@@ -389,6 +389,11 @@ CREATE FUNCTION pgstrom.numeric_stddev_pop(internal)
   AS 'MODULE_PATHNAME', 'pgstrom_numeric_stddev_pop'
   LANGUAGE C STRICT;
 
+CREATE FUNCTION pgstrom.to_host(numeric)
+  RETURNS numeric
+  AS 'MODULE_PATHNAME', 'pgstrom_numeric_to_host'
+  LANGUAGE C STRICT;
+
 CREATE AGGREGATE pgstrom.stddev(int4, numeric, numeric)
 (
   sfunc = pgstrom.numeric_var_accum,

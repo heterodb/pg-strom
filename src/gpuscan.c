@@ -594,6 +594,110 @@ pgstrom_plan_is_gpuscan(const Plan *plan)
 	return false;
 }
 
+
+
+
+
+
+
+
+
+
+
+
+
+static char *
+gpuscan_codegen_projection(GpuScan *gscan)
+{
+	StringInfoData	buf;
+
+	initStringInfo(&buf);
+
+
+
+
+
+	return buf.data;
+}
+
+/*
+ * tlist_matches_baserel
+ *
+ * It returns true, if tlist of GpuScan matches definition of the base
+ * relation, thus no special projection is not needed.
+ * Its logic is equivalent to tlist_matches_tupdesc.
+ */
+static bool
+tlist_matches_baserel(List *tlist, Index varno, TupleDesc tupdesc)
+{
+	int			numattrs = tupdesc->natts;
+	int			attrno;
+	ListCell   *tlist_item = list_head(tlist);
+
+	/* Check the tlist attributes */
+	for (attrno = 1; attrno <= numattrs; attrno++)
+	{
+		Form_pg_attribute	attr = tupdesc->attrs[attno - 1];
+
+		if (!tlist_item)
+			return false;	/* tlist is short */
+		var = (Var *) ((TargetEntry *) lfirst(tlist_item))->expr;
+		if (!var || !IsA(var, Var))
+			return false;	/* tlist item not a Var  */
+		/* if these Asserts fail, planner messed up */
+		Assert(var->varno == varno);
+		Assert(var->varlevelsup == 0);
+		if (var->varattno != attrno)
+			return false;	/* out of order */
+		if (attr->attisdropped)
+			return false;	/* table contains dropped columns */
+
+		/*
+		 * Note: usually the Var's type should match the tupdesc exactly, but
+		 * in situations involving unions of columns that have different
+		 * typmods, the Var may have come from above the union and hence have
+		 * typmod -1.  This is a legitimate situation since the Var still
+		 * describes the column, just not as exactly as the tupdesc does. We
+		 * could change the planner to prevent it, but it'd then insert
+		 * projection steps just to convert from specific typmod to typmod -1,
+		 * which is pretty silly.
+		 */
+		if (var->vartype != att_tup->atttypid ||
+			(var->vartypmod != att_tup->atttypmod &&
+			 var->vartypmod != -1))
+			return false;		/* type mismatch */
+
+		tlist_item = lnext(tlist_item);
+	}
+
+	if (tlist_item)
+		return false;		/* tlist too long */
+
+	return true;			/* tlist is compatible to the base relation */
+}
+
+/*
+ * pgstrom_post_planner_gpuscan
+ *
+ * Applies projection of GpuScan if needed.
+ */
+void
+pgstrom_post_planner_gpuscan(PlannedStmt *pstmt, Plan *plan)
+{
+	GpuScan		   *gscan = (GpuScan *) plan;
+	List		   *rtables = pstmt->rtable;
+	RangeTblEntry  *rte;
+	Relation		heap;
+
+	rte = rt_fetch(gscan->cscan.scan.scanrelid, rtables);
+	Assert(rte->rtekind == RTE_RELATION);
+	heap = heap_open(rte->relid, NoLock);
+
+
+
+	heap_close(heap, NoLock);
+}
+
 /*
  * pgstrom_gpuscan_setup_bulkslot
  *

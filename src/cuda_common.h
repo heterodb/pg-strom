@@ -1495,6 +1495,138 @@ kern_writeback_error_status(kern_errorbuf *result, kern_errorbuf own_error)
 	}
 }
 
+/*
+ * build_kern_tupitem
+ *
+ * A utility routine to build a kern_tupitem on the destination buffer
+ * already allocated.
+ *
+ * kds        ... destination data-store
+ * tupitem    ... kern_tupitem allocated on the kds
+ * tuple_len  ... length of the tuple; shall be MAXALIGN(t_hoff) + data_len
+ * heap_hasnull ... true, if tup_values/tup_isnull contains NULL
+ * tup_values ... array of result datum
+ * tup_isnull ... array of null flag
+ */
+STATIC_FUNCTION(void)
+build_kern_tupitem(kern_data_store *kds,	/* destination data-store */
+				   kern_tupitem *tupitem,	/* tupitem allocated on the KDS */
+				   cl_uint tuple_len,		/* length of the tuple */
+				   Datum *tup_values,		/* array of result datum */
+				   cl_bool *tup_isnull)		/* array of NULL flags */
+{
+	HeapTupleHeaderData	   *htup;
+	cl_bool		heap_hasnull;
+	cl_uint		t_hoff;
+	cl_uint		required = t_hoff + MAXALIGN(datalen);
+	cl_uint		i, ncols = kds->ncols;
+	cl_uint		curr;
+
+	/* sanity checks */
+	assert(kds->format == KDS_FORMAT_ROW);
+	assert(h_off == MAXALIGN(h_off));
+	assert((uintptr_t)tupitem > (uintptr_t) kds &&
+		   (uintptr_t)tupitem+MAXALIGN(tuplen) <= (uintptr_t)kds+kds->length);
+
+	/* Does it have any null field? */
+	heap_hasnull = false;
+	for (i=0; i < ncols; i++)
+	{
+		if (tup_isnull[i])
+		{
+			tup_isnull[i] = true;
+			break;
+		}
+	}
+
+	/* Compute header offset */
+	t_hoff = offsetof(HeapTupleHeaderData, t_bits);
+	if (heap_hasnull)
+		t_hoff += bitmaplen(ncols);
+	if (kds->tdhasoid)
+		t_hoff += sizeof(cl_uint);
+	t_hoff = MAXALIGN(t_hoff);
+
+	/* setup header of kern_tupitem */
+	titem->t_len = t_hoff + data_len;
+	titem->t_self.ip_blkid.bi_hi = 0xffff;	/* InvalidBlockNumber */
+	titem->t_self.ip_blkid.bi_lo = 0xffff;
+	titem->t_self.ip_posid = 0;				/* InvalidOffsetNumber */
+	htup = &titem->htup;
+
+	/* setup HeapTupleHeader */
+	SET_VARSIZE(&htup->t_choice.t_datum, MAXALIGN(tuplen));
+	htup->t_choice.t_datum.datum_typmod = kds->tdtypmod;
+	htup->t_choice.t_datum.datum_typeid = kds->tdtypeid;
+	htup->t_ctid.ip_blkid.bi_hi = 0xffff;
+	htup->t_ctid.ip_blkid.bi_lo = 0xffff;
+	htup->t_ctid.ip_posid = 0;
+	htup->t_infomask2 = (ncols & HEAP_NATTS_MASK);
+	htup->t_infomask = (heap_hasnull ? HEAP_HASNULL : 0);
+	htup->t_hoff = t_hoff;
+	curr = t_hoff;
+
+	/* setup tuple body */
+	for (i=0; i < ncols; i++)
+	{
+		kern_colmeta	cmeta = kds->colmeta[i];
+		Datum			datum = tup_values[i];
+		cl_bool			isnull = tup_isnull[i];
+
+		if (isnull)
+			htup->t_bits[i >> 3] &= ~(1 << (i & 0x07));
+		else
+		{
+			if (cmeta.attbyval)
+			{
+				char   *dest;
+
+				while (TYPEALIGN(cmeta.attalign, curr) != curr)
+					((char *)htup)[curr++] = '\0';
+				dest = (char *)htup + curr;
+
+				if (cmeta.attlen == sizeof(cl_long))
+					*((cl_long *) dest) = (cl_long) datum;
+				else if (cmeta.attlen == sizeof(cl_int))
+					*((cl_int *) dest) = (cl_int) (datum & 0xffffffff);
+				else if (cmeta.attlen == sizeof(cl_short))
+					*((cl_short *) dest) = (cl_short) (datum & 0x0000ffff);
+				else
+				{
+					assert(cmeta.attlen == sizeof(cl_char));
+					*((cl_char *) dest) = (cl_char) (datum & 0x000000ff);
+				}
+				curr += cmeta.attlen;
+			}
+			else if (cmeta.attlen > 0)
+			{
+				while (TYPEALIGN(cmeta.attalign, curr) != curr)
+					((char *)htup)[curr++] = '\0';
+
+				memcpy((char *)htup + curr, datum, cmeta.attlen);
+
+				curr += cmeta.attlen;
+			}
+			else
+			{
+				cl_uint		vl_len = VARSIZE_ANY(datum);
+
+				/* put 0 and align here, if not a short varlena */
+				if (!VARATT_IS_1B(datum))
+				{
+					while (TYPEALIGN(cmeta.attalign, curr) != curr)
+						((char *)htup)[curr++] = '\0';
+				}
+				memcpy((char *)htup + curr, datum, vl_len);
+				curr += vl_len;
+			}
+			if (heap_hasnull)
+				htup->t_bits[i >> 3] |= (1 << (i & 0x07));
+		}
+	}
+	assert(t_hoff + data_len == curr);
+}
+
 /* ------------------------------------------------------------
  *
  * Declarations of common built-in functions
