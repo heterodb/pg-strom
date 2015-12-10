@@ -520,6 +520,17 @@ KERN_HASH_NEXT_ITEM(kern_data_store *kds, kern_hashitem *khitem)
 #define KERN_DATA_STORE_HEAD_LENGTH(kds)			\
 	STROMALIGN(offsetof(kern_data_store, colmeta[(kds)->ncols]))
 
+/* transform device pointer to host address */
+#define devptr_to_host(kds,devptr)		\
+	((uintptr_t)(devptr) -				\
+	 (uintptr_t)(&(kds)->hostptr) +		\
+	 (uintptr_t)((kds)->hostptr))
+/* transform host pointer to device address */
+#define hostptr_to_dev(kds,hostptr)		\
+	((uintptr_t)(hostptr) -				\
+	 (uintptr_t)((kds)->hostptr) +		\
+	 (uintptr_t)(&(kds)->hostptr))
+
 /*
  * kern_parambuf
  *

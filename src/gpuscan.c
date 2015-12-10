@@ -32,6 +32,7 @@
 #include "optimizer/var.h"
 #include "parser/parsetree.h"
 #include "storage/bufmgr.h"
+#include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
@@ -608,22 +609,321 @@ pgstrom_plan_is_gpuscan(const Plan *plan)
 
 
 
-
-
-
-
+/*
+ * gpuscan_codegen_projection
+ *
+ * It makes GPU code to transform baserel => scan_tlist
+ * Job of scan_tlist => targetlist by CPu
+ *
+ * Job of GPUSCAN_DEVICE_PROJECTION_(ROW|SLOT) macro:
+ * - define tup_values[] / tup_isnull[] array (only ROW)
+ * - define KVAR variables if referenced within expression node
+ * - extract tuple and load data to KVAR/tup_values
+ * - execute expression node, then store tup_values[]
+ */
 static char *
-gpuscan_codegen_projection(CustomScan *cscan)
+gpuscan_codegen_projection(CustomScan *cscan, TupleDesc tupdesc)
 {
-	StringInfoData	buf;
+	Index			scanrelid = cscan->scan.scanrelid;
+	List		   *scan_tlist = cscan->custom_scan_tlist;
+	AttrNumber	   *varremaps;
+	Bitmapset	   *varattnos;
+	List		   *tempval_types;
+	ListCell	   *lc;
+	int				prev;
+	int				i, j, k;
+	devtype_info   *dtype;
+	StringInfoData	decl;
+	StringInfoData	body;
+	StringInfoData	temp;
+	codegen_context	context;
 
-	initStringInfo(&buf);
+	initStringInfo(&decl);
+	initStringInfo(&body);
+	initStringInfo(&temp);
 
+	/*
+	 * step.0 - declaration of tup_values[]/tup_isnull[] (only ROW)
+	 */
+	appendStringInfo(
+		&decl,
+		"#define GPUSCAN_DEVICE_PROJECTION_ROW(a,b,c,d) \\\n"
+		"    Datum   tup_values[%u]; \\\n"
+		"    cl_bool tup_isnull[%u]; \\\n"
+		"    GPUSCAN_DEVICE_PROJECTION_SLOT((a),(b),(c),(d))\n"
+		"\n",
+		list_length(scan_tlist),
+		list_length(scan_tlist));
 
+	/*
+	 * step.1 - declaration of KVARxx for each Var nodes in expression
+	 */
+	appendStringInfo(
+		&decl,
+		"#define GPUSCAN_DEVICE_PROJECTION_SLOT"
+		"(kds_dst,kds_src,tupitem_src,tuple_len) \\\n"
+		" do { \\\n"
+		"  HeapTupleHeaderData *htup = &(tupitem_src)->htup; \\\n"
+		"  cl_bool heap_hasnull; \\\n"
+		"  char *addr; \\\n");
 
+	varremaps = palloc0(sizeof(AttrNumber) * list_length(scan_tlist));
+	varattnos = NULL;
+	foreach (lc, scan_tlist)
+	{
+		TargetEntry	   *tle = lfirst(lc);
 
+		/*
+		 * NOTE: If expression of TargetEntry is a simple Var-node,
+		 * we can load the value into tup_values[]/tup_isnull[]
+		 * array regardless of the data type. We have to track which
+		 * column is the source of this TargetEntry.
+		 * Elsewhere, we will construct device side expression using
+		 * KVAR_xx variables.
+		 */
+		if (IsA(tle->expr, Var))
+		{
+			Var	   *var = (Var *) tle->expr;
 
-	return buf.data;
+			Assert(var->varno == scanrelid);
+			Assert(var->varattno > 0 && var->varattno <= tupdesc->natts);
+			varremaps[tle->resno - 1] = var->varattno;
+		}
+		else
+		{
+			pull_varattnos((Node *) tle->expr, scanrelid, &varattnos);
+		}
+	}
+
+	prev = -1;
+	while ((prev = bms_next_member(varattnos, prev)) >= 0)
+	{
+		Form_pg_attribute attr;
+		AttrNumber	anum = prev + FirstLowInvalidHeapAttributeNumber;
+
+		/* system column should not appear within device expression */
+		Assert(anum > 0);
+		attr = tupdesc->attrs[anum - 1];
+
+		dtype = pgstrom_devtype_lookup(attr->atttypid);
+		if (!dtype)
+			elog(ERROR, "Bug? failed to lookup device supported type: %s",
+				 format_type_be(attr->atttypid));
+		appendStringInfo(&decl,
+						 "  pg_%s_t KVAR_%u; \\\n",
+						 dtype->type_name, anum);
+	}
+
+	/*
+	 * step.2 - extract tuples and load values to KVAR or values/isnull array
+	 */
+	appendStringInfo(
+		&body,
+		"  heap_hasnull = ((htup->t_infomask & HEAP_HASNULL) != 0); \\\n"
+		"  offset = htup->t_hoff; \\\n");
+	for (i=0; i < tupdesc->natts; i++)
+	{
+		Form_pg_attribute	attr = tupdesc->attrs[i];
+		bool		referenced = false;
+
+		dtype = pgstrom_devtype_lookup(attr->atttypid);
+		k = attr->attnum - FirstLowInvalidHeapAttributeNumber;
+
+		appendStringInfo(
+			&temp,
+			"  /* attribute %d */ \\\n"
+			"  if (!heap_hasnull || !att_isnull(%d, htup->t_bits)) \\\n"
+			"  { \\\n",
+			attr->attnum,
+			attr->attnum - 1);
+
+		/* offset alignment */
+		if (attr->attlen > 0)
+			appendStringInfo(
+				&temp,
+				"    offset = TYPEALIGN(%d, offset); \\\n",
+				typealign_get_width(attr->attalign));
+		else
+			appendStringInfo(
+				&temp,
+				"    if (!VARATT_NOT_PAD_BYTE((char *)htup + offset)) \\\n"
+				"      offset = TYPEALIGN(%d, offset); \\\n",
+				typealign_get_width(attr->attalign));
+
+		/* Put values on tup_values/tup_isnull and KVAR_xx if referenced */
+		for (j=0; j < list_length(scan_tlist); j++)
+		{
+			if (varremaps[j] != attr->attnum)
+				continue;
+
+			if (!referenced)
+			{
+				appendStringInfo(
+					&temp,
+					"    addr = ((char *) htup + offset); \\\n");
+				referenced = true;
+			}
+			appendStringInfo(
+				&temp,
+				"    tup_isnull[%d] = false; \\\n", j);
+			if (attr->attbyval)
+			{
+				appendStringInfo(
+					&temp,
+					"    tup_values[%d] = *((%s *) addr); \\\n",
+					j,
+					(attr->attlen == sizeof(cl_long) ? "cl_long"
+					 : attr->attlen == sizeof(cl_int) ? "cl_int"
+					 : attr->attlen == sizeof(cl_short) ? "cl_short"
+					 : "cl_char"));
+			}
+			else
+			{
+				appendStringInfo(
+					&temp,
+					"    tup_values[%d] = devptr_to_host(kds_src,addr); \\\n",
+					j);
+			}
+		}
+
+		k = attr->attnum - FirstLowInvalidHeapAttributeNumber;
+		if (bms_is_member(k, varattnos))
+		{
+			if (!referenced)
+			{
+				appendStringInfo(
+					&temp,
+					"    addr = ((char *) htup + offset); \\\n");
+				referenced = true;
+			}
+			appendStringInfo(
+				&temp,
+				"    KVAR_%u = pg_%s_datum_ref((kcxt), addr, false); \\\n",
+				attr->attnum,
+				dtype->type_name);
+		}
+		/* make advance the offset */
+		if (attr->attlen > 0)
+			appendStringInfo(
+				&temp,
+				"    offset += %d; \\\n",
+				attr->attlen);
+		else
+		{
+			if (!referenced)
+				appendStringInfo(
+					&temp,
+					"    addr = ((char *) htup + offset); \\\n");
+			appendStringInfo(
+				&temp,
+				"    offset += VARSIZE_ANY(addr); \\\n");
+		}
+		appendStringInfo(
+			&temp,
+			"  } \\\n");
+		/* Put NULL on tup_isnull and KVAR_xx, if needed */
+		if (referenced)
+		{
+			appendStringInfo(
+				&temp,
+				"  else \\\n"
+				"  { \\\n");
+
+			for (j=0; j < list_length(scan_tlist); j++)
+			{
+				if (varremaps[j] == attr->attnum)
+					appendStringInfo(
+						&temp,
+						"    tup_isnull[%d] = true; \\\n", j);
+			}
+			k = attr->attnum - FirstLowInvalidHeapAttributeNumber;
+			if (bms_is_member(k, varattnos))
+			{
+				appendStringInfo(
+					&temp,
+					"    KVAR_%u = pg_%s_datum_ref((kcxt), NULL, false); \\\n",
+					attr->attnum,
+					dtype->type_name);
+			}
+			appendStringInfo(
+				&temp,
+				"  } \\\n");
+		}
+
+		if (referenced)
+		{
+			appendStringInfo(&body, "%s", temp.data);
+			resetStringInfo(&temp);
+		}
+	}
+
+	/*
+	 * step.3 - execute expression node, then store the result
+	 */
+	pgstrom_init_codegen_context(&context);
+	// TODO: restore the tracked functions
+
+	tempval_types = NIL;
+    foreach (lc, scan_tlist)
+    {
+        TargetEntry    *tle = lfirst(lc);
+		Oid				type_oid;
+
+		if (IsA(tle->expr, Var))
+			continue;
+
+		type_oid = exprType((Node *)tle->expr);
+		dtype = pgstrom_devtype_lookup(type_oid);
+		if (!dtype)
+			elog(ERROR, "Bug? device supported type is missing: %u", type_oid);
+		tempval_types = list_append_unique_oid(tempval_types, type_oid);
+
+		appendStringInfo(
+			&body,
+			"\\\n"
+			"  temp_%s_val = %s; \\\n"
+			"  if (temp_%s_val.isnull) \\\n"
+			"    tup_isnull[%d] = true; \\\n"
+			"  else \\\n"
+			"  { \\\n"
+			"    tup_isnull[%d] = false; \\\n"
+			"    tup_values[%d] = %s(temp_%s_val.value); \\\n"
+			"  } \\\n",
+			dtype->type_name,
+			pgstrom_codegen_expression((Node *) tle->expr, &context),
+			dtype->type_name,
+			tle->resno - 1,
+			tle->resno - 1,
+			tle->resno - 1,
+			// FIXME: floating point makes error
+			dtype->type_byval ? "(Datum)" : "devptr_to_host",
+			dtype->type_name);
+	}
+
+	/* parameter references */
+	appendStringInfo(&decl,"%s",pgstrom_codegen_param_declarations(&context));
+
+	/* temporary variables */
+	foreach (lc, tempval_types)
+	{
+		Oid		type_oid = lfirst_oid(lc);
+
+		dtype = pgstrom_devtype_lookup(type_oid);
+		if (!dtype)
+			elog(ERROR, "Bug? device supported type is missing: %u", type_oid);
+		appendStringInfo(&decl, "  pg_%s_t temp_%s_val; \\\n",
+						 dtype->type_name,
+						 dtype->type_name);
+	}
+
+	/* end of the block */
+	appendStringInfo(&body,
+					 " } while(0)\n");
+	/* merge declaration and body */
+	appendStringInfo(&decl, "\\\n%s", body.data);
+	pfree(body.data);
+
+	return decl.data;
 }
 
 /*
@@ -872,6 +1172,7 @@ pgstrom_post_planner_gpuscan(PlannedStmt *pstmt, Plan **p_curr_plan)
 	List		   *rtables = pstmt->rtable;
 	RangeTblEntry  *rte;
 	Relation		baserel;
+	TupleDesc		tupdesc;
 	List		   *tlist_new = NIL;
 	List		   *scan_tlist = NIL;
 	List		   *numeric_fixup_attnos = NIL;
@@ -882,18 +1183,24 @@ pgstrom_post_planner_gpuscan(PlannedStmt *pstmt, Plan **p_curr_plan)
 	 */
 	rte = rt_fetch(cscan->scan.scanrelid, rtables);
 	Assert(rte->rtekind == RTE_RELATION);
-	baserel= heap_open(rte->relid, NoLock);
+	baserel = heap_open(rte->relid, NoLock);
+	tupdesc = RelationGetDescr(baserel);
 
 	if (build_device_projection(cscan->scan.plan.targetlist,
 								cscan->scan.scanrelid,
-								RelationGetDescr(baserel),
+								tupdesc,
 								&tlist_new, &scan_tlist,
 								&numeric_fixup_attnos))
 	{
-		elog(INFO, "tlist_new = %s", nodeToString(tlist_new));
-		elog(INFO, "scan_tlist = %s", nodeToString(scan_tlist));
-		elog(INFO, "numeric_fixup_attnos = %s", nodeToString(numeric_fixup_attnos));
+		const char *kern_devproj;
 
+		//elog(INFO, "tlist_new = %s", nodeToString(tlist_new));
+		//elog(INFO, "scan_tlist = %s", nodeToString(scan_tlist));
+		//elog(INFO, "numeric_fixup_attnos = %s", nodeToString(numeric_fixup_attnos));
+		cscan->scan.plan.targetlist = tlist_new;
+		cscan->custom_scan_tlist = scan_tlist;
+		kern_devproj = gpuscan_codegen_projection(cscan, tupdesc);
+		elog(INFO, "kern_devproj = %s", kern_devproj);
 	}
 	heap_close(baserel, NoLock);
 }
