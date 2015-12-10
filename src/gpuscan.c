@@ -16,14 +16,20 @@
  * GNU General Public License for more details.
  */
 #include "postgres.h"
+#include "access/sysattr.h"
 #include "access/xact.h"
+#include "catalog/heap.h"
 #include "catalog/pg_namespace.h"
+#include "catalog/pg_type.h"
 #include "miscadmin.h"
+#include "nodes/makefuncs.h"
+#include "nodes/nodeFuncs.h"
 #include "optimizer/cost.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
 #include "optimizer/plancat.h"
 #include "optimizer/restrictinfo.h"
+#include "optimizer/var.h"
 #include "parser/parsetree.h"
 #include "storage/bufmgr.h"
 #include "utils/guc.h"
@@ -607,7 +613,7 @@ pgstrom_plan_is_gpuscan(const Plan *plan)
 
 
 static char *
-gpuscan_codegen_projection(GpuScan *gscan)
+gpuscan_codegen_projection(CustomScan *cscan)
 {
 	StringInfoData	buf;
 
@@ -621,59 +627,236 @@ gpuscan_codegen_projection(GpuScan *gscan)
 }
 
 /*
- * tlist_matches_baserel
+ * build_device_projection
  *
- * It returns true, if tlist of GpuScan matches definition of the base
- * relation, thus no special projection is not needed.
- * Its logic is equivalent to tlist_matches_tupdesc.
+ *
+ *
+ *
  */
-static bool
-tlist_matches_baserel(List *tlist, Index varno, TupleDesc tupdesc)
+static Node *
+replace_varnode_with_scan_tlist(Node *node, List *scan_tlist)
 {
-	int			numattrs = tupdesc->natts;
-	int			attrno;
-	ListCell   *tlist_item = list_head(tlist);
+	if (node == NULL)
+		return NULL;
 
-	/* Check the tlist attributes */
-	for (attrno = 1; attrno <= numattrs; attrno++)
+	if (IsA(node, Var))
 	{
-		Form_pg_attribute	attr = tupdesc->attrs[attno - 1];
+		Var		   *var = (Var *) node;
+		ListCell   *lc;
 
-		if (!tlist_item)
-			return false;	/* tlist is short */
-		var = (Var *) ((TargetEntry *) lfirst(tlist_item))->expr;
-		if (!var || !IsA(var, Var))
-			return false;	/* tlist item not a Var  */
-		/* if these Asserts fail, planner messed up */
-		Assert(var->varno == varno);
 		Assert(var->varlevelsup == 0);
-		if (var->varattno != attrno)
-			return false;	/* out of order */
-		if (attr->attisdropped)
-			return false;	/* table contains dropped columns */
 
-		/*
-		 * Note: usually the Var's type should match the tupdesc exactly, but
-		 * in situations involving unions of columns that have different
-		 * typmods, the Var may have come from above the union and hence have
-		 * typmod -1.  This is a legitimate situation since the Var still
-		 * describes the column, just not as exactly as the tupdesc does. We
-		 * could change the planner to prevent it, but it'd then insert
-		 * projection steps just to convert from specific typmod to typmod -1,
-		 * which is pretty silly.
-		 */
-		if (var->vartype != att_tup->atttypid ||
-			(var->vartypmod != att_tup->atttypmod &&
-			 var->vartypmod != -1))
-			return false;		/* type mismatch */
+		foreach (lc, scan_tlist)
+		{
+			TargetEntry	   *tle = lfirst(lc);
+			Var			   *scan_var;
 
-		tlist_item = lnext(tlist_item);
+			if (!IsA(tle->expr, Var))
+				continue;
+			scan_var = (Var *) tle->expr;
+
+			Assert(scan_var->varno == var->varno);
+			if (scan_var->varattno == var->varattno)
+			{
+				Assert(scan_var->vartype == var->vartype &&
+					   scan_var->vartypmod == var->vartypmod &&
+					   scan_var->varcollid == var->varcollid);
+
+				return (Node *) makeVar(INDEX_VAR,
+										tle->resno,
+										var->vartype,
+										var->vartypmod,
+										var->varcollid,
+										0);
+			}
+		}
+		elog(ERROR, "Bug? referenced Var-node not in scan_tlist");
+	}
+	return expression_tree_mutator(node, replace_varnode_with_scan_tlist,
+								   scan_tlist);
+}
+
+static AttrNumber
+insert_unique_expression(Expr *expr, List **p_scan_tlist)
+{
+	TargetEntry	   *tle;
+	ListCell	   *lc;
+
+	foreach (lc, *p_scan_tlist)
+	{
+		tle = lfirst(lc);
+		if (equal(expr, tle->expr))
+			return tle->resno;
 	}
 
-	if (tlist_item)
-		return false;		/* tlist too long */
+	/*
+	 * Not found, so append this expression 
+	 */
+	tle = makeTargetEntry(copyObject(expr),
+						  list_length(*p_scan_tlist) + 1,
+						  NULL,
+						  false);
+	*p_scan_tlist = lappend(*p_scan_tlist, tle);
 
-	return true;			/* tlist is compatible to the base relation */
+	return list_length(*p_scan_tlist);
+}
+
+static bool
+build_device_projection(List *tlist_old, Index varno, TupleDesc tupdesc,
+						List **p_tlist_new, List **p_scan_tlist,
+						List **p_numeric_fixup_attnos)
+{
+	AttrNumber	attnum;
+	ListCell   *lc;
+	List	   *tlist_new = NIL;
+	List	   *scan_tlist = NIL;
+	List	   *numeric_fixup_attnos = NIL;
+	bool		with_gpu_projection = false;
+
+#if NOT_USED
+	/*
+	 * XXX - Do we actually need projection if tlist is shorter than
+	 * definition of the base relation but it is compatible with?
+	 */
+	if (list_length(tlist_old) != tupdesc->natts)
+		with_gpu_projection = true;
+#endif
+
+	attnum = 1;
+	foreach (lc, tlist_old)
+	{
+		TargetEntry	   *tle = lfirst(lc);
+		TargetEntry	   *tle_new;
+		AttrNumber		varattno;
+
+		if (IsA(tle->expr, Var))
+		{
+			Var	   *var = (Var *) tle->expr;
+
+			/* if these Asserts fail, planner messed up */
+			Assert(var->varno == varno);
+			Assert(var->varlevelsup == 0);
+
+			/* GPU projection cannot contain whole-row reference */
+			if (var->varattno == InvalidAttrNumber)
+				return false;
+
+			/*
+			 * check whether the original tlist matches the physical layout
+			 * of the base relation. GPU can reorder the var reference
+			 * regardless of the data-type support.
+			 */
+			if (var->varattno != attnum || attnum > tupdesc->natts)
+				with_gpu_projection = true;
+			else
+			{
+				Form_pg_attribute	attr = tupdesc->attrs[attnum - 1];
+
+				/* How to reference the dropped column? */
+				Assert(!attr->attisdropped);
+				/* See the logic in tlist_matches_tupdesc */
+				if (var->vartype != attr->atttypid ||
+					(var->vartypmod != attr->atttypmod &&
+					 var->vartypmod != -1))
+					with_gpu_projection = true;
+			}
+			/* add primitive Var-node on the scan_tlist */
+			varattno = insert_unique_expression((Expr *) var, &scan_tlist);
+
+			/* add pseudo Var-node on the tlist_new */
+			tle_new = makeTargetEntry((Expr *) makeVar(INDEX_VAR,
+													   varattno,
+													   var->vartype,
+													   var->vartypmod,
+													   var->varcollid,
+													   0),
+									  list_length(tlist_new) + 1,
+									  tle->resname,
+									  tle->resjunk);
+			tlist_new = lappend(tlist_new, tle_new);
+		}
+		else if (pgstrom_codegen_available_expression(tle->expr))
+		{
+			Oid		type_oid = exprType((Node *)tle->expr);
+			Oid		type_mod = exprTypmod((Node *)tle->expr);
+			Oid		coll_oid = exprCollation((Node *)tle->expr);
+
+			/* Add device executable expression onto the scan_tlist */
+			varattno = insert_unique_expression(tle->expr, &scan_tlist);
+
+			/* Then, CPU just referenced the calculation result */
+			tle_new = makeTargetEntry((Expr *) makeVar(INDEX_VAR,
+													   varattno,
+													   type_oid,
+													   type_mod,
+													   coll_oid,
+													   0),
+									  list_length(tlist_new) + 1,
+									  tle->resname,
+									  tle->resjunk);
+			tlist_new = lappend(tlist_new, tle_new);
+
+			/* Numeric expression returns an internal representation */
+			if (type_oid == NUMERICOID)
+				numeric_fixup_attnos = lappend_int(numeric_fixup_attnos,
+												   tle_new->resno);
+			/* obviously, we need GPU projection */
+			with_gpu_projection = true;
+		}
+		else
+		{
+			/* Elsewhere, expression is not device executable */
+			Bitmapset  *varattnos = NULL;
+			int			prev = -1;
+			Node	   *expr_new;
+
+			/* 1. Pull varnodes within the expression*/
+			pull_varattnos((Node *) tle->expr, varno, &varattnos);
+
+			/* 2. Add varnodes to scan_tlist */
+			while ((prev = bms_next_member(varattnos, prev)) >= 0)
+			{
+				Form_pg_attribute	attr;
+				int		anum = prev - FirstLowInvalidHeapAttributeNumber;
+
+				/* GPU projection cannot contain whole-row reference */
+				if (anum == InvalidAttrNumber)
+					return false;
+
+				/* Add varnodes to scan_tlist */
+				if (anum > 0)
+					attr = tupdesc->attrs[anum - 1];
+				else
+					attr = SystemAttributeDefinition(anum, true);
+
+				insert_unique_expression((Expr *) makeVar(varno,
+														  attr->attnum,
+														  attr->atttypid,
+														  attr->atttypmod,
+														  attr->attcollation,
+														  0),
+										 &scan_tlist);
+			}
+			/* 3. replace varnode of the expression */
+			expr_new = replace_varnode_with_scan_tlist((Node *) tle->expr,
+													   scan_tlist);
+			/* 4. add modified expression to tlist_new */
+			tle_new = makeTargetEntry((Expr *)expr_new,
+									  list_length(tlist_new) + 1,
+									  tle->resname,
+									  tle->resjunk);
+			tlist_new = lappend(tlist_new, tle_new);
+
+			/* obviously, we need GPU projection */
+			with_gpu_projection = true;
+		}
+		attnum++;
+	}
+	*p_tlist_new = tlist_new;
+	*p_scan_tlist = scan_tlist;
+	*p_numeric_fixup_attnos = numeric_fixup_attnos;
+
+	return with_gpu_projection;
 }
 
 /*
@@ -682,20 +865,37 @@ tlist_matches_baserel(List *tlist, Index varno, TupleDesc tupdesc)
  * Applies projection of GpuScan if needed.
  */
 void
-pgstrom_post_planner_gpuscan(PlannedStmt *pstmt, Plan *plan)
+pgstrom_post_planner_gpuscan(PlannedStmt *pstmt, Plan **p_curr_plan)
 {
-	GpuScan		   *gscan = (GpuScan *) plan;
+//	GpuScan		   *gscan = (GpuScan *) cscan;
+	CustomScan	   *cscan = (CustomScan *) (*p_curr_plan);
 	List		   *rtables = pstmt->rtable;
 	RangeTblEntry  *rte;
-	Relation		heap;
+	Relation		baserel;
+	List		   *tlist_new = NIL;
+	List		   *scan_tlist = NIL;
+	List		   *numeric_fixup_attnos = NIL;
 
-	rte = rt_fetch(gscan->cscan.scan.scanrelid, rtables);
+	/*
+	 * TODO: We may need to replace SeqScan by GpuScan with device
+	 * projection, if it is enough cost effective.
+	 */
+	rte = rt_fetch(cscan->scan.scanrelid, rtables);
 	Assert(rte->rtekind == RTE_RELATION);
-	heap = heap_open(rte->relid, NoLock);
+	baserel= heap_open(rte->relid, NoLock);
 
+	if (build_device_projection(cscan->scan.plan.targetlist,
+								cscan->scan.scanrelid,
+								RelationGetDescr(baserel),
+								&tlist_new, &scan_tlist,
+								&numeric_fixup_attnos))
+	{
+		elog(INFO, "tlist_new = %s", nodeToString(tlist_new));
+		elog(INFO, "scan_tlist = %s", nodeToString(scan_tlist));
+		elog(INFO, "numeric_fixup_attnos = %s", nodeToString(numeric_fixup_attnos));
 
-
-	heap_close(heap, NoLock);
+	}
+	heap_close(baserel, NoLock);
 }
 
 /*

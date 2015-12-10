@@ -60,8 +60,6 @@ Datum pgstrom_numeric_var_pop(PG_FUNCTION_ARGS);
 Datum pgstrom_numeric_stddev_samp(PG_FUNCTION_ARGS);
 Datum pgstrom_numeric_stddev_pop(PG_FUNCTION_ARGS);
 
-Datum pgstrom_numeric_to_host(PG_FUNCTION_ARGS);
-
 /* gpupreagg_partial_nrows - placeholder function that generate number
  * of rows being included in this partial group.
  */
@@ -741,32 +739,6 @@ pgstrom_numeric_stddev_pop(PG_FUNCTION_ARGS)
 	PG_RETURN_NUMERIC(result);
 }
 PG_FUNCTION_INFO_V1(pgstrom_numeric_stddev_pop);
-
-
-/*
- * pgstrom.to_host(numeric)
- *
- * transformation of device internal representation of NUMERIC
- * to the host representation.
- */
-Datum
-pgstrom_numeric_tohost(PG_FUNCTION_ARGS)
-{
-	cl_ulong	numeric_value = PG_GETARG_INT64(0);
-	bool		sign = PG_NUMERIC_SIGN(numeric_value);
-	int			expo = PG_NUMERIC_EXPONENT(numeric_value);
-	cl_ulong	mantissa = PG_NUMERIC_MANTISSA(numeric_value);
-	char		temp[100];
-
-	/* more effective implementation in the future :-) */
-	snprintf(temp, sizeof(temp), "%c%lue%d",
-			 sign ? '-' : '+', mantissa, expo);
-	return DirectFunctionCall3(numeric_in,
-							   CStringGetDatum(temp),
-							   Int32GetDatum(0),
-							   Int32GetDatum(-1));
-}
-PG_FUNCTION_INFO_V1(pgstrom_numeric_tohost);
 
 /*
  * covariance - mathmatical compatible result can be lead using

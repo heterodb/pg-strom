@@ -611,7 +611,7 @@ extern Plan *gpuscan_try_replace_seqscan(SeqScan *seqscan,
 										 double *p_outer_ratio);
 extern bool pgstrom_path_is_gpuscan(const Path *path);
 extern bool pgstrom_plan_is_gpuscan(const Plan *plan);
-extern void pgstrom_post_planner_gpuscan(PlannedStmt *pstmt, Plan *plan);
+extern void pgstrom_post_planner_gpuscan(PlannedStmt *pstmt, Plan **p_plan);
 extern void pgstrom_gpuscan_setup_bulkslot(PlanState *outer_ps,
 										   ProjectionInfo **p_bulk_proj,
 										   TupleTableSlot **p_bulk_slot);
