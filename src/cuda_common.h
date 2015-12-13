@@ -465,6 +465,7 @@ typedef struct {
 	cl_char			tdhasoid;	/* copy of TupleDesc.tdhasoid */
 	cl_uint			tdtypeid;	/* copy of TupleDesc.tdtypeid */
 	cl_int			tdtypmod;	/* copy of TupleDesc.tdtypmod */
+	cl_uint			table_oid;	/* OID of the table (only if GpuScan) */
 	cl_uint			nslots;		/* width of hash-slot (only HASH format) */
 	cl_uint			hash_min;	/* minimum hash-value (only HASH format) */
 	cl_uint			hash_max;	/* maximum hash-value (only HASH format) */
@@ -644,7 +645,8 @@ pg_common_vstore(kern_data_store *kds,
 	typedef struct {										\
 		BASE		value;									\
 		cl_bool		isnull;									\
-	} pg_##NAME##_t;
+	} pg_##NAME##_t;										\
+	typedef BASE pg_##BASE##_base_t;
 
 #define STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE)			\
 	STATIC_FUNCTION(pg_##NAME##_t)							\
@@ -1437,6 +1439,65 @@ arithmetic_stairlike_add(cl_uint my_value, cl_uint *total_sum)
 }
 
 /*
+ * Utility functions to reference system columns
+ */
+STATIC_INLINE(Datum)
+kern_getsysatt_ctid(kern_data_store *kds, kern_tupitem *tupitem)
+{
+	return (Datum) devptr_to_host(kds, &tupitem->t_self);
+}
+
+STATIC_INLINE(Datum)
+kern_getsysatt_oid(kern_data_store *kds, kern_tupitem *tupitem)
+{
+	HeapTupleHeaderData *htup = &tupitem->htup;
+
+	if ((htup->t_infomask & HEAP_HASOID) != 0)
+		return *((cl_uint *)((char *) htup
+							 + htup->t_hoff
+							 - sizeof(cl_uint)));
+	return 0;	/* InvalidOid */
+}
+
+STATIC_INLINE(Datum)
+kern_getsysatt_xmin(kern_data_store *kds, kern_tupitem *tupitem)
+{
+	HeapTupleHeaderData *htup = &tupitem->htup;
+
+	return (Datum) htup->t_choice.t_heap.t_xmin;
+}
+
+STATIC_INLINE(Datum)
+kern_getsysatt_xmax(kern_data_store *kds, kern_tupitem *tupitem)
+{
+	HeapTupleHeaderData *htup = &tupitem->htup;
+
+	return (Datum) htup->t_choice.t_heap.t_xmax;
+}
+
+STATIC_INLINE(Datum)
+kern_getsysatt_cmin(kern_data_store *kds, kern_tupitem *tupitem)
+{
+	HeapTupleHeaderData *htup = &tupitem->htup;
+
+	return (Datum) htup->t_choice.t_heap.t_field3.t_cid;
+}
+
+STATIC_INLINE(Datum)
+kern_getsysatt_cmax(kern_data_store *kds, kern_tupitem *tupitem)
+{
+	HeapTupleHeaderData *htup = &tupitem->htup;
+
+	return (Datum) htup->t_choice.t_heap.t_field3.t_cid;
+}
+
+STATIC_INLINE(Datum)
+kern_getsysatt_tableoid(kern_data_store *kds, HeapTupleHeaderData *htup)
+{
+	return kds->table_oid;
+}
+
+/*
  * kern_writeback_error_status
  *
  * It set thread local error code on the status variable on the global
@@ -1507,6 +1568,153 @@ kern_writeback_error_status(kern_errorbuf *result, kern_errorbuf own_error)
 }
 
 /*
+ * compute_heaptuple_size
+ */
+STATIC_FUNCTION(cl_uint)
+compute_heaptuple_size(kern_data_store *kds,
+					   Datum *tup_values,
+					   cl_bool *tup_isnull,
+					   cl_bool *tup_internal)
+{
+	cl_uint		t_hoff;
+	cl_uint		datalen = 0;
+	cl_uint		i, ncols = kds->ncols;
+	cl_bool		heap_hasnull = false;
+
+	/* compute data length */
+	for (i=0; i < ncols; i++)
+	{
+		kern_colmeta	cmeta = kds->colmeta[i];
+
+		if (tup_isnull[i])
+			heap_hasnull = true;
+		else
+		{
+			if (tup_internal[i])
+			{
+				/*
+				 * NOTE: Right now, only numeric data type has internal
+				 * data representation. It has to be transformed to the
+				 * regular format prior to CPU write back.
+				 */
+				datalen = TYPEALIGN(sizeof(cl_uint), datalen);
+				datalen += pg_numeric_to_varlena(kcxt, NULL,
+												 tup_values[i],
+												 tup_isnull[i]);
+			}
+			else if (cmeta.attlen > 0)
+			{
+				datalen = TYPEALIGN(cmeta.attalign, datalen);
+			    datalen += cmeta.attlen;
+			}
+			else
+			{
+				Datum		datum = tup_values[i];
+				cl_uint		vl_len = VARSIZE_ANY(datum);
+
+				if (!VARATT_IS_1B(datum))
+					datalen = TYPEALIGN(cmeta.attalign, datalen);
+				datalen += vl_len;
+			}
+		}
+	}
+
+	/* compute header offset */
+	t_hoff = offsetof(HeapTupleHeaderData, t_bits);
+	if (heap_hasnull)
+		t_hoff += bitmaplen(ncols);
+	if (kds->tdhasoid)
+		t_hoff += sizeof(cl_uint);
+	t_hoff = MAXALIGN(t_hoff);
+
+	return t_hoff + datalen;
+}
+
+/*
+ * deform_kern_heaptuple
+ *
+ * Like deform_heap_tuple in host side, it extracts the supplied tuple-item
+ * into tup_values / tup_isnull array. Note that pointer datum shall be
+ * adjusted to the host-side address space.
+ */
+STATIC_FUNCTION(void)
+deform_kern_heaptuple(kern_data_store *kds,		/* in */
+					  kern_tupitem *tupitem,	/* in */
+					  cl_uint	nfields,		/* in */
+					  Datum	   *tup_values,		/* out */
+					  cl_bool  *tup_isnull)		/* out */
+{
+	HeapTupleHeaderData *htup = &tupitem->htup;
+	cl_uint		offset = htup->t_hoff;
+	cl_uint		i, ncols = (htup->t_infomask2 & HEAP_NATTS_MASK);
+	cl_bool		tup_hasnull = ((htup->t_infomask & HEAP_HASNULL) != 0);
+
+	/*
+	 * In case of 'nfields' is less than length of array, we extract
+	 * the first N columns only. On the other hands, t_informask2
+	 * should not contain attributes than definition.
+	 */
+	assert(ncols, kds->ncols);
+	ncols = min(ncols, nfields);
+
+	for (i=0; i < ncols; i++)
+	{
+		if (tup_hasnull && att_isnull(i, htup->t_bits))
+		{
+			tup_isnull[i] = true;
+			tup_values[i] = 0;
+		}
+		else
+		{
+			kern_colmeta	cmeta_src = colmeta[i];
+			kern_colmeta	cmeta = kds->colmeta[i];
+			char		   *addr;
+
+			if (cmeta.attlen > 0)
+				offset = TYPEALIGN(cmeta.attalign, offset);
+			else if (!VARATT_NOT_PAD_BYTE((char *)htup + offset))
+				offset = TYPEALIGN(cmeta.attalign, offset);
+
+			/*
+			 * Store the value
+			 */
+			addr = ((char *) htup + offset);
+			if (cmeta_dst.attbyval)
+			{
+				if (cmeta_dst.attlen == sizeof(cl_long))
+					tup_values[i] = *((cl_long *) addr);
+				else if (cmeta_dst.attlen == sizeof(cl_int))
+					tup_values[i] = *((cl_int *) addr);
+				else if (cmeta_dst.attlen == sizeof(cl_short))
+					tup_values[i] = *((cl_short *) addr);
+				else
+				{
+					assert(cmeta_dst.attlen == sizeof(cl_char));
+					tup_values[i] = *((cl_char *) addr);
+				}
+				offset += cmeta.attlen;
+			}
+			else
+			{
+				/* store the host pointer */
+				tup_values[i] = devptr_to_host(kds, addr);
+				offset += (cmeta_dst.attlen > 0
+						   ? cmeta_dst.attlen
+						   : VARSIZE_ANY(addr));
+			}
+			tup_isnull[i] = false;
+		}
+	}
+
+	/*
+	 * Fill up remaining columns if source tuple has less columns than
+	 * length of the array; that is definition of the destination
+	 */
+	while (i < nfields)
+		tup_isnull[i++] = true;
+}
+
+/*
  * build_kern_tupitem
  *
  * A utility routine to build a kern_tupitem on the destination buffer
@@ -1520,17 +1728,17 @@ kern_writeback_error_status(kern_errorbuf *result, kern_errorbuf own_error)
  * tup_isnull ... array of null flag
  */
 STATIC_FUNCTION(void)
-build_kern_tupitem(kern_data_store *kds,	/* destination data-store */
-				   kern_tupitem *tupitem,	/* tupitem allocated on the KDS */
-				   cl_uint tuple_len,		/* length of the tuple */
-				   Datum *tup_values,		/* array of result datum */
-				   cl_bool *tup_isnull)		/* array of NULL flags */
+form_kern_heaptuple(kern_data_store *kds,
+					kern_tupitem *tupitem,
+					Datum *tup_values,
+					cl_bool *tup_isnull,
+					cl_bool *tup_internal)
 {
-	HeapTupleHeaderData	   *htup;
-	cl_bool		heap_hasnull;
-	cl_uint		t_hoff;
-	cl_uint		required = t_hoff + MAXALIGN(datalen);
+	HeapTupleHeaderData *htup;
 	cl_uint		i, ncols = kds->ncols;
+	cl_bool		heap_hasnull;
+	cl_ushort	t_infomask;
+	cl_uint		t_hoff;
 	cl_uint		curr;
 
 	/* sanity checks */
@@ -1539,27 +1747,31 @@ build_kern_tupitem(kern_data_store *kds,	/* destination data-store */
 	assert((uintptr_t)tupitem > (uintptr_t) kds &&
 		   (uintptr_t)tupitem+MAXALIGN(tuplen) <= (uintptr_t)kds+kds->length);
 
-	/* Does it have any null field? */
+	/* Does it have any NULL field? */
 	heap_hasnull = false;
 	for (i=0; i < ncols; i++)
 	{
 		if (tup_isnull[i])
 		{
-			tup_isnull[i] = true;
+			heap_hasnull = true;
 			break;
 		}
 	}
+	t_infomask = (heap_hasnull ? HEAP_HASNULL : 0);
 
 	/* Compute header offset */
 	t_hoff = offsetof(HeapTupleHeaderData, t_bits);
 	if (heap_hasnull)
 		t_hoff += bitmaplen(ncols);
 	if (kds->tdhasoid)
+	{
+		t_infomask |= HEAP_HASOID;
 		t_hoff += sizeof(cl_uint);
+	}
 	t_hoff = MAXALIGN(t_hoff);
 
 	/* setup header of kern_tupitem */
-	titem->t_len = t_hoff + data_len;
+	// titem->t_len shall be set up later
 	titem->t_self.ip_blkid.bi_hi = 0xffff;	/* InvalidBlockNumber */
 	titem->t_self.ip_blkid.bi_lo = 0xffff;
 	titem->t_self.ip_posid = 0;				/* InvalidOffsetNumber */
@@ -1573,7 +1785,7 @@ build_kern_tupitem(kern_data_store *kds,	/* destination data-store */
 	htup->t_ctid.ip_blkid.bi_lo = 0xffff;
 	htup->t_ctid.ip_posid = 0;
 	htup->t_infomask2 = (ncols & HEAP_NATTS_MASK);
-	htup->t_infomask = (heap_hasnull ? HEAP_HASNULL : 0);
+	// htup->t_infomask shall be set up later
 	htup->t_hoff = t_hoff;
 	curr = t_hoff;
 
@@ -1588,7 +1800,21 @@ build_kern_tupitem(kern_data_store *kds,	/* destination data-store */
 			htup->t_bits[i >> 3] &= ~(1 << (i & 0x07));
 		else
 		{
-			if (cmeta.attbyval)
+			if (heap_hasnull)
+				htup->t_bits[i >> 3] |= (1 << (i & 0x07));
+
+			if (tup_internal && tup_internal[i])
+			{
+				/*
+				 * NOTE: Right now, only NUMERIC has internal data format.
+				 * It has to be transformed again prior to CPU write back.
+				 */
+				curr = TYPEALIGN(sizeof(cl_uint), curr);
+				curr += pg_numeric_to_varlena(kcxt, ((char *)htup + curr),
+											  tup_values[i],
+											  tup_isnull[i]);
+			}
+			else if (cmeta.attbyval)
 			{
 				char   *dest;
 
@@ -1622,6 +1848,7 @@ build_kern_tupitem(kern_data_store *kds,	/* destination data-store */
 			{
 				cl_uint		vl_len = VARSIZE_ANY(datum);
 
+				t_infomask |= HEAP_HASVARWIDTH;
 				/* put 0 and align here, if not a short varlena */
 				if (!VARATT_IS_1B(datum))
 				{
@@ -1631,11 +1858,13 @@ build_kern_tupitem(kern_data_store *kds,	/* destination data-store */
 				memcpy((char *)htup + curr, datum, vl_len);
 				curr += vl_len;
 			}
-			if (heap_hasnull)
-				htup->t_bits[i >> 3] |= (1 << (i & 0x07));
 		}
 	}
-	assert(t_hoff + data_len == curr);
+	curr += t_hoff;		/* add header length */
+	titem->t_len = curr;
+	htup->t_infomask = t_infomask;
+
+	return curr;
 }
 
 /* ------------------------------------------------------------

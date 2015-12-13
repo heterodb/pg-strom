@@ -628,10 +628,10 @@ gpuscan_codegen_projection(CustomScan *cscan, TupleDesc tupdesc)
 	List		   *scan_tlist = cscan->custom_scan_tlist;
 	AttrNumber	   *varremaps;
 	Bitmapset	   *varattnos;
-	List		   *tempval_types;
 	ListCell	   *lc;
 	int				prev;
 	int				i, j, k;
+	bool			needs_vlbuf = false;
 	devtype_info   *dtype;
 	StringInfoData	decl;
 	StringInfoData	body;
@@ -647,12 +647,7 @@ gpuscan_codegen_projection(CustomScan *cscan, TupleDesc tupdesc)
 	 */
 	appendStringInfo(
 		&decl,
-		"#define GPUSCAN_DEVICE_PROJECTION_ROW(a,b,c,d) \\\n"
-		"    Datum   tup_values[%u]; \\\n"
-		"    cl_bool tup_isnull[%u]; \\\n"
-		"    GPUSCAN_DEVICE_PROJECTION_SLOT((a),(b),(c),(d))\n"
-		"\n",
-		list_length(scan_tlist),
+		"#define GPUSCAN_DEVICE_PROJECTION_NFIELDS %d\n",
 		list_length(scan_tlist));
 
 	/*
@@ -660,12 +655,12 @@ gpuscan_codegen_projection(CustomScan *cscan, TupleDesc tupdesc)
 	 */
 	appendStringInfo(
 		&decl,
-		"#define GPUSCAN_DEVICE_PROJECTION_SLOT"
-		"(kds_dst,kds_src,tupitem_src,tuple_len) \\\n"
-		" do { \\\n"
-		"  HeapTupleHeaderData *htup = &(tupitem_src)->htup; \\\n"
-		"  cl_bool heap_hasnull; \\\n"
-		"  char *addr; \\\n");
+		"#define GPUSCAN_DEVICE_PROJECTION(format) \\\n"
+		"do { \\\n"
+		"HeapTupleHeaderData *htup; \\\n"
+		"cl_bool heap_hasnull; \\\n"
+		"char   *addr; \\\n"
+		"char   *vl_buf; \\\n");
 
 	varremaps = palloc0(sizeof(AttrNumber) * list_length(scan_tlist));
 	varattnos = NULL;
@@ -710,21 +705,26 @@ gpuscan_codegen_projection(CustomScan *cscan, TupleDesc tupdesc)
 			elog(ERROR, "Bug? failed to lookup device supported type: %s",
 				 format_type_be(attr->atttypid));
 		appendStringInfo(&decl,
-						 "  pg_%s_t KVAR_%u; \\\n",
+						 "pg_%s_t KVAR_%u; \\\n",
 						 dtype->type_name, anum);
 	}
 
 	/*
 	 * step.2 - extract tuples and load values to KVAR or values/isnull array
+	 * (only if tupitem_src is valid, of course)
 	 */
 	appendStringInfo(
 		&body,
-		"  heap_hasnull = ((htup->t_infomask & HEAP_HASNULL) != 0); \\\n"
-		"  offset = htup->t_hoff; \\\n");
+		"htup = (!tupitem_src ? NULL : &tupitem_src->htup; \\\n"
+		"if (htup) \\\n"
+		"{ \\\n"
+		"  cl_uint curr = htup->t_hoff; \\\n"
+		"  cl_bool hasnull = ((htup->t_infomask & HEAP_HASNULL) != 0); \\\n");
 	for (i=0; i < tupdesc->natts; i++)
 	{
 		Form_pg_attribute	attr = tupdesc->attrs[i];
 		bool		referenced = false;
+		const char *__CURR_ADDR = "((char *)htup + curr)";
 
 		dtype = pgstrom_devtype_lookup(attr->atttypid);
 		k = attr->attnum - FirstLowInvalidHeapAttributeNumber;
@@ -732,22 +732,23 @@ gpuscan_codegen_projection(CustomScan *cscan, TupleDesc tupdesc)
 		appendStringInfo(
 			&temp,
 			"  /* attribute %d */ \\\n"
-			"  if (!heap_hasnull || !att_isnull(%d, htup->t_bits)) \\\n"
+			"  if (!hasnull || !att_isnull(%d, htup->t_bits)) \\\n"
 			"  { \\\n",
 			attr->attnum,
 			attr->attnum - 1);
 
-		/* offset alignment */
+		/* current offset alignment */
 		if (attr->attlen > 0)
 			appendStringInfo(
 				&temp,
-				"    offset = TYPEALIGN(%d, offset); \\\n",
+				"    curr = TYPEALIGN(%d, curr); \\\n",
 				typealign_get_width(attr->attalign));
 		else
 			appendStringInfo(
 				&temp,
-				"    if (!VARATT_NOT_PAD_BYTE((char *)htup + offset)) \\\n"
-				"      offset = TYPEALIGN(%d, offset); \\\n",
+				"    if (!VARATT_NOT_PAD_BYTE(%s) \\\n"
+				"      curr = TYPEALIGN(%d, curr); \\\n",
+				__CURR_ADDR,
 				typealign_get_width(attr->attalign));
 
 		/* Put values on tup_values/tup_isnull and KVAR_xx if referenced */
@@ -756,13 +757,6 @@ gpuscan_codegen_projection(CustomScan *cscan, TupleDesc tupdesc)
 			if (varremaps[j] != attr->attnum)
 				continue;
 
-			if (!referenced)
-			{
-				appendStringInfo(
-					&temp,
-					"    addr = ((char *) htup + offset); \\\n");
-				referenced = true;
-			}
 			appendStringInfo(
 				&temp,
 				"    tup_isnull[%d] = false; \\\n", j);
@@ -770,57 +764,49 @@ gpuscan_codegen_projection(CustomScan *cscan, TupleDesc tupdesc)
 			{
 				appendStringInfo(
 					&temp,
-					"    tup_values[%d] = *((%s *) addr); \\\n",
+					"    tup_values[%d] = *((%s *) %s); \\\n",
 					j,
 					(attr->attlen == sizeof(cl_long) ? "cl_long"
 					 : attr->attlen == sizeof(cl_int) ? "cl_int"
 					 : attr->attlen == sizeof(cl_short) ? "cl_short"
-					 : "cl_char"));
+					 : "cl_char"),
+					__CURR_ADDR);
 			}
 			else
 			{
 				appendStringInfo(
 					&temp,
-					"    tup_values[%d] = devptr_to_host(kds_src,addr); \\\n",
-					j);
+					"    tup_values[%d] = devptr_to_host(kds_src,%s); \\\n",
+					j, __CURR_ADDR);
 			}
 		}
 
 		k = attr->attnum - FirstLowInvalidHeapAttributeNumber;
 		if (bms_is_member(k, varattnos))
 		{
-			if (!referenced)
-			{
-				appendStringInfo(
-					&temp,
-					"    addr = ((char *) htup + offset); \\\n");
-				referenced = true;
-			}
 			appendStringInfo(
 				&temp,
-				"    KVAR_%u = pg_%s_datum_ref((kcxt), addr, false); \\\n",
+				"    KVAR_%u = pg_%s_datum_ref((kcxt), %s, false); \\\n",
 				attr->attnum,
-				dtype->type_name);
+				dtype->type_name,
+				__CURR_ADDR);
 		}
 		/* make advance the offset */
 		if (attr->attlen > 0)
 			appendStringInfo(
 				&temp,
-				"    offset += %d; \\\n",
+				"    curr += %d; \\\n",
 				attr->attlen);
 		else
-		{
-			if (!referenced)
-				appendStringInfo(
-					&temp,
-					"    addr = ((char *) htup + offset); \\\n");
 			appendStringInfo(
 				&temp,
-				"    offset += VARSIZE_ANY(addr); \\\n");
-		}
+				"    curr += VARSIZE_ANY(%s); \\\n",
+				__CURR_ADDR);
+
 		appendStringInfo(
 			&temp,
 			"  } \\\n");
+
 		/* Put NULL on tup_isnull and KVAR_xx, if needed */
 		if (referenced)
 		{
@@ -841,7 +827,7 @@ gpuscan_codegen_projection(CustomScan *cscan, TupleDesc tupdesc)
 			{
 				appendStringInfo(
 					&temp,
-					"    KVAR_%u = pg_%s_datum_ref((kcxt), NULL, false); \\\n",
+					"    KVAR_%u = pg_%s_datum_ref(kcxt, NULL, false); \\\n",
 					attr->attnum,
 					dtype->type_name);
 			}
@@ -858,12 +844,11 @@ gpuscan_codegen_projection(CustomScan *cscan, TupleDesc tupdesc)
 	}
 
 	/*
-	 * step.3 - execute expression node, then store the result
+	 * step.3 - execute expression node, then store the result onto KVAR_xx
 	 */
 	pgstrom_init_codegen_context(&context);
 	// TODO: restore the tracked functions
 
-	tempval_types = NIL;
     foreach (lc, scan_tlist)
     {
         TargetEntry    *tle = lfirst(lc);
@@ -876,12 +861,110 @@ gpuscan_codegen_projection(CustomScan *cscan, TupleDesc tupdesc)
 		dtype = pgstrom_devtype_lookup(type_oid);
 		if (!dtype)
 			elog(ERROR, "Bug? device supported type is missing: %u", type_oid);
-		tempval_types = list_append_unique_oid(tempval_types, type_oid);
+
+		appendStringInfo(
+			&decl,
+			"  pg_%s_t temp_%u_v; \\\n",
+			dtype->type_name,
+			tle->resno);
+		appendStringInfo(
+			&body,
+			"  temp_%u_v = %s; \\\n",
+			tle->resno,
+			pgstrom_codegen_expression((Node *) tle->expr, &context));
+	}
+
+	appendStringInfo(
+		&body,
+		"} \\\n");
+
+	/*
+	 * step.4 (only FDW_FORMAT_SLOT) - We have to acquire variable length
+	 * buffer for indirect or numeric data type.
+	 */
+	resetStringInfo(&temp);
+	appendStringInfo(
+		&temp,
+		"if ((format) == KDS_FORMAT_SLOT) \\\n"
+		"{ \\\n"
+		"  cl_uint vl_len = 0; \\\n"
+		" \\\n"
+		"  if (htup) \\\n"
+		"  { \\\n");
+
+	foreach (lc, scan_tlist)
+	{
+		TargetEntry	   *tle = lfirst(lc);
+		Oid				type_oid;
+
+		if (IsA(tle->expr, Var))
+			continue;
+
+		type_oid = exprType((Node *)tle->expr);
+		dtype = pgstrom_devtype_lookup(type_oid);
+		if (!dtype)
+			elog(ERROR, "Bug? device supported type is missing: %u", type_oid);
+		if (type_oid == NUMERICOID)
+		{
+			appendStringInfo(
+				&body,
+				"  if (!temp_%u_v.isnull) \\\n"
+				"    vl_len = TYPEALIGN(sizeof(cl_uint), vl_len) \\\n"
+				"           + pg_numeric_to_varlena(kcxt,NULL, \\\n"
+				"                                   temp_%u_v.value, \\\n"
+				"                                   temp_%u_v.isnull); \\\n",
+				tle->resno,
+				tle->resno,
+				tle->resno);
+		}
+		else if (!dtype->type_byval)
+		{
+			/* varlena is not supported yet */
+			Assert(dtype->type_length > 0);
+
+			appendStringInfo(
+				&body,
+				"  if (!temp_%u_v.isnull) \\\n"
+				"    vl_len = TYPEALIGN(%u, vl_len) + %u; \\\n",
+				tle->resno,
+				dtype->type_align,
+				dtype->type_length);
+		}
+	}
+
+	appendStringInfo(
+		&temp,
+		"  } \\\n"
+		"  /* allocation of variable length buffer */ \\\n "
+		"  hoge = arithmetic_stairlike_add(MAXALIGN(vl_len), &count); \\\n"
+		"  if (get_local_id() == 0) \\\n"
+		"  { \\\n"
+		"    if (count > 0) \\\n"
+		"      usage_prev = atomicAdd(&kds_dst->usage, count); \\\n"
+		"    else \\\n"
+		"      usage_prev = 0; \\\n"
+		"  } \\\n"
+		"  __syncthreads(); \\\n"
+		"  \\\n"
+		"  if (KERN_DATA_STORE_HEAD_LENGTH(kds_dst) +"
+		"      LONGALIGN((sizeof(Datum) + sizeof(char)) *"
+		"                kds_dst->ncols) * XXX nitems XXX) < kds_dst->length - (usage_prev + count))"
+		"    NoDataSpace; break;\n"
+		"} \\\n");
+	if (needs_vlbuf)
+		appendStringInfo(&body, "%s", temp.data);
+
+
+
+
+
+		// we have to transform indirect / numeric data types on the
+		// variable length buffer if KDS_FORMAT_SLOT
 
 		appendStringInfo(
 			&body,
 			"\\\n"
-			"  temp_%s_val = %s; \\\n"
+			"  temp_%u_v = %s; \\\n"
 			"  if (temp_%s_val.isnull) \\\n"
 			"    tup_isnull[%d] = true; \\\n"
 			"  else \\\n"
@@ -889,7 +972,7 @@ gpuscan_codegen_projection(CustomScan *cscan, TupleDesc tupdesc)
 			"    tup_isnull[%d] = false; \\\n"
 			"    tup_values[%d] = %s(temp_%s_val.value); \\\n"
 			"  } \\\n",
-			dtype->type_name,
+			tle->resno,
 			pgstrom_codegen_expression((Node *) tle->expr, &context),
 			dtype->type_name,
 			tle->resno - 1,
@@ -902,19 +985,6 @@ gpuscan_codegen_projection(CustomScan *cscan, TupleDesc tupdesc)
 
 	/* parameter references */
 	appendStringInfo(&decl,"%s",pgstrom_codegen_param_declarations(&context));
-
-	/* temporary variables */
-	foreach (lc, tempval_types)
-	{
-		Oid		type_oid = lfirst_oid(lc);
-
-		dtype = pgstrom_devtype_lookup(type_oid);
-		if (!dtype)
-			elog(ERROR, "Bug? device supported type is missing: %u", type_oid);
-		appendStringInfo(&decl, "  pg_%s_t temp_%s_val; \\\n",
-						 dtype->type_name,
-						 dtype->type_name);
-	}
 
 	/* end of the block */
 	appendStringInfo(&body,
@@ -1386,6 +1456,8 @@ gpuscan_next_chunk(GpuTaskState *gts)
 											tupdesc,
 											pgstrom_chunk_size(),
 											false);
+		pds->kds->table_oid = RelationGetRelid(rel);
+
 		/* fill up this data-store */
 		while (gss->curr_blknum < gss->last_blknum &&
 			   pgstrom_data_store_insert_block(pds, rel,

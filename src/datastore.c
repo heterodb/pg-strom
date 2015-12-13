@@ -495,6 +495,7 @@ init_kernel_data_store(kern_data_store *kds,
 	kds->tdhasoid = tupdesc->tdhasoid;
 	kds->tdtypeid = tupdesc->tdtypeid;
 	kds->tdtypmod = tupdesc->tdtypmod;
+	kds->table_oid = InvalidOid;	/* caller shall set */
 	kds->nslots = 0;
 	kds->hash_min = 0;
 	kds->hash_max = UINT_MAX;

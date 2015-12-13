@@ -174,8 +174,17 @@ gpuscan_projection_row(kern_gpuscan *kgpuscan,
 	 *  2. initialization of the above array.
 	 *  3. and, computing the tuple_len
 	 */
-#ifdef GPUSCAN_DEVICE_PROJECTION_ROW
-	GPUSCAN_DEVICE_PROJECTION_ROW(kds_dst, cmeta_src, tupitem_src, tuple_len);
+#ifdef GPUSCAN_DEVICE_PROJECTION
+	Datum		tup_values[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
+	cl_bool		tup_isnull[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
+	cl_bool		tup_internal[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
+
+	GPUSCAN_DEVICE_PROJECTION(KDS_FORMAT_ROW);
+
+	tuple_len = compute_heaptuple_size(kds,
+									   tup_values,
+									   tup_isnull,
+									   tup_internal);
 #else
 	tuple_len = (tupitem_src != NULL ? tupitem_src->t_len : 0);
 #endif
@@ -232,26 +241,26 @@ gpuscan_projection_row(kern_gpuscan *kgpuscan,
 	{
 		cl_uint		   *tupitem_idx
 			= (cl_uint *)KERN_DATA_STORE_BODY(kds_dst);
-		kern_tupitem   *titem_dst
+		kern_tupitem   *tupitem_dst
 			= (kern_tupitem *)((char *)kds_dst + htup_offset);
 
-		tupitem_idx[item_index] = htup_offset;
 #ifdef GPUSCAN_DEVICE_PROJECTION
-		build_kern_tupitem(kds_dst, titem_dst, tuple_len,
-						   tup_values, tup_isnull);
+		form_kern_heaptuple(kds_dst, tupitem_dst,
+							tup_values, tup_isnull, tup_internal);
 #else
 		memcpy(tupitem_dst, tupitem_src,
 			   offsetof(kern_tupitem, htup) + tuplen);
 #endif
+		tupitem_idx[item_index] = htup_offset;
 	}
 }
 
 STATIC_FUNCTION(void)
 gpuscan_projection_slot(kern_gpuscan *kgpuscan,
 						kern_context *kcxt,
-						kern_colmeta *cmeta_src,
-						kern_tupitem *tupitem_src,
-						kern_data_store *kds_dst)
+						kern_data_store *kds_dst,
+						kern_data_store *kds_src,
+						kern_tupitem *tupitem_src)
 {
 	cl_uint				tuple_len;
 	cl_uint				offset;
@@ -278,99 +287,31 @@ gpuscan_projection_slot(kern_gpuscan *kgpuscan,
 	__syncthreads();
 
 	if (base + count > kds_dst->nrooms)
-	{
 		STROM_SET_ERROR(&kcxt->e, StromError_DataStoreNoSpace);
-		return;
-	}
-	dst_index = base + offset;
-
-	/*
-	 * We store the result only when tuple is visible, of course.
-	 */
-	if (tupitem_src != NULL)
+	else
 	{
-		Datum	   *dst_values = KERN_DATA_STORE_VALUES(kds_dst, dst_index);
-		cl_bool	   *dst_isnull = KERN_DATA_STORE_ISNULL(kds_dst, dst_index);
-#ifdef GPUSCAN_DEVICE_PROJECTION_SLOT
-		cl_uint		__dummy;
 		/*
-		 * Unlike GPUSCAN_DEVICE_PROJECTION_ROW, it does not need to
-		 * declare an array of 'dst_values' and 'dst_isnull' because
-		 * we already have on the kds_dst. Other portions are common.
+		 * NOTE: GPUSCAN_DEVICE_PROJECTION internally acquires variable-
+		 * length buffer, thus involves reduction operations using shared
+		 * memory and 
 		 */
-		GPUSCAN_DEVICE_PROJECTION_SLOT(kds_dst, cmeta_src, tupitem_src,
-									   __dummy__);
+		cl_uint		dst_index = base + offset;
+		Datum	   *tup_values = KERN_DATA_STORE_VALUES(kds_dst, dst_index);
+		cl_bool	   *tup_isnull = KERN_DATA_STORE_ISNULL(kds_dst, dst_index);
+#ifdef GPUSCAN_DEVICE_PROJECTION
+		cl_bool		tup_internal[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
+		cl_uint		i, ncols = kds_dst->ncols;
+		cl_uint		vl_buflen = 0;
+
+		GPUSCAN_DEVICE_PROJECTION(KDS_FORMAT_SLOT);
 #else
-		/*
-		 * Row-format has to be extracted to individual references,
-		 * even if we have no projection here.
-		 */
-		HeapTupleHeaderData *htup = &tupitem_src->htup;
-		cl_uint		offset = htup->t_hoff;
-		cl_uint		i, ncols = (htup->t_infomask2 & HEAP_NATTS_MASK);;
-		cl_bool		heap_hasnull = ((htup->t_infomask & HEAP_HASNULL) != 0);
-
-		/* source tuple may be wider than destination (likely bug?) */
-		ncols = min(ncols, kds_dst->ncols);
-
-		for (i=0; i < ncols; i++)
-		{
-			if (heap_hasnull && att_isnull(i, htup->t_bits))
-			{
-				dst_values[i] = 0;
-				dst_isnull[i] = true;
-			}
-			else
-			{
-				kern_colmeta	cmeta_src = colmeta[i];
-				kern_colmeta	cmeta_dst = kds_dst->colmeta[i];
-
-				if (cmeta.attlen > 0)
-					offset = TYPEALIGN(cmeta.attalign, offset);
-				else if (!VARATT_NOT_PAD_BYTE((char *)htup + offset))
-					offset = TYPEALIGN(cmeta.attalign, offset);
-				/* TODO: overrun checks here */
-				addr = ((char *) htup + offset);
-
-				/*
-				 * store the values
-				 */
-				if (cmeta_dst.attbyval)
-				{
-					if (cmeta_dst.attlen == sizeof(cl_long))
-						dst_values[i] = *((cl_long *) addr);
-					else if (cmeta_dst.attlen == sizeof(cl_int))
-						dst_values[i] = *((cl_int *) addr);
-					else if (cmeta_dst.attlen == sizeof(cl_short))
-						dst_values[i] = *((cl_short *) addr);
-					else
-					{
-						assert(cmeta_dst.attlen == sizeof(cl_char));
-						dst_values[i] = *((cl_char *) addr);
-					}
-					offset += cmeta.attlen;
-				}
-				else
-				{
-					/* store the host pointer */
-					dst_values[i] = ((uintptr_t) addr -
-									 (uintptr_t) &kds_src->hostptr +
-									 (uintptr_t) kds_src->hostptr);
-
-					offset += (cmeta_dst.attlen > 0
-							   ? cmeta_dst.attlen
-							   : VARSIZE_ANY(addr));
-				}
-				dst_isnull[i] = false;
-			}
+		if (tupitem_src != NULL)
+			deform_kern_heaptuple(kds_src,
+								  tupitem_src,
+								  kds_dst->ncols,
+								  tup_values,
+								  tup_isnull);
 		}
-
-		/*
-		 * Fill up remaining columns if source tuple has less columns
-		 * than destination's definition.
-		 */
-		while (i < kds_dst->ncols)
-			dst_isnull[i++] = true;
 #endif
 	}
 }

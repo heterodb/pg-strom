@@ -147,6 +147,7 @@ typedef struct {
 	cl_ulong	value;
 	bool		isnull;
 } pg_numeric_t;
+typedef cl_ulong pg_numeric_base_t;
 
 #define PG_NUMERIC_EXPONENT_BITS	6
 #define PG_NUMERIC_EXPONENT_POS		58
@@ -352,39 +353,22 @@ pg_numeric_from_varlena(kern_context *kcxt, struct varlena *vl_val)
 #define NUMERIC_TO_VERLENA_USE_SHORT_FORMAT
 
 STATIC_INLINE(size_t)
-pg_numeric_to_varlena(kern_context *kcxt, pg_numeric_t arg, varlena *vl_val)
+pg_numeric_to_varlena(kern_context *kcxt, char *vl_buffer,
+					  pg_numeric_base_t value, cl_bool isnull)
 {
-	varattrib_4b		   *pHeader;
-	union NumericChoice	   *pNumData;
+	varattrib_4b   *pHeader = (varattrib_4b *) vl_buffer;
+	cl_uint			vl_len;
 
-	if (vl_val == NULL)
-	{
-		// No destination buffer
-		STROM_SET_ERROR(&kcxt->e, StromError_CudaInternal);
+	/* alignment error; varlena buffer must be 4byte alignment */
+	assert(((cl_ulong)vl_buffer % sizeof(cl_int)) == 0);
+
+	/* NULL writes nothing anyway */
+	if (isnull)
 		return 0;
-	}
 
-	if ((cl_long)vl_val % sizeof(cl_int))
+	/* generate numeric data */
 	{
-		// Alignment error.
-		// Must be set 4 byte alignment for varlena buffer.
-		STROM_SET_ERROR(&kcxt->e, StromError_CudaInternal);
-		return 0;
-	}
-
-	if (arg.isnull)
-	{
-		// The caller function set NULL to bitmapt if arg is NULL.
-		// And then, does not call this function.
-		STROM_SET_ERROR(&kcxt->e, StromError_CudaInternal);
-		return 0;
-	}
-
-	pHeader  = (varattrib_4b *)vl_val;
-	pNumData = (union NumericChoice *)((char *)pHeader + VARHDRSZ);
-
-	// generate numeric data
-	{
+		union NumericChoice	*pNumData;
 		int			sign = PG_NUMERIC_SIGN(arg.value);
 		int 		expo = PG_NUMERIC_EXPONENT(arg.value);
 		cl_ulong	mant = PG_NUMERIC_MANTISSA(arg.value);
@@ -425,29 +409,39 @@ pg_numeric_to_varlena(kern_context *kcxt, pg_numeric_t arg, varlena *vl_val)
 		}
 
 #ifdef NUMERIC_TO_VERLENA_USE_SHORT_FORMAT
-		// create the data of the short format.
-		pHeader->va_4byte.va_header = (offsetof(struct NumericShort, n_data) + 
-									   nData * sizeof(NumericDigit) + 
-									   VARHDRSZ) << 2;
+		/* create the data of the short format. */
+		vl_len = (VARHDRSZ +
+				  offsetof(struct NumericShort, n_data) +
+				  nData * sizeof(NumericDigit));
+		if (!pHeader)
+			return vl_len;
+
+		SET_VARSIZE(pHeader, vl_len);
+		pNumData = (union NumericChoice *)((char *)pHeader + VARHDRSZ);
 		pNumData->n_short.n_header =
 			NUMERIC_SHORT |
 			(sign ? NUMERIC_SHORT_SIGN_MASK : 0) |
 			(dscale & NUMERIC_SHORT_DSCALE_MASK) |
-			(weight &
-			 (NUMERIC_SHORT_WEIGHT_SIGN_MASK | NUMERIC_SHORT_WEIGHT_MASK));
+			(weight & (NUMERIC_SHORT_WEIGHT_SIGN_MASK |
+					   NUMERIC_SHORT_WEIGHT_MASK));
 		pNData = pNumData->n_short.n_data;
 #else
-		// create the data of the long format
-		pHeader->va_4byte.va_header = (offsetof(struct NumericLong, n_data) + 
-									   nData * sizeof(NumericDigit) + 
-									   VARHDRSZ) << 2;
+		/* create the data of the long format */
+		vl_len = (VARHDRSZ +
+				  offsetof(struct NumericLong, n_data) +
+				  nData * sizeof(NumericDigit));
+		if (!pHeader)
+			return vl_len;
+
+		SET_VARSIZE(pHeader, vl_len);
+		pNumData = (union NumericChoice *)((char *)pHeader + VARHDRSZ);
 		pNumData->n_long.n_sign_dscale = ((sign ? NUMERIC_SIGN_MASK : 0) |
 										  (dscale & NUMERIC_SHORT_SCALE_MASK));
 		pNumData->n_long.n_weight = weight;
 		pNData = pNumData->n_long.n_data;
 #endif
 
-		if (0 < nData)
+		if (nData > 0)
 		{
 			pNData[nData-1] = (mant % (PG_NBASE/mag)) * mag;
 			mant /= (PG_NBASE/mag);
@@ -462,8 +456,7 @@ pg_numeric_to_varlena(kern_context *kcxt, pg_numeric_t arg, varlena *vl_val)
 			}
 		}
 	}
-
-	return pHeader->va_4byte.va_header;
+	return vl_len;
 }
 
 
