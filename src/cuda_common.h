@@ -153,7 +153,7 @@ extern __shared__ cl_ulong __pgstrom_dynamic_shared_workmem[];
 #define __global__		/* address space qualifier is noise on host */
 #define __constant__	/* address space qualifier is noise on host */
 #define __shared__		/* address space qualifier is noise on host */
-typedef uintptr_t	hostptr_t;
+typedef uintptr_t		hostptr_t;
 #endif
 
 /*
@@ -473,10 +473,16 @@ typedef struct {
 	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER]; /* metadata of columns */
 } kern_data_store;
 
+/* length of kern_data_store */
+#define KERN_DATA_STORE_LENGTH(kds)		((kds)->length)
+
+/* length of the header portion of kern_data_store */
+#define KERN_DATA_STORE_HEAD_LENGTH(kds)			\
+	STROMALIGN(offsetof(kern_data_store, colmeta[(kds)->ncols]))
+
 /* head address of data body */
 #define KERN_DATA_STORE_BODY(kds)							\
-	((char *)(kds) + STROMALIGN(offsetof(kern_data_store,	\
-										 colmeta[(kds)->ncols])))
+	((char *)(kds) + KERN_DATA_STORE_HEAD_LENGTH(kds))
 
 /* access macro for row-format */
 #define KERN_DATA_STORE_TUPITEM(kds,kds_index)				\
@@ -485,10 +491,14 @@ typedef struct {
 	  ((cl_uint *)KERN_DATA_STORE_BODY(kds))[(kds_index)]))
 
 /* access macro for tuple-slot format */
+#define KERN_DATA_STORE_SLOT_LENGTH(kds,nitems)				\
+	(KERN_DATA_STORE_HEAD_LENGTH(kds) +						\
+	 LONGALIGN((sizeof(Datum) +								\
+				sizeof(char)) * (kds)->ncols) * (nitems))
+
 #define KERN_DATA_STORE_VALUES(kds,kds_index)				\
-	((Datum *)(KERN_DATA_STORE_BODY(kds) +					\
-			   LONGALIGN((sizeof(Datum) + sizeof(char)) *	\
-						 (kds)->ncols) * (kds_index)))
+	((Datum *)((char *)(kds) + KERN_DATA_STORE_SLOT_LENGTH((kds),(kds_index))))
+
 #define KERN_DATA_STORE_ISNULL(kds,kds_index)				\
 	((cl_bool *)(KERN_DATA_STORE_VALUES((kds),(kds_index)) + (kds)->ncols))
 
@@ -515,23 +525,16 @@ KERN_HASH_NEXT_ITEM(kern_data_store *kds, kern_hashitem *khitem)
 	return (kern_hashitem *)((char *)kds + khitem->next);
 }
 
-/* length of kern_data_store */
-#define KERN_DATA_STORE_LENGTH(kds)		((kds)->length)
-
-/* length of the header portion of kern_data_store */
-#define KERN_DATA_STORE_HEAD_LENGTH(kds)			\
-	STROMALIGN(offsetof(kern_data_store, colmeta[(kds)->ncols]))
-
 /* transform device pointer to host address */
 #define devptr_to_host(kds,devptr)		\
-	((uintptr_t)(devptr) -				\
-	 (uintptr_t)(&(kds)->hostptr) +		\
-	 (uintptr_t)((kds)->hostptr))
+	((hostptr_t)(devptr) -				\
+	 (hostptr_t)(&(kds)->hostptr) +		\
+	 (hostptr_t)((kds)->hostptr))
 /* transform host pointer to device address */
 #define hostptr_to_dev(kds,hostptr)		\
-	((uintptr_t)(hostptr) -				\
-	 (uintptr_t)((kds)->hostptr) +		\
-	 (uintptr_t)(&(kds)->hostptr))
+	((hostptr_t)(hostptr) -				\
+	 (hostptr_t)((kds)->hostptr) +		\
+	 (hostptr_t)(&(kds)->hostptr))
 
 /*
  * kern_parambuf
@@ -1581,7 +1584,8 @@ pg_numeric_to_varlena(kern_context *kcxt, char *vl_buffer,
  * compute_heaptuple_size
  */
 STATIC_FUNCTION(cl_uint)
-compute_heaptuple_size(kern_data_store *kds,
+compute_heaptuple_size(kern_context *kcxt,
+					   kern_data_store *kds,
 					   Datum *tup_values,
 					   cl_bool *tup_isnull,
 					   cl_bool *tup_internal)
@@ -1648,7 +1652,8 @@ compute_heaptuple_size(kern_data_store *kds,
  * adjusted to the host-side address space.
  */
 STATIC_FUNCTION(void)
-deform_kern_heaptuple(kern_data_store *kds,		/* in */
+deform_kern_heaptuple(kern_context *kcxt,
+					  kern_data_store *kds,		/* in */
 					  kern_tupitem *tupitem,	/* in */
 					  cl_uint	nfields,		/* in */
 					  Datum	   *tup_values,		/* out */
@@ -1659,12 +1664,15 @@ deform_kern_heaptuple(kern_data_store *kds,		/* in */
 	cl_uint		i, ncols = (htup->t_infomask2 & HEAP_NATTS_MASK);
 	cl_bool		tup_hasnull = ((htup->t_infomask & HEAP_HASNULL) != 0);
 
+	/* sanity check */
+	assert(kds->format == KDS_FORMAT_ROW);
+
 	/*
 	 * In case of 'nfields' is less than length of array, we extract
 	 * the first N columns only. On the other hands, t_informask2
 	 * should not contain attributes than definition.
 	 */
-	assert(ncols, kds->ncols);
+	assert(ncols <= kds->ncols);
 	ncols = min(ncols, nfields);
 
 	for (i=0; i < ncols; i++)
@@ -1676,7 +1684,6 @@ deform_kern_heaptuple(kern_data_store *kds,		/* in */
 		}
 		else
 		{
-			kern_colmeta	cmeta_src = colmeta[i];
 			kern_colmeta	cmeta = kds->colmeta[i];
 			char		   *addr;
 
@@ -1689,17 +1696,17 @@ deform_kern_heaptuple(kern_data_store *kds,		/* in */
 			 * Store the value
 			 */
 			addr = ((char *) htup + offset);
-			if (cmeta_dst.attbyval)
+			if (cmeta.attbyval)
 			{
-				if (cmeta_dst.attlen == sizeof(cl_long))
+				if (cmeta.attlen == sizeof(cl_long))
 					tup_values[i] = *((cl_long *) addr);
-				else if (cmeta_dst.attlen == sizeof(cl_int))
+				else if (cmeta.attlen == sizeof(cl_int))
 					tup_values[i] = *((cl_int *) addr);
-				else if (cmeta_dst.attlen == sizeof(cl_short))
+				else if (cmeta.attlen == sizeof(cl_short))
 					tup_values[i] = *((cl_short *) addr);
 				else
 				{
-					assert(cmeta_dst.attlen == sizeof(cl_char));
+					assert(cmeta.attlen == sizeof(cl_char));
 					tup_values[i] = *((cl_char *) addr);
 				}
 				offset += cmeta.attlen;
@@ -1708,8 +1715,8 @@ deform_kern_heaptuple(kern_data_store *kds,		/* in */
 			{
 				/* store the host pointer */
 				tup_values[i] = devptr_to_host(kds, addr);
-				offset += (cmeta_dst.attlen > 0
-						   ? cmeta_dst.attlen
+				offset += (cmeta.attlen > 0
+						   ? cmeta.attlen
 						   : VARSIZE_ANY(addr));
 			}
 			tup_isnull[i] = false;
@@ -1737,8 +1744,9 @@ deform_kern_heaptuple(kern_data_store *kds,		/* in */
  * tup_values ... array of result datum
  * tup_isnull ... array of null flag
  */
-STATIC_FUNCTION(void)
-form_kern_heaptuple(kern_data_store *kds,
+STATIC_FUNCTION(cl_uint)
+form_kern_heaptuple(kern_context *kcxt,
+					kern_data_store *kds,
 					kern_tupitem *tupitem,
 					Datum *tup_values,
 					cl_bool *tup_isnull,
@@ -1753,9 +1761,6 @@ form_kern_heaptuple(kern_data_store *kds,
 
 	/* sanity checks */
 	assert(kds->format == KDS_FORMAT_ROW);
-	assert(h_off == MAXALIGN(h_off));
-	assert((uintptr_t)tupitem > (uintptr_t) kds &&
-		   (uintptr_t)tupitem+MAXALIGN(tuplen) <= (uintptr_t)kds+kds->length);
 
 	/* Does it have any NULL field? */
 	heap_hasnull = false;
@@ -1782,13 +1787,13 @@ form_kern_heaptuple(kern_data_store *kds,
 
 	/* setup header of kern_tupitem */
 	// titem->t_len shall be set up later
-	titem->t_self.ip_blkid.bi_hi = 0xffff;	/* InvalidBlockNumber */
-	titem->t_self.ip_blkid.bi_lo = 0xffff;
-	titem->t_self.ip_posid = 0;				/* InvalidOffsetNumber */
-	htup = &titem->htup;
+	tupitem->t_self.ip_blkid.bi_hi = 0xffff;	/* InvalidBlockNumber */
+	tupitem->t_self.ip_blkid.bi_lo = 0xffff;
+	tupitem->t_self.ip_posid = 0;				/* InvalidOffsetNumber */
+	htup = &tupitem->htup;
 
 	/* setup HeapTupleHeader */
-	SET_VARSIZE(&htup->t_choice.t_datum, MAXALIGN(tuplen));
+	// datum_len_ shall be set later
 	htup->t_choice.t_datum.datum_typmod = kds->tdtypmod;
 	htup->t_choice.t_datum.datum_typeid = kds->tdtypeid;
 	htup->t_ctid.ip_blkid.bi_hi = 0xffff;
@@ -1850,7 +1855,7 @@ form_kern_heaptuple(kern_data_store *kds,
 				while (TYPEALIGN(cmeta.attalign, curr) != curr)
 					((char *)htup)[curr++] = '\0';
 
-				memcpy((char *)htup + curr, datum, cmeta.attlen);
+				memcpy((char *)htup + curr, (char *)datum, cmeta.attlen);
 
 				curr += cmeta.attlen;
 			}
@@ -1865,13 +1870,14 @@ form_kern_heaptuple(kern_data_store *kds,
 					while (TYPEALIGN(cmeta.attalign, curr) != curr)
 						((char *)htup)[curr++] = '\0';
 				}
-				memcpy((char *)htup + curr, datum, vl_len);
+				memcpy((char *)htup + curr, (char *)datum, vl_len);
 				curr += vl_len;
 			}
 		}
 	}
 	curr += t_hoff;		/* add header length */
-	titem->t_len = curr;
+	tupitem->t_len = curr;
+	SET_VARSIZE(&htup->t_choice.t_datum, MAXALIGN(curr));
 	htup->t_infomask = t_infomask;
 
 	return curr;

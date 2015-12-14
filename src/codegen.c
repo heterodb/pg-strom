@@ -1175,6 +1175,7 @@ pgstrom_devfunc_lookup(Oid func_oid, Oid func_collid)
 	 * Not found, construct a new entry for device function
 	 */
 	tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(func_oid));
+	Assert(HeapTupleIsValid(tuple));
 	if (!HeapTupleIsValid(tuple))
 		elog(ERROR, "cache lookup failed for function %u", func_oid);
 	proc = (Form_pg_proc) GETSTRUCT(tuple);
@@ -1629,12 +1630,11 @@ pgstrom_codegen_expression(Node *expr, codegen_context *context)
 }
 
 /*
- * pgstrom_codegen_func_declarations
+ * codegen_func_declarations
  */
-char *
-pgstrom_codegen_func_declarations(codegen_context *context)
+void
+codegen_func_declarations(StringInfo buf, List *func_defs_list)
 {
-	StringInfoData	str;
 	ListCell	   *lc;
 	devfunc_info   *dfunc;
 	union {
@@ -1645,8 +1645,7 @@ pgstrom_codegen_func_declarations(codegen_context *context)
 		long		packed;
 	} uval;
 
-	initStringInfo(&str);
-	foreach (lc, context->func_defs)
+	foreach (lc, func_defs_list)
 	{
 		uval.packed = intVal(lfirst(lc));
 
@@ -1656,8 +1655,21 @@ pgstrom_codegen_func_declarations(codegen_context *context)
 			elog(ERROR, "Failed to lookup tracked function: %u",
 				 uval.f.func_oid);
 		if (dfunc->func_decl)
-			appendStringInfo(&str, "%s\n", dfunc->func_decl);
+			appendStringInfo(buf, "%s\n", dfunc->func_decl);
 	}
+}
+
+/*
+ * pgstrom_codegen_func_declarations
+ */
+char *
+pgstrom_codegen_func_declarations(codegen_context *context)
+{
+	StringInfoData	str;
+
+	initStringInfo(&str);
+	codegen_func_declarations(&str, context->func_defs);
+
 	return str.data;
 }
 

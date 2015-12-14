@@ -134,8 +134,7 @@ gpuscan_writeback_results(kern_resultbuf *kresults, int result)
 STATIC_FUNCTION(cl_bool)
 gpuscan_qual_eval(kern_context *kcxt,
 				  kern_data_store *kds,
-				  kern_data_store *ktoast,
-				  size_t kds_index);
+				  kern_tupitem *tupitem);
 
 /*
  * gpuscan_projection_row
@@ -148,17 +147,17 @@ gpuscan_qual_eval(kern_context *kcxt,
 STATIC_FUNCTION(void)
 gpuscan_projection_row(kern_gpuscan *kgpuscan,
 					   kern_context *kcxt,
-					   kern_colmeta *cmeta_src,
-					   kern_tupitem	*tupitem_src,
-					   kern_data_store *kds_dst)
+					   kern_data_store *kds_dst,
+					   kern_data_store *kds_src,
+					   kern_tupitem *tupitem_src)
 {
-	cl_uint				tuplen;
 	cl_uint				required;
 	cl_uint				offset;
 	cl_uint				count;
-	__shared__ cl_uint	prev_nitems;
-	__shared__ cl_uint	prev_usage;
-	cl_uint				item_index;
+	__shared__ cl_uint	base;
+	cl_uint				tuple_len;
+	cl_uint				dst_index;
+	cl_uint				dst_limit;
 	cl_uint				htup_offset;
 
 	/*
@@ -179,12 +178,17 @@ gpuscan_projection_row(kern_gpuscan *kgpuscan,
 	cl_bool		tup_isnull[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
 	cl_bool		tup_internal[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
 
+	memset(tup_internal, 0, sizeof(tup_internal));
 	GPUSCAN_DEVICE_PROJECTION(KDS_FORMAT_ROW);
 
-	tuple_len = compute_heaptuple_size(kds,
-									   tup_values,
-									   tup_isnull,
-									   tup_internal);
+	if (tupitem_src != NULL)
+		tuple_len = compute_heaptuple_size(kcxt,
+										   kds,
+										   tup_values,
+										   tup_isnull,
+										   tup_internal);
+	else
+		tuple_len = 0;
 #else
 	tuple_len = (tupitem_src != NULL ? tupitem_src->t_len : 0);
 #endif
@@ -197,18 +201,20 @@ gpuscan_projection_row(kern_gpuscan *kgpuscan,
 	if (get_local_id() == 0)
 	{
 		if (count > 0)
-			nitems_prev = atomicAdd(&kds_dst->nitems, count);
+			base = atomicAdd(&kds_dst->nitems, count);
 		else
-			nitems_prev = 0;
+			base = 0;
 	}
 	__syncthreads();
+	dst_index = base + offset;
+	dst_limit = base + count;
+	__syncthreads();
 
-	if (nitems_prev + count > kds_dst->nrooms)
+	if (dst_limit > kds_dst->nrooms)
 	{
 		STROM_SET_ERROR(&kcxt->e, StromError_DataStoreNoSpace);
 		return;
 	}
-	item_index = nitems_prev + offset;
 
 	/*
 	 * step.3 - increment buffer usage on kds_dst
@@ -218,26 +224,26 @@ gpuscan_projection_row(kern_gpuscan *kgpuscan,
 	if (get_local_id() == 0)
 	{
 		if (count > 0)
-			usage_prev = atomicAdd(&kds_dst->usage, count);
+			base = atomicAdd(&kds_dst->usage, count);
 		else
-			usage_prev = 0;
+			base = 0;
 	}
 	__syncthreads();
 
 	if (KERN_DATA_STORE_HEAD_LENGTH(kds_dst) +
-		STROMALIGN(sizeof(cl_uint) * kds_dst->nitems) +
-		usage_prev + count > kds_dst->length)
+		STROMALIGN(sizeof(cl_uint) * dst_limit) +
+		base + count > kds_dst->length)
 	{
 		STROM_SET_ERROR(&kcxt->e, StromError_DataStoreNoSpace);
 		return;
 	}
-	htup_offset = kds_dst->length - (usage_prev + offset + required);
+	htup_offset = kds_dst->length - (base + offset + required);
 	assert(htup_offset == MAXALIGN(htup_offset));
 
 	/*
 	 * step.4 - construction of the result tuple
 	 */
-	if (tupsrc != NULL)
+	if (tupitem_src != NULL)
 	{
 		cl_uint		   *tupitem_idx
 			= (cl_uint *)KERN_DATA_STORE_BODY(kds_dst);
@@ -245,13 +251,13 @@ gpuscan_projection_row(kern_gpuscan *kgpuscan,
 			= (kern_tupitem *)((char *)kds_dst + htup_offset);
 
 #ifdef GPUSCAN_DEVICE_PROJECTION
-		form_kern_heaptuple(kds_dst, tupitem_dst,
+		form_kern_heaptuple(kcxt, kds_dst, tupitem_dst,
 							tup_values, tup_isnull, tup_internal);
 #else
 		memcpy(tupitem_dst, tupitem_src,
-			   offsetof(kern_tupitem, htup) + tuplen);
+			   offsetof(kern_tupitem, htup) + tuple_len);
 #endif
-		tupitem_idx[item_index] = htup_offset;
+		tupitem_idx[dst_index] = htup_offset;
 	}
 }
 
@@ -262,10 +268,8 @@ gpuscan_projection_slot(kern_gpuscan *kgpuscan,
 						kern_data_store *kds_src,
 						kern_tupitem *tupitem_src)
 {
-	cl_uint				tuple_len;
 	cl_uint				offset;
 	cl_uint				count;
-	cl_uint				dst_index;
 	__shared__ cl_uint	base;
 
 	/*
@@ -296,6 +300,7 @@ gpuscan_projection_slot(kern_gpuscan *kgpuscan,
 		 * memory and 
 		 */
 		cl_uint		dst_index = base + offset;
+		cl_uint		dst_limit = base + count;
 		Datum	   *tup_values = KERN_DATA_STORE_VALUES(kds_dst, dst_index);
 		cl_bool	   *tup_isnull = KERN_DATA_STORE_ISNULL(kds_dst, dst_index);
 #ifdef GPUSCAN_DEVICE_PROJECTION
@@ -303,14 +308,20 @@ gpuscan_projection_slot(kern_gpuscan *kgpuscan,
 		cl_uint		i, ncols = kds_dst->ncols;
 		cl_uint		vl_buflen = 0;
 
+		/* not to break base */
+		__syncthreads();
+
 		GPUSCAN_DEVICE_PROJECTION(KDS_FORMAT_SLOT);
 #else
 		if (tupitem_src != NULL)
-			deform_kern_heaptuple(kds_src,
+		{
+			deform_kern_heaptuple(kcxt,
+								  kds_src,
 								  tupitem_src,
 								  kds_dst->ncols,
 								  tup_values,
 								  tup_isnull);
+			// needs to fix up device pointer to host pointer?
 		}
 #endif
 	}
@@ -333,10 +344,10 @@ gpuscan_qual(kern_gpuscan *kgpuscan,	/* in/out */
 
 	INIT_KERNEL_CONTEXT(&kcxt,gpuscan_qual,kparams);
 
-	if (kds_index < kds->nitems)
+	if (kds_index < kds_src->nitems)
 	{
 		tupitem = KERN_DATA_STORE_TUPITEM(kds_src, kds_index);
-		if (!gpuscan_qual_eval(&kcxt, tupitem))
+		if (!gpuscan_qual_eval(&kcxt, kds_src, tupitem))
 			tupitem = NULL;		/* this row is not visible */
 		else if (kcxt.e.errcode != StromError_Success)
 			tupitem = NULL;		/* chunk will raise an error */
@@ -354,12 +365,19 @@ gpuscan_qual(kern_gpuscan *kgpuscan,	/* in/out */
 	 *
 	 *
 	 */
+
+	kern_gpuscan *kgpuscan,
+		kern_context *kcxt,
+		kern_colmeta *cmeta_src,
+		kern_tupitem *tupitem_src,
+		kern_data_store *kds_dst)
+
 	assert(kds_dst->format == KDS_FORMAT_ROW ||
 		   kds_dst->format == KDS_FORMAT_SLOT);
 	if (kds_dst->format == KDS_FORMAT_ROW)
-		gpuscan_projection_row(kgpuscan, &kcxt, kds_dst, kds_src, kds_index);
+		gpuscan_projection_row(kgpuscan, &kcxt, kds_dst, kds_src, tupitem);
 	else
-		gpuscan_projection_slot(kgpuscan, &kcxt, kds_dst, kds_src, kds_index);
+		gpuscan_projection_slot(kgpuscan, &kcxt, kds_dst, kds_src, tupitem);
 
 	/*
 	 * write back error status, if any
