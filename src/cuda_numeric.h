@@ -147,7 +147,6 @@ typedef struct {
 	cl_ulong	value;
 	bool		isnull;
 } pg_numeric_t;
-typedef cl_ulong pg_numeric_base_t;
 
 #define PG_NUMERIC_EXPONENT_BITS	6
 #define PG_NUMERIC_EXPONENT_POS		58
@@ -352,9 +351,9 @@ pg_numeric_from_varlena(kern_context *kcxt, struct varlena *vl_val)
  */
 #define NUMERIC_TO_VERLENA_USE_SHORT_FORMAT
 
-STATIC_INLINE(size_t)
+STATIC_FUNCTION(cl_uint)
 pg_numeric_to_varlena(kern_context *kcxt, char *vl_buffer,
-					  pg_numeric_base_t value, cl_bool isnull)
+					  Datum value, cl_bool isnull)
 {
 	varattrib_4b   *pHeader = (varattrib_4b *) vl_buffer;
 	cl_uint			vl_len;

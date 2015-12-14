@@ -198,6 +198,7 @@ typedef uintptr_t	hostptr_t;
 #define StromError_DataStoreNoSpace			2001 /* KDS has no space */
 #define StromError_DataStoreOutOfRange		2002 /* out of KDS range access */
 #define StromError_SanityCheckViolation		2003 /* sanity check violation */
+#define StromError_WrongCodeGeneration		2004 /* Bugs on code generation */
 
 /*
  * Kernel functions identifier
@@ -645,8 +646,7 @@ pg_common_vstore(kern_data_store *kds,
 	typedef struct {										\
 		BASE		value;									\
 		cl_bool		isnull;									\
-	} pg_##NAME##_t;										\
-	typedef BASE pg_##BASE##_base_t;
+	} pg_##NAME##_t;
 
 #define STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE)			\
 	STATIC_FUNCTION(pg_##NAME##_t)							\
@@ -1566,6 +1566,16 @@ kern_writeback_error_status(kern_errorbuf *result, kern_errorbuf own_error)
 		}
 	}
 }
+
+/*
+ * Forward function declarations) 
+ * - kern_form_heaptuple needs type transform function on the data type; that
+ *   has special internal format. Right now, only NUMERIC data type has own
+ *   internal data format.
+ */
+STATIC_FUNCTION(cl_uint)
+pg_numeric_to_varlena(kern_context *kcxt, char *vl_buffer,
+					  Datum value, cl_bool isnull);
 
 /*
  * compute_heaptuple_size

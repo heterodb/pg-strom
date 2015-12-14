@@ -422,6 +422,9 @@ construct_flat_cuda_source(const char *kern_source,
 	/* Source code generated on the fly */
 	appendStringInfoString(&source, kern_source);
 
+	/* Source code to fix up undefined type/functions */
+	appendStringInfoString(&source, pgstrom_cuda_terminal_code);
+
 	/* disable C++ feature */
 	appendStringInfo(&source,
 					 "#ifdef __cplusplus\n"

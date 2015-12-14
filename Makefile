@@ -30,7 +30,8 @@ CUDA_OBJS = cuda_common.o \
 	cuda_textlib.o \
 	cuda_timelib.o \
 	cuda_numeric.o \
-	cuda_money.o
+	cuda_money.o   \
+	cuda_terminal.o
 CUDA_SOURCES = $(CUDA_OBJS:.o=.c)
 
 #

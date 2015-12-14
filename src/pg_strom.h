@@ -685,6 +685,7 @@ extern const char *pgstrom_cuda_textlib_code;
 extern const char *pgstrom_cuda_timelib_code;
 extern const char *pgstrom_cuda_numeric_code;
 extern const char *pgstrom_cuda_money_code;
+extern const char *pgstrom_cuda_terminal_code;
 
 /*
  * createplan.c
