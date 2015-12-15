@@ -36,6 +36,7 @@
 #include "pg_strom.h"
 #include "cuda_money.h"
 #include "cuda_timelib.h"
+#include "cuda_gpuscan.h"
 
 typedef struct
 {
@@ -1181,7 +1182,8 @@ pgstrom_assign_cuda_program(GpuTaskState *gts,
 	StringInfoData	buf;
 
 	if ((extra_flags & (DEVFUNC_NEEDS_TIMELIB |
-						DEVFUNC_NEEDS_MONEY)) != 0)
+						DEVFUNC_NEEDS_MONEY |
+						DEVKERNEL_NEEDS_GPUSCAN)) != 0)
 	{
 		initStringInfo(&buf);
 
@@ -1191,6 +1193,10 @@ pgstrom_assign_cuda_program(GpuTaskState *gts,
 		/* put currency info */
 		if ((extra_flags & DEVFUNC_NEEDS_MONEY) != 0)
 			assign_moneylib_session_info(&buf);
+
+		/* enables device projection? */
+		if ((extra_flags & DEVKERNEL_NEEDS_GPUSCAN) != 0)
+			assign_gpuscan_session_info(&buf, gts);
 
 		kern_define = buf.data;
 	}

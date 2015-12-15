@@ -29,7 +29,7 @@ STATIC_FUNCTION(cl_uint)
 pg_numeric_to_varlena(kern_context *kcxt, char *vl_buffer,
                       Datum value, cl_bool isnull)
 {
-	STROM_SET_ERROR(kcxt, StromError_WrongCodeGeneration);
+	STROM_SET_ERROR(&kcxt->e, StromError_WrongCodeGeneration);
 	return 0;
 }
 #endif

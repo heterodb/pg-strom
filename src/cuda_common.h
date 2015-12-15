@@ -75,7 +75,7 @@ typedef cl_ulong	hostptr_t;
 typedef size_t		devptr_t;
 typedef cl_ulong	Datum;
 #define PointerGetDatum(X)		((Datum) (X))
-#define DatumGetPointer(X)		((cl_char *) (X))
+#define DatumGetPointer(X)		((char *) (X))
 
 #define INT64CONST(x)	((cl_long) x##L)
 #define UINT64CONST(x)	((cl_ulong) x##UL)
@@ -877,42 +877,77 @@ cl_uint_comp_crc32(const cl_uint *crc32_table, cl_uint value)
 	STROMCL_INDIRECT_VARSTORE_TEMPLATE(NAME,BASE)	\
 	STROMCL_INDIRECT_PARAMREF_TEMPLATE(NAME,BASE)	\
 	STROMCL_SIMPLE_NULLTEST_TEMPLATE(NAME)          \
-	STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(NAME,BASE)
+	STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(NAME,BASE)	\
+	STATIC_INLINE(Datum)							\
+	pg_##NAME##_to_datum(BASE *p_value)				\
+	{												\
+		return PointerGetDatum(p_value);			\
+	}
 
 /* pg_bool_t */
 #ifndef PG_BOOL_TYPE_DEFINED
 #define PG_BOOL_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(bool, cl_bool)
+STATIC_INLINE(Datum)
+pg_bool_to_datum(cl_bool value)
+{
+	return (Datum)(value ? true : false);
+}
 #endif
 
 /* pg_int2_t */
 #ifndef PG_INT2_TYPE_DEFINED
 #define PG_INT2_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(int2, cl_short)
+STATIC_INLINE(Datum)
+pg_int2_to_datum(cl_short value)
+{
+	return (Datum)(((Datum) value) & 0x0000ffffUL);
+}
 #endif
 
 /* pg_int4_t */
 #ifndef PG_INT4_TYPE_DEFINED
 #define PG_INT4_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(int4, cl_int)
+STATIC_INLINE(Datum)
+pg_int4_to_datum(cl_short value)
+{
+	return (Datum)(((Datum) value) & 0xffffffffUL);
+}
 #endif
 
 /* pg_int8_t */
 #ifndef PG_INT8_TYPE_DEFINED
 #define PG_INT8_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(int8, cl_long)
+STATIC_INLINE(Datum)
+pg_int8_to_datum(cl_long value)
+{
+	return (Datum)(value);
+}
 #endif
 
 /* pg_float4_t */
 #ifndef PG_FLOAT4_TYPE_DEFINED
 #define PG_FLOAT4_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(float4, cl_float)
+STATIC_INLINE(Datum)
+pg_float4_to_datum(cl_float value)
+{
+	return (Datum)((Datum)__float_as_int(value) & 0xffffffffUL);
+}
 #endif
 
 /* pg_float8_t */
 #ifndef PG_FLOAT8_TYPE_DEFINED
 #define PG_FLOAT8_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(float8, cl_double)
+STATIC_INLINE(Datum)
+pg_float8_to_datum(cl_double value)
+{
+	return (Datum)__double_as_longlong(value);
+}
 #endif
 
 /*

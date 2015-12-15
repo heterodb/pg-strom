@@ -2444,12 +2444,13 @@ gpujoin_codegen_outer_quals(StringInfo source,
 
 		context->pseudo_tlist = NIL;
 		expr_text = pgstrom_codegen_expression(outer_quals, context);
+		pgstrom_codegen_param_declarations(source, context);
+		pgstrom_codegen_var_declarations(source, context);
+
 		appendStringInfo(
 			source,
-			"%s%s\n"
+			"\n"
 			"  return EVAL(%s);\n",
-			pgstrom_codegen_param_declarations(context),
-			pgstrom_codegen_var_declarations(context),
 			expr_text);
 		context->pseudo_tlist = pseudo_tlist_saved;
 	}
@@ -2474,7 +2475,6 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 	List	   *kern_vars = NIL;
 	ListCell   *cell;
 	int			depth;
-	char	   *param_decl;
 	cl_int		gnl_shmem_xsize = 0;
 	cl_int		gnl_shmem_ysize = 0;
 
@@ -2550,8 +2550,7 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 	/*
 	 * parameter declaration
 	 */
-	param_decl = pgstrom_codegen_param_declarations(context);
-	appendStringInfo(source, "%s\n", param_decl);
+	pgstrom_codegen_param_declarations(source, context);
 
 	/*
 	 * variable declarations
@@ -3060,10 +3059,9 @@ gpujoin_codegen(PlannerInfo *root,
 	/* gpujoin_projection_mapping */
 	gpujoin_codegen_projection_mapping(&source, gj_info, context);
 
-	/* */
-	appendStringInfo(&decl, "%s\n%s",
-					 pgstrom_codegen_func_declarations(context),
-					 source.data);
+	/* add function declarations */
+	pgstrom_codegen_func_declarations(&decl, context);
+	appendStringInfo(&decl, "\n%s", source.data);
 	pfree(source.data);
 
 	return decl.data;

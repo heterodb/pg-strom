@@ -61,6 +61,7 @@
  * Gpuscan kernel code assumes all the fields shall be initialized to zero.
  */
 typedef struct {
+	kern_errorbuf	kerror;
 	kern_parambuf	kparams;
 } kern_gpuscan;
 
@@ -134,7 +135,19 @@ gpuscan_writeback_results(kern_resultbuf *kresults, int result)
 STATIC_FUNCTION(cl_bool)
 gpuscan_qual_eval(kern_context *kcxt,
 				  kern_data_store *kds,
-				  kern_tupitem *tupitem);
+				  size_t kds_index);
+
+/*
+ * forward declaration of the function to be generated on the fly
+ */
+STATIC_FUNCTION(void)
+gpuscan_projection(kern_context *kcxt,
+				   kern_data_store *kds,
+				   kern_tupitem *tupitem,
+				   cl_int format,
+				   Datum *tup_values,
+				   cl_bool *tup_isnull,
+				   cl_bool *tup_internal);
 
 /*
  * gpuscan_projection_row
@@ -173,17 +186,22 @@ gpuscan_projection_row(kern_gpuscan *kgpuscan,
 	 *  2. initialization of the above array.
 	 *  3. and, computing the tuple_len
 	 */
-#ifdef GPUSCAN_DEVICE_PROJECTION
+#ifdef GPUSCAN_DEVICE_PROJECTION_NFIELDS
 	Datum		tup_values[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
 	cl_bool		tup_isnull[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
 	cl_bool		tup_internal[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
 
 	memset(tup_internal, 0, sizeof(tup_internal));
-	GPUSCAN_DEVICE_PROJECTION(KDS_FORMAT_ROW);
-
+	gpuscan_projection(kcxt,
+					   kds_src,
+					   tupitem_src,
+					   KDS_FORMAT_ROW,
+					   tup_values,
+					   tup_isnull,
+					   tup_internal);
 	if (tupitem_src != NULL)
 		tuple_len = compute_heaptuple_size(kcxt,
-										   kds,
+										   kds_dst,
 										   tup_values,
 										   tup_isnull,
 										   tup_internal);
@@ -250,7 +268,7 @@ gpuscan_projection_row(kern_gpuscan *kgpuscan,
 		kern_tupitem   *tupitem_dst
 			= (kern_tupitem *)((char *)kds_dst + htup_offset);
 
-#ifdef GPUSCAN_DEVICE_PROJECTION
+#ifdef GPUSCAN_DEVICE_PROJECTION_NFIELDS
 		form_kern_heaptuple(kcxt, kds_dst, tupitem_dst,
 							tup_values, tup_isnull, tup_internal);
 #else
@@ -303,15 +321,19 @@ gpuscan_projection_slot(kern_gpuscan *kgpuscan,
 		cl_uint		dst_limit = base + count;
 		Datum	   *tup_values = KERN_DATA_STORE_VALUES(kds_dst, dst_index);
 		cl_bool	   *tup_isnull = KERN_DATA_STORE_ISNULL(kds_dst, dst_index);
-#ifdef GPUSCAN_DEVICE_PROJECTION
+#ifdef GPUSCAN_DEVICE_PROJECTION_NFIELDS
 		cl_bool		tup_internal[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
-		cl_uint		i, ncols = kds_dst->ncols;
-		cl_uint		vl_buflen = 0;
 
 		/* not to break base */
 		__syncthreads();
 
-		GPUSCAN_DEVICE_PROJECTION(KDS_FORMAT_SLOT);
+		gpuscan_projection(kcxt,
+						   kds_src,
+						   tupitem_src,
+						   KDS_FORMAT_SLOT,
+						   tup_values,
+						   tup_isnull,
+						   tup_internal);
 #else
 		if (tupitem_src != NULL)
 		{
@@ -336,42 +358,23 @@ gpuscan_qual(kern_gpuscan *kgpuscan,	/* in/out */
 			 kern_data_store *kds_dst)	/* out */
 {
 	kern_parambuf  *kparams = KERN_GPUSCAN_PARAMBUF(kgpuscan);
-	kern_resultbuf *kresults = KERN_GPUSCAN_RESULTBUF(kgpuscan);
+//	kern_resultbuf *kresults = KERN_GPUSCAN_RESULTBUF(kgpuscan);
 	kern_context	kcxt;
-	kern_tupitem   *tupitem;
+	kern_tupitem   *tupitem = NULL;
 	size_t			kds_index = get_global_id();
-	cl_int			rc = 0;
 
 	INIT_KERNEL_CONTEXT(&kcxt,gpuscan_qual,kparams);
 
-	if (kds_index < kds_src->nitems)
+	if (kds_index < kds_src->nitems &&
+		gpuscan_qual_eval(&kcxt, kds_src, kds_index))
 	{
+		/* this row is visible */
 		tupitem = KERN_DATA_STORE_TUPITEM(kds_src, kds_index);
-		if (!gpuscan_qual_eval(&kcxt, kds_src, tupitem))
-			tupitem = NULL;		/* this row is not visible */
-		else if (kcxt.e.errcode != StromError_Success)
-			tupitem = NULL;		/* chunk will raise an error */
 	}
-	else
-	{
-		tupitem = NULL;			/* kds_index - out of range */
-	}
-
 
 	/*
-	 * Projection , thread for invisible rows must be called to 
-	 *
-	 *
-	 *
-	 *
+	 * Device side projection
 	 */
-
-	kern_gpuscan *kgpuscan,
-		kern_context *kcxt,
-		kern_colmeta *cmeta_src,
-		kern_tupitem *tupitem_src,
-		kern_data_store *kds_dst)
-
 	assert(kds_dst->format == KDS_FORMAT_ROW ||
 		   kds_dst->format == KDS_FORMAT_SLOT);
 	if (kds_dst->format == KDS_FORMAT_ROW)
@@ -382,7 +385,24 @@ gpuscan_qual(kern_gpuscan *kgpuscan,	/* in/out */
 	/*
 	 * write back error status, if any
 	 */
-	kern_writeback_error_status(&kgpuscan->errcode, kcxt.e);
+	kern_writeback_error_status(&kgpuscan->kerror, kcxt.e);
+}
+#else	/* __CUDACC__ */
+STATIC_INLINE(void)
+assign_gpuscan_session_info(StringInfo buf, GpuTaskState *gts)
+{
+	CustomScan *cscan = (CustomScan *)gts->css.ss.ps.plan;
+
+	Assert(pgstrom_plan_is_gpuscan((Plan *) cscan));
+
+	if (cscan->custom_scan_tlist != NIL)
+	{
+		appendStringInfo(
+			buf,
+			"#define GPUSCAN_DEVICE_PROJECTION          1\n"
+			"#define GPUSCAN_DEVICE_PROJECTION_NFIELDS  %d\n\n",
+			list_length(cscan->custom_scan_tlist));
+	}
 }
 
 #endif	/* __CUDACC__ */

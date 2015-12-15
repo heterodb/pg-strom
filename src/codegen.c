@@ -49,7 +49,7 @@ static struct {
 	const char	   *type_base;
 	int32			type_flags;		/* library to declare this type */
 } devtype_catalog[] = {
-	/* basic datatypes */
+	/* primitive datatypes */
 	{ BOOLOID,		"cl_bool",	0 },	/* bool */
 	{ INT2OID,		"cl_short",	0 },	/* smallint */
 	{ INT4OID,		"cl_int",	0 },	/* int */
@@ -1630,10 +1630,10 @@ pgstrom_codegen_expression(Node *expr, codegen_context *context)
 }
 
 /*
- * codegen_func_declarations
+ * pgstrom_codegen_func_declarations
  */
 void
-codegen_func_declarations(StringInfo buf, List *func_defs_list)
+pgstrom_codegen_func_declarations(StringInfo buf, codegen_context *context)
 {
 	ListCell	   *lc;
 	devfunc_info   *dfunc;
@@ -1645,14 +1645,14 @@ codegen_func_declarations(StringInfo buf, List *func_defs_list)
 		long		packed;
 	} uval;
 
-	foreach (lc, func_defs_list)
+	foreach (lc, context->func_defs)
 	{
 		uval.packed = intVal(lfirst(lc));
 
 		dfunc = pgstrom_devfunc_lookup(uval.f.func_oid,
 									   uval.f.func_collid);
 		if (!dfunc)
-			elog(ERROR, "Failed to lookup tracked function: %u",
+			elog(ERROR, "Failed to lookup device function: %u",
 				 uval.f.func_oid);
 		if (dfunc->func_decl)
 			appendStringInfo(buf, "%s\n", dfunc->func_decl);
@@ -1660,31 +1660,15 @@ codegen_func_declarations(StringInfo buf, List *func_defs_list)
 }
 
 /*
- * pgstrom_codegen_func_declarations
- */
-char *
-pgstrom_codegen_func_declarations(codegen_context *context)
-{
-	StringInfoData	str;
-
-	initStringInfo(&str);
-	codegen_func_declarations(&str, context->func_defs);
-
-	return str.data;
-}
-
-/*
  * pgstrom_codegen_param_declarations
  */
-char *
-pgstrom_codegen_param_declarations(codegen_context *context)
+void
+pgstrom_codegen_param_declarations(StringInfo buf, codegen_context *context)
 {
-	StringInfoData	str;
 	ListCell	   *cell;
 	devtype_info   *dtype;
 	int				index = 0;
 
-	initStringInfo(&str);
 	foreach (cell, context->used_params)
 	{
 		if (!bms_is_member(index, context->param_refs))
@@ -1695,10 +1679,12 @@ pgstrom_codegen_param_declarations(codegen_context *context)
 			Const  *con = lfirst(cell);
 
 			dtype = pgstrom_devtype_lookup(con->consttype);
-			Assert(dtype != NULL);
+			if (!dtype)
+				elog(ERROR, "failed to lookup device type: %u",
+					 con->consttype);
 
 			appendStringInfo(
-				&str,
+				buf,
 				"  pg_%s_t KPARAM_%u = pg_%s_param(kcxt,%d);\n",
 				dtype->type_name, index, dtype->type_name, index);
 		}
@@ -1707,9 +1693,12 @@ pgstrom_codegen_param_declarations(codegen_context *context)
 			Param  *param = lfirst(cell);
 
 			dtype = pgstrom_devtype_lookup(param->paramtype);
-			Assert(dtype != NULL);
+			if (!dtype)
+				elog(ERROR, "failed to lookup device type: %u",
+					 param->paramtype);
+
 			appendStringInfo(
-				&str,
+				buf,
 				"  pg_%s_t KPARAM_%u = pg_%s_param(kcxt,%d);\n",
 				dtype->type_name, index, dtype->type_name, index);
 		}
@@ -1718,27 +1707,26 @@ pgstrom_codegen_param_declarations(codegen_context *context)
 	lnext:
 		index++;
 	}
-	return str.data;
 }
 
 /*
  * pgstrom_codegen_var_declarations
  */
-char *
-pgstrom_codegen_var_declarations(codegen_context *context)
+void
+pgstrom_codegen_var_declarations(StringInfo buf, codegen_context *context)
 {
-	StringInfoData	str;
 	ListCell	   *cell;
 
-	initStringInfo(&str);
 	foreach (cell, context->used_vars)
 	{
 		Var			   *var = lfirst(cell);
 		devtype_info   *dtype = pgstrom_devtype_lookup(var->vartype);
 
-		Assert(dtype != NULL);
+		if (!dtype)
+			elog(ERROR, "failed to lookup device type: %u", var->vartype);
+
 		appendStringInfo(
-			&str,
+			buf,
 			"  pg_%s_t %s_%u = pg_%s_vref(%s,kcxt,%u,%s);\n",
 			dtype->type_name,
 			context->var_label,
@@ -1748,7 +1736,6 @@ pgstrom_codegen_var_declarations(codegen_context *context)
 			var->varattno - 1,
 			context->kds_index_label);
 	}
-	return str.data;
 }
 
 /*

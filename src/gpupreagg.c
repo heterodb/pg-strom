@@ -1826,17 +1826,17 @@ gpupreagg_codegen_qual_eval(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 		 * relation. So, it does not need to pay attention for projection,
 		 * however, needs to be careful to deal with...
 		 */
-		char   *expr_code
-			= pgstrom_codegen_expression((Node *)gpa_info->outer_quals,
-										 context);
+		Node   *outer_quals = (Node *)gpa_info->outer_quals;
+		char   *expr_code = pgstrom_codegen_expression(outer_quals,
+													   context);
 		Assert(expr_code != NULL);
 
+		pgstrom_codegen_param_declarations(&str, context);
+		pgstrom_codegen_var_declarations(&str, context);
 		appendStringInfo(
 			&str,
-			"%s%s\n"
+			"\n"
 			"  return EVAL(%s);\n",
-			pgstrom_codegen_param_declarations(context),
-			pgstrom_codegen_var_declarations(context),
 			expr_code);
 	}
 	else
@@ -2007,13 +2007,9 @@ gpupreagg_codegen_keycomp(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 			resno, resno);
 	}
 	/* add parameters, if referenced */
-	if (context->param_refs)
+	if (!bms_is_empty(context->param_refs))
 	{
-		char	   *params_decl
-			= pgstrom_codegen_param_declarations(context);
-
-		appendStringInfo(&decl, "%s", params_decl);
-		pfree(params_decl);
+		pgstrom_codegen_param_declarations(&decl, context);
 		bms_free(context->param_refs);
 	}
 
@@ -2841,13 +2837,9 @@ gpupreagg_codegen_projection(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 	}
 
 	/* declaration of parameter reference */
-	if (context->param_refs)
+	if (!bms_is_empty(context->param_refs))
 	{
-		char	   *params_decl
-			= pgstrom_codegen_param_declarations(context);
-
-		appendStringInfo(&decl2, "%s", params_decl);
-		pfree(params_decl);
+		pgstrom_codegen_param_declarations(&decl2, context);
 		bms_free(context->param_refs);
 	}
 
@@ -2943,8 +2935,10 @@ gpupreagg_codegen(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 
 	/* OK, add type/function declarations */
 	initStringInfo(&str);
+	/* function declarations */
+	pgstrom_codegen_func_declarations(&str, context);
+
 	appendStringInfo(&str,
-					 "%s\n"		/* function declarations */
 					 "%s\n"		/* gpupreagg_qual_eval() */
 					 "%s\n"		/* gpupreagg_hashvalue() */
 					 "%s\n"		/* gpupreagg_keycomp() */
@@ -2952,7 +2946,6 @@ gpupreagg_codegen(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 					 "%s\n"		/* gpupreagg_global_calc() */
 					 "%s\n"		/* gpupreagg_nogroup_calc() */
 					 "%s\n",	/* gpupreagg_projection() */
-					 pgstrom_codegen_func_declarations(context),
 					 fn_qualeval,
 					 fn_hashvalue,
 					 fn_keycomp,

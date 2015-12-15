@@ -191,11 +191,21 @@ struct pg_tm
 #ifndef PG_DATE_TYPE_DEFINED
 #define PG_DATE_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(date,DateADT)
+STATIC_INLINE(Datum)
+pg_date_to_datum(DateADT value)
+{
+	return pg_int4_to_datum(value);
+}
 #endif
 
 #ifndef PG_TIME_TYPE_DEFINED
 #define PG_TIME_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(time,TimeADT)
+STATIC_INLINE(Datum)
+pg_time_to_datum(TimeADT value)
+{
+	return pg_int8_to_datum(value);
+}
 #endif
 
 #ifndef PG_TIMETZ_TYPE_DEFINED
@@ -206,21 +216,26 @@ STROMCL_INDIRECT_TYPE_TEMPLATE(timetz,TimeTzADT)
 #ifndef PG_TIMESTAMP_TYPE_DEFINED
 #define PG_TIMESTAMP_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(timestamp,Timestamp)
+STATIC_INLINE(Datum)
+pg_timestamp_to_datum(Timestamp value)
+{
+	return pg_int8_to_datum(value);
+}
 #endif
 
 #ifndef PG_TIMESTAMPTZ_TYPE_DEFINED
 #define PG_TIMESTAMPTZ_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(timestamptz,TimestampTz)
+STATIC_INLINE(Datum)
+pg_timestamptz_to_datum(TimestampTz value)
+{
+	return pg_int8_to_datum(value);
+}
 #endif
 
 #ifndef PG_INTERVAL_TYPE_DEFINED
 #define PG_INTERVAL_TYPE_DEFINED
 STROMCL_INDIRECT_TYPE_TEMPLATE(interval,Interval)
-#endif
-
-#ifndef PG_INT4_TYPE_DEFINED
-#define PG_INT4_TYPE_DEFINED
-STROMCL_SIMPLE_TYPE_TEMPLATE(int4,cl_int);
 #endif
 
 /*
