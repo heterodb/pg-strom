@@ -199,7 +199,7 @@ subtract_tuplecost_if_bulkload(Cost *p_run_cost, Path *pathnode)
 			 * executable expression.
 			 */
 			if (!IsA(expr, Var) &&
-				!pgstrom_codegen_available_expression(expr))
+				!pgstrom_device_expression(expr))
 				return;
 		}
 
@@ -208,7 +208,7 @@ subtract_tuplecost_if_bulkload(Cost *p_run_cost, Path *pathnode)
 			RestrictInfo   *rinfo = lfirst(lc);
 
 			/* All the restrictclause has to be device executable */
-			if (!pgstrom_codegen_available_expression(rinfo->clause))
+			if (!pgstrom_device_expression(rinfo->clause))
 				return;
 		}
 	}
@@ -260,7 +260,7 @@ pgstrom_try_replace_plannode(Plan *plannode, List *range_tables,
 	}
 	else if (IsA(plannode, SeqScan))
 	{
-		return gpuscan_try_replace_seqscan((SeqScan *) plannode,
+		return legacy_gpuscan_try_replace_seqscan((SeqScan *) plannode,
 										   range_tables,
 										   p_outer_quals,
 										   p_outer_ratio);

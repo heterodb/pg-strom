@@ -1830,13 +1830,13 @@ pgstrom_codegen_bulk_var_declarations(codegen_context *context,
 }
 
 /*
- * codegen_available_expression
+ * pgstrom_device_expression
  *
  * It shows a quick decision whether the provided expression tree is
- * available to run on OpenCL device, or not.
+ * available to run on CUDA device, or not.
  */
 bool
-pgstrom_codegen_available_expression(Expr *expr)
+pgstrom_device_expression(Expr *expr)
 {
 	if (expr == NULL)
 		return true;
@@ -1846,7 +1846,7 @@ pgstrom_codegen_available_expression(Expr *expr)
 
 		foreach (cell, (List *) expr)
 		{
-			if (!pgstrom_codegen_available_expression(lfirst(cell)))
+			if (!pgstrom_device_expression(lfirst(cell)))
 				return false;
 		}
 		return true;
@@ -1895,7 +1895,7 @@ pgstrom_codegen_available_expression(Expr *expr)
 			elog(DEBUG2, "Unable to run on device: %s", nodeToString(expr));
 			return false;
 		}
-		return pgstrom_codegen_available_expression((Expr *) func->args);
+		return pgstrom_device_expression((Expr *) func->args);
 	}
 	else if (IsA(expr, OpExpr) || IsA(expr, DistinctExpr))
 	{
@@ -1907,7 +1907,7 @@ pgstrom_codegen_available_expression(Expr *expr)
 			elog(DEBUG2, "Unable to run on device: %s", nodeToString(expr));
 			return false;
 		}
-		return pgstrom_codegen_available_expression((Expr *) op->args);
+		return pgstrom_device_expression((Expr *) op->args);
 	}
 	else if (IsA(expr, NullTest))
 	{
@@ -1918,13 +1918,13 @@ pgstrom_codegen_available_expression(Expr *expr)
 			elog(DEBUG2, "Unable to run on device: %s", nodeToString(expr));
 			return false;
 		}
-		return pgstrom_codegen_available_expression((Expr *) nulltest->arg);
+		return pgstrom_device_expression((Expr *) nulltest->arg);
 	}
 	else if (IsA(expr, BooleanTest))
 	{
 		BooleanTest	   *booltest = (BooleanTest *) expr;
 
-		return pgstrom_codegen_available_expression((Expr *) booltest->arg);
+		return pgstrom_device_expression((Expr *) booltest->arg);
 	}
 	else if (IsA(expr, BoolExpr))
 	{
@@ -1933,7 +1933,7 @@ pgstrom_codegen_available_expression(Expr *expr)
 		Assert(boolexpr->boolop == AND_EXPR ||
 			   boolexpr->boolop == OR_EXPR ||
 			   boolexpr->boolop == NOT_EXPR);
-		return pgstrom_codegen_available_expression((Expr *) boolexpr->args);
+		return pgstrom_device_expression((Expr *) boolexpr->args);
 	}
 	else if (IsA(expr, RelabelType))
 	{
@@ -1944,7 +1944,7 @@ pgstrom_codegen_available_expression(Expr *expr)
 			elog(DEBUG2, "Unable to run on device: %s", nodeToString(expr));
 			return false;
 		}
-		return pgstrom_codegen_available_expression((Expr *) relabel->arg);
+		return pgstrom_device_expression((Expr *) relabel->arg);
 	}
 	else if (IsA(expr, CaseExpr))
 	{
@@ -1985,12 +1985,12 @@ pgstrom_codegen_available_expression(Expr *expr)
 					 nodeToString(lfirst(cell)));
 				return false;
 			}
-			if (!pgstrom_codegen_available_expression(casewhen->expr))
+			if (!pgstrom_device_expression(casewhen->expr))
 				return false;
-			if (!pgstrom_codegen_available_expression(casewhen->result))
+			if (!pgstrom_device_expression(casewhen->result))
 				return false;
 		}
-		if (!pgstrom_codegen_available_expression((Expr *)caseexpr->defresult))
+		if (!pgstrom_device_expression((Expr *)caseexpr->defresult))
 			return false;
 		return true;
 	}

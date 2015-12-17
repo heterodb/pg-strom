@@ -164,83 +164,123 @@ static void pgstrom_release_gpuscan(GpuTask *gtask);
 static GpuTask *gpuscan_next_chunk(GpuTaskState *gts);
 static TupleTableSlot *gpuscan_next_tuple(GpuTaskState *gts);
 
+/* dummy kernel source if no device qualifier is given */
+#define GPUSCAN_KERN_SOURCE_NO_DEVQUAL					\
+	"STATIC_FUNCTION(cl_bool)\n"						\
+	"gpuscan_quals_eval(kern_context *kcxt,\n"			\
+	"                   kern_data_store *kds,\n"		\
+	"                   size_t kds_index)\n"			\
+	"{\n"												\
+	"  return true;\n"									\
+	"}\n"
+
 /*
  * cost_gpuscan
  *
- * cost estimation for GpuScan
+ * Cost estimation of GpuScan - Note that we may need to call this function
+ * on the planner_hook context.
  */
 static void
-cost_gpuscan(CustomPath *pathnode, PlannerInfo *root,
-			 RelOptInfo *baserel, ParamPathInfo *param_info,
-			 List *host_quals, List *dev_quals, bool is_bulkload)
+cost_gpuscan(AttrNumber ncols,		/* number of columns */
+			 Oid tablespace_oid,	/* OID of tablespace */
+			 BlockNumber num_pages,	/* number of base blocks */
+			 double num_tuples,		/* number of base tuples */
+			 double num_rows,		/* number of returned rows */
+			 Selectivity dev_sel,	/* selectivity by dev_quals */
+			 List *dev_quals,		/* List of device quals */
+			 List *host_quals,		/* List of host quals */
+			 List *ppi_quals,		/* List of PPI quals */
+			 Cost *p_startup_cost,	/* out: startup_cost */
+			 Cost *p_total_cost)	/* out: total_cost */
 {
-	Path	   *path = &pathnode->path;
-	Cost		startup_cost = 0.0;
+	Cost		startup_cost = pgstrom_gpu_setup_cost;
 	Cost		run_cost = 0.0;
 	Cost		startup_delay = 0.0;
-	double		spc_seq_page_cost;
-	QualCost	dev_cost;
-	QualCost	host_cost;
 	Cost		gpu_per_tuple;
 	Cost		cpu_per_tuple;
+	QualCost	dev_cost;
+	QualCost	host_cost;
+	QualCost	ppi_cost;
+	double		spc_seq_page_cost;
+	double		heap_size;
+	cl_uint		htup_size;
 	cl_uint		num_chunks;
-	Selectivity	dev_sel;
 
-	/* Should only be applied to base relations */
-	Assert(baserel->relid > 0);
-	Assert(baserel->rtekind == RTE_RELATION);
+	/* estimate number of chunks */
+	heap_size = (double)(BLCKSZ - SizeOfPageHeaderData) * num_pages;
+	htup_size = (MAXALIGN(offsetof(HeapTupleHeaderData,
+								   t_bits[BITMAPLEN(ncols)])) +
+				 MAXALIGN(heap_size / Max(num_tuples, 1.0) -
+						  sizeof(ItemIdData) - SizeofHeapTupleHeader));
+	num_chunks = (cl_uint)
+		((double)(htup_size + sizeof(cl_int)) * num_tuples /
+		 (double)(pgstrom_chunk_size() -
+				  STROMALIGN(offsetof(kern_data_store, colmeta[ncols]))));
+	num_chunks = Max(num_chunks, 1);
 
-	/* Mark the path with the correct row estimate */
-	if (param_info)
-		path->rows = param_info->ppi_rows;
-	else
-		path->rows = baserel->rows;
-	num_chunks = estimate_num_chunks(path);
+	/* fetch estimated page cost for tablespace containing the table */
+	get_tablespace_page_costs(tablespace_oid, NULL, &spc_seq_page_cost);
 
-	/* fetch estimated page cost for tablespace containing table */
-	get_tablespace_page_costs(baserel->reltablespace,
-							  NULL,
-							  &spc_seq_page_cost);
 	/* Disk costs */
-    run_cost += spc_seq_page_cost * baserel->pages;
+	run_cost += spc_seq_page_cost * num_pages;
 
 	/* GPU costs */
-	cost_qual_eval(&dev_cost, dev_quals, root);
-	dev_sel = clauselist_selectivity(root, dev_quals, 0, JOIN_INNER, NULL);
-	dev_cost.startup += pgstrom_gpu_setup_cost;
+	cost_qual_eval(&dev_cost, dev_quals, NULL);
 	if (cpu_tuple_cost > 0.0)
-		dev_cost.per_tuple *= pgstrom_gpu_tuple_cost / cpu_tuple_cost;
+		dev_cost.per_tuple *= pgstrom_gpu_operator_cost / cpu_operator_cost;
 	else
 		dev_cost.per_tuple += disable_cost;
 
 	/* CPU costs */
-	cost_qual_eval(&host_cost, host_quals, root);
+	cost_qual_eval(&host_cost, host_quals, NULL);
 
-	/* Adjustment for param info */
-	if (param_info)
-	{
-		QualCost	param_cost;
-
-		/* Include costs of pushed-down clauses */
-		cost_qual_eval(&param_cost, param_info->ppi_clauses, root);
-		host_cost.startup += param_cost.startup;
-		host_cost.per_tuple += param_cost.per_tuple;
-	}
+	/* PPI costs (as a part of host quals, if any) */
+	cost_qual_eval(&ppi_cost, ppi_quals, NULL);
+	host_cost.startup += ppi_cost.startup;
+	host_cost.per_tuple += ppi_cost.per_tuple;
 
 	/* total path cost */
 	startup_cost += dev_cost.startup + host_cost.startup;
-	if (!is_bulkload)
-		cpu_per_tuple = host_cost.per_tuple + cpu_tuple_cost;
-	else
-		cpu_per_tuple = host_cost.per_tuple;
+	cpu_per_tuple = host_cost.per_tuple + cpu_tuple_cost;
 	gpu_per_tuple = dev_cost.per_tuple;
-	run_cost += gpu_per_tuple * baserel->tuples;
+
+	run_cost += gpu_per_tuple * num_tuples;
 	if (dev_quals != NIL)
 		startup_delay = run_cost * (1.0 / (double)num_chunks);
-	run_cost += cpu_per_tuple * dev_sel * baserel->tuples;
+	run_cost += cpu_per_tuple * dev_sel * num_tuples;
 
-	path->startup_cost = startup_cost + startup_delay;
-    path->total_cost = startup_cost + run_cost;
+	*p_startup_cost = startup_cost + startup_delay;
+	*p_total_cost = startup_cost + run_cost;
+}
+
+static void
+cost_gpuscan_path(PlannerInfo *root, CustomPath *pathnode,
+				  List *dev_quals, List *host_quals)
+{
+	RelOptInfo	   *baserel = pathnode->path.parent;
+	ParamPathInfo  *param_info = pathnode->path.param_info;
+	double			selectivity;
+
+	pathnode->path.rows = (param_info
+						   ? param_info->ppi_rows
+						   : baserel->rows);
+
+	selectivity = clauselist_selectivity(root,
+										 dev_quals,
+										 baserel->relid,
+										 JOIN_INNER,
+										 NULL);
+	cost_gpuscan(list_length(baserel->reltargetlist),
+				 baserel->reltablespace,
+				 baserel->pages,
+				 baserel->tuples,
+				 pathnode->path.rows,
+				 selectivity,
+				 dev_quals,
+				 host_quals,
+				 param_info ? param_info->ppi_clauses : NULL,
+				 &pathnode->path.startup_cost,
+				 &pathnode->path.total_cost);
 }
 
 static void
@@ -279,7 +319,7 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	{
 		RestrictInfo   *rinfo = lfirst(cell);
 
-		if (pgstrom_codegen_available_expression(rinfo->clause))
+		if (pgstrom_device_expression(rinfo->clause))
 			dev_quals = lappend(dev_quals, rinfo);
 		else
 			host_quals = lappend(host_quals, rinfo);
@@ -303,9 +343,8 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	pathnode->methods = &gpuscan_path_methods;
 
 	/* cost estimation */
-	cost_gpuscan(pathnode, root, baserel,
-				 pathnode->path.param_info,
-				 host_quals, dev_quals, false);
+	cost_gpuscan_path(root, pathnode, dev_quals, host_quals);
+
 	/*
 	 * FIXME: needs to pay attention for projection cost.
 	 */
@@ -320,7 +359,7 @@ gpuscan_add_scan_path(PlannerInfo *root,
 			Expr	   *expr = lfirst(cell);
 
 			if (!IsA(expr, Var) &&
-				!pgstrom_codegen_available_expression(expr))
+				!pgstrom_device_expression(expr))
 			{
 				support_bulkload = false;
 				break;
@@ -354,6 +393,7 @@ assign_bare_ntuples(Plan *plannode, RangeTblEntry *rte)
 	heap_close(rel, NoLock);
 }
 
+#if 1
 /*
  * gpuscan_try_replace_relscan
  *
@@ -361,9 +401,11 @@ assign_bare_ntuples(Plan *plannode, RangeTblEntry *rte)
  * enough simple. Even though seq_path didn't involve any qualifiers,
  * it makes sense if parent path is managed by PG-Strom because of bulk-
  * loading functionality.
+ *
+ * XXX - This function shall be deprecated in the near future
  */
 Plan *
-gpuscan_try_replace_seqscan(SeqScan *seqscan,
+legacy_gpuscan_try_replace_seqscan(SeqScan *seqscan,
 							List *range_tables,
 							List **p_outer_quals,
 							double *p_outer_ratio)
@@ -395,7 +437,7 @@ gpuscan_try_replace_seqscan(SeqScan *seqscan,
 		TargetEntry	   *tle = lfirst(lc);
 
 		if (!IsA(tle->expr, Var) &&
-			!pgstrom_codegen_available_expression(tle->expr))
+			!pgstrom_device_expression(tle->expr))
 			return NULL;
 	}
 
@@ -403,7 +445,7 @@ gpuscan_try_replace_seqscan(SeqScan *seqscan,
 	 * Check whether the plan qualifiers is executable on device.
 	 * Any host-only qualifier prevents bulk-loading.
 	 */
-	if (!pgstrom_codegen_available_expression((Expr *) seqscan->plan.qual))
+	if (!pgstrom_device_expression((Expr *) seqscan->plan.qual))
 		return NULL;
 
 	/*
@@ -477,9 +519,100 @@ gpuscan_pullup_devquals(Plan *plannode,
 						 cscan_new->scan.plan.plan_rows, 1.0);
 	return &cscan_new->scan.plan;
 }
+#endif
 
 /*
- * OpenCL code generation that can run on GPU/MIC device
+ * gpuscan_try_replace_seqscan
+ *
+ *
+ *
+ */
+static CustomScan *
+gpuscan_try_replace_seqscan(Relation baserel, SeqScan *seqscan)
+{
+	CustomScan	   *cscan;
+	GpuScanInfo		gs_info;
+	BlockNumber		num_pages;
+	double			num_tuples;
+	double			allvisfrac;
+	double			selectivity;
+	Cost			startup_cost;
+	Cost			total_cost;
+	ListCell	   *lc;
+
+	/* get table's statistics */
+	estimate_rel_size(baserel, NULL, &num_pages, &num_tuples, &allvisfrac);
+
+	/*
+	 * Unlike OUTER Pull-Up by other node, GpuScan can process
+	 * host-only target list, so we don't need to check them.
+	 */
+
+	/*
+	 * Check whether scan-qualifier contains host-only expression,
+	 * or not. Even though we can inject host-only expression here,
+	 * heuristically, it does not much make sense. In addition,
+	 * we cannot estimate correct selectivity by device qualifier
+	 * here, because clauselist_selectivity() takes PlannerInfo.
+	 */
+	foreach (lc, seqscan->plan.qual)
+	{
+		if (!pgstrom_device_expression((Expr *) lfirst(lc)))
+			return NULL;
+	}
+	if (seqscan->plan.plan_rows >= num_tuples)
+		selectivity = 1.0;
+	else if (seqscan->plan.plan_rows <= 0.0)
+		selectivity = 0.0;
+	else
+		selectivity = seqscan->plan.plan_rows / num_tuples;
+
+	/*
+	 * OK, we will be able to replace this SeqScan by GpuScan.
+	 * Let's estimate cost to determine whether it is reasonable
+	 * or not.
+	 */
+	cost_gpuscan(RelationGetNumberOfAttributes(baserel),
+				 RelationGetForm(baserel)->reltablespace,
+				 num_pages,
+				 num_tuples,
+				 seqscan->plan.plan_rows,
+				 selectivity,
+				 seqscan->plan.qual,
+				 NIL,
+				 NIL,
+				 &startup_cost,
+				 &total_cost);
+
+	/*
+	 * OK, let's make a GpuScan that can replace SeqScan without
+	 * host-only expression in scan-qualifiers.
+	 */
+	cscan = makeNode(CustomScan);
+	cscan->scan.plan.startup_cost = startup_cost;
+	cscan->scan.plan.total_cost = total_cost;
+	cscan->scan.plan.plan_width = seqscan->plan.plan_width;
+	cscan->scan.plan.plan_rows = seqscan->plan.plan_rows;
+	cscan->scan.plan.targetlist = copyObject(seqscan->plan.targetlist);
+	cscan->scan.plan.qual = NIL;
+	cscan->scan.plan.extParam = bms_copy(seqscan->plan.extParam);
+	cscan->scan.plan.allParam = bms_copy(seqscan->plan.allParam);
+	cscan->scan.scanrelid = seqscan->scanrelid;
+	cscan->flags = CUSTOMPATH_SUPPORT_BULKLOAD;
+	cscan->custom_relids = bms_make_singleton(seqscan->scanrelid);
+	cscan->methods = &bulkscan_plan_methods;
+
+	memset(&gs_info, 0, sizeof(GpuScanInfo));
+	gs_info.kern_source = GPUSCAN_KERN_SOURCE_NO_DEVQUAL;
+	gs_info.extra_flags = DEVKERNEL_NEEDS_GPUSCAN;
+	gs_info.dev_quals = copyObject(seqscan->plan.qual);
+	form_gpuscan_info(cscan, &gs_info);
+
+	return cscan;
+}
+
+/*
+ * Code generator for GpuScan's qualifier
  */
 static char *
 gpuscan_codegen_exec_quals(PlannerInfo *root,
@@ -489,8 +622,13 @@ gpuscan_codegen_exec_quals(PlannerInfo *root,
 	StringInfoData	body;
 	char		   *expr_code;
 
-	initStringInfo(&body);
+	if (dev_quals == NULL)
+		return GPUSCAN_KERN_SOURCE_NO_DEVQUAL;
 
+	/* Let's walk on the device expression tree */
+	expr_code = pgstrom_codegen_expression((Node *)dev_quals, context);
+
+	initStringInfo(&body);
 	appendStringInfo(
 		&body,
 		"STATIC_FUNCTION(cl_bool)\n"
@@ -498,32 +636,17 @@ gpuscan_codegen_exec_quals(PlannerInfo *root,
 		"                   kern_data_store *kds,\n"
 		"                   size_t kds_index)\n"
 		"{\n");
+	/* add parameter declarations */
+	pgstrom_codegen_param_declarations(&body, context);
+	/* add variables declarations */
+	pgstrom_codegen_var_declarations(&body, context);
 
-	if (dev_quals != NIL)
-	{
-		/* OK, let's walk on the device expression tree */
-		expr_code = pgstrom_codegen_expression((Node *)dev_quals, context);
-
-		/* add parameter declarations */
-		pgstrom_codegen_param_declarations(&body, context);
-		/* add variables declarations */
-		pgstrom_codegen_var_declarations(&body, context);
-
-		appendStringInfo(
-			&body,
-			"\n"
-			"  return EVAL(%s);\n",
-			expr_code);
-	}
-	else
-	{
-		appendStringInfo(
-			&body,
-			"  return true;\n");
-	}
 	appendStringInfo(
 		&body,
-		"}\n");
+		"\n"
+		"  return EVAL(%s);\n"
+		"}\n",
+		expr_code);
 
 	return body.data;
 }
@@ -560,7 +683,7 @@ create_gpuscan_plan(PlannerInfo *root,
 	{
 		RestrictInfo   *rinfo = lfirst(cell);
 
-		if (!pgstrom_codegen_available_expression(rinfo->clause))
+		if (!pgstrom_device_expression(rinfo->clause))
 			host_quals = lappend(host_quals, rinfo);
 		else
 			dev_quals = lappend(dev_quals, rinfo);
@@ -1297,7 +1420,7 @@ build_device_projection(TupleDesc tupdesc,
 									  tle->resjunk);
 			tlist_new = lappend(tlist_new, tle_new);
 		}
-		else if (pgstrom_codegen_available_expression(tle->expr))
+		else if (pgstrom_device_expression(tle->expr))
 		{
 			Oid		type_oid = exprType((Node *)tle->expr);
 			Oid		type_mod = exprTypmod((Node *)tle->expr);
@@ -1431,29 +1554,57 @@ build_device_projection(TupleDesc tupdesc,
 void
 pgstrom_post_planner_gpuscan(PlannedStmt *pstmt, Plan **p_curr_plan)
 {
-//	GpuScan		   *gscan = (GpuScan *) cscan;
-	CustomScan	   *cscan = (CustomScan *) (*p_curr_plan);
-	GpuScanInfo	   *gs_info = deform_gpuscan_info(cscan);
-	List		   *rtables = pstmt->rtable;
+	Plan		   *plan = *p_curr_plan;
+	CustomScan	   *cscan = (CustomScan *) (plan);
+	GpuScanInfo	   *gs_info;
 	RangeTblEntry  *rte;
 	Relation		baserel;
 	TupleDesc		tupdesc;
 	codegen_context	context;
+	QualCost		qcost;
+	Cost			actual_old_cost = 0.0;
+	Cost			actual_new_cost = 0.0;
+
+	/* quick bailout if not supported anyway */
+	if (!pgstrom_plan_is_gpuscan(plan) && !IsA(plan, SeqScan))
+		return;
+
+	/* compute 'actual' cost that includes evaluation of targetlist */
+	cost_qual_eval(&qcost, plan->targetlist, NULL);
+	actual_old_cost = plan->total_cost
+		+ qcost.startup
+		+ qcost.per_tuple * plan->plan_rows;
+
+	/*
+	 * This plan is at least either of GpuScan or SeqScan.
+	 * For more optimal plan by surgery, we try to open the relation
+	 * and tries to replace SeqScan by GpuScan if reasonable.
+	 */
+	rte = rt_fetch(cscan->scan.scanrelid, pstmt->rtable);
+	Assert(rte->rtekind == RTE_RELATION);
+	baserel = heap_open(rte->relid, NoLock);
+	tupdesc = RelationGetDescr(baserel);
+
+	/*
+	 * Try to replace SeqScan to evaluate target-list on the device side.
+	 * Unlike outer pull-up, GpuScan can handle host-only expression using
+	 * ExecProject() later stage, so all we require is that scan-quals
+	 * are device executable.
+	 */
+	if (IsA(cscan, SeqScan))
+	{
+		cscan = gpuscan_try_replace_seqscan(baserel, (SeqScan *) cscan);
+		if (!cscan)
+			return;
+	}
+	/* extract private fields */
+	gs_info = deform_gpuscan_info(cscan);
 
 	pgstrom_init_codegen_context(&context);
 	context.extra_flags = gs_info->extra_flags;	/* restore */
 	context.func_defs = gs_info->func_defs;		/* restore */
 	context.used_params = gs_info->used_params;	/* restore */
 	context.used_vars = gs_info->used_vars;		/* restore */
-
-	/*
-	 * TODO: We may need to replace SeqScan by GpuScan with device
-	 * projection, if it is enough cost effective.
-	 */
-	rte = rt_fetch(cscan->scan.scanrelid, rtables);
-	Assert(rte->rtekind == RTE_RELATION);
-	baserel = heap_open(rte->relid, NoLock);
-	tupdesc = RelationGetDescr(baserel);
 
 	if (build_device_projection(tupdesc, cscan, gs_info))
 	{
@@ -1466,6 +1617,27 @@ pgstrom_post_planner_gpuscan(PlannedStmt *pstmt, Plan **p_curr_plan)
 													tupdesc,
 													&context));
 		gs_info->kern_source = kern.data;
+
+		/*
+		 * compute 'actual' cost based on device projection
+		 */
+		actual_new_cost = cscan->scan.plan.total_cost;
+		/* cost for device projection */
+		cost_qual_eval(&qcost, cscan->custom_scan_tlist, NULL);
+		qcost.per_tuple *= pgstrom_gpu_operator_cost / cpu_operator_cost;
+		actual_new_cost += (qcost.startup +
+							qcost.per_tuple * plan->plan_rows);
+		/* cost for device projection */
+		cost_qual_eval(&qcost, cscan->scan.plan.targetlist, NULL);
+		actual_new_cost += (qcost.startup +
+							qcost.per_tuple * plan->plan_rows);
+
+		/* if GpuScan is actually cheaper than original, replace it */
+		if (actual_new_cost < actual_old_cost)
+		{
+			if (*p_curr_plan != &cscan->scan.plan)
+				*p_curr_plan = &cscan->scan.plan;
+		}
 	}
 
 	/*

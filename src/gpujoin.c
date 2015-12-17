@@ -1184,7 +1184,7 @@ gpujoin_add_join_path(PlannerInfo *root,
 	{
 		Expr   *expr = lfirst(lc);
 
-		if (!IsA(expr, Var) && !pgstrom_codegen_available_expression(expr))
+		if (!IsA(expr, Var) && !pgstrom_device_expression(expr))
 		{
 			support_bulkload = false;
 			break;
@@ -1262,7 +1262,7 @@ gpujoin_add_join_path(PlannerInfo *root,
 			 * So, we simply reject any join that contains host-only
 			 * qualifiers.
 			 */
-			if (!pgstrom_codegen_available_expression(rinfo->clause))
+			if (!pgstrom_device_expression(rinfo->clause))
 				return;
 
 			/*

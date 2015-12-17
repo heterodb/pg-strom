@@ -1291,10 +1291,10 @@ make_gpupreagg_refnode(Aggref *aggref, List **prep_tlist,
 	foreach (cell, aggref->args)
 	{
 		TargetEntry *tle = lfirst(cell);
-		if (!pgstrom_codegen_available_expression(tle->expr))
+		if (!pgstrom_device_expression(tle->expr))
 			return NULL;
 	}
-	if (!pgstrom_codegen_available_expression(aggref->aggfilter))
+	if (!pgstrom_device_expression(aggref->aggfilter))
 		return NULL;
 
 	/*

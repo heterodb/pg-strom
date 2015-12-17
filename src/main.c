@@ -319,6 +319,11 @@ pgstrom_recursive_grafter(PlannedStmt *pstmt, Plan *parent, Plan **p_curr_plan)
 				pgstrom_post_planner_gpuscan(pstmt, p_curr_plan);
 			break;
 
+		case T_SeqScan:
+			/* SeqScan might be replaced by GpuScan */
+			pgstrom_post_planner_gpuscan(pstmt, p_curr_plan);
+			break;
+
 		default:
 			/* nothing to do, keep existing one */
 			break;

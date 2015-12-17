@@ -527,7 +527,7 @@ extern void pgstrom_codegen_var_declarations(StringInfo buf,
 extern char *pgstrom_codegen_bulk_var_declarations(codegen_context *context,
 												   Plan *outer_plan,
 												   Bitmapset *attr_refs);
-extern bool pgstrom_codegen_available_expression(Expr *expr);
+extern bool pgstrom_device_expression(Expr *expr);
 extern void pgstrom_init_codegen_context(codegen_context *context);
 extern void pgstrom_init_codegen(void);
 
@@ -611,7 +611,7 @@ extern Plan *gpuscan_pullup_devquals(Plan *plannode,
 									 List *range_tables,
 									 List **p_outer_quals,
 									 double *p_outer_ratio);
-extern Plan *gpuscan_try_replace_seqscan(SeqScan *seqscan,
+extern Plan *legacy_gpuscan_try_replace_seqscan(SeqScan *seqscan,
 										 List *range_tables,
 										 List **p_outer_quals,
 										 double *p_outer_ratio);
