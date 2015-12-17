@@ -305,6 +305,7 @@ struct GpuTask
 	dlist_node		tracker;	/* link to task tracker list */
 	GpuTaskState   *gts;
 	bool			no_cuda_setup;	/* true, if no need to set up stream */
+	bool			cpu_fallback;	/* true, if task needs CPU fallback */
 	cl_uint			cuda_index;		/* index of the cuda_context */
 	CUcontext		cuda_context;	/* just reference, no cleanup needed */
 	CUdevice		cuda_device;	/* just reference, no cleanup needed */

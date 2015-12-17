@@ -36,6 +36,7 @@
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
+#include "utils/memutils.h"
 #include "utils/rel.h"
 #include "utils/ruleutils.h"
 #include "utils/spccache.h"
@@ -145,12 +146,15 @@ typedef struct {
 	BlockNumber		curr_blknum;
 	BlockNumber		last_blknum;
 	HeapTupleData	scan_tuple;
-	List		   *dev_quals;
+	List		   *dev_tlist;		/* tlist to be returned from the device */
+	List		   *dev_quals;		/* quals to be run on the device */
 	bool			dev_projection;	/* true, if device projection is valid */
 	cl_int			base_fixed_width; /* width of fixed fields on base rel */
 	cl_int			proj_fixed_width; /* width of fixed fields on projection */
 	cl_int			proj_extra_width; /* width of extra buffer on projection */
-	cl_uint			num_rechecked;
+	/* resource for CPU fallback */
+	TupleTableSlot *base_slot;
+	ProjectionInfo *base_proj;
 } GpuScanState;
 
 /* forward declarations */
@@ -626,14 +630,6 @@ pgstrom_plan_is_gpuscan(const Plan *plan)
 		return true;
 	return false;
 }
-
-
-
-
-
-
-
-
 
 /*
  * gpuscan_codegen_projection
@@ -1445,7 +1441,10 @@ pgstrom_post_planner_gpuscan(PlannedStmt *pstmt, Plan **p_curr_plan)
 	codegen_context	context;
 
 	pgstrom_init_codegen_context(&context);
-	context.func_defs = gs_info->func_defs;	/* restore */
+	context.extra_flags = gs_info->extra_flags;	/* restore */
+	context.func_defs = gs_info->func_defs;		/* restore */
+	context.used_params = gs_info->used_params;	/* restore */
+	context.used_vars = gs_info->used_vars;		/* restore */
 
 	/*
 	 * TODO: We may need to replace SeqScan by GpuScan with device
@@ -1479,9 +1478,11 @@ pgstrom_post_planner_gpuscan(PlannedStmt *pstmt, Plan **p_curr_plan)
 		initStringInfo(&kern);
 		pgstrom_codegen_func_declarations(&kern, &context);
 		appendStringInfo(&kern, "%s", gs_info->kern_source);
-
 		gs_info->kern_source = kern.data;
 	}
+	gs_info->extra_flags = context.extra_flags;
+	gs_info->used_params = context.used_params;
+	gs_info->used_vars = context.used_vars;
 	form_gpuscan_info(cscan, gs_info);
 
 	heap_close(baserel, NoLock);
@@ -1559,6 +1560,9 @@ gpuscan_begin(CustomScanState *node, EState *estate, int eflags)
 	/* initialize the start/end position */
 	gss->curr_blknum = 0;
 	gss->last_blknum = RelationGetNumberOfBlocks(scan_rel);
+	/* initialize device tlist for CPU fallback */
+	gss->dev_tlist = (List *)
+		ExecInitExpr((Expr *) cscan->custom_scan_tlist, &gss->gts.css.ss.ps);
 	/* initialize device qualifiers also, for fallback */
 	gss->dev_quals = (List *)
 		ExecInitExpr((Expr *) gs_info->dev_quals, &gss->gts.css.ss.ps);
@@ -1574,9 +1578,20 @@ gpuscan_begin(CustomScanState *node, EState *estate, int eflags)
 	/* preload the CUDA program, if actually executed */
 	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
 		pgstrom_preload_cuda_program(&gss->gts);
+	/* initialize resource for CPU fallback */
+	gss->base_slot = MakeSingleTupleTableSlot(RelationGetDescr(scan_rel));
+	if (!gss->dev_projection)
+	{
+		ExprContext	   *econtext = gss->gts.css.ss.ps.ps_ExprContext;
+		TupleTableSlot *scan_slot = gss->gts.css.ss.ss_ScanTupleSlot;
 
-	/* other run-time parameters */
-    gss->num_rechecked = 0;
+		gss->base_proj = ExecBuildProjectionInfo(gss->dev_tlist,
+												 econtext,
+												 scan_slot,
+												 RelationGetDescr(scan_rel));
+	}
+	else
+		gss->base_proj = NULL;
 }
 
 /*
@@ -1749,57 +1764,79 @@ gpuscan_next_tuple(GpuTaskState *gts)
 {
 	GpuScanState	   *gss = (GpuScanState *) gts;
 	pgstrom_gpuscan	   *gpuscan = (pgstrom_gpuscan *) gts->curr_task;
-	pgstrom_data_store *pds_dst = gpuscan->pds_dst;
 	TupleTableSlot	   *slot = NULL;
 	struct timeval		tv1, tv2;
 
 	PERFMON_BEGIN(&gss->gts.pfm_accum, &tv1);
-	if (gss->gts.curr_index < pds_dst->kds->nitems)
+	if (!gpuscan->task.cpu_fallback)
 	{
-		cl_uint		index = gss->gts.curr_index++;
+		pgstrom_data_store *pds_dst = gpuscan->pds_dst;
 
-		slot = gss->gts.css.ss.ss_ScanTupleSlot;
-		if (!pgstrom_fetch_data_store(slot, pds_dst, index,
-									  &gss->scan_tuple))
-			elog(ERROR, "failed to fetch a record from pds");
-	}
-
-#if 0
-	/*
-	 * XXX - old implementation. If CpuReCheck, we run dev_quals on the
-	 * pds_src first, then make projection towards custom_scan_tlist by
-	 * CPU.
-	 */
-	while (gss->gts.curr_index < kds_dst->nitems)
-	{
-		slot = gss->gts.css.ss.ss_ScanTupleSlot;
-		if (!pgstrom_fetch_data_store(slot, pds, gss->gts.curr_index,
-									  &gss->scan_tuple))
-			elog(ERROR, "failed to fetch a record from pds: %d", i_result);
-		Assert(slot->tts_tuple == &gss->scan_tuple);
-
-		if (do_recheck)
+		if (gss->gts.curr_index < pds_dst->kds->nitems)
 		{
-			ExprContext *econtext = gss->gts.css.ss.ps.ps_ExprContext;
+			cl_uint		index = gss->gts.curr_index++;
 
-			Assert(gss->dev_quals != NULL);
-			econtext->ecxt_scantuple = slot;
-			if (!ExecQual(gss->dev_quals, econtext, false))
-			{
-				slot = NULL;
-				continue;
-			}
+			slot = gss->gts.css.ss.ss_ScanTupleSlot;
+			if (!pgstrom_fetch_data_store(slot, pds_dst, index,
+										  &gss->scan_tuple))
+				elog(ERROR, "failed to fetch a record from pds");
 		}
-		break;
 	}
-#endif
+	else
+	{
+		/*
+		 * If GPU kernel returned StromError_CpuReCheck, we have to
+		 * evaluate dev_quals by ourselves, then adjust tuple format
+		 * according to custom_scan_tlist.
+		 */
+		pgstrom_data_store *pds_src = gpuscan->pds_src;
+
+		while (gss->gts.curr_index < pds_src->kds->nitems)
+		{
+			cl_uint			index = gss->gts.curr_index++;
+			ExprContext	   *econtext = gss->gts.css.ss.ps.ps_ExprContext;
+			ExprDoneCond	is_done;
+
+			if (!pgstrom_fetch_data_store(gss->base_slot, pds_src, index,
+										  &gss->scan_tuple))
+				elog(ERROR, "failed to fetch a record from pds");
+
+			/*
+			 * step.1 - evaluate dev_quals if any
+			 */
+			if (gss->dev_quals != NIL)
+			{
+				econtext->ecxt_scantuple = gss->base_slot;
+				if (!ExecQual(gss->dev_quals, econtext, false))
+					continue;
+			}
+
+			/*
+			 * step.2 - makes a projection if any
+			 */
+			if (gss->base_proj != NULL)
+			{
+				slot = ExecProject(gss->base_proj, &is_done);
+				if (is_done == ExprEndResult)
+				{
+					/* tuple fails qual, so free per-tuple memory and try
+					 * again.
+					 * XXX - Is logic really right? needs to be checked */
+					ResetExprContext(econtext);
+					slot = NULL;
+					continue;
+				}
+			}
+			break;
+		}
+	}
 	PERFMON_END(&gss->gts.pfm_accum, time_materialize, &tv1, &tv2);
 
 	return slot;
 }
 
 static TupleTableSlot *
-gpuscan_exec(CustomScanState *node)
+	gpuscan_exec(CustomScanState *node)
 {
 	return ExecScan(&node->ss,
 					(ExecScanAccessMtd) pgstrom_exec_gputask,
@@ -1849,6 +1886,10 @@ static void
 gpuscan_end(CustomScanState *node)
 {
 	GpuScanState	   *gss = (GpuScanState *)node;
+
+	/* reset fallback resources */
+	if (gss->base_slot)
+		ExecDropSingleTupleTableSlot(gss->base_slot);
 
 	pgstrom_release_gputaskstate(&gss->gts);
 }
@@ -2037,7 +2078,15 @@ pgstrom_respond_gpuscan(CUstream stream, CUresult status, void *private)
 
 	/* OK, routine is called back in the usual context */
 	if (status == CUDA_SUCCESS)
+	{
 		gpuscan->task.kerror = gpuscan->kern.kerror;
+		if (gpuscan->task.kerror.errcode == StromError_CpuReCheck)
+		{
+			/* clear the error instead of the CPU fallback */
+			gpuscan->task.kerror.errcode = StromError_Success;
+			gpuscan->task.cpu_fallback = true;
+		}
+	}
 	else
 	{
 		gpuscan->task.kerror.errcode = status;
