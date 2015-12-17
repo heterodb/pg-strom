@@ -268,6 +268,7 @@ struct GpuTaskState
 	const char	   *source_pathname;
 	CUmodule	   *cuda_modules;	/* CUmodules for each CUDA context */
 	bool			scan_done;		/* no rows to read, if true */
+	bool			be_row_format;	/* true, if KDS_FORMAT_ROW is preferable */
 	bool			scan_bulk;		/* bulk outer load, if true */
 	double			scan_bulk_density;	/* density of bulk input, if any */
 	TupleTableSlot *scan_overflow;	/* temp buffer, if unable to load */

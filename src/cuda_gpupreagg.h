@@ -423,25 +423,26 @@ gpupreagg_final_data_move(kern_context *kcxt,
 		void		   *datum = kern_get_datum(kds_src,colidx,rowidx_src);
 		pg_varlena_t	vl_src = pg_varlena_datum_ref(kcxt,datum,false);
 		cl_uint			vl_len;
-		cl_uint			offset;
+		cl_uint			usage_prev;
 
 		vl_len = (cmeta.attlen >= 0
 				  ? cmeta.attlen
 				  : VARSIZE_ANY(vl_src.value));
 		alloc_size = MAXALIGN(vl_len);
-		offset = atomicAdd(&kds_dst->usage, alloc_size);
-		if (offset + alloc_size >= kds_dst->length)
+		usage_prev = atomicAdd(&kds_dst->usage, alloc_size);
+		if (KERN_DATA_STORE_SLOT_LENGTH(kds_dst, kds_dst->nrooms) +
+			usage_prev + alloc_size >= kds_dst->length)
 		{
 			STROM_SET_ERROR(&kcxt->e, StromError_DataStoreNoSpace);
 			dst_isnull[colidx] = true;
 		}
 		else
 		{
-			char	   *alloc_ptr = (char *)kds_dst + offset;
-
+			char	   *alloc_ptr = ((char *)kds_dst + kds_dst->length -
+									 (usage_prev + alloc_size));
 			memcpy(alloc_ptr, vl_src.value, vl_len);
 			dst_isnull[colidx] = false;
-			dst_values[colidx] = (Datum) alloc_ptr;
+			dst_values[colidx] = PointerGetDatum(alloc_ptr);
 		}
 	}
 	return alloc_size;
@@ -1162,9 +1163,11 @@ retry_minor:
 		/*
 		 * This thread shall be responsible to this grouping-key
 		 *
-		 * MEMO: Can we reduce of number of atomic operation using
-		 * arithmetic_stairlike_add() on shared memory?
-		 * It is a possible optimization if # of groups is large.
+		 * MEMO: We may need to check whether the new nitems exceeds
+		 * usage of the extra length of the kds_final from the tail,
+		 * instead of the nrooms, however, some code assumes kds_final
+		 * can store at least 'nrooms' items. So, right now, we don't
+		 * allow to expand extra area across nrooms boundary.
 		 */
 		new_slot.s.index = atomicAdd(&kds_final->nitems, 1);
 		if (new_slot.s.index < kds_final->nrooms)

@@ -2334,7 +2334,9 @@ errorTextKernel(kern_errorbuf *kerror)
 	switch (kerror->kernel)
 	{
 		KERN_ENTRY(CudaRuntime);
-		KERN_ENTRY(gpuscan_qual);
+		KERN_ENTRY(gpuscan_exec_quals);
+		KERN_ENTRY(gpuscan_projection_row);
+		KERN_ENTRY(gpuscan_projection_slot);
 		KERN_ENTRY(gpujoin_preparation);
 		KERN_ENTRY(gpujoin_exec_nestloop);
 		KERN_ENTRY(gpujoin_exec_hashjoin);

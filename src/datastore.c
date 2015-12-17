@@ -844,7 +844,7 @@ pgstrom_create_data_store_slot(GpuContext *gcontext,
 							   pgstrom_data_store *ptoast)
 {
 	pgstrom_data_store *pds;
-	size_t			kds_usage;
+	size_t			kds_length;
 	MemoryContext	gmcxt = gcontext->memcxt;
 
 	/* allocation of pds */
@@ -852,11 +852,13 @@ pgstrom_create_data_store_slot(GpuContext *gcontext,
 	pds->refcnt = 1;	/* owned by the caller at least */
 
 	/* allocation of kds */
-	kds_usage = STROMALIGN(offsetof(kern_data_store,
-									colmeta[tupdesc->natts])) +
-		STROMALIGN(LONGALIGN((sizeof(Datum) +
-                              sizeof(char)) * tupdesc->natts) * nrooms);
-	pds->kds_length = kds_usage + STROMALIGN(extra_length);
+	kds_length = (STROMALIGN(offsetof(kern_data_store,
+									  colmeta[tupdesc->natts])) +
+				  STROMALIGN(LONGALIGN((sizeof(Datum) + sizeof(char)) *
+									   tupdesc->natts) * nrooms));
+	kds_length += STROMALIGN(extra_length);
+
+	pds->kds_length = kds_length;
 
 	if (!ptoast || !ptoast->kds_fname)
 		pds->kds = MemoryContextAllocHuge(gmcxt, pds->kds_length);
@@ -945,7 +947,6 @@ pgstrom_create_data_store_slot(GpuContext *gcontext,
 	}
 	init_kernel_data_store(pds->kds, tupdesc, pds->kds_length,
 						   KDS_FORMAT_SLOT, nrooms, internal_format);
-	pds->kds->usage = kds_usage;
 
 	/* OK, now it is tracked by GpuContext */
 	dlist_push_tail(&gcontext->pds_list, &pds->pds_chain);

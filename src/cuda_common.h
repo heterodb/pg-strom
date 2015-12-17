@@ -205,7 +205,9 @@ typedef uintptr_t		hostptr_t;
  */
 #define StromKernel_HostPGStrom						0x0001
 #define StromKernel_CudaRuntime						0x0002
-#define StromKernel_gpuscan_qual					0x0101
+#define StromKernel_gpuscan_exec_quals				0x0101
+#define StromKernel_gpuscan_projection_row			0x0102
+#define StromKernel_gpuscan_projection_slot			0x0103
 #define StromKernel_gpujoin_preparation				0x0201
 #define StromKernel_gpujoin_exec_nestloop			0x0202
 #define StromKernel_gpujoin_exec_hashjoin			0x0203
