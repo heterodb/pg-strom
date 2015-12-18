@@ -1769,7 +1769,7 @@ deform_kern_heaptuple(kern_context *kcxt,
 }
 
 /*
- * build_kern_tupitem
+ * form_kern_heaptuple
  *
  * A utility routine to build a kern_tupitem on the destination buffer
  * already allocated.
