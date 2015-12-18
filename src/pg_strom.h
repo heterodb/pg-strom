@@ -607,6 +607,7 @@ extern void pgstrom_init_datastore(void);
 /*
  * gpuscan.c
  */
+#if 1
 extern Plan *gpuscan_pullup_devquals(Plan *plannode,
 									 List *range_tables,
 									 List **p_outer_quals,
@@ -615,6 +616,10 @@ extern Plan *legacy_gpuscan_try_replace_seqscan(SeqScan *seqscan,
 										 List *range_tables,
 										 List **p_outer_quals,
 										 double *p_outer_ratio);
+#endif
+extern bool pgstrom_pullup_outer_scan(Plan *plannode,
+									  bool allow_expression,
+									  List **p_outer_qual);
 extern bool pgstrom_path_is_gpuscan(const Path *path);
 extern bool pgstrom_plan_is_gpuscan(const Plan *plan);
 extern void pgstrom_post_planner_gpuscan(PlannedStmt *pstmt, Plan **p_plan);

@@ -522,6 +522,76 @@ gpuscan_pullup_devquals(Plan *plannode,
 #endif
 
 /*
+ * pgstrom_pullup_outer_scan
+ *
+ * It tries to pull up underlying SeqScan or GpuScan node if it is mergeable
+ * to the upper node.
+ */
+bool
+pgstrom_pullup_outer_scan(Plan *plannode,
+						  bool allow_expression,
+						  List **p_outer_quals)
+{
+	List		   *outer_quals;
+	ListCell	   *lc;
+
+	if (IsA(plannode, SeqScan))
+	{
+		SeqScan	   *seqscan = (SeqScan *) plannode;
+
+		outer_quals = seqscan->plan.qual;
+		/* Scan-quals must be entirely device executable */
+		if (!pgstrom_device_expression((Expr *) outer_quals))
+			return false;
+	}
+	else if (pgstrom_plan_is_gpuscan(plannode))
+	{
+		CustomScan	   *cscan = (CustomScan *) plannode;
+		GpuScanInfo	   *gs_info = deform_gpuscan_info(cscan);
+
+		/* Scan-quals must be entirely device executable */
+		if (cscan->scan.plan.qual != NIL)
+			return false;
+		outer_quals = gs_info->dev_quals;
+		Assert(pgstrom_device_expression((Expr *) outer_quals));
+	}
+	else
+	{
+		/* quick bailout if unavailable to pull-up */
+		return false;
+	}
+
+	/*
+	 * Check whether target-list of the outer scan node is legal.
+	 * GpuJoin expects tlist of underlying node has only Var-nodes;
+	 * that makes projection simple. GpuPreAgg may have expression
+	 * node on the tlist.
+	 *
+	 * XXX - Can we share the device projection code of GpuScan
+	 * for GpuPreAgg with expression input? One major difference
+	 * is GpuPreAgg needs expression as input, but GpuScan builds
+	 * CPU accessible output.
+	 */
+	foreach (lc, plannode->targetlist)
+	{
+		TargetEntry	   *tle = lfirst(lc);
+
+		if (!IsA(tle->expr, Var) && !allow_expression)
+			return false;
+
+		if (!pgstrom_device_expression(tle->expr))
+			return false;
+	}
+
+	/*
+	 * return the properties
+	 */
+	*p_outer_quals = copyObject(outer_quals);
+
+	return true;
+}
+
+/*
  * gpuscan_try_replace_seqscan
  *
  *
@@ -759,22 +829,14 @@ pgstrom_plan_is_gpuscan(const Plan *plan)
  *
  * It makes GPU code to perform device projection to extract a valid
  * kern_tupitem into tup_values/tup_isnull form.
- *
- * NOTE: GpuScan expects host pointer
- *       GpuJoin expects internal format
- *
  */
-static bool
+static void
 codegen_device_projection(StringInfo source,
-						  const char *kernel_name,
-						  bool use_host_addr,
+						  codegen_context *context,
 						  Index scanrelid,
 						  TupleDesc tupdesc,
-						  List *tlist_dev,
-						  codegen_context *context)
+						  List *tlist_dev)
 {
-	Index			scanrelid = cscan->scan.scanrelid;
-	List		   *scan_tlist = cscan->custom_scan_tlist;
 	AttrNumber	   *varremaps;
 	Bitmapset	   *varattnos;
 	ListCell	   *lc;
@@ -793,10 +855,10 @@ codegen_device_projection(StringInfo source,
 	/*
 	 * step.1 - declaration of function and KVAR_xx for expressions
 	 */
-	appendStringInfo(
+	appendStringInfoString(
 		&decl,
 		"STATIC_FUNCTION(void)\n"
-		"%s(kern_context *kcxt,\n"
+		"gpuscan_projection(kern_context *kcxt,\n"
 		"					kern_data_store *kds,\n"
 		"                   kern_tupitem *tupitem,\n"
 		"                   cl_int format,\n"
@@ -804,12 +866,11 @@ codegen_device_projection(StringInfo source,
 		"                   cl_bool *tup_isnull,\n"
 		"                   cl_bool *tup_internal)\n"
 		"{\n"
-		"  HeapTupleHeaderData *htup;\n",
-		kernel_name);
+		"  HeapTupleHeaderData *htup;\n");
 
 	varremaps = palloc0(sizeof(AttrNumber) * list_length(tlist_dev));
 	varattnos = NULL;
-	foreach (lc, scan_tlist)
+	foreach (lc, tlist_dev)
 	{
 		TargetEntry	   *tle = lfirst(lc);
 
@@ -899,7 +960,7 @@ codegen_device_projection(StringInfo source,
 				"        curr = (char *)TYPEALIGN(cmeta.attalign, curr);\n");
 
 		/* Put values on tup_values/tup_isnull and KVAR_xx if referenced */
-		for (j=0; j < list_length(scan_tlist); j++)
+		for (j=0; j < list_length(tlist_dev); j++)
 		{
 			if (varremaps[j] != attr->attnum)
 				continue;
@@ -954,7 +1015,7 @@ codegen_device_projection(StringInfo source,
 				"    else\n"
 				"    {\n");
 
-			for (j=0; j < list_length(scan_tlist); j++)
+			for (j=0; j < list_length(tlist_dev); j++)
 			{
 				if (varremaps[j] == attr->attnum)
 					appendStringInfo(
@@ -1030,7 +1091,7 @@ codegen_device_projection(StringInfo source,
 		"    if (htup)\n"
 		"    {\n");
 
-	foreach (lc, scan_tlist)
+	foreach (lc, tlist_dev)
 	{
 		TargetEntry	   *tle = lfirst(lc);
 		Oid				type_oid;
@@ -1107,7 +1168,7 @@ codegen_device_projection(StringInfo source,
 		"    if (htup)\n"
 		"    {\n");
 
-	foreach (lc, scan_tlist)
+	foreach (lc, tlist_dev)
 	{
 		TargetEntry	   *tle = lfirst(lc);
 		Oid				type_oid;
@@ -1188,7 +1249,7 @@ codegen_device_projection(StringInfo source,
 		"    if (htup)\n"
 		"    {\n");
 
-	foreach (lc, scan_tlist)
+	foreach (lc, tlist_dev)
 	{
 		TargetEntry	   *tle = lfirst(lc);
 		Oid				type_oid;
@@ -1258,12 +1319,7 @@ codegen_device_projection(StringInfo source,
 	appendStringInfo(source, "%s\n%s", decl.data, body.data);
 	pfree(decl.data);
 	pfree(body.data);
-
-	return true;
 }
-
-
-
 
 /*
  * replace_varnode_with_tlist_dev - replaces the Var node in the supplied
@@ -1272,7 +1328,7 @@ codegen_device_projection(StringInfo source,
 static Node *
 replace_varnode_with_tlist_dev(Node *node, List *tlist_dev)
 {
-	it (node == NULL)
+	if (node == NULL)
 		return NULL;
 
 	if (IsA(node, Var))
@@ -1292,7 +1348,7 @@ replace_varnode_with_tlist_dev(Node *node, List *tlist_dev)
 			var_dev = (Var *) tle->expr;
 
 			Assert(var_dev->varno == var->varno);
-			if (ver_dev->varattno == var->varattno)
+			if (var_dev->varattno == var->varattno)
 			{
 				Assert(var_dev->vartype == var->vartype &&
 					   var_dev->vartypmod == var->vartypmod &&
@@ -1353,6 +1409,7 @@ add_unique_expression(Expr *expr, List **p_targetlist)
  * complicated formula but executable on the device, because all host
  * side has to do is just reference the preliminary computed result.
  *
+ * 'scanrelid'		rtindex of the base relation to be scanned
  * 'tupdesc'		Descriptor of the base relation to be scanned
  * 'tlist_old'		The original target-list
  * 'allow_hostonly' True, if caller allows host-only expression in
@@ -1363,7 +1420,8 @@ add_unique_expression(Expr *expr, List **p_targetlist)
  *						relation, thus no actual projection is needed
  */
 static bool
-build_device_projection(TupleDesc tupdesc,
+build_device_projection(Index scanrelid,
+						TupleDesc tupdesc,
 						List *tlist_old,
 						bool allow_hostonly,
 						List **p_tlist_new,
@@ -1388,6 +1446,7 @@ build_device_projection(TupleDesc tupdesc,
 			Var	   *var = (Var *) tle->expr;
 
 			/* if these Asserts fail, planner messed up */
+			Assert(var->varno == scanrelid);
 			Assert(var->varlevelsup == 0);
 
 			/* GPU projection cannot contain whole-row reference */
@@ -1464,7 +1523,7 @@ build_device_projection(TupleDesc tupdesc,
 				return false;
 
 			/* 1. Pull varnodes within the expression*/
-			pull_varattnos((Node *) tle->expr, varno, &varattnos);
+			pull_varattnos((Node *) tle->expr, scanrelid, &varattnos);
 
 			/* 2. Add varnodes to tlist_dev */
 			while ((prev = bms_next_member(varattnos, prev)) >= 0)
@@ -1476,13 +1535,13 @@ build_device_projection(TupleDesc tupdesc,
 				if (anum == InvalidAttrNumber)
 					return false;
 
-				/* Add varnodes to scan_tlist */
+				/* Add varnodes to tlist_dev */
 				if (anum > 0)
 					attr = tupdesc->attrs[anum - 1];
 				else
 					attr = SystemAttributeDefinition(anum, true);
 
-				add_unique_expression((Expr *) makeVar(varno,
+				add_unique_expression((Expr *) makeVar(scanrelid,
 													   attr->attnum,
 													   attr->atttypid,
 													   attr->atttypmod,
@@ -1522,129 +1581,6 @@ build_device_projection(TupleDesc tupdesc,
 }
 
 /*
- * pgstrom_pullup_outer_scan
- *
- * It tries to pull up underlying SeqScan or GpuScan node if it is mergeable
- * to the upper node.
- */
-bool
-pgstrom_pullup_outer_scan(Plan *plannode,
-						  List *range_tables,
-						  bool allow_hostonly,
-						  const char *kern_function,
-						  StringInfo kern_source,
-						  List **p_tlist_new,
-						  List **p_outer_qual)
-{
-	Index			scanrelid;
-	List		   *tlist_old;
-	List		   *tlist_new;
-	List		   *tlist_dev;
-	List		   *outer_quals;
-	ListCell	   *lc;
-	RangeTblEntry  *rte;
-	Relation		baserel;
-	TupleDesc		tupdesc;
-
-	if (IsA(plannode, SeqScan))
-	{
-		SeqScan	   *seqscan = (SeqScan *) plannode;
-
-		scanrelid = seqscan->scanrelid;
-		tlist_old = seqscan->plan.targetlist;
-		outer_quals = seqscan->plan.qual;
-
-		/*
-		 * Qualifier has to be entirely device executable to pull-up.
-		 */
-		if (!pgstrom_device_expression((Expr *) outer_quals))
-			return false;
-	}
-	else if (pgstrom_plan_is_gpuscan(plannode))
-	{
-		CustomScan	   *cscan = (CustomScan *) plannode;
-		GpuScanInfo	   *gs_info = deform_gpuscan_info(cscan);
-
-		/* host-only qualifier prevents to pull-up outer scan */
-		if (cscan->scan.plan.qual != NIL)
-			return false;
-		scanrelid = cscan->scan.scanrelid;
-		tlist_old = cscan->scan.plan.targetlist;
-		outer_quals = cscan->scan.plan.qual;
-		Assert(pgstrom_device_expression((Expr *) outer_quals));
-	}
-	else
-	{
-		/* quick bailout if unavailable to pull-up */
-		return false;
-	}
-
-	/*
-	 * If caller don't allow to have host-only expression in the target-
-	 * list, we cannot pull-up outer scan obviously.
-	 * Host-only expression has to be processed by CPU, prior to GPU
-	 * loading, so it is not a case when we can pull-up outer scan.
-	 */
-	if (!allow_hostonly_tlist)
-	{
-		foreach (lc, tlist_old)
-		{
-			TargetEntry	   *tle = lfirst(lc);
-
-			if (!IsA(tle->expr, Var) &&
-				!pgstrom_device_expression(tle->expr))
-				return false;
-		}
-	}
-
-	/*
-	 * This plan is at least either of GpuScan or SeqScan.
-	 * For more optimal plan by surgery, we try to open the relation
-	 * and tries to make a device projection kernel
-	 */
-	rte = rt_fetch(cscan->scan.scanrelid, pstmt->rtable);
-	Assert(rte->rtekind == RTE_RELATION);
-	baserel = heap_open(rte->relid, NoLock);
-	tupdesc = RelationGetDescr(baserel);
-
-	if (build_device_projection(tupdesc,
-								tlist_old,
-								allow_hostonly,
-								&tlist_new,
-								&tlist_dev,
-								&tlist_compatible))
-		;
-
-
- ||
-		!codegen_device_projection(kern_source,
-								   tlist_devproj))
-	{
-		heap_close(baserel, NoLock);
-		return false;
-	}
-	heap_close(baserel, NoLock);
-
-	*p_outer_quals = outer_quals;
-	*p_tlist_new = tlist_new;
-	*p_tlist_dev = tlist_dev;
-
-	return true;
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-/*
  * pgstrom_post_planner_gpuscan
  *
  * Applies projection of GpuScan if needed.
@@ -1659,9 +1595,14 @@ pgstrom_post_planner_gpuscan(PlannedStmt *pstmt, Plan **p_curr_plan)
 	Relation		baserel;
 	TupleDesc		tupdesc;
 	codegen_context	context;
+	List		   *tlist_new = NIL;
+	List		   *tlist_dev = NIL;
+	bool			tlist_compatible;
+	ListCell	   *lc;
 	QualCost		qcost;
 	Cost			actual_old_cost = 0.0;
 	Cost			actual_new_cost = 0.0;
+	AttrNumber		attnum;
 
 	/* quick bailout if not supported anyway */
 	if (!pgstrom_plan_is_gpuscan(plan) && !IsA(plan, SeqScan))
@@ -1704,7 +1645,8 @@ pgstrom_post_planner_gpuscan(PlannedStmt *pstmt, Plan **p_curr_plan)
 	context.used_params = gs_info->used_params;	/* restore */
 	context.used_vars = gs_info->used_vars;		/* restore */
 
-	if (build_device_projection(tupdesc,
+	if (build_device_projection(cscan->scan.scanrelid,
+								tupdesc,
 								cscan->scan.plan.targetlist,
 								true,	/* allow host-only */
 								&tlist_new,
@@ -1774,7 +1716,11 @@ pgstrom_post_planner_gpuscan(PlannedStmt *pstmt, Plan **p_curr_plan)
 			/* update GpuScanInfo to support device projection */
 			initStringInfo(&kern);
 			appendStringInfoString(&kern, gs_info->kern_source);
-			codegen_device_projection();
+			codegen_device_projection(&kern,
+									  &context,
+									  cscan->scan.scanrelid,
+									  tupdesc,
+									  tlist_dev);
 			gs_info->kern_source = kern.data;
 			gs_info->base_fixed_width = base_fixed_width;
 			gs_info->proj_fixed_width = proj_fixed_width;
