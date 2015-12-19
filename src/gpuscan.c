@@ -2073,9 +2073,6 @@ gpuscan_next_tuple(GpuTaskState *gts)
 		 */
 		pgstrom_data_store *pds_src = gpuscan->pds_src;
 
-		if (gss->gts.curr_index == 0)
-			elog(INFO, "chunk %p has CPU fallback", gpuscan);
-
 		while (gss->gts.curr_index < pds_src->kds->nitems)
 		{
 			cl_uint			index = gss->gts.curr_index++;
@@ -2085,6 +2082,8 @@ gpuscan_next_tuple(GpuTaskState *gts)
 			if (!pgstrom_fetch_data_store(gss->base_slot, pds_src, index,
 										  &gss->scan_tuple))
 				elog(ERROR, "failed to fetch a record from pds");
+
+			ResetExprContext(econtext);
 			econtext->ecxt_scantuple = gss->base_slot;
 
 			/*
@@ -2367,7 +2366,8 @@ pgstrom_respond_gpuscan(CUstream stream, CUresult status, void *private)
 	if (status == CUDA_SUCCESS)
 	{
 		gpuscan->task.kerror = gpuscan->kern.kerror;
-		if (gpuscan->task.kerror.errcode == StromError_CpuReCheck)
+		if (gpuscan->task.kerror.errcode == StromError_CpuReCheck ||
+			gpuscan->task.kerror.errcode == StromError_DataStoreNoSpace)
 		{
 			/* clear the error instead of the CPU fallback */
 			gpuscan->task.kerror.errcode = StromError_Success;
