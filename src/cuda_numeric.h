@@ -368,9 +368,9 @@ pg_numeric_to_varlena(kern_context *kcxt, char *vl_buffer,
 	/* generate numeric data */
 	{
 		union NumericChoice	*pNumData;
-		int			sign = PG_NUMERIC_SIGN(arg.value);
-		int 		expo = PG_NUMERIC_EXPONENT(arg.value);
-		cl_ulong	mant = PG_NUMERIC_MANTISSA(arg.value);
+		int			sign = PG_NUMERIC_SIGN(value);
+		int 		expo = PG_NUMERIC_EXPONENT(value);
+		cl_ulong	mant = PG_NUMERIC_MANTISSA(value);
 		NumericDigit   *pNData;
 		int			digits;
 		int			dscale;

@@ -103,9 +103,10 @@ gpuscan_quals_eval(kern_context *kcxt,
  */
 STATIC_FUNCTION(void)
 gpuscan_projection(kern_context *kcxt,
-				   kern_data_store *kds,
+				   kern_data_store *kds_src,
 				   kern_tupitem *tupitem,
-				   cl_int format,
+				   kern_data_store *kds_dst,
+				   cl_uint dst_nitems,
 				   Datum *tup_values,
 				   cl_bool *tup_isnull,
 				   cl_bool *tup_internal);
@@ -184,7 +185,7 @@ gpuscan_projection_row(kern_gpuscan *kgpuscan,
 	kern_parambuf  *kparams = KERN_GPUSCAN_PARAMBUF(kgpuscan);
 	kern_resultbuf *kresults = KERN_GPUSCAN_RESULTBUF(kgpuscan);
 	kern_context	kcxt;
-	cl_uint			src_nitems;
+	cl_uint			dst_nitems;
 	cl_uint			offset;
 	cl_uint			count;
 	__shared__ cl_uint base;
@@ -206,8 +207,11 @@ gpuscan_projection_row(kern_gpuscan *kgpuscan,
 	assert(kresults->nrels == 1);
 	assert(kds_src->format == KDS_FORMAT_ROW);
 	assert(kds_dst->format == KDS_FORMAT_ROW);
-	src_nitems = (kresults->all_visible ? kds_src->nitems : kresults->nitems);
-	if (src_nitems > kds_dst->nrooms)
+	/* update number of visible items */
+	dst_nitems = (kresults->all_visible ? kds_src->nitems : kresults->nitems);
+	if (get_global_id() == 0)
+		kds_dst->nitems = dst_nitems;
+	if (dst_nitems > kds_dst->nrooms)
 	{
 		STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
 		goto out;
@@ -218,7 +222,7 @@ gpuscan_projection_row(kern_gpuscan *kgpuscan,
 	 */
 	memset(tup_internal, 0, sizeof(tup_internal));
 
-	if (get_global_id() < src_nitems)
+	if (get_global_id() < dst_nitems)
 	{
 		kern_tupitem   *tupitem_src;
 
@@ -230,7 +234,8 @@ gpuscan_projection_row(kern_gpuscan *kgpuscan,
 		gpuscan_projection(&kcxt,
 						   kds_src,
 						   tupitem_src,
-						   KDS_FORMAT_ROW,
+						   kds_dst,
+						   dst_nitems,
 						   tup_values,
 						   tup_isnull,
 						   tup_internal);
@@ -288,7 +293,7 @@ gpuscan_projection_slot(kern_gpuscan *kgpuscan,
 	kern_parambuf  *kparams = KERN_GPUSCAN_PARAMBUF(kgpuscan);
 	kern_resultbuf *kresults = KERN_GPUSCAN_RESULTBUF(kgpuscan);
 	kern_context	kcxt;
-	cl_uint			src_nitems;
+	cl_uint			dst_nitems;
 	kern_tupitem   *tupitem;
 	Datum		   *tup_values;
 	cl_bool		   *tup_isnull;
@@ -314,17 +319,23 @@ gpuscan_projection_slot(kern_gpuscan *kgpuscan,
 		goto out;
 	}
 	/* update number of visible items */
-	src_nitems = (kresults->all_visible ? kds_src->nitems : kresults->nitems);
+	dst_nitems = (kresults->all_visible ? kds_src->nitems : kresults->nitems);
 	if (get_global_id() == 0)
-		kds_dst->nitems = src_nitems;
-	if (src_nitems > kds_dst->nrooms)
+		kds_dst->nitems = dst_nitems;
+	if (dst_nitems > kds_dst->nrooms)
 	{
 		STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
 		goto out;
 	}
 	/* fetch the source tuple */
-	if (get_global_id() < src_nitems)
-		tupitem = KERN_DATA_STORE_TUPITEM(kds_src, get_global_id());
+	if (get_global_id() < dst_nitems)
+	{
+		if (kresults->all_visible)
+			tupitem = KERN_DATA_STORE_TUPITEM(kds_src, get_global_id());
+		else
+			tupitem = (kern_tupitem *)((char *)kds_src +
+									   kresults->results[get_global_id()]);
+	}
 	else
 		tupitem = NULL;
 
@@ -335,7 +346,8 @@ gpuscan_projection_slot(kern_gpuscan *kgpuscan,
 	gpuscan_projection(&kcxt,
 					   kds_src,
 					   tupitem,
-					   KDS_FORMAT_SLOT,
+					   kds_dst,
+					   dst_nitems,
 					   tup_values,
 					   tup_isnull,
 					   tup_internal);

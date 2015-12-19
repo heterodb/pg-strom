@@ -859,9 +859,10 @@ codegen_device_projection(StringInfo source,
 		&decl,
 		"STATIC_FUNCTION(void)\n"
 		"gpuscan_projection(kern_context *kcxt,\n"
-		"					kern_data_store *kds,\n"
+		"					kern_data_store *kds_src,\n"
 		"                   kern_tupitem *tupitem,\n"
-		"                   cl_int format,\n"
+		"                   kern_data_store *kds_dst,\n"
+		"                   cl_uint dst_nitems,\n"
 		"                   Datum *tup_values,\n"
 		"                   cl_bool *tup_isnull,\n"
 		"                   cl_bool *tup_internal)\n"
@@ -941,7 +942,7 @@ codegen_device_projection(StringInfo source,
 		appendStringInfo(
 			&temp,
 			"    /* attribute %d */\n"
-			"    cmeta = kds->colmeta[%d];\n"
+			"    cmeta = kds_src->colmeta[%d];\n"
 			"    if (!heap_hasnull || !att_isnull(%d, htup->t_bits))\n"
 			"    {\n",
 			attr->attnum,
@@ -983,7 +984,7 @@ codegen_device_projection(StringInfo source,
 			{
 				appendStringInfo(
 					&temp,
-					"      tup_values[%d] = devptr_to_host(kds,curr);\n",
+					"      tup_values[%d] = devptr_to_host(kds_src,curr);\n",
 					j);
 			}
 			referenced = true;
@@ -1079,7 +1080,7 @@ codegen_device_projection(StringInfo source,
 	 */
 	appendStringInfo(
 		&body,
-		"  if (format == KDS_FORMAT_SLOT)\n"
+		"  if (kds_dst->format == KDS_FORMAT_SLOT)\n"
 		"  {\n");
 
 	resetStringInfo(&temp);
@@ -1087,6 +1088,9 @@ codegen_device_projection(StringInfo source,
 		&temp,
 		"    cl_uint vl_len = 0;\n"
 		"    char   *vl_buf = NULL;\n"
+		"    cl_uint offset;\n"
+		"    cl_uint count;\n"
+		"    cl_uint __shared__ base;\n"
 		"\n"
 		"    if (htup)\n"
 		"    {\n");
@@ -1108,14 +1112,15 @@ codegen_device_projection(StringInfo source,
 		{
 			appendStringInfo(
 				&temp,
-				"    if (!temp_%u_v.isnull)\n"
-				"      vl_len = TYPEALIGN(sizeof(cl_uint), vl_len)\n"
-				"             + pg_numeric_to_varlena(kcxt,NULL,\n"
-				"                                     temp_%u_v.value,\n"
-				"                                     temp_%u_v.isnull);\n",
+				"      if (!temp_%u_v.isnull)\n"
+				"        vl_len = TYPEALIGN(sizeof(cl_uint), vl_len)\n"
+				"               + pg_numeric_to_varlena(kcxt,NULL,\n"
+				"                                       temp_%u_v.value,\n"
+				"                                       temp_%u_v.isnull);\n",
 				tle->resno,
 				tle->resno,
 				tle->resno);
+			needs_vlbuf = true;
 		}
 		else if (!dtype->type_byval)
 		{
@@ -1124,18 +1129,20 @@ codegen_device_projection(StringInfo source,
 
 			appendStringInfo(
 				&temp,
-				"    if (!temp_%u_v.isnull)\n"
-				"      vl_len = TYPEALIGN(%u, vl_len) + %u;\n",
+				"      if (!temp_%u_v.isnull)\n"
+				"        vl_len = TYPEALIGN(%u, vl_len) + %u;\n",
 				tle->resno,
 				dtype->type_align,
 				dtype->type_length);
+			needs_vlbuf = true;
 		}
 	}
 
 	appendStringInfo(
 		&temp,
 		"    }\n"
-		"    /* allocation of variable length buffer */\n "
+		"\n"
+		"    /* allocation of variable length buffer */\n"
 		"    vl_len = MAXALIGN(vl_len);\n"
 		"    offset = arithmetic_stairlike_add(vl_len, &count);\n"
 		"    if (get_local_id() == 0)\n"
@@ -1147,7 +1154,7 @@ codegen_device_projection(StringInfo source,
 		"    }\n"
 		"    __syncthreads();\n"
 		"\n"
-		"    if (KERN_DATA_STORE_SLOT_LENGTH(kds_dst, dst_limit) +\n"
+		"    if (KERN_DATA_STORE_SLOT_LENGTH(kds_dst, dst_nitems) +\n"
 		"        base + count > kds_dst->length)\n"
 		"    {\n"
 		"      STROM_SET_ERROR(&kcxt->e, StromError_DataStoreNoSpace);\n"
@@ -1183,20 +1190,21 @@ codegen_device_projection(StringInfo source,
 
 		appendStringInfo(
 			&body,
-			"    tup_isnull[%d] = temp_%u_v.isnull;\n",
+			"      tup_isnull[%d] = temp_%u_v.isnull;\n",
 			tle->resno - 1, tle->resno);
 
 		if (type_oid == NUMERICOID)
 		{
 			appendStringInfo(
 				&body,
-				"    if (!temp_%u_v.isnull)\n"
-				"    {\n"
-				"      vl_buf = (char *)TYPEALIGN(sizeof(cl_int), vl_buf);\n"
-				"      tup_values[%d] = devptr_to_host(kds_dst, vl_buf);\n"
-				"      vl_buf += pg_numeric_to_varlena(kcxt, vl_buf,\n"
-				"                                      temp_%u_v.value,\n"
-				"                                      temp_%u_v.isnull);\n",
+				"      if (!temp_%u_v.isnull)\n"
+				"      {\n"
+				"        vl_buf = (char *)TYPEALIGN(sizeof(cl_int), vl_buf);\n"
+				"        tup_values[%d] = devptr_to_host(kds_dst, vl_buf);\n"
+				"        vl_buf += pg_numeric_to_varlena(kcxt, vl_buf,\n"
+				"                                        temp_%u_v.value,\n"
+				"                                        temp_%u_v.isnull);\n"
+				"       }\n",
 				tle->resno,
 				tle->resno - 1,
 				tle->resno,
@@ -1204,11 +1212,10 @@ codegen_device_projection(StringInfo source,
 		}
 		else if (dtype->type_byval)
 		{
-			/* FIXME: How to transform to the datum? */
 			appendStringInfo(
 				&body,
-				"    if (!temp_%u_v.isnull)\n"
-				"      tup_values[%d] = pg_%s_to_datum(temp_%u_v.value);\n",
+				"      if (!temp_%u_v.isnull)\n"
+				"        tup_values[%d] = pg_%s_to_datum(temp_%u_v.value);\n",
 				tle->resno,
 				tle->resno - 1,
 				dtype->type_name,
@@ -1219,13 +1226,13 @@ codegen_device_projection(StringInfo source,
 			Assert(dtype->type_length > 0);
 			appendStringInfo(
 				&body,
-				"    if (!temp_%u_v.isnull)\n"
-				"    {\n"
-				"      vl_buf = (char *)TYPEALIGN(%u, vl_buf);\n"
-				"      tup_values[%d] = devptr_to_host(kds_dst, vl_buf);\n"
-				"      memcpy(vl_buf, &temp_%u_v.value, %d);\n"
-				"      vl_buf += %d;\n"
-				"    }\n",
+				"      if (!temp_%u_v.isnull)\n"
+				"      {\n"
+				"        vl_buf = (char *)TYPEALIGN(%u, vl_buf);\n"
+				"        tup_values[%d] = devptr_to_host(kds_dst, vl_buf);\n"
+				"        memcpy(vl_buf, &temp_%u_v.value, %d);\n"
+				"        vl_buf += %d;\n"
+				"      }\n",
 				tle->resno,
 				dtype->type_align,
 				tle->resno - 1,
@@ -1634,7 +1641,10 @@ pgstrom_post_planner_gpuscan(PlannedStmt *pstmt, Plan **p_curr_plan)
 	{
 		cscan = gpuscan_try_replace_seqscan(baserel, (SeqScan *) cscan);
 		if (!cscan)
+		{
+			heap_close(baserel, NoLock);
 			return;
+		}
 	}
 	/* extract private fields */
 	gs_info = deform_gpuscan_info(cscan);
@@ -1738,16 +1748,17 @@ pgstrom_post_planner_gpuscan(PlannedStmt *pstmt, Plan **p_curr_plan)
 	/*
 	 * Declaration of functions
 	 */
-	if (gs_info->func_defs != NULL)
+	if (context.func_defs != NULL)
 	{
 		StringInfoData	kern;
 
 		initStringInfo(&kern);
 		pgstrom_codegen_func_declarations(&kern, &context);
-		appendStringInfo(&kern, "%s", gs_info->kern_source);
+		appendStringInfoString(&kern, gs_info->kern_source);
 		gs_info->kern_source = kern.data;
 	}
 	gs_info->extra_flags = context.extra_flags;
+	gs_info->func_defs = context.func_defs;
 	gs_info->used_params = context.used_params;
 	gs_info->used_vars = context.used_vars;
 	form_gpuscan_info(cscan, gs_info);
@@ -1835,6 +1846,10 @@ gpuscan_begin(CustomScanState *node, EState *estate, int eflags)
 		ExecInitExpr((Expr *) gs_info->dev_quals, &gss->gts.css.ss.ps);
 	/* true, if device projection is needed */
 	gss->dev_projection = (cscan->custom_scan_tlist != NIL);
+	/* device projection related resource consumption */
+	gss->base_fixed_width = gs_info->base_fixed_width;
+	gss->proj_fixed_width = gs_info->proj_fixed_width;
+	gss->proj_extra_width = gs_info->proj_extra_width;
 	/* 'tableoid' should not change during relation scan */
 	gss->scan_tuple.t_tableOid = RelationGetRelid(scan_rel);
 	/* assign kernel source and flags */
@@ -1847,7 +1862,7 @@ gpuscan_begin(CustomScanState *node, EState *estate, int eflags)
 		pgstrom_preload_cuda_program(&gss->gts);
 	/* initialize resource for CPU fallback */
 	gss->base_slot = MakeSingleTupleTableSlot(RelationGetDescr(scan_rel));
-	if (!gss->dev_projection)
+	if (gss->dev_projection)
 	{
 		ExprContext	   *econtext = gss->gts.css.ss.ps.ps_ExprContext;
 		TupleTableSlot *scan_slot = gss->gts.css.ss.ss_ScanTupleSlot;
@@ -2058,6 +2073,9 @@ gpuscan_next_tuple(GpuTaskState *gts)
 		 */
 		pgstrom_data_store *pds_src = gpuscan->pds_src;
 
+		if (gss->gts.curr_index == 0)
+			elog(INFO, "chunk %p has CPU fallback", gpuscan);
+
 		while (gss->gts.curr_index < pds_src->kds->nitems)
 		{
 			cl_uint			index = gss->gts.curr_index++;
@@ -2067,13 +2085,13 @@ gpuscan_next_tuple(GpuTaskState *gts)
 			if (!pgstrom_fetch_data_store(gss->base_slot, pds_src, index,
 										  &gss->scan_tuple))
 				elog(ERROR, "failed to fetch a record from pds");
+			econtext->ecxt_scantuple = gss->base_slot;
 
 			/*
 			 * step.1 - evaluate dev_quals if any
 			 */
 			if (gss->dev_quals != NIL)
 			{
-				econtext->ecxt_scantuple = gss->base_slot;
 				if (!ExecQual(gss->dev_quals, econtext, false))
 					continue;
 			}
@@ -2081,7 +2099,9 @@ gpuscan_next_tuple(GpuTaskState *gts)
 			/*
 			 * step.2 - makes a projection if any
 			 */
-			if (gss->base_proj != NULL)
+			if (gss->base_proj == NULL)
+				slot = gss->base_slot;
+			else
 			{
 				slot = ExecProject(gss->base_proj, &is_done);
 				if (is_done == ExprEndResult)
