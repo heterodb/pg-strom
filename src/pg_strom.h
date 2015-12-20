@@ -271,6 +271,8 @@ struct GpuTaskState
 	bool			be_row_format;	/* true, if KDS_FORMAT_ROW is preferable */
 	bool			scan_bulk;		/* bulk outer load, if true */
 	double			scan_bulk_density;	/* density of bulk input, if any */
+	BlockNumber		curr_blknum;	/* current block number to scan table */
+	BlockNumber		last_blknum;	/* last block number to scan table */
 	TupleTableSlot *scan_overflow;	/* temp buffer, if unable to load */
 	cl_long			curr_index;		/* current position on the curr_task */
 	struct GpuTask *curr_task;		/* a task currently processed */
@@ -622,6 +624,9 @@ extern bool pgstrom_pullup_outer_scan(Plan *plannode,
 									  List **p_outer_qual);
 extern bool pgstrom_path_is_gpuscan(const Path *path);
 extern bool pgstrom_plan_is_gpuscan(const Plan *plan);
+extern pgstrom_data_store *pgstrom_exec_scan_chunk(GpuTaskState *gts,
+												   Size chunk_length);
+extern void pgstrom_rewind_scan_chunk(GpuTaskState *gts);
 extern void pgstrom_post_planner_gpuscan(PlannedStmt *pstmt, Plan **p_plan);
 extern void pgstrom_gpuscan_setup_bulkslot(PlanState *outer_ps,
 										   ProjectionInfo **p_bulk_proj,

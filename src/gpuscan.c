@@ -143,9 +143,7 @@ typedef struct
 typedef struct {
 	GpuTaskState	gts;
 
-	BlockNumber		curr_blknum;
-	BlockNumber		last_blknum;
-	HeapTupleData	scan_tuple;
+	HeapTupleData	scan_tuple;		/* buffer to fetch tuple */
 	List		   *dev_tlist;		/* tlist to be returned from the device */
 	List		   *dev_quals;		/* quals to be run on the device */
 	bool			dev_projection;	/* true, if device projection is valid */
@@ -1835,9 +1833,6 @@ gpuscan_begin(CustomScanState *node, EState *estate, int eflags)
 	gss->gts.cb_next_chunk = gpuscan_next_chunk;
 	gss->gts.cb_next_tuple = gpuscan_next_tuple;
 
-	/* initialize the start/end position */
-	gss->curr_blknum = 0;
-	gss->last_blknum = RelationGetNumberOfBlocks(scan_rel);
 	/* initialize device tlist for CPU fallback */
 	gss->dev_tlist = (List *)
 		ExecInitExpr((Expr *) cscan->custom_scan_tlist, &gss->gts.css.ss.ps);
@@ -1977,67 +1972,78 @@ create_pgstrom_gpuscan_task(GpuScanState *gss, pgstrom_data_store *pds_src)
 	return gpuscan;
 }
 
+/*
+ * pgstrom_exec_scan_chunk
+ *
+ * It makes advance the scan pointer of the relation.
+ */
+pgstrom_data_store *
+pgstrom_exec_scan_chunk(GpuTaskState *gts, Size chunk_length)
+{
+	Relation		base_rel = gts->css.ss.ss_currentRelation;
+	TupleDesc		tupdesc = RelationGetDescr(base_rel);
+	Snapshot		snapshot = gts->css.ss.ps.state->es_snapshot;
+	pgstrom_data_store *pds = NULL;
+	struct timeval	tv1, tv2;
+
+	/* no more blocks to read */
+	if (gts->curr_blknum >= gts->last_blknum)
+		return NULL;
+
+	PERFMON_BEGIN(&gts->pfm_accum, &tv1);
+	pds = pgstrom_create_data_store_row(gts->gcontext,
+										tupdesc,
+										chunk_length,
+										false);
+	pds->kds->table_oid = RelationGetRelid(base_rel);
+
+	/*
+	 * TODO: We have to stop block insert if and when device projection
+	 * will increase the buffer consumption than threshold.
+	 * OR,
+	 * specify smaller chunk by caller. GpuScan may become wise using
+	 * adaptive buffer size control by row selevtivity on run-time.
+	 */
+
+	/* fill up this data-store */
+	while (gts->curr_blknum < gts->last_blknum &&
+		   pgstrom_data_store_insert_block(pds, base_rel,
+										   gts->curr_blknum,
+										   snapshot, true) >= 0)
+		gts->curr_blknum++;
+
+	if (pds->kds->nitems == 0)
+	{
+		pgstrom_release_data_store(pds);
+		pds = NULL;
+	}
+	PERFMON_END(&gts->pfm_accum, time_outer_load, &tv1, &tv2);
+
+	return pds;
+}
+
+/*
+ * pgstrom_rewind_scan_chunk - rewind the position to read
+ */
+void
+pgstrom_rewind_scan_chunk(GpuTaskState *gts)
+{
+	Assert(gts->css.ss.ss_currentRelation != NULL);
+	gts->curr_blknum = 0;
+}
+
 static GpuTask *
 gpuscan_next_chunk(GpuTaskState *gts)
 {
-	pgstrom_gpuscan	   *gpuscan = NULL;
 	GpuScanState	   *gss = (GpuScanState *) gts;
-	Relation			rel = gss->gts.css.ss.ss_currentRelation;
-	TupleDesc			tupdesc = RelationGetDescr(rel);
-	Snapshot			snapshot = gss->gts.css.ss.ps.state->es_snapshot;
-	bool				end_of_scan = false;
+	pgstrom_gpuscan	   *gpuscan;
 	pgstrom_data_store *pds;
-	struct timeval tv1, tv2;
 
-	/* no more blocks to read */
-	if (gss->curr_blknum > gss->last_blknum)
+	pds = pgstrom_exec_scan_chunk(gts, pgstrom_chunk_size());
+	if (!pds)
 		return NULL;
 
-	PERFMON_BEGIN(&gss->gts.pfm_accum, &tv1);
-
-	while (!gpuscan && !end_of_scan)
-	{
-		pds = pgstrom_create_data_store_row(gss->gts.gcontext,
-											tupdesc,
-											pgstrom_chunk_size(),
-											false);
-		pds->kds->table_oid = RelationGetRelid(rel);
-
-		/*
-		 * TODO: We have to stop block insert if and when device projection
-		 * will increase the buffer consumption than threshold.
-		 */
-
-		/* fill up this data-store */
-		while (gss->curr_blknum < gss->last_blknum &&
-			   pgstrom_data_store_insert_block(pds, rel,
-											   gss->curr_blknum,
-											   snapshot, true) >= 0)
-			gss->curr_blknum++;
-
-		if (pds->kds->nitems > 0)
-			gpuscan = create_pgstrom_gpuscan_task(gss, pds);
-		else
-		{
-			pgstrom_release_data_store(pds);
-
-			/* NOTE: In case when it scans on a large hole (that is
-			 * continuous blocks contain invisible tuples only; may
-			 * be created by DELETE with relaxed condition),
-			 * pgstrom_data_store_insert_block() may return negative
-			 * value without valid tuples, even though we don't reach
-			 * either end of relation or chunk.
-			 * So, we need to check whether we actually touched on
-			 * the end-of-relation. If not, retry scanning.
-			 *
-			 * XXX - Is the above behavior still right?
-			 */
-			if (gss->curr_blknum >= gss->last_blknum)
-				end_of_scan = true;
-		}
-	}
-	PERFMON_END(&gss->gts.pfm_accum, time_outer_load, &tv1, &tv2);
-
+	gpuscan = create_pgstrom_gpuscan_task(gss, pds);
 	return &gpuscan->task;
 }
 
@@ -2122,7 +2128,7 @@ gpuscan_next_tuple(GpuTaskState *gts)
 }
 
 static TupleTableSlot *
-	gpuscan_exec(CustomScanState *node)
+gpuscan_exec(CustomScanState *node)
 {
 	return ExecScan(&node->ss,
 					(ExecScanAccessMtd) pgstrom_exec_gputask,
@@ -2144,18 +2150,18 @@ gpuscan_exec_bulk(CustomScanState *node)
 
 	PERFMON_BEGIN(&gss->gts.pfm_accum, &tv1);
 
-	while (gss->curr_blknum < gss->last_blknum)
+	while (gss->gts.curr_blknum < gss->gts.last_blknum)
 	{
 		pds = pgstrom_create_data_store_row(gss->gts.gcontext,
 											tupdesc,
 											pgstrom_chunk_size(),
 											false);
 		/* fill up this data store */
-		while (gss->curr_blknum < gss->last_blknum &&
+		while (gss->gts.curr_blknum < gss->gts.last_blknum &&
 			   pgstrom_data_store_insert_block(pds, rel,
-											   gss->curr_blknum,
+											   gss->gts.curr_blknum,
 											   snapshot, true) >= 0)
-			gss->curr_blknum++;
+			gss->gts.curr_blknum++;
 
 		if (pds->kds->nitems > 0)
 			break;
@@ -2189,7 +2195,7 @@ gpuscan_rescan(CustomScanState *node)
     pgstrom_cleanup_gputaskstate(&gss->gts);
 
 	/* OK, rewind the position to read */
-	gss->curr_blknum = 0;
+	pgstrom_rewind_scan_chunk(&gss->gts);
 }
 
 static void

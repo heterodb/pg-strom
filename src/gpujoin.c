@@ -92,6 +92,7 @@ typedef struct
 	double		bulkload_density;
 	Expr	   *outer_quals;
 	double		outer_ratio;
+	double		outer_nrows;
 	/* for each depth */
 	List	   *nrows_ratio;
 	List	   *ichunk_size;
@@ -124,6 +125,7 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 					makeInteger(double_as_long(gj_info->bulkload_density)));
 	exprs = lappend(exprs, gj_info->outer_quals);
 	privs = lappend(privs, makeInteger(double_as_long(gj_info->outer_ratio)));
+	privs = lappend(privs, makeInteger(double_as_long(gj_info->outer_nrows)));
 	/* for each depth */
 	privs = lappend(privs, gj_info->nrows_ratio);
 	privs = lappend(privs, gj_info->ichunk_size);
@@ -162,6 +164,7 @@ deform_gpujoin_info(CustomScan *cscan)
 		long_as_double(intVal(list_nth(privs, pindex++)));
 	gj_info->outer_quals = list_nth(exprs, eindex++);
 	gj_info->outer_ratio = long_as_double(intVal(list_nth(privs, pindex++)));
+	gj_info->outer_nrows = long_as_double(intVal(list_nth(privs, pindex++)));
 	/* for each depth */
 	gj_info->nrows_ratio = list_nth(privs, pindex++);
 	gj_info->ichunk_size = list_nth(privs, pindex++);
@@ -244,6 +247,7 @@ typedef struct
 	List		   *join_types;
 	ExprState	   *outer_quals;
 	double			outer_ratio;
+	double			outer_nrows;
 	List		   *hash_outer_keys;
 	List		   *join_quals;
 	/* current window of inner relations */
@@ -1596,6 +1600,7 @@ create_gpujoin_plan(PlannerInfo *root,
 	CustomScan	   *cscan;
 	codegen_context	context;
 	Plan		   *outer_plan;
+	List		   *outer_quals;
 	List		   *host_quals;
 	ListCell	   *lc;
 	double			outer_nrows;
@@ -1614,6 +1619,7 @@ create_gpujoin_plan(PlannerInfo *root,
 
 	memset(&gj_info, 0, sizeof(GpuJoinInfo));
 	gj_info.outer_ratio = 1.0;
+	gj_info.outer_nrows = outer_plan->plan_rows;
 	gj_info.num_rels = gpath->num_rels;
 
 	outer_nrows = outer_plan->plan_rows;
@@ -1682,6 +1688,7 @@ create_gpujoin_plan(PlannerInfo *root,
 		outer_nrows = gpath->inners[i].join_nrows;
 	}
 
+#if 0
 	/*
 	 * Creation of the underlying outer Plan node. In case of SeqScan,
 	 * it may make sense to replace it with GpuScan for bulk-loading.
@@ -1719,6 +1726,19 @@ create_gpujoin_plan(PlannerInfo *root,
 			gj_info.bulkload_density = outer_density;
 		}
 	}
+	/*
+	 * XXX - meaning of bulkload will change, thus, no need to pay attention
+	 * on the density
+	 */
+#endif
+	if (pgstrom_pullup_outer_scan(outer_plan, false, &outer_quals))
+	{
+		Index	scanrelid = ((Scan *) outer_plan)->scanrelid;
+
+		cscan->scan.scanrelid = scanrelid;
+		gj_info.outer_quals = build_flatten_qualifier(outer_quals);
+		outer_plan = NULL;
+	}
 	outerPlan(cscan) = outer_plan;
 
 	/*
@@ -1742,58 +1762,6 @@ create_gpujoin_plan(PlannerInfo *root,
 
 	return &cscan->scan.plan;
 }
-
-static void
-gpujoin_textout_path(StringInfo str, const CustomPath *node)
-{
-	GpuJoinPath *gpath = (GpuJoinPath *) node;
-	int		i;
-
-	/* outer_path */
-	appendStringInfo(str, " :outer_path %s",
-					 nodeToString(gpath->outer_path));
-	/* num_rels */
-	appendStringInfo(str, " :num_rels %d", gpath->num_rels);
-	/* host_quals */
-	appendStringInfo(str, " :host_quals %s", nodeToString(gpath->host_quals));
-	/* inner relations */
-	appendStringInfo(str, " :inners (");
-	for (i=0; i < gpath->num_rels; i++)
-	{
-		appendStringInfo(str, "{");
-		/* join_type */
-		appendStringInfo(str, " :join_type %d",
-						 (int)gpath->inners[i].join_type);
-		/* join nrows */
-		appendStringInfo(str, " :join_nrows %zu",
-						 (Size)gpath->inners[i].join_nrows);
-		/* scan_path */
-		appendStringInfo(str, " :scan_path %s",
-						 nodeToString(gpath->inners[i].scan_path));
-		/* hash_quals */
-		appendStringInfo(str, " :hash_quals %s",
-						 nodeToString(gpath->inners[i].hash_quals));
-		/* join_quals */
-		appendStringInfo(str, " :join_quals %s",
-						 nodeToString(gpath->inners[i].join_quals));
-		/* ichunk_size */
-		appendStringInfo(str, " :ichunk_size %zu",
-						 gpath->inners[i].ichunk_size);
-		/* nloops_minor */
-		appendStringInfo(str, " :nloops_minor %d",
-						 gpath->inners[i].nloops_minor);
-		/* nloops_major */
-		appendStringInfo(str, " :nloops_major %d",
-						 gpath->inners[i].nloops_major);
-		/* hash_nslots */
-		appendStringInfo(str, " :hash_nslots %d",
-						 gpath->inners[i].hash_nslots);
-		appendStringInfo(str, "}");
-	}
-	appendStringInfo(str, ")");
-}
-
-
 
 typedef struct
 {
@@ -1918,6 +1886,7 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 	gjs->join_types = gj_info->join_types;
 	gjs->outer_quals = ExecInitExpr((Expr *)gj_info->outer_quals, ps);
 	gjs->outer_ratio = gj_info->outer_ratio;
+	gjs->outer_nrows = gj_info->outer_nrows;
 	gjs->gts.css.ss.ps.qual = (List *)
 		ExecInitExpr((Expr *)cscan->scan.plan.qual, ps);
 
@@ -3107,7 +3076,7 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs,
 	double				inner_ratio;
 	double				inner_ratio_total;
 
-	outer_plan_nrows = outerPlanState(gjs)->plan->plan_rows;
+	outer_plan_nrows = gjs->outer_nrows;
 
 	/*
 	 * If valid inner_base[] is given, we set starting position here.
@@ -3590,8 +3559,6 @@ static GpuTask *
 gpujoin_next_chunk(GpuTaskState *gts)
 {
 	GpuJoinState   *gjs = (GpuJoinState *) gts;
-	PlanState	   *outer_node = outerPlanState(gjs);
-	TupleDesc		tupdesc = ExecGetResultType(outer_node);
 	pgstrom_data_store *pds = NULL;
 	struct timeval	tv1, tv2;
 
@@ -3638,14 +3605,27 @@ gpujoin_next_chunk(GpuTaskState *gts)
 			 */
 			if (gjs->outer_scan_done)
 			{
-				ExecReScan(outerPlanState(gjs));
+				if (gjs->gts.css.ss.ss_currentRelation)
+					pgstrom_rewind_scan_chunk(&gjs->gts);
+				else
+					ExecReScan(outerPlanState(gjs));
 				gjs->outer_scan_done = false;
 			}
 		}
 
 		PERFMON_BEGIN(&gts->pfm_accum, &tv1);
-		if (!gjs->gts.scan_bulk)
+		if (gjs->gts.css.ss.ss_currentRelation)
 		{
+			/* Scan and load the outer relation by itself */
+			pds = pgstrom_exec_scan_chunk(gts, pgstrom_chunk_size());
+			if (!pds)
+				gjs->outer_scan_done = true;
+		}
+		else if (!gjs->gts.scan_bulk)
+		{
+			PlanState   *outer_node = outerPlanState(gjs);
+			TupleDesc	tupdesc = ExecGetResultType(outer_node);
+
 			while (true)
 			{
 				TupleTableSlot *slot;
@@ -3684,7 +3664,7 @@ gpujoin_next_chunk(GpuTaskState *gts)
 		}
 		else
 		{
-			pds = BulkExecProcNode(outer_node);
+			pds = BulkExecProcNode(outerPlanState(gjs));
 			if (!pds)
 				gjs->outer_scan_done = true;
 		}
@@ -5771,7 +5751,6 @@ pgstrom_init_gpujoin(void)
 	/* setup path methods */
 	gpujoin_path_methods.CustomName				= "GpuJoin";
 	gpujoin_path_methods.PlanCustomPath			= create_gpujoin_plan;
-	gpujoin_path_methods.TextOutCustomPath		= gpujoin_textout_path;
 
 	/* setup plan methods */
 	gpujoin_plan_methods.CustomName				= "GpuJoin";

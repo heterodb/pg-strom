@@ -20,6 +20,7 @@
 #include "funcapi.h"
 #include "lib/ilist.h"
 #include "port/atomics.h"
+#include "storage/bufmgr.h"
 #include "storage/ipc.h"
 #include "storage/latch.h"
 #include "storage/proc.h"
@@ -1175,6 +1176,14 @@ pgstrom_init_gputaskstate(GpuContext *gcontext, GpuTaskState *gts)
 	gts->cuda_modules = NULL;
 	gts->scan_done = false;
 	gts->scan_bulk = false;
+	gts->curr_blknum = 0;
+	if (gts->css.ss.ss_currentRelation)
+	{
+		Relation	scan_rel = gts->css.ss.ss_currentRelation;
+		gts->last_blknum = RelationGetNumberOfBlocks(scan_rel);
+	}
+	else
+		gts->last_blknum = 0;
 	gts->scan_overflow = NULL;
 	SpinLockInit(&gts->lock);
 	dlist_init(&gts->tracked_tasks);
