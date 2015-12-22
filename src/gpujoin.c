@@ -1689,29 +1689,6 @@ create_gpujoin_plan(PlannerInfo *root,
 	}
 
 #if 0
-	/*
-	 * Creation of the underlying outer Plan node. In case of SeqScan,
-	 * it may make sense to replace it with GpuScan for bulk-loading.
-	 */
-	if (IsA(outer_plan, SeqScan) || IsA(outer_plan, CustomScan))
-	{
-		Query	   *parse = root->parse;
-		List	   *outer_quals = NIL;
-		double		outer_ratio = 1.0;
-		Plan	   *alter_plan;
-
-		alter_plan = pgstrom_try_replace_plannode(outer_plan,
-												  parse->rtable,
-												  &outer_quals,
-												  &outer_ratio);
-		if (alter_plan)
-		{
-			gj_info.outer_quals = build_flatten_qualifier(outer_quals);
-			gj_info.outer_ratio = outer_ratio;
-			outer_plan = alter_plan;
-		}
-	}
-
 	/* check bulkload availability */
 	if (IsA(outer_plan, CustomScan))
 	{

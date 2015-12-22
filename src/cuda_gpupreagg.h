@@ -235,10 +235,12 @@ gpupreagg_nogroup_calc(kern_context *kcxt,
  */
 STATIC_FUNCTION(void)
 gpupreagg_projection(kern_context *kcxt,
-					 kern_data_store *kds_in,
-					 kern_data_store *kds_src,
-					 size_t rowidx_in,
-					 size_t rowidx_out);
+					 kern_data_store *kds_src,	/* in */
+					 kern_tupitem *tupitem,		/* in */
+					 kern_data_store *kds_dst,	/* out */
+					 Datum *dst_values,			/* out */
+					 cl_char *dst_isnull);		/* out */
+
 /*
  * check qualifiers being pulled-up from the outer relation.
  * if not valid, this record shall not be processed.
@@ -469,8 +471,9 @@ gpupreagg_preparation(kern_gpupreagg *kgpreagg,
 {
 	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	kern_context	kcxt;
+	kern_tupitem   *tupitem;
 	cl_uint			offset;
-	cl_uint			nitems;
+	cl_uint			count;
 	size_t			kds_index = get_global_id();
 	size_t			hash_size;
 	size_t			hash_index;
@@ -499,39 +502,42 @@ gpupreagg_preparation(kern_gpupreagg *kgpreagg,
 	}
 
 	/* check qualifiers */
-	if (kds_index < kds_in->nitems)
-	{
-		if (!gpupreagg_qual_eval(&kcxt, kds_in, kds_index))
-			kds_index = kds_in->nitems;	/* ensure this thread is not valid */
-	}
+	if (kds_index < kds_in->nitems &&
+		gpupreagg_qual_eval(&kcxt, kds_in, kds_index))
+		tupitem = KERN_DATA_STORE_TUPITEM(kds_in, kds_index);
+	else
+		tupitem = NULL;		/* not a visible tuple */
 
 	/* calculation of total number of rows to be processed in this work-
 	 * group.
 	 */
-	offset = arithmetic_stairlike_add(kds_index < kds_in->nitems ? 1 : 0,
-									  &nitems);
+	offset = arithmetic_stairlike_add(tupitem != NULL ? 1 : 0, &count);
 
 	/* Allocation of the result slot on the kds_src. */
 	if (get_local_id() == 0)
 	{
-		if (nitems > 0)
-			base = atomicAdd(&kds_src->nitems, nitems);
+		if (count > 0)
+			base = atomicAdd(&kds_src->nitems, count);
 		else
 			base = 0;
 	}
 	__syncthreads();
 
 	/* GpuPreAgg should never increase number of items */
-	assert(base + nitems <= kds_src->nrooms);
+	assert(base + count <= kds_src->nrooms);
 
 	/* do projection */
-	if (kds_index < kds_in->nitems)
+	if (tupitem != NULL)
 	{
-		gpupreagg_projection(&kcxt,
-							 kds_in,			/* input kds */
-							 kds_src,			/* source of reduction kds */
-							 kds_index,			/* rowidx of kds_in */
-							 base + offset);	/* rowidx of kds_src */
+		Datum	   *dst_values = KERN_DATA_STORE_VALUES(kds_src, base + count);
+		cl_char	   *dst_isnull = KERN_DATA_STORE_ISNULL(kds_dst, base + count);
+
+		gpupreagg_projection(&kds,
+							 kds_in,		/* input kds */
+							 tupitem,		/* input tuple */
+							 kds_src,		/* destination kds */
+							 dst_values,	/* destination values[] array */
+							 dst_isnull);	/* destination isnull[] array */
 	}
 	/* write-back execution status into host-side */
 	kern_writeback_error_status(&kgpreagg->kerror, kcxt.e);

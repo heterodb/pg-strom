@@ -65,12 +65,10 @@ typedef struct
 	Size			varlena_unitsz;	/* estimated unit size of varlena */
 	cl_int			safety_limit;	/* reasonable limit for reduction */
 	cl_int			key_dist_salt;	/* salt, if more distribution needed */
-	List		   *outer_quals;	/* device quals pulled-up */
+	List		   *outer_quals;	/* device executable quals of outer-scan */
 	const char	   *kern_source;
 	int				extra_flags;
 	List		   *used_params;	/* referenced Const/Param */
-	Bitmapset	   *outer_attrefs;	/* bitmap of referenced outer attributes */
-	Bitmapset	   *tlist_attrefs;	/* bitmap of referenced tlist attributes */
 	bool			has_numeric;	/* if true, result contains numeric val */
 	bool			has_notbyval;	/* if true, result contains varlena or
 									 * indirect reference (!attbyval) */
@@ -102,18 +100,6 @@ form_gpupreagg_info(CustomScan *cscan, GpuPreAggInfo *gpa_info)
 	privs = lappend(privs, makeString(pstrdup(gpa_info->kern_source)));
 	privs = lappend(privs, makeInteger(gpa_info->extra_flags));
 	exprs = lappend(exprs, gpa_info->used_params);
-	/* outer_attrefs */
-	temp = NIL;
-	i = -1;
-	while ((i = bms_next_member(gpa_info->outer_attrefs, i)) >= 0)
-		temp = lappend_int(temp, i);
-	privs = lappend(privs, temp);
-	/* tlist_attrefs */
-	temp = NIL;
-	i = -1;
-	while ((i = bms_next_member(gpa_info->tlist_attrefs, i)) >= 0)
-		temp = lappend_int(temp, i);
-	privs = lappend(privs, temp);
 	privs = lappend(privs, makeInteger(gpa_info->has_numeric));
 	privs = lappend(privs, makeInteger(gpa_info->has_notbyval));
 
@@ -154,20 +140,6 @@ deform_gpupreagg_info(CustomScan *cscan)
 	gpa_info->kern_source = strVal(list_nth(privs, pindex++));
 	gpa_info->extra_flags = intVal(list_nth(privs, pindex++));
 	gpa_info->used_params = list_nth(exprs, eindex++);
-	/* outer_attrefs */
-	tempset = NULL;
-	temp = list_nth(privs, pindex++);
-	foreach (cell, temp)
-		tempset = bms_add_member(tempset, lfirst_int(cell));
-	gpa_info->outer_attrefs = tempset;
-
-	/* tlist_attrefs */
-	tempset = NULL;
-	temp = list_nth(privs, pindex++);
-	foreach (cell, temp)
-		tempset = bms_add_member(tempset, lfirst_int(cell));
-	gpa_info->tlist_attrefs = tempset;
-
 	gpa_info->has_numeric = intVal(list_nth(privs, pindex++));
 	gpa_info->has_notbyval = intVal(list_nth(privs, pindex++));
 
@@ -2652,6 +2624,293 @@ gpupreagg_codegen_projection_corr(StringInfo body, FuncExpr *func,
 		pc->rowidx_label);
 }
 
+/*
+ * gpupreagg_codegen_projection
+ *
+ *
+ *
+ *
+ */
+static char *
+gpupreagg_codegen_projection(CustomScan *cscan,
+							 Relation outer_baserel,
+							 GpuPreAggInfo *gpa_info,
+							 codegen_context *context)
+{
+	Oid			namespace_oid = get_namespace_oid("pgstrom", false);
+	List	   *tlist_gpa = cscan->scan.plan.targetlist;
+	List	   *tlist_dev = cscan->custom_scan_tlist;
+	ListCell   *lc;
+	AttrNumber *varremaps;
+	Bitmapset  *varattnos;
+	StringInfoData decl;
+	StringInfoData body;
+	StringInfoData temp;
+	StringInfoData temp_null;
+
+
+	initStringInfo(&decl);
+	initStringInfo(&body);
+	initStringInfo(&temp);
+	initStringInfo(&temp_null);
+
+	appendStringInfoString(
+		&decl,
+		"STATIC_FUNCTION(void)\n"
+		"gpupreagg_projection(kern_context *kcxt,\n"
+		"                     kern_data_store *kds_src,\n"
+		"                     kern_tupitem *tupitem,\n"
+		"                     kern_data_store *kds_dst,\n"
+		"                     Datum *dst_values,\n"
+		"                     cl_char *dst_isnull)\n"
+		"{\n"
+		"  HeapTupleHeaderData *htup = &tupitem->htup;\n");
+
+	/* init projection context */
+	memset(&pc, 0, sizeof(codegen_projection_context));
+	pc.kds_label = "kds_src";
+	pc.ktoast_label = "kds_in";
+	pc.rowidx_label = "rowidx_out";
+	pc.context = context;
+
+	/*
+	 * construction of kparam_0 - that is an array of cl_char, to inform
+	 * kernel which fields are grouping-key, or aggregate function or not.
+	 */
+	kparam_0 = (Const *) linitial(context->used_params);
+	length = VARHDRSZ + sizeof(cl_char) * list_length(targetlist);
+	vl_datum = palloc0(length);
+	SET_VARSIZE(vl_datum, length);
+	kparam_0->constvalue = PointerGetDatum(vl_datum);
+	kparam_0->constisnull = false;
+	gpagg_atts = (cl_char *)VARDATA(vl_datum);
+
+	/*
+	 * Step.1 - List up variables of outer-scan/relation to be referenced
+	 * by aggregate function or grouping keys.
+	 *
+	 * 'varremaps' indicates the source attribute of the outer-scan/relation
+	 * to be moved by simple reference.
+	 * 'varattnos' indicates the source attribute of the outer relation to be
+	 * referenced within expression; thus, we have to set up KVAR variables.
+	 */
+	varremaps = palloc0(sizeof(AttrNumber) * list_length(tlist_gpa));
+	varattnos = NULL;
+	foreach (lc, tlist_gpa)
+	{
+		TargetEntry *tle = lfirst(lc);
+
+		if (IsA(tle->expr, Var))
+		{
+			Var	   *var = (Var *) tle->expr;
+
+			Assert(var->varno == INDEX_VAR);
+			Assert(var->varattno > 0);
+			varremaps[tle->resno - 1] = var->varattno;
+			/* track usage of this field */
+			gpagg_atts[tle->resno - 1] = GPUPREAGG_FIELD_IS_GROUPKEY;
+		}
+		else if (IsA(tle->expr, FuncExpr))
+		{
+			pull_varattnos((Node *) tle->expr, INDEX_VAR, &varattnos);
+			/* track usage of this field */
+			gpagg_atts[tle->resno - 1] = GPUPREAGG_FIELD_IS_AGGFUNC;
+		}
+		else
+			elog(ERROR, "bug? unexpected node type: %s",
+				 nodeToString(pc.tle->expr));
+	}
+
+	/*
+	 * Step.2 - Extract tupitem of the outer relation
+	 *
+	 *
+	 */
+	if (!outer_baserel)
+	{
+		foreach (lc, tlist_dev)
+		{
+			TargetEntry	   *tle = lfirst(lc);
+			Var			   *var = (Var *)tle->expr;
+			bool			referenced = false;
+
+			/* Just reference of the outer attribute */
+			Assert(IsA(Var, var));
+			Assert(var->varno == OUTER_VAR);
+			Assert(var->varattno > 0 &&
+				   var->varattno <= list_length(tlist_dev));
+
+			appendStringInfo(
+				&temp,
+				"  /* ---- attribute %d ---- */\n"
+				"  cmeta = kds_src->colmeta[%d];\n"
+				"  if (!heap_hasnull || !att_isnull(%d, htup->t_bits))\n"
+				"  {\n"
+				"    if (cmeta.attlen > 0)\n"
+				"      curr = (char *)TYPEALIGN(cmeta.attalign, curr);\n"
+				"    else if (!VARATT_NOT_PAD_BYTE(curr))\n"
+				"      curr = (char *)TYPEALIGN(cmeta.attalign, curr);\n",
+				tle->resno,
+				tle->resno - 1,
+				tle->resno - 1);
+
+			/* Direct move if this variable is referenced by varremaps */
+			for (j=0; j < list_length(tlist_gpa); j++)
+			{
+				int16	typlen;
+				bool	typbyval;
+
+				if (varremaps[j] != tle->resno)
+					continue;
+
+				resetStringInfo(&temp_null);
+
+				appendStringInfo(
+					&temp,
+					"    dst_isnull[%d] = false;\n",
+					j);
+				appendStringInfo(
+					&temp_null,
+					"    dst_isnull[%d] = true;\n",
+					j);
+				get_typlenbyval(var->vartype, &typlen, &typbyval);
+				if (!typbyval)
+				{
+					appendStringInfo(
+						&temp,
+						"    dst_values[%d] = PointerGetDatum(curr);\n",
+						j);
+				}
+				else
+				{
+					appendStringInfo(
+						&temp,
+						"    dst_values[%d] = *((%s *) curr);\n",
+						(typlen == sizeof(cl_long) ? "cl_long" :
+						 typlen == sizeof(cl_int) ? "cl_int" :
+						 typlen == sizeof(cl_short) ? "cl_short" : "cl_char"));
+				}
+			}
+
+			/* Construct KVAR_%u if this variable is referenced by varattnos */
+			k = tle->resno - FirstLowInvalidHeapAttributeNumber;
+			if (bms_is_member(k, varattnos))
+			{
+				appendStringInfo(
+					&temp,
+					"    KVAR_%u = pg_%s_datum_ref(kcxt, curr, false);\n",
+					tle->resno,
+					dtype->type_name);
+				appendStringInfo(
+					&temp_null,
+					"    KVAR_%u = pg_%s_datum_ref(kcxt, NULL, false);\n",
+					tle->resno,
+					dtype->type_name);
+			}
+			/* Make advance the offset */
+			appendStringInfoString(
+				&temp,
+				"    curr += (cmeta.attlen > 0 ?\n"
+				"             cmeta.attlen :\n"
+				"             VARSIZE_ANY(curr));\n"
+				"  }\n");
+			/* Put NULL handling if needed */
+			if (temp_null.len > 0)
+				appendStringInfo(
+					&temp,
+					"  else\n"
+					"  {\n"
+					"%s"
+					"  }\n", temp_null.data);
+			/* we have to walk on until this column at least */
+			appendStringInfoString(&body, temp.data);
+			resetStringInfo(&temp);
+		}
+	}
+	else
+	{
+		TupleDesc	tupdesc = RelationGetDescr(outer_baserel);
+		Index		scanrelid = cscan->scan.scanrelid;
+		Bitmapset  *outer_varref = NULL;
+
+		pull_varattnos((Node *) tlist_dev, scanrelid, &outer_varref);
+		for (i=0; i < tupdesc->natts; i++)
+		{
+			appendStringInfo(
+				&temp,
+				"  /* ---- attribute %d ---- */\n"
+				"  cmeta = kds_src->colmeta[%d];\n"
+				"  if (!heap_hasnull || !att_isnull(%d, htup->t_bits))\n"
+				"  {\n"
+				"    if (cmeta.attlen > 0)\n"
+				"      curr = (char *)TYPEALIGN(cmeta.attalign, curr);\n"
+				"    else if (!VARATT_NOT_PAD_BYTE(curr))\n"
+				"      curr = (char *)TYPEALIGN(cmeta.attalign, curr);\n",
+				tle->resno,
+				tle->resno - 1,
+				tle->resno - 1);
+
+			// check whether KVAR is needed
+
+			// check 
+
+
+			OVAR_%u = pg_%s_vref(curr);
+			
+
+
+
+
+
+            for (j=0; j < list_length(tlist_gpa); j++)
+            {
+                int16   typlen;
+                bool    typbyval;
+
+                if (varremaps[j] != tle->resno)
+                    continue;
+
+
+
+
+				/* direct move if myself is referenced by varremaps */
+				/* construct OVAR if myself is referenced by varattnos */
+			}
+		}
+
+		/* then, construct KVAR */
+
+	}
+
+	
+
+
+	/*
+	 * Step.1 - pull-out variables to be referenced by expression
+	 */
+	foreach (lc, targetlist)
+	{
+		TargetEntry *tle = lfirst(lc);
+
+		if (IsA(tle->expr, Var))
+			continue;
+
+		
+
+	
+
+
+
+
+
+
+
+}
+
+
+
+
+#if 0
 static char *
 gpupreagg_codegen_projection(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 							 codegen_context *context)
@@ -2890,9 +3149,12 @@ gpupreagg_codegen_projection(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 
 	return str.data;
 }
+#3ndif
 
 static char *
-gpupreagg_codegen(CustomScan *cscan, GpuPreAggInfo *gpa_info,
+gpupreagg_codegen(CustomScan *cscan,
+				  Relation outer_baserel,
+				  GpuPreAggInfo *gpa_info,
 				  codegen_context *context)
 {
 	StringInfoData	str;
@@ -2931,7 +3193,8 @@ gpupreagg_codegen(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 												GPUPREAGG_NOGROUP_REDUCTION,
 												context);
 	/* generate an initial data loading function */
-	fn_projection = gpupreagg_codegen_projection(cscan, gpa_info, context);
+	fn_projection = gpupreagg_codegen_projection(cscan, outer_baserel,
+												 gpa_info, context);
 
 	/* OK, add type/function declarations */
 	initStringInfo(&str);
@@ -2969,12 +3232,13 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	GpuPreAggInfo	gpa_info;
 	Sort		   *sort_node;
 	Plan		   *outer_node;
-	Plan		   *alter_node;
+	Relation		outer_baserel = NULL;
 	List		   *pre_tlist = NIL;
 	List		   *agg_quals = NIL;
 	List		   *agg_tlist = NIL;
 	AttrNumber	   *attr_maps = NULL;
 	Bitmapset	   *attr_refs = NULL;
+	List		   *outer_tlist = NIL;
 	List		   *outer_quals = NIL;
 	double			outer_ratio = 1.0;
 	bool			has_numeric = false;
@@ -3041,12 +3305,6 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 		 */
 		sort_node = NULL;
 		outer_node = outerPlan(agg);
-		alter_node = pgstrom_try_replace_plannode(outer_node,
-												  pstmt->rtable,
-												  &outer_quals,
-												  &outer_ratio);
-		if (alter_node)
-			outer_node = alter_node;
 		new_agg_strategy = agg->aggstrategy;
 	}
 	else if (IsA(outerPlan(agg), Sort))
@@ -3059,12 +3317,6 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 		 */
 		sort_node = (Sort *)outerPlan(agg);
 		outer_node = outerPlan(sort_node);
-		alter_node = pgstrom_try_replace_plannode(outer_node,
-												  pstmt->rtable,
-												  &outer_quals,
-												  &outer_ratio);
-		if (alter_node)
-			outer_node = alter_node;
 		new_agg_strategy = agg->aggstrategy;
 	}
 	else
@@ -3080,12 +3332,6 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 		 */
 		sort_node = NULL;
 		outer_node = outerPlan(agg);
-		alter_node = pgstrom_try_replace_plannode(outer_node,
-												  pstmt->rtable,
-												  &outer_quals,
-												  &outer_ratio);
-		if (alter_node)
-			outer_node = alter_node;
 		new_agg_strategy = AGG_HASHED;
 
 		/*
@@ -3105,7 +3351,7 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 		if (hashentrysize * agg->plan.plan_rows > work_mem * 1024L)
 			return;
 	}
-
+#if 0
 	/* check availability of outer bulkload */
 	if (IsA(outer_node, CustomScan))
 	{
@@ -3117,7 +3363,7 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 			bulkload_density <= (1.0 + pgstrom_bulkload_density))
 			outer_bulkload = true;
 	}
-
+#endif
 	/*
 	 * Estimation of the "effective" number of groups.
 	 *
@@ -3162,6 +3408,53 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 		agg->plan.total_cost <= newcost_agg.total_cost)
 		return;
 
+	/* OK, let's construct GpuPreAgg node here */
+
+	/* Pulls-up outer node if it is a simple SeqScan or GpuScan */
+	if (!pgstrom_pullup_outer_scan(outer_node, true, &outer_quals))
+	{
+		outerPlan(cscan)	= outer_node;
+		outer_tlist			= outer_node->targetlist;
+	}
+	else
+	{
+		Index		scanrelid = ((Scan *) outer_node)->scanrelid;
+		RangeTblEntry *rte = rt_fetch(scanrelid, pstmt->rtable);
+
+		cscan->scan.scanrelid = scanrelid;
+		outer_baserel		= heap_open(rte->relid, NoLock);
+		outer_tlist			= outer_node->targetlist;
+		outer_node			= NULL;
+	}
+
+	/*
+	 * Construction of tlist_dev - All GpuPreAgg shall do is just reference
+	 * of the underlying outer plan, if any. If it performs relation scan
+	 * by itself, GpuPreAgg node also does projection by itself.
+	 */
+	foreach (lc, outer_tlist)
+	{
+		TargetEntry	   *tle = lfirst(lc);
+		TargetEntry	   *tle_new;
+		Expr		   *expr;
+
+		if (outer_node != NULL)
+			expr = (Expr *) makeVar(OUTER_VAR,
+									tle->resno,
+									exprType((Node *) tle->expr),
+									exprTypmod((Node *) tle->expr),
+									exprCollation((Node *) tle->expr),
+									0);
+		else
+			expr = copyObject(tle->expr);
+
+		tle_new = makeTargetEntry(exprnode,
+								  list_length(tlist_dev) + 1,
+								  tle->resname,
+								  false);
+		tlist_dev = lappend(tlist_dev, tle_new);
+	}
+
 	/*
 	 * OK, let's construct GpuPreAgg node then inject it.
 	 */
@@ -3174,30 +3467,9 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	cscan->scan.plan.qual         = NIL;
 	cscan->scan.scanrelid         = 0;
 	cscan->flags                  = 0;
-	cscan->custom_scan_tlist      = NIL;
+	cscan->custom_scan_tlist      = tlist_dev;
 	cscan->custom_relids          = NULL;
 	cscan->methods                = &gpupreagg_scan_methods;
-	foreach (cell, outer_node->targetlist)
-	{
-		TargetEntry *tle = lfirst(cell);
-		TargetEntry	*ps_tle;
-		Var		   *varnode;
-
-		varnode = makeVar(OUTER_VAR,
-						  tle->resno,
-						  exprType((Node *) tle->expr),
-						  exprTypmod((Node *) tle->expr),
-						  exprCollation((Node *) tle->expr),
-						  0);
-		ps_tle = makeTargetEntry((Expr *) varnode,
-								 list_length(cscan->custom_scan_tlist) + 1,
-								 tle->resname ? pstrdup(tle->resname) : NULL,
-								 false);
-		cscan->custom_scan_tlist = lappend(cscan->custom_scan_tlist, ps_tle);
-	}
-	if (IsA(outer_node, CustomScan))
-		((CustomScan *) outer_node)->flags |= CUSTOMPATH_PREFERE_ROW_FORMAT;
-	outerPlan(cscan)		= outer_node;
 
 	/* also set up private information */
 	memset(&gpa_info, 0, sizeof(GpuPreAggInfo));
@@ -3205,7 +3477,6 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	gpa_info.grpColIdx      = palloc0(sizeof(AttrNumber) * agg->numCols);
 	for (i=0; i < agg->numCols; i++)
 		gpa_info.grpColIdx[i] = attr_maps[agg->grpColIdx[i] - 1];
-	gpa_info.outer_quals    = outer_quals;
 	gpa_info.outer_bulkload = outer_bulkload;
 	gpa_info.bulkload_density = bulkload_density;
 	gpa_info.num_groups     = num_groups;
@@ -3213,29 +3484,17 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	gpa_info.varlena_unitsz = varlena_unitsz;
 	gpa_info.safety_limit   = safety_limit;
 	gpa_info.key_dist_salt  = key_dist_salt;
-	gpa_info.outer_quals    = outer_quals;
+	gpa_info.outer_quals	= outer_quals;
 
 	/*
 	 * construction of the kernel code according to the target-list
 	 * and qualifiers (pulled-up from outer plan).
 	 */
 	pgstrom_init_codegen_context(&context);
-	gpa_info.kern_source = gpupreagg_codegen(cscan, &gpa_info, &context);
+	gpa_info.kern_source = gpupreagg_codegen(cscan, outer_baserel,
+											 &gpa_info, &context);
 	gpa_info.extra_flags = extra_flags | context.extra_flags;
 	gpa_info.used_params = context.used_params;
-	pull_varattnos((Node *)context.used_vars,
-				   INDEX_VAR,
-				   &gpa_info.outer_attrefs);
-	foreach (cell, cscan->scan.plan.targetlist)
-	{
-		TargetEntry	   *tle = lfirst(cell);
-
-		if (IsA(tle->expr, Const))
-			continue;
-		gpa_info.tlist_attrefs =
-			bms_add_member(gpa_info.tlist_attrefs, tle->resno -
-						   FirstLowInvalidHeapAttributeNumber);
-	}
 	gpa_info.has_numeric = has_numeric;
 	gpa_info.has_notbyval = has_notbyval;
 	form_gpupreagg_info(cscan, &gpa_info);
@@ -3280,6 +3539,9 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 		for (i=0; i < subagg->numCols; i++)
 			subagg->grpColIdx[i] = attr_maps[subagg->grpColIdx[i] - 1];
 	}
+
+	if (outer_baserel)
+		heap_close(outer_baserel, NoLock);
 }
 
 bool

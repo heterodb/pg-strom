@@ -240,34 +240,6 @@ subtract_tuplecost_if_bulkload(Cost *p_run_cost, Path *pathnode)
 	*p_run_cost = run_cost;
 }
 
-Plan *
-pgstrom_try_replace_plannode(Plan *plannode, List *range_tables,
-							 List **p_outer_quals, double *p_outer_ratio)
-{
-	if (IsA(plannode, CustomScan))
-	{
-		CustomScan *cscan = (CustomScan *) plannode;
-
-		if ((cscan->flags & CUSTOMPATH_SUPPORT_BULKLOAD) == 0)
-			return NULL;
-		/* GpuScan may want to pull-up device qualifiers */
-		if (pgstrom_plan_is_gpuscan(plannode))
-			return gpuscan_pullup_devquals(plannode, range_tables,
-										   p_outer_quals, p_outer_ratio);
-		*p_outer_quals = NIL;
-		*p_outer_ratio = 1.0;
-		return plannode;
-	}
-	else if (IsA(plannode, SeqScan))
-	{
-		return legacy_gpuscan_try_replace_seqscan((SeqScan *) plannode,
-										   range_tables,
-										   p_outer_quals,
-										   p_outer_ratio);
-	}
-	return NULL;
-}
-
 /*
  * pgstrom_get_bulkload_density
  *

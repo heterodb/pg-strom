@@ -541,10 +541,7 @@ extern Size pgstrom_chunk_size_limit(void);
 extern cl_uint estimate_num_chunks(Path *pathnode);
 extern void subtract_tuplecost_if_bulkload(Cost *p_run_cost, Path *pathnode);
 extern double pgstrom_get_bulkload_density(Plan *child_plan);
-extern Plan *pgstrom_try_replace_plannode(Plan *child_plan,
-										  List *range_tables,
-										  List **p_outer_quals,
-										  double *p_outer_ratio);
+
 extern pgstrom_data_store *BulkExecProcNode(PlanState *node);
 extern Datum pgstrom_fixup_kernel_numeric(Datum numeric_datum);
 extern bool pgstrom_fetch_data_store(TupleTableSlot *slot,
@@ -609,16 +606,6 @@ extern void pgstrom_init_datastore(void);
 /*
  * gpuscan.c
  */
-#if 1
-extern Plan *gpuscan_pullup_devquals(Plan *plannode,
-									 List *range_tables,
-									 List **p_outer_quals,
-									 double *p_outer_ratio);
-extern Plan *legacy_gpuscan_try_replace_seqscan(SeqScan *seqscan,
-										 List *range_tables,
-										 List **p_outer_quals,
-										 double *p_outer_ratio);
-#endif
 extern bool pgstrom_pullup_outer_scan(Plan *plannode,
 									  bool allow_expression,
 									  List **p_outer_qual);
