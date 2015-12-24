@@ -1127,6 +1127,63 @@ toast_raw_datum_size(kern_context *kcxt, varlena *attr)
 }
 
 /*
+ * Macro to extract a heap-tuple
+ *
+ * usage:
+ * char   *addr;
+ *
+ * EXTRACT_HEAP_TUPLE_BEGIN(kds, htup, addr)
+ *  -> addr shall point the device pointer of the first field, or NULL
+ * EXTRACT_HEAP_TUPLE_NEXT(addr)
+ *  -> addr shall point the device pointer of the second field, or NULL
+ *     :
+ * EXTRACT_HEAP_TUPLE_END()
+ */
+#define EXTRACT_HEAP_TUPLE_BEGIN(kds, htup, ADDR)	\
+	do {											\
+		HeapTupleHeaderData *__htup = (htup);		\
+		kern_data_store	*__kds = (kds);				\
+		kern_colmeta	__cmeta;					\
+		cl_uint			__colidx = 0;				\
+		cl_uint			__ncols;					\
+		cl_bool			__heap_hasnull;				\
+		char		   *__pos;										\
+																	\
+		__heap_hasnull = ((__htup->t_infomask & HEAP_HASNULL) != 0);	\
+		__ncols = min((kds)->ncols, __htup->t_infomask2 & HEAP_NATTS_MASK);	\
+		__cmeta = __kds->colmeta[__colidx];								\
+		__pos = (char *)(__htup) + __htup->t_hoff;						\
+		assert(__pos == (char *)MAXALIGN(__pos));						\
+																		\
+		if (__colidx < __ncols &&										\
+			(!__heap_hasnull || !att_isnull(__colidx, __htup->t_bits)))	\
+			(ADDR) = __pos;												\
+		else															\
+			(ADDR) = NULL
+
+#define EXTRACT_HEAP_TUPLE_NEXT(ADDR)									\
+		__colidx++;														\
+		if (__colidx < __ncols &&										\
+			(!__heap_hasnull || !att_isnull(__colidx, __htup->t_bits)))	\
+		{																\
+			__cmeta = __kds->colmeta[__colidx];							\
+																		\
+			if (__cmeta.attlen > 0)										\
+				__pos = (char *)TYPEALIGN(__cmeta.attalign, __pos);		\
+			else if (!VARATT_NOT_PAD_BYTE(__pos))						\
+				__pos = (char *)TYPEALIGN(__cmeta.attalign, __pos);		\
+			(ADDR) = __pos;												\
+			__pos += (__cmeta.attlen > 0 ?								\
+					  __cmeta.attlen :									\
+					  VARSIZE_ANY(__pos));								\
+		}																\
+		else															\
+			(ADDR) = NULL
+
+#define EXTRACT_HEAP_TUPLE_END()										\
+	} while(0)
+
+/*
  * kern_get_datum
  *
  * Reference to a particular datum on the supplied kernel data store.
