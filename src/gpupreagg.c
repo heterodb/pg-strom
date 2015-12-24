@@ -2641,18 +2641,17 @@ gpupreagg_codegen_projection(CustomScan *cscan,
 	List	   *tlist_gpa = cscan->scan.plan.targetlist;
 	List	   *tlist_dev = cscan->custom_scan_tlist;
 	ListCell   *lc;
-	AttrNumber *varremaps;
-	Bitmapset  *varattnos;
+	AttrNumber *varremaps = NULL;
+	Bitmapset  *varattnos = NULL;
+	Bitmapset  *kvars_decl = NULL;
+	Bitmapset  *ovars_decl = NULL;
 	StringInfoData decl;
 	StringInfoData body;
 	StringInfoData temp;
-	StringInfoData temp_null;
-
 
 	initStringInfo(&decl);
 	initStringInfo(&body);
 	initStringInfo(&temp);
-	initStringInfo(&temp_null);
 
 	appendStringInfoString(
 		&decl,
@@ -2664,7 +2663,20 @@ gpupreagg_codegen_projection(CustomScan *cscan,
 		"                     Datum *dst_values,\n"
 		"                     cl_char *dst_isnull)\n"
 		"{\n"
-		"  HeapTupleHeaderData *htup = &tupitem->htup;\n");
+		"  union {\n"
+		"    pg_int2_t        int2_v;\n"
+		"    pg_int4_t        int4_v;\n"
+		"    pg_int8_t        int8_v;\n"
+		"    pg_float4_t      float4_v;\n"
+		"    pg_float8_t      float8_v;\n"
+		"    pg_numeric_t     numeric_v;\n"
+		"    pg_money_t       money_v;\n"
+		"    pg_date_t        date_v;\n"
+		"    pg_time_t        time_v;\n"
+		"    pg_timestamp_t   timestamp_v;\n"
+		"    pg_timestamptz_t timestamptz_v;\n"
+		"  } temp;\n"
+		"  char   *addr;\n");
 
 	/* init projection context */
 	memset(&pc, 0, sizeof(codegen_projection_context));
@@ -2689,13 +2701,9 @@ gpupreagg_codegen_projection(CustomScan *cscan,
 	 * Step.1 - List up variables of outer-scan/relation to be referenced
 	 * by aggregate function or grouping keys.
 	 *
-	 * 'varremaps' indicates the source attribute of the outer-scan/relation
-	 * to be moved by simple reference.
-	 * 'varattnos' indicates the source attribute of the outer relation to be
-	 * referenced within expression; thus, we have to set up KVAR variables.
 	 */
 	varremaps = palloc0(sizeof(AttrNumber) * list_length(tlist_gpa));
-	varattnos = NULL;
+	pull_varattnos((Node *) tlist_gpa, INDEX_VAR, &varattnos);
 	foreach (lc, tlist_gpa)
 	{
 		TargetEntry *tle = lfirst(lc);
@@ -2704,202 +2712,247 @@ gpupreagg_codegen_projection(CustomScan *cscan,
 		{
 			Var	   *var = (Var *) tle->expr;
 
-			Assert(var->varno == INDEX_VAR);
-			Assert(var->varattno > 0);
+			Assert(var->varno == INDEX_VAR &&
+				   var->varattno > InvalidAttrNumber &&
+				   var->varattno <= list_length(tlist_dev));
 			varremaps[tle->resno - 1] = var->varattno;
-			/* track usage of this field */
-			gpagg_atts[tle->resno - 1] = GPUPREAGG_FIELD_IS_GROUPKEY;
-		}
-		else if (IsA(tle->expr, FuncExpr))
-		{
-			pull_varattnos((Node *) tle->expr, INDEX_VAR, &varattnos);
-			/* track usage of this field */
-			gpagg_atts[tle->resno - 1] = GPUPREAGG_FIELD_IS_AGGFUNC;
 		}
 		else
-			elog(ERROR, "bug? unexpected node type: %s",
-				 nodeToString(pc.tle->expr));
+		{
+			pull_varattnos((Node *) tle->expr, INDEX_VAR, &kvars_decl);
+		}
+	}
+
+	if (outer_baserel)
+	{
+		Bitmapset  *varattnos_base = NULL;
+		AttrNumber *varremaps_base = palloc0(sizeof(AttrNumber) *
+											 list_length(tlist_gpa));
+		foreach (lc, tlist_dev)
+		{
+			TargetEntry *tle = lfirst(lc);
+
+			k = tle->resno - FirstLowInvalidHeapAttributeNumber;
+			if (!bms_is_member(k, varattnos))
+				continue;		/* ignore unreferenced column */
+
+			pull_varattnos((Node *) tle->expr,
+						   cscan->scan.scanrelid,
+						   &varattnos_base);
+			if (IsA(tle->expr, Var))
+			{
+				for (i=0; i < list_length(tlist_gpa); i++)
+				{
+					if (varremaps[i] == tle->resno)
+						varremaps_base[i] = var->varattno;
+				}
+			}
+			else
+			{
+				pull_varattnos((Node *) tle->expr,
+							   cscan->scan.scanrelid,
+							   &ovars_decl);
+			}
+		}
+		varattnos = varattnos_base;
+		varremaps = varremaps_base;
 	}
 
 	/*
-	 * Step.2 - Extract tupitem of the outer relation
-	 *
-	 *
+	 * Step.2 - Extract heap-tuple of the outer relation (may be base
+	 * relation)
 	 */
+	appendStringInfo(
+		&body,
+		"  EXTRACT_HEAP_TUPLE_BEGIN(kds_src, &tupitem->htup, addr);\n");
+
 	if (!outer_baserel)
 	{
+		Assert(outerPlan(cscan) != NULL);
+
 		foreach (lc, tlist_dev)
 		{
-			TargetEntry	   *tle = lfirst(lc);
-			Var			   *var = (Var *)tle->expr;
-			bool			referenced = false;
+			TargetEntry *tle = lfirst(lc);
+			Var		   *var = (Var *) tle->expr;
+			int16		typlen;
+			bool		typbyval;
 
-			/* Just reference of the outer attribute */
-			Assert(IsA(Var, var));
+			/* should be just a reference to the outer attribute */
+			Assert(IsA(var, Var));
 			Assert(var->varno == OUTER_VAR);
 			Assert(var->varattno > 0 &&
-				   var->varattno <= list_length(tlist_dev));
-
-			appendStringInfo(
-				&temp,
-				"  /* ---- attribute %d ---- */\n"
-				"  cmeta = kds_src->colmeta[%d];\n"
-				"  if (!heap_hasnull || !att_isnull(%d, htup->t_bits))\n"
-				"  {\n"
-				"    if (cmeta.attlen > 0)\n"
-				"      curr = (char *)TYPEALIGN(cmeta.attalign, curr);\n"
-				"    else if (!VARATT_NOT_PAD_BYTE(curr))\n"
-				"      curr = (char *)TYPEALIGN(cmeta.attalign, curr);\n",
-				tle->resno,
-				tle->resno - 1,
-				tle->resno - 1);
-
-			/* Direct move if this variable is referenced by varremaps */
+				   var->varattno <= list_length(outerPlan(cscan)->targetlist));
+			get_typlenbyval(var->vartype, &typlen, &typbyval);
+			/* direct move if this variable is referenced by varremaps */
 			for (j=0; j < list_length(tlist_gpa); j++)
 			{
-				int16	typlen;
-				bool	typbyval;
-
 				if (varremaps[j] != tle->resno)
 					continue;
 
-				resetStringInfo(&temp_null);
-
-				appendStringInfo(
-					&temp,
-					"    dst_isnull[%d] = false;\n",
-					j);
-				appendStringInfo(
-					&temp_null,
-					"    dst_isnull[%d] = true;\n",
-					j);
-				get_typlenbyval(var->vartype, &typlen, &typbyval);
-				if (!typbyval)
+				if (var->vartype == NUMERICOID)
 				{
 					appendStringInfo(
 						&temp,
-						"    dst_values[%d] = PointerGetDatum(curr);\n",
-						j);
+						"  temp.numeric_v = pg_numeric_datum_ref(kcxt,addr,\n"
+						"                                        false);\n"
+						"  dst_isnull[%d] = temp_numeric.isnull;\n"
+						"  dst_values[%d] = (Datum)temp_numeric.value;\n",
+						j, j);
+				}
+				else if (!typbyval)
+				{
+					appendStringInfo(
+						&temp,
+						"  dst_isnull[%d] = (addr != NULL ? false : true);\n"
+						"  dst_values[%d] = PointerGetDatum(addr);\n",
+						j, j);
 				}
 				else
 				{
 					appendStringInfo(
 						&temp,
-						"    dst_values[%d] = *((%s *) curr);\n",
-						(typlen == sizeof(cl_long) ? "cl_long" :
-						 typlen == sizeof(cl_int) ? "cl_int" :
-						 typlen == sizeof(cl_short) ? "cl_short" : "cl_char"));
+						"  dst_isnull[%d] = (addr != NULL ? false : true);\n"
+						"  if (addr)\n"
+						"    dst_values[%d] = *((%s *) addr);\n",
+						j, j,
+						(typlen == sizeof(cl_long)  ? "cl_long" :
+						 typlen == sizeof(cl_int)   ? "cl_int" :
+						 typlen == sizeof(cl_short) ? "cl_short"
+						 							: "cl_char"));
 				}
+				referenced = true;
 			}
 
 			/* Construct KVAR_%u if this variable is referenced by varattnos */
 			k = tle->resno - FirstLowInvalidHeapAttributeNumber;
-			if (bms_is_member(k, varattnos))
+			if (bms_is_member(k, kvars_decl))
 			{
+				devtype_info   *dtype = pgstrom_devtype_lookup(var->vartype);
 				appendStringInfo(
 					&temp,
-					"    KVAR_%u = pg_%s_datum_ref(kcxt, curr, false);\n",
+					"  KVAR_%u = pg_%s_datum_ref(kcxt,addr,false);\n",
 					tle->resno,
 					dtype->type_name);
-				appendStringInfo(
-					&temp_null,
-					"    KVAR_%u = pg_%s_datum_ref(kcxt, NULL, false);\n",
-					tle->resno,
-					dtype->type_name);
+				referenced = true;
 			}
-			/* Make advance the offset */
+			/* we have to walk on until this column at least */
+			if (referenced)
+			{
+				appendStringInfoString(&body, temp.data);
+				resetStringInfo(&temp);
+			}
 			appendStringInfoString(
 				&temp,
-				"    curr += (cmeta.attlen > 0 ?\n"
-				"             cmeta.attlen :\n"
-				"             VARSIZE_ANY(curr));\n"
-				"  }\n");
-			/* Put NULL handling if needed */
-			if (temp_null.len > 0)
-				appendStringInfo(
-					&temp,
-					"  else\n"
-					"  {\n"
-					"%s"
-					"  }\n", temp_null.data);
-			/* we have to walk on until this column at least */
-			appendStringInfoString(&body, temp.data);
-			resetStringInfo(&temp);
+				"  EXTRACT_HEAP_TUPLE_NEXT(addr)\n");
 		}
+		appendStringInfoString(
+			&body,
+			"  EXTRACT_HEAP_TUPLE_END();\n");
 	}
 	else
 	{
 		TupleDesc	tupdesc = RelationGetDescr(outer_baserel);
 		Index		scanrelid = cscan->scan.scanrelid;
-		Bitmapset  *outer_varref = NULL;
+		int			i, j, k;
 
-		pull_varattnos((Node *) tlist_dev, scanrelid, &outer_varref);
+		Assert(outerPlan(cscan) == NULL);
 		for (i=0; i < tupdesc->natts; i++)
 		{
-			appendStringInfo(
+			Form_pg_attribute attr = tupdesc->attrs[i];
+			cl_bool		referenced = false;
+
+			for (j=0; j < list_length(tlist_gpa); j++)
+			{
+				if (varremaps[j] != attr->attnum)
+					continue;
+				/* NUMERIC should have an internal representation */
+				if (attr->atttypid == NUMERICOID)
+				{
+					appendStringInfo(
+						&temp,
+						"  temp.numeric_v = pg_numeric_datum_ref(kcxt,addr,\n"
+						"                                        false);\n"
+						"  base_isnull[%d] = temp_numeric.isnull;\n"
+						"  base_values[%d] = (Datum)temp_numeric.value;\n",
+						j, j);
+				}
+				else if (!attr->attbyval)
+				{
+					appendStringInfo(
+						&temp,
+						"  base_isnull[%d] = (addr != NULL ? false : true);\n"
+						"  base_values[%d] = PointerGetDatum(addr);\n",
+						j, j);
+				}
+				else
+				{
+					appendStringInfo(
+						&temp,
+						"  base_isnull[%d] = (addr != NULL ? false : true);\n"
+						"  if (addr)\n"
+						"    base_values[%d] = *((%s *) addr);\n",
+						j, j,
+						(attr->attlen == sizeof(cl_long)  ? "cl_long" :
+						 attr->attlen == sizeof(cl_int)   ? "cl_int" :
+						 attr->attlen == sizeof(cl_short) ? "cl_short"
+						 								  : "cl_char"));
+				}
+				referenced = true;
+			}
+			/*
+			 * Construct OVAR_%u
+			 */
+			k = attr->attnum - FirstLowInvalidHeapAttributeNumber;
+			if (bms_is_member(k, ovars_decl))
+			{
+				devtype_info   *dtype = pgstrom_devtype_lookup(attr->atttypid);
+				appendStringInfo(
+					&temp,
+					"  OVAR_%u = pg_%s_datum_ref(kcxt,addr,false);\n",
+					attr->attnum,
+					dtype->type_name);
+				referenced = true;
+			}
+			/* we have to walk on until this column at least */
+			if (referenced)
+			{
+				appendStringInfoString(&body, temp.data);
+				resetStringInfo(&temp);
+			}
+			appendStringInfoString(
 				&temp,
-				"  /* ---- attribute %d ---- */\n"
-				"  cmeta = kds_src->colmeta[%d];\n"
-				"  if (!heap_hasnull || !att_isnull(%d, htup->t_bits))\n"
-				"  {\n"
-				"    if (cmeta.attlen > 0)\n"
-				"      curr = (char *)TYPEALIGN(cmeta.attalign, curr);\n"
-				"    else if (!VARATT_NOT_PAD_BYTE(curr))\n"
-				"      curr = (char *)TYPEALIGN(cmeta.attalign, curr);\n",
-				tle->resno,
-				tle->resno - 1,
-				tle->resno - 1);
+				"  EXTRACT_HEAP_TUPLE_NEXT(addr)\n");
+		}
+		appendStringInfoString(
+			&body,
+			"  EXTRACT_HEAP_TUPLE_END();\n");
 
-			// check whether KVAR is needed
+		/*
+		 * Construct KVAR_%u
+		 */
+		foreach (lc, tlist_gpa)
+		{
+			TargetEntry *tle = lfirst(lc);
 
-			// check 
+			k = tle->resno - FirstLowInvalidHeapAttributeNumber;
+			if (bms_is_member(k, kvars_decl))
+			{
+				devtype_info   *dtype;
 
+				dtype = pgstrom_devtype_lookup(exprType((Node *) tle->expr));
+				if (!dtype)
+					elog(ERROR, "cache lookup failed for device type: %s",
+						 type_format_be(exprType((Node *) tle->expr)));
 
-			OVAR_%u = pg_%s_vref(curr);
-			
-
-
-
-
-
-            for (j=0; j < list_length(tlist_gpa); j++)
-            {
-                int16   typlen;
-                bool    typbyval;
-
-                if (varremaps[j] != tle->resno)
-                    continue;
-
-
-
-
-				/* direct move if myself is referenced by varremaps */
-				/* construct OVAR if myself is referenced by varattnos */
+				// put KVAR alias!
+				appendStringInfo(
+					&body,
+					"  KVAR_%u = %s;\n",
+					tle->resno,
+					pgstrom_codegen_expression(tle->expr));
 			}
 		}
-
-		/* then, construct KVAR */
-
 	}
-
-	
-
-
-	/*
-	 * Step.1 - pull-out variables to be referenced by expression
-	 */
-	foreach (lc, targetlist)
-	{
-		TargetEntry *tle = lfirst(lc);
-
-		if (IsA(tle->expr, Var))
-			continue;
-
-		
-
-	
-
-
 
 
 
