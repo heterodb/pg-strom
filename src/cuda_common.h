@@ -913,7 +913,7 @@ pg_int2_to_datum(cl_short value)
 #define PG_INT4_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(int4, cl_int)
 STATIC_INLINE(Datum)
-pg_int4_to_datum(cl_short value)
+pg_int4_to_datum(cl_int value)
 {
 	return (Datum)(((Datum) value) & 0xffffffffUL);
 }

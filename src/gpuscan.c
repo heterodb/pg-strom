@@ -2078,7 +2078,6 @@ gpuscan_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	GpuScanInfo	   *gsinfo = deform_gpuscan_info(cscan);
 	List		   *context;
 	List		   *dev_proj = NIL;
-	char		   *temp;
 	ListCell	   *lc;
 
 	/* Set up deparsing context */
@@ -2088,19 +2087,15 @@ gpuscan_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	/* Show device projection */
 	foreach (lc, cscan->custom_scan_tlist)
 		dev_proj = lappend(dev_proj, ((TargetEntry *) lfirst(lc))->expr);
-	temp = deparse_expression((Node *)dev_proj, context, es->verbose, false);
-	ExplainPropertyText("Device Projection", temp, es);
-
+	pgstrom_explain_expression(dev_proj, "GPU Projection",
+							   &gss->gts.css.ss.ps, context,
+							   ancestors, es, false, false);
 	/* Show device filter */
-	if (gsinfo->dev_quals != NIL)
-	{
-		Node   *dev_quals = (Node *) make_ands_explicit(gsinfo->dev_quals);
+	pgstrom_explain_expression(gsinfo->dev_quals, "GPU Filter",
+							   &gss->gts.css.ss.ps, context,
+                               ancestors, es, false, true);
+	// TODO: Add number of rows filtered by the device side
 
-		temp = deparse_expression(dev_quals, context, es->verbose, false);
-		ExplainPropertyText("Device Filter", temp, es);
-		show_instrumentation_count("Rows Removed by Device Fileter",
-								   2, &gss->gts.css.ss.ps, es);
-	}
 	pgstrom_explain_gputaskstate(&gss->gts, es);
 }
 

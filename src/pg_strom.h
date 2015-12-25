@@ -660,6 +660,14 @@ extern double	pgstrom_chunk_size_margin;
 
 extern void _PG_init(void);
 extern const char *pgstrom_strerror(cl_int errcode);
+
+extern void pgstrom_explain_expression(List *expr_list, const char *qlabel,
+									   PlanState *planstate,
+									   List *deparse_context,
+									   List *ancestors, ExplainState *es,
+									   bool force_prefix,
+									   bool convert_to_and);
+
 extern void show_scan_qual(List *qual, const char *qlabel,
 						   PlanState *planstate, List *ancestors,
 						   ExplainState *es);

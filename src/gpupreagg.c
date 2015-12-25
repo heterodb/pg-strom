@@ -36,6 +36,8 @@
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/pg_crc.h"
+#include "utils/rel.h"
+#include "utils/ruleutils.h"
 #include "utils/syscache.h"
 #include <math.h>
 #include "pg_strom.h"
@@ -65,6 +67,7 @@ typedef struct
 	Size			varlena_unitsz;	/* estimated unit size of varlena */
 	cl_int			safety_limit;	/* reasonable limit for reduction */
 	cl_int			key_dist_salt;	/* salt, if more distribution needed */
+	double			outer_nitems;	/* number of expected outer input */
 	List		   *outer_quals;	/* device executable quals of outer-scan */
 	const char	   *kern_source;
 	int				extra_flags;
@@ -96,6 +99,8 @@ form_gpupreagg_info(CustomScan *cscan, GpuPreAggInfo *gpa_info)
 	privs = lappend(privs, makeInteger(gpa_info->varlena_unitsz));
 	privs = lappend(privs, makeInteger(gpa_info->safety_limit));
 	privs = lappend(privs, makeInteger(gpa_info->key_dist_salt));
+	privs = lappend(privs,
+					makeInteger(double_as_long(gpa_info->outer_nitems)));
 	exprs = lappend(exprs, gpa_info->outer_quals);
 	privs = lappend(privs, makeString(pstrdup(gpa_info->kern_source)));
 	privs = lappend(privs, makeInteger(gpa_info->extra_flags));
@@ -116,7 +121,6 @@ deform_gpupreagg_info(CustomScan *cscan)
 	int			pindex = 0;
 	int			eindex = 0;
 	int			i = 0;
-	Bitmapset  *tempset;
 	List	   *temp;
 	ListCell   *cell;
 
@@ -136,6 +140,8 @@ deform_gpupreagg_info(CustomScan *cscan)
 	gpa_info->varlena_unitsz = intVal(list_nth(privs, pindex++));
 	gpa_info->safety_limit = intVal(list_nth(privs, pindex++));
 	gpa_info->key_dist_salt = intVal(list_nth(privs, pindex++));
+	gpa_info->outer_nitems =
+		long_as_double(intVal(list_nth(privs, pindex++)));
 	gpa_info->outer_quals = list_nth(exprs, eindex++);
 	gpa_info->kern_source = strVal(list_nth(privs, pindex++));
 	gpa_info->extra_flags = intVal(list_nth(privs, pindex++));
@@ -2223,46 +2229,20 @@ gpupreagg_codegen_aggcalc(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 }
 
 /*
- * static void
- * gpupreagg_projection(kern_context *kcxt,
- *                      kern_data_store *kds_in,
- *                      kern_data_store *kds_src,
- *                      size_t kds_index);
+ * gpupreagg_codegen_projection_nrows - put initial value of nrows()
  */
-typedef struct
-{
-	codegen_context *context;
-	const char	   *kds_label;
-	const char	   *ktoast_label;
-	const char	   *rowidx_label;
-	bool			use_temp_datum;
-	bool			use_temp_int2;
-	bool			use_temp_int4;
-	bool			use_temp_int8;
-	bool			use_temp_float4;
-	bool			use_temp_float8x;
-	bool			use_temp_float8y;
-	bool			use_temp_numeric;
-	bool			use_temp_money;
-	bool			use_temp_date;
-	bool			use_temp_time;
-	bool			use_temp_timestamp;
-	bool			use_temp_timestamptz;
-	TargetEntry	   *tle;
-} codegen_projection_context;
-
 static void
-gpupreagg_codegen_projection_nrows(StringInfo body, FuncExpr *func,
-								   codegen_projection_context *pc)
+gpupreagg_codegen_projection_nrows(StringInfo body, cl_int dst_index,
+								   FuncExpr *func, codegen_context *context)
 {
 	devtype_info   *dtype;
 	ListCell	   *cell;
 
-	dtype = pgstrom_devtype_lookup_and_track(INT4OID, pc->context);
+	dtype = pgstrom_devtype_lookup_and_track(INT4OID, context);
 	if (!dtype)
-		elog(ERROR, "device type lookup failed: %u", INT4OID);
+		elog(ERROR, "cache lookup failed for device type: %s",
+			 format_type_be(INT4OID));
 
-	pc->use_temp_int4 = true;
 	if (list_length(func->args) > 0)
 	{
 		appendStringInfo(body, "  if (");
@@ -2274,36 +2254,40 @@ gpupreagg_codegen_projection_nrows(StringInfo body, FuncExpr *func,
 								 "      ");
 			appendStringInfo(body, "EVAL(%s)",
 							 pgstrom_codegen_expression(lfirst(cell),
-														pc->context));
+														context));
 		}
 		appendStringInfo(body,
 						 ")\n"
 						 "  {\n"
-						 "    temp_int4.isnull = false;\n"
-						 "    temp_int4.value = 1;\n"
+						 "    dst_isnull[%d] = false;\n"
+						 "    dst_values[%d] = pg_int4_to_datum(1);\n"
 						 "  }\n"
 						 "  else\n"
 						 "  {\n"
-						 "    temp_int4.isnull = true;\n"
-						 "    temp_int4.value = 0;\n"
-						 "  }\n");
+						 "    dst_isnull[%d] = true;\n"
+						 "    dst_values[%d] = pg_int4_to_datum(0);\n"
+						 "  }\n",
+						 dst_index - 1,
+						 dst_index - 1,
+						 dst_index - 1,
+						 dst_index - 1);
 	}
 	else
-		appendStringInfo(body,
-						 "  temp_int4.isnull = false;\n"
-						 "  temp_int4.value = 1;\n");
-	appendStringInfo(body,
-					 "  pg_%s_vstore(%s,kcxt,%u,%s,temp_int4);\n",
-					 dtype->type_name,
-					 pc->kds_label,
-					 pc->tle->resno - 1,
-					 pc->rowidx_label);
+		appendStringInfo(
+			body,
+			"  dst_isnull[%d] = false;\n"
+			"  dst_values[%d] = 1;\n",
+			dst_index - 1,
+			dst_index - 1);
 }
 
+/*
+ * gpupreagg_codegen_projection_misc - put initial value of MIN, MAX or SUM
+ */
 static void
-gpupreagg_codegen_projection_misc(StringInfo body, FuncExpr *func,
-								  const char *func_name,
-								  codegen_projection_context *pc)
+gpupreagg_codegen_projection_misc(StringInfo body, cl_int dst_index,
+								  FuncExpr *func, const char *func_name,
+								  codegen_context *context)
 {
 	/* Store the original value as-is. If clause is conditional and
 	 * false, NULL shall be set. Even if NULL, value fields MUST have
@@ -2313,7 +2297,6 @@ gpupreagg_codegen_projection_misc(StringInfo body, FuncExpr *func,
 	Node		   *clause = linitial(func->args);
 	Oid				type_oid = exprType(clause);
 	devtype_info   *dtype;
-	const char	   *temp_val;
 	const char	   *max_const;
 	const char	   *min_const;
 	const char	   *zero_const;
@@ -2335,197 +2318,168 @@ gpupreagg_codegen_projection_misc(StringInfo body, FuncExpr *func,
 			/* no break here */
 
 		case INT4OID:
-			pc->use_temp_int4 = true;
-			temp_val = "temp_int4";
 			max_const = "INT_MAX";
 			min_const = "INT_MIN";
 			zero_const = "0";
 			break;
 
 		case INT8OID:
-			pc->use_temp_int8 = true;
-            temp_val = "temp_int8";
             max_const = "LONG_MAX";
             min_const = "LONG_MIN";
             zero_const = "0";
 			break;
 
 		case FLOAT4OID:
-			pc->use_temp_float4 = true;
-			temp_val = "temp_float4";
 			max_const = "FLT_MAX";
 			min_const = "-FLT_MAX";
 			zero_const = "0.0";
 			break;
 
 		case FLOAT8OID:
-			pc->use_temp_float8x = true;
-			temp_val = "temp_float8x";
 			max_const = "DBL_MAX";
 			min_const = "-DBL_MAX";
 			zero_const = "0.0";
 			break;
 
 		case NUMERICOID:
-			pc->use_temp_numeric = true;
-			temp_val = "temp_numeric";
 			max_const = "PG_NUMERIC_MAX";
 			min_const = "PG_NUMERIC_MIN";
 			zero_const = "PG_NUMERIC_ZERO";
 			break;
 
 		case CASHOID:
-			pc->use_temp_money = true;
-			temp_val = "temp_money";
             max_const = "LONG_MAX";
             min_const = "LONG_MIN";
             zero_const = "0";
 			break;
 
 		case DATEOID:
-			pc->use_temp_date = true;
-			temp_val = "temp_date";
 			max_const = "INT_MAX";
 			min_const = "INT_MIN";
 			zero_const = "0";
 			break;
 
 		case TIMEOID:
-			pc->use_temp_time = true;
-			temp_val = "temp_time";
 			max_const = "LONG_MAX";
 			min_const = "LONG_MIN";
 			zero_const = "0";
 			break;
 
 		case TIMESTAMPOID:
-			pc->use_temp_timestamp = true;
-			temp_val = "temp_timestamp";
 			max_const = "LONG_MAX";
 			min_const = "LONG_MIN";
 			zero_const = "0";
 			break;
 
 		case TIMESTAMPTZOID:
-			pc->use_temp_timestamptz = true;
-			temp_val = "temp_timestamptz";
 			max_const = "LONG_MAX";
 			min_const = "LONG_MIN";
 			zero_const = "0";
 			break;
 
 		default:
-			elog(ERROR, "Bug? device type %s is not expected",
+			elog(ERROR, "Bug? cache lookup failed for device type: %s",
 				 format_type_be(type_oid));
 	}
-	dtype = pgstrom_devtype_lookup_and_track(type_oid, pc->context);
+	dtype = pgstrom_devtype_lookup_and_track(type_oid, context);
 	if (!dtype)
 		elog(ERROR, "device type lookup failed: %u", type_oid);
 
-	appendStringInfo(body,
-					 "  %s = %s;\n"
-					 "  if (%s.isnull)\n"
-					 "    %s.value = ",
-					 temp_val,
-					 pgstrom_codegen_expression(clause, pc->context),
-					 temp_val,
-					 temp_val);
-	if (strcmp(func_name, "pmin") == 0)
-		appendStringInfo(body, "%s;\n", max_const);
-	else if (strcmp(func_name, "pmax") == 0)
-		appendStringInfo(body, "%s;\n", min_const);
-	else if (strcmp(func_name, "psum") == 0)
-		appendStringInfo(body, "%s;\n", zero_const);
-	else
-		elog(ERROR, "unexpected partial aggregate function: %s", func_name);
-
-	appendStringInfo(body,
-					 "  pg_%s_vstore(%s,kcxt,%u,%s,%s);\n",
-					 dtype->type_name,
-					 pc->kds_label,
-					 pc->tle->resno - 1,
-					 pc->rowidx_label,
-					 temp_val);
+	appendStringInfo(
+		body,
+		"  temp.%s_v = %s;\n"
+		"  dst_isnull[%d] = temp.%s_v.isnull;\n"
+		"  if (!temp.%s_v.isnull)\n"
+		"    dst_values[%d] = pg_%s_to_datum(temp.%s_v.value);\n"
+		"  else\n"
+		"    dst_values[%d] = %s;\n",
+		dtype->type_name,
+		pgstrom_codegen_expression(clause, context),
+		dst_index - 1,
+		dtype->type_name,
+		dtype->type_name,
+		dst_index - 1,
+		dtype->type_name,
+		dtype->type_name,
+		dst_index - 1,
+		strcmp(func_name, "pmin") == 0 ? max_const :
+		strcmp(func_name, "pmax") == 0 ? min_const :
+		strcmp(func_name, "psum") == 0 ? zero_const : "__invalid__");
 }
 
+/*
+ * gpupreagg_codegen_projection_psum_x2 - Put initial value of psum_x2
+ */
 static void
-gpupreagg_codegen_projection_psum_x2(StringInfo body, FuncExpr *func,
-									 codegen_projection_context *pc)
+gpupreagg_codegen_projection_psum_x2(StringInfo body, cl_int dst_index,
+									 FuncExpr *func,
+									 codegen_context *context)
 {
 	Node		   *clause = linitial(func->args);
 	devtype_info   *dtype;
 	devfunc_info   *dfunc;
-	const char	   *temp_label;
 	const char	   *zero_label;
 
 	if (exprType(clause) == FLOAT8OID)
 	{
-		pc->use_temp_float8x = true;
-		dtype = pgstrom_devtype_lookup_and_track(FLOAT8OID, pc->context);
+		dtype = pgstrom_devtype_lookup_and_track(FLOAT8OID, context);
 		if (!dtype)
-			elog(ERROR, "device type lookup failed: %u", FLOAT8OID);
+			elog(ERROR, "cache lookup failed for device type: %s",
+				 format_type_be(FLOAT8OID));
 		dfunc = pgstrom_devfunc_lookup_and_track(F_FLOAT8MUL,
 												 InvalidOid,
-												 pc->context);
+												 context);
 		if (!dtype)
-			elog(ERROR, "device function lookup failed: %u", F_FLOAT8MUL);
-		temp_label = "temp_float8x";
+			elog(ERROR, "cache lookup failed for device function: %u",
+				 F_FLOAT8MUL);
 		zero_label = "0.0";
 	}
 	else if (exprType(clause) == NUMERICOID)
 	{
-		pc->use_temp_numeric = true;
-		dtype = pgstrom_devtype_lookup_and_track(NUMERICOID, pc->context);
+		dtype = pgstrom_devtype_lookup_and_track(NUMERICOID, context);
 		if (!dtype)
-			elog(ERROR, "device type lookup failed: %u", NUMERICOID);
+			elog(ERROR, "cache lookup failed for device type: %s",
+				 format_type_be(NUMERICOID));
 		dfunc = pgstrom_devfunc_lookup_and_track(F_NUMERIC_MUL,
 												 InvalidOid,
-												 pc->context);
+												 context);
 		if (!dtype)
 			elog(ERROR, "device function lookup failed: %u", F_NUMERIC_MUL);
-		temp_label = "temp_numeric";
 		zero_label = "PG_NUMERIC_ZERO";
 	}
 	else
-		elog(ERROR, "Bug? psum_x2 expect float8 or numeric");
+		elog(ERROR, "Bug? psum_x2 expects either float8 or numeric");
 
 	appendStringInfo(
 		body,
-		"  %s = %s;\n"
-		"  if (%s.isnull)\n"
-		"    %s.value = %s;\n"
+		"  temp.%s_v = %s;\n"
+		"  temp.%s_v = pgfn_%s(kcxt, temp.%s_v, temp.%s_v);\n"
+		"  dst_isnull[%d] = temp.%s_v.isnull;\n"
+		"  if (temp.%s_v.isnull)\n"
+		"    dst_values[%d] = %s;\n"
 		"  else\n"
-		"    %s = pgfn_%s(kcxt, %s, %s);\n"
-		"  pg_%s_vstore(%s,kcxt,%u,%s,%s);\n",
-		temp_label,
-        pgstrom_codegen_expression(clause, pc->context),
-		temp_label,
-		temp_label,
-		zero_label,
-		temp_label,
-		dfunc->func_devname,
-		temp_label,
-		temp_label,
+		"    dst_values[%d] = pg_%s_to_datum(temp.%s_v.value);\n",
+		dtype->type_name, pgstrom_codegen_expression(clause, context),
+		dtype->type_name, dfunc->func_devname,
+		dtype->type_name, dtype->type_name,
+		dst_index - 1, dtype->type_name,
 		dtype->type_name,
-		pc->kds_label,
-        pc->tle->resno - 1,
-        pc->rowidx_label,
-		temp_label);
+		dst_index - 1, zero_label,
+		dst_index - 1, dtype->type_name, dtype->type_name);
 }
 
+/*
+ * gpupreagg_codegen_projection_corr - Put initial value of pcov_XX
+ */
 static void
-gpupreagg_codegen_projection_corr(StringInfo body, FuncExpr *func,
-								  const char *func_name,
-								  codegen_projection_context *pc)
+gpupreagg_codegen_projection_corr(StringInfo body, cl_int dst_index,
+								  FuncExpr *func, const char *func_name,
+								  codegen_context *context)
 {
-	devfunc_info   *dfunc;
-	devtype_info   *dtype;
-	Node		   *filter = linitial(func->args);
-	Node		   *x_clause = lsecond(func->args);
-	Node		   *y_clause = lthird(func->args);
-
-	pc->use_temp_float8x = true;
-	pc->use_temp_float8y = true;
+	devfunc_info *dfunc;
+	Node	   *filter = linitial(func->args);
+	Node	   *x_clause = lsecond(func->args);
+	Node	   *y_clause = lthird(func->args);
 
 	if (IsA(filter, Const))
 	{
@@ -2540,93 +2494,106 @@ gpupreagg_codegen_projection_corr(StringInfo body, FuncExpr *func,
 		body,
 		"  temp_float8x = %s;\n"
 		"  temp_float8y = %s;\n",
-		pgstrom_codegen_expression(x_clause, pc->context),
-		pgstrom_codegen_expression(y_clause, pc->context));
+		pgstrom_codegen_expression(x_clause, context),
+		pgstrom_codegen_expression(y_clause, context));
 	appendStringInfo(
 		body,
-		"  if (temp_float8x.isnull ||\n"
-		"      temp_float8y.isnull");
+		"  if (temp_float8x.isnull || temp_float8y.isnull");
 	if (filter)
 		appendStringInfo(
 			body,
 			" ||\n"
 			"      !EVAL(%s)",
-			pgstrom_codegen_expression(filter, pc->context));
+			pgstrom_codegen_expression(filter, context));
 
-	appendStringInfo(
+	appendStringInfoString(
 		body,
 		")\n"
 		"  {\n"
-		"    temp_float8x.isnull = true;\n"
-		"    temp_float8x.value = 0.0;\n"
-		"  }\n");
+		"    temp.float8_v.isnull = true;\n"
+		"    temp_float8_v.value = 0.0;\n"
+		"  }\n"
+		"  else\n");
 
 	/* initial value according to the function */
-	if (strcmp(func_name, "pcov_y") == 0)
+	if (strcmp(func_name, "pcov_x") == 0)
 	{
-		appendStringInfo(
+		appendStringInfoString(
 			body,
-			"  else\n"
-			"    temp_float8x = temp_float8y;\n");
+			"    temp.float8_v = temp_float8x;\n");
+	}
+	else if (strcmp(func_name, "pcov_y") == 0)
+	{
+		appendStringInfoString(
+			body,
+			"    temp.float8_v = temp_float8y;\n");
 	}
 	else if (strcmp(func_name, "pcov_x2") == 0)
 	{
 		dfunc = pgstrom_devfunc_lookup_and_track(F_FLOAT8MUL,
 												 InvalidOid,
-												 pc->context);
+												 context);
 		appendStringInfo(
 			body,
-			"  else\n"
-			"    temp_float8x = pgfn_%s(kcxt,\n"
-			"                           temp_float8x,\n"
-			"                           temp_float8x);\n",
+			"    temp.float8_v = pgfn_%s(kcxt,\n"
+			"                            temp_float8x,\n"
+			"                            temp_float8x);\n",
 			dfunc->func_devname);
 	}
 	else if (strcmp(func_name, "pcov_y2") == 0)
 	{
 		dfunc = pgstrom_devfunc_lookup_and_track(F_FLOAT8MUL,
 												 InvalidOid,
-												 pc->context);
+												 context);
 		appendStringInfo(
 			body,
-			"  else\n"
-			"    temp_float8x = pgfn_%s(kcxt,\n"
-			"                           temp_float8y,\n"
-			"                           temp_float8y);\n",
+			"    temp.float8_v = pgfn_%s(kcxt,\n"
+			"                            temp_float8y,\n"
+			"                            temp_float8y);\n",
 			dfunc->func_devname);
 	}
 	else if (strcmp(func_name, "pcov_xy") == 0)
 	{
 		dfunc = pgstrom_devfunc_lookup_and_track(F_FLOAT8MUL,
 												 InvalidOid,
-												 pc->context);
+												 context);
 		appendStringInfo(
 			body,
-			"  else\n"
-			"    temp_float8x = pgfn_%s(kcxt,\n"
-			"                           temp_float8x,\n"
-			"                           temp_float8y);\n",
+			"    temp.float8_v = pgfn_%s(kcxt,\n"
+			"                            temp_float8x,\n"
+			"                            temp_float8y);\n",
 			dfunc->func_devname);
 	}
-	else if (strcmp(func_name, "pcov_x") != 0)
-		elog(ERROR, "unexpected partial covariance function: %s",
-			 func_name);
+	else
+		elog(ERROR, "unexpected partial covariance function: %s", func_name);
 
-	dtype = pgstrom_devtype_lookup_and_track(FLOAT8OID, pc->context);
+	if (!pgstrom_devtype_lookup_and_track(FLOAT8OID, context))
+		elog(ERROR, "cache lookup failed for device function: %u",
+			 FLOAT8OID);
+
 	appendStringInfo(
 		body,
-		"  if (temp_float8x.isnull)\n"
-		"    temp_float8x.value = 0.0;\n"
-		"  pg_%s_vstore(%s,kcxt,%u,%s,temp_float8x);\n",
-		dtype->type_name,
-		pc->kds_label,
-		pc->tle->resno - 1,
-		pc->rowidx_label);
+		"  dst_isnull[%d] = temp.float8_v.isnull;\n"
+		"  if (temp.float8_v.isnull)\n"
+		"    dst_values[%d] = 0.0;\n"
+		"  else\n"
+		"    dst_values[%d] = temp.float8_v.value;\n",
+		dst_index - 1,
+		dst_index - 1,
+		dst_index - 1);
 }
 
 /*
  * gpupreagg_codegen_projection
  *
+ * Constructs the kernel projection function declared as:
+ * STATIC_FUNCTION(void)
+ * gpupreagg_projection(kern_context *kcxt,
+ *                      kern_data_store *kds_src, // in, row-format
+ *                      kern_tupitem *tupitem,    // in
+ *                      kern_data_store *kds_dst  // out, slot_format
+ *                      Datum *dst_values,        // out
+ *                      cl_char *dst_isnull)      // out
  *
  *
  *
@@ -2637,17 +2604,22 @@ gpupreagg_codegen_projection(CustomScan *cscan,
 							 GpuPreAggInfo *gpa_info,
 							 codegen_context *context)
 {
-	Oid			namespace_oid = get_namespace_oid("pgstrom", false);
-	List	   *tlist_gpa = cscan->scan.plan.targetlist;
-	List	   *tlist_dev = cscan->custom_scan_tlist;
-	ListCell   *lc;
-	AttrNumber *varremaps = NULL;
-	Bitmapset  *varattnos = NULL;
-	Bitmapset  *kvars_decl = NULL;
-	Bitmapset  *ovars_decl = NULL;
-	StringInfoData decl;
-	StringInfoData body;
-	StringInfoData temp;
+	Oid				namespace_oid = get_namespace_oid("pgstrom", false);
+	List		   *tlist_gpa = cscan->scan.plan.targetlist;
+	List		   *tlist_dev = cscan->custom_scan_tlist;
+	ListCell	   *lc;
+	int				i, j, k;
+	AttrNumber	   *varremaps = NULL;
+	Bitmapset	   *varattnos = NULL;
+	Bitmapset	   *kvars_decl = NULL;
+	Bitmapset	   *ovars_decl = NULL;
+	Const		   *kparam_0;
+	cl_char		   *gpagg_atts;
+	Size			vl_length;
+	struct varlena *vl_datum;
+	StringInfoData	decl;
+	StringInfoData	body;
+	StringInfoData	temp;
 
 	initStringInfo(&decl);
 	initStringInfo(&body);
@@ -2676,26 +2648,9 @@ gpupreagg_codegen_projection(CustomScan *cscan,
 		"    pg_timestamp_t   timestamp_v;\n"
 		"    pg_timestamptz_t timestamptz_v;\n"
 		"  } temp;\n"
-		"  char   *addr;\n");
-
-	/* init projection context */
-	memset(&pc, 0, sizeof(codegen_projection_context));
-	pc.kds_label = "kds_src";
-	pc.ktoast_label = "kds_in";
-	pc.rowidx_label = "rowidx_out";
-	pc.context = context;
-
-	/*
-	 * construction of kparam_0 - that is an array of cl_char, to inform
-	 * kernel which fields are grouping-key, or aggregate function or not.
-	 */
-	kparam_0 = (Const *) linitial(context->used_params);
-	length = VARHDRSZ + sizeof(cl_char) * list_length(targetlist);
-	vl_datum = palloc0(length);
-	SET_VARSIZE(vl_datum, length);
-	kparam_0->constvalue = PointerGetDatum(vl_datum);
-	kparam_0->constisnull = false;
-	gpagg_atts = (cl_char *)VARDATA(vl_datum);
+		"  pg_float8_t        temp_float8x __attribute__ ((unused));\n"
+		"  pg_float8_t        temp_float8y __attribute__ ((unused));\n"
+		"  char              *addr;\n");
 
 	/*
 	 * Step.1 - List up variables of outer-scan/relation to be referenced
@@ -2744,7 +2699,7 @@ gpupreagg_codegen_projection(CustomScan *cscan,
 				for (i=0; i < list_length(tlist_gpa); i++)
 				{
 					if (varremaps[i] == tle->resno)
-						varremaps_base[i] = var->varattno;
+						varremaps_base[i] = ((Var *)tle->expr)->varattno;
 				}
 			}
 			else
@@ -2759,7 +2714,29 @@ gpupreagg_codegen_projection(CustomScan *cscan,
 	}
 
 	/*
-	 * Step.2 - Extract heap-tuple of the outer relation (may be base
+	 * Step.2 - Add declaration of the KVAR variables
+	 */
+	foreach (lc, tlist_dev)
+	{
+		TargetEntry	   *tle = lfirst(lc);
+		devtype_info   *dtype;
+
+		k = tle->resno - FirstLowInvalidHeapAttributeNumber;
+		if (bms_is_member(k, kvars_decl))
+		{
+			dtype = pgstrom_devtype_lookup(exprType((Node *) tle->expr));
+			if (!dtype)
+				elog(ERROR, "cache lookup failed for device type: %s",
+					 format_type_be(exprType((Node *) tle->expr)));
+			appendStringInfo(
+				&decl,
+				"  pg_%s_t KVAR_%u;\n",
+				dtype->type_name, tle->resno);
+		}
+	}
+
+	/*
+	 * Step.3 - Extract heap-tuple of the outer relation (may be base
 	 * relation)
 	 */
 	appendStringInfo(
@@ -2776,6 +2753,7 @@ gpupreagg_codegen_projection(CustomScan *cscan,
 			Var		   *var = (Var *) tle->expr;
 			int16		typlen;
 			bool		typbyval;
+			bool		referenced = false;
 
 			/* should be just a reference to the outer attribute */
 			Assert(IsA(var, Var));
@@ -2852,8 +2830,7 @@ gpupreagg_codegen_projection(CustomScan *cscan,
 	else
 	{
 		TupleDesc	tupdesc = RelationGetDescr(outer_baserel);
-		Index		scanrelid = cscan->scan.scanrelid;
-		int			i, j, k;
+		const char *var_label_saved;
 
 		Assert(outerPlan(cscan) == NULL);
 		for (i=0; i < tupdesc->natts; i++)
@@ -2906,6 +2883,17 @@ gpupreagg_codegen_projection(CustomScan *cscan,
 			if (bms_is_member(k, ovars_decl))
 			{
 				devtype_info   *dtype = pgstrom_devtype_lookup(attr->atttypid);
+
+				if (!dtype)
+					elog(ERROR, "cache lookup failed for device type: %s",
+						 format_type_be(attr->atttypid));
+
+				appendStringInfo(
+					&decl,
+					"  pg_%s_t OVAR_%u;\n",
+					dtype->type_name,
+					attr->attnum);
+
 				appendStringInfo(
 					&temp,
 					"  OVAR_%u = pg_%s_datum_ref(kcxt,addr,false);\n",
@@ -2930,6 +2918,8 @@ gpupreagg_codegen_projection(CustomScan *cscan,
 		/*
 		 * Construct KVAR_%u
 		 */
+		var_label_saved = context->var_label;
+		context->var_label = "OVAR";
 		foreach (lc, tlist_gpa)
 		{
 			TargetEntry *tle = lfirst(lc);
@@ -2942,22 +2932,111 @@ gpupreagg_codegen_projection(CustomScan *cscan,
 				dtype = pgstrom_devtype_lookup(exprType((Node *) tle->expr));
 				if (!dtype)
 					elog(ERROR, "cache lookup failed for device type: %s",
-						 type_format_be(exprType((Node *) tle->expr)));
+						 format_type_be(exprType((Node *) tle->expr)));
 
-				// put KVAR alias!
 				appendStringInfo(
 					&body,
 					"  KVAR_%u = %s;\n",
 					tle->resno,
-					pgstrom_codegen_expression(tle->expr));
+					pgstrom_codegen_expression((Node *)tle->expr, context));
 			}
 		}
+		context->var_label = var_label_saved;
 	}
 
+	/*
+	 * construction of kparam_0 - that is an array of cl_char, to inform
+	 * kernel which fields are grouping-key, or aggregate function or not.
+	 */
+	kparam_0 = (Const *) linitial(context->used_params);
+	vl_length = VARHDRSZ + sizeof(cl_char) * list_length(tlist_gpa);
+	vl_datum = palloc0(vl_length);
+	SET_VARSIZE(vl_datum, vl_length);
+	kparam_0->constvalue = PointerGetDatum(vl_datum);
+	kparam_0->constisnull = false;
+	gpagg_atts = (cl_char *)VARDATA(vl_datum);
 
+	foreach (lc, tlist_gpa)
+	{
+		TargetEntry *tle = lfirst(lc);
 
+		if (varremaps[tle->resno - 1] != 0)
+			continue;
+		/* we should have KVAR_xx */
+		if (IsA(tle->expr, Var))
+		{
+			Var			   *var = (Var *) tle->expr;
+			devtype_info   *dtype;
 
+			Assert(var->varno == INDEX_VAR);
+			Assert(var->varattno > 0);
 
+			dtype = pgstrom_devtype_lookup_and_track(var->vartype, context);
+			if (!dtype)
+				elog(ERROR, "cache lookup failed for device type: %s",
+					 format_type_be(var->vartype));
+			/*
+			 * NOTE: Only numeric or fixed-length built-in data type can
+			 * appear here. Other types shall be moved directly on the
+			 * earlier stage, so we don't need to care about.
+			 */
+			Assert(dtype->type_oid == NUMERICOID || dtype->type_byval);
+			appendStringInfo(
+				&body,
+				"  dst_isnull[%d] = KVAR_%u.isnull;\n"
+				"  dst_values[%d] = pg_%s_to_datum(KVAR_%u.value);\n",
+				tle->resno - 1,
+				tle->resno,
+				tle->resno - 1,
+				dtype->type_name,
+				tle->resno);
+			/* track usage of this field */
+			gpagg_atts[tle->resno - 1] = GPUPREAGG_FIELD_IS_GROUPKEY;
+		}
+		else if (IsA(tle->expr, FuncExpr))
+		{
+			FuncExpr   *func = (FuncExpr *) tle->expr;
+			const char *func_name;
+
+			if (namespace_oid != get_func_namespace(func->funcid))
+				elog(ERROR, "Bug? unexpected FuncExpr: %s",
+					 nodeToString(func));
+
+			func_name = get_func_name(func->funcid);
+			if (strcmp(func_name, "nrows") == 0)
+				gpupreagg_codegen_projection_nrows(&body, tle->resno,
+												   func, context);
+			else if (strcmp(func_name, "pmax") == 0 ||
+					 strcmp(func_name, "pmin") == 0 ||
+					 strcmp(func_name, "psum") == 0)
+				gpupreagg_codegen_projection_misc(&body, tle->resno,
+												  func, func_name, context);
+			else if (strcmp(func_name, "psum_x2") == 0)
+				gpupreagg_codegen_projection_psum_x2(&body, tle->resno,
+													 func, context);
+			else if (strcmp(func_name, "pcov_x") == 0 ||
+					 strcmp(func_name, "pcov_y") == 0 ||
+					 strcmp(func_name, "pcov_x2") == 0 ||
+					 strcmp(func_name, "pcov_y2") == 0 ||
+					 strcmp(func_name, "pcov_xy") == 0)
+				gpupreagg_codegen_projection_corr(&body, tle->resno,
+												  func, func_name, context);
+			else
+				elog(ERROR, "Bug? unexpected partial aggregate function: %s",
+					 func_name);
+			/* track usage of this field */
+			gpagg_atts[tle->resno - 1] = GPUPREAGG_FIELD_IS_AGGFUNC;
+		}
+		else
+			elog(ERROR, "bug? unexpected node in tlist_gpa: %s",
+				 nodeToString(tle->expr));
+	}
+
+	appendStringInfo(&decl, "\n%s\n", body.data);
+	pfree(body.data);
+	pfree(temp.data);
+
+	return decl.data;
 }
 
 
@@ -3202,7 +3281,7 @@ gpupreagg_codegen_projection(CustomScan *cscan, GpuPreAggInfo *gpa_info,
 
 	return str.data;
 }
-#3ndif
+#endif
 
 static char *
 gpupreagg_codegen(CustomScan *cscan,
@@ -3285,7 +3364,9 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	GpuPreAggInfo	gpa_info;
 	Sort		   *sort_node;
 	Plan		   *outer_node;
+	Index			outer_scanrelid = 0;
 	Relation		outer_baserel = NULL;
+	RangeTblEntry  *rte;
 	List		   *pre_tlist = NIL;
 	List		   *agg_quals = NIL;
 	List		   *agg_tlist = NIL;
@@ -3293,7 +3374,9 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	Bitmapset	   *attr_refs = NULL;
 	List		   *outer_tlist = NIL;
 	List		   *outer_quals = NIL;
-	double			outer_ratio = 1.0;
+	List		   *tlist_dev = NIL;
+	double			outer_nitems;
+//	double			outer_ratio = 1.0;
 	bool			has_numeric = false;
 	bool			has_notbyval = false;
 	Size			varlena_unitsz;
@@ -3301,7 +3384,7 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	cl_int			key_dist_salt;
 	double			num_groups;
 	cl_int			num_chunks;
-	ListCell	   *cell;
+	ListCell	   *lc;
 	int				i;
 	AggStrategy		new_agg_strategy;
 	AggClauseCosts	agg_clause_costs;
@@ -3466,18 +3549,17 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	/* Pulls-up outer node if it is a simple SeqScan or GpuScan */
 	if (!pgstrom_pullup_outer_scan(outer_node, true, &outer_quals))
 	{
-		outerPlan(cscan)	= outer_node;
-		outer_tlist			= outer_node->targetlist;
+		outer_tlist		= outer_node->targetlist;
+		outer_nitems	= outer_node->plan_rows;
 	}
 	else
 	{
-		Index		scanrelid = ((Scan *) outer_node)->scanrelid;
-		RangeTblEntry *rte = rt_fetch(scanrelid, pstmt->rtable);
-
-		cscan->scan.scanrelid = scanrelid;
-		outer_baserel		= heap_open(rte->relid, NoLock);
-		outer_tlist			= outer_node->targetlist;
-		outer_node			= NULL;
+		outer_scanrelid	= ((Scan *) outer_node)->scanrelid;
+		rte = rt_fetch(outer_scanrelid, pstmt->rtable);
+		outer_baserel	= heap_open(rte->relid, NoLock);
+		outer_tlist		= outer_node->targetlist;
+		outer_nitems	= outer_node->plan_rows;
+		outer_node		= NULL;
 	}
 
 	/*
@@ -3501,7 +3583,7 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 		else
 			expr = copyObject(tle->expr);
 
-		tle_new = makeTargetEntry(exprnode,
+		tle_new = makeTargetEntry(expr,
 								  list_length(tlist_dev) + 1,
 								  tle->resname,
 								  false);
@@ -3518,7 +3600,8 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	cscan->scan.plan.plan_width   = newcost_gpreagg.plan_width;
 	cscan->scan.plan.targetlist   = pre_tlist;
 	cscan->scan.plan.qual         = NIL;
-	cscan->scan.scanrelid         = 0;
+	cscan->scan.plan.lefttree     = outer_node;
+	cscan->scan.scanrelid         = outer_scanrelid;
 	cscan->flags                  = 0;
 	cscan->custom_scan_tlist      = tlist_dev;
 	cscan->custom_relids          = NULL;
@@ -3538,6 +3621,7 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	gpa_info.safety_limit   = safety_limit;
 	gpa_info.key_dist_salt  = key_dist_salt;
 	gpa_info.outer_quals	= outer_quals;
+	gpa_info.outer_nitems	= outer_nitems;
 
 	/*
 	 * construction of the kernel code according to the target-list
@@ -3585,9 +3669,9 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	agg->aggstrategy = new_agg_strategy;
 	for (i=0; i < agg->numCols; i++)
 		agg->grpColIdx[i] = attr_maps[agg->grpColIdx[i] - 1];
-	foreach (cell, agg->chain)
+	foreach (lc, agg->chain)
 	{
-		Agg	   *subagg = lfirst(cell);
+		Agg	   *subagg = lfirst(lc);
 
 		for (i=0; i < subagg->numCols; i++)
 			subagg->grpColIdx[i] = attr_maps[subagg->grpColIdx[i] - 1];
@@ -3652,10 +3736,25 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 		ExecInitExpr((Expr *) gpa_info->outer_quals, ps);
 
 	/*
+	 * initialize own data source
+	 */
+	if (outerPlan(cscan) != NULL)
+	{
+		Assert(cscan->scan.scanrelid == 0);
+		outerPlanState(gpas) = ExecInitNode(outerPlan(cscan), estate, eflags);
+		outer_nitems = outerPlanState(gpas)->plan->plan_rows;
+	}
+	else
+	{
+		Assert(gpas->gts.css.ss.ss_currentRelation != NULL);
+	}
+	outer_nitems = gpa_info->outer_nitems;
+
+	/*
 	 * initialize child node
 	 */
-	outerPlanState(gpas) = ExecInitNode(outerPlan(cscan), estate, eflags);
-	outer_nitems = outerPlanState(gpas)->plan->plan_rows;
+//	outerPlanState(gpas) = ExecInitNode(outerPlan(cscan), estate, eflags);
+//	outer_nitems = outerPlanState(gpas)->plan->plan_rows;
 	if (pgstrom_bulkload_enabled)
 		gpas->gts.scan_bulk = gpa_info->outer_bulkload;
 	gpas->gts.scan_bulk_density = gpa_info->bulkload_density;
@@ -4523,8 +4622,11 @@ static void
 gpupreagg_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 {
 	GpuPreAggState *gpas = (GpuPreAggState *) node;
-	GpuPreAggInfo  *gpa_info
-		= deform_gpupreagg_info((CustomScan *) node->ss.ps.plan);
+	CustomScan	   *cscan = (CustomScan *) node->ss.ps.plan;
+	GpuPreAggInfo  *gpa_info = deform_gpupreagg_info(cscan);
+	List		   *context;
+	List		   *dev_proj = NIL;
+	ListCell	   *lc;
 	const char	   *policy;
 	char			temp[2048];
 
@@ -4549,13 +4651,21 @@ gpupreagg_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 		policy = "Unknown";
 	ExplainPropertyText("Reduction", policy, es);
 
-	if (gpa_info->outer_quals != NIL)
-	{
-		show_scan_qual(gpa_info->outer_quals,
-					   "Device Filter", &gpas->gts.css.ss.ps, ancestors, es);
-		show_instrumentation_count("Rows Removed by Device Fileter",
-                                   2, &gpas->gts.css.ss.ps, es);
-	}
+	/* Set up deparsing context */
+	context = set_deparse_context_planstate(es->deparse_cxt,
+                                            (Node *)&gpas->gts.css.ss.ps,
+                                            ancestors);
+	/* Show device projection */
+	foreach (lc, cscan->custom_scan_tlist)
+		dev_proj = lappend(dev_proj, ((TargetEntry *) lfirst(lc))->expr);
+	pgstrom_explain_expression(dev_proj, "GPU Projection",
+							   &gpas->gts.css.ss.ps, context,
+							   ancestors, es, false, false);
+	/* Show device filter */
+	pgstrom_explain_expression(gpa_info->outer_quals, "GPU Filter",
+							   &gpas->gts.css.ss.ps, context,
+							   ancestors, es, false, true);
+	// TODO: Add number of rows filtered by the device side
 
 	if (es->verbose)
 	{

@@ -416,6 +416,33 @@ _PG_init(void)
  * ------------------------------------------------------------
  */
 void
+pgstrom_explain_expression(List *expr_list, const char *qlabel,
+						   PlanState *planstate, List *deparse_context,
+						   List *ancestors, ExplainState *es,
+						   bool force_prefix, bool convert_to_and)
+{
+	bool        useprefix;
+	char       *exprstr;
+
+	useprefix = (force_prefix || es->verbose);
+
+	/* No work if empty expression list */
+	if (expr_list == NIL)
+		return;
+
+	/* Deparse the expression */
+	/* List shall be replaced by explicit AND, if needed */
+	exprstr = deparse_expression(convert_to_and
+								 ? (Node *) make_ands_explicit(expr_list)
+								 : (Node *) expr_list,
+								 deparse_context,
+								 useprefix,
+								 false);
+	/* And add to es->str */
+	ExplainPropertyText(qlabel, exprstr, es);
+}
+
+void
 show_scan_qual(List *qual, const char *qlabel,
                PlanState *planstate, List *ancestors,
                ExplainState *es)
