@@ -151,6 +151,7 @@ cudaHostMemAllocBlock(cudaHostMemHead *chm_head, int least_class)
 
 	/* init block */
 	dlist_init(&chm_block->addr_chunks);
+	dlist_push_tail(&chm_head->blocks, &chm_block->chain);
 
 	/* init first chunk */
 	chm_chunk = &chm_block->first_chunk;
@@ -220,11 +221,13 @@ cudaHostMemFree(MemoryContext context, void *pointer)
 	dlist_node		   *dnode;
 	uintptr_t			offset;
 	int					index;
+	CUresult			rc;
 
 	chunk = HOSTMEM_CHUNK_BY_POINTER(pointer);
 	Assert(HOSTMEM_CHUNK_MAGIC(chunk) == HOSTMEM_CHUNK_MAGIC_CODE);
 	chm_block = chunk->chm_block;
 	Assert(memset(pointer, 0xc7, chunk->chunk_head.requested_size) == pointer);
+	Assert(!chunk->free_chain.prev && !chunk->free_chain.next);
 
 	while (true)
 	{
@@ -286,7 +289,25 @@ cudaHostMemFree(MemoryContext context, void *pointer)
 			chunk = buddy;
 		}
 	}
-	/* OK, add chunk to free list */
+
+	/*
+	 * In case when the chunk being released is the last chunk in this
+	 * block, we release this host-pinned memory instead of waiting for
+	 * reuse.
+	 */
+	if (!dlist_has_prev(&chm_block->addr_chunks, &chunk->addr_chain) &&
+		!dlist_has_next(&chm_block->addr_chunks, &chunk->addr_chain))
+	{
+		Assert(!chunk->free_chain.prev && !chunk->free_chain.next);
+		dlist_delete(&chm_block->chain);
+
+		rc = cuMemFreeHost(chm_block);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuMemFreeHost: %s", errorText(rc));
+		return;
+	}
+
+	/* OK, add chunk to the free list */
 	index = get_next_log2(chunk->chunk_head.size);
 	Assert(index >= HOSTMEM_CHUNKSZ_MIN_BIT &&
 		   index <= HOSTMEM_CHUNKSZ_MAX_BIT);
