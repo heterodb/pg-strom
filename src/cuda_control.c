@@ -1590,13 +1590,30 @@ pgstrom_fetch_gputask(GpuTaskState *gts)
 		if (!gts->scan_done)
 		{
 			while (pgstrom_max_async_tasks > (gts->num_running_tasks +
-											   gts->num_pending_tasks +
-											   gts->num_ready_tasks))
+											  gts->num_pending_tasks +
+											  gts->num_ready_tasks))
 			{
+				/*
+				 * NOTE: We like to keep a particular number of asynchronous
+				 * tasks prior to getting out the control to upper node.
+				 * However, right now, we have no good criteria how to
+				 * determine it.
+				 * In the older version, pgstrom_min_async_tasks and sum of
+				 * running and pending tasks were checked, but it does not
+				 * work well on GpuPreAgg because its completed task will
+				 * vanished except for the terminator tasks. In the result,
+				 * data-stores kept by the terminator task shall retain and
+				 * be consuming RAM.
+				 */
+#ifdef NOT_USED
+				/* XXX - deprecated implementation */
 				/* no urgent reason why to make the scan progress */
 				if (!dlist_is_empty(&gts->ready_tasks) &&
-					pgstrom_max_async_tasks < (gts->num_running_tasks +
-											   gts->num_pending_tasks))
+					gts->num_ready_tasks < (gts->num_running_tasks +
+											gts->num_pending_tasks))
+					break;
+#endif
+				if (!dlist_is_empty(&gts->ready_tasks))
 					break;
 				SpinLockRelease(&gts->lock);
 
