@@ -529,10 +529,11 @@ gpupreagg_preparation(kern_gpupreagg *kgpreagg,
 	/* do projection */
 	if (tupitem != NULL)
 	{
-		Datum	   *dst_values = KERN_DATA_STORE_VALUES(kds_src, base + count);
-		cl_char	   *dst_isnull = KERN_DATA_STORE_ISNULL(kds_dst, base + count);
+		cl_uint		dst_index = base + offset;
+		Datum	   *dst_values = KERN_DATA_STORE_VALUES(kds_src, dst_index);
+		cl_char	   *dst_isnull = KERN_DATA_STORE_ISNULL(kds_src, dst_index);
 
-		gpupreagg_projection(&kds,
+		gpupreagg_projection(&kcxt,
 							 kds_in,		/* input kds */
 							 tupitem,		/* input tuple */
 							 kds_src,		/* destination kds */

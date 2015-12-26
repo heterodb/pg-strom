@@ -1139,7 +1139,7 @@ toast_raw_datum_size(kern_context *kcxt, varlena *attr)
  *     :
  * EXTRACT_HEAP_TUPLE_END()
  */
-#define EXTRACT_HEAP_TUPLE_BEGIN(kds, htup, ADDR)	\
+#define EXTRACT_HEAP_TUPLE_BEGIN(ADDR, kds, htup)	\
 	do {											\
 		HeapTupleHeaderData *__htup = (htup);		\
 		kern_data_store	*__kds = (kds);				\
@@ -1157,7 +1157,12 @@ toast_raw_datum_size(kern_context *kcxt, varlena *attr)
 																		\
 		if (__colidx < __ncols &&										\
 			(!__heap_hasnull || !att_isnull(__colidx, __htup->t_bits)))	\
+		{																\
 			(ADDR) = __pos;												\
+			__pos += (__cmeta.attlen > 0 ?								\
+					  __cmeta.attlen :									\
+					  VARSIZE_ANY(__pos));								\
+		}																\
 		else															\
 			(ADDR) = NULL
 

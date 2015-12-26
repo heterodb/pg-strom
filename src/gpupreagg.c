@@ -294,7 +294,7 @@ static TupleTableSlot *gpupreagg_next_tuple(GpuTaskState *gts);
  * will increase atomic contension. So, at this moment we turned
  * off GpuPreAgg + Numeric
  */
-//#define GPUPREAGG_SUPPORT_NUMERIC			1
+#define GPUPREAGG_SUPPORT_NUMERIC			1
 
 /*
  * List of supported aggregate functions
@@ -2245,32 +2245,25 @@ gpupreagg_codegen_projection_nrows(StringInfo body, cl_int dst_index,
 
 	if (list_length(func->args) > 0)
 	{
-		appendStringInfo(body, "  if (");
+		appendStringInfoString(body, "  temp.bool_v = (");
 		foreach (cell, func->args)
 		{
 			if (cell != list_head(func->args))
-				appendStringInfo(body,
-								 " &&\n"
-								 "      ");
-			appendStringInfo(body, "EVAL(%s)",
-							 pgstrom_codegen_expression(lfirst(cell),
-														context));
+				appendStringInfoString(
+					body,
+					" &&\n"
+					"                 ");
+			appendStringInfoString(
+				body,
+				pgstrom_codegen_expression(lfirst(cell), context));
 		}
-		appendStringInfo(body,
-						 ")\n"
-						 "  {\n"
-						 "    dst_isnull[%d] = false;\n"
-						 "    dst_values[%d] = pg_int4_to_datum(1);\n"
-						 "  }\n"
-						 "  else\n"
-						 "  {\n"
-						 "    dst_isnull[%d] = true;\n"
-						 "    dst_values[%d] = pg_int4_to_datum(0);\n"
-						 "  }\n",
-						 dst_index - 1,
-						 dst_index - 1,
-						 dst_index - 1,
-						 dst_index - 1);
+		appendStringInfo(
+			body,
+			");\n"
+			"  dst_isnull[%d] = temp.bool_v.isnull;\n"
+			"  dst_values[%d] = pg_int4_to_datum(EVAL(temp.bool_v) ? 1 : 0);\n",
+			dst_index - 1,
+			dst_index - 1);
 	}
 	else
 		appendStringInfo(
@@ -2613,6 +2606,7 @@ gpupreagg_codegen_projection(CustomScan *cscan,
 	Bitmapset	   *varattnos = NULL;
 	Bitmapset	   *kvars_decl = NULL;
 	Bitmapset	   *ovars_decl = NULL;
+	cl_bool			outer_compatible = true;
 	Const		   *kparam_0;
 	cl_char		   *gpagg_atts;
 	Size			vl_length;
@@ -2624,6 +2618,7 @@ gpupreagg_codegen_projection(CustomScan *cscan,
 	initStringInfo(&decl);
 	initStringInfo(&body);
 	initStringInfo(&temp);
+	context->param_refs = NULL;
 
 	appendStringInfoString(
 		&decl,
@@ -2636,17 +2631,22 @@ gpupreagg_codegen_projection(CustomScan *cscan,
 		"                     cl_char *dst_isnull)\n"
 		"{\n"
 		"  union {\n"
+		"    pg_bool_t        bool_v;\n"
 		"    pg_int2_t        int2_v;\n"
 		"    pg_int4_t        int4_v;\n"
 		"    pg_int8_t        int8_v;\n"
 		"    pg_float4_t      float4_v;\n"
 		"    pg_float8_t      float8_v;\n"
+		"#ifdef CUDA_NUMERIC_H\n"
 		"    pg_numeric_t     numeric_v;\n"
+		"#endif\n"
+		"#ifdef CUDA_TIMELIB_H\n"
 		"    pg_money_t       money_v;\n"
 		"    pg_date_t        date_v;\n"
 		"    pg_time_t        time_v;\n"
 		"    pg_timestamp_t   timestamp_v;\n"
 		"    pg_timestamptz_t timestamptz_v;\n"
+		"#endif\n"
 		"  } temp;\n"
 		"  pg_float8_t        temp_float8x __attribute__ ((unused));\n"
 		"  pg_float8_t        temp_float8y __attribute__ ((unused));\n"
@@ -2680,7 +2680,6 @@ gpupreagg_codegen_projection(CustomScan *cscan,
 
 	if (outer_baserel)
 	{
-		Bitmapset  *varattnos_base = NULL;
 		AttrNumber *varremaps_base = palloc0(sizeof(AttrNumber) *
 											 list_length(tlist_gpa));
 		foreach (lc, tlist_dev)
@@ -2691,25 +2690,34 @@ gpupreagg_codegen_projection(CustomScan *cscan,
 			if (!bms_is_member(k, varattnos))
 				continue;		/* ignore unreferenced column */
 
-			pull_varattnos((Node *) tle->expr,
-						   cscan->scan.scanrelid,
-						   &varattnos_base);
 			if (IsA(tle->expr, Var))
 			{
+				Var	   *var = (Var *) tle->expr;
+
+				if (tle->resno != var->varattno)
+					outer_compatible = false;
+				else
+					Assert(exprType((Node *)tle->expr) == var->vartype);
+
+
 				for (i=0; i < list_length(tlist_gpa); i++)
 				{
 					if (varremaps[i] == tle->resno)
-						varremaps_base[i] = ((Var *)tle->expr)->varattno;
+						varremaps_base[i] = var->varattno;
 				}
+				if (bms_is_member(k, kvars_decl))
+					ovars_decl = bms_add_member(ovars_decl, var->varattno -
+										FirstLowInvalidHeapAttributeNumber);
 			}
 			else
 			{
+				outer_compatible = false;
+				kvars_decl = bms_add_member(kvars_decl, k);
 				pull_varattnos((Node *) tle->expr,
 							   cscan->scan.scanrelid,
 							   &ovars_decl);
 			}
 		}
-		varattnos = varattnos_base;
 		varremaps = varremaps_base;
 	}
 
@@ -2741,12 +2749,10 @@ gpupreagg_codegen_projection(CustomScan *cscan,
 	 */
 	appendStringInfo(
 		&body,
-		"  EXTRACT_HEAP_TUPLE_BEGIN(kds_src, &tupitem->htup, addr);\n");
+		"  EXTRACT_HEAP_TUPLE_BEGIN(addr, kds_src, &tupitem->htup);\n");
 
-	if (!outer_baserel)
+	if (!outer_baserel || outer_compatible)
 	{
-		Assert(outerPlan(cscan) != NULL);
-
 		foreach (lc, tlist_dev)
 		{
 			TargetEntry *tle = lfirst(lc);
@@ -2757,9 +2763,6 @@ gpupreagg_codegen_projection(CustomScan *cscan,
 
 			/* should be just a reference to the outer attribute */
 			Assert(IsA(var, Var));
-			Assert(var->varno == OUTER_VAR);
-			Assert(var->varattno > 0 &&
-				   var->varattno <= list_length(outerPlan(cscan)->targetlist));
 			get_typlenbyval(var->vartype, &typlen, &typbyval);
 			/* direct move if this variable is referenced by varremaps */
 			for (j=0; j < list_length(tlist_gpa); j++)
@@ -2821,11 +2824,11 @@ gpupreagg_codegen_projection(CustomScan *cscan,
 			}
 			appendStringInfoString(
 				&temp,
-				"  EXTRACT_HEAP_TUPLE_NEXT(addr)\n");
+				"  EXTRACT_HEAP_TUPLE_NEXT(addr);\n");
 		}
 		appendStringInfoString(
 			&body,
-			"  EXTRACT_HEAP_TUPLE_END();\n");
+			"  EXTRACT_HEAP_TUPLE_END();\n\n");
 	}
 	else
 	{
@@ -2909,23 +2912,23 @@ gpupreagg_codegen_projection(CustomScan *cscan,
 			}
 			appendStringInfoString(
 				&temp,
-				"  EXTRACT_HEAP_TUPLE_NEXT(addr)\n");
+				"  EXTRACT_HEAP_TUPLE_NEXT(addr);\n");
 		}
 		appendStringInfoString(
 			&body,
-			"  EXTRACT_HEAP_TUPLE_END();\n");
+			"  EXTRACT_HEAP_TUPLE_END();\n\n");
 
 		/*
 		 * Construct KVAR_%u
 		 */
 		var_label_saved = context->var_label;
 		context->var_label = "OVAR";
-		foreach (lc, tlist_gpa)
+		foreach (lc, tlist_dev)
 		{
 			TargetEntry *tle = lfirst(lc);
 
 			k = tle->resno - FirstLowInvalidHeapAttributeNumber;
-			if (bms_is_member(k, kvars_decl))
+			if (bms_is_member(k, varattnos))
 			{
 				devtype_info   *dtype;
 
@@ -2962,6 +2965,7 @@ gpupreagg_codegen_projection(CustomScan *cscan,
 
 		if (varremaps[tle->resno - 1] != 0)
 			continue;
+		appendStringInfoChar(&body, '\n');
 		/* we should have KVAR_xx */
 		if (IsA(tle->expr, Var))
 		{
@@ -3031,257 +3035,15 @@ gpupreagg_codegen_projection(CustomScan *cscan,
 			elog(ERROR, "bug? unexpected node in tlist_gpa: %s",
 				 nodeToString(tle->expr));
 	}
+	appendStringInfoString(&body, "}\n");
 
+	pgstrom_codegen_param_declarations(&decl, context);
 	appendStringInfo(&decl, "\n%s\n", body.data);
 	pfree(body.data);
 	pfree(temp.data);
 
 	return decl.data;
 }
-
-
-
-
-#if 0
-static char *
-gpupreagg_codegen_projection(CustomScan *cscan, GpuPreAggInfo *gpa_info,
-							 codegen_context *context)
-{
-	Oid				namespace_oid = get_namespace_oid("pgstrom", false);
-	List		   *targetlist = cscan->scan.plan.targetlist;
-	StringInfoData	str;
-	StringInfoData	decl1;
-	StringInfoData	decl2;
-    StringInfoData	body;
-	ListCell	   *cell;
-	Bitmapset	   *attr_refs = NULL;
-	devtype_info   *dtype;
-	Plan		   *outer_plan;
-	struct varlena *vl_datum;
-	Const		   *kparam_0;
-	cl_char		   *gpagg_atts;
-	Size			length;
-	codegen_projection_context pc;
-
-	/* init projection context */
-	memset(&pc, 0, sizeof(codegen_projection_context));
-	pc.kds_label = "kds_src";
-	pc.ktoast_label = "kds_in";
-	pc.rowidx_label = "rowidx_out";
-	pc.context = context;
-
-
-	initStringInfo(&str);
-	initStringInfo(&decl1);
-	initStringInfo(&decl2);
-	initStringInfo(&body);
-	context->param_refs = NULL;
-
-	/*
-	 * construction of kparam_0 - that is an array of cl_char, to inform
-	 * kernel which fields are grouping-key, or aggregate function or not.
-	 */
-	kparam_0 = (Const *) linitial(context->used_params);
-	length = VARHDRSZ + sizeof(cl_char) * list_length(targetlist);
-	vl_datum = palloc0(length);
-	SET_VARSIZE(vl_datum, length);
-	kparam_0->constvalue = PointerGetDatum(vl_datum);
-	kparam_0->constisnull = false;
-	gpagg_atts = (cl_char *)VARDATA(vl_datum);
-
-	foreach (cell, targetlist)
-	{
-		pc.tle = lfirst(cell);
-
-		if (IsA(pc.tle->expr, Var))
-		{
-			Var	   *var = (Var *) pc.tle->expr;
-
-			Assert(var->varno == INDEX_VAR);
-			Assert(var->varattno > 0);
-			dtype = pgstrom_devtype_lookup_and_track(var->vartype, context);
-
-			if (!dtype->type_byval && dtype->type_length > 0)
-			{
-				/*
-				 * NOTE: Indirect data type (fixed-length but referenced by
-				 * pointer) needs special treatment when we put initial
-				 * values of KDS slot, by gpupreagg_preparation().
-				 * Because indirect data type is kept as inline in kernel
-				 * space, however, it lost pointer information where the
-				 * value is originally kept in kds_in.
-				 */
-				appendStringInfo(
-					&body,
-					"  /* projection for resource %u */\n"
-					"  temp_datum = kern_get_datum(kds_in,%u,rowidx_in);\n"
-					"  pg_common_vstore(%s,kcxt,%u,%s,(Datum)temp_datum,\n"
-					"                   !temp_datum ? true : false);\n",
-					pc.tle->resno - 1,
-					var->varattno - 1,
-					pc.kds_label,
-					pc.tle->resno - 1,
-					pc.rowidx_label);
-				pc.use_temp_datum = true;
-			}
-			else
-			{
-				attr_refs = bms_add_member(attr_refs, var->varattno -
-										   FirstLowInvalidHeapAttributeNumber);
-				appendStringInfo(
-					&body,
-					"  /* projection for resource %u */\n"
-					"  pg_%s_vstore(%s,kcxt,%u,%s,KVAR_%u);\n",
-					pc.tle->resno - 1,
-					dtype->type_name,
-					pc.kds_label,
-					pc.tle->resno - 1,
-					pc.rowidx_label,
-					var->varattno);
-			}
-			/* track usage of this field */
-			gpagg_atts[pc.tle->resno - 1] = GPUPREAGG_FIELD_IS_GROUPKEY;
-		}
-		else if (IsA(pc.tle->expr, FuncExpr))
-		{
-			FuncExpr   *func = (FuncExpr *) pc.tle->expr;
-			const char *func_name;
-
-			appendStringInfo(&body,
-							 "  /* projection for resource %u */\n",
-							 pc.tle->resno - 1);
-			if (namespace_oid != get_func_namespace(func->funcid))
-				elog(ERROR, "Bug? unexpected FuncExpr: %s",
-					 nodeToString(func));
-
-			pull_varattnos((Node *)func, INDEX_VAR, &attr_refs);
-
-			func_name = get_func_name(func->funcid);
-			if (strcmp(func_name, "nrows") == 0)
-				gpupreagg_codegen_projection_nrows(&body, func, &pc);
-			else if (strcmp(func_name, "pmax") == 0 ||
-					 strcmp(func_name, "pmin") == 0 ||
-					 strcmp(func_name, "psum") == 0)
-				gpupreagg_codegen_projection_misc(&body, func, func_name, &pc);
-			else if (strcmp(func_name, "psum_x2") == 0)
-				gpupreagg_codegen_projection_psum_x2(&body, func, &pc);
-			else if (strcmp(func_name, "pcov_x") == 0 ||
-					 strcmp(func_name, "pcov_y") == 0 ||
-					 strcmp(func_name, "pcov_x2") == 0 ||
-					 strcmp(func_name, "pcov_y2") == 0 ||
-					 strcmp(func_name, "pcov_xy") == 0)
-				gpupreagg_codegen_projection_corr(&body, func, func_name, &pc);
-			else
-				elog(ERROR, "Bug? unexpected partial aggregate function: %s",
-					 func_name);
-			/* track usage of this field */
-			gpagg_atts[pc.tle->resno - 1] = GPUPREAGG_FIELD_IS_AGGFUNC;
-		}
-		else
-			elog(ERROR, "bug? unexpected node type: %s",
-				 nodeToString(pc.tle->expr));
-	}
-
-	/*
-	 * Declaration of variables
-	 */
-	outer_plan = outerPlan(cscan);
-	if (gpa_info->outer_bulkload)
-	{
-		const char *saved_kds_label = context->kds_label;
-		const char *saved_kds_index_label = context->kds_index_label;
-		char	   *temp;
-
-		context->kds_label = "kds_in";
-		context->kds_index_label = "rowidx_in";
-
-		temp = pgstrom_codegen_bulk_var_declarations(context,
-													 outer_plan,
-													 attr_refs);
-		appendStringInfo(&decl1, "%s", temp);
-		pfree(temp);
-
-		context->kds_label = saved_kds_label;
-		context->kds_index_label = saved_kds_index_label;
-	}
-	else
-	{
-		foreach (cell, outer_plan->targetlist)
-		{
-			TargetEntry	*tle = lfirst(cell);
-			int		x = tle->resno - FirstLowInvalidHeapAttributeNumber;
-			Oid		type_oid;
-
-			if (!bms_is_member(x, attr_refs))
-				continue;
-			type_oid = exprType((Node *) tle->expr);
-			dtype = pgstrom_devtype_lookup_and_track(type_oid, context);
-			appendStringInfo(
-				&decl1,
-				"  pg_%s_t KVAR_%u "
-				"= pg_%s_vref(kds_in,kcxt,%u,rowidx_in);\n",
-				dtype->type_name,
-				tle->resno,
-				dtype->type_name,
-				tle->resno - 1);
-		}
-	}
-
-	/* declaration of parameter reference */
-	if (!bms_is_empty(context->param_refs))
-	{
-		pgstrom_codegen_param_declarations(&decl2, context);
-		bms_free(context->param_refs);
-	}
-
-	/* declaration of other temp variables */
-	if (pc.use_temp_datum)
-		appendStringInfo(&decl1, "  void   *temp_datum;\n");
-	if (pc.use_temp_int2)
-		appendStringInfo(&decl1, "  pg_int2_t temp_int2;\n");
-	if (pc.use_temp_int4)
-		appendStringInfo(&decl1, "  pg_int4_t temp_int4;\n");
-	if (pc.use_temp_int8)
-		appendStringInfo(&decl1, "  pg_int8_t temp_int8;\n");
-	if (pc.use_temp_float4)
-		appendStringInfo(&decl1, "  pg_float4_t temp_float4;\n");
-	if (pc.use_temp_float8x)
-		appendStringInfo(&decl1, "  pg_float8_t temp_float8x;\n");
-	if (pc.use_temp_float8y)
-		appendStringInfo(&decl1, "  pg_float8_t temp_float8y;\n");
-	if (pc.use_temp_numeric)
-		appendStringInfo(&decl1, "  pg_numeric_t temp_numeric;\n");
-	if (pc.use_temp_money)
-		appendStringInfo(&decl1, "  pg_money_t temp_money;\n");
-	if (pc.use_temp_date)
-		appendStringInfo(&decl1, "  pg_date_t temp_date;\n");
-	if (pc.use_temp_time)
-		appendStringInfo(&decl1, "  pg_time_t temp_time;\n");
-	if (pc.use_temp_timestamp)
-		appendStringInfo(&decl1, "  pg_timestamp_t temp_timestamp;\n");
-	if (pc.use_temp_timestamptz)
-		appendStringInfo(&decl1, "  pg_timestamptz_t temp_timestamptz;\n");
-
-	appendStringInfo(
-		&str,
-		"STATIC_FUNCTION(void)\n"
-		"gpupreagg_projection(kern_context *kcxt,\n"
-		"                     kern_data_store *kds_in,\n"
-		"                     kern_data_store *kds_src,\n"
-		"                     size_t rowidx_in, size_t rowidx_out)\n"
-		"{\n"
-		"%s"
-		"%s"
-		"\n"
-		"%s"
-		"}\n",
-		decl2.data,
-		decl1.data,
-		body.data);
-
-	return str.data;
-}
-#endif
 
 static char *
 gpupreagg_codegen(CustomScan *cscan,
@@ -4312,8 +4074,14 @@ gpupreagg_next_chunk(GpuTaskState *gts)
 		return NULL;
 
 	PERFMON_BEGIN(&gts->pfm_accum, &tv1);
-
-	if (!gpas->gts.scan_bulk)
+	if (gpas->gts.css.ss.ss_currentRelation)
+	{
+		/* Scan and load the outer relation by itself */
+		pds = pgstrom_exec_scan_chunk(&gpas->gts, pgstrom_chunk_size());
+		if (!pds)
+			gpas->gts.scan_done = true;
+	}
+	else if (!gpas->gts.scan_bulk)
 	{
 		/* Scan the outer relation using row-by-row mode */
 		TupleDesc		tupdesc
@@ -4592,8 +4360,9 @@ gpupreagg_end(CustomScanState *node)
 	}
 	/* Cleanup and relase any concurrent tasks */
 	pgstrom_release_gputaskstate(&gpas->gts);
-	/* Clean up subtree */
-	ExecEndNode(outerPlanState(node));
+	/* Clean up subtree, if any */
+	if (outerPlanState(node))
+		ExecEndNode(outerPlanState(node));
 
 #if 0
 	/* dump stat */
