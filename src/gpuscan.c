@@ -45,12 +45,13 @@
 #include "cuda_gpuscan.h"
 
 static set_rel_pathlist_hook_type	set_rel_pathlist_next;
-static CustomPathMethods		gpuscan_path_methods;
-static CustomScanMethods		gpuscan_plan_methods;
-static PGStromExecMethods		gpuscan_exec_methods;
-static CustomScanMethods		bulkscan_plan_methods;
-static PGStromExecMethods		bulkscan_exec_methods;
-static bool						enable_gpuscan;
+static CustomPathMethods	gpuscan_path_methods;
+static CustomScanMethods	gpuscan_plan_methods;
+static PGStromExecMethods	gpuscan_exec_methods;
+static CustomScanMethods	bulkscan_plan_methods;
+static PGStromExecMethods	bulkscan_exec_methods;
+static bool					enable_gpuscan;
+static bool					debug_pullup_outer_scan;
 
 /*
  * Path information of GpuScan
@@ -369,6 +370,7 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	add_path(baserel, &pathnode->path);
 }
 
+#if 0
 /*
  * assign_bare_ntuples
  *
@@ -390,6 +392,7 @@ assign_bare_ntuples(Plan *plannode, RangeTblEntry *rte)
 
 	heap_close(rel, NoLock);
 }
+#endif
 
 /*
  * pgstrom_pullup_outer_scan
@@ -404,6 +407,9 @@ pgstrom_pullup_outer_scan(Plan *plannode,
 {
 	List		   *outer_quals;
 	ListCell	   *lc;
+
+	if (!debug_pullup_outer_scan)
+		return false;
 
 	if (IsA(plannode, SeqScan))
 	{
@@ -2102,7 +2108,7 @@ gpuscan_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 void
 pgstrom_init_gpuscan(void)
 {
-	/* enable_gpuscan */
+	/* pg_strom.enable_gpuscan */
 	DefineCustomBoolVariable("pg_strom.enable_gpuscan",
 							 "Enables the use of GPU accelerated full-scan",
 							 NULL,
@@ -2111,6 +2117,15 @@ pgstrom_init_gpuscan(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
+	/* pg_strom.debug_pullup_outer_scan */
+	DefineCustomBoolVariable("pg_strom.debug_pullup_outer_scan",
+							 "Enables to pull up simple outer scan",
+							 NULL,
+							 &debug_pullup_outer_scan,
+							 true,
+							 PGC_USERSET,
+                             GUC_NOT_IN_SAMPLE,
+                             NULL, NULL, NULL);
 
 	/* setup path methods */
 	memset(&gpuscan_path_methods, 0, sizeof(gpuscan_path_methods));
