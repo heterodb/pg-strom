@@ -913,6 +913,15 @@ pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan)
 	*p_plan = &cscan->scan.plan;
 }
 
+bool
+pgstrom_plan_is_gpusort(const Plan *plan)
+{
+	if (IsA(plan, CustomScan) &&
+		((CustomScan *) plan)->methods == &gpusort_scan_methods)
+		return true;
+	return false;
+}
+
 static Node *
 gpusort_create_scan_state(CustomScan *cscan)
 {

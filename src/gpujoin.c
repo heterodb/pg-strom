@@ -407,7 +407,7 @@ pgstrom_path_is_gpujoin(Path *pathnode)
  * returns true, if plannode is GpuJoin
  */
 bool
-pgstrom_plan_is_gpujoin(Plan *plannode)
+pgstrom_plan_is_gpujoin(const Plan *plannode)
 {
 	CustomScan *cscan = (CustomScan *) plannode;
 
@@ -421,7 +421,7 @@ pgstrom_plan_is_gpujoin(Plan *plannode)
  * returns true, if plannode is GpuJoin and takes bulk-input
  */
 bool
-pgstrom_plan_is_gpujoin_bulkinput(Plan *plannode)
+pgstrom_plan_is_gpujoin_bulkinput(const Plan *plannode)
 {
 	if (pgstrom_plan_is_gpujoin(plannode))
 	{

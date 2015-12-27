@@ -535,10 +535,11 @@ extern void pgstrom_init_codegen(void);
  */
 extern Size pgstrom_chunk_size(void);
 extern Size pgstrom_chunk_size_limit(void);
+extern bool pgstrom_plan_is_gputask(const Plan *plannode);
+
 extern cl_uint estimate_num_chunks(Path *pathnode);
 extern void subtract_tuplecost_if_bulkload(Cost *p_run_cost, Path *pathnode);
 extern double pgstrom_get_bulkload_density(Plan *child_plan);
-
 extern pgstrom_data_store *BulkExecProcNode(PlanState *node);
 extern Datum pgstrom_fixup_kernel_numeric(Datum numeric_datum);
 extern bool pgstrom_fetch_data_store(TupleTableSlot *slot,
@@ -621,8 +622,8 @@ extern void pgstrom_init_gpuscan(void);
  * gpujoin.c
  */
 extern bool pgstrom_path_is_gpujoin(Path *pathnode);
-extern bool pgstrom_plan_is_gpujoin(Plan *plannode);
-extern bool pgstrom_plan_is_gpujoin_bulkinput(Plan *plannode);
+extern bool pgstrom_plan_is_gpujoin(const Plan *plannode);
+extern bool pgstrom_plan_is_gpujoin_bulkinput(const Plan *plannode);
 extern void	pgstrom_init_gpujoin(void);
 
 /*
@@ -636,6 +637,7 @@ extern void pgstrom_init_gpupreagg(void);
  * gpusort.c
  */
 extern void pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan);
+extern bool pgstrom_plan_is_gpusort(const Plan *plan);
 extern void pgstrom_init_gpusort(void);
 
 /*

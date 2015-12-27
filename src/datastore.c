@@ -64,6 +64,26 @@ pgstrom_chunk_size_limit(void)
 }
 
 /*
+ * pgstrom_plan_is_gputask - returns true, if supplied plannode is
+ * managed by PG-Strom
+ */
+bool
+pgstrom_plan_is_gputask(const Plan *plannode)
+{
+	/* quick bailout if not */
+	if (!IsA(plannode, CustomScan))
+		return false;
+	/* try to check this CustomScan node */
+	if (pgstrom_plan_is_gpuscan(plannode) ||
+		pgstrom_plan_is_gpujoin(plannode) ||
+		pgstrom_plan_is_gpupreagg(plannode) ||
+		pgstrom_plan_is_gpusort(plannode))
+		return true;
+
+	return false;
+}
+
+/*
  * estimate_num_chunks
  *
  * it estimates number of chunks to be fetched from the supplied Path
