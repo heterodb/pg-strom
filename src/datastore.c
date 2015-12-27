@@ -64,22 +64,22 @@ pgstrom_chunk_size_limit(void)
 }
 
 /*
- * pgstrom_plan_is_gputask - returns true, if supplied plannode is
- * managed by PG-Strom
+ * pgstrom_chunk_exec_supported - returns true, if supplied planstate
+ * supports execution-per-chunk mode.
  */
 bool
-pgstrom_plan_is_gputask(const Plan *plannode)
+pgstrom_chunk_exec_supported(const PlanState *planstate)
 {
-	/* quick bailout if not */
-	if (!IsA(plannode, CustomScan))
-		return false;
-	/* try to check this CustomScan node */
-	if (pgstrom_plan_is_gpuscan(plannode) ||
-		pgstrom_plan_is_gpujoin(plannode) ||
-		pgstrom_plan_is_gpupreagg(plannode) ||
-		pgstrom_plan_is_gpusort(plannode))
-		return true;
+	if (pgstrom_plan_is_gpuscan(planstate->plan) ||
+        pgstrom_plan_is_gpujoin(planstate->plan) ||
+        pgstrom_plan_is_gpupreagg(planstate->plan) ||
+        pgstrom_plan_is_gpusort(planstate->plan))
+	{
+		GpuTaskState   *gts = (GpuTaskState *) planstate;
 
+		if (gts->exec_chunk_scan != NULL)
+			return true;
+	}
 	return false;
 }
 
@@ -289,6 +289,46 @@ pgstrom_get_bulkload_density(Plan *child_plan)
 }
 
 /*
+ * ChunkExecProcNode
+ *
+ * It reads a chunk of the underlying sub-plan managed by PG-Strom.
+ * Caller can expect the sub-plan fills up a chunk with specified size.
+ */
+pgstrom_data_store *
+ChunkExecProcNode(GpuTaskState *gts, size_t chunk_size)
+{
+	PlanState		   *plannode = &gts->css.ss.ps;
+	pgstrom_data_store *pds;
+
+	CHECK_FOR_INTERRUPTS();
+
+	if (plannode->chgParam != NULL)	/* If something changed, */
+		ExecReScan(&gts->css.ss.ps);		/* let ReScan handle this */
+
+	Assert(IsA(gts, CustomScanState));		/* rough checks */
+	if (gts->exec_chunk_scan)
+	{
+		/* must provide our own instrumentation support */
+		if (plannode->instrument)
+			InstrStartNode(plannode->instrument);
+		/* execution per chunk */
+		pds = gts->exec_chunk_scan(gts, chunk_size);
+
+		/* must provide our own instrumentation support */
+		if (plannode->instrument)
+			InstrStopNode(plannode->instrument,
+						  !pds ? 0.0 : (double)pds->kds->nitems);
+		Assert(!pds || pds->kds->nitems > 0);
+		return pds;
+	}
+	elog(ERROR, "Bug? exec_chunk_scan callback was not implemented");
+}
+
+#if 1
+/* shall be deprecated - bulkload policy is not sufficient when number
+ * of output rows are much different from the input */
+
+/*
  * BulkExecProcNode
  *
  * It runs the bulk-exec method of the supplied plannode.
@@ -329,6 +369,7 @@ BulkExecProcNode(PlanState *node)
 	}
 	elog(ERROR, "unrecognized node type: %d", (int) nodeTag(node));
 }
+#endif
 
 /*
  * pgstrom_fixup_kernel_numeric

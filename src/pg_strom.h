@@ -293,6 +293,9 @@ struct GpuTaskState
 	void		  (*cb_task_polling)(GpuTaskState *gts);
 	GpuTask		 *(*cb_next_chunk)(GpuTaskState *gts);
 	TupleTableSlot *(*cb_next_tuple)(GpuTaskState *gts);
+	/* extended executor */
+	struct pgstrom_data_store *(*exec_chunk_scan)(GpuTaskState *gts,
+												  size_t chunk_size);
 	/* performance counter  */
 	pgstrom_perfmon	pfm_accum;
 };
@@ -407,9 +410,15 @@ typedef struct
  * It informs child node a preferable output if parent can collaborate.
  * Note that this flag never enforce the child node format. It's just
  * a hint.
+ *
+ * CUSTOMPATH_SUPPORT_CHUNK_SCAN is set, if this CustomScan node support
+ * execution by chunk mode. In this case, ChunkExecProcNode() shall be
+ * used instead of the usual ExecProcNode().
  */
 #define CUSTOMPATH_SUPPORT_BULKLOAD			0x10000000
 #define CUSTOMPATH_PREFERE_ROW_FORMAT		0x20000000
+
+#define CUSTOMPATH_SUPPORT_CHUNK_SCAN		0x40000000
 
 /*
  * --------------------------------------------------------------------
@@ -535,11 +544,13 @@ extern void pgstrom_init_codegen(void);
  */
 extern Size pgstrom_chunk_size(void);
 extern Size pgstrom_chunk_size_limit(void);
-extern bool pgstrom_plan_is_gputask(const Plan *plannode);
+extern bool pgstrom_chunk_exec_supported(const PlanState *planstate);
 
 extern cl_uint estimate_num_chunks(Path *pathnode);
 extern void subtract_tuplecost_if_bulkload(Cost *p_run_cost, Path *pathnode);
 extern double pgstrom_get_bulkload_density(Plan *child_plan);
+extern pgstrom_data_store *ChunkExecProcNode(GpuTaskState *gts,
+											 size_t chunk_size);
 extern pgstrom_data_store *BulkExecProcNode(PlanState *node);
 extern Datum pgstrom_fixup_kernel_numeric(Datum numeric_datum);
 extern bool pgstrom_fetch_data_store(TupleTableSlot *slot,

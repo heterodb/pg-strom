@@ -1201,6 +1201,7 @@ pgstrom_init_gputaskstate(GpuContext *gcontext, GpuTaskState *gts)
 	gts->cb_task_polling = NULL;
 	gts->cb_next_chunk = NULL;
 	gts->cb_next_tuple = NULL;
+	gts->exec_chunk_scan = NULL;
 	memset(&gts->pfm_accum, 0, sizeof(pgstrom_perfmon));
 	gts->pfm_accum.enabled = pgstrom_perfmon_enabled;
 }
