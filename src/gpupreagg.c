@@ -162,7 +162,7 @@ typedef struct
 	cl_int			reduction_mode;
 	List		   *outer_quals;
 	TupleTableSlot *outer_overflow;
-	pgstrom_data_store *outer_bulk_overflow;
+	pgstrom_data_store *outer_pds;
 
 	bool			has_numeric;
 	bool			has_notbyval;
@@ -4093,10 +4093,20 @@ gpupreagg_next_chunk(GpuTaskState *gts)
 	PERFMON_BEGIN(&gts->pfm_accum, &tv1);
 	if (gpas->gts.css.ss.ss_currentRelation)
 	{
-		/* Scan and load the outer relation by itself */
-		pds = pgstrom_exec_scan_chunk(&gpas->gts, pgstrom_chunk_size());
+		/* Load a bunch of records at once on the first time */
+		if (!gpas->outer_pds)
+			gpas->outer_pds = pgstrom_exec_scan_chunk(&gpas->gts,
+													  pgstrom_chunk_size());
+		/* Picks up the cached one to detect the final chunk */
+		pds = gpas->outer_pds;
 		if (!pds)
 			gpas->gts.scan_done = true;
+		else
+			gpas->outer_pds = pgstrom_exec_scan_chunk(&gpas->gts,
+													  pgstrom_chunk_size());
+		/* Any more chunk expected? */
+		if (!gpas->outer_pds)
+			is_terminator = true;
 	}
 	else if (!gpas->gts.scan_bulk)
 	{
@@ -4142,16 +4152,16 @@ gpupreagg_next_chunk(GpuTaskState *gts)
 	else
 	{
 		/* Load a bunch of records at once on the first time */
-		if (!gpas->outer_bulk_overflow)
-			gpas->outer_bulk_overflow = BulkExecProcNode(subnode);
+		if (!gpas->outer_pds)
+			gpas->outer_pds = BulkExecProcNode(subnode);
 		/* Picks up the cached one to detect the final chunk */
-		pds = gpas->outer_bulk_overflow;
+		pds = gpas->outer_pds;
 		if (!pds)
 			gpas->gts.scan_done = true;
 		else
-			gpas->outer_bulk_overflow = BulkExecProcNode(subnode);
+			gpas->outer_pds = BulkExecProcNode(subnode);
 		/* Any more chunk expected? */
-		if (!gpas->outer_bulk_overflow)
+		if (!gpas->outer_pds)
 			is_terminator = true;
 	}
 	PERFMON_END(&gts->pfm_accum, time_outer_load, &tv1, &tv2);
