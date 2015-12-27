@@ -526,9 +526,6 @@ extern void pgstrom_codegen_param_declarations(StringInfo buf,
 											   codegen_context *context);
 extern void pgstrom_codegen_var_declarations(StringInfo buf,
 											 codegen_context *context);
-extern char *pgstrom_codegen_bulk_var_declarations(codegen_context *context,
-												   Plan *outer_plan,
-												   Bitmapset *attr_refs);
 extern bool pgstrom_device_expression(Expr *expr);
 extern void pgstrom_init_codegen_context(codegen_context *context);
 extern void pgstrom_init_codegen(void);
