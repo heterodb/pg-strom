@@ -3405,13 +3405,30 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 		outerPlan(agg) = &cscan->scan.plan;
 	else
 	{
+		List   *tlist_sort = NIL;
+
+		foreach (lc, pre_tlist)
+		{
+			TargetEntry	   *tle = lfirst(lc);
+			Var			   *var_sort;
+
+			var_sort = makeVar(OUTER_VAR,
+							   tle->resno,
+							   exprType((Node *) tle->expr),
+							   exprTypmod((Node *) tle->expr),
+							   exprCollation((Node *) tle->expr),
+							   0);
+			tlist_sort = lappend(tlist_sort,
+								 makeTargetEntry((Expr *) var_sort,
+												 list_length(tlist_sort) + 1,
+												 tle->resname,
+												 tle->resjunk));
+		}
 		sort_node->plan.startup_cost = newcost_sort.startup_cost;
 		sort_node->plan.total_cost   = newcost_sort.total_cost;
 		sort_node->plan.plan_rows    = newcost_sort.plan_rows;
 		sort_node->plan.plan_width   = newcost_sort.plan_width;
-		sort_node->plan.targetlist   = expr_fixup_varno(pre_tlist,
-														INDEX_VAR,
-														OUTER_VAR);
+		sort_node->plan.targetlist   = tlist_sort;
 		for (i=0; i < sort_node->numCols; i++)
 			sort_node->sortColIdx[i] = attr_maps[sort_node->sortColIdx[i] - 1];
 		outerPlan(sort_node) = &cscan->scan.plan;
