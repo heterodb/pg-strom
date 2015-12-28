@@ -1941,10 +1941,9 @@ gpuscan_next_tuple(GpuTaskState *gts)
 
 			if (gss->gts.curr_index < pds_dst->kds->nitems)
 			{
-				cl_uint		index = gss->gts.curr_index++;
-
 				slot = gss->gts.css.ss.ss_ScanTupleSlot;
-				if (!pgstrom_fetch_data_store(slot, pds_dst, index,
+				if (!pgstrom_fetch_data_store(slot, pds_dst,
+											  gss->gts.curr_index++,
 											  &gss->scan_tuple))
 					elog(ERROR, "failed to fetch a record from pds");
 			}
@@ -1954,18 +1953,25 @@ gpuscan_next_tuple(GpuTaskState *gts)
 			pgstrom_data_store *pds_src = gpuscan->pds_src;
 			kern_resultbuf	   *kresults = gpuscan->kresults;
 
-			if (gss->gts.curr_index < (kresults->all_visible
-									   ? pds_src->kds->nitems
-									   : kresults->nitems))
+			/*
+			 * We should not inject GpuScan for all-visible with no device
+			 * projection; GPU has no actual works in other words.
+			 * NOTE: kresults->results[] keeps offset from the head of
+			 * kds_src.
+			 */
+			Assert(!kresults->all_visible);
+			if (gss->gts.curr_index < kresults->nitems)
 			{
-				cl_uint		index = gss->gts.curr_index++;
+				HeapTuple		tuple = &gss->scan_tuple;
+				kern_tupitem   *tupitem = (kern_tupitem *)
+					((char *)pds_src->kds +
+					 kresults->results[gss->gts.curr_index++]);
 
-				if (!kresults->all_visible)
-					index = kresults->results[index];
 				slot = gss->gts.css.ss.ss_ScanTupleSlot;
-				if (!pgstrom_fetch_data_store(slot, pds_src, index,
-											  &gss->scan_tuple))
-					elog(ERROR, "failed to fetch a record from pds");
+				tuple->t_len = tupitem->t_len;
+				tuple->t_self = tupitem->t_self;
+				tuple->t_data = &tupitem->htup;
+				ExecStoreTuple(tuple, slot, InvalidBuffer, false);
 			}
 		}
 	}
