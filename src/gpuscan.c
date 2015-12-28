@@ -1935,16 +1935,40 @@ gpuscan_next_tuple(GpuTaskState *gts)
 	PERFMON_BEGIN(&gss->gts.pfm_accum, &tv1);
 	if (!gpuscan->task.cpu_fallback)
 	{
-		pgstrom_data_store *pds_dst = gpuscan->pds_dst;
-
-		if (gss->gts.curr_index < pds_dst->kds->nitems)
+		if (gpuscan->pds_dst)
 		{
-			cl_uint		index = gss->gts.curr_index++;
+			pgstrom_data_store *pds_dst = gpuscan->pds_dst;
 
-			slot = gss->gts.css.ss.ss_ScanTupleSlot;
-			if (!pgstrom_fetch_data_store(slot, pds_dst, index,
-										  &gss->scan_tuple))
-				elog(ERROR, "failed to fetch a record from pds");
+			if (gss->gts.curr_index < pds_dst->kds->nitems)
+			{
+				cl_uint		index = gss->gts.curr_index++;
+
+				slot = gss->gts.css.ss.ss_ScanTupleSlot;
+				if (!pgstrom_fetch_data_store(slot, pds_dst, index,
+											  &gss->scan_tuple))
+					elog(ERROR, "failed to fetch a record from pds");
+			}
+		}
+		else
+		{
+			pgstrom_data_store *pds_src = gpuscan->pds_src;
+			kern_resultbuf	   *kresults = gpuscan->kresults;
+			cl_int				index;
+
+			if (kresults->all_visible)
+			{
+				if (gss->gts.curr_index < pds_src->kds->nitems)
+				{
+
+				}
+			}
+			else
+			{
+				if (gss->gts.curr_index < kresults->nitems)
+				{
+					
+				}
+			}
 		}
 	}
 	else
@@ -2302,13 +2326,18 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
 
-	rc = cuModuleGetFunction(&gpuscan->kern_dev_proj,
-							 gpuscan->task.cuda_module,
-							 gss->gts.be_row_format
-							 ? "gpuscan_projection_row"
-							 : "gpuscan_projection_slot");
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
+	/* we don't need projection kernel without destination buffer */
+	if (pds_dst != NULL)
+	{
+		rc = cuModuleGetFunction(&gpuscan->kern_dev_proj,
+								 gpuscan->task.cuda_module,
+								 gss->gts.be_row_format
+								 ? "gpuscan_projection_row"
+								 : "gpuscan_projection_slot");
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
+		Assert(false);
+	}
 
 	/*
 	 * Allocation of device memory

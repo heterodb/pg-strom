@@ -356,7 +356,7 @@ gpuscan_projection_slot(kern_gpuscan *kgpuscan,
 	{
 		deform_kern_heaptuple(&kcxt,
 							  kds_src,
-							  tupitem_src,
+							  tupitem,
 							  kds_dst->ncols,
 							  tup_values,
 							  tup_isnull);
