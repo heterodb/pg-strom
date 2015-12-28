@@ -77,7 +77,7 @@ pgstrom_chunk_exec_supported(const PlanState *planstate)
 	{
 		GpuTaskState   *gts = (GpuTaskState *) planstate;
 
-		if (gts->exec_chunk_scan != NULL)
+		if (gts->cb_exec_chunk != NULL)
 			return true;
 	}
 	return false;
@@ -306,13 +306,13 @@ ChunkExecProcNode(GpuTaskState *gts, size_t chunk_size)
 		ExecReScan(&gts->css.ss.ps);		/* let ReScan handle this */
 
 	Assert(IsA(gts, CustomScanState));		/* rough checks */
-	if (gts->exec_chunk_scan)
+	if (gts->cb_exec_chunk)
 	{
 		/* must provide our own instrumentation support */
 		if (plannode->instrument)
 			InstrStartNode(plannode->instrument);
 		/* execution per chunk */
-		pds = gts->exec_chunk_scan(gts, chunk_size);
+		pds = gts->cb_exec_chunk(gts, chunk_size);
 
 		/* must provide our own instrumentation support */
 		if (plannode->instrument)
@@ -321,7 +321,7 @@ ChunkExecProcNode(GpuTaskState *gts, size_t chunk_size)
 		Assert(!pds || pds->kds->nitems > 0);
 		return pds;
 	}
-	elog(ERROR, "Bug? exec_chunk_scan callback was not implemented");
+	elog(ERROR, "Bug? exec_chunk callback was not implemented");
 }
 
 #if 1

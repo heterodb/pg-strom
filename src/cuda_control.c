@@ -1175,6 +1175,8 @@ pgstrom_init_gputaskstate(GpuContext *gcontext, GpuTaskState *gts)
 	gts->extra_flags = 0;		/* to be set later */
 	gts->cuda_modules = NULL;
 	gts->scan_done = false;
+	gts->exec_per_chunk = false;
+	gts->be_row_format = false;
 	gts->scan_bulk = false;
 	gts->curr_blknum = 0;
 	if (gts->css.ss.ss_currentRelation)
@@ -1201,7 +1203,7 @@ pgstrom_init_gputaskstate(GpuContext *gcontext, GpuTaskState *gts)
 	gts->cb_task_polling = NULL;
 	gts->cb_next_chunk = NULL;
 	gts->cb_next_tuple = NULL;
-	gts->exec_chunk_scan = NULL;
+	gts->cb_exec_chunk = NULL;
 	memset(&gts->pfm_accum, 0, sizeof(pgstrom_perfmon));
 	gts->pfm_accum.enabled = pgstrom_perfmon_enabled;
 }
@@ -1716,6 +1718,85 @@ pgstrom_recheck_gputask(GpuTaskState *gts, TupleTableSlot *slot)
 {
 	/* no GpuTaskState class needs recheck */
 	return true;
+}
+
+pgstrom_data_store *
+pgstrom_exec_chunk_gputask(GpuTaskState *gts, size_t chunk_size)
+{
+	TupleTableSlot	   *slot = gts->css.ss.ss_ScanTupleSlot;
+	pgstrom_data_store *pds_dst = NULL;
+
+	/* GTS should not have neither host qualifier nor projection */
+	Assert(gts->css.ss.ps.qual == NIL);
+	Assert(gts->css.ss.ps.ps_ProjInfo == NULL);
+
+	do {
+		GpuTask	   *gtask = gts->curr_task;
+
+		/* Reload next GpuTask to be scanned, if needed */
+		if (!gtask)
+		{
+			gtask = pgstrom_fetch_gputask(gts);
+			if (!gtask)
+				break;	/* end of the scan */
+			gts->curr_task = gtask;
+			gts->curr_index = 0;
+		}
+		Assert(gtask != NULL);
+
+		while ((slot = gts->cb_next_tuple(gts)) != NULL)
+		{
+			/*
+			 * Creation of the destination store on demand.
+			 */
+			if (!pds_dst)
+			{
+				pds_dst = pgstrom_create_data_store_row(gts->gcontext,
+													slot->tts_tupleDescriptor,
+														chunk_size,
+														false);
+			}
+
+			/*
+			 * Move rows from the source data-store to the destination store
+			 * until:
+			 *  The destination store still has space.
+			 *  The source store still has unread rows.
+			 */
+			if (!pgstrom_data_store_insert_tuple(pds_dst, slot))
+			{
+				/* Rewind the source PDS, if destination gets filled up */
+				Assert(gts->curr_index > 0);
+				gts->curr_index--;
+
+				/*
+				 * At least one tuple can be stored, unless the supplied
+				 * chunk_size is not too small.
+				 */
+				if (pds_dst->kds->nitems == 0)
+				{
+					HeapTuple	tuple = ExecFetchSlotTuple(slot);
+					elog(ERROR,
+						 "Bug? Too short chunk_size (%zu) for tuple (len=%u)",
+						 chunk_size, tuple->t_len);
+				}
+				return pds_dst;
+			}
+		}
+
+		/*
+		 * All the rows in pds_src are already fetched,
+		 * so current GpuTask shall be detached.
+		 */
+		SpinLockAcquire(&gts->lock);
+		dlist_delete(&gtask->tracker);
+		SpinLockRelease(&gts->lock);
+		gts->cb_task_release(gtask);
+		gts->curr_task = NULL;
+		gts->curr_index = 0;
+	} while (true);
+
+	return pds_dst;
 }
 
 void

@@ -268,7 +268,8 @@ struct GpuTaskState
 	const char	   *source_pathname;
 	CUmodule	   *cuda_modules;	/* CUmodules for each CUDA context */
 	bool			scan_done;		/* no rows to read, if true */
-	bool			be_row_format;	/* true, if KDS_FORMAT_ROW is preferable */
+	bool			exec_per_chunk;	/* true, if it uses per-chunk-execution */
+	bool			be_row_format;	/* true, if KDS_FORMAT_ROW is required */
 	bool			scan_bulk;		/* bulk outer load, if true */
 	double			scan_bulk_density;	/* density of bulk input, if any */
 	BlockNumber		curr_blknum;	/* current block number to scan table */
@@ -294,8 +295,8 @@ struct GpuTaskState
 	GpuTask		 *(*cb_next_chunk)(GpuTaskState *gts);
 	TupleTableSlot *(*cb_next_tuple)(GpuTaskState *gts);
 	/* extended executor */
-	struct pgstrom_data_store *(*exec_chunk_scan)(GpuTaskState *gts,
-												  size_t chunk_size);
+	struct pgstrom_data_store *(*cb_exec_chunk)(GpuTaskState *gts,
+												size_t chunk_size);
 	/* performance counter  */
 	pgstrom_perfmon	pfm_accum;
 };
@@ -460,6 +461,8 @@ extern void pgstrom_init_gputaskstate(GpuContext *gcontext, GpuTaskState *gts);
 extern void pgstrom_init_gputask(GpuTaskState *gts, GpuTask *gtask);
 extern void pgstrom_release_gputask(GpuTask *gtask);
 extern GpuTask *pgstrom_fetch_gputask(GpuTaskState *gts);
+extern pgstrom_data_store *pgstrom_exec_chunk_gputask(GpuTaskState *gts,
+													  size_t chunk_size);
 extern TupleTableSlot *pgstrom_exec_gputask(GpuTaskState *gts);
 extern bool pgstrom_recheck_gputask(GpuTaskState *gts, TupleTableSlot *slot);
 extern void pgstrom_cleanup_gputask_cuda_resources(GpuTask *gtask);

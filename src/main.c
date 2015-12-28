@@ -791,28 +791,27 @@ void
 pgstrom_explain_gputaskstate(GpuTaskState *gts, ExplainState *es)
 {
 	/*
-	 * Explain custom-flags
+	 * Extra features if any
 	 */
 	if (es->verbose)
 	{
-		StringInfoData	buf;
-		uint32			cflags = gts->css.flags;
+		char	temp[256];
+		int		ofs = 0;
 
-		initStringInfo(&buf);
-
-		if ((cflags & CUSTOMPATH_PREFERE_ROW_FORMAT) != 0)
-			appendStringInfo(&buf, "format: heap-tuple");
-		else
-			appendStringInfo(&buf, "format: tuple-slot");
-
-		if ((cflags & CUSTOMPATH_SUPPORT_BULKLOAD) != 0)
-			appendStringInfo(&buf, ", bulkload: supported");
-		else
-			appendStringInfo(&buf, ", bulkload: unsupported");
-
-		ExplainPropertyText("Features", buf.data, es);
-
-		pfree(buf.data);
+		/* run per-chunk-execution? */
+		if (gts->exec_per_chunk)
+			ofs += snprintf(temp+ofs, sizeof(temp) - ofs, "%sexec-per-chunk",
+							ofs > 0 ? ", " : "");
+		/* per-chunk-execution support? */
+		if (gts->cb_exec_chunk != NULL)
+			ofs += snprintf(temp+ofs, sizeof(temp) - ofs, "%schunk-format",
+							ofs > 0 ? ", " : "");
+		/* preferable result format */
+		if (gts->be_row_format)
+			ofs += snprintf(temp+ofs, sizeof(temp) - ofs, "%srow-format",
+							ofs > 0 ? ", " : "");
+		if (ofs > 0)
+			ExplainPropertyText("Extra", temp, es);
 	}
 
 	/*

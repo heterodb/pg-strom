@@ -3503,6 +3503,7 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 	gpas->gts.cb_task_release = gpupreagg_task_release;
 	gpas->gts.cb_next_chunk = gpupreagg_next_chunk;
 	gpas->gts.cb_next_tuple = gpupreagg_next_tuple;
+	gpas->gts.cb_exec_chunk = NULL;		/* nobody should use */
 	/* re-initialization of scan-descriptor and projection-info */
 	tupdesc = ExecCleanTypeFromTL(cscan->custom_scan_tlist, false);
 	ExecAssignScanType(&gpas->gts.css.ss, tupdesc);
@@ -3519,9 +3520,17 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 	 */
 	if (outerPlan(cscan) != NULL)
 	{
+		PlanState  *outer_ps;
+
 		Assert(cscan->scan.scanrelid == 0);
-		outerPlanState(gpas) = ExecInitNode(outerPlan(cscan), estate, eflags);
-		outer_nitems = outerPlanState(gpas)->plan->plan_rows;
+		outer_ps = ExecInitNode(outerPlan(cscan), estate, eflags);
+		if (pgstrom_chunk_exec_supported(outer_ps))
+		{
+			((GpuTaskState *) outer_ps)->be_row_format = true;
+			gpas->gts.exec_per_chunk = true;
+		}
+		outerPlanState(gpas) = outer_ps;
+		outer_nitems = outer_ps->plan->plan_rows;
 	}
 	else
 	{
@@ -3532,8 +3541,6 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 	/*
 	 * initialize child node
 	 */
-//	outerPlanState(gpas) = ExecInitNode(outerPlan(cscan), estate, eflags);
-//	outer_nitems = outerPlanState(gpas)->plan->plan_rows;
 	if (pgstrom_bulkload_enabled)
 		gpas->gts.scan_bulk = gpa_info->outer_bulkload;
 	gpas->gts.scan_bulk_density = gpa_info->bulkload_density;
@@ -4108,7 +4115,7 @@ gpupreagg_next_chunk(GpuTaskState *gts)
 		if (!gpas->outer_pds)
 			is_terminator = true;
 	}
-	else if (!gpas->gts.scan_bulk)
+	else if (!gpas->gts.exec_per_chunk)
 	{
 		/* Scan the outer relation using row-by-row mode */
 		TupleDesc		tupdesc
@@ -4153,13 +4160,15 @@ gpupreagg_next_chunk(GpuTaskState *gts)
 	{
 		/* Load a bunch of records at once on the first time */
 		if (!gpas->outer_pds)
-			gpas->outer_pds = BulkExecProcNode(subnode);
+			gpas->outer_pds = ChunkExecProcNode((GpuTaskState *)subnode,
+												pgstrom_chunk_size());
 		/* Picks up the cached one to detect the final chunk */
 		pds = gpas->outer_pds;
 		if (!pds)
 			gpas->gts.scan_done = true;
 		else
-			gpas->outer_pds = BulkExecProcNode(subnode);
+			gpas->outer_pds = ChunkExecProcNode((GpuTaskState *)subnode,
+												pgstrom_chunk_size());
 		/* Any more chunk expected? */
 		if (!gpas->outer_pds)
 			is_terminator = true;

@@ -1705,6 +1705,11 @@ gpuscan_begin(CustomScanState *node, EState *estate, int eflags)
 	gss->gts.cb_next_chunk = gpuscan_next_chunk;
 	gss->gts.cb_next_tuple = gpuscan_next_tuple;
 
+	/* Per chunk execution supported? */
+	if (gss->gts.css.ss.ps.qual == NIL &&
+		gss->gts.css.ss.ps.ps_ProjInfo == NULL)
+		gss->gts.cb_exec_chunk = pgstrom_exec_chunk_gputask;
+
 	/* initialize device tlist for CPU fallback */
 	gss->dev_tlist = (List *)
 		ExecInitExpr((Expr *) cscan->custom_scan_tlist, &gss->gts.css.ss.ps);
