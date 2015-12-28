@@ -1953,21 +1953,19 @@ gpuscan_next_tuple(GpuTaskState *gts)
 		{
 			pgstrom_data_store *pds_src = gpuscan->pds_src;
 			kern_resultbuf	   *kresults = gpuscan->kresults;
-			cl_int				index;
 
-			if (kresults->all_visible)
+			if (gss->gts.curr_index < (kresults->all_visible
+									   ? pds_src->kds->nitems
+									   : kresults->nitems))
 			{
-				if (gss->gts.curr_index < pds_src->kds->nitems)
-				{
+				cl_uint		index = gss->gts.curr_index++;
 
-				}
-			}
-			else
-			{
-				if (gss->gts.curr_index < kresults->nitems)
-				{
-					
-				}
+				if (!kresults->all_visible)
+					index = kresults->results[index];
+				slot = gss->gts.css.ss.ss_ScanTupleSlot;
+				if (!pgstrom_fetch_data_store(slot, pds_src, index,
+											  &gss->scan_tuple))
+					elog(ERROR, "failed to fetch a record from pds");
 			}
 		}
 	}
