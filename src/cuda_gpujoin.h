@@ -158,14 +158,21 @@ gpujoin_hash_value(kern_context *kcxt,
 				   cl_int *outer_index);
 
 /*
- * gpujoin_projection_mapping
+ * gpujoin_projection
  *
- * Lookup source depth/colidx pair by the destination colidx.
+ * Implementation of device projection. Extract a pair of outer/inner tuples
+ * on the tup_values/tup_isnull array.
  */
 STATIC_FUNCTION(void)
-gpujoin_projection_mapping(cl_int dest_colidx,
-						   cl_int *src_depth,
-						   cl_int *src_colidx);
+gpujoin_projection(kern_context *kcxt,
+				   kern_gpujoin *kgjoin,
+				   kern_data_store *kds_src,
+				   kern_multirels *kmrels,
+				   cl_uint *r_buffer,
+				   kern_data_store *kds_dst,
+				   Datum *tup_values,
+				   cl_bool *tup_isnull,
+				   cl_bool *tup_internal);
 
 KERNEL_FUNCTION(void)
 gpujoin_preparation(kern_gpujoin *kgjoin,
@@ -911,6 +918,7 @@ out:
  *
  * It makes joined relation on kds_dst
  */
+#if 0
 STATIC_FUNCTION(void)
 __gpujoin_projection_row(kern_context *kcxt,
 						 kern_gpujoin *kgjoin,
@@ -1174,6 +1182,98 @@ __gpujoin_projection_row(kern_context *kcxt,
 		titem->t_len = curr;
 	}
 }
+#endif
+
+STATIC_FUNCTION(void)
+__gpujoin_projection_row(kern_context *kcxt,
+						 kern_gpujoin *kgjoin,
+						 kern_resultbuf *kresults,
+						 size_t res_index,
+						 kern_multirels *kmrels,
+                         kern_data_store *kds_src,
+                         kern_data_store *kds_dst)
+{
+	Datum		tup_values[GPUJOIN_DEVICE_PROJECTION_NFIELDS];
+	cl_bool		tup_isnull[GPUJOIN_DEVICE_PROJECTION_NFIELDS];
+	cl_bool		tup_internal[GPUJOIN_DEVICE_PROJECTION_NFIELDS];
+	cl_uint	   *r_buffer;
+	cl_uint		offset;
+	cl_uint		count;
+	__shared__ cl_uint base;
+
+	/*
+	 * result buffer
+	 * -------------
+	 * r_buffer[0] -> offset from the 'kds_src'
+	 * r_buffer[i; i > 0] -> offset from the kern_data_store of individual
+	 *   depth in the kern_multirels buffer.
+	 *   (can be picked up using KERN_MULTIRELS_INNER_KDS)
+	 * r_buffer[*] may be 0, if NULL-tuple was set
+	 */
+	if (res_index < kresults->nitems)
+		r_buffer = KERN_GET_RESULT(kresults, res_index);
+	else
+		r_buffer = NULL;
+
+	/*
+	 * Step.1 - comput length of the result tuple to be written
+	 */
+	if (r_buffer)
+	{
+		gpujoin_projection(&kcxt,
+						   kgjoin,
+						   kds_src,
+						   kmrels,
+						   r_buffer,
+						   kds_dst,
+						   tup_values,
+						   tup_isnull,
+						   tup_internal);
+		required = MAXALIGN(offsetof(kern_tupitem, htup) +
+							compute_heaptuple_size(&kcxt,
+												   kds_dst,
+												   tup_values,
+												   tup_isnull,
+												   tup_internal));
+	}
+	else
+		required = 0;
+
+	/*
+	 * Step.2 - increment the buffer usage of kds_dst
+	 */
+	offset = arithmetic_stairlike_add(required, &count);
+	if (get_lobal_id() == 0)
+	{
+		if (count > 0)
+			base = atomicAdd(&kds_dst->usage, count);
+		else
+			base = 0;
+	}
+	__syncthreads();
+
+	if (KERN_DATA_STORE_HEAD_LENGTH(kds_dst) +
+		STROMALIGN(sizeof(cl_uint) * kresults->nitems) +
+		base + count > kds_dst->length)
+	{
+		STROM_SET_ERROR(&kcxt->e, StromError_DataStoreNoSpace);
+		return;
+	}
+
+	/*
+	 * Step.3 - write out the HeapTuple on the destination buffer
+	 */
+	if (required > 0)
+	{
+		cl_uint			pos = kds_dst->length - (base + offset + required);
+		kern_tupitem   *tupitem = (kern_tupitem *)((char *)kds_dst + pos);
+
+		form_kern_heaptuple(kcxt, kds_dst, tupitem_dst,
+							tup_values, tup_isnull, tup_internal);
+	}
+}
+
+
 
 KERNEL_FUNCTION(void)
 gpujoin_projection_row(kern_gpujoin *kgjoin,
@@ -1239,6 +1339,7 @@ out:
 	kern_writeback_error_status(&kgjoin->kerror, kcxt.e);
 }
 
+#if 0
 STATIC_FUNCTION(void)
 __gpujoin_projection_slot(kern_context *kcxt,
 						  kern_resultbuf *kresults,
@@ -1339,6 +1440,7 @@ __gpujoin_projection_slot(kern_context *kcxt,
 		}
 	}
 }
+#endif
 
 KERNEL_FUNCTION(void)
 gpujoin_projection_slot(kern_gpujoin *kgjoin,
@@ -1350,6 +1452,11 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 	kern_resultbuf *kresults = KERN_GPUJOIN_OUT_RESULTS(kgjoin,
 														kgjoin->num_rels);
 	kern_context	kcxt;
+	Datum		   *tup_values;
+	cl_bool		   *tup_isnull;
+	cl_bool			tup_internal[GPUJOIN_DEVICE_PROJECTION_NFIELDS];
+	cl_uint		   *r_buffer;
+	size_t			res_limit;
 	size_t			res_index;
 
 	/* sanity checks */
@@ -1390,12 +1497,29 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 	}
 
 	/* Do projection if thread is responsible */
+	res_limit = ((kresults->nitems + get_local_size() - 1) /
+				 get_local_size()) * get_local_size();
 	for (res_index = get_global_id();
-		 res_index < kresults->nitems;
+		 res_index < res_limit;
 		 res_index += get_global_size())
 	{
-		__gpujoin_projection_slot(&kcxt, kresults, res_index,
-								  kmrels, kds_src, kds_dst);
+		if (res_index < kresults->nitems)
+			r_buffer = KERN_GET_RESULT(kresults, res_index);
+		else
+			r_buffer = NULL;	/* not a valid joined tuple */
+
+		tup_values = KERN_DATA_STORE_VALUES(kds_dst, res_index);
+		tup_isnull = KERN_DATA_STORE_ISNULL(kds_dst, res_index);
+		memset(tup_internal, 0, sizeof(tup_internal));
+
+		gpujoin_projection(&kcxt,
+						   kgjoin,
+						   kds_src,
+						   kmrels,
+						   r_buffer,
+						   tup_values,
+						   tup_isnull,
+						   tup_internal);
 	}
 out:
 	/* write-back execution status to host-side */
