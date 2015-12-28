@@ -48,8 +48,6 @@ static set_rel_pathlist_hook_type	set_rel_pathlist_next;
 static CustomPathMethods	gpuscan_path_methods;
 static CustomScanMethods	gpuscan_plan_methods;
 static PGStromExecMethods	gpuscan_exec_methods;
-static CustomScanMethods	bulkscan_plan_methods;
-static PGStromExecMethods	bulkscan_exec_methods;
 static bool					enable_gpuscan;
 static bool					debug_pullup_outer_scan;
 
@@ -546,7 +544,7 @@ gpuscan_try_replace_seqscan(Relation baserel, SeqScan *seqscan)
 	cscan->scan.scanrelid = seqscan->scanrelid;
 	cscan->flags = CUSTOMPATH_SUPPORT_BULKLOAD;
 	cscan->custom_relids = bms_make_singleton(seqscan->scanrelid);
-	cscan->methods = &bulkscan_plan_methods;
+	cscan->methods = &gpuscan_plan_methods;
 
 	memset(&gs_info, 0, sizeof(GpuScanInfo));
 	gs_info.kern_source = GPUSCAN_KERN_SOURCE_NO_DEVQUAL;
@@ -693,9 +691,7 @@ pgstrom_plan_is_gpuscan(const Plan *plan)
 {
 	CustomScan	   *cscan = (CustomScan *) plan;
 
-	if (IsA(cscan, CustomScan) &&
-		(cscan->methods == &gpuscan_plan_methods ||
-		 cscan->methods == &bulkscan_plan_methods))
+	if (IsA(cscan, CustomScan) && cscan->methods == &gpuscan_plan_methods)
 		return true;
 	return false;
 }
@@ -1679,8 +1675,6 @@ gpuscan_create_scan_state(CustomScan *cscan)
 	gss->gts.css.flags = cscan->flags;
 	if (cscan->methods == &gpuscan_plan_methods)
 		gss->gts.css.methods = &gpuscan_exec_methods.c;
-	else if (cscan->methods == &bulkscan_plan_methods)
-		gss->gts.css.methods = &bulkscan_exec_methods.c;
 	else
 		elog(ERROR, "Bug? unexpected CustomPlanMethods");
 
@@ -2137,10 +2131,6 @@ pgstrom_init_gpuscan(void)
 	gpuscan_plan_methods.CustomName			= "GpuScan";
 	gpuscan_plan_methods.CreateCustomScanState = gpuscan_create_scan_state;
 
-	memset(&bulkscan_plan_methods, 0, sizeof(bulkscan_plan_methods));
-	bulkscan_plan_methods.CustomName		= "BulkScan";
-	bulkscan_plan_methods.CreateCustomScanState = gpuscan_create_scan_state;
-
 	/* setup exec methods */
 	memset(&gpuscan_exec_methods, 0, sizeof(gpuscan_exec_methods));
 	gpuscan_exec_methods.c.CustomName         = "GpuScan";
@@ -2150,14 +2140,6 @@ pgstrom_init_gpuscan(void)
 	gpuscan_exec_methods.c.ReScanCustomScan   = gpuscan_rescan;
 	gpuscan_exec_methods.c.ExplainCustomScan  = gpuscan_explain;
 	gpuscan_exec_methods.ExecCustomBulk       = gpuscan_exec_bulk;
-
-	bulkscan_exec_methods.c.CustomName        = "BulkScan";
-	bulkscan_exec_methods.c.BeginCustomScan   = gpuscan_begin;
-	bulkscan_exec_methods.c.ExecCustomScan    = gpuscan_exec;
-	bulkscan_exec_methods.c.EndCustomScan     = gpuscan_end;
-	bulkscan_exec_methods.c.ReScanCustomScan  = gpuscan_rescan;
-	bulkscan_exec_methods.c.ExplainCustomScan = gpuscan_explain;
-	bulkscan_exec_methods.ExecCustomBulk      = gpuscan_exec_bulk;
 
 	/* hook registration */
 	set_rel_pathlist_next = set_rel_pathlist_hook;
