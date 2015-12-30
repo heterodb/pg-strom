@@ -1204,7 +1204,7 @@ codegen_device_projection(StringInfo source,
  * replace_varnode_with_tlist_dev - replaces the Var node in the supplied
  * expression node to reference tlist_dev, instead of the original.
  */
-static Node *
+Node *
 replace_varnode_with_tlist_dev(Node *node, List *tlist_dev)
 {
 	if (node == NULL)
@@ -1257,8 +1257,8 @@ replace_varnode_with_tlist_dev(Node *node, List *tlist_dev)
  * add_unique_expression - adds an expression node on the supplied
  * target-list, then returns the varattno to reference the entry.
  */
-static AttrNumber
-add_unique_expression(Expr *expr, List **p_targetlist)
+AttrNumber
+add_unique_expression(Expr *expr, List **p_targetlist, bool resjunk)
 {
 	TargetEntry	   *tle;
 	ListCell	   *lc;
@@ -1272,7 +1272,7 @@ add_unique_expression(Expr *expr, List **p_targetlist)
 	}
 	/* Not found, so add this expression */
 	resno = list_length(*p_targetlist) + 1;
-	tle = makeTargetEntry(copyObject(expr), resno, NULL, false);
+	tle = makeTargetEntry(copyObject(expr), resno, NULL, resjunk);
 	*p_targetlist = lappend(*p_targetlist, tle);
 
 	return resno;
@@ -1352,7 +1352,7 @@ build_device_projection(Index scanrelid,
 					tlist_compatible = false;
 			}
 			/* add primitive Var-node on the tlist_dev */
-			varattno = add_unique_expression((Expr *) var, &tlist_dev);
+			varattno = add_unique_expression((Expr *) var, &tlist_dev, false);
 
 			/* add pseudo Var-node on the tlist_new */
 			tle_new = makeTargetEntry((Expr *) makeVar(INDEX_VAR,
@@ -1373,7 +1373,7 @@ build_device_projection(Index scanrelid,
 			Oid		coll_oid = exprCollation((Node *)tle->expr);
 
 			/* Add device executable expression onto the tlist_dev */
-			varattno = add_unique_expression(tle->expr, &tlist_dev);
+			varattno = add_unique_expression(tle->expr, &tlist_dev, false);
 
 			/* Then, CPU just referenced the calculation result */
 			tle_new = makeTargetEntry((Expr *) makeVar(INDEX_VAR,
@@ -1426,7 +1426,8 @@ build_device_projection(Index scanrelid,
 													   attr->atttypmod,
 													   attr->attcollation,
 													   0),
-									  &tlist_dev);
+									  &tlist_dev,
+									  false);
 			}
 			/* 3. replace varnode of the expression */
 			expr_new = replace_varnode_with_tlist_dev((Node *) tle->expr,
@@ -1450,6 +1451,13 @@ build_device_projection(Index scanrelid,
 	 */
 	if (attnum != tupdesc->natts)
 		tlist_compatible = false;
+
+	/*
+	 * NOTE: The reason why we don't need to add target-entries with
+	 * resjunk==true is, all the varnodes in host-/device-qualifiers
+	 * references the base relation, thus we don't need special
+	 * translation for them.
+	 */
 
 	/* put results */
 	*p_tlist_new = tlist_new;
@@ -1636,28 +1644,6 @@ pgstrom_post_planner_gpuscan(PlannedStmt *pstmt, Plan **p_curr_plan)
 	form_gpuscan_info(cscan, gs_info);
 
 	heap_close(baserel, NoLock);
-}
-
-/*
- * pgstrom_gpuscan_setup_bulkslot
- *
- * It setup tuple-slot for bulk-loading and projection-info to transform
- * the tuple into expected form.
- * (Once CustomPlan become CustomScan, no need to be a API)
- */
-void
-pgstrom_gpuscan_setup_bulkslot(PlanState *outer_planstate,
-							   ProjectionInfo **p_bulk_proj,
-							   TupleTableSlot **p_bulk_slot)
-{
-	CustomScanState *css = (CustomScanState *) outer_planstate;
-
-	if (!IsA(css, CustomScanState) ||
-		css->methods != &gpuscan_exec_methods.c)
-		elog(ERROR, "Bug? PlanState node is not GpuScanState");
-
-	*p_bulk_proj = css->ss.ps.ps_ProjInfo;
-	*p_bulk_slot = css->ss.ss_ScanTupleSlot;
 }
 
 /*

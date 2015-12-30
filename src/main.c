@@ -317,6 +317,8 @@ pgstrom_recursive_grafter(PlannedStmt *pstmt, Plan *parent, Plan **p_curr_plan)
 		case T_CustomScan:
 			if (pgstrom_plan_is_gpuscan(plan))
 				pgstrom_post_planner_gpuscan(pstmt, p_curr_plan);
+			else if (pgstrom_plan_is_gpujoin(plan))
+				pgstrom_post_planner_gpujoin(pstmt, p_curr_plan);
 			break;
 
 		case T_SeqScan:

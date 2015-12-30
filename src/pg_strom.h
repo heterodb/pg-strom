@@ -623,13 +623,13 @@ extern bool pgstrom_pullup_outer_scan(Plan *plannode,
 									  List **p_outer_qual);
 extern bool pgstrom_path_is_gpuscan(const Path *path);
 extern bool pgstrom_plan_is_gpuscan(const Plan *plan);
+extern Node *replace_varnode_with_tlist_dev(Node *node, List *tlist_dev);
+extern AttrNumber add_unique_expression(Expr *expr, List **p_targetlist,
+										bool resjunk);
 extern pgstrom_data_store *pgstrom_exec_scan_chunk(GpuTaskState *gts,
 												   Size chunk_length);
 extern void pgstrom_rewind_scan_chunk(GpuTaskState *gts);
 extern void pgstrom_post_planner_gpuscan(PlannedStmt *pstmt, Plan **p_plan);
-extern void pgstrom_gpuscan_setup_bulkslot(PlanState *outer_ps,
-										   ProjectionInfo **p_bulk_proj,
-										   TupleTableSlot **p_bulk_slot);
 extern void pgstrom_init_gpuscan(void);
 
 /*
@@ -638,6 +638,7 @@ extern void pgstrom_init_gpuscan(void);
 extern bool pgstrom_path_is_gpujoin(Path *pathnode);
 extern bool pgstrom_plan_is_gpujoin(const Plan *plannode);
 extern bool pgstrom_plan_is_gpujoin_bulkinput(const Plan *plannode);
+extern void pgstrom_post_planner_gpujoin(PlannedStmt *pstmt, Plan **p_plan);
 extern void	pgstrom_init_gpujoin(void);
 
 /*

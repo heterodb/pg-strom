@@ -1436,19 +1436,22 @@ build_flatten_qualifier(List *clauses)
 }
 
 /*
- * build_pseudo_targetlist
+ * build_device_tlist_tentative
  *
- * constructor of pseudo-targetlist according to the expression tree
- * to be evaluated or returned. Usually, all we need to consider are
- * columns referenced by host-qualifiers and target-list. However,
- * we may need to execute device-qualifiers on CPU when device code
- * raised CpuReCheck error, so we also append columns (that is
- * referenced by device qualifiers only) in addition to the columns
- * referenced by host qualifiers. It has another benefit, because
- * it can share the data-structure regardless of CpuReCheck error.
- * Device code will generate full pseudo-scan data chunk, then we
- * can cut off the columns within scope of host references, if no
- * error was reported.
+ * It constructs a tentative custom_scan_tlist, according to
+ * the expression to be evaluated, returned or shown in EXPLAIN.
+ * Usually, all we need to pay attention is columns referenced by host-
+ * qualifiers and target-list. However, we may need to execute entire
+ * JOIN operations on CPU if GPU raised CpuReCheck error. So, we also
+ * adds columns which are also referenced by device qualifiers.
+ * (EXPLAIN command has to solve the name, so we have to have these
+ * Var nodes in the custom_scan_tlist.)
+ *
+ * pgstrom_post_planner_gpujoin() may update the custom_scan_tlist
+ * to push-down CPU projection. In this case, custom_scan_tlist will
+ * have complicated expression not only simple Var-nodes, to simplify
+ * targetlist of the CustomScan to reduce cost for CPU projection as
+ * small as possible we can.
  */
 typedef struct
 {
@@ -1457,11 +1460,12 @@ typedef struct
 	List		   *ps_resno;
 	GpuJoinPath	   *gpath;
 	List		   *custom_plans;
+	Index			outer_scanrelid;
 	bool			resjunk;
-} build_ps_tlist_context;
+} build_device_tlist_context;
 
 static bool
-build_pseudo_targetlist_walker(Node *node, build_ps_tlist_context *context)
+build_device_tlist_walker(Node *node, build_device_tlist_context *context)
 {
 	GpuJoinPath	   *gpath = context->gpath;
 	RelOptInfo	   *rel;
@@ -1501,7 +1505,23 @@ build_pseudo_targetlist_walker(Node *node, build_ps_tlist_context *context)
 		for (i=0; i <= gpath->num_rels; i++)
 		{
 			if (i == 0)
+			{
 				rel = gpath->outer_path->parent;
+				/* special case if outer scan was pulled up */
+				if (context->outer_scanrelid == rel->relid)
+				{
+					TargetEntry	   *ps_tle =
+						makeTargetEntry((Expr *) copyObject(varnode),
+										list_length(context->ps_tlist) + 1,
+										NULL,
+										context->resjunk);
+					context->ps_tlist = lappend(context->ps_tlist, ps_tle);
+					context->ps_depth = lappend_int(context->ps_depth, i);
+					context->ps_resno = lappend_int(context->ps_resno,
+													varnode->varattno);
+					return false;
+				}
+			}
 			else
 				rel = gpath->inners[i-1].scan_path->parent;
 
@@ -1524,13 +1544,10 @@ build_pseudo_targetlist_walker(Node *node, build_ps_tlist_context *context)
 											list_length(context->ps_tlist) + 1,
 											NULL,
 											context->resjunk);
-						context->ps_tlist =
-							lappend(context->ps_tlist, ps_tle);
-						context->ps_depth =
-							lappend_int(context->ps_depth, i);
-						context->ps_resno =
-							lappend_int(context->ps_resno, tle->resno);
-
+						context->ps_tlist = lappend(context->ps_tlist, ps_tle);
+						context->ps_depth = lappend_int(context->ps_depth, i);
+						context->ps_resno = lappend_int(context->ps_resno,
+														tle->resno);
 						return false;
 					}
 				}
@@ -1540,26 +1557,32 @@ build_pseudo_targetlist_walker(Node *node, build_ps_tlist_context *context)
 		elog(ERROR, "Bug? uncertain origin of Var-node: %s",
 			 nodeToString(varnode));
 	}
-	return expression_tree_walker(node, build_pseudo_targetlist_walker,
+	return expression_tree_walker(node, build_device_tlist_walker,
 								  (void *) context);
 }
 
-static List *
-build_pseudo_targetlist(GpuJoinPath *gpath,
-						GpuJoinInfo *gj_info,
-						List *targetlist,
-						List *host_quals,
-						List *custom_plans)
+static void
+build_device_tlist_tentative(GpuJoinPath *gpath,
+							 CustomScan *cscan,
+							 GpuJoinInfo *gj_info,
+							 List *targetlist,
+							 List *host_quals,
+							 List *custom_plans)
 {
-	build_ps_tlist_context context;
+	build_device_tlist_context	context;
 
-	memset(&context, 0, sizeof(build_ps_tlist_context));
-	context.gpath   = gpath;
+	Assert(outerPlan(cscan)
+		   ? cscan->scan.scanrelid == 0
+		   : cscan->scan.scanrelid != 0);
+
+	memset(&context, 0, sizeof(build_device_tlist_context));
+	context.gpath = gpath;
 	context.custom_plans = custom_plans;
+	context.outer_scanrelid = cscan->scan.scanrelid;
 	context.resjunk = false;
 
-	build_pseudo_targetlist_walker((Node *)targetlist, &context);
-	build_pseudo_targetlist_walker((Node *)host_quals, &context);
+	build_device_tlist_walker((Node *)targetlist, &context);
+	Assert(host_quals == NIL);
 
 	/*
 	 * Above are host referenced columns. On the other hands, the columns
@@ -1567,17 +1590,17 @@ build_pseudo_targetlist(GpuJoinPath *gpath,
 	 * referenced by the host-side. We mark it resjunk=true.
 	 */
 	context.resjunk = true;
-	build_pseudo_targetlist_walker((Node *)gj_info->hash_outer_keys, &context);
-	build_pseudo_targetlist_walker((Node *)gj_info->join_quals, &context);
-	build_pseudo_targetlist_walker((Node *)gj_info->outer_quals, &context);
+	build_device_tlist_walker((Node *)gj_info->outer_quals, &context);
+	build_device_tlist_walker((Node *)gj_info->join_quals, &context);
+	build_device_tlist_walker((Node *)gj_info->hash_inner_keys, &context);
+	build_device_tlist_walker((Node *)gj_info->hash_outer_keys, &context);
 
-    Assert(list_length(context.ps_tlist) == list_length(context.ps_depth) &&
-           list_length(context.ps_tlist) == list_length(context.ps_resno));
+	Assert(list_length(context.ps_tlist) == list_length(context.ps_depth) &&
+		   list_length(context.ps_tlist) == list_length(context.ps_resno));
 
 	gj_info->ps_src_depth = context.ps_depth;
 	gj_info->ps_src_resno = context.ps_resno;
-
-	return context.ps_tlist;
+	cscan->custom_scan_tlist = context.ps_tlist;
 }
 
 /*
@@ -1688,26 +1711,11 @@ create_gpujoin_plan(PlannerInfo *root,
 		outer_nrows = gpath->inners[i].join_nrows;
 	}
 
-#if 0
-	/* check bulkload availability */
-	if (IsA(outer_plan, CustomScan))
-	{
-		int		custom_flags = ((CustomScan *) outer_plan)->flags;
-		double	outer_density = pgstrom_get_bulkload_density(outer_plan);
-
-		if ((custom_flags & CUSTOMPATH_SUPPORT_BULKLOAD) != 0 &&
-			outer_density >= (1.0 - pgstrom_bulkload_density) &&
-			outer_density <= (1.0 + pgstrom_bulkload_density))
-		{
-			gj_info.outer_bulkload = true;
-			gj_info.bulkload_density = outer_density;
-		}
-	}
 	/*
-	 * XXX - meaning of bulkload will change, thus, no need to pay attention
-	 * on the density
+	 * If outer-plan node is simple enough; GPU executable SeqScan or GpuScan,
+	 * we pull up the outer-plan and execute by itself, to reduce cost for
+	 * communication between two nodes.
 	 */
-#endif
 	if (pgstrom_pullup_outer_scan(outer_plan, false, &outer_quals))
 	{
 		Index	scanrelid = ((Scan *) outer_plan)->scanrelid;
@@ -1719,11 +1727,13 @@ create_gpujoin_plan(PlannerInfo *root,
 	outerPlan(cscan) = outer_plan;
 
 	/*
-	 * Build a pseudo-scan targetlist
+	 * Build a tentative pseudo-scan targetlist. At this point, we cannot
+	 * know which expression shall be applied on the final results, thus,
+	 * all we can construct is a pseudo-scan targetlist that is consists
+	 * of Var-nodes only.
 	 */
-	cscan->custom_scan_tlist = build_pseudo_targetlist(gpath, &gj_info,
-													   tlist, host_quals,
-													   custom_plans);
+	build_device_tlist_tentative(gpath, cscan, &gj_info,
+								 tlist, host_quals, custom_plans);
 
 	/*
 	 * construct kernel code
@@ -1739,6 +1749,257 @@ create_gpujoin_plan(PlannerInfo *root,
 
 	return &cscan->scan.plan;
 }
+
+/*
+ * fixup_device_only_expr - replace varnode with INDEX_VAR based on
+ * the previous custom_scan_tlist, by newer tlist_dev.
+ */
+static Node *
+fixup_device_only_expr(Node *node, List **p_tlist_dev)
+{
+	if (node == NULL)
+		return NULL;
+
+	if (IsA(node, Var))
+	{
+		TargetEntry	   *tle_new;
+		Var			   *var = (Var *) node;
+		ListCell	   *lc;
+
+		Assert(var->varno == INDEX_VAR);
+		Assert(var->varlevelsup == 0);
+
+		foreach (lc, *p_tlist_dev)
+		{
+			TargetEntry	   *tle = lfirst(lc);
+			Var			   *curr = (Var *) tle->expr;
+
+			if (!IsA(curr, Var))
+				continue;
+
+			if (var->varno == curr->varno &&
+				var->varattno == curr->varattno)
+			{
+				return (Node *) makeVar(INDEX_VAR,
+										tle->resno,
+										var->vartype,
+										var->vartypmod,
+										var->varcollid,
+										0);
+			}
+		}
+		/* not found, so add a new junk target-entry */
+		tle_new = makeTargetEntry((Expr *) copyObject(var),
+								  list_length(*p_tlist_dev) + 1,
+								  NULL,
+								  true);
+		*p_tlist_dev = lappend(*p_tlist_dev, tle_new);
+
+		return (Node *) makeVar(INDEX_VAR,
+								tle_new->resno,
+								var->vartype,
+								var->vartypmod,
+								var->varcollid,
+								0);
+	}
+	return expression_tree_mutator(node, fixup_device_only_expr, p_tlist_dev);
+}
+
+
+
+
+
+/*
+ * finalize_device_tlist
+ *
+ * 
+ *
+ */
+static bool
+finalize_device_tlist(Node *node, List *old_tlist_dev)
+{
+	if (!node)
+		return false;
+	if (IsA(node, Var))
+	{
+		Var	   *var_cur = (Var *) node;
+		Var	   *var_old;
+		TargetEntry *tle;
+		Var		temp1;
+		Var		temp2;
+
+		Assert(var_cur->varno == INDEX_VAR);
+		tle = list_nth(old_tlist_dev, var_cur->varattno - 1);
+		Assert(IsA(tle->expr, Var));
+		var_old = (Var *) tle->expr;
+		memcpy(&temp1, var_old, sizeof(Var));
+		memcpy(&temp2, var_cur, sizeof(Var));
+
+		/* fixup this var-node */
+		var_cur->varno = var_old->varno;
+		var_cur->varattno = var_old->varattno;
+		Assert(var_cur->vartype == var_old->vartype);
+		Assert(var_cur->vartypmod == var_old->vartypmod);
+		Assert(var_cur->varcollid == var_cur->varcollid);
+		return false;
+	}
+	return expression_tree_walker(node, finalize_device_tlist, old_tlist_dev);
+}
+
+/*
+ * build_device_tlist_final
+ *
+ * It constructs the final custom_scan_tlist that contains device executable
+ * expressions.
+ */
+static void
+build_device_tlist_final(CustomScan *cscan, GpuJoinInfo *gj_info)
+{
+	List	   *tlist_old = cscan->scan.plan.targetlist;
+	List	   *tlist_new = NIL;
+	List	   *tlist_dev = NIL;
+	List	   *new_src_depth = NIL;
+	List	   *new_src_resno = NIL;
+	ListCell   *lc;
+
+	foreach (lc, tlist_old)
+	{
+		TargetEntry	   *tle = lfirst(lc);
+		TargetEntry	   *tle_new;
+		AttrNumber		varattno;
+
+		if (IsA(tle->expr, Var))
+		{
+			Var	   *var = (Var *) tle->expr;
+
+			/* sanity checks */
+			Assert(var->varno == INDEX_VAR);
+			Assert(var->varlevelsup == 0);
+			/* add primitive Var-node on the tlist_dev */
+			varattno = add_unique_expression(tle->expr, &tlist_dev, false);
+			/* add a varnode to reference above entry */
+			tle_new = makeTargetEntry((Expr *) makeVar(INDEX_VAR,
+													   varattno,
+													   var->vartype,
+													   var->vartypmod,
+													   var->varcollid,
+													   0),
+									  list_length(tlist_new) + 1,
+									  tle->resname,
+									  tle->resjunk);
+			tlist_new = lappend(tlist_new, tle_new);
+		}
+		else if (pgstrom_device_expression(tle->expr))
+		{
+			Oid		type_oid = exprType((Node *)tle->expr);
+			int32	type_mod = exprTypmod((Node *)tle->expr);
+			Oid		coll_oid = exprCollation((Node *)tle->expr);
+
+			/* Add device executable expression onto the tlist_dev */
+			varattno = add_unique_expression(tle->expr, &tlist_dev, false);
+			/* add a varnode to reference above expression */
+			tle_new = makeTargetEntry((Expr *) makeVar(INDEX_VAR,
+													   varattno,
+													   type_oid,
+													   type_mod,
+													   coll_oid,
+													   0),
+									  list_length(tlist_new) + 1,
+									  tle->resname,
+									  tle->resjunk);
+			tlist_new = lappend(tlist_new, tle_new);
+		}
+		else
+		{
+			List	   *vars_list;
+			ListCell   *cell;
+			Node	   *expr_new;
+			/*
+			 * Elsewhere, expression is not device executable, thus
+			 * we have to run host side projection to run host-only
+			 * expression node on the ExecProject().
+			 */
+			vars_list = pull_vars_of_level((Node *) tle->expr, 0);
+			foreach (cell, vars_list)
+			{
+				Var			   *var = (Var *) lfirst(cell);
+
+				Assert(var->varno == INDEX_VAR);
+				add_unique_expression((Expr *) var, &tlist_dev, false);
+			}
+			expr_new = replace_varnode_with_tlist_dev((Node *) tle->expr,
+													  tlist_dev);
+			tle_new = makeTargetEntry((Expr *) expr_new,
+									  list_length(tlist_new) + 1,
+									  tle->resname,
+									  tle->resjunk);
+			tlist_new = lappend(tlist_new, tle_new);
+		}
+	}
+
+	/*
+	 * tlist_dev shall become new custom_scan_tlist, thus, it also used
+	 * to solve the column name in EXPLAIN command. If join-qualifiers
+	 * and others references untracked var-nodes, we need to add target
+	 * entries with resjunk=true.
+	 */
+	gj_info->hash_outer_keys = (List *)
+		fixup_device_only_expr((Node *) gj_info->hash_outer_keys, &tlist_dev);
+	gj_info->hash_inner_keys = (List *)
+		fixup_device_only_expr((Node *) gj_info->hash_inner_keys, &tlist_dev);
+	gj_info->join_quals = (List *)
+		fixup_device_only_expr((Node *) gj_info->join_quals, &tlist_dev);
+	gj_info->outer_quals = (Expr *)
+		fixup_device_only_expr((Node *) gj_info->outer_quals, &tlist_dev);
+
+	/*
+	 * At this point, all the varnodes in tlist_new has varno==INDEX_VAR,
+	 * and references a particular target-entry on the tlist_dev.
+	 * The tlist_dev also contains the varnodes with varno==INDEV_VAR,
+	 * however, its varattno assumes a target-entry on the original
+	 * custom_scan_tlist, but to be replaced by tlist_dev.
+	 * So, tlist_dev has to be fixed up to reference correct columns.
+	 */
+	foreach (lc, tlist_dev)
+	{
+		TargetEntry	   *tle = lfirst(lc);
+		cl_int			src_depth = -1;
+		cl_int			src_resno = -1;
+
+		if (IsA(tle->expr, Var))
+		{
+			cl_int		index = ((Var *) tle->expr)->varattno;
+			src_depth = list_nth_int(gj_info->ps_src_depth, index - 1);
+			src_resno = list_nth_int(gj_info->ps_src_resno, index - 1);
+		}
+		finalize_device_tlist((Node *) tle->expr, cscan->custom_scan_tlist);
+		new_src_depth = lappend_int(new_src_depth, src_depth);
+		new_src_resno = lappend_int(new_src_resno, src_resno);
+	}
+	cscan->scan.plan.targetlist = tlist_new;
+	cscan->custom_scan_tlist = tlist_dev;
+	gj_info->ps_src_depth = new_src_depth;
+	gj_info->ps_src_resno = new_src_resno;
+}
+
+/*
+ * pgstrom_post_planner_gpujoin
+ *
+ * Applies device projection of GpuJoin
+ */
+void
+pgstrom_post_planner_gpujoin(PlannedStmt *pstmt, Plan **p_curr_plan)
+{
+	CustomScan	   *cscan = (CustomScan *)(*p_curr_plan);
+	GpuJoinInfo	   *gj_info = deform_gpujoin_info(cscan);
+
+	Assert(pgstrom_plan_is_gpujoin((Plan *) cscan));
+
+	build_device_tlist_final(cscan, gj_info);
+
+	form_gpujoin_info(cscan, gj_info);
+}
+
 
 typedef struct
 {
@@ -1791,8 +2052,6 @@ fixup_varnode_to_origin(GpuJoinState *gjs, int depth, List *expr_list)
 	return (List *) fixup_varnode_to_origin_mutator((Node *) expr_list,
 													&context);
 }
-
-
 
 static Node *
 gpujoin_create_scan_state(CustomScan *node)
@@ -2169,6 +2428,7 @@ gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	char		   *temp;
 	char			qlabel[128];
 	int				depth;
+	bool			meet_resjunk = false;
 	StringInfoData	str;
 
 	initStringInfo(&str);
@@ -2177,30 +2437,36 @@ gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	context =  set_deparse_context_planstate(es->deparse_cxt,
 											 (Node *) node,
 											 ancestors);
-	/* pseudo scan tlist if verbose */
-	if (es->verbose)
+	/* Device projection */
+	resetStringInfo(&str);
+	foreach (lc1, cscan->custom_scan_tlist)
 	{
-		resetStringInfo(&str);
-		foreach (lc1, cscan->custom_scan_tlist)
+		TargetEntry	   *tle = lfirst(lc1);
+
+		if (meet_resjunk || (!es->verbose && tle->resjunk))
 		{
-			TargetEntry	   *tle = lfirst(lc1);
+			Assert(tle->resjunk);
+			meet_resjunk = true;
+			continue;
+		}
+		temp = deparse_expression((Node *)tle->expr,
+								  context, true, false);
+		if (lc1 != list_head(cscan->custom_scan_tlist))
+			appendStringInfo(&str, ", ");
 
-			temp = deparse_expression((Node *)tle->expr,
-									  context, true, false);
-			if (lc1 != list_head(cscan->custom_scan_tlist))
-				appendStringInfo(&str, ", ");
-			if (!tle->resjunk)
-				appendStringInfo(&str, "%s", temp);
-			else
-				appendStringInfo(&str, "(%s)", temp);
-
+		if (es->verbose)
+		{
 			temp = format_type_with_typemod(exprType((Node *)tle->expr),
 											exprTypmod((Node *)tle->expr));
 			appendStringInfo(&str, "::%s", temp);
 		}
-		ExplainPropertyText("Pseudo Scan", str.data, es);
+		if (!tle->resjunk)
+			appendStringInfo(&str, "%s", temp);
+		else
+			appendStringInfo(&str, "[%s]", temp);
 	}
-
+	ExplainPropertyText("GPU Projection", str.data, es);
+#if 0
 	/* outer bulkload */
 	if (!gjs->gts.scan_bulk)
 		ExplainPropertyText("Bulkload", "Off", es);
@@ -2210,6 +2476,7 @@ gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 						100.0 * gjs->gts.scan_bulk_density);
 		ExplainPropertyText("Bulkload", temp, es);
 	}
+#endif
 
 	/* outer qualifier if any */
 	if (gj_info->outer_quals)
@@ -2226,7 +2493,7 @@ gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 			temp = psprintf("%s (%.2f%%)",
 							temp,
 							100.0 * gj_info->outer_ratio);
-		ExplainPropertyText("OuterQual", temp, es);
+		ExplainPropertyText("GPU Filter", temp, es);
 	}
 
 	/* join-qualifiers */
