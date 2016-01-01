@@ -420,7 +420,8 @@ pg_numeric_to_varlena(kern_context *kcxt, char *vl_buffer,
 		pNumData->n_short.n_header =
 			NUMERIC_SHORT |
 			(sign ? NUMERIC_SHORT_SIGN_MASK : 0) |
-			(dscale & NUMERIC_SHORT_DSCALE_MASK) |
+			((dscale << NUMERIC_SHORT_DSCALE_SHIFT)
+			 & NUMERIC_SHORT_DSCALE_MASK) |
 			(weight & (NUMERIC_SHORT_WEIGHT_SIGN_MASK |
 					   NUMERIC_SHORT_WEIGHT_MASK));
 		pNData = pNumData->n_short.n_data;
