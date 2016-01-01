@@ -1814,6 +1814,7 @@ codegen_device_projection(CustomScan *cscan, GpuJoinInfo *gj_info,
 		"                   kern_data_store *kds_dst,\n"
 		"                   Datum *tup_values,\n"
 		"                   cl_bool *tup_isnull,\n"
+		"                   cl_short *tup_depth,\n"
 		"                   cl_char *extra_buf,\n"
 		"                   cl_uint *extra_len)\n"
 		"{\n"
@@ -1925,9 +1926,11 @@ codegen_device_projection(CustomScan *cscan, GpuJoinInfo *gj_info,
 					appendStringInfo(
 						&temp,
 						"  tup_isnull[%d] = (addr != NULL ? false : true);\n"
-						"  tup_values[%d] = PointerGetDatum(addr);\n",
+						"  tup_values[%d] = PointerGetDatum(addr);\n"
+						"  tup_depth[%d] = %d;\n",
 						tle->resno - 1,
-						tle->resno - 1);
+						tle->resno - 1,
+						tle->resno - 1, depth);
 				}
 				else
 				{
@@ -1935,13 +1938,15 @@ codegen_device_projection(CustomScan *cscan, GpuJoinInfo *gj_info,
 						&temp,
 						"  tup_isnull[%d] = (addr != NULL ? false : true);\n"
 						"  if (addr)\n"
-						"    tup_values[%d] = *((%s *) addr);\n",
+						"    tup_values[%d] = *((%s *) addr);\n"
+						"  tup_depth[%d] = %d;\n",
 						tle->resno - 1,
                         tle->resno - 1,
 						(typelen == sizeof(cl_long)  ? "cl_long" :
 						 typelen == sizeof(cl_int)   ? "cl_int" :
 						 typelen == sizeof(cl_short) ? "cl_short"
-						 							 : "cl_char"));
+													 : "cl_char"),
+						tle->resno - 1, depth);
 				}
 				referenced = true;
 			}
@@ -2036,7 +2041,8 @@ codegen_device_projection(CustomScan *cscan, GpuJoinInfo *gj_info,
 				"                              temp.%s_v.isnull);\n"
 				"    tup_values[%d] = PointerGetDatum(extra_pos);\n"
 				"    extra_pos += MAXALIGN(numeric_len);\n"
-				"  }\n",
+				"  }\n"
+				"  tup_depth[%d] = -1;\n",
 				dtype->type_name,
 				pgstrom_codegen_expression((Node *)tle->expr, context),
 				tle->resno - 1,
@@ -2044,6 +2050,7 @@ codegen_device_projection(CustomScan *cscan, GpuJoinInfo *gj_info,
 				dtype->type_name,
 				dtype->type_name,
 				dtype->type_name,
+				tle->resno - 1,
 				tle->resno - 1);
 		}
 		else if (!dtype->type_byval)
@@ -2061,7 +2068,8 @@ codegen_device_projection(CustomScan *cscan, GpuJoinInfo *gj_info,
 				"           sizeof(temp.%s_v.value));\n"
 				"    tup_values[%d] = PointerGetDatum(extra_pos);\n"
 				"    extra_pos += MAXALIGN(sizeof(temp.%s_v.value));\n"
-				"  }\n",
+				"  }\n"
+				"  tup_depth[%d] = -1;\n",
 				dtype->type_name,
 				pgstrom_codegen_expression((Node *)tle->expr, context),
 				tle->resno - 1,
@@ -2070,7 +2078,8 @@ codegen_device_projection(CustomScan *cscan, GpuJoinInfo *gj_info,
 				dtype->type_name,
 				dtype->type_name,
 				tle->resno - 1,
-				dtype->type_name);
+				dtype->type_name,
+				tle->resno - 1);
 		}
 		else
 		{
@@ -2079,7 +2088,8 @@ codegen_device_projection(CustomScan *cscan, GpuJoinInfo *gj_info,
 				"  temp.%s_v = %s;\n"
 				"  tup_isnull[%d] = temp.%s_v.isnull;\n"
 				"  if (!temp.%s_v.isnull)\n"
-				"    tup_values[%d] = pg_%s_to_datum(temp.%s_v.value);\n",
+				"    tup_values[%d] = pg_%s_to_datum(temp.%s_v.value);\n"
+				"  tup_depth[%d] = -1;\n",
 				dtype->type_name,
 				pgstrom_codegen_expression((Node *)tle->expr, context),
 				tle->resno - 1,
@@ -2087,7 +2097,8 @@ codegen_device_projection(CustomScan *cscan, GpuJoinInfo *gj_info,
 				dtype->type_name,
 				tle->resno - 1,
 				dtype->type_name,
-				dtype->type_name);
+				dtype->type_name,
+				tle->resno - 1);
 		}
 	}
 	/* how much extra field required? */

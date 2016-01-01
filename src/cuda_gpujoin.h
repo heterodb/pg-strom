@@ -171,6 +171,7 @@ gpujoin_projection(kern_context *kcxt,
 				   kern_data_store *kds_dst,
 				   Datum *tup_values,
 				   cl_bool *tup_isnull,
+				   cl_short *tup_depth,
 				   cl_char *extra_buf,
 				   cl_uint *extra_len);
 
@@ -977,6 +978,7 @@ gpujoin_projection_row(kern_gpujoin *kgjoin,
 	{
 		Datum		tup_values[GPUJOIN_DEVICE_PROJECTION_NFIELDS];
 		cl_bool		tup_isnull[GPUJOIN_DEVICE_PROJECTION_NFIELDS];
+		cl_short	tup_depth[GPUJOIN_DEVICE_PROJECTION_NFIELDS];
 #if GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE > 0
 		cl_char		extra_buf[GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE]
 					__attribute__ ((aligned(MAXIMUM_ALIGNOF)));
@@ -1011,6 +1013,7 @@ gpujoin_projection_row(kern_gpujoin *kgjoin,
 							   kds_dst,
 							   tup_values,
 							   tup_isnull,
+							   tup_depth,
 #if GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE > 0
 							   extra_buf,
 #else
@@ -1079,6 +1082,7 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 	cl_uint		   *r_buffer;
 	Datum		   *tup_values;
 	cl_bool		   *tup_isnull;
+	cl_short		tup_depth[GPUJOIN_DEVICE_PROJECTION_NFIELDS];
 #if GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE > 0
 	cl_char			extra_buf[GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE]
 					__attribute__ ((aligned(MAXIMUM_ALIGNOF)));
@@ -1149,6 +1153,7 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 							   kds_dst,
 							   tup_values,
 							   tup_isnull,
+							   tup_depth,
 #if GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE > 0
 							   extra_buf,
 #else
@@ -1204,20 +1209,28 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 				{
 					char   *addr = DatumGetPointer(tup_values[i]);
 
-					/* move the body of values to extra area of kds_dst */
+					if (tup_depth[i] == 0)
+						tup_values[i] = devptr_to_host(kds_src, addr);
+					else if (tup_depth[i] > 0)
+					{
+						kern_data_store *kds_in =
+							KERN_MULTIRELS_INNER_KDS(kmrels, tup_depth[i]);
+						tup_values[i] = devptr_to_host(kds_in, addr);
+					}
 #if GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE > 0
-					if (addr >= extra_buf &&
-						addr <  extra_buf + sizeof(extra_buf))
+					else if (tup_depth[i] < 0)
 					{
 						cl_uint		vl_len = (cmeta.attlen > 0 ?
 											  cmeta.attlen :
 											  VARSIZE_ANY(addr));
 						memcpy(vl_buf, addr, vl_len);
-						addr = vl_buf;
+						tup_values[i] = devptr_to_host(kds_dst, vl_buf);
 						vl_buf += MAXALIGN(vl_len);
 					}
 #endif
-					tup_values[i] = devptr_to_host(kds_dst, addr);
+					else
+						STROM_SET_ERROR(&kcxt.e,
+										StromError_WrongCodeGeneration);
 				}
 			}
 		}
