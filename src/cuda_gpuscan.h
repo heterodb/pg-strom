@@ -366,24 +366,5 @@ out:
 	/* write back error status if any */
 	kern_writeback_error_status(&kgpuscan->kerror, kcxt.e);
 }
-
-#else	/* __CUDACC__ */
-STATIC_INLINE(void)
-assign_gpuscan_session_info(StringInfo buf, GpuTaskState *gts)
-{
-	CustomScan *cscan = (CustomScan *)gts->css.ss.ps.plan;
-
-	Assert(pgstrom_plan_is_gpuscan((Plan *) cscan));
-
-	if (cscan->custom_scan_tlist != NIL)
-	{
-		appendStringInfo(
-			buf,
-			"#define GPUSCAN_DEVICE_PROJECTION          1\n"
-			"#define GPUSCAN_DEVICE_PROJECTION_NFIELDS  %d\n\n",
-			list_length(cscan->custom_scan_tlist));
-	}
-}
-
 #endif	/* __CUDACC__ */
 #endif	/* CUDA_GPUSCAN_H */

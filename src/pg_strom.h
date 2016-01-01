@@ -630,6 +630,7 @@ extern pgstrom_data_store *pgstrom_exec_scan_chunk(GpuTaskState *gts,
 												   Size chunk_length);
 extern void pgstrom_rewind_scan_chunk(GpuTaskState *gts);
 extern void pgstrom_post_planner_gpuscan(PlannedStmt *pstmt, Plan **p_plan);
+extern void assign_gpuscan_session_info(StringInfo buf, GpuTaskState *gts);
 extern void pgstrom_init_gpuscan(void);
 
 /*
@@ -639,6 +640,7 @@ extern bool pgstrom_path_is_gpujoin(Path *pathnode);
 extern bool pgstrom_plan_is_gpujoin(const Plan *plannode);
 extern bool pgstrom_plan_is_gpujoin_bulkinput(const Plan *plannode);
 extern void pgstrom_post_planner_gpujoin(PlannedStmt *pstmt, Plan **p_plan);
+extern void assign_gpujoin_session_info(StringInfo buf, GpuTaskState *gts);
 extern void	pgstrom_init_gpujoin(void);
 
 /*

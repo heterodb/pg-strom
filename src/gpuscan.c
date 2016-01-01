@@ -1647,6 +1647,28 @@ pgstrom_post_planner_gpuscan(PlannedStmt *pstmt, Plan **p_curr_plan)
 }
 
 /*
+ * assign_gpuscan_session_info
+ *
+ * Gives some definitions to the static portion of GpuScan implementation
+ */
+void
+assign_gpuscan_session_info(StringInfo buf, GpuTaskState *gts)
+{
+	CustomScan *cscan = (CustomScan *)gts->css.ss.ps.plan;
+
+	Assert(pgstrom_plan_is_gpuscan((Plan *) cscan));
+
+	if (cscan->custom_scan_tlist != NIL)
+	{
+		appendStringInfo(
+			buf,
+			"#define GPUSCAN_DEVICE_PROJECTION          1\n"
+			"#define GPUSCAN_DEVICE_PROJECTION_NFIELDS  %d\n\n",
+			list_length(cscan->custom_scan_tlist));
+	}
+}
+
+/*
  * gpuscan_create_scan_state
  *
  * allocation of GpuScanState, rather than CustomScanState

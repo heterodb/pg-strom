@@ -17,6 +17,7 @@
  * GNU General Public License for more details.
  */
 #include "postgres.h"
+#include "access/sysattr.h"
 #include "access/xact.h"
 #include "catalog/pg_type.h"
 #include "nodes/makefuncs.h"
@@ -108,6 +109,7 @@ typedef struct
 	/* supplemental information of ps_tlist */
 	List	   *ps_src_depth;	/* source depth of the ps_tlist entry */
 	List	   *ps_src_resno;	/* source resno of the ps_tlist entry */
+	cl_uint		extra_maxlen;	/* max length of extra area per rows */
 } GpuJoinInfo;
 
 static inline void
@@ -141,6 +143,7 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 
 	privs = lappend(privs, gj_info->ps_src_depth);
 	privs = lappend(privs, gj_info->ps_src_resno);
+	privs = lappend(privs, makeInteger(gj_info->extra_maxlen));
 
 	cscan->custom_private = privs;
 	cscan->custom_exprs = exprs;
@@ -180,6 +183,7 @@ deform_gpujoin_info(CustomScan *cscan)
 
 	gj_info->ps_src_depth = list_nth(privs, pindex++);
 	gj_info->ps_src_resno = list_nth(privs, pindex++);
+	gj_info->extra_maxlen = intVal(list_nth(privs, pindex++));
 	Assert(pindex == list_length(privs));
 	Assert(eindex == list_length(exprs));
 
@@ -259,6 +263,7 @@ typedef struct
 	/* supplemental information to ps_tlist  */
 	List		   *ps_src_depth;
 	List		   *ps_src_resno;
+	cl_uint			extra_maxlen;
 	/* buffer for row materialization  */
 	HeapTupleData	curr_tuple;
 
@@ -1508,7 +1513,7 @@ build_device_tlist_walker(Node *node, build_device_tlist_context *context)
 			{
 				rel = gpath->outer_path->parent;
 				/* special case if outer scan was pulled up */
-				if (context->outer_scanrelid == rel->relid)
+				if (varnode->varno == context->outer_scanrelid)
 				{
 					TargetEntry	   *ps_tle =
 						makeTargetEntry((Expr *) copyObject(varnode),
@@ -1519,6 +1524,8 @@ build_device_tlist_walker(Node *node, build_device_tlist_context *context)
 					context->ps_depth = lappend_int(context->ps_depth, i);
 					context->ps_resno = lappend_int(context->ps_resno,
 													varnode->varattno);
+					Assert(bms_is_member(varnode->varno, rel->relids));
+					Assert(varnode->varno == rel->relid);
 					return false;
 				}
 			}
@@ -1751,6 +1758,335 @@ create_gpujoin_plan(PlannerInfo *root,
 }
 
 /*
+ * codegen_device_projection
+ *
+ * It makes a function for device projection.
+ */
+static const char *
+codegen_device_projection(CustomScan *cscan, GpuJoinInfo *gj_info,
+						  codegen_context *context,
+						  cl_uint *p_extra_maxlen)
+{
+	List		   *tlist_dev = cscan->custom_scan_tlist;
+	ListCell	   *lc;
+	AttrNumber	   *varattmaps;
+	Bitmapset	   *refs_by_vars = NULL;
+	Bitmapset	   *refs_by_expr = NULL;
+	StringInfoData	decl;
+	StringInfoData	body;
+	StringInfoData	temp;
+	cl_int			depth;
+	cl_uint			extra_maxlen;
+	cl_bool			is_first;
+
+	varattmaps = palloc(sizeof(AttrNumber) * list_length(tlist_dev));
+	initStringInfo(&decl);
+	initStringInfo(&body);
+	initStringInfo(&temp);
+
+	/* Pick up all the var-node referenced by entries with no resjunk */
+	foreach (lc, tlist_dev)
+	{
+		TargetEntry	   *tle = lfirst(lc);
+
+		if (tle->resjunk)
+			continue;
+		if (IsA(tle->expr, Var))
+			refs_by_vars = bms_add_member(refs_by_vars, tle->resno -
+										  FirstLowInvalidHeapAttributeNumber);
+		else
+			pull_varattnos((Node *) tle->expr, INDEX_VAR, &refs_by_expr);
+	}
+
+
+
+	appendStringInfoString(
+		&decl,
+		"STATIC_FUNCTION(void)\n"
+		"gpujoin_projection(kern_context *kcxt,\n"
+		"                   kern_gpujoin *kgjoin,\n"
+		"                   kern_data_store *kds_src,\n"
+		"                   kern_multirels *kmrels,\n"
+		"                   cl_uint *r_buffer,\n"
+		"                   kern_data_store *kds_dst,\n"
+		"                   Datum *tup_values,\n"
+		"                   cl_bool *tup_isnull,\n"
+		"                   cl_char *extra_buf,\n"
+		"                   cl_uint *extra_len)\n"
+		"{\n"
+		"  HeapTupleHeaderData *htup;\n"
+		"  kern_data_store *kds_in;\n"
+		"  char *addr;\n"
+		"  char *extra_pos = extra_buf;\n");
+
+	for (depth=0; depth <= gj_info->num_rels; depth++)
+	{
+		List	   *kvars_srcnum = NIL;
+		List	   *kvars_dstnum = NIL;
+		ListCell   *lc1;
+		ListCell   *lc2;
+		ListCell   *lc3;
+		cl_int		i, nattrs = -1;
+
+		/* collect information in this depth */
+		memset(varattmaps, 0, sizeof(AttrNumber) * list_length(tlist_dev));
+		forthree (lc1, tlist_dev,
+				  lc2, gj_info->ps_src_depth,
+				  lc3, gj_info->ps_src_resno)
+		{
+			TargetEntry *tle = lfirst(lc1);
+			cl_int		src_depth = lfirst_int(lc2);
+			cl_int		src_resno = lfirst_int(lc3);
+			cl_int		k = tle->resno - FirstLowInvalidHeapAttributeNumber;
+
+			/* expression shall be built later */
+			if (!IsA(tle->expr, Var))
+				continue;
+			/* var-node points to different depth */
+			if (depth != src_depth)
+				continue;
+
+			if (bms_is_member(k, refs_by_vars))
+				varattmaps[tle->resno - 1] = src_resno;
+
+			if (bms_is_member(k, refs_by_expr))
+			{
+				kvars_srcnum = lappend_int(kvars_srcnum, src_resno);
+				kvars_dstnum = lappend_int(kvars_dstnum, tle->resno);
+			}
+			if (bms_is_member(k, refs_by_vars) ||
+				bms_is_member(k, refs_by_expr))
+				nattrs = Max(nattrs, src_resno);
+		}
+		/* no need to extract inner/outer tuple in this depth */
+		if (nattrs < 1)
+			continue;
+
+		appendStringInfo(
+			&body,
+			"  /* ---- extract %s relation (depth=%d) */\n",
+			depth > 0 ? "inner" : "outer", depth);
+		if (depth > 0)
+			appendStringInfo(
+				&body,
+				"  kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, %d);\n", depth);
+		appendStringInfo(
+			&body,
+			"  htup = (HeapTupleHeaderData *)\n"
+			"    (r_buffer[%d] == 0 ? NULL : ((char *)%s + r_buffer[%d]);\n"
+			"  EXTRACT_HEAP_TUPLE_BEGIN(%s, htup, addr);\n",
+			depth,
+			depth == 0 ? "kds_src" : "kds_in",
+			depth,
+			depth == 0 ? "kds_src" : "kds_in");
+
+		resetStringInfo(&temp);
+		for (i=1; i <= nattrs; i++)
+		{
+			TargetEntry	   *tle;
+			Var			   *var;
+			int16			typelen;
+			bool			typebyval;
+			cl_bool			referenced = false;
+
+			foreach (lc1, tlist_dev)
+			{
+				tle = lfirst(lc1);
+
+				if (varattmaps[tle->resno - 1] != i)
+					continue;
+				/* attribute shall be directly copied */
+				Assert(IsA(tle->expr, Var));
+				var = (Var *) tle->expr;
+				get_typlenbyval(var->vartype, &typelen, &typebyval);
+				if (!typebyval)
+				{
+					appendStringInfo(
+						&temp,
+						"  tup_isnull[%d] = (addr != NULL ? false : true);\n"
+						"  tup_values[%d] = PointerGetDatum(addr);\n",
+						tle->resno - 1,
+						tle->resno - 1);
+				}
+				else
+				{
+					appendStringInfo(
+						&temp,
+						"  tup_isnull[%d] = (addr != NULL ? false : true);\n"
+						"  if (addr)\n"
+						"    tup_values[%d] = *((%s *) addr);\n",
+						tle->resno - 1,
+                        tle->resno - 1,
+						(typelen == sizeof(cl_long)  ? "cl_long" :
+						 typelen == sizeof(cl_int)   ? "cl_int" :
+						 typelen == sizeof(cl_short) ? "cl_short"
+						 							 : "cl_char"));
+				}
+				referenced = true;
+			}
+
+			forboth (lc1, kvars_srcnum,
+					 lc2, kvars_dstnum)
+			{
+				devtype_info   *dtype;
+				cl_int			src_num = lfirst_int(lc1);
+				cl_int			dst_num = lfirst_int(lc2);
+
+				if (src_num != i)
+					continue;
+				/* add KVAR_%u declarations */
+				tle = list_nth(tlist_dev, dst_num - 1);
+				Assert(IsA(tle->expr, Var));
+				var = (Var *) tle->expr;
+
+				dtype = pgstrom_devtype_lookup(var->vartype);
+				if (!dtype)
+					elog(ERROR, "cache lookup failed for device type: %s",
+						 format_type_be(var->vartype));
+
+				appendStringInfo(
+					&decl,
+					"  pg_%s_t KVAR_%u;\n",
+					dtype->type_name,
+					dst_num);
+				appendStringInfo(
+					&temp,
+					"  KVAR_%u = pg_%s_datum_ref(kcxt, addr, false);\n",
+					dst_num,
+					dtype->type_name);
+
+				referenced = true;
+			}
+
+			/* flush to the main buffer */
+			if (referenced)
+			{
+				appendStringInfoString(&body, temp.data);
+				resetStringInfo(&temp);
+			}
+			appendStringInfoString(
+				&temp,
+				"  EXTRACT_HEAP_TUPLE_NEXT(addr);\n");
+		}
+		appendStringInfoString(
+			&body,
+			"  EXTRACT_HEAP_TUPLE_END();\n");
+	}
+
+	/*
+	 * Execution of the expression
+	 */
+	is_first = true;
+	extra_maxlen = 0;
+	foreach (lc, tlist_dev)
+	{
+		TargetEntry	   *tle = lfirst(lc);
+		devtype_info   *dtype;
+
+		if (tle->resjunk || IsA(tle->expr, Var))
+			continue;
+
+		if (is_first)
+		{
+			appendStringInfoString(
+				&body,
+				"\n"
+				"  /* calculation of expressions */\n");
+			is_first = false;
+		}
+
+		dtype = pgstrom_devtype_lookup(exprType((Node *) tle->expr));
+		if (!dtype)
+			elog(ERROR, "cache lookup failed for device type: %s",
+				 format_type_be(exprType((Node *) tle->expr)));
+
+		if (dtype->type_oid == NUMERICOID)
+		{
+			extra_maxlen += 32;
+			appendStringInfo(
+				&body,
+				"  temp.%s_v = %s;\n"
+				"  tup_isnull[%d] = temp.%s_v.isnull;\n"
+				"  if (!temp.%s_v.isnull)\n"
+				"  {\n"
+				"    cl_uint numeric_len =\n"
+				"        pg_numeric_to_varlena(kcxt, extra_pos,\n"
+				"                              temp.%s_v.value,\n"
+				"                              temp.%s_v.isnull);\n"
+				"    tup_values[%d] = PointerGetDatum(extra_pos);\n"
+				"    extra_pos += MAXALIGN(numeric_len);\n"
+				"  }\n",
+				dtype->type_name,
+				pgstrom_codegen_expression((Node *)tle->expr, context),
+				tle->resno - 1,
+				dtype->type_name,
+				dtype->type_name,
+				dtype->type_name,
+				dtype->type_name,
+				tle->resno - 1);
+		}
+		else if (!dtype->type_byval)
+		{
+			/* right now, we have no expression that returns varlena*/
+			Assert(dtype->type_length > 0);
+			extra_maxlen += MAXALIGN(dtype->type_length);
+			appendStringInfo(
+				&body,
+				"  temp.%s_v = %s;\n"
+				"  tup_isnull[%d] = temp.%s_v.isnull;\n"
+				"  if (!temp.%s_v.isnull)\n"
+				"  {\n"
+				"    memcpy(extra_pos, &temp.%s_v.value,\n"
+				"           sizeof(temp.%s_v.value));\n"
+				"    tup_values[%d] = PointerGetDatum(extra_pos);\n"
+				"    extra_pos += MAXALIGN(sizeof(temp.%s_v.value));\n"
+				"  }\n",
+				dtype->type_name,
+				pgstrom_codegen_expression((Node *)tle->expr, context),
+				tle->resno - 1,
+				dtype->type_name,
+				dtype->type_name,
+				dtype->type_name,
+				dtype->type_name,
+				tle->resno - 1,
+				dtype->type_name);
+		}
+		else
+		{
+			appendStringInfo(
+				&body,
+				"  temp.%s_v = %s;\n"
+				"  tup_isnull[%d] = temp.%s_v.isnull;\n"
+				"  if (!temp.%s_v.isnull)\n"
+				"    tup_values[%d] = pg_%s_to_datum(temp.%s_v.value);\n",
+				dtype->type_name,
+				pgstrom_codegen_expression((Node *)tle->expr, context),
+				tle->resno - 1,
+				dtype->type_name,
+				dtype->type_name,
+				tle->resno - 1,
+				dtype->type_name,
+				dtype->type_name);
+		}
+	}
+	/* how much extra field required? */
+	appendStringInfoString(
+		&body,
+		"\n"
+		"  *extra_len = (cl_uint)(extra_pos - extra_buf);\n");
+	/* merge with declaration part */
+	appendStringInfo(&decl, "\n%s}\n", body.data);
+
+	*p_extra_maxlen = extra_maxlen;
+
+
+	pfree(body.data);
+	pfree(temp.data);
+
+	return decl.data;
+}
+
+/*
  * fixup_device_only_expr - replace varnode with INDEX_VAR based on
  * the previous custom_scan_tlist, by newer tlist_dev.
  */
@@ -1805,63 +2141,92 @@ fixup_device_only_expr(Node *node, List **p_tlist_dev)
 	return expression_tree_mutator(node, fixup_device_only_expr, p_tlist_dev);
 }
 
-
-
-
-
 /*
- * finalize_device_tlist
+ * finalize_device_only_expr
  *
  * 
  *
  */
+typedef struct
+{
+	List	   *old_tlist_dev;
+	List	   *new_tlist_dev;
+} finalize_device_only_expr_context;
+
 static bool
-finalize_device_tlist(Node *node, List *old_tlist_dev)
+finalize_device_only_expr(Node *node, finalize_device_only_expr_context *con)
 {
 	if (!node)
 		return false;
 	if (IsA(node, Var))
 	{
-		Var	   *var_cur = (Var *) node;
-		Var	   *var_old;
-		TargetEntry *tle;
-		Var		temp1;
-		Var		temp2;
+		Var			*var_cur = (Var *) node;
+		Var			*var_old;
+		TargetEntry *tle_old;
+		ListCell	*lc;
 
 		Assert(var_cur->varno == INDEX_VAR);
-		tle = list_nth(old_tlist_dev, var_cur->varattno - 1);
-		Assert(IsA(tle->expr, Var));
-		var_old = (Var *) tle->expr;
-		memcpy(&temp1, var_old, sizeof(Var));
-		memcpy(&temp2, var_cur, sizeof(Var));
+		tle_old = list_nth(con->old_tlist_dev, var_cur->varattno - 1);
+		Assert(IsA(tle_old->expr, Var));
+		var_old = (Var *) tle_old->expr;
 
-		/* fixup this var-node */
-		var_cur->varno = var_old->varno;
-		var_cur->varattno = var_old->varattno;
-		Assert(var_cur->vartype == var_old->vartype);
-		Assert(var_cur->vartypmod == var_old->vartypmod);
-		Assert(var_cur->varcollid == var_cur->varcollid);
-		return false;
+		foreach (lc, con->new_tlist_dev)
+		{
+			TargetEntry    *tle_new = lfirst(lc);
+			Var			   *var_new;
+
+			if (!IsA(tle_new->expr, Var))
+				continue;
+			var_new = (Var *) tle_new->expr;
+			if (var_old->varno == var_new->varno &&
+				var_old->varattno == var_new->varattno)
+			{
+				var_cur->varno = INDEX_VAR;
+				var_cur->varattno = tle_new->resno;
+				Assert(var_cur->vartype == var_new->vartype &&
+					   var_cur->vartype == var_old->vartype);
+				Assert(var_cur->vartypmod == var_new->vartypmod &&
+					   var_cur->vartypmod == var_old->vartypmod);
+				Assert(var_cur->varcollid == var_new->varcollid &&
+					   var_cur->varcollid == var_old->varcollid);
+				var_cur->varnoold = var_new->varno;
+				var_cur->varoattno = var_new->varoattno;
+				return false;
+			}
+		}
+		elog(ERROR, "Bug? Var referenced by device expression was not found");
 	}
-	return expression_tree_walker(node, finalize_device_tlist, old_tlist_dev);
+	return expression_tree_walker(node, finalize_device_only_expr, con);
 }
 
 /*
- * build_device_tlist_final
+ * pgstrom_post_planner_gpujoin
  *
- * It constructs the final custom_scan_tlist that contains device executable
- * expressions.
+ * Applies device projection of GpuJoin
  */
-static void
-build_device_tlist_final(CustomScan *cscan, GpuJoinInfo *gj_info)
+void
+pgstrom_post_planner_gpujoin(PlannedStmt *pstmt, Plan **p_curr_plan)
 {
-	List	   *tlist_old = cscan->scan.plan.targetlist;
-	List	   *tlist_new = NIL;
-	List	   *tlist_dev = NIL;
-	List	   *new_src_depth = NIL;
-	List	   *new_src_resno = NIL;
-	ListCell   *lc;
+	CustomScan	   *cscan = (CustomScan *)(*p_curr_plan);
+	GpuJoinInfo	   *gj_info = deform_gpujoin_info(cscan);
+	List		   *tlist_old = cscan->scan.plan.targetlist;
+	List		   *tlist_new = NIL;
+	List		   *tlist_dev = NIL;
+	List		   *junk_vars = NIL;
+	List		   *new_src_depth = NIL;
+	List		   *new_src_resno = NIL;
+	const char	   *devproj_function;
+	cl_uint			extra_maxlen;
+	codegen_context	context;
+	StringInfoData	source;
+	ListCell	   *lc;
 
+	Assert(pgstrom_plan_is_gpujoin((Plan *) cscan));
+
+	/*
+	 * First of all, we try to push down complicated expression into
+	 * the device projection if it is device executable.
+	 */
 	foreach (lc, tlist_old)
 	{
 		TargetEntry	   *tle = lfirst(lc);
@@ -1894,6 +2259,7 @@ build_device_tlist_final(CustomScan *cscan, GpuJoinInfo *gj_info)
 			Oid		type_oid = exprType((Node *)tle->expr);
 			int32	type_mod = exprTypmod((Node *)tle->expr);
 			Oid		coll_oid = exprCollation((Node *)tle->expr);
+			List   *temp = pull_vars_of_level((Node *)tle->expr, 0);
 
 			/* Add device executable expression onto the tlist_dev */
 			varattno = add_unique_expression(tle->expr, &tlist_dev, false);
@@ -1908,6 +2274,8 @@ build_device_tlist_final(CustomScan *cscan, GpuJoinInfo *gj_info)
 									  tle->resname,
 									  tle->resjunk);
 			tlist_new = lappend(tlist_new, tle_new);
+			/* var-nodes in the expression node has to be added later */
+			junk_vars = list_concat(junk_vars, temp);
 		}
 		else
 		{
@@ -1938,6 +2306,15 @@ build_device_tlist_final(CustomScan *cscan, GpuJoinInfo *gj_info)
 	}
 
 	/*
+	 * NOTE: var-nodes in device executable expression also have to be
+	 * added to the tlist_dev as junk attribute, because
+	 * - KVAR_%u needs to have an index on tlist_dev
+	 * - src_depth/src_resno also associated with index on tlist_dev
+	 */
+	foreach (lc, junk_vars)
+		add_unique_expression(lfirst(lc), &tlist_dev, true);
+
+	/*
 	 * tlist_dev shall become new custom_scan_tlist, thus, it also used
 	 * to solve the column name in EXPLAIN command. If join-qualifiers
 	 * and others references untracked var-nodes, we need to add target
@@ -1960,42 +2337,91 @@ build_device_tlist_final(CustomScan *cscan, GpuJoinInfo *gj_info)
 	 * custom_scan_tlist, but to be replaced by tlist_dev.
 	 * So, tlist_dev has to be fixed up to reference correct columns.
 	 */
+
+	// 1st: replace Var node to the new policy
 	foreach (lc, tlist_dev)
 	{
 		TargetEntry	   *tle = lfirst(lc);
-		cl_int			src_depth = -1;
-		cl_int			src_resno = -1;
+		cl_int			src_depth;
+		cl_int			src_resno;
 
 		if (IsA(tle->expr, Var))
 		{
-			cl_int		index = ((Var *) tle->expr)->varattno;
-			src_depth = list_nth_int(gj_info->ps_src_depth, index - 1);
-			src_resno = list_nth_int(gj_info->ps_src_resno, index - 1);
+			Var			   *var_cur = (Var *) tle->expr;
+			Var			   *var_old;
+			TargetEntry	   *tle_old;
+			cl_int			index = var_cur->varattno - 1;
+
+			Assert(var_cur->varno == INDEX_VAR);
+			tle_old = list_nth(cscan->custom_scan_tlist, index);
+			Assert(IsA(tle_old->expr, Var));
+			var_old = (Var *) tle_old->expr;
+			/* fixup this varnode by the old custom-scan-tlist */
+			var_cur->varno = var_old->varno;
+			var_cur->varattno = var_old->varattno;
+			Assert(var_cur->vartype == var_old->vartype);
+			Assert(var_cur->vartypmod == var_old->vartypmod);
+			Assert(var_cur->varcollid == var_cur->varcollid);
+			/* update src_depth/src_resno */
+			src_depth = list_nth_int(gj_info->ps_src_depth, index);
+			src_resno = list_nth_int(gj_info->ps_src_resno, index);
 		}
-		finalize_device_tlist((Node *) tle->expr, cscan->custom_scan_tlist);
+		else
+		{
+			/* set dummy src_depth/src_resno */
+			src_depth = -1;
+			src_resno = -1;
+		}
 		new_src_depth = lappend_int(new_src_depth, src_depth);
 		new_src_resno = lappend_int(new_src_resno, src_resno);
 	}
+
+	// 2nd: replace Expression node to the new tlist
+	foreach (lc, tlist_dev)
+	{
+		TargetEntry	   *tle = lfirst(lc);
+
+		if (!IsA(tle->expr, Var))
+		{
+			finalize_device_only_expr_context con;
+			/*
+			 * Also fixup varnodes in this expression, but it will
+			 * reference the varnode in the new tlist_dev.
+			 */
+			con.old_tlist_dev = cscan->custom_scan_tlist;
+			con.new_tlist_dev = tlist_dev;
+			finalize_device_only_expr((Node *) tle->expr, &con);
+		}
+	}
+
+	/*
+	 * TODO: We need to compare two scenarios; whether device projection
+	 * is actually cheaper than CPU projection. In most usages, device
+	 * projection has advantages, however, we may pay attention if result
+	 * width is larger than CPU projection case.
+	 */
 	cscan->scan.plan.targetlist = tlist_new;
 	cscan->custom_scan_tlist = tlist_dev;
 	gj_info->ps_src_depth = new_src_depth;
 	gj_info->ps_src_resno = new_src_resno;
-}
 
-/*
- * pgstrom_post_planner_gpujoin
- *
- * Applies device projection of GpuJoin
- */
-void
-pgstrom_post_planner_gpujoin(PlannedStmt *pstmt, Plan **p_curr_plan)
-{
-	CustomScan	   *cscan = (CustomScan *)(*p_curr_plan);
-	GpuJoinInfo	   *gj_info = deform_gpujoin_info(cscan);
+	/*
+	 * Then, construct kernel functions including device projections,
+	 * according to the new target-list.
+	 */
+	initStringInfo(&source);
 
-	Assert(pgstrom_plan_is_gpujoin((Plan *) cscan));
+	pgstrom_init_codegen_context(&context);
 
-	build_device_tlist_final(cscan, gj_info);
+	// TODO: restore the status
+
+	devproj_function = codegen_device_projection(cscan, gj_info, &context,
+												 &extra_maxlen);
+	pgstrom_codegen_func_declarations(&source, &context);
+	appendStringInfo(&source, "%s\n", gj_info->kern_source);
+	appendStringInfo(&source, "%s\n", devproj_function);
+
+	gj_info->extra_maxlen = extra_maxlen;
 
 	form_gpujoin_info(cscan, gj_info);
 }
@@ -2051,6 +2477,26 @@ fixup_varnode_to_origin(GpuJoinState *gjs, int depth, List *expr_list)
 
 	return (List *) fixup_varnode_to_origin_mutator((Node *) expr_list,
 													&context);
+}
+
+/*
+ * assign_gpujoin_session_info
+ *
+ * Gives some definitions to the static portion of GpuJoin implementation
+ */
+void
+assign_gpujoin_session_info(StringInfo buf, GpuTaskState *gts)
+{
+	TupleTableSlot *slot = gts->css.ss.ss_ScanTupleSlot;
+	TupleDesc		tupdesc = slot->tts_tupleDescriptor;
+
+	Assert(gts->css.methods == &gpujoin_exec_methods.c);
+	appendStringInfo(
+		buf,
+		"#define GPUJOIN_DEVICE_PROJECTION_NFIELDS %u\n"
+		"#define GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE %u\n",
+		tupdesc->natts,
+		((GpuJoinState *) gts)->extra_maxlen);
 }
 
 static Node *
@@ -2129,6 +2575,7 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 	/* needs to track corresponding columns */
 	gjs->ps_src_depth = gj_info->ps_src_depth;
 	gjs->ps_src_resno = gj_info->ps_src_resno;
+	gjs->extra_maxlen = gj_info->extra_maxlen;
 
 	/*
 	 * initialization of child nodes
@@ -2454,16 +2901,17 @@ gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 		if (lc1 != list_head(cscan->custom_scan_tlist))
 			appendStringInfo(&str, ", ");
 
+		if (!tle->resjunk)
+			appendStringInfo(&str, "%s", temp);
+		else
+			appendStringInfo(&str, "[%s]", temp);
+
 		if (es->verbose)
 		{
 			temp = format_type_with_typemod(exprType((Node *)tle->expr),
 											exprTypmod((Node *)tle->expr));
 			appendStringInfo(&str, "::%s", temp);
 		}
-		if (!tle->resjunk)
-			appendStringInfo(&str, "%s", temp);
-		else
-			appendStringInfo(&str, "[%s]", temp);
 	}
 	ExplainPropertyText("GPU Projection", str.data, es);
 #if 0
@@ -2768,10 +3216,10 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 	/*
 	 * variable declarations
 	 */
-	appendStringInfo(
+	appendStringInfoString(
 		source,
 		"  HeapTupleHeaderData *htup;\n"
-		"  kern_data_store *kds_in;\n"
+		"  kern_data_store *kds_in\t__attribute__((unused));\n"
 		"  kern_colmeta *colmeta;\n"
 		"  void *datum;\n");
 
@@ -3011,7 +3459,7 @@ gpujoin_codegen_join_quals(StringInfo source,
 		"gpujoin_join_quals_depth%d(kern_context *kcxt,\n"
 		"                           kern_data_store *kds,\n"
         "                           kern_multirels *kmrels,\n"
-		"                           cl_int *o_buffer,\n"
+		"                           cl_uint *o_buffer,\n"
 		"                           HeapTupleHeaderData *i_htup)\n"
 		"{\n"
 		"  cl_bool result = false;\n",
@@ -3071,7 +3519,7 @@ gpujoin_codegen_hash_value(StringInfo source,
 		"                           cl_uint *pg_crc32_table,\n"
 		"                           kern_data_store *kds,\n"
 		"                           kern_multirels *kmrels,\n"
-		"                           cl_int *o_buffer)\n"
+		"                           cl_uint *o_buffer)\n"
 		"{\n"
 		"  cl_uint hash;\n",
 		cur_depth);
@@ -3201,7 +3649,7 @@ gpujoin_codegen(PlannerInfo *root,
 		"                   kern_data_store *kds,\n"
 		"                   kern_multirels *kmrels,\n"
 		"                   int depth,\n"
-		"                   cl_int *outer_index,\n"
+		"                   cl_uint *o_buffer,\n"
 		"                   HeapTupleHeaderData *i_htup)\n"
 		"{\n"
 		"  switch (depth)\n"
@@ -3212,7 +3660,7 @@ gpujoin_codegen(PlannerInfo *root,
 		appendStringInfo(
 			&source,
 			"  case %d:\n"
-			"    return gpujoin_join_quals_depth%d(kcxt, kds, kmrels, outer_index, i_htup);\n",
+			"    return gpujoin_join_quals_depth%d(kcxt, kds, kmrels, o_buffer, i_htup);\n",
 			depth, depth);
 	}
 	appendStringInfo(
@@ -3242,7 +3690,7 @@ gpujoin_codegen(PlannerInfo *root,
 		"                   kern_data_store *kds,\n"
 		"                   kern_multirels *kmrels,\n"
 		"                   cl_int depth,\n"
-		"                   cl_int *o_buffer)\n"
+		"                   cl_uint *o_buffer)\n"
 		"{\n"
 		"  switch (depth)\n"
 		"  {\n");

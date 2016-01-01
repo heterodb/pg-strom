@@ -1183,7 +1183,8 @@ pgstrom_assign_cuda_program(GpuTaskState *gts,
 
 	if ((extra_flags & (DEVFUNC_NEEDS_TIMELIB |
 						DEVFUNC_NEEDS_MONEY |
-						DEVKERNEL_NEEDS_GPUSCAN)) != 0)
+						DEVKERNEL_NEEDS_GPUSCAN |
+						DEVKERNEL_NEEDS_GPUJOIN)) != 0)
 	{
 		initStringInfo(&buf);
 
@@ -1197,6 +1198,9 @@ pgstrom_assign_cuda_program(GpuTaskState *gts,
 		/* enables device projection? */
 		if ((extra_flags & DEVKERNEL_NEEDS_GPUSCAN) != 0)
 			assign_gpuscan_session_info(&buf, gts);
+		/* enables device projection? */
+		if ((extra_flags & DEVKERNEL_NEEDS_GPUJOIN) != 0)
+			assign_gpujoin_session_info(&buf, gts);
 
 		kern_define = buf.data;
 	}

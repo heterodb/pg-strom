@@ -582,7 +582,7 @@ typedef struct {
 	cl_char		all_visible;/* GpuScan dumps all the tuples in chunk */
 	cl_char		__padding__[3];
 	kern_errorbuf kerror;	/* error information */
-	cl_int		results[FLEXIBLE_ARRAY_MEMBER];
+	cl_uint		results[FLEXIBLE_ARRAY_MEMBER];
 } kern_resultbuf;
 
 #define KERN_GET_RESULT(kresults, index)		\
@@ -1139,22 +1139,27 @@ toast_raw_datum_size(kern_context *kcxt, varlena *attr)
  *     :
  * EXTRACT_HEAP_TUPLE_END()
  */
-#define EXTRACT_HEAP_TUPLE_BEGIN(ADDR, kds, htup)	\
-	do {											\
-		HeapTupleHeaderData *__htup = (htup);		\
-		kern_data_store	*__kds = (kds);				\
-		kern_colmeta	__cmeta;					\
-		cl_uint			__colidx = 0;				\
-		cl_uint			__ncols;					\
-		cl_bool			__heap_hasnull;				\
-		char		   *__pos;										\
-																	\
-		__heap_hasnull = ((__htup->t_infomask & HEAP_HASNULL) != 0);	\
-		__ncols = min((kds)->ncols, __htup->t_infomask2 & HEAP_NATTS_MASK);	\
-		__cmeta = __kds->colmeta[__colidx];								\
-		__pos = (char *)(__htup) + __htup->t_hoff;						\
-		assert(__pos == (char *)MAXALIGN(__pos));						\
+#define EXTRACT_HEAP_TUPLE_BEGIN(ADDR, kds, htup)						\
+	do {																\
+		HeapTupleHeaderData *__htup = (htup);							\
+		kern_data_store	*__kds = (kds);									\
+		kern_colmeta	__cmeta;										\
+		cl_uint			__colidx = 0;									\
+		cl_uint			__ncols;										\
+		cl_bool			__heap_hasnull;									\
+		char		   *__pos;											\
 																		\
+		if (!__htup)													\
+			__ncols = 0;	/* deal w*/									\
+		else															\
+		{																\
+			__heap_hasnull = ((__htup->t_infomask & HEAP_HASNULL) != 0); \
+			__ncols = min((kds)->ncols,									\
+						  __htup->t_infomask2 & HEAP_NATTS_MASK);		\
+			__cmeta = __kds->colmeta[__colidx];							\
+			__pos = (char *)(__htup) + __htup->t_hoff;					\
+			assert(__pos == (char *)MAXALIGN(__pos));					\
+		}																\
 		if (__colidx < __ncols &&										\
 			(!__heap_hasnull || !att_isnull(__colidx, __htup->t_bits)))	\
 		{																\
@@ -1703,7 +1708,7 @@ compute_heaptuple_size(kern_context *kcxt,
 			heap_hasnull = true;
 		else
 		{
-			if (tup_internal[i])
+			if (tup_internal && tup_internal[i])
 			{
 				/*
 				 * NOTE: Right now, only numeric data type has internal
@@ -1836,12 +1841,13 @@ deform_kern_heaptuple(kern_context *kcxt,
  * A utility routine to build a kern_tupitem on the destination buffer
  * already allocated.
  *
- * kds        ... destination data-store
- * tupitem    ... kern_tupitem allocated on the kds
- * tuple_len  ... length of the tuple; shall be MAXALIGN(t_hoff) + data_len
+ * kds          ... destination data-store
+ * tupitem      ... kern_tupitem allocated on the kds
+ * tuple_len    ... length of the tuple; shall be MAXALIGN(t_hoff) + data_len
  * heap_hasnull ... true, if tup_values/tup_isnull contains NULL
- * tup_values ... array of result datum
- * tup_isnull ... array of null flag
+ * tup_values   ... array of result datum
+ * tup_isnull   ... array of null flags
+ * tup_internal ... array of internal flags
  */
 STATIC_FUNCTION(cl_uint)
 form_kern_heaptuple(kern_context *kcxt,
