@@ -1179,11 +1179,11 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 		if (KERN_DATA_STORE_SLOT_LENGTH(kds_dst, kresults->nitems) +
 			base + count > kds_dst->length)
 		{
-			STROM_SET_ERROR(&kcxt->e, StromError_DataStoreNoSpace);
+			STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
 			goto out;
 		}
 		vl_buf = ((char *)kds_dst + kds_dst->length
-				  - (base + offset + required));
+				  - (base + offset + extra_len));
 #endif
 		/*
 		 * At this point, tup_values have device pointer or internal

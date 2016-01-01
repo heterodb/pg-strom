@@ -3958,7 +3958,8 @@ retry:
 		length = (STROMALIGN(offsetof(kern_data_store,
 									  colmeta[ncols])) +
 				  LONGALIGN((sizeof(Datum) +
-							 sizeof(char)) * ncols) * dst_nrooms);
+							 sizeof(char)) * ncols +
+							gjs->extra_maxlen) * dst_nrooms);
 
 		/* Adjustment if too short or too large */
 		if (ncols == 0)
@@ -3980,7 +3981,8 @@ retry:
 			dst_nrooms = (pgstrom_chunk_size() / 4 -
 						  STROMALIGN(offsetof(kern_data_store,
 											  colmeta[ncols])))
-				/ LONGALIGN((sizeof(Datum) + sizeof(char)) * ncols);
+				/ LONGALIGN((sizeof(Datum) + sizeof(char)) * ncols
+							+ gjs->extra_maxlen);
 		}
 		else if (length > pgstrom_chunk_size_limit())
 		{
@@ -3995,20 +3997,26 @@ retry:
 		}
 
 		if (!pds_dst)
-			pgjoin->pds_dst = pgstrom_create_data_store_slot(gcontext, tupdesc,
+		{
+			Size	extra_len = gjs->extra_maxlen * dst_nrooms;
+			pgjoin->pds_dst = pgstrom_create_data_store_slot(gcontext,
+															 tupdesc,
 															 dst_nrooms,
-															 false, 0, NULL);
+															 false,
+															 extra_len,
+															 NULL);
+		}
 		else
 		{
 			/* in case of StromError_DataStoreNoSpace */
 			kern_data_store	   *kds_dst = pds_dst->kds;
 			Size				new_length;
 
-			new_length = STROMALIGN(offsetof(kern_data_store,
-											 colmeta[ncols])) +
-				LONGALIGN((sizeof(Datum) +
-						   sizeof(char)) * ncols) * dst_nrooms;
-
+			new_length = (STROMALIGN(offsetof(kern_data_store,
+											  colmeta[ncols])) +
+						  LONGALIGN((sizeof(Datum) +
+									 sizeof(char)) * ncols +
+									gjs->extra_maxlen) * dst_nrooms);
 			/* needs to allocate KDS again? */
 			if (new_length <= kds_dst->length)
 			{
