@@ -88,6 +88,7 @@ typedef struct
 	int			num_rels;
 	char	   *kern_source;
 	int			extra_flags;
+	List	   *func_defs;
 	List	   *used_params;
 	bool		outer_bulkload;
 	double		bulkload_density;
@@ -121,6 +122,7 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 	privs = lappend(privs, makeInteger(gj_info->num_rels));
 	privs = lappend(privs, makeString(pstrdup(gj_info->kern_source)));
 	privs = lappend(privs, makeInteger(gj_info->extra_flags));
+	privs = lappend(privs, gj_info->func_defs);
 	exprs = lappend(exprs, gj_info->used_params);
 	privs = lappend(privs, makeInteger(gj_info->outer_bulkload));
 	privs = lappend(privs,
@@ -161,6 +163,7 @@ deform_gpujoin_info(CustomScan *cscan)
 	gj_info->num_rels = intVal(list_nth(privs, pindex++));
 	gj_info->kern_source = strVal(list_nth(privs, pindex++));
 	gj_info->extra_flags = intVal(list_nth(privs, pindex++));
+	gj_info->func_defs = list_nth(privs, pindex++);
 	gj_info->used_params = list_nth(exprs, eindex++);
 	gj_info->outer_bulkload = intVal(list_nth(privs, pindex++));
 	gj_info->bulkload_density =
@@ -1750,6 +1753,7 @@ create_gpujoin_plan(PlannerInfo *root,
 
 	gj_info.kern_source = gpujoin_codegen(root, cscan, &gj_info, &context);
 	gj_info.extra_flags = DEVKERNEL_NEEDS_GPUJOIN | context.extra_flags;
+	gj_info.func_defs = context.func_defs;
 	gj_info.used_params = context.used_params;
 
 	form_gpujoin_info(cscan, &gj_info);
@@ -1804,7 +1808,6 @@ codegen_device_projection(CustomScan *cscan, GpuJoinInfo *gj_info,
 		&decl,
 		"STATIC_FUNCTION(void)\n"
 		"gpujoin_projection(kern_context *kcxt,\n"
-		"                   kern_gpujoin *kgjoin,\n"
 		"                   kern_data_store *kds_src,\n"
 		"                   kern_multirels *kmrels,\n"
 		"                   cl_uint *r_buffer,\n"
@@ -1817,7 +1820,25 @@ codegen_device_projection(CustomScan *cscan, GpuJoinInfo *gj_info,
 		"  HeapTupleHeaderData *htup;\n"
 		"  kern_data_store *kds_in;\n"
 		"  char *addr;\n"
-		"  char *extra_pos = extra_buf;\n");
+		"  char *extra_pos = extra_buf;\n"
+		"  union {\n"
+		"    pg_bool_t        bool_v;\n"
+		"    pg_int2_t        int2_v;\n"
+		"    pg_int4_t        int4_v;\n"
+		"    pg_int8_t        int8_v;\n"
+		"    pg_float4_t      float4_v;\n"
+		"    pg_float8_t      float8_v;\n"
+		"#ifdef CUDA_NUMERIC_H\n"
+		"    pg_numeric_t     numeric_v;\n"
+		"#endif\n"
+		"#ifdef CUDA_TIMELIB_H\n"
+		"    pg_money_t       money_v;\n"
+		"    pg_date_t        date_v;\n"
+		"    pg_time_t        time_v;\n"
+		"    pg_timestamp_t   timestamp_v;\n"
+		"    pg_timestamptz_t timestamptz_v;\n"
+		"#endif\n"
+		"  } temp;\n");
 
 	for (depth=0; depth <= gj_info->num_rels; depth++)
 	{
@@ -1873,8 +1894,8 @@ codegen_device_projection(CustomScan *cscan, GpuJoinInfo *gj_info,
 		appendStringInfo(
 			&body,
 			"  htup = (HeapTupleHeaderData *)\n"
-			"    (r_buffer[%d] == 0 ? NULL : ((char *)%s + r_buffer[%d]);\n"
-			"  EXTRACT_HEAP_TUPLE_BEGIN(%s, htup, addr);\n",
+			"    (r_buffer[%d] == 0 ? NULL : ((char *)%s + r_buffer[%d]));\n"
+			"  EXTRACT_HEAP_TUPLE_BEGIN(addr, %s, htup);\n",
 			depth,
 			depth == 0 ? "kds_src" : "kds_in",
 			depth,
@@ -2074,6 +2095,8 @@ codegen_device_projection(CustomScan *cscan, GpuJoinInfo *gj_info,
 		&body,
 		"\n"
 		"  *extra_len = (cl_uint)(extra_pos - extra_buf);\n");
+	/* add parameter declarations */
+	pgstrom_codegen_param_declarations(&decl, context);
 	/* merge with declaration part */
 	appendStringInfo(&decl, "\n%s}\n", body.data);
 
@@ -2412,8 +2435,9 @@ pgstrom_post_planner_gpujoin(PlannedStmt *pstmt, Plan **p_curr_plan)
 	initStringInfo(&source);
 
 	pgstrom_init_codegen_context(&context);
-
-	// TODO: restore the status
+	context.func_defs = gj_info->func_defs;
+	context.used_params = gj_info->used_params;
+	context.extra_flags = gj_info->extra_flags;
 
 	devproj_function = codegen_device_projection(cscan, gj_info, &context,
 												 &extra_maxlen);
@@ -2421,6 +2445,10 @@ pgstrom_post_planner_gpujoin(PlannedStmt *pstmt, Plan **p_curr_plan)
 	appendStringInfo(&source, "%s\n", gj_info->kern_source);
 	appendStringInfo(&source, "%s\n", devproj_function);
 
+	gj_info->func_defs = context.func_defs;
+	gj_info->used_params = context.used_params;
+	gj_info->extra_flags = context.extra_flags;
+	gj_info->kern_source = source.data;
 	gj_info->extra_maxlen = extra_maxlen;
 
 	form_gpujoin_info(cscan, gj_info);
@@ -3568,72 +3596,16 @@ gpujoin_codegen_hash_value(StringInfo source,
 	pfree(body.data);
 }
 
-/*
- * codegen for:
- * STATIC_FUNCTION(void)
- * gpujoin_projection_mapping(cl_int dest_resno,
- *                            cl_int *src_depth,
- *                            cl_int *src_colidx);
- */
-static void
-gpujoin_codegen_projection_mapping(StringInfo source,
-								   GpuJoinInfo *gj_info,
-								   codegen_context *context)
-{
-	ListCell   *lc1;
-	ListCell   *lc2;
-	ListCell   *lc3;
-
-	appendStringInfo(
-		source,
-		"STATIC_FUNCTION(void)\n"
-		"gpujoin_projection_mapping(cl_int dest_colidx,\n"
-		"                           cl_int *src_depth,\n"
-		"                           cl_int *src_colidx)\n"
-		"{\n"
-		"  switch (dest_colidx)\n"
-		"  {\n");
-
-   	forthree(lc1, context->pseudo_tlist,
-   			 lc2, gj_info->ps_src_depth,
-			 lc3, gj_info->ps_src_resno)
-	{
-		TargetEntry *tle = lfirst(lc1);
-		int		src_depth = lfirst_int(lc2);
-		int		src_resno = lfirst_int(lc3);
-
-		appendStringInfo(
-			source,
-			"  case %d:\n"
-			"    *src_depth = %d;\n"
-			"    *src_colidx = %d;\n"
-			"    break;\n",
-			tle->resno - 1,
-			src_depth,
-			src_resno - 1);
-	}
-	appendStringInfo(
-		source,
-		"  default:\n"
-		"    *src_depth = INT_MAX;\n"
-		"    *src_colidx = INT_MAX;\n"
-		"    break;\n"
-		"  }\n"
-		"}\n\n");
-}
-
 static char *
 gpujoin_codegen(PlannerInfo *root,
 				CustomScan *cscan,
 				GpuJoinInfo *gj_info,
 				codegen_context *context)
 {
-	StringInfoData decl;
 	StringInfoData source;
 	int			depth;
 	ListCell   *cell;
 
-	initStringInfo(&decl);
 	initStringInfo(&source);
 
 	/* gpujoin_outer_quals  */
@@ -3717,15 +3689,7 @@ gpujoin_codegen(PlannerInfo *root,
 		"}\n"
 		"\n");
 
-	/* gpujoin_projection_mapping */
-	gpujoin_codegen_projection_mapping(&source, gj_info, context);
-
-	/* add function declarations */
-	pgstrom_codegen_func_declarations(&decl, context);
-	appendStringInfo(&decl, "\n%s", source.data);
-	pfree(source.data);
-
-	return decl.data;
+	return source.data;
 }
 
 /*

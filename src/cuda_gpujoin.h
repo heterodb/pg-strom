@@ -165,7 +165,6 @@ gpujoin_hash_value(kern_context *kcxt,
  */
 STATIC_FUNCTION(void)
 gpujoin_projection(kern_context *kcxt,
-				   kern_gpujoin *kgjoin,
 				   kern_data_store *kds_src,
 				   kern_multirels *kmrels,
 				   cl_uint *r_buffer,
@@ -981,8 +980,6 @@ gpujoin_projection_row(kern_gpujoin *kgjoin,
 #if GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE > 0
 		cl_char		extra_buf[GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE]
 					__attribute__ ((aligned(MAXIMUM_ALIGNOF)));
-#else
-#define				extra_buf ((char *) NULL)
 #endif
 		cl_uint		extra_len;
 		cl_uint		required;
@@ -1008,14 +1005,17 @@ gpujoin_projection_row(kern_gpujoin *kgjoin,
 			cl_uint	   *r_buffer = KERN_GET_RESULT(kresults, res_index);
 
 			gpujoin_projection(&kcxt,
-							   kgjoin,
 							   kds_src,
 							   kmrels,
 							   r_buffer,
 							   kds_dst,
 							   tup_values,
 							   tup_isnull,
+#if GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE > 0
 							   extra_buf,
+#else
+							   NULL,
+#endif
 							   &extra_len);
 			assert(extra_len <= GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE);
 			required = MAXALIGN(offsetof(kern_tupitem, htup) +
@@ -1082,8 +1082,6 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 #if GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE > 0
 	cl_char			extra_buf[GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE]
 					__attribute__ ((aligned(MAXIMUM_ALIGNOF)));
-#else
-#define				extra_buf ((char *) NULL)
 #endif
 	cl_uint			extra_len;
 	cl_uint			offset	__attribute__ ((unused));
@@ -1145,14 +1143,17 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 			tup_isnull = KERN_DATA_STORE_ISNULL(kds_dst, res_index);
 
 			gpujoin_projection(&kcxt,
-							   kgjoin,
 							   kds_src,
 							   kmrels,
 							   r_buffer,
 							   kds_dst,
 							   tup_values,
 							   tup_isnull,
+#if GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE > 0
 							   extra_buf,
+#else
+							   NULL,
+#endif
 							   &extra_len);
 		}
 		else
@@ -1204,8 +1205,9 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 					char   *addr = DatumGetPointer(tup_values[i]);
 
 					/* move the body of values to extra area of kds_dst */
+#if GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE > 0
 					if (addr >= extra_buf &&
-						addr <  extra_buf + GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE)
+						addr <  extra_buf + sizeof(extra_buf))
 					{
 						cl_uint		vl_len = (cmeta.attlen > 0 ?
 											  cmeta.attlen :
@@ -1214,6 +1216,7 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 						addr = vl_buf;
 						vl_buf += MAXALIGN(vl_len);
 					}
+#endif
 					tup_values[i] = devptr_to_host(kds_dst, addr);
 				}
 			}
