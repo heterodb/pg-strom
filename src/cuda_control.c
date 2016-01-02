@@ -1175,7 +1175,7 @@ pgstrom_init_gputaskstate(GpuContext *gcontext, GpuTaskState *gts)
 	gts->extra_flags = 0;		/* to be set later */
 	gts->cuda_modules = NULL;
 	gts->scan_done = false;
-	gts->exec_per_chunk = false;
+	gts->outer_bulk_exec = false;
 	gts->be_row_format = false;
 	gts->curr_blknum = 0;
 	if (gts->css.ss.ss_currentRelation)
@@ -1202,7 +1202,7 @@ pgstrom_init_gputaskstate(GpuContext *gcontext, GpuTaskState *gts)
 	gts->cb_task_polling = NULL;
 	gts->cb_next_chunk = NULL;
 	gts->cb_next_tuple = NULL;
-	gts->cb_exec_chunk = NULL;
+	gts->cb_bulk_exec = NULL;
 	memset(&gts->pfm_accum, 0, sizeof(pgstrom_perfmon));
 	gts->pfm_accum.enabled = pgstrom_perfmon_enabled;
 }

@@ -801,12 +801,14 @@ pgstrom_explain_gputaskstate(GpuTaskState *gts, ExplainState *es)
 		int		ofs = 0;
 
 		/* run per-chunk-execution? */
-		if (gts->exec_per_chunk)
-			ofs += snprintf(temp+ofs, sizeof(temp) - ofs, "%sexec-per-chunk",
+		if (gts->outer_bulk_exec)
+			ofs += snprintf(temp+ofs, sizeof(temp) - ofs,
+							"%souter-bulk-exec",
 							ofs > 0 ? ", " : "");
 		/* per-chunk-execution support? */
-		if (gts->cb_exec_chunk != NULL)
-			ofs += snprintf(temp+ofs, sizeof(temp) - ofs, "%schunk-format",
+		if (gts->cb_bulk_exec != NULL)
+			ofs += snprintf(temp+ofs, sizeof(temp) - ofs,
+							"%sbulk-exec-support",
 							ofs > 0 ? ", " : "");
 		/* preferable result format */
 		if (gts->be_row_format)

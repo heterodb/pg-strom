@@ -3479,7 +3479,6 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 	gpas->gts.cb_task_release = gpupreagg_task_release;
 	gpas->gts.cb_next_chunk = gpupreagg_next_chunk;
 	gpas->gts.cb_next_tuple = gpupreagg_next_tuple;
-	gpas->gts.cb_exec_chunk = NULL;		/* nobody should use */
 	/* re-initialization of scan-descriptor and projection-info */
 	tupdesc = ExecCleanTypeFromTL(cscan->custom_scan_tlist, false);
 	ExecAssignScanType(&gpas->gts.css.ss, tupdesc);
@@ -3500,10 +3499,10 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 
 		Assert(cscan->scan.scanrelid == 0);
 		outer_ps = ExecInitNode(outerPlan(cscan), estate, eflags);
-		if (pgstrom_chunk_exec_supported(outer_ps))
+		if (pgstrom_bulk_exec_supported(outer_ps))
 		{
 			((GpuTaskState *) outer_ps)->be_row_format = true;
-			gpas->gts.exec_per_chunk = true;
+			gpas->gts.outer_bulk_exec = true;
 		}
 		outerPlanState(gpas) = outer_ps;
 		outer_nitems = outer_ps->plan->plan_rows;
@@ -4075,7 +4074,7 @@ gpupreagg_next_chunk(GpuTaskState *gts)
 		if (!gpas->outer_pds)
 			is_terminator = true;
 	}
-	else if (!gpas->gts.exec_per_chunk)
+	else if (!gpas->gts.outer_bulk_exec)
 	{
 		/* Scan the outer relation using row-by-row mode */
 		TupleDesc		tupdesc

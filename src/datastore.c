@@ -64,11 +64,11 @@ pgstrom_chunk_size_limit(void)
 }
 
 /*
- * pgstrom_chunk_exec_supported - returns true, if supplied planstate
- * supports execution-per-chunk mode.
+ * pgstrom_bulk_exec_supported - returns true, if supplied planstate
+ * supports bulk execution mode.
  */
 bool
-pgstrom_chunk_exec_supported(const PlanState *planstate)
+pgstrom_bulk_exec_supported(const PlanState *planstate)
 {
 	if (pgstrom_plan_is_gpuscan(planstate->plan) ||
         pgstrom_plan_is_gpujoin(planstate->plan) ||
@@ -77,7 +77,7 @@ pgstrom_chunk_exec_supported(const PlanState *planstate)
 	{
 		GpuTaskState   *gts = (GpuTaskState *) planstate;
 
-		if (gts->cb_exec_chunk != NULL)
+		if (gts->cb_bulk_exec != NULL)
 			return true;
 	}
 	return false;
@@ -204,13 +204,13 @@ ChunkExecProcNode(GpuTaskState *gts, size_t chunk_size)
 		ExecReScan(&gts->css.ss.ps);		/* let ReScan handle this */
 
 	Assert(IsA(gts, CustomScanState));		/* rough checks */
-	if (gts->cb_exec_chunk)
+	if (gts->cb_bulk_exec)
 	{
 		/* must provide our own instrumentation support */
 		if (plannode->instrument)
 			InstrStartNode(plannode->instrument);
 		/* execution per chunk */
-		pds = gts->cb_exec_chunk(gts, chunk_size);
+		pds = gts->cb_bulk_exec(gts, chunk_size);
 
 		/* must provide our own instrumentation support */
 		if (plannode->instrument)
