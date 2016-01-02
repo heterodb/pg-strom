@@ -186,80 +186,6 @@ pgstrom_open_tempfile(const char **p_tempfilepath)
 	return file_desc;
 }
 
-/* ------------------------------------------------------------
- *
- * Routines to support bulk-loading between PG-Strom nodes
- *
- * ------------------------------------------------------------
- */
-void
-subtract_tuplecost_if_bulkload(Cost *p_run_cost, Path *pathnode)
-{
-	Cost		run_cost = *p_run_cost;
-	RelOptInfo *rel = pathnode->parent;
-
-	if (pathnode->pathtype == T_CustomScan)
-	{
-		CustomPath	   *cpath = (CustomPath *) pathnode;
-
-		/* No tuple-cost benefit, if bulkload is not supported. */
-		if ((cpath->flags & CUSTOMPATH_SUPPORT_BULKLOAD) == 0)
-			return;
-	}
-	else if (pathnode->pathtype == T_SeqScan)
-	{
-		ListCell	   *lc;
-
-		foreach (lc, rel->reltargetlist)
-		{
-			Expr	   *expr = lfirst(lc);
-
-			/*
-			 * All the items in targetlist have to be Var-nodes or device
-			 * executable expression.
-			 */
-			if (!IsA(expr, Var) &&
-				!pgstrom_device_expression(expr))
-				return;
-		}
-
-		foreach (lc, rel->baserestrictinfo)
-		{
-			RestrictInfo   *rinfo = lfirst(lc);
-
-			/* All the restrictclause has to be device executable */
-			if (!pgstrom_device_expression(rinfo->clause))
-				return;
-		}
-	}
-	else
-	{
-		/* elsewhere, bulkload is not supported anyway */
-		return;
-	}
-
-	/*
-	 * reduce cpu_tuple_cost; that assumes row-by-row mode
-	 */
-	run_cost -= cpu_tuple_cost * pathnode->rows;
-
-	/*
-	 * As discount rate, we use cpu_tuple_cost for each "block"
-	 */
-	if (rel->reloptkind == RELOPT_BASEREL)
-		run_cost += cpu_tuple_cost * rel->pages;
-	else
-	{
-		int		nattrs = list_length(rel->reltargetlist);
-		Size	tup_size
-			= MAXALIGN(offsetof(HeapTupleHeaderData,
-								t_bits[BITMAPLEN(nattrs)]) +
-					   rel->width);
-		run_cost += cpu_tuple_cost * Max(BLCKSZ / tup_size, 1);
-	}
-	*p_run_cost = run_cost;
-}
-
 /*
  * ChunkExecProcNode
  *
@@ -297,56 +223,12 @@ ChunkExecProcNode(GpuTaskState *gts, size_t chunk_size)
 }
 
 #if 1
-/* shall be deprecated - bulkload policy is not sufficient when number
- * of output rows are much different from the input */
-
-/*
- * BulkExecProcNode
- *
- * It runs the bulk-exec method of the supplied plannode.
- *
- * TODO: It will take 'chunk_size' argument to specify expected size of
- * the chunk, and to adjust it.
- */
-pgstrom_data_store *
-BulkExecProcNode(PlanState *node)
-{
-	CHECK_FOR_INTERRUPTS();
-
-	if (node->chgParam != NULL)		/* something changed */
-		ExecReScan(node);			/* let ReScan handle this */
-
-	/* rough check, not sufficient... */
-	if (IsA(node, CustomScanState))
-	{
-		CustomScanState	   *css = (CustomScanState *) node;
-		PGStromExecMethods *methods = (PGStromExecMethods *) css->methods;
-		pgstrom_data_store *pds;
-
-		Assert(methods->ExecCustomBulk != NULL);
-
-		/* must provide our own instrumentation support */
-		if (node->instrument)
-			InstrStartNode(node->instrument);
-
-		/* do bulk execution */
-		pds = methods->ExecCustomBulk(css);
-
-		/* must provide our own instrumentation support */
-		if (node->instrument)
-			InstrStopNode(node->instrument,
-						  !pds ? 0.0 : (double)pds->kds->nitems);
-		Assert(!pds || pds->kds->nitems > 0);
-		return pds;
-	}
-	elog(ERROR, "unrecognized node type: %d", (int) nodeTag(node));
-}
-#endif
-
 /*
  * pgstrom_fixup_kernel_numeric
  *
  * It fixes up internal numeric representation
+ *
+ * TO BE DEPRECATED - Slot+Extra buffer allows to fixup numeric in kernel
  */
 Datum
 pgstrom_fixup_kernel_numeric(Datum datum)
@@ -366,6 +248,7 @@ pgstrom_fixup_kernel_numeric(Datum datum)
 							   Int32GetDatum(0),
 							   Int32GetDatum(-1));
 }
+#endif
 
 bool
 kern_fetch_data_store(TupleTableSlot *slot,

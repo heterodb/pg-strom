@@ -888,9 +888,6 @@ pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan)
 								  false);
 		cscan->custom_scan_tlist = lappend(cscan->custom_scan_tlist, tle_new);
 	}
-	/* informs our preference to fetch tuples */
-	if (IsA(subplan, CustomScan))
-		((CustomScan *) subplan)->flags |= CUSTOMPATH_PREFERE_ROW_FORMAT;
 	outerPlan(cscan) = subplan;
 	cscan->scan.plan.initPlan = sort->plan.initPlan;
 
@@ -942,6 +939,7 @@ gpusort_begin(CustomScanState *node, EState *estate, int eflags)
 	GpuSortState   *gss = (GpuSortState *) node;
 	CustomScan	   *cscan = (CustomScan *) node->ss.ps.plan;
 	GpuSortInfo	   *gs_info = deform_gpusort_info(cscan);
+	PlanState	   *subplan_state;
 	TupleDesc		tupdesc;
 
 	/* activate GpuContext for device execution */
@@ -972,7 +970,14 @@ gpusort_begin(CustomScanState *node, EState *estate, int eflags)
 	gss->markpos_index = -1;
 
 	/* initialize child exec node */
-	outerPlanState(gss) = ExecInitNode(outerPlan(cscan), estate, eflags);
+	subplan_state = ExecInitNode(outerPlan(cscan), estate, eflags);
+	/* informs our preferred tuple format, if supported */
+	if (pgstrom_plan_is_gpuscan(outerPlan(cscan)) ||
+		pgstrom_plan_is_gpujoin(outerPlan(cscan)) ||
+		pgstrom_plan_is_gpupreagg(outerPlan(cscan)) ||
+		pgstrom_plan_is_gpusort(outerPlan(cscan)))
+		((GpuTaskState *) subplan_state)->be_row_format = true;
+	outerPlanState(gss) = subplan_state;
 
 	/* for GPU bitonic sorting */
 	pgstrom_assign_cuda_program(&gss->gts,
@@ -1351,18 +1356,18 @@ gpusort_next_tuple(GpuTaskState *gts)
 	if (gss->gts.curr_index < kresults->nitems)
 	{
 		cl_long		index = 2 * gss->gts.curr_index++;
-		cl_int		chunk_id = kresults->results[index];
-		cl_int		item_id = kresults->results[index + 1];
+		cl_uint		chunk_id = kresults->results[index];
+		cl_uint		item_id = kresults->results[index + 1];
 
 		ExecClearTuple(slot);
 
 		if (chunk_id >= gss->num_chunks || !gss->pds_chunks[chunk_id])
 			elog(ERROR, "Bug? data-store of GpuSort missing (chunk-id: %d)",
 				 chunk_id);
-		if ((gss->gts.css.flags & CUSTOMPATH_PREFERE_ROW_FORMAT) == 0)
-			pds = gss->pds_chunks[chunk_id];
-		else
+		if (gss->gts.be_row_format)
 			pds = gss->pds_toasts[chunk_id];
+		else
+			pds = gss->pds_chunks[chunk_id];
 
 		if (pgstrom_fetch_data_store(slot, pds, item_id, &gss->tuple_buf))
 			return slot;

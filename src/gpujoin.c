@@ -251,8 +251,6 @@ typedef struct
 	List		   *join_quals;
 	/* current window of inner relations */
 	struct pgstrom_multirels *curr_pmrels;
-	/* format of destination store */
-	int				result_format;
 	/* buffer population ratio */
 	int				result_width;	/* result width for buffer length calc */
 	/* supplemental information to ps_tlist  */
@@ -683,8 +681,7 @@ static bool
 cost_gpujoin(PlannerInfo *root,
 			 RelOptInfo *joinrel,
 			 GpuJoinPath *gpath,
-			 Relids required_outer,
-			 bool support_bulkload)
+			 Relids required_outer)
 {
 	Path	   *outer_path = gpath->outer_path;
 	cl_uint		num_chunks = estimate_num_chunks(outer_path);
@@ -717,7 +714,6 @@ cost_gpujoin(PlannerInfo *root,
 	startup_cost = pgstrom_gpu_setup_cost + outer_path->startup_cost;
 	run_cost = outer_path->total_cost - outer_path->startup_cost;
 	run_cost_per_chunk = 0.0;
-	subtract_tuplecost_if_bulkload(&run_cost, outer_path);
 
 	/*
 	 * Cost of per-tuple evaluation
@@ -888,8 +884,7 @@ create_gpujoin_path(PlannerInfo *root,
 					Path *outer_path,
 					List *inner_path_list,
 					ParamPathInfo *param_info,
-					Relids required_outer,
-					bool support_bulkload)
+					Relids required_outer)
 {
 	GpuJoinPath	   *result;
 	cl_int			num_rels = list_length(inner_path_list);
@@ -911,7 +906,7 @@ create_gpujoin_path(PlannerInfo *root,
 	result->cpath.path.param_info = param_info;	// XXXXXX
 	result->cpath.path.pathkeys = NIL;
 	result->cpath.path.rows = joinrel->rows;	// XXXXXX
-	result->cpath.flags = (support_bulkload ? CUSTOMPATH_SUPPORT_BULKLOAD : 0);
+	result->cpath.flags = 0;
 	result->cpath.methods = &gpujoin_path_methods;
 	result->outer_path = outer_path;
 	result->num_rels = num_rels;
@@ -939,8 +934,7 @@ create_gpujoin_path(PlannerInfo *root,
 	 * cost calculation of GpuJoin, then, add this path to the joinrel,
 	 * unless its cost is not obviously huge.
 	 */
-	if (cost_gpujoin(root, joinrel, result, required_outer,
-					 support_bulkload))
+	if (cost_gpujoin(root, joinrel, result, required_outer))
 	{
 		List   *custom_paths = list_make1(result->outer_path);
 
@@ -1146,10 +1140,8 @@ gpujoin_add_join_path(PlannerInfo *root,
 	Path	   *inner_path;
 	List	   *inner_path_list;
 	List	   *restrict_clauses;
-	ListCell   *lc;
 	Relids		required_outer;
 	ParamPathInfo *param_info;
-	bool		support_bulkload = true;
 	inner_path_item *ip_item;
 
 	/* calls secondary module if exists */
@@ -1164,21 +1156,6 @@ gpujoin_add_join_path(PlannerInfo *root,
 	/* nothing to do, if PG-Strom is not enabled */
 	if (!pgstrom_enabled)
 		return;
-
-	/*
-	 * check bulk-load capability around targetlist of joinrel.
-	 * it may be turned off according to the host_quals if any.
-	 */
-	foreach (lc, joinrel->reltargetlist)
-	{
-		Expr   *expr = lfirst(lc);
-
-		if (!IsA(expr, Var) && !pgstrom_device_expression(expr))
-		{
-			support_bulkload = false;
-			break;
-		}
-	}
 
 	/*
 	 * Find out the cheapest inner and outer path from the standpoint
@@ -1293,8 +1270,7 @@ gpujoin_add_join_path(PlannerInfo *root,
 								outer_path,
 								inner_path_list,
 								param_info,
-                                required_outer,
-                                support_bulkload);
+                                required_outer);
 		}
 
 		/*
@@ -1308,8 +1284,7 @@ gpujoin_add_join_path(PlannerInfo *root,
 								outer_path,
 								inner_path_list,
 								param_info,
-								required_outer,
-								support_bulkload);
+								required_outer);
 		}
 
 		/*
@@ -2710,14 +2685,6 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
 		pgstrom_preload_cuda_program(&gjs->gts);
 
-	/*
-	 * initialize misc stuff
-	 */
-	if ((gjs->gts.css.flags & CUSTOMPATH_PREFERE_ROW_FORMAT) != 0)
-		gjs->result_format = KDS_FORMAT_ROW;
-	else
-		gjs->result_format = KDS_FORMAT_SLOT;
-
 	/* expected kresults buffer expand rate */
 	gjs->result_width =
 		MAXALIGN(offsetof(HeapTupleHeaderData,
@@ -2742,7 +2709,7 @@ gpujoin_exec_bulk(CustomScanState *node)
 	pgstrom_data_store *pds_dst;
 
 	/* force to return row-format */
-	gjs->result_format = KDS_FORMAT_ROW;
+	gjs->gts.be_row_format = true;
 
 retry:
 	/* fetch next chunk to be processed */
@@ -3921,7 +3888,7 @@ retry:
 	 */
 	dst_nrooms = (Size)(ntuples * (double) pgstrom_chunk_size_margin);
 
-	if (gjs->result_format == KDS_FORMAT_SLOT)
+	if (!gjs->gts.be_row_format)
 	{
 		Size	length;
 
@@ -4010,7 +3977,7 @@ retry:
 			}
 		}
 	}
-	else if (gjs->result_format == KDS_FORMAT_ROW)
+	else
 	{
 		Size		result_width;
 		Size		new_length;
@@ -4095,8 +4062,6 @@ retry:
 			}
 		}
 	}
-	else
-		elog(ERROR, "Bug? unexpected result format: %d", gjs->result_format);
 
 	/*
 	 * Setup kern_gpujoin structure

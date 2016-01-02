@@ -343,28 +343,8 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	cost_gpuscan_path(root, pathnode, dev_quals, host_quals);
 
 	/*
-	 * FIXME: needs to pay attention for projection cost.
+	 * FIXME: needs to pay attention for projection cost?
 	 */
-
-	/* check bulk-load capability */
-	if (host_quals == NIL)
-	{
-		bool		support_bulkload = true;
-
-		foreach (cell, baserel->reltargetlist)
-		{
-			Expr	   *expr = lfirst(cell);
-
-			if (!IsA(expr, Var) &&
-				!pgstrom_device_expression(expr))
-			{
-				support_bulkload = false;
-				break;
-			}
-		}
-		if (support_bulkload)
-			pathnode->flags |= CUSTOMPATH_SUPPORT_BULKLOAD;
-	}
 	add_path(baserel, &pathnode->path);
 }
 
@@ -542,7 +522,7 @@ gpuscan_try_replace_seqscan(Relation baserel, SeqScan *seqscan)
 	cscan->scan.plan.extParam = bms_copy(seqscan->plan.extParam);
 	cscan->scan.plan.allParam = bms_copy(seqscan->plan.allParam);
 	cscan->scan.scanrelid = seqscan->scanrelid;
-	cscan->flags = CUSTOMPATH_SUPPORT_BULKLOAD;
+	cscan->flags = 0;
 	cscan->custom_relids = bms_make_singleton(seqscan->scanrelid);
 	cscan->methods = &gpuscan_plan_methods;
 
