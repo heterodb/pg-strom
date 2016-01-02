@@ -60,8 +60,6 @@ typedef struct
 {
 	int				numCols;		/* number of grouping columns */
 	AttrNumber	   *grpColIdx;		/* their indexes in the target list */
-	bool			outer_bulkload;
-	double			bulkload_density;
 	double			num_groups;		/* estimated number of groups */
 	cl_int			num_chunks;		/* estimated number of chunks */
 	Size			varlena_unitsz;	/* estimated unit size of varlena */
@@ -91,9 +89,6 @@ form_gpupreagg_info(CustomScan *cscan, GpuPreAggInfo *gpa_info)
 		temp = lappend_int(temp, gpa_info->grpColIdx[i]);
 
 	privs = lappend(privs, temp);
-	privs = lappend(privs, makeInteger(gpa_info->outer_bulkload));
-	privs = lappend(privs,
-					makeInteger(double_as_long(gpa_info->bulkload_density)));
 	privs = lappend(privs, makeInteger(double_as_long(gpa_info->num_groups)));
 	privs = lappend(privs, makeInteger(gpa_info->num_chunks));
 	privs = lappend(privs, makeInteger(gpa_info->varlena_unitsz));
@@ -131,9 +126,6 @@ deform_gpupreagg_info(CustomScan *cscan)
 	foreach (cell, temp)
 		gpa_info->grpColIdx[i++] = lfirst_int(cell);
 
-	gpa_info->outer_bulkload = intVal(list_nth(privs, pindex++));
-	gpa_info->bulkload_density =
-		long_as_double(intVal(list_nth(privs, pindex++)));
 	gpa_info->num_groups =
 		long_as_double(intVal(list_nth(privs, pindex++)));
 	gpa_info->num_chunks = intVal(list_nth(privs, pindex++));
@@ -3154,8 +3146,6 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	Plan			newcost_sort;
 	Plan			newcost_gpreagg;
 	int				extra_flags;
-	bool			outer_bulkload = false;
-	double			bulkload_density = 0.0;
 	codegen_context context;
 
 	/* nothing to do, if feature is turned off */
@@ -3249,19 +3239,7 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 		if (hashentrysize * agg->plan.plan_rows > work_mem * 1024L)
 			return;
 	}
-#if 0
-	/* check availability of outer bulkload */
-	if (IsA(outer_node, CustomScan))
-	{
-		int		custom_flags = ((CustomScan *) outer_node)->flags;
 
-		bulkload_density = pgstrom_get_bulkload_density(outer_node);
-		if ((custom_flags & CUSTOMPATH_SUPPORT_BULKLOAD) != 0 &&
-			bulkload_density >= (1.0 - pgstrom_bulkload_density) &&
-			bulkload_density <= (1.0 + pgstrom_bulkload_density))
-			outer_bulkload = true;
-	}
-#endif
 	/*
 	 * Estimation of the "effective" number of groups.
 	 *
@@ -3375,8 +3353,6 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	gpa_info.grpColIdx      = palloc0(sizeof(AttrNumber) * agg->numCols);
 	for (i=0; i < agg->numCols; i++)
 		gpa_info.grpColIdx[i] = attr_maps[agg->grpColIdx[i] - 1];
-	gpa_info.outer_bulkload = outer_bulkload;
-	gpa_info.bulkload_density = bulkload_density;
 	gpa_info.num_groups     = num_groups;
 	gpa_info.num_chunks     = num_chunks;
 	gpa_info.varlena_unitsz = varlena_unitsz;
@@ -3541,27 +3517,11 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 	/*
 	 * initialize child node
 	 */
-	if (pgstrom_bulkload_enabled)
-		gpas->gts.scan_bulk = gpa_info->outer_bulkload;
-	gpas->gts.scan_bulk_density = gpa_info->bulkload_density;
-
 	gpas->outer_overflow = NULL;
 
 	//outer_width = outerPlanState(gpas)->plan->plan_width;
 	gpas->safety_limit = gpa_info->safety_limit;
 	gpas->key_dist_salt = gpa_info->key_dist_salt;
-
-	/*
-	 * initialize result tuple type and projection info
-	 */
-	if (gpas->gts.scan_bulk)
-	{
-		CustomScanState *ocss = (CustomScanState *) outerPlanState(gpas);
-
-		Assert(IsA(ocss, CustomScanState));
-		gpas->bulk_proj = ocss->ss.ps.ps_ProjInfo;
-		gpas->bulk_slot = ocss->ss.ss_ScanTupleSlot;
-	}
 
 	/*
 	 * Setting up kernel program and message queue
@@ -4235,16 +4195,11 @@ retry_segment:
 static TupleTableSlot *
 gpupreagg_next_tuple_fallback(GpuPreAggState *gpas, gpupreagg_segment *segment)
 {
+	TupleTableSlot	   *slot = gpas->gts.css.ss.ss_ScanTupleSlot;
 	pgstrom_data_store *pds;
-	TupleTableSlot	   *slot;
 	cl_uint				row_index;
 	HeapTupleData		tuple;
 
-	/* bulk-load uses individual slot; then may have a projection */
-	if (!gpas->gts.scan_bulk)
-		slot = gpas->gts.css.ss.ss_ScanTupleSlot;
-	else
-		slot = gpas->bulk_slot;
 retry:
 	if (segment->idx_chunks == 0)
 		return NULL;
@@ -4267,48 +4222,14 @@ retry:
 	}
 	else
 	{
-		ExprContext	   *econtext;
-		ExprDoneCond	is_done;
-
-		if (gpas->gts.scan_bulk)
-		{
-			/*
-			 * check qualifier being pulled up from the outer scan, if any.
-			 * Outer_quals assumes fetched tuple is stored on the
-			 * ecxt_scantuple (because it came from relation-scan), we need
-			 * to adjust it.
-			 */
-			if (gpas->outer_quals != NIL)
-			{
-				econtext = gpas->gts.css.ss.ps.ps_ExprContext;
-				econtext->ecxt_scantuple = slot;
-				if (!ExecQual(gpas->outer_quals, econtext, false))
-					goto retry;
-			}
-
-			/*
-			 * In case of bulk-load mode, it may take additional projection
-			 * because slot has a record type of underlying scan node, thus
-			 * we need to translate this record into the form we expected.
-			 * If bulk_proj is valid, it implies our expected input record is
-			 * incompatible from the record type of underlying scan.
-			 */
-			if (gpas->bulk_proj)
-			{
-				econtext = gpas->bulk_proj->pi_exprContext;
-				econtext->ecxt_scantuple = slot;
-				slot = ExecProject(gpas->bulk_proj, &is_done);
-				if (is_done == ExprEndResult)
-					goto retry;
-			}
-		}
-
 		/*
-		 * Projection from scan-tuple to result-tuple
+		 * Projection from scan-tuple to result-tuple, if any
 		 */
 		if (gpas->gts.css.ss.ps.ps_ProjInfo != NULL)
 		{
-			econtext = gpas->gts.css.ss.ps.ps_ExprContext;
+			ExprContext	   *econtext = gpas->gts.css.ss.ps.ps_ExprContext;
+			ExprDoneCond	is_done;
+
 			econtext->ecxt_scantuple = slot;
 			slot = ExecProject(gpas->gts.css.ss.ps.ps_ProjInfo, &is_done);
 			if (is_done == ExprEndResult)
@@ -4434,15 +4355,6 @@ gpupreagg_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	ListCell	   *lc;
 	const char	   *policy;
 	char			temp[2048];
-
-	if (!gpas->gts.scan_bulk)
-		ExplainPropertyText("Bulkload", "Off", es);
-	else
-	{
-		snprintf(temp, sizeof(temp), "On (density: %.2f%%)",
-				 100.0 * gpas->gts.scan_bulk_density);
-		ExplainPropertyText("Bulkload", temp, es);
-	}
 
 	if (gpas->reduction_mode == GPUPREAGG_NOGROUP_REDUCTION)
 		policy = "NoGroup";

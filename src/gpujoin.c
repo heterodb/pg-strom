@@ -90,8 +90,6 @@ typedef struct
 	int			extra_flags;
 	List	   *func_defs;
 	List	   *used_params;
-	bool		outer_bulkload;
-	double		bulkload_density;
 	Expr	   *outer_quals;
 	double		outer_ratio;
 	double		outer_nrows;
@@ -124,9 +122,6 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 	privs = lappend(privs, makeInteger(gj_info->extra_flags));
 	privs = lappend(privs, gj_info->func_defs);
 	exprs = lappend(exprs, gj_info->used_params);
-	privs = lappend(privs, makeInteger(gj_info->outer_bulkload));
-	privs = lappend(privs,
-					makeInteger(double_as_long(gj_info->bulkload_density)));
 	exprs = lappend(exprs, gj_info->outer_quals);
 	privs = lappend(privs, makeInteger(double_as_long(gj_info->outer_ratio)));
 	privs = lappend(privs, makeInteger(double_as_long(gj_info->outer_nrows)));
@@ -165,9 +160,6 @@ deform_gpujoin_info(CustomScan *cscan)
 	gj_info->extra_flags = intVal(list_nth(privs, pindex++));
 	gj_info->func_defs = list_nth(privs, pindex++);
 	gj_info->used_params = list_nth(exprs, eindex++);
-	gj_info->outer_bulkload = intVal(list_nth(privs, pindex++));
-	gj_info->bulkload_density =
-		long_as_double(intVal(list_nth(privs, pindex++)));
 	gj_info->outer_quals = list_nth(exprs, eindex++);
 	gj_info->outer_ratio = long_as_double(intVal(list_nth(privs, pindex++)));
 	gj_info->outer_nrows = long_as_double(intVal(list_nth(privs, pindex++)));
@@ -422,21 +414,6 @@ pgstrom_plan_is_gpujoin(const Plan *plannode)
 	if (IsA(cscan, CustomScan) &&
 		cscan->methods == &gpujoin_plan_methods)
 		return true;
-	return false;
-}
-
-/*
- * returns true, if plannode is GpuJoin and takes bulk-input
- */
-bool
-pgstrom_plan_is_gpujoin_bulkinput(const Plan *plannode)
-{
-	if (pgstrom_plan_is_gpujoin(plannode))
-	{
-		GpuJoinInfo	   *gj_info = deform_gpujoin_info((CustomScan *) plannode);
-
-		return gj_info->outer_bulkload;
-	}
 	return false;
 }
 
@@ -2719,13 +2696,6 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 	}
 
 	/*
-	 * Is bulkload available?
-	 */
-	gjs->gts.scan_bulk =
-		(!pgstrom_bulkload_enabled ? false : gj_info->outer_bulkload);
-	gjs->gts.scan_bulk_density = gj_info->bulkload_density;
-
-	/*
 	 * Is OUTER RIGHT/FULL JOIN needed?
 	 */
 	gjs->outer_join_start_depth = Max(outer_join_start_depth, 1);
@@ -2953,17 +2923,6 @@ gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 		}
 	}
 	ExplainPropertyText("GPU Projection", str.data, es);
-#if 0
-	/* outer bulkload */
-	if (!gjs->gts.scan_bulk)
-		ExplainPropertyText("Bulkload", "Off", es);
-	else
-	{
-		temp = psprintf("On (density: %.2f%%)",
-						100.0 * gjs->gts.scan_bulk_density);
-		ExplainPropertyText("Bulkload", temp, es);
-	}
-#endif
 
 	/* outer qualifier if any */
 	if (gj_info->outer_quals)
@@ -4296,7 +4255,7 @@ gpujoin_next_chunk(GpuTaskState *gts)
 			if (!pds)
 				gjs->outer_scan_done = true;
 		}
-		else if (!gjs->gts.scan_bulk)
+		else
 		{
 			PlanState   *outer_node = outerPlanState(gjs);
 			TupleDesc	tupdesc = ExecGetResultType(outer_node);
@@ -4336,12 +4295,6 @@ gpujoin_next_chunk(GpuTaskState *gts)
 					break;
 				}
 			}
-		}
-		else
-		{
-			pds = BulkExecProcNode(outerPlanState(gjs));
-			if (!pds)
-				gjs->outer_scan_done = true;
 		}
 		PERFMON_END(&gjs->gts.pfm_accum, time_outer_load, &tv1, &tv2);
 

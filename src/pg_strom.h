@@ -270,8 +270,6 @@ struct GpuTaskState
 	bool			scan_done;		/* no rows to read, if true */
 	bool			exec_per_chunk;	/* true, if it uses per-chunk-execution */
 	bool			be_row_format;	/* true, if KDS_FORMAT_ROW is required */
-	bool			scan_bulk;		/* bulk outer load, if true */
-	double			scan_bulk_density;	/* density of bulk input, if any */
 	BlockNumber		curr_blknum;	/* current block number to scan table */
 	BlockNumber		last_blknum;	/* last block number to scan table */
 	TupleTableSlot *scan_overflow;	/* temp buffer, if unable to load */
@@ -551,7 +549,7 @@ extern bool pgstrom_chunk_exec_supported(const PlanState *planstate);
 
 extern cl_uint estimate_num_chunks(Path *pathnode);
 extern void subtract_tuplecost_if_bulkload(Cost *p_run_cost, Path *pathnode);
-extern double pgstrom_get_bulkload_density(Plan *child_plan);
+
 extern pgstrom_data_store *ChunkExecProcNode(GpuTaskState *gts,
 											 size_t chunk_size);
 extern pgstrom_data_store *BulkExecProcNode(PlanState *node);
@@ -638,7 +636,6 @@ extern void pgstrom_init_gpuscan(void);
  */
 extern bool pgstrom_path_is_gpujoin(Path *pathnode);
 extern bool pgstrom_plan_is_gpujoin(const Plan *plannode);
-extern bool pgstrom_plan_is_gpujoin_bulkinput(const Plan *plannode);
 extern void pgstrom_post_planner_gpujoin(PlannedStmt *pstmt, Plan **p_plan);
 extern void assign_gpujoin_session_info(StringInfo buf, GpuTaskState *gts);
 extern void	pgstrom_init_gpujoin(void);

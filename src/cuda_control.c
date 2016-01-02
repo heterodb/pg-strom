@@ -1177,7 +1177,6 @@ pgstrom_init_gputaskstate(GpuContext *gcontext, GpuTaskState *gts)
 	gts->scan_done = false;
 	gts->exec_per_chunk = false;
 	gts->be_row_format = false;
-	gts->scan_bulk = false;
 	gts->curr_blknum = 0;
 	if (gts->css.ss.ss_currentRelation)
 	{
