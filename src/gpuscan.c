@@ -49,7 +49,7 @@ static CustomPathMethods	gpuscan_path_methods;
 static CustomScanMethods	gpuscan_plan_methods;
 static CustomExecMethods	gpuscan_exec_methods;
 static bool					enable_gpuscan;
-static bool					debug_pullup_outer_scan;
+static bool					enable_pullup_outer_scan;
 
 /*
  * Path information of GpuScan
@@ -386,7 +386,7 @@ pgstrom_pullup_outer_scan(Plan *plannode,
 	List		   *outer_quals;
 	ListCell	   *lc;
 
-	if (!debug_pullup_outer_scan)
+	if (!enable_pullup_outer_scan)
 		return false;
 
 	if (IsA(plannode, SeqScan))
@@ -1694,7 +1694,8 @@ gpuscan_begin(CustomScanState *node, EState *estate, int eflags)
 	gss->gts.cb_next_tuple = gpuscan_next_tuple;
 
 	/* Per chunk execution supported? */
-	if (gss->gts.css.ss.ps.qual == NIL &&
+	if (pgstrom_bulkexec_enabled &&
+		gss->gts.css.ss.ps.qual == NIL &&
 		gss->gts.css.ss.ps.ps_ProjInfo == NULL)
 		gss->gts.cb_bulk_exec = pgstrom_exec_chunk_gputask;
 
@@ -2093,11 +2094,11 @@ pgstrom_init_gpuscan(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
-	/* pg_strom.debug_pullup_outer_scan */
-	DefineCustomBoolVariable("pg_strom.debug_pullup_outer_scan",
+	/* pg_strom.pullup_outer_scan */
+	DefineCustomBoolVariable("pg_strom.pullup_outer_scan",
 							 "Enables to pull up simple outer scan",
 							 NULL,
-							 &debug_pullup_outer_scan,
+							 &enable_pullup_outer_scan,
 							 true,
 							 PGC_USERSET,
                              GUC_NOT_IN_SAMPLE,

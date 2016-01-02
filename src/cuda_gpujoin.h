@@ -1058,8 +1058,10 @@ gpujoin_projection_row(kern_gpujoin *kgjoin,
 		if (required > 0)
 		{
 			cl_uint			pos = kds_dst->length - (base + offset + required);
+			cl_uint		   *tup_pos = (cl_uint *)KERN_DATA_STORE_BODY(kds_dst);
 			kern_tupitem   *tupitem = (kern_tupitem *)((char *)kds_dst + pos);
 
+			tup_pos[res_index] = pos;
 			form_kern_heaptuple(&kcxt, kds_dst, tupitem,
 								tup_values, tup_isnull, NULL);
 		}

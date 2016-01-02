@@ -46,8 +46,7 @@ static planner_hook_type	planner_hook_next;
 bool		pgstrom_enabled;
 bool		pgstrom_perfmon_enabled;
 static bool	pgstrom_debug_kernel_source;
-bool		pgstrom_bulkload_enabled;
-double		pgstrom_bulkload_density;
+bool		pgstrom_bulkexec_enabled;
 int			pgstrom_max_async_tasks;
 double		pgstrom_num_threads_margin;
 double		pgstrom_chunk_size_margin;
@@ -80,22 +79,11 @@ pgstrom_init_misc_guc(void)
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 	/* turn on/off bulkload feature to exchange PG-Strom nodes */
-	DefineCustomBoolVariable("pg_strom.bulkload_enabled",
-							 "Enables the bulk-loading mode of PG-Strom",
+	DefineCustomBoolVariable("pg_strom.bulkexec",
+							 "Enables the bulk-execution mode of PG-Strom",
 							 NULL,
-							 &pgstrom_bulkload_enabled,
+							 &pgstrom_bulkexec_enabled,
 							 true,
-							 PGC_USERSET,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
-	/* threshold of bulkload density */
-	DefineCustomRealVariable("pg_strom.bulkload_density",
-							 "Threshold to use bulkload for data exchange",
-							 NULL,
-							 &pgstrom_bulkload_density,
-							 0.50,
-							 0,
-							 DBL_MAX,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);

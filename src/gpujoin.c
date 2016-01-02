@@ -2524,14 +2524,6 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
 		gcontext = pgstrom_get_gpucontext();
 
-	/* Setup common GpuTaskState fields */
-	pgstrom_init_gputaskstate(gcontext, &gjs->gts);
-	gjs->gts.cb_task_process = gpujoin_task_process;
-	gjs->gts.cb_task_complete = gpujoin_task_complete;
-	gjs->gts.cb_task_release = gpujoin_task_release;
-	gjs->gts.cb_next_chunk = gpujoin_next_chunk;
-	gjs->gts.cb_next_tuple = gpujoin_next_tuple;
-
 	/*
 	 * Re-initialization of scan tuple-descriptor and projection-info,
 	 * because commit 1a8a4e5cde2b7755e11bde2ea7897bd650622d3e of
@@ -2542,6 +2534,18 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 	scan_tupdesc = ExecCleanTypeFromTL(cscan->custom_scan_tlist, false);
 	ExecAssignScanType(&gjs->gts.css.ss, scan_tupdesc);
 	ExecAssignScanProjectionInfoWithVarno(&gjs->gts.css.ss, INDEX_VAR);
+
+	/* Setup common GpuTaskState fields */
+	pgstrom_init_gputaskstate(gcontext, &gjs->gts);
+	gjs->gts.cb_task_process = gpujoin_task_process;
+	gjs->gts.cb_task_complete = gpujoin_task_complete;
+	gjs->gts.cb_task_release = gpujoin_task_release;
+	gjs->gts.cb_next_chunk = gpujoin_next_chunk;
+	gjs->gts.cb_next_tuple = gpujoin_next_tuple;
+	if (pgstrom_bulkexec_enabled &&
+		gjs->gts.css.ss.ps.qual == NIL &&
+		gjs->gts.css.ss.ps.ps_ProjInfo == NULL)
+		gjs->gts.cb_bulk_exec = pgstrom_exec_chunk_gputask;
 
 	/*
 	 * NOTE: outer_quals, hash_outer_keys and join_quals are intended
