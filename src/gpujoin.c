@@ -51,7 +51,7 @@ static TupleTableSlot *gpujoin_next_tuple(GpuTaskState *gts);
 static set_join_pathlist_hook_type set_join_pathlist_next;
 static CustomPathMethods	gpujoin_path_methods;
 static CustomScanMethods	gpujoin_plan_methods;
-static PGStromExecMethods	gpujoin_exec_methods;
+static CustomExecMethods	gpujoin_exec_methods;
 static bool					enable_gpunestloop;
 static bool					enable_gpuhashjoin;
 
@@ -2481,7 +2481,7 @@ assign_gpujoin_session_info(StringInfo buf, GpuTaskState *gts)
 	TupleTableSlot *slot = gts->css.ss.ss_ScanTupleSlot;
 	TupleDesc		tupdesc = slot->tts_tupleDescriptor;
 
-	Assert(gts->css.methods == &gpujoin_exec_methods.c);
+	Assert(gts->css.methods == &gpujoin_exec_methods);
 	appendStringInfo(
 		buf,
 		"#define GPUJOIN_DEVICE_PROJECTION_NFIELDS %u\n"
@@ -2502,7 +2502,7 @@ gpujoin_create_scan_state(CustomScan *node)
 	/* Set tag and executor callbacks */
 	NodeSetTag(gjs, T_CustomScanState);
 	gjs->gts.css.flags = node->flags;
-	gjs->gts.css.methods = &gpujoin_exec_methods.c;
+	gjs->gts.css.methods = &gpujoin_exec_methods;
 
 	return (Node *) gjs;
 }
@@ -2699,36 +2699,6 @@ gpujoin_exec(CustomScanState *node)
 	return ExecScan(&node->ss,
 					(ExecScanAccessMtd) pgstrom_exec_gputask,
 					(ExecScanRecheckMtd) pgstrom_recheck_gputask);
-}
-
-static void *
-gpujoin_exec_bulk(CustomScanState *node)
-{
-	GpuJoinState	   *gjs = (GpuJoinState *) node;
-	pgstrom_gpujoin	   *pgjoin;
-	pgstrom_data_store *pds_dst;
-
-	/* force to return row-format */
-	gjs->gts.be_row_format = true;
-
-retry:
-	/* fetch next chunk to be processed */
-	pgjoin = (pgstrom_gpujoin *) pgstrom_fetch_gputask(&gjs->gts);
-	if (!pgjoin)
-		return NULL;
-
-	pds_dst = pgjoin->pds_dst;
-	/* retry, if no valid rows are contained */
-	if (pds_dst->kds->nitems == 0)
-	{
-		pgstrom_release_gputask(&pgjoin->task);
-		goto retry;
-	}
-	/* release this pgstrom_gpujoin, except for pds_dst */
-	pgjoin->pds_dst = NULL;
-	pgstrom_release_gputask(&pgjoin->task);
-
-	return pds_dst;
 }
 
 static void
@@ -6350,15 +6320,14 @@ pgstrom_init_gpujoin(void)
 	gpujoin_plan_methods.CreateCustomScanState	= gpujoin_create_scan_state;
 
 	/* setup exec methods */
-	gpujoin_exec_methods.c.CustomName			= "GpuJoin";
-	gpujoin_exec_methods.c.BeginCustomScan		= gpujoin_begin;
-	gpujoin_exec_methods.c.ExecCustomScan		= gpujoin_exec;
-	gpujoin_exec_methods.c.EndCustomScan		= gpujoin_end;
-	gpujoin_exec_methods.c.ReScanCustomScan		= gpujoin_rescan;
-	gpujoin_exec_methods.c.MarkPosCustomScan	= NULL;
-	gpujoin_exec_methods.c.RestrPosCustomScan	= NULL;
-	gpujoin_exec_methods.c.ExplainCustomScan	= gpujoin_explain;
-	gpujoin_exec_methods.ExecCustomBulk			= gpujoin_exec_bulk;
+	gpujoin_exec_methods.CustomName				= "GpuJoin";
+	gpujoin_exec_methods.BeginCustomScan		= gpujoin_begin;
+	gpujoin_exec_methods.ExecCustomScan			= gpujoin_exec;
+	gpujoin_exec_methods.EndCustomScan			= gpujoin_end;
+	gpujoin_exec_methods.ReScanCustomScan		= gpujoin_rescan;
+	gpujoin_exec_methods.MarkPosCustomScan		= NULL;
+	gpujoin_exec_methods.RestrPosCustomScan		= NULL;
+	gpujoin_exec_methods.ExplainCustomScan		= gpujoin_explain;
 
 	/* hook registration */
 	set_join_pathlist_next = set_join_pathlist_hook;

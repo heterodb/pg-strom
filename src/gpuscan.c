@@ -47,7 +47,7 @@
 static set_rel_pathlist_hook_type	set_rel_pathlist_next;
 static CustomPathMethods	gpuscan_path_methods;
 static CustomScanMethods	gpuscan_plan_methods;
-static PGStromExecMethods	gpuscan_exec_methods;
+static CustomExecMethods	gpuscan_exec_methods;
 static bool					enable_gpuscan;
 static bool					debug_pullup_outer_scan;
 
@@ -1662,7 +1662,7 @@ gpuscan_create_scan_state(CustomScan *cscan)
 	NodeSetTag(gss, T_CustomScanState);
 	gss->gts.css.flags = cscan->flags;
 	if (cscan->methods == &gpuscan_plan_methods)
-		gss->gts.css.methods = &gpuscan_exec_methods.c;
+		gss->gts.css.methods = &gpuscan_exec_methods;
 	else
 		elog(ERROR, "Bug? unexpected CustomPlanMethods");
 
@@ -2028,45 +2028,6 @@ gpuscan_exec(CustomScanState *node)
 					(ExecScanRecheckMtd) pgstrom_recheck_gputask);
 }
 
-static void *
-gpuscan_exec_bulk(CustomScanState *node)
-{
-	GpuScanState	   *gss = (GpuScanState *) node;
-	Relation			rel = node->ss.ss_currentRelation;
-	TupleTableSlot	   *slot = node->ss.ss_ScanTupleSlot;
-	TupleDesc			tupdesc = slot->tts_tupleDescriptor;
-	Snapshot			snapshot = node->ss.ps.state->es_snapshot;
-	pgstrom_data_store *pds = NULL;
-	struct timeval		tv1, tv2;
-
-	Assert(!gss->gts.kern_source);
-
-	PERFMON_BEGIN(&gss->gts.pfm_accum, &tv1);
-
-	while (gss->gts.curr_blknum < gss->gts.last_blknum)
-	{
-		pds = pgstrom_create_data_store_row(gss->gts.gcontext,
-											tupdesc,
-											pgstrom_chunk_size(),
-											false);
-		/* fill up this data store */
-		while (gss->gts.curr_blknum < gss->gts.last_blknum &&
-			   pgstrom_data_store_insert_block(pds, rel,
-											   gss->gts.curr_blknum,
-											   snapshot, true) >= 0)
-			gss->gts.curr_blknum++;
-
-		if (pds->kds->nitems > 0)
-			break;
-		pgstrom_release_data_store(pds);
-        pds = NULL;
-	}
-
-	PERFMON_END(&gss->gts.pfm_accum, time_outer_load, &tv1, &tv2);
-
-	return pds;
-}
-
 static void
 gpuscan_end(CustomScanState *node)
 {
@@ -2154,13 +2115,12 @@ pgstrom_init_gpuscan(void)
 
 	/* setup exec methods */
 	memset(&gpuscan_exec_methods, 0, sizeof(gpuscan_exec_methods));
-	gpuscan_exec_methods.c.CustomName         = "GpuScan";
-	gpuscan_exec_methods.c.BeginCustomScan    = gpuscan_begin;
-	gpuscan_exec_methods.c.ExecCustomScan     = gpuscan_exec;
-	gpuscan_exec_methods.c.EndCustomScan      = gpuscan_end;
-	gpuscan_exec_methods.c.ReScanCustomScan   = gpuscan_rescan;
-	gpuscan_exec_methods.c.ExplainCustomScan  = gpuscan_explain;
-	gpuscan_exec_methods.ExecCustomBulk       = gpuscan_exec_bulk;
+	gpuscan_exec_methods.CustomName         = "GpuScan";
+	gpuscan_exec_methods.BeginCustomScan    = gpuscan_begin;
+	gpuscan_exec_methods.ExecCustomScan     = gpuscan_exec;
+	gpuscan_exec_methods.EndCustomScan      = gpuscan_end;
+	gpuscan_exec_methods.ReScanCustomScan   = gpuscan_rescan;
+	gpuscan_exec_methods.ExplainCustomScan  = gpuscan_explain;
 
 	/* hook registration */
 	set_rel_pathlist_next = set_rel_pathlist_hook;

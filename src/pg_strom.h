@@ -80,9 +80,6 @@
  */
 
 
-
-
-
 /*
  * --------------------------------------------------------------------
  *
@@ -381,20 +378,6 @@ typedef struct pgstrom_data_store
 	kern_data_store *kds;
 	struct pgstrom_data_store *ptoast;
 } pgstrom_data_store;
-
-/* --------------------------------------------------------------------
- *
- * Private enhancement of CustomScan Interface
- *
- * --------------------------------------------------------------------
- */
-typedef void *(*pgstromExecBulkScan_type)(CustomScanState *node);
-
-typedef struct
-{
-	CustomExecMethods	c;
-	pgstromExecBulkScan_type ExecCustomBulk;
-} PGStromExecMethods;
 
 /*
  * --------------------------------------------------------------------
