@@ -4521,7 +4521,7 @@ gpujoin_task_complete(GpuTask *gtask)
 		nrooms_old = kds_dst->nrooms;
 		max_space_old = pgjoin->kern.kresults_max_space;
 		progress = 100.0 * ((double) gjs->source_nitems /
-							(double) outerPlanState(gjs)->plan->plan_rows);
+							(double) gjs->outer_nrows);
 #endif
 		/*
 		 * StromError_DataStoreNoSpace indicates either/both of buffers
