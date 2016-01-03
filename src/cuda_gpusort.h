@@ -1,11 +1,10 @@
 /*
- * opencl_gpupreagg.h
+ * cuda_gpusort.h
  *
- * Preprocess of aggregate using GPU acceleration, to reduce number of
- * rows to be processed by CPU; including the Sort reduction.
+ * GPU implementation of GPU bitonic sorting
  * --
- * Copyright 2011-2014 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014 (C) The PG-Strom Development Team
+ * Copyright 2011-2016 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2016 (C) The PG-Strom Development Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as

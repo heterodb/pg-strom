@@ -3,8 +3,8 @@
  *
  * Collection of math functions for OpenCL devices
  * --
- * Copyright 2011-2014 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014 (C) The PG-Strom Development Team
+ * Copyright 2011-2016 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2016 (C) The PG-Strom Development Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
