@@ -2825,7 +2825,6 @@ gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	char		   *temp;
 	char			qlabel[128];
 	int				depth;
-	bool			meet_resjunk = false;
 	StringInfoData	str;
 
 	initStringInfo(&str);
@@ -2840,28 +2839,25 @@ gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	{
 		TargetEntry	   *tle = lfirst(lc1);
 
-		if (meet_resjunk || (!es->verbose && tle->resjunk))
-		{
-			Assert(tle->resjunk);
-			meet_resjunk = true;
+#if 1
+		/* disable this code block, if junk TLE is noisy */
+		if (tle->resjunk)
 			continue;
-		}
-		temp = deparse_expression((Node *)tle->expr,
-								  context, true, false);
+#endif
 		if (lc1 != list_head(cscan->custom_scan_tlist))
 			appendStringInfo(&str, ", ");
-
-		if (!tle->resjunk)
-			appendStringInfo(&str, "%s", temp);
-		else
-			appendStringInfo(&str, "[%s]", temp);
-
+		if (tle->resjunk)
+			appendStringInfoChar(&str, '[');
+		temp = deparse_expression((Node *)tle->expr, context, true, false);
+		appendStringInfo(&str, "%s", temp);
 		if (es->verbose)
 		{
 			temp = format_type_with_typemod(exprType((Node *)tle->expr),
 											exprTypmod((Node *)tle->expr));
 			appendStringInfo(&str, "::%s", temp);
 		}
+		if (tle->resjunk)
+			appendStringInfoChar(&str, ']');
 	}
 	ExplainPropertyText("GPU Projection", str.data, es);
 
