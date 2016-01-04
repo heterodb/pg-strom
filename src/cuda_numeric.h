@@ -528,9 +528,12 @@ pg_numeric_param(kern_context *kcxt,
 STROMCL_SIMPLE_NULLTEST_TEMPLATE(numeric)
 /* CRC32 calculation function */
 STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(numeric,cl_long)
-/*
- * A function to store NUMERIC internal onto the Datum value
- */
+/* NUMERIC internal to Datum */
+STATIC_INLINE(Datum)
+pg_numeric_to_datum(cl_ulong value)
+{
+	return (Datum) value;
+}
 
 /* to avoid conflicts with auto-generated data type */
 #define PG_NUMERIC_TYPE_DEFINED
