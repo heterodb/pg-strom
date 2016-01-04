@@ -1388,7 +1388,7 @@ build_device_projection(Index scanrelid,
 			while ((prev = bms_next_member(varattnos, prev)) >= 0)
 			{
 				Form_pg_attribute	attr;
-				int		anum = prev - FirstLowInvalidHeapAttributeNumber;
+				int		anum = prev + FirstLowInvalidHeapAttributeNumber;
 
 				/* GPU projection cannot contain whole-row reference */
 				if (anum == InvalidAttrNumber)
