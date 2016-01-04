@@ -2289,7 +2289,6 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 								 : "gpuscan_projection_slot");
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
-		Assert(false);
 	}
 
 	/*
