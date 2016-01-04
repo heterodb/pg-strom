@@ -2259,7 +2259,6 @@ static bool
 __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 {
 	GpuScanState	   *gss = (GpuScanState *) gpuscan->task.gts;
-	kern_resultbuf	   *kresults = KERN_GPUSCAN_RESULTBUF(&gpuscan->kern);
 	pgstrom_data_store *pds_src = gpuscan->pds_src;
 	pgstrom_data_store *pds_dst = gpuscan->pds_dst;
 	cl_uint				src_nitems = pds_src->kds->nitems;
@@ -2405,7 +2404,7 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 	else
 	{
 		/* no device qualifiers, thus, all rows are visible to projection */
-		Assert(kresults->all_visible);
+		Assert(KERN_GPUSCAN_RESULTBUF(&gpuscan->kern)->all_visible);
 	}
 
 	if (pds_dst != NULL)

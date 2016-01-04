@@ -682,7 +682,10 @@ __build_cuda_program(program_cache_entry *old_entry)
 	 * Read PTX Binary
 	 */
 	if (build_failure)
+	{
 		bin_image = NULL;
+		bin_length = 0;
+	}
 	else
 	{
 		char	   *ptx_image;
