@@ -647,11 +647,6 @@ extern void
 pgstrom_explain_gputaskstate(GpuTaskState *gts, ExplainState *es);
 
 /*
- * grafter.c
- */
-extern void pgstrom_init_grafter(void);
-
-/*
  * opencl_*.h
  */
 extern const char *pgstrom_cuda_common_code;
@@ -665,11 +660,6 @@ extern const char *pgstrom_cuda_timelib_code;
 extern const char *pgstrom_cuda_numeric_code;
 extern const char *pgstrom_cuda_money_code;
 extern const char *pgstrom_cuda_terminal_code;
-
-/*
- * createplan.c
- */
-extern Plan *create_plan_recurse(PlannerInfo *root, Path *best_path);
 
 /* ----------------------------------------------------------------
  *
