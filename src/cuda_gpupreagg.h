@@ -1429,15 +1429,12 @@ gpupreagg_fixup_varlena(kern_gpupreagg *kgpreagg, kern_data_store *kds_final)
 			if (ts_isnull[colidx])
 				continue;
 			/* fixup pointer variables */
-			offset = ((size_t)ts_values[colidx] -
-					  (size_t)&kds_final->hostptr);
-			if (offset < kds_final->length)
-				ts_values[colidx] = kds_final->hostptr + offset;
-			else
-			{
-				STROM_SET_ERROR(&kcxt.e, StromError_DataStoreOutOfRange);
-				break;
-			}
+			assert(ts_values[colidx] >= ((size_t)kds_final +
+										 kds_final->length -
+										 kds_final->usage) &&
+				   ts_values[colidx] <  ((size_t)kds_final +
+										 kds_final->length));
+			ts_values[colidx] = devptr_to_host(kds_final, ts_values[colidx]);
 		}
 	}
 	/* write-back execution status into host-side */

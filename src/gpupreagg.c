@@ -2957,8 +2957,14 @@ gpupreagg_codegen_projection(CustomScan *cscan,
 	{
 		TargetEntry *tle = lfirst(lc);
 
+		/* Also track usage of this field */
 		if (varremaps[tle->resno - 1] != 0)
+		{
+			gpagg_atts[tle->resno - 1] = GPUPREAGG_FIELD_IS_GROUPKEY;
 			continue;
+		}
+		gpagg_atts[tle->resno - 1] = GPUPREAGG_FIELD_IS_AGGFUNC;
+
 		appendStringInfoChar(&body, '\n');
 		/* we should have KVAR_xx */
 		if (IsA(tle->expr, Var))
@@ -2988,8 +2994,6 @@ gpupreagg_codegen_projection(CustomScan *cscan,
 				tle->resno - 1,
 				dtype->type_name,
 				tle->resno);
-			/* track usage of this field */
-			gpagg_atts[tle->resno - 1] = GPUPREAGG_FIELD_IS_GROUPKEY;
 		}
 		else if (IsA(tle->expr, FuncExpr))
 		{
@@ -3022,8 +3026,6 @@ gpupreagg_codegen_projection(CustomScan *cscan,
 			else
 				elog(ERROR, "Bug? unexpected partial aggregate function: %s",
 					 func_name);
-			/* track usage of this field */
-			gpagg_atts[tle->resno - 1] = GPUPREAGG_FIELD_IS_AGGFUNC;
 		}
 		else
 			elog(ERROR, "bug? unexpected node in tlist_gpa: %s",
