@@ -2759,10 +2759,13 @@ gpujoin_rescan(CustomScanState *node)
 	/*
 	 * Rewind the outer relation
 	 */
+	if (gjs->gts.css.ss.ss_currentRelation)
+		pgstrom_rewind_scan_chunk(&gjs->gts);
+	else
+		ExecReScan(outerPlanState(gjs));
 	gjs->gts.scan_done = false;
 	gjs->gts.scan_overflow = NULL;
-	gjs->outer_scan_done = true;
-	ExecReScan(outerPlanState(gjs));
+	gjs->outer_scan_done = false;
 
 	/*
 	 * Detach previous inner relations buffer

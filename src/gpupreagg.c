@@ -4341,8 +4341,11 @@ gpupreagg_rescan(CustomScanState *node)
 	/* Cleanup and relase any concurrent tasks */
 	pgstrom_cleanup_gputaskstate(&gpas->gts);
 	/* Rewind the subtree */
+	if (gpas->gts.css.ss.ss_currentRelation)
+		pgstrom_rewind_scan_chunk(&gpas->gts);
+	else
+		ExecReScan(outerPlanState(node));
 	gpas->gts.scan_done = false;
-	ExecReScan(outerPlanState(node));
 }
 
 static void
