@@ -67,8 +67,7 @@ static struct {
 	/* variable length datatypes */
 	{ BPCHAROID,	"varlena",	DEVFUNC_NEEDS_TEXTLIB },
 	{ VARCHAROID,	"varlena",	DEVFUNC_NEEDS_TEXTLIB },
-	{ NUMERICOID,	"varlena",
-	  DEVFUNC_NEEDS_NUMERIC | DEVTYPE_HAS_INTERNAL_FORMAT },
+	{ NUMERICOID,	"varlena",	DEVFUNC_NEEDS_NUMERIC },
 	{ BYTEAOID,		"varlena",	0 },
 	{ TEXTOID,		"varlena",	DEVFUNC_NEEDS_TEXTLIB },
 };
@@ -107,8 +106,6 @@ pgstrom_devtype_lookup(Oid type_oid)
 
 	entry = palloc0(sizeof(devtype_info));
 	entry->type_oid = type_oid;
-	if (typeform->typlen < 0)
-		entry->type_flags |= DEVTYPE_IS_VARLENA;
 
 	for (i=0; i < lengthof(devtype_catalog); i++)
 	{

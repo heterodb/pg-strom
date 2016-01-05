@@ -823,7 +823,7 @@ pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan)
 			return;
 
 		/* Does key contain varlena data type? */
-		if ((dtype->type_flags & DEVTYPE_IS_VARLENA) != 0)
+		if (dtype->type_length < 0)
 			varlena_keys = true;
 	}
 
