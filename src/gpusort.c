@@ -946,7 +946,7 @@ gpusort_begin(CustomScanState *node, EState *estate, int eflags)
 	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
 		gcontext = pgstrom_get_gpucontext();
 	/* common GpuTaskState setup */
-	pgstrom_init_gputaskstate(gcontext, &gss->gts);
+	pgstrom_init_gputaskstate(gcontext, &gss->gts, estate);
 	gss->gts.cb_task_process = gpusort_task_process;
 	gss->gts.cb_task_complete = gpusort_task_complete;
 	gss->gts.cb_task_release = gpusort_task_release;

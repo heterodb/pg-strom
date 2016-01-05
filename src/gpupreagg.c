@@ -3475,7 +3475,7 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
 		gcontext = pgstrom_get_gpucontext();
 	/* common GpuTaskState setup */
-	pgstrom_init_gputaskstate(gcontext, &gpas->gts);
+	pgstrom_init_gputaskstate(gcontext, &gpas->gts, estate);
 	gpas->gts.cb_task_process = gpupreagg_task_process;
 	gpas->gts.cb_task_complete = gpupreagg_task_complete;
 	gpas->gts.cb_task_release = gpupreagg_task_release;

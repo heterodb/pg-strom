@@ -17,6 +17,7 @@
  */
 #include "postgres.h"
 #include "catalog/pg_type.h"
+#include "executor/instrument.h"
 #include "funcapi.h"
 #include "lib/ilist.h"
 #include "port/atomics.h"
@@ -1168,15 +1169,26 @@ pgstrom_release_gputaskstate(GpuTaskState *gts)
 }
 
 void
-pgstrom_init_gputaskstate(GpuContext *gcontext, GpuTaskState *gts)
+pgstrom_init_gputaskstate(GpuContext *gcontext,
+						  GpuTaskState *gts,
+						  EState *estate)
 {
 	gts->gcontext = gcontext;
 	gts->kern_source = NULL;	/* to be set later */
 	gts->extra_flags = 0;		/* to be set later */
 	gts->cuda_modules = NULL;
 	gts->scan_done = false;
-	gts->outer_bulk_exec = false;
 	gts->be_row_format = false;
+	gts->outer_bulk_exec = false;
+#if PG_VERSION_NUM >= 90600
+	InstrInit(&gts->outer_instrument, estate->es_instrument);
+#else
+	memset(&gts->outer_instrument, 0, sizeof(Instrumentation));
+	if ((estate->es_instrument & INSTRUMENT_BUFFERS) != 0)
+		gts->outer_instrument.need_bufusage = true;
+	if ((estate->es_instrument & INSTRUMENT_TIMER) != 0)
+		gts->outer_instrument.need_timer = true;
+#endif
 	gts->curr_blknum = 0;
 	if (gts->css.ss.ss_currentRelation)
 	{

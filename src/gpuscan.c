@@ -1686,7 +1686,7 @@ gpuscan_begin(CustomScanState *node, EState *estate, int eflags)
 	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
 		gcontext = pgstrom_get_gpucontext();
 	/* setup common GpuTaskState fields */
-	pgstrom_init_gputaskstate(gcontext, &gss->gts);
+	pgstrom_init_gputaskstate(gcontext, &gss->gts, estate);
 	gss->gts.cb_task_process = pgstrom_process_gpuscan;
 	gss->gts.cb_task_complete = pgstrom_complete_gpuscan;
 	gss->gts.cb_task_release = pgstrom_release_gpuscan;
@@ -1856,6 +1856,7 @@ pgstrom_exec_scan_chunk(GpuTaskState *gts, Size chunk_length)
 	if (gts->curr_blknum >= gts->last_blknum)
 		return NULL;
 
+	InstrStartNode(&gts->outer_instrument);
 	PERFMON_BEGIN(&gts->pfm_accum, &tv1);
 	pds = pgstrom_create_data_store_row(gts->gcontext,
 										tupdesc,
@@ -1884,7 +1885,8 @@ pgstrom_exec_scan_chunk(GpuTaskState *gts, Size chunk_length)
 		pds = NULL;
 	}
 	PERFMON_END(&gts->pfm_accum, time_outer_load, &tv1, &tv2);
-
+	InstrStopNode(&gts->outer_instrument,
+				  !pds ? 0.0 : (double)pds->kds->nitems);
 	return pds;
 }
 
@@ -1894,6 +1896,7 @@ pgstrom_exec_scan_chunk(GpuTaskState *gts, Size chunk_length)
 void
 pgstrom_rewind_scan_chunk(GpuTaskState *gts)
 {
+	InstrEndLoop(&gts->outer_instrument);
 	Assert(gts->css.ss.ss_currentRelation != NULL);
 	gts->curr_blknum = 0;
 }

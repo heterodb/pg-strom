@@ -2538,7 +2538,7 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 	ExecAssignScanProjectionInfoWithVarno(&gjs->gts.css.ss, INDEX_VAR);
 
 	/* Setup common GpuTaskState fields */
-	pgstrom_init_gputaskstate(gcontext, &gjs->gts);
+	pgstrom_init_gputaskstate(gcontext, &gjs->gts, estate);
 	gjs->gts.cb_task_process = gpujoin_task_process;
 	gjs->gts.cb_task_complete = gpujoin_task_complete;
 	gjs->gts.cb_task_release = gpujoin_task_release;
@@ -2865,6 +2865,9 @@ gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 			appendStringInfoChar(&str, ']');
 	}
 	ExplainPropertyText("GPU Projection", str.data, es);
+
+	/* statistics for outer scan, if it was pulled-up */
+	pgstrom_explain_outer_bulkexec(&gjs->gts, context, ancestors, es);
 
 	/* outer qualifier if any */
 	if (gj_info->outer_quals)

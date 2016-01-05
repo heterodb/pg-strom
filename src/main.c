@@ -23,11 +23,13 @@
 #include "optimizer/cost.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/planner.h"
+#include "parser/parsetree.h"
 #include "storage/ipc.h"
 #include "storage/pg_shmem.h"
 #include "storage/shmem.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
+#include "utils/lsyscache.h"
 #include "utils/ruleutils.h"
 #include <float.h>
 #include <limits.h>
@@ -430,6 +432,235 @@ pgstrom_explain_expression(List *expr_list, const char *qlabel,
 								 false);
 	/* And add to es->str */
 	ExplainPropertyText(qlabel, exprstr, es);
+}
+
+void
+pgstrom_explain_outer_bulkexec(GpuTaskState *gts,
+							   List *deparse_context,
+							   List *ancestors,
+							   ExplainState *es)
+{
+	Plan		   *plannode = gts->css.ss.ps.plan;
+	Index			scanrelid = ((Scan *) plannode)->scanrelid;
+	StringInfoData	str;
+
+	/* Does this GpuTaskState has outer simple scan? */
+	if (scanrelid == 0)
+		return;
+
+	/* Is it EXPLAIN ANALYZE? */
+	if (!es->analyze)
+		return;
+
+	/*
+	 * We have to forcibly clean up the instrumentation state because we
+	 * haven't done ExecutorEnd yet.  This is pretty grotty ...
+	 * See the comment in ExplainNode()
+	 */
+	InstrEndLoop(&gts->outer_instrument);
+
+	/*
+	 * See the logic in ExplainTargetRel()
+	 */
+	initStringInfo(&str);
+	if (es->format == EXPLAIN_FORMAT_TEXT)
+	{
+		RangeTblEntry  *rte = rt_fetch(scanrelid, es->rtable);
+		char		   *refname;
+		char		   *relname;
+
+		refname = (char *) list_nth(es->rtable_names, scanrelid - 1);
+		if (refname == NULL)
+			refname = rte->eref->aliasname;
+		relname = get_rel_name(rte->relid);
+		if (es->verbose)
+		{
+			char	   *nspname
+				= get_namespace_name(get_rel_namespace(rte->relid));
+
+			appendStringInfo(&str, "%s.%s",
+							 quote_identifier(nspname),
+							 quote_identifier(relname));
+		}
+		else if (relname != NULL)
+			appendStringInfo(&str, "%s", quote_identifier(relname));
+		if (strcmp(relname, refname) != 0)
+			appendStringInfo(&str, " %s", quote_identifier(refname));
+	}
+
+	if (gts->outer_instrument.nloops > 0)
+	{
+		Instrumentation *instrument = &gts->outer_instrument;
+		double		nloops = instrument->nloops;
+		double		startup_sec = 1000.0 * instrument->startup / nloops;
+		double		total_sec = 1000.0 * instrument->total / nloops;
+		double		rows = instrument->ntuples / nloops;
+
+		if (es->format == EXPLAIN_FORMAT_TEXT)
+		{
+			if (es->timing)
+				appendStringInfo(
+					&str,
+					" (actual time=%.3f..%.3f rows=%.0f loops=%.0f)",
+					startup_sec, total_sec, rows, nloops);
+		else
+			appendStringInfo(
+				&str,
+				" (actual rows=%.0f loops=%.0f)",
+				rows, nloops);
+		}
+		else
+		{
+			if (es->timing)
+			{
+				ExplainPropertyFloat("Outer Actual Startup Time",
+									 startup_sec, 3, es);
+				ExplainPropertyFloat("Outer Actual Total Time",
+									 total_sec, 3, es);
+			}
+			ExplainPropertyFloat("Outer Actual Rows", rows, 0, es);
+			ExplainPropertyFloat("Outer Actual Loops", nloops, 0, es);
+		}
+	}
+	else
+	{
+		if (es->format == EXPLAIN_FORMAT_TEXT)
+			appendStringInfoString(&str, " (never executed)");
+		else
+		{
+			if (es->timing)
+			{
+				ExplainPropertyFloat("Outer Actual Startup Time", 0.0, 3, es);
+				ExplainPropertyFloat("Outer Actual Total Time", 0.0, 3, es);
+			}
+			ExplainPropertyFloat("Outer Actual Rows", 0.0, 0, es);
+			ExplainPropertyFloat("Outer Actual Loops", 0.0, 0, es);
+		}
+	}
+
+	/*
+	 * Logic copied from show_buffer_usage()
+	 */
+	if (es->buffers)
+	{
+		BufferUsage *usage = &gts->outer_instrument.bufusage;
+
+		if (es->format == EXPLAIN_FORMAT_TEXT)
+		{
+			bool	has_shared = (usage->shared_blks_hit > 0 ||
+								  usage->shared_blks_read > 0 ||
+								  usage->shared_blks_dirtied > 0 ||
+								  usage->shared_blks_written > 0);
+			bool	has_local = (usage->local_blks_hit > 0 ||
+								 usage->local_blks_read > 0 ||
+								 usage->local_blks_dirtied > 0 ||
+							   	 usage->local_blks_written > 0);
+			bool	has_temp = (usage->temp_blks_read > 0 ||
+								usage->temp_blks_written > 0);
+			bool	has_timing = (!INSTR_TIME_IS_ZERO(usage->blk_read_time) ||
+								  !INSTR_TIME_IS_ZERO(usage->blk_write_time));
+
+			/* Show only positive counter values. */
+			if (has_shared || has_local || has_temp)
+			{
+				appendStringInfoChar(&str, '\n');
+				appendStringInfoSpaces(&str, es->indent * 2 + 12);
+				appendStringInfoString(&str, "buffers:");
+
+				if (has_shared)
+				{
+					appendStringInfoString(&str, " shared");
+					if (usage->shared_blks_hit > 0)
+						appendStringInfo(&str, " hit=%ld",
+										 usage->shared_blks_hit);
+					if (usage->shared_blks_read > 0)
+						appendStringInfo(&str, " read=%ld",
+										 usage->shared_blks_read);
+					if (usage->shared_blks_dirtied > 0)
+						appendStringInfo(&str, " dirtied=%ld",
+										 usage->shared_blks_dirtied);
+					if (usage->shared_blks_written > 0)
+						appendStringInfo(&str, " written=%ld",
+										 usage->shared_blks_written);
+					if (has_local || has_temp)
+						appendStringInfoChar(&str, ',');
+				}
+				if (has_local)
+				{
+					appendStringInfoString(&str, " local");
+					if (usage->local_blks_hit > 0)
+						appendStringInfo(&str, " hit=%ld",
+										 usage->local_blks_hit);
+					if (usage->local_blks_read > 0)
+						appendStringInfo(&str, " read=%ld",
+										 usage->local_blks_read);
+					if (usage->local_blks_dirtied > 0)
+						appendStringInfo(&str, " dirtied=%ld",
+										 usage->local_blks_dirtied);
+					if (usage->local_blks_written > 0)
+						appendStringInfo(&str, " written=%ld",
+										 usage->local_blks_written);
+					if (has_temp)
+						appendStringInfoChar(&str, ',');
+				}
+				if (has_temp)
+				{
+					appendStringInfoString(&str, " temp");
+					if (usage->temp_blks_read > 0)
+						appendStringInfo(&str, " read=%ld",
+										 usage->temp_blks_read);
+					if (usage->temp_blks_written > 0)
+						appendStringInfo(&str, " written=%ld",
+										 usage->temp_blks_written);
+				}
+			}
+
+			/* As above, show only positive counter values. */
+			if (has_timing)
+			{
+				if (has_shared || has_local || has_temp)
+					appendStringInfo(&str, ", ");
+				appendStringInfoString(&str, "I/O Timings:");
+				if (!INSTR_TIME_IS_ZERO(usage->blk_read_time))
+					appendStringInfo(&str, " read=%0.3f",
+							INSTR_TIME_GET_MILLISEC(usage->blk_read_time));
+				if (!INSTR_TIME_IS_ZERO(usage->blk_write_time))
+					appendStringInfo(&str, " write=%0.3f",
+							INSTR_TIME_GET_MILLISEC(usage->blk_write_time));
+			}
+		}
+		else
+		{
+			double		time_value;
+			ExplainPropertyLong("Outer Shared Hit Blocks",
+								usage->shared_blks_hit, es);
+			ExplainPropertyLong("Outer Shared Read Blocks",
+								usage->shared_blks_read, es);
+			ExplainPropertyLong("Outer Shared Dirtied Blocks",
+								usage->shared_blks_dirtied, es);
+			ExplainPropertyLong("Outer Shared Written Blocks",
+								usage->shared_blks_written, es);
+			ExplainPropertyLong("Outer Local Hit Blocks",
+								usage->local_blks_hit, es);
+			ExplainPropertyLong("Outer Local Read Blocks",
+								usage->local_blks_read, es);
+			ExplainPropertyLong("Outer Local Dirtied Blocks",
+								usage->local_blks_dirtied, es);
+			ExplainPropertyLong("Outer Local Written Blocks",
+								usage->local_blks_written, es);
+			ExplainPropertyLong("Outer Temp Read Blocks",
+								usage->temp_blks_read, es);
+			ExplainPropertyLong("Outer Temp Written Blocks",
+								usage->temp_blks_written, es);
+			time_value = INSTR_TIME_GET_MILLISEC(usage->blk_read_time);
+			ExplainPropertyFloat("Outer I/O Read Time", time_value, 3, es);
+			time_value = INSTR_TIME_GET_MILLISEC(usage->blk_write_time);
+			ExplainPropertyFloat("Outer I/O Write Time", time_value, 3, es);
+		}
+	}
+
+	if (es->format == EXPLAIN_FORMAT_TEXT)
+		ExplainPropertyText("Outer Scan", str.data, es);
 }
 
 void

@@ -265,8 +265,9 @@ struct GpuTaskState
 	const char	   *source_pathname;
 	CUmodule	   *cuda_modules;	/* CUmodules for each CUDA context */
 	bool			scan_done;		/* no rows to read, if true */
-	bool			outer_bulk_exec;/* true, if it bulk-exec on outer-node */
 	bool			be_row_format;	/* true, if KDS_FORMAT_ROW is required */
+	bool			outer_bulk_exec;/* true, if it bulk-exec on outer-node */
+	Instrumentation	outer_instrument; /* run time statistics */
 	BlockNumber		curr_blknum;	/* current block number to scan table */
 	BlockNumber		last_blknum;	/* last block number to scan table */
 	TupleTableSlot *scan_overflow;	/* temp buffer, if unable to load */
@@ -415,7 +416,9 @@ extern void pgstrom_put_gpucontext(GpuContext *gcontext);
 
 extern void pgstrom_cleanup_gputaskstate(GpuTaskState *gts);
 extern void pgstrom_release_gputaskstate(GpuTaskState *gts);
-extern void pgstrom_init_gputaskstate(GpuContext *gcontext, GpuTaskState *gts);
+extern void pgstrom_init_gputaskstate(GpuContext *gcontext,
+									  GpuTaskState *gts,
+									  EState *estate);
 extern void pgstrom_init_gputask(GpuTaskState *gts, GpuTask *gtask);
 extern void pgstrom_release_gputask(GpuTask *gtask);
 extern GpuTask *pgstrom_fetch_gputask(GpuTaskState *gts);
@@ -635,7 +638,10 @@ extern void pgstrom_explain_expression(List *expr_list, const char *qlabel,
 									   List *ancestors, ExplainState *es,
 									   bool force_prefix,
 									   bool convert_to_and);
-
+extern void pgstrom_explain_outer_bulkexec(GpuTaskState *gts,
+										   List *deparse_context,
+										   List *ancestors,
+										   ExplainState *es);
 extern void show_scan_qual(List *qual, const char *qlabel,
 						   PlanState *planstate, List *ancestors,
 						   ExplainState *es);
