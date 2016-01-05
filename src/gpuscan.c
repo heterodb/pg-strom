@@ -519,6 +519,7 @@ gpuscan_try_replace_seqscan(Relation baserel, SeqScan *seqscan)
 	cscan->scan.plan.plan_rows = seqscan->plan.plan_rows;
 	cscan->scan.plan.targetlist = copyObject(seqscan->plan.targetlist);
 	cscan->scan.plan.qual = NIL;
+	cscan->scan.plan.initPlan = seqscan->plan.initPlan;
 	cscan->scan.plan.extParam = bms_copy(seqscan->plan.extParam);
 	cscan->scan.plan.allParam = bms_copy(seqscan->plan.allParam);
 	cscan->scan.scanrelid = seqscan->scanrelid;
