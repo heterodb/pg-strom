@@ -1770,9 +1770,9 @@ codegen_device_projection(CustomScan *cscan, GpuJoinInfo *gj_info,
 		"                   cl_char *extra_buf,\n"
 		"                   cl_uint *extra_len)\n"
 		"{\n"
-		"  HeapTupleHeaderData *htup;\n"
-		"  kern_data_store *kds_in;\n"
-		"  char *addr;\n"
+		"  HeapTupleHeaderData *htup    __attribute__((unused));\n"
+		"  kern_data_store *kds_in      __attribute__((unused));\n"
+		"  char *addr                   __attribute__((unused));\n"
 		"  char *extra_pos = extra_buf;\n"
 		"  union {\n"
 		"    pg_bool_t        bool_v;\n"
@@ -1793,7 +1793,7 @@ codegen_device_projection(CustomScan *cscan, GpuJoinInfo *gj_info,
 		"    pg_timestamp_t   timestamp_v;\n"
 		"    pg_timestamptz_t timestamptz_v;\n"
 		"#endif\n"
-		"  } temp;\n");
+		"  } temp;                      __attribute__((unused));\n");
 
 	for (depth=0; depth <= gj_info->num_rels; depth++)
 	{

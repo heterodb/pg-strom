@@ -976,12 +976,20 @@ gpujoin_projection_row(kern_gpujoin *kgjoin,
 		 res_index < res_limit;
 		 res_index += get_global_size())
 	{
+#if GPUJOIN_DEVICE_PROJECTION_NFIELDS > 0
 		Datum		tup_values[GPUJOIN_DEVICE_PROJECTION_NFIELDS];
 		cl_bool		tup_isnull[GPUJOIN_DEVICE_PROJECTION_NFIELDS];
 		cl_short	tup_depth[GPUJOIN_DEVICE_PROJECTION_NFIELDS];
+#else
+		Datum	   *tup_values = NULL;
+		cl_bool	   *tup_isnull = NULL;
+		cl_short   *tup_depth = NULL;
+#endif
 #if GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE > 0
 		cl_char		extra_buf[GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE]
 					__attribute__ ((aligned(MAXIMUM_ALIGNOF)));
+#else
+		cl_char	   *extra_buf = NULL;
 #endif
 		cl_uint		extra_len;
 		cl_uint		required;
@@ -1014,11 +1022,7 @@ gpujoin_projection_row(kern_gpujoin *kgjoin,
 							   tup_values,
 							   tup_isnull,
 							   tup_depth,
-#if GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE > 0
 							   extra_buf,
-#else
-							   NULL,
-#endif
 							   &extra_len);
 			assert(extra_len <= GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE);
 			required = MAXALIGN(offsetof(kern_tupitem, htup) +
@@ -1084,10 +1088,16 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 	cl_uint		   *r_buffer;
 	Datum		   *tup_values;
 	cl_bool		   *tup_isnull;
+#if GPUJOIN_DEVICE_PROJECTION_NFIELDS > 0
 	cl_short		tup_depth[GPUJOIN_DEVICE_PROJECTION_NFIELDS];
+#else
+	cl_short	   *tup_depth = NULL;
+#endif
 #if GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE > 0
 	cl_char			extra_buf[GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE]
 					__attribute__ ((aligned(MAXIMUM_ALIGNOF)));
+#else
+	cl_char		   *extra_buf = NULL;
 #endif
 	cl_uint			extra_len;
 	cl_uint			offset	__attribute__ ((unused));
@@ -1156,11 +1166,7 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 							   tup_values,
 							   tup_isnull,
 							   tup_depth,
-#if GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE > 0
 							   extra_buf,
-#else
-							   NULL,
-#endif
 							   &extra_len);
 		}
 		else

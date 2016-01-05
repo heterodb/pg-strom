@@ -2641,10 +2641,10 @@ gpupreagg_codegen_projection(CustomScan *cscan,
 		"    pg_timestamp_t   timestamp_v;\n"
 		"    pg_timestamptz_t timestamptz_v;\n"
 		"#endif\n"
-		"  } temp;\n"
+		"  } temp                          __attribute__ ((unused));\n"
 		"  pg_float8_t        temp_float8x __attribute__ ((unused));\n"
 		"  pg_float8_t        temp_float8y __attribute__ ((unused));\n"
-		"  char              *addr;\n");
+		"  char              *addr         __attribute__ ((unused));\n");
 
 	/*
 	 * Step.1 - List up variables of outer-scan/relation to be referenced
