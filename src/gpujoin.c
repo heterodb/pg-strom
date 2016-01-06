@@ -74,9 +74,9 @@ typedef struct
 		List	   *hash_quals;		/* valid quals, if hash-join */
 		List	   *join_quals;		/* all the device quals, incl hash_quals */
 		Size		ichunk_size;	/* expected inner chunk size */
-		int			nloops_minor;	/* # of virtual segment of inner buffer */
-		int			nloops_major;	/* # of physical split of inner buffer */
-		int			hash_nslots;	/* expected hashjoin slots width, if any */
+		double		nloops_minor;	/* # of virtual segment of inner buffer */
+		double		nloops_major;	/* # of physical split of inner buffer */
+		Size		hash_nslots;	/* expected hashjoin slots width, if any */
 	} inners[FLEXIBLE_ARRAY_MEMBER];
 } GpuJoinPath;
 
@@ -464,8 +464,8 @@ estimate_buffersize_gpujoin(PlannerInfo *root,
 {
 	Size		inner_limit_sz;
 	Size		inner_total_sz;
-	Size		prev_nloops_minor;
-	Size		curr_nloops_minor;
+	double		prev_nloops_minor;
+	double		curr_nloops_minor;
 	Size		largest_chunk_size = 0;
 	cl_int		largest_chunk_index = -1;
 	Size		largest_growth_ntuples = 0.0;
@@ -480,8 +480,8 @@ estimate_buffersize_gpujoin(PlannerInfo *root,
 	/* init number of loops */
 	for (i=0; i < num_rels; i++)
 	{
-		gpath->inners[i].nloops_minor = 1;
-		gpath->inners[i].nloops_major = 1;
+		gpath->inners[i].nloops_minor = 1.0;
+		gpath->inners[i].nloops_major = 1.0;
 	}
 
 	/*
@@ -514,7 +514,7 @@ retry_major:
 		/* force a plausible relation size if no information. */
 		inner_ntuples = Max(inner_path->rows *
 							pgstrom_chunk_size_margin /
-							(double)gpath->inners[i].nloops_major,
+							gpath->inners[i].nloops_major,
 							100.0);
 
 		/*
@@ -634,17 +634,20 @@ retry_major:
 					* (Size) join_ntuples);
 	if (buffer_size > pgstrom_chunk_size_limit())
 	{
-		Size	nloops_minor = (buffer_size / pgstrom_chunk_size_limit()) + 1;
+		double	nloops_minor_next;
 
-		if (nloops_minor > INT_MAX)
+		Assert(largest_growth_index >= 0 &&
+			   largest_growth_index < num_rels);
+
+		nloops_minor_next = gpath->inners[largest_growth_index].nloops_minor
+			* (double)((buffer_size / pgstrom_chunk_size_limit()) + 1);
+		if (nloops_minor_next > (double) INT_MAX)
 		{
 			elog(DEBUG1, "Too large KDS-Dest {nrooms=%zu size=%zu}",
 				 (Size) join_ntuples, (Size) buffer_size);
 			return false;
 		}
-		Assert(largest_growth_index >= 0 &&
-			   largest_growth_index < num_rels);
-		gpath->inners[largest_growth_index].nloops_minor *= nloops_minor;
+		gpath->inners[largest_growth_index].nloops_minor *= nloops_minor_next;
 		goto retry_major;
 	}
 
@@ -652,21 +655,28 @@ retry_major:
 	 * NOTE: If total size of inner multi-relations buffer is out of
 	 * range, we have to split inner buffer multiple portions to fit
 	 * GPU RAMs. It is a restriction come from H/W capability.
+	 *
+	 * Also note that the estimated inner_total_sz can be extremely
+	 * large, so it often leads 32bit integer overflow. Please be
+	 * careful.
 	 */
 	inner_limit_sz = gpuMemMaxAllocSize() / 2 - BLCKSZ * num_rels;
 	if (inner_total_sz > inner_limit_sz)
 	{
-		Size	nloops_major = (inner_total_sz / inner_limit_sz) + 1;
+		double	nloops_major_next;
 
-		if (nloops_major > INT_MAX)
+		Assert(largest_chunk_index >= 0 &&
+			   largest_chunk_index < num_rels);
+
+		nloops_major_next = gpath->inners[largest_chunk_index].nloops_major
+			* (double)(inner_total_sz / inner_limit_sz + 1);
+		if (nloops_major_next > (double) INT_MAX)
 		{
 			elog(DEBUG1, "Too large Inner multirel buffer {size=%zu}",
 				 (Size) inner_total_sz);
 			return false;
 		}
-		Assert(largest_chunk_index >= 0 &&
-			   largest_chunk_index < num_rels);
-		gpath->inners[largest_chunk_index].nloops_major *= nloops_major;
+		gpath->inners[largest_chunk_index].nloops_major = nloops_major_next;
 		goto retry_major;
 	}
 	return true;	/* probably, reasonable plan for buffer usage */
@@ -704,8 +714,8 @@ cost_gpujoin(PlannerInfo *root,
 
 	for (i=0; i < num_rels; i++)
 	{
-		total_nloops_major *= (double)gpath->inners[i].nloops_major;
-		total_nloops_minor *= (double)gpath->inners[i].nloops_minor;
+		total_nloops_major *= gpath->inners[i].nloops_major;
+		total_nloops_minor *= gpath->inners[i].nloops_minor;
 	}
 
 	/*
@@ -753,7 +763,7 @@ cost_gpujoin(PlannerInfo *root,
 			 */
 			List	   *hash_quals = gpath->inners[i].hash_quals;
 			cl_uint		num_hashkeys = list_length(hash_quals);
-			cl_uint		hash_nslots = gpath->inners[i].hash_nslots;
+			Size		hash_nslots = gpath->inners[i].hash_nslots;
 			double		hash_nsteps = scan_path->rows / (double) hash_nslots;
 
 			/* cost to compute inner hash value by CPU */
@@ -776,8 +786,8 @@ cost_gpujoin(PlannerInfo *root,
 			 * GpuHashJoin.
 			 */
 			double		inner_ntuples = scan_path->rows
-				/ ((double) gpath->inners[i].nloops_major *
-				   (double) gpath->inners[i].nloops_minor);
+				/ (gpath->inners[i].nloops_major *
+				   gpath->inners[i].nloops_minor);
 
 			/* cost to load inner heap tuples by CPU */
 			startup_cost += cpu_tuple_cost * scan_path->rows;
@@ -790,7 +800,7 @@ cost_gpujoin(PlannerInfo *root,
 		/* number of outer items on the next depth */
 		chunk_ntuples = (gpath->inners[i].join_nrows /
 						 ((double) num_chunks *
-						  (double) gpath->inners[i].nloops_minor));
+						  gpath->inners[i].nloops_minor));
 
 		/* consider inner chunk size to be sent over DMA */
 		inner_total_sz += gpath->inners[i].ichunk_size;
@@ -923,8 +933,8 @@ create_gpujoin_path(PlannerInfo *root,
 		result->inners[i].hash_quals = ip_item->hash_quals;
 		result->inners[i].join_quals = ip_item->join_quals;
 		result->inners[i].ichunk_size = 0;		/* to be set later */
-		result->inners[i].nloops_minor = 1;		/* to be set later */
-		result->inners[i].nloops_major = 1;		/* to be set later */
+		result->inners[i].nloops_minor = 1.0;	/* to be set later */
+		result->inners[i].nloops_major = 1.0;	/* to be set later */
 		result->inners[i].hash_nslots = 0;		/* to be set later */
 		i++;
 	}
@@ -1660,16 +1670,16 @@ create_gpujoin_plan(PlannerInfo *root,
 		clauses = extract_actual_clauses(gpath->inners[i].join_quals, false);
 		gj_info.join_quals = lappend(gj_info.join_quals,
 									 build_flatten_qualifier(clauses));
-		gj_info.nloops_minor = lappend_int(gj_info.nloops_minor,
-										   gpath->inners[i].nloops_minor);
-		gj_info.nloops_major = lappend_int(gj_info.nloops_major,
-										   gpath->inners[i].nloops_major);
+		gj_info.nloops_minor = lappend(gj_info.nloops_minor,
+				makeInteger(double_as_long(gpath->inners[i].nloops_minor)));
+		gj_info.nloops_major = lappend(gj_info.nloops_major,
+				makeInteger(double_as_long(gpath->inners[i].nloops_major)));
 		gj_info.hash_inner_keys = lappend(gj_info.hash_inner_keys,
 										  hash_inner_keys);
 		gj_info.hash_outer_keys = lappend(gj_info.hash_outer_keys,
 										  hash_outer_keys);
-		gj_info.hash_nslots = lappend_int(gj_info.hash_nslots,
-										  gpath->inners[i].hash_nslots);
+		gj_info.hash_nslots = lappend(gj_info.hash_nslots,
+				makeInteger(gpath->inners[i].hash_nslots));
 		outer_nrows = gpath->inners[i].join_nrows;
 	}
 
@@ -2589,7 +2599,8 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 		istate->state = ExecInitNode(inner_plan, estate, eflags);
 		istate->econtext = CreateExprContext(estate);
 		istate->depth = i + 1;
-		istate->nbatches_plan = list_nth_int(gj_info->nloops_major, i);
+		istate->nbatches_plan =
+			long_as_double(intVal(list_nth(gj_info->nloops_major, i)));
 		istate->nbatches_exec =
 			((eflags & EXEC_FLAG_EXPLAIN_ONLY) != 0 ? -1 : 0);
 		istate->nrows_ratio =
@@ -2654,7 +2665,7 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 				   list_length(istate->hash_outer_keys));
 
 			/* hash slot width */
-			istate->hash_nslots = list_nth_int(gj_info->hash_nslots, i);
+			istate->hash_nslots = intVal(list_nth(gj_info->hash_nslots, i));
 
 			/* usage histgram */
 			shift = get_next_log2(gjs->inners[i].nbatches_plan) + 8;
@@ -5636,12 +5647,12 @@ retry:
 		if (istate->join_type == JOIN_INNER ||
 			istate->join_type == JOIN_LEFT)
 		{
-			cl_uint		hash_nslots;
+			Size		hash_nslots;
 
 			pgstrom_shrink_data_store(pds_hash);
 
-			hash_nslots = (cl_uint)((double) pds_hash->kds->nitems *
-									pgstrom_chunk_size_margin);
+			hash_nslots = (Size)((double) pds_hash->kds->nitems *
+								 pgstrom_chunk_size_margin);
 			pds_hash = pgstrom_create_data_store_hash(gjs->gts.gcontext,
 													  scan_desc,
 													  istate->pds_limit,
