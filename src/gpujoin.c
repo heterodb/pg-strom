@@ -4299,6 +4299,7 @@ gpujoin_next_tuple(GpuTaskState *gts)
 		int		index = gjs->gts.curr_index++;
 
 		/* fetch a result tuple */
+		ExecClearTuple(slot);
 		pgstrom_fetch_data_store(slot,
 								 pds_dst,
 								 index,

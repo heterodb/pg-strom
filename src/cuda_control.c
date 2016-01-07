@@ -1698,8 +1698,6 @@ pgstrom_exec_gputask(GpuTaskState *gts)
 {
 	TupleTableSlot *slot = gts->css.ss.ss_ScanTupleSlot;
 
-	ExecClearTuple(slot);
-
 	while (!gts->curr_task || !(slot = gts->cb_next_tuple(gts)))
 	{
 		GpuTask	   *gtask = gts->curr_task;
@@ -1734,8 +1732,8 @@ pgstrom_recheck_gputask(GpuTaskState *gts, TupleTableSlot *slot)
 pgstrom_data_store *
 pgstrom_exec_chunk_gputask(GpuTaskState *gts, size_t chunk_size)
 {
-	TupleTableSlot	   *slot = gts->css.ss.ss_ScanTupleSlot;
 	pgstrom_data_store *pds_dst = NULL;
+	TupleTableSlot	   *slot;
 
 	/* GTS should not have neither host qualifier nor projection */
 	Assert(gts->css.ss.ps.qual == NIL);

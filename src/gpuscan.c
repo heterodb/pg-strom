@@ -1935,6 +1935,7 @@ gpuscan_next_tuple(GpuTaskState *gts)
 			if (gss->gts.curr_index < pds_dst->kds->nitems)
 			{
 				slot = gss->gts.css.ss.ss_ScanTupleSlot;
+				ExecClearTuple(slot);
 				if (!pgstrom_fetch_data_store(slot, pds_dst,
 											  gss->gts.curr_index++,
 											  &gss->scan_tuple))
@@ -1983,6 +1984,7 @@ gpuscan_next_tuple(GpuTaskState *gts)
 			ExprContext	   *econtext = gss->gts.css.ss.ps.ps_ExprContext;
 			ExprDoneCond	is_done;
 
+			ExecClearTuple(gss->base_slot);
 			if (!pgstrom_fetch_data_store(gss->base_slot, pds_src, index,
 										  &gss->scan_tuple))
 				elog(ERROR, "failed to fetch a record from pds");

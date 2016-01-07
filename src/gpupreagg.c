@@ -3716,7 +3716,7 @@ gpupreagg_create_segment(GpuPreAggState *gpas)
 						  gpas->stat_num_chunks, 1.0) /* nrows per chunk */
 		/ (gpas->stat_num_groups * gpas->key_dist_salt);
 	num_chunks = Min(num_chunks, reduction_ratio * gpas->safety_limit);
-	Assert(num_chunks > 0);
+	num_chunks = Max(num_chunks, 1);	/* at least one chunk */
 
 	/*
 	 * Any tasks that share same segment has to be kicked on the same
