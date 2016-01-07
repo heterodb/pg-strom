@@ -507,7 +507,7 @@ extern Size pgstrom_chunk_size(void);
 extern Size pgstrom_chunk_size_limit(void);
 extern bool pgstrom_bulk_exec_supported(const PlanState *planstate);
 extern cl_uint estimate_num_chunks(Path *pathnode);
-extern pgstrom_data_store *ChunkExecProcNode(GpuTaskState *gts,
+extern pgstrom_data_store *BulkExecProcNode(GpuTaskState *gts,
 											 size_t chunk_size);
 extern Datum pgstrom_fixup_kernel_numeric(Datum numeric_datum);
 extern bool pgstrom_fetch_data_store(TupleTableSlot *slot,

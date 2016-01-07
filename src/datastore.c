@@ -187,20 +187,21 @@ pgstrom_open_tempfile(const char **p_tempfilepath)
 }
 
 /*
- * ChunkExecProcNode
+ * BulkExecProcNode
  *
- * It reads a chunk of the underlying sub-plan managed by PG-Strom.
- * Caller can expect the sub-plan fills up a chunk with specified size.
+ * It runs the underlying sub-plan managed by PG-Strom in bulk-execution
+ * mode. Caller can expect the data-store shall be filled up by the rows
+ * read from the sub-plan.
  */
 pgstrom_data_store *
-ChunkExecProcNode(GpuTaskState *gts, size_t chunk_size)
+BulkExecProcNode(GpuTaskState *gts, size_t chunk_size)
 {
 	PlanState		   *plannode = &gts->css.ss.ps;
 	pgstrom_data_store *pds;
 
 	CHECK_FOR_INTERRUPTS();
 
-	if (plannode->chgParam != NULL)	/* If something changed, */
+	if (plannode->chgParam != NULL)			/* If something changed, */
 		ExecReScan(&gts->css.ss.ps);		/* let ReScan handle this */
 
 	Assert(IsA(gts, CustomScanState));		/* rough checks */

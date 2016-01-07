@@ -4124,15 +4124,15 @@ gpupreagg_next_chunk(GpuTaskState *gts)
 	{
 		/* Load a bunch of records at once on the first time */
 		if (!gpas->outer_pds)
-			gpas->outer_pds = ChunkExecProcNode((GpuTaskState *)subnode,
-												pgstrom_chunk_size());
+			gpas->outer_pds = BulkExecProcNode((GpuTaskState *)subnode,
+											   pgstrom_chunk_size());
 		/* Picks up the cached one to detect the final chunk */
 		pds = gpas->outer_pds;
 		if (!pds)
 			gpas->gts.scan_done = true;
 		else
-			gpas->outer_pds = ChunkExecProcNode((GpuTaskState *)subnode,
-												pgstrom_chunk_size());
+			gpas->outer_pds = BulkExecProcNode((GpuTaskState *)subnode,
+											   pgstrom_chunk_size());
 		/* Any more chunk expected? */
 		if (!gpas->outer_pds)
 			is_terminator = true;
