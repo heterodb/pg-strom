@@ -1764,8 +1764,6 @@ codegen_device_projection(CustomScan *cscan, GpuJoinInfo *gj_info,
 			pull_varattnos((Node *) tle->expr, INDEX_VAR, &refs_by_expr);
 	}
 
-
-
 	appendStringInfoString(
 		&decl,
 		"STATIC_FUNCTION(void)\n"
@@ -1785,6 +1783,7 @@ codegen_device_projection(CustomScan *cscan, GpuJoinInfo *gj_info,
 		"  char *addr                   __attribute__((unused));\n"
 		"  char *extra_pos = extra_buf;\n"
 		"  union {\n"
+		"    pg_varlena_t     varlena_v;\n"
 		"    pg_bool_t        bool_v;\n"
 		"    pg_int2_t        int2_v;\n"
 		"    pg_int4_t        int4_v;\n"
@@ -2006,7 +2005,7 @@ codegen_device_projection(CustomScan *cscan, GpuJoinInfo *gj_info,
 				"    tup_values[%d] = PointerGetDatum(extra_pos);\n"
 				"    extra_pos += MAXALIGN(numeric_len);\n"
 				"  }\n"
-				"  tup_depth[%d] = -1;\n",
+				"  tup_depth[%d] = -1;\n",	/* use of local extra_buf */
 				dtype->type_name,
 				pgstrom_codegen_expression((Node *)tle->expr, context),
 				tle->resno - 1,
@@ -2017,10 +2016,29 @@ codegen_device_projection(CustomScan *cscan, GpuJoinInfo *gj_info,
 				tle->resno - 1,
 				tle->resno - 1);
 		}
-		else if (!dtype->type_byval)
+		else if (dtype->type_byval)
 		{
-			/* right now, we have no expression that returns varlena*/
-			Assert(dtype->type_length > 0);
+			/* fixed length built-in data type */
+			appendStringInfo(
+				&body,
+				"  temp.%s_v = %s;\n"
+				"  tup_isnull[%d] = temp.%s_v.isnull;\n"
+				"  if (!temp.%s_v.isnull)\n"
+				"    tup_values[%d] = pg_%s_to_datum(temp.%s_v.value);\n"
+				"  tup_depth[%d] = -255;\n",	/* just a poison */
+				dtype->type_name,
+				pgstrom_codegen_expression((Node *)tle->expr, context),
+				tle->resno - 1,
+				dtype->type_name,
+				dtype->type_name,
+				tle->resno - 1,
+				dtype->type_name,
+				dtype->type_name,
+				tle->resno - 1);
+		}
+		else if (!dtype->type_length > 0)
+		{
+			/* fixed length pointer data type */
 			extra_maxlen += MAXALIGN(dtype->type_length);
 			appendStringInfo(
 				&body,
@@ -2033,7 +2051,7 @@ codegen_device_projection(CustomScan *cscan, GpuJoinInfo *gj_info,
 				"    tup_values[%d] = PointerGetDatum(extra_pos);\n"
 				"    extra_pos += MAXALIGN(sizeof(temp.%s_v.value));\n"
 				"  }\n"
-				"  tup_depth[%d] = -1;\n",
+				"  tup_depth[%d] = -1;\n",	/* use of local extra_buf */
 				dtype->type_name,
 				pgstrom_codegen_expression((Node *)tle->expr, context),
 				tle->resno - 1,
@@ -2047,21 +2065,22 @@ codegen_device_projection(CustomScan *cscan, GpuJoinInfo *gj_info,
 		}
 		else
 		{
+			/*
+			 * variable length pointer data type
+			 *
+			 * NOTE: Right now, we have no device function that can return
+			 * varlena data type, thus, only Const or Param are expected.
+			 */
+			Assert(IsA(tle->expr, Const) || IsA(tle->expr, Param));
 			appendStringInfo(
 				&body,
-				"  temp.%s_v = %s;\n"
-				"  tup_isnull[%d] = temp.%s_v.isnull;\n"
-				"  if (!temp.%s_v.isnull)\n"
-				"    tup_values[%d] = pg_%s_to_datum(temp.%s_v.value);\n"
-				"  tup_depth[%d] = -1;\n",
-				dtype->type_name,
+				"  temp.varlena_v = %s;\n"
+				"  tup_isnull[%d] = temp.varlena_v.isnull;\n"
+				"  tup_values[%d] = PointerGetDatum(temp.varlena_v.value);\n"
+				"  tup_depth[%d] = -2;\n",	/* reference to kparams buffer */
 				pgstrom_codegen_expression((Node *)tle->expr, context),
 				tle->resno - 1,
-				dtype->type_name,
-				dtype->type_name,
 				tle->resno - 1,
-				dtype->type_name,
-				dtype->type_name,
 				tle->resno - 1);
 		}
 	}

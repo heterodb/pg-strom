@@ -547,6 +547,8 @@ KERN_HASH_NEXT_ITEM(kern_data_store *kds, kern_hashitem *khitem)
  */
 typedef struct kern_parambuf
 {
+	hostptr_t	hostptr;	/* address of the parambuf on host-side */
+
 	/*
 	 * Fields of system information on execution
 	 */

@@ -1197,6 +1197,8 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 		}
 		vl_buf = ((char *)kds_dst + kds_dst->length
 				  - (base + offset + extra_len));
+#else
+		assert(extra_len == 0);
 #endif
 		/*
 		 * At this point, tup_values have device pointer or internal
@@ -1225,9 +1227,9 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 							KERN_MULTIRELS_INNER_KDS(kmrels, tup_depth[i]);
 						tup_values[i] = devptr_to_host(kds_in, addr);
 					}
-#if GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE > 0
-					else if (tup_depth[i] < 0)
+					else if (tup_depth[i] == -1)
 					{
+						/* value is stored in the local array */
 						cl_uint		vl_len = (cmeta.attlen > 0 ?
 											  cmeta.attlen :
 											  VARSIZE_ANY(addr));
@@ -1235,7 +1237,13 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 						tup_values[i] = devptr_to_host(kds_dst, vl_buf);
 						vl_buf += MAXALIGN(vl_len);
 					}
-#endif
+					else if (tup_depth[i] == -2)
+					{
+						/* value is simple reference to kparams */
+						assert(addr >= (char *)kparams &&
+							   addr <  (char *)kparams + kparams->length);
+						tup_values[i] = devptr_to_host(kparams, addr);
+					}
 					else
 						STROM_SET_ERROR(&kcxt.e,
 										StromError_WrongCodeGeneration);

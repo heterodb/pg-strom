@@ -1160,6 +1160,7 @@ construct_kern_parambuf(List *used_params, ExprContext *econtext)
 	}
 	Assert(STROMALIGN(str.len) == str.len);
 	kparams = (kern_parambuf *)str.data;
+	kparams->hostptr = (hostptr_t) &kparams->hostptr;
 	kparams->xactStartTimestamp = GetCurrentTransactionStartTimestamp();
 	kparams->length = str.len;
 	kparams->nparams = nparams;

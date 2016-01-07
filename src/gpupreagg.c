@@ -2623,6 +2623,7 @@ gpupreagg_codegen_projection(CustomScan *cscan,
 		"                     cl_char *dst_isnull)\n"
 		"{\n"
 		"  union {\n"
+		"    pg_varlena_t     varlena_t;\n"
 		"    pg_bool_t        bool_v;\n"
 		"    pg_int2_t        int2_v;\n"
 		"    pg_int4_t        int4_v;\n"
