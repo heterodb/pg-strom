@@ -44,32 +44,36 @@ static List	   *devfunc_info_slot[1024];
  * naming convension of types:
  *   pg_<type_name>_t
  */
+#define DEVTYPE_DECL(type_oid, type_base, type_flags)	\
+	{ type_oid, #type_oid, type_base, type_flags }
+
 static struct {
 	Oid				type_oid;
+	const char	   *type_oid_label;
 	const char	   *type_base;
 	int32			type_flags;		/* library to declare this type */
 } devtype_catalog[] = {
 	/* primitive datatypes */
-	{ BOOLOID,		"cl_bool",	0 },	/* bool */
-	{ INT2OID,		"cl_short",	0 },	/* smallint */
-	{ INT4OID,		"cl_int",	0 },	/* int */
-	{ INT8OID,		"cl_long",	0 },	/* bigint */
-	{ FLOAT4OID,	"cl_float",	0 },	/* real */
-	{ FLOAT8OID,	"cl_double",0 },	/* float */
-	{ CASHOID,		"cl_long",	DEVFUNC_NEEDS_MONEY },	/* money */
+	DEVTYPE_DECL(BOOLOID,   "cl_bool",   0),		/* bool */
+	DEVTYPE_DECL(INT2OID,   "cl_short",  0),		/* smallint */
+	DEVTYPE_DECL(INT4OID,   "cl_int",    0),		/* int */
+	DEVTYPE_DECL(INT8OID,   "cl_long",   0),		/* bigint */
+	DEVTYPE_DECL(FLOAT4OID, "cl_float",  0),		/* real */
+	DEVTYPE_DECL(FLOAT8OID, "cl_double", 0),		/* float */
+	DEVTYPE_DECL(CASHOID,   "cl_long",   DEVFUNC_NEEDS_MONEY),	/* money */
 	/* date and time datatypes */
-	{ DATEOID,			"DateADT",		DEVFUNC_NEEDS_TIMELIB },
-	{ TIMEOID,			"TimeADT",		DEVFUNC_NEEDS_TIMELIB },
-	{ TIMETZOID,		"TimeTzADT",	DEVFUNC_NEEDS_TIMELIB },
-	{ TIMESTAMPOID,		"Timestamp",	DEVFUNC_NEEDS_TIMELIB },
-	{ TIMESTAMPTZOID,	"TimestampTz",	DEVFUNC_NEEDS_TIMELIB },
-	{ INTERVALOID,		"Interval",		DEVFUNC_NEEDS_TIMELIB },
+	DEVTYPE_DECL(DATEOID,        "DateADT",     DEVFUNC_NEEDS_TIMELIB),
+	DEVTYPE_DECL(TIMEOID,        "TimeADT",     DEVFUNC_NEEDS_TIMELIB),
+	DEVTYPE_DECL(TIMETZOID,      "TimeTzADT",   DEVFUNC_NEEDS_TIMELIB),
+	DEVTYPE_DECL(TIMESTAMPOID,   "Timestamp",   DEVFUNC_NEEDS_TIMELIB),
+	DEVTYPE_DECL(TIMESTAMPTZOID, "TimestampTz", DEVFUNC_NEEDS_TIMELIB),
+	DEVTYPE_DECL(INTERVALOID,    "Interval",    DEVFUNC_NEEDS_TIMELIB),
 	/* variable length datatypes */
-	{ BPCHAROID,	"varlena",	DEVFUNC_NEEDS_TEXTLIB },
-	{ VARCHAROID,	"varlena",	DEVFUNC_NEEDS_TEXTLIB },
-	{ NUMERICOID,	"varlena",	DEVFUNC_NEEDS_NUMERIC },
-	{ BYTEAOID,		"varlena",	0 },
-	{ TEXTOID,		"varlena",	DEVFUNC_NEEDS_TEXTLIB },
+	DEVTYPE_DECL(BPCHAROID,  "varlena *", DEVFUNC_NEEDS_TEXTLIB),
+	DEVTYPE_DECL(VARCHAROID, "varlena *", DEVFUNC_NEEDS_TEXTLIB),
+	DEVTYPE_DECL(NUMERICOID, "cl_ulong",  DEVFUNC_NEEDS_NUMERIC),
+	DEVTYPE_DECL(BYTEAOID,   "varlena *", 0),
+	DEVTYPE_DECL(TEXTOID,    "varlena *", DEVFUNC_NEEDS_TEXTLIB),
 };
 
 devtype_info *
@@ -170,6 +174,21 @@ pgstrom_devtype_lookup_and_track(Oid type_oid, codegen_context *context)
 	pgstrom_devtype_track(context, dtype);
 
 	return dtype;
+}
+
+/* dump all the type_oid declaration */
+void
+pgstrom_codegen_typeoid_declarations(StringInfo source)
+{
+	int		i;
+
+	for (i=0; i < lengthof(devtype_catalog); i++)
+	{
+		appendStringInfo(source,
+						 "#define PG_%s %u\n",
+						 devtype_catalog[i].type_oid_label,
+						 devtype_catalog[i].type_oid);
+	}
 }
 
 /*

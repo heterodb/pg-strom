@@ -280,17 +280,21 @@ kern_fetch_data_store(TupleTableSlot *slot,
 	{
 		Datum  *tts_values = (Datum *)KERN_DATA_STORE_VALUES(kds, row_index);
 		bool   *tts_isnull = (bool *)KERN_DATA_STORE_ISNULL(kds, row_index);
+		int		natts = slot->tts_tupleDescriptor->natts;
 
+		memcpy(slot->tts_values, tts_values, sizeof(Datum) * natts);
+		memcpy(slot->tts_isnull, tts_isnull, sizeof(bool) * natts);
+#ifdef NOT_USED
+		/*
+		 * XXX - pointer reference is better than memcpy from performance
+		 * perspectives, however, we need to ensure tts_values/tts_isnull
+		 * shall be restored when pgstrom-data-store is released.
+		 * It will be cause of complicated / invisible bugs.
+		 */
 		slot->tts_values = tts_values;
 		slot->tts_isnull = tts_isnull;
+#endif
 		ExecStoreVirtualTuple(slot);
-
-		/*
-		 * MEMO: Is it really needed to take memcpy() here? If we can 
-		 * do same job with pointer opertion, it makes more sense from
-		 * performance standpoint.
-		 * (NOTE: hash-join materialization is a hot point)
-		 */
 		return true;
 	}
 	elog(ERROR, "Bug? unexpected data-store format: %d", kds->format);
@@ -402,22 +406,6 @@ init_kernel_data_store(kern_data_store *kds,
 		int		attlen   = attr->attlen;
 		int		attnum   = attr->attnum;
 
-		/*
-		 * If variable is expected to have special internal format
-		 * different from the host representation, we need to fixup
-		 * colmeta catalog also. Right now, only NUMERIC can have
-		 * special internal format.
-		 */
-		if (internal_format)
-		{
-			if (attr->atttypid == NUMERICOID)
-			{
-				attbyval = true;
-				attalign = sizeof(cl_ulong);
-				attlen   = sizeof(cl_ulong);
-			}
-		}
-
 		if (attcacheoff > 0)
 		{
 			if (attlen > 0)
@@ -430,6 +418,8 @@ init_kernel_data_store(kern_data_store *kds,
 		kds->colmeta[i].attlen = attlen;
 		kds->colmeta[i].attnum = attnum;
 		kds->colmeta[i].attcacheoff = attcacheoff;
+		kds->colmeta[i].atttypid = (cl_uint)attr->atttypid;
+		kds->colmeta[i].atttypmod = (cl_int)attr->atttypmod;
 		if (attcacheoff >= 0)
 			attcacheoff += attlen;
 	}

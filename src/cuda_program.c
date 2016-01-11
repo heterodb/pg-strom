@@ -375,12 +375,19 @@ construct_flat_cuda_source(const char *kern_source,
 					 sizeof(CUdeviceptr),
 					 BLCKSZ,
 					 MAXIMUM_ALIGNOF);
+#ifdef PGSTROM_DEBUG
+	appendStringInfo(&source,
+					 "#define PGSTROM_DEBUG %d\n", PGSTROM_DEBUG);
+#endif
 
 	/* disable C++ feature */
 	appendStringInfo(&source,
 					 "#ifdef __cplusplus\n"
 					 "extern \"C\" {\n"
 					 "#endif	/* __cplusplus */\n");
+	/* Declaration of device type oids */
+	pgstrom_codegen_typeoid_declarations(&source);
+
 	/* Common PG-Strom device routine */
 	appendStringInfoString(&source, pgstrom_cuda_common_code);
 

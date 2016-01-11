@@ -388,63 +388,97 @@ gpupreagg_data_move(kern_context *kcxt,
  */
 STATIC_FUNCTION(cl_uint)
 gpupreagg_final_data_move(kern_context *kcxt,
-						  cl_uint colidx,
 						  kern_data_store *kds_src, cl_uint rowidx_src,
 						  kern_data_store *kds_dst, cl_uint rowidx_dst)
 {
-	Datum	   *src_values;
-	Datum	   *dst_values;
-	cl_char	   *src_isnull;
-	cl_char	   *dst_isnull;
+	Datum	   *src_values = KERN_DATA_STORE_VALUES(kds_src, rowidx_src);
+	Datum	   *dst_values = KERN_DATA_STORE_VALUES(kds_dst, rowidx_dst);
+	cl_char	   *src_isnull = KERN_DATA_STORE_ISNULL(kds_src, rowidx_src);
+	cl_char	   *dst_isnull = KERN_DATA_STORE_ISNULL(kds_dst, rowidx_dst);
+	cl_uint		i, ncols = kds_src->ncols;
 	cl_uint		alloc_size = 0;
-
-	kern_colmeta cmeta = kds_src->colmeta[colidx];
+	char	   *alloc_ptr = NULL;
 
 	/* Paranoire checks? */
 	assert(kds_src->format == KDS_FORMAT_SLOT &&
 		   kds_dst->format == KDS_FORMAT_SLOT);
-	assert(colidx < kds_src->ncols && colidx < kds_dst->ncols);
+	assert(kds_src->ncols == kds_dst->ncols);
 	assert(rowidx_src < kds_src->nitems);
 	assert(rowidx_dst < kds_dst->nitems);
 
-	/* Get relevant slot */
-	src_values = KERN_DATA_STORE_VALUES(kds_src, rowidx_src);
-	src_isnull = KERN_DATA_STORE_ISNULL(kds_src, rowidx_src);
-	dst_values = KERN_DATA_STORE_VALUES(kds_dst, rowidx_dst);
-	dst_isnull = KERN_DATA_STORE_ISNULL(kds_dst, rowidx_dst);
-
-	if (src_isnull[colidx])
-		dst_isnull[colidx] = true;
-	else if (cmeta.attbyval)
+	/* size for allocation */
+	for (i=0; i < ncols; i++)
 	{
-		dst_isnull[colidx] = false;
-		dst_values[colidx] = src_values[colidx];
+		kern_colmeta cmeta = kds_src->colmeta[i];
+
+		if (src_isnull[i])
+			continue;	/* no need buffer */
+		if (cmeta.atttypid == PG_NUMERICOID)
+			continue;	/* special internal data format */
+		if (!cmeta.attbyval)
+		{
+			if (cmeta.attlen > 0)
+				alloc_size += MAXALIGN(cmeta.attlen);
+			else
+			{
+				char   *datum = DatumGetPointer(src_values[i]);
+
+				alloc_size += MAXALIGN(VARSIZE_ANY(datum));
+			}
+		}
 	}
-	else
+	/* allocate extra buffer by atomic operation */
+	if (alloc_size > 0)
 	{
-		void		   *datum = kern_get_datum(kds_src,colidx,rowidx_src);
-		pg_varlena_t	vl_src = pg_varlena_datum_ref(kcxt,datum,false);
-		cl_uint			vl_len;
-		cl_uint			usage_prev;
+		cl_uint		usage_prev = atomicAdd(&kds_dst->usage, alloc_size);
 
-		vl_len = (cmeta.attlen >= 0
-				  ? cmeta.attlen
-				  : VARSIZE_ANY(vl_src.value));
-		alloc_size = MAXALIGN(vl_len);
-		usage_prev = atomicAdd(&kds_dst->usage, alloc_size);
 		if (KERN_DATA_STORE_SLOT_LENGTH(kds_dst, kds_dst->nrooms) +
 			usage_prev + alloc_size >= kds_dst->length)
 		{
 			STROM_SET_ERROR(&kcxt->e, StromError_DataStoreNoSpace);
-			dst_isnull[colidx] = true;
+			/*
+			 * NOTE: Uninitialized dst_values[] for NULL values will lead
+			 * a problem around atomic operation, because we designed 
+			 * reduction operation that assumes values are correctly
+			 * initialized even if it is NULL.
+			 */
+			for (i=0; i < ncols; i++)
+			{
+				dst_isnull[i] = true;
+				dst_values[i] = src_values[i];
+			}
+			return;
+		}
+		alloc_ptr = ((char *)kds_dst + kds_dst->length -
+					 (usage_prev + alloc_size));
+	}
+	/* move the data */
+	for (i=0; i < ncols; i++)
+	{
+		kern_colmeta cmeta = kds_src->colmeta[i];
+
+		if (src_isnull[i])
+		{
+			dst_isnull[i] = true;
+			dst_values[i] = src_values[i];
+		}
+		else if (cmeta.atttypid == PG_NUMERICOID ||
+				 cmeta.attbyval)
+		{
+			dst_isnull[i] = false;
+			dst_values[i] = src_values[i];
 		}
 		else
 		{
-			char	   *alloc_ptr = ((char *)kds_dst + kds_dst->length -
-									 (usage_prev + alloc_size));
-			memcpy(alloc_ptr, vl_src.value, vl_len);
-			dst_isnull[colidx] = false;
-			dst_values[colidx] = PointerGetDatum(alloc_ptr);
+			char	   *datum = DatumGetPointer(src_values[i]);
+			cl_uint		datum_len = (cmeta.attlen > 0 ?
+									 cmeta.attlen :
+									 VARSIZE_ANY(datum));
+			memcpy(alloc_ptr, datum, datum_len);
+			dst_isnull[i] = false;
+			dst_values[i] = PointerGetDatum(alloc_ptr);
+
+			alloc_ptr += MAXALIGN(datum_len);
 		}
 	}
 	return alloc_size;
@@ -1179,15 +1213,11 @@ retry_minor:
 		new_slot.s.index = atomicAdd(&kds_final->nitems, 1);
 		if (new_slot.s.index < kds_final->nrooms)
 		{
-			for (attnum = 0; attnum < nattrs; attnum++)
-			{
-				allocated += gpupreagg_final_data_move(&kcxt,
-													   attnum,
-													   kds_dst,
-													   kds_index,
-													   kds_final,
-													   new_slot.s.index);
-			}
+			allocated += gpupreagg_final_data_move(&kcxt,
+												   kds_dst,
+												   kds_index,
+												   kds_final,
+												   new_slot.s.index);
 		}
 		else
 		{
@@ -1195,58 +1225,59 @@ retry_minor:
 		}
 		__threadfence();
 		f_hash->hash_slot[index].s.index = new_slot.s.index;
-	}
-	/* wait updating the hash slot. */
-	while (cur_slot.s.index == (cl_uint)(0xfffffffe))
-	{
-		__threadfence();
-		cur_slot.s.index = f_hash->hash_slot[index].s.index;
-	}
-
-	if (cur_slot.value == old_slot.value)
-	{
+		/* this thread is the owner of this slot */
 		owner_index = new_slot.s.index;
 		isOwner = true;
 	}
-	else if (cur_slot.s.hash == new_slot.s.hash &&
-			 (cur_slot.s.index < kds_final->nrooms
-			  ? gpupreagg_keymatch(&kcxt,
-								   kds_dst, kds_index,
-								   kds_final, cur_slot.s.index)
-			  : true))
-	{
-		/*
-		 * NOTE: If hash value was identical but cur_slot.s.index is out
-		 * of range thus we cannot use gpupreagg_keymatch, we cannot
-		 * determine whether this hash slot is actually owned by other
-		 * row that has identical grouping keys.
-		 * However, it is obvious this kernel invocation will return
-		 * DataStoreNoSpace error, then CPU fallback will work.
-		 */
-		owner_index = cur_slot.s.index;
-	}
 	else
 	{
-		/* hash slot conflicts */
-		nconflicts++;
-		if (key_dist_salt > 1 && ++key_dist_index < key_dist_salt)
+		/* wait updating the hash slot. */
+		while (cur_slot.s.index == (cl_uint)(0xfffffffe))
 		{
-			hash_value = hash_value_base;
-			key_dist_factor.isnull = false;
-			key_dist_factor.value =
-				(get_global_id() + key_dist_index) % key_dist_salt;
-			hash_value = pg_int4_comp_crc32(crc32_table,
-											hash_value,
-											key_dist_factor);
-			FIN_LEGACY_CRC32(hash_value);
-			goto retry_major;
+			__threadfence();
+			cur_slot.value = f_hash->hash_slot[index].value;
 		}
 		__threadfence();
-		if (!check_global_hashslot_usage(&kcxt, f_hash->hash_usage,
-										 f_hashlimit))
-			goto out;
-		index = (index + 1) % f_hashsize;
-		goto retry_minor;
+
+		if (cur_slot.s.hash == new_slot.s.hash &&
+			(cur_slot.s.index >= kds_final->nitems ||
+			 gpupreagg_keymatch(&kcxt,
+								kds_dst, kds_index,
+								kds_final, cur_slot.s.index)))
+		{
+			/*
+			 * NOTE: If hash value was identical but cur_slot.s.index is out
+			 * of range thus we cannot use gpupreagg_keymatch, we cannot
+			 * determine whether this hash slot is actually owned by other
+			 * row that has identical grouping keys.
+			 * However, it is obvious this kernel invocation will return
+			 * DataStoreNoSpace error, then CPU fallback will work.
+			 */
+			owner_index = cur_slot.s.index;
+		}
+		else
+		{
+			/* hash slot conflicts */
+			nconflicts++;
+			if (key_dist_salt > 1 && ++key_dist_index < key_dist_salt)
+			{
+				hash_value = hash_value_base;
+				key_dist_factor.isnull = false;
+				key_dist_factor.value =
+					(get_global_id() + key_dist_index) % key_dist_salt;
+				hash_value = pg_int4_comp_crc32(crc32_table,
+												hash_value,
+												key_dist_factor);
+				FIN_LEGACY_CRC32(hash_value);
+				goto retry_major;
+			}
+			__threadfence();
+			if (!check_global_hashslot_usage(&kcxt, f_hash->hash_usage,
+											 f_hashlimit))
+				goto out;
+			index = (index + 1) % f_hashsize;
+			goto retry_minor;
+		}
 	}
 
 	/*
@@ -1279,8 +1310,10 @@ retry_minor:
 								  kds_dst, kds_index);
 		}
 	}
-
 out:
+	/* concurrent thread may still use crc32_table */
+	__syncthreads();
+
 	/* update run-time statistics */
 	arithmetic_stairlike_add(isOwner ? 1 : 0, &count);
 	if (count > 0 && get_local_id() == 0)

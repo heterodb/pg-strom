@@ -481,6 +481,7 @@ typedef struct {
 	int			extra_flags;/* external libraries to be included */
 } codegen_context;
 
+extern void pgstrom_codegen_typeoid_declarations(StringInfo buf);
 extern devtype_info *pgstrom_devtype_lookup(Oid type_oid);
 extern devfunc_info *pgstrom_devfunc_lookup(Oid func_oid, Oid func_collid);
 extern devtype_info *pgstrom_devtype_lookup_and_track(Oid type_oid,

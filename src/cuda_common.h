@@ -233,7 +233,23 @@ typedef struct
 	cl_int		errcode;	/* one of the StromError_* */
 	cl_short	kernel;		/* one of the StromKernel_* */
 	cl_short	lineno;		/* line number STROM_SET_ERROR is called */
+#ifdef PGSTROM_DEBUG
+	cl_long		extra_x;	/* for debug purpose */
+	cl_long		extra_y;	/* for debug purpose */
+	cl_long		extra_z;	/* for debug purpose */
+#endif
 } kern_errorbuf;
+
+#ifdef PGSTROM_DEBUG
+#define KERN_ERRORBUF_SET_EXTRA(p_kerror,x,y,z)	\
+	do {										\
+		(p_kerror)->extra_x = (cl_long)(x);		\
+		(p_kerror)->extra_y = (cl_long)(y);		\
+		(p_kerror)->extra_z = (cl_long)(z);		\
+	} while(0)
+#else
+#define KERN_ERRORBUF_SET_EXTRA(kcxt,x,y,z)		do {} while(0)
+#endif
 
 /*
  * kern_context - a set of run-time information
@@ -251,6 +267,7 @@ typedef struct
 		(kcxt)->e.errcode = StromError_Success;			\
 		(kcxt)->e.kernel = StromKernel_##kfunction;		\
 		(kcxt)->e.lineno = 0;							\
+		KERN_ERRORBUF_SET_EXTRA(&(kcxt)->e,0,0,0);		\
 		(kcxt)->kparams = (kparams);					\
 	} while(0)
 
@@ -262,7 +279,8 @@ typedef struct
  */
 #ifdef __CUDACC__
 STATIC_INLINE(void)
-__STROM_SET_ERROR(kern_errorbuf *p_kerror, cl_int errcode, cl_int lineno)
+__STROM_SET_ERROR(kern_errorbuf *p_kerror, cl_int errcode, cl_int lineno,
+				  cl_long extra_x, cl_long extra_y, cl_long extra_z)
 {
 	cl_int			oldcode = p_kerror->errcode;
 
@@ -271,12 +289,25 @@ __STROM_SET_ERROR(kern_errorbuf *p_kerror, cl_int errcode, cl_int lineno)
 	{
 		p_kerror->errcode = errcode;
 		p_kerror->lineno = lineno;
+		KERN_ERRORBUF_SET_EXTRA(p_kerror, extra_x, extra_y, extra_z);
 	}
 }
 
 #define STROM_SET_ERROR(p_kerror, errcode)		\
-	__STROM_SET_ERROR((p_kerror), (errcode), __LINE__)
+	__STROM_SET_ERROR((p_kerror), (errcode), __LINE__, 123, 456, 789)
+#define STROM_SET_ERROR_EXTRA(p_kerror, errcode, x, y, z)	\
+	__STROM_SET_ERROR((p_kerror), (errcode), __LINE__, (x), (y), (z))
 #else
+#ifdef PGSTROM_DEBUG
+#define KERROR_EXTRA_X(p_kerror)		((p_kerror)->extra_x)
+#define KERROR_EXTRA_Y(p_kerror)		((p_kerror)->extra_y)
+#define KERROR_EXTRA_Z(p_kerror)		((p_kerror)->extra_z)
+#else
+#define KERROR_EXTRA_X(p_kerror)		0UL
+#define KERROR_EXTRA_Y(p_kerror)		0UL
+#define KERROR_EXTRA_Z(p_kerror)		0UL
+#endif
+
 /*
  * If case when STROM_SET_ERROR is called in the host code,
  * it raises an error using ereport()
@@ -429,6 +460,10 @@ typedef struct {
 	cl_short		attnum;
 	/* offset of attribute location, if deterministic */
 	cl_short		attcacheoff;
+	/* oid of the SQL data type */
+	cl_uint			atttypid;
+	/* typmod of the SQL data type */
+	cl_int			atttypmod;
 } kern_colmeta;
 
 /*
@@ -1672,6 +1707,11 @@ kern_writeback_error_status(kern_errorbuf *result, kern_errorbuf own_error)
 			/* only primary error workgroup can come into */
 			result->kernel = kerror.kernel;
 			result->lineno = kerror.lineno;
+#ifdef PGSTROM_DEBUG
+			result->extra_x = kerror.extra_x;
+			result->extra_y = kerror.extra_y;
+			result->extra_z = kerror.extra_z;
+#endif
 		}
 	}
 }
