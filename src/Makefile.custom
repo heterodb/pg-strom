@@ -1,9 +1,0 @@
-#
-# Custom configuration towards the main Makefile
-#
-
-# ------------------------------------------------------------
-# PGSTROM_DEBUG enables various debug checks, but leads less
-# performance due to paranoier checks. 
-#
-#PGSTROM_FLAGS_CUSTOM := -DPGSTROM_DEBUG=1 -g -O0

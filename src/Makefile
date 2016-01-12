@@ -47,6 +47,9 @@ PGSTROM_FLAGS += -DPGSTROM_BUILD_DATE=\"$(PGSTROM_BUILD_DATE)\"
 PGSTROM_FLAGS += -DCUDA_INCLUDE_PATH=\"$(IPATH)\"
 PGSTROM_FLAGS += -DCUDA_LIBRARY_PATH=\"$(LPATH)\"
 PGSTROM_FLAGS += -DCMD_GPUINFO_PATH=\"$(shell $(PG_CONFIG) --bindir)/gpuinfo\"
+# We assume to put the following line in Makefile.custom according to
+# the purpose of this build.
+#   PGSTROM_FLAGS_CUSTOM := -DPGSTROM_DEBUG=1 -g -O0
 PGSTROM_FLAGS += $(PGSTROM_FLAGS_CUSTOM)
 PG_CPPFLAGS := $(PGSTROM_FLAGS) -I $(IPATH)
 SHLIB_LINK := -L $(LPATH) -lnvrtc -lcuda
