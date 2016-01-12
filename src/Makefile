@@ -1,6 +1,7 @@
 # Load the common definition
 PGSTROM_MAKEFILE_IN_SUBDIR := 1
 include ../Makefile
+-include ./Makefile.custom
 
 #
 # Definition of PG-Strom Extension
@@ -39,16 +40,14 @@ ifdef TEMP_INSTANCE
 endif
 
 PGSTROM_FLAGS := $(shell $(PG_CONFIG) --configure | \
-  awk '/'--enable-debug'/ {print "-Wall -DPGSTROM_DEBUG=1"}')
-PGSTROM_FLAGS += $(shell $(PG_CONFIG) --cflags | \
-  sed -E 's/[ ]+/\n/g' | \
-  awk 'BEGIN{ CCOPT="" } /^-O[0-9]$$/{ CCOPT=$$1 } END{ print CCOPT }')
+  awk '/'--enable-debug'/ {print "-Werror"}')
 PGSTROM_FLAGS += -DPGSTROM_VERSION=\"$(PGSTROM_VERSION)\"
 PGSTROM_FLAGS += -DPGSTROM_VERSION_NUM=$(PGSTROM_VERSION_NUM)
 PGSTROM_FLAGS += -DPGSTROM_BUILD_DATE=\"$(PGSTROM_BUILD_DATE)\"
 PGSTROM_FLAGS += -DCUDA_INCLUDE_PATH=\"$(IPATH)\"
 PGSTROM_FLAGS += -DCUDA_LIBRARY_PATH=\"$(LPATH)\"
 PGSTROM_FLAGS += -DCMD_GPUINFO_PATH=\"$(shell $(PG_CONFIG) --bindir)/gpuinfo\"
+PGSTROM_FLAGS += $(PGSTROM_FLAGS_CUSTOM)
 PG_CPPFLAGS := $(PGSTROM_FLAGS) -I $(IPATH)
 SHLIB_LINK := -L $(LPATH) -lnvrtc -lcuda
 
