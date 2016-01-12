@@ -4117,7 +4117,7 @@ gpupreagg_next_chunk(GpuTaskState *gts)
 		/* Picks up the cached one to detect the final chunk */
 		pds = gpas->outer_pds;
 		if (!pds)
-			gpas->gts.scan_done = true;
+			pgstrom_deactivate_gputaskstate(&gpas->gts);
 		else
 			gpas->outer_pds = pgstrom_exec_scan_chunk(&gpas->gts,
 													  pgstrom_chunk_size());
@@ -4145,7 +4145,7 @@ gpupreagg_next_chunk(GpuTaskState *gts)
 				slot = ExecProcNode(subnode);
 				if (TupIsNull(slot))
 				{
-					gpas->gts.scan_done = true;
+					pgstrom_deactivate_gputaskstate(&gpas->gts);
 					break;
 				}
 			}
@@ -4175,7 +4175,7 @@ gpupreagg_next_chunk(GpuTaskState *gts)
 		/* Picks up the cached one to detect the final chunk */
 		pds = gpas->outer_pds;
 		if (!pds)
-			gpas->gts.scan_done = true;
+			pgstrom_deactivate_gputaskstate(&gpas->gts);
 		else
 			gpas->outer_pds = BulkExecProcNode((GpuTaskState *)subnode,
 											   pgstrom_chunk_size());
@@ -4392,6 +4392,8 @@ gpupreagg_rescan(CustomScanState *node)
 {
 	GpuPreAggState	   *gpas = (GpuPreAggState *) node;
 
+	/* inform this GpuTaskState will produce more rows, prior to cleanup */
+	pgstrom_activate_gputaskstate(&gpas->gts);
 	/* Cleanup and relase any concurrent tasks */
 	pgstrom_cleanup_gputaskstate(&gpas->gts);
 	/* Rewind the subtree */
@@ -4399,7 +4401,6 @@ gpupreagg_rescan(CustomScanState *node)
 		pgstrom_rewind_scan_chunk(&gpas->gts);
 	else
 		ExecReScan(outerPlanState(node));
-	gpas->gts.scan_done = false;
 }
 
 static void

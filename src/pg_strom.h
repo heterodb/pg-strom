@@ -240,6 +240,7 @@ typedef struct
 	int				refcnt;			/* reference counter */
 	ResourceOwner	resowner;		/* ResourceOwner owns this GpuContext */
 	MemoryContext	memcxt;			/* Memory context for host pinned mem */
+	cl_int		   *p_keep_freemem;	/* flag to control memory cache policy */
 	dlist_head		pds_list;		/* list of pgstrom_data_store */
 	cl_int			num_context;	/* number of CUDA context */
 	cl_int			next_context;
@@ -395,7 +396,8 @@ HostPinMemContextCreate(MemoryContext parent,
                         const char *name,
 						CUcontext cuda_context,
                         Size block_size_init,
-                        Size block_size_max);
+                        Size block_size_max,
+						cl_int **pp_keep_freemem);
 /*
  * cuda_control.c
  */
@@ -416,6 +418,8 @@ extern void pgstrom_release_gputaskstate(GpuTaskState *gts);
 extern void pgstrom_init_gputaskstate(GpuContext *gcontext,
 									  GpuTaskState *gts,
 									  EState *estate);
+extern void pgstrom_activate_gputaskstate(GpuTaskState *gts);
+extern void pgstrom_deactivate_gputaskstate(GpuTaskState *gts);
 extern void pgstrom_init_gputask(GpuTaskState *gts, GpuTask *gtask);
 extern void pgstrom_release_gputask(GpuTask *gtask);
 extern GpuTask *pgstrom_fetch_gputask(GpuTaskState *gts);

@@ -2052,9 +2052,10 @@ gpuscan_rescan(CustomScanState *node)
 {
 	GpuScanState	   *gss = (GpuScanState *) node;
 
+	/* activate GpuTaskState first, not to release pinned memory */
+	pgstrom_activate_gputaskstate(&gss->gts);
 	/* clean-up and release any concurrent tasks */
     pgstrom_cleanup_gputaskstate(&gss->gts);
-
 	/* OK, rewind the position to read */
 	pgstrom_rewind_scan_chunk(&gss->gts);
 }

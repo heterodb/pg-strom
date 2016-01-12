@@ -64,6 +64,7 @@ typedef struct
 {
 	MemoryContextData	header;
 	CUcontext			cuda_context;
+	cl_int				keep_freemem;	/* if > 0, try to keep free chunk */
 	dlist_head			blocks;
 	dlist_head			free_chunks[HOSTMEM_CHUNKSZ_MAX_BIT + 1];
 	/* allocation parameters for this context */
@@ -291,11 +292,17 @@ cudaHostMemFree(MemoryContext context, void *pointer)
 	}
 
 	/*
-	 * In case when the chunk being released is the last chunk in this
-	 * block, we release this host-pinned memory instead of waiting for
-	 * reuse.
+	 * NOTE: Host-pinned memory is usually expensive to allocate because of
+	 * some extra operations in the ndivia driver, thus, it is a good idea
+	 * to retain free memory blocks and reuse for further requirement.
+	 * However, it also leads dead memory in case when no PG-Strom node will
+	 * produce tuples any more. So, we get a hint from GpuContext how many
+	 * GpuTaskState is still active.
+	 * Right now, we simply retain the free memory block if any GpuTaskState
+	 * is still active thus it may require further host-pinned memory.
 	 */
-	if (!dlist_has_prev(&chm_block->addr_chunks, &chunk->addr_chain) &&
+	if (chm_head->keep_freemem == 0 &&
+		!dlist_has_prev(&chm_block->addr_chunks, &chunk->addr_chain) &&
 		!dlist_has_next(&chm_block->addr_chunks, &chunk->addr_chain))
 	{
 		Assert(!chunk->free_chain.prev && !chunk->free_chain.next);
@@ -539,7 +546,8 @@ HostPinMemContextCreate(MemoryContext parent,
 						const char *name,
 						CUcontext cuda_context,
 						Size block_size_init,
-						Size block_size_max)
+						Size block_size_max,
+						cl_int **pp_keep_freemem)
 {
 	cudaHostMemHead	   *chm_head;
 
@@ -552,6 +560,15 @@ HostPinMemContextCreate(MemoryContext parent,
 							name);
 	/* save the reference to cuda_context */
 	chm_head->cuda_context = cuda_context;
+
+	/*
+	 * keep_freemem shall be incremented on creation or rescan of GpuTaskState,
+	 * then decreased when it reached end-of-scan; that means GpuTaskState will
+	 * never produce any tuple more, thus, we don't need to keep free pinned
+	 * memory if all active GpuTaskState gone.
+	 */
+	chm_head->keep_freemem = 0;
+	*pp_keep_freemem = &chm_head->keep_freemem;
 
 	/*
 	 * Make sure alloc parameters are reasonable

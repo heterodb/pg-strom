@@ -815,6 +815,7 @@ pgstrom_create_gpucontext(ResourceOwner resowner, bool *context_reused)
 	static bool		on_shmem_callback_registered = false;
 	GpuContext	   *gcontext = NULL;
 	MemoryContext	memcxt = NULL;
+	cl_int		   *p_keep_freemem;
 	CUcontext	   *cuda_context_temp;
 	Size			length_gcxt;
 	Size			length_init;
@@ -876,10 +877,12 @@ pgstrom_create_gpucontext(ResourceOwner resowner, bool *context_reused)
 										 namebuf,
 										 cuda_context_temp[0],
 										 length_init,
-										 length_max);
+										 length_max,
+										 &p_keep_freemem);
 		length_gcxt = offsetof(GpuContext, gpu[cuda_num_devices]);
 		gcontext = MemoryContextAllocZero(memcxt, length_gcxt);
 		gcontext->refcnt = 1;
+		gcontext->p_keep_freemem = p_keep_freemem;
 		gcontext->resowner = resowner;
 		gcontext->memcxt = memcxt;
 		dlist_init(&gcontext->pds_list);
@@ -961,6 +964,12 @@ pgstrom_release_gpucontext(GpuContext *gcontext, bool sanity_release)
 	/* detach this GpuContext from the global list */
 	dlist_delete(&gcontext->chain);
 	memset(&gcontext->chain, 0, sizeof(dlist_node));
+
+	/* Any GpuTaskState is still active? */
+	if (*gcontext->p_keep_freemem > 0)
+		elog(sanity_release ? NOTICE : DEBUG1,
+			 "GpuContext still has active GpuTaskState on release (%d GTSs)",
+			 *gcontext->p_keep_freemem);
 
 	/*
 	 * Synchronization of all the asynchronouse events, if any
@@ -1144,6 +1153,8 @@ pgstrom_release_gputaskstate(GpuTaskState *gts)
 	CUresult	rc;
 	int			i;
 
+	/* obviously, the GpuTaskState shall be deactivated */
+	pgstrom_deactivate_gputaskstate(gts);
 	/* clean-up and release any concurrent tasks */
 	pgstrom_cleanup_gputaskstate(gts);
 
@@ -1178,6 +1189,8 @@ pgstrom_init_gputaskstate(GpuContext *gcontext,
 	gts->extra_flags = 0;		/* to be set later */
 	gts->cuda_modules = NULL;
 	gts->scan_done = false;
+	if (gcontext)
+		(*gcontext->p_keep_freemem)++;
 	gts->be_row_format = false;
 	gts->outer_bulk_exec = false;
 #if PG_VERSION_NUM >= 90600
@@ -1217,6 +1230,38 @@ pgstrom_init_gputaskstate(GpuContext *gcontext,
 	gts->cb_bulk_exec = NULL;
 	memset(&gts->pfm_accum, 0, sizeof(pgstrom_perfmon));
 	gts->pfm_accum.enabled = pgstrom_perfmon_enabled;
+}
+
+/*
+ * pgstrom_(activate|deactivate)_gputaskstate
+ *
+ * It gives a hint of host pinned memory manager. If GpuTaskState within
+ * a particular GpuContext will produce further GpuTask thus it needs more
+ * pinned memory, we shall retain host memory so much to reuse them.
+ * Elsewher, we should release pinned memory actively.
+ */
+void
+pgstrom_activate_gputaskstate(GpuTaskState *gts)
+{
+	if (gts->scan_done)
+	{
+		GpuContext *gcontext = gts->gcontext;
+		if (gcontext)
+			(*gcontext->p_keep_freemem)++;
+		gts->scan_done = false;
+	}
+}
+
+void
+pgstrom_deactivate_gputaskstate(GpuTaskState *gts)
+{
+	if (!gts->scan_done)
+	{
+		GpuContext *gcontext = gts->gcontext;
+		if (gcontext)
+			(*gcontext->p_keep_freemem)--;
+		gts->scan_done = true;
+	}
 }
 
 /*
@@ -1637,7 +1682,7 @@ pgstrom_fetch_gputask(GpuTaskState *gts)
 				SpinLockAcquire(&gts->lock);
 				if (!gtask)
 				{
-					gts->scan_done = true;
+					pgstrom_deactivate_gputaskstate(gts);
 					elog(DEBUG1, "scan done (%s)",
 						 gts->css.methods->CustomName);
 					break;

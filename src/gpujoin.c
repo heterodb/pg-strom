@@ -2768,6 +2768,8 @@ gpujoin_rescan(CustomScanState *node)
 	ListCell	   *lc;
 	cl_int			i;
 
+	/* inform this GpuTaskState will produce more rows, prior to cleanup */
+	pgstrom_activate_gputaskstate(&gjs->gts);
 	/* clean-up and release any concurrent tasks */
 	pgstrom_cleanup_gputaskstate(&gjs->gts);
 
@@ -2793,7 +2795,6 @@ gpujoin_rescan(CustomScanState *node)
 		pgstrom_rewind_scan_chunk(&gjs->gts);
 	else
 		ExecReScan(outerPlanState(gjs));
-	gjs->gts.scan_done = false;
 	gjs->gts.scan_overflow = NULL;
 	gjs->outer_scan_done = false;
 
@@ -4200,10 +4201,8 @@ gpujoin_next_chunk(GpuTaskState *gts)
 			 * read any more, so we break the GpuJoin.
 			 */
 			if (!pmrels_new)
-			{
-				gjs->gts.scan_done = true;
 				return NULL;
-			}
+
 			gjs->curr_pmrels = pmrels_new;
 
 			/*
