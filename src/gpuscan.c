@@ -1803,7 +1803,6 @@ create_pgstrom_gpuscan_task(GpuScanState *gss, pgstrom_data_store *pds_src)
 		pds_dst = pgstrom_create_data_store_slot(gcontext,
 												 scan_tupdesc,
 												 kds_src->nitems,
-												 false,
 												 length,
 												 NULL);
 	}

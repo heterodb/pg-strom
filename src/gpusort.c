@@ -1299,8 +1299,9 @@ gpusort_next_chunk(GpuTaskState *gts)
 	}
 	/* Expand the backend file of the data chunk */
 	nitems = ptoast->kds->nitems;
+	/* FIXME: kernel has to handle numeric by typeoid */
 	pds = pgstrom_create_data_store_slot(gcontext, tupdesc,
-										 nitems, true, 0, ptoast);
+										 nitems, 0, ptoast);
 	/* Save this chunk on the global array */
 	chunk_id = gss->num_chunks++;
 	if (chunk_id >= gss->num_chunks_limit)

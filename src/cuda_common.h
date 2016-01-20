@@ -500,6 +500,8 @@ typedef struct {
 	cl_uint			nitems; 	/* number of rows in this store */
 	cl_uint			nrooms;		/* number of available rows in this store */
 	cl_char			format;		/* one of KDS_FORMAT_* above */
+	cl_char			has_notbyval; /* true, if any of column is !attbyval */
+	cl_char			has_numeric;/* true, if any of column is numeric */
 	cl_char			tdhasoid;	/* copy of TupleDesc.tdhasoid */
 	cl_uint			tdtypeid;	/* copy of TupleDesc.tdtypeid */
 	cl_int			tdtypmod;	/* copy of TupleDesc.tdtypmod */

@@ -514,7 +514,6 @@ extern bool pgstrom_bulk_exec_supported(const PlanState *planstate);
 extern cl_uint estimate_num_chunks(Path *pathnode);
 extern pgstrom_data_store *BulkExecProcNode(GpuTaskState *gts,
 											 size_t chunk_size);
-extern Datum pgstrom_fixup_kernel_numeric(Datum numeric_datum);
 extern bool pgstrom_fetch_data_store(TupleTableSlot *slot,
 									 pgstrom_data_store *pds,
 									 size_t row_index,
@@ -534,8 +533,7 @@ extern void init_kernel_data_store(kern_data_store *kds,
 								   TupleDesc tupdesc,
 								   Size length,
 								   int format,
-								   uint nrooms,
-								   bool internal_format);
+								   uint nrooms);
 extern pgstrom_data_store *
 pgstrom_create_data_store_row(GpuContext *gcontext,
 							  TupleDesc tupdesc,
@@ -545,7 +543,6 @@ extern pgstrom_data_store *
 pgstrom_create_data_store_slot(GpuContext *gcontext,
 							   TupleDesc tupdesc,
 							   cl_uint nrooms,
-							   bool internal_format,
 							   Size extra_length,
 							   pgstrom_data_store *ptoast);
 extern pgstrom_data_store *
@@ -674,6 +671,13 @@ extern const char *pgstrom_cuda_terminal_code;
  * Miscellaneous static inline functions
  *
  * ---------------------------------------------------------------- */
+
+/* Max/Min macros that takes 3 or more arguments */
+#define Max3(a,b,c)		((a) > (b) ? Max((a),(c)) : Max((b),(c)))
+#define Max4(a,b,c,d)	Max(Max((a),(b)), Max((c),(d)))
+
+#define Min3(a,b,c)		((a) > (b) ? Min((a),(c)) : Min((b),(c)))
+#define Min4(a,b,c,d)	Min(Min((a),(b)), Min((c),(d)))
 
 /*
  * int/float reinterpret functions

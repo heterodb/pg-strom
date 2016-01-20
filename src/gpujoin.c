@@ -3925,7 +3925,6 @@ retry:
 			pgjoin->pds_dst = pgstrom_create_data_store_slot(gcontext,
 															 tupdesc,
 															 dst_nrooms,
-															 false,
 															 extra_len,
 															 NULL);
 		}

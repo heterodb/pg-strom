@@ -282,7 +282,8 @@ gpupreagg_data_load(pagg_datum *pdatum,		/* __shared__ */
 		pdatum->isnull = isnull[colidx];
 		pdatum->int_val = (cl_int)(values[colidx] & 0xffffffffUL);
 	}
-	else if (cmeta.attlen == sizeof(cl_long))	/* also, cl_double */
+	else if (cmeta.attlen == sizeof(cl_long) ||	/* also, cl_double */
+			 cmeta.atttypid == PG_NUMERICOID)	/* internal of numeric */
 	{
 		pdatum->isnull = isnull[colidx];
 		pdatum->long_val = (cl_long)values[colidx];
@@ -329,7 +330,8 @@ gpupreagg_data_store(pagg_datum *pdatum,	/* __shared__ */
 		isnull[colidx] = pdatum->isnull;
 		values[colidx] = pdatum->int_val;
 	}
-	else if (cmeta.attlen == sizeof(cl_long))	/* also, cl_double */
+	else if (cmeta.attlen == sizeof(cl_long) ||	/* also, cl_double */
+			 cmeta.atttypid == PG_NUMERICOID)	/* internal of numeric */
 	{
 		isnull[colidx] = pdatum->isnull;
 		values[colidx] = pdatum->long_val;
@@ -1245,7 +1247,7 @@ retry_minor:
 	 * we have to ensure the owner thread's code block is located prior to
 	 * the busy-loop.
 	 */
-	while ((volatile cl_uint)cur_slot.s.index == (cl_uint)(0xfffffffe))
+	while (cur_slot.s.index == (cl_uint)(0xfffffffe))
 		cur_slot.value = f_hash->hash_slot[index].value;
 	owner_index = cur_slot.s.index;
 	assert(owner_index < (cl_uint)(0xfffffffe));
@@ -1427,7 +1429,6 @@ gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,
 	{
 		kresults->results[dest_index] = dest_index;
 	}
-
 	/* write-back execution status into host-side */
 	kern_writeback_error_status(&kgpreagg->kerror, kcxt.e);
 }
@@ -1447,41 +1448,104 @@ gpupreagg_fixup_varlena(kern_gpupreagg *kgpreagg, kern_data_store *kds_final)
 	kern_context	kcxt;
 	varlena		   *kparam_0 = (varlena *) kparam_get_value(kparams, 0);
 	cl_char		   *gpagg_atts = (cl_char *) VARDATA(kparam_0);
-	cl_uint			nattrs = kds_final->ncols;
-	cl_uint			colidx;
+	cl_uint			i, ncols = kds_final->ncols;
 	kern_colmeta	cmeta;
+	size_t			kds_index = get_global_id();
+	Datum		   *dst_values = KERN_DATA_STORE_VALUES(kds_final, kds_index);
+	cl_bool		   *dst_isnull = KERN_DATA_STORE_ISNULL(kds_final, kds_index);
+	cl_char		   *numeric_ptr = NULL;
+	cl_uint			numeric_len = 0;
 
 	/* Sanity checks */
 	assert(kds_final->format == KDS_FORMAT_SLOT);
+	assert(kds_final->has_notbyval);
 
 	INIT_KERNEL_CONTEXT(&kcxt,gpupreagg_fixup_varlena,kparams);
 
-	if (get_global_id() < kds_final->nitems)
+	/*
+	 * Expand extra field to fixup numeric data type; varlena or indirect
+	 * data types are already copied to the extra field, so all we have to
+	 * fixup here is numeric data type.
+	 */
+	if (kds_final->has_numeric)
 	{
-		size_t		kds_index = get_global_id();
-		Datum	   *ts_values = KERN_DATA_STORE_VALUES(kds_final, kds_index);
-		cl_bool	   *ts_isnull = KERN_DATA_STORE_ISNULL(kds_final, kds_index);
+		cl_uint		offset;
+		cl_uint		count;
+		__shared__ cl_uint base;
 
-		for (colidx = 0; colidx < nattrs; colidx++)
+		if (kds_index < kds_final->nitems)
 		{
-			if (gpagg_atts[colidx] != GPUPREAGG_FIELD_IS_GROUPKEY)
+			for (i=0; i < ncols; i++)
+			{
+				cmeta = kds_final->colmeta[i];
+
+				if (cmeta.atttypid != PG_NUMERICOID)
+					continue;
+				if (dst_isnull[i])
+					continue;
+				numeric_len += MAXALIGN(pg_numeric_to_varlena(&kcxt, NULL,
+															  dst_values[i],
+															  dst_isnull[i]));
+			}
+		}
+		/* allocation of the extra buffer on demand */
+		offset = arithmetic_stairlike_add(numeric_len, &count);
+		if (get_local_id() == 0)
+		{
+			if (count > 0)
+				base = atomicAdd(&kds_final->usage, count);
+			else
+				base = 0;
+		}
+		__syncthreads();
+
+		/*
+		 * At this point, number of items will be never increased any more,
+		 * so extra area is limited by nitems, not nrooms. It is actually
+		 * 'extra' area than final_reduction phase. :-)
+		 */
+		if (KERN_DATA_STORE_SLOT_LENGTH(kds_final, kds_final->nitems) +
+			base + count >= kds_final->length)
+		{
+			STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
+			goto out;
+		}
+		numeric_ptr = ((char *)kds_final + kds_final->length -
+					   (base + offset + numeric_len));
+	}
+
+	if (kds_index < kds_final->nitems)
+	{
+		for (i=0; i < ncols; i++)
+		{
+			/* No need to fixup NULL value anyway */
+			if (dst_isnull[i])
 				continue;
-			/* fixed length variable? */
-			cmeta = kds_final->colmeta[colidx];
-			if (cmeta.attbyval)
-				continue;
-			/* null variable? */
-			if (ts_isnull[colidx])
-				continue;
-			/* fixup pointer variables */
-			assert(ts_values[colidx] >= ((size_t)kds_final +
+
+			cmeta = kds_final->colmeta[i];
+			if (cmeta.atttypid == PG_NUMERICOID)
+			{
+				assert(numeric_ptr != NULL);
+
+				numeric_len = pg_numeric_to_varlena(&kcxt, numeric_ptr,
+													dst_values[i],
+													dst_isnull[i]);
+				dst_values[i] = devptr_to_host(kds_final, numeric_ptr);
+				numeric_ptr += MAXALIGN(numeric_len);
+			}
+			else if (!cmeta.attbyval)
+			{
+				/* validation of the device pointer */
+				assert(dst_values[i] >= ((size_t)kds_final +
 										 kds_final->length -
 										 kds_final->usage) &&
-				   ts_values[colidx] <  ((size_t)kds_final +
+					   dst_values[i] <  ((size_t)kds_final +
 										 kds_final->length));
-			ts_values[colidx] = devptr_to_host(kds_final, ts_values[colidx]);
+				dst_values[i] = devptr_to_host(kds_final, dst_values[i]);
+			}
 		}
 	}
+out:
 	/* write-back execution status into host-side */
 	kern_writeback_error_status(&kgpreagg->kerror, kcxt.e);
 }

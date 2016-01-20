@@ -223,34 +223,6 @@ BulkExecProcNode(GpuTaskState *gts, size_t chunk_size)
 	elog(ERROR, "Bug? exec_chunk callback was not implemented");
 }
 
-#if 1
-/*
- * pgstrom_fixup_kernel_numeric
- *
- * It fixes up internal numeric representation
- *
- * TO BE DEPRECATED - Slot+Extra buffer allows to fixup numeric in kernel
- */
-Datum
-pgstrom_fixup_kernel_numeric(Datum datum)
-{
-	cl_ulong	numeric_value = (cl_ulong) datum;
-	bool		sign = PG_NUMERIC_SIGN(numeric_value);
-	int			expo = PG_NUMERIC_EXPONENT(numeric_value);
-	cl_ulong	mantissa = PG_NUMERIC_MANTISSA(numeric_value);
-	char		temp[100];
-
-	/* more effective implementation in the future :-) */
-	snprintf(temp, sizeof(temp), "%c%lue%d",
-			 sign ? '-' : '+', mantissa, expo);
-	//elog(INFO, "numeric %016lx -> %s", numeric_value, temp);
-	return DirectFunctionCall3(numeric_in,
-							   CStringGetDatum(temp),
-							   Int32GetDatum(0),
-							   Int32GetDatum(-1));
-}
-#endif
-
 bool
 kern_fetch_data_store(TupleTableSlot *slot,
 					  kern_data_store *kds,
@@ -373,8 +345,7 @@ init_kernel_data_store(kern_data_store *kds,
 					   TupleDesc tupdesc,
 					   Size length,
 					   int format,
-					   uint nrooms,
-					   bool internal_format)
+					   uint nrooms)
 {
 	int		i, attcacheoff;
 
@@ -401,27 +372,29 @@ init_kernel_data_store(kern_data_store *kds,
 	for (i=0; i < tupdesc->natts; i++)
 	{
 		Form_pg_attribute attr = tupdesc->attrs[i];
-		bool	attbyval = attr->attbyval;
 		int		attalign = typealign_get_width(attr->attalign);
-		int		attlen   = attr->attlen;
-		int		attnum   = attr->attnum;
+
+		if (!attr->attbyval)
+			kds->has_notbyval = true;
+		if (attr->atttypid == NUMERICOID)
+			kds->has_numeric = true;
 
 		if (attcacheoff > 0)
 		{
-			if (attlen > 0)
+			if (attr->attlen > 0)
 				attcacheoff = TYPEALIGN(attalign, attcacheoff);
 			else
 				attcacheoff = -1;	/* no more shortcut any more */
 		}
-		kds->colmeta[i].attbyval = attbyval;
+		kds->colmeta[i].attbyval = attr->attbyval;
 		kds->colmeta[i].attalign = attalign;
-		kds->colmeta[i].attlen = attlen;
-		kds->colmeta[i].attnum = attnum;
+		kds->colmeta[i].attlen = attr->attlen;
+		kds->colmeta[i].attnum = attr->attnum;
 		kds->colmeta[i].attcacheoff = attcacheoff;
 		kds->colmeta[i].atttypid = (cl_uint)attr->atttypid;
 		kds->colmeta[i].atttypmod = (cl_int)attr->atttypmod;
 		if (attcacheoff >= 0)
-			attcacheoff += attlen;
+			attcacheoff += attr->attlen;
 	}
 }
 
@@ -707,7 +680,7 @@ pgstrom_create_data_store_row(GpuContext *gcontext,
 	 * determine 'nrooms' preliminary, so INT_MAX instead.
 	 */
 	init_kernel_data_store(pds->kds, tupdesc, pds->kds_length,
-						   KDS_FORMAT_ROW, INT_MAX, false);
+						   KDS_FORMAT_ROW, INT_MAX);
 
 	/* OK, it is now tracked by GpuContext */
 	dlist_push_tail(&gcontext->pds_list, &pds->pds_chain);
@@ -718,7 +691,6 @@ pgstrom_create_data_store_row(GpuContext *gcontext,
 pgstrom_data_store *
 pgstrom_create_data_store_slot(GpuContext *gcontext,
 							   TupleDesc tupdesc, cl_uint nrooms,
-							   bool internal_format,
 							   Size extra_length,
 							   pgstrom_data_store *ptoast)
 {
@@ -825,7 +797,7 @@ pgstrom_create_data_store_slot(GpuContext *gcontext,
 		pds->ptoast = ptoast;
 	}
 	init_kernel_data_store(pds->kds, tupdesc, pds->kds_length,
-						   KDS_FORMAT_SLOT, nrooms, internal_format);
+						   KDS_FORMAT_SLOT, nrooms);
 
 	/* OK, now it is tracked by GpuContext */
 	dlist_push_tail(&gcontext->pds_list, &pds->pds_chain);

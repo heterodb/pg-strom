@@ -71,9 +71,6 @@ typedef struct
 	const char	   *kern_source;
 	int				extra_flags;
 	List		   *used_params;	/* referenced Const/Param */
-	bool			has_numeric;	/* if true, result contains numeric val */
-	bool			has_notbyval;	/* if true, result contains varlena or
-									 * indirect reference (!attbyval) */
 } GpuPreAggInfo;
 
 static inline void
@@ -101,8 +98,6 @@ form_gpupreagg_info(CustomScan *cscan, GpuPreAggInfo *gpa_info)
 	privs = lappend(privs, makeString(pstrdup(gpa_info->kern_source)));
 	privs = lappend(privs, makeInteger(gpa_info->extra_flags));
 	exprs = lappend(exprs, gpa_info->used_params);
-	privs = lappend(privs, makeInteger(gpa_info->has_numeric));
-	privs = lappend(privs, makeInteger(gpa_info->has_notbyval));
 
 	cscan->custom_private = privs;
 	cscan->custom_exprs = exprs;
@@ -140,8 +135,6 @@ deform_gpupreagg_info(CustomScan *cscan)
 	gpa_info->kern_source = strVal(list_nth(privs, pindex++));
 	gpa_info->extra_flags = intVal(list_nth(privs, pindex++));
 	gpa_info->used_params = list_nth(exprs, eindex++);
-	gpa_info->has_numeric = intVal(list_nth(privs, pindex++));
-	gpa_info->has_notbyval = intVal(list_nth(privs, pindex++));
 
 	return gpa_info;
 }
@@ -157,9 +150,6 @@ typedef struct
 	List		   *outer_quals;
 	TupleTableSlot *outer_overflow;
 	pgstrom_data_store *outer_pds;
-
-	bool			has_numeric;
-	bool			has_notbyval;
 
 	/*
 	 * segment is a set of chunks to be aggregated
@@ -230,7 +220,6 @@ typedef struct
 	cl_int			segment_id;		/* my index within segment */
 	cl_int			reduction_mode;	/* one of GPUPREAGG_*_REDUCTION */
 	bool			is_terminator;	/* If true, collector of final result */
-	bool			has_notbyval;	/* If true, it has varlena/indirect keys */
 	double			num_groups;		/* estimated number of groups */
 	CUfunction		kern_prep;
 	CUfunction		kern_lagg;
@@ -1544,8 +1533,6 @@ gpupreagg_rewrite_expr(Agg *agg,
 					   AttrNumber **p_attr_maps,
 					   Bitmapset **p_attr_refs,
 					   int	*p_extra_flags,
-					   bool *p_has_numeric,
-					   bool *p_has_notbyval,
 					   Size *p_varlena_unitsz,
 					   cl_int *p_safety_limit)
 {
@@ -1557,8 +1544,6 @@ gpupreagg_rewrite_expr(Agg *agg,
 	AttrNumber *attr_maps;
 	Bitmapset  *attr_refs = NULL;
 	Bitmapset  *grouping_keys = NULL;
-	bool		has_numeric = false;
-	bool		has_notbyval = false;
 	Size		varlena_unitsz = 0;
 	ListCell   *cell;
 	Size		final_length;
@@ -1630,11 +1615,8 @@ gpupreagg_rewrite_expr(Agg *agg,
 		}
 
 		/* check whether types need special treatment */
-		if (dtype->type_oid == NUMERICOID)
-			has_numeric = true;
-		else if (!dtype->type_byval)
+		if (!dtype->type_byval)
 		{
-			has_notbyval = true;
 			/*
 			 * We also need to estimate average size of varlene or indirect
 			 * grouping keys to make copies of varlena datum on extra area
@@ -1702,7 +1684,6 @@ gpupreagg_rewrite_expr(Agg *agg,
 	{
 		TargetEntry	   *oldtle = lfirst(cell);
 		TargetEntry	   *newtle = flatCopyTargetEntry(oldtle);
-		Oid				type_oid;
 
 		newtle->expr = (Expr *)gpupreagg_rewrite_mutator((Node *)oldtle->expr,
 														 &context);
@@ -1713,11 +1694,6 @@ gpupreagg_rewrite_expr(Agg *agg,
 				 nodeToString(oldtle->expr));
 			return false;
 		}
-		type_oid = exprType((Node *)newtle->expr);
-		if (type_oid == NUMERICOID)
-			has_numeric = true;
-		else if (get_typlen(type_oid) < 0)
-			has_notbyval = true;
 		agg_tlist = lappend(agg_tlist, newtle);
 	}
 
@@ -1728,7 +1704,6 @@ gpupreagg_rewrite_expr(Agg *agg,
 	{
 		Expr	   *old_expr = lfirst(cell);
 		Expr	   *new_expr;
-		Oid			type_oid;
 
 		new_expr = (Expr *)gpupreagg_rewrite_mutator((Node *)old_expr,
 													 &context);
@@ -1739,11 +1714,6 @@ gpupreagg_rewrite_expr(Agg *agg,
                  nodeToString(old_expr));
 			return false;
 		}
-		type_oid = exprType((Node *)new_expr);
-		if (type_oid == NUMERICOID)
-			has_numeric = true;
-		else if (get_typlen(type_oid) < 0)
-			has_notbyval = true;
 		agg_quals = lappend(agg_quals, new_expr);
 	}
 	*p_agg_tlist = agg_tlist;
@@ -1752,8 +1722,6 @@ gpupreagg_rewrite_expr(Agg *agg,
 	*p_attr_maps = attr_maps;
 	*p_attr_refs = context.attr_refs;
 	*p_extra_flags = context.extra_flags;
-	*p_has_numeric = has_numeric;
-	*p_has_notbyval = has_notbyval;
 	*p_varlena_unitsz = varlena_unitsz;
 	*p_safety_limit = context.safety_limit;
 
@@ -3171,8 +3139,6 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	List		   *outer_quals = NIL;
 	List		   *tlist_dev = NIL;
 	double			outer_nitems;
-	bool			has_numeric = false;
-	bool			has_notbyval = false;
 	Size			varlena_unitsz;
 	cl_int			safety_limit;
 	cl_int			key_dist_salt;
@@ -3203,8 +3169,6 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 								&attr_maps,
 								&attr_refs,
 								&extra_flags,
-								&has_numeric,
-								&has_notbyval,
 								&varlena_unitsz,
 								&safety_limit))
 		return;
@@ -3418,8 +3382,6 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 											 &context);
 	gpa_info.extra_flags = extra_flags | context.extra_flags;
 	gpa_info.used_params = context.used_params;
-	gpa_info.has_numeric = has_numeric;
-	gpa_info.has_notbyval = has_notbyval;
 
 	/*
 	 * NOTE: In case when GpuPreAgg pull up outer base relation, CPU fallback
@@ -3597,8 +3559,6 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 		ExecInitExpr((Expr *) gpa_info->outer_quals, ps);
 	gpas->outer_overflow = NULL;
 	gpas->outer_pds = NULL;
-	gpas->has_numeric = gpa_info->has_numeric;
-	gpas->has_notbyval = gpa_info->has_notbyval;
 	gpas->curr_segment = NULL;
 
 	/*
@@ -3775,7 +3735,6 @@ gpupreagg_create_segment(GpuPreAggState *gpas)
 	pds_final = pgstrom_create_data_store_slot(gcontext,
 											   tupdesc,
 											   f_nrooms,
-											   gpas->has_numeric,
 											   varlena_length,
 											   NULL);
 	/* gpupreagg_segment itself */
@@ -4058,7 +4017,6 @@ gpupreagg_task_create(GpuPreAggState *gpas,
 	gpreagg->segment = segment;	/* caller already acquired */
 	gpreagg->is_terminator = is_terminator;
 	gpreagg->reduction_mode = gpas->reduction_mode;
-	gpreagg->has_notbyval = gpas->has_notbyval;
 	/*
 	 * FIXME: If num_groups is larger than expectation, we may need to
 	 * change the reduction policy on run-time
@@ -4098,8 +4056,7 @@ gpupreagg_task_create(GpuPreAggState *gpas,
 						   tupdesc,
 						   length,
 						   KDS_FORMAT_SLOT,
-						   nitems,
-						   gpas->has_numeric);
+						   nitems);
 	return gpreagg;
 }
 
@@ -4334,32 +4291,6 @@ gpupreagg_next_tuple(GpuTaskState *gts)
 			elog(NOTICE, "Bug? empty slot was specified by kern_resultbuf");
 			slot = NULL;
 		}
-		else if (gpas->has_numeric)
-		{
-			TupleDesc	tupdesc = slot->tts_tupleDescriptor;
-			int			i;
-
-			/*
-			 * We have to fixup numeric values from the in-kernel format
-			 * to PostgreSQL's internal format.
-			 */
-			slot_getallattrs(slot);
-			for (i=0; i < tupdesc->natts; i++)
-			{
-				Form_pg_attribute	attr = tupdesc->attrs[i];
-
-				if (attr->atttypid != NUMERICOID || slot->tts_isnull[i])
-					continue;	/* no need to fixup */
-
-				slot->tts_values[i] =
-					pgstrom_fixup_kernel_numeric(slot->tts_values[i]);
-			}
-
-			/* Now we expect GpuPreAgg takes KDS_FORMAT_TUPSLOT for result
-			 * buffer, it should not have tts_tuple to be fixed up too.
-			 */
-			Assert(!slot->tts_tuple);
-		}
 	}
 	PERFMON_END(&gts->pfm_accum, time_materialize, &tv1, &tv2);
 	return slot;
@@ -4576,11 +4507,15 @@ gpupreagg_task_complete(GpuTask *gtask)
 				elog(ERROR, "Unknown reduction mode: %d",
 					 gpreagg->reduction_mode);
 		}
-		if (gpreagg->is_terminator && gpreagg->has_notbyval)
+		if (gpreagg->is_terminator)
 		{
-			CUDA_EVENT_ELAPSED(gpreagg, time_kern_fixvar,
-							   ev_kern_fixvar_begin,
-							   ev_dma_recv_start);
+			gpupreagg_segment  *segment = gpreagg->segment;
+			pgstrom_data_store *pds_final = segment->pds_final;
+
+			if (pds_final->kds->has_notbyval)
+				CUDA_EVENT_ELAPSED(gpreagg, time_kern_fixvar,
+								   ev_kern_fixvar_begin,
+								   ev_dma_recv_start);
 		}
 		CUDA_EVENT_ELAPSED(gpreagg, time_dma_recv,
 						   ev_dma_recv_start,
@@ -4618,6 +4553,16 @@ gpupreagg_task_complete(GpuTask *gtask)
 		{
 			gpreagg->is_terminator = true;
 			segment->has_terminator = true;
+			elog(NOTICE, "segment is urgently terminated. who fixes up numeric and varlena?");
+			/*
+			 * FIXME: In case when non-terminator task was promoted to
+			 * terminator task, we have to
+			 * (1) synchronize completion of the other tasks
+			 * (2) enqueue recv DMA to pds_final
+			 * 
+			 * Also, we have to check this urgent promotion prior to
+			 * event profiling for correct performance counter.
+			 */
 		}
 	}
 
@@ -4759,7 +4704,6 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 	size_t				length;
 	size_t				grid_size;
 	size_t				block_size;
-	size_t				lmem_size;
 	CUevent				ev_kern_exec_end;
 	CUresult			rc;
 	cl_int				i;
@@ -5003,7 +4947,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 							grid_size, 1, 1,
 							block_size, 1, 1,
 							Max(sizeof(pagg_datum),
-								sizeof(cl_uint)) * block_size,
+								sizeof(kern_errorbuf)) * block_size,
 							gpreagg->task.cuda_stream,
 							kern_args,
 							NULL);
@@ -5030,17 +4974,18 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 										   gpreagg->task.cuda_device,
 										   true,
 										   nitems,
-										   Max(sizeof(pagg_hashslot),
-											   sizeof(pagg_datum)));
+										   Max3(sizeof(kern_errorbuf),
+												sizeof(pagg_hashslot),
+												sizeof(pagg_datum)));
 			kern_args[0] = &gpreagg->m_gpreagg;
 			kern_args[1] = &gpreagg->m_kds_1st;
 			kern_args[2] = &gpreagg->m_kds_2nd;
-			lmem_size = Max(sizeof(pagg_hashslot),
-							sizeof(pagg_datum)) * block_size;
 			rc = cuLaunchKernel(gpreagg->kern_lagg,
 								grid_size, 1, 1,
 								block_size, 1, 1,
-								lmem_size,
+								Max3(sizeof(kern_errorbuf),
+									 sizeof(pagg_hashslot),
+									 sizeof(pagg_datum)) * block_size,
 								gpreagg->task.cuda_stream,
 								kern_args,
 								NULL);
@@ -5070,11 +5015,10 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 						? &gpreagg->m_kds_1st
 						: &gpreagg->m_kds_2nd);
 		kern_args[2] = &gpreagg->m_ghash;
-		lmem_size = sizeof(kern_errorbuf) * block_size;
 		rc = cuLaunchKernel(gpreagg->kern_gagg,
 							grid_size, 1, 1,
 							block_size, 1, 1,
-							lmem_size,
+							sizeof(kern_errorbuf) * block_size,
 							gpreagg->task.cuda_stream,
 							kern_args,
 							NULL);
@@ -5107,11 +5051,10 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 					: &gpreagg->m_kds_2nd);
 	kern_args[2] = &segment->m_kds_final;
 	kern_args[3] = &segment->m_hashslot_final;
-	lmem_size = sizeof(kern_errorbuf) * block_size;
 	rc = cuLaunchKernel(gpreagg->kern_fagg,
 						grid_size, 1, 1,
 						block_size, 1, 1,
-						lmem_size,
+						sizeof(kern_errorbuf) * block_size,
 						gpreagg->task.cuda_stream,
 						kern_args,
 						NULL);
@@ -5150,7 +5093,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 		/*
 		 * Fixup varlena values, if needed
 		 */
-		if (gpreagg->has_notbyval)
+		if (pds_final->kds->has_notbyval)
 		{
 			CUDA_EVENT_RECORD(gpreagg, ev_kern_fixvar_begin);
 			/* Launch:
