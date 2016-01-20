@@ -366,7 +366,7 @@ static char *gpujoin_codegen(PlannerInfo *root,
 							 GpuJoinInfo *gj_info,
 							 codegen_context *context);
 
-
+static void gpujoin_inner_unload(GpuJoinState *gjs);
 static pgstrom_multirels *gpujoin_inner_getnext(GpuJoinState *gjs);
 static pgstrom_multirels *multirels_attach_buffer(pgstrom_multirels *pmrels);
 static bool multirels_get_buffer(pgstrom_multirels *pmrels, GpuTask *gtask,
@@ -2744,18 +2744,21 @@ gpujoin_end(CustomScanState *node)
 	int				i;
 
 	/*
-	 * clean up subtree
+	 * clean up GpuJoin specific resources
+	 */
+	if (gjs->curr_pmrels)
+	{
+		multirels_detach_buffer(gjs->curr_pmrels, false, __FUNCTION__);
+		gjs->curr_pmrels = NULL;
+	}
+	gpujoin_inner_unload(gjs);
+
+	/*
+	 * Clean up subtree (if any)
 	 */
 	ExecEndNode(outerPlanState(node));
 	for (i=0; i < gjs->num_rels; i++)
 		ExecEndNode(gjs->inners[i].state);
-
-	/*
-	 * clean up GpuJoin specific resources
-	 */
-	if (gjs->curr_pmrels)
-		multirels_detach_buffer(gjs->curr_pmrels, false, __FUNCTION__);
-
 	/* then other generic resources */
 	pgstrom_release_gputaskstate(&gjs->gts);
 }
@@ -2765,7 +2768,6 @@ gpujoin_rescan(CustomScanState *node)
 {
 	GpuJoinState   *gjs = (GpuJoinState *) node;
 	bool			keep_inners = true;
-	ListCell	   *lc;
 	cl_int			i;
 
 	/* inform this GpuTaskState will produce more rows, prior to cleanup */
@@ -2807,7 +2809,9 @@ gpujoin_rescan(CustomScanState *node)
 		gjs->curr_pmrels = NULL;
 	}
 
-	if (keep_inners)
+	if (!keep_inners)
+		gpujoin_inner_unload(gjs);
+	else
 	{
 		/*
 		 * Just rewind the inner pointer.
@@ -2818,33 +2822,6 @@ gpujoin_rescan(CustomScanState *node)
 		 */
         for (i=0; i < gjs->num_rels; i++)
             gjs->inners[i].pds_index = 0;
-	}
-	else
-	{
-		/*
-		 * Unload the inner relations since it is not valid no longer
-		 */
-		gjs->inner_preloaded = false;
-		for (i=0; i < gjs->num_rels; i++)
-		{
-			innerState *istate = &gjs->inners[i];
-
-			/*
-			 * If chgParam of subnode is not null then plan will be
-			 * re-scanned by next ExecProcNode.
-			 */
-			if (istate->state->chgParam == NULL)
-				ExecReScan(istate->state);
-
-			foreach (lc, istate->pds_list)
-				pgstrom_release_data_store((pgstrom_data_store *) lfirst(lc));
-			istate->pds_list = NIL;
-			istate->pds_index = 0;
-			istate->pds_limit = 0;
-			istate->consumed = 0;
-			istate->ntuples = 0;
-			istate->tupstore = NULL;
-		}
 	}
 }
 
@@ -4229,7 +4206,7 @@ gpujoin_next_chunk(GpuTaskState *gts)
 		}
 		else
 		{
-			PlanState   *outer_node = outerPlanState(gjs);
+			PlanState  *outer_node = outerPlanState(gjs);
 			TupleDesc	tupdesc = ExecGetResultType(outer_node);
 
 			while (true)
@@ -5374,6 +5351,41 @@ add_extra_randomness(pgstrom_data_store *pds)
 	}
 	else
 		elog(ERROR, "Unexpected data chunk format: %u", kds->format);
+}
+
+/*
+ * gpujoin_inner_unload - it release inner relations and its data stores.
+ *
+ * TODO: We like to retain a part of inner relations if it is not
+ * parametalized.
+ */
+static void
+gpujoin_inner_unload(GpuJoinState *gjs)
+{
+	ListCell   *lc;
+	cl_int		i;
+
+	for (i=0; i < gjs->num_rels; i++)
+	{
+		innerState *istate = &gjs->inners[i];
+
+		/*
+		 * If chgParam of subnode is not null then plan will be
+		 * re-scanned by next ExecProcNode.
+		 */
+		if (istate->state->chgParam == NULL)
+			ExecReScan(istate->state);
+
+		foreach (lc, istate->pds_list)
+			pgstrom_release_data_store((pgstrom_data_store *) lfirst(lc));
+		istate->pds_list = NIL;
+		istate->pds_index = 0;
+		istate->pds_limit = 0;
+		istate->consumed = 0;
+		istate->ntuples = 0;
+		istate->tupstore = NULL;
+	}
+	gjs->inner_preloaded = false;
 }
 
 /*
