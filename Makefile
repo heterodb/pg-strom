@@ -10,7 +10,7 @@ PGSTROM_VERSION=1.0devel
 PGSTROM_VERSION_NUM=$(shell echo $(PGSTROM_VERSION)			\
 	| sed -e 's/\./ /g' -e 's/[A-Za-z].*$$//g'			\
 	| awk '{printf "%d%02d%02d", $$1, $$2, (NF >=3) ? $$3 : 0}')
-PGSTROM_BUILD_DATE="$(shell env LANG=C date '+%a %d-%b-%Y')"
+PGSTROM_BUILD_DATE="$(shell env LANG=C date '+%F %T %Z')"
 PG_VERSION_NUM=$(shell $(PG_CONFIG) --version | awk '{print $$NF}'	\
 	| sed -e 's/\./ /g' -e 's/[A-Za-z].*$$//g'			\
 	| awk '{printf "%d%02d%02d", $$1, $$2, (NF >=3) ? $$3 : 0}')

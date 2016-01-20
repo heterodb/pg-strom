@@ -795,7 +795,6 @@ pgstrom_cleanup_cuda(int code, Datum arg)
 
 			Assert(context != NULL);
 			cuda_last_contexts[i] = NULL;
-
 			rc = cuCtxDestroy(context);
 			if (rc != CUDA_SUCCESS)
 				elog(WARNING, "failed on cuCtxDestroy: %s", errorText(rc));
@@ -957,6 +956,7 @@ pgstrom_get_gpucontext(void)
 static void
 pgstrom_release_gpucontext(GpuContext *gcontext, bool sanity_release)
 {
+	bool		keep_context = sanity_release;
 	CUcontext	cuda_context;
 	CUresult	rc;
 	int			i;
@@ -999,12 +999,13 @@ pgstrom_release_gpucontext(GpuContext *gcontext, bool sanity_release)
 		pgstrom_data_store	   *pds =
 			dlist_container(pgstrom_data_store, pds_chain,
 							dlist_head_node(&gcontext->pds_list));
-		pgstrom_release_data_store(pds);
 
 		/* No PDS should be orphan if sanity release */
-		if (sanity_release)
-			elog(DEBUG1, "Orphan PDS found, no cuContext shall be cached %p", pds);
-		sanity_release = false;
+		elog(sanity_release ? NOTICE : DEBUG1,
+			 "Orphan PDS found at %p (format=%d, length=%u)",
+			 pds, pds->kds->format, pds->kds->length);
+		pgstrom_release_data_store(pds);
+		keep_context = false;
 	}
 
 	/*
@@ -1015,11 +1016,12 @@ pgstrom_release_gpucontext(GpuContext *gcontext, bool sanity_release)
 	for (i=0; i < gcontext->num_context; i++)
 	{
 		/* No device memory should be acquired if sanity release */
-		if (sanity_release && gcontext->gpu[i].gmem_used > 0)
+		if (gcontext->gpu[i].gmem_used > 0)
 		{
-			elog(DEBUG1, "Orphan GPU memory %zuKB on device %u, no cuContext shall be cached",
+			elog(sanity_release ? NOTICE : DEBUG1,
+				 "Orphan GPU memory %zuKB on device %u",
 				 gcontext->gpu[i].gmem_used / 1024, i);
-			sanity_release = false;
+			keep_context = false;
 		}
 		GpuScoreDeclMemUsage(gcontext, i, gcontext->gpu[i].gmem_used);
 	}
@@ -1034,7 +1036,7 @@ pgstrom_release_gpucontext(GpuContext *gcontext, bool sanity_release)
 	 * being cached for the next execution. In this case, only memory context
 	 * shall be released.
 	 */
-	if (sanity_release && cuda_last_contexts[0] == NULL)
+	if (keep_context && cuda_last_contexts[0] == NULL)
 	{
 		for (i=0; i < cuda_num_devices; i++)
 		{

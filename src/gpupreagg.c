@@ -3879,21 +3879,33 @@ gpupreagg_put_segment(gpupreagg_segment *segment)
 	{
 		GpuPreAggState *gpas = segment->gpas;
 
-		/* record statistics */
-		n = ++gpas->stat_num_segments;
-		gpas->stat_num_groups =
-			((double)gpas->stat_num_groups * (n-1) +
-			 (double)segment->total_ngroups) / n;
-		gpas->stat_num_chunks =
-			((double)gpas->stat_num_chunks * (n-1) +
-			 (double)segment->total_ntasks) / n;
-		gpas->stat_src_nitems =
-			((double)gpas->stat_src_nitems * (n-1) +
-			 (double)segment->total_nitems) / n;
-		gpas->stat_varlena_unitsz =
-			((double)gpas->stat_varlena_unitsz * (n-1) +
-			 (double)segment->total_varlena /
-			 (double)segment->total_ngroups) / n;
+		/* update statistics */
+		if (!segment->needs_fallback)
+		{
+			/*
+			 * Unless GpuPreAggState does not have very restrictive (but
+			 * nobody knows) outer_quals, GpuPreAgg operations shall have
+			 * at least one results.
+			 */
+			Assert(gpas->outer_quals != NIL || segment->total_ngroups > 0);
+			n = ++gpas->stat_num_segments;
+			gpas->stat_num_groups =
+				((double)gpas->stat_num_groups * (n-1) +
+				 (double)segment->total_ngroups) / n;
+			gpas->stat_num_chunks =
+				((double)gpas->stat_num_chunks * (n-1) +
+				 (double)segment->total_ntasks) / n;
+			gpas->stat_src_nitems =
+				((double)gpas->stat_src_nitems * (n-1) +
+				 (double)segment->total_nitems) / n;
+			if (segment->total_ngroups > 0)
+			{
+				gpas->stat_varlena_unitsz =
+					((double)gpas->stat_varlena_unitsz * (n-1) +
+					 (double)segment->total_varlena /
+					 (double)segment->total_ngroups) / n;
+			}
+		}
 		/* unless error path or fallback, it shall be released already */
 		gpupreagg_cleanup_segment(segment);
 
@@ -5121,6 +5133,9 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 	 */
 	if (gpreagg->is_terminator)
 	{
+		pgstrom_data_store *pds_final = segment->pds_final;
+		cl_uint		final_nrooms = pds_final->kds->nrooms;
+
 		/*
 		 * Synchronization of any other concurrent tasks
 		 */
@@ -5148,7 +5163,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 										   gpreagg->kern_fixvar,
 										   gpreagg->task.cuda_device,
 										   false,
-										   nitems,
+										   final_nrooms,
 										   sizeof(kern_errorbuf));
 			kern_args[0] = &gpreagg->m_gpreagg;
 			kern_args[1] = &segment->m_kds_final;

@@ -31,12 +31,13 @@ STROMCL_VARLENA_TYPE_TEMPLATE(bpchar)
 #endif
 
 STATIC_INLINE(cl_int)
-bpchar_truelen(varlena *arg)
+bpchar_truelen(kern_context *kcxt, varlena *arg)
 {
 	cl_char	   *s = VARDATA_ANY(arg);
 	cl_int		i, len;
 
 	len = VARSIZE_ANY_EXHDR(arg);
+	assert(len <= 50);
 	for (i = len - 1; i >= 0; i--)
 	{
 		if (s[i] != ' ')
@@ -50,8 +51,8 @@ bpchar_compare(kern_context *kcxt, varlena *arg1, varlena *arg2)
 {
 	cl_char	   *s1 = VARDATA_ANY(arg1);
 	cl_char	   *s2 = VARDATA_ANY(arg2);
-	cl_int		len1 = bpchar_truelen(arg1);
-	cl_int		len2 = bpchar_truelen(arg2);
+	cl_int		len1 = bpchar_truelen(kcxt, arg1);
+	cl_int		len2 = bpchar_truelen(kcxt, arg2);
 	cl_int		len = min(len1, len2);
 
 	while (len > 0)
@@ -168,7 +169,7 @@ pgfn_bpcharlen(kern_context *kcxt, pg_bpchar_t arg1)
 	 */
 	result.isnull = arg1.isnull;
 	if (!result.isnull)
-		result.value = bpchar_truelen(arg1.value);
+		result.value = bpchar_truelen(kcxt, arg1.value);
 	return result;
 }
 

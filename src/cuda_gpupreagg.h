@@ -412,7 +412,7 @@ gpupreagg_final_data_move(kern_context *kcxt,
 		kern_colmeta cmeta = kds_src->colmeta[i];
 
 		if (src_isnull[i])
-			continue;	/* no need buffer */
+			continue;	/* no buffer needed */
 		if (cmeta.atttypid == PG_NUMERICOID)
 			continue;	/* special internal data format */
 		if (!cmeta.attbyval)
@@ -447,7 +447,7 @@ gpupreagg_final_data_move(kern_context *kcxt,
 				dst_isnull[i] = true;
 				dst_values[i] = src_values[i];
 			}
-			return;
+			return 0;
 		}
 		alloc_ptr = ((char *)kds_dst + kds_dst->length -
 					 (usage_prev + alloc_size));
@@ -1080,7 +1080,7 @@ gpupreagg_final_preparation(size_t f_hashsize,
 KERNEL_FUNCTION(void)
 gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 						  kern_data_store *kds_dst,		/* in */
-						  kern_data_store *kds_final,		/* out */
+						  kern_data_store *kds_final,	/* out */
 						  kern_global_hashslot *f_hash)	/* only internal */
 {
 	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
@@ -1227,18 +1227,31 @@ retry_minor:
 		f_hash->hash_slot[index].s.index = new_slot.s.index;
 		/* this thread is the owner of this slot */
 		owner_index = new_slot.s.index;
+		cur_slot.value = new_slot.value;
 		isOwner = true;
 	}
-	else
-	{
-		/* wait updating the hash slot. */
-		while (cur_slot.s.index == (cl_uint)(0xfffffffe))
-		{
-			__threadfence();
-			cur_slot.value = f_hash->hash_slot[index].value;
-		}
-		__threadfence();
 
+	/*
+	 * Wait for updates of the final hash slot by the owner thread
+	 *
+	 * NOTE: Pay attention the readon why the owner thread also shall go
+	 * into the while loop below. If and when any of thread waits for
+	 * the update by the owner thread in same warp, its code block to put
+	 * initial values of kds_final has to be located prior to the busy-
+	 * loop below. If we would split the code block using if ... else,
+	 * compiler may reorder the 'else' block earlier than the code block
+	 * of the owner thread. It will make a deadlock hard to find, because
+	 * all the GPU thread shares same instruction pointer in a warp, thus,
+	 * we have to ensure the owner thread's code block is located prior to
+	 * the busy-loop.
+	 */
+	while ((volatile cl_uint)cur_slot.s.index == (cl_uint)(0xfffffffe))
+		cur_slot.value = f_hash->hash_slot[index].value;
+	owner_index = cur_slot.s.index;
+	assert(owner_index < (cl_uint)(0xfffffffe));
+
+	if (!isOwner)
+	{
 		if (cur_slot.s.hash == new_slot.s.hash &&
 			(cur_slot.s.index >= kds_final->nitems ||
 			 gpupreagg_keymatch(&kcxt,
@@ -1436,7 +1449,6 @@ gpupreagg_fixup_varlena(kern_gpupreagg *kgpreagg, kern_data_store *kds_final)
 	cl_char		   *gpagg_atts = (cl_char *) VARDATA(kparam_0);
 	cl_uint			nattrs = kds_final->ncols;
 	cl_uint			colidx;
-	size_t			offset;
 	kern_colmeta	cmeta;
 
 	/* Sanity checks */
