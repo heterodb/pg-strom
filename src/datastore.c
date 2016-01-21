@@ -349,6 +349,7 @@ init_kernel_data_store(kern_data_store *kds,
 {
 	int		i, attcacheoff;
 
+	memset(kds, 0, offsetof(kern_data_store, colmeta));
 	kds->hostptr = (hostptr_t) &kds->hostptr;
 	kds->length = length;
 	kds->usage = 0;

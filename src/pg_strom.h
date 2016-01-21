@@ -648,11 +648,10 @@ extern void show_instrumentation_count(const char *qlabel, int which,
 									   PlanState *planstate, ExplainState *es);
 extern void pgstrom_accum_perfmon(pgstrom_perfmon *accum,
 								  const pgstrom_perfmon *pfm);
-extern void
-pgstrom_explain_gputaskstate(GpuTaskState *gts, ExplainState *es);
+extern void pgstrom_explain_gputaskstate(GpuTaskState *gts, ExplainState *es);
 
 /*
- * opencl_*.h
+ * Device Code generated from cuda_*.h
  */
 extern const char *pgstrom_cuda_common_code;
 extern const char *pgstrom_cuda_gpuscan_code;

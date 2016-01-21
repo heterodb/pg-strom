@@ -1447,7 +1447,6 @@ gpupreagg_fixup_varlena(kern_gpupreagg *kgpreagg, kern_data_store *kds_final)
 	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	kern_context	kcxt;
 	varlena		   *kparam_0 = (varlena *) kparam_get_value(kparams, 0);
-	cl_char		   *gpagg_atts = (cl_char *) VARDATA(kparam_0);
 	cl_uint			i, ncols = kds_final->ncols;
 	kern_colmeta	cmeta;
 	size_t			kds_index = get_global_id();
