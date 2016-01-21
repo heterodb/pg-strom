@@ -1002,30 +1002,32 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 	}
 
 	/*
+	 * Quick bailout if thread is not valid, or no hash slot is available.
+	 * check_global_hashslot_usage() already put an error code, for CPU
+	 * fallback logic, so we can exit anyway.
+	 */
+	if (owner_index == (cl_uint)(0xffffffff))
+		goto out;
+
+	/*
 	 * Global reduction for each column
 	 *
-	 * Any threads that are NOT responsible to grouping-key calculates
-	 * aggregation on the item that is responsibles.
-	 * Once atomic operations got finished, values of pagg_datum in the
-	 * respobsible thread will have partially aggregated one.
+	 * Any non-owner thread shall accumulate its own value onto the value
+	 * owned by grouping-key owner. Once atomic operations got done, the
+	 * accumulated value means the partial aggregation.
+	 * In case when thread points invalid item or thread could not find
+	 * a hash slot (decision by check_global_hashslot_usage), this thread
+	 * will skip the reduction phase.
+	 * Even in the later case, check_global_hashslot_usage already set an
+	 * error code, so we don't care about here.
 	 */
-	for (attnum = 0; attnum < nattrs; attnum++)
+	if (owner_index != 0xffffffffU &&		/* a valid thread? */
+		owner_index != get_global_id())		/* not a owner thread? */
 	{
-		if (gpagg_atts[attnum] != GPUPREAGG_FIELD_IS_AGGFUNC)
-			continue;
-
-		/*
-		 * Reduction, using global atomic operation
-		 *
-		 * If thread is responsible to the grouping-key, other threads but
-		 * NOT responsible will accumlate their values here, then it shall
-		 * become aggregated result. So, we mark the "responsible" thread
-		 * identifier on the kern_row_map. Once kernel execution gets done,
-		 * this index points the location of aggregate value.
-		 */
-		if (get_global_id() < kds_dst->nitems &&
-			get_global_id() != owner_index)
+		for (attnum = 0; attnum < nattrs; attnum++)
 		{
+			if (gpagg_atts[attnum] != GPUPREAGG_FIELD_IS_AGGFUNC)
+				continue;
 			assert(owner_index < kds_dst->nrooms);
 			gpupreagg_global_calc(&kcxt,
 								  attnum,
