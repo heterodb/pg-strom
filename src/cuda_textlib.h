@@ -25,19 +25,13 @@
  * 
  * ----------------------------------------------------------------
  */
-#ifndef PG_BPCHAR_TYPE_DEFINED
-#define PG_BPCHAR_TYPE_DEFINED
-STROMCL_VARLENA_TYPE_TEMPLATE(bpchar)
-#endif
-
 STATIC_INLINE(cl_int)
-bpchar_truelen(kern_context *kcxt, varlena *arg)
+bpchar_truelen(struct varlena *arg)
 {
 	cl_char	   *s = VARDATA_ANY(arg);
 	cl_int		i, len;
 
 	len = VARSIZE_ANY_EXHDR(arg);
-	assert(len <= 50);
 	for (i = len - 1; i >= 0; i--)
 	{
 		if (s[i] != ' ')
@@ -46,13 +40,35 @@ bpchar_truelen(kern_context *kcxt, varlena *arg)
 	return i + 1;
 }
 
+#ifndef PG_BPCHAR_TYPE_DEFINED
+#define PG_BPCHAR_TYPE_DEFINED
+STROMCL_VARLENA_DATATYPE_TEMPLATE(bpchar)
+STROMCL_VARLENA_VARREF_TEMPLATE(bpchar)
+STROMCL_VARLENA_VARSTORE_TEMPLATE(bpchar)
+STROMCL_VARLENA_PARAMREF_TEMPLATE(bpchar)
+STROMCL_VARLENA_NULLTEST_TEMPLATE(bpchar)
+/* pg_bpchar_comp_crc32 has to be defined with own way */
+STATIC_FUNCTION(cl_uint)
+pg_bpchar_comp_crc32(const cl_uint *crc32_table,
+					 cl_uint hash, pg_bpchar_t datum)
+{
+	if (!datum.isnull)
+	{
+		hash = pg_common_comp_crc32(crc32_table, hash,
+									VARDATA_ANY(datum.value),
+									bpchar_truelen(datum.value));
+	}
+	return hash;
+}
+#endif
+
 STATIC_FUNCTION(cl_int)
 bpchar_compare(kern_context *kcxt, varlena *arg1, varlena *arg2)
 {
 	cl_char	   *s1 = VARDATA_ANY(arg1);
 	cl_char	   *s2 = VARDATA_ANY(arg2);
-	cl_int		len1 = bpchar_truelen(kcxt, arg1);
-	cl_int		len2 = bpchar_truelen(kcxt, arg2);
+	cl_int		len1 = bpchar_truelen(arg1);
+	cl_int		len2 = bpchar_truelen(arg2);
 	cl_int		len = min(len1, len2);
 
 	while (len > 0)
@@ -169,7 +185,7 @@ pgfn_bpcharlen(kern_context *kcxt, pg_bpchar_t arg1)
 	 */
 	result.isnull = arg1.isnull;
 	if (!result.isnull)
-		result.value = bpchar_truelen(kcxt, arg1.value);
+		result.value = bpchar_truelen(arg1.value);
 	return result;
 }
 

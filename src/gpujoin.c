@@ -5431,24 +5431,29 @@ get_tuple_hashvalue(innerState *istate, TupleTableSlot *slot)
 			 */
 			temp = pg_numeric_from_varlena(&dummy, (struct varlena *)
 										   DatumGetPointer(value));
-			keylen = sizeof(temp.value);
-			keybyval = true;
-			value = temp.value;
+			COMP_LEGACY_CRC32(hash, &temp.value, sizeof(temp.value));
 		}
+		else if (keytype == BPCHAROID)
+		{
+			/*
+			 * whitespace is the tail end of CHAR(n) data shall be ignored
+			 * when we calculate hash-value, to match same text exactly.
+			 */
+			cl_char	   *s = VARDATA_ANY(value);
+			cl_int		i, len = VARSIZE_ANY_EXHDR(value);
 
-		if (keylen > 0)
-		{
-			if (keybyval)
-				COMP_LEGACY_CRC32(hash, &value, keylen);
-			else
-				COMP_LEGACY_CRC32(hash, DatumGetPointer(value), keylen);
+			for (i = len - 1; i >= 0 && s[i] == ' '; i--)
+				;
+			COMP_LEGACY_CRC32(hash, VARDATA_ANY(value), i+1);
 		}
+		else if (keybyval)
+			COMP_LEGACY_CRC32(hash, &value, keylen);
+		else if (keylen > 0)
+			COMP_LEGACY_CRC32(hash, DatumGetPointer(value), keylen);
 		else
-		{
 			COMP_LEGACY_CRC32(hash,
 							  VARDATA_ANY(value),
 							  VARSIZE_ANY_EXHDR(value));
-		}
 	}
 	FIN_LEGACY_CRC32(hash);
 

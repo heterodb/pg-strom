@@ -856,53 +856,41 @@ pg_common_vstore(kern_data_store *kds,
 #define FIN_LEGACY_CRC32(crc)		((crc) ^= 0xFFFFFFFF)
 #define EQ_LEGACY_CRC32(crc1,crc2)	((crc1) == (crc2))
 
+STATIC_INLINE(cl_uint)
+pg_common_comp_crc32(const cl_uint *crc32_table,
+					 cl_uint hash,
+					 const char *__data, cl_uint __len)
+{
+	cl_uint		__index;
+
+	while (__len-- > 0)
+	{
+		__index = ((int) ((hash) >> 24) ^ *__data++) & 0xff;
+		hash = crc32_table[__index] ^ ((hash) << 8);
+	}
+	return hash;
+}
+
 #define STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(NAME,BASE)			\
 	STATIC_FUNCTION(cl_uint)									\
 	pg_##NAME##_comp_crc32(const cl_uint *crc32_table,			\
 						   cl_uint hash, pg_##NAME##_t datum)	\
 	{															\
-		cl_uint         __len = sizeof(BASE);					\
-		cl_uint         __index;								\
-		union {													\
-			BASE        as_base;								\
-			cl_uint     as_int;									\
-			cl_ulong    as_long;								\
-		} __data;												\
-																\
 		if (!datum.isnull)										\
 		{														\
+			union {												\
+				BASE	as_base;								\
+				char	as_char[sizeof(BASE)];					\
+			} __data;											\
+																\
 			__data.as_base = datum.value;						\
-			while (__len-- > 0)									\
-			{													\
-				__index = (((hash) >> 24) ^ __data.as_int) & 0xff;	\
-				hash = crc32_table[__index] ^ ((hash) << 8);	\
-				__data.as_long = (__data.as_long >> 8);			\
-			}													\
+			hash = pg_common_comp_crc32(crc32_table,			\
+										hash,					\
+										__data.as_char,			\
+										sizeof(BASE));			\
 		}														\
 		return hash;											\
 	}
-
-/*
- * utility routine to compute crc32 of cl_uint data type
- */
-STATIC_INLINE(cl_uint)
-cl_uint_comp_crc32(const cl_uint *crc32_table, cl_uint value)
-{
-	cl_uint		__len = sizeof(cl_uint);
-	cl_uint		__index;
-	cl_uint		hash;
-
-	INIT_LEGACY_CRC32(hash);
-	while (__len-- > 0)
-	{
-		__index = (((hash) >> 24) ^ value) & 0xff;
-		hash = crc32_table[__index] ^ ((hash) << 8);
-		value = (value >> 8);
-	}
-	FIN_LEGACY_CRC32(hash);
-
-	return hash;
-}
 
 #define STROMCL_SIMPLE_TYPE_TEMPLATE(NAME,BASE)		\
 	STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME,BASE)		\
@@ -1431,15 +1419,10 @@ pg_varlena_comp_crc32(const cl_uint *crc32_table,
 {
 	if (!datum.isnull)
 	{
-		const cl_char  *__data = VARDATA_ANY(datum.value);
-		cl_uint			__len = VARSIZE_ANY_EXHDR(datum.value);
-		cl_uint			__index;
-
-		while (__len-- > 0)
-		{
-			__index = ((int) ((hash) >> 24) ^ *__data++) & 0xff;
-			hash = crc32_table[__index] ^ ((hash) << 8);
-		}
+		hash = pg_common_comp_crc32(crc32_table,
+									hash,
+									VARDATA_ANY(datum.value),
+									VARSIZE_ANY_EXHDR(datum.value));
 	}
 	return hash;
 }
