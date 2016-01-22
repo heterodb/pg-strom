@@ -366,7 +366,7 @@ static char *gpujoin_codegen(PlannerInfo *root,
 							 GpuJoinInfo *gj_info,
 							 codegen_context *context);
 
-static void gpujoin_inner_unload(GpuJoinState *gjs);
+static void gpujoin_inner_unload(GpuJoinState *gjs, bool needs_rescan);
 static pgstrom_multirels *gpujoin_inner_getnext(GpuJoinState *gjs);
 static pgstrom_multirels *multirels_attach_buffer(pgstrom_multirels *pmrels);
 static bool multirels_get_buffer(pgstrom_multirels *pmrels, GpuTask *gtask,
@@ -2751,7 +2751,7 @@ gpujoin_end(CustomScanState *node)
 		multirels_detach_buffer(gjs->curr_pmrels, false, __FUNCTION__);
 		gjs->curr_pmrels = NULL;
 	}
-	gpujoin_inner_unload(gjs);
+	gpujoin_inner_unload(gjs, false);
 
 	/*
 	 * Clean up subtree (if any)
@@ -2810,7 +2810,7 @@ gpujoin_rescan(CustomScanState *node)
 	}
 
 	if (!keep_inners)
-		gpujoin_inner_unload(gjs);
+		gpujoin_inner_unload(gjs, true);
 	else
 	{
 		/*
@@ -5359,7 +5359,7 @@ add_extra_randomness(pgstrom_data_store *pds)
  * parametalized.
  */
 static void
-gpujoin_inner_unload(GpuJoinState *gjs)
+gpujoin_inner_unload(GpuJoinState *gjs, bool needs_rescan)
 {
 	ListCell   *lc;
 	cl_int		i;
@@ -5372,9 +5372,8 @@ gpujoin_inner_unload(GpuJoinState *gjs)
 		 * If chgParam of subnode is not null then plan will be
 		 * re-scanned by next ExecProcNode.
 		 */
-		if (istate->state->chgParam == NULL)
+		if (needs_rescan && istate->state->chgParam == NULL)
 			ExecReScan(istate->state);
-
 		foreach (lc, istate->pds_list)
 			pgstrom_release_data_store((pgstrom_data_store *) lfirst(lc));
 		istate->pds_list = NIL;
