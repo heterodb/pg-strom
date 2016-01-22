@@ -305,12 +305,16 @@ __STROM_SET_ERROR(kern_errorbuf *p_kerror, cl_int errcode, cl_int lineno,
 	__STROM_SET_ERROR((p_kerror), (errcode), __LINE__, 123, 456, 789)
 #define STROM_SET_ERROR_EXTRA(p_kerror, errcode, x, y, z)	\
 	__STROM_SET_ERROR((p_kerror), (errcode), __LINE__, (x), (y), (z))
-#define STROM_SET_RUNTIME_ERROR(p_kerror, errcode)				\
-	STROM_SET_ERROR((p_kerror), (errcode) == 0 ? (errcode) :	\
-					(errcode) + StromError_CudaDevRunTimeBase)
-#define STROM_SET_RUNTIME_ERROR_EXTRA(p_kerror, errcode, x, y, z)	\
-	STROM_SET_ERROR_EXTRA((p_kerror), (errcode) == 0 ? (errcode) :	\
-					(errcode) + StromError_CudaDevRunTimeBase, (x), (y), (z))
+#define STROM_SET_RUNTIME_ERROR(p_kerror, errcode)						\
+	STROM_SET_ERROR((p_kerror), (errcode) == cudaSuccess ?				\
+					(cl_int)(errcode) :									\
+					(cl_int)(errcode) + StromError_CudaDevRunTimeBase)
+#define STROM_SET_RUNTIME_ERROR_EXTRA(p_kerror, errcode, x, y, z)		\
+	STROM_SET_ERROR_EXTRA((p_kerror),									\
+						  (errcode) == cudaSuccess ?					\
+						  (cl_int)(errcode) :							\
+						  (cl_int)(errcode) + StromError_CudaDevRunTimeBase, \
+						  (x), (y), (z))
 #else	/* __CUDACC__ */
 #ifdef PGSTROM_DEBUG
 #define KERROR_EXTRA_X(p_kerror)		((p_kerror)->extra_x)
