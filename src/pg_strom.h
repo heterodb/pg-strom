@@ -321,17 +321,16 @@ struct GpuTask
 /*
  * Type declarations for code generator
  */
-#define DEVFUNC_NEEDS_TIMELIB			0x00000008
-#define DEVFUNC_NEEDS_TEXTLIB			0x00000010
-#define DEVFUNC_NEEDS_NUMERIC			0x00000020
-#define DEVFUNC_NEEDS_MATHLIB			0x00000040
-#define DEVFUNC_NEEDS_MONEY				0x00000080
-#define DEVFUNC_INCL_FLAGS				0x000000f8
-#define DEVKERNEL_NEEDS_GPUSCAN			0x00010000
-#define DEVKERNEL_NEEDS_GPUJOIN			0x00020000
-#define DEVKERNEL_NEEDS_GPUPREAGG		0x00040000
-#define DEVKERNEL_NEEDS_GPUSORT			0x00080000
-#define DEVKERNEL_NEEDS_LIBCUDART		0x80000000
+#define DEVKERNEL_NEEDS_TIMELIB			0x00000008
+#define DEVKERNEL_NEEDS_TEXTLIB			0x00000010
+#define DEVKERNEL_NEEDS_NUMERIC			0x00000020
+#define DEVKERNEL_NEEDS_MATHLIB			0x00000040
+#define DEVKERNEL_NEEDS_MONEY			0x00000080
+#define DEVKERNEL_NEEDS_DYNPARA			0x00000100
+#define DEVKERNEL_NEEDS_GPUSCAN			0x01000000	/* GpuScan logic */
+#define DEVKERNEL_NEEDS_GPUJOIN			0x02000000	/* GpuJoin logic */
+#define DEVKERNEL_NEEDS_GPUPREAGG		0x04000000	/* GpuPreAgg logic */
+#define DEVKERNEL_NEEDS_GPUSORT			0x08000000	/* GpuSort logic */
 
 struct devtype_info;
 struct devfunc_info;
@@ -654,6 +653,7 @@ extern void pgstrom_explain_gputaskstate(GpuTaskState *gts, ExplainState *es);
  * Device Code generated from cuda_*.h
  */
 extern const char *pgstrom_cuda_common_code;
+extern const char *pgstrom_cuda_dynpara_code;
 extern const char *pgstrom_cuda_gpuscan_code;
 extern const char *pgstrom_cuda_gpujoin_code;
 extern const char *pgstrom_cuda_gpupreagg_code;

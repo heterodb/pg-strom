@@ -22,6 +22,7 @@ STROM_OBJS = main.o codegen.o datastore.o aggfuncs.o \
 
 # Source file of GPU portion
 CUDA_OBJS = cuda_common.o \
+	cuda_dynpara.o \
 	cuda_gpuscan.o \
 	cuda_gpujoin.o \
 	cuda_gpupreagg.o \

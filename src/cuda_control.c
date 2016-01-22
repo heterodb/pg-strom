@@ -2441,42 +2441,47 @@ const char *
 errorText(int errcode)
 {
 	static __thread char buffer[512];
-	const char *error_val;
-	const char *error_str;
+	const char	   *error_val;
+	const char	   *error_str;
 
 	switch (errcode)
 	{
+		case StromError_Success:
+			return "Suceess";
 		case StromError_CpuReCheck:
-			snprintf(buffer, sizeof(buffer), "CPU ReCheck");
-			break;
+			return "CPU ReCheck";
 		case StromError_CudaInternal:
-			snprintf(buffer, sizeof(buffer), "CUDA Internal Error");
-			break;
+			return "CUDA Internal Error";
 		case StromError_OutOfMemory:
-			snprintf(buffer, sizeof(buffer), "Out of memory");
-			break;
+			return "Out of memory";
 		case StromError_OutOfSharedMemory:
-			snprintf(buffer, sizeof(buffer), "Out of shared memory");
-			break;
+			return "Out of shared memory";
 		case StromError_DataStoreCorruption:
-			snprintf(buffer, sizeof(buffer), "Data store corruption");
-			break;
+			return "Data store corruption";
 		case StromError_DataStoreNoSpace:
-			snprintf(buffer, sizeof(buffer), "Data store no space");
-			break;
+			return "Data store no space";
 		case StromError_DataStoreOutOfRange:
-			snprintf(buffer, sizeof(buffer), "Data store out of range");
-			break;
+			return "Data store out of range";
 		case StromError_SanityCheckViolation:
-			snprintf(buffer, sizeof(buffer), "Sanity check violation");
-			break;
+			return "Sanity check violation";
 		default:
-			if (cuGetErrorName(errcode, &error_val) == CUDA_SUCCESS &&
-				cuGetErrorString(errcode, &error_str) == CUDA_SUCCESS)
-				snprintf(buffer, sizeof(buffer), "%s - %s",
-						 error_val, error_str);
+			if (errcode < StromError_CudaDevRunTimeBase)
+			{
+				if (cuGetErrorName(errcode, &error_val) == CUDA_SUCCESS &&
+					cuGetErrorString(errcode, &error_str) == CUDA_SUCCESS)
+					snprintf(buffer, sizeof(buffer), "%s - %s",
+							 error_val, error_str);
+				else
+					snprintf(buffer, sizeof(buffer), "%d - unknown", errcode);
+			}
 			else
-				snprintf(buffer, sizeof(buffer), "%d - unknown", errcode);
+			{
+				/* Elsewhere error code by device runtime */
+				errcode -= StromError_CudaDevRunTimeBase;
+				// TODO: Put text representation here
+				snprintf(buffer, sizeof(buffer),
+						 "cuda device runtime error - %d", errcode);
+			}
 	}
 	return buffer;
 }

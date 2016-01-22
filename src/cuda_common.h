@@ -188,6 +188,13 @@ typedef uintptr_t		hostptr_t;
 
 /*
  * Error code definition
+ *
+ *           0 : Success in all error code scheme
+ *    1 -  999 : Error code in CUDA driver API
+ * 1000 - 9999 : Error code of PG-Strom
+ *     > 10000 : Error code in CUDA device runtime
+ *
+ * Error code definition
  */
 #define StromError_Success					   0 /* OK */
 #define StromError_CpuReCheck				1000 /* To be re-checked by CPU */
@@ -199,6 +206,7 @@ typedef uintptr_t		hostptr_t;
 #define StromError_DataStoreOutOfRange		2002 /* out of KDS range access */
 #define StromError_SanityCheckViolation		2003 /* sanity check violation */
 #define StromError_WrongCodeGeneration		2004 /* Bugs on code generation */
+#define StromError_CudaDevRunTimeBase	   10000 /* Base value for runtime */
 
 /*
  * Kernel functions identifier
@@ -297,7 +305,13 @@ __STROM_SET_ERROR(kern_errorbuf *p_kerror, cl_int errcode, cl_int lineno,
 	__STROM_SET_ERROR((p_kerror), (errcode), __LINE__, 123, 456, 789)
 #define STROM_SET_ERROR_EXTRA(p_kerror, errcode, x, y, z)	\
 	__STROM_SET_ERROR((p_kerror), (errcode), __LINE__, (x), (y), (z))
-#else
+#define STROM_SET_RUNTIME_ERROR(p_kerror, errcode)				\
+	STROM_SET_ERROR((p_kerror), (errcode) == 0 ? (errcode) :	\
+					(errcode) + StromError_CudaDevRunTimeBase)
+#define STROM_SET_RUNTIME_ERROR_EXTRA(p_kerror, errcode, x, y, z)	\
+	STROM_SET_ERROR_EXTRA((p_kerror), (errcode) == 0 ? (errcode) :	\
+					(errcode) + StromError_CudaDevRunTimeBase, (x), (y), (z))
+#else	/* __CUDACC__ */
 #ifdef PGSTROM_DEBUG
 #define KERROR_EXTRA_X(p_kerror)		((p_kerror)->extra_x)
 #define KERROR_EXTRA_Y(p_kerror)		((p_kerror)->extra_y)
@@ -307,14 +321,13 @@ __STROM_SET_ERROR(kern_errorbuf *p_kerror, cl_int errcode, cl_int lineno,
 #define KERROR_EXTRA_Y(p_kerror)		0UL
 #define KERROR_EXTRA_Z(p_kerror)		0UL
 #endif
-
 /*
  * If case when STROM_SET_ERROR is called in the host code,
  * it raises an error using ereport()
  */
 #define STROM_SET_ERROR(p_kerror, errcode)		\
 	elog(ERROR, "%s:%d %s", __FUNCTION__, __LINE__, errorText(errcode))
-#endif
+#endif	/* __CUDACC__ */
 
 #ifdef __CUDACC__
 /*

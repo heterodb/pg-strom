@@ -326,7 +326,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	{ "avg",	1, {NUMERICOID},
 	  "s:avg_numeric",	2, {INT4OID, NUMERICOID},
 	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM},
-	  DEVFUNC_NEEDS_NUMERIC, 100
+	  DEVKERNEL_NEEDS_NUMERIC, 100
 	},
 #endif
 	/* COUNT(*) = SUM(NROWS(*|X)) */
@@ -362,12 +362,12 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "max", 1, {NUMERICOID},
 	  "c:max", 1, {NUMERICOID},
-	  {ALTFUNC_EXPR_PMAX}, DEVFUNC_NEEDS_NUMERIC, INT_MAX
+	  {ALTFUNC_EXPR_PMAX}, DEVKERNEL_NEEDS_NUMERIC, INT_MAX
 	},
 #endif
 	{ "max", 1, {CASHOID},
 	  "c:max", 1, {CASHOID},
-	  {ALTFUNC_EXPR_PMAX}, DEVFUNC_NEEDS_MONEY, INT_MAX
+	  {ALTFUNC_EXPR_PMAX}, DEVKERNEL_NEEDS_MONEY, INT_MAX
 	},
 	{ "max", 1, {DATEOID},
 	  "c:max", 1, {DATEOID},
@@ -410,12 +410,12 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "min", 1, {NUMERICOID},
 	  "c:min", 1, {NUMERICOID},
-	  {ALTFUNC_EXPR_PMIN}, DEVFUNC_NEEDS_NUMERIC, INT_MAX
+	  {ALTFUNC_EXPR_PMIN}, DEVKERNEL_NEEDS_NUMERIC, INT_MAX
 	},
 #endif
 	{ "min", 1, {CASHOID},
 	  "c:max", 1, {CASHOID},
-	  {ALTFUNC_EXPR_PMAX}, DEVFUNC_NEEDS_MONEY, INT_MAX
+	  {ALTFUNC_EXPR_PMAX}, DEVKERNEL_NEEDS_MONEY, INT_MAX
 	},
 	{ "min", 1, {DATEOID},
 	  "c:min", 1, {DATEOID},
@@ -458,12 +458,12 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "sum", 1, {NUMERICOID},
 	  "c:sum", 1, {NUMERICOID},
-	  {ALTFUNC_EXPR_PSUM}, DEVFUNC_NEEDS_NUMERIC, 100
+	  {ALTFUNC_EXPR_PSUM}, DEVKERNEL_NEEDS_NUMERIC, 100
 	},
 #endif
 	{ "sum", 1, {CASHOID},
 	  "c:sum", 1, {CASHOID},
-	  {ALTFUNC_EXPR_PSUM}, DEVFUNC_NEEDS_MONEY, INT_MAX
+	  {ALTFUNC_EXPR_PSUM}, DEVKERNEL_NEEDS_MONEY, INT_MAX
 	},
 	/* STDDEV(X) = EX_STDDEV(NROWS(),PSUM(X),PSUM(X*X)) */
 	{ "stddev", 1, {FLOAT4OID},
@@ -483,7 +483,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  "s:stddev", 3, {INT4OID, NUMERICOID, NUMERICOID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, DEVFUNC_NEEDS_NUMERIC, 32
+	   ALTFUNC_EXPR_PSUM_X2}, DEVKERNEL_NEEDS_NUMERIC, 32
 	},
 #endif
 	{ "stddev_pop", 1, {FLOAT4OID},
@@ -503,7 +503,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  "s:stddev_pop", 3, {INT4OID, NUMERICOID, NUMERICOID},
 	  {ALTFUNC_EXPR_NROWS,
        ALTFUNC_EXPR_PSUM,
-       ALTFUNC_EXPR_PSUM_X2}, DEVFUNC_NEEDS_NUMERIC, 32
+       ALTFUNC_EXPR_PSUM_X2}, DEVKERNEL_NEEDS_NUMERIC, 32
 	},
 #endif
 	{ "stddev_samp", 1, {FLOAT4OID},
@@ -523,7 +523,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  "s:stddev_samp", 3, {INT4OID, NUMERICOID, NUMERICOID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
-	   ALTFUNC_EXPR_PSUM_X2}, DEVFUNC_NEEDS_NUMERIC, 32
+	   ALTFUNC_EXPR_PSUM_X2}, DEVKERNEL_NEEDS_NUMERIC, 32
 	},
 #endif
 	/* VARIANCE(X) = PGSTROM.VARIANCE(NROWS(), PSUM(X),PSUM(X^2)) */
@@ -544,7 +544,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  "s:variance", 3, {INT4OID, NUMERICOID, NUMERICOID},
 	  {ALTFUNC_EXPR_NROWS,
        ALTFUNC_EXPR_PSUM,
-       ALTFUNC_EXPR_PSUM_X2}, DEVFUNC_NEEDS_NUMERIC, 32
+       ALTFUNC_EXPR_PSUM_X2}, DEVKERNEL_NEEDS_NUMERIC, 32
 	},
 #endif
 	{ "var_pop", 1, {FLOAT4OID},
@@ -564,7 +564,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  "s:var_pop", 3, {INT4OID, NUMERICOID, NUMERICOID},
 	  {ALTFUNC_EXPR_NROWS,
        ALTFUNC_EXPR_PSUM,
-       ALTFUNC_EXPR_PSUM_X2}, DEVFUNC_NEEDS_NUMERIC, 32
+       ALTFUNC_EXPR_PSUM_X2}, DEVKERNEL_NEEDS_NUMERIC, 32
 	},
 #endif
 	{ "var_samp", 1, {FLOAT4OID},
@@ -584,7 +584,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  "s:var_samp", 3, {INT4OID, NUMERICOID, NUMERICOID},
 	  {ALTFUNC_EXPR_NROWS,
        ALTFUNC_EXPR_PSUM,
-       ALTFUNC_EXPR_PSUM_X2}, DEVFUNC_NEEDS_NUMERIC, 32
+       ALTFUNC_EXPR_PSUM_X2}, DEVKERNEL_NEEDS_NUMERIC, 32
 	},
 #endif
 	/*

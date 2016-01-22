@@ -60,20 +60,20 @@ static struct {
 	DEVTYPE_DECL(INT8OID,   "cl_long",   0),		/* bigint */
 	DEVTYPE_DECL(FLOAT4OID, "cl_float",  0),		/* real */
 	DEVTYPE_DECL(FLOAT8OID, "cl_double", 0),		/* float */
-	DEVTYPE_DECL(CASHOID,   "cl_long",   DEVFUNC_NEEDS_MONEY),	/* money */
+	DEVTYPE_DECL(CASHOID,   "cl_long",   DEVKERNEL_NEEDS_MONEY),	/* money */
 	/* date and time datatypes */
-	DEVTYPE_DECL(DATEOID,        "DateADT",     DEVFUNC_NEEDS_TIMELIB),
-	DEVTYPE_DECL(TIMEOID,        "TimeADT",     DEVFUNC_NEEDS_TIMELIB),
-	DEVTYPE_DECL(TIMETZOID,      "TimeTzADT",   DEVFUNC_NEEDS_TIMELIB),
-	DEVTYPE_DECL(TIMESTAMPOID,   "Timestamp",   DEVFUNC_NEEDS_TIMELIB),
-	DEVTYPE_DECL(TIMESTAMPTZOID, "TimestampTz", DEVFUNC_NEEDS_TIMELIB),
-	DEVTYPE_DECL(INTERVALOID,    "Interval",    DEVFUNC_NEEDS_TIMELIB),
+	DEVTYPE_DECL(DATEOID,        "DateADT",     DEVKERNEL_NEEDS_TIMELIB),
+	DEVTYPE_DECL(TIMEOID,        "TimeADT",     DEVKERNEL_NEEDS_TIMELIB),
+	DEVTYPE_DECL(TIMETZOID,      "TimeTzADT",   DEVKERNEL_NEEDS_TIMELIB),
+	DEVTYPE_DECL(TIMESTAMPOID,   "Timestamp",   DEVKERNEL_NEEDS_TIMELIB),
+	DEVTYPE_DECL(TIMESTAMPTZOID, "TimestampTz", DEVKERNEL_NEEDS_TIMELIB),
+	DEVTYPE_DECL(INTERVALOID,    "Interval",    DEVKERNEL_NEEDS_TIMELIB),
 	/* variable length datatypes */
-	DEVTYPE_DECL(BPCHAROID,  "varlena *", DEVFUNC_NEEDS_TEXTLIB),
-	DEVTYPE_DECL(VARCHAROID, "varlena *", DEVFUNC_NEEDS_TEXTLIB),
-	DEVTYPE_DECL(NUMERICOID, "cl_ulong",  DEVFUNC_NEEDS_NUMERIC),
+	DEVTYPE_DECL(BPCHAROID,  "varlena *", DEVKERNEL_NEEDS_TEXTLIB),
+	DEVTYPE_DECL(VARCHAROID, "varlena *", DEVKERNEL_NEEDS_TEXTLIB),
+	DEVTYPE_DECL(NUMERICOID, "cl_ulong",  DEVKERNEL_NEEDS_NUMERIC),
 	DEVTYPE_DECL(BYTEAOID,   "varlena *", 0),
-	DEVTYPE_DECL(TEXTOID,    "varlena *", DEVFUNC_NEEDS_TEXTLIB),
+	DEVTYPE_DECL(TEXTOID,    "varlena *", DEVKERNEL_NEEDS_TEXTLIB),
 };
 
 devtype_info *
@@ -170,7 +170,7 @@ pgstrom_devtype_lookup_and_track(Oid type_oid, codegen_context *context)
 	if (!dtype)
 		return NULL;
 
-	context->extra_flags |= (dtype->type_flags & DEVFUNC_INCL_FLAGS);
+	context->extra_flags |= dtype->type_flags;
 	pgstrom_devtype_track(context, dtype);
 
 	return dtype;
@@ -1095,19 +1095,19 @@ pgstrom_devfunc_construct(Oid func_oid,
 							has_collation = true;
 							break;
 						case 'n':
-							flags |= DEVFUNC_NEEDS_NUMERIC;
+							flags |= DEVKERNEL_NEEDS_NUMERIC;
 							break;
 						case 'm':
-							flags |= DEVFUNC_NEEDS_MATHLIB;
+							flags |= DEVKERNEL_NEEDS_MATHLIB;
 							break;
 						case 's':
-							flags |= DEVFUNC_NEEDS_TEXTLIB;
+							flags |= DEVKERNEL_NEEDS_TEXTLIB;
 							break;
 						case 't':
-							flags |= DEVFUNC_NEEDS_TIMELIB;
+							flags |= DEVKERNEL_NEEDS_TIMELIB;
 							break;
 						case 'y':
-							flags |= DEVFUNC_NEEDS_MONEY;
+							flags |= DEVKERNEL_NEEDS_MONEY;
 							break;
 						default:
 							elog(NOTICE,
@@ -1252,18 +1252,18 @@ pgstrom_devfunc_lookup_and_track(Oid func_oid, Oid func_collid,
 	if (!dfunc)
 		return NULL;
 	/* track device function */
-	context->extra_flags |= (dfunc->func_flags & DEVFUNC_INCL_FLAGS);
+	context->extra_flags |= dfunc->func_flags;
 	pgstrom_devfunc_track(context, dfunc);
 
 	/* track function arguments and result type also */
 	dtype = dfunc->func_rettype;
-	context->extra_flags |= (dtype->type_flags & DEVFUNC_INCL_FLAGS);
+	context->extra_flags |= dtype->type_flags;
 	pgstrom_devtype_track(context, dtype);
 
 	foreach (cell, dfunc->func_args)
 	{
 		dtype = lfirst(cell);
-		context->extra_flags |= (dtype->type_flags & DEVFUNC_INCL_FLAGS);
+		context->extra_flags |= dtype->type_flags;
 		pgstrom_devtype_track(context, dtype);
 	}
 	return dfunc;

@@ -396,20 +396,23 @@ construct_flat_cuda_source(const char *kern_source,
 
 	/* PG-Strom CUDA device code libraries */
 
+	/* cuda dynpara.h */
+	if (extra_flags & DEVKERNEL_NEEDS_DYNPARA)
+		appendStringInfoString(&source, pgstrom_cuda_dynpara_code);
 	/* cuda mathlib.h */
-	if (extra_flags & DEVFUNC_NEEDS_MATHLIB)
+	if (extra_flags & DEVKERNEL_NEEDS_MATHLIB)
 		appendStringInfoString(&source, pgstrom_cuda_mathlib_code);
 	/* cuda timelib.h */
-	if (extra_flags & DEVFUNC_NEEDS_TIMELIB)
+	if (extra_flags & DEVKERNEL_NEEDS_TIMELIB)
 		appendStringInfoString(&source, pgstrom_cuda_timelib_code);
 	/* cuda textlib.h */
-	if (extra_flags & DEVFUNC_NEEDS_TEXTLIB)
+	if (extra_flags & DEVKERNEL_NEEDS_TEXTLIB)
 		appendStringInfoString(&source, pgstrom_cuda_textlib_code);
 	/* cuda numeric.h */
-	if (extra_flags & DEVFUNC_NEEDS_NUMERIC)
+	if (extra_flags & DEVKERNEL_NEEDS_NUMERIC)
 		appendStringInfoString(&source, pgstrom_cuda_numeric_code);
 	/* cuda money.h */
-	if (extra_flags & DEVFUNC_NEEDS_MONEY)
+	if (extra_flags & DEVKERNEL_NEEDS_MONEY)
 		appendStringInfoString(&source, pgstrom_cuda_money_code);
 
 	/* Main logic of each GPU tasks */
@@ -459,7 +462,7 @@ link_cuda_libraries(char *ptx_image, size_t ptx_length, cl_uint extra_flags,
 	char			pathname[MAXPGPATH];
 
 	/* at least one library has to be specified */
-	Assert((extra_flags & DEVKERNEL_NEEDS_LIBCUDART) != 0);
+	Assert((extra_flags & DEVKERNEL_NEEDS_DYNPARA) != 0);
 
 	/*
 	 * NOTE: cuLinkXXXX() APIs works under a particular CUDA context,
@@ -506,7 +509,7 @@ link_cuda_libraries(char *ptx_image, size_t ptx_length, cl_uint extra_flags,
 		elog(ERROR, "failed on cuLinkAddData: %s", errorText(rc));
 
 	/* libcudart.a, if any */
-	if (extra_flags & DEVKERNEL_NEEDS_LIBCUDART)
+	if (extra_flags & DEVKERNEL_NEEDS_DYNPARA)
 	{
 		snprintf(pathname, sizeof(pathname), "%s/libcudadevrt.a",
 				 CUDA_LIBRARY_PATH);
@@ -663,7 +666,7 @@ __build_cuda_program(program_cache_entry *old_entry)
 #endif
 	options[opt_index++] = "--use_fast_math";
 	/* library linkage needs relocatable PTX */
-	if (old_entry->extra_flags & DEVKERNEL_NEEDS_LIBCUDART)
+	if (old_entry->extra_flags & DEVKERNEL_NEEDS_DYNPARA)
 		options[opt_index++] = "--relocatable-device-code=true";
 
 	/*
@@ -713,7 +716,7 @@ __build_cuda_program(program_cache_entry *old_entry)
 		/*
 		 * Link the required run-time libraries, if any
 		 */
-		if (old_entry->extra_flags & DEVKERNEL_NEEDS_LIBCUDART)
+		if (old_entry->extra_flags & DEVKERNEL_NEEDS_DYNPARA)
 		{
 			link_cuda_libraries(ptx_image, ptx_length,
 								old_entry->extra_flags,
@@ -1192,18 +1195,18 @@ pgstrom_assign_cuda_program(GpuTaskState *gts,
 	const char	   *kern_define;
 	StringInfoData	buf;
 
-	if ((extra_flags & (DEVFUNC_NEEDS_TIMELIB |
-						DEVFUNC_NEEDS_MONEY |
+	if ((extra_flags & (DEVKERNEL_NEEDS_TIMELIB |
+						DEVKERNEL_NEEDS_MONEY |
 						DEVKERNEL_NEEDS_GPUSCAN |
 						DEVKERNEL_NEEDS_GPUJOIN)) != 0)
 	{
 		initStringInfo(&buf);
 
 		/* put timezone info */
-		if ((extra_flags & DEVFUNC_NEEDS_TIMELIB) != 0)
+		if ((extra_flags & DEVKERNEL_NEEDS_TIMELIB) != 0)
 			assign_timelib_session_info(&buf);
 		/* put currency info */
-		if ((extra_flags & DEVFUNC_NEEDS_MONEY) != 0)
+		if ((extra_flags & DEVKERNEL_NEEDS_MONEY) != 0)
 			assign_moneylib_session_info(&buf);
 
 		/* enables device projection? */
