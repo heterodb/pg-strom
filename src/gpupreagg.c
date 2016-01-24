@@ -3950,11 +3950,10 @@ gpupreagg_setup_segment(pgstrom_gpupreagg *gpreagg)
 		 * gpupreagg_final_preparation(size_t hash_size,
 		 *                             kern_global_hashslot *f_hashslot)
 		 */
-		pgstrom_compute_workgroup_size(&grid_size,
+		pgstrom_optimal_workgroup_size(&grid_size,
 									   &block_size,
 									   kern_final_prep,
 									   gpreagg->task.cuda_device,
-									   false,
 									   segment->f_hashsize,
 									   sizeof(kern_errorbuf));
 		kern_args[0] = &segment->f_hashsize;
@@ -4931,11 +4930,10 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 	 */
 	if (gpreagg->reduction_mode != GPUPREAGG_ONLY_TERMINATION)
 	{
-		pgstrom_compute_workgroup_size(&grid_size,
+		pgstrom_optimal_workgroup_size(&grid_size,
 									   &block_size,
 									   gpreagg->kern_prep,
 									   gpreagg->task.cuda_device,
-									   false,
 									   nitems,
 									   sizeof(kern_errorbuf));
 
@@ -4964,11 +4962,10 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 		 *                             kern_data_store *kds_src,
 		 *                             kern_data_store *kds_dst)
 		 */
-		pgstrom_compute_workgroup_size(&grid_size,
+		pgstrom_largest_workgroup_size(&grid_size,
 									   &block_size,
 									   gpreagg->kern_nogrp,
 									   gpreagg->task.cuda_device,
-									   true,
 									   nitems,
 									   Max(sizeof(pagg_datum),
 										   sizeof(kern_errorbuf)));
@@ -5024,11 +5021,10 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 			 *                           kern_data_store *kds_src,
 			 *                           kern_data_store *kds_dst)
 			 */
-			pgstrom_compute_workgroup_size(&grid_size,
+			pgstrom_largest_workgroup_size(&grid_size,
 										   &block_size,
 										   gpreagg->kern_lagg,
 										   gpreagg->task.cuda_device,
-										   true,
 										   nitems,
 										   Max3(sizeof(kern_errorbuf),
 												sizeof(pagg_hashslot),
@@ -5059,11 +5055,10 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 		 *                            kern_data_store *kds_dst,
 		 *                            kern_global_hashslot *g_hashslot)
 		 */
-		pgstrom_compute_workgroup_size(&grid_size,
+		pgstrom_optimal_workgroup_size(&grid_size,
 									   &block_size,
 									   gpreagg->kern_gagg,
 									   gpreagg->task.cuda_device,
-									   false,
 									   nitems,
 									   sizeof(kern_errorbuf));
 		kern_args[0] = &gpreagg->m_gpreagg;
@@ -5094,11 +5089,10 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 	 */
 	if (gpreagg->reduction_mode != GPUPREAGG_ONLY_TERMINATION)
 	{
-		pgstrom_compute_workgroup_size(&grid_size,
+		pgstrom_optimal_workgroup_size(&grid_size,
 									   &block_size,
 									   gpreagg->kern_fagg,
 									   gpreagg->task.cuda_device,
-									   false,
 									   nitems,
 									   sizeof(kern_errorbuf));
 		kern_args[0] = &gpreagg->m_gpreagg;
@@ -5158,11 +5152,10 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 			 * gpupreagg_fixup_varlena(kern_gpupreagg *kgpreagg,
 			 *                         kern_data_store *kds_final)
 			 */
-			pgstrom_compute_workgroup_size(&grid_size,
+			pgstrom_optimal_workgroup_size(&grid_size,
 										   &block_size,
 										   gpreagg->kern_fixvar,
 										   gpreagg->task.cuda_device,
-										   false,
 										   final_nrooms,
 										   sizeof(kern_errorbuf));
 			kern_args[0] = &gpreagg->m_gpreagg;

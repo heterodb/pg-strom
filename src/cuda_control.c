@@ -33,6 +33,7 @@
 #include "utils/resowner.h"
 #include <math.h>
 #include "pg_strom.h"
+#include "cuda_dynpara.h"
 
 /* available devices set by postmaster startup */
 static List		   *cuda_device_ordinals = NIL;
@@ -1956,113 +1957,146 @@ gpuMaxThreadsPerBlock(void)
 }
 
 /*
- *
- *
+ * pgstrom_optimal_workgroup_size - calculates the optimal block size
+ * according to the function and device attributes
  */
-static __thread int __dynamic_shmem_per_thread;
-static size_t
-dynamic_shmem_size_per_block(int blockSize)
-{
-	return __dynamic_shmem_per_thread * (size_t)blockSize;
-}
-
 void
-pgstrom_compute_workgroup_size(size_t *p_grid_size,
+pgstrom_optimal_workgroup_size(size_t *p_grid_size,
 							   size_t *p_block_size,
 							   CUfunction function,
 							   CUdevice device,
-							   bool maximum_blocksize,
 							   size_t nitems,
 							   size_t dynamic_shmem_per_thread)
 {
-	int			grid_size;
-	int			block_size;
-	int			max_shmem_size;
-	int			static_shmem_size;
-	int			warp_size;
+	cl_int		grid_size;
+	cl_int		block_size;
+	cl_int		funcMaxThreadsPerBlock;
+	cl_int		staticShmemSize;
+	cl_int		warpSize;
+	cl_int		devMaxThreadsPerBlock;
+	cl_int		maxThreadsPerMultiProcessor;
+	cl_int		status;
 	CUresult	rc;
 
+	/* get max number of thread per block on this kernel function */
+	rc = cuFuncGetAttribute(&funcMaxThreadsPerBlock,
+							CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK,
+							function);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
+
 	/* get statically allocated shared memory */
-	rc = cuFuncGetAttribute(&static_shmem_size,
+	rc = cuFuncGetAttribute(&staticShmemSize,
 							CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES,
 							function);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
 
-	/* get warp size of the target device */
-	rc = cuDeviceGetAttribute(&warp_size,
+	/* get device warp size */
+	rc = cuDeviceGetAttribute(&warpSize,
 							  CU_DEVICE_ATTRIBUTE_WARP_SIZE,
 							  device);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuDeviceGetAttribute: %s",
-			 errorText(rc));
+		elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
 
-	if (maximum_blocksize)
-	{
-		rc = cuFuncGetAttribute(&block_size,
-								CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK,
-								function);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuFuncGetAttribute: %s",
-				 errorText(rc));
+	/* get device limit of thread/block ratio */
+	rc = cuDeviceGetAttribute(&devMaxThreadsPerBlock,
+							  CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK,
+							  device);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
 
-		rc = cuDeviceGetAttribute(&max_shmem_size,
-							CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK,
-								  device);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuDeviceGetAttribute: %s",
-				 errorText(rc));
+	/* get device limit of thread/multiprocessor ratio */
+	rc = cuDeviceGetAttribute(&maxThreadsPerMultiProcessor,
+						CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_MULTIPROCESSOR,
+							  device);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
 
-		if (static_shmem_size +
-			dynamic_shmem_per_thread * block_size > max_shmem_size)
-		{
-			block_size = ((max_shmem_size - static_shmem_size)
-						  / dynamic_shmem_per_thread);
-			block_size &= ~(warp_size - 1);
-
-			if (static_shmem_size > max_shmem_size || block_size < warp_size)
-				elog(ERROR, "Too much GPU shared memory required");
-		}
-	}
-	else
-	{
-		__dynamic_shmem_per_thread = dynamic_shmem_per_thread;
-		rc = cuOccupancyMaxPotentialBlockSize(&grid_size,
+	status = __pgstrom_optimal_workgroup_size(&grid_size,
 											  &block_size,
+											  nitems,
 											  function,
-											  dynamic_shmem_size_per_block,
-											  static_shmem_size,
-											  cuda_max_threads_per_block);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuOccupancyMaxPotentialBlockSize: %s",
-				 errorText(rc));
-	}
+											  funcMaxThreadsPerBlock,
+											  staticShmemSize,
+											  dynamic_shmem_per_thread,
+											  warpSize,
+											  devMaxThreadsPerBlock,
+											  maxThreadsPerMultiProcessor,
+											  0);
 
-	/*
-	 * Adjustment of the block size, if it is larger than nitems including
-	 * the case when nitems == 0. We expects block_size it at least equal
-	 * to the WARP_SIZE.
-	 */
-	if (block_size > nitems)
-		block_size = (nitems + warp_size - 1) & ~(warp_size - 1);
-	block_size = Max(block_size, warp_size);
-
-	*p_block_size = block_size;
-	*p_grid_size = (nitems + block_size - 1) / block_size;
+	if (status != StromError_Success)
+		elog(ERROR, "failed on calculation of optimal workgroup size: %s",
+			 errorText(status));
+	*p_grid_size = (size_t) grid_size;
+	*p_block_size = (size_t) block_size;
 }
 
-/*
- * pgstrom_compute_workgroup_size_2d
- *
- * special routine to compute an optimal kernel launch size if caller
- * wants to have 2-dimensional threading model.
- * It intends to maximize the number of concurrent threads as long as
- * resource consumption allows.
- */
 void
-pgstrom_compute_workgroup_size_2d(size_t *p_grid_xsize,
-								  size_t *p_block_xsize,
+pgstrom_largest_workgroup_size(size_t *p_grid_size,
+							   size_t *p_block_size,
+							   CUfunction function,
+							   CUdevice device,
+							   size_t nitems,
+							   size_t dynamic_shmem_per_thread)
+{
+	cl_int		grid_size;
+	cl_int		block_size;
+	cl_int		kernel_max_blocksz;
+	cl_int		static_shmem_sz;
+	cl_int		warp_size;
+	cl_int		max_shmem_per_block;
+	cl_int		status;
+	CUresult	rc;
+
+    /* get max number of thread per block on this kernel function */
+    rc = cuFuncGetAttribute(&kernel_max_blocksz,
+                            CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK,
+                            function);
+    if (rc != CUDA_SUCCESS)
+        elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
+
+    /* get statically allocated shared memory */
+    rc = cuFuncGetAttribute(&static_shmem_sz,
+                            CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES,
+                            function);
+    if (rc != CUDA_SUCCESS)
+        elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
+
+    /* get device warp size */
+    rc = cuDeviceGetAttribute(&warp_size,
+                              CU_DEVICE_ATTRIBUTE_WARP_SIZE,
+                              device);
+    if (rc != CUDA_SUCCESS)
+        elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
+
+    /* get device limit of thread/block ratio */
+    rc = cuDeviceGetAttribute(&max_shmem_per_block,
+                              CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK,
+                              device);
+    if (rc != CUDA_SUCCESS)
+        elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
+
+	status = __pgstrom_largest_workgroup_size(&grid_size,
+											  &block_size,
+											  nitems,
+											  kernel_max_blocksz,
+											  static_shmem_sz,
+											  dynamic_shmem_per_thread,
+											  warp_size,
+											  max_shmem_per_block);
+	if (status != CUDA_SUCCESS)
+		elog(ERROR, "failed on calculation of largest workgroup size: %s",
+			 errorText(status));
+
+	*p_grid_size = (size_t) grid_size;
+	*p_block_size = (size_t) block_size;
+}
+
+void
+pgstrom_largest_workgroup_size_2d(size_t *p_grid_xsize,
 								  size_t *p_grid_ysize,
+								  size_t *p_block_xsize,
 								  size_t *p_block_ysize,
 								  CUfunction function,
 								  CUdevice device,
@@ -2072,89 +2106,66 @@ pgstrom_compute_workgroup_size_2d(size_t *p_grid_xsize,
 								  size_t dynamic_shmem_per_yitems,
 								  size_t dynamic_shmem_per_thread)
 {
-	int			block_xsize;
-	int			block_ysize;
-	int			root_block_size;
-	int			max_block_size;
-	int			max_shmem_size;
-	int			static_shmem_size;
-	int			warp_size;
+	cl_int		grid_xsize;
+	cl_int		grid_ysize;
+	cl_int		block_xsize;
+	cl_int		block_ysize;
+	cl_int		kernel_max_blocksz;
+	cl_int		static_shmem_sz;
+	cl_int		warp_size;
+	cl_int		max_shmem_per_block;
+	cl_int		status;
 	CUresult	rc;
 
-	/* get capability of the device */
-	rc = cuDeviceGetAttribute(&max_shmem_size,
-							  CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK,
-							  device);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
+    /* get max number of thread per block on this kernel function */
+    rc = cuFuncGetAttribute(&kernel_max_blocksz,
+                            CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK,
+                            function);
+    if (rc != CUDA_SUCCESS)
+        elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
 
-	rc = cuDeviceGetAttribute(&warp_size,
-							  CU_DEVICE_ATTRIBUTE_WARP_SIZE,
-							  device);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
+    /* get statically allocated shared memory */
+    rc = cuFuncGetAttribute(&static_shmem_sz,
+                            CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES,
+                            function);
+    if (rc != CUDA_SUCCESS)
+        elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
 
-	/* get resource consumption by the kernel function */
-	rc = cuFuncGetAttribute(&static_shmem_size,
-							CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES,
-							function);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
+    /* get device warp size */
+    rc = cuDeviceGetAttribute(&warp_size,
+                              CU_DEVICE_ATTRIBUTE_WARP_SIZE,
+                              device);
+    if (rc != CUDA_SUCCESS)
+        elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
 
-   	rc = cuFuncGetAttribute(&max_block_size,
-							CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK,
-							function);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
+    /* get device limit of thread/block ratio */
+    rc = cuDeviceGetAttribute(&max_shmem_per_block,
+                              CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK,
+                              device);
+    if (rc != CUDA_SUCCESS)
+        elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
 
-	/* reduce max block size, if unavailable to allocate shared memory */
-	if (static_shmem_size +
-		dynamic_shmem_per_thread * max_block_size > max_shmem_size)
-	{
-		max_block_size = ((max_shmem_size - static_shmem_size)
-						  / dynamic_shmem_per_thread);
-		max_block_size &= ~(warp_size - 1);
+	status = __pgstrom_largest_workgroup_size_2d(&grid_xsize,
+												 &grid_ysize,
+												 &block_xsize,
+												 &block_ysize,
+												 x_nitems,
+												 y_nitems,
+												 kernel_max_blocksz,
+												 static_shmem_sz,
+												 dynamic_shmem_per_xitems,
+												 dynamic_shmem_per_yitems,
+												 dynamic_shmem_per_thread,
+												 warp_size,
+												 max_shmem_per_block);
+	if (status != StromError_Success)
+		elog(ERROR, "failed on calculation of largest workgroup size: %s",
+			 errorText(status));
 
-		if (static_shmem_size > max_shmem_size || max_block_size < warp_size)
-			elog(ERROR, "Too much GPU shared memory required");
-	}
-	/* 1024 = 32 * 32 */
-	root_block_size = (int) sqrt(max_block_size);
-
-	block_ysize = Min(root_block_size, y_nitems);
-	block_ysize = Max(block_ysize, 1);
-	block_xsize = ((max_block_size / block_ysize) & ~(warp_size - 1));
-	block_xsize = Max(block_xsize, 1);
-
-	/*
-	 * adjust block_xsize and _ysize according to the expected shared memory
-	 * consumption.
-	 */
-	while (static_shmem_size +
-		   block_xsize * dynamic_shmem_per_xitems +
-		   block_ysize * dynamic_shmem_per_yitems > max_shmem_size)
-	{
-		if (block_xsize * dynamic_shmem_per_xitems >=
-			block_ysize * dynamic_shmem_per_yitems)
-		{
-			if (block_xsize <= warp_size)
-				elog(ERROR, "We cannot reduce block_xsize any more");
-			block_xsize -= warp_size;
-			block_ysize = max_block_size / block_xsize;
-		}
-		else
-		{
-			if (block_ysize <= 1)
-				elog(ERROR, "We cannot reduce block_ysize any more");
-			block_ysize--;
-			block_xsize = (max_block_size / block_ysize) & ~(warp_size - 1);
-		}
-	}
-	/* put results */
-	*p_block_xsize = block_xsize;
-	*p_block_ysize = block_ysize;
-	*p_grid_xsize = Max((x_nitems + block_xsize - 1) / block_xsize, 1);
-	*p_grid_ysize = Max((y_nitems + block_ysize - 1) / block_ysize, 1);
+	*p_grid_xsize = (size_t) grid_xsize;
+	*p_grid_ysize = (size_t) grid_ysize;
+	*p_block_xsize = (size_t) block_xsize;
+	*p_block_ysize = (size_t) block_ysize;
 }
 
 /*
@@ -2456,6 +2467,8 @@ errorText(int errcode)
 			return "Out of memory";
 		case StromError_OutOfSharedMemory:
 			return "Out of shared memory";
+		case StromError_InvalidValue:
+			return "Invalid Value";
 		case StromError_DataStoreCorruption:
 			return "Data store corruption";
 		case StromError_DataStoreNoSpace:

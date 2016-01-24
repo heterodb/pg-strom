@@ -1763,11 +1763,10 @@ launch_gpu_bitonic_kernels(GpuSortState *gss,
 
 	for (i=0; i < lengthof(sort_kernels); i++)
 	{
-		pgstrom_compute_workgroup_size(&grid_temp,
+		pgstrom_largest_workgroup_size(&grid_temp,
 									   &block_temp,
 									   sort_kernels[i],
 									   gpusort->task.cuda_device,
-									   true,
 									   (nitems + 1) / 2,
 									   shmem_unitsz[i]);
 		block_size = Min(block_size, block_temp);
@@ -2026,11 +2025,10 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *gpusort)
 	 *                     kern_data_store *ktoast,
 	 *                     cl_int chunk_id)
 	 */
-	pgstrom_compute_workgroup_size(&grid_size,
+	pgstrom_optimal_workgroup_size(&grid_size,
 								   &block_size,
 								   gpusort->kern_prep,
 								   gpusort->task.cuda_device,
-								   false,
 								   nitems,
 								   sizeof(kern_errorbuf));
 	kernel_args[0] = &gpusort->m_gpusort;
@@ -2061,11 +2059,10 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *gpusort)
 	 *                         kern_data_store *kds,
 	 *                         kern_data_store *ktoast)
 	 */
-	pgstrom_compute_workgroup_size(&grid_size,
+	pgstrom_optimal_workgroup_size(&grid_size,
                                    &block_size,
                                    gpusort->kern_fixup,
 								   gpusort->task.cuda_device,
-								   false,
 								   nitems,
 								   sizeof(kern_errorbuf));
 	kernel_args[0] = &gpusort->m_gpusort;

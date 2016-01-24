@@ -2386,11 +2386,10 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 	 */
 	if (gss->dev_quals != NIL)
 	{
-		pgstrom_compute_workgroup_size(&grid_size,
+		pgstrom_optimal_workgroup_size(&grid_size,
 									   &block_size,
 									   gpuscan->kern_exec_quals,
 									   gpuscan->task.cuda_device,
-									   false,
 									   src_nitems,
 									   sizeof(kern_errorbuf));
 		kern_args[0] = &gpuscan->m_gpuscan;
@@ -2415,11 +2414,10 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 
 	if (pds_dst != NULL)
 	{
-		pgstrom_compute_workgroup_size(&grid_size,
+		pgstrom_optimal_workgroup_size(&grid_size,
 									   &block_size,
 									   gpuscan->kern_dev_proj, 
 									   gpuscan->task.cuda_device,
-									   false,
 									   src_nitems,
 									   sizeof(kern_errorbuf));
 		kern_args[0] = &gpuscan->m_gpuscan;

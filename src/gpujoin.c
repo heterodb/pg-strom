@@ -4899,11 +4899,10 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 		 *                     cl_int depth)
 		 */
 		num_threads = ((depth > 1 || !pds_src) ? 1 : pds_src->kds->nitems);
-		pgstrom_compute_workgroup_size(&grid_xsize,
+		pgstrom_optimal_workgroup_size(&grid_xsize,
 									   &block_xsize,
 									   pgjoin->kern_prep,
 									   pgjoin->task.cuda_device,
-									   false,
 									   num_threads,
 									   sizeof(kern_errorbuf));
 		kern_args[0] = &pgjoin->m_kgjoin;
@@ -4952,7 +4951,7 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 			if (pds_src != NULL || depth > gjs->outer_join_start_depth)
 			{
 				outer_ntuples = pgjoin->num_threads[depth-1];
-				pgstrom_compute_workgroup_size_2d(&grid_xsize, &block_xsize,
+				pgstrom_largest_workgroup_size_2d(&grid_xsize, &block_xsize,
 												  &grid_ysize, &block_ysize,
 												  pgjoin->kern_exec_nl,
 												  pgjoin->task.cuda_device,
@@ -5011,11 +5010,10 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 				multirels_colocate_outer_join_maps(pmrels,
 												   &pgjoin->task,
 												   depth);
-				pgstrom_compute_workgroup_size(&grid_xsize,
+				pgstrom_optimal_workgroup_size(&grid_xsize,
 											   &block_xsize,
 											   pgjoin->kern_outer_nl,
 											   pgjoin->task.cuda_device,
-											   false,
 											   inner_size,
 											   sizeof(kern_errorbuf));
 				kern_args[0] = &pgjoin->m_kgjoin;
@@ -5062,11 +5060,10 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 			{
 				outer_ntuples = pgjoin->num_threads[depth-1];
 				Assert(outer_ntuples > 0);
-				pgstrom_compute_workgroup_size(&grid_xsize,
+				pgstrom_optimal_workgroup_size(&grid_xsize,
 											   &block_xsize,
 											   pgjoin->kern_exec_hj,
 											   pgjoin->task.cuda_device,
-											   false,
 											   outer_ntuples,
 											   sizeof(kern_errorbuf));
 				kern_args[0] = &pgjoin->m_kgjoin;
@@ -5115,11 +5112,10 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 				/* gather the outer join map, if multi-GPUs environment */
 				multirels_colocate_outer_join_maps(pgjoin->pmrels,
 												   &pgjoin->task, depth);
-				pgstrom_compute_workgroup_size(&grid_xsize,
+				pgstrom_optimal_workgroup_size(&grid_xsize,
 											   &block_xsize,
 											   pgjoin->kern_outer_hj,
 											   pgjoin->task.cuda_device,
-											   false,
 											   pds_in->kds->nslots,
 											   sizeof(kern_errorbuf));
 				kern_args[0] = &pgjoin->m_kgjoin;
@@ -5160,11 +5156,10 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 	 *                               kern_data_store *kds_src,
 	 *                               kern_data_store *kds_dst)
 	 */
-	pgstrom_compute_workgroup_size(&grid_xsize,
+	pgstrom_optimal_workgroup_size(&grid_xsize,
 								   &block_xsize,
 								   pgjoin->kern_proj,
 								   pgjoin->task.cuda_device,
-								   false,
 								   pgjoin->num_threads[gjs->num_rels],
 								   sizeof(kern_errorbuf));
 	kern_args[0] = &pgjoin->m_kgjoin;
