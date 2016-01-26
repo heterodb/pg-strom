@@ -1628,7 +1628,7 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 												&block_sz,
 												gpupreagg_nogroup_reduction,
 												kds_src->nitems,
-												max(sizeof(pagg_datum),
+												Max(sizeof(pagg_datum),
 													sizeof(kern_errorbuf)));
 		if (status != cudaSuccess)
 		{
@@ -1638,7 +1638,7 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 
 		status = cudaLaunchDevice(gpupreagg_nogroup_reduction,
 								  kern_args, grid_sz, block_sz,
-								  max(sizeof(pagg_datum),
+								  Max(sizeof(pagg_datum),
 									  sizeof(kern_errorbuf)) * block_sz.x,
 								  NULL);
         if (status != cudaSuccess)
@@ -1662,7 +1662,7 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 												&block_sz,
 												gpupreagg_nogroup_reduction,
 												kds_dst->nitems,
-												max(sizeof(pagg_datum),
+												Max(sizeof(pagg_datum),
                                                     sizeof(kern_errorbuf)));
 		if (status != cudaSuccess)
 		{
@@ -1672,7 +1672,7 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 
 		status = cudaLaunchDevice(gpupreagg_nogroup_reduction,
 								  kern_args, grid_sz, block_sz,
-								  max(sizeof(pagg_datum),
+								  Max(sizeof(pagg_datum),
 									  sizeof(kern_errorbuf)) * block_sz.x,
 								  NULL);
 		if (status != cudaSuccess)
@@ -1707,7 +1707,7 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 													&block_sz,
 													gpupreagg_local_reduction,
 													kds_src->nitems,
-													max3(sizeof(kern_errorbuf),
+													Max3(sizeof(kern_errorbuf),
 														 sizeof(pagg_hashslot),
 														 sizeof(pagg_datum)));
 			if (status != cudaSuccess)
@@ -1720,7 +1720,7 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 									  kern_args,
 									  grid_sz,
 									  block_sz,
-									  max3(sizeof(kern_errorbuf),
+									  Max3(sizeof(kern_errorbuf),
 										   sizeof(pagg_hashslot),
 										   sizeof(pagg_datum)) * block_sz.x,
 									  NULL);
@@ -1851,8 +1851,8 @@ out:
  *
  * ----------------------------------------------------------------
  */
-#define Min(x,y)	((x) < (y) ? (x) : (y))
-#define Max(x,y)	((x) > (y) ? (x) : (y))
+//#define Min(x,y)	((x) < (y) ? (x) : (y))
+//#define Max(x,y)	((x) > (y) ? (x) : (y))
 #define Add(x,y)	((x)+(y))
 
 STATIC_INLINE(cl_int)
@@ -2484,6 +2484,5 @@ pg_atomic_add_double(cl_double *addr, cl_double value)
 #define AGGCALC_NOGROUP_PADD_NUMERIC(kcxt,accum,newval)		\
 	AGGCALC_NOGROUP_TEMPLATE_NUMERIC((kcxt),accum,newval,	\
 									 pgfn_numeric_add)
-
 #endif	/* __CUDACC__ */
 #endif	/* CUDA_GPUPREAGG_H */

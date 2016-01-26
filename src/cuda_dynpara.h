@@ -18,8 +18,8 @@
  */
 #ifndef CUDA_DYNPARA_H
 #define CUDA_DYNPARA_H
-#include <device_launch_parameters.h>
 #ifdef __CUDACC__
+#include <device_launch_parameters.h>
 #define WORKGROUPSIZE_RESULT_TYPE		cudaError_t
 #define WORKGROUPSIZE_RESULT_SUCCESS	cudaSuccess
 #define WORKGROUPSIZE_RESULT_EINVAL		cudaErrorInvalidValue

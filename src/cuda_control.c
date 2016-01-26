@@ -1968,8 +1968,8 @@ pgstrom_optimal_workgroup_size(size_t *p_grid_size,
 							   size_t nitems,
 							   size_t dynamic_shmem_per_thread)
 {
-	cl_int		grid_size;
-	cl_int		block_size;
+	cl_uint		grid_size;
+	cl_uint		block_size;
 	cl_int		funcMaxThreadsPerBlock;
 	cl_int		staticShmemSize;
 	cl_int		warpSize;
@@ -2038,8 +2038,8 @@ pgstrom_largest_workgroup_size(size_t *p_grid_size,
 							   size_t nitems,
 							   size_t dynamic_shmem_per_thread)
 {
-	cl_int		grid_size;
-	cl_int		block_size;
+	cl_uint		grid_size;
+	cl_uint		block_size;
 	cl_int		kernel_max_blocksz;
 	cl_int		static_shmem_sz;
 	cl_int		warp_size;
@@ -2069,7 +2069,7 @@ pgstrom_largest_workgroup_size(size_t *p_grid_size,
 
     /* get device limit of thread/block ratio */
     rc = cuDeviceGetAttribute(&max_shmem_per_block,
-                              CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK,
+                              CU_DEVICE_ATTRIBUTE_SHARED_MEMORY_PER_BLOCK,
                               device);
     if (rc != CUDA_SUCCESS)
         elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
@@ -2085,6 +2085,7 @@ pgstrom_largest_workgroup_size(size_t *p_grid_size,
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on calculation of largest workgroup size: %s",
 			 errorText(rc));
+	elog(INFO, "grid=%u block=%u", grid_size, block_size);
 
 	*p_grid_size = (size_t) grid_size;
 	*p_block_size = (size_t) block_size;
@@ -2103,10 +2104,10 @@ pgstrom_largest_workgroup_size_2d(size_t *p_grid_xsize,
 								  size_t dynamic_shmem_per_yitems,
 								  size_t dynamic_shmem_per_thread)
 {
-	cl_int		grid_xsize;
-	cl_int		grid_ysize;
-	cl_int		block_xsize;
-	cl_int		block_ysize;
+	cl_uint		grid_xsize;
+	cl_uint		grid_ysize;
+	cl_uint		block_xsize;
+	cl_uint		block_ysize;
 	cl_int		kernel_max_blocksz;
 	cl_int		static_shmem_sz;
 	cl_int		warp_size;
@@ -2136,7 +2137,7 @@ pgstrom_largest_workgroup_size_2d(size_t *p_grid_xsize,
 
     /* get device limit of thread/block ratio */
     rc = cuDeviceGetAttribute(&max_shmem_per_block,
-                              CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK,
+							  CU_DEVICE_ATTRIBUTE_SHARED_MEMORY_PER_BLOCK,
                               device);
     if (rc != CUDA_SUCCESS)
         elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));

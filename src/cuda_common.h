@@ -80,12 +80,13 @@ typedef cl_ulong	Datum;
 #define INT64CONST(x)	((cl_long) x##L)
 #define UINT64CONST(x)	((cl_ulong) x##UL)
 
-#define max3(a,b,c)		((a) < (b) ? max((b),(c)) : max((a),(c)))
-#define max4(a,b,c,d)	max(max((a),(b)), max((c),(d)))
+#define Max(a,b)		((a) > (b) ? (a) : (b))
+#define Max3(a,b,c)		((a) > (b) ? Max((a),(c)) : Max((b),(c)))
+#define Max4(a,b,c,d)	Max(Max((a),(b)),Max((c),(d)))
 
-#define min3(a,b,c)		((a) < (b) ? min((a),(c)) : min((b),(c)))
-#define min4(a,b,c,d)	min(min((a),(b)),min((c),(d)))
-
+#define Min(a,b)		((a) < (b) ? (a) : (b))
+#define Min3(a,b,c)		((a) < (b) ? Min((a),(c)) : Min((b),(c)))
+#define Min4(a,b,c,d)	Min(Min((a),(b)),Min((c),(d)))
 
 /*
  * Alignment macros
