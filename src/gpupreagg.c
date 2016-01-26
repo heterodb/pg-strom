@@ -3174,7 +3174,7 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 								&safety_limit))
 		return;
 	/* main portion is always needed! */
-	extra_flags |= DEVKERNEL_NEEDS_GPUPREAGG;
+	extra_flags |= DEVKERNEL_NEEDS_DYNPARA | DEVKERNEL_NEEDS_GPUPREAGG;
 
 	/*
 	 * cost estimation of aggregate clauses
@@ -5041,6 +5041,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 								gpreagg->task.cuda_stream,
 								kern_args,
 								NULL);
+			elog(INFO, "grid(%zu,1,1) block(%zu,1,1)", grid_size, block_size);
 			if (rc != CUDA_SUCCESS)
 				elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
 			gpreagg->task.pfm.num_kern_lagg++;

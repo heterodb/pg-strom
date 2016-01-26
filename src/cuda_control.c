@@ -1975,7 +1975,6 @@ pgstrom_optimal_workgroup_size(size_t *p_grid_size,
 	cl_int		warpSize;
 	cl_int		devMaxThreadsPerBlock;
 	cl_int		maxThreadsPerMultiProcessor;
-	cl_int		status;
 	CUresult	rc;
 
 	/* get max number of thread per block on this kernel function */
@@ -2013,21 +2012,20 @@ pgstrom_optimal_workgroup_size(size_t *p_grid_size,
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
 
-	status = __pgstrom_optimal_workgroup_size(&grid_size,
-											  &block_size,
-											  nitems,
-											  function,
-											  funcMaxThreadsPerBlock,
-											  staticShmemSize,
-											  dynamic_shmem_per_thread,
-											  warpSize,
-											  devMaxThreadsPerBlock,
-											  maxThreadsPerMultiProcessor,
-											  0);
-
-	if (status != StromError_Success)
+	rc = __pgstrom_optimal_workgroup_size(&grid_size,
+										  &block_size,
+										  nitems,
+										  function,
+										  funcMaxThreadsPerBlock,
+										  staticShmemSize,
+										  dynamic_shmem_per_thread,
+										  warpSize,
+										  devMaxThreadsPerBlock,
+										  maxThreadsPerMultiProcessor,
+										  0);
+	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on calculation of optimal workgroup size: %s",
-			 errorText(status));
+			 errorText(rc));
 	*p_grid_size = (size_t) grid_size;
 	*p_block_size = (size_t) block_size;
 }
@@ -2046,7 +2044,6 @@ pgstrom_largest_workgroup_size(size_t *p_grid_size,
 	cl_int		static_shmem_sz;
 	cl_int		warp_size;
 	cl_int		max_shmem_per_block;
-	cl_int		status;
 	CUresult	rc;
 
     /* get max number of thread per block on this kernel function */
@@ -2077,17 +2074,17 @@ pgstrom_largest_workgroup_size(size_t *p_grid_size,
     if (rc != CUDA_SUCCESS)
         elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
 
-	status = __pgstrom_largest_workgroup_size(&grid_size,
-											  &block_size,
-											  nitems,
-											  kernel_max_blocksz,
-											  static_shmem_sz,
-											  dynamic_shmem_per_thread,
-											  warp_size,
-											  max_shmem_per_block);
-	if (status != CUDA_SUCCESS)
+	rc = __pgstrom_largest_workgroup_size(&grid_size,
+										  &block_size,
+										  nitems,
+										  kernel_max_blocksz,
+										  static_shmem_sz,
+										  dynamic_shmem_per_thread,
+										  warp_size,
+										  max_shmem_per_block);
+	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on calculation of largest workgroup size: %s",
-			 errorText(status));
+			 errorText(rc));
 
 	*p_grid_size = (size_t) grid_size;
 	*p_block_size = (size_t) block_size;
@@ -2114,7 +2111,6 @@ pgstrom_largest_workgroup_size_2d(size_t *p_grid_xsize,
 	cl_int		static_shmem_sz;
 	cl_int		warp_size;
 	cl_int		max_shmem_per_block;
-	cl_int		status;
 	CUresult	rc;
 
     /* get max number of thread per block on this kernel function */
@@ -2145,22 +2141,22 @@ pgstrom_largest_workgroup_size_2d(size_t *p_grid_xsize,
     if (rc != CUDA_SUCCESS)
         elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
 
-	status = __pgstrom_largest_workgroup_size_2d(&grid_xsize,
-												 &grid_ysize,
-												 &block_xsize,
-												 &block_ysize,
-												 x_nitems,
-												 y_nitems,
-												 kernel_max_blocksz,
-												 static_shmem_sz,
-												 dynamic_shmem_per_xitems,
-												 dynamic_shmem_per_yitems,
-												 dynamic_shmem_per_thread,
-												 warp_size,
-												 max_shmem_per_block);
-	if (status != StromError_Success)
+	rc = __pgstrom_largest_workgroup_size_2d(&grid_xsize,
+											 &grid_ysize,
+											 &block_xsize,
+											 &block_ysize,
+											 x_nitems,
+											 y_nitems,
+											 kernel_max_blocksz,
+											 static_shmem_sz,
+											 dynamic_shmem_per_xitems,
+											 dynamic_shmem_per_yitems,
+											 dynamic_shmem_per_thread,
+											 warp_size,
+											 max_shmem_per_block);
+	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on calculation of largest workgroup size: %s",
-			 errorText(status));
+			 errorText(rc));
 
 	*p_grid_xsize = (size_t) grid_xsize;
 	*p_grid_ysize = (size_t) grid_ysize;

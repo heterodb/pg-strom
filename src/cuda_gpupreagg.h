@@ -20,47 +20,20 @@
 #define CUDA_GPUPREAGG_H
 
 /*
- * Sequential Scan using GPU/MIC acceleration
- *
- * It packs a kern_parambuf and kern_resultbuf structure within a continuous
- * memory ares, to transfer (usually) small chunk by one DMA call.
- *
- * +----------------+
- * | status         |
- * +----------------+
- * | hash_size      |
- * +----------------+
- * | pg_crc32_table |
- * |      :         |
- * +----------------+ ---
- * | kern_parambuf  |  ^
- * | +--------------+  | kparams.length
- * | | length       |  |
- * | +--------------+  |
- * | | nparams      |  |
- * | +--------------+  |
- * | |    :         |  |
- * | |    :         |  v
- * +-+--------------+ ---
- * | kern_resultbuf |
- * | +--------------+
- * | | nrels        |
- * | +--------------+
- * | | nrooms       |
- * | +--------------+
- * | | nitems       |
- * | +--------------+
- * | | errcode      |
- * | +--------------+
- * | | results[]    |
- * | |    :         |
- * | |    :         |
- * +-+--------------+
+ * Control data structure for GpuPreAgg kernel functions
  */
+#define GPUPREAGG_NOGROUP_REDUCTION		1
+#define GPUPREAGG_LOCAL_REDUCTION		2
+#define GPUPREAGG_GLOBAL_REDUCTION		3
+#define GPUPREAGG_FINAL_REDUCTION		4
+#define GPUPREAGG_ONLY_TERMINATION		99	/* used to urgent termination */
+
 typedef struct
 {
 	kern_errorbuf	kerror;					/* kernel error information */
+	cl_uint			reduction_mode;			/* one of GPUPREAGG_* above */
 	/* -- runtime statistics -- */
+	cl_uint			num_conflicts;			/* only used in kernel space */
 	cl_uint			num_groups;				/* out: # of new groups */
 	cl_uint			varlena_usage;			/* out: size of varlena usage */
 	cl_uint			ghash_conflicts;		/* out: # of ghash conflicts */
@@ -1444,7 +1417,8 @@ gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,
  * So, we need to fix up its value to adjust offset by hostptr.
  */
 KERNEL_FUNCTION(void)
-gpupreagg_fixup_varlena(kern_gpupreagg *kgpreagg, kern_data_store *kds_final)
+gpupreagg_fixup_varlena(kern_gpupreagg *kgpreagg,
+						kern_data_store *kds_final)
 {
 	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	kern_context	kcxt;
@@ -1548,6 +1522,321 @@ gpupreagg_fixup_varlena(kern_gpupreagg *kgpreagg, kern_data_store *kds_final)
 	}
 out:
 	/* write-back execution status into host-side */
+	kern_writeback_error_status(&kgpreagg->kerror, kcxt.e);
+}
+
+/*
+ * gpupreagg_main
+ *
+ * The controller kernel function that launches a 
+ *
+ *
+ *
+ *
+ *
+ */
+KERNEL_FUNCTION(void)
+gpupreagg_main(kern_gpupreagg *kgpreagg,
+			   kern_data_store *kds_in,			/* KDS_FORMAT_ROW */
+			   kern_data_store *kds_src,		/* KDS_FORMAT_SLOT */
+			   kern_data_store *kds_dst,		/* KDS_FORMAT_SLOT */
+			   kern_global_hashslot *g_hash,	/* For global reduction */
+			   kern_data_store *kds_final,		/* KDS_FORMAT_SLOT + Extra */
+			   kern_global_hashslot *f_hash)
+{
+	kern_parambuf	   *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
+	kern_context		kcxt;
+	void			  **kern_args;
+	dim3				grid_sz;
+	dim3				block_sz;
+	cudaError_t			status = cudaSuccess;
+	kern_data_store	   *kds_final_source = kds_src;
+
+	INIT_KERNEL_CONTEXT(&kcxt, gpupreagg_main, kparams);
+	assert(get_global_size() == 1);	/* !!single thread!! */
+
+	/*
+	 * NOTE: kernel entrypoints in GpuPreAgg has up to four, and all
+	 * pointer arguments. So, "4 * sizeof(void *)" is sufficient to
+	 * launch these kernel functions.
+	 */
+	kern_args = (void **)cudaGetParameterBuffer(sizeof(void *),
+												sizeof(void *) * 4);
+	if (!kern_args)
+	{
+		STROM_SET_ERROR(&kcxt.e, StromError_OutOfMemory);
+		goto out;
+	}
+
+	if (kgpreagg->reduction_mode != GPUPREAGG_ONLY_TERMINATION)
+	{
+		/* Launch:
+		 * KERNEL_FUNCTION(void)
+		 * gpupreagg_preparation(kern_gpupreagg *kgpreagg,
+		 *                       kern_data_store *kds_in,
+		 *                       kern_data_store *kds_src,
+		 *                       kern_global_hashslot *g_hash)
+		 */
+		kern_args[0] = kgpreagg;
+		kern_args[1] = kds_in;
+		kern_args[2] = kds_src;
+		kern_args[3] = g_hash;
+
+		status = pgstrom_optimal_workgroup_size(&grid_sz,
+												&block_sz,
+												gpupreagg_preparation,
+												kds_in->nitems,
+												sizeof(kern_errorbuf));
+		if (status != cudaSuccess)
+		{
+			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+			goto out;
+		}
+
+		status = cudaLaunchDevice(gpupreagg_preparation,
+								  kern_args, grid_sz, block_sz,
+								  sizeof(kern_errorbuf) * block_sz.x,
+								  NULL);
+		if (status != cudaSuccess)
+		{
+			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+			goto out;
+		}
+
+		status = cudaDeviceSynchronize();
+		if (status != cudaSuccess)
+		{
+			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+			goto out;
+		}
+	}
+
+	if (kgpreagg->reduction_mode == GPUPREAGG_NOGROUP_REDUCTION)
+	{
+		/* Launch:
+		 * KERNEL_FUNCTION(void)
+		 * gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,
+		 *                             kern_data_store *kds_src,
+		 *                             kern_data_store *kds_dst)
+		 */
+
+		/* 1st trial of the reduction */
+		kern_args[0] = kgpreagg;
+		kern_args[1] = kds_src;
+		kern_args[2] = kds_dst;
+		status = pgstrom_largest_workgroup_size(&grid_sz,
+												&block_sz,
+												gpupreagg_nogroup_reduction,
+												kds_src->nitems,
+												max(sizeof(pagg_datum),
+													sizeof(kern_errorbuf)));
+		if (status != cudaSuccess)
+		{
+			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+			goto out;
+		}
+
+		status = cudaLaunchDevice(gpupreagg_nogroup_reduction,
+								  kern_args, grid_sz, block_sz,
+								  max(sizeof(pagg_datum),
+									  sizeof(kern_errorbuf)) * block_sz.x,
+								  NULL);
+        if (status != cudaSuccess)
+        {
+            STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+            goto out;
+        }
+
+		status = cudaDeviceSynchronize();
+		if (status != cudaSuccess)
+		{
+			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+			goto out;
+		}
+
+		/* 2nd trial of the reduction */
+		kern_args[0] = kgpreagg;
+        kern_args[1] = kds_dst;		/* reversed */
+        kern_args[2] = kds_src;		/* reversed */
+		status = pgstrom_largest_workgroup_size(&grid_sz,
+												&block_sz,
+												gpupreagg_nogroup_reduction,
+												kds_dst->nitems,
+												max(sizeof(pagg_datum),
+                                                    sizeof(kern_errorbuf)));
+		if (status != cudaSuccess)
+		{
+			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+			goto out;
+		}
+
+		status = cudaLaunchDevice(gpupreagg_nogroup_reduction,
+								  kern_args, grid_sz, block_sz,
+								  max(sizeof(pagg_datum),
+									  sizeof(kern_errorbuf)) * block_sz.x,
+								  NULL);
+		if (status != cudaSuccess)
+		{
+			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+			goto out;
+		}
+
+		status = cudaDeviceSynchronize();
+		if (status != cudaSuccess)
+		{
+			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+			goto out;
+		}
+	}
+	else if (kgpreagg->reduction_mode == GPUPREAGG_LOCAL_REDUCTION ||
+			 kgpreagg->reduction_mode == GPUPREAGG_GLOBAL_REDUCTION)
+	{
+		if (kgpreagg->reduction_mode == GPUPREAGG_LOCAL_REDUCTION)
+		{
+			/*
+			 * Launch:
+			 * KERNEL_FUNCTION_MAXTHREADS(void)
+			 * gpupreagg_local_reduction(kern_gpupreagg *kgpreagg,
+			 *                           kern_data_store *kds_src,
+			 *                           kern_data_store *kds_dst)
+			 */
+			kern_args[0] = kgpreagg;
+			kern_args[1] = kds_src;		/* in */
+			kern_args[2] = kds_dst;		/* out */
+			status = pgstrom_largest_workgroup_size(&grid_sz,
+													&block_sz,
+													gpupreagg_local_reduction,
+													kds_src->nitems,
+													max3(sizeof(kern_errorbuf),
+														 sizeof(pagg_hashslot),
+														 sizeof(pagg_datum)));
+			if (status != cudaSuccess)
+			{
+				STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+				goto out;
+			}
+
+			status = cudaLaunchDevice(gpupreagg_local_reduction,
+									  kern_args,
+									  grid_sz,
+									  block_sz,
+									  max3(sizeof(kern_errorbuf),
+										   sizeof(pagg_hashslot),
+										   sizeof(pagg_datum)) * block_sz.x,
+									  NULL);
+			if (status != cudaSuccess)
+			{
+				STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+				goto out;
+			}
+
+			status = cudaDeviceSynchronize();
+			if (status != cudaSuccess)
+			{
+				STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+				goto out;
+			}
+			kds_final_source = kds_dst;
+		}
+
+		/*
+		 * Launch:
+		 * KERNEL_FUNCTION(void)
+		 * gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
+		 *                            kern_data_store *kds_dst,
+		 *                            kern_global_hashslot *g_hash)
+		 */
+		kern_args[0] = kgpreagg;
+		kern_args[1] = kds_final_source;
+		kern_args[1] = g_hash;
+		status = pgstrom_largest_workgroup_size(&grid_sz,
+												&block_sz,
+												gpupreagg_global_reduction,
+												kds_final_source->nitems,
+												sizeof(kern_errorbuf));
+		if (status != cudaSuccess)
+		{
+			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+			goto out;
+		}
+
+		status = cudaLaunchDevice(gpupreagg_global_reduction,
+								  kern_args,
+								  grid_sz,
+								  block_sz,
+								  sizeof(kern_errorbuf) * block_sz.x,
+								  NULL);
+		if (status != cudaSuccess)
+		{
+			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+			goto out;
+		}
+
+		status = cudaDeviceSynchronize();
+		if (status != cudaSuccess)
+		{
+			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+			goto out;
+		}
+	}
+
+	if (kgpreagg->reduction_mode != GPUPREAGG_ONLY_TERMINATION)
+	{
+		/* Launch:
+		 * KERNEL_FUNCTION(void)
+		 * gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,
+		 *                           kern_data_store *kds_dst,
+		 *                           kern_data_store *kds_final,
+		 *                           kern_global_hashslot *f_hash)
+		 */
+		kern_args[0] = kgpreagg;
+		kern_args[1] = kds_final_source;
+		kern_args[2] = kds_final;
+		kern_args[3] = f_hash;
+
+		status = pgstrom_largest_workgroup_size(&grid_sz,
+												&block_sz,
+												gpupreagg_final_reduction,
+												kds_final_source->nitems,
+												sizeof(kern_errorbuf));
+		if (status != cudaSuccess)
+		{
+			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+			goto out;
+		}
+
+		status = cudaLaunchDevice(gpupreagg_final_reduction,
+								  kern_args,
+								  grid_sz,
+								  block_sz,
+								  sizeof(kern_errorbuf) * block_sz.x,
+								  NULL);
+		if (status != cudaSuccess)
+		{
+			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+			goto out;
+		}
+
+		status = cudaDeviceSynchronize();
+		if (status != cudaSuccess)
+		{
+			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+			goto out;
+		}
+
+		// TODO: Iterate calls until number of conflict items becomes zero
+
+
+
+
+	}
+
+	/*
+	 * NOTE: gpupreagg_fixup_varlena shall be launched by CPU thread
+	 * after synchronization of all the concurrent tasks within same
+	 * segments. So, we have no chance to launch this kernel by GPU.
+	 */
+out:
 	kern_writeback_error_status(&kgpreagg->kerror, kcxt.e);
 }
 

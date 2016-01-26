@@ -80,6 +80,13 @@ typedef cl_ulong	Datum;
 #define INT64CONST(x)	((cl_long) x##L)
 #define UINT64CONST(x)	((cl_ulong) x##UL)
 
+#define max3(a,b,c)		((a) < (b) ? max((b),(c)) : max((a),(c)))
+#define max4(a,b,c,d)	max(max((a),(b)), max((c),(d)))
+
+#define min3(a,b,c)		((a) < (b) ? min((a),(c)) : min((b),(c)))
+#define min4(a,b,c,d)	min(min((a),(b)),min((c),(d)))
+
+
 /*
  * Alignment macros
  */
@@ -231,6 +238,7 @@ typedef uintptr_t		hostptr_t;
 #define StromKernel_gpupreagg_final_preparation		0x0305
 #define StromKernel_gpupreagg_final_reduction		0x0306
 #define StromKernel_gpupreagg_fixup_varlena			0x0307
+#define StromKernel_gpupreagg_main					0x0399
 #define StromKernel_gpusort_preparation				0x0401
 #define StromKernel_gpusort_bitonic_local			0x0402
 #define StromKernel_gpusort_bitonic_step			0x0403
