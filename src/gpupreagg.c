@@ -238,12 +238,7 @@ typedef struct
 	CUdeviceptr		m_ghash;		/* global hash slot */
 	CUevent			ev_dma_send_start;
 	CUevent			ev_dma_send_stop;
-	CUevent			ev_kern_prep_end;
-	CUevent			ev_kern_nogrp_end;
-	CUevent			ev_kern_lagg_end;
-	CUevent			ev_kern_gagg_end;
-	CUevent			ev_kern_fagg_end;
-	CUevent			ev_kern_fixvar_begin;
+	CUevent			ev_kern_fixvar;
 	CUevent			ev_dma_recv_start;
 	CUevent			ev_dma_recv_stop;
 	pgstrom_data_store *pds_in;		/* source data-store */
@@ -4412,11 +4407,7 @@ gpupreagg_cleanup_cuda_resources(pgstrom_gpupreagg *gpreagg)
 
 	CUDA_EVENT_DESTROY(gpreagg, ev_dma_send_start);
 	CUDA_EVENT_DESTROY(gpreagg, ev_dma_send_stop);
-	CUDA_EVENT_DESTROY(gpreagg, ev_kern_prep_end);
-	CUDA_EVENT_DESTROY(gpreagg, ev_kern_lagg_end);
-	CUDA_EVENT_DESTROY(gpreagg, ev_kern_gagg_end);
-	CUDA_EVENT_DESTROY(gpreagg, ev_kern_fagg_end);
-	CUDA_EVENT_DESTROY(gpreagg, ev_kern_fixvar_begin);
+	CUDA_EVENT_DESTROY(gpreagg, ev_kern_fixvar);
 	CUDA_EVENT_DESTROY(gpreagg, ev_dma_recv_start);
 	CUDA_EVENT_DESTROY(gpreagg, ev_dma_recv_stop);
 
@@ -4460,46 +4451,35 @@ gpupreagg_task_complete(GpuTask *gtask)
 		CUDA_EVENT_ELAPSED(gpreagg, time_dma_send,
 						   ev_dma_send_start,
 						   ev_dma_send_stop);
-		CUDA_EVENT_ELAPSED(gpreagg, time_kern_prep,
-						   ev_dma_send_stop,
-						   ev_kern_prep_end);
-		switch (gpreagg->reduction_mode)
+		if (gpreagg->kern.ktime_prep > 0)
 		{
-			case GPUPREAGG_NOGROUP_REDUCTION:
-				CUDA_EVENT_ELAPSED(gpreagg, time_kern_nogrp,
-								   ev_kern_prep_end,
-								   ev_kern_nogrp_end);
-				CUDA_EVENT_ELAPSED(gpreagg, time_kern_fagg,
-								   ev_kern_nogrp_end,
-								   ev_kern_fagg_end);
-				break;
-			case GPUPREAGG_LOCAL_REDUCTION:
-				CUDA_EVENT_ELAPSED(gpreagg, time_kern_lagg,
-								   ev_kern_prep_end,
-								   ev_kern_lagg_end);
-				CUDA_EVENT_ELAPSED(gpreagg, time_kern_gagg,
-								   ev_kern_lagg_end,
-								   ev_kern_gagg_end);
-				CUDA_EVENT_ELAPSED(gpreagg, time_kern_fagg,
-								   ev_kern_gagg_end,
-								   ev_kern_fagg_end);
-				break;
-			case GPUPREAGG_GLOBAL_REDUCTION:
-				CUDA_EVENT_ELAPSED(gpreagg, time_kern_gagg,
-								   ev_kern_prep_end,
-								   ev_kern_gagg_end);
-				CUDA_EVENT_ELAPSED(gpreagg, time_kern_fagg,
-								   ev_kern_gagg_end,
-								   ev_kern_fagg_end);
-				break;
-			case GPUPREAGG_FINAL_REDUCTION:
-				CUDA_EVENT_ELAPSED(gpreagg, time_kern_fagg,
-								   ev_kern_prep_end,
-								   ev_kern_fagg_end);
-				break;
-			default:
-				elog(ERROR, "Unknown reduction mode: %d",
-					 gpreagg->reduction_mode);
+			gpreagg->task.pfm.num_kern_prep++;
+			gpreagg->task.pfm.time_kern_prep +=
+				(double)gpreagg->kern.ktime_prep;
+		}
+		if (gpreagg->kern.ktime_nogrp > 0)
+		{
+			gpreagg->task.pfm.num_kern_nogrp++;
+			gpreagg->task.pfm.time_kern_nogrp +=
+				(double)gpreagg->kern.ktime_nogrp;
+		}
+		if (gpreagg->kern.ktime_lagg > 0)
+		{
+			gpreagg->task.pfm.num_kern_lagg++;
+			gpreagg->task.pfm.time_kern_lagg +=
+				(double)gpreagg->kern.ktime_fagg;
+		}
+		if (gpreagg->kern.ktime_gagg > 0)
+		{
+			gpreagg->task.pfm.num_kern_gagg++;
+			gpreagg->task.pfm.time_kern_gagg +=
+				(double)gpreagg->kern.ktime_gagg;
+		}
+		if (gpreagg->kern.ktime_fagg > 0)
+		{
+			gpreagg->task.pfm.num_kern_fagg++;
+			gpreagg->task.pfm.time_kern_fagg +=
+				(double)gpreagg->kern.ktime_fagg;
 		}
 		if (gpreagg->is_terminator)
 		{
@@ -4508,7 +4488,7 @@ gpupreagg_task_complete(GpuTask *gtask)
 
 			if (pds_final->kds->has_notbyval)
 				CUDA_EVENT_ELAPSED(gpreagg, time_kern_fixvar,
-								   ev_kern_fixvar_begin,
+								   ev_kern_fixvar,
 								   ev_dma_recv_start);
 		}
 		CUDA_EVENT_ELAPSED(gpreagg, time_dma_recv,
@@ -4819,12 +4799,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 	{
 		CUDA_EVENT_CREATE(gpreagg, ev_dma_send_start);
 		CUDA_EVENT_CREATE(gpreagg, ev_dma_send_stop);
-		CUDA_EVENT_CREATE(gpreagg, ev_kern_prep_end);
-		CUDA_EVENT_CREATE(gpreagg, ev_kern_nogrp_end);
-		CUDA_EVENT_CREATE(gpreagg, ev_kern_lagg_end);
-		CUDA_EVENT_CREATE(gpreagg, ev_kern_gagg_end);
-		CUDA_EVENT_CREATE(gpreagg, ev_kern_fagg_end);
-		CUDA_EVENT_CREATE(gpreagg, ev_kern_fixvar_begin);
+		CUDA_EVENT_CREATE(gpreagg, ev_kern_fixvar);
 		CUDA_EVENT_CREATE(gpreagg, ev_dma_recv_start);
 		CUDA_EVENT_CREATE(gpreagg, ev_dma_recv_stop);
 	}
@@ -4935,7 +4910,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 			size_t		grid_size;
 			size_t		block_size;
 
-			CUDA_EVENT_RECORD(gpreagg, ev_kern_fixvar_begin);
+			CUDA_EVENT_RECORD(gpreagg, ev_kern_fixvar);
 			/* Launch:
 			 * KERNEL_FUNCTION(void)
 			 * gpupreagg_fixup_varlena(kern_gpupreagg *kgpreagg,

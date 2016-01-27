@@ -118,17 +118,17 @@ typedef struct {
 	cl_double	time_kern_proj;	/* time to execute projection kernel */
 	/*-- (special perfmon for gpupreagg) --*/
 	cl_uint		num_kern_prep;	/* number of preparation kernel execution */
+	cl_uint		num_kern_nogrp;	/* number of nogroup reduction kernel exec */
 	cl_uint		num_kern_lagg;	/* number of local reduction kernel exec */
 	cl_uint		num_kern_gagg;	/* number of global reduction kernel exec */
 	cl_uint		num_kern_fagg;	/* number of final reduction kernel exec */
-	cl_uint		num_kern_nogrp;	/* number of nogroup reduction kernel exec */
 	cl_uint		num_kern_fixvar;/* number of varlena fixup kernel exec */
 	cl_double	time_kern_prep;	/* time to execute preparation kernel */
+	cl_double	time_kern_nogrp;/* time to execute nogroup reduction kernel */
 	cl_double	time_kern_lagg;	/* time to execute local reduction kernel */
 	cl_double	time_kern_gagg;	/* time to execute global reduction kernel */
 	cl_double	time_kern_fagg;	/* time to execute final reduction kernel */
 	cl_double	time_kern_fixvar; /* time to execute varlena fixup kernel */
-	cl_double	time_kern_nogrp;/* time to execute nogroup reduction kernel */
 	/*-- (special perfmon for gpusort) --*/
 	cl_uint		num_prep_sort;	/* number of GPU sort preparation kernel */
 	cl_uint		num_gpu_sort;	/* number of GPU bitonic sort execution */
