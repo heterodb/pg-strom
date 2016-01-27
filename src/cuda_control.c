@@ -2193,9 +2193,10 @@ check_target_cuda_device(struct target_cuda_device *dattr)
 	cl_ulong	dev_cap;
 
 	/*
-	 * CUDA device older than Kepler is not supported
+	 * CUDA device older than Computing Capability 3.5 is not supported
 	 */
-	if (dattr->dev_cap_major < 3)
+	if (dattr->dev_cap_major < 3 ||
+		(dattr->dev_cap_major == 3 && dattr->dev_cap_minor < 5))
 		goto out;
 
 	/*
