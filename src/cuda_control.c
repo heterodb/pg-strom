@@ -2464,6 +2464,8 @@ errorText(int errcode)
 			return "Out of memory";
 		case StromError_OutOfSharedMemory:
 			return "Out of shared memory";
+		case StromError_OutOfKernelParamBuffer:
+			return "Out of kernel argument parameter buffer";
 		case StromError_InvalidValue:
 			return "Invalid Value";
 		case StromError_DataStoreCorruption:

@@ -28,20 +28,47 @@
 #define GPUPREAGG_FINAL_REDUCTION		4
 #define GPUPREAGG_ONLY_TERMINATION		99	/* used to urgent termination */
 
+/*
+ * +--------------------+
+ * | kern_gpupreagg     |
+ * |     :              |
+ * | kresults_1_offset -------+
+ * | kresults_2_offset -----+ |
+ * | +------------------+   | |
+ * | | kern_parambuf    |   | |
+ * | |    :             |   | |
+ * +-+------------------+ <-|-+
+ * | kern_resultbuf(1st)|   |
+ * |      :             |   |
+ * |      :             |   |
+ * +--------------------+ <-+
+ * | kern_resultbuf(2nd)|
+ * |      :             |
+ * |      :             |
+ * +--------------------+
+ */
 typedef struct
 {
 	kern_errorbuf	kerror;					/* kernel error information */
 	cl_uint			reduction_mode;			/* one of GPUPREAGG_* above */
 	/* -- runtime statistics -- */
-	cl_uint			num_conflicts;			/* only used in kernel space */
-	cl_uint			num_groups;				/* out: # of new groups */
-	cl_uint			varlena_usage;			/* out: size of varlena usage */
-	cl_uint			ghash_conflicts;		/* out: # of ghash conflicts */
-	cl_uint			fhash_conflicts;		/* out: # of fhash conflicts */
+	cl_uint			num_conflicts;		/* only used in kernel space */
+	cl_uint			num_groups;			/* out: # of new groups */
+	cl_uint			varlena_usage;		/* out: size of varlena usage */
+	cl_uint			ghash_conflicts;	/* out: # of ghash conflicts */
+	cl_uint			fhash_conflicts;	/* out: # of fhash conflicts */
+	cl_uint			ktime_prep;			/* exec msec of preparation kernel */
+	cl_uint			ktime_nogroup;		/* exec msec of nogroup kernel */
+	cl_uint			ktime_local;		/* exec msec of local kernel */
+	cl_uint			ktime_global;		/* exec msec of global kernel */
+	cl_uint			ktime_final;		/* exec msec of final kernel */
+	//cl_uint		ktime_fixvar;		/* exec msec of fixvar kernel */
 	/* -- other hashing parameters -- */
 	cl_uint			key_dist_salt;			/* hashkey distribution salt */
 	cl_uint			hash_size;				/* size of global hash-slots */
 	cl_uint			pg_crc32_table[256];	/* master CRC32 table */
+	cl_uint			kresults_1_offset;		/* offset to 1st kresults */
+	cl_uint			kresults_2_offset;		/* offset to 2nd kresults */
 	kern_parambuf	kparams;
 	/*
 	 * kern_resultbuf with nrels==1 shall be located next to kern_parambuf
@@ -53,20 +80,21 @@ typedef struct
 	(&(kgpreagg)->kparams)
 #define KERN_GPUPREAGG_PARAMBUF_LENGTH(kgpreagg)		\
 	((kgpreagg)->kparams.length)
-#define KERN_GPUPREAGG_RESULTBUF(kgpreagg)				\
+#define KERN_GPUPREAGG_1ST_RESULTBUF(kgpreagg)			\
 	((kern_resultbuf *)									\
-	 ((char *)KERN_GPUPREAGG_PARAMBUF(kgpreagg)			\
-	  + KERN_GPUPREAGG_PARAMBUF_LENGTH(kgpreagg)))
+	 ((char *)(kgpreagg) + (kgpreagg)->kresults_1_offset))
+#define KERN_GPUPREAGG_2ND_RESULTBUF(kgpreagg)			\
+	((kern_resultbuf *)									\
+	 ((char *)(kgpreagg) + (kgpreagg)->kresults_2_offset))
 
-#define KERN_GPUPREAGG_LENGTH(kgpreagg,nitems)			\
-	((uintptr_t)(KERN_GPUPREAGG_RESULTBUF(kgpreagg)->results + (nitems)) - \
-	 (uintptr_t)(kgpreagg))
-
+#define KERN_GPUPREAGG_LENGTH(kgpreagg)					\
+	((uintptr_t)(kgpreagg)->kresults_1_offset +			\
+	 2 * ((uintptr_t)(kgpreagg)->kresults_2_offset -	\
+		  (uintptr_t)(kgpreagg)->kresults_1_offset))
 #define KERN_GPUPREAGG_DMASEND_OFFSET(kgpreagg)		0
 #define KERN_GPUPREAGG_DMASEND_LENGTH(kgpreagg)			\
 	(offsetof(kern_gpupreagg, kparams) +				\
-	 KERN_GPUPREAGG_PARAMBUF_LENGTH(kgpreagg) +			\
-	 offsetof(kern_resultbuf, results[0]))
+	 KERN_GPUPREAGG_PARAMBUF_LENGTH(kgpreagg))
 #define KERN_GPUPREAGG_DMARECV_OFFSET(kgpreagg)		0
 #define KERN_GPUPREAGG_DMARECV_LENGTH(kgpreagg)			\
 	offsetof(kern_gpupreagg, pg_crc32_table[0])
@@ -554,29 +582,107 @@ gpupreagg_preparation(kern_gpupreagg *kgpreagg,
 }
 
 /*
+ * gpupreagg_nogroup_reduction
+ *
+ * It makes aggregation if no GROUP-BY clause given. We can omit atomic-
+ * operations in this case, because all the rows are eventually consolidated
+ * to just one record, thus usual reduction operation is sufficient.
+ */
+KERNEL_FUNCTION_MAXTHREADS(void)
+gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,
+							kern_data_store *kds_slot,
+							kern_resultbuf *kresults_src,
+							kern_resultbuf *kresults_dst)
+{
+	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
+	kern_context	kcxt;
+	varlena		   *kparam_0 = (varlena *)kparam_get_value(kparams, 0);
+	cl_char		   *gpagg_atts = (cl_char *)VARDATA(kparam_0);
+	pagg_datum	   *l_datum = SHARED_WORKMEM(pagg_datum);
+	cl_uint			i, ncols = kds_slot->ncols;
+	cl_uint			nitems;
+	cl_uint			kds_index;
+
+	INIT_KERNEL_CONTEXT(&kcxt, gpupreagg_nogroup_reduction, kparams);
+	if (kresults_src->all_visible)
+	{
+		nitems = kds_slot->nitems;
+		if (get_global_id() < kds_slot->nitems)
+			kds_index = get_global_id();
+	}
+	else
+	{
+		nitems = kresults_src->nitems;
+		if (get_global_id() < kresults_src->nitems)
+			kds_index = kresults_src->results[get_global_id()];
+	}
+
+	/* loop for each columns */
+	for (i=0; i < ncols; i++)
+	{
+		size_t	dist;
+
+		/* if not GPUPREAGG_FIELD_IS_AGGFUNC, do nothing */
+		if (gpagg_atts[i] != GPUPREAGG_FIELD_IS_AGGFUNC)
+			continue;
+
+		/* load this value from kds_slot onto pagg_datum */
+		if (get_global_id() < nitems)
+			gpupreagg_data_load(l_datum + get_local_id(),
+								&kcxt, kds_slot, i, kds_index);
+		__syncthreads();
+
+		/* do reduction */
+		for (dist = 2; dist <= get_local_size(); dist *= 2)
+		{
+			if (get_local_id() % dist == 0 &&
+				(get_global_id() + dist / 2) < nitems)
+				gpupreagg_nogroup_calc(&kcxt,
+									   i,
+									   l_datum + get_local_id(),
+									   l_datum + get_local_id() + dist / 2);
+			__syncthreads();
+		}
+
+		/* store this value to kds_dst from datum */
+		if (kds_index < nitems && get_local_id() == 0)
+			gpupreagg_data_store(l_datum + get_local_id(),
+								 &kcxt, kds_slot, i, kds_index);
+		__syncthreads();
+	}
+	/* update kresults_dst */
+	if (get_local_id() == 0)
+	{
+		cl_uint		dest_index
+			= atomicAdd(&kresults_dst->nitems, 1);
+		kresults_dst->results[dest_index] = kds_index;
+	}
+	/* write-back execution status into host-side */
+	kern_writeback_error_status(&kgpreagg->kerror, kcxt.e);
+}
+
+/*
  * gpupreagg_local_reduction
  */
 KERNEL_FUNCTION_MAXTHREADS(void)
 gpupreagg_local_reduction(kern_gpupreagg *kgpreagg,
-						  kern_data_store *kds_src,
-						  kern_data_store *kds_dst)
+						  kern_data_store *kds_slot,
+						  kern_resultbuf *kresults)
 {
 	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	kern_context	kcxt;
 	varlena		   *kparam_0 = (varlena *)kparam_get_value(kparams, 0);
 	cl_char		   *gpagg_atts = (cl_char *) VARDATA(kparam_0);
 	size_t			hash_size = 2 * get_local_size();
-	size_t			dest_index;
 	cl_uint			owner_index;
 	cl_uint			key_dist_salt = kgpreagg->key_dist_salt;
 	cl_uint			key_dist_index = 0;
 	cl_uint			hash_value;
 	cl_uint			hash_value_base;
-	cl_uint			nitems = kds_src->nitems;
-	cl_uint			nattrs = kds_src->ncols;
-	cl_uint			ngroups;
+	cl_uint			nitems = kds_slot->nitems;
+	cl_uint			i, ncols = kds_slot->ncols;
+	cl_uint			count;
 	cl_uint			index;
-	cl_uint			attnum;
 	pg_int4_t		key_dist_factor;
 	pagg_hashslot	old_slot;
 	pagg_hashslot	new_slot;
@@ -584,7 +690,7 @@ gpupreagg_local_reduction(kern_gpupreagg *kgpreagg,
 	pagg_datum	   *l_datum;
 	pagg_hashslot  *l_hashslot;
 	__shared__ cl_uint	crc32_table[256];
-	__shared__ size_t	base_index;
+	__shared__ size_t	base;
 
 	INIT_KERNEL_CONTEXT(&kcxt,gpupreagg_local_reduction,kparams);
 
@@ -604,7 +710,7 @@ gpupreagg_local_reduction(kern_gpupreagg *kgpreagg,
 	if (get_global_id() < nitems)
 		hash_value = gpupreagg_hashvalue(&kcxt, crc32_table,
 										 hash_value,
-										 kds_src,
+										 kds_slot,
 										 get_global_id());
 	hash_value_base = hash_value;
 	if (key_dist_salt > 1)
@@ -665,8 +771,8 @@ gpupreagg_local_reduction(kern_gpupreagg *kgpreagg,
 
 			if (cur_slot.s.hash == new_slot.s.hash &&
 				gpupreagg_keymatch(&kcxt,
-								   kds_src, get_global_id(),
-								   kds_src, buddy_index))
+								   kds_slot, get_global_id(),
+								   kds_slot, buddy_index))
 			{
 				owner_index = cur_slot.s.index;
 			}
@@ -700,14 +806,14 @@ gpupreagg_local_reduction(kern_gpupreagg *kgpreagg,
 	 * destination kern_data_store.
 	 */
 	index = arithmetic_stairlike_add(get_local_id() == owner_index ? 1 : 0,
-									 &ngroups);
+									 &count);
 	if (get_local_id() == 0)
-		base_index = atomicAdd(&kds_dst->nitems, ngroups);
+		base = atomicAdd(&kresults->nitems, count);
 	__syncthreads();
-
-	/* should not growth the number of items over the nrooms */
-	assert(base_index + ngroups <= kds_dst->nrooms);
-	dest_index = base_index + index;
+	if (get_local_id() == owner_index)
+		kresults->results[base + index] = get_global_id();
+	/* Number of items should not be larger than nrooms  */
+	assert(base + count <= kresults->nrooms);
 
 	/*
 	 * Local reduction for each column
@@ -721,7 +827,7 @@ gpupreagg_local_reduction(kern_gpupreagg *kgpreagg,
 	 * array is no longer available across here
 	 */
 	l_datum = SHARED_WORKMEM(pagg_datum);
-	for (attnum = 0; attnum < nattrs; attnum++)
+	for (i=0; i < ncols; i++)
 	{
 		/*
 		 * In case when this column is either a grouping-key or not-
@@ -729,25 +835,16 @@ gpupreagg_local_reduction(kern_gpupreagg *kgpreagg,
 		 * need to do is copying the data from the source to the
 		 * destination; without modification anything.
 		 */
-		if (gpagg_atts[attnum] != GPUPREAGG_FIELD_IS_AGGFUNC)
-		{
-			if (owner_index == get_local_id())
-			{
-				gpupreagg_data_move(&kcxt,
-									attnum,
-									kds_src, get_global_id(),
-									kds_dst, dest_index);
-			}
+		if (gpagg_atts[i] != GPUPREAGG_FIELD_IS_AGGFUNC)
 			continue;
-		}
 
 		/* Load aggregation item to pagg_datum */
 		if (get_global_id() < nitems)
 		{
 			gpupreagg_data_load(l_datum + get_local_id(),
 								&kcxt,
-								kds_src,
-								attnum,
+								kds_slot,
+								i,
 								get_global_id());
 		}
 		__syncthreads();
@@ -757,7 +854,7 @@ gpupreagg_local_reduction(kern_gpupreagg *kgpreagg,
 			get_local_id() != owner_index)
 		{
 			gpupreagg_local_calc(&kcxt,
-								 attnum,
+								 i,
 								 l_datum + owner_index,
 								 l_datum + get_local_id());
 		}
@@ -766,11 +863,12 @@ gpupreagg_local_reduction(kern_gpupreagg *kgpreagg,
 		/* Move the value that is aggregated */
 		if (owner_index == get_local_id())
 		{
+			assert(get_global_id() < nitems);
 			gpupreagg_data_store(l_datum + owner_index,
 								 &kcxt,
-								 kds_dst,
-								 attnum,
-								 dest_index);
+								 kds_slot,
+								 i,
+								 get_global_id());
 			/*
 			 * varlena should never appear here, so we don't need to
 			 * put pg_fixup_tupslot_varlena() here
@@ -802,26 +900,26 @@ check_global_hashslot_usage(kern_context *kcxt,
  */
 KERNEL_FUNCTION(void)
 gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
-						   kern_data_store *kds_dst,
+						   kern_data_store *kds_slot,
+						   kern_resultbuf *kresults_src,
+						   kern_resultbuf *kresults_dst,
 						   kern_global_hashslot *g_hash)
 {
 	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
-	kern_resultbuf *kresults = KERN_GPUPREAGG_RESULTBUF(kgpreagg);
 	kern_context	kcxt;
 	varlena		   *kparam_0 = (varlena *) kparam_get_value(kparams, 0);
 	cl_char		   *gpagg_atts = (cl_char *) VARDATA(kparam_0);
 	size_t			g_hashsize = g_hash->hash_size;
 	size_t			g_hashlimit = GLOBAL_HASHSLOT_THRESHOLD(g_hashsize);
-	size_t			dest_index;
 	size_t			owner_index;
+	size_t			kds_index;
+	cl_bool			is_valid_slot = false;
 	cl_uint			key_dist_salt = kgpreagg->key_dist_salt;
 	cl_uint			key_dist_index = 0;
 	cl_uint			hash_value;
 	cl_uint			hash_value_base;
-	cl_uint			ngroups;
 	cl_uint			index;
-	cl_uint			nattrs = kds_dst->ncols;
-	cl_uint			attnum;
+	cl_uint			i, ncols = kds_slot->ncols;
 	cl_uint			nconflicts = 0;
 	cl_uint			count;
 	pg_int4_t		key_dist_factor;
@@ -857,7 +955,25 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 	if (!check_global_hashslot_usage(&kcxt, g_hashusage, g_hashlimit))
 		goto out;
 
-	if (get_global_id() < kds_dst->nitems)
+	if (kresults_src->all_visible)
+	{
+		if (get_global_id() < kds_slot->nitems)
+		{
+			kds_index = get_global_id();
+			is_valid_slot = true;
+		}
+	}
+	else
+	{
+		if (get_global_id() < kresults_src->nitems)
+		{
+			kds_index = kresults_src->results[get_global_id()];
+			assert(kds_index < kds_slot->nitems);
+			is_valid_slot = true;
+		}
+	}
+
+	if (is_valid_slot)
 	{
 		/*
 		 * Calculation of initial hash value
@@ -865,8 +981,8 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 		INIT_LEGACY_CRC32(hash_value);
 		hash_value = gpupreagg_hashvalue(&kcxt, crc32_table,
 										 hash_value,
-										 kds_dst,
-										 get_global_id());
+										 kds_slot,
+										 kds_index);
 		hash_value_base = hash_value;
 		if (key_dist_salt > 1)
 		{
@@ -891,7 +1007,7 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 		 */
 	retry_major:
 		new_slot.s.hash = hash_value;
-		new_slot.s.index = get_global_id();
+		new_slot.s.index = kds_index;
 		old_slot.s.hash = 0;
 		old_slot.s.index = (cl_uint)(0xffffffff);
 		index = hash_value % g_hashsize;
@@ -912,10 +1028,10 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 		}
 		else if (cur_slot.s.hash == new_slot.s.hash &&
 				 gpupreagg_keymatch(&kcxt,
-									kds_dst, get_global_id(),
-									kds_dst, cur_slot.s.index))
+									kds_slot, kds_index,
+									kds_slot, cur_slot.s.index))
 		{
-			assert(cur_slot.s.index < kds_dst->nitems);
+			assert(cur_slot.s.index < kds_slot->nitems);
 			owner_index = cur_slot.s.index;
 		}
 		else
@@ -956,22 +1072,17 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 	 * So, we can use kds->nrooms to check array boundary.
 	 */
 	__syncthreads();
-	index = arithmetic_stairlike_add(get_global_id() == owner_index ? 1 : 0,
-									 &ngroups);
+	index = arithmetic_stairlike_add(kds_index == owner_index ? 1 : 0,
+									 &count);
 	__syncthreads();
-	if (ngroups > 0)
+	if (count > 0)
 	{
 		if (get_local_id() == 0)
-			base = atomicAdd(&kresults->nitems, ngroups);
+			base = atomicAdd(&kresults_dst->nitems, count);
 		__syncthreads();
-		assert(base + ngroups <= kresults->nrooms);
-		dest_index = base + index;
-
-		if (get_global_id() < kds_dst->nitems &&
-			get_global_id() == owner_index)
-		{
-			kresults->results[dest_index] = get_global_id();
-		}
+		assert(base + count <= kresults_dst->nrooms);
+		if (kds_index == owner_index)
+			kresults_dst->results[base + index] = kds_index;
 	}
 
 	/*
@@ -995,17 +1106,17 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 	 * error code, so we don't care about here.
 	 */
 	if (owner_index != 0xffffffffU &&		/* a valid thread? */
-		owner_index != get_global_id())		/* not a owner thread? */
+		owner_index != kds_index)			/* not a owner thread? */
 	{
-		for (attnum = 0; attnum < nattrs; attnum++)
+		for (i=0; i < ncols; i++)
 		{
-			if (gpagg_atts[attnum] != GPUPREAGG_FIELD_IS_AGGFUNC)
+			if (gpagg_atts[i] != GPUPREAGG_FIELD_IS_AGGFUNC)
 				continue;
-			assert(owner_index < kds_dst->nrooms);
+			assert(owner_index < kds_slot->nrooms);
 			gpupreagg_global_calc(&kcxt,
-								  attnum,
-								  kds_dst, owner_index,
-								  kds_dst, get_global_id());
+								  i,
+								  kds_slot, owner_index,
+								  kds_slot, kds_index);
 		}
 	}
 out:
@@ -1047,39 +1158,34 @@ gpupreagg_final_preparation(size_t f_hashsize,
 
 /*
  * gpupreagg_final_reduction
- *
- * kds_dst = result of local or global reduction
- * kds_final = destination buffer in this case.
- *             kds_final->usage points current available variable length
- *             area, until kds_final->length. Use atomicAdd().
- * f_hash = hash slot of the final buffer
  */
 KERNEL_FUNCTION(void)
 gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
-						  kern_data_store *kds_dst,		/* in */
+						  kern_data_store *kds_slot,	/* in */
 						  kern_data_store *kds_final,	/* out */
+						  kern_resultbuf *kresults_src,	/* in */
+						  kern_resultbuf *kresults_dst,	/* out, locked only */
 						  kern_global_hashslot *f_hash)	/* only internal */
 {
 	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
-	kern_resultbuf *kresults = KERN_GPUPREAGG_RESULTBUF(kgpreagg);
 	kern_context	kcxt;
 	varlena		   *kparam_0 = (varlena *) kparam_get_value(kparams, 0);
 	cl_char		   *gpagg_atts = (cl_char *) VARDATA(kparam_0);
 	cl_uint			kds_index;
-	cl_uint			owner_index;
+	cl_uint			owner_index = (cl_uint)(0xffffffff); //INVALID
 	size_t			f_hashsize = f_hash->hash_size;
 	size_t			f_hashlimit = GLOBAL_HASHSLOT_THRESHOLD(f_hashsize);
 	cl_uint			key_dist_salt = kgpreagg->key_dist_salt;
 	cl_uint			key_dist_index = 0;
 	cl_uint			hash_value;
 	cl_uint			hash_value_base;
+	cl_uint			i, ncols = kds_slot->ncols;
 	cl_uint			index;
-	cl_uint			nattrs = kds_dst->ncols;
-	cl_uint			attnum;
 	cl_uint			count;
 	cl_uint			nconflicts = 0;
 	cl_uint			allocated = 0;
 	cl_bool			isOwner = false;
+	cl_bool			meet_locked = false;
 	pg_int4_t		key_dist_factor;
 	pagg_hashslot	old_slot;
 	pagg_hashslot	new_slot;
@@ -1111,22 +1217,22 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 		crc32_table[index] = kgpreagg->pg_crc32_table[index];
 	__syncthreads();
 
-	/* row-index on the kds_dst buffer */
-	if (kresults->all_visible)
+	/* row-index on the kds_slot buffer */
+	if (kresults_src->all_visible)
 	{
-		if (get_global_id() < kds_dst->nitems)
+		if (get_global_id() < kds_slot->nitems)
 			kds_index = get_global_id();
 		else
 			goto out;
 	}
 	else
 	{
-		if (get_global_id() < min(kresults->nitems,
-								  kresults->nrooms))
-			kds_index = kresults->results[get_global_id()];
+		if (get_global_id() < min(kresults_src->nitems,
+								  kresults_src->nrooms))
+			kds_index = kresults_src->results[get_global_id()];
 		else
 			goto out;
-		assert(kds_index < kds_dst->nitems);
+		assert(kds_index < kds_slot->nitems);
 	}
 
 	/*
@@ -1135,7 +1241,7 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 	INIT_LEGACY_CRC32(hash_value);
 	hash_value = gpupreagg_hashvalue(&kcxt, crc32_table,
 									 hash_value,
-									 kds_dst,
+									 kds_slot,
 									 kds_index);
 	hash_value_base = hash_value;
 	if (key_dist_salt > 1)
@@ -1191,7 +1297,7 @@ retry_minor:
 		if (new_slot.s.index < kds_final->nrooms)
 		{
 			allocated += gpupreagg_final_data_move(&kcxt,
-												   kds_dst,
+												   kds_slot,
 												   kds_index,
 												   kds_final,
 												   new_slot.s.index);
@@ -1207,42 +1313,20 @@ retry_minor:
 		cur_slot.value = new_slot.value;
 		isOwner = true;
 	}
-
-	/*
-	 * Wait for updates of the final hash slot by the owner thread
-	 *
-	 * NOTE: Pay attention the readon why the owner thread also shall go
-	 * into the while loop below. If and when any of thread waits for
-	 * the update by the owner thread in same warp, its code block to put
-	 * initial values of kds_final has to be located prior to the busy-
-	 * loop below. If we would split the code block using if ... else,
-	 * compiler may reorder the 'else' block earlier than the code block
-	 * of the owner thread. It will make a deadlock hard to find, because
-	 * all the GPU thread shares same instruction pointer in a warp, thus,
-	 * we have to ensure the owner thread's code block is located prior to
-	 * the busy-loop.
-	 */
-	while (cur_slot.s.index == (cl_uint)(0xfffffffe))
-		cur_slot.value = f_hash->hash_slot[index].value;
-	owner_index = cur_slot.s.index;
-	assert(owner_index < (cl_uint)(0xfffffffe));
-
-	if (!isOwner)
+	else
 	{
-		if (cur_slot.s.hash == new_slot.s.hash &&
-			(cur_slot.s.index >= kds_final->nitems ||
-			 gpupreagg_keymatch(&kcxt,
-								kds_dst, kds_index,
-								kds_final, cur_slot.s.index)))
+		/* it may be a slot we can use later */
+		if (cur_slot.s.index == (cl_uint)(0xfffffffe) &&
+			cur_slot.s.hash == hash_value)
+			meet_locked = true;
+
+		if (cur_slot.s.index != (cl_uint)(0xfffffffe) &&
+			cur_slot.s.hash  == hash_value &&
+			gpupreagg_keymatch(&kcxt,
+							   kds_slot, kds_index,
+							   kds_final, cur_slot.s.index))
 		{
-			/*
-			 * NOTE: If hash value was identical but cur_slot.s.index is out
-			 * of range thus we cannot use gpupreagg_keymatch, we cannot
-			 * determine whether this hash slot is actually owned by other
-			 * row that has identical grouping keys.
-			 * However, it is obvious this kernel invocation will return
-			 * DataStoreNoSpace error, then CPU fallback will work.
-			 */
+			/* grouping key matched */
 			owner_index = cur_slot.s.index;
 		}
 		else
@@ -1261,48 +1345,71 @@ retry_minor:
 				FIN_LEGACY_CRC32(hash_value);
 				goto retry_major;
 			}
-			__threadfence();
+			/*
+			 * If we already meet a hash entry that was locked but has
+			 * same hash value, we try to walk on the next kernel
+			 * invocation, than enlarge hash slot.
+			 */
+			if (meet_locked)
+			{
+				owner_index = (cl_uint)(0xfffffffe); // LOCKED
+				goto out;
+			}
+
 			if (!check_global_hashslot_usage(&kcxt, f_hash->hash_usage,
 											 f_hashlimit))
 				goto out;
 			index = (index + 1) % f_hashsize;
 			goto retry_minor;
 		}
-	}
 
-	/*
-	 * Global reduction for each column
-	 *
-	 * Any threads that are NOT responsible to grouping-key calculates
-	 * aggregation on the item that is responsibles.
-	 * Once atomic operations got finished, values of pagg_datum in the
-	 * respobsible thread will have partially aggregated one.
-	 */
-	if (!isOwner && owner_index < kds_final->nrooms)
-	{
-		for (attnum = 0; attnum < nattrs; attnum++)
+		/*
+		 * Global reduction for each column
+		 *
+		 * Any threads that are NOT responsible to grouping-key calculates
+		 * aggregation on the item that is responsibles.
+		 * Once atomic operations got finished, values of pagg_datum in the
+		 * respobsible thread will have partially aggregated one.
+		 */
+		if (owner_index < Min(kds_final->nitems,
+							  kds_final->nrooms))
 		{
-			if (gpagg_atts[attnum] != GPUPREAGG_FIELD_IS_AGGFUNC)
-				continue;
+			for (i=0; i < ncols; i++)
+			{
+				if (gpagg_atts[i] != GPUPREAGG_FIELD_IS_AGGFUNC)
+					continue;
 			
-			/*
-			 * Reduction, using global atomic operation
-			 *
-			 * If thread is responsible to the grouping-key, other threads but
-			 * NOT responsible will accumlate their values here, then it shall
-			 * become aggregated result. So, we mark the "responsible" thread
-			 * identifier on the kern_row_map. Once kernel execution gets done,
-			 * this index points the location of aggregate value.
-			 */
-			gpupreagg_global_calc(&kcxt,
-								  attnum,
-								  kds_final, owner_index,
-								  kds_dst, kds_index);
+				/*
+				 * Reduction, using global atomic operation
+				 *
+				 * If thread is responsible to the grouping-key, other
+				 * threads but NOT responsible will accumlate their values
+				 * here, then it shall become aggregated result. So, we mark
+				 * the "responsible" thread identifier on the kern_row_map.
+				 * Once kernel execution gets done, this index points the
+				 * location of aggregate value.
+				 */
+				gpupreagg_global_calc(&kcxt,
+									  i,
+									  kds_final, owner_index,
+									  kds_slot, kds_index);
+			}
 		}
 	}
 out:
-	/* concurrent thread may still use crc32_table */
+	/* Do we try to update kds_final again on the next kernel call? */
 	__syncthreads();
+	index = arithmetic_stairlike_add(owner_index == 0xfffffffeU ? 1 : 0,
+									 &count);
+	if (count > 0)
+	{
+		__shared__ cl_uint base;
+
+		if (get_local_id() == 0)
+			base = atomicAdd(&kresults_dst->nitems, count);
+		__syncthreads();
+		kresults_dst->results[base + index] = kds_index;
+	}
 
 	/* update run-time statistics */
 	arithmetic_stairlike_add(isOwner ? 1 : 0, &count);
@@ -1323,91 +1430,6 @@ out:
 	/* write-back execution status into host-side */
 	kern_writeback_error_status(&kgpreagg->kerror, kcxt.e);
 }
-
-/*
- * gpupreagg_nogroup_reduction
- *
- * It makes aggregation if no GROUP-BY clause given. We can omit atomic-
- * operations in this case, because all the rows are eventually consolidated
- * to just one record, thus usual reduction operation is sufficient.
- */
-KERNEL_FUNCTION_MAXTHREADS(void)
-gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,
-							kern_data_store *kds_src,
-							kern_data_store *kds_dst)
-{
-	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
-	kern_resultbuf *kresults = KERN_GPUPREAGG_RESULTBUF(kgpreagg);
-	kern_context	kcxt;
-	varlena		   *kparam_0 = (varlena *)kparam_get_value(kparams, 0);
-	cl_char		   *gpagg_atts = (cl_char *)VARDATA(kparam_0);
-	pagg_datum	   *l_datum = SHARED_WORKMEM(pagg_datum);
-	cl_uint			nitems = kds_src->nitems;
-	cl_uint			nattrs = kds_src->ncols;
-	size_t			lid = get_local_id();
-	size_t			gid = get_global_id();
-	size_t			lsz = get_local_size();
-	size_t			dest_index	= gid / lsz;
-	int				attnum;
-
-	INIT_KERNEL_CONTEXT(&kcxt, gpupreagg_nogroup_reduction, kparams);
-
-	/* loop for each columns */
-	for (attnum = 0; attnum < nattrs; attnum++)
-	{
-		size_t	distance;
-
-		/* if not GPUPREAGG_FIELD_IS_AGGFUNC, do nothing */
-		if (gpagg_atts[attnum] != GPUPREAGG_FIELD_IS_AGGFUNC)
-		{
-			if (gid < nitems  && lid == 0)
-				gpupreagg_data_move(&kcxt, attnum,
-									kds_src, gid,
-									kds_dst, dest_index);
-			continue;
-		}
-
-		/* load this value from kds_src onto datum */
-		if (gid < nitems)
-			gpupreagg_data_load(&l_datum[lid], &kcxt,
-								kds_src, attnum, gid);
-
-		__syncthreads();
-
-		/* do reduction */
-		for (distance = 2; distance <= lsz; distance *= 2)
-		{
-			if (lid % distance == 0 && (gid + distance / 2) < nitems)
-				gpupreagg_nogroup_calc(&kcxt,
-									   attnum,
-									   &l_datum[lid],
-									   &l_datum[lid + distance / 2]);
-			__syncthreads();
-		}
-
-		/* store this value to kds_dst from datum */
-		if (gid < nitems  &&  lid == 0)
-			gpupreagg_data_store(&l_datum[lid], &kcxt,
-								 kds_dst, attnum, dest_index);
-		__syncthreads();
-	}
-
-	/*
-	 * Fixup kern_rowmap/kds->nitems
-	 */
-	if (gid == 0)
-	{
-		kresults->nitems = (nitems + lsz - 1) / lsz;
-		kds_dst->nitems = (nitems + lsz - 1) / lsz;
-	}
-	if (lid == 0)
-	{
-		kresults->results[dest_index] = dest_index;
-	}
-	/* write-back execution status into host-side */
-	kern_writeback_error_status(&kgpreagg->kerror, kcxt.e);
-}
-
 
 /*
  * gpupreagg_fixup_varlena
@@ -1537,97 +1559,141 @@ out:
  */
 KERNEL_FUNCTION(void)
 gpupreagg_main(kern_gpupreagg *kgpreagg,
-			   kern_data_store *kds_in,			/* KDS_FORMAT_ROW */
-			   kern_data_store *kds_src,		/* KDS_FORMAT_SLOT */
-			   kern_data_store *kds_dst,		/* KDS_FORMAT_SLOT */
+			   kern_data_store *kds_row,		/* KDS_FORMAT_ROW */
+			   kern_data_store *kds_slot,		/* KDS_FORMAT_SLOT */
 			   kern_global_hashslot *g_hash,	/* For global reduction */
 			   kern_data_store *kds_final,		/* KDS_FORMAT_SLOT + Extra */
 			   kern_global_hashslot *f_hash)
 {
 	kern_parambuf	   *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
+	kern_resultbuf	   *kresults_src = KERN_GPUPREAGG_1ST_RESULTBUF(kgpreagg);
+	kern_resultbuf	   *kresults_dst = KERN_GPUPREAGG_2ND_RESULTBUF(kgpreagg);
+	kern_resultbuf	   *kresults_tmp;
+	cl_uint				kresults_nrooms = kds_row->nitems;
 	kern_context		kcxt;
 	void			  **kern_args;
 	dim3				grid_sz;
 	dim3				block_sz;
+	cl_int				device;
+	cl_int				smx_clock;
+	cl_ulong			tv1, tv2;
 	cudaError_t			status = cudaSuccess;
-	kern_data_store	   *kds_final_source = kds_src;
 
+	/* Init kernel context */
 	INIT_KERNEL_CONTEXT(&kcxt, gpupreagg_main, kparams);
 	assert(get_global_size() == 1);	/* !!single thread!! */
+	assert(kgpreagg->reduction_mode != GPUPREAGG_ONLY_TERMINATION);
 
-	/*
-	 * NOTE: kernel entrypoints in GpuPreAgg has up to four, and all
-	 * pointer arguments. So, "4 * sizeof(void *)" is sufficient to
-	 * launch these kernel functions.
+	/* Get device clock for performance monitor */
+	status = cudaGetDevice(&device);
+	if (status != cudaSuccess)
+	{
+		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+		goto out;
+	}
+
+	status = cudaDeviceGetAttribute(&smx_clock,
+									cudaDevAttrClockRate,
+									device);
+	status = cudaGetDevice(&device);
+	if (status != cudaSuccess)
+	{
+		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+		goto out;
+	}
+
+	/* Launch:
+	 * KERNEL_FUNCTION(void)
+	 * gpupreagg_preparation(kern_gpupreagg *kgpreagg,
+	 *                       kern_data_store *kds_row,
+	 *                       kern_data_store *kds_slot,
+	 *                       kern_global_hashslot *g_hash)
 	 */
+	tv1 = clock64();
 	kern_args = (void **)cudaGetParameterBuffer(sizeof(void *),
 												sizeof(void *) * 4);
 	if (!kern_args)
 	{
-		STROM_SET_ERROR(&kcxt.e, StromError_OutOfMemory);
+		STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelParamBuffer);
+		goto out;
+	}
+	kern_args[0] = kgpreagg;
+	kern_args[1] = kds_row;
+	kern_args[2] = kds_slot;
+	kern_args[3] = g_hash;
+
+	status = pgstrom_optimal_workgroup_size(&grid_sz,
+											&block_sz,
+											(const void *)
+											gpupreagg_preparation,
+											kds_row->nitems,
+											sizeof(kern_errorbuf));
+	if (status != cudaSuccess)
+	{
+		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
 		goto out;
 	}
 
-	if (kgpreagg->reduction_mode != GPUPREAGG_ONLY_TERMINATION)
+	status = cudaLaunchDevice((void *)gpupreagg_preparation,
+							  kern_args, grid_sz, block_sz,
+							  sizeof(kern_errorbuf) * block_sz.x,
+							  NULL);
+	if (status != cudaSuccess)
 	{
-		/* Launch:
-		 * KERNEL_FUNCTION(void)
-		 * gpupreagg_preparation(kern_gpupreagg *kgpreagg,
-		 *                       kern_data_store *kds_in,
-		 *                       kern_data_store *kds_src,
-		 *                       kern_global_hashslot *g_hash)
-		 */
-		kern_args[0] = kgpreagg;
-		kern_args[1] = kds_in;
-		kern_args[2] = kds_src;
-		kern_args[3] = g_hash;
-
-		status = pgstrom_optimal_workgroup_size(&grid_sz,
-												&block_sz,
-												gpupreagg_preparation,
-												kds_in->nitems,
-												sizeof(kern_errorbuf));
-		if (status != cudaSuccess)
-		{
-			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
-			goto out;
-		}
-
-		status = cudaLaunchDevice(gpupreagg_preparation,
-								  kern_args, grid_sz, block_sz,
-								  sizeof(kern_errorbuf) * block_sz.x,
-								  NULL);
-		if (status != cudaSuccess)
-		{
-			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
-			goto out;
-		}
-
-		status = cudaDeviceSynchronize();
-		if (status != cudaSuccess)
-		{
-			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
-			goto out;
-		}
+		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+		goto out;
 	}
 
+	status = cudaDeviceSynchronize();
+	if (status != cudaSuccess)
+	{
+		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+		goto out;
+	}
+	else if (kgpreagg->kerror.errcode != StromError_Success)
+		return;
+	tv2 = clock64();
+	kgpreagg->ktime_prep = (tv2 - tv1) / smx_clock;
+
+	kgpreagg->reduction_mode = GPUPREAGG_FINAL_REDUCTION;
 	if (kgpreagg->reduction_mode == GPUPREAGG_NOGROUP_REDUCTION)
 	{
 		/* Launch:
 		 * KERNEL_FUNCTION(void)
 		 * gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,
-		 *                             kern_data_store *kds_src,
-		 *                             kern_data_store *kds_dst)
+		 *                             kern_data_store *kds_slot,
+		 *                             kern_resultbuf *kresults_src,
+		 *                             kern_resultbuf *kresults_dst)
 		 */
+		tv1 = clock64();
+
+		/* setup kern_resultbuf */
+		memset(kresults_src, 0, offsetof(kern_resultbuf, results[0]));
+		kresults_src->nrels = 1;
+		kresults_src->nrooms = kresults_nrooms;
+		kresults_src->all_visible = true;
+
+		memset(kresults_dst, 0, offsetof(kern_resultbuf, results[0]));
+		kresults_dst->nrels = 1;
+		kresults_dst->nrooms = kresults_nrooms;
 
 		/* 1st trial of the reduction */
+		kern_args = (void **)cudaGetParameterBuffer(sizeof(void *),
+													sizeof(void *) * 4);
+		if (!kern_args)
+		{
+			STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelParamBuffer);
+			goto out;
+		}
 		kern_args[0] = kgpreagg;
-		kern_args[1] = kds_src;
-		kern_args[2] = kds_dst;
+		kern_args[1] = kds_slot;
+		kern_args[2] = kresults_src;
+		kern_args[3] = kresults_dst;
 		status = pgstrom_largest_workgroup_size(&grid_sz,
 												&block_sz,
+												(const void *)
 												gpupreagg_nogroup_reduction,
-												kds_src->nitems,
+												kds_slot->nitems,
 												Max(sizeof(pagg_datum),
 													sizeof(kern_errorbuf)));
 		if (status != cudaSuccess)
@@ -1636,7 +1702,7 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 			goto out;
 		}
 
-		status = cudaLaunchDevice(gpupreagg_nogroup_reduction,
+		status = cudaLaunchDevice((void *)gpupreagg_nogroup_reduction,
 								  kern_args, grid_sz, block_sz,
 								  Max(sizeof(pagg_datum),
 									  sizeof(kern_errorbuf)) * block_sz.x,
@@ -1653,15 +1719,32 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
 			goto out;
 		}
+		else if (kgpreagg->kerror.errcode != StromError_Success)
+			return;
+
+		printf("nogroup reduction(1) nitems %u => %u\n", kds_slot->nitems, kresults_dst->nitems);
 
 		/* 2nd trial of the reduction */
+		memset(kresults_src, 0, offsetof(kern_resultbuf, results[0]));
+		kresults_src->nrels = 1;
+		kresults_src->nrooms = kresults_nrooms;
+
+		kern_args = (void **)cudaGetParameterBuffer(sizeof(void *),
+													sizeof(void *) * 4);
+		if (!kern_args)
+		{
+			STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelParamBuffer);
+			goto out;
+		}
 		kern_args[0] = kgpreagg;
-        kern_args[1] = kds_dst;		/* reversed */
-        kern_args[2] = kds_src;		/* reversed */
+        kern_args[1] = kds_slot;
+		kern_args[2] = kresults_dst;	/* reverse */
+        kern_args[2] = kresults_src;	/* reverse */
 		status = pgstrom_largest_workgroup_size(&grid_sz,
 												&block_sz,
+												(const void *)
 												gpupreagg_nogroup_reduction,
-												kds_dst->nitems,
+												kresults_dst->nitems,
 												Max(sizeof(pagg_datum),
                                                     sizeof(kern_errorbuf)));
 		if (status != cudaSuccess)
@@ -1670,7 +1753,7 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 			goto out;
 		}
 
-		status = cudaLaunchDevice(gpupreagg_nogroup_reduction,
+		status = cudaLaunchDevice((void *)gpupreagg_nogroup_reduction,
 								  kern_args, grid_sz, block_sz,
 								  Max(sizeof(pagg_datum),
 									  sizeof(kern_errorbuf)) * block_sz.x,
@@ -1687,42 +1770,64 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
 			goto out;
 		}
+		else if (kgpreagg->kerror.errcode != StromError_Success)
+			return;
+
+		tv2 = clock64();
+		kgpreagg->ktime_nogroup = (tv2 - tv1) / smx_clock;
+
+		printf("nogroup reduction(2) nitems %u => %u\n", kresults_dst->nitems, kresults_src->nitems);
 	}
 	else if (kgpreagg->reduction_mode == GPUPREAGG_LOCAL_REDUCTION ||
 			 kgpreagg->reduction_mode == GPUPREAGG_GLOBAL_REDUCTION)
 	{
+		memset(kresults_src, 0, offsetof(kern_resultbuf, results[0]));
+		kresults_src->nrels = 1;
+		kresults_src->nrooms = kresults_nrooms;
+		memset(kresults_dst, 0, offsetof(kern_resultbuf, results[0]));
+		kresults_dst->nrels = 1;
+		kresults_dst->nrooms = kresults_nrooms;
+
 		if (kgpreagg->reduction_mode == GPUPREAGG_LOCAL_REDUCTION)
 		{
+			size_t		dynamic_shmem_unitsz = Max3(sizeof(kern_errorbuf),
+													sizeof(pagg_hashslot) * 2,
+													sizeof(pagg_datum));
 			/*
 			 * Launch:
 			 * KERNEL_FUNCTION_MAXTHREADS(void)
 			 * gpupreagg_local_reduction(kern_gpupreagg *kgpreagg,
-			 *                           kern_data_store *kds_src,
-			 *                           kern_data_store *kds_dst)
+			 *                           kern_data_store *kds_slot,
+			 *                           kern_resultbuf *kresults
 			 */
+			tv1 = clock64();
+			kern_args = (void **)cudaGetParameterBuffer(sizeof(void *),
+														sizeof(void *) * 3);
+			if (!kern_args)
+			{
+				STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelParamBuffer);
+				goto out;
+			}
 			kern_args[0] = kgpreagg;
-			kern_args[1] = kds_src;		/* in */
-			kern_args[2] = kds_dst;		/* out */
+			kern_args[1] = kds_slot;		/* in */
+			kern_args[2] = kresults_src;	/* out */
 			status = pgstrom_largest_workgroup_size(&grid_sz,
 													&block_sz,
+													(const void *)
 													gpupreagg_local_reduction,
-													kds_src->nitems,
-													Max3(sizeof(kern_errorbuf),
-														 sizeof(pagg_hashslot),
-														 sizeof(pagg_datum)));
+													kds_slot->nitems,
+													dynamic_shmem_unitsz);
 			if (status != cudaSuccess)
 			{
 				STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
 				goto out;
 			}
 
-			status = cudaLaunchDevice(gpupreagg_local_reduction,
+			status = cudaLaunchDevice((void *)gpupreagg_local_reduction,
 									  kern_args,
 									  grid_sz,
 									  block_sz,
-									  Max3(sizeof(kern_errorbuf),
-										   sizeof(pagg_hashslot),
-										   sizeof(pagg_datum)) * block_sz.x,
+									  dynamic_shmem_unitsz * block_sz.x,
 									  NULL);
 			if (status != cudaSuccess)
 			{
@@ -1736,23 +1841,49 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 				STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
 				goto out;
 			}
-			kds_final_source = kds_dst;
+			else if (kgpreagg->kerror.errcode != StromError_Success)
+				return;
+
+			printf("local_reduction %u=>%u\n", kds_slot->nitems, kresults_src->nitems);
+			/* perfmon */
+			tv2 = clock64();
+			kgpreagg->ktime_local = (tv2 - tv1) / smx_clock;
+		}
+		else
+		{
+			/* if no local reduction, global reduction takes all the rows */
+			kresults_src->all_visible = true;
 		}
 
 		/*
 		 * Launch:
 		 * KERNEL_FUNCTION(void)
 		 * gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
-		 *                            kern_data_store *kds_dst,
+		 *                            kern_data_store *kds_slot,
+		 *                            kern_resultbuf *kresults_src,
+		 *                            kern_resultbuf *kresults_dst,
 		 *                            kern_global_hashslot *g_hash)
 		 */
+		tv1 = clock64();
+		kern_args = (void **)cudaGetParameterBuffer(sizeof(void *),
+													sizeof(void *) * 5);
+		if (!kern_args)
+		{
+			STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelParamBuffer);
+			goto out;
+		}
 		kern_args[0] = kgpreagg;
-		kern_args[1] = kds_final_source;
-		kern_args[1] = g_hash;
+		kern_args[1] = kds_slot;
+		kern_args[2] = kresults_src;
+		kern_args[3] = kresults_dst;
+		kern_args[4] = g_hash;
 		status = pgstrom_largest_workgroup_size(&grid_sz,
 												&block_sz,
+												(const void *)
 												gpupreagg_global_reduction,
-												kds_final_source->nitems,
+												kresults_src->all_visible
+												? kds_slot->nitems
+												: kresults_src->nitems,
 												sizeof(kern_errorbuf));
 		if (status != cudaSuccess)
 		{
@@ -1760,7 +1891,7 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 			goto out;
 		}
 
-		status = cudaLaunchDevice(gpupreagg_global_reduction,
+		status = cudaLaunchDevice((void *)gpupreagg_global_reduction,
 								  kern_args,
 								  grid_sz,
 								  block_sz,
@@ -1778,34 +1909,76 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
 			goto out;
 		}
+		else if (kgpreagg->kerror.errcode != StromError_Success)
+			return;
+
+		tv2 = clock64();
+		kgpreagg->ktime_global = (tv2 - tv1) / smx_clock;
+
+		printf("global_reduction %u=>%u\n", kresults_src->all_visible ? kds_slot->nitems : kresults_src->nitems, kresults_dst->nitems);
+		/* swap */
+		kresults_tmp = kresults_src;
+		kresults_src = kresults_dst;
+		kresults_dst = kresults_src;
 	}
+	else
+	{
+		/* only final reduction - all input slot should be visible */
+		memset(kresults_src, 0, offsetof(kern_resultbuf, results[0]));
+		kresults_src->nrels = 1;
+		kresults_src->nrooms = kresults_nrooms;
+		kresults_src->all_visible = true;
+	}
+
 
 	if (kgpreagg->reduction_mode != GPUPREAGG_ONLY_TERMINATION)
 	{
+		cl_uint		retry_count = 1;
+
 		/* Launch:
 		 * KERNEL_FUNCTION(void)
 		 * gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,
-		 *                           kern_data_store *kds_dst,
+		 *                           kern_data_store *kds_slot,
 		 *                           kern_data_store *kds_final,
+		 *                           kern_resultbuf *kresults_src,
+		 *                           kern_resultbuf *kresults_dst,
 		 *                           kern_global_hashslot *f_hash)
 		 */
-		kern_args[0] = kgpreagg;
-		kern_args[1] = kds_final_source;
-		kern_args[2] = kds_final;
-		kern_args[3] = f_hash;
+		tv1 = clock64();
+	final_retry:
+		/* init destination kern_resultbuf */
+		memset(kresults_dst, 0, offsetof(kern_resultbuf, results[0]));
+		kresults_dst->nrels = 1;
+		kresults_dst->nrooms = kresults_nrooms;
 
-		status = pgstrom_largest_workgroup_size(&grid_sz,
+		kern_args = (void **)cudaGetParameterBuffer(sizeof(void *),
+													sizeof(void *) * 6);
+		if (!kern_args)
+		{
+			STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelParamBuffer);
+			goto out;
+		}
+		kern_args[0] = kgpreagg;
+		kern_args[1] = kds_slot;
+		kern_args[2] = kds_final;
+		kern_args[3] = kresults_src;
+		kern_args[4] = kresults_dst;
+		kern_args[5] = f_hash;
+
+		status = pgstrom_optimal_workgroup_size(&grid_sz,
 												&block_sz,
+												(const void *)
 												gpupreagg_final_reduction,
-												kds_final_source->nitems,
+												kresults_src->all_visible
+												? kds_slot->nitems
+												: kresults_src->nitems,
 												sizeof(kern_errorbuf));
 		if (status != cudaSuccess)
 		{
 			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
 			goto out;
 		}
-
-		status = cudaLaunchDevice(gpupreagg_final_reduction,
+		status = cudaLaunchDevice((void *)gpupreagg_final_reduction,
 								  kern_args,
 								  grid_sz,
 								  block_sz,
@@ -1816,19 +1989,28 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
 			goto out;
 		}
-
 		status = cudaDeviceSynchronize();
 		if (status != cudaSuccess)
 		{
 			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
 			goto out;
 		}
+		else if (kgpreagg->kerror.errcode != StromError_Success)
+			return;
 
-		// TODO: Iterate calls until number of conflict items becomes zero
+		if (kresults_dst->nitems > 0)
+		{
+			/* swap */
+			kresults_tmp = kresults_src;
+			kresults_src = kresults_dst;
+			kresults_dst = kresults_tmp;
 
+			retry_count++;
 
-
-
+			goto final_retry;
+		}
+		tv2 = clock64();
+		kgpreagg->ktime_final = (tv2 - tv1) / smx_clock;
 	}
 
 	/*
@@ -1837,7 +2019,11 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 	 * segments. So, we have no chance to launch this kernel by GPU.
 	 */
 out:
-	kern_writeback_error_status(&kgpreagg->kerror, kcxt.e);
+	/*
+	 * This kernel shall be launched with GridSz=(1,1,1), BlockSz=(1,1,1)
+	 * So, we don't need to care about concurrent threads.
+	 */
+	kgpreagg->kerror = kcxt.e;
 }
 
 /* ----------------------------------------------------------------

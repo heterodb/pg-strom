@@ -209,7 +209,8 @@ typedef uintptr_t		hostptr_t;
 #define StromError_CudaInternal				1001 /* CUDA internal error */
 #define StromError_OutOfMemory				1002 /* Out of memory */
 #define StromError_OutOfSharedMemory		1003 /* Out of shared memory */
-#define StromError_InvalidValue				1004 /* Something invalid */
+#define StromError_OutOfKernelParamBuffer	1004 /* Out of kernel parambuf */
+#define StromError_InvalidValue				1999 /* Something invalid */
 #define StromError_DataStoreCorruption		2000 /* KDS corrupted */
 #define StromError_DataStoreNoSpace			2001 /* KDS has no space */
 #define StromError_DataStoreOutOfRange		2002 /* out of KDS range access */
