@@ -318,12 +318,7 @@ typedef struct pgstrom_multirels
 typedef struct
 {
 	GpuTask			task;
-	CUfunction		kern_prep;
-	CUfunction		kern_exec_nl;	/* gpujoin_exec_nestloop */
-	CUfunction		kern_exec_hj;	/* gpujoin_exec_hashjoin */
-	CUfunction		kern_outer_nl;	/* gpujoin_leftouter_nestloop */
-	CUfunction		kern_outer_hj;	/* gpujoin_leftouter_hashjoin */
-	CUfunction		kern_proj;
+	CUfunction		kern_main;
 	CUdeviceptr		m_kgjoin;
 	CUdeviceptr		m_kmrels;
 	CUdeviceptr		m_kds_src;
@@ -331,25 +326,8 @@ typedef struct
 	CUdeviceptr		m_ojmaps;
 	CUevent			ev_dma_send_start;
 	CUevent			ev_dma_send_stop;
-	CUevent			ev_kern_join_end;
 	CUevent			ev_dma_recv_start;
 	CUevent			ev_dma_recv_stop;
-
-	/* number of task retry because of DataStoreNoSpace */
-	cl_int			retry_count;
-
-	/*
-	 * NOTE: If expected size of the kds_dst is too large (that exceeds
-	 * pg_strom.chunk_max_inout_ratio), we split GpuJoin steps multiple
-	 * times. In this case, all we reference is kds_src[oitems_base] ...
-	 * kds_src[oitems_base + oitems_nums - 1] on the next invocation,
-	 * then this GpuJoinTask shall be reused with new oitems_base and
-	 * oitems_nums after the result is processed at CPU side.
-	 */
-	cl_uint			num_threads[GPUJOIN_MAX_DEPTH + 1];
-	cl_uint			inner_base[GPUJOIN_MAX_DEPTH + 1];
-	cl_uint			inner_size[GPUJOIN_MAX_DEPTH + 1];
-	double			inner_ratio;
 
 	pgstrom_multirels  *pmrels;		/* inner multi relations (heap or hash) */
 	pgstrom_data_store *pds_src;	/* data store of outer relation */
@@ -4051,7 +4029,7 @@ retry:
 	/*
 	 * Setup kern_gpujoin structure
 	 */
-	kgjoin_length = offsetof(kern_gpujoin, kparams)
+	kgjoin_length = STROMALIGN(offsetof(kern_gpujoin, iscale[gjs->num_rels]))
 		+ STROMALIGN(gjs->gts.kern_params->length)
 		+ STROMALIGN(offsetof(kern_resultbuf, results[max_items]))
 		+ STROMALIGN(offsetof(kern_resultbuf, results[max_items]));
@@ -4080,20 +4058,27 @@ retry:
 		kgjoin_length = pgstrom_chunk_size() / 8;
 		max_items = alt_items;
 	}
-	memset(kgjoin, 0, offsetof(kern_gpujoin, kparams));
-	kgjoin->kresults_1_offset = (offsetof(kern_gpujoin, kparams) +
+	memset(kgjoin, 0, offsetof(kern_gpujoin, iscale[gjs->num_rels]));
+	kgjoin->kparams_offset = STROMALIGN(offsetof(kern_gpujoin,
+												 iscale[gjs->num_rels]));
+	kgjoin->kresults_1_offset = (kgjoin->kparams_offset +
 								 STROMALIGN(gjs->gts.kern_params->length));
-	kgjoin->kresults_2_offset = kgjoin->kresults_1_offset
-		+ STROMALIGN(offsetof(kern_resultbuf, results[max_items]));
+	kgjoin->kresults_2_offset = kgjoin->kresults_1_offset +
+		STROMALIGN(offsetof(kern_resultbuf, results[max_items]));
 	kgjoin->kresults_max_space = max_items;
 	kgjoin->num_rels = gjs->num_rels;
 	kgjoin->start_depth = start_depth;
-	kgjoin->result_valid_until = 0;
+	kgjoin->outer_join_start_depth = ;
+
+	//TODO: assign initial value of iscale (inner_size, inner_base)
 
 	/* copies the constant/parameter buffer */
 	memcpy(KERN_GPUJOIN_PARAMBUF(kgjoin),
 		   gjs->gts.kern_params,
 		   gjs->gts.kern_params->length);
+#if 0
+	//MEMO: It shall be done in the kernel space
+
 	/*
 	 * Also, kresults_in of depth==1 has to be initialized preliminary
 	 */
@@ -4102,6 +4087,7 @@ retry:
 	kresults_in->nrels = 1;
 	kresults_in->nrooms = max_items;
 	kresults_in->nitems = 0;
+#endif
 
 	/* copy inner_size[] and num_threads[] */
 	memcpy(pgjoin->inner_size, inner_size, sizeof(pgjoin->inner_size));
@@ -4117,22 +4103,21 @@ gpujoin_create_task(GpuJoinState *gjs,
 {
 	GpuContext		   *gcontext = gjs->gts.gcontext;
 	pgstrom_gpujoin	   *pgjoin;
-	Size				pgjoin_head;
 	Size				required;
 
 	/*
 	 * Allocation of pgstrom_gpujoin task object
 	 */
-	pgjoin_head = (offsetof(pgstrom_gpujoin, kern) +
-				   offsetof(kern_gpujoin, kparams) +
-				   STROMALIGN(gjs->gts.kern_params->length));
-	required = pgjoin_head + STROMALIGN(offsetof(kern_resultbuf, results[0]));
+	required = (offsetof(pgstrom_gpujoin, kern) +
+				STROMALIGN(offsetof(kern_gpujoin,
+									iscale[gjs->num_rels])) +
+				STROMALIGN(gjs->gts.kern_params->length));
 	pgjoin = MemoryContextAllocZero(gcontext->memcxt, required);
 	pgstrom_init_gputask(&gjs->gts, &pgjoin->task);
 	pgjoin->pmrels = multirels_attach_buffer(pmrels);
 	pgjoin->pds_src = pds_src;
 	pgjoin->pds_dst = NULL;		/* to be set later */
-	/* inner_base[], inner_size[] and num_threads[] will be set below */
+	/* inner_base[] and inner_size[] shall be set below */
 	gpujoin_attach_result_buffer(gjs, pgjoin, inner_base);
 
 	return &pgjoin->task;
@@ -4302,7 +4287,6 @@ gpujoin_cleanup_cuda_resources(pgstrom_gpujoin *pgjoin)
 {
 	CUDA_EVENT_DESTROY(pgjoin, ev_dma_send_start);
 	CUDA_EVENT_DESTROY(pgjoin, ev_dma_send_stop);
-	CUDA_EVENT_DESTROY(pgjoin, ev_kern_join_end);
 	CUDA_EVENT_DESTROY(pgjoin, ev_dma_recv_start);
 	CUDA_EVENT_DESTROY(pgjoin, ev_dma_recv_stop);
 
@@ -4324,7 +4308,6 @@ gpujoin_cleanup_cuda_resources(pgstrom_gpujoin *pgjoin)
 	pgjoin->m_kmrels = 0UL;
 	pgjoin->ev_dma_send_start = NULL;
 	pgjoin->ev_dma_send_stop = NULL;
-	pgjoin->ev_kern_join_end = NULL;
 	pgjoin->ev_dma_recv_start = NULL;
 	pgjoin->ev_dma_recv_stop = NULL;
 }
@@ -4360,12 +4343,6 @@ gpujoin_task_complete(GpuTask *gtask)
 		CUDA_EVENT_ELAPSED(pgjoin, time_dma_send,
 						   ev_dma_send_start,
 						   ev_dma_send_stop);
-		CUDA_EVENT_ELAPSED(pgjoin, time_kern_join,
-						   ev_dma_send_stop,
-						   ev_kern_join_end);
-		CUDA_EVENT_ELAPSED(pgjoin, time_kern_proj,
-						   ev_kern_join_end,
-						   ev_dma_recv_start);
 		CUDA_EVENT_ELAPSED(pgjoin, time_dma_recv,
 						   ev_dma_recv_start,
 						   ev_dma_recv_stop);
@@ -4395,49 +4372,6 @@ gpujoin_task_complete(GpuTask *gtask)
 		for (i=0; i <= pgjoin->kern.num_rels; i++)
 			gjs->result_nitems[i] += (Size)
 				(pgjoin->inner_ratio * (double) pgjoin->kern.result_nitems[i]);
-#if 0
-		/*
-		 * For debug, to observe success cases
-		 */
-		{
-			kern_data_store	   *kds_dst = pgjoin->pds_dst->kds;
-			StringInfoData		str;
-
-			initStringInfo(&str);
-
-			appendStringInfo(&str, "src_nitems: %u (%.2f%%) max_space: %u ",
-							 pgjoin->pds_src->kds->nitems,
-							 100.0 * pgjoin->inner_ratio,
-							 pgjoin->kern.kresults_max_space);
-			if (kds_dst->format == KDS_FORMAT_ROW)
-				appendStringInfo(&str, "length: %u ", kds_dst->length);
-			else
-				appendStringInfo(&str, "nrooms: %u ", kds_dst->nrooms);
-
-			if (client_min_messages <= DEBUG1)
-			{
-				appendStringInfo(&str, " Nthreads: (");
-				for (i=0; i <= gjs->num_rels; i++)
-					appendStringInfo(&str, "%s%u", i > 0 ? ", " : "",
-									 pgjoin->num_threads[i]);
-				appendStringInfo(&str, ")");
-			}
-			appendStringInfo(&str, " Inners: ");
-			for (i=0; i < gjs->num_rels; i++)
-				appendStringInfo(&str, "%s(%u, %u)", i > 0 ? ", " : "",
-								 pgjoin->inner_base[i],
-								 pgjoin->inner_size[i]);
-			appendStringInfo(&str, " Results: [");
-			for (i=0; i <= gjs->num_rels; i++)
-				appendStringInfo(&str, "%s%u", i > 0 ? ", " : "",
-								 pgjoin->kern.result_nitems[i]);
-			appendStringInfo(&str, "]");
-
-			elog(INFO, "Success: %s retry=%d",
-				 str.data, pgjoin->retry_count);
-			pfree(str.data);
-		}
-#endif
 
 		/*
 		 * Enqueue another GpuJoin taks if completed one was run towards
@@ -4475,20 +4409,7 @@ gpujoin_task_complete(GpuTask *gtask)
 									pgjoin->pmrels,
 									pds_src,
 									inner_base);
-#if 1
-			{
-				StringInfoData	str;
 
-				initStringInfo(&str);
-				appendStringInfo(&str, " Inners: ");
-				for (i=0; i < gjs->num_rels; i++)
-					appendStringInfo(&str, "%s(%u, %u)", i > 0 ? ", " : "",
-				   					 pgjoin_new->inner_base[i],
-								   	 pgjoin_new->inner_size[i]);
-				elog(INFO, "Next(%p): %s", pgjoin_new, str.data);
-				pfree(str.data);
-			}
-#endif
 			/* add this new task to the pending list */
 			SpinLockAcquire(&gjs->gts.lock);
 			dlist_push_tail(&gjs->gts.pending_tasks, &pgjoin_new->task.chain);
@@ -4503,164 +4424,6 @@ gpujoin_task_complete(GpuTask *gtask)
 		Assert(pgjoin->pmrels != NULL);
 		multirels_detach_buffer(pgjoin->pmrels, true, __FUNCTION__);
 		pgjoin->pmrels = NULL;
-	}
-	else if (pgjoin->task.kerror.errcode == StromError_DataStoreNoSpace)
-	{
-#ifdef PGSTROM_DEBUG
-		/* For debug output */
-		kern_data_store	   *kds_dst = pgjoin->pds_dst->kds;
-		cl_uint		num_threads[GPUJOIN_MAX_DEPTH + 1];
-		cl_uint		inner_base[GPUJOIN_MAX_DEPTH + 1];
-		cl_uint		inner_size[GPUJOIN_MAX_DEPTH + 1];
-		cl_uint		result_nitems[GPUJOIN_MAX_DEPTH + 1];
-		cl_uint		result_valid_until;
-		cl_uint		nrooms_old;
-		cl_uint		length_old;
-		cl_uint		max_space_old;
-		cl_int		i;
-		double		progress;
-		bool		has_resized = false;
-		StringInfoData	str;
-
-		memcpy(num_threads, pgjoin->num_threads,
-			   sizeof(num_threads));
-		memcpy(inner_base, pgjoin->inner_base,
-			   sizeof(inner_base));
-		memcpy(inner_size, pgjoin->inner_size,
-			   sizeof(inner_size));
-		memcpy(result_nitems, pgjoin->kern.result_nitems,
-			   sizeof(result_nitems));
-		result_valid_until = pgjoin->kern.result_valid_until;
-		length_old = kds_dst->length;
-		nrooms_old = kds_dst->nrooms;
-		max_space_old = pgjoin->kern.kresults_max_space;
-		progress = 100.0 * ((double) gjs->source_nitems /
-							(double) gjs->outer_nrows);
-#endif
-		/*
-		 * StromError_DataStoreNoSpace indicates either/both of buffers
-		 * were smaller than required. So, we expand the buffer or reduce
-		 * number of outer tuples, then kick this gputask again.
-		 */
-		gpujoin_attach_result_buffer(gjs, pgjoin, pgjoin->inner_base);
-		pgjoin->retry_count++;
-
-#ifdef PGSTROM_DEBUG
-		/*
-		 * DEBUG OUTPUT if GpuJoinTask retry happen - to track how many
-		 * items are required and actually required.
-		 */
-
-		/* kds_dst might be replaced */
-		kds_dst = pgjoin->pds_dst->kds;
-		initStringInfo(&str);
-		if (pgjoin->pds_src)
-			appendStringInfo(&str, "src_nitems: %u",
-							 pgjoin->pds_src->kds->nitems);
-		else
-		{
-			pgstrom_multirels  *pmrels = pgjoin->pmrels;
-			pgstrom_data_store *pds_in =
-				pmrels->inner_chunks[gjs->outer_join_start_depth];
-			appendStringInfo(&str, "in_nitems: %u", pds_in->kds->nitems);
-		}
-
-		if (max_space_old == pgjoin->kern.kresults_max_space)
-			appendStringInfo(&str, " max_space: %u ", max_space_old);
-		else
-		{
-			appendStringInfo(&str, " max_space: %u=>%u ",
-							 max_space_old, pgjoin->kern.kresults_max_space);
-			has_resized = true;
-		}
-
-		if (kds_dst->format == KDS_FORMAT_ROW)
-		{
-			if (length_old == kds_dst->length)
-				appendStringInfo(&str, "length: %u", length_old);
-			else
-			{
-				appendStringInfo(&str, "length: %u=>%u",
-								 length_old, kds_dst->length);
-				has_resized = true;
-			}
-		}
-		else
-		{
-			if (nrooms_old == kds_dst->nrooms)
-				appendStringInfo(&str, "nrooms: %u", nrooms_old);
-			else
-			{
-				appendStringInfo(&str, "nrooms: %u=>%u",
-								 nrooms_old, kds_dst->nrooms);
-				has_resized = true;
-			}
-		}
-
-		if (client_min_messages <= DEBUG1)
-		{
-			appendStringInfo(&str, " Nthreads: (");
-			for (i=0; i <= gjs->num_rels; i++)
-			{
-				if (num_threads[i] == pgjoin->num_threads[i])
-					appendStringInfo(&str, "%s%u", i > 0 ? ", " : "",
-									 pgjoin->num_threads[i]);
-				else
-				{
-					appendStringInfo(&str, "%s%u=>%u", i > 0 ? ", " : "",
-									 num_threads[i], pgjoin->num_threads[i]);
-					has_resized = true;
-				}
-			}
-			appendStringInfo(&str, ")");
-		}
-
-		appendStringInfo(&str, " inners: ");
-		for (i=0; i < gjs->num_rels; i++)
-		{
-			Assert(inner_base[i] == pgjoin->inner_base[i]);
-			if (inner_size[i] == pgjoin->inner_size[i])
-				appendStringInfo(&str, "%s(%u, %u)", i > 0 ? ", " : "",
-								 inner_base[i], inner_size[i]);
-			else
-			{
-				appendStringInfo(&str, "%s(%u, %u=>%u)", i > 0 ? ", " : "",
-								 inner_base[i], inner_size[i],
-								 pgjoin->inner_size[i]);
-				has_resized = true;
-			}
-		}
-		appendStringInfo(&str, " results: [");
-		for (i=0; i <= gjs->num_rels; i++)
-		{
-			if (i <= result_valid_until)
-				appendStringInfo(&str, "%s%u", i > 0 ? ", " : "",
-								 result_nitems[i]);
-			else
-				appendStringInfo(&str, "%s*", i > 0 ? ", " : "");
-		}
-		appendStringInfo(&str, "]");
-
-		elog(has_resized ? NOTICE : ERROR,
-			 "GpuJoin(%p) %s retry=%d [%.2f%%] %s%s",
-			 pgjoin, errorTextKernel(&pgjoin->task.kerror),
-			 pgjoin->retry_count, progress, str.data,
-			 has_resized ? "" : ", but not resized actually");
-		pfree(str.data);
-#endif
-		/*
-		 * OK, chain this task on the pending_tasks queue again
-		 *
-		 * NOTE: 'false' indicates cuda_control.c that this cb_complete
-		 * callback handled this request by itself - we re-entered the
-		 * GpuTask on the pending_task queue to execute again.
-		 */
-		SpinLockAcquire(&gjs->gts.lock);
-		dlist_push_head(&gjs->gts.pending_tasks, &pgjoin->task.chain);
-		gjs->gts.num_pending_tasks++;
-		SpinLockRelease(&gjs->gts.lock);
-
-		return false;
 	}
 	return true;
 }
@@ -4737,42 +4500,9 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 	/*
 	 * GPU kernel function lookup
 	 */
-	rc = cuModuleGetFunction(&pgjoin->kern_prep,
+	rc = cuModuleGetFunction(&pgjoin->kern_main,
 							 pgjoin->task.cuda_module,
-							 "gpujoin_preparation");
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
-
-	rc = cuModuleGetFunction(&pgjoin->kern_exec_nl,
-							 pgjoin->task.cuda_module,
-							 "gpujoin_exec_nestloop");
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
-
-	rc = cuModuleGetFunction(&pgjoin->kern_exec_hj,
-							 pgjoin->task.cuda_module,
-							 "gpujoin_exec_hashjoin");
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
-
-	rc = cuModuleGetFunction(&pgjoin->kern_outer_nl,
-							 pgjoin->task.cuda_module,
-							 "gpujoin_outer_nestloop");
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
-
-	rc = cuModuleGetFunction(&pgjoin->kern_outer_hj,
-							 pgjoin->task.cuda_module,
-							 "gpujoin_outer_hashjoin");
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
-
-	kern_proj_name = (pds_dst->kds->format == KDS_FORMAT_ROW
-					  ? "gpujoin_projection_row"
-					  : "gpujoin_projection_slot");
-	rc = cuModuleGetFunction(&pgjoin->kern_proj,
-							 pgjoin->task.cuda_module,
-							 kern_proj_name);
+							 "gpujoin_main");
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
 
@@ -4877,313 +4607,31 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 
 	CUDA_EVENT_RECORD(pgjoin, ev_dma_send_stop);
 
-	/*
-	 * OK, enqueue a series of requests
-	 */
-	start_depth = gjs->outer_join_start_depth;
-	for (depth = start_depth; depth <= gjs->num_rels; depth++)
-	{
-		innerState *istate = &gjs->inners[depth - 1];
-		JoinType	join_type = istate->join_type;
-		bool		is_nestloop = (!istate->hash_outer_keys);
-		cl_uint		inner_base = pgjoin->inner_base[depth-1];
-		cl_uint		inner_size = pgjoin->inner_size[depth-1];
-		size_t		num_threads;
-
-		/*
-		 * Launch:
-		 * KERNEL_FUNCTION(void)
-		 * gpujoin_preparation(kern_gpujoin *kgjoin,
-		 *                     kern_data_store *kds,
-		 *                     kern_multirels *kmrels,
-		 *                     cl_int depth)
-		 */
-		num_threads = ((depth > 1 || !pds_src) ? 1 : pds_src->kds->nitems);
-		pgstrom_optimal_workgroup_size(&grid_xsize,
-									   &block_xsize,
-									   pgjoin->kern_prep,
-									   pgjoin->task.cuda_device,
-									   num_threads,
-									   sizeof(kern_errorbuf));
-		kern_args[0] = &pgjoin->m_kgjoin;
-		kern_args[1] = &pgjoin->m_kds_src;
-		kern_args[2] = &pgjoin->m_kmrels;
-		kern_args[3] = &depth;
-
-		rc = cuLaunchKernel(pgjoin->kern_prep,
-							grid_xsize, 1, 1,
-							block_xsize, 1, 1,
-							sizeof(kern_errorbuf) * block_xsize,
-							pgjoin->task.cuda_stream,
-							kern_args,
-							NULL);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
-		pgjoin->task.pfm.num_kern_join++;
-		elog(DEBUG2, "CUDA launch %s grid:{%u,1,1}, block:{%u,1,1}",
-			 "gpujoin_preparation",
-			 (cl_uint)grid_xsize,
-			 (cl_uint)block_xsize);
-		/*
-		 * Main logic of GpuHashJoin or GpuNestLoop
-		 */
-		if (is_nestloop)
-		{
-			pgstrom_data_store *pds_in = pmrels->inner_chunks[depth - 1];
-			cl_uint		inner_ntuples = pds_in->kds->nitems;
-			cl_uint		shmem_size;
-
-			/* NestLoop logic cannot run LEFT JOIN */
-			Assert(join_type != JOIN_LEFT && join_type != JOIN_FULL);
-
-			/*
-			 * Launch:
-			 * KERNEL_FUNCTION_MAXTHREADS(void)
-			 * gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
-			 *                       kern_data_store *kds,
-			 *                       kern_multirels *kmrels,
-			 *                       cl_int depth,
-			 *                       cl_uint cuda_index,
-			 *                       cl_bool *outer_join_map,
-			 *                       cl_uint inner_base,
-			 *                       cl_uint inner_size)
-			 */
-			if (pds_src != NULL || depth > gjs->outer_join_start_depth)
-			{
-				outer_ntuples = pgjoin->num_threads[depth-1];
-				pgstrom_largest_workgroup_size_2d(&grid_xsize, &block_xsize,
-												  &grid_ysize, &block_ysize,
-												  pgjoin->kern_exec_nl,
-												  pgjoin->task.cuda_device,
-												  outer_ntuples,
-												  inner_ntuples,
-												  istate->gnl_shmem_xsize,
-												  istate->gnl_shmem_ysize,
-												  sizeof(kern_errorbuf));
-				kern_args[0] = &pgjoin->m_kgjoin;
-				kern_args[1] = &pgjoin->m_kds_src;
-				kern_args[2] = &pgjoin->m_kmrels;
-				kern_args[3] = &depth;
-				kern_args[4] = &pgjoin->task.cuda_index;
-				kern_args[5] = &pgjoin->m_ojmaps;
-				kern_args[6] = &inner_base;
-				kern_args[7] = &inner_size;
-
-				shmem_size = Max(sizeof(kern_errorbuf) * (block_xsize *
-														  block_ysize),
-								 istate->gnl_shmem_xsize * block_xsize +
-								 istate->gnl_shmem_ysize * block_ysize);
-
-				rc = cuLaunchKernel(pgjoin->kern_exec_nl,
-									grid_xsize, grid_ysize, 1,
-									block_xsize, block_ysize, 1,
-									shmem_size,
-									pgjoin->task.cuda_stream,
-									kern_args,
-									NULL);
-				if (rc != CUDA_SUCCESS)
-					elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
-				pgjoin->task.pfm.num_kern_join++;
-				elog(DEBUG2, "CUDA launch %s grid:{%u,%u,1}, block:{%u,%u,1}",
-					 "gpujoin_exec_nestloop",
-					 (cl_uint)grid_xsize, (cl_uint)grid_ysize,
-					 (cl_uint)block_xsize, (cl_uint)block_ysize);
-			}
-
-			/*
-			 * Launch:
-			 * KERNEL_FUNCTION(void)
-			 * gpujoin_leftouter_nestloop(kern_gpujoin *kgjoin,
-			 *                            kern_data_store *kds,
-			 *                            kern_multirels *kmrels,
-			 *                            cl_int depth,
-			 *                            cl_uint cuda_index,
-			 *                            cl_bool *outer_join_maps,
-			 *                            cl_uint inner_base,
-			 *                            cl_uint inner_size)
-			 */
-			if (pds_src == NULL &&
-				(join_type == JOIN_RIGHT || join_type == JOIN_FULL))
-			{
-				Assert(depth >= gjs->outer_join_start_depth);
-				/* gather the outer join map, if multi-GPUs environment */
-				multirels_colocate_outer_join_maps(pmrels,
-												   &pgjoin->task,
-												   depth);
-				pgstrom_optimal_workgroup_size(&grid_xsize,
-											   &block_xsize,
-											   pgjoin->kern_outer_nl,
-											   pgjoin->task.cuda_device,
-											   inner_size,
-											   sizeof(kern_errorbuf));
-				kern_args[0] = &pgjoin->m_kgjoin;
-				kern_args[1] = &pgjoin->m_kds_src;
-				kern_args[2] = &pgjoin->m_kmrels;
-				kern_args[3] = &depth;
-				kern_args[4] = &pgjoin->task.cuda_index;
-				kern_args[5] = &pgjoin->m_ojmaps;
-				kern_args[6] = &inner_base;
-				kern_args[7] = &inner_size;
-
-				rc = cuLaunchKernel(pgjoin->kern_outer_nl,
-									grid_xsize, 1, 1,
-									block_xsize, 1, 1,
-									sizeof(kern_errorbuf) * block_xsize,
-									pgjoin->task.cuda_stream,
-									kern_args,
-									NULL);
-				if (rc != CUDA_SUCCESS)
-					elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
-				pgjoin->task.pfm.num_kern_join++;
-
-				elog(DEBUG2, "CUDA launch %s grid:{%u,1,1}, block:{%u,1,1}",
-					 "gpujoin_leftouter_nestloop",
-					 (cl_uint)grid_xsize,
-					 (cl_uint)block_xsize);
-			}
-		}
-		else
-		{
-			/*
-			 * Launch:
-			 * KERNEL_FUNCTION(void)
-			 * gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
-			 *                       kern_data_store *kds,
-			 *                       kern_multirels *kmrels,
-			 *                       cl_int depth,
-			 *                       cl_uint cuda_index,
-			 *                       cl_bool *outer_join_map,
-			 *                       cl_uint inner_base,
-			 *                       cl_uint inner_size)
-			 */
-			if (pds_src != NULL || depth > gjs->outer_join_start_depth)
-			{
-				outer_ntuples = pgjoin->num_threads[depth-1];
-				Assert(outer_ntuples > 0);
-				pgstrom_optimal_workgroup_size(&grid_xsize,
-											   &block_xsize,
-											   pgjoin->kern_exec_hj,
-											   pgjoin->task.cuda_device,
-											   outer_ntuples,
-											   sizeof(kern_errorbuf));
-				kern_args[0] = &pgjoin->m_kgjoin;
-				kern_args[1] = &pgjoin->m_kds_src;
-				kern_args[2] = &pgjoin->m_kmrels;
-				kern_args[3] = &depth;
-				kern_args[4] = &pgjoin->task.cuda_index;
-				kern_args[5] = &pgjoin->m_ojmaps;
-				kern_args[6] = &inner_base;
-				kern_args[7] = &inner_size;
-
-				rc = cuLaunchKernel(pgjoin->kern_exec_hj,
-									grid_xsize, 1, 1,
-									block_xsize, 1, 1,
-									sizeof(kern_errorbuf) * block_xsize,
-									pgjoin->task.cuda_stream,
-									kern_args,
-									NULL);
-				if (rc != CUDA_SUCCESS)
-					elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
-				pgjoin->task.pfm.num_kern_join++;
-				elog(DEBUG2, "CUDA launch %s grid:{%u,1,1}, block:{%u,1,1}",
-					 "gpujoin_exec_hashjoin",
-					 (cl_uint)grid_xsize,
-					 (cl_uint)block_xsize);
-			}
-
-			/*
-			 * Launch:
-			 * KERNEL_FUNCTION(void)
-			 * gpujoin_leftouter_hashjoin(kern_gpujoin *kgjoin,
-			 *                            kern_data_store *kds,
-			 *                            kern_multirels *kmrels,
-			 *                            cl_int depth,
-			 *                            cl_uint cuda_index,
-			 *                            cl_bool *outer_join_maps
-			 *                            cl_uint inner_base,
-			 *                            cl_uint inner_size)
-			 */
-			if (pds_src == NULL &&
-				(join_type == JOIN_RIGHT || join_type == JOIN_FULL))
-			{
-				pgstrom_data_store *pds_in = pmrels->inner_chunks[depth - 1];
-
-				Assert(depth >= gjs->outer_join_start_depth);
-				/* gather the outer join map, if multi-GPUs environment */
-				multirels_colocate_outer_join_maps(pgjoin->pmrels,
-												   &pgjoin->task, depth);
-				pgstrom_optimal_workgroup_size(&grid_xsize,
-											   &block_xsize,
-											   pgjoin->kern_outer_hj,
-											   pgjoin->task.cuda_device,
-											   pds_in->kds->nslots,
-											   sizeof(kern_errorbuf));
-				kern_args[0] = &pgjoin->m_kgjoin;
-				kern_args[1] = &pgjoin->m_kds_src;
-				kern_args[2] = &pgjoin->m_kmrels;
-				kern_args[3] = &depth;
-				kern_args[4] = &pgjoin->task.cuda_index;
-				kern_args[5] = &pgjoin->m_ojmaps;
-				kern_args[6] = &inner_base;
-				kern_args[7] = &inner_size;
-
-				rc = cuLaunchKernel(pgjoin->kern_outer_hj,
-									grid_xsize, 1, 1,
-									block_xsize, 1, 1,
-									sizeof(kern_errorbuf) * block_xsize,
-									pgjoin->task.cuda_stream,
-									kern_args,
-									NULL);
-				if (rc != CUDA_SUCCESS)
-					elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
-				pgjoin->task.pfm.num_kern_join++;
-
-				elog(DEBUG2, "CUDA launch %s grid:{%u,1,1}, block:{%u,1,1}",
-					 "gpujoin_leftouter_hashjoin",
-					 (cl_uint)grid_xsize,
-					 (cl_uint)block_xsize);
-			}
-		}
-	}
-	Assert(pgjoin->kern.num_rels == depth - 1);
-	CUDA_EVENT_RECORD(pgjoin, ev_kern_join_end);
-
-	/*
-	 * Launch:
+	/* Lunch:
 	 * KERNEL_FUNCTION(void)
-	 * gpujoin_projection_(row|slot)(kern_gpujoin *kgjoin,
-	 *                               kern_multirels *kmrels,
-	 *                               kern_data_store *kds_src,
-	 *                               kern_data_store *kds_dst)
+	 * gpujoin_main(kern_gpujoin *kgjoin,
+	 *              kern_multirels *kmrels,
+	 *              cl_bool *outer_join_map,
+	 *              kern_data_store *kds_src,
+	 *              kern_data_store *kds_dst,
+	 *              cl_int cuda_index)
 	 */
-	pgstrom_optimal_workgroup_size(&grid_xsize,
-								   &block_xsize,
-								   pgjoin->kern_proj,
-								   pgjoin->task.cuda_device,
-								   pgjoin->num_threads[gjs->num_rels],
-								   sizeof(kern_errorbuf));
 	kern_args[0] = &pgjoin->m_kgjoin;
 	kern_args[1] = &pgjoin->m_kmrels;
-	kern_args[2] = &pgjoin->m_kds_src;
-	kern_args[3] = &pgjoin->m_kds_dst;
+	kern_args[2] = &pgjoin->m_ojmaps;
+	kern_args[3] = &pgjoin->m_kds_src;
+	kern_args[4] = &pgjoin->m_kds_dst;
+	kern_args[5] = &pgjoin->task.cuda_index;
 
-	rc = cuLaunchKernel(pgjoin->kern_proj,
-						grid_xsize, 1, 1,
-						block_xsize, 1, 1,
-						sizeof(kern_errorbuf) * block_xsize,
+	rc = cuLaunchKernel(pgjoin->kern_main,
+						1, 1, 1,
+						1, 1, 1,
+						0,
 						pgjoin->task.cuda_stream,
 						kern_args,
 						NULL);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
-	pgjoin->task.pfm.num_kern_proj++;
-
-	elog(DEBUG2, "CUDA launch %s grid:{%u,1,1}, block:{%u,1,1}",
-		 (pds_dst->kds->format == KDS_FORMAT_ROW
-		  ? "gpujoin_projection_row"
-		  : "gpujoin_projection_slot"),
-		 (cl_uint)grid_xsize,
-		 (cl_uint)block_xsize);
 
 	CUDA_EVENT_RECORD(pgjoin, ev_dma_recv_start);
 
@@ -6052,6 +5500,13 @@ gpujoin_inner_getnext(GpuJoinState *gjs)
 		pmrels->inner_chunks[i] = pgstrom_acquire_data_store(pds);
 		pmrels->kern.chunks[i].chunk_offset = pmrels->usage_length;
 		pmrels->usage_length += STROMALIGN(pds->kds->length);
+
+		if (!istate->hash_outer_keys)
+		{
+			pmrels->kern.chunks[i].is_nestloop = true;
+			pmrels->kern.chunks[i].gnl_shmem_xsize = istate->gnl_shmem_xsize;
+			pmrels->kern.chunks[i].gnl_shmem_ysize = istate->gnl_shmem_ysize;
+		}
 
 		if (istate->join_type == JOIN_RIGHT ||
 			istate->join_type == JOIN_FULL)

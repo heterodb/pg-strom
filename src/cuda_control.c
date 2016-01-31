@@ -2519,6 +2519,7 @@ errorTextKernel(kern_errorbuf *kerror)
 		KERN_ENTRY(gpuscan_exec_quals);
 		KERN_ENTRY(gpuscan_projection_row);
 		KERN_ENTRY(gpuscan_projection_slot);
+		KERN_ENTRY(gpuscan_main);
 		KERN_ENTRY(gpujoin_preparation);
 		KERN_ENTRY(gpujoin_exec_nestloop);
 		KERN_ENTRY(gpujoin_exec_hashjoin);
@@ -2526,6 +2527,7 @@ errorTextKernel(kern_errorbuf *kerror)
 		KERN_ENTRY(gpujoin_outer_hashjoin);
 		KERN_ENTRY(gpujoin_projection_row);
 		KERN_ENTRY(gpujoin_projection_slot);
+		KERN_ENTRY(gpujoin_main);
 		KERN_ENTRY(gpupreagg_preparation);
 		KERN_ENTRY(gpupreagg_local_reduction);
 		KERN_ENTRY(gpupreagg_global_reduction);
@@ -2533,11 +2535,13 @@ errorTextKernel(kern_errorbuf *kerror)
 		KERN_ENTRY(gpupreagg_final_preparation);
 		KERN_ENTRY(gpupreagg_final_reduction);
 		KERN_ENTRY(gpupreagg_fixup_varlena);
+		KERN_ENTRY(gpupreagg_main);
 		KERN_ENTRY(gpusort_preparation);
 		KERN_ENTRY(gpusort_bitonic_local);
 		KERN_ENTRY(gpusort_bitonic_step);
 		KERN_ENTRY(gpusort_bitonic_merge);
 		KERN_ENTRY(gpusort_fixup_datastore);
+		KERN_ENTRY(gpusort_main);
 		default:
 			kernel_name = "unknown kernel";
 			break;

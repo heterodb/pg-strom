@@ -1616,7 +1616,7 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 												sizeof(void *) * 4);
 	if (!kern_args)
 	{
-		STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelParamBuffer);
+		STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelArgs);
 		goto out;
 	}
 	kern_args[0] = kgpreagg;
@@ -1683,7 +1683,7 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 													sizeof(void *) * 4);
 		if (!kern_args)
 		{
-			STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelParamBuffer);
+			STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelArgs);
 			goto out;
 		}
 		kern_args[0] = kgpreagg;
@@ -1734,7 +1734,7 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 													sizeof(void *) * 4);
 		if (!kern_args)
 		{
-			STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelParamBuffer);
+			STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelArgs);
 			goto out;
 		}
 		kern_args[0] = kgpreagg;
@@ -1806,7 +1806,7 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 														sizeof(void *) * 3);
 			if (!kern_args)
 			{
-				STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelParamBuffer);
+				STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelArgs);
 				goto out;
 			}
 			kern_args[0] = kgpreagg;
@@ -1870,7 +1870,7 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 													sizeof(void *) * 5);
 		if (!kern_args)
 		{
-			STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelParamBuffer);
+			STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelArgs);
 			goto out;
 		}
 		kern_args[0] = kgpreagg;
@@ -1951,7 +1951,7 @@ final_retry:
 												sizeof(void *) * 6);
 	if (!kern_args)
 	{
-		STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelParamBuffer);
+		STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelArgs);
 		goto out;
 	}
 	kern_args[0] = kgpreagg;

@@ -209,7 +209,7 @@ typedef uintptr_t		hostptr_t;
 #define StromError_CudaInternal				1001 /* CUDA internal error */
 #define StromError_OutOfMemory				1002 /* Out of memory */
 #define StromError_OutOfSharedMemory		1003 /* Out of shared memory */
-#define StromError_OutOfKernelParamBuffer	1004 /* Out of kernel parambuf */
+#define StromError_OutOfKernelArgs			1004 /* Out of kernel arguments */
 #define StromError_InvalidValue				1999 /* Something invalid */
 #define StromError_DataStoreCorruption		2000 /* KDS corrupted */
 #define StromError_DataStoreNoSpace			2001 /* KDS has no space */
@@ -226,6 +226,7 @@ typedef uintptr_t		hostptr_t;
 #define StromKernel_gpuscan_exec_quals				0x0101
 #define StromKernel_gpuscan_projection_row			0x0102
 #define StromKernel_gpuscan_projection_slot			0x0103
+#define StromKernel_gpuscan_main					0x0199
 #define StromKernel_gpujoin_preparation				0x0201
 #define StromKernel_gpujoin_exec_nestloop			0x0202
 #define StromKernel_gpujoin_exec_hashjoin			0x0203
@@ -233,6 +234,7 @@ typedef uintptr_t		hostptr_t;
 #define StromKernel_gpujoin_outer_hashjoin			0x0205
 #define StromKernel_gpujoin_projection_row			0x0206
 #define StromKernel_gpujoin_projection_slot			0x0207
+#define StromKernel_gpujoin_main					0x0299
 #define StromKernel_gpupreagg_preparation			0x0301
 #define StromKernel_gpupreagg_local_reduction		0x0302
 #define StromKernel_gpupreagg_global_reduction		0x0303
@@ -246,6 +248,7 @@ typedef uintptr_t		hostptr_t;
 #define StromKernel_gpusort_bitonic_step			0x0403
 #define StromKernel_gpusort_bitonic_merge			0x0404
 #define StromKernel_gpusort_fixup_datastore			0x0405
+#define StromKernel_gpusort_main					0x0499
 
 typedef struct
 {

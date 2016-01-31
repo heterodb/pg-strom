@@ -32,9 +32,12 @@ typedef struct
 	{
 		cl_uint		chunk_offset;	/* offset to KDS or Hash */
 		cl_uint		ojmap_offset;	/* offset to Left-Outer Map, if any */
+		cl_ushort	gnl_shmem_xsize;/* dynamix shmem size of xitem if NL */
+		cl_ushort	gnl_shmem_ysize;/* dynamix shmem size of yitem if NL */
+		cl_bool		is_nestloop;	/* true, if NestLoop. */
 		cl_bool		left_outer;		/* true, if JOIN_LEFT or JOIN_FULL */
 		cl_bool		right_outer;	/* true, if JOIN_RIGHT or JOIN_FULL */
-		cl_char		__padding__[2];
+		cl_char		__padding__[1];
 	} chunks[FLEXIBLE_ARRAY_MEMBER];
 } kern_multirels;
 
@@ -64,6 +67,16 @@ typedef struct
 
 typedef struct
 {
+	cl_uint		inner_base;		/* base of inner window */
+	cl_uint		inner_size;		/* size of inner window */
+	size_t		result_nitems;	/* # of results in this depth */
+	cl_float	join_ratio;		/* expected row growth ratio */
+} kern_inner_scale;
+
+typedef struct
+{
+	/* offset to the run-time parameter buffer */
+	cl_uint			kparams_offset;
 	/* offset to the primary kern_resultbuf */
 	size_t			kresults_1_offset;
 	/* offset to the secondary kern_resultbuf */
@@ -74,23 +87,50 @@ typedef struct
 	cl_uint			num_rels;
 	/* least depth in this call chain */
 	cl_uint			start_depth;
+	/* least depth in case of RIGHT/FULL OUTER JOIN */
+	cl_uint			outer_join_start_depth;
+	/* error status to be backed (OUT) */
+	kern_errorbuf	kerror;
+	/*
+	 * Performance statistics
+	 */
+	cl_uint			num_kern_outer_eval;
+	cl_uint			num_kern_nestloop;
+	cl_uint			num_kern_hashjoin;
+	cl_uint			num_kern_nestloop_outer;
+	cl_uint			num_kern_hashjoin_outer;
+	cl_uint			num_kern_projection_row;
+	cl_uint			num_kern_projection_slot;
+	cl_flost		usec_kern_outer_eval;
+	cl_float		usec_kern_nestloop;
+	cl_float		usec_kern_hashjoin;
+	cl_float		usec_kern_nestloop_outer;
+	cl_float		usec_kern_hashjoin_outer;
+	cl_float		usec_kern_projection;
+	/*
+	 * Scale of inner virtual window for each depth
+	 */
+	kern_inner_scale iscale[FLEXIBLE_ARRAY_MEMBER];
+#if 0
 	/* OUT: number of result rows actually generated for each depth */
 	cl_uint			result_nitems[GPUJOIN_MAX_DEPTH + 1];
 	/* OUT: maximum valid depth in the above result */
 	cl_uint			result_valid_until;
-	/* error status to be backed (OUT) */
-	kern_errorbuf	kerror;
 	/* run-time parameter buffer */
 	kern_parambuf	kparams;
+#endif
 } kern_gpujoin;
 
 #define KERN_GPUJOIN_PARAMBUF(kgjoin)			\
-	((kern_parambuf *)(&(kgjoin)->kparams))
+	((kern_parambuf *)((kgjoin)->iscale + (kgjoin)->num_rels))
 #define KERN_GPUJOIN_PARAMBUF_LENGTH(kgjoin)	\
 	STROMALIGN(KERN_GPUJOIN_PARAMBUF(kgjoin)->length)
 #define KERN_GPUJOIN_HEAD_LENGTH(kgjoin)		\
-	((kgjoin)->kresults_1_offset +				\
-	 STROMALIGN(offsetof(kern_resultbuf, results[0])))
+	((char *)KERN_GPUJOIN_PARAMBUF(kgjoin) +	\
+	 KERN_GPUJOIN_PARAMBUF_LENGTH(kgjoin) -		\
+	 (char *)(kgjoin))
+
+
 #define KERN_GPUJOIN_IN_RESULTS(kgjoin,depth)			\
 	((kern_resultbuf *)((char *)(kgjoin) +				\
 						(((depth) & 0x01)				\
@@ -102,7 +142,10 @@ typedef struct
 						 ? (kgjoin)->kresults_2_offset  \
 						 : (kgjoin)->kresults_1_offset)))
 
-
+#define KERN_GPUJOIN_1ST_RESULTBUF(kgjoin)		\
+	((kern_resultbuf *)((char *)(kgjoin) + (kgjoin)->kresults_1_offset))
+#define KERN_GPUJOIN_2ND_RESULTBUF(kgjoin)		\
+	((kern_resultbuf *)((char *)(kgjoin) + (kgjoin)->kresults_2_offset))
 
 #ifdef __CUDACC__
 
@@ -115,16 +158,6 @@ typedef struct
 #define GPUJOIN_REF_DATUM(colmeta,htup,colidx)	\
 	(!(htup) ? NULL : kern_get_datum_tuple((colmeta),(htup),(colidx)))
 
-/*
- * gpujoin_outer_quals
- *
- * Evaluation of outer-relation's qualifier, if any. Elsewhere, it always
- * returns true.
- */
-STATIC_FUNCTION(cl_bool)
-gpujoin_outer_quals(kern_context *kcxt,
-					kern_data_store *kds,
-					size_t kds_index);
 /*
  * gpujoin_join_quals
  *
@@ -175,6 +208,59 @@ gpujoin_projection(kern_context *kcxt,
 				   cl_char *extra_buf,
 				   cl_uint *extra_len);
 
+/*
+ * gpujoin_outer_quals
+ *
+ * Evaluation of outer-relation's qualifier, if any. Elsewhere, it always
+ * returns true.
+ */
+STATIC_FUNCTION(cl_bool)
+gpujoin_outer_quals(kern_context *kcxt,
+					kern_data_store *kds,
+					size_t kds_index);
+
+KERNEL_FUNCTION(void)
+gpujoin_outer_eval(kern_gpujoin *kgjoin,
+				   kern_data_store *kds,
+				   kern_resultbuf *kresults)
+{
+	cl_uint		kds_index = get_global_id();
+	cl_uint		count;
+	cl_uint		offset;
+	cl_bool		matched;
+	__shared__ cl_int base;
+
+	assert(kresults->nrels == 1);	/* only happen if depth == 1 */
+
+	if (get_global_id() < kds->nitems)
+		matched = gpujoin_outer_quals(&kcxt, kds, get_global_id());
+	else
+		matched = false;
+
+	/* expand kresults->nitems */
+	offset = arithmetic_stairlike_add(matched ? 1 : 0, &count);
+	if (count > 0)
+	{
+		if (get_local_id() == 0)
+			base = atomicAdd(&kresults->nitems, count);
+		__syncthreads();
+
+		if (base + count >= kresults->nrooms)
+			STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
+		else if (matched)
+		{
+			HeapTupleHeaderData	   *htup
+				= kern_get_tuple_row(kds, get_global_id());
+			kresults->results[base + offset]
+				= (size_t)htup - (size_t)kds;
+		}
+	}
+out:
+	kern_writeback_error_status(&kgjoin->kerror, kcxt,e);
+}
+
+
+#if 0
 KERNEL_FUNCTION(void)
 gpujoin_preparation(kern_gpujoin *kgjoin,
 					kern_data_store *kds,
@@ -295,6 +381,21 @@ gpujoin_preparation(kern_gpujoin *kgjoin,
 	}
 	kern_writeback_error_status(&kresults_in->kerror, kcxt.e);
 }
+#endif
+
+/*
+ * argument layout to launch inner/outer join functions
+ */
+typedef struct
+{
+	kern_gpujoin	   *kgjoin;
+	kern_data_store	   *kds;
+	kern_multirels	   *kmrels;
+	cl_bool			   *outer_join_map;
+	cl_int				depth;
+	cl_int				cuda_index;
+} kern_join_args_t;
+
 
 KERNEL_FUNCTION_MAXTHREADS(void)
 gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
@@ -924,11 +1025,10 @@ KERNEL_FUNCTION(void)
 gpujoin_projection_row(kern_gpujoin *kgjoin,
 					   kern_multirels *kmrels,
 					   kern_data_store *kds_src,
-					   kern_data_store *kds_dst)
+					   kern_data_store *kds_dst,
+					   kern_resultbuf *kresults)
 {
 	kern_parambuf  *kparams = KERN_GPUJOIN_PARAMBUF(kgjoin);
-	kern_resultbuf *kresults = KERN_GPUJOIN_OUT_RESULTS(kgjoin,
-														kgjoin->num_rels);
 	kern_context	kcxt;
 	size_t		res_index;
 	size_t		res_limit;
@@ -1079,11 +1179,10 @@ KERNEL_FUNCTION(void)
 gpujoin_projection_slot(kern_gpujoin *kgjoin,
 						kern_multirels *kmrels,
 						kern_data_store *kds_src,
-						kern_data_store *kds_dst)
+						kern_data_store *kds_dst,
+						kern_resultbuf *kresults)
 {
 	kern_parambuf  *kparams = KERN_GPUJOIN_PARAMBUF(kgjoin);
-	kern_resultbuf *kresults = KERN_GPUJOIN_OUT_RESULTS(kgjoin,
-														kgjoin->num_rels);
 	kern_context	kcxt;
 	cl_uint		   *r_buffer;
 	Datum		   *tup_values;
@@ -1255,5 +1354,557 @@ out:
 	/* write-back execution status to host-side */
 	kern_writeback_error_status(&kgjoin->kerror, kcxt.e);
 }
+
+/*
+ * returns true, if major retry, elsewhere minor retry
+ *
+ *
+ */
+STATIC_FUNCTION(cl_bool)
+gpujoin_resize_inner_window(kern_gpujoin *kgjoin,
+							kern_multirels *kmrels,
+							kern_data_store *kds_src,
+							cl_int depth)
+{
+
+
+}
+
+#define TIMEVAL_RECORD(kgjoin,field,tv1,tv2,smx_clock)	\
+	do {												\
+		(kgjoin)->num_##field++;						\
+		(kgjoin)->usec_##field += (cl_float)			\
+			((1000 * ((tv2) - (tv1))) / (smx_clock));	\
+	} while(0)
+
+/*
+ *
+ *
+ */
+KERNEL_FUNCTION(void)
+gpujoin_main(kern_gpujoin *kgjoin,		/* in/out: misc stuffs */
+			 kern_multirels *kmrels,	/* in: inner sources */
+			 cl_bool *outer_join_map,	/* internal buffer */
+			 kern_data_store *kds_src,	/* in: outer source (may be NULL) */
+			 kern_data_store *kds_dst,	/* out: join results */
+			 cl_int cuda_index)			/* device index on the host side */
+{
+	kern_parambuf	   *kparams = KERN_GPUJOIN_PARAMBUF(kgjoin);
+	kern_resultbuf	   *kresults_src = KERN_GPUJOIN_1ST_RESULTBUF(kgjoin);
+	kern_resultbuf	   *kresults_dst = KERN_GPUJOIN_2ND_RESULTBUF(kgjoin);
+	kern_resultbuf	   *kresults_tmp;
+	kern_context		kcxt;
+	const void		   *kernel_projection;
+	void			  **kern_args;
+	kern_join_args_t   *kern_join_args;
+	dim3				grid_sz;
+	dim3				block_sz;
+	cl_uint				kresults_max_space = kgjoin->kresults_max_space;
+	cl_int				device;
+	cl_int				smx_clock;
+	cl_int				depth;
+	cl_int				errcode;
+	cl_ulong			tv1, tv2;
+	cudaError_t			status = cudaSuccess;
+
+	/* Init kernel context */
+	INIT_KERNEL_CONTEXT(&kcxt, gpujoin_main, kparams);
+	assert(get_global_size() == 1);		/* only single thread */
+	assert(kgjoin->start_depth > 0 &&
+		   kgjoin->start_depth <= kgjoin->num_rels);
+	assert(kds_src->format == KDS_FORMAT_ROW);
+	assert(kds_dst->format == KDS_FORMAT_ROW ||
+		   kds_dst->format == KDS_FORMAT_SLOT);
+
+	/* Get device clock for performance monitor */
+	status = cudaGetDevice(&device);
+	if (status != cudaSuccess)
+	{
+		STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
+		return;
+	}
+
+	status = cudaDeviceGetAttribute(&smx_clock,
+									cudaDevAttrClockRate,
+									device);
+	status = cudaGetDevice(&device);
+	if (status != cudaSuccess)
+	{
+		STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
+		return;
+	}
+
+retry_major:
+	for (depth = kgjoin->start_depth; depth <= kgjoin->num_rels; depth++)
+	{
+		/*
+		 * Initialization of the kresults_src buffer if start depth.
+		 * Elsewhere, kresults_dst buffer of the last depth is also
+		 * kresults_src buffer in this depth.
+		 */
+	retry_minor:
+		if (depth == kgjoin->start_depth)
+		{
+			memset(kresults_src, 0, offsetof(kern_resultbuf, results[0]));
+			kresults_src->nrels = depth;
+			kresults_src->nrooms = kresults_max_space / (depth + 1);
+			if (kds_src != NULL)
+			{
+				/* Launch:
+				 * gpujoin_outer_eval(kern_gpujoin *kgjoin,
+				 *                    kern_data_store *kds,
+				 *                    kern_resultbuf *kresults)
+				 */
+				tv1 = clock64();
+				kern_args = (void **)
+					cudaGetParameterBuffer(sizeof(void *),
+										   sizeof(void *) * 3);
+				if (!kern_args)
+				{
+					STROM_SET_ERROR(&kgjoin->kerror,
+									StromError_OutOfKernelArgs);
+					return;
+				}
+				kern_args[0] = kgjoin;
+				kern_args[1] = kds_src;
+				kern_args[2] = kresults_src;
+
+				status = pgstrom_optimal_workgroup_size(&grid_sz,
+														&block_sz,
+														(const void *)
+														gpujoin_outer_eval,
+														kds_src->nitems,
+														sizeof(kern_errorbuf));
+				if (status != cudaSuccess)
+				{
+					STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
+					return;
+				}
+
+				status = cudaLaunchDevice((void *)gpujoin_outer_eval,
+										  kern_args, grid_sz, block_sz,
+										  sizeof(kern_errorbuf) * block_sz.x,
+										  NULL);
+				if (status != cudaSuccess)
+				{
+					STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
+					return;
+				}
+
+				status = cudaDeviceSynchronize();
+				if (status != cudaSuccess)
+				{
+					STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
+					return;
+				}
+				tv2 = clock64();
+				TIMEVAL_RECORD(kgjoin,kern_outer_eval,tv1,tv2,smx_clock);
+				if (kgjoin->kerror.errcode != StromError_Success)
+					return;
+			}
+		}
+		/* make the kresults_dst buffer empty */
+		memset(kresults_dst, 0, offsetof(kern_resultbuf, results[0]));
+		kresults_dst->nrels = depth + 1;
+		kresults_dst->nrooms = kresults_max_space / (depth + 1);
+
+		if (kmrels->chunks[depth - 1].is_nestloop)
+		{
+			if (kds_src != NULL || depth > kgjoin->outer_join_start_depth)
+			{
+				cl_ushort	gnl_shmem_xsize;
+				cl_ushort	gnl_shmem_ysize;
+
+				/* Launch:
+				 * KERNEL_FUNCTION_MAXTHREADS(void)
+				 * gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
+				 *                       kern_data_store *kds,
+				 *                       kern_multirels *kmrels,
+				 *                       cl_bool *outer_join_map,
+				 *                       cl_int depth,
+				 *                       cl_int cuda_index)
+				 */
+				tv1 = clock64();
+				kern_join_args = (kern_join_args_t *)
+					cudaGetParameterBuffer(sizeof(void *),
+										   sizeof(kern_join_args_t));
+				if (!kern_join_args)
+				{
+					STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelArgs);
+					goto out;
+				}
+				kern_join_args->kgjoin = kgjoin;
+				kern_join_args->kds = kds_src;
+				kern_join_args->kmrels = kmrels;
+				kern_join_args->outer_join_map = outer_join_map;
+				kern_join_args->depth = depth;
+				kern_join_args->cuda_index = cuda_index;
+
+				gnl_shmem_xsize = kmrels->chunks[depth - 1].gnl_shmem_xsize;
+				gnl_shmem_ysize = kmrels->chunks[depth - 1].gnl_shmem_ysize;
+				status = pgstrom_largest_workgroup_size_2d(
+					&grid_sz,
+					&block_sz,
+					(const void *)gpujoin_exec_nestloop,
+					kresults_src->nitems,
+					kgjoin->iscale[depth - 1].inner_size,
+					gnl_shmem_xsize,
+					gnl_shmem_ysize,
+					sizeof(kern_errorbuf));
+				if (status != cudaSuccess)
+				{
+					STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
+					return;
+				}
+
+				shmem_size = Max(sizeof(kern_errorbuf) * (block_sz.x *
+														  block_sz.y),
+								 gnl_shmem_xsize * block_sz.x +
+								 gnl_shmem_ysize * block_sz.y);
+				status = cudaLaunchDevice((void *)gpujoin_exec_nestloop,
+										  kern_join_args,
+										  grid_sz, block_sz,
+										  shmem_size,
+										  NULL);
+				if (status != cudaSuccess)
+				{
+					STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
+					return;
+				}
+
+				status = cudaDeviceSynchronize();
+				if (status != cudaSuccess)
+				{
+					STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
+					return;
+				}
+				tv2 = clock64();
+				TIMEVAL_RECORD(kgjoin,kern_nestloop_outer,tv1,tv2,smx_clock);
+				if (kgjoin->kerror.errcode == StromError_DataStoreNoSpace)
+				{
+					memset(&kgjoin->kerror, 0, sizeof(kern_errorbuf));
+					if (gpujoin_resize_inner_window(kgjoin,
+													kmrels,
+													kds_src,
+													depth))
+						goto retry_major;
+					goto retry_minor;
+				}
+				else if (kgjoin->kerror.errcode != StromError_Success)
+					return;
+			}
+
+			if (kds_src == NULL && kmrels->chunks[depth - 1].right_outer)
+			{
+				/* Launch:
+				 * KERNEL_FUNCTION(void)
+				 * gpujoin_outer_nestloop(kern_gpujoin *kgjoin,
+				 *                        kern_data_store *kds,
+				 *                        kern_multirels *kmrels,
+				 *                        cl_bool *outer_join_map,
+				 *                        cl_int depth,
+				 *                        cl_int cuda_index)
+				 *
+				 * NOTE: Host-size has to co-locate the outer join map
+				 * into this device, prior to the kernel launch.
+				 */
+				tv1 = clock64();
+				kern_join_args = (kern_join_args_t *)
+					cudaGetParameterBuffer(sizeof(void *),
+										   sizeof(kern_join_args_t));
+				if (!kern_join_args)
+				{
+					STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelArgs);
+					goto out;
+				}
+				kern_join_args->kgjoin = kgjoin;
+				kern_join_args->kds = kds_src;
+				kern_join_args->kmrels = kmrels;
+				kern_join_args->outer_join_map = outer_join_map;
+				kern_join_args->depth = depth;
+				kern_join_args->cuda_index = cuda_index;
+
+				status = pgstrom_optimal_workgroup_size(&grid_sz,
+														&block_sz,
+														(const void *)
+														gpujoin_outer_nestloop,
+														inner_size,
+														sizeof(kern_errorbuf));
+				if (status != cudaSuccess)
+				{
+					STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
+					return;
+				}
+
+
+
+
+				shmem_size = Max(sizeof(kern_errorbuf) * (block_sz.x *
+														  block_sz.y),
+								 dynshmem_per_xitem * block_sz.x +
+								 dynshmem_per_yitem * block_sz.y);
+				status = cudaLaunchDevice((void *)gpujoin_exec_nestloop,
+										  kern_join_args,
+										  grid_sz, block_sz,
+										  shmem_size,
+										  NULL);
+				if (status != cudaSuccess)
+				{
+					STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
+					return;
+				}
+
+				status = cudaDeviceSynchronize();
+				if (status != cudaSuccess)
+				{
+					STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
+					return;
+				}
+				tv2 = clock64();
+				TIMEVAL_RECORD(kgjoin,kern_nestloop,tv1,tv2,smx_clock);
+
+				if (kgjoin->kerror.errcode == StromError_DataStoreNoSpace)
+				{
+					memset(kgjoin->kerror.errcode, 0, sizeof(kern_errorbuf));
+					if (gpujoin_resize_inner_window(kgjoin,
+													kmrels,
+													kds_src,
+													depth))
+						goto retry_major;
+
+					goto retry_minor;
+				}
+				else if (kgjoin->kerror.errcode != StromError_Success)
+					return;
+			}
+
+
+		}
+		else
+		{
+			if (kds_src != NULL || depth > outer_join_start_depth)
+			{
+				/* Launch:
+				 * KERNEL_FUNCTION_MAXTHREADS(void)
+				 * gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
+				 *                       kern_data_store *kds,
+				 *                       kern_multirels *kmrels,
+				 *                       cl_bool *outer_join_map,
+				 *                       cl_int depth,
+				 *                       cl_int cuda_index)
+				 */
+				tv1 = clock64();
+				kern_join_args = (kern_join_args_t *)
+					cudaGetParameterBuffer(sizeof(void *),
+										   sizeof(kern_join_args_t));
+				if (!kern_join_args)
+				{
+					STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelArgs);
+					goto out;
+				}
+				kern_join_args->kgjoin = kgjoin;
+				kern_join_args->kds = kds_src;
+				kern_join_args->kmrels = kmrels;
+				kern_join_args->outer_join_map = outer_join_map;
+				kern_join_args->depth = depth;
+				kern_join_args->cuda_index = cuda_index;
+
+				status = pgstrom_optimal_workgroup_size(&grid_sz,
+														&block_sz,
+														(const void *)
+														gpujoin_exec_hashjoin,
+														kresults_src->nitems,
+														sizeof(kern_errorbuf));
+				if (status != cudaSuccess)
+				{
+					STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
+					return;
+				}
+
+				status = cudaLaunchDevice((void *)gpujoin_exec_hashjoin,
+										  kern_join_args,
+										  grid_sz, block_sz,
+										  sizeof(kern_errorbuf) * block_sz.x,
+										  NULL);
+				if (status != cudaSuccess)
+				{
+					STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
+					return;
+				}
+
+				status = cudaDeviceSynchronize();
+				if (status != cudaSuccess)
+				{
+					STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
+					return;
+				}
+				tv2 = clock64();
+				TIMEVAL_RECORD(kgjoin,kern_nestloop_outer,tv1,tv2,smx_clock);
+
+				if (kgjoin->kerror.errcode == StromError_DataStoreNoSpace)
+				{
+					if (gpujoin_resize_inner_window(kgjoin,
+													kmrels,
+													kds_src,
+													depth))
+						goto retry_major;
+
+					goto retry_minor;
+				}
+				else if (kgjoin->kerror.errcode != StromError_Success)
+					return;
+			}
+
+			if (kds_src == NULL && kmrels->chunks[depth - 1].right_outer)
+			{
+				/* Launch:
+				 * KERNEL_FUNCTION(void)
+				 * gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
+				 *                        kern_data_store *kds,
+				 *                        kern_multirels *kmrels,
+				 *                        cl_bool *outer_join_map,
+				 *                        cl_int depth,
+				 *                        cl_int cuda_index);
+				 */
+				tv1 = clock64();
+				kern_join_args = (kern_join_args_t *)
+					cudaGetParameterBuffer(sizeof(void *),
+										   sizeof(kern_join_args_t));
+				if (!kern_join_args)
+				{
+					STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelArgs);
+					goto out;
+				}
+				kern_join_args->kgjoin = kgjoin;
+				kern_join_args->kds = kds_src;
+				kern_join_args->kmrels = kmrels;
+				kern_join_args->outer_join_map = outer_join_map;
+				kern_join_args->depth = depth;
+				kern_join_args->cuda_index = cuda_index;
+
+				status = pgstrom_optimal_workgroup_size(&grid_sz,
+														&block_sz,
+														(const void *)
+														gpujoin_outer_hashjoin,
+														inner_size,
+														sizeof(kern_errorbuf));
+				if (status != cudaSuccess)
+				{
+					STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
+					return;
+				}
+
+				status = cudaLaunchDevice((void *)gpujoin_outer_hashjoin,
+										  kern_join_args,
+										  grid_sz, block_sz,
+										  sizeof(kern_errorbuf) * block_sz.x,
+										  NULL);
+				if (status != cudaSuccess)
+				{
+					STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
+					return;
+				}
+
+				status = cudaDeviceSynchronize();
+				if (status != cudaSuccess)
+				{
+					STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
+					return;
+				}
+				tv2 = clock64();
+				TIMEVAL_RECORD(kgjoin,kern_hashjoin_outer,tv1,tv2,smx_clock);
+
+				if (kgjoin->kerror.errcode == StromError_DataStoreNoSpace)
+				{
+					if (gpujoin_resize_inner_window(kgjoin,
+													kmrels,
+													kds_src,
+													depth))
+						goto retry_major;
+
+					goto retry_minor;
+				}
+				else if (kgjoin->kerror.errcode != StromError_Success)
+					return;
+			}
+		}
+
+		/*
+		 * Swap result buffer
+		 */
+		kresults_tmp = kresults_src;
+		kresults_src = kresults_dst;
+		kresults_dst = kresults_tmp;
+	}
+
+	/*
+	 * Launch:
+	 * KERNEL_FUNCTION(void)
+	 * gpujoin_projection_(row|slot)(kern_gpujoin *kgjoin,
+	 *                               kern_multirels *kmrels,
+	 *                               kern_data_store *kds_src,
+	 *                               kern_data_store *kds_dst,
+	 *                               kern_resultbuf *kresults)
+	 */
+	tv1 = clock64();
+	if (kds_dst->format == KDS_FORMAT_ROW)
+		kernel_projection = (const void *)gpujoin_projection_row;
+	else
+		kernel_projection = (const void *)gpujoin_projection_slot;
+
+	kern_args = (void **)cudaGetParameterBuffer(sizeof(void *),
+												sizeof(void *) * 5);
+	if (!kern_args)
+	{
+		STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelArgs);
+		goto out;
+	}
+	kern_args[0] = kgjoin;
+	kern_args[1] = kmrels;
+	kern_args[2] = kds_src;
+	kern_args[3] = kds_dst;
+	kern_args[4] = kresults_src;
+
+	status = pgstrom_optimal_workgroup_size(&grid_sz,
+											&block_sz,
+											kernel_projection,
+											kresults_src->nitems,
+											sizeof(kern_errorbuf));
+	if (status != cudaSuccess)
+	{
+		STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
+		return;
+	}
+
+	status = cudaLaunchDevice(gpujoin_projection,
+							  kern_args, grid_sz, block_sz,
+							  sizeof(kern_errorbuf) * block_sz.x,
+							  NULL);
+	if (status != cudaSuccess)
+	{
+		STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
+		return;
+	}
+
+	status = cudaDeviceSynchronize();
+	if (status != cudaSuccess)
+	{
+		STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
+		return;
+	}
+	tv2 = clock64();
+	TIMEVAL_RECORD(kgjoin,kern_projection,tv1,tv2,smx_clock);
+
+	if (kgjoin->kerror.errcode == StromError_DataStoreNoSpace)
+	{
+		// adjust inner_size
+		// if size == 0, then GpuReCheck
+
+		// clear error
+		memset(&kgjoin->kerror, 0, sizeof(kern_errorbuf));
+		goto retry_major;
+	}
+}
+
 #endif	/* __CUDACC__ */
 #endif	/* CUDA_GPUJOIN_H */
