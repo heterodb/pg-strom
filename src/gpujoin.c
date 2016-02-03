@@ -1691,7 +1691,9 @@ create_gpujoin_plan(PlannerInfo *root,
 	context.pseudo_tlist = cscan->custom_scan_tlist;
 
 	gj_info.kern_source = gpujoin_codegen(root, cscan, &gj_info, &context);
-	gj_info.extra_flags = DEVKERNEL_NEEDS_GPUJOIN | context.extra_flags;
+	gj_info.extra_flags = (DEVKERNEL_NEEDS_GPUJOIN |
+						   DEVKERNEL_NEEDS_DYNPARA |
+						   context.extra_flags);
 	gj_info.func_defs = context.func_defs;
 	gj_info.used_params = context.used_params;
 
@@ -1779,7 +1781,7 @@ codegen_device_projection(CustomScan *cscan, GpuJoinInfo *gj_info,
 		"    pg_timestamp_t   timestamp_v;\n"
 		"    pg_timestamptz_t timestamptz_v;\n"
 		"#endif\n"
-		"  } temp;                      __attribute__((unused));\n");
+		"  } temp       __attribute__((unused));\n");
 
 	for (depth=0; depth <= gj_info->num_rels; depth++)
 	{
@@ -4357,7 +4359,7 @@ gpujoin_task_complete(GpuTask *gtask)
 				(Size)(pgjoin->inner_ratio * (double)
 					   pgjoin->kern.jscale.r[i].total_nitems);
 		}
-		Assert(gjs->results_usage == gjs->total_nitems[gjs->num_rels - 1]);
+		Assert(gjs->results_nitems == gjs->total_nitems[gjs->num_rels - 1]);
 
 		/*
 		 * Enqueue another GpuJoin taks if completed one run on a part of

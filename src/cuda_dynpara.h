@@ -128,8 +128,8 @@ __pgstrom_optimal_workgroup_size(cl_uint *p_grid_sz,
 	/*
 	 * Return best availability
 	 */
-	*p_grid_sz = (nitems + maxBlockSize - 1) / maxBlockSize;
-	*p_block_sz = maxBlockSize;
+	*p_grid_sz = max((nitems + maxBlockSize - 1) / maxBlockSize, 1);
+	*p_block_sz = max(maxBlockSize, 1);
 
 	return WORKGROUPSIZE_RESULT_SUCCESS;
 }

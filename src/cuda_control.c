@@ -2520,7 +2520,7 @@ errorTextKernel(kern_errorbuf *kerror)
 		KERN_ENTRY(gpuscan_projection_row);
 		KERN_ENTRY(gpuscan_projection_slot);
 		KERN_ENTRY(gpuscan_main);
-		KERN_ENTRY(gpujoin_preparation);
+		KERN_ENTRY(gpujoin_exec_outerscan);
 		KERN_ENTRY(gpujoin_exec_nestloop);
 		KERN_ENTRY(gpujoin_exec_hashjoin);
 		KERN_ENTRY(gpujoin_outer_nestloop);

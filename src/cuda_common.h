@@ -227,7 +227,7 @@ typedef uintptr_t		hostptr_t;
 #define StromKernel_gpuscan_projection_row			0x0102
 #define StromKernel_gpuscan_projection_slot			0x0103
 #define StromKernel_gpuscan_main					0x0199
-#define StromKernel_gpujoin_preparation				0x0201
+#define StromKernel_gpujoin_exec_outerscan			0x0201
 #define StromKernel_gpujoin_exec_nestloop			0x0202
 #define StromKernel_gpujoin_exec_hashjoin			0x0203
 #define StromKernel_gpujoin_outer_nestloop			0x0204

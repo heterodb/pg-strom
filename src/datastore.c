@@ -42,7 +42,7 @@
  * GUC variables
  */
 static int		pgstrom_chunk_size_kb;
-static int		pgstrom_chunk_limit_kb;
+static int		pgstrom_chunk_limit_kb = INT_MAX;
 
 /*
  * pgstrom_chunk_size - configured chunk size
