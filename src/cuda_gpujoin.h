@@ -63,26 +63,25 @@ typedef struct
 /*
  * kern_gpujoin - control object of GpuJoin
  */
-#define GPUJOIN_MAX_DEPTH	24
+typedef struct
+{
+	cl_uint		kds_dst_length;	/* copy of kds_dst->length */
+	cl_uint		source_nitems;	/* source nitems that is actually inputed */
+	cl_uint		source_matched;	/* source nitems matched to the outer quels */
+	struct {
+		cl_uint	inner_base;		/* base of the inner window */
+		cl_uint	inner_size;		/* size of the inner window */
+		cl_uint inner_nitems;	/* out: number of inner join results */
+		cl_uint total_nitems;	/* out: number of (inner+outer) join results */
+	} r[FLEXIBLE_ARRAY_MEMBER];
+} kern_join_scale;
 
 typedef struct
 {
-	cl_uint		inner_base;		/* base of inner window */
-	cl_uint		inner_size;		/* size of inner window */
-	size_t		result_nitems;	/* # of results in this depth */
-	cl_float	join_ratio;		/* expected row growth ratio */
-} kern_inner_scale;
-
-typedef struct
-{
-	/* offset to the run-time parameter buffer */
-	cl_uint			kparams_offset;
-	/* offset to the primary kern_resultbuf */
-	size_t			kresults_1_offset;
-	/* offset to the secondary kern_resultbuf */
-	size_t			kresults_2_offset;
-	/* max allocatable number of kern_resultbuf items */
-	cl_uint			kresults_max_space;
+	cl_uint			kparams_offset;		/* offset to the kparams */
+	cl_uint			kresults_1_offset;	/* offset to the 1st kresults buffer */
+	cl_uint			kresults_2_offset;	/* offset to the 2nd kresults buffer */
+	cl_uint			kresults_max_items;	/* max items kresults buffer can hold */
 	/* number of inner relations */
 	cl_uint			num_rels;
 	/* least depth in this call chain */
@@ -101,7 +100,7 @@ typedef struct
 	cl_uint			num_kern_hashjoin_outer;
 	cl_uint			num_kern_projection_row;
 	cl_uint			num_kern_projection_slot;
-	cl_flost		usec_kern_outer_eval;
+	cl_float		usec_kern_outer_eval;
 	cl_float		usec_kern_nestloop;
 	cl_float		usec_kern_hashjoin;
 	cl_float		usec_kern_nestloop_outer;
@@ -110,26 +109,17 @@ typedef struct
 	/*
 	 * Scale of inner virtual window for each depth
 	 */
-	kern_inner_scale iscale[FLEXIBLE_ARRAY_MEMBER];
-#if 0
-	/* OUT: number of result rows actually generated for each depth */
-	cl_uint			result_nitems[GPUJOIN_MAX_DEPTH + 1];
-	/* OUT: maximum valid depth in the above result */
-	cl_uint			result_valid_until;
-	/* run-time parameter buffer */
-	kern_parambuf	kparams;
-#endif
+	kern_join_scale	jscale;
 } kern_gpujoin;
 
 #define KERN_GPUJOIN_PARAMBUF(kgjoin)			\
-	((kern_parambuf *)((kgjoin)->iscale + (kgjoin)->num_rels))
+	((kern_parambuf *)((kgjoin)->jscale.r + (kgjoin)->num_rels))
 #define KERN_GPUJOIN_PARAMBUF_LENGTH(kgjoin)	\
 	STROMALIGN(KERN_GPUJOIN_PARAMBUF(kgjoin)->length)
-#define KERN_GPUJOIN_HEAD_LENGTH(kgjoin)		\
-	((char *)KERN_GPUJOIN_PARAMBUF(kgjoin) +	\
-	 KERN_GPUJOIN_PARAMBUF_LENGTH(kgjoin) -		\
-	 (char *)(kgjoin))
-
+#define KERN_GPUJOIN_HEAD_LENGTH(kgjoin)				\
+	STROMALIGN((char *)KERN_GPUJOIN_PARAMBUF(kgjoin) +	\
+			   KERN_GPUJOIN_PARAMBUF_LENGTH(kgjoin) -	\
+			   (char *)(kgjoin))
 
 #define KERN_GPUJOIN_IN_RESULTS(kgjoin,depth)			\
 	((kern_resultbuf *)((char *)(kgjoin) +				\
@@ -220,9 +210,9 @@ gpujoin_outer_quals(kern_context *kcxt,
 					size_t kds_index);
 
 KERNEL_FUNCTION(void)
-gpujoin_outer_eval(kern_gpujoin *kgjoin,
-				   kern_data_store *kds,
-				   kern_resultbuf *kresults)
+gpujoin_source_eval(kern_gpujoin *kgjoin,
+					kern_data_store *kds,
+					kern_resultbuf *kresults)
 {
 	cl_uint		kds_index = get_global_id();
 	cl_uint		count;
@@ -258,130 +248,6 @@ gpujoin_outer_eval(kern_gpujoin *kgjoin,
 out:
 	kern_writeback_error_status(&kgjoin->kerror, kcxt,e);
 }
-
-
-#if 0
-KERNEL_FUNCTION(void)
-gpujoin_preparation(kern_gpujoin *kgjoin,
-					kern_data_store *kds,
-					kern_multirels *kmrels,
-					cl_int depth)
-{
-	kern_parambuf  *kparams = KERN_GPUJOIN_PARAMBUF(kgjoin);
-	kern_resultbuf *kresults_in;
-	kern_resultbuf *kresults_out;
-	kern_context	kcxt;
-	cl_uint			start_depth = kgjoin->start_depth;
-
-	/* sanity check */
-	assert(depth > 0 && depth <= kgjoin->num_rels);
-	assert(depth >= start_depth && start_depth <= kgjoin->num_rels);
-	assert(!kmrels || start_depth == 1);
-	assert(kgjoin->kresults_1_offset > 0);
-	assert(kgjoin->kresults_2_offset > 0);
-	kresults_in = KERN_GPUJOIN_IN_RESULTS(kgjoin, depth);
-	kresults_out = KERN_GPUJOIN_OUT_RESULTS(kgjoin, depth);
-
-	INIT_KERNEL_CONTEXT(&kcxt, gpujoin_preparation, kparams);
-	if (depth > start_depth &&
-		kresults_in->kerror.errcode != StromError_Success)
-		kcxt.e = kresults_in->kerror;
-
-	/*
-	 * In case of start depth, input result buffer is not initialized
-	 * yet. So, we need to put initial values first of all.
-	 */
-	if (depth == start_depth)
-	{
-		if (kds == NULL)
-		{
-			/*
-			 * Special case if RIGHT/FULL OUTER JOIN. We have no input rows
-			 * on depth == start_depth, so results_in shall be simply cleared.
-			 */
-			if (get_global_id() == 0)
-			{
-				kresults_in->nrels = depth;
-				kresults_in->nrooms = 0;
-				kresults_in->nitems = 0;
-				memset(&kresults_in->kerror, 0,
-					   sizeof(kern_errorbuf));
-				memset(kgjoin->result_nitems, 0,
-					   sizeof(kgjoin->result_nitems));
-			}
-		}
-		else
-		{
-			cl_uint		kds_index = get_global_id();
-			cl_uint		count;
-			cl_uint		offset;
-			cl_bool		is_matched;
-			__shared__ cl_int	base;
-
-			assert(depth == 1);
-			assert(kresults_in->nrels == 1);
-			assert(kresults_in->nrooms == kgjoin->kresults_max_space);
-			/*
-			 * Check qualifier of outer scan that was pulled-up (if any).
-			 * then, it allocates result buffer on kresults_in and put
-			 * get_global_id() if it match.
-			 */
-			if (kds_index < kds->nitems)
-				is_matched = gpujoin_outer_quals(&kcxt, kds, kds_index);
-			else
-				is_matched = false;
-
-			/* expand kresults_in->nitems */
-			offset = arithmetic_stairlike_add(is_matched ? 1 : 0, &count);
-			if (get_local_id() == 0)
-			{
-				if (count > 0)
-					base = atomicAdd(&kresults_in->nitems, count);
-				else
-					base = 0;
-				atomicMax(&kgjoin->result_nitems[0], base + count);
-			}
-			__syncthreads();
-
-			if (base + count >= kgjoin->kresults_max_space)
-				STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
-			else if (is_matched)
-			{
-				HeapTupleHeaderData	   *htup
-					= kern_get_tuple_row(kds, kds_index);
-				kresults_in->results[base + offset]
-					= (size_t)htup - (size_t)kds;
-			}
-		}
-	}
-	/*
-	 * Initialize output kresults buffer
-	 */
-	if (get_global_id() == 0)
-	{
-		assert(kresults_in->nrels == depth);
-		kresults_out->nrels = depth + 1;
-		kresults_out->nrooms = kgjoin->kresults_max_space / (depth + 1);
-		kresults_out->nitems = 0;
-		memset(&kresults_out->kerror, 0, sizeof(kern_errorbuf));
-		/*
-		 * Update statistics - unless we have no errors, nitems in the
-		 * previous depth is reliable.
-		 *
-		 * NOTE: The reason why result_valid_until will have 'depth', not
-		 * 'depth - 1', is that we shall put exact value on result_nitems[]
-		 * even if next depth will raise NoSpaceDataStore error. So, host
-		 * code can know the number of rows to be generated in this depth.
-		 */
-		if (kresults_in->kerror.errcode == StromError_Success)
-		{
-			kgjoin->result_nitems[depth - 1] = kresults_in->nitems;
-			kgjoin->result_valid_until = depth;
-		}
-	}
-	kern_writeback_error_status(&kresults_in->kerror, kcxt.e);
-}
-#endif
 
 /*
  * argument layout to launch inner/outer join functions
@@ -1399,7 +1265,7 @@ gpujoin_main(kern_gpujoin *kgjoin,		/* in/out: misc stuffs */
 	kern_join_args_t   *kern_join_args;
 	dim3				grid_sz;
 	dim3				block_sz;
-	cl_uint				kresults_max_space = kgjoin->kresults_max_space;
+	cl_uint				kresults_max_items = kgjoin->kresults_max_items;
 	cl_int				device;
 	cl_int				smx_clock;
 	cl_int				depth;
@@ -1410,9 +1276,10 @@ gpujoin_main(kern_gpujoin *kgjoin,		/* in/out: misc stuffs */
 	/* Init kernel context */
 	INIT_KERNEL_CONTEXT(&kcxt, gpujoin_main, kparams);
 	assert(get_global_size() == 1);		/* only single thread */
-	assert(kgjoin->start_depth > 0 &&
-		   kgjoin->start_depth <= kgjoin->num_rels);
-	assert(kds_src->format == KDS_FORMAT_ROW);
+	assert(kds_src != NULL
+		   ? kgjoin->start_depth == 1
+		   : kgjoin->start_depth > 0 && kgjoin->start_depth <= kgjoin->num_rels);
+	assert(!kds_src || kds_src->format == KDS_FORMAT_ROW);
 	assert(kds_dst->format == KDS_FORMAT_ROW ||
 		   kds_dst->format == KDS_FORMAT_SLOT);
 
@@ -1447,13 +1314,13 @@ retry_major:
 		{
 			memset(kresults_src, 0, offsetof(kern_resultbuf, results[0]));
 			kresults_src->nrels = depth;
-			kresults_src->nrooms = kresults_max_space / (depth + 1);
+			kresults_src->nrooms = kresults_max_items / (depth + 1);
 			if (kds_src != NULL)
 			{
 				/* Launch:
-				 * gpujoin_outer_eval(kern_gpujoin *kgjoin,
-				 *                    kern_data_store *kds,
-				 *                    kern_resultbuf *kresults)
+				 * gpujoin_source_eval(kern_gpujoin *kgjoin,
+				 *                     kern_data_store *kds,
+				 *                     kern_resultbuf *kresults)
 				 */
 				tv1 = clock64();
 				kern_args = (void **)
@@ -1472,7 +1339,7 @@ retry_major:
 				status = pgstrom_optimal_workgroup_size(&grid_sz,
 														&block_sz,
 														(const void *)
-														gpujoin_outer_eval,
+														gpujoin_source_eval,
 														kds_src->nitems,
 														sizeof(kern_errorbuf));
 				if (status != cudaSuccess)
@@ -1480,8 +1347,9 @@ retry_major:
 					STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
 					return;
 				}
+				// update source_nitems
 
-				status = cudaLaunchDevice((void *)gpujoin_outer_eval,
+				status = cudaLaunchDevice((void *)gpujoin_source_eval,
 										  kern_args, grid_sz, block_sz,
 										  sizeof(kern_errorbuf) * block_sz.x,
 										  NULL);
@@ -1501,14 +1369,17 @@ retry_major:
 				TIMEVAL_RECORD(kgjoin,kern_outer_eval,tv1,tv2,smx_clock);
 				if (kgjoin->kerror.errcode != StromError_Success)
 					return;
+				/* update run-time statistics */
+				kgjoin->jscale.source_nitems = kds_src->nitems;
+				kgjoin->jscale.source_matched = kresults_src->nitems;
 			}
 		}
 		/* make the kresults_dst buffer empty */
 		memset(kresults_dst, 0, offsetof(kern_resultbuf, results[0]));
 		kresults_dst->nrels = depth + 1;
-		kresults_dst->nrooms = kresults_max_space / (depth + 1);
+		kresults_dst->nrooms = kresults_max_items / (depth + 1);
 
-		if (kmrels->chunks[depth - 1].is_nestloop)
+		if (kmrels->chunks[depth-1].is_nestloop)
 		{
 			if (kds_src != NULL || depth > kgjoin->outer_join_start_depth)
 			{
@@ -1540,14 +1411,14 @@ retry_major:
 				kern_join_args->depth = depth;
 				kern_join_args->cuda_index = cuda_index;
 
-				gnl_shmem_xsize = kmrels->chunks[depth - 1].gnl_shmem_xsize;
-				gnl_shmem_ysize = kmrels->chunks[depth - 1].gnl_shmem_ysize;
+				gnl_shmem_xsize = kmrels->chunks[depth-1].gnl_shmem_xsize;
+				gnl_shmem_ysize = kmrels->chunks[depth-1].gnl_shmem_ysize;
 				status = pgstrom_largest_workgroup_size_2d(
 					&grid_sz,
 					&block_sz,
 					(const void *)gpujoin_exec_nestloop,
 					kresults_src->nitems,
-					kgjoin->iscale[depth - 1].inner_size,
+					kgjoin->jscale.r[depth-1].inner_size,
 					gnl_shmem_xsize,
 					gnl_shmem_ysize,
 					sizeof(kern_errorbuf));
@@ -1592,9 +1463,13 @@ retry_major:
 				}
 				else if (kgjoin->kerror.errcode != StromError_Success)
 					return;
+				/* update run-time statistics */
+				kgjoin->jscale.r[depth-1].inner_nitems = kresults_dst->nitems;
+				kgjoin->jscale.r[depth-1].total_nitems = kresults_dst->nitems;
 			}
 
-			if (kds_src == NULL && kmrels->chunks[depth - 1].right_outer)
+			if (kds_src == NULL &&
+				KERN_MULTIRELS_RIGHT_OUTER_JOIN(kmrels, depth))
 			{
 				/* Launch:
 				 * KERNEL_FUNCTION(void)
@@ -1676,9 +1551,9 @@ retry_major:
 				}
 				else if (kgjoin->kerror.errcode != StromError_Success)
 					return;
+				/* update run-time statistics */
+				kgjoin->jscale.v[depth-1].total_nitems = kresults_dst->nitems;
 			}
-
-
 		}
 		else
 		{
@@ -1753,9 +1628,13 @@ retry_major:
 				}
 				else if (kgjoin->kerror.errcode != StromError_Success)
 					return;
+				/* update run-time statistics */
+				kgjoin->jscale.v[depth-1].inner_nitems = kresults_dst->nitems;
+				kgjoin->jscale.v[depth-1].total_nitems = kresults_dst->nitems;
 			}
 
-			if (kds_src == NULL && kmrels->chunks[depth - 1].right_outer)
+			if (kds_src == NULL &&
+				KERN_MULTIRELS_RIGHT_OUTER_JOIN(kmrels, depth))
 			{
 				/* Launch:
 				 * KERNEL_FUNCTION(void)
@@ -1826,6 +1705,8 @@ retry_major:
 				}
 				else if (kgjoin->kerror.errcode != StromError_Success)
 					return;
+				/* update run-time statistics */
+				kgjoin->jscale.v[depth-1].total_nitems = kresults_dst->nitems;
 			}
 		}
 
