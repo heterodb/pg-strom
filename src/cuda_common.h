@@ -1569,9 +1569,10 @@ STATIC_FUNCTION(cl_uint)
 arithmetic_stairlike_add(cl_uint my_value, cl_uint *total_sum)
 {
 	cl_uint	   *items = SHARED_WORKMEM(cl_uint);
-	size_t		local_sz;
-	size_t		local_id;
-	size_t		unit_sz;
+	cl_uint		local_sz;
+	cl_uint		local_id;
+	cl_uint		unit_sz;
+	cl_uint		stair_sum;
 	cl_int		i, j;
 
 	/* setup local size (pay attention, if 2D invocation) */
@@ -1595,7 +1596,9 @@ arithmetic_stairlike_add(cl_uint my_value, cl_uint *total_sum)
 	}
 	if (total_sum)
 		*total_sum = items[local_sz - 1];
-	return local_id == 0 ? 0 : items[local_id - 1];
+	stair_sum = local_id == 0 ? 0 : items[local_id - 1];
+	__syncthreads();
+	return stair_sum;
 }
 
 /*

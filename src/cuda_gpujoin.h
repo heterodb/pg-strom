@@ -404,6 +404,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 	cl_uint				offset;
 	cl_uint				count;
 	cl_bool				is_matched;
+	cl_uint				loops = 100;	// for debug ... to be removed later
 	cl_bool				needs_outer_row = false;
 	__shared__ cl_uint	base;
 	__shared__ cl_uint	pg_crc32_table[256];
@@ -483,6 +484,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 		if (is_matched)
 		{
 			assert(khitem->rowid < kds_hash->nitems);
+			assert(lo_map == NULL);
 			if (lo_map && !lo_map[khitem->rowid])
 				lo_map[khitem->rowid] = true;
 			needs_outer_row = false;
@@ -505,8 +507,8 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 				memcpy(r_buffer, x_buffer, sizeof(cl_int) * depth);
 				r_buffer[depth] = (size_t)&khitem->htup - (size_t)kds_hash;
 			}
-			__syncthreads();
 		}
+		__syncthreads();
 
 		/*
 		 * Fetch next hash entry, then checks whether all the local
@@ -515,7 +517,13 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 		 */
 		khitem = KERN_HASH_NEXT_ITEM(kds_hash, khitem);
 		arithmetic_stairlike_add(khitem != NULL ? 1 : 0, &count);
-	} while (count > 0);
+	} while (count > 0 && --loops > 0);
+
+	/*
+	 * FOR DEBUG - It may detect infinite loop.
+	 */
+	if (loops < 1)
+		STROM_SET_ERROR(&kcxt.e, StromError_CudaInternal);
 
 	/*
 	 * If no inner rows were matched on LEFT OUTER JOIN case, we fill up
@@ -632,8 +640,8 @@ gpujoin_outer_nestloop(kern_gpujoin *kgjoin,
 			memset(r_buffer, 0, sizeof(cl_int) * depth);	/* NULL */
 			r_buffer[depth] = (size_t)htup - (size_t)kds_in;
 		}
-		__syncthreads();
 	}
+	__syncthreads();
 	kern_writeback_error_status(&kgjoin->kerror, kcxt.e);
 }
 
@@ -923,6 +931,7 @@ gpujoin_projection_row(kern_gpujoin *kgjoin,
 			goto out;
 		}
 	}
+	__syncthreads();
 
 	/*
 	 * Step.3 - write out the HeapTuple on the destination buffer
@@ -1024,6 +1033,7 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 		vl_buf = ((char *)kds_dst + kds_dst->length
 				  - (base + offset + extra_len));
 	}
+	__syncthreads();
 #else
 	if (extra_len > 0)
 	{
@@ -1764,7 +1774,7 @@ retry_major:
 			nitems_to_fit = (kds_dst->length -
 							 STROMALIGN(offsetof(kern_data_store,
 												 colmeta[ncols]))) / width_avg;
-			nsplits = kds_dst->nitems / nitems_to_fit;
+			nsplits = kds_dst->nitems / nitems_to_fit + 1;
 		}
 		else
 		{
@@ -1773,9 +1783,8 @@ retry_major:
 			nitems_to_fit = (kds_dst->length -
 							 STROMALIGN(offsetof(kern_data_store,
 												 colmeta[ncols]))) / width_avg;
-			nsplits = kds_dst->nitems / nitems_to_fit;
+			nsplits = kds_dst->nitems / nitems_to_fit + 1;
 		}
-
 		if (nsplits < 2)
 			return;	/* should never happen */
 
@@ -1788,6 +1797,10 @@ retry_major:
 		kgjoin->num_major_retry++;
 		goto retry_major;
 	}
+
+	/*
+	 * TODO: If kds_dst still has space, do major_retry if we can shift inner_base
+	 */
 }
 
 #endif	/* __CUDACC__ */

@@ -1074,7 +1074,6 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 	__syncthreads();
 	index = arithmetic_stairlike_add(kds_index == owner_index ? 1 : 0,
 									 &count);
-	__syncthreads();
 	if (count > 0)
 	{
 		if (get_local_id() == 0)
@@ -1084,6 +1083,7 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 		if (kds_index == owner_index)
 			kresults_dst->results[base + index] = kds_index;
 	}
+	__syncthreads();
 
 	/*
 	 * Quick bailout if thread is not valid, or no hash slot is available.

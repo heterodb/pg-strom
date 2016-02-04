@@ -141,28 +141,26 @@ gpuscan_exec_quals(kern_gpuscan *kgpuscan,
 
 	/* expand kresults buffer */
 	offset = arithmetic_stairlike_add(rc ? 1 : 0, &count);
-	if (get_local_id() == 0)
+	if (count > 0)
 	{
-		if (count > 0)
+		if (get_local_id() == 0)
 			base = atomicAdd(&kresults->nitems, count);
-		else
-			base = 0;
+		__syncthreads();
+
+		if (base + count > kresults->nrooms)
+		{
+			STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
+			goto out;
+		}
+		else if (rc)
+		{
+			/* OK, store the result */
+			kresults->results[base + offset] = (cl_uint)
+				((char *)KERN_DATA_STORE_TUPITEM(kds_src, kds_index) -
+				 (char *)kds_src);
+		}
 	}
 	__syncthreads();
-
-	if (base + count > kresults->nrooms)
-	{
-		STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
-		goto out;
-	}
-
-	/* store the result */
-	if (rc)
-	{
-		kresults->results[base + offset]
-			= (cl_uint)((char *)KERN_DATA_STORE_TUPITEM(kds_src, kds_index) -
-						(char *)kds_src);
-	}
 out:
 	/* write back error status if any */
 	kern_writeback_error_status(&kgpuscan->kerror, kcxt.e);
@@ -253,32 +251,33 @@ gpuscan_projection_row(kern_gpuscan *kgpuscan,
 	 * step.2 - increment the buffer usage of kds_dst
 	 */
 	offset = arithmetic_stairlike_add(required, &count);
-	if (get_local_id() == 0)
+	if (count > 0)
 	{
-		if (count > 0)
+		if (get_local_id() == 0)
 			base = atomicAdd(&kds_dst->usage, count);
-		else
-			base = 0;
+		__syncthreads();
+
+		if (KERN_DATA_STORE_HEAD_LENGTH(kds_dst) +
+			STROMALIGN(sizeof(cl_uint) * kresults->nitems) +
+			base + count > kds_dst->length)
+		{
+			STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
+			goto out;
+		}
+		else if (required > 0)
+		{
+			/*
+			 * step.3 - extract the result heap-tuple
+			 */
+			cl_uint			pos = kds_dst->length - (base + offset + required);
+			kern_tupitem   *tupitem_dst = (kern_tupitem *)((char *)kds_dst + pos);
+
+			tup_index[get_global_id()] = pos;
+			form_kern_heaptuple(&kcxt, kds_dst, tupitem_dst,
+								tup_values, tup_isnull, tup_internal);
+		}
 	}
 	__syncthreads();
-
-	if (KERN_DATA_STORE_HEAD_LENGTH(kds_dst) +
-		STROMALIGN(sizeof(cl_uint) * kresults->nitems) +
-		base + count > kds_dst->length)
-	{
-		STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
-		goto out;
-	}
-
-	if (required > 0)
-	{
-		cl_uint			pos = kds_dst->length - (base + offset + required);
-		kern_tupitem   *tupitem_dst = (kern_tupitem *)((char *)kds_dst + pos);
-
-		tup_index[get_global_id()] = pos;
-		form_kern_heaptuple(&kcxt, kds_dst, tupitem_dst,
-							tup_values, tup_isnull, tup_internal);
-	}
 out:
 	/* write back error status if any */
 	kern_writeback_error_status(&kgpuscan->kerror, kcxt.e);
