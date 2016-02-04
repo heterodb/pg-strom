@@ -1025,7 +1025,11 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 				  - (base + offset + extra_len));
 	}
 #else
-	assert(extra_len == 0);
+	if (extra_len > 0)
+	{
+		STROM_SET_ERROR(&kcxt.e, StromError_WrongCodeGeneration);
+		goto out;
+	}
 #endif
 	/*
 	 * At this point, tup_values have device pointer or internal
@@ -1087,7 +1091,7 @@ out:
  *
  *
  */
-STATIC_FUNCTION(cl_bool)
+STATIC_FUNCTION(cl_int)
 gpujoin_resize_inner_window(kern_gpujoin *kgjoin,
 							kern_multirels *kmrels,
 							kern_data_store *kds_src,
@@ -1121,14 +1125,20 @@ gpujoin_resize_inner_window(kern_gpujoin *kgjoin,
 	}
 	assert(target_depth >= 1 && target_depth <= valid_until);
 
-	/* reduce inner window */
+	/*
+	 * Reduction of the inner partition window. Of course, we cannot
+	 * reduce the inner size less than 1.
+	 */
 	kgjoin->jscale.r[target_depth - 1].inner_size /= nsplits;
+	if (kgjoin->jscale.r[target_depth - 1].inner_size < 1)
+		return -1;
 
 	/*
-	 * If victim inner chunks is the last one, we can restart the last
-	 * join step, instead of the entire retry.
+	 * Informs the caller victim inner chunk. If it is the last depth,
+	 * we may not need to retry from the beginning, but from the last
+	 * depth.
 	 */
-	return (target_depth == valid_until ? true : false);
+	return target_depth;
 }
 
 #define TIMEVAL_RECORD(kgjoin,field,tv1,tv2,smx_clock)	\
@@ -1179,6 +1189,7 @@ gpujoin_main(kern_gpujoin *kgjoin,		/* in/out: misc stuffs */
 	cl_int				device;
 	cl_int				smx_clock;
 	cl_int				depth;
+	cl_int				victim;
 	cl_int				nsplits;
 	cl_ulong			tv1, tv2;
 	cudaError_t			status = cudaSuccess;
@@ -1370,19 +1381,22 @@ retry_major:
 				TIMEVAL_RECORD(kgjoin,kern_nestloop_outer,tv1,tv2,smx_clock);
 				if (kgjoin->kerror.errcode == StromError_DataStoreNoSpace)
 				{
-					memset(&kgjoin->kerror, 0, sizeof(kern_errorbuf));
 					nsplits = kresults_dst->nitems / kresults_dst->nrooms + 1;
-					if (gpujoin_resize_inner_window(kgjoin,
-													kmrels,
-													kds_src,
-													depth,
-													nsplits))
+					victim = gpujoin_resize_inner_window(kgjoin,
+														 kmrels,
+														 kds_src,
+														 depth,
+														 nsplits);
+					if (victim < 0)
+						return;
+					memset(&kgjoin->kerror, 0, sizeof(kern_errorbuf));
+					if (victim < depth)
 					{
-						kgjoin->num_minor_retry++;
-						goto retry_minor;
+						kgjoin->num_major_retry++;
+						goto retry_major;
 					}
-					kgjoin->num_major_retry++;
-					goto retry_major;
+					kgjoin->num_minor_retry++;
+					goto retry_minor;
 				}
 				else if (kgjoin->kerror.errcode != StromError_Success)
 					return;
@@ -1455,19 +1469,22 @@ retry_major:
 
 				if (kgjoin->kerror.errcode == StromError_DataStoreNoSpace)
 				{
-					memset(&kgjoin->kerror, 0, sizeof(kern_errorbuf));
 					nsplits = kresults_dst->nitems / kresults_dst->nrooms + 1;
-					if (gpujoin_resize_inner_window(kgjoin,
-													kmrels,
-													kds_src,
-													depth,
-													nsplits))
+					victim = gpujoin_resize_inner_window(kgjoin,
+														 kmrels,
+														 kds_src,
+														 depth,
+														 nsplits);
+					if (victim < 0)
+						return;
+					memset(&kgjoin->kerror, 0, sizeof(kern_errorbuf));
+					if (victim < depth)
 					{
-						kgjoin->num_minor_retry++;
-						goto retry_minor;
+						kgjoin->num_major_retry++;
+						goto retry_major;
 					}
-					kgjoin->num_major_retry++;
-					goto retry_major;
+					kgjoin->num_minor_retry++;
+					goto retry_minor;
 				}
 				else if (kgjoin->kerror.errcode != StromError_Success)
 					return;
@@ -1539,17 +1556,20 @@ retry_major:
 				{
 					memset(&kgjoin->kerror, 0, sizeof(kern_errorbuf));
 					nsplits = kresults_dst->nitems / kresults_dst->nrooms + 1;
-					if (gpujoin_resize_inner_window(kgjoin,
-													kmrels,
-													kds_src,
-													depth,
-													nsplits))
+					victim = gpujoin_resize_inner_window(kgjoin,
+														 kmrels,
+														 kds_src,
+														 depth,
+														 nsplits);
+					if (victim < 0)
+						return;
+					if (victim < depth)
 					{
-						kgjoin->num_minor_retry++;
-						goto retry_minor;
+						kgjoin->num_major_retry++;
+						goto retry_major;
 					}
-					kgjoin->num_major_retry++;
-					goto retry_major;
+					kgjoin->num_minor_retry++;
+					goto retry_minor;
 				}
 				else if (kgjoin->kerror.errcode != StromError_Success)
 					return;
@@ -1618,19 +1638,22 @@ retry_major:
 
 				if (kgjoin->kerror.errcode == StromError_DataStoreNoSpace)
 				{
-					memset(&kgjoin->kerror, 0, sizeof(kern_errorbuf));
 					nsplits = kresults_dst->nitems / kresults_dst->nrooms + 1;
-					if (gpujoin_resize_inner_window(kgjoin,
-													kmrels,
-													kds_src,
-													depth,
-													nsplits))
+					victim = gpujoin_resize_inner_window(kgjoin,
+														 kmrels,
+														 kds_src,
+														 depth,
+														 nsplits);
+					if (victim < 0)
+						return;
+					memset(&kgjoin->kerror, 0, sizeof(kern_errorbuf));
+					if (victim < depth)
 					{
-						kgjoin->num_minor_retry++;
-						goto retry_minor;
+						kgjoin->num_major_retry++;
+						goto retry_major;
 					}
-					kgjoin->num_major_retry++;
-					goto retry_major;
+					kgjoin->num_minor_retry++;
+					goto retry_minor;
 				}
 				else if (kgjoin->kerror.errcode != StromError_Success)
 					return;
@@ -1668,13 +1691,15 @@ retry_major:
 	kds_dst->nitems = kresults_src->nitems;
 	if (kds_dst->nitems >= kds_dst->nrooms)
 	{
-		memset(&kgjoin->kerror, 0, sizeof(kern_errorbuf));
 		nsplits = kresults_src->nitems / kds_dst->nrooms + 1;
-		gpujoin_resize_inner_window(kgjoin,
-									kmrels,
-									kds_src,
-									kgjoin->num_rels,
-									nsplits);
+		victim = gpujoin_resize_inner_window(kgjoin,
+											 kmrels,
+											 kds_src,
+											 kgjoin->num_rels,
+											 nsplits);
+		if (victim < 0)
+			return;
+		memset(&kgjoin->kerror, 0, sizeof(kern_errorbuf));
 		kgjoin->num_major_retry++;
 		goto retry_major;
 	}
@@ -1759,8 +1784,8 @@ retry_major:
 									kds_src,
 									kgjoin->num_rels,
 									nsplits);
-		kgjoin->num_major_retry++;
 		memset(&kgjoin->kerror, 0, sizeof(kern_errorbuf));
+		kgjoin->num_major_retry++;
 		goto retry_major;
 	}
 }
