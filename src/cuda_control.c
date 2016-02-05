@@ -295,6 +295,7 @@ __gpuMemAlloc(GpuContext *gcontext, int cuda_index, size_t bytesize)
 	uint32			curr_numcxt;
 	size_t			curr_limit;
 	size_t			required;
+	struct timeval	tv1, tv2;
 
 	/* round up to 1KB align */
 	bytesize = TYPEALIGN(1024, bytesize);
@@ -381,6 +382,7 @@ __gpuMemAlloc(GpuContext *gcontext, int cuda_index, size_t bytesize)
 	 * TODO: too frequent device memory allocation request will lock
 	 * down the system. We may need to have cooling-down time here.
 	 */
+	gettimeofday(&tv1, NULL);
 	rc = cuMemAlloc(&block_addr, required);
 	if (rc != CUDA_SUCCESS)
 	{
@@ -391,6 +393,11 @@ __gpuMemAlloc(GpuContext *gcontext, int cuda_index, size_t bytesize)
 		}
 		elog(ERROR, "failed on cuMemAlloc: %s", errorText(rc));
 	}
+	/* update performance statistics */
+	gettimeofday(&tv2, NULL);
+	gcontext->num_dev_malloc++;
+	PFMON_ADD_TIMEVAL(&gcontext->tv_dev_malloc, &tv1, &tv2);
+
 	/* update scoreboard for resource control */
 	GpuScoreInclMemUsage(gcontext, cuda_index, required);
 
@@ -526,6 +533,7 @@ __gpuMemFree(GpuContext *gcontext, int cuda_index, CUdeviceptr chunk_addr)
 	dlist_iter		iter;
 	CUresult		rc;
 	int				index;
+	struct timeval	tv1, tv2;
 
 	/* find out the cuda-context */
 	Assert(cuda_index < gcontext->num_context);
@@ -639,6 +647,8 @@ found:
 			gm_head->empty_block = gm_block;
 		else
 		{
+			gettimeofday(&tv1, NULL);
+
 			rc = cuCtxPushCurrent(gcontext->gpu[cuda_index].cuda_context);
 			if (rc != CUDA_SUCCESS)
 				elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
@@ -650,6 +660,11 @@ found:
 			rc = cuCtxPopCurrent(NULL);
 			if (rc != CUDA_SUCCESS)
 				elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
+
+			/* update performance statistics */
+			gettimeofday(&tv2, NULL);
+			gcontext->num_dev_mfree++;
+			PFMON_ADD_TIMEVAL(&gcontext->tv_dev_mfree, &tv1, &tv2);
 
 			/* update scoreboard for resource control */
 			GpuScoreDeclMemUsage(gcontext, cuda_index, gm_block->block_size);
@@ -816,6 +831,10 @@ pgstrom_create_gpucontext(ResourceOwner resowner, bool *context_reused)
 	GpuContext	   *gcontext = NULL;
 	MemoryContext	memcxt = NULL;
 	cl_int		   *p_keep_freemem;
+	cl_int		   *p_num_host_malloc;
+	cl_int		   *p_num_host_mfree;
+	struct timeval *p_tv_host_malloc;
+	struct timeval *p_tv_host_mfree;
 	CUcontext	   *cuda_context_temp;
 	Size			length_gcxt;
 	Size			length_init;
@@ -878,11 +897,19 @@ pgstrom_create_gpucontext(ResourceOwner resowner, bool *context_reused)
 										 cuda_context_temp[0],
 										 length_init,
 										 length_max,
-										 &p_keep_freemem);
+										 &p_keep_freemem,
+										 &p_num_host_malloc,
+										 &p_num_host_mfree,
+										 &p_tv_host_malloc,
+										 &p_tv_host_mfree);
 		length_gcxt = offsetof(GpuContext, gpu[cuda_num_devices]);
 		gcontext = MemoryContextAllocZero(memcxt, length_gcxt);
 		gcontext->refcnt = 1;
 		gcontext->p_keep_freemem = p_keep_freemem;
+		gcontext->p_num_host_malloc = p_num_host_malloc;
+		gcontext->p_num_host_mfree = p_num_host_mfree;
+		gcontext->p_tv_host_malloc = p_tv_host_malloc;
+		gcontext->p_tv_host_mfree = p_tv_host_mfree;
 		gcontext->resowner = resowner;
 		gcontext->memcxt = memcxt;
 		dlist_init(&gcontext->pds_list);
@@ -1233,6 +1260,7 @@ pgstrom_init_gputaskstate(GpuContext *gcontext,
 	gts->cb_bulk_exec = NULL;
 	memset(&gts->pfm_accum, 0, sizeof(pgstrom_perfmon));
 	gts->pfm_accum.enabled = pgstrom_perfmon_enabled;
+	gts->pfm_accum.prime_in_gpucontext = (gcontext->refcnt == 1);
 }
 
 /*

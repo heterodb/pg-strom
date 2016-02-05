@@ -1033,14 +1033,14 @@ gpusort_end(CustomScanState *node)
 			Assert(!gss->sorted_chunks[i]);
 	}
 #endif
+	/* Clean up subtree */
+	ExecEndNode(outerPlanState(node));
+
 	/*
 	 * Cleanup and relase any concurrent tasks
 	 * (including pgstrom_data_store)
 	 */
 	pgstrom_release_gputaskstate(&gss->gts);
-
-	/* Clean up subtree */
-    ExecEndNode(outerPlanState(node));
 }
 
 static void

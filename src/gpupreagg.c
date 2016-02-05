@@ -4308,21 +4308,11 @@ gpupreagg_end(CustomScanState *node)
 		gpupreagg_put_segment(gpas->curr_segment);
 		gpas->curr_segment = NULL;
 	}
-	/* Cleanup and relase any concurrent tasks */
-	pgstrom_release_gputaskstate(&gpas->gts);
 	/* Clean up subtree, if any */
 	if (outerPlanState(node))
 		ExecEndNode(outerPlanState(node));
-
-#if 0
-	/* dump stat */
-	elog(INFO, "stat {num_segments: %u, num_groups: %.0f, num_chunks: %.0f, src_nitems: %.0f, varlena_unitsz: %.0f}",
-		 gpas->stat_num_segments,
-		 gpas->stat_num_groups,
-		 gpas->stat_num_chunks,
-		 gpas->stat_src_nitems,
-		 gpas->stat_varlena_unitsz);
-#endif
+	/* Cleanup and relase any concurrent tasks */
+	pgstrom_release_gputaskstate(&gpas->gts);
 }
 
 static void

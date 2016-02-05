@@ -782,9 +782,10 @@ pgstrom_accum_perfmon(pgstrom_perfmon *accum, const pgstrom_perfmon *pfm)
 }
 
 static void
-pgstrom_explain_perfmon(pgstrom_perfmon *pfm, ExplainState *es)
+pgstrom_explain_perfmon(GpuTaskState *gts, ExplainState *es)
 {
-	char		buf[256];
+	pgstrom_perfmon	   *pfm = &gts->pfm_accum;
+	char				buf[1024];
 
 	if (!pfm->enabled || pfm->num_samples == 0)
 		return;
@@ -1001,6 +1002,65 @@ pgstrom_explain_perfmon(pgstrom_perfmon *pfm, ExplainState *es)
 				 milliseconds_unitary_format(pfm->time_debug4));
 		ExplainPropertyText("debug-4", buf, es);
 	}
+
+
+
+
+	/*
+	 * Output statistics of GpuContext
+	 */
+	if (pfm->prime_in_gpucontext)
+	{
+		GpuContext *gcontext = gts->gcontext;
+		cl_int		num_host_malloc = *gcontext->p_num_host_malloc;
+		cl_int		num_host_mfree = *gcontext->p_num_host_mfree;
+		cl_int		num_dev_malloc = gcontext->num_dev_malloc;
+		cl_int		num_dev_mfree = gcontext->num_dev_mfree;
+		cl_double	tv_host_malloc =
+			PFMON_TIMEVAL_AS_FLOAT(gcontext->p_tv_host_malloc);
+		cl_double	tv_host_mfree =
+			PFMON_TIMEVAL_AS_FLOAT(gcontext->p_tv_host_mfree);
+		cl_double	tv_dev_malloc =
+			PFMON_TIMEVAL_AS_FLOAT(&gcontext->tv_dev_malloc);
+		cl_double	tv_dev_mfree =
+			PFMON_TIMEVAL_AS_FLOAT(&gcontext->tv_dev_mfree);
+
+		if (es->format == EXPLAIN_FORMAT_TEXT)
+		{
+			snprintf(buf, sizeof(buf),
+					 "alloc (count: %u, time: %.3fs), "
+					 "free (count: %u, time: %.3fs)",
+					 num_host_malloc, tv_host_malloc,
+					 num_host_mfree, tv_host_mfree);
+			ExplainPropertyText("CUDA Host memory", buf, es);
+
+			snprintf(buf, sizeof(buf),
+					 "alloc (count: %u, time: %.3fs), "
+					 "free (count: %u, time: %.3fs)",
+					 num_dev_malloc, tv_dev_malloc,
+					 num_dev_mfree, tv_dev_mfree);
+			ExplainPropertyText("CUDA Device memory", buf, es);
+		}
+		else
+		{
+			ExplainPropertyInteger("Number of CUDA Host memory alloc",
+								   num_host_malloc, es);
+			ExplainPropertyInteger("Number of CUDA Host memory alloc",
+								   num_host_mfree, es);
+			ExplainPropertyFloat("Time of CUDA Host memory alloc",
+								 tv_host_malloc, 3, es);
+			ExplainPropertyFloat("Time of CUDA Host memory free",
+								 tv_host_mfree, 3, es);
+			ExplainPropertyInteger("Number of CUDA Device memory alloc",
+								   num_dev_malloc, es);
+			ExplainPropertyInteger("Number of CUDA Device memory alloc",
+								   num_dev_mfree, es);
+			ExplainPropertyFloat("Time of CUDA Device memory alloc",
+								 tv_dev_malloc, 3, es);
+			ExplainPropertyFloat("Time of CUDA Device memory free",
+								 tv_dev_mfree, 3, es);
+		}
+	}
 }
 
 /*
@@ -1053,5 +1113,5 @@ pgstrom_explain_gputaskstate(GpuTaskState *gts, ExplainState *es)
 	 * Show performance information
 	 */
 	if (es->analyze && gts->pfm_accum.enabled)
-		pgstrom_explain_perfmon(&gts->pfm_accum, es);
+		pgstrom_explain_perfmon(gts, es);
 }

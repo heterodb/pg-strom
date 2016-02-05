@@ -65,6 +65,10 @@ typedef struct
 	MemoryContextData	header;
 	CUcontext			cuda_context;
 	cl_int				keep_freemem;	/* if > 0, try to keep free chunk */
+	cl_int				num_host_malloc;/* # of cuMemAllocHost calls */
+	cl_int				num_host_mfree;	/* # of cuMemFreeHost calls */
+	struct timeval		tv_host_malloc;	/* total time for cuMemAllocHost */
+	struct timeval		tv_host_mfree;	/* total time for cuMemFreeHost */
 	dlist_head			blocks;
 	dlist_head			free_chunks[HOSTMEM_CHUNKSZ_MAX_BIT + 1];
 	/* allocation parameters for this context */
@@ -128,6 +132,7 @@ cudaHostMemAllocBlock(cudaHostMemHead *chm_head, int least_class)
 	Size		least_size = (1UL << least_class);
 	int			index;
 	CUresult	rc;
+	struct timeval tv1, tv2;
 
 	/* find out the best fit, and update next allocation standpoint */
 	while (block_size < least_size)
@@ -136,7 +141,10 @@ cudaHostMemAllocBlock(cudaHostMemHead *chm_head, int least_class)
 									chm_head->block_size_max);
 	Assert((block_size & (block_size - 1)) == 0);
 
-	/* allocate host pinned memory */
+	/*
+	 * Allocation of the host pinned memory
+	 */
+	gettimeofday(&tv1, NULL);
 	rc = cuCtxPushCurrent(chm_head->cuda_context);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
@@ -149,6 +157,9 @@ cudaHostMemAllocBlock(cudaHostMemHead *chm_head, int least_class)
 	rc = cuCtxPopCurrent(NULL);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuCtxPopCurrent: %s", errorText(rc));
+	gettimeofday(&tv2, NULL);
+	chm_head->num_host_malloc++;
+	PFMON_ADD_TIMEVAL(&chm_head->tv_host_malloc, &tv1, &tv2);
 
 	/* init block */
 	dlist_init(&chm_block->addr_chunks);
@@ -223,6 +234,7 @@ cudaHostMemFree(MemoryContext context, void *pointer)
 	uintptr_t			offset;
 	int					index;
 	CUresult			rc;
+	struct timeval		tv1, tv2;
 
 	chunk = HOSTMEM_CHUNK_BY_POINTER(pointer);
 	Assert(HOSTMEM_CHUNK_MAGIC(chunk) == HOSTMEM_CHUNK_MAGIC_CODE);
@@ -308,9 +320,16 @@ cudaHostMemFree(MemoryContext context, void *pointer)
 		Assert(!chunk->free_chain.prev && !chunk->free_chain.next);
 		dlist_delete(&chm_block->chain);
 
+		gettimeofday(&tv1, NULL);
+
 		rc = cuMemFreeHost(chm_block);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuMemFreeHost: %s", errorText(rc));
+
+		gettimeofday(&tv2, NULL);
+		chm_head->num_host_mfree++;
+		PFMON_ADD_TIMEVAL(&chm_head->tv_host_mfree, &tv1, &tv2);
+
 		return;
 	}
 
@@ -547,7 +566,11 @@ HostPinMemContextCreate(MemoryContext parent,
 						CUcontext cuda_context,
 						Size block_size_init,
 						Size block_size_max,
-						cl_int **pp_keep_freemem)
+						cl_int **pp_keep_freemem,
+						cl_int **pp_num_host_malloc,
+						cl_int **pp_num_host_mfree,
+						struct timeval **pp_tv_host_malloc,
+						struct timeval **pp_tv_host_mfree)
 {
 	cudaHostMemHead	   *chm_head;
 
@@ -567,8 +590,13 @@ HostPinMemContextCreate(MemoryContext parent,
 	 * never produce any tuple more, thus, we don't need to keep free pinned
 	 * memory if all active GpuTaskState gone.
 	 */
-	chm_head->keep_freemem = 0;
 	*pp_keep_freemem = &chm_head->keep_freemem;
+
+	/* performance statistics for malloc/mfree of pinned memory */
+	*pp_num_host_malloc = &chm_head->num_host_malloc;
+	*pp_num_host_mfree = &chm_head->num_host_mfree;
+	*pp_tv_host_malloc = &chm_head->tv_host_malloc;
+	*pp_tv_host_mfree = &chm_head->tv_host_mfree;
 
 	/*
 	 * Make sure alloc parameters are reasonable

@@ -92,7 +92,37 @@
  * Performance monitor structure
  */
 typedef struct {
-	cl_bool		enabled;
+	cl_bool			enabled;
+	cl_bool			prime_in_gpucontext;
+	/*-- memory allocation counter --*/
+	cl_uint			num_host_malloc;
+	cl_uint			num_host_mfree;
+	cl_uint			num_dev_malloc;
+	cl_uint			num_dev_mfree;
+	cl_double		tv_host_malloc;
+	cl_double		tv_host_mfree;
+	cl_double		tv_dev_malloc;
+	cl_double		tv_dev_mfree;
+
+#if 0
+	union {
+		struct {
+
+		} gpuscan;
+		struct {
+
+		} gpujoin;
+		struct {
+
+		} gpupreagg;
+		struct {
+
+		} gpusort;
+	} u;
+#endif
+
+	/* below is the legacy perfmon stuff */
+
 	cl_uint		num_samples;
 	/*-- perfmon to load and materialize --*/
 	cl_double	time_inner_load;	/* time to load the inner relation */
@@ -218,6 +248,22 @@ typedef struct {
 		}														\
 	} while(0)
 
+#define PFMON_ADD_TIMEVAL(tv_sum,tv1,tv2)						\
+	do {														\
+		(tv_sum)->tv_sec += (tv2)->tv_sec - (tv1)->tv_sec;		\
+		if ((tv2)->tv_usec > (tv1)->tv_usec)					\
+			(tv_sum)->tv_usec += (tv2)->tv_usec - (tv1)->tv_usec;	\
+		else													\
+		{														\
+			(tv_sum)->tv_sec--;									\
+			(tv_sum)->tv_usec += 1000000 + (tv2)->tv_usec - (tv1)->tv_usec; \
+		}														\
+	} while(0)
+
+#define PFMON_TIMEVAL_AS_FLOAT(tval)			\
+	(((cl_double)(tval)->tv_sec) +				\
+	 ((cl_double)(tval)->tv_usec / 1000000.0))
+
 /*
  *
  *
@@ -241,6 +287,19 @@ typedef struct
 	ResourceOwner	resowner;		/* ResourceOwner owns this GpuContext */
 	MemoryContext	memcxt;			/* Memory context for host pinned mem */
 	cl_int		   *p_keep_freemem;	/* flag to control memory cache policy */
+	/*
+	 * Performance statistics
+	 */
+	cl_int		   *p_num_host_malloc;	/* # of cuMemAllocHost calls */
+	cl_int		   *p_num_host_mfree;	/* # of cuMemFreeHost calls */
+	struct timeval *p_tv_host_malloc;	/* total time for cuMemAllocHost */
+	struct timeval *p_tv_host_mfree;	/* total time for cuMemFreeHost */
+	cl_int			num_dev_malloc;
+	cl_int			num_dev_mfree;
+	struct timeval	tv_dev_malloc;
+	struct timeval	tv_dev_mfree;
+
+
 	dlist_head		pds_list;		/* list of pgstrom_data_store */
 	cl_int			num_context;	/* number of CUDA context */
 	cl_int			next_context;
@@ -396,7 +455,11 @@ HostPinMemContextCreate(MemoryContext parent,
 						CUcontext cuda_context,
                         Size block_size_init,
                         Size block_size_max,
-						cl_int **pp_keep_freemem);
+						cl_int **pp_keep_freemem,
+						cl_int **pp_num_host_malloc,
+						cl_int **pp_num_host_mfree,
+						struct timeval **pp_tv_host_malloc,
+						struct timeval **pp_tv_host_mfree);
 /*
  * cuda_control.c
  */
