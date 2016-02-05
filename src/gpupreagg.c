@@ -4867,7 +4867,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 		rc = cuLaunchKernel(gpreagg->kern_main,
 							1, 1, 1,
 							1, 1, 1,
-							0,
+							sizeof(kern_errorbuf),
 							gpreagg->task.cuda_stream,
 							kern_args,
 							NULL);

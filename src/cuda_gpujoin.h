@@ -91,17 +91,17 @@ typedef struct
 	/*
 	 * Performance statistics
 	 */
-	cl_uint			num_kern_outer_eval;
-	cl_uint			num_kern_nestloop;
-	cl_uint			num_kern_hashjoin;
-	cl_uint			num_kern_nestloop_outer;
-	cl_uint			num_kern_hashjoin_outer;
+	cl_uint			num_kern_outer_scan;
+	cl_uint			num_kern_exec_nestloop;
+	cl_uint			num_kern_exec_hashjoin;
+	cl_uint			num_kern_outer_nestloop;
+	cl_uint			num_kern_outer_hashjoin;
 	cl_uint			num_kern_projection;
-	cl_float		usec_kern_outer_eval;
-	cl_float		usec_kern_nestloop;
-	cl_float		usec_kern_hashjoin;
-	cl_float		usec_kern_nestloop_outer;
-	cl_float		usec_kern_hashjoin_outer;
+	cl_float		usec_kern_outer_scan;
+	cl_float		usec_kern_exec_nestloop;
+	cl_float		usec_kern_exec_hashjoin;
+	cl_float		usec_kern_outer_nestloop;
+	cl_float		usec_kern_outer_hashjoin;
 	cl_float		usec_kern_projection;
 	cl_uint			num_minor_retry;
 	cl_uint			num_major_retry;
@@ -466,29 +466,29 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 	 * Walks on the hash entries chain from the khitem
 	 */
 	do {
-		HeapTupleHeaderData *h_htup;
-
 		if (khitem && (khitem->hash  == hash_value &&
 					   khitem->rowid >= inner_base &&
 					   khitem->rowid <  inner_base + inner_size))
-			h_htup = &khitem->htup;
-		else
-			h_htup = NULL;
-
-		is_matched = gpujoin_join_quals(&kcxt,
-										kds,
-										kmrels,
-										depth,
-										x_buffer,	/* valid if in range */
-										h_htup);	/* valid if in range */
-		if (is_matched)
 		{
-			assert(khitem->rowid < kds_hash->nitems);
-			assert(lo_map == NULL);
-			if (lo_map && !lo_map[khitem->rowid])
-				lo_map[khitem->rowid] = true;
-			needs_outer_row = false;
+			HeapTupleHeaderData *h_htup = &khitem->htup;
+
+			is_matched = gpujoin_join_quals(&kcxt,
+											kds,
+											kmrels,
+											depth,
+											x_buffer,
+											h_htup);
+			if (is_matched)
+			{
+				assert(khitem->rowid < kds_hash->nitems);
+				assert(lo_map == NULL);
+				if (lo_map && !lo_map[khitem->rowid])
+					lo_map[khitem->rowid] = true;
+				needs_outer_row = false;
+			}
 		}
+		else
+			is_matched = false;
 
 		/* Expand kresults_dst->nitems */
 		offset = arithmetic_stairlike_add(is_matched ? 1 : 0, &count);
@@ -975,7 +975,7 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 	cl_char		   *extra_buf = NULL;
 #endif
 	cl_uint			extra_len;
-	char		   *vl_buf __attribute__((unused)) = NULL;
+	char		   *vl_buf	__attribute__ ((unused)) = NULL;
 	cl_uint			offset	__attribute__ ((unused));
 	cl_uint			count	__attribute__ ((unused));
 	__shared__ cl_uint base	__attribute__ ((unused));
@@ -1086,8 +1086,7 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 					tup_values[i] = devptr_to_host(kparams, addr);
 				}
 				else
-					STROM_SET_ERROR(&kcxt.e,
-									StromError_WrongCodeGeneration);
+					STROM_SET_ERROR(&kcxt.e, StromError_WrongCodeGeneration);
 			}
 		}
 	}
@@ -1106,7 +1105,8 @@ gpujoin_resize_inner_window(kern_gpujoin *kgjoin,
 							kern_multirels *kmrels,
 							kern_data_store *kds_src,
 							cl_int valid_until,
-							cl_int nsplits)
+							cl_uint flood_nitems,
+							cl_uint flood_nrooms)
 {
 	cl_uint		largest_delta = 0;
 	cl_uint		current_delta = 0;
@@ -1114,9 +1114,12 @@ gpujoin_resize_inner_window(kern_gpujoin *kgjoin,
 	cl_uint		curr_nitems;
 	cl_int		target_depth = -1;
 	cl_int		depth;
+	cl_int		nsplits = (flood_nitems / flood_nrooms) + 1;
 
 	assert(valid_until > 1 && valid_until <= kgjoin->num_rels);
-	assert(nsplits > 1);
+	if (nsplits < 2)
+		return -1;	/* it does not look like flooding */
+
 	last_nitems = kgjoin->jscale.source_matched;
 	for (depth = 1; depth <= valid_until; depth++)
 	{
@@ -1142,7 +1145,6 @@ gpujoin_resize_inner_window(kern_gpujoin *kgjoin,
 	kgjoin->jscale.r[target_depth - 1].inner_size /= nsplits;
 	if (kgjoin->jscale.r[target_depth - 1].inner_size < 1)
 		return -1;
-
 	/*
 	 * Informs the caller victim inner chunk. If it is the last depth,
 	 * we may not need to retry from the beginning, but from the last
@@ -1200,7 +1202,6 @@ gpujoin_main(kern_gpujoin *kgjoin,		/* in/out: misc stuffs */
 	cl_int				smx_clock;
 	cl_int				depth;
 	cl_int				victim;
-	cl_int				nsplits;
 	cl_ulong			tv1, tv2;
 	cudaError_t			status = cudaSuccess;
 
@@ -1219,8 +1220,8 @@ gpujoin_main(kern_gpujoin *kgjoin,		/* in/out: misc stuffs */
 	status = cudaGetDevice(&device);
 	if (status != cudaSuccess)
 	{
-		STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
-		return;
+		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+		goto out;
 	}
 	status = cudaDeviceGetAttribute(&smx_clock,
 									cudaDevAttrClockRate,
@@ -1228,8 +1229,8 @@ gpujoin_main(kern_gpujoin *kgjoin,		/* in/out: misc stuffs */
 	status = cudaGetDevice(&device);
 	if (status != cudaSuccess)
 	{
-		STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
-		return;
+		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+		goto out;
 	}
 
 retry_major:
@@ -1263,9 +1264,8 @@ retry_major:
 										   sizeof(void *) * 3);
 				if (!kern_args)
 				{
-					STROM_SET_ERROR(&kgjoin->kerror,
-									StromError_OutOfKernelArgs);
-					return;
+					STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelArgs);
+					goto out;
 				}
 				kern_args[0] = kgjoin;
 				kern_args[1] = kds_src;
@@ -1279,8 +1279,8 @@ retry_major:
 														sizeof(kern_errorbuf));
 				if (status != cudaSuccess)
 				{
-					STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
-					return;
+					STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+					goto out;
 				}
 
 				status = cudaLaunchDevice((void *)gpujoin_exec_outerscan,
@@ -1289,18 +1289,18 @@ retry_major:
 										  NULL);
 				if (status != cudaSuccess)
 				{
-					STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
-					return;
+					STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+					goto out;
 				}
 
 				status = cudaDeviceSynchronize();
 				if (status != cudaSuccess)
 				{
-					STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
-					return;
+					STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+					goto out;
 				}
 				tv2 = clock64();
-				TIMEVAL_RECORD(kgjoin,kern_outer_eval,tv1,tv2,smx_clock);
+				TIMEVAL_RECORD(kgjoin,kern_outer_scan,tv1,tv2,smx_clock);
 				if (kgjoin->kerror.errcode != StromError_Success)
 					return;
 				/* update run-time statistics */
@@ -1345,7 +1345,7 @@ retry_major:
 				if (!kern_join_args)
 				{
 					STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelArgs);
-					return;
+					goto out;
 				}
 				SETUP_KERN_JOIN_ARGS(kern_join_args);
 
@@ -1362,8 +1362,8 @@ retry_major:
 					sizeof(kern_errorbuf));
 				if (status != cudaSuccess)
 				{
-					STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
-					return;
+					STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+					goto out;
 				}
 
 				shmem_size = Max(sizeof(kern_errorbuf) * (block_sz.x *
@@ -1377,26 +1377,27 @@ retry_major:
 										  NULL);
 				if (status != cudaSuccess)
 				{
-					STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
-					return;
+					STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+					goto out;
 				}
 
 				status = cudaDeviceSynchronize();
 				if (status != cudaSuccess)
 				{
-					STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
-					return;
+					STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+					goto out;
 				}
 				tv2 = clock64();
-				TIMEVAL_RECORD(kgjoin,kern_nestloop_outer,tv1,tv2,smx_clock);
+				TIMEVAL_RECORD(kgjoin,kern_exec_nestloop,tv1,tv2,smx_clock);
+
 				if (kgjoin->kerror.errcode == StromError_DataStoreNoSpace)
 				{
-					nsplits = kresults_dst->nitems / kresults_dst->nrooms + 1;
 					victim = gpujoin_resize_inner_window(kgjoin,
 														 kmrels,
 														 kds_src,
 														 depth,
-														 nsplits);
+														 kresults_dst->nitems,
+														 kresults_dst->nrooms);
 					if (victim < 0)
 						return;
 					memset(&kgjoin->kerror, 0, sizeof(kern_errorbuf));
@@ -1441,7 +1442,7 @@ retry_major:
 				if (!kern_join_args)
 				{
 					STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelArgs);
-					return;
+					goto out;
 				}
 				SETUP_KERN_JOIN_ARGS(kern_join_args);
 
@@ -1453,8 +1454,8 @@ retry_major:
 														sizeof(kern_errorbuf));
 				if (status != cudaSuccess)
 				{
-					STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
-					return;
+					STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+					goto out;
 				}
 
 				status = cudaLaunchDevice((void *)gpujoin_exec_nestloop,
@@ -1464,27 +1465,27 @@ retry_major:
 										  NULL);
 				if (status != cudaSuccess)
 				{
-					STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
-					return;
+					STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+					goto out;
 				}
 
 				status = cudaDeviceSynchronize();
 				if (status != cudaSuccess)
 				{
-					STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
-					return;
+					STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+					goto out;
 				}
 				tv2 = clock64();
-				TIMEVAL_RECORD(kgjoin,kern_nestloop,tv1,tv2,smx_clock);
+				TIMEVAL_RECORD(kgjoin,kern_outer_nestloop,tv1,tv2,smx_clock);
 
 				if (kgjoin->kerror.errcode == StromError_DataStoreNoSpace)
 				{
-					nsplits = kresults_dst->nitems / kresults_dst->nrooms + 1;
 					victim = gpujoin_resize_inner_window(kgjoin,
 														 kmrels,
 														 kds_src,
 														 depth,
-														 nsplits);
+														 kresults_dst->nitems,
+														 kresults_dst->nrooms);
 					if (victim < 0)
 						return;
 					memset(&kgjoin->kerror, 0, sizeof(kern_errorbuf));
@@ -1526,7 +1527,7 @@ retry_major:
 				if (!kern_join_args)
 				{
 					STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelArgs);
-					return;
+					goto out;
 				}
 				SETUP_KERN_JOIN_ARGS(kern_join_args);
 
@@ -1538,8 +1539,8 @@ retry_major:
 														sizeof(kern_errorbuf));
 				if (status != cudaSuccess)
 				{
-					STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
-					return;
+					STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+					goto out;
 				}
 
 				status = cudaLaunchDevice((void *)gpujoin_exec_hashjoin,
@@ -1549,30 +1550,30 @@ retry_major:
 										  NULL);
 				if (status != cudaSuccess)
 				{
-					STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
-					return;
+					STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+					goto out;
 				}
 
 				status = cudaDeviceSynchronize();
 				if (status != cudaSuccess)
 				{
-					STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
-					return;
+					STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+					goto out;
 				}
 				tv2 = clock64();
-				TIMEVAL_RECORD(kgjoin,kern_nestloop_outer,tv1,tv2,smx_clock);
+				TIMEVAL_RECORD(kgjoin,kern_exec_hashjoin,tv1,tv2,smx_clock);
 
 				if (kgjoin->kerror.errcode == StromError_DataStoreNoSpace)
 				{
-					memset(&kgjoin->kerror, 0, sizeof(kern_errorbuf));
-					nsplits = kresults_dst->nitems / kresults_dst->nrooms + 1;
 					victim = gpujoin_resize_inner_window(kgjoin,
 														 kmrels,
 														 kds_src,
 														 depth,
-														 nsplits);
+														 kresults_dst->nitems,
+														 kresults_dst->nrooms);
 					if (victim < 0)
 						return;
+					memset(&kgjoin->kerror, 0, sizeof(kern_errorbuf));
 					if (victim < depth)
 					{
 						kgjoin->num_major_retry++;
@@ -1610,7 +1611,7 @@ retry_major:
 				if (!kern_join_args)
 				{
 					STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelArgs);
-					return;
+					goto out;
 				}
 				SETUP_KERN_JOIN_ARGS(kern_join_args);
 
@@ -1622,8 +1623,8 @@ retry_major:
 														sizeof(kern_errorbuf));
 				if (status != cudaSuccess)
 				{
-					STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
-					return;
+					STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+					goto out;
 				}
 
 				status = cudaLaunchDevice((void *)gpujoin_outer_hashjoin,
@@ -1633,27 +1634,27 @@ retry_major:
 										  NULL);
 				if (status != cudaSuccess)
 				{
-					STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
-					return;
+					STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+					goto out;
 				}
 
 				status = cudaDeviceSynchronize();
 				if (status != cudaSuccess)
 				{
-					STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
-					return;
+					STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+					goto out;
 				}
 				tv2 = clock64();
-				TIMEVAL_RECORD(kgjoin,kern_hashjoin_outer,tv1,tv2,smx_clock);
+				TIMEVAL_RECORD(kgjoin,kern_outer_hashjoin,tv1,tv2,smx_clock);
 
 				if (kgjoin->kerror.errcode == StromError_DataStoreNoSpace)
 				{
-					nsplits = kresults_dst->nitems / kresults_dst->nrooms + 1;
 					victim = gpujoin_resize_inner_window(kgjoin,
 														 kmrels,
 														 kds_src,
 														 depth,
-														 nsplits);
+														 kresults_dst->nitems,
+														 kresults_dst->nrooms);
 					if (victim < 0)
 						return;
 					memset(&kgjoin->kerror, 0, sizeof(kern_errorbuf));
@@ -1698,27 +1699,31 @@ retry_major:
 	/*
 	 * Setup kds_dst according to the final kern_resultbuf
 	 */
-	kds_dst->nitems = kresults_src->nitems;
-	if (kds_dst->nitems >= kds_dst->nrooms)
+	if (kresults_src->nitems >= kds_dst->nrooms)
 	{
-		nsplits = kresults_src->nitems / kds_dst->nrooms + 1;
 		victim = gpujoin_resize_inner_window(kgjoin,
 											 kmrels,
 											 kds_src,
 											 kgjoin->num_rels,
-											 nsplits);
+											 kresults_src->nitems,
+											 kds_dst->nrooms);
 		if (victim < 0)
-			return;
+		{
+			STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
+			goto out;
+		}
 		memset(&kgjoin->kerror, 0, sizeof(kern_errorbuf));
 		kgjoin->num_major_retry++;
 		goto retry_major;
 	}
+	kds_dst->nitems = kresults_src->nitems;
+
 	kern_args = (void **)cudaGetParameterBuffer(sizeof(void *),
 												sizeof(void *) * 5);
 	if (!kern_args)
 	{
 		STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelArgs);
-		return;
+		goto out;
 	}
 	kern_args[0] = kgjoin;
 	kern_args[1] = kmrels;
@@ -1733,8 +1738,8 @@ retry_major:
 											sizeof(kern_errorbuf));
 	if (status != cudaSuccess)
 	{
-		STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
-		return;
+		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+		goto out;
 	}
 
 	status = cudaLaunchDevice((void *)kernel_projection,
@@ -1743,15 +1748,15 @@ retry_major:
 							  NULL);
 	if (status != cudaSuccess)
 	{
-		STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
-		return;
+		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+		goto out;
 	}
 
 	status = cudaDeviceSynchronize();
 	if (status != cudaSuccess)
 	{
-		STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
-		return;
+		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+		goto out;
 	}
 	tv2 = clock64();
 	TIMEVAL_RECORD(kgjoin,kern_projection,tv1,tv2,smx_clock);
@@ -1762,9 +1767,8 @@ retry_major:
 		cl_uint		nitems_to_fit;
 		cl_uint		width_avg;
 
-		/* should never happen probably */
 		if (kds_dst->nitems == 0)
-			return;
+			return;		/* should never happen */
 		if (kds_dst->format == KDS_FORMAT_SLOT)
 		{
 			width_avg = (LONGALIGN((sizeof(Datum) +
@@ -1774,7 +1778,6 @@ retry_major:
 			nitems_to_fit = (kds_dst->length -
 							 STROMALIGN(offsetof(kern_data_store,
 												 colmeta[ncols]))) / width_avg;
-			nsplits = kds_dst->nitems / nitems_to_fit + 1;
 		}
 		else
 		{
@@ -1783,24 +1786,25 @@ retry_major:
 			nitems_to_fit = (kds_dst->length -
 							 STROMALIGN(offsetof(kern_data_store,
 												 colmeta[ncols]))) / width_avg;
-			nsplits = kds_dst->nitems / nitems_to_fit + 1;
 		}
-		if (nsplits < 2)
-			return;	/* should never happen */
-
-		gpujoin_resize_inner_window(kgjoin,
-									kmrels,
-									kds_src,
-									kgjoin->num_rels,
-									nsplits);
+		if (gpujoin_resize_inner_window(kgjoin,
+										kmrels,
+										kds_src,
+										kgjoin->num_rels,
+										kds_dst->nitems,
+										nitems_to_fit) < 0)
+			return;
 		memset(&kgjoin->kerror, 0, sizeof(kern_errorbuf));
 		kgjoin->num_major_retry++;
 		goto retry_major;
 	}
 
 	/*
-	 * TODO: If kds_dst still has space, do major_retry if we can shift inner_base
+	 * TODO: If kds_dst still has space, do major_retry if we can shift
+	 * inner_base
 	 */
+out:
+	kern_writeback_error_status(&kgjoin->kerror, kcxt.e);
 }
 
 #endif	/* __CUDACC__ */

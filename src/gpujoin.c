@@ -3848,7 +3848,7 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs,
 			cl_int	nsplit = length / pgstrom_chunk_size_limit() + 1;
 
 			Assert(target_depth > 0 && target_depth <= gjs->num_rels);
-			pgjoin->kern.jscale.r[target_depth - 1].inner_size /= nsplit;
+			pgjoin->kern.jscale.r[target_depth - 1].inner_size /= nsplit + 1;
 			if (pgjoin->kern.jscale.r[target_depth - 1].inner_size < 1)
 				elog(ERROR, "Too much growth of result rows");
 			return NULL;
@@ -3912,7 +3912,7 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs,
 				   MAXALIGN(offsetof(kern_tupitem, htup) +
 							ceill(tup_width)));
 			nsplit = nrooms / small_nrooms + 1;
-			pgjoin->kern.jscale.r[target_depth - 1].inner_size /= nsplit;
+			pgjoin->kern.jscale.r[target_depth - 1].inner_size /= nsplit + 1;
 			if (pgjoin->kern.jscale.r[target_depth - 1].inner_size < 1)
 				elog(ERROR, "Too much growth of result rows");
 			return NULL;
@@ -3993,10 +3993,14 @@ gpujoin_create_task(GpuJoinState *gjs,
 			 * (or rewinded to 0 if needed) at gpujoin_task_complete(). 
 			 * So, it shall be set on the next inner_base.
 			 */
-			Assert(jscale->r[i].inner_base +
-				   jscale->r[i].inner_size <= pds_in->kds->nitems);
+			Assert(jscale_old->r[i].inner_base <= pds_in->kds->nitems);
 			jscale->r[i].inner_base = jscale_old->r[i].inner_base;
 			jscale->r[i].inner_size = jscale_old->r[i].inner_size;
+			if (jscale->r[i].inner_base +
+				jscale->r[i].inner_size > pds_in->kds->nitems)
+				jscale->r[i].inner_size = (pds_in->kds->nitems -
+										   jscale->r[i].inner_base);
+
 		}
 	}
 
@@ -4100,6 +4104,7 @@ major_retry:
 	pgjoin->kern.start_depth = (!pgjoin->pds_src
 								? gjs->outer_join_start_depth
 								: 1);
+	pgjoin->kern.jscale.kds_dst_length = pgjoin->pds_dst->kds->length;
 	pgjoin->inner_ratio = inner_ratio;
 
 	/*
@@ -4253,8 +4258,8 @@ gpujoin_next_tuple(GpuTaskState *gts)
 {
 	GpuJoinState	   *gjs = (GpuJoinState *) gts;
 	TupleTableSlot	   *slot = gjs->gts.css.ss.ss_ScanTupleSlot;
-	pgstrom_gpujoin	   *gjoin = (pgstrom_gpujoin *)gjs->gts.curr_task;
-	pgstrom_data_store *pds_dst = gjoin->pds_dst;
+	pgstrom_gpujoin	   *pgjoin = (pgstrom_gpujoin *)gjs->gts.curr_task;
+	pgstrom_data_store *pds_dst = pgjoin->pds_dst;
 	kern_data_store	   *kds_dst = pds_dst->kds;
 	struct timeval		tv1, tv2;
 
@@ -4274,6 +4279,7 @@ gpujoin_next_tuple(GpuTaskState *gts)
 		 * NOTE: host-only qualifiers are checked during ExecScan(),
 		 * so we don't check it here by itself.
 		 */
+		(void) ExecMaterializeSlot(slot);
 	}
 	else
 		slot = NULL;	/* try next chunk */
@@ -4374,12 +4380,8 @@ gpujoin_task_complete(GpuTask *gtask)
 
 		for (i = 0; i < gjs->num_rels; i++)
 		{
-			gjs->inner_nitems[i] +=
-				(Size)(pgjoin->inner_ratio * (double)
-					   pgjoin->kern.jscale.r[i].inner_nitems);
-			gjs->total_nitems[i] +=
-				(Size)(pgjoin->inner_ratio * (double)
-					   pgjoin->kern.jscale.r[i].total_nitems);
+			gjs->inner_nitems[i] += pgjoin->kern.jscale.r[i].inner_nitems;
+			gjs->total_nitems[i] += pgjoin->kern.jscale.r[i].total_nitems;
 		}
 		Assert(gjs->results_nitems == gjs->total_nitems[gjs->num_rels - 1]);
 
@@ -4399,11 +4401,12 @@ gpujoin_task_complete(GpuTask *gtask)
 			jscale->r[i].inner_base += jscale->r[i].inner_size;
 			if (jscale->r[i].inner_base < pds_in->kds->nitems)
 			{
-				while (++i <= gjs->num_rels)
+				while (++i < gjs->num_rels)
 					jscale->r[i].inner_base = 0;
 				break;
 			}
-			Assert(jscale->r[i].inner_base == pds_in->kds->nitems);
+			else if (jscale->r[i].inner_base > pds_in->kds->nitems)
+				jscale->r[i].inner_base = pds_in->kds->nitems;
 		}
 
 		if (i >= 0)
@@ -4642,7 +4645,7 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 	rc = cuLaunchKernel(pgjoin->kern_main,
 						1, 1, 1,
 						1, 1, 1,
-						0,
+						sizeof(kern_errorbuf),
 						pgjoin->task.cuda_stream,
 						kern_args,
 						NULL);

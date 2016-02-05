@@ -2013,11 +2013,7 @@ final_retry:
 	 * segments. So, we have no chance to launch this kernel by GPU.
 	 */
 out:
-	/*
-	 * This kernel shall be launched with GridSz=(1,1,1), BlockSz=(1,1,1)
-	 * So, we don't need to care about concurrent threads.
-	 */
-	kgpreagg->kerror = kcxt.e;
+	kern_writeback_error_status(&kgpreagg->kerror, kcxt.e);
 }
 
 /* ----------------------------------------------------------------
