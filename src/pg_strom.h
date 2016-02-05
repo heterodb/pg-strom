@@ -103,7 +103,9 @@ typedef struct {
 	cl_double		tv_host_mfree;
 	cl_double		tv_dev_malloc;
 	cl_double		tv_dev_mfree;
-
+	/*-- build cuda program --*/
+	struct timeval	tv_build_start;
+	struct timeval	tv_build_end;
 #if 0
 	union {
 		struct {
@@ -247,6 +249,10 @@ typedef struct {
 			((GpuTask *)(node))->pfm.pfm_field += __elapsed;	\
 		}														\
 	} while(0)
+
+#define PFMON_TIMEVAL_DIFF(tv1,tv2)								\
+	((cl_double)(((tv2)->tv_sec * 1000000 + (tv2)->tv_usec) -	\
+				 ((tv1)->tv_sec * 1000000 + (tv1)->tv_usec)) / 1000000.0)
 
 #define PFMON_ADD_TIMEVAL(tv_sum,tv1,tv2)						\
 	do {														\

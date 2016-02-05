@@ -1061,6 +1061,19 @@ pgstrom_explain_perfmon(GpuTaskState *gts, ExplainState *es)
 								 tv_dev_mfree, 3, es);
 		}
 	}
+
+	/*
+	 * Time to build CUDA program
+	 */
+	if (pfm->tv_build_start.tv_sec < pfm->tv_build_end.tv_sec ||
+		(pfm->tv_build_start.tv_sec == pfm->tv_build_end.tv_sec &&
+		 pfm->tv_build_start.tv_usec < pfm->tv_build_end.tv_usec))
+	{
+		cl_double	tv_code_build = PFMON_TIMEVAL_DIFF(&pfm->tv_build_start,
+													   &pfm->tv_build_end);
+		snprintf(buf, sizeof(buf), "%.3fs", tv_code_build);
+		ExplainPropertyText("CUDA Program Build", buf, es);
+	}
 }
 
 /*

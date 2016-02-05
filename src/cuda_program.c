@@ -40,19 +40,20 @@
 
 typedef struct
 {
-	dlist_node	hash_chain;
-	dlist_node	lru_chain;
-	int			shift;	/* block class of this entry */
-	int			refcnt;	/* 0 means free entry */
-	pg_crc32	crc;	/* hash value by extra_flags + kern_source */
-	Bitmapset  *waiting_backends;
-	int			extra_flags;
-	char	   *kern_define;
-	char	   *kern_source;
-	char	   *bin_image;
-	size_t		bin_length;
-	char	   *error_msg;
-	char		data[FLEXIBLE_ARRAY_MEMBER];
+	dlist_node		hash_chain;
+	dlist_node		lru_chain;
+	int				shift;	/* block class of this entry */
+	int				refcnt;	/* 0 means free entry */
+	pg_crc32		crc;	/* hash value by extra_flags + kern_source */
+	struct timeval	tv_build_end;	/* timestamp when build end */
+	Bitmapset	   *waiting_backends;
+	int				extra_flags;
+	char		   *kern_define;
+	char		   *kern_source;
+	char		   *bin_image;
+	size_t			bin_length;
+	char		   *error_msg;
+	char			data[FLEXIBLE_ARRAY_MEMBER];
 } program_cache_entry;
 
 #define PGCACHE_ACTIVE_ENTRY(entry)				\
@@ -804,6 +805,10 @@ __build_cuda_program(program_cache_entry *old_entry)
 				 "build: %s\n%s",
 				 !bin_image ? "failed" : "success",
 				 build_log);
+
+	/* record timestamp of the build end */
+	gettimeofday(&new_entry->tv_build_end, NULL);
+
 	/*
 	 * Add new_entry to the hash slot
 	 */
@@ -889,6 +894,10 @@ __pgstrom_load_cuda_program(GpuTaskState *gts, bool is_preload)
 	int				i, num_context;
 	BackgroundWorker worker;
 
+	/* save the timestamp of the first touch */
+	if (gts->pfm_accum.tv_build_start.tv_sec == 0)
+		gettimeofday(&gts->pfm_accum.tv_build_start, NULL);
+
 	/* makes a hash value */
 	INIT_LEGACY_CRC32(crc);
 	COMP_LEGACY_CRC32(crc, &extra_flags, sizeof(int32));
@@ -973,6 +982,10 @@ retry:
 				PG_RE_THROW();
 			}
 			PG_END_TRY();
+			/* get timestamp of the program build */
+			if (gts->pfm_accum.tv_build_end.tv_sec == 0)
+				gts->pfm_accum.tv_build_end = entry->tv_build_end;
+
 			pgstrom_put_cuda_program(entry);
 			return true;
 		}
