@@ -352,9 +352,8 @@ static char *gpujoin_codegen(PlannerInfo *root,
 static void gpujoin_inner_unload(GpuJoinState *gjs, bool needs_rescan);
 static pgstrom_multirels *gpujoin_inner_getnext(GpuJoinState *gjs);
 static pgstrom_multirels *multirels_attach_buffer(pgstrom_multirels *pmrels);
-static bool multirels_get_buffer(pgstrom_multirels *pmrels, GpuTask *gtask,
-								 CUdeviceptr *p_kmrels,
-								 CUdeviceptr *p_ojmaps);
+static bool multirels_get_buffer(pgstrom_multirels *pmrels,
+								 pgstrom_gpujoin *pgjoin);
 static void multirels_put_buffer(pgstrom_multirels *pmrels, GpuTask *gtask);
 static void multirels_send_buffer(pgstrom_multirels *pmrels, GpuTask *gtask);
 static void multirels_colocate_outer_join_maps(pgstrom_multirels *pmrels,
@@ -4103,6 +4102,30 @@ major_retry:
 								: 1);
 	pgjoin->inner_ratio = inner_ratio;
 
+	/*
+	 * Attach the inner multi-relations buffer, if here is at least one
+	 * active one; that already has device memory and no need to kick
+	 * inner DMA again.
+	 * gpujoin_task_complete() unreference the device memory soon, if no
+	 * other task acquired the segment. So, getting the buffer here, prior
+	 * to the launch of task, enables to reduce number of inner DMA.
+	 *
+	 * One other side-effect is, it becomes to tend to use a particular GPU
+	 * device, rather than the round robin assignment. However, round-robin
+	 * GPU assignment within a process will not make sense no longer, because
+	 * PostgreSQL v9.6 support CustomScan under the Gather node, for CPU level
+	 * parallelism. So, even if a particular process sticks on a particular
+	 * GPU, it shall be distributed to the multiple GPUs in CPU level.
+	 */
+	for (i=0; i < gcontext->num_context; i++)
+	{
+		if (pmrels->refcnt[i] > 0)
+		{
+			pgjoin->task.cuda_index = i;
+			multirels_get_buffer(pmrels, pgjoin);
+			break;
+		}
+	}
 	return &pgjoin->task;
 }
 
@@ -4326,7 +4349,6 @@ gpujoin_task_complete(GpuTask *gtask)
 						   ev_dma_recv_stop);
 		pgstrom_accum_perfmon(&gjs->gts.pfm_accum, &pgjoin->task.pfm);
 	}
-	gpujoin_cleanup_cuda_resources(pgjoin);
 
 	if (pgjoin->task.kerror.errcode == StromError_Success)
 	{
@@ -4408,15 +4430,24 @@ gpujoin_task_complete(GpuTask *gtask)
 			gjs->gts.num_pending_tasks++;
 			SpinLockRelease(&gjs->gts.lock);
 		}
-		/*
-		 * NOTE: We have to detach inner chunks here, because it may kick
-		 * OUTER JOIN task if this context is the last holder of inner
-		 * buffer.
-		 */
-		Assert(pgjoin->pmrels != NULL);
-		multirels_detach_buffer(pgjoin->pmrels, true, __FUNCTION__);
-		pgjoin->pmrels = NULL;
 	}
+
+	/*
+	 * Release device memory and event objects acquired by the task.
+	 * For the better reuse of the inner multirels buffer, it has to
+	 * be after the above re-enqueue in case of retry.
+	 */
+	gpujoin_cleanup_cuda_resources(pgjoin);
+
+	/*
+	 * NOTE: We have to detach inner chunks here, because it may kick
+	 * OUTER JOIN task if this context is the last holder of inner
+	 * buffer.
+	 */
+	Assert(pgjoin->pmrels != NULL);
+	multirels_detach_buffer(pgjoin->pmrels, true, __FUNCTION__);
+	pgjoin->pmrels = NULL;
+
 	return true;
 }
 
@@ -4673,9 +4704,8 @@ gpujoin_task_process(GpuTask *gtask)
 		elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
 	PG_TRY();
 	{
-		if (multirels_get_buffer(pgjoin->pmrels, &pgjoin->task,
-								 &pgjoin->m_kmrels,
-								 &pgjoin->m_ojmaps))
+		if (pgjoin->m_kmrels != 0UL ||
+			multirels_get_buffer(pgjoin->pmrels, pgjoin))
 			status = __gpujoin_task_process(pgjoin);
 		else
 			status = false;
@@ -5535,14 +5565,12 @@ multirels_attach_buffer(pgstrom_multirels *pmrels)
 
 /*****/
 static bool
-multirels_get_buffer(pgstrom_multirels *pmrels, GpuTask *gtask,
-					 CUdeviceptr *p_kmrels,		/* inner relations */
-					 CUdeviceptr *p_ojmaps)		/* left-outer map */
+multirels_get_buffer(pgstrom_multirels *pmrels, pgstrom_gpujoin *pgjoin)
 {
-	cl_int		cuda_index = gtask->cuda_index;
+	cl_int		cuda_index = pgjoin->task.cuda_index;
 	CUresult	rc;
 
-	Assert(&pmrels->gjs->gts == gtask->gts);
+	Assert(&pmrels->gjs->gts == pgjoin->task.gts);
 
 	if (pmrels->refcnt[cuda_index] == 0)
 	{
@@ -5550,16 +5578,16 @@ multirels_get_buffer(pgstrom_multirels *pmrels, GpuTask *gtask,
 		CUdeviceptr	m_ojmaps = 0UL;
 
 		/* buffer for the inner multi-relations */
-		m_kmrels = gpuMemAlloc(gtask, pmrels->usage_length);
+		m_kmrels = gpuMemAlloc(&pgjoin->task, pmrels->usage_length);
 		if (!m_kmrels)
 			return false;
 
 		if (pmrels->ojmap_length > 0 && !pmrels->m_ojmaps[cuda_index])
 		{
-			m_ojmaps = gpuMemAlloc(gtask, pmrels->ojmap_length);
+			m_ojmaps = gpuMemAlloc(&pgjoin->task, pmrels->ojmap_length);
 			if (!m_ojmaps)
 			{
-				gpuMemFree(gtask, m_kmrels);
+				gpuMemFree(&pgjoin->task, m_kmrels);
 				return false;
 			}
 			/*
@@ -5577,8 +5605,8 @@ multirels_get_buffer(pgstrom_multirels *pmrels, GpuTask *gtask,
 	}
 
 	pmrels->refcnt[cuda_index]++;
-	*p_kmrels = pmrels->m_kmrels[cuda_index];
-	*p_ojmaps = pmrels->m_ojmaps[cuda_index];
+	pgjoin->m_kmrels = pmrels->m_kmrels[cuda_index];
+	pgjoin->m_ojmaps = pmrels->m_ojmaps[cuda_index];
 
 	return true;
 }
