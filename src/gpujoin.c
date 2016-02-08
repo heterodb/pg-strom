@@ -282,7 +282,6 @@ typedef struct
 	int				num_rels;
 	size_t			source_ntasks;	/* number of sampled tasks */
 	size_t			source_nitems;	/* number of sampled source items */
-	size_t			source_matched;	/* number of matched source items */
 	size_t			results_nitems;	/* number of joined result items */
 	size_t			results_usage;	/* sum of kds_dst->usage */
 	size_t		   *inner_nitems;	/* number of inner join results items */
@@ -336,7 +335,7 @@ typedef struct
 	pgstrom_multirels  *pmrels;		/* inner multi relations (heap or hash) */
 	pgstrom_data_store *pds_src;	/* data store of outer relation */
 	pgstrom_data_store *pds_dst;	/* data store of result buffer */
-	double			inner_ratio;	/* portion of the inner window square */
+	double			window_ratio;	/* percentage of partition window square */
 	kern_gpujoin	kern;			/* kern_gpujoin of this request */
 } pgstrom_gpujoin;
 
@@ -561,7 +560,7 @@ retry_major:
 						(double)(num_chunks * curr_nloops_minor));
 		num_items = (Size)((double)(i+2) * join_ntuples *
 						   pgstrom_chunk_size_margin);
-		buffer_size = offsetof(kern_gpujoin, jscale.r[num_rels])
+		buffer_size = offsetof(kern_gpujoin, jscale[num_rels + 1])
 			+ BLCKSZ	/* alternative of kern_parambuf */
 			+ STROMALIGN(offsetof(kern_resultbuf, results[num_items]))
 			+ STROMALIGN(offsetof(kern_resultbuf, results[num_items]));
@@ -2508,8 +2507,8 @@ gpujoin_create_scan_state(CustomScan *node)
 
 	Assert(num_rels == list_length(node->custom_plans));
 	gjs = palloc0(offsetof(GpuJoinState, inners[num_rels]) +
-				  sizeof(size_t) * num_rels +
-				  sizeof(size_t) * num_rels);
+				  sizeof(size_t) * (num_rels + 1) +
+				  sizeof(size_t) * (num_rels + 1));
 
 	/* Set tag and executor callbacks */
 	NodeSetTag(gjs, T_CustomScanState);
@@ -2517,7 +2516,7 @@ gpujoin_create_scan_state(CustomScan *node)
 	gjs->gts.css.methods = &gpujoin_exec_methods;
 	gjs->inner_nitems = (size_t *)((char *)gjs + offsetof(GpuJoinState,
 														  inners[num_rels]));
-	gjs->total_nitems = (size_t *)(gjs->inner_nitems + num_rels);
+	gjs->total_nitems = (size_t *)(gjs->inner_nitems + num_rels + 1);
 
 	return (Node *) gjs;
 }
@@ -2869,7 +2868,7 @@ gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 		if (es->analyze)
 			temp = psprintf("%s (%.2f%%, expected %.2f%%)",
 							temp,
-							100.0 * ((double) gjs->source_matched /
+							100.0 * ((double) gjs->total_nitems[0] /
 									 (double) gjs->source_nitems),
 							100.0 * gj_info->outer_ratio);
 		else
@@ -2922,10 +2921,8 @@ gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 		if (es->analyze)
 		{
 			innerState *istate = &gjs->inners[depth-1];
-			size_t		nrows_in = (depth > 1
-									? gjs->total_nitems[depth-2]
-									: gjs->source_matched);
-			size_t		nrows_out = gjs->total_nitems[depth-1];
+			size_t		nrows_in = gjs->total_nitems[depth - 1];
+			size_t		nrows_out = gjs->total_nitems[depth];
 			cl_float	nrows_ratio
 				= int_as_float(list_nth_int(gj_info->nrows_ratio, depth - 1));
 
@@ -3637,7 +3634,7 @@ gpujoin_exec_estimate_nitems(GpuJoinState *gjs,
 			 * In case of task re-enqueue with inner window shift,
 			 * last execution result is the most reliable information.
 			 */
-			ntuples_next = (double) jscale_old->source_matched;
+			ntuples_next = (double) jscale_old[0].total_nitems;
 		}
 		else if (!gjs->outer_quals)
 		{
@@ -3657,7 +3654,7 @@ gpujoin_exec_estimate_nitems(GpuJoinState *gjs,
 			 * plan estimation and run-time statistics using weighted average.
 			 */
 			plan_ratio = gjs->outer_ratio;
-			exec_ratio = ((double) gjs->source_matched /
+			exec_ratio = ((double) gjs->total_nitems[0] /
 						  (double) gjs->source_nitems);
 			ntuples_next = ((exec_ratio * merge_ratio +
 							 plan_ratio * (1.0 - merge_ratio)) *
@@ -3669,7 +3666,7 @@ gpujoin_exec_estimate_nitems(GpuJoinState *gjs,
 			 * Progress of the outer scan already exceeded to the threshold
 			 * where we rely on the run-time statistics entirely.
 			 */
-			exec_ratio = ((double) gjs->source_matched /
+			exec_ratio = ((double) gjs->total_nitems[0] /
 						  (double) gjs->source_nitems);
 			ntuples_next = exec_ratio * (double) pds_src->kds->nitems;
 		}
@@ -3678,18 +3675,13 @@ gpujoin_exec_estimate_nitems(GpuJoinState *gjs,
 	{
 		pgstrom_data_store *pds_in = pmrels->inner_chunks[depth - 1];
 		innerState		   *istate = &gjs->inners[depth - 1];
-		kern_join_scale	   *jscale = &pgjoin->kern.jscale;
-		size_t				source_nitems;
-		double				inner_ratio;
+		kern_join_scale	   *jscale = pgjoin->kern.jscale;
+		size_t				source_nitems = gjs->total_nitems[depth - 1];
+		double				window_ratio;
 
-		source_nitems = (depth == 1
-						 ? gjs->source_matched
-						 : gjs->total_nitems[depth - 2]);
-
-		inner_ratio = ((double) jscale->r[depth-1].inner_size /
-					   (double) pds_in->kds->nitems);
-
-		if (!pgjoin->pds_src && gjs->outer_join_start_depth)
+		window_ratio = ((double) jscale[depth].window_size /
+						(double) pds_in->kds->nitems);
+		if (!pgjoin->pds_src && depth <= gjs->outer_join_start_depth)
 		{
 			/*
 			 * obviously, first depth of the outer join neve produce
@@ -3700,12 +3692,12 @@ gpujoin_exec_estimate_nitems(GpuJoinState *gjs,
 		else if (jscale_old)
 		{
 			/*
-			 * In case of task re-enqueue with inner window shift,
-			 * last execution result is the most reliable hint.
+			 * In case of task re-enqueue with virtual partition window
+			 * shift, last execution result is the most reliable hint.
 			 */
-			ntuples_next = ((double) jscale->r[depth-1].inner_size /
-							(double) jscale_old->r[depth-1].inner_size) *
-				(double) jscale_old->r[depth-1].inner_nitems;
+			ntuples_next = (((double) jscale[depth].window_size /
+							 (double) jscale_old[depth].window_size) *
+							(double) jscale_old[depth].inner_nitems);
 		}
 		else if (source_nitems == 0)
 		{
@@ -3716,7 +3708,7 @@ gpujoin_exec_estimate_nitems(GpuJoinState *gjs,
 			 * input - thus outer join produced all the results.
 			 */
 			if (merge_ratio < 1.0)
-				ntuples_next = istate->nrows_ratio * inner_ratio * ntuples_in;
+				ntuples_next = istate->nrows_ratio * window_ratio * ntuples_in;
 			else
 				ntuples_next = 0.0;
 		}
@@ -3727,14 +3719,14 @@ gpujoin_exec_estimate_nitems(GpuJoinState *gjs,
 						  (double) source_nitems);
 			ntuples_next = ((exec_ratio * merge_ratio +
 							 plan_ratio * (1.0 - merge_ratio)) *
-							inner_ratio * ntuples_in);
+							window_ratio * ntuples_in);
 		}
 		else
 		{
 			/* We entirely rely on the run-time statistics */
-			exec_ratio = ((double) gjs->inner_nitems[depth-1] /
+			exec_ratio = ((double) gjs->inner_nitems[depth] /
 						  (double)(source_nitems));
-			ntuples_next = exec_ratio * inner_ratio * ntuples_in;
+			ntuples_next = exec_ratio * window_ratio * ntuples_in;
 		}
 
 		/*
@@ -3753,10 +3745,10 @@ gpujoin_exec_estimate_nitems(GpuJoinState *gjs,
 				 * In case of task re-enqueue with inner window shift,
 				 * last execution result is the most reliable hint.
 				 */
-				ntuples_next += ((double) jscale->r[depth-1].inner_size /
-								 (double) jscale_old->r[depth-1].inner_size) *
-					(double)(jscale_old->r[depth-1].total_nitems -
-							 jscale_old->r[depth-1].inner_nitems);
+				ntuples_next += ((double) jscale[depth].window_size /
+								 (double) jscale_old[depth].window_size) *
+					(double)(jscale_old[depth].total_nitems -
+							 jscale_old[depth].inner_nitems);
 			}
 			else
 			{
@@ -3767,11 +3759,11 @@ gpujoin_exec_estimate_nitems(GpuJoinState *gjs,
 				 * XXX - We need exec statistics by outer_join_map
 				 */
 				double match_ratio
-					= sqrt((double) gjs->total_nitems[depth-1] /
+					= sqrt((double) gjs->total_nitems[depth] /
 						   (double) pds_in->kds->nitems);
 				match_ratio = 1.0 - Min(1.0, match_ratio);
 				match_ratio = Max(0.05, match_ratio);	/* at least 5% */
-				ntuples_next += match_ratio * jscale->r[depth-1].inner_size;
+				ntuples_next += match_ratio * jscale[depth].window_size;
 			}
 		}
 	}
@@ -3848,8 +3840,9 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs,
 			cl_int	nsplit = length / pgstrom_chunk_size_limit() + 1;
 
 			Assert(target_depth > 0 && target_depth <= gjs->num_rels);
-			pgjoin->kern.jscale.r[target_depth - 1].inner_size /= nsplit + 1;
-			if (pgjoin->kern.jscale.r[target_depth - 1].inner_size < 1)
+			pgjoin->kern.jscale[target_depth].window_size
+				= (pgjoin->kern.jscale[target_depth].window_size / nsplit) + 1;
+			if (pgjoin->kern.jscale[target_depth].window_size <= 1)
 				elog(ERROR, "Too much growth of result rows");
 			return NULL;
 		}
@@ -3912,8 +3905,9 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs,
 				   MAXALIGN(offsetof(kern_tupitem, htup) +
 							ceill(tup_width)));
 			nsplit = nrooms / small_nrooms + 1;
-			pgjoin->kern.jscale.r[target_depth - 1].inner_size /= nsplit + 1;
-			if (pgjoin->kern.jscale.r[target_depth - 1].inner_size < 1)
+			pgjoin->kern.jscale[target_depth].window_size
+				= pgjoin->kern.jscale[target_depth].window_size / nsplit + 1;
+			if (pgjoin->kern.jscale[target_depth].window_size <= 1)
 				elog(ERROR, "Too much growth of result rows");
 			return NULL;
 		}
@@ -3927,10 +3921,12 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs,
 
 
 
-
-
-
-
+/*
+ * gpujoin_create_task
+ *
+ *
+ *
+ */
 static GpuTask *
 gpujoin_create_task(GpuJoinState *gjs,
 					pgstrom_multirels *pmrels,
@@ -3939,7 +3935,7 @@ gpujoin_create_task(GpuJoinState *gjs,
 {
 	GpuContext		   *gcontext = gjs->gts.gcontext;
 	pgstrom_gpujoin	   *pgjoin;
-	double				inner_ratio = 1.0;
+	double				window_ratio = 1.0;
 	double				ntuples;
 	double				ntuples_next;
 	double				ntuples_delta;
@@ -3953,7 +3949,8 @@ gpujoin_create_task(GpuJoinState *gjs,
 	 * Allocation of pgstrom_gpujoin task object
 	 */
 	required = (offsetof(pgstrom_gpujoin, kern) +
-				STROMALIGN(offsetof(kern_gpujoin, jscale.r[gjs->num_rels])) +
+				STROMALIGN(offsetof(kern_gpujoin,
+									jscale[gjs->num_rels + 1])) +
 				STROMALIGN(gjs->gts.kern_params->length));
 	pgjoin = MemoryContextAllocZero(gcontext->memcxt, required);
 	pgstrom_init_gputask(&gjs->gts, &pgjoin->task);
@@ -3962,7 +3959,7 @@ gpujoin_create_task(GpuJoinState *gjs,
 	pgjoin->pds_dst = NULL;		/* to be set later */
 	/* setup of kern_parambuf */
 	pgjoin->kern.kparams_offset = offsetof(pgstrom_gpujoin, kern) +
-		STROMALIGN(offsetof(kern_gpujoin, jscale.r[gjs->num_rels]));
+		STROMALIGN(offsetof(kern_gpujoin, jscale[gjs->num_rels + 1]));
 	memcpy(KERN_GPUJOIN_PARAMBUF(&pgjoin->kern),
 		   gjs->gts.kern_params,
 		   gjs->gts.kern_params->length);
@@ -3971,36 +3968,38 @@ gpujoin_create_task(GpuJoinState *gjs,
 	pgjoin->kern.num_rels = gjs->num_rels;
 
 	/*
-	 * Assignment of inner window size to control the number of join results,
-	 * to avoid overflow of destination buffer.
+	 * Assignment of the virtual partition window size to control the number
+	 * of joined results, to avoid overflow of destination buffer.
 	 * If a valid jscale_old is supplied, it means this task shall be
 	 * re-enqueued because of smaller buffer than actual necessity.
 	 */
-	for (i=0; i < gjs->num_rels; i++)
+	for (i=0; i <= gjs->num_rels; i++)
 	{
-		pgstrom_data_store *pds_in = pmrels->inner_chunks[i];
-		kern_join_scale	   *jscale = &pgjoin->kern.jscale;
+		kern_join_scale	   *jscale = pgjoin->kern.jscale;
 
-		if (!jscale_old)
+		if (jscale_old)
 		{
-			jscale->r[i].inner_base = 0;
-			jscale->r[i].inner_size = pds_in->kds->nitems;
+			/*
+			 * jscale_old->window_base/size are assumed already incremented
+			 * (or rewinded to 0 if needed) at gpujoin_task_complete().
+			 * So, we just copy the old _base/size to the next ones.
+			 */
+			jscale[i].window_base = jscale_old[i].window_base;
+			jscale[i].window_size = jscale_old[i].window_size;
 		}
 		else
 		{
-			/*
-			 * jscale_old->r[].inner_base is already incremented
-			 * (or rewinded to 0 if needed) at gpujoin_task_complete(). 
-			 * So, it shall be set on the next inner_base.
-			 */
-			Assert(jscale_old->r[i].inner_base <= pds_in->kds->nitems);
-			jscale->r[i].inner_base = jscale_old->r[i].inner_base;
-			jscale->r[i].inner_size = jscale_old->r[i].inner_size;
-			if (jscale->r[i].inner_base +
-				jscale->r[i].inner_size > pds_in->kds->nitems)
-				jscale->r[i].inner_size = (pds_in->kds->nitems -
-										   jscale->r[i].inner_base);
+			cl_uint		nitems;
 
+			if (i == 0)
+				nitems = (!pgjoin->pds_src ? 0 : pgjoin->pds_src->kds->nitems);
+			else
+			{
+				pgstrom_data_store *pds = pmrels->inner_chunks[i-1];
+				nitems = pds->kds->nitems;
+			}
+			jscale[i].window_base = 0;
+			jscale[i].window_size = nitems;
 		}
 	}
 
@@ -4018,6 +4017,7 @@ major_retry:
 		 depth <= gjs->num_rels;
 		 depth++, ntuples = ntuples_next)
 	{
+		pgstrom_data_store *pds;
 		Size		max_items_temp;
 
 	minor_retry:
@@ -4037,28 +4037,33 @@ major_retry:
 		/* split inner window if too large */
 		if (length > 2 * pgstrom_chunk_size())
 		{
-			pgjoin->kern.jscale.r[depth-1].inner_size
+			pgjoin->kern.jscale[depth].window_size
 				/= (length / (2 * pgstrom_chunk_size())) + 1;
-			if (pgjoin->kern.jscale.r[depth-1].inner_size < 1)
+			if (pgjoin->kern.jscale[depth].window_size < 1)
 				elog(ERROR, "Too much growth of result rows");
 			goto minor_retry;
 		}
 		max_items = Max(max_items, max_items_temp);
 
-		/* save the depth with largest row growth */
+		/*
+		 * Save the depth with largest row growth
+		 *
+		 * TODO: We may be able to utilize in-kernel joined row distribution
+		 *       histgram for better separation point.
+		 */
 		if (depth > 0 && (depth == 1 ||
 						  ntuples_next - ntuples > ntuples_delta))
 		{
 			ntuples_delta = Max(ntuples_next - ntuples, 0.0);
 			target_depth = depth;
 		}
-		/* adjust inner_ratio, if partial inner window */
-		if (depth > 0)
-		{
-			pgstrom_data_store *pds_in = pmrels->inner_chunks[depth-1];
-			inner_ratio *= ((double)pgjoin->kern.jscale.r[depth-1].inner_size /
-							(double) pds_in->kds->nitems);
-		}
+		/* adjust window ratio, if virtual partition window */
+		pds = (depth == 0
+			   ? pgjoin->pds_src
+			   : pmrels->inner_chunks[depth - 1]);
+		window_ratio *= ((double) pgjoin->kern.jscale[depth].window_size /
+						 (double) pds->kds->nitems);
+
 		ntuples = ntuples_next;
 	}
 
@@ -4104,8 +4109,7 @@ major_retry:
 	pgjoin->kern.start_depth = (!pgjoin->pds_src
 								? gjs->outer_join_start_depth
 								: 1);
-	pgjoin->kern.jscale.kds_dst_length = pgjoin->pds_dst->kds->length;
-	pgjoin->inner_ratio = inner_ratio;
+	pgjoin->window_ratio = window_ratio;
 
 	/*
 	 * Attach the inner multi-relations buffer, if here is at least one
@@ -4371,19 +4375,22 @@ gpujoin_task_complete(GpuTask *gtask)
 		 * it is generated as result of unmatched tuples.
 		 */
 		gjs->source_ntasks++;
-		gjs->source_nitems += (Size)(pgjoin->inner_ratio *
-									 pgjoin->kern.jscale.source_nitems);
-		gjs->source_matched += (Size)(pgjoin->inner_ratio *
-									  pgjoin->kern.jscale.source_matched);
+		gjs->source_nitems += (Size)(pgjoin->window_ratio *
+									 (double)(!pds_src
+											  ? 0.0
+											  : pds_src->kds->nitems));
 		gjs->results_nitems += pds_dst->kds->nitems;
 		gjs->results_usage += pds_dst->kds->usage;
 
-		for (i = 0; i < gjs->num_rels; i++)
+		for (i=0; i <= gjs->num_rels; i++)
 		{
-			gjs->inner_nitems[i] += pgjoin->kern.jscale.r[i].inner_nitems;
-			gjs->total_nitems[i] += pgjoin->kern.jscale.r[i].total_nitems;
+			 gjs->inner_nitems[i] +=
+				 (Size)(pgjoin->window_ratio * (double)
+						pgjoin->kern.jscale[i].inner_nitems);
+			 gjs->total_nitems[i] +=
+				 (Size)(pgjoin->window_ratio * (double)
+						pgjoin->kern.jscale[i].total_nitems);
 		}
-		Assert(gjs->results_nitems == gjs->total_nitems[gjs->num_rels - 1]);
 
 		/*
 		 * Enqueue another GpuJoin taks if completed one run on a part of
@@ -4393,45 +4400,51 @@ gpujoin_task_complete(GpuTask *gtask)
 		 * size of result buffer and chunk size limitation.
 		 * (The new inner_size[] shall become baseline of the next inner scale)
 		 */
-		for (i = gjs->num_rels - 1; i >= 0; i--)
+		for (i = gjs->num_rels; i >= 0; i--)
 		{
-			pgstrom_data_store *pds_in = pmrels->inner_chunks[i];
-			kern_join_scale	   *jscale = &pgjoin->kern.jscale;
+			kern_join_scale	   *jscale = pgjoin->kern.jscale;
+			cl_uint				nitems;
 
-			jscale->r[i].inner_base += jscale->r[i].inner_size;
-			if (jscale->r[i].inner_base < pds_in->kds->nitems)
+			if (i == 0)
+				nitems = (!pgjoin->pds_src ? 0 : pgjoin->pds_src->kds->nitems);
+			else
 			{
-				while (++i < gjs->num_rels)
-					jscale->r[i].inner_base = 0;
+				pgstrom_data_store *pds = pmrels->inner_chunks[i-1];
+				nitems = pds->kds->nitems;
+			}
+
+			jscale[i].window_base += jscale[i].window_size;
+			if (jscale[i].window_base < nitems)
+			{
+				/*
+				 * Re-enqueue the task with modified window_base/size
+				 */
+				while (++i <= gjs->num_rels)
+					jscale[i].window_base = 0;
+
+				/*
+				 * Instead of detach and attach PDS here, we simply give
+				 * the previous PDS to the new pgjoin, to reduce waste of
+				 * spinlocks.
+				 *
+				 * NOTE: The inner buffer (pmrels) shall be attached within
+				 * gpujoin_create_task, so don't need to attach it here.
+				 */
+				pgjoin->pds_src = NULL;
+				pgjoin_new = (pgstrom_gpujoin *)
+					gpujoin_create_task(gjs,
+										pgjoin->pmrels,
+										pds_src,
+										pgjoin->kern.jscale);
+				/* add this new task to the pending list */
+				SpinLockAcquire(&gjs->gts.lock);
+				dlist_push_tail(&gjs->gts.pending_tasks,
+								&pgjoin_new->task.chain);
+				gjs->gts.num_pending_tasks++;
+				SpinLockRelease(&gjs->gts.lock);
 				break;
 			}
-			else if (jscale->r[i].inner_base > pds_in->kds->nitems)
-				jscale->r[i].inner_base = pds_in->kds->nitems;
-		}
-
-		if (i >= 0)
-		{
-			/*
-			 * XXX - do we need to acquire the source PDS, rather than
-			 * explicit detach from pgjoin?
-			 */
-			pgjoin->pds_src = NULL;
-
-			/*
-			 * NOTE: The inner buffer (pmrels) shall be attached within
-			 * gpujoin_create_task, so don't need to attach it here.
-			 */
-			pgjoin_new = (pgstrom_gpujoin *)
-				gpujoin_create_task(gjs,
-									pgjoin->pmrels,
-									pds_src,
-									&pgjoin->kern.jscale);
-
-			/* add this new task to the pending list */
-			SpinLockAcquire(&gjs->gts.lock);
-			dlist_push_tail(&gjs->gts.pending_tasks, &pgjoin_new->task.chain);
-			gjs->gts.num_pending_tasks++;
-			SpinLockRelease(&gjs->gts.lock);
+			Assert(jscale[i].window_base = nitems);
 		}
 	}
 
