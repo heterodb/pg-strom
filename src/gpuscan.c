@@ -430,11 +430,19 @@ pgstrom_pullup_outer_scan(Plan *plannode,
 	{
 		TargetEntry	   *tle = lfirst(lc);
 
-		if (!IsA(tle->expr, Var) && !allow_expression)
-			return false;
+		if (IsA(tle->expr, Var))
+		{
+			Var	   *var = (Var *) tle->expr;
+			/* we cannot support whole row reference */
+			if (var->varattno == InvalidAttrNumber)
+				return false;
+			continue;
+		}
+		if (allow_expression &&
+			pgstrom_device_expression(tle->expr))
+			continue;
 
-		if (!pgstrom_device_expression(tle->expr))
-			return false;
+		return false;
 	}
 
 	/*
@@ -446,10 +454,48 @@ pgstrom_pullup_outer_scan(Plan *plannode,
 }
 
 /*
+ * Code generator for GpuScan's qualifier
+ */
+static char *
+gpuscan_codegen_exec_quals(codegen_context *context, List *dev_quals)
+{
+	StringInfoData	body;
+	char		   *expr_code;
+
+	if (dev_quals == NULL)
+		return GPUSCAN_KERN_SOURCE_NO_DEVQUAL;
+
+	/* Let's walk on the device expression tree */
+	expr_code = pgstrom_codegen_expression((Node *)dev_quals, context);
+
+	initStringInfo(&body);
+	appendStringInfo(
+		&body,
+		"STATIC_FUNCTION(cl_bool)\n"
+		"gpuscan_quals_eval(kern_context *kcxt,\n"
+		"                   kern_data_store *kds,\n"
+		"                   size_t kds_index)\n"
+		"{\n");
+	/* add parameter declarations */
+	pgstrom_codegen_param_declarations(&body, context);
+	/* add variables declarations */
+	pgstrom_codegen_var_declarations(&body, context);
+
+	appendStringInfo(
+		&body,
+		"\n"
+		"  return EVAL(%s);\n"
+		"}\n",
+		expr_code);
+
+	return body.data;
+}
+
+/*
  * gpuscan_try_replace_seqscan
  *
- *
- *
+ * It tries to replace a SeqScan that takes no host-only qualifiers
+ * by GpuScan if expected cost is reasonable.
  */
 static CustomScan *
 gpuscan_try_replace_seqscan(Relation baserel, SeqScan *seqscan)
@@ -462,6 +508,7 @@ gpuscan_try_replace_seqscan(Relation baserel, SeqScan *seqscan)
 	double			selectivity;
 	Cost			startup_cost;
 	Cost			total_cost;
+	codegen_context	context;
 	ListCell	   *lc;
 
 	/* get table's statistics */
@@ -527,53 +574,19 @@ gpuscan_try_replace_seqscan(Relation baserel, SeqScan *seqscan)
 	cscan->custom_relids = bms_make_singleton(seqscan->scanrelid);
 	cscan->methods = &gpuscan_plan_methods;
 
+
 	memset(&gs_info, 0, sizeof(GpuScanInfo));
-	gs_info.kern_source = GPUSCAN_KERN_SOURCE_NO_DEVQUAL;
-	gs_info.extra_flags = DEVKERNEL_NEEDS_GPUSCAN;
+	pgstrom_init_codegen_context(&context);
+	gs_info.kern_source = gpuscan_codegen_exec_quals(&context,
+													 seqscan->plan.qual);
+	gs_info.extra_flags = context.extra_flags | DEVKERNEL_NEEDS_GPUSCAN;
+	gs_info.func_defs = context.func_defs;
+	gs_info.used_params = context.used_params;
+	gs_info.used_vars = context.used_vars;
 	gs_info.dev_quals = copyObject(seqscan->plan.qual);
 	form_gpuscan_info(cscan, &gs_info);
 
 	return cscan;
-}
-
-/*
- * Code generator for GpuScan's qualifier
- */
-static char *
-gpuscan_codegen_exec_quals(PlannerInfo *root,
-						   List *dev_quals,
-						   codegen_context *context)
-{
-	StringInfoData	body;
-	char		   *expr_code;
-
-	if (dev_quals == NULL)
-		return GPUSCAN_KERN_SOURCE_NO_DEVQUAL;
-
-	/* Let's walk on the device expression tree */
-	expr_code = pgstrom_codegen_expression((Node *)dev_quals, context);
-
-	initStringInfo(&body);
-	appendStringInfo(
-		&body,
-		"STATIC_FUNCTION(cl_bool)\n"
-		"gpuscan_quals_eval(kern_context *kcxt,\n"
-		"                   kern_data_store *kds,\n"
-		"                   size_t kds_index)\n"
-		"{\n");
-	/* add parameter declarations */
-	pgstrom_codegen_param_declarations(&body, context);
-	/* add variables declarations */
-	pgstrom_codegen_var_declarations(&body, context);
-
-	appendStringInfo(
-		&body,
-		"\n"
-		"  return EVAL(%s);\n"
-		"}\n",
-		expr_code);
-
-	return body.data;
 }
 
 static Plan *
@@ -621,7 +634,7 @@ create_gpuscan_plan(PlannerInfo *root,
 	 * Construct OpenCL kernel code
 	 */
 	pgstrom_init_codegen_context(&context);
-	kern_source = gpuscan_codegen_exec_quals(root, dev_quals, &context);
+	kern_source = gpuscan_codegen_exec_quals(&context, dev_quals);
 
 	/*
 	 * Construction of GpuScanPlan node; on top of CustomPlan node
@@ -741,7 +754,9 @@ codegen_device_projection(StringInfo source,
 			Var	   *var = (Var *) tle->expr;
 
 			Assert(var->varno == scanrelid);
-			Assert(var->varattno > 0 && var->varattno <= tupdesc->natts);
+			Assert(var->varattno > FirstLowInvalidHeapAttributeNumber &&
+				   var->varattno != InvalidAttrNumber &&
+				   var->varattno <= tupdesc->natts);
 			varremaps[tle->resno - 1] = var->varattno;
 		}
 		else
@@ -783,6 +798,25 @@ codegen_device_projection(StringInfo source,
 		"    kern_colmeta cmeta;\n"
 		"\n"
 		"    assert((devptr_t)curr == MAXALIGN(curr));\n");
+
+	/* system columns reference if any */
+	for (j=0; j < list_length(tlist_dev); j++)
+	{
+		if (varremaps[j] < 0)
+		{
+			Form_pg_attribute	attr
+				= SystemAttributeDefinition(varremaps[j], true);
+
+			appendStringInfo(
+				&body,
+				"    /* %s system column */\n"
+				"    tup_isnull[%d] = false;\n"
+				"    tup_values[%d] = kern_getsysatt_%s(kds_src, htup);\n",
+				NameStr(attr->attname),
+				j, j,
+				NameStr(attr->attname));
+		}
+	}
 
 	for (i=0; i < tupdesc->natts; i++)
 	{

@@ -19,6 +19,7 @@
 #include "postgres.h"
 #include "access/sysattr.h"
 #include "access/xact.h"
+#include "catalog/heap.h"
 #include "catalog/pg_type.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
@@ -1835,11 +1836,40 @@ codegen_device_projection(CustomScan *cscan, GpuJoinInfo *gj_info,
 		appendStringInfo(
 			&body,
 			"  htup = (HeapTupleHeaderData *)\n"
-			"    (r_buffer[%d] == 0 ? NULL : ((char *)%s + r_buffer[%d]));\n"
-			"  EXTRACT_HEAP_TUPLE_BEGIN(addr, %s, htup);\n",
+			"    (r_buffer[%d] == 0 ? NULL : ((char *)%s + r_buffer[%d]));\n",
 			depth,
 			depth == 0 ? "kds_src" : "kds_in",
-			depth,
+			depth);
+
+		/* System column reference if any */
+		foreach (lc1, tlist_dev)
+		{
+			TargetEntry		   *tle = lfirst(lc1);
+			Form_pg_attribute	attr;
+
+			if (varattmaps[tle->resno-1] >= 0)
+				continue;
+			attr = SystemAttributeDefinition(varattmaps[tle->resno-1], true);
+			appendStringInfo(
+				&body,
+				"    /* %s system column */\n"
+				"    if (!htup)\n"
+				"      tup_isnull[%d] = true;\n"
+				"    else {\n"
+				"      tup_isnull[%d] = false;\n"
+				"      tup_values[%d] = kern_getsysatt_%s(kds_src, htup);\n"
+				"    }\n",
+				NameStr(attr->attname),
+				tle->resno-1,
+				tle->resno-1,
+				tle->resno-1,
+				NameStr(attr->attname));
+		}
+
+		/* begin to walk on the tuple */
+		appendStringInfo(
+			&body,
+			"  EXTRACT_HEAP_TUPLE_BEGIN(addr, %s, htup);\n",
 			depth == 0 ? "kds_src" : "kds_in");
 
 		resetStringInfo(&temp);

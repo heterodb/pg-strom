@@ -515,7 +515,9 @@ typedef struct
 	cl_uint				hash;	/* 32-bit hash value */
 	cl_uint				next;	/* offset of the next */
 	cl_uint				rowid;	/* unique identifier of this hash entry */
-	cl_uint				t_len;	/* length of tuple */
+	cl_char				__padding__[4];	/* for alignment */
+	cl_ushort			t_len;	/* length of tuple */
+	ItemPointerData		t_self;	/* SelfItemPointer */
 	HeapTupleHeaderData	htup;
 } kern_hashitem;
 
@@ -1605,16 +1607,21 @@ arithmetic_stairlike_add(cl_uint my_value, cl_uint *total_sum)
  * Utility functions to reference system columns
  */
 STATIC_INLINE(Datum)
-kern_getsysatt_ctid(kern_data_store *kds, kern_tupitem *tupitem)
+kern_getsysatt_ctid(kern_data_store *kds, HeapTupleHeaderData *htup)
 {
-	return (Datum) devptr_to_host(kds, &tupitem->t_self);
+	/*
+	 * NOTE: Both of kern_tupitem and kern_hashitem put t_self just
+	 * before the htup, with consideration of alignment.
+	 */
+	ItemPointerData	   *p_self = (ItemPointerData *)
+		((char *)htup - (offsetof(kern_tupitem, htup) -
+						 offsetof(kern_tupitem, t_self)));
+	return (Datum) devptr_to_host(kds, p_self);
 }
 
 STATIC_INLINE(Datum)
-kern_getsysatt_oid(kern_data_store *kds, kern_tupitem *tupitem)
+kern_getsysatt_oid(kern_data_store *kds, HeapTupleHeaderData *htup)
 {
-	HeapTupleHeaderData *htup = &tupitem->htup;
-
 	if ((htup->t_infomask & HEAP_HASOID) != 0)
 		return *((cl_uint *)((char *) htup
 							 + htup->t_hoff
@@ -1623,34 +1630,26 @@ kern_getsysatt_oid(kern_data_store *kds, kern_tupitem *tupitem)
 }
 
 STATIC_INLINE(Datum)
-kern_getsysatt_xmin(kern_data_store *kds, kern_tupitem *tupitem)
+kern_getsysatt_xmin(kern_data_store *kds, HeapTupleHeaderData *htup)
 {
-	HeapTupleHeaderData *htup = &tupitem->htup;
-
 	return (Datum) htup->t_choice.t_heap.t_xmin;
 }
 
 STATIC_INLINE(Datum)
-kern_getsysatt_xmax(kern_data_store *kds, kern_tupitem *tupitem)
+kern_getsysatt_xmax(kern_data_store *kds, HeapTupleHeaderData *htup)
 {
-	HeapTupleHeaderData *htup = &tupitem->htup;
-
 	return (Datum) htup->t_choice.t_heap.t_xmax;
 }
 
 STATIC_INLINE(Datum)
-kern_getsysatt_cmin(kern_data_store *kds, kern_tupitem *tupitem)
+kern_getsysatt_cmin(kern_data_store *kds, HeapTupleHeaderData *htup)
 {
-	HeapTupleHeaderData *htup = &tupitem->htup;
-
 	return (Datum) htup->t_choice.t_heap.t_field3.t_cid;
 }
 
 STATIC_INLINE(Datum)
-kern_getsysatt_cmax(kern_data_store *kds, kern_tupitem *tupitem)
+kern_getsysatt_cmax(kern_data_store *kds, HeapTupleHeaderData *htup)
 {
-	HeapTupleHeaderData *htup = &tupitem->htup;
-
 	return (Datum) htup->t_choice.t_heap.t_field3.t_cid;
 }
 
