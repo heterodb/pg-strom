@@ -1101,6 +1101,7 @@ pgstrom_data_store_insert_hashitem(pgstrom_data_store *pds,
 	khslots[index] = kds->usage;
 	khitem->rowid = kds->nitems++;
 	khitem->t_len = tuple->t_len;
+	khitem->t_self = tuple->t_self;
 	memcpy(&khitem->htup, tuple->t_data, tuple->t_len);
 	kds->usage += required;
 

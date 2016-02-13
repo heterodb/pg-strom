@@ -430,11 +430,19 @@ pgstrom_pullup_outer_scan(Plan *plannode,
 	{
 		TargetEntry	   *tle = lfirst(lc);
 
-		if (!IsA(tle->expr, Var) && !allow_expression)
-			return false;
+		if (IsA(tle->expr, Var))
+		{
+			Var	   *var = (Var *) tle->expr;
+			/* we cannot support whole row reference */
+			if (var->varattno == InvalidAttrNumber)
+				return false;
+			continue;
+		}
+		if (allow_expression &&
+			pgstrom_device_expression(tle->expr))
+			continue;
 
-		if (!pgstrom_device_expression(tle->expr))
-			return false;
+		return false;
 	}
 
 	/*
@@ -803,7 +811,7 @@ codegen_device_projection(StringInfo source,
 				&body,
 				"    /* %s system column */\n"
 				"    tup_isnull[%d] = false;\n"
-				"    tup_values[%d] = kern_getsysatt_%s(kds_src, tupitem);\n",
+				"    tup_values[%d] = kern_getsysatt_%s(kds_src, htup);\n",
 				NameStr(attr->attname),
 				j, j,
 				NameStr(attr->attname));
