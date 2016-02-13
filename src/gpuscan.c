@@ -746,7 +746,9 @@ codegen_device_projection(StringInfo source,
 			Var	   *var = (Var *) tle->expr;
 
 			Assert(var->varno == scanrelid);
-			Assert(var->varattno > 0 && var->varattno <= tupdesc->natts);
+			Assert(var->varattno > FirstLowInvalidHeapAttributeNumber &&
+				   var->varattno != InvalidAttrNumber &&
+				   var->varattno <= tupdesc->natts);
 			varremaps[tle->resno - 1] = var->varattno;
 		}
 		else
@@ -788,6 +790,25 @@ codegen_device_projection(StringInfo source,
 		"    kern_colmeta cmeta;\n"
 		"\n"
 		"    assert((devptr_t)curr == MAXALIGN(curr));\n");
+
+	/* system columns reference if any */
+	for (j=0; j < list_length(tlist_dev); j++)
+	{
+		if (varremaps[j] < 0)
+		{
+			Form_pg_attribute	attr
+				= SystemAttributeDefinition(varremaps[j], true);
+
+			appendStringInfo(
+				&body,
+				"    /* %s system column */\n"
+				"    tup_isnull[%d] = false;\n"
+				"    tup_values[%d] = kern_getsysatt_%s(kds_src, tupitem);\n",
+				NameStr(attr->attname),
+				j, j,
+				NameStr(attr->attname));
+		}
+	}
 
 	for (i=0; i < tupdesc->natts; i++)
 	{

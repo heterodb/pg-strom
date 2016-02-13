@@ -1649,7 +1649,7 @@ kern_getsysatt_cmax(kern_data_store *kds, kern_tupitem *tupitem)
 }
 
 STATIC_INLINE(Datum)
-kern_getsysatt_tableoid(kern_data_store *kds, HeapTupleHeaderData *htup)
+kern_getsysatt_tableoid(kern_data_store *kds, kern_tupitem *tupitem)
 {
 	return kds->table_oid;
 }
