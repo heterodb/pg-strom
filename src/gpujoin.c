@@ -3519,27 +3519,25 @@ gpujoin_codegen_join_quals(StringInfo source,
 		"  cl_bool result   __attribute__((__unused__));\n"
 		"\n");
 
-	if (other_quals_code != NULL)
-	{
-		appendStringInfo(
-			source,
-			"  result = EVAL(%s);\n"
-			"  if (!result)\n"
-			"    return false;\n",
-			other_quals_code);
-	}
-	appendStringInfo(
-		source,
-		"  *needs_outer_row = true;\n");
-
 	if (join_quals_code != NULL)
 	{
 		appendStringInfo(
 			source,
-			"  result = EVAL(%s);\n"
-			"  if (!result)\n"
+			"  if (i_htup && !EVAL(%s))\n"
 			"    return false;\n",
 			join_quals_code);
+	}
+	appendStringInfo(
+		source,
+		"  if (needs_outer_row)\n"
+		"    *needs_outer_row = false;\n");
+	if (other_quals_code != NULL)
+	{
+		appendStringInfo(
+			source,
+			"  if (!EVAL(%s))\n"
+			"    return false;\n",
+			other_quals_code);
 	}
 	appendStringInfo(
 		source,

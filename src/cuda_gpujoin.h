@@ -362,37 +362,35 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 		cl_bool			is_matched;
 		cl_uint			offset;
 		cl_uint			count;
-		cl_bool			__dummy__;
 		__shared__ cl_uint base;
 
-		/* outer input */
-		if (x_index < nvalids)
-			x_buffer = KERN_GET_RESULT(kresults_in, x_index);
-		else
-			x_buffer = NULL;
-
-		/* inner input */
-		if (y_index < y_limit)
-			y_htup = kern_get_tuple_row(kds_in, y_index);
-		else
-			y_htup = NULL;
-
-		/* does it satisfies join condition? */
-		is_matched = gpujoin_join_quals(&kcxt,
-										kds,
-										kmrels,
-										depth,
-										x_buffer,
-										y_htup,
-										&__dummy__);
-		if (is_matched)
+		if (x_index < nvalids &&
+			y_index < y_limit)
 		{
-			y_offset = (size_t)y_htup - (size_t)kds_in;
-			if (lo_map && !lo_map[y_index])
-				lo_map[y_index] = true;
+			/* outer input */
+			x_buffer = KERN_GET_RESULT(kresults_in, x_index);
+			/* inner input */
+			y_htup = kern_get_tuple_row(kds_in, y_index);
+
+			/* does it satisfies join condition? */
+			is_matched = gpujoin_join_quals(&kcxt,
+											kds,
+											kmrels,
+											depth,
+											x_buffer,
+											y_htup,
+											NULL);
+			if (is_matched)
+			{
+				y_offset = (size_t)y_htup - (size_t)kds_in;
+				if (lo_map && !lo_map[y_index])
+					lo_map[y_index] = true;
+			}
+			else
+				y_offset = UINT_MAX;
 		}
 		else
-			y_offset = UINT_MAX;
+			is_matched = false;
 		__syncthreads();
 
 		/*
@@ -507,7 +505,6 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
         cl_uint		   *r_buffer;
 		cl_uint			offset;
 		cl_uint			count;
-		cl_uint			num_matched = 0;
 		cl_bool			is_matched;
 		cl_bool			needs_outer_row = false;
 
@@ -528,6 +525,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 				hash_value <= kds_hash->hash_max)
 			{
 				khitem = KERN_HASH_FIRST_ITEM(kds_hash, hash_value);
+				needs_outer_row = true;
 			}
 		}
 
@@ -535,29 +533,28 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 		 * walks on the hash entries
 		 */
 		do {
-			HeapTupleHeaderData *h_htup;
-
 			if (khitem && (khitem->hash  == hash_value &&
 						   khitem->rowid >= inner_base &&
 						   khitem->rowid <  inner_base + inner_size))
-				h_htup = &khitem->htup;
-			else
-				h_htup = NULL;
-
-			is_matched = gpujoin_join_quals(&kcxt,
-											kds,
-											kmrels,
-											depth,
-											x_buffer,	/* valid if in range */
-											h_htup,		/* valid if in range */
-											&needs_outer_row);
-			if (is_matched)
 			{
-				num_matched++;
-				assert(khitem->rowid < kds_hash->nitems);
-				if (lo_map && !lo_map[khitem->rowid])
-					lo_map[khitem->rowid] = true;
+				HeapTupleHeaderData *h_htup = &khitem->htup;
+
+				is_matched = gpujoin_join_quals(&kcxt,
+												kds,
+												kmrels,
+												depth,
+												x_buffer,
+												h_htup,
+												&needs_outer_row);
+				if (is_matched)
+				{
+					assert(khitem->rowid < kds_hash->nitems);
+					if (lo_map && !lo_map[khitem->rowid])
+						lo_map[khitem->rowid] = true;
+				}
 			}
+			else
+				is_matched = false;
 
 			/*
 			 * Expand kresults_out->nitems
@@ -598,11 +595,18 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 		 */
 		if (KERN_MULTIRELS_LEFT_OUTER_JOIN(kmrels, depth))
 		{
-			if (num_matched > 0)
-				needs_outer_row = false;
+			cl_bool		is_matched = false;
 
-			offset = arithmetic_stairlike_add(needs_outer_row ? 1 : 0,
-											  &count);
+			if (needs_outer_row)
+				is_matched = gpujoin_join_quals(&kcxt,
+												kds,
+												kmrels,
+												depth,
+												x_buffer,
+												NULL,
+												NULL);
+
+			offset = arithmetic_stairlike_add(is_matched ? 1 : 0, &count);
 			if (get_local_xid() == 0)
 			{
 				if (count > 0)
@@ -616,7 +620,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 			/* kresults_out still have enough space? */
 			if (base + count >= kresults_out->nrooms)
 				STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
-			else if (needs_outer_row)
+			else if (is_matched)
 			{
 				assert(x_buffer != NULL);
 				r_buffer = KERN_GET_RESULT(kresults_out, base + offset);
