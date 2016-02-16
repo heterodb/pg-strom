@@ -3496,11 +3496,6 @@ gpujoin_codegen_join_quals(StringInfo source,
 	/*
 	 * evaluation of other-quals and join-quals
 	 */
-	appendStringInfo(
-		source,
-		"  cl_bool result   __attribute__((__unused__));\n"
-		"\n");
-
 	if (join_quals_code != NULL)
 	{
 		appendStringInfo(
