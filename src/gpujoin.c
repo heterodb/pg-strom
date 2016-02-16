@@ -99,6 +99,7 @@ typedef struct
 	List	   *ichunk_size;
 	List	   *join_types;
 	List	   *join_quals;
+	List	   *other_quals;
 	List	   *nloops_minor;
 	List	   *nloops_major;
 	List	   *hash_inner_keys;	/* if hash-join */
@@ -131,6 +132,7 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 	privs = lappend(privs, gj_info->ichunk_size);
 	privs = lappend(privs, gj_info->join_types);
 	exprs = lappend(exprs, gj_info->join_quals);
+	exprs = lappend(exprs, gj_info->other_quals);
 	privs = lappend(privs, gj_info->nloops_minor);
 	privs = lappend(privs, gj_info->nloops_major);
 	exprs = lappend(exprs, gj_info->hash_inner_keys);
@@ -169,6 +171,7 @@ deform_gpujoin_info(CustomScan *cscan)
 	gj_info->ichunk_size = list_nth(privs, pindex++);
 	gj_info->join_types = list_nth(privs, pindex++);
     gj_info->join_quals = list_nth(exprs, eindex++);
+	gj_info->other_quals = list_nth(exprs, eindex++);
 	gj_info->nloops_minor = list_nth(privs, pindex++);
 	gj_info->nloops_major = list_nth(privs, pindex++);
 	gj_info->hash_inner_keys = list_nth(exprs, eindex++);
@@ -217,6 +220,7 @@ typedef struct
 	double				nrows_ratio;
 	cl_uint				ichunk_size;
 	ExprState		   *join_quals;
+	ExprState		   *other_quals;
 
 	/*
 	 * Join properties; only hash-join
@@ -1540,6 +1544,7 @@ build_device_tlist_tentative(GpuJoinPath *gpath,
 	context.resjunk = true;
 	build_device_tlist_walker((Node *)gj_info->outer_quals, &context);
 	build_device_tlist_walker((Node *)gj_info->join_quals, &context);
+	build_device_tlist_walker((Node *)gj_info->other_quals, &context);
 	build_device_tlist_walker((Node *)gj_info->hash_inner_keys, &context);
 	build_device_tlist_walker((Node *)gj_info->hash_outer_keys, &context);
 
@@ -1598,7 +1603,8 @@ create_gpujoin_plan(PlannerInfo *root,
 	{
 		List	   *hash_inner_keys = NIL;
 		List	   *hash_outer_keys = NIL;
-		List	   *clauses;
+		List	   *join_quals = NIL;
+		List	   *other_quals = NIL;
 		float		nrows_ratio;
 
 		foreach (lc, gpath->inners[i].hash_quals)
@@ -1643,9 +1649,23 @@ create_gpujoin_plan(PlannerInfo *root,
 										  gpath->inners[i].ichunk_size);
 		gj_info.join_types = lappend_int(gj_info.join_types,
 										 gpath->inners[i].join_type);
-		clauses = extract_actual_clauses(gpath->inners[i].join_quals, false);
+
+		if (IS_OUTER_JOIN(gpath->inners[i].join_type))
+		{
+			extract_actual_join_clauses(gpath->inners[i].join_quals,
+										&join_quals, &other_quals);
+		}
+		else
+		{
+			join_quals = extract_actual_clauses(gpath->inners[i].join_quals,
+												false);
+			other_quals = NIL;
+		}
 		gj_info.join_quals = lappend(gj_info.join_quals,
-									 build_flatten_qualifier(clauses));
+									 build_flatten_qualifier(join_quals));
+		gj_info.other_quals = lappend(gj_info.other_quals,
+									  build_flatten_qualifier(other_quals));
+
 		gj_info.nloops_minor = lappend(gj_info.nloops_minor,
 				makeInteger(double_as_long(gpath->inners[i].nloops_minor)));
 		gj_info.nloops_major = lappend(gj_info.nloops_major,
@@ -2350,6 +2370,8 @@ pgstrom_post_planner_gpujoin(PlannedStmt *pstmt, Plan **p_curr_plan)
 		fixup_device_only_expr((Node *) gj_info->hash_inner_keys, &tlist_dev);
 	gj_info->join_quals = (List *)
 		fixup_device_only_expr((Node *) gj_info->join_quals, &tlist_dev);
+	gj_info->other_quals = (List *)
+		fixup_device_only_expr((Node *) gj_info->other_quals, &tlist_dev);
 	gj_info->outer_quals = (Expr *)
 		fixup_device_only_expr((Node *) gj_info->outer_quals, &tlist_dev);
 
@@ -2659,6 +2681,8 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 		 */
 		istate->join_quals =
 			ExecInitExpr(list_nth(gj_info->join_quals, i), ps);
+		istate->other_quals =
+			ExecInitExpr(list_nth(gj_info->other_quals, i), ps);
 
 		hash_inner_keys = list_nth(gj_info->hash_inner_keys, i);
 		if (hash_inner_keys != NIL)
@@ -2848,6 +2872,7 @@ gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	ListCell	   *lc1;
 	ListCell	   *lc2;
 	ListCell	   *lc3;
+	ListCell	   *lc4;
 	char		   *temp;
 	char			qlabel[128];
 	int				depth;
@@ -2910,13 +2935,15 @@ gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 
 	/* join-qualifiers */
 	depth = 1;
-	forthree (lc1, gj_info->join_types,
-			  lc2, gj_info->join_quals,
-			  lc3, gj_info->hash_outer_keys)
+	forfour (lc1, gj_info->join_types,
+			 lc2, gj_info->join_quals,
+			 lc3, gj_info->other_quals,
+			 lc4, gj_info->hash_outer_keys)
 	{
 		JoinType	join_type = (JoinType) lfirst_int(lc1);
-		Expr	   *join_qual = lfirst(lc2);
-		Expr	   *hash_outer_key = lfirst(lc3);
+		Expr	   *join_quals = lfirst(lc2);
+		Expr	   *other_quals = lfirst(lc3);
+		Expr	   *hash_outer_key = lfirst(lc4);
 
 		resetStringInfo(&str);
 		if (hash_outer_key != NULL)
@@ -2940,13 +2967,40 @@ gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
                                       context, es->verbose, false);
 			appendStringInfo(&str, ", HashKeys: (%s)", temp);
 		}
-		temp = deparse_expression((Node *)join_qual, context,
-								  es->verbose, false);
-		appendStringInfo(&str, ", JoinQual: %s", temp);
-
 		snprintf(qlabel, sizeof(qlabel), "Depth% 2d", depth);
 		ExplainPropertyText(qlabel, str.data, es);
 		resetStringInfo(&str);
+
+		/* join_quals */
+		temp = deparse_expression((Node *)join_quals, context,
+								  es->verbose, false);
+		if (es->format == EXPLAIN_FORMAT_TEXT)
+		{
+			appendStringInfoSpaces(es->str, es->indent * 2 + 9);
+			appendStringInfo(es->str, "JoinQuals: %s\n", temp);
+		}
+		else
+		{
+			snprintf(qlabel, sizeof(qlabel), "Depth %02d-JoinQual", depth);
+			ExplainPropertyText(qlabel, temp, es);
+		}
+
+		/* other_quals if any */
+		if (other_quals)
+		{
+			temp = deparse_expression((Node *)other_quals, context,
+									  es->verbose, false);
+			if (es->format == EXPLAIN_FORMAT_TEXT)
+			{
+				appendStringInfoSpaces(es->str, es->indent * 2 + 9);
+				appendStringInfo(es->str, "JoinFilter: %s\n", temp);
+			}
+			else
+			{
+				snprintf(qlabel, sizeof(qlabel), "Depth %02d-Filter", depth);
+				ExplainPropertyText(qlabel, str.data, es);
+			}
+		}
 
 		if (es->analyze)
 		{
@@ -3386,7 +3440,8 @@ gpujoin_codegen_var_param_decl(StringInfo source,
  *                            kern_data_store *kds,
  *                            kern_multirels *kmrels,
  *                            cl_int *o_buffer,
- *                            HeapTupleHeaderData *i_htup)
+ *                            HeapTupleHeaderData *i_htup,
+ *                            cl_bool *needs_outer_row)
  */
 static void
 gpujoin_codegen_join_quals(StringInfo source,
@@ -3394,25 +3449,29 @@ gpujoin_codegen_join_quals(StringInfo source,
 						   int cur_depth,
 						   codegen_context *context)
 {
-	List	   *join_qual;
-	char	   *join_code;
-	bool		is_nestloop;
+	List	   *join_quals;
+	List	   *other_quals;
+	char	   *join_quals_code = NULL;
+	char	   *other_quals_code = NULL;
 	StringInfoData	v_unaliases;
-
-	is_nestloop = (!list_nth(gj_info->hash_outer_keys, cur_depth - 1));
 
 	initStringInfo(&v_unaliases);
 
 	Assert(cur_depth > 0 && cur_depth <= gj_info->num_rels);
-	join_qual = list_nth(gj_info->join_quals, cur_depth - 1);
+	join_quals = list_nth(gj_info->join_quals, cur_depth - 1);
+	other_quals = list_nth(gj_info->other_quals, cur_depth - 1);
 
 	/*
 	 * make a text representation of join_qual
 	 */
 	context->used_vars = NIL;
 	context->param_refs = NULL;
-	join_code = pgstrom_codegen_expression((Node *) join_qual, context);
-
+	if (join_quals != NIL)
+		join_quals_code = pgstrom_codegen_expression((Node *)join_quals,
+													 context);
+	if (other_quals != NIL)
+		other_quals_code = pgstrom_codegen_expression((Node *)other_quals,
+													  context);
 	/*
 	 * function declaration
 	 */
@@ -3423,10 +3482,11 @@ gpujoin_codegen_join_quals(StringInfo source,
 		"                           kern_data_store *kds,\n"
         "                           kern_multirels *kmrels,\n"
 		"                           cl_uint *o_buffer,\n"
-		"                           HeapTupleHeaderData *i_htup)\n"
-		"{\n"
-		"  cl_bool result = false;\n",
+		"                           HeapTupleHeaderData *i_htup,\n"
+		"                           cl_bool *needs_outer_row)\n"
+		"{\n",
 		cur_depth);
+
 	/*
 	 * variable/params declaration & initialization
 	 */
@@ -3434,21 +3494,39 @@ gpujoin_codegen_join_quals(StringInfo source,
 								   &v_unaliases, context);
 
 	/*
-	 * evaluate join qualifier
+	 * evaluation of other-quals and join-quals
 	 */
 	appendStringInfo(
 		source,
-		"\n"
-		"  if (o_buffer != NULL && i_htup != NULL)\n"
-		"    result = EVAL(%s);\n"
-		"%s"
-		"  return result;\n"
-		"%s"
-		"}\n\n",
-		join_code,
-		is_nestloop ? "  __syncthreads();\n" : "",
-		v_unaliases.data);
+		"  cl_bool result   __attribute__((__unused__));\n"
+		"\n");
 
+	if (join_quals_code != NULL)
+	{
+		appendStringInfo(
+			source,
+			"  if (i_htup && !EVAL(%s))\n"
+			"    return false;\n",
+			join_quals_code);
+	}
+	appendStringInfo(
+		source,
+		"  if (needs_outer_row)\n"
+		"    *needs_outer_row = false;\n");
+	if (other_quals_code != NULL)
+	{
+		appendStringInfo(
+			source,
+			"  if (!EVAL(%s))\n"
+			"    return false;\n",
+			other_quals_code);
+	}
+	appendStringInfo(
+		source,
+		"  return true;\n"
+		"%s"
+		"}\n",
+		v_unaliases.data);
 	pfree(v_unaliases.data);
 }
 
@@ -3557,8 +3635,13 @@ gpujoin_codegen(PlannerInfo *root,
 		"                   kern_multirels *kmrels,\n"
 		"                   int depth,\n"
 		"                   cl_uint *o_buffer,\n"
-		"                   HeapTupleHeaderData *i_htup)\n"
+		"                   HeapTupleHeaderData *i_htup,\n"
+		"                   cl_bool *needs_outer_row)\n"
 		"{\n"
+		"  /* out of range? */\n"
+		"  if (!o_buffer)\n"
+		"    return false;\n"
+		"\n"
 		"  switch (depth)\n"
 		"  {\n");
 
@@ -3567,7 +3650,7 @@ gpujoin_codegen(PlannerInfo *root,
 		appendStringInfo(
 			&source,
 			"  case %d:\n"
-			"    return gpujoin_join_quals_depth%d(kcxt, kds, kmrels, o_buffer, i_htup);\n",
+			"    return gpujoin_join_quals_depth%d(kcxt, kds, kmrels, o_buffer, i_htup, needs_outer_row);\n",
 			depth, depth);
 	}
 	appendStringInfo(

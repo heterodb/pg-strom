@@ -155,7 +155,8 @@ gpujoin_join_quals(kern_context *kcxt,
 				   kern_multirels *kmrels,
 				   int depth,
 				   cl_uint *x_buffer,
-				   HeapTupleHeaderData *inner_htup);
+				   HeapTupleHeaderData *inner_htup,
+				   cl_bool *needs_outer_row);
 
 /*
  * gpujoin_hash_value
@@ -314,32 +315,33 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 	/* will be valid, if LEFT OUTER JOIN */
 	lo_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth, kds_in->nitems,
 										   cuda_index, outer_join_map);
-
-	/* outer input */
-	if (x_index < x_limit)
-		x_buffer = KERN_GET_RESULT(kresults_src, x_index);
-	else
-		x_buffer = NULL;
-
-	/* inner input */
-	if (y_index < y_limit)
-		y_htup = kern_get_tuple_row(kds_in, y_index);
-	else
-		y_htup = NULL;
-
-	/* does it satisfies join condition? */
-	is_matched = gpujoin_join_quals(&kcxt,
-									kds,
-									kmrels,
-									depth,
-									x_buffer,
-									y_htup);
-	if (is_matched)
+	/* inside of the range? */
+	if (x_index < x_limit && y_index < y_limit)
 	{
-		y_offset = (size_t)y_htup - (size_t)kds_in;
-		if (lo_map && !lo_map[y_index])
-			lo_map[y_index] = true;
+		/* outer input */
+		x_buffer = KERN_GET_RESULT(kresults_src, x_index);
+		/* inner input */
+		y_htup = kern_get_tuple_row(kds_in, y_index);
+
+		/* does it satisfies join condition? */
+		is_matched = gpujoin_join_quals(&kcxt,
+										kds,
+										kmrels,
+										depth,
+										x_buffer,
+										y_htup,
+										NULL);
+		if (is_matched)
+		{
+			y_offset = (size_t)y_htup - (size_t)kds_in;
+			if (lo_map && !lo_map[y_index])
+				lo_map[y_index] = true;
+		}
 	}
+	else
+		is_matched = false;
+
+	__syncthreads();
 
 	/*
 	 * Expand kresults_dst->nitems, and put values
@@ -387,8 +389,8 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 	kern_parambuf	   *kparams = KERN_GPUJOIN_PARAMBUF(kgjoin);
 	kern_data_store	   *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
 	kern_context		kcxt;
-	kern_hashitem	   *khitem;
-	cl_uint			   *x_buffer;
+	kern_hashitem	   *khitem = NULL;
+	cl_uint			   *x_buffer = NULL;
 	cl_uint			   *r_buffer;
 	cl_bool			   *lo_map;
 	cl_uint				crc_index;
@@ -426,7 +428,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 	}
 	__syncthreads();
 
-	/* will be valid, if LEFT OUTER JOIN */
+	/* will be valid, if RIGHT OUTER JOIN */
 	lo_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth, kds_hash->nitems,
 										   cuda_index, outer_join_map);
 
@@ -448,11 +450,6 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 			needs_outer_row = true;
 		}
 	}
-	else
-	{
-		khitem = NULL;
-		x_buffer = NULL;
-	}
 
 	/*
 	 * Walks on the hash entries chain from the khitem
@@ -469,18 +466,16 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 											kmrels,
 											depth,
 											x_buffer,
-											h_htup);
+											h_htup,
+											&needs_outer_row);
 			if (is_matched)
 			{
 				assert(khitem->rowid < kds_hash->nitems);
 				assert(lo_map == NULL);
 				if (lo_map && !lo_map[khitem->rowid])
 					lo_map[khitem->rowid] = true;
-				needs_outer_row = false;
 			}
 		}
-		else
-			is_matched = false;
 
 		/* Expand kresults_dst->nitems */
 		offset = arithmetic_stairlike_add(is_matched ? 1 : 0, &count);
@@ -523,8 +518,21 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 	 */
 	if (KERN_MULTIRELS_LEFT_OUTER_JOIN(kmrels, depth))
 	{
-		offset = arithmetic_stairlike_add(needs_outer_row ? 1 : 0, &count);
+		if (needs_outer_row)
+		{
+			assert(x_buffer != NULL);
+			is_matched = gpujoin_join_quals(&kcxt,
+											kds,
+											kmrels,
+											depth,
+											x_buffer,
+											NULL,
+											NULL);
+		}
+		else
+			is_matched = false;
 
+		offset = arithmetic_stairlike_add(is_matched ? 1 : 0, &count);
 		if (count > 0)
 		{
 			if (get_local_id() == 0)
@@ -534,7 +542,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 			/* kresults_dst still have enough space? */
 			if (base + count >= kresults_dst->nrooms)
 				STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
-			else if (needs_outer_row)
+			else if (is_matched)
 			{
 				assert(x_buffer != NULL);
 				r_buffer = KERN_GET_RESULT(kresults_dst, base + offset);
