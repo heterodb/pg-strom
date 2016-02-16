@@ -142,7 +142,8 @@ gpujoin_join_quals(kern_context *kcxt,
 				   kern_multirels *kmrels,
 				   int depth,
 				   cl_uint *x_buffer,
-				   HeapTupleHeaderData *inner_htup);
+				   HeapTupleHeaderData *inner_htup,
+				   cl_bool *needs_outer_row);
 
 /*
  * gpujoin_hash_value
@@ -361,6 +362,7 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 		cl_bool			is_matched;
 		cl_uint			offset;
 		cl_uint			count;
+		cl_bool			__dummy__;
 		__shared__ cl_uint base;
 
 		/* outer input */
@@ -381,7 +383,8 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 										kmrels,
 										depth,
 										x_buffer,
-										y_htup);
+										y_htup,
+										&__dummy__);
 		if (is_matched)
 		{
 			y_offset = (size_t)y_htup - (size_t)kds_in;
@@ -390,6 +393,7 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 		}
 		else
 			y_offset = UINT_MAX;
+		__syncthreads();
 
 		/*
 		 * Expand kresults_out->nitems, and put values
@@ -503,6 +507,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
         cl_uint		   *r_buffer;
 		cl_uint			offset;
 		cl_uint			count;
+		cl_uint			num_matched = 0;
 		cl_bool			is_matched;
 		cl_bool			needs_outer_row = false;
 
@@ -523,7 +528,6 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 				hash_value <= kds_hash->hash_max)
 			{
 				khitem = KERN_HASH_FIRST_ITEM(kds_hash, hash_value);
-				needs_outer_row = true;
 			}
 		}
 
@@ -545,13 +549,14 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 											kmrels,
 											depth,
 											x_buffer,	/* valid if in range */
-											h_htup);	/* valid if in range */
+											h_htup,		/* valid if in range */
+											&needs_outer_row);
 			if (is_matched)
 			{
+				num_matched++;
 				assert(khitem->rowid < kds_hash->nitems);
 				if (lo_map && !lo_map[khitem->rowid])
 					lo_map[khitem->rowid] = true;
-				needs_outer_row = false;
 			}
 
 			/*
@@ -593,6 +598,9 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 		 */
 		if (KERN_MULTIRELS_LEFT_OUTER_JOIN(kmrels, depth))
 		{
+			if (num_matched > 0)
+				needs_outer_row = false;
+
 			offset = arithmetic_stairlike_add(needs_outer_row ? 1 : 0,
 											  &count);
 			if (get_local_xid() == 0)
