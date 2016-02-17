@@ -1100,19 +1100,30 @@ out:
 }
 
 /*
- * gpujoin_count_row_dist_hist
+ * gpujoin_count_rows_dist
  *
- * makes row distribution histgram when buffer gets overflow
+ * It counts a rough rows distribution degreee on buffer overflow.
+ * No needs to be a strict count, so we use a histgram constructed on
+ * a shared memory region as an indicator of the distribution.
  */
-#define ROW_DIST_HIST_SIZE		(10 * 1024)
+typedef struct
+{
+	kern_gpujoin   *kgjoin;
+	kern_multirels *kmrels;
+	kern_resultbuf *kresults;
+	cl_int			thread_width;
+} kern_rows_dist_args_t;
+
+#define ROW_DIST_COUNT_MAX_THREAD_WIDTH		18
+#define ROW_DIST_HIST_SIZE		(1024 * ROW_DIST_COUNT_MAX_THREAD_WIDTH)
 
 KERNEL_FUNCTION_MAXTHREADS(void)
-gpujoin_count_row_dist_hist(kern_gpujoin *kgjoin,
-							kern_multirels *kmrels,
-							kern_resultbuf *kresults)
+gpujoin_count_rows_dist(kern_gpujoin *kgjoin,
+						kern_multirels *kmrels,
+						kern_resultbuf *kresults,
+						cl_int thread_width)
 {
 	cl_uint		nvalids = min(kresults->nitems, kresults->nrooms);
-	cl_uint		multiple;
 	cl_uint		limit;
 	cl_uint		i, j;
 	__shared__ cl_uint	pg_crc32_table[256];
@@ -1127,27 +1138,41 @@ gpujoin_count_row_dist_hist(kern_gpujoin *kgjoin,
 	}
 	__syncthreads();
 
-	multiple = (ROW_DIST_HIST_SIZE + get_local_size() - 1) / get_local_size();
-	limit = multiple * get_local_size();
+	limit = ((ROW_DIST_HIST_SIZE +
+			  get_local_size() - 1) / get_local_size()) * get_local_size();
 
 	for (i=0; i < kresults->nrels; i++)
 	{
 		cl_uint		count = 0;
 		cl_uint		hash;
 
-		/* makes row distribution histgram in this depth */
-		if (get_global_id() < nvalids)
+		/* clear the row distribution histgram of this depth */
+		for (j = get_local_id();
+			 j < ROW_DIST_HIST_SIZE;
+			 j += get_local_size())
 		{
-			cl_uint	   *r_buffer = KERN_GET_RESULT(kresults, get_global_id());
-
-			hash = pg_common_comp_crc32(pg_crc32_table, 0U,
-										(const char *)(r_buffer + i),
-										sizeof(cl_uint));
-			row_dist_hist[hash % ROW_DIST_HIST_SIZE] = 1;
+			row_dist_hist[j] = 0;
 		}
 		__syncthreads();
 
-		/* count the row distribution histgram */
+		/* Makes row distribution histgram */
+		for (j=0; j < thread_width; j++)
+		{
+			cl_uint		r_index = get_global_id() * thread_width + j;
+
+			if (r_index < nvalids)
+			{
+				cl_uint	   *r_buffer = KERN_GET_RESULT(kresults, r_index);
+
+				hash = pg_common_comp_crc32(pg_crc32_table, 0U,
+											(const char *)(r_buffer + i),
+											sizeof(cl_uint));
+				row_dist_hist[hash % ROW_DIST_HIST_SIZE] = 1;
+			}
+		}
+		__syncthreads();
+
+		/* Count the row distribution histgram */
 		for (j = get_local_id();
 			 j < limit;
 			 j += get_local_size())
@@ -1157,32 +1182,9 @@ gpujoin_count_row_dist_hist(kern_gpujoin *kgjoin,
 										 : 0);
 		}
 
-		/*
-		 * NOTE: Our model assumes highly occupied histgram may have
-		 * higher probability of conflicts with different rows but
-		 * same CRC32 code, but less occupied histgram does not.
-		 * If we would adjust row_dist_hist score with liner manner,
-		 * it may make a problem. For example, only one tuples in
-		 * a large table (nrows=10M) contributed the join results,
-		 * its adjustment factor also becomes large, even if all rows
-		 * in a small table (nrows=100) contributed.
-		 * So, we adjust the score by (count / ROW_DIST_HIST_SIZE)^2
-		 * to increase the score rapidly if many rows in small table
-		 * were contributed to the join result.
-		 */
 		if (get_local_id() == 0)
-		{
-			cl_float	score = (cl_float) count;
-			cl_float	weight;
-
-			/* adjustment by the histgram occupancy */
-			weight = ((cl_float) count / (cl_float)ROW_DIST_HIST_SIZE);
-			score *= sqrt(2.0 * weight - weight * weight);
-			/* adjustment by the window size */
-			score /= (cl_float)kgjoin->jscale[i].window_size;
-
-			atomicAdd(&kgjoin->jscale[i].row_dist_score, score);
-		}
+			atomicAdd(&kgjoin->jscale[i].row_dist_score, (cl_float)count);
+		__syncthreads();
 	}
 }
 
@@ -1208,43 +1210,70 @@ gpujoin_resize_window(kern_gpujoin *kgjoin,
 					  kern_data_store *kds_src,
 					  kern_resultbuf *kresults,
 					  cl_int nsplits,
+					  cl_int smx_count,
 					  cl_int smx_clock)
 {
-	void		  **kern_args;
+	cudaFuncAttributes fattrs;
+	kern_rows_dist_args_t *kern_args;
 	dim3			grid_sz;
 	dim3			block_sz;
+	cl_uint			nvalids;
+	cl_uint			unitsz;
+	cl_uint			thread_width;
 	cl_uint			depth;
 	cl_uint			target_depth = 0;
 	cl_float		row_dist_score_largest = FLT_MIN;
 	cl_ulong		tv1, tv2;
+	kern_errorbuf	kerror_save;
 	cudaError_t		status = cudaSuccess;
 
-	kern_args = (void **)
-		cudaGetParameterBuffer(sizeof(void *),
-							   sizeof(void *) * 3);
-	if (!kern_args)
-	{
-		STROM_SET_ERROR(&kgjoin->kerror, StromError_OutOfKernelArgs);
-		return -1;
-	}
-	kern_args[0] = kgjoin;
-	kern_args[1] = kmrels;
-	kern_args[2] = kresults;
+	/*
+	 * clear the error code, but may need to restore if we cannot
+	 * split the target window any more
+	 */
+	kerror_save = kgjoin->kerror;
+	memset(&kgjoin->kerror, 0, sizeof(kern_errorbuf));
 
-	status = pgstrom_largest_workgroup_size(&grid_sz,
-											&block_sz,
-											(const void *)
-											gpujoin_count_row_dist_hist,
-											min(kresults->nitems,
-												kresults->nrooms),
-											sizeof(kern_errorbuf));
+	/* get max available block size */
+	status = cudaFuncGetAttributes(&fattrs, (const void *)
+								   gpujoin_count_rows_dist);
 	if (status != cudaSuccess)
 	{
 		STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
 		return -1;
 	}
 
-	status = cudaLaunchDevice((void *)gpujoin_count_row_dist_hist,
+	/* how many items to be processed per thread? */
+	nvalids = min(kresults->nitems, kresults->nrooms);
+	thread_width = (nvalids - 1) / (smx_count * fattrs.maxThreadsPerBlock) + 1;
+	if (thread_width > ROW_DIST_COUNT_MAX_THREAD_WIDTH)
+		thread_width = ROW_DIST_COUNT_MAX_THREAD_WIDTH;
+
+	/* allocation of argument buffer */
+	kern_args = (kern_rows_dist_args_t *)
+		cudaGetParameterBuffer(sizeof(void *),
+							   sizeof(kern_rows_dist_args_t));
+	if (!kern_args)
+	{
+		STROM_SET_ERROR(&kgjoin->kerror, StromError_OutOfKernelArgs);
+		return -1;
+	}
+	kern_args->kgjoin = kgjoin;
+	kern_args->kmrels = kmrels;
+	kern_args->kresults = kresults;
+	kern_args->thread_width = thread_width;
+
+	/* special calculation of the kernel block size */
+	block_sz.x = fattrs.maxThreadsPerBlock;
+	block_sz.y = 1;
+	block_sz.z = 1;
+	unitsz = thread_width * fattrs.maxThreadsPerBlock;
+	grid_sz.x = (nvalids - 1) / unitsz + 1;
+	grid_sz.y = 1;
+	grid_sz.z = 1;
+
+	/* OK, launch the histgram calculation kernel */
+	status = cudaLaunchDevice((void *)gpujoin_count_rows_dist,
 							  kern_args, grid_sz, block_sz,
 							  0,
 							  NULL);
@@ -1274,13 +1303,33 @@ gpujoin_resize_window(kern_gpujoin *kgjoin,
 
 		if (window_size == 0)
 			continue;
-		row_dist_score = ((cl_float) kgjoin->jscale[depth].row_dist_score /
-						  (cl_float) window_size);
+		/*
+		 * NOTE: Adjustment of the row-distribution score
+		 *
+		 * Because of performance reason, we don't make a strict histgram
+		 * (it is almost equivalent to GpuPreAgg!). It is a sum of per-block
+		 * summary, thus, may contain duplications to be adjusted.
+		 * A unit size of the histgram is (thread-width * block-size).
+		 * If window size is less than the unit-size, it is obvious that rows
+		 * may be distributed in any histgrams. So, simply we divide the score
+		 * by grid-size.
+		 * If window size is larger than unit-size, we have to pay attention
+		 * for duplications across histgram. We adopted a simple approximate
+		 * that assumes rows will duplicate according to the square root of
+		 * number of histgrams.
+		 */
+		row_dist_score = kgjoin->jscale[depth].row_dist_score;
+		if (window_size <= unitsz)
+			row_dist_score /= (cl_float)grid_sz.x;
+		else
+			row_dist_score /= (1.0 + sqrt((cl_float)(grid_sz.x - 1)));
+
 		if (row_dist_score > row_dist_score_largest)
 		{
 			target_depth = depth;
-	        row_dist_score_largest = row_dist_score;
+			row_dist_score_largest = row_dist_score;
 		}
+		kgjoin->jscale[depth].row_dist_score = row_dist_score;
 	}
 
 	/*
@@ -1290,7 +1339,10 @@ gpujoin_resize_window(kern_gpujoin *kgjoin,
 	kgjoin->jscale[target_depth].window_size
 		= kgjoin->jscale[target_depth].window_size / nsplits;
 	if (kgjoin->jscale[target_depth].window_size <= 1)
+	{
+		kgjoin->kerror = kerror_save;
 		return -1;
+	}
 
 	/*
 	 * Inform caller the victim depth. If it is the last depth, we may
@@ -1338,6 +1390,7 @@ gpujoin_main(kern_gpujoin *kgjoin,		/* in/out: misc stuffs */
 	cl_uint				window_size;
 	cl_int				device;
 	cl_int				smx_clock;
+	cl_int				smx_count;
 	cl_int				depth;
 	cl_int				nsplits;
 	cl_int				victim;
@@ -1362,10 +1415,19 @@ gpujoin_main(kern_gpujoin *kgjoin,		/* in/out: misc stuffs */
 		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
 		goto out;
 	}
+
 	status = cudaDeviceGetAttribute(&smx_clock,
 									cudaDevAttrClockRate,
 									device);
-	status = cudaGetDevice(&device);
+	if (status != cudaSuccess)
+	{
+		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+		goto out;
+	}
+
+	status = cudaDeviceGetAttribute(&smx_count,
+									cudaDevAttrMultiProcessorCount,
+									device);
 	if (status != cudaSuccess)
 	{
 		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
@@ -1545,11 +1607,11 @@ retry_major:
 												   kds_src,
 												   kresults_dst,
 												   nsplits,
+												   smx_count,
 												   smx_clock);
 					if (victim < 0)
 						return;
-					memset(&kgjoin->kerror, 0, sizeof(kern_errorbuf));
-					if (victim < depth)
+					else if (victim < depth)
 					{
 						kgjoin->num_major_retry++;
 						goto retry_major;
@@ -1634,11 +1696,11 @@ retry_major:
 												   kds_src,
 												   kresults_dst,
 												   nsplits,
+												   smx_count,
 												   smx_clock);
 					if (victim < 0)
 						return;
-					memset(&kgjoin->kerror, 0, sizeof(kern_errorbuf));
-					if (victim < depth)
+					else if (victim < depth)
 					{
 						kgjoin->num_major_retry++;
 						goto retry_major;
@@ -1720,11 +1782,11 @@ retry_major:
 												   kds_src,
 												   kresults_dst,
 												   nsplits,
+												   smx_count,
 												   smx_clock);
 					if (victim < 0)
 						return;
-					memset(&kgjoin->kerror, 0, sizeof(kern_errorbuf));
-					if (victim < depth)
+					else if (victim < depth)
 					{
 						kgjoin->num_major_retry++;
 						goto retry_major;
@@ -1805,11 +1867,11 @@ retry_major:
 												   kds_src,
 												   kresults_dst,
 												   nsplits,
+												   smx_count,
 												   smx_clock);
 					if (victim < 0)
 						return;
-					memset(&kgjoin->kerror, 0, sizeof(kern_errorbuf));
-					if (victim < depth)
+					else if (victim < depth)
 					{
 						kgjoin->num_major_retry++;
 						goto retry_major;
@@ -1858,13 +1920,13 @@ retry_major:
 									   kds_src,
 									   kresults_src,
 									   nsplits,
+									   smx_count,
 									   smx_clock);
 		if (victim < 0)
 		{
 			STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
 			goto out;
 		}
-		memset(&kgjoin->kerror, 0, sizeof(kern_errorbuf));
 		kgjoin->num_major_retry++;
 		goto retry_major;
 	}
@@ -1944,9 +2006,9 @@ retry_major:
 								  kds_src,
 								  kresults_src,
 								  kds_dst->nitems / nitems_to_fit + 1,
+								  smx_count,
 								  smx_clock) < 0)
 			return;
-		memset(&kgjoin->kerror, 0, sizeof(kern_errorbuf));
 		kgjoin->num_major_retry++;
 		goto retry_major;
 	}

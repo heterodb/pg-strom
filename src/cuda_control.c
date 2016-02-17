@@ -2555,6 +2555,7 @@ errorTextKernel(kern_errorbuf *kerror)
 		KERN_ENTRY(gpujoin_outer_hashjoin);
 		KERN_ENTRY(gpujoin_projection_row);
 		KERN_ENTRY(gpujoin_projection_slot);
+		KERN_ENTRY(gpujoin_count_rows_dist);
 		KERN_ENTRY(gpujoin_main);
 		KERN_ENTRY(gpupreagg_preparation);
 		KERN_ENTRY(gpupreagg_local_reduction);

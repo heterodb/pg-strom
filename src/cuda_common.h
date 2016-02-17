@@ -234,6 +234,7 @@ typedef uintptr_t		hostptr_t;
 #define StromKernel_gpujoin_outer_hashjoin			0x0205
 #define StromKernel_gpujoin_projection_row			0x0206
 #define StromKernel_gpujoin_projection_slot			0x0207
+#define StromKernel_gpujoin_count_rows_dist			0x0208
 #define StromKernel_gpujoin_main					0x0299
 #define StromKernel_gpupreagg_preparation			0x0301
 #define StromKernel_gpupreagg_local_reduction		0x0302
