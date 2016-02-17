@@ -92,54 +92,90 @@
  * Performance monitor structure
  */
 typedef struct {
-	cl_bool			enabled;
-	cl_bool			prime_in_gpucontext;
+	cl_bool		enabled;
+	cl_bool		prime_in_gpucontext;
+	cl_uint		extra_flags;	/* one of DEVKERNEL_NEEDS_GPUXXXX */
 	/*-- memory allocation counter --*/
-	cl_uint			num_host_malloc;
-	cl_uint			num_host_mfree;
-	cl_uint			num_dev_malloc;
-	cl_uint			num_dev_mfree;
-	cl_double		tv_host_malloc;
-	cl_double		tv_host_mfree;
-	cl_double		tv_dev_malloc;
-	cl_double		tv_dev_mfree;
+	cl_uint		num_host_malloc;
+	cl_uint		num_host_mfree;
+	cl_uint		num_dev_malloc;
+	cl_uint		num_dev_mfree;
+	cl_double	tv_host_malloc;
+	cl_double	tv_host_mfree;
+	cl_double	tv_dev_malloc;
+	cl_double	tv_dev_mfree;
 	/*-- build cuda program --*/
 	struct timeval	tv_build_start;
 	struct timeval	tv_build_end;
-#if 0
-	union {
-		struct {
+	/*-- time for task pending --*/
 
-		} gpuscan;
-		struct {
-
-		} gpujoin;
-		struct {
-
-		} gpupreagg;
-		struct {
-
-		} gpusort;
-	} u;
-#endif
-
-	/* below is the legacy perfmon stuff */
-
-	cl_uint		num_samples;
-	/*-- perfmon to load and materialize --*/
+	/*-- time for I/O stuff --*/
 	cl_double	time_inner_load;	/* time to load the inner relation */
 	cl_double	time_outer_load;	/* time to load the outer relation */
 	cl_double	time_materialize;	/* time to materialize the result */
-	/*-- perfmon to launch CUDA kernel --*/
-	cl_double	time_launch_cuda;	/* time to kick CUDA commands */
-	cl_double	time_sync_tasks;	/* time to synchronize tasks */
-	/*-- perfmon for DMA send/recv --*/
+	/*-- DMA data transfer --*/
 	cl_uint		num_dma_send;	/* number of DMA send request */
 	cl_uint		num_dma_recv;	/* number of DMA receive request */
 	cl_ulong	bytes_dma_send;	/* bytes of DMA send */
 	cl_ulong	bytes_dma_recv;	/* bytes of DMA receive */
 	cl_double	time_dma_send;	/* time to send host=>device data */
 	cl_double	time_dma_recv;	/* time to receive device=>host data */
+	/*-- specific items for each GPU logic --*/
+	cl_uint		num_tasks;		/* number of tasks completed */
+#if 1
+	struct {
+		cl_uint		num_kern_exec_quals;
+		cl_uint		num_kern_projection;
+		cl_double	tv_kern_exec_quals;
+		cl_double	tv_kern_projection;
+	} gscan;
+	struct {
+		cl_uint		num_kern_outer_scan;
+		cl_uint		num_kern_exec_nestloop;
+		cl_uint		num_kern_exec_hashjoin;
+		cl_uint		num_kern_outer_nestloop;
+		cl_uint		num_kern_outer_hashjoin;
+		cl_uint		num_kern_projection;
+		cl_uint		num_kern_rows_dist;
+		cl_double	tv_kern_outer_scan;
+		cl_double	tv_kern_exec_nestloop;
+		cl_double	tv_kern_exec_hashjoin;
+		cl_double	tv_kern_outer_nestloop;
+		cl_double	tv_kern_outer_hashjoin;
+		cl_double	tv_kern_projection;
+		cl_double	tv_kern_rows_dist;
+		/* DMA of inner multi relations */
+		cl_uint		num_inner_dma_send;
+		cl_ulong	bytes_inner_dma_send;
+		cl_double	tv_inner_dma_send;
+	} gjoin;
+	struct {
+		cl_uint		num_kern_prep;
+		cl_uint		num_kern_nogrp;
+		cl_uint		num_kern_lagg;
+		cl_uint		num_kern_gagg;
+		cl_uint		num_kern_fagg;
+		cl_double	tv_kern_prep;
+		cl_double	tv_kern_nogrp;
+		cl_double	tv_kern_lagg;
+		cl_double	tv_kern_gagg;
+		cl_double	tv_kern_fagg;
+	} gpreagg;
+	struct {
+		char		__to_be_later__;
+		
+	} gsort;
+#endif
+
+	/* below is the legacy perfmon stuff */
+
+	cl_uint		num_samples;
+	/*-- perfmon to load and materialize --*/
+	/*-- perfmon to launch CUDA kernel --*/
+	cl_double	time_launch_cuda;	/* time to kick CUDA commands */
+	cl_double	time_sync_tasks;	/* time to synchronize tasks */
+	/*-- perfmon for DMA send/recv --*/
+
 	/*-- (special perfmon for gpuscan) --*/
 	cl_uint		num_kern_qual;	/* number of qual eval kernel execution */
 	cl_double	time_kern_qual;	/* time to execute qual eval kernel */

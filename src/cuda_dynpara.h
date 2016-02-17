@@ -29,6 +29,18 @@
 #define WORKGROUPSIZE_RESULT_EINVAL		CUDA_ERROR_INVALID_VALUE
 #endif
 
+#ifdef __CUDACC__
+/*
+ * Macro to track timeval and increment usage.
+ */
+#define TIMEVAL_RECORD(ktask,field,tv1,tv2,smx_clock)				\
+	do {															\
+		(ktask)->num_##field++;										\
+		(ktask)->tv_##field += (((cl_float)(((tv2) - (tv1)))) /		\
+								 ((cl_float)((smx_clock) * 1000)));	\
+	} while(0)
+#endif
+
 /*
  * __pgstrom_optimal_workgroup_size
  *

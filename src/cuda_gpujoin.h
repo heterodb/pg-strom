@@ -96,14 +96,14 @@ typedef struct
 	cl_uint			num_kern_outer_nestloop;
 	cl_uint			num_kern_outer_hashjoin;
 	cl_uint			num_kern_projection;
-	cl_uint			num_kern_row_dist_hist;
-	cl_float		usec_kern_outer_scan;
-	cl_float		usec_kern_exec_nestloop;
-	cl_float		usec_kern_exec_hashjoin;
-	cl_float		usec_kern_outer_nestloop;
-	cl_float		usec_kern_outer_hashjoin;
-	cl_float		usec_kern_projection;
-	cl_float		usec_kern_row_dist_hist;
+	cl_uint			num_kern_rows_dist;
+	cl_float		tv_kern_outer_scan;
+	cl_float		tv_kern_exec_nestloop;
+	cl_float		tv_kern_exec_hashjoin;
+	cl_float		tv_kern_outer_nestloop;
+	cl_float		tv_kern_outer_hashjoin;
+	cl_float		tv_kern_projection;
+	cl_float		tv_kern_rows_dist;
 	cl_uint			num_minor_retry;
 	cl_uint			num_major_retry;
 	/*
@@ -1186,17 +1186,6 @@ gpujoin_count_rows_dist(kern_gpujoin *kgjoin,
 	}
 }
 
-
-
-
-#define TIMEVAL_RECORD(kgjoin,field,tv1,tv2,smx_clock)	\
-	do {												\
-		(kgjoin)->num_##field++;						\
-		(kgjoin)->usec_##field += (cl_float)			\
-			((1000 * ((tv2) - (tv1))) / (smx_clock));	\
-	} while(0)
-
-
 /*
  * returns true, if major retry, elsewhere minor retry
  *
@@ -1288,7 +1277,7 @@ gpujoin_resize_window(kern_gpujoin *kgjoin,
 		return -1;
 	}
 	tv2 = clock64();
-	TIMEVAL_RECORD(kgjoin,kern_row_dist_hist,tv1,tv2,smx_clock);
+	TIMEVAL_RECORD(kgjoin,kern_rows_dist,tv1,tv2,smx_clock);
 	if (kgjoin->kerror.errcode != StromError_Success)
 		return -1;
 	/*
