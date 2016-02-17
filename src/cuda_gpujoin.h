@@ -520,7 +520,6 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 	 */
 	if (KERN_MULTIRELS_LEFT_OUTER_JOIN(kmrels, depth))
 	{
-#if 1
 		if (needs_outer_row)
 		{
 			assert(x_buffer != NULL);
@@ -553,7 +552,6 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 				r_buffer[depth] = 0;	/* inner NULL */
 			}
 		}
-#endif
 	}
 	kern_writeback_error_status(&kgjoin->kerror, kcxt.e);
 }

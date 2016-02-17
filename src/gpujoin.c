@@ -4622,7 +4622,6 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 	pgstrom_multirels  *pmrels = pgjoin->pmrels;
 	pgstrom_data_store *pds_src = pgjoin->pds_src;
 	pgstrom_data_store *pds_dst = pgjoin->pds_dst;
-	GpuJoinState   *gjs = (GpuJoinState *) pgjoin->task.gts;
 	Size			length;
 	Size			total_length;
 	CUresult		rc;
@@ -4632,8 +4631,6 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 	 * sanity checks
 	 */
 	Assert(pds_src == NULL || pds_src->kds->format == KDS_FORMAT_ROW);
-	Assert(gjs->outer_join_start_depth >= 1 &&
-		   gjs->outer_join_start_depth <= gjs->num_rels);
 	Assert(pds_dst->kds->format == KDS_FORMAT_ROW ||
 		   pds_dst->kds->format == KDS_FORMAT_SLOT);
 	/*
