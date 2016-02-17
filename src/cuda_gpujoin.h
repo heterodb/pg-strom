@@ -478,6 +478,8 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 					lo_map[khitem->rowid] = true;
 			}
 		}
+		else
+			is_matched = false;
 
 		/* Expand kresults_dst->nitems */
 		offset = arithmetic_stairlike_add(is_matched ? 1 : 0, &count);
@@ -520,7 +522,6 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 	 */
 	if (KERN_MULTIRELS_LEFT_OUTER_JOIN(kmrels, depth))
 	{
-#if 1
 		if (needs_outer_row)
 		{
 			assert(x_buffer != NULL);
@@ -553,7 +554,6 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 				r_buffer[depth] = 0;	/* inner NULL */
 			}
 		}
-#endif
 	}
 	kern_writeback_error_status(&kgjoin->kerror, kcxt.e);
 }
@@ -1449,6 +1449,11 @@ retry_major:
 				kgjoin->jscale[0].inner_nitems = kresults_src->nitems;
 				kgjoin->jscale[0].total_nitems = kresults_src->nitems;
 			}
+			else
+			{
+				kgjoin->jscale[0].inner_nitems = 0;	/* no input rows */
+				kgjoin->jscale[0].total_nitems = 0;	/* update later */
+			}
 		}
 		/* make the kresults_dst buffer empty */
 		memset(kresults_dst, 0, offsetof(kern_resultbuf, results[0]));
@@ -1555,8 +1560,8 @@ retry_major:
 				else if (kgjoin->kerror.errcode != StromError_Success)
 					return;
 				/* update run-time statistics */
-				kgjoin->jscale[depth-1].inner_nitems = kresults_dst->nitems;
-				kgjoin->jscale[depth-1].total_nitems = kresults_dst->nitems;
+				kgjoin->jscale[depth].inner_nitems = kresults_dst->nitems;
+				kgjoin->jscale[depth].total_nitems = kresults_dst->nitems;
 			}
 
 			if (kds_src == NULL &&
@@ -1644,7 +1649,7 @@ retry_major:
 				else if (kgjoin->kerror.errcode != StromError_Success)
 					return;
 				/* update run-time statistics */
-				kgjoin->jscale[depth-1].total_nitems = kresults_dst->nitems;
+				kgjoin->jscale[depth].total_nitems = kresults_dst->nitems;
 			}
 		}
 		else
@@ -1730,8 +1735,8 @@ retry_major:
 				else if (kgjoin->kerror.errcode != StromError_Success)
 					return;
 				/* update run-time statistics */
-				kgjoin->jscale[depth-1].inner_nitems = kresults_dst->nitems;
-				kgjoin->jscale[depth-1].total_nitems = kresults_dst->nitems;
+				kgjoin->jscale[depth].inner_nitems = kresults_dst->nitems;
+				kgjoin->jscale[depth].total_nitems = kresults_dst->nitems;
 			}
 
 			if (kds_src == NULL &&
@@ -1815,7 +1820,7 @@ retry_major:
 				else if (kgjoin->kerror.errcode != StromError_Success)
 					return;
 				/* update run-time statistics */
-				kgjoin->jscale[depth-1].total_nitems = kresults_dst->nitems;
+				kgjoin->jscale[depth].total_nitems = kresults_dst->nitems;
 			}
 		}
 
@@ -1826,8 +1831,6 @@ retry_major:
 		kresults_src = kresults_dst;
 		kresults_dst = kresults_tmp;
 	}
-
-	assert(false);
 
 	/*
 	 * Launch:
