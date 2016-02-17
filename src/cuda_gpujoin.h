@@ -73,8 +73,6 @@ typedef struct
 								 * window resize. larger score means more
 								 * distributed depth, thus to be target of
 								 * the window split */
-	cl_uint		row_dist_total;	/* sum of row_dist_score, for better result
-								 * buffer estimation on host side */
 } kern_join_scale;
 
 typedef struct

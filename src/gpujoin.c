@@ -291,6 +291,8 @@ typedef struct
 	size_t			results_usage;	/* sum of kds_dst->usage */
 	size_t		   *inner_nitems;	/* number of inner join results items */
 	size_t		   *total_nitems;	/* number of (inner+outer) join results */
+	cl_double	   *row_dist_score;	/* degree of result row distribution */
+	bool			row_dist_score_valid;	/* true, if RDS is valid */
 	size_t			inner_dma_nums;	/* number of inner DMA calls */
 	size_t			inner_dma_size;	/* total length of inner DMA calls */
 
@@ -2560,7 +2562,8 @@ gpujoin_create_scan_state(CustomScan *node)
 	Assert(num_rels == list_length(node->custom_plans));
 	gjs = palloc0(offsetof(GpuJoinState, inners[num_rels]) +
 				  sizeof(size_t) * (num_rels + 1) +
-				  sizeof(size_t) * (num_rels + 1));
+				  sizeof(size_t) * (num_rels + 1) +
+				  sizeof(cl_double) * (num_rels + 1));
 
 	/* Set tag and executor callbacks */
 	NodeSetTag(gjs, T_CustomScanState);
@@ -2569,6 +2572,7 @@ gpujoin_create_scan_state(CustomScan *node)
 	gjs->inner_nitems = (size_t *)((char *)gjs + offsetof(GpuJoinState,
 														  inners[num_rels]));
 	gjs->total_nitems = (size_t *)(gjs->inner_nitems + num_rels + 1);
+	gjs->row_dist_score = (cl_double *)(gjs->total_nitems + num_rels + 1);
 
 	return (Node *) gjs;
 }
@@ -4052,6 +4056,7 @@ gpujoin_create_task(GpuJoinState *gjs,
 	Size				max_items;
 	cl_int				i, depth;
 	cl_int				target_depth;
+	cl_double			target_row_dist_score;
 
 	/*
 	 * Allocation of pgstrom_gpujoin task object
@@ -4116,6 +4121,7 @@ gpujoin_create_task(GpuJoinState *gjs,
 	 */
 major_retry:
 	target_depth = 0;
+	target_row_dist_score = gjs->row_dist_score[0];
 	length = 0;
 	ntuples = 0.0;
 	ntuples_delta = 0.0;
@@ -4142,14 +4148,38 @@ major_retry:
 			STROMALIGN(offsetof(kern_resultbuf, results[max_items_temp])) +
 			STROMALIGN(offsetof(kern_resultbuf, results[max_items_temp]));
 
+		/*
+		 * Remember the largest distributed depth (if run-time statistics
+		 * exists), or depth with largest delta elsewhere, for later
+		 * window reduction.
+		 */
+		if (depth > 0)
+		{
+			if (gjs->row_dist_score_valid)
+			{
+				if (target_row_dist_score < gjs->row_dist_score[depth])
+				{
+					target_row_dist_score = gjs->row_dist_score[depth];
+					target_depth = depth;
+				}
+			}
+			else if (depth == 1 || ntuples_next - ntuples > ntuples_delta)
+			{
+				ntuples_delta = Max(ntuples_next - ntuples, 0.0);
+				target_depth = depth;
+			}
+		}
+
 		/* split inner window if too large */
 		if (length > 2 * pgstrom_chunk_size())
 		{
-			pgjoin->kern.jscale[depth].window_size
+			pgjoin->kern.jscale[target_depth].window_size
 				/= (length / (2 * pgstrom_chunk_size())) + 1;
 			if (pgjoin->kern.jscale[depth].window_size < 1)
 				elog(ERROR, "Too much growth of result rows");
-			goto minor_retry;
+			if (depth == target_depth)
+				goto minor_retry;
+			goto major_retry;
 		}
 		max_items = Max(max_items, max_items_temp);
 
@@ -4165,6 +4195,9 @@ major_retry:
 			ntuples_delta = Max(ntuples_next - ntuples, 0.0);
 			target_depth = depth;
 		}
+
+
+
 		/* adjust window ratio, if virtual partition window */
 		pds = (depth == 0
 			   ? pgjoin->pds_src
@@ -4498,6 +4531,12 @@ gpujoin_task_complete(GpuTask *gtask)
 			 gjs->total_nitems[i] +=
 				 (Size)(pgjoin->window_ratio * (double)
 						pgjoin->kern.jscale[i].total_nitems);
+			 if (pgjoin->kern.jscale[i].row_dist_score > 0.0)
+			 {
+				 gjs->row_dist_score_valid = true;
+				 gjs->row_dist_score[i] +=
+					 pgjoin->kern.jscale[i].row_dist_score;
+			 }
 		}
 
 		/*
