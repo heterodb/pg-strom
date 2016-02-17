@@ -837,8 +837,8 @@ pgstrom_explain_perfmon(GpuTaskState *gts, ExplainState *es)
 							  1000.0 / pfm->time_dma_send);
 		snprintf(buf, sizeof(buf),
 				 "%s/sec, len: %s, time: %s, count: %u",
-				 bytesz_unitary_format(band),
-				 bytesz_unitary_format((double)pfm->bytes_dma_send),
+				 format_bytesz(band),
+				 format_bytesz((double)pfm->bytes_dma_send),
 				 milliseconds_unitary_format(pfm->time_dma_send),
 				 pfm->num_dma_send);
 		ExplainPropertyText("DMA send", buf, es);
@@ -850,8 +850,8 @@ pgstrom_explain_perfmon(GpuTaskState *gts, ExplainState *es)
 							  1000.0 / pfm->time_dma_recv);
 		snprintf(buf, sizeof(buf),
 				 "%s/sec, len: %s, time: %s, count: %u",
-				 bytesz_unitary_format(band),
-				 bytesz_unitary_format((double)pfm->bytes_dma_recv),
+				 format_bytesz(band),
+				 format_bytesz((double)pfm->bytes_dma_recv),
 				 milliseconds_unitary_format(pfm->time_dma_recv),
 				 pfm->num_dma_recv);
 		ExplainPropertyText("DMA recv", buf, es);

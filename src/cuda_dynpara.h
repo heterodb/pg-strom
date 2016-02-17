@@ -37,7 +37,7 @@
 	do {															\
 		(ktask)->num_##field++;										\
 		(ktask)->tv_##field += (((cl_float)(((tv2) - (tv1)))) /		\
-								 ((cl_float)((smx_clock) * 1000)));	\
+								((cl_float)(smx_clock)));			\
 	} while(0)
 #endif
 

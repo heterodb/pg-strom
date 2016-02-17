@@ -4545,8 +4545,8 @@ gpupreagg_task_complete(GpuTask *gtask)
 			elog(NOTICE, "GpuPreAgg urgent termination: segment %p (ngroups %zu of %zu, extra %s of %s, ntasks %d or %d) by gpupreagg (id=%d)",
 				 segment,
 				 segment->total_ngroups, segment->allocated_nrooms,
-				 bytesz_unitary_format(segment->total_varlena),
-				 bytesz_unitary_format(segment->allocated_varlena),
+				 format_bytesz(segment->total_varlena),
+				 format_bytesz(segment->allocated_varlena),
 				 (int)segment->total_ntasks, segment->idx_chunks,
 				 gpreagg->segment_id);
 			Assert(!gpreagg->is_terminator);

@@ -920,7 +920,7 @@ typealign_get_width(char type_align)
 #endif
 
 static inline char *
-bytesz_unitary_format(Size nbytes)
+format_bytesz(Size nbytes)
 {
 	if (nbytes > (Size)(1UL << 43))
 		return psprintf("%.2fTB", (double)nbytes / (double)(1UL << 40));
@@ -934,7 +934,7 @@ bytesz_unitary_format(Size nbytes)
 }
 
 static inline char *
-milliseconds_unitary_format(double milliseconds)
+format_millisec(double milliseconds)
 {
 	if (milliseconds > 300000.0)    /* more then 5min */
 		return psprintf("%.2fmin", milliseconds / 60000.0);
@@ -942,5 +942,13 @@ milliseconds_unitary_format(double milliseconds)
 		return psprintf("%.2fsec", milliseconds / 1000.0);
 	return psprintf("%.2fms", milliseconds);
 }
+
+/* old style */
+static inline char *
+milliseconds_unitary_format(double milliseconds)
+{
+	return format_millisec(milliseconds);
+}
+
 
 #endif	/* PG_STROM_H */

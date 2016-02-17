@@ -3024,8 +3024,8 @@ gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 									  (double) nrows_in),
 							 100.0 * nrows_ratio,
 							 hash_outer_key ? "Hash" : "Heap",
-							 bytesz_unitary_format(istate->pds_limit),
-							 bytesz_unitary_format(istate->ichunk_size),
+							 format_bytesz(istate->pds_limit),
+							 format_bytesz(istate->ichunk_size),
 							 istate->nbatches_exec,
 							 istate->nbatches_plan);
 		}
@@ -3040,7 +3040,7 @@ gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 							 "KDS-%s (size: %s, nbatches: %u)",
 							 100.0 * nrows_ratio,
 							 hash_outer_key ? "Hash" : "Heap",
-							 bytesz_unitary_format(istate->ichunk_size),
+							 format_bytesz(istate->ichunk_size),
 							 istate->nbatches_plan);
 		}
 
@@ -3059,6 +3059,8 @@ gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	/* inner multirels buffer statistics */
 	if (es->analyze)
 	{
+		pgstrom_perfmon	   *pfm = &gjs->gts.pfm_accum;
+
 		if (es->format == EXPLAIN_FORMAT_TEXT)
 		{
 			resetStringInfo(&str);
@@ -3074,19 +3076,21 @@ gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 					if (lc1 != list_head(istate->pds_list))
 						appendStringInfo(&str, ", ");
 					appendStringInfo(&str, "%s",
-									 bytesz_unitary_format(pds->kds->length));
+									 format_bytesz(pds->kds->length));
 				}
 				appendStringInfo(&str, ")");
 			}
-			appendStringInfo(&str, ", DMA nums: %zu, size: %s",
-							 gjs->inner_dma_nums,
-							 bytesz_unitary_format(gjs->inner_dma_size));
+			appendStringInfo(&str, ", DMA nums: %u, size: %s",
+							 pfm->gjoin.num_inner_dma_send,
+							 format_bytesz(pfm->gjoin.bytes_inner_dma_send));
 			ExplainPropertyText("Inner Buffer", str.data, es);
    		}
 		else
 		{
-			ExplainPropertyLong("Num of Inner-DMA", gjs->inner_dma_nums, es);
-			ExplainPropertyLong("Size of Inner-DMA", gjs->inner_dma_size, es);
+			ExplainPropertyLong("Num of Inner-DMA",
+								pfm->gjoin.num_inner_dma_send, es);
+			ExplainPropertyLong("Size of Inner-DMA",
+								pfm->gjoin.bytes_inner_dma_send, es);
 		}
 	}
 	/* other common field */
