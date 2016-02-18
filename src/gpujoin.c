@@ -4689,7 +4689,7 @@ skip:
 				SpinLockRelease(&gjs->gts.lock);
 				break;
 			}
-			Assert(jscale[i].window_base = nitems);
+			Assert(jscale[i].window_base == nitems);
 		}
 	}
 
@@ -5287,7 +5287,7 @@ gpujoin_inner_hash_preload_TS(GpuJoinState *gjs,
 		 * so we drop these tuples from the inner buffer.
 		 */
 		if (is_null_keys && (istate->join_type == JOIN_INNER ||
-							 istate->join_type == JOIN_RIGHT))
+							 istate->join_type == JOIN_LEFT))
 			continue;
 
 		forboth (lc1, pds_list,
@@ -5379,7 +5379,7 @@ next:
 	 * we don't need to keep this tuple in the 
 	 */
 	if (is_null_keys && (istate->join_type == JOIN_INNER ||
-						 istate->join_type == JOIN_RIGHT))
+						 istate->join_type == JOIN_LEFT))
 		goto next;
 
 	scan_desc = scan_slot->tts_tupleDescriptor;
