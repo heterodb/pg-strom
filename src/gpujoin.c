@@ -5285,7 +5285,6 @@ gpujoin_inner_hash_preload_TS(GpuJoinState *gjs,
 			{
 				if (pgstrom_data_store_insert_hashitem(pds, scan_slot, hash))
 					break;
-				Assert(false);
 				elog(ERROR, "Bug? GpuHashJoin Histgram was not correct");
 			}
 		}
@@ -5383,8 +5382,9 @@ next:
 		istate->consumed = KERN_DATA_STORE_HEAD_LENGTH(pds_hash->kds);
 	}
 
-	consumption = sizeof(cl_uint) +	/* for hash_slot */
-		MAXALIGN(offsetof(kern_hashitem, htup) + tuple->t_len);
+	consumption = (sizeof(cl_uint) +	/* for hash_slot */
+				   sizeof(cl_uint) +	/* for row_index */
+				   MAXALIGN(offsetof(kern_hashitem, htup) + tuple->t_len));
 	/*
 	 * Update Histgram
 	 */
