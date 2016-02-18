@@ -541,10 +541,10 @@ retry_major:
 		/*
 		 * inner chunk size estimation
 		 */
-		chunk_size = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]))
-			+ STROMALIGN(gpath->inners[i].hash_quals != NIL
-						 ? sizeof(cl_uint) * hash_nslots
-						 : sizeof(cl_uint) * (Size)(inner_ntuples))
+		chunk_size = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
+		if (gpath->inners[i].hash_quals != NIL)
+			chunk_size += STROMALIGN(sizeof(cl_uint) * hash_nslots);
+		chunk_size += STROMALIGN(sizeof(cl_uint) * (Size)(inner_ntuples))
 			+ STROMALIGN(entry_size * (Size)(inner_ntuples));
 
 		gpath->inners[i].ichunk_size = chunk_size;
@@ -5021,49 +5021,34 @@ static void
 add_extra_randomness(pgstrom_data_store *pds)
 {
 	kern_data_store	   *kds = pds->kds;
-	cl_uint				i, j, temp;
+	cl_uint				x, y, temp;
 
 	/* nothing to do */
 	if (kds->nitems == 0)
 		return;
 
-	if (kds->format == KDS_FORMAT_ROW)
+	if (kds->format == KDS_FORMAT_ROW ||
+		kds->format == KDS_FORMAT_HASH)
 	{
-		cl_uint		   *htup_offset = (cl_uint *)KERN_DATA_STORE_BODY(kds);
+		cl_uint		   *row_index = KERN_DATA_STORE_ROWINDEX(kds);
 
-		for (i=0; i < kds->nitems; i++)
+		for (x=0; x < kds->nitems; x++)
 		{
-			temp = htup_offset[i];
-			j = rand() % kds->nitems;
-			htup_offset[i] = htup_offset[j];
-			htup_offset[j] = temp;
-		}
-	}
-	else if (kds->format == KDS_FORMAT_HASH)
-	{
-		cl_uint		   *rowid_new = palloc(sizeof(cl_uint) * kds->nitems);
-		kern_hashitem  *khitem;
+			y = rand() % kds->nitems;
 
-		for (i=0; i < kds->nitems; i++)
-			rowid_new[i] = i;
-		for (i=0; i < kds->nitems; i++)
-		{
-			temp = rowid_new[i];
-			j = rand() % kds->nitems;
-			rowid_new[i] = rowid_new[j];
-			rowid_new[j] = temp;
-		}
-		for (i=0; i < kds->nslots; i++)
-		{
-			for (khitem = KERN_HASH_FIRST_ITEM(kds, i);
-				 khitem != NULL;
-				 khitem = KERN_HASH_NEXT_ITEM(kds, khitem))
+			if (kds->format == KDS_FORMAT_HASH)
 			{
-				Assert(khitem->rowid < kds->nitems);
-				khitem->rowid = rowid_new[khitem->rowid];
+				kern_hashitem  *khitem_x = KERN_DATA_STORE_HASHITEM(kds, x);
+				kern_hashitem  *khitem_y = KERN_DATA_STORE_HASHITEM(kds, y);
+				Assert(khitem_x->rowid == x);
+				Assert(khitem_y->rowid == y);
+				khitem_x->rowid = y;	/* swap */
+				khitem_y->rowid = x;	/* swap */
 			}
+			temp = row_index[x];
+			row_index[x] = row_index[y];
+			row_index[y] = temp;
 		}
-		pfree(rowid_new);
 	}
 	else
 		elog(ERROR, "Unexpected data chunk format: %u", kds->format);

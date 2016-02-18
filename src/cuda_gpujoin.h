@@ -672,15 +672,15 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 {
 	kern_parambuf	   *kparams = KERN_GPUJOIN_PARAMBUF(kgjoin);
 	kern_data_store	   *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
-	kern_hashitem	   *khitem;
+	kern_hashitem	   *khitem = NULL;
 	kern_context		kcxt;
-	cl_bool			   *lo_map;
+	cl_uint				kds_index;
 	cl_bool				needs_outer_row;
-//	cl_uint				offset;
-//	cl_uint				count;
+	cl_uint				offset;
+	cl_uint				count;
 	cl_int				i, ndevs = kmrels->ndevs;
 	cl_uint			   *r_buffer;
-//	__shared__ cl_uint	base;
+	__shared__ cl_uint	base;
 
 	INIT_KERNEL_CONTEXT(&kcxt,gpujoin_outer_hashjoin,kparams);
 
@@ -692,57 +692,44 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 	assert(window_base + window_size <= kds_hash->nitems);
 	assert(window_size > 0);
 
-	/*
-	 * A workaround implementation based on global memory operation.
-	 *
-	 * NOTE: we had a trouble around the code at #else .. #endif
-	 * It looks to me the problem comes from shared memory and inter-
-	 * thread synchronization, however, not ensured 100% at this moment.
-	 * So, I put alternative implementation without reduction operation
-	 * on the shared memory, but takes atomic operation on global
-	 * memory for each outer tuple. It is a concern.
-	 */
-	if (get_global_id() < kds_hash->nslots)
-		khitem = KERN_HASH_FIRST_ITEM(kds_hash, get_global_id());
-	else
-		khitem = NULL;
-
-	while (khitem != NULL)
+	kds_index = window_base + get_global_id();
+	if (kds_index < min(window_base + window_size,
+						kds_hash->nitems))
 	{
-		assert((khitem->hash % kds_hash->nslots) == get_global_id());
-		if (khitem->rowid >= window_base &&
-			khitem->rowid <  window_base + window_size)
+		khitem = KERN_DATA_STORE_HASHITEM(kds_hash, kds_index);
+
+		assert(khitem->rowid == kds_index);
+		needs_outer_row = true;
+		for (i=0; i < ndevs; i++)
 		{
-			cl_uint		nitems = kds_hash->nitems;
-
-			assert(khitem->rowid < nitems);
-			needs_outer_row = true;
-			for (i=0; i < ndevs; i++)
-			{
-				lo_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth, nitems,
-													   i, outer_join_map);
-				assert(lo_map != NULL);
-				assert(khitem->rowid < nitems);
-				if (lo_map[khitem->rowid])
-					needs_outer_row = false;
-			}
-
-			if (needs_outer_row)
-			{
-				cl_uint		index = atomicAdd(&kresults_dst->nitems, 1);
-
-				if (index < kresults_dst->nrooms)
-				{
-					r_buffer = KERN_GET_RESULT(kresults_dst, index);
-					memset(r_buffer, 0, sizeof(cl_int) * depth);    /* NULL */
-					r_buffer[depth] = (size_t)&khitem->htup - (size_t)kds_hash;
-					assert((size_t)&khitem->htup - (size_t)kds_hash > 0UL);
-				}
-				else
-					STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
-			}
+			cl_bool *lo_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth,
+															kds_hash->nitems,
+															i, outer_join_map);
+			assert(lo_map != NULL);
+			if (lo_map[kds_index])
+				needs_outer_row = false;
 		}
-		khitem = KERN_HASH_NEXT_ITEM(kds_hash, khitem);
+	}
+	else
+		needs_outer_row = false;
+
+	/* expand kresults->nitems */
+	offset = arithmetic_stairlike_add(needs_outer_row ? 1 : 0, &count);
+	if (count > 0)
+	{
+		if (get_local_id() == 0)
+			base = atomicAdd(&kresults_dst->nitems, count);
+		__syncthreads();
+
+		if (base + offset >= kresults_dst->nrooms)
+			STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
+		else if (needs_outer_row)
+		{
+			r_buffer = KERN_GET_RESULT(kresults_dst, base + offset);
+			memset(r_buffer, 0, sizeof(cl_uint) * depth);	/* NULL */
+			assert((size_t)&khitem->htup - (size_t)kds_hash > 0UL);
+			r_buffer[depth] = (size_t)&khitem->htup - (size_t)kds_hash;
+		}
 	}
 	kern_writeback_error_status(&kgjoin->kerror, kcxt.e);
 }
@@ -1717,9 +1704,6 @@ retry_major:
 				 *                        cl_int depth,
 				 *                        cl_int cuda_index);
 				 */
-				kern_data_store	   *kds_hash
-					= KERN_MULTIRELS_INNER_KDS(kmrels, depth);
-
 				tv1 = clock64();
 				kern_join_args = (kern_join_args_t *)
 					cudaGetParameterBuffer(sizeof(void *),
@@ -1735,7 +1719,7 @@ retry_major:
 														&block_sz,
 														(const void *)
 														gpujoin_outer_hashjoin,
-														kds_hash->nslots,
+														window_size,
 														sizeof(kern_errorbuf));
 				if (status != cudaSuccess)
 				{

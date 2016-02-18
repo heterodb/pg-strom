@@ -445,138 +445,68 @@ pgstrom_expand_data_store(GpuContext *gcontext,
 	/* no need to expand? */
 	if (kds_length_old >= kds_length_new)
 		return;
+	/* file mapped data-store is no longer supported */
+	Assert(!pds->kds_fname);
+
+	kds_new = MemoryContextAllocHuge(gcontext->memcxt,
+									 kds_length_new);
+	memcpy(kds_new, kds_old, KERN_DATA_STORE_HEAD_LENGTH(kds_old));
+	kds_new->hostptr = (hostptr_t)&kds_new->hostptr;
+	kds_new->length = kds_length_new;
+	kds_new->nslots = nslots_new;
+
 	/*
-	 * expand the buffer first
+	 * Move the contents to new buffer from the old one
 	 */
-	if (!pds->kds_fname)
+	if (kds_new->format == KDS_FORMAT_ROW ||
+		kds_new->format == KDS_FORMAT_HASH)
 	{
-		kds_new = MemoryContextAllocHuge(gcontext->memcxt,
-										 kds_length_new);
-		memcpy(kds_new, kds_old, KERN_DATA_STORE_HEAD_LENGTH(kds_old));
-		kds_new->hostptr = (hostptr_t)&kds_new->hostptr;
-		kds_new->length = kds_length_new;
-		kds_new->nslots = nslots_new;
+		cl_uint	   *row_index_old = KERN_DATA_STORE_ROWINDEX(kds_old);
+		cl_uint	   *row_index_new = KERN_DATA_STORE_ROWINDEX(kds_new);
+		cl_uint	   *hash_slot = KERN_DATA_STORE_HASHSLOT(kds_new);
+		size_t		shift = kds_length_new - kds_length_old;
 
-		/* move the contents to new buffer from the old one */
-		if (kds_old->format == KDS_FORMAT_ROW)
+		memcpy((char *)kds_new + kds_length_new - kds_usage,
+			   (char *)kds_old + kds_length_old - kds_usage,
+			   kds_usage);
+
+		if (kds_new->format == KDS_FORMAT_HASH)
+			memset(hash_slot, 0, sizeof(cl_uint) * nslots_new);
+
+		for (i=0; i < nitems; i++)
 		{
-			cl_uint	   *tup_index_old;
-			cl_uint	   *tup_index_new;
-			size_t		shift = kds_length_new - kds_length_old;
-
-			memcpy((char *)kds_new + kds_length_new - kds_usage,
-				   (char *)kds_old + kds_length_old - kds_usage,
-				   kds_usage);
-
-			tup_index_old = (cl_uint *)KERN_DATA_STORE_BODY(kds_old);
-			tup_index_new = (cl_uint *)KERN_DATA_STORE_BODY(kds_new);
-			for (i=0; i < nitems; i++)
-				tup_index_new[i] = tup_index_old[i] + shift;
-		}
-		else if (kds_old->format == KDS_FORMAT_HASH)
-		{
-			kern_hashitem  *hitem_old;
-			kern_hashitem  *hitem_new;
-			cl_uint		   *hash_slot;
-			size_t			length;
-			int				i, j;
-
-			memset(KERN_DATA_STORE_HASHSLOT(kds_new),
-				   0, sizeof(cl_uint) * nslots_new);
-			hash_slot = KERN_DATA_STORE_HASHSLOT(kds_new);
-			kds_new->usage = STROMALIGN((uintptr_t)(hash_slot + nslots_new) -
-										(uintptr_t)(kds_new));
-			for (i=0; i < kds_old->nslots; i++)
+			row_index_new[i] = row_index_old[i] + shift;
+			if (kds_new->format == KDS_FORMAT_HASH)
 			{
-				for (hitem_old = KERN_HASH_FIRST_ITEM(kds_old, i);
-					 hitem_old != NULL;
-					 hitem_old = KERN_HASH_NEXT_ITEM(kds_old, hitem_old))
-				{
-					j = hitem_old->hash % kds_new->nslots;
+				kern_hashitem  *khitem = KERN_DATA_STORE_HASHITEM(kds_new, i);
+				cl_uint			khindex;
 
-					length = offsetof(kern_hashitem, htup) + hitem_old->t_len;
-					hitem_new = (kern_hashitem *)((char *)kds_new +
-												  kds_new->usage);
-					memcpy(hitem_new, hitem_old, length);
-					hitem_new->next = hash_slot[j];
-					hash_slot[j] = kds_new->usage;
-
-					kds_new->usage += MAXALIGN(length);
-					Assert(kds_new->usage <= kds_new->length);
-				}
+				Assert(khitem->rowid == i);
+				khindex = khitem->hash % nslots_new;
+				khitem->next = hash_slot[khindex];
+				hash_slot[khindex] = (uintptr_t)khitem - (uintptr_t)kds_new;
 			}
 		}
-		else
+	}
+	else if (kds_new->format == KDS_FORMAT_SLOT)
+	{
+		/* copy the values/isnull pair */
+		memcpy(KERN_DATA_STORE_BODY(kds_new),
+			   KERN_DATA_STORE_BODY(kds_old),
+			   KERN_DATA_STORE_SLOT_LENGTH(kds_old, kds_old->nitems));
+		/* also copy the extra area if any */
+		if (kds_new->usage > 0)
 		{
-			/* copy the hash_slots and kern_hashitem */
-			memcpy(KERN_DATA_STORE_BODY(kds_new),
-				   KERN_DATA_STORE_BODY(kds_old),
-				   kds_old->usage - KERN_DATA_STORE_HEAD_LENGTH(kds_old));
+			memcpy((char *)kds_new + kds_new->length - kds_new->usage,
+				   (char *)kds_old + kds_old->length - kds_old->usage,
+				   kds_new->usage);
 		}
-		pfree(kds_old);
 	}
 	else
-	{
-		size_t		mmap_length = TYPEALIGN(BLCKSZ, kds_length_new);
-		CUresult	rc;
+		elog(ERROR, "unexpected KDS format: %d", kds_new->format);
+	/* old KDS is no longer referenced */
+	pfree(kds_old);
 
-		/* expand the size of underlying file */
-		if (truncate(pds->kds_fname, mmap_length))
-			ereport(ERROR,
-					(errcode_for_file_access(),
-					 errmsg("could not truncate file \"%s\" to %zu: %m",
-							pds->kds_fname, mmap_length)));
-
-		/* unregister the old KDS as page-locked region */
-		rc = cuMemHostUnregister(kds_old);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuMemHostUnregister: %s", errorText(rc));
-
-		/* remap area */
-		kds_new = mremap(kds_old, TYPEALIGN(BLCKSZ, kds_length_old),
-						 mmap_length, MREMAP_MAYMOVE);
-		if (kds_new == MAP_FAILED)
-			ereport(ERROR,
-					(errcode_for_file_access(),
-					 errmsg("could not mremap \"%s\" with length=%zu: %m",
-							pds->kds_fname, mmap_length)));
-		kds_new->hostptr = (hostptr_t)&kds_new->hostptr;
-		kds_new->length = kds_length_new;
-
-		if (kds_new->format == KDS_FORMAT_ROW)
-		{
-			cl_uint	   *tup_index;
-			size_t		shift = kds_length_new - kds_length_old;
-
-			memmove((char *)kds_new + kds_length_new - kds_usage,
-					(char *)kds_new + kds_length_old - kds_usage,
-					kds_usage);
-			tup_index = (cl_uint *)KERN_DATA_STORE_BODY(kds_new);
-			for (i=0; i < nitems; i++)
-				tup_index[i] += shift;
-		}
-		/*
-		 * File mapped PDS shall be deprecated in the near future,
-		 * and KDS_FORMAT_HASH shall never appear
-		 */
-		Assert(kds_new->format != KDS_FORMAT_HASH);
-
-		/*
-		 * Registers the file-mapped KDS as page-locked region again
-		 */
-		rc = cuCtxPushCurrent(gcontext->gpu[0].cuda_context);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
-
-		rc = cuMemHostRegister(kds_new, mmap_length,
-							   CU_MEMHOSTREGISTER_PORTABLE);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuMemHostRegister: %s", errorText(rc));
-
-		rc = cuCtxPopCurrent(NULL);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
-	}
 	/* update length and kernel buffer */
 	pds->kds_length = kds_length_new;
 	pds->kds = kds_new;
@@ -586,31 +516,68 @@ void
 pgstrom_shrink_data_store(pgstrom_data_store *pds)
 {
 	kern_data_store	   *kds = pds->kds;
+	size_t				new_length;
 
-	if (kds->format == KDS_FORMAT_ROW)
+	if (kds->format == KDS_FORMAT_ROW ||
+		kds->format == KDS_FORMAT_HASH)
 	{
+		cl_uint	   *hash_slot = KERN_DATA_STORE_HASHSLOT(kds);
+		cl_uint	   *row_index = KERN_DATA_STORE_ROWINDEX(kds);
+		size_t		shift = STROMALIGN_DOWN(KERN_DATA_STORE_FREESPACE(kds));
+		cl_uint		i, nslots = kds->nslots;
 
-		/* to be done later */
+		/* small shift has less advantage than CPU cycle consumption */
+		if (shift < BLCKSZ || shift < sizeof(Datum) * kds->nitems)
+			return;
 
+		/* move the kern_tupitem / kern_hashitem */
+		memmove(KERN_DATA_STORE_BODY(kds) +
+				STROMALIGN(sizeof(cl_uint) * kds->nslots) +
+				STROMALIGN(sizeof(cl_uint) * kds->nitems),
+				(char *)kds + kds->length - kds->usage,
+				kds->usage);
+		/* clear the hash slot once */
+		if (nslots > 0)
+		{
+			Assert(kds->format == KDS_FORMAT_HASH);
+			memset(hash_slot, 0, sizeof(cl_uint) * nslots);
+		}
+
+		/* adjust row_index and hash_slot */
+		for (i=0; i < kds->nitems; i++)
+		{
+			row_index[i] -= shift;
+			if (kds->format == KDS_FORMAT_HASH)
+			{
+				kern_hashitem  *khitem = KERN_DATA_STORE_HASHITEM(kds, i);
+				cl_uint			khindex;
+
+				Assert(khitem->rowid == i);
+				khindex = khitem->hash % nslots;
+                khitem->next = hash_slot[khindex];
+                hash_slot[khindex] = (uintptr_t)khitem - (uintptr_t)kds;
+			}
+		}
+		new_length = kds->length - shift;
 	}
 	else if (kds->format == KDS_FORMAT_SLOT)
 	{
-		size_t		new_length = KERN_DATA_STORE_HEAD_LENGTH(kds) +
-			(LONGALIGN(sizeof(bool) * kds->ncols) +
-			 LONGALIGN(sizeof(Datum) * kds->ncols)) * kds->nitems;
+		new_length = KERN_DATA_STORE_SLOT_LENGTH(kds, kds->nitems);
 
-		Assert(new_length <= kds->length);
-		kds->length = new_length;
-		pds->kds_length = kds->length;
-	}
-	else if (kds->format == KDS_FORMAT_HASH)
-	{
-		Assert(kds->usage <= kds->length);
-		kds->length = kds->usage;
-		pds->kds_length = kds->length;
+		/*
+		 * We cannot know which datum references the extra area with
+		 * reasonable cost. So, prohibit it simply. We don't use SLOT
+		 * format for data source, so usually no matter.
+		 */
+		if (kds->usage > 0)
+			elog(ERROR, "cannot shirink KDS_SLOT with extra region");
 	}
 	else
 		elog(ERROR, "Bug? unexpected PDS to be shrinked");
+
+	Assert(new_length <= kds->length);
+	kds->length = new_length;
+	pds->kds_length = kds->length;
 }
 
 pgstrom_data_store *
@@ -839,12 +806,12 @@ pgstrom_create_data_store_hash(GpuContext *gcontext,
 {
 	pgstrom_data_store *pds;
 	kern_data_store	   *kds;
-	Size				usage;
+	Size				consumed;
 
-	usage = (STROMALIGN(offsetof(kern_data_store,
-								 colmeta[tupdesc->natts])) +
-			 STROMALIGN(sizeof(cl_uint) * nslots));
-	if (usage > length)
+	consumed = (STROMALIGN(offsetof(kern_data_store,
+									colmeta[tupdesc->natts])) +
+				STROMALIGN(sizeof(cl_uint) * nslots));
+	if (consumed > length)
 		elog(ERROR, "Required length for KDS-Hash is too short");
 
 	/*
@@ -854,7 +821,6 @@ pgstrom_create_data_store_hash(GpuContext *gcontext,
 	pds = pgstrom_create_data_store_row(gcontext, tupdesc,
 										length, file_mapped);
 	kds = pds->kds;
-	kds->usage = usage;
 	kds->format = KDS_FORMAT_HASH;
 	kds->nslots = nslots;
 
@@ -1096,7 +1062,8 @@ pgstrom_data_store_insert_hashitem(pgstrom_data_store *pds,
 {
 	kern_data_store	   *kds = pds->kds;
 	cl_uint				index = hash_value % kds->nslots;
-	cl_uint			   *khslots = KERN_DATA_STORE_HASHSLOT(kds);
+	cl_uint			   *row_index = KERN_DATA_STORE_ROWINDEX(kds);
+	cl_uint			   *hash_slot = KERN_DATA_STORE_HASHSLOT(kds);
 	Size				required;
 	HeapTuple			tuple;
 	kern_hashitem	   *khitem;
@@ -1112,23 +1079,27 @@ pgstrom_data_store_insert_hashitem(pgstrom_data_store *pds,
 
 	/* compute required length */
 	tuple = ExecFetchSlotTuple(slot);
-	required = LONGALIGN(offsetof(kern_hashitem, htup) + tuple->t_len);
+	required = MAXALIGN(offsetof(kern_hashitem, htup) + tuple->t_len);
 
-	Assert(kds->usage == LONGALIGN(kds->usage));
-	if (kds->usage + required > kds->length)
+	Assert(kds->usage == MAXALIGN(kds->usage));
+	if (required + sizeof(cl_uint) > KERN_DATA_STORE_FREESPACE(kds))
 		return false;	/* no more space to put */
 
 	/* OK, put a tuple */
-	khitem = (kern_hashitem *)((char *)kds + kds->usage);
+	khitem = (kern_hashitem *)((char *)kds + kds->length
+							   - (kds->usage + required));
+	kds->usage += required;
+
 	khitem->hash = hash_value;
-	khitem->next = khslots[index];
-	khslots[index] = kds->usage;
+	khitem->next = hash_slot[index];
+	hash_slot[index] = (cl_uint)((uintptr_t)khitem - (uintptr_t)kds);
 	khitem->rowid = kds->nitems++;
 	khitem->t_len = tuple->t_len;
 	khitem->t_self = tuple->t_self;
 	memcpy(&khitem->htup, tuple->t_data, tuple->t_len);
-	kds->usage += required;
 
+	row_index[khitem->rowid] = (cl_uint)((uintptr_t)&khitem->t_len -
+										 (uintptr_t)kds);
 	return true;
 }
 

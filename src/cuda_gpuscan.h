@@ -191,7 +191,7 @@ gpuscan_projection_row(kern_gpuscan *kgpuscan,
 	Datum			tup_values[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
 	cl_bool			tup_isnull[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
 	cl_bool			tup_internal[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
-	cl_uint		   *tup_index = (cl_uint *)KERN_DATA_STORE_BODY(kds_dst);
+	cl_uint		   *tup_index = KERN_DATA_STORE_ROWINDEX(kds_dst);
 
 	/*
 	 * immediate bailout if previous stage already have error status
@@ -270,7 +270,8 @@ gpuscan_projection_row(kern_gpuscan *kgpuscan,
 			 * step.3 - extract the result heap-tuple
 			 */
 			cl_uint			pos = kds_dst->length - (base + offset + required);
-			kern_tupitem   *tupitem_dst = (kern_tupitem *)((char *)kds_dst + pos);
+			kern_tupitem   *tupitem_dst
+				= (kern_tupitem *)((char *)kds_dst + pos);
 
 			tup_index[get_global_id()] = pos;
 			form_kern_heaptuple(&kcxt, kds_dst, tupitem_dst,

@@ -427,59 +427,50 @@ typedef struct {
 /*
  * kern_data_store
  *
- * It stores row- and column-oriented values in the kernel space.
- *
- * +--------------------------------+
- * | hostptr                        |
- * +--------------------------------+
- * | length                         |
- * +--------------------------------+
- * | ncols                          |
- * +--------------------------------+
- * | nitems                         |
- * +--------------------------------+
- * | nrooms                         |
- * +--------------------------------+
- * | format                         |
- * +--------------------------------+
- * | colmeta[0]                     | aligned to
- * | colmeta[1]                     | STROMALIGN()
- * |   :                            |    |
- * | colmeta[M-1]                   |    V
- * +----------------+---------------+----------------+
- * |  <row-format>  | <slot-format> | <hash-format>  |
- * +----------------+---------------+----------------+
- * | tup_offset[0]  | values/isnull | hash_slot[0]   |
- * | tup_offset[1]  | pair of the   | hash_slot[1]   |
- * |    :           | 1st row       |     :          |
- * | tup_offset[N-1]| +-------------+ hash_slot[N-1] |
- * +----------------+ | values[0]   +----------------+
- * |    :           | |    :        |     :          |
- * |    :           | | values[N-1] |     :          |
- * +----------------+ +-------------+----------------+
- * | htup_item[N-1] | | isnull[0]   | kern_hashentry |
- * | +--------------+ |    :        | +--------------+
- * | | t_len        | | isnull[N-1] | | hash         |
- * | +--------------+-+-------------+ +--------------+
- * | | t_self       | values/isnull | | next         |
- * | +--------------+ pair of the   | +--------------+
- * | | heap_tuple   | 2nd row       | | rowid        |
- * | |   :          | +-------------+ +--------------+
- * | |   :          | | values[0]   | | t_len        |
- * +-+--------------+ |    :        | +--------------+
- * |     :          | | values[N-1] | | htup         |
- * |     :          | +-------------+ |   :          |
- * +----------------+ | isnull[0]   +-+--------------+
- * | htup_item[0]   | |    :        | kern_hashentry |
- * | +--------------+ | isnull[N-1] | +--------------+
- * | | t_len        +-+-------------+ | hash         |
- * | +--------------+       :       | +--------------+
- * | | t_self       |       :       | | next         |
- * | +--------------+       :       | +--------------+
- * | | heap_tuple   |       :       | | rowid        |
- * | |   :          |       :       | +--------------+
- * | |   :          |       :       | |    :         |
- * +-+--------------+---------------+----------------+
+ * +----------------------------------------------+
+ * | Common header portion of the kern_data_store |
+ * |         :                                    |
+ * | 'format' determines the layout below         |
+ * +----------------------------------------------+
+ * | Attributes of columns                        |
+ * |                                              |
+ * | kern_colmeta colmeta[0]                      |
+ * | kern_colmeta colmeta[1]                      |
+ * |        :                                     |
+ * | kern_colmeta colmeta[M-1]                    |
+ * +----------------------------------------------+
+ * | <slot format> | <row format> / <hash format> |
+ * +---------------+------------------------------+  -----
+ * | values/isnull | Offset to the first hash-    |
+ * | pair of the   | item for each slot (*).      |
+ * | 1st tuple     |                              |
+ * | +-------------+ (*) nslots=0 if row-format,  |
+ * | | values[0]   | thus, it has no offset to    |
+ * | |    :        | hash items.                  |
+ * | | values[M-1] |                              |
+ * | +-------------+  hash_slot[0]                |
+ * | | isnull[0]   |  hash_slot[1]                |
+ * | |    :        |      :                       |
+ * | | isnull[M-1] |  hash_slot[nslots-1]         |
+ * +-+-------------+------------------------------+
+ * | values/isnull | Offset to the individual     |
+ * | pair of the   | kern_tupitem.                |
+ * | 2nd tuple     |                              |
+ * | +-------------+ row_index[0]                 |
+ * | | values[0]   | row_index[1]                 |
+ * | |    :        |    :                         |
+ * | | values[M-1] | row_index[nitems-1]          |
+ * | +-------------+--------------+---------------+
+ * | | isnull[0]   |    :         |       :       |
+ * | |    :        +--------------+---------------+
+ * | | isnull[M-1] | kern_tupitem | kern_hashitem |
+ * +-+-------------+--------------+---------------+
+ * | values/isnull | kern_tupitem | kern_hashitem |
+ * | pair of the   +--------------+---------------+
+ * | 3rd tuple     | kern_tupitem | kern_hashitem |
+ * |      :        |     :        |     :         |
+ * |      :        |     :        |     :         |
+ * +---------------+--------------+---------------+
  */
 typedef struct {
 	/* true, if column is held by value. Elsewhere, a reference */
@@ -557,11 +548,33 @@ typedef struct {
 #define KERN_DATA_STORE_BODY(kds)							\
 	((char *)(kds) + KERN_DATA_STORE_HEAD_LENGTH(kds))
 
-/* access macro for row-format */
+/* access macro for row- and hash-format */
+#define KERN_DATA_STORE_HASHSLOT(kds)                       \
+	((cl_uint *)KERN_DATA_STORE_BODY(kds))
+
+/* access macro for row- and hash-format */
+#define KERN_DATA_STORE_ROWINDEX(kds)						\
+	((cl_uint *)(KERN_DATA_STORE_BODY(kds) +				\
+				 STROMALIGN(sizeof(cl_uint) * (kds)->nslots)))
+
+/* access macro for row- and hash-format */
+#define KERN_DATA_STORE_FREESPACE(kds)				\
+	((kds)->length -								\
+	 (KERN_DATA_STORE_HEAD_LENGTH(kds) +			\
+	  STROMALIGN(sizeof(cl_uint) * (kds)->nslots) +	\
+	  STROMALIGN(sizeof(cl_uint) * (kds)->nitems) +	\
+	  (kds)->usage))
+
+/* access macro for row- and hash-format */
 #define KERN_DATA_STORE_TUPITEM(kds,kds_index)				\
-	((kern_tupitem *)										\
-	 ((char *)(kds) +										\
-	  ((cl_uint *)KERN_DATA_STORE_BODY(kds))[(kds_index)]))
+	((kern_tupitem *)((char *)(kds) +						\
+			KERN_DATA_STORE_ROWINDEX(kds)[(kds_index)]))
+
+/* access macro for hash-format */
+#define KERN_DATA_STORE_HASHITEM(kds,kds_index)			\
+	((kern_hashitem *)									\
+	 ((char *)KERN_DATA_STORE_TUPITEM(kds,kds_index) -	\
+	  offsetof(kern_hashitem, t_len)))
 
 /* access macro for tuple-slot format */
 #define KERN_DATA_STORE_SLOT_LENGTH(kds,nitems)				\
@@ -575,9 +588,6 @@ typedef struct {
 #define KERN_DATA_STORE_ISNULL(kds,kds_index)				\
 	((cl_bool *)(KERN_DATA_STORE_VALUES((kds),(kds_index)) + (kds)->ncols))
 
-/* access macro for hash-format */
-#define KERN_DATA_STORE_HASHSLOT(kds)						\
-	((cl_uint *)KERN_DATA_STORE_BODY(kds))
 
 STATIC_INLINE(kern_hashitem *)
 KERN_HASH_FIRST_ITEM(kern_data_store *kds, cl_uint hash)
@@ -1367,7 +1377,8 @@ kern_get_datum(kern_data_store *kds,
 	/* is it out of range? */
 	if (colidx >= kds->ncols || rowidx >= kds->nitems)
 		return NULL;
-	if (kds->format == KDS_FORMAT_ROW)
+	if (kds->format == KDS_FORMAT_ROW ||
+		kds->format == KDS_FORMAT_HASH)
 		return kern_get_datum_row(kds, colidx, rowidx);
 	if (kds->format == KDS_FORMAT_SLOT)
 		return kern_get_datum_slot(kds, colidx, rowidx);
