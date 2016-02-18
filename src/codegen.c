@@ -1783,6 +1783,11 @@ codegen_tempvar_declaration(StringInfo buf, const char *varname)
 		"    pg_timestamp_t   timestamp_v;\n"
 		"    pg_timestamptz_t timestamptz_v;\n"
 		"#endif\n"
+		"#ifdef CUDA_TEXTLIB_H\n"
+		"    pg_bpchar_t      bpchar_v;\n"
+		"    pg_text_t        text_v;\n"
+		"    pg_varchar_t     varchar_t;\n"
+		"#endif\n"
 		"  } %s	__attribute__ ((unused));\n",
 		varname);
 }
