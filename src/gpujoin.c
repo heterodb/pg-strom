@@ -3540,7 +3540,8 @@ gpujoin_codegen_join_quals(StringInfo source,
  *                            cl_uint *pg_crc32_table,
  *                            kern_data_store *kds,
  *                            kern_multirels *kmrels,
- *                            cl_int *outer_index);
+ *                            cl_int *outer_index,
+ *                            cl_bool *is_null_keys)
  */
 static void
 gpujoin_codegen_hash_value(StringInfo source,
@@ -3563,10 +3564,16 @@ gpujoin_codegen_hash_value(StringInfo source,
 		"                           cl_uint *pg_crc32_table,\n"
 		"                           kern_data_store *kds,\n"
 		"                           kern_multirels *kmrels,\n"
-		"                           cl_uint *o_buffer)\n"
-		"{\n"
-		"  cl_uint hash;\n",
+		"                           cl_uint *o_buffer,\n"
+		"                           cl_bool *p_is_null_keys)\n"
+		"{\n",
 		cur_depth);
+	codegen_tempvar_declaration(source, "temp");
+	appendStringInfo(
+		source,
+		"  cl_uint hash;\n"
+		"  cl_bool is_null_keys = true;\n"
+		"\n");
 
 	context->used_vars = NIL;
 	context->param_refs = NULL;
@@ -3581,19 +3588,22 @@ gpujoin_codegen_hash_value(StringInfo source,
 		Node	   *key_expr = lfirst(lc);
 		Oid			key_type = exprType(key_expr);
 		devtype_info *dtype;
-		char	   *temp;
 
 		dtype = pgstrom_devtype_lookup(key_type);
 		if (!dtype)
 			elog(ERROR, "Bug? device type \"%s\" not found",
                  format_type_be(key_type));
-		temp = pgstrom_codegen_expression(key_expr, context);
 		appendStringInfo(
 			&body,
-			"  hash = pg_%s_comp_crc32(pg_crc32_table, hash, %s);\n",
+			"  temp.%s_v = %s;\n"
+			"  if (!temp.%s_v.isnull)\n"
+			"    is_null_keys = false;\n"
+			"  hash = pg_%s_comp_crc32(pg_crc32_table, hash, temp.%s_v);\n",
 			dtype->type_name,
-			temp);
-		pfree(temp);
+			pgstrom_codegen_expression(key_expr, context),
+			dtype->type_name,
+			dtype->type_name,
+			dtype->type_name);
 	}
 	appendStringInfo(&body, "  FIN_LEGACY_CRC32(hash);\n");
 
@@ -3605,6 +3615,8 @@ gpujoin_codegen_hash_value(StringInfo source,
 	appendStringInfo(
 		source,
 		"%s"
+		"\n"
+		"  *p_is_null_keys = is_null_keys;\n"
 		"  return hash;\n"
 		"}\n"
 		"\n",
@@ -3683,7 +3695,8 @@ gpujoin_codegen(PlannerInfo *root,
 		"                   kern_data_store *kds,\n"
 		"                   kern_multirels *kmrels,\n"
 		"                   cl_int depth,\n"
-		"                   cl_uint *o_buffer)\n"
+		"                   cl_uint *o_buffer,\n"
+		"                   cl_bool *p_is_null_keys)\n"
 		"{\n"
 		"  switch (depth)\n"
 		"  {\n");
@@ -3695,7 +3708,9 @@ gpujoin_codegen(PlannerInfo *root,
 			appendStringInfo(
 				&source,
 				"  case %u:\n"
-				"    return gpujoin_hash_value_depth%u(kcxt,pg_crc32_table,kds,kmrels,o_buffer);\n",
+				"    return gpujoin_hash_value_depth%u(kcxt,pg_crc32_table,\n"
+				"                                      kds,kmrels,o_buffer,\n"
+				"                                      p_is_null_keys);\n",
 				depth, depth);
 		}
 		depth++;
@@ -5092,7 +5107,9 @@ gpujoin_inner_unload(GpuJoinState *gjs, bool needs_rescan)
  * calculation of the hash-value
  */
 static pg_crc32
-get_tuple_hashvalue(innerState *istate, TupleTableSlot *slot)
+get_tuple_hashvalue(innerState *istate,
+					TupleTableSlot *slot,
+					bool *p_is_null_keys)
 {
 	ExprContext	   *econtext = istate->econtext;
 	pg_crc32		hash;
@@ -5100,6 +5117,7 @@ get_tuple_hashvalue(innerState *istate, TupleTableSlot *slot)
 	ListCell	   *lc2;
 	ListCell	   *lc3;
 	ListCell	   *lc4;
+	bool			is_null_keys = true;
 
 	/* calculation of a hash value of this entry */
 	econtext->ecxt_innertuple = slot;
@@ -5119,6 +5137,7 @@ get_tuple_hashvalue(innerState *istate, TupleTableSlot *slot)
 		value = ExecEvalExpr(clause, istate->econtext, &isnull, NULL);
 		if (isnull)
 			continue;
+		is_null_keys = false;	/* key is non-NULL valid */
 
 		/* fixup host representation to special internal format. */
 		if (keytype == NUMERICOID)
@@ -5157,6 +5176,8 @@ get_tuple_hashvalue(innerState *istate, TupleTableSlot *slot)
 							  VARSIZE_ANY_EXHDR(value));
 	}
 	FIN_LEGACY_CRC32(hash);
+
+	*p_is_null_keys = is_null_keys;
 
 	return hash;
 }
@@ -5255,7 +5276,19 @@ gpujoin_inner_hash_preload_TS(GpuJoinState *gjs,
 	 */
 	while (tuplestore_gettupleslot(tupstore, true, false, scan_slot))
 	{
-		pg_crc32	hash = get_tuple_hashvalue(istate, scan_slot);
+		pg_crc32	hash;
+		bool		is_null_keys;
+
+		hash = get_tuple_hashvalue(istate, scan_slot, &is_null_keys);
+
+		/*
+		 * It is obvious all-NULLs keys shall not match any outer tuples.
+		 * In case INNER or RIGHT join, this tuple shall be never referenced,
+		 * so we drop these tuples from the inner buffer.
+		 */
+		if (is_null_keys && (istate->join_type == JOIN_INNER ||
+							 istate->join_type == JOIN_RIGHT))
+			continue;
 
 		forboth (lc1, pds_list,
 				 lc2, hash_max_list)
@@ -5304,9 +5337,11 @@ gpujoin_inner_hash_preload(GpuJoinState *gjs,
 	Size				consumption;
 	pgstrom_data_store *pds_hash = NULL;
 	pg_crc32			hash;
+	bool				is_null_keys;
 	cl_int				index;
 	ListCell		   *lc;
 
+next:
 	scan_slot = ExecProcNode(istate->state);
 	if (TupIsNull(scan_slot))
 	{
@@ -5335,6 +5370,18 @@ gpujoin_inner_hash_preload(GpuJoinState *gjs,
 		return false;
 	}
 
+	tuple = ExecFetchSlotTuple(scan_slot);
+	hash = get_tuple_hashvalue(istate, scan_slot, &is_null_keys);
+
+	/*
+	 * If join keys are NULLs, it is obvious that inner tuple shall not
+	 * match with outer tuples. Unless it is not referenced in outer join,
+	 * we don't need to keep this tuple in the 
+	 */
+	if (is_null_keys && (istate->join_type == JOIN_INNER ||
+						 istate->join_type == JOIN_RIGHT))
+		goto next;
+
 	scan_desc = scan_slot->tts_tupleDescriptor;
 	if (istate->pds_list != NIL)
 		pds_hash = (pgstrom_data_store *) llast(istate->pds_list);
@@ -5351,8 +5398,6 @@ gpujoin_inner_hash_preload(GpuJoinState *gjs,
 		istate->consumed = KERN_DATA_STORE_HEAD_LENGTH(pds_hash->kds);
 	}
 
-	tuple = ExecFetchSlotTuple(scan_slot);
-	hash = get_tuple_hashvalue(istate, scan_slot);
 	consumption = sizeof(cl_uint) +	/* for hash_slot */
 		MAXALIGN(offsetof(kern_hashitem, htup) + tuple->t_len);
 	/*

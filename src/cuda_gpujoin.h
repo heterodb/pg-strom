@@ -169,7 +169,8 @@ gpujoin_hash_value(kern_context *kcxt,
 				   kern_data_store *kds,
 				   kern_multirels *kmrels,
 				   cl_int depth,
-				   cl_uint *x_buffer);
+				   cl_uint *x_buffer,
+				   cl_bool *p_is_null_keys);
 
 /*
  * gpujoin_projection
@@ -400,6 +401,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 	cl_bool				is_matched;
 	cl_uint				loops = 100;	// for debug ... to be removed later
 	cl_bool				needs_outer_row = false;
+	cl_bool				is_null_keys;
 	__shared__ cl_uint	base;
 	__shared__ cl_uint	pg_crc32_table[256];
 
@@ -442,9 +444,11 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 										kds,
 										kmrels,
 										depth,
-										x_buffer);
-		if (hash_value >= kds_hash->hash_min &&
-			hash_value <= kds_hash->hash_max)
+										x_buffer,
+										&is_null_keys);
+		/* NOTE: NULL-keys never match on inner join */
+		if (!is_null_keys && (hash_value >= kds_hash->hash_min &&
+							  hash_value <= kds_hash->hash_max))
 		{
 			khitem = KERN_HASH_FIRST_ITEM(kds_hash, hash_value);
 			needs_outer_row = true;
@@ -512,7 +516,9 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 	 * FOR DEBUG - It may detect infinite loop.
 	 */
 	if (loops < 1)
+	{
 		STROM_SET_ERROR(&kcxt.e, StromError_CudaInternal);
+	}
 
 	/*
 	 * If no inner rows were matched on LEFT OUTER JOIN case, we fill up

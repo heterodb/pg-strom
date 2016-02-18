@@ -2593,28 +2593,10 @@ gpupreagg_codegen_projection(GpuPreAggInfo *gpa_info,
 		"                     kern_data_store *kds_dst,\n"
 		"                     Datum *dst_values,\n"
 		"                     cl_char *dst_isnull)\n"
-		"{\n"
-		"  union {\n"
-		"    pg_varlena_t     varlena_t;\n"
-		"    pg_bool_t        bool_v;\n"
-		"    pg_int2_t        int2_v;\n"
-		"    pg_int4_t        int4_v;\n"
-		"    pg_int8_t        int8_v;\n"
-		"    pg_float4_t      float4_v;\n"
-		"    pg_float8_t      float8_v;\n"
-		"#ifdef CUDA_NUMERIC_H\n"
-		"    pg_numeric_t     numeric_v;\n"
-		"#endif\n"
-		"#ifdef CUDA_MONEY_H\n"
-		"    pg_money_t       money_v;\n"
-		"#endif\n"
-		"#ifdef CUDA_TIMELIB_H\n"
-		"    pg_date_t        date_v;\n"
-		"    pg_time_t        time_v;\n"
-		"    pg_timestamp_t   timestamp_v;\n"
-		"    pg_timestamptz_t timestamptz_v;\n"
-		"#endif\n"
-		"  } temp                          __attribute__ ((unused));\n"
+		"{\n");
+	codegen_tempvar_declaration(&decl, "temp");
+	appendStringInfoString(
+		&decl,
 		"  pg_float8_t        temp_float8x __attribute__ ((unused));\n"
 		"  pg_float8_t        temp_float8y __attribute__ ((unused));\n"
 		"  char              *addr         __attribute__ ((unused));\n");
