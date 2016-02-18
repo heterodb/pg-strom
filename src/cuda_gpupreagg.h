@@ -57,12 +57,25 @@ typedef struct
 	cl_uint			varlena_usage;		/* out: size of varlena usage */
 	cl_uint			ghash_conflicts;	/* out: # of ghash conflicts */
 	cl_uint			fhash_conflicts;	/* out: # of fhash conflicts */
+	/* -- performance monitor -- */
+	cl_uint			num_kern_prep;		/* # of kern_preparation calls */
+	cl_uint			num_kern_nogrp;		/* # of kern_nogroup calls */
+	cl_uint			num_kern_lagg;		/* # of kern_local_reduction calls */
+	cl_uint			num_kern_gagg;		/* # of kern_global_reducation calls */
+	cl_uint			num_kern_fagg;		/* # of kern_final_reduction calls */
+	cl_float		tv_kern_prep;		/* msec of kern_preparation */
+	cl_float		tv_kern_nogrp;		/* msec of kern_nogroup */
+	cl_float		tv_kern_lagg;		/* msec of kern_local_reduction */
+	cl_float		tv_kern_gagg;		/* msec of kern_global_reducation */
+	cl_float		tv_kern_fagg;		/* msec of kern_final_reduction */
+#if 0
 	cl_uint			ktime_prep;			/* exec msec of preparation kernel */
 	cl_uint			ktime_nogrp;		/* exec msec of nogroup kernel */
 	cl_uint			ktime_lagg;			/* exec msec of local kernel */
 	cl_uint			ktime_gagg;			/* exec msec of global kernel */
 	cl_uint			ktime_fagg;			/* exec msec of final kernel */
 	//cl_uint		ktime_fixvar;		/* exec msec of fixvar kernel */
+#endif
 	/* -- other hashing parameters -- */
 	cl_uint			key_dist_salt;			/* hashkey distribution salt */
 	cl_uint			hash_size;				/* size of global hash-slots */
@@ -1655,7 +1668,7 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 	else if (kgpreagg->kerror.errcode != StromError_Success)
 		return;
 	tv2 = clock64();
-	kgpreagg->ktime_prep = (tv2 - tv1) / smx_clock;
+	TIMEVAL_RECORD(kgpreagg,kern_prep,tv1,tv2,smx_clock);
 
 	if (kgpreagg->reduction_mode == GPUPREAGG_NOGROUP_REDUCTION)
 	{
@@ -1723,8 +1736,6 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 		else if (kgpreagg->kerror.errcode != StromError_Success)
 			return;
 
-		printf("nogroup reduction(1) nitems %u => %u\n", kds_slot->nitems, kresults_dst->nitems);
-
 		/* 2nd trial of the reduction */
 		memset(kresults_src, 0, offsetof(kern_resultbuf, results[0]));
 		kresults_src->nrels = 1;
@@ -1775,9 +1786,7 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 			return;
 
 		tv2 = clock64();
-		kgpreagg->ktime_nogrp = (tv2 - tv1) / smx_clock;
-
-		printf("nogroup reduction(2) nitems %u => %u\n", kresults_dst->nitems, kresults_src->nitems);
+		TIMEVAL_RECORD(kgpreagg,kern_nogrp,tv1,tv2,smx_clock);
 	}
 	else if (kgpreagg->reduction_mode == GPUPREAGG_LOCAL_REDUCTION ||
 			 kgpreagg->reduction_mode == GPUPREAGG_GLOBAL_REDUCTION)
@@ -1848,7 +1857,7 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 			printf("local_reduction %u=>%u\n", kds_slot->nitems, kresults_src->nitems);
 			/* perfmon */
 			tv2 = clock64();
-			kgpreagg->ktime_lagg = (tv2 - tv1) / smx_clock;
+			TIMEVAL_RECORD(kgpreagg,kern_lagg,tv1,tv2,smx_clock);
 		}
 		else
 		{
@@ -1914,9 +1923,8 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 			return;
 
 		tv2 = clock64();
-		kgpreagg->ktime_gagg = (tv2 - tv1) / smx_clock;
+		TIMEVAL_RECORD(kgpreagg,kern_gagg,tv1,tv2,smx_clock);
 
-		printf("global_reduction %u=>%u\n", kresults_src->all_visible ? kds_slot->nitems : kresults_src->nitems, kresults_dst->nitems);
 		/* swap */
 		kresults_tmp = kresults_src;
 		kresults_src = kresults_dst;
@@ -2005,7 +2013,7 @@ final_retry:
 		goto final_retry;
 	}
 	tv2 = clock64();
-	kgpreagg->ktime_fagg = (tv2 - tv1) / smx_clock;
+	TIMEVAL_RECORD(kgpreagg,kern_fagg,tv1,tv2,smx_clock);
 
 	/*
 	 * NOTE: gpupreagg_fixup_varlena shall be launched by CPU thread

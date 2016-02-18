@@ -1571,22 +1571,27 @@ gpusort_task_complete(GpuTask *gtask)
 	GpuSortState	   *gss = (GpuSortState *) gtask->gts;
 	pgstrom_gpusort	   *gpusort = (pgstrom_gpusort *) gtask;
 	pgstrom_gpusort	   *newsort;
+	pgstrom_perfmon	   *pfm = &gss->gts.pfm_accum;
 
 	if (gpusort->mc_class == 0)
 	{
-		if (gpusort->task.pfm.enabled)
+		if (pfm->enabled)
 		{
+			pfm->num_tasks++;
 			CUDA_EVENT_ELAPSED(gpusort, time_dma_send,
-							   ev_dma_send_start,
-							   ev_dma_send_stop);
-			CUDA_EVENT_ELAPSED(gpusort, time_gpu_sort,
-							   ev_dma_send_stop,
-							   ev_dma_recv_start);
+							   gpusort->ev_dma_send_start,
+							   gpusort->ev_dma_send_stop,
+							   skip);
+			CUDA_EVENT_ELAPSED(gpusort, gsort.tv_kern_sort,
+							   gpusort->ev_dma_send_stop,
+							   gpusort->ev_dma_recv_start,
+							   skip);
 			CUDA_EVENT_ELAPSED(gpusort, time_dma_recv,
-							   ev_dma_recv_start,
-							   ev_dma_recv_stop);
-			pgstrom_accum_perfmon(&gss->gts.pfm_accum, &gpusort->task.pfm);
+							   gpusort->ev_dma_recv_start,
+							   gpusort->ev_dma_recv_stop,
+							   skip);
 		}
+	skip:
 		gpusort_cleanup_cuda_resources(gpusort);
 
 		if (gpusort->task.kerror.errcode == StromError_CpuReCheck)
@@ -1600,7 +1605,7 @@ gpusort_task_complete(GpuTask *gtask)
 		pgstrom_flat_gpusort   *pfg = (pgstrom_flat_gpusort *)
 			dsm_segment_address(gpusort->oitems_dsm);
 
-		if (gpusort->task.pfm.enabled)
+		if (gss->gts.pfm_accum.enabled)
 		{
 			struct timeval	tv_curr;
 
@@ -1615,7 +1620,6 @@ gpusort_task_complete(GpuTask *gtask)
 						&pfg->tv_sort_end, &tv_curr);
 		}
 	}
-
 	/* ritems and litems are no longer referenced */
 	if (gpusort->litems_dsm)
 	{
@@ -1739,6 +1743,7 @@ launch_gpu_bitonic_kernels(GpuSortState *gss,
 						   pgstrom_gpusort *gpusort,
 						   size_t nitems)
 {
+	pgstrom_perfmon *pfm_accum = &gss->gts.pfm_accum;
 	size_t		block_size = INT_MAX;
 	size_t		grid_size;
 	size_t		block_temp;
@@ -1808,7 +1813,7 @@ launch_gpu_bitonic_kernels(GpuSortState *gss,
 		elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
 	elog(DEBUG2, "gpusort_bitonic_local(gridSz=%zu,blockSz=%zu)",
 		 grid_size, block_size);
-	gpusort->task.pfm.num_gpu_sort++;
+	pfm_accum->gsort.num_kern_sort++;
 
 	/* Sorting inter blocks */
 	for (i = block_size; i < nhalf; i *= 2)
@@ -1843,7 +1848,7 @@ launch_gpu_bitonic_kernels(GpuSortState *gss,
 			elog(DEBUG2,
 				 "gpusort_bitonic_step(gridSz=%zu,blockSz=%zu,unitsz=%d)",
 				 grid_size, block_size,bitonic_unitsz);
-			gpusort->task.pfm.num_gpu_sort++;
+			pfm_accum->gsort.num_kern_sort++;
 		}
 
 		/*
@@ -1866,7 +1871,7 @@ launch_gpu_bitonic_kernels(GpuSortState *gss,
 		elog(DEBUG2,
 			 "gpusort_bitonic_merge(gridSz=%zu,blockSz=%zu)",
 			 grid_size, block_size);
-		gpusort->task.pfm.num_gpu_sort++;
+		pfm_accum->gsort.num_kern_sort++;
 	}
 }
 
@@ -1874,6 +1879,7 @@ static bool
 __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *gpusort)
 {
 	kern_resultbuf	   *kresults = GPUSORT_GET_KRESULTS(gpusort->oitems_dsm);
+	pgstrom_perfmon	   *pfm_accum = &gss->gts.pfm_accum;
 	pgstrom_data_store *pds;
 	pgstrom_data_store *ptoast;
 	void			   *kernel_args[8];
@@ -1943,21 +1949,10 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *gpusort)
 	/*
 	 * creation of event objects, if any
 	 */
-	if (gpusort->task.pfm.enabled)
-	{
-		rc = cuEventCreate(&gpusort->ev_dma_send_start, CU_EVENT_DEFAULT);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
-		rc = cuEventCreate(&gpusort->ev_dma_send_stop, CU_EVENT_DEFAULT);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
-		rc = cuEventCreate(&gpusort->ev_dma_recv_start, CU_EVENT_DEFAULT);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
-		rc = cuEventCreate(&gpusort->ev_dma_recv_stop, CU_EVENT_DEFAULT);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
-	}
+	CUDA_EVENT_CREATE(gpusort, ev_dma_send_start);
+	CUDA_EVENT_CREATE(gpusort, ev_dma_send_stop);
+	CUDA_EVENT_CREATE(gpusort, ev_dma_recv_start);
+	CUDA_EVENT_CREATE(gpusort, ev_dma_recv_stop);
 
 	/*
 	 * Registers oitems_dsm as host pinned memory
@@ -1984,8 +1979,8 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *gpusort)
 						   gpusort->task.cuda_stream);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-	gpusort->task.pfm.bytes_dma_send += gss->gts.kern_params->length;
-	gpusort->task.pfm.num_dma_send++;
+	pfm_accum->bytes_dma_send += gss->gts.kern_params->length;
+	pfm_accum->num_dma_send++;
 
 	offset = STROMALIGN(gss->gts.kern_params->length);
 	length = offsetof(kern_resultbuf, results[0]);
@@ -1995,8 +1990,8 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *gpusort)
 						   gpusort->task.cuda_stream);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-	gpusort->task.pfm.bytes_dma_send += length;
-	gpusort->task.pfm.num_dma_send++;
+	pfm_accum->bytes_dma_send += length;
+	pfm_accum->num_dma_send++;
 
 	rc = cuMemcpyHtoDAsync(gpusort->m_kds,
 						   pds->kds,
@@ -2004,8 +1999,8 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *gpusort)
 						   gpusort->task.cuda_stream);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-	gpusort->task.pfm.bytes_dma_send += KERN_DATA_STORE_HEAD_LENGTH(pds->kds);
-	gpusort->task.pfm.num_dma_send++;
+	pfm_accum->bytes_dma_send += KERN_DATA_STORE_HEAD_LENGTH(pds->kds);
+	pfm_accum->num_dma_send++;
 
 	rc = cuMemcpyHtoDAsync(gpusort->m_ktoast,
 						   ptoast->kds,
@@ -2013,8 +2008,8 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *gpusort)
 						   gpusort->task.cuda_stream);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-	gpusort->task.pfm.bytes_dma_send += KERN_DATA_STORE_LENGTH(ptoast->kds);
-	gpusort->task.pfm.num_dma_send++;
+	pfm_accum->bytes_dma_send += KERN_DATA_STORE_LENGTH(ptoast->kds);
+	pfm_accum->num_dma_send++;
 
 	CUDA_EVENT_RECORD(gpusort, ev_dma_send_stop);
 
@@ -2046,7 +2041,7 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *gpusort)
 		elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
 	elog(DEBUG2, "kern_prep grid_size=%zu block_size=%zu nitems=%zu",
 		 grid_size, block_size, (size_t)nitems);
-	gpusort->task.pfm.num_kern_prep++;
+	pfm_accum->gsort.num_kern_prep++;
 
 	/*
 	 * Launch kernel functions of bitonic-sorting
@@ -2077,7 +2072,7 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *gpusort)
 						NULL);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
-	gpusort->task.pfm.num_kern_prep++;
+	pfm_accum->gsort.num_kern_fixup++;
 
 	/*
 	 * DMA Recv
@@ -2092,8 +2087,8 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *gpusort)
 						   gpusort->task.cuda_stream);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "cuMemcpyDtoHAsync: %s", errorText(rc));
-	gpusort->task.pfm.bytes_dma_recv += length;
-	gpusort->task.pfm.num_dma_recv++;
+	pfm_accum->bytes_dma_recv += length;
+	pfm_accum->num_dma_recv++;
 
 	length = KERN_DATA_STORE_LENGTH(pds->kds);
 	rc = cuMemcpyDtoHAsync(pds->kds,
@@ -2102,8 +2097,8 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *gpusort)
 						   gpusort->task.cuda_stream);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "cuMemcpyDtoHAsync: %s", errorText(rc));
-	gpusort->task.pfm.bytes_dma_recv += length;
-	gpusort->task.pfm.num_dma_recv++;
+	pfm_accum->bytes_dma_recv += length;
+	pfm_accum->num_dma_recv++;
 
 	CUDA_EVENT_RECORD(gpusort, ev_dma_recv_stop);
 

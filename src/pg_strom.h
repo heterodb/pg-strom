@@ -155,18 +155,24 @@ typedef struct {
 		cl_uint		num_kern_lagg;
 		cl_uint		num_kern_gagg;
 		cl_uint		num_kern_fagg;
+		cl_uint		num_kern_fixvar;
 		cl_double	tv_kern_prep;
 		cl_double	tv_kern_nogrp;
 		cl_double	tv_kern_lagg;
 		cl_double	tv_kern_gagg;
 		cl_double	tv_kern_fagg;
+		cl_double	tv_kern_fixvar;
 	} gpreagg;
 	struct {
-		char		__to_be_later__;
-		
+		cl_uint		num_kern_prep;
+		cl_uint		num_kern_sort;
+		cl_uint		num_kern_fixup;
+		cl_double	tv_kern_prep;
+		cl_double	tv_kern_sort;
+		cl_double	tv_kern_fixup;
 	} gsort;
 #endif
-
+#if 1
 	/* below is the legacy perfmon stuff */
 
 	cl_uint		num_samples;
@@ -216,6 +222,7 @@ typedef struct {
 	cl_double	time_debug4;	/* time for debugging purpose.4 */
 
 	struct timeval	tv;	/* result of gettimeofday(2) when enqueued */
+#endif
 } pgstrom_perfmon;
 
 /* time interval in milliseconds */
@@ -238,23 +245,26 @@ typedef struct {
 
 #define CUDA_EVENT_RECORD(node,ev_field)						\
 	do {														\
-		if (((GpuTask *)(node))->pfm.enabled)					\
+		if (((GpuTask *)(node))->gts->pfm_accum.enabled)		\
 		{														\
-			CUresult __rc =	cuEventRecord((node)->ev_field,		\
-										  ((GpuTask *)(node))->cuda_stream); \
+			CUresult __rc = cuEventRecord((node)->ev_field,		\
+							((GpuTask *)(node))->cuda_stream);	\
 			if (__rc != CUDA_SUCCESS)							\
 				elog(ERROR, "failed on cuEventRecord: %s",		\
 					 errorText(__rc));							\
 		}														\
 	} while(0)
 
-#define CUDA_EVENT_CREATE(node,ev_field)					\
-	do {													\
-		CUresult __rc = cuEventCreate(&(node)->ev_field,	\
-									  CU_EVENT_DEFAULT);	\
-		if (__rc != CUDA_SUCCESS)							\
-			elog(ERROR, "failed on cuEventCreate: %s",		\
-				 errorText(__rc));							\
+#define CUDA_EVENT_CREATE(node,ev_field)						\
+	do {														\
+		if (((GpuTask *)(node))->gts->pfm_accum.enabled)		\
+		{														\
+			CUresult __rc = cuEventCreate(&(node)->ev_field,	\
+										  CU_EVENT_DEFAULT);	\
+			if (__rc != CUDA_SUCCESS)							\
+				elog(ERROR, "failed on cuEventCreate: %s",		\
+					 errorText(__rc));							\
+		}														\
 	} while(0)
 
 #define CUDA_EVENT_DESTROY(node,ev_field)						\
@@ -269,20 +279,23 @@ typedef struct {
 		}														\
 	} while(0)
 
-#define CUDA_EVENT_ELAPSED(node,pfm_field,ev_start,ev_stop)		\
+#define CUDA_EVENT_ELAPSED(node,pfm_field,ev_start,ev_stop,bailout) \
 	do {														\
 		CUresult	__rc;										\
 		float		__elapsed;									\
 																\
-		if ((node)->ev_start != NULL && (node)->ev_stop != NULL)\
+		if ((ev_start) != NULL && (ev_stop) != NULL)			\
 		{														\
 			__rc = cuEventElapsedTime(&__elapsed,				\
-									  (node)->ev_start,			\
-									  (node)->ev_stop);			\
+									  (ev_start),				\
+									  (ev_stop));				\
 			if (__rc != CUDA_SUCCESS)							\
-				elog(ERROR, "failed on cuEventElapsedTime: %s",	\
+			{													\
+				elog(WARNING, "failed on cuEventElapsedTime: %s",	\
 					 errorText(__rc));							\
-			((GpuTask *)(node))->pfm.pfm_field += __elapsed;	\
+				goto bailout;									\
+			}													\
+			((GpuTask *)(node))->gts->pfm_accum.pfm_field += __elapsed; \
 		}														\
 	} while(0)
 
@@ -416,7 +429,6 @@ struct GpuTask
 	CUstream		cuda_stream;	/* owned for each GpuTask */
 	CUmodule		cuda_module;	/* just reference, no cleanup needed */
 	kern_errorbuf	kerror;		/* error status on CUDA kernel execution */
-	pgstrom_perfmon	pfm;
 };
 
 /*

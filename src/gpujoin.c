@@ -4508,94 +4508,65 @@ gpujoin_task_complete(GpuTask *gtask)
 {
 	pgstrom_gpujoin	   *pgjoin = (pgstrom_gpujoin *) gtask;
 	GpuJoinState	   *gjs = (GpuJoinState *) gtask->gts;
+	pgstrom_perfmon	   *pfm = &gjs->gts.pfm_accum;
 
-	if (gjs->gts.pfm_accum.enabled)
+	if (pfm->enabled)
 	{
-		CUresult	rc;
-		cl_float	tv_dma_inner_send = 0.0;
-		cl_float	tv_dma_outer_send;
-		cl_float	tv_dma_recv;
-
+		pfm->num_tasks++;
 		if (pgjoin->is_inner_loader)
 		{
-			CUevent	ev_inner_loaded
-				= pgjoin->pmrels->ev_loaded[gtask->cuda_index];
+			CUevent ev_inner_loaded =
+				pgjoin->pmrels->ev_loaded[gtask->cuda_index];
 
-			rc = cuEventElapsedTime(&tv_dma_inner_send,
-									pgjoin->ev_dma_send_start,
-									ev_inner_loaded);
-			if (rc != CUDA_SUCCESS)
-			{
-				elog(WARNING, "failed on cuEventElapsedTime: %s",
-					 errorText(rc));
-				goto skip;
-			}
-
-			rc = cuEventElapsedTime(&tv_dma_outer_send,
-									ev_inner_loaded,
-									pgjoin->ev_dma_send_stop);
-			if (rc != CUDA_SUCCESS)
-			{
-				elog(WARNING, "failed on cuEventElapsedTime: %s",
-					 errorText(rc));
-				goto skip;
-			}
+			CUDA_EVENT_ELAPSED(pgjoin, gjoin.tv_inner_dma_send,
+							   pgjoin->ev_dma_send_start,
+							   ev_inner_loaded,
+							   skip);
+			CUDA_EVENT_ELAPSED(pgjoin, time_dma_send,
+							   ev_inner_loaded,
+							   pgjoin->ev_dma_send_stop,
+							   skip);
 		}
 		else
 		{
-			rc = cuEventElapsedTime(&tv_dma_outer_send,
-									pgjoin->ev_dma_send_start,
-									pgjoin->ev_dma_send_stop);
-			if (rc != CUDA_SUCCESS)
-			{
-				elog(WARNING, "failed on cuEventElapsedTime: %s",
-					 errorText(rc));
-				goto skip;
-			}
+			CUDA_EVENT_ELAPSED(pgjoin, time_dma_send,
+							   pgjoin->ev_dma_send_start,
+							   pgjoin->ev_dma_send_stop,
+							   skip);
 		}
-
-		rc = cuEventElapsedTime(&tv_dma_recv,
-								pgjoin->ev_dma_recv_start,
-								pgjoin->ev_dma_recv_stop);
-		if (rc != CUDA_SUCCESS)
-		{
-			elog(WARNING, "failed on cuEventElapsedTime: %s",
-				 errorText(rc));
-			goto skip;
-		}
-		/* update perfmon */
-		gjs->gts.pfm_accum.gjoin.tv_inner_dma_send += tv_dma_inner_send;
-		gjs->gts.pfm_accum.time_dma_send += tv_dma_outer_send;
-		gjs->gts.pfm_accum.time_dma_recv += tv_dma_recv;
-
-		gjs->gts.pfm_accum.gjoin.num_kern_outer_scan
+		CUDA_EVENT_ELAPSED(pgjoin, time_dma_recv,
+						   pgjoin->ev_dma_recv_start,
+						   pgjoin->ev_dma_recv_stop,
+						   skip);
+		/* update performance */
+		pfm->gjoin.num_kern_outer_scan
 			+= pgjoin->kern.num_kern_outer_scan;
-		gjs->gts.pfm_accum.gjoin.num_kern_exec_nestloop
+		pfm->gjoin.num_kern_exec_nestloop
 			+= pgjoin->kern.num_kern_exec_nestloop;
-		gjs->gts.pfm_accum.gjoin.num_kern_exec_hashjoin
+		pfm->gjoin.num_kern_exec_hashjoin
 			+= pgjoin->kern.num_kern_exec_hashjoin;
-		gjs->gts.pfm_accum.gjoin.num_kern_outer_nestloop
+		pfm->gjoin.num_kern_outer_nestloop
 			+= pgjoin->kern.num_kern_outer_nestloop;
-		gjs->gts.pfm_accum.gjoin.num_kern_outer_hashjoin
+		pfm->gjoin.num_kern_outer_hashjoin
 			+= pgjoin->kern.num_kern_outer_hashjoin;
-		gjs->gts.pfm_accum.gjoin.num_kern_projection
+		pfm->gjoin.num_kern_projection
 			+= pgjoin->kern.num_kern_projection;
-		gjs->gts.pfm_accum.gjoin.num_kern_rows_dist
+		pfm->gjoin.num_kern_rows_dist
 			+= pgjoin->kern.num_kern_rows_dist;
 
-		gjs->gts.pfm_accum.gjoin.tv_kern_outer_scan
+		pfm->gjoin.tv_kern_outer_scan
 			+= pgjoin->kern.tv_kern_outer_scan;
-		gjs->gts.pfm_accum.gjoin.tv_kern_exec_nestloop
+		pfm->gjoin.tv_kern_exec_nestloop
 			+= pgjoin->kern.tv_kern_exec_nestloop;
-		gjs->gts.pfm_accum.gjoin.tv_kern_exec_hashjoin
+		pfm->gjoin.tv_kern_exec_hashjoin
 			+= pgjoin->kern.tv_kern_exec_hashjoin;
-		gjs->gts.pfm_accum.gjoin.tv_kern_outer_nestloop
+		pfm->gjoin.tv_kern_outer_nestloop
 			+= pgjoin->kern.tv_kern_outer_nestloop;
-		gjs->gts.pfm_accum.gjoin.tv_kern_outer_hashjoin
+		pfm->gjoin.tv_kern_outer_hashjoin
 			+= pgjoin->kern.tv_kern_outer_hashjoin;
-		gjs->gts.pfm_accum.gjoin.tv_kern_projection
+		pfm->gjoin.tv_kern_projection
 			+= pgjoin->kern.tv_kern_projection;
-		gjs->gts.pfm_accum.gjoin.tv_kern_rows_dist
+		pfm->gjoin.tv_kern_rows_dist
 			+= pgjoin->kern.tv_kern_rows_dist;
 	}
 skip:
@@ -4812,24 +4783,10 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 	/*
 	 * Creation of event objects, if needed
 	 */
-	if (gjs->gts.pfm_accum.enabled)
-	{
-		rc = cuEventCreate(&pgjoin->ev_dma_send_start, CU_EVENT_DEFAULT);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
-
-		rc = cuEventCreate(&pgjoin->ev_dma_send_stop, CU_EVENT_DEFAULT);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
-
-		rc = cuEventCreate(&pgjoin->ev_dma_recv_start, CU_EVENT_DEFAULT);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
-
-		rc = cuEventCreate(&pgjoin->ev_dma_recv_stop, CU_EVENT_DEFAULT);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
-    }
+	CUDA_EVENT_CREATE(pgjoin, ev_dma_send_start);
+	CUDA_EVENT_CREATE(pgjoin, ev_dma_send_stop);
+	CUDA_EVENT_CREATE(pgjoin, ev_dma_recv_start);
+	CUDA_EVENT_CREATE(pgjoin, ev_dma_recv_stop);
 
 	/*
 	 * OK, all the device memory and kernel objects are successfully

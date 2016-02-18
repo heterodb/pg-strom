@@ -2206,52 +2206,23 @@ pgstrom_complete_gpuscan(GpuTask *gtask)
 
 	if (gts->pfm_accum.enabled)
 	{
-		CUresult	rc;
-		float		tv_dma_send;
-		float		tv_kern_exec_quals;
-		float		tv_kern_projection;
-		float		tv_dma_recv;
-
-		rc = cuEventElapsedTime(&tv_dma_send,
-								gpuscan->ev_dma_send_start,
-								gpuscan->ev_dma_send_stop);
-		if (rc != CUDA_SUCCESS)
-		{
-			elog(WARNING, "failed on cuEventElapsedTime: %s", errorText(rc));
-			goto skip;
-		}
-
-		rc = cuEventElapsedTime(&tv_kern_exec_quals,
-								gpuscan->ev_dma_send_stop,
-								gpuscan->ev_kern_exec_quals);
-		if (rc != CUDA_SUCCESS)
-		{
-			elog(WARNING, "failed on cuEventElapsedTime: %s", errorText(rc));
-			goto skip;
-		}
-
-		rc = cuEventElapsedTime(&tv_kern_projection,
-								gpuscan->ev_kern_exec_quals,
-								gpuscan->ev_dma_recv_start);
-		if (rc != CUDA_SUCCESS)
-		{
-			elog(WARNING, "failed on cuEventElapsedTime: %s", errorText(rc));
-			goto skip;
-		}
-
-		rc = cuEventElapsedTime(&tv_dma_recv,
-								gpuscan->ev_dma_recv_start,
-								gpuscan->ev_dma_recv_stop);
-		if (rc != CUDA_SUCCESS)
-		{
-			elog(WARNING, "failed on cuEventElapsedTime: %s", errorText(rc));
-			goto skip;
-		}
-		/* update perfmon */
-		gts->pfm_accum.time_dma_send += tv_dma_send;
-		gts->pfm_accum.time_dma_recv += tv_dma_recv;
-		gts->pfm_accum.gscan.tv_kern_exec_quals += tv_kern_exec_quals;
-		gts->pfm_accum.gscan.tv_kern_projection += tv_kern_projection;
+		gts->pfm_accum.num_tasks++;
+		CUDA_EVENT_ELAPSED(gpuscan,time_dma_send,
+						   gpuscan->ev_dma_send_start,
+						   gpuscan->ev_dma_send_stop,
+						   skip);
+		CUDA_EVENT_ELAPSED(gpuscan, gscan.tv_kern_exec_quals,
+						   gpuscan->ev_dma_send_stop,
+						   gpuscan->ev_kern_exec_quals,
+						   skip);
+		CUDA_EVENT_ELAPSED(gpuscan, gscan.tv_kern_projection,
+						   gpuscan->ev_kern_exec_quals,
+						   gpuscan->ev_dma_recv_start,
+						   skip);
+		CUDA_EVENT_ELAPSED(gpuscan, time_dma_recv,
+						   gpuscan->ev_dma_recv_start,
+						   gpuscan->ev_dma_recv_stop,
+						   skip);
 	}
 skip:
 	gpuscan_cleanup_cuda_resources(gpuscan);
@@ -2395,24 +2366,10 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 	/*
 	 * Creation of event objects, if any
 	 */
-	if (gss->gts.pfm_accum.enabled)
-	{
-		rc = cuEventCreate(&gpuscan->ev_dma_send_start, CU_EVENT_DEFAULT);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
-
-		rc = cuEventCreate(&gpuscan->ev_dma_send_stop, CU_EVENT_DEFAULT);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
-
-		rc = cuEventCreate(&gpuscan->ev_dma_recv_start, CU_EVENT_DEFAULT);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
-
-		rc = cuEventCreate(&gpuscan->ev_dma_recv_stop, CU_EVENT_DEFAULT);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
-	}
+	CUDA_EVENT_CREATE(gpuscan, ev_dma_send_start);
+	CUDA_EVENT_CREATE(gpuscan, ev_dma_send_stop);
+	CUDA_EVENT_CREATE(gpuscan, ev_dma_recv_start);
+	CUDA_EVENT_CREATE(gpuscan, ev_dma_recv_stop);
 
 	/*
 	 * OK, enqueue a series of requests

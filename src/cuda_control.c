@@ -1894,7 +1894,6 @@ pgstrom_init_gputask(GpuTaskState *gts, GpuTask *gtask)
 	SpinLockAcquire(&gts->lock);
 	dlist_push_tail(&gts->tracked_tasks, &gtask->tracker);
 	SpinLockRelease(&gts->lock);
-	gtask->pfm.enabled = gts->pfm_accum.enabled;
 }
 
 void
