@@ -4108,6 +4108,15 @@ gpujoin_create_task(GpuJoinState *gjs,
 	for (i=0; i <= gjs->num_rels; i++)
 	{
 		kern_join_scale	   *jscale = pgjoin->kern.jscale;
+		cl_uint				nitems;
+
+		if (i == 0)
+			nitems = (!pgjoin->pds_src ? 0 : pgjoin->pds_src->kds->nitems);
+		else
+		{
+			pgstrom_data_store *pds = pmrels->inner_chunks[i-1];
+			nitems = pds->kds->nitems;
+		}
 
 		if (jscale_old)
 		{
@@ -4118,18 +4127,11 @@ gpujoin_create_task(GpuJoinState *gjs,
 			 */
 			jscale[i].window_base = jscale_old[i].window_base;
 			jscale[i].window_size = jscale_old[i].window_size;
+			if (jscale[i].window_base + jscale[i].window_size > nitems)
+				jscale[i].window_size = nitems - jscale[i].window_base;
 		}
 		else
 		{
-			cl_uint		nitems;
-
-			if (i == 0)
-				nitems = (!pgjoin->pds_src ? 0 : pgjoin->pds_src->kds->nitems);
-			else
-			{
-				pgstrom_data_store *pds = pmrels->inner_chunks[i-1];
-				nitems = pds->kds->nitems;
-			}
 			jscale[i].window_base = 0;
 			jscale[i].window_size = nitems;
 		}
@@ -4474,9 +4476,9 @@ gpujoin_cleanup_cuda_resources(pgstrom_gpujoin *pgjoin)
 	/* clear the pointers */
 	pgjoin->kern_main = NULL;
 	pgjoin->m_kgjoin = 0UL;
-	pgjoin->m_kmrels = 0UL;
 	pgjoin->m_kds_src = 0UL;
 	pgjoin->m_kds_dst = 0UL;
+	pgjoin->m_kmrels = 0UL;
 	pgjoin->ev_dma_send_start = NULL;
 	pgjoin->ev_dma_send_stop = NULL;
 	pgjoin->ev_dma_recv_start = NULL;
@@ -4868,7 +4870,7 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 	CUDA_EVENT_RECORD(pgjoin, ev_dma_recv_start);
 
 	/* DMA Recv: kern_gpujoin *kgjoin */
-	length = KERN_GPUJOIN_HEAD_LENGTH(&pgjoin->kern);
+	length = offsetof(kern_gpujoin, jscale[gjs->num_rels+1]);
 	rc = cuMemcpyDtoHAsync(&pgjoin->kern,
 						   pgjoin->m_kgjoin,
 						   length,
@@ -4992,6 +4994,8 @@ add_extra_randomness(pgstrom_data_store *pds)
 		for (x=0; x < kds->nitems; x++)
 		{
 			y = rand() % kds->nitems;
+			if (x == y)
+				continue;
 
 			if (kds->format == KDS_FORMAT_HASH)
 			{
@@ -5172,6 +5176,7 @@ gpujoin_inner_hash_preload_TS(GpuJoinState *gjs,
 			kds_length = (STROMALIGN(offsetof(kern_data_store,
 											 colmeta[scan_desc->natts])) +
 						  STROMALIGN(sizeof(cl_uint) * nslots) +
+						  STROMALIGN(sizeof(cl_uint) * curr_nitems) +
 						  curr_size);
 
 			hash_max = i * (1U << istate->hgram_shift) - 1;
@@ -5202,6 +5207,7 @@ gpujoin_inner_hash_preload_TS(GpuJoinState *gjs,
 	kds_length = (STROMALIGN(offsetof(kern_data_store,
 									  colmeta[scan_desc->natts])) +
 				  STROMALIGN(sizeof(cl_uint) * nslots) +
+				  STROMALIGN(sizeof(cl_uint) * curr_nitems) +
 				  curr_size + BLCKSZ);
 	pds_hash = pgstrom_create_data_store_hash(gjs->gts.gcontext,
 											  scan_desc,

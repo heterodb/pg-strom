@@ -767,7 +767,7 @@ gpujoin_projection_row(kern_gpujoin *kgjoin,
 	/* sanity checks */
 	assert(kresults->nrels == kgjoin->num_rels + 1);
 	assert(kds_src == NULL || kds_src->format == KDS_FORMAT_ROW);
-	assert(kds_dst->format == KDS_FORMAT_ROW);
+	assert(kds_dst->format == KDS_FORMAT_ROW && kds_dst->nslots == 0);
 
 	INIT_KERNEL_CONTEXT(&kcxt, gpujoin_projection_row, kparams);
 
@@ -845,7 +845,7 @@ gpujoin_projection_row(kern_gpujoin *kgjoin,
 	if (required > 0)
 	{
 		cl_uint			pos = kds_dst->length - (base + offset + required);
-		cl_uint		   *tup_pos = (cl_uint *)KERN_DATA_STORE_BODY(kds_dst);
+		cl_uint		   *tup_pos = KERN_DATA_STORE_ROWINDEX(kds_dst);
 		kern_tupitem   *tupitem = (kern_tupitem *)((char *)kds_dst + pos);
 
 		tup_pos[res_index] = pos;
@@ -1228,7 +1228,7 @@ gpujoin_resize_window(kern_gpujoin *kgjoin,
 	 * reduce the window size less than 1.
 	 */
 	kgjoin->jscale[target_depth].window_size
-		= kgjoin->jscale[target_depth].window_size / nsplits;
+		= kgjoin->jscale[target_depth].window_size / nsplits + 1;
 	if (kgjoin->jscale[target_depth].window_size <= 1)
 	{
 		kgjoin->kerror = kerror_save;
