@@ -4843,7 +4843,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 							NULL);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
-		pfm_accum->num_kern_prep++;
+		pfm_accum->gpreagg.num_kern_prep++;
 	}
 	/*
 	 * Record normal kernel execution end event

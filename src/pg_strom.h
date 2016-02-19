@@ -121,8 +121,10 @@ typedef struct {
 	cl_double	time_dma_send;	/* time to send host=>device data */
 	cl_double	time_dma_recv;	/* time to receive device=>host data */
 	/*-- specific items for each GPU logic --*/
-	cl_uint		num_tasks;		/* number of tasks completed */
-#if 1
+	cl_uint		num_tasks;			/* number of tasks completed */
+	cl_double	time_launch_cuda;	/* time to kick CUDA commands */
+	cl_double	time_sync_tasks;	/* time to synchronize tasks */
+	/*-- for each GPU logic --*/
 	struct {
 		cl_uint		num_kern_exec_quals;
 		cl_uint		num_kern_projection;
@@ -171,153 +173,7 @@ typedef struct {
 		cl_double	tv_kern_sort;
 		cl_double	tv_kern_fixup;
 	} gsort;
-#endif
-#if 1
-	/* below is the legacy perfmon stuff */
-
-	cl_uint		num_samples;
-	/*-- perfmon to load and materialize --*/
-	/*-- perfmon to launch CUDA kernel --*/
-	cl_double	time_launch_cuda;	/* time to kick CUDA commands */
-	cl_double	time_sync_tasks;	/* time to synchronize tasks */
-	/*-- perfmon for DMA send/recv --*/
-
-	/*-- (special perfmon for gpuscan) --*/
-	cl_uint		num_kern_qual;	/* number of qual eval kernel execution */
-	cl_double	time_kern_qual;	/* time to execute qual eval kernel */
-	/*-- (special perfmon for gpuhashjoin) --*/
-	cl_uint		num_kern_join;	/* number of hash-join kernel execution */
-	cl_uint		num_kern_proj;	/* number of projection kernel execution */
-	cl_double	time_kern_join;	/* time to execute hash-join kernel */
-	cl_double	time_kern_proj;	/* time to execute projection kernel */
-	/*-- (special perfmon for gpupreagg) --*/
-	cl_uint		num_kern_prep;	/* number of preparation kernel execution */
-	cl_uint		num_kern_nogrp;	/* number of nogroup reduction kernel exec */
-	cl_uint		num_kern_lagg;	/* number of local reduction kernel exec */
-	cl_uint		num_kern_gagg;	/* number of global reduction kernel exec */
-	cl_uint		num_kern_fagg;	/* number of final reduction kernel exec */
-	cl_uint		num_kern_fixvar;/* number of varlena fixup kernel exec */
-	cl_double	time_kern_prep;	/* time to execute preparation kernel */
-	cl_double	time_kern_nogrp;/* time to execute nogroup reduction kernel */
-	cl_double	time_kern_lagg;	/* time to execute local reduction kernel */
-	cl_double	time_kern_gagg;	/* time to execute global reduction kernel */
-	cl_double	time_kern_fagg;	/* time to execute final reduction kernel */
-	cl_double	time_kern_fixvar; /* time to execute varlena fixup kernel */
-	/*-- (special perfmon for gpusort) --*/
-	cl_uint		num_prep_sort;	/* number of GPU sort preparation kernel */
-	cl_uint		num_gpu_sort;	/* number of GPU bitonic sort execution */
-	cl_uint		num_cpu_sort;	/* number of GPU merge sort execution */
-	cl_double	time_prep_sort;	/* time to execute GPU sort prep kernel */
-	cl_double	time_gpu_sort;	/* time to execute GPU bitonic sort */
-	cl_double	time_cpu_sort;	/* time to execute CPU merge sort */
-	cl_double	time_cpu_sort_real;	/* real time to execute CPU merge sort */
-	cl_double	time_cpu_sort_min;	/* min time to execute CPU merge sort */
-	cl_double	time_cpu_sort_max;	/* max time to execute CPU merge sort */
-	cl_double	time_bgw_sync;	/* time to synchronize bgworkers*/
-
-	/*-- for debugging usage --*/
-	cl_double	time_debug1;	/* time for debugging purpose.1 */
-	cl_double	time_debug2;	/* time for debugging purpose.2 */
-	cl_double	time_debug3;	/* time for debugging purpose.3 */
-	cl_double	time_debug4;	/* time for debugging purpose.4 */
-
-	struct timeval	tv;	/* result of gettimeofday(2) when enqueued */
-#endif
 } pgstrom_perfmon;
-
-/* time interval in milliseconds */
-#define PERFMON_BEGIN(pfm_accum,tv1)			\
-	do {										\
-		if ((pfm_accum)->enabled)				\
-			gettimeofday((tv1), NULL);			\
-	} while(0)
-
-#define PERFMON_END(pfm_accum,field,tv1,tv2)					\
-	do {														\
-		if ((pfm_accum)->enabled)								\
-		{														\
-			gettimeofday((tv2), NULL);							\
-			(pfm_accum)->field +=								\
-				((double)(((tv2)->tv_sec - (tv1)->tv_sec) * 1000000L +	\
-						  ((tv2)->tv_usec - (tv1)->tv_usec)) / 1000.0);	\
-		}														\
-	} while(0)
-
-#define CUDA_EVENT_RECORD(node,ev_field)						\
-	do {														\
-		if (((GpuTask *)(node))->gts->pfm_accum.enabled)		\
-		{														\
-			CUresult __rc = cuEventRecord((node)->ev_field,		\
-							((GpuTask *)(node))->cuda_stream);	\
-			if (__rc != CUDA_SUCCESS)							\
-				elog(ERROR, "failed on cuEventRecord: %s",		\
-					 errorText(__rc));							\
-		}														\
-	} while(0)
-
-#define CUDA_EVENT_CREATE(node,ev_field)						\
-	do {														\
-		if (((GpuTask *)(node))->gts->pfm_accum.enabled)		\
-		{														\
-			CUresult __rc = cuEventCreate(&(node)->ev_field,	\
-										  CU_EVENT_DEFAULT);	\
-			if (__rc != CUDA_SUCCESS)							\
-				elog(ERROR, "failed on cuEventCreate: %s",		\
-					 errorText(__rc));							\
-		}														\
-	} while(0)
-
-#define CUDA_EVENT_DESTROY(node,ev_field)						\
-	do {														\
-		if ((node)->ev_field)									\
-		{														\
-			CUresult __rc = cuEventDestroy((node)->ev_field);	\
-			if (__rc != CUDA_SUCCESS)							\
-				elog(WARNING, "failed on cuEventDestroy: %s",	\
-					 errorText(__rc));							\
-			(node)->ev_field = NULL;							\
-		}														\
-	} while(0)
-
-#define CUDA_EVENT_ELAPSED(node,pfm_field,ev_start,ev_stop,bailout) \
-	do {														\
-		CUresult	__rc;										\
-		float		__elapsed;									\
-																\
-		if ((ev_start) != NULL && (ev_stop) != NULL)			\
-		{														\
-			__rc = cuEventElapsedTime(&__elapsed,				\
-									  (ev_start),				\
-									  (ev_stop));				\
-			if (__rc != CUDA_SUCCESS)							\
-			{													\
-				elog(WARNING, "failed on cuEventElapsedTime: %s",	\
-					 errorText(__rc));							\
-				goto bailout;									\
-			}													\
-			((GpuTask *)(node))->gts->pfm_accum.pfm_field += __elapsed; \
-		}														\
-	} while(0)
-
-#define PFMON_TIMEVAL_DIFF(tv1,tv2)								\
-	((cl_double)(((tv2)->tv_sec * 1000000 + (tv2)->tv_usec) -	\
-				 ((tv1)->tv_sec * 1000000 + (tv1)->tv_usec)) / 1000000.0)
-
-#define PFMON_ADD_TIMEVAL(tv_sum,tv1,tv2)						\
-	do {														\
-		(tv_sum)->tv_sec += (tv2)->tv_sec - (tv1)->tv_sec;		\
-		if ((tv2)->tv_usec > (tv1)->tv_usec)					\
-			(tv_sum)->tv_usec += (tv2)->tv_usec - (tv1)->tv_usec;	\
-		else													\
-		{														\
-			(tv_sum)->tv_sec--;									\
-			(tv_sum)->tv_usec += 1000000 + (tv2)->tv_usec - (tv1)->tv_usec; \
-		}														\
-	} while(0)
-
-#define PFMON_TIMEVAL_AS_FLOAT(tval)			\
-	(((cl_double)(tval)->tv_sec) +				\
-	 ((cl_double)(tval)->tv_usec / 1000000.0))
 
 /*
  *
@@ -768,9 +624,103 @@ extern void show_scan_qual(List *qual, const char *qlabel,
 						   ExplainState *es);
 extern void show_instrumentation_count(const char *qlabel, int which,
 									   PlanState *planstate, ExplainState *es);
-extern void pgstrom_accum_perfmon(pgstrom_perfmon *accum,
-								  const pgstrom_perfmon *pfm);
 extern void pgstrom_explain_gputaskstate(GpuTaskState *gts, ExplainState *es);
+
+/*
+ * macro definitions for performance counter
+ */
+#define PERFMON_BEGIN(pfm_accum,tv1)			\
+	do {										\
+		if ((pfm_accum)->enabled)				\
+			gettimeofday((tv1), NULL);			\
+	} while(0)
+
+#define PERFMON_END(pfm_accum,field,tv1,tv2)	\
+	do {										\
+		if ((pfm_accum)->enabled)				\
+		{										\
+			gettimeofday((tv2), NULL);			\
+			(pfm_accum)->field +=				\
+				((double)(((tv2)->tv_sec - (tv1)->tv_sec) * 1000000L +	\
+						  ((tv2)->tv_usec - (tv1)->tv_usec)) / 1000.0);	\
+		}										\
+	} while(0)
+
+#define CUDA_EVENT_RECORD(node,ev_field)						\
+	do {														\
+		if (((GpuTask *)(node))->gts->pfm_accum.enabled)		\
+		{														\
+			CUresult __rc = cuEventRecord((node)->ev_field,		\
+							((GpuTask *)(node))->cuda_stream);	\
+			if (__rc != CUDA_SUCCESS)							\
+				elog(ERROR, "failed on cuEventRecord: %s",		\
+					 errorText(__rc));							\
+		}														\
+	} while(0)
+
+#define CUDA_EVENT_CREATE(node,ev_field)						\
+	do {														\
+		if (((GpuTask *)(node))->gts->pfm_accum.enabled)		\
+		{														\
+			CUresult __rc = cuEventCreate(&(node)->ev_field,	\
+										  CU_EVENT_DEFAULT);	\
+			if (__rc != CUDA_SUCCESS)							\
+				elog(ERROR, "failed on cuEventCreate: %s",		\
+					 errorText(__rc));							\
+		}														\
+	} while(0)
+
+#define CUDA_EVENT_DESTROY(node,ev_field)						\
+	do {														\
+		if ((node)->ev_field)									\
+		{														\
+			CUresult __rc = cuEventDestroy((node)->ev_field);	\
+			if (__rc != CUDA_SUCCESS)							\
+				elog(WARNING, "failed on cuEventDestroy: %s",	\
+					 errorText(__rc));							\
+			(node)->ev_field = NULL;							\
+		}														\
+	} while(0)
+
+#define CUDA_EVENT_ELAPSED(node,pfm_field,ev_start,ev_stop,bailout) \
+	do {														\
+		CUresult	__rc;										\
+		float		__elapsed;									\
+																\
+		if ((ev_start) != NULL && (ev_stop) != NULL)			\
+		{														\
+			__rc = cuEventElapsedTime(&__elapsed,				\
+									  (ev_start),				\
+									  (ev_stop));				\
+			if (__rc != CUDA_SUCCESS)							\
+			{													\
+				elog(WARNING, "failed on cuEventElapsedTime: %s",	\
+					 errorText(__rc));							\
+				goto bailout;									\
+			}													\
+			((GpuTask *)(node))->gts->pfm_accum.pfm_field += __elapsed; \
+		}														\
+	} while(0)
+
+#define PFMON_TIMEVAL_DIFF(tv1,tv2)								\
+	((cl_double)(((tv2)->tv_sec * 1000000 + (tv2)->tv_usec) -	\
+				 ((tv1)->tv_sec * 1000000 + (tv1)->tv_usec)) / 1000000.0)
+
+#define PFMON_ADD_TIMEVAL(tv_sum,tv1,tv2)						\
+	do {														\
+		(tv_sum)->tv_sec += (tv2)->tv_sec - (tv1)->tv_sec;		\
+		if ((tv2)->tv_usec > (tv1)->tv_usec)					\
+			(tv_sum)->tv_usec += (tv2)->tv_usec - (tv1)->tv_usec;	\
+		else													\
+		{														\
+			(tv_sum)->tv_sec--;									\
+			(tv_sum)->tv_usec += 1000000 + (tv2)->tv_usec - (tv1)->tv_usec; \
+		}														\
+	} while(0)
+
+#define PFMON_TIMEVAL_AS_FLOAT(tval)			\
+	(((cl_double)(tval)->tv_sec) +				\
+	 ((cl_double)(tval)->tv_usec / 1000000.0))
 
 /*
  * Device Code generated from cuda_*.h

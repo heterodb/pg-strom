@@ -724,113 +724,129 @@ show_instrumentation_count(const char *qlabel, int which,
 	}
 }
 
-void
-pgstrom_accum_perfmon(pgstrom_perfmon *accum, const pgstrom_perfmon *pfm)
-{
-	if (!accum->enabled)
-		return;
-
-	accum->num_samples++;
-	accum->time_inner_load		+= pfm->time_inner_load;
-	accum->time_outer_load		+= pfm->time_outer_load;
-	accum->time_materialize		+= pfm->time_materialize;
-	accum->time_launch_cuda		+= pfm->time_launch_cuda;
-	accum->time_sync_tasks		+= pfm->time_sync_tasks;
-	accum->num_dma_send			+= pfm->num_dma_send;
-	accum->num_dma_recv			+= pfm->num_dma_recv;
-	accum->bytes_dma_send		+= pfm->bytes_dma_send;
-	accum->bytes_dma_recv		+= pfm->bytes_dma_recv;
-	accum->time_dma_send		+= pfm->time_dma_send;
-	accum->time_dma_recv		+= pfm->time_dma_recv;
-	/* in case of gpuscan */
-	accum->num_kern_qual		+= pfm->num_kern_qual;
-	accum->time_kern_qual		+= pfm->time_kern_qual;
-	/* in case of gpuhashjoin */
-	accum->num_kern_join		+= pfm->num_kern_join;
-	accum->num_kern_proj		+= pfm->num_kern_proj;
-	accum->time_kern_join		+= pfm->time_kern_join;
-	accum->time_kern_proj		+= pfm->time_kern_proj;
-	/* in case of gpupreagg */
-	accum->num_kern_prep		+= pfm->num_kern_prep;
-	accum->num_kern_lagg		+= pfm->num_kern_lagg;
-	accum->num_kern_gagg		+= pfm->num_kern_gagg;
-	accum->num_kern_fagg		+= pfm->num_kern_fagg;
-	accum->num_kern_nogrp		+= pfm->num_kern_nogrp;
-	accum->time_kern_prep		+= pfm->time_kern_prep;
-	accum->time_kern_lagg		+= pfm->time_kern_lagg;
-	accum->time_kern_gagg		+= pfm->time_kern_gagg;
-	accum->time_kern_fagg		+= pfm->time_kern_fagg;
-	accum->time_kern_nogrp		+= pfm->time_kern_nogrp;
-	/* in case of gpusort */
-	accum->num_prep_sort		+= pfm->num_prep_sort;
-	accum->num_gpu_sort			+= pfm->num_gpu_sort;
-	accum->num_cpu_sort			+= pfm->num_cpu_sort;
-	accum->time_prep_sort		+= pfm->time_prep_sort;
-	accum->time_gpu_sort		+= pfm->time_gpu_sort;
-	accum->time_cpu_sort		+= pfm->time_cpu_sort;
-	accum->time_cpu_sort_real	+= pfm->time_cpu_sort_real;
-	accum->time_cpu_sort_min	= Min(accum->time_cpu_sort_min,
-									  pfm->time_cpu_sort);
-	accum->time_cpu_sort_max	= Max(accum->time_cpu_sort_min,
-									  pfm->time_cpu_sort);
-	accum->time_bgw_sync		+= pfm->time_bgw_sync;
-	/* for debug usage */
-	accum->time_debug1			+= pfm->time_debug1;
-	accum->time_debug2			+= pfm->time_debug2;
-	accum->time_debug3			+= pfm->time_debug3;
-	accum->time_debug4			+= pfm->time_debug4;
-}
-
 static void
 pgstrom_explain_perfmon(GpuTaskState *gts, ExplainState *es)
 {
 	pgstrom_perfmon	   *pfm = &gts->pfm_accum;
 	char				buf[1024];
 
-	if (!pfm->enabled || pfm->num_samples == 0)
+	if (!pfm->enabled)
 		return;
 
 	/* common performance statistics */
-	ExplainPropertyInteger("number of tasks", pfm->num_samples, es);
+	ExplainPropertyInteger("number of tasks", pfm->num_tasks, es);
 
-	if (pfm->time_inner_load > 0.0)
+#define EXPLAIN_KERNEL_PERFMON(label,num_field,tv_field)		\
+	do {														\
+		if (pfm->num_field > 0)									\
+		{														\
+			snprintf(buf, sizeof(buf),							\
+					 "total: %s, avg: %s, count: %u",			\
+					 format_millisec(pfm->tv_field),			\
+					 format_millisec(pfm->tv_field /			\
+									 (double)pfm->num_field),	\
+					 pfm->num_field);							\
+			ExplainPropertyText(label, buf, es);				\
+		}														\
+	} while(0)
+
+	/* GpuScan: kernel execution */
+	if ((pfm->extra_flags & DEVKERNEL_NEEDS_GPUSCAN) != 0)
+	{
+		EXPLAIN_KERNEL_PERFMON("gpuscan_exec_quals",
+							   gscan.num_kern_exec_quals,
+							   gscan.tv_kern_exec_quals);
+		EXPLAIN_KERNEL_PERFMON("gpuscan_projection",
+							   gscan.num_kern_projection,
+							   gscan.tv_kern_projection);
+	}
+
+	/* GpuJoin: kernel execution */
+	if ((pfm->extra_flags & DEVKERNEL_NEEDS_GPUJOIN) != 0)
+	{
+		EXPLAIN_KERNEL_PERFMON("gpujoin_exec_outerscan",
+							   gjoin.num_kern_outer_scan,
+							   gjoin.tv_kern_outer_scan);
+		EXPLAIN_KERNEL_PERFMON("gpujoin_exec_nestloop",
+							   gjoin.num_kern_exec_nestloop,
+							   gjoin.tv_kern_exec_nestloop);
+		EXPLAIN_KERNEL_PERFMON("gpujoin_exec_hashjoin",
+							   gjoin.num_kern_exec_hashjoin,
+							   gjoin.tv_kern_exec_hashjoin);
+		EXPLAIN_KERNEL_PERFMON("gpujoin_outer_nestloop",
+							   gjoin.num_kern_outer_nestloop,
+							   gjoin.tv_kern_outer_nestloop);
+		EXPLAIN_KERNEL_PERFMON("gpujoin_outer_hashjoin",
+							   gjoin.num_kern_outer_hashjoin,
+							   gjoin.tv_kern_outer_hashjoin);
+		EXPLAIN_KERNEL_PERFMON("gpujoin_projection",
+							   gjoin.num_kern_projection,
+							   gjoin.tv_kern_projection);
+		EXPLAIN_KERNEL_PERFMON("gpujoin_count_rows_dist",
+							   gjoin.num_kern_rows_dist,
+							   gjoin.tv_kern_rows_dist);
+	}
+
+	/* GpuPreAgg: kernel execution */
+	if ((pfm->extra_flags & DEVKERNEL_NEEDS_GPUPREAGG) != 0)
+	{
+		EXPLAIN_KERNEL_PERFMON("gpupreagg_preparation",
+							   gpreagg.num_kern_prep,
+							   gpreagg.tv_kern_prep);
+		EXPLAIN_KERNEL_PERFMON("gpupreagg_nogroup_reduction",
+							   gpreagg.num_kern_nogrp,
+							   gpreagg.tv_kern_nogrp);
+		EXPLAIN_KERNEL_PERFMON("gpupreagg_local_reduction",
+							   gpreagg.num_kern_lagg,
+							   gpreagg.tv_kern_lagg);
+		EXPLAIN_KERNEL_PERFMON("gpupreagg_global_reduction",
+							   gpreagg.num_kern_gagg,
+							   gpreagg.tv_kern_gagg);
+		EXPLAIN_KERNEL_PERFMON("gpupreagg_final_reduction",
+							   gpreagg.num_kern_fagg,
+							   gpreagg.tv_kern_fagg);
+		EXPLAIN_KERNEL_PERFMON("gpupreagg_fixup_varlena",
+							   gpreagg.num_kern_fixvar,
+							   gpreagg.tv_kern_fixvar);
+	}
+
+	/* GpuSort: kernel execution */
+	if ((pfm->extra_flags & DEVKERNEL_NEEDS_GPUSORT) != 0)
+	{
+		EXPLAIN_KERNEL_PERFMON("gpusort_preparation",
+							   gsort.num_kern_prep,
+							   gsort.tv_kern_prep);
+		EXPLAIN_KERNEL_PERFMON("gpusort_bitonic",
+							   gsort.num_kern_sort,
+							   gsort.tv_kern_sort);
+		EXPLAIN_KERNEL_PERFMON("gpusort_fixup_datastore",
+							   gsort.num_kern_fixup,
+							   gsort.tv_kern_fixup);		
+	}
+
+#undef EXPLAIN_KERNEL_PERFMON
+	/* Time of I/O stuff */
+	if ((pfm->extra_flags & DEVKERNEL_NEEDS_GPUJOIN) != 0)
 	{
 		snprintf(buf, sizeof(buf), "%s",
-				 milliseconds_unitary_format(pfm->time_inner_load));
-		ExplainPropertyText("total time for inner load", buf, es);
-
+				 format_millisec(pfm->time_inner_load));
+		ExplainPropertyText("time of inner load", buf, es);
 		snprintf(buf, sizeof(buf), "%s",
-				 milliseconds_unitary_format(pfm->time_outer_load));
-		ExplainPropertyText("total time for outer load", buf, es);
+				 format_millisec(pfm->time_outer_load));
+		ExplainPropertyText("time of outer load", buf, es);
 	}
 	else
 	{
 		snprintf(buf, sizeof(buf), "%s",
-				 milliseconds_unitary_format(pfm->time_outer_load));
-		ExplainPropertyText("total time to load", buf, es);
+				 format_millisec(pfm->time_outer_load));
+		ExplainPropertyText("time of load", buf, es);
 	}
 
-	if (pfm->time_materialize > 0.0)
-	{
-		snprintf(buf, sizeof(buf), "%s",
-                 milliseconds_unitary_format(pfm->time_materialize));
-		ExplainPropertyText("total time to materialize", buf, es);
-	}
+	snprintf(buf, sizeof(buf), "%s",
+			 format_millisec(pfm->time_materialize));
+	ExplainPropertyText("time of materialize", buf, es);
 
-	if (pfm->time_launch_cuda > 0.0)
-	{
-		snprintf(buf, sizeof(buf), "%s",
-				 milliseconds_unitary_format(pfm->time_launch_cuda));
-		ExplainPropertyText("total time to CUDA commands", buf, es);
-	}
-
-	if (pfm->time_sync_tasks > 0.0)
-	{
-		snprintf(buf, sizeof(buf), "%s",
-				 milliseconds_unitary_format(pfm->time_sync_tasks));
-		ExplainPropertyText("total time to synchronize", buf, es);
-	}
-
+	/* DMA Send/Recv performance */
 	if (pfm->num_dma_send > 0)
 	{
 		Size	band = (Size)((double)pfm->bytes_dma_send *
@@ -839,7 +855,7 @@ pgstrom_explain_perfmon(GpuTaskState *gts, ExplainState *es)
 				 "%s/sec, len: %s, time: %s, count: %u",
 				 format_bytesz(band),
 				 format_bytesz((double)pfm->bytes_dma_send),
-				 milliseconds_unitary_format(pfm->time_dma_send),
+				 format_millisec(pfm->time_dma_send),
 				 pfm->num_dma_send);
 		ExplainPropertyText("DMA send", buf, es);
 	}
@@ -852,163 +868,23 @@ pgstrom_explain_perfmon(GpuTaskState *gts, ExplainState *es)
 				 "%s/sec, len: %s, time: %s, count: %u",
 				 format_bytesz(band),
 				 format_bytesz((double)pfm->bytes_dma_recv),
-				 milliseconds_unitary_format(pfm->time_dma_recv),
+				 format_millisec(pfm->time_dma_recv),
 				 pfm->num_dma_recv);
 		ExplainPropertyText("DMA recv", buf, es);
 	}
 
-	/* in case of gpuscan */
-	if (pfm->num_kern_qual > 0)
+	/* Time to build CUDA code */
+	if (pfm->tv_build_start.tv_sec < pfm->tv_build_end.tv_sec ||
+		(pfm->tv_build_start.tv_sec == pfm->tv_build_end.tv_sec &&
+		 pfm->tv_build_start.tv_usec < pfm->tv_build_end.tv_usec))
 	{
-		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
-				 milliseconds_unitary_format(pfm->time_kern_qual),
-                 milliseconds_unitary_format(pfm->time_kern_qual /
-											 (double)pfm->num_kern_qual),
-                 pfm->num_kern_qual);
-		ExplainPropertyText("Qual kernel exec", buf, es);
-	}
-	/* in case of gpuhashjoin */
-	if (pfm->num_kern_join > 0)
-	{
-		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
-				 milliseconds_unitary_format(pfm->time_kern_join),
-                 milliseconds_unitary_format(pfm->time_kern_join /
-											 (double)pfm->num_kern_join),
-                 pfm->num_kern_join);
-		ExplainPropertyText("GpuJoin main kernel", buf, es);
+		cl_double	tv_cuda_build = PFMON_TIMEVAL_DIFF(&pfm->tv_build_start,
+													   &pfm->tv_build_end);
+		snprintf(buf, sizeof(buf), "%s", format_millisec(tv_cuda_build));
+		ExplainPropertyText("Build CUDA Program", buf, es);
 	}
 
-	if (pfm->num_kern_proj > 0)
-	{
-		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
-				 milliseconds_unitary_format(pfm->time_kern_proj),
-                 milliseconds_unitary_format(pfm->time_kern_proj /
-											 (double)pfm->num_kern_proj),
-                 pfm->num_kern_proj);
-		ExplainPropertyText("GpuJoin projection", buf, es);
-	}
-	/* in case of gpupreagg */
-	if (pfm->num_kern_prep > 0)
-	{
-		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
-				 milliseconds_unitary_format(pfm->time_kern_prep),
-				 milliseconds_unitary_format(pfm->time_kern_prep /
-											 (double)pfm->num_kern_prep),
-				 pfm->num_kern_prep);
-        ExplainPropertyText("Aggregate preparation", buf, es);
-	}
-
-	if (pfm->num_kern_lagg > 0)
-	{
-		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
-				 milliseconds_unitary_format((double)pfm->time_kern_lagg),
-				 milliseconds_unitary_format((double)pfm->time_kern_lagg /
-											 (double)pfm->num_kern_lagg),
-				 pfm->num_kern_lagg);
-        ExplainPropertyText("Local reduction kernel", buf, es);
-	}
-
-	if (pfm->num_kern_gagg > 0)
-	{
-		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
-				 milliseconds_unitary_format((double)pfm->time_kern_gagg),
-				 milliseconds_unitary_format((double)pfm->time_kern_gagg /
-											 (double)pfm->num_kern_gagg),
-				 pfm->num_kern_gagg);
-        ExplainPropertyText("Global reduction kernel", buf, es);
-	}
-
-	if (pfm->num_kern_fagg > 0)
-	{
-		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
-				 milliseconds_unitary_format((double)pfm->time_kern_fagg),
-				 milliseconds_unitary_format((double)pfm->time_kern_fagg /
-											 (double)pfm->num_kern_fagg),
-				 pfm->num_kern_fagg);
-        ExplainPropertyText("Final reduction kernel", buf, es);
-	}
-
-	if (pfm->num_kern_nogrp > 0)
-	{
-		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
-				 milliseconds_unitary_format((double)pfm->time_kern_nogrp),
-				 milliseconds_unitary_format((double)pfm->time_kern_nogrp /
-											 (double)pfm->num_kern_nogrp),
-				 pfm->num_kern_nogrp);
-        ExplainPropertyText("NoGroup reduction kernel", buf, es);
-	}
-
-	/* in case of gpusort */
-	if (pfm->num_prep_sort > 0)
-	{
-		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
-				 milliseconds_unitary_format(pfm->time_prep_sort),
-				 milliseconds_unitary_format(pfm->time_prep_sort /
-											 (double)pfm->num_gpu_sort),
-				 pfm->num_gpu_sort);
-		ExplainPropertyText("GPU sort prep", buf, es);
-	}
-
-	if (pfm->num_gpu_sort > 0)
-	{
-		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
-				 milliseconds_unitary_format(pfm->time_gpu_sort),
-				 milliseconds_unitary_format(pfm->time_gpu_sort /
-											 (double)pfm->num_gpu_sort),
-				 pfm->num_gpu_sort);
-		ExplainPropertyText("GPU sort exec", buf, es);
-	}
-
-	if (pfm->num_cpu_sort > 0)
-	{
-		cl_double	overhead;
-
-		snprintf(buf, sizeof(buf), "total: %s, avg: %s, count: %u",
-				 milliseconds_unitary_format(pfm->time_cpu_sort),
-				 milliseconds_unitary_format(pfm->time_cpu_sort /
-											 (double)pfm->num_cpu_sort),
-				 pfm->num_cpu_sort);
-		ExplainPropertyText("CPU sort exec", buf, es);
-
-		overhead = pfm->time_cpu_sort_real - pfm->time_cpu_sort;
-		snprintf(buf, sizeof(buf), "overhead: %s, sync: %s",
-				 milliseconds_unitary_format(overhead),
-				 milliseconds_unitary_format(pfm->time_bgw_sync));
-		ExplainPropertyText("BGWorker", buf, es);
-	}
-
-	/* for debugging if any */
-	if (pfm->time_debug1 > 0.0)
-	{
-		snprintf(buf, sizeof(buf), "debug1: %s",
-				 milliseconds_unitary_format(pfm->time_debug1));
-		ExplainPropertyText("debug-1", buf, es);
-	}
-	if (pfm->time_debug2 > 0.0)
-	{
-		snprintf(buf, sizeof(buf), "debug2: %s",
-				 milliseconds_unitary_format(pfm->time_debug2));
-		ExplainPropertyText("debug-2", buf, es);
-	}
-	if (pfm->time_debug3 > 0.0)
-	{
-		snprintf(buf, sizeof(buf), "debug3: %s",
-				 milliseconds_unitary_format(pfm->time_debug3));
-		ExplainPropertyText("debug-3", buf, es);
-	}
-	if (pfm->time_debug4 > 0.0)
-	{
-		snprintf(buf, sizeof(buf), "debug4: %s",
-				 milliseconds_unitary_format(pfm->time_debug4));
-		ExplainPropertyText("debug-4", buf, es);
-	}
-
-
-
-
-	/*
-	 * Output statistics of GpuContext
-	 */
+	/* Host/Device Memory Allocation (only prime node) */
 	if (pfm->prime_in_gpucontext)
 	{
 		GpuContext *gcontext = gts->gcontext;
@@ -1025,54 +901,17 @@ pgstrom_explain_perfmon(GpuTaskState *gts, ExplainState *es)
 		cl_double	tv_dev_mfree =
 			PFMON_TIMEVAL_AS_FLOAT(&gcontext->tv_dev_mfree);
 
-		if (es->format == EXPLAIN_FORMAT_TEXT)
-		{
-			snprintf(buf, sizeof(buf),
-					 "alloc (count: %u, time: %.3fs), "
-					 "free (count: %u, time: %.3fs)",
-					 num_host_malloc, tv_host_malloc,
-					 num_host_mfree, tv_host_mfree);
-			ExplainPropertyText("CUDA Host memory", buf, es);
+		snprintf(buf, sizeof(buf),
+				 "alloc (count: %u, time: %s), free (count: %u, time: %s)",
+				 num_host_malloc, format_millisec(tv_host_malloc),
+				 num_host_mfree, format_millisec(tv_host_mfree));
+		ExplainPropertyText("CUDA host memory", buf, es);
 
-			snprintf(buf, sizeof(buf),
-					 "alloc (count: %u, time: %.3fs), "
-					 "free (count: %u, time: %.3fs)",
-					 num_dev_malloc, tv_dev_malloc,
-					 num_dev_mfree, tv_dev_mfree);
-			ExplainPropertyText("CUDA Device memory", buf, es);
-		}
-		else
-		{
-			ExplainPropertyInteger("Number of CUDA Host memory alloc",
-								   num_host_malloc, es);
-			ExplainPropertyInteger("Number of CUDA Host memory alloc",
-								   num_host_mfree, es);
-			ExplainPropertyFloat("Time of CUDA Host memory alloc",
-								 tv_host_malloc, 3, es);
-			ExplainPropertyFloat("Time of CUDA Host memory free",
-								 tv_host_mfree, 3, es);
-			ExplainPropertyInteger("Number of CUDA Device memory alloc",
-								   num_dev_malloc, es);
-			ExplainPropertyInteger("Number of CUDA Device memory alloc",
-								   num_dev_mfree, es);
-			ExplainPropertyFloat("Time of CUDA Device memory alloc",
-								 tv_dev_malloc, 3, es);
-			ExplainPropertyFloat("Time of CUDA Device memory free",
-								 tv_dev_mfree, 3, es);
-		}
-	}
-
-	/*
-	 * Time to build CUDA program
-	 */
-	if (pfm->tv_build_start.tv_sec < pfm->tv_build_end.tv_sec ||
-		(pfm->tv_build_start.tv_sec == pfm->tv_build_end.tv_sec &&
-		 pfm->tv_build_start.tv_usec < pfm->tv_build_end.tv_usec))
-	{
-		cl_double	tv_code_build = PFMON_TIMEVAL_DIFF(&pfm->tv_build_start,
-													   &pfm->tv_build_end);
-		snprintf(buf, sizeof(buf), "%.3fs", tv_code_build);
-		ExplainPropertyText("CUDA Program Build", buf, es);
+		snprintf(buf, sizeof(buf),
+				 "alloc (count: %u, time: %s), free (count: %u, time: %s)",
+				 num_dev_malloc, format_millisec(tv_dev_malloc),
+				 num_dev_mfree, format_millisec(tv_dev_mfree));
+		ExplainPropertyText("CUDA device memory", buf, es);
 	}
 }
 

@@ -1602,6 +1602,7 @@ gpusort_task_complete(GpuTask *gtask)
 	}
 	else
 	{
+#if 0
 		pgstrom_flat_gpusort   *pfg = (pgstrom_flat_gpusort *)
 			dsm_segment_address(gpusort->oitems_dsm);
 
@@ -1619,6 +1620,7 @@ gpusort_task_complete(GpuTask *gtask)
 			PERFMON_END(&gss->gts.pfm_accum, time_bgw_sync,
 						&pfg->tv_sort_end, &tv_curr);
 		}
+#endif
 	}
 	/* ritems and litems are no longer referenced */
 	if (gpusort->litems_dsm)
