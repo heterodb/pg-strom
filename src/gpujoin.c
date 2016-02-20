@@ -528,7 +528,7 @@ retry_major:
 
 		if (gpath->inners[i].hash_quals != NIL)
 		{
-			entry_size += offsetof(kern_hashitem, htup);
+			entry_size += offsetof(kern_hashitem, t.htup);
 			hash_nslots = (Size)(inner_ntuples *
 								 pgstrom_chunk_size_margin);
 		}
@@ -5343,7 +5343,7 @@ next:
 
 	consumption = (sizeof(cl_uint) +	/* for hash_slot */
 				   sizeof(cl_uint) +	/* for row_index */
-				   MAXALIGN(offsetof(kern_hashitem, htup) + tuple->t_len));
+				   MAXALIGN(offsetof(kern_hashitem, t.htup) + tuple->t_len));
 	/*
 	 * Update Histgram
 	 */
@@ -5404,8 +5404,8 @@ retry:
 					 khitem != NULL;
 					 khitem = KERN_HASH_NEXT_ITEM(kds_hash, khitem))
 				{
-					tupData.t_len = khitem->t_len;
-					tupData.t_data = &khitem->htup;
+					tupData.t_len = khitem->t.t_len;
+					tupData.t_data = &khitem->t.htup;
 					tuplestore_puttuple(istate->tupstore, &tupData);
 				}
 			}

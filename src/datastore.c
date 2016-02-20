@@ -1095,7 +1095,7 @@ pgstrom_data_store_insert_hashitem(pgstrom_data_store *pds,
 
 	/* compute required length */
 	tuple = ExecFetchSlotTuple(slot);
-	required = MAXALIGN(offsetof(kern_hashitem, htup) + tuple->t_len);
+	required = MAXALIGN(offsetof(kern_hashitem, t.htup) + tuple->t_len);
 
 	Assert(kds->usage == MAXALIGN(kds->usage));
 	if (KDS_CALCULATE_HASH_LENGTH(kds->ncols,
@@ -1115,11 +1115,11 @@ pgstrom_data_store_insert_hashitem(pgstrom_data_store *pds,
 	khitem->next = hash_slot[index];
 	hash_slot[index] = (cl_uint)((uintptr_t)khitem - (uintptr_t)kds);
 	khitem->rowid = kds->nitems++;
-	khitem->t_len = tuple->t_len;
-	khitem->t_self = tuple->t_self;
-	memcpy(&khitem->htup, tuple->t_data, tuple->t_len);
+	khitem->t.t_len = tuple->t_len;
+	khitem->t.t_self = tuple->t_self;
+	memcpy(&khitem->t.htup, tuple->t_data, tuple->t_len);
 
-	row_index[khitem->rowid] = (cl_uint)((uintptr_t)&khitem->t_len -
+	row_index[khitem->rowid] = (cl_uint)((uintptr_t)&khitem->t.t_len -
 										 (uintptr_t)kds);
 	return true;
 }

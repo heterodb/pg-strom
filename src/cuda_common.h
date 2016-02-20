@@ -514,9 +514,7 @@ typedef struct
 	cl_uint				next;	/* offset of the next */
 	cl_uint				rowid;	/* unique identifier of this hash entry */
 	cl_char				__padding__[4];	/* for alignment */
-	cl_ushort			t_len;	/* length of tuple */
-	ItemPointerData		t_self;	/* SelfItemPointer */
-	HeapTupleHeaderData	htup;
+	kern_tupitem		t;		/* HeapTuple of this entry */
 } kern_hashitem;
 
 #define KDS_FORMAT_ROW			1
@@ -599,7 +597,7 @@ typedef struct {
 #define KERN_DATA_STORE_HASHITEM(kds,kds_index)		\
 	((kern_hashitem *)								\
 	 ((char *)KERN_DATA_STORE_TUPITEM(kds,kds_index) -	\
-	  offsetof(kern_hashitem, t_len)))
+	  offsetof(kern_hashitem, t)))
 
 /* access macro for tuple-slot format */
 #define KERN_DATA_STORE_SLOT_LENGTH(kds,nitems)				\

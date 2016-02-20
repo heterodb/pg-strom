@@ -463,7 +463,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 					   khitem->rowid >= window_base &&
 					   khitem->rowid <  window_base + window_size))
 		{
-			HeapTupleHeaderData *h_htup = &khitem->htup;
+			HeapTupleHeaderData *h_htup = &khitem->t.htup;
 
 			is_matched = gpujoin_join_quals(&kcxt,
 											kds,
@@ -497,7 +497,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 			{
 				r_buffer = KERN_GET_RESULT(kresults_dst, base + offset);
 				memcpy(r_buffer, x_buffer, sizeof(cl_int) * depth);
-				r_buffer[depth] = (size_t)&khitem->htup - (size_t)kds_hash;
+				r_buffer[depth] = (size_t)&khitem->t.htup - (size_t)kds_hash;
 			}
 		}
 		__syncthreads();
@@ -727,8 +727,8 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 		{
 			r_buffer = KERN_GET_RESULT(kresults_dst, base + offset);
 			memset(r_buffer, 0, sizeof(cl_uint) * depth);	/* NULL */
-			assert((size_t)&khitem->htup - (size_t)kds_hash > 0UL);
-			r_buffer[depth] = (size_t)&khitem->htup - (size_t)kds_hash;
+			assert((size_t)&khitem->t.htup > (size_t)kds_hash);
+			r_buffer[depth] = (size_t)&khitem->t.htup - (size_t)kds_hash;
 		}
 	}
 	kern_writeback_error_status(&kgjoin->kerror, kcxt.e);
