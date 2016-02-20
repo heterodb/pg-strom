@@ -472,9 +472,7 @@ pgstrom_expand_data_store(GpuContext *gcontext,
 		 * If supplied new nslots is too big, larger than the expanded,
 		 * it does not make sense to expand the buffer.
 		 */
-		if (KERN_DATA_STORE_HEAD_LENGTH(kds_new) +
-			STROMALIGN(sizeof(cl_uint) * kds_new->nslots) +
-			STROMALIGN(sizeof(cl_uint) * kds_new->nitems) +
+		if (KERN_DATA_STORE_FRONTEND_LENGTH(kds_new) +
 			kds_new->usage >= kds_new->length)
 			elog(ERROR, "New nslots consumed larger than expanded");
 
@@ -535,18 +533,18 @@ pgstrom_shrink_data_store(pgstrom_data_store *pds)
 	{
 		cl_uint	   *hash_slot = KERN_DATA_STORE_HASHSLOT(kds);
 		cl_uint	   *row_index = KERN_DATA_STORE_ROWINDEX(kds);
-		size_t		shift = STROMALIGN_DOWN(KERN_DATA_STORE_FREESPACE(kds));
 		cl_uint		i, nslots = kds->nslots;
+		size_t		shift;
 		char	   *baseptr;
 
 		/* small shift has less advantage than CPU cycle consumption */
+		shift = STROMALIGN_DOWN(kds->length - kds->usage -
+								KERN_DATA_STORE_FRONTEND_LENGTH(kds));
 		if (shift < BLCKSZ || shift < sizeof(Datum) * kds->nitems)
 			return;
 
 		/* move the kern_tupitem / kern_hashitem */
-		baseptr = (KERN_DATA_STORE_BODY(kds) +
-				   STROMALIGN(sizeof(cl_uint) * kds->nslots) +
-				   STROMALIGN(sizeof(cl_uint) * kds->nitems));
+		baseptr = (char *)kds + KERN_DATA_STORE_FRONTEND_LENGTH(kds);
 		memmove(baseptr, baseptr + shift, kds->length - shift);
 
 		/* clear the hash slot once */
@@ -950,11 +948,12 @@ pgstrom_data_store_insert_block(pgstrom_data_store *pds,
 	 * the items in a block, we inform the caller this block shall be
 	 * loaded on the next data store.
 	 */
-	max_consume = (KERN_DATA_STORE_HEAD_LENGTH(kds) +
-				   STROMALIGN(sizeof(cl_uint) * kds->nslots) +
-				   STROMALIGN(sizeof(cl_uint) * (kds->nitems + lines)) +
-				   offsetof(kern_tupitem, htup) * lines + BLCKSZ +
-				   kds->usage);
+	max_consume = KDS_CALCULATE_HASH_LENGTH(kds->ncols,
+											kds->nslots,
+											kds->nitems + lines,
+											offsetof(kern_tupitem,
+													 htup) * lines +
+											BLCKSZ + kds->usage);
 	if (max_consume > kds->length)
 	{
 		UnlockReleaseBuffer(buffer);
@@ -1047,10 +1046,11 @@ pgstrom_data_store_insert_tuple(pgstrom_data_store *pds,
 
 	/* check whether we have room for this tuple */
 	required = LONGALIGN(offsetof(kern_tupitem, htup) + tuple->t_len);
-	if (KERN_DATA_STORE_HEAD_LENGTH(kds) +
-		STROMALIGN(sizeof(cl_uint) * kds->nslots) +
-		STROMALIGN(sizeof(cl_uint) * (kds->nitems + 1)) +
-		required + kds->usage > pds->kds_length)
+	if (KDS_CALCULATE_HASH_LENGTH(kds->ncols,
+								  kds->nslots,
+								  kds->nitems + 1,
+								  required +
+								  kds->usage) > kds->length)
 		return false;
 
 	kds->usage += required;
@@ -1098,10 +1098,11 @@ pgstrom_data_store_insert_hashitem(pgstrom_data_store *pds,
 	required = MAXALIGN(offsetof(kern_hashitem, htup) + tuple->t_len);
 
 	Assert(kds->usage == MAXALIGN(kds->usage));
-	if (KERN_DATA_STORE_HEAD_LENGTH(kds) +
-		STROMALIGN(sizeof(cl_uint) * kds->nslots) +
-		STROMALIGN(sizeof(cl_uint) * (kds->nitems + 1)) +
-		required + kds->usage > pds->kds_length)
+	if (KDS_CALCULATE_HASH_LENGTH(kds->ncols,
+								  kds->nslots,
+								  kds->nitems + 1,
+								  required +
+								  kds->usage) > pds->kds_length)
 		return false;	/* no more space to put */
 
 	/* OK, put a tuple */

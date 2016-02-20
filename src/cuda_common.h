@@ -504,6 +504,12 @@ typedef struct
  */
 typedef struct
 {
+	cl_uint				index;	/* index of the row-index */
+	cl_uint				count;	/* number of hash items in this slot */
+} kern_hashslot;
+
+typedef struct
+{
 	cl_uint				hash;	/* 32-bit hash value */
 	cl_uint				next;	/* offset of the next */
 	cl_uint				rowid;	/* unique identifier of this hash entry */
@@ -537,56 +543,74 @@ typedef struct {
 	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER]; /* metadata of columns */
 } kern_data_store;
 
+
+/* length estimator */
+#define KDS_CALCULATE_HEAD_LENGTH(ncols)		\
+	STROMALIGN(offsetof(kern_data_store, colmeta[(ncols)]))
+
+#define KDS_CALCULATE_FRONTEND_LENGTH(ncols,nslots,nitems)	\
+	(KDS_CALCULATE_HEAD_LENGTH(ncols) +			\
+	 STROMALIGN(sizeof(cl_uint) * (nslots)) +	\
+	 STROMALIGN(sizeof(cl_uint) * (nitems)))
+
+#define KDS_CALCULATE_ROW_LENGTH(ncols,nitems,data_len)	\
+	(KDS_CALCULATE_FRONTEND_LENGTH((ncols),0,(nitems))	\
+	 + STROMALIGN(data_len))
+#define KDS_CALCULATE_HASH_LENGTH(ncols,nslots,nitems,data_len)	\
+	(KDS_CALCULATE_FRONTEND_LENGTH((ncols),(nslots),(nitems))	\
+	 + STROMALIGN(data_len))
+#define KDS_CALCULATE_SLOT_LENGTH(ncols,nitems)	\
+	(KDS_CALCULATE_HEAD_LENGTH(ncols) +			\
+	 LONGALIGN((sizeof(Datum) +					\
+				sizeof(char)) * (ncols)) * (nitems))
+
 /* length of kern_data_store */
 #define KERN_DATA_STORE_LENGTH(kds)		((kds)->length)
 
 /* length of the header portion of kern_data_store */
 #define KERN_DATA_STORE_HEAD_LENGTH(kds)			\
-	STROMALIGN(offsetof(kern_data_store, colmeta[(kds)->ncols]))
+	KDS_CALCULATE_HEAD_LENGTH((kds)->ncols)
 
 /* head address of data body */
-#define KERN_DATA_STORE_BODY(kds)							\
+#define KERN_DATA_STORE_BODY(kds)					\
 	((char *)(kds) + KERN_DATA_STORE_HEAD_LENGTH(kds))
 
 /* access macro for row- and hash-format */
-#define KERN_DATA_STORE_HASHSLOT(kds)                       \
+#define KERN_DATA_STORE_HASHSLOT(kds)				\
 	((cl_uint *)KERN_DATA_STORE_BODY(kds))
 
 /* access macro for row- and hash-format */
-#define KERN_DATA_STORE_ROWINDEX(kds)						\
-	((cl_uint *)(KERN_DATA_STORE_BODY(kds) +				\
+#define KERN_DATA_STORE_ROWINDEX(kds)				\
+	((cl_uint *)(KERN_DATA_STORE_BODY(kds) +		\
 				 STROMALIGN(sizeof(cl_uint) * (kds)->nslots)))
 
 /* access macro for row- and hash-format */
-#define KERN_DATA_STORE_FREESPACE(kds)				\
-	((kds)->length -								\
-	 (KERN_DATA_STORE_HEAD_LENGTH(kds) +			\
-	  STROMALIGN(sizeof(cl_uint) * (kds)->nslots) +	\
-	  STROMALIGN(sizeof(cl_uint) * (kds)->nitems) +	\
-	  (kds)->usage))
+#define KERN_DATA_STORE_FRONTEND_LENGTH(kds)		\
+	(KERN_DATA_STORE_HEAD_LENGTH(kds) +				\
+	 STROMALIGN(sizeof(cl_uint) * (kds)->nslots) +	\
+	 STROMALIGN(sizeof(cl_uint) * (kds)->nitems))
 
 /* access macro for row- and hash-format */
-#define KERN_DATA_STORE_TUPITEM(kds,kds_index)				\
-	((kern_tupitem *)((char *)(kds) +						\
+#define KERN_DATA_STORE_TUPITEM(kds,kds_index)		\
+	((kern_tupitem *)((char *)(kds) +				\
 			KERN_DATA_STORE_ROWINDEX(kds)[(kds_index)]))
 
 /* access macro for hash-format */
-#define KERN_DATA_STORE_HASHITEM(kds,kds_index)			\
-	((kern_hashitem *)									\
+#define KERN_DATA_STORE_HASHITEM(kds,kds_index)		\
+	((kern_hashitem *)								\
 	 ((char *)KERN_DATA_STORE_TUPITEM(kds,kds_index) -	\
 	  offsetof(kern_hashitem, t_len)))
 
 /* access macro for tuple-slot format */
 #define KERN_DATA_STORE_SLOT_LENGTH(kds,nitems)				\
-	(KERN_DATA_STORE_HEAD_LENGTH(kds) +						\
-	 LONGALIGN((sizeof(Datum) +								\
-				sizeof(char)) * (kds)->ncols) * (nitems))
+	KDS_CALCULATE_SLOT_LENGTH((kds)->ncols,(nitems))
 
 #define KERN_DATA_STORE_VALUES(kds,kds_index)				\
-	((Datum *)((char *)(kds) + KERN_DATA_STORE_SLOT_LENGTH((kds),(kds_index))))
+	((Datum *)((char *)(kds) +								\
+			   KDS_CALCULATE_SLOT_LENGTH((kds)->ncols,(kds_index))))
 
 #define KERN_DATA_STORE_ISNULL(kds,kds_index)				\
-	((cl_bool *)(KERN_DATA_STORE_VALUES((kds),(kds_index)) + (kds)->ncols))
+	((char *)(KERN_DATA_STORE_VALUES((kds),(kds_index)) + (kds)->ncols))
 
 
 STATIC_INLINE(kern_hashitem *)

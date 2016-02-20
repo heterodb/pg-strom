@@ -541,12 +541,11 @@ retry_major:
 		/*
 		 * inner chunk size estimation
 		 */
-		chunk_size = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
-		if (gpath->inners[i].hash_quals != NIL)
-			chunk_size += STROMALIGN(sizeof(cl_uint) * hash_nslots);
-		chunk_size += STROMALIGN(sizeof(cl_uint) * (Size)(inner_ntuples))
-			+ STROMALIGN(entry_size * (Size)(inner_ntuples));
-
+		chunk_size = KDS_CALCULATE_HASH_LENGTH(ncols,
+											   hash_nslots,
+											   (Size)inner_ntuples,
+											   entry_size *
+											   (Size)inner_ntuples);
 		gpath->inners[i].ichunk_size = chunk_size;
 		gpath->inners[i].hash_nslots = hash_nslots;
 
@@ -5173,12 +5172,10 @@ gpujoin_inner_hash_preload_TS(GpuJoinState *gjs,
 
 			nslots = (cl_uint)((double) curr_nitems *
 							   pgstrom_chunk_size_margin);
-			kds_length = (STROMALIGN(offsetof(kern_data_store,
-											 colmeta[scan_desc->natts])) +
-						  STROMALIGN(sizeof(cl_uint) * nslots) +
-						  STROMALIGN(sizeof(cl_uint) * curr_nitems) +
-						  curr_size);
-
+			kds_length = KDS_CALCULATE_HASH_LENGTH(scan_desc->natts,
+												   nslots,
+												   curr_nitems,
+												   curr_size);
 			hash_max = i * (1U << istate->hgram_shift) - 1;
 			pds_hash = pgstrom_create_data_store_hash(gjs->gts.gcontext,
 													  scan_desc,
@@ -5204,11 +5201,10 @@ gpujoin_inner_hash_preload_TS(GpuJoinState *gjs,
 	nslots = (cl_uint)((double) curr_nitems *
 					   pgstrom_chunk_size_margin);
 	nslots = Max(nslots, 128);
-	kds_length = (STROMALIGN(offsetof(kern_data_store,
-									  colmeta[scan_desc->natts])) +
-				  STROMALIGN(sizeof(cl_uint) * nslots) +
-				  STROMALIGN(sizeof(cl_uint) * curr_nitems) +
-				  curr_size + BLCKSZ);
+	kds_length = KDS_CALCULATE_HASH_LENGTH(scan_desc->natts,
+										   nslots,
+										   curr_nitems,
+										   curr_size + BLCKSZ);
 	pds_hash = pgstrom_create_data_store_hash(gjs->gts.gcontext,
 											  scan_desc,
 											  kds_length,
