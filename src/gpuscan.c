@@ -1894,7 +1894,7 @@ pgstrom_exec_scan_chunk(GpuTaskState *gts, Size chunk_length)
 		return NULL;
 
 	InstrStartNode(&gts->outer_instrument);
-	PERFMON_BEGIN(&gts->pfm_accum, &tv1);
+	PERFMON_BEGIN(&gts->pfm, &tv1);
 	pds = pgstrom_create_data_store_row(gts->gcontext,
 										tupdesc,
 										chunk_length,
@@ -1921,7 +1921,7 @@ pgstrom_exec_scan_chunk(GpuTaskState *gts, Size chunk_length)
 		pgstrom_release_data_store(pds);
 		pds = NULL;
 	}
-	PERFMON_END(&gts->pfm_accum, time_outer_load, &tv1, &tv2);
+	PERFMON_END(&gts->pfm, time_outer_load, &tv1, &tv2);
 	InstrStopNode(&gts->outer_instrument,
 				  !pds ? 0.0 : (double)pds->kds->nitems);
 	return pds;
@@ -1961,7 +1961,7 @@ gpuscan_next_tuple(GpuTaskState *gts)
 	TupleTableSlot	   *slot = NULL;
 	struct timeval		tv1, tv2;
 
-	PERFMON_BEGIN(&gss->gts.pfm_accum, &tv1);
+	PERFMON_BEGIN(&gss->gts.pfm, &tv1);
 	if (!gpuscan->task.cpu_fallback)
 	{
 		if (gpuscan->pds_dst)
@@ -2058,7 +2058,7 @@ gpuscan_next_tuple(GpuTaskState *gts)
 			break;
 		}
 	}
-	PERFMON_END(&gss->gts.pfm_accum, time_materialize, &tv1, &tv2);
+	PERFMON_END(&gss->gts.pfm, time_materialize, &tv1, &tv2);
 
 	return slot;
 }
@@ -2204,9 +2204,9 @@ pgstrom_complete_gpuscan(GpuTask *gtask)
 	pgstrom_gpuscan	   *gpuscan = (pgstrom_gpuscan *) gtask;
 	GpuTaskState	   *gts = gtask->gts;
 
-	if (gts->pfm_accum.enabled)
+	if (gts->pfm.enabled)
 	{
-		gts->pfm_accum.num_tasks++;
+		gts->pfm.num_tasks++;
 		CUDA_EVENT_ELAPSED(gpuscan,time_dma_send,
 						   gpuscan->ev_dma_send_start,
 						   gpuscan->ev_dma_send_stop,
@@ -2384,8 +2384,8 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 						   gpuscan->task.cuda_stream);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-	gss->gts.pfm_accum.bytes_dma_send += length;
-	gss->gts.pfm_accum.num_dma_send++;
+	gss->gts.pfm.bytes_dma_send += length;
+	gss->gts.pfm.num_dma_send++;
 
 	/* kern_data_store *kds_src */
 	length = KERN_DATA_STORE_LENGTH(pds_src->kds);
@@ -2395,8 +2395,8 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 						   gpuscan->task.cuda_stream);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-	gss->gts.pfm_accum.bytes_dma_send += length;
-	gss->gts.pfm_accum.num_dma_send++;
+	gss->gts.pfm.bytes_dma_send += length;
+	gss->gts.pfm.num_dma_send++;
 
 	/* kern_data_store *kds_dst, if any */
 	if (pds_dst)
@@ -2408,8 +2408,8 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 							   gpuscan->task.cuda_stream);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-		gss->gts.pfm_accum.bytes_dma_send += length;
-		gss->gts.pfm_accum.num_dma_send++;
+		gss->gts.pfm.bytes_dma_send += length;
+		gss->gts.pfm.num_dma_send++;
 	}
 	CUDA_EVENT_RECORD(gpuscan, ev_dma_send_stop);
 
@@ -2436,7 +2436,7 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 							NULL);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
-		gss->gts.pfm_accum.gscan.num_kern_exec_quals++;
+		gss->gts.pfm.gscan.num_kern_exec_quals++;
 	}
 	else
 	{
@@ -2466,7 +2466,7 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 							NULL);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
-		gss->gts.pfm_accum.gscan.num_kern_projection++;
+		gss->gts.pfm.gscan.num_kern_projection++;
 	}
 
 	/*
@@ -2483,8 +2483,8 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 						   gpuscan->task.cuda_stream);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "cuMemcpyDtoHAsync: %s", errorText(rc));
-	gss->gts.pfm_accum.bytes_dma_recv += length;
-	gss->gts.pfm_accum.num_dma_recv++;
+	gss->gts.pfm.bytes_dma_recv += length;
+	gss->gts.pfm.num_dma_recv++;
 
 	if (pds_dst)
 	{
@@ -2495,8 +2495,8 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 							   gpuscan->task.cuda_stream);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "cuMemcpyDtoHAsync: %s", errorText(rc));
-		gss->gts.pfm_accum.bytes_dma_recv += length;
-		gss->gts.pfm_accum.num_dma_recv++;
+		gss->gts.pfm.bytes_dma_recv += length;
+		gss->gts.pfm.num_dma_recv++;
 	}
 	CUDA_EVENT_RECORD(gpuscan, ev_dma_recv_stop);
 

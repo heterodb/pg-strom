@@ -1380,7 +1380,7 @@ launch_pending_tasks(GpuTaskState *gts)
 			return;
 	}
 
-	PERFMON_BEGIN(&gts->pfm_accum, &tv1);
+	PERFMON_BEGIN(&gts->pfm, &tv1);
 	while (!dlist_is_empty(&gts->pending_tasks))
 	{
 		dnode = dlist_pop_head_node(&gts->pending_tasks);
@@ -1462,7 +1462,7 @@ launch_pending_tasks(GpuTaskState *gts)
 			}
 		}
 	}
-	PERFMON_END(&gts->pfm_accum, time_launch_cuda, &tv1, &tv2);
+	PERFMON_END(&gts->pfm, time_launch_cuda, &tv1, &tv2);
 }
 
 /*
@@ -1547,7 +1547,7 @@ __waitfor_ready_tasks(GpuTaskState *gts)
 	{
 		struct timeval	tv1, tv2;
 
-		PERFMON_BEGIN(&gts->pfm_accum, &tv1);
+		PERFMON_BEGIN(&gts->pfm, &tv1);
 
 		rc = WaitLatch(&MyProc->procLatch,
 					   WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
@@ -1556,7 +1556,7 @@ __waitfor_ready_tasks(GpuTaskState *gts)
 		if (rc & WL_POSTMASTER_DEATH)
 			elog(ERROR, "Emergency bail out because of Postmaster crash");
 
-		PERFMON_END(&gts->pfm_accum, time_sync_tasks, &tv1, &tv2);
+		PERFMON_END(&gts->pfm, time_sync_tasks, &tv1, &tv2);
 	}
 	return retry_next;
 }

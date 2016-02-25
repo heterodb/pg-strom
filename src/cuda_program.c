@@ -895,8 +895,8 @@ __pgstrom_load_cuda_program(GpuTaskState *gts, bool is_preload)
 	BackgroundWorker worker;
 
 	/* save the timestamp of the first touch */
-	if (gts->pfm_accum.tv_build_start.tv_sec == 0)
-		gettimeofday(&gts->pfm_accum.tv_build_start, NULL);
+	if (gts->pfm.tv_build_start.tv_sec == 0)
+		gettimeofday(&gts->pfm.tv_build_start, NULL);
 
 	/* makes a hash value */
 	INIT_LEGACY_CRC32(crc);
@@ -983,8 +983,8 @@ retry:
 			}
 			PG_END_TRY();
 			/* get timestamp of the program build */
-			if (gts->pfm_accum.tv_build_end.tv_sec == 0)
-				gts->pfm_accum.tv_build_end = entry->tv_build_end;
+			if (gts->pfm.tv_build_end.tv_sec == 0)
+				gts->pfm.tv_build_end = entry->tv_build_end;
 
 			pgstrom_put_cuda_program(entry);
 			return true;

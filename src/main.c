@@ -729,16 +729,16 @@ pgstrom_init_perfmon(GpuTaskState *gts)
 {
 	GpuContext	   *gcontext = gts->gcontext;
 
-	memset(&gts->pfm_accum, 0, sizeof(pgstrom_perfmon));
-	gts->pfm_accum.enabled = pgstrom_perfmon_enabled;
-	gts->pfm_accum.prime_in_gpucontext = (gcontext && gcontext->refcnt == 1);
-	gts->pfm_accum.extra_flags = gts->extra_flags;
+	memset(&gts->pfm, 0, sizeof(pgstrom_perfmon));
+	gts->pfm.enabled = pgstrom_perfmon_enabled;
+	gts->pfm.prime_in_gpucontext = (gcontext && gcontext->refcnt == 1);
+	gts->pfm.extra_flags = gts->extra_flags;
 }
 
 static void
 pgstrom_explain_perfmon(GpuTaskState *gts, ExplainState *es)
 {
-	pgstrom_perfmon	   *pfm = &gts->pfm_accum;
+	pgstrom_perfmon	   *pfm = &gts->pfm;
 	char				buf[1024];
 
 	if (!pfm->enabled)
@@ -975,6 +975,6 @@ pgstrom_explain_gputaskstate(GpuTaskState *gts, ExplainState *es)
 	/*
 	 * Show performance information
 	 */
-	if (es->analyze && gts->pfm_accum.enabled)
+	if (es->analyze && gts->pfm.enabled)
 		pgstrom_explain_perfmon(gts, es);
 }

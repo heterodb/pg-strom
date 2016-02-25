@@ -3040,7 +3040,7 @@ gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	/* inner multirels buffer statistics */
 	if (es->analyze)
 	{
-		pgstrom_perfmon	   *pfm = &gjs->gts.pfm_accum;
+		pgstrom_perfmon	   *pfm = &gjs->gts.pfm;
 
 		if (es->format == EXPLAIN_FORMAT_TEXT)
 		{
@@ -4348,7 +4348,7 @@ gpujoin_next_chunk(GpuTaskState *gts)
 			}
 		}
 
-		PERFMON_BEGIN(&gts->pfm_accum, &tv1);
+		PERFMON_BEGIN(&gts->pfm, &tv1);
 		if (gjs->gts.css.ss.ss_currentRelation)
 		{
 			/* Scan and load the outer relation by itself */
@@ -4397,7 +4397,7 @@ gpujoin_next_chunk(GpuTaskState *gts)
 				}
 			}
 		}
-		PERFMON_END(&gjs->gts.pfm_accum, time_outer_load, &tv1, &tv2);
+		PERFMON_END(&gjs->gts.pfm, time_outer_load, &tv1, &tv2);
 
 		/*
 		 * We also need to check existence of next inner hash-chunks,
@@ -4420,7 +4420,7 @@ gpujoin_next_tuple(GpuTaskState *gts)
 	kern_data_store	   *kds_dst = pds_dst->kds;
 	struct timeval		tv1, tv2;
 
-	PERFMON_BEGIN(&gjs->gts.pfm_accum, &tv1);
+	PERFMON_BEGIN(&gjs->gts.pfm, &tv1);
 
 	if (gjs->gts.curr_index < kds_dst->nitems)
 	{
@@ -4441,7 +4441,7 @@ gpujoin_next_tuple(GpuTaskState *gts)
 	else
 		slot = NULL;	/* try next chunk */
 
-	PERFMON_END(&gjs->gts.pfm_accum, time_materialize, &tv1, &tv2);
+	PERFMON_END(&gjs->gts.pfm, time_materialize, &tv1, &tv2);
 	return slot;
 }
 
@@ -4501,7 +4501,7 @@ gpujoin_task_complete(GpuTask *gtask)
 {
 	pgstrom_gpujoin	   *pgjoin = (pgstrom_gpujoin *) gtask;
 	GpuJoinState	   *gjs = (GpuJoinState *) gtask->gts;
-	pgstrom_perfmon	   *pfm = &gjs->gts.pfm_accum;
+	pgstrom_perfmon	   *pfm = &gjs->gts.pfm;
 
 	if (pfm->enabled)
 	{
@@ -4797,8 +4797,8 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 						   pgjoin->task.cuda_stream);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-	gjs->gts.pfm_accum.bytes_dma_send += length;
-	gjs->gts.pfm_accum.num_dma_send++;
+	gjs->gts.pfm.bytes_dma_send += length;
+	gjs->gts.pfm.num_dma_send++;
 
 	if (pds_src)
 	{
@@ -4810,8 +4810,8 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 							   pgjoin->task.cuda_stream);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-		gjs->gts.pfm_accum.bytes_dma_send += length;
-		gjs->gts.pfm_accum.num_dma_send++;
+		gjs->gts.pfm.bytes_dma_send += length;
+		gjs->gts.pfm.num_dma_send++;
 	}
 	else
 	{
@@ -4827,8 +4827,8 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 						   pgjoin->task.cuda_stream);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-	gjs->gts.pfm_accum.bytes_dma_send += length;
-	gjs->gts.pfm_accum.num_dma_send++;
+	gjs->gts.pfm.bytes_dma_send += length;
+	gjs->gts.pfm.num_dma_send++;
 
 	CUDA_EVENT_RECORD(pgjoin, ev_dma_send_stop);
 
@@ -4868,8 +4868,8 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 						   pgjoin->task.cuda_stream);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "cuMemcpyDtoHAsync: %s", errorText(rc));
-	gjs->gts.pfm_accum.bytes_dma_recv += length;
-	gjs->gts.pfm_accum.num_dma_recv++;
+	gjs->gts.pfm.bytes_dma_recv += length;
+	gjs->gts.pfm.num_dma_recv++;
 
 	/* DMA Recv: kern_data_store *kds_dst */
 	length = KERN_DATA_STORE_LENGTH(pds_dst->kds);
@@ -4879,8 +4879,8 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 						   pgjoin->task.cuda_stream);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "cuMemcpyDtoHAsync: %s", errorText(rc));
-	gjs->gts.pfm_accum.bytes_dma_recv += length;
-	gjs->gts.pfm_accum.num_dma_recv++;
+	gjs->gts.pfm.bytes_dma_recv += length;
+	gjs->gts.pfm.num_dma_recv++;
 
 	CUDA_EVENT_RECORD(pgjoin, ev_dma_recv_stop);
 
@@ -5592,7 +5592,7 @@ gpujoin_inner_preload(GpuJoinState *gjs)
 	struct timeval	tv1, tv2;
 
 
-	PERFMON_BEGIN(&gjs->gts.pfm_accum, &tv1);
+	PERFMON_BEGIN(&gjs->gts.pfm, &tv1);
 	/*
 	 * Half of the max allocatable GPU memory (and minus some margin) is
 	 * the current hard limit of the inner relations buffer.
@@ -5647,7 +5647,7 @@ gpujoin_inner_preload(GpuJoinState *gjs)
 			kmrels_size_fixed = true;
 		}
 	}
-	PERFMON_END(&gjs->gts.pfm_accum, time_inner_load, &tv1, &tv2);
+	PERFMON_END(&gjs->gts.pfm, time_inner_load, &tv1, &tv2);
 
 	/*
 	 * XXX - It is ideal case; all the inner chunk can be loaded to
@@ -5932,8 +5932,8 @@ multirels_send_buffer(pgstrom_multirels *pmrels, GpuTask *gtask)
 		((pgstrom_gpujoin *)gtask)->is_inner_loader = true;
 
 		/* update statistics */
-		gjs->gts.pfm_accum.gjoin.num_inner_dma_send++;
-		gjs->gts.pfm_accum.gjoin.bytes_inner_dma_send += total_length;
+		gjs->gts.pfm.gjoin.num_inner_dma_send++;
+		gjs->gts.pfm.gjoin.bytes_inner_dma_send += total_length;
 	}
 	else
 	{

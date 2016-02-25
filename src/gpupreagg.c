@@ -4055,7 +4055,7 @@ gpupreagg_next_chunk(GpuTaskState *gts)
 	if (gpas->gts.scan_done)
 		return NULL;
 
-	PERFMON_BEGIN(&gts->pfm_accum, &tv1);
+	PERFMON_BEGIN(&gts->pfm, &tv1);
 	if (gpas->gts.css.ss.ss_currentRelation)
 	{
 		/* Load a bunch of records at once on the first time */
@@ -4131,7 +4131,7 @@ gpupreagg_next_chunk(GpuTaskState *gts)
 		if (!gpas->outer_pds)
 			is_terminator = true;
 	}
-	PERFMON_END(&gts->pfm_accum, time_outer_load, &tv1, &tv2);
+	PERFMON_END(&gts->pfm, time_outer_load, &tv1, &tv2);
 
 	if (!pds)
 		return NULL;	/* no more tuples to read */
@@ -4256,7 +4256,7 @@ gpupreagg_next_tuple(GpuTaskState *gts)
 
 	Assert(gpreagg->is_terminator);
 
-	PERFMON_BEGIN(&gts->pfm_accum, &tv1);
+	PERFMON_BEGIN(&gts->pfm, &tv1);
 	if (segment->needs_fallback)
 		slot = gpupreagg_next_tuple_fallback(gpas, segment);
 	else if (gpas->gts.curr_index < kds_final->nitems)
@@ -4271,7 +4271,7 @@ gpupreagg_next_tuple(GpuTaskState *gts)
 			slot = NULL;
 		}
 	}
-	PERFMON_END(&gts->pfm_accum, time_materialize, &tv1, &tv2);
+	PERFMON_END(&gts->pfm, time_materialize, &tv1, &tv2);
 	return slot;
 }
 
@@ -4418,7 +4418,7 @@ gpupreagg_task_complete(GpuTask *gtask)
 	pgstrom_gpupreagg  *gpreagg = (pgstrom_gpupreagg *) gtask;
 	gpupreagg_segment  *segment = gpreagg->segment;
 	GpuPreAggState	   *gpas = (GpuPreAggState *) gtask->gts;
-	pgstrom_perfmon	   *pfm = &gpas->gts.pfm_accum;
+	pgstrom_perfmon	   *pfm = &gpas->gts.pfm;
 	cl_uint				nitems_in = gpreagg->pds_in->kds->nitems;
 
 	if (pfm->enabled)
@@ -4686,7 +4686,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 	pgstrom_data_store *pds_in = gpreagg->pds_in;
 	kern_data_store	   *kds_head = gpreagg->kds_head;
 	gpupreagg_segment  *segment = gpreagg->segment;
-	pgstrom_perfmon	   *pfm_accum = &gpreagg->task.gts->pfm_accum;
+	pgstrom_perfmon	   *pfm = &gpreagg->task.gts->pfm;
 	size_t				offset;
 	size_t				length;
 	CUevent				ev_kern_exec_end;
@@ -4789,8 +4789,8 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 						   gpreagg->task.cuda_stream);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-	pfm_accum->bytes_dma_send += length;
-	pfm_accum->num_dma_send++;
+	pfm->bytes_dma_send += length;
+	pfm->num_dma_send++;
 
 	if (gpreagg->reduction_mode != GPUPREAGG_ONLY_TERMINATION)
 	{
@@ -4802,8 +4802,8 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 							   gpreagg->task.cuda_stream);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-		pfm_accum->bytes_dma_send += length;
-		pfm_accum->num_dma_send++;
+		pfm->bytes_dma_send += length;
+		pfm->num_dma_send++;
 
 		/* header of the internal kds-slot buffer */
 		length = KERN_DATA_STORE_HEAD_LENGTH(kds_head);
@@ -4813,8 +4813,8 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 							   gpreagg->task.cuda_stream);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-		pfm_accum->bytes_dma_send += length;
-		pfm_accum->num_dma_send++;
+		pfm->bytes_dma_send += length;
+		pfm->num_dma_send++;
 	}
 	CUDA_EVENT_RECORD(gpreagg, ev_dma_send_stop);
 
@@ -4845,7 +4845,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 							NULL);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
-		pfm_accum->gpreagg.num_kern_prep++;
+		pfm->gpreagg.num_kern_prep++;
 	}
 	/*
 	 * Record normal kernel execution end event
@@ -4906,7 +4906,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 								NULL);
 			if (rc != CUDA_SUCCESS)
 				elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
-			pfm_accum->gpreagg.num_kern_fixvar++;
+			pfm->gpreagg.num_kern_fixvar++;
 		}
 	}
 
@@ -4923,8 +4923,8 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
                            gpreagg->task.cuda_stream);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuMemcpyDtoHAsync: %s", errorText(rc));
-    pfm_accum->bytes_dma_recv += length;
-    pfm_accum->num_dma_recv++;
+    pfm->bytes_dma_recv += length;
+    pfm->num_dma_recv++;
 
 	/*
 	 * DMA Recv of final result buffer
@@ -4941,8 +4941,8 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 							   gpreagg->task.cuda_stream);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-		pfm_accum->bytes_dma_recv += length;
-        pfm_accum->num_dma_recv++;
+		pfm->bytes_dma_recv += length;
+        pfm->num_dma_recv++;
 	}
 	CUDA_EVENT_RECORD(gpreagg, ev_dma_recv_stop);
 

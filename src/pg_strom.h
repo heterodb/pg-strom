@@ -265,7 +265,7 @@ struct GpuTaskState
 	struct pgstrom_data_store *(*cb_bulk_exec)(GpuTaskState *gts,
 											   size_t chunk_size);
 	/* performance counter  */
-	pgstrom_perfmon	pfm_accum;
+	pgstrom_perfmon	pfm;
 };
 #define GTS_GET_SCAN_TUPDESC(gts)				\
 	(((GpuTaskState *)(gts))->css.ss.ss_ScanTupleSlot->tts_tupleDescriptor)
@@ -629,18 +629,18 @@ extern void pgstrom_explain_gputaskstate(GpuTaskState *gts, ExplainState *es);
 /*
  * macro definitions for performance counter
  */
-#define PERFMON_BEGIN(pfm_accum,tv1)			\
+#define PERFMON_BEGIN(pfm,tv1)					\
 	do {										\
-		if ((pfm_accum)->enabled)				\
+		if ((pfm)->enabled)						\
 			gettimeofday((tv1), NULL);			\
 	} while(0)
 
-#define PERFMON_END(pfm_accum,field,tv1,tv2)	\
+#define PERFMON_END(pfm,field,tv1,tv2)			\
 	do {										\
-		if ((pfm_accum)->enabled)				\
+		if ((pfm)->enabled)						\
 		{										\
 			gettimeofday((tv2), NULL);			\
-			(pfm_accum)->field +=				\
+			(pfm)->field +=												\
 				((double)(((tv2)->tv_sec - (tv1)->tv_sec) * 1000000L +	\
 						  ((tv2)->tv_usec - (tv1)->tv_usec)) / 1000.0);	\
 		}										\
@@ -648,7 +648,7 @@ extern void pgstrom_explain_gputaskstate(GpuTaskState *gts, ExplainState *es);
 
 #define CUDA_EVENT_RECORD(node,ev_field)						\
 	do {														\
-		if (((GpuTask *)(node))->gts->pfm_accum.enabled)		\
+		if (((GpuTask *)(node))->gts->pfm.enabled)				\
 		{														\
 			CUresult __rc = cuEventRecord((node)->ev_field,		\
 							((GpuTask *)(node))->cuda_stream);	\
@@ -660,7 +660,7 @@ extern void pgstrom_explain_gputaskstate(GpuTaskState *gts, ExplainState *es);
 
 #define CUDA_EVENT_CREATE(node,ev_field)						\
 	do {														\
-		if (((GpuTask *)(node))->gts->pfm_accum.enabled)		\
+		if (((GpuTask *)(node))->gts->pfm.enabled)				\
 		{														\
 			CUresult __rc = cuEventCreate(&(node)->ev_field,	\
 										  CU_EVENT_DEFAULT);	\
@@ -698,7 +698,7 @@ extern void pgstrom_explain_gputaskstate(GpuTaskState *gts, ExplainState *es);
 					 errorText(__rc));							\
 				goto bailout;									\
 			}													\
-			((GpuTask *)(node))->gts->pfm_accum.pfm_field += __elapsed; \
+			((GpuTask *)(node))->gts->pfm.pfm_field += __elapsed;	\
 		}														\
 	} while(0)
 
