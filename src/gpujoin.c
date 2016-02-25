@@ -261,11 +261,11 @@ typedef struct
 	HeapTupleData	curr_tuple;
 
 	/*
-	 * The least depth to process RIGHT/FULL OUTER JOIN if any. We shall
-	 * generate zero tuples for earlier depths, obviously, so we can omit.
-	 * If no OUTER JOIN cases, it shall be initialized to 1.
+	 * The first RIGHT OUTER JOIN depth, if any. It is a hint for optimization
+	 * because it is obvious the shallower depth will produce no tuples when
+	 * no input tuples are supplied.
 	 */
-	cl_int			outer_join_start_depth;
+	cl_int			first_right_outer_depth;
 
 	/*
 	 * flag to set if outer plan reached to end of the relation
@@ -2569,7 +2569,7 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 	GpuJoinInfo	   *gj_info = deform_gpujoin_info(cscan);
 	TupleDesc		result_tupdesc = GTS_GET_RESULT_TUPDESC(gjs);
 	TupleDesc		scan_tupdesc;
-	cl_int			outer_join_start_depth = -1;
+	cl_int			first_right_outer_depth = -1;
 	cl_int			i;
 
 	/* activate GpuContext for device execution */
@@ -2648,10 +2648,10 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 		istate->ichunk_size = list_nth_int(gj_info->ichunk_size, i);
 		istate->join_type = (JoinType)list_nth_int(gj_info->join_types, i);
 
-		if (outer_join_start_depth < 0 &&
+		if (first_right_outer_depth < 0 &&
 			(istate->join_type == JOIN_RIGHT ||
 			 istate->join_type == JOIN_FULL))
-			outer_join_start_depth = istate->depth;
+			first_right_outer_depth = istate->depth;
 
 		/*
 		 * NOTE: We need to deal with Var-node references carefully,
@@ -2725,11 +2725,11 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 		gjs->gts.css.custom_ps = lappend(gjs->gts.css.custom_ps,
 										 gjs->inners[i].state);
 	}
-
 	/*
-	 * Is OUTER RIGHT/FULL JOIN needed?
+	 * Track the first RIGHT/FULL OUTER JOIN depth, if any
 	 */
-	gjs->outer_join_start_depth = Max(outer_join_start_depth, 1);
+	gjs->first_right_outer_depth = Min(first_right_outer_depth,
+									   gjs->num_rels + 1);
 
 	/*
 	 * initialize kernel execution parameter
@@ -3737,8 +3737,15 @@ gpujoin_exec_estimate_nitems(GpuJoinState *gjs,
 	{
 		pgstrom_data_store *pds_src = pgjoin->pds_src;
 
-		Assert(pgjoin->pds_src != NULL);
-		if (jscale_old != NULL)
+		if (!pds_src)
+		{
+			/*
+			 * Due to the definition, RIGHT OUTER JOIN task has no source
+			 * PDS, thus it makes empty result on depth==0
+			 */
+			ntuples_next = 0.0;
+		}
+		else if (jscale_old != NULL)
 		{
 			/*
 			 * In case of task re-enqueue with inner window shift,
@@ -3791,7 +3798,7 @@ gpujoin_exec_estimate_nitems(GpuJoinState *gjs,
 
 		window_ratio = ((double) jscale[depth].window_size /
 						(double) pds_in->kds->nitems);
-		if (!pgjoin->pds_src && depth <= gjs->outer_join_start_depth)
+		if (!pgjoin->pds_src && depth <= gjs->first_right_outer_depth)
 		{
 			/*
 			 * obviously, first depth of the outer join neve produce
@@ -4133,7 +4140,7 @@ major_retry:
 	ntuples_delta = 0.0;
 	max_items = 0;
 
-	for (depth = (!pgjoin->pds_src ? gjs->outer_join_start_depth : 0);
+	for (depth = 0;
 		 depth <= gjs->num_rels;
 		 depth++, ntuples = ntuples_next)
 	{
@@ -4195,8 +4202,8 @@ major_retry:
 		 * TODO: We may be able to utilize in-kernel joined row distribution
 		 *       histgram for better separation point.
 		 */
-		if (depth > 0 && (depth == 1 ||
-						  ntuples_next - ntuples > ntuples_delta))
+		if (depth > 0 &&
+			(depth == 1 || ntuples_next - ntuples > ntuples_delta))
 		{
 			ntuples_delta = Max(ntuples_next - ntuples, 0.0);
 			target_depth = depth;
@@ -4253,9 +4260,6 @@ major_retry:
 		STROMALIGN(offsetof(kern_resultbuf, results[max_items]));
 	pgjoin->kern.kresults_max_items = max_items;
 	pgjoin->kern.num_rels = gjs->num_rels;
-	pgjoin->kern.start_depth = (!pgjoin->pds_src
-								? gjs->outer_join_start_depth
-								: 1);
 	pgjoin->window_ratio = window_ratio;
 
 	/*

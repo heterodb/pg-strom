@@ -84,7 +84,7 @@ typedef struct
 	/* number of inner relations */
 	cl_uint			num_rels;
 	/* least depth in this call chain */
-	cl_uint			start_depth;
+//	cl_uint			start_depth;
 	/* error status to be backed (OUT) */
 	kern_errorbuf	kerror;
 	/*
@@ -1292,10 +1292,6 @@ gpujoin_main(kern_gpujoin *kgjoin,		/* in/out: misc stuffs */
 	/* Init kernel context */
 	INIT_KERNEL_CONTEXT(&kcxt, gpujoin_main, kparams);
 	assert(get_global_size() == 1);		/* only single thread */
-	assert(kds_src != NULL
-		   ? kgjoin->start_depth == 1
-		   : kgjoin->start_depth > 0 &&
-		     kgjoin->start_depth <= kgjoin->num_rels);
 	assert(!kds_src || kds_src->format == KDS_FORMAT_ROW);
 	assert(kds_dst->format == KDS_FORMAT_ROW ||
 		   kds_dst->format == KDS_FORMAT_SLOT);
@@ -1331,15 +1327,20 @@ retry_major:
 	kds_dst->nitems = 0;
 	kds_dst->usage = 0;
 
-	for (depth = kgjoin->start_depth; depth <= kgjoin->num_rels; depth++)
+	for (depth = 1; depth <= kgjoin->num_rels; depth++)
 	{
+		cl_bool		exec_right_outer;
+
+	retry_minor:
+		/* Does this depth need to launch RIGHT OUTER JOIN? */
+		exec_right_outer = (kds_src == NULL &&
+							KERN_MULTIRELS_RIGHT_OUTER_JOIN(kmrels, depth));
 		/*
 		 * Initialization of the kresults_src buffer if start depth.
 		 * Elsewhere, kresults_dst buffer of the last depth is also
 		 * kresults_src buffer in this depth.
 		 */
-	retry_minor:
-		if (depth == kgjoin->start_depth)
+		if (depth == 1)
 		{
 			memset(kresults_src, 0, offsetof(kern_resultbuf, results[0]));
 			kresults_src->nrels = depth;
@@ -1418,27 +1419,27 @@ retry_major:
 		window_base = kgjoin->jscale[depth].window_base;
 		window_size = kgjoin->jscale[depth].window_size;
 
+		/* Launch:
+		 * KERNEL_FUNCTION_MAXTHREADS(void)
+		 * gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
+		 *                       kern_data_store *kds,
+		 *                       kern_multirels *kmrels,
+		 *                       kern_resultbuf *kresults_src,
+		 *                       kern_resultbuf *kresults_dst,
+		 *                       cl_bool *outer_join_map,
+		 *                       cl_int depth,
+		 *                       cl_int cuda_index,
+		 *                       cl_uint window_base,
+		 *                       cl_uint window_size)
+		 */
 		if (kmrels->chunks[depth-1].is_nestloop)
 		{
-			if (kds_src != NULL || depth > kgjoin->start_depth)
+			if (kresults_src->nitems > 0)
 			{
 				cl_ushort	gnl_shmem_xsize;
 				cl_ushort	gnl_shmem_ysize;
 				cl_uint		shmem_size;
 
-				/* Launch:
-				 * KERNEL_FUNCTION_MAXTHREADS(void)
-				 * gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
-				 *                       kern_data_store *kds,
-				 *                       kern_multirels *kmrels,
-				 *                       kern_resultbuf *kresults_src,
-				 *                       kern_resultbuf *kresults_dst,
-				 *                       cl_bool *outer_join_map,
-				 *                       cl_int depth,
-				 *                       cl_int cuda_index,
-				 *                       cl_uint window_base,
-				 *                       cl_uint window_size)
-				 */
 				tv1 = clock64();
 				kern_join_args = (kern_join_args_t *)
 					cudaGetParameterBuffer(sizeof(void *),
@@ -1517,26 +1518,31 @@ retry_major:
 				kgjoin->jscale[depth].inner_nitems = kresults_dst->nitems;
 				kgjoin->jscale[depth].total_nitems = kresults_dst->nitems;
 			}
-
-			if (kds_src == NULL &&
-				KERN_MULTIRELS_RIGHT_OUTER_JOIN(kmrels, depth))
+			else
 			{
-				/* Launch:
-				 * KERNEL_FUNCTION(void)
-				 * gpujoin_outer_nestloop(kern_gpujoin *kgjoin,
-				 *                        kern_data_store *kds,
-				 *                        kern_multirels *kmrels,
-				 *                        kern_resultbuf *kresults_src,
-				 *                        kern_resultbuf *kresults_dst,
-				 *                        cl_bool *outer_join_map,
-				 *                        cl_int depth,
-				 *                        cl_int cuda_index,
-				 *                        cl_uint window_base,
-				 *                        cl_uint window_size)
-				 *
-				 * NOTE: Host-side has to co-locate the outer join map
-				 * into this device, prior to the kernel launch.
-				 */
+				/* in case when no input rows. INNER JOIN produce no rows */
+				kgjoin->jscale[depth].inner_nitems = 0;
+				kgjoin->jscale[depth].total_nitems = 0;
+			}
+
+			/* Launch:
+			 * KERNEL_FUNCTION(void)
+			 * gpujoin_outer_nestloop(kern_gpujoin *kgjoin,
+			 *                        kern_data_store *kds,
+			 *                        kern_multirels *kmrels,
+			 *                        kern_resultbuf *kresults_src,
+			 *                        kern_resultbuf *kresults_dst,
+			 *                        cl_bool *outer_join_map,
+			 *                        cl_int depth,
+			 *                        cl_int cuda_index,
+			 *                        cl_uint window_base,
+			 *                        cl_uint window_size)
+			 *
+			 * NOTE: Host-side has to co-locate the outer join map
+			 * into this device, prior to the kernel launch.
+			 */
+			if (exec_right_outer)
+			{
 				tv1 = clock64();
 				kern_join_args = (kern_join_args_t *)
 					cudaGetParameterBuffer(sizeof(void *),
@@ -1608,21 +1614,21 @@ retry_major:
 		}
 		else
 		{
-			if (kds_src != NULL || depth > kgjoin->start_depth)
+			/* Launch:
+			 * KERNEL_FUNCTION(void)
+			 * gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
+			 *                       kern_data_store *kds,
+			 *                       kern_multirels *kmrels,
+			 *                       kern_resultbuf *kresults_src,
+			 *                       kern_resultbuf *kresults_dst,
+			 *                       cl_bool *outer_join_map,
+			 *                       cl_int depth,
+			 *                       cl_int cuda_index,
+			 *                       cl_uint window_base,
+			 *                       cl_uint window_size);
+			 */
+			if (kresults_src->nitems > 0)
 			{
-				/* Launch:
-				 * KERNEL_FUNCTION(void)
-				 * gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
-				 *                       kern_data_store *kds,
-				 *                       kern_multirels *kmrels,
-				 *                       kern_resultbuf *kresults_src,
-				 *                       kern_resultbuf *kresults_dst,
-				 *                       cl_bool *outer_join_map,
-				 *                       cl_int depth,
-				 *                       cl_int cuda_index,
-				 *                       cl_uint window_base,
-				 *                       cl_uint window_size);
-				 */
 				tv1 = clock64();
 				kern_join_args = (kern_join_args_t *)
 					cudaGetParameterBuffer(sizeof(void *),
@@ -1692,19 +1698,24 @@ retry_major:
 				kgjoin->jscale[depth].inner_nitems = kresults_dst->nitems;
 				kgjoin->jscale[depth].total_nitems = kresults_dst->nitems;
 			}
-
-			if (kds_src == NULL &&
-				KERN_MULTIRELS_RIGHT_OUTER_JOIN(kmrels, depth))
+			else
 			{
-				/* Launch:
-				 * KERNEL_FUNCTION(void)
-				 * gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
-				 *                        kern_data_store *kds,
-				 *                        kern_multirels *kmrels,
-				 *                        cl_bool *outer_join_map,
-				 *                        cl_int depth,
-				 *                        cl_int cuda_index);
-				 */
+				/* no input rows, then no output rows */
+				kgjoin->jscale[depth].inner_nitems = 0;
+				kgjoin->jscale[depth].total_nitems = 0;
+			}
+
+			/* Launch:
+			 * KERNEL_FUNCTION(void)
+			 * gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
+			 *                        kern_data_store *kds,
+			 *                        kern_multirels *kmrels,
+			 *                        cl_bool *outer_join_map,
+			 *                        cl_int depth,
+			 *                        cl_int cuda_index);
+			 */
+			if (exec_right_outer)
+			{
 				tv1 = clock64();
 				kern_join_args = (kern_join_args_t *)
 					cudaGetParameterBuffer(sizeof(void *),
