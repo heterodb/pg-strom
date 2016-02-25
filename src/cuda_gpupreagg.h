@@ -49,8 +49,8 @@
  */
 typedef struct
 {
-	kern_errorbuf	kerror;					/* kernel error information */
-	cl_uint			reduction_mode;			/* one of GPUPREAGG_* above */
+	kern_errorbuf	kerror;				/* kernel error information */
+	cl_uint			reduction_mode;		/* one of GPUPREAGG_* above */
 	/* -- runtime statistics -- */
 	cl_uint			num_conflicts;		/* only used in kernel space */
 	cl_uint			num_groups;			/* out: # of new groups */
@@ -68,14 +68,6 @@ typedef struct
 	cl_float		tv_kern_lagg;		/* msec of kern_local_reduction */
 	cl_float		tv_kern_gagg;		/* msec of kern_global_reducation */
 	cl_float		tv_kern_fagg;		/* msec of kern_final_reduction */
-#if 0
-	cl_uint			ktime_prep;			/* exec msec of preparation kernel */
-	cl_uint			ktime_nogrp;		/* exec msec of nogroup kernel */
-	cl_uint			ktime_lagg;			/* exec msec of local kernel */
-	cl_uint			ktime_gagg;			/* exec msec of global kernel */
-	cl_uint			ktime_fagg;			/* exec msec of final kernel */
-	//cl_uint		ktime_fixvar;		/* exec msec of fixvar kernel */
-#endif
 	/* -- other hashing parameters -- */
 	cl_uint			key_dist_salt;			/* hashkey distribution salt */
 	cl_uint			hash_size;				/* size of global hash-slots */
@@ -1590,7 +1582,6 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 	dim3				block_sz;
 	cl_int				device;
 	cl_int				smx_clock;
-	cl_int				retry_count = 1;
 	cl_ulong			tv1, tv2;
 	cudaError_t			status = cudaSuccess;
 
@@ -1853,8 +1844,6 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 			}
 			else if (kgpreagg->kerror.errcode != StromError_Success)
 				return;
-
-			printf("local_reduction %u=>%u\n", kds_slot->nitems, kresults_src->nitems);
 			/* perfmon */
 			tv2 = clock64();
 			TIMEVAL_RECORD(kgpreagg,kern_lagg,tv1,tv2,smx_clock);
@@ -1928,7 +1917,7 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 		/* swap */
 		kresults_tmp = kresults_src;
 		kresults_src = kresults_dst;
-		kresults_dst = kresults_src;
+		kresults_dst = kresults_tmp;
 	}
 	else
 	{
@@ -1948,6 +1937,12 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 	 *                           kern_resultbuf *kresults_dst,
 	 *                           kern_global_hashslot *f_hash)
 	 */
+	cl_uint  hogehoge = (kresults_src->all_visible
+						 ? kds_slot->nitems
+						 : kresults_src->nitems);
+	cl_uint  hoge_nrooms = kresults_src->nrooms;
+	cl_uint  hoge_all_visible = kresults_src->all_visible;
+
 	tv1 = clock64();
 final_retry:
 	/* init destination kern_resultbuf */
@@ -2008,8 +2003,8 @@ final_retry:
 		kresults_tmp = kresults_src;
 		kresults_src = kresults_dst;
 		kresults_dst = kresults_tmp;
-
-		retry_count++;
+		/* increment num_kern_fagg */
+		kgpreagg->num_kern_fagg++;
 		goto final_retry;
 	}
 	tv2 = clock64();
@@ -2035,10 +2030,6 @@ out:
  *
  * ----------------------------------------------------------------
  */
-//#define Min(x,y)	((x) < (y) ? (x) : (y))
-//#define Max(x,y)	((x) > (y) ? (x) : (y))
-#define Add(x,y)	((x)+(y))
-
 STATIC_INLINE(cl_int)
 pg_atomic_min_int(cl_int *addr, cl_int value)
 {

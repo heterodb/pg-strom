@@ -88,6 +88,10 @@ typedef cl_ulong	Datum;
 #define Min3(a,b,c)		((a) < (b) ? Min((a),(c)) : Min((b),(c)))
 #define Min4(a,b,c,d)	Min(Min((a),(b)),Min((c),(d)))
 
+#define Add(a,b)		((a) + (b))
+#define Add3(a,b,c)		((a) + (b) + (c))
+#define Add4(a,b,c,d)	((a) + (b) + (c) + (d))
+
 /*
  * Alignment macros
  */

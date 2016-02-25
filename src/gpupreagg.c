@@ -221,16 +221,9 @@ typedef struct
 	GpuTask			task;
 	gpupreagg_segment *segment;		/* reference to the preagg segment */
 	cl_int			segment_id;		/* my index within segment */
-	cl_int			reduction_mode;	/* one of GPUPREAGG_*_REDUCTION */
 	bool			is_terminator;	/* If true, collector of final result */
 	double			num_groups;		/* estimated number of groups */
 	CUfunction		kern_main;
-//	CUfunction		kern_prep;
-//	CUfunction		kern_lagg;
-//	CUfunction		kern_gagg;
-//	CUfunction		kern_fagg;
-//	CUfunction		kern_fprep;
-//	CUfunction		kern_nogrp;
 	CUfunction		kern_fixvar;
 	CUdeviceptr		m_gpreagg;
 	CUdeviceptr		m_kds_row;		/* source row-buffer */
@@ -3997,7 +3990,7 @@ gpupreagg_task_create(GpuPreAggState *gpas,
 	gpreagg->task.cuda_index = segment->cuda_index;
 	gpreagg->segment = segment;	/* caller already acquired */
 	gpreagg->is_terminator = is_terminator;
-	gpreagg->reduction_mode = gpas->reduction_mode;
+
 	/*
 	 * FIXME: If num_groups is larger than expectation, we may need to
 	 * change the reduction policy on run-time
@@ -4006,6 +3999,7 @@ gpupreagg_task_create(GpuPreAggState *gpas,
 	gpreagg->pds_in = pds_in;
 
 	/* also initialize kern_gpupreagg portion */
+	gpreagg->kern.reduction_mode = gpas->reduction_mode;
 	memset(&gpreagg->kern.kerror, 0, sizeof(kern_errorbuf));
 	gpreagg->kern.key_dist_salt = gpas->key_dist_salt;
 	gpreagg->kern.hash_size = nitems;
@@ -4456,17 +4450,17 @@ gpupreagg_task_complete(GpuTask *gtask)
 		if (gpreagg->kern.num_kern_lagg > 0)
 		{
 			pfm->gpreagg.num_kern_lagg += gpreagg->kern.num_kern_lagg;
-			pfm->gpreagg.tv_kern_lagg += gpreagg->kern.num_kern_lagg;
+			pfm->gpreagg.tv_kern_lagg += gpreagg->kern.tv_kern_lagg;
 		}
 		if (gpreagg->kern.num_kern_gagg > 0)
 		{
 			pfm->gpreagg.num_kern_gagg += gpreagg->kern.num_kern_gagg;
-			pfm->gpreagg.tv_kern_gagg += gpreagg->kern.num_kern_gagg;
+			pfm->gpreagg.tv_kern_gagg += gpreagg->kern.tv_kern_gagg;
 		}
 		if (gpreagg->kern.num_kern_fagg > 0)
 		{
 			pfm->gpreagg.num_kern_fagg += gpreagg->kern.num_kern_fagg;
-			pfm->gpreagg.tv_kern_fagg += gpreagg->kern.num_kern_fagg;
+			pfm->gpreagg.tv_kern_fagg += gpreagg->kern.tv_kern_fagg;
 		}
 	}
 skip:
@@ -4534,8 +4528,8 @@ skip:
 				 (int)segment->total_ntasks, segment->idx_chunks,
 				 gpreagg->segment_id);
 			Assert(!gpreagg->is_terminator);
-			gpreagg->reduction_mode = GPUPREAGG_ONLY_TERMINATION;
 			gpreagg->is_terminator = true;
+			gpreagg->kern.reduction_mode = GPUPREAGG_ONLY_TERMINATION;
 			/* clear the statistics */
 			gpreagg->kern.num_groups = 0;
 			gpreagg->kern.varlena_usage = 0;
@@ -4733,7 +4727,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 	/*
 	 * Allocation of own device memory
 	 */
-	if (gpreagg->reduction_mode != GPUPREAGG_ONLY_TERMINATION)
+	if (gpreagg->kern.reduction_mode != GPUPREAGG_ONLY_TERMINATION)
 	{
 		length = (GPUMEMALIGN(KERN_GPUPREAGG_LENGTH(&gpreagg->kern)) +
 				  GPUMEMALIGN(KERN_DATA_STORE_LENGTH(pds_in->kds)) +
@@ -4792,7 +4786,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 	pfm->bytes_dma_send += length;
 	pfm->num_dma_send++;
 
-	if (gpreagg->reduction_mode != GPUPREAGG_ONLY_TERMINATION)
+	if (gpreagg->kern.reduction_mode != GPUPREAGG_ONLY_TERMINATION)
 	{
 		/* source data to be reduced */
 		length = KERN_DATA_STORE_LENGTH(pds_in->kds);
@@ -4827,7 +4821,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 	 *                kern_data_store *kds_final,
 	 *                kern_global_hashslot *f_hash)
 	 */
-	if (gpreagg->reduction_mode != GPUPREAGG_ONLY_TERMINATION)
+	if (gpreagg->kern.reduction_mode != GPUPREAGG_ONLY_TERMINATION)
 	{
 		kern_args[0] = &gpreagg->m_gpreagg;
 		kern_args[1] = &gpreagg->m_kds_row;

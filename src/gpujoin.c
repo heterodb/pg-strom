@@ -2949,7 +2949,7 @@ gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 		if (hash_outer_key)
 		{
 			temp = deparse_expression((Node *)hash_outer_key,
-                                      context, es->verbose, false);
+                                      context, true, false);
 			appendStringInfo(&str, ", HashKeys: (%s)", temp);
 		}
 		snprintf(qlabel, sizeof(qlabel), "Depth% 2d", depth);
@@ -2958,7 +2958,7 @@ gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 
 		/* join_quals */
 		temp = deparse_expression((Node *)join_quals, context,
-								  es->verbose, false);
+								  true, false);
 		if (es->format == EXPLAIN_FORMAT_TEXT)
 		{
 			appendStringInfoSpaces(es->str, es->indent * 2 + 9);
@@ -2995,20 +2995,30 @@ gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 			cl_float	nrows_ratio
 				= int_as_float(list_nth_int(gj_info->nrows_ratio, depth - 1));
 
-			appendStringInfo(&str,
-							 "Nrows (in:%zu out:%zu, %.2f%% planned %.2f%%), "
-							 "KDS-%s (size: %s planned %s, "
-							 "nbatches: %u planned %u)",
-							 nrows_in,
-							 nrows_out,
-							 100.0 * ((double) nrows_out /
-									  (double) nrows_in),
-							 100.0 * nrows_ratio,
-							 hash_outer_key ? "Hash" : "Heap",
-							 format_bytesz(istate->pds_limit),
-							 format_bytesz(istate->ichunk_size),
-							 istate->nbatches_exec,
-							 istate->nbatches_plan);
+			appendStringInfo(
+				&str,
+				"Nrows (in:%zu out:%zu, %.2f%% planned %.2f%%)",
+				nrows_in,
+				nrows_out,
+				100.0 * ((double) nrows_out /
+						 (double) nrows_in),
+				100.0 * nrows_ratio);
+			if (es->format == EXPLAIN_FORMAT_TEXT)
+			{
+				appendStringInfoString(&str, "\n         ");
+				appendStringInfoSpaces(&str, es->indent * 2);
+			}
+			else
+				appendStringInfoString(&str, ", ");
+
+			appendStringInfo(
+				&str,
+				"KDS-%s (size: %s planned %s, nbatches: %u planned %u)",
+				hash_outer_key ? "Hash" : "Heap",
+				format_bytesz(istate->pds_limit),
+				format_bytesz(istate->ichunk_size),
+				istate->nbatches_exec,
+				istate->nbatches_plan);
 		}
 		else
 		{
