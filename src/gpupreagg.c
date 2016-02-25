@@ -3553,6 +3553,8 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 	gpas->stat_num_chunks = gpa_info->num_chunks;
 	gpas->stat_src_nitems = outer_nitems;
 	gpas->stat_varlena_unitsz = gpa_info->varlena_unitsz;
+	/* init perfmon */
+	pgstrom_init_perfmon(&gpas->gts);
 }
 
 /*

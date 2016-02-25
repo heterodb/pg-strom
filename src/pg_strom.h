@@ -623,6 +623,7 @@ extern void show_scan_qual(List *qual, const char *qlabel,
 						   ExplainState *es);
 extern void show_instrumentation_count(const char *qlabel, int which,
 									   PlanState *planstate, ExplainState *es);
+extern void pgstrom_init_perfmon(GpuTaskState *gts);
 extern void pgstrom_explain_gputaskstate(GpuTaskState *gts, ExplainState *es);
 
 /*

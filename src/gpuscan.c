@@ -1772,7 +1772,7 @@ gpuscan_begin(CustomScanState *node, EState *estate, int eflags)
 	else
 		gss->base_proj = NULL;
 	/* init perfmon */
-	gss->gts.pfm_accum.extra_flags = gs_info->extra_flags;
+	pgstrom_init_perfmon(&gss->gts);
 }
 
 /*

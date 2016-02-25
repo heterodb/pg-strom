@@ -2747,6 +2747,8 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 						  t_bits[BITMAPLEN(result_tupdesc->natts)]) +
 				 (result_tupdesc->tdhasoid ? sizeof(Oid) : 0)) +
 		MAXALIGN(cscan->scan.plan.plan_width);	/* average width */
+	/* init perfmon */
+	pgstrom_init_perfmon(&gjs->gts);
 }
 
 static TupleTableSlot *

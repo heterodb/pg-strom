@@ -1012,6 +1012,8 @@ gpusort_begin(CustomScanState *node, EState *estate, int eflags)
 	gss->sort_done = false;
 	gss->cpusort_seqno = 0;
 	gss->overflow_slot = NULL;
+	/* init perfmon */
+	pgstrom_init_perfmon(&gss->gts);
 }
 
 static TupleTableSlot *

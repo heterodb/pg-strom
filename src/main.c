@@ -724,6 +724,17 @@ show_instrumentation_count(const char *qlabel, int which,
 	}
 }
 
+void
+pgstrom_init_perfmon(GpuTaskState *gts)
+{
+	GpuContext	   *gcontext = gts->gcontext;
+
+	memset(&gts->pfm_accum, 0, sizeof(pgstrom_perfmon));
+	gts->pfm_accum.enabled = pgstrom_perfmon_enabled;
+	gts->pfm_accum.prime_in_gpucontext = (gcontext && gcontext->refcnt == 1);
+	gts->pfm_accum.extra_flags = gts->extra_flags;
+}
+
 static void
 pgstrom_explain_perfmon(GpuTaskState *gts, ExplainState *es)
 {

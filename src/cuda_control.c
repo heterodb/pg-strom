@@ -1258,9 +1258,6 @@ pgstrom_init_gputaskstate(GpuContext *gcontext,
 	gts->cb_next_chunk = NULL;
 	gts->cb_next_tuple = NULL;
 	gts->cb_bulk_exec = NULL;
-	memset(&gts->pfm_accum, 0, sizeof(pgstrom_perfmon));
-	gts->pfm_accum.enabled = pgstrom_perfmon_enabled;
-	gts->pfm_accum.prime_in_gpucontext = (gcontext && gcontext->refcnt == 1);
 }
 
 /*
