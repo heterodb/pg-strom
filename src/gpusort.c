@@ -1287,7 +1287,7 @@ gpusort_next_chunk(GpuTaskState *gts)
 				break;
 			/* OK, expand it and try again */
 			gss->chunk_size += gss->chunk_size;
-			pgstrom_expand_data_store(gcontext, ptoast, gss->chunk_size, 0);
+			PDS_expand_size(gcontext, ptoast, gss->chunk_size);
 			ptoast->kds->nrooms = 2 * ptoast->kds->nitems;
 		}
 	}
