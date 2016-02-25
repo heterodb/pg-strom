@@ -77,7 +77,6 @@ typedef struct
 		Size		ichunk_size;	/* expected inner chunk size */
 		double		nloops_minor;	/* # of virtual segment of inner buffer */
 		double		nloops_major;	/* # of physical split of inner buffer */
-		Size		hash_nslots;	/* expected hashjoin slots width, if any */
 	} inners[FLEXIBLE_ARRAY_MEMBER];
 } GpuJoinPath;
 
@@ -104,7 +103,6 @@ typedef struct
 	List	   *nloops_major;
 	List	   *hash_inner_keys;	/* if hash-join */
 	List	   *hash_outer_keys;	/* if hash-join */
-	List	   *hash_nslots;		/* if hash-join */
 	List	   *gnl_shmem_xsize;	/* if nest-loop */
 	List	   *gnl_shmem_ysize;	/* if nest-loop */
 	/* supplemental information of ps_tlist */
@@ -137,7 +135,6 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 	privs = lappend(privs, gj_info->nloops_major);
 	exprs = lappend(exprs, gj_info->hash_inner_keys);
 	exprs = lappend(exprs, gj_info->hash_outer_keys);
-	privs = lappend(privs, gj_info->hash_nslots);
 	privs = lappend(privs, gj_info->gnl_shmem_xsize);
 	privs = lappend(privs, gj_info->gnl_shmem_ysize);
 
@@ -176,7 +173,6 @@ deform_gpujoin_info(CustomScan *cscan)
 	gj_info->nloops_major = list_nth(privs, pindex++);
 	gj_info->hash_inner_keys = list_nth(exprs, eindex++);
     gj_info->hash_outer_keys = list_nth(exprs, eindex++);
-	gj_info->hash_nslots = list_nth(privs, pindex++);
 	gj_info->gnl_shmem_xsize = list_nth(privs, pindex++);
 	gj_info->gnl_shmem_ysize = list_nth(privs, pindex++);
 
@@ -225,7 +221,6 @@ typedef struct
 	/*
 	 * Join properties; only hash-join
 	 */
-	cl_uint				hash_nslots;
 	cl_uint				hgram_shift;
 	cl_uint				hgram_curr;
 	cl_uint				hgram_width;
@@ -491,7 +486,6 @@ retry_major:
 		RelOptInfo *inner_rel = inner_path->parent;
 		Size		chunk_size;
 		Size		entry_size;
-		Size		hash_nslots;
 		Size		num_items;
 
 	retry_minor:
@@ -512,7 +506,13 @@ retry_major:
 		 * tuples on the KDS/KHash buffer if base relation.
 		 */
 		ncols = list_length(inner_rel->reltargetlist);
-		entry_size = MAXALIGN(offsetof(HeapTupleHeaderData,
+
+		if (gpath->inners[i].hash_quals != NIL)
+			entry_size = offsetof(kern_hashitem, t.htup);
+		else
+			entry_size = offsetof(kern_tupitem, htup);
+
+		entry_size += MAXALIGN(offsetof(HeapTupleHeaderData,
 									   t_bits[BITMAPLEN(ncols)]));
 		if (inner_rel->reloptkind != RELOPT_BASEREL)
 			entry_size += MAXALIGN(inner_rel->width);
@@ -526,18 +526,6 @@ retry_major:
 								   - SizeofHeapTupleHeader);
 		}
 
-		if (gpath->inners[i].hash_quals != NIL)
-		{
-			entry_size += offsetof(kern_hashitem, t.htup);
-			hash_nslots = (Size)(inner_ntuples *
-								 pgstrom_chunk_size_margin);
-		}
-		else
-		{
-			entry_size += offsetof(kern_tupitem, htup);
-			hash_nslots = 0;
-		}
-
 		/*
 		 * inner chunk size estimation
 		 */
@@ -546,7 +534,6 @@ retry_major:
 											   entry_size *
 											   (Size)inner_ntuples);
 		gpath->inners[i].ichunk_size = chunk_size;
-		gpath->inners[i].hash_nslots = hash_nslots; //hoge
 
 		if (largest_chunk_index < 0 || largest_chunk_size < chunk_size)
 		{
@@ -749,8 +736,8 @@ cost_gpujoin(PlannerInfo *root,
 			 */
 			List	   *hash_quals = gpath->inners[i].hash_quals;
 			cl_uint		num_hashkeys = list_length(hash_quals);
-			Size		hash_nslots = gpath->inners[i].hash_nslots;
-			double		hash_nsteps = scan_path->rows / (double) hash_nslots;
+			double		hash_nsteps = scan_path->rows /
+				(double)__KDS_NSLOTS((Size)scan_path->rows);
 
 			/* cost to compute inner hash value by CPU */
 			startup_cost += (cpu_operator_cost * num_hashkeys *
@@ -921,7 +908,6 @@ create_gpujoin_path(PlannerInfo *root,
 		result->inners[i].ichunk_size = 0;		/* to be set later */
 		result->inners[i].nloops_minor = 1.0;	/* to be set later */
 		result->inners[i].nloops_major = 1.0;	/* to be set later */
-		result->inners[i].hash_nslots = 0;		/* to be set later */
 		i++;
 	}
 	Assert(i == num_rels);
@@ -1674,8 +1660,6 @@ create_gpujoin_plan(PlannerInfo *root,
 										  hash_inner_keys);
 		gj_info.hash_outer_keys = lappend(gj_info.hash_outer_keys,
 										  hash_outer_keys);
-		gj_info.hash_nslots = lappend(gj_info.hash_nslots,
-				makeInteger(gpath->inners[i].hash_nslots));
 		outer_nrows = gpath->inners[i].join_nrows;
 	}
 
@@ -2721,9 +2705,6 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 			Assert(IsA(istate->hash_outer_keys, List) &&
 				   list_length(istate->hash_inner_keys) ==
 				   list_length(istate->hash_outer_keys));
-
-			/* hash slot width */
-			istate->hash_nslots = intVal(list_nth(gj_info->hash_nslots, i));
 
 			/* usage histgram */
 			shift = get_next_log2(gjs->inners[i].nbatches_plan) + 8;
