@@ -542,12 +542,11 @@ retry_major:
 		 * inner chunk size estimation
 		 */
 		chunk_size = KDS_CALCULATE_HASH_LENGTH(ncols,
-											   hash_nslots,
 											   (Size)inner_ntuples,
 											   entry_size *
 											   (Size)inner_ntuples);
 		gpath->inners[i].ichunk_size = chunk_size;
-		gpath->inners[i].hash_nslots = hash_nslots;
+		gpath->inners[i].hash_nslots = hash_nslots; //hoge
 
 		if (largest_chunk_index < 0 || largest_chunk_size < chunk_size)
 		{
@@ -4076,6 +4075,8 @@ gpujoin_create_task(GpuJoinState *gjs,
 	cl_int				target_depth;
 	cl_double			target_row_dist_score;
 
+	kern_parambuf	   *kparams __attribute__((unused));
+
 	/*
 	 * Allocation of pgstrom_gpujoin task object
 	 */
@@ -4088,15 +4089,19 @@ gpujoin_create_task(GpuJoinState *gjs,
 	pgjoin->pmrels = multirels_attach_buffer(pmrels);
 	pgjoin->pds_src = pds_src;
 	pgjoin->pds_dst = NULL;		/* to be set later */
+
+	pgjoin->kern.kresults_1_offset = 0xe7e7e7e7;	/* to be set later */
+	pgjoin->kern.kresults_2_offset = 0x7e7e7e7e;	/* to be set later */
+	pgjoin->kern.num_rels = gjs->num_rels;
+
 	/* setup of kern_parambuf */
+	/* NOTE: KERN_GPUJOIN_PARAMBUF() depends on pgjoin->kern.num_rels */
 	pgjoin->kern.kparams_offset = offsetof(pgstrom_gpujoin, kern) +
 		STROMALIGN(offsetof(kern_gpujoin, jscale[gjs->num_rels + 1]));
+	kparams = KERN_GPUJOIN_PARAMBUF(&pgjoin->kern);
 	memcpy(KERN_GPUJOIN_PARAMBUF(&pgjoin->kern),
 		   gjs->gts.kern_params,
 		   gjs->gts.kern_params->length);
-	pgjoin->kern.kresults_1_offset = KERN_GPUJOIN_HEAD_LENGTH(&pgjoin->kern);
-	pgjoin->kern.kresults_2_offset = 0x7e7e7e7e;	/* to be set later */
-	pgjoin->kern.num_rels = gjs->num_rels;
 
 	/*
 	 * Assignment of the virtual partition window size to control the number
@@ -4981,9 +4986,7 @@ add_extra_randomness(pgstrom_data_store *pds)
 	kern_data_store	   *kds = pds->kds;
 	cl_uint				x, y, temp;
 
-	/* nothing to do */
-	if (kds->nitems == 0)
-		return;
+	return;
 
 	if (kds->format == KDS_FORMAT_ROW ||
 		kds->format == KDS_FORMAT_HASH)
@@ -5149,7 +5152,6 @@ gpujoin_inner_hash_preload_TS(GpuJoinState *gjs,
 	Size				curr_size = 0;
 	Size				curr_nitems = 0;
 	Size				kds_length;
-	cl_uint				nslots;
 	pg_crc32			hash_min;
 	pg_crc32			hash_max;
 	ListCell		   *lc1;
@@ -5164,23 +5166,23 @@ gpujoin_inner_hash_preload_TS(GpuJoinState *gjs,
 	{
 		Size	next_size = istate->hgram_size[i];
 		Size	next_nitems = istate->hgram_nitems[i];
+		Size	next_length;
 
-		if (curr_size + next_size > istate->pds_limit)
+		next_length = KDS_CALCULATE_HASH_LENGTH(scan_desc->natts,
+												curr_nitems + next_nitems,
+												curr_size + next_size);
+		if (next_length > istate->pds_limit)
 		{
 			if (curr_size == 0)
 				elog(ERROR, "Too extreme hash-key distribution");
 
-			nslots = (cl_uint)((double) curr_nitems *
-							   pgstrom_chunk_size_margin);
 			kds_length = KDS_CALCULATE_HASH_LENGTH(scan_desc->natts,
-												   nslots,
 												   curr_nitems,
 												   curr_size);
 			hash_max = i * (1U << istate->hgram_shift) - 1;
 			pds_hash = pgstrom_create_data_store_hash(gjs->gts.gcontext,
 													  scan_desc,
 													  kds_length,
-													  nslots,
 													  false);
 			pds_hash->kds->hash_min = hash_min;
 			pds_hash->kds->hash_max = hash_max;
@@ -5198,17 +5200,12 @@ gpujoin_inner_hash_preload_TS(GpuJoinState *gjs,
 	/*
 	 * The last partitioned chunk
 	 */
-	nslots = (cl_uint)((double) curr_nitems *
-					   pgstrom_chunk_size_margin);
-	nslots = Max(nslots, 128);
 	kds_length = KDS_CALCULATE_HASH_LENGTH(scan_desc->natts,
-										   nslots,
 										   curr_nitems,
 										   curr_size + BLCKSZ);
 	pds_hash = pgstrom_create_data_store_hash(gjs->gts.gcontext,
 											  scan_desc,
 											  kds_length,
-											  nslots,
 											  false);
 	pds_hash->kds->hash_min = hash_min;
 	pds_hash->kds->hash_max = UINT_MAX;
@@ -5297,19 +5294,20 @@ next:
 
 			scan_slot = scan_ps->ps_ResultTupleSlot;
 			scan_desc = scan_slot->tts_tupleDescriptor;
-			empty_len = (STROMALIGN(offsetof(kern_data_store,
-											 colmeta[scan_desc->natts])) +
-						 STROMALIGN(sizeof(cl_uint) * 4));
+			empty_len = KDS_CALCULATE_HASH_LENGTH(scan_desc->natts, 0, 0);
 			pds_hash = pgstrom_create_data_store_hash(gjs->gts.gcontext,
 													  scan_desc,
 													  empty_len,
-													  4,
 													  false);
 			istate->pds_list = list_make1(pds_hash);
 		}
 		/* add extra randomness for better key distribution */
 		foreach (lc, istate->pds_list)
-			add_extra_randomness((pgstrom_data_store *) lfirst(lc));
+		{
+			pgstrom_data_store *pds = lfirst(lc);
+			add_extra_randomness(pds);
+			PDS_build_hashtable(pds);
+		}
 		return false;
 	}
 
@@ -5335,18 +5333,16 @@ next:
 		pds_hash = pgstrom_create_data_store_hash(gjs->gts.gcontext,
 												  scan_desc,
 												  ichunk_size,
-												  istate->hash_nslots,
 												  false);
 		istate->pds_list = list_make1(pds_hash);
-		istate->consumed = KERN_DATA_STORE_HEAD_LENGTH(pds_hash->kds);
+		istate->ntuples = 0;
+		istate->consumed = KDS_CALCULATE_HEAD_LENGTH(scan_desc->natts);
 	}
 
-	consumption = (sizeof(cl_uint) +	/* for hash_slot */
-				   sizeof(cl_uint) +	/* for row_index */
-				   MAXALIGN(offsetof(kern_hashitem, t.htup) + tuple->t_len));
 	/*
 	 * Update Histgram
 	 */
+	consumption = MAXALIGN(offsetof(kern_hashitem, t.htup) + tuple->t_len);
 	index = (hash >> istate->hgram_shift);
 	istate->hgram_size[index] += consumption;
 	istate->hgram_nitems[index]++;
@@ -5360,31 +5356,32 @@ retry:
 	if (istate->tupstore)
 	{
 		tuplestore_puttuple(istate->tupstore, tuple);
+		*p_total_usage += KDS_HASH_USAGE_GROWTH(istate->ntuples,
+												consumption);
 		istate->ntuples++;
 		istate->consumed += consumption;
-		*p_total_usage += consumption;
+
 		return true;
 	}
 
 	if (istate->pds_limit > 0 &&
-		istate->pds_limit <= istate->consumed + consumption)
+		istate->pds_limit <= KDS_CALCULATE_HASH_LENGTH(scan_desc->natts,
+													   istate->ntuples + 1,
+													   istate->consumed +
+													   consumption))
 	{
 		if (istate->join_type == JOIN_INNER ||
 			istate->join_type == JOIN_LEFT)
 		{
-			Size		hash_nslots;
-
 			pgstrom_shrink_data_store(pds_hash);
 
-			hash_nslots = (Size)((double) pds_hash->kds->nitems *
-								 pgstrom_chunk_size_margin);
 			pds_hash = pgstrom_create_data_store_hash(gjs->gts.gcontext,
 													  scan_desc,
 													  istate->pds_limit,
-													  hash_nslots,
 													  false);
 			istate->pds_list = lappend(istate->pds_list, pds_hash);
-			istate->consumed = pds_hash->kds->usage;
+			istate->ntuples = 0;
+			istate->consumed = KDS_CALCULATE_HEAD_LENGTH(scan_desc->natts);
 		}
 		else
 		{
@@ -5412,24 +5409,25 @@ retry:
 			Assert(list_length(istate->pds_list) == 1);
 			pgstrom_release_data_store(pds_hash);
 			istate->pds_list = NULL;
+			/*
+			 * NOTE: istate->ntuples and istate->consumed shall be updated on
+			 * the if-block just after the retry: label.
+			 */
 			goto retry;
 		}
 	}
 
 	if (!pgstrom_data_store_insert_hashitem(pds_hash, scan_slot, hash))
 	{
-		cl_uint	nitems_old = pds_hash->kds->nitems;
-		cl_uint	nslots_new = (cl_uint)(pgstrom_chunk_size_margin *
-									   (double)(2 * nitems_old));
-		pgstrom_expand_data_store(gjs->gts.gcontext,
-								  pds_hash,
-								  2 * pds_hash->kds_length,
-								  nslots_new);
+		PDS_expand_size(gjs->gts.gcontext,
+						pds_hash,
+						2 * pds_hash->kds_length);
 		goto retry;
 	}
+	*p_total_usage += KDS_HASH_USAGE_GROWTH(istate->ntuples,
+											consumption);
 	istate->ntuples++;
 	istate->consumed += consumption;
-	*p_total_usage += consumption;
 
 	return true;
 }
@@ -5491,7 +5489,8 @@ gpujoin_inner_heap_preload(GpuJoinState *gjs,
 												 ichunk_size,
 												 false);
 		istate->pds_list = list_make1(pds_heap);
-		istate->consumed = KERN_DATA_STORE_HEAD_LENGTH(pds_heap->kds);
+		istate->consumed = KDS_CALCULATE_HEAD_LENGTH(scan_desc->natts);
+		istate->ntuples = 0;
 	}
 
 	tuple = ExecFetchSlotTuple(scan_slot);
@@ -5502,27 +5501,32 @@ gpujoin_inner_heap_preload(GpuJoinState *gjs,
 	 * Switch to the new chunk, if current one exceeds the limitation
 	 */
 	if (istate->pds_limit > 0 &&
-		istate->pds_limit <= istate->consumed + consumption)
+		istate->pds_limit <= KDS_CALCULATE_ROW_LENGTH(scan_desc->natts,
+													  istate->ntuples + 1,
+													  istate->consumed +
+													  consumption))
 	{
 		pds_heap = pgstrom_create_data_store_row(gjs->gts.gcontext,
 												 scan_desc,
 												 pds_heap->kds_length,
 												 false);
 		istate->pds_list = lappend(istate->pds_list, pds_heap);
-		istate->consumed = STROMALIGN(offsetof(kern_data_store,
-											   colmeta[scan_desc->natts]));
+		istate->consumed = KDS_CALCULATE_HEAD_LENGTH(scan_desc->natts);
+		istate->ntuples = 0;
 	}
-	istate->consumed += consumption;
-	*p_total_usage += consumption;
 
 retry:
 	if (!pgstrom_data_store_insert_tuple(pds_heap, scan_slot))
 	{
-		pgstrom_expand_data_store(gjs->gts.gcontext, pds_heap,
-								  2 * pds_heap->kds_length, 0);
+		PDS_expand_size(gjs->gts.gcontext,
+						pds_heap,
+						2 * pds_heap->kds_length);
 		goto retry;
 	}
+	*p_total_usage += KDS_ROW_USAGE_GROWTH(istate->ntuples,
+										   consumption);
 	istate->ntuples++;
+	istate->consumed += consumption;
 
 	return true;
 }
@@ -5635,11 +5639,24 @@ gpujoin_inner_preload(GpuJoinState *gjs)
 		if (!kmrels_size_fixed && total_usage >= total_limit)
 		{
 			/*
-			 * XXX - current usage became a limitation, so next call
-			 * of gpujoin_inner_XXXX_preload makes second chunk.
+			 * NOTE: current usage becomes limitation, so next call of
+			 * gpujoin_inner_XXXX_preload will make its second chunk.
 			 */
 			for (i=0; i < gjs->num_rels; i++)
-				gjs->inners[i].pds_limit = gjs->inners[i].consumed;
+			{
+				innerState	   *istate = istate_buf[i];
+				TupleTableSlot *scan_slot = istate->state->ps_ResultTupleSlot;
+				TupleDesc	 	scan_desc = scan_slot->tts_tupleDescriptor;
+
+				gjs->inners[i].pds_limit =
+					(istate->hash_inner_keys != NIL
+					 ? KDS_CALCULATE_HASH_LENGTH(scan_desc->natts,
+												 istate->ntuples,
+												 istate->consumed)
+					 : KDS_CALCULATE_ROW_LENGTH(scan_desc->natts,
+												istate->ntuples,
+												istate->consumed));
+			}
 			kmrels_size_fixed = true;
 		}
 	}

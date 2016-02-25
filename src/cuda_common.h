@@ -504,16 +504,10 @@ typedef struct
  */
 typedef struct
 {
-	cl_uint				index;	/* index of the row-index */
-	cl_uint				count;	/* number of hash items in this slot */
-} kern_hashslot;
-
-typedef struct
-{
 	cl_uint				hash;	/* 32-bit hash value */
 	cl_uint				next;	/* offset of the next */
 	cl_uint				rowid;	/* unique identifier of this hash entry */
-	cl_char				__padding__[4];	/* for alignment */
+	cl_uint				__padding__; /* for alignment */
 	kern_tupitem		t;		/* HeapTuple of this entry */
 } kern_hashitem;
 
@@ -548,19 +542,35 @@ typedef struct {
 
 #define KDS_CALCULATE_FRONTEND_LENGTH(ncols,nslots,nitems)	\
 	(KDS_CALCULATE_HEAD_LENGTH(ncols) +			\
-	 STROMALIGN(sizeof(cl_uint) * (nslots)) +	\
-	 STROMALIGN(sizeof(cl_uint) * (nitems)))
+	 STROMALIGN(sizeof(cl_uint) * (nitems)) +	\
+	 STROMALIGN(sizeof(cl_uint) * (nslots)))
 
-#define KDS_CALCULATE_ROW_LENGTH(ncols,nitems,data_len)	\
-	(KDS_CALCULATE_FRONTEND_LENGTH((ncols),0,(nitems))	\
-	 + STROMALIGN(data_len))
-#define KDS_CALCULATE_HASH_LENGTH(ncols,nslots,nitems,data_len)	\
-	(KDS_CALCULATE_FRONTEND_LENGTH((ncols),(nslots),(nitems))	\
-	 + STROMALIGN(data_len))
+/* 'nslots' estimation; 25% larger than nitems, but 128 at least */
+#define __KDS_NSLOTS(nitems)					\
+	Max(128, ((nitems) * 5) >> 2)
+
+#define KDS_CALCULATE_ROW_LENGTH(ncols,nitems,data_len)		\
+	(KDS_CALCULATE_FRONTEND_LENGTH((ncols),0,(nitems)) +	\
+	 STROMALIGN(data_len))
+#define KDS_CALCULATE_HASH_LENGTH(ncols,nitems,data_len)	\
+	(KDS_CALCULATE_FRONTEND_LENGTH((ncols),__KDS_NSLOTS(nitems),(nitems)) +	\
+	 STROMALIGN(data_len))
 #define KDS_CALCULATE_SLOT_LENGTH(ncols,nitems)	\
 	(KDS_CALCULATE_HEAD_LENGTH(ncols) +			\
 	 LONGALIGN((sizeof(Datum) +					\
 				sizeof(char)) * (ncols)) * (nitems))
+/* gsage growth by the next tuple (row) */
+#define KDS_ROW_USAGE_GROWTH(nitems, consumption)			\
+	(STROMALIGN(sizeof(cl_uint) * ((nitems) + 1)) -			\
+	 STROMALIGN(sizeof(cl_uint) * (nitems)) +				\
+	 MAXALIGN(consumption))
+/* usage growth by the next one tuple (hash) */
+#define KDS_HASH_USAGE_GROWTH(nitems, consumption)			\
+	(STROMALIGN(sizeof(cl_uint) * ((nitems) + 1)) -			\
+	 STROMALIGN(sizeof(cl_uint) * (nitems)) +				\
+	 STROMALIGN(sizeof(cl_uint) * __KDS_NSLOTS((nitems) + 1)) -	\
+	 STROMALIGN(sizeof(cl_uint) * __KDS_NSLOTS(nitems)) +	\
+	 MAXALIGN(consumption))
 
 /* length of kern_data_store */
 #define KERN_DATA_STORE_LENGTH(kds)		((kds)->length)
@@ -574,13 +584,13 @@ typedef struct {
 	((char *)(kds) + KERN_DATA_STORE_HEAD_LENGTH(kds))
 
 /* access macro for row- and hash-format */
-#define KERN_DATA_STORE_HASHSLOT(kds)				\
-	((cl_uint *)KERN_DATA_STORE_BODY(kds))
-
-/* access macro for row- and hash-format */
 #define KERN_DATA_STORE_ROWINDEX(kds)				\
+	((cl_uint *)(KERN_DATA_STORE_BODY(kds)))
+
+/* access macro for hash-format */
+#define KERN_DATA_STORE_HASHSLOT(kds)				\
 	((cl_uint *)(KERN_DATA_STORE_BODY(kds) +		\
-				 STROMALIGN(sizeof(cl_uint) * (kds)->nslots)))
+				 STROMALIGN(sizeof(cl_uint) * (kds)->nitems)))
 
 /* access macro for row- and hash-format */
 #define KERN_DATA_STORE_FRONTEND_LENGTH(kds)		\
@@ -591,7 +601,7 @@ typedef struct {
 /* access macro for row- and hash-format */
 #define KERN_DATA_STORE_TUPITEM(kds,kds_index)		\
 	((kern_tupitem *)((char *)(kds) +				\
-			KERN_DATA_STORE_ROWINDEX(kds)[(kds_index)]))
+					  (KERN_DATA_STORE_ROWINDEX(kds)[(kds_index)])))
 
 /* access macro for hash-format */
 #define KERN_DATA_STORE_HASHITEM(kds,kds_index)		\

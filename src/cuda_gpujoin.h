@@ -446,11 +446,12 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 										depth,
 										x_buffer,
 										&is_null_keys);
-		/* NOTE: NULL-keys never match on inner join */
-		if (!is_null_keys && (hash_value >= kds_hash->hash_min &&
-							  hash_value <= kds_hash->hash_max))
+		if (hash_value >= kds_hash->hash_min &&
+			hash_value <= kds_hash->hash_max)
 		{
-			khitem = KERN_HASH_FIRST_ITEM(kds_hash, hash_value);
+			/* NOTE: NULL-keys never match on inner join */
+			if (!is_null_keys)
+				khitem = KERN_HASH_FIRST_ITEM(kds_hash, hash_value);
 			needs_outer_row = true;
 		}
 	}
@@ -509,7 +510,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 		 */
 		khitem = KERN_HASH_NEXT_ITEM(kds_hash, khitem);
 		arithmetic_stairlike_add(khitem != NULL ? 1 : 0, &count);
-	} while (count > 0 && --loops > 0);
+	} while (count > 0);
 
 	/*
 	 * FOR DEBUG - It may detect infinite loop.
