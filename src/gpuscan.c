@@ -300,6 +300,14 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	if (!pgstrom_enabled || !enable_gpuscan)
 		return;
 
+	/* We already proved the relation empty, so nothing more to do */
+	if (IS_DUMMY_REL(baserel))
+		return;
+
+	/* It is the role of built-in Append node */
+	if (rte->inh)
+		return;
+
 	/* only base relation we can handle */
 	if (baserel->rtekind != RTE_RELATION || baserel->relid == 0)
 		return;
