@@ -4064,7 +4064,7 @@ gpujoin_create_task(GpuJoinState *gjs,
 {
 	GpuContext		   *gcontext = gjs->gts.gcontext;
 	pgstrom_gpujoin	   *pgjoin;
-	double				window_ratio = 1.0;
+	double				window_ratio;
 	double				ntuples;
 	double				ntuples_next;
 	double				ntuples_delta;
@@ -4151,6 +4151,7 @@ major_retry:
 	ntuples = 0.0;
 	ntuples_delta = 0.0;
 	max_items = 0;
+	window_ratio = 1.0;
 
 	for (depth = 0;
 		 depth <= gjs->num_rels;
@@ -4227,8 +4228,9 @@ major_retry:
 		pds = (depth == 0
 			   ? pgjoin->pds_src
 			   : pmrels->inner_chunks[depth - 1]);
-		window_ratio *= ((double) pgjoin->kern.jscale[depth].window_size /
-						 (double) pds->kds->nitems);
+		if (pds != NULL)
+			window_ratio *= ((double) pgjoin->kern.jscale[depth].window_size /
+							 (double) pds->kds->nitems);
 
 		ntuples = ntuples_next;
 	}
@@ -5246,7 +5248,7 @@ gpujoin_inner_hash_preload_TS(GpuJoinState *gjs,
 	foreach (lc1, pds_list)
 	{
 		pgstrom_data_store *pds_in = lfirst(lc1);
-		pgstrom_shrink_data_store(pds_in);
+		PDS_shrink_size(pds_in);
 	}
 	Assert(istate->pds_list == NIL);
 	istate->pds_list = pds_list;
@@ -5370,7 +5372,7 @@ retry:
 		if (istate->join_type == JOIN_INNER ||
 			istate->join_type == JOIN_LEFT)
 		{
-			pgstrom_shrink_data_store(pds_hash);
+			PDS_shrink_size(pds_hash);
 
 			pds_hash = pgstrom_create_data_store_hash(gjs->gts.gcontext,
 													  scan_desc,

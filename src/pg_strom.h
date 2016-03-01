@@ -505,7 +505,7 @@ extern void pgstrom_release_data_store(pgstrom_data_store *pds);
 extern void PDS_expand_size(GpuContext *gcontext,
 							pgstrom_data_store *pds,
 							Size kds_length_new);
-extern void pgstrom_shrink_data_store(pgstrom_data_store *pds);
+extern void PDS_shrink_size(pgstrom_data_store *pds);
 extern void init_kernel_data_store(kern_data_store *kds,
 								   TupleDesc tupdesc,
 								   Size length,

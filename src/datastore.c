@@ -470,8 +470,13 @@ PDS_expand_size(GpuContext *gcontext,
 		 * If supplied new nslots is too big, larger than the expanded,
 		 * it does not make sense to expand the buffer.
 		 */
-		if (KERN_DATA_STORE_FRONTEND_LENGTH(kds_new) +
-			kds_new->usage >= kds_new->length)
+		if ((kds_new->format == KDS_FORMAT_HASH
+			 ? KDS_CALCULATE_HASH_LENGTH(kds_new->ncols,
+										 kds_new->nitems,
+										 kds_new->usage)
+			 : KDS_CALCULATE_ROW_LENGTH(kds_new->ncols,
+										kds_new->nitems,
+										kds_new->usage)) >= kds_new->length)
 			elog(ERROR, "New nslots consumed larger than expanded");
 
 		memcpy((char *)kds_new + offset + shift,
@@ -504,7 +509,7 @@ PDS_expand_size(GpuContext *gcontext,
 }
 
 void
-pgstrom_shrink_data_store(pgstrom_data_store *pds)
+PDS_shrink_size(pgstrom_data_store *pds)
 {
 	kern_data_store	   *kds = pds->kds;
 	size_t				new_length;
@@ -519,13 +524,24 @@ pgstrom_shrink_data_store(pgstrom_data_store *pds)
 		char	   *baseptr;
 
 		/* small shift has less advantage than CPU cycle consumption */
-		shift = STROMALIGN_DOWN(kds->length - kds->usage -
-								KERN_DATA_STORE_FRONTEND_LENGTH(kds));
+		shift = kds->length - (kds->format == KDS_FORMAT_HASH
+							   ? KDS_CALCULATE_HASH_LENGTH(kds->ncols,
+														   kds->nitems,
+														   kds->usage)
+							   : KDS_CALCULATE_ROW_LENGTH(kds->ncols,
+														  kds->nitems,
+														  kds->usage));
+		shift = STROMALIGN_DOWN(shift);
+
 		if (shift < BLCKSZ || shift < sizeof(Datum) * kds->nitems)
 			return;
 
 		/* move the kern_tupitem / kern_hashitem */
-		baseptr = (char *)kds + KERN_DATA_STORE_FRONTEND_LENGTH(kds);
+		baseptr = (char *)kds + (kds->format == KDS_FORMAT_HASH
+								 ? KDS_CALCULATE_HASH_FRONTLEN(kds->ncols,
+															   kds->nitems)
+								 : KDS_CALCULATE_ROW_FRONTLEN(kds->ncols,
+															  kds->nitems));
 		memmove(baseptr, baseptr + shift, kds->length - shift);
 
 		/* clear the hash slot once */
@@ -539,7 +555,7 @@ pgstrom_shrink_data_store(pgstrom_data_store *pds)
 		for (i=0; i < kds->nitems; i++)
 		{
 			row_index[i] -= shift;
-			if (kds->format == KDS_FORMAT_HASH)
+			if (nslots > 0)
 			{
 				kern_hashitem  *khitem = KERN_DATA_STORE_HASHITEM(kds, i);
 				cl_uint			khindex;
