@@ -156,7 +156,7 @@ gpujoin_join_quals(kern_context *kcxt,
 				   int depth,
 				   cl_uint *x_buffer,
 				   HeapTupleHeaderData *inner_htup,
-				   cl_bool *needs_outer_row);
+				   cl_bool *joinquals_matched);
 
 /*
  * gpujoin_hash_value
@@ -399,7 +399,6 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 	cl_uint				offset;
 	cl_uint				count;
 	cl_bool				is_matched;
-	cl_uint				loops = 100;	// for debug ... to be removed later
 	cl_bool				needs_outer_row = false;
 	cl_bool				is_null_keys;
 	__shared__ cl_uint	base;
@@ -465,6 +464,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 					   khitem->rowid <  window_base + window_size))
 		{
 			HeapTupleHeaderData *h_htup = &khitem->t.htup;
+			cl_bool			joinquals_matched;
 
 			is_matched = gpujoin_join_quals(&kcxt,
 											kds,
@@ -472,9 +472,12 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 											depth,
 											x_buffer,
 											h_htup,
-											&needs_outer_row);
-			if (is_matched)
+											&joinquals_matched);
+			if (joinquals_matched)
 			{
+				/* no need LEFT/FULL OUTER JOIN */
+				needs_outer_row = false;
+				/* no need RIGHT/FULL OUTER JOIN */
 				assert(khitem->rowid < kds_hash->nitems);
 				if (lo_map && !lo_map[khitem->rowid])
 					lo_map[khitem->rowid] = true;
@@ -511,14 +514,6 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 		khitem = KERN_HASH_NEXT_ITEM(kds_hash, khitem);
 		arithmetic_stairlike_add(khitem != NULL ? 1 : 0, &count);
 	} while (count > 0);
-
-	/*
-	 * FOR DEBUG - It may detect infinite loop.
-	 */
-	if (loops < 1)
-	{
-		STROM_SET_ERROR(&kcxt.e, StromError_CudaInternal);
-	}
 
 	/*
 	 * If no inner rows were matched on LEFT OUTER JOIN case, we fill up
@@ -617,6 +612,19 @@ gpujoin_outer_nestloop(kern_gpujoin *kgjoin,
 			if (lo_map[y_index])
 				needs_outer_row = false;
 		}
+
+        /* check non-join-quals again */
+        if (needs_outer_row)
+        {
+			HeapTupleHeaderData *htup = kern_get_tuple_row(kds_in, y_index);
+            needs_outer_row = gpujoin_join_quals(&kcxt,
+												 kds,
+												 kmrels,
+												 depth,
+												 NULL,	/* NULL for Left */
+												 htup,
+												 NULL);
+		}
 	}
 	else
 		needs_outer_row = false;
@@ -709,6 +717,18 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 			assert(lo_map != NULL);
 			if (lo_map[kds_index])
 				needs_outer_row = false;
+		}
+
+		/* check non-join-quals again */
+		if (needs_outer_row)
+		{
+			needs_outer_row = gpujoin_join_quals(&kcxt,
+												 kds,
+												 kmrels,
+												 depth,
+												 NULL,	/* NULL for Left */
+												 &khitem->t.htup,
+												 NULL);
 		}
 	}
 	else

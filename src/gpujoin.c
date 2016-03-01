@@ -3440,7 +3440,7 @@ gpujoin_codegen_var_param_decl(StringInfo source,
  *                            kern_multirels *kmrels,
  *                            cl_int *o_buffer,
  *                            HeapTupleHeaderData *i_htup,
- *                            cl_bool *needs_outer_row)
+ *                            cl_bool *joinquals_matched)
  */
 static void
 gpujoin_codegen_join_quals(StringInfo source,
@@ -3482,7 +3482,7 @@ gpujoin_codegen_join_quals(StringInfo source,
         "                           kern_multirels *kmrels,\n"
 		"                           cl_uint *o_buffer,\n"
 		"                           HeapTupleHeaderData *i_htup,\n"
-		"                           cl_bool *needs_outer_row)\n"
+		"                           cl_bool *joinquals_matched)\n"
 		"{\n",
 		cur_depth);
 
@@ -3499,14 +3499,18 @@ gpujoin_codegen_join_quals(StringInfo source,
 	{
 		appendStringInfo(
 			source,
-			"  if (i_htup && !EVAL(%s))\n"
-			"    return false;\n",
+			"  if (i_htup && o_buffer && !EVAL(%s))\n"
+			"  {\n"
+			"    if (joinquals_matched)\n"
+			"      *joinquals_matched = false;\n"
+			"    return false;\n"
+			"  }\n",
 			join_quals_code);
 	}
 	appendStringInfo(
 		source,
-		"  if (needs_outer_row)\n"
-		"    *needs_outer_row = false;\n");
+		"  if (joinquals_matched)\n"
+		"    *joinquals_matched = true;\n");
 	if (other_quals_code != NULL)
 	{
 		appendStringInfo(
@@ -3644,10 +3648,6 @@ gpujoin_codegen(PlannerInfo *root,
 		"                   HeapTupleHeaderData *i_htup,\n"
 		"                   cl_bool *needs_outer_row)\n"
 		"{\n"
-		"  /* out of range? */\n"
-		"  if (!o_buffer)\n"
-		"    return false;\n"
-		"\n"
 		"  switch (depth)\n"
 		"  {\n");
 
