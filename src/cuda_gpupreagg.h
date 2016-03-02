@@ -269,11 +269,9 @@ gpupreagg_data_load(pagg_datum *pdatum,		/* __shared__ */
 	Datum		   *values;
 	cl_char		   *isnull;
 
-	if (kds->format != KDS_FORMAT_SLOT || colidx >= kds->ncols)
-	{
-		STROM_SET_ERROR(&kcxt->e, StromError_DataStoreCorruption);
-		return;
-	}
+	assert(kds->format == KDS_FORMAT_SLOT);
+	assert(colidx < kds->ncols);
+
 	cmeta = kds->colmeta[colidx];
 	values = KERN_DATA_STORE_VALUES(kds,rowidx);
 	isnull = KERN_DATA_STORE_ISNULL(kds,rowidx);
@@ -313,11 +311,9 @@ gpupreagg_data_store(pagg_datum *pdatum,	/* __shared__ */
 	Datum		   *values;
 	cl_char		   *isnull;
 
-	if (kds->format != KDS_FORMAT_SLOT || colidx >= kds->ncols)
-	{
-		STROM_SET_ERROR(&kcxt->e, StromError_DataStoreCorruption);
-		return;
-	}
+	assert(kds->format == KDS_FORMAT_SLOT);
+	assert(colidx < kds->ncols);
+
 	cmeta = kds->colmeta[colidx];
 	values = KERN_DATA_STORE_VALUES(kds,rowidx);
 	isnull = KERN_DATA_STORE_ISNULL(kds,rowidx);
@@ -605,63 +601,101 @@ gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,
 	cl_char		   *gpagg_atts = (cl_char *)VARDATA(kparam_0);
 	pagg_datum	   *l_datum = SHARED_WORKMEM(pagg_datum);
 	cl_uint			i, ncols = kds_slot->ncols;
-	cl_uint			nitems;
+	cl_uint			nvalids = 0;
 	cl_uint			kds_index;
 
 	INIT_KERNEL_CONTEXT(&kcxt, gpupreagg_nogroup_reduction, kparams);
 	if (kresults_src->all_visible)
 	{
-		nitems = kds_slot->nitems;
-		if (get_global_id() < kds_slot->nitems)
-			kds_index = get_global_id();
+		/* scope of this block */
+		if (get_global_base() < kds_slot->nitems)
+			nvalids = min(kds_slot->nitems - get_global_base(),
+						  get_local_size());
+		else
+			goto out;	/* should not happen */
+
+		/* global index on the kds_slot */
+		if (get_local_id() < nvalids)
+			kds_index = get_global_base() + get_local_id();
+		else
+			kds_index = UINT_MAX;	/* always invalid */
 	}
 	else
 	{
-		nitems = kresults_src->nitems;
-		if (get_global_id() < kresults_src->nitems)
+		/* scope of this block */
+		if (get_global_base() < kresults_src->nitems)
+			nvalids = min(kresults_src->nitems - get_global_base(),
+						  get_local_size());
+		else
+			goto out;	/* should not happen */
+
+		/* global index on the kds_slot */
+
+		/* MEMO: On the CUDA 7.5 NVRTC, we met a strange behavior.
+		 * If and when a part of threads in warp didn't fit nvalids,
+		 * it is ought to ignore the following if-then block unless
+		 * else-block. At that time, our test workloads has nvalids=196,
+		 * thus 4 threads match the if-condition below.
+		 * According to the observation, these 4 threads didn't resume
+		 * until exit of any other threads (thread 0-191 and 196-223!).
+		 * Thus, final result lacks the values to be accumulated by the
+		 * 4 threads. This strange behavior was eliminated if we added
+		 * an else-block. It seems to me a bug of NVRTC 7.5?
+		 */
+		if (get_local_id() < nvalids)
 			kds_index = kresults_src->results[get_global_id()];
+		else
+			kds_index = UINT_MAX;	/* always invalid */
 	}
 
 	/* loop for each columns */
 	for (i=0; i < ncols; i++)
 	{
-		size_t	dist;
+		size_t		dist;
 
 		/* if not GPUPREAGG_FIELD_IS_AGGFUNC, do nothing */
 		if (gpagg_atts[i] != GPUPREAGG_FIELD_IS_AGGFUNC)
 			continue;
 
 		/* load this value from kds_slot onto pagg_datum */
-		if (get_global_id() < nitems)
+		if (get_local_id() < nvalids)
+		{
 			gpupreagg_data_load(l_datum + get_local_id(),
 								&kcxt, kds_slot, i, kds_index);
-		__syncthreads();
+		}
 
 		/* do reduction */
-		for (dist = 2; dist <= get_local_size(); dist *= 2)
+		for (dist = 2; dist < 2 * nvalids; dist *= 2)
 		{
-			if (get_local_id() % dist == 0 &&
-				(get_global_id() + dist / 2) < nitems)
+			if ((get_local_id() % dist) == 0 &&
+				(get_local_id() + dist / 2) < nvalids)
+			{
 				gpupreagg_nogroup_calc(&kcxt,
 									   i,
 									   l_datum + get_local_id(),
 									   l_datum + get_local_id() + dist / 2);
+			}
 			__syncthreads();
 		}
 
 		/* store this value to kds_dst from datum */
-		if (kds_index < nitems && get_local_id() == 0)
+		if (get_local_id() == 0)
+		{
 			gpupreagg_data_store(l_datum + get_local_id(),
 								 &kcxt, kds_slot, i, kds_index);
+		}
 		__syncthreads();
 	}
+
 	/* update kresults_dst */
 	if (get_local_id() == 0)
 	{
 		cl_uint		dest_index
 			= atomicAdd(&kresults_dst->nitems, 1);
+		assert(dest_index < kresults_dst->nrooms);
 		kresults_dst->results[dest_index] = kds_index;
 	}
+out:
 	/* write-back execution status into host-side */
 	kern_writeback_error_status(&kgpreagg->kerror, kcxt.e);
 }
@@ -1663,6 +1697,8 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 
 	if (kgpreagg->reduction_mode == GPUPREAGG_NOGROUP_REDUCTION)
 	{
+		cl_uint		nitems_orig = kds_slot->nitems;
+
 		/* Launch:
 		 * KERNEL_FUNCTION(void)
 		 * gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,
@@ -1742,7 +1778,7 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 		kern_args[0] = kgpreagg;
         kern_args[1] = kds_slot;
 		kern_args[2] = kresults_dst;	/* reverse */
-        kern_args[2] = kresults_src;	/* reverse */
+        kern_args[3] = kresults_src;	/* reverse */
 		status = pgstrom_largest_workgroup_size(&grid_sz,
 												&block_sz,
 												(const void *)
@@ -1937,12 +1973,6 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 	 *                           kern_resultbuf *kresults_dst,
 	 *                           kern_global_hashslot *f_hash)
 	 */
-	cl_uint  hogehoge = (kresults_src->all_visible
-						 ? kds_slot->nitems
-						 : kresults_src->nitems);
-	cl_uint  hoge_nrooms = kresults_src->nrooms;
-	cl_uint  hoge_all_visible = kresults_src->all_visible;
-
 	tv1 = clock64();
 final_retry:
 	/* init destination kern_resultbuf */
