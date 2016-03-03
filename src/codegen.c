@@ -25,6 +25,7 @@
 #include "nodes/nodeFuncs.h"
 #include "nodes/pg_list.h"
 #include "optimizer/clauses.h"
+#include "utils/builtins.h"
 #include "utils/fmgroids.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
@@ -1269,6 +1270,14 @@ pgstrom_devfunc_lookup_and_track(Oid func_oid, Oid func_collid,
 	return dfunc;
 }
 
+/*
+ * codegen_expression_walker - main logic of run-time code generator
+ */
+static bool codegen_coalesce_expression(CoalesceExpr *coalesce,
+										codegen_context *context);
+static bool codegen_minmax_expression(MinMaxExpr *minmax,
+									  codegen_context *context);
+
 static bool
 codegen_expression_walker(Node *node, codegen_context *context)
 {
@@ -1541,6 +1550,18 @@ codegen_expression_walker(Node *node, codegen_context *context)
 			elog(ERROR, "unrecognized boolop: %d", (int) b->boolop);
 		return true;
 	}
+	else if (IsA(node, CoalesceExpr))
+	{
+		CoalesceExpr   *coalesce = (CoalesceExpr *) node;
+
+		return codegen_coalesce_expression(coalesce, context);
+	}
+	else if (IsA(node, MinMaxExpr))
+	{
+		MinMaxExpr	   *minmax = (MinMaxExpr *) node;
+
+		return codegen_minmax_expression(minmax, context);
+	}
 	else if (IsA(node, RelabelType))
 	{
 		RelabelType *relabel = (RelabelType *) node;
@@ -1607,6 +1628,354 @@ codegen_expression_walker(Node *node, codegen_context *context)
 	return false;
 }
 
+/*
+ * form_devexpr_info
+ */
+static List *
+form_devexpr_info(devexpr_info *devexpr)
+{
+	devtype_info   *dtype;
+	List		   *result = NIL;
+	List		   *expr_args = NIL;
+	ListCell	   *lc;
+
+	result = lappend(result, makeInteger((long)devexpr->expr_tag));
+	result = lappend(result, makeInteger((long)devexpr->expr_collid));
+	foreach (lc, devexpr->expr_args)
+	{
+		dtype = lfirst(lc);
+		expr_args = lappend(expr_args, makeInteger((long) dtype->type_oid));
+	}
+	result = lappend(result, expr_args);
+
+	dtype = devexpr->expr_rettype;
+	result = lappend(result, makeInteger((long) dtype->type_oid));
+	result = lappend(result, makeInteger((long) devexpr->expr_extra));
+	result = lappend(result, makeString(pstrdup(devexpr->expr_name)));
+	result = lappend(result, makeString(pstrdup(devexpr->expr_decl)));
+
+	return result;
+}
+
+/*
+ * deform_devexpr_info
+ */
+static void
+deform_devexpr_info(devexpr_info *devexpr, List *contents)
+{
+	ListCell   *cell = list_head(contents);
+	ListCell   *lc;
+
+	memset(devexpr, 0, sizeof(devexpr_info));
+	devexpr->expr_tag = intVal(lfirst(cell));
+
+	cell = lnext(cell);
+	devexpr->expr_collid = intVal(lfirst(cell));
+
+    cell = lnext(cell);
+	foreach (lc, (List *)lfirst(cell))
+	{
+		devtype_info   *dtype = pgstrom_devtype_lookup(intVal(lfirst(lc)));
+		if (!dtype)
+			elog(ERROR, "failed to lookup device type");
+		devexpr->expr_args = lappend(devexpr->expr_args, dtype);
+	}
+
+	cell = lnext(cell);
+	devexpr->expr_rettype = pgstrom_devtype_lookup(intVal(lfirst(cell)));
+	if (!devexpr->expr_rettype)
+		elog(ERROR, "failed to lookup device type");
+
+	cell = lnext(cell);
+	devexpr->expr_extra = intVal(lfirst(cell));
+
+	cell = lnext(cell);
+	devexpr->expr_name = strVal(lfirst(cell));
+
+	cell = lnext(cell);
+	devexpr->expr_decl = strVal(lfirst(cell));
+
+	Assert(lnext(cell) == NULL);
+}
+
+static bool
+codegen_coalesce_expression(CoalesceExpr *coalesce, codegen_context *context)
+{
+	devtype_info   *dtype;
+	devexpr_info	devexpr;
+	ListCell	   *cell;
+
+	dtype = pgstrom_devtype_lookup(coalesce->coalescetype);
+	if (!dtype)
+		elog(ERROR, "unsupported device type in COALESCE: %s",
+			 format_type_be(coalesce->coalescetype));
+
+	/* find out identical predefined device COALESCE */
+	foreach (cell, context->expr_defs)
+	{
+		deform_devexpr_info(&devexpr, (List *)lfirst(cell));
+
+		if (devexpr.expr_tag == T_CoalesceExpr &&
+			devexpr.expr_rettype->type_oid == coalesce->coalescetype &&
+			devexpr.expr_collid == InvalidOid &&
+			list_length(devexpr.expr_args) == list_length(coalesce->args))
+			break;		/* ok, found */
+	}
+
+	/* if no predefined one, make a special expression device function */
+	if (!cell)
+	{
+		StringInfoData decl;
+		int		arg_index;
+
+		memset(&devexpr, 0, sizeof(devexpr_info));
+		devexpr.expr_tag = T_CoalesceExpr;
+		devexpr.expr_collid = InvalidOid;	/* never collation aware */
+		foreach (cell, coalesce->args)
+		{
+			Oid		type_oid = exprType((Node *)lfirst(cell));
+
+			if (dtype->type_oid != type_oid)
+			{
+				elog(DEBUG2, "device type mismatch in COALESCE: %s / %s",
+					 format_type_be(dtype->type_oid),
+					 format_type_be(type_oid));
+				return false;
+			}
+			devexpr.expr_args = lappend(devexpr.expr_args, dtype);
+		}
+
+		if (coalesce->coalescetype != dtype->type_oid)
+		{
+			elog(DEBUG2, "device type mismatch in COALESCE: %s / %s",
+				 format_type_be(dtype->type_oid),
+				 format_type_be(coalesce->coalescetype));
+			return false;
+		}
+		devexpr.expr_rettype = dtype;
+		devexpr.expr_extra = 0;		/* no extra information */
+
+		/* device function name */
+		devexpr.expr_name = psprintf("%s_coalesce_%u",
+									 dtype->type_name,
+									 list_length(coalesce->args));
+		/* device function body */
+		initStringInfo(&decl);
+		appendStringInfo(&decl,
+						 "STATIC_INLINE(pg_%s_t)\n"
+						 "pgfn_%s(kern_context *kcxt",
+						 dtype->type_name,
+						 devexpr.expr_name);
+		arg_index = 1;
+		foreach (cell, devexpr.expr_args)
+		{
+			dtype = lfirst(cell);
+
+			appendStringInfo(&decl,
+							 ", pg_%s_t arg%d",
+							 dtype->type_name,
+							 arg_index++);
+		}
+		appendStringInfo(&decl, ")\n{\n");
+
+		arg_index = 1;
+		foreach (cell, devexpr.expr_args)
+		{
+			appendStringInfo(
+				&decl,
+				"  if (!arg%d.isnull)\n"
+				"    return arg%d;\n",
+				arg_index,
+				arg_index);
+			arg_index++;
+		}
+		appendStringInfo(
+			&decl,
+			"\n"
+			"  /* return NULL if any arguments are NULL */\n"
+			"  memset(&arg1, 0, sizeof(arg1));\n"
+			"  arg1.isnull = true;\n"
+			"  return arg1;\n"
+			"}\n");
+
+		devexpr.expr_decl = decl.data;
+		/* track this special expression */
+		context->expr_defs = lappend(context->expr_defs,
+									 form_devexpr_info(&devexpr));
+	}
+
+	/* write out this special expression */
+	appendStringInfo(&context->str, "pgfn_%s(kcxt", devexpr.expr_name);
+	foreach (cell, coalesce->args)
+	{
+		Node	   *expr = lfirst(cell);
+
+		if (dtype->type_oid != exprType(expr))
+		{
+			elog(DEBUG2, "device type mismatch in COALESCE: %s / %s",
+				 format_type_be(dtype->type_oid),
+				 format_type_be(exprType(expr)));
+			return false;
+		}
+		appendStringInfo(&context->str, ", ");
+		if (!codegen_expression_walker(expr, context))
+			return false;
+	}
+	appendStringInfo(&context->str, ")");
+
+	return true;
+}
+
+static bool
+codegen_minmax_expression(MinMaxExpr *minmax, codegen_context *context)
+{
+	devtype_info   *dtype;
+	devfunc_info   *dfunc;
+	devexpr_info	devexpr;
+	ListCell	   *cell;
+
+	if (minmax->op != IS_GREATEST && minmax->op != IS_LEAST)
+		return false;	/* unknown operation */
+
+	dtype = pgstrom_devtype_lookup(minmax->minmaxtype);
+	if (!dtype || !OidIsValid(dtype->type_cmpfunc))
+		elog(ERROR, "unsupported device type in LEAST/GREATEST: %s",
+			 format_type_be(minmax->minmaxtype));
+
+	dfunc = pgstrom_devfunc_lookup_and_track(dtype->type_cmpfunc,
+											 minmax->inputcollid,
+											 context);
+	if (!dfunc)
+		elog(ERROR, "unsupported device function in LEAST/GREATEST: %s",
+			 format_procedure(dtype->type_cmpfunc));
+
+	/* find out identical predefined device LEAST/GREATEST */
+	foreach (cell, context->expr_defs)
+	{
+		deform_devexpr_info(&devexpr, (List *)lfirst(cell));
+
+		if (devexpr.expr_tag == T_MinMaxExpr &&
+			devexpr.expr_rettype->type_oid == minmax->minmaxtype &&
+			devexpr.expr_collid == minmax->inputcollid &&
+			list_length(devexpr.expr_args) == list_length(minmax->args) &&
+			devexpr.expr_extra == (Datum)minmax->op)
+			break;		/* ok, found */
+	}
+
+	/* if no predefined one, make a special expression device function */
+	if (!cell)
+	{
+		StringInfoData decl;
+		int		arg_index;
+
+		memset(&devexpr, 0, sizeof(devexpr_info));
+		devexpr.expr_tag = T_MinMaxExpr;
+		devexpr.expr_collid = minmax->inputcollid;
+		foreach (cell, minmax->args)
+		{
+			Node		   *expr = lfirst(cell);
+
+			if (dtype->type_oid != exprType(expr))
+			{
+				elog(DEBUG2, "device type mismatch in LEAST/GREATEST: %s / %s",
+					 format_type_be(dtype->type_oid),
+					 format_type_be(exprType(expr)));
+				return false;
+			}
+			devexpr.expr_args = lappend(devexpr.expr_args, dtype);
+		}
+
+		if (dtype->type_oid != minmax->minmaxtype)
+		{
+			elog(DEBUG2, "device type mismatch in LEAST/GREATEST: %s / %s",
+				 format_type_be(dtype->type_oid),
+				 format_type_be(minmax->minmaxtype));
+			return false;
+		}
+		devexpr.expr_rettype = dtype;
+		devexpr.expr_extra = (Datum) minmax->op;
+		devexpr.expr_name = psprintf("%s_%s_%u",
+									 dtype->type_name,
+									 minmax->op == IS_LEAST
+									 ? "least"
+									 : "greatest",
+									 list_length(minmax->args));
+		/* device function body */
+		initStringInfo(&decl);
+		appendStringInfo(&decl,
+						 "STATIC_INLINE(pg_%s_t)\n"
+						 "pgfn_%s(kern_context *kcxt",
+						 devexpr.expr_rettype->type_name,
+						 devexpr.expr_name);
+		arg_index = 1;
+		foreach (cell, devexpr.expr_args)
+		{
+			appendStringInfo(&decl, ", pg_%s_t arg%d",
+							 dtype->type_name,
+							 arg_index++);
+		}
+		appendStringInfo(&decl, ")\n"
+						 "{\n"
+						 "  pg_%s_t   result;\n"
+						 "  pg_int4_t eval;\n"
+						 "\n"
+						 "  memset(&result, 0, sizeof(result));\n"
+						 "  result.isnull = true;\n\n",
+						 devexpr.expr_rettype->type_name);
+		arg_index = 1;
+		foreach (cell, devexpr.expr_args)
+		{
+			appendStringInfo(
+				&decl,
+				"  if (result.isnull)\n"
+				"    result = arg%d;\n"
+				"  else if (!arg%d.isnull)\n"
+				"  {\n"
+				"    eval = pgfn_%s(kcxt, result, arg%d);\n"
+				"    if (!eval.isnull && eval.value %s 0)\n"
+				"      result = arg%d;\n"
+				"  }\n\n",
+				arg_index,
+				arg_index,
+				dfunc->func_devname,
+				arg_index,
+				minmax->op == IS_LEAST ? ">" : "<",
+				arg_index);
+			arg_index++;
+		}
+		appendStringInfo(
+			&decl,
+			"  return result;\n"
+			"}\n\n");
+
+		devexpr.expr_decl = decl.data;
+		/* track this special expression */
+		context->expr_defs = lappend(context->expr_defs,
+									 form_devexpr_info(&devexpr));
+	}
+
+	/* write out this special expression */
+	appendStringInfo(&context->str, "pgfn_%s(kcxt", devexpr.expr_name);
+	foreach (cell, minmax->args)
+	{
+		Node	   *expr = lfirst(cell);
+
+		if (dtype->type_oid != exprType(expr))
+		{
+			elog(DEBUG2, "device type mismatch in LEAST / GREATEST: %s / %s",
+				 format_type_be(dtype->type_oid),
+				 format_type_be(exprType(expr)));
+			return false;
+		}
+		appendStringInfo(&context->str, ", ");
+		if (!codegen_expression_walker(expr, context))
+			return false;
+    }
+	appendStringInfo(&context->str, ")");
+
+	return true;
+}
+
 char *
 pgstrom_codegen_expression(Node *expr, codegen_context *context)
 {
@@ -1615,6 +1984,7 @@ pgstrom_codegen_expression(Node *expr, codegen_context *context)
 	initStringInfo(&walker_context.str);
 	walker_context.type_defs = list_copy(context->type_defs);
 	walker_context.func_defs = list_copy(context->func_defs);
+	walker_context.expr_defs = list_copy(context->expr_defs);
 	walker_context.used_params = list_copy(context->used_params);
 	walker_context.used_vars = list_copy(context->used_vars);
 	walker_context.param_refs = bms_copy(context->param_refs);
@@ -1636,6 +2006,7 @@ pgstrom_codegen_expression(Node *expr, codegen_context *context)
 
 	context->type_defs = walker_context.type_defs;
 	context->func_defs = walker_context.func_defs;
+	context->expr_defs = walker_context.expr_defs;
 	context->used_params = walker_context.used_params;
 	context->used_vars = walker_context.used_vars;
 	context->param_refs = walker_context.param_refs;
@@ -1672,6 +2043,23 @@ pgstrom_codegen_func_declarations(StringInfo buf, codegen_context *context)
 				 uval.f.func_oid);
 		if (dfunc->func_decl)
 			appendStringInfo(buf, "%s\n", dfunc->func_decl);
+	}
+}
+
+/*
+ * pgstrom_codegen_expr_declarations
+ */
+void
+pgstrom_codegen_expr_declarations(StringInfo buf, codegen_context *context)
+{
+	devexpr_info	devexpr;
+	ListCell	   *lc;
+
+	foreach (lc, context->expr_defs)
+	{
+		deform_devexpr_info(&devexpr, (List *) lfirst(lc));
+
+		appendStringInfo(buf, "%s\n", devexpr.expr_decl);
 	}
 }
 
@@ -1897,6 +2285,60 @@ pgstrom_device_expression(Expr *expr)
 			   boolexpr->boolop == OR_EXPR ||
 			   boolexpr->boolop == NOT_EXPR);
 		return pgstrom_device_expression((Expr *) boolexpr->args);
+	}
+	else if (IsA(expr, CoalesceExpr))
+	{
+		CoalesceExpr   *coalesce = (CoalesceExpr *) expr;
+		ListCell	   *cell;
+
+		if (!pgstrom_devtype_lookup(coalesce->coalescetype))
+		{
+			elog(DEBUG2, "Unable to run on device: %s", nodeToString(expr));
+			return false;
+		}
+		/* arguments also have to be same type (=device supported) */
+		foreach (cell, coalesce->args)
+		{
+			Node   *expr = lfirst(cell);
+
+			if (coalesce->coalescetype != exprType(expr))
+			{
+				elog(DEBUG2, "Unable to run on device: %s",
+					 nodeToString(expr));
+				return false;
+			}
+		}
+		return pgstrom_device_expression((Expr *) coalesce->args);
+	}
+	else if (IsA(expr, MinMaxExpr))
+	{
+		MinMaxExpr	   *minmax = (MinMaxExpr *) expr;
+		devtype_info   *dtype = pgstrom_devtype_lookup(minmax->minmaxtype);
+		ListCell	   *cell;
+
+		if (minmax->op != IS_GREATEST && minmax->op != IS_LEAST)
+			return false;	/* unknown MinMax operation */
+
+		if (!dtype || !OidIsValid(dtype->type_cmpfunc) ||
+			!pgstrom_devfunc_lookup(dtype->type_cmpfunc,
+									minmax->inputcollid))
+		{
+			elog(DEBUG2, "Unable to run on device: %s", nodeToString(expr));
+			return false;
+		}
+		/* arguments also have to be same type (=device supported) */
+		foreach (cell, minmax->args)
+		{
+			Node   *expr = lfirst(cell);
+
+			if (minmax->minmaxtype != exprType(expr))
+			{
+				elog(DEBUG2, "Unable to run on device: %s",
+					 nodeToString(expr));
+				return false;
+			}
+		}
+		return pgstrom_device_expression((Expr *) minmax->args);
 	}
 	else if (IsA(expr, RelabelType))
 	{

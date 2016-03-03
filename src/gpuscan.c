@@ -67,6 +67,7 @@ typedef struct {
 	char	   *kern_source;	/* source of opencl kernel */
 	int32		extra_flags;	/* extra libraries to be included */
 	List	   *func_defs;		/* list of declared functions */
+	List	   *expr_defs;		/* list of special expression in use */
 	List	   *used_params;	/* list of Const/Param in use */
 	List	   *used_vars;		/* list of Var in use */
 	List	   *dev_quals;		/* qualifiers to be run on device */
@@ -86,6 +87,7 @@ form_gpuscan_info(CustomScan *cscan, GpuScanInfo *gs_info)
 									  NULL));
 	privs = lappend(privs, makeInteger(gs_info->extra_flags));
 	privs = lappend(privs, gs_info->func_defs);
+	privs = lappend(privs, gs_info->expr_defs);
 	exprs = lappend(exprs, gs_info->used_params);
 	exprs = lappend(exprs, gs_info->used_vars);
 	exprs = lappend(exprs, gs_info->dev_quals);
@@ -110,6 +112,7 @@ deform_gpuscan_info(CustomScan *cscan)
 	gs_info->kern_source = strVal(list_nth(privs, pindex++));
 	gs_info->extra_flags = intVal(list_nth(privs, pindex++));
 	gs_info->func_defs = list_nth(privs, pindex++);
+	gs_info->expr_defs = list_nth(privs, pindex++);
 	gs_info->used_params = list_nth(exprs, eindex++);
 	gs_info->used_vars = list_nth(exprs, eindex++);
 	gs_info->dev_quals = list_nth(exprs, eindex++);
@@ -590,6 +593,7 @@ gpuscan_try_replace_seqscan(Relation baserel, SeqScan *seqscan)
 													 seqscan->plan.qual);
 	gs_info.extra_flags = context.extra_flags | DEVKERNEL_NEEDS_GPUSCAN;
 	gs_info.func_defs = context.func_defs;
+	gs_info.expr_defs = context.expr_defs;
 	gs_info.used_params = context.used_params;
 	gs_info.used_vars = context.used_vars;
 	gs_info.dev_quals = copyObject(seqscan->plan.qual);
@@ -659,6 +663,7 @@ create_gpuscan_plan(PlannerInfo *root,
 	gs_info.kern_source = kern_source;
 	gs_info.extra_flags = context.extra_flags | DEVKERNEL_NEEDS_GPUSCAN;
 	gs_info.func_defs = context.func_defs;
+	gs_info.expr_defs = context.expr_defs;
 	gs_info.used_params = context.used_params;
 	gs_info.used_vars = context.used_vars;
 	gs_info.dev_quals = dev_quals;
@@ -1556,6 +1561,7 @@ pgstrom_post_planner_gpuscan(PlannedStmt *pstmt, Plan **p_curr_plan)
 	pgstrom_init_codegen_context(&context);
 	context.extra_flags = gs_info->extra_flags;	/* restore */
 	context.func_defs = gs_info->func_defs;		/* restore */
+	context.expr_defs = gs_info->expr_defs;		/* restore */
 	context.used_params = gs_info->used_params;	/* restore */
 	context.used_vars = gs_info->used_vars;		/* restore */
 
@@ -1650,19 +1656,21 @@ pgstrom_post_planner_gpuscan(PlannedStmt *pstmt, Plan **p_curr_plan)
 	}
 
 	/*
-	 * Declaration of functions
+	 * Declaration of functions/special expressions
 	 */
-	if (context.func_defs != NULL)
+	if (context.func_defs != NULL || context.expr_defs != NULL)
 	{
 		StringInfoData	kern;
 
 		initStringInfo(&kern);
 		pgstrom_codegen_func_declarations(&kern, &context);
+		pgstrom_codegen_expr_declarations(&kern, &context);
 		appendStringInfoString(&kern, gs_info->kern_source);
 		gs_info->kern_source = kern.data;
 	}
 	gs_info->extra_flags = context.extra_flags;
 	gs_info->func_defs = context.func_defs;
+	gs_info->expr_defs = context.expr_defs;
 	gs_info->used_params = context.used_params;
 	gs_info->used_vars = context.used_vars;
 	form_gpuscan_info(cscan, gs_info);

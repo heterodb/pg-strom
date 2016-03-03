@@ -331,6 +331,16 @@ typedef struct devfunc_info {
 	const char *func_decl;	/* declaration of device function, if any */
 } devfunc_info;
 
+typedef struct devexpr_info {
+	NodeTag		expr_tag;		/* tag of the expression */
+	Oid			expr_collid;	/* OID of collation, if collation aware */
+	List	   *expr_args;		/* argument types by devtype_info */
+	devtype_info *expr_rettype;	/* result type by devtype_info */
+	Datum		expr_extra;	/* an extra information per node type */
+	const char *expr_name;	/* name of the function in device side */
+	const char *expr_decl;	/* declaration of device function, if any */
+} devexpr_info;
+
 /*
  * pgstrom_data_store - a data structure with row- or column- format
  * to exchange a data chunk between the host and opencl server.
@@ -452,6 +462,7 @@ typedef struct {
 	StringInfoData	str;
 	List	   *type_defs;	/* list of devtype_info in use */
 	List	   *func_defs;	/* list of devfunc_info in use */
+	List	   *expr_defs;	/* list of devexpr_info in use */
 	List	   *used_params;/* list of Const/Param in use */
 	List	   *used_vars;	/* list of Var in use */
 	Bitmapset  *param_refs;	/* referenced parameters */
@@ -473,6 +484,8 @@ extern devfunc_info *pgstrom_devfunc_lookup_and_track(Oid func_oid,
 
 extern char *pgstrom_codegen_expression(Node *expr, codegen_context *context);
 extern void pgstrom_codegen_func_declarations(StringInfo buf,
+											  codegen_context *context);
+extern void pgstrom_codegen_expr_declarations(StringInfo buf,
 											  codegen_context *context);
 extern void pgstrom_codegen_param_declarations(StringInfo buf,
 											   codegen_context *context);

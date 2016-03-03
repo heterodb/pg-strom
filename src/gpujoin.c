@@ -89,6 +89,7 @@ typedef struct
 	char	   *kern_source;
 	int			extra_flags;
 	List	   *func_defs;
+	List	   *expr_defs;
 	List	   *used_params;
 	Expr	   *outer_quals;
 	double		outer_ratio;
@@ -121,6 +122,7 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 	privs = lappend(privs, makeString(pstrdup(gj_info->kern_source)));
 	privs = lappend(privs, makeInteger(gj_info->extra_flags));
 	privs = lappend(privs, gj_info->func_defs);
+	privs = lappend(privs, gj_info->expr_defs);
 	exprs = lappend(exprs, gj_info->used_params);
 	exprs = lappend(exprs, gj_info->outer_quals);
 	privs = lappend(privs, makeInteger(double_as_long(gj_info->outer_ratio)));
@@ -159,6 +161,7 @@ deform_gpujoin_info(CustomScan *cscan)
 	gj_info->kern_source = strVal(list_nth(privs, pindex++));
 	gj_info->extra_flags = intVal(list_nth(privs, pindex++));
 	gj_info->func_defs = list_nth(privs, pindex++);
+	gj_info->expr_defs = list_nth(privs, pindex++);
 	gj_info->used_params = list_nth(exprs, eindex++);
 	gj_info->outer_quals = list_nth(exprs, eindex++);
 	gj_info->outer_ratio = long_as_double(intVal(list_nth(privs, pindex++)));
@@ -1698,6 +1701,7 @@ create_gpujoin_plan(PlannerInfo *root,
 						   DEVKERNEL_NEEDS_DYNPARA |
 						   context.extra_flags);
 	gj_info.func_defs = context.func_defs;
+	gj_info.expr_defs = context.expr_defs;
 	gj_info.used_params = context.used_params;
 
 	form_gpujoin_info(cscan, &gj_info);
@@ -2443,16 +2447,19 @@ pgstrom_post_planner_gpujoin(PlannedStmt *pstmt, Plan **p_curr_plan)
 
 	pgstrom_init_codegen_context(&context);
 	context.func_defs = gj_info->func_defs;
+	context.expr_defs = gj_info->expr_defs;
 	context.used_params = gj_info->used_params;
 	context.extra_flags = gj_info->extra_flags;
 
 	devproj_function = codegen_device_projection(cscan, gj_info, &context,
 												 &extra_maxlen);
 	pgstrom_codegen_func_declarations(&source, &context);
+	pgstrom_codegen_expr_declarations(&source, &context);
 	appendStringInfo(&source, "%s\n", gj_info->kern_source);
 	appendStringInfo(&source, "%s\n", devproj_function);
 
 	gj_info->func_defs = context.func_defs;
+	gj_info->expr_defs = context.expr_defs;
 	gj_info->used_params = context.used_params;
 	gj_info->extra_flags = context.extra_flags;
 	gj_info->kern_source = source.data;
