@@ -716,6 +716,8 @@ pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 
 	/* functions declarations */
 	pgstrom_codegen_func_declarations(&result, context);
+	/* special expression declarations */
+	pgstrom_codegen_expr_declarations(&result, context);
 
 	/* make a projection function */
 	appendStringInfo(

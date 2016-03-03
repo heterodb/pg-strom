@@ -3045,6 +3045,8 @@ gpupreagg_codegen(GpuPreAggInfo *gpa_info,
 	initStringInfo(&str);
 	/* function declarations */
 	pgstrom_codegen_func_declarations(&str, context);
+	/* special expression declarations */
+	pgstrom_codegen_expr_declarations(&str, context);
 
 	appendStringInfo(&str,
 					 "%s\n"		/* gpupreagg_qual_eval() */
