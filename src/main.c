@@ -377,8 +377,8 @@ _PG_init(void)
 		errmsg("PG-Strom must be loaded via shared_preload_libraries")));
 
 	/* dump version number */
-	elog(LOG, "PG-Strom version %s built for PostgreSQL %s.x (build: %s)",
-		 PGSTROM_VERSION, PG_MAJORVERSION, PGSTROM_BUILD_DATE);
+	elog(LOG, "PG-Strom version %s built for PostgreSQL %s",
+		 PGSTROM_VERSION, PG_MAJORVERSION);
 
 	/* initialization of CUDA related stuff */
 	pgstrom_init_cuda_control();
