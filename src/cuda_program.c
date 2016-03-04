@@ -824,12 +824,19 @@ __build_cuda_program(program_cache_entry *old_entry)
 	 */
 	pgstrom_wakeup_backends(old_entry->waiting_backends);
 
+	/*
+	 * NOTE: In case of buils success or NVRTC_ERROR_COMPILATION, old_entry
+	 * shall not be used no longer. The new_entry is already entered, then
+	 * we detach old_entry instead. pgstrom_put_cuda_program() will release
+	 * shared memory segment.
+	 */
 	dlist_delete(&old_entry->hash_chain);
 	dlist_delete(&old_entry->lru_chain);
 	memset(&old_entry->hash_chain, 0, sizeof(dlist_node));
 	memset(&old_entry->lru_chain, 0, sizeof(dlist_node));
-
 	SpinLockRelease(&pgcache_head->lock);
+
+	pgstrom_put_cuda_program(old_entry);
 }
 
 static void
@@ -865,12 +872,10 @@ pgstrom_build_cuda_program(Datum cuda_program)
 		}
 		pgstrom_wakeup_backends(entry->waiting_backends);
 		SpinLockRelease(&pgcache_head->lock);
-		pgstrom_put_cuda_program(entry);
 		MemoryContextSwitchTo(oldcxt);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
-	pgstrom_put_cuda_program(entry);
 }
 
 static bool

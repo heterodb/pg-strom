@@ -53,7 +53,7 @@ PGSTROM_FLAGS += -DCUDA_LIBRARY_PATH=\"$(LPATH)\"
 PGSTROM_FLAGS += -DCMD_GPUINFO_PATH=\"$(shell $(PG_CONFIG) --bindir)/gpuinfo\"
 PG_CPPFLAGS := $(PGSTROM_FLAGS) -I $(IPATH)
 SHLIB_LINK := -L $(LPATH) -lnvrtc -lcuda
-LDFLAGS_SL := -Wl,-rpath,'$(LPATH)'
+#LDFLAGS_SL := -Wl,-rpath,'$(LPATH)'
 
 EXTRA_CLEAN := $(EXTRA_CLEAN_SRC)
 
