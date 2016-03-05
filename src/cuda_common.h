@@ -337,6 +337,35 @@ __STROM_SET_ERROR(kern_errorbuf *p_kerror, cl_int errcode, cl_int lineno,
 						  (cl_int)(errcode) :							\
 						  (cl_int)(errcode) + StromError_CudaDevRunTimeBase, \
 						  (x), (y), (z))
+
+/*
+ * kern_writeback_error_status
+ */
+STATIC_INLINE(void)
+kern_writeback_error_status(kern_errorbuf *result, kern_errorbuf own_error)
+{
+	/*
+	 * It writes back a thread local error status only when the global
+	 * error status is not set yet and the caller thread contains any
+	 * error status. Elsewhere, we don't involves any atomic operation
+	 * in the most of code path.
+	 */
+	if (own_error.errcode != StromError_Success &&
+		atomicCAS(&result->errcode,
+				  StromError_Success,
+				  own_error.errcode) == StromError_Success)
+	{
+		/* only primary error workgroup can come into */
+		result->kernel = own_error.kernel;
+		result->lineno = own_error.lineno;
+#ifdef PGSTROM_DEBUG
+		result->extra_x = own_error.extra_x;
+		result->extra_y = own_error.extra_y;
+		result->extra_z = own_error.extra_z;
+#endif
+	}
+}
+
 #else	/* __CUDACC__ */
 #ifdef PGSTROM_DEBUG
 #define KERROR_EXTRA_X(p_kerror)		((p_kerror)->extra_x)
@@ -353,8 +382,7 @@ __STROM_SET_ERROR(kern_errorbuf *p_kerror, cl_int errcode, cl_int lineno,
  */
 #define STROM_SET_ERROR(p_kerror, errcode)		\
 	elog(ERROR, "%s:%d %s", __FUNCTION__, __LINE__, errorText(errcode))
-#endif	/* __CUDACC__ */
-
+#endif	/* !__CUDACC__! */
 #ifdef __CUDACC__
 /*
  * We need to re-define HeapTupleHeaderData and t_infomask related stuff
@@ -1703,81 +1731,6 @@ STATIC_INLINE(Datum)
 kern_getsysatt_tableoid(kern_data_store *kds, HeapTupleHeaderData *htup)
 {
 	return kds->table_oid;
-}
-
-/*
- * kern_writeback_error_status
- *
- * It set thread local error code on the status variable on the global
- * memory, if status code is still StromError_Success and any of thread
- * has a particular error code.
- * NOTE: It does not look at significance of the error, so caller has
- * to clear its error code if it is a minor one.
- */
-STATIC_FUNCTION(void)
-kern_writeback_error_status(kern_errorbuf *result, kern_errorbuf own_error)
-{
-	kern_errorbuf *error_temp = SHARED_WORKMEM(kern_errorbuf);
-	size_t		local_sz;
-	size_t		local_id;
-	size_t		unitsz;
-	size_t		mask;
-	size_t		buddy;
-	cl_int		errcode_0;
-	cl_int		errcode_1;
-	cl_int		i;
-
-	/* setup local size (pay attention, if 2D invocation) */
-	local_sz = get_local_ysize() * get_local_xsize();
-	local_id = get_local_yid() * get_local_xsize() + get_local_xid();
-
-	/* set initial value */
-	error_temp[local_id] = own_error;
-	__syncthreads();
-
-	for (i=1, unitsz = local_sz; unitsz > 0; i++, unitsz >>= 1)
-	{
-		mask = (1 << i) - 1;
-
-		if ((local_id & mask) == 0)
-		{
-			buddy = local_id + (1 << (i - 1));
-
-			errcode_0 = error_temp[local_id].errcode;
-			errcode_1 = (buddy < local_sz
-						 ? error_temp[buddy].errcode
-						 : StromError_Success);
-			if (errcode_0 == StromError_Success &&
-				errcode_1 != StromError_Success)
-				error_temp[local_id] = error_temp[buddy];
-		}
-		__syncthreads();
-	}
-
-	/*
-	 * It writes back a statement level error, unless no other workgroup
-	 * put an error status preliminary. This atomic operation set an error
-	 * code, if it is still StromError_Success.
-	 */
-	if (get_local_xid() == 0 && get_local_yid() == 0)
-	{
-		kern_errorbuf	kerror = error_temp[0];
-
-		if (kerror.errcode != StromError_Success &&
-			atomicCAS(&result->errcode,
-					  StromError_Success,
-					  kerror.errcode) == StromError_Success)
-		{
-			/* only primary error workgroup can come into */
-			result->kernel = kerror.kernel;
-			result->lineno = kerror.lineno;
-#ifdef PGSTROM_DEBUG
-			result->extra_x = kerror.extra_x;
-			result->extra_y = kerror.extra_y;
-			result->extra_z = kerror.extra_z;
-#endif
-		}
-	}
 }
 
 /*

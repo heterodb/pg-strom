@@ -1851,6 +1851,9 @@ retry_major:
 		goto retry_major;
 	}
 	kds_dst->nitems = kresults_src->nitems;
+	/* No need to launch projection kernel? */
+	if (kds_dst->nitems == 0)
+		goto out;
 
 	kern_args = (void **)cudaGetParameterBuffer(sizeof(void *),
 												sizeof(void *) * 5);
