@@ -304,6 +304,12 @@ pgstrom_recursive_grafter(PlannedStmt *pstmt, Plan *parent, Plan **p_curr_plan)
 			pgstrom_try_insert_gpusort(pstmt, p_curr_plan);
 			break;
 
+		case T_NestLoop:
+		case T_HashJoin:
+			/* NestLoop or HashJoin may be replaced by GpuJoin */
+			pgstrom_post_planner_cpujoin(pstmt, p_curr_plan);
+			break;
+
 		case T_CustomScan:
 			if (pgstrom_plan_is_gpuscan(plan))
 				pgstrom_post_planner_gpuscan(pstmt, p_curr_plan);

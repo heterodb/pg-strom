@@ -83,8 +83,6 @@ typedef struct
 	cl_uint			kresults_max_items;	/* max items kresult_buf can hold */
 	/* number of inner relations */
 	cl_uint			num_rels;
-	/* least depth in this call chain */
-//	cl_uint			start_depth;
 	/* error status to be backed (OUT) */
 	kern_errorbuf	kerror;
 	/*

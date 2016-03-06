@@ -855,6 +855,448 @@ cost_gpujoin(PlannerInfo *root,
 	return false;
 }
 
+/*
+ *
+ *
+ *
+ *
+ *
+ */
+static bool
+estimate_gpujoin_buffersize(int num_rels,
+							double outer_num_rows,
+							int outer_width,
+							int outer_num_chunks,
+							List *inner_nrows_list,	/* T_IntList (as_float) */
+							List *inner_ncols_list,	/* T_IntList */
+							List *inner_width_list,	/* T_IntList */
+							List *joined_nrows_list,/* T_IntList (as float) */
+							List *hash_quals_list,
+							int joined_ncols,
+							int joined_width,
+							int joined_extra_width,	/* consumed by NUMERIC */
+							Size *p_inner_total_sz,
+							cl_uint *p_nloops_major,
+							cl_uint *p_nloops_minor)
+{
+	List		   *nloops_major_list = NIL;
+	cl_uint			nloops_major;
+	cl_uint			nloops_minor;
+	ListCell	   *lc1;
+	ListCell	   *lc2;
+	ListCell	   *lc3;
+	ListCell	   *lc4;
+	ListCell	   *lc5;
+	ListCell	   *lc6;
+	cl_int			i, depth;
+	Size			entry_size;
+	Size			buffer_size;
+	Size			inner_total_sz;
+	Size			inner_largest_sz;
+	cl_int			inner_largest_depth;
+	Size			inner_limit_sz;
+	double			prev_ntuples;
+
+
+	/* sanity checks */
+	Assert(IsA(inner_nrows_list, IntList) &&
+		   list_length(inner_nrows_list) == num_rels);
+	Assert(IsA(inner_width_list, IntList) &&
+		   list_length(inner_width_list) == num_rels);
+	Assert(IsA(joined_nrows_list, IntList) &&
+		   list_length(joined_nrows_list) == num_rels);
+	Assert(IsA(hash_quals_list, List) &&
+		   list_length(hash_quals_list) == num_rels);
+
+	for (i=0; i < num_rels; i++)
+		nloops_major_list = lappend_int(nloops_major_list, 1);
+
+	/*
+	 * Estimation: size of multi relational inner buffer
+	 */
+retry_major:
+	inner_total_sz = STROMALIGN(offsetof(kern_multirels,
+										 chunks[num_rels]));
+	inner_largest_sz = 0;
+	inner_largest_depth = 0;
+	nloops_major = 1;
+	nloops_minor = 1;
+
+	depth = 1;
+	prev_ntuples = outer_num_rows / outer_num_chunks;
+    forsix (lc1, inner_nrows_list,
+			lc2, inner_ncols_list,
+			lc3, inner_width_list,
+			lc4, hash_quals_list,
+			lc5, joined_nrows_list,
+			lc6, nloops_major_list)
+	{
+		double		inner_nrows = int_as_float(lfirst_int(lc1));
+		cl_int		inner_ncols = lfirst_int(lc2);
+		cl_int		inner_width = lfirst_int(lc3);
+		List	   *hash_quals = lfirst(lc4);
+		double		joined_nrows = int_as_float(lfirst_int(lc5));
+		cl_int		nloops_major_curr = lfirst_int(lc6);
+		double		inner_ntuples;
+		double		joined_ntuples;
+		Size		chunk_size;
+		Size		results_size;
+		Size		num_items;
+
+	retry_minor:
+		/* Force a plausible relation size if no information. */
+		inner_ntuples = Max(inner_nrows
+							* pgstrom_chunk_size_margin
+							/ (double)nloops_major_curr,
+							100.0);
+
+		/* Estimate buffer consumption per item */
+		entry_size = (hash_quals != NIL
+					  ? offsetof(kern_hashitem, t.htup)
+					  : offsetof(kern_tupitem, htup))
+			+ MAXALIGN(offsetof(HeapTupleHeaderData,
+								t_bits[BITMAPLEN(inner_ncols)]))
+			+ MAXALIGN(inner_width);
+
+		/* Estimate inner chunks of this depth */
+		chunk_size = hash_quals != NIL
+			? KDS_CALCULATE_HASH_LENGTH(inner_ncols,
+										(Size)(inner_ntuples * entry_size),
+										(Size)inner_ntuples)
+			: KDS_CALCULATE_ROW_LENGTH(inner_ncols,
+									   (Size)(inner_ntuples * entry_size),
+									   (Size)inner_ntuples);
+		inner_total_sz += STROMALIGN(chunk_size);
+
+		/*
+		 * Track depth of the inner largest chunk size
+		 */
+		if (inner_largest_sz < chunk_size)
+		{
+			inner_largest_sz = chunk_size;
+			inner_largest_depth = depth;
+		}
+
+		/*
+		 * NOTE: The number of intermediation result of GpuJoin has to
+		 * fit (2 * pgstrom_chunk_size()). If too large number of rows
+		 * are expected, we try to run same chunk multiple times with
+		 * smaller inner_size[].
+		 */
+		joined_ntuples = joined_nrows / (outer_num_chunks * nloops_minor);
+		num_items = (Size)((double)(depth + 1) *
+						   joined_ntuples *
+						   pgstrom_chunk_size_margin);
+
+		results_size = offsetof(kern_gpujoin, jscale[num_rels + 1])
+			+ BLCKSZ	/* alternative of kern_parambuf */
+			+ STROMALIGN(offsetof(kern_resultbuf, results[num_items]))
+			+ STROMALIGN(offsetof(kern_resultbuf, results[num_items]));
+		if (results_size > 2 * pgstrom_chunk_size())
+		{
+			Size	nsplits = (results_size / (2 * pgstrom_chunk_size())) + 1;
+
+			if (nsplits > SHRT_MAX)
+			{
+				elog(DEBUG1, "GpuJoin results too large (nitems=%zu size=%zu)",
+					 num_items, results_size);
+				/*
+				 * NOTE: Heuristically, it is not a reasonable plan to
+				 * expect massive amount of intermediation result items.
+				 * It will lead very large ammount of minor iteration
+				 * for GpuJoin kernel invocations. So, we bail out this
+				 * plan immediately.
+				 */
+				return false;
+			}
+			nloops_minor *= nsplits;
+			goto retry_minor;
+		}
+		prev_ntuples = joined_ntuples;
+		depth++;
+	}
+	Assert(inner_largest_depth > 0 && inner_largest_depth <= num_rels);
+
+	/*
+	 * Estimation of the expected consumption of the destination buffer.
+	 * If it will exceed the chunk-size limitation, we logically split
+	 * either of outer/inner chunks.
+	 * At this moment, we cannot determine which result format shall
+	 * be used (either KDS_FORMAT_ROW or KDS_FORMAT_SLOT), so we adopt
+	 * the larger one for safety.
+	 */
+	entry_size = (offsetof(kern_tupitem, htup) +
+				  MAXALIGN(offsetof(HeapTupleHeaderData,
+									t_bits[BITMAPLEN(joined_ncols)])) +
+				  MAXALIGN(joined_width));
+	buffer_size = Max(KDS_CALCULATE_ROW_LENGTH(joined_ncols,
+											   prev_ntuples * entry_size,
+											   (Size)prev_ntuples),
+					  KDS_CALCULATE_SLOT_LENGTH(joined_ncols,
+												(Size)prev_ntuples) +
+					  joined_extra_width * prev_ntuples);
+
+	if (buffer_size > pgstrom_chunk_size_limit())
+	{
+		Size	nsplits = buffer_size / pgstrom_chunk_size_limit() + 1;
+
+		if (nsplits > SHRT_MAX)
+		{
+			/*
+			 * Heuristically, it is not a reasonable Join plan to produce
+			 * massive amount of results than input.
+			 */
+			return false;
+		}
+		nloops_minor *= nsplits;
+	}
+
+	/*
+	 * Check of the estimated inner multi-relations buffer. If it is out of
+	 * the range, we have to split inner buffer into multiple portions to
+	 * fit GPU RAMs. It is a restriction come from H/W capability.
+	 */
+	inner_limit_sz = gpuMemMaxAllocSize() / 4 - BLCKSZ * num_rels;
+	if (inner_total_sz > inner_limit_sz)
+	{
+		ListCell   *cell = list_nth_cell(nloops_major_list,
+										 inner_largest_depth - 1);
+
+		lfirst_int(cell) *= inner_total_sz / inner_limit_sz + 1;
+		if (lfirst_int(cell) > SHRT_MAX)
+		{
+			elog(DEBUG1, "Too large Inner multirel buffer {size=%zu}",
+				 (Size) inner_total_sz);
+			return false;
+		}
+		goto retry_major;
+	}
+	*p_inner_total_sz = inner_total_sz;
+	*p_nloops_minor = nloops_minor;
+	*p_nloops_major = nloops_major;
+
+	return true;	/* probably, plan is reasonable for buffer usage */
+}
+
+
+
+/*
+ *
+ *
+ *
+ *
+ *
+ *
+ */
+#if 0
+static bool
+__cost_gpujoin(PlannerInfo *root,
+			   Cost *p_startup_cost,
+			   Cost *p_total_cost,
+			   Cost outer_startup_cost,
+			   Cost outer_total_cost,
+			   double outer_num_rows,
+			   int outer_width,
+			   int outer_ncols,
+			   List *join_type_list,
+			   List *inner_startup_cost_list,	/* T_IntList (as_float) */
+			   List *inner_total_cost_list,		/* T_IntList (as_float) */
+			   List *inner_nrows_list,	/* T_IntList (as_float) */
+			   List *inner_width_list,	/* T_IntList */
+			   List *inner_ncols_list,	/* T_IntList */
+			   List *joined_nrows_list,	/* T_IntList (as_float) */
+			   List *hash_quals_list,
+			   List *join_quals_list,
+			   List *other_quals_list)
+{
+	cl_int		num_rels = list_length(join_type_list);
+	cl_uint		num_chunks;
+	cl_uint		item_size;
+	cl_uint		nloops_major;
+	cl_uint		nloops_minor;
+	Cost		startup_cost;
+	Cost		run_cost;
+	Cost		eval_cost;
+	Cost		startup_delay;
+	double		curr_ntuples;
+	ListCell   *lc1;
+	ListCell   *lc2;
+	ListCell   *lc3;
+	ListCell   *lc4;
+	ListCell   *lc5;
+	ListCell   *lc6;
+	ListCell   *lc7;
+
+	/*
+	 * Number of chunks (= number of GpuJoin tasks) expected, under the
+	 * assumption of KDS_FORMAT_ROW
+	 */
+	item_size = (MAXALIGN(offsetof(HeapTupleHeaderData,
+								   t_bits[BITMAPLEN(outer_ncols)])) +
+				 MAXALIGN(outer_width));
+	num_chunks = outer_num_rows /
+		((pgstrom_chunk_size() - KDS_CALCULATE_HEAD_LENGTH(outer_ncols)) /
+		 (sizeof(cl_uint) + item_size));
+	num_chunks = Max(num_chunks, 1);	/* at least one chunk */
+
+	/*
+	 * Estimation of inner / destination buffer consumption
+	 */
+estimate_gpujoin_buffersize(int num_rels,
+							double outer_num_rows,
+							int outer_width,
+							int outer_num_chunks,
+							List *inner_nrows_list,	/* T_IntList (as_float) */
+							List *inner_ncols_list,	/* T_IntList */
+							List *inner_width_list,	/* T_IntList */
+							List *joined_nrows_list,/* T_IntList (as float) */
+							List *hash_quals_list,
+							int joined_ncols,
+							int joined_width,
+							int joined_extra_width,	/* consumed by NUMERIC */
+							Size *p_inner_total_sz,
+							cl_uint *p_nloops_major,
+							cl_uint *p_nloops_minor)
+
+	if (!estimate_gpujoin_buffersize(num_rels,
+									 outer_num_rows,
+									 outer_width,
+									 outer_num_chunks,
+									 inner_nrows_list,
+									 inner_width_list,
+									 inner_ncols_list,
+									 joined_nrows_list,
+									 hash_quals_list,
+									 joined_ncols,
+									 joined_width,
+									 joined_extra_width,
+									 &nloops_major,
+									 &nloops_minor))
+		return false;
+
+	/*
+	 * Minimum cost comes from outer-path
+	 */
+	startup_cost = pgstrom_gpu_setup_cost + outer_startup_cost;
+	run_cost = outer_total_cost - outer_startup_cost;
+	eval_cost = 0.0;
+
+	/*
+	 * Cost for each depth
+	 */
+	curr_ntuples = outer_num_rows;
+	forseven (lc1, join_type_list,
+			  lc2, hash_quals_list,
+			  lc3, join_quals_list,
+			  lc4, other_quals_list,
+			  lc5, inner_total_cost_list,
+			  lc6, inner_nrows_list,
+			  lc7, joined_nrows_list)
+	{
+		JoinType	jointype = (JoinType) lfirst_int(lc1);
+		List	   *hash_quals = lfirst(lc2);
+		List	   *join_quals = lfirst(lc3);
+		List	   *other_quals = lfirst(lc4);
+		Cost		inner_total_cost = int_as_float(lfirst_int(lc5));
+		double		inner_nrows = int_as_float(lfirst_int(lc6));
+		double		joined_nrows = int_as_float(lfirst_int(lc7));
+		double		gpu_ratio = pgstrom_gpu_operator_cost / cpu_operator_cost;
+		QualCost	qcost;
+
+		/* cost to load all the tuples from inner-scan */
+		startup_cost += inner_total_cost;
+
+		if (hash_quals != NIL)
+		{
+			/*
+			 * GpuHashJoin - It computes hash-value of inner tuples by CPU,
+			 * but outer tuples by GPU, then it evaluates join/other-quals
+			 * for each items on the inner hash table on GPU.
+			 */
+			double		num_hashkeys = (double)list_length(hash_quals);
+			double		hash_nsteps
+				= Max(inner_nrows / (double)__KDS_NSLOTS((Size)inner_nrows),
+					  1.0);
+
+			/* cost to compute inner hash value by CPU */
+			startup_cost += cpu_operator_cost * num_hashkeys * inner_nrows;
+			/* cost to load inner heap tuples by CPU */
+			startup_cost += cpu_tuple_cost * inner_nrows;
+			/* cost to compute hash value by GPU */
+			eval_cost += (pgstrom_gpu_operator_cost *
+						  num_hashkeys * curr_ntuples);
+			/* cost to evaluate join quals */
+			cost_qual_eval(&qcost, join_quals, root);
+			startup_cost += qcost.startup;
+			eval_cost += (gpu_ratio * qcost.per_tuple *
+						  curr_ntuples * hash_nsteps);
+			/* cost to evaluate other quals, if any */
+			cost_qual_eval(&qcost, other_quals, root);
+			startup_cost += qcost.startup;
+			eval_cost += (gpu_ratio * qcost.per_tuple *
+						  curr_ntuples * hash_nsteps);
+		}
+		else
+		{
+			/*
+             * GpuNestLoop - It evaluates join-qual for each pair of outer
+             * and inner tuples. So, its run_cost is usually higher than
+             * GpuHashJoin.
+             */
+
+			/* cost to load inner heap tuples by CPU */
+            startup_cost += cpu_tuple_cost * inner_nrows;
+
+			/* cost to evaluate join quals */
+			cost_qual_eval(&qcost, join_quals, root);
+			startup_cost += qcost.startup;
+			eval_cost += (gpu_ratio * qcost.per_tuple *
+						  curr_ntuples * inner_nrows);
+
+			/* cost to evaluate other quals, if any */
+			cost_qual_eval(&qcost, other_quals, root);
+			startup_cost += qcost.startup;
+			eval_cost += (gpu_ratio * qcost.per_tuple *
+						  curr_ntuples * inner_nrows);
+		}
+		/* number of outer items on the next depth */
+		curr_ntuples = joined_nrows;
+	}
+	/* total GPU execution cost */
+	run_cost += eval_cost * (double) nloops_minor;
+	/* cost to send outer chunks */
+	run_cost += (double) num_chunks * pgstrom_gpu_dma_cost;
+	/* cost to send inner buffer; assume 20% of kernel kicks DMA */
+	run_cost += ((double)(inner_total_sz / pgstrom_chunk_size()) *
+				 (double) num_chunks * 0.20);
+	/* iteration by nloops_major > 1 */
+	run_cost *= (double) nloops_major;
+
+	/*
+	 * cost of final materialization, but GPU does most of projection
+	 */
+	run_cost += cpu_tuple_cost * curr_ntuples;
+
+	/*
+	 * delay to fetch the first tuple
+	 */
+	startup_delay = run_cost * (1.0 / (double) num_chunks);
+
+	/*
+	 * Put results
+	 */
+	*p_startup_cost = startup_cost + startup_delay;
+	*p_total_cost = startup_cost + run_cost;
+
+	return true;	/* probably, plan is reasonable */
+}
+#endif
+
+
+
+
+
+
 typedef struct
 {
 	JoinType	join_type;
@@ -2466,6 +2908,135 @@ pgstrom_post_planner_gpujoin(PlannedStmt *pstmt, Plan **p_curr_plan)
 	gj_info->extra_maxlen = extra_maxlen;
 
 	form_gpujoin_info(cscan, gj_info);
+}
+
+/*
+ * pgstrom_post_planner_cpujoin
+ *
+ * It tries to replace built-in join logic by GpuJoin, if its target-list
+ * involves heavy calculation, but no consideration about join order.
+ */
+void
+pgstrom_post_planner_cpujoin(PlannedStmt *pstmt, Plan **p_curr_plan)
+{
+	Join	   *cpujoin = (Join *)(*p_curr_plan);
+	CustomScan *gpujoin;
+	QualCost	qcost;
+	Cost		projection_old_cost;
+	Cost		projection_new_cost;
+	Cost		actual_old_cost;
+	Cost		actual_new_cost;
+	ListCell   *lc;
+
+	if (IsA(cpujoin, NestLoop))
+	{
+		NestLoop   *nestloop = (NestLoop *) cpujoin;
+
+		/* supported join type? */
+		if (cpujoin->jointype != JOIN_INNER &&
+			cpujoin->jointype != JOIN_RIGHT)
+			return;
+
+		/* unavailable to run parameterized NestLoop on GPU device */
+		if (nestloop->nestParams != NIL)
+			return;
+	}
+	else if (IsA(cpujoin, HashJoin))
+	{
+		HashJoin   *hashjoin = (HashJoin *) cpujoin;
+
+		/* supported join type? */
+		if (cpujoin->jointype != JOIN_INNER &&
+			cpujoin->jointype != JOIN_LEFT &&
+			cpujoin->jointype != JOIN_FULL &&
+			cpujoin->jointype != JOIN_RIGHT)
+			return;
+
+		/* hash-keys must be executable on GPU device */
+		foreach (lc, hashjoin->hashclauses)
+		{
+			if (!pgstrom_device_expression((Expr *) lfirst(lc)))
+				return;
+		}
+	}
+	else
+		return;		/* don't try to replace */
+
+	/* join quals must be executable on GPU device */
+	foreach (lc, cpujoin->joinqual)
+	{
+		if (!pgstrom_device_expression((Expr *) lfirst(lc)))
+			return;
+	}
+	/* other quals must be executable on GPU device */
+	foreach (lc, cpujoin->plan.qual)
+	{
+		if (!pgstrom_device_expression((Expr *) lfirst(lc)))
+			return;
+	}
+
+	/*
+	 * check whether device projection is executable on GPU device, and
+	 * its cost merit if off-load to the device side.
+	 */
+	cost_qual_eval(&qcost, cpujoin->plan.targetlist, NULL);
+	projection_old_cost = (qcost.startup +
+						   qcost.per_tuple * cpujoin->plan.plan_rows);
+	actual_old_cost = cpujoin->plan.total_cost + projection_old_cost;
+
+	memset(&qcost, 0, sizeof(QualCost));
+	foreach (lc, cpujoin->plan.targetlist)
+	{
+		TargetEntry	   *tle = lfirst(lc);
+		QualCost		temp;
+
+		if (IsA(tle->expr, Var))
+		{
+			/* just a var-node reference */
+			cost_qual_eval_node(&temp, (Node *) tle->expr, NULL);
+		}
+		else if (pgstrom_device_expression(tle->expr))
+		{
+			/* projection by GPU */
+			cost_qual_eval_node(&temp, (Node *) tle->expr, NULL);
+			temp.per_tuple *= pgstrom_gpu_operator_cost / cpu_operator_cost;
+		}
+		else
+		{
+			/* projection by CPU */
+			cost_qual_eval_node(&temp, (Node *)tle->expr, NULL);
+		}
+		qcost.startup   += temp.startup;
+		qcost.per_tuple += temp.per_tuple;
+	}
+	projection_new_cost = (qcost.startup +
+						   qcost.per_tuple * cpujoin->plan.plan_rows);
+	/* Quick bailout if GpuJoin replacement makes no sense obviously */
+	if (projection_old_cost < projection_new_cost + pgstrom_gpu_setup_cost)
+		return;
+
+	/*
+	 * OK, we try to investigate an alternative GpuJoin instead of the
+	 * planner's selection.
+	 */
+
+	// make a GpuJoinInfo
+	// estimate a GpuJoin cost
+
+#if 0
+	actual_new_cost = projection_new_cost + ...;
+	if (actual_old_cost <= actual_new_cost)
+		return;
+
+
+
+
+
+
+
+	if (gpujoin)
+		pgstrom_post_planner_gpujoin(pstmt, );
+#endif
 }
 
 
