@@ -584,7 +584,6 @@ extern void pgstrom_init_gpuscan(void);
  */
 extern bool pgstrom_path_is_gpujoin(Path *pathnode);
 extern bool pgstrom_plan_is_gpujoin(const Plan *plannode);
-extern void pgstrom_post_planner_cpujoin(PlannedStmt *pstmt, Plan **p_plan);
 extern void pgstrom_post_planner_gpujoin(PlannedStmt *pstmt, Plan **p_plan);
 extern void assign_gpujoin_session_info(StringInfo buf, GpuTaskState *gts);
 extern void	pgstrom_init_gpujoin(void);
