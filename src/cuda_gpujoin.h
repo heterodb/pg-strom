@@ -83,8 +83,6 @@ typedef struct
 	cl_uint			kresults_max_items;	/* max items kresult_buf can hold */
 	/* number of inner relations */
 	cl_uint			num_rels;
-	/* least depth in this call chain */
-//	cl_uint			start_depth;
 	/* error status to be backed (OUT) */
 	kern_errorbuf	kerror;
 	/*
@@ -1851,6 +1849,9 @@ retry_major:
 		goto retry_major;
 	}
 	kds_dst->nitems = kresults_src->nitems;
+	/* No need to launch projection kernel? */
+	if (kds_dst->nitems == 0)
+		goto out;
 
 	kern_args = (void **)cudaGetParameterBuffer(sizeof(void *),
 												sizeof(void *) * 5);
