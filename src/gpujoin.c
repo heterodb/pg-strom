@@ -2867,8 +2867,8 @@ pgstrom_post_planner_gpujoin(PlannedStmt *pstmt, Plan **p_curr_plan)
 typedef struct
 {
 	List	   *ps_tlist;
-	List	   *ps_depth;
-	List	   *ps_resno;
+	List	   *ps_src_depth;
+	List	   *ps_src_resno;
 	Join	   *cpujoin;			/* the original node */
 	Index		outer_scanrelid;	/* > 0, if outer scan pulled up */
 	bool		be_resjunk;
@@ -2881,15 +2881,14 @@ fixup_cpujoin_expression(Node *node, fixup_cpujoin_expression_context *fc_cxt)
 		return NULL;
 	if (IsA(node, Var))
 	{
-		Var		   *varnode = (Var *) node;
-		int			var_depth;
-		int			var_resno;
-		ListCell   *lc;
+		Var			   *varnode = (Var *) node;
+		int				var_depth;
+		int				var_resno;
+		TargetEntry	   *ps_tle;
+		ListCell	   *lc;
 
 		if (varnode->varno == OUTER_VAR)
 		{
-			TargetEntry	   *ps_tle;
-
 			var_depth = 0;	/* OUTER */
 			var_resno = varnode->varattno;
 
@@ -2915,13 +2914,15 @@ fixup_cpujoin_expression(Node *node, fixup_cpujoin_expression_context *fc_cxt)
 		}
 		else if (varnode->varno == INNER_VAR)
 		{
-			Plan	   *curr_plan = fc_cxt->cpujoin;
+			Plan	   *curr_plan = (Plan *)fc_cxt->cpujoin;
 
 			var_depth = 1;	/* INNER */
 			var_resno = varnode->varattno;
 
-			while (IS_SPECIAL_VARNO(varnode))
+			while (IS_SPECIAL_VARNO(varnode->varno))
 			{
+				TargetEntry	   *tle;
+
 				if (varnode->varno == INNER_VAR)
 				{
 					Plan   *i_plan = innerPlan(curr_plan);
@@ -2941,7 +2942,7 @@ fixup_cpujoin_expression(Node *node, fixup_cpujoin_expression_context *fc_cxt)
 					Plan   *o_plan = outerPlan(curr_plan);
 
 					if (varnode->varattno < 1 ||
-						varnode->varattno > list_length(i_plan->targetlist))
+						varnode->varattno > list_length(o_plan->targetlist))
 						elog(ERROR, "Bug? OUTER_VAR reference out of range");
 
 					tle = list_nth(o_plan->targetlist, varnode->varattno - 1);
@@ -3014,14 +3015,15 @@ fixup_cpujoin_expression(Node *node, fixup_cpujoin_expression_context *fc_cxt)
 								 NULL,
 								 fc_cxt->be_resjunk);
 		fc_cxt->ps_tlist = lappend(fc_cxt->ps_tlist, ps_tle);
-		fc_cxt->ps_depth = lappend_int(fc_cxt->ps_depth, var_depth);
-		fc_cxt->ps_resno = lappend_int(fc_cxt->ps_resno, var_resno);
+		fc_cxt->ps_src_depth = lappend_int(fc_cxt->ps_src_depth, var_depth);
+		fc_cxt->ps_src_resno = lappend_int(fc_cxt->ps_src_resno, var_resno);
 
 		return (Node *)makeVar(INDEX_VAR,
-							   tle->resno,
+							   ps_tle->resno,
 							   varnode->vartype,
 							   varnode->vartypmod,
-							   varnode->varcollid);
+							   varnode->varcollid,
+							   0);
 	}
 	return expression_tree_mutator(node, fixup_cpujoin_expression, fc_cxt);
 }
@@ -3046,7 +3048,7 @@ pgstrom_post_planner_cpujoin(PlannedStmt *pstmt, Plan **p_curr_plan)
 	List		   *join_quals;
 	List		   *other_quals;
 	CustomScan	   *cscan;
-	GpuJoinInfo	   *gs_info;
+	GpuJoinInfo		gj_info;
 	QualCost		qcost;
 	Cost			projection_old_cost;
 	Cost			projection_new_cost;
@@ -3056,6 +3058,8 @@ pgstrom_post_planner_cpujoin(PlannedStmt *pstmt, Plan **p_curr_plan)
 	cost_gpujoin_context *cxt;
 	fixup_cpujoin_expression_context fc_cxt;
 	ListCell	   *lc;
+
+	return;		/* tentative */
 
 	if (IsA(cpujoin, NestLoop))
 	{
@@ -3086,7 +3090,7 @@ pgstrom_post_planner_cpujoin(PlannedStmt *pstmt, Plan **p_curr_plan)
 		{
 			OpExpr	   *opexpr = (OpExpr *) lfirst(lc);
 
-			Assert(opexpr, OpExpr);
+			Assert(IsA(opexpr, OpExpr));
 			if (!pgstrom_device_expression((Expr *)opexpr))
 				return;
 			Assert(list_length(opexpr->args) == 2);
@@ -3201,7 +3205,6 @@ pgstrom_post_planner_cpujoin(PlannedStmt *pstmt, Plan **p_curr_plan)
 	/* OK, replacement by GpuJoin is reasonable from cost perspectives */
 
 	/* Try to pull-up device executable SeqScan */
-	outer_tlist = outer_plan->targetlist;
 	if (pgstrom_pullup_outer_scan(outer_plan, false, &outer_quals))
 	{
 		outer_scanrelid = ((Scan *) outer_plan)->scanrelid;
@@ -3236,18 +3239,39 @@ pgstrom_post_planner_cpujoin(PlannedStmt *pstmt, Plan **p_curr_plan)
 		fixup_cpujoin_expression((Node *)hash_quals, &fc_cxt);
 	join_quals = (List *)
 		fixup_cpujoin_expression((Node *)join_quals, &fc_cxt);
-	other_quels = (List *)
+	other_quals = (List *)
 		fixup_cpujoin_expression((Node *)other_quals, &fc_cxt);
 
-	// construct GpuJoinInfo
+	cscan->custom_scan_tlist = fc_cxt.ps_tlist;
 
+	/* construction of GpuJoinInfo */
+	gj_info.num_rels = 1;
+	gj_info.kern_source = "";	/* need to call codegen */
+	gj_info.extra_flags = DEVKERNEL_NEEDS_GPUJOIN | DEVKERNEL_NEEDS_DYNPARA;
+	gj_info.func_defs = NIL;	/* from codegen_context */
+	gj_info.expr_defs = NIL;	/* from codegen_context */
+	gj_info.used_params = NIL;	/* from codegen_context */
+	gj_info.outer_quals = (Expr *)outer_quals;
+	gj_info.outer_ratio = 99.99;/* to be fixed up */
+	gj_info.outer_nrows = 0.0;	/* to be fixed up */
 
-	
+	gj_info.nrows_ratio = list_make1_int(1234);
+	gj_info.ichunk_size = list_make1_int(2345);
+	gj_info.join_types = list_make1_int((int) cpujoin->jointype);
+	gj_info.join_quals = list_make1(list_concat(hash_quals,
+												join_quals));
+	gj_info.other_quals = list_make1(other_quals);
+	gj_info.nloops_minor = list_make1_int(cxt->inners[0].nloops_minor);
+	gj_info.nloops_major = list_make1_int(cxt->inners[0].nloops_major);
+	gj_info.hash_inner_keys = list_make1(hash_inner_keys);
+	gj_info.hash_outer_keys = list_make1(hash_outer_keys);
+	gj_info.gnl_shmem_xsize = list_make1_int(1234);	// to be fixed
+	gj_info.gnl_shmem_ysize = list_make1_int(1234);	// to be fixed
 
-
-
-
-	form_gpujoin_ingo();
+	gj_info.ps_src_depth = fc_cxt.ps_src_depth;
+	gj_info.ps_src_resno = fc_cxt.ps_src_resno;
+	gj_info.extra_maxlen = 1234; // to be fixed
+	form_gpujoin_info(cscan, &gj_info);
 
 	/* OK, replace the built-in join plan then apply post planner fixup */
 	*p_curr_plan = &cscan->scan.plan;
