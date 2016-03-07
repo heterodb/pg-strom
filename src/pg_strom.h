@@ -895,41 +895,6 @@ typealign_get_width(char type_align)
 		 (lc1) = lnext(lc1), (lc2) = lnext(lc2), (lc3) = lnext(lc3),\
 		 (lc4) = lnext(lc4))
 #endif
-#ifndef forfive
-#define forfive(lc1, list1, lc2, list2, lc3, list3, lc4, list4, lc5, list5)	\
-	for((lc1) = list_head(list1), (lc2) = list_head(list2),			\
-		(lc3) = list_head(list3), (lc4) = list_head(list4),			\
-		(lc5) = list_head(list5);									\
-		(lc1) != NULL && (lc2) != NULL && (lc3) != NULL &&			\
-		(lc4) != NULL && (lc5) != NULL;								\
-		(lc1) = lnext(lc1), (lc2) = lnext(lc2), (lc3) = lnext(lc3),	\
-		(lc4) = lnext(lc4), (lc5) = lnext(lc5))
-#endif
-#ifndef forsix
-#define forsix(lc1, list1, lc2, list2, lc3, list3, lc4, list4,		\
-			   lc5, list5, lc6, list6)								\
-	for((lc1) = list_head(list1), (lc2) = list_head(list2),			\
-		(lc3) = list_head(list3), (lc4) = list_head(list4),			\
-		(lc5) = list_head(list5), (lc6) = list_head(list6);			\
-		(lc1) != NULL && (lc2) != NULL && (lc3) != NULL &&			\
-		(lc4) != NULL && (lc5) != NULL && (lc6) != NULL;			\
-		(lc1) = lnext(lc1), (lc2) = lnext(lc2), (lc3) = lnext(lc3),	\
-		(lc4) = lnext(lc4), (lc5) = lnext(lc5), (lc6) = lnext(lc6))
-#endif
-#ifndef forseven
-#define forseven(lc1, list1, lc2, list2, lc3, list3, lc4, list4,	\
-				 lc5, list5, lc6, list6, lc7, list7)				\
-	for((lc1) = list_head(list1), (lc2) = list_head(list2),			\
-		(lc3) = list_head(list3), (lc4) = list_head(list4),			\
-		(lc5) = list_head(list5), (lc6) = list_head(list6),			\
-		(lc7) = list_head(list7);									\
-		(lc1) != NULL && (lc2) != NULL && (lc3) != NULL &&			\
-		(lc4) != NULL && (lc5) != NULL && (lc6) != NULL &&			\
-		(lc7) != NULL;												\
-		(lc1) = lnext(lc1), (lc2) = lnext(lc2), (lc3) = lnext(lc3),	\
-		(lc4) = lnext(lc4), (lc5) = lnext(lc5), (lc6) = lnext(lc6),	\
-		(lc7) = lnext(lc7))
-#endif
 
 static inline char *
 format_bytesz(Size nbytes)
