@@ -330,7 +330,7 @@ cost_gpuscan_path(PlannerInfo *root, CustomPath *pathnode,
 			{
 				cost_qual_eval_node(&qcost, (Node *)tle->expr, root);
 				discount_per_tuple += (qcost.per_tuple *
-									   Max(1.0 - gpu_ratio, 0.0));
+									   Max(1.0 - gpu_ratio, 0.0) / 10.0);
 				num_vars++;
 			}
 			else
