@@ -147,7 +147,7 @@ pgstrom_init_misc_guc(void)
 							 "Cost to send/recv data via DMA",
 							 NULL,
 							 &pgstrom_gpu_dma_cost,
-							 DEFAULT_SEQ_PAGE_COST,
+							 10 * DEFAULT_SEQ_PAGE_COST,
 							 0,
 							 DBL_MAX,
                              PGC_USERSET,
@@ -309,11 +309,6 @@ pgstrom_recursive_grafter(PlannedStmt *pstmt, Plan *parent, Plan **p_curr_plan)
 				pgstrom_post_planner_gpuscan(pstmt, p_curr_plan);
 			else if (pgstrom_plan_is_gpujoin(plan))
 				pgstrom_post_planner_gpujoin(pstmt, p_curr_plan);
-			break;
-
-		case T_SeqScan:
-			/* SeqScan might be replaced by GpuScan */
-			pgstrom_post_planner_gpuscan(pstmt, p_curr_plan);
 			break;
 
 		default:

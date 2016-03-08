@@ -256,32 +256,118 @@ cost_gpuscan(AttrNumber ncols,		/* number of columns */
 
 static void
 cost_gpuscan_path(PlannerInfo *root, CustomPath *pathnode,
-				  List *dev_quals, List *host_quals)
+				  List *dev_tlist, List *dev_quals, List *host_quals)
 {
 	RelOptInfo	   *baserel = pathnode->path.parent;
 	ParamPathInfo  *param_info = pathnode->path.param_info;
+	List		   *ppi_quals = param_info ? param_info->ppi_clauses : NIL;
+	Cost			startup_cost = pgstrom_gpu_setup_cost;
+	Cost			run_cost = 0.0;
+	Cost			startup_delay = 0.0;
+	Cost			cpu_per_tuple = 0.0;
+	Cost			discount_total = 0.0;
 	double			selectivity;
+	double			heap_size;
+	Size			htup_size;
+	Size			num_chunks;
+	QualCost		qcost;
+	double			spc_seq_page_cost;
+	double			ntuples = baserel->tuples;
+	double			gpu_ratio = pgstrom_gpu_operator_cost / cpu_operator_cost;
 
 	pathnode->path.rows = (param_info
 						   ? param_info->ppi_rows
 						   : baserel->rows);
-
+	/* estimate selectivity */
 	selectivity = clauselist_selectivity(root,
 										 dev_quals,
 										 baserel->relid,
 										 JOIN_INNER,
 										 NULL);
-	cost_gpuscan(list_length(baserel->reltargetlist),
-				 baserel->reltablespace,
-				 baserel->pages,
-				 baserel->tuples,
-				 pathnode->path.rows,
-				 selectivity,
-				 dev_quals,
-				 host_quals,
-				 param_info ? param_info->ppi_clauses : NULL,
-				 &pathnode->path.startup_cost,
-				 &pathnode->path.total_cost);
+	/* estimate number of chunks */
+	heap_size = (double)(BLCKSZ - SizeOfPageHeaderData) * baserel->pages;
+	htup_size = (MAXALIGN(offsetof(HeapTupleHeaderData,
+								   t_bits[BITMAPLEN(baserel->max_attr)])) +
+				 MAXALIGN(heap_size / Max(baserel->tuples, 1.0) -
+						  sizeof(ItemIdData) - SizeofHeapTupleHeader));
+	num_chunks = (Size)
+		(((double)(offsetof(kern_tupitem, htup) + htup_size +
+				   sizeof(cl_uint)) * Max(baserel->tuples, 1.0)) /
+		 ((double)(pgstrom_chunk_size() -
+				   KDS_CALCULATE_HEAD_LENGTH(baserel->max_attr))));
+	num_chunks = Max(num_chunks, 1);
+
+	/* fetch estimated page cost for tablespace containing the table */
+	get_tablespace_page_costs(baserel->reltablespace,
+							  NULL, &spc_seq_page_cost);
+	/* Disk costs */
+	run_cost += spc_seq_page_cost * (double)baserel->pages;
+
+	/* Cost for GPU qualifiers */
+	cost_qual_eval(&qcost, dev_quals, root);
+	startup_cost += qcost.startup;
+	run_cost += qcost.per_tuple * gpu_ratio * ntuples;
+	ntuples *= selectivity;
+
+	if (dev_tlist != NIL)
+	{
+		Cost		discount_per_tuple = 0.0;
+		cl_uint		num_vars = 0;
+		ListCell   *lc;
+		Bitmapset  *varattnos = NULL;
+
+		foreach (lc, dev_tlist)
+		{
+			TargetEntry	   *tle = lfirst(lc);
+
+			if (IsA(tle->expr, Var))
+				varattnos = bms_add_member(varattnos,
+										   ((Var *)tle->expr)->varno -
+										   FirstLowInvalidHeapAttributeNumber);
+			else if (IsA(tle->expr, Const) || IsA(tle->expr, Param))
+				num_vars++;
+			else if (pgstrom_device_expression(tle->expr))
+			{
+				cost_qual_eval_node(&qcost, (Node *)tle->expr, root);
+				discount_per_tuple += (qcost.per_tuple *
+									   Max(1.0 - gpu_ratio, 0.0));
+				num_vars++;
+			}
+			else
+			{
+				pull_varattnos((Node *)tle->expr, baserel->relid, &varattnos);
+			}
+		}
+
+		if (num_vars > baserel->max_attr)
+			discount_per_tuple -= cpu_tuple_cost * (double)(num_vars -
+															baserel->max_attr);
+		discount_total = discount_per_tuple * ntuples;
+	}
+
+	/* Cost for CPU qualifiers */
+	cost_qual_eval(&qcost, host_quals, root);
+	startup_cost += qcost.startup;
+	cpu_per_tuple += qcost.per_tuple;
+
+	/* PPI costs (as a part of host quals, if any) */
+	cost_qual_eval(&qcost, ppi_quals, root);
+	startup_cost += qcost.startup;
+	cpu_per_tuple += qcost.per_tuple;
+
+	run_cost += (cpu_per_tuple + cpu_tuple_cost) * ntuples;
+
+	/* Cost for DMA transfer */
+	run_cost += pgstrom_gpu_dma_cost * (double) num_chunks;
+
+	/* Latency to get the first chunk */
+	startup_delay = run_cost * (1.0 / (double) num_chunks);
+
+	/* Discount device projection cost if any */
+	run_cost = Max(run_cost - discount_total, startup_delay);
+
+	pathnode->path.startup_cost = startup_cost + startup_delay;
+	pathnode->path.total_cost = startup_cost + run_cost;
 }
 
 static void
@@ -291,6 +377,7 @@ gpuscan_add_scan_path(PlannerInfo *root,
 					  RangeTblEntry *rte)
 {
 	CustomPath	   *pathnode;
+	List		   *dev_tlist = NIL;
 	List		   *dev_quals = NIL;
 	List		   *host_quals = NIL;
 	ListCell	   *cell;
@@ -320,6 +407,10 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	if (get_rel_namespace(rte->relid) == PG_CATALOG_NAMESPACE)
 		return;
 
+	/* Is this path responsible to evaluation of final target-list? */
+	if (bms_equal(root->all_baserels, baserel->relids))
+		dev_tlist = root->parse->targetList;
+
 	/*
 	 * check whether the qualifier can run on GPU device, or not
 	 */
@@ -334,8 +425,11 @@ gpuscan_add_scan_path(PlannerInfo *root,
 			host_quals = lappend(host_quals, rinfo);
 	}
 
-	/* GpuScan does not make sense if no device qualifiers */
-	if (dev_quals == NIL)
+	/*
+	 * GpuScan does not make sense if neither dev_tlist nor dev_quals valid.
+	 * It is almost equivalent to SeqScan.
+	 */
+	if (dev_tlist == NIL && dev_quals == NIL)
 		return;
 
 	/*
@@ -352,37 +446,13 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	pathnode->methods = &gpuscan_path_methods;
 
 	/* cost estimation */
-	cost_gpuscan_path(root, pathnode, dev_quals, host_quals);
+	cost_gpuscan_path(root, pathnode, dev_tlist, dev_quals, host_quals);
 
 	/*
 	 * FIXME: needs to pay attention for projection cost?
 	 */
 	add_path(baserel, &pathnode->path);
 }
-
-#if 0
-/*
- * assign_bare_ntuples
- *
- * It assigns original number of tuples of the target relation when BulkScan
- * is built, because original plan_rows introduces the number of tuples
- * already filtered out, however, BulkScan will pull-up device executable
- * qualifiers.
- */
-static void
-assign_bare_ntuples(Plan *plannode, RangeTblEntry *rte)
-{
-	Relation		rel = heap_open(rte->relid, NoLock);
-	BlockNumber		num_pages;
-	double			num_tuples;
-	double			allvisfrac;
-
-	estimate_rel_size(rel, NULL, &num_pages, &num_tuples, &allvisfrac);
-	plannode->plan_rows = num_tuples;
-
-	heap_close(rel, NoLock);
-}
-#endif
 
 /*
  * pgstrom_pullup_outer_scan
@@ -1540,6 +1610,7 @@ pgstrom_post_planner_gpuscan(PlannedStmt *pstmt, Plan **p_curr_plan)
 	baserel = heap_open(rte->relid, NoLock);
 	tupdesc = RelationGetDescr(baserel);
 
+#if 1
 	/*
 	 * Try to replace SeqScan to evaluate target-list on the device side.
 	 * Unlike outer pull-up, GpuScan can handle host-only expression using
@@ -1555,6 +1626,7 @@ pgstrom_post_planner_gpuscan(PlannedStmt *pstmt, Plan **p_curr_plan)
 			return;
 		}
 	}
+#endif
 	/* extract private fields */
 	gs_info = deform_gpuscan_info(cscan);
 
