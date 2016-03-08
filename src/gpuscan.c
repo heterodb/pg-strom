@@ -175,6 +175,7 @@ static TupleTableSlot *gpuscan_next_tuple(GpuTaskState *gts);
 	"  return true;\n"									\
 	"}\n"
 
+#if 0
 /*
  * cost_gpuscan
  *
@@ -253,6 +254,7 @@ cost_gpuscan(AttrNumber ncols,		/* number of columns */
 	*p_startup_cost = startup_cost + startup_delay;
 	*p_total_cost = startup_cost + run_cost;
 }
+#endif
 
 static void
 cost_gpuscan_path(PlannerInfo *root, CustomPath *pathnode,
@@ -573,6 +575,7 @@ gpuscan_codegen_exec_quals(codegen_context *context, List *dev_quals)
 	return body.data;
 }
 
+#if 0
 /*
  * gpuscan_try_replace_seqscan
  *
@@ -671,6 +674,7 @@ gpuscan_try_replace_seqscan(Relation baserel, SeqScan *seqscan)
 
 	return cscan;
 }
+#endif
 
 static Plan *
 create_gpuscan_plan(PlannerInfo *root,
@@ -1610,7 +1614,7 @@ pgstrom_post_planner_gpuscan(PlannedStmt *pstmt, Plan **p_curr_plan)
 	baserel = heap_open(rte->relid, NoLock);
 	tupdesc = RelationGetDescr(baserel);
 
-#if 1
+#if 0
 	/*
 	 * Try to replace SeqScan to evaluate target-list on the device side.
 	 * Unlike outer pull-up, GpuScan can handle host-only expression using
