@@ -667,6 +667,7 @@ static bool
 cost_gpujoin(PlannerInfo *root,
 			 RelOptInfo *joinrel,
 			 GpuJoinPath *gpath,
+			 List *final_tlist,
 			 Relids required_outer)
 {
 	Path	   *outer_path = gpath->outer_path;
@@ -677,6 +678,7 @@ cost_gpujoin(PlannerInfo *root,
 	Cost		startup_delay;
 	QualCost   *join_cost;
 	Size		inner_total_sz = 0;
+	double		gpu_ratio = pgstrom_gpu_operator_cost / cpu_operator_cost;
 	double		chunk_ntuples;
 	double		total_nloops_minor = 1.0;	/* loops by kds_dst overflow */
 	double		total_nloops_major = 1.0;	/* loops by pmrels overflow */
@@ -708,8 +710,7 @@ cost_gpujoin(PlannerInfo *root,
 	for (i=0; i < num_rels; i++)
 	{
 		cost_qual_eval(&join_cost[i], gpath->inners[i].join_quals, root);
-		join_cost[i].per_tuple *= (pgstrom_gpu_operator_cost /
-								   cpu_operator_cost);
+		join_cost[i].per_tuple *= gpu_ratio;
 	}
 
 	/*
@@ -785,14 +786,65 @@ cost_gpujoin(PlannerInfo *root,
 	run_cost += (run_cost_per_chunk *
 				 (double) num_chunks *
 				 (double) total_nloops_minor);
+	/*
+	 * cost to sent inner/outer chunks; we assume 20% of kernel task call
+	 * also involve DMA of inner multi-relations buffer
+	 */
+	/* outer DMA cost */
+	run_cost += (double)num_chunks * pgstrom_gpu_dma_cost;
+	/* inner DMA cost */
+	run_cost += ((double)inner_total_sz / (double)pgstrom_chunk_size() *
+				 (double)num_chunks * pgstrom_gpu_dma_cost *
+				 total_nloops_minor * 0.20);
+
+	/*
+	 * Major inner split makes iteration of entire process multiple times
+	 */
 	run_cost *= total_nloops_major;
 
-	/* cost to send inner buffer; assume 25% of kernel kick will take DMA */
-	run_cost += ((double)(inner_total_sz / pgstrom_chunk_size())
-				 * pgstrom_gpu_dma_cost
-				 * ((double)num_chunks *
-					total_nloops_minor *
-					total_nloops_major) * 0.25);
+	/*
+	 * cost discount by GPU projection, if this join is the last level
+	 */
+	if (final_tlist != NIL)
+	{
+		Cost		discount_per_tuple = 0.0;
+		Cost		discount_total;
+		QualCost	qcost;
+		cl_uint		num_vars = 0;
+		ListCell   *lc;
+
+		foreach (lc, final_tlist)
+		{
+			TargetEntry	   *tle = lfirst(lc);
+
+			if (IsA(tle->expr, Var) ||
+				IsA(tle->expr, Const) ||
+				IsA(tle->expr, Param))
+				num_vars++;
+			else if (pgstrom_device_expression(tle->expr))
+            {
+                cost_qual_eval_node(&qcost, (Node *)tle->expr, root);
+                discount_per_tuple += (qcost.per_tuple *
+                                       Max(1.0 - gpu_ratio, 0.0) / 10.0);
+                num_vars++;
+            }
+            else
+            {
+				List	   *vars_list
+					= pull_vars_of_level((Node *)tle->expr, 0);
+				num_vars += list_length(vars_list);
+				list_free(vars_list);
+			}
+		}
+
+		if (num_vars > list_length(joinrel->reltargetlist))
+			discount_per_tuple -= cpu_tuple_cost *
+				(double)(num_vars - list_length(joinrel->reltargetlist));
+		discount_total = discount_per_tuple * joinrel->rows;
+
+		run_cost = Max(run_cost - discount_total, 0.0);
+	}
+
 	/*
 	 * delay to fetch the first tuple
 	 */
@@ -869,6 +921,7 @@ create_gpujoin_path(PlannerInfo *root,
 					RelOptInfo *joinrel,
 					Path *outer_path,
 					List *inner_path_list,
+					List *final_tlist,
 					ParamPathInfo *param_info,
 					Relids required_outer)
 {
@@ -919,7 +972,7 @@ create_gpujoin_path(PlannerInfo *root,
 	 * cost calculation of GpuJoin, then, add this path to the joinrel,
 	 * unless its cost is not obviously huge.
 	 */
-	if (cost_gpujoin(root, joinrel, result, required_outer))
+	if (cost_gpujoin(root, joinrel, result, final_tlist, required_outer))
 	{
 		List   *custom_paths = list_make1(result->outer_path);
 
@@ -1125,6 +1178,8 @@ gpujoin_add_join_path(PlannerInfo *root,
 	Path	   *inner_path;
 	List	   *inner_path_list;
 	List	   *restrict_clauses;
+	List	   *final_tlist = NIL;
+	ListCell   *lc;
 	Relids		required_outer;
 	ParamPathInfo *param_info;
 	inner_path_item *ip_item;
@@ -1164,6 +1219,28 @@ gpujoin_add_join_path(PlannerInfo *root,
 									 &required_outer))
 		return;
 
+	/*
+	 * We will consider the device projection cost if this joinrel may
+	 * take complicated but device executable expressions.
+	 */
+	if (bms_equal(root->all_baserels, joinrel->relids))
+	{
+		foreach (lc, root->parse->targetList)
+		{
+			TargetEntry	   *tle = lfirst(lc);
+
+			if (!IsA(tle->expr, Var) &&
+				!IsA(tle->expr, Const) &&
+				!IsA(tle->expr, Param) &&
+				pgstrom_device_expression(tle->expr))
+			{
+				final_tlist = root->parse->targetList;
+				break;
+			}
+		}
+	}
+
+	/* get param info */
 	param_info = get_joinrel_parampathinfo(root,
 										   joinrel,
 										   outer_path,
@@ -1188,8 +1265,11 @@ gpujoin_add_join_path(PlannerInfo *root,
 		Assert(outerrel == outer_path->parent);
 		Assert(innerrel == ip_item->inner_path->parent);
 
-		/* no benefit to run cross join in GPU device */
-		if (!restrict_clauses)
+		/*
+		 * It makes no sense to run cross join on GPU devices without
+		 * GPU projection opportunity.
+		 */
+		if (!final_tlist && !restrict_clauses)
 			return;
 
 		/*
@@ -1248,6 +1328,7 @@ gpujoin_add_join_path(PlannerInfo *root,
 								joinrel,
 								outer_path,
 								inner_path_list,
+								final_tlist,
 								param_info,
                                 required_outer);
 		}
@@ -1262,6 +1343,7 @@ gpujoin_add_join_path(PlannerInfo *root,
 								joinrel,
 								outer_path,
 								inner_path_list,
+								final_tlist,
 								param_info,
 								required_outer);
 		}

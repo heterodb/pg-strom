@@ -258,7 +258,7 @@ cost_gpuscan(AttrNumber ncols,		/* number of columns */
 
 static void
 cost_gpuscan_path(PlannerInfo *root, CustomPath *pathnode,
-				  List *dev_tlist, List *dev_quals, List *host_quals)
+				  List *final_tlist, List *dev_quals, List *host_quals)
 {
 	RelOptInfo	   *baserel = pathnode->path.parent;
 	ParamPathInfo  *param_info = pathnode->path.param_info;
@@ -267,7 +267,6 @@ cost_gpuscan_path(PlannerInfo *root, CustomPath *pathnode,
 	Cost			run_cost = 0.0;
 	Cost			startup_delay = 0.0;
 	Cost			cpu_per_tuple = 0.0;
-	Cost			discount_total = 0.0;
 	double			selectivity;
 	double			heap_size;
 	Size			htup_size;
@@ -311,14 +310,31 @@ cost_gpuscan_path(PlannerInfo *root, CustomPath *pathnode,
 	run_cost += qcost.per_tuple * gpu_ratio * ntuples;
 	ntuples *= selectivity;
 
-	if (dev_tlist != NIL)
+	/* Cost for CPU qualifiers */
+	cost_qual_eval(&qcost, host_quals, root);
+	startup_cost += qcost.startup;
+	cpu_per_tuple += qcost.per_tuple;
+
+	/* PPI costs (as a part of host quals, if any) */
+	cost_qual_eval(&qcost, ppi_quals, root);
+	startup_cost += qcost.startup;
+	cpu_per_tuple += qcost.per_tuple;
+
+	run_cost += (cpu_per_tuple + cpu_tuple_cost) * ntuples;
+
+	/* Cost for DMA transfer */
+	run_cost += pgstrom_gpu_dma_cost * (double) num_chunks;
+
+	/* Cost discount it GPU Projection off-loads CPU workloads */
+	if (final_tlist != NIL)
 	{
 		Cost		discount_per_tuple = 0.0;
+		Cost		discount_total;
 		cl_uint		num_vars = 0;
 		ListCell   *lc;
 		Bitmapset  *varattnos = NULL;
 
-		foreach (lc, dev_tlist)
+		foreach (lc, final_tlist)
 		{
 			TargetEntry	   *tle = lfirst(lc);
 
@@ -340,33 +356,16 @@ cost_gpuscan_path(PlannerInfo *root, CustomPath *pathnode,
 				pull_varattnos((Node *)tle->expr, baserel->relid, &varattnos);
 			}
 		}
-
 		if (num_vars > baserel->max_attr)
-			discount_per_tuple -= cpu_tuple_cost * (double)(num_vars -
-															baserel->max_attr);
-		discount_total = discount_per_tuple * ntuples;
+			discount_per_tuple -= cpu_tuple_cost *
+				(double)(num_vars - baserel->max_attr);
+		discount_total = discount_per_tuple * baserel->rows;
+
+		run_cost = Max(run_cost - discount_total, 0.0);
 	}
-
-	/* Cost for CPU qualifiers */
-	cost_qual_eval(&qcost, host_quals, root);
-	startup_cost += qcost.startup;
-	cpu_per_tuple += qcost.per_tuple;
-
-	/* PPI costs (as a part of host quals, if any) */
-	cost_qual_eval(&qcost, ppi_quals, root);
-	startup_cost += qcost.startup;
-	cpu_per_tuple += qcost.per_tuple;
-
-	run_cost += (cpu_per_tuple + cpu_tuple_cost) * ntuples;
-
-	/* Cost for DMA transfer */
-	run_cost += pgstrom_gpu_dma_cost * (double) num_chunks;
 
 	/* Latency to get the first chunk */
 	startup_delay = run_cost * (1.0 / (double) num_chunks);
-
-	/* Discount device projection cost if any */
-	run_cost = Max(run_cost - discount_total, startup_delay);
 
 	pathnode->path.startup_cost = startup_cost + startup_delay;
 	pathnode->path.total_cost = startup_cost + run_cost;
@@ -379,7 +378,7 @@ gpuscan_add_scan_path(PlannerInfo *root,
 					  RangeTblEntry *rte)
 {
 	CustomPath	   *pathnode;
-	List		   *dev_tlist = NIL;
+	List		   *final_tlist = NIL;
 	List		   *dev_quals = NIL;
 	List		   *host_quals = NIL;
 	ListCell	   *cell;
@@ -411,7 +410,21 @@ gpuscan_add_scan_path(PlannerInfo *root,
 
 	/* Is this path responsible to evaluation of final target-list? */
 	if (bms_equal(root->all_baserels, baserel->relids))
-		dev_tlist = root->parse->targetList;
+	{
+		foreach (cell, root->parse->targetList)
+		{
+			TargetEntry	   *tle = lfirst(cell);
+
+			if (!IsA(tle->expr, Var) &&
+				!IsA(tle->expr, Const) &&
+				!IsA(tle->expr, Param) &&
+				pgstrom_device_expression(tle->expr))
+			{
+				final_tlist = root->parse->targetList;
+				break;
+			}
+		}
+	}
 
 	/*
 	 * check whether the qualifier can run on GPU device, or not
@@ -428,10 +441,10 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	}
 
 	/*
-	 * GpuScan does not make sense if neither dev_tlist nor dev_quals valid.
+	 * GpuScan does not make sense if neither final_tlist nor dev_quals valid.
 	 * It is almost equivalent to SeqScan.
 	 */
-	if (dev_tlist == NIL && dev_quals == NIL)
+	if (final_tlist == NIL && dev_quals == NIL)
 		return;
 
 	/*
@@ -448,7 +461,7 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	pathnode->methods = &gpuscan_path_methods;
 
 	/* cost estimation */
-	cost_gpuscan_path(root, pathnode, dev_tlist, dev_quals, host_quals);
+	cost_gpuscan_path(root, pathnode, final_tlist, dev_quals, host_quals);
 
 	/*
 	 * FIXME: needs to pay attention for projection cost?

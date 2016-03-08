@@ -2364,18 +2364,8 @@ pgstrom_device_expression(Expr *expr)
 
 		if (caseexpr->arg)
 		{
-			Oid				expr_type = exprType((Node *)caseexpr->arg);
-			devtype_info   *dtype = pgstrom_devtype_lookup(expr_type);
-
-			Assert(caseexpr->casetype == dtype->type_oid);
-			if (!OidIsValid(dtype->type_eqfunc) ||
-				!pgstrom_devfunc_lookup(dtype->type_eqfunc,
-										caseexpr->casecollid))
-			{
-				elog(DEBUG2, "Unable to run on device: %s",
-					 nodeToString(caseexpr->arg));
+			if (!pgstrom_device_expression(caseexpr->arg))
 				return false;
-			}
 		}
 
 		foreach (cell, caseexpr->args)
@@ -2397,6 +2387,19 @@ pgstrom_device_expression(Expr *expr)
 		}
 		if (!pgstrom_device_expression((Expr *)caseexpr->defresult))
 			return false;
+		return true;
+	}
+	else if (IsA(expr, CaseTestExpr))
+	{
+		CaseTestExpr   *casetest = (CaseTestExpr *) expr;
+		devtype_info   *dtype = pgstrom_devtype_lookup(casetest->typeId);
+
+		if (!dtype)
+		{
+			elog(DEBUG2, "Unable to run on device: %s",
+				 nodeToString(casetest));
+			return false;
+		}
 		return true;
 	}
 	elog(DEBUG2, "Unable to run on device: %s", nodeToString(expr));
