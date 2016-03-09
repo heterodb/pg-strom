@@ -1063,7 +1063,6 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 			 * to this grouping-key.
 			 */
 			owner_index = new_slot.s.index;
-
 		}
 		else if (cur_slot.s.hash == new_slot.s.hash &&
 				 gpupreagg_keymatch(&kcxt,
@@ -1111,7 +1110,8 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 	 * So, we can use kds->nrooms to check array boundary.
 	 */
 	__syncthreads();
-	index = arithmetic_stairlike_add(kds_index == owner_index ? 1 : 0,
+	index = arithmetic_stairlike_add(owner_index != (cl_uint)(0xffffffff) &&
+									 owner_index == kds_index ? 1 : 0,
 									 &count);
 	if (count > 0)
 	{
