@@ -3322,82 +3322,82 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 	 */
 	appendStringInfoString(
 		source,
-		"  HeapTupleHeaderData *htup;\n"
-		"  kern_data_store *kds_in\t__attribute__((unused));\n"
-		"  kern_colmeta *colmeta;\n"
-		"  void *datum;\n");
+		"  HeapTupleHeaderData *htup  __attribute__((unused));\n"
+		"  kern_data_store *kds_in    __attribute__((unused));\n"
+		"  kern_colmeta *colmeta      __attribute__((unused));\n"
+		"  void *datum                __attribute__((unused));\n");
 
 	if (is_nestloop)
 	{
 		StringInfoData	i_struct;
 		StringInfoData	o_struct;
 
-		initStringInfo(&i_struct);
-		initStringInfo(&o_struct);
-
-		appendStringInfo(&i_struct, "  struct inner_struct {\n");
-		appendStringInfo(&o_struct, "  struct outer_struct {\n");
-
-		foreach (cell, kern_vars)
+		if (kern_vars != NIL)	/* in case of not cross-join */
 		{
-			Var			   *kernode = lfirst(cell);
-			devtype_info   *dtype;
-			size_t			field_size;
+			initStringInfo(&i_struct);
+			initStringInfo(&o_struct);
 
-			dtype = pgstrom_devtype_lookup(kernode->vartype);
-			if (!dtype)
-				elog(ERROR, "device type \"%s\" not found",
-					 format_type_be(kernode->vartype));
+			appendStringInfo(&i_struct, "  struct inner_struct {\n");
+			appendStringInfo(&o_struct, "  struct outer_struct {\n");
 
-			if (dtype->type_byval &&
-				dtype->type_length < sizeof(cl_ulong))
-				field_size = sizeof(cl_ulong);
-			else
-				field_size = 2 * sizeof(cl_ulong);
+			foreach (cell, kern_vars)
+			{
+				Var			   *kernode = lfirst(cell);
+				devtype_info   *dtype;
+				size_t			field_size;
 
-			if (kernode->varno == cur_depth)
-				gnl_shmem_xsize += field_size;
-			else
-				gnl_shmem_ysize += field_size;
+				dtype = pgstrom_devtype_lookup(kernode->vartype);
+				if (!dtype)
+					elog(ERROR, "device type \"%s\" not found",
+						 format_type_be(kernode->vartype));
 
+				if (dtype->type_byval &&
+					dtype->type_length < sizeof(cl_ulong))
+					field_size = sizeof(cl_ulong);
+				else
+					field_size = 2 * sizeof(cl_ulong);
+
+				if (kernode->varno == cur_depth)
+					gnl_shmem_xsize += field_size;
+				else
+					gnl_shmem_ysize += field_size;
+
+				appendStringInfo(
+					kernode->varno == cur_depth
+					? &i_struct
+					: &o_struct,
+					"    pg_%s_t KVAR_%u;\n"
+					"#define KVAR_%u\t(%s->KVAR_%u)\n",
+					/* for var decl */
+					dtype->type_name,
+					kernode->varoattno,
+					/* for alias */
+					kernode->varoattno,
+					kernode->varno == cur_depth
+					? "inner_values"
+					: "outer_values",
+					kernode->varoattno);
+				appendStringInfo(
+					v_unaliases,
+					"#undef KVAR_%u\n",
+					kernode->varoattno);
+			}
 			appendStringInfo(
-				kernode->varno == cur_depth
-				? &i_struct
-				: &o_struct,
-				"    pg_%s_t KVAR_%u;\n"
-				"#define KVAR_%u\t(%s->KVAR_%u)\n",
-				/* for var decl */
-				dtype->type_name,
-				kernode->varoattno,
-				/* for alias */
-				kernode->varoattno,
-				kernode->varno == cur_depth
-				? "inner_values"
-				: "outer_values",
-				kernode->varoattno);
+				&i_struct,
+				"  } *inner_values = (SHARED_WORKMEM(struct inner_struct) +\n"
+				"                     get_local_yid());\n");
 			appendStringInfo(
-				v_unaliases,
-				"#undef KVAR_%u\n",
-				kernode->varoattno);
-
-
-
+				&o_struct,
+				"  } *outer_values = ((struct outer_struct *)\n"
+				"                     (SHARED_WORKMEM(struct inner_struct) +\n"
+				"                      get_local_ysize())) +\n"
+				"                     get_local_xid();\n");
+			appendStringInfo(source, "%s%s\n",
+							 i_struct.data,
+							 o_struct.data);
+			pfree(i_struct.data);
+			pfree(o_struct.data);
 		}
-		appendStringInfo(
-			&i_struct,
-			"  } *inner_values = (SHARED_WORKMEM(struct inner_struct) +\n"
-			"                     get_local_yid());\n");
-		appendStringInfo(
-			&o_struct,
-			"  } *outer_values = ((struct outer_struct *)\n"
-			"                     (SHARED_WORKMEM(struct inner_struct) +\n"
-			"                      get_local_ysize())) +\n"
-			"                     get_local_xid();\n");
-		appendStringInfo(source, "%s%s\n",
-						 i_struct.data,
-						 o_struct.data);
-		pfree(i_struct.data);
-		pfree(o_struct.data);
 	}
 	else
 	{
@@ -3499,7 +3499,7 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 			keynode->varoattno,
 			dtype->type_name);
 	}
-	if (is_nestloop)
+	if (is_nestloop && kern_vars != NIL)
 		appendStringInfo(source,
 						 "  }\n"
 						 "  __syncthreads();\n");
