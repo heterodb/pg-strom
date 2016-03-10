@@ -1849,28 +1849,8 @@ codegen_device_projection(CustomScan *cscan, GpuJoinInfo *gj_info,
 		"  HeapTupleHeaderData *htup    __attribute__((unused));\n"
 		"  kern_data_store *kds_in      __attribute__((unused));\n"
 		"  char *addr                   __attribute__((unused));\n"
-		"  char *extra_pos = extra_buf;\n"
-		"  union {\n"
-		"    pg_varlena_t     varlena_v;\n"
-		"    pg_bool_t        bool_v;\n"
-		"    pg_int2_t        int2_v;\n"
-		"    pg_int4_t        int4_v;\n"
-		"    pg_int8_t        int8_v;\n"
-		"    pg_float4_t      float4_v;\n"
-		"    pg_float8_t      float8_v;\n"
-		"#ifdef CUDA_NUMERIC_H\n"
-		"    pg_numeric_t     numeric_v;\n"
-		"#endif\n"
-		"#ifdef CUDA_MONEY_H\n"
-		"    pg_money_t       money_v;\n"
-		"#endif\n"
-		"#ifdef CUDA_TIMELIB_H\n"
-		"    pg_date_t        date_v;\n"
-		"    pg_time_t        time_v;\n"
-		"    pg_timestamp_t   timestamp_v;\n"
-		"    pg_timestamptz_t timestamptz_v;\n"
-		"#endif\n"
-		"  } temp       __attribute__((unused));\n");
+		"  char *extra_pos = extra_buf;\n");
+	codegen_tempvar_declaration(&decl, "temp");
 
 	for (depth=0; depth <= gj_info->num_rels; depth++)
 	{
@@ -4184,8 +4164,8 @@ gpujoin_create_task(GpuJoinState *gjs,
 
 	/* setup of kern_parambuf */
 	/* NOTE: KERN_GPUJOIN_PARAMBUF() depends on pgjoin->kern.num_rels */
-	pgjoin->kern.kparams_offset = offsetof(pgstrom_gpujoin, kern) +
-		STROMALIGN(offsetof(kern_gpujoin, jscale[gjs->num_rels + 1]));
+	pgjoin->kern.kparams_offset
+		= STROMALIGN(offsetof(kern_gpujoin, jscale[gjs->num_rels + 1]));
 	kparams = KERN_GPUJOIN_PARAMBUF(&pgjoin->kern);
 	memcpy(KERN_GPUJOIN_PARAMBUF(&pgjoin->kern),
 		   gjs->gts.kern_params,

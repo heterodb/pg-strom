@@ -112,7 +112,7 @@ typedef struct
 } kern_gpujoin;
 
 #define KERN_GPUJOIN_PARAMBUF(kgjoin)			\
-	((kern_parambuf *)((kgjoin)->jscale + (kgjoin)->num_rels + 1))
+	((kern_parambuf *)((char *)(kgjoin) + (kgjoin)->kparams_offset))
 #define KERN_GPUJOIN_PARAMBUF_LENGTH(kgjoin)	\
 	STROMALIGN(KERN_GPUJOIN_PARAMBUF(kgjoin)->length)
 #define KERN_GPUJOIN_HEAD_LENGTH(kgjoin)				\

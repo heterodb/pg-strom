@@ -292,13 +292,14 @@ typedef struct
 	struct kern_parambuf *kparams;
 } kern_context;
 
-#define INIT_KERNEL_CONTEXT(kcxt,kfunction,kparams)		\
-	do {												\
-		(kcxt)->e.errcode = StromError_Success;			\
-		(kcxt)->e.kernel = StromKernel_##kfunction;		\
-		(kcxt)->e.lineno = 0;							\
-		KERN_ERRORBUF_SET_EXTRA(&(kcxt)->e,0,0,0);		\
-		(kcxt)->kparams = (kparams);					\
+#define INIT_KERNEL_CONTEXT(kcxt,kfunction,kparams)			\
+	do {													\
+		(kcxt)->e.errcode = StromError_Success;				\
+		(kcxt)->e.kernel = StromKernel_##kfunction;			\
+		(kcxt)->e.lineno = 0;								\
+		KERN_ERRORBUF_SET_EXTRA(&(kcxt)->e,0,0,0);			\
+		(kcxt)->kparams = (kparams);						\
+		assert((cl_ulong)(kparams) == MAXALIGN(kparams));	\
 	} while(0)
 
 /*
@@ -1283,7 +1284,7 @@ toast_raw_datum_size(kern_context *kcxt, varlena *attr)
 		char		   *__pos;											\
 																		\
 		if (!__htup)													\
-			__ncols = 0;	/* deal w*/									\
+			__ncols = 0;	/* to be considered as NULL */				\
 		else															\
 		{																\
 			__heap_hasnull = ((__htup->t_infomask & HEAP_HASNULL) != 0); \
