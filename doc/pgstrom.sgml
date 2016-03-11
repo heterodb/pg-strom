@@ -2,20 +2,20 @@
 
 <!DOCTYPE book PUBLIC "-//OASIS//DTD DocBook V4.2//EN" [
 
-<!ENTITY % pgstrom_version SYSTEM "version.sgml">
-%pgstrom_version;
+<!ENTITY % stromversion SYSTEM "version.sgml">
+%stromversion;
 <!ENTITY % filelist SYSTEM "filelist.sgml">
 %filelist;
 
 ]>
 
 <book id="pgstrom">
-  <title>PG-Strom &pgstrom_version; Documentation</title>
+  <title>PG-Strom &stromversion; Documentation</title>
 
   <bookinfo>
     <corpauthor>The PG-Strom Development Team</corpauthor>
     <productname>PG-Strom</productname>
-    <productnumber>&pgstrom_version;</productnumber>
+    <productnumber>&stromversion;</productnumber>
   </bookinfo>
 
   <part id="getting-started">

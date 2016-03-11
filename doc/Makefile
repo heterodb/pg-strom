@@ -43,7 +43,7 @@ html.single-stamp: pgstrom.sgml $(ALLSGML) $(GENERATED_SGML) stylesheet.dsl webs
 	touch $@
 
 version.sgml:
-	@echo "<!ENTITY pgstrom_version \"$(PGSTROM_VERSION)\">" > $@
+	@echo "<!ENTITY stromversion \"$(PGSTROM_VERSION)\">" > $@
 
 HTML.index: pgstrom.sgml $(ALMOSTALLSGML) stylesheet.dsl
 	@$(MKDIR_P) html

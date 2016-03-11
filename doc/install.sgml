@@ -5,8 +5,11 @@
   This chapter introduce the steps to install <productname>PG-Strom</> from
   the source code.
  </para>
- <para>
+ <para lang="en">
   Below is the quick-check list prior to installation.
+ </para>
+ <para lang="ja">
+  Ika ha quick-check list desu.
  </para>
  <variablelist>
   <title>Quick CheckList</title>
