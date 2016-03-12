@@ -2,58 +2,24 @@
 PGSTROM_MAKEFILE_IN_SUBDIR := 1
 include ../Makefile
 
-EXTRA_CLEAN := $(EXTRA_CLEAN_DOC)
+PYTHON := $(shell which python)
+HTMLSOURCES := manual.src.html install.src.html tutrial.src.html \
+		troubles.src.html release.src.html
+HTMLFILES := $(addprefix html/,$(HTMLSOURCES:.src.html=.html))
+EXTRA_CLEAN := $(HTMLFILES)
 
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 
-ifndef JADE
-JADE = jade
-endif
-
-SGMLINCLUDE = -D .
-
-SPFLAGS += -wall -wno-unused-param -wno-empty -wfully-tagged
-
-JADE.html.call = $(JADE) $(JADEFLAGS) $(SPFLAGS) $(SGMLINCLUDE) $(CATALOG) -d stylesheet.dsl -t sgml -i output-html
-
-JADE.html.single.call = $(JADE.html.call) -V nochunks -V rootchunk -V '(define %root-filename% \#f)' -V '(define use-output-dir \#f)'
-
-ALLSGML := $(wildcard $(srcdir)/*.sgml)
-# to build bookindex
-ALMOSTALLSGML := $(filter-out %bookindex.sgml,$(ALLSGML))
-GENERATED_SGML = version.sgml bookindex.sgml
-
 all: html
 
-html: html-stamp
+html: $(HTMLFILES)
 
-html.single: html.single-stamp
-
-html-stamp: pgstrom.sgml $(ALLSGML) $(GENERATED_SGML) stylesheet.dsl website-docs.css
-	$(MKDIR_P) html
-	$(JADE.html.call) -i include-index $<
-	cp stylesheet.css website-docs.css html
-	touch $@
-
-html.single-stamp: pgstrom.sgml $(ALLSGML) $(GENERATED_SGML) stylesheet.dsl website-docs.css
-	$(MKDIR_P) html
-	$(JADE.html.single.call) -i include-index $<
-	cp stylesheet.css website-docs.css html
-	touch $@
-
-version.sgml:
-	@echo "<!ENTITY stromversion \"$(PGSTROM_VERSION)\">" > $@
-
-HTML.index: pgstrom.sgml $(ALMOSTALLSGML) stylesheet.dsl
+$(HTMLFILES): $(HTMLSOURCES) template.src.html
 	@$(MKDIR_P) html
-	$(JADE.html.call) -V html-index $<
-
-bookindex.sgml: HTML.index
-ifdef COLLATEINDEX
-	LC_ALL=C $(PERL) $(COLLATEINDEX) -f -g -i 'bookindex' -o $@ $<
-else
-	collateindex.pl $< $@
-endif
+	@./menugen.py -t template.src.html \
+		-v '$(PGSTROM_VERSION)' \
+		-m $(@:html/%.html=%.src.html) $(HTMLSOURCES) > $@
+	@echo $@
 
 .PHONY: html html.single all

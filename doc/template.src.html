@@ -1,0 +1,53 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="ja">
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta http-equiv="Content-Style-Type" content="text/css" />
+<meta http-equiv="Content-Script-Type" content="text/javascript" />
+<meta http-equiv="imagetoolbar" content="no" />
+<meta name="description" content="" />
+<meta name="keywords" content="" />
+<link rel="stylesheet" href="manual.css" type="text/css" />
+<title>PG-Strom - User's Manual</title>
+<head>
+<body>
+<!-- Multi-Language Selector -->
+<input type="radio" name="lang-select" id="lang-ja" value="1" checked>
+<input type="radio" name="lang-select" id="lang-en" value="2">
+<div id="left_menu">
+PG-Strom
+%%%PGSTROM_MANUAL_VERSION%%%
+Manual
+
+<label for="lang-ja" onclick="document.cookie='lang_setting=ja';">
+  <img src="img/lang_ja.png">
+</label>
+<label for="lang-en" onclick="document.cookie='lang_setting=en';">
+  <img src="img/lang_en.png">
+</label>
+
+<ul>
+%%%PGSTROM_MANUAL_MENU%%%
+</ul>
+</div>
+<div id="manual_body">
+
+%%%PGSTROM_MANUAL_BODY%%%
+
+</div>
+<!-- Default language setting -->
+<script type="text/javascript">
+  var lang_setting = GetCookie("lang_setting");
+  if (!lang_setting || !lang_setting.match(/^(ja|en).*/))
+  {
+    lang_setting=navigator.userLanguage ||
+                 navigator.browserLanguage ||
+                 navigator.language;
+  }
+  if (lang_setting.match(/^ja.*/))
+    document.getElementsByName("lang-select")[0].checked = true;
+  else
+    document.getElementsByName("lang-select")[1].checked = true;
+</script>
+</body>
+</html>

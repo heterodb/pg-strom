@@ -38,8 +38,7 @@ CUDA_SOURCES = $(CUDA_OBJS:.o=.c)
 # Extra files to be cleaned
 #
 EXTRA_CLEAN_SRC=$(CUDA_SOURCES)
-EXTRA_CLEAN_DOC=html version.sgml bookindex.sgml \
-		HTML.index html-stamp html.single-stamp
+EXTRA_CLEAN_DOC=
 
 ifndef PGSTROM_MAKEFILE_IN_SUBDIR
 all:
@@ -49,9 +48,6 @@ check installcheck:
 	$(MAKE) -C test $* $(MAKEFLAGS)
 
 html:
-	$(MAKE) -C doc $@ $(MAKEFLAGS)
-
-html.single:
 	$(MAKE) -C doc $@ $(MAKEFLAGS)
 
 %:
