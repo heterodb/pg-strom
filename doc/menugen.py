@@ -10,6 +10,7 @@ from HTMLParser import HTMLParser
 # HTML Parser Enhancement
 #
 class StromDocParser(HTMLParser):
+    toc_index = []
     html_lines = ""
     menu_items = ""
     __h1_start = 0
@@ -18,6 +19,10 @@ class StromDocParser(HTMLParser):
     __h2_attrs = 0
     __h3_start = 0
     __h3_attrs = 0
+    __h4_start = 0
+    __h4_attrs = 0
+    __h5_start = 0
+    __h5_attrs = 0
 
     def handle_starttag(self, tag, attrs):
         if (tag == "h1"):
@@ -29,6 +34,12 @@ class StromDocParser(HTMLParser):
         elif (tag == "h3"):
             self.__h3_start = self.getpos()
             self.__h3_attrs = attrs
+        elif (tag == "h4"):
+            self.__h4_start = self.getpos()
+            self.__h4_attrs = attrs
+        elif (tag == "h5"):
+            self.__h5_start = self.getpos()
+            self.__h5_attrs = attrs
 
     def handle_endtag(self, tag):
         result = ""
@@ -42,6 +53,12 @@ class StromDocParser(HTMLParser):
         elif (tag == "h3"):
             startpos = self.__h3_start
             attrs = self.__h3_attrs
+        elif (tag == "h4"):
+            startpos = self.__h4_start
+            attrs = self.__h4_attrs
+        elif (tag == "h5"):
+            startpos = self.__h5_start
+            attrs = self.__h5_attrs
         else:
             return
 
@@ -58,14 +75,17 @@ class StromDocParser(HTMLParser):
             result += line
         result = result[result.find('>') + 1:]
 
-        menuitem = "<li class=\"menuitem_" + tag + "\">"
-        menuitem += "<a href=\"./" + self.html_filename
+        link = ""
         for x in attrs:
             if (x[0] == "id"):
-                menuitem += "#" + x[1]
+                link = "<a href=\"./" + self.html_filename
+                link += "#" + x[1] + "\">" + result + "</a>"
+                self.toc_index.append([x[1], link])
                 break
-        menuitem += "\">" + result + "</a></li>\n"
-        self.menu_items += menuitem
+
+        if (link != "" and (tag == "h1" or tag == "h2") ):
+            item = "<li class=\"menuitem_" + tag + "\">" + link + "</li>\n"
+            self.menu_items += item
 
 optlist, args = getopt.getopt(sys.argv[1:], 't:v:m:')
 
@@ -109,6 +129,7 @@ for filename in args:
     parser.reset()
     fd.close()
 menu_items = parser.menu_items
+toc_index = parser.toc_index
 
 #
 # Apply source HTML to the template
@@ -117,10 +138,22 @@ fd = open(temp_filename, "r")
 template = fd.read()
 fd.close()
 
+fd = open(manual_filename, "r")
+manual = fd.read()
+fd.close()
+
+#
+# Replace PGSTROM_MANUAL_XLINK by <a href=...> tag
+#
+for x in toc_index:
+    pattern = "%%%PGSTROM_MANUAL_XLINK:" + x[0] + "%%%"
+    manual = manual.replace(pattern, x[1])
+
+#
+# Insert manual into the template
+#
 template = template.replace("%%%PGSTROM_MANUAL_VERSION%%%", version_number)
 template = template.replace("%%%PGSTROM_MANUAL_MENU%%%", menu_items)
-fd = open(manual_filename, "r")
-template = template.replace("%%%PGSTROM_MANUAL_BODY%%%", fd.read())
-fd.close()
+template = template.replace("%%%PGSTROM_MANUAL_BODY%%%", manual)
 
 print template
