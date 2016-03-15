@@ -491,7 +491,6 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "btfloat48cmp", 2, {FLOAT4OID, FLOAT8OID}, "f:devfunc_float_comp" },
 	{ "btfloat84cmp", 2, {FLOAT8OID, FLOAT4OID}, "f:devfunc_float_comp" },
 	{ "btfloat8cmp",  2, {FLOAT8OID, FLOAT8OID}, "f:devfunc_float_comp" },
-#if 0
 	/* currency cast */
 	{ "money",			1, {NUMERICOID},			"y/F:numeric_cash" },
 	{ "money",			1, {INT4OID},				"y/F:int4_cash" },
@@ -520,7 +519,6 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "cash_le",		2, {CASHOID, CASHOID},		"y/F:cash_le" },
 	{ "cash_gt",		2, {CASHOID, CASHOID},		"y/F:cash_gt" },
 	{ "cash_ge",		2, {CASHOID, CASHOID},		"y/F:cash_ge" },
-#endif
 	/*
      * Mathmatical functions
      */
@@ -555,8 +553,7 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	/*
      * Trigonometric function
      */
-	{ "degrees", 1, {FLOAT4OID}, "a/f:degrees" },
-	{ "degrees", 1, {FLOAT8OID}, "a/f:degrees" },
+	{ "degrees", 1, {FLOAT8OID}, "f:degrees" },
 	{ "radians", 1, {FLOAT8OID}, "f:radians" },
 	{ "acos",    1, {FLOAT8OID}, "f:acos" },
 	{ "asin",    1, {FLOAT8OID}, "f:asin" },

@@ -1,1 +1,867 @@
-<article><h1 id="tutrial">  <span lang="en">User Tutrial</span>  <span lang="ja">チュートリアル</span></h1><section><h2 id="basic-operations">  <span lang="en">Basic Operations</span>  <span lang="ja">基本的な操作</span></h2><h3 id="tutrial-pgstrom_enabled"><span lang="en">Turn On/Off PG-Strom</span><span lang="ja">PG-Stromの有効化/無効化</span></h3><p><span lang="en">You can turn on/off <tt>PG-Strom</tt> functionality using <tt>pg_strom.enabled</tt> configuration parameter.</span><span lang="ja"><tt>pg_strom.enabled</tt>パラメータを使用して<tt>PG-Strom</tt>機能の有効/無効を切替える事ができます。</span></p><pre># SET pg_strom.enabled = off;</pre><p><span lang="en">The above is the command to turn off the <tt>PG-Strom</tt>, and, the below is the command to turn on <tt>PG-Strom</tt> again.</span><span lang="ja">上記が<tt>PG-Strom</tt>を無効化するコマンド、そして、下記が<tt>PG-Strom</tt>を再び有効化するコマンドです。</span></p><pre># SET pg_strom.enabled = on;</pre><p><span lang="en">You can turn off <tt>PG-Strom</tt> on troubles, then confirm whether the problem is reproducible with no <tt>PG-Strom</tt> support.</span><span lang="ja">トラブル時にはこれらのコマンドを用いて<tt>PG-Strom</tt>を無効化し、その状態でも問題が再現可能かどうかを確認する事ができます。</span></p><div class="hint"><p><span lang="en">The command below allows to turn on/off <tt>PG-Strom</tt> from out of the session.It is convenient to have performance benchmark according to existence of <tt>PG-Strom</tt>, if application construct and send queries to <tt>PostgreSQL</tt> directly.</span><span lang="ja">以下のコマンドを用いることで、セッションの外部から<tt>PG-Strom</tt>の有効・無効を切り替えることができます。これは、アプリケーションが直接<tt>PostgreSQL</tt>にクエリを発行するような状況で、<tt>PG-Strom</tt>の有無に伴う性能差をベンチマークするケースなどで有用です。</span></p><pre># ALTER SYSTEM SET pg_strom.enabled TO off;# SELECT pg_reload_conf();</pre></div><h3 id="tutrial-operation-checks"><span lang="en">Operation Checks of PG-Strom</span><span lang="ja">PG-Stromの動作確認</span></h3><p><span lang="en">EXPLAIN command displays the query execution plan. Once PG-Strom gets a role to execute a part of the given query workloads, it shall be shown as <tt>CustomScan</tt> node; implemented by <tt>PG-Strom</tt>.</span><span lang="ja">EXPLAINコマンドを用いてクエリ実行計画を表示することができます。<tt>PG-Strom</tt>がクエリ処理の一部を実行することになると、その部分は<tt>PG-Strom</tt>によって実装された<tt>CustomScan</tt>ノードとして表示されます。</span></p><pre>postgres=# EXPLAIN           SELECT cat, avg(ax) FROM t0 NATURAL JOIN t1 NATURAL JOIN t2 GROUP BY cat;                                    QUERY PLAN----------------------------------------------------------------------------------- HashAggregate  (cost=2347813.66..2347813.98 rows=26 width=12)   Group Key: t0.cat   ->  Custom Scan (GpuPreAgg)  (cost=14189.15..1878462.46 rows=234 width=44)         Bulkload: On (density: 99.33%)         Reduction: Local + Global         ->  Custom Scan (GpuJoin)  (cost=10189.15..1851180.43 rows=99326645 width=12)               Bulkload: On (density: 100.00%)               Depth 1: GpuHashJoin, HashKeys: (bid), JoinQual: (bid = bid)                        Nrows (in/out: 99.33%), KDS-Hash (size: 12.04MB, nbatches: 1)               Depth 2: GpuHashJoin, HashKeys: (aid), JoinQual: (aid = aid)                        Nrows (in/out: 100.00%), KDS-Hash (size: 12.04MB, nbatches: 1)               ->  Custom Scan (BulkScan) on t0  (cost=0.00..1833334.80 rows=100000080 width=12)               ->  Seq Scan on t2  (cost=0.00..1935.00 rows=100000 width=4)               ->  Seq Scan on t1  (cost=0.00..1935.00 rows=100000 width=12)(14 rows)</pre><p><span lang="en">In the above example, we can see GpuJoin and GpuPreAgg to process relation's join and partial aggregation, by PG-Strom.On the other hands, once we turned off <tt>PG-Strom</tt>, then same query generate different query execution plan.</span><span lang="ja">上記の例では、PG-Stromの提供するGpuJoinとGpuPreAggがそれぞれジョインと部分集約演算を実行します。 一方、いったんPG-Stromを無効化すると、同一のクエリが異なった実行計画を生成します。</span></p><pre>postgres=# SET pg_strom.enabled = off;SETpostgres=# EXPLAIN           SELECT cat, avg(ax) FROM t0 NATURAL JOIN t1 NATURAL JOIN t2 GROUP BY cat;                                    QUERY PLAN----------------------------------------------------------------------------------- HashAggregate  (cost=6824660.14..6824660.47 rows=26 width=12)   Group Key: t0.cat   ->  Hash Join  (cost=7250.00..6328026.92 rows=99326645 width=12)         Hash Cond: (t0.aid = t1.aid)         ->  Hash Join  (cost=3576.00..4182132.55 rows=99326645 width=8)               Hash Cond: (t0.bid = t2.bid)               ->  Seq Scan on t0  (cost=0.00..1833334.80 rows=100000080 width=12)               ->  Hash  (cost=1935.00..1935.00 rows=100000 width=4)                     ->  Seq Scan on t2  (cost=0.00..1935.00 rows=100000 width=4)         ->  Hash  (cost=1935.00..1935.00 rows=100000 width=12)               ->  Seq Scan on t1  (cost=0.00..1935.00 rows=100000 width=12)(11 rows)</pre><p><span lang="en">Here is no CustomScan node, thus PG-Strom is not responsible to execution of the query.</span><span lang="ja">CustomScanが出現していません、したがって、PG-Stromはこのクエリの実行に関与しません。</span></p></section><h2 id="reference_types">  <span lang="en">Reference:Data Types</span>  <span lang="ja">リファレンス：データ型</span></h2><h2 id="reference_functions">  <span lang="en">Reference:Functions and Operators</span>  <span lang="ja">リファレンス：関数と演算子</span></h2><h2 id="reference_configs">  <span lang="en">Reference:Config Options</span>  <span lang="ja">リファレンス：設定パラメータ</span></h2></article>
+<article>
+<h1 id="tutrial">
+  <span lang="en">User Tutrial</span>
+  <span lang="ja">チュートリアル</span>
+</h1>
+
+<section>
+<h2 id="basic-operations">
+  <span lang="en">Basic Operations</span>
+  <span lang="ja">基本的な操作</span>
+</h2>
+
+<h3 id="tutrial-pgstrom_enabled">
+<span lang="en">Turn On/Off PG-Strom</span>
+<span lang="ja">PG-Stromの有効化/無効化</span>
+</h3>
+<p>
+<span lang="en">
+You can turn on/off <tt>PG-Strom</tt> functionality using <tt>pg_strom.enabled</tt> configuration parameter.
+</span>
+<span lang="ja">
+<tt>pg_strom.enabled</tt>パラメータを使用して<tt>PG-Strom</tt>機能の有効/無効を切替える事ができます。
+</span>
+</p>
+<pre>
+# SET pg_strom.enabled = off;
+</pre>
+
+<p>
+<span lang="en">
+The above is the command to turn off the <tt>PG-Strom</tt>, and, the below is the command to turn on <tt>PG-Strom</tt> again.
+</span>
+<span lang="ja">
+上記が<tt>PG-Strom</tt>を無効化するコマンド、そして、下記が<tt>PG-Strom</tt>を再び有効化するコマンドです。
+</span>
+</p>
+
+<pre>
+# SET pg_strom.enabled = on;
+</pre>
+
+<p>
+<span lang="en">
+You can turn off <tt>PG-Strom</tt> on troubles, then confirm whether the problem is reproducible with no <tt>PG-Strom</tt> support.
+</span>
+<span lang="ja">
+トラブル時にはこれらのコマンドを用いて<tt>PG-Strom</tt>を無効化し、その状態でも問題が再現可能かどうかを確認する事ができます。
+</span>
+</p>
+
+<div class="hint">
+<p>
+<span lang="en">
+The command below allows to turn on/off <tt>PG-Strom</tt> from out of the session.
+It is convenient to have performance benchmark according to existence of <tt>PG-Strom</tt>, if application construct and send queries to <tt>PostgreSQL</tt> directly.
+</span>
+<span lang="ja">
+以下のコマンドを用いることで、セッションの外部から<tt>PG-Strom</tt>の有効・無効を切り替えることができます。これは、アプリケーションが直接<tt>PostgreSQL</tt>にクエリを発行するような状況で、<tt>PG-Strom</tt>の有無に伴う性能差をベンチマークするケースなどで有用です。
+</span>
+</p>
+<pre>
+# ALTER SYSTEM SET pg_strom.enabled TO off;
+# SELECT pg_reload_conf();
+</pre>
+</div>
+
+
+
+
+<h3 id="tutrial-operation-checks">
+<span lang="en">Operation Checks of PG-Strom</span>
+<span lang="ja">PG-Stromの動作確認</span>
+</h3>
+
+<p>
+<span lang="en">
+EXPLAIN command displays the query execution plan. Once PG-Strom gets a role to execute a part of the given query workloads, it shall be shown as <tt>CustomScan</tt> node; implemented by <tt>PG-Strom</tt>.
+</span>
+<span lang="ja">
+EXPLAINコマンドを用いてクエリ実行計画を表示することができます。<tt>PG-Strom</tt>がクエリ処理の一部を実行することになると、その部分は<tt>PG-Strom</tt>によって実装された<tt>CustomScan</tt>ノードとして表示されます。
+</span>
+</p>
+
+<pre>
+postgres=# EXPLAIN
+           SELECT cat, avg(ax) FROM t0 NATURAL JOIN t1 NATURAL JOIN t2 GROUP BY cat;
+                                    QUERY PLAN
+-----------------------------------------------------------------------------------
+ HashAggregate  (cost=2347813.66..2347813.98 rows=26 width=12)
+   Group Key: t0.cat
+   ->  Custom Scan (GpuPreAgg)  (cost=14189.15..1878462.46 rows=234 width=44)
+         Bulkload: On (density: 99.33%)
+         Reduction: Local + Global
+         ->  Custom Scan (GpuJoin)  (cost=10189.15..1851180.43 rows=99326645 width=12)
+               Bulkload: On (density: 100.00%)
+               Depth 1: GpuHashJoin, HashKeys: (bid), JoinQual: (bid = bid)
+                        Nrows (in/out: 99.33%), KDS-Hash (size: 12.04MB, nbatches: 1)
+               Depth 2: GpuHashJoin, HashKeys: (aid), JoinQual: (aid = aid)
+                        Nrows (in/out: 100.00%), KDS-Hash (size: 12.04MB, nbatches: 1)
+               ->  Custom Scan (BulkScan) on t0  (cost=0.00..1833334.80 rows=100000080 width=12)
+               ->  Seq Scan on t2  (cost=0.00..1935.00 rows=100000 width=4)
+               ->  Seq Scan on t1  (cost=0.00..1935.00 rows=100000 width=12)
+(14 rows)
+</pre>
+
+<p>
+<span lang="en">
+In the above example, we can see GpuJoin and GpuPreAgg to process relation's join and partial aggregation, by PG-Strom.
+On the other hands, once we turned off <tt>PG-Strom</tt>, then same query generate different query execution plan.
+</span>
+<span lang="ja">
+上記の例では、PG-Stromの提供するGpuJoinとGpuPreAggがそれぞれジョインと部分集約演算を実行します。 一方、いったんPG-Stromを無効化すると、同一のクエリが異なった実行計画を生成します。
+</span>
+</p>
+
+<pre>
+postgres=# SET pg_strom.enabled = off;
+SET
+postgres=# EXPLAIN
+           SELECT cat, avg(ax) FROM t0 NATURAL JOIN t1 NATURAL JOIN t2 GROUP BY cat;
+                                    QUERY PLAN
+-----------------------------------------------------------------------------------
+ HashAggregate  (cost=6824660.14..6824660.47 rows=26 width=12)
+   Group Key: t0.cat
+   ->  Hash Join  (cost=7250.00..6328026.92 rows=99326645 width=12)
+         Hash Cond: (t0.aid = t1.aid)
+         ->  Hash Join  (cost=3576.00..4182132.55 rows=99326645 width=8)
+               Hash Cond: (t0.bid = t2.bid)
+               ->  Seq Scan on t0  (cost=0.00..1833334.80 rows=100000080 width=12)
+               ->  Hash  (cost=1935.00..1935.00 rows=100000 width=4)
+                     ->  Seq Scan on t2  (cost=0.00..1935.00 rows=100000 width=4)
+         ->  Hash  (cost=1935.00..1935.00 rows=100000 width=12)
+               ->  Seq Scan on t1  (cost=0.00..1935.00 rows=100000 width=12)
+(11 rows)
+</pre>
+<p>
+<span lang="en">
+Here is no CustomScan node, thus PG-Strom is not responsible to execution of the query.
+</span>
+<span lang="ja">
+CustomScanが出現していません、したがって、PG-Stromはこのクエリの実行に関与しません。
+</span>
+</p>
+
+</section>
+
+<h2 id="reference_types">
+  <span lang="en">Reference:Data Types</span>
+  <span lang="ja">リファレンス：データ型</span>
+</h2>
+<p>
+<span lang="en">
+PG-Strom supports the data types below.
+</span>
+<span lang="ja">
+PG-Stromは以下のデータ型に対応しています。
+</span>
+</p>
+
+<table class="manual">
+<caption class="manual">
+<span lang="en">Built-in Data Types</span>
+<span lang="ja">組み込みのデータ型</span>
+</caption>
+<thead class="manual">
+<tr>
+<th class="manual" style="width: 12em;">
+<span lang="en">SQL Data Type</span>
+<span lang="ja">SQL データ型</span>
+</th>
+<th class="manual" style="width: 8em;">
+<span lang="en">Internal Form</span>
+<span lang="ja">内部データ表現</span>
+</th>
+<th class="manual" style="width: 6em;">
+<span lang="en">Length</span>
+<span lang="ja">データ長</span>
+</th>
+<th class="manual" style="max-width: 40%;">
+<span lang="en">Remarks</span>
+<span lang="ja">備考</span>
+</th>
+</tr>
+</thead>
+
+<tbody class="manual">
+<tr>
+<td class="manual">boolean</td>
+<td class="manual">cl_bool</td>
+<td class="manual">1 byte</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">smallint</td>
+<td class="manual">cl_short</td>
+<td class="manual">2 bytes</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">integer</td>
+<td class="manual">cl_int</td>
+<td class="manual">4 bytes</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">bigint</td>
+<td class="manual">cl_long</td>
+<td class="manual">8 bytes</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">real</td>
+<td class="manual">cl_float</td>
+<td class="manual">4 bytes</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">float</td>
+<td class="manual">cl_double</td>
+<td class="manual">8 bytes</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">numeric</td>
+<td class="manual">cl_ulong</td>
+<td class="manual">8 bytes</td>
+<td class="manual">
+<span lang="en">
+It maps variable length numeric data on 64bit fixed length datum. Up to 18 digits are available, but may take CPU fallback if overflow.
+</span>
+<span lang="ja">
+可変長のnumericデータを64bit固定長データに割り当てて使用。最大18桁まで表現可能だが、桁あふれを起こすとCPU側でフォールバック処理を行う。
+</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual">money</td>
+<td class="manual">cl_long</td>
+<td class="manual">8 bytes</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">date</td>
+<td class="manual">DateADT</td>
+<td class="manual">4 bytes</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">time</td>
+<td class="manual">TimeADT</td>
+<td class="manual">8 bytes</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">time with timezone</td>
+<td class="manual">TimeTzADT</td>
+<td class="manual">12 bytes</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">timestamp</td>
+<td class="manual">Timestamp</td>
+<td class="manual">8 bytes</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">timestamp with timezone</td>
+<td class="manual">TimestampTz</td>
+<td class="manual">8 bytes</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">interval</td>
+<td class="manual">Interval</td>
+<td class="manual">16 bytes</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">interval</td>
+<td class="manual">Interval</td>
+<td class="manual">16 bytes</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">char(n)</td>
+<td class="manual">varlena *</td>
+<td class="manual">
+<span lang="en">variable length</span>
+<span lang="ja">可変長</span>
+</td>
+<td class="manual">
+<span lang="en">GPU cannot process compressed or TOAST'ed data.</span>
+<span lang="ja">圧縮、またはTOAST済みデータをGPUで扱う事はできません。</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual">varchar(n)</td>
+<td class="manual">varlena *</td>
+<td class="manual">
+<span lang="en">variable length</span>
+<span lang="ja">可変長</span>
+</td>
+<td class="manual">
+<span lang="en">GPU cannot process compressed or TOAST'ed data.</span>
+<span lang="ja">圧縮、またはTOAST済みデータをGPUで扱う事はできません。</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual">text</td>
+<td class="manual">varlena *</td>
+<td class="manual">
+<span lang="en">variable length</span>
+<span lang="ja">可変長</span>
+</td>
+<td class="manual">
+<span lang="en">GPU cannot process compressed or TOAST'ed data.</span>
+<span lang="ja">圧縮、またはTOAST済みデータをGPUで扱う事はできません。</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual">bytea</td>
+<td class="manual">varlena *</td>
+<td class="manual">
+<span lang="en">variable length</span>
+<span lang="ja">可変長</span>
+</td>
+<td class="manual">
+<span lang="en">GPU cannot process compressed or TOAST'ed data.</span>
+<span lang="ja">圧縮、またはTOAST済みデータをGPUで扱う事はできません。</span>
+</td>
+</tr>
+</tbody>
+</table>
+
+<div class="hint">
+<p>
+<span lang="en">
+GPU cannot evaluate an expression that includes reference to variable length datum, if this datum is compressed or stored in external TOAST table.
+As a second best, PG-Strom evaluates same expression by CPU, however, it leads performance degradation because it consumes CPU cycles in addition to GPU cycles.
+</span>
+<span lang="ja">
+GPUが可変長データの参照を含む式の評価を行うとき、当該データが圧縮済み、またはTOASTテーブルに外部格納されているとこれを実行できません。
+次善策として、PG-StromはCPUで同じ式を評価しますが、いったんGPUでの処理を行った上にCPUで再評価を行うために性能劣化の原因となります。
+</span>
+</p>
+
+<p>
+<span lang="en">
+<code>ALTER TABLE ... SET STORAGE</code> command configures the storage mode of columns. It allows to avoid the problem, if you can know which column is referenced by GPU preliminary.
+The storage mode <tt>PLAIN</tt> prohibit compression or external TOAST save, so it allows to reference the variable length field always, however, it may lead an error when you try to save a large record bigger than the page size (it is usually 8KB).
+The storage mode <tt>MAIN</tt> does not prohibit compression or external TOAST save entirely, however, it tries to compress or write out the variable length data only when it has no other way to store the record.
+</span>
+<span lang="ja">
+GPUが参照する可変長データ列が予め分かっているのであれば、<code>ALTER TABLE ... SET STORAGE</code>によって列の保管モードを指定する事で問題を回避する事ができます。
+保管モード<tt>PLAIN</tt>を指定した場合、圧縮およびTOASTテーブルへの外部格納は行いませんので、必ずGPUで処理する事ができます。しかし、レコード長が（通常8KBである）ページサイズを越えるような長いデータを格納しようとした時にエラーとなる可能性があります。
+保管モード<tt>MAIN</tt>を指定した場合、圧縮およびTOASTテーブルへの外部格納を行う可能性は依然としてありますが、他にレコードを格納する手段が無い時の最終手段としてのみ、圧縮およびTOASTテーブルへの外部格納を行います。
+</span>
+</p>
+
+<p>
+<span lang="en">
+Thus, it is preferable to specify <tt>PLAIN</tt> if you can ensure the maximum length of the variable like <code>varchar(n)</code> data type, or <tt>MAIN</tt> if you cannot deny a string larger than several thousand bytes entirely.
+Even if CPU runs the fallback evaluation, it may be minor if a record per million rows.
+</span>
+<span lang="ja">
+したがって、<code>varchar(n)</code>型など文字列長の上限を保証できる場合は<tt>PLAIN</tt>を、必ずしも数KBの文字列が入力される可能性が排除できない場合は<tt>MAIN</tt>を指定するのがよいでしょう。仮に一部のデータに対してCPUでの再実行が発生したとしても、例えば、100万行に1行の割合であればその影響は軽微と考える事もできます。
+</span>
+</p>
+<pre>
+# ALTER TABLE <i>my_table</i> ALTER <i>varlena_column</i> SET STORAGE main;
+</pre>
+</div>
+
+<h2 id="reference_functions">
+  <span lang="en">Reference:Functions and Operators</span>
+  <span lang="ja">リファレンス：関数と演算子</span>
+</h2>
+
+<table class="manual">
+<caption class="manual">
+<span lang="en">Arithmetic Operators</span>
+<span lang="ja">算術演算子</span>
+</caption>
+<thead class="manual">
+<tr>
+<th class="manual" style="width: 20em;">
+<span lang="en">Operator</span>
+<span lang="ja">演算子</span>
+</th>
+<th class="manual" style="width: 8em;">
+<span lang="en">Return Value</span>
+<span lang="ja">戻り値</span>
+</th>
+<th class="manual" style="max-width: 40%;">
+<span lang="en">Remarks</span>
+<span lang="ja">備考</span>
+</th>
+</tr>
+</thead>
+
+<tbody>
+
+
+</tbody>
+</table>
+
+<table class="manual">
+<caption class="manual">
+<span lang="en">Comparison Operators</span>
+<span lang="ja">比較演算子</span>
+</caption>
+<thead class="manual">
+<tr>
+<th class="manual" style="width: 20em;">
+<span lang="en">Operator</span>
+<span lang="ja">演算子</span>
+</th>
+<th class="manual" style="width: 8em;">
+<span lang="en">Return Value</span>
+<span lang="ja">戻り値</span>
+</th>
+<th class="manual" style="max-width: 40%;">
+<span lang="en">Remarks</span>
+<span lang="ja">備考</span>
+</th>
+</tr>
+</thead>
+
+<tbody>
+<tr>
+<td class="manual">smallint, integer, bigint, real, float<br><i>comp</i><br>smallint, integer, bigint, real, float</td>
+<td class="manual"></td>
+<td class="manual">
+<span lang="en"><i>comp</i> is either of <tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> or <tt>&gt;</tt>.</span>
+<span lang="ja"><i>comp</i>は<tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> または <tt>&gt;</tt>のいずれか</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual">money <i>comp</i> money</td>
+<td class="manual"></td>
+<td class="manual">
+<span lang="en"><i>comp</i> is either of <tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> or <tt>&gt;</tt>.</span>
+<span lang="ja"><i>comp</i>は<tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> または <tt>&gt;</tt>のいずれか</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual">numeric <i>comp</i> numeric</td>
+<td class="manual"></td>
+<td class="manual">
+<span lang="en"><i>comp</i> is either of <tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> or <tt>&gt;</tt>.</span>
+<span lang="ja"><i>comp</i>は<tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> または <tt>&gt;</tt>のいずれか</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual">date, timestamp, timestamp with timezone<br><i>comp</i><br>date, timestamp, timestamp with timezone</td>
+<td class="manual"></td>
+<td class="manual">
+<span lang="en"><i>comp</i> is either of <tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> or <tt>&gt;</tt>.</span>
+<span lang="ja"><i>comp</i>は<tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> または <tt>&gt;</tt>のいずれか</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual">time <i>comp</i> time</td>
+<td class="manual"></td>
+<td class="manual">
+<span lang="en"><i>comp</i> is either of <tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> or <tt>&gt;</tt>.</span>
+<span lang="ja"><i>comp</i>は<tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> または <tt>&gt;</tt>のいずれか</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual">time with timezone <i>comp</i> time with timezone</td>
+<td class="manual"></td>
+<td class="manual">
+<span lang="en"><i>comp</i> is either of <tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> or <tt>&gt;</tt>.</span>
+<span lang="ja"><i>comp</i>は<tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> または <tt>&gt;</tt>のいずれか</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual">interval <i>comp</i> interval</td>
+<td class="manual"></td>
+<td class="manual">
+<span lang="en"><i>comp</i> is either of <tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> or <tt>&gt;</tt>.</span>
+<span lang="ja"><i>comp</i>は<tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> または <tt>&gt;</tt>のいずれか</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual">char(n) <i>comp</i> char(n)</td>
+<td class="manual"></td>
+<td class="manual">
+<span lang="en">
+<i>comp</i> is either of <tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> or <tt>&gt;</tt>.<br>
+<tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt> and <tt>&gt;=</tt> are valid only if c-locale.
+</span>
+<span lang="ja">
+<i>comp</i>は<tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> または <tt>&gt;</tt>のいずれか。<br>
+<tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>および <tt>&gt;=</tt> はCロケールの場合のみ有効。
+</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual">text <i>comp</i> text</td>
+<td class="manual"></td>
+<td class="manual">
+<span lang="en">
+<i>comp</i> is either of <tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> or <tt>&gt;</tt>.<br>
+<tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt> and <tt>&gt;=</tt> are valid only if c-locale.
+</span>
+<span lang="ja">
+<i>comp</i>は<tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> または <tt>&gt;</tt>のいずれか。<br>
+<tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>および <tt>&gt;=</tt> はCロケールの場合のみ有効。
+</span>
+</td>
+</tr>
+</tbody>
+</table>
+
+
+
+<table class="manual">
+<caption class="manual">
+<span lang="en">Mathematical Functions</span>
+<span lang="ja">数学関数</span>
+</caption>
+<thead class="manual">
+<tr>
+<th class="manual" style="width: 20em;">
+<span lang="en">Function</span>
+<span lang="ja">関数</span>
+</th>
+<th class="manual" style="width: 8em;">
+<span lang="en">Return Value</span>
+<span lang="ja">戻り値</span>
+</th>
+<th class="manual" style="max-width: 40%;">
+<span lang="en">Remarks</span>
+<span lang="ja">備考</span>
+</th>
+</tr>
+</thead>
+
+<tbody>
+<tr>
+<td class="manual">abs(smallint)</td>
+<td class="manual">smallint</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">abs(integer)</td>
+<td class="manual">integer</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">abs(bigint)</td>
+<td class="manual">bigint</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">abs(real)</td>
+<td class="manual">real</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">abs(float)</td>
+<td class="manual">float</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">cbrt(float)</td>
+<td class="manual">float</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">dcbrt(float)</td>
+<td class="manual">float</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">ceil(float)</td>
+<td class="manual">float</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">ceiling(float)</td>
+<td class="manual">float</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">exp(float)</td>
+<td class="manual">float</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">dexp(float)</td>
+<td class="manual">float</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">floor(float)</td>
+<td class="manual">float</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">ln(float)</td>
+<td class="manual">float</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">dlog1(float)</td>
+<td class="manual">float</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">log(float)</td>
+<td class="manual">float</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">dlog10(float)</td>
+<td class="manual">float</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">pi()</td>
+<td class="manual">float</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">power(float, float)</td>
+<td class="manual">float</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">pow(float, float)</td>
+<td class="manual">float</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">dpow(float, float)</td>
+<td class="manual">float</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">round(float)</td>
+<td class="manual">float</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">dround(float)</td>
+<td class="manual">float</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">sign(float)</td>
+<td class="manual">float</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">sqrt(float)</td>
+<td class="manual">float</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">dsqrt(float)</td>
+<td class="manual">float</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">trunc(float)</td>
+<td class="manual">float</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">dtrunc(float)</td>
+<td class="manual">float</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"></td>
+<td class="manual"></td>
+<td class="manual"></td>
+</tr>
+
+
+
+
+
+</tbody>
+</table>
+
+
+<table class="manual">
+<caption class="manual">
+<span lang="en">Other Functions</span>
+<span lang="ja">その他の関数</span>
+</caption>
+<thead class="manual">
+<tr>
+<th class="manual" style="width: 20em;">
+<span lang="en">Functions</span>
+<span lang="ja">関数</span>
+</th>
+<th class="manual" style="width: 8em;">
+<span lang="en">Return Value</span>
+<span lang="ja">戻り値</span>
+</th>
+<th class="manual" style="max-width: 40%;">
+<span lang="en">Remarks</span>
+<span lang="ja">備考</span>
+</th>
+</tr>
+</thead>
+
+<tbody>
+<tr>
+<td class="manual"></td>
+<td class="manual"></td>
+<td class="manual"></td>
+</tr>
+
+
+
+
+
+</tbody>
+</table>
+
+
+<table class="manual">
+<caption class="manual">
+<span lang="en">Type Cast</span>
+<span lang="ja">型キャスト</span>
+</caption>
+<thead class="manual">
+<tr>
+<th class="manual" style="width: 20em;">
+<span lang="en">Destination</span>
+<span lang="ja">演算子</span>
+</th>
+<th class="manual" style="width: 20em;">
+<span lang="en">Source</span>
+<span lang="ja">戻り値</span>
+</th>
+<th class="manual" style="max-width: 40%;">
+<span lang="en">Remarks</span>
+<span lang="ja">備考</span>
+</th>
+</tr>
+</thead>
+
+<tbody>
+<tr>
+<td class="manual">integer</td>
+<td class="manual">boolean</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">smallint, integer, bigint, real, float, numeric</td>
+<td class="manual">smallint, integer, bigint, real, float, numeric</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">money</td>
+<td class="manual">integer, bigint, numeric</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">date</td>
+<td class="manual">date, timestamp, timestamp with timezone</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">time</td>
+<td class="manual">time, time with timezone, timestamp, timestamp with timezone</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">time with timezone</td>
+<td class="manual">time, timestamp with timezone</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">timestamp</td>
+<td class="manual">date, timestamp with timezone</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">timestamp with timezone</td>
+<td class="manual">date, timestamp</td>
+<td class="manual"></td>
+</tr>
+
+</tbody>
+</table>
+
+
+
+
+
+
+
+<h2 id="reference_configs">
+  <span lang="en">Reference:Config Options</span>
+  <span lang="ja">リファレンス：設定パラメータ</span>
+</h2>
+
+
+</article>

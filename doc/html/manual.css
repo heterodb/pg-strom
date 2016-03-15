@@ -163,3 +163,29 @@ img {
     width: auto;
     max-width: 100%;
 }
+
+table.manual {
+    border: 2px solid gray;
+    border-collapse: collapse;
+    margin: 1em auto 1em auto;
+    caption-side: top;
+}
+thead.manual {
+    background-color: #ffc060;;
+}
+tbody.manual {
+    border: 1px solid red;
+}
+
+th.manual,
+td.manual {
+    margin: 0px;
+    border: 1px solid lightgray;
+    padding: 2px;
+}
+
+caption.manual {
+    font-weight: bold;
+    font-size: 1.1em;
+    padding: 0.4em;
+}
