@@ -165,6 +165,7 @@ img {
 }
 
 table.manual {
+    min-width: 80%;
     border: 2px solid gray;
     border-collapse: collapse;
     margin: 1em auto 1em auto;

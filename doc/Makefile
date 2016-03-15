@@ -4,7 +4,7 @@ include ../Makefile
 
 PYTHON := $(shell which python)
 HTMLSOURCES := manual.src.html install.src.html tutrial.src.html \
-		troubles.src.html release.src.html
+		release.src.html
 HTMLFILES := $(addprefix html/,$(HTMLSOURCES:.src.html=.html))
 EXTRA_CLEAN := $(HTMLFILES)
 

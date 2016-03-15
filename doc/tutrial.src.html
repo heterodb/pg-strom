@@ -144,6 +144,21 @@ CustomScanが出現していません、したがって、PG-Stromはこのク�
 
 </section>
 
+<section>
+<h2 id="trouble-shooting">
+<span lang="en">Trouble Shooting</span>
+<span lang="ja">トラブルシューティング</span>
+</h2>
+
+
+<h3 id="write-a-bug-report">
+<span lang="en">Write a Bug Report</span>
+<span lang="ja">バグレポートの書き方</span>
+</h3>
+
+</section>
+
+<section>
 <h2 id="reference_types">
   <span lang="en">Reference:Data Types</span>
   <span lang="ja">リファレンス：データ型</span>
@@ -388,7 +403,9 @@ Even if CPU runs the fallback evaluation, it may be minor if a record per millio
 # ALTER TABLE <i>my_table</i> ALTER <i>varlena_column</i> SET STORAGE main;
 </pre>
 </div>
+</section>
 
+<section>
 <h2 id="reference_functions">
   <span lang="en">Reference:Functions and Operators</span>
   <span lang="ja">リファレンス：関数と演算子</span>
@@ -417,7 +434,236 @@ Even if CPU runs the fallback evaluation, it may be minor if a record per millio
 </thead>
 
 <tbody>
+<tr>
+<td class="manual">{smallint, integer, bigint}<tt>+</tt>{smallint, integer, bigint}</td>
+<td class="manual">{smallint, integer, bigint}</td>
+<td class="manual">
+<span lang="en">Result data type is wider one if both side has different data types.</span>
+<span lang="ja">両辺でデータ型が異なる時は、結果は幅の大きなデータ型で返る</span>
+</td>
+</tr>
 
+<tr>
+<td class="manual">{real, float}<tt>+</tt>{real, float}</td>
+<td class="manual">{real, float}</td>
+<td class="manual">
+<span lang="en">Result data type is wider one if both side has different data types.</span>
+<span lang="ja">両辺でデータ型が異なる時は、結果は幅の大きなデータ型で返る</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual">{smallint, integer, bigint}<tt>-</tt>{smallint, integer, bigint}</td>
+<td class="manual">{smallint, integer, bigint}</td>
+<td class="manual">
+<span lang="en">Result data type is wider one if both side has different data types.</span>
+<span lang="ja">両辺でデータ型が異なる時は、結果は幅の大きなデータ型で返る</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual">{real, float}<tt>-</tt>{real, float}</td>
+<td class="manual">{real, float}</td>
+<td class="manual">
+<span lang="en">Result data type is wider one if both side has different data types.</span>
+<span lang="ja">両辺でデータ型が異なる時は、結果は幅の大きなデータ型で返る</span>
+</td>
+</tr>
+
+
+<tr>
+<td class="manual">{smallint, integer, bigint}<tt>*</tt>{smallint, integer, bigint}</td>
+<td class="manual">{smallint, integer, bigint}</td>
+<td class="manual">
+<span lang="en">Result data type is wider one if both side has different data types.</span>
+<span lang="ja">両辺でデータ型が異なる時は、結果は幅の大きなデータ型で返る</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual">{real, float}<tt>*</tt>{real, float}</td>
+<td class="manual">{real, float}</td>
+<td class="manual">
+<span lang="en">Result data type is wider one if both side has different data types.</span>
+<span lang="ja">両辺でデータ型が異なる時は、結果は幅の大きなデータ型で返る</span>
+</td>
+</tr>
+
+
+<tr>
+<td class="manual">{smallint, integer, bigint}<tt>/</tt>{smallint, integer, bigint}</td>
+<td class="manual">{smallint, integer, bigint}</td>
+<td class="manual">
+<span lang="en">Result data type is wider one if both side has different data types.</span>
+<span lang="ja">両辺でデータ型が異なる時は、結果は幅の大きなデータ型で返る</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual">{real, float}<tt>/</tt>{real, float}</td>
+<td class="manual">{real, float}</td>
+<td class="manual">
+<span lang="en">Result data type is wider one if both side has different data types.</span>
+<span lang="ja">両辺でデータ型が異なる時は、結果は幅の大きなデータ型で返る</span>
+</td>
+</tr>
+
+
+<tr>
+<td class="manual">{smallint, integer, bigint}<tt>%</tt>{smallint, integer, bigint}</td>
+<td class="manual">{smallint, integer, bigint}</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><tt>+</tt>{smallint, integer, bigint, real, float}</td>
+<td class="manual">{smallint, integer, bigint, real, float}</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><tt>-</tt>{smallint, integer, bigint, real, float}</td>
+<td class="manual">{smallint, integer, bigint, real. float}</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><tt>@<tt>{smallint, integer, bigint, real, float}</td>
+<td class="manual">{smallint, integer, bigint, real, float}</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">{smallint, integer, bigint} <tt>&amp;</tt> {smallint, integer, bigint}</td>
+<td class="manual">{smallint, integer, bigint}</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">{smallint, integer, bigint} <tt>|</tt> {smallint, integer, bigint}</td>
+<td class="manual">{smallint, integer, bigint}</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">{smallint, integer, bigint} <tt>#</tt> {smallint, integer, bigint}</td>
+<td class="manual">{smallint, integer, bigint}</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><tt>~</tt> {smallint, integer, bigint}</td>
+<td class="manual">{smallint, integer, bigint}</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">{smallint, integer, bigint} <tt>&gt;&gt;</tt> integer</td>
+<td class="manual">{smallint, integer, bigint}</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">{smallint, integer, bigint} <tt>&lt;&lt;</tt> integer</td>
+<td class="manual">{smallint, integer, bigint}</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">money {<tt>+</tt>, <tt>-</tt>} money</td>
+<td class="manual">money</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">money / money</td>
+<td class="manual">float</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">money <tt>*</tt> {smallint, integer, real, float}</td>
+<td class="manual">money</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">{smallint, integer, real, float} <tt>*</tt> money</td>
+<td class="manual">money</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">money <tt>/</tt> {smallint, integer, real, float}</td>
+<td class="manual">money</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">date <tt>+</tt> integer or integer <tt>+</tt> date</td>
+<td class="manual">date</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">date <tt>-</tt> integer</td>
+<td class="manual">date</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">date <tt>-</tt> date</td>
+<td class="manual">integer</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">date <tt>+</tt> time</tt> or time <tt>+</tt> date</td>
+<td class="manual">timestamp</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">time <tt>-</tt> time</td>
+<td class="manual">interval</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">timestamp <tt>-</tt> timestamp</td>
+<td class="manual">interval</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">time with timezone {<tt>+</tt>, <tt>-</tt>} interval</td>
+<td class="manual">time with timezone</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">timestamp with timezone {<tt>+</tt>, <tt>-</tt>} interval</td>
+<td class="manual">timestamp with timezone</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><tt>-</tt> interval</td>
+<td class="manual">interval</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">interval {<tt>+</tt>, <tt>-</tt>} interval</td>
+<td class="manual">interval</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">date <tt>+</tt> time with timezone or<br>time with timezone <tt>+</tt> date</td>
+<td class="manual">timestamp with timezone</td>
+<td class="manual"></td>
+</tr>
 
 </tbody>
 </table>
@@ -446,7 +692,7 @@ Even if CPU runs the fallback evaluation, it may be minor if a record per millio
 
 <tbody>
 <tr>
-<td class="manual">smallint, integer, bigint, real, float<br><i>comp</i><br>smallint, integer, bigint, real, float</td>
+<td class="manual">{smallint, integer, bigint, real, float}<br><i>comp</i><br>{smallint, integer, bigint, real, float}</td>
 <td class="manual"></td>
 <td class="manual">
 <span lang="en"><i>comp</i> is either of <tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> or <tt>&gt;</tt>.</span>
@@ -473,7 +719,7 @@ Even if CPU runs the fallback evaluation, it may be minor if a record per millio
 </tr>
 
 <tr>
-<td class="manual">date, timestamp, timestamp with timezone<br><i>comp</i><br>date, timestamp, timestamp with timezone</td>
+<td class="manual">{date, timestamp, timestamp with timezone}<br><i>comp</i><br>{date, timestamp, timestamp with timezone}</td>
 <td class="manual"></td>
 <td class="manual">
 <span lang="en"><i>comp</i> is either of <tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> or <tt>&gt;</tt>.</span>
@@ -728,8 +974,62 @@ Even if CPU runs the fallback evaluation, it may be minor if a record per millio
 </tr>
 
 <tr>
+<td class="manual">degrees(float)</td>
+<td class="manual">float</td>
 <td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">radians(float)</td>
+<td class="manual">float</td>
 <td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">acon(float)</td>
+<td class="manual">float</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">asin(float)</td>
+<td class="manual">float</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">atan(float)</td>
+<td class="manual">float</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">atan2(float, float)</td>
+<td class="manual">float</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">cos(float)</td>
+<td class="manual">float</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">cot(float)</td>
+<td class="manual">float</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">sin(float)</td>
+<td class="manual">float</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">tan(float)</td>
+<td class="manual">float</td>
 <td class="manual"></td>
 </tr>
 
@@ -765,15 +1065,40 @@ Even if CPU runs the fallback evaluation, it may be minor if a record per millio
 
 <tbody>
 <tr>
-<td class="manual"></td>
-<td class="manual"></td>
+<td class="manual">overlap(time, time, time, time)</td>
+<td class="manual">boolean</td>
 <td class="manual"></td>
 </tr>
 
+<tr>
+<td class="manual">overlap(time with timezone, time with timezone, time with timezone, time with timezone)</td>
+<td class="manual">boolean</td>
+<td class="manual"></td>
+</tr>
 
+<tr>
+<td class="manual">overlap(timestamp, timestamp, timestamp, timestamp)</td>
+<td class="manual">boolean</td>
+<td class="manual"></td>
+</tr>
 
+<tr>
+<td class="manual">overlap(timestamp with timezone, timestamp with timezone, timestamp with timezone, timestamp with timezone)</td>
+<td class="manual">boolean</td>
+<td class="manual"></td>
+</tr>
 
+<tr>
+<td class="manual">now()</td>
+<td class="manual">timestamp with timezone</td>
+<td class="manual"></td>
+</tr>
 
+<tr>
+<td class="manual">length({char(n), text})</td>
+<td class="manual">integer</td>
+<td class="manual"></td>
+</tr>
 </tbody>
 </table>
 
@@ -808,60 +1133,57 @@ Even if CPU runs the fallback evaluation, it may be minor if a record per millio
 </tr>
 
 <tr>
-<td class="manual">smallint, integer, bigint, real, float, numeric</td>
-<td class="manual">smallint, integer, bigint, real, float, numeric</td>
+<td class="manual">{smallint, integer, bigint, real, float, numeric}</td>
+<td class="manual">{smallint, integer, bigint, real, float, numeric}</td>
 <td class="manual"></td>
 </tr>
 
 <tr>
 <td class="manual">money</td>
-<td class="manual">integer, bigint, numeric</td>
+<td class="manual">{integer, bigint, numeric}</td>
 <td class="manual"></td>
 </tr>
 
 <tr>
 <td class="manual">date</td>
-<td class="manual">date, timestamp, timestamp with timezone</td>
+<td class="manual">{date, timestamp, timestamp with timezone}</td>
 <td class="manual"></td>
 </tr>
 
 <tr>
 <td class="manual">time</td>
-<td class="manual">time, time with timezone, timestamp, timestamp with timezone</td>
+<td class="manual">{time, time with timezone, timestamp, timestamp with timezone}</td>
 <td class="manual"></td>
 </tr>
 
 <tr>
 <td class="manual">time with timezone</td>
-<td class="manual">time, timestamp with timezone</td>
+<td class="manual">{time, timestamp with timezone}</td>
 <td class="manual"></td>
 </tr>
 
 <tr>
 <td class="manual">timestamp</td>
-<td class="manual">date, timestamp with timezone</td>
+<td class="manual">{date, timestamp with timezone}</td>
 <td class="manual"></td>
 </tr>
 
 <tr>
 <td class="manual">timestamp with timezone</td>
-<td class="manual">date, timestamp</td>
+<td class="manual">{date, timestamp}</td>
 <td class="manual"></td>
 </tr>
 
 </tbody>
 </table>
+</section>
 
-
-
-
-
-
-
+<section>
 <h2 id="reference_configs">
   <span lang="en">Reference:Config Options</span>
   <span lang="ja">リファレンス：設定パラメータ</span>
 </h2>
 
 
+</section>
 </article>
