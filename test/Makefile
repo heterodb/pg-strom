@@ -1,6 +1,15 @@
 # Load the common definition
-PGSTROM_MAKEFILE_IN_SUBDIR := 1
-include ../Makefile
+ifndef STROM_BUILD_ROOT
+STROM_BUILD_ROOT = ..
+endif
+
+ifdef MAKEFILE_PARAMDEF_ONLY
+include $(STROM_BUILD_ROOT)/Makefile
+else
+MAKEFILE_PARAMDEF_ONLY = 1
+include $(STROM_BUILD_ROOT)/Makefile
+undefine MAKEFILE_PARAMDEF_ONLY
+endif
 
 # Regression test options
 REGRESS = --schedule=parallel_schedule
@@ -14,5 +23,8 @@ ifdef TEMP_INSTANCE
 	endif
 endif
 
+ifndef MAKEFILE_PARAMDEF_ONLY
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
+endif	# MAKEFILE_PARAMDEF_ONLY
+

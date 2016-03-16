@@ -34,13 +34,13 @@ CUDA_OBJS = cuda_common.o \
 	cuda_terminal.o
 CUDA_SOURCES = $(CUDA_OBJS:.o=.c)
 
+ifndef MAKEFILE_PARAMDEF_ONLY
 #
 # Extra files to be cleaned
 #
 EXTRA_CLEAN_SRC=$(CUDA_SOURCES)
 EXTRA_CLEAN_DOC=
 
-ifndef PGSTROM_MAKEFILE_IN_SUBDIR
 all:
 	$(MAKE) -C src $@ $(MAKEFLAGS)
 
@@ -57,4 +57,5 @@ clean:
 	$(MAKE) -C src clean
 	$(MAKE) -C doc clean
 	$(MAKE) -C test clean
-endif
+
+endif	# MAKEFILE_PARAMDEF_ONLY

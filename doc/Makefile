@@ -1,6 +1,15 @@
 # Load the common definition
-PGSTROM_MAKEFILE_IN_SUBDIR := 1
-include ../Makefile
+ifndef STROM_BUILD_ROOT
+STROM_BUILD_ROOT = ..
+endif
+
+ifdef MAKEFILE_PARAMDEF_ONLY
+include $(STROM_BUILD_ROOT)/Makefile
+else
+MAKEFILE_PARAMDEF_ONLY = 1
+include $(STROM_BUILD_ROOT)/Makefile
+undefine MAKEFILE_PARAMDEF_ONLY
+endif
 
 PYTHON_CMD := $(shell which python)
 HTMLSOURCES := manual.src.html install.src.html tutrial.src.html \
@@ -9,8 +18,9 @@ HTMLFILES := $(addprefix html/,$(HTMLSOURCES:.src.html=.html))
 HTML_TEMPLATE := template.src.html
 MENUGEN_PY := menugen.py
 
-EXTRA_CLEAN := $(HTMLFILES)
+ifndef MAKEFILE_PARAMDEF_ONLY
 
+EXTRA_CLEAN := $(HTMLFILES)
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 
@@ -26,3 +36,4 @@ $(HTMLFILES): $(HTMLSOURCES) $(HTML_TEMPLATE)
 		-m $(@:html/%.html=%.src.html) $(HTMLSOURCES) > $@
 
 .PHONY: html html.single all
+endif	# MAKEFILE_PARAMDEF_ONLY
