@@ -33,6 +33,12 @@ input[id="lang-en"]:checked ~ * *:lang(ja) {
     _overflow:auto;
 }
 
+div.manual_title {
+    font-weight: bold;
+    font-size: 1.2em;
+    text-align: center;
+}
+
 h1, h2, h3, h4 {
     font-weight: bold;
     margin-top: 2ex;

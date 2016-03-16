@@ -13,55 +13,31 @@ class StromDocParser(HTMLParser):
     toc_index = []
     html_lines = ""
     menu_items = ""
-    __h1_start = 0
-    __h1_attrs = 0
-    __h2_start = 0
-    __h2_attrs = 0
-    __h3_start = 0
-    __h3_attrs = 0
-    __h4_start = 0
-    __h4_attrs = 0
-    __h5_start = 0
-    __h5_attrs = 0
+    __section_id = ""
+
+    __htag_start = []
+    __htag_attrs = []
 
     def handle_starttag(self, tag, attrs):
-        if (tag == "h1"):
-            self.__h1_start = self.getpos()
-            self.__h1_attrs = attrs
-        elif (tag == "h2"):
-            self.__h2_start = self.getpos()
-            self.__h2_attrs = attrs
-        elif (tag == "h3"):
-            self.__h3_start = self.getpos()
-            self.__h3_attrs = attrs
-        elif (tag == "h4"):
-            self.__h4_start = self.getpos()
-            self.__h4_attrs = attrs
-        elif (tag == "h5"):
-            self.__h5_start = self.getpos()
-            self.__h5_attrs = attrs
+        if (tag == "section" or tag == "article"):
+            for x in attrs:
+                if (x[0] == "id"):
+                    self.__section_id = x[1]
+                    break
+        elif (len(self.__section_id) > 0 and \
+              (tag == "h1" or tag == "h2" or tag == "h3" or tag == "h4")):
+            self.__htag_kind = tag
+            self.__htag_start = self.getpos()
 
     def handle_endtag(self, tag):
-        result = ""
-        endpos = self.getpos()
-        if (tag == "h1"):
-            startpos = self.__h1_start
-            attrs = self.__h1_attrs
-        elif (tag == "h2"):
-            startpos = self.__h2_start
-            attrs = self.__h2_attrs
-        elif (tag == "h3"):
-            startpos = self.__h3_start
-            attrs = self.__h3_attrs
-        elif (tag == "h4"):
-            startpos = self.__h4_start
-            attrs = self.__h4_attrs
-        elif (tag == "h5"):
-            startpos = self.__h5_start
-            attrs = self.__h5_attrs
+        if (len(self.__section_id) > 0 and \
+            (tag == "h1" or tag == "h2" or tag == "h3" or tag == "h4")):
+            startpos = self.__htag_start
+            endpos = self.getpos()
         else:
             return
 
+        result = ""
         for i in range(startpos[0], endpos[0] + 1, 1):
             line = self.html_lines[i-1]
             if (i == startpos[0] and i == endpos[0]):
@@ -75,17 +51,12 @@ class StromDocParser(HTMLParser):
             result += line
         result = result[result.find('>') + 1:]
 
-        link = ""
-        for x in attrs:
-            if (x[0] == "id"):
-                link = "<a href=\"./" + self.html_filename
-                link += "#" + x[1] + "\">" + result + "</a>"
-                self.toc_index.append([x[1], link])
-                break
-
-        if (link != "" and (tag == "h1" or tag == "h2") ):
-            item = "<li class=\"menuitem_" + tag + "\">" + link + "</li>\n"
-            self.menu_items += item
+        link = "<a href=\"./" + os.path.basename(self.html_filename) + \
+               "#" + self.__section_id + "\">" + result + "</a>"
+        self.toc_index.append([self.__section_id, link])
+        if (self.__htag_kind == "h1" or self.__htag_kind == "h2"):
+            self.menu_items += "<li class=\"menuitem_"+tag+"\">"+link+"</li>\n"
+        self.__section_id = ""	# reset
 
 optlist, args = getopt.getopt(sys.argv[1:], 't:v:m:')
 

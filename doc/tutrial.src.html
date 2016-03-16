@@ -1,16 +1,17 @@
-<article>
-<h1 id="tutrial">
+<article class="manual_1" id="tutrial">
+<h1>
   <span lang="en">User Tutrial</span>
   <span lang="ja">チュートリアル</span>
 </h1>
 
-<section>
+<section class="manual_2" id="tutrial-basic-operations">
 <h2 id="basic-operations">
   <span lang="en">Basic Operations</span>
   <span lang="ja">基本的な操作</span>
 </h2>
 
-<h3 id="tutrial-pgstrom_enabled">
+<section class="manual_3" id="tutrial-pgstrom_enabled">
+<h3>
 <span lang="en">Turn On/Off PG-Strom</span>
 <span lang="ja">PG-Stromの有効化/無効化</span>
 </h3>
@@ -63,11 +64,10 @@ It is convenient to have performance benchmark according to existence of <tt>PG-
 # SELECT pg_reload_conf();
 </pre>
 </div>
+</section>
 
-
-
-
-<h3 id="tutrial-operation-checks">
+<section class="manual_3" id="tutrial-operation-checks">
+<h3>
 <span lang="en">Operation Checks of PG-Strom</span>
 <span lang="ja">PG-Stromの動作確認</span>
 </h3>
@@ -141,25 +141,33 @@ Here is no CustomScan node, thus PG-Strom is not responsible to execution of the
 CustomScanが出現していません、したがって、PG-Stromはこのクエリの実行に関与しません。
 </span>
 </p>
-
+</section>
 </section>
 
-<section>
-<h2 id="trouble-shooting">
+<section class="manual_2" id="tutrial-trouble-shooting">
+<h2>
 <span lang="en">Trouble Shooting</span>
 <span lang="ja">トラブルシューティング</span>
 </h2>
+<p>
+<span lang="en">Coming Soon...</span>
+<span lang="ja">あとで書く</span>
+</p>
 
-
-<h3 id="write-a-bug-report">
+<section class="manual_3" id="tutrial-write-a-bug-report">
+<h3>
 <span lang="en">Write a Bug Report</span>
 <span lang="ja">バグレポートの書き方</span>
 </h3>
-
+<p>
+<span lang="en">Coming Soon...</span>
+<span lang="ja">あとで書く</span>
+</p>
+</section>
 </section>
 
-<section>
-<h2 id="reference_types">
+<section class="manual_2" id="reference_types">
+<h2>
   <span lang="en">Reference:Data Types</span>
   <span lang="ja">リファレンス：データ型</span>
 </h2>
@@ -405,8 +413,8 @@ Even if CPU runs the fallback evaluation, it may be minor if a record per millio
 </div>
 </section>
 
-<section>
-<h2 id="reference_functions">
+<section class="manual_2" id="reference_functions">
+<h2>
   <span lang="en">Reference:Functions and Operators</span>
   <span lang="ja">リファレンス：関数と演算子</span>
 </h2>
@@ -1111,12 +1119,12 @@ Even if CPU runs the fallback evaluation, it may be minor if a record per millio
 <thead class="manual">
 <tr>
 <th class="manual" style="width: 20em;">
-<span lang="en">Destination</span>
-<span lang="ja">演算子</span>
+<span lang="en">Destination Type</span>
+<span lang="ja">変換先データ型</span>
 </th>
 <th class="manual" style="width: 20em;">
 <span lang="en">Source</span>
-<span lang="ja">戻り値</span>
+<span lang="ja">変換元データ型</span>
 </th>
 <th class="manual" style="max-width: 40%;">
 <span lang="en">Remarks</span>
@@ -1178,12 +1186,372 @@ Even if CPU runs the fallback evaluation, it may be minor if a record per millio
 </table>
 </section>
 
-<section>
-<h2 id="reference_configs">
+<section class="manual_2" id="reference_configs">
+<h2>
   <span lang="en">Reference:Config Options</span>
   <span lang="ja">リファレンス：設定パラメータ</span>
 </h2>
 
+
+<dt><span>pg_strom.enable_gpuscan</span></dt>
+<dd>
+<p>
+<span lang="en">
+It turns on / off the feature of PG-Strom
+</span>
+<span lang="ja">
+GpuScan機能の有効、無効を切替えます。
+</span>
+</p>
+<p>
+<span lang="en">Default: on</span>
+<span lang="ja">デフォルト: on</span>
+<p>
+</dd>
+
+<dt><span>pg_strom.pullup_outer_scan</span></dt>
+<dd>
+<p>
+<span lang="en">
+</span>
+<span lang="ja">
+クエリ実行計画において、GpuJoinやGpuPreAggの直下でテーブルスキャンの実行が計画されている場合、GpuJoinやGpuPreAgg自身がこのスキャン処理を実行する事で、関数呼び出しおよびデータコピーのオーバーヘッドを削減します。
+</span>
+</p>
+<p>
+<span lang="en">Default: On</span>
+<span lang="ja">デフォルト: On</span>
+<p>
+</dd>
+
+<dt><span>pg_strom.program_cache_size</span></dt>
+<dd>
+<p>
+<span lang="en">
+</span>
+<span lang="ja">
+ビルド済みデバイスプログラムを保持するキャッシュの容量を指定します。
+非常に多様な種類のSQLを利用する場合には容量の拡大を検討してください。一方、キャッシュは共有メモリ上に確保されるため、必要以上に確保すべきでもありません。
+</span>
+</p>
+<p>
+<span lang="en">default: 48MB, congurable only when startup</span>
+<span lang="ja">デフォルト: 48MB、起動時のみ設定可能</span>
+<p>
+</dd>
+
+<dt><span>pg_strom.debug_cuda_coredump</span></dt>
+<dd>
+<p>
+<span lang="en">
+</span>
+<span lang="ja">
+GPUで動作するデバイスプログラムがエラーを起こした時に、クラッシュダンプの採取を試みます。
+内部的には、環境変数<tt>CUDA_ENABLE_COREDUMP_ON_EXCEPTION=1</tt>と<tt>CUDA_ENABLE_CPU_COREDUMP_ON_EXCEPTION=0</tt>をセットする事と等価ですが、CUDA 7.5では正しく動作しません。
+</span>
+</p>
+<p>
+<span lang="en">Default: off, configurable only when startup</span>
+<span lang="ja">デフォルト: off、起動時のみ設定可能</span>
+<p>
+</dd>
+
+<dt><span>pg_strom.chunk_size</span></dt>
+<dd>
+<p>
+<span lang="en">
+</span>
+<span lang="ja">
+PG-StromがGPUにデータを送出する単位を指定します。
+</span>
+</p>
+<p>
+<span lang="en">Default: 15MB</span>
+<span lang="ja">デフォルト: 15MB</span>
+<p>
+</dd>
+
+<dt><span>pg_strom.chunk_limit</span></dt>
+<dd>
+<p>
+<span lang="en">
+</span>
+<span lang="ja">
+
+</span>
+</p>
+<p>
+<span lang="en">default: 5 * pg_strom.chunk_size</span>
+<span lang="ja">デフォルト: 5 * pg_strom.chunk_size</span>
+<p>
+</dd>
+
+<dt><span>pg_strom.enabled</span></dt>
+<dd>
+<p>
+<span lang="en">
+</span>
+<span lang="ja">
+PG-Strom全機能のOn/Offを切替えます。
+</span>
+</p>
+<p>
+<span lang="en">Default: On</span>
+<span lang="ja">デフォルト: On</span>
+<p>
+</dd>
+
+<dt><span>pg_strom.perfmon</span></dt>
+<dd>
+<p>
+<span lang="en">
+</span>
+<span lang="ja">
+パフォーマンスモニタの有効、無効を切替えます。
+パフォーマンスモニタが有効化されている状態で<tt>EXPLAIN ANALYZE</tt>を実行すると、追加的な性能情報が出力されます。
+</span>
+</p>
+<p>
+<span lang="en">Default: Off</span>
+<span lang="ja">デフォルト: Off</span>
+<p>
+</dd>
+
+<dt><span>pg_strom.bulkexec</span></dt>
+<dd>
+<p>
+<span lang="en">Obsoleted, has no effect.</span>
+<span lang="ja">廃止予定。特に効果はありません。</span>
+</p>
+<p>
+<span lang="en">Default: Off</span>
+<span lang="ja">デフォルト: Off</span>
+<p>
+</dd>
+
+<dt><span>pg_strom.debug_kernel_source</span></dt>
+<dd>
+<p>
+<span lang="en">
+</span>
+<span lang="ja">
+PG-Stromが自動生成したGPUデバイスプログラムを一時ファイルに書き出します。
+本オプションが有効である状態で<tt>EXPLAIN VERBOSE</tt>を実行すると、ソースコードを含む一時ファイルのパスが出力されます。
+</span>
+</p>
+<p>
+<span lang="en">Default: Off</span>
+<span lang="ja">デフォルト: Off</span>
+<p>
+</dd>
+
+<dt><span>pg_strom.max_async_tasks</span></dt>
+<dd>
+<p>
+<span lang="en">
+</span>
+<span lang="ja">
+GPUに対して非同期に処理を行うデバイスプログラム実行要求の最大多重度を指定します。
+</span>
+</p>
+<p>
+<span lang="en">Default: 32</span>
+<span lang="ja">デフォルト: 32</span>
+<p>
+</dd>
+
+<dt><span>pg_strom.num_threads_margin</span></dt>
+<dd>
+<p>
+<span lang="en">Obsoleted, has no effect</span>
+<span lang="ja">廃止予定。特に効果はありません。</span>
+</p>
+<p>
+<span lang="en">Default: 1.10</span>
+<span lang="ja">デフォルト: 1.10</span>
+<p>
+</dd>
+
+<dt><span>pg_strom.chunk_size_margin</span></dt>
+<dd>
+<p>
+<span lang="en">
+</span>
+<span lang="ja">
+GPUで処理するSQLワークロードの中には、実際に処理を行うまで結果バッファに必要な大きさが正確には分からないものがあります。例えば、テーブル同士をJOINする場合、例外的な状況を除き、実際にJOINを行わなければ何行が生成されるのか分かりません。
+このオプションは、結果バッファの獲得時に一定の割合のマージンを取る事で、GPUプログラムの処理エラーに伴う再実行やフォールバック処理の確率を減らします。
+一方で、無駄に大きなマージンを取る事はデバイスメモリの浪費に繋がるためお勧めできません。
+</span>
+</p>
+<p>
+<span lang="en">Default: 1.25</span>
+<span lang="ja">デフォルト: 1.25</span>
+<p>
+</dd>
+
+<dt><span>pg_strom.gpu_setup_cost</span></dt>
+<dd>
+<p>
+<span lang="en">
+</span>
+<span lang="ja">
+プラナーがGPU処理のコストを見積もる時に使用するコストパラメータの一つで、GPUデバイスの初期化やデバイスプログラムのビルドに要するコストを表現します。このパラメータを大きな値にするほど、サイズの小さなテーブルに対してPG-Stromが機能しにくくなります。
+</span>
+</p>
+<p>
+<span lang="en">Default: 4000 * <tt>DEFAULT_SEQ_PAGE_COST</tt></span>
+<span lang="ja">デフォルト: 4000 * <tt>DEFAULT_SEQ_PAGE_COST</tt></span>
+<p>
+</dd>
+
+<dt><span>pg_strom.gpu_dma_cost</span></dt>
+<dd>
+<p>
+<span lang="en">
+</span>
+<span lang="ja">
+<tt>pg_strom.chunk_size</tt>分の大きさを持つデータチャンクをGPUデバイスにDMA転送するために必要なコストを表現します。
+</span>
+</p>
+<p>
+<span lang="en">Default: 10 * <tt>DEFAULT_SEQ_PAGE_COST</tt></span>
+<span lang="ja">デフォルト: 10 * <tt>DEFAULT_SEQ_PAGE_COST</tt></span>
+<p>
+</dd>
+
+<dt><span>pg_strom.gpu_operator_cost</span></dt>
+<dd>
+<p>
+<span lang="en">
+</span>
+<span lang="ja">
+GPUデバイスが計算式を処理する際のコストを表現します。この値を小さくするほど、GPUデバイスの計算能力がCPUより優れているという事を意味します。
+</span>
+</p>
+<p>
+<span lang="en">Default: DEFAULT_CPU_OPERATOR_COST / 32</span>
+<span lang="ja">デフォルト: DEFAULT_CPU_OPERATOR_COST / 32</span>
+<p>
+</dd>
+
+<dt><span>pg_strom.gpu_tuple_cost</span></dt>
+<dd>
+<p>
+<span lang="en">Obsoleted, not used now</span>
+<span lang="ja">廃止予定。現在は使われていません</span>
+</p>
+<p>
+<span lang="en">Default: DEFAULT_CPU_TUPLE_COST / 32</span>
+<span lang="ja">デフォルト: DEFAULT_CPU_TUPLE_COST / 32</span>
+<p>
+</dd>
+
+<dt><span>pg_strom.enable_gpusort</span></dt>
+<dd>
+<p>
+<span lang="en">
+</span>
+<span lang="ja">
+GpuSort機能の有効・無効を切替えます。
+現バージョンのGpuSortは品質が安定していないため、デフォルトOffに設定されています。
+</span>
+</p>
+<p>
+<span lang="en">Default: Off</span>
+<span lang="ja">デフォルト: Off</span>
+<p>
+</dd>
+
+<dt><span>pg_strom.debug_force_gpusort</span></dt>
+<dd>
+<p>
+<span lang="en">
+</span>
+<span lang="ja">
+デバッグ用オプションです。推定コスト値に関係なく<tt>GpuSort</tt>をクエリ実行プランに埋め込みます。通常は使用しないでください。
+</span>
+</p>
+<p>
+<span lang="en">Default: Off</span>
+<span lang="ja">デフォルト: Off</span>
+<p>
+</dd>
+
+<dt><span>pg_strom.max_workers</span></dt>
+<dd>
+<p>
+<span lang="en">Obsoleted, not used now</span>
+<span lang="ja">廃止予定。現在は使われていません。</span>
+</span>
+</p>
+<p>
+<span lang="en">Default: max_worker_processes / 2</span>
+<span lang="ja">デフォルト: max_worker_processes / 2</span>
+<p>
+</dd>
+
+<dt><span>pg_strom.enable_gpunestloop</span></dt>
+<dd>
+<p>
+<span lang="en">
+</span>
+<span lang="ja">
+GpuNestLoop機能の有効・無効を切替えます。
+</span>
+</p>
+<p>
+<span lang="en">Default: On</span>
+<span lang="ja">デフォルト: On</span>
+<p>
+</dd>
+
+<dt><span>pg_strom.enable_gpuhashjoin</span></dt>
+<dd>
+<p>
+<span lang="en">
+</span>
+<span lang="ja">
+GpuHashJoin機能の有効・無効を切替えます。
+</span>
+</p>
+<p>
+<span lang="en">Default: On</span>
+<span lang="ja">デフォルト: On</span>
+<p>
+</dd>
+
+<dt><span>pg_strom.enable_gpupreagg</span></dt>
+<dd>
+<p>
+<span lang="en">
+</span>
+<span lang="ja">
+GpuPreAgg機能の有効・無効を切替えます。
+</span>
+</p>
+<p>
+<span lang="en">Default: On</span>
+<span lang="ja">デフォルト: On</span>
+<p>
+</dd>
+
+<dt><span>pg_strom.debug_force_gpupreagg</span></dt>
+<dd>
+<p>
+<span lang="en">
+</span>
+<span lang="ja">
+デバッグオプションです。推定コスト値に関係なくGpuPreAgg処理をクエリ実行プランに埋め込みます。
+通常は使用しないでください。
+</span>
+</p>
+<p>
+<span lang="en">Default: Off</span>
+<span lang="ja">デフォルト: Off</span>
+<p>
+</dd>
+
+</dl>
 
 </section>
 </article>
