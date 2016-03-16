@@ -208,50 +208,50 @@ PG-Stromは以下のデータ型に対応しています。
 
 <tbody class="manual">
 <tr>
-<td class="manual">boolean</td>
-<td class="manual">cl_bool</td>
+<td class="manual"><code>boolean</code></td>
+<td class="manual"><code>cl_bool</code></td>
 <td class="manual">1 byte</td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">smallint</td>
-<td class="manual">cl_short</td>
+<td class="manual"><code>smallint</code></td>
+<td class="manual"><code>cl_short</code></td>
 <td class="manual">2 bytes</td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">integer</td>
-<td class="manual">cl_int</td>
+<td class="manual"><code>integer</code></td>
+<td class="manual"><code>cl_int</code></td>
 <td class="manual">4 bytes</td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">bigint</td>
-<td class="manual">cl_long</td>
+<td class="manual"><code>bigint</code></td>
+<td class="manual"><code>cl_long</code></td>
 <td class="manual">8 bytes</td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">real</td>
-<td class="manual">cl_float</td>
+<td class="manual"><code>real</code></td>
+<td class="manual"><code>cl_float</code></td>
 <td class="manual">4 bytes</td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">float</td>
-<td class="manual">cl_double</td>
+<td class="manual"><code>float</code></td>
+<td class="manual"><code>cl_double</code></td>
 <td class="manual">8 bytes</td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">numeric</td>
-<td class="manual">cl_ulong</td>
+<td class="manual"><code>numeric</code></td>
+<td class="manual"><code>cl_ulong</code></td>
 <td class="manual">8 bytes</td>
 <td class="manual">
 <span lang="en">
@@ -264,64 +264,57 @@ It maps variable length numeric data on 64bit fixed length datum. Up to 18 digit
 </tr>
 
 <tr>
-<td class="manual">money</td>
-<td class="manual">cl_long</td>
+<td class="manual"><code>money</code></td>
+<td class="manual"><code>cl_long</code></td>
 <td class="manual">8 bytes</td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">date</td>
-<td class="manual">DateADT</td>
+<td class="manual"><code>date</code></td>
+<td class="manual"><code>DateADT</code></td>
 <td class="manual">4 bytes</td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">time</td>
-<td class="manual">TimeADT</td>
+<td class="manual"><code>time</code></td>
+<td class="manual"><code>TimeADT</code></td>
 <td class="manual">8 bytes</td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">time with timezone</td>
-<td class="manual">TimeTzADT</td>
+<td class="manual"><code>time with timezone</code></td>
+<td class="manual"><code>TimeTzADT</code></td>
 <td class="manual">12 bytes</td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">timestamp</td>
-<td class="manual">Timestamp</td>
+<td class="manual"><code>timestamp</code></td>
+<td class="manual"><code>Timestamp</code></td>
 <td class="manual">8 bytes</td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">timestamp with timezone</td>
-<td class="manual">TimestampTz</td>
+<td class="manual"><code>timestamp with timezone</code></td>
+<td class="manual"><code>TimestampTz</code></td>
 <td class="manual">8 bytes</td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">interval</td>
-<td class="manual">Interval</td>
+<td class="manual"><code>interval</code></td>
+<td class="manual"><code>Interval</code></td>
 <td class="manual">16 bytes</td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">interval</td>
-<td class="manual">Interval</td>
-<td class="manual">16 bytes</td>
-<td class="manual"></td>
-</tr>
-
-<tr>
-<td class="manual">char(n)</td>
-<td class="manual">varlena *</td>
+<td class="manual"><code>char(n)</code></td>
+<td class="manual"><code>varlena *</code></td>
 <td class="manual">
 <span lang="en">variable length</span>
 <span lang="ja">可変長</span>
@@ -333,8 +326,8 @@ It maps variable length numeric data on 64bit fixed length datum. Up to 18 digit
 </tr>
 
 <tr>
-<td class="manual">varchar(n)</td>
-<td class="manual">varlena *</td>
+<td class="manual"><code>varchar(n)</code></td>
+<td class="manual"><code>varlena *</code></td>
 <td class="manual">
 <span lang="en">variable length</span>
 <span lang="ja">可変長</span>
@@ -346,8 +339,8 @@ It maps variable length numeric data on 64bit fixed length datum. Up to 18 digit
 </tr>
 
 <tr>
-<td class="manual">text</td>
-<td class="manual">varlena *</td>
+<td class="manual"><code>text</code></td>
+<td class="manual"><code>varlena *</code></td>
 <td class="manual">
 <span lang="en">variable length</span>
 <span lang="ja">可変長</span>
@@ -359,8 +352,8 @@ It maps variable length numeric data on 64bit fixed length datum. Up to 18 digit
 </tr>
 
 <tr>
-<td class="manual">bytea</td>
-<td class="manual">varlena *</td>
+<td class="manual"><code>bytea</code></td>
+<td class="manual"><code>varlena *</code></td>
 <td class="manual">
 <span lang="en">variable length</span>
 <span lang="ja">可変長</span>
@@ -421,8 +414,8 @@ Even if CPU runs the fallback evaluation, it may be minor if a record per millio
 
 <table class="manual">
 <caption class="manual">
-<span lang="en">Arithmetic Operators</span>
-<span lang="ja">算術演算子</span>
+<span lang="en">Basic Arithmetic Operators</span>
+<span lang="ja">基本算術演算子</span>
 </caption>
 <thead class="manual">
 <tr>
@@ -443,243 +436,578 @@ Even if CPU runs the fallback evaluation, it may be minor if a record per millio
 
 <tbody>
 <tr>
-<td class="manual">{smallint, integer, bigint}<tt>+</tt>{smallint, integer, bigint}</td>
-<td class="manual">{smallint, integer, bigint}</td>
-<td class="manual">
-<span lang="en">Result data type is wider one if both side has different data types.</span>
-<span lang="ja">両辺でデータ型が異なる時は、結果は幅の大きなデータ型で返る</span>
-</td>
-</tr>
-
-<tr>
-<td class="manual">{real, float}<tt>+</tt>{real, float}</td>
-<td class="manual">{real, float}</td>
-<td class="manual">
-<span lang="en">Result data type is wider one if both side has different data types.</span>
-<span lang="ja">両辺でデータ型が異なる時は、結果は幅の大きなデータ型で返る</span>
-</td>
-</tr>
-
-<tr>
-<td class="manual">{smallint, integer, bigint}<tt>-</tt>{smallint, integer, bigint}</td>
-<td class="manual">{smallint, integer, bigint}</td>
-<td class="manual">
-<span lang="en">Result data type is wider one if both side has different data types.</span>
-<span lang="ja">両辺でデータ型が異なる時は、結果は幅の大きなデータ型で返る</span>
-</td>
-</tr>
-
-<tr>
-<td class="manual">{real, float}<tt>-</tt>{real, float}</td>
-<td class="manual">{real, float}</td>
-<td class="manual">
-<span lang="en">Result data type is wider one if both side has different data types.</span>
-<span lang="ja">両辺でデータ型が異なる時は、結果は幅の大きなデータ型で返る</span>
-</td>
-</tr>
-
-
-<tr>
-<td class="manual">{smallint, integer, bigint}<tt>*</tt>{smallint, integer, bigint}</td>
-<td class="manual">{smallint, integer, bigint}</td>
-<td class="manual">
-<span lang="en">Result data type is wider one if both side has different data types.</span>
-<span lang="ja">両辺でデータ型が異なる時は、結果は幅の大きなデータ型で返る</span>
-</td>
-</tr>
-
-<tr>
-<td class="manual">{real, float}<tt>*</tt>{real, float}</td>
-<td class="manual">{real, float}</td>
-<td class="manual">
-<span lang="en">Result data type is wider one if both side has different data types.</span>
-<span lang="ja">両辺でデータ型が異なる時は、結果は幅の大きなデータ型で返る</span>
-</td>
-</tr>
-
-
-<tr>
-<td class="manual">{smallint, integer, bigint}<tt>/</tt>{smallint, integer, bigint}</td>
-<td class="manual">{smallint, integer, bigint}</td>
-<td class="manual">
-<span lang="en">Result data type is wider one if both side has different data types.</span>
-<span lang="ja">両辺でデータ型が異なる時は、結果は幅の大きなデータ型で返る</span>
-</td>
-</tr>
-
-<tr>
-<td class="manual">{real, float}<tt>/</tt>{real, float}</td>
-<td class="manual">{real, float}</td>
-<td class="manual">
-<span lang="en">Result data type is wider one if both side has different data types.</span>
-<span lang="ja">両辺でデータ型が異なる時は、結果は幅の大きなデータ型で返る</span>
-</td>
-</tr>
-
-
-<tr>
-<td class="manual">{smallint, integer, bigint}<tt>%</tt>{smallint, integer, bigint}</td>
-<td class="manual">{smallint, integer, bigint}</td>
+<td class="manual"><code>smallint + smallint</code></td>
+<td class="manual"><code>smallint</code></td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual"><tt>+</tt>{smallint, integer, bigint, real, float}</td>
-<td class="manual">{smallint, integer, bigint, real, float}</td>
+<td class="manual"><code>smallint + integer</code></td>
+<td class="manual"><code>integer</code></td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual"><tt>-</tt>{smallint, integer, bigint, real, float}</td>
-<td class="manual">{smallint, integer, bigint, real. float}</td>
+<td class="manual"><code>smallint + bigint</code></td>
+<td class="manual"><code>bigint</code></td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual"><tt>@<tt>{smallint, integer, bigint, real, float}</td>
-<td class="manual">{smallint, integer, bigint, real, float}</td>
+<td class="manual"><code>integer + smallint</code></td>
+<td class="manual"><code>integer</code></td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">{smallint, integer, bigint} <tt>&amp;</tt> {smallint, integer, bigint}</td>
-<td class="manual">{smallint, integer, bigint}</td>
+<td class="manual"><code>integer + integer</code></td>
+<td class="manual"><code>integer</code></td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">{smallint, integer, bigint} <tt>|</tt> {smallint, integer, bigint}</td>
-<td class="manual">{smallint, integer, bigint}</td>
+<td class="manual"><code>integer + bigint</code></td>
+<td class="manual"><code>bigint</code></td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">{smallint, integer, bigint} <tt>#</tt> {smallint, integer, bigint}</td>
-<td class="manual">{smallint, integer, bigint}</td>
+<td class="manual"><code>bigint + smallint</code></td>
+<td class="manual"><code>bigint</code></td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual"><tt>~</tt> {smallint, integer, bigint}</td>
-<td class="manual">{smallint, integer, bigint}</td>
+<td class="manual"><code>bigint + integer</code></td>
+<td class="manual"><code>bigint</code></td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">{smallint, integer, bigint} <tt>&gt;&gt;</tt> integer</td>
-<td class="manual">{smallint, integer, bigint}</td>
+<td class="manual"><code>bigint + bigint</code></td>
+<td class="manual"><code>bigint</code></td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">{smallint, integer, bigint} <tt>&lt;&lt;</tt> integer</td>
-<td class="manual">{smallint, integer, bigint}</td>
+<td class="manual"><code>real + real</code></td>
+<td class="manual"><code>real</code></td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">money {<tt>+</tt>, <tt>-</tt>} money</td>
-<td class="manual">money</td>
+<td class="manual"><code>real + float</code></td>
+<td class="manual"><code>float</code></td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">money / money</td>
-<td class="manual">float</td>
+<td class="manual"><code>float + real</code></td>
+<td class="manual"><code>float</code></td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">money <tt>*</tt> {smallint, integer, real, float}</td>
-<td class="manual">money</td>
+<td class="manual"><code>float + float</code></td>
+<td class="manual"><code>float</code></td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">{smallint, integer, real, float} <tt>*</tt> money</td>
-<td class="manual">money</td>
+<td class="manual"><code>numeric + numeric</code></td>
+<td class="manual"><code>numeric</code></td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">money <tt>/</tt> {smallint, integer, real, float}</td>
-<td class="manual">money</td>
+<td class="manual"><code>smallint - smallint</code></td>
+<td class="manual"><code>smallint</code></td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">date <tt>+</tt> integer or integer <tt>+</tt> date</td>
-<td class="manual">date</td>
+<td class="manual"><code>smallint - integer</code></td>
+<td class="manual"><code>integer</code></td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">date <tt>-</tt> integer</td>
-<td class="manual">date</td>
+<td class="manual"><code>smallint - bigint</code></td>
+<td class="manual"><code>bigint</code></td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">date <tt>-</tt> date</td>
-<td class="manual">integer</td>
+<td class="manual"><code>integer - smallint</code></td>
+<td class="manual"><code>integer</code></td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">date <tt>+</tt> time</tt> or time <tt>+</tt> date</td>
-<td class="manual">timestamp</td>
+<td class="manual"><code>integer - integer</code></td>
+<td class="manual"><code>integer</code></td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">time <tt>-</tt> time</td>
-<td class="manual">interval</td>
+<td class="manual"><code>integer - bigint</code></td>
+<td class="manual"><code>bigint</code></td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">timestamp <tt>-</tt> timestamp</td>
-<td class="manual">interval</td>
+<td class="manual"><code>bigint - smallint</code></td>
+<td class="manual"><code>bigint</code></td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">time with timezone {<tt>+</tt>, <tt>-</tt>} interval</td>
-<td class="manual">time with timezone</td>
+<td class="manual"><code>bigint - integer</code></td>
+<td class="manual"><code>bigint</code></td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">timestamp with timezone {<tt>+</tt>, <tt>-</tt>} interval</td>
-<td class="manual">timestamp with timezone</td>
+<td class="manual"><code>bigint - bigint</code></td>
+<td class="manual"><code>bigint</code></td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual"><tt>-</tt> interval</td>
-<td class="manual">interval</td>
+<td class="manual"><code>real - real</code></td>
+<td class="manual"><code>real</code></td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">interval {<tt>+</tt>, <tt>-</tt>} interval</td>
-<td class="manual">interval</td>
+<td class="manual"><code>real - float</code></td>
+<td class="manual"><code>float</code></td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">date <tt>+</tt> time with timezone or<br>time with timezone <tt>+</tt> date</td>
-<td class="manual">timestamp with timezone</td>
+<td class="manual"><code>float - real</code></td>
+<td class="manual"><code>float</code></td>
 <td class="manual"></td>
 </tr>
 
+<tr>
+<td class="manual"><code>float - float</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>numeric - numeric</code></td>
+<td class="manual"><code>numeric</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>smallint * smallint</code></td>
+<td class="manual"><code>smallint</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>smallint * integer</code></td>
+<td class="manual"><code>integer</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>smallint * bigint</code></td>
+<td class="manual"><code>bigint</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>integer * smallint</code></td>
+<td class="manual"><code>integer</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>integer * integer</code></td>
+<td class="manual"><code>integer</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>integer * bigint</code></td>
+<td class="manual"><code>bigint</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>bigint * smallint</code></td>
+<td class="manual"><code>bigint</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>bigint * integer</code></td>
+<td class="manual"><code>bigint</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>bigint * bigint</code></td>
+<td class="manual"><code>bigint</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>real * real</code></td>
+<td class="manual"><code>real</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>real * float</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>float * real</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>float * float</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>numeric * numeric</code></td>
+<td class="manual"><code>numeric</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>smallint / smallint</code></td>
+<td class="manual"><code>smallint</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>smallint / integer</code></td>
+<td class="manual"><code>integer</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>smallint / bigint</code></td>
+<td class="manual"><code>bigint</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>integer / smallint</code></td>
+<td class="manual"><code>integer</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>integer / integer</code></td>
+<td class="manual"><code>integer</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>integer / bigint</code></td>
+<td class="manual"><code>bigint</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>bigint / smallint</code></td>
+<td class="manual"><code>bigint</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>bigint / integer</code></td>
+<td class="manual"><code>bigint</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>bigint / bigint</code></td>
+<td class="manual"><code>bigint</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>real / real</code></td>
+<td class="manual"><code>real</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>real / float</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>float / real</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>float / float</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>smallint % smallint</code></td>
+<td class="manual"><code>smallint</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>integer % integer</code></td>
+<td class="manual"><code>integer</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>bigint % bigint</code></td>
+<td class="manual"><code>bigint</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>smallint & smallint</code></td>
+<td class="manual"><code>smallint</code></td>
+<td class="manual">bitwise and</td>
+</tr>
+
+<tr>
+<td class="manual"><code>integer & integer</code></td>
+<td class="manual"><code>integer</code></td>
+<td class="manual">bitwise and</td>
+</tr>
+
+<tr>
+<td class="manual"><code>bigint & bigint</code></td>
+<td class="manual"><code>bigint</code></td>
+<td class="manual">bitwise and</td>
+</tr>
+
+<tr>
+<td class="manual"><code>smallint | smallint</code></td>
+<td class="manual"><code>smallint</code></td>
+<td class="manual">bitwise or</td>
+</tr>
+
+<tr>
+<td class="manual"><code>integer | integer</code></td>
+<td class="manual"><code>integer</code></td>
+<td class="manual">bitwise or</td>
+</tr>
+
+<tr>
+<td class="manual"><code>bigint | bigint</code></td>
+<td class="manual"><code>bigint</code></td>
+<td class="manual">bitwise or</td>
+</tr>
+
+<tr>
+<td class="manual"><code>smallint # smallint</code></td>
+<td class="manual"><code>smallint</code></td>
+<td class="manual">bitwise xor</td>
+</tr>
+
+<tr>
+<td class="manual"><code>integer # integer</code></td>
+<td class="manual"><code>integer</code></td>
+<td class="manual">bitwise xor</td>
+</tr>
+
+<tr>
+<td class="manual"><code>bigint # bigint</code></td>
+<td class="manual"><code>bigint</code></td>
+<td class="manual">bitwise xor</td>
+</tr>
+
+<tr>
+<td class="manual"><code>~smallint</code></td>
+<td class="manual"><code>smallint</code></td>
+<td class="manual">bitwise not</td>
+</tr>
+
+<tr>
+<td class="manual"><code>~integer</code></td>
+<td class="manual"><code>integer</code></td>
+<td class="manual">bitwise not</td>
+</tr>
+
+<tr>
+<td class="manual"><code>~bigint</code></td>
+<td class="manual"><code>bigint</code></td>
+<td class="manual">bitwise not</td>
+</tr>
+
+<tr>
+<td class="manual"><code>smallint &gt;&gt; integer</code></td>
+<td class="manual"><code>smallint</code></td>
+<td class="manual">right shift</td>
+</tr>
+
+<tr>
+<td class="manual"><code>integer &gt;&gt; integer</code></td>
+<td class="manual"><code>integer</code></td>
+<td class="manual">right shift</td>
+</tr>
+
+<tr>
+<td class="manual"><code>bigint &gt;&gt; integer</code></td>
+<td class="manual"><code>bigint</code></td>
+<td class="manual">right shift</td>
+</tr>
+
+<tr>
+<td class="manual"><code>smallint &lt;&lt; integer</code></td>
+<td class="manual"><code>smallint</code></td>
+<td class="manual">left shift</td>
+</tr>
+
+<tr>
+<td class="manual"><code>integer &lt;&lt; integer</code></td>
+<td class="manual"><code>integer</code></td>
+<td class="manual">left shift</td>
+</tr>
+
+<tr>
+<td class="manual"><code>bigint &lt;&lt; integer</code></td>
+<td class="manual"><code>bigint</code></td>
+<td class="manual">left shift</td>
+</tr>
+
+<tr>
+<td class="manual"><code>+smallint</code></td>
+<td class="manual"><code>smallint</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>+integer</code></td>
+<td class="manual"><code>integer</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>+bigint</code></td>
+<td class="manual"><code>bigint</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>+real</code></td>
+<td class="manual"><code>real</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>+float</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>+numeric</code></td>
+<td class="manual"><code>numeric</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>-smallint</code></td>
+<td class="manual"><code>smallint</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>-integer</code></td>
+<td class="manual"><code>integer</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>-bigint</code></td>
+<td class="manual"><code>bigint</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>-real</code></td>
+<td class="manual"><code>real</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>-float</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>-numeric</code></td>
+<td class="manual"><code>numeric</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>@smallint</code></td>
+<td class="manual"><code>smallint</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>@integer</code></td>
+<td class="manual"><code>integer</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>@bigint</code></td>
+<td class="manual"><code>bigint</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>@real</code></td>
+<td class="manual"><code>real</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>@float</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>@numeric</code></td>
+<td class="manual"><code>numeric</code></td>
+<td class="manual"></td>
+</tr>
 </tbody>
 </table>
+
+
+
 
 <table class="manual">
 <caption class="manual">
-<span lang="en">Comparison Operators</span>
-<span lang="ja">比較演算子</span>
+<span lang="en">Basic Comparison Operators</span>
+<span lang="ja">基本比較演算子</span>
 </caption>
 <thead class="manual">
 <tr>
@@ -700,8 +1028,8 @@ Even if CPU runs the fallback evaluation, it may be minor if a record per millio
 
 <tbody>
 <tr>
-<td class="manual">{smallint, integer, bigint, real, float}<br><i>comp</i><br>{smallint, integer, bigint, real, float}</td>
-<td class="manual"></td>
+<td class="manual"><code>smallint <i>comp</i> smallint</code></td>
+<td class="manual"><code>boolean</code></td>
 <td class="manual">
 <span lang="en"><i>comp</i> is either of <tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> or <tt>&gt;</tt>.</span>
 <span lang="ja"><i>comp</i>は<tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> または <tt>&gt;</tt>のいずれか</span>
@@ -709,8 +1037,8 @@ Even if CPU runs the fallback evaluation, it may be minor if a record per millio
 </tr>
 
 <tr>
-<td class="manual">money <i>comp</i> money</td>
-<td class="manual"></td>
+<td class="manual"><code>integer <i>comp</i> integer</code></td>
+<td class="manual"><code>boolean</code></td>
 <td class="manual">
 <span lang="en"><i>comp</i> is either of <tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> or <tt>&gt;</tt>.</span>
 <span lang="ja"><i>comp</i>は<tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> または <tt>&gt;</tt>のいずれか</span>
@@ -718,8 +1046,8 @@ Even if CPU runs the fallback evaluation, it may be minor if a record per millio
 </tr>
 
 <tr>
-<td class="manual">numeric <i>comp</i> numeric</td>
-<td class="manual"></td>
+<td class="manual"><code>bigint <i>comp</i> bigint</code></td>
+<td class="manual"><code>boolean</code></td>
 <td class="manual">
 <span lang="en"><i>comp</i> is either of <tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> or <tt>&gt;</tt>.</span>
 <span lang="ja"><i>comp</i>は<tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> または <tt>&gt;</tt>のいずれか</span>
@@ -727,8 +1055,8 @@ Even if CPU runs the fallback evaluation, it may be minor if a record per millio
 </tr>
 
 <tr>
-<td class="manual">{date, timestamp, timestamp with timezone}<br><i>comp</i><br>{date, timestamp, timestamp with timezone}</td>
-<td class="manual"></td>
+<td class="manual"><code>real <i>comp</i> real</code></td>
+<td class="manual"><code>boolean</code></td>
 <td class="manual">
 <span lang="en"><i>comp</i> is either of <tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> or <tt>&gt;</tt>.</span>
 <span lang="ja"><i>comp</i>は<tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> または <tt>&gt;</tt>のいずれか</span>
@@ -736,8 +1064,8 @@ Even if CPU runs the fallback evaluation, it may be minor if a record per millio
 </tr>
 
 <tr>
-<td class="manual">time <i>comp</i> time</td>
-<td class="manual"></td>
+<td class="manual"><code>float <i>comp</i> float</code></td>
+<td class="manual"><code>boolean</code></td>
 <td class="manual">
 <span lang="en"><i>comp</i> is either of <tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> or <tt>&gt;</tt>.</span>
 <span lang="ja"><i>comp</i>は<tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> または <tt>&gt;</tt>のいずれか</span>
@@ -745,56 +1073,15 @@ Even if CPU runs the fallback evaluation, it may be minor if a record per millio
 </tr>
 
 <tr>
-<td class="manual">time with timezone <i>comp</i> time with timezone</td>
-<td class="manual"></td>
+<td class="manual"><code>numeric <i>comp</i> numeric</code></td>
+<td class="manual"><code>boolean</code></td>
 <td class="manual">
 <span lang="en"><i>comp</i> is either of <tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> or <tt>&gt;</tt>.</span>
 <span lang="ja"><i>comp</i>は<tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> または <tt>&gt;</tt>のいずれか</span>
-</td>
-</tr>
-
-<tr>
-<td class="manual">interval <i>comp</i> interval</td>
-<td class="manual"></td>
-<td class="manual">
-<span lang="en"><i>comp</i> is either of <tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> or <tt>&gt;</tt>.</span>
-<span lang="ja"><i>comp</i>は<tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> または <tt>&gt;</tt>のいずれか</span>
-</td>
-</tr>
-
-<tr>
-<td class="manual">char(n) <i>comp</i> char(n)</td>
-<td class="manual"></td>
-<td class="manual">
-<span lang="en">
-<i>comp</i> is either of <tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> or <tt>&gt;</tt>.<br>
-<tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt> and <tt>&gt;=</tt> are valid only if c-locale.
-</span>
-<span lang="ja">
-<i>comp</i>は<tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> または <tt>&gt;</tt>のいずれか。<br>
-<tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>および <tt>&gt;=</tt> はCロケールの場合のみ有効。
-</span>
-</td>
-</tr>
-
-<tr>
-<td class="manual">text <i>comp</i> text</td>
-<td class="manual"></td>
-<td class="manual">
-<span lang="en">
-<i>comp</i> is either of <tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> or <tt>&gt;</tt>.<br>
-<tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt> and <tt>&gt;=</tt> are valid only if c-locale.
-</span>
-<span lang="ja">
-<i>comp</i>は<tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> または <tt>&gt;</tt>のいずれか。<br>
-<tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>および <tt>&gt;=</tt> はCロケールの場合のみ有効。
-</span>
 </td>
 </tr>
 </tbody>
 </table>
-
-
 
 <table class="manual">
 <caption class="manual">
@@ -820,245 +1107,352 @@ Even if CPU runs the fallback evaluation, it may be minor if a record per millio
 
 <tbody>
 <tr>
-<td class="manual">abs(smallint)</td>
-<td class="manual">smallint</td>
-<td class="manual"></td>
+<td class="manual"><code>abs(smallint)</code></td>
+<td class="manual"><code>smallint</code></td>
+<td class="manual">
+<span lang="en">absolute value</span>
+<span lang="ja">絶対値</span>
+</td>
 </tr>
 
 <tr>
-<td class="manual">abs(integer)</td>
-<td class="manual">integer</td>
-<td class="manual"></td>
+<td class="manual"><code>abs(integer)</code></td>
+<td class="manual"><code>integer</code></td>
+<td class="manual">
+<span lang="en">absolute value</span>
+<span lang="ja">絶対値</span>
+</td>
 </tr>
 
 <tr>
-<td class="manual">abs(bigint)</td>
-<td class="manual">bigint</td>
-<td class="manual"></td>
+<td class="manual"><code>abs(bigint)</code></td>
+<td class="manual"><code>bigint</code></td>
+<td class="manual">
+<span lang="en">absolute value</span>
+<span lang="ja">絶対値</span>
+</td>
 </tr>
 
 <tr>
-<td class="manual">abs(real)</td>
-<td class="manual">real</td>
-<td class="manual"></td>
+<td class="manual"><code>abs(real)</code></td>
+<td class="manual"><code>real</code></td>
+<td class="manual">
+<span lang="en">absolute value</span>
+<span lang="ja">絶対値</span>
+</td>
 </tr>
 
 <tr>
-<td class="manual">abs(float)</td>
-<td class="manual">float</td>
-<td class="manual"></td>
+<td class="manual"><code>abs(float)</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual">
+<span lang="en">absolute value</span>
+<span lang="ja">絶対値</span>
+</td>
 </tr>
 
 <tr>
-<td class="manual">cbrt(float)</td>
-<td class="manual">float</td>
-<td class="manual"></td>
+<td class="manual"><code>cbrt(float)</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual">
+<span lang="en"></span>
+<span lang="ja">立方根</span>
+</td>
 </tr>
 
 <tr>
-<td class="manual">dcbrt(float)</td>
-<td class="manual">float</td>
-<td class="manual"></td>
+<td class="manual"><code>dcbrt(float)</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual">
+<span lang="en"></span>
+<span lang="ja">立方根</span>
+</td>
 </tr>
 
 <tr>
-<td class="manual">ceil(float)</td>
-<td class="manual">float</td>
-<td class="manual"></td>
+<td class="manual"><code>ceil(float)</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual">
+<span lang="en"></span>
+<span lang="ja">引数より小さくない最小の整数</span>
+</td>
 </tr>
 
 <tr>
-<td class="manual">ceiling(float)</td>
-<td class="manual">float</td>
-<td class="manual"></td>
+<td class="manual"><code>ceiling(float)</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual">
+<span lang="en"></span>
+<span lang="ja">引数より小さくない最小の整数</span>
+</td>
 </tr>
 
 <tr>
-<td class="manual">exp(float)</td>
-<td class="manual">float</td>
-<td class="manual"></td>
+<td class="manual"><code>exp(float)</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual">
+<span lang="en"></span>
+<span lang="ja">指数</span>
+</td>
 </tr>
 
 <tr>
-<td class="manual">dexp(float)</td>
-<td class="manual">float</td>
-<td class="manual"></td>
+<td class="manual"><code>dexp(float)</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual">
+<span lang="en"></span>
+<span lang="ja">指数</span>
+</td>
 </tr>
 
 <tr>
-<td class="manual">floor(float)</td>
-<td class="manual">float</td>
-<td class="manual"></td>
+<td class="manual"><code>floor(float)</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual">
+<span lang="en"></span>
+<span lang="ja">引数より大きくない最大の整数</span>
+</td>
 </tr>
 
 <tr>
-<td class="manual">ln(float)</td>
-<td class="manual">float</td>
-<td class="manual"></td>
+<td class="manual"><code>ln(float)</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual">
+<span lang="en"></span>
+<span lang="ja">自然対数</span>
+</td>
 </tr>
 
 <tr>
-<td class="manual">dlog1(float)</td>
-<td class="manual">float</td>
-<td class="manual"></td>
+<td class="manual"><code>dlog1(float)</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual">
+<span lang="en"></span>
+<span lang="ja">自然対数</span></td>
 </tr>
 
 <tr>
-<td class="manual">log(float)</td>
-<td class="manual">float</td>
-<td class="manual"></td>
+<td class="manual"><code>log(float)</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual">
+<span lang="en"></span>
+<span lang="ja">10を底とした対数（常用対数）</span>
+</td>
 </tr>
 
 <tr>
-<td class="manual">dlog10(float)</td>
-<td class="manual">float</td>
-<td class="manual"></td>
+<td class="manual"><code>dlog10(float)</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual">
+<span lang="en"></span>
+<span lang="ja">10を底とした対数（常用対数）</span>
+</td>
 </tr>
 
 <tr>
-<td class="manual">pi()</td>
-<td class="manual">float</td>
-<td class="manual"></td>
+<td class="manual"><code>pi()</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual">
+<span lang="en"></span>
+<span lang="ja">円周率</span></td>
+</td>
 </tr>
 
 <tr>
-<td class="manual">power(float, float)</td>
-<td class="manual">float</td>
-<td class="manual"></td>
+<td class="manual"><code>power(a float, b float)<code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual">
+<span lang="en"></span>
+<span lang="ja">aのb乗</span></td>
+</td>
 </tr>
 
 <tr>
-<td class="manual">pow(float, float)</td>
-<td class="manual">float</td>
-<td class="manual"></td>
+<td class="manual"><code>pow(a float, b float)</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual">
+<span lang="en"></span>
+<span lang="ja">aのb乗</span></td>
+</td>
 </tr>
 
 <tr>
-<td class="manual">dpow(float, float)</td>
-<td class="manual">float</td>
-<td class="manual"></td>
+<td class="manual"><code>dpow(a float, b float)</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual">
+<span lang="en"></span>
+<span lang="ja">aのb乗</span></td>
+</td>
 </tr>
 
 <tr>
-<td class="manual">round(float)</td>
-<td class="manual">float</td>
-<td class="manual"></td>
+<td class="manual"><code>round(float)</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual">
+<span lang="en"></span>
+<span lang="ja">四捨五入</span></td>
+</td>
 </tr>
 
 <tr>
-<td class="manual">dround(float)</td>
-<td class="manual">float</td>
-<td class="manual"></td>
+<td class="manual"><code>dround(float)</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual">
+<span lang="en"></span>
+<span lang="ja">四捨五入</span></td>
+</td>
 </tr>
 
 <tr>
-<td class="manual">sign(float)</td>
-<td class="manual">float</td>
-<td class="manual"></td>
+<td class="manual"><code>sign(float)</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual">
+<span lang="en"></span>
+<span lang="ja">引数の符号（-1, 0, +1）</span></td>
+</td>
 </tr>
 
 <tr>
-<td class="manual">sqrt(float)</td>
-<td class="manual">float</td>
-<td class="manual"></td>
+<td class="manual"><code>sqrt(float)</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual">
+<span lang="en"></span>
+<span lang="ja">平方根</span></td>
+</td>
 </tr>
 
 <tr>
-<td class="manual">dsqrt(float)</td>
-<td class="manual">float</td>
-<td class="manual"></td>
+<td class="manual"><code>dsqrt(float)</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual">
+<span lang="en"></span>
+<span lang="ja">平方根</span></td>
+</td>
 </tr>
 
 <tr>
-<td class="manual">trunc(float)</td>
-<td class="manual">float</td>
-<td class="manual"></td>
+<td class="manual"><code>trunc(float)</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual">
+<span lang="en">truncate</span>
+<span lang="ja">切り捨て</span></td>
+</td>
 </tr>
 
 <tr>
-<td class="manual">dtrunc(float)</td>
-<td class="manual">float</td>
-<td class="manual"></td>
+<td class="manual"><code>dtrunc(float)</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual">
+<span lang="en">truncate</span>
+<span lang="ja">切り捨て</span></td>
+</td>
 </tr>
 
 <tr>
-<td class="manual">degrees(float)</td>
-<td class="manual">float</td>
-<td class="manual"></td>
+<td class="manual"><code>degrees(float)</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual">
+<span lang="en"></span>
+<span lang="ja">ラジアンに対応する度</span>
+</td>
 </tr>
 
 <tr>
-<td class="manual">radians(float)</td>
-<td class="manual">float</td>
-<td class="manual"></td>
+<td class="manual"><code>radians(float)</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual">
+<span lang="en"></span>
+<span lang="ja">度に対応するラジアン</span></td>
+</td>
 </tr>
 
+<!--
+あれ？PostgreSQLにない
 <tr>
 <td class="manual">acon(float)</td>
 <td class="manual">float</td>
 <td class="manual"></td>
 </tr>
+-->
 
 <tr>
-<td class="manual">asin(float)</td>
-<td class="manual">float</td>
-<td class="manual"></td>
+<td class="manual"><code>asin(float)</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual">
+<span lang="en"></span>
+<span lang="ja">逆正弦関数</span></td>
+</td>
 </tr>
 
 <tr>
-<td class="manual">atan(float)</td>
-<td class="manual">float</td>
-<td class="manual"></td>
+<td class="manual"><code>atan(float)</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual">
+<span lang="en"></span>
+<span lang="ja">逆正接関数</span></td>
+</td>
 </tr>
 
 <tr>
-<td class="manual">atan2(float, float)</td>
-<td class="manual">float</td>
-<td class="manual"></td>
+<td class="manual"><code>atan2(x float, y float)</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual">
+<span lang="en"></span>
+<span lang="ja">x/yの逆正接関数</span></td>
+</td>
 </tr>
 
 <tr>
-<td class="manual">cos(float)</td>
-<td class="manual">float</td>
-<td class="manual"></td>
+<td class="manual"><code>cos(float)</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual">
+<span lang="en"></span>
+<span lang="ja">余弦関数</span></td>
+</td>
 </tr>
 
 <tr>
-<td class="manual">cot(float)</td>
-<td class="manual">float</td>
-<td class="manual"></td>
+<td class="manual"><code>cot(float)</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual">
+<span lang="en"></span>
+<span lang="ja">余接関数</span></td>
+</td>
 </tr>
 
 <tr>
-<td class="manual">sin(float)</td>
-<td class="manual">float</td>
-<td class="manual"></td>
+<td class="manual"><code>sin(float)</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual">
+<span lang="en"></span>
+<span lang="ja">正弦関数</span></td>
+</td>
 </tr>
 
 <tr>
-<td class="manual">tan(float)</td>
-<td class="manual">float</td>
-<td class="manual"></td>
+<td class="manual"><code>tan(float)</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual">
+<span lang="en"></span>
+<span lang="ja">正接関数</span>
+</td>
+</td>
 </tr>
-
-
-
-
-
 </tbody>
 </table>
 
 
+
 <table class="manual">
 <caption class="manual">
-<span lang="en">Other Functions</span>
-<span lang="ja">その他の関数</span>
+<span lang="en">Date and Time Functions / Operators</span>
+<span lang="ja">日付時刻関数・演算子</span>
 </caption>
 <thead class="manual">
 <tr>
 <th class="manual" style="width: 20em;">
-<span lang="en">Functions</span>
-<span lang="ja">関数</span>
+<span lang="en">Operator</span>
+<span lang="ja">演算子</span>
 </th>
 <th class="manual" style="width: 8em;">
 <span lang="en">Return Value</span>
@@ -1073,38 +1467,466 @@ Even if CPU runs the fallback evaluation, it may be minor if a record per millio
 
 <tbody>
 <tr>
-<td class="manual">overlap(time, time, time, time)</td>
-<td class="manual">boolean</td>
+<td class="manual"><code>date + integer</code></td>
+<td class="manual"><code>date</code></td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">overlap(time with timezone, time with timezone, time with timezone, time with timezone)</td>
-<td class="manual">boolean</td>
+<td class="manual"><code>integer + date</code></td>
+<td class="manual"><code>date</code></td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">overlap(timestamp, timestamp, timestamp, timestamp)</td>
-<td class="manual">boolean</td>
+<td class="manual"><code>date - integer</code></td>
+<td class="manual"><code>date</code></td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">overlap(timestamp with timezone, timestamp with timezone, timestamp with timezone, timestamp with timezone)</td>
-<td class="manual">boolean</td>
+<td class="manual"><code>date - date</code></td>
+<td class="manual"><code>integer</code></td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">now()</td>
-<td class="manual">timestamp with timezone</td>
+<td class="manual"><code>date + time</code></td>
+<td class="manual"><code>timestamp</code></td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">length({char(n), text})</td>
-<td class="manual">integer</td>
+<td class="manual"><code>date + time with timezone</code></td>
+<td class="manual"><code>timestamp with timezone</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>time + date</code></td>
+<td class="manual"><code>timestamp</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>time - time</code></td>
+<td class="manual"><code>interval</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>timestamp - timestamp</code></td>
+<td class="manual"><code>interval</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>time with timezone + interval</code></td>
+<td class="manual"><code>time with timezone</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>time with timezone - interval</code></td>
+<td class="manual"><code>time with timezone</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>timestamp with timezone + interval</code></td>
+<td class="manual"><code>timestamp with timezone</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>timestamp with timezone - interval</code></td>
+<td class="manual"><code>timestamp with timezone</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>- interval</code></td>
+<td class="manual"><code>interval</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>interval + interval</code></td>
+<td class="manual"><code>interval</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>interval - interval</code></td>
+<td class="manual"><code>interval</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>date <i>comp</i> date</code></td>
+<td class="manual"><code>boolean</code></td>
+<td class="manual">
+<span lang="en"><i>comp</i> is either of <tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> or <tt>&gt;</tt>.</span>
+<span lang="ja"><i>comp</i>は<tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> または <tt>&gt;</tt>のいずれか</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual"><code>date <i>comp</i> timestamp</code></td>
+<td class="manual"><code>boolean</code></td>
+<td class="manual">
+<span lang="en"><i>comp</i> is either of <tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> or <tt>&gt;</tt>.</span>
+<span lang="ja"><i>comp</i>は<tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> または <tt>&gt;</tt>のいずれか</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual"><code>time <i>comp</i> time</code></td>
+<td class="manual"><code>boolean</code></td>
+<td class="manual">
+<span lang="en"><i>comp</i> is either of <tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> or <tt>&gt;</tt>.</span>
+<span lang="ja"><i>comp</i>は<tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> または <tt>&gt;</tt>のいずれか</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual"><code>time with timezone <i>comp</i> time with timezone</code></td>
+<td class="manual"><code>boolean</code></td>
+<td class="manual">
+<span lang="en"><i>comp</i> is either of <tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> or <tt>&gt;</tt>.</span>
+<span lang="ja"><i>comp</i>は<tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> または <tt>&gt;</tt>のいずれか</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual"><code>timestamp <i>comp</i> timestamp</code></td>
+<td class="manual"><code>boolean</code></td>
+<td class="manual">
+<span lang="en"><i>comp</i> is either of <tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> or <tt>&gt;</tt>.</span>
+<span lang="ja"><i>comp</i>は<tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> または <tt>&gt;</tt>のいずれか</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual"><code>timestamp <i>comp</i> date</code></td>
+<td class="manual"><code>boolean</code></td>
+<td class="manual">
+<span lang="en"><i>comp</i> is either of <tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> or <tt>&gt;</tt>.</span>
+<span lang="ja"><i>comp</i>は<tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> または <tt>&gt;</tt>のいずれか</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual"><code>timestamp with timezone <i>comp</i> timestamp with timezone</code></td>
+<td class="manual"><code>boolean</code></td>
+<td class="manual">
+<span lang="en"><i>comp</i> is either of <tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> or <tt>&gt;</tt>.</span>
+<span lang="ja"><i>comp</i>は<tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> または <tt>&gt;</tt>のいずれか</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual"><code>date <i>comp</i> timestamp with timezone</code></td>
+<td class="manual"><code>boolean</code></td>
+<td class="manual">
+<span lang="en"><i>comp</i> is either of <tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> or <tt>&gt;</tt>.</span>
+<span lang="ja"><i>comp</i>は<tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> または <tt>&gt;</tt>のいずれか</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual"><code>timestamp with timezone <i>comp</i> date</code></td>
+<td class="manual"><code>boolean</code></td>
+<td class="manual">
+<span lang="en"><i>comp</i> is either of <tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> or <tt>&gt;</tt>.</span>
+<span lang="ja"><i>comp</i>は<tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> または <tt>&gt;</tt>のいずれか</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual"><code>timestamp <i>comp</i> timestamp with timezone</code></td>
+<td class="manual"><code>boolean</code></td>
+<td class="manual">
+<span lang="en"><i>comp</i> is either of <tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> or <tt>&gt;</tt>.</span>
+<span lang="ja"><i>comp</i>は<tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> または <tt>&gt;</tt>のいずれか</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual"><code>timestamp with timezone <i>comp</i> timestamp</code></td>
+<td class="manual"><code>boolean</code></td>
+<td class="manual">
+<span lang="en"><i>comp</i> is either of <tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> or <tt>&gt;</tt>.</span>
+<span lang="ja"><i>comp</i>は<tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> または <tt>&gt;</tt>のいずれか</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual"><code>interval <i>comp</i> interval</code></td>
+<td class="manual"><code>boolean</code></td>
+<td class="manual">
+<span lang="en"><i>comp</i> is either of <tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> or <tt>&gt;</tt>.</span>
+<span lang="ja"><i>comp</i>は<tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> または <tt>&gt;</tt>のいずれか</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual"><code>overlap(time, time, time, time)</code></td>
+<td class="manual"><code>boolean</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>overlap(time with timezone, time with timezone, time with timezone, time with timezone)</code></td>
+<td class="manual"><code>boolean</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>overlap(timestamp, timestamp, timestamp, timestamp)</code></td>
+<td class="manual"><code>boolean</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>overlap(timestamp with timezone, timestamp with timezone, timestamp with timezone, timestamp with timezone)</code></td>
+<td class="manual"><code>boolean</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>now()</code></td>
+<td class="manual"><code>timestamp with timezone</code></td>
+<td class="manual"></td>
+</tr>
+</tbody>
+</table>
+
+
+
+
+<table class="manual">
+<caption class="manual">
+<span lang="en">Text Functions / Operators</span>
+<span lang="ja">文字列関数・演算子</span>
+</caption>
+<thead class="manual">
+<tr>
+<th class="manual" style="width: 20em;">
+<span lang="en">Functions / Operators</span>
+<span lang="ja">関数・演算子</span>
+</th>
+<th class="manual" style="width: 8em;">
+<span lang="en">Return Value</span>
+<span lang="ja">戻り値</span>
+</th>
+<th class="manual" style="max-width: 40%;">
+<span lang="en">Remarks</span>
+<span lang="ja">備考</span>
+</th>
+</tr>
+</thead>
+
+<tbody>
+<tr>
+<td class="manual"><code>char(n) <i>comp</i> char(n)</code></td>
+<td class="manual"><code>boolean</code></td>
+<td class="manual">
+<span lang="en"><i>comp</i> is either of <tt>=</tt> or <tt>&lt;&gt;</tt>.</span>
+<span lang="ja"><i>comp</i>は<tt>=</tt> または <tt>&lt;&gt;</tt>。</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual"><code>char(n) <i>comp</i> char(n)</code></td>
+<td class="manual"><code>boolean</code></td>
+<td class="manual">
+<span lang="en">
+<i>comp</i> is either of <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> or <tt>&gt;</tt>.
+Valid only when no-locale or C-locale.
+</span>
+<span lang="ja">
+<i>comp</i>は<tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> または <tt>&gt;</tt>のいずれか。
+ロケールなし、またはCロケールの場合のみ有効。
+</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual"><code>length(char(n))</code></td>
+<td class="manual"><code>integer</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>bpcharcmp(char(n), char(n))</code></td>
+<td class="manual"><code>integer</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>text <i>comp</i> text</code></td>
+<td class="manual"><code>boolean</code></td>
+<td class="manual">
+<span lang="en"><i>comp</i> is either of <tt>=</tt> or <tt>&lt;&gt;</tt>.</span>
+<span lang="ja"><i>comp</i>は<tt>=</tt> または <tt>&lt;&gt;</tt>。</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual"><code>text <i>comp</i> text</code></td>
+<td class="manual"><code>boolean</code></td>
+<td class="manual">
+<span lang="en">
+<i>comp</i> is either of <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> or <tt>&gt;</tt>.
+Valid only when no-locale or C-locale.
+</span>
+<span lang="ja">
+<i>comp</i>は<tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> または <tt>&gt;</tt>のいずれか。
+ロケールなし、またはCロケールの場合のみ有効。
+</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual"><code>length(text)</code></td>
+<td class="manual"><code>integer</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>bttextcmp(text, text)</code></td>
+<td class="manual"><code>integer</code></td>
+<td class="manual"></td>
+</tr>
+</tbody>
+</table>
+
+
+<table class="manual">
+<caption class="manual">
+<span lang="en">Currency Functions / Operators</span>
+<span lang="ja">通貨型関数・演算子</span>
+</caption>
+<thead class="manual">
+<tr>
+<th class="manual" style="width: 20em;">
+<span lang="en">Functions / Operators</span>
+<span lang="ja">関数・演算子</span>
+</th>
+<th class="manual" style="width: 8em;">
+<span lang="en">Return Value</span>
+<span lang="ja">戻り値</span>
+</th>
+<th class="manual" style="max-width: 40%;">
+<span lang="en">Remarks</span>
+<span lang="ja">備考</span>
+</th>
+</tr>
+</thead>
+
+<tr>
+<td class="manual"><code>money + money</code></td>
+<td class="manual"><code>money</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>money - money</code></td>
+<td class="manual"><code>money</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>money / money</code></td>
+<td class="manual"><code>float</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>money * smallint</code></td>
+<td class="manual"><code>money</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>money * integer</code></td>
+<td class="manual"><code>money</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>money * real</code></td>
+<td class="manual"><code>money</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>money * float</code></td>
+<td class="manual"><code>money</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>money / smallint</code></td>
+<td class="manual"><code>money</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>money / integer</code></td>
+<td class="manual"><code>money</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>money / real</code></td>
+<td class="manual"><code>money</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>money / float</code></td>
+<td class="manual"><code>money</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>smallint * money</code></td>
+<td class="manual"><code>money</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>integer * money</code></td>
+<td class="manual"><code>money</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>real * money</code></td>
+<td class="manual"><code>money</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>float * money</code></td>
+<td class="manual"><code>money</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>money <i>comp</i> money</code></td>
+<td class="manual"><code>boolean</code></td>
+<td class="manual">
+<span lang="en"><i>comp</i> is either of <tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> or <tt>&gt;</tt>.</span>
+<span lang="ja"><i>comp</i>は<tt>=</tt>, <tt>&lt;&gt;</tt>, <tt>&lt;</tt>, <tt>&lt;=</tt>, <tt>&gt;=</tt> または <tt>&gt;</tt>のいずれか</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual"><code>cash_cmp(money, money)</code></td>
+<td class="manual"><code>integer</code></td>
 <td class="manual"></td>
 </tr>
 </tbody>
@@ -1135,50 +1957,81 @@ Even if CPU runs the fallback evaluation, it may be minor if a record per millio
 
 <tbody>
 <tr>
-<td class="manual">integer</td>
-<td class="manual">boolean</td>
+<td class="manual"><code>integer</code></td>
+<td class="manual"><code>boolean</code></td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">{smallint, integer, bigint, real, float, numeric}</td>
-<td class="manual">{smallint, integer, bigint, real, float, numeric}</td>
+<td class="manual"><code>smallint</code></td>
+<td class="manual"><code>{smallint, integer, bigint, real, float, numeric}</code></td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">money</td>
-<td class="manual">{integer, bigint, numeric}</td>
+<td class="manual"><code>integer</code></td>
+<td class="manual"><code>{smallint, integer, bigint, real, float, numeric}</code></td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">date</td>
-<td class="manual">{date, timestamp, timestamp with timezone}</td>
+<td class="manual"><code>bigint</code></td>
+<td class="manual"><code>{smallint, integer, bigint, real, float, numeric}</code></td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">time</td>
-<td class="manual">{time, time with timezone, timestamp, timestamp with timezone}</td>
+<td class="manual"><code>real</code></td>
+<td class="manual"><code>{smallint, integer, bigint, real, float, numeric}</code></td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">time with timezone</td>
-<td class="manual">{time, timestamp with timezone}</td>
+<td class="manual"><code>float</code></td>
+<td class="manual"><code>{smallint, integer, bigint, real, float, numeric}</code></td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">timestamp</td>
-<td class="manual">{date, timestamp with timezone}</td>
+<td class="manual"><code>numeric</code></td>
+<td class="manual"><code>{smallint, integer, bigint, real, float, numeric}</code></td>
+<td class="manual"></td>
+</tr>
+
+
+<tr>
+<td class="manual"><code>money</code></td>
+<td class="manual"><code>{integer, bigint, numeric}<code></td>
 <td class="manual"></td>
 </tr>
 
 <tr>
-<td class="manual">timestamp with timezone</td>
-<td class="manual">{date, timestamp}</td>
+<td class="manual"><code>date</code></td>
+<td class="manual"><code>{date, timestamp, timestamp with timezone}</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>time</code></td>
+<td class="manual"><code>{time, time with timezone, timestamp, timestamp with timezone}</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>time with timezone</code></td>
+<td class="manual"><code>{time, timestamp with timezone}</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>timestamp</code></td>
+<td class="manual"><code>{date, timestamp with timezone}</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>timestamp with timezone</code></td>
+<td class="manual"><code>{date, timestamp}</code></td>
 <td class="manual"></td>
 </tr>
 
