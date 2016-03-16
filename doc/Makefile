@@ -2,10 +2,13 @@
 PGSTROM_MAKEFILE_IN_SUBDIR := 1
 include ../Makefile
 
-PYTHON := $(shell which python)
+PYTHON_CMD := $(shell which python)
 HTMLSOURCES := manual.src.html install.src.html tutrial.src.html \
 		release.src.html
 HTMLFILES := $(addprefix html/,$(HTMLSOURCES:.src.html=.html))
+HTML_TEMPLATE := template.src.html
+MENUGEN_PY := menugen.py
+
 EXTRA_CLEAN := $(HTMLFILES)
 
 PGXS := $(shell $(PG_CONFIG) --pgxs)
@@ -15,11 +18,11 @@ all: html
 
 html: $(HTMLFILES)
 
-$(HTMLFILES): $(HTMLSOURCES) template.src.html
+$(HTMLFILES): $(HTMLSOURCES) $(HTML_TEMPLATE)
 	@$(MKDIR_P) html
-	@./menugen.py -t template.src.html \
-		-v '$(PGSTROM_VERSION)' \
+	$(PYTHON_CMD) $(MENUGEN_PY)	\
+		-t $(HTML_TEMPLATE)	\
+		-v '$(PGSTROM_VERSION)'	\
 		-m $(@:html/%.html=%.src.html) $(HTMLSOURCES) > $@
-	@echo $@
 
 .PHONY: html html.single all
