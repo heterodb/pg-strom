@@ -16,6 +16,9 @@ HTMLSOURCES := manual.src.html install.src.html tutrial.src.html \
 		release.src.html
 HTMLFILES := $(addprefix html/,$(HTMLSOURCES:.src.html=.html))
 HTML_TEMPLATE := template.src.html
+IMAGE_SOURCES := lang_en.png lang_ja.png \
+	icon-warning.png icon-caution.png icon-hint.png \
+	pgstrom-install-download-zip.png cuda-install-target.png
 MENUGEN_PY := menugen.py
 
 ifndef MAKEFILE_PARAMDEF_ONLY
