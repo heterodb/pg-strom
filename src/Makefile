@@ -8,7 +8,7 @@ include $(STROM_BUILD_ROOT)/Makefile
 else
 MAKEFILE_PARAMDEF_ONLY = 1
 include $(STROM_BUILD_ROOT)/Makefile
-undefine MAKEFILE_PARAMDEF_ONLY
+MAKEFILE_PARAMDEF_ONLY = 0
 endif
 
 -include ./Makefile.custom
@@ -65,7 +65,7 @@ PG_CPPFLAGS := $(PGSTROM_FLAGS) -I $(IPATH)
 SHLIB_LINK := -L $(LPATH) -lnvrtc -lcuda
 #LDFLAGS_SL := -Wl,-rpath,'$(LPATH)'
 
-ifndef MAKEFILE_PARAMDEF_ONLY
+ifeq ($(MAKEFILE_PARAMDEF_ONLY), 0)
 
 EXTRA_CLEAN := $(EXTRA_CLEAN_SRC)
 PGXS := $(shell $(PG_CONFIG) --pgxs)

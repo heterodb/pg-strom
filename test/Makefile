@@ -8,7 +8,7 @@ include $(STROM_BUILD_ROOT)/Makefile
 else
 MAKEFILE_PARAMDEF_ONLY = 1
 include $(STROM_BUILD_ROOT)/Makefile
-undefine MAKEFILE_PARAMDEF_ONLY
+MAKEFILE_PARAMDEF_ONLY = 0
 endif
 
 # Regression test options
@@ -23,7 +23,7 @@ ifdef TEMP_INSTANCE
 	endif
 endif
 
-ifndef MAKEFILE_PARAMDEF_ONLY
+ifeq ($(MAKEFILE_PARAMDEF_ONLY), 0)
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 endif	# MAKEFILE_PARAMDEF_ONLY

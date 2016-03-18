@@ -1,4 +1,11 @@
 #
+# included by other Makefile?
+#
+ifndef MAKEFILE_PARAMDEF_ONLY
+MAKEFILE_PARAMDEF_ONLY = 0
+endif
+
+#
 # Common definitions for PG-Strom Makefile
 #
 PG_CONFIG=pg_config
@@ -34,7 +41,7 @@ CUDA_OBJS = cuda_common.o \
 	cuda_terminal.o
 CUDA_SOURCES = $(CUDA_OBJS:.o=.c)
 
-ifndef MAKEFILE_PARAMDEF_ONLY
+ifeq ($(MAKEFILE_PARAMDEF_ONLY), 0)
 #
 # Extra files to be cleaned
 #

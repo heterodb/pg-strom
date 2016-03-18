@@ -8,7 +8,7 @@ include $(STROM_BUILD_ROOT)/Makefile
 else
 MAKEFILE_PARAMDEF_ONLY = 1
 include $(STROM_BUILD_ROOT)/Makefile
-undefine MAKEFILE_PARAMDEF_ONLY
+MAKEFILE_PARAMDEF_ONLY = 0
 endif
 
 PYTHON_CMD := $(shell which python)
@@ -21,8 +21,7 @@ IMAGE_SOURCES := lang_en.png lang_ja.png \
 	pgstrom-install-download-zip.png cuda-install-target.png
 MENUGEN_PY := menugen.py
 
-ifndef MAKEFILE_PARAMDEF_ONLY
-
+ifeq ($(MAKEFILE_PARAMDEF_ONLY), 0)
 EXTRA_CLEAN := $(HTMLFILES)
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
