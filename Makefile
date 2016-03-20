@@ -123,28 +123,29 @@ endif
 #
 # Definition of PG-Strom Extension
 #
-MODULE_big = $(addprefix $(STROM_BUILD_ROOT)/src/, pg_strom)
+MODULE_big = pg_strom
 OBJS =  $(STROM_OBJS) $(CUDA_OBJS)
 EXTENSION = pg_strom
 ifeq ($(shell test $(PG_VERSION_NUM) -ge 90600; echo $??),0)
-DATA = pg_strom--1.0.sql
+DATA = $(addprefix $(STROM_BUILD_ROOT)/src/, pg_strom--1.0.sql)
 else
-DATA = pg_strom--1.0.sql
+DATA = $(addprefix $(STROM_BUILD_ROOT)/src/, pg_strom--1.0.sql)
 endif
 
 # Support utilities
 SCRIPTS_built = $(GPUINFO_CMD)
 # Extra files to be cleaned
-EXTRA_CLEAN = $(CUDA_SOURCES) $(HTML_FILES) $(GPUINFO_CMD)
-
-# VPATH to get pg_strom.control
-VPATH = $(STROM_BUILD_ROOT)/src
+EXTRA_CLEAN = $(CUDA_SOURCES) $(HTML_FILES) $(GPUINFO_CMD) \
+	$(shell test pg_strom.control -ef $(addprefix $(STROM_BUILD_ROOT)/src/, pg_strom.control) || echo pg_strom.control)
 
 #
 # Build chain of PostgreSQL
 #
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
+
+pg_strom.control: $(addprefix $(STROM_BUILD_ROOT)/src/, pg_strom.control)
+	test $< -ef $@ || cp -f $< $@
 
 $(CUDA_SOURCES): $(CUDA_SOURCES:.c=.h)
 	@(echo "const char *pgstrom_$(shell basename $(@:%.c=%))_code =";		\
