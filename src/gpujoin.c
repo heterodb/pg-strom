@@ -104,8 +104,6 @@ typedef struct
 	List	   *nloops_major;
 	List	   *hash_inner_keys;	/* if hash-join */
 	List	   *hash_outer_keys;	/* if hash-join */
-	List	   *gnl_shmem_xsize;	/* if nest-loop */
-	List	   *gnl_shmem_ysize;	/* if nest-loop */
 	/* supplemental information of ps_tlist */
 	List	   *ps_src_depth;	/* source depth of the ps_tlist entry */
 	List	   *ps_src_resno;	/* source resno of the ps_tlist entry */
@@ -137,8 +135,6 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 	privs = lappend(privs, gj_info->nloops_major);
 	exprs = lappend(exprs, gj_info->hash_inner_keys);
 	exprs = lappend(exprs, gj_info->hash_outer_keys);
-	privs = lappend(privs, gj_info->gnl_shmem_xsize);
-	privs = lappend(privs, gj_info->gnl_shmem_ysize);
 
 	privs = lappend(privs, gj_info->ps_src_depth);
 	privs = lappend(privs, gj_info->ps_src_resno);
@@ -176,8 +172,6 @@ deform_gpujoin_info(CustomScan *cscan)
 	gj_info->nloops_major = list_nth(privs, pindex++);
 	gj_info->hash_inner_keys = list_nth(exprs, eindex++);
     gj_info->hash_outer_keys = list_nth(exprs, eindex++);
-	gj_info->gnl_shmem_xsize = list_nth(privs, pindex++);
-	gj_info->gnl_shmem_ysize = list_nth(privs, pindex++);
 
 	gj_info->ps_src_depth = list_nth(privs, pindex++);
 	gj_info->ps_src_resno = list_nth(privs, pindex++);
@@ -234,12 +228,6 @@ typedef struct
 	List			   *hash_keylen;
 	List			   *hash_keybyval;
 	List			   *hash_keytype;
-
-	/*
-	 * Join properties; only nest-loop
-	 */
-	cl_uint				gnl_shmem_xsize;
-	cl_uint				gnl_shmem_ysize;
 } innerState;
 
 typedef struct
@@ -2783,13 +2771,6 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 			istate->hgram_shift = sizeof(cl_uint) * BITS_PER_BYTE - shift;
 			istate->hgram_curr = 0;
 		}
-		else
-		{
-			istate->gnl_shmem_xsize
-				= list_nth_int(gj_info->gnl_shmem_xsize, i);
-			istate->gnl_shmem_ysize
-				= list_nth_int(gj_info->gnl_shmem_ysize, i);
-		}
 		gjs->gts.css.custom_ps = lappend(gjs->gts.css.custom_ps,
 										 gjs->inners[i].state);
 	}
@@ -3213,19 +3194,13 @@ static void
 gpujoin_codegen_var_param_decl(StringInfo source,
 							   GpuJoinInfo *gj_info,
 							   int cur_depth,
-							   StringInfo v_unaliases,
 							   codegen_context *context)
 {
-	bool		is_nestloop;
 	List	   *kern_vars = NIL;
 	ListCell   *cell;
 	int			depth;
-	cl_int		gnl_shmem_xsize = 0;
-	cl_int		gnl_shmem_ysize = 0;
 
 	Assert(cur_depth > 0 && cur_depth <= gj_info->num_rels);
-	is_nestloop = (!list_nth(gj_info->hash_outer_keys, cur_depth - 1));
-	Assert(!is_nestloop || v_unaliases != NULL);
 
 	/*
 	 * Pick up variables in-use and append its properties in the order
@@ -3307,98 +3282,22 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 		"  kern_colmeta *colmeta      __attribute__((unused));\n"
 		"  void *datum                __attribute__((unused));\n");
 
-	if (is_nestloop)
+	foreach (cell, kern_vars)
 	{
-		StringInfoData	i_struct;
-		StringInfoData	o_struct;
+		Var			   *kernode = lfirst(cell);
+		devtype_info   *dtype;
 
-		if (kern_vars != NIL)	/* in case of not cross-join */
-		{
-			initStringInfo(&i_struct);
-			initStringInfo(&o_struct);
+		dtype = pgstrom_devtype_lookup(kernode->vartype);
+		if (!dtype)
+			elog(ERROR, "device type \"%s\" not found",
+				 format_type_be(kernode->vartype));
 
-			appendStringInfo(&i_struct, "  struct inner_struct {\n");
-			appendStringInfo(&o_struct, "  struct outer_struct {\n");
-
-			foreach (cell, kern_vars)
-			{
-				Var			   *kernode = lfirst(cell);
-				devtype_info   *dtype;
-				size_t			field_size;
-
-				dtype = pgstrom_devtype_lookup(kernode->vartype);
-				if (!dtype)
-					elog(ERROR, "device type \"%s\" not found",
-						 format_type_be(kernode->vartype));
-
-				if (dtype->type_byval &&
-					dtype->type_length < sizeof(cl_ulong))
-					field_size = sizeof(cl_ulong);
-				else
-					field_size = 2 * sizeof(cl_ulong);
-
-				if (kernode->varno == cur_depth)
-					gnl_shmem_xsize += field_size;
-				else
-					gnl_shmem_ysize += field_size;
-
-				appendStringInfo(
-					kernode->varno == cur_depth
-					? &i_struct
-					: &o_struct,
-					"    pg_%s_t KVAR_%u;\n"
-					"#define KVAR_%u\t(%s->KVAR_%u)\n",
-					/* for var decl */
-					dtype->type_name,
-					kernode->varoattno,
-					/* for alias */
-					kernode->varoattno,
-					kernode->varno == cur_depth
-					? "inner_values"
-					: "outer_values",
-					kernode->varoattno);
-				appendStringInfo(
-					v_unaliases,
-					"#undef KVAR_%u\n",
-					kernode->varoattno);
-			}
-			appendStringInfo(
-				&i_struct,
-				"  } *inner_values = (SHARED_WORKMEM(struct inner_struct) +\n"
-				"                     get_local_yid());\n");
-			appendStringInfo(
-				&o_struct,
-				"  } *outer_values = ((struct outer_struct *)\n"
-				"                     (SHARED_WORKMEM(struct inner_struct) +\n"
-				"                      get_local_ysize())) +\n"
-				"                     get_local_xid();\n");
-			appendStringInfo(source, "%s%s\n",
-							 i_struct.data,
-							 o_struct.data);
-			pfree(i_struct.data);
-			pfree(o_struct.data);
-		}
+		appendStringInfo(
+			source,
+			"  pg_%s_t KVAR_%u;\n",
+			dtype->type_name,
+			kernode->varoattno);
 	}
-	else
-	{
-		foreach (cell, kern_vars)
-		{
-			Var			   *kernode = lfirst(cell);
-			devtype_info   *dtype;
-
-			dtype = pgstrom_devtype_lookup(kernode->vartype);
-			if (!dtype)
-				elog(ERROR, "device type \"%s\" not found",
-					 format_type_be(kernode->vartype));
-
-			appendStringInfo(
-				source,
-				"  pg_%s_t KVAR_%u;\n",
-				dtype->type_name,
-				kernode->varoattno);
-		}
-	}
-
 
 	/*
 	 * variable initialization
@@ -3416,9 +3315,6 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 
 		if (depth != keynode->varno)
 		{
-			if (depth >= 0 && is_nestloop)
-				appendStringInfo(source, "  }\n\n");
-
 			if (keynode->varno == 0)
 			{
 				/* htup from KDS */
@@ -3461,15 +3357,6 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 					elog(ERROR, "Bug? too deeper varnode reference");
 			}
 			depth = keynode->varno;
-
-			if (is_nestloop)
-			{
-				appendStringInfo(
-					source,
-					"  if (get_local_%s() == 0)\n"
-					"  {\n",
-					depth == cur_depth ? "xid" : "yid");
-			}
 		}
 		appendStringInfo(
 			source,
@@ -3479,25 +3366,7 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 			keynode->varoattno,
 			dtype->type_name);
 	}
-	if (is_nestloop && kern_vars != NIL)
-		appendStringInfo(source,
-						 "  }\n"
-						 "  __syncthreads();\n");
-
-	/*
-	 * FIXME: We want to add gnl_shmem_?size only when this function
-	 * was called to construct gpujoin_join_quals_depth%u().
-	 * Is there more graceful way to do?
-	 */
-	if (v_unaliases != NULL)
-	{
-		Assert(list_length(gj_info->gnl_shmem_xsize) == cur_depth - 1);
-		gj_info->gnl_shmem_xsize = lappend_int(gj_info->gnl_shmem_xsize,
-											   gnl_shmem_xsize);
-		Assert(list_length(gj_info->gnl_shmem_ysize) == cur_depth - 1);
-		gj_info->gnl_shmem_ysize = lappend_int(gj_info->gnl_shmem_ysize,
-											   gnl_shmem_ysize);
-	}
+	appendStringInfo(source, "\n");
 }
 
 /*
@@ -3520,9 +3389,6 @@ gpujoin_codegen_join_quals(StringInfo source,
 	List	   *other_quals;
 	char	   *join_quals_code = NULL;
 	char	   *other_quals_code = NULL;
-	StringInfoData	v_unaliases;
-
-	initStringInfo(&v_unaliases);
 
 	Assert(cur_depth > 0 && cur_depth <= gj_info->num_rels);
 	join_quals = list_nth(gj_info->join_quals, cur_depth - 1);
@@ -3557,8 +3423,7 @@ gpujoin_codegen_join_quals(StringInfo source,
 	/*
 	 * variable/params declaration & initialization
 	 */
-	gpujoin_codegen_var_param_decl(source, gj_info, cur_depth,
-								   &v_unaliases, context);
+	gpujoin_codegen_var_param_decl(source, gj_info, cur_depth, context);
 
 	/*
 	 * evaluation of other-quals and join-quals
@@ -3590,10 +3455,7 @@ gpujoin_codegen_join_quals(StringInfo source,
 	appendStringInfo(
 		source,
 		"  return true;\n"
-		"%s"
-		"}\n",
-		v_unaliases.data);
-	pfree(v_unaliases.data);
+		"}\n");
 }
 
 /*
@@ -3673,7 +3535,7 @@ gpujoin_codegen_hash_value(StringInfo source,
 	/*
 	 * variable/params declaration & initialization
 	 */
-	gpujoin_codegen_var_param_decl(source, gj_info, cur_depth, NULL, context);
+	gpujoin_codegen_var_param_decl(source, gj_info, cur_depth, context);
 
 	appendStringInfo(
 		source,
@@ -5834,11 +5696,7 @@ gpujoin_inner_getnext(GpuJoinState *gjs)
 		pmrels->usage_length += STROMALIGN(pds->kds->length);
 
 		if (!istate->hash_outer_keys)
-		{
 			pmrels->kern.chunks[i].is_nestloop = true;
-			pmrels->kern.chunks[i].gnl_shmem_xsize = istate->gnl_shmem_xsize;
-			pmrels->kern.chunks[i].gnl_shmem_ysize = istate->gnl_shmem_ysize;
-		}
 
 		if (istate->join_type == JOIN_RIGHT ||
 			istate->join_type == JOIN_FULL)

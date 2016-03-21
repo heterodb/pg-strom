@@ -32,8 +32,6 @@ typedef struct
 	{
 		cl_uint		chunk_offset;	/* offset to KDS or Hash */
 		cl_uint		ojmap_offset;	/* offset to Left-Outer Map, if any */
-		cl_ushort	gnl_shmem_xsize;/* dynamix shmem size of xitem if NL */
-		cl_ushort	gnl_shmem_ysize;/* dynamix shmem size of yitem if NL */
 		cl_bool		is_nestloop;	/* true, if NestLoop. */
 		cl_bool		left_outer;		/* true, if JOIN_LEFT or JOIN_FULL */
 		cl_bool		right_outer;	/* true, if JOIN_RIGHT or JOIN_FULL */
@@ -1454,8 +1452,6 @@ retry_major:
 		{
 			if (kresults_src->nitems > 0)
 			{
-				cl_ushort	gnl_shmem_xsize;
-				cl_ushort	gnl_shmem_ysize;
 				cl_uint		shmem_size;
 
 				tv1 = clock64();
@@ -1469,16 +1465,14 @@ retry_major:
 				}
 				SETUP_KERN_JOIN_ARGS(kern_join_args);
 
-				gnl_shmem_xsize = kmrels->chunks[depth-1].gnl_shmem_xsize;
-				gnl_shmem_ysize = kmrels->chunks[depth-1].gnl_shmem_ysize;
 				status = pgstrom_largest_workgroup_size_2d(
 					&grid_sz,
 					&block_sz,
 					(const void *)gpujoin_exec_nestloop,
 					kresults_src->nitems,
 					window_size,
-					gnl_shmem_xsize,
-					gnl_shmem_ysize,
+					0,	/* no shmem per x-axil */
+					0,	/* no shmem per y-axil */
 					sizeof(kern_errorbuf));
 				if (status != cudaSuccess)
 				{
@@ -1486,10 +1480,14 @@ retry_major:
 					goto out;
 				}
 
-				shmem_size = Max(sizeof(kern_errorbuf) * (block_sz.x *
-														  block_sz.y),
-								 gnl_shmem_xsize * block_sz.x +
-								 gnl_shmem_ysize * block_sz.y);
+				shmem_size = sizeof(kern_errorbuf) * (block_sz.x *
+													  block_sz.y);
+#if 0
+				printf("gpunestloop block(%u,%u,%u) grid(%u,%u,%u) xsize=%u ysize=%u\n",
+					   block_sz.x, block_sz.y, block_sz.z,
+					   grid_sz.x, grid_sz.y, grid_sz.z,
+					   kresults_src->nitems, window_size);
+#endif
 				status = cudaLaunchDevice((void *)gpujoin_exec_nestloop,
 										  kern_join_args,
 										  grid_sz, block_sz,
