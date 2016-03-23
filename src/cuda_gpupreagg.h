@@ -602,7 +602,7 @@ gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,
 	pagg_datum	   *l_datum = SHARED_WORKMEM(pagg_datum);
 	cl_uint			i, ncols = kds_slot->ncols;
 	cl_uint			nvalids = 0;
-	cl_uint			kds_index;
+	cl_uint			kds_index = UINT_MAX;
 
 	INIT_KERNEL_CONTEXT(&kcxt, gpupreagg_nogroup_reduction, kparams);
 	if (kresults_src->all_visible)
@@ -617,8 +617,7 @@ gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,
 		/* global index on the kds_slot */
 		if (get_local_id() < nvalids)
 			kds_index = get_global_base() + get_local_id();
-		else
-			kds_index = UINT_MAX;	/* always invalid */
+		__syncthreads();
 	}
 	else
 	{
@@ -641,11 +640,27 @@ gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,
 		 * Thus, final result lacks the values to be accumulated by the
 		 * 4 threads. This strange behavior was eliminated if we added
 		 * an else-block. It seems to me a bug of NVRTC 7.5?
+		 *
+		 * MEMO: additional investigation - This problem happens on
+		 * GTX980 (GM104) but didn't happen in Tesla K20c (GK110).
+		 * Here is no difference in the PTX image, expect for .target
+		 * directive. One strange is, the reduction loop below contains
+		 * three __syncthreads(), but I could find only two bar.sync
+		 * operation in this function. So, I doubt the threads out of
+		 * range unexpectedly reached end of the function, then it
+		 * made H/W synchronization mechanism confused.
+		 *
+		 * As a workaround, I could find an extra '__syncthreads()'
+		 * just after that if-block below can hide the problem.
+		 * However, it shouldn't be necessary
+		 *
+		 * This strange behavior was reported to NVIDIA at 22-03-2016,
+		 * as a bug report bug#160322-000527. The PG-Strom development
+		 * team is now waiting for their response.
 		 */
 		if (get_local_id() < nvalids)
 			kds_index = kresults_src->results[get_global_id()];
-		else
-			kds_index = UINT_MAX;	/* always invalid */
+		__syncthreads();
 	}
 
 	/* loop for each columns */
