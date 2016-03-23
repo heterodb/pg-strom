@@ -141,6 +141,8 @@ EXTRA_CLEAN = $(CUDA_SOURCES) $(HTML_FILES) $(GPUINFO_CMD) \
 #
 # Build chain of PostgreSQL
 #
+ifndef PGSTROM_MAKEFILE_ONLY_PARAMDEF
+
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 
@@ -165,3 +167,5 @@ $(HTML_FILES): $(HTML_SOURCES) $(HTML_TEMPLATE)
 		$(HTML_SOURCES) > $@
 
 html: $(HTML_FILES)
+
+endif
