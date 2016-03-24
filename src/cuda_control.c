@@ -2214,6 +2214,7 @@ check_target_cuda_device(struct target_cuda_device *dattr)
 {
 	MemoryContext oldcxt;
 	cl_int		cores_per_mpu = -1;
+	cl_bool		supported = true;
 	cl_ulong	dev_cap;
 
 	/*
@@ -2221,7 +2222,10 @@ check_target_cuda_device(struct target_cuda_device *dattr)
 	 */
 	if (dattr->dev_cap_major < 3 ||
 		(dattr->dev_cap_major == 3 && dattr->dev_cap_minor < 5))
+	{
+		supported = false;
 		goto out;
+	}
 
 	/*
 	 * Number of CUDA cores (just for log messages)
@@ -2280,7 +2284,7 @@ out:
 		 dattr->dev_mem_clk / 1000,
 		 dattr->dev_cap_major,
 		 dattr->dev_cap_minor,
-		 dattr->dev_cap_major < 3 ? ", NOT SUPPORTED" : "");
+		 !supported ? ", NOT SUPPORTED" : "");
 
 	/* clear the target_cuda_device structure */
 	if (dattr->dev_name)
@@ -2435,7 +2439,7 @@ pgstrom_init_cuda_control(void)
 	 */
 	pickup_target_cuda_devices();
 	if (cuda_device_ordinals == NIL)
-		elog(ERROR, "No CUDA devices, PG-Strom was disabled");
+		elog(ERROR, "No supported CUDA devices, PG-Strom was disabled");
 	if (list_length(cuda_device_capabilities) > 1)
 		elog(WARNING, "Mixture of multiple GPU device capabilities");
 
