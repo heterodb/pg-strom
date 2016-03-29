@@ -21,6 +21,7 @@
 #include "catalog/heap.h"
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_type.h"
+#include "executor/nodeCustom.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"

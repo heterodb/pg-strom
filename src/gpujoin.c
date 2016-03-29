@@ -21,6 +21,7 @@
 #include "access/xact.h"
 #include "catalog/heap.h"
 #include "catalog/pg_type.h"
+#include "executor/nodeCustom.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/clauses.h"
