@@ -589,107 +589,6 @@ gpuscan_codegen_exec_quals(codegen_context *context, List *dev_quals)
 	return body.data;
 }
 
-#if 0
-/*
- * gpuscan_try_replace_seqscan
- *
- * It tries to replace a SeqScan that takes no host-only qualifiers
- * by GpuScan if expected cost is reasonable.
- */
-static CustomScan *
-gpuscan_try_replace_seqscan(Relation baserel, SeqScan *seqscan)
-{
-	CustomScan	   *cscan;
-	GpuScanInfo		gs_info;
-	BlockNumber		num_pages;
-	double			num_tuples;
-	double			allvisfrac;
-	double			selectivity;
-	Cost			startup_cost;
-	Cost			total_cost;
-	codegen_context	context;
-	ListCell	   *lc;
-
-	/* get table's statistics */
-	estimate_rel_size(baserel, NULL, &num_pages, &num_tuples, &allvisfrac);
-
-	/*
-	 * Unlike OUTER Pull-Up by other node, GpuScan can process
-	 * host-only target list, so we don't need to check them.
-	 */
-
-	/*
-	 * Check whether scan-qualifier contains host-only expression,
-	 * or not. Even though we can inject host-only expression here,
-	 * heuristically, it does not much make sense. In addition,
-	 * we cannot estimate correct selectivity by device qualifier
-	 * here, because clauselist_selectivity() takes PlannerInfo.
-	 */
-	foreach (lc, seqscan->plan.qual)
-	{
-		if (!pgstrom_device_expression((Expr *) lfirst(lc)))
-			return NULL;
-	}
-	if (seqscan->plan.plan_rows >= num_tuples)
-		selectivity = 1.0;
-	else if (seqscan->plan.plan_rows <= 0.0)
-		selectivity = 0.0;
-	else
-		selectivity = seqscan->plan.plan_rows / num_tuples;
-
-	/*
-	 * OK, we will be able to replace this SeqScan by GpuScan.
-	 * Let's estimate cost to determine whether it is reasonable
-	 * or not.
-	 */
-	cost_gpuscan(RelationGetNumberOfAttributes(baserel),
-				 RelationGetForm(baserel)->reltablespace,
-				 num_pages,
-				 num_tuples,
-				 seqscan->plan.plan_rows,
-				 selectivity,
-				 seqscan->plan.qual,
-				 NIL,
-				 NIL,
-				 &startup_cost,
-				 &total_cost);
-
-	/*
-	 * OK, let's make a GpuScan that can replace SeqScan without
-	 * host-only expression in scan-qualifiers.
-	 */
-	cscan = makeNode(CustomScan);
-	cscan->scan.plan.startup_cost = startup_cost;
-	cscan->scan.plan.total_cost = total_cost;
-	cscan->scan.plan.plan_width = seqscan->plan.plan_width;
-	cscan->scan.plan.plan_rows = seqscan->plan.plan_rows;
-	cscan->scan.plan.targetlist = copyObject(seqscan->plan.targetlist);
-	cscan->scan.plan.qual = NIL;
-	cscan->scan.plan.initPlan = seqscan->plan.initPlan;
-	cscan->scan.plan.extParam = bms_copy(seqscan->plan.extParam);
-	cscan->scan.plan.allParam = bms_copy(seqscan->plan.allParam);
-	cscan->scan.scanrelid = seqscan->scanrelid;
-	cscan->flags = 0;
-	cscan->custom_relids = bms_make_singleton(seqscan->scanrelid);
-	cscan->methods = &gpuscan_plan_methods;
-
-
-	memset(&gs_info, 0, sizeof(GpuScanInfo));
-	pgstrom_init_codegen_context(&context);
-	gs_info.kern_source = gpuscan_codegen_exec_quals(&context,
-													 seqscan->plan.qual);
-	gs_info.extra_flags = context.extra_flags | DEVKERNEL_NEEDS_GPUSCAN;
-	gs_info.func_defs = context.func_defs;
-	gs_info.expr_defs = context.expr_defs;
-	gs_info.used_params = context.used_params;
-	gs_info.used_vars = context.used_vars;
-	gs_info.dev_quals = copyObject(seqscan->plan.qual);
-	form_gpuscan_info(cscan, &gs_info);
-
-	return cscan;
-}
-#endif
-
 static Plan *
 create_gpuscan_plan(PlannerInfo *root,
 					RelOptInfo *rel,
@@ -1628,23 +1527,6 @@ pgstrom_post_planner_gpuscan(PlannedStmt *pstmt, Plan **p_curr_plan)
 	baserel = heap_open(rte->relid, NoLock);
 	tupdesc = RelationGetDescr(baserel);
 
-#if 0
-	/*
-	 * Try to replace SeqScan to evaluate target-list on the device side.
-	 * Unlike outer pull-up, GpuScan can handle host-only expression using
-	 * ExecProject() later stage, so all we require is that scan-quals
-	 * are device executable.
-	 */
-	if (IsA(cscan, SeqScan))
-	{
-		cscan = gpuscan_try_replace_seqscan(baserel, (SeqScan *) cscan);
-		if (!cscan)
-		{
-			heap_close(baserel, NoLock);
-			return;
-		}
-	}
-#endif
 	/* extract private fields */
 	gs_info = deform_gpuscan_info(cscan);
 
@@ -2169,12 +2051,57 @@ gpuscan_next_tuple(GpuTaskState *gts)
 	return slot;
 }
 
+/*
+ * gpuscan_exec_recheck
+ *
+ * Routine of EPQ recheck on GpuScan. If any, HostQual shall be checked
+ * on ExecScan(), all we have to do here is recheck of device qualifier.
+ */
+static bool
+gpuscan_exec_recheck(CustomScanState *node, TupleTableSlot *slot)
+{
+	GpuScanState   *gss = (GpuScanState *) node;
+	ExprContext	   *econtext = node->ss.ps.ps_ExprContext;
+	HeapTuple		tuple = slot->tts_tuple;
+	TupleTableSlot *scan_slot	__attribute__((unused));
+	ExprDoneCond	is_done;
+
+	/*
+	 * Does the tuple meet the device qual condition?
+	 * Please note that we should not use the supplied 'slot' as is,
+	 * because it may not be compatible with relations's definition
+	 * if device projection is valid.
+	 */
+	ExecStoreTuple(tuple, gss->base_slot, InvalidBuffer, false);
+	econtext->ecxt_scantuple = gss->base_slot;
+	ResetExprContext(econtext);
+
+	if (!ExecQual(gss->dev_quals, econtext, false))
+		return false;
+
+	if (gss->base_proj)
+	{
+		/*
+		 * NOTE: If device projection is valid, we have to adjust the
+		 * supplied tuple (that follows the base relation's definition)
+		 * into ss_ScanTupleSlot, to fit tuple descriptor of the supplied
+		 * 'slot'.
+		 */
+		Assert(!slot->tts_shouldFree);
+		ExecClearTuple(slot);
+
+		scan_slot = ExecProject(gss->base_proj, &is_done);
+		Assert(scan_slot == slot);
+	}
+	return true;
+}
+
 static TupleTableSlot *
 gpuscan_exec(CustomScanState *node)
 {
 	return ExecScan(&node->ss,
 					(ExecScanAccessMtd) pgstrom_exec_gputask,
-					(ExecScanRecheckMtd) pgstrom_recheck_gputask);
+					(ExecScanRecheckMtd) gpuscan_exec_recheck);
 }
 
 static void
