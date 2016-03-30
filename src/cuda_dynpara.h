@@ -314,6 +314,8 @@ pgstrom_largest_workgroup_size(dim3 *p_grid_sz,
 }
 #endif	/* __CUDACC__ */
 
+#if 0
+/* GpuNestLoop no longer use 2-dimensional kernel call */
 STATIC_INLINE(WORKGROUPSIZE_RESULT_TYPE)
 __pgstrom_largest_workgroup_size_2d(cl_uint *p_grid_xsize,
 									cl_uint *p_grid_ysize,
@@ -467,6 +469,8 @@ pgstrom_largest_workgroup_size_2d(dim3 *p_grid_sz,
 	return cudaSuccess;
 }
 #endif	/* __CUDACC__ */
+#endif
+
 #undef WORKGROUPSIZE_RESULT_TYPE
 #undef WORKGROUPSIZE_RESULT_SUCCESS
 #undef WORKGROUPSIZE_RESULT_EINVAL

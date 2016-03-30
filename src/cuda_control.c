@@ -2115,6 +2115,10 @@ pgstrom_largest_workgroup_size(size_t *p_grid_size,
 	*p_block_size = (size_t) block_size;
 }
 
+#if 0
+/*
+ * XXX - GpuNestLoop no longer use 2-dimensional kernel call
+ */
 void
 pgstrom_largest_workgroup_size_2d(size_t *p_grid_xsize,
 								  size_t *p_grid_ysize,
@@ -2188,6 +2192,7 @@ pgstrom_largest_workgroup_size_2d(size_t *p_grid_xsize,
 	*p_block_xsize = (size_t) block_xsize;
 	*p_block_ysize = (size_t) block_ysize;
 }
+#endif
 
 /*
  * Device properties referenced to log messages on starting-up time,
