@@ -36,6 +36,7 @@
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/pg_crc.h"
+#include "utils/rel.h"
 #include "utils/ruleutils.h"
 #include <math.h>
 #include "pg_strom.h"
@@ -229,6 +230,11 @@ typedef struct
 	List			   *hash_keylen;
 	List			   *hash_keybyval;
 	List			   *hash_keytype;
+
+	/* CPU Fallback related */
+	AttrNumber		   *inner_dst_resno;
+	AttrNumber			inner_src_anum_min;
+	AttrNumber			inner_src_anum_max;
 } innerState;
 
 typedef struct
@@ -243,12 +249,11 @@ typedef struct
 	List		   *join_quals;
 	/* current window of inner relations */
 	struct pgstrom_multirels *curr_pmrels;
-	/* buffer population ratio */
-	int				result_width;	/* result width for buffer length calc */
-	/* supplemental information to ps_tlist  */
-	List		   *ps_src_depth;
-	List		   *ps_src_resno;
+	/* result width per tuple for buffer length calculation */
+	int				result_width;
+	/* expected extra length per result tuple  */
 	cl_uint			extra_maxlen;
+
 	/* buffer for row materialization  */
 	HeapTupleData	curr_tuple;
 
@@ -267,6 +272,15 @@ typedef struct
 	 * the cuda_control.c
 	 */
 	bool			outer_scan_done;
+
+	/*
+	 * CPU Fallback
+	 */
+	TupleTableSlot *slot_fallback;
+	ProjectionInfo *proj_fallback;		/* slot_fallback -> scan_slot */
+	AttrNumber	   *outer_dst_resno;	/* destination attribute number to */
+	AttrNumber		outer_src_anum_min;	/* be mapped on the slot_fallback */
+	AttrNumber		outer_src_anum_max;
 
 	/*
 	 * Runtime statistics
@@ -2558,14 +2572,15 @@ fixup_varnode_to_origin_mutator(Node *node,
 }
 
 static List *
-fixup_varnode_to_origin(GpuJoinState *gjs, int depth, List *expr_list)
+fixup_varnode_to_origin(int depth, List *ps_src_depth, List *ps_src_resno,
+						List *expr_list)
 {
 	fixup_varnode_to_origin_context	context;
 
 	Assert(IsA(expr_list, List));
 	context.depth = depth;
-	context.ps_src_depth = gjs->ps_src_depth;
-	context.ps_src_resno = gjs->ps_src_resno;
+	context.ps_src_depth = ps_src_depth;
+	context.ps_src_resno = ps_src_resno;
 
 	return (List *) fixup_varnode_to_origin_mutator((Node *) expr_list,
 													&context);
@@ -2621,13 +2636,17 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 {
 	GpuContext	   *gcontext = NULL;
 	GpuJoinState   *gjs = (GpuJoinState *) node;
-	PlanState	   *ps = &gjs->gts.css.ss.ps;
+	ScanState	   *ss = &gjs->gts.css.ss;
 	CustomScan	   *cscan = (CustomScan *) node->ss.ps.plan;
 	GpuJoinInfo	   *gj_info = deform_gpujoin_info(cscan);
 	TupleDesc		result_tupdesc = GTS_GET_RESULT_TUPDESC(gjs);
 	TupleDesc		scan_tupdesc;
+	TupleDesc		junk_tupdesc;
+	List		   *tlist_fallback;
+	ListCell	   *lc1;
+	ListCell	   *lc2;
+	cl_int			i, j, nattrs;
 	cl_int			first_right_outer_depth = -1;
-	cl_int			i;
 
 	/* activate GpuContext for device execution */
 	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
@@ -2639,7 +2658,12 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 	 * PostgreSQL makes to assign result of ExecTypeFromTL() instead
 	 * of ExecCleanTypeFromTL; that leads unnecessary projection.
 	 * So, we try to remove junk attributes from the scan-descriptor.
+	 *
+	 * Also note that the supplied TupleDesc that contains junk attributes
+	 * are still useful to run CPU fallback code. So, we keep this tuple-
+	 * descriptor to initialize the related stuff.
 	 */
+	junk_tupdesc = gjs->gts.css.ss.ss_ScanTupleSlot->tts_tupleDescriptor;
 	scan_tupdesc = ExecCleanTypeFromTL(cscan->custom_scan_tlist, false);
 	ExecAssignScanType(&gjs->gts.css.ss, scan_tupdesc);
 	ExecAssignScanProjectionInfoWithVarno(&gjs->gts.css.ss, INDEX_VAR);
@@ -2670,28 +2694,79 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 	 */
 	gjs->num_rels = gj_info->num_rels;
 	gjs->join_types = gj_info->join_types;
-	gjs->outer_quals = ExecInitExpr((Expr *)gj_info->outer_quals, ps);
+	gjs->outer_quals = ExecInitExpr((Expr *)gj_info->outer_quals, &ss->ps);
 	gjs->outer_ratio = gj_info->outer_ratio;
 	gjs->outer_nrows = gj_info->outer_nrows;
 	gjs->gts.css.ss.ps.qual = (List *)
-		ExecInitExpr((Expr *)cscan->scan.plan.qual, ps);
-
-	/* needs to track corresponding columns */
-	gjs->ps_src_depth = gj_info->ps_src_depth;
-	gjs->ps_src_resno = gj_info->ps_src_resno;
-	gjs->extra_maxlen = gj_info->extra_maxlen;
+		ExecInitExpr((Expr *)cscan->scan.plan.qual, &ss->ps);
 
 	/*
-	 * initialization of child nodes
+	 * Init OUTER child node
 	 */
-	outerPlanState(gjs) = ExecInitNode(outerPlan(cscan), estate, eflags);
+	if (gjs->gts.css.ss.ss_currentRelation)
+	{
+		TupleDesc	outer_tupdesc
+			= RelationGetDescr(gjs->gts.css.ss.ss_currentRelation);
+		nattrs = outer_tupdesc->natts;
+	}
+	else
+	{
+		TupleTableSlot *outer_slot;
+
+		outerPlanState(gjs) = ExecInitNode(outerPlan(cscan), estate, eflags);
+		outer_slot = outerPlanState(gjs)->ps_ResultTupleSlot;
+		nattrs = outer_slot->tts_tupleDescriptor->natts;
+	}
+
+	/*
+	 * Init CPU fallback stuff
+	 */
+	tlist_fallback = (List *)
+		ExecInitExpr((Expr *)cscan->custom_scan_tlist, &ss->ps);
+	gjs->slot_fallback = MakeSingleTupleTableSlot(junk_tupdesc);
+	gjs->proj_fallback = ExecBuildProjectionInfo(tlist_fallback,
+												 ss->ps.ps_ExprContext,
+												 ss->ss_ScanTupleSlot,
+												 junk_tupdesc);
+	gjs->outer_src_anum_min = nattrs;
+	gjs->outer_src_anum_max = FirstLowInvalidHeapAttributeNumber;
+	nattrs -= FirstLowInvalidHeapAttributeNumber;
+	gjs->outer_dst_resno = palloc0(sizeof(AttrNumber) * nattrs);
+	j = 1;
+	forboth (lc1, gj_info->ps_src_depth,
+			 lc2, gj_info->ps_src_resno)
+	{
+		int		depth = lfirst_int(lc1);
+		int		resno = lfirst_int(lc2);
+
+		if (depth == 0)
+		{
+			if (gjs->outer_src_anum_min > resno)
+				gjs->outer_src_anum_min = resno;
+			if (gjs->outer_src_anum_max < resno)
+				gjs->outer_src_anum_max = resno;
+			resno -= FirstLowInvalidHeapAttributeNumber;
+			Assert(resno > 0 && resno <= nattrs);
+			gjs->outer_dst_resno[resno - 1] = j;
+		}
+		j++;
+	}
+
+	for (j=gjs->outer_src_anum_min; j <= gjs->outer_src_anum_max; j++)
+	{
+		elog(INFO, "outer: %d => %d", j, gjs->outer_dst_resno[j - FirstLowInvalidHeapAttributeNumber - 1]);
+	}
+
+	/*
+	 * Init INNER child nodes for each depth
+	 */
 	for (i=0; i < gj_info->num_rels; i++)
 	{
 		Plan	   *inner_plan = list_nth(cscan->custom_plans, i);
 		innerState *istate = &gjs->inners[i];
 		List	   *hash_inner_keys;
 		List	   *hash_outer_keys;
-		ListCell   *lc;
+		TupleTableSlot *inner_slot;
 
 		istate->state = ExecInitNode(inner_plan, estate, eflags);
 		istate->econtext = CreateExprContext(estate);
@@ -2723,21 +2798,23 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 		 * are deployed according to the result of child plans.
 		 */
 		istate->join_quals =
-			ExecInitExpr(list_nth(gj_info->join_quals, i), ps);
+			ExecInitExpr(list_nth(gj_info->join_quals, i), &ss->ps);
 		istate->other_quals =
-			ExecInitExpr(list_nth(gj_info->other_quals, i), ps);
+			ExecInitExpr(list_nth(gj_info->other_quals, i), &ss->ps);
 
 		hash_inner_keys = list_nth(gj_info->hash_inner_keys, i);
 		if (hash_inner_keys != NIL)
 		{
 			cl_uint		shift;
 
-			hash_inner_keys = fixup_varnode_to_origin(gjs, i+1,
+			hash_inner_keys = fixup_varnode_to_origin(i+1,
+													  gj_info->ps_src_depth,
+													  gj_info->ps_src_resno,
 													  hash_inner_keys);
-			foreach (lc, hash_inner_keys)
+			foreach (lc1, hash_inner_keys)
 			{
-				Expr	   *expr = lfirst(lc);
-				ExprState  *expr_state = ExecInitExpr(expr, ps);
+				Expr	   *expr = lfirst(lc1);
+				ExprState  *expr_state = ExecInitExpr(expr, &ss->ps);
 				Oid			type_oid = exprType((Node *)expr);
 				int16		typlen;
 				bool		typbyval;
@@ -2757,7 +2834,7 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 			hash_outer_keys = list_nth(gj_info->hash_outer_keys, i);
 			Assert(hash_outer_keys != NIL);
 			istate->hash_outer_keys = (List *)
-				ExecInitExpr((Expr *)hash_outer_keys, ps);
+				ExecInitExpr((Expr *)hash_outer_keys, &ss->ps);
 
 			Assert(IsA(istate->hash_outer_keys, List) &&
 				   list_length(istate->hash_inner_keys) ==
@@ -2772,8 +2849,40 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 			istate->hgram_shift = sizeof(cl_uint) * BITS_PER_BYTE - shift;
 			istate->hgram_curr = 0;
 		}
+
+		/*
+		 * CPU fallback setup for INNER reference
+		 */
+		inner_slot = istate->state->ps_ResultTupleSlot;
+		nattrs = inner_slot->tts_tupleDescriptor->natts;
+		istate->inner_src_anum_min = nattrs;
+		istate->inner_src_anum_max = FirstLowInvalidHeapAttributeNumber;
+		nattrs -= FirstLowInvalidHeapAttributeNumber;
+		istate->inner_dst_resno = palloc0(sizeof(AttrNumber) * nattrs);
+
+		j = 1;
+		forboth (lc1, gj_info->ps_src_depth,
+				 lc2, gj_info->ps_src_resno)
+		{
+			int		depth = lfirst_int(lc1);
+			int		resno = lfirst_int(lc2);
+
+			if (depth == istate->depth)
+			{
+				if (istate->inner_src_anum_min > resno)
+					istate->inner_src_anum_min = resno;
+				if (istate->inner_src_anum_max < resno)
+					istate->inner_src_anum_max = resno;
+				resno -= FirstLowInvalidHeapAttributeNumber;
+				Assert(resno > 0 && resno <= nattrs);
+				istate->inner_dst_resno[resno - 1] = j;
+			}
+			j++;
+		}
+
+		/* add inner state as children of this custom-scan */
 		gjs->gts.css.custom_ps = lappend(gjs->gts.css.custom_ps,
-										 gjs->inners[i].state);
+										 istate->state);
 	}
 	/*
 	 * Track the first RIGHT/FULL OUTER JOIN depth, if any
@@ -2797,6 +2906,9 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 						  t_bits[BITMAPLEN(result_tupdesc->natts)]) +
 				 (result_tupdesc->tdhasoid ? sizeof(Oid) : 0)) +
 		MAXALIGN(cscan->scan.plan.plan_width);	/* average width */
+	/* expected extra length per result tuple  */
+	gjs->extra_maxlen = gj_info->extra_maxlen;
+
 	/* init perfmon */
 	pgstrom_init_perfmon(&gjs->gts);
 }
@@ -4387,6 +4499,194 @@ gpujoin_next_tuple(GpuTaskState *gts)
 	PERFMON_END(&gjs->gts.pfm, time_materialize, &tv1, &tv2);
 	return slot;
 }
+
+/* ----------------------------------------------------------------
+ *
+ * Routines for CPU fallback, if kernel code returned CpuReCheck
+ * error code.
+ *
+ * ----------------------------------------------------------------
+ */
+static void
+gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
+							   TupleDesc tupdesc, HeapTuple tuple,
+							   AttrNumber *tuple_dst_resno,
+							   AttrNumber src_anum_min,
+							   AttrNumber src_anum_max)
+{
+	HeapTupleHeader	tup = tuple->t_data;
+	bool		hasnulls = HeapTupleHasNulls(tuple);
+	Datum	   *tts_values = slot_fallback->tts_values;
+	bool	   *tts_isnull = slot_fallback->tts_isnull;
+	char	   *tp;
+	long		off;
+	int			i, nattrs;
+	AttrNumber	resnum;
+
+	/*
+	 * Extract system columns if any
+	 */
+	if (src_anum_min < 0)
+	{
+		/* ctid */
+		resnum = tuple_dst_resno[SelfItemPointerAttributeNumber -
+								 FirstLowInvalidHeapAttributeNumber - 1];
+		if (resnum)
+		{
+			tts_values[resnum - 1] = PointerGetDatum(&(tuple->t_self));
+			tts_isnull[resnum - 1] = false;
+		}
+
+		/* cmax */
+		resnum = tuple_dst_resno[MaxCommandIdAttributeNumber -
+								 FirstLowInvalidHeapAttributeNumber - 1];
+		if (resnum)
+		{
+			tts_values[resnum - 1]
+				= CommandIdGetDatum(HeapTupleHeaderGetRawCommandId(tup));
+			tts_isnull[resnum - 1] = false;
+		}
+
+		/* xmax */
+		resnum = tuple_dst_resno[MaxTransactionIdAttributeNumber -
+								 FirstLowInvalidHeapAttributeNumber - 1];
+		if (resnum)
+		{
+			tts_values[resnum - 1]
+				= TransactionIdGetDatum(HeapTupleHeaderGetRawXmax(tup));
+			tts_isnull[resnum - 1] = false;
+		}
+
+		/* cmin */
+		resnum = tuple_dst_resno[MinCommandIdAttributeNumber -
+								 FirstLowInvalidHeapAttributeNumber - 1];
+		if (resnum)
+		{
+			tts_values[resnum - 1]
+				= CommandIdGetDatum(HeapTupleHeaderGetRawCommandId(tup));
+			tts_isnull[resnum - 1] = false;
+		}
+
+		/* xmin */
+		resnum = tuple_dst_resno[MinTransactionIdAttributeNumber -
+								 FirstLowInvalidHeapAttributeNumber - 1];
+		if (resnum)
+		{
+			tts_values[resnum - 1]
+				= TransactionIdGetDatum(HeapTupleHeaderGetRawXmin(tup));
+			tts_isnull[resnum - 1] = false;
+		}
+
+		/* oid */
+		resnum = tuple_dst_resno[ObjectIdAttributeNumber -
+								 FirstLowInvalidHeapAttributeNumber - 1];
+		if (resnum)
+		{
+			tts_values[resnum - 1] = ObjectIdGetDatum(HeapTupleGetOid(tuple));
+			tts_isnull[resnum - 1] = false;
+		}
+
+		/* tableoid */
+		resnum = tuple_dst_resno[TableOidAttributeNumber -
+								 FirstLowInvalidHeapAttributeNumber - 1];
+		if (resnum)
+		{
+			tts_values[resnum - 1] = ObjectIdGetDatum(tuple->t_tableOid);
+			tts_isnull[resnum - 1] = false;
+		}
+	}
+
+	/*
+	 * Extract user defined columns, according to the logic in
+	 * heap_deform_tuple(), but implemented by ourselves for performance.
+	 */
+	nattrs = HeapTupleHeaderGetNatts(tup);
+	nattrs = Min3(nattrs, tupdesc->natts, src_anum_max);
+
+	tp = (char *) tup + tup->t_hoff;
+	off = 0;
+	for (i=0; i < nattrs; i++)
+	{
+		Form_pg_attribute	attr = tupdesc->attrs[i];
+
+		resnum = tuple_dst_resno[i - FirstLowInvalidHeapAttributeNumber];
+
+		if (hasnulls && att_isnull(i, tup->t_bits))
+		{
+			if (resnum > 0)
+			{
+				tts_values[resnum - 1] = (Datum) 0;
+				tts_isnull[resnum - 1] = true;
+			}
+			continue;
+		}
+
+		/* elsewhere field is not null */
+		if (resnum > 0)
+			tts_isnull[resnum - 1] = false;
+
+		if (attr->attlen == -1)
+			off = att_align_pointer(off, attr->attalign, -1, tp + off);
+		else
+			off = att_align_nominal(off, attr->attalign);
+
+		if (resnum > 0)
+			tts_values[resnum - 1] = fetchatt(attr, tp + off);
+
+		off = att_addlength_pointer(off, attr->attlen, tp + off);
+	}
+
+	/*
+     * If tuple doesn't have all the atts indicated by src_anum_max,
+	 * read the rest as null
+	 */
+	for (; i < src_anum_max; i++)
+	{
+		resnum = tuple_dst_resno[i - FirstLowInvalidHeapAttributeNumber];
+		if (resnum > 0)
+		{
+			tts_values[resnum - 1] = (Datum) 0;
+			tts_isnull[resnum - 1] = true;
+		}
+	}
+}
+
+#if 0
+static void
+gpujoin_fallback(GpuJoinState *gjs, HeapTuple tuple, int depth)
+{
+	TupleTableSlot	   *slot = gjs->gts.css.ss.ss_ScanTupleSlot;
+
+	if (depth == 0)
+	{
+		// extract outer to slot (var is INDEX_VAR)
+
+		// run outer qual on the slot
+
+
+	}
+	else
+	{
+		// run join cond
+
+		// extract inner tuple to slot
+
+
+	}
+
+
+
+}
+
+static TupleTableSlot *
+gpujoin_next_tuple_fallback(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
+{
+	/* pickup set of heaptuple */
+
+
+	return NULL;
+}
+#endif
 
 /* ----------------------------------------------------------------
  *
