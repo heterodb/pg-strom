@@ -312,6 +312,7 @@ typedef struct pgstrom_multirels
 	CUdeviceptr	   *m_kmrels;	/* GPU memory for each CUDA context */
 	CUevent		   *ev_loaded;	/* Sync object for each CUDA context */
 	CUdeviceptr	   *m_ojmaps;	/* GPU memory for outer join maps */
+	cl_bool		   *host_ojmaps;/* Host memory for outer join maps */
 	kern_multirels	kern;
 } pgstrom_multirels;
 
@@ -4746,16 +4747,32 @@ gpujoin_fallback_inner_recurse(GpuJoinState *gjs,
 										   istate,
 										   slot_fallback,
 										   &is_null_keys);
-				/* all null key will never match */
-				if (is_null_keys && (istate->join_type == JOIN_INNER ||
-									 istate->join_type == JOIN_LEFT))
-					return false;
 				istate->fallback_inner_hash = hash;
+
+				/* Is hash-value in range of the kds_in? */
+				if (hash < kds_in->hash_min || hash > kds_in->hash_max)
+					return false;
+				/* All NULL keys will never match to inner rows */
+				if (is_null_keys)
+				{
+					if (istate->join_type == JOIN_LEFT ||
+						istate->join_type == JOIN_FULL)
+					{
+						tupitem = NULL;
+						goto inner_fillup;
+					}
+					return false;
+				}
 
 				khitem = KERN_HASH_FIRST_ITEM(kds_in, hash);
 				if (!khitem)
 				{
-					// if OJ, fill up inner by NULL then walk down next depth
+					if (istate->join_type == JOIN_LEFT ||
+						istate->join_type == JOIN_FULL)
+					{
+						tupitem = NULL;
+						goto inner_fillup;
+					}
 					return false;
 				}
 				istate->fallback_inner_index = khitem->rowid;
@@ -4778,7 +4795,13 @@ gpujoin_fallback_inner_recurse(GpuJoinState *gjs,
 				khitem = KERN_HASH_NEXT_ITEM(kds_in, khitem);
 				if (!khitem)
 				{
-					// if OJ, fill up inner by NULL then walk down next depth
+					if (!istate->fallback_inner_matched &&
+						(istate->join_type == JOIN_LEFT ||
+						 istate->join_type == JOIN_FULL))
+					{
+						tupitem = NULL;
+						goto inner_fillup;
+					}
 					return false;
 				}
 				istate->fallback_inner_index = khitem->rowid;
@@ -4793,6 +4816,7 @@ gpujoin_fallback_inner_recurse(GpuJoinState *gjs,
 			/*
 			 * Extract inner columns to the slot_fallback
 			 */
+		inner_fillup:
 			gpujoin_fallback_tuple_extract(slot_fallback,
 										   tupdesc,
 										   kds_in->table_oid,
@@ -4801,14 +4825,24 @@ gpujoin_fallback_inner_recurse(GpuJoinState *gjs,
 										   istate->inner_src_anum_min,
 										   istate->inner_src_anum_max);
 			/*
-			 * Evaluation of the join_quals, if any
+			 * Evaluation of the join_quals, if inner matched
 			 */
-			if (!ExecQual(istate->join_quals, econtext, false))
-				continue;
-		
-			istate->fallback_inner_matched = true;
+			if (tupitem)
+			{
+				if (!ExecQual(istate->join_quals, econtext, false))
+					continue;
 
-			// put flags to put flags of outer_matched
+				if (istate->join_type == JOIN_RIGHT ||
+					istate->join_type == JOIN_FULL)
+				{
+					/*
+					 * TODO: Host-side outer-join map is needed for ...
+					 * - CPU Fallback
+					 * - Release GPU memory on multirels_put_buffer
+					 */
+				}
+			}
+			istate->fallback_inner_matched = true;
 
 			/*
 			 * Evaluation of the other_quals, if any
@@ -4852,7 +4886,6 @@ gpujoin_next_tuple_fallback(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 
 	if (!pgjoin->pds_src)
 		elog(ERROR, "CPU Fallback of RIGHT/FULL OUTER JOIN is not ready");
-	/* Only INNER/LEFT OUTER JOIN are available now */
 
 	econtext->ecxt_scantuple = slot_fallback;
 	do {
@@ -6000,29 +6033,47 @@ gpujoin_create_multirels(GpuJoinState *gjs)
 {
 	GpuContext *gcontext = gjs->gts.gcontext;
 	pgstrom_multirels  *pmrels;
-	int			num_rels = gjs->num_rels;
+	Size		ojmap_length = 0;
 	Size		head_length;
 	Size		alloc_length;
+	int			i;
 	char	   *pos;
 
+	/* calculation of outer-join map length */
+	for (i=0; i < gjs->num_rels; i++)
+	{
+		innerState	   *istate = &gjs->inners[i];
+
+		if (istate->join_type == JOIN_RIGHT ||
+			istate->join_type == JOIN_FULL)
+		{
+			pgstrom_data_store *pds = list_nth(istate->pds_list,
+											   istate->pds_index - 1);
+			ojmap_length += STROMALIGN(sizeof(cl_bool) * pds->kds->nitems);
+		}
+	}
+
+	/* calculate total length and allocate */
 	head_length = STROMALIGN(offsetof(pgstrom_multirels,
-									  kern.chunks[num_rels]));
+									  kern.chunks[gjs->num_rels]));
 	alloc_length = head_length +
-		STROMALIGN(sizeof(pgstrom_data_store *) * num_rels) +
+		STROMALIGN(sizeof(pgstrom_data_store *) * gjs->num_rels) +
 		STROMALIGN(sizeof(cl_int) * gcontext->num_context) +
 		STROMALIGN(sizeof(CUdeviceptr) * gcontext->num_context) +
 		STROMALIGN(sizeof(CUevent) * gcontext->num_context) +
-		STROMALIGN(sizeof(CUdeviceptr) * gcontext->num_context);
+		STROMALIGN(sizeof(CUdeviceptr) * gcontext->num_context) +
+		STROMALIGN(ojmap_length * gcontext->num_context);
 
 	pmrels = MemoryContextAllocZero(gcontext->memcxt, alloc_length);
 	pmrels->gjs = gjs;
 	pmrels->head_length = head_length;
 	pmrels->usage_length = head_length;
 	pmrels->ojmap_length = 0;
+	pmrels->n_attached = 1;		/* already attached to the caller */
 
 	pos = (char *)pmrels + head_length;
 	pmrels->inner_chunks = (pgstrom_data_store **) pos;
-	pos += STROMALIGN(sizeof(pgstrom_data_store *) * num_rels);
+	pos += STROMALIGN(sizeof(pgstrom_data_store *) * gjs->num_rels);
 	pmrels->refcnt = (cl_int *) pos;
 	pos += STROMALIGN(sizeof(cl_int) * gcontext->num_context);
 	pmrels->m_kmrels = (CUdeviceptr *) pos;
@@ -6031,17 +6082,45 @@ gpujoin_create_multirels(GpuJoinState *gjs)
 	pos += STROMALIGN(sizeof(CUevent) * gcontext->num_context);
 	pmrels->m_ojmaps = (CUdeviceptr *) pos;
 	pos += STROMALIGN(sizeof(CUdeviceptr) * gcontext->num_context);
+	pmrels->host_ojmaps = (cl_bool *)(ojmap_length > 0 ? pos : NULL);
 
 	memcpy(pmrels->kern.pg_crc32_table,
 		   pg_crc32_table,
 		   sizeof(cl_uint) * 256);
-	pmrels->kern.nrels = num_rels;
+	pmrels->kern.nrels = gjs->num_rels;
 	pmrels->kern.ndevs = gcontext->num_context;
 	memset(pmrels->kern.chunks,
 		   0,
-		   offsetof(pgstrom_multirels, kern.chunks[num_rels]) -
+		   offsetof(pgstrom_multirels, kern.chunks[gjs->num_rels]) -
 		   offsetof(pgstrom_multirels, kern.chunks[0]));
 
+	for (i=0; i < gjs->num_rels; i++)
+	{
+		innerState			   *istate = &gjs->inners[i];
+		pgstrom_data_store	   *pds = list_nth(istate->pds_list,
+											   istate->pds_index - 1);
+
+		pmrels->inner_chunks[i] = pgstrom_acquire_data_store(pds);
+		pmrels->kern.chunks[i].chunk_offset = pmrels->usage_length;
+		pmrels->usage_length += STROMALIGN(pds->kds->length);
+
+		if (!istate->hash_outer_keys)
+			pmrels->kern.chunks[i].is_nestloop = true;
+
+		if (istate->join_type == JOIN_RIGHT ||
+			istate->join_type == JOIN_FULL)
+		{
+			pmrels->kern.chunks[i].right_outer = true;
+			pmrels->kern.chunks[i].ojmap_offset = pmrels->ojmap_length;
+			pmrels->ojmap_length += (STROMALIGN(sizeof(cl_bool) *
+												pds->kds->nitems) *
+									 (pmrels->kern.ndevs + 1));
+			pmrels->needs_outer_join = true;
+		}
+		if (istate->join_type == JOIN_LEFT ||
+			istate->join_type == JOIN_FULL)
+			pmrels->kern.chunks[i].left_outer = true;
+	}
 	return pmrels;
 }
 
@@ -6175,8 +6254,6 @@ gpujoin_inner_preload(GpuJoinState *gjs)
 static pgstrom_multirels *
 gpujoin_inner_getnext(GpuJoinState *gjs)
 {
-	pgstrom_multirels  *pmrels = NULL;
-	pgstrom_data_store *pds;
 	int		i, j;
 
 	if (!gjs->inner_preloaded)
@@ -6195,13 +6272,13 @@ gpujoin_inner_getnext(GpuJoinState *gjs)
 		 */
 		for (i=gjs->num_rels; i > 0; i--)
 		{
-			innerState *istate = &gjs->inners[i-1];
+			innerState	   *istate = &gjs->inners[i-1];
 
 			if (istate->pds_index < list_length(istate->pds_list))
 			{
 				istate->pds_index++;
 				for (j=i; j < gjs->num_rels; j++)
-					istate->pds_index = 1;
+					gjs->inners[j].pds_index = 1;
 				break;
 			}
 		}
@@ -6212,40 +6289,7 @@ gpujoin_inner_getnext(GpuJoinState *gjs)
 	/*
 	 * OK, makes next pgstrom_multirels buffer
 	 */
-	pmrels = gpujoin_create_multirels(gjs);
-	for (i=0; i < gjs->num_rels; i++)
-	{
-		innerState		   *istate = &gjs->inners[i];
-
-		Assert(istate->pds_index > 0 &&
-			   istate->pds_index <= list_length(istate->pds_list));
-		pds = list_nth(istate->pds_list, istate->pds_index - 1);
-
-		pmrels->inner_chunks[i] = pgstrom_acquire_data_store(pds);
-		pmrels->kern.chunks[i].chunk_offset = pmrels->usage_length;
-		pmrels->usage_length += STROMALIGN(pds->kds->length);
-
-		if (!istate->hash_outer_keys)
-			pmrels->kern.chunks[i].is_nestloop = true;
-
-		if (istate->join_type == JOIN_RIGHT ||
-			istate->join_type == JOIN_FULL)
-		{
-			pmrels->kern.chunks[i].right_outer = true;
-			pmrels->kern.chunks[i].ojmap_offset = pmrels->ojmap_length;
-			pmrels->ojmap_length += (STROMALIGN(sizeof(cl_bool) *
-												pds->kds->nitems) *
-									 pmrels->kern.ndevs);
-			pmrels->needs_outer_join = true;
-		}
-		if (istate->join_type == JOIN_LEFT ||
-			istate->join_type == JOIN_FULL)
-			pmrels->kern.chunks[i].left_outer = true;
-	}
-	/* already attached on the caller's context */
-	pmrels->n_attached = 1;
-
-	return pmrels;
+	return gpujoin_create_multirels(gjs);
 }
 
 /*
