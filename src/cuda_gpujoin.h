@@ -31,7 +31,7 @@ typedef struct
 	struct
 	{
 		cl_uint		chunk_offset;	/* offset to KDS or Hash */
-		cl_uint		ojmap_offset;	/* offset to Left-Outer Map, if any */
+		cl_uint		ojmap_offset;	/* offset to Outer-Join Map, if any */
 		cl_bool		is_nestloop;	/* true, if NestLoop. */
 		cl_bool		left_outer;		/* true, if JOIN_LEFT or JOIN_FULL */
 		cl_bool		right_outer;	/* true, if JOIN_RIGHT or JOIN_FULL */

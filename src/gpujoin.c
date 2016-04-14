@@ -373,7 +373,8 @@ static bool multirels_get_buffer(pgstrom_multirels *pmrels,
 								 pgstrom_gpujoin *pgjoin);
 static void multirels_put_buffer(pgstrom_multirels *pmrels, GpuTask *gtask);
 static void multirels_send_buffer(pgstrom_multirels *pmrels, GpuTask *gtask);
-static void multirels_colocate_outer_join_maps(pgstrom_multirels *pmrels,
+static void colocate_outer_join_maps_to_host(pgstrom_multirels *pmrels);
+static void colocate_outer_join_maps_to_device(pgstrom_multirels *pmrels,
 											   GpuTask *gtask);
 static void multirels_detach_buffer(pgstrom_multirels *pmrels,
 									bool may_kick_outer_join,
@@ -5221,6 +5222,37 @@ skip:
 			if (jscale[i].window_base < nitems)
 			{
 				/*
+				 * NOTE: consideration to a corner case - If CpuReCheck
+				 * error was returned on JOIN_RIGHT/FULL processing, we
+				 * cannot continue asynchronous task execution no longer,
+				 * because outer-join-map may be updated during execution
+				 * of the last task (with no valid outer PDS/KDS).
+				 * For example, if depth=2 and depth=4 is RIGHT JOIN,
+				 * depth=2 will produce half-NULL'ed tuples according to
+				 * the outer-join-map. Thie tuple shall be processed in
+				 * the depth=3 and later, according to INNER JOIN manner.
+				 * It may add new match on the depth=4, then it updates
+				 * the outer-join-map.
+				 * If a particular portion of RIGHT JOIN are executed on
+				 * both of CPU and GPU concurrently, we cannot guarantee
+				 * the outer-join-map is consistent.
+				 * Thus, once a pgstrom_gpujoin task got CpuReCheck error,
+				 * we will process remaining RIGHT JOIN stuff on CPU
+				 * entirely.
+				 */
+				if (!pgjoin->pds_src && pgjoin->task.cpu_fallback)
+				{
+					for (i=0; i < gjs->num_rels; i++)
+					{
+						pgstrom_data_store *pds = pmrels->inner_chunks[i];
+
+						jscale[i+1].window_size = (pds->kds->nitems -
+												   jscale[i+1].window_base);
+					}
+					break;
+				}
+
+				/*
 				 * Re-enqueue the task with modified window_base/size
 				 */
 				while (++i <= gjs->num_rels)
@@ -5412,7 +5444,7 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 	else
 	{
 		/* colocation of the outer join map */
-		multirels_colocate_outer_join_maps(pmrels, &pgjoin->task);
+		colocate_outer_join_maps_to_device(pmrels, &pgjoin->task);
 	}
 
 	/* kern_data_store (dst of head) */
@@ -6165,7 +6197,8 @@ gpujoin_create_multirels(GpuJoinState *gjs)
 		STROMALIGN(sizeof(CUdeviceptr) * gcontext->num_context) +
 		STROMALIGN(sizeof(CUevent) * gcontext->num_context) +
 		STROMALIGN(sizeof(CUdeviceptr) * gcontext->num_context) +
-		STROMALIGN(ojmap_length * gcontext->num_context);
+		STROMALIGN(ojmap_length * (gcontext->num_context + 1));
+		/* The last segment of OJMap is used by CPU fallback */
 
 	pmrels = MemoryContextAllocZero(gcontext->memcxt, alloc_length);
 	pmrels->gjs = gjs;
@@ -6224,6 +6257,7 @@ gpujoin_create_multirels(GpuJoinState *gjs)
 			istate->join_type == JOIN_FULL)
 			pmrels->kern.chunks[i].left_outer = true;
 	}
+	Assert(pmrels->ojmap_length == ojmap_length);
 	return pmrels;
 }
 
@@ -6563,58 +6597,87 @@ multirels_send_buffer(pgstrom_multirels *pmrels, GpuTask *gtask)
 }
 
 static void
-multirels_colocate_outer_join_maps(pgstrom_multirels *pmrels, GpuTask *gtask)
+colocate_outer_join_maps_to_host(pgstrom_multirels *pmrels)
+{
+	GpuContext *gcontext = pmrels->gjs->gts.gcontext;
+	Size		ojmap_length = pmrels->ojmap_length;
+	cl_bool	   *host_ojmaps = pmrels->host_ojmaps;
+	cl_int		i;
+
+	for (i=0; i < gcontext->num_context; i++)
+	{
+		cl_bool	   *dest_addr = host_ojmaps + i * ojmap_length;
+		CUdeviceptr	source_addr;
+		CUresult	rc;
+
+		/* never executed on this device */
+		if (!pmrels->m_ojmaps[i])
+			continue;
+
+		/* move data from the device memory */
+		rc = cuCtxPushCurrent(gcontext->gpu[i].cuda_context);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
+
+		source_addr = pmrels->m_ojmaps[i] + i * ojmap_length;
+		rc = cuMemcpyDtoH(dest_addr,
+						  source_addr,
+						  ojmap_length);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuMemcpyDtoH: %s", errorText(rc));
+
+		rc = cuCtxPopCurrent(NULL);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
+	}
+}
+
+static void
+colocate_outer_join_maps_to_device(pgstrom_multirels *pmrels, GpuTask *gtask)
 {
 	GpuContext	   *gcontext = pmrels->gjs->gts.gcontext;
+	cl_int			ndevs = gcontext->num_context;
 	cl_int			cuda_index = gtask->cuda_index;
 	CUstream		cuda_stream = gtask->cuda_stream;
 	CUcontext		dst_context = gtask->cuda_context;
 	CUcontext		src_context;
-	cl_int			i, depth;
+	CUdeviceptr		dst_ojmaps = pmrels->m_ojmaps[cuda_index];
+	CUdeviceptr		src_ojmaps;
+	cl_int			i;
 	CUresult		rc;
 
 	Assert(pmrels->m_ojmaps[cuda_index] != 0UL);
 	Assert(gcontext->gpu[cuda_index].cuda_context == gtask->cuda_context);
 
-	for (depth=1; depth <= pmrels->kern.nrels; depth++)
+	/* device-to-device colocation */
+	for (i=0; i < ndevs; i++)
 	{
-		pgstrom_data_store *chunk = pmrels->inner_chunks[depth - 1];
-		CUdeviceptr		dst_ojmaps = pmrels->m_ojmaps[cuda_index];
-		cl_bool		   *dst_lomap;
-		cl_bool		   *src_lomap;
-		cl_uint			nitems = chunk->kds->nitems;
-
-		dst_lomap = KERN_MULTIRELS_OUTER_JOIN_MAP(&pmrels->kern,
-												  depth,
-												  nitems,
-												  cuda_index,
-												  dst_ojmaps);
-		if (!dst_lomap)
+		/* no need to copy from the destination device */
+		if (i == cuda_index)
+			continue;
+		/* never executed on this device */
+		if (!pmrels->m_ojmaps[i])
 			continue;
 
-		for (i=0; i < gcontext->num_context; i++)
-		{
-			/* no need to copy from the destination device */
-			if (i == cuda_index)
-				continue;
-			/* never executed on this device */
-			if (!pmrels->m_ojmaps[i])
-				continue;
+		src_context = gcontext->gpu[i].cuda_context;
+		src_ojmaps = pmrels->m_ojmaps[i];
 
-			src_context = gcontext->gpu[i].cuda_context;
-			src_lomap = KERN_MULTIRELS_OUTER_JOIN_MAP(&pmrels->kern,
-													  depth,
-													  nitems,
-													  i,
-													  pmrels->m_ojmaps[i]);
-			rc = cuMemcpyPeerAsync((CUdeviceptr)dst_lomap, dst_context,
-								   (CUdeviceptr)src_lomap, src_context,
-								   STROMALIGN(sizeof(cl_bool) * nitems),
-								   cuda_stream);
-			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on cuMemcpyPeerAsync: %s", errorText(rc));
-		}
+		rc = cuMemcpyPeerAsync(dst_ojmaps + i * pmrels->ojmap_length,
+							   dst_context,
+							   src_ojmaps + i * pmrels->ojmap_length,
+							   src_context,
+							   pmrels->ojmap_length,
+							   cuda_stream);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuMemcpyPeerAsync: %s", errorText(rc));
 	}
+	/* host-to-device colocation */
+	rc = cuMemcpyHtoDAsync(dst_ojmaps + ndevs * pmrels->ojmap_length,
+						   pmrels->host_ojmaps + ndevs * pmrels->ojmap_length,
+						   pmrels->ojmap_length,
+						   cuda_stream);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
 }
 
 static void
