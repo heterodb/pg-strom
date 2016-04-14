@@ -4772,6 +4772,7 @@ gpujoin_fallback_inner_recurse(GpuJoinState *gjs,
 	TupleTableSlot	   *slot_in = istate->state->ps_ResultTupleSlot;
 	TupleDesc			tupdesc = slot_in->tts_tupleDescriptor;
 	kern_data_store	   *kds_in;
+	kern_join_scale	   *jscale = &pgjoin->kern.jscale[depth-1];
 	kern_tupitem	   *tupitem;
 	kern_hashitem	   *khitem;
 	bool				reload_inner_next;
@@ -4784,6 +4785,7 @@ gpujoin_fallback_inner_recurse(GpuJoinState *gjs,
 	for (;;)
 	{
 		cl_uint			i, kds_index;
+		cl_uint			nvalids;
 
 		if (reload_inner_next)
 		{
@@ -4794,8 +4796,11 @@ gpujoin_fallback_inner_recurse(GpuJoinState *gjs,
 				/*
 				 * Case of GpuNestLoop
 				 */
-				kds_index = Max(0, istate->fallback_inner_index + 1);
-				if (kds_index >= kds_in->nitems)
+				kds_index = Max(jscale->window_base,
+								istate->fallback_inner_index + 1);
+				nvalids = Min(kds_in->nitems,
+							  jscale->window_base + jscale->window_size);
+				if (kds_index >= nvalids)
 					return false;
 
 				tupitem = KERN_DATA_STORE_TUPITEM(kds_in, kds_index);
@@ -4846,6 +4851,11 @@ gpujoin_fallback_inner_recurse(GpuJoinState *gjs,
 				istate->fallback_inner_index = khitem->rowid;
 				istate->fallback_inner_matched = false;
 
+				/* khitem is not visible if rowid is out of window range */
+				if (khitem->rowid < jscale->window_base ||
+					khitem->rowid >= jscale->window_base + jscale->window_size)
+					continue;
+
 				/* quick check whether khitem shall match */
 				if (khitem->hash != istate->fallback_inner_hash)
 					continue;
@@ -4873,6 +4883,11 @@ gpujoin_fallback_inner_recurse(GpuJoinState *gjs,
 					return false;
 				}
 				istate->fallback_inner_index = khitem->rowid;
+
+				/* khitem is not visible if rowid is out of window range */
+				if (khitem->rowid < jscale->window_base ||
+					khitem->rowid >= jscale->window_base + jscale->window_size)
+					continue;
 
 				/* quick check whether khitem shall match */
 				if (khitem->hash != istate->fallback_inner_hash)
@@ -4948,6 +4963,7 @@ gpujoin_next_tuple_fallback(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 	ExprContext		   *econtext = gjs->gts.css.ss.ps.ps_ExprContext;
 	TupleTableSlot	   *slot_fallback = gjs->slot_fallback;
 	kern_data_store	   *kds_src = pgjoin->pds_src->kds;
+	kern_join_scale	   *jscale = pgjoin->kern.jscale;
 	TupleDesc			tupdesc;
 	kern_tupitem	   *tupitem;
 	ExprDoneCond		is_done;
@@ -4964,10 +4980,15 @@ gpujoin_next_tuple_fallback(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 
 		if (reload_outer_next)
 		{
-			cl_uint		i, kds_index = Max(0, gjs->fallback_outer_index + 1);
+			cl_uint		i, kds_index;
+			cl_uint		nvalids;
 
-			/* Do we still have any outer rows more? */
-			if (kds_index >= kds_src->nitems)
+			kds_index = Max(jscale->window_base,
+							gjs->fallback_outer_index + 1);
+			/* Do we still have any other rows more? */
+			nvalids = Min(kds_src->nitems,
+                          jscale->window_base + jscale->window_size);
+			if (kds_index >= nvalids)
 			{
 				/*
 				 * NOTE: detach of the inner pmrels buffer was postponed to
@@ -5237,16 +5258,7 @@ skip:
 	 * be after the above re-enqueue in case of retry.
 	 */
 	gpujoin_cleanup_cuda_resources(pgjoin);
-#if 0
-	/*
-	 * NOTE: We have to detach inner chunks here, because it may kick
-	 * OUTER JOIN task if this context is the last holder of inner
-	 * buffer.
-	 */
-	Assert(pgjoin->pmrels != NULL);
-	multirels_detach_buffer(pgjoin->pmrels, true, __FUNCTION__);
-	pgjoin->pmrels = NULL;
-#endif
+
 	return true;
 }
 
