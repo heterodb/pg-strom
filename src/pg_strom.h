@@ -258,8 +258,9 @@ struct GpuTaskState
 	bool		  (*cb_task_process)(GpuTask *gtask);
 	bool		  (*cb_task_complete)(GpuTask *gtask);
 	void		  (*cb_task_release)(GpuTask *gtask);
-	void		  (*cb_task_polling)(GpuTaskState *gts);
+	void		  (*cb_task_polling)(GpuTaskState *gts);	// deprecated
 	GpuTask		 *(*cb_next_chunk)(GpuTaskState *gts);
+	void		  (*cb_switch_task)(GpuTaskState *gts, GpuTask *gtask);
 	TupleTableSlot *(*cb_next_tuple)(GpuTaskState *gts);
 	/* extended executor */
 	struct pgstrom_data_store *(*cb_bulk_exec)(GpuTaskState *gts,

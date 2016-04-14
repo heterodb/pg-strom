@@ -1254,8 +1254,9 @@ pgstrom_init_gputaskstate(GpuContext *gcontext,
 	gts->cb_task_process = NULL;
 	gts->cb_task_complete = NULL;
 	gts->cb_task_release = NULL;
-	gts->cb_task_polling = NULL;
+	gts->cb_task_polling = NULL;	// deprecated
 	gts->cb_next_chunk = NULL;
+	gts->cb_switch_task = NULL;
 	gts->cb_next_tuple = NULL;
 	gts->cb_bulk_exec = NULL;
 }
@@ -1791,6 +1792,8 @@ pgstrom_exec_gputask(GpuTaskState *gts)
 			break;
 		gts->curr_task = gtask;
 		gts->curr_index = 0;
+		if (gts->cb_switch_task)
+			gts->cb_switch_task(gts, gtask);
 	}
 	return slot;
 }
@@ -1823,6 +1826,8 @@ pgstrom_exec_chunk_gputask(GpuTaskState *gts, size_t chunk_size)
 				break;	/* end of the scan */
 			gts->curr_task = gtask;
 			gts->curr_index = 0;
+			if (gts->cb_switch_task)
+				gts->cb_switch_task(gts, gtask);
 		}
 		Assert(gtask != NULL);
 

@@ -271,7 +271,6 @@ typedef struct
 	AttrNumber	   *outer_dst_resno;	/* destination attribute number to */
 	AttrNumber		outer_src_anum_min;	/* be mapped on the slot_fallback */
 	AttrNumber		outer_src_anum_max;
-	cl_int			fallback_curr_depth;
 	cl_long			fallback_outer_index;
 
 	/*
@@ -353,11 +352,12 @@ static bool	gpujoin_task_process(GpuTask *gtask);
 static bool	gpujoin_task_complete(GpuTask *gtask);
 static void	gpujoin_task_release(GpuTask *gtask);
 static GpuTask *gpujoin_next_chunk(GpuTaskState *gts);
+static void gpujoin_switch_task(GpuTaskState *gts, GpuTask *gtask);
 static TupleTableSlot *gpujoin_next_tuple(GpuTaskState *gts);
 static TupleTableSlot *gpujoin_next_tuple_fallback(GpuJoinState *gjs,
 												   pgstrom_gpujoin *pgjoin);
-static pg_crc32 get_tuple_hashvalue(List *hash_expr_keys,
-									innerState *istate,
+static pg_crc32 get_tuple_hashvalue(innerState *istate,
+									bool is_inner_hashkeys,
 									TupleTableSlot *slot,
 									bool *p_is_null_keys);
 
@@ -2652,7 +2652,8 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 	TupleDesc		result_tupdesc = GTS_GET_RESULT_TUPDESC(gjs);
 	TupleDesc		scan_tupdesc;
 	TupleDesc		junk_tupdesc;
-	List		   *tlist_fallback;
+	List		   *tlist_fallback = NIL;
+	bool			fallback_needs_projection = false;
 	ListCell	   *lc1;
 	ListCell	   *lc2;
 	cl_int			i, j, nattrs;
@@ -2684,6 +2685,7 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 	gjs->gts.cb_task_complete = gpujoin_task_complete;
 	gjs->gts.cb_task_release = gpujoin_task_release;
 	gjs->gts.cb_next_chunk = gpujoin_next_chunk;
+	gjs->gts.cb_switch_task = gpujoin_switch_task;
 	gjs->gts.cb_next_tuple = gpujoin_next_tuple;
 	if (pgstrom_bulkexec_enabled &&
 		gjs->gts.css.ss.ps.qual == NIL &&
@@ -2704,7 +2706,13 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 	 */
 	gjs->num_rels = gj_info->num_rels;
 	gjs->join_types = gj_info->join_types;
-	gjs->outer_quals = list_make1(ExecInitExpr(gj_info->outer_quals, &ss->ps));
+	if (!gj_info->outer_quals)
+		gjs->outer_quals = NIL;
+	else
+	{
+		ExprState  *expr_state = ExecInitExpr(gj_info->outer_quals, &ss->ps);
+		gjs->outer_quals = list_make1(expr_state);
+	}
 	gjs->outer_ratio = gj_info->outer_ratio;
 	gjs->outer_nrows = gj_info->outer_nrows;
 	gjs->gts.css.ss.ps.qual = (List *)
@@ -2731,13 +2739,41 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 	/*
 	 * Init CPU fallback stuff
 	 */
-	tlist_fallback = (List *)
-		ExecInitExpr((Expr *)cscan->custom_scan_tlist, &ss->ps);
+	foreach (lc1, cscan->custom_scan_tlist)
+	{
+		TargetEntry	   *tle = lfirst(lc1);
+		Var			   *var;
+
+		/*
+		 * NOTE: Var node inside of general expression shall reference
+		 * the custom_scan_tlist recursively. Thus, we don't need to
+		 * care about varno/varattno fixup here.
+		 */
+		Assert(IsA(tle, TargetEntry));
+		if (IsA(tle->expr, Var))
+		{
+			tle = copyObject(tle);
+			var = (Var *) tle->expr;
+			var->varnoold	= var->varno;
+			var->varoattno	= var->varattno;
+			var->varno		= INDEX_VAR;
+			var->varattno	= tle->resno;
+		}
+		else
+		{
+			fallback_needs_projection = true;
+		}
+		tlist_fallback = lappend(tlist_fallback,
+								 ExecInitExpr((Expr *) tle, &ss->ps));
+	}
 	gjs->slot_fallback = MakeSingleTupleTableSlot(junk_tupdesc);
-	gjs->proj_fallback = ExecBuildProjectionInfo(tlist_fallback,
-												 ss->ps.ps_ExprContext,
-												 ss->ss_ScanTupleSlot,
-												 junk_tupdesc);
+	gjs->proj_fallback = (fallback_needs_projection
+						  ? ExecBuildProjectionInfo(tlist_fallback,
+													ss->ps.ps_ExprContext,
+													ss->ss_ScanTupleSlot,
+													junk_tupdesc)
+						  : NULL);
+
 	gjs->outer_src_anum_min = nattrs;
 	gjs->outer_src_anum_max = FirstLowInvalidHeapAttributeNumber;
 	nattrs -= FirstLowInvalidHeapAttributeNumber;
@@ -2760,11 +2796,6 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 			gjs->outer_dst_resno[resno - 1] = j;
 		}
 		j++;
-	}
-
-	for (j=gjs->outer_src_anum_min; j <= gjs->outer_src_anum_max; j++)
-	{
-		elog(INFO, "outer: %d => %d", j, gjs->outer_dst_resno[j - FirstLowInvalidHeapAttributeNumber - 1]);
 	}
 
 	/*
@@ -2810,9 +2841,22 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 		 * are deployed according to the result of child plans.
 		 */
 		join_quals = list_nth(gj_info->join_quals, i);
-		istate->join_quals = list_make1(ExecInitExpr(join_quals, &ss->ps));
+		if (!join_quals)
+			istate->join_quals = NIL;
+		else
+		{
+			ExprState  *expr_state = ExecInitExpr(join_quals, &ss->ps);
+			istate->join_quals = list_make1(expr_state);
+		}
+
 		other_quals = list_nth(gj_info->other_quals, i);
-		istate->other_quals = list_make1(ExecInitExpr(other_quals, &ss->ps));
+		if (!other_quals)
+			istate->other_quals = NIL;
+		else
+		{
+			ExprState  *expr_state = ExecInitExpr(other_quals, &ss->ps);
+			istate->other_quals = list_make1(expr_state);
+		}
 
 		hash_inner_keys = list_nth(gj_info->hash_inner_keys, i);
 		if (hash_inner_keys != NIL)
@@ -4364,7 +4408,6 @@ gpujoin_next_chunk(GpuTaskState *gts)
 {
 	GpuJoinState   *gjs = (GpuJoinState *) gts;
 	pgstrom_data_store *pds = NULL;
-	cl_int			i;
 	struct timeval	tv1, tv2;
 
 	/*
@@ -4475,15 +4518,37 @@ gpujoin_next_chunk(GpuTaskState *gts)
 		 */
 	} while (!pds);
 
-	/*
-	 * Rewind the CPU fallback pointer
-	 */
-	gjs->fallback_curr_depth = 0;
-	gjs->fallback_outer_index = -1;
-	for (i=0; i < gjs->num_rels; i++)
-		gjs->inners[i].fallback_inner_index = -1;
-
 	return gpujoin_create_task(gjs, gjs->curr_pmrels, pds, NULL);
+}
+
+/*
+ * gpujoin_switch_task - callback when a pgstrom_gpujoin task gets completed
+ * and assigned on the gts->curr_task.
+ */
+static void
+gpujoin_switch_task(GpuTaskState *gts, GpuTask *gtask)
+{
+	GpuJoinState	   *gjs = (GpuJoinState *) gts;
+	pgstrom_gpujoin	   *pgjoin = (pgstrom_gpujoin *) gtask;
+	int					i;
+
+	/* rewind the CPU fallback position */
+	if (pgjoin->task.cpu_fallback)
+	{
+		gjs->fallback_outer_index = -1;
+		for (i=0; i < gjs->num_rels; i++)
+			gjs->inners[i].fallback_inner_index = -1;
+		ExecStoreAllNullTuple(gjs->slot_fallback);
+	}
+	else
+	{
+		/*
+		 * We don't need to have the inner pmrels buffer no longer, if GPU
+		 * task gets successfully done.
+		 */
+		multirels_detach_buffer(pgjoin->pmrels, true, __FUNCTION__);
+		pgjoin->pmrels = NULL;
+	}
 }
 
 static TupleTableSlot *
@@ -4703,7 +4768,7 @@ gpujoin_fallback_inner_recurse(GpuJoinState *gjs,
 	ExprContext		   *econtext = gjs->gts.css.ss.ps.ps_ExprContext;
 	TupleTableSlot	   *slot_fallback = gjs->slot_fallback;
 	pgstrom_multirels  *pmrels = pgjoin->pmrels;
-	innerState		   *istate = &gjs->inners[depth - 1];
+	innerState		   *istate = &gjs->inners[depth-1];
 	TupleTableSlot	   *slot_in = istate->state->ps_ResultTupleSlot;
 	TupleDesc			tupdesc = slot_in->tts_tupleDescriptor;
 	kern_data_store	   *kds_in;
@@ -4712,10 +4777,12 @@ gpujoin_fallback_inner_recurse(GpuJoinState *gjs,
 	bool				reload_inner_next;
 
 	Assert(depth > 0 && depth <= gjs->num_rels);
-	kds_in = KERN_MULTIRELS_INNER_KDS(&pmrels->kern, depth - 1);
+	kds_in = pmrels->inner_chunks[depth-1]->kds;
 
-	reload_inner_next = (istate->fallback_inner_index < 0);
-	do {
+	reload_inner_next = (istate->fallback_inner_index < 0 ||
+						 depth == gjs->num_rels);
+	for (;;)
+	{
 		cl_uint			i, kds_index;
 
 		if (reload_inner_next)
@@ -4743,8 +4810,8 @@ gpujoin_fallback_inner_recurse(GpuJoinState *gjs,
 				cl_uint		hash;
 				bool		is_null_keys;
 
-				hash = get_tuple_hashvalue(istate->hash_outer_keys,
-										   istate,
+				hash = get_tuple_hashvalue(istate,
+										   false,
 										   slot_fallback,
 										   &is_null_keys);
 				istate->fallback_inner_hash = hash;
@@ -4752,6 +4819,7 @@ gpujoin_fallback_inner_recurse(GpuJoinState *gjs,
 				/* Is hash-value in range of the kds_in? */
 				if (hash < kds_in->hash_min || hash > kds_in->hash_max)
 					return false;
+
 				/* All NULL keys will never match to inner rows */
 				if (is_null_keys)
 				{
@@ -4866,7 +4934,8 @@ gpujoin_fallback_inner_recurse(GpuJoinState *gjs,
 			reload_inner_next = true;
 			continue;
 		}
-	} while(0);
+		break;
+	}
 
 	return true;
 }
@@ -4882,13 +4951,15 @@ gpujoin_next_tuple_fallback(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 	TupleDesc			tupdesc;
 	kern_tupitem	   *tupitem;
 	ExprDoneCond		is_done;
-	bool				reload_outer_next = (gjs->fallback_outer_index < 0);
+	bool				reload_outer_next;
 
 	if (!pgjoin->pds_src)
 		elog(ERROR, "CPU Fallback of RIGHT/FULL OUTER JOIN is not ready");
 
-	econtext->ecxt_scantuple = slot_fallback;
-	do {
+	reload_outer_next = (gjs->fallback_outer_index < 0);
+	for (;;)
+	{
+		econtext->ecxt_scantuple = slot_fallback;
 		ResetExprContext(econtext);
 
 		if (reload_outer_next)
@@ -4897,7 +4968,17 @@ gpujoin_next_tuple_fallback(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 
 			/* Do we still have any outer rows more? */
 			if (kds_index >= kds_src->nitems)
+			{
+				/*
+				 * NOTE: detach of the inner pmrels buffer was postponed to
+				 * the point of CPU fallback end, if needed. So, we have to
+				 * detach here.
+				 */
+				multirels_detach_buffer(pgjoin->pmrels, true, __FUNCTION__);
+				pgjoin->pmrels = NULL;
 				return NULL;
+			}
+			gjs->fallback_outer_index = kds_index;
 
 			/* Fills up fields of the fallback_slot with outer columns */
 			tupitem = KERN_DATA_STORE_TUPITEM(kds_src, kds_index);
@@ -4929,8 +5010,8 @@ gpujoin_next_tuple_fallback(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 			reload_outer_next = true;
 			continue;
 		}
-	} while(0);
-
+		break;
+	}
 
 	if (gjs->proj_fallback)
 		return ExecProject(gjs->proj_fallback, &is_done);
@@ -5156,7 +5237,7 @@ skip:
 	 * be after the above re-enqueue in case of retry.
 	 */
 	gpujoin_cleanup_cuda_resources(pgjoin);
-
+#if 0
 	/*
 	 * NOTE: We have to detach inner chunks here, because it may kick
 	 * OUTER JOIN task if this context is the last holder of inner
@@ -5165,7 +5246,7 @@ skip:
 	Assert(pgjoin->pmrels != NULL);
 	multirels_detach_buffer(pgjoin->pmrels, true, __FUNCTION__);
 	pgjoin->pmrels = NULL;
-
+#endif
 	return true;
 }
 
@@ -5189,6 +5270,7 @@ gpujoin_task_respond(CUstream stream, CUresult status, void *private)
 			pgjoin->task.kerror.errcode = StromError_Success;
 			pgjoin->task.cpu_fallback = true;
 		}
+		pgjoin->task.cpu_fallback = true;	// debug
 	}
 	else
 	{
@@ -5544,23 +5626,34 @@ gpujoin_inner_unload(GpuJoinState *gjs, bool needs_rescan)
  * calculation of the hash-value
  */
 static pg_crc32
-get_tuple_hashvalue(List *hash_expr_keys,
-					innerState *istate,
+get_tuple_hashvalue(innerState *istate,
+					bool is_inner_hashkeys,
 					TupleTableSlot *slot,
 					bool *p_is_null_keys)
 {
 	ExprContext	   *econtext = istate->econtext;
 	pg_crc32		hash;
+	List		   *hash_keys_list;
 	ListCell	   *lc1;
 	ListCell	   *lc2;
 	ListCell	   *lc3;
 	ListCell	   *lc4;
 	bool			is_null_keys = true;
 
+	if (is_inner_hashkeys)
+	{
+		hash_keys_list = istate->hash_inner_keys;
+		econtext->ecxt_innertuple = slot;
+	}
+	else
+	{
+		hash_keys_list = istate->hash_outer_keys;
+		econtext->ecxt_scantuple = slot;
+	}
+
 	/* calculation of a hash value of this entry */
-	econtext->ecxt_innertuple = slot;
 	INIT_LEGACY_CRC32(hash);
-	forfour (lc1, hash_expr_keys,
+	forfour (lc1, hash_keys_list,
 			 lc2, istate->hash_keylen,
 			 lc3, istate->hash_keybyval,
 			 lc4, istate->hash_keytype)
@@ -5710,8 +5803,7 @@ gpujoin_inner_hash_preload_TS(GpuJoinState *gjs,
 		pg_crc32	hash;
 		bool		is_null_keys;
 
-		hash = get_tuple_hashvalue(istate->hash_inner_keys,
-								   istate, scan_slot, &is_null_keys);
+		hash = get_tuple_hashvalue(istate, true, scan_slot, &is_null_keys);
 
 		/*
 		 * It is obvious all-NULLs keys shall not match any outer tuples.
@@ -5803,8 +5895,7 @@ next:
 	}
 
 	tuple = ExecFetchSlotTuple(scan_slot);
-	hash = get_tuple_hashvalue(istate->hash_inner_keys,
-							   istate, scan_slot, &is_null_keys);
+	hash = get_tuple_hashvalue(istate, true, scan_slot, &is_null_keys);
 
 	/*
 	 * If join keys are NULLs, it is obvious that inner tuple shall not
