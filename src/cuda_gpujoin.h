@@ -27,11 +27,11 @@ typedef struct
 {
 	cl_uint			pg_crc32_table[256];	/* used to hashjoin */
 	cl_uint			nrels;			/* number of relations */
-	cl_uint			ndevs;			/* number of devices installed */
+	cl_uint			ojmap_length;	/* length of outer-join map, if any */
 	struct
 	{
 		cl_uint		chunk_offset;	/* offset to KDS or Hash */
-		cl_uint		ojmap_offset;	/* offset to Outer-Join Map, if any */
+		cl_uint		ojmap_offset;	/* offset to outer-join map, if any */
 		cl_bool		is_nestloop;	/* true, if NestLoop. */
 		cl_bool		left_outer;		/* true, if JOIN_LEFT or JOIN_FULL */
 		cl_bool		right_outer;	/* true, if JOIN_RIGHT or JOIN_FULL */
@@ -43,14 +43,11 @@ typedef struct
 	((kern_data_store *)						\
 	 ((char *)(kmrels) + (kmrels)->chunks[(depth)-1].chunk_offset))
 
-#define KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth, nitems,		\
-									  cuda_index, outer_join_map)	\
-	((cl_bool *)													\
-	 ((kmrels)->chunks[(depth)-1].right_outer						\
-	  ? ((char *)(outer_join_map) +									\
-		 STROMALIGN(sizeof(cl_bool) * (nitems)) *					\
-		 (cuda_index))												\
-	  : NULL))
+#define KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth, outer_join_map)	\
+	((cl_bool *)((kmrels)->chunks[(depth)-1].right_outer				\
+				 ? ((char *)(outer_join_map) +							\
+					(kmrels)->chunks[(depth)-1].ojmap_offset)			\
+				 : NULL))
 
 #define KERN_MULTIRELS_LEFT_OUTER_JOIN(kmrels, depth)	\
 	((kmrels)->chunks[(depth)-1].left_outer)
@@ -271,7 +268,7 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 	kern_parambuf	   *kparams = KERN_GPUJOIN_PARAMBUF(kgjoin);
 	kern_context		kcxt;
 	kern_data_store	   *kds_in;
-	cl_bool			   *lo_map;
+	cl_bool			   *oj_map;
 	HeapTupleHeaderData *y_htup;
 	cl_uint			   *x_buffer;
 	cl_uint			   *r_buffer;
@@ -310,8 +307,7 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 	y_limit = min(window_base + window_size, kds_in->nitems);
 
 	/* will be valid, if LEFT OUTER JOIN */
-	lo_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth, kds_in->nitems,
-										   cuda_index, outer_join_map);
+	oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth, outer_join_map);
 	/* inside of the range? */
 	if (x_index < x_limit && y_index < y_limit)
 	{
@@ -331,8 +327,8 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 		if (is_matched)
 		{
 			y_offset = (size_t)y_htup - (size_t)kds_in;
-			if (lo_map && !lo_map[y_index])
-				lo_map[y_index] = true;
+			if (oj_map && !oj_map[y_index])
+				oj_map[y_index] = true;
 		}
 	}
 	else
@@ -389,7 +385,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 	kern_hashitem	   *khitem = NULL;
 	cl_uint			   *x_buffer = NULL;
 	cl_uint			   *r_buffer;
-	cl_bool			   *lo_map;
+	cl_bool			   *oj_map;
 	cl_uint				crc_index;
 	cl_uint				hash_value;
 	cl_uint				offset;
@@ -426,8 +422,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 	__syncthreads();
 
 	/* will be valid, if RIGHT OUTER JOIN */
-	lo_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth, kds_hash->nitems,
-										   cuda_index, outer_join_map);
+	oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth, outer_join_map);
 
 	/* Calculation of hash-value by the outer join keys */
 	if (get_global_id() < kresults_src->nitems)
@@ -475,8 +470,8 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 				needs_outer_row = false;
 				/* no need RIGHT/FULL OUTER JOIN */
 				assert(khitem->rowid < kds_hash->nitems);
-				if (lo_map && !lo_map[khitem->rowid])
-					lo_map[khitem->rowid] = true;
+				if (oj_map && !oj_map[khitem->rowid])
+					oj_map[khitem->rowid] = true;
 			}
 		}
 		else
@@ -554,6 +549,23 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 }
 
 /*
+ * gpujoin_collocate_outer_join_map
+ *
+ * it merges the result of other GPU devices and CPU fallback
+ */
+KERNEL_FUNCTION(void)
+gpujoin_colocate_outer_join_map(kern_multirels *kmrels,
+								cl_bool *outer_join_map)
+{
+	cl_uint		nitems = kmrels->ojmap_length / sizeof(cl_uint);
+	cl_uint	   *self_map = (cl_uint *)outer_join_map;
+	cl_uint	   *recv_map = (cl_uint *)((char *)outer_join_map +
+									   kmrels->ojmap_length);
+	if (get_global_id() < nitems)
+		self_map[get_global_id()] |= recv_map[get_global_id()];
+}
+
+/*
  * gpujoin_outer_nestloop
  *
  * It injects unmatched tuples to kresuts_out buffer if RIGHT OUTER JOIN
@@ -573,7 +585,6 @@ gpujoin_outer_nestloop(kern_gpujoin *kgjoin,
 	kern_parambuf	   *kparams = KERN_GPUJOIN_PARAMBUF(kgjoin);
 	kern_data_store	   *kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
 	kern_context		kcxt;
-	cl_bool			   *lo_map;
 	cl_bool				needs_outer_row;
 	cl_uint				y_index = window_base + get_global_id();
 	cl_uint				y_limit = min(window_base + window_size,
@@ -581,7 +592,6 @@ gpujoin_outer_nestloop(kern_gpujoin *kgjoin,
 	cl_uint				count;
 	cl_uint				offset;
 	cl_uint			   *r_buffer;
-	cl_int				i, ndevs = kmrels->ndevs;
 	__shared__ cl_uint	base;
 
 	INIT_KERNEL_CONTEXT(&kcxt,gpujoin_outer_nestloop,kparams);
@@ -598,18 +608,12 @@ gpujoin_outer_nestloop(kern_gpujoin *kgjoin,
 	if (y_index < y_limit)
 	{
 		cl_uint		nitems = kds_in->nitems;
+		cl_bool	   *oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth,
+														   outer_join_map);
 
-		needs_outer_row = true;
-		for (i=0; i < ndevs; i++)
-		{
-			lo_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth, nitems,
-												   i, outer_join_map);
-			assert(lo_map != NULL);
-			if (lo_map[y_index])
-				needs_outer_row = false;
-		}
-
-        /* check non-join-quals again */
+		assert(oj_map != NULL);
+		needs_outer_row = (oj_map[y_index] ? false : true);
+		/* check non-join-quals again */
         if (needs_outer_row)
         {
 			HeapTupleHeaderData *htup = kern_get_tuple_row(kds_in, y_index);
@@ -683,7 +687,6 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 	cl_bool				needs_outer_row;
 	cl_uint				offset;
 	cl_uint				count;
-	cl_int				i, ndevs = kmrels->ndevs;
 	cl_uint			   *r_buffer;
 	__shared__ cl_uint	base;
 
@@ -692,7 +695,6 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 	/* sanity checks */
 	assert(get_global_ysize() == 1);
 	assert(depth > 0 && depth <= kgjoin->num_rels);
-	assert(ndevs > 0);
 	assert(kresults_dst->nrels == depth + 1);
 	assert(window_base + window_size <= kds_hash->nitems);
 	assert(window_size > 0);
@@ -701,19 +703,11 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 	if (kds_index < min(window_base + window_size,
 						kds_hash->nitems))
 	{
+		cl_bool	   *oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth,
+														   outer_join_map);
 		khitem = KERN_DATA_STORE_HASHITEM(kds_hash, kds_index);
-
 		assert(khitem->rowid == kds_index);
-		needs_outer_row = true;
-		for (i=0; i < ndevs; i++)
-		{
-			cl_bool *lo_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth,
-															kds_hash->nitems,
-															i, outer_join_map);
-			assert(lo_map != NULL);
-			if (lo_map[kds_index])
-				needs_outer_row = false;
-		}
+		needs_outer_row = (oj_map[kds_index] ? false : true);
 
 		/* check non-join-quals again */
 		if (needs_outer_row)
@@ -1465,14 +1459,11 @@ retry_major:
 				}
 				SETUP_KERN_JOIN_ARGS(kern_join_args);
 
-				status = pgstrom_largest_workgroup_size_2d(
+				status = pgstrom_largest_workgroup_size(
 					&grid_sz,
 					&block_sz,
 					(const void *)gpujoin_exec_nestloop,
 					kresults_src->nitems,
-					window_size,
-					0,	/* no shmem per x-axil */
-					0,	/* no shmem per y-axil */
 					sizeof(kern_errorbuf));
 				if (status != cudaSuccess)
 				{

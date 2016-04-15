@@ -303,7 +303,6 @@ typedef struct pgstrom_multirels
 	GpuJoinState   *gjs;		/* GpuJoinState of this buffer */
 	Size			head_length;	/* length of the header portion */
 	Size			usage_length;	/* length actually in use */
-	Size			ojmap_length;	/* length of outer-join map */
 	pgstrom_data_store **inner_chunks;	/* array of inner PDS */
 	cl_bool			needs_outer_join;	/* true, if OJ is needed */
 	cl_int			n_attached;	/* Number of attached tasks */
@@ -5282,6 +5281,13 @@ skip:
 			}
 			Assert(jscale[i].window_base == nitems);
 		}
+
+		/*
+		 * In case of CPU fallback, we have to move the entire outer-
+		 * join map into the host side, prior to fallback execution.
+		 */
+		if (!pgjoin->pds_src && pgjoin->task.cpu_fallback)
+			colocate_outer_join_maps_to_host(pgjoin->pmrels);
 	}
 
 	/*
@@ -5314,7 +5320,7 @@ gpujoin_task_respond(CUstream stream, CUresult status, void *private)
 			pgjoin->task.kerror.errcode = StromError_Success;
 			pgjoin->task.cpu_fallback = true;
 		}
-		pgjoin->task.cpu_fallback = true;	// debug
+		//pgjoin->task.cpu_fallback = true;	// debug
 	}
 	else
 	{
@@ -6197,14 +6203,12 @@ gpujoin_create_multirels(GpuJoinState *gjs)
 		STROMALIGN(sizeof(CUdeviceptr) * gcontext->num_context) +
 		STROMALIGN(sizeof(CUevent) * gcontext->num_context) +
 		STROMALIGN(sizeof(CUdeviceptr) * gcontext->num_context) +
-		STROMALIGN(ojmap_length * (gcontext->num_context + 1));
-		/* The last segment of OJMap is used by CPU fallback */
+		2 * STROMALIGN(ojmap_length);	/* main usage + DMA buffer */
 
 	pmrels = MemoryContextAllocZero(gcontext->memcxt, alloc_length);
 	pmrels->gjs = gjs;
 	pmrels->head_length = head_length;
 	pmrels->usage_length = head_length;
-	pmrels->ojmap_length = 0;
 	pmrels->n_attached = 1;		/* already attached to the caller */
 
 	pos = (char *)pmrels + head_length;
@@ -6224,7 +6228,7 @@ gpujoin_create_multirels(GpuJoinState *gjs)
 		   pg_crc32_table,
 		   sizeof(cl_uint) * 256);
 	pmrels->kern.nrels = gjs->num_rels;
-	pmrels->kern.ndevs = gcontext->num_context;
+	pmrels->kern.ojmap_length = 0;
 	memset(pmrels->kern.chunks,
 		   0,
 		   offsetof(pgstrom_multirels, kern.chunks[gjs->num_rels]) -
@@ -6247,17 +6251,16 @@ gpujoin_create_multirels(GpuJoinState *gjs)
 			istate->join_type == JOIN_FULL)
 		{
 			pmrels->kern.chunks[i].right_outer = true;
-			pmrels->kern.chunks[i].ojmap_offset = pmrels->ojmap_length;
-			pmrels->ojmap_length += (STROMALIGN(sizeof(cl_bool) *
-												pds->kds->nitems) *
-									 (pmrels->kern.ndevs + 1));
+			pmrels->kern.chunks[i].ojmap_offset = pmrels->kern.ojmap_length;
+			pmrels->kern.ojmap_length
+				+= STROMALIGN(sizeof(cl_bool) * pds->kds->nitems);
 			pmrels->needs_outer_join = true;
 		}
 		if (istate->join_type == JOIN_LEFT ||
 			istate->join_type == JOIN_FULL)
 			pmrels->kern.chunks[i].left_outer = true;
 	}
-	Assert(pmrels->ojmap_length == ojmap_length);
+	Assert(pmrels->kern.ojmap_length == ojmap_length);
 	return pmrels;
 }
 
@@ -6468,9 +6471,11 @@ multirels_get_buffer(pgstrom_multirels *pmrels, pgstrom_gpujoin *pgjoin)
 		if (!m_kmrels)
 			return false;
 
-		if (pmrels->ojmap_length > 0 && !pmrels->m_ojmaps[cuda_index])
+		if (pmrels->kern.ojmap_length > 0 && !pmrels->m_ojmaps[cuda_index])
 		{
-			m_ojmaps = gpuMemAlloc(&pgjoin->task, pmrels->ojmap_length);
+			Size	length = 2 * pmrels->kern.ojmap_length;
+
+			m_ojmaps = gpuMemAlloc(&pgjoin->task, length);
 			if (!m_ojmaps)
 			{
 				gpuMemFree(&pgjoin->task, m_kmrels);
@@ -6479,7 +6484,7 @@ multirels_get_buffer(pgstrom_multirels *pmrels, pgstrom_gpujoin *pgjoin)
 			/*
 			 * Zero clear the left-outer map in sync manner
 			 */
-			rc = cuMemsetD32(m_ojmaps, 0, pmrels->ojmap_length / sizeof(int));
+			rc = cuMemsetD32(m_ojmaps, 0, length / sizeof(int));
 			if (rc != CUDA_SUCCESS)
 				elog(ERROR, "failed on cuMemsetD32: %s", errorText(rc));
 			Assert(!pmrels->m_ojmaps[cuda_index]);
@@ -6600,13 +6605,14 @@ static void
 colocate_outer_join_maps_to_host(pgstrom_multirels *pmrels)
 {
 	GpuContext *gcontext = pmrels->gjs->gts.gcontext;
-	Size		ojmap_length = pmrels->ojmap_length;
+	Size		ojmap_length = pmrels->kern.ojmap_length;
 	cl_bool	   *host_ojmaps = pmrels->host_ojmaps;
-	cl_int		i;
+	cl_bool	   *recv_ojmaps = (cl_bool *)((char *)host_ojmaps + ojmap_length);
+	cl_int		i, j, n;
 
+	Assert(ojmap_length % sizeof(cl_ulong) == 0);
 	for (i=0; i < gcontext->num_context; i++)
 	{
-		cl_bool	   *dest_addr = host_ojmaps + i * ojmap_length;
 		CUdeviceptr	source_addr;
 		CUresult	rc;
 
@@ -6619,8 +6625,8 @@ colocate_outer_join_maps_to_host(pgstrom_multirels *pmrels)
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
 
-		source_addr = pmrels->m_ojmaps[i] + i * ojmap_length;
-		rc = cuMemcpyDtoH(dest_addr,
+		source_addr = pmrels->m_ojmaps[i];
+		rc = cuMemcpyDtoH(recv_ojmaps,
 						  source_addr,
 						  ojmap_length);
 		if (rc != CUDA_SUCCESS)
@@ -6629,6 +6635,16 @@ colocate_outer_join_maps_to_host(pgstrom_multirels *pmrels)
 		rc = cuCtxPopCurrent(NULL);
 		if (rc != CUDA_SUCCESS)
 			elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
+
+		/* merge recv_ojmaps with host_ojmaps */
+		n = ojmap_length / sizeof(cl_ulong);
+		for (j=0; j < n; j++)
+		{
+			cl_ulong   *dest = (cl_ulong *)host_ojmaps + j;
+			cl_ulong   *recv = (cl_ulong *)recv_ojmaps + j;
+
+			*dest |= *recv;
+		}
 	}
 }
 
@@ -6636,18 +6652,39 @@ static void
 colocate_outer_join_maps_to_device(pgstrom_multirels *pmrels, GpuTask *gtask)
 {
 	GpuContext	   *gcontext = pmrels->gjs->gts.gcontext;
+	pgstrom_gpujoin *pgjoin = (pgstrom_gpujoin *) gtask;
 	cl_int			ndevs = gcontext->num_context;
+	cl_uint			ojmap_length = pmrels->kern.ojmap_length;
 	cl_int			cuda_index = gtask->cuda_index;
 	CUstream		cuda_stream = gtask->cuda_stream;
 	CUcontext		dst_context = gtask->cuda_context;
 	CUcontext		src_context;
-	CUdeviceptr		dst_ojmaps = pmrels->m_ojmaps[cuda_index];
+	CUdeviceptr		dst_ojmaps = pmrels->m_ojmaps[cuda_index] + ojmap_length;
 	CUdeviceptr		src_ojmaps;
+	CUfunction		kern_colocate;
+	void		   *kern_args[2];
+	size_t			grid_size;
+	size_t			block_size;
 	cl_int			i;
 	CUresult		rc;
 
 	Assert(pmrels->m_ojmaps[cuda_index] != 0UL);
 	Assert(gcontext->gpu[cuda_index].cuda_context == gtask->cuda_context);
+
+	/* GPU kernel function lookup */
+	rc = cuModuleGetFunction(&kern_colocate,
+							 pgjoin->task.cuda_module,
+							 "gpujoin_colocate_outer_join_map");
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
+
+	/* calculation of the optimal number of threads */
+	pgstrom_optimal_workgroup_size(&grid_size,
+								   &block_size,
+								   kern_colocate,
+								   pgjoin->task.cuda_device,
+								   ojmap_length / sizeof(cl_uint),
+								   0);	/* no shared memory usage */
 
 	/* device-to-device colocation */
 	for (i=0; i < ndevs; i++)
@@ -6662,22 +6699,60 @@ colocate_outer_join_maps_to_device(pgstrom_multirels *pmrels, GpuTask *gtask)
 		src_context = gcontext->gpu[i].cuda_context;
 		src_ojmaps = pmrels->m_ojmaps[i];
 
-		rc = cuMemcpyPeerAsync(dst_ojmaps + i * pmrels->ojmap_length,
-							   dst_context,
-							   src_ojmaps + i * pmrels->ojmap_length,
-							   src_context,
-							   pmrels->ojmap_length,
+		/*
+		 * Move the INNER JOIN results in other GPUs to the later half of
+		 * outer-join-map of the target GPU.
+		 */
+		rc = cuMemcpyPeerAsync(dst_ojmaps, dst_context,
+							   src_ojmaps, src_context,
+							   ojmap_length,
 							   cuda_stream);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuMemcpyPeerAsync: %s", errorText(rc));
+
+		/*
+		 * KERNEL_FUNCTION(void)
+		 * gpujoin_collocate_outer_join_map(kern_multirels *kmrels,
+		 *                                  cl_bool *outer_join_map)
+		 */
+		kern_args[0] = &pgjoin->m_kmrels;
+		kern_args[1] = &pgjoin->m_ojmaps;
+
+		rc = cuLaunchKernel(kern_colocate,
+							grid_size, 1, 1,
+							block_size, 1, 1,
+							0,	/* no shmem usage */
+							pgjoin->task.cuda_stream,
+							kern_args,
+							NULL);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
 	}
 	/* host-to-device colocation */
-	rc = cuMemcpyHtoDAsync(dst_ojmaps + ndevs * pmrels->ojmap_length,
-						   pmrels->host_ojmaps + ndevs * pmrels->ojmap_length,
-						   pmrels->ojmap_length,
+	rc = cuMemcpyHtoDAsync(dst_ojmaps,
+						   pmrels->host_ojmaps,
+						   ojmap_length,
 						   cuda_stream);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+
+	/*
+	 * KERNEL_FUNCTION(void)
+	 * gpujoin_colocate_outer_join_map(kern_multirels *kmrels,
+	 *                                 cl_bool *outer_join_map)
+	 */
+	kern_args[0] = &pgjoin->m_kmrels;
+	kern_args[1] = &pgjoin->m_ojmaps;
+
+	rc = cuLaunchKernel(kern_colocate,
+						grid_size, 1, 1,
+						block_size, 1, 1,
+						0,	/* no shmem usage */
+						pgjoin->task.cuda_stream,
+						kern_args,
+						NULL);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
 }
 
 static void
