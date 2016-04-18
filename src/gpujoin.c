@@ -225,6 +225,7 @@ typedef struct
 	cl_long				fallback_inner_index;
 	pg_crc32			fallback_inner_hash;
 	cl_bool				fallback_inner_matched;
+	cl_bool				fallback_right_outer;
 } innerState;
 
 typedef struct
@@ -4537,7 +4538,10 @@ gpujoin_switch_task(GpuTaskState *gts, GpuTask *gtask)
 	{
 		gjs->fallback_outer_index = -1;
 		for (i=0; i < gjs->num_rels; i++)
+		{
 			gjs->inners[i].fallback_inner_index = -1;
+			gjs->inners[i].fallback_right_outer = false;
+		}
 		ExecStoreAllNullTuple(gjs->slot_fallback);
 	}
 	else
@@ -4763,7 +4767,8 @@ gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
 static bool
 gpujoin_fallback_inner_recurse(GpuJoinState *gjs,
 							   pgstrom_gpujoin *pgjoin,
-							   int depth)
+							   int depth,
+							   cl_bool with_right_outer_rows)
 {
 	ExprContext		   *econtext = gjs->gts.css.ss.ps.ps_ExprContext;
 	TupleTableSlot	   *slot_fallback = gjs->slot_fallback;
@@ -4786,12 +4791,53 @@ gpujoin_fallback_inner_recurse(GpuJoinState *gjs,
 	{
 		cl_uint			i, kds_index;
 		cl_uint			nvalids;
+		cl_bool			next_depth_right_outer = false;
+		cl_bool			needs_eval_join_quals = true;
 
 		if (reload_inner_next)
 		{
 			ResetExprContext(econtext);
 
-			if (!istate->hash_outer_keys)
+			tupitem = NULL;
+			if (istate->fallback_right_outer)
+			{
+				kds_index = Max(jscale->window_base,
+								istate->fallback_inner_index + 1);
+
+				if (istate->join_type == JOIN_RIGHT ||
+					istate->join_type == JOIN_FULL)
+				{
+					cl_bool	   *host_ojmap = pmrels->host_ojmaps;
+
+					Assert(host_ojmap != NULL);
+					host_ojmap += pmrels->kern.chunks[depth-1].ojmap_offset;
+
+					nvalids = Min(kds_in->nitems,
+								  jscale->window_base + jscale->window_size);
+					while (kds_index < nvalids)
+					{
+						if (!host_ojmap[kds_index])
+						{
+							ExecStoreAllNullTuple(fallback_slot);
+
+							tupitem = KERN_DATA_STORE_TUPITEM(kds_in,
+															  kds_index);
+							istate->fallback_inner_index = kds_index;
+							break;
+						}
+						kds_index++;
+					}
+				}
+				else
+					nvalids = jscale->window_base;
+
+				if (kds_index == nvalids)
+					;
+
+
+
+			}
+			else if (!istate->hash_outer_keys)
 			{
 				/*
 				 * Case of GpuNestLoop
@@ -4800,9 +4846,16 @@ gpujoin_fallback_inner_recurse(GpuJoinState *gjs,
 								istate->fallback_inner_index + 1);
 				nvalids = Min(kds_in->nitems,
 							  jscale->window_base + jscale->window_size);
-				if (kds_index >= nvalids)
+				if (kds_index >= nvalids)	/* end of inner/left join */
+				{
+					if (with_right_outer_rows)
+					{
+						istate->fallback_inner_index = -1;
+						istate->fallback_right_outer = true;
+						continue;
+					}
 					return false;
-
+				}
 				tupitem = KERN_DATA_STORE_TUPITEM(kds_in, kds_index);
 				istate->fallback_inner_index = kds_index;
 				istate->fallback_inner_matched = false;
@@ -4819,23 +4872,22 @@ gpujoin_fallback_inner_recurse(GpuJoinState *gjs,
 										   false,
 										   slot_fallback,
 										   &is_null_keys);
-				istate->fallback_inner_hash = hash;
-
-				/* Is hash-value in range of the kds_in? */
-				if (hash < kds_in->hash_min || hash > kds_in->hash_max)
-					return false;
-
-				/* All NULL keys will never match to inner rows */
+				/* all-NULL keys will never match to inner rows */
 				if (is_null_keys)
 				{
 					if (istate->join_type == JOIN_LEFT ||
 						istate->join_type == JOIN_FULL)
 					{
 						tupitem = NULL;
+						needs_eval_join_quals = false;
 						goto inner_fillup;
 					}
 					return false;
 				}
+
+				/* Is the hash-value in range of the kds_in? */
+				if (hash < kds_in->hash_min || hash > kds_in->hash_max)
+					return false;
 
 				khitem = KERN_HASH_FIRST_ITEM(kds_in, hash);
 				if (!khitem)
@@ -4844,10 +4896,12 @@ gpujoin_fallback_inner_recurse(GpuJoinState *gjs,
 						istate->join_type == JOIN_FULL)
 					{
 						tupitem = NULL;
+						needs_eval_join_quals = false;
 						goto inner_fillup;
 					}
 					return false;
 				}
+				istate->fallback_inner_hash = hash;
 				istate->fallback_inner_index = khitem->rowid;
 				istate->fallback_inner_matched = false;
 
@@ -4868,6 +4922,13 @@ gpujoin_fallback_inner_recurse(GpuJoinState *gjs,
 				 * Case of GpuHashJoin (second or later item)
 				 */
 				kds_index = istate->fallback_inner_index;
+				if (kds_index >= kds_in->nitems)
+				{
+					// RIGHT/FULL JOIN?
+
+				}
+
+
 				khitem = KERN_DATA_STORE_HASHITEM(kds_in, kds_index);
 				Assert(khitem != NULL);
 				khitem = KERN_HASH_NEXT_ITEM(kds_in, khitem);
@@ -4878,6 +4939,7 @@ gpujoin_fallback_inner_recurse(GpuJoinState *gjs,
 						 istate->join_type == JOIN_FULL))
 					{
 						tupitem = NULL;
+						needs_eval_join_quals = false;
 						goto inner_fillup;
 					}
 					return false;
@@ -4910,22 +4972,26 @@ gpujoin_fallback_inner_recurse(GpuJoinState *gjs,
 			/*
 			 * Evaluation of the join_quals, if inner matched
 			 */
-			if (tupitem)
+			if (needs_eval_join_quals)
 			{
 				if (!ExecQual(istate->join_quals, econtext, false))
 					continue;
 
+				/* No RJ/FJ tuple is needed for this inner item */
 				if (istate->join_type == JOIN_RIGHT ||
 					istate->join_type == JOIN_FULL)
 				{
-					/*
-					 * TODO: Host-side outer-join map is needed for ...
-					 * - CPU Fallback
-					 * - Release GPU memory on multirels_put_buffer
-					 */
+					cl_bool	   *host_ojmaps = pmrels->host_ojmaps;
+
+					Assert(host_ojmaps != NULL);
+					host_ojmaps += pmrels->kern.chunks[depth-1].ojmap_offset;
+
+					Assert(kds_index >= 0 && kds_index < kds_in->nitems);
+					host_ojmaps[kds_index] = true;
 				}
+				/* No LJ/FJ tuple is needed for this outer item */
+				istate->fallback_inner_matched = true;
 			}
-			istate->fallback_inner_matched = true;
 
 			/*
 			 * Evaluation of the other_quals, if any
@@ -4935,7 +5001,10 @@ gpujoin_fallback_inner_recurse(GpuJoinState *gjs,
 
 			/* Rewind the position of deeper levels */
 			for (i = depth; i < gjs->num_rels; i++)
+			{
 				gjs->inners[i].fallback_inner_index = -1;
+				gjs->inners[i].fallback_right_outer = false;
+			}
 		}
 
 		/*
@@ -4944,14 +5013,14 @@ gpujoin_fallback_inner_recurse(GpuJoinState *gjs,
 		 * next tuple in this level.
 		 */
 		if (depth < gjs->num_rels &&
-			!gpujoin_fallback_inner_recurse(gjs, pgjoin, depth + 1))
+			!gpujoin_fallback_inner_recurse(gjs, pgjoin, depth + 1,
+											next_depth_right_outer))
 		{
 			reload_inner_next = true;
 			continue;
 		}
 		break;
 	}
-
 	return true;
 }
 
@@ -4969,71 +5038,97 @@ gpujoin_next_tuple_fallback(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 	ExprDoneCond		is_done;
 	bool				reload_outer_next;
 
-	if (!pgjoin->pds_src)
-		elog(ERROR, "CPU Fallback of RIGHT/FULL OUTER JOIN is not ready");
+	/* tuple descriptor of the outer relation */
+	if (gjs->gts.css.ss.ss_currentRelation)
+		tupdesc = RelationGetDescr(gjs->gts.css.ss.ss_currentRelation);
+	else
+		tupdesc = outerPlanState(gjs)->ps_ResultTupleSlot->tts_tupleDescriptor;
 
-	reload_outer_next = (gjs->fallback_outer_index < 0);
-	for (;;)
+	if (pgjoin->pds_src)
 	{
-		econtext->ecxt_scantuple = slot_fallback;
-		ResetExprContext(econtext);
-
-		if (reload_outer_next)
+		reload_outer_next = (gjs->fallback_outer_index < 0);
+		for (;;)
 		{
-			cl_uint		i, kds_index;
-			cl_uint		nvalids;
+			econtext->ecxt_scantuple = slot_fallback;
+			ResetExprContext(econtext);
 
-			kds_index = Max(jscale->window_base,
-							gjs->fallback_outer_index + 1);
-			/* Do we still have any other rows more? */
-			nvalids = Min(kds_src->nitems,
-                          jscale->window_base + jscale->window_size);
-			if (kds_index >= nvalids)
+			if (reload_outer_next)
 			{
-				/*
-				 * NOTE: detach of the inner pmrels buffer was postponed to
-				 * the point of CPU fallback end, if needed. So, we have to
-				 * detach here.
-				 */
-				multirels_detach_buffer(pgjoin->pmrels, true, __FUNCTION__);
-				pgjoin->pmrels = NULL;
-				return NULL;
-			}
-			gjs->fallback_outer_index = kds_index;
+				cl_uint		i, kds_index;
+				cl_uint		nvalids;
 
-			/* Fills up fields of the fallback_slot with outer columns */
-			tupitem = KERN_DATA_STORE_TUPITEM(kds_src, kds_index);
-			if (gjs->gts.css.ss.ss_currentRelation)
-				tupdesc = RelationGetDescr(gjs->gts.css.ss.ss_currentRelation);
-			else
+				kds_index = Max(jscale->window_base,
+								gjs->fallback_outer_index + 1);
+				/* Do we still have any other rows more? */
+				nvalids = Min(kds_src->nitems,
+							  jscale->window_base + jscale->window_size);
+				if (kds_index >= nvalids)
+				{
+					/*
+					 * NOTE: detach of the inner pmrels buffer was postponed
+					 * to the point of CPU fallback end, if needed. So, we
+					 * have to detach here.
+					 */
+					multirels_detach_buffer(pgjoin->pmrels, true,
+											__FUNCTION__);
+					pgjoin->pmrels = NULL;
+					return NULL;
+				}
+				gjs->fallback_outer_index = kds_index;
+
+				/* Fills up fields of the fallback_slot with outer columns */
+				tupitem = KERN_DATA_STORE_TUPITEM(kds_src, kds_index);
+				gpujoin_fallback_tuple_extract(slot_fallback, tupdesc,
+											   kds_src->table_oid,
+											   tupitem,
+											   gjs->outer_dst_resno,
+											   gjs->outer_src_anum_min,
+											   gjs->outer_src_anum_max);
+				/* evaluation of the outer qual if any */
+				if (!ExecQual(gjs->outer_quals, econtext, false))
+					continue;
+				/* ok, rewind the deeper levels prior to walk down */
+				for (i=0; i < gjs->num_rels; i++)
+				{
+					gjs->inners[i].fallback_inner_index = -1;
+					gjs->inners[i].fallback_right_outer = false;
+				}
+			}
+
+			/* walk down to the deeper depth */
+			if (!gpujoin_fallback_inner_recurse(gjs, pgjoin, 1, false))
 			{
-				PlanState	   *outer_child = outerPlanState(gjs);
-				tupdesc = outer_child->ps_ResultTupleSlot->tts_tupleDescriptor;
+				reload_outer_next = true;
+				continue;
 			}
-
+			break;
+		}
+	}
+	else
+	{
+		/*
+		 * pds_src == NULL means the final chunk of RIGHT/FULL OUTER JOIN.
+		 * We have to fill up outer columns with NULLs, then walk down into
+		 * the inner depths.
+		 */
+		if (gjs->fallback_outer_index < 0)
+		{
 			gpujoin_fallback_tuple_extract(slot_fallback, tupdesc,
-										   kds_src->table_oid,
-										   tupitem,
+										   InvalidOid,
+										   NULL,
 										   gjs->outer_dst_resno,
 										   gjs->outer_src_anum_min,
 										   gjs->outer_src_anum_max);
-			/* evaluation of the outer qual if any */
-			if (!ExecQual(gjs->outer_quals, econtext, false))
-				continue;
-			/* ok, rewind the deeper levels prior to walk down */
-			for (i=0; i < gjs->num_rels; i++)
-				gjs->inners[i].fallback_inner_index = -1;
+			gjs->fallback_outer_index = 0;
+			/* XXX - Do we need to rewind inners? Likely, No */
+			/* gpujoin_switch_task() should rewind them already */
 		}
-
-		/* walk down to the deeper depth */
-		if (!gpujoin_fallback_inner_recurse(gjs, pgjoin, 1))
-		{
-			reload_outer_next = true;
-			continue;
-		}
-		break;
+		/* walk down into the deeper depth */
+		if (!gpujoin_fallback_inner_recurse(gjs, pgjoin, 1, true))
+			return NULL;
 	}
 
+	Assert(!TupIsNull(slot_fallback));
 	if (gjs->proj_fallback)
 		return ExecProject(gjs->proj_fallback, &is_done);
 
