@@ -2114,84 +2114,9 @@ pgstrom_largest_workgroup_size(size_t *p_grid_size,
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on calculation of largest workgroup size: %s",
 			 errorText(rc));
-	elog(INFO, "grid=%u block=%u", grid_size, block_size);
 
 	*p_grid_size = (size_t) grid_size;
 	*p_block_size = (size_t) block_size;
-}
-
-void
-pgstrom_largest_workgroup_size_2d(size_t *p_grid_xsize,
-								  size_t *p_grid_ysize,
-								  size_t *p_block_xsize,
-								  size_t *p_block_ysize,
-								  CUfunction function,
-								  CUdevice device,
-								  size_t x_nitems,
-								  size_t y_nitems,
-								  size_t dynamic_shmem_per_xitems,
-								  size_t dynamic_shmem_per_yitems,
-								  size_t dynamic_shmem_per_thread)
-{
-	cl_uint		grid_xsize;
-	cl_uint		grid_ysize;
-	cl_uint		block_xsize;
-	cl_uint		block_ysize;
-	cl_int		kernel_max_blocksz;
-	cl_int		static_shmem_sz;
-	cl_int		warp_size;
-	cl_int		max_shmem_per_block;
-	CUresult	rc;
-
-    /* get max number of thread per block on this kernel function */
-    rc = cuFuncGetAttribute(&kernel_max_blocksz,
-                            CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK,
-                            function);
-    if (rc != CUDA_SUCCESS)
-        elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
-
-    /* get statically allocated shared memory */
-    rc = cuFuncGetAttribute(&static_shmem_sz,
-                            CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES,
-                            function);
-    if (rc != CUDA_SUCCESS)
-        elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
-
-    /* get device warp size */
-    rc = cuDeviceGetAttribute(&warp_size,
-                              CU_DEVICE_ATTRIBUTE_WARP_SIZE,
-                              device);
-    if (rc != CUDA_SUCCESS)
-        elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
-
-    /* get device limit of thread/block ratio */
-    rc = cuDeviceGetAttribute(&max_shmem_per_block,
-							  CU_DEVICE_ATTRIBUTE_SHARED_MEMORY_PER_BLOCK,
-                              device);
-    if (rc != CUDA_SUCCESS)
-        elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
-
-	rc = __pgstrom_largest_workgroup_size_2d(&grid_xsize,
-											 &grid_ysize,
-											 &block_xsize,
-											 &block_ysize,
-											 x_nitems,
-											 y_nitems,
-											 kernel_max_blocksz,
-											 static_shmem_sz,
-											 dynamic_shmem_per_xitems,
-											 dynamic_shmem_per_yitems,
-											 dynamic_shmem_per_thread,
-											 warp_size,
-											 max_shmem_per_block);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on calculation of largest workgroup size: %s",
-			 errorText(rc));
-
-	*p_grid_xsize = (size_t) grid_xsize;
-	*p_grid_ysize = (size_t) grid_ysize;
-	*p_block_xsize = (size_t) block_xsize;
-	*p_block_ysize = (size_t) block_ysize;
 }
 
 /*
