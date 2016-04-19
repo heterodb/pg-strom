@@ -91,10 +91,8 @@ LPATH := $(CUDA_PATH)/lib64
 # NOTE: we assume to put the following line in Makefile.custom according to
 #       the purpose of this build
 #
-#       PGSTROM_FLAGS_CUSTOM := -DPGSTROM_DEBUG=1 -g -O0
+#       PGSTROM_FLAGS_CUSTOM := -DPGSTROM_DEBUG=1 -g -O0 -Werror
 #
-PGSTROM_FLAGS := $(shell $(PG_CONFIG) --configure | \
-  awk '/'--enable-debug'/ {print "-Werror"}')
 PGSTROM_FLAGS += $(PGSTROM_FLAGS_CUSTOM)
 PGSTROM_FLAGS += -DPGSTROM_VERSION=\"$(PGSTROM_VERSION)\"
 PGSTROM_FLAGS += -DPGSTROM_VERSION_NUM=$(PGSTROM_VERSION_NUM)
