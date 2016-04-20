@@ -1233,6 +1233,9 @@ pgstrom_assign_cuda_program(GpuTaskState *gts,
 		/* enables device projection? */
 		if ((extra_flags & DEVKERNEL_NEEDS_GPUJOIN) != 0)
 			assign_gpujoin_session_info(&buf, gts);
+		/* enables device projection? */
+		if ((extra_flags & DEVKERNEL_NEEDS_GPUSORT) != 0)
+			assign_gpusort_session_info(&buf, gts);
 
 		kern_define = buf.data;
 	}

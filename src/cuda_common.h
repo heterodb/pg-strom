@@ -93,6 +93,17 @@ typedef cl_ulong	Datum;
 #define Add4(a,b,c,d)	((a) + (b) + (c) + (d))
 
 /*
+ * same as host side get_next_log2()
+ */
+static inline int
+get_next_log2(unsigned long long value)
+{
+	if (value == 0)
+		return 0;
+	return sizeof(unsigned long long) * BITS_PER_BYTE - clzll(value - 1);
+}
+
+/*
  * Alignment macros
  */
 #define TYPEALIGN(ALIGNVAL,LEN)	\
@@ -1815,11 +1826,12 @@ compute_heaptuple_size(kern_context *kcxt,
  * into tup_values / tup_isnull array. Note that pointer datum shall be
  * adjusted to the host-side address space.
  */
-STATIC_FUNCTION(void)
+STATIC_FUNCTION(size_t)
 deform_kern_heaptuple(kern_context *kcxt,
 					  kern_data_store *kds,		/* in */
 					  kern_tupitem *tupitem,	/* in */
 					  cl_uint	nfields,		/* in */
+					  cl_bool	as_host_addr,	/* in */
 					  Datum	   *tup_values,		/* out */
 					  cl_bool  *tup_isnull)		/* out */
 {
@@ -1827,6 +1839,7 @@ deform_kern_heaptuple(kern_context *kcxt,
 	cl_uint		offset = htup->t_hoff;
 	cl_uint		i, ncols = (htup->t_infomask2 & HEAP_NATTS_MASK);
 	cl_bool		tup_hasnull = ((htup->t_infomask & HEAP_HASNULL) != 0);
+	size_t		extra_len = 0;
 
 	/* sanity check */
 	assert(kds->format == KDS_FORMAT_ROW);
@@ -1877,11 +1890,17 @@ deform_kern_heaptuple(kern_context *kcxt,
 			}
 			else
 			{
-				/* store the host pointer */
-				tup_values[i] = devptr_to_host(kds, addr);
-				offset += (cmeta.attlen > 0
-						   ? cmeta.attlen
-						   : VARSIZE_ANY(addr));
+				cl_uint		attlen = (cmeta.attlen > 0
+									  ? cmeta.attlen
+									  : VARSIZE_ANY(addr));
+				/* store the device or host pointer according to the flag */
+				tup_values[i] = (as_host_addr
+								 ? devptr_to_host(kds, addr)
+								 : PointerGetDatum(addr));
+				offset += attlen;
+				/* caller may need extra area */
+				extra_len = TYPEALIGN(cmeta.attalign, extra_len);
+				extra_len += attlen;
 			}
 			tup_isnull[i] = false;
 		}
@@ -1893,6 +1912,8 @@ deform_kern_heaptuple(kern_context *kcxt,
 	 */
 	while (i < nfields)
 		tup_isnull[i++] = true;
+
+	return MAXALIGN(extra_len);
 }
 
 /*

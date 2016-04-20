@@ -144,94 +144,37 @@ deform_gpusort_info(CustomScan *cscan)
 	return gs_info;
 }
 
+struct gpusort_segment;
+
 typedef struct
 {
-	GpuTask				task;
-
-	/* class of number of chunks - GPU can sort only mc_class == 0 */
-	cl_uint				mc_class;
-
-	/*
-	 * Index of the sorted tuples
-	 */
-	dsm_segment		   *litems_dsm;
-	dsm_segment		   *ritems_dsm;
-	dsm_segment		   *oitems_dsm;
-	bool				oitems_pinned;
-
-	/* ------------------------------------- *
-	 * Fields to run GPU sorting             *
-	 * ------------------------------------- */
-	cl_int				chunk_id;		/* id of the chunk */
-	CUfunction			kern_prep;		/* gpusort_preparation */
-	CUfunction			kern_bitonic_local;	/* gpusort_bitonic_local */
-	CUfunction			kern_bitonic_step;	/* gpusort_bitonic_step */
-	CUfunction			kern_bitonic_merge;	/* gpusort_bitonic_merge */
-	CUfunction			kern_fixup;		/* gpusort_fixup_datastore */
-	CUdeviceptr			m_gpusort;
-	CUdeviceptr			m_kds;
-	CUdeviceptr			m_ktoast;
-	CUevent				ev_dma_send_start;
-	CUevent				ev_dma_send_stop;
-	CUevent				ev_dma_recv_start;
-	CUevent				ev_dma_recv_stop;
-
-	/* ------------------------------------- *
-	 * Fields to run CPU sorting             *
-	 * ------------------------------------- */
-	BackgroundWorkerHandle *bgw_handle;
-	/* connection info */
-	PGPROC			   *backend_proc;
-	char			   *database_name;
-	/* data chunks to be referenced (BGW context only) */
-	Bitmapset		   *chunk_id_map;
-	bool				varlena_keys;
-	cl_uint				num_chunks;
-	kern_data_store	  **kern_toasts;
-	kern_data_store	  **kern_chunks;
-	/* definition of relation and sorting keys (BGW context only) */
-	TupleDesc			tupdesc;
-	int					numCols;
-	AttrNumber		   *sortColIdx;
-	Oid				   *sortOperators;
-	Oid				   *collations;
-	bool			   *nullsFirst;
+	GpuTask			task;
+	pgstrom_data_store *pds_in;			/* source of data chunk */
+	struct gpusort_segment *segment;	/* sorting segment */
+	cl_bool			is_terminator;	/* true, if terminator proces */
+	CUfunction		kern_load;		/* gpusort_data_load */
+	CUdeviceptr		m_gpusort;
+	CUevent			ev_dma_send_start;
+	CUevent			ev_dma_send_stop;
+	CUevent			ev_dma_recv_start;
+	CUevent			ev_dma_recv_stop;
 } pgstrom_gpusort;
 
 typedef struct
 {
-	Size			dsm_length;		/* total length of this structure */
-	Size			kresults_ofs;	/* offset from data[] */
-	/* connection information */	
-	PGPROC		   *backend_proc;	/* PGPROC of the coordinator backend */
-	Size			database_name;	/* offset from data[] */
-	/* IPC stuff */
-	volatile bool	bgw_done;	/* flag to inform BGW gets completed */
-	struct timeval	tv_bgw_launch;
-	struct timeval	tv_sort_start;
-	struct timeval	tv_sort_end;
-	dsm_handle		litems_dsmhnd;
-	dsm_handle		ritems_dsmhnd;
-	/* chunks to be sorted  */
-	cl_uint			varlena_keys;
-	cl_uint			num_chunks;
-	Size			kern_chunks;	/* offset from data[] */
-	/* definition of relation and sorting keys */
-	Size			tupdesc;		/* offset from data[] */
-	int				numCols;
-	Size			sortColIdx;		/* offset from data[] */
-	Size			sortOperators;	/* offset from data[] */
-	Size			collations;		/* offset from data[] */
-	Size			nullsFirst;		/* offset from data[] */
-	char			data[FLEXIBLE_ARRAY_MEMBER];
-} pgstrom_flat_gpusort;
+	GpuTaskState   *gts;	/* reference to GpuSortState */
+	CUfunction		kern_main;		/* gpusort_main */
+	CUdeviceptr		m_kds_slot;		/* kds_slot */
+	CUdeviceptr		m_kresults;		/* kresults */
+	CUevent			ev_segment_loaded;	/* event to sync gpusort_segment */
+	CUevent		   *ev_kern_exec_end;	/* event to sync gpusort_data_load */
 
-#define GPUSORT_GET_KRESULTS(dsmseg)									\
-	((kern_resultbuf *)													\
-	 (((pgstrom_flat_gpusort *)dsm_segment_address(dsmseg))->data +		\
-	  ((pgstrom_flat_gpusort *)dsm_segment_address(dsmseg))->kresults_ofs))
+	cl_bool			has_terminator;
+	pgstrom_data_store *pds_slot;
+	kern_resultbuf	kresults;
+} gpusort_segment;
 
-#define MAX_MERGECHUNKS_CLASS		10		/* 1024 chunks are enough large */
+
 
 typedef struct
 {
@@ -255,17 +198,6 @@ typedef struct
 	bool		   *nullsFirst;		/* NULLS FIRST/LAST directions */
 	bool			varlena_keys;	/* True, if varlena sorting key exists */
 	SortSupportData *ssup_keys;		/* XXX - used by fallback function */
-
-	/* running status */
-	char		   *database_name;	/* name of the current database */
-	/* chunks already sorted but no pair yet */
-	pgstrom_gpusort	*sorted_chunks[MAX_MERGECHUNKS_CLASS];
-	bool			sort_done;		/* if true, now ready to fetch records */
-	cl_int			cpusort_seqno;	/* seqno of cpusort to launch */
-
-	/* random access capability */
-	bool			randomAccess;
-	cl_long			markpos_index;
 
 	/* final result */
 	HeapTupleData	tuple_buf;		/* temp buffer during scan */
@@ -332,6 +264,7 @@ gpusort_devmem_requirement(Size kparams_len, cl_int nattrs, Size nitems,
  */
 #define LOG2(x)		(log(x) / 0.693147180559945)
 
+// XXX - to be fixed to revise cost model
 static void
 cost_gpusort(PlannedStmt *pstmt, Sort *sort,
 			 Cost *p_startup_cost, Cost *p_total_cost,
@@ -369,6 +302,43 @@ cost_gpusort(PlannedStmt *pstmt, Sort *sort,
 	}
 	/* Fixed cost to setup/launch GPU kernel */
 	startup_cost += pgstrom_gpu_setup_cost;
+
+	/*
+	 * Estimate number of segments and its length
+	 */
+	ncols = list_length(outer_plan->targetlist);
+	extra_len = 0;
+	foreach (lc, outer_plan->targetlist)
+	{
+		TargetEntry	   *tle = lfirst(lc);
+		Oid				type_oid = exprType((Node *) tle->expr);
+		int32			type_mod = exprTypmod((Node *) tle->expr);
+
+		if (get_typbyval(type_oid))
+		{
+			width -= get_typlen(type_oid);
+			continue;
+		}
+		// how to expect extra len?
+		
+		
+		
+		
+		
+		
+	}
+
+
+
+
+
+
+
+
+
+
+
+
 
 	/*
 	 * Estimate number of chunks and nrows per chunk
@@ -448,161 +418,37 @@ cost_gpusort(PlannedStmt *pstmt, Sort *sort,
 	*p_chunk_size = chunk_size;
 }
 
-/*
- * make a projection function
- */
-static void
-gpusort_projection_addcase(StringInfo body,
-						   AttrNumber resno,
-						   Oid type_oid,
-						   int type_len,
-						   bool type_byval,
-						   bool is_sortkey)
-{
-	if (body->len == 0)
-		appendStringInfo(body, "  void *datum;\n");
-
-	if (type_byval)
-	{
-		const char *type_cast;
-
-		Assert(type_len > 0);
-
-		if (type_len == sizeof(cl_uchar))
-			type_cast = "cl_uchar";
-		else if (type_len == sizeof(cl_ushort))
-			type_cast = "cl_ushort";
-		else if (type_len == sizeof(cl_uint))
-			type_cast = "cl_uint";
-		else if (type_len == sizeof(cl_ulong))
-			type_cast = "cl_ulong";
-		else
-			elog(ERROR, "unexpected length of data type");
-
-		appendStringInfo(
-			body,
-			"\n"
-			"  /* %s %d projection */\n"
-			"  datum = kern_get_datum_tuple(ktoast->colmeta,htup,%d);\n"
-			"  if (!datum)\n"
-			"    ts_isnull[%d] = true;\n"
-			"  else\n"
-			"  {\n"
-			"    ts_isnull[%d] = false;\n"
-			"    ts_values[%d] = *((%s *) datum);\n"
-			"  }\n",
-			is_sortkey ? "sortkey" : "attribute",
-			resno,
-			resno - 1,
-			resno - 1,
-			resno - 1,
-			resno - 1,
-			type_cast);
-	}
-	else if (type_oid == NUMERICOID && is_sortkey)
-	{
-		/*
-		 * NUMERIC data type has internal data format. So, it needs to
-		 * be transformed GPU accessable representation.
-		 */
-		appendStringInfo(
-			body,
-			"\n"
-			"  /* sortkey %d projection */\n"
-			"  datum = kern_get_datum_tuple(ktoast->colmeta,htup,%d);\n"
-			"  if (!datum)\n"
-			"    ts_isnull[%d] = true;\n"
-			"  else\n"
-			"  {\n"
-			"    pg_numeric_t temp =\n"
-			"      pg_numeric_from_varlena(kcxt, (varlena *) datum);\n"
-			"    ts_isnull[%d] = temp.isnull;\n"
-			"    ts_values[%d] = temp.value;\n"
-			"  }\n",
-			resno,
-			resno - 1,
-			resno - 1,
-			resno - 1,
-			resno - 1);
-	}
-	else
-	{
-		/*
-		 * Elsewhere, variables are device accessible pointer; either
-		 * of varlena datum or fixed-length variables with !type_byval.
-		 */
-		appendStringInfo(
-			body,
-			"\n"
-			"  /* attribute %d projection */\n"
-			"  datum = kern_get_datum_tuple(ktoast->colmeta,htup,%d);\n"
-			"  if (!datum)\n"
-			"    ts_isnull[%d] = true;\n"
-			"  else\n"
-			"  {\n"
-			"    ts_isnull[%d] = false;\n"
-			"    ts_values[%d] = PointerGetDatum(datum);\n"
-			"  }\n",
-			resno,
-			resno - 1,
-			resno - 1,
-			resno - 1,
-			resno - 1);
-	}
-}
-
-static void
-gpusort_fixupvar_addcase(StringInfo body,
-						 AttrNumber resno,
-						 Oid type_oid,
-						 int type_len,
-						 bool type_byval,
-						 bool is_sortkey)
-{
-	if (type_byval)
-		return;
-
-	if (body->len == 0)
-		appendStringInfo(body, "  void *datum;\n");
-
-   	appendStringInfo(
-		body,
-		"\n"
-		"  /* varlena %s %d fixup */\n"
-		"  datum = kern_get_datum_tuple(ktoast->colmeta,htup,%d);\n"
-		"  if (!datum)\n"
-		"    ts_isnull[%d] = true;\n"
-		"  else\n"
-		"  {\n"
-		"    ts_isnull[%d] = false;\n"
-		"    ts_values[%d] = (Datum)((hostptr_t)datum -\n"
-		"                            (hostptr_t)&ktoast->hostptr +\n"
-		"                            ktoast->hostptr);\n"
-		"  }\n",
-		is_sortkey ? "sortkey" : "attribute",
-		resno,
-		resno - 1,
-		resno - 1,
-		resno - 1,
-		resno - 1);
-}
-
 static char *
 pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 {
-	StringInfoData	pj_body;
-	StringInfoData	fv_body;
-	StringInfoData	kc_decl;
-	StringInfoData	kc_body;
-	StringInfoData	result;
-	ListCell	   *cell;
-	int				i;
+	StringInfoData	kern;
+	StringInfoData	body;
+	ListCell	   *lc;
 
-	initStringInfo(&pj_body);
-	initStringInfo(&fv_body);
-	initStringInfo(&kc_decl);
-	initStringInfo(&kc_body);
-	initStringInfo(&result);
+	initStringInfo(&kern);
+	initStringInfo(&decl);
+
+	/*
+	 * STATIC_FUNCTION(cl_int)
+	 * gpusort_keycomp(kern_context *kcxt,
+	 *                 kern_data_store *kds_slot,
+	 *                 size_t x_index,
+	 *                 size_t y_index);
+	 */
+	appendStringInfo(
+		&body,
+		"STATIC_FUNCTION(cl_int)\n"
+		"gpusort_keycomp(kern_context *kcxt,\n"
+		"                kern_data_store *kds_slot,\n"
+		"                size_t x_index,\n"
+		"                size_t y_index)\n"
+		"{\n");
+	codegen_tempvar_declaration(&body, "KVAR_X");
+	codegen_tempvar_declaration(&body, "KVAR_Y");
+	appendStringInfo(
+		&body,
+		"  pg_int4_t comp;\n"
+		"\n");
 
 	for (i=0; i < sort->numCols; i++)
 	{
@@ -651,126 +497,45 @@ pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 		if (!dfunc)
 			elog(ERROR, "device function %u lookup failed", sort_func);
 
-		/*
-		 * reference to X-variable / Y-variable
-		 *
-		 * Because KDS has tuple-slot format, colidx should be index
-		 * from the sortkyes array, not resno on host-side.
-		 */
+		/* Logic to compare */
 		appendStringInfo(
-			&kc_decl,
-			"  pg_%s_t KVAR_X%d;\n"
-			"  pg_%s_t KVAR_Y%d;\n",
-			dtype->type_name, i+1,
-			dtype->type_name, i+1);
-
-		/* logic to compare */
-		appendStringInfo(
-			&kc_body,
+			&body,
 			"  /* sort key comparison on the resource %d */\n"
-			"  KVAR_X%d = pg_%s_vref(kds,kcxt,%d,x_index);\n"
-			"  KVAR_Y%d = pg_%s_vref(kds,kcxt,%d,y_index);\n"
-			"  if (!KVAR_X%d.isnull && !KVAR_Y%d.isnull)\n"
+			"  KVAR_X.%s = pg_%s_vref(kds,kcxt,%d,x_index);\n"
+			"  KVAR_Y.%s = pg_%s_vref(kds,kcxt,%d,x_index);\n"
+			"  if (!KVAR_X.%s.isnull && !KVAR_Y.%s.isnull)\n"
 			"  {\n"
-			"    comp = pgfn_%s(kcxt, KVAR_X%d, KVAR_Y%d);\n"
+			"    comp = pgfn_%s(kcxt, KVAR_X.%s, KVAR_Y.%s);\n"
 			"    if (comp.value != 0)\n"
 			"      return %s;\n"
 			"  }\n"
-			"  else if (KVAR_X%d.isnull && !KVAR_Y%d.isnull)\n"
+			"  else if (KVAR_X.%s.isnull && !KVAR_Y.%s.isnull)\n"
 			"    return %d;\n"
-			"  else if (!KVAR_X%d.isnull && KVAR_Y%d.isnull)\n"
-			"    return %d;\n",
-			colidx,
-			i+1, dtype->type_name, colidx-1,
-			i+1, dtype->type_name, colidx-1,
-			i+1, i+1,
-			dfunc->func_devname, i+1, i+1,
+			"  else if (!KVAR_X.%s.isnull && KVAR_Y.%s.isnull)\n"
+			"    return %d;\n"
+			"\n",
+			dtype->type_name, dtype->type_name, colidx-1,
+			dtype->type_name, dtype->type_name, colidx-1,
+			dtype->type_name, dtype->type_name,
+			dfunc->func_devname, dtype->type_name, dtype->type_name,
 			is_reverse ? "-comp.value" : "comp.value",
-			i+1, i+1, null_first ? -1 : 1,
-			i+1, i+1, null_first ? 1 : -1);
+			dtype->type_name, dtype->type_name,
+			null_first ? -1 : 1,
+			dtype->type_name, dtype->type_name,
+			null_first ? -1 : 1);
 	}
+	/* functions declarations, if any */
+	pgstrom_codegen_func_declarations(&kern, context);
+	/* special expression declarations, if any */
+	pgstrom_codegen_expr_declarations(&kern, context);
 
-	/*
-	 * Make projection / fixup-variable code
-	 */
-	foreach (cell, sort->plan.targetlist)
-	{
-		TargetEntry	   *tle = lfirst(cell);
-		Oid				type_oid = exprType((Node *) tle->expr);
-		int				type_len = get_typlen(type_oid);
-		bool			type_byval = get_typbyval(type_oid);
-		bool			is_sortkey = false;
+	if (kern.len > 0)
+		appendStringInfo(&kern, "\n");
+	appendStringInfoString(&kern, body.data);
 
-		for (i=0; i < sort->numCols; i++)
-		{
-			if (tle->resno == sort->sortColIdx[i])
-			{
-				is_sortkey = true;
-				break;
-			}
-		}
-		gpusort_projection_addcase(&pj_body, tle->resno, type_oid,
-								   type_len, type_byval, is_sortkey);
-		gpusort_fixupvar_addcase(&fv_body, tle->resno, type_oid,
-								 type_len, type_byval, is_sortkey);
-	}
+	pfree(decl.data);
 
-	/* functions declarations */
-	pgstrom_codegen_func_declarations(&result, context);
-	/* special expression declarations */
-	pgstrom_codegen_expr_declarations(&result, context);
-
-	/* make a projection function */
-	appendStringInfo(
-		&result,
-		"STATIC_FUNCTION(void)\n"
-		"gpusort_projection(kern_context *kcxt,\n"
-		"                   Datum *ts_values,\n"
-		"                   cl_char *ts_isnull,\n"
-		"                   kern_data_store *ktoast,\n"
-		"                   HeapTupleHeaderData *htup)\n"
-		"{\n"
-		"%s"
-		"}\n\n",
-		pj_body.data);
-	/* make a fixup-var function */
-	appendStringInfo(
-        &result,
-		"STATIC_FUNCTION(void)\n"
-		"gpusort_fixup_variables(kern_context *kcxt,\n"
-		"                        Datum *ts_values,\n"
-		"                        cl_char *ts_isnull,\n"
-		"                        kern_data_store *ktoast,\n"
-		"                        HeapTupleHeaderData *htup)\n"
-		"{\n"
-		"%s"
-		"}\n\n",
-		fv_body.data);
-
-	/* make a comparison function */
-	appendStringInfo(
-		&result,
-		"STATIC_FUNCTION(cl_int)\n"
-		"gpusort_keycomp(kern_context *kcxt,\n"
-		"                kern_data_store *kds,\n"
-		"                kern_data_store *ktoast,\n"
-		"                size_t x_index,\n"
-		"                size_t y_index)\n"
-		"{\n"
-		"%s"		/* variables declaration */
-		"  pg_int4_t comp;\n"
-		"\n"
-		"%s"		/* comparison body */
-		"  return 0;\n"
-		"}\n",
-		kc_decl.data,
-		kc_body.data);
-
-	pfree(pj_body.data);
-	pfree(kc_decl.data);
-	pfree(kc_body.data);
-
-	return result.data;
+	return kern.data;
 }
 
 void
@@ -907,7 +672,7 @@ pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan)
 	gs_info.sortOperators = sort->sortOperators;
 	gs_info.collations = sort->collations;
 	gs_info.nullsFirst = sort->nullsFirst;
-	gs_info.varlena_keys = varlena_keys;
+	gs_info.varlena_keys = varlena_keys;	// still used?
 	form_gpusort_info(cscan, &gs_info);
 
 	*p_plan = &cscan->scan.plan;
@@ -953,7 +718,7 @@ gpusort_begin(CustomScanState *node, EState *estate, int eflags)
 	gss->gts.cb_task_process = gpusort_task_process;
 	gss->gts.cb_task_complete = gpusort_task_complete;
 	gss->gts.cb_task_release = gpusort_task_release;
-	gss->gts.cb_task_polling = gpusort_task_polling;
+//	gss->gts.cb_task_polling = gpusort_task_polling;
 	gss->gts.cb_next_chunk = gpusort_next_chunk;
 	gss->gts.cb_next_tuple = gpusort_next_tuple;
 	/* re-initialization of scan-descriptor and projection-info */
@@ -1009,12 +774,7 @@ gpusort_begin(CustomScanState *node, EState *estate, int eflags)
 	gss->varlena_keys = gs_info->varlena_keys;
 	gss->ssup_keys = NULL;	/* to be initialized on demand */
 
-	/* running status */
-	gss->database_name = get_database_name(MyDatabaseId);
-	memset(gss->sorted_chunks, 0, sizeof(gss->sorted_chunks));
-	gss->sort_done = false;
-	gss->cpusort_seqno = 0;
-	gss->overflow_slot = NULL;
+
 	/* init perfmon */
 	pgstrom_init_perfmon(&gss->gts);
 }
