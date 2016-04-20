@@ -2149,7 +2149,7 @@ codegen_tempvar_declaration(StringInfo buf, const char *varname)
 	appendStringInfo(
 		buf,
 		"  union {\n"
-		"    pg_varlena_t     varlena_t;\n"
+		"    pg_varlena_t     varlena_v;\n"
 		"    pg_bool_t        bool_v;\n"
 		"    pg_int2_t        int2_v;\n"
 		"    pg_int4_t        int4_v;\n"
@@ -2171,7 +2171,7 @@ codegen_tempvar_declaration(StringInfo buf, const char *varname)
 		"#ifdef CUDA_TEXTLIB_H\n"
 		"    pg_bpchar_t      bpchar_v;\n"
 		"    pg_text_t        text_v;\n"
-		"    pg_varchar_t     varchar_t;\n"
+		"    pg_varchar_t     varchar_v;\n"
 		"#endif\n"
 		"  } %s	__attribute__ ((unused));\n",
 		varname);
