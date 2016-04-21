@@ -927,5 +927,4 @@ milliseconds_unitary_format(double milliseconds)
 	return format_millisec(milliseconds);
 }
 
-
 #endif	/* PG_STROM_H */

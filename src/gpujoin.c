@@ -2655,6 +2655,7 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 	TupleDesc		junk_tupdesc;
 	List		   *tlist_fallback = NIL;
 	bool			fallback_needs_projection = false;
+	bool			fallback_meets_resjunk = false;
 	ListCell	   *lc1;
 	ListCell	   *lc2;
 	cl_int			i, j, nattrs;
@@ -2751,21 +2752,40 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 		 * care about varno/varattno fixup here.
 		 */
 		Assert(IsA(tle, TargetEntry));
-		if (IsA(tle->expr, Var))
+
+		/*
+		 * Because ss_ScanTupleSlot does not contain junk attribute,
+		 * we have to remove junk attribute by projection, if any of
+		 * target-entry in custom_scan_tlist (that is tuple format to
+		 * be constructed by CPU fallback) are junk.
+		 */
+		if (tle->resjunk)
 		{
-			tle = copyObject(tle);
-			var = (Var *) tle->expr;
-			var->varnoold	= var->varno;
-			var->varoattno	= var->varattno;
-			var->varno		= INDEX_VAR;
-			var->varattno	= tle->resno;
+			fallback_needs_projection = true;
+			fallback_meets_resjunk = true;
 		}
 		else
 		{
-			fallback_needs_projection = true;
+			/* no valid attribute after junk attribute */
+			Assert(!fallback_meets_resjunk);
+
+			if (IsA(tle->expr, Var))
+			{
+				tle = copyObject(tle);
+				var = (Var *) tle->expr;
+				var->varnoold	= var->varno;
+				var->varoattno	= var->varattno;
+				var->varno		= INDEX_VAR;
+				var->varattno	= tle->resno;
+			}
+			else
+			{
+				/* also, non-simple Var node needs projection */
+				fallback_needs_projection = true;
+			}
+			tlist_fallback = lappend(tlist_fallback,
+									 ExecInitExpr((Expr *) tle, &ss->ps));
 		}
-		tlist_fallback = lappend(tlist_fallback,
-								 ExecInitExpr((Expr *) tle, &ss->ps));
 	}
 
 	if (fallback_needs_projection)
@@ -2778,19 +2798,9 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 	}
 	else
 	{
-		gjs->slot_fallback = NULL;
+		gjs->slot_fallback = ss->ss_ScanTupleSlot;
 		gjs->proj_fallback = NULL;
 	}
-
-#if 0
-	gjs->slot_fallback = MakeSingleTupleTableSlot(junk_tupdesc);
-	gjs->proj_fallback = (fallback_needs_projection
-						  ? ExecBuildProjectionInfo(tlist_fallback,
-													ss->ps.ps_ExprContext,
-													ss->ss_ScanTupleSlot,
-													junk_tupdesc)
-						  : NULL);
-#endif
 
 	gjs->outer_src_anum_min = nattrs;
 	gjs->outer_src_anum_max = FirstLowInvalidHeapAttributeNumber;
@@ -4570,16 +4580,13 @@ gpujoin_switch_task(GpuTaskState *gts, GpuTask *gtask)
 	/* rewind the CPU fallback position */
 	if (pgjoin->task.cpu_fallback)
 	{
-		TupleTableSlot *slot_fallback = (gjs->proj_fallback
-										 ? gjs->slot_fallback
-										 : gjs->gts.css.ss.ss_ScanTupleSlot);
 		gjs->fallback_outer_index = -1;
 		for (i=0; i < gjs->num_rels; i++)
 		{
 			gjs->inners[i].fallback_inner_index = -1;
 			gjs->inners[i].fallback_right_outer = false;
 		}
-		ExecStoreAllNullTuple(slot_fallback);
+		ExecStoreAllNullTuple(gjs->slot_fallback);
 	}
 	else
 	{
@@ -4604,7 +4611,16 @@ gpujoin_next_tuple(GpuTaskState *gts)
 
 	PERFMON_BEGIN(&gjs->gts.pfm, &tv1);
 	if (pgjoin->task.cpu_fallback)
+	{
+		/*
+		 * MEMO: We may reuse tts_values[]/tts_isnull[] of the previous
+		 * tuple, to avoid same part of tuple extraction. For example,
+		 * portion by depth < 2 will not be changed during iteration in
+		 * depth == 3. You may need to pay attention on the core changes
+		 * in the future version.
+		 */
 		slot = gpujoin_next_tuple_fallback(gjs, pgjoin);
+	}
 	else if (gjs->gts.curr_index < kds_dst->nitems)
 	{
 		int		index = gjs->gts.curr_index++;
@@ -4615,15 +4631,22 @@ gpujoin_next_tuple(GpuTaskState *gts)
 								 pds_dst,
 								 index,
 								 &gjs->curr_tuple);
-		/*
-		 * NOTE: host-only qualifiers are checked during ExecScan(),
-		 * so we don't check it here by itself.
-		 */
-		(void) ExecMaterializeSlot(slot);
 	}
 	else
+	{
 		slot = NULL;	/* try next chunk */
+	}
 
+#if 0
+	/*
+	 * MEMO: If GpuJoin generates a corrupted tuple, it may lead crash on
+	 * the upper level of plan node. Even if we got a crash dump, it is not
+	 * easy to analyze corrupted tuple later. ExecMaterializeSlot() can
+	 * cause crash in proper level, and it will assist bug fixes.
+	 */
+	if (slot != NULL)
+		(void) ExecMaterializeSlot(slot);
+#endif
 	PERFMON_END(&gjs->gts.pfm, time_materialize, &tv1, &tv2);
 	return slot;
 }
@@ -4645,12 +4668,16 @@ gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
 {
 	HeapTupleHeader	htup;
 	bool		hasnulls;
+	TupleDesc	fallback_tupdesc = slot_fallback->tts_tupleDescriptor;
 	Datum	   *tts_values = slot_fallback->tts_values;
 	bool	   *tts_isnull = slot_fallback->tts_isnull;
 	char	   *tp;
 	long		off;
 	int			i, nattrs;
 	AttrNumber	resnum;
+
+	Assert(src_anum_min > FirstLowInvalidHeapAttributeNumber);
+	Assert(src_anum_max <= tupdesc->natts);
 
 	/*
 	 * Fill up the destination by NULL, if no tuple was supplied.
@@ -4662,6 +4689,7 @@ gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
 			resnum = tuple_dst_resno[i-FirstLowInvalidHeapAttributeNumber-1];
 			if (resnum)
 			{
+				Assert(resnum > 0 && resnum <= fallback_tupdesc->natts);
 				tts_values[resnum - 1] = (Datum) 0;
 				tts_isnull[resnum - 1] = true;
 			}
@@ -4682,6 +4710,7 @@ gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
 								 FirstLowInvalidHeapAttributeNumber - 1];
 		if (resnum)
 		{
+			Assert(resnum > 0 && resnum <= fallback_tupdesc->natts);
 			tts_values[resnum - 1] = PointerGetDatum(&tupitem->t_self);
 			tts_isnull[resnum - 1] = false;
 		}
@@ -4691,6 +4720,7 @@ gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
 								 FirstLowInvalidHeapAttributeNumber - 1];
 		if (resnum)
 		{
+			Assert(resnum > 0 && resnum <= fallback_tupdesc->natts);
 			tts_values[resnum - 1]
 				= CommandIdGetDatum(HeapTupleHeaderGetRawCommandId(htup));
 			tts_isnull[resnum - 1] = false;
@@ -4701,6 +4731,7 @@ gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
 								 FirstLowInvalidHeapAttributeNumber - 1];
 		if (resnum)
 		{
+			Assert(resnum > 0 && resnum <= fallback_tupdesc->natts);
 			tts_values[resnum - 1]
 				= TransactionIdGetDatum(HeapTupleHeaderGetRawXmax(htup));
 			tts_isnull[resnum - 1] = false;
@@ -4711,6 +4742,7 @@ gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
 								 FirstLowInvalidHeapAttributeNumber - 1];
 		if (resnum)
 		{
+			Assert(resnum > 0 && resnum <= fallback_tupdesc->natts);
 			tts_values[resnum - 1]
 				= CommandIdGetDatum(HeapTupleHeaderGetRawCommandId(htup));
 			tts_isnull[resnum - 1] = false;
@@ -4721,6 +4753,7 @@ gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
 								 FirstLowInvalidHeapAttributeNumber - 1];
 		if (resnum)
 		{
+			Assert(resnum > 0 && resnum <= fallback_tupdesc->natts);
 			tts_values[resnum - 1]
 				= TransactionIdGetDatum(HeapTupleHeaderGetRawXmin(htup));
 			tts_isnull[resnum - 1] = false;
@@ -4731,6 +4764,7 @@ gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
 								 FirstLowInvalidHeapAttributeNumber - 1];
 		if (resnum)
 		{
+			Assert(resnum > 0 && resnum <= fallback_tupdesc->natts);
 			tts_values[resnum - 1]
 				= ObjectIdGetDatum(HeapTupleHeaderGetOid(htup));
 			tts_isnull[resnum - 1] = false;
@@ -4741,6 +4775,7 @@ gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
 								 FirstLowInvalidHeapAttributeNumber - 1];
 		if (resnum)
 		{
+			Assert(resnum > 0 && resnum <= fallback_tupdesc->natts);
 			tts_values[resnum - 1] = ObjectIdGetDatum(table_oid);
 			tts_isnull[resnum - 1] = false;
 		}
@@ -4760,11 +4795,11 @@ gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
 		Form_pg_attribute	attr = tupdesc->attrs[i];
 
 		resnum = tuple_dst_resno[i - FirstLowInvalidHeapAttributeNumber];
-
 		if (hasnulls && att_isnull(i, htup->t_bits))
 		{
 			if (resnum > 0)
 			{
+				Assert(resnum <= fallback_tupdesc->natts);
 				tts_values[resnum - 1] = (Datum) 0;
 				tts_isnull[resnum - 1] = true;
 			}
@@ -4773,7 +4808,10 @@ gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
 
 		/* elsewhere field is not null */
 		if (resnum > 0)
+		{
+			Assert(resnum <= fallback_tupdesc->natts);
 			tts_isnull[resnum - 1] = false;
+		}
 
 		if (attr->attlen == -1)
 			off = att_align_pointer(off, attr->attalign, -1, tp + off);
@@ -4781,8 +4819,10 @@ gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
 			off = att_align_nominal(off, attr->attalign);
 
 		if (resnum > 0)
+		{
+			Assert(resnum <= fallback_tupdesc->natts);
 			tts_values[resnum - 1] = fetchatt(attr, tp + off);
-
+		}
 		off = att_addlength_pointer(off, attr->attlen, tp + off);
 	}
 
@@ -4790,11 +4830,12 @@ gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
      * If tuple doesn't have all the atts indicated by src_anum_max,
 	 * read the rest as null
 	 */
-	for (; i <= src_anum_max; i++)
+	for (; i < src_anum_max; i++)
 	{
 		resnum = tuple_dst_resno[i - FirstLowInvalidHeapAttributeNumber];
 		if (resnum > 0)
 		{
+			Assert(resnum <= fallback_tupdesc->natts);
 			tts_values[resnum - 1] = (Datum) 0;
 			tts_isnull[resnum - 1] = true;
 		}
@@ -5070,7 +5111,6 @@ static TupleTableSlot *
 gpujoin_next_tuple_fallback(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 {
 	ExprContext		   *econtext = gjs->gts.css.ss.ps.ps_ExprContext;
-	TupleTableSlot	   *slot_fallback;
 	TupleDesc			tupdesc;
 	ExprDoneCond		is_done;
 
@@ -5091,12 +5131,9 @@ gpujoin_next_tuple_fallback(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 	 * 'tts_nvalid' by ExecStoreVirtualTuple(); which does not touch values
 	 * of tts_values/tts_isnull.
 	 */
-	slot_fallback = (gjs->proj_fallback
-					 ? gjs->slot_fallback
-					 : gjs->gts.css.ss.ss_ScanTupleSlot);
-	Assert(slot_fallback != NULL);
-	ExecClearTuple(slot_fallback);
-	ExecStoreVirtualTuple(slot_fallback);
+	Assert(gjs->slot_fallback != NULL);
+	ExecClearTuple(gjs->slot_fallback);
+	ExecStoreVirtualTuple(gjs->slot_fallback);
 
 	if (pgjoin->pds_src)
 	{
@@ -5108,7 +5145,7 @@ gpujoin_next_tuple_fallback(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 		reload_outer_next = (gjs->fallback_outer_index < 0);
 		for (;;)
 		{
-			econtext->ecxt_scantuple = slot_fallback;
+			econtext->ecxt_scantuple = gjs->slot_fallback;
 			ResetExprContext(econtext);
 
 			if (reload_outer_next)
@@ -5137,7 +5174,8 @@ gpujoin_next_tuple_fallback(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 
 				/* Fills up fields of the fallback_slot with outer columns */
 				tupitem = KERN_DATA_STORE_TUPITEM(kds_src, kds_index);
-				gpujoin_fallback_tuple_extract(slot_fallback, tupdesc,
+				gpujoin_fallback_tuple_extract(gjs->slot_fallback,
+											   tupdesc,
 											   kds_src->table_oid,
 											   tupitem,
 											   gjs->outer_dst_resno,
@@ -5155,7 +5193,7 @@ gpujoin_next_tuple_fallback(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 			}
 
 			/* walk down to the deeper depth */
-			if (!gpujoin_fallback_inner_recurse(gjs, slot_fallback,
+			if (!gpujoin_fallback_inner_recurse(gjs, gjs->slot_fallback,
 												pgjoin, 1, false))
 			{
 				reload_outer_next = true;
@@ -5173,7 +5211,8 @@ gpujoin_next_tuple_fallback(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 		 */
 		if (gjs->fallback_outer_index < 0)
 		{
-			gpujoin_fallback_tuple_extract(slot_fallback, tupdesc,
+			gpujoin_fallback_tuple_extract(gjs->slot_fallback,
+										   tupdesc,
 										   InvalidOid,
 										   NULL,
 										   gjs->outer_dst_resno,
@@ -5184,16 +5223,16 @@ gpujoin_next_tuple_fallback(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 			/* gpujoin_switch_task() should rewind them already */
 		}
 		/* walk down into the deeper depth */
-		if (!gpujoin_fallback_inner_recurse(gjs, slot_fallback,
+		if (!gpujoin_fallback_inner_recurse(gjs, gjs->slot_fallback,
 											pgjoin, 1, true))
 			return NULL;
 	}
 
-	Assert(!TupIsNull(slot_fallback));
+	Assert(!TupIsNull(gjs->slot_fallback));
 	if (gjs->proj_fallback)
 		return ExecProject(gjs->proj_fallback, &is_done);
 
-	return slot_fallback;	/* no projection is needed? */
+	return gjs->slot_fallback;	/* no projection is needed? */
 }
 
 /* ----------------------------------------------------------------
