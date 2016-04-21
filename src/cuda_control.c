@@ -1751,7 +1751,7 @@ pgstrom_fetch_gputask(GpuTaskState *gts)
 	gts->num_ready_tasks--;
 	dnode = dlist_pop_head_node(&gts->ready_tasks);
 	gtask = dlist_container(GpuTask, chain, dnode);
-    memset(&gtask->chain, 0, sizeof(dlist_node));
+	memset(&gtask->chain, 0, sizeof(dlist_node));
 	SpinLockRelease(&gts->lock);
 
 	/*
