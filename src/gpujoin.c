@@ -2767,6 +2767,9 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 		else
 		{
 			/* no valid attribute after junk attribute */
+			if (fallback_meets_resjunk)
+				elog(ERROR, "Bug? a valid attribute appear after junk ones");
+
 			Assert(!fallback_meets_resjunk);
 
 			if (IsA(tle->expr, Var))
@@ -4668,7 +4671,7 @@ gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
 {
 	HeapTupleHeader	htup;
 	bool		hasnulls;
-	TupleDesc	fallback_tupdesc = slot_fallback->tts_tupleDescriptor;
+	AttrNumber	fallback_nattrs __attribute__ ((unused));
 	Datum	   *tts_values = slot_fallback->tts_values;
 	bool	   *tts_isnull = slot_fallback->tts_isnull;
 	char	   *tp;
@@ -4678,6 +4681,7 @@ gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
 
 	Assert(src_anum_min > FirstLowInvalidHeapAttributeNumber);
 	Assert(src_anum_max <= tupdesc->natts);
+	fallback_nattrs = slot_fallback->tts_tupleDescriptor->natts;
 
 	/*
 	 * Fill up the destination by NULL, if no tuple was supplied.
@@ -4689,7 +4693,7 @@ gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
 			resnum = tuple_dst_resno[i-FirstLowInvalidHeapAttributeNumber-1];
 			if (resnum)
 			{
-				Assert(resnum > 0 && resnum <= fallback_tupdesc->natts);
+				Assert(resnum > 0 && resnum <= fallback_nattrs);
 				tts_values[resnum - 1] = (Datum) 0;
 				tts_isnull[resnum - 1] = true;
 			}
@@ -4710,7 +4714,7 @@ gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
 								 FirstLowInvalidHeapAttributeNumber - 1];
 		if (resnum)
 		{
-			Assert(resnum > 0 && resnum <= fallback_tupdesc->natts);
+			Assert(resnum > 0 && resnum <= fallback_nattrs);
 			tts_values[resnum - 1] = PointerGetDatum(&tupitem->t_self);
 			tts_isnull[resnum - 1] = false;
 		}
@@ -4720,7 +4724,7 @@ gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
 								 FirstLowInvalidHeapAttributeNumber - 1];
 		if (resnum)
 		{
-			Assert(resnum > 0 && resnum <= fallback_tupdesc->natts);
+			Assert(resnum > 0 && resnum <= fallback_nattrs);
 			tts_values[resnum - 1]
 				= CommandIdGetDatum(HeapTupleHeaderGetRawCommandId(htup));
 			tts_isnull[resnum - 1] = false;
@@ -4731,7 +4735,7 @@ gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
 								 FirstLowInvalidHeapAttributeNumber - 1];
 		if (resnum)
 		{
-			Assert(resnum > 0 && resnum <= fallback_tupdesc->natts);
+			Assert(resnum > 0 && resnum <= fallback_nattrs);
 			tts_values[resnum - 1]
 				= TransactionIdGetDatum(HeapTupleHeaderGetRawXmax(htup));
 			tts_isnull[resnum - 1] = false;
@@ -4742,7 +4746,7 @@ gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
 								 FirstLowInvalidHeapAttributeNumber - 1];
 		if (resnum)
 		{
-			Assert(resnum > 0 && resnum <= fallback_tupdesc->natts);
+			Assert(resnum > 0 && resnum <= fallback_nattrs);
 			tts_values[resnum - 1]
 				= CommandIdGetDatum(HeapTupleHeaderGetRawCommandId(htup));
 			tts_isnull[resnum - 1] = false;
@@ -4753,7 +4757,7 @@ gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
 								 FirstLowInvalidHeapAttributeNumber - 1];
 		if (resnum)
 		{
-			Assert(resnum > 0 && resnum <= fallback_tupdesc->natts);
+			Assert(resnum > 0 && resnum <= fallback_nattrs);
 			tts_values[resnum - 1]
 				= TransactionIdGetDatum(HeapTupleHeaderGetRawXmin(htup));
 			tts_isnull[resnum - 1] = false;
@@ -4764,7 +4768,7 @@ gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
 								 FirstLowInvalidHeapAttributeNumber - 1];
 		if (resnum)
 		{
-			Assert(resnum > 0 && resnum <= fallback_tupdesc->natts);
+			Assert(resnum > 0 && resnum <= fallback_nattrs);
 			tts_values[resnum - 1]
 				= ObjectIdGetDatum(HeapTupleHeaderGetOid(htup));
 			tts_isnull[resnum - 1] = false;
@@ -4775,7 +4779,7 @@ gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
 								 FirstLowInvalidHeapAttributeNumber - 1];
 		if (resnum)
 		{
-			Assert(resnum > 0 && resnum <= fallback_tupdesc->natts);
+			Assert(resnum > 0 && resnum <= fallback_nattrs);
 			tts_values[resnum - 1] = ObjectIdGetDatum(table_oid);
 			tts_isnull[resnum - 1] = false;
 		}
@@ -4799,7 +4803,7 @@ gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
 		{
 			if (resnum > 0)
 			{
-				Assert(resnum <= fallback_tupdesc->natts);
+				Assert(resnum <= fallback_nattrs);
 				tts_values[resnum - 1] = (Datum) 0;
 				tts_isnull[resnum - 1] = true;
 			}
@@ -4809,7 +4813,7 @@ gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
 		/* elsewhere field is not null */
 		if (resnum > 0)
 		{
-			Assert(resnum <= fallback_tupdesc->natts);
+			Assert(resnum <= fallback_nattrs);
 			tts_isnull[resnum - 1] = false;
 		}
 
@@ -4820,7 +4824,7 @@ gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
 
 		if (resnum > 0)
 		{
-			Assert(resnum <= fallback_tupdesc->natts);
+			Assert(resnum <= fallback_nattrs);
 			tts_values[resnum - 1] = fetchatt(attr, tp + off);
 		}
 		off = att_addlength_pointer(off, attr->attlen, tp + off);
@@ -4835,7 +4839,7 @@ gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
 		resnum = tuple_dst_resno[i - FirstLowInvalidHeapAttributeNumber];
 		if (resnum > 0)
 		{
-			Assert(resnum <= fallback_tupdesc->natts);
+			Assert(resnum <= fallback_nattrs);
 			tts_values[resnum - 1] = (Datum) 0;
 			tts_isnull[resnum - 1] = true;
 		}
