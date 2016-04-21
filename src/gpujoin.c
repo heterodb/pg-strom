@@ -2978,8 +2978,12 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 									   gjs->num_rels + 1);
 
 	/*
-	 * initialize kernel execution parameter
+	 * Construct CUDA program, and kick asynchronous compile process.
+	 * Note that assign_gpujoin_session_info() is called back from
+	 * the pgstrom_assign_cuda_program(), thus, gjs->extra_maxlen has
+	 * to be set prior to the program assignment.
 	 */
+	gjs->extra_maxlen = gj_info->extra_maxlen;
 	pgstrom_assign_cuda_program(&gjs->gts,
 								gj_info->used_params,
 								gj_info->kern_source,
@@ -2993,8 +2997,6 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 						  t_bits[BITMAPLEN(result_tupdesc->natts)]) +
 				 (result_tupdesc->tdhasoid ? sizeof(Oid) : 0)) +
 		MAXALIGN(cscan->scan.plan.plan_width);	/* average width */
-	/* expected extra length per result tuple  */
-	gjs->extra_maxlen = gj_info->extra_maxlen;
 
 	/* init perfmon */
 	pgstrom_init_perfmon(&gjs->gts);
