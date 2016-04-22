@@ -253,7 +253,7 @@ gpujoin_exec_outerscan(kern_gpujoin *kgjoin,
 	kern_writeback_error_status(&kgjoin->kerror, kcxt.e);
 }
 
-KERNEL_FUNCTION_MAXTHREADS(void)
+KERNEL_FUNCTION(void)
 gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 					  kern_data_store *kds,
 					  kern_multirels *kmrels,
@@ -290,21 +290,18 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 	assert(kresults_src->nrels == depth);
 	assert(kresults_src->nitems <= kresults_src->nrooms);
 
-	/*
-	 * NOTE: size of Y-axis deterministric on the time of kernel launch.
-	 * host-side guarantees get_global_ysize() is larger then kds->nitems
-	 * of the depth. On the other hands, nobody can know correct size of
-	 * X-axis unless gpujoin_exec_nestloop() of the previous stage.
-	 * So, we ensure all the outer items are picked up by the loop below.
-	 */
+	/* inner tuple is pointed by y_index */
 	kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
 	assert(kds_in != NULL);
 
-	/* */
-	x_index = get_global_xid();
+	/*
+	 * Because of a historic reason, we call index of outer tuple 'x_index',
+	 * and index of inner tuple 'y_index'.
+	 */
 	x_limit = kresults_src->nitems;
-	y_index = window_base + get_global_yid();
+	x_index = get_global_id() % x_limit;
 	y_limit = min(window_base + window_size, kds_in->nitems);
+	y_index = window_base + (get_global_id() / x_limit);
 
 	/* will be valid, if LEFT OUTER JOIN */
 	oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth, outer_join_map);
@@ -342,7 +339,7 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 	offset = arithmetic_stairlike_add(is_matched ? 1 : 0, &count);
 	if (count > 0)
 	{
-		if (get_local_xid() == 0 && get_local_yid() == 0)
+		if (get_local_id() == 0)
 			base = atomicAdd(&kresults_dst->nitems, count);
 		__syncthreads();
 
@@ -399,7 +396,6 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 	INIT_KERNEL_CONTEXT(&kcxt,gpujoin_exec_hashjoin,kparams);
 
 	/* sanity checks */
-	assert(get_global_ysize() == 1);
 	assert(depth > 0 && depth <= kgjoin->num_rels);
 	assert(kresults_dst->nrels == depth + 1);
 	assert(kresults_src->nrels == depth);
@@ -481,7 +477,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 		offset = arithmetic_stairlike_add(is_matched ? 1 : 0, &count);
 		if (count > 0)
 		{
-			if (get_local_xid() == 0)
+			if (get_local_id() == 0)
 				base = atomicAdd(&kresults_dst->nitems, count);
 			__syncthreads();
 
@@ -597,7 +593,6 @@ gpujoin_outer_nestloop(kern_gpujoin *kgjoin,
 	INIT_KERNEL_CONTEXT(&kcxt,gpujoin_outer_nestloop,kparams);
 
 	/* sanity checks */
-	assert(get_global_ysize() == 1);
 	assert(depth > 0 && depth <= kgjoin->num_rels);
 	assert(kresults_dst->nrels == depth + 1);
 
@@ -693,7 +688,6 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 	INIT_KERNEL_CONTEXT(&kcxt,gpujoin_outer_hashjoin,kparams);
 
 	/* sanity checks */
-	assert(get_global_ysize() == 1);
 	assert(depth > 0 && depth <= kgjoin->num_rels);
 	assert(kresults_dst->nrels == depth + 1);
 	assert(window_base + window_size <= kds_hash->nitems);
@@ -1459,30 +1453,21 @@ retry_major:
 				}
 				SETUP_KERN_JOIN_ARGS(kern_join_args);
 
-				status = pgstrom_largest_workgroup_size(
+				status = pgstrom_optimal_workgroup_size(
 					&grid_sz,
 					&block_sz,
 					(const void *)gpujoin_exec_nestloop,
-					kresults_src->nitems,
+					(size_t)kresults_src->nitems * (size_t)window_size,
 					sizeof(kern_errorbuf));
 				if (status != cudaSuccess)
 				{
 					STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
 					goto out;
 				}
-
-				shmem_size = sizeof(kern_errorbuf) * (block_sz.x *
-													  block_sz.y);
-#if 0
-				printf("gpunestloop block(%u,%u,%u) grid(%u,%u,%u) xsize=%u ysize=%u\n",
-					   block_sz.x, block_sz.y, block_sz.z,
-					   grid_sz.x, grid_sz.y, grid_sz.z,
-					   kresults_src->nitems, window_size);
-#endif
 				status = cudaLaunchDevice((void *)gpujoin_exec_nestloop,
 										  kern_join_args,
 										  grid_sz, block_sz,
-										  shmem_size,
+										  sizeof(cl_uint) * block_sz.x,
 										  NULL);
 				if (status != cudaSuccess)
 				{
