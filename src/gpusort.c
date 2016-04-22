@@ -41,8 +41,8 @@ typedef struct
 	const char *kern_source;
 	int			extra_flags;
 	List	   *used_params;
-	long		num_chunks;
-	Size		chunk_size;
+	int			num_segments;
+	Size		segment_size;
 	/* delivered from original Sort */
 	int			numCols;		/* number of sort-key columns */
 	AttrNumber *sortColIdx;		/* their indexes in the target list */
@@ -64,8 +64,8 @@ form_gpusort_info(CustomScan *cscan, GpuSortInfo *gs_info)
 	privs = lappend(privs, makeString(pstrdup(gs_info->kern_source)));
 	privs = lappend(privs, makeInteger(gs_info->extra_flags));
 	privs = lappend(privs, gs_info->used_params);
-	privs = lappend(privs, makeInteger(gs_info->num_chunks));
-	privs = lappend(privs, makeInteger(gs_info->chunk_size));
+	privs = lappend(privs, makeInteger(gs_info->num_segments));
+	privs = lappend(privs, makeInteger(gs_info->segment_size));
 	privs = lappend(privs, makeInteger(gs_info->numCols));
 	/* sortColIdx */
 	for (temp = NIL, i=0; i < gs_info->numCols; i++)
@@ -104,8 +104,8 @@ deform_gpusort_info(CustomScan *cscan)
 	gs_info->kern_source = strVal(list_nth(privs, pindex++));
 	gs_info->extra_flags = intVal(list_nth(privs, pindex++));
 	gs_info->used_params = list_nth(privs, pindex++);
-	gs_info->num_chunks = intVal(list_nth(privs, pindex++));
-	gs_info->chunk_size = intVal(list_nth(privs, pindex++));
+	gs_info->num_segments = intVal(list_nth(privs, pindex++));
+	gs_info->segment_size = intVal(list_nth(privs, pindex++));
 	gs_info->numCols = intVal(list_nth(privs, pindex++));
 	/* sortColIdx */
 	temp = list_nth(privs, pindex++);
@@ -152,6 +152,7 @@ typedef struct
 	pgstrom_data_store *pds_in;			/* source of data chunk */
 	struct gpusort_segment *segment;	/* sorting segment */
 	cl_bool			is_terminator;	/* true, if terminator proces */
+	cl_uint			seg_ev_index;	/* index to ev_kern_proj_exec */
 	CUfunction		kern_load;		/* gpusort_data_load */
 	CUdeviceptr		m_gpusort;
 	CUevent			ev_dma_send_start;
@@ -167,28 +168,30 @@ typedef struct
 	CUdeviceptr		m_kds_slot;		/* kds_slot */
 	CUdeviceptr		m_kresults;		/* kresults */
 	CUevent			ev_segment_loaded;	/* event to sync gpusort_segment */
-	CUevent		   *ev_kern_exec_end;	/* event to sync gpusort_data_load */
+	CUevent		   *ev_kern_proj_exec;	/* event to sync gpusort_data_load */
 
+	cl_int			cuda_index;
+	cl_uint			num_chunks;
+	cl_uint			max_chunks;
+	cl_uint			nitems_total;
 	cl_bool			has_terminator;
 	pgstrom_data_store *pds_slot;
 	kern_resultbuf	kresults;
 } gpusort_segment;
 
-
-
 typedef struct
 {
 	GpuTaskState	gts;
 
-	/*
-	 * Data store saved in temporary file
-	 */
-	cl_uint			num_chunks;
-	cl_uint			num_chunks_limit;
-	pgstrom_data_store **pds_chunks;
-	pgstrom_data_store **pds_toasts;
-	Size			chunk_size;		/* expected best size for sorting chunk */
-	Size			chunk_nrooms;	/* expected nrooms of sorting chunk */
+	/* sorting segments  */
+	cl_uint			num_segments;
+	cl_uint			num_segments_limit;
+	pgstrom_data_store **seg_slots;	/* copy of kern_data_store (SLOT) */
+	kern_resultbuf	   **seg_index;	/* copy of kern_resultbuf */
+	gpusort_segment		*curr_segment; /* the latest segment */
+	Size			segment_size;	/* planned best length for sorting seg */
+	Size			segment_nrooms;	/* planned best nrooms for sorting seg */
+	cl_uint			segment_nchunks;/* expected number of chunks per seg */
 
 	/* copied from the plan node */
     int				numCols;		/* number of sort-key columns */
@@ -199,9 +202,11 @@ typedef struct
 	bool			varlena_keys;	/* True, if varlena sorting key exists */
 	SortSupportData *ssup_keys;		/* XXX - used by fallback function */
 
-	/* final result */
+	/* misc stuff */
+	cl_int			markpos_index;
 	HeapTupleData	tuple_buf;		/* temp buffer during scan */
 	TupleTableSlot *overflow_slot;
+	pgstrom_data_store *overflow_pds;
 } GpuSortState;
 
 /*
@@ -211,7 +216,6 @@ static CustomScanMethods	gpusort_scan_methods;
 static CustomExecMethods	gpusort_exec_methods;
 static bool					enable_gpusort;
 static bool					debug_force_gpusort;
-static int					gpusort_max_workers;
 
 static GpuTask *gpusort_next_chunk(GpuTaskState *gts);
 static TupleTableSlot *gpusort_next_tuple(GpuTaskState *gts);
@@ -219,43 +223,9 @@ static bool gpusort_task_process(GpuTask *gtask);
 static bool gpusort_task_complete(GpuTask *gtask);
 static void gpusort_task_release(GpuTask *gtask);
 static void gpusort_task_polling(GpuTaskState *gts);
-static dsm_segment *form_pgstrom_flat_gpusort_base(GpuSortState *gss,
-												   cl_int chunk_id);
-static dsm_segment *form_pgstrom_flat_gpusort(GpuSortState *gss,
-											  pgstrom_gpusort *l_gpusort,
-											  pgstrom_gpusort *r_gpusort);
-static pgstrom_gpusort *deform_pgstrom_flat_gpusort(dsm_segment *dsm_seg);
 static void gpusort_fallback_quicksort(GpuSortState *gss,
 									   pgstrom_gpusort *gpusort);
-static void bgw_cpusort_entrypoint(Datum main_arg);
 
-/*
- *
- *
- */
-static inline Size
-gpusort_devmem_requirement(Size kparams_len, cl_int nattrs, Size nitems,
-						   Size chunk_size)
-{
-	Size	length;
-	Size	total_length = kparams_len;
-
-	/* for kern_gpusort + kern_resultbuf */
-	length = STROMALIGN(kparams_len) +
-		STROMALIGN(offsetof(kern_resultbuf, results[2 * nitems]));
-	total_length += GPUMEMALIGN(length);
-
-	/* for ktoast(row) */
-	total_length += GPUMEMALIGN(chunk_size);
-
-	/* for kds(slot) */
-	length = (STROMALIGN(offsetof(kern_data_store, colmeta[nattrs])) +
-			  (LONGALIGN(sizeof(bool) * nattrs) +
-			   LONGALIGN(sizeof(Datum) * nattrs)) * nitems);
-	total_length += GPUMEMALIGN(length);
-
-	return total_length;
-}
 
 /*
  * cost_gpusort
@@ -264,26 +234,27 @@ gpusort_devmem_requirement(Size kparams_len, cl_int nattrs, Size nitems,
  */
 #define LOG2(x)		(log(x) / 0.693147180559945)
 
-// XXX - to be fixed to revise cost model
 static void
 cost_gpusort(PlannedStmt *pstmt, Sort *sort,
 			 Cost *p_startup_cost, Cost *p_total_cost,
-			 long *p_num_chunks, Size *p_chunk_size)
+			 cl_uint *p_num_segments)
 {
 	Plan	   *outer_plan = outerPlan(sort);
 	double		ntuples = outer_plan->plan_rows;
-	int			width = outer_plan->plan_width;
+	double		ntuples_per_chunk;
+	int			plan_width = outer_plan->plan_width;
 	int			nattrs = list_length(outer_plan->targetlist);
+	int			extra_len;
+	int			unitsz_fmt_slot;
+	int			unitsz_fmt_row;
+	int			num_segments;
+	bool		only_inline_attrs;
 	Cost		startup_cost;
 	Cost		run_cost;
+	Cost		sorting_cost;
 	Cost		cpu_comp_cost = 2.0 * cpu_operator_cost;
 	Cost		gpu_comp_cost = 2.0 * pgstrom_gpu_operator_cost;
-	double		nrows_per_chunk;
-	double		num_chunks;
-	double		chunk_margin = 1.10;
-	Size		chunk_size;
-	Size		kparams_len;
-	Size		total_length;
+	int			k;
 	ListCell   *lc;
 
 	if (ntuples < 2.0)
@@ -297,125 +268,153 @@ cost_gpusort(PlannedStmt *pstmt, Sort *sort,
 		SubPlan	   *subplan = lfirst(lc);
 		Plan	   *temp = list_nth(pstmt->subplans, subplan->plan_id - 1);
 
-		startup_cost += temp->startup_cost;
-		run_cost += temp->total_cost - temp->startup_cost;
+		startup_cost += temp->total_cost;
 	}
 	/* Fixed cost to setup/launch GPU kernel */
 	startup_cost += pgstrom_gpu_setup_cost;
 
 	/*
-	 * Estimate number of segments and its length
+	 * Estimation of unit size of extra buffer consumption.
+	 *
+	 * Non-inline attributes (indirect or varlena type) need extra area of
+	 * KDS_slot on gpusort_projection(). We will estimate an average length
+	 * of per-tuple consumption. 
 	 */
-	ncols = list_length(outer_plan->targetlist);
-	extra_len = 0;
+	extra_len = plan_width;
+	only_inline_attrs = true;
 	foreach (lc, outer_plan->targetlist)
 	{
 		TargetEntry	   *tle = lfirst(lc);
 		Oid				type_oid = exprType((Node *) tle->expr);
-		int32			type_mod = exprTypmod((Node *) tle->expr);
+		int16			type_len;
+		bool			type_byval;
+		char			type_align;
 
-		if (get_typbyval(type_oid))
+		get_typlenbyvalalign(type_oid, &type_len, &type_byval, &type_align);
+		if (type_byval)
+			extra_len -= type_len;
+		else
 		{
-			width -= get_typlen(type_oid);
+			/* adjust for alignment */
+			extra_len += typealign_get_width(type_align);
+			only_inline_attrs = false;
+		}
+	}
+	if (only_inline_attrs)
+		extra_len = 0;		/* mistake in width estimation */
+	else if (extra_len < 32)
+		extra_len = 32;		/* minimum guarantee if extra area is needed */
+
+	unitsz_fmt_slot = (MAXALIGN(sizeof(Datum) * nattrs) +
+					   MAXALIGN(sizeof(cl_char) * nattrs) +
+					   MAXALIGN(extra_len));
+
+	/* also, unitsz in row format for kds_in */
+	unitsz_fmt_row = MAXALIGN(offsetof(kern_tupitem, htup) +
+							  MAXALIGN(offsetof(HeapTupleHeaderData, t_bits) +
+									   sizeof(Oid) +
+									   BITMAPLEN(nattrs)) +
+							  MAXALIGN(plan_width)) + sizeof(cl_uint);
+	/* number of chunks we can pack in a KDS chunk */
+	ntuples_per_chunk = (pgstrom_chunk_size() -
+						 KDS_CALCULATE_HEAD_LENGTH(nattrs)) / unitsz_fmt_row;
+
+	/*
+	 * Estimate an optimal number of segments
+	 */
+	num_segments = ceil((double)(sizeof(cl_uint) + unitsz_fmt_slot) * ntuples /
+						(double)(gpuMemMaxAllocSize() / 2 -
+								 KDS_CALCULATE_HEAD_LENGTH(nattrs) -
+								 offsetof(kern_resultbuf, results)));
+	k = num_segments = Max(num_segments, 2);	/* at least 2 segments */
+
+	sorting_cost = DBL_MAX;
+	for (;;)
+	{
+		double	ntuples_per_segment = ntuples / (double) k;
+		double	nchunks_per_segment;
+		Cost	cost_load_chunk = cpu_tuple_cost * ntuples_per_chunk;
+		Cost	cost_load_segment;
+		Cost	cost_gpu_sorting;
+		Cost	cost_dma_recv;
+		Cost	cost_others;
+		Cost	tentative;
+
+		/*
+		 * data load to a particular segment is consists of multiple kernel
+		 * call with individual data-store. KDS setup and kernel execution
+		 * are handled in asynchronously, so our cost estimation assumes
+		 * that more expensive work dominates the entire data loading,
+		 * except for the last small fraction.
+		 */
+		nchunks_per_segment = ceil(ntuples_per_segment / ntuples_per_chunk);
+		if (nchunks_per_segment < 1.0)
+			nchunks_per_segment = 1.0;
+		cost_load_segment =
+			Max(cost_load_chunk, pgstrom_gpu_dma_cost) * nchunks_per_segment +
+			Min(cost_load_chunk, pgstrom_gpu_dma_cost);
+
+		/*
+		 * Our bitonic sorting logic taks O(N * Log2(N)) on GPU device
+		 */
+		cost_gpu_sorting = (gpu_comp_cost *
+							ntuples_per_segment *
+							LOG2(ntuples_per_segment));
+		/*
+		 * Cost to write back the sorted results
+		 */
+		cost_dma_recv = pgstrom_gpu_dma_cost * nchunks_per_segment;
+
+		/*
+		 * Our cost model assumes asynchronous executions; each fraction of
+		 * tasks are executed, but usually these tasks needs different time
+		 * to run. Thus, entire response time shall be dominated by the most
+		 * expensive portion. In the diagram below, "GPU sorting" dominates
+		 * the entire processing time.
+		 *
+		 *  +-----------+---------------+--------+
+		 *  | data load |  GPU sorting  |DMA Recv|
+		 *  +-----------+-----------+---+--------+------+--------+
+		 *              | data load |...|  GPU sorting  |DMA Recv|
+		 *              +-----------+---+-------+-------+--------+------+---
+		 *                          | data load |.......|  GPU sorting  |DMA
+		 *                          +-----------+-------+---------------+---
+		 * The total cost in GPU portion shall be:
+		 *   ((cost of most expensive job) * (# of segments) +
+		 *    (cost of other portions))
+		 *
+		 * Also, CPU has to merge the individual sorted segments. Its cost
+		 * depends on number of segments and number of tuples per segment.
+		 * If we have k-segments, CPU has to compare (k-1) times to return
+		 * a tuple.
+		 */
+		cost_others = (cost_load_segment + cost_gpu_sorting + cost_dma_recv) -
+			Max3(cost_load_segment, cost_gpu_sorting, cost_dma_recv);
+
+		tentative = Max3(cost_load_segment,
+						 cost_gpu_sorting,
+						 cost_dma_recv) * (double) k + cost_others;
+		/* fine grained segmentation also makes CPU busy... */
+		tentative += cpu_comp_cost * (k-1) * ntuples;
+
+		if (tentative < sorting_cost)
+		{
+			num_segments = k;
+			sorting_cost = tentative;
+
+			/* try next segment size */
+			k += (k < 5 ? 1 : (k < 40 ? k / 2 : k));
 			continue;
 		}
-		// how to expect extra len?
-		
-		
-		
-		
-		
-		
+		break;
 	}
-
-
-
-
-
-
-
-
-
-
-
-
-
-	/*
-	 * Estimate number of chunks and nrows per chunk
-	 */
-	width = MAXALIGN(offsetof(kern_tupitem, htup) +
-					 MAXALIGN(offsetof(HeapTupleHeaderData, t_bits) +
-							  sizeof(Oid) +		/* if HEAP_HASOID */
-							  BITMAPLEN(nattrs)) +
-					 MAXALIGN(width));
-	chunk_size = (STROMALIGN(offsetof(kern_data_store, colmeta[nattrs])) +
-				  (sizeof(cl_uint) + width) * ntuples * chunk_margin);
-
-	/*
-	 * Does it suitable for device memory limitation?
-	 */
-	kparams_len = 1024;
-	total_length = gpusort_devmem_requirement(kparams_len,
-											  nattrs,
-											  (Size)ntuples,
-											  chunk_size);
-	if (gpuMemMaxAllocSize() > total_length)
-	{
-		if (chunk_size < pgstrom_chunk_size())
-			chunk_size = pgstrom_chunk_size();
-		nrows_per_chunk = ntuples;
-		num_chunks = 1.0;
-	}
-	else
-	{
-		nrows_per_chunk =
-			(double)(gpuMemMaxAllocSize()
-					 /* for alignment */
-					 - 3 * GPUMEMALIGN_LEN
-					 /* for kern_gpusort */
-					 - STROMALIGN(kparams_len)
-					 - STROMALIGN(offsetof(kern_resultbuf, results[0]))
-					 /* for kern_data_store (row) */
-					 - STROMALIGN(offsetof(kern_data_store, colmeta[nattrs]))
-					 /* for kern_data_store (slot) */
-					 - STROMALIGN(offsetof(kern_data_store, colmeta[nattrs]))
-				) / (double)(2 * sizeof(cl_uint) +	/* kern_resultbuf */
-							 sizeof(cl_uint) + width +	/* kds(row) */
-							 LONGALIGN(sizeof(bool) * nattrs) +
-							 LONGALIGN(sizeof(Datum) * nattrs));
-		if (chunk_margin > 1.0)
-			nrows_per_chunk /= chunk_margin;
-
-		chunk_size = STROMALIGN(offsetof(kern_data_store, colmeta[nattrs])) +
-			(sizeof(cl_uint) + width) * nrows_per_chunk * chunk_margin;
-		num_chunks = Max(1.0, floor(ntuples / nrows_per_chunk + 0.9999));
-	}
-
-	/*
-	 * We'll use bitonic sorting logic on GPU device.
-	 * It's cost is N * Log2(N)
-	 */
-	startup_cost += num_chunks *
-		gpu_comp_cost * nrows_per_chunk * LOG2(nrows_per_chunk);
-
-	/*
-	 * We'll also use CPU based N-way merge sort, if # of chunks > 1.
-	 * It is usually expensive, so we like to avoid it as long as we can.
-	 */
-	if (num_chunks > 1.0)
-		startup_cost += cpu_comp_cost * nrows_per_chunk *
-			num_chunks * (num_chunks - 1.0);
-
-	/*
-	 * Cost to communicate with upper node
-	 */
+	startup_cost += sorting_cost;
 	run_cost += cpu_operator_cost * ntuples;
 
 	/* result */
 	*p_startup_cost = startup_cost;
 	*p_total_cost = startup_cost + run_cost;
-	*p_num_chunks = num_chunks;
-	*p_chunk_size = chunk_size;
+	*p_num_segments = num_segments;
 }
 
 static char *
@@ -423,10 +422,10 @@ pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 {
 	StringInfoData	kern;
 	StringInfoData	body;
-	ListCell	   *lc;
+	int				i;
 
 	initStringInfo(&kern);
-	initStringInfo(&decl);
+	initStringInfo(&body);
 
 	/*
 	 * STATIC_FUNCTION(cl_int)
@@ -514,6 +513,7 @@ pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 			"  else if (!KVAR_X.%s.isnull && KVAR_Y.%s.isnull)\n"
 			"    return %d;\n"
 			"\n",
+			tle->resno,
 			dtype->type_name, dtype->type_name, colidx-1,
 			dtype->type_name, dtype->type_name, colidx-1,
 			dtype->type_name, dtype->type_name,
@@ -533,7 +533,7 @@ pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 		appendStringInfo(&kern, "\n");
 	appendStringInfoString(&kern, body.data);
 
-	pfree(decl.data);
+	pfree(body.data);
 
 	return kern.data;
 }
@@ -546,8 +546,7 @@ pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan)
 	ListCell   *cell;
 	Cost		startup_cost;
 	Cost		total_cost;
-	long		num_chunks;
-	Size		chunk_size;
+	cl_int		num_segments;
 	CustomScan *cscan;
 	Plan	   *subplan;
 	GpuSortInfo	gs_info;
@@ -600,7 +599,7 @@ pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan)
 	 */
 	cost_gpusort(pstmt, sort,
 				 &startup_cost, &total_cost,
-				 &num_chunks, &chunk_size);
+				 &num_segments);
 
 	elog(DEBUG1,
 		 "GpuSort (cost=%.2f..%.2f) has%sadvantage to Sort (cost=%.2f..%.2f)",
@@ -612,6 +611,18 @@ pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan)
 
 	if (!debug_force_gpusort && total_cost >= sort->plan.total_cost)
 		return;
+
+	/*
+	 * OK, estimated GpuSort cost is enough reasonable to inject.
+	 * Let's construct a new one.
+	 */
+
+	/*
+	 * XXX - Here would be a location to put pgstrom_pullup_outer_scan().
+	 * However, the upcoming v9.6 support upper path construction by
+	 * extensions. We can add entirely graceful approach than previous
+	 * pull-up outer "plan" implementation.
+	 */
 
 	/*
 	 * OK, expected GpuSort cost is enough reasonable to run.
@@ -690,12 +701,11 @@ pgstrom_plan_is_gpusort(const Plan *plan)
 static Node *
 gpusort_create_scan_state(CustomScan *cscan)
 {
-	GpuSortState   *gss = palloc0(sizeof(GpuSortState));
-
+	GpuSortState   *gss = (GpuSortState *) newNode(sizeof(GpuSortState),
+												   T_CustomScanState);
 	/* Set tag and executor callbacks */
-    NodeSetTag(gss, T_CustomScanState);
-    gss->gts.css.flags = cscan->flags;
-    gss->gts.css.methods = &gpusort_exec_methods;
+	gss->gts.css.flags = cscan->flags;
+	gss->gts.css.methods = &gpusort_exec_methods;
 
 	return (Node *) gss;
 }
@@ -718,7 +728,6 @@ gpusort_begin(CustomScanState *node, EState *estate, int eflags)
 	gss->gts.cb_task_process = gpusort_task_process;
 	gss->gts.cb_task_complete = gpusort_task_complete;
 	gss->gts.cb_task_release = gpusort_task_release;
-//	gss->gts.cb_task_polling = gpusort_task_polling;
 	gss->gts.cb_next_chunk = gpusort_next_chunk;
 	gss->gts.cb_next_tuple = gpusort_next_tuple;
 	/* re-initialization of scan-descriptor and projection-info */
@@ -726,25 +735,23 @@ gpusort_begin(CustomScanState *node, EState *estate, int eflags)
 	ExecAssignScanType(&gss->gts.css.ss, tupdesc);
 	ExecAssignScanProjectionInfoWithVarno(&gss->gts.css.ss, INDEX_VAR);
 
-	/* Like built-in Sort node doing, we shall provide random access
-	 * capability to the sort output, including backward scan or
-	 * mark/restore. We also prefer to materialize the sort output
-	 * if we might be called on to rewind and replay it many times.
+	/*
+	 * Unlike built-in Sort node doing, our GpuSort "always" provide
+	 * a materialized output, so it is unconditionally possible to run
+	 * backward scan, random accesses and rewind the position.
 	 */
-	gss->randomAccess = (eflags & (EXEC_FLAG_REWIND |
-								   EXEC_FLAG_BACKWARD |
-								   EXEC_FLAG_MARK)) != 0;
 	eflags &= ~(EXEC_FLAG_REWIND | EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK);
+
 	gss->markpos_index = -1;
 
 	/* initialize child exec node */
 	subplan_state = ExecInitNode(outerPlan(cscan), estate, eflags);
 	/* informs our preferred tuple format, if supported */
-	if (pgstrom_plan_is_gpuscan(outerPlan(cscan)) ||
-		pgstrom_plan_is_gpujoin(outerPlan(cscan)) ||
-		pgstrom_plan_is_gpupreagg(outerPlan(cscan)) ||
-		pgstrom_plan_is_gpusort(outerPlan(cscan)))
+	if (pgstrom_bulk_exec_supported(subplan_state))
+	{
 		((GpuTaskState *) subplan_state)->be_row_format = true;
+		gss->gts.outer_bulk_exec = true;
+	}
 	outerPlanState(gss) = subplan_state;
 
 	/* for GPU bitonic sorting */
@@ -756,24 +763,23 @@ gpusort_begin(CustomScanState *node, EState *estate, int eflags)
 		pgstrom_preload_cuda_program(&gss->gts);
 
 	/* array for data-stores */
-	gss->num_chunks = 0;
-	gss->num_chunks_limit = gs_info->num_chunks + 10;
-	gss->pds_chunks = palloc0(sizeof(pgstrom_data_store *) *
-							  gss->num_chunks_limit);
-	gss->pds_toasts = palloc0(sizeof(pgstrom_data_store *) *
-							  gss->num_chunks_limit);
-	gss->chunk_size = gs_info->chunk_size;
-	gss->chunk_nrooms = (Size)(outerPlan(cscan)->plan_rows /
-							   (double)gs_info->num_chunks);
+	gss->num_segments = 0;
+	gss->num_segments_limit = gs_info->num_segments + 10;
+	gss->seg_slots = palloc0(sizeof(pgstrom_data_store *) *
+							 gss->num_segments_limit);
+	gss->seg_index = palloc0(sizeof(kern_resultbuf *) *
+							 gss->num_segments_limit);
+	gss->segment_size = gs_info->segment_size;
+	gss->segment_nrooms = gs_info->segment_nrooms;
+
 	/* sorting keys */
 	gss->numCols = gs_info->numCols;
 	gss->sortColIdx = gs_info->sortColIdx;
 	gss->sortOperators = gs_info->sortOperators;
 	gss->collations = gs_info->collations;
 	gss->nullsFirst = gs_info->nullsFirst;
-	gss->varlena_keys = gs_info->varlena_keys;
+	//gss->varlena_keys = gs_info->varlena_keys;
 	gss->ssup_keys = NULL;	/* to be initialized on demand */
-
 
 	/* init perfmon */
 	pgstrom_init_perfmon(&gss->gts);
@@ -984,122 +990,178 @@ gpusort_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	pgstrom_explain_gputaskstate(&gss->gts, es);
 }
 
+/*
+ * Create/Get/Put gpusort_segment
+ */
+static gpusort_segment *
+gpusort_create_segment(GpuSortState *gss)
+{
+	GpuContext		   *gcontext = gss->gts.gcontext;
+	cl_uint				seg_nrooms = gss->segment_nrooms;
+	cl_uint				seg_nchunks = gss->segment_nchunks + 20;
+	gpusort_segment	   *segment;
+	kern_resultbuf	   *kresults;
+
+	segment = MemoryContextAlloc(gcontext->memcxt,
+								 offsetof(gpusort_segment, kresults) +
+								 STROMALIGN(offsetof(kern_resultbuf,
+													 results[seg_nrooms])) +
+								 sizeof(CUevent) * seg_nchunks);
+	kresults = &segment->kresults;
+
+	memset(segment, 0, sizeof(gpusort_segment));
+	segment->kern_main = NULL;
+	segment->m_kds_slot = 0UL;
+	segment->m_kresults = 0UL;
+	segment->cuda_index = gcontext->next_context++ % gcontext->num_context;
+	segment->num_chunks = 0;
+	segment->max_chunks = seg_nchunks;
+	segment->nitems_total = 0;
+	segment->has_terminator = false;
+	segment->ev_segment_loaded = NULL;
+	segment->ev_load_kernels (CUevent *)
+		((char *)kresults + STROMALIGN(offsetof(kern_resultbuf,
+												results[seg_nrooms])));
+	memset(segment->ev_load_kernels, 0, sizeof(CUevent) * seg_nchunks);
+
+	segment->pds_slot = pgstrom_create_data_store_slot(gcontext,
+													   tupdesc,
+													   gss->segment_nrooms,
+													   extra_len,
+													   NULL);
+	kresults->nrels = 1;
+	kresults->nrooms = seg_nrooms;
+	kresults->nitems = 0;
+
+	return segment;
+}
+
+static GpuTask *
+gpusort_create_task(GpuSortState *gss, pgstrom_data_store *pds,
+					cl_uint valid_nitems, cl_bool is_terminator)
+{
+	pgstrom_gpusort	   *gpusort = NULL;
+	gpusort_segment	   *segment = gss->curr_segment;
+	cl_uint				seg_ev_index;
+
+	if (!segment || segment->has_terminator)
+	{
+		segment = gpusort_create_segment(gss);
+		if (gss->num_segments == gss->num_segments_limit)
+		{
+			gss->num_segments_limit += Max(10, gss->num_segments_limit);
+			gss->seg_slots = repalloc(gss->seg_slots,
+									  sizeof(pgstrom_data_store *) *
+									  gss->num_segments_limit);
+			gss->seg_index = repalloc(gss->seg_index,
+									  sizeof(kern_resultbuf *) *
+									  gss->num_segments_limit);
+		}
+		gss->seg_slots[gss->num_segments] = segment->pds_slot;
+		gss->seg_index[gss->num_segments] = &segment->kresults;
+		gss->num_segments++;
+		gss->curr_segment = segment;
+	}
+	Assert(segment->num_chunks < segment->max_chunks);
+	seg_ev_index = segment->num_chunks++;
+	Assert(valid_nitems <= pds->kds->nitems);
+	segment->nitems_total += valid_nitems;
+
+	/*
+	 * This task shall perform as a terminator if no more tasks shall be
+	 * added or no more space for data load obviously.
+	 */
+	if (segment->num_chunks == segment->max_chunks ||
+        segment->nitems_total > segment->kresults.nrooms)
+		is_terminator = true;
+	if (is_terminator)
+		segment->has_terminator = true;
+
+	gpusort = MemoryContextAllocZero(gcontext->memcxt,
+									 sizeof(gpusort_segment));
+	pgstrom_init_gputask(&gss->gts, &gpusort->task);
+	gpusort->task.cuda_index = segment->cuda_index;	/* bind on a GPU */
+	gpusort->pds_in = pds_in;
+	gpusort->segment = gpusort_get_segment(gss, segment);
+	gpusort->is_terminator = is_terminator;
+	gpusort->seg_ev_index = seg_ev_index;
+
+	return &gpusort->task;
+}
+
 static GpuTask *
 gpusort_next_chunk(GpuTaskState *gts)
 {
 	GpuContext		   *gcontext = gts->gcontext;
 	GpuSortState	   *gss = (GpuSortState *) gts;
 	TupleDesc			tupdesc = GTS_GET_SCAN_TUPDESC(gts);
-	pgstrom_gpusort	   *gpusort = NULL;
 	pgstrom_data_store *pds = NULL;
-	pgstrom_data_store *ptoast = NULL;
 	TupleTableSlot	   *slot;
-	dsm_segment		   *oitems_dsm;
 	cl_uint				nitems;
 	Size				length;
 	cl_int				chunk_id = -1;
 	struct timeval		tv1, tv2;
 
-	PERFMON_BEGIN(&gts->pfm, &tv1);
-
 	/*
 	 * Load tuples from the underlying plan node
 	 */
-	while (!gss->gts.scan_done)
+	PERFMON_BEGIN(&gts->pfm, &tv1);
+	if (!gss->gts.outer_bulk_exec)
 	{
-		if (gss->overflow_slot != NULL)
+		while (!gss->gts.scan_done)
 		{
-			slot = gss->overflow_slot;
-			gss->overflow_slot = NULL;
-		}
-		else
-		{
-			slot = ExecProcNode(outerPlanState(gss));
-			if (TupIsNull(slot))
+			if (gss->overflow_slot != NULL)
 			{
-				gss->gts.scan_done = true;
-				slot = NULL;
+				slot = gss->overflow_slot;
+				gss->overflow_slot = NULL;
+			}
+			else
+			{
+				slot = ExecProcNode(outerPlanState(gss));
+				if (TupIsNull(slot))
+				{
+					gss->gts.scan_done = true;
+					slot = NULL;
+					break;
+				}
+			}
+			Assert(!TupIsNull(slot));
+
+			if (!pds)
+				pds = pgstrom_create_data_store_row(gcontext,
+													tupdesc,
+													pgstrom_chunk_size(),
+													false);
+
+			if (!pgstrom_data_store_insert_tuple(pds, slot))
+			{
+				gss->overflow_slot = slot;
 				break;
 			}
 		}
-		Assert(!TupIsNull(slot));
-
-		/* Makes a sorting chunk on the first tuple */
-		if (!ptoast)
-		{
-			ptoast = pgstrom_create_data_store_row(gcontext,
-												   tupdesc,
-												   gss->chunk_size,
-												   true);
-			ptoast->kds->nrooms = (cl_uint)gss->chunk_nrooms;
-		}
-
-		/* Insert this tuple to the data store */
-		if (!pgstrom_data_store_insert_tuple(ptoast, slot))
-		{
-			gss->overflow_slot = slot;
-
-			/* Even if insertion of the tuple would be unavailable,
-			 * we try to expand the ptoast as long as the expected
-			 * length of kds + ktoast is less than max allocatable
-			 * device memory.
-			 */
-			length = gpusort_devmem_requirement(gss->gts.kern_params->length,
-												tupdesc->natts,
-												2 * ptoast->kds->nitems,
-												2 * gss->chunk_size);
-			if (length > gpuMemMaxAllocSize())
-				break;
-			/* OK, expand it and try again */
-			gss->chunk_size += gss->chunk_size;
-			PDS_expand_size(gcontext, ptoast, gss->chunk_size);
-			ptoast->kds->nrooms = 2 * ptoast->kds->nitems;
-		}
+		/* any more chunks expected? */
+		if (!gss->overflow_slot)
+			is_terminator = true;
 	}
-	/* Did we read any tuples? */
-	if (!ptoast)
+	else
 	{
-		PERFMON_END(&gts->pfm, time_outer_load, &tv1, &tv2);
-		return NULL;
+		/* Load a bunch of records at once on the first time */
+		if (!gss->overflow_pds)
+			gss->bulk_pds = BulkExecProcNode((GpuTaskState *) subnode,
+											 pgstrom_chunk_size());
+		pds = gss->overflow_pds;
+		if (!pds)
+			pgstrom_deactivate_gputaskstate(&gss->gts);
+		else
+			gss->overflow_pds = BulkExecProcNode((GpuTaskState *) subnode,
+												 pgstrom_chunk_size());
+		/* any more chunks expected? */
+		if (!gss->bulk_pds)
+			is_terminator = true;
 	}
-	/* Expand the backend file of the data chunk */
-	nitems = ptoast->kds->nitems;
-	/* FIXME: kernel has to handle numeric by typeoid */
-	pds = pgstrom_create_data_store_slot(gcontext, tupdesc,
-										 nitems, 0, ptoast);
-	/* Save this chunk on the global array */
-	chunk_id = gss->num_chunks++;
-	if (chunk_id >= gss->num_chunks_limit)
-	{
-		cl_uint		new_limit = 2 * gss->num_chunks_limit;
-
-		/* expand the array twice */
-		gss->pds_chunks = repalloc(gss->pds_chunks,
-								   sizeof(pgstrom_data_store *) * new_limit);
-		gss->pds_toasts = repalloc(gss->pds_toasts,
-								   sizeof(pgstrom_data_store *) * new_limit);
-		gss->num_chunks_limit = new_limit;
-	}
-	gss->pds_chunks[chunk_id] = pds;
-	gss->pds_toasts[chunk_id] = ptoast;
-
-	/* Make a shared memory segment for kern_resultbuf */
-	oitems_dsm = form_pgstrom_flat_gpusort_base(gss, chunk_id);
-
-	/* Make a gpusort, based on pds_row, pds_slot and kresults */
-	gpusort = MemoryContextAllocZero(gcontext->memcxt,
-									 sizeof(pgstrom_gpusort));
-	/* initialize GpuTask object */
-	pgstrom_init_gputask(&gss->gts, &gpusort->task);
-	gpusort->mc_class = 0;
-	gpusort->litems_dsm = NULL;
-	gpusort->ritems_dsm = NULL;
-	gpusort->oitems_dsm = oitems_dsm;
-	gpusort->chunk_id = chunk_id;
-	gpusort->chunk_id_map = bms_make_singleton(chunk_id);
 	PERFMON_END(&gts->pfm, time_outer_load, &tv1, &tv2);
 
-	return &gpusort->task;
+	return !pds ? NULL : gpusort_create_task(gss, pds);
 }
 
 static TupleTableSlot *
@@ -1500,6 +1562,7 @@ gpusort_task_respond(CUstream stream, CUresult status, void *private)
 	SetLatch(&MyProc->procLatch);
 }
 
+#if 0
 /*
  * launch_gpu_bitonic_kernels
  *
@@ -1641,6 +1704,7 @@ launch_gpu_bitonic_kernels(GpuSortState *gss,
 		pfm->gsort.num_kern_sort++;
 	}
 }
+#endif
 
 static bool
 __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *gpusort)
@@ -1986,6 +2050,7 @@ gpusort_task_polling(GpuTaskState *gts)
 	}
 }
 
+#if 0
 /*
  * form_pgstrom_flat_gpusort(_base)
  * deform_pgstrom_flat_gpusort
@@ -2259,7 +2324,7 @@ deform_pgstrom_flat_gpusort(dsm_segment *dsm_seg)
 
 	return gpusort;
 }
-
+#endif
 /*
  * gpusort_fallback_gpu_chunks
  *
@@ -2413,17 +2478,6 @@ pgstrom_init_gpusort(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
-	/* pg_strom.gpusort_max_workers */
-	DefineCustomIntVariable("pg_strom.max_workers",
-							"Maximum number of sorting workers for GpuSort",
-							NULL,
-							&gpusort_max_workers,
-							Max(1, max_worker_processes / 2),
-							1,
-							max_worker_processes / 2,
-							PGC_USERSET,
-							GUC_NOT_IN_SAMPLE,
-							NULL, NULL, NULL);
 
 	/* initialize the plan method table */
 	memset(&gpusort_scan_methods, 0, sizeof(CustomScanMethods));
@@ -2442,6 +2496,7 @@ pgstrom_init_gpusort(void)
 	gpusort_exec_methods.ExplainCustomScan	= gpusort_explain;
 }
 
+#if 0
 /* ================================================================
  *
  * Routines for CPU sorting
@@ -2692,3 +2747,4 @@ bgw_cpusort_entrypoint(Datum main_arg)
 	pg_memory_barrier();
 	SetLatch(&backend_proc->procLatch);
 }
+#endif
