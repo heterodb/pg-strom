@@ -1407,6 +1407,14 @@ retry_major:
 				/* update run-time statistics */
 				kgjoin->jscale[0].inner_nitems = kresults_src->nitems;
 				kgjoin->jscale[0].total_nitems = kresults_src->nitems;
+
+				/*
+				 * Once source nitems became zero, we cannot produce any
+				 * result tuples without RIGHT OUTER JOIN (and, it shall
+				 * not be kicked when kds_src != NULL).
+				 */
+				if (kresults_src->nitems == 0)
+					break;
 			}
 			else
 			{
@@ -1784,6 +1792,14 @@ retry_major:
 		kresults_tmp = kresults_src;
 		kresults_src = kresults_dst;
 		kresults_dst = kresults_tmp;
+
+		/*
+		 * Once nitems became zero, we have no chance to produce any
+		 * result tuples without RIGHT OUTER JOIN. So, we don't need
+		 * to walk down deeper level any more, for a niche optimization.
+		 */
+		if (kds_src != NULL && kresults_src->nitems == 0)
+			break;
 	}
 
 	/*
