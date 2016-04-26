@@ -503,8 +503,8 @@ extern bool kern_fetch_data_store(TupleTableSlot *slot,
 								  kern_data_store *kds,
 								  size_t row_index,
 								  HeapTuple tuple);
-extern pgstrom_data_store *pgstrom_acquire_data_store(pgstrom_data_store *pds);
-extern void pgstrom_release_data_store(pgstrom_data_store *pds);
+extern pgstrom_data_store *PDS_retain(pgstrom_data_store *pds);
+extern void PDS_release(pgstrom_data_store *pds);
 extern void PDS_expand_size(GpuContext *gcontext,
 							pgstrom_data_store *pds,
 							Size kds_length_new);
@@ -513,23 +513,24 @@ extern void init_kernel_data_store(kern_data_store *kds,
 								   TupleDesc tupdesc,
 								   Size length,
 								   int format,
-								   uint nrooms);
-extern pgstrom_data_store *
-pgstrom_create_data_store_row(GpuContext *gcontext,
-							  TupleDesc tupdesc,
-							  Size length,
-							  bool file_mapped);
-extern pgstrom_data_store *
-pgstrom_create_data_store_slot(GpuContext *gcontext,
-							   TupleDesc tupdesc,
-							   cl_uint nrooms,
-							   Size extra_length,
-							   pgstrom_data_store *ptoast);
-extern pgstrom_data_store *
-pgstrom_create_data_store_hash(GpuContext *gcontext,
-							   TupleDesc tupdesc,
-							   Size length,
-							   bool file_mapped);
+								   uint nrooms,
+								   bool use_internal);
+
+extern pgstrom_data_store *PDS_create_row(GpuContext *gcontext,
+										  TupleDesc tupdesc,
+										  Size length,
+										  bool file_mapped);
+extern pgstrom_data_store *PDS_create_slot(GpuContext *gcontext,
+										   TupleDesc tupdesc,
+										   cl_uint nrooms,
+										   Size extra_length,
+										   bool use_internal,
+										   pgstrom_data_store *ptoast);
+
+extern pgstrom_data_store *PDS_create_hash(GpuContext *gcontext,
+										   TupleDesc tupdesc,
+										   Size length,
+										   bool file_mapped);
 extern void
 pgstrom_file_mmap_data_store(FileName kds_fname,
 							 Size kds_offset,
@@ -537,18 +538,17 @@ pgstrom_file_mmap_data_store(FileName kds_fname,
 							 kern_data_store **p_kds,
 							 kern_data_store **p_ktoast);
 
-extern int pgstrom_data_store_insert_block(pgstrom_data_store *pds,
-										   Relation rel,
-										   BlockNumber blknum,
-										   Snapshot snapshot,
-										   bool page_prune);
-extern bool pgstrom_data_store_insert_tuple(pgstrom_data_store *pds,
-											TupleTableSlot *slot);
-extern bool pgstrom_data_store_insert_hashitem(pgstrom_data_store *pds,
-											   TupleTableSlot *slot,
-											   cl_uint hash_value);
+extern int PDS_insert_block(pgstrom_data_store *pds,
+							Relation rel,
+							BlockNumber blknum,
+							Snapshot snapshot,
+							bool page_prune);
+extern bool PDS_insert_tuple(pgstrom_data_store *pds,
+							 TupleTableSlot *slot);
+extern bool PDS_insert_hashitem(pgstrom_data_store *pds,
+								TupleTableSlot *slot,
+								cl_uint hash_value);
 extern void PDS_build_hashtable(pgstrom_data_store *pds);
-extern void pgstrom_dump_data_store(pgstrom_data_store *pds);
 extern void pgstrom_init_datastore(void);
 
 /*

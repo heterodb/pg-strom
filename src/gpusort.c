@@ -1267,15 +1267,15 @@ gpusort_next_chunk(GpuTaskState *gts)
 		/* Makes a sorting chunk on the first tuple */
 		if (!ptoast)
 		{
-			ptoast = pgstrom_create_data_store_row(gcontext,
-												   tupdesc,
-												   gss->chunk_size,
-												   true);
+			ptoast = PDS_create_row(gcontext,
+									tupdesc,
+									gss->chunk_size,
+									true);
 			ptoast->kds->nrooms = (cl_uint)gss->chunk_nrooms;
 		}
 
 		/* Insert this tuple to the data store */
-		if (!pgstrom_data_store_insert_tuple(ptoast, slot))
+		if (!PDS_insert_tuple(ptoast, slot))
 		{
 			gss->overflow_slot = slot;
 
@@ -1305,8 +1305,7 @@ gpusort_next_chunk(GpuTaskState *gts)
 	/* Expand the backend file of the data chunk */
 	nitems = ptoast->kds->nitems;
 	/* FIXME: kernel has to handle numeric by typeoid */
-	pds = pgstrom_create_data_store_slot(gcontext, tupdesc,
-										 nitems, 0, ptoast);
+	pds = PDS_create_slot(gcontext, tupdesc, false, nitems, 0, ptoast);
 	/* Save this chunk on the global array */
 	chunk_id = gss->num_chunks++;
 	if (chunk_id >= gss->num_chunks_limit)

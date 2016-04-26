@@ -1032,7 +1032,7 @@ pgstrom_release_gpucontext(GpuContext *gcontext, bool sanity_release)
 		elog(sanity_release ? NOTICE : DEBUG1,
 			 "Orphan PDS found at %p (format=%d, length=%u)",
 			 pds, pds->kds->format, pds->kds->length);
-		pgstrom_release_data_store(pds);
+		PDS_release(pds);
 		keep_context = false;
 	}
 
@@ -1838,10 +1838,10 @@ pgstrom_exec_chunk_gputask(GpuTaskState *gts, size_t chunk_size)
 			 */
 			if (!pds_dst)
 			{
-				pds_dst = pgstrom_create_data_store_row(gts->gcontext,
-													slot->tts_tupleDescriptor,
-														chunk_size,
-														false);
+				pds_dst = PDS_create_row(gts->gcontext,
+										 slot->tts_tupleDescriptor,
+										 chunk_size,
+										 false);
 			}
 
 			/*
@@ -1850,7 +1850,7 @@ pgstrom_exec_chunk_gputask(GpuTaskState *gts, size_t chunk_size)
 			 *  The destination store still has space.
 			 *  The source store still has unread rows.
 			 */
-			if (!pgstrom_data_store_insert_tuple(pds_dst, slot))
+			if (!PDS_insert_tuple(pds_dst, slot))
 			{
 				/* Rewind the source PDS, if destination gets filled up */
 				Assert(gts->curr_index > 0);

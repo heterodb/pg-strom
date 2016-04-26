@@ -4107,11 +4107,12 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs,
 				elog(ERROR, "Too much growth of result rows");
 			return NULL;
 		}
-		pds_dst = pgstrom_create_data_store_slot(gjs->gts.gcontext,
-												 tupdesc,
-												 nrooms,
-												 gjs->extra_maxlen * nrooms,
-												 NULL);
+		pds_dst = PDS_create_slot(gjs->gts.gcontext,
+								  tupdesc,
+								  nrooms,
+								  gjs->extra_maxlen * nrooms,
+								  false,
+								  NULL);
 	}
 	else
 	{
@@ -4172,10 +4173,7 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs,
 				elog(ERROR, "Too much growth of result rows");
 			return NULL;
 		}
-		pds_dst = pgstrom_create_data_store_row(gcontext,
-												tupdesc,
-												length,
-												false);
+		pds_dst = PDS_create_row(gcontext, tupdesc, length, false);
 	}
 	return pds_dst;
 }
@@ -4538,14 +4536,14 @@ gpujoin_next_chunk(GpuTaskState *gts)
 				/* create a new data-store if not constructed yet */
 				if (!pds)
 				{
-					pds = pgstrom_create_data_store_row(gjs->gts.gcontext,
-														tupdesc,
-														pgstrom_chunk_size(),
-														false);
+					pds = PDS_create_row(gjs->gts.gcontext,
+										 tupdesc,
+										 pgstrom_chunk_size(),
+										 false);
 				}
 
 				/* insert the tuple on the data-store */
-				if (!pgstrom_data_store_insert_tuple(pds, slot))
+				if (!PDS_insert_tuple(pds, slot))
 				{
 					gjs->gts.scan_overflow = slot;
 					break;
@@ -5278,10 +5276,10 @@ gpujoin_task_release(GpuTask *gtask)
 		multirels_detach_buffer(pgjoin->pmrels, false, __FUNCTION__);
 	/* unlink source data store */
 	if (pgjoin->pds_src)
-		pgstrom_release_data_store(pgjoin->pds_src);
+		PDS_release(pgjoin->pds_src);
 	/* unlink destination data store */
 	if (pgjoin->pds_dst)
-		pgstrom_release_data_store(pgjoin->pds_dst);
+		PDS_release(pgjoin->pds_dst);
 	/* release this gpu-task itself */
 	pfree(pgjoin);
 }
@@ -5849,7 +5847,7 @@ gpujoin_inner_unload(GpuJoinState *gjs, bool needs_rescan)
 		if (needs_rescan && istate->state->chgParam == NULL)
 			ExecReScan(istate->state);
 		foreach (lc, istate->pds_list)
-			pgstrom_release_data_store((pgstrom_data_store *) lfirst(lc));
+			PDS_release((pgstrom_data_store *) lfirst(lc));
 		istate->pds_list = NIL;
 		istate->pds_index = 0;
 		istate->pds_limit = 0;
@@ -6001,10 +5999,10 @@ gpujoin_inner_hash_preload_TS(GpuJoinState *gjs,
 												   curr_nitems,
 												   curr_size);
 			hash_max = i * (1U << istate->hgram_shift) - 1;
-			pds_hash = pgstrom_create_data_store_hash(gjs->gts.gcontext,
-													  scan_desc,
-													  kds_length,
-													  false);
+			pds_hash = PDS_create_hash(gjs->gts.gcontext,
+									   scan_desc,
+									   kds_length,
+									   false);
 			pds_hash->kds->hash_min = hash_min;
 			pds_hash->kds->hash_max = hash_max;
 
@@ -6024,10 +6022,10 @@ gpujoin_inner_hash_preload_TS(GpuJoinState *gjs,
 	kds_length = KDS_CALCULATE_HASH_LENGTH(scan_desc->natts,
 										   curr_nitems,
 										   curr_size + BLCKSZ);
-	pds_hash = pgstrom_create_data_store_hash(gjs->gts.gcontext,
-											  scan_desc,
-											  kds_length,
-											  false);
+	pds_hash = PDS_create_hash(gjs->gts.gcontext,
+							   scan_desc,
+							   kds_length,
+							   false);
 	pds_hash->kds->hash_min = hash_min;
 	pds_hash->kds->hash_max = UINT_MAX;
 	pds_list = lappend(pds_list, pds_hash);
@@ -6060,7 +6058,7 @@ gpujoin_inner_hash_preload_TS(GpuJoinState *gjs,
 
 			if (hash <= hash_max)
 			{
-				if (pgstrom_data_store_insert_hashitem(pds, scan_slot, hash))
+				if (PDS_insert_hashitem(pds, scan_slot, hash))
 					break;
 				elog(ERROR, "Bug? GpuHashJoin Histgram was not correct");
 			}
@@ -6116,10 +6114,10 @@ next:
 			scan_slot = scan_ps->ps_ResultTupleSlot;
 			scan_desc = scan_slot->tts_tupleDescriptor;
 			empty_len = KDS_CALCULATE_HASH_LENGTH(scan_desc->natts, 0, 0);
-			pds_hash = pgstrom_create_data_store_hash(gjs->gts.gcontext,
-													  scan_desc,
-													  empty_len,
-													  false);
+			pds_hash = PDS_create_hash(gjs->gts.gcontext,
+									   scan_desc,
+									   empty_len,
+									   false);
 			istate->pds_list = list_make1(pds_hash);
 		}
 		/* add extra randomness for better key distribution */
@@ -6151,10 +6149,10 @@ next:
 	{
 		Size	ichunk_size = Max(istate->ichunk_size,
 								  pgstrom_chunk_size() / 4);
-		pds_hash = pgstrom_create_data_store_hash(gjs->gts.gcontext,
-												  scan_desc,
-												  ichunk_size,
-												  false);
+		pds_hash = PDS_create_hash(gjs->gts.gcontext,
+								   scan_desc,
+								   ichunk_size,
+								   false);
 		istate->pds_list = list_make1(pds_hash);
 		istate->ntuples = 0;
 		istate->consumed = KDS_CALCULATE_HEAD_LENGTH(scan_desc->natts);
@@ -6196,10 +6194,10 @@ retry:
 		{
 			PDS_shrink_size(pds_hash);
 
-			pds_hash = pgstrom_create_data_store_hash(gjs->gts.gcontext,
-													  scan_desc,
-													  istate->pds_limit,
-													  false);
+			pds_hash = PDS_create_hash(gjs->gts.gcontext,
+									   scan_desc,
+									   istate->pds_limit,
+									   false);
 			istate->pds_list = lappend(istate->pds_list, pds_hash);
 			istate->ntuples = 0;
 			istate->consumed = KDS_CALCULATE_HEAD_LENGTH(scan_desc->natts);
@@ -6228,7 +6226,7 @@ retry:
 				}
 			}
 			Assert(list_length(istate->pds_list) == 1);
-			pgstrom_release_data_store(pds_hash);
+			PDS_release(pds_hash);
 			istate->pds_list = NULL;
 			/*
 			 * NOTE: istate->ntuples and istate->consumed shall be updated on
@@ -6238,7 +6236,7 @@ retry:
 		}
 	}
 
-	if (!pgstrom_data_store_insert_hashitem(pds_hash, scan_slot, hash))
+	if (!PDS_insert_hashitem(pds_hash, scan_slot, hash))
 	{
 		PDS_expand_size(gjs->gts.gcontext,
 						pds_hash,
@@ -6286,10 +6284,10 @@ gpujoin_inner_heap_preload(GpuJoinState *gjs,
 			scan_desc = scan_slot->tts_tupleDescriptor;
 			empty_len = STROMALIGN(offsetof(kern_data_store,
 											colmeta[scan_desc->natts]));
-			pds_heap = pgstrom_create_data_store_row(gjs->gts.gcontext,
-													 scan_desc,
-													 empty_len,
-													 false);
+			pds_heap = PDS_create_row(gjs->gts.gcontext,
+									  scan_desc,
+									  empty_len,
+									  false);
 			istate->pds_list = list_make1(pds_heap);
 		}
 		/* add extra randomness for better key distribution */
@@ -6305,10 +6303,10 @@ gpujoin_inner_heap_preload(GpuJoinState *gjs,
 	{
 		Size	ichunk_size = Max(istate->ichunk_size,
 								  pgstrom_chunk_size() / 4);
-		pds_heap = pgstrom_create_data_store_row(gjs->gts.gcontext,
-												 scan_desc,
-												 ichunk_size,
-												 false);
+		pds_heap = PDS_create_row(gjs->gts.gcontext,
+								  scan_desc,
+								  ichunk_size,
+								  false);
 		istate->pds_list = list_make1(pds_heap);
 		istate->consumed = KDS_CALCULATE_HEAD_LENGTH(scan_desc->natts);
 		istate->ntuples = 0;
@@ -6327,17 +6325,17 @@ gpujoin_inner_heap_preload(GpuJoinState *gjs,
 													  istate->consumed +
 													  consumption))
 	{
-		pds_heap = pgstrom_create_data_store_row(gjs->gts.gcontext,
-												 scan_desc,
-												 pds_heap->kds_length,
-												 false);
+		pds_heap = PDS_create_row(gjs->gts.gcontext,
+								  scan_desc,
+								  pds_heap->kds_length,
+								  false);
 		istate->pds_list = lappend(istate->pds_list, pds_heap);
 		istate->consumed = KDS_CALCULATE_HEAD_LENGTH(scan_desc->natts);
 		istate->ntuples = 0;
 	}
 
 retry:
-	if (!pgstrom_data_store_insert_tuple(pds_heap, scan_slot))
+	if (!PDS_insert_tuple(pds_heap, scan_slot))
 	{
 		PDS_expand_size(gjs->gts.gcontext,
 						pds_heap,
@@ -6428,7 +6426,7 @@ gpujoin_create_multirels(GpuJoinState *gjs)
 		pgstrom_data_store	   *pds = list_nth(istate->pds_list,
 											   istate->pds_index - 1);
 
-		pmrels->inner_chunks[i] = pgstrom_acquire_data_store(pds);
+		pmrels->inner_chunks[i] = PDS_retain(pds);
 		pmrels->kern.chunks[i].chunk_offset = pmrels->usage_length;
 		pmrels->usage_length += STROMALIGN(pds->kds->length);
 
@@ -6634,7 +6632,7 @@ multirels_attach_buffer(pgstrom_multirels *pmrels)
 	pmrels->n_attached++;
 	/* also, data store */
 	for (i=0; i < num_rels; i++)
-		pgstrom_acquire_data_store(pmrels->inner_chunks[i]);
+		PDS_retain(pmrels->inner_chunks[i]);
 
 	return pmrels;
 }
@@ -6977,7 +6975,7 @@ multirels_detach_buffer(pgstrom_multirels *pmrels, bool may_kick_outer_join,
 
 	/* release data store */
 	for (i=0; i < num_rels; i++)
-		pgstrom_release_data_store(pmrels->inner_chunks[i]);
+		PDS_release(pmrels->inner_chunks[i]);
 
 	/* Also, this pmrels */
 	if (--pmrels->n_attached == 0)

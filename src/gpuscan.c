@@ -1779,9 +1779,9 @@ pgstrom_release_gpuscan(GpuTask *gputask)
 	pgstrom_gpuscan	   *gpuscan = (pgstrom_gpuscan *) gputask;
 
 	if (gpuscan->pds_src)
-		pgstrom_release_data_store(gpuscan->pds_src);
+		PDS_release(gpuscan->pds_src);
 	if (gpuscan->pds_dst)
-		pgstrom_release_data_store(gpuscan->pds_dst);
+		PDS_release(gpuscan->pds_dst);
 	pgstrom_complete_gpuscan(&gpuscan->task);
 
 	pfree(gpuscan);
@@ -1816,20 +1816,21 @@ create_pgstrom_gpuscan_task(GpuScanState *gss, pgstrom_data_store *pds_src)
 			length = (kds_src->length +
 					  Max(gss->proj_fixed_width -
 						  gss->base_fixed_width, 0) * kds_src->nitems);
-			pds_dst = pgstrom_create_data_store_row(gcontext,
-													scan_tupdesc,
-													length,
-													false);
+			pds_dst = PDS_create_row(gcontext,
+									 scan_tupdesc,
+									 length,
+									 false);
 		}
 	}
 	else
 	{
 		length = gss->proj_extra_width * kds_src->nitems;
-		pds_dst = pgstrom_create_data_store_slot(gcontext,
-												 scan_tupdesc,
-												 kds_src->nitems,
-												 length,
-												 NULL);
+		pds_dst = PDS_create_slot(gcontext,
+								  scan_tupdesc,
+								  kds_src->nitems,
+								  length,
+								  false,
+								  NULL);
 	}
 
 	/*
@@ -1883,10 +1884,10 @@ pgstrom_exec_scan_chunk(GpuTaskState *gts, Size chunk_length)
 
 	InstrStartNode(&gts->outer_instrument);
 	PERFMON_BEGIN(&gts->pfm, &tv1);
-	pds = pgstrom_create_data_store_row(gts->gcontext,
-										tupdesc,
-										chunk_length,
-										false);
+	pds = PDS_create_row(gts->gcontext,
+						 tupdesc,
+						 chunk_length,
+						 false);
 	pds->kds->table_oid = RelationGetRelid(base_rel);
 
 	/*
@@ -1899,14 +1900,14 @@ pgstrom_exec_scan_chunk(GpuTaskState *gts, Size chunk_length)
 
 	/* fill up this data-store */
 	while (gts->curr_blknum < gts->last_blknum &&
-		   pgstrom_data_store_insert_block(pds, base_rel,
-										   gts->curr_blknum,
-										   snapshot, true) >= 0)
+		   PDS_insert_block(pds, base_rel,
+							gts->curr_blknum,
+							snapshot, true) >= 0)
 		gts->curr_blknum++;
 
 	if (pds->kds->nitems == 0)
 	{
-		pgstrom_release_data_store(pds);
+		PDS_release(pds);
 		pds = NULL;
 	}
 	PERFMON_END(&gts->pfm, time_outer_load, &tv1, &tv2);
