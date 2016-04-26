@@ -307,7 +307,7 @@ pgstrom_fetch_data_store(TupleTableSlot *slot,
 }
 
 pgstrom_data_store *
-pgstrom_acquire_data_store(pgstrom_data_store *pds)
+PDS_retain(pgstrom_data_store *pds)
 {
 	Assert(pds->refcnt > 0);
 
@@ -317,7 +317,7 @@ pgstrom_acquire_data_store(pgstrom_data_store *pds)
 }
 
 void
-pgstrom_release_data_store(pgstrom_data_store *pds)
+PDS_release(pgstrom_data_store *pds)
 {
 	Assert(pds->refcnt > 0);
 	/* acquired by multiple owners? */
@@ -333,7 +333,7 @@ pgstrom_release_data_store(pgstrom_data_store *pds)
 
 	/* release relevant toast store, if any */
 	if (pds->ptoast)
-		pgstrom_release_data_store(pds->ptoast);
+		PDS_release(pds->ptoast);
 	/* release body of the data store */
 	if (!pds->kds_fname)
 		pfree(pds->kds);
@@ -369,7 +369,8 @@ init_kernel_data_store(kern_data_store *kds,
 					   TupleDesc tupdesc,
 					   Size length,
 					   int format,
-					   uint nrooms)
+					   uint nrooms,
+					   bool use_internal)
 {
 	int		i, attcacheoff;
 
@@ -398,22 +399,31 @@ init_kernel_data_store(kern_data_store *kds,
 	{
 		Form_pg_attribute attr = tupdesc->attrs[i];
 		int		attalign = typealign_get_width(attr->attalign);
+		bool	attbyval = attr->attbyval;
+		int		attlen = attr->attlen;
 
 		if (!attr->attbyval)
 			kds->has_notbyval = true;
 		if (attr->atttypid == NUMERICOID)
+		{
 			kds->has_numeric = true;
+			if (use_internal)
+			{
+				attbyval = true;
+				attlen = sizeof(cl_long);
+			}
+		}
 
 		if (attcacheoff > 0)
 		{
-			if (attr->attlen > 0)
+			if (attlen > 0)
 				attcacheoff = TYPEALIGN(attalign, attcacheoff);
 			else
 				attcacheoff = -1;	/* no more shortcut any more */
 		}
-		kds->colmeta[i].attbyval = attr->attbyval;
+		kds->colmeta[i].attbyval = attbyval;
 		kds->colmeta[i].attalign = attalign;
-		kds->colmeta[i].attlen = attr->attlen;
+		kds->colmeta[i].attlen = attlen;
 		kds->colmeta[i].attnum = attr->attnum;
 		kds->colmeta[i].attcacheoff = attcacheoff;
 		kds->colmeta[i].atttypid = (cl_uint)attr->atttypid;
@@ -589,9 +599,9 @@ PDS_shrink_size(pgstrom_data_store *pds)
 }
 
 pgstrom_data_store *
-pgstrom_create_data_store_row(GpuContext *gcontext,
-							  TupleDesc tupdesc, Size length,
-							  bool file_mapped)
+PDS_create_row(GpuContext *gcontext,
+			   TupleDesc tupdesc, Size length,
+			   bool file_mapped)
 {
 	pgstrom_data_store *pds;
 	MemoryContext	gmcxt = gcontext->memcxt;
@@ -680,7 +690,7 @@ pgstrom_create_data_store_row(GpuContext *gcontext,
 	 * determine 'nrooms' preliminary, so INT_MAX instead.
 	 */
 	init_kernel_data_store(pds->kds, tupdesc, pds->kds_length,
-						   KDS_FORMAT_ROW, INT_MAX);
+						   KDS_FORMAT_ROW, INT_MAX, false);
 
 	/* OK, it is now tracked by GpuContext */
 	dlist_push_tail(&gcontext->pds_list, &pds->pds_chain);
@@ -689,10 +699,11 @@ pgstrom_create_data_store_row(GpuContext *gcontext,
 }
 
 pgstrom_data_store *
-pgstrom_create_data_store_slot(GpuContext *gcontext,
-							   TupleDesc tupdesc, cl_uint nrooms,
-							   Size extra_length,
-							   pgstrom_data_store *ptoast)
+PDS_create_slot(GpuContext *gcontext,
+				TupleDesc tupdesc, cl_uint nrooms,
+				Size extra_length,
+				bool use_internal,
+				pgstrom_data_store *ptoast)
 {
 	pgstrom_data_store *pds;
 	size_t			kds_length;
@@ -797,7 +808,7 @@ pgstrom_create_data_store_slot(GpuContext *gcontext,
 		pds->ptoast = ptoast;
 	}
 	init_kernel_data_store(pds->kds, tupdesc, pds->kds_length,
-						   KDS_FORMAT_SLOT, nrooms);
+						   KDS_FORMAT_SLOT, nrooms, use_internal);
 
 	/* OK, now it is tracked by GpuContext */
 	dlist_push_tail(&gcontext->pds_list, &pds->pds_chain);
@@ -806,10 +817,10 @@ pgstrom_create_data_store_slot(GpuContext *gcontext,
 }
 
 pgstrom_data_store *
-pgstrom_create_data_store_hash(GpuContext *gcontext,
-							   TupleDesc tupdesc,
-							   Size length,
-							   bool file_mapped)
+PDS_create_hash(GpuContext *gcontext,
+				TupleDesc tupdesc,
+				Size length,
+				bool file_mapped)
 {
 	pgstrom_data_store *pds;
 
@@ -820,8 +831,7 @@ pgstrom_create_data_store_hash(GpuContext *gcontext,
 	 * KDS_FORMAT_HASH has almost same initialization to KDS_FORMAT_ROW,
 	 * so we once create it as _row format, then fixup the pds/kds.
 	 */
-	pds = pgstrom_create_data_store_row(gcontext, tupdesc,
-										length, file_mapped);
+	pds = PDS_create_row(gcontext, tupdesc, length, file_mapped);
 	pds->kds->format = KDS_FORMAT_HASH;
 	Assert(pds->kds->nslots == 0);	/* to be set later */
 
@@ -892,9 +902,9 @@ pgstrom_file_mmap_data_store(FileName kds_fname,
 }
 
 int
-pgstrom_data_store_insert_block(pgstrom_data_store *pds,
-								Relation rel, BlockNumber blknum,
-								Snapshot snapshot, bool page_prune)
+PDS_insert_block(pgstrom_data_store *pds,
+				 Relation rel, BlockNumber blknum,
+				 Snapshot snapshot, bool page_prune)
 {
 	kern_data_store	*kds = pds->kds;
 	Buffer			buffer;
@@ -999,14 +1009,13 @@ pgstrom_data_store_insert_block(pgstrom_data_store *pds,
 }
 
 /*
- * pgstrom_data_store_insert_tuple
+ * PDS_insert_tuple
  *
  * It inserts a tuple on the data store. Unlike block read mode, we can use
  * this interface for both of row and column data store.
  */
 bool
-pgstrom_data_store_insert_tuple(pgstrom_data_store *pds,
-								TupleTableSlot *slot)
+PDS_insert_tuple(pgstrom_data_store *pds, TupleTableSlot *slot)
 {
 	kern_data_store	   *kds = pds->kds;
 	size_t				required;
@@ -1049,14 +1058,14 @@ pgstrom_data_store_insert_tuple(pgstrom_data_store *pds,
 
 
 /*
- * pgstrom_data_store_insert_hashitem
+ * PDS_insert_hashitem
  *
  * It inserts a tuple to the data store of hash format.
  */
 bool
-pgstrom_data_store_insert_hashitem(pgstrom_data_store *pds,
-								   TupleTableSlot *slot,
-								   cl_uint hash_value)
+PDS_insert_hashitem(pgstrom_data_store *pds,
+					TupleTableSlot *slot,
+					cl_uint hash_value)
 {
 	kern_data_store	   *kds = pds->kds;
 	cl_uint			   *row_index = KERN_DATA_STORE_ROWINDEX(kds);
@@ -1133,124 +1142,6 @@ PDS_build_hashtable(pgstrom_data_store *pds)
 	}
 	kds->nslots = nslots;
 }
-
-
-#ifdef NOT_USED
-/*
- * pgstrom_dump_data_store
- *
- * A utility routine that dumps properties of data store
- */
-static inline void
-__dump_datum(StringInfo buf, kern_colmeta *cmeta, char *datum)
-{
-	int		i;
-
-	switch (cmeta->attlen)
-	{
-		case sizeof(char):
-			appendStringInfo(buf, "%02x", *((char *)datum));
-			break;
-		case sizeof(short):
-			appendStringInfo(buf, "%04x", *((short *)datum));
-			break;
-		case sizeof(int):
-			appendStringInfo(buf, "%08x", *((int *)datum));
-			break;
-		case sizeof(long):
-			appendStringInfo(buf, "%016lx", *((long *)datum));
-			break;
-		default:
-			if (cmeta->attlen >= 0)
-			{
-				for (i=0; i < cmeta->attlen; i++)
-					appendStringInfo(buf, "%02x", datum[i]);
-			}
-			else
-			{
-				Datum	vl_txt = DirectFunctionCall1(byteaout,
-													 PointerGetDatum(datum));
-				appendStringInfo(buf, "%s", DatumGetCString(vl_txt));
-			}
-	}
-}
-
-void
-pgstrom_dump_data_store(pgstrom_data_store *pds)
-{
-	kern_data_store	   *kds = pds->kds;
-	StringInfoData		buf;
-	int					i, j;
-
-	elog(INFO,
-		 "pds {kds_fname=%s kds_offset=%zu kds_length=%zu kds=%p ktoast=%p}",
-		 pds->kds_fname, pds->kds_offset, pds->kds_length,
-		 pds->kds, pds->ptoast);
-	elog(INFO,
-		 "kds {hostptr=%lu length=%u usage=%u ncols=%u nitems=%u nrooms=%u"
-		 " format=%s tdhasoid=%s tdtypeid=%u tdtypmod=%d}",
-		 kds->hostptr,
-		 kds->length, kds->usage, kds->ncols, kds->nitems, kds->nrooms,
-		 kds->format == KDS_FORMAT_ROW ? "row" :
-		 kds->format == KDS_FORMAT_SLOT ? "slot" : "unknown",
-		 kds->tdhasoid ? "true" : "false", kds->tdtypeid, kds->tdtypmod);
-	for (i=0; i < kds->ncols; i++)
-	{
-		elog(INFO, "column[%d] "
-			 "{attbyval=%d attalign=%d attlen=%d attnum=%d attcacheoff=%d}",
-			 i,
-			 kds->colmeta[i].attbyval,
-			 kds->colmeta[i].attalign,
-			 kds->colmeta[i].attlen,
-			 kds->colmeta[i].attnum,
-			 kds->colmeta[i].attcacheoff);
-	}
-
-	if (kds->format == KDS_FORMAT_ROW)
-	{
-		initStringInfo(&buf);
-		for (i=0; i < kds->nitems; i++)
-		{
-			kern_tupitem *tup_item = KERN_DATA_STORE_TUPITEM(kds, i);
-			HeapTupleHeaderData *htup = &tup_item->htup;
-			size_t		offset = (uintptr_t)tup_item - (uintptr_t)kds;
-			cl_int		natts = (htup->t_infomask2 & HEAP_NATTS_MASK);
-			cl_int		curr = htup->t_hoff;
-			char	   *datum;
-
-			resetStringInfo(&buf);
-			appendStringInfo(&buf, "htup[%d] @%zu natts=%u {",
-							 i, offset, natts);
-			for (j=0; j < kds->ncols; j++)
-			{
-				if (j > 0)
-					appendStringInfo(&buf, ", ");
-				if ((htup->t_infomask & HEAP_HASNULL) != 0 &&
-					att_isnull(j, htup->t_bits))
-					appendStringInfo(&buf, "null");
-				else if (kds->colmeta[j].attlen > 0)
-				{
-					curr = TYPEALIGN(kds->colmeta[j].attalign, curr);
-					datum = (char *)htup + curr;
-
-					__dump_datum(&buf, &kds->colmeta[j], datum);
-				}
-				else
-				{
-					if (!VARATT_NOT_PAD_BYTE((char *)htup + curr))
-						curr = TYPEALIGN(kds->colmeta[j].attalign, curr);
-					datum = (char *)htup + curr;
-					__dump_datum(&buf, &kds->colmeta[j], datum);
-					curr += VARSIZE_ANY(datum);
-				}
-			}
-			appendStringInfo(&buf, "}");
-			elog(INFO, "%s", buf.data);
-		}
-		pfree(buf.data);
-	}
-}
-#endif
 
 void
 pgstrom_init_datastore(void)

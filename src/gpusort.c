@@ -1128,12 +1128,12 @@ gpusort_next_chunk(GpuTaskState *gts)
 			Assert(!TupIsNull(slot));
 
 			if (!pds)
-				pds = pgstrom_create_data_store_row(gcontext,
-													tupdesc,
-													pgstrom_chunk_size(),
-													false);
+				pds = PDS_create_row(gcontext,
+									 tupdesc,
+									 pgstrom_chunk_size(),
+									 false);
 
-			if (!pgstrom_data_store_insert_tuple(pds, slot))
+			if (!PDS_insert_tuple(pds, slot))
 			{
 				gss->overflow_slot = slot;
 				break;

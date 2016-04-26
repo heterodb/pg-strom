@@ -253,7 +253,7 @@ gpujoin_exec_outerscan(kern_gpujoin *kgjoin,
 	kern_writeback_error_status(&kgjoin->kerror, kcxt.e);
 }
 
-KERNEL_FUNCTION_MAXTHREADS(void)
+KERNEL_FUNCTION(void)
 gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 					  kern_data_store *kds,
 					  kern_multirels *kmrels,
@@ -290,21 +290,18 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 	assert(kresults_src->nrels == depth);
 	assert(kresults_src->nitems <= kresults_src->nrooms);
 
-	/*
-	 * NOTE: size of Y-axis deterministric on the time of kernel launch.
-	 * host-side guarantees get_global_ysize() is larger then kds->nitems
-	 * of the depth. On the other hands, nobody can know correct size of
-	 * X-axis unless gpujoin_exec_nestloop() of the previous stage.
-	 * So, we ensure all the outer items are picked up by the loop below.
-	 */
+	/* inner tuple is pointed by y_index */
 	kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
 	assert(kds_in != NULL);
 
-	/* */
-	x_index = get_global_xid();
+	/*
+	 * Because of a historic reason, we call index of outer tuple 'x_index',
+	 * and index of inner tuple 'y_index'.
+	 */
 	x_limit = kresults_src->nitems;
-	y_index = window_base + get_global_yid();
+	x_index = get_global_id() % x_limit;
 	y_limit = min(window_base + window_size, kds_in->nitems);
+	y_index = window_base + (get_global_id() / x_limit);
 
 	/* will be valid, if LEFT OUTER JOIN */
 	oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth, outer_join_map);
@@ -342,7 +339,7 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 	offset = arithmetic_stairlike_add(is_matched ? 1 : 0, &count);
 	if (count > 0)
 	{
-		if (get_local_xid() == 0 && get_local_yid() == 0)
+		if (get_local_id() == 0)
 			base = atomicAdd(&kresults_dst->nitems, count);
 		__syncthreads();
 
@@ -399,7 +396,6 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 	INIT_KERNEL_CONTEXT(&kcxt,gpujoin_exec_hashjoin,kparams);
 
 	/* sanity checks */
-	assert(get_global_ysize() == 1);
 	assert(depth > 0 && depth <= kgjoin->num_rels);
 	assert(kresults_dst->nrels == depth + 1);
 	assert(kresults_src->nrels == depth);
@@ -481,7 +477,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 		offset = arithmetic_stairlike_add(is_matched ? 1 : 0, &count);
 		if (count > 0)
 		{
-			if (get_local_xid() == 0)
+			if (get_local_id() == 0)
 				base = atomicAdd(&kresults_dst->nitems, count);
 			__syncthreads();
 
@@ -597,7 +593,6 @@ gpujoin_outer_nestloop(kern_gpujoin *kgjoin,
 	INIT_KERNEL_CONTEXT(&kcxt,gpujoin_outer_nestloop,kparams);
 
 	/* sanity checks */
-	assert(get_global_ysize() == 1);
 	assert(depth > 0 && depth <= kgjoin->num_rels);
 	assert(kresults_dst->nrels == depth + 1);
 
@@ -607,7 +602,6 @@ gpujoin_outer_nestloop(kern_gpujoin *kgjoin,
 	 */
 	if (y_index < y_limit)
 	{
-		cl_uint		nitems = kds_in->nitems;
 		cl_bool	   *oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth,
 														   outer_join_map);
 
@@ -693,7 +687,6 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 	INIT_KERNEL_CONTEXT(&kcxt,gpujoin_outer_hashjoin,kparams);
 
 	/* sanity checks */
-	assert(get_global_ysize() == 1);
 	assert(depth > 0 && depth <= kgjoin->num_rels);
 	assert(kresults_dst->nrels == depth + 1);
 	assert(window_base + window_size <= kds_hash->nitems);
@@ -760,7 +753,8 @@ gpujoin_projection_row(kern_gpujoin *kgjoin,
 {
 	kern_parambuf  *kparams = KERN_GPUJOIN_PARAMBUF(kgjoin);
 	kern_context	kcxt;
-	cl_uint			res_index = get_global_id();
+	cl_uint			dest_nitems = kds_dst->nitems + kresults->nitems;
+	cl_uint			dest_index = kds_dst->nitems + get_global_id();
 	cl_uint			required;
 	cl_uint			offset;
 	cl_uint			count;
@@ -782,9 +776,8 @@ gpujoin_projection_row(kern_gpujoin *kgjoin,
 
 	INIT_KERNEL_CONTEXT(&kcxt, gpujoin_projection_row, kparams);
 
-	assert(kds_dst->nitems == kresults->nitems &&
-		   kds_dst->nitems <= kds_dst->nrooms);
-	if (res_index < kds_dst->nitems)
+	assert(kds_dst->nitems + kresults->nitems <= kds_dst->nrooms);
+	if (get_global_id() < kresults->nitems)
 	{
 #if GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE > 0
 		cl_char		extra_buf[GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE]
@@ -807,7 +800,7 @@ gpujoin_projection_row(kern_gpujoin *kgjoin,
 		/*
 		 * Step.1 - compute length of the result tuple to be written
 		 */
-		cl_uint	   *r_buffer = KERN_GET_RESULT(kresults, res_index);
+		cl_uint	   *r_buffer = KERN_GET_RESULT(kresults, get_global_id());
 
 		gpujoin_projection(&kcxt,
 						   kds_src,
@@ -841,7 +834,7 @@ gpujoin_projection_row(kern_gpujoin *kgjoin,
 		__syncthreads();
 
 		if (KERN_DATA_STORE_HEAD_LENGTH(kds_dst) +
-			STROMALIGN(sizeof(cl_uint) * kresults->nitems) +
+			STROMALIGN(sizeof(cl_uint) * dest_nitems) +
 			base + count > kds_dst->length)
 		{
 			STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
@@ -859,7 +852,8 @@ gpujoin_projection_row(kern_gpujoin *kgjoin,
 		cl_uint		   *tup_pos = KERN_DATA_STORE_ROWINDEX(kds_dst);
 		kern_tupitem   *tupitem = (kern_tupitem *)((char *)kds_dst + pos);
 
-		tup_pos[res_index] = pos;
+		assert(pos == (pos & ~7));
+		tup_pos[dest_index] = pos;
 		form_kern_heaptuple(&kcxt, kds_dst, tupitem,
 							tup_values, tup_isnull, NULL);
 	}
@@ -877,6 +871,7 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 {
 	kern_parambuf  *kparams = KERN_GPUJOIN_PARAMBUF(kgjoin);
 	kern_context	kcxt;
+	cl_uint			dest_index = kds_dst->nitems + get_global_id();
 	cl_uint		   *r_buffer;
 	Datum		   *tup_values;
 	cl_bool		   *tup_isnull;
@@ -896,7 +891,6 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 	cl_uint			offset	__attribute__ ((unused));
 	cl_uint			count	__attribute__ ((unused));
 	__shared__ cl_uint base	__attribute__ ((unused));
-	cl_uint			res_index = get_global_id();
 
 	/* sanity checks */
 	assert(kresults->nrels == kgjoin->num_rels + 1);
@@ -906,11 +900,12 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 	INIT_KERNEL_CONTEXT(&kcxt, gpujoin_projection_slot, kparams);
 
 	/* Do projection if thread is responsible */
-	if (res_index < kresults->nitems)
+	if (get_global_id() < kresults->nitems)
 	{
-		r_buffer = KERN_GET_RESULT(kresults, res_index);
-		tup_values = KERN_DATA_STORE_VALUES(kds_dst, res_index);
-		tup_isnull = KERN_DATA_STORE_ISNULL(kds_dst, res_index);
+		r_buffer = KERN_GET_RESULT(kresults, get_global_id());
+		assert(dest_index < kds_dst->nrooms);
+		tup_values = KERN_DATA_STORE_VALUES(kds_dst, dest_index);
+		tup_isnull = KERN_DATA_STORE_ISNULL(kds_dst, dest_index);
 
 		gpujoin_projection(&kcxt,
 						   kds_src,
@@ -941,14 +936,15 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 			base = atomicAdd(&kds_dst->usage, count);
 		__syncthreads();
 
-		if (KERN_DATA_STORE_SLOT_LENGTH(kds_dst, kresults->nitems) +
+		if (KERN_DATA_STORE_SLOT_LENGTH(kds_dst, (kds_dst->nitems +
+												  kresults->nitems)) +
 			base + count > kds_dst->length)
 		{
 			STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
 			goto out;
 		}
-		vl_buf = ((char *)kds_dst + kds_dst->length
-				  - (base + offset + extra_len));
+		vl_buf = ((char *)kds_dst + kds_dst->length -
+				  (base + offset + extra_len));
 	}
 	__syncthreads();
 #else
@@ -963,7 +959,7 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 	 * data representation. We have to fix up these values to fit
 	 * host-side representation.
 	 */
-	if (res_index < kresults->nitems)
+	if (get_global_id() < kresults->nitems)
 	{
 		cl_uint		i, ncols = kds_dst->ncols;
 
@@ -1204,7 +1200,7 @@ gpujoin_resize_window(kern_gpujoin *kgjoin,
 		cl_float    row_dist_score;
 
 		if (window_size == 0)
-			continue;
+			continue;	/* should not happen */
 		/*
 		 * NOTE: Adjustment of the row-distribution score
 		 *
@@ -1253,6 +1249,141 @@ gpujoin_resize_window(kern_gpujoin *kgjoin,
 	return target_depth;
 }
 
+/*
+ * gpujoin_try_next_window
+ *
+ * It tries to move the current partition window to the next position, and
+ * adjust size if we still have enough space on the kds_dst buffer.
+ */
+STATIC_FUNCTION(cl_bool)
+gpujoin_try_next_window(kern_gpujoin *kgjoin,
+						kern_multirels *kmrels,
+						kern_data_store *kds_src,
+						kern_data_store *kds_dst,
+						cl_uint last_nitems,
+						cl_uint last_usage)
+{
+	size_t		curr_length;
+	cl_uint		curr_nitems;
+	cl_int		i, j;
+	double		ratio = -1.0;
+
+	if (kds_dst->format == KDS_FORMAT_ROW)
+	{
+		curr_length = (KERN_DATA_STORE_HEAD_LENGTH(kds_dst) +
+					   STROMALIGN(sizeof(cl_uint) * kds_dst->nitems) +
+					   STROMALIGN(kds_dst->usage));
+
+		/* can we run the same scale join again? */
+		if (curr_length +
+			STROMALIGN(sizeof(cl_uint) * last_nitems) +
+			STROMALIGN(last_usage) > kds_dst->length)
+			return false;
+
+		/* how much larger window size if last nitems is not zero */
+		if (last_nitems > 0)
+		{
+			assert(last_usage > 0);
+			ratio = ((double)(kds_dst->length - curr_length) /
+					 (double)(STROMALIGN(sizeof(cl_uint) * last_nitems) +
+							  STROMALIGN(last_usage)));
+		}
+	}
+	else
+	{
+		curr_length = (KERN_DATA_STORE_SLOT_LENGTH(kds_dst, kds_dst->nitems) +
+					   STROMALIGN(kds_dst->usage));
+
+		/* can we run the same scale join again? */
+		if (curr_length +
+			LONGALIGN((sizeof(Datum) +
+					   sizeof(char)) * kds_dst->ncols) * last_nitems +
+			STROMALIGN(last_usage) > kds_dst->length)
+			return false;
+
+		/* how much larger window size if last nitems is not zero */
+		if (last_nitems > 0)
+		{
+			ratio = ((double)(kds_dst->length - curr_length) /
+					 (double)(LONGALIGN(sizeof(Datum) +
+										sizeof(char)) * kds_dst->ncols *
+							  last_nitems + STROMALIGN(last_usage)));
+		}
+	}
+
+	/*
+	 * At this point, less than half of the kds_dst buffer is in use.
+	 * It means we can run the same scale join twice using this buffer,
+	 * if any of the inner/outer relations are virtually partitioned,
+	 * thus, a part of them were invisible on the previous try.
+	 *
+	 * XXX - We may need to revise the logic for more adeque adjustment
+	 * For example, 'window_orig' may be valuable to inform CPU exact
+	 * size of the next try. Based on heuristics, we expand the deepest
+	 * partitioned depth. It's uncertain whether it is right decision.
+	 */
+	for (i = kgjoin->num_rels; i >= 0; i--)
+	{
+		kern_join_scale	   *jscale = kgjoin->jscale;
+
+		if (i == 0)
+			curr_nitems = (kds_src ? kds_src->nitems : 0);
+		else
+			curr_nitems = KERN_MULTIRELS_INNER_KDS(kmrels, i)->nitems;
+
+		if (jscale[i].window_base + jscale[i].window_size < curr_nitems)
+		{
+			cl_bool		meet_partition = false;
+
+			jscale[i].window_base += jscale[i].window_size;
+			jscale[i].window_size = Min(jscale[i].window_size,
+										curr_nitems - jscale[i].window_base);
+			/* rewind deeper */
+			for (j = kgjoin->num_rels; j > i; j--)
+			{
+				cl_uint		nitems;
+
+				jscale[j].window_base = 0;
+
+				nitems = KERN_MULTIRELS_INNER_KDS(kmrels, j)->nitems;
+				if (!meet_partition &&
+					jscale[j].window_size != nitems)
+				{
+					if (last_nitems == 0)
+						jscale[j].window_size = nitems;
+					else
+					{
+						jscale[j].window_size = (cl_uint)
+							((double)jscale[j].window_size * ratio);
+						if (jscale[j].window_size > nitems)
+							jscale[j].window_size = nitems;
+					}
+					meet_partition = true;
+				}
+			}
+
+			if (!meet_partition)
+			{
+				if (last_nitems == 0)
+					jscale[i].window_size = (curr_nitems -
+											 jscale[i].window_size);
+				else
+				{
+					jscale[i].window_size = (cl_uint)
+						((double)jscale[i].window_size * ratio);
+					if (jscale[i].window_base +
+						jscale[i].window_size < curr_nitems)
+						jscale[i].window_size = (curr_nitems -
+												 jscale[i].window_base);
+				}
+			}
+			return true;
+		}
+	}
+	return false;
+}
+
+
 /* NOTE: This macro assumes name of local variables in gpujoin_main() */
 #define SETUP_KERN_JOIN_ARGS(argbuf)			\
 	(argbuf)->kgjoin = kgjoin;					\
@@ -1290,6 +1421,7 @@ gpujoin_main(kern_gpujoin *kgjoin,		/* in/out: misc stuffs */
 	cl_uint				kresults_max_items = kgjoin->kresults_max_items;
 	cl_uint				window_base;
 	cl_uint				window_size;
+	cl_uint				dest_usage_prev;
 	cl_int				device;
 	cl_int				smx_clock;
 	cl_int				smx_count;
@@ -1332,10 +1464,13 @@ gpujoin_main(kern_gpujoin *kgjoin,		/* in/out: misc stuffs */
 		goto out;
 	}
 
-retry_major:
-	/* rewind the destination buffer */
 	kds_dst->nitems = 0;
-	kds_dst->usage = 0;
+	dest_usage_prev = 0;
+retry_major:
+	/* rewind the destination buffer; because kds_dst->usage is increased
+	 * by atomic operation even if this trial made too much joined results.
+	 * So, we save kds_dst->usage at the beginning. */
+	kds_dst->usage = dest_usage_prev;
 
 	for (depth = 1; depth <= kgjoin->num_rels; depth++)
 	{
@@ -1413,6 +1548,14 @@ retry_major:
 				/* update run-time statistics */
 				kgjoin->jscale[0].inner_nitems = kresults_src->nitems;
 				kgjoin->jscale[0].total_nitems = kresults_src->nitems;
+
+				/*
+				 * Once source nitems became zero, we cannot produce any
+				 * result tuples without RIGHT OUTER JOIN (and, it shall
+				 * not be kicked when kds_src != NULL).
+				 */
+				if (kresults_src->nitems == 0)
+					break;
 			}
 			else
 			{
@@ -1446,8 +1589,6 @@ retry_major:
 		{
 			if (kresults_src->nitems > 0)
 			{
-				cl_uint		shmem_size;
-
 				tv1 = clock64();
 				kern_join_args = (kern_join_args_t *)
 					cudaGetParameterBuffer(sizeof(void *),
@@ -1459,30 +1600,21 @@ retry_major:
 				}
 				SETUP_KERN_JOIN_ARGS(kern_join_args);
 
-				status = pgstrom_largest_workgroup_size(
+				status = pgstrom_optimal_workgroup_size(
 					&grid_sz,
 					&block_sz,
 					(const void *)gpujoin_exec_nestloop,
-					kresults_src->nitems,
+					(size_t)kresults_src->nitems * (size_t)window_size,
 					sizeof(kern_errorbuf));
 				if (status != cudaSuccess)
 				{
 					STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
 					goto out;
 				}
-
-				shmem_size = sizeof(kern_errorbuf) * (block_sz.x *
-													  block_sz.y);
-#if 0
-				printf("gpunestloop block(%u,%u,%u) grid(%u,%u,%u) xsize=%u ysize=%u\n",
-					   block_sz.x, block_sz.y, block_sz.z,
-					   grid_sz.x, grid_sz.y, grid_sz.z,
-					   kresults_src->nitems, window_size);
-#endif
 				status = cudaLaunchDevice((void *)gpujoin_exec_nestloop,
 										  kern_join_args,
 										  grid_sz, block_sz,
-										  shmem_size,
+										  sizeof(cl_uint) * block_sz.x,
 										  NULL);
 				if (status != cudaSuccess)
 				{
@@ -1799,134 +1931,172 @@ retry_major:
 		kresults_tmp = kresults_src;
 		kresults_src = kresults_dst;
 		kresults_dst = kresults_tmp;
+
+		/*
+		 * Once nitems became zero, we have no chance to produce any
+		 * result tuples without RIGHT OUTER JOIN. So, we don't need
+		 * to walk down deeper level any more, for a niche optimization.
+		 */
+		if (kds_src != NULL && kresults_src->nitems == 0)
+			break;
 	}
 
 	/*
-	 * Launch:
-	 * KERNEL_FUNCTION(void)
-	 * gpujoin_projection_(row|slot)(kern_gpujoin *kgjoin,
-	 *                               kern_multirels *kmrels,
-	 *                               kern_data_store *kds_src,
-	 *                               kern_data_store *kds_dst,
-	 *                               kern_resultbuf *kresults)
+	 * gpujoin_projection_* makes sense only if any joined tuples are
+	 * produced. Elsewhere, we can skip it.
 	 */
-	tv1 = clock64();
-	if (kds_dst->format == KDS_FORMAT_ROW)
-		kernel_projection = (const void *)gpujoin_projection_row;
-	else
-		kernel_projection = (const void *)gpujoin_projection_slot;
-
-	/*
-	 * Setup kds_dst according to the final kern_resultbuf
-	 */
-	if (kresults_src->nitems >= kds_dst->nrooms)
+	if (kresults_src->nitems > 0)
 	{
-		nsplits = kresults_src->nitems / kds_dst->nrooms + 1;
-		victim = gpujoin_resize_window(kgjoin,
-									   kmrels,
-									   kds_src,
-									   kresults_src,
-									   nsplits,
-									   smx_count,
-									   smx_clock);
-		if (victim < 0)
+		/*
+		 * Launch:
+		 * KERNEL_FUNCTION(void)
+		 * gpujoin_projection_(row|slot)(kern_gpujoin *kgjoin,
+		 *                               kern_multirels *kmrels,
+		 *                               kern_data_store *kds_src,
+		 *                               kern_data_store *kds_dst,
+		 *                               kern_resultbuf *kresults)
+		 */
+		tv1 = clock64();
+		if (kds_dst->format == KDS_FORMAT_ROW)
+			kernel_projection = (const void *)gpujoin_projection_row;
+		else
+			kernel_projection = (const void *)gpujoin_projection_slot;
+
+		/*
+		 * Setup kds_dst according to the final kern_resultbuf
+		 */
+		if (kds_dst->nitems + kresults_src->nitems >= kds_dst->nrooms)
 		{
-			STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
+			nsplits = kresults_src->nitems /
+				(kds_dst->nrooms - kds_dst->nitems) + 1;
+			victim = gpujoin_resize_window(kgjoin,
+										   kmrels,
+										   kds_src,
+										   kresults_src,
+										   nsplits,
+										   smx_count,
+										   smx_clock);
+			if (victim < 0)
+			{
+				STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
+				goto out;
+			}
+			kgjoin->num_major_retry++;
+			goto retry_major;
+		}
+
+		kern_args = (void **)cudaGetParameterBuffer(sizeof(void *),
+													sizeof(void *) * 5);
+		if (!kern_args)
+		{
+			STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelArgs);
 			goto out;
 		}
-		kgjoin->num_major_retry++;
-		goto retry_major;
-	}
-	kds_dst->nitems = kresults_src->nitems;
-	/* No need to launch projection kernel? */
-	if (kds_dst->nitems == 0)
-		goto out;
+		kern_args[0] = kgjoin;
+		kern_args[1] = kmrels;
+		kern_args[2] = kds_src;
+		kern_args[3] = kds_dst;
+		kern_args[4] = kresults_src;
 
-	kern_args = (void **)cudaGetParameterBuffer(sizeof(void *),
-												sizeof(void *) * 5);
-	if (!kern_args)
-	{
-		STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelArgs);
-		goto out;
-	}
-	kern_args[0] = kgjoin;
-	kern_args[1] = kmrels;
-	kern_args[2] = kds_src;
-	kern_args[3] = kds_dst;
-	kern_args[4] = kresults_src;
-
-	status = pgstrom_optimal_workgroup_size(&grid_sz,
-											&block_sz,
-											kernel_projection,
-											kresults_src->nitems,
-											sizeof(kern_errorbuf));
-	if (status != cudaSuccess)
-	{
-		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
-		goto out;
-	}
-
-	status = cudaLaunchDevice((void *)kernel_projection,
-							  kern_args, grid_sz, block_sz,
-							  sizeof(kern_errorbuf) * block_sz.x,
-							  NULL);
-	if (status != cudaSuccess)
-	{
-		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
-		goto out;
-	}
-
-	status = cudaDeviceSynchronize();
-	if (status != cudaSuccess)
-	{
-		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
-		goto out;
-	}
-	tv2 = clock64();
-	TIMEVAL_RECORD(kgjoin,kern_projection,tv1,tv2,smx_clock);
-
-	if (kgjoin->kerror.errcode == StromError_DataStoreNoSpace)
-	{
-		cl_uint		ncols = kds_dst->ncols;
-		cl_uint		nitems_to_fit;
-		cl_uint		width_avg;
-
-		if (kds_dst->nitems == 0)
-			return;		/* should never happen */
-		if (kds_dst->format == KDS_FORMAT_SLOT)
+		status = pgstrom_optimal_workgroup_size(&grid_sz,
+												&block_sz,
+												kernel_projection,
+												kresults_src->nitems,
+												sizeof(kern_errorbuf));
+		if (status != cudaSuccess)
 		{
-			width_avg = (LONGALIGN((sizeof(Datum) +
-									sizeof(char)) * ncols) +
-						 MAXALIGN(kds_dst->usage /
-								  kds_dst->nitems + 1));
-			nitems_to_fit = (kds_dst->length -
-							 STROMALIGN(offsetof(kern_data_store,
-												 colmeta[ncols]))) / width_avg;
+			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+			goto out;
 		}
-		else
+
+		status = cudaLaunchDevice((void *)kernel_projection,
+								  kern_args, grid_sz, block_sz,
+								  sizeof(kern_errorbuf) * block_sz.x,
+								  NULL);
+		if (status != cudaSuccess)
 		{
-			width_avg = MAXALIGN(kds_dst->usage /
-								 kds_dst->nitems + 1) + sizeof(cl_uint);
-			nitems_to_fit = (kds_dst->length -
-							 STROMALIGN(offsetof(kern_data_store,
-												 colmeta[ncols]))) / width_avg;
+			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+			goto out;
 		}
-		if (gpujoin_resize_window(kgjoin,
-								  kmrels,
-								  kds_src,
-								  kresults_src,
-								  kds_dst->nitems / nitems_to_fit + 1,
-								  smx_count,
-								  smx_clock) < 0)
-			return;
-		kgjoin->num_major_retry++;
-		goto retry_major;
+
+		status = cudaDeviceSynchronize();
+		if (status != cudaSuccess)
+		{
+			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+			goto out;
+		}
+		tv2 = clock64();
+		TIMEVAL_RECORD(kgjoin,kern_projection,tv1,tv2,smx_clock);
+
+		if (kgjoin->kerror.errcode == StromError_DataStoreNoSpace)
+		{
+			cl_uint		ncols = kds_dst->ncols;
+			cl_uint		nitems_to_fit;
+			cl_uint		width_avg;
+
+			if (kds_dst->nitems == 0)
+				return;		/* should never happen */
+			if (kds_dst->format == KDS_FORMAT_SLOT)
+			{
+				width_avg = (LONGALIGN((sizeof(Datum) +
+										sizeof(char)) * ncols) +
+							 MAXALIGN((kds_dst->usage - dest_usage_prev) /
+									  kresults_src->nitems + 1));
+				nitems_to_fit = kds_dst->length -
+					STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
+				nitems_to_fit /= width_avg;
+			}
+			else
+			{
+				width_avg = MAXALIGN((kds_dst->usage - dest_usage_prev) /
+									 kds_dst->nitems + 1) + sizeof(cl_uint);
+				nitems_to_fit = kds_dst->length -
+					STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
+				nitems_to_fit /= width_avg;
+			}
+
+			if (gpujoin_resize_window(kgjoin,
+									  kmrels,
+									  kds_src,
+									  kresults_src,
+									  kresults_src->nitems / nitems_to_fit + 1,
+									  smx_count,
+									  smx_clock) < 0)
+				return;
+			kgjoin->num_major_retry++;
+			goto retry_major;
+		}
 	}
+
+	/* OK, we could make up joined results on the kds_dst */
+	kds_dst->nitems += kresults_src->nitems;
+	assert(kds_dst->nitems <= kds_dst->nrooms);
+	assert(dest_usage_prev <= kds_dst->usage);
 
 	/*
-	 * TODO: If kds_dst still has space, do major_retry if we can shift
-	 * inner_base
+	 * NOTE: If we still have enough space on the destination buffer, and
+	 * when virtual partition window is applied, it is worthful to retry
+	 * next join with new window_base/size, without returning to the user-
+	 * space once.
+	 *
+	 * Also note that we check error code here. It is valid check because
+	 * gpujoin_main() shall be in single-thread execution.
 	 */
+	if (kgjoin->kerror.errcode == StromError_Success &&
+		gpujoin_try_next_window(kgjoin,
+								kmrels,
+								kds_src,
+								kds_dst,
+								kresults_src->nitems,
+								kds_dst->usage - dest_usage_prev))
+	{
+		printf("gpujoin_try_next_window(nitems=%u += %u, usage=%u += %u\n",
+			   kds_dst->nitems - kresults_src->nitems,
+			   kresults_src->nitems,
+			   dest_usage_prev, kds_dst->usage - dest_usage_prev);
+		dest_usage_prev = kds_dst->usage;
+		goto retry_major;
+	}
 out:
 	kern_writeback_error_status(&kgjoin->kerror, kcxt.e);
 }

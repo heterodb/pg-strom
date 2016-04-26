@@ -1578,7 +1578,6 @@ gpupreagg_fixup_varlena(kern_gpupreagg *kgpreagg,
 			if (cmeta.atttypid == PG_NUMERICOID)
 			{
 				assert(numeric_ptr != NULL);
-
 				numeric_len = pg_numeric_to_varlena(&kcxt, numeric_ptr,
 													dst_values[i],
 													dst_isnull[i]);
@@ -1712,8 +1711,6 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 
 	if (kgpreagg->reduction_mode == GPUPREAGG_NOGROUP_REDUCTION)
 	{
-		cl_uint		nitems_orig = kds_slot->nitems;
-
 		/* Launch:
 		 * KERNEL_FUNCTION(void)
 		 * gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,

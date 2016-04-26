@@ -160,18 +160,6 @@ extern __shared__ cl_ulong __pgstrom_dynamic_shared_workmem[];
 #define get_global_size()		(blockDim.x * gridDim.x)
 #define get_global_base()		(blockIdx.x * blockDim.x)
 
-/* 2-dimensional */
-#define get_local_xid()			get_local_id()
-#define get_local_xsize()		get_local_size()
-#define get_global_xid()		get_global_id()
-#define get_global_xsize()		get_global_size()
-#define get_global_xbase()		get_global_base()
-#define get_local_yid()			(threadIdx.y)
-#define get_local_ysize()		(blockDim.y)
-#define get_global_yid()		(threadIdx.y + blockIdx.y * blockDim.y)
-#define get_global_ysize()		(blockDim.y * gridDim.y)
-#define get_global_ybase()		(blockIdx.y * blockDim.y)
-
 #else	/* __CUDACC__ */
 #include "access/htup_details.h"
 #include "storage/itemptr.h"
@@ -1664,8 +1652,8 @@ arithmetic_stairlike_add(cl_uint my_value, cl_uint *total_sum)
 	cl_int		i, j;
 
 	/* setup local size (pay attention, if 2D invocation) */
-	local_sz = get_local_ysize() * get_local_xsize();
-	local_id = get_local_yid() * get_local_xsize() + get_local_xid();
+	local_sz = get_local_size();
+	local_id = get_local_id();
 	assert(local_id < local_sz);
 
 	/* set initial value */

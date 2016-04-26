@@ -2041,13 +2041,13 @@ gpupreagg_codegen_aggcalc(GpuPreAggInfo *gpa_info,
 			"                      kern_data_store *newval_kds,\n"
 			"                      size_t newval_index)\n"
 			"{\n"
-			"  char    *accum_isnull\n"
+			"  char    *accum_isnull	__attribute__((unused))\n"
 			"   = KERN_DATA_STORE_ISNULL(accum_kds,accum_index) + attnum;\n"
-			"  Datum   *accum_value\n"
+			"  Datum   *accum_value		__attribute__((unused))\n"
 			"   = KERN_DATA_STORE_VALUES(accum_kds,accum_index) + attnum;\n"
-			"  char     new_isnull\n"
+			"  char     new_isnull		__attribute__((unused))\n"
 			"   = KERN_DATA_STORE_ISNULL(newval_kds,newval_index)[attnum];\n"
-			"  Datum    new_value\n"
+			"  Datum    new_value		__attribute__((unused))\n"
 			"   = KERN_DATA_STORE_VALUES(newval_kds,newval_index)[attnum];\n"
 			"\n"
 			"  assert(accum_kds->format == KDS_FORMAT_SLOT);\n"
@@ -2719,8 +2719,8 @@ gpupreagg_codegen_projection(GpuPreAggInfo *gpa_info,
 						&temp,
 						"  temp.numeric_v = pg_numeric_datum_ref(kcxt,addr,\n"
 						"                                        false);\n"
-						"  dst_isnull[%d] = temp_numeric.isnull;\n"
-						"  dst_values[%d] = (Datum)temp_numeric.value;\n",
+						"  dst_isnull[%d] = temp.numeric_v.isnull;\n"
+						"  dst_values[%d] = (Datum)temp.numeric_v.value;\n",
 						j, j);
 				}
 				else if (!typbyval)
@@ -3710,11 +3710,12 @@ gpupreagg_create_segment(GpuPreAggState *gpas)
 	cuda_index = gcontext->next_context++ % gcontext->num_context;
 
 	/* pds_final buffer */
-	pds_final = pgstrom_create_data_store_slot(gcontext,
-											   tupdesc,
-											   f_nrooms,
-											   varlena_length,
-											   NULL);
+	pds_final = PDS_create_slot(gcontext,
+								tupdesc,
+								f_nrooms,
+								varlena_length,
+								true,
+								NULL);
 	/* gpupreagg_segment itself */
 	offset = STROMALIGN(sizeof(gpupreagg_segment));
 	required = offset +
@@ -3848,7 +3849,7 @@ gpupreagg_put_segment(gpupreagg_segment *segment)
 
 		if (segment->pds_final)
 		{
-			pgstrom_release_data_store(segment->pds_final);
+			PDS_release(segment->pds_final);
 			segment->pds_final = NULL;
 		}
 
@@ -3856,7 +3857,7 @@ gpupreagg_put_segment(gpupreagg_segment *segment)
 		{
 			if (segment->pds_src[i] != NULL)
 			{
-				pgstrom_release_data_store(segment->pds_src[i]);
+				PDS_release(segment->pds_src[i]);
 				segment->pds_src[i] = NULL;
 			}
 		}
@@ -4032,7 +4033,8 @@ gpupreagg_task_create(GpuPreAggState *gpas,
 						   tupdesc,
 						   length,
 						   KDS_FORMAT_SLOT,
-						   nitems);
+						   nitems,
+						   true);
 	return gpreagg;
 }
 
@@ -4096,12 +4098,12 @@ gpupreagg_next_chunk(GpuTaskState *gts)
 			}
 
 			if (!pds)
-				pds = pgstrom_create_data_store_row(gcontext,
-													tupdesc,
-													pgstrom_chunk_size(),
-													false);
+				pds = PDS_create_row(gcontext,
+									 tupdesc,
+									 pgstrom_chunk_size(),
+									 false);
 			/* insert a tuple to the data-store */
-			if (!pgstrom_data_store_insert_tuple(pds, slot))
+			if (!PDS_insert_tuple(pds, slot))
 			{
 				gpas->outer_overflow = slot;
 				break;
@@ -4163,7 +4165,7 @@ retry_segment:
 	 */
 	Assert(segment->idx_chunks < segment->num_chunks);
 	segment_id = segment->idx_chunks++;
-	segment->pds_src[segment_id] = pgstrom_acquire_data_store(pds);
+	segment->pds_src[segment_id] = PDS_retain(pds);
 	if (segment->idx_chunks == segment->num_chunks)
 		is_terminator = true;
 	gpreagg = gpupreagg_task_create(gpas, pds, segment, is_terminator);
@@ -4210,7 +4212,7 @@ retry:
 	ExecClearTuple(slot);
 	if (!pgstrom_fetch_data_store(slot, pds, row_index, &tuple))
 	{
-		pgstrom_release_data_store(pds);
+		PDS_release(pds);
 		segment->pds_src[segment->idx_chunks - 1] = NULL;
 		segment->idx_chunks--;
 		gpas->gts.curr_index = 0;
@@ -4400,7 +4402,7 @@ gpupreagg_task_release(GpuTask *gtask)
 	gpupreagg_cleanup_cuda_resources(gpreagg);
 
 	if (gpreagg->pds_in)
-		pgstrom_release_data_store(gpreagg->pds_in);
+		PDS_release(gpreagg->pds_in);
 	if (gpreagg->segment)
 		gpupreagg_put_segment(gpreagg->segment);
 	pfree(gpreagg);
