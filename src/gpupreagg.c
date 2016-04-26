@@ -2041,13 +2041,13 @@ gpupreagg_codegen_aggcalc(GpuPreAggInfo *gpa_info,
 			"                      kern_data_store *newval_kds,\n"
 			"                      size_t newval_index)\n"
 			"{\n"
-			"  char    *accum_isnull\n"
+			"  char    *accum_isnull	__attribute__((unused))\n"
 			"   = KERN_DATA_STORE_ISNULL(accum_kds,accum_index) + attnum;\n"
-			"  Datum   *accum_value\n"
+			"  Datum   *accum_value		__attribute__((unused))\n"
 			"   = KERN_DATA_STORE_VALUES(accum_kds,accum_index) + attnum;\n"
-			"  char     new_isnull\n"
+			"  char     new_isnull		__attribute__((unused))\n"
 			"   = KERN_DATA_STORE_ISNULL(newval_kds,newval_index)[attnum];\n"
-			"  Datum    new_value\n"
+			"  Datum    new_value		__attribute__((unused))\n"
 			"   = KERN_DATA_STORE_VALUES(newval_kds,newval_index)[attnum];\n"
 			"\n"
 			"  assert(accum_kds->format == KDS_FORMAT_SLOT);\n"
@@ -2719,8 +2719,8 @@ gpupreagg_codegen_projection(GpuPreAggInfo *gpa_info,
 						&temp,
 						"  temp.numeric_v = pg_numeric_datum_ref(kcxt,addr,\n"
 						"                                        false);\n"
-						"  dst_isnull[%d] = temp_numeric.isnull;\n"
-						"  dst_values[%d] = (Datum)temp_numeric.value;\n",
+						"  dst_isnull[%d] = temp.numeric_v.isnull;\n"
+						"  dst_values[%d] = (Datum)temp.numeric_v.value;\n",
 						j, j);
 				}
 				else if (!typbyval)

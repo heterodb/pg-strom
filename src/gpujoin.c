@@ -4203,7 +4203,7 @@ gpujoin_create_task(GpuJoinState *gjs,
 	Size				length;
 	Size				required;
 	Size				max_items;
-	cl_int				i, depth;
+	cl_int				i, j, depth;
 	cl_int				target_depth;
 	cl_double			target_row_dist_score;
 	cl_bool				jscale_rewind = false;
@@ -4242,7 +4242,7 @@ gpujoin_create_task(GpuJoinState *gjs,
 	 * If a valid jscale_old is supplied, it means this task shall be
 	 * re-enqueued because of smaller buffer than actual necessity.
 	 */
-	for (i=0; i <= gjs->num_rels; i++)
+	for (i = gjs->num_rels; i >= 0; i--)
 	{
 		kern_join_scale	   *jscale = pgjoin->kern.jscale;
 		cl_uint				nitems;
@@ -4255,37 +4255,31 @@ gpujoin_create_task(GpuJoinState *gjs,
 			nitems = pds->kds->nitems;
 		}
 
-		if (jscale_old)
-		{
-			if (!jscale_rewind)
-			{
-				if (jscale_old[i].window_base +
-					jscale_old[i].window_size < nitems)
-				{
-					jscale[i].window_base = (jscale_old[i].window_base +
-											 jscale_old[i].window_size);
-					jscale[i].window_size = jscale_old[i].window_size;
-					if (jscale[i].window_base +
-						jscale[i].window_size > nitems)
-						jscale[i].window_size = nitems - jscale[i].window_base;
-					jscale_rewind = true;
-				}
-				else
-				{
-					jscale[i].window_base = jscale_old[i].window_base;
-					jscale[i].window_size = jscale_old[i].window_size;
-				}
-			}
-			else
-			{
-				/* rewind the window size to 0, but keep window_size */
-				jscale[i].window_base = 0;
-			}
-		}
-		else
+		if (!jscale_old)
 		{
 			jscale[i].window_base = 0;
 			jscale[i].window_size = nitems;
+		}
+		else if (!jscale_rewind &&
+				 jscale_old[i].window_base +
+				 jscale_old[i].window_size < nitems)
+		{
+			jscale[i].window_base = (jscale_old[i].window_base +
+									 jscale_old[i].window_size);
+			jscale[i].window_size = jscale_old[i].window_size;
+			if (jscale[i].window_base +
+				jscale[i].window_size > nitems)
+				jscale[i].window_size = nitems - jscale[i].window_base;
+
+			for (j = i + 1; j <= gjs->num_rels; j++)
+				jscale[j].window_base  = 0;
+
+			jscale_rewind = true;
+		}
+		else
+		{
+			jscale[i].window_base = jscale_old[i].window_base;
+			jscale[i].window_size = jscale_old[i].window_size;
 		}
 	}
 	Assert(!jscale_old || jscale_rewind);
