@@ -2441,6 +2441,45 @@ pgstrom_device_expression(Expr *expr)
 		}
 		return true;
 	}
+	else if (IsA(expr, ArrayRef))
+	{
+		ArrayRef	   *aref = (ArrayRef *) expr;
+		devtype_info   *dtype = pgstrom_devtype_lookup(aref->refelemtype);
+
+		/*
+		 * MEMO: ArrayRef takes supported array type, and returns a scalar
+		 * type
+		 */
+		if (!dtype /* needs to check */)
+			goto unable;
+
+		/* we cannot support ArrayRef that intends value assignment */
+		if (aref->refassgnexpr != NULL)
+			goto unable;
+
+		/* we cannot support ArrayRef that returns a sliced array */
+		if (aref->reflowerindexpr != NIL)
+			goto unable;
+
+		if (!pgstrom_device_expression((Expr *)aref->refupperindexpr))
+			return false;
+
+		if (!pgstrom_device_expression(aref->refexpr))
+			return false;
+
+		return true;
+	}
+	else if (IsA(expr, ScalarArrayOpExpr))
+	{
+		ScalarArrayOpExpr *opexpr = (ScalarArrayOpExpr *) expr;
+		devfunc_info   *dfunc = pgstrom_devfunc_lookup(opexpr->opfuncid,
+													   opexpr->inputcollid);
+		if (!dfunc)
+			goto unable;
+		if (!pgstrom_device_expression((Expr *) opexpr->args))
+			return false;
+	}
+unable:
 	elog(DEBUG2, "Unable to run on device: %s", nodeToString(expr));
 	return false;
 }
