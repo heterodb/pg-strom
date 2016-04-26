@@ -4111,8 +4111,7 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs,
 								  tupdesc,
 								  nrooms,
 								  gjs->extra_maxlen * nrooms,
-								  false,
-								  NULL);
+								  false);
 	}
 	else
 	{
@@ -4173,7 +4172,7 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs,
 				elog(ERROR, "Too much growth of result rows");
 			return NULL;
 		}
-		pds_dst = PDS_create_row(gcontext, tupdesc, length, false);
+		pds_dst = PDS_create_row(gcontext, tupdesc, length);
 	}
 	return pds_dst;
 }
@@ -4538,8 +4537,7 @@ gpujoin_next_chunk(GpuTaskState *gts)
 				{
 					pds = PDS_create_row(gjs->gts.gcontext,
 										 tupdesc,
-										 pgstrom_chunk_size(),
-										 false);
+										 pgstrom_chunk_size());
 				}
 
 				/* insert the tuple on the data-store */
@@ -6001,8 +5999,7 @@ gpujoin_inner_hash_preload_TS(GpuJoinState *gjs,
 			hash_max = i * (1U << istate->hgram_shift) - 1;
 			pds_hash = PDS_create_hash(gjs->gts.gcontext,
 									   scan_desc,
-									   kds_length,
-									   false);
+									   kds_length);
 			pds_hash->kds->hash_min = hash_min;
 			pds_hash->kds->hash_max = hash_max;
 
@@ -6024,8 +6021,7 @@ gpujoin_inner_hash_preload_TS(GpuJoinState *gjs,
 										   curr_size + BLCKSZ);
 	pds_hash = PDS_create_hash(gjs->gts.gcontext,
 							   scan_desc,
-							   kds_length,
-							   false);
+							   kds_length);
 	pds_hash->kds->hash_min = hash_min;
 	pds_hash->kds->hash_max = UINT_MAX;
 	pds_list = lappend(pds_list, pds_hash);
@@ -6116,8 +6112,7 @@ next:
 			empty_len = KDS_CALCULATE_HASH_LENGTH(scan_desc->natts, 0, 0);
 			pds_hash = PDS_create_hash(gjs->gts.gcontext,
 									   scan_desc,
-									   empty_len,
-									   false);
+									   empty_len);
 			istate->pds_list = list_make1(pds_hash);
 		}
 		/* add extra randomness for better key distribution */
@@ -6151,8 +6146,7 @@ next:
 								  pgstrom_chunk_size() / 4);
 		pds_hash = PDS_create_hash(gjs->gts.gcontext,
 								   scan_desc,
-								   ichunk_size,
-								   false);
+								   ichunk_size);
 		istate->pds_list = list_make1(pds_hash);
 		istate->ntuples = 0;
 		istate->consumed = KDS_CALCULATE_HEAD_LENGTH(scan_desc->natts);
@@ -6196,8 +6190,7 @@ retry:
 
 			pds_hash = PDS_create_hash(gjs->gts.gcontext,
 									   scan_desc,
-									   istate->pds_limit,
-									   false);
+									   istate->pds_limit);
 			istate->pds_list = lappend(istate->pds_list, pds_hash);
 			istate->ntuples = 0;
 			istate->consumed = KDS_CALCULATE_HEAD_LENGTH(scan_desc->natts);
@@ -6286,8 +6279,7 @@ gpujoin_inner_heap_preload(GpuJoinState *gjs,
 											colmeta[scan_desc->natts]));
 			pds_heap = PDS_create_row(gjs->gts.gcontext,
 									  scan_desc,
-									  empty_len,
-									  false);
+									  empty_len);
 			istate->pds_list = list_make1(pds_heap);
 		}
 		/* add extra randomness for better key distribution */
@@ -6305,8 +6297,7 @@ gpujoin_inner_heap_preload(GpuJoinState *gjs,
 								  pgstrom_chunk_size() / 4);
 		pds_heap = PDS_create_row(gjs->gts.gcontext,
 								  scan_desc,
-								  ichunk_size,
-								  false);
+								  ichunk_size);
 		istate->pds_list = list_make1(pds_heap);
 		istate->consumed = KDS_CALCULATE_HEAD_LENGTH(scan_desc->natts);
 		istate->ntuples = 0;
@@ -6327,8 +6318,7 @@ gpujoin_inner_heap_preload(GpuJoinState *gjs,
 	{
 		pds_heap = PDS_create_row(gjs->gts.gcontext,
 								  scan_desc,
-								  pds_heap->kds_length,
-								  false);
+								  pds_heap->kds_length);
 		istate->pds_list = lappend(istate->pds_list, pds_heap);
 		istate->consumed = KDS_CALCULATE_HEAD_LENGTH(scan_desc->natts);
 		istate->ntuples = 0;

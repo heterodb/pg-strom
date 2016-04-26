@@ -350,11 +350,8 @@ typedef struct pgstrom_data_store
 {
 	dlist_node	pds_chain;	/* link to GpuContext->pds_list */
 	cl_int		refcnt;		/* reference counter */
-	FileName	kds_fname;	/* filename, if file-mapped */
-	Size		kds_offset;	/* offset of mapped file */
 	Size		kds_length;	/* length of the kernel data store */
 	kern_data_store *kds;
-	struct pgstrom_data_store *ptoast;
 } pgstrom_data_store;
 
 /*
@@ -518,26 +515,15 @@ extern void init_kernel_data_store(kern_data_store *kds,
 
 extern pgstrom_data_store *PDS_create_row(GpuContext *gcontext,
 										  TupleDesc tupdesc,
-										  Size length,
-										  bool file_mapped);
+										  Size length);
 extern pgstrom_data_store *PDS_create_slot(GpuContext *gcontext,
 										   TupleDesc tupdesc,
 										   cl_uint nrooms,
 										   Size extra_length,
-										   bool use_internal,
-										   pgstrom_data_store *ptoast);
-
+										   bool use_internal);
 extern pgstrom_data_store *PDS_create_hash(GpuContext *gcontext,
 										   TupleDesc tupdesc,
-										   Size length,
-										   bool file_mapped);
-extern void
-pgstrom_file_mmap_data_store(FileName kds_fname,
-							 Size kds_offset,
-							 Size kds_length,
-							 kern_data_store **p_kds,
-							 kern_data_store **p_ktoast);
-
+										   Size length);
 extern int PDS_insert_block(pgstrom_data_store *pds,
 							Relation rel,
 							BlockNumber blknum,
@@ -590,6 +576,7 @@ extern void pgstrom_init_gpupreagg(void);
  */
 extern void pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan);
 extern bool pgstrom_plan_is_gpusort(const Plan *plan);
+extern void assign_gpusort_session_info(StringInfo buf, GpuTaskState *gts);
 extern void pgstrom_init_gpusort(void);
 
 /*

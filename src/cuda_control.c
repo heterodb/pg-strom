@@ -1840,8 +1840,7 @@ pgstrom_exec_chunk_gputask(GpuTaskState *gts, size_t chunk_size)
 			{
 				pds_dst = PDS_create_row(gts->gcontext,
 										 slot->tts_tupleDescriptor,
-										 chunk_size,
-										 false);
+										 chunk_size);
 			}
 
 			/*

@@ -3714,8 +3714,7 @@ gpupreagg_create_segment(GpuPreAggState *gpas)
 								tupdesc,
 								f_nrooms,
 								varlena_length,
-								true,
-								NULL);
+								true);
 	/* gpupreagg_segment itself */
 	offset = STROMALIGN(sizeof(gpupreagg_segment));
 	required = offset +
@@ -4100,8 +4099,7 @@ gpupreagg_next_chunk(GpuTaskState *gts)
 			if (!pds)
 				pds = PDS_create_row(gcontext,
 									 tupdesc,
-									 pgstrom_chunk_size(),
-									 false);
+									 pgstrom_chunk_size());
 			/* insert a tuple to the data-store */
 			if (!PDS_insert_tuple(pds, slot))
 			{

@@ -1818,8 +1818,7 @@ create_pgstrom_gpuscan_task(GpuScanState *gss, pgstrom_data_store *pds_src)
 						  gss->base_fixed_width, 0) * kds_src->nitems);
 			pds_dst = PDS_create_row(gcontext,
 									 scan_tupdesc,
-									 length,
-									 false);
+									 length);
 		}
 	}
 	else
@@ -1829,8 +1828,7 @@ create_pgstrom_gpuscan_task(GpuScanState *gss, pgstrom_data_store *pds_src)
 								  scan_tupdesc,
 								  kds_src->nitems,
 								  length,
-								  false,
-								  NULL);
+								  false);
 	}
 
 	/*
@@ -1886,8 +1884,7 @@ pgstrom_exec_scan_chunk(GpuTaskState *gts, Size chunk_length)
 	PERFMON_BEGIN(&gts->pfm, &tv1);
 	pds = PDS_create_row(gts->gcontext,
 						 tupdesc,
-						 chunk_length,
-						 false);
+						 chunk_length);
 	pds->kds->table_oid = RelationGetRelid(base_rel);
 
 	/*

@@ -1130,8 +1130,7 @@ gpusort_next_chunk(GpuTaskState *gts)
 			if (!pds)
 				pds = PDS_create_row(gcontext,
 									 tupdesc,
-									 pgstrom_chunk_size(),
-									 false);
+									 pgstrom_chunk_size());
 
 			if (!PDS_insert_tuple(pds, slot))
 			{

@@ -142,75 +142,6 @@ estimate_num_chunks(Path *pathnode)
 }
 
 /*
- * pgstrom_temp_dirpath - makes a temporary file according to the system
- * setting. Note that we never gueran
- */
-static int
-pgstrom_open_tempfile(const char **p_tempfilepath)
-{
-	static long	tempFileCounter = 0;
-	static char	tempfilepath[MAXPGPATH];
-	char		tempdirpath[MAXPGPATH];
-	int			file_desc;
-	int			file_flags;
-	Oid			tablespace_oid = GetNextTempTableSpace();
-
-	if (!OidIsValid(tablespace_oid))
-		tablespace_oid = (OidIsValid(MyDatabaseTableSpace)
-						  ? MyDatabaseTableSpace :
-						  DEFAULTTABLESPACE_OID);
-
-	if (tablespace_oid == DEFAULTTABLESPACE_OID ||
-		tablespace_oid == GLOBALTABLESPACE_OID)
-	{
-		/* The default tablespace is {datadir}/base */
-		snprintf(tempdirpath, sizeof(tempdirpath),
-				 "base/%s", PG_TEMP_FILES_DIR);
-	}
-	else
-	{
-		/* All other tablespaces are accessed via symlinks */
-		snprintf(tempdirpath, sizeof(tempdirpath),
-				 "pg_tblspc/%u/%s/%s",
-				 tablespace_oid,
-				 TABLESPACE_VERSION_DIRECTORY,
-				 PG_TEMP_FILES_DIR);
-	}
-
-	/*
-	 * Generate a tempfile name that should be unique within the current
-	 * database instance.
-	 */
-	snprintf(tempfilepath, sizeof(tempfilepath),
-			 "%s/%s_strom_%d.%ld.map",
-			 tempdirpath, PG_TEMP_FILE_PREFIX,
-			 MyProcPid, tempFileCounter++);
-
-	file_flags = O_RDWR | O_CREAT | O_TRUNC | PG_BINARY;
-	file_desc = OpenTransientFile(tempfilepath, file_flags, 0600);
-	if (file_desc < 0)
-	{
-		/*
-		 * We might need to create the tablespace's tempfile directory,
-		 * if no one has yet done so. However, no error check needed,
-		 * because concurrent mkdir() can happen and OpenTransientFile
-		 * below eventually raise an error.
-		 */
-		mkdir(tempdirpath, S_IRWXU);
-
-		file_desc = OpenTransientFile(tempfilepath, file_flags, 0600);
-		if (file_desc < 0)
-			ereport(ERROR,
-					(errcode_for_file_access(),
-					 errmsg("could not create temporary file \"%s\": %m",
-							tempfilepath)));
-	}
-	if (p_tempfilepath)
-		*p_tempfilepath = tempfilepath;
-	return file_desc;
-}
-
-/*
  * BulkExecProcNode
  *
  * It runs the underlying sub-plan managed by PG-Strom in bulk-execution
@@ -320,48 +251,18 @@ void
 PDS_release(pgstrom_data_store *pds)
 {
 	Assert(pds->refcnt > 0);
-	/* acquired by multiple owners? */
-	if (--pds->refcnt > 0)
-		return;
-
-	/* detach from the GpuContext */
-	if (pds->pds_chain.prev && pds->pds_chain.next)
+	if (--pds->refcnt == 0)
 	{
-		dlist_delete(&pds->pds_chain);
-		memset(&pds->pds_chain, 0, sizeof(dlist_node));
-	}
-
-	/* release relevant toast store, if any */
-	if (pds->ptoast)
-		PDS_release(pds->ptoast);
-	/* release body of the data store */
-	if (!pds->kds_fname)
-		pfree(pds->kds);
-	else
-	{
-		size_t		mmap_length = TYPEALIGN(BLCKSZ, pds->kds_length);
-		CUresult	rc;
-
-		rc = cuMemHostUnregister(pds->kds);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuMemHostUnregister: %s", errorText(rc));
-
-		if (munmap(pds->kds, mmap_length) != 0)
-			ereport(WARNING,
-					(errcode_for_file_access(),
-					 errmsg("could not unmap file \"%s\" from %p-%p: %m",
-							pds->kds_fname,
-							(char *)pds->kds,
-							(char *)pds->kds + mmap_length - 1)));
-		if (!pds->ptoast)
+		/* detach from the GpuContext */
+		if (pds->pds_chain.prev && pds->pds_chain.next)
 		{
-			/* Also unlink the backend file, if responsible */
-			if (unlink(pds->kds_fname) != 0)
-				elog(WARNING, "failed on unlink(\"%s\") : %m", pds->kds_fname);
+			dlist_delete(&pds->pds_chain);
+			memset(&pds->pds_chain, 0, sizeof(dlist_node));
 		}
-		pfree(pds->kds_fname);
+		/* release body of the data store */
+		pfree(pds->kds);
+		pfree(pds);
 	}
-	pfree(pds);
 }
 
 void
@@ -445,9 +346,7 @@ PDS_expand_size(GpuContext *gcontext,
 	cl_uint				i, nitems = kds_old->nitems;
 
 	/* sanity checks */
-	Assert(pds->kds_offset == 0);
 	Assert(pds->kds_length == kds_length_old);
-	Assert(pds->ptoast == NULL);
 	Assert(kds_old->format == KDS_FORMAT_ROW ||
 		   kds_old->format == KDS_FORMAT_HASH);
 	Assert(kds_old->nslots == 0);
@@ -455,9 +354,6 @@ PDS_expand_size(GpuContext *gcontext,
 	/* no need to expand? */
 	if (kds_length_old >= kds_length_new)
 		return;
-
-	/* file mapped data-store is no longer supported */
-	Assert(!pds->kds_fname);
 
 	kds_new = MemoryContextAllocHuge(gcontext->memcxt,
 									 kds_length_new);
@@ -599,9 +495,7 @@ PDS_shrink_size(pgstrom_data_store *pds)
 }
 
 pgstrom_data_store *
-PDS_create_row(GpuContext *gcontext,
-			   TupleDesc tupdesc, Size length,
-			   bool file_mapped)
+PDS_create_row(GpuContext *gcontext, TupleDesc tupdesc, Size length)
 {
 	pgstrom_data_store *pds;
 	MemoryContext	gmcxt = gcontext->memcxt;
@@ -612,78 +506,7 @@ PDS_create_row(GpuContext *gcontext,
 
 	/* allocation of kds */
 	pds->kds_length = STROMALIGN_DOWN(length);
-	pds->kds_offset = 0;
-
-	if (!file_mapped)
-		pds->kds = MemoryContextAllocHuge(gmcxt, pds->kds_length);
-	else
-	{
-		const char *kds_fname;
-		int			kds_fdesc;
-		size_t		mmap_length;
-		CUresult	rc;
-
-		kds_fdesc = pgstrom_open_tempfile(&kds_fname);
-		pds->kds_fname = MemoryContextStrdup(gmcxt, kds_fname);
-
-		mmap_length = TYPEALIGN(BLCKSZ, pds->kds_length);
-		if (ftruncate(kds_fdesc, mmap_length) != 0)
-			ereport(ERROR,
-					(errcode_for_file_access(),
-					 errmsg("could not truncate file \"%s\" to %zu: %m",
-							pds->kds_fname, pds->kds_length)));
-
-		pds->kds = mmap(NULL, mmap_length,
-						PROT_READ | PROT_WRITE,
-#ifdef MAP_POPULATE
-						MAP_POPULATE |
-#endif
-						MAP_SHARED,
-						kds_fdesc, 0);
-		if (pds->kds == MAP_FAILED)
-			ereport(ERROR,
-					(errcode_for_file_access(),
-					 errmsg("could not mmap \"%s\" with length=%zu: %m",
-							pds->kds_fname, pds->kds_length)));
-
-		/* kds is still mapped - not to manage file desc by ourself */
-		CloseTransientFile(kds_fdesc);
-
-		/*
-		 * Registers the file-mapped KDS as page-locked region,
-		 * for asynchronous DMA transfer
-		 *
-		 * Unless PDS is not tracked by GpuContext, mapped file is
-		 * never unmapped, so we have to care about the case when
-		 * cuMemHostRegister() got failed.
-		 */
-		PG_TRY();
-		{
-			rc = cuCtxPushCurrent(gcontext->gpu[0].cuda_context);
-			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
-
-			rc = cuMemHostRegister(pds->kds, mmap_length,
-								   CU_MEMHOSTREGISTER_PORTABLE);
-			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on cuMemHostRegister: %s", errorText(rc));
-
-			rc = cuCtxPopCurrent(NULL);
-			if (rc != CUDA_SUCCESS)
-				elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
-		}
-		PG_CATCH();
-		{
-			if (munmap(pds->kds, mmap_length) != 0)
-				elog(WARNING, "failed to unmap \"%s\" %p-%p",
-					 pds->kds_fname,
-					 (char *)pds->kds,
-					 (char *)pds->kds + mmap_length - 1);
-			PG_RE_THROW();
-		}
-		PG_END_TRY();
-	}
-	pds->ptoast = NULL;	/* never used */
+	pds->kds = MemoryContextAllocHuge(gmcxt, pds->kds_length);
 
 	/*
 	 * initialize common part of kds. Note that row-format cannot
@@ -700,10 +523,10 @@ PDS_create_row(GpuContext *gcontext,
 
 pgstrom_data_store *
 PDS_create_slot(GpuContext *gcontext,
-				TupleDesc tupdesc, cl_uint nrooms,
+				TupleDesc tupdesc,
+				cl_uint nrooms,
 				Size extra_length,
-				bool use_internal,
-				pgstrom_data_store *ptoast)
+				bool use_internal)
 {
 	pgstrom_data_store *pds;
 	size_t			kds_length;
@@ -721,92 +544,8 @@ PDS_create_slot(GpuContext *gcontext,
 	kds_length += STROMALIGN(extra_length);
 
 	pds->kds_length = kds_length;
+	pds->kds = MemoryContextAllocHuge(gmcxt, pds->kds_length);
 
-	if (!ptoast || !ptoast->kds_fname)
-		pds->kds = MemoryContextAllocHuge(gmcxt, pds->kds_length);
-	else
-	{
-		int			kds_fdesc;
-		size_t		file_length;
-		size_t		mmap_length;
-		CUresult	rc;
-
-		/* append KDS after the ktoast file */
-		pds->kds_offset = TYPEALIGN(BLCKSZ, ptoast->kds_length);
-
-		pds->kds_fname = MemoryContextStrdup(gmcxt, ptoast->kds_fname);
-		kds_fdesc = OpenTransientFile(pds->kds_fname,
-									  O_RDWR | PG_BINARY, 0600);
-		if (kds_fdesc < 0)
-			ereport(ERROR,
-                    (errcode_for_file_access(),
-					 errmsg("could not open file-mapped data store \"%s\"",
-							pds->kds_fname)));
-
-		mmap_length = TYPEALIGN(BLCKSZ, pds->kds_length);
-		file_length = pds->kds_offset + mmap_length;
-		if (ftruncate(kds_fdesc, file_length) != 0)
-			ereport(ERROR,
-					(errcode_for_file_access(),
-					 errmsg("could not truncate file \"%s\" to %zu: %m",
-							pds->kds_fname, file_length)));
-
-		pds->kds = mmap(NULL, mmap_length,
-						PROT_READ | PROT_WRITE,
-						MAP_SHARED | MAP_POPULATE,
-						kds_fdesc, pds->kds_offset);
-		if (pds->kds == MAP_FAILED)
-			ereport(ERROR,
-					(errcode_for_file_access(),
-					 errmsg("could not mmap \"%s\" with len/ofs=%zu/%zu: %m",
-							pds->kds_fname,
-							pds->kds_length, pds->kds_offset)));
-
-		/* kds is still mapped - not to manage file desc by ourself */
-		CloseTransientFile(kds_fdesc);
-
-		/*
-		 * registers this KDS as page-locked area
-		 * Unless PDS is not tracked by GpuContext, mapped file is
-		 * never unmapped, so we have to care about the case when
-		 * cuMemHostRegister() got failed.
-		 */
-		PG_TRY();
-		{
-			rc = cuCtxPushCurrent(gcontext->gpu[0].cuda_context);
-			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
-
-			rc = cuMemHostRegister(pds->kds, mmap_length,
-								   CU_MEMHOSTREGISTER_PORTABLE);
-			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on cuMemHostRegister: %s", errorText(rc));
-
-			rc = cuCtxPopCurrent(NULL);
-			if (rc != CUDA_SUCCESS)
-				elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
-		}
-		PG_CATCH();
-		{
-			if (munmap(pds->kds, mmap_length) != 0)
-				elog(WARNING, "failed to unmap \"%s\" %p-%p",
-					 pds->kds_fname,
-					 (char *)pds->kds,
-					 (char *)pds->kds + mmap_length - 1);
-			PG_RE_THROW();
-		}
-		PG_END_TRY();
-	}
-	/*
-	 * toast buffer shall be released with main data-store together,
-	 * so we don't need to track it individually.
-	 */
-	if (ptoast)
-	{
-		dlist_delete(&ptoast->pds_chain);
-		memset(&ptoast->pds_chain, 0, sizeof(dlist_node));
-		pds->ptoast = ptoast;
-	}
 	init_kernel_data_store(pds->kds, tupdesc, pds->kds_length,
 						   KDS_FORMAT_SLOT, nrooms, use_internal);
 
@@ -819,8 +558,7 @@ PDS_create_slot(GpuContext *gcontext,
 pgstrom_data_store *
 PDS_create_hash(GpuContext *gcontext,
 				TupleDesc tupdesc,
-				Size length,
-				bool file_mapped)
+				Size length)
 {
 	pgstrom_data_store *pds;
 
@@ -831,74 +569,11 @@ PDS_create_hash(GpuContext *gcontext,
 	 * KDS_FORMAT_HASH has almost same initialization to KDS_FORMAT_ROW,
 	 * so we once create it as _row format, then fixup the pds/kds.
 	 */
-	pds = PDS_create_row(gcontext, tupdesc, length, file_mapped);
+	pds = PDS_create_row(gcontext, tupdesc, length);
 	pds->kds->format = KDS_FORMAT_HASH;
 	Assert(pds->kds->nslots == 0);	/* to be set later */
 
 	return pds;
-}
-
-/*
- * pgstrom_file_mmap_data_store
- *
- * This routine assume that dynamic background worker maps shared-file
- * to process it. So, here is no GpuContext.
- */
-void
-pgstrom_file_mmap_data_store(FileName kds_fname,
-                             Size kds_offset, Size kds_length,
-							 kern_data_store **p_kds,
-							 kern_data_store **p_ktoast)
-{
-	size_t		mmap_length = TYPEALIGN(BLCKSZ, kds_length);
-	size_t		mmap_offset = TYPEALIGN(BLCKSZ, kds_offset);
-	void	   *mmap_addr;
-	int			kds_fdesc;
-
-	kds_fdesc = OpenTransientFile(kds_fname,
-								  O_RDWR | PG_BINARY, 0600);
-	if (kds_fdesc < 0)
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not open file-mapped data store \"%s\"",
-						kds_fname)));
-
-	if (ftruncate(kds_fdesc, kds_offset + kds_length) != 0)
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not truncate file \"%s\" to %zu: %m",
-						kds_fname, kds_offset + kds_length)));
-	/*
-	 * Toast buffer of file-mapped data store is located on the header
-	 * portion of the same file. So, offset will be truncated to 0,
-	 * and length is expanded.
-	 */
-	if (p_ktoast)
-	{
-		mmap_length += mmap_offset;
-		mmap_offset = 0;
-	}
-	mmap_addr = mmap(NULL, mmap_length,
-					 PROT_READ | PROT_WRITE,
-#ifdef MAP_POPULATE
-					 MAP_POPULATE |
-#endif
-					 MAP_SHARED,
-					 kds_fdesc, mmap_offset);
-	if (mmap_addr == MAP_FAILED)
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not mmap \"%s\" with len/ofs=%zu/%zu: %m",
-						kds_fname, mmap_length, mmap_offset)));
-	if (!p_ktoast)
-		*p_kds = (kern_data_store *)mmap_addr;
-	else
-	{
-		*p_kds = (kern_data_store *)((char *)mmap_addr + kds_offset);
-		*p_ktoast = (kern_data_store *)mmap_addr;
-	}
-	/* kds is still mapped - not to manage file desc by ourself */
-	CloseTransientFile(kds_fdesc);
 }
 
 int
