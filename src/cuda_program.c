@@ -415,6 +415,9 @@ construct_flat_cuda_source(const char *kern_source,
 	/* cuda money.h */
 	if (extra_flags & DEVKERNEL_NEEDS_MONEY)
 		appendStringInfoString(&source, pgstrom_cuda_money_code);
+	/* cuda matrix.h */
+	if (extra_flags & DEVKERNEL_NEEDS_MATRIX)
+		appendStringInfoString(&source, pgstrom_cuda_matrix_code);
 
 	/* Main logic of each GPU tasks */
 

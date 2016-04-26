@@ -291,16 +291,18 @@ struct GpuTask
 /*
  * Type declarations for code generator
  */
-#define DEVKERNEL_NEEDS_TIMELIB			0x00000008
-#define DEVKERNEL_NEEDS_TEXTLIB			0x00000010
-#define DEVKERNEL_NEEDS_NUMERIC			0x00000020
-#define DEVKERNEL_NEEDS_MATHLIB			0x00000040
-#define DEVKERNEL_NEEDS_MONEY			0x00000080
+#define DEVKERNEL_NEEDS_GPUSCAN			0x00000001	/* GpuScan logic */
+#define DEVKERNEL_NEEDS_GPUJOIN			0x00000002	/* GpuJoin logic */
+#define DEVKERNEL_NEEDS_GPUPREAGG		0x00000004	/* GpuPreAgg logic */
+#define DEVKERNEL_NEEDS_GPUSORT			0x00000008	/* GpuSort logic */
+
 #define DEVKERNEL_NEEDS_DYNPARA			0x00000100
-#define DEVKERNEL_NEEDS_GPUSCAN			0x01000000	/* GpuScan logic */
-#define DEVKERNEL_NEEDS_GPUJOIN			0x02000000	/* GpuJoin logic */
-#define DEVKERNEL_NEEDS_GPUPREAGG		0x04000000	/* GpuPreAgg logic */
-#define DEVKERNEL_NEEDS_GPUSORT			0x08000000	/* GpuSort logic */
+#define DEVKERNEL_NEEDS_MATRIX			0x00000200
+#define DEVKERNEL_NEEDS_TIMELIB			0x00000400
+#define DEVKERNEL_NEEDS_TEXTLIB			0x00000800
+#define DEVKERNEL_NEEDS_NUMERIC			0x00001000
+#define DEVKERNEL_NEEDS_MATHLIB			0x00002000
+#define DEVKERNEL_NEEDS_MONEY			0x00004000
 
 struct devtype_info;
 struct devfunc_info;
@@ -317,6 +319,8 @@ typedef struct devtype_info {
 	/* oid of type related functions */
 	Oid			type_eqfunc;	/* function to check equality */
 	Oid			type_cmpfunc;	/* function to compare two values */
+	const struct devtype_info *type_array;	/* array type of itself, if any */
+	const struct devtype_info *type_element;/* element type of array, if any */
 } devtype_info;
 
 typedef struct devfunc_info {
@@ -730,6 +734,7 @@ extern void pgstrom_explain_gputaskstate(GpuTaskState *gts, ExplainState *es);
  */
 extern const char *pgstrom_cuda_common_code;
 extern const char *pgstrom_cuda_dynpara_code;
+extern const char *pgstrom_cuda_matrix_code;
 extern const char *pgstrom_cuda_gpuscan_code;
 extern const char *pgstrom_cuda_gpujoin_code;
 extern const char *pgstrom_cuda_gpupreagg_code;

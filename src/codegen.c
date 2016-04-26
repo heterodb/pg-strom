@@ -36,6 +36,7 @@
 #include "pg_strom.h"
 
 static MemoryContext	devinfo_memcxt;
+static bool		devtype_info_is_built;
 static List	   *devtype_info_slot[128];
 static List	   *devfunc_info_slot[1024];
 
@@ -77,74 +78,115 @@ static struct {
 	DEVTYPE_DECL(TEXTOID,    "varlena *", DEVKERNEL_NEEDS_TEXTLIB),
 };
 
-devtype_info *
-pgstrom_devtype_lookup(Oid type_oid)
+static devtype_info *
+build_devtype_info_entry(Oid type_oid, int32 type_flags,
+						 const char *type_basename)
 {
-	devtype_info   *entry;
-	ListCell	   *cell;
 	HeapTuple		tuple;
 	Form_pg_type	typeform;
-	MemoryContext	oldcxt;
-	int				i, hash;
+	TypeCacheEntry *tcache;
+	devtype_info   *entry;
 
-	hash = hash_uint32((uint32) type_oid) % lengthof(devtype_info_slot);
-	foreach (cell, devtype_info_slot[hash])
-	{
-		entry = lfirst(cell);
-		if (entry->type_oid == type_oid)
-		{
-			if (entry->type_is_negative)
-				return NULL;
-			return entry;
-		}
-	}
-
-	/*
-	 * Not found, insert a new entry
-	 */
 	tuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(type_oid));
 	if (!HeapTupleIsValid(tuple))
-		elog(ERROR, "cache lookup failed for type %u", type_oid);
+		return NULL;
 	typeform = (Form_pg_type) GETSTRUCT(tuple);
 
-	oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
+	tcache = lookup_type_cache(type_oid,
+							   TYPECACHE_EQ_OPR |
+							   TYPECACHE_CMP_PROC);
 
 	entry = palloc0(sizeof(devtype_info));
 	entry->type_oid = type_oid;
+	entry->type_flags = type_flags;
+	entry->type_length = typeform->typlen;
+	entry->type_align = typealign_get_width(typeform->typalign);
+	entry->type_byval = typeform->typbyval;
+	entry->type_name = pstrdup(NameStr(typeform->typname));
+	entry->type_base = pstrdup(type_basename);
 
-	for (i=0; i < lengthof(devtype_catalog); i++)
-	{
-		TypeCacheEntry *tcache;
+   	entry->type_eqfunc = get_opcode(tcache->eq_opr);
+	entry->type_cmpfunc = tcache->cmp_proc;
+	entry->type_array = NULL;	/* caller will set, if any */
+	entry->type_element = NULL;	/* caller will set, if any */
 
-		if (devtype_catalog[i].type_oid != type_oid)
-			continue;
-
-		tcache = lookup_type_cache(type_oid,
-								   TYPECACHE_EQ_OPR |
-								   TYPECACHE_CMP_PROC);
-
-		entry->type_flags |= devtype_catalog[i].type_flags;
-		entry->type_length = typeform->typlen;
-		entry->type_align = typealign_get_width(typeform->typalign);
-		entry->type_byval = typeform->typbyval;
-		entry->type_name = pstrdup(NameStr(typeform->typname));
-		entry->type_base = pstrdup(devtype_catalog[i].type_base);
-
-		entry->type_eqfunc = get_opcode(tcache->eq_opr);
-		entry->type_cmpfunc = tcache->cmp_proc;
-		break;
-	}
-	if (i == lengthof(devtype_catalog))
-		entry->type_is_negative = true;
-
-	devtype_info_slot[hash] = lappend(devtype_info_slot[hash], entry);
-
-	MemoryContextSwitchTo(oldcxt);
 	ReleaseSysCache(tuple);
 
-	if (entry->type_is_negative)
-		return NULL;
 	return entry;
+}
+
+static void
+build_devtype_info(void)
+{
+	MemoryContext	oldcxt;
+	devtype_info   *prime_entry;
+	devtype_info   *array_entry;
+	Oid				array_typeoid;
+	int				i, hindex;
+
+	Assert(!devtype_info_is_built);
+
+	oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
+	for (i=0; i < lengthof(devtype_catalog); i++)
+	{
+		prime_entry = build_devtype_info_entry(devtype_catalog[i].type_oid,
+											   devtype_catalog[i].type_flags,
+											   devtype_catalog[i].type_base);
+		if (!prime_entry)
+		{
+			elog(NOTICE, "Bug? could not find type entry '%s' (oid=%u)",
+				 devtype_catalog[i].type_base,
+				 devtype_catalog[i].type_oid);
+			continue;
+		}
+
+		array_typeoid = get_array_type(devtype_catalog[i].type_oid);
+		if (!OidIsValid(array_typeoid))
+			array_entry = NULL;
+		else
+			array_entry = build_devtype_info_entry(array_typeoid,
+												   prime_entry->type_flags,
+												   "varlena *");
+		prime_entry->type_array = array_entry;
+
+		/* add primary entry */
+		hindex = (hash_uint32((uint32) prime_entry->type_oid)
+				  % lengthof(devtype_info_slot));
+		devtype_info_slot[hindex] = lappend(devtype_info_slot[hindex],
+											prime_entry);
+		/* add array entry, if any */
+		if (array_entry)
+		{
+			hindex = (hash_uint32((uint32) array_entry->type_oid)
+					  % lengthof(devtype_info_slot));
+			devtype_info_slot[hindex] = lappend(devtype_info_slot[hindex],
+												array_entry);
+		}
+	}
+	MemoryContextSwitchTo(oldcxt);
+
+	devtype_info_is_built = true;
+}
+
+devtype_info *
+pgstrom_devtype_lookup(Oid type_oid)
+{
+	ListCell	   *cell;
+	int				hindex;
+
+	if (!devtype_info_is_built)
+		build_devtype_info();
+
+	hindex = hash_uint32((uint32) type_oid) % lengthof(devtype_info_slot);
+
+	foreach (cell, devtype_info_slot[hindex])
+	{
+		devtype_info   *entry = lfirst(cell);
+
+		if (entry->type_oid == type_oid)
+			return entry;
+	}
+	return NULL;
 }
 
 static void
@@ -2409,6 +2451,7 @@ codegen_cache_invalidator(Datum arg, int cacheid, uint32 hashvalue)
 	MemoryContextReset(devinfo_memcxt);
 	memset(devtype_info_slot, 0, sizeof(devtype_info_slot));
 	memset(devfunc_info_slot, 0, sizeof(devfunc_info_slot));
+	devtype_info_is_built = false;
 }
 
 void
@@ -2426,6 +2469,7 @@ pgstrom_init_codegen(void)
 {
 	memset(devtype_info_slot, 0, sizeof(devtype_info_slot));
 	memset(devfunc_info_slot, 0, sizeof(devfunc_info_slot));
+	devtype_info_is_built = false;
 
 	/* create a memory context */
 	devinfo_memcxt = AllocSetContextCreate(CacheMemoryContext,

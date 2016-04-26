@@ -35,6 +35,7 @@ STROM_OBJS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__STROM_OBJS))
 #
 __CUDA_OBJS = cuda_common.o \
 	cuda_dynpara.o \
+	cuda_matrix.o  \
 	cuda_gpuscan.o \
 	cuda_gpujoin.o \
 	cuda_gpupreagg.o \
