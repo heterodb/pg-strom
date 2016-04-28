@@ -60,14 +60,17 @@ typedef struct
  */
 typedef struct
 {
+	cl_uint		window_orig;	/* 'window_base' value on kernel invocation */
 	cl_uint		window_base;	/* base of the virtual partition window */
 	cl_uint		window_size;	/* size of the virtual partition window */
 	cl_uint		inner_nitems;	/* out: number of inner join results */
-	cl_uint		total_nitems;	/* out: number of (inner+outer) join results */
+	cl_uint		right_nitems;	/* out: number of right join results */
 	cl_float	row_dist_score;	/* out: count of non-zero histgram items on
 								 * window resize. larger score means more
 								 * distributed depth, thus to be target of
 								 * the window split */
+	cl_uint		inner_nitems_stage;	/* internal: # of inner join results */
+	cl_uint		right_nitems_stage;	/* internal: # of right join results */
 } kern_join_scale;
 
 typedef struct
@@ -1412,6 +1415,7 @@ gpujoin_main(kern_gpujoin *kgjoin,		/* in/out: misc stuffs */
 	kern_resultbuf	   *kresults_src = KERN_GPUJOIN_1ST_RESULTBUF(kgjoin);
 	kern_resultbuf	   *kresults_dst = KERN_GPUJOIN_2ND_RESULTBUF(kgjoin);
 	kern_resultbuf	   *kresults_tmp;
+	kern_join_scale	   *jscale = kgjoin->jscale;
 	kern_context		kcxt;
 	const void		   *kernel_projection;
 	void			  **kern_args;
@@ -1546,8 +1550,8 @@ retry_major:
 				if (kgjoin->kerror.errcode != StromError_Success)
 					return;
 				/* update run-time statistics */
-				kgjoin->jscale[0].inner_nitems = kresults_src->nitems;
-				kgjoin->jscale[0].total_nitems = kresults_src->nitems;
+				jscale[0].inner_nitems_stage = kresults_src->nitems;
+				jscale[0].right_nitems_stage = 0;
 
 				/*
 				 * Once source nitems became zero, we cannot produce any
@@ -1559,8 +1563,9 @@ retry_major:
 			}
 			else
 			{
-				kgjoin->jscale[0].inner_nitems = 0;	/* no input rows */
-				kgjoin->jscale[0].total_nitems = 0;	/* update later */
+				/* In RIGHT OUTER JOIN, no input rows in depth==0 */
+				jscale[0].inner_nitems_stage = 0;
+				jscale[0].right_nitems_stage = 0;
 			}
 		}
 		/* make the kresults_dst buffer empty */
@@ -1654,14 +1659,14 @@ retry_major:
 				else if (kgjoin->kerror.errcode != StromError_Success)
 					return;
 				/* update run-time statistics */
-				kgjoin->jscale[depth].inner_nitems = kresults_dst->nitems;
-				kgjoin->jscale[depth].total_nitems = kresults_dst->nitems;
+				jscale[depth].inner_nitems_stage = kresults_dst->nitems;
+				jscale[depth].right_nitems_stage = 0;
 			}
 			else
 			{
 				/* in case when no input rows. INNER JOIN produce no rows */
-				kgjoin->jscale[depth].inner_nitems = 0;
-				kgjoin->jscale[depth].total_nitems = 0;
+				jscale[depth].inner_nitems_stage = 0;
+				jscale[depth].right_nitems_stage = 0;
 			}
 
 			/* Launch:
@@ -1748,7 +1753,7 @@ retry_major:
 				else if (kgjoin->kerror.errcode != StromError_Success)
 					return;
 				/* update run-time statistics */
-				kgjoin->jscale[depth].total_nitems = kresults_dst->nitems;
+				jscale[depth].right_nitems_stage = kresults_dst->nitems;
 			}
 		}
 		else
@@ -1834,14 +1839,14 @@ retry_major:
 				else if (kgjoin->kerror.errcode != StromError_Success)
 					return;
 				/* update run-time statistics */
-				kgjoin->jscale[depth].inner_nitems = kresults_dst->nitems;
-				kgjoin->jscale[depth].total_nitems = kresults_dst->nitems;
+				jscale[depth].inner_nitems_stage = kresults_dst->nitems;
+				jscale[depth].right_nitems_stage = 0;
 			}
 			else
 			{
 				/* no input rows, then no output rows */
-				kgjoin->jscale[depth].inner_nitems = 0;
-				kgjoin->jscale[depth].total_nitems = 0;
+				jscale[depth].inner_nitems_stage = 0;
+				jscale[depth].right_nitems_stage = 0;
 			}
 
 			/* Launch:
@@ -1921,7 +1926,7 @@ retry_major:
 				else if (kgjoin->kerror.errcode != StromError_Success)
 					return;
 				/* update run-time statistics */
-				kgjoin->jscale[depth].total_nitems = kresults_dst->nitems;
+				jscale[depth].right_nitems_stage = kresults_dst->nitems;
 			}
 		}
 
@@ -2073,6 +2078,13 @@ retry_major:
 	assert(kds_dst->nitems <= kds_dst->nrooms);
 	assert(dest_usage_prev <= kds_dst->usage);
 
+	/* update statistics to be informed to the host side */
+	for (depth = 0; depth <= kgjoin->num_rels; depth++)
+	{
+		jscale[depth].inner_nitems += jscale[depth].inner_nitems_stage;
+		jscale[depth].right_nitems += jscale[depth].right_nitems_stage;
+	}
+
 	/*
 	 * NOTE: If we still have enough space on the destination buffer, and
 	 * when virtual partition window is applied, it is worthful to retry
@@ -2090,10 +2102,6 @@ retry_major:
 								kresults_src->nitems,
 								kds_dst->usage - dest_usage_prev))
 	{
-		printf("gpujoin_try_next_window(nitems=%u += %u, usage=%u += %u\n",
-			   kds_dst->nitems - kresults_src->nitems,
-			   kresults_src->nitems,
-			   dest_usage_prev, kds_dst->usage - dest_usage_prev);
 		dest_usage_prev = kds_dst->usage;
 		goto retry_major;
 	}
