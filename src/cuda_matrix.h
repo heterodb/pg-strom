@@ -35,16 +35,37 @@
  */
 
 
+/* copied from utils/array.h */
+typedef struct
+{
+	cl_uint		vl_len_;		/* varlena header (do not touch directly!) */
+	cl_int		ndim;			/* # of dimensions */
+	cl_int		dataoffset;		/* offset to data, or 0 if no bitmap */
+	Oid			elemtype;		/* element type OID */
+} ArrayType;
+
+
 
 
 
 #define ARR_SIZE(a)		VARSIZE_ANY(a)
 #define ARR_NDIM(a)						\
-	(pg_get_int32_value((char *)(a) + offsetof(ArrayType, ndim)))
+	(get_int32_val((char *)(a) + offsetof(ArrayType, ndim)))
 #define ARR_HASNULL(a)					\
-	(pg_get_int32_value((char *)(a) + offsetof(ArrayType, dataoffset)) != 0)
+	(get_int32_val((char *)(a) + offsetof(ArrayType, dataoffset)) != 0)
 #define ARR_ELEMTYPE(a)					\
-	(pg_get_int32_value((char *)(a) + offsetof(ArrayType, elemtype)))
+	(get_int32_val((char *)(a) + offsetof(ArrayType, elemtype)))
+#define ARR_DIMS(a)		/* !!may be unaligned!! */		\
+	((int *) (((char *) (a)) + sizeof(ArrayType)))
+#define ARR_LBOUND(a)	/* !!may be unaligned!! */		\
+	((int *) (((char *) (a)) + sizeof(ArrayType) +		\
+			  sizeof(int) * ARR_NDIM(a)))
+#define ARR_NULLBITMAP(a)									  \
+	(ARR_HASNULL(a)											  \
+	 ? (cl_char *) (((char *) (a)) + sizeof(ArrayType) +	  \
+					2 * sizeof(int) * ARR_NDIM(a))			  \
+	 : (cl_char *) NULL)
+
 
 /* copy of host-side ArrayGetOffset */
 STATIC_INLINE(cl_uint)
@@ -74,36 +95,69 @@ pg_array_get_isnull(const cl_uchar *nullbitmap, int offset))
 }
 
 STATIC_INLINE(void *)
-pg_array_seek()
+pg_array_seek(char *dataptr, cl_char *nullbitmap, cl_int nitems,
+			  cl_short typlen, cl_char typbyval, cl_char typalign)
 {
-	/* easy if fixed-size elements and no NULLs */
-	if (typlen > 0 && !nullbitmap)
-		return ptr + nitems * ((size_t) att_align_nominal(typlen, typalign));
+	int			i;
 
-	/* seems worth having separate loops for NULL and no-NULLs cases */
-	if (nullbitmap)
+	if (!nullbitmap)
 	{
+		/* easy if fixed-size elements and no NULLs */
+		if (typlen > 0)
+			return dataptr + ((size_t)TYPEALIGN(typalign, typlen)) * nitems;
 
-
-
+		/* walk on the array of variable length datum */
+		for (i = 0; i < nitems; i++)
+		{
+			dataptr += VARSIZE_ANY(dataptr);
+			dataptr = (char *) TYPEALIGN(typalign, dataptr);
+		}
 	}
 	else
 	{
+		cl_uint		bitmask = 1;
+		cl_uint		nullmask = *nullbitmap++;
+
 		for (i = 0; i < nitems; i++)
 		{
-			
-			
+			if (nullmask & bitmask)
+			{
+				dataptr += (typlen > 0 ? typlen : VARSIZE_ANY(dataptr));
+				dataptr = (char *) TYPEALIGN(dataptr, typalign);
+			}
+			bitmask <<= 1;
+			if (bitmask == 0x100)
+			{
+				nullmask = *nullbitmap++;
+				bitmask = 1;
+			}
 		}
+
 	}
-	return addr;
+	return dataptr;
+}
+
+
+INLINE_FUNCTION(void *)
+pg_array_get_element_fast()
+{
+	/* if not-null, 1D, fixed-length array */
+
+
 }
 
 
 STATIC_FUNCTION(void *)
-pg_array_get_element(kern_context *kcxt,
-					 pg_array_t array,
-	)
+pg_arrayref_get_element(kern_context *kcxt, pg_array_t array,
+						int nscripts, cl_int *index)
+
 {
+	cl_int		i, ndim;
+	cl_int	   *dim;
+	cl_int	   *lb;
+	size_t		offset;
+	size_t		scale;
+	cl_char	   *nullbitmap;
 
 	if (array.isnull)
 		return NULL;
@@ -112,17 +166,40 @@ pg_array_get_element(kern_context *kcxt,
 	if (ndim != nscripts || ndim <= 0 || ndim > MAXDIM)
 		return NULL;
 
+	dim = ARR_DIMS(array.value);
+	lb = ARR_LBOUND(array.value);
+	nullbitmap = ARR_NULLBITMAP(array.value);
+
 	for (i = 0; i < ndim; i++)
 	{
 		if (index[i] < lb[i] || index[i] >= (dim[i] + lb[i]))
 			return NULL;
 	}
 
-	/* calculate the element number */
-	offset = pg_array_get_offset();
 
+	/* not null, fixed length, 1D then fast path */
+	if (ndim == 1 && !ARR_HASNULL(array.value) && element_type_len > 0)
+	{
+		// do fast path
+	}
 
+	/*
+	 * calculate the element number (ArrayGetOffset in the host code)
+	 */
+	offset = 0;
+	for (i = ndim - 1; i >= 0; i--)
+	{
+		offset += (index[i] - lb[i]) * scale;
+		scale *= dim[i];
+	}
 
+	/*
+	 * Check for NULL array element (array_get_isnull in the host code)
+	 */
+	if (nullbitmap && att_isnull(nullbitmap, offset))
+		return NULL;
+
+	return pg_array_seek();
 }
 
 
@@ -131,8 +208,16 @@ pg_array_get_element(kern_context *kcxt,
 
 STATIC_FUNCTION(void *)
 pg_array_reference_1d(kern_context *kcxt, pg_array_t *array,
-					  cl_uint index_x)
-{}
+					  pg_int4_t index_1)
+{
+	if (aindex_1.isnull)
+		return NULL;
+	// NULL, if index is null
+
+
+
+
+}
 
 STATIC_FUNCTION(void *)
 pg_array_reference_2d(kern_context *kcxt, pg_array_t *array,
@@ -141,6 +226,10 @@ pg_array_reference_2d(kern_context *kcxt, pg_array_t *array,
 
 
 
+
+
+pg_arrayref_int4(pg_int4_array_t)
+{}
 
 
 

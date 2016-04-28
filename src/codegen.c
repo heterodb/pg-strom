@@ -2243,36 +2243,35 @@ pgstrom_device_expression(Expr *expr)
 	}
 	else if (IsA(expr, Const))
 	{
-		Const  *con = (Const *) expr;
+		Const		   *con = (Const *) expr;
+		devtype_info   *dtype = pgstrom_devtype_lookup(con->consttype);
 
-		if (!pgstrom_devtype_lookup(con->consttype))
-		{
-			elog(DEBUG2, "Unable to run on device: %s", nodeToString(expr));
-			return false;
-		}
+		/* only supported scalar type */
+		if (!dtype || dtype->type_element)
+			goto unable_node;
+
 		return true;
 	}
 	else if (IsA(expr, Param))
 	{
-		Param  *param = (Param *) expr;
+		Param		   *param = (Param *) expr;
+		devtype_info   *dtype = pgstrom_devtype_lookup(param->paramtype);
 
-		if (param->paramkind != PARAM_EXTERN ||
-			!pgstrom_devtype_lookup(param->paramtype))
-		{
-			elog(DEBUG2, "Unable to run on device: %s", nodeToString(expr));
-			return false;
-		}
+		/* only supported scalar type */
+		if (!dtype || dtype->type_element)
+			goto unable_node;
+
 		return true;
 	}
 	else if (IsA(expr, Var))
 	{
-		Var	   *var = (Var *) expr;
+		Var			   *var = (Var *) expr;
+		devtype_info   *dtype = pgstrom_devtype_lookup(var->vartype);
 
-		if (!pgstrom_devtype_lookup(var->vartype))
-		{
-			elog(DEBUG2, "Unable to run on device: %s", nodeToString(expr));
-			return false;
-		}
+		/* only supported scalar type */
+		if (!dtype || dtype->type_element)
+			goto unable_node;
+
 		return true;
 	}
 	else if (IsA(expr, FuncExpr))
@@ -2281,10 +2280,8 @@ pgstrom_device_expression(Expr *expr)
 
 		if (!pgstrom_devfunc_lookup(func->funcid,
 									func->inputcollid))
-		{
-			elog(DEBUG2, "Unable to run on device: %s", nodeToString(expr));
-			return false;
-		}
+			goto unable_node;
+
 		return pgstrom_device_expression((Expr *) func->args);
 	}
 	else if (IsA(expr, OpExpr) || IsA(expr, DistinctExpr))
@@ -2293,10 +2290,8 @@ pgstrom_device_expression(Expr *expr)
 
 		if (!pgstrom_devfunc_lookup(get_opcode(op->opno),
 									op->inputcollid))
-		{
-			elog(DEBUG2, "Unable to run on device: %s", nodeToString(expr));
-			return false;
-		}
+			goto unable_node;
+
 		return pgstrom_device_expression((Expr *) op->args);
 	}
 	else if (IsA(expr, NullTest))
@@ -2304,10 +2299,8 @@ pgstrom_device_expression(Expr *expr)
 		NullTest   *nulltest = (NullTest *) expr;
 
 		if (nulltest->argisrow)
-		{
-			elog(DEBUG2, "Unable to run on device: %s", nodeToString(expr));
-			return false;
-		}
+			goto unable_node;
+
 		return pgstrom_device_expression((Expr *) nulltest->arg);
 	}
 	else if (IsA(expr, BooleanTest))
@@ -2328,24 +2321,20 @@ pgstrom_device_expression(Expr *expr)
 	else if (IsA(expr, CoalesceExpr))
 	{
 		CoalesceExpr   *coalesce = (CoalesceExpr *) expr;
+		devtype_info   *dtype = pgstrom_devtype_lookup(coalesce->coalescetype);
 		ListCell	   *cell;
 
-		if (!pgstrom_devtype_lookup(coalesce->coalescetype))
-		{
-			elog(DEBUG2, "Unable to run on device: %s", nodeToString(expr));
-			return false;
-		}
+		/* only supported scalar type */
+		if (!dtype || dtype->type_element)
+			goto unable_node;
+
 		/* arguments also have to be same type (=device supported) */
 		foreach (cell, coalesce->args)
 		{
 			Node   *expr = lfirst(cell);
 
 			if (coalesce->coalescetype != exprType(expr))
-			{
-				elog(DEBUG2, "Unable to run on device: %s",
-					 nodeToString(expr));
-				return false;
-			}
+				goto unable_node;
 		}
 		return pgstrom_device_expression((Expr *) coalesce->args);
 	}
@@ -2358,36 +2347,34 @@ pgstrom_device_expression(Expr *expr)
 		if (minmax->op != IS_GREATEST && minmax->op != IS_LEAST)
 			return false;	/* unknown MinMax operation */
 
-		if (!dtype || !OidIsValid(dtype->type_cmpfunc) ||
+		/* only supported scalar type */
+		if (!dtype || dtype->type_element)
+			goto unable_node;
+		/* type compare function is required */
+		if (!OidIsValid(dtype->type_cmpfunc) ||
 			!pgstrom_devfunc_lookup(dtype->type_cmpfunc,
 									minmax->inputcollid))
-		{
-			elog(DEBUG2, "Unable to run on device: %s", nodeToString(expr));
-			return false;
-		}
+			goto unable_node;
+
 		/* arguments also have to be same type (=device supported) */
 		foreach (cell, minmax->args)
 		{
 			Node   *expr = lfirst(cell);
 
 			if (minmax->minmaxtype != exprType(expr))
-			{
-				elog(DEBUG2, "Unable to run on device: %s",
-					 nodeToString(expr));
-				return false;
-			}
+				goto unable_node;
 		}
 		return pgstrom_device_expression((Expr *) minmax->args);
 	}
 	else if (IsA(expr, RelabelType))
 	{
-		RelabelType *relabel = (RelabelType *) expr;
+		RelabelType	   *relabel = (RelabelType *) expr;
+		devtype_info   *dtype = pgstrom_devtype_lookup(relabel->resulttype);
 
-		if (!pgstrom_devtype_lookup(relabel->resulttype))
-		{
-			elog(DEBUG2, "Unable to run on device: %s", nodeToString(expr));
-			return false;
-		}
+		/* array->array relabel may be possible */
+		if (!dtype)
+			goto unable_node;
+
 		return pgstrom_device_expression((Expr *) relabel->arg);
 	}
 	else if (IsA(expr, CaseExpr))
@@ -2396,10 +2383,7 @@ pgstrom_device_expression(Expr *expr)
 		ListCell   *cell;
 
 		if (!pgstrom_devtype_lookup(caseexpr->casetype))
-		{
-			elog(DEBUG2, "Unable to run on device: %s", nodeToString(expr));
-			return false;
-		}
+			goto unable_node;
 
 		if (caseexpr->arg)
 		{
@@ -2414,11 +2398,8 @@ pgstrom_device_expression(Expr *expr)
 			Assert(IsA(casewhen, CaseWhen));
 			if (exprType((Node *)casewhen->expr) !=
 				(caseexpr->arg ? exprType((Node *)caseexpr->arg) : BOOLOID))
-			{
-				elog(DEBUG2, "Unable to run on device: %s",
-					 nodeToString(lfirst(cell)));
-				return false;
-			}
+				goto unable_node;
+
 			if (!pgstrom_device_expression(casewhen->expr))
 				return false;
 			if (!pgstrom_device_expression(casewhen->result))
@@ -2434,11 +2415,8 @@ pgstrom_device_expression(Expr *expr)
 		devtype_info   *dtype = pgstrom_devtype_lookup(casetest->typeId);
 
 		if (!dtype)
-		{
-			elog(DEBUG2, "Unable to run on device: %s",
-				 nodeToString(casetest));
-			return false;
-		}
+			goto unable_node;
+
 		return true;
 	}
 	else if (IsA(expr, ArrayRef))
@@ -2479,7 +2457,7 @@ pgstrom_device_expression(Expr *expr)
 		if (!pgstrom_device_expression((Expr *) opexpr->args))
 			return false;
 	}
-unable:
+unable_node:
 	elog(DEBUG2, "Unable to run on device: %s", nodeToString(expr));
 	return false;
 }

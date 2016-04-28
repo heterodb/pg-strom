@@ -181,6 +181,77 @@ typedef uintptr_t		hostptr_t;
 	__global__ RET_TYPE __launch_bounds__(1024)
 #endif
 
+/*
+ * alignment aware value reference
+ */
+STATIC_INLINE(cl_short)
+get_int16_val(const void *addr)
+{
+	return ((uintptr_t)addr & (sizeof(cl_short) - 1)) == 0
+		? *((cl_short *) addr)
+		: ((cl_short)((cl_char *)addr)[0] |
+		   (cl_short)((cl_char *)addr)[1] << 8);
+}
+
+STATIC_INLINE(cl_int)
+get_int32_val(const void *addr)
+{
+	switch ((uintptr_t)addr & (sizeof(cl_int) - 1))
+	{
+		case 0:
+			return *((cl_int *) addr);
+		case 2:
+			return ((cl_int)(*((cl_short *)((char *)addr))) |
+					(cl_int)(*((cl_short *)((char *)addr + 2))) << 16);
+		default:
+			return ((cl_int)(*((cl_char *)((char *)addr))) |
+					(cl_int)(*((cl_short *)((char *)addr + 1))) << 8 |
+					(cl_int)(*((cl_char *)((char *)addr + 3))) << 24);
+	}
+}
+
+STATIC_INLINE(cl_long)
+get_int64_val(const void *addr)
+{
+	switch ((uintptr_t)addr & (sizeof(cl_long) - 1))
+	{
+		case 0:
+			return *((cl_long *)addr);
+		case 4:
+			return ((cl_long)(*((cl_int *)((char *)addr))) |
+					(cl_long)(*((cl_int *)((char *)addr + 4))));
+		case 2:
+		case 6:
+			return ((cl_long)(*((cl_short *)((char *)addr))) |
+					(cl_long)(*((cl_int *)  ((char *)addr + 2))) << 16 |
+					(cl_long)(*((cl_short *)((char *)addr + 6))) << 48);
+		case 1:
+		case 5:
+			return ((cl_long)(*((cl_char *)((char *)addr))) |
+					(cl_long)(*((cl_short *)((char *)addr + 1))) << 8 |
+					(cl_long)(*((cl_int *)((char *)addr + 3))) << 24 |
+					(cl_long)(*((cl_char *)((char *)addr + 7))) << 56);
+		case 3:
+		case 7:
+			return ((cl_long)(*((cl_char *)((char *)addr))) |
+					(cl_long)(*((cl_int *)((char *)addr + 1))) << 8 |
+					(cl_long)(*((cl_short *)((char *)addr + 5))) << 40 |
+					(cl_long)(*((cl_char *)((char *)addr + 7))) << 56);
+	}
+}
+
+STATIC_INLINE(cl_float)
+get_float32_val(const void *addr)
+{
+	return __int_as_float(get_int32_val(addr));
+}
+
+STATIC_INLINE(cl_double)
+get_float64_val(const void *addr)
+{
+	return __longlong_as_double(get_int64_val(addr));
+}
+
 
 #else
 #define STATIC_INLINE(RET_TYPE)		static inline RET_TYPE
