@@ -79,18 +79,29 @@ static struct {
 };
 
 static devtype_info *
-build_devtype_info_entry(Oid type_oid, int32 type_flags,
-						 const char *type_basename)
+build_devtype_info_entry(Oid type_oid,
+						 int32 type_flags,
+						 const char *type_basename,
+						 devtype_info *element)
 {
 	HeapTuple		tuple;
-	Form_pg_type	typeform;
+	Form_pg_type	type_form;
 	TypeCacheEntry *tcache;
 	devtype_info   *entry;
+	cl_int			hindex;
 
 	tuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(type_oid));
 	if (!HeapTupleIsValid(tuple))
 		return NULL;
-	typeform = (Form_pg_type) GETSTRUCT(tuple);
+	type_form = (Form_pg_type) GETSTRUCT(tuple);
+
+	/* Don't register if array type is not true array type */
+	if (element && (type_form->typelem != element->type_oid ||
+					type_form->typlen >= 0))
+	{
+		ReleaseSysCache(tuple);
+		return NULL;
+	}
 
 	tcache = lookup_type_cache(type_oid,
 							   TYPECACHE_EQ_OPR |
@@ -99,18 +110,31 @@ build_devtype_info_entry(Oid type_oid, int32 type_flags,
 	entry = palloc0(sizeof(devtype_info));
 	entry->type_oid = type_oid;
 	entry->type_flags = type_flags;
-	entry->type_length = typeform->typlen;
-	entry->type_align = typealign_get_width(typeform->typalign);
-	entry->type_byval = typeform->typbyval;
-	entry->type_name = pstrdup(NameStr(typeform->typname));
-	entry->type_base = pstrdup(type_basename);
+	entry->type_length = type_form->typlen;
+	entry->type_align = typealign_get_width(type_form->typalign);
+	entry->type_byval = type_form->typbyval;
+	if (!element)
+		entry->type_name = pstrdup(NameStr(type_form->typname));
+	else
+		entry->type_name = pstrdup("array");
 
    	entry->type_eqfunc = get_opcode(tcache->eq_opr);
 	entry->type_cmpfunc = tcache->cmp_proc;
-	entry->type_array = NULL;	/* caller will set, if any */
-	entry->type_element = NULL;	/* caller will set, if any */
+	if (!element)
+		entry->type_array = build_devtype_info_entry(type_form->typarray,
+													 type_flags |
+													 DEVKERNEL_NEEDS_MATRIX,
+													 "varlena *",
+													 entry);
+	else
+		entry->type_element = element;
 
 	ReleaseSysCache(tuple);
+
+	/* add to the hash slot */
+	hindex = (hash_uint32((uint32) entry->type_oid)
+			  % lengthof(devtype_info_slot));
+	devtype_info_slot[hindex] = lappend(devtype_info_slot[hindex], entry);
 
 	return entry;
 }
@@ -119,49 +143,17 @@ static void
 build_devtype_info(void)
 {
 	MemoryContext	oldcxt;
-	devtype_info   *prime_entry;
-	devtype_info   *array_entry;
-	Oid				array_typeoid;
-	int				i, hindex;
+	int				i;
 
 	Assert(!devtype_info_is_built);
 
 	oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
 	for (i=0; i < lengthof(devtype_catalog); i++)
 	{
-		prime_entry = build_devtype_info_entry(devtype_catalog[i].type_oid,
-											   devtype_catalog[i].type_flags,
-											   devtype_catalog[i].type_base);
-		if (!prime_entry)
-		{
-			elog(NOTICE, "Bug? could not find type entry '%s' (oid=%u)",
-				 devtype_catalog[i].type_base,
-				 devtype_catalog[i].type_oid);
-			continue;
-		}
-
-		array_typeoid = get_array_type(devtype_catalog[i].type_oid);
-		if (!OidIsValid(array_typeoid))
-			array_entry = NULL;
-		else
-			array_entry = build_devtype_info_entry(array_typeoid,
-												   prime_entry->type_flags,
-												   "varlena *");
-		prime_entry->type_array = array_entry;
-
-		/* add primary entry */
-		hindex = (hash_uint32((uint32) prime_entry->type_oid)
-				  % lengthof(devtype_info_slot));
-		devtype_info_slot[hindex] = lappend(devtype_info_slot[hindex],
-											prime_entry);
-		/* add array entry, if any */
-		if (array_entry)
-		{
-			hindex = (hash_uint32((uint32) array_entry->type_oid)
-					  % lengthof(devtype_info_slot));
-			devtype_info_slot[hindex] = lappend(devtype_info_slot[hindex],
-												array_entry);
-		}
+		(void) build_devtype_info_entry(devtype_catalog[i].type_oid,
+										devtype_catalog[i].type_flags,
+										devtype_catalog[i].type_base,
+										NULL);
 	}
 	MemoryContextSwitchTo(oldcxt);
 
@@ -1316,6 +1308,8 @@ static bool codegen_coalesce_expression(CoalesceExpr *coalesce,
 										codegen_context *context);
 static bool codegen_minmax_expression(MinMaxExpr *minmax,
 									  codegen_context *context);
+static bool codegen_scalar_array_op_expression(ScalarArrayOpExpr *opexpr,
+											   codegen_context *context);
 
 static bool
 codegen_expression_walker(Node *node, codegen_context *context)
@@ -1395,11 +1389,13 @@ codegen_expression_walker(Node *node, codegen_context *context)
 	}
 	else if (IsA(node, Var))
 	{
-		Var		   *var = (Var *) node;
-		AttrNumber	varattno = var->varattno;
-		ListCell   *cell;
+		Var			   *var = (Var *) node;
+		AttrNumber		varattno = var->varattno;
+		devtype_info   *dtype;
+		ListCell	   *cell;
 
-		if (!pgstrom_devtype_lookup_and_track(var->vartype, context))
+		dtype = pgstrom_devtype_lookup_and_track(var->vartype, context);
+		if (!dtype || dtype->type_element)
 			return false;
 
 		/* Fixup varattno when pseudo-scan tlist exists, because varattno
@@ -1663,7 +1659,13 @@ codegen_expression_walker(Node *node, codegen_context *context)
 			appendStringInfo(&context->str, ")");
 		return true;
 	}
-	Assert(false);
+	else if (IsA(node, ScalarArrayOpExpr))
+	{
+		ScalarArrayOpExpr  *opexpr = (ScalarArrayOpExpr *) node;
+
+		return codegen_scalar_array_op_expression(opexpr, context);
+	}
+	elog(ERROR, "Bug? unsupported expression: %s", nodeToString(node));
 	return false;
 }
 
@@ -1689,7 +1691,8 @@ form_devexpr_info(devexpr_info *devexpr)
 
 	dtype = devexpr->expr_rettype;
 	result = lappend(result, makeInteger((long) dtype->type_oid));
-	result = lappend(result, makeInteger((long) devexpr->expr_extra));
+	result = lappend(result, makeInteger((long) devexpr->expr_extra1));
+	result = lappend(result, makeInteger((long) devexpr->expr_extra2));
 	result = lappend(result, makeString(pstrdup(devexpr->expr_name)));
 	result = lappend(result, makeString(pstrdup(devexpr->expr_decl)));
 
@@ -1726,7 +1729,10 @@ deform_devexpr_info(devexpr_info *devexpr, List *contents)
 		elog(ERROR, "failed to lookup device type");
 
 	cell = lnext(cell);
-	devexpr->expr_extra = intVal(lfirst(cell));
+	devexpr->expr_extra1 = (Datum)intVal(lfirst(cell));
+
+	cell = lnext(cell);
+	devexpr->expr_extra2 = (Datum)intVal(lfirst(cell));
 
 	cell = lnext(cell);
 	devexpr->expr_name = strVal(lfirst(cell));
@@ -1792,7 +1798,8 @@ codegen_coalesce_expression(CoalesceExpr *coalesce, codegen_context *context)
 			return false;
 		}
 		devexpr.expr_rettype = dtype;
-		devexpr.expr_extra = 0;		/* no extra information */
+		devexpr.expr_extra1 = 0;		/* no extra information */
+		devexpr.expr_extra2 = 0;		/* no extra information */
 
 		/* device function name */
 		devexpr.expr_name = psprintf("%s_coalesce_%u",
@@ -1897,7 +1904,7 @@ codegen_minmax_expression(MinMaxExpr *minmax, codegen_context *context)
 			devexpr.expr_rettype->type_oid == minmax->minmaxtype &&
 			devexpr.expr_collid == minmax->inputcollid &&
 			list_length(devexpr.expr_args) == list_length(minmax->args) &&
-			devexpr.expr_extra == (Datum)minmax->op)
+			devexpr.expr_extra1 == ObjectIdGetDatum(minmax->op))
 			break;		/* ok, found */
 	}
 
@@ -1932,7 +1939,7 @@ codegen_minmax_expression(MinMaxExpr *minmax, codegen_context *context)
 			return false;
 		}
 		devexpr.expr_rettype = dtype;
-		devexpr.expr_extra = (Datum) minmax->op;
+		devexpr.expr_extra1 = (Datum) minmax->op;
 		devexpr.expr_name = psprintf("%s_%s_%u",
 									 dtype->type_name,
 									 minmax->op == IS_LEAST
@@ -2010,6 +2017,206 @@ codegen_minmax_expression(MinMaxExpr *minmax, codegen_context *context)
 		if (!codegen_expression_walker(expr, context))
 			return false;
     }
+	appendStringInfo(&context->str, ")");
+
+	return true;
+}
+
+static bool
+codegen_scalar_array_op_expression(ScalarArrayOpExpr *opexpr,
+								   codegen_context *context)
+{
+	devexpr_info	devexpr;
+	devtype_info   *dtype1;
+	devtype_info   *dtype2;
+	devfunc_info   *dfunc;
+	ListCell	   *cell;
+	StringInfoData	decl;
+
+	/* find out identical predefined device ScalarArrayOpExpr */
+	foreach (cell, context->expr_defs)
+	{
+		deform_devexpr_info(&devexpr, (List *)lfirst(cell));
+
+		if (devexpr.expr_tag == T_ScalarArrayOpExpr &&
+			devexpr.expr_rettype->type_oid == BOOLOID &&
+			devexpr.expr_collid == opexpr->inputcollid &&
+			list_length(devexpr.expr_args) == 2 &&
+			devexpr.expr_extra1 == ObjectIdGetDatum(opexpr->opno) &&
+			devexpr.expr_extra2 == BoolGetDatum(opexpr->useOr))
+			goto found;		/* OK, found a predefined one */
+	}
+
+	/* no predefined one, create a special expression function */
+	memset(&devexpr, 0, sizeof(devexpr_info));
+	devexpr.expr_tag = T_ScalarArrayOpExpr;
+	devexpr.expr_collid = opexpr->inputcollid;
+
+	dfunc = pgstrom_devfunc_lookup(get_opcode(opexpr->opno),
+								   opexpr->inputcollid);
+	if (!dfunc)
+		return false;
+
+	/* sanity checks */
+	if (dfunc->func_rettype->type_oid != BOOLOID ||
+		list_length(dfunc->func_args) != 2)
+		return false;
+
+	dtype1 = pgstrom_devtype_lookup(exprType(linitial(opexpr->args)));
+	if (!dtype1 || dtype1->type_element)
+		return false;	/* 1st argument has to be scalar */
+
+	dtype2 = pgstrom_devtype_lookup(exprType(lsecond(opexpr->args)));
+	if (!dtype2 || !dtype2->type_element)
+		return false;	/* 2nd argument has to be array */
+
+	/* sanity checks */
+	if (dfunc->func_rettype->type_oid != BOOLOID ||
+		list_length(dfunc->func_args) != 2 ||
+		((devtype_info *)linitial(dfunc->func_args))->type_oid
+			!= dtype1->type_oid ||
+		((devtype_info *)lsecond(dfunc->func_args))->type_oid
+			!= dtype2->type_element->type_oid)
+		return false;
+
+	devexpr.expr_args = list_make2(dtype1, dtype2);
+	devexpr.expr_rettype = pgstrom_devtype_lookup(BOOLOID);
+	if (!devexpr.expr_rettype)
+		return false;
+	devexpr.expr_extra1 = ObjectIdGetDatum(opexpr->opno);
+	devexpr.expr_extra2 = BoolGetDatum(opexpr->useOr);
+	/* device function name */
+	devexpr.expr_name = psprintf("%s_%s_array",
+								 dfunc->func_sqlname,
+								 opexpr->useOr ? "any" : "all");
+	/* device function declaration */
+	initStringInfo(&decl);
+	appendStringInfo(
+		&decl,
+		"STATIC_INLINE(pg_bool_t)\n"
+		"pgfn_%s(kern_context *kcxt, pg_%s_t scalar, pg_array_t array)\n"
+		"{\n"
+		"  pg_bool_t  result;\n"
+		"  pg_bool_t  rv;\n"
+		"  cl_int     i, nitems;\n"
+		"  char      *dataptr;\n"
+		"  char      *bitmap;\n"
+		"  int        bitmask;\n",
+		devexpr.expr_name,
+		dtype1->type_name);
+	codegen_tempvar_declaration(&decl, "temp");
+
+	appendStringInfo(
+		&decl,
+		"\n"
+		"  /* NULL result to NULL array */\n"
+		"  if (array.isnull)\n"
+		"  {\n"
+		"    result.isnull = true;\n"
+		"    result.value  = false;\n"
+		"    return result;\n"
+		"  }\n\n");
+
+	if (dfunc->func_is_strict)
+	{
+		appendStringInfo(
+			&decl,
+			"  /* Quick NULL return to NULL scalar and strict function */\n"
+			"  if (scalar.isnull)\n"
+			"  {\n"
+			"    result.isnull = true;\n"
+			"    result.value  = false;\n"
+			"    return result;\n"
+			"  }\n");
+	}
+
+	appendStringInfo(
+        &decl,
+		"  /* how much items in the array? */\n"
+		"  nitems = ArrayGetNItems(kcxt, ARR_NDIM(array.value),\n"
+		"                                ARR_DIMS(array.value));\n"
+		"  if (nitems <= 0)\n"
+		"  {\n"
+		"    result.isnull = false;\n"
+		"    result.value  = %s;\n"
+		"  }\n\n",
+		opexpr->useOr ? "false" : "true");
+
+	appendStringInfo(
+		&decl,
+		"  /* loop over the array elements */\n"
+		"  dataptr = ARR_DATA_PTR(array.value);\n"
+		"  bitmap  = ARR_NULLBITMAP(array.value);\n"
+		"  bitmask = 1;\n"
+		"  result.isnull = false;\n"
+		"  result.value  = %s;\n"
+		"\n"
+		"  for (i=0; i < nitems; i++)\n"
+		"  {\n"
+		"    if (bitmap && (*bitmap & bitmask) == 0)\n"
+		"      temp.%s_v = pg_%s_datum_ref(kcxt,NULL,false);\n"
+		"    else\n"
+		"    {\n"
+		"      temp.%s_v = pg_%s_datum_ref(kcxt,dataptr,false);\n"
+		"      dataptr += %s;\n"
+		"      dataptr = (char *) TYPEALIGN(%d, dataptr);\n"
+		"    }\n\n",
+		opexpr->useOr ? "false" : "true",
+		dtype1->type_name, dtype1->type_name,
+		dtype1->type_name, dtype1->type_name,
+		dtype1->type_length < 0
+		? "VARSIZE_ANY(dataptr)"
+		: psprintf("%d", dtype1->type_length),
+		dtype1->type_align);
+
+	appendStringInfo(
+		&decl,
+		"    /* call for comparison function */\n"
+		"    rv = pgfn_%s(kcxt, scalar, temp.%s_v);\n"
+		"    if (rv.isnull)\n"
+		"      result.isnull = true;\n"
+		"    else if (%srv.value)\n"
+		"    {\n"
+		"      result.isnull = false;\n"
+		"      result.value  = %s;\n"
+		"      break;\n"
+		"    }\n",
+		dfunc->func_devname, dtype1->type_name,
+		opexpr->useOr ? "" : "!",
+		opexpr->useOr ? "true" : "false");
+
+	appendStringInfo(
+		&decl,
+		"    /* advance bitmap pointer if any */\n"
+		"    if (bitmap)\n"
+		"    {\n"
+		"      bitmask <<= 1;\n"
+		"      if (bitmask == 0x0100)\n"
+		"      {\n"
+		"        bitmap++;\n"
+		"        bitmask = 1;\n"
+		"      }\n"
+		"    }\n"
+		"  }\n"
+		"  return result;\n"
+		"}\n");
+	devexpr.expr_decl = decl.data;
+
+	/* remember this special device function */
+	context->expr_defs = lappend(context->expr_defs,
+								 form_devexpr_info(&devexpr));
+
+found:
+	/* write out this special expression */
+	appendStringInfo(&context->str, "pgfn_%s(kcxt", devexpr.expr_name);
+	foreach (cell, opexpr->args)
+	{
+		Node   *expr = lfirst(cell);
+
+		appendStringInfo(&context->str, ", ");
+		if (!codegen_expression_walker(expr, context))
+			return false;
+	}
 	appendStringInfo(&context->str, ")");
 
 	return true;
@@ -2244,10 +2451,9 @@ pgstrom_device_expression(Expr *expr)
 	else if (IsA(expr, Const))
 	{
 		Const		   *con = (Const *) expr;
-		devtype_info   *dtype = pgstrom_devtype_lookup(con->consttype);
 
-		/* only supported scalar type */
-		if (!dtype || dtype->type_element)
+		/* supported types only */
+		if (!pgstrom_devtype_lookup(con->consttype))
 			goto unable_node;
 
 		return true;
@@ -2255,10 +2461,9 @@ pgstrom_device_expression(Expr *expr)
 	else if (IsA(expr, Param))
 	{
 		Param		   *param = (Param *) expr;
-		devtype_info   *dtype = pgstrom_devtype_lookup(param->paramtype);
 
-		/* only supported scalar type */
-		if (!dtype || dtype->type_element)
+		/* supported types only */
+		if (!pgstrom_devtype_lookup(param->paramtype))
 			goto unable_node;
 
 		return true;
@@ -2268,7 +2473,16 @@ pgstrom_device_expression(Expr *expr)
 		Var			   *var = (Var *) expr;
 		devtype_info   *dtype = pgstrom_devtype_lookup(var->vartype);
 
-		/* only supported scalar type */
+		/*
+		 * supported and scalar types only
+		 *
+		 * NOTE: We don't support array data type stored in relations,
+		 * because it may have short varlena format (1-byte header), thus,
+		 * we cannot guarantee alignment of packed datum in the array.
+		 * Param or Const are individually untoasted on the parameter buffer,
+		 * so its alignment is always 4-bytes, however, array datum in Var
+		 * nodes have unpredictable alignment.
+		 */
 		if (!dtype || dtype->type_element)
 			goto unable_node;
 
@@ -2321,11 +2535,10 @@ pgstrom_device_expression(Expr *expr)
 	else if (IsA(expr, CoalesceExpr))
 	{
 		CoalesceExpr   *coalesce = (CoalesceExpr *) expr;
-		devtype_info   *dtype = pgstrom_devtype_lookup(coalesce->coalescetype);
 		ListCell	   *cell;
 
-		/* only supported scalar type */
-		if (!dtype || dtype->type_element)
+		/* supported types only */
+		if (!pgstrom_devtype_lookup(coalesce->coalescetype))
 			goto unable_node;
 
 		/* arguments also have to be same type (=device supported) */
@@ -2347,9 +2560,10 @@ pgstrom_device_expression(Expr *expr)
 		if (minmax->op != IS_GREATEST && minmax->op != IS_LEAST)
 			return false;	/* unknown MinMax operation */
 
-		/* only supported scalar type */
-		if (!dtype || dtype->type_element)
+		/* supported types only */
+		if (!dtype)
 			goto unable_node;
+
 		/* type compare function is required */
 		if (!OidIsValid(dtype->type_cmpfunc) ||
 			!pgstrom_devfunc_lookup(dtype->type_cmpfunc,
@@ -2419,43 +2633,33 @@ pgstrom_device_expression(Expr *expr)
 
 		return true;
 	}
-	else if (IsA(expr, ArrayRef))
+	else if (IsA(expr, ScalarArrayOpExpr))
 	{
-		ArrayRef	   *aref = (ArrayRef *) expr;
-		devtype_info   *dtype = pgstrom_devtype_lookup(aref->refelemtype);
+		ScalarArrayOpExpr  *opexpr = (ScalarArrayOpExpr *) expr;
+		devtype_info	   *dtype;
 
-		/*
-		 * MEMO: ArrayRef takes supported array type, and returns a scalar
-		 * type
-		 */
-		if (!dtype /* needs to check */)
-			goto unable;
+		if (!pgstrom_devfunc_lookup(get_opcode(opexpr->opno),
+									opexpr->inputcollid))
+			goto unable_node;
 
-		/* we cannot support ArrayRef that intends value assignment */
-		if (aref->refassgnexpr != NULL)
-			goto unable;
+		/* sanity checks */
+		if (list_length(opexpr->args) != 2)
+			goto unable_node;
 
-		/* we cannot support ArrayRef that returns a sliced array */
-		if (aref->reflowerindexpr != NIL)
-			goto unable;
+		/* 1st argument must be scalar */
+		dtype = pgstrom_devtype_lookup(exprType(linitial(opexpr->args)));
+		if (!dtype || dtype->type_element)
+			goto unable_node;
 
-		if (!pgstrom_device_expression((Expr *)aref->refupperindexpr))
-			return false;
+		/* 2nd argument must be array */
+		dtype = pgstrom_devtype_lookup(exprType(lsecond(opexpr->args)));
+		if (!dtype || dtype->type_array)
+			goto unable_node;
 
-		if (!pgstrom_device_expression(aref->refexpr))
+		if (!pgstrom_device_expression((Expr *) opexpr->args))
 			return false;
 
 		return true;
-	}
-	else if (IsA(expr, ScalarArrayOpExpr))
-	{
-		ScalarArrayOpExpr *opexpr = (ScalarArrayOpExpr *) expr;
-		devfunc_info   *dfunc = pgstrom_devfunc_lookup(opexpr->opfuncid,
-													   opexpr->inputcollid);
-		if (!dfunc)
-			goto unable;
-		if (!pgstrom_device_expression((Expr *) opexpr->args))
-			return false;
 	}
 unable_node:
 	elog(DEBUG2, "Unable to run on device: %s", nodeToString(expr));

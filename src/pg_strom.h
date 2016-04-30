@@ -341,7 +341,8 @@ typedef struct devexpr_info {
 	Oid			expr_collid;	/* OID of collation, if collation aware */
 	List	   *expr_args;		/* argument types by devtype_info */
 	devtype_info *expr_rettype;	/* result type by devtype_info */
-	Datum		expr_extra;	/* an extra information per node type */
+	Datum		expr_extra1;	/* 1st extra information per node type */
+	Datum		expr_extra2;	/* 2nd extra information per node type */
 	const char *expr_name;	/* name of the function in device side */
 	const char *expr_decl;	/* declaration of device function, if any */
 } devexpr_info;
