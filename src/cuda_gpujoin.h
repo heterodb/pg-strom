@@ -253,7 +253,7 @@ gpujoin_exec_outerscan(kern_gpujoin *kgjoin,
 			kresults->results[base + offset] = (size_t)htup - (size_t)kds;
 		}
 	}
-	kern_writeback_error_status(&kgjoin->kerror, kcxt.e);
+	kern_writeback_error_status(&kresults->kerror, kcxt.e);
 }
 
 KERNEL_FUNCTION(void)
@@ -358,7 +358,7 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 		}
 		__syncthreads();
 	}
-	kern_writeback_error_status(&kgjoin->kerror, kcxt.e);
+	kern_writeback_error_status(&kresults_dst->kerror, kcxt.e);
 }
 
 /*
@@ -544,7 +544,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 			}
 		}
 	}
-	kern_writeback_error_status(&kgjoin->kerror, kcxt.e);
+	kern_writeback_error_status(&kresults_dst->kerror, kcxt.e);
 }
 
 /*
@@ -655,7 +655,7 @@ gpujoin_outer_nestloop(kern_gpujoin *kgjoin,
 		}
 	}
 	__syncthreads();
-	kern_writeback_error_status(&kgjoin->kerror, kcxt.e);
+	kern_writeback_error_status(&kresults_dst->kerror, kcxt.e);
 }
 
 /*
@@ -738,7 +738,7 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 			r_buffer[depth] = (size_t)&khitem->t.htup - (size_t)kds_hash;
 		}
 	}
-	kern_writeback_error_status(&kgjoin->kerror, kcxt.e);
+	kern_writeback_error_status(&kresults_dst->kerror, kcxt.e);
 }
 
 /*
@@ -862,7 +862,7 @@ gpujoin_projection_row(kern_gpujoin *kgjoin,
 	}
 out:
 	/* write-back execution status to host-side */
-	kern_writeback_error_status(&kgjoin->kerror, kcxt.e);
+	kern_writeback_error_status(&kresults->kerror, kcxt.e);
 }
 
 KERNEL_FUNCTION(void)
@@ -1008,7 +1008,7 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 	}
 out:
 	/* write-back execution status to host-side */
-	kern_writeback_error_status(&kgjoin->kerror, kcxt.e);
+	kern_writeback_error_status(&kresults->kerror, kcxt.e);
 }
 
 /*
@@ -1101,16 +1101,22 @@ gpujoin_count_rows_dist(kern_gpujoin *kgjoin,
 }
 
 /*
- * returns true, if major retry, elsewhere minor retry
+ * gpujoin_resize_window
  *
- *
+ * It resizes the current virtual partition window size according to the
+ * histogram of the latest join results, then, returns the victim depth
+ * number. If negative number, it means we cannot split window any more.
  */
 STATIC_FUNCTION(cl_int)
-gpujoin_resize_window(kern_gpujoin *kgjoin,
+gpujoin_resize_window(kern_context *kcxt,
+					  kern_gpujoin *kgjoin,
 					  kern_multirels *kmrels,
 					  kern_data_store *kds_src,
+					  kern_data_store *kds_dst,
 					  kern_resultbuf *kresults,
 					  cl_int nsplits,
+					  cl_uint dest_consumed,
+					  kern_errorbuf kerror,
 					  cl_int smx_count,
 					  cl_int smx_clock)
 {
@@ -1125,22 +1131,24 @@ gpujoin_resize_window(kern_gpujoin *kgjoin,
 	cl_uint			target_depth = 0;
 	cl_float		row_dist_score_largest = FLT_MIN;
 	cl_ulong		tv1, tv2;
-	kern_errorbuf	kerror_save;
 	cudaError_t		status = cudaSuccess;
 
 	/*
-	 * clear the error code, but may need to restore if we cannot
-	 * split the target window any more
+	 * Even if we got StromError_DataStoreNoSpace once, it may not make much
+	 * sense to investigate an optimal window size when more than half of the
+	 * destination buffer was already consumed by the previous trial.
+	 * In this case, we will terminate the kernel execution instead of finding
+	 * out new optimal window size and retry.
 	 */
-	kerror_save = kgjoin->kerror;
-	memset(&kgjoin->kerror, 0, sizeof(kern_errorbuf));
+	if (2 * dest_consumed > kds_dst->length)
+		return -1;
 
 	/* get max available block size */
 	status = cudaFuncGetAttributes(&fattrs, (const void *)
 								   gpujoin_count_rows_dist);
 	if (status != cudaSuccess)
 	{
-		STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
+		STROM_SET_RUNTIME_ERROR(&kcxt->e, status);
 		return -1;
 	}
 
@@ -1156,7 +1164,7 @@ gpujoin_resize_window(kern_gpujoin *kgjoin,
 							   sizeof(kern_rows_dist_args_t));
 	if (!kern_args)
 	{
-		STROM_SET_ERROR(&kgjoin->kerror, StromError_OutOfKernelArgs);
+		STROM_SET_ERROR(&kcxt->e, StromError_OutOfKernelArgs);
 		return -1;
 	}
 	kern_args->kgjoin = kgjoin;
@@ -1180,20 +1188,20 @@ gpujoin_resize_window(kern_gpujoin *kgjoin,
 							  NULL);
 	if (status != cudaSuccess)
 	{
-		STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
+		STROM_SET_RUNTIME_ERROR(&kcxt->e, status);
 		return -1;
 	}
 
 	status = cudaDeviceSynchronize();
 	if (status != cudaSuccess)
 	{
-		STROM_SET_RUNTIME_ERROR(&kgjoin->kerror, status);
+		STROM_SET_RUNTIME_ERROR(&kcxt->e, status);
 		return -1;
 	}
 	tv2 = clock64();
 	TIMEVAL_RECORD(kgjoin,kern_rows_dist,tv1,tv2,smx_clock);
-	if (kgjoin->kerror.errcode != StromError_Success)
-		return -1;
+	/* NOTE: gpujoin_count_rows_dist never returns PG-Strom's error code */
+
 	/*
 	 * Find out the most distributed depth
 	 */
@@ -1241,8 +1249,9 @@ gpujoin_resize_window(kern_gpujoin *kgjoin,
 		= kgjoin->jscale[target_depth].window_size / nsplits + 1;
 	if (kgjoin->jscale[target_depth].window_size <= 1)
 	{
-		kgjoin->kerror = kerror_save;
-		return -1;
+		if (kcxt->e.errcode == StromError_Success)
+			kcxt->e = kerror;
+		return -1;		/* caller has to set original error code */
 	}
 
 	/*
@@ -1263,22 +1272,17 @@ gpujoin_try_next_window(kern_gpujoin *kgjoin,
 						kern_multirels *kmrels,
 						kern_data_store *kds_src,
 						kern_data_store *kds_dst,
+						cl_uint dest_consumed,
 						cl_uint last_nitems,
 						cl_uint last_usage)
 {
-	size_t		curr_length;
-	cl_uint		curr_nitems;
 	cl_int		i, j;
 	double		ratio = -1.0;
 
 	if (kds_dst->format == KDS_FORMAT_ROW)
 	{
-		curr_length = (KERN_DATA_STORE_HEAD_LENGTH(kds_dst) +
-					   STROMALIGN(sizeof(cl_uint) * kds_dst->nitems) +
-					   STROMALIGN(kds_dst->usage));
-
 		/* can we run the same scale join again? */
-		if (curr_length +
+		if (dest_consumed +
 			STROMALIGN(sizeof(cl_uint) * last_nitems) +
 			STROMALIGN(last_usage) > kds_dst->length)
 			return false;
@@ -1287,18 +1291,15 @@ gpujoin_try_next_window(kern_gpujoin *kgjoin,
 		if (last_nitems > 0)
 		{
 			assert(last_usage > 0);
-			ratio = ((double)(kds_dst->length - curr_length) /
+			ratio = ((double)(kds_dst->length - dest_consumed) /
 					 (double)(STROMALIGN(sizeof(cl_uint) * last_nitems) +
 							  STROMALIGN(last_usage)));
 		}
 	}
 	else
 	{
-		curr_length = (KERN_DATA_STORE_SLOT_LENGTH(kds_dst, kds_dst->nitems) +
-					   STROMALIGN(kds_dst->usage));
-
 		/* can we run the same scale join again? */
-		if (curr_length +
+		if (dest_consumed +
 			LONGALIGN((sizeof(Datum) +
 					   sizeof(char)) * kds_dst->ncols) * last_nitems +
 			STROMALIGN(last_usage) > kds_dst->length)
@@ -1307,7 +1308,7 @@ gpujoin_try_next_window(kern_gpujoin *kgjoin,
 		/* how much larger window size if last nitems is not zero */
 		if (last_nitems > 0)
 		{
-			ratio = ((double)(kds_dst->length - curr_length) /
+			ratio = ((double)(kds_dst->length - dest_consumed) /
 					 (double)(LONGALIGN(sizeof(Datum) +
 										sizeof(char)) * kds_dst->ncols *
 							  last_nitems + STROMALIGN(last_usage)));
@@ -1328,6 +1329,7 @@ gpujoin_try_next_window(kern_gpujoin *kgjoin,
 	for (i = kgjoin->num_rels; i >= 0; i--)
 	{
 		kern_join_scale	   *jscale = kgjoin->jscale;
+		cl_uint				curr_nitems;
 
 		if (i == 0)
 			curr_nitems = (kds_src ? kds_src->nitems : 0);
@@ -1425,7 +1427,8 @@ gpujoin_main(kern_gpujoin *kgjoin,		/* in/out: misc stuffs */
 	cl_uint				kresults_max_items = kgjoin->kresults_max_items;
 	cl_uint				window_base;
 	cl_uint				window_size;
-	cl_uint				dest_usage_prev;
+	cl_uint				dest_usage_saved;
+	cl_uint				dest_consumed;
 	cl_int				device;
 	cl_int				smx_clock;
 	cl_int				smx_count;
@@ -1469,12 +1472,13 @@ gpujoin_main(kern_gpujoin *kgjoin,		/* in/out: misc stuffs */
 	}
 
 	kds_dst->nitems = 0;
-	dest_usage_prev = 0;
+	dest_usage_saved = 0;
+	dest_consumed = 0;
 retry_major:
 	/* rewind the destination buffer; because kds_dst->usage is increased
 	 * by atomic operation even if this trial made too much joined results.
 	 * So, we save kds_dst->usage at the beginning. */
-	kds_dst->usage = dest_usage_prev;
+	kds_dst->usage = dest_usage_saved;
 
 	for (depth = 1; depth <= kgjoin->num_rels; depth++)
 	{
@@ -1547,8 +1551,11 @@ retry_major:
 				}
 				tv2 = clock64();
 				TIMEVAL_RECORD(kgjoin,kern_outer_scan,tv1,tv2,smx_clock);
-				if (kgjoin->kerror.errcode != StromError_Success)
-					return;
+				if (kresults_src->kerror.errcode != StromError_Success)
+				{
+					kcxt.e = kresults_src->kerror;
+					goto out;
+				}
 				/* update run-time statistics */
 				jscale[0].inner_nitems_stage = kresults_src->nitems;
 				jscale[0].right_nitems_stage = 0;
@@ -1636,18 +1643,22 @@ retry_major:
 				tv2 = clock64();
 				TIMEVAL_RECORD(kgjoin,kern_exec_nestloop,tv1,tv2,smx_clock);
 
-				if (kgjoin->kerror.errcode == StromError_DataStoreNoSpace)
+				if (kresults_dst->kerror.errcode == StromError_DataStoreNoSpace)
 				{
 					nsplits = kresults_dst->nitems / kresults_dst->nrooms + 1;
-					victim = gpujoin_resize_window(kgjoin,
+					victim = gpujoin_resize_window(&kcxt,
+												   kgjoin,
 												   kmrels,
 												   kds_src,
+												   kds_dst,
 												   kresults_dst,
 												   nsplits,
+												   dest_consumed,
+												   kresults_dst->kerror,
 												   smx_count,
 												   smx_clock);
 					if (victim < 0)
-						return;
+						goto out;
 					else if (victim < depth)
 					{
 						kgjoin->num_major_retry++;
@@ -1656,8 +1667,11 @@ retry_major:
 					kgjoin->num_minor_retry++;
 					goto retry_minor;
 				}
-				else if (kgjoin->kerror.errcode != StromError_Success)
-					return;
+				else if (kresults_dst->kerror.errcode != StromError_Success)
+				{
+					kcxt.e = kresults_dst->kerror;
+					goto out;
+				}
 				/* update run-time statistics */
 				jscale[depth].inner_nitems_stage = kresults_dst->nitems;
 				jscale[depth].right_nitems_stage = 0;
@@ -1710,7 +1724,7 @@ retry_major:
 					goto out;
 				}
 
-				status = cudaLaunchDevice((void *)gpujoin_exec_nestloop,
+				status = cudaLaunchDevice((void *)gpujoin_outer_nestloop,
 										  kern_join_args,
 										  grid_sz, block_sz,
 										  sizeof(kern_errorbuf) * block_sz.x,
@@ -1730,18 +1744,22 @@ retry_major:
 				tv2 = clock64();
 				TIMEVAL_RECORD(kgjoin,kern_outer_nestloop,tv1,tv2,smx_clock);
 
-				if (kgjoin->kerror.errcode == StromError_DataStoreNoSpace)
+				if (kresults_dst->kerror.errcode == StromError_DataStoreNoSpace)
 				{
 					nsplits = kresults_dst->nitems / kresults_dst->nrooms + 1;
-					victim = gpujoin_resize_window(kgjoin,
+					victim = gpujoin_resize_window(&kcxt,
+												   kgjoin,
 												   kmrels,
 												   kds_src,
+												   kds_dst,
 												   kresults_dst,
 												   nsplits,
+												   dest_consumed,
+												   kresults_dst->kerror,
 												   smx_count,
 												   smx_clock);
 					if (victim < 0)
-						return;
+						goto out;
 					else if (victim < depth)
 					{
 						kgjoin->num_major_retry++;
@@ -1750,8 +1768,11 @@ retry_major:
 					kgjoin->num_minor_retry++;
 					goto retry_minor;
 				}
-				else if (kgjoin->kerror.errcode != StromError_Success)
-					return;
+				else if (kresults_dst->kerror.errcode != StromError_Success)
+				{
+					kcxt.e = kresults_dst->kerror;
+					goto out;
+				}
 				/* update run-time statistics */
 				jscale[depth].right_nitems_stage = kresults_dst->nitems;
 			}
@@ -1816,18 +1837,22 @@ retry_major:
 				tv2 = clock64();
 				TIMEVAL_RECORD(kgjoin,kern_exec_hashjoin,tv1,tv2,smx_clock);
 
-				if (kgjoin->kerror.errcode == StromError_DataStoreNoSpace)
+				if (kresults_dst->kerror.errcode == StromError_DataStoreNoSpace)
 				{
 					nsplits = kresults_dst->nitems / kresults_dst->nrooms + 1;
-					victim = gpujoin_resize_window(kgjoin,
+					victim = gpujoin_resize_window(&kcxt,
+												   kgjoin,
 												   kmrels,
 												   kds_src,
+												   kds_dst,
 												   kresults_dst,
 												   nsplits,
+												   dest_consumed,
+												   kresults_dst->kerror,
 												   smx_count,
 												   smx_clock);
 					if (victim < 0)
-						return;
+						goto out;
 					else if (victim < depth)
 					{
 						kgjoin->num_major_retry++;
@@ -1836,8 +1861,11 @@ retry_major:
 					kgjoin->num_minor_retry++;
 					goto retry_minor;
 				}
-				else if (kgjoin->kerror.errcode != StromError_Success)
-					return;
+				else if (kresults_dst->kerror.errcode != StromError_Success)
+				{
+					kcxt.e = kresults_dst->kerror;
+					goto out;
+				}
 				/* update run-time statistics */
 				jscale[depth].inner_nitems_stage = kresults_dst->nitems;
 				jscale[depth].right_nitems_stage = 0;
@@ -1903,18 +1931,22 @@ retry_major:
 				tv2 = clock64();
 				TIMEVAL_RECORD(kgjoin,kern_outer_hashjoin,tv1,tv2,smx_clock);
 
-				if (kgjoin->kerror.errcode == StromError_DataStoreNoSpace)
+				if (kresults_dst->kerror.errcode == StromError_DataStoreNoSpace)
 				{
 					nsplits = kresults_dst->nitems / kresults_dst->nrooms + 1;
-					victim = gpujoin_resize_window(kgjoin,
+					victim = gpujoin_resize_window(&kcxt,
+												   kgjoin,
 												   kmrels,
 												   kds_src,
+												   kds_dst,
 												   kresults_dst,
 												   nsplits,
+												   dest_consumed,
+												   kresults_dst->kerror,
 												   smx_count,
 												   smx_clock);
 					if (victim < 0)
-						return;
+						goto out;
 					else if (victim < depth)
 					{
 						kgjoin->num_major_retry++;
@@ -1923,8 +1955,11 @@ retry_major:
 					kgjoin->num_minor_retry++;
 					goto retry_minor;
 				}
-				else if (kgjoin->kerror.errcode != StromError_Success)
-					return;
+				else if (kresults_dst->kerror.errcode != StromError_Success)
+				{
+					kcxt.e = kresults_dst->kerror;
+					goto out;
+				}
 				/* update run-time statistics */
 				jscale[depth].right_nitems_stage = kresults_dst->nitems;
 			}
@@ -1952,6 +1987,8 @@ retry_major:
 	 */
 	if (kresults_src->nitems > 0)
 	{
+		assert(kresults_src->kerror.errcode == StromError_Success);
+
 		/*
 		 * Launch:
 		 * KERNEL_FUNCTION(void)
@@ -1972,20 +2009,24 @@ retry_major:
 		 */
 		if (kds_dst->nitems + kresults_src->nitems >= kds_dst->nrooms)
 		{
+			/* for temporary usage of error buffer */
+			STROM_SET_ERROR(&kresults_src->kerror, StromError_DataStoreNoSpace);
+
 			nsplits = kresults_src->nitems /
 				(kds_dst->nrooms - kds_dst->nitems) + 1;
-			victim = gpujoin_resize_window(kgjoin,
-										   kmrels,
-										   kds_src,
-										   kresults_src,
-										   nsplits,
-										   smx_count,
-										   smx_clock);
-			if (victim < 0)
-			{
-				STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
+			if (gpujoin_resize_window(&kcxt,
+									  kgjoin,
+									  kmrels,
+									  kds_src,
+									  kds_dst,
+									  kresults_src,
+									  nsplits,
+									  dest_consumed,
+									  kresults_src->kerror,
+									  smx_count,
+									  smx_clock) < 0)
 				goto out;
-			}
+
 			kgjoin->num_major_retry++;
 			goto retry_major;
 		}
@@ -2033,19 +2074,20 @@ retry_major:
 		tv2 = clock64();
 		TIMEVAL_RECORD(kgjoin,kern_projection,tv1,tv2,smx_clock);
 
-		if (kgjoin->kerror.errcode == StromError_DataStoreNoSpace)
+		if (kresults_src->kerror.errcode == StromError_DataStoreNoSpace)
 		{
 			cl_uint		ncols = kds_dst->ncols;
 			cl_uint		nitems_to_fit;
 			cl_uint		width_avg;
 
-			if (kds_dst->nitems == 0)
+			if (kresults_src->nitems == 0)
 				return;		/* should never happen */
+
 			if (kds_dst->format == KDS_FORMAT_SLOT)
 			{
 				width_avg = (LONGALIGN((sizeof(Datum) +
 										sizeof(char)) * ncols) +
-							 MAXALIGN((kds_dst->usage - dest_usage_prev) /
+							 MAXALIGN((kds_dst->usage - dest_usage_saved) /
 									  kresults_src->nitems + 1));
 				nitems_to_fit = kds_dst->length -
 					STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
@@ -2053,30 +2095,43 @@ retry_major:
 			}
 			else
 			{
-				width_avg = MAXALIGN((kds_dst->usage - dest_usage_prev) /
-									 kds_dst->nitems + 1) + sizeof(cl_uint);
+				width_avg = (MAXALIGN((kds_dst->usage - dest_usage_saved) /
+									 kresults_src->nitems + 1) +
+							 sizeof(cl_uint));
 				nitems_to_fit = kds_dst->length -
 					STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
 				nitems_to_fit /= width_avg;
 			}
 
-			if (gpujoin_resize_window(kgjoin,
-									  kmrels,
-									  kds_src,
-									  kresults_src,
-									  kresults_src->nitems / nitems_to_fit + 1,
-									  smx_count,
-									  smx_clock) < 0)
-				return;
+			nsplits = kresults_src->nitems / nitems_to_fit + 1;
+			victim = gpujoin_resize_window(&kcxt,
+										   kgjoin,
+										   kmrels,
+										   kds_src,
+										   kds_dst,
+										   kresults_src,
+										   nsplits,
+										   dest_consumed,
+										   kresults_src->kerror,
+										   smx_count,
+										   smx_clock);
+			if (victim < 0)
+				goto out;
+
 			kgjoin->num_major_retry++;
 			goto retry_major;
+		}
+		else if (kresults_src->kerror.errcode != StromError_Success)
+		{
+			kcxt.e = kresults_src->kerror;
+			goto out;
 		}
 	}
 
 	/* OK, we could make up joined results on the kds_dst */
 	kds_dst->nitems += kresults_src->nitems;
 	assert(kds_dst->nitems <= kds_dst->nrooms);
-	assert(dest_usage_prev <= kds_dst->usage);
+	assert(dest_usage_saved <= kds_dst->usage);
 
 	/* update statistics to be informed to the host side */
 	for (depth = 0; depth <= kgjoin->num_rels; depth++)
@@ -2094,16 +2149,26 @@ retry_major:
 	 * Also note that we check error code here. It is valid check because
 	 * gpujoin_main() shall be in single-thread execution.
 	 */
-	if (kgjoin->kerror.errcode == StromError_Success &&
-		gpujoin_try_next_window(kgjoin,
-								kmrels,
-								kds_src,
-								kds_dst,
-								kresults_src->nitems,
-								kds_dst->usage - dest_usage_prev))
+	if (kgjoin->kerror.errcode == StromError_Success)
 	{
-		dest_usage_prev = kds_dst->usage;
-		goto retry_major;
+		dest_consumed = (kds_dst->format == KDS_FORMAT_ROW
+						 ? (KERN_DATA_STORE_HEAD_LENGTH(kds_dst) +
+							STROMALIGN(sizeof(cl_uint) * kds_dst->nitems) +
+							STROMALIGN(kds_dst->usage))
+						 : (KERN_DATA_STORE_SLOT_LENGTH(kds_dst,
+														kds_dst->nitems) +
+							STROMALIGN(kds_dst->usage)));
+		if (gpujoin_try_next_window(kgjoin,
+									kmrels,
+									kds_src,
+									kds_dst,
+									dest_consumed,
+									kresults_src->nitems,
+									kds_dst->usage - dest_usage_saved))
+		{
+			dest_usage_saved = kds_dst->usage;
+			goto retry_major;
+		}
 	}
 out:
 	kern_writeback_error_status(&kgjoin->kerror, kcxt.e);
