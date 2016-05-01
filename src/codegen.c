@@ -117,6 +117,7 @@ build_devtype_info_entry(Oid type_oid,
 		entry->type_name = pstrdup(NameStr(type_form->typname));
 	else
 		entry->type_name = pstrdup("array");
+	entry->type_base = pstrdup(type_basename);
 
    	entry->type_eqfunc = get_opcode(tcache->eq_opr);
 	entry->type_cmpfunc = tcache->cmp_proc;
@@ -2052,8 +2053,9 @@ codegen_scalar_array_op_expression(ScalarArrayOpExpr *opexpr,
 	devexpr.expr_tag = T_ScalarArrayOpExpr;
 	devexpr.expr_collid = opexpr->inputcollid;
 
-	dfunc = pgstrom_devfunc_lookup(get_opcode(opexpr->opno),
-								   opexpr->inputcollid);
+	dfunc = pgstrom_devfunc_lookup_and_track(get_opcode(opexpr->opno),
+											 opexpr->inputcollid,
+											 context);
 	if (!dfunc)
 		return false;
 
