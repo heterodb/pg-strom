@@ -191,8 +191,6 @@ typedef uintptr_t		hostptr_t;
 #define KERNEL_FUNCTION_MAXTHREADS(RET_TYPE)	\
 	__global__ RET_TYPE __launch_bounds__(1024)
 #endif
-
-
 #else
 #define STATIC_INLINE(RET_TYPE)		static inline RET_TYPE
 #define STATIC_FUNCTION(RET_TYPE)	static inline RET_TYPE
@@ -458,6 +456,72 @@ typedef struct {
 #define GPUMEMALIGN_LEN			1024
 #define GPUMEMALIGN(LEN)		TYPEALIGN(GPUMEMALIGN_LEN,(LEN))
 #define GPUMEMALIGN_DOWN(LEN)	TYPEALIGN_DOWN(GPUMEMALIGN_LEN,(LEN))
+
+#ifdef __CUDACC__
+/*
+ * alignment aware value reference
+ */
+STATIC_INLINE(cl_short)
+get_uint16_val(const void *addr)
+{
+	return ((devptr_t)addr & (sizeof(cl_ushort) - 1)) == 0
+		? *((cl_ushort *) addr)
+		: ((cl_ushort)((cl_uchar *)addr)[0] |
+		   (cl_ushort)((cl_uchar *)addr)[1] << 8);
+}
+
+STATIC_INLINE(cl_uint)
+get_uint32_val(const void *addr)
+{
+	switch ((devptr_t)addr & (sizeof(cl_uint) - 1))
+	{
+		case 0:
+			return *((cl_uint *) addr);
+		case 2:
+			return ((cl_uint)(*((cl_ushort *)((char *)addr))) |
+					(cl_uint)(*((cl_ushort *)((char *)addr + 2))) << 16);
+		default:
+			return ((cl_uint)(*((cl_uchar *) ((char *)addr))) |
+					(cl_uint)(*((cl_ushort *)((char *)addr + 1))) << 8 |
+					(cl_uint)(*((cl_uchar *) ((char *)addr + 3))) << 24);
+	}
+}
+
+STATIC_INLINE(cl_ulong)
+get_uint64_val(const void *addr)
+{
+	switch ((devptr_t)addr & (sizeof(cl_ulong) - 1))
+	{
+		case 0:
+			return *((cl_ulong *)addr);
+		case 4:
+			return ((cl_ulong)(*((cl_uint *)((char *)addr))) |
+					(cl_ulong)(*((cl_uint *)((char *)addr + 4))));
+		case 2:
+		case 6:
+			return ((cl_ulong)(*((cl_ushort *)((char *)addr))) |
+					(cl_ulong)(*((cl_uint *)  ((char *)addr + 2))) << 16 |
+					(cl_ulong)(*((cl_ushort *)((char *)addr + 6))) << 48);
+		case 1:
+		case 5:
+			return ((cl_ulong)(*((cl_uchar *) ((char *)addr))) |
+					(cl_ulong)(*((cl_ushort *)((char *)addr + 1))) <<  8 |
+					(cl_ulong)(*((cl_uint *)  ((char *)addr + 3))) << 24 |
+					(cl_ulong)(*((cl_uchar *) ((char *)addr + 7))) << 56);
+		default:	/* 3 or 7 */
+			return ((cl_ulong)(*((cl_uchar *) ((char *)addr))) |
+					(cl_ulong)(*((cl_uint *)  ((char *)addr + 1))) <<  8 |
+					(cl_ulong)(*((cl_ushort *)((char *)addr + 5))) << 40 |
+					(cl_ulong)(*((cl_uchar *) ((char *)addr + 7))) << 56);
+	}
+}
+
+#define get_int16_val(ADDR)		((cl_int)get_uint16_val(ADDR))
+#define get_int32_val(ADDR)		((cl_int)get_uint32_val(ADDR))
+#define get_int64_val(ADDR)		((cl_int)get_uint64_val(ADDR))
+#define get_float32_val(ADDR)	__int_as_float(get_uint32_val(ADDR))
+#define get_float64_val(ADDR)	__longlong_as_double(get_int64_val(ADDR))
+#endif	/* __CUDACC__ */
 
 /*
  * kern_data_store
@@ -1195,7 +1259,7 @@ typedef struct varatt_indirect
 #define VARATT_IS_EXTENDED(PTR)			(!VARATT_IS_4B_U(PTR))
 #define VARATT_NOT_PAD_BYTE(PTR) 		(*((cl_uchar *) (PTR)) != 0)
 
-#define VARSIZE_4B(PTR) \
+#define VARSIZE_4B(PTR)						\
 	((((varattrib_4b *) (PTR))->va_4byte.va_header >> 2) & 0x3FFFFFFF)
 #define VARSIZE_1B(PTR) \
 	((((varattrib_1b *) (PTR))->va_header >> 1) & 0x7F)
