@@ -166,12 +166,10 @@ typedef struct {
 		cl_double	tv_kern_fixvar;
 	} gpreagg;
 	struct {
-		cl_uint		num_kern_prep;
-		cl_uint		num_kern_sort;
-		cl_uint		num_kern_fixup;
-		cl_double	tv_kern_prep;
-		cl_double	tv_kern_sort;
-		cl_double	tv_kern_fixup;
+		cl_uint		num_kern_proj;
+		cl_uint		num_kern_main;
+		cl_double	tv_kern_proj;
+		cl_double	tv_kern_main;
 	} gsort;
 } pgstrom_perfmon;
 
@@ -258,7 +256,6 @@ struct GpuTaskState
 	bool		  (*cb_task_process)(GpuTask *gtask);
 	bool		  (*cb_task_complete)(GpuTask *gtask);
 	void		  (*cb_task_release)(GpuTask *gtask);
-	void		  (*cb_task_polling)(GpuTaskState *gts);	// deprecated
 	GpuTask		 *(*cb_next_chunk)(GpuTaskState *gts);
 	void		  (*cb_switch_task)(GpuTaskState *gts, GpuTask *gtask);
 	TupleTableSlot *(*cb_next_tuple)(GpuTaskState *gts);

@@ -1254,7 +1254,6 @@ pgstrom_init_gputaskstate(GpuContext *gcontext,
 	gts->cb_task_process = NULL;
 	gts->cb_task_complete = NULL;
 	gts->cb_task_release = NULL;
-	gts->cb_task_polling = NULL;	// deprecated
 	gts->cb_next_chunk = NULL;
 	gts->cb_switch_task = NULL;
 	gts->cb_next_tuple = NULL;
@@ -1309,6 +1308,7 @@ check_completed_tasks(GpuTaskState *gts)
 	GpuTask		   *gtask;
 	dlist_node	   *dnode;
 
+#if 0
 	/*
 	 * Allows GpuTaskState to check additional concurrent tasks,
 	 * like dynamic background workers based on CPUs, if it has
@@ -1319,6 +1319,7 @@ check_completed_tasks(GpuTaskState *gts)
 	 */
 	if (gts->cb_task_polling)
 		gts->cb_task_polling(gts);
+#endif
 
 	while (!dlist_is_empty(&gts->completed_tasks))
 	{

@@ -28,7 +28,7 @@
 typedef struct
 {
 	kern_errorbuf	kerror;
-	cl_uint			chunk_id;	/* chunk-id of the current kds_in */
+	cl_uint			segid;		/* segment id to be loaded */
 	cl_uint			n_loaded;	/* number of items already loaded */
 	kern_parambuf	kparams;
 	/* input chunk shall be located just after the kparams*/
@@ -39,17 +39,11 @@ typedef struct
 #define KERN_GPUSORT_KDS_IN(kgpusort)								\
 	((kern_data_store *)((char *)KERN_GPUSORT_PARAMBUF(kgpusort) +	\
 						 KERN_GPUSORT_PARAMBUF_LENGTH(kgpusort)))
-#define KERN_GPUSORT_DMASEND_OFFSET(kgpusort)		0
 #define KERN_GPUSORT_DMASEND_LENGTH(kgpusort)		\
 	(offsetof(kern_gpusort, kparams) +				\
-	 KERN_GPUSORT_PARAMBUF_LENGTH(kgpusort) +		\
-	 KERN_GPUSORT_KDS_IN(kgpusort)->length)
-#define KERN_GPUSORT_DMARECV_OFFSET(kgpusort)		0
+	 KERN_GPUSORT_PARAMBUF_LENGTH(kgpusort))
 #define KERN_GPUSORT_DMARECV_LENGTH(kgpusort)						\
-	(offsetof(kern_gpusort, kparams) +								\
-	 KERN_GPUSORT_PARAMBUF_LENGTH(kgpusort) +						\
-	 KERN_DATA_STORE_HEAD_LENGTH(KERN_GPUSORT_KDS_IN(kgpusort)) +	\
-	 sizeof(cl_uint) * KERN_GPUSORT_KDS_IN(kgpusort)->nitems)
+	offsetof(kern_gpusort, kparams)
 
 /*
  * NOTE: Persistent segment - GpuSort have two persistent data structure
@@ -83,7 +77,8 @@ gpusort_keycomp(kern_context *kcxt,
 KERNEL_FUNCTION(void)
 gpusort_projection(kern_gpusort *kgpusort,
 				   kern_resultbuf *kresults,
-				   kern_data_store *kds_slot)
+				   kern_data_store *kds_slot,
+				   kern_data_store *kds_in)
 {
 	kern_parambuf  *kparams = KERN_GPUSORT_PARAMBUF(kgpusort);
 	kern_data_store	*kds_in = KERN_GPUSORT_KDS_IN(kgpusort);

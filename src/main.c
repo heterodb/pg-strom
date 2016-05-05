@@ -819,15 +819,12 @@ pgstrom_explain_perfmon(GpuTaskState *gts, ExplainState *es)
 	/* GpuSort: kernel execution */
 	if ((pfm->extra_flags & DEVKERNEL_NEEDS_GPUSORT) != 0)
 	{
-		EXPLAIN_KERNEL_PERFMON("gpusort_preparation",
-							   gsort.num_kern_prep,
-							   gsort.tv_kern_prep);
-		EXPLAIN_KERNEL_PERFMON("gpusort_bitonic",
-							   gsort.num_kern_sort,
-							   gsort.tv_kern_sort);
-		EXPLAIN_KERNEL_PERFMON("gpusort_fixup_datastore",
-							   gsort.num_kern_fixup,
-							   gsort.tv_kern_fixup);		
+		EXPLAIN_KERNEL_PERFMON("gpusort_projection",
+							   gsort.num_kern_proj,
+							   gsort.tv_kern_proj);
+		EXPLAIN_KERNEL_PERFMON("gpusort_main",
+							   gsort.num_kern_main,
+							   gsort.tv_kern_main);
 	}
 
 #undef EXPLAIN_KERNEL_PERFMON
