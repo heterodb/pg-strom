@@ -95,7 +95,7 @@ typedef cl_ulong	Datum;
 /* same as host side get_next_log2() */
 #define get_next_log2(value)								\
 	((value) == 0 ? 0 : (sizeof(cl_ulong) * BITS_PER_BYTE - \
-						 clzll((cl_ulong)(value) - 1)))
+						 __clzll((cl_ulong)(value) - 1)))
 
 /*
  * Alignment macros

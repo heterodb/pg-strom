@@ -2495,11 +2495,11 @@ errorTextKernel(kern_errorbuf *kerror)
 		KERN_ENTRY(gpupreagg_final_reduction);
 		KERN_ENTRY(gpupreagg_fixup_varlena);
 		KERN_ENTRY(gpupreagg_main);
-		KERN_ENTRY(gpusort_preparation);
+		KERN_ENTRY(gpusort_projection);
 		KERN_ENTRY(gpusort_bitonic_local);
 		KERN_ENTRY(gpusort_bitonic_step);
 		KERN_ENTRY(gpusort_bitonic_merge);
-		KERN_ENTRY(gpusort_fixup_datastore);
+		KERN_ENTRY(gpusort_fixup_pointers);
 		KERN_ENTRY(gpusort_main);
 		default:
 			kernel_name = "unknown kernel";

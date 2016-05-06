@@ -515,17 +515,17 @@ pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 		appendStringInfo(
 			&body,
 			"  /* sort key comparison on the resource %d */\n"
-			"  KVAR_X.%s = pg_%s_vref(kds,kcxt,%d,x_index);\n"
-			"  KVAR_Y.%s = pg_%s_vref(kds,kcxt,%d,x_index);\n"
-			"  if (!KVAR_X.%s.isnull && !KVAR_Y.%s.isnull)\n"
+			"  KVAR_X.%s_v = pg_%s_vref(kds_slot,kcxt,%d,x_index);\n"
+			"  KVAR_Y.%s_v = pg_%s_vref(kds_slot,kcxt,%d,x_index);\n"
+			"  if (!KVAR_X.%s_v.isnull && !KVAR_Y.%s_v.isnull)\n"
 			"  {\n"
-			"    comp = pgfn_%s(kcxt, KVAR_X.%s, KVAR_Y.%s);\n"
+			"    comp = pgfn_%s(kcxt, KVAR_X.%s_v, KVAR_Y.%s_v);\n"
 			"    if (comp.value != 0)\n"
 			"      return %s;\n"
 			"  }\n"
-			"  else if (KVAR_X.%s.isnull && !KVAR_Y.%s.isnull)\n"
+			"  else if (KVAR_X.%s_v.isnull && !KVAR_Y.%s_v.isnull)\n"
 			"    return %d;\n"
-			"  else if (!KVAR_X.%s.isnull && KVAR_Y.%s.isnull)\n"
+			"  else if (!KVAR_X.%s_v.isnull && KVAR_Y.%s_v.isnull)\n"
 			"    return %d;\n"
 			"\n",
 			tle->resno,
@@ -539,6 +539,11 @@ pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 			dtype->type_name, dtype->type_name,
 			null_first ? -1 : 1);
 	}
+	appendStringInfo(
+		&body,
+		"  return 0;\n"
+		"}\n");
+
 	/* functions declarations, if any */
 	pgstrom_codegen_func_declarations(&kern, context);
 	/* special expression declarations, if any */
@@ -691,7 +696,8 @@ pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan)
 	gs_info.startup_cost = startup_cost;
 	gs_info.total_cost = total_cost;
 	gs_info.kern_source = pgstrom_gpusort_codegen(sort, &context);
-	gs_info.extra_flags = context.extra_flags | DEVKERNEL_NEEDS_GPUSORT;
+	gs_info.extra_flags = context.extra_flags |
+		DEVKERNEL_NEEDS_DYNPARA | DEVKERNEL_NEEDS_GPUSORT;
 	gs_info.used_params = context.used_params;
 	gs_info.num_segments = num_segments;
 	gs_info.segment_nrooms = segment_nrooms;

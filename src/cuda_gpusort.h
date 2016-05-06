@@ -93,7 +93,6 @@ gpusort_projection(kern_gpusort *kgpusort,
 	cl_uint			extra_sum;
 	char		   *extra_buf;
 	char		   *extra_pos;
-	size_t			front_len;
 	cl_uint			nrows_sum;
 	cl_uint			nrows_ofs;
 	cl_uint			kds_index;
@@ -255,7 +254,6 @@ gpusort_bitonic_local(kern_gpusort *kgpusort,
 					  kern_data_store *kds_slot)
 {
 	kern_parambuf  *kparams = KERN_GPUSORT_PARAMBUF(kgpusort);
-	kern_resultbuf *kresults = KERN_GPUSORT_RESULTBUF(kgpusort);
 	kern_context	kcxt;
 	cl_uint		   *localIdx = SHARED_WORKMEM(cl_uint);
 	cl_uint			nitems = kresults->nitems;
@@ -289,7 +287,7 @@ gpusort_bitonic_local(kern_gpusort *kgpusort,
 							? ((idx0 & ~unitMask) | (~idx0 & unitMask))
 							: (halfUnitSize + idx0));
 
-            if(idx1 < localEntry)
+            if(idx1 < part_size)
 			{
 				cl_uint		pos0 = localIdx[idx0];
 				cl_uint		pos1 = localIdx[idx1];
@@ -328,7 +326,6 @@ gpusort_bitonic_step(kern_gpusort *kgpusort,
 					 cl_bool reversing)
 {
 	kern_parambuf  *kparams = KERN_GPUSORT_PARAMBUF(kgpusort);
-	kern_resultbuf *kresults = KERN_GPUSORT_RESULTBUF(kgpusort);
 	kern_context	kcxt;
 	cl_uint			nitems = kresults->nitems;
 	size_t			halfUnitSize = unitsz / 2;
@@ -348,7 +345,7 @@ gpusort_bitonic_step(kern_gpusort *kgpusort,
 
 	pos0 = kresults->results[idx0];
 	pos1 = kresults->results[idx1];
-	if (gpusort_keycomp(&kcxt, kds, ktoast, pos0, pos1) > 0)
+	if (gpusort_keycomp(&kcxt, kds_slot, pos0, pos1) > 0)
 	{
 		/* swap them */
 		kresults->results[idx0] = pos1;
@@ -370,10 +367,9 @@ gpusort_bitonic_merge(kern_gpusort *kgpusort,
 					  kern_data_store *kds_slot)
 {
 	kern_parambuf  *kparams = KERN_GPUSORT_PARAMBUF(kgpusort);
-	kern_resultbuf *kresults = KERN_GPUSORT_RESULTBUF(kgpusort);
 	kern_context	kcxt;
 	cl_int		   *localIdx = SHARED_WORKMEM(cl_int);
-	cl_uint			nitems = kds->nitems;
+	cl_uint			nitems = kds_slot->nitems;
 	size_t			part_id = get_global_id() / get_local_size();
 	size_t			part_size = 2 * get_local_size();	/* partition Size */
 	size_t			part_base = part_id * part_size;	/* partition Base */
@@ -405,7 +401,7 @@ gpusort_bitonic_merge(kern_gpusort *kgpusort,
 			size_t	pos0 = localIdx[idx0];
 			size_t	pos1 = localIdx[idx1];
 
-			if (gpusort_keycomp(&kcxt, kds, ktoast, pos0, pos1) > 0)
+			if (gpusort_keycomp(&kcxt, kds_slot, pos0, pos1) > 0)
 			{
 				/* swap them */
 				localIdx[idx0] = pos1;
@@ -428,10 +424,11 @@ gpusort_fixup_pointers(kern_gpusort *kgpusort,
 					   kern_data_store *kds_slot)
 {
 	kern_parambuf  *kparams = KERN_GPUSORT_PARAMBUF(kgpusort);
-	cl_ulong	   *record_ids;
+	kern_context	kcxt;
 	cl_uint			kds_index;
 	Datum		   *tup_values;
 	cl_bool		   *tup_isnull;
+	cl_int			i;
 
 	INIT_KERNEL_CONTEXT(&kcxt, gpusort_fixup_pointers, kparams);
 	if (get_global_id() < kresults->nitems)
@@ -464,6 +461,7 @@ gpusort_main(kern_gpusort *kgpusort,
 			 kern_data_store *kds_slot)
 {
 	kern_parambuf  *kparams = KERN_GPUSORT_PARAMBUF(kgpusort);
+	kern_context	kcxt;
 	const void	   *kern_funcs[3];
 	void		  **kern_args;
 	cl_uint			nitems = kresults->nitems;
@@ -490,7 +488,7 @@ gpusort_main(kern_gpusort *kgpusort,
 	 */
 	kern_funcs[0] = (const void *)gpusort_bitonic_local;
 	kern_funcs[1] = (const void *)gpusort_bitonic_step;
-	kern_funct[2] = (const void *)gpusort_bitonic_merge;
+	kern_funcs[2] = (const void *)gpusort_bitonic_merge;
 	for (i=0; i < 3; i++)
 	{
 		status = pgstrom_largest_workgroup_size(&grid_sz,
@@ -566,12 +564,12 @@ gpusort_main(kern_gpusort *kgpusort,
 			 *                       cl_bool reversing)
 			 */
 			size_t		unitsz = 2 * j;
-			cl_bool		reversing = ((j == 2 * i) ? true : false)
+			cl_bool		reversing = ((j == 2 * i) ? true : false);
 			size_t		work_size;
 
 			kern_args = (void **)
 				cudaGetParameterBuffer(sizeof(void *),
-									   sizeof(void *) * 4);
+									   sizeof(void *) * 5);
 			if (!kern_args)
 			{
 				STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelArgs);
@@ -580,8 +578,8 @@ gpusort_main(kern_gpusort *kgpusort,
 			kern_args[0] = kgpusort;
 			kern_args[1] = kresults;
 			kern_args[2] = kds_slot;
-			kern_args[3] = &unitsz;
-			kern_args[4] = &reversing;
+			kern_args[3] = (void *)unitsz;
+			kern_args[4] = (void *)reversing;
 
 			work_size = (((nitems + unitsz - 1) / unitsz) * unitsz / 2);
 			grid_sz.x = (work_size + block_sz.x - 1) / block_sz.x;
@@ -649,9 +647,9 @@ gpusort_main(kern_gpusort *kgpusort,
 	 * For receive DMA, we will make an array of record-id.
 	 *
 	 * KERNEL_FUNCTION(void)
-	 * gpusort_extract_order(kern_gpusort *kgpusort,
-	 *                       kern_resultbuf *kresults,
-	 *                       kern_data_store *kds_slot)
+	 * gpusort_fixup_pointers(kern_gpusort *kgpusort,
+	 *                        kern_resultbuf *kresults,
+	 *                        kern_data_store *kds_slot)
 	 */
 	kern_args = (void **)
 		cudaGetParameterBuffer(sizeof(void *),
@@ -668,7 +666,7 @@ gpusort_main(kern_gpusort *kgpusort,
 	status = pgstrom_optimal_workgroup_size(&grid_sz,
 											&block_sz,
 											(const void *)
-											gpusort_extract_order,
+											gpusort_fixup_pointers,
 											kresults->nitems,
 											sizeof(cl_uint));
 	if (status != cudaSuccess)
@@ -677,7 +675,7 @@ gpusort_main(kern_gpusort *kgpusort,
 		goto out;
 	}
 
-	status = cudaLaunchDevice((void *)gpujoin_exec_outerscan,
+	status = cudaLaunchDevice((void *)gpusort_fixup_pointers,
 							  kern_args, grid_sz, block_sz,
 							  sizeof(cl_uint) * block_sz.x,
 							  NULL);
