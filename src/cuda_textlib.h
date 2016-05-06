@@ -336,5 +336,394 @@ pgfn_textlen(kern_context *kcxt, pg_text_t arg1)
 STROMCL_VARLENA_TYPE_TEMPLATE(varchar)
 #endif
 
+/*
+ * Support for LIKE operator
+ */
+#define LIKE_TRUE				1
+#define LIKE_FALSE				0
+#define LIKE_ABORT				(-1)
+
+#define GETCHAR(t)				(t)
+#define NextByte(p, plen)		\
+	do { (p)++; (plen)--; } while(0)
+#define NextChar(p, plen)		\
+	do { int __l = pg_wchar_mblen(p); (p) += __l; (plen) -= __l; } while(0)
+
+#define RECURSIVE_RETURN(__retcode)			\
+	do {									\
+		if (depth == 0)						\
+			return (__retcode);				\
+		retcode = (__retcode);				\
+		goto recursive_return;				\
+	} while(0)
+#define VIRTUAL_STACK_MAX_DEPTH		8
+
+STATIC_FUNCTION(cl_int)
+GenericMatchText(kern_context *kcxt,
+				 char *t, int tlen,
+				 char *p, int plen,
+				 int depth)
+{
+	cl_int		retcode;
+	struct {
+		char   *__t;
+		char   *__p;
+		int		__tlen;
+		int		__plen;
+	} vstack[VIRTUAL_STACK_MAX_DEPTH];
+
+recursive_entry:
+	/* Fast path for match-everything pattern */
+	if (plen == 1 && *p == '%')
+		RECURSIVE_RETURN(LIKE_TRUE);
+
+	/*
+	 * In this loop, we advance by char when matching wildcards (and thus on
+	 * recursive entry to this function we are properly char-synced). On other
+	 * occasions it is safe to advance by byte, as the text and pattern will
+	 * be in lockstep. This allows us to perform all comparisons between the
+	 * text and pattern on a byte by byte basis, even for multi-byte
+	 * encodings.
+	 */
+	while (tlen > 0 && plen > 0)
+	{
+		if (*p == '\\')
+		{
+			/* Next pattern byte must match literally, whatever it is */
+			NextByte(p, plen);
+			/* ... and there had better be one, per SQL standard */
+			if (plen <= 0)
+			{
+				STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+				return LIKE_ABORT;
+			}
+			if (GETCHAR(*p) != GETCHAR(*t))
+				RECURSIVE_RETURN(LIKE_FALSE);
+		}
+		else if (*p == '%')
+		{
+			char		firstpat;
+
+			/*
+			 * % processing is essentially a search for a text position at
+			 * which the remainder of the text matches the remainder of the
+			 * pattern, using a recursive call to check each potential match.
+			 *
+			 * If there are wildcards immediately following the %, we can skip
+			 * over them first, using the idea that any sequence of N _'s and
+			 * one or more %'s is equivalent to N _'s and one % (ie, it will
+			 * match any sequence of at least N text characters).  In this way
+			 * we will always run the recursive search loop using a pattern
+			 * fragment that begins with a literal character-to-match, thereby
+			 * not recursing more than we have to.
+			 */
+			NextByte(p, plen);
+
+			while (plen > 0)
+			{
+				if (*p == '%')
+					NextByte(p, plen);
+				else if (*p == '_')
+				{
+					/* If not enough text left to match the pattern, ABORT */
+					if (tlen <= 0)
+						RECURSIVE_RETURN(LIKE_ABORT);
+					NextChar(t, tlen);
+					NextByte(p, plen);
+				}
+				else
+					break;		/* Reached a non-wildcard pattern char */
+			}
+
+			/*
+			 * If we're at end of pattern, match: we have a trailing % which
+			 * matches any remaining text string.
+			 */
+			if (plen <= 0)
+				RECURSIVE_RETURN(LIKE_TRUE);
+
+			/*
+			 * Otherwise, scan for a text position at which we can match the
+			 * rest of the pattern.  The first remaining pattern char is known
+			 * to be a regular or escaped literal character, so we can compare
+			 * the first pattern byte to each text byte to avoid recursing
+			 * more than we have to.  This fact also guarantees that we don't
+			 * have to consider a match to the zero-length substring at the
+			 * end of the text.
+			 */
+			if (*p == '\\')
+			{
+				if (plen < 0)
+				{
+					STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+					return LIKE_ABORT;
+				}
+				firstpat = GETCHAR(p[1]);
+			}
+			else
+				firstpat = GETCHAR(*p);
+
+			while (tlen > 0)
+			{
+				if (GETCHAR(*t) == firstpat)
+				{
+					if (depth >= VIRTUAL_STACK_MAX_DEPTH)
+					{
+						STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+						return LIKE_ABORT;
+					}
+					/* push values */
+					vstack[depth].__t = t;
+					vstack[depth].__p = p;
+					vstack[depth].__tlen = tlen;
+					vstack[depth].__plen = plen;
+					depth++;
+					goto recursive_entry;
+				recursive_return:
+					depth--;
+					if (retcode != LIKE_FALSE)
+						RECURSIVE_RETURN(retcode);	/* TRUE or ABORT */
+					/* pop values */
+					t = vstack[depth].__t;
+					p = vstack[depth].__p;
+					tlen = vstack[depth].__tlen;
+					plen = vstack[depth].__plen;
+				}
+				NextChar(t, tlen);
+			}
+
+			/*
+			 * End of text with no match, so no point in trying later places
+			 * to start matching this pattern.
+			 */
+			RECURSIVE_RETURN(LIKE_ABORT);
+		}
+		else if (*p == '_')
+		{
+			/* _ matches any single character, and we know there is one */
+			NextChar(t, tlen);
+			NextByte(p, plen);
+			continue;
+		}
+		else if (GETCHAR(*p) != GETCHAR(*t))
+		{
+			RECURSIVE_RETURN(LIKE_FALSE);
+		}
+
+		/*
+		 * Pattern and text match, so advance.
+		 *
+		 * It is safe to use NextByte instead of NextChar here, even for
+		 * multi-byte character sets, because we are not following immediately
+		 * after a wildcard character. If we are in the middle of a multibyte
+		 * character, we must already have matched at least one byte of the
+		 * character from both text and pattern; so we cannot get out-of-sync
+		 * on character boundaries.  And we know that no backend-legal
+		 * encoding allows ASCII characters such as '%' to appear as non-first
+		 * bytes of characters, so we won't mistakenly detect a new wildcard.
+		 */
+		NextByte(t, tlen);
+		NextByte(p, plen);
+	}
+
+	if (tlen > 0)
+		RECURSIVE_RETURN(LIKE_FALSE);
+
+	/*
+	 * End of text, but perhaps not of pattern.  Match iff the remaining
+	 * pattern can match a zero-length string, ie, it's zero or more %'s.
+	 */
+	while (plen > 0 && *p == '%')
+		NextByte(p, plen);
+	if (plen <= 0)
+		RECURSIVE_RETURN(LIKE_TRUE);
+
+	/*
+	 * End of text with no match, so no point in trying later places to start
+	 * matching this pattern.
+	 */
+	RECURSIVE_RETURN(LIKE_ABORT);
+}
+
+#undef NextByte
+#undef NextChar
+#undef RECURSIVE_RETURN
+#undef VIRTUAL_STACK_MAX_DEPTH
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_textlike(kern_context *kcxt, pg_text_t arg1, pg_text_t arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		char	   *s = VARDATA_ANY(arg1.value);
+		char	   *p = VARDATA_ANY(arg2.value);
+		cl_uint		slen = VARSIZE_ANY_EXHDR(arg1.value);
+		cl_uint		plen = VARSIZE_ANY_EXHDR(arg2.value);
+
+		result.value = (GenericMatchText(kcxt,
+										 s, slen,
+										 p, plen, 0) == LIKE_TRUE);
+	}
+	return result;
+}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_textnlike(kern_context *kcxt, pg_text_t arg1, pg_text_t arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		char	   *s = VARDATA_ANY(arg1.value);
+		char	   *p = VARDATA_ANY(arg2.value);
+		cl_uint		slen = VARSIZE_ANY_EXHDR(arg1.value);
+		cl_uint		plen = VARSIZE_ANY_EXHDR(arg2.value);
+
+		result.value = (GenericMatchText(kcxt,
+										 s, slen,
+										 p, plen, 0) != LIKE_TRUE);
+	}
+	return result;
+}
+
+#undef LIKE_TRUE
+#undef LIKE_FALSE
+#undef LIKE_ABORT
+
+
+
+#else	/* __CUDACC__ */
+#include "mb/pg_wchar.h"
+
+STATIC_INLINE(void)
+assign_textlib_session_info(StringInfo buf)
+{
+	/*
+	 * Put encoding aware character length function
+	 */
+	appendStringInfoString(
+		buf,
+		"STATIC_INLINE(cl_int)\n"
+		"pg_wchar_mblen(const char *str)\n"
+		"{\n");
+
+	switch (GetDatabaseEncoding())
+	{
+		case PG_EUC_JP:		/* logic in pg_euc_mblen() */
+		case PG_EUC_KR:
+		case PG_EUC_TW:		/* logic in pg_euctw_mblen(), but identical */
+		case PG_EUC_JIS_2004:
+		case PG_JOHAB:		/* logic in pg_johab_mblen(), but identical */
+			appendStringInfoString(
+				buf,
+				"  cl_uchar c = *((const cl_uchar *)str);\n"
+				"  if (c == 0x8e)\n"
+				"    return 2;\n"
+				"  else if (c == 0x8f)\n"
+				"    return 3;\n"
+				"  else if (c & 0x80)\n"
+				"    return 2;\n"
+				"  return 1;\n");
+			break;
+
+		case PG_EUC_CN:		/* logic in pg_euccn_mblen */
+			appendStringInfoString(
+				buf,
+				"  cl_uchar c = *((const cl_uchar *)str);\n"
+				"  if (c & 0x80)\n"
+				"    return 2;\n"
+				"  return 1;\n");
+			break;
+
+		case PG_UTF8:		/* logic in pg_utf_mblen */
+			appendStringInfoString(
+				buf,
+				"  cl_uchar c = *((const cl_uchar *)str);\n"
+				"  if ((c & 0x80) == 0)\n"
+				"    return 1;\n"
+				"  else if ((c & 0xe0) == 0xc0)\n"
+				"    return 2;\n"
+				"  else if ((c & 0xf0) == 0xe0)\n"
+				"    return 3;\n"
+				"  else if ((c & 0xf8) == 0xf0)\n"
+				"    return 4;\n"
+				"#ifdef NOT_USED\n"
+				"  else if ((c & 0xfc) == 0xf8)\n"
+				"    return 5;\n"
+				"  else if ((c & 0xfe) == 0xfc)\n"
+				"    return 6;\n"
+				"#endif\n"
+				"  return 1;\n");
+			break;
+
+		case PG_MULE_INTERNAL:	/* logic in pg_mule_mblen */
+			appendStringInfoString(
+				buf,
+				"  cl_uchar c = *((const cl_uchar *)str);\n"
+				"  if (c >= 0x81 && c <= 0x8d)\n"
+				"    return 2;\n"
+				"  else if (c == 0x9a || c == 0x9b)\n"
+				"    return 3;\n"
+				"  else if (c >= 0x90 && c <= 0x99)\n"
+				"    return 2;\n"
+				"  else if (c == 0x9c || c == 0x9d)\n"
+				"    return 4;\n"
+				"  return 1;\n");
+			break;
+
+		case PG_SJIS:	/* logic in pg_sjis_mblen */
+		case PG_SHIFT_JIS_2004:
+			appendStringInfoString(
+				buf,
+				"  cl_uchar c = *((const cl_uchar *)str);\n"
+				"  if (c >= 0xa1 && c <= 0xdf)\n"
+				"    return 1;	/* 1byte kana? */\n"
+				"  else if (c & 0x80)\n"
+				"    return 2;\n"
+				"  return 1;\n");
+			break;
+
+		case PG_BIG5:	/* logic in pg_big5_mblen */
+		case PG_GBK:	/* logic in pg_gbk_mblen, but identical */
+		case PG_UHC:	/* logic in pg_uhc_mblen, but identical */
+			appendStringInfoString(
+				buf,
+				"  cl_uchar c = *((const cl_uchar *)str);\n"
+				"  if (c & 0x80)\n"
+				"    return 2;\n"
+				"  return 1;\n");
+			break;
+
+		case PG_GB18030:/* logic in pg_gb18030_mblen */
+			appendStringInfoString(
+				buf,
+				"  cl_uchar c1 = *((const cl_uchar *)str);\n"
+				"  cl_uchar c2;\n"
+				"  if ((c & 0x80) == 0)\n"
+				"    return 1; /* ASCII */\n"
+				"  c2 = *((const cl_uchar *)(str + 1));\n"
+				"  if (c2 >= 0x30 && c2 <= 0x39)\n"
+				"    return 4;\n"
+				"  return 2;\n");
+			break;
+
+		default:	/* encoding with maxlen==1 */
+			if (pg_database_encoding_max_length() != 1)
+				elog(ERROR, "Bug? unsupported database encoding: %s",
+					 GetDatabaseEncodingName());
+			appendStringInfoString(
+				buf,
+				"  return 1;\n");
+			break;
+	}
+	appendStringInfoString(
+		buf,
+		"}\n\n");
+}
+
 #endif	/* __CUDACC__ */
 #endif	/* CUDA_TEXTLIB_H */
