@@ -853,6 +853,13 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "text_ge",   2, {TEXTOID, TEXTOID},     "sc/F:text_ge" },
 	{ "bttextcmp", 2, {TEXTOID, TEXTOID},     "sc/F:text_cmp" },
 	{ "length",    1, {TEXTOID},              "sc/F:textlen" },
+	/* LIKE operators */
+	{ "like",        2, {TEXTOID, TEXTOID},   "s/F:textlike" },
+	{ "textlike",    2, {TEXTOID, TEXTOID},   "s/F:textlike" },
+	{ "bpcharlike",  2, {BPCHAROID, TEXTOID}, "s/F:textlike" },
+	{ "notlike",     2, {TEXTOID, TEXTOID},   "s/F:textnlike" },
+	{ "textnlike",   2, {TEXTOID, TEXTOID},   "s/F:textnlike" },
+	{ "bpcharnlike", 2, {BPCHAROID, TEXTOID}, "s/F:textnlike" },
 };
 
 static void
