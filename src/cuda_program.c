@@ -37,7 +37,6 @@
 #include "cuda_money.h"
 #include "cuda_timelib.h"
 #include "cuda_textlib.h"
-#include "cuda_gpuscan.h"
 
 typedef struct
 {
@@ -1218,9 +1217,11 @@ pgstrom_assign_cuda_program(GpuTaskState *gts,
 	StringInfoData	buf;
 
 	if ((extra_flags & (DEVKERNEL_NEEDS_TIMELIB |
-						DEVKERNEL_NEEDS_MONEY |
+						DEVKERNEL_NEEDS_MONEY   |
+						DEVKERNEL_NEEDS_TEXTLIB |
 						DEVKERNEL_NEEDS_GPUSCAN |
-						DEVKERNEL_NEEDS_GPUJOIN)) != 0)
+						DEVKERNEL_NEEDS_GPUJOIN |
+						DEVKERNEL_NEEDS_GPUSORT)) != 0)
 	{
 		initStringInfo(&buf);
 

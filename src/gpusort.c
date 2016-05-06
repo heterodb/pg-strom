@@ -716,6 +716,18 @@ pgstrom_plan_is_gpusort(const Plan *plan)
 	return false;
 }
 
+void
+assign_gpusort_session_info(StringInfo buf, GpuTaskState *gts)
+{
+	TupleDesc	tupdesc = GTS_GET_RESULT_TUPDESC(gts);
+
+	elog(INFO, "hogehoge");
+	appendStringInfo(
+		buf,
+		"#define GPUSORT_DEVICE_PROJECTION_NFIELDS %u\n\n",
+		tupdesc->natts);
+}
+
 static Node *
 gpusort_create_scan_state(CustomScan *cscan)
 {

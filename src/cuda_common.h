@@ -92,16 +92,10 @@ typedef cl_ulong	Datum;
 #define Add3(a,b,c)		((a) + (b) + (c))
 #define Add4(a,b,c,d)	((a) + (b) + (c) + (d))
 
-/*
- * same as host side get_next_log2()
- */
-static inline int
-get_next_log2(unsigned long long value)
-{
-	if (value == 0)
-		return 0;
-	return sizeof(unsigned long long) * BITS_PER_BYTE - clzll(value - 1);
-}
+/* same as host side get_next_log2() */
+#define get_next_log2(value)								\
+	((value) == 0 ? 0 : (sizeof(cl_ulong) * BITS_PER_BYTE - \
+						 clzll((cl_ulong)(value) - 1)))
 
 /*
  * Alignment macros
@@ -248,11 +242,11 @@ typedef uintptr_t		hostptr_t;
 #define StromKernel_gpupreagg_final_reduction		0x0306
 #define StromKernel_gpupreagg_fixup_varlena			0x0307
 #define StromKernel_gpupreagg_main					0x0399
-#define StromKernel_gpusort_preparation				0x0401
+#define StromKernel_gpusort_projection				0x0401
 #define StromKernel_gpusort_bitonic_local			0x0402
 #define StromKernel_gpusort_bitonic_step			0x0403
 #define StromKernel_gpusort_bitonic_merge			0x0404
-#define StromKernel_gpusort_fixup_datastore			0x0405
+#define StromKernel_gpusort_fixup_pointers			0x0405
 #define StromKernel_gpusort_main					0x0499
 
 typedef struct

@@ -81,7 +81,6 @@ gpusort_projection(kern_gpusort *kgpusort,
 				   kern_data_store *kds_in)
 {
 	kern_parambuf  *kparams = KERN_GPUSORT_PARAMBUF(kgpusort);
-	kern_data_store	*kds_in = KERN_GPUSORT_KDS_IN(kgpusort);
 	kern_context	kcxt;
 	kern_tupitem   *tupitem = NULL;
 	cl_uint		   *row_index;
@@ -139,7 +138,7 @@ gpusort_projection(kern_gpusort *kgpusort,
 									kds_slot->nitems + nrows_sum)
 		+ kds_slot->usage + extra_sum > kds_slot->length)
 	{
-		STROM_SET_ERROR(&kcxt->e, StromError_DataStoreNoSpace);
+		STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
 		goto out;
 	}
 
@@ -156,7 +155,7 @@ gpusort_projection(kern_gpusort *kgpusort,
 									nrows_base + nrows_sum) +
 		+ (extra_base + extra_sum) > kds_slot->length)
 	{
-		STROM_SET_ERROR(&kcxt->e, StromError_DataStoreNoSpace);
+		STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
 		goto out;
 	}
 
@@ -174,7 +173,7 @@ gpusort_projection(kern_gpusort *kgpusort,
 	__syncthreads();
 	if (kresults_base + nrows_sum > kresults->nrooms)
 	{
-		STROM_SET_ERROR(&kcxt->e, StromError_DataStoreNoSpace);
+		STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
 		goto out;
 	}
 	kresults->results[kresults_base + nrows_ofs] = kds_index;
@@ -206,7 +205,7 @@ gpusort_projection(kern_gpusort *kgpusort,
 			else if (cmeta.attlen > 0)
 			{
 				/* fixed length indirect variables */
-				extra_pos = (char *)TYPEALIGN(extra_pos, cmeta.attlen);
+				extra_pos = (char *)TYPEALIGN(cmeta.attlen, extra_pos);
 				assert(extra_pos + cmeta.attlen <= extra_buf + extra_len);
 				memcpy(extra_pos,
 					   DatumGetPointer(tup_values[i]),
@@ -219,7 +218,7 @@ gpusort_projection(kern_gpusort *kgpusort,
 				/* varlena datum */
 				cl_uint		vl_len = VARSIZE_ANY(tup_values[i]);
 
-				extra_pos = (char *)TYPEALIGN(extra_pos, cmeta.attlen);
+				extra_pos = (char *)TYPEALIGN(cmeta.attlen, extra_pos);
 				assert(extra_pos + vl_len <= extra_buf + extra_len);
 				memcpy(extra_pos,
 					   DatumGetPointer(tup_values[i]),
