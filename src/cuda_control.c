@@ -1308,19 +1308,6 @@ check_completed_tasks(GpuTaskState *gts)
 	GpuTask		   *gtask;
 	dlist_node	   *dnode;
 
-#if 0
-	/*
-	 * Allows GpuTaskState to check additional concurrent tasks,
-	 * like dynamic background workers based on CPUs, if it has
-	 * hybrid approach implementation.
-	 * If and when concurrent task got completed, typically,
-	 * callback detach task from the running_tasks and reconnect
-	 * to completed_tasks
-	 */
-	if (gts->cb_task_polling)
-		gts->cb_task_polling(gts);
-#endif
-
 	while (!dlist_is_empty(&gts->completed_tasks))
 	{
 		dnode = dlist_pop_head_node(&gts->completed_tasks);

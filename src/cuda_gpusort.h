@@ -110,11 +110,13 @@ gpusort_projection(kern_gpusort *kgpusort,
 	 * segment, so we shall ignore them
 	 */
 	row_index = KERN_DATA_STORE_ROWINDEX(kds_in);
+
 	if (get_global_id() < kds_in->nitems &&
 		(row_index[get_global_id()] & 0x01) == 0)
 	{
 		tupitem = (kern_tupitem *)
 			((char *)kds_in + row_index[get_global_id()]);
+
 		extra_len = deform_kern_heaptuple(&kcxt,
 										  kds_in,
 										  tupitem,
@@ -369,20 +371,20 @@ gpusort_bitonic_merge(kern_gpusort *kgpusort,
 	kern_parambuf  *kparams = KERN_GPUSORT_PARAMBUF(kgpusort);
 	kern_context	kcxt;
 	cl_int		   *localIdx = SHARED_WORKMEM(cl_int);
-	cl_uint			nitems = kds_slot->nitems;
+	cl_uint			nitems = kresults->nitems;
 	size_t			part_id = get_global_id() / get_local_size();
 	size_t			part_size = 2 * get_local_size();	/* partition Size */
 	size_t			part_base = part_id * part_size;	/* partition Base */
 	size_t			blockSize = part_size;
 	size_t			unitSize = part_size;
-	size_t			i;
+	size_t			i, temp;
 
 	INIT_KERNEL_CONTEXT(&kcxt, gpusort_bitonic_merge, kparams);
 
 	/* Load index to localIdx[] */
-	if (part_base + part_size < nitems)
+	if (part_base + part_size > nitems)
 		part_size = nitems - part_base;
-	for (i = get_local_id(); i < part_size; i += get_local_size())
+	for (i = get_local_id(); i < part_size && i < 2048; i += get_local_size())
 		localIdx[i] = kresults->results[part_base + i];
 	__syncthreads();
 
@@ -431,6 +433,7 @@ gpusort_fixup_pointers(kern_gpusort *kgpusort,
 	cl_int			i;
 
 	INIT_KERNEL_CONTEXT(&kcxt, gpusort_fixup_pointers, kparams);
+	goto out;
 	if (get_global_id() < kresults->nitems)
 	{
 		kds_index = kresults->results[get_global_id()];
@@ -452,6 +455,7 @@ gpusort_fixup_pointers(kern_gpusort *kgpusort,
 							 kds_slot->hostptr);
 		}
 	}
+out:
 	kern_writeback_error_status(&kgpusort->kerror, kcxt.e);
 }
 
@@ -477,7 +481,6 @@ gpusort_main(kern_gpusort *kgpusort,
 
 	// MEMO: error code shall be put on kresults, not kgpusort
 	// because NoSpace error should not prevent sort the segment
-
 
 	/*
 	 * NOTE: Because of the bitonic sorting algorithm characteristics,
@@ -602,7 +605,6 @@ gpusort_main(kern_gpusort *kgpusort,
 				goto out;
 			}
 		}
-
 		/*
 		 * KERNEL_FUNCTION_MAXTHREADS(void)
 		 * gpusort_bitonic_merge(kern_gpusort *kgpusort,
