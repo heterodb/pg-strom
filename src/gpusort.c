@@ -1528,6 +1528,8 @@ gpusort_task_complete(GpuTask *gtask)
 						   skip);
 	}
 skip:
+	elog(INFO, "pgsort %p complete (errcode=%d, kresults=%d, kgsort=%d)", pgsort, pgsort->task.kerror.errcode, segment->kresults.kerror.errcode, pgsort->kern.kerror.errcode);
+
 	/*
      * Release device memory and event objects acquired by the task.
      * If task is terminator of the segment, it also releases relevant
@@ -1556,6 +1558,7 @@ skip:
 								   &segment->kresults,
 								   segment->pds_slot->kds,
 								   0, segment->kresults.nitems - 1);
+		elog(INFO, "pgsort=%p StromError_CpuReCheck done", pgsort);
 	}
 
 	/*

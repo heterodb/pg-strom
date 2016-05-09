@@ -181,61 +181,69 @@ gpusort_projection(kern_gpusort *kgpusort,
 	__syncthreads();
 
 	/* Copy the values/isnull to the sorting segment */
-	ncols = kds_slot->ncols;
-	dest_isnull = KERN_DATA_STORE_ISNULL(kds_slot, kds_index);
-	dest_values = KERN_DATA_STORE_VALUES(kds_slot, kds_index);
-	extra_pos = extra_buf;
-	for (i=0; i < ncols; i++)
+	if (tupitem != NULL)
 	{
-		kern_colmeta	cmeta = kds_slot->colmeta[i];
+		ncols = kds_slot->ncols;
+		dest_isnull = KERN_DATA_STORE_ISNULL(kds_slot, kds_index);
+		dest_values = KERN_DATA_STORE_VALUES(kds_slot, kds_index);
+		extra_pos = extra_buf;
 
-		if (tup_isnull[i])
+		for (i=0; i < ncols; i++)
 		{
-			dest_isnull[i] = true;
-			dest_values[i] = (Datum) 0;
-		}
-		else
-		{
-			dest_isnull[i] = false;
+			kern_colmeta	cmeta = kds_slot->colmeta[i];
 
-			if (cmeta.attbyval)
+			if (tup_isnull[i])
 			{
-				/* fixed length inline variables */
-				dest_values[i] = tup_values[i];
-			}
-			else if (cmeta.attlen > 0)
-			{
-				/* fixed length indirect variables */
-				extra_pos = (char *)TYPEALIGN(cmeta.attlen, extra_pos);
-				assert(extra_pos + cmeta.attlen <= extra_buf + extra_len);
-				memcpy(extra_pos,
-					   DatumGetPointer(tup_values[i]),
-					   cmeta.attlen);
-				dest_values[i] = PointerGetDatum(extra_pos);
-				extra_pos += cmeta.attlen;
+				dest_isnull[i] = true;
+				dest_values[i] = (Datum) 0;
 			}
 			else
 			{
-				/* varlena datum */
-				cl_uint		vl_len = VARSIZE_ANY(tup_values[i]);
+				dest_isnull[i] = false;
 
-				extra_pos = (char *)TYPEALIGN(cmeta.attlen, extra_pos);
-				assert(extra_pos + vl_len <= extra_buf + extra_len);
-				memcpy(extra_pos,
-					   DatumGetPointer(tup_values[i]),
-					   vl_len);
-				dest_values[i] = PointerGetDatum(extra_pos);
-				extra_pos += vl_len;
+				if (cmeta.attbyval)
+				{
+					/* fixed length inline variables */
+					dest_values[i] = tup_values[i];
+				}
+				else if (cmeta.attlen > 0)
+				{
+					/* fixed length indirect variables */
+					extra_pos = (char *)TYPEALIGN(cmeta.attlen, extra_pos);
+					assert(extra_pos + cmeta.attlen <= extra_buf + extra_len);
+					memcpy(extra_pos,
+						   DatumGetPointer(tup_values[i]),
+						   cmeta.attlen);
+					dest_values[i] = PointerGetDatum(extra_pos);
+					extra_pos += cmeta.attlen;
+				}
+				else
+				{
+					/* varlena datum */
+					cl_uint		vl_len = VARSIZE_ANY(tup_values[i]);
+					extra_pos = (char *)TYPEALIGN(cmeta.attlen, extra_pos);
+					assert(extra_pos + vl_len <= extra_buf + extra_len);
+					hoge;
+					memcpy(extra_pos,
+						   DatumGetPointer(tup_values[i]),
+						   vl_len);
+					dest_values[i] = PointerGetDatum(extra_pos);
+#if 0
+					extra_pos += vl_len;
+#else
+					dest_isnull[i] = true;
+#endif
+				}
 			}
 		}
-	}
 
-	/*
-	 * Invalidate the row_index, to inform we could successfully move
-	 * this record to kds_slot.
-	 */
-	if (tupitem != NULL)
+		/*
+		 * Invalidate the row_index, to inform we could successfully move
+		 * this record to kds_slot.
+		 */
 		row_index[get_global_id()] |= 0x00000001U;
+	}
+	/* inform host-side the number of rows actually moved */
 	if (get_local_id() == 0)
 		atomicAdd(&kgpusort->n_loaded, nrows_sum);
 	__syncthreads();
@@ -433,7 +441,7 @@ gpusort_fixup_pointers(kern_gpusort *kgpusort,
 	cl_int			i;
 
 	INIT_KERNEL_CONTEXT(&kcxt, gpusort_fixup_pointers, kparams);
-	goto out;
+
 	if (get_global_id() < kresults->nitems)
 	{
 		kds_index = kresults->results[get_global_id()];
