@@ -727,7 +727,6 @@ assign_gpusort_session_info(StringInfo buf, GpuTaskState *gts)
 {
 	TupleDesc	tupdesc = GTS_GET_RESULT_TUPDESC(gts);
 
-	elog(INFO, "hogehoge");
 	appendStringInfo(
 		buf,
 		"#define GPUSORT_DEVICE_PROJECTION_NFIELDS %u\n\n",
@@ -1528,8 +1527,6 @@ gpusort_task_complete(GpuTask *gtask)
 						   skip);
 	}
 skip:
-	elog(INFO, "pgsort %p complete (errcode=%d, kresults=%d, kgsort=%d)", pgsort, pgsort->task.kerror.errcode, segment->kresults.kerror.errcode, pgsort->kern.kerror.errcode);
-
 	/*
      * Release device memory and event objects acquired by the task.
      * If task is terminator of the segment, it also releases relevant
@@ -1558,7 +1555,6 @@ skip:
 								   &segment->kresults,
 								   segment->pds_slot->kds,
 								   0, segment->kresults.nitems - 1);
-		elog(INFO, "pgsort=%p StromError_CpuReCheck done", pgsort);
 	}
 
 	/*
@@ -1571,27 +1567,12 @@ skip:
 		pgstrom_data_store *pds_in = pgsort->pds_in;
 		pgstrom_gpusort	   *pgsort_new;
 		cl_uint				valid_nitems;
-
-		pgsort->pds_in = NULL;	/* detach old PDS */
-
-		Assert(pds_in->kds->nitems > pgsort->kern.n_loaded);
-		valid_nitems = pds_in->kds->nitems - pgsort->kern.n_loaded;
-		pgsort_new = (pgstrom_gpusort *)
-			gpusort_create_task(gss, pds_in, valid_nitems,
-								pgsort->is_final_chunk);
-		/* enqueue the new task */
-		SpinLockAcquire(&gss->gts.lock);
-		dlist_push_head(&gss->gts.pending_tasks, &pgsort_new->task.chain);
-		gss->gts.num_pending_tasks++;
-		SpinLockRelease(&gss->gts.lock);
-
-		/* The old one is not a final chunk no longer */
-		pgsort->is_final_chunk = false;
+		bool				became_terminator = false;
 
 		/*
 		 * NOTE: When segment still has no terminator task in spite of
-		 * DataStoreNoSpace error, somebody has to terminate (= kicks
-		 * GPU sorting to construct kresults array) this segment.
+		 * DataStoreNoSpace, the segment must be terminated by somebody;
+		 * that is kick of GPU sorting to construct the kresults array.
 		 * In this case, this task will take over the role to terminate
 		 * the segment. Once 'has_terminator' flag is set, no tasks
 		 * shall be attached on the segment.
@@ -1601,7 +1582,33 @@ skip:
 			Assert(!pgsort->is_terminator);
 			pgsort->is_terminator = true;
 			segment->has_terminator = true;
+			became_terminator = true;
+		}
 
+		elog(INFO, "NoSpace nitems=%u n_loaded=%u remain=%u", pds_in->kds->nitems, pgsort->kern.n_loaded, pds_in->kds->nitems - pgsort->kern.n_loaded);
+
+		/*
+		 * Create a new task to run gpusort_projection for the rows that
+		 * were not moved to kds_slot.
+		 */
+		pgsort->pds_in = NULL;		/* detach last PDS */
+		Assert(pds_in->kds->nitems > pgsort->kern.n_loaded);
+		valid_nitems = pds_in->kds->nitems - pgsort->kern.n_loaded;
+		pgsort_new = (pgstrom_gpusort *)
+			gpusort_create_task(gss, pds_in, valid_nitems,
+								pgsort->is_final_chunk);
+		elog(INFO, "old_seg=%p new_seg=%p", segment, pgsort_new->segment);
+
+		/* enqueue the new task */
+		SpinLockAcquire(&gss->gts.lock);
+		dlist_push_head(&gss->gts.pending_tasks, &pgsort_new->task.chain);
+		gss->gts.num_pending_tasks++;
+		SpinLockRelease(&gss->gts.lock);
+
+		/* The old task should never be a final chunk no longer */
+		pgsort->is_final_chunk = false;
+		if (became_terminator)
+		{
 			SpinLockAcquire(&gss->gts.lock);
 			dlist_push_head(&gss->gts.pending_tasks,
 							&pgsort->task.chain);
@@ -1611,6 +1618,9 @@ skip:
 			return false;
 		}
 	}
+	else
+		elog(INFO, "pgsort=%p successfully done", pgsort);
+
 
 	/*
 	 * Only final chunk shall be backed to the main logic.

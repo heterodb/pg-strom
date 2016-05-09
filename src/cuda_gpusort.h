@@ -154,7 +154,7 @@ gpusort_projection(kern_gpusort *kgpusort,
 	/* confirmation of buffer usage */
 	if (KERN_DATA_STORE_SLOT_LENGTH(kds_slot,
 									nrows_base + nrows_sum) +
-		+ (extra_base + extra_sum) > kds_slot->length)
+		(extra_base + extra_sum) > kds_slot->length)
 	{
 		STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
 		goto out;
@@ -177,7 +177,8 @@ gpusort_projection(kern_gpusort *kgpusort,
 		STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
 		goto out;
 	}
-	kresults->results[kresults_base + nrows_ofs] = kds_index;
+	if (tupitem != NULL)
+		kresults->results[kresults_base + nrows_ofs] = kds_index;
 	__syncthreads();
 
 	/* Copy the values/isnull to the sorting segment */
@@ -209,7 +210,7 @@ gpusort_projection(kern_gpusort *kgpusort,
 				else if (cmeta.attlen > 0)
 				{
 					/* fixed length indirect variables */
-					extra_pos = (char *)TYPEALIGN(cmeta.attlen, extra_pos);
+					extra_pos = (char *)TYPEALIGN(cmeta.attalign, extra_pos);
 					assert(extra_pos + cmeta.attlen <= extra_buf + extra_len);
 					memcpy(extra_pos,
 						   DatumGetPointer(tup_values[i]),
@@ -221,18 +222,13 @@ gpusort_projection(kern_gpusort *kgpusort,
 				{
 					/* varlena datum */
 					cl_uint		vl_len = VARSIZE_ANY(tup_values[i]);
-					extra_pos = (char *)TYPEALIGN(cmeta.attlen, extra_pos);
+					extra_pos = (char *)TYPEALIGN(cmeta.attalign, extra_pos);
 					assert(extra_pos + vl_len <= extra_buf + extra_len);
-					hoge;
 					memcpy(extra_pos,
 						   DatumGetPointer(tup_values[i]),
 						   vl_len);
 					dest_values[i] = PointerGetDatum(extra_pos);
-#if 0
 					extra_pos += vl_len;
-#else
-					dest_isnull[i] = true;
-#endif
 				}
 			}
 		}
@@ -245,9 +241,10 @@ gpusort_projection(kern_gpusort *kgpusort,
 	}
 	/* inform host-side the number of rows actually moved */
 	if (get_local_id() == 0)
+	{
 		atomicAdd(&kgpusort->n_loaded, nrows_sum);
+	}
 	__syncthreads();
-
 out:
 	kern_writeback_error_status(&kgpusort->kerror, kcxt.e);
 }
@@ -385,7 +382,7 @@ gpusort_bitonic_merge(kern_gpusort *kgpusort,
 	size_t			part_base = part_id * part_size;	/* partition Base */
 	size_t			blockSize = part_size;
 	size_t			unitSize = part_size;
-	size_t			i, temp;
+	size_t			i;
 
 	INIT_KERNEL_CONTEXT(&kcxt, gpusort_bitonic_merge, kparams);
 
@@ -483,7 +480,6 @@ gpusort_main(kern_gpusort *kgpusort,
 	dim3			block_sz;
 	cl_uint			i, j;
 	cudaError_t		status = cudaSuccess;
-
 
 	INIT_KERNEL_CONTEXT(&kcxt, gpusort_main, kparams);
 
