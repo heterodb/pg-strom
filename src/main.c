@@ -740,7 +740,7 @@ pgstrom_explain_perfmon(GpuTaskState *gts, ExplainState *es)
 		return;
 
 	/* common performance statistics */
-	ExplainPropertyInteger("number of tasks", pfm->num_tasks, es);
+	ExplainPropertyInteger("Number of tasks", pfm->num_tasks, es);
 
 #define EXPLAIN_KERNEL_PERFMON(label,num_field,tv_field)		\
 	do {														\
@@ -819,12 +819,27 @@ pgstrom_explain_perfmon(GpuTaskState *gts, ExplainState *es)
 	/* GpuSort: kernel execution */
 	if ((pfm->extra_flags & DEVKERNEL_NEEDS_GPUSORT) != 0)
 	{
-		EXPLAIN_KERNEL_PERFMON("gpusort_projection",
+		EXPLAIN_KERNEL_PERFMON("gpusort_projection()",
 							   gsort.num_kern_proj,
 							   gsort.tv_kern_proj);
-		EXPLAIN_KERNEL_PERFMON("gpusort_main",
+		EXPLAIN_KERNEL_PERFMON("gpusort_main()",
 							   gsort.num_kern_main,
 							   gsort.tv_kern_main);
+		EXPLAIN_KERNEL_PERFMON(" - gpusort_bitonic_local()",
+							   gsort.num_kern_lsort,
+							   gsort.tv_kern_lsort);
+		EXPLAIN_KERNEL_PERFMON(" - gpusort_bitonic_step()",
+							   gsort.num_kern_ssort,
+							   gsort.tv_kern_ssort);
+		EXPLAIN_KERNEL_PERFMON(" - gpusort_bitonic_merge()",
+							   gsort.num_kern_msort,
+							   gsort.tv_kern_msort);
+		EXPLAIN_KERNEL_PERFMON(" - gpusort_fixup_pointers()",
+							   gsort.num_kern_fixvar,
+							   gsort.tv_kern_fixvar);
+		snprintf(buf, sizeof(buf), "total: %s",
+				 format_millisec(pfm->gsort.tv_cpu_sort));
+		ExplainPropertyText("CPU merge sort", buf, es);
 	}
 
 #undef EXPLAIN_KERNEL_PERFMON
@@ -833,21 +848,21 @@ pgstrom_explain_perfmon(GpuTaskState *gts, ExplainState *es)
 	{
 		snprintf(buf, sizeof(buf), "%s",
 				 format_millisec(pfm->time_inner_load));
-		ExplainPropertyText("time of inner load", buf, es);
+		ExplainPropertyText("Time of inner load", buf, es);
 		snprintf(buf, sizeof(buf), "%s",
 				 format_millisec(pfm->time_outer_load));
-		ExplainPropertyText("time of outer load", buf, es);
+		ExplainPropertyText("Time of outer load", buf, es);
 	}
 	else
 	{
 		snprintf(buf, sizeof(buf), "%s",
 				 format_millisec(pfm->time_outer_load));
-		ExplainPropertyText("time of load", buf, es);
+		ExplainPropertyText("Time of load", buf, es);
 	}
 
 	snprintf(buf, sizeof(buf), "%s",
 			 format_millisec(pfm->time_materialize));
-	ExplainPropertyText("time of materialize", buf, es);
+	ExplainPropertyText("Time of materialize", buf, es);
 
 	/* DMA Send/Recv performance */
 	if (pfm->num_dma_send > 0)

@@ -30,6 +30,17 @@ typedef struct
 	kern_errorbuf	kerror;
 	cl_uint			segid;		/* segment id to be loaded */
 	cl_uint			n_loaded;	/* number of items already loaded */
+	/* performance counter */
+	struct {
+		cl_uint		num_kern_lsort;
+		cl_uint		num_kern_ssort;
+		cl_uint		num_kern_msort;
+		cl_uint		num_kern_fixvar;
+		cl_float	tv_kern_lsort;
+		cl_float	tv_kern_ssort;
+		cl_float	tv_kern_msort;
+		cl_float	tv_kern_fixvar;
+	} pfm;
 	kern_parambuf	kparams;
 	/* input chunk shall be located just after the kparams*/
 } kern_gpusort;
@@ -494,6 +505,13 @@ out:
 	kern_writeback_error_status(&kgpusort->kerror, kcxt.e);
 }
 
+#define __TIMEVAL_RECORD(ktask,field,tv1,tv2,smx_clock)				\
+	do {															\
+		(ktask)->pfm.num_##field++;									\
+		(ktask)->pfm.tv_##field += (((cl_float)(((tv2) - (tv1)))) /	\
+									((cl_float)(smx_clock)));		\
+	} while(0)
+
 KERNEL_FUNCTION(void)
 gpusort_main(kern_gpusort *kgpusort,
 			 kern_resultbuf *kresults,
@@ -508,10 +526,30 @@ gpusort_main(kern_gpusort *kgpusort,
 	cl_uint			__block_sz = UINT_MAX;
 	dim3			grid_sz;
 	dim3			block_sz;
+	cl_int			device;
+	cl_int			smx_clock;
 	cl_uint			i, j;
+	cl_ulong		tv1, tv2;
 	cudaError_t		status = cudaSuccess;
 
 	INIT_KERNEL_CONTEXT(&kcxt, gpusort_main, kparams);
+
+	/* Get device clock for performance monitor */
+	status = cudaGetDevice(&device);
+	if (status != cudaSuccess)
+	{
+		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+		goto out;
+	}
+
+	status = cudaDeviceGetAttribute(&smx_clock,
+									cudaDevAttrClockRate,
+									device);
+	if (status != cudaSuccess)
+	{
+		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+		goto out;
+	}
 
 	/*
 	 * NOTE: Because of the bitonic sorting algorithm characteristics,
@@ -552,6 +590,7 @@ gpusort_main(kern_gpusort *kgpusort,
 	 *                       kern_resultbuf *kresults,
 	 *                       kern_data_store *kds_slot)
 	 */
+	tv1 = clock64();
 	kern_args = (void **)
 		cudaGetParameterBuffer(sizeof(void *),
 							   sizeof(void *) * 3);
@@ -583,6 +622,8 @@ gpusort_main(kern_gpusort *kgpusort,
 		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
 		goto out;
 	}
+	tv2 = clock64();
+	__TIMEVAL_RECORD(kgpusort,kern_lsort,tv1,tv2,smx_clock);
 
 	/* Inter blocks bitonic sorting */
 	for (i = block_sz.x; i < nhalf; i *= 2)
@@ -601,6 +642,7 @@ gpusort_main(kern_gpusort *kgpusort,
 			cl_bool		reversing = ((j == 2 * i) ? true : false);
 			size_t		work_size;
 
+			tv1 = clock64();
 			kern_args = (void **)
 				cudaGetParameterBuffer(sizeof(void *),
 									   sizeof(void *) * 5);
@@ -635,6 +677,8 @@ gpusort_main(kern_gpusort *kgpusort,
 				STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
 				goto out;
 			}
+			tv2 = clock64();
+			__TIMEVAL_RECORD(kgpusort,kern_ssort,tv1,tv2,smx_clock);
 		}
 		/*
 		 * KERNEL_FUNCTION_MAXTHREADS(void)
@@ -642,6 +686,7 @@ gpusort_main(kern_gpusort *kgpusort,
 		 *                       kern_resultbuf *kresults,
 		 *                       kern_data_store *kds_slot)
 		 */
+		tv1 = clock64();
 		kern_args = (void **)
 			cudaGetParameterBuffer(sizeof(void *),
 								   sizeof(void *) * 3);
@@ -673,6 +718,8 @@ gpusort_main(kern_gpusort *kgpusort,
 			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
 			goto out;
 		}
+		tv2 = clock64();
+		__TIMEVAL_RECORD(kgpusort,kern_msort,tv1,tv2,smx_clock);
 	}
 
 	/*
@@ -684,6 +731,7 @@ gpusort_main(kern_gpusort *kgpusort,
 	 *                        kern_resultbuf *kresults,
 	 *                        kern_data_store *kds_slot)
 	 */
+	tv1 = clock64();
 	kern_args = (void **)
 		cudaGetParameterBuffer(sizeof(void *),
 							   sizeof(void *) * 3);
@@ -724,6 +772,8 @@ gpusort_main(kern_gpusort *kgpusort,
 		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
 		goto out;
 	}
+	tv2 = clock64();
+	__TIMEVAL_RECORD(kgpusort,kern_fixvar,tv1,tv2,smx_clock);
 out:
 	kern_writeback_error_status(&kresults->kerror, kcxt.e);
 }

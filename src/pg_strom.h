@@ -168,8 +168,17 @@ typedef struct {
 	struct {
 		cl_uint		num_kern_proj;
 		cl_uint		num_kern_main;
+		cl_uint		num_kern_lsort;	/* gpusort_bitonic_local */
+		cl_uint		num_kern_ssort;	/* gpusort_bitonic_step */
+		cl_uint		num_kern_msort;	/* gpusort_bitonic_merge */
+		cl_uint		num_kern_fixvar;/* gpusort_fixup_pointers */
 		cl_double	tv_kern_proj;
 		cl_double	tv_kern_main;
+		cl_double	tv_kern_lsort;
+		cl_double	tv_kern_ssort;
+		cl_double	tv_kern_msort;
+		cl_double	tv_kern_fixvar;
+		cl_double	tv_cpu_sort;
 	} gsort;
 } pgstrom_perfmon;
 

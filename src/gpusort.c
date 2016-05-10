@@ -155,7 +155,7 @@ typedef struct
 	CUdeviceptr			m_kds_slot;			/* kds_slot */
 	CUdeviceptr			m_kresults;			/* kresults */
 	CUevent				ev_setup_segment;	/* event to sync setup_segment */
-	CUevent			   *ev_kern_proj_exec;	/* event to sync projection */
+	CUevent			   *ev_kern_proj;		/* event to sync projection */
 	cl_int				cuda_index;
 	cl_uint				num_chunks;
 	cl_uint				max_chunks;
@@ -172,7 +172,7 @@ typedef struct
 	gpusort_segment	   *segment;		/* sorting segment */
 	cl_bool				is_terminator;	/* true, if terminator proces */
 //	cl_bool				is_final_chunk;	/* true, if final chunk */
-	cl_uint				seg_ev_index;	/* index to ev_kern_proj_exec */
+	cl_uint				seg_ev_index;	/* index to ev_kern_proj */
 	CUfunction			kern_proj;		/* gpusort_projection */
 	CUfunction			kern_main;		/* gpusort_main */
 	CUdeviceptr			m_gpusort;
@@ -1069,10 +1069,10 @@ gpusort_create_segment(GpuSortState *gss)
 	segment->nitems_total = 0;
 	segment->has_terminator = false;
 	segment->ev_setup_segment = NULL;
-	segment->ev_kern_proj_exec = (CUevent *)
+	segment->ev_kern_proj = (CUevent *)
 		((char *)kresults + STROMALIGN(offsetof(kern_resultbuf,
 												results[seg_nrooms])));
-	memset(segment->ev_kern_proj_exec, 0, sizeof(CUevent) * seg_nchunks);
+	memset(segment->ev_kern_proj, 0, sizeof(CUevent) * seg_nchunks);
 
 	segment->pds_slot = PDS_create_slot(gcontext,
 										tupdesc,
@@ -1116,9 +1116,9 @@ gpusort_put_segment(gpusort_segment *segment)
 			elog(WARNING, "failed on cuEventDestroy: %s", errorText(rc));
 		for (i=0; i < segment->num_chunks; i++)
 		{
-			if (segment->ev_kern_proj_exec[i])
+			if (segment->ev_kern_proj[i])
 			{
-				rc = cuEventDestroy(segment->ev_kern_proj_exec[i]);
+				rc = cuEventDestroy(segment->ev_kern_proj[i]);
 				if (rc != CUDA_SUCCESS)
 					elog(WARNING, "failed on cuEventDestroy: %s",
 						 errorText(rc));
@@ -1367,12 +1367,14 @@ gpusort_next_tuple(GpuTaskState *gts)
 	cl_uint				index;
 	Datum			   *values;
 	bool			   *isnull;
+	struct timeval		tv1, tv2, tv3;
 
 	if (!pgsort)
 		return NULL;
 
 	ExecClearTuple(slot);
 
+	PERFMON_BEGIN(&gss->gts.pfm, &tv1);
 	if (!gss->seg_curpos)
 	{
 		/* construction of the initial lstree */
@@ -1424,6 +1426,7 @@ gpusort_next_tuple(GpuTaskState *gts)
 			gpusort_update_lstree(gss, i, j);
 		}
 	}
+	PERFMON_END(&gss->gts.pfm, gsort.tv_cpu_sort, &tv1, &tv2);
 
 	/*
 	 * Fetch the next tuple
@@ -1442,6 +1445,8 @@ gpusort_next_tuple(GpuTaskState *gts)
 	memcpy(slot->tts_values, values, sizeof(Datum) * natts);
 	memcpy(slot->tts_isnull, isnull, sizeof(bool) * natts);
 	ExecStoreVirtualTuple(slot);
+
+	PERFMON_END(&gss->gts.pfm, time_materialize, &tv2, &tv3);
 
 	return slot;
 }
@@ -1478,7 +1483,7 @@ gpusort_cleanup_cuda_resources(pgstrom_gpusort *pgsort)
 
 		CUDA_EVENT_DESTROY(segment, ev_setup_segment);
 		for (i=0; i < segment->num_chunks; i++)
-			CUDA_EVENT_DESTROY(segment, ev_kern_proj_exec[i]);
+			CUDA_EVENT_DESTROY(segment, ev_kern_proj[i]);
 
 		segment->m_kds_slot = 0UL;
 		segment->m_kresults = 0UL;
@@ -1521,10 +1526,30 @@ gpusort_task_complete(GpuTask *gtask)
 						   pgsort->ev_dma_send_start,
 						   pgsort->ev_dma_send_stop,
 						   skip);
-		CUDA_EVENT_ELAPSED(pgsort, gsort.tv_kern_proj,
-						   pgsort->ev_dma_send_stop,
-						   pgsort->ev_dma_recv_start,
-						   skip);
+		if (pgsort->pds_in)
+		{
+			CUDA_EVENT_ELAPSED(pgsort, gsort.tv_kern_proj,
+							   pgsort->ev_dma_send_stop,
+							   segment->ev_kern_proj[pgsort->seg_ev_index],
+							   skip);
+		}
+
+		if (pgsort->is_terminator)
+		{
+			CUDA_EVENT_ELAPSED(pgsort, gsort.tv_kern_main,
+							   segment->ev_kern_proj[pgsort->seg_ev_index],
+							   pgsort->ev_dma_recv_start,
+							   skip);
+			/* kernels launched by dynamic parallel */
+			pfm->gsort.num_kern_lsort += pgsort->kern.pfm.num_kern_lsort;
+			pfm->gsort.num_kern_ssort += pgsort->kern.pfm.num_kern_ssort;
+			pfm->gsort.num_kern_msort += pgsort->kern.pfm.num_kern_msort;
+			pfm->gsort.num_kern_fixvar += pgsort->kern.pfm.num_kern_fixvar;
+			pfm->gsort.tv_kern_lsort += pgsort->kern.pfm.tv_kern_lsort;
+			pfm->gsort.tv_kern_ssort += pgsort->kern.pfm.tv_kern_ssort;
+			pfm->gsort.tv_kern_msort += pgsort->kern.pfm.tv_kern_msort;
+			pfm->gsort.tv_kern_fixvar += pgsort->kern.pfm.tv_kern_fixvar;
+		}
 		CUDA_EVENT_ELAPSED(pgsort, time_dma_recv,
 						   pgsort->ev_dma_recv_start,
 						   pgsort->ev_dma_recv_stop,
@@ -1814,7 +1839,7 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *pgsort)
 	Size				length;
 	size_t				grid_size;
 	size_t				block_size;
-	CUevent				ev_kern_proj_exec;
+	CUevent				ev_kern_proj;
 	CUresult			rc;
 
 
@@ -1877,7 +1902,10 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *pgsort)
 	pfm->num_dma_send++;
 
 	if (!pds_in)
+	{
 		Assert(pgsort->is_terminator);
+		CUDA_EVENT_RECORD(pgsort, ev_dma_send_stop);
+	}
 	else
 	{
 		kern_data_store	   *kds_in = pds_in->kds;
@@ -1926,17 +1954,30 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *pgsort)
 	}
 
 	/* inject an event to synchronize the projection kernel */
-	rc = cuEventCreate(&ev_kern_proj_exec, CU_EVENT_DEFAULT);
+	rc = cuEventCreate(&ev_kern_proj, CU_EVENT_DEFAULT);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
-	segment->ev_kern_proj_exec[pgsort->seg_ev_index] = ev_kern_proj_exec;
+	segment->ev_kern_proj[pgsort->seg_ev_index] = ev_kern_proj;
 
-	rc = cuEventRecord(ev_kern_proj_exec, pgsort->task.cuda_stream);
+	rc = cuEventRecord(ev_kern_proj, pgsort->task.cuda_stream);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuEventRecord: %s", errorText(rc));
 
 	if (pgsort->is_terminator)
 	{
+		cl_uint		i;
+
+		/*
+		 * Synchronization of other concurrent gpusort_projection kernels
+		 */
+		for (i=0; i < segment->num_chunks; i++)
+		{
+			rc = cuStreamWaitEvent(pgsort->task.cuda_stream,
+								   segment->ev_kern_proj[i], 0);
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on cuEventRecord: %s", errorText(rc));
+		}
+
 		/*
 		 * KERNEL_FUNCTION(void)
 		 * gpusort_main(kern_gpusort *kgpusort,
@@ -1964,11 +2005,10 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *pgsort)
 	/*
 	 * DMA Recv
 	 */
+	CUDA_EVENT_RECORD(pgsort, ev_dma_recv_start);
 	if (pds_in)
 	{
 		kern_data_store	   *kds_in = pds_in->kds;
-
-		CUDA_EVENT_RECORD(pgsort, ev_dma_recv_start);
 
 		length = KERN_GPUSORT_DMARECV_LENGTH(&pgsort->kern);
 		rc = cuMemcpyDtoHAsync(&pgsort->kern,
