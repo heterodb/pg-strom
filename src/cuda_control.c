@@ -1700,7 +1700,7 @@ pgstrom_fetch_gputask(GpuTaskState *gts)
 				if (!gtask)
 				{
 					pgstrom_deactivate_gputaskstate(gts);
-					elog(DEBUG1, "scan done (%s)",
+					elog(NOTICE, "scan done (%s)",
 						 gts->css.methods->CustomName);
 					break;
 				}

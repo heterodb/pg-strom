@@ -257,8 +257,8 @@ cost_gpusort(PlannedStmt *pstmt, Sort *sort,
 	int			unitsz_fmt_slot;
 	int			unitsz_fmt_row;
 	cl_uint		num_segments;
-	Size		segment_nrooms;
-	Size		segment_extra;
+	double		segment_nrooms;
+	double		segment_extra;
 	bool		only_inline_attrs;
 	Cost		startup_cost;
 	Cost		run_cost;
@@ -364,8 +364,8 @@ cost_gpusort(PlannedStmt *pstmt, Sort *sort,
 		cost_load_segment =
 			Max(cost_load_chunk, pgstrom_gpu_dma_cost) * nchunks_per_segment +
 			Min(cost_load_chunk, pgstrom_gpu_dma_cost);
-		segment_nrooms = (Size) ntuples_per_segment;
-		segment_extra = (Size)extra_len * segment_nrooms;
+		segment_nrooms = ntuples_per_segment;
+		segment_extra  = (double)extra_len * segment_nrooms;
 
 		/*
 		 * Our bitonic sorting logic taks O(N * Log2(N)) on GPU device
@@ -428,8 +428,8 @@ cost_gpusort(PlannedStmt *pstmt, Sort *sort,
 	*p_startup_cost = startup_cost;
 	*p_total_cost = startup_cost + run_cost;
 	*p_num_segments = num_segments;
-	*p_segment_nrooms = segment_nrooms;
-	*p_segment_extra = segment_extra;
+	*p_segment_nrooms = (Size)(segment_nrooms * pgstrom_chunk_size_margin);
+	*p_segment_extra = (Size)(segment_extra * pgstrom_chunk_size_margin);
 }
 
 static char *
@@ -516,7 +516,7 @@ pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 			&body,
 			"  /* sort key comparison on the resource %d */\n"
 			"  KVAR_X.%s_v = pg_%s_vref(kds_slot,kcxt,%d,x_index);\n"
-			"  KVAR_Y.%s_v = pg_%s_vref(kds_slot,kcxt,%d,x_index);\n"
+			"  KVAR_Y.%s_v = pg_%s_vref(kds_slot,kcxt,%d,y_index);\n"
 			"  if (!KVAR_X.%s_v.isnull && !KVAR_Y.%s_v.isnull)\n"
 			"  {\n"
 			"    comp = pgfn_%s(kcxt, KVAR_X.%s_v, KVAR_Y.%s_v);\n"
@@ -537,7 +537,7 @@ pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 			dtype->type_name, dtype->type_name,
 			null_first ? -1 : 1,
 			dtype->type_name, dtype->type_name,
-			null_first ? -1 : 1);
+			null_first ? 1 : -1);
 	}
 	appendStringInfo(
 		&body,
@@ -1186,6 +1186,9 @@ gpusort_create_task(GpuSortState *gss, pgstrom_data_store *pds_in,
 	pgsort->is_final_chunk = is_final_chunk;
 	pgsort->seg_ev_index = seg_ev_index;
 
+	if (is_terminator)
+		elog(INFO, "pgsort=%p is terminator of segment=%p", pgsort, segment);
+
 	pgsort->kern.segid = pgsort->segment->segid;
 	memcpy(&pgsort->kern.kparams,
 		   gss->gts.kern_params,
@@ -1223,7 +1226,7 @@ gpusort_next_chunk(GpuTaskState *gts)
 				slot = ExecProcNode(outerPlanState(gss));
 				if (TupIsNull(slot))
 				{
-					slot = NULL;
+					pgstrom_deactivate_gputaskstate(gts);
 					break;
 				}
 			}
@@ -1256,6 +1259,9 @@ gpusort_next_chunk(GpuTaskState *gts)
 		if (pds)
 			gss->overflow_pds = BulkExecProcNode(subnode,
 												 pgstrom_chunk_size());
+		else
+			pgstrom_deactivate_gputaskstate(&gss->gts);
+
 		/* any more chunks expected? */
 		if (!gss->overflow_pds)
 			is_final_chunk = true;
@@ -1369,6 +1375,8 @@ gpusort_next_tuple(GpuTaskState *gts)
 	if (!pgsort)
 		return NULL;
 
+	ExecClearTuple(slot);
+
 	if (!gss->seg_curpos)
 	{
 		/* construction of the initial lstree */
@@ -1395,6 +1403,24 @@ gpusort_next_tuple(GpuTaskState *gts)
 			for (j=0, k=(1 << i); j < k; j++)
 				gpusort_update_lstree(gss, i, j);
 		}
+#if 1
+		do {
+			cl_uint		total = 0;
+
+			// debug info
+			for (i=0; i < gss->num_segments; i++)
+			{
+				gpusort_segment *seg;
+
+				kresults = gss->seg_results[i];
+				seg = (gpusort_segment *)
+					((char *)kresults - offsetof(gpusort_segment, kresults));
+				elog(INFO, "seg-%d %p kresults->nitems=%u", i, seg, kresults->nitems);
+				total += kresults->nitems;
+			}
+			elog(INFO, "total nitems = %u", total);
+		} while(0);
+#endif
 	}
 	else
 	{
@@ -1585,7 +1611,7 @@ skip:
 			became_terminator = true;
 		}
 
-		elog(INFO, "NoSpace nitems=%u n_loaded=%u remain=%u", pds_in->kds->nitems, pgsort->kern.n_loaded, pds_in->kds->nitems - pgsort->kern.n_loaded);
+		elog(INFO, "NoSpace pds_in=%p nitems=%u n_loaded=%u remain=%u is_terminator=%d is_final_chunk=%d, became_terminator=%d curr_seg=%p", pds_in, pds_in->kds->nitems, pgsort->kern.n_loaded, pds_in->kds->nitems - pgsort->kern.n_loaded, pgsort->is_terminator, pgsort->is_final_chunk, became_terminator, gss->curr_segment);
 
 		/*
 		 * Create a new task to run gpusort_projection for the rows that
@@ -1597,7 +1623,7 @@ skip:
 		pgsort_new = (pgstrom_gpusort *)
 			gpusort_create_task(gss, pds_in, valid_nitems,
 								pgsort->is_final_chunk);
-		elog(INFO, "old_seg=%p new_seg=%p", segment, pgsort_new->segment);
+		elog(INFO, "old_seg=%p new_seg=%p {has_terminator=%d}, gss->curr_seg=%p", segment, pgsort_new->segment, pgsort->segment->has_terminator, gss->curr_segment);
 
 		/* enqueue the new task */
 		SpinLockAcquire(&gss->gts.lock);
@@ -1618,9 +1644,6 @@ skip:
 			return false;
 		}
 	}
-	else
-		elog(INFO, "pgsort=%p successfully done", pgsort);
-
 
 	/*
 	 * Only final chunk shall be backed to the main logic.
@@ -1840,19 +1863,22 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *pgsort)
 	if (!gpusort_setup_segment(gss, pgsort))
 		goto out_of_resource;
 
-	if (pds_in)
+	/* send kern_gpusort */
+	length = KERN_GPUSORT_DMASEND_LENGTH(&pgsort->kern);
+	rc = cuMemcpyHtoDAsync(pgsort->m_gpusort,
+						   &pgsort->kern,
+						   length,
+						   pgsort->task.cuda_stream);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+	pfm->bytes_dma_send += length;
+	pfm->num_dma_send++;
+
+	if (!pds_in)
+		Assert(pgsort->is_terminator);
+	else
 	{
 		kern_data_store	   *kds_in = pds_in->kds;
-
-		length = KERN_GPUSORT_DMASEND_LENGTH(&pgsort->kern);
-		rc = cuMemcpyHtoDAsync(pgsort->m_gpusort,
-							   &pgsort->kern,
-							   length,
-							   pgsort->task.cuda_stream);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-		pfm->bytes_dma_send += length;
-		pfm->num_dma_send++;
 
 		rc = cuMemcpyHtoDAsync(pgsort->m_kds_in,
 							   kds_in,
@@ -1895,10 +1921,6 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *pgsort)
 		elog(DEBUG2, "gpusort_projection grid=%zu block=%zu nitems=%zu",
 			 grid_size, block_size, (size_t)pds_in->kds->nitems);
 		pfm->gsort.num_kern_proj++;
-	}
-	else
-	{
-		Assert(pgsort->is_terminator);
 	}
 
 	/* inject an event to synchronize the projection kernel */

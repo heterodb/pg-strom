@@ -83,7 +83,7 @@ gpusort_projection(kern_gpusort *kgpusort,
 	kern_parambuf  *kparams = KERN_GPUSORT_PARAMBUF(kgpusort);
 	kern_context	kcxt;
 	kern_tupitem   *tupitem = NULL;
-	cl_uint		   *row_index;
+	cl_uint		   *row_index = KERN_DATA_STORE_ROWINDEX(kds_in);
 	cl_bool			tup_isnull[GPUSORT_DEVICE_PROJECTION_NFIELDS];
 	Datum			tup_values[GPUSORT_DEVICE_PROJECTION_NFIELDS];
 	cl_bool		   *dest_isnull;
@@ -97,6 +97,7 @@ gpusort_projection(kern_gpusort *kgpusort,
 	cl_uint			nrows_ofs;
 	cl_uint			kds_index;
 	cl_uint			i, ncols;
+	__shared__ cl_uint may_overflow;
 	__shared__ cl_uint extra_base;
 	__shared__ cl_uint nrows_base;
 	__shared__ cl_uint kresults_base;
@@ -104,19 +105,55 @@ gpusort_projection(kern_gpusort *kgpusort,
 	INIT_KERNEL_CONTEXT(&kcxt, gpusort_projection, kparams);
 
 	/*
+	 * Fetch the source tuple, if it is valid. Elsewhere, tupitem == NULL.
+	 */
+	if (get_global_id() < kds_in->nitems &&
+		(row_index[get_global_id()] & 0x01) == 0)
+	{
+		tupitem = (kern_tupitem *)((char *)kds_in +
+								   row_index[get_global_id()]);
+	}
+	nrows_ofs = arithmetic_stairlike_add(tupitem != NULL ? 1 : 0, &nrows_sum);
+
+	/*
+	 * Quick bailout if we have no hope for buffer allocation on the current
+	 * sorting segment, prior to the tuple extraction and buffer allocation
+	 * on the kds_slot.
+	 *
+	 * NOTE: We try to reference kds_slot->{nitems, usage} without atomic
+	 * guarantee, so it can lead inconsistent view between threads in same
+	 * block, depending on the concurrent access.
+	 * Thus, if any of the thread would detect potential overflow, all the
+	 * threads in this block will escape.
+	 *
+	 * Also note that we cannot know exact size of extra_len prior to
+	 * extraction of the tuple. So, we assume extra_len == 0. Of course,
+	 * it is very naive estimation.
+	 */
+	if (get_local_id() == 0)
+		may_overflow = 0;
+	__syncthreads();
+
+	if (KERN_DATA_STORE_SLOT_LENGTH(kds_slot,
+									kds_slot->nitems + nrows_sum) +
+		kds_slot->usage > kds_slot->length)
+		may_overflow = 1;
+	__syncthreads();
+
+	if (may_overflow > 0)
+	{
+		STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
+		goto out;
+	}
+
+	/*
 	 * Extract the sorting keys and put record identifier here.
 	 * If the least bit of row_index[] (that is usually aligned to 8-bytes)
 	 * is set, it means this record is already loaded to another sorting
 	 * segment, so we shall ignore them
 	 */
-	row_index = KERN_DATA_STORE_ROWINDEX(kds_in);
-
-	if (get_global_id() < kds_in->nitems &&
-		(row_index[get_global_id()] & 0x01) == 0)
+	if (tupitem != NULL)
 	{
-		tupitem = (kern_tupitem *)
-			((char *)kds_in + row_index[get_global_id()]);
-
 		extra_len = deform_kern_heaptuple(&kcxt,
 										  kds_in,
 										  tupitem,
@@ -126,22 +163,8 @@ gpusort_projection(kern_gpusort *kgpusort,
 										  tup_isnull);
 		assert(extra_len == MAXALIGN(extra_len));
 	}
-
-	/* count resource consumption by this block */
-	nrows_ofs = arithmetic_stairlike_add(tupitem != NULL ? 1 : 0, &nrows_sum);
+	/* consumption of the extra buffer by this block */
 	extra_ofs = arithmetic_stairlike_add(extra_len, &extra_sum);
-
-	/*
-	 * Quick bailout if we have no hope for buffer allocation on the current
-	 * sorting segment, prior to atomic operations.
-	 */
-	if (KERN_DATA_STORE_SLOT_LENGTH(kds_slot,
-									kds_slot->nitems + nrows_sum)
-		+ kds_slot->usage + extra_sum > kds_slot->length)
-	{
-		STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
-		goto out;
-	}
 
 	/* buffer allocation on the current sorting block, by atomic operations */
 	if (get_local_id() == 0)
@@ -152,7 +175,8 @@ gpusort_projection(kern_gpusort *kgpusort,
 	__syncthreads();
 
 	/* confirmation of buffer usage */
-	if (KERN_DATA_STORE_SLOT_LENGTH(kds_slot,
+	if (nrows_base + nrows_sum >= kds_slot->nrooms ||
+		KERN_DATA_STORE_SLOT_LENGTH(kds_slot,
 									nrows_base + nrows_sum) +
 		(extra_base + extra_sum) > kds_slot->length)
 	{
@@ -172,23 +196,28 @@ gpusort_projection(kern_gpusort *kgpusort,
 	if (get_local_id() == 0)
 		kresults_base = atomicAdd(&kresults->nitems, nrows_sum);
 	__syncthreads();
-	if (kresults_base + nrows_sum > kresults->nrooms)
+	assert(kresults_base + nrows_sum < kresults->nrooms);
+	if (kresults_base + nrows_sum >= kresults->nrooms)
 	{
+		/*
+		 * It should not happen because kresults->nrooms == kds_slot->nrooms,
+		 * so once we could acquire the slot on kds_slot, kresults shall also
+		 * have enough rooms to store.
+		 */
 		STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
 		goto out;
 	}
-	if (tupitem != NULL)
-		kresults->results[kresults_base + nrows_ofs] = kds_index;
-	__syncthreads();
 
 	/* Copy the values/isnull to the sorting segment */
 	if (tupitem != NULL)
 	{
-		ncols = kds_slot->ncols;
+		kresults->results[kresults_base + nrows_ofs] = kds_index;
+
 		dest_isnull = KERN_DATA_STORE_ISNULL(kds_slot, kds_index);
 		dest_values = KERN_DATA_STORE_VALUES(kds_slot, kds_index);
 		extra_pos = extra_buf;
 
+		ncols = kds_slot->ncols;
 		for (i=0; i < ncols; i++)
 		{
 			kern_colmeta	cmeta = kds_slot->colmeta[i];
@@ -242,6 +271,7 @@ gpusort_projection(kern_gpusort *kgpusort,
 	/* inform host-side the number of rows actually moved */
 	if (get_local_id() == 0)
 	{
+		cl_uint hoge =
 		atomicAdd(&kgpusort->n_loaded, nrows_sum);
 	}
 	__syncthreads();
@@ -442,6 +472,14 @@ gpusort_fixup_pointers(kern_gpusort *kgpusort,
 	if (get_global_id() < kresults->nitems)
 	{
 		kds_index = kresults->results[get_global_id()];
+#if 0
+		if (kds_index >= kds_slot->nitems)
+		{
+			printf("gid=%u NITEMS=%u kds_index=%u nitems=%u\n", get_global_id(), kresults->nitems, kds_index, kds_slot->nitems);
+			STROM_SET_ERROR(&kcxt.e, 9999);
+			goto out;
+		}
+#endif
 		assert(kds_index < kds_slot->nitems);
 
 		tup_values = KERN_DATA_STORE_VALUES(kds_slot, kds_index);
@@ -483,8 +521,11 @@ gpusort_main(kern_gpusort *kgpusort,
 
 	INIT_KERNEL_CONTEXT(&kcxt, gpusort_main, kparams);
 
-	// MEMO: error code shall be put on kresults, not kgpusort
-	// because NoSpace error should not prevent sort the segment
+	// DEBUG
+	printf("segid=%u kresults{nitems=%u nrooms=%u} kds_slot {nitems=%u nrooms=%u}\n",
+		   kgpusort->segid,
+		   kresults->nitems, kresults->nrooms,
+		   kds_slot->nitems, kds_slot->nrooms);
 
 	/*
 	 * NOTE: Because of the bitonic sorting algorithm characteristics,
