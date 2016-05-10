@@ -472,14 +472,6 @@ gpusort_fixup_pointers(kern_gpusort *kgpusort,
 	if (get_global_id() < kresults->nitems)
 	{
 		kds_index = kresults->results[get_global_id()];
-#if 0
-		if (kds_index >= kds_slot->nitems)
-		{
-			printf("gid=%u NITEMS=%u kds_index=%u nitems=%u\n", get_global_id(), kresults->nitems, kds_index, kds_slot->nitems);
-			STROM_SET_ERROR(&kcxt.e, 9999);
-			goto out;
-		}
-#endif
 		assert(kds_index < kds_slot->nitems);
 
 		tup_values = KERN_DATA_STORE_VALUES(kds_slot, kds_index);
@@ -520,12 +512,6 @@ gpusort_main(kern_gpusort *kgpusort,
 	cudaError_t		status = cudaSuccess;
 
 	INIT_KERNEL_CONTEXT(&kcxt, gpusort_main, kparams);
-
-	// DEBUG
-	printf("segid=%u kresults{nitems=%u nrooms=%u} kds_slot {nitems=%u nrooms=%u}\n",
-		   kgpusort->segid,
-		   kresults->nitems, kresults->nrooms,
-		   kds_slot->nitems, kds_slot->nrooms);
 
 	/*
 	 * NOTE: Because of the bitonic sorting algorithm characteristics,

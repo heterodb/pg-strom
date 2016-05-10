@@ -1681,14 +1681,6 @@ pgstrom_fetch_gputask(GpuTaskState *gts)
 				 * data-stores kept by the terminator task shall retain and
 				 * be consuming RAM.
 				 */
-#ifdef NOT_USED
-				/* XXX - deprecated implementation */
-				/* no urgent reason why to make the scan progress */
-				if (!dlist_is_empty(&gts->ready_tasks) &&
-					gts->num_ready_tasks < (gts->num_running_tasks +
-											gts->num_pending_tasks))
-					break;
-#endif
 				if (!dlist_is_empty(&gts->ready_tasks))
 					break;
 				SpinLockRelease(&gts->lock);
@@ -1700,7 +1692,7 @@ pgstrom_fetch_gputask(GpuTaskState *gts)
 				if (!gtask)
 				{
 					pgstrom_deactivate_gputaskstate(gts);
-					elog(NOTICE, "scan done (%s)",
+					elog(DEBUG2, "scan done (%s)",
 						 gts->css.methods->CustomName);
 					break;
 				}
