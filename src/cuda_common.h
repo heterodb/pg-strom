@@ -377,6 +377,49 @@ kern_writeback_error_status(kern_errorbuf *result, kern_errorbuf own_error)
 #endif	/* !__CUDACC__! */
 #ifdef __CUDACC__
 /*
+ * NumSmx - reference to the %nsmid register
+ */
+STATIC_INLINE(cl_uint) NumSmx(void)
+{
+	cl_uint		ret;
+	asm("mov.u32 %0, %nsmid;" : "=r"(ret) );
+	return ret;
+}
+
+/*
+ * SmxId - reference to the %smid register
+ */
+STATIC_INLINE(cl_uint) SmxId(void)
+{
+	cl_uint		ret;
+	asm("mov.u32 %0, %smid;" : "=r"(ret) );
+	return ret;
+}
+
+/*
+ * WarpId() - reference to the %warpid register
+ */
+STATIC_INLINE(cl_uint) WarpId(void)
+{
+	cl_uint		ret;
+	asm("mov.u32 %0, %warpid;" : "=r"(ret) );
+	return ret;
+}
+
+/*
+ * GlobalTimer - A pre-defined, 64bit global nanosecond timer.
+ *
+ * NOTE: clock64() is not consistent across different SMX, thus, should not
+ *       use this API in case when device time-run may reschedule the kernel.
+ */
+STATIC_INLINE(cl_ulong) GlobalTimer(void)
+{
+	cl_ulong	ret;
+	asm("mov.u64 %0, %globaltimer;" : "=l"(ret) );
+	return ret;
+}
+
+/*
  * We need to re-define HeapTupleHeaderData and t_infomask related stuff
  */
 typedef struct {

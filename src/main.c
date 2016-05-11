@@ -780,48 +780,64 @@ pgstrom_explain_perfmon(GpuTaskState *gts, ExplainState *es)
 	/* GpuJoin: kernel execution */
 	if ((pfm->extra_flags & DEVKERNEL_NEEDS_GPUJOIN) != 0)
 	{
-		EXPLAIN_KERNEL_PERFMON("gpujoin_exec_outerscan",
+		EXPLAIN_KERNEL_PERFMON("gpujoin_main()",
+							   gjoin.num_kern_main,
+							   gjoin.tv_kern_main);
+		EXPLAIN_KERNEL_PERFMON(" - gpujoin_exec_outerscan",
 							   gjoin.num_kern_outer_scan,
 							   gjoin.tv_kern_outer_scan);
-		EXPLAIN_KERNEL_PERFMON("gpujoin_exec_nestloop",
+		EXPLAIN_KERNEL_PERFMON(" - gpujoin_exec_nestloop",
 							   gjoin.num_kern_exec_nestloop,
 							   gjoin.tv_kern_exec_nestloop);
-		EXPLAIN_KERNEL_PERFMON("gpujoin_exec_hashjoin",
+		EXPLAIN_KERNEL_PERFMON(" - gpujoin_exec_hashjoin",
 							   gjoin.num_kern_exec_hashjoin,
 							   gjoin.tv_kern_exec_hashjoin);
-		EXPLAIN_KERNEL_PERFMON("gpujoin_outer_nestloop",
+		EXPLAIN_KERNEL_PERFMON(" - gpujoin_outer_nestloop",
 							   gjoin.num_kern_outer_nestloop,
 							   gjoin.tv_kern_outer_nestloop);
-		EXPLAIN_KERNEL_PERFMON("gpujoin_outer_hashjoin",
+		EXPLAIN_KERNEL_PERFMON(" - gpujoin_outer_hashjoin",
 							   gjoin.num_kern_outer_hashjoin,
 							   gjoin.tv_kern_outer_hashjoin);
-		EXPLAIN_KERNEL_PERFMON("gpujoin_projection",
+		EXPLAIN_KERNEL_PERFMON(" - gpujoin_projection",
 							   gjoin.num_kern_projection,
 							   gjoin.tv_kern_projection);
-		EXPLAIN_KERNEL_PERFMON("gpujoin_count_rows_dist",
+		EXPLAIN_KERNEL_PERFMON(" - gpujoin_count_rows_dist",
 							   gjoin.num_kern_rows_dist,
 							   gjoin.tv_kern_rows_dist);
+		if (pfm->gjoin.num_global_retry > 0 ||
+			pfm->gjoin.num_major_retry > 0 ||
+			pfm->gjoin.num_minor_retry > 0)
+		{
+			snprintf(buf, sizeof(buf), "global: %u, major: %u, minor: %u",
+					 pfm->gjoin.num_global_retry,
+					 pfm->gjoin.num_major_retry,
+					 pfm->gjoin.num_minor_retry);
+			ExplainPropertyText("Retry Loops", buf, es);
+		}
 	}
 
 	/* GpuPreAgg: kernel execution */
 	if ((pfm->extra_flags & DEVKERNEL_NEEDS_GPUPREAGG) != 0)
 	{
-		EXPLAIN_KERNEL_PERFMON("gpupreagg_preparation",
+		EXPLAIN_KERNEL_PERFMON("gpupreagg_main()",
+							   gpreagg.num_kern_main,
+							   gpreagg.tv_kern_main);
+		EXPLAIN_KERNEL_PERFMON(" - gpupreagg_preparation()",
 							   gpreagg.num_kern_prep,
 							   gpreagg.tv_kern_prep);
-		EXPLAIN_KERNEL_PERFMON("gpupreagg_nogroup_reduction",
+		EXPLAIN_KERNEL_PERFMON(" - gpupreagg_nogroup_reduction()",
 							   gpreagg.num_kern_nogrp,
 							   gpreagg.tv_kern_nogrp);
-		EXPLAIN_KERNEL_PERFMON("gpupreagg_local_reduction",
+		EXPLAIN_KERNEL_PERFMON(" - gpupreagg_local_reduction()",
 							   gpreagg.num_kern_lagg,
 							   gpreagg.tv_kern_lagg);
-		EXPLAIN_KERNEL_PERFMON("gpupreagg_global_reduction",
+		EXPLAIN_KERNEL_PERFMON(" - gpupreagg_global_reduction()",
 							   gpreagg.num_kern_gagg,
 							   gpreagg.tv_kern_gagg);
-		EXPLAIN_KERNEL_PERFMON("gpupreagg_final_reduction",
+		EXPLAIN_KERNEL_PERFMON(" - gpupreagg_final_reduction()",
 							   gpreagg.num_kern_fagg,
 							   gpreagg.tv_kern_fagg);
-		EXPLAIN_KERNEL_PERFMON("gpupreagg_fixup_varlena",
+		EXPLAIN_KERNEL_PERFMON(" - gpupreagg_fixup_varlena()",
 							   gpreagg.num_kern_fixvar,
 							   gpreagg.tv_kern_fixvar);
 	}

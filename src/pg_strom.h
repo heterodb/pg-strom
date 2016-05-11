@@ -126,12 +126,15 @@ typedef struct {
 	cl_double	time_sync_tasks;	/* time to synchronize tasks */
 	/*-- for each GPU logic --*/
 	struct {
+		cl_uint		num_kern_main;
 		cl_uint		num_kern_exec_quals;
 		cl_uint		num_kern_projection;
+		cl_double	tv_kern_main;
 		cl_double	tv_kern_exec_quals;
 		cl_double	tv_kern_projection;
 	} gscan;
 	struct {
+		cl_uint		num_kern_main;
 		cl_uint		num_kern_outer_scan;
 		cl_uint		num_kern_exec_nestloop;
 		cl_uint		num_kern_exec_hashjoin;
@@ -139,6 +142,10 @@ typedef struct {
 		cl_uint		num_kern_outer_hashjoin;
 		cl_uint		num_kern_projection;
 		cl_uint		num_kern_rows_dist;
+		cl_uint		num_global_retry;
+		cl_uint		num_major_retry;
+		cl_uint		num_minor_retry;
+		cl_double	tv_kern_main;
 		cl_double	tv_kern_outer_scan;
 		cl_double	tv_kern_exec_nestloop;
 		cl_double	tv_kern_exec_hashjoin;
@@ -152,12 +159,14 @@ typedef struct {
 		cl_double	tv_inner_dma_send;
 	} gjoin;
 	struct {
+		cl_uint		num_kern_main;
 		cl_uint		num_kern_prep;
 		cl_uint		num_kern_nogrp;
 		cl_uint		num_kern_lagg;
 		cl_uint		num_kern_gagg;
 		cl_uint		num_kern_fagg;
 		cl_uint		num_kern_fixvar;
+		cl_double	tv_kern_main;
 		cl_double	tv_kern_prep;
 		cl_double	tv_kern_nogrp;
 		cl_double	tv_kern_lagg;

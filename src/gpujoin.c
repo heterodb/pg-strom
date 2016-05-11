@@ -3974,6 +3974,8 @@ gpujoin_exec_estimate_nitems(GpuJoinState *gjs,
 				 (double)(jscale_old[depth].window_base +
 						  jscale_old[depth].window_size -
 						  jscale_old[depth].window_orig));
+
+			elog(INFO, "DEPTH=%d ntuples %f -> %f", depth, ntuples_in, ntuples_next);
 		}
 		else
 		{
@@ -3981,9 +3983,14 @@ gpujoin_exec_estimate_nitems(GpuJoinState *gjs,
 			cl_uint				nitems_in = pds_in->kds->nitems;
 
 			plan_ratio = istate->nrows_ratio;
-			exec_ratio = ((double)(gjs->inner_nitems[depth]) /
-						  (double)(gjs->inner_nitems[depth - 1] +
-								   gjs->right_nitems[depth - 1]));
+			if (gjs->inner_nitems[depth - 1] +
+				gjs->right_nitems[depth - 1] > 0)
+				exec_ratio = ((double)(gjs->inner_nitems[depth]) /
+							  (double)(gjs->inner_nitems[depth - 1] +
+									   gjs->right_nitems[depth - 1]));
+			else
+				exec_ratio = 0.0;
+
 			ntuples_next = ntuples_in *
 				(exec_ratio * merge_ratio +
 				 plan_ratio * (1.0 - merge_ratio)) *
@@ -5311,40 +5318,47 @@ gpujoin_task_complete(GpuTask *gtask)
 							   pgjoin->ev_dma_send_stop,
 							   skip);
 		}
+		CUDA_EVENT_ELAPSED(pgjoin, gjoin.tv_kern_main,
+						   pgjoin->ev_dma_send_stop,
+						   pgjoin->ev_dma_recv_start,
+						   skip);
 		CUDA_EVENT_ELAPSED(pgjoin, time_dma_recv,
 						   pgjoin->ev_dma_recv_start,
 						   pgjoin->ev_dma_recv_stop,
 						   skip);
 		/* update performance */
 		pfm->gjoin.num_kern_outer_scan
-			+= pgjoin->kern.num_kern_outer_scan;
+			+= pgjoin->kern.pfm.num_kern_outer_scan;
 		pfm->gjoin.num_kern_exec_nestloop
-			+= pgjoin->kern.num_kern_exec_nestloop;
+			+= pgjoin->kern.pfm.num_kern_exec_nestloop;
 		pfm->gjoin.num_kern_exec_hashjoin
-			+= pgjoin->kern.num_kern_exec_hashjoin;
+			+= pgjoin->kern.pfm.num_kern_exec_hashjoin;
 		pfm->gjoin.num_kern_outer_nestloop
-			+= pgjoin->kern.num_kern_outer_nestloop;
+			+= pgjoin->kern.pfm.num_kern_outer_nestloop;
 		pfm->gjoin.num_kern_outer_hashjoin
-			+= pgjoin->kern.num_kern_outer_hashjoin;
+			+= pgjoin->kern.pfm.num_kern_outer_hashjoin;
 		pfm->gjoin.num_kern_projection
-			+= pgjoin->kern.num_kern_projection;
+			+= pgjoin->kern.pfm.num_kern_projection;
 		pfm->gjoin.num_kern_rows_dist
-			+= pgjoin->kern.num_kern_rows_dist;
+			+= pgjoin->kern.pfm.num_kern_rows_dist;
 
 		pfm->gjoin.tv_kern_outer_scan
-			+= pgjoin->kern.tv_kern_outer_scan;
+			+= pgjoin->kern.pfm.tv_kern_outer_scan;
 		pfm->gjoin.tv_kern_exec_nestloop
-			+= pgjoin->kern.tv_kern_exec_nestloop;
+			+= pgjoin->kern.pfm.tv_kern_exec_nestloop;
 		pfm->gjoin.tv_kern_exec_hashjoin
-			+= pgjoin->kern.tv_kern_exec_hashjoin;
+			+= pgjoin->kern.pfm.tv_kern_exec_hashjoin;
 		pfm->gjoin.tv_kern_outer_nestloop
-			+= pgjoin->kern.tv_kern_outer_nestloop;
+			+= pgjoin->kern.pfm.tv_kern_outer_nestloop;
 		pfm->gjoin.tv_kern_outer_hashjoin
-			+= pgjoin->kern.tv_kern_outer_hashjoin;
+			+= pgjoin->kern.pfm.tv_kern_outer_hashjoin;
 		pfm->gjoin.tv_kern_projection
-			+= pgjoin->kern.tv_kern_projection;
+			+= pgjoin->kern.pfm.tv_kern_projection;
 		pfm->gjoin.tv_kern_rows_dist
-			+= pgjoin->kern.tv_kern_rows_dist;
+			+= pgjoin->kern.pfm.tv_kern_rows_dist;
+
+		pfm->gjoin.num_major_retry += pgjoin->kern.pfm.num_major_retry;
+		pfm->gjoin.num_minor_retry += pgjoin->kern.pfm.num_minor_retry;
 	}
 skip:
 	if (pgjoin->task.kerror.errcode == StromError_Success)
@@ -5455,6 +5469,8 @@ skip:
 								&pgjoin_new->task.chain);
 				gjs->gts.num_pending_tasks++;
 				SpinLockRelease(&gjs->gts.lock);
+
+				gjs->gts.pfm.gjoin.num_global_retry++;
 				break;
 			}
 			Assert(jscale[i].window_base + jscale[i].window_size == nitems);
@@ -5669,6 +5685,7 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 						NULL);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
+	gjs->gts.pfm.gjoin.num_kern_main++;
 
 	CUDA_EVENT_RECORD(pgjoin, ev_dma_recv_start);
 

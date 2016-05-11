@@ -33,6 +33,7 @@
 /*
  * Macro to track timeval and increment usage.
  */
+#if 0
 #define TIMEVAL_RECORD(ktask,field,tv1,tv2,smx_clock)				\
 	do {															\
 		(ktask)->num_##field++;										\
@@ -40,6 +41,14 @@
 								((cl_float)(smx_clock)));			\
 	} while(0)
 #endif
+#endif
+
+#define TIMEVAL_RECORD(ktask,field,tv_start)					\
+	do {														\
+		(ktask)->pfm.num_##field++;								\
+		(ktask)->pfm.tv_##field +=								\
+			((cl_float)(GlobalTimer() -	(tv_start)) / 1000000);	\
+	} while(0)
 
 /*
  * __pgstrom_optimal_workgroup_size

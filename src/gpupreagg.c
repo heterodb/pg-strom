@@ -199,7 +199,7 @@ typedef struct gpupreagg_segment
 	cl_bool			needs_fallback;		/* true, if CPU fallback needed */
 	pgstrom_data_store **pds_src;		/* reference to source PDSs */
 	CUevent			ev_final_loaded;	/* event of final-buffer load */
-	CUevent		   *ev_kern_exec_end;	/* event of kernel-exec end */
+	CUevent		   *ev_kern_main;		/* event of gpupreagg_main end */
 	/* run-time statistics */
 	size_t			allocated_nrooms;	/* nrooms of the kds_final */
 	size_t			allocated_varlena;	/* length of the varlena buffer */
@@ -3739,7 +3739,7 @@ gpupreagg_create_segment(GpuPreAggState *gpas)
 	segment->needs_fallback = false;
 	segment->pds_src = (pgstrom_data_store **)((char *)segment + offset);
 	offset += STROMALIGN(sizeof(pgstrom_data_store *) * num_chunks);
-	segment->ev_kern_exec_end = (CUevent *)((char *)segment + offset);
+	segment->ev_kern_main = (CUevent *)((char *)segment + offset);
 
 	/* run-time statistics */
 	segment->allocated_nrooms = f_nrooms;
@@ -3780,12 +3780,12 @@ gpupreagg_cleanup_segment(gpupreagg_segment *segment)
 
 	for (i=0; i < segment->num_chunks; i++)
 	{
-		if (segment->ev_kern_exec_end[i])
+		if (segment->ev_kern_main[i])
 		{
-			rc = cuEventDestroy(segment->ev_kern_exec_end[i]);
+			rc = cuEventDestroy(segment->ev_kern_main[i]);
 			if (rc != CUDA_SUCCESS)
 				elog(WARNING, "failed on cuEventDestroy: %s", errorText(rc));
-			segment->ev_kern_exec_end[i] = NULL;
+			segment->ev_kern_main[i] = NULL;
 		}
 	}
 }
@@ -3865,7 +3865,7 @@ gpupreagg_put_segment(gpupreagg_segment *segment)
 }
 
 static bool
-gpupreagg_setup_segment(pgstrom_gpupreagg *gpreagg)
+gpupreagg_setup_segment(pgstrom_gpupreagg *gpreagg, bool perfmon_enabled)
 {
 	gpupreagg_segment  *segment = gpreagg->segment;
 	pgstrom_data_store *pds_final = segment->pds_final;
@@ -3908,9 +3908,9 @@ gpupreagg_setup_segment(pgstrom_gpupreagg *gpreagg)
 		/* Create event object to synchronize every kernel execution end */
 		for (i=0; i < segment->num_chunks; i++)
 		{
-			Assert(segment->ev_kern_exec_end[i] == NULL);
-			rc = cuEventCreate(&segment->ev_kern_exec_end[i],
-							   CU_EVENT_DISABLE_TIMING);
+			Assert(segment->ev_kern_main[i] == NULL);
+			rc = cuEventCreate(&segment->ev_kern_main[i],
+							   perfmon_enabled ? 0 : CU_EVENT_DISABLE_TIMING);
 			if (rc != CUDA_SUCCESS)
 				elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
 		}
@@ -4420,13 +4420,19 @@ gpupreagg_task_complete(GpuTask *gtask)
 
 	if (pfm->enabled)
 	{
+		CUevent			ev_kern_main;
+
 		pfm->num_tasks++;
 
 		CUDA_EVENT_ELAPSED(gpreagg, time_dma_send,
 						   gpreagg->ev_dma_send_start,
 						   gpreagg->ev_dma_send_stop,
 						   skip);
-
+		ev_kern_main = segment->ev_kern_main[gpreagg->segment_id];
+		CUDA_EVENT_ELAPSED(gpreagg, gpreagg.tv_kern_main,
+						   gpreagg->ev_dma_send_stop,
+						   ev_kern_main,
+						   skip);
 		if (gpreagg->is_terminator)
 		{
 			pgstrom_data_store *pds_final = segment->pds_final;
@@ -4439,31 +4445,35 @@ gpupreagg_task_complete(GpuTask *gtask)
 								   skip);
 			}
 		}
+		CUDA_EVENT_ELAPSED(gpreagg, time_dma_recv,
+						   gpreagg->ev_dma_recv_start,
+						   gpreagg->ev_dma_recv_stop,
+						   skip);
 
-		if (gpreagg->kern.num_kern_prep > 0)
+		if (gpreagg->kern.pfm.num_kern_prep > 0)
 		{
-			pfm->gpreagg.num_kern_prep += gpreagg->kern.num_kern_prep;
-			pfm->gpreagg.tv_kern_prep += gpreagg->kern.tv_kern_prep;
+			pfm->gpreagg.num_kern_prep += gpreagg->kern.pfm.num_kern_prep;
+			pfm->gpreagg.tv_kern_prep += gpreagg->kern.pfm.tv_kern_prep;
 		}
-		if (gpreagg->kern.num_kern_nogrp > 0)
+		if (gpreagg->kern.pfm.num_kern_nogrp > 0)
 		{
-			pfm->gpreagg.num_kern_nogrp += gpreagg->kern.num_kern_nogrp;
-			pfm->gpreagg.tv_kern_nogrp += gpreagg->kern.tv_kern_nogrp;
+			pfm->gpreagg.num_kern_nogrp += gpreagg->kern.pfm.num_kern_nogrp;
+			pfm->gpreagg.tv_kern_nogrp += gpreagg->kern.pfm.tv_kern_nogrp;
 		}
-		if (gpreagg->kern.num_kern_lagg > 0)
+		if (gpreagg->kern.pfm.num_kern_lagg > 0)
 		{
-			pfm->gpreagg.num_kern_lagg += gpreagg->kern.num_kern_lagg;
-			pfm->gpreagg.tv_kern_lagg += gpreagg->kern.tv_kern_lagg;
+			pfm->gpreagg.num_kern_lagg += gpreagg->kern.pfm.num_kern_lagg;
+			pfm->gpreagg.tv_kern_lagg += gpreagg->kern.pfm.tv_kern_lagg;
 		}
-		if (gpreagg->kern.num_kern_gagg > 0)
+		if (gpreagg->kern.pfm.num_kern_gagg > 0)
 		{
-			pfm->gpreagg.num_kern_gagg += gpreagg->kern.num_kern_gagg;
-			pfm->gpreagg.tv_kern_gagg += gpreagg->kern.tv_kern_gagg;
+			pfm->gpreagg.num_kern_gagg += gpreagg->kern.pfm.num_kern_gagg;
+			pfm->gpreagg.tv_kern_gagg += gpreagg->kern.pfm.tv_kern_gagg;
 		}
-		if (gpreagg->kern.num_kern_fagg > 0)
+		if (gpreagg->kern.pfm.num_kern_fagg > 0)
 		{
-			pfm->gpreagg.num_kern_fagg += gpreagg->kern.num_kern_fagg;
-			pfm->gpreagg.tv_kern_fagg += gpreagg->kern.tv_kern_fagg;
+			pfm->gpreagg.num_kern_fagg += gpreagg->kern.pfm.num_kern_fagg;
+			pfm->gpreagg.tv_kern_fagg += gpreagg->kern.pfm.tv_kern_fagg;
 		}
 	}
 skip:
@@ -4681,7 +4691,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 	pgstrom_perfmon	   *pfm = &gpreagg->task.gts->pfm;
 	size_t				offset;
 	size_t				length;
-	CUevent				ev_kern_exec_end;
+	CUevent				ev_kern_main;
 	CUresult			rc;
 	cl_int				i;
 	void			   *kern_args[10];
@@ -4756,7 +4766,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 	 * Allocation and setup final result buffer of this segment, or
 	 * synchronize initialization by other task
 	 */
-	if (!gpupreagg_setup_segment(gpreagg))
+	if (!gpupreagg_setup_segment(gpreagg, pfm->enabled))
 		goto out_of_resource;
 
 	/*
@@ -4837,13 +4847,13 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 							NULL);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
-		pfm->gpreagg.num_kern_prep++;
+		pfm->gpreagg.num_kern_main++;
 	}
 	/*
 	 * Record normal kernel execution end event
 	 */
-	ev_kern_exec_end = segment->ev_kern_exec_end[gpreagg->segment_id];
-	rc = cuEventRecord(ev_kern_exec_end, gpreagg->task.cuda_stream);
+	ev_kern_main = segment->ev_kern_main[gpreagg->segment_id];
+	rc = cuEventRecord(ev_kern_main, gpreagg->task.cuda_stream);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuEventRecord: %s", errorText(rc));
 
@@ -4861,7 +4871,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 		for (i=0; i < segment->idx_chunks; i++)
 		{
 			rc = cuStreamWaitEvent(gpreagg->task.cuda_stream,
-								   segment->ev_kern_exec_end[i], 0);
+								   segment->ev_kern_main[i], 0);
 			if (rc != CUDA_SUCCESS)
 				elog(ERROR, "failed on cuStreamWaitEvent: %s", errorText(rc));
 		}

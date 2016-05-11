@@ -58,16 +58,18 @@ typedef struct
 	cl_uint			ghash_conflicts;	/* out: # of ghash conflicts */
 	cl_uint			fhash_conflicts;	/* out: # of fhash conflicts */
 	/* -- performance monitor -- */
-	cl_uint			num_kern_prep;		/* # of kern_preparation calls */
-	cl_uint			num_kern_nogrp;		/* # of kern_nogroup calls */
-	cl_uint			num_kern_lagg;		/* # of kern_local_reduction calls */
-	cl_uint			num_kern_gagg;		/* # of kern_global_reducation calls */
-	cl_uint			num_kern_fagg;		/* # of kern_final_reduction calls */
-	cl_float		tv_kern_prep;		/* msec of kern_preparation */
-	cl_float		tv_kern_nogrp;		/* msec of kern_nogroup */
-	cl_float		tv_kern_lagg;		/* msec of kern_local_reduction */
-	cl_float		tv_kern_gagg;		/* msec of kern_global_reducation */
-	cl_float		tv_kern_fagg;		/* msec of kern_final_reduction */
+	struct {
+		cl_uint		num_kern_prep;		/* # of kern_preparation calls */
+		cl_uint		num_kern_nogrp;		/* # of kern_nogroup calls */
+		cl_uint		num_kern_lagg;		/* # of kern_local_reduction calls */
+		cl_uint		num_kern_gagg;		/* # of kern_global_reducation calls */
+		cl_uint		num_kern_fagg;		/* # of kern_final_reduction calls */
+		cl_float	tv_kern_prep;		/* msec of kern_preparation */
+		cl_float	tv_kern_nogrp;		/* msec of kern_nogroup */
+		cl_float	tv_kern_lagg;		/* msec of kern_local_reduction */
+		cl_float	tv_kern_gagg;		/* msec of kern_global_reducation */
+		cl_float	tv_kern_fagg;		/* msec of kern_final_reduction */
+	} pfm;
 	/* -- other hashing parameters -- */
 	cl_uint			key_dist_salt;			/* hashkey distribution salt */
 	cl_uint			hash_size;				/* size of global hash-slots */
@@ -1628,33 +1630,13 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 	void			  **kern_args;
 	dim3				grid_sz;
 	dim3				block_sz;
-	cl_int				device;
-	cl_int				smx_clock;
-	cl_ulong			tv1, tv2;
+	cl_ulong			tv_start;
 	cudaError_t			status = cudaSuccess;
 
 	/* Init kernel context */
 	INIT_KERNEL_CONTEXT(&kcxt, gpupreagg_main, kparams);
 	assert(get_global_size() == 1);	/* !!single thread!! */
 	assert(kgpreagg->reduction_mode != GPUPREAGG_ONLY_TERMINATION);
-
-	/* Get device clock for performance monitor */
-	status = cudaGetDevice(&device);
-	if (status != cudaSuccess)
-	{
-		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
-		goto out;
-	}
-
-	status = cudaDeviceGetAttribute(&smx_clock,
-									cudaDevAttrClockRate,
-									device);
-	status = cudaGetDevice(&device);
-	if (status != cudaSuccess)
-	{
-		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
-		goto out;
-	}
 
 	/* Launch:
 	 * KERNEL_FUNCTION(void)
@@ -1663,7 +1645,7 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 	 *                       kern_data_store *kds_slot,
 	 *                       kern_global_hashslot *g_hash)
 	 */
-	tv1 = clock64();
+	tv_start = GlobalTimer();
 	kern_args = (void **)cudaGetParameterBuffer(sizeof(void *),
 												sizeof(void *) * 4);
 	if (!kern_args)
@@ -1706,8 +1688,8 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 	}
 	else if (kgpreagg->kerror.errcode != StromError_Success)
 		return;
-	tv2 = clock64();
-	TIMEVAL_RECORD(kgpreagg,kern_prep,tv1,tv2,smx_clock);
+
+	TIMEVAL_RECORD(kgpreagg,kern_prep,tv_start);
 
 	if (kgpreagg->reduction_mode == GPUPREAGG_NOGROUP_REDUCTION)
 	{
@@ -1718,7 +1700,7 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 		 *                             kern_resultbuf *kresults_src,
 		 *                             kern_resultbuf *kresults_dst)
 		 */
-		tv1 = clock64();
+		tv_start = GlobalTimer();
 
 		/* setup kern_resultbuf */
 		memset(kresults_src, 0, offsetof(kern_resultbuf, results[0]));
@@ -1824,8 +1806,7 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 		else if (kgpreagg->kerror.errcode != StromError_Success)
 			return;
 
-		tv2 = clock64();
-		TIMEVAL_RECORD(kgpreagg,kern_nogrp,tv1,tv2,smx_clock);
+		TIMEVAL_RECORD(kgpreagg,kern_nogrp,tv_start);
 	}
 	else if (kgpreagg->reduction_mode == GPUPREAGG_LOCAL_REDUCTION ||
 			 kgpreagg->reduction_mode == GPUPREAGG_GLOBAL_REDUCTION)
@@ -1849,7 +1830,7 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 			 *                           kern_data_store *kds_slot,
 			 *                           kern_resultbuf *kresults
 			 */
-			tv1 = clock64();
+			tv_start = GlobalTimer();
 			kern_args = (void **)cudaGetParameterBuffer(sizeof(void *),
 														sizeof(void *) * 3);
 			if (!kern_args)
@@ -1893,8 +1874,7 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 			else if (kgpreagg->kerror.errcode != StromError_Success)
 				return;
 			/* perfmon */
-			tv2 = clock64();
-			TIMEVAL_RECORD(kgpreagg,kern_lagg,tv1,tv2,smx_clock);
+			TIMEVAL_RECORD(kgpreagg,kern_lagg,tv_start);
 		}
 		else
 		{
@@ -1911,7 +1891,7 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 		 *                            kern_resultbuf *kresults_dst,
 		 *                            kern_global_hashslot *g_hash)
 		 */
-		tv1 = clock64();
+		tv_start = GlobalTimer();
 		kern_args = (void **)cudaGetParameterBuffer(sizeof(void *),
 													sizeof(void *) * 5);
 		if (!kern_args)
@@ -1959,8 +1939,7 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 		else if (kgpreagg->kerror.errcode != StromError_Success)
 			return;
 
-		tv2 = clock64();
-		TIMEVAL_RECORD(kgpreagg,kern_gagg,tv1,tv2,smx_clock);
+		TIMEVAL_RECORD(kgpreagg,kern_gagg,tv_start);
 
 		/* swap */
 		kresults_tmp = kresults_src;
@@ -1985,7 +1964,7 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 	 *                           kern_resultbuf *kresults_dst,
 	 *                           kern_global_hashslot *f_hash)
 	 */
-	tv1 = clock64();
+	tv_start = GlobalTimer();
 final_retry:
 	/* init destination kern_resultbuf */
 	memset(kresults_dst, 0, offsetof(kern_resultbuf, results[0]));
@@ -2046,11 +2025,10 @@ final_retry:
 		kresults_src = kresults_dst;
 		kresults_dst = kresults_tmp;
 		/* increment num_kern_fagg */
-		kgpreagg->num_kern_fagg++;
+		kgpreagg->pfm.num_kern_fagg++;
 		goto final_retry;
 	}
-	tv2 = clock64();
-	TIMEVAL_RECORD(kgpreagg,kern_fagg,tv1,tv2,smx_clock);
+	TIMEVAL_RECORD(kgpreagg,kern_fagg,tv_start);
 
 	/*
 	 * NOTE: gpupreagg_fixup_varlena shall be launched by CPU thread

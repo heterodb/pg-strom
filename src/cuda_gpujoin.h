@@ -83,25 +83,25 @@ typedef struct
 	cl_uint			num_rels;
 	/* error status to be backed (OUT) */
 	kern_errorbuf	kerror;
-	/*
-	 * Performance statistics
-	 */
-	cl_uint			num_kern_outer_scan;
-	cl_uint			num_kern_exec_nestloop;
-	cl_uint			num_kern_exec_hashjoin;
-	cl_uint			num_kern_outer_nestloop;
-	cl_uint			num_kern_outer_hashjoin;
-	cl_uint			num_kern_projection;
-	cl_uint			num_kern_rows_dist;
-	cl_float		tv_kern_outer_scan;
-	cl_float		tv_kern_exec_nestloop;
-	cl_float		tv_kern_exec_hashjoin;
-	cl_float		tv_kern_outer_nestloop;
-	cl_float		tv_kern_outer_hashjoin;
-	cl_float		tv_kern_projection;
-	cl_float		tv_kern_rows_dist;
-	cl_uint			num_minor_retry;
-	cl_uint			num_major_retry;
+	/* performance profiler */
+	struct {
+		cl_uint		num_kern_outer_scan;
+		cl_uint		num_kern_exec_nestloop;
+		cl_uint		num_kern_exec_hashjoin;
+		cl_uint		num_kern_outer_nestloop;
+		cl_uint		num_kern_outer_hashjoin;
+		cl_uint		num_kern_projection;
+		cl_uint		num_kern_rows_dist;
+		cl_float	tv_kern_outer_scan;
+		cl_float	tv_kern_exec_nestloop;
+		cl_float	tv_kern_exec_hashjoin;
+		cl_float	tv_kern_outer_nestloop;
+		cl_float	tv_kern_outer_hashjoin;
+		cl_float	tv_kern_projection;
+		cl_float	tv_kern_rows_dist;
+		cl_uint		num_minor_retry;
+		cl_uint		num_major_retry;
+	} pfm;
 	/*
 	 * Scale of inner virtual window for each depth
 	 * (note that jscale has (num_rels + 1) elements
@@ -1116,9 +1116,7 @@ gpujoin_resize_window(kern_context *kcxt,
 					  kern_resultbuf *kresults,
 					  cl_int nsplits,
 					  cl_uint dest_consumed,
-					  kern_errorbuf kerror,
-					  cl_int smx_count,
-					  cl_int smx_clock)
+					  kern_errorbuf kerror)
 {
 	cudaFuncAttributes fattrs;
 	kern_rows_dist_args_t *kern_args;
@@ -1130,7 +1128,7 @@ gpujoin_resize_window(kern_context *kcxt,
 	cl_uint			depth;
 	cl_uint			target_depth = 0;
 	cl_float		row_dist_score_largest = FLT_MIN;
-	cl_ulong		tv1, tv2;
+	cl_ulong		tv_start;
 	cudaError_t		status = cudaSuccess;
 
 	/*
@@ -1154,11 +1152,12 @@ gpujoin_resize_window(kern_context *kcxt,
 
 	/* how many items to be processed per thread? */
 	nvalids = min(kresults->nitems, kresults->nrooms);
-	thread_width = (nvalids - 1) / (smx_count * fattrs.maxThreadsPerBlock) + 1;
+	thread_width = (nvalids - 1) / (NumSmx() * fattrs.maxThreadsPerBlock) + 1;
 	if (thread_width > ROW_DIST_COUNT_MAX_THREAD_WIDTH)
 		thread_width = ROW_DIST_COUNT_MAX_THREAD_WIDTH;
 
 	/* allocation of argument buffer */
+	tv_start = GlobalTimer();
 	kern_args = (kern_rows_dist_args_t *)
 		cudaGetParameterBuffer(sizeof(void *),
 							   sizeof(kern_rows_dist_args_t));
@@ -1198,8 +1197,7 @@ gpujoin_resize_window(kern_context *kcxt,
 		STROM_SET_RUNTIME_ERROR(&kcxt->e, status);
 		return -1;
 	}
-	tv2 = clock64();
-	TIMEVAL_RECORD(kgjoin,kern_rows_dist,tv1,tv2,smx_clock);
+	TIMEVAL_RECORD(kgjoin,kern_rows_dist,tv_start);
 	/* NOTE: gpujoin_count_rows_dist never returns PG-Strom's error code */
 
 	/*
@@ -1430,12 +1428,10 @@ gpujoin_main(kern_gpujoin *kgjoin,		/* in/out: misc stuffs */
 	cl_uint				dest_usage_saved;
 	cl_uint				dest_consumed;
 	cl_int				device;
-	cl_int				smx_clock;
-	cl_int				smx_count;
 	cl_int				depth;
 	cl_int				nsplits;
 	cl_int				victim;
-	cl_ulong			tv1, tv2;
+	cl_ulong			tv_start;
 	cudaError_t			status = cudaSuccess;
 
 	/* Init kernel context */
@@ -1447,24 +1443,6 @@ gpujoin_main(kern_gpujoin *kgjoin,		/* in/out: misc stuffs */
 
 	/* Get device clock for performance monitor */
 	status = cudaGetDevice(&device);
-	if (status != cudaSuccess)
-	{
-		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
-		goto out;
-	}
-
-	status = cudaDeviceGetAttribute(&smx_clock,
-									cudaDevAttrClockRate,
-									device);
-	if (status != cudaSuccess)
-	{
-		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
-		goto out;
-	}
-
-	status = cudaDeviceGetAttribute(&smx_count,
-									cudaDevAttrMultiProcessorCount,
-									device);
 	if (status != cudaSuccess)
 	{
 		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
@@ -1508,7 +1486,8 @@ retry_major:
 				 *                        kern_data_store *kds,
 				 *                        kern_resultbuf *kresults)
 				 */
-				tv1 = clock64();
+				tv_start = GlobalTimer();
+
 				kern_args = (void **)
 					cudaGetParameterBuffer(sizeof(void *),
 										   sizeof(void *) * 3);
@@ -1549,8 +1528,8 @@ retry_major:
 					STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
 					goto out;
 				}
-				tv2 = clock64();
-				TIMEVAL_RECORD(kgjoin,kern_outer_scan,tv1,tv2,smx_clock);
+				TIMEVAL_RECORD(kgjoin,kern_outer_scan,tv_start);
+
 				if (kresults_src->kerror.errcode != StromError_Success)
 				{
 					kcxt.e = kresults_src->kerror;
@@ -1601,7 +1580,7 @@ retry_major:
 		{
 			if (kresults_src->nitems > 0)
 			{
-				tv1 = clock64();
+				tv_start = GlobalTimer();
 				kern_join_args = (kern_join_args_t *)
 					cudaGetParameterBuffer(sizeof(void *),
 										   sizeof(kern_join_args_t));
@@ -1640,10 +1619,9 @@ retry_major:
 					STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
 					goto out;
 				}
-				tv2 = clock64();
-				TIMEVAL_RECORD(kgjoin,kern_exec_nestloop,tv1,tv2,smx_clock);
+				TIMEVAL_RECORD(kgjoin,kern_exec_nestloop,tv_start);
 
-				if (kresults_dst->kerror.errcode == StromError_DataStoreNoSpace)
+				if (kresults_dst->kerror.errcode==StromError_DataStoreNoSpace)
 				{
 					nsplits = kresults_dst->nitems / kresults_dst->nrooms + 1;
 					victim = gpujoin_resize_window(&kcxt,
@@ -1654,17 +1632,15 @@ retry_major:
 												   kresults_dst,
 												   nsplits,
 												   dest_consumed,
-												   kresults_dst->kerror,
-												   smx_count,
-												   smx_clock);
+												   kresults_dst->kerror);
 					if (victim < 0)
 						goto out;
 					else if (victim < depth)
 					{
-						kgjoin->num_major_retry++;
+						kgjoin->pfm.num_major_retry++;
 						goto retry_major;
 					}
-					kgjoin->num_minor_retry++;
+					kgjoin->pfm.num_minor_retry++;
 					goto retry_minor;
 				}
 				else if (kresults_dst->kerror.errcode != StromError_Success)
@@ -1701,7 +1677,7 @@ retry_major:
 			 */
 			if (exec_right_outer)
 			{
-				tv1 = clock64();
+				tv_start = GlobalTimer();
 				kern_join_args = (kern_join_args_t *)
 					cudaGetParameterBuffer(sizeof(void *),
 										   sizeof(kern_join_args_t));
@@ -1741,10 +1717,9 @@ retry_major:
 					STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
 					goto out;
 				}
-				tv2 = clock64();
-				TIMEVAL_RECORD(kgjoin,kern_outer_nestloop,tv1,tv2,smx_clock);
+				TIMEVAL_RECORD(kgjoin,kern_outer_nestloop,tv_start);
 
-				if (kresults_dst->kerror.errcode == StromError_DataStoreNoSpace)
+				if (kresults_dst->kerror.errcode==StromError_DataStoreNoSpace)
 				{
 					nsplits = kresults_dst->nitems / kresults_dst->nrooms + 1;
 					victim = gpujoin_resize_window(&kcxt,
@@ -1755,17 +1730,15 @@ retry_major:
 												   kresults_dst,
 												   nsplits,
 												   dest_consumed,
-												   kresults_dst->kerror,
-												   smx_count,
-												   smx_clock);
+												   kresults_dst->kerror);
 					if (victim < 0)
 						goto out;
 					else if (victim < depth)
 					{
-						kgjoin->num_major_retry++;
+						kgjoin->pfm.num_major_retry++;
 						goto retry_major;
 					}
-					kgjoin->num_minor_retry++;
+					kgjoin->pfm.num_minor_retry++;
 					goto retry_minor;
 				}
 				else if (kresults_dst->kerror.errcode != StromError_Success)
@@ -1794,7 +1767,7 @@ retry_major:
 			 */
 			if (kresults_src->nitems > 0)
 			{
-				tv1 = clock64();
+				tv_start = GlobalTimer();
 				kern_join_args = (kern_join_args_t *)
 					cudaGetParameterBuffer(sizeof(void *),
 										   sizeof(kern_join_args_t));
@@ -1834,10 +1807,9 @@ retry_major:
 					STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
 					goto out;
 				}
-				tv2 = clock64();
-				TIMEVAL_RECORD(kgjoin,kern_exec_hashjoin,tv1,tv2,smx_clock);
+				TIMEVAL_RECORD(kgjoin,kern_exec_hashjoin,tv_start);
 
-				if (kresults_dst->kerror.errcode == StromError_DataStoreNoSpace)
+				if (kresults_dst->kerror.errcode==StromError_DataStoreNoSpace)
 				{
 					nsplits = kresults_dst->nitems / kresults_dst->nrooms + 1;
 					victim = gpujoin_resize_window(&kcxt,
@@ -1848,17 +1820,15 @@ retry_major:
 												   kresults_dst,
 												   nsplits,
 												   dest_consumed,
-												   kresults_dst->kerror,
-												   smx_count,
-												   smx_clock);
+												   kresults_dst->kerror);
 					if (victim < 0)
 						goto out;
 					else if (victim < depth)
 					{
-						kgjoin->num_major_retry++;
+						kgjoin->pfm.num_major_retry++;
 						goto retry_major;
 					}
-					kgjoin->num_minor_retry++;
+					kgjoin->pfm.num_minor_retry++;
 					goto retry_minor;
 				}
 				else if (kresults_dst->kerror.errcode != StromError_Success)
@@ -1888,7 +1858,7 @@ retry_major:
 			 */
 			if (exec_right_outer)
 			{
-				tv1 = clock64();
+				tv_start = GlobalTimer();
 				kern_join_args = (kern_join_args_t *)
 					cudaGetParameterBuffer(sizeof(void *),
 										   sizeof(kern_join_args_t));
@@ -1928,10 +1898,9 @@ retry_major:
 					STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
 					goto out;
 				}
-				tv2 = clock64();
-				TIMEVAL_RECORD(kgjoin,kern_outer_hashjoin,tv1,tv2,smx_clock);
+				TIMEVAL_RECORD(kgjoin,kern_outer_hashjoin,tv_start);
 
-				if (kresults_dst->kerror.errcode == StromError_DataStoreNoSpace)
+				if (kresults_dst->kerror.errcode==StromError_DataStoreNoSpace)
 				{
 					nsplits = kresults_dst->nitems / kresults_dst->nrooms + 1;
 					victim = gpujoin_resize_window(&kcxt,
@@ -1942,17 +1911,15 @@ retry_major:
 												   kresults_dst,
 												   nsplits,
 												   dest_consumed,
-												   kresults_dst->kerror,
-												   smx_count,
-												   smx_clock);
+												   kresults_dst->kerror);
 					if (victim < 0)
 						goto out;
 					else if (victim < depth)
 					{
-						kgjoin->num_major_retry++;
+						kgjoin->pfm.num_major_retry++;
 						goto retry_major;
 					}
-					kgjoin->num_minor_retry++;
+					kgjoin->pfm.num_minor_retry++;
 					goto retry_minor;
 				}
 				else if (kresults_dst->kerror.errcode != StromError_Success)
@@ -1998,7 +1965,7 @@ retry_major:
 		 *                               kern_data_store *kds_dst,
 		 *                               kern_resultbuf *kresults)
 		 */
-		tv1 = clock64();
+		tv_start = GlobalTimer();
 		if (kds_dst->format == KDS_FORMAT_ROW)
 			kernel_projection = (const void *)gpujoin_projection_row;
 		else
@@ -2010,7 +1977,8 @@ retry_major:
 		if (kds_dst->nitems + kresults_src->nitems >= kds_dst->nrooms)
 		{
 			/* for temporary usage of error buffer */
-			STROM_SET_ERROR(&kresults_src->kerror, StromError_DataStoreNoSpace);
+			STROM_SET_ERROR(&kresults_src->kerror,
+							StromError_DataStoreNoSpace);
 
 			nsplits = kresults_src->nitems /
 				(kds_dst->nrooms - kds_dst->nitems) + 1;
@@ -2022,12 +1990,10 @@ retry_major:
 									  kresults_src,
 									  nsplits,
 									  dest_consumed,
-									  kresults_src->kerror,
-									  smx_count,
-									  smx_clock) < 0)
+									  kresults_src->kerror) < 0)
 				goto out;
 
-			kgjoin->num_major_retry++;
+			kgjoin->pfm.num_major_retry++;
 			goto retry_major;
 		}
 
@@ -2071,8 +2037,7 @@ retry_major:
 			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
 			goto out;
 		}
-		tv2 = clock64();
-		TIMEVAL_RECORD(kgjoin,kern_projection,tv1,tv2,smx_clock);
+		TIMEVAL_RECORD(kgjoin,kern_projection,tv_start);
 
 		if (kresults_src->kerror.errcode == StromError_DataStoreNoSpace)
 		{
@@ -2112,13 +2077,11 @@ retry_major:
 										   kresults_src,
 										   nsplits,
 										   dest_consumed,
-										   kresults_src->kerror,
-										   smx_count,
-										   smx_clock);
+										   kresults_src->kerror);
 			if (victim < 0)
 				goto out;
 
-			kgjoin->num_major_retry++;
+			kgjoin->pfm.num_major_retry++;
 			goto retry_major;
 		}
 		else if (kresults_src->kerror.errcode != StromError_Success)
