@@ -161,6 +161,7 @@ typedef struct
 	cl_uint				max_chunks;
 	cl_uint				nitems_total;
 	cl_bool				has_terminator;
+	cl_bool				cpu_fallback;
 	pgstrom_data_store *pds_slot;
 	kern_resultbuf		kresults;
 } gpusort_segment;
@@ -1568,15 +1569,16 @@ skip:
 		return true;
 
 	/*
-	 * StromError_CpuReCheck of kresults implies gpusort_keycomp could
-	 * not compare key variables on GPU side. So, segment needs to be
-	 * processed by CPU fallback routine, to construct kern_resultbuf.
+	 * StromError_CpuReCheck informs gpusort_keycomp could not compare
+	 * the key variables on GPU side. So, segment needs to be processed
+	 * by CPU fallback routine, to construct kern_resultbuf.
 	 */
-	if (segment->kresults.kerror.errcode == StromError_CpuReCheck)
+	if (segment->cpu_fallback)
 	{
 		int		i;
 
 		Assert(pgsort->is_terminator);
+		Assert(pgstrom_cpu_fallback_enabled);
 		memset(&segment->kresults.kerror, 0, sizeof(kern_errorbuf));
 		for (i=0; i < segment->kresults.nitems; i++)
 			segment->kresults.results[i] = i;
@@ -1585,6 +1587,7 @@ skip:
 								   &segment->kresults,
 								   segment->pds_slot->kds,
 								   0, segment->kresults.nitems - 1);
+		segment->cpu_fallback = false;
 	}
 
 	/*
@@ -1719,9 +1722,14 @@ gpusort_task_respond(CUstream stream, CUresult status, void *private)
 			pgsort->kern.kerror.errcode == StromError_DataStoreNoSpace)
 		{
 			if (!pgsort->is_terminator ||
-				segment->kresults.kerror.errcode == StromError_Success ||
-				segment->kresults.kerror.errcode == StromError_CpuReCheck)
+				segment->kresults.kerror.errcode == StromError_Success)
 				memset(&pgsort->task.kerror, 0, sizeof(kern_errorbuf));
+			else if (pgstrom_cpu_fallback_enabled &&
+					 segment->kresults.kerror.errcode == StromError_CpuReCheck)
+			{
+				memset(&pgsort->task.kerror, 0, sizeof(kern_errorbuf));
+				segment->cpu_fallback = true;
+			}
 			else
 				pgsort->task.kerror = segment->kresults.kerror;
 		}

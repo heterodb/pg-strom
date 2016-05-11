@@ -5493,7 +5493,8 @@ gpujoin_task_respond(CUstream stream, CUresult status, void *private)
 		pgjoin->task.kerror = pgjoin->kern.kerror;
 
 		/* Takes CPU fallback instead of the CpuReCheck error */
-		if (pgjoin->task.kerror.errcode == StromError_CpuReCheck)
+		if (pgstrom_cpu_fallback_enabled &&
+			pgjoin->task.kerror.errcode == StromError_CpuReCheck)
 		{
 			pgjoin->task.kerror.errcode = StromError_Success;
 			pgjoin->task.cpu_fallback = true;

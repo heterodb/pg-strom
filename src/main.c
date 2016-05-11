@@ -49,6 +49,7 @@ bool		pgstrom_enabled;
 bool		pgstrom_perfmon_enabled;
 static bool	pgstrom_debug_kernel_source;
 bool		pgstrom_bulkexec_enabled;
+bool		pgstrom_cpu_fallback_enabled;
 int			pgstrom_max_async_tasks;
 double		pgstrom_num_threads_margin;
 double		pgstrom_chunk_size_margin;
@@ -85,6 +86,15 @@ pgstrom_init_misc_guc(void)
 							 "Enables the bulk-execution mode of PG-Strom",
 							 NULL,
 							 &pgstrom_bulkexec_enabled,
+							 true,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	/* turn on/off CPU fallback if GPU could not execute the query */
+	DefineCustomBoolVariable("pg_strom.cpu_fallback",
+							 "Enables CPU fallback if GPU is ",
+							 NULL,
+							 &pgstrom_cpu_fallback_enabled,
 							 true,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,

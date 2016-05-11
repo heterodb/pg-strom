@@ -596,6 +596,7 @@ extern void pgstrom_init_gpusort(void);
 extern bool		pgstrom_enabled;
 extern bool		pgstrom_perfmon_enabled;
 extern bool		pgstrom_bulkexec_enabled;
+extern bool		pgstrom_cpu_fallback_enabled;
 extern int		pgstrom_max_async_tasks;
 extern double	pgstrom_gpu_setup_cost;
 extern double	pgstrom_gpu_dma_cost;

@@ -4561,17 +4561,11 @@ skip:
 	 */
 	if (segment->needs_fallback)
 	{
-		/*  */
-		if (gpreagg->task.kerror.errcode == StromError_CpuReCheck ||
-			gpreagg->task.kerror.errcode == StromError_DataStoreNoSpace)
-		{
-			elog(NOTICE, "%s, GpuPreAgg task is processed by CPU fallback (x=%016lx, y=%016lx z=%016lx)",
-				 errorTextKernel(&gpreagg->task.kerror),
-				 KERROR_EXTRA_X(&gpreagg->task.kerror),
-				 KERROR_EXTRA_Y(&gpreagg->task.kerror),
-				 KERROR_EXTRA_Z(&gpreagg->task.kerror));
-			gpreagg->task.kerror.errcode = StromError_Success;
-		}
+		if (pgstrom_cpu_fallback_enabled &&
+			(gpreagg->task.kerror.errcode == StromError_CpuReCheck ||
+			 gpreagg->task.kerror.errcode == StromError_DataStoreNoSpace))
+			memset(&gpreagg->task.kerror, 0, sizeof(kern_errorbuf));
+
 		/*
 		 * Someone has to be segment terminator even if it is not assigned
 		 * yet. Once needs_fallback is set, no task shall be added any more.
@@ -4603,7 +4597,8 @@ skip:
 	 * Elsewhere, task shall be no longer referenced thus we can release
 	 * relevant buffer immediately as if nothing were returned.
 	 */
-	if (!gpreagg->is_terminator)
+	if (!gpreagg->is_terminator &&
+		gpreagg->task.kerror.errcode == StromError_Success)
 	{
 		/* detach from the task tracking list */
 		SpinLockAcquire(&gpas->gts.lock);

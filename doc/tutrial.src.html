@@ -2167,6 +2167,33 @@ PG-Strom全機能のOn/Offを切替えます。
 <p>
 </dd>
 
+<dt><span>pg_strom.cpu_fallback</span></dt>
+<dd>
+<p>
+<span lang="en">
+It enables or disables CPU fallback feature.
+PG-Strom may give up execution of the GPU code depending on the supplied data; too large, externally toasted, ... for example. If CPU fallback is enabled, PG-Strom run the equivalent stuff by CPU, but sequentially.
+CPU fallback ensures the query's executability, but it may also lead unexpected performance degradation. It is a trade-off stuff.
+</span>
+<span lang="ja">
+CPUフォールバック機能のOn/Offを切替えます。
+（例えば、巨大すぎる、外部TOAST表に格納されているなど、）入力データ次第でPG-StromはGPUコードの実行を断念する事があります。
+CPUフォールバックが有効であれば、PG-Stromは同等の処理をCPU上で実行します。しかし、これへ並列実行ではありません。
+CPUフォールバックはクエリを確実に実行可能にしますが、一方で、予測できない性能の低下を招く可能性があり、これはトレードオフです。
+</span>
+<span lang="en">
+NOTE: GPU code may require CPU fallback to raise an appropriate error, like division-by-zero. Please pay attention that disabling CPU fallback may hide actual reason of the error.
+</span>
+<span lang="ja">
+注意：例えばゼロ除算など、CPU側に適切なエラーを発生させる事を目的として、GPU側がCPUフォールバックを要求する事があります。CPUフォールバックを無効化する事で、真のエラー原因が出力されなくなる可能性についても留意してください。
+</span>
+</p>
+<p>
+<span lang="en">Default: On</span>
+<span lang="ja">デフォルト: On</span>
+<p>
+</dd>
+
 <dt><span>pg_strom.perfmon</span></dt>
 <dd>
 <p>

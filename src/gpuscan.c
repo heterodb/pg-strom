@@ -2301,8 +2301,9 @@ pgstrom_respond_gpuscan(CUstream stream, CUresult status, void *private)
 	if (status == CUDA_SUCCESS)
 	{
 		gpuscan->task.kerror = gpuscan->kern.kerror;
-		if (gpuscan->task.kerror.errcode == StromError_CpuReCheck ||
-			gpuscan->task.kerror.errcode == StromError_DataStoreNoSpace)
+		if (pgstrom_cpu_fallback_enabled &&
+			(gpuscan->task.kerror.errcode == StromError_CpuReCheck ||
+			 gpuscan->task.kerror.errcode == StromError_DataStoreNoSpace))
 		{
 			/* clear the error instead of the CPU fallback */
 			gpuscan->task.kerror.errcode = StromError_Success;
