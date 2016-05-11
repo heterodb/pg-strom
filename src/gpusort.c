@@ -172,7 +172,6 @@ typedef struct
 	pgstrom_data_store *pds_in;			/* source of data chunk */
 	gpusort_segment	   *segment;		/* sorting segment */
 	cl_bool				is_terminator;	/* true, if terminator proces */
-//	cl_bool				is_final_chunk;	/* true, if final chunk */
 	cl_uint				seg_ev_index;	/* index to ev_kern_proj */
 	CUfunction			kern_proj;		/* gpusort_projection */
 	CUfunction			kern_main;		/* gpusort_main */
@@ -1035,6 +1034,8 @@ gpusort_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 			ExplainPropertyText("Sort Method", sort_method, es);
 			ExplainPropertyLong("Sort Space Used", total_consumption, es);
 		}
+		/* number of segments */
+		ExplainPropertyInteger("Number of segments", gss->num_segments, es);
 	}
 	pgstrom_explain_gputaskstate(&gss->gts, es);
 }
@@ -2005,8 +2006,7 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *pgsort)
 							NULL);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
-		elog(DEBUG2, "gpusort_main grid_size=%zu block_size=%zu nitems=%u",
-			 grid_size, block_size, segment->nitems_total);
+		elog(DEBUG2, "gpusort_main grid {1,1,1} block{1,1,1}");
 		pfm->gsort.num_kern_main++;
 	}
 
