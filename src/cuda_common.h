@@ -153,6 +153,7 @@ extern __shared__ cl_ulong __pgstrom_dynamic_shared_workmem[];
 #define get_global_id()			(threadIdx.x + blockIdx.x * blockDim.x)
 #define get_global_size()		(blockDim.x * gridDim.x)
 #define get_global_base()		(blockIdx.x * blockDim.x)
+#define get_global_index()		(blockIdx.x)
 
 #else	/* __CUDACC__ */
 #include "access/htup_details.h"

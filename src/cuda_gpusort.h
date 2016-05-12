@@ -304,37 +304,40 @@ gpusort_bitonic_local(kern_gpusort *kgpusort,
 	kern_parambuf  *kparams = KERN_GPUSORT_PARAMBUF(kgpusort);
 	kern_context	kcxt;
 	cl_uint		   *localIdx = SHARED_WORKMEM(cl_uint);
+	cl_uint			localLimit;
 	cl_uint			nitems = kresults->nitems;
-	size_t			part_id = get_global_id() / get_local_size();
-	size_t			part_size = 2 * get_local_size();	/* Partition Size */
-	size_t			part_base = part_id * part_size;	/* Base of partition */
-	size_t			blockSize;
-	size_t			unitSize;
-	size_t			i;
+	cl_uint			part_size = 2 * get_local_size();
+	cl_uint			part_base = get_global_index() * part_size;
+	cl_uint			blockSize;
+	cl_uint			unitSize;
+	cl_uint			i;
 
 	INIT_KERNEL_CONTEXT(&kcxt, gpusort_bitonic_local, kparams);
 
 	/* Load index to localIdx[] */
-	if (part_base + part_size > nitems)
-		part_size = nitems - part_base;
-	for (i = get_local_id(); i < part_size; i += get_local_size())
+	localLimit = (part_base + part_size <= nitems
+				  ? part_size
+				  : nitems - part_base);
+	for (i = get_local_id(); i < localLimit; i += get_local_size())
 		localIdx[i] = kresults->results[part_base + i];
 	__syncthreads();
 
-	for (blockSize = 2; blockSize <= 2 * get_local_size(); blockSize *= 2)
+	for (blockSize = 2; blockSize <= part_size; blockSize *= 2)
 	{
 		for (unitSize = blockSize; unitSize >= 2; unitSize /= 2)
         {
-			size_t	unitMask		= unitSize - 1;
-			size_t	halfUnitSize	= unitSize / 2;
-			bool	reversing  = (unitSize == blockSize ? true : false);
-			size_t	idx0 = ((get_local_id() / halfUnitSize) * unitSize
-							+ get_local_id() % halfUnitSize);
-            size_t	idx1 = ((reversing == true)
-							? ((idx0 & ~unitMask) | (~idx0 & unitMask))
-							: (halfUnitSize + idx0));
+			cl_uint		unitMask		= (unitSize - 1);
+			cl_uint		halfUnitSize	= (unitSize >> 1);
+			cl_uint		halfUnitMask	= (halfUnitSize - 1);
+			cl_bool		reversing		= (unitSize == blockSize);
+			cl_uint		idx0, idx1;
 
-            if(idx1 < part_size)
+			idx0 = (((get_local_id() & ~halfUnitMask) << 1) +
+					(get_local_id() & halfUnitMask));
+         	idx1 = ((reversing == true)
+					? ((idx0 & ~unitMask) | (~idx0 & unitMask))
+					: (halfUnitSize + idx0));
+            if(idx1 < localLimit)
 			{
 				cl_uint		pos0 = localIdx[idx0];
 				cl_uint		pos1 = localIdx[idx1];
