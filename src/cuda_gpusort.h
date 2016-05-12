@@ -419,37 +419,39 @@ gpusort_bitonic_merge(kern_gpusort *kgpusort,
 	kern_parambuf  *kparams = KERN_GPUSORT_PARAMBUF(kgpusort);
 	kern_context	kcxt;
 	cl_int		   *localIdx = SHARED_WORKMEM(cl_int);
+	cl_uint			localLimit;
 	cl_uint			nitems = kresults->nitems;
-	size_t			part_id = get_global_id() / get_local_size();
-	size_t			part_size = 2 * get_local_size();	/* partition Size */
-	size_t			part_base = part_id * part_size;	/* partition Base */
-	size_t			blockSize = part_size;
-	size_t			unitSize = part_size;
-	size_t			i;
+	cl_uint			part_size = 2 * get_local_size();
+	cl_uint			part_base = get_global_index() * part_size;
+	cl_uint			blockSize = part_size;
+	cl_uint			unitSize;
+	cl_uint			i;
 
 	INIT_KERNEL_CONTEXT(&kcxt, gpusort_bitonic_merge, kparams);
 
 	/* Load index to localIdx[] */
-	if (part_base + part_size > nitems)
-		part_size = nitems - part_base;
-	for (i = get_local_id(); i < part_size; i += get_local_size())
+	localLimit = (part_base + part_size <= nitems
+				  ? part_size
+				  : nitems - part_base);
+	for (i = get_local_id(); i < localLimit; i += get_local_size())
 		localIdx[i] = kresults->results[part_base + i];
 	__syncthreads();
 
 	/* merge two sorted blocks */
-	for (unitSize = blockSize; unitSize >= 2; unitSize /= 2)
+	for (unitSize = blockSize; unitSize >= 2; unitSize >>= 1)
 	{
-		size_t	halfUnitSize = unitSize / 2;
-		size_t	idx0, idx1;
+		cl_uint		halfUnitSize = (unitSize >> 1);
+		cl_uint		halfUnitMask = (halfUnitSize - 1);
+		cl_uint		idx0, idx1;
 
-		idx0 = (get_local_id() / halfUnitSize * unitSize
-				+ get_local_id() % halfUnitSize);
+		idx0 = (((get_local_id() & ~halfUnitMask) << 1)
+				+ (get_local_id() & halfUnitMask));
 		idx1 = halfUnitSize + idx0;
 
-        if (idx1 < part_size)
+        if (idx1 < localLimit)
 		{
-			size_t	pos0 = localIdx[idx0];
-			size_t	pos1 = localIdx[idx1];
+			cl_uint		pos0 = localIdx[idx0];
+			cl_uint		pos1 = localIdx[idx1];
 
 			if (gpusort_keycomp(&kcxt, kds_slot, pos0, pos1) > 0)
 			{
