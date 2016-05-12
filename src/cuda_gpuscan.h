@@ -358,6 +358,7 @@ gpuscan_projection_slot(kern_gpuscan *kgpuscan,
 							  kds_src,
 							  tupitem,
 							  kds_dst->ncols,
+							  true,
 							  tup_values,
 							  tup_isnull);
 	}
