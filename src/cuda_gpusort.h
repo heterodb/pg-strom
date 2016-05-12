@@ -294,7 +294,7 @@ out:
  * gpusort_bitonic_local
  *
  * It tries to apply each steps of bitonic-sorting until its unitsize
- * reaches the workgroup-size (that is expected to power of 2).
+ * reaches the 2 * workgroup-size (that is expected to power of 2).
  */
 KERNEL_FUNCTION_MAXTHREADS(void)
 gpusort_bitonic_local(kern_gpusort *kgpusort,
@@ -321,8 +321,7 @@ gpusort_bitonic_local(kern_gpusort *kgpusort,
 		localIdx[i] = kresults->results[part_base + i];
 	__syncthreads();
 
-	/* bitonic sorting */
-	for (blockSize = 2; blockSize <= part_size; blockSize *= 2)
+	for (blockSize = 2; blockSize <= 2 * get_local_size(); blockSize *= 2)
 	{
 		for (unitSize = blockSize; unitSize >= 2; unitSize /= 2)
         {
@@ -430,7 +429,7 @@ gpusort_bitonic_merge(kern_gpusort *kgpusort,
 	/* Load index to localIdx[] */
 	if (part_base + part_size > nitems)
 		part_size = nitems - part_base;
-	for (i = get_local_id(); i < part_size && i < 2048; i += get_local_size())
+	for (i = get_local_id(); i < part_size; i += get_local_size())
 		localIdx[i] = kresults->results[part_base + i];
 	__syncthreads();
 
@@ -558,6 +557,8 @@ gpusort_main(kern_gpusort *kgpusort,
 	nhalf = 1UL << (get_next_log2(nitems + 1) - 1);
 
 	/*
+	 * makea a sorting block up to (2 * __block_sz)
+	 *
 	 * KERNEL_FUNCTION_MAXTHREADS(void)
 	 * gpusort_bitonic_local(kern_gpusort *kgpusort,
 	 *                       kern_resultbuf *kresults,
@@ -597,7 +598,7 @@ gpusort_main(kern_gpusort *kgpusort,
 	}
 	TIMEVAL_RECORD(kgpusort,kern_lsort,tv_start);
 
-	/* Inter blocks bitonic sorting */
+	/* inter blocks bitonic sorting */
 	for (i = block_sz.x; i < nhalf; i *= 2)
 	{
 		for (j = 2 * i; j > block_sz.x; j /= 2)
@@ -633,6 +634,7 @@ gpusort_main(kern_gpusort *kgpusort,
 			grid_sz.x = (work_size + block_sz.x - 1) / block_sz.x;
 			grid_sz.y = 1;
 			grid_sz.z = 1;
+
 			status = cudaLaunchDevice((void *)gpusort_bitonic_step,
 									  kern_args, grid_sz, block_sz,
 									  2 * sizeof(cl_uint) * block_sz.x,
@@ -651,6 +653,7 @@ gpusort_main(kern_gpusort *kgpusort,
 			}
 			TIMEVAL_RECORD(kgpusort,kern_ssort,tv_start);
 		}
+
 		/*
 		 * KERNEL_FUNCTION_MAXTHREADS(void)
 		 * gpusort_bitonic_merge(kern_gpusort *kgpusort,
@@ -673,6 +676,7 @@ gpusort_main(kern_gpusort *kgpusort,
 		grid_sz.x = ((nitems + 1) / 2 + block_sz.x - 1) / block_sz.x;
 		grid_sz.y = 1;
 		grid_sz.z = 1;
+
 		status = cudaLaunchDevice((void *)gpusort_bitonic_merge,
 								  kern_args, grid_sz, block_sz,
 								  2 * sizeof(cl_uint) * block_sz.x,
