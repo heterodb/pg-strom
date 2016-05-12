@@ -2194,7 +2194,7 @@ pgstrom_init_gpusort(void)
 							 "Enables the use of GPU accelerated sorting",
 							 NULL,
 							 &enable_gpusort,
-							 true,
+							 false,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
