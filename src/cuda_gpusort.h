@@ -702,56 +702,60 @@ gpusort_main(kern_gpusort *kgpusort,
 	}
 
 	/*
-	 * OK, kresults shall hold a sorted indexes at this timing.
-	 * For receive DMA, we will make an array of record-id.
-	 *
-	 * KERNEL_FUNCTION(void)
-	 * gpusort_fixup_pointers(kern_gpusort *kgpusort,
-	 *                        kern_resultbuf *kresults,
-	 *                        kern_data_store *kds_slot)
+	 * If kds_slot contains any attribute of pointer reference, we have to
+	 * fix up device pointer to host pointer, prior to receive DMA.
 	 */
-	tv_start = GlobalTimer();
-	kern_args = (void **)
-		cudaGetParameterBuffer(sizeof(void *),
-							   sizeof(void *) * 3);
-	if (!kern_args)
+	if (kds_slot->has_notbyval)
 	{
-		STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelArgs);
-		goto out;
-	}
-	kern_args[0] = kgpusort;
-	kern_args[1] = kresults;
-	kern_args[2] = kds_slot;
+		/*
+		 * KERNEL_FUNCTION(void)
+		 * gpusort_fixup_pointers(kern_gpusort *kgpusort,
+		 *                        kern_resultbuf *kresults,
+		 *                        kern_data_store *kds_slot)
+		 */
+		tv_start = GlobalTimer();
+		kern_args = (void **)
+			cudaGetParameterBuffer(sizeof(void *),
+								   sizeof(void *) * 3);
+		if (!kern_args)
+		{
+			STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelArgs);
+			goto out;
+		}
+		kern_args[0] = kgpusort;
+		kern_args[1] = kresults;
+		kern_args[2] = kds_slot;
 
-	status = pgstrom_optimal_workgroup_size(&grid_sz,
-											&block_sz,
-											(const void *)
-											gpusort_fixup_pointers,
-											kresults->nitems,
-											sizeof(cl_uint));
-	if (status != cudaSuccess)
-	{
-		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
-		goto out;
-	}
+		status = pgstrom_optimal_workgroup_size(&grid_sz,
+												&block_sz,
+												(const void *)
+												gpusort_fixup_pointers,
+												kresults->nitems,
+												sizeof(cl_uint));
+		if (status != cudaSuccess)
+		{
+			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+			goto out;
+		}
 
-	status = cudaLaunchDevice((void *)gpusort_fixup_pointers,
-							  kern_args, grid_sz, block_sz,
-							  sizeof(cl_uint) * block_sz.x,
-							  NULL);
-	if (status != cudaSuccess)
-	{
-		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
-		goto out;
-	}
+		status = cudaLaunchDevice((void *)gpusort_fixup_pointers,
+								  kern_args, grid_sz, block_sz,
+								  sizeof(cl_uint) * block_sz.x,
+								  NULL);
+		if (status != cudaSuccess)
+		{
+			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+			goto out;
+		}
 
-	status = cudaDeviceSynchronize();
-	if (status != cudaSuccess)
-	{
-		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
-		goto out;
+		status = cudaDeviceSynchronize();
+		if (status != cudaSuccess)
+		{
+			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+			goto out;
+		}
+		TIMEVAL_RECORD(kgpusort,kern_fixvar,tv_start);
 	}
-	TIMEVAL_RECORD(kgpusort,kern_fixvar,tv_start);
 out:
 	kern_writeback_error_status(&kresults->kerror, kcxt.e);
 }
