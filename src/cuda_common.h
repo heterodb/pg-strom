@@ -383,7 +383,7 @@ kern_writeback_error_status(kern_errorbuf *result, kern_errorbuf own_error)
 STATIC_INLINE(cl_uint) NumSmx(void)
 {
 	cl_uint		ret;
-	asm("mov.u32 %0, %nsmid;" : "=r"(ret) );
+	asm volatile("mov.u32 %0, %nsmid;" : "=r"(ret) );
 	return ret;
 }
 
@@ -393,7 +393,7 @@ STATIC_INLINE(cl_uint) NumSmx(void)
 STATIC_INLINE(cl_uint) SmxId(void)
 {
 	cl_uint		ret;
-	asm("mov.u32 %0, %smid;" : "=r"(ret) );
+	asm volatile("mov.u32 %0, %smid;" : "=r"(ret) );
 	return ret;
 }
 
@@ -403,7 +403,7 @@ STATIC_INLINE(cl_uint) SmxId(void)
 STATIC_INLINE(cl_uint) WarpId(void)
 {
 	cl_uint		ret;
-	asm("mov.u32 %0, %warpid;" : "=r"(ret) );
+	asm volatile("mov.u32 %0, %warpid;" : "=r"(ret) );
 	return ret;
 }
 
@@ -416,7 +416,7 @@ STATIC_INLINE(cl_uint) WarpId(void)
 STATIC_INLINE(cl_ulong) GlobalTimer(void)
 {
 	cl_ulong	ret;
-	asm("mov.u64 %0, %globaltimer;" : "=l"(ret) );
+	asm volatile("mov.u64 %0, %globaltimer;" : "=l"(ret) );
 	return ret;
 }
 

@@ -33,22 +33,13 @@
 /*
  * Macro to track timeval and increment usage.
  */
-#if 0
-#define TIMEVAL_RECORD(ktask,field,tv1,tv2,smx_clock)				\
+#define TIMEVAL_RECORD(ktask,field,tv_start)						\
 	do {															\
-		(ktask)->num_##field++;										\
-		(ktask)->tv_##field += (((cl_float)(((tv2) - (tv1)))) /		\
-								((cl_float)(smx_clock)));			\
+		(ktask)->pfm.num_##field++;									\
+		(ktask)->pfm.tv_##field +=									\
+			((cl_float)(GlobalTimer() - (tv_start)) / 1000000.0);	\
 	} while(0)
-#endif
-#endif
-
-#define TIMEVAL_RECORD(ktask,field,tv_start)					\
-	do {														\
-		(ktask)->pfm.num_##field++;								\
-		(ktask)->pfm.tv_##field +=								\
-			((cl_float)(GlobalTimer() -	(tv_start)) / 1000000);	\
-	} while(0)
+#endif	/* __CUDACC__ */
 
 /*
  * __pgstrom_optimal_workgroup_size
