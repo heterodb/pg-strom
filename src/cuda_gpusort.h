@@ -378,30 +378,30 @@ gpusort_bitonic_step(kern_gpusort *kgpusort,
 	kern_parambuf  *kparams = KERN_GPUSORT_PARAMBUF(kgpusort);
 	kern_context	kcxt;
 	cl_uint			nitems = kresults->nitems;
-	size_t			halfUnitSize = unitsz / 2;
-	size_t			unitMask = unitsz - 1;
-	cl_int			idx0, idx1;
-	cl_int			pos0, pos1;
+	cl_uint			halfUnitSize = unitsz >> 1;
+	cl_uint			halfUnitMask = halfUnitSize - 1;
+	cl_uint			unitMask = unitsz - 1;
+	cl_uint			idx0, idx1;
+	cl_uint			pos0, pos1;
 
 	INIT_KERNEL_CONTEXT(&kcxt, gpusort_bitonic_step, kparams);
 
-	idx0 = ((get_global_id() / halfUnitSize) * unitsz
-			+ get_global_id() % halfUnitSize);
+	idx0 = (((get_global_id() & ~halfUnitMask) << 1)
+			+ (get_global_id() & halfUnitMask));
 	idx1 = (reversing
 			? ((idx0 & ~unitMask) | (~idx0 & unitMask))
 			: (idx0 + halfUnitSize));
-	if (idx1 >= nitems)
-		goto out;
-
-	pos0 = kresults->results[idx0];
-	pos1 = kresults->results[idx1];
-	if (gpusort_keycomp(&kcxt, kds_slot, pos0, pos1) > 0)
+	if (idx1 < nitems)
 	{
-		/* swap them */
-		kresults->results[idx0] = pos1;
-		kresults->results[idx1] = pos0;
+		pos0 = kresults->results[idx0];
+		pos1 = kresults->results[idx1];
+		if (gpusort_keycomp(&kcxt, kds_slot, pos0, pos1) > 0)
+		{
+			/* swap them */
+			kresults->results[idx0] = pos1;
+			kresults->results[idx1] = pos0;
+		}
 	}
-out:
 	kern_writeback_error_status(&kresults->kerror, kcxt.e);
 }
 
