@@ -20,17 +20,18 @@ input[id="lang-en"]:checked ~ * *:lang(ja) {
     height:100%;
     margin:0;
     padding:0;
-    position:fixed;
+    position:fixed !important;
     _position:absolute;
     top:0;
     width:180px;
+    overflow:auto;
 }
 #manual_body {
     margin:0 0 0 180px;
     padding-left: 2em;
     padding-right: 2em;
     height:100%;
-    _overflow:auto;
+    overflow:auto;
 }
 
 div.manual_title {
