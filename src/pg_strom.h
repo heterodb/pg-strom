@@ -47,17 +47,27 @@
  *
  * --------------------------------------------------------------------
  */
-#if PG_VERSION_NUM < 90500
-#error Not supported PostgreSQL version
-#else
-/* check only for v9.5 series */
+#ifdef PG_MIN_VERSION_NUM
+#if PG_VERSION_NUM < PG_MIN_VERSION_NUM
+#error Base PostgreSQL version is too OLD for this PG-Strom code
+#endif
+#endif	/* PG_MIN_VERSION_NUM */
+
+#ifdef PG_MAX_VERSION_NUM
+#if PG_VERSION_NUM >= PG_MAX_VERSION_NUM
+#error Base PostgreSQL version is too NEW for this PG-Strom code
+#endif
+#endif	/* PG_MAX_VERSION_NUM */
+
+/* inline function is minimum requirement. fortunately, it also
+ * become prerequisite of PostgreSQL at v9.6.
+ */
 #if PG_VERSION_NUM < 90600
 #ifndef PG_USE_INLINE
-/* inline function became minimum requirement at v9.6 */
 #error PG-Strom expects inline function is supported by compiler
 #endif	/* PG_USE_INLINE */
 #endif
-#endif
+
 #if SIZEOF_DATUM != 8
 #error PG-Strom expects 64bit platform
 #endif
