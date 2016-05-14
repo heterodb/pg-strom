@@ -366,7 +366,6 @@ Please note that configuration to disable <tt>nouveau</tt> driver is not applied
 <tt>nvidia</tt>ドライバのビルドやインストールに失敗する場合は、%%%PGSTROM_MANUAL_XLINK:install-os%%%において必要なパッケージが導入されている事、および<tt>nouveau</tt>ドライバが無効化されている事を確認してください。特に<tt>dracut</tt>スクリプトを実行するまでは<tt>nouveau</tt>ドライバの無効化設定が起動イメージに反映されない事に留意してください。</span>
 </div>
 
-
 <h3 id="cuda-post-installation">
   <span lang="en">Post installation configuration</span>
   <span lang="ja">インストール後の設定</span>
@@ -378,15 +377,46 @@ We have a known problem about linkage of <tt>NVRTC</tt> that is used by <tt>PG-S
 </span>
 <span lang="ja">
 少なくとも<tt>CUDA-7.0</tt>および<tt>CUDA-7.5</tt>において、<tt>PG-Strom</tt>の使用する<tt>NVRTC</tt>ライブラリのリンケージに関して問題がある事が分かっており、これを回避するため、ワークアラウンドとして以下の設定を行ってください。
-</p>
+</p>い
 <pre>
 # echo /usr/local/cuda/lib64 > /etc/ld.so.conf.d/cuda-lib64.conf
 # ldconfig
 </pre>
 
-<!--
-ドライバのロードに関する補足。誰がロードしてるんだっけか？
--->
+<p>
+<span lang="en">
+Once installation of CUDA and <code>nvidia</code> driver gets completed, ensure the GPU devices are ready to use.
+The <code>nvidia-smi</code> command will print information about GPU devices installed on the system, like the example below.
+</span>
+<span lang="ja">
+CUDAおよび<code>nvidia</code>ドライバのインストールが完了したら、GPUが正しく認識されている事を確認してください。
+<code>nvidia-smi</code>コマンドを実行すると、以下の出力例のように、システムに搭載されているGPUの情報が表示されます。
+</span>
+</p>
+
+<pre>
+$ nvidia-smi
+Sat May 14 21:17:35 2016
++------------------------------------------------------+
+| NVIDIA-SMI 352.68     Driver Version: 352.68         |
+|-------------------------------+----------------------+----------------------+
+| GPU  Name        Persistence-M| Bus-Id        Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp  Perf  Pwr:Usage/Cap|         Memory-Usage | GPU-Util  Compute M. |
+|===============================+======================+======================|
+|   0  GeForce GTX 980     Off  | 0000:02:00.0     Off |                  N/A |
+| 33%   33C    P0    41W / 180W |     15MiB /  4095MiB |      0%      Default |
++-------------------------------+----------------------+----------------------+
+|   1  Tesla K20c          Off  | 0000:04:00.0     Off |                  Off |
+| 30%   36C    P0    42W / 225W |     12MiB /  5119MiB |      0%      Default |
++-------------------------------+----------------------+----------------------+
+
++-----------------------------------------------------------------------------+
+| Processes:                                                       GPU Memory |
+|  GPU       PID  Type  Process name                               Usage      |
+|=============================================================================|
+|  No running processes found                                                 |
++-----------------------------------------------------------------------------+
+</pre>
 
 </section>
 </section>
@@ -507,8 +537,22 @@ All you need to do are installation of yum repository definition, then install <
 <span lang="ja">
 以下のように、yumリポジトリの定義をインストールし、次いで、<tt>PostgreSQL</tt>パッケージをインストールすれば完了です。
 </span>
+<span lang="en">
+The packages below are needed to build and run PG-Strom.
+</span>
+<span lang="ja">
+PG-Stromのビルドおよび実行には以下のパッケージが必要です。
+</span>
+
+<ul>
+<li>postgresql95-devel</li>
+<li>postgresql95-libs</li>
+<li>postgresql95-server</li>
+<li>postgresql95</li>
+</ul>
 </p>
 
+<p>
 <pre>
 $ sudo rpm -ivh pgdg-redhat95-9.5-2.noarch.rpm
 $ sudo yum install postgresql95-server postgresql95-devel
@@ -611,7 +655,7 @@ Thus, <tt>PG-Strom</tt> has no own configure script; that may produce inconsiste
 </p>
 <p>
 <span lang="en">
-
+Run <tt>make</tt> then <tt>make install</tt> with no extra configuration, if <tt>PATH</tt> environment variable is configured to <tt>pg_config</tt> of the target <tt>PostgreSQL</tt> correctly.
 </span>
 <span lang="ja">
 <tt>pg_config</tt>にパスが通っており、それがインストール先の<tt>PostgreSQL</tt>のものであれば、そのまま<tt>make</tt>、<tt>make install</tt>を実行してください。

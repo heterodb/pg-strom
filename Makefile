@@ -14,7 +14,7 @@ endif
 #
 # PG-Strom versioning
 #
-PGSTROM_VERSION=0.9.1
+PGSTROM_VERSION=0.9.0
 PGSTROM_VERSION_NUM=$(shell echo $(PGSTROM_VERSION)			\
 	| sed -e 's/\./ /g' -e 's/[A-Za-z].*$$//g'			\
 	| awk '{printf "%d%02d%02d", $$1, $$2, (NF >=3) ? $$3 : 0}')

@@ -150,9 +150,94 @@ CustomScanが出現していません、したがって、PG-Stromはこのク�
 <span lang="ja">トラブルシューティング</span>
 </h2>
 <p>
-<span lang="en">Coming Soon...</span>
-<span lang="ja">あとで書く</span>
+<span lang="en">
+
+</span>
+<span lang="ja">
+PG-Stromの運用においてトラブルが発生した場合、まず、それがPG-Stromに起因するものであるのかどうかを切り分けます。
+%%%PGSTROM_MANUAL_XLINK:tutrial-pgstrom_enabled%%%を参照し、PG-Stromを無効化した状態でトラブルを引き起こしたクエリを実行し、問題が再現するかどうかを確認してください。
+</span>
+<pre>
+SET pg_strom.enabled = off;
+</pre>
 </p>
+
+<p>
+<span lang="en">
+By the performance monitor of PG-Strom, you can gather more detailed run-time information regarding to the query execution performance.
+Set <code>On</code> to the <code>pg_strom.perfmon</code> parameter, then run the target query using <code>EXPLAIN ANALYZE</code> command.
+</span>
+<span lang="ja">
+PG-Stromのパフォーマンスモニタを用いる事で、クエリ実行性能に関するより詳細な情報を採取する事ができます。
+パフォーマンスモニタを使用するには<code>pg_strom.perfmon</code>パラメータに<code>On</code>を設定し、<code>EXPLAIN ANALYZE</code>コマンドを用いて対象となるクエリを実行します。
+</span>
+
+<span lang="en">
+If performance monitor is enabled, <code>EXPLAIN ANALYZE</code> shows number of GPU kernel invocation and time consumption, amount of data transfer over the PCI-E bus using DMA, its performance and etc, in addition to the usual items.
+</span>
+<span lang="ja">
+パフォーマンスモニタが有効である状態でクエリを実行すると、<code>EXPLAIN ANALYZE</code>による通常の表示内容に加えて、GPUで実行された各関数の処理時間や呼び出し回数、PCI-Eバスを介してDMA転送されたデータサイズや転送性能などが表示されます。
+</span>
+
+<pre>
+postgres=# SET <em>pg_strom.perfmon</em> = on;
+SET
+postgres=# EXPLAIN ANALYZE
+           SELECT cat,count(*),avg(ax) FROM t0 NATURAL JOIN t1 NATURAL JOIN t2 GROUP BY cat;
+                                               QUERY PLAN
+-----------------------------------------------------------------------------------------------------------------
+ HashAggregate  (cost=3573290.38..3573290.71 rows=26 width=12)
+                (actual time=14310.290..14310.297 rows=26 loops=1)
+   Group Key: t0.cat
+   ->  Custom Scan (GpuPreAgg)  (cost=16325.67..2871839.94 rows=234 width=48)
+                                (actual time=4992.761..14309.959 rows=936 loops=1)
+         Reduction: Local + Global
+         GPU Projection: cat, ax
+         Number of tasks: 468
+         gpupreagg_main(): total: 980.31ms, avg: 2.09ms, count: 468
+          - gpupreagg_preparation(): total: 277.16ms, avg: 0.59ms, count: 468
+          - gpupreagg_local_reduction(): total: 485.22ms, avg: 1.04ms, count: 468
+          - gpupreagg_global_reduction(): total: 121.51ms, avg: 0.26ms, count: 468
+          - gpupreagg_final_reduction(): total: 65.05ms, avg: 0.14ms, count: 468
+          - gpupreagg_fixup_varlena(): total: 0.09ms, avg: 0.02ms, count: 4
+         Time of load: 13.66sec
+         Time of materialize: 0.09ms
+         DMA send: 10.95GB/sec, len: 7254.57MB, time: 647.23ms, count: 1404
+         DMA recv: 997.03MB/sec, len: 31.04MB, time: 31.13ms, count: 472
+         ->  Custom Scan (GpuJoin) on t0  (cost=12325.67..2837165.74 rows=98149953 width=12)
+                                          (actual time=131.377..13659.267 rows=100000000 loops=1)
+               GPU Projection: t0.cat, t1.ax
+               Outer Scan: t0 (actual time=9.097..4571.012 rows=100000000 loops=1)
+               Depth 1: GpuHashJoin, HashKeys: (t0.bid)
+                        JoinQuals: (t0.bid = t2.bid)
+                        Nrows (in:100000000 out:100000000, 100.00% planned 98.15%)
+                        KDS-Hash (size: 9.16MB planned 13.47MB, nbatches: 1 planned 1)
+               Depth 2: GpuHashJoin, HashKeys: (t0.aid)
+                        JoinQuals: (t0.aid = t1.aid)
+                        Nrows (in:100000000 out:100000000, 100.00% planned 100.00%)
+                        KDS-Hash (size: 9.16MB planned 13.47MB, nbatches: 1 planned 1)
+               Inner Buffer: (13.47MB)x(13.47MB), DMA nums: 167, size: 4499.40MB
+               Number of tasks: 499
+               gpujoin_main(): total: 2512.94ms, avg: 5.04ms, count: 499
+                - gpujoin_exec_outerscan: total: 58.02ms, avg: 0.12ms, count: 499
+                - gpujoin_exec_hashjoin: total: 1796.94ms, avg: 1.80ms, count: 998
+                - gpujoin_projection: total: 634.04ms, avg: 1.27ms, count: 499
+               Time of inner load: 76.87ms
+               Time of outer load: 9.14sec
+               Time of materialize: 3991.05ms
+               DMA send: 10.86GB/sec, len: 7734.65MB, time: 695.38ms, count: 1497
+               DMA recv: 11.80GB/sec, len: 7145.93MB, time: 591.62ms, count: 998
+               ->  Seq Scan on t2  (cost=0.00..1935.00 rows=100000 width=4)
+                                   (actual time=0.013..14.324 rows=100000 loops=1)
+               ->  Seq Scan on t1  (cost=0.00..1935.00 rows=100000 width=12)
+                                   (actual time=0.006..14.078 rows=100000 loops=1)
+ Planning time: 0.887 ms
+ Execution time: 14743.778 ms
+(42 rows)
+</pre>
+
+</p>
+
 
 <section class="manual_3" id="tutrial-write-a-bug-report">
 <h3>
