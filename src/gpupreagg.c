@@ -3514,7 +3514,7 @@ gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
 								gpa_info->kern_source,
 								gpa_info->extra_flags);
 	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
-        pgstrom_preload_cuda_program(&gpas->gts);
+        pgstrom_load_cuda_program(&gpas->gts, true);
 
 	/*
 	 * init misc stuff

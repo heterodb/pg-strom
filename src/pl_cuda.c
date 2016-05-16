@@ -25,7 +25,6 @@
 
 typedef struct plcuda_func_info
 {
-	cl_uint			extra_flags;
 	/* number of the threads to kick */
 	Oid				func_num_threads;
 	Size			value_num_threads;
@@ -35,9 +34,12 @@ typedef struct plcuda_func_info
 	/* amount of device memory to allocate */
 	Oid				func_buffer_size;
 	Size			value_buffer_size;
-
-	const char	   *kfunc_decl;
-	const char	   *kfunc_body;
+	/* emergency fallback if GPU returned CpuReCheck error */
+	Oid				func_cpu_fallback;
+	/* kernel source code */
+	cl_uint			extra_flags;
+	const char	   *kern_decl;
+	const char	   *kern_body;
 } plcuda_func_info;
 
 /*
@@ -48,15 +50,16 @@ form_plcuda_func_info(plcuda_func_info *cf_info)
 {
 	List   *l = NIL;
 
-	l = lappend(l, makeInteger(cf_info->extra_flags));
 	l = lappend(l, makeInteger(cf_info->func_num_threads));
 	l = lappend(l, makeInteger(cf_info->value_num_threads));
 	l = lappend(l, makeInteger(cf_info->func_shmem_size));
 	l = lappend(l, makeInteger(cf_info->value_shmem_size));
 	l = lappend(l, makeInteger(cf_info->func_buffer_size));
 	l = lappend(l, makeInteger(cf_info->value_buffer_size));
-	l = lappend(l, makeString(cf_info->kfunc_decl));
-	l = lappend(l, makeString(cf_info->kfunc_body));
+	l = lappend(l, makeInteger(cf_info->func_cpu_fallback));
+	l = lappend(l, makeInteger(cf_info->extra_flags));
+	l = lappend(l, makeString(cf_info->kern_decl));
+	l = lappend(l, makeString(cf_info->kern_body));
 
 	return cstring_to_text(nodeToString(l));
 }
@@ -68,15 +71,16 @@ deform_plcuda_func_info(text *cf_info_text)
 	List	   *l = stringToNode(VARDATA(cf_info_text));
 	cl_uint		index = 0;
 
-	cf_info->extra_flags = intVal(list_nth(l, index++));
 	cf_info->func_num_threads = intVal(list_nth(l, index++));
 	cf_info->value_num_threads = intVal(list_nth(l, index++));
 	cf_info->func_shmem_size = intVal(list_nth(l, index++));
 	cf_info->value_shmem_size = intVal(list_nth(l, index++));
 	cf_info->func_buffer_size = intVal(list_nth(l, index++));
 	cf_info->value_buffer_size = intVal(list_nth(l, index++));
-	cf_info->kfunc_decl = strVal(list_nth(l, index++));
-	cf_info->kfunc_body = strVal(list_nth(l, index++));
+	cf_info->func_cpu_fallback = intVal(list_nth(l, index++));
+	cf_info->extra_flags = intVal(list_nth(l, index++));
+	cf_info->kern_decl = strVal(list_nth(l, index++));
+	cf_info->kern_body = strVal(list_nth(l, index++));
 
 	return cf_info;
 }
@@ -106,7 +110,7 @@ plcuda_parse_tokens(const char *buffer)
 			else if (*pos == '\\')
 			{
 				if (*++pos == '\0')
-					elog(ERROR, "pl/cuda parse error");
+					return NIL;
 				appendStringInfoChar(&token, *pos);
 			}
 			else
@@ -119,7 +123,7 @@ plcuda_parse_tokens(const char *buffer)
 			if (*pos == '\\')
 			{
 				if (*++pos == '\0')
-					elog(ERROR, "pl/cuda parse syntax error");
+					return NIL;
 				appendStringInfoChar(&token, *pos);
 			}
 			else if (quote != '\0')
@@ -148,7 +152,7 @@ plcuda_parse_tokens(const char *buffer)
 					quote = *pos;
 
 					if (*++pos == '\0')
-						elog(ERROR, "pl/cuda parse syntax error");
+						return NIL;
 					appendStringInfoChar(&token, *pos);
 				}
 				else
@@ -161,7 +165,7 @@ plcuda_parse_tokens(const char *buffer)
 	if (token.len > 0)
 	{
 		if (quote != '\0')
-			elog(ERROR, "pl/cuda parse syntax error");
+			return NIL;
 		l = lappend(l, pstrdup(token.data));
 	}
 	return l;
@@ -288,8 +292,12 @@ plcuda_code_validation(plcuda_func_info *cf_info,
 			List	   *l = plcuda_parse_tokens(line);
 			const char *plcuda_cmd;
 
-			if (list_length(l) == 0)
-				elog(ERROR, "Bug? pl/cuda command was incorrectly parsed");
+			if (list_length(l) < 1)
+			{
+				appendStringInfo(&emsg, "\n%u: pl/cuda parse error:\n",
+								 lineno, line);
+				continue;
+			}
 			plcuda_cmd = (const char *)linitial(l);
 
 			if (strcmp(plcuda_cmd, "#plcuda_declare") == 0)
@@ -493,13 +501,32 @@ plcuda_code_validation(plcuda_func_info *cf_info,
 				(errcode(ERRCODE_SYNTAX_ERROR),
 				 errmsg("pl/cuda function syntax error\n%s", emsg.data)));
 
+	appendStringInfo(&decl, "\n%s", body.data);
+	cf_info->kern_source = decl.data;
+	pfree(body.data);
+	pfree(emsg.data);
+
 	cf_info->kfunc_decl = decl.data;
 	cf_info->kfunc_body = decl.data;
 }
 
 static void
-plcuda_code_compile(plcuda_func_info *cf_info)
+plcuda_setup_cuda_program(GpuContext *gcontext, plcuda_func_info *cf_info)
 {
+	gcontext = pgstrom_get_gpucontext();
+	cuda_modules = plcuda_load_cuda_program(gcontext,
+											cf_info.kern_source,
+											cf_info.extra_flags);
+	plcuda_code_trybuild(gcontext, &cf_info);
+	pgstrom_put_gpucontext(gcontext);
+	
+	/*
+	 * Try to compile the pl/cuda code
+	 */
+
+
+
+
 	//
 	// need to revise __pgstrom_load_cuda_program definition
 	//
@@ -583,6 +610,9 @@ plcuda_function_validator(PG_FUNCTION_ARGS)
 
 	proc_source = TextDatumGetCString(values[Anum_pg_proc_prosrc - 1]);
 	plcuda_code_validation(&cf_info, procForm, proc_source);
+	
+
+
 	plcuda_code_compile(&cf_info);
 
 	/*

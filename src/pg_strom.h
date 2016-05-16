@@ -115,6 +115,7 @@ typedef struct {
 	cl_double	tv_dev_malloc;
 	cl_double	tv_dev_mfree;
 	/*-- build cuda program --*/
+	cl_double	tv_build_kernel;
 	struct timeval	tv_build_start;
 	struct timeval	tv_build_end;
 	/*-- time for task pending --*/
@@ -463,8 +464,13 @@ extern Datum pgstrom_device_info(PG_FUNCTION_ARGS);
  * cuda_program.c
  */
 extern const char *pgstrom_cuda_source_file(GpuTaskState *gts);
-extern bool pgstrom_load_cuda_program(GpuTaskState *gts);
-extern void pgstrom_preload_cuda_program(GpuTaskState *gts);
+extern bool pgstrom_load_cuda_program(GpuTaskState *gts, bool is_preload);
+extern CUmodule *plcuda_load_cuda_program(GpuContext *gcontext,
+										  const char *kern_source,
+										  cl_uint extra_flags);
+extern char *pgstrom_build_session_info(GpuTaskState *gts,
+										const char *kern_source,
+										cl_uint extra_flags);
 extern void pgstrom_assign_cuda_program(GpuTaskState *gts,
 										List *used_params,
 										const char *kern_source,
