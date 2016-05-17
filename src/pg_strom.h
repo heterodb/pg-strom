@@ -321,6 +321,7 @@ struct GpuTask
 #define DEVKERNEL_NEEDS_GPUJOIN			0x00000002	/* GpuJoin logic */
 #define DEVKERNEL_NEEDS_GPUPREAGG		0x00000004	/* GpuPreAgg logic */
 #define DEVKERNEL_NEEDS_GPUSORT			0x00000008	/* GpuSort logic */
+#define DEVKERNEL_NEEDS_PLCUDA			0x00000080	/* PL/CUDA related */
 
 #define DEVKERNEL_NEEDS_DYNPARA			0x00000100
 #define DEVKERNEL_NEEDS_MATRIX			0x00000200
@@ -764,6 +765,7 @@ extern const char *pgstrom_cuda_textlib_code;
 extern const char *pgstrom_cuda_timelib_code;
 extern const char *pgstrom_cuda_numeric_code;
 extern const char *pgstrom_cuda_money_code;
+extern const char *pgstrom_cuda_plcuda_code;
 extern const char *pgstrom_cuda_terminal_code;
 
 /* ----------------------------------------------------------------

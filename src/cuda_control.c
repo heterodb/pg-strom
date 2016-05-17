@@ -2480,6 +2480,9 @@ errorTextKernel(kern_errorbuf *kerror)
 		KERN_ENTRY(gpusort_bitonic_merge);
 		KERN_ENTRY(gpusort_fixup_pointers);
 		KERN_ENTRY(gpusort_main);
+		KERN_ENTRY(plcuda_prep_kernel);
+		KERN_ENTRY(plcuda_main_kernel);
+		KERN_ENTRY(plcuda_post_kernel);
 		default:
 			kernel_name = "unknown kernel";
 			break;

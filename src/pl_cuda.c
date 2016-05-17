@@ -36,13 +36,13 @@ typedef struct plcuda_func_info
 	Oid			fn_prep_shmem_size;
 	Size		varl_prep_shmem_size;
 
-	/* kernel function for body */
-	const char *kern_body;
-	bool		kern_body_max_threads;
-	Oid			fn_body_num_threads;
-	Size		val_body_num_threads;
-	Oid			fn_body_shmem_size;
-	Size		varl_body_shmem_size;
+	/* kernel function for main */
+	const char *kern_main;
+	bool		kern_main_max_threads;
+	Oid			fn_main_num_threads;
+	Size		val_main_num_threads;
+	Oid			fn_main_shmem_size;
+	Size		varl_main_shmem_size;
 
 	/* kernel function for post */
 	const char *kern_post;
@@ -80,12 +80,12 @@ form_plcuda_func_info(plcuda_func_info *cf_info)
 	l = lappend(l, makeInteger(cf_info->fn_prep_shmem_size));
 	l = lappend(l, makeInteger(cf_info->val_prep_shmem_size));
 	/* body kernel */
-	l = lappend(l, makeString(cf_info->kern_body));
-	l = lappend(l, makeInteger(cf_info->kern_body_max_threads));
-	l = lappend(l, makeInteger(cf_info->fn_body_num_threads));
-	l = lappend(l, makeInteger(cf_info->val_body_num_threads));
-	l = lappend(l, makeInteger(cf_info->fn_body_shmem_size));
-	l = lappend(l, makeInteger(cf_info->val_body_shmem_size));
+	l = lappend(l, makeString(cf_info->kern_main));
+	l = lappend(l, makeInteger(cf_info->kern_main_max_threads));
+	l = lappend(l, makeInteger(cf_info->fn_main_num_threads));
+	l = lappend(l, makeInteger(cf_info->val_main_num_threads));
+	l = lappend(l, makeInteger(cf_info->fn_main_shmem_size));
+	l = lappend(l, makeInteger(cf_info->val_main_shmem_size));
 	/* post kernel */
 	l = lappend(l, makeString(cf_info->kern_post));
 	l = lappend(l, makeInteger(cf_info->kern_post_max_threads));
@@ -120,11 +120,11 @@ deform_plcuda_func_info(text *cf_info_text)
 	cf_info->fn_prep_shmem_size = intVal(list_nth(l, index++));
 	cf_info->val_prep_shmem_size = intVal(list_nth(l, index++));
 	/* body kernel */
-	cf_info->kern_body = strVal(list_nth(l, index++));
-	cf_info->fn_body_num_threads = intVal(list_nth(l, index++));
-	cf_info->val_body_num_threads = intVal(list_nth(l, index++));
-	cf_info->fn_body_shmem_size = intVal(list_nth(l, index++));
-	cf_info->val_body_shmem_size = intVal(list_nth(l, index++));
+	cf_info->kern_main = strVal(list_nth(l, index++));
+	cf_info->fn_main_num_threads = intVal(list_nth(l, index++));
+	cf_info->val_main_num_threads = intVal(list_nth(l, index++));
+	cf_info->fn_main_shmem_size = intVal(list_nth(l, index++));
+	cf_info->val_main_shmem_size = intVal(list_nth(l, index++));
 	/* post kernel */
 	cf_info->kern_post = strVal(list_nth(l, index++));
 	cf_info->fn_post_num_threads = intVal(list_nth(l, index++));
@@ -140,27 +140,6 @@ deform_plcuda_func_info(text *cf_info_text)
 
 	return cf_info;
 }
-
-
-
-/*
- * structure to communicate between host <--> device
- *
- * kern_parambuf is used to excange arguments
- *
- * KPARAM_0       ... buffer for the result
- * KPARAM_X (X>0) ... introduce 
- */
-typedef struct
-{
-	kern_errorbuf	kerror;
-	cl_uint			num_threads;
-	cl_uint			shmem_size;
-	cl_uint			result_size;
-	cl_uint			buffer_size;
-	kern_parambuf	kparams;
-} kern_plcuda;
-
 
 /*
  * plcuda_parse_cmdline
@@ -348,7 +327,7 @@ ident_to_cstring(List *ident)
  *      :  initial setup of working/result buffer
  * #plcuda_end
  *
- * #plcuda_body  [<num_threads>[,<shmem_size>[, max_threads]]]
+ * #plcuda_main  [<num_threads>[,<shmem_size>[, max_threads]]]
  *      :  main logic of pl/cuda function
  * #plcuda_end
  *
@@ -368,7 +347,7 @@ plcuda_code_validation(plcuda_func_info *cf_info,
 {
 	StringInfoData	decl;
 	StringInfoData	prep;
-	StringInfoData	body;
+	StringInfoData	main;
 	StringInfoData	post;
 	StringInfoData	emsg;
 	StringInfo		curr = NULL;
@@ -378,14 +357,14 @@ plcuda_code_validation(plcuda_func_info *cf_info,
 	int			lineno;
 	bool		has_decl_block = false;
 	bool		has_prep_block = false;
-	bool		has_body_block = false;
+	bool		has_main_block = false;
 	bool		has_post_block = false;
 	bool		has_working_bufsz = false;
 	bool		has_results_bufsz = false;
 
 	initStringInfo(&decl);
 	initStringInfo(&prep);
-	initStringInfo(&body);
+	initStringInfo(&main);
 	initStringInfo(&post);
 	initStringInfo(&emsg);
 
@@ -403,9 +382,14 @@ plcuda_code_validation(plcuda_func_info *cf_info,
 			if (curr != NULL)
 				appendStringInfo(curr, "%s\n", line);
 			else
-				appendStringInfo(&emsg, "\n%u: "
-								 "code is out of valid block:\n%s",
-								 lineno, line);
+			{
+				for (pos = line; !isspace(*pos) && *pos != '\0'; pos++);
+
+				if (*pos != '\0')
+					appendStringInfo(&emsg, "\n%u: "
+									 "code is out of valid block:\n%s",
+									 lineno, line);
+			}
 			continue;
 		}
 		/* pick up command name */
@@ -480,9 +464,9 @@ plcuda_code_validation(plcuda_func_info *cf_info,
 					break;
 			}
 		}
-		else if (strcmp(cmd, "#plcuda_body") == 0)
+		else if (strcmp(cmd, "#plcuda_begin") == 0)
 		{
-			if (has_prep_block)
+			if (has_main_block)
 			{
 				appendStringInfo(&emsg, "\n%u: %s appeared twice",
 								 lineno, cmd);
@@ -497,22 +481,22 @@ plcuda_code_validation(plcuda_func_info *cf_info,
 						appendStringInfo(&emsg, "\n%u:%s was not valid",
 										 lineno, linitial(ident));
 					else if (strcmp(linitial(ident), "max_threads") == 0)
-						cf_info->kern_body_max_threads = true;
+						cf_info->kern_main_max_threads = true;
 					else
 						appendStringInfo(&emsg, "\n%u:%s was unknown",
 										 lineno, linitial(ident));
 				case 2:
 					if (!plcuda_lookup_helper(lsecond(options),
 											  nargs, argtypes,
-											  &cf_info->fn_body_shmem_size,
-											  &cf_info->val_body_shmem_size))
+											  &cf_info->fn_main_shmem_size,
+											  &cf_info->val_main_shmem_size))
 						appendStringInfo(&emsg, "\n%u:%s was not valid",
 								lineno, ident_to_cstring(lsecond(options)));
 				case 1:
 					if (!plcuda_lookup_helper(linitial(options),
 											  nargs, argtypes,
-											  &cf_info->fn_body_num_threads,
-											  &cf_info->val_body_num_threads))
+											  &cf_info->fn_main_num_threads,
+											  &cf_info->val_main_num_threads))
 						appendStringInfo(&emsg, "\n%u:%s was not valid",
 								lineno, ident_to_cstring(linitial(options)));
 				case 0:
@@ -525,7 +509,7 @@ plcuda_code_validation(plcuda_func_info *cf_info,
 		}
 		else if (strcmp(cmd, "#plcuda_post") == 0)
 		{
-			if (has_prep_block)
+			if (has_post_block)
 			{
 				appendStringInfo(&emsg, "\n%u: %s appeared twice",
 								 lineno, cmd);
@@ -644,12 +628,111 @@ plcuda_code_validation(plcuda_func_info *cf_info,
 		cf_info->kern_decl = decl.data;
 	if (has_prep_block)
 		cf_info->kern_prep = prep.data;
-	if (has_body_block)
-		cf_info->kern_body = body.data;
+	if (has_main_block)
+		cf_info->kern_main = main.data;
 	if (has_post_block)
-		cf_info->kern_post = body.data;
+		cf_info->kern_post = post.data;
 
 	pfree(emsg.data);
+}
+
+/*
+ * plcuda_codegen
+ *
+ *
+ *
+ */
+static void
+__plcuda_codegen(StringInfo kern,
+				 const char *suffix,
+				 const char *kernel_body,
+				 Form_pg_proc procForm)
+{
+	devtype_info   *dtype;
+
+	appendStringInfo(
+		kern,
+		"KERNEL_FUNCTION(void)\n"
+		"plcuda_%s_%s(kern_plcuda *kplcuda, void *workbuf, void *results)\n"
+		"{\n"
+		"  kern_context kcxt;\n",
+		NameStr(procForm->proname), suffix);
+
+	/* setup results buffer */
+	dtype = pgstrom_devtype_lookup(procForm->prorettype);
+	if (!dtype)
+		elog(ERROR, "cache lookup failed for type '%s'",
+			 format_type_be(procForm->prorettype));
+	appendStringInfo(
+		kern,
+		"  pg_%s_t *retval = (pg_%s_t *)kplcuda->__retval;\n",
+		dtype->type_name, dtype->type_name);
+
+	for (i=0; i < procForm->pronargs; i++)
+	{
+		Oid		type_oid = procForm->proargtypes.values[i];
+
+		dtype = pgstrom_devtype_lookup(type_oid);
+		if (!dtype)
+			elog(ERROR, "cache lookup failed for type '%s'",
+				 format_type_be(type_oid));
+		appendStringInfo(
+			kern,
+			"  pg_%s_t karg_%u;\n",
+			dtype->type_name, i+1);
+	}
+	appendStringInfo(
+		kern,
+		"\n"
+		"  assert(sizeof(*retval) <= sizeof(kplcuda->__retval));\n"
+		"  INIT_KERNEL_CONTEXT(&kcxt,plcuda_%s_kernel,&kplcuda->kparams);\n"
+		"\n",
+		suffix);
+
+	for (i=0; i < procForm->pronargs; i++)
+	{
+		Oid		type_oid = procForm->proargtypes.values[i];
+
+		dtype = pgstrom_devtype_lookup(type_oid);
+		if (!dtype)
+			elog(ERROR, "cache lookup failed for type '%s'",
+				 format_type_be(type_oid));
+		appendStringInfo(
+			kern,
+			"  karg_%u = pg_%s_param(&kcxt,%d);\n",
+			i+1, i+1);
+	}
+
+	appendStringInfo(
+		kern,
+		"\n"
+		"  /* ---- code by pl/cuda function ---- */\n"
+		"%s"
+		"  /* ---- code by pl/cuda function ---- */\n"
+		"out:\n"
+		"  kern_writeback_error_status(&plcuda->kerror, kcxt.e);\n"
+		"}\n\n",
+		kernel_body);
+}
+
+static char *
+plcuda_codegen(Form_pg_proc procForm,
+			   plcuda_func_info *cf_info)
+{
+	StringInfoData	kern;
+
+	initStringInfo(&kern);
+
+	if (cf_info->kern_decl)
+		appendStringInfo(&kern, "%s\n", cf_info->kern_decl);
+	if (cf_info->kern_prep)
+		__plcuda_codegen(&kern, "prep", cf_info->kern_prep, procForm);
+	if (cf_info->kern_main)
+		__plcuda_codegen(&kern, "main", cf_info->kern_main, procForm);
+	if (cf_info->kern_post)
+		__plcuda_codegen(&kern, "post", cf_info->kern_post, procForm);
+
+	return kern.data;
 }
 
 static void
@@ -657,86 +740,17 @@ plcuda_setup_cuda_program(GpuContext *gcontext,
 						  Form_pg_proc procForm,
 						  plcuda_func_info *cf_info)
 {
-	devtype_info   *dtype_r;
-	StringInfoData	kern;
+	char	   *kern_source = plcuda_codegen(procForm, cf_info);
+	CUmodule   *cuda_modules;
 
-
-	initStringInfo(&kern);
-	/* type definition of kern_plcuda */
-	appendStringInfoString(
-		&kern,
-		"/* structure to communicat between host <--> device */\n"
-		"typedef struct {\n"
-		"  kern_errorbuf      kerror;\n"
-		"  kern_parambuf      kparams;\n"
-		"};\n\n");
-
-	/* declaration part */
-	appendStringInfoString(&kern, cf_info->kern_decl);
-
-	/* pl/cuda function body */
-	dtype_r = pgstrom_devtype_lookup(procForm->prorettype);
-	if (!dtype_r)
-		elog(ERROR, "cache lookup failed for device type: %s",
-			 format_type_be(procForm->prorettype));
-
-	appendStringInfo(&kern,
-					 "STATIC_FUNCTION(pg_%s_t)\n"
-					 "pgfn_%s_%s(kern_context *kcxt",
-					 dtype_r->type_name,
-					 get_namespace_name(procForm->pronamespace),
-					 NameStr(procForm->proname));
-
-	for (i=0; i < procForm->pronargs; i++)
-	{
-		Oid		type_oid = procForm->proargtypes.values[i];
-		devtype_info *dtype;
-
-		dtype = pgstrom_devtype_lookup(type_oid);
-		if (!dtype)
-			elog(ERROR, "cache lookup failed for device type: %s",
-				 format_type_be(type_oid));
-		appendStringInfo(&kern, ", pg_%s_t arg%d",
-						 dtype->type_name, i+1);
-	}
-	appendStringInfo(&kern, ")\n{\n%s\n}\n\n", cf_info->kern_body);
-
-	/* kernel entrypoint */
-	appendStringInfo(
-		&kern,
-		"KERNEL_FUNCTION%s(void)\n"
-		"plcuda_entrypoint(kern_plcuda *kplcuda,\n"
-		"                  char *buffer)\n"
-		"{\n"
-		"    "
-
-
-
-
-
-
-
-
-	gcontext = pgstrom_get_gpucontext();
 	cuda_modules = plcuda_load_cuda_program(gcontext,
-											cf_info.kern_source,
-											cf_info.extra_flags);
-	plcuda_code_trybuild(gcontext, &cf_info);
-	pgstrom_put_gpucontext(gcontext);
-	
-	/*
-	 * Try to compile the pl/cuda code
-	 */
+											kern_source,
+											cf_info->extra_flags);
 
+	// register cuda module for release on gpucontext detach
 
-
-
-	//
-	// need to revise __pgstrom_load_cuda_program definition
-	//
-	// cuda_module has to be released on release of GPU context
-	//
 }
+
 
 
 Datum
@@ -754,6 +768,8 @@ plcuda_function_validator(PG_FUNCTION_ARGS)
 	const char	   *proc_source;
 	cl_uint			extra_flags = 0;
 	cl_uint			i;
+	ObjectAddress	myself;
+	ObjectAddress	referenced;
 
 	rel = heap_open(ProcedureRelationId, RowExclusiveLock);
 	tupdesc = RelationGetDescr(rel);
@@ -839,52 +855,74 @@ plcuda_function_validator(PG_FUNCTION_ARGS)
 	myself.objectId = func_oid;
 	myself.objectSubId = 0;
 
-	/* dependency to num_threads function */
-	if (OidIsValid(plcuda_info.func_num_threads))
+	/* dependency to kernel function for prep */
+	if (OidIsValid(plcuda_info.fn_prep_num_threads))
 	{
 		referenced.classId = ProcedureRelationId;
-		referenced.objectId = plcuda_info.func_num_threads;
+		referenced.objectId = plcuda_info.fn_prep_num_threads;
 		referenced.objectSubId = 0;
 		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
 	}
 
-	/* dependency to shmem_size function */
-	if (OidIsValid(plcuda_info.func_shmem_size))
+	if (OidIsValid(plcuda_info.fn_prep_shmem_size))
 	{
 		referenced.classId = ProcedureRelationId;
-		referenced.objectId = plcuda_info.func_shmem_size;
+		referenced.objectId = plcuda_info.fn_prep_shmem_size;
 		referenced.objectSubId = 0;
 		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
 	}
 
-	/* dependency to buffer_size function */
-	if (OidIsValid(plcuda_info.func_buffer_size))
+	/* dependency to kernel function for main */
+	if (OidIsValid(plcuda_info.fn_main_num_threads))
 	{
 		referenced.classId = ProcedureRelationId;
-		referenced.objectId = plcuda_info.func_buffer_size;
+		referenced.objectId = plcuda_info.fn_main_num_threads;
 		referenced.objectSubId = 0;
 		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
 	}
 
-	if (OidIsValid(plcuda_info.func_results_size))
+	if (OidIsValid(plcuda_info.fn_main_shmem_size))
 	{
 		referenced.classId = ProcedureRelationId;
-		referenced.objectId = plcuda_info.func_results_size;
+		referenced.objectId = plcuda_info.fn_main_shmem_size;
 		referenced.objectSubId = 0;
 		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
 	}
 
-	if (OidIsValid(plcuda_info.func_cpu_fallback))
+	/* dependency to kernel function for post */
+	if (OidIsValid(plcuda_info.fn_post_num_threads))
 	{
 		referenced.classId = ProcedureRelationId;
-		referenced.objectId = plcuda_info.func_cpu_fallback;
+		referenced.objectId = plcuda_info.fn_post_num_threads;
 		referenced.objectSubId = 0;
 		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
 	}
 
+	if (OidIsValid(plcuda_info.fn_post_shmem_size))
+	{
+		referenced.classId = ProcedureRelationId;
+		referenced.objectId = plcuda_info.fn_post_shmem_size;
+		referenced.objectSubId = 0;
+		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
+	}
 
+	/* dependency to working buffer */
+	if (OidIsValid(plcuda_info.fn_working_bufsz))
+	{
+		referenced.classId = ProcedureRelationId;
+		referenced.objectId = plcuda_info.fn_working_bufsz;
+		referenced.objectSubId = 0;
+		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
+	}
 
-
+	/* dependency to results buffer */
+	if (OidIsValid(plcuda_info.fn_results_bufsz))
+	{
+		referenced.classId = ProcedureRelationId;
+		referenced.objectId = plcuda_info.fn_results_bufsz;
+		referenced.objectSubId = 0;
+		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
+	}
 
 	ReleaseSysCache(tuple);
 	heap_close(rel, RowExclusiveLock);
