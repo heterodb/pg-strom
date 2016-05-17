@@ -616,6 +616,9 @@ extern bool pgstrom_plan_is_gpusort(const Plan *plan);
 extern void assign_gpusort_session_info(StringInfo buf, GpuTaskState *gts);
 extern void pgstrom_init_gpusort(void);
 
+extern Datum plcuda_function_validator(PG_FUNCTION_ARGS);
+extern Datum plcuda_function_handler(PG_FUNCTION_ARGS);
+
 /*
  * main.c
  */

@@ -16,8 +16,10 @@
  * GNU General Public License for more details.
  */
 #include "postgres.h"
-#include "builtins.h"
-#include "catalog/pg_prog.h"
+#include "catalog/dependency.h"
+#include "catalog/objectaddress.h"
+#include "catalog/pg_proc.h"
+#include "utils/builtins.h"
 #include "utils/syscache.h"
 #include "pg_strom.h"
 
@@ -25,40 +27,40 @@
 
 typedef struct plcuda_func_info
 {
-	cl_uint		extra_flags;
+	cl_uint	extra_flags;
 	/* kernel function for decl */
-	const char *kern_decl;
+	char   *kern_decl;
 	/* kernel function for prep */
-	const char *kern_prep;
-	bool		kern_prep_max_threads;
-	Oid			fn_prep_num_threads;
-	Size		val_prep_num_threads;
-	Oid			fn_prep_shmem_size;
-	Size		varl_prep_shmem_size;
+	char   *kern_prep;
+	bool	kern_prep_max_threads;
+	Oid		fn_prep_num_threads;
+	Size	val_prep_num_threads;
+	Oid		fn_prep_shmem_size;
+	Size	val_prep_shmem_size;
 
 	/* kernel function for main */
-	const char *kern_main;
-	bool		kern_main_max_threads;
-	Oid			fn_main_num_threads;
-	Size		val_main_num_threads;
-	Oid			fn_main_shmem_size;
-	Size		varl_main_shmem_size;
+	char   *kern_main;
+	bool	kern_main_max_threads;
+	Oid		fn_main_num_threads;
+	Size	val_main_num_threads;
+	Oid		fn_main_shmem_size;
+	Size	val_main_shmem_size;
 
 	/* kernel function for post */
-	const char *kern_post;
-	bool		kern_post_max_threads;
-	Oid			fn_post_num_threads;
-	Size		val_post_num_threads;
-	Oid			fn_post_shmem_size;
-	Size		val_post_shmem_size;
+    char   *kern_post;
+	bool	kern_post_max_threads;
+	Oid		fn_post_num_threads;
+	Size	val_post_num_threads;
+	Oid		fn_post_shmem_size;
+	Size	val_post_shmem_size;
 
 	/* device memory size for working buffer */
-	Oid			fn_working_bufsz;
-	Size		val_working_bufsz;
+	Oid		fn_working_bufsz;
+	Size	val_working_bufsz;
 
 	/* device memory size for result buffer */
-	Oid			fn_results_bufsz;
-	Size		val_results_bufsz;
+	Oid		fn_results_bufsz;
+	Size	val_results_bufsz;
 } plcuda_func_info;
 
 /*
@@ -147,10 +149,10 @@ deform_plcuda_func_info(text *cf_info_text)
  * It parse the line of '#plcuda_xxx'
  */
 static bool
-plcuda_parse_cmd_options(const char *linebuf, List *p_options)
+plcuda_parse_cmd_options(const char *linebuf, List **p_options)
 {
 	List	   *l = NIL;
-	char	   *pos = linebuf;
+	const char *pos = linebuf;
 	char		quote = '\0';
 	List	   *options = NIL;
 	StringInfoData token;
@@ -233,49 +235,38 @@ plcuda_parse_cmd_options(const char *linebuf, List *p_options)
 		return false;		/* syntax error; EOL by ',' */
 
 	*p_options = options;
-	return plcuda_cmd;
+	return true;
 }
 
 static bool
-plcuda_lookup_helper(List *l, oidvector *arg_types, Oid result_type,
+plcuda_lookup_helper(List *options, oidvector *arg_types, Oid result_type,
 					 Oid *p_func_oid, Size *p_size_value)
 {
-	const char *plcuda_cmd = linitial(l);
 	List	   *names;
-	Oid			helper_oid;
-	HeapTuple	helper_tup;
-	Form_pg_proc helper_form;
 
-	if (list_length(l) == 2)
+	if (list_length(options) == 1)
 	{
-		/* a constant value, or a function in search path
-		 * #plcuda_xxxx [<value> | <function>]
-		 */
+		/* a constant value, or a function in search path */
 		const char *ident = lsecond(l);
+		const char *pos = ident;
 
 		if (p_size_value)
 		{
-			/* check whether ident is const value, or not */
-			const char *pos = ident;
-
-			while (isdigit(*pos))
-				pos++;
+			for (pos = ident; isdigit(*pos); pos++);
 			if (*pos == '\0')
 			{
 				*p_size_value = atol(ident);
-				return true;
+                return true;
 			}
 		}
 		names = list_make1(makeString(ident));
 	}
-	else if (list_length(l) == 4)
+	else if (list_length(l) == 3)
 	{
-		/* function in a particular schema:
-		 * #plcuda_xxxx <schema> . <function>
-		 */
-		const char *nspname = lsecond(l);
-		const char *dot = lthird(l);
-		const char *proname = lfourth(l);
+		/* function in a particular schema */
+		const char *nspname = lsecond(options);
+		const char *dot = lthird(options);
+		const char *proname = lfourth(options);
 
 		if (strcmp(dot, ".") != 0)
 			return false;
@@ -286,22 +277,23 @@ plcuda_lookup_helper(List *l, oidvector *arg_types, Oid result_type,
 	else
 		return false;
 
-	helper_oid = LookupFuncName(names,
-								arg_types->dim1,
-								arg_types->values,
-								true);
-	if (!OidIsValid(helper_oid))
-		return false;
+	if (p_func_oid)
+	{
+		Oid		helper_oid = LookupFuncName(names,
+											arg_types->dim1,
+											arg_types->values,
+											true);
+		if (!OidIsValid(helper_oid))
+			return false;
+		if (result_type != get_func_rettype(helper_oid))
+			return false;
 
-	helper_tup = SearchSysCache1(PROCOID, ObjectIdGetDatum(helper_oid));
-	if (!HeapTupleIsValid(helper_tup))
-		elog(ERROR, "cache lookup failed for function %u", helper_oid);
-	helper_form = (Form_pg_proc) GETSTRUCT(helper_tup);
+		/* OK, helper function is valid */
+		*p_func_oid = helper_oid;
 
-
-	ReleaseSysCache(helper_tup);
-
-	return true;
+		return true;
+	}
+	return false;
 }
 
 static inline char *
@@ -758,8 +750,8 @@ plcuda_function_validator(PG_FUNCTION_ARGS)
 {
 	Oid				func_oid = PG_GETARG_OID(0);
 	Relation		rel;
-	TupleDesc		tupdesc;
 	HeapTuple		tuple;
+	HeapTuple		newtup;
 	Form_pg_proc	procForm;
 	bool			isnull[Natts_pg_proc];
 	Datum			values[Natts_pg_proc];
@@ -823,7 +815,7 @@ plcuda_function_validator(PG_FUNCTION_ARGS)
 		elog(ERROR, "Bug? pg_proc.probin has non-NULL preset value");
 
 	/*
-	 * Do syntax checks and construction of plcuda_info
+	 * Do syntax checks and construction of plcuda_func_info
 	 */
 	memset(&cf_info, 0, sizeof(plcuda_func_info));
 	cf_info->extra_flags = extra_flags;
@@ -832,9 +824,9 @@ plcuda_function_validator(PG_FUNCTION_ARGS)
 	proc_source = TextDatumGetCString(values[Anum_pg_proc_prosrc - 1]);
 	plcuda_code_validation(&cf_info, procForm, proc_source);
 
-	gcontext = get_gpucontext();
+	gcontext = pgstrom_get_gpucontext();
 	plcuda_setup_cuda_program(gcontext, procForm, &cf_info);
-	put_gpucontext(gcontext);
+	pgstrom_put_gpucontext(gcontext);
 
 	/*
 	 * OK, supplied function is compilable. Update the catalog.
@@ -844,9 +836,9 @@ plcuda_function_validator(PG_FUNCTION_ARGS)
 		PointerGetDatum(form_plcuda_func_info(&cf_info));
 
 	newtup = heap_form_tuple(RelationGetDescr(rel), values, isnull);
-	simple_heap_update(rel, &tuple->t_self, tuple);
+	simple_heap_update(rel, &tuple->t_self, newtup);
 
-	CatalogUpdateIndexes(rel, tuple);
+	CatalogUpdateIndexes(rel, newtup);
 
 	/*
 	 * Add dependency for hint routines
@@ -856,70 +848,70 @@ plcuda_function_validator(PG_FUNCTION_ARGS)
 	myself.objectSubId = 0;
 
 	/* dependency to kernel function for prep */
-	if (OidIsValid(plcuda_info.fn_prep_num_threads))
+	if (OidIsValid(cf_info.fn_prep_num_threads))
 	{
 		referenced.classId = ProcedureRelationId;
-		referenced.objectId = plcuda_info.fn_prep_num_threads;
+		referenced.objectId = cf_info.fn_prep_num_threads;
 		referenced.objectSubId = 0;
 		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
 	}
 
-	if (OidIsValid(plcuda_info.fn_prep_shmem_size))
+	if (OidIsValid(cf_info.fn_prep_shmem_size))
 	{
 		referenced.classId = ProcedureRelationId;
-		referenced.objectId = plcuda_info.fn_prep_shmem_size;
+		referenced.objectId = cf_info.fn_prep_shmem_size;
 		referenced.objectSubId = 0;
 		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
 	}
 
 	/* dependency to kernel function for main */
-	if (OidIsValid(plcuda_info.fn_main_num_threads))
+	if (OidIsValid(cf_info.fn_main_num_threads))
 	{
 		referenced.classId = ProcedureRelationId;
-		referenced.objectId = plcuda_info.fn_main_num_threads;
+		referenced.objectId = cf_info.fn_main_num_threads;
 		referenced.objectSubId = 0;
 		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
 	}
 
-	if (OidIsValid(plcuda_info.fn_main_shmem_size))
+	if (OidIsValid(cf_info.fn_main_shmem_size))
 	{
 		referenced.classId = ProcedureRelationId;
-		referenced.objectId = plcuda_info.fn_main_shmem_size;
+		referenced.objectId = cf_info.fn_main_shmem_size;
 		referenced.objectSubId = 0;
 		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
 	}
 
 	/* dependency to kernel function for post */
-	if (OidIsValid(plcuda_info.fn_post_num_threads))
+	if (OidIsValid(cf_info.fn_post_num_threads))
 	{
 		referenced.classId = ProcedureRelationId;
-		referenced.objectId = plcuda_info.fn_post_num_threads;
+		referenced.objectId = cf_info.fn_post_num_threads;
 		referenced.objectSubId = 0;
 		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
 	}
 
-	if (OidIsValid(plcuda_info.fn_post_shmem_size))
+	if (OidIsValid(cf_info.fn_post_shmem_size))
 	{
 		referenced.classId = ProcedureRelationId;
-		referenced.objectId = plcuda_info.fn_post_shmem_size;
+		referenced.objectId = cf_info.fn_post_shmem_size;
 		referenced.objectSubId = 0;
 		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
 	}
 
 	/* dependency to working buffer */
-	if (OidIsValid(plcuda_info.fn_working_bufsz))
+	if (OidIsValid(cf_info.fn_working_bufsz))
 	{
 		referenced.classId = ProcedureRelationId;
-		referenced.objectId = plcuda_info.fn_working_bufsz;
+		referenced.objectId = cf_info.fn_working_bufsz;
 		referenced.objectSubId = 0;
 		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
 	}
 
 	/* dependency to results buffer */
-	if (OidIsValid(plcuda_info.fn_results_bufsz))
+	if (OidIsValid(cf_info.fn_results_bufsz))
 	{
 		referenced.classId = ProcedureRelationId;
-		referenced.objectId = plcuda_info.fn_results_bufsz;
+		referenced.objectId = cf_info.fn_results_bufsz;
 		referenced.objectSubId = 0;
 		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
 	}
