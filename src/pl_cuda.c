@@ -21,6 +21,7 @@
 #include "catalog/objectaddress.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
+#include "nodes/readfuncs.h"
 #include "parser/parse_func.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
@@ -68,92 +69,224 @@ typedef struct plcudaInfo
 	Size	val_results_bufsz;
 } plcudaInfo;
 
+#if PG_VERSION_NUM < 90600
 /*
- * XXX - to be revised to use ExtensibleNode in 9.6 based implementation
+ * to be revised when we rebase PostgreSQL to v9.6
  */
-static text *
-form_plcuda_info(plcudaInfo *cf_info)
+static void
+outToken(StringInfo str, const char *s)
 {
-	List   *l = NIL;
+	if (s == NULL || *s == '\0')
+	{
+		appendStringInfoString(str, "<>");
+		return;
+	}
 
-	l = lappend(l, makeInteger(cf_info->extra_flags));
-	/* declarations */
-	l = lappend(l, makeString(cf_info->kern_decl));
-	/* prep kernel */
-	l = lappend(l, makeString(cf_info->kern_prep));
-	l = lappend(l, makeInteger(cf_info->kern_prep_maxthreads));
-	l = lappend(l, makeInteger(cf_info->fn_prep_num_threads));
-	l = lappend(l, makeInteger(cf_info->val_prep_num_threads));
-	l = lappend(l, makeInteger(cf_info->fn_prep_shmem_size));
-	l = lappend(l, makeInteger(cf_info->val_prep_shmem_size));
-	/* body kernel */
-	l = lappend(l, makeString(cf_info->kern_body));
-	l = lappend(l, makeInteger(cf_info->kern_body_maxthreads));
-	l = lappend(l, makeInteger(cf_info->fn_body_num_threads));
-	l = lappend(l, makeInteger(cf_info->val_body_num_threads));
-	l = lappend(l, makeInteger(cf_info->fn_body_shmem_size));
-	l = lappend(l, makeInteger(cf_info->val_body_shmem_size));
-	/* post kernel */
-	l = lappend(l, makeString(cf_info->kern_post));
-	l = lappend(l, makeInteger(cf_info->kern_post_maxthreads));
-	l = lappend(l, makeInteger(cf_info->fn_post_num_threads));
-	l = lappend(l, makeInteger(cf_info->val_post_num_threads));
-	l = lappend(l, makeInteger(cf_info->fn_post_shmem_size));
-	l = lappend(l, makeInteger(cf_info->val_post_shmem_size));
-	/* working buffer */
-	l = lappend(l, makeInteger(cf_info->fn_working_bufsz));
-	l = lappend(l, makeInteger(cf_info->val_working_bufsz));
-	/* results buffer */
-	l = lappend(l, makeInteger(cf_info->fn_results_bufsz));
-	l = lappend(l, makeInteger(cf_info->val_results_bufsz));
+	/*
+	 * Look for characters or patterns that are treated specially by read.c
+	 * (either in pg_strtok() or in nodeRead()), and therefore need a
+	 * protective backslash.
+	 */
 
-	return cstring_to_text(nodeToString(l));
+	/* These characters only need to be quoted at the start of the string */
+	if (*s == '<' ||
+		*s == '"' ||
+		isdigit((unsigned char) *s) ||
+		((*s == '+' || *s == '-') &&
+		 (isdigit((unsigned char) s[1]) || s[1] == '.')))
+		appendStringInfoChar(str, '\\');
+	while (*s)
+	{
+		/* These chars must be backslashed anywhere in the string */
+		if (*s == ' ' || *s == '\n' || *s == '\t' ||
+			*s == '(' || *s == ')' || *s == '{' || *s == '}' ||
+			*s == '\\')
+			appendStringInfoChar(str, '\\');
+		appendStringInfoChar(str, *s++);
+	}
 }
+
+static char *pg_strtok_ptr = NULL;
+
+static char *
+readToken(int *length)
+{
+	char	   *local_str;		/* working pointer to string */
+	char	   *ret_str;		/* start of token to return */
+
+	local_str = pg_strtok_ptr;
+
+	while (*local_str == ' ' || *local_str == '\n' || *local_str == '\t')
+		local_str++;
+
+	if (*local_str == '\0')
+	{
+		*length = 0;
+		pg_strtok_ptr = local_str;
+		return NULL;            /* no more tokens */
+	}
+
+	/*
+	 * Now pointing at start of next token.
+	 */
+	ret_str = local_str;
+
+	if (*local_str == '(' || *local_str == ')' ||
+		*local_str == '{' || *local_str == '}')
+	{
+		/* special 1-character token */
+		local_str++;
+	}
+	else
+	{
+		/* Normal token, possibly containing backslashes */
+		while (*local_str != '\0' &&
+			   *local_str != ' ' && *local_str != '\n' &&
+			   *local_str != '\t' &&
+			   *local_str != '(' && *local_str != ')' &&
+			   *local_str != '{' && *local_str != '}')
+		{
+			if (*local_str == '\\' && local_str[1] != '\0')
+				local_str += 2;
+			else
+				local_str++;
+		}
+	}
+
+	*length = local_str - ret_str;
+	/* Recognize special case for "empty" token */
+	if (*length == 2 && ret_str[0] == '<' && ret_str[1] == '>')
+		*length = 0;
+
+	pg_strtok_ptr = local_str;
+
+	return ret_str;
+}
+
+#endif /* PG_VERSION_NUM */
+
+#define WRITE_BOOL_FIELD(fldname)							\
+	appendStringInfo(&str, " :" CppAsString(fldname) " %s",	\
+					 (node->fldname) ? "true" : "false")
+#define WRITE_OID_FIELD(fldname)							\
+	appendStringInfo(&str, " :" CppAsString(fldname) " %u",	\
+					 node->fldname)
+#define WRITE_UINT_FIELD(fldname)							\
+    appendStringInfo(&str, " :" CppAsString(fldname) " %u",	\
+					 node->fldname)
+#define WRITE_LONG_FIELD(fldname)							\
+	appendStringInfo(&str, " :" CppAsString(fldname) " %ld",\
+					 node->fldname)
+#define  WRITE_STRING_FIELD(fldname)						\
+	(appendStringInfo(&str, " :" CppAsString(fldname) " "),	\
+	 outToken(&str, node->fldname))
+
+static text *
+form_plcuda_info(plcudaInfo *node)
+{
+	StringInfoData	str;
+
+	initStringInfo(&str);
+	/* extra_flags */
+	WRITE_UINT_FIELD(extra_flags);
+	/* declarations */
+	WRITE_STRING_FIELD(kern_decl);
+	/* prep kernel */
+	WRITE_STRING_FIELD(kern_prep);
+	WRITE_BOOL_FIELD(kern_prep_maxthreads);
+	WRITE_OID_FIELD(fn_prep_num_threads);
+	WRITE_LONG_FIELD(val_prep_num_threads);
+	WRITE_OID_FIELD(fn_prep_shmem_size);
+	WRITE_LONG_FIELD(val_prep_shmem_size);
+	/* body kernel */
+	WRITE_STRING_FIELD(kern_body);
+	WRITE_BOOL_FIELD(kern_body_maxthreads);
+	WRITE_OID_FIELD(fn_body_num_threads);
+	WRITE_LONG_FIELD(val_body_num_threads);
+	WRITE_OID_FIELD(fn_body_shmem_size);
+	WRITE_LONG_FIELD(val_body_shmem_size);
+	/* post kernel */
+	WRITE_STRING_FIELD(kern_post);
+	WRITE_BOOL_FIELD(kern_post_maxthreads);
+	WRITE_OID_FIELD(fn_post_num_threads);
+	WRITE_LONG_FIELD(val_post_num_threads);
+	WRITE_OID_FIELD(fn_post_shmem_size);
+	WRITE_LONG_FIELD(val_post_shmem_size);
+	/* working buffer */
+	WRITE_OID_FIELD(fn_working_bufsz);
+	WRITE_LONG_FIELD(val_working_bufsz);
+	/* results buffer */
+	WRITE_OID_FIELD(fn_results_bufsz);
+	WRITE_LONG_FIELD(val_results_bufsz);
+
+	return cstring_to_text(str.data);
+}
+
+#define READ_BOOL_FIELD(fldname)		\
+	token = readToken(&length);			\
+	token = readToken(&length);			\
+	local_node->fldname = (*token == 't' ? true : false)
+#define READ_UINT_FIELD(fldname)		\
+    token = readToken(&length);			\
+    token = readToken(&length);			\
+    local_node->fldname = (cl_uint) strtoul((token), NULL, 10)
+#define READ_OID_FIELD(fldname)			\
+    token = readToken(&length);			\
+    token = readToken(&length);			\
+    local_node->fldname = (Oid) strtoul(token, NULL, 10)
+#define READ_LONG_FIELD(fldname)		\
+	token = readToken(&length);			\
+    token = readToken(&length);			\
+    local_node->fldname = atol(token)
+#define READ_STRING_FIELD(fldname)		\
+    token = readToken(&length);			\
+    token = readToken(&length);			\
+    local_node->fldname = (length == 0 ? NULL : debackslash(token, length))
 
 static plcudaInfo *
 deform_plcuda_info(text *cf_info_text)
 {
-	plcudaInfo *cf_info = palloc0(sizeof(plcudaInfo));
-	List	   *l = stringToNode(VARDATA(cf_info_text));
-	cl_uint		index = 0;
+	plcudaInfo *local_node = palloc0(sizeof(plcudaInfo));
+	char	   *save_strtok = pg_strtok_ptr;
+	char	   *token;
+	int			length;
 
-	cf_info->extra_flags = intVal(list_nth(l, index++));
+	pg_strtok_ptr = text_to_cstring(cf_info_text);
+
+	READ_UINT_FIELD(extra_flags);
 	/* declarations */
-	cf_info->kern_decl = strVal(list_nth(l, index++));
-	if (cf_info->kern_decl[0] == '\0')
-		cf_info->kern_decl = NULL;
+	READ_STRING_FIELD(kern_decl);
 	/* prep kernel */
-	cf_info->kern_prep = strVal(list_nth(l, index++));
-	if (cf_info->kern_prep[0] == '\0')
-		cf_info->kern_prep = NULL;
-	cf_info->fn_prep_num_threads = intVal(list_nth(l, index++));
-	cf_info->val_prep_num_threads = intVal(list_nth(l, index++));
-	cf_info->fn_prep_shmem_size = intVal(list_nth(l, index++));
-	cf_info->val_prep_shmem_size = intVal(list_nth(l, index++));
+	READ_STRING_FIELD(kern_prep);
+	READ_BOOL_FIELD(kern_prep_maxthreads);
+	READ_OID_FIELD(fn_prep_num_threads);
+	READ_LONG_FIELD(val_prep_num_threads);
+	READ_OID_FIELD(fn_prep_shmem_size);
+	READ_LONG_FIELD(val_prep_shmem_size);
 	/* body kernel */
-	cf_info->kern_body = strVal(list_nth(l, index++));
-	if (cf_info->kern_body[0] == '\0')
-		cf_info->kern_body = NULL;
-	cf_info->fn_body_num_threads = intVal(list_nth(l, index++));
-	cf_info->val_body_num_threads = intVal(list_nth(l, index++));
-	cf_info->fn_body_shmem_size = intVal(list_nth(l, index++));
-	cf_info->val_body_shmem_size = intVal(list_nth(l, index++));
-	/* post kernel */
-	cf_info->kern_post = strVal(list_nth(l, index++));
-	if (cf_info->kern_post[0] == '\0')
-		cf_info->kern_post = NULL;
-	cf_info->fn_post_num_threads = intVal(list_nth(l, index++));
-	cf_info->val_post_num_threads = intVal(list_nth(l, index++));
-	cf_info->fn_post_shmem_size = intVal(list_nth(l, index++));
-	cf_info->val_post_shmem_size = intVal(list_nth(l, index++));
+	READ_STRING_FIELD(kern_body);
+	READ_BOOL_FIELD(kern_body_maxthreads);
+	READ_OID_FIELD(fn_body_num_threads);
+	READ_LONG_FIELD(val_body_num_threads);
+	READ_OID_FIELD(fn_body_shmem_size);
+	READ_LONG_FIELD(val_body_shmem_size);
+	/* post kernel  */
+	READ_STRING_FIELD(kern_post);
+	READ_BOOL_FIELD(kern_post_maxthreads);
+	READ_OID_FIELD(fn_post_num_threads);
+	READ_LONG_FIELD(val_post_num_threads);
+	READ_OID_FIELD(fn_post_shmem_size);
+	READ_LONG_FIELD(val_post_shmem_size);
 	/* working buffer */
-	cf_info->fn_working_bufsz = intVal(list_nth(l, index++));
-	cf_info->val_working_bufsz = intVal(list_nth(l, index++));
+	READ_OID_FIELD(fn_working_bufsz);
+	READ_LONG_FIELD(val_working_bufsz);
 	/* results buffer */
-	cf_info->fn_results_bufsz = intVal(list_nth(l, index++));
-	cf_info->val_results_bufsz = intVal(list_nth(l, index++));
+	READ_OID_FIELD(fn_results_bufsz);
+	READ_LONG_FIELD(val_results_bufsz);
 
-	return cf_info;
+	pg_strtok_ptr = save_strtok;
+
+	return local_node;
 }
 
 /*
@@ -165,8 +298,19 @@ typedef struct plcudaState
 	ResourceOwner	owner;
 	GpuContext	   *gcontext;
 	plcudaInfo		cf_info;
+	/* helper functions */
+	FmgrInfo		fmgr_prep_num_threads;
+	FmgrInfo		fmgr_prep_shmem_size;
+	FmgrInfo		fmgr_body_num_threads;
+	FmgrInfo		fmgr_body_shmem_size;
+	FmgrInfo		fmgr_post_num_threads;
+	FmgrInfo		fmgr_post_shmem_size;
+	FmgrInfo		fmgr_working_bufsz;
+	FmgrInfo		fmgr_results_bufsz;
+	/* GPU resources */
+	cl_int			cuda_index;
 	CUfunction		kern_prep;
-	CUfunction		kern_main;
+	CUfunction		kern_body;
 	CUfunction		kern_post;
 	CUmodule	   *cuda_modules;
 } plcudaState;
@@ -808,6 +952,9 @@ __plcuda_cleanup_resources(plcudaState *state)
 	{
 		CUresult	rc;
 
+		if (!state->cuda_modules[i])
+			continue;
+
 		rc = cuModuleUnload(state->cuda_modules[i]);
 		if (rc != CUDA_SUCCESS)
 			elog(WARNING, "failed on cuModuleUnload: %s", errorText(rc));
@@ -850,6 +997,9 @@ plcuda_exec_begin(Form_pg_proc proc_form, plcudaInfo *cf_info)
 	char		   *kern_source;
 	CUmodule	   *cuda_modules;
 	plcudaState	   *state;
+	char			namebuf[NAMEDATALEN + 40];
+	CUresult		rc;
+	int				index;
 
 	/* construct a flat kernel source then load cuda module */
 	kern_source = plcuda_codegen(proc_form, cf_info);
@@ -869,8 +1019,79 @@ plcuda_exec_begin(Form_pg_proc proc_form, plcudaInfo *cf_info)
 	state->cf_info.kern_post = NULL;
 	state->cuda_modules = cuda_modules;
 
+	/* helper functions */
+	if (OidIsValid(cf_info->fn_prep_num_threads))
+		fmgr_info(cf_info->fn_prep_num_threads,
+				  &state->fmgr_prep_num_threads);
+	if (OidIsValid(cf_info->fn_prep_shmem_size))
+		fmgr_info(cf_info->fn_prep_shmem_size,
+				  &state->fmgr_prep_shmem_size);
+	if (OidIsValid(cf_info->fn_body_num_threads))
+		fmgr_info(cf_info->fn_body_num_threads,
+				  &state->fmgr_body_num_threads);
+	if (OidIsValid(cf_info->fn_body_shmem_size))
+		fmgr_info(cf_info->fn_body_shmem_size,
+				  &state->fmgr_body_shmem_size);
+	if (OidIsValid(cf_info->fn_post_num_threads))
+		fmgr_info(cf_info->fn_post_num_threads,
+				  &state->fmgr_post_num_threads);
+	if (OidIsValid(cf_info->fn_post_shmem_size))
+		fmgr_info(cf_info->fn_post_shmem_size,
+				  &state->fmgr_post_shmem_size);
+	if (OidIsValid(cf_info->fn_working_bufsz))
+		fmgr_info(cf_info->fn_working_bufsz,
+				  &state->fmgr_working_bufsz);
+	if (OidIsValid(cf_info->fn_results_bufsz))
+		fmgr_info(cf_info->fn_results_bufsz,
+				  &state->fmgr_results_bufsz);
+
 	/* track state */
 	dlist_push_head(&plcuda_state_list, &state->chain);
+
+	/* resolve kernel functions */
+	index = (gcontext->next_context++ % gcontext->num_context);
+	state->cuda_index = index;
+
+	rc = cuCtxPushCurrent(gcontext->gpu[index].cuda_context);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
+
+	if (cf_info->kern_decl)
+	{
+		snprintf(namebuf, sizeof(namebuf), "plcuda_%s_prep",
+				 NameStr(proc_form->proname));
+		rc = cuModuleGetFunction(&state->kern_prep,
+								 state->cuda_modules[index],
+								 namebuf);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
+	}
+
+	if (cf_info->kern_body)
+	{
+		snprintf(namebuf, sizeof(namebuf), "plcuda_%s",
+				 NameStr(proc_form->proname));
+		rc = cuModuleGetFunction(&state->kern_body,
+								 state->cuda_modules[index],
+								 namebuf);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
+	}
+
+	if (cf_info->kern_post)
+	{
+		snprintf(namebuf, sizeof(namebuf), "plcuda_%s_post",
+				 NameStr(proc_form->proname));
+		rc = cuModuleGetFunction(&state->kern_post,
+								 state->cuda_modules[index],
+								 namebuf);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
+	}
+
+	rc = cuCtxPopCurrent(NULL);
+	if (rc != CUDA_SUCCESS)
+		elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
 
 	return state;
 }
@@ -959,9 +1180,9 @@ plcuda_function_validator(PG_FUNCTION_ARGS)
 	 */
 	memset(&cf_info, 0, sizeof(plcudaInfo));
 	cf_info.extra_flags = extra_flags;
-	cf_info.fn_prep_num_threads = 1;	/* default */
-	cf_info.fn_body_num_threads = 1;	/* default */
-	cf_info.fn_post_num_threads = 1;	/* default */
+	cf_info.val_prep_num_threads = 1;	/* default */
+	cf_info.val_body_num_threads = 1;	/* default */
+	cf_info.val_post_num_threads = 1;	/* default */
 
 	source = TextDatumGetCString(values[Anum_pg_proc_prosrc - 1]);
 	plcuda_code_validation(&cf_info, procForm, source);
@@ -1066,16 +1287,130 @@ PG_FUNCTION_INFO_V1(plcuda_function_validator);
 
 
 
+static inline Size
+kernel_launch_param(FunctionCallInfo fcinfo,
+					FmgrInfo *__flinfo, Size const_setting)
+{
+	FunctionCallInfoData __fcinfo;
+	Datum		__result;
 
+	if (!OidIsValid(__flinfo->fn_oid))
+		return const_setting;
+
+	InitFunctionCallInfoData(__fcinfo, __flinfo,
+							 fcinfo->nargs,
+							 fcinfo->fncollation,
+							 NULL, NULL);
+	memcpy(__fcinfo.arg, fcinfo->arg,
+		   sizeof(Datum) * fcinfo->nargs);
+	memcpy(__fcinfo.argnull, fcinfo->argnull,
+		   sizeof(bool) * fcinfo->nargs);
+
+	__result = FunctionCallInvoke(&__fcinfo);
+	if (__fcinfo.isnull)
+		elog(ERROR, "function %u returned NULL", __fcinfo.flinfo->fn_oid);
+
+	return (Size) DatumGetInt64(__result);
+}
 
 Datum
 plcuda_function_handler(PG_FUNCTION_ARGS)
 {
-	// construct kernel code
+	FmgrInfo	   *flinfo = fcinfo->flinfo;
+	plcudaState	   *state;
+	plcudaInfo	   *cf_info;
+	Size			prep_num_threads;
+	Size			prep_shmem_size;
+	Size			body_num_threads;
+	Size			body_shmem_size;
+	Size			post_num_threads;
+	Size			post_shmem_size;
+	Size			working_bufsz;
+	Size			results_bufsz;
 
-	// setup param buffer
+	if (flinfo->fn_extra)
+		state = (plcudaState *) flinfo->fn_extra;
+	else
+	{
+		HeapTuple	tuple;
+		Datum		probin;
+		bool		isnull;
 
-	elog(ERROR, "not implemented yet");
+		tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(flinfo->fn_oid));
+		if (!HeapTupleIsValid(tuple))
+			elog(ERROR, "cache lookup failed for function %u",
+				 flinfo->fn_oid);
+
+		probin = SysCacheGetAttr(PROCOID, tuple,
+								 Anum_pg_proc_probin,
+								 &isnull);
+		if (isnull)
+			elog(ERROR, "Bug? plcudaInfo was not built yet");
+		cf_info = deform_plcuda_info(DatumGetTextP(probin));
+
+		state = plcuda_exec_begin((Form_pg_proc) GETSTRUCT(tuple), cf_info);
+
+		ReleaseSysCache(tuple);
+		flinfo->fn_extra = state;
+	}
+
+	/* determine the kernel launch parameters */
+	cf_info = &state->cf_info;
+	if (state->kern_prep)
+	{
+		prep_num_threads = kernel_launch_param(fcinfo,
+											   &state->fmgr_prep_num_threads,
+											   cf_info->val_prep_num_threads);
+		prep_shmem_size = kernel_launch_param(fcinfo,
+											  &state->fmgr_prep_shmem_size,
+											  cf_info->val_prep_shmem_size);
+		elog(INFO, "prep_num_threads = %zu, prep_shmem_size = %zu",
+			 prep_num_threads, prep_shmem_size);
+	}
+
+	if (state->kern_body)
+	{
+		body_num_threads = kernel_launch_param(fcinfo,
+											   &state->fmgr_body_num_threads,
+											   cf_info->val_body_num_threads);
+		body_shmem_size = kernel_launch_param(fcinfo,
+											  &state->fmgr_body_shmem_size,
+											  cf_info->val_body_shmem_size);
+		elog(INFO, "body_num_threads = %zu, body_shmem_size = %zu",
+			 body_num_threads, body_shmem_size);
+	}
+
+	if (state->kern_post)
+	{
+		post_num_threads = kernel_launch_param(fcinfo,
+											   &state->fmgr_post_num_threads,
+											   cf_info->val_post_num_threads);
+		post_shmem_size = kernel_launch_param(fcinfo,
+											  &state->fmgr_post_shmem_size,
+											  cf_info->val_post_shmem_size);
+		elog(INFO, "post_num_threads = %zu, post_shmem_size = %zu",
+			 post_num_threads, post_shmem_size);
+	}
+
+	working_bufsz = kernel_launch_param(fcinfo,
+										&state->fmgr_working_bufsz,
+										cf_info->val_working_bufsz);
+	results_bufsz = kernel_launch_param(fcinfo,
+										&state->fmgr_results_bufsz,
+										cf_info->val_results_bufsz);
+	elog(INFO, "working_bufsz = %zu, results_bufsz = %zu",
+		 working_bufsz, results_bufsz);
+
+
+
+	/* construction of the parambuf by function arguments */
+
+
+	/* call the kernel */
+
+
+	/* reconstruct the result */
+
 
 	PG_RETURN_VOID();
 }
