@@ -27,10 +27,10 @@
 #include "utils/rel.h"
 #include "utils/syscache.h"
 #include "pg_strom.h"
+#include "cuda_plcuda.h"
 
 
-
-typedef struct plcuda_func_info
+typedef struct plcudaInfo
 {
 	cl_uint	extra_flags;
 	/* kernel declarations */
@@ -66,13 +66,13 @@ typedef struct plcuda_func_info
 	/* device memory size for result buffer */
 	Oid		fn_results_bufsz;
 	Size	val_results_bufsz;
-} plcuda_func_info;
+} plcudaInfo;
 
 /*
  * XXX - to be revised to use ExtensibleNode in 9.6 based implementation
  */
 static text *
-form_plcuda_func_info(plcuda_func_info *cf_info)
+form_plcuda_info(plcudaInfo *cf_info)
 {
 	List   *l = NIL;
 
@@ -110,30 +110,38 @@ form_plcuda_func_info(plcuda_func_info *cf_info)
 	return cstring_to_text(nodeToString(l));
 }
 
-static plcuda_func_info *
-deform_plcuda_func_info(text *cf_info_text)
+static plcudaInfo *
+deform_plcuda_info(text *cf_info_text)
 {
-	plcuda_func_info *cf_info = palloc0(sizeof(plcuda_func_info));
+	plcudaInfo *cf_info = palloc0(sizeof(plcudaInfo));
 	List	   *l = stringToNode(VARDATA(cf_info_text));
 	cl_uint		index = 0;
 
 	cf_info->extra_flags = intVal(list_nth(l, index++));
 	/* declarations */
 	cf_info->kern_decl = strVal(list_nth(l, index++));
+	if (cf_info->kern_decl[0] == '\0')
+		cf_info->kern_decl = NULL;
 	/* prep kernel */
 	cf_info->kern_prep = strVal(list_nth(l, index++));
+	if (cf_info->kern_prep[0] == '\0')
+		cf_info->kern_prep = NULL;
 	cf_info->fn_prep_num_threads = intVal(list_nth(l, index++));
 	cf_info->val_prep_num_threads = intVal(list_nth(l, index++));
 	cf_info->fn_prep_shmem_size = intVal(list_nth(l, index++));
 	cf_info->val_prep_shmem_size = intVal(list_nth(l, index++));
 	/* body kernel */
 	cf_info->kern_body = strVal(list_nth(l, index++));
+	if (cf_info->kern_body[0] == '\0')
+		cf_info->kern_body = NULL;
 	cf_info->fn_body_num_threads = intVal(list_nth(l, index++));
 	cf_info->val_body_num_threads = intVal(list_nth(l, index++));
 	cf_info->fn_body_shmem_size = intVal(list_nth(l, index++));
 	cf_info->val_body_shmem_size = intVal(list_nth(l, index++));
 	/* post kernel */
 	cf_info->kern_post = strVal(list_nth(l, index++));
+	if (cf_info->kern_post[0] == '\0')
+		cf_info->kern_post = NULL;
 	cf_info->fn_post_num_threads = intVal(list_nth(l, index++));
 	cf_info->val_post_num_threads = intVal(list_nth(l, index++));
 	cf_info->fn_post_shmem_size = intVal(list_nth(l, index++));
@@ -147,6 +155,31 @@ deform_plcuda_func_info(text *cf_info_text)
 
 	return cf_info;
 }
+
+/*
+ * plcudaState - runtime state of pl/cuda functions
+ */
+typedef struct plcudaState
+{
+	dlist_node		chain;
+	ResourceOwner	owner;
+	GpuContext	   *gcontext;
+	plcudaInfo		cf_info;
+	CUfunction		kern_prep;
+	CUfunction		kern_main;
+	CUfunction		kern_post;
+	CUmodule	   *cuda_modules;
+} plcudaState;
+
+/*
+ * static functions
+ */
+static plcudaState *plcuda_exec_begin(Form_pg_proc proc_form,
+									  plcudaInfo *cf_info);
+static void plcuda_exec_end(plcudaState *state);
+
+/* tracker of plcudaState */
+static dlist_head	plcuda_state_list;
 
 /*
  * plcuda_parse_cmdline
@@ -340,7 +373,7 @@ ident_to_cstring(List *ident)
  * #plcuda_cpu_fallback {<function>}             (default: no fallback)
  */
 static void
-plcuda_code_validation(plcuda_func_info *cf_info,
+plcuda_code_validation(plcudaInfo *cf_info,
 					   Form_pg_proc proc_form, char *source)
 {
 	StringInfoData	decl;
@@ -621,21 +654,29 @@ plcuda_code_validation(plcuda_func_info *cf_info,
 				appendStringInfo(&emsg, "\n%u: %s unknown include target: %s",
 								 lineno, cmd, target);
 		}
+		else
+		{
+			appendStringInfo(&emsg, "\n%u: unknown command: %s",
+							 lineno, cmd);
+		}
 	}
+	if (curr)
+		appendStringInfo(
+			&emsg, "\n%u: code block was not closed", lineno);
+
+	if (!has_body_block)
+		appendStringInfo(
+			&emsg, "\n%u: no '#plcuda_begin' ... #plcuda_end' block", lineno);
 
 	if (emsg.len > 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_SYNTAX_ERROR),
 				 errmsg("pl/cuda function syntax error\n%s", emsg.data)));
 
-	if (has_decl_block)
-		cf_info->kern_decl = decl.data;
-	if (has_prep_block)
-		cf_info->kern_prep = prep.data;
-	if (has_body_block)
-		cf_info->kern_body = body.data;
-	if (has_post_block)
-		cf_info->kern_post = post.data;
+	cf_info->kern_decl = decl.data;
+	cf_info->kern_prep = prep.data;
+	cf_info->kern_body = body.data;
+	cf_info->kern_post = post.data;
 
 	pfree(emsg.data);
 }
@@ -649,65 +690,71 @@ plcuda_code_validation(plcuda_func_info *cf_info,
 static void
 __plcuda_codegen(StringInfo kern,
 				 const char *suffix,
-				 const char *kernel_body,
+				 const char *users_code,
 				 bool kernel_maxthreads,
 				 Form_pg_proc procForm)
 {
-	devtype_info   *dtype;
+	devtype_info   *dtype_r;
+	devtype_info   *dtype_a;
 	int		i;
 
 	appendStringInfo(
 		kern,
 		"KERNEL_FUNCTION%s(void)\n"
-		"plcuda_%s_%s(kern_plcuda *kplcuda, void *workbuf, void *results)\n"
+		"plcuda_%s%s(kern_plcuda *kplcuda, void *workbuf, void *results)\n"
 		"{\n"
+		"  kern_parambuf *kparams = &kplcuda->kparams;\n"
 		"  kern_context kcxt;\n",
 		kernel_maxthreads ? "_MAXTHREADS" : "",
-		NameStr(procForm->proname), suffix);
+		NameStr(procForm->proname), suffix ? suffix : "");
 
 	/* setup results buffer */
-	dtype = pgstrom_devtype_lookup(procForm->prorettype);
-	if (!dtype)
+	dtype_r = pgstrom_devtype_lookup(procForm->prorettype);
+	if (!dtype_r)
 		elog(ERROR, "cache lookup failed for type '%s'",
 			 format_type_be(procForm->prorettype));
 	appendStringInfo(
 		kern,
-		"  pg_%s_t *retval = (pg_%s_t *)kplcuda->__retval;\n",
-		dtype->type_name, dtype->type_name);
+		"  pg_%s_t *retval __attribute__ ((unused));\n",
+		dtype_r->type_name);
 
 	for (i=0; i < procForm->pronargs; i++)
 	{
 		Oid		type_oid = procForm->proargtypes.values[i];
 
-		dtype = pgstrom_devtype_lookup(type_oid);
-		if (!dtype)
+		dtype_a = pgstrom_devtype_lookup(type_oid);
+		if (!dtype_a)
 			elog(ERROR, "cache lookup failed for type '%s'",
 				 format_type_be(type_oid));
 		appendStringInfo(
 			kern,
-			"  pg_%s_t karg_%u;\n",
-			dtype->type_name, i+1);
+			"  pg_%s_t karg_%u __attribute__((unused));\n",
+			dtype_a->type_name, i+1);
 	}
 	appendStringInfo(
 		kern,
 		"\n"
 		"  assert(sizeof(*retval) <= sizeof(kplcuda->__retval));\n"
-		"  INIT_KERNEL_CONTEXT(&kcxt,plcuda_%s_kernel,&kplcuda->kparams);\n"
+		"  INIT_KERNEL_CONTEXT(&kcxt,plcuda%s_kernel,kparams);\n"
 		"\n",
-		suffix);
+		suffix ? suffix : "");
+
+	appendStringInfo(
+		kern,
+		"  retval = (pg_%s_t *)kplcuda->__retval;\n", dtype_r->type_name);
 
 	for (i=0; i < procForm->pronargs; i++)
 	{
 		Oid		type_oid = procForm->proargtypes.values[i];
 
-		dtype = pgstrom_devtype_lookup(type_oid);
-		if (!dtype)
+		dtype_a = pgstrom_devtype_lookup(type_oid);
+		if (!dtype_a)
 			elog(ERROR, "cache lookup failed for type '%s'",
 				 format_type_be(type_oid));
 		appendStringInfo(
 			kern,
 			"  karg_%u = pg_%s_param(&kcxt,%d);\n",
-			i+1, dtype->type_name, i+1);
+			i+1, dtype_a->type_name, i+1);
 	}
 
 	appendStringInfo(
@@ -717,14 +764,14 @@ __plcuda_codegen(StringInfo kern,
 		"%s"
 		"  /* ---- code by pl/cuda function ---- */\n"
 		"out:\n"
-		"  kern_writeback_error_status(&plcuda->kerror, kcxt.e);\n"
+		"  kern_writeback_error_status(&kplcuda->kerror, kcxt.e);\n"
 		"}\n\n",
-		kernel_body);
+		users_code);
 }
 
 static char *
 plcuda_codegen(Form_pg_proc procForm,
-			   plcuda_func_info *cf_info)
+			   plcudaInfo *cf_info)
 {
 	StringInfoData	kern;
 
@@ -733,17 +780,17 @@ plcuda_codegen(Form_pg_proc procForm,
 	if (cf_info->kern_decl)
 		appendStringInfo(&kern, "%s\n", cf_info->kern_decl);
 	if (cf_info->kern_prep)
-		__plcuda_codegen(&kern, "prep",
+		__plcuda_codegen(&kern, "_prep",
 						 cf_info->kern_prep,
 						 cf_info->kern_prep_maxthreads,
 						 procForm);
 	if (cf_info->kern_body)
-		__plcuda_codegen(&kern, "main",
+		__plcuda_codegen(&kern, NULL,
 						 cf_info->kern_body,
 						 cf_info->kern_body_maxthreads,
 						 procForm);
 	if (cf_info->kern_post)
-		__plcuda_codegen(&kern, "post",
+		__plcuda_codegen(&kern, "_post",
 						 cf_info->kern_post,
 						 cf_info->kern_post_maxthreads,
 						 procForm);
@@ -752,22 +799,88 @@ plcuda_codegen(Form_pg_proc procForm,
 }
 
 static void
-plcuda_setup_cuda_program(GpuContext *gcontext,
-						  Form_pg_proc procForm,
-						  plcuda_func_info *cf_info)
+__plcuda_cleanup_resources(plcudaState *state)
 {
-	char	   *kern_source = plcuda_codegen(procForm, cf_info);
-	CUmodule   *cuda_modules;
+	GpuContext	   *gcontext = state->gcontext;
+	cl_uint			i, ndevs = gcontext->num_context;
 
+	for (i=0; i < ndevs; i++)
+	{
+		CUresult	rc;
+
+		rc = cuModuleUnload(state->cuda_modules[i]);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuModuleUnload: %s", errorText(rc));
+	}
+	pfree(state->cuda_modules);
+	pfree(state);
+
+	pgstrom_put_gpucontext(gcontext);
+}
+
+static void
+plcuda_cleanup_resources(ResourceReleasePhase phase,
+						 bool isCommit,
+						 bool isTopLevel,
+						 void *private)
+{
+	dlist_mutable_iter iter;
+
+	if (phase != RESOURCE_RELEASE_BEFORE_LOCKS)
+		return;
+
+	dlist_foreach_modify(iter, &plcuda_state_list)
+	{
+		plcudaState	   *state = (plcudaState *)
+			dlist_container(plcudaState, chain, iter.cur);
+
+		if (state->owner == CurrentResourceOwner)
+		{
+			/* detach state */
+			dlist_delete(&state->chain);
+			__plcuda_cleanup_resources(state);
+		}
+	}
+}
+
+static plcudaState *
+plcuda_exec_begin(Form_pg_proc proc_form, plcudaInfo *cf_info)
+{
+	GpuContext	   *gcontext = pgstrom_get_gpucontext();
+	char		   *kern_source;
+	CUmodule	   *cuda_modules;
+	plcudaState	   *state;
+
+	/* construct a flat kernel source then load cuda module */
+	kern_source = plcuda_codegen(proc_form, cf_info);
 	cuda_modules = plcuda_load_cuda_program(gcontext,
 											kern_source,
 											cf_info->extra_flags);
 
-	// register cuda module for release on gpucontext detach
+	/* construct plcudaState */
+	state = MemoryContextAllocZero(gcontext->memcxt,
+								   sizeof(plcudaState));
+	state->owner = CurrentResourceOwner;
+	state->gcontext = gcontext;
+	memcpy(&state->cf_info, cf_info, sizeof(plcudaInfo));
+	state->cf_info.kern_decl = NULL;
+	state->cf_info.kern_prep = NULL;
+	state->cf_info.kern_body = NULL;
+	state->cf_info.kern_post = NULL;
+	state->cuda_modules = cuda_modules;
 
+	/* track state */
+	dlist_push_head(&plcuda_state_list, &state->chain);
+
+	return state;
 }
 
-
+static void
+plcuda_exec_end(plcudaState *state)
+{
+	dlist_delete(&state->chain);
+	__plcuda_cleanup_resources(state);
+}
 
 Datum
 plcuda_function_validator(PG_FUNCTION_ARGS)
@@ -779,14 +892,17 @@ plcuda_function_validator(PG_FUNCTION_ARGS)
 	Form_pg_proc	procForm;
 	bool			isnull[Natts_pg_proc];
 	Datum			values[Natts_pg_proc];
-	plcuda_func_info cf_info;
+	plcudaInfo cf_info;
 	devtype_info   *dtype;
 	char		   *source;
 	cl_uint			extra_flags = DEVKERNEL_NEEDS_PLCUDA;
 	cl_uint			i;
-	GpuContext	   *gcontext;
+	plcudaState	   *state;
 	ObjectAddress	myself;
 	ObjectAddress	referenced;
+
+	if (!CheckFunctionValidatorAccess(fcinfo->flinfo->fn_oid, func_oid))
+		PG_RETURN_VOID();
 
 	rel = heap_open(ProcedureRelationId, RowExclusiveLock);
 	tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(func_oid));
@@ -839,9 +955,9 @@ plcuda_function_validator(PG_FUNCTION_ARGS)
 		elog(ERROR, "Bug? pg_proc.probin has non-NULL preset value");
 
 	/*
-	 * Do syntax checks and construction of plcuda_func_info
+	 * Do syntax checks and construction of plcudaInfo
 	 */
-	memset(&cf_info, 0, sizeof(plcuda_func_info));
+	memset(&cf_info, 0, sizeof(plcudaInfo));
 	cf_info.extra_flags = extra_flags;
 	cf_info.fn_prep_num_threads = 1;	/* default */
 	cf_info.fn_body_num_threads = 1;	/* default */
@@ -850,16 +966,15 @@ plcuda_function_validator(PG_FUNCTION_ARGS)
 	source = TextDatumGetCString(values[Anum_pg_proc_prosrc - 1]);
 	plcuda_code_validation(&cf_info, procForm, source);
 
-	gcontext = pgstrom_get_gpucontext();
-	plcuda_setup_cuda_program(gcontext, procForm, &cf_info);
-	pgstrom_put_gpucontext(gcontext);
+	state = plcuda_exec_begin(procForm, &cf_info);
+	plcuda_exec_end(state);
 
 	/*
 	 * OK, supplied function is compilable. Update the catalog.
 	 */
 	isnull[Anum_pg_proc_probin - 1] = false;
 	values[Anum_pg_proc_probin - 1] =
-		PointerGetDatum(form_plcuda_func_info(&cf_info));
+		PointerGetDatum(form_plcuda_info(&cf_info));
 
 	newtup = heap_form_tuple(RelationGetDescr(rel), values, isnull);
 	simple_heap_update(rel, &tuple->t_self, newtup);
@@ -965,3 +1080,14 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 	PG_RETURN_VOID();
 }
 PG_FUNCTION_INFO_V1(plcuda_function_handler);
+
+/*
+ * pgstrom_init_plcuda
+ */
+void
+pgstrom_init_plcuda(void)
+{
+	dlist_init(&plcuda_state_list);
+
+	RegisterResourceReleaseCallback(plcuda_cleanup_resources, NULL);
+}

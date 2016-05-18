@@ -433,6 +433,9 @@ construct_flat_cuda_source(const char *kern_source,
 	/* GpuSort */
 	if (extra_flags & DEVKERNEL_NEEDS_GPUSORT)
 		appendStringInfoString(&source, pgstrom_cuda_gpusort_code);
+	/* PL/CUDA functions */
+	if (extra_flags & DEVKERNEL_NEEDS_PLCUDA)
+		appendStringInfoString(&source, pgstrom_cuda_plcuda_code);
 
 	/* Source code generated on the fly */
 	appendStringInfoString(&source, kern_source);

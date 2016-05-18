@@ -400,6 +400,7 @@ _PG_init(void)
 	/* miscellaneous initializations */
 	pgstrom_init_misc_guc();
 	pgstrom_init_codegen();
+	pgstrom_init_plcuda();
 
 	/* overall planner hook registration */
 	planner_hook_next = planner_hook;

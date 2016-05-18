@@ -545,3 +545,22 @@ CREATE AGGREGATE pgstrom.regr_syy(int4, float8, float8,
   finalfunc = pg_catalog.float8_regr_syy,
   initcond = '{0,0,0,0,0,0}'
 );
+
+--
+-- Functions/Languages to support PL/CUDA
+--
+CREATE FUNCTION pgstrom.plcuda_function_validator(oid)
+  RETURNS void
+  AS 'MODULE_PATHNAME','plcuda_function_validator'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pgstrom.plcuda_function_handler()
+  RETURNS language_handler
+  AS 'MODULE_PATHNAME','plcuda_function_handler'
+  LANGUAGE C STRICT;
+
+CREATE LANGUAGE plcuda
+  HANDLER pgstrom.plcuda_function_handler
+  VALIDATOR pgstrom.plcuda_function_validator;
+COMMENT ON LANGUAGE plcuda IS 'PL/CUDA procedural language';
+
