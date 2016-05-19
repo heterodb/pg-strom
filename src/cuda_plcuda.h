@@ -35,11 +35,31 @@ typedef struct
 	 *   --> valid varlena if 'results' != NULL
 	 */
 	char			__retval[__DATATYPE_MAX_WIDTH];
+	cl_uint			prep_num_threads;
+	cl_uint			prep_shmem_size;
+	cl_uint			body_num_threads;
+	cl_uint			body_shmem_size;
+	cl_uint			post_num_threads;
+	cl_uint			post_shmem_size;
 	cl_ulong		working_bufsz;
 	cl_ulong		working_usage;
 	cl_ulong		results_bufsz;
 	cl_ulong		results_usage;
-	kern_parambuf	kparams;
+	cl_uint			total_length;	/* total lenght including kparams buffer */
+	cl_uint			nargs;
+	kern_colmeta	retmeta;
+	kern_colmeta	argmeta[FLEXIBLE_ARRAY_MEMBER];	/* metadata of arguments */
 } kern_plcuda;
+
+#define KERN_PLCUDA_PARAMBUF(kplcuda)			\
+	((kern_parambuf *)((char *)(kplcuda) +		\
+					   STROMALIGN(offsetof(kern_plcuda,		\
+										   argmeta[(kplcuda)->nargs]))))
+#define KERN_PLCUDA_PARAMBUF_LENGTH(kplcuda)	\
+	(KERN_PLCUDA_PARAMBUF(kplcuda)->length)
+#define KERN_PLCUDA_DMASEND_LENGTH(kplcuda)		\
+	((kplcuda)->total_length)
+#define KERN_PLCUDA_DMARECV_LENGTH(kplcuda)		\
+	(offsetof(kern_plcuda, retmeta))
 
 #endif	/* CUDA_PLCUDA.H */
