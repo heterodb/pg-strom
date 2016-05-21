@@ -37,8 +37,8 @@ typedef struct
 	char			__retval[__DATATYPE_MAX_WIDTH];
 	cl_uint			prep_num_threads;
 	cl_uint			prep_shmem_size;
-	cl_uint			body_num_threads;
-	cl_uint			body_shmem_size;
+	cl_uint			main_num_threads;
+	cl_uint			main_shmem_size;
 	cl_uint			post_num_threads;
 	cl_uint			post_shmem_size;
 	cl_ulong		working_bufsz;
