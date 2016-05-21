@@ -874,7 +874,7 @@ __plcuda_codegen(StringInfo kern,
 				 format_type_be(type_oid));
 		appendStringInfo(
 			kern,
-			"  pg_%s_t karg_%u __attribute__((unused));\n",
+			"  pg_%s_t arg%u __attribute__((unused));\n",
 			dtype_a->type_name, i+1);
 	}
 	appendStringInfo(
@@ -904,8 +904,8 @@ __plcuda_codegen(StringInfo kern,
 				 format_type_be(type_oid));
 		appendStringInfo(
 			kern,
-			"  karg_%u = pg_%s_param(&kcxt,%d);\n",
-			i+1, dtype_a->type_name, i+1);
+			"  arg%u = pg_%s_param(&kcxt,%d);\n",
+			i+1, dtype_a->type_name, i);
 	}
 
 	appendStringInfo(
@@ -1419,19 +1419,25 @@ __build_kern_plcuda(FunctionCallInfo fcinfo,
 
 		if (fcinfo->argnull[i])
 			kparams->poffset[i] = 0;	/* null */
-		else if (cmeta.attbyval)
-		{
-			Assert(cmeta.attlen > 0);
-			memcpy((char *)kparams + offset, &fcinfo->arg[i], cmeta.attlen);
-			offset += MAXALIGN(cmeta.attlen);
-		}
 		else
 		{
-			char   *vl_ptr = DatumGetPointer(fcinfo->arg[i]);
-			Size	vl_len = VARSIZE_ANY(vl_ptr);
+			kparams->poffset[i] = offset;
+			if (cmeta.attbyval)
+			{
+				Assert(cmeta.attlen > 0);
+				memcpy((char *)kparams + offset,
+					   &fcinfo->arg[i],
+					   cmeta.attlen);
+				offset += MAXALIGN(cmeta.attlen);
+			}
+			else
+			{
+				char   *vl_ptr = DatumGetPointer(fcinfo->arg[i]);
+				Size	vl_len = VARSIZE_ANY(vl_ptr);
 
-			memcpy((char *)kparams + offset, vl_ptr, vl_len);
-			offset += MAXALIGN(vl_len);
+				memcpy((char *)kparams + offset, vl_ptr, vl_len);
+				offset += MAXALIGN(vl_len);
+			}
 		}
 	}
 	kparams->nparams = fcinfo->nargs;
