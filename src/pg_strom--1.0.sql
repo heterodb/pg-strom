@@ -564,3 +564,48 @@ CREATE LANGUAGE plcuda
   VALIDATOR pgstrom.plcuda_function_validator;
 COMMENT ON LANGUAGE plcuda IS 'PL/CUDA procedural language';
 
+--
+-- Matrix data type
+--
+CREATE FUNCTION pgstrom.matrix_in(cstring, oid, int4)
+  RETURNS pg_catalog.matrix
+  AS 'MODULE_PATHNAME','matrix_in'
+  LANGUAGE C STRICT IMMUTABLE ;
+CREATE FUNCTION pgstrom.matrix_out(pg_catalog.matrix)
+  RETURNS cstring
+  AS 'MODULE_PATHNAME','matrix_out'
+  LANGUAGE C STRICT IMMUTABLE ;
+CREATE FUNCTION pgstrom.matrix_recv(internal, oid, int4)
+  RETURNS pg_catalog.matrix
+  AS 'MODULE_PATHNAME','matrix_recv'
+  LANGUAGE C STRICT IMMUTABLE ;
+CREATE FUNCTION pgstrom.matrix_send(pg_catalog.matrix)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','matrix_send'
+  LANGUAGE C STRICT IMMUTABLE ;
+CREATE FUNCTION pgstrom.float4_to_matrix(float4[])
+  RETURNS pg_catalog.matrix
+  AS 'MODULE_PATHNAME','float4_to_matrix'
+  LANGUAGE C STRICT;
+CREATE FUNCTION pgstrom.matrix_to_float4(matrix)
+  RETURNS float4[]
+  AS 'MODULE_PATHNAME','matrix_to_float4'
+  LANGUAGE C STRICT;
+
+CREATE TYPE pg_catalog.matrix (
+  INPUT = pgstrom.matrix_in,
+  OUTPUT = pgstrom.matrix_out,
+  RECEIVE = pgstrom.matrix_recv,
+  SEND = pgstrom.matrix_send,
+  ANALYZE = pg_catalog.array_typanalyze,
+  LIKE = pg_catalog.float4[],
+  ELEMENT = float4
+);
+
+CREATE CAST (float4[] AS pg_catalog.matrix)
+  WITH FUNCTION pgstrom.float4_to_matrix(float4[])
+  AS IMPLICIT;
+
+CREATE CAST (pg_catalog.matrix AS float4[])
+  WITH FUNCTION pgstrom.matrix_to_float4(matrix)
+  AS IMPLICIT;

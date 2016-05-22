@@ -624,6 +624,16 @@ extern Datum plcuda_function_handler(PG_FUNCTION_ARGS);
 extern void pgstrom_init_plcuda(void);
 
 /*
+ * matrix.h
+ */
+extern Datum matrix_in(PG_FUNCTION_ARGS);
+extern Datum matrix_out(PG_FUNCTION_ARGS);
+extern Datum matrix_recv(PG_FUNCTION_ARGS);
+extern Datum matrix_send(PG_FUNCTION_ARGS);
+extern Datum float4_to_matrix(PG_FUNCTION_ARGS);
+extern Datum matrix_to_float4(PG_FUNCTION_ARGS);
+
+/*
  * main.c
  */
 extern bool		pgstrom_enabled;
