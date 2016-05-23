@@ -239,3 +239,118 @@ matrix_to_float4(PG_FUNCTION_ARGS)
 	PG_RETURN_POINTER(matrix);
 }
 PG_FUNCTION_INFO_V1(matrix_to_float4);
+
+/*
+ * make_matrix aggregate function
+ */
+typedef struct
+{
+	cl_int		width;	/* maximum width of input float4[] vector */
+	List	   *rows;	/* list of supplied float4vector */
+} make_matrix_state;
+
+Datum
+make_matrix_accum(PG_FUNCTION_ARGS)
+{
+	make_matrix_state  *mstate;
+	MemoryContext		aggcxt;
+	MemoryContext		oldcxt;
+	ArrayType		   *array;
+	cl_uint				width;
+
+	if (!AggCheckCallContext(fcinfo, &aggcxt))
+		elog(ERROR, "aggregate function called in non-aggregate context");
+
+	if (PG_ARGISNULL(1))
+		elog(ERROR, "null-array was supplied");
+
+	oldcxt = MemoryContextSwitchTo(aggcxt);
+	array = PG_GETARG_ARRAYTYPE_P_COPY(1);
+
+	/* sanity check */
+	if (ARR_ELEMTYPE(array) != FLOAT4OID || ARR_NDIM(array) != 1)
+		elog(ERROR, "input array was not float4[]");
+	width = ARR_LBOUND(array)[0] + ARR_DIMS(array)[0] - 1;
+
+	if (PG_ARGISNULL(0))
+		mstate = palloc0(sizeof(make_matrix_state));
+	else
+		mstate = (make_matrix_state *)PG_GETARG_POINTER(0);
+
+	mstate->width = Max(mstate->width, width);
+	mstate->rows = lappend(mstate->rows, array);
+
+	MemoryContextSwitchTo(oldcxt);
+
+	PG_RETURN_POINTER(mstate);
+}
+PG_FUNCTION_INFO_V1(make_matrix_accum);
+
+Datum
+make_matrix_final(PG_FUNCTION_ARGS)
+{
+	make_matrix_state  *mstate;
+	ArrayType		   *matrix;
+	ListCell		   *lc;
+	cl_float		   *dst;
+	Size				len;
+
+	if (PG_ARGISNULL(0))
+		PG_RETURN_NULL();
+	mstate = (make_matrix_state *)PG_GETARG_POINTER(0);
+
+	/* construct a new 2D matrix, then copy data */
+	if ((Size)mstate->width * (Size)list_length(mstate->rows) > INT_MAX)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_EXCEPTION),
+				 errmsg("supplied matrix is too big")));
+
+	len = sizeof(ArrayType) + 4 * sizeof(int) +
+		sizeof(float) * mstate->width * list_length(mstate->rows);
+	matrix = palloc(len);
+	SET_VARSIZE(matrix, len);
+	matrix->ndim = 2;
+	matrix->dataoffset = 0;
+	matrix->elemtype = FLOAT4OID;
+	ARR_DIMS(matrix)[0] = list_length(mstate->rows);
+	ARR_DIMS(matrix)[1] = mstate->width;
+	ARR_LBOUND(matrix)[0] = 1;
+	ARR_LBOUND(matrix)[1] = 1;
+
+	dst = (float *)ARR_DATA_PTR(matrix);
+	foreach (lc, mstate->rows)
+	{
+		ArrayType  *array = lfirst(lc);
+		cl_uint		offset = ARR_LBOUND(array)[0] - 1;
+		cl_uint		nitems = ARR_DIMS(array)[0];
+		cl_float   *src = (float *)ARR_DATA_PTR(array);
+
+		/* sanity checks */
+		Assert(ARR_ELEMTYPE(array) == FLOAT4OID &&
+			   ARR_NDIM(array) == 1 &&
+			   offset + nitems <= mstate->width);
+
+		if (offset > 0)
+		{
+			memset(dst, 0, sizeof(float) * offset);
+			dst += offset;
+		}
+
+		memcpy(dst, src, sizeof(float) * nitems);
+		dst += nitems;
+
+		if (offset + nitems < mstate->width)
+		{
+			cl_uint		n = mstate->width - (offset + nitems);
+
+			memset(dst, 0, sizeof(float) * n);
+			dst += n;
+		}
+
+		Assert(((uintptr_t) dst - (uintptr_t) ARR_DATA_PTR(matrix))
+			   % (sizeof(float) * mstate->width) == 0);
+		pfree(array);
+	}
+	PG_RETURN_POINTER(matrix);
+}
+PG_FUNCTION_INFO_V1(make_matrix_final);

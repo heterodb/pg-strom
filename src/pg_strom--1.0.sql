@@ -609,3 +609,20 @@ CREATE CAST (float4[] AS pg_catalog.matrix)
 CREATE CAST (pg_catalog.matrix AS float4[])
   WITH FUNCTION pgstrom.matrix_to_float4(matrix)
   AS IMPLICIT;
+
+CREATE FUNCTION pgstrom.make_matrix_accum(internal, variadic float4[])
+  RETURNS internal
+  AS 'MODULE_PATHNAME','make_matrix_accum'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE FUNCTION pgstrom.make_matrix_final(internal)
+  RETURNS matrix
+  AS 'MODULE_PATHNAME', 'make_matrix_final'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE AGGREGATE pg_catalog.make_matrix(variadic float4[])
+(
+  sfunc = pgstrom.make_matrix_accum,
+  stype = internal,
+  finalfunc = pgstrom.make_matrix_final
+);
