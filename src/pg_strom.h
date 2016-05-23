@@ -634,6 +634,9 @@ extern Datum float4_to_matrix(PG_FUNCTION_ARGS);
 extern Datum matrix_to_float4(PG_FUNCTION_ARGS);
 extern Datum make_matrix_accum(PG_FUNCTION_ARGS);
 extern Datum make_matrix_final(PG_FUNCTION_ARGS);
+extern Datum matrix_add(PG_FUNCTION_ARGS);
+extern Datum matrix_sub(PG_FUNCTION_ARGS);
+extern Datum matrix_mul(PG_FUNCTION_ARGS);
 
 /*
  * main.c

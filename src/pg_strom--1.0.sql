@@ -626,3 +626,36 @@ CREATE AGGREGATE pg_catalog.make_matrix(variadic float4[])
   stype = internal,
   finalfunc = pgstrom.make_matrix_final
 );
+
+CREATE FUNCTION pgstrom.matrix_add(matrix, matrix)
+  RETURNS matrix
+  AS 'MODULE_PATHNAME','matrix_add'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pgstrom.matrix_sub(matrix, matrix)
+  RETURNS matrix
+  AS 'MODULE_PATHNAME','matrix_sub'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pgstrom.matrix_mul(matrix, matrix)
+  RETURNS matrix
+  AS 'MODULE_PATHNAME','matrix_mul'
+  LANGUAGE C STRICT;
+
+CREATE OPERATOR pg_catalog.+ (
+  PROCEDURE = pgstrom.matrix_add,
+  LEFTARG = pg_catalog.matrix,
+  RIGHTARG = pg_catalog.matrix
+);
+
+CREATE OPERATOR pg_catalog.- (
+  PROCEDURE = pgstrom.matrix_sub,
+  LEFTARG = pg_catalog.matrix,
+  RIGHTARG = pg_catalog.matrix
+);
+
+CREATE OPERATOR pg_catalog.* (
+  PROCEDURE = pgstrom.matrix_mul,
+  LEFTARG = pg_catalog.matrix,
+  RIGHTARG = pg_catalog.matrix
+);

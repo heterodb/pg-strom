@@ -354,3 +354,187 @@ make_matrix_final(PG_FUNCTION_ARGS)
 	PG_RETURN_POINTER(matrix);
 }
 PG_FUNCTION_INFO_V1(make_matrix_final);
+
+/*
+ * matrix_add
+ */
+Datum
+matrix_add(PG_FUNCTION_ARGS)
+{
+	ArrayType  *X = PG_GETARG_ARRAYTYPE_P(0);
+	ArrayType  *Y = PG_GETARG_ARRAYTYPE_P(1);
+	ArrayType  *R;
+	Size		i, nitems;
+	Size		len;
+	float	   *xval;
+	float	   *yval;
+	float	   *rval;
+
+	/* sanity check */
+	if (ARR_NDIM(X) != 2 || ARR_HASNULL(X) || ARR_ELEMTYPE(X) != FLOAT4OID ||
+		ARR_LBOUND(X)[0] != 1 || ARR_LBOUND(X)[1] != 1)
+		elog(ERROR, "invalid matrix format on the left-hand");
+
+	if (ARR_NDIM(Y) != 2 || ARR_HASNULL(Y) || ARR_ELEMTYPE(Y) != FLOAT4OID ||
+		ARR_LBOUND(Y)[0] != 1 || ARR_LBOUND(Y)[1] != 1)
+		elog(ERROR, "invalid matrix format on the right-hand");
+
+	if (ARR_DIMS(X)[0] != ARR_DIMS(Y)[0] || ARR_DIMS(X)[1] != ARR_DIMS(Y)[1])
+		elog(ERROR, "matrix size mismatch (%u,%u) + (%u,%u)",
+			 ARR_DIMS(X)[1], ARR_DIMS(X)[0],
+			 ARR_DIMS(Y)[1], ARR_DIMS(Y)[0]);
+
+	/* make a new matrix */
+	nitems = (Size)(ARR_DIMS(X)[0]) * (Size)(ARR_DIMS(X)[1]);
+	if (nitems > INT_MAX)
+		elog(ERROR, "too big matrix");
+	len = sizeof(ArrayType) + 4 * sizeof(int) + sizeof(float) * nitems;
+	R = palloc(len);
+	SET_VARSIZE(R, len);
+    R->ndim = 2;
+    R->dataoffset = 0;
+    R->elemtype = FLOAT4OID;
+    ARR_DIMS(R)[0] = ARR_DIMS(X)[0];
+    ARR_DIMS(R)[1] = ARR_DIMS(X)[1];
+    ARR_LBOUND(R)[0] = 1;
+    ARR_LBOUND(R)[1] = 1;
+
+	xval = (float *)ARR_DATA_PTR(X);
+	yval = (float *)ARR_DATA_PTR(Y);
+	rval = (float *)ARR_DATA_PTR(R);
+	for (i=0; i < nitems; i++, xval++, yval++, rval++)
+		*rval = *xval + *yval;
+
+	PG_RETURN_POINTER(R);
+}
+PG_FUNCTION_INFO_V1(matrix_add);
+
+/*
+ * matrix_sub
+ */
+Datum
+matrix_sub(PG_FUNCTION_ARGS)
+{
+	ArrayType  *X = PG_GETARG_ARRAYTYPE_P(0);
+	ArrayType  *Y = PG_GETARG_ARRAYTYPE_P(1);
+	ArrayType  *R;
+	Size		i, nitems;
+	Size		len;
+	float	   *xval;
+	float	   *yval;
+	float	   *rval;
+
+	/* sanity check */
+	if (ARR_NDIM(X) != 2 || ARR_HASNULL(X) || ARR_ELEMTYPE(X) != FLOAT4OID ||
+		ARR_LBOUND(X)[0] != 1 || ARR_LBOUND(X)[1] != 1)
+		elog(ERROR, "invalid matrix format on the left-hand");
+
+	if (ARR_NDIM(Y) != 2 || ARR_HASNULL(Y) || ARR_ELEMTYPE(Y) != FLOAT4OID ||
+		ARR_LBOUND(Y)[0] != 1 || ARR_LBOUND(Y)[1] != 1)
+		elog(ERROR, "invalid matrix format on the right-hand");
+
+	if (ARR_DIMS(X)[0] != ARR_DIMS(Y)[0] || ARR_DIMS(X)[1] != ARR_DIMS(Y)[1])
+		elog(ERROR, "matrix size mismatch (%u,%u) - (%u,%u)",
+			 ARR_DIMS(X)[1], ARR_DIMS(X)[0],
+			 ARR_DIMS(Y)[1], ARR_DIMS(Y)[0]);
+
+	/* make a new matrix */
+	nitems = (Size)(ARR_DIMS(X)[0]) * (Size)(ARR_DIMS(X)[1]);
+	if (nitems > INT_MAX)
+		elog(ERROR, "too big matrix");
+	len = sizeof(ArrayType) + 4 * sizeof(int) + sizeof(float) * nitems;
+	R = palloc(len);
+	SET_VARSIZE(R, len);
+    R->ndim = 2;
+    R->dataoffset = 0;
+    R->elemtype = FLOAT4OID;
+    ARR_DIMS(R)[0] = ARR_DIMS(X)[0];
+    ARR_DIMS(R)[1] = ARR_DIMS(X)[1];
+    ARR_LBOUND(R)[0] = 1;
+    ARR_LBOUND(R)[1] = 1;
+
+	xval = (float *)ARR_DATA_PTR(X);
+	yval = (float *)ARR_DATA_PTR(Y);
+	rval = (float *)ARR_DATA_PTR(R);
+	for (i=0; i < nitems; i++, xval++, yval++, rval++)
+		*rval = *xval - *yval;
+
+	PG_RETURN_POINTER(R);
+}
+PG_FUNCTION_INFO_V1(matrix_sub);
+
+/*
+ * matrix_mul
+ */
+Datum
+matrix_mul(PG_FUNCTION_ARGS)
+{
+	ArrayType  *X = PG_GETARG_ARRAYTYPE_P(0);
+	ArrayType  *Y = PG_GETARG_ARRAYTYPE_P(1);
+	ArrayType  *R;
+	Size		nitems;
+	Size		len;
+	float	   *dst;
+	float	   *x_val;
+	float	   *y_val;
+	cl_uint		h_size;
+	cl_uint		v_size;
+	cl_uint		nloops;
+	cl_uint		i, j, k;
+
+	/* sanity check */
+	if (ARR_NDIM(X) != 2 || ARR_HASNULL(X) || ARR_ELEMTYPE(X) != FLOAT4OID ||
+		ARR_LBOUND(X)[0] != 1 || ARR_LBOUND(X)[1] != 1)
+		elog(ERROR, "invalid matrix format on the left-hand");
+
+	if (ARR_NDIM(Y) != 2 || ARR_HASNULL(Y) || ARR_ELEMTYPE(Y) != FLOAT4OID ||
+		ARR_LBOUND(Y)[0] != 1 || ARR_LBOUND(Y)[1] != 1)
+		elog(ERROR, "invalid matrix format on the right-hand");
+
+	if (ARR_DIMS(X)[1] != ARR_DIMS(Y)[0])
+		elog(ERROR, "matrix size mismatch (%u,%u) * (%u,%u)",
+			 ARR_DIMS(X)[1], ARR_DIMS(X)[0],
+			 ARR_DIMS(Y)[1], ARR_DIMS(Y)[0]);
+
+	/* make a new matrix */
+	nloops = ARR_DIMS(X)[1];
+	h_size = ARR_DIMS(Y)[1];
+	v_size = ARR_DIMS(X)[0];
+
+	nitems = (Size)h_size * (Size)v_size;
+	if (nitems > INT_MAX)
+		elog(ERROR, "too big matrix");
+	len = sizeof(ArrayType) + 4 * sizeof(int) + sizeof(float) * nitems;
+	R = palloc(len);
+	SET_VARSIZE(R, len);
+	R->ndim = 2;
+	R->dataoffset = 0;
+	R->elemtype = FLOAT4OID;
+	ARR_DIMS(R)[0] = v_size;
+	ARR_DIMS(R)[1] = h_size;
+	ARR_LBOUND(R)[0] = 1;
+	ARR_LBOUND(R)[1] = 1;
+
+	dst = (float *)ARR_DATA_PTR(R);
+	for (j=0; j < v_size; j++)
+	{
+		for (i=0; i < h_size; i++)
+		{
+			double	sum = 0.0;
+
+			x_val = (float *)ARR_DATA_PTR(X) + j * h_size;
+			y_val = (float *)ARR_DATA_PTR(Y) + i;
+
+			for (k=0; k < nloops; k++)
+			{
+				sum += *x_val * *y_val;
+
+				x_val++;
+				y_val += v_size;
+			}
+			*dst++ = (float)sum;
+		}
+	}
+	PG_RETURN_POINTER(R);
+}
+PG_FUNCTION_INFO_V1(matrix_mul);
