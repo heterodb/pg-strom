@@ -16,7 +16,6 @@
  * GNU General Public License for more details.
  */
 #include "postgres.h"
-#include "catalog/pg_cast.h"
 #include "catalog/pg_type.h"
 #include "utils/array.h"
 #include "utils/arrayaccess.h"
@@ -67,7 +66,7 @@
  * Type cast functions
  */
 static MatrixType *
-__array_to_matrix(ArrayType *array)
+__array_to_matrix(ArrayType *array, Oid cast_func)
 {
 	MatrixType *matrix;
 	cl_uint		x_offset;
@@ -78,39 +77,17 @@ __array_to_matrix(ArrayType *array)
 	cl_uint		index = 0;
 	cl_uint		i, j;
 	cl_float   *dst;
-	Oid			cast_func = InvalidOid;
-	char		cast_method = COERCION_METHOD_BINARY;
-	FmgrInfo	cast_flinfo;
-	FunctionCallInfoData cast_fcinfo;
 	int16		typlen;
 	bool		typbyval;
 	char		typalign;
 	array_iter	iter;
+	FmgrInfo	flinfo;
+    FunctionCallInfoData fcinfo;
 
-	if (ARR_ELEMTYPE(array) != FLOAT4OID)
+	if (OidIsValid(cast_func))
 	{
-		HeapTuple		tuple;
-		Form_pg_cast	castForm;
-
-		tuple = SearchSysCache2(CASTSOURCETARGET,
-								ObjectIdGetDatum(ARR_ELEMTYPE(array)),
-								ObjectIdGetDatum(FLOAT4OID));
-		if (!HeapTupleIsValid(tuple))
-			elog(ERROR, "failed to lookup cast %s to %s",
-				 format_type_be(ARR_ELEMTYPE(array)),
-				 format_type_be(FLOAT4OID));
-		castForm = (Form_pg_cast) GETSTRUCT(tuple);
-		cast_func = castForm->castfunc;
-		cast_method = castForm->castmethod;
-		Assert(OidIsValid(cast_func) || cast_method == COERCION_METHOD_BINARY);
-		ReleaseSysCache(tuple);
-
-		if (OidIsValid(cast_func))
-		{
-			fmgr_info(cast_func, &cast_flinfo);
-			InitFunctionCallInfoData(cast_fcinfo, &cast_flinfo,
-									 1, InvalidOid, NULL, NULL);
-		}
+		fmgr_info(cast_func, &flinfo);
+		InitFunctionCallInfoData(fcinfo, &flinfo, 1, InvalidOid, NULL, NULL);
 	}
 
 	if (ARR_NDIM(array) > 2)
@@ -121,14 +98,8 @@ __array_to_matrix(ArrayType *array)
 		int	   *lbounds = ARR_LBOUND(array);
 		int	   *dims = ARR_DIMS(array);
 
-		/*
-		 * fast path - if supplied array is entirely compatible to matrix,
-		 * we don't need to transform the data.
-		 */
-		if (ARR_ELEMTYPE(array) == FLOAT4OID &&
-			!ARR_HASNULL(array) &&
-			lbounds[0] == 1 &&
-			lbounds[1] == 1)
+		/* fast path - if array is binary compatible to matrix */
+		if (MATRIX_SANITYCHECK_NOERROR((MatrixType *) array))
 			return (MatrixType *) array;
 
 		/* make a matrix */
@@ -187,21 +158,19 @@ __array_to_matrix(ArrayType *array)
 									typlen, typbyval, typalign);
 			if (isnull)
 				*dst++ = 0.0;
-			else if (cast_method == COERCION_METHOD_BINARY)
+			else if (!OidIsValid(cast_func))	/* binary compatible */
 				*dst++ = DatumGetFloat4(datum);
 			else
 			{
-				Datum	newval;
+				fcinfo.arg[0] = datum;
+				fcinfo.argnull[0] = false;
+				fcinfo.isnull = false;
 
-				cast_fcinfo.isnull = false;
-				cast_fcinfo.arg[0] = datum;
-				cast_fcinfo.argnull[0] = false;
-
-				newval = FunctionCallInvoke(&cast_fcinfo);
-				if (cast_fcinfo.isnull)
+				datum = FunctionCallInvoke(&fcinfo);
+				if (fcinfo.isnull)
 					*dst++ = 0.0;
 				else
-					*dst++ = DatumGetFloat4(newval);
+					*dst++ = DatumGetFloat4(datum);
 			}
 			index++;
 		}
@@ -213,110 +182,62 @@ __array_to_matrix(ArrayType *array)
 }
 
 static ArrayType *
-__matrix_to_array(MatrixType *matrix, Oid dest_type)
+__matrix_to_array(MatrixType *matrix, Oid dest_type, Oid cast_func)
 {
 	ArrayType  *array;
 	Size		i, nitems;
-	Size		len;
-	int			typlen;
-	float	   *src;
-	Oid			cast_func = InvalidOid;
-	char		cast_method = COERCION_METHOD_BINARY;
-	FmgrInfo	cast_flinfo;
-	FunctionCallInfoData cast_fcinfo;
 	int16		typlen;
 	bool		typbyval;
 	char		typalign;
+	Datum	   *elem_values;
+	bool	   *elem_isnull;
+	float	   *src;
+	int			dims[2];
+	int			lbounds[2];
+	FmgrInfo	flinfo;
+    FunctionCallInfoData fcinfo;
 
 	MATRIX_SANITYCHECK(matrix);
 	if (dest_type == FLOAT4OID)
 		return (ArrayType *) matrix;	/* super fast path if float4[] */
-	// check binary comatible
 
-	// if function cast, setup cast function
-	// elsewhere, use in/out function
-	// walk on the source matrix then set up values/isnull
-	// finally construct_md_array()
-
-	else
+	if (OidIsValid(cast_func))
 	{
-		HeapTuple		tuple;
-		Form_pg_cast	castForm;
-
-		tuple = SearchSysCache2(CASTSOURCETARGET,
-                                ObjectIdGetDatum(FLOAT4OID),
-								ObjectIdGetDatum(dest_type));
-		if (!HeapTupleIsValid(tuple))
-            elog(ERROR, "failed to lookup cast %s to %s",
-				 format_type_be(FLOAT4OID),
-				 format_type_be(dest_type));
-		castForm = (Form_pg_cast) GETSTRUCT(tuple);
-		cast_func = castForm->castfunc;
-		cast_method = castForm->castmethod;
-		Assert(OidIsValid(cast_func) || cast_method == COERCION_METHOD_BINARY);
-		ReleaseSysCache(tuple);
-
-		if (OidIsValid(cast_func))
-		{
-			fmgr_info(cast_func, &cast_flinfo);
-			InitFunctionCallInfoData(cast_fcinfo, &cast_flinfo,
-									 1, InvalidOid, NULL, NULL);
-		}
+		fmgr_info(cast_func, &flinfo);
+		InitFunctionCallInfoData(fcinfo, &flinfo, 1, InvalidOid, NULL, NULL);
 	}
 	get_typlenbyvalalign(dest_type, &typlen, &typbyval, &typalign);
+
 	nitems = (Size)matrix->height * (Size)matrix->width;
+	elem_values = palloc(sizeof(Datum) * nitems);
+	elem_isnull = palloc(sizeof(bool) * nitems);
 
-	if (cast_method == COERCION_METHOD_BINARY)
+	src = (float *)ARR_DATA_PTR(matrix);
+	for (i=0; i < nitems; i++)
 	{
-		len = sizeof(ArrayType) + 4 * sizeof(int) + typlen * nitems;
-		if (!AllocSizeIsValid(len))
-			elog(ERROR, "array size too large");
-		array = palloc0(len);
-		SET_VARSIZE(array,len);
-		array->ndim = 2;
-		array->dataoffset = 0;
-		array->elemtype = dest_type;
-		ARR_DIMS(array)[0] = matrix->height;
-		ARR_DIMS(array)[1] = matrix->width;
-		ARR_LBOUND(array)[0] = 1;
-		ARR_LBOUND(array)[1] = 1;
+		Datum	newval;
 
-		Assert(typlen == sizeof(float));
-		memcpy(ARR_DATA_PTR(array), matrix->values, sizeof(float) * nitems);
-	}
-	else
-	{
-		Datum  *values = palloc(sizeof(Datum) * nitems);
-		bool   *isnull = palloc(sizeof(bool) * nitems);
-		float  *src = (float *)ARR_DATA_PTR(matrix);
-		int		dims[2];
-		int		lbounds[2];
-
-		for (i=0; i < nitems; i++)
+		fcinfo.isnull = false;
+		fcinfo.arg[0] = Float4GetDatum(*src);
+		fcinfo.argnull[0] = false;
+		newval = FunctionCallInvoke(&fcinfo);
+		if (fcinfo.isnull)
+			elem_isnull[i] = true;
+		else
 		{
-			Datum	newval;
-
-			cast_fcinfo.isnull = false;
-			cast_fcinfo.arg[0] = Float4GetDatum(*src);
-			cast_fcinfo.argnull[0] = false;
-			newval = FunctionCallInvoke(&cast_fcinfo);
-			if (cast_fcinfo.isnull)
-				isnull[i] = true;
-			else
-			{
-				isnull[i] = false;
-				values[i] = newval;
-			}
-			src++;
+			elem_isnull[i] = false;
+			elem_values[i] = newval;
 		}
-		dims[0] = matrix->height;
-		dims[1] = matrix->width;
-		lbounds[0] = matrix->lbound1;
-		lbounds[1] = matrix->lbound2;
-
-		array = construct_md_array(values, isnull, 2, dims, lbounds,
-								   dest_type, typlen, typbyval, typalign);
+		src++;
 	}
+	Assert(ARR_DATA_PTR(matrix) + sizeof(float) * nitems == (char *)src);
+	dims[0] = matrix->height;
+	dims[1] = matrix->width;
+	lbounds[0] = 1;
+	lbounds[1] = 1;
+
+	array = construct_md_array(elem_values, elem_isnull, 2, dims, lbounds,
+							   dest_type, typlen, typbyval, typalign);
 	return array;
 }
 
@@ -326,20 +247,18 @@ __matrix_to_array(MatrixType *matrix, Oid dest_type)
 Datum
 matrix_in(PG_FUNCTION_ARGS)
 {
-	Datum	array;
+	ArrayType  *array;
 
-	elog(INFO, "matrix_in arg %lu %lu %lu",
-		 fcinfo->arg[0], fcinfo->arg[1], fcinfo->arg[2]);
-
-	array = OidFunctionCall3Coll(F_ARRAY_IN,
-								 fcinfo->fncollation,
-								 fcinfo->arg[0],
-								 ObjectIdGetDatum(FLOAT8OID),
-								 Int32GetDatum(-1));
+	array = (ArrayType *) OidFunctionCall3Coll(F_ARRAY_IN,
+											   fcinfo->fncollation,
+											   fcinfo->arg[0],
+											   ObjectIdGetDatum(FLOAT4OID),
+											   Int32GetDatum(-1));
 	if (MATRIX_SANITYCHECK_NOERROR((MatrixType *)array))
-		return array;
-
-	return PointerGetDatum(array_to_matrix((ArrayType *) array));
+		return PointerGetDatum(array);
+	if (ARR_ELEMTYPE(array) != FLOAT4OID)
+		elog(ERROR, "Bug? array is not float4[]");
+	return PointerGetDatum(__array_to_matrix(array, InvalidOid));
 }
 PG_FUNCTION_INFO_V1(matrix_in);
 
@@ -359,20 +278,18 @@ PG_FUNCTION_INFO_V1(matrix_out);
 Datum
 matrix_recv(PG_FUNCTION_ARGS)
 {
-	Datum   array;
+	ArrayType  *array;
 
-	elog(INFO, "matrix_recv arg %lu %lu %lu",
-		 fcinfo->arg[0], fcinfo->arg[1], fcinfo->arg[2]);
-
-	array = OidFunctionCall3Coll(F_ARRAY_RECV,
-								 fcinfo->fncollation,
-								 fcinfo->arg[0],
-								 fcinfo->arg[1],
-								 fcinfo->arg[2]);
+	array = (ArrayType *)OidFunctionCall3Coll(F_ARRAY_RECV,
+											  fcinfo->fncollation,
+											  fcinfo->arg[0],
+											  ObjectIdGetDatum(FLOAT8OID),
+											  Int32GetDatum(-1));
 	if (MATRIX_SANITYCHECK_NOERROR((MatrixType *)array))
-		return array;
-
-	return PointerGetDatum(array_to_matrix((ArrayType *) array));
+		return PointerGetDatum(array);
+	if (ARR_ELEMTYPE(array) != FLOAT4OID)
+		elog(ERROR, "Bug? array is not float4[]");
+	return PointerGetDatum(__array_to_matrix(array, InvalidOid));
 }
 PG_FUNCTION_INFO_V1(matrix_recv);
 
@@ -390,26 +307,53 @@ matrix_send(PG_FUNCTION_ARGS)
 PG_FUNCTION_INFO_V1(matrix_send);
 
 Datum
-anyarray_to_matrix(PG_FUNCTION_ARGS)
+float4array_to_matrix(PG_FUNCTION_ARGS)
 {
 	ArrayType  *array = PG_GETARG_ARRAYTYPE_P(0);
-	elog(INFO, "%s", __FUNCTION__);
-	PG_RETURN_MATRIXTYPE_P(__array_to_matrix(array));
+	PG_RETURN_MATRIXTYPE_P(__array_to_matrix(array, InvalidOid));
 }
-PG_FUNCTION_INFO_V1(anyarray_to_matric);
+PG_FUNCTION_INFO_V1(float4array_to_matrix);
 
 Datum
-matrix_to_anyarray(PG_FUNCTION_ARGS)
+matrix_to_float4array(PG_FUNCTION_ARGS)
 {
 	MatrixType *matrix = PG_GETARG_MATRIXTYPE_P(0);
-	Oid			fn_oid = fcinfo->flinfo->fn_oid;
-	Oid			rettype = get_func_rettype(fn_oid);
-	Oid			elemtype = get_element_type(rettype);
-
-	elog(INFO, "%s", __FUNCTION__);
-	PG_RETURN_ARRAYTYPE_P(__matrix_to_array(matrix, elemtype));
+	PG_RETURN_ARRAYTYPE_P(__matrix_to_array(matrix, FLOAT4OID, InvalidOid));
 }
-PG_FUNCTION_INFO_V1(matrix_to_anyarray);
+PG_FUNCTION_INFO_V1(matrix_to_float4array);
+
+Datum
+float8array_to_matrix(PG_FUNCTION_ARGS)
+{
+	ArrayType  *array = PG_GETARG_ARRAYTYPE_P(0);
+	PG_RETURN_MATRIXTYPE_P(__array_to_matrix(array, F_DTOF));
+}
+PG_FUNCTION_INFO_V1(float8array_to_matrix);
+
+Datum
+matrix_to_float8array(PG_FUNCTION_ARGS)
+{
+	MatrixType *matrix = PG_GETARG_MATRIXTYPE_P(0);
+	PG_RETURN_ARRAYTYPE_P(__matrix_to_array(matrix, FLOAT8OID, F_FTOD));
+}
+PG_FUNCTION_INFO_V1(matrix_to_float8array);
+
+Datum
+numericarray_to_matrix(PG_FUNCTION_ARGS)
+{
+	ArrayType  *array = PG_GETARG_ARRAYTYPE_P(0);
+	PG_RETURN_MATRIXTYPE_P(__array_to_matrix(array, F_NUMERIC_FLOAT4));
+}
+PG_FUNCTION_INFO_V1(numericarray_to_matrix);
+
+Datum
+matrix_to_numericarray(PG_FUNCTION_ARGS)
+{
+	MatrixType *matrix = PG_GETARG_MATRIXTYPE_P(0);
+	PG_RETURN_ARRAYTYPE_P(__matrix_to_array(matrix, NUMERICOID,
+											F_FLOAT4_NUMERIC));
+}
+PG_FUNCTION_INFO_V1(matrix_to_numericarray);
 
 /*
  * make_matrix aggregate function
@@ -442,8 +386,12 @@ make_matrix_accum(PG_FUNCTION_ARGS)
 	/* sanity check */
 	if (ARR_NDIM(array) != 1)
 		elog(ERROR, "input array was not 1-dimension array");
-	if (ARR_ELEMTYPE(array) != FLOAT4OID &&
-		ARR_ELEMTYPE(array) != FLOAT8OID)
+	if (ARR_ELEMTYPE(array) != INT2OID &&
+		ARR_ELEMTYPE(array) != INT4OID &&
+		ARR_ELEMTYPE(array) != INT8OID &&
+		ARR_ELEMTYPE(array) != FLOAT4OID &&
+		ARR_ELEMTYPE(array) != FLOAT8OID &&
+		ARR_ELEMTYPE(array) != NUMERICOID)
 		elog(ERROR, "unsupported element type: %s",
 			 format_type_be(ARR_ELEMTYPE(array)));
 
@@ -472,31 +420,64 @@ PG_FUNCTION_INFO_V1(make_matrix_accum);
 Datum
 make_matrix_final(PG_FUNCTION_ARGS)
 {
-	make_matrix_state  *mstate;
-	MatrixType		   *matrix;
-	ListCell		   *lc;
-	cl_float		   *dst;
-	cl_int				typlen;
-	Size				len;
+	make_matrix_state *mstate;
+	MatrixType *matrix;
+	ListCell   *lc;
+	cl_float   *dst;
+	Oid			cast_fnoid;
+	int16		typlen;
+	bool		typbyval;
+	char		typalign;
+	array_iter	iter;
+	FmgrInfo	cast_flinfo;
+	FunctionCallInfoData cast_fcinfo;
+	Size		len;
 
 	if (PG_ARGISNULL(0))
 		PG_RETURN_NULL();
 	mstate = (make_matrix_state *)PG_GETARG_POINTER(0);
-	if (mstate->elemtype == FLOAT4OID)
-		typlen = sizeof(cl_float);
-	else if (mstate->elemtype == FLOAT8OID)
-		typlen = sizeof(cl_double);
-	else
-		elog(ERROR, "matrix does not support %s as element type",
-			 format_type_be(mstate->elemtype));
+
+	switch (mstate->elemtype)
+	{
+		case INT2OID:
+			cast_fnoid = F_I2TOF;
+			break;
+		case INT4OID:
+			cast_fnoid = F_I4TOF;
+			break;
+		case INT8OID:
+			cast_fnoid = F_I8TOF;
+			break;
+		case FLOAT4OID:
+			cast_fnoid = InvalidOid;
+			break;
+		case FLOAT8OID:
+			cast_fnoid = F_DTOF;
+			break;
+		case NUMERICOID:
+			cast_fnoid = F_NUMERIC_FLOAT4;
+			break;
+		default:
+			elog(ERROR, "matrix does not support %s as element type",
+				 format_type_be(mstate->elemtype));
+	}
+
+	if (OidIsValid(cast_fnoid))
+	{
+		fmgr_info(cast_fnoid, &cast_flinfo);
+		InitFunctionCallInfoData(cast_fcinfo, &cast_flinfo,
+								 1, InvalidOid, NULL, NULL);
+	}
 
 	len = sizeof(MatrixType) +
-		typlen * (Size)mstate->width * (Size)list_length(mstate->rows);
+		sizeof(float) * (Size)mstate->width * (Size)list_length(mstate->rows);
 	if (!AllocSizeIsValid(len))
 		elog(ERROR, "supplied matrix is too big");
 	matrix = palloc(len);
 	SET_VARSIZE(matrix, len);
 	MATRIX_INIT_FIELDS(matrix, list_length(mstate->rows), mstate->width);
+
+	get_typlenbyvalalign(mstate->elemtype, &typlen, &typbyval, &typalign);
 
 	dst = matrix->values;
 	foreach (lc, mstate->rows)
@@ -506,54 +487,56 @@ make_matrix_final(PG_FUNCTION_ARGS)
 		cl_uint		i, nitems = ARR_DIMS(array)[0];
 
 		/* sanity checks */
-		Assert((ARR_ELEMTYPE(array) == FLOAT4OID ||
-				ARR_ELEMTYPE(array) == FLOAT8OID) &&
+		Assert(ARR_ELEMTYPE(array) == mstate->elemtype &&
 			   ARR_NDIM(array) == 1 &&
 			   offset + nitems <= mstate->width);
-
 		if (offset > 0)
 		{
 			memset(dst, 0, sizeof(float) * offset);
 			dst += offset;
 		}
 
-		if (mstate->elemtype == FLOAT4OID)
+		if (!OidIsValid(cast_fnoid) && !ARR_HASNULL(array))
 		{
-			/* no need to transform, if float4 */
 			memcpy(dst, ARR_DATA_PTR(array), sizeof(float) * nitems);
 			dst += nitems;
 		}
-		else if (mstate->elemtype == FLOAT8OID)
+		else
 		{
-			double *src = (double *) ARR_DATA_PTR(array);
+			Datum	datum;
+			bool	isnull;
 
+			array_iter_setup(&iter, (AnyArrayType *)array);
 			for (i=0; i < nitems; i++)
 			{
-				double	oldval = *src++;
-				float	newval = (float)oldval;
+				datum = array_iter_next(&iter, &isnull, i,
+										typlen, typbyval, typalign);
+				if (isnull)
+					*dst++ = 0.0;
+				else if (!OidIsValid(cast_fnoid))
+					*dst++ = DatumGetFloat4(datum);
+				else
+				{
+					cast_fcinfo.arg[0] = datum;
+					cast_fcinfo.argnull[0] = false;
+					cast_fcinfo.isnull = false;
 
-				if (!isinf(oldval) && isinf(newval))
-					ereport(ERROR,
-							(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-							 errmsg("value out of range: overflow")));
-				if (oldval != 0.0 && newval == 0.0)
-					ereport(ERROR,
-							(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-							 errmsg("value out of range: underflow")));
-				*dst++ = newval;
+					datum = FunctionCallInvoke(&cast_fcinfo);
+					if (cast_fcinfo.isnull)
+						*dst++ = 0.0;
+					else
+						*dst++ = DatumGetFloat4(datum);
+				}
 			}
 		}
-		else
-			elog(ERROR, "unexpected element type");
 
 		if (offset + nitems < mstate->width)
 		{
-			cl_uint		n = mstate->width - (offset + nitems);
+			cl_uint		remain = mstate->width - (offset + nitems);
 
-			memset(dst, 0, sizeof(float) * n);
-			dst += n;
+			memset(dst, 0, sizeof(float) * remain);
+			dst += remain;
 		}
-
 		Assert((dst - matrix->values) % mstate->width == 0);
 		pfree(array);
 	}
