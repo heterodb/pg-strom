@@ -106,5 +106,57 @@ ArrayGetNItems(kern_context *kcxt, cl_int ndim, const cl_int *dims)
 	return ret;
 }
 
+/* ----------------------------------------------------------------
+ *
+ * MATRIX data type support
+ *
+ * ---------------------------------------------------------------- */
+
+#ifndef PG_MATRIX_TYPE_DEFINED
+#define PG_MATRIX_TYPE_DEFINED
+STROMCL_VARLENA_TYPE_TEMPLATE(matrix)
+#endif
+
+#endif	/* __CUDACC__ */
+
+typedef struct
+{
+	cl_uint		__vl_len;	/* varlena header (only 4B header) */
+	cl_int		ndim;		/* always 2 for matrix */
+	cl_int		dataoffset;	/* always 0 for matrix */
+	cl_uint		elemtype;	/* always FLOAT4OID for matrix */
+	cl_int		height;		/* height of the matrix; =dim1 */
+	cl_int		width;		/* width of the matrix; =dim2 */
+	cl_int		lbound1;	/* always 1 for matrix */
+	cl_int		lbound2;	/* always 1 for matrix */
+	cl_float	values[FLEXIBLE_ARRAY_MEMBER];
+} MatrixType;
+
+#ifdef __CUDACC__
+
+STATIC_INLINE(cl_bool)
+pg_matrix_sanitychecks(kern_context *kcxt, pg_matrix_t arg)
+{
+	if (!arg.isnull)
+	{
+		MatrixType *matrix = (MatrixType *) arg.value;
+
+		/* 1B varlena header is not supported */
+		if (VARATT_IS_1B(matrix))
+		{
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			return false;
+		}
+
+		if (matrix->ndim != 2 ||
+			matrix->dataoffset != 0 ||
+			matrix->elemtype != FLOAT4OID ||
+			matrix->lbound1 != 1 ||
+			matrix->lbound2 != 1)
+			return false;
+	}
+	return false;
+}
+
 #endif	/* __CUDACC__ */
 #endif	/* CUDA_MATRIX_H */

@@ -78,6 +78,18 @@ static struct {
 	DEVTYPE_DECL(TEXTOID,    "varlena *", DEVKERNEL_NEEDS_TEXTLIB),
 };
 
+static struct {
+	const char	   *type_schema;
+	const char	   *type_name;
+	const char	   *type_oid_label;
+	const char	   *type_base;
+	cl_uint			type_flags;
+} devtype_catalog_ex[] = {
+	/* matrix data type */
+	{ "pg_catalog", "matrix", "MATRIXOID", "varlena *",
+	  DEVKERNEL_NEEDS_MATRIX },
+};
+
 static devtype_info *
 build_devtype_info_entry(Oid type_oid,
 						 int32 type_flags,
@@ -140,11 +152,31 @@ build_devtype_info_entry(Oid type_oid,
 	return entry;
 }
 
+static Oid
+lookup_typeoid_by_name(const char *namespace, const char *typename)
+{
+	Oid		nspOid;
+	Oid		typOid;
+
+	nspOid = GetSysCacheOid1(NAMESPACENAME, CStringGetDatum(namespace));
+	if (!OidIsValid(nspOid))
+		return InvalidOid;
+
+	typOid = GetSysCacheOid2(TYPENAMENSP,
+							 CStringGetDatum(typename),
+							 ObjectIdGetDatum(nspOid));
+	if (!OidIsValid(typOid))
+		return InvalidOid;
+
+	return typOid;
+}
+
 static void
 build_devtype_info(void)
 {
-	MemoryContext	oldcxt;
-	int				i;
+	MemoryContext oldcxt;
+	Oid		typeOid;
+	int		i;
 
 	Assert(!devtype_info_is_built);
 
@@ -155,6 +187,17 @@ build_devtype_info(void)
 										devtype_catalog[i].type_flags,
 										devtype_catalog[i].type_base,
 										NULL);
+	}
+
+	for (i=0; i < lengthof(devtype_catalog_ex); i++)
+	{
+		typeOid = lookup_typeoid_by_name(devtype_catalog_ex[i].type_schema,
+										 devtype_catalog_ex[i].type_name);
+
+		(void) build_devtype_info_entry(typeOid,
+                                        devtype_catalog_ex[i].type_flags,
+                                        devtype_catalog_ex[i].type_base,
+                                        NULL);
 	}
 	MemoryContextSwitchTo(oldcxt);
 
@@ -217,6 +260,7 @@ void
 pgstrom_codegen_typeoid_declarations(StringInfo source)
 {
 	int		i;
+	Oid		typeOid;
 
 	for (i=0; i < lengthof(devtype_catalog); i++)
 	{
@@ -224,6 +268,19 @@ pgstrom_codegen_typeoid_declarations(StringInfo source)
 						 "#define PG_%s %u\n",
 						 devtype_catalog[i].type_oid_label,
 						 devtype_catalog[i].type_oid);
+	}
+
+	for (i=0; i < lengthof(devtype_catalog_ex); i++)
+	{
+		typeOid = lookup_typeoid_by_name(devtype_catalog_ex[i].type_schema,
+										 devtype_catalog_ex[i].type_name);
+		if (!OidIsValid(typeOid))
+			continue;
+
+		appendStringInfo(source,
+                         "#define PG_%s %u\n",
+                         devtype_catalog_ex[i].type_oid_label,
+						 typeOid);
 	}
 }
 
