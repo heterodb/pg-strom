@@ -567,30 +567,22 @@ COMMENT ON LANGUAGE plcuda IS 'PL/CUDA procedural language';
 --
 -- Matrix data type
 --
-CREATE FUNCTION pgstrom.matrix_in(cstring, oid, int4)
+CREATE FUNCTION pgstrom.matrix_in(cstring)
   RETURNS pg_catalog.matrix
-  AS 'MODULE_PATHNAME','matrix_in'
-  LANGUAGE C STRICT IMMUTABLE ;
+  AS 'MODULE_PATHNAME', 'matrix_in'
+  LANGUAGE C STRICT IMMUTABLE;
 CREATE FUNCTION pgstrom.matrix_out(pg_catalog.matrix)
   RETURNS cstring
-  AS 'MODULE_PATHNAME','matrix_out'
-  LANGUAGE C STRICT IMMUTABLE ;
-CREATE FUNCTION pgstrom.matrix_recv(internal, oid, int4)
+  AS 'MODULE_PATHNAME', 'matrix_out'
+  LANGUAGE C STRICT IMMUTABLE;
+CREATE FUNCTION pgstrom.matrix_recv(internal)
   RETURNS pg_catalog.matrix
-  AS 'MODULE_PATHNAME','matrix_recv'
-  LANGUAGE C STRICT IMMUTABLE ;
+  AS 'MODULE_PATHNAME', 'matrix_recv'
+  LANGUAGE C STRICT IMMUTABLE;
 CREATE FUNCTION pgstrom.matrix_send(pg_catalog.matrix)
   RETURNS bytea
-  AS 'MODULE_PATHNAME','matrix_send'
-  LANGUAGE C STRICT IMMUTABLE ;
-CREATE FUNCTION pgstrom.float4_to_matrix(float4[])
-  RETURNS pg_catalog.matrix
-  AS 'MODULE_PATHNAME','float4_to_matrix'
-  LANGUAGE C STRICT;
-CREATE FUNCTION pgstrom.matrix_to_float4(matrix)
-  RETURNS float4[]
-  AS 'MODULE_PATHNAME','matrix_to_float4'
-  LANGUAGE C STRICT;
+  AS 'MODULE_PATHNAME', 'matrix_send'
+  LANGUAGE C STRICT IMMUTABLE;
 
 CREATE TYPE pg_catalog.matrix (
   INPUT = pgstrom.matrix_in,
@@ -598,19 +590,62 @@ CREATE TYPE pg_catalog.matrix (
   RECEIVE = pgstrom.matrix_recv,
   SEND = pgstrom.matrix_send,
   ANALYZE = pg_catalog.array_typanalyze,
+  CATEGORY = 'A',
   LIKE = pg_catalog.float4[],
   ELEMENT = float4
 );
 
+CREATE FUNCTION pgstrom.float4_to_matrix(float4[])
+  RETURNS pg_catalog.matrix
+  AS 'MODULE_PATHNAME', 'anyarray_to_matrix'
+  LANGUAGE C STRICT IMMUTABLE;
+CREATE FUNCTION pgstrom.float8_to_matrix(float8[])
+  RETURNS pg_catalog.matrix
+  AS 'MODULE_PATHNAME', 'anyarray_to_matrix'
+  LANGUAGE C STRICT IMMUTABLE;
+CREATE FUNCTION pgstrom.numeric_to_matrix(numeric[])
+  RETURNS pg_catalog.matrix
+  AS 'MODULE_PATHNAME', 'anyarray_to_matrix'
+  LANGUAGE C STRICT IMMUTABLE;
+CREATE FUNCTION pgstrom.matrix_to_float4(matrix)
+  RETURNS float4[]
+  AS 'MODULE_PATHNAME', 'matrix_to_anyarray'
+  LANGUAGE C STRICT IMMUTABLE;
+CREATE FUNCTION pgstrom.matrix_to_float8(matrix)
+  RETURNS float8[]
+  AS 'MODULE_PATHNAME', 'matrix_to_anyarray'
+  LANGUAGE C STRICT IMMUTABLE;
+CREATE FUNCTION pgstrom.matrix_to_numeric(matrix)
+  RETURNS numeric[]
+  AS 'MODULE_PATHNAME', 'matrix_to_anyarray'
+  LANGUAGE C STRICT IMMUTABLE;
+
 CREATE CAST (float4[] AS pg_catalog.matrix)
   WITH FUNCTION pgstrom.float4_to_matrix(float4[])
   AS IMPLICIT;
-
 CREATE CAST (pg_catalog.matrix AS float4[])
   WITH FUNCTION pgstrom.matrix_to_float4(matrix)
   AS IMPLICIT;
+CREATE CAST (float8[] AS pg_catalog.matrix)
+  WITH FUNCTION pgstrom.float8_to_matrix(float8[])
+  AS IMPLICIT;
+CREATE CAST (pg_catalog.matrix AS float8[])
+  WITH FUNCTION pgstrom.matrix_to_float8(matrix)
+  AS IMPLICIT;
+CREATE CAST (numeric[] AS pg_catalog.matrix)
+  WITH FUNCTION pgstrom.numeric_to_matrix(numeric[])
+  AS IMPLICIT;
+CREATE CAST (pg_catalog.matrix AS numeric[])
+  WITH FUNCTION pgstrom.matrix_to_numeric(matrix)
+  AS IMPLICIT;
+
 
 CREATE FUNCTION pgstrom.make_matrix_accum(internal, variadic float4[])
+  RETURNS internal
+  AS 'MODULE_PATHNAME','make_matrix_accum'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE FUNCTION pgstrom.make_matrix_accum(internal, variadic float8[])
   RETURNS internal
   AS 'MODULE_PATHNAME','make_matrix_accum'
   LANGUAGE C CALLED ON NULL INPUT;
@@ -621,6 +656,13 @@ CREATE FUNCTION pgstrom.make_matrix_final(internal)
   LANGUAGE C CALLED ON NULL INPUT;
 
 CREATE AGGREGATE pg_catalog.make_matrix(variadic float4[])
+(
+  sfunc = pgstrom.make_matrix_accum,
+  stype = internal,
+  finalfunc = pgstrom.make_matrix_final
+);
+
+CREATE AGGREGATE pg_catalog.make_matrix(variadic float8[])
 (
   sfunc = pgstrom.make_matrix_accum,
   stype = internal,
