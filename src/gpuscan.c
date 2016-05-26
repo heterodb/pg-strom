@@ -2400,6 +2400,7 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 	 */
 	CUDA_EVENT_CREATE(gpuscan, ev_dma_send_start);
 	CUDA_EVENT_CREATE(gpuscan, ev_dma_send_stop);
+	CUDA_EVENT_CREATE(gpuscan, ev_kern_exec_quals);
 	CUDA_EVENT_CREATE(gpuscan, ev_dma_recv_start);
 	CUDA_EVENT_CREATE(gpuscan, ev_dma_recv_stop);
 
