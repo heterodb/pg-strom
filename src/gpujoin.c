@@ -3991,10 +3991,13 @@ gpujoin_exec_estimate_nitems(GpuJoinState *gjs,
 			else
 				exec_ratio = 0.0;
 
-			ntuples_next = ntuples_in *
-				(exec_ratio * merge_ratio +
-				 plan_ratio * (1.0 - merge_ratio)) *
-				((double)jscale[depth].window_size / (double)nitems_in);
+			if (nitems_in == 0)
+				ntuples_next = 0.0;
+			else
+				ntuples_next = ntuples_in *
+					(exec_ratio * merge_ratio +
+					 plan_ratio * (1.0 - merge_ratio)) *
+					((double)jscale[depth].window_size / (double)nitems_in);
 		}
 	}
 
@@ -4028,12 +4031,19 @@ gpujoin_exec_estimate_nitems(GpuJoinState *gjs,
 				 *
 				 * XXX - We may need more exact statistics on outer_join_map
 				 */
-				double match_ratio
-					= sqrt((double)(gjs->inner_nitems[depth] +
-									gjs->right_nitems[depth]) /
-						   (double)(pds_in->kds->nitems));
-				match_ratio = 1.0 - Min(1.0, match_ratio);
-				match_ratio = Max(0.05, match_ratio);	/* at least 5% */
+				cl_uint	nitems_in = pds_in->kds->nitems;
+				double	match_ratio;
+
+				if (nitems_in == 0)
+					match_ratio = 1.0;	/* an obvious case */
+				else
+				{
+					match_ratio = sqrt((double)(gjs->inner_nitems[depth] +
+												gjs->right_nitems[depth]) /
+									   (double)(nitems_in));
+					match_ratio = 1.0 - Min(1.0, match_ratio);
+					match_ratio = Max(0.05, match_ratio);	/* at least 5% */
+				}
 				ntuples_next += match_ratio * jscale[depth].window_size;
 			}
 		}
@@ -4319,6 +4329,7 @@ major_retry:
 													jscale_old,
 													ntuples,
 													depth);
+
 		/* check expected length of the kern_gpujoin head */
 		max_items_temp = (Size)((double)(depth+1) *
 								ntuples_next *
