@@ -1504,6 +1504,7 @@ build_device_tlist_walker(Node *node, build_device_tlist_context *context)
 	GpuJoinPath	   *gpath = context->gpath;
 	RelOptInfo	   *rel;
 	ListCell	   *cell;
+	int				i;
 
 	if (!node)
 		return false;
@@ -1511,7 +1512,6 @@ build_device_tlist_walker(Node *node, build_device_tlist_context *context)
 	{
 		Var	   *varnode = (Var *) node;
 		Var	   *ps_node;
-		int		i;
 
 		foreach (cell, context->ps_tlist)
 		{
@@ -1569,10 +1569,6 @@ build_device_tlist_walker(Node *node, build_device_tlist_context *context)
 				{
 					TargetEntry *tle = lfirst(cell);
 
-					if (!IsA(tle->expr, Var))
-						elog(ERROR, "Bug? unexpected node in tlist: %s",
-							 nodeToString(tle->expr));
-
 					if (equal(varnode, tle->expr))
 					{
 						TargetEntry	   *ps_tle =
@@ -1592,6 +1588,69 @@ build_device_tlist_walker(Node *node, build_device_tlist_context *context)
 		}
 		elog(ERROR, "Bug? uncertain origin of Var-node: %s",
 			 nodeToString(varnode));
+	}
+	else if (IsA(node, PlaceHolderVar))
+	{
+		PlaceHolderVar *phvnode = (PlaceHolderVar *) node;
+
+		foreach (cell, context->ps_tlist)
+		{
+			TargetEntry	   *tle = lfirst(cell);
+
+			if (equal(phvnode, tle->expr))
+				return false;
+		}
+
+		/* Not in the pseudo-scan target-list, so append a new one */
+		for (i=0; i <= gpath->num_rels; i++)
+		{
+			if (i == 0)
+			{
+				/*
+				 * NOTE: We don't assume PlaceHolderVar that references the
+				 * outer-path which was pulled-up, because only simple scan
+				 * paths (SeqScan or GpuScan with no host-only qualifiers)
+				 * can be pulled-up, thus, no chance for SubQuery paths.
+				 */
+				Index	outer_scanrelid = context->outer_scanrelid;
+
+				if (outer_scanrelid != 0 &&
+					bms_is_member(outer_scanrelid, phvnode->phrels))
+					elog(ERROR, "Bug? PlaceHolderVar referenced simple scan outer-path, not expected: %s", nodeToString(phvnode));
+
+				rel = gpath->outer_path->parent;
+			}
+			else
+				rel = gpath->inners[i-1].scan_path->parent;
+
+			if (bms_is_subset(phvnode->phrels, rel->relids))
+			{
+				Plan   *plan = list_nth(context->custom_plans, i);
+
+				foreach (cell, plan->targetlist)
+				{
+					TargetEntry	   *tle = lfirst(cell);
+					TargetEntry	   *ps_tle;
+					AttrNumber		ps_resno;
+
+					if (!equal(phvnode, tle->expr))
+						continue;
+
+					ps_resno = list_length(context->ps_tlist) + 1;
+					ps_tle = makeTargetEntry((Expr *) copyObject(phvnode),
+											 ps_resno,
+											 NULL,
+											 context->resjunk);
+					context->ps_tlist = lappend(context->ps_tlist, ps_tle);
+					context->ps_depth = lappend_int(context->ps_depth, i);
+					context->ps_resno = lappend_int(context->ps_resno,
+													tle->resno);
+					return false;
+				}
+			}
+		}
+		elog(ERROR, "Bug? uncertain origin of PlaceHolderVar-node: %s",
+			 nodeToString(phvnode));
 	}
 	return expression_tree_walker(node, build_device_tlist_walker,
 								  (void *) context);
@@ -1815,7 +1874,11 @@ codegen_device_projection(CustomScan *cscan, GpuJoinInfo *gj_info,
 						  cl_uint *p_extra_maxlen)
 {
 	List		   *tlist_dev = cscan->custom_scan_tlist;
-	ListCell	   *lc;
+	List		   *ps_src_depth = gj_info->ps_src_depth;
+	List		   *ps_src_resno = gj_info->ps_src_resno;
+	ListCell	   *lc1;
+	ListCell	   *lc2;
+	ListCell	   *lc3;
 	AttrNumber	   *varattmaps;
 	Bitmapset	   *refs_by_vars = NULL;
 	Bitmapset	   *refs_by_expr = NULL;
@@ -1832,13 +1895,16 @@ codegen_device_projection(CustomScan *cscan, GpuJoinInfo *gj_info,
 	initStringInfo(&temp);
 
 	/* Pick up all the var-node referenced by entries with no resjunk */
-	foreach (lc, tlist_dev)
+	forthree (lc1, tlist_dev,
+			  lc2, ps_src_depth,
+			  lc3, ps_src_resno)
 	{
-		TargetEntry	   *tle = lfirst(lc);
+		TargetEntry	*tle = lfirst(lc1);
+		cl_int		src_depth = lfirst_int(lc2);
 
 		if (tle->resjunk)
 			continue;
-		if (IsA(tle->expr, Var))
+		if (src_depth >= 0)
 			refs_by_vars = bms_add_member(refs_by_vars, tle->resno -
 										  FirstLowInvalidHeapAttributeNumber);
 		else
@@ -1869,29 +1935,22 @@ codegen_device_projection(CustomScan *cscan, GpuJoinInfo *gj_info,
 	{
 		List	   *kvars_srcnum = NIL;
 		List	   *kvars_dstnum = NIL;
-		ListCell   *lc1;
-		ListCell   *lc2;
-		ListCell   *lc3;
 		cl_int		i, nattrs = -1;
 
 		/* collect information in this depth */
 		memset(varattmaps, 0, sizeof(AttrNumber) * list_length(tlist_dev));
+
 		forthree (lc1, tlist_dev,
-				  lc2, gj_info->ps_src_depth,
-				  lc3, gj_info->ps_src_resno)
+				  lc2, ps_src_depth,
+				  lc3, ps_src_resno)
 		{
 			TargetEntry *tle = lfirst(lc1);
 			cl_int		src_depth = lfirst_int(lc2);
 			cl_int		src_resno = lfirst_int(lc3);
 			cl_int		k = tle->resno - FirstLowInvalidHeapAttributeNumber;
 
-			/* expression shall be built later */
-			if (!IsA(tle->expr, Var))
-				continue;
-			/* var-node points to different depth */
 			if (depth != src_depth)
 				continue;
-
 			if (bms_is_member(k, refs_by_vars))
 				varattmaps[tle->resno - 1] = src_resno;
 
@@ -1904,6 +1963,7 @@ codegen_device_projection(CustomScan *cscan, GpuJoinInfo *gj_info,
 				bms_is_member(k, refs_by_expr))
 				nattrs = Max(nattrs, src_resno);
 		}
+
 		/* no need to extract inner/outer tuple in this depth */
 		if (nattrs < 1)
 			continue;
@@ -1959,7 +2019,6 @@ codegen_device_projection(CustomScan *cscan, GpuJoinInfo *gj_info,
 		for (i=1; i <= nattrs; i++)
 		{
 			TargetEntry	   *tle;
-			Var			   *var;
 			int16			typelen;
 			bool			typebyval;
 			cl_bool			referenced = false;
@@ -1971,9 +2030,8 @@ codegen_device_projection(CustomScan *cscan, GpuJoinInfo *gj_info,
 				if (varattmaps[tle->resno - 1] != i)
 					continue;
 				/* attribute shall be directly copied */
-				Assert(IsA(tle->expr, Var));
-				var = (Var *) tle->expr;
-				get_typlenbyval(var->vartype, &typelen, &typebyval);
+				get_typlenbyval(exprType((Node *)tle->expr),
+								&typelen, &typebyval);
 				if (!typebyval)
 				{
 					appendStringInfo(
@@ -2010,18 +2068,17 @@ codegen_device_projection(CustomScan *cscan, GpuJoinInfo *gj_info,
 				devtype_info   *dtype;
 				cl_int			src_num = lfirst_int(lc1);
 				cl_int			dst_num = lfirst_int(lc2);
+				Oid				type_oid;
 
 				if (src_num != i)
 					continue;
 				/* add KVAR_%u declarations */
 				tle = list_nth(tlist_dev, dst_num - 1);
-				Assert(IsA(tle->expr, Var));
-				var = (Var *) tle->expr;
-
-				dtype = pgstrom_devtype_lookup(var->vartype);
+				type_oid = exprType((Node *)tle->expr);
+				dtype = pgstrom_devtype_lookup(type_oid);
 				if (!dtype)
 					elog(ERROR, "cache lookup failed for device type: %s",
-						 format_type_be(var->vartype));
+						 format_type_be(type_oid));
 
 				appendStringInfo(
 					&decl,
@@ -2057,12 +2114,14 @@ codegen_device_projection(CustomScan *cscan, GpuJoinInfo *gj_info,
 	 */
 	is_first = true;
 	extra_maxlen = 0;
-	foreach (lc, tlist_dev)
+	forboth (lc1, tlist_dev,
+			 lc2, ps_src_depth)
 	{
-		TargetEntry	   *tle = lfirst(lc);
+		TargetEntry	   *tle = lfirst(lc1);
+		cl_int			src_depth = lfirst_int(lc2);
 		devtype_info   *dtype;
 
-		if (tle->resjunk || IsA(tle->expr, Var))
+		if (tle->resjunk || src_depth >= 0)
 			continue;
 
 		if (is_first)
@@ -2185,7 +2244,6 @@ codegen_device_projection(CustomScan *cscan, GpuJoinInfo *gj_info,
 	appendStringInfo(&decl, "\n%s}\n", body.data);
 
 	*p_extra_maxlen = extra_maxlen;
-
 
 	pfree(body.data);
 	pfree(temp.data);
@@ -2457,20 +2515,18 @@ pgstrom_post_planner_gpujoin(PlannedStmt *pstmt, Plan **p_curr_plan)
 		if (IsA(tle->expr, Var))
 		{
 			Var			   *var_cur = (Var *) tle->expr;
-			Var			   *var_old;
 			TargetEntry	   *tle_old;
 			cl_int			index = var_cur->varattno - 1;
 
 			Assert(var_cur->varno == INDEX_VAR);
 			tle_old = list_nth(cscan->custom_scan_tlist, index);
-			Assert(IsA(tle_old->expr, Var));
-			var_old = (Var *) tle_old->expr;
-			/* fixup this varnode by the old custom-scan-tlist */
-			var_cur->varno = var_old->varno;
-			var_cur->varattno = var_old->varattno;
-			Assert(var_cur->vartype == var_old->vartype);
-			Assert(var_cur->vartypmod == var_old->vartypmod);
-			Assert(var_cur->varcollid == var_cur->varcollid);
+			Assert(exprType((Node *)var_cur) ==
+				   exprType((Node *)tle_old->expr));
+			Assert(exprTypmod((Node *)var_cur) ==
+				   exprTypmod((Node *)tle_old->expr));
+			Assert(exprCollation((Node *)var_cur) ==
+				   exprCollation((Node *)tle_old->expr));
+			tle->expr = copyObject(tle_old->expr);
 			/* update src_depth/src_resno */
 			src_depth = list_nth_int(gj_info->ps_src_depth, index);
 			src_resno = list_nth_int(gj_info->ps_src_resno, index);
@@ -3974,8 +4030,6 @@ gpujoin_exec_estimate_nitems(GpuJoinState *gjs,
 				 (double)(jscale_old[depth].window_base +
 						  jscale_old[depth].window_size -
 						  jscale_old[depth].window_orig));
-
-			elog(INFO, "DEPTH=%d ntuples %f -> %f", depth, ntuples_in, ntuples_next);
 		}
 		else
 		{
