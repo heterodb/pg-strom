@@ -1312,14 +1312,14 @@ pgstrom_devfunc_lookup_and_track(Oid func_oid, Oid func_collid,
 /*
  * codegen_expression_walker - main logic of run-time code generator
  */
-static bool codegen_coalesce_expression(CoalesceExpr *coalesce,
+static void codegen_coalesce_expression(CoalesceExpr *coalesce,
 										codegen_context *context);
-static bool codegen_minmax_expression(MinMaxExpr *minmax,
+static void codegen_minmax_expression(MinMaxExpr *minmax,
 									  codegen_context *context);
-static bool codegen_scalar_array_op_expression(ScalarArrayOpExpr *opexpr,
+static void codegen_scalar_array_op_expression(ScalarArrayOpExpr *opexpr,
 											   codegen_context *context);
 
-static bool
+static void
 codegen_expression_walker(Node *node, codegen_context *context)
 {
 	devtype_info   *dtype;
@@ -1327,7 +1327,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 	ListCell	   *cell;
 
 	if (node == NULL)
-		return true;
+		return;
 
 	if (IsA(node, Const))
 	{
@@ -1335,47 +1335,28 @@ codegen_expression_walker(Node *node, codegen_context *context)
 		cl_uint	index = 0;
 
 		if (!pgstrom_devtype_lookup_and_track(con->consttype, context))
-			return false;
-#ifdef NOT_USED
-		/*
-		 * Even though we have identical Const node in used_params list,
-		 * we never reuse it to avoid too frequent GPU kernel build.
-		 * Assume the following expression.
-		 *   ... WHERE sqrt((x - 10)^2) < 2
-		 * Next time, people may want to use
-		 *   ... WHERE sqrt((x - 10)^2) < 5
-		 * If identical Const node would be mapped to the same kernel
-		 * parameters, second expression will take 3 individual parameters,
-		 * thus, it leads unnecessary GPU kernel build.
-		 */
-		foreach (cell, context->used_params)
-		{
-			if (equal(node, lfirst(cell)))
-			{
-				appendStringInfo(&context->str, "KPARAM_%u", index);
-				context->param_refs =
-					bms_add_member(context->param_refs, index);
-				return true;
-			}
-			index++;
-		}
-#endif
+			elog(ERROR, "codegen: faied to lookup device type: %s",
+				 format_type_be(con->consttype));
+
 		context->used_params = lappend(context->used_params,
 									   copyObject(node));
 		index = list_length(context->used_params) - 1;
 		appendStringInfo(&context->str, "KPARAM_%u", index);
 		context->param_refs =
 			bms_add_member(context->param_refs, index);
-		return true;
 	}
 	else if (IsA(node, Param))
 	{
 		Param  *param = (Param *) node;
 		int		index = 0;
 
-		if (param->paramkind != PARAM_EXTERN ||
-			!pgstrom_devtype_lookup_and_track(param->paramtype, context))
-			return false;
+		if (param->paramkind != PARAM_EXTERN)
+			elog(ERROR, "codegen: ParamKind is not PARAM_EXTERN: %d",
+				 (int)param->paramkind);
+
+		if (!pgstrom_devtype_lookup_and_track(param->paramtype, context))
+			elog(ERROR, "codegen: faied to lookup device type: %s",
+				 format_type_be(param->paramtype));
 
 		foreach (cell, context->used_params)
 		{
@@ -1384,7 +1365,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 				appendStringInfo(&context->str, "KPARAM_%u", index);
 				context->param_refs =
 					bms_add_member(context->param_refs, index);
-				return true;
+				return;
 			}
 			index++;
 		}
@@ -1393,7 +1374,6 @@ codegen_expression_walker(Node *node, codegen_context *context)
 		index = list_length(context->used_params) - 1;
 		appendStringInfo(&context->str, "KPARAM_%u", index);
 		context->param_refs = bms_add_member(context->param_refs, index);
-		return true;
 	}
 	else if (IsA(node, Var))
 	{
@@ -1403,8 +1383,12 @@ codegen_expression_walker(Node *node, codegen_context *context)
 		ListCell	   *cell;
 
 		dtype = pgstrom_devtype_lookup_and_track(var->vartype, context);
-		if (!dtype || dtype->type_element)
-			return false;
+		if (!dtype)
+			elog(ERROR, "codegen: faied to lookup device type: %s",
+				 format_type_be(var->vartype));
+		if (dtype->type_element)
+			elog(ERROR, "codegen: array type referenced by Var: %s",
+				 format_type_be(var->vartype));
 
 		/* Fixup varattno when pseudo-scan tlist exists, because varattno
 		 * shall be adjusted on setrefs.c, so we have to adjust variable
@@ -1429,14 +1413,14 @@ codegen_expression_walker(Node *node, codegen_context *context)
 			}
 			Assert(cell != NULL);
 			if (!cell)
-				elog(ERROR, "failed to lookup var-node in the pseudo_tlist v=%s ps=%s", nodeToString(var), nodeToString(context->pseudo_tlist));
+				elog(ERROR, "codegen: failed to map Var (%s)on ps_tlist: %s",
+					 nodeToString(var), nodeToString(context->pseudo_tlist));
 		}
 		appendStringInfo(&context->str, "%s_%u",
 						 context->var_label,
 						 varattno);
 		context->used_vars = list_append_unique(context->used_vars,
 												copyObject(node));
-		return true;
 	}
 	else if (IsA(node, FuncExpr))
 	{
@@ -1446,42 +1430,41 @@ codegen_expression_walker(Node *node, codegen_context *context)
 												 func->inputcollid,
 												 context);
 		if (!dfunc)
-			return false;
+			elog(ERROR, "codegen: failed to lookup device function: %s",
+				 format_procedure(func->funcid));
+
 		appendStringInfo(&context->str,
 						 "pgfn_%s(kcxt", dfunc->func_devname);
 
 		foreach (cell, func->args)
 		{
 			appendStringInfo(&context->str, ", ");
-			if (!codegen_expression_walker(lfirst(cell), context))
-				return false;
+			codegen_expression_walker(lfirst(cell), context);
 		}
 		appendStringInfoChar(&context->str, ')');
-
-		return true;
 	}
 	else if (IsA(node, OpExpr) ||
 			 IsA(node, DistinctExpr))
 	{
 		OpExpr	   *op = (OpExpr *) node;
+		Oid			op_funcid = get_opcode(op->opno);
 
-		dfunc = pgstrom_devfunc_lookup_and_track(get_opcode(op->opno),
+		dfunc = pgstrom_devfunc_lookup_and_track(op_funcid,
 												 op->inputcollid,
 												 context);
 		if (!dfunc)
-			return false;
+			elog(ERROR, "codegen: failed to lookup device function: %s",
+                 format_procedure(op_funcid));
+
 		appendStringInfo(&context->str,
 						 "pgfn_%s(kcxt", dfunc->func_devname);
 
 		foreach (cell, op->args)
 		{
 			appendStringInfo(&context->str, ", ");
-			if (!codegen_expression_walker(lfirst(cell), context))
-				return false;
+			codegen_expression_walker(lfirst(cell), context);
 		}
 		appendStringInfoChar(&context->str, ')');
-
-		return true;
 	}
 	else if (IsA(node, NullTest))
 	{
@@ -1490,11 +1473,12 @@ codegen_expression_walker(Node *node, codegen_context *context)
 		const char *func_name;
 
 		if (nulltest->argisrow)
-			return false;
+			elog(ERROR, "codegen: NullTest towards RECORD data");
 
 		dtype = pgstrom_devtype_lookup_and_track(typeoid, context);
 		if (!dtype)
-			return false;
+			elog(ERROR, "codegen: failed to lookup device type: %s",
+				 format_type_be(typeoid));
 
 		switch (nulltest->nulltesttype)
 		{
@@ -1511,11 +1495,8 @@ codegen_expression_walker(Node *node, codegen_context *context)
 		}
 		appendStringInfo(&context->str, "pgfn_%s_%s(kcxt, ",
 						 dtype->type_name, func_name);
-		if (!codegen_expression_walker((Node *) nulltest->arg, context))
-			return false;
+		codegen_expression_walker((Node *) nulltest->arg, context);
 		appendStringInfoChar(&context->str, ')');
-
-		return true;
 	}
 	else if (IsA(node, BooleanTest))
 	{
@@ -1552,10 +1533,8 @@ codegen_expression_walker(Node *node, codegen_context *context)
 				break;
 		}
 		appendStringInfo(&context->str, "pgfn_%s(kcxt, ", func_name);
-		if (!codegen_expression_walker((Node *) booltest->arg, context))
-			return false;
+		codegen_expression_walker((Node *) booltest->arg, context);
 		appendStringInfoChar(&context->str, ')');
-		return true;
 	}
 	else if (IsA(node, BoolExpr))
 	{
@@ -1565,8 +1544,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 		{
 			Assert(list_length(b->args) == 1);
 			appendStringInfo(&context->str, "(!");
-			if (!codegen_expression_walker(linitial(b->args), context))
-				return false;
+			codegen_expression_walker(linitial(b->args), context);
 			appendStringInfoChar(&context->str, ')');
 		}
 		else if (b->boolop == AND_EXPR || b->boolop == OR_EXPR)
@@ -1584,26 +1562,24 @@ codegen_expression_walker(Node *node, codegen_context *context)
 					else
 						appendStringInfo(&context->str, " || ");
 				}
-				if (!codegen_expression_walker(lfirst(cell), context))
-					return false;
+				codegen_expression_walker(lfirst(cell), context);
 			}
 			appendStringInfoChar(&context->str, ')');
 		}
 		else
 			elog(ERROR, "unrecognized boolop: %d", (int) b->boolop);
-		return true;
 	}
 	else if (IsA(node, CoalesceExpr))
 	{
 		CoalesceExpr   *coalesce = (CoalesceExpr *) node;
 
-		return codegen_coalesce_expression(coalesce, context);
+		codegen_coalesce_expression(coalesce, context);
 	}
 	else if (IsA(node, MinMaxExpr))
 	{
 		MinMaxExpr	   *minmax = (MinMaxExpr *) node;
 
-		return codegen_minmax_expression(minmax, context);
+		codegen_minmax_expression(minmax, context);
 	}
 	else if (IsA(node, RelabelType))
 	{
@@ -1614,7 +1590,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 		 * data types as alias of __global *varlena), so no need to do
 		 * anything special.
 		 */
-		return codegen_expression_walker((Node *)relabel->arg, context);
+		codegen_expression_walker((Node *)relabel->arg, context);
 	}
 	else if (IsA(node, CaseExpr))
 	{
@@ -1635,12 +1611,16 @@ codegen_expression_walker(Node *node, codegen_context *context)
 				expr_type = exprType((Node *)caseexpr->arg);
 				dtype = pgstrom_devtype_lookup_and_track(expr_type, context);
 				if (!dtype)
-					return false;
+					elog(ERROR, "codegen: failed to lookup device type: %s",
+						 format_type_be(expr_type));
+
 				dfunc = pgstrom_devfunc_lookup_and_track(dtype->type_eqfunc,
 														 caseexpr->casecollid,
 														 context);
 				if (!dfunc)
-					return false;
+					elog(ERROR,"codegen: failed to lookup device function: %s",
+						 format_procedure(dtype->type_eqfunc));
+
 				appendStringInfo(&context->str,
 								 "EVAL(pgfn_%s(", dfunc->func_devname);
 				codegen_expression_walker((Node *) caseexpr->arg, context);
@@ -1665,16 +1645,15 @@ codegen_expression_walker(Node *node, codegen_context *context)
 		codegen_expression_walker((Node *) caseexpr->defresult, context);
 		foreach (cell, caseexpr->args)
 			appendStringInfo(&context->str, ")");
-		return true;
 	}
 	else if (IsA(node, ScalarArrayOpExpr))
 	{
 		ScalarArrayOpExpr  *opexpr = (ScalarArrayOpExpr *) node;
 
-		return codegen_scalar_array_op_expression(opexpr, context);
+		codegen_scalar_array_op_expression(opexpr, context);
 	}
-	elog(ERROR, "Bug? unsupported expression: %s", nodeToString(node));
-	return false;
+	else
+		elog(ERROR, "Bug? unsupported expression: %s", nodeToString(node));
 }
 
 /*
@@ -1751,7 +1730,7 @@ deform_devexpr_info(devexpr_info *devexpr, List *contents)
 	Assert(lnext(cell) == NULL);
 }
 
-static bool
+static void
 codegen_coalesce_expression(CoalesceExpr *coalesce, codegen_context *context)
 {
 	devtype_info   *dtype;
@@ -1760,7 +1739,7 @@ codegen_coalesce_expression(CoalesceExpr *coalesce, codegen_context *context)
 
 	dtype = pgstrom_devtype_lookup(coalesce->coalescetype);
 	if (!dtype)
-		elog(ERROR, "unsupported device type in COALESCE: %s",
+		elog(ERROR, "codegen: unsupported device type in COALESCE: %s",
 			 format_type_be(coalesce->coalescetype));
 
 	/* find out identical predefined device COALESCE */
@@ -1789,22 +1768,18 @@ codegen_coalesce_expression(CoalesceExpr *coalesce, codegen_context *context)
 			Oid		type_oid = exprType((Node *)lfirst(cell));
 
 			if (dtype->type_oid != type_oid)
-			{
-				elog(DEBUG2, "device type mismatch in COALESCE: %s / %s",
+				elog(ERROR, "device type mismatch in COALESCE: %s / %s",
 					 format_type_be(dtype->type_oid),
 					 format_type_be(type_oid));
-				return false;
-			}
+
 			devexpr.expr_args = lappend(devexpr.expr_args, dtype);
 		}
 
 		if (coalesce->coalescetype != dtype->type_oid)
-		{
-			elog(DEBUG2, "device type mismatch in COALESCE: %s / %s",
+			elog(ERROR, "device type mismatch in COALESCE: %s / %s",
 				 format_type_be(dtype->type_oid),
 				 format_type_be(coalesce->coalescetype));
-			return false;
-		}
+
 		devexpr.expr_rettype = dtype;
 		devexpr.expr_extra1 = 0;		/* no extra information */
 		devexpr.expr_extra2 = 0;		/* no extra information */
@@ -1865,22 +1840,17 @@ codegen_coalesce_expression(CoalesceExpr *coalesce, codegen_context *context)
 		Node	   *expr = lfirst(cell);
 
 		if (dtype->type_oid != exprType(expr))
-		{
-			elog(DEBUG2, "device type mismatch in COALESCE: %s / %s",
+			elog(ERROR, "codegen: device type mismatch in COALESCE: %s / %s",
 				 format_type_be(dtype->type_oid),
 				 format_type_be(exprType(expr)));
-			return false;
-		}
+
 		appendStringInfo(&context->str, ", ");
-		if (!codegen_expression_walker(expr, context))
-			return false;
+		codegen_expression_walker(expr, context);
 	}
 	appendStringInfo(&context->str, ")");
-
-	return true;
 }
 
-static bool
+static void
 codegen_minmax_expression(MinMaxExpr *minmax, codegen_context *context)
 {
 	devtype_info   *dtype;
@@ -1889,7 +1859,8 @@ codegen_minmax_expression(MinMaxExpr *minmax, codegen_context *context)
 	ListCell	   *cell;
 
 	if (minmax->op != IS_GREATEST && minmax->op != IS_LEAST)
-		return false;	/* unknown operation */
+		elog(ERROR, "unknown operation at MinMaxExpr: %d",
+			 (int)minmax->op);
 
 	dtype = pgstrom_devtype_lookup(minmax->minmaxtype);
 	if (!dtype || !OidIsValid(dtype->type_cmpfunc))
@@ -1930,22 +1901,18 @@ codegen_minmax_expression(MinMaxExpr *minmax, codegen_context *context)
 			Node		   *expr = lfirst(cell);
 
 			if (dtype->type_oid != exprType(expr))
-			{
-				elog(DEBUG2, "device type mismatch in LEAST/GREATEST: %s / %s",
+				elog(ERROR, "device type mismatch in LEAST/GREATEST: %s / %s",
 					 format_type_be(dtype->type_oid),
 					 format_type_be(exprType(expr)));
-				return false;
-			}
+
 			devexpr.expr_args = lappend(devexpr.expr_args, dtype);
 		}
 
 		if (dtype->type_oid != minmax->minmaxtype)
-		{
-			elog(DEBUG2, "device type mismatch in LEAST/GREATEST: %s / %s",
+			elog(ERROR, "device type mismatch in LEAST/GREATEST: %s / %s",
 				 format_type_be(dtype->type_oid),
 				 format_type_be(minmax->minmaxtype));
-			return false;
-		}
+
 		devexpr.expr_rettype = dtype;
 		devexpr.expr_extra1 = (Datum) minmax->op;
 		devexpr.expr_name = psprintf("%s_%s_%u",
@@ -2015,22 +1982,17 @@ codegen_minmax_expression(MinMaxExpr *minmax, codegen_context *context)
 		Node	   *expr = lfirst(cell);
 
 		if (dtype->type_oid != exprType(expr))
-		{
-			elog(DEBUG2, "device type mismatch in LEAST / GREATEST: %s / %s",
+			elog(ERROR, "device type mismatch in LEAST / GREATEST: %s / %s",
 				 format_type_be(dtype->type_oid),
 				 format_type_be(exprType(expr)));
-			return false;
-		}
+
 		appendStringInfo(&context->str, ", ");
-		if (!codegen_expression_walker(expr, context))
-			return false;
+		codegen_expression_walker(expr, context);
     }
 	appendStringInfo(&context->str, ")");
-
-	return true;
 }
 
-static bool
+static void
 codegen_scalar_array_op_expression(ScalarArrayOpExpr *opexpr,
 								   codegen_context *context)
 {
@@ -2038,6 +2000,8 @@ codegen_scalar_array_op_expression(ScalarArrayOpExpr *opexpr,
 	devtype_info   *dtype1;
 	devtype_info   *dtype2;
 	devfunc_info   *dfunc;
+	Oid				func_oid;
+	Oid				type_oid;
 	ListCell	   *cell;
 	StringInfoData	decl;
 
@@ -2060,24 +2024,30 @@ codegen_scalar_array_op_expression(ScalarArrayOpExpr *opexpr,
 	devexpr.expr_tag = T_ScalarArrayOpExpr;
 	devexpr.expr_collid = opexpr->inputcollid;
 
-	dfunc = pgstrom_devfunc_lookup_and_track(get_opcode(opexpr->opno),
+	func_oid = get_opcode(opexpr->opno);
+	dfunc = pgstrom_devfunc_lookup_and_track(func_oid,
 											 opexpr->inputcollid,
 											 context);
 	if (!dfunc)
-		return false;
+		elog(ERROR, "codegen: failed to lookup device function: %s",
+			 format_procedure(get_opcode(opexpr->opno)));
 
 	/* sanity checks */
 	if (dfunc->func_rettype->type_oid != BOOLOID ||
 		list_length(dfunc->func_args) != 2)
-		return false;
+		elog(ERROR, "sanity check violation at ScalarArrayOp");
 
-	dtype1 = pgstrom_devtype_lookup(exprType(linitial(opexpr->args)));
+	type_oid = exprType(linitial(opexpr->args));
+	dtype1 = pgstrom_devtype_lookup(type_oid);
 	if (!dtype1 || dtype1->type_element)
-		return false;	/* 1st argument has to be scalar */
+		elog(ERROR, "codegen: failed to lookup device type, or array: %s",
+			 format_type_be(type_oid));	/* 1st arg must be scalar */
 
-	dtype2 = pgstrom_devtype_lookup(exprType(lsecond(opexpr->args)));
+	type_oid = exprType(lsecond(opexpr->args));
+	dtype2 = pgstrom_devtype_lookup(type_oid);
 	if (!dtype2 || !dtype2->type_element)
-		return false;	/* 2nd argument has to be array */
+		elog(ERROR, "codegen: failed to lookup device type, or scalar: %s",
+			 format_type_be(type_oid));	/* 2nd arg must be array */
 
 	/* sanity checks */
 	if (dfunc->func_rettype->type_oid != BOOLOID ||
@@ -2086,12 +2056,13 @@ codegen_scalar_array_op_expression(ScalarArrayOpExpr *opexpr,
 			!= dtype1->type_oid ||
 		((devtype_info *)lsecond(dfunc->func_args))->type_oid
 			!= dtype2->type_element->type_oid)
-		return false;
+		elog(ERROR, "sanity check violation at ScalarArrayOp");
 
 	devexpr.expr_args = list_make2(dtype1, dtype2);
 	devexpr.expr_rettype = pgstrom_devtype_lookup(BOOLOID);
 	if (!devexpr.expr_rettype)
-		return false;
+		elog(ERROR, "codegen: failed to lookup device type: %s",
+			 format_type_be(BOOLOID));
 	devexpr.expr_extra1 = ObjectIdGetDatum(opexpr->opno);
 	devexpr.expr_extra2 = BoolGetDatum(opexpr->useOr);
 	/* device function name */
@@ -2223,12 +2194,9 @@ found:
 		Node   *expr = lfirst(cell);
 
 		appendStringInfo(&context->str, ", ");
-		if (!codegen_expression_walker(expr, context))
-			return false;
+		codegen_expression_walker(expr, context);
 	}
 	appendStringInfo(&context->str, ")");
-
-	return true;
 }
 
 char *
@@ -2256,8 +2224,7 @@ pgstrom_codegen_expression(Node *expr, codegen_context *context)
 		else
 			expr = (Node *)make_andclause((List *)expr);
 	}
-	if (!codegen_expression_walker(expr, &walker_context))
-		return NULL;
+	codegen_expression_walker(expr, &walker_context);
 
 	context->type_defs = walker_context.type_defs;
 	context->func_defs = walker_context.func_defs;
@@ -2470,6 +2437,10 @@ pgstrom_device_expression(Expr *expr)
 	else if (IsA(expr, Param))
 	{
 		Param		   *param = (Param *) expr;
+
+		/* only PARAM_EXTERN, right now */
+		if (param->paramkind != PARAM_EXTERN)
+			goto unable_node;
 
 		/* supported types only */
 		if (!pgstrom_devtype_lookup(param->paramtype))
