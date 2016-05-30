@@ -42,24 +42,24 @@ typedef struct plcudaInfo
 	bool	kern_prep_maxthreads;
 	Oid		fn_prep_num_threads;
 	Size	val_prep_num_threads;
-	Oid		fn_prep_shmem_size;
-	Size	val_prep_shmem_size;
+	Oid		fn_prep_shmem_unitsz;
+	Size	val_prep_shmem_unitsz;
 
 	/* kernel function */
 	char   *kern_main;
 	bool	kern_main_maxthreads;
 	Oid		fn_main_num_threads;
 	Size	val_main_num_threads;
-	Oid		fn_main_shmem_size;
-	Size	val_main_shmem_size;
+	Oid		fn_main_shmem_unitsz;
+	Size	val_main_shmem_unitsz;
 
 	/* kernel post function */
     char   *kern_post;
 	bool	kern_post_maxthreads;
 	Oid		fn_post_num_threads;
 	Size	val_post_num_threads;
-	Oid		fn_post_shmem_size;
-	Size	val_post_shmem_size;
+	Oid		fn_post_shmem_unitsz;
+	Size	val_post_shmem_unitsz;
 
 	/* device memory size for working buffer */
 	Oid		fn_working_bufsz;
@@ -197,22 +197,22 @@ form_plcuda_info(plcudaInfo *node)
 	WRITE_BOOL_FIELD(kern_prep_maxthreads);
 	WRITE_OID_FIELD(fn_prep_num_threads);
 	WRITE_LONG_FIELD(val_prep_num_threads);
-	WRITE_OID_FIELD(fn_prep_shmem_size);
-	WRITE_LONG_FIELD(val_prep_shmem_size);
+	WRITE_OID_FIELD(fn_prep_shmem_unitsz);
+	WRITE_LONG_FIELD(val_prep_shmem_unitsz);
 	/* main kernel */
 	WRITE_STRING_FIELD(kern_main);
 	WRITE_BOOL_FIELD(kern_main_maxthreads);
 	WRITE_OID_FIELD(fn_main_num_threads);
 	WRITE_LONG_FIELD(val_main_num_threads);
-	WRITE_OID_FIELD(fn_main_shmem_size);
-	WRITE_LONG_FIELD(val_main_shmem_size);
+	WRITE_OID_FIELD(fn_main_shmem_unitsz);
+	WRITE_LONG_FIELD(val_main_shmem_unitsz);
 	/* post kernel */
 	WRITE_STRING_FIELD(kern_post);
 	WRITE_BOOL_FIELD(kern_post_maxthreads);
 	WRITE_OID_FIELD(fn_post_num_threads);
 	WRITE_LONG_FIELD(val_post_num_threads);
-	WRITE_OID_FIELD(fn_post_shmem_size);
-	WRITE_LONG_FIELD(val_post_shmem_size);
+	WRITE_OID_FIELD(fn_post_shmem_unitsz);
+	WRITE_LONG_FIELD(val_post_shmem_unitsz);
 	/* working buffer */
 	WRITE_OID_FIELD(fn_working_bufsz);
 	WRITE_LONG_FIELD(val_working_bufsz);
@@ -262,22 +262,22 @@ deform_plcuda_info(text *cf_info_text)
 	READ_BOOL_FIELD(kern_prep_maxthreads);
 	READ_OID_FIELD(fn_prep_num_threads);
 	READ_LONG_FIELD(val_prep_num_threads);
-	READ_OID_FIELD(fn_prep_shmem_size);
-	READ_LONG_FIELD(val_prep_shmem_size);
+	READ_OID_FIELD(fn_prep_shmem_unitsz);
+	READ_LONG_FIELD(val_prep_shmem_unitsz);
 	/* main kernel */
 	READ_STRING_FIELD(kern_main);
 	READ_BOOL_FIELD(kern_main_maxthreads);
 	READ_OID_FIELD(fn_main_num_threads);
 	READ_LONG_FIELD(val_main_num_threads);
-	READ_OID_FIELD(fn_main_shmem_size);
-	READ_LONG_FIELD(val_main_shmem_size);
+	READ_OID_FIELD(fn_main_shmem_unitsz);
+	READ_LONG_FIELD(val_main_shmem_unitsz);
 	/* post kernel  */
 	READ_STRING_FIELD(kern_post);
 	READ_BOOL_FIELD(kern_post_maxthreads);
 	READ_OID_FIELD(fn_post_num_threads);
 	READ_LONG_FIELD(val_post_num_threads);
-	READ_OID_FIELD(fn_post_shmem_size);
-	READ_LONG_FIELD(val_post_shmem_size);
+	READ_OID_FIELD(fn_post_shmem_unitsz);
+	READ_LONG_FIELD(val_post_shmem_unitsz);
 	/* working buffer */
 	READ_OID_FIELD(fn_working_bufsz);
 	READ_LONG_FIELD(val_working_bufsz);
@@ -302,11 +302,11 @@ typedef struct plcudaState
 	kern_plcuda	   *kplcuda_head;	/* template */
 	/* helper functions */
 	FmgrInfo		fmgr_prep_num_threads;
-	FmgrInfo		fmgr_prep_shmem_size;
+	FmgrInfo		fmgr_prep_shmem_unitsz;
 	FmgrInfo		fmgr_main_num_threads;
-	FmgrInfo		fmgr_main_shmem_size;
+	FmgrInfo		fmgr_main_shmem_unitsz;
 	FmgrInfo		fmgr_post_num_threads;
-	FmgrInfo		fmgr_post_shmem_size;
+	FmgrInfo		fmgr_post_shmem_unitsz;
 	FmgrInfo		fmgr_working_bufsz;
 	FmgrInfo		fmgr_results_bufsz;
 	/* GPU resources */
@@ -335,7 +335,6 @@ static dlist_head	plcuda_state_list;
 static bool
 plcuda_parse_cmd_options(const char *linebuf, List **p_options)
 {
-	List	   *l = NIL;
 	const char *pos = linebuf;
 	char		quote = '\0';
 	List	   *options = NIL;
@@ -354,40 +353,28 @@ plcuda_parse_cmd_options(const char *linebuf, List **p_options)
 		{
 			if (*pos == quote)
 			{
-				l = lappend(l, pstrdup(token.data));
+				options = lappend(options, pstrdup(token.data));
 				resetStringInfo(&token);
 				quote = '\0';
 			}
 			else
 				appendStringInfoChar(&token, *pos);
 		}
-		else if (*pos == ',')
-		{
-			if (token.len > 0)
-			{
-				l = lappend(l, pstrdup(token.data));
-				resetStringInfo(&token);
-			}
-			if (l == NIL)
-				return false;
-			options = lappend(options, l);
-			l = NIL;
-		}
 		else if (*pos == '.')
 		{
 			if (token.len > 0)
 			{
-				l = lappend(l, pstrdup(token.data));
+				options = lappend(options, pstrdup(token.data));
 				resetStringInfo(&token);
 			}
-			/* single character token for delimiter */
-			l = lappend(l, pnstrdup(pos, 1));
+			if (options == NIL)
+				return false;
 		}
 		else if (*pos == '"' || *pos == '\'')
 		{
 			if (token.len > 0)
 			{
-				l = lappend(l, pstrdup(token.data));
+				options = lappend(options, pstrdup(token.data));
 				resetStringInfo(&token);
 			}
 			quote = *pos;
@@ -396,7 +383,7 @@ plcuda_parse_cmd_options(const char *linebuf, List **p_options)
 		{
 			if (isspace(*pos))
 			{
-				l = lappend(l, pstrdup(token.data));
+				options = lappend(options, pstrdup(token.data));
 				resetStringInfo(&token);
 			}
 			else
@@ -408,15 +395,10 @@ plcuda_parse_cmd_options(const char *linebuf, List **p_options)
 				appendStringInfoChar(&token, tolower(*pos));
 		}
 	}
-
 	if (quote != '\0')
 		return false;		/* syntax error; EOL inside quote */
 	if (token.len > 0)
-		l = lappend(l, pstrdup(token.data));
-	if (l != NIL)
-		options = lappend(options, l);
-	else if (options != NIL)
-		return false;		/* syntax error; EOL by ',' */
+		options = lappend(options, pstrdup(token.data));
 
 	*p_options = options;
 	return true;
@@ -500,16 +482,25 @@ ident_to_cstring(List *ident)
  *      :  any declaration code
  * #plcuda_end 
  *
- * #plcuda_prep  [<num_threads>[, <shmem_size>[, maxthreads]]]
- *      :  initial setup of working/result buffer
+ * #plcuda_prep (optional)
+ * #plcuda_num_threads (value|function)
+ * #plcuda_shmem_size  (value|function)
+ * #plcuda_kernel_maxthreads
+ *      :
  * #plcuda_end
  *
- * #plcuda_main  [<num_threads>[,<shmem_size>[, maxthreads]]]
- *      :  main logic of pl/cuda function
+ * #plcuda_begin
+ * #plcuda_num_threads (value|function)
+ * #plcuda_shmem_size  (value|function)
+ * #plcuda_kernel_maxthreads
+ *      :
  * #plcuda_end
  *
- * #plcuda_final [<num_threads>[,<shmem_size>[, maxthreads]]]
- *      :  final setup of result buffer
+ * #plcuda_post (optional)
+ * #plcuda_num_threads (value|function)
+ * #plcuda_shmem_size  (value|function)
+ * #plcuda_kernel_maxthreads
+ *      :
  * #plcuda_end
  *
  * (additional options)
@@ -528,22 +519,23 @@ plcuda_code_validation(plcudaInfo *cf_info,
 	StringInfoData	post_src;
 	StringInfoData	emsg;
 	StringInfo		curr = NULL;
-	oidvector  *argtypes = &proc_form->proargtypes;
-	char	   *line;
-	int			lineno;
-	List	   *ident;
-	bool		has_decl_block = false;
-	bool		has_prep_block = false;
-	bool		has_main_block = false;
-	bool		has_post_block = false;
-	bool		has_working_bufsz = false;
-	bool		has_results_bufsz = false;
+	oidvector	   *argtypes = &proc_form->proargtypes;
+	char		   *line;
+	int				lineno;
+	bool			has_decl_block = false;
+	bool			has_prep_block = false;
+	bool			has_main_block = false;
+	bool			has_post_block = false;
+	bool			has_working_bufsz = false;
+	bool			has_results_bufsz = false;
 
 	initStringInfo(&decl_src);
 	initStringInfo(&prep_src);
 	initStringInfo(&main_src);
 	initStringInfo(&post_src);
 	initStringInfo(&emsg);
+#define EMSG(fmt,...)		appendStringInfo(&emsg, "\n%u: " fmt,	\
+											 lineno, __VA_ARGS__)
 
 	for (line = strtok(source, "\n"), lineno = 1;
 		 line != NULL;
@@ -560,260 +552,228 @@ plcuda_code_validation(plcudaInfo *cf_info,
 				appendStringInfo(curr, "%s\n", line);
 			else
 			{
+				/* ignore if empty line */
 				for (pos = line; !isspace(*pos) && *pos != '\0'; pos++);
 
 				if (*pos != '\0')
-					appendStringInfo(&emsg, "\n%u: "
-									 "code is out of valid block:\n%s",
-									 lineno, line);
+					EMSG("code is out of valid block:\n%s", line);
 			}
-			continue;
-		}
-		/* pick up command name */
-		for (pos = line; !isspace(*pos) && *pos != '\0'; pos++);
-		cmd = pnstrdup(line, pos - line);
-		/* parse pl/cuda command options */
-		if (!plcuda_parse_cmd_options(pos, &options))
-		{
-			appendStringInfo(&emsg, "\n%u: pl/cuda parse error:\n%s",
-							 lineno, line);
-			continue;
-		}
-
-		if (strcmp(cmd, "#plcuda_decl") == 0)
-		{
-			if (has_decl_block)
-			{
-				appendStringInfo(&emsg, "\n%u: %s appeared twice",
-								 lineno, line);
-				continue;
-			}
-
-			if (list_length(options) > 0)
-			{
-				appendStringInfo(&emsg, "\n%u: %s takes no parameters",
-								 lineno, line);
-				continue;
-			}
-			curr = &decl_src;
-			has_decl_block = true;
-		}
-		else if (strcmp(cmd, "#plcuda_prep") == 0)
-		{
-			if (has_prep_block)
-			{
-				appendStringInfo(&emsg, "\n%u: %s appeared twice",
-								 lineno, cmd);
-				continue;
-			}
-
-			switch (list_length(options))
-			{
-				case 3:
-					ident = lthird(options);
-					if (list_length(ident) != 1)
-						appendStringInfo(&emsg, "\n%u:%s was not valid",
-										 lineno, (char *)linitial(ident));
-					else if (strcmp(linitial(ident), "maxthreads") == 0)
-						cf_info->kern_prep_maxthreads = true;
-					else
-						appendStringInfo(&emsg, "\n%u:%s was unknown",
-										 lineno, (char *)linitial(ident));
-				case 2:
-					ident = lsecond(options);
-					if (!plcuda_lookup_helper(ident, argtypes, INT8OID,
-											  &cf_info->fn_prep_shmem_size,
-											  &cf_info->val_prep_shmem_size))
-						appendStringInfo(&emsg, "\n%u:%s was not valid",
-										 lineno, ident_to_cstring(ident));
-				case 1:
-					ident = linitial(options);
-					if (!plcuda_lookup_helper(ident, argtypes, INT8OID,
-											  &cf_info->fn_prep_num_threads,
-											  &cf_info->val_prep_num_threads))
-						appendStringInfo(&emsg, "\n%u:%s was not valid",
-										 lineno, ident_to_cstring(ident));
-				case 0:
-					break;
-				default:
-					appendStringInfo(&emsg, "\n%u: %s had too much parameters",
-									 lineno, cmd);
-					break;
-			}
-			curr = &prep_src;
-			has_prep_block = true;
-		}
-		else if (strcmp(cmd, "#plcuda_begin") == 0)
-		{
-			if (has_main_block)
-			{
-				appendStringInfo(&emsg, "\n%u: %s appeared twice",
-								 lineno, cmd);
-				continue;
-			}
-
-			switch (list_length(options))
-			{
-				case 3:
-					ident = lthird(options);
-					if (list_length(ident) != 1)
-						appendStringInfo(&emsg, "\n%u:%s was not valid",
-										 lineno, (char *)linitial(ident));
-					else if (strcmp(linitial(ident), "maxthreads") == 0)
-						cf_info->kern_main_maxthreads = true;
-					else
-						appendStringInfo(&emsg, "\n%u:%s was unknown",
-										 lineno, (char *)linitial(ident));
-				case 2:
-					ident = lsecond(options);
-					if (!plcuda_lookup_helper(ident, argtypes, INT8OID,
-											  &cf_info->fn_main_shmem_size,
-											  &cf_info->val_main_shmem_size))
-						appendStringInfo(&emsg, "\n%u:%s was not valid",
-										 lineno, ident_to_cstring(ident));
-				case 1:
-					ident = linitial(options);
-					if (!plcuda_lookup_helper(ident, argtypes, INT8OID,
-											  &cf_info->fn_main_num_threads,
-											  &cf_info->val_main_num_threads))
-						appendStringInfo(&emsg, "\n%u:%s was not valid",
-										 lineno, ident_to_cstring(ident));
-				case 0:
-					break;
-				default:
-					appendStringInfo(&emsg, "\n%u: %s had too much parameters",
-									 lineno, cmd);
-					break;
-			}
-			curr = &main_src;
-			has_main_block = true;
-		}
-		else if (strcmp(cmd, "#plcuda_post") == 0)
-		{
-			if (has_post_block)
-			{
-				appendStringInfo(&emsg, "\n%u: %s appeared twice",
-								 lineno, cmd);
-				continue;
-			}
-
-			switch (list_length(options))
-			{
-				case 3:
-					ident = lthird(options);
-					if (list_length(ident) != 1)
-						appendStringInfo(&emsg, "\n%u:%s was not valid",
-										 lineno, (char *)linitial(ident));
-					else if (strcmp(linitial(ident), "maxthreads") == 0)
-						cf_info->kern_post_maxthreads = true;
-					else
-						appendStringInfo(&emsg, "\n%u:%s was unknown",
-										 lineno, (char *)linitial(ident));
-				case 2:
-					ident = lsecond(options);
-					if (!plcuda_lookup_helper(ident, argtypes, INT8OID,
-											  &cf_info->fn_post_shmem_size,
-											  &cf_info->val_post_shmem_size))
-						appendStringInfo(&emsg, "\n%u:%s was not valid",
-								lineno, ident_to_cstring(lsecond(options)));
-				case 1:
-					ident = linitial(options);
-					if (!plcuda_lookup_helper(ident, argtypes, INT8OID,
-											  &cf_info->fn_post_num_threads,
-											  &cf_info->val_post_num_threads))
-						appendStringInfo(&emsg, "\n%u:%s was not valid",
-										 lineno, ident_to_cstring(ident));
-				case 0:
-					break;
-				default:
-					appendStringInfo(&emsg, "\n%u: %s had too much parameters",
-									 lineno, cmd);
-					break;
-			}
-			curr = &post_src;
-			has_post_block = true;
-		}
-		else if (strcmp(cmd, "#plcuda_end") == 0)
-		{
-			if (list_length(options) > 0)
-				appendStringInfo(&emsg, "\n%u: %s takes no parameters",
-								 lineno, line);
-			curr = NULL;
-		}
-		else if (strcmp(cmd, "#plcuda_working_bufsz") == 0)
-		{
-			if (has_working_bufsz)
-				appendStringInfo(&emsg, "\n%u: %s appears twice",
-								 lineno, cmd);
-			else if (list_length(options) != 1)
-				appendStringInfo(&emsg, "\n%u: %s wrong syntax",
-								 lineno, cmd);
-			else if (plcuda_lookup_helper((List *)linitial(options),
-										  argtypes, INT8OID,
-										  &cf_info->fn_working_bufsz,
-										  &cf_info->val_working_bufsz))
-				has_working_bufsz = true;
-			else
-				appendStringInfo(&emsg, "\n%u:%s was not valid",
-								 lineno, ident_to_cstring(linitial(options)));
-		}
-		else if (strcmp(cmd, "#plcuda_results_bufsz") == 0)
-		{
-			if (has_results_bufsz)
-				appendStringInfo(&emsg, "\n%u: %s appears twice",
-								 lineno, cmd);
-			else if (list_length(options) != 1)
-				appendStringInfo(&emsg, "\n%u: %s wrong syntax",
-								 lineno, cmd);
-			else if (plcuda_lookup_helper((List *)linitial(options),
-										  argtypes, INT8OID,
-										  &cf_info->fn_results_bufsz,
-										  &cf_info->val_results_bufsz))
-				has_results_bufsz = true;
-			else
-				appendStringInfo(&emsg, "\n%u:%s was not valid",
-								 lineno, ident_to_cstring(linitial(options)));
-		}
-		else if (strcmp(cmd, "#plcuda_include") == 0)
-		{
-			const char *target;
-
-			if (list_length(options) != 1)
-				appendStringInfo(&emsg, "\n%u: %s wrong syntax", lineno, cmd);
-
-			target = linitial(options);
-			if (strcmp(target, "cuda_dynpara.h") == 0)
-				cf_info->extra_flags |= DEVKERNEL_NEEDS_DYNPARA;
-			else if (strcmp(target, "cuda_matrix.h") == 0)
-				cf_info->extra_flags |= DEVKERNEL_NEEDS_MATRIX;
-			else if (strcmp(target, "cuda_timelib.h") == 0)
-				cf_info->extra_flags |= DEVKERNEL_NEEDS_TIMELIB;
-			else if (strcmp(target, "cuda_textlib.h") == 0)
-				cf_info->extra_flags |= DEVKERNEL_NEEDS_TEXTLIB;
-			else if (strcmp(target, "cuda_numeric.h") == 0)
-				cf_info->extra_flags |= DEVKERNEL_NEEDS_NUMERIC;
-			else if (strcmp(target, "cuda_mathlib.h") == 0)
-				cf_info->extra_flags |= DEVKERNEL_NEEDS_MATHLIB;
-			else if (strcmp(target, "cuda_money.h") == 0)
-				cf_info->extra_flags |= DEVKERNEL_NEEDS_MONEY;
-			else
-				appendStringInfo(&emsg, "\n%u: %s unknown include target: %s",
-								 lineno, cmd, target);
 		}
 		else
 		{
-			appendStringInfo(&emsg, "\n%u: unknown command: %s",
-							 lineno, cmd);
+			/* pick up command name */
+			for (pos = line; !isspace(*pos) && *pos != '\0'; pos++);
+			cmd = pnstrdup(line, pos - line);
+			/* parse pl/cuda command options */
+			if (!plcuda_parse_cmd_options(pos, &options))
+			{
+				EMSG("pl/cuda parse error:\n%s", line);
+				continue;
+			}
+
+			if (strcmp(cmd, "#plcuda_decl") == 0)
+			{
+				if (has_decl_block)
+					EMSG("%s appeared twice", cmd);
+				else if (list_length(options) > 0)
+					EMSG("syntax error:\n  %s", line);
+				else
+				{
+					curr = &decl_src;
+					has_decl_block = true;
+				}
+			}
+			else if (strcmp(cmd, "#plcuda_prep") == 0)
+			{
+				if (has_prep_block)
+					EMSG("%s appeared twice", cmd);
+				else if (list_length(options) > 0)
+					EMSG("syntax error:\n  %s", line);
+				else
+				{
+					curr = &prep_src;
+					has_prep_block = true;
+				}
+			}
+			else if (strcmp(cmd, "#plcuda_begin") == 0)
+			{
+				if (has_main_block)
+					EMSG("%s appeared twice", cmd);
+				else if (list_length(options) > 0)
+					EMSG("syntax error:\n  %s", line);
+				else
+				{
+					curr = &main_src;
+					has_main_block = true;
+				}
+			}
+			else if (strcmp(cmd, "#plcuda_post") == 0)
+			{
+				if (has_post_block)
+					EMSG("%s appeared twice", cmd);
+				else if (list_length(options) > 0)
+					EMSG("syntax error:\n  %s\n", line);
+				else
+				{
+					curr = &post_src;
+					has_post_block = true;
+				}
+			}
+			else if (strcmp(cmd, "#plcuda_num_threads") == 0)
+			{
+				Oid		fn_num_threads;
+				Size	val_num_threads;
+
+				if (!curr)
+					EMSG("%s appeared outside of code block", cmd);
+				else if (list_length(options) != 1 &&
+						 list_length(options) != 3)
+					EMSG("syntax error:\n  %s\n"
+						 "  should be: %s (value|function)", line, cmd);
+				else if (plcuda_lookup_helper(options,
+											  argtypes, INT8OID,
+											  &fn_num_threads,
+											  &val_num_threads))
+				{
+					if (curr == &prep_src)
+					{
+						cf_info->fn_prep_num_threads = fn_num_threads;
+						cf_info->val_prep_num_threads = val_num_threads;
+					}
+					else if (curr == &main_src)
+					{
+						cf_info->fn_main_num_threads = fn_num_threads;
+						cf_info->val_main_num_threads = val_num_threads;
+					}
+					else if (curr == &post_src)
+					{
+						cf_info->fn_post_num_threads = fn_num_threads;
+						cf_info->val_post_num_threads = val_num_threads;
+					}
+					else
+						EMSG("cannot use \"%s\" in this code block", cmd);
+				}
+				else
+					EMSG("\"%s\" was not a valid value or function",
+						 ident_to_cstring(options));
+			}
+			else if (strcmp(cmd, "#plcuda_shmem_unitsz") == 0)
+			{
+				Oid		fn_shmem_unitsz;
+				Size	val_shmem_unitsz;
+
+				if (!curr)
+					EMSG("%s appeared outside of code block", cmd);
+				else if (list_length(options) != 1 &&
+						 list_length(options) != 3)
+					EMSG("syntax error:\n  %s\n"
+						 "  should be: %s (value|function)", line, cmd);
+				else if (plcuda_lookup_helper(options,
+											  argtypes, INT8OID,
+											  &fn_shmem_unitsz,
+											  &val_shmem_unitsz))
+				{
+					if (curr == &prep_src)
+					{
+						cf_info->fn_prep_shmem_unitsz = fn_shmem_unitsz;
+						cf_info->val_prep_shmem_unitsz = val_shmem_unitsz;
+					}
+					else if (curr == &main_src)
+					{
+						cf_info->fn_main_shmem_unitsz = fn_shmem_unitsz;
+						cf_info->val_main_shmem_unitsz = val_shmem_unitsz;
+					}
+					else if (curr == &post_src)
+					{
+						cf_info->fn_post_shmem_unitsz = fn_shmem_unitsz;
+						cf_info->val_post_shmem_unitsz = val_shmem_unitsz;
+					}
+					else
+						EMSG("cannot use \"%s\" in this code block", cmd);
+				}
+				else
+					EMSG("\"%s\" was not a valid value or function",
+						 ident_to_cstring(options));
+			}
+			else if (strcmp(cmd, "#plcuda_kernel_maxthreads") == 0)
+			{
+				if (!curr)
+					EMSG("%s appeared outside of code block", cmd);
+				else if (list_length(options) > 0)
+					EMSG("syntax error:\n  %s\n", line);
+				else if (curr == &prep_src)
+					cf_info->kern_prep_maxthreads = true;
+				else if (curr == &main_src)
+					cf_info->kern_main_maxthreads = true;
+				else if (curr == &post_src)
+					cf_info->kern_post_maxthreads = true;
+				else
+					EMSG("cannot use \"%s\" in this code block", cmd);
+			}
+			else if (strcmp(cmd, "#plcuda_working_bufsz") == 0)
+			{
+				if (has_working_bufsz)
+					EMSG("%s appeared twice", cmd);
+				else if (list_length(options) != 1)
+					EMSG("syntax error:\n  %s\n"
+						 "should be: %s (value|function)", line, cmd);
+				else if (plcuda_lookup_helper(options,
+											  argtypes, INT8OID,
+											  &cf_info->fn_working_bufsz,
+											  &cf_info->val_working_bufsz))
+					has_working_bufsz = true;
+				else
+					EMSG("\"%s\" was not a valid value or function",
+                         ident_to_cstring(options));
+			}
+			else if (strcmp(cmd, "#plcuda_results_bufsz") == 0)
+			{
+				if (has_results_bufsz)
+					EMSG("%s appeared twice", cmd);
+				else if (list_length(options) != 1)
+					EMSG("syntax error:\n  %s\n"
+						 "should be: %s (value|function)", line, cmd);
+				else if (plcuda_lookup_helper(options,
+											  argtypes, INT8OID,
+											  &cf_info->fn_results_bufsz,
+											  &cf_info->val_results_bufsz))
+					has_results_bufsz = true;
+				else
+					EMSG("\"%s\" was not a valid value or function",
+						 ident_to_cstring(options));
+			}
+			else if (strcmp(cmd, "#plcuda_include") == 0)
+			{
+				const char *target;
+
+				if (list_length(options) != 1)
+					EMSG("syntax error:\n%s", line);
+				target = linitial(options);
+				if (strcmp(target, "cuda_dynpara.h") == 0)
+					cf_info->extra_flags |= DEVKERNEL_NEEDS_DYNPARA;
+				else if (strcmp(target, "cuda_matrix.h") == 0)
+					cf_info->extra_flags |= DEVKERNEL_NEEDS_MATRIX;
+				else if (strcmp(target, "cuda_timelib.h") == 0)
+					cf_info->extra_flags |= DEVKERNEL_NEEDS_TIMELIB;
+				else if (strcmp(target, "cuda_textlib.h") == 0)
+					cf_info->extra_flags |= DEVKERNEL_NEEDS_TEXTLIB;
+				else if (strcmp(target, "cuda_numeric.h") == 0)
+					cf_info->extra_flags |= DEVKERNEL_NEEDS_NUMERIC;
+				else if (strcmp(target, "cuda_mathlib.h") == 0)
+					cf_info->extra_flags |= DEVKERNEL_NEEDS_MATHLIB;
+				else if (strcmp(target, "cuda_money.h") == 0)
+					cf_info->extra_flags |= DEVKERNEL_NEEDS_MONEY;
+				else
+					EMSG("unknown include target: %s", target);
+			}
+			else
+				EMSG("unknown command: %s", line);
 		}
 	}
 	if (curr)
-		appendStringInfo(
-			&emsg, "\n%u: code block was not closed", lineno);
-
+		appendStringInfo(&emsg, "\n%u: code block was not closed", lineno);
 	if (!has_main_block)
-		appendStringInfo(
-			&emsg, "\n%u: no '#plcuda_begin' ... #plcuda_end' block", lineno);
-
+		appendStringInfo(&emsg, "\n%u: no main code block", lineno);
 	if (emsg.len > 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_SYNTAX_ERROR),
@@ -823,7 +783,7 @@ plcuda_code_validation(plcudaInfo *cf_info,
 	cf_info->kern_prep = prep_src.data;
 	cf_info->kern_main = main_src.data;
 	cf_info->kern_post = post_src.data;
-
+#undef EMSG
 	pfree(emsg.data);
 }
 
@@ -1073,21 +1033,21 @@ plcuda_exec_begin(Form_pg_proc procForm, plcudaInfo *cf_info)
 	if (OidIsValid(cf_info->fn_prep_num_threads))
 		fmgr_info(cf_info->fn_prep_num_threads,
 				  &state->fmgr_prep_num_threads);
-	if (OidIsValid(cf_info->fn_prep_shmem_size))
-		fmgr_info(cf_info->fn_prep_shmem_size,
-				  &state->fmgr_prep_shmem_size);
+	if (OidIsValid(cf_info->fn_prep_shmem_unitsz))
+		fmgr_info(cf_info->fn_prep_shmem_unitsz,
+				  &state->fmgr_prep_shmem_unitsz);
 	if (OidIsValid(cf_info->fn_main_num_threads))
 		fmgr_info(cf_info->fn_main_num_threads,
 				  &state->fmgr_main_num_threads);
-	if (OidIsValid(cf_info->fn_main_shmem_size))
-		fmgr_info(cf_info->fn_main_shmem_size,
-				  &state->fmgr_main_shmem_size);
+	if (OidIsValid(cf_info->fn_main_shmem_unitsz))
+		fmgr_info(cf_info->fn_main_shmem_unitsz,
+				  &state->fmgr_main_shmem_unitsz);
 	if (OidIsValid(cf_info->fn_post_num_threads))
 		fmgr_info(cf_info->fn_post_num_threads,
 				  &state->fmgr_post_num_threads);
-	if (OidIsValid(cf_info->fn_post_shmem_size))
-		fmgr_info(cf_info->fn_post_shmem_size,
-				  &state->fmgr_post_shmem_size);
+	if (OidIsValid(cf_info->fn_post_shmem_unitsz))
+		fmgr_info(cf_info->fn_post_shmem_unitsz,
+				  &state->fmgr_post_shmem_unitsz);
 	if (OidIsValid(cf_info->fn_working_bufsz))
 		fmgr_info(cf_info->fn_working_bufsz,
 				  &state->fmgr_working_bufsz);
@@ -1268,10 +1228,10 @@ plcuda_function_validator(PG_FUNCTION_ARGS)
 		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
 	}
 
-	if (OidIsValid(cf_info.fn_prep_shmem_size))
+	if (OidIsValid(cf_info.fn_prep_shmem_unitsz))
 	{
 		referenced.classId = ProcedureRelationId;
-		referenced.objectId = cf_info.fn_prep_shmem_size;
+		referenced.objectId = cf_info.fn_prep_shmem_unitsz;
 		referenced.objectSubId = 0;
 		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
 	}
@@ -1285,10 +1245,10 @@ plcuda_function_validator(PG_FUNCTION_ARGS)
 		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
 	}
 
-	if (OidIsValid(cf_info.fn_main_shmem_size))
+	if (OidIsValid(cf_info.fn_main_shmem_unitsz))
 	{
 		referenced.classId = ProcedureRelationId;
-		referenced.objectId = cf_info.fn_main_shmem_size;
+		referenced.objectId = cf_info.fn_main_shmem_unitsz;
 		referenced.objectSubId = 0;
 		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
 	}
@@ -1302,10 +1262,10 @@ plcuda_function_validator(PG_FUNCTION_ARGS)
 		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
 	}
 
-	if (OidIsValid(cf_info.fn_post_shmem_size))
+	if (OidIsValid(cf_info.fn_post_shmem_unitsz))
 	{
 		referenced.classId = ProcedureRelationId;
-		referenced.objectId = cf_info.fn_post_shmem_size;
+		referenced.objectId = cf_info.fn_post_shmem_unitsz;
 		referenced.objectSubId = 0;
 		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
 	}
@@ -1497,12 +1457,12 @@ __launch_plcuda_kernels(plcudaState *state,
 										   state->kern_prep,
 										   cuda_device,
 										   kplcuda->prep_num_threads,
-										   kplcuda->prep_shmem_size);
+										   kplcuda->prep_shmem_unitsz);
 
 			rc = cuLaunchKernel(state->kern_prep,
 								grid_size, 1, 1,
 								block_size, 1, 1,
-								block_size * kplcuda->prep_shmem_size,
+								block_size * kplcuda->prep_shmem_unitsz,
 								stream,
 								kern_args,
 								NULL);
@@ -1512,7 +1472,7 @@ __launch_plcuda_kernels(plcudaState *state,
 			elog(DEBUG2, "pl/CUDA prep kernel, "
 				 "grid=(%u,1,1), block=(%u,1,1), shmem=%zu",
 				 (cl_uint)grid_size, (cl_uint)block_size,
-				 block_size * kplcuda->prep_shmem_size);
+				 block_size * kplcuda->prep_shmem_unitsz);
 		}
 
 		/* kernel launch of the main function */
@@ -1521,12 +1481,12 @@ __launch_plcuda_kernels(plcudaState *state,
 									   state->kern_main,
 									   cuda_device,
 									   kplcuda->main_num_threads,
-									   kplcuda->main_shmem_size);
+									   kplcuda->main_shmem_unitsz);
 
 		rc = cuLaunchKernel(state->kern_main,
 							grid_size, 1, 1,
 							block_size, 1, 1,
-							block_size * kplcuda->main_shmem_size,
+							block_size * kplcuda->main_shmem_unitsz,
 							stream,
 							kern_args,
 							NULL);
@@ -1536,7 +1496,7 @@ __launch_plcuda_kernels(plcudaState *state,
 			elog(DEBUG2, "pl/CUDA main kernel, "
 				 "grid=(%u,1,1), block=(%u,1,1), shmem=%zu",
 				 (cl_uint)grid_size, (cl_uint)block_size,
-				 block_size * kplcuda->main_shmem_size);
+				 block_size * kplcuda->main_shmem_unitsz);
 
 		/* kernel launch of the post function */
 		if (state->kern_post)
@@ -1546,12 +1506,12 @@ __launch_plcuda_kernels(plcudaState *state,
 										   state->kern_post,
 										   cuda_device,
 										   kplcuda->post_num_threads,
-										   kplcuda->post_shmem_size);
+										   kplcuda->post_shmem_unitsz);
 
 			rc = cuLaunchKernel(state->kern_post,
 								grid_size, 1, 1,
 								block_size, 1, 1,
-								block_size * kplcuda->post_shmem_size,
+								block_size * kplcuda->post_shmem_unitsz,
 								stream,
 								kern_args,
 								NULL);
@@ -1561,7 +1521,7 @@ __launch_plcuda_kernels(plcudaState *state,
 			elog(DEBUG2, "pl/CUDA post kernel, "
 				 "grid=(%u,1,1), block=(%u,1,1), shmem=%zu",
 				 (cl_uint)grid_size, (cl_uint)block_size,
-				 block_size * kplcuda->post_shmem_size);
+				 block_size * kplcuda->post_shmem_unitsz);
 		}
 
 		/* write back the control block */
@@ -1723,12 +1683,12 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 			= kernel_launch_param(fcinfo,
 								  &state->fmgr_prep_num_threads,
 								  cf_info->val_prep_num_threads);
-		kplcuda->prep_shmem_size
+		kplcuda->prep_shmem_unitsz
 			= kernel_launch_param(fcinfo,
-								  &state->fmgr_prep_shmem_size,
-								  cf_info->val_prep_shmem_size);
-		elog(INFO, "prep_num_threads = %u, prep_shmem_size = %u",
-			 kplcuda->prep_num_threads, kplcuda->prep_shmem_size);
+								  &state->fmgr_prep_shmem_unitsz,
+								  cf_info->val_prep_shmem_unitsz);
+		elog(INFO, "prep_num_threads = %u, prep_shmem_unitsz = %u",
+			 kplcuda->prep_num_threads, kplcuda->prep_shmem_unitsz);
 	}
 
 	if (state->kern_main)
@@ -1737,12 +1697,12 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 			= kernel_launch_param(fcinfo,
 								  &state->fmgr_main_num_threads,
 								  cf_info->val_main_num_threads);
-		kplcuda->main_shmem_size
+		kplcuda->main_shmem_unitsz
 			= kernel_launch_param(fcinfo,
-								  &state->fmgr_main_shmem_size,
-								  cf_info->val_main_shmem_size);
-		elog(INFO, "main_num_threads = %u, main_shmem_size = %u",
-			 kplcuda->main_num_threads, kplcuda->main_shmem_size);
+								  &state->fmgr_main_shmem_unitsz,
+								  cf_info->val_main_shmem_unitsz);
+		elog(INFO, "main_num_threads = %u, main_shmem_unitsz = %u",
+			 kplcuda->main_num_threads, kplcuda->main_shmem_unitsz);
 	}
 
 	if (state->kern_post)
@@ -1751,12 +1711,12 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 			= kernel_launch_param(fcinfo,
 								  &state->fmgr_post_num_threads,
 								  cf_info->val_post_num_threads);
-		kplcuda->post_shmem_size
+		kplcuda->post_shmem_unitsz
 			= kernel_launch_param(fcinfo,
-								  &state->fmgr_post_shmem_size,
-								  cf_info->val_post_shmem_size);
-		elog(INFO, "post_num_threads = %u, post_shmem_size = %u",
-			 kplcuda->post_num_threads, kplcuda->post_shmem_size);
+								  &state->fmgr_post_shmem_unitsz,
+								  cf_info->val_post_shmem_unitsz);
+		elog(INFO, "post_num_threads = %u, post_shmem_unitsz = %u",
+			 kplcuda->post_num_threads, kplcuda->post_shmem_unitsz);
 	}
 
 	/* set context */

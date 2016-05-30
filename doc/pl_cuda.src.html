@@ -1,0 +1,172 @@
+<article class="manual_1" id="pl_cuda">
+<h1>PL/CUDA</h1>
+<p>
+<span lang="en">
+This chapter introduces the way to implement GPU executable native program as SQL functions, using PL/CUDA procedural language.
+</span>
+<span lang="ja">
+本章では、PL/CUDA言語を用いて、GPUで実行可能なネイティブプログラムをSQL関数として実装する方法について説明します。
+</span>
+</p>
+
+<section class="manual_2" id="plcuda_overview">
+
+PostgreSQLでは、SQL関数の記述に用いるプログラミング言語を拡張モジュールによって追加する事ができます。
+
+
+
+</section>
+
+<section class="manual_2" id="plcuda_directives">
+
+ここに絵がほしい。
+
+<dl>
+<dt><code>#plcuda_begin</code></dt>
+<dd>
+</dd>
+
+<dl>
+<dt><code>#plcuda_end</code></dt>
+<dd>
+</dd>
+
+<dl>
+<dt><code>#plcuda_decl</code></dt>
+<dd>
+<span lang="ja">
+全てのkernel関数の定義に先立って宣言しておくべきコードブロックを記述します。
+他のコードブロックとは異なり、自動的にkernel関数として展開される事はありませんので、完全な関数定義を記述する必要があります。
+</span>
+</dd>
+
+<dl>
+<dt><code>#plcuda_prep</code></dt>
+<dd>
+<span lang="en">
+You can optionally use this directive.
+</span>
+<span lang="ja">
+このディレクティブの使用は任意です。
+</span>
+
+<span lang="ja">
+<code>#plcuda_begin</code>から始まる本体コードブロックの実行に先立ってGPUで実行すべき処理を記述します。
+ここでは、結果バッファや作業バッファの初期化を行う事を意図しており、<code>#plcuda_prep</code>の実行が完了するまでは本体コードブロックは実行されません。
+</span>
+
+
+
+</dd>
+
+<dl>
+<dt><code>#plcuda_post</code></dt>
+<dd>
+<span lang="en">
+You can optionally use this directive.
+</span>
+<span lang="ja">
+このディレクティブの使用は任意です。
+</span>
+
+<span lang="ja">
+<code>#plcuda_begin</code>から始まる本体コードブロックの実行後にGPUで実行すべき処理を記述します。
+ここでは、CPU側に返却する最終結果を結果バッファにセットする事を意図しており、本体コードブロックの実行が完了するまでは<code>#plcuda_post</code>コードブロックは実行されません。
+</span>
+
+
+
+</dd>
+
+<dl>
+<dt><code>#plcuda_num_threads (%lt;value%gt;|%lt;function%gt;)</code></dt>
+<dd>
+<span lang="en">
+You can optionally use this directive. If not specified, the default is a constant value <code>0</code>.
+</span>
+<span lang="ja">
+このディレクティブの使用は任意です。未指定の場合、デフォルト値として定数<code>1</code>が使われます。
+</span>
+
+<span lang="ja">
+このディレクティブが<code>#plcuda_prep</code>、<code>#plcuda_begin</code>、および<code>#plcuda_post</code>コードブロックの内側で指定されると、それぞれのGPU kernel関数を起動する際のスレッド数を指定する事ができます。
+</span>
+
+<span lang="ja">
+数値が指定されると、PL/CUDAランタイムは指定された数のGPUスレッドを起動してGPU kernel関数を実行します。
+関数名が指定されると、PL/CUDAランタイムは指定されたSQL関数を呼び出し、戻り値で指定された数のGPUスレッドを起動します。
+</span>
+
+
+
+</dd>
+
+<dl>
+<dt><code>#plcuda_shmem_unitsz (%lt;value%gt;|%lt;function%gt;)</code></dt>
+<dd>
+<span lang="en">
+You can optionally use this directive. If not specified, the default is a constant value <code>0</code>.
+</span>
+<span lang="ja">
+このディレクティブの使用は任意です。未指定の場合のデフォルト値は定数<code>0</code>です
+</span>
+
+
+</dd>
+
+<dl>
+<dt><code>#plcuda_kernel_maxthreads</code></dt>
+<dd>
+<span lang="en">
+You can optionally use this directive.
+</span>
+<span lang="ja">
+このディレクティブの使用は任意です。
+</span>
+
+
+<span lang="ja">
+<code>#plcuda_prep</code>、<code>#plcuda_begin</code>、および<code>#plcuda_post</code>コードブロックの内側でこのディレクティブを指定すると、GPU kernel関数の最適化ポリシーを『実行効率最適化』から『ブロックあたりスレッド数最大化』に切り替えます。
+</span>
+<span lang="ja">
+ブロックあたりスレッド数が多くなると、より多くのスレッドが共有メモリを介して同期処理を行う事ができるようになる半面、スレッドが使用できるレジスタ数が減少するため、一部のローカル変数がグローバルメモリ上に確保されるなど性能面では不利になる事があります。
+</span>
+
+
+
+</dd>
+
+<dl>
+<dt><code>#plcuda_include "library name"</code></dt>
+<dd>
+</dd>
+
+<dl>
+<dt><code>#plcuda_results_size (%lt;value%gt;|%lt;function%gt;)</code></dt>
+<dd>
+</dd>
+
+<dl>
+<dt><code>#plcuda_working_bufsz (%lt;value%gt;|%lt;function%gt;)</code></dt>
+<dd>
+</dd>
+
+<dl>
+<dt><code>#plcuda_cpu_fallback &lt;function%gt;</code></dt>
+<dd>
+</dd>
+
+</dl>
+
+
+
+</section>
+
+<section class="manual_2" id="plcuda_example">
+</section>
+
+
+<section class="manual_2" id="plcuda_matrix">
+</section>
+
+</article>

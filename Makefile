@@ -86,6 +86,7 @@ __HTML_TEMPLATE = template.src.html
 __HTML_SOURCES = manual.src.html \
 	install.src.html \
 	tutrial.src.html \
+	pl_cuda.src.html \
 	release.src.html
 __IMAGE_SOURCES = lang_en.png \
 	lang_ja.png \
