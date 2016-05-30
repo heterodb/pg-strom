@@ -718,6 +718,26 @@ CREATE AGGREGATE pg_catalog.make_matrix(variadic numeric[])
   finalfunc = pgstrom.make_matrix_final
 );
 
+CREATE FUNCTION pg_catalog.matrix_height(matrix)
+  RETURNS int
+  AS 'MODULE_PATHNAME','matrix_height'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.matrix_width(matrix)
+  RETURNS int
+  AS 'MODULE_PATHNAME','matrix_width'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.matrix_rawsize(int,int)
+  RETURNS bigint
+  AS 'MODULE_PATHNAME','matrix_rawsize'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.matrix_transpose(matrix)
+  RETURNS matrix
+  AS 'MODULE_PATHNAME','matrix_transpose'
+  LANGUAGE C STRICT;
+
 CREATE FUNCTION pgstrom.matrix_add(matrix, matrix)
   RETURNS matrix
   AS 'MODULE_PATHNAME','matrix_add'

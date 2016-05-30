@@ -68,6 +68,10 @@ typedef struct plcudaInfo
 	/* device memory size for result buffer */
 	Oid		fn_results_bufsz;
 	Size	val_results_bufsz;
+
+	/* comprehensive functions */
+	Oid		fn_sanity_check;
+	Oid		fn_cpu_fallback;
 } plcudaInfo;
 
 #if PG_VERSION_NUM < 90600
@@ -219,6 +223,9 @@ form_plcuda_info(plcudaInfo *node)
 	/* results buffer */
 	WRITE_OID_FIELD(fn_results_bufsz);
 	WRITE_LONG_FIELD(val_results_bufsz);
+	/* comprehensive functions */
+	WRITE_OID_FIELD(fn_sanity_check);
+	WRITE_OID_FIELD(fn_cpu_fallback);
 
 	return cstring_to_text(str.data);
 }
@@ -284,6 +291,9 @@ deform_plcuda_info(text *cf_info_text)
 	/* results buffer */
 	READ_OID_FIELD(fn_results_bufsz);
 	READ_LONG_FIELD(val_results_bufsz);
+	/* comprehensive functions */
+	READ_OID_FIELD(fn_sanity_check);
+	READ_OID_FIELD(fn_cpu_fallback);
 
 	pg_strtok_ptr = save_strtok;
 
@@ -309,6 +319,8 @@ typedef struct plcudaState
 	FmgrInfo		fmgr_post_shmem_unitsz;
 	FmgrInfo		fmgr_working_bufsz;
 	FmgrInfo		fmgr_results_bufsz;
+	FmgrInfo		fmgr_sanity_check;
+	FmgrInfo		fmgr_cpu_fallback;
 	/* GPU resources */
 	cl_int			cuda_index;
 	CUfunction		kern_prep;
@@ -410,7 +422,6 @@ plcuda_lookup_helper(List *options, oidvector *arg_types, Oid result_type,
 {
 	List	   *names;
 
-	Assert(IsA(options, List));
 	if (list_length(options) == 1)
 	{
 		/* a constant value, or a function in search path */
@@ -422,6 +433,8 @@ plcuda_lookup_helper(List *options, oidvector *arg_types, Oid result_type,
 			for (pos = ident; isdigit(*pos); pos++);
 			if (*pos == '\0')
 			{
+				if (p_func_oid)
+					*p_func_oid = InvalidOid;	/* no function */
 				*p_size_value = atol(ident);
                 return true;
 			}
@@ -457,6 +470,8 @@ plcuda_lookup_helper(List *options, oidvector *arg_types, Oid result_type,
 
 		/* OK, helper function is valid */
 		*p_func_oid = helper_oid;
+		if (*p_size_value)
+			*p_size_value = 0;	/* no const value */
 
 		return true;
 	}
@@ -471,7 +486,11 @@ ident_to_cstring(List *ident)
 
 	initStringInfo(&buf);
 	foreach (lc, ident)
-		appendStringInfo(&buf, " %s", quote_identifier(lfirst(lc)));
+	{
+		if (buf.len > 0)
+			appendStringInfoChar(&buf, ' ');
+		appendStringInfo(&buf, "%s", quote_identifier(lfirst(lc)));
+	}
 	return buf.data;
 }
 
@@ -507,6 +526,7 @@ ident_to_cstring(List *ident)
  * #plcuda_include "cuda_xxx.h"
  * #plcuda_results_size {<value>|<function>}     (default: 0)
  * #plcuda_buffer_size {<value>|<function>}      (default: 0)
+ * #plcuda_sanity_check {<function>}             (default: no fallback)
  * #plcuda_cpu_fallback {<function>}             (default: no fallback)
  */
 static void
@@ -528,6 +548,8 @@ plcuda_code_validation(plcudaInfo *cf_info,
 	bool			has_post_block = false;
 	bool			has_working_bufsz = false;
 	bool			has_results_bufsz = false;
+	bool			has_sanity_check = false;
+	bool			has_cpu_fallback = false;
 
 	initStringInfo(&decl_src);
 	initStringInfo(&prep_src);
@@ -619,6 +641,13 @@ plcuda_code_validation(plcudaInfo *cf_info,
 					has_post_block = true;
 				}
 			}
+			else if (strcmp(cmd, "#plcuda_end") == 0)
+			{
+				if (!curr)
+					EMSG("%s was used out of code block", cmd);
+				else
+					curr = NULL;
+			}
 			else if (strcmp(cmd, "#plcuda_num_threads") == 0)
 			{
 				Oid		fn_num_threads;
@@ -626,10 +655,6 @@ plcuda_code_validation(plcudaInfo *cf_info,
 
 				if (!curr)
 					EMSG("%s appeared outside of code block", cmd);
-				else if (list_length(options) != 1 &&
-						 list_length(options) != 3)
-					EMSG("syntax error:\n  %s\n"
-						 "  should be: %s (value|function)", line, cmd);
 				else if (plcuda_lookup_helper(options,
 											  argtypes, INT8OID,
 											  &fn_num_threads,
@@ -664,10 +689,6 @@ plcuda_code_validation(plcudaInfo *cf_info,
 
 				if (!curr)
 					EMSG("%s appeared outside of code block", cmd);
-				else if (list_length(options) != 1 &&
-						 list_length(options) != 3)
-					EMSG("syntax error:\n  %s\n"
-						 "  should be: %s (value|function)", line, cmd);
 				else if (plcuda_lookup_helper(options,
 											  argtypes, INT8OID,
 											  &fn_shmem_unitsz,
@@ -714,9 +735,6 @@ plcuda_code_validation(plcudaInfo *cf_info,
 			{
 				if (has_working_bufsz)
 					EMSG("%s appeared twice", cmd);
-				else if (list_length(options) != 1)
-					EMSG("syntax error:\n  %s\n"
-						 "should be: %s (value|function)", line, cmd);
 				else if (plcuda_lookup_helper(options,
 											  argtypes, INT8OID,
 											  &cf_info->fn_working_bufsz,
@@ -730,9 +748,6 @@ plcuda_code_validation(plcudaInfo *cf_info,
 			{
 				if (has_results_bufsz)
 					EMSG("%s appeared twice", cmd);
-				else if (list_length(options) != 1)
-					EMSG("syntax error:\n  %s\n"
-						 "should be: %s (value|function)", line, cmd);
 				else if (plcuda_lookup_helper(options,
 											  argtypes, INT8OID,
 											  &cf_info->fn_results_bufsz,
@@ -766,6 +781,32 @@ plcuda_code_validation(plcudaInfo *cf_info,
 				else
 					EMSG("unknown include target: %s", target);
 			}
+			else if (strcmp(cmd, "#plcuda_sanity_check") == 0)
+			{
+				if (has_sanity_check)
+					EMSG("%s appeared twice", cmd);
+				else if (plcuda_lookup_helper(options,
+											  argtypes, BOOLOID,
+											  &cf_info->fn_sanity_check,
+											  NULL))
+					has_sanity_check = true;
+				else
+					EMSG("\"%s\" was not a valid function name",
+						 ident_to_cstring(options));
+			}
+			else if (strcmp(cmd, "#plcuda_cpu_fallback") == 0)
+			{
+				if (has_cpu_fallback)
+					EMSG("%s appeared twice", cmd);
+				else if (plcuda_lookup_helper(options,
+											  argtypes, proc_form->prorettype,
+											  &cf_info->fn_cpu_fallback,
+											  NULL))
+					has_cpu_fallback = true;
+				else
+					EMSG("\"%s\" was not a valid function name",
+						 ident_to_cstring(options));
+			}
 			else
 				EMSG("unknown command: %s", line);
 		}
@@ -798,7 +839,8 @@ __plcuda_codegen(StringInfo kern,
 				 const char *suffix,
 				 const char *users_code,
 				 bool kernel_maxthreads,
-				 Form_pg_proc procForm)
+				 Form_pg_proc procForm,
+				 const char *last_suffix)
 {
 	devtype_info   *dtype_r;
 	devtype_info   *dtype_a;
@@ -806,15 +848,13 @@ __plcuda_codegen(StringInfo kern,
 
 	appendStringInfo(
 		kern,
-		"KERNEL_FUNCTION%s(void)\n"
-		"plcuda_%s%s(kern_plcuda *kplcuda, void *workbuf, void *results)\n"
-		"{\n"
-		"  kern_parambuf *kparams = KERN_PLCUDA_PARAMBUF(kplcuda);\n"
-		"  kern_context kcxt;\n",
-		kernel_maxthreads ? "_MAXTHREADS" : "",
-		NameStr(procForm->proname), suffix ? suffix : "");
+		"STATIC_INLINE(void)\n"
+		"__plcuda_%s%s(kern_plcuda *kplcuda, void *workbuf, void *results,\n"
+		"              kern_context *kcxt)\n"
+		"{\n",
+		NameStr(procForm->proname), suffix);
 
-	/* setup results buffer */
+	/* declaration of 'retval' variable */
 	dtype_r = pgstrom_devtype_lookup(procForm->prorettype);
 	if (!dtype_r)
 		elog(ERROR, "cache lookup failed for type '%s'",
@@ -824,6 +864,7 @@ __plcuda_codegen(StringInfo kern,
 		"  pg_%s_t *retval __attribute__ ((unused));\n",
 		dtype_r->type_name);
 
+	/* declaration of argument variables */
 	for (i=0; i < procForm->pronargs; i++)
 	{
 		Oid		type_oid = procForm->proargtypes.values[i];
@@ -837,22 +878,15 @@ __plcuda_codegen(StringInfo kern,
 			"  pg_%s_t arg%u __attribute__((unused));\n",
 			dtype_a->type_name, i+1);
 	}
-	appendStringInfo(
-		kern,
-		"\n"
-		"  assert(sizeof(*retval) <= sizeof(kplcuda->__retval));\n"
-		"  INIT_KERNEL_CONTEXT(&kcxt,plcuda%s_kernel,kparams);\n"
-		"  /* sanity checks */\n"
-		"  if (kplcuda->nargs != kparams->nparams)\n"
-		"  {\n"
-		"    STROM_SET_ERROR(&kcxt.e, StromError_SanityCheckViolation);\n"
-		"    goto out;\n"
-		"  }\n",
-		suffix ? suffix : "");
 
 	appendStringInfo(
 		kern,
+		"  assert(sizeof(*retval) <= sizeof(kplcuda->__retval));\n"
 		"  retval = (pg_%s_t *)kplcuda->__retval;\n", dtype_r->type_name);
+	if (dtype_r->type_length < 0)
+		appendStringInfo(
+			kern,
+			"  assert(retval->isnull || (void *)retval->value == results);\n");
 
 	for (i=0; i < procForm->pronargs; i++)
 	{
@@ -864,7 +898,7 @@ __plcuda_codegen(StringInfo kern,
 				 format_type_be(type_oid));
 		appendStringInfo(
 			kern,
-			"  arg%u = pg_%s_param(&kcxt,%d);\n",
+			"  arg%u = pg_%s_param(kcxt,%d);\n",
 			i+1, dtype_a->type_name, i);
 	}
 
@@ -874,10 +908,50 @@ __plcuda_codegen(StringInfo kern,
 		"  /* ---- code by pl/cuda function ---- */\n"
 		"%s"
 		"  /* ---- code by pl/cuda function ---- */\n"
-		"out:\n"
-		"  kern_writeback_error_status(&kplcuda->kerror, kcxt.e);\n"
 		"}\n\n",
 		users_code);
+
+	appendStringInfo(
+		kern,
+		"KERNEL_FUNCTION%s(void)\n"
+		"plcuda_%s%s(kern_plcuda *kplcuda, void *workbuf, void *results)\n"
+		"{\n"
+		"  kern_parambuf *kparams = KERN_PLCUDA_PARAMBUF(kplcuda);\n"
+		"  kern_context kcxt;\n"
+		"\n"
+		"  assert(kplcuda->nargs == kparams->nparams);\n"
+		"  INIT_KERNEL_CONTEXT(&kcxt,plcuda%s_kernel,kparams);\n",
+		kernel_maxthreads ? "_MAXTHREADS" : "",
+		NameStr(procForm->proname), suffix,
+		suffix);
+
+	if (last_suffix)
+		appendStringInfo(
+			kern,
+			"  if (kplcuda->kerror%s.errcode != StromError_Success)\n"
+			"    kcxt.e = kplcuda->kerror%s;\n"
+			"  else\n"
+			"  {\n"
+			"    INIT_KERNEL_CONTEXT(&kcxt,plcuda%s_kernel,kparams);\n"
+			"    __plcuda_%s%s(kplcuda, workbuf, results, &kcxt);\n"
+			"  }\n",
+			last_suffix,
+			last_suffix,
+			suffix,
+			NameStr(procForm->proname), suffix);
+	else
+		appendStringInfo(
+			kern,
+			"  INIT_KERNEL_CONTEXT(&kcxt,plcuda%s_kernel,kparams);\n"
+			"  __plcuda_%s%s(kplcuda, workbuf, results, &kcxt);\n",
+			suffix,
+			NameStr(procForm->proname), suffix);
+
+	appendStringInfo(
+		kern,
+		"  kern_writeback_error_status(&kplcuda->kerror%s, kcxt.e);\n"
+		"}\n\n",
+		suffix);
 }
 
 static char *
@@ -885,27 +959,39 @@ plcuda_codegen(Form_pg_proc procForm,
 			   plcudaInfo *cf_info)
 {
 	StringInfoData	kern;
+	const char	   *last_stage = NULL;
 
 	initStringInfo(&kern);
 
 	if (cf_info->kern_decl)
 		appendStringInfo(&kern, "%s\n", cf_info->kern_decl);
 	if (cf_info->kern_prep)
+	{
 		__plcuda_codegen(&kern, "_prep",
 						 cf_info->kern_prep,
 						 cf_info->kern_prep_maxthreads,
-						 procForm);
+						 procForm,
+						 last_stage);
+		last_stage = "_prep";
+	}
 	if (cf_info->kern_main)
-		__plcuda_codegen(&kern, NULL,
+	{
+		__plcuda_codegen(&kern, "_main",
 						 cf_info->kern_main,
 						 cf_info->kern_main_maxthreads,
-						 procForm);
+						 procForm,
+						 last_stage);
+		last_stage = "_main";
+	}
 	if (cf_info->kern_post)
+	{
 		__plcuda_codegen(&kern, "_post",
 						 cf_info->kern_post,
 						 cf_info->kern_post_maxthreads,
-						 procForm);
-
+						 procForm,
+						 last_stage);
+		last_stage = "_post";
+	}
 	return kern.data;
 }
 
@@ -1002,7 +1088,6 @@ plcuda_exec_begin(Form_pg_proc procForm, plcudaInfo *cf_info)
 	cuda_modules = plcuda_load_cuda_program(gcontext,
 											kern_source,
 											cf_info->extra_flags);
-
 	/* construct plcudaState */
 	state = MemoryContextAllocZero(gcontext->memcxt,
 								   sizeof(plcudaState));
@@ -1027,6 +1112,9 @@ plcuda_exec_begin(Form_pg_proc procForm, plcudaInfo *cf_info)
 
 		kplcuda->argmeta[i] = __setup_kern_colmeta(argtype_oid, i);
 	}
+	/* MEMO: if result type is varlena, initialized to NULL as a default */
+	if (kplcuda->retmeta.attlen < 0)
+		kplcuda->__retval[sizeof(CUdeviceptr)] = true;
 	state->kplcuda_head = kplcuda;
 
 	/* helper functions */
@@ -1054,6 +1142,12 @@ plcuda_exec_begin(Form_pg_proc procForm, plcudaInfo *cf_info)
 	if (OidIsValid(cf_info->fn_results_bufsz))
 		fmgr_info(cf_info->fn_results_bufsz,
 				  &state->fmgr_results_bufsz);
+	if (OidIsValid(cf_info->fn_sanity_check))
+		fmgr_info(cf_info->fn_sanity_check,
+				  &state->fmgr_sanity_check);
+	if (OidIsValid(cf_info->fn_cpu_fallback))
+		fmgr_info(cf_info->fn_cpu_fallback,
+				  &state->fmgr_cpu_fallback);
 
 	/* track state */
 	dlist_push_head(&plcuda_state_list, &state->chain);
@@ -1066,7 +1160,7 @@ plcuda_exec_begin(Form_pg_proc procForm, plcudaInfo *cf_info)
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
 
-	if (cf_info->kern_decl)
+	if (cf_info->kern_prep)
 	{
 		snprintf(namebuf, sizeof(namebuf), "plcuda_%s_prep",
 				 NameStr(procForm->proname));
@@ -1079,7 +1173,7 @@ plcuda_exec_begin(Form_pg_proc procForm, plcudaInfo *cf_info)
 
 	if (cf_info->kern_main)
 	{
-		snprintf(namebuf, sizeof(namebuf), "plcuda_%s",
+		snprintf(namebuf, sizeof(namebuf), "plcuda_%s_main",
 				 NameStr(procForm->proname));
 		rc = cuModuleGetFunction(&state->kern_main,
 								 state->cuda_modules[i],
@@ -1288,6 +1382,24 @@ plcuda_function_validator(PG_FUNCTION_ARGS)
 		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
 	}
 
+	/* dependency to sanitycheck function */
+	if (OidIsValid(cf_info.fn_sanity_check))
+	{
+		referenced.classId = ProcedureRelationId;
+		referenced.objectId = cf_info.fn_sanity_check;
+		referenced.objectSubId = 0;
+		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
+	}
+
+	/* dependency to fallback function */
+	if (OidIsValid(cf_info.fn_cpu_fallback))
+	{
+		referenced.classId = ProcedureRelationId;
+		referenced.objectId = cf_info.fn_cpu_fallback;
+		referenced.objectSubId = 0;
+		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
+	}
+
 	ReleaseSysCache(tuple);
 	heap_close(rel, RowExclusiveLock);
 
@@ -1296,10 +1408,9 @@ plcuda_function_validator(PG_FUNCTION_ARGS)
 PG_FUNCTION_INFO_V1(plcuda_function_validator);
 
 
-
-static inline Size
+static inline Datum
 kernel_launch_param(FunctionCallInfo fcinfo,
-					FmgrInfo *__flinfo, Size const_setting)
+					FmgrInfo *__flinfo, Datum const_setting)
 {
 	FunctionCallInfoData __fcinfo;
 	Datum		__result;
@@ -1320,7 +1431,7 @@ kernel_launch_param(FunctionCallInfo fcinfo,
 	if (__fcinfo.isnull)
 		elog(ERROR, "function %u returned NULL", __fcinfo.flinfo->fn_oid);
 
-	return (Size) DatumGetInt64(__result);
+	return __result;
 }
 
 static kern_plcuda *
@@ -1416,6 +1527,7 @@ __launch_plcuda_kernels(plcudaState *state,
 						CUdeviceptr m_working_buf,
 						CUdeviceptr m_results_buf,
 						char *h_results_buf,
+						kern_errorbuf *p_kerror,
 						bool *p_isnull)
 {
 	GpuContext *gcontext = state->gcontext;
@@ -1469,7 +1581,7 @@ __launch_plcuda_kernels(plcudaState *state,
 			if (rc != CUDA_SUCCESS)
 				elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
 
-			elog(DEBUG2, "pl/CUDA prep kernel, "
+			elog(DEBUG2, "PL/CUDA prep kernel, "
 				 "grid=(%u,1,1), block=(%u,1,1), shmem=%zu",
 				 (cl_uint)grid_size, (cl_uint)block_size,
 				 block_size * kplcuda->prep_shmem_unitsz);
@@ -1493,7 +1605,7 @@ __launch_plcuda_kernels(plcudaState *state,
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
 
-			elog(DEBUG2, "pl/CUDA main kernel, "
+			elog(DEBUG2, "PL/CUDA main kernel, "
 				 "grid=(%u,1,1), block=(%u,1,1), shmem=%zu",
 				 (cl_uint)grid_size, (cl_uint)block_size,
 				 block_size * kplcuda->main_shmem_unitsz);
@@ -1518,7 +1630,7 @@ __launch_plcuda_kernels(plcudaState *state,
 			if (rc != CUDA_SUCCESS)
 				elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
 
-			elog(DEBUG2, "pl/CUDA post kernel, "
+			elog(DEBUG2, "PL/CUDA post kernel, "
 				 "grid=(%u,1,1), block=(%u,1,1), shmem=%zu",
 				 (cl_uint)grid_size, (cl_uint)block_size,
 				 block_size * kplcuda->post_shmem_unitsz);
@@ -1543,8 +1655,7 @@ __launch_plcuda_kernels(plcudaState *state,
 							  kplcuda->results_bufsz);
 			if (rc != CUDA_SUCCESS)
 				elog(ERROR, "failed on cuMemcpyDtoH: %s", errorText(rc));
-
-			elog(DEBUG2, "pl/CUDA results DMA %zu bytes",
+			elog(DEBUG2, "PL/CUDA results DMA %zu bytes",
 				 kplcuda->results_bufsz);
 		}
 	}
@@ -1576,8 +1687,17 @@ __launch_plcuda_kernels(plcudaState *state,
 	if (rc != CUDA_SUCCESS)
 		elog(WARNING, "failed on cuStreamDestroy: %s", errorText(rc));
 
-	/* construct the result value */
-	if (kplcuda->retmeta.attlen > 0)
+	/* construction of the result value */
+	if (state->kern_post != NULL &&
+		kplcuda->kerror_post.errcode != StromError_Success)
+	{
+		*p_kerror = kplcuda->kerror_post;
+	}
+	else if (kplcuda->kerror_main.errcode != StromError_Success)
+	{
+		*p_kerror = kplcuda->kerror_main;
+	}
+	else if (kplcuda->retmeta.attlen > 0)
 	{
 		if (kplcuda->__retval[kplcuda->retmeta.attlen])
 			*p_isnull = true;
@@ -1625,6 +1745,7 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 	Size			working_bufsz;
 	Size			results_bufsz;
 	kern_plcuda	   *kplcuda;
+	kern_errorbuf	kerror;
 	CUcontext		cuda_context;
 	CUdeviceptr		m_kern_plcuda = 0UL;
 	CUdeviceptr		m_working_buf = 0UL;
@@ -1659,17 +1780,25 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 		ReleaseSysCache(tuple);
 		flinfo->fn_extra = state;
 	}
-
-	/* determine the kernel launch parameters */
 	cf_info = &state->cf_info;
 
-	working_bufsz = kernel_launch_param(fcinfo,
-										&state->fmgr_working_bufsz,
-										cf_info->val_working_bufsz);
-	results_bufsz = kernel_launch_param(fcinfo,
-										&state->fmgr_results_bufsz,
-										cf_info->val_results_bufsz);
-	elog(INFO, "working_bufsz = %zu, results_bufsz = %zu",
+	/* sanitycheck of the supplied arguments, prior to GPU launch */
+	if (!DatumGetBool(kernel_launch_param(fcinfo,
+										  &state->fmgr_sanity_check,
+										  BoolGetDatum(true))))
+		elog(ERROR, "function '%s' argument sanity check failed",
+			 format_procedure(state->fmgr_sanity_check.fn_oid));
+
+	/* determine the kernel launch parameters */
+	working_bufsz =
+		DatumGetInt64(kernel_launch_param(fcinfo,
+										  &state->fmgr_working_bufsz,
+										  cf_info->val_working_bufsz));
+	results_bufsz =
+		DatumGetInt64(kernel_launch_param(fcinfo,
+										  &state->fmgr_results_bufsz,
+										  cf_info->val_results_bufsz));
+	elog(DEBUG2, "working_bufsz = %zu, results_bufsz = %zu",
 		 working_bufsz, results_bufsz);
 
 	/* make kern_plcuda structure */
@@ -1687,7 +1816,7 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 			= kernel_launch_param(fcinfo,
 								  &state->fmgr_prep_shmem_unitsz,
 								  cf_info->val_prep_shmem_unitsz);
-		elog(INFO, "prep_num_threads = %u, prep_shmem_unitsz = %u",
+		elog(DEBUG2, "prep_num_threads = %u, prep_shmem_unitsz = %u",
 			 kplcuda->prep_num_threads, kplcuda->prep_shmem_unitsz);
 	}
 
@@ -1701,7 +1830,7 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 			= kernel_launch_param(fcinfo,
 								  &state->fmgr_main_shmem_unitsz,
 								  cf_info->val_main_shmem_unitsz);
-		elog(INFO, "main_num_threads = %u, main_shmem_unitsz = %u",
+		elog(DEBUG2, "main_num_threads = %u, main_shmem_unitsz = %u",
 			 kplcuda->main_num_threads, kplcuda->main_shmem_unitsz);
 	}
 
@@ -1715,7 +1844,7 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 			= kernel_launch_param(fcinfo,
 								  &state->fmgr_post_shmem_unitsz,
 								  cf_info->val_post_shmem_unitsz);
-		elog(INFO, "post_num_threads = %u, post_shmem_unitsz = %u",
+		elog(DEBUG2, "post_num_threads = %u, post_shmem_unitsz = %u",
 			 kplcuda->post_num_threads, kplcuda->post_shmem_unitsz);
 	}
 
@@ -1770,11 +1899,13 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 		/*
 		 * OK, launch a series of CUDA kernels (synchronous invocation)
 		 */
+		memset(&kerror, 0, sizeof(kern_errorbuf));
 		retval = __launch_plcuda_kernels(state, kplcuda,
 										 m_kern_plcuda,
 										 m_working_buf,
 										 m_results_buf,
 										 h_results_buf,
+										 &kerror,
 										 &isnull);
 	}
 	PG_CATCH();
@@ -1810,8 +1941,36 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 	rc = cuCtxPopCurrent(NULL);
 	if (rc != CUDA_SUCCESS)
 		elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
-
 	pfree(kplcuda);
+
+	if (kerror.errcode != StromError_Success)
+	{
+		FunctionCallInfoData __fcinfo;
+
+		if (kerror.errcode == StromError_CpuReCheck &&
+			OidIsValid(state->fmgr_cpu_fallback.fn_oid))
+		{
+			/* CPU fallback, if any */
+			InitFunctionCallInfoData(__fcinfo, &state->fmgr_cpu_fallback,
+									 fcinfo->nargs,
+									 fcinfo->fncollation,
+									 NULL, NULL);
+			memcpy(__fcinfo.arg, fcinfo->arg,
+				   sizeof(Datum) * fcinfo->nargs);
+			memcpy(__fcinfo.argnull, fcinfo->argnull,
+				   sizeof(bool) * fcinfo->nargs);
+
+			retval = FunctionCallInvoke(&__fcinfo);
+			isnull = __fcinfo.isnull;
+		}
+		else
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("PL/CUDA execution error (%s)",
+							errorTextKernel(&kerror))));
+		}
+	}
 
 	if (isnull)
 		PG_RETURN_NULL();

@@ -423,7 +423,6 @@ make_matrix_final(PG_FUNCTION_ARGS)
 	make_matrix_state *mstate;
 	MatrixType *matrix;
 	ListCell   *lc;
-	cl_float   *dst;
 	Oid			cast_fnoid;
 	int16		typlen;
 	bool		typbyval;
@@ -431,7 +430,10 @@ make_matrix_final(PG_FUNCTION_ARGS)
 	array_iter	iter;
 	FmgrInfo	cast_flinfo;
 	FunctionCallInfoData cast_fcinfo;
+	Size		width;
+	Size		height;
 	Size		len;
+	Size		row_index;
 
 	if (PG_ARGISNULL(0))
 		PG_RETURN_NULL();
@@ -469,22 +471,26 @@ make_matrix_final(PG_FUNCTION_ARGS)
 								 1, InvalidOid, NULL, NULL);
 	}
 
-	len = sizeof(MatrixType) +
-		sizeof(float) * (Size)mstate->width * (Size)list_length(mstate->rows);
+	width = mstate->width;
+	height = list_length(mstate->rows);
+	len = sizeof(MatrixType) + sizeof(float) * width * height;
 	if (!AllocSizeIsValid(len))
 		elog(ERROR, "supplied matrix is too big");
 	matrix = palloc(len);
 	SET_VARSIZE(matrix, len);
-	MATRIX_INIT_FIELDS(matrix, list_length(mstate->rows), mstate->width);
+	MATRIX_INIT_FIELDS(matrix, height, width);
 
 	get_typlenbyvalalign(mstate->elemtype, &typlen, &typbyval, &typalign);
 
-	dst = matrix->values;
+	row_index = 0;
 	foreach (lc, mstate->rows)
 	{
 		ArrayType  *array = lfirst(lc);
-		cl_uint		offset = ARR_LBOUND(array)[0] - 1;
-		cl_uint		i, nitems = ARR_DIMS(array)[0];
+		Size		offset = ARR_LBOUND(array)[0] - 1;
+		Size		i, nitems = ARR_DIMS(array)[0];
+		cl_float   *dst = matrix->values + row_index;
+		Datum		datum;
+		bool		isnull;
 
 		/* sanity checks */
 		Assert(ARR_ELEMTYPE(array) == mstate->elemtype &&
@@ -492,57 +498,116 @@ make_matrix_final(PG_FUNCTION_ARGS)
 			   offset + nitems <= mstate->width);
 		if (offset > 0)
 		{
-			memset(dst, 0, sizeof(float) * offset);
-			dst += offset;
-		}
-
-		if (!OidIsValid(cast_fnoid) && !ARR_HASNULL(array))
-		{
-			memcpy(dst, ARR_DATA_PTR(array), sizeof(float) * nitems);
-			dst += nitems;
-		}
-		else
-		{
-			Datum	datum;
-			bool	isnull;
-
-			array_iter_setup(&iter, (AnyArrayType *)array);
-			for (i=0; i < nitems; i++)
+			for (i=0; i < offset; i++)
 			{
-				datum = array_iter_next(&iter, &isnull, i,
-										typlen, typbyval, typalign);
-				if (isnull)
-					*dst++ = 0.0;
-				else if (!OidIsValid(cast_fnoid))
-					*dst++ = DatumGetFloat4(datum);
-				else
-				{
-					cast_fcinfo.arg[0] = datum;
-					cast_fcinfo.argnull[0] = false;
-					cast_fcinfo.isnull = false;
-
-					datum = FunctionCallInvoke(&cast_fcinfo);
-					if (cast_fcinfo.isnull)
-						*dst++ = 0.0;
-					else
-						*dst++ = DatumGetFloat4(datum);
-				}
+				*dst = 0.0;
+				dst += height;
 			}
 		}
 
-		if (offset + nitems < mstate->width)
+		array_iter_setup(&iter, (AnyArrayType *)array);
+		for (i=0; i < nitems; i++)
 		{
-			cl_uint		remain = mstate->width - (offset + nitems);
+			datum = array_iter_next(&iter, &isnull, i,
+									typlen, typbyval, typalign);
+			if (isnull)
+				*dst = 0.0;
+			else if (!OidIsValid(cast_fnoid))
+				*dst = DatumGetFloat4(datum);
+			else
+			{
+				cast_fcinfo.arg[0] = datum;
+				cast_fcinfo.argnull[0] = false;
+				cast_fcinfo.isnull = false;
 
-			memset(dst, 0, sizeof(float) * remain);
-			dst += remain;
+				datum = FunctionCallInvoke(&cast_fcinfo);
+				if (cast_fcinfo.isnull)
+					*dst = 0.0;
+				else
+					*dst = DatumGetFloat4(datum);
+			}
+			dst += height;
 		}
-		Assert((dst - matrix->values) % mstate->width == 0);
+
+		for (i=offset + nitems; i < width; i++)
+		{
+			*dst = 0.0;
+			dst += height;
+		}
 		pfree(array);
+		row_index++;
 	}
 	PG_RETURN_POINTER(matrix);
 }
 PG_FUNCTION_INFO_V1(make_matrix_final);
+
+/*
+ * Get properties of matrix
+ */
+Datum
+matrix_height(PG_FUNCTION_ARGS)
+{
+	MatrixType *X = PG_GETARG_MATRIXTYPE_P(0);
+
+	MATRIX_SANITYCHECK(X);
+
+	PG_RETURN_INT32(X->height);
+}
+PG_FUNCTION_INFO_V1(matrix_height);
+
+Datum
+matrix_width(PG_FUNCTION_ARGS)
+{
+	MatrixType *X = PG_GETARG_MATRIXTYPE_P(0);
+
+	MATRIX_SANITYCHECK(X);
+
+	PG_RETURN_INT32(X->width);
+}
+PG_FUNCTION_INFO_V1(matrix_width);
+
+Datum
+matrix_rawsize(PG_FUNCTION_ARGS)
+{
+	int32	height = PG_GETARG_INT32(0);
+	int32	width = PG_GETARG_INT32(1);
+
+	PG_RETURN_INT64(offsetof(MatrixType,
+							 values[(Size)height * (Size)width]));
+}
+PG_FUNCTION_INFO_V1(matrix_rawsize);
+
+/*
+ * matrix_transpose
+ */
+Datum
+matrix_transpose(PG_FUNCTION_ARGS)
+{
+	MatrixType *X = PG_GETARG_MATRIXTYPE_P(0);
+	MatrixType *T;
+	Size		len;
+	Size		i, nitems;
+
+	MATRIX_SANITYCHECK(X);
+
+	/* make a new matrix */
+	len = offsetof(MatrixType,
+				   values[(Size)X->width * (Size)X->height]);
+	if (!AllocSizeIsValid(len))
+		elog(ERROR, "matrix size too large");
+	T = palloc(len);
+	SET_VARSIZE(T, len);
+	MATRIX_INIT_FIELDS(T, X->width, X->height);
+
+	nitems = (Size)X->height * (Size)X->width;
+	for (i=0; i < nitems; i++)
+	{
+		T->values[(i % X->height) * T->width +
+				  (i / X->height)] = X->values[i];
+	}
+	PG_RETURN_MATRIXTYPE_P(T);
+}
+PG_FUNCTION_INFO_V1(matrix_transpose);
 
 /*
  * matrix_add

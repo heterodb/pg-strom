@@ -125,8 +125,8 @@ typedef struct
 	cl_int		ndim;		/* always 2 for matrix */
 	cl_int		dataoffset;	/* always 0 for matrix */
 	cl_uint		elemtype;	/* always FLOAT4OID for matrix */
-	cl_int		height;		/* height of the matrix; =dim1 */
-	cl_int		width;		/* width of the matrix; =dim2 */
+	cl_int		width;		/* height of the matrix; =dim1 */
+	cl_int		height;		/* width of the matrix; =dim2 */
 	cl_int		lbound1;	/* always 1 for matrix */
 	cl_int		lbound2;	/* always 1 for matrix */
 	cl_float	values[FLEXIBLE_ARRAY_MEMBER];
@@ -150,12 +150,27 @@ pg_matrix_sanitychecks(kern_context *kcxt, pg_matrix_t arg)
 
 		if (matrix->ndim != 2 ||
 			matrix->dataoffset != 0 ||
-			matrix->elemtype != FLOAT4OID ||
+			matrix->elemtype != PG_FLOAT4OID ||
 			matrix->lbound1 != 1 ||
 			matrix->lbound2 != 1)
+		{
+			STROM_SET_ERROR(&kcxt->e, StromError_InvalidValue);
 			return false;
+		}
 	}
-	return false;
+	return true;
+}
+
+STATIC_INLINE(void)
+pg_matrix_init_fields(MatrixType *matrix, cl_uint height, cl_uint width)
+{
+	matrix->ndim = 2;
+	matrix->dataoffset = 0;
+	matrix->elemtype = PG_FLOAT4OID;
+	matrix->height = height;
+	matrix->width = width;
+	matrix->lbound1 = 1;
+	matrix->lbound2 = 1;
 }
 
 #endif	/* __CUDACC__ */

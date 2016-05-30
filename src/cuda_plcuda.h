@@ -23,7 +23,9 @@
 
 typedef struct
 {
-	kern_errorbuf	kerror;
+	kern_errorbuf	kerror_prep;
+	kern_errorbuf	kerror_main;
+	kern_errorbuf	kerror_post;
 	/*
 	 * NOTE: __retval is the primary result buffer. It shall be initialized
 	 * on kernel invocation (prior to the prep-kernel) as follows:
@@ -61,5 +63,10 @@ typedef struct
 	((kplcuda)->total_length)
 #define KERN_PLCUDA_DMARECV_LENGTH(kplcuda)		\
 	(offsetof(kern_plcuda, retmeta))
+#define PLCUDA_ERROR_RETURN(errcode)			\
+	do {										\
+		STROM_SET_ERROR(&kcxt->e, (errcode));	\
+		return;									\
+	} while(0)
 
 #endif	/* CUDA_PLCUDA.H */
