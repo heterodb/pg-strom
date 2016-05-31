@@ -2315,7 +2315,11 @@ fixup_device_only_expr(Node *node, List **p_tlist_dev)
 typedef struct
 {
 	List	   *old_tlist_dev;
+	List	   *old_src_depth;
+	List	   *old_src_resno;
 	List	   *new_tlist_dev;
+	List	   *new_src_depth;
+	List	   *new_src_resno;
 } finalize_device_only_expr_context;
 
 static bool
@@ -2325,37 +2329,38 @@ finalize_device_only_expr(Node *node, finalize_device_only_expr_context *con)
 		return false;
 	if (IsA(node, Var))
 	{
-		Var			*var_cur = (Var *) node;
-		Var			*var_old;
-		TargetEntry *tle_old;
-		ListCell	*lc;
+		Var			   *var = (Var *) node;
+		int				src_depth;
+		int				src_resno;
+		ListCell	   *lc1;
+		ListCell	   *lc2;
+		ListCell	   *lc3;
 
-		Assert(var_cur->varno == INDEX_VAR);
-		tle_old = list_nth(con->old_tlist_dev, var_cur->varattno - 1);
-		Assert(IsA(tle_old->expr, Var));
-		var_old = (Var *) tle_old->expr;
-
-		foreach (lc, con->new_tlist_dev)
+		Assert(var->varno == INDEX_VAR);
+		src_depth = list_nth_int(con->old_src_depth, var->varattno - 1);
+		src_resno = list_nth_int(con->old_src_resno, var->varattno - 1);
+		forthree (lc1, con->new_tlist_dev,
+				  lc2, con->new_src_depth,
+				  lc3, con->new_src_resno)
 		{
-			TargetEntry    *tle_new = lfirst(lc);
-			Var			   *var_new;
+			TargetEntry	   *tle_new = lfirst(lc1);
+			int				new_depth = lfirst_int(lc2);
+			int				new_resno = lfirst_int(lc3);
 
-			if (!IsA(tle_new->expr, Var))
-				continue;
-			var_new = (Var *) tle_new->expr;
-			if (var_old->varno == var_new->varno &&
-				var_old->varattno == var_new->varattno)
+			if (src_depth == new_depth &&
+				src_resno == new_resno)
 			{
-				var_cur->varno = INDEX_VAR;
-				var_cur->varattno = tle_new->resno;
-				Assert(var_cur->vartype == var_new->vartype &&
-					   var_cur->vartype == var_old->vartype);
-				Assert(var_cur->vartypmod == var_new->vartypmod &&
-					   var_cur->vartypmod == var_old->vartypmod);
-				Assert(var_cur->varcollid == var_new->varcollid &&
-					   var_cur->varcollid == var_old->varcollid);
-				var_cur->varnoold = var_new->varno;
-				var_cur->varoattno = var_new->varoattno;
+				Oid		expr_typoid = exprType((Node *)tle_new->expr);
+				int32	expr_typmod = exprTypmod((Node *)tle_new->expr);
+				Oid		expr_collid = exprCollation((Node *)tle_new->expr);
+
+				if (var->vartype != expr_typoid ||
+					var->vartypmod != expr_typmod ||
+					var->varcollid != expr_collid)
+					elog(ERROR, "Bug? depth/resno mismatch");
+
+				var->varno = INDEX_VAR;
+				var->varattno = tle_new->resno;
 				return false;
 			}
 		}
@@ -2554,7 +2559,11 @@ pgstrom_post_planner_gpujoin(PlannedStmt *pstmt, Plan **p_curr_plan)
 			 * reference the varnode in the new tlist_dev.
 			 */
 			con.old_tlist_dev = cscan->custom_scan_tlist;
+			con.old_src_depth = gj_info->ps_src_depth;
+			con.old_src_resno = gj_info->ps_src_resno;
 			con.new_tlist_dev = tlist_dev;
+			con.new_src_depth = new_src_depth;
+			con.new_src_resno = new_src_resno;
 			finalize_device_only_expr((Node *) tle->expr, &con);
 		}
 	}
