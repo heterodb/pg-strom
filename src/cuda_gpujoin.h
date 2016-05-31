@@ -1623,6 +1623,7 @@ retry_major:
 
 				if (kresults_dst->kerror.errcode==StromError_DataStoreNoSpace)
 				{
+					assert(kresults_dst->nitems > kresults_dst->nrooms);
 					nsplits = kresults_dst->nitems / kresults_dst->nrooms + 1;
 					victim = gpujoin_resize_window(&kcxt,
 												   kgjoin,
@@ -1721,6 +1722,7 @@ retry_major:
 
 				if (kresults_dst->kerror.errcode==StromError_DataStoreNoSpace)
 				{
+					assert(kresults_dst->nitems > kresults_dst->nrooms);
 					nsplits = kresults_dst->nitems / kresults_dst->nrooms + 1;
 					victim = gpujoin_resize_window(&kcxt,
 												   kgjoin,
@@ -1811,6 +1813,7 @@ retry_major:
 
 				if (kresults_dst->kerror.errcode==StromError_DataStoreNoSpace)
 				{
+					assert(kresults_dst->nitems > kresults_dst->nrooms);
 					nsplits = kresults_dst->nitems / kresults_dst->nrooms + 1;
 					victim = gpujoin_resize_window(&kcxt,
 												   kgjoin,
@@ -1902,6 +1905,7 @@ retry_major:
 
 				if (kresults_dst->kerror.errcode==StromError_DataStoreNoSpace)
 				{
+					assert(kresults_dst->nitems > kresults_dst->nrooms);
 					nsplits = kresults_dst->nitems / kresults_dst->nrooms + 1;
 					victim = gpujoin_resize_window(&kcxt,
 												   kgjoin,
@@ -1980,6 +1984,7 @@ retry_major:
 			STROM_SET_ERROR(&kresults_src->kerror,
 							StromError_DataStoreNoSpace);
 
+			assert(kds_dst->nitems < kds_dst->nrooms);
 			nsplits = kresults_src->nitems /
 				(kds_dst->nrooms - kds_dst->nitems) + 1;
 			if (gpujoin_resize_window(&kcxt,
@@ -1996,7 +2001,6 @@ retry_major:
 			kgjoin->pfm.num_major_retry++;
 			goto retry_major;
 		}
-
 		kern_args = (void **)cudaGetParameterBuffer(sizeof(void *),
 													sizeof(void *) * 5);
 		if (!kern_args)
@@ -2048,27 +2052,32 @@ retry_major:
 			if (kresults_src->nitems == 0)
 				return;		/* should never happen */
 
+			assert(kds_dst->usage >= dest_usage_saved);
 			if (kds_dst->format == KDS_FORMAT_SLOT)
 			{
 				width_avg = (LONGALIGN((sizeof(Datum) +
 										sizeof(char)) * ncols) +
 							 MAXALIGN((kds_dst->usage - dest_usage_saved) /
 									  kresults_src->nitems + 1));
-				nitems_to_fit = kds_dst->length -
-					STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
+				nitems_to_fit = kds_dst->length
+					- STROMALIGN(offsetof(kern_data_store, colmeta[ncols]))
+					- dest_usage_saved;
 				nitems_to_fit /= width_avg;
 			}
 			else
 			{
 				width_avg = (MAXALIGN((kds_dst->usage - dest_usage_saved) /
-									 kresults_src->nitems + 1) +
+									  kresults_src->nitems + 1) +
 							 sizeof(cl_uint));
-				nitems_to_fit = kds_dst->length -
-					STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
+				nitems_to_fit = kds_dst->length
+					- STROMALIGN(offsetof(kern_data_store, colmeta[ncols]))
+					- STROMALIGN(sizeof(cl_uint) * kds_dst->nitems)
+					- dest_usage_saved;
 				nitems_to_fit /= width_avg;
 			}
-
 			nsplits = kresults_src->nitems / nitems_to_fit + 1;
+			assert(nsplits > 1);
+
 			victim = gpujoin_resize_window(&kcxt,
 										   kgjoin,
 										   kmrels,
