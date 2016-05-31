@@ -164,6 +164,9 @@ pg_matrix_sanitychecks(kern_context *kcxt, pg_matrix_t arg)
 STATIC_INLINE(void)
 pg_matrix_init_fields(MatrixType *matrix, cl_uint height, cl_uint width)
 {
+	size_t	len = sizeof(cl_float) * (size_t)height * (size_t)width;
+
+	SET_VARSIZE(matrix, VARHDRSZ + len);
 	matrix->ndim = 2;
 	matrix->dataoffset = 0;
 	matrix->elemtype = PG_FLOAT4OID;

@@ -21,6 +21,7 @@
 #include "utils/arrayaccess.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
+#include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/syscache.h"
@@ -50,16 +51,32 @@
 		(matrix)->lbound2 = 1;						\
 	} while(0)										\
 
-#define MATRIX_SANITYCHECK_NOERROR(matrix)			\
-	(((matrix)->ndim == 2 &&						\
-	  (matrix)->dataoffset == 0 &&					\
-	  (matrix)->elemtype == FLOAT4OID &&			\
-	  (matrix)->lbound1 == 1 &&						\
-	  (matrix)->lbound2 == 1) ? true : false)
-#define MATRIX_SANITYCHECK(matrix)					\
-	do {											\
-		if (!MATRIX_SANITYCHECK_NOERROR((matrix)))	\
-			elog(ERROR, "Invalid matrix format");	\
+#define MATRIX_SANITYCHECK_NOERROR(matrix)						\
+	((((MatrixType *)(matrix))->ndim == 2 &&					\
+	  ((MatrixType *)(matrix))->dataoffset == 0 &&				\
+	  ((MatrixType *)(matrix))->elemtype == FLOAT4OID &&		\
+	  ((MatrixType *)(matrix))->lbound1 == 1 &&					\
+	  ((MatrixType *)(matrix))->lbound2 == 1) ? true : false)
+
+#define MATRIX_SANITYCHECK(matrix)										\
+	do {																\
+		if (!MATRIX_SANITYCHECK_NOERROR((matrix)))						\
+		{																\
+			if (client_min_messages <= DEBUG1)							\
+				elog(ERROR, "Invalid matrix format: "					\
+					 "__vl_len=%u ndim=%d dataoffset=%d elemtype=%u "	\
+					 "width=%d height=%d lbound1=%d lbound2=%d",		\
+					 ((MatrixType *)(matrix))->__vl_len,				\
+					 ((MatrixType *)(matrix))->ndim,					\
+					 ((MatrixType *)(matrix))->dataoffset,				\
+					 ((MatrixType *)(matrix))->elemtype,				\
+					 ((MatrixType *)(matrix))->width,					\
+					 ((MatrixType *)(matrix))->height,					\
+					 ((MatrixType *)(matrix))->lbound1,					\
+					 ((MatrixType *)(matrix))->lbound2);				\
+			else														\
+				elog(ERROR, "Invalid matrix format");					\
+		}																\
 	} while(0)
 
 /*
@@ -602,7 +619,7 @@ matrix_transpose(PG_FUNCTION_ARGS)
 	nitems = (Size)X->height * (Size)X->width;
 	for (i=0; i < nitems; i++)
 	{
-		T->values[(i % X->height) * T->width +
+		T->values[(i % X->height) * T->height +
 				  (i / X->height)] = X->values[i];
 	}
 	PG_RETURN_MATRIXTYPE_P(T);

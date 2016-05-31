@@ -559,6 +559,11 @@ CREATE FUNCTION pgstrom.plcuda_function_handler()
   AS 'MODULE_PATHNAME','plcuda_function_handler'
   LANGUAGE C STRICT;
 
+CREATE FUNCTION pgstrom.plcuda_function_source(regproc)
+  RETURNS text
+  AS 'MODULE_PATHNAME','plcuda_function_source'
+  LANGUAGE C STRICT;
+
 CREATE LANGUAGE plcuda
   HANDLER pgstrom.plcuda_function_handler
   VALIDATOR pgstrom.plcuda_function_validator;

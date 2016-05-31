@@ -919,11 +919,9 @@ __plcuda_codegen(StringInfo kern,
 		"  kern_parambuf *kparams = KERN_PLCUDA_PARAMBUF(kplcuda);\n"
 		"  kern_context kcxt;\n"
 		"\n"
-		"  assert(kplcuda->nargs == kparams->nparams);\n"
-		"  INIT_KERNEL_CONTEXT(&kcxt,plcuda%s_kernel,kparams);\n",
+		"  assert(kplcuda->nargs == kparams->nparams);\n",
 		kernel_maxthreads ? "_MAXTHREADS" : "",
-		NameStr(procForm->proname), suffix,
-		suffix);
+		NameStr(procForm->proname), suffix);
 
 	if (last_suffix)
 		appendStringInfo(
@@ -1977,6 +1975,84 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 	PG_RETURN_DATUM(retval);
 }
 PG_FUNCTION_INFO_V1(plcuda_function_handler);
+
+/*
+ * plcuda_function_source
+ */
+Datum
+plcuda_function_source(PG_FUNCTION_ARGS)
+{
+	Oid				func_oid = PG_GETARG_OID(0);
+	Oid				lang_oid;
+	const char	   *lang_name = "plcuda";
+	HeapTuple		tuple;
+	Form_pg_proc	procForm;
+	Datum			probin;
+	bool			isnull;
+	char			vl_head[VARHDRSZ];
+	plcudaInfo	   *cf_info;
+	StringInfoData	str;
+
+	lang_oid = GetSysCacheOid1(LANGNAME, CStringGetDatum(lang_name));
+	if (!OidIsValid(lang_oid))
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("language \"%s\" does not exist", lang_name)));
+
+	tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(func_oid));
+	if (!HeapTupleIsValid(tuple))
+		elog(ERROR, "cache lookup failed for function %u", func_oid);
+	procForm = (Form_pg_proc) GETSTRUCT(tuple);
+
+	if (procForm->prolang != lang_oid)
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("procedure \"%s\" is not implemented by \"%s\"",
+						format_procedure(func_oid), lang_name)));
+
+	probin = SysCacheGetAttr(PROCOID, tuple,
+							 Anum_pg_proc_probin,
+							 &isnull);
+	if (isnull)
+		elog(ERROR, "Bug? plcudaInfo was not built yet");
+	cf_info = deform_plcuda_info(DatumGetTextP(probin));
+
+	/* construct source text */
+	initStringInfo(&str);
+	appendBinaryStringInfo(&str, vl_head, VARHDRSZ);	/* varlena head */
+
+	appendStringInfo(&str, "#include \"cuda_common.h\"\n");
+	if (cf_info->extra_flags & DEVKERNEL_NEEDS_DYNPARA)
+		appendStringInfo(&str, "#include \"cuda_dynpara.h\"\n");
+	if (cf_info->extra_flags & DEVKERNEL_NEEDS_MATRIX)
+		appendStringInfo(&str, "#include \"cuda_matrix.h\"\n");
+	if (cf_info->extra_flags & DEVKERNEL_NEEDS_TIMELIB)
+		appendStringInfo(&str, "#include \"cuda_timelib.h\"\n");
+	if (cf_info->extra_flags & DEVKERNEL_NEEDS_TEXTLIB)
+		appendStringInfo(&str, "#include \"cuda_textlib.h\"\n");
+	if (cf_info->extra_flags & DEVKERNEL_NEEDS_NUMERIC)
+		appendStringInfo(&str, "#include \"cuda_numeric.h\"\n");
+	if (cf_info->extra_flags & DEVKERNEL_NEEDS_MATHLIB)
+		appendStringInfo(&str, "#include \"cuda_mathlib.h\"\n");
+	if (cf_info->extra_flags & DEVKERNEL_NEEDS_MONEY)
+		appendStringInfo(&str, "#include \"cuda_money.h\"\n");
+	if (cf_info->extra_flags & (DEVKERNEL_NEEDS_GPUSCAN |
+								DEVKERNEL_NEEDS_GPUJOIN |
+								DEVKERNEL_NEEDS_GPUPREAGG |
+								DEVKERNEL_NEEDS_GPUSORT))
+		elog(WARNING, "Bug? PL/CUDA function needs logic routines");
+	if (cf_info->extra_flags & DEVKERNEL_NEEDS_PLCUDA)
+		appendStringInfo(&str, "#include \"cuda_plcuda.h\"\n");
+	appendStringInfoChar(&str, '\n');
+
+	appendStringInfoString(&str, plcuda_codegen(procForm, cf_info));
+	SET_VARSIZE(str.data, str.len);
+
+	ReleaseSysCache(tuple);
+
+	PG_RETURN_TEXT_P(str.data);
+}
+PG_FUNCTION_INFO_V1(plcuda_function_source);
 
 /*
  * pgstrom_init_plcuda

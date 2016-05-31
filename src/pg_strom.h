@@ -621,6 +621,7 @@ extern void pgstrom_init_gpusort(void);
  */
 extern Datum plcuda_function_validator(PG_FUNCTION_ARGS);
 extern Datum plcuda_function_handler(PG_FUNCTION_ARGS);
+extern Datum plcuda_function_source(PG_FUNCTION_ARGS);
 extern void pgstrom_init_plcuda(void);
 
 /*
