@@ -1218,18 +1218,31 @@ construct_kern_parambuf(List *used_params, ExprContext *econtext)
 
 					get_typlenbyval(prm->ptype, &typlen, &typbyval);
 					if (typbyval)
+					{
 						appendBinaryStringInfo(&str,
 											   (char *)&prm->value,
 											   typlen);
+					}
 					else if (typlen > 0)
+					{
 						appendBinaryStringInfo(&str,
 											   DatumGetPointer(prm->value),
 											   typlen);
+					}
 					else
+					{
 						appendBinaryStringInfo(&str,
 											   DatumGetPointer(prm->value),
 											   VARSIZE(prm->value));
+					}
 				}
+			}
+			else
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_UNDEFINED_OBJECT),
+						 errmsg("no value found for parameter %d",
+								param->paramid)));
 			}
 		}
 		else
