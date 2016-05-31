@@ -849,7 +849,9 @@ __plcuda_codegen(StringInfo kern,
 	appendStringInfo(
 		kern,
 		"STATIC_INLINE(void)\n"
-		"__plcuda_%s%s(kern_plcuda *kplcuda, void *workbuf, void *results,\n"
+		"__plcuda_%s%s(kern_plcuda *kplcuda,\n"
+		"              void *workbuf,\n"
+		"              void *results,\n"
 		"              kern_context *kcxt)\n"
 		"{\n",
 		NameStr(procForm->proname), suffix);
@@ -914,7 +916,9 @@ __plcuda_codegen(StringInfo kern,
 	appendStringInfo(
 		kern,
 		"KERNEL_FUNCTION%s(void)\n"
-		"plcuda_%s%s(kern_plcuda *kplcuda, void *workbuf, void *results)\n"
+		"plcuda_%s%s(kern_plcuda *kplcuda,\n"
+		"            void *workbuf,\n"
+		"            void *results)\n"
 		"{\n"
 		"  kern_parambuf *kparams = KERN_PLCUDA_PARAMBUF(kplcuda);\n"
 		"  kern_context kcxt;\n"
