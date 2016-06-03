@@ -386,6 +386,12 @@ _PG_init(void)
 		 PGSTROM_VERSION, PG_MAJORVERSION);
 
 	/* initialization of CUDA related stuff */
+	pgstrom_init_gpu_device();
+	pgstrom_init_gpu_server();
+
+
+
+	/* initialization of CUDA related stuff */
 	pgstrom_init_cuda_control();
 	pgstrom_init_cuda_program();
 	/* initialization of data store support */
