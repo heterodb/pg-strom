@@ -335,17 +335,29 @@ typedef struct {
 </p>
 
 <p>
-<span lang="ja">
-GPUカーネル関数を実行するスレッド数を指定するには<code>#plcuda_num_threads</code>ディレクティブを使用します。このディレクティブはコードブロックの内側で使用され、定数値またはSQL関数名を指定します。SQL関数は、PL/CUDA関数と同一の引数を持ち<code>bigint</code>型を返すSQL関数として宣言されている必要があります。
+<span lang="en">
+<code>#plcuda_num_threads</code> directive allows to specify the number of threads to execute GPU kernel function. This directive can be used inside of the code block, and takes either a constant value or a SQL function. This SQL function has to be declared to take identical argument types and return <code>bigint</code> type.
 </span>
-
+<span lang="ja">
+GPUカーネル関数を実行するスレッド数を指定するには<code>#plcuda_num_threads</code>ディレクティブを使用します。このディレクティブはコードブロックの内側で使用され、定数値またはSQL関数名を指定します。SQL関数は、PL/CUDA関数と同一の引数を持ち<code>bigint</code>型を返す関数として宣言されている必要があります。
+</span>
+</p>
+<p>
+<span lang="en">
+In a similar fashion, <code>#plcuda_shmem_unitsz</code> allows to specify the amount of shared memory per thread, to be acquired on GPU kernel function launch. For example, when a GPU kernel function that consumes 8bytes per thread is launched with 384 threads per streaming-multiprocessor, 3KB of shared memory shall be available.
+Please note that the number of threads per streaming-multiprocessor shall be automatically calculated during the code optimization, a different concept from what we specify with <code>#plcuda_num_threads</code> directive.
+</span>
 <span lang="ja">
 同様に、<code>#plcuda_shmem_unitsz</code>ディレクティブを使用する事で、GPUカーネル関数の実行時に動的に確保する共有メモリのサイズを、スレッドあたりの大きさで指定する事ができます。例えば、スレッドあたり8バイトの共有メモリを使用するGPUカーネル関数が実行ユニットあたり384スレッドで起動された場合、3KBの共有メモリを使用する事ができます。
 ここで言う実行ユニットあたりスレッド数は、最適化の結果自動的に算出される値で、<code>#plcuda_num_threads</code>で指定する値とは異なる事に留意してください。
 </span>
-
+</p>
+<p>
+<span lang="en">
+<code>#plcuda_kernel_maxthreads</code> directive allows to switch optimization policy of the kernel function for the current code block, from maximization of execution efficiency to maximization of number of threads per streaming-multiprocessor (usually 1024). Increase of number of threads per streaming-multiprocessor will improve the performance of workloads which heavily use inter-threads synchronization using shared memory, like reduction operation.
+</span>
 <span lang="ja">
-また、<code>#plcuda_kernel_maxthreads</code>ディレクティブを使用する事で、コードブロックから作成されるカーネル関数の最適化方針を、実行効率最大化から、実行ユニットあたりスレッド数最大化（通常、1024スレッド）へと切り替える事が可能です。実行ユニットあたりのスレッド数が増加する事で、縮約演算など、共有メモリを用いた実行ユニット内部の同期処理を中核とする処理での実行効率向上が期待できます。
+また、<code>#plcuda_kernel_maxthreads</code>ディレクティブを使用する事で、コードブロックから作成されるカーネル関数の最適化方針を、実行効率最大化から、実行ユニットあたりスレッド数最大化（通常、1024スレッド）へと切り替える事が可能です。実行ユニットあたりのスレッド数が増加する事で、縮約演算など、共有メモリを用いた実行ユニット間の同期処理を中核とする処理での性能向上か期待できます。
 </span>
 
 <pre>
@@ -354,8 +366,6 @@ GPUカーネル関数を実行するスレッド数を指定するには<code>#p
 #plcuda_kernel_maxthreads
 </pre>
 </p>
-
-
 
 
 </section>
@@ -377,6 +387,9 @@ PostgreSQLでの標準化議論が終わったら、ここに matrix データ�
 </h3>
 
 <p>
+<span lang="en">
+This section introduce the directives we can use in PL/CUDA functions.
+</span>
 <span lang="ja">
 本節ではPL/CUDA関数で使用する事のできるディレクティブについて説明します。
 </span>
@@ -386,12 +399,19 @@ PostgreSQLでの標準化議論が終わったら、ここに matrix データ�
 <dt><code>#plcuda_begin</code></dt>
 <dd>
 <p>
+<span lang="en">
+It marks beginning of the main kernel function code block. This directive is always required.
+</span>
 <span lang="ja">
 本体カーネル関数のコードブロックの開始を宣言します。このディレクティブは必須です。
 </span>
+<span lang="en">
+Prior to execution of the code block on GPU, the arguments of PL/CUDA function are initialized for references by variable names like <code>arg1</code>, <code>arg2</code>, ...
+These variables have same representation with what PG-Strom represents SQL data types on GPU, for example, an argument of the <code>real</code> data type (that is single precision floating point type) is shown as a <code>pg_float4_t</code> type variable as declared below.
+</span>
 <span lang="ja">
-GPU上でのコードブロックの実行開始に先立って、PL/CUDA関数の引数は<code>arg1</code>、<code>arg2</code>、...という名前で参照可能となるよう初期化されます。
-これらの変数は、PG-StromがSQLデータ型をGPU上で表現するのと同じ方式でセットアップされており、例えば、単精度浮動小数点である<code>real</code>型の引数は、以下のように定義された<code>pg_float4_t</code>型の変数として表現されています。
+GPU上でのコードブロックの実行開始に先立って、PL/CUDA関数の引数は<code>arg1</code>、<code>arg2</code>、...という変数名で参照可能となるよう初期化されます。
+これらの変数は、PG-StromがSQLデータ型をGPU上で表現するのと同じ表現を持っており、例えば、単精度浮動小数点である<code>real</code>型の引数は、以下のように定義された<code>pg_float4_t</code>型の変数として表現されています。
 </span>
 
 <pre>
@@ -400,7 +420,11 @@ typedef struct {
     cl_bool     isnull;
 } pg_float4_t;
 </pre>
-
+</p>
+<p>
+<span lang="en">
+These variables are kept in private area of each threads, thus, update of these variables are not reflected on execution of the kernel function on the next step. If you want to share the state between kernel functions, value shall be kept in either the working buffer referenced by the <code>void *workbuf</code> pointer or the results buffer referenced by the <code>void *results</code> pointer.
+</span>
 <span lang="ja">
 これらの変数は各スレッドのプライベート領域に確保されており、変数を更新したとしても次ステップのカーネル関数には反映されません。カーネル関数の終了後、次のカーネル関数に状態を引き継ぐには、<code>void *workbuf</code>ポインタが参照する作業バッファか、<code>void *results</code>ポインタの参照する結果バッファに値を格納する必要があります。
 </span>
@@ -410,18 +434,32 @@ typedef struct {
 <dl>
 <dt><code>#plcuda_end</code></dt>
 <dd>
+<span lang="en">
+It marks end of the kernel function code block.
+By the way, if a directive to start code block was put inside of the different code block, the current code block is implicitly closed by the <code>#plcuda_end</code> directive.
+</span>
 <span lang="ja">
 コードブロックの終了を宣言します。
-なお、あるコードブロックの内側で他のコードブロックの開始を宣言した場合、暗黙のうちに<code>#plcuda_end</code>ディレクティブが指定されたものとして扱われます。
+なお、あるコードブロックの内側で他のコードブロックの開始を宣言した場合、現在のコードブロックは暗黙のうちに<code>#plcuda_end</code>ディレクティブによって終了したものとして扱われます。
 </span>
 </dd>
 
 <dl>
 <dt><code>#plcuda_decl</code></dt>
 <dd>
+<span lang="en">
+Use of this directive is optional.
+</span>
 <span lang="ja">
-全てのkernel関数の定義に先立って宣言しておくべきコードブロックを記述します。
-他のコードブロックとは異なり、自動的にkernel関数として展開される事はありませんので、完全な関数定義を記述する必要があります。
+このディレクティブの使用は任意です。
+</span>
+<span lang="en">
+It marks beginning of the declaration code block that contains the raw code to be declared prior to the definition of any kernel functions.
+Unlike other code blocks, the contents of this code block shall not be applied as a kernel function, thus, you have to put complete function defenitions.
+</span>
+<span lang="ja">
+全てのkernel関数の定義に先立って宣言しておくべきコードブロックの開始を宣言します。
+他のコードブロックとは異なり、内容が自動的にkernel関数として展開される事はありませんので、完全な関数定義を記述する必要があります。
 </span>
 </dd>
 
@@ -434,10 +472,16 @@ Use of this directive is optional.
 <span lang="ja">
 このディレクティブの使用は任意です。
 </span>
-
+<span lang="en">
+It marks beginning of the preparation code block that shall be executed on GPU prior to the main kernel function; begins from <code>#plcuda_begin</code> directive.
+We expect the preparation kernel initializes the results and working buffer. The main kernel shall not be kicked until completion of the preparation kernel.
+</span>
 <span lang="ja">
 <code>#plcuda_begin</code>から始まる本体カーネル関数の実行に先立ってGPUで実行すべき、前処理カーネル関数の処理を記述します。
 ここでは、結果バッファや作業バッファの初期化を行う事を意図しており、前処理カーネル関数の実行が完了するまでは本体カーネル関数は実行されません。
+</span>
+<span lang="en">
+Arguments of PL/CUDA functions can be referenced like as the main kernel function doing.
 </span>
 <span lang="ja">
 PL/CUDA関数の引数へは、本体カーネル関数と同様にアクセスする事ができます。
@@ -453,10 +497,16 @@ You can optionally use this directive.
 <span lang="ja">
 このディレクティブの使用は任意です。
 </span>
-
+<span lang="en">
+It marks beginning of the post-process code block that shall be executed on GPU next to the main kernel function; begins from <code>#plcuda_begin</code> directive.
+We expect the post-process kernel set up the final results to be returned to the CPU side. The post-process kernel shall not be kicked until completion of the preparation kernel.
+</span>
 <span lang="ja">
 <code>#plcuda_begin</code>から始まる本体カーネル関数の実行後にGPUで実行すべき、後処理カーネル関数の処理を記述します。
 ここでは、CPU側に返却する最終結果を結果バッファにセットする事を意図しており、本体カーネル関数の実行が完了するまでは後処理カーネル関数は実行されません。
+</span>
+<span lang="en">
+Arguments of PL/CUDA functions can be referenced like as the main kernel function doing.
 </span>
 <span lang="ja">
 PL/CUDA関数の引数へは、本体カーネル関数と同様にアクセスする事ができます。
@@ -467,7 +517,7 @@ PL/CUDA関数の引数へは、本体カーネル関数と同様にアクセス�
 <dt><code>#plcuda_num_threads (&lt;value&gt;|&lt;function&gt;)</code></dt>
 <dd>
 <span lang="en">
-You can optionally use this directive. If not specified, the default is a constant value <code>0</code>.
+Use of this directive is optional. If not specified, the default is a constant value <code>1</code>.
 </span>
 <p>
 <span lang="ja">
@@ -475,11 +525,19 @@ You can optionally use this directive. If not specified, the default is a consta
 </span>
 </p>
 <p>
+<span lang="en">
+This directive allows to specify number of the threads to execute the GPU kernel function if it is used in the code block of <code>#plcuda_prep</code>, <code>#plcuda_begin</code>, or <code>#plcuda_post</code>.
+</span>
 <span lang="ja">
 このディレクティブが<code>#plcuda_prep</code>、<code>#plcuda_begin</code>、および<code>#plcuda_post</code>コードブロックの内側で指定されると、それぞれのGPUカーネル関数を起動する際のスレッド数を指定する事ができます。
 </span>
 </p>
 <p>
+<span lang="en">
+If a constant value is specified, PL/CUDA runtime kicks the specified number of GPU threads to run the GPU kernel function.
+If a SQL function name is specified, PL/CUDA runtime call the specified SQL function, then result of the function shall be applied as the number of GPU threads to run the GPU kernel function.
+This SQL function takes identical arguments with PL/CUDA function, and returns <code>bigint</code> data type.
+</span>
 <span lang="ja">
 数値が指定されると、PL/CUDAランタイムは指定された数のGPUスレッドを起動してGPUカーネル関数を実行します。
 関数名が指定されると、PL/CUDAランタイムは指定されたSQL関数を呼び出し、戻り値で指定された数のGPUスレッドを起動します。このSQL関数は、PL/CUDA関数と同一の引数を取り、<code>bigint</code>型を返す必要があります。
@@ -499,17 +557,27 @@ Use of this directive is optional. If not specified, the default is a constant v
 </span>
 </p>
 <p>
+This directive allows to specify amount of the shared memory per thread to be dinamically allocated on GPU kernel execution, if it is used in the code block of <code>#plcuda_prep</code>, <code>#plcuda_begin</code>, or <code>#plcuda_post</code>.
 <span lang="ja">
 このディレクティブが<code>#plcuda_prep</code>、<code>#plcuda_begin</code>、および<code>#plcuda_post</code>コードブロックの内側で指定されると、それぞれのGPUカーネル関数を起動する際に動的に確保するスレッドあたり共有メモリのサイズを指定する事ができます。
 </span>
 </p>
 <p>
+<span lang="en">
+If a constant value is specified, PL/CUDA runtime kicks GPU kernel function with the specified amount of the shared memory per thread.
+If a SQL function name is specified, PL/CUDA runtime call the specified SQL function, then result of the function shall be applied as the amount of the shared memory per thread to run the GPU kernel function.
+This SQL function takes identical arguments with PL/CUDA function, and returns <code>bigint</code> data type.
+</span>
 <span lang="ja">
-数値が指定されると、PL/CUDAランタイムは指定された数のGPUスレッドを起動してGPUカーネル関数を実行します。
-関数名が指定されると、PL/CUDAランタイムは指定されたSQL関数を呼び出し、戻り値で指定された数のGPUスレッドを起動します。このSQL関数は、PL/CUDA関数と同一の引数を取り、<code>bigint</code>型を返す必要があります。
+数値が指定されると、PL/CUDAランタイムは指定された大きさのスレッドあたり共有メモリを確保してGPUカーネル関数を実行します。
+関数名が指定されると、PL/CUDAランタイムは指定されたSQL関数を呼び出し、戻り値で指定された大きさのスレッドあたり共有メモリを確保してGPUカーネル関数を実行します。このSQL関数は、PL/CUDA関数と同一の引数を取り、<code>bigint</code>型を返す必要があります。
 </span>
 </p>
 <p>
+<span lang="en">
+Please note that amount of the shared memory actually acquired on execution of GPU kernel function depends on the number of threads per streaming-multiprocessor, not only the amount of shared memory per thread specified by this directive. (Also note that the number of threads per streaming-multiprocessor is a different concept what we specified using <code>#plcuda_num_threads</code>.)
+For example, if amount of shared memory per thread is 8 bytes and the number of streaming-multiprocessor is 384, 3KB of shared memory shall be allocated per streaming-multiprocessor. At that time, if the number of total threads specified by <code>#plcuda_num_threads</code> is 32768, this GPU kernel shall be executed with 86 streaming-multiprocessor. However, it is the role of scheduler to determine the timing to put kernels into, so it does not mean that 86 x 3KB = 256KB of the shared memory is consumed at once.
+</span>
 <span lang="ja">
 GPUカーネル関数の実行時に実際に確保される共有メモリのサイズは、本ディレクティブによって指定したスレッドあたり共有メモリのサイズだけでなく、実行ユニットあたりのスレッド数に依存する事に留意してください。（また、実行ユニットあたりのスレッド数は<code>#plcuda_num_threads</code>で指定した値とも異なる概念である事に留意してください。）
 例えば、スレッドあたり共有メモリのサイズが8バイトであり、実行ユニットあたりのスレッド数が384である場合、実行ユニット毎に3KBの共有メモリが確保されます。この時、<code>#plcuda_num_threads</code>で指定したスレッド数が32768であれば、このGPUカーネルは86個の実行ユニットを使用して実行されますが、実行ユニットにタスクが投入されるタイミングを決めるのはスケジューラの役割ですので、必ずしも3KB x 86個 = 258KBの共有メモリが一度に消費されるわけではありません。
@@ -529,12 +597,19 @@ Use of this directive is optional.
 </span>
 </p>
 <p>
+<span lang="en">
+This directive switches the optimization policy of GPU kernel function, from maximization of execution efficiency to maximization of number of threads per streaming-multiprocessor.
+Usually, it enables to launch 1024 threads per streaming-multiprocessor.
+</span>
 <span lang="ja">
 <code>#plcuda_prep</code>、<code>#plcuda_begin</code>、および<code>#plcuda_post</code>コードブロックの内側でこのディレクティブを指定すると、GPUカーネル関数の最適化ポリシーを『実行効率最適化』から『ブロックあたりスレッド数最大化』に切り替えます。
 通常、実行ユニットあたり1024個のスレッドを起動できるようになります。
 </span>
 </p>
 <p>
+<span lang="en">
+Increase the number of threads per streaming-multiprocessor allows more threads to synchronize other threads using the shared memory, on the other hands, it leads decrease of the amount of registers a thread can use, thus, it may have performance degradation by private variables allocation on the (slow) global memory for example.
+</span>
 <span lang="ja">
 ブロックあたりスレッド数が多くなると、より多くのスレッドが共有メモリを介して同期処理を行う事ができるようになる半面、スレッドが使用できるレジスタ数が減少するため、一部のローカル変数がグローバルメモリ上に確保されるなど性能面では不利になる事があります。
 </span>
@@ -544,6 +619,10 @@ Use of this directive is optional.
 <dl>
 <dt><code>#plcuda_include "library name"</code></dt>
 <dd>
+<span lang="en">
+It allows to include the GPU runtime functions of PG-Strom, and use by the PL/CUDA functions.
+Please note that it is not a feature to include arbitrary header file.
+</span>
 <span lang="ja">
 PG-StromのGPUランタイム関数をインクルードし、PL/CUDA関数内で使用できるようにします。
 任意のヘッダファイルをインクルードして利用するための機能ではない事に留意してください。
@@ -552,6 +631,10 @@ PG-StromのGPUランタイム関数をインクルードし、PL/CUDA関数内�
 <li>
 <code>"cuda_dynpara.h"</code>
 <p>
+<span lang="en">
+It is a collection of GPU runtime functions related to dynamic parallelism; that launch kernel functions on GPU.
+Include of this file also links the device runtime library of CUDA.
+</span>
 <span lang="ja">
 GPU内で動的にカーネル関数を起動するDynamic Parallelism関連のGPUランタイム関数群です。
 このファイルをインクルードすると、CUDAのデバイスランタイムも同時にリンクされるようになります。
@@ -561,6 +644,10 @@ GPU内で動的にカーネル関数を起動するDynamic Parallelism関連のG
 <li>
 <code>"cuda_matrix.h"</code>
 <p>
+<span lang="en">
+It is a collection of GPU runtime functions to process the matrix data type of SQL.
+Please note that the matrix data type in this version is provided by PG-Strom, thus, it may not be compatible when the future version of PostgreSQL newly support the matrix data type.
+</span>
 <span lang="ja">
 SQLの行列型を処理するためのGPUランタイム関数群です。
 なお、現バージョンの行列型はPG-Stromが独自に提供しているものであり、将来バージョンのPostgreSQLが行列型に対応した際に、フォーマットの互換性が維持されない可能性に留意してください。
@@ -570,6 +657,9 @@ SQLの行列型を処理するためのGPUランタイム関数群です。
 <li>
 <code>"cuda_timelib.h"</code>
 <p>
+<span lang="en">
+It is a collection of GPU runtime functions to process the date and time data type of SQL.
+</span>
 <span lang="ja">
 SQLの日付時刻型を処理するためのGPUランタイム関数群です。
 </span>
@@ -579,6 +669,9 @@ SQLの日付時刻型を処理するためのGPUランタイム関数群です�
 <li>
 <code>"cuda_textlib.h"</code>
 <p>
+<span lang="en">
+It is a collection of GPU runtime functions to process the text data type and <code>LIKE</code> operator.
+</span>
 <span lang="ja">
 SQLのテキストデータ型、および<code>LIKE</code>オペレータを処理するためのGPUランタイム関数群です。
 </span>
@@ -587,6 +680,9 @@ SQLのテキストデータ型、および<code>LIKE</code>オペレータを処
 <li>
 <code>"cuda_numeric.h"</code>
 <p>
+<span lang="en">
+It is a collection of GPU runtime functions to process the numeric data type of SQL.
+</span>
 <span lang="ja">
 SQLのNumericデータ型を処理するためのGPUランタイム関数群です。
 </span>
@@ -595,14 +691,20 @@ SQLのNumericデータ型を処理するためのGPUランタイム関数群で�
 <li>
 <code>"cuda_mathlib.h"</code>
 <p>
+<span lang="en">
+It is a collection of GPU runtime functions to process the arithmetic operators and mathematic functions of SQL.
+</span>
 <span lang="ja">
-SQLの数学関数や四則演算オペレータを処理するためのCPUランタイム関数群です。
+SQLの数学関数や四則演算オペレータを処理するためのGPUランタイム関数群です。
 </span>
 </p>
 </li>
 <li>
 <code>"cuda_money.h"</code>
 <p>
+<span lang="en">
+It is a collection of GPU runtime functions to process the currency data type of SQL.
+</span>
 <span lang="ja">
 SQLの通貨型を処理するためのGPUランタイム関数群です。
 </span>
@@ -615,22 +717,37 @@ SQLの通貨型を処理するためのGPUランタイム関数群です。
 <dt><code>#plcuda_results_size (&lt;value&gt;|&lt;function&gt;)</code></dt>
 <dd>
 <p>
+<span lang="en">
+Use of this directive is optional. If not specified, the default is a constant value <code>0</code>.
+</span>
 <span lang="ja">
 このディレクティブの使用は任意です。未指定の場合のデフォルト値は定数<code>0</code>です
 </span>
 </p>
 <p>
+<span lang="en">
+This directive allows to specify amount of the results buffer in bytes, to be acquired on execution of PL/CUDA function. If PL/CUDA function is declared to return variable length datum, allocation of the results buffer is needed.
+</span>
 <span lang="ja">
 PL/CUDA関数の実行時に確保する結果バッファの大きさをバイト単位で指定します。PL/CUDA関数が可変長型データを返却する際には、結果バッファの確保は必須です。
 </span>
 </p>
 <p>
-<span lang="ja"<
+<span lang="en">
+If a constant value is specified, PL/CUDA language handler acquires the specified amount of GPU RAM as the results buffer, then launch the GPU kernel functions.
+If a SQL function name is specified, PL/CUDA language handler call the specified SQL function, then result of the function shall be applied as the amount of GPU RAM for the results buffer and launch the GPU kernel functions.
+This SQL function takes identical arguments with PL/CUDA function, and returns <code>bigint</code> data type.
+</span>
+<span lang="ja">
 数値が指定されると、PL/CUDA言語ハンドラは指定されたバイト数のGPU RAMを結果バッファとして確保してからGPUカーネル関数を起動します。
 関数名が指定されると、PL/CUDA言語ハンドラは指定されたSQL関数を呼び出し、戻り値で指定されたバイト数のGPU RAMを結果バッファとして確保し、GPUカーネル関数を起動します。このSQL関数は、PL/CUDA関数と同一の引数を取り、<code>bigint</code>型を返す必要があります。
 </span>
 </p>
 <p>
+<span lang="en">
+GPU kernel functions can access the results buffer as the region pointed by the <code>void *results</code> argument.
+If 0 bytes were specified, NULL shall be set on the <code>void *results</code>.
+</span>
 <span lang="ja">
 GPUカーネル関数からは、結果バッファは引数<code>void *results</code>で指定された領域としてアクセス可能です。
 0バイトが指定された場合、<code>void *results</code>には<code>NULL</code>がセットされます。
@@ -642,22 +759,37 @@ GPUカーネル関数からは、結果バッファは引数<code>void *results<
 <dt><code>#plcuda_working_bufsz (&lt;value&gt;|&lt;function&gt;)</code></dt>
 <dd>
 <p>
+<span lang="en">
+Use of this directive is optional. If not specified, the default is a constant value <code>0</code>.
+</span>
 <span lang="ja">
 このディレクティブの使用は任意です。未指定の場合のデフォルト値は定数<code>0</code>です
 </span>
 </p>
 <p>
+<span lang="en">
+This directive allows to specify amount of the working buffer in bytes, to be acquired on execution of PL/CUDA function.
+</span>
 <span lang="ja">
 PL/CUDA関数の実行時に確保する作業バッファの大きさをバイト単位で指定します。
 </span>
 </p>
 <p>
+<span lang="en">
+If a constant value is specified, PL/CUDA language handler acquires the specified amount of GPU RAM as the working buffer, then launch the GPU kernel functions.
+If a SQL function name is specified, PL/CUDA language handler call the specified SQL function, then result of the function shall be applied as the amount of GPU RAM for the working buffer and launch the GPU kernel functions.
+This SQL function takes identical arguments with PL/CUDA function, and returns <code>bigint</code> data type.
+</span>
 <span lang="ja"<
 数値が指定されると、PL/CUDA言語ハンドラは指定されたバイト数のGPU RAMを作業バッファとして確保してからGPUカーネル関数を起動します。
 関数名が指定されると、PL/CUDA言語ハンドラは指定されたSQL関数を呼び出し、戻り値で指定されたバイト数のGPU RAMを作業バッファとして確保し、GPUカーネル関数を起動します。このSQL関数は、PL/CUDA関数と同一の引数を取り、<code>bigint</code>型を返す必要があります。
 </span>
 </p>
 <p>
+<span lang="en">
+GPU kernel functions can access the working buffer as the region pointed by the <code>void *results</code> argument.
+If 0 bytes were specified, NULL shall be set on the <code>void *results</code>.
+</span>
 <span lang="ja">
 GPUカーネル関数からは、作業バッファは引数<code>void *workbuf</code>で指定された領域としてアクセス可能です。
 0バイトが指定された場合、<code>void *workbuf</code>には<code>NULL</code>がセットされます。
@@ -669,12 +801,21 @@ GPUカーネル関数からは、作業バッファは引数<code>void *workbuf<
 <dt><code>#plcuda_cpu_fallback &lt;function%gt;</code></dt>
 <dd>
 <p>
+<span lang="en">
+It allows to specify the CPU fallback function that performs as like GPU kernel function.
+No CPU fallback function is configured on the default.
+</span>
 <span lang="ja">
 GPUカーネル関数と同等の処理を行うCPUフォールバック関数を指定します。
 デフォルトではCPUフォールバック関数は設定されていません。
 </span>
 </p>
 <p>
+<span lang="en">
+If GPU kernel function returns <code>StromError_CpuReCheck</code> error and the CPU fallback function is configured, the PL/CUDA language handler discards the results of processing on GPU side, then call the CPU fallback function.
+It is valuable to implement an alternative remedy, in case when GPU kernel function is not always executable for all possible input; for example, data size may be too large to load onto GPU RAM.
+Also note that we must have a trade off of the performance because CPU fallback function shall be executed in CPU single thread.
+</span>
 <span lang="ja">
 GPUカーネル関数が<code>StromError_CpuReCheck</code>エラーを返却し、さらにCPUフォールバック関数が設定されていると、PL/CUDA言語ハンドラはGPUでの処理結果を破棄してCPUフォールバック関数を呼びだします。
 これは、必ずしも全ての入力に対してGPUカーネル関数を実行可能でない（例えばデータサイズがGPU RAMに載りきらないなど）場合に、代替の救済策を実装するために有用です。ただし、CPUフォールバック関数はシングルスレッドで実行されるため、パフォーマンスが犠牲にならざるを得ない点には留意してください。
@@ -691,6 +832,9 @@ PL/CUDA related functions
 PL/CUDA関連関数
 </span>
 </h3>
+<span lang="en">
+This section introduces the SQL functions related to PL/CUDA.
+</span>
 <span lang="ja">
 本節ではPL/CUDAに関連するSQL関数について説明します。
 </span>
@@ -699,6 +843,9 @@ PL/CUDA関連関数
 </dt>
 <dd>
 <p>
+<span lang="en">
+It returns source code of the GPU kernel generated from the PL/CUDA function, towards the OID input of PL/CUDA function as argument.
+</span>
 <span lang="ja">
 引数としてPL/CUDA関数のOIDを与えると、PL/CUDA関数から生成されるGPUカーネルのソースコードを出力します。
 </span>
