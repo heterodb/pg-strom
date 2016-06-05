@@ -22,7 +22,7 @@ input[id="lang-en"]:checked ~ * *:lang(ja) {
     padding:0;
     position:fixed !important;
     _position:absolute;
-    top:0;
+    top:90px;
     width:180px;
     overflow:auto;
 }
