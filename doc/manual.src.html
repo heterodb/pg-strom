@@ -5,7 +5,7 @@
 </h1>
 <p>
 <span lang="en">
-This chapter introduces a bried overview of PG-Strom and developer community.
+This chapter introduces a brief overview of PG-Strom and developer community.
 </span>
 <span lang="ja">
 本章では、PG-Stromの概要、および開発者コミュニティについて紹介します。
@@ -28,7 +28,7 @@ PG-Stromとは、PostgreSQL v9.5および以降のバージョン向けに設計
 </span>
 <span lang="en">
 The core idea of PG-Strom is, the code generator that constructs GPU native binaries according to the supplied SQL queries on the fly and transparently, and execution engine that runs the GPU native binaries to the massive input data stream in parallel and asynchronously.
-These mechanisms enable to pull out capability of GPU devices that mount multi-hundred to multi-thousand cores per chip, to process massive amount of records, transparently from the standpoint of users or applications.
+These mechanisms enable to pull out capability of GPU devices that mount multi-hundred to multi-thousand cores per chip, to process the massive amount of records, transparently from the standpoint of users or applications.
 </span>
 <span lang="ja">
 PG-Stromの中核を成すのは、SQL構文に対応したGPU用バイナリ命令列を動的かつ透過的に生成しコードジェネレータと、これを並列プロセッサで大量の入力データに対して非同期・並列実行する実行エンジンです。
@@ -81,7 +81,7 @@ On full table scan with scan qualifiers, GPU runs evaluation of scan qualifier a
 </dt>
 <dd>
 <span lang="en">
-GPU runs relations joins. Parallel version of hash-join algorithm and simple (none parametalized) nest-loop algorithm are supported. It have advantages to relations join between a large table and relatively small tables; that expects fact-master table schema design we usually use transactional systems.
+GPU runs relations joins. Parallel version of hash-join algorithm and simple (none parameterized) nest-loop algorithm are supported. It have advantages to relations join between a large table and relatively small tables; that expects fact-master table schema design we usually use transactional systems.
 </span>
 <span lang="ja">
 テーブル同士の結合をGPU側で処理します。Hash-Joinアルゴリズムと単純Nest-Loopアルゴリズムが実装されており、非常に大きな一個のテーブルと、比較的サイズの小さな複数個のテーブルの結合において特に効果を発揮します。
@@ -95,8 +95,8 @@ GPU runs relations joins. Parallel version of hash-join algorithm and simple (no
 </dt>
 <dd>
 <span lang="en">
-GPU runs pre-processing of aggregate operations, to reduce number of rows to be processed by CPU.
-In case when we make 1000 groups from 10million rows and compute average of each group, for example, GPU can load data chunks per million rows then return number of rows and total sum for each groups, in the result, all CPU needs to process will be just 10,000 rows.
+GPU runs pre-processing of aggregate operations, to reduce the number of rows to be processed by CPU.
+In case when we make 1000 groups from 10 million rows and compute average of each group, for example, GPU can load a data chunk per million rows then return the number of rows and total sum for each groups, in the result, all CPU needs to process will be just 10,000 rows.
 </span>
 <span lang="ja">
 GPU側で集約演算の前処理を行い、CPUが処理すべき行数を削減します。
@@ -122,10 +122,10 @@ GPUとCPUの両方を用いてデータの整列を行います。GPU側ではBi
 </dt>
 <dd>
 <span lang="en">
-When SQL query contains complicated mathematical formulas, GPU runs calculation of these expression on the device then CPU just references the calculated results.
+When SQL query contains complicated mathematical formulas, GPU runs calculation of these expression on the device, then CPU just references the calculated results.
 It has advantages to execute statistical analytics workloads on SQL.
 </span>
-<span lang="jp">
+<span lang="ja">
 問合せが複雑な数式の計算を含む場合に、GPU側で計算処理を行い、CPU側では計算済みの結果を参照するようにします。統計解析処理をSQLで実行する時に効果を発揮します。
 </span>
 </dd>
@@ -135,7 +135,7 @@ It has advantages to execute statistical analytics workloads on SQL.
 <span lang="en">
 PG-Strom supports the data types below. See the %%%PGSTROM_MANUAL_XLINK:reference_types%%% for more details.
 </span>
-</span>
+<span lang="ja">
 PG-Stromは以下のデータ型に対応しています。詳細は %%%PGSTROM_MANUAL_XLINK:reference_types%%% を参照してください。
 </span>
 </p>

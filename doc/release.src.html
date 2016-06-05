@@ -134,7 +134,7 @@ It runs tables join on GPU. Parallel version of HashJoin and NestLoop algorithms
 <dt>GpuPreAgg</dt>
 <dd>
 <span lang="en">
-It runs aggregate operations on GPU to off-loads CPU workloads. It is the most advantaced workloads for GPU to summarize massive input data into small number of results by collaboration of the many processor cores. Especially, it works well on the case when reduction ratio is very high.
+It runs aggregate operations on GPU to off-load CPU workloads. It is the most advantaged workloads for GPU to summarize massive input data into small number of results by collaboration of the many processor cores. Especially, it works well on the case when reduction ratio is very high.
 </span>
 <span lang="ja">
 集約演算をGPUで実行しCPUの負荷を軽減します。非常に多くの演算コアが協調して大量の入力データをごく少数のサマリへと縮約する演算はGPUが最も得意とするもので、特に、GROUP BYの結果集約率が非常に高くなるケースで効果を発揮します。
@@ -155,7 +155,7 @@ GPUでのBitonic Sortingと、CPU側でのMerge Sortingを組み合わせる事�
 <dt>GpuProjection</dt>
 <dd>
 <span lang="en">
-People often processes the data fetched from the database with complicated expression prior to the return. The process to evaluate expressions, called projection, often consumes larger time than the core workloads of database like scan or join, according to number of the rows in results and complexity of the expression. GpuProjection enables to compute the complicated expressions on GPU side preliminary, and rewrites the query execution plan to replace these expression by just references to the calculation results.
+People often processes the data fetched from the database with complicated expression prior to the return. The process to evaluate expressions, called projection, often consumes larger time than the core workloads of database like scan or join, according to number of the rows in results and complexity of the expression. GpuProjection enables to compute the complicated expressions on GPU side preliminary, and rewrites the query execution plan to replace these expressions by just references to the calculation results.
 </span>
 <span lang="ja">
 データベースから取り出したデータを複雑な計算式で処理し、その結果を利用者へと返却する事があります。プロジェクションと呼ばれるこの処理は、結果の件数や計算式の複雑さ次第では、スキャンやジョインといったデータベースの中核的な処理よりも処理時間を要します。GpuProjection機能は、これらの複雑な計算をGPU側で予め行っておき、CPU側では『GPUでの計算結果を参照する』ようクエリ実行計画を書き換える事でクエリ処理を高速化します。
@@ -165,7 +165,7 @@ People often processes the data fetched from the database with complicated expre
 <dt>PL/CUDA</dt>
 <dd>
 <span lang="en">
-A feature to run user's defined CUDA program as SQL function. It is implemented as Procedural Language of PostgreSQL, and its runtime automatically exchanges the arguments and result of SQL function between CPU and GPU, thus, it allows user to focus on implementation of advanced data analytics algorithms. It makes in-database data analytics much efficiently because PL/CUDA function can pull out the innate ability of GPU to run the algorithm.
+A feature to run user defined CUDA program as SQL function. It is implemented as Procedural Language of PostgreSQL, and its runtime automatically exchanges the arguments and result of SQL function between CPU and GPU, thus, it allows user to focus on implementation of advanced data analytics algorithms. It makes in-database data analytics much efficiently because PL/CUDA function can pull out the innate ability of GPU to run the algorithm.
 </span>
 <span lang="ja">
 任意のCUDAプログラムをSQL関数として実行するための機能です。PostgreSQLのProcedural Languageとして実装されており、SQL関数の引数や実行結果は自動的にCPU～GPU間で受け渡されるため、ユーザは高度なデータ解析アルゴリズムの実装に集中する事ができます。PL/CUDA関数はGPUの本来持っている速度でアルゴリズムを動作させる事ができるため、効率的なin-databaseデータ解析を実現する事ができます。
@@ -206,7 +206,7 @@ GPUデバイスの初期化およびCUDAコンテキストの作成には、概�
 </dt>
 <dd>
 <span lang="en">
-Due to reuse of CUDA context, a session that already finished to use GPU may cache GPU's RAM for the next use. It will reduce time for device initialization on the next time, however, it also prevent resource allocation by the concurrent sessions. To avoid it, please keep the number of concurrent sessions up to 3-5. We plan an essential improvement at v2.0.
+Due to reuse of CUDA context, a session that already finished using GPU may cache GPU's RAM for the next use. It will reduce time for device initialization on the next time, however, it also prevent resource allocation by the concurrent sessions. To avoid it, please keep the number of concurrent sessions up to 3-5. We plan an essential improvement at v2.0.
 </span>
 <span lang="ja">
 CUDAコンテキストの再利用に伴い、既にGPUを使い終えたセッションが次回の利用に備えてGPUのRAMをキャッシュする事があります。これは次回のデバイス初期化時間を短縮するためですが、無関係のセッションがGPUのリソースを確保する時の障害ともなります。これを避けるには、同時にPG-Stromを使用するセッション数は最大3～5程度に抑えてください。v2.0での改善が予定されています。

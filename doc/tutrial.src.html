@@ -165,7 +165,7 @@ SET pg_strom.enabled = off;
 <p>
 <span lang="en">
 By the performance monitor of PG-Strom, you can gather more detailed run-time information regarding to the query execution performance.
-Set <code>On</code> to the <code>pg_strom.perfmon</code> parameter, then run the target query using <code>EXPLAIN ANALYZE</code> command.
+Set <code>On</code> to the <code>pg_strom.perfmon</code> parameter, and then run the target query using <code>EXPLAIN ANALYZE</code> command.
 </span>
 <span lang="ja">
 PG-Stromのパフォーマンスモニタを用いる事で、クエリ実行性能に関するより詳細な情報を採取する事ができます。
@@ -465,8 +465,8 @@ GPUが可変長データの参照を含む式の評価を行うとき、当該�
 
 <p>
 <span lang="en">
-<code>ALTER TABLE ... SET STORAGE</code> command configures the storage mode of columns. It allows to avoid the problem, if you can know which column is referenced by GPU preliminary.
-The storage mode <tt>PLAIN</tt> prohibit compression or external TOAST save, so it allows to reference the variable length field always, however, it may lead an error when you try to save a large record bigger than the page size (it is usually 8KB).
+<code>ALTER TABLE ... SET STORAGE</code> command configures the storage mode of columns. It allows avoiding the problem, if you can know which column is referenced by GPU preliminary.
+The storage mode <tt>PLAIN</tt> prohibits compression or external TOAST save, so it allows to reference the variable length field always, however, it may lead an error when you try to save a large record bigger than the page size (it is usually 8KB).
 The storage mode <tt>MAIN</tt> does not prohibit compression or external TOAST save entirely, however, it tries to compress or write out the variable length data only when it has no other way to store the record.
 </span>
 <span lang="ja">

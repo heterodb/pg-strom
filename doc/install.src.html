@@ -27,7 +27,7 @@ This chapter introduces the steps to install PG-Strom from the source code.
 <span lang="en">
 It requires generic x86_64 hardware that can run Linux operating system supported by <tt>CUDA Toolkit</tt>.
 We have no special requirement for CPU, storage and network devices.
-Regarding of RAM capacity, we recommend to install 150% of RAM towards data size to preload entire data-set onto the shared buffer of <tt>PostgreSQL</tt>.
+Regarding of RAM capacity, we recommend to installing 150% of RAM towards data size to preload entire data-set onto the shared buffer of <tt>PostgreSQL</tt>.
 </span>
 <span lang="ja">
 CUDA ToolkitのサポートするLinuxオペレーティングシステムを動作可能な x86_64 アーキテクチャのハードウェアが必要です。
@@ -101,8 +101,8 @@ Our recommendation is <tt>Red Hat Enterprise Linux</tt> or <tt>CentOS</tt> versi
 </h2>
 <p>
 <span lang="en">
-Choose a <tt>Linux</tt> distribution that is supported by <tt>CUDA Toolkit</tt>, then install it according to the installation process of individual distributions.
-A list of supported <tt>Linux</tt> distributions are introduced at <a href="http://developer.nvidia.com/" target="_blank">NVIDIA DEVELOPER ZONE</a>.
+Choose a <tt>Linux</tt> distribution that is supported by <tt>CUDA Toolkit</tt>, and then install it according to the installation process of individual distributions.
+A list of supported <tt>Linux</tt> distributions is introduced at <a href="http://developer.nvidia.com/" target="_blank">NVIDIA DEVELOPER ZONE</a>.
 </span>
 <span lang="ja">
 <tt>CUDA Toolkit</tt>のサポートする<tt>Linux</tt>ディストリビューションを選択し、個々のディストリビューションのインストールプロセスに従ってインストール作業を行ってください。
@@ -139,7 +139,7 @@ These are usually categorized to development software.
 
 <p>
 <span lang="en">
-Also, Please don't install the <tt>PostgreSQL</tt> package provided by the distribution, if its package version is prior to 9.5.
+Also, please don't install the <tt>PostgreSQL</tt> package provided by the distribution, if its package version is prior to 9.5.
 </span>
 <span lang="ja">
 また、ディストリビューションの提供する<tt>PostgreSQL</tt>パッケージのバージョンが9.5以前の場合、これをインストールしないでください。
@@ -153,7 +153,7 @@ Also, Please don't install the <tt>PostgreSQL</tt> package provided by the distr
 </h3>
 <p>
 <span lang="en">
-Once operating system gets installed on your system, a few additional packager configuration is needed for GPU driver installation on the later steps.
+Once operating system gets installed on your system, a few additional packager configurations are needed for GPU driver installation on the later steps.
 </span>
 <span lang="ja">
 システムへのOSのインストール後、後のステップでGPUドライバをインストールするために、少々のパッケージャー設定が必要です。
@@ -162,7 +162,7 @@ Once operating system gets installed on your system, a few additional packager c
 <p>
 <span lang="en">
 <tt>DKMS (Dynamic Kernel Module Support)</tt> is a framework that enables to build a Linux kernel module on the fly, according to the Linux kernel currently working on.
-NVIDIA's driver supports this framework, and we recommend to setup it.
+NVIDIA's driver supports this framework, and we recommend setup it.
 </span>
 <span lang="ja">
 <tt>DKMS (Dynamic Kernel Module Support)</tt> は、動作中のLinuxカーネル向けのLinuxカーネルモジュールをその場でビルドする事を可能にするフレームワークで、NVIDIAのドライバも対応しています。そのため、我々も<tt>DKMS</tt>のセットアップを推奨します。
@@ -269,7 +269,7 @@ If you already install the required version of <tt>CUDA Toolkit</tt>, you can sk
 
 <p>
 <span lang="en">
-NVIDIA provides two types of installation methods for <tt>CUDA Toolkit</tt>; the first is self executable archive (called as runfile), the other is collection of RPM packages. Our recommendation is RPM installation. <tt>PG-Strom</tt>'s <tt>Makefile</tt> is designed according to the installation layout of RPM packages.
+NVIDIA provides two types of installation methods for <tt>CUDA Toolkit</tt>; the first is self-executable archive (called as runfile), the other is collection of RPM packages. Our recommendation is RPM installation. <tt>PG-Strom</tt>'s <tt>Makefile</tt> is designed according to the installation layout of RPM packages.
 </span>
 <span lang="ja">
 NVIDIAは<tt>CUDA Toolkit</tt>のインストールに２通りの方法を提供しています。一つは自己実行型アーカイブ（runfileと呼ばれる）によるもの。もう一つはRPMパッケージによるものです。
@@ -278,7 +278,7 @@ NVIDIAは<tt>CUDA Toolkit</tt>のインストールに２通りの方法を提�
 </p>
 <p>
 <span lang="en">
-You can download the <tt>CUDA Toolkit</tt> instllation package from <a href="https://developer.nvidia.com/cuda-downloads" target="_blank">NVIDIA DEVELOPER ZONE</a>.
+You can download the <tt>CUDA Toolkit</tt> installation package from <a href="https://developer.nvidia.com/cuda-downloads" target="_blank">NVIDIA DEVELOPER ZONE</a>.
 Please select proper operating system, architecture, distribution, version and installer type.
 RPM installation in this document intends to use "rpm (network)".
 </span>
@@ -300,7 +300,7 @@ RPM installation in this document intends to use "rpm (network)".
 <p>
 <span lang="en">
 The "rpm (network)" package contains only definition of the yum repository that distributes <tt>CUDA Toolkit</tt>. It is similar method when we add definition of the <tt>EPEL</tt> repository on %%%PGSTROM_MANUAL_XLINK:install-os%%%.
-So, you needs to obtain and install the related RPM packages over the network.
+So, you need to obtain and install the related RPM packages over the network.
 Run the commands below.
 </span>
 <span lang="ja">
@@ -428,7 +428,7 @@ Sat May 14 21:17:35 2016
 </h2>
 <p>
 <span lang="en">
-This section introduce the installation of <tt>PostgreSQL</tt> from ths source code.
+This section introduces the installation of <tt>PostgreSQL</tt> from the source code.
 You can skip this section if you already installed required version of <tt>PostgreSQL</tt> on your system.
 If your preference is RPM installation, see the %%%PGSTROM_MANUAL_XLINK:install-postgresql-rpm%%% below.
 </span>
@@ -513,7 +513,7 @@ Thus, its build chain relies on the <tt>pg_config</tt> that provides information
 <p>
 <span lang="en">
 <tt>PostgreSQL Global Development Group</tt> also provides a yum repository to distribute the latest and supported <tt>PostgreSQL</tt> and related software.
-You can install a small package to setup definition of the yum repository, like <tt>EPEL</tt> configuration, then install <tt>PostgreSQL</tt> and other software.
+You can install a small package to setup definition of the yum repository, like <tt>EPEL</tt> configuration, and then install <tt>PostgreSQL</tt> and other software.
 </span>
 <span lang="ja">
 最新およびサポート中の<tt>PostgreSQL</tt>と関連ソフトウェアの配布のため、<tt>PostgreSQL Global Development Group</tt>はyumリポジトリを提供しています。
@@ -523,7 +523,7 @@ You can install a small package to setup definition of the yum repository, like 
 <p>
 <span lang="en">
 The list of yum repository definition is here: <a href="http://yum.postgresql.org/repopackages.php" target="_blank">http://yum.postgresql.org/repopackages.php</a>.
-You can find many repository definition for each <tt>PostgreSQL</tt> major version and <tt>Linux</tt> distribution. You need to choose one of <tt>PostgreSQL</tt> 9.5 or later on your <tt>Linux</tt> distribution.
+You can find many repository definitions for each <tt>PostgreSQL</tt> major version and <tt>Linux</tt> distribution. You need to choose one of <tt>PostgreSQL</tt> 9.5 or later on your <tt>Linux</tt> distribution.
 </span>
 <span lang="ja">
 yumリポジトリ定義の一覧は <a href="http://yum.postgresql.org/repopackages.php" target="_blank">http://yum.postgresql.org/repopackages.php</a> です。
@@ -610,7 +610,7 @@ Right now, <tt>PG-Strom</tt> is not distributed from the yum repository.
 </h3>
 <p>
 <span lang="en">
-You can checkout the <tt>master</tt> branch of the Git repository (<a href="https://github.com/pg-strom/devel" target="_blank">https://github.com/pg-strom/devel.git</a>) to get source code of <tt>PG-Strom</tt>.
+You can check out the <tt>master</tt> branch of the Git repository (<a href="https://github.com/pg-strom/devel" target="_blank">https://github.com/pg-strom/devel.git</a>) to get source code of <tt>PG-Strom</tt>.
 </span>
 <span lang="ja">
 <tt>PG-Strom</tt>のソースコードを入手するには、Gitリポジトリ (<a href="https://github.com/pg-strom/devel" target="_blank">https://github.com/pg-strom/devel.git</a>) の<tt>master</tt>ブランチをチェックアウトします。
@@ -628,7 +628,7 @@ Resolving deltas: 100% (6427/6427), done.
 
 <p>
 <span lang="en">
-By the feature of GitHub, you can also download the latest source tree as a zip file. However, it is not convenient to follow the update of <tt>PG-Strom</tt>, so we don't recomment to use unless you don't have particular reason; the server cannot connect to the internet for example.
+By the feature of GitHub, you can also download the latest source tree as a zip file. However, it is not convenient to follow the update of <tt>PG-Strom</tt>, so we don't recommend using the package unless you don't have particular reason; the server cannot connect to the internet for example.
 </span>
 <span lang="ja">
 GitHubの機能により、最新版のソースツリーをZIPファイルとして入手する事もできますが、<tt>PG-Strom</tt>が更新された時の追従が不便ですので、サーバからインターネットに接続できないなどの事情がない限り、あまりお勧めはしません。
@@ -675,8 +675,8 @@ $ sudo make install
 
 <div class="hint">
 <span lang="en">
-Ensure the <tt>pg_config</tt> command kicked by <tt>make</tt> on build is 
-In case when multiple <tt>PostgreSQL</tt> by RPM installation and source installation are mixtured for example, <tt>pg_config</tt> in use, also configuration on build, will be determined according to the <tt>$PATH</tt> environment variable.
+Ensure the <tt>pg_config</tt> command kicked by the <tt>make</tt> on the build is really what you intend.
+For example, in case when multiple <tt>PostgreSQL</tt> by RPM installation and source installation are mixed, <tt>pg_config</tt> in use will be determined according to the <tt>$PATH</tt> environment variable.
 </span>
 <span lang="ja">
 <tt>make</tt>コマンドを実行した時に、ビルドの過程で呼び出される<tt>pg_config</tt>コマンドが本当にインストール先の<tt>PostgreSQL</tt>のものであるのかどうかを確認してください。
@@ -809,7 +809,7 @@ shared_preload_libraries = '$libdir/pg_strom'
 </dt>
 <dd>
 <span lang="en">
-We recommend to expand <tt>shared_buffers</tt> configuration from the default, to the expected amount of the data size for on-memory processing.
+We recommend expanding <tt>shared_buffers</tt> configuration from the default, to the expected amount of the data size for on-memory processing.
 <tt>PG-Strom</tt> enables effective query processing with GPU parallelism on CPU intensive workloads. On the other hands, if most of the data to be processed is stored in the magnetic drives, i/o operation shall be the dominance factor, thus, GPU parallelism will not work well.
 So, it is preferable to expand the <tt>shared_buffers</tt> to the amount of data size to be processed, and preload the data using <a href="http://www.postgresql.org/docs/devel/static/pgprewarm.html" target="_blank"><tt>pg_prewarm</tt></a>.
 </span>
@@ -829,7 +829,7 @@ shared_buffers = 10GB
 <dd>
 <span lang="en">
 (Even though it depends on the target workloads,) we recommend to expand <tt>work_mem</tt> into multi-gigabytes at least.
-Analytic queries tend to consume larger working memory in general, but less concurrency than transactional workloads. So, larger assignment of <tt>work_mem</tt> configuration allows to adopt better execution strategy on CPU side also, like quick-sort instead of disk-sort.
+Analytic queries tend to consume larger working memory in general, but less concurrency than transactional workloads. So, larger assignment of <tt>work_mem</tt> configuration allows adopting better execution strategy on CPU side also, like quick-sort instead of disk-sort.
 </span>
 <span lang="ja">
 （対象となるワークロードによりますが、）<tt>work_mem</tt>パラメータを少なくとも数GBまでは拡大する事を推奨します。
