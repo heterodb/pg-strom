@@ -14,7 +14,7 @@ endif
 #
 # PG-Strom versioning
 #
-PGSTROM_VERSION=1.9.0
+PGSTROM_VERSION=1.9devel
 PGSTROM_VERSION_NUM=$(shell echo $(PGSTROM_VERSION)			\
 	| sed -e 's/\./ /g' -e 's/[A-Za-z].*$$//g'			\
 	| awk '{printf "%d%02d%02d", $$1, $$2, (NF >=3) ? $$3 : 0}')
@@ -41,7 +41,9 @@ PG_MAX_VERSION_NUM=$(shell echo $(PG_MAX_VERSION) | awk '{print $$NF}'	\
 __STROM_OBJS = main.o codegen.o datastore.o aggfuncs.o \
 		cuda_control.o cuda_program.o cuda_mmgr.o \
 		gpuscan.o gpujoin.o gpupreagg.o gpusort.o \
+		pl_cuda.o matrix.o \
 		gpu_server.o gpu_device.o
+
 STROM_OBJS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__STROM_OBJS))
 STROM_SOURCES = $(STROM_OBJS:.o=.c)
 
@@ -60,6 +62,7 @@ __CUDA_OBJS = cuda_common.o \
 	cuda_timelib.o \
 	cuda_numeric.o \
 	cuda_money.o   \
+	cuda_plcuda.o  \
 	cuda_terminal.o
 CUDA_OBJS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__CUDA_OBJS))
 CUDA_SOURCES = $(CUDA_OBJS:.o=.c)
@@ -84,6 +87,7 @@ __HTML_TEMPLATE = template.src.html
 __HTML_SOURCES = manual.src.html \
 	install.src.html \
 	tutrial.src.html \
+	pl_cuda.src.html \
 	release.src.html
 __IMAGE_SOURCES = lang_en.png \
 	lang_ja.png \
@@ -91,7 +95,10 @@ __IMAGE_SOURCES = lang_en.png \
 	icon-caution.png \
 	icon-hint.png \
 	pgstrom-install-download-zip.png \
-	cuda-install-target.png
+	cuda-install-target.png \
+	plcuda-callflow.png \
+	plcuda-overview.png \
+	release-policy.png
 __MANUAL_CSS = manual.css
 __MENUGEN_PY = menugen.py
 

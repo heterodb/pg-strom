@@ -433,6 +433,9 @@ construct_flat_cuda_source(const char *kern_source,
 	/* GpuSort */
 	if (extra_flags & DEVKERNEL_NEEDS_GPUSORT)
 		appendStringInfoString(&source, pgstrom_cuda_gpusort_code);
+	/* PL/CUDA functions */
+	if (extra_flags & DEVKERNEL_NEEDS_PLCUDA)
+		appendStringInfoString(&source, pgstrom_cuda_plcuda_code);
 
 	/* Source code generated on the fly */
 	appendStringInfoString(&source, kern_source);
@@ -881,15 +884,18 @@ pgstrom_build_cuda_program(Datum cuda_program)
 	PG_END_TRY();
 }
 
-static bool
-__pgstrom_load_cuda_program(GpuTaskState *gts, bool is_preload)
+static CUmodule *
+__pgstrom_load_cuda_program(GpuContext *gcontext,
+							cl_uint extra_flags,
+							const char *kern_source,
+							const char *kern_define,
+							bool is_preload,
+							bool with_async_build,
+							struct timeval *tv_build_start,
+							struct timeval *tv_build_end)
 {
 	program_cache_entry	*entry;
-	GpuContext	   *gcontext = gts->gcontext;
-	cl_uint			extra_flags = gts->extra_flags;
-	const char	   *kern_source = gts->kern_source;
 	Size			kern_source_len = strlen(kern_source);
-	const char	   *kern_define = gts->kern_define;
 	Size			kern_define_len = strlen(kern_define);
 	Size			required;
 	Size			usage;
@@ -901,10 +907,6 @@ __pgstrom_load_cuda_program(GpuTaskState *gts, bool is_preload)
 	CUmodule	   *cuda_modules = NULL;
 	int				i, num_context;
 	BackgroundWorker worker;
-
-	/* save the timestamp of the first touch */
-	if (gts->pfm.tv_build_start.tv_sec == 0)
-		gettimeofday(&gts->pfm.tv_build_start, NULL);
 
 	/* makes a hash value */
 	INIT_LEGACY_CRC32(crc);
@@ -933,7 +935,7 @@ retry:
 				SpinLockRelease(&pgcache_head->lock);
 				if (!is_preload)
 					elog(ERROR, "%s", entry->error_msg);
-				return false;
+				return NULL;
 			}
 			/* Kernel build is still in-progress */
 			if (!entry->bin_image)
@@ -942,11 +944,23 @@ retry:
 				waiting_backends->words[WORDNUM(MyProc->pgprocno)]
 					|= (1 << BITNUM(MyProc->pgprocno));
 				SpinLockRelease(&pgcache_head->lock);
-				return false;
+
+				/*
+				 * NOTE: current timestamp is an alternative of the timestamp
+				 * when build start, if somebody concurrent already kicked
+				 * the same kernel.
+				 */
+				if (tv_build_start && tv_build_start->tv_sec == 0)
+					gettimeofday(tv_build_start, NULL);
+				return NULL;
 			}
 			/* OK, this kernel is already built */
 			Assert(entry->refcnt > 0);
 			entry->refcnt++;
+
+			if (tv_build_end && tv_build_end->tv_sec == 0)
+				*tv_build_end = entry->tv_build_end;
+
 			SpinLockRelease(&pgcache_head->lock);
 
 			/*
@@ -975,7 +989,6 @@ retry:
 				if (rc != CUDA_SUCCESS)
 					elog(ERROR, "failed on cuCtxPopCurrent (%s)",
 						 errorText(rc));
-				gts->cuda_modules = cuda_modules;
 			}
 			PG_CATCH();
 			{
@@ -990,15 +1003,19 @@ retry:
 				PG_RE_THROW();
 			}
 			PG_END_TRY();
-			/* get timestamp of the program build */
-			if (gts->pfm.tv_build_end.tv_sec == 0)
-				gts->pfm.tv_build_end = entry->tv_build_end;
-
 			pgstrom_put_cuda_program(entry);
-			return true;
+
+			return cuda_modules;
 		}
 	}
-	/* Not found on the existing cache */
+
+	/*
+	 * Not found on the existing cache.
+	 * So, create a new one then kick NVRTC
+	 */
+	if (tv_build_start && tv_build_start->tv_sec == 0)
+		gettimeofday(tv_build_start, NULL);
+
 	required = offsetof(program_cache_entry, data[0]);
 	nwords = (ProcGlobal->allProcCount +
 			  BITS_PER_BITMAPWORD - 1) / BITS_PER_BITMAPWORD;
@@ -1010,6 +1027,7 @@ retry:
 
 	entry = pgstrom_program_cache_alloc(required);
 	entry->crc = crc;
+	memset(&entry->tv_build_end, 0, sizeof(struct timeval));
 	/* bitmap for waiting backends */
 	entry->waiting_backends = (Bitmapset *) entry->data;
 	entry->waiting_backends->nwords = nwords;
@@ -1039,36 +1057,70 @@ retry:
 	dlist_push_head(&pgcache_head->lru_list, &entry->lru_chain);
 
 	/* Kick a dynamic background worker to build */
-	snprintf(worker.bgw_name, sizeof(worker.bgw_name),
-			 "nvcc launcher - crc %08x", crc);
-	worker.bgw_flags = BGWORKER_SHMEM_ACCESS;
-	worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
-	worker.bgw_restart_time = BGW_NEVER_RESTART;
-	worker.bgw_main = pgstrom_build_cuda_program;
-	worker.bgw_main_arg = PointerGetDatum(entry);
-
-	if (!RegisterDynamicBackgroundWorker(&worker, NULL))
+	if (with_async_build)
 	{
-		SpinLockRelease(&pgcache_head->lock);
-		elog(LOG, "failed to launch nvcc asynchronous mode, try synchronous");
-		pgstrom_build_cuda_program(PointerGetDatum(entry));
-		goto retry;
+		snprintf(worker.bgw_name, sizeof(worker.bgw_name),
+				 "nvcc launcher - crc %08x", crc);
+		worker.bgw_flags = BGWORKER_SHMEM_ACCESS;
+		worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
+		worker.bgw_restart_time = BGW_NEVER_RESTART;
+		worker.bgw_main = pgstrom_build_cuda_program;
+		worker.bgw_main_arg = PointerGetDatum(entry);
+
+		if (RegisterDynamicBackgroundWorker(&worker, NULL) || is_preload)
+		{
+			SpinLockRelease(&pgcache_head->lock);
+			return NULL;	/* now bgworker building the device kernel */
+		}
+		elog(LOG, "failed to launch async NVRTC build, try sync mode");
 	}
 	SpinLockRelease(&pgcache_head->lock);
-
-	return false;	/* now build the device kernel */
+	/* build the device kernel synchronously */
+	pgstrom_build_cuda_program(PointerGetDatum(entry));
+	goto retry;
 }
 
 bool
-pgstrom_load_cuda_program(GpuTaskState *gts)
+pgstrom_load_cuda_program(GpuTaskState *gts, bool is_preload)
 {
-	return __pgstrom_load_cuda_program(gts, false);
+	CUmodule	   *cuda_modules;
+
+	Assert(!gts->cuda_modules);
+
+	cuda_modules = __pgstrom_load_cuda_program(gts->gcontext,
+											   gts->extra_flags,
+											   gts->kern_source,
+											   gts->kern_define,
+											   is_preload, true,
+											   &gts->pfm.tv_build_start,
+											   &gts->pfm.tv_build_end);
+	if (cuda_modules)
+	{
+		gts->cuda_modules = cuda_modules;
+		return true;
+	}
+	return false;
 }
 
-void
-pgstrom_preload_cuda_program(GpuTaskState *gts)
+/*
+ * plcuda_load_cuda_program
+ *
+ * It builds the program synchronously and load CUmodule.
+ * Used for pl/cuda functions
+ */
+CUmodule *
+plcuda_load_cuda_program(GpuContext *gcontext,
+						 const char *kern_source,
+						 cl_uint extra_flags)
 {
-	__pgstrom_load_cuda_program(gts, true);
+	const char	   *kern_define
+		= pgstrom_build_session_info(NULL, kern_source, extra_flags);
+	return __pgstrom_load_cuda_program(gcontext,
+									   extra_flags,
+									   kern_source,
+									   kern_define,
+									   false, false,
+									   NULL, NULL);
 }
 
 /*
@@ -1213,6 +1265,55 @@ construct_kern_parambuf(List *used_params, ExprContext *econtext)
 }
 
 /*
+ * pgstrom_build_session_info
+ *
+ * it build a session specific code. if extra_flags contains a particular
+ * custom_scan node related GPU routine, GpuTaskState must be provided.
+ */
+char *
+pgstrom_build_session_info(GpuTaskState *gts,
+						   const char *kern_source,
+						   cl_uint extra_flags)
+{
+	StringInfoData	buf;
+
+	if ((extra_flags & (DEVKERNEL_NEEDS_TIMELIB |
+						DEVKERNEL_NEEDS_MONEY   |
+						DEVKERNEL_NEEDS_TEXTLIB |
+						DEVKERNEL_NEEDS_GPUSCAN |
+						DEVKERNEL_NEEDS_GPUJOIN |
+						DEVKERNEL_NEEDS_GPUSORT)) == 0)
+		return "";	/* no session specific code */
+
+	Assert(gts != NULL || (extra_flags & (DEVKERNEL_NEEDS_GPUSCAN |
+										  DEVKERNEL_NEEDS_GPUJOIN |
+										  DEVKERNEL_NEEDS_GPUSORT)) == 0);
+	initStringInfo(&buf);
+
+	/* put timezone info */
+	if ((extra_flags & DEVKERNEL_NEEDS_TIMELIB) != 0)
+		assign_timelib_session_info(&buf);
+	/* put currency info */
+	if ((extra_flags & DEVKERNEL_NEEDS_MONEY) != 0)
+		assign_moneylib_session_info(&buf);
+	/* put text/string info */
+	if ((extra_flags & DEVKERNEL_NEEDS_TEXTLIB) != 0)
+		assign_textlib_session_info(&buf);
+
+	/* enables device projection? */
+	if ((extra_flags & DEVKERNEL_NEEDS_GPUSCAN) != 0)
+		assign_gpuscan_session_info(&buf, gts);
+	/* enables device projection? */
+	if ((extra_flags & DEVKERNEL_NEEDS_GPUJOIN) != 0)
+		assign_gpujoin_session_info(&buf, gts);
+	/* enables device projection? */
+	if ((extra_flags & DEVKERNEL_NEEDS_GPUSORT) != 0)
+		assign_gpusort_session_info(&buf, gts);
+
+	return buf.data;
+}
+
+/*
  * pgstrom_assign_cuda_program
  *
  * It assigns kernel_source and extra_flags on the given GpuTaskState.
@@ -1226,42 +1327,8 @@ pgstrom_assign_cuda_program(GpuTaskState *gts,
 							int extra_flags)
 {
 	ExprContext	   *econtext = gts->css.ss.ps.ps_ExprContext;
-	const char	   *kern_define;
-	StringInfoData	buf;
-
-	if ((extra_flags & (DEVKERNEL_NEEDS_TIMELIB |
-						DEVKERNEL_NEEDS_MONEY   |
-						DEVKERNEL_NEEDS_TEXTLIB |
-						DEVKERNEL_NEEDS_GPUSCAN |
-						DEVKERNEL_NEEDS_GPUJOIN |
-						DEVKERNEL_NEEDS_GPUSORT)) != 0)
-	{
-		initStringInfo(&buf);
-
-		/* put timezone info */
-		if ((extra_flags & DEVKERNEL_NEEDS_TIMELIB) != 0)
-			assign_timelib_session_info(&buf);
-		/* put currency info */
-		if ((extra_flags & DEVKERNEL_NEEDS_MONEY) != 0)
-			assign_moneylib_session_info(&buf);
-		/* put text/string info */
-		if ((extra_flags & DEVKERNEL_NEEDS_TEXTLIB) != 0)
-			assign_textlib_session_info(&buf);
-
-		/* enables device projection? */
-		if ((extra_flags & DEVKERNEL_NEEDS_GPUSCAN) != 0)
-			assign_gpuscan_session_info(&buf, gts);
-		/* enables device projection? */
-		if ((extra_flags & DEVKERNEL_NEEDS_GPUJOIN) != 0)
-			assign_gpujoin_session_info(&buf, gts);
-		/* enables device projection? */
-		if ((extra_flags & DEVKERNEL_NEEDS_GPUSORT) != 0)
-			assign_gpusort_session_info(&buf, gts);
-
-		kern_define = buf.data;
-	}
-	else
-		kern_define = "";	/* no session specific code */
+	const char	   *kern_define
+		= pgstrom_build_session_info(gts, kern_source, extra_flags);
 
 	gts->kern_params = construct_kern_parambuf(used_params, econtext);
 	gts->kern_source = kern_source;

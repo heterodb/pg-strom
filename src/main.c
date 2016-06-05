@@ -406,6 +406,7 @@ _PG_init(void)
 	/* miscellaneous initializations */
 	pgstrom_init_misc_guc();
 	pgstrom_init_codegen();
+	pgstrom_init_plcuda();
 
 	/* overall planner hook registration */
 	planner_hook_next = planner_hook;
@@ -924,9 +925,11 @@ pgstrom_explain_perfmon(GpuTaskState *gts, ExplainState *es)
 	}
 
 	/* Time to build CUDA code */
-	if (pfm->tv_build_start.tv_sec < pfm->tv_build_end.tv_sec ||
-		(pfm->tv_build_start.tv_sec == pfm->tv_build_end.tv_sec &&
-		 pfm->tv_build_start.tv_usec < pfm->tv_build_end.tv_usec))
+	if (pfm->tv_build_start.tv_sec > 0 &&
+		pfm->tv_build_end.tv_sec > 0 &&
+		(pfm->tv_build_start.tv_sec < pfm->tv_build_end.tv_sec ||
+		 (pfm->tv_build_start.tv_sec == pfm->tv_build_end.tv_sec &&
+		  pfm->tv_build_start.tv_usec < pfm->tv_build_end.tv_usec)))
 	{
 		cl_double	tv_cuda_build = PFMON_TIMEVAL_DIFF(&pfm->tv_build_start,
 													   &pfm->tv_build_end);

@@ -796,7 +796,7 @@ gpusort_begin(CustomScanState *node, EState *estate, int eflags)
 								gs_info->kern_source,
 								gs_info->extra_flags);
 	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
-		pgstrom_preload_cuda_program(&gss->gts);
+		pgstrom_load_cuda_program(&gss->gts, true);
 
 	/* array for data-stores */
 	gss->num_segments = 0;

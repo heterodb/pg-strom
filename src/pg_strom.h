@@ -100,7 +100,7 @@ typedef struct GpuContext_v2
 
 	slock_t		lock;			/* lock of the field below */
 	cl_int		refcnt;			/* reference count */
-	cl_int		pgprocno;		/* MyProc->pgprocno */
+	cl_int		pgprocno;		/* MyProc->pgprocno, or -1 */
 
 	/*
 	 * Shared resource tracker
@@ -128,11 +128,6 @@ typedef struct GpuContext_v2
 } GpuContext_v2;
 
 #define INVALID_GPU_CONTEXT_ID		(-1)
-
-
-
-
-
 
 
 
@@ -265,6 +260,7 @@ struct GpuTask
 #define DEVKERNEL_NEEDS_GPUJOIN			0x00000002	/* GpuJoin logic */
 #define DEVKERNEL_NEEDS_GPUPREAGG		0x00000004	/* GpuPreAgg logic */
 #define DEVKERNEL_NEEDS_GPUSORT			0x00000008	/* GpuSort logic */
+#define DEVKERNEL_NEEDS_PLCUDA			0x00000080	/* PL/CUDA related */
 
 #define DEVKERNEL_NEEDS_DYNPARA			0x00000100
 #define DEVKERNEL_NEEDS_MATRIX			0x00000200
@@ -440,8 +436,13 @@ extern Datum pgstrom_device_info(PG_FUNCTION_ARGS);
  * cuda_program.c
  */
 extern const char *pgstrom_cuda_source_file(GpuTaskState *gts);
-extern bool pgstrom_load_cuda_program(GpuTaskState *gts);
-extern void pgstrom_preload_cuda_program(GpuTaskState *gts);
+extern bool pgstrom_load_cuda_program(GpuTaskState *gts, bool is_preload);
+extern CUmodule *plcuda_load_cuda_program(GpuContext *gcontext,
+										  const char *kern_source,
+										  cl_uint extra_flags);
+extern char *pgstrom_build_session_info(GpuTaskState *gts,
+										const char *kern_source,
+										cl_uint extra_flags);
 extern void pgstrom_assign_cuda_program(GpuTaskState *gts,
 										List *used_params,
 										const char *kern_source,
@@ -587,6 +588,37 @@ extern void assign_gpusort_session_info(StringInfo buf, GpuTaskState *gts);
 extern void pgstrom_init_gpusort(void);
 
 /*
+ * pl_cuda.c
+ */
+extern Datum plcuda_function_validator(PG_FUNCTION_ARGS);
+extern Datum plcuda_function_handler(PG_FUNCTION_ARGS);
+extern Datum plcuda_function_source(PG_FUNCTION_ARGS);
+extern void pgstrom_init_plcuda(void);
+
+/*
+ * matrix.h
+ */
+extern Datum matrix_in(PG_FUNCTION_ARGS);
+extern Datum matrix_out(PG_FUNCTION_ARGS);
+extern Datum matrix_recv(PG_FUNCTION_ARGS);
+extern Datum matrix_send(PG_FUNCTION_ARGS);
+extern Datum float4array_to_matrix(PG_FUNCTION_ARGS);
+extern Datum float8array_to_matrix(PG_FUNCTION_ARGS);
+extern Datum numericarray_to_matrix(PG_FUNCTION_ARGS);
+extern Datum matrix_to_float4array(PG_FUNCTION_ARGS);
+extern Datum matrix_to_float8array(PG_FUNCTION_ARGS);
+extern Datum matrix_to_numericarray(PG_FUNCTION_ARGS);
+extern Datum make_matrix_accum(PG_FUNCTION_ARGS);
+extern Datum make_matrix_final(PG_FUNCTION_ARGS);
+extern Datum matrix_height(PG_FUNCTION_ARGS);
+extern Datum matrix_width(PG_FUNCTION_ARGS);
+extern Datum matrix_rawsize(PG_FUNCTION_ARGS);
+extern Datum matrix_transpose(PG_FUNCTION_ARGS);
+extern Datum matrix_add(PG_FUNCTION_ARGS);
+extern Datum matrix_sub(PG_FUNCTION_ARGS);
+extern Datum matrix_mul(PG_FUNCTION_ARGS);
+
+/*
  * main.c
  */
 extern bool		pgstrom_enabled;
@@ -639,6 +671,7 @@ extern const char *pgstrom_cuda_textlib_code;
 extern const char *pgstrom_cuda_timelib_code;
 extern const char *pgstrom_cuda_numeric_code;
 extern const char *pgstrom_cuda_money_code;
+extern const char *pgstrom_cuda_plcuda_code;
 extern const char *pgstrom_cuda_terminal_code;
 
 /* ----------------------------------------------------------------

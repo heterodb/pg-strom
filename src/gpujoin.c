@@ -3053,7 +3053,7 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 								gj_info->kern_source,
 								gj_info->extra_flags);
 	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
-		pgstrom_preload_cuda_program(&gjs->gts);
+		pgstrom_load_cuda_program(&gjs->gts, true);
 
 	/* expected kresults buffer expand rate */
 	gjs->result_width =

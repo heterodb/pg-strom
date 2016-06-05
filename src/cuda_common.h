@@ -249,6 +249,9 @@ typedef uintptr_t		hostptr_t;
 #define StromKernel_gpusort_bitonic_merge			0x0404
 #define StromKernel_gpusort_fixup_pointers			0x0405
 #define StromKernel_gpusort_main					0x0499
+#define StromKernel_plcuda_prep_kernel				0x0501
+#define StromKernel_plcuda_main_kernel				0x0502
+#define StromKernel_plcuda_post_kernel				0x0503
 
 typedef struct
 {

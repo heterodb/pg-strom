@@ -1365,7 +1365,7 @@ launch_pending_tasks(GpuTaskState *gts)
 	 */
 	if (!gts->cuda_modules)
 	{
-		if (!pgstrom_load_cuda_program(gts))
+		if (!pgstrom_load_cuda_program(gts, false))
 			return;
 	}
 
@@ -1474,7 +1474,7 @@ __waitfor_ready_tasks(GpuTaskState *gts)
 	 * Unless CUDA module is not loaded, we cannot launch process
 	 * of GpuTask callback. So, we go on the long-waut path.
 	 */
-	if (gts->cuda_modules || pgstrom_load_cuda_program(gts))
+	if (gts->cuda_modules || pgstrom_load_cuda_program(gts, false))
 	{
 		SpinLockAcquire(&gts->lock);
 		if (!dlist_is_empty(&gts->ready_tasks))
@@ -2462,6 +2462,9 @@ errorTextKernel(kern_errorbuf *kerror)
 		KERN_ENTRY(gpusort_bitonic_merge);
 		KERN_ENTRY(gpusort_fixup_pointers);
 		KERN_ENTRY(gpusort_main);
+		KERN_ENTRY(plcuda_prep_kernel);
+		KERN_ENTRY(plcuda_main_kernel);
+		KERN_ENTRY(plcuda_post_kernel);
 		default:
 			kernel_name = "unknown kernel";
 			break;

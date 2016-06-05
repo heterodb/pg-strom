@@ -331,6 +331,10 @@ init_kernel_data_store(kern_data_store *kds,
 		kds->colmeta[i].atttypmod = (cl_int)attr->atttypmod;
 		if (attcacheoff >= 0)
 			attcacheoff += attr->attlen;
+		/*
+		 * !!don't forget to update pl_cuda.c if kern_colmeta layout would
+		 * be updated !!
+		 */
 	}
 }
 

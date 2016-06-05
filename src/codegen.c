@@ -46,36 +46,45 @@ static List	   *devfunc_info_slot[1024];
  * naming convension of types:
  *   pg_<type_name>_t
  */
-#define DEVTYPE_DECL(type_oid, type_base, type_flags)	\
-	{ type_oid, #type_oid, type_base, type_flags }
+#define DEVTYPE_DECL(type_name,type_oid,type_base,type_flags)	\
+	{ "pg_catalog", type_name, type_oid, #type_oid, type_base, type_flags }
 
 static struct {
-	Oid				type_oid;
+	const char	   *type_schema;
+	const char	   *type_name;
+	Oid				type_oid_static;
 	const char	   *type_oid_label;
 	const char	   *type_base;
 	int32			type_flags;		/* library to declare this type */
 } devtype_catalog[] = {
 	/* primitive datatypes */
-	DEVTYPE_DECL(BOOLOID,   "cl_bool",   0),		/* bool */
-	DEVTYPE_DECL(INT2OID,   "cl_short",  0),		/* smallint */
-	DEVTYPE_DECL(INT4OID,   "cl_int",    0),		/* int */
-	DEVTYPE_DECL(INT8OID,   "cl_long",   0),		/* bigint */
-	DEVTYPE_DECL(FLOAT4OID, "cl_float",  0),		/* real */
-	DEVTYPE_DECL(FLOAT8OID, "cl_double", 0),		/* float */
-	DEVTYPE_DECL(CASHOID,   "cl_long",   DEVKERNEL_NEEDS_MONEY),	/* money */
+	DEVTYPE_DECL("bool",   BOOLOID,   "cl_bool",   0),		/* bool */
+	DEVTYPE_DECL("int2",   INT2OID,   "cl_short",  0),		/* smallint */
+	DEVTYPE_DECL("int4",   INT4OID,   "cl_int",    0),		/* int */
+	DEVTYPE_DECL("int8",   INT8OID,   "cl_long",   0),		/* bigint */
+	DEVTYPE_DECL("float4", FLOAT4OID, "cl_float",  0),		/* real */
+	DEVTYPE_DECL("float8", FLOAT8OID, "cl_double", 0),		/* float */
+	DEVTYPE_DECL("money",  CASHOID,   "cl_long",
+				 DEVKERNEL_NEEDS_MONEY),	/* money */
 	/* date and time datatypes */
-	DEVTYPE_DECL(DATEOID,        "DateADT",     DEVKERNEL_NEEDS_TIMELIB),
-	DEVTYPE_DECL(TIMEOID,        "TimeADT",     DEVKERNEL_NEEDS_TIMELIB),
-	DEVTYPE_DECL(TIMETZOID,      "TimeTzADT",   DEVKERNEL_NEEDS_TIMELIB),
-	DEVTYPE_DECL(TIMESTAMPOID,   "Timestamp",   DEVKERNEL_NEEDS_TIMELIB),
-	DEVTYPE_DECL(TIMESTAMPTZOID, "TimestampTz", DEVKERNEL_NEEDS_TIMELIB),
-	DEVTYPE_DECL(INTERVALOID,    "Interval",    DEVKERNEL_NEEDS_TIMELIB),
+	DEVTYPE_DECL("date", DATEOID, "DateADT", DEVKERNEL_NEEDS_TIMELIB),
+	DEVTYPE_DECL("time", TIMEOID, "TimeADT", DEVKERNEL_NEEDS_TIMELIB),
+	DEVTYPE_DECL("timetz", TIMETZOID, "TimeTzADT", DEVKERNEL_NEEDS_TIMELIB),
+	DEVTYPE_DECL("timestamp", TIMESTAMPOID,"Timestamp",
+				 DEVKERNEL_NEEDS_TIMELIB),
+	DEVTYPE_DECL("timestamptz", TIMESTAMPTZOID, "TimestampTz",
+				 DEVKERNEL_NEEDS_TIMELIB),
+	DEVTYPE_DECL("interval", INTERVALOID, "Interval",
+				 DEVKERNEL_NEEDS_TIMELIB),
 	/* variable length datatypes */
-	DEVTYPE_DECL(BPCHAROID,  "varlena *", DEVKERNEL_NEEDS_TEXTLIB),
-	DEVTYPE_DECL(VARCHAROID, "varlena *", DEVKERNEL_NEEDS_TEXTLIB),
-	DEVTYPE_DECL(NUMERICOID, "cl_ulong",  DEVKERNEL_NEEDS_NUMERIC),
-	DEVTYPE_DECL(BYTEAOID,   "varlena *", 0),
-	DEVTYPE_DECL(TEXTOID,    "varlena *", DEVKERNEL_NEEDS_TEXTLIB),
+	DEVTYPE_DECL("bpchar",  BPCHAROID,  "varlena *", DEVKERNEL_NEEDS_TEXTLIB),
+	DEVTYPE_DECL("varchar", VARCHAROID, "varlena *", DEVKERNEL_NEEDS_TEXTLIB),
+	DEVTYPE_DECL("numeric", NUMERICOID, "cl_ulong",  DEVKERNEL_NEEDS_NUMERIC),
+	DEVTYPE_DECL("bytea",   BYTEAOID,   "varlena *", 0),
+	DEVTYPE_DECL("text",    TEXTOID,    "varlena *", DEVKERNEL_NEEDS_TEXTLIB),
+	/* pl/cuda datatypes */
+	{"pg_catalog", "matrix", InvalidOid, "MATRIXOID",
+	 "varlena *", DEVKERNEL_NEEDS_MATRIX },
 };
 
 static devtype_info *
@@ -143,15 +152,30 @@ build_devtype_info_entry(Oid type_oid,
 static void
 build_devtype_info(void)
 {
-	MemoryContext	oldcxt;
-	int				i;
+	MemoryContext oldcxt;
+	int		i;
 
 	Assert(!devtype_info_is_built);
 
 	oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
 	for (i=0; i < lengthof(devtype_catalog); i++)
 	{
-		(void) build_devtype_info_entry(devtype_catalog[i].type_oid,
+		const char *nsp_name = devtype_catalog[i].type_schema;
+		const char *typ_name = devtype_catalog[i].type_name;
+		Oid			nsp_oid;
+		Oid			typ_oid;
+
+		nsp_oid = GetSysCacheOid1(NAMESPACENAME, CStringGetDatum(nsp_name));
+		if (!OidIsValid(nsp_oid))
+			continue;
+
+		typ_oid = GetSysCacheOid2(TYPENAMENSP,
+								  CStringGetDatum(typ_name),
+								  ObjectIdGetDatum(nsp_oid));
+		if (!OidIsValid(typ_oid))
+			continue;
+
+		(void) build_devtype_info_entry(typ_oid,
 										devtype_catalog[i].type_flags,
 										devtype_catalog[i].type_base,
 										NULL);
@@ -220,10 +244,24 @@ pgstrom_codegen_typeoid_declarations(StringInfo source)
 
 	for (i=0; i < lengthof(devtype_catalog); i++)
 	{
-		appendStringInfo(source,
-						 "#define PG_%s %u\n",
-						 devtype_catalog[i].type_oid_label,
-						 devtype_catalog[i].type_oid);
+		const char *nsp_name = devtype_catalog[i].type_schema;
+		const char *typ_name = devtype_catalog[i].type_name;
+		const char *oid_label = devtype_catalog[i].type_oid_label;
+		Oid			nsp_oid;
+		Oid			typ_oid;
+
+		nsp_oid = GetSysCacheOid1(NAMESPACENAME,
+								  CStringGetDatum(nsp_name));
+		if (!OidIsValid(nsp_oid))
+			continue;
+
+		typ_oid = GetSysCacheOid2(TYPENAMENSP,
+								  CStringGetDatum(typ_name),
+								  ObjectIdGetDatum(nsp_oid));
+		if (!OidIsValid(typ_oid))
+			continue;
+
+		appendStringInfo(source, "#define PG_%s %u\n", oid_label, typ_oid);
 	}
 }
 
