@@ -94,7 +94,10 @@ __IMAGE_SOURCES = lang_en.png \
 	icon-caution.png \
 	icon-hint.png \
 	pgstrom-install-download-zip.png \
-	cuda-install-target.png
+	cuda-install-target.png \
+	plcuda-callflow.png \
+	plcuda-overview.png \
+	release-policy.png
 __MANUAL_CSS = manual.css
 __MENUGEN_PY = menugen.py
 
