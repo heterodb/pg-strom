@@ -1,9 +1,0 @@
-<!-- doc/gpucontext.sgml -->
-<chapter id="gpucontext" xreflabel="GpuContext">
- <title>GpuContext and State Machine</title>
-
- <para>
-   here is internal resource
-   GpuContext and GpuTask State Machine
- </para>
-</chapter>
