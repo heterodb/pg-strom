@@ -19,7 +19,7 @@ input[id="lang-en"]:checked ~ * *:lang(ja) {
     left:0;
     height:100%;
     margin:0;
-    padding:0;
+    padding:0 0 100px 0;
     position:fixed !important;
     _position:absolute;
     top:90px;
