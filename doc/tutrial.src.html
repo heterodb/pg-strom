@@ -1884,6 +1884,36 @@ Valid only when no-locale or C-locale.
 <td class="manual"><code>integer</code></td>
 <td class="manual"></td>
 </tr>
+
+<tr>
+<td class="manual"><code><i>string</i> LIKE <i>pattern</i></code></td>
+<td class="manual"><code>boolean</code></td>
+<td class="manual">
+<span lang="en">
+<i>string</i> is <code>text</code> or <code>char(n)</code> type.
+<i>pattern</i> is <code>text</code> type.
+</span>
+<span lang="ja">
+<i>string</i>は<code>text</code>または<code>char(n)</code>型。
+<i>pattern</i>は<code>text</code>型。
+</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual"><code><i>string</i> NOT LIKE <i>pattern</i></code></td>
+<td class="manual"><code>boolean</code></td>
+<td class="manual">
+<span lang="en">
+<i>string</i> is <code>text</code> or <code>char(n)</code> type.
+<i>pattern</i> is <code>text</code> type.
+</span>
+<span lang="ja">
+<i>string</i>は<code>text</code>または<code>char(n)</code>型。
+<i>pattern</i>は<code>text</code>型。
+</span>
+</td>
+</tr>
 </tbody>
 </table>
 
@@ -2122,6 +2152,189 @@ Valid only when no-locale or C-locale.
 
 </tbody>
 </table>
+
+<table class="manual">
+<caption class="manual">
+<span lang="en">Other expression elements</span>
+<span lang="ja">その他の式要素</span>
+</caption>
+<thead class="manual">
+<tr>
+<th class="manual" style="width: 20em;">
+<span lang="en">Expression</span>
+<span lang="ja">式要素</span>
+</th>
+<th class="manual" style="width: 8em;">
+<span lang="en">Return Value</span>
+<span lang="ja">戻り値</span>
+</th>
+<th class="manual" style="max-width: 40%;">
+<span lang="en">Remarks</span>
+<span lang="ja">備考</span>
+</th>
+</tr>
+</thead>
+
+<tbody>
+<tr>
+<td class="manual"><code>COALESCE(<i>value</i>, <i>value</i>, ...)</code></td>
+<td class="manual">
+<span lang="en">type of the <i>value</i></span>
+<span lang="ja"><i>value</i>の型</span>
+</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code>GREATEST(<i>value</i>, <i>value</i>, ...)</code></td>
+<td class="manual">
+<span lang="en">type of the <i>value</i></span>
+<span lang="ja"><i>value</i>の型</span>
+</td>
+<td class="manual">
+<span lang="en">type of the <i>value</i> must have comparison operator.</span>
+<span lang="ja"><i>value</i>のデータ型に大小比較が定義されていなければならない</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual"><code>LEAST(<i>value</i>, <i>value</i>, ...)</code></td>
+<td class="manual">
+<span lang="en">type of the <i>value</i></span>
+<span lang="ja"><i>value</i>の型</span>
+</td>
+<td class="manual">
+<span lang="en">type of the <i>value</i> must have comparison operator.</span>
+<span lang="ja"><i>value</i>のデータ型に大小比較が定義されていなければならない</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual"><code><i>anytype</i> IS NULL</code></td>
+<td class="manual"><code>boolean</code></td>
+<td class="manual">
+<span lang="en"><i>anytype</i> is one of the supported data type</span>
+<span lang="ja"><i>anytype</i>はサポートされているデータ型の一つ。</span>
+</td>
+</tr>
+<tr>
+<td class="manual"><code><i>anytype</i> IS NOT NULL</code></td>
+<td class="manual"><code>boolean</code></td>
+<td class="manual">
+<span lang="en"><i>anytype</i> is one of the supported data type</span>
+<span lang="ja"><i>anytype</i>はサポートされているデータ型の一つ。</span>
+</td>
+</tr>
+<tr>
+<td class="manual"><code>boolean IS TRUE</code></td>
+<td class="manual"><code>boolean</code></td>
+<td class="manual"></td>
+</tr>
+<tr>
+<td class="manual"><code>boolean IS NOT TRUE</code></td>
+<td class="manual"><code>boolean</code></td>
+<td class="manual"></td>
+</tr>
+<tr>
+<td class="manual"><code>boolean IS FALSE</code></td>
+<td class="manual"><code>boolean</code></td>
+<td class="manual"></td>
+</tr>
+<tr>
+<td class="manual"><code>boolean IS NOT FALSE</code></td>
+<td class="manual"><code>boolean</code></td>
+<td class="manual"></td>
+</tr>
+<tr>
+<td class="manual"><code>boolean IS UNKNOWN</code></td>
+<td class="manual"><code>boolean</code></td>
+<td class="manual"></td>
+</tr>
+<tr>
+<td class="manual"><code>boolean IS NOT UNKNOWN</code></td>
+<td class="manual"><code>boolean</code></td>
+<td class="manual"></td>
+</tr>
+<tr>
+<td class="manual"><code>NOT boolean</code></td>
+<td class="manual"><code>boolean</code></td>
+<td class="manual"></td>
+</tr>
+<tr>
+<td class="manual"><code>AND boolean</code></td>
+<td class="manual"><code>boolean</code></td>
+<td class="manual"></td>
+</tr>
+<tr>
+<td class="manual"><code>OR boolean</code></td>
+<td class="manual"><code>boolean</code></td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">
+<code>CASE WHEN <i>cond</i> THEN <i>result</i><br>
+&nbsp;&nbsp;&nbsp;&nbsp;[WHEN <i>cond</i> THEN <i>result</i> ...]<br>
+&nbsp;&nbsp;&nbsp;&nbsp;[ELSE <i>result</i>]<br>
+END</code></td>
+<td class="manual">
+<span lang="en">same with <i>result</i></span>
+<span lang="ja"><i>result</i>と同じ</span>
+</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual">
+<code>CASE <i>expr</i><br>
+&nbsp;&nbsp;&nbsp;&nbsp;WHEN <i>value</i> THEN <i>result</i><br>
+&nbsp;&nbsp;&nbsp;[WHEN <i>value</i> THEN <i>result</i> ...]<br>
+&nbsp;&nbsp;&nbsp;[ELSE <i>result</i>]<br>
+END
+<td class="manual">
+<span lang="en">same with <i>result</i></span>
+<span lang="ja"><i>result</i>と同じ</span>
+</td>
+<td class="manual"></td>
+</tr>
+
+<tr>
+<td class="manual"><code><i>scalar</i> <i>comp</i> ANY (<i>array</i>)</code></td>
+<td class="manual"><code>boolean</code></td>
+<td class="manual">
+<span lang="en">
+<i>scalar</i> is a supported data type,
+<i>comp</i> is a supported operator that returns <code>boolean</code>,
+and <i>array</i> is an array consists of supported data types and must be constant value or parameter reference.
+</span>
+<span lang="ja">
+<i>scalar</i>はサポートされているデータ型、
+<i>comp</i>はサポートされている演算子で<code>boolean</code>を返すもの、
+および、<i>array</i>はサポートされているデータ型から成る配列で、定数またはパラメータ参照である事。
+</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual"><code><i>scalar</i> <i>comp</i> ALL (<i>array</i>)</code></td>
+<td class="manual"><code>boolean</code></td>
+<td class="manual">
+<span lang="en">
+<i>scalar</i> is a supported data type,
+<i>comp</i> is a supported operator that returns <code>boolean</code>,
+and <i>array</i> is an array consists of supported data types and must be constant value or parameter reference.
+</span>
+<span lang="ja">
+<i>scalar</i>はサポートされているデータ型、
+<i>comp</i>はサポートされている演算子で<code>boolean</code>を返すもの、
+および、<i>array</i>はサポートされているデータ型から成る配列で、定数またはパラメータ参照である事。
+</span>
+</td>
+</tr>
+
+</tbody>
+</table>
+
 </section>
 
 <section class="manual_2" id="reference_configs">

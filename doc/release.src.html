@@ -7,12 +7,301 @@
 
 <section class="manual_2" id="release-note-1_0">
 <h2>
-  <span lang="en">PG-Strom 1.0 Release</span>
-  <span lang="ja">PG-Strom 1.0 リリース</span>
+<span lang="en">PG-Strom 1.0 Release</span>
+<span lang="ja">PG-Strom 1.0 リリース</span>
 </h2>
 
+<h3>
+<span lang="en">Highlight</span>
+<span lang="ja">ハイライト</span>
+</h3>
 
+<dl>
+<dt>
+<span lang="en">Position of this version</span>
+<span lang="ja">本バージョンの位置付け</span>
+</dt>
+<dd>
+<p>
+<span lang="en">
+The version 1.0, released at xx-Jun-2016, is the first release of PG-Strom which enables to off-load PostgreSQL's query processing workloads to GPUs transparently.
+</span>
+<span lang="ja">
+2016-06-xxにリリースされたv1.0は、PostgreSQLクエリ処理を透過的にGPUへオフロードする事で高速化する拡張モジュール<em>PG-Strom</em>の最初のリリースとなります。
+</span>
+</p>
+<p>
+<span lang="en">
+Its main target is early adopters who are interested in new technology, and it fits the evaluation and validation for GPU opportunity in database area.
+</span>
+<span lang="ja">
+新しい技術に関心の高いアーリーアダプタ層を主たるターゲットとしており、データベース領域におけるGPUの適用可能性の評価・検証に適します。
+</span>
+</p>
+<p>
+</p>
+</dd>
+
+<dt>
+<span lang="en">Characteristics</span>
+<span lang="ja">特長</span>
+</dt>
+<dd>
+<p>
+<span lang="en">
+Because of evolution of semiconductor technology, it became commodity to mount a few hundred to a few thousands processing cores per chip and ultra wide band RAM more than a few hundred gigabytes per second; that is supercomputer grade performance in the past, but personal individuals can get nowadays.
+PG-Strom is designed to break limitations of existing system's performance with less tuning by hand and inexpensive cost, by applying these GPU's capabilities to the query processing area, without modification of existing operations and environment of PostgreSQL; it means no modification for existing applications and schema definitions on database.
+</span>
+<span lang="ja">
+半導体技術の進化に伴い、GPUはワンチップに数百～数千並列コアと数百GB/sの広帯域RAMの搭載が一般的になり、かつてはスーパーコンピューター水準の性能とされていた処理能力が、個人の手にも届く水準となってきました。
+PG-StromはこのようなGPUの計算能力をクエリ処理の分野に適用する事で、既存のPostgreSQL運用環境に手を加えることなく（つまり、既存のアプリケーションやデータ構造を修正なく使い続けるという条件下で）、チューニングレスかつ安価に性能上の限界を突破する事を意図して設計されています。
+</span>
+</p>
+<p>
+<span lang="en">
+The code technology of PG-Strom is: (1) a code generator that construct GPU binary to process the supplied SQL workloads, and (2) asynchronous execution engine that processes per data chunk that contains about the tens of thousands to the hundreds of thousands rows.
+PostgreSQL v9.5 newly supports a feature of CustomScan/Join interface; which enables PG-Strom to implement these features as a pure extension, with no patch and modification to the PostgreSQL side.
+</span>
+<span lang="ja">
+PG-Stromの中核となる技術は、①入力されたSQLワークロードを処理するGPU用バイナリを生成するコードジェネレータ、②数万～数十万行程度のデータチャンク単位で非同期処理を行う実行エンジンの２つです。
+PostgreSQL v9.5で新たに対応した CustomScan Interface に対応する事で、PostgreSQL側にはパッチ等を適用することなく、純粋な拡張モジュールとしてこれらの機能を実装する事が可能となりました。
+</span>
+</p>
+</dd>
+
+<dt>
+<span lang="en">Expected Usage</span>
+<span lang="ja">想定用途</span>
+</dt>
+<dd>
+<span lang="en">
+PG-Strom v1.0 is designed for the following expected usage.
+</span>
+<span lang="ja">
+PG-Strom v1.0は、以下のような用途での利用を想定して設計されています。
+</span>
+<dl>
+<li>
+<span lang="en">As a backend of OLAP applications, like BI</span>
+<span lang="ja">BIなどOLAP系処理を行うアプリケーションのバックエンド</span>
+</li>
+
+<li>
+<span lang="en">Batch processing like ETL, Reporting</span>
+<span lang="ja">ETLやレポーティングなどバッチ処理系</span>
+</li>
+
+<li>
+<span lang="en">Integration of transactional database and information database</span>
+<span lang="ja">トランザクション系DBと情報系DBの統合</span>
+</li>
+
+<li>
+<span lang="en">In-database statistical analytics processing</span>
+<span lang="ja">データベース上での統計解析処理</span>
+</li>
+</dl>
+
+</dd>
+</dl>
+
+<h3>
+<span lang="en">New Features</span>
+<span lang="ja">新機能</span>
+</h3>
+
+<dl>
+<dt>GpuScan</dt>
+<dd>
+<span lang="en">
+It runs full-table scan with evaluation of qualifiers on GPU device. In case when most of tables are on memory, evaluation of the qualifiers are significant part of the workloads, parallel processing is worthy of consideration for tuning.
+</span>
+<span lang="ja">
+条件句を伴うテーブルの全件スキャンをGPUで実行します。テーブルの大部分がオンメモリの状況では条件句の評価が負荷の大部分を占めるため、並列処理は有効なチューニング策です。
+</span>
+</dd>
+
+<dt>GpuJoin</dt>
+<dd>
+<span lang="en">
+It runs tables join on GPU. Parallel version of HashJoin and NestLoop algorithms are implemented. It can join more than two tables by one GPU kernel launch, so it processes tables join workload effectively that is usually bottleneck for RDBMS.
+</span>
+<span lang="ja">
+テーブルJOINをGPUで実行します。並列版HashJoinおよびNestLoopアルゴリズムが実装されており、また、1回のGPU呼び出しで3個以上のテーブルを結合する事もありますので、通常、RDBMSの処理ボトルネックとなりがちなテーブル同士の結合を効率的に実行する事ができます。
+</span>
+</dd>
+
+<dt>GpuPreAgg</dt>
+<dd>
+<span lang="en">
+It runs aggregate operations on GPU to off-loads CPU workloads. It is the most advantaced workloads for GPU to summarize massive input data into small number of results by collaboration of the many processor cores. Especially, it works well on the case when reduction ratio is very high.
+</span>
+<span lang="ja">
+集約演算をGPUで実行しCPUの負荷を軽減します。非常に多くの演算コアが協調して大量の入力データをごく少数のサマリへと縮約する演算はGPUが最も得意とするもので、特に、GROUP BYの結果集約率が非常に高くなるケースで効果を発揮します。
+</span>
+</dd>
+
+<dt>GpuSort</dt>
+<dd>
+<span lang="en">
+It replaces the standard sorting by the combination of bitonic sorting on GPU and merge sorting on CPU. 
+It is more efficient to process larger amount of data on GPU at once, on the other hands, expand of data chunk makes asynchronous execution more inefficient. Thus, we disabled GpuSort on the default because its performance advantage is not clear in this version.
+</span>
+<span lang="ja">
+GPUでのBitonic Sortingと、CPU側でのMerge Sortingを組み合わせる事で、本体のソート処理を代替します。できるだけ多くのデータを一度にGPUで処理した方が効率的である一方、データチャンクの拡大に伴って非同期処理の効率は低下します。そのため、現バージョンでは十分な性能優位性が得られておらず、デフォルトでは無効化されています。
+</span>
+</dd>
+
+<dt>GpuProjection</dt>
+<dd>
+<span lang="en">
+People often processes the data fetched from the database with complicated expression prior to the return. The process to evaluate expressions, called projection, often consumes larger time than the core workloads of database like scan or join, according to number of the rows in results and complexity of the expression. GpuProjection enables to compute the complicated expressions on GPU side preliminary, and rewrites the query execution plan to replace these expression by just references to the calculation results.
+</span>
+<span lang="ja">
+データベースから取り出したデータを複雑な計算式で処理し、その結果を利用者へと返却する事があります。プロジェクションと呼ばれるこの処理は、結果の件数や計算式の複雑さ次第では、スキャンやジョインといったデータベースの中核的な処理よりも処理時間を要します。GpuProjection機能は、これらの複雑な計算をGPU側で予め行っておき、CPU側では『GPUでの計算結果を参照する』ようクエリ実行計画を書き換える事でクエリ処理を高速化します。
+</span>
+</dd>
+
+<dt>PL/CUDA</dt>
+<dd>
+<span lang="en">
+A feature to run user's defined CUDA program as SQL function. It is implemented as Procedural Language of PostgreSQL, and its runtime automatically exchanges the arguments and result of SQL function between CPU and GPU, thus, it allows user to focus on implementation of advanced data analytics algorithms. It makes in-database data analytics much efficiently because PL/CUDA function can pull out the innate ability of GPU to run the algorithm.
+</span>
+<span lang="ja">
+任意のCUDAプログラムをSQL関数として実行するための機能です。PostgreSQLのProcedural Languageとして実装されており、SQL関数の引数や実行結果は自動的にCPU～GPU間で受け渡されるため、ユーザは高度なデータ解析アルゴリズムの実装に集中する事ができます。PL/CUDA関数はGPUの本来持っている速度でアルゴリズムを動作させる事ができるため、効率的なin-databaseデータ解析を実現する事ができます。
+</span>
+</dd>
+
+<dt>
+<span lang="en">LIKE operator</span>
+<span lang="ja">LIKE句</span>
+</dt>
+<dd>
+<span lang="en">It supports pattern matching by LIKE clause</span>
+<span lang="ja">LIKE句によるパターンマッチングに対応しています。</span>
+</dd>
+</dl>
+
+<h3>
+<span lang="en">Limitation</span>
+<span lang="ja">制限事項</span>
+</h3>
+<dl>
+<dt>
+<span lang="en">Time for device initialization</span>
+<span lang="ja">デバイス初期化に要する時間</span>
+</dt>
+<dd>
+<span lang="en">
+It takes about 0.2-0.3 sec for initialization of GPU device and creation of CUDA context. This extra cost may not be ignorable for the queries that will complete shortly. A CUDA context once constructed shall be reused, connection pooling technology absorb the limitation. We plan an essential improvement at v2.0.
+</span>
+<span lang="ja">
+GPUデバイスの初期化およびCUDAコンテキストの作成には、概ね0.2～0.3秒程度の時間を要します。短時間で完了するクエリにとってはこの追加コストは無視できないものになるかもしれません。いったん作成したCUDAコンテキストは再利用されるため、コネクションプーリングの利用によりこの制限はある程度緩和されますが、本質的にはv2.0での改善を待つ必要があります。
+</span>
+</dd>
+
+<dt>
+<span lang="en">Number of concurrent sessions</span>
+<span lang="ja">同時並行セッション数</span>
+</dt>
+<dd>
+<span lang="en">
+Due to reuse of CUDA context, a session that already finished to use GPU may cache GPU's RAM for the next use. It will reduce time for device initialization on the next time, however, it also prevent resource allocation by the concurrent sessions. To avoid it, please keep the number of concurrent sessions up to 3-5. We plan an essential improvement at v2.0.
+</span>
+<span lang="ja">
+CUDAコンテキストの再利用に伴い、既にGPUを使い終えたセッションが次回の利用に備えてGPUのRAMをキャッシュする事があります。これは次回のデバイス初期化時間を短縮するためですが、無関係のセッションがGPUのリソースを確保する時の障害ともなります。これを避けるには、同時にPG-Stromを使用するセッション数は最大3～5程度に抑えてください。v2.0での改善が予定されています。
+</span>
+</dd>
+
+<dt>
+<span lang="en">Database Size</span>
+<span lang="ja">データベースサイズ</span>
+</dt>
+<dd>
+<span lang="en">
+In general, data accesses involving storage I/O is much slower than RAM access. PG-Strom off-loads CPU workloads by SQL processing, but makes no sense to the workloads which is mostly consists of I/O task. It shall be applied on the case when target data is on the shared buffer of PostgreSQL, or disk cache of operating system at least.
+This limitation shall be absorbed by the SSD collaboration feature at v2.0.
+</span>
+<span lang="ja">
+一般に、ストレージへのI/Oを伴うデータアクセスはRAMへのアクセスに比べて非常に低速です。PG-StromはSQL処理に伴うCPU負荷をオフロードしますが、I/O主体のワークロードに対しては効果を発揮する事ができません。処理対象のデータがPostgreSQLの共有バッファか、少なくともOSのディスクキャッシュに載り切る程度の大きさのものに対して適用されるべきです。
+この制限は、v2.0で導入される予定のSSD連携機能によりある程度緩和される見通しです。
+</span>
+</dd>
+</dl>
 
 </section>
 
+<section class="manual_2" id="versioning-policy">
+<h2>
+<span lang="en">Versioning and support policy</span>
+<span lang="ja">バージョン番号とサポートポリシー</span>
+</h2>
+
+<p>
+<span lang="ja">
+PG-Stromのバージョン番号は <em>pg_strom-<i>x</i>.<i>y</i></em> という２つの数字の組による形式で表現されます。<em><i>x</i></em>をメジャーバージョン、<em><i>y</i></em>をマイナーバージョンと呼びます。
+</span>
+</p>
+<p>
+<span lang="ja">
+メジャーバージョンの変更を伴うバージョンアップでは、新機能の追加や強化（場合によっては従来バージョンとの非互換を伴う）、動作環境への要件（例えば前提となるPostgreSQLやCUDAバージョンの変更）事があります。
+従来のバージョンで動作していたSQLクエリやPL/CUDA関数が、必ずしも新バージョンではそのまま利用できるとは限りません。
+</span>
+</p>
+<p>
+<span lang="ja">
+マイナーバージョンの変更を伴うバージョンアップでは、バグ修正のみが行われます。データベースに保存されたデータのフォーマットや、SQL関数のシグネチャ、SQL構文などへの変更はありません。
+したがって、PG-Stromモジュールを更新してPostgreSQLを再起動するだけでバージョンアップが完了する事を目指しています。
+</span>
+</p>
+
+<p>
+<div class="figure">
+<img src="./figs/release-policy.png">
+</div>
+</p>
+
+<p>
+<span lang="en">
+The PG-Strom Development Team has the support policy below.
+</span>
+<span lang="ja">
+PG-Strom各バージョンのリリースに際して、PG-Strom Development Teamは次のような保守ポリシーを持っています。
+</span>
+</p>
+
+<p>
+<span lang="en">
+On the minor version up, our supported version will switch to the newer version soon. For example, when the v1.0 is updated to the v1.1, the older v1.0 will become unsupported. On the bug report to the community, please ensure your problem is reproducible on the latest version.
+</span>
+<span lang="ja">
+マイナーバージョンアップに際しては、最新版のみがサポート対象へと切り替わります。例えば、v1.0からv1.1へのバージョンアップが行われた段階で、古いv1.0はサポートの対象から外れます。コミュニティにバグ報告を行う際には、最新版において再現する問題である事を確認してください。
+</span>
+</p>
+
+<p>
+<span lang="en">
+On major version up, we will support the older version for three months since the day of new version's release, then, the older version will become end of line status.
+We don't guarantee the compatibility with the older version on major version up, we position the 3 months window as time for transitional period.
+</span>
+<span lang="ja">
+メジャーバージョンアップに際しては、新しいバージョンのリリース後、３ヵ月間は旧バージョンもサポートの対象となります。しかし、それ以降は旧バージョンはEOLとなります。
+メジャーバージョンアップに際しては必ずしも旧バージョンとの互換を担保していないため、我々はこれを移行期間として位置付けています。
+</span>
+</p>
+
+<p>
+<div class="hint">
+<span lang="en">
+The "support" introduced here is best effort by the developer's community.
+Unlike commercial support, it is not a commitment for investigation of problems and bug fixes.
+</span>
+<span lang="ja">
+ここで説明している"サポート"は、開発者コミュニティによるベストエフォートのものです。
+商用サポート契約とは異なり、障害の解析やバグの修正を約束するものではありません。
+</span>
+</div>
+</p>
+
+</section>
 </article>
