@@ -33,20 +33,6 @@ typedef struct GpuContextHead
 	GpuContext_v2	gpu_contexts[FLEXIBLE_ARRAY_MEMBER];
 } GpuContextHead;
 
-/*
- * static variables
- */
-static shmem_startup_hook_type shmem_startup_hook_next = NULL;
-static pgsocket			gpu_server_sock = -1;
-static int				gpu_server_got_signal = 0;
-static GpuServerState  *gpuServState = NULL;
-static GpuContextHead  *gpuContextHead;
-static int				numGpuServers;	/* GUC */
-static int				numGpuContexts;	/* GUC */
-static CUdevice			cuda_device = NULL;
-static CUcontext		cuda_context = NULL;
-
-
 #define GPUSERV_CMD_OPEN
 #define GPUSERV_CMD_GPUSCAN
 #define GPUSERV_CMD_GPUJOIN
@@ -70,6 +56,169 @@ typedef struct GpuServCommand
 		} task;
 	} u;
 } GpuServCommand;
+
+/*
+ * tracker of local resources
+ */
+#define RESOURCE_TRACKER_CLASS__FILEDESC	1
+#define RESOURCE_TRACKER_CLASS__GPUMEMORY	2
+
+typedef struct ResourceTracker
+{
+	cl_int			resclass;
+	Datum			resource;
+	dlist_node		chain;
+} ResourceTracker;
+#define ResourceTrackerNumSlots		175
+
+/*
+ * static variables
+ */
+static shmem_startup_hook_type shmem_startup_hook_next = NULL;
+static pgsocket			gpu_server_sock = -1;
+static int				gpu_server_got_signal = 0;
+static GpuServerState  *gpuServState = NULL;
+static GpuContextHead  *gpuContextHead;
+static int				numGpuServers;	/* GUC */
+static int				numGpuContexts;	/* GUC */
+static GpuContext_v2   *currGpuContext = NULL;
+static CUdevice			cuda_device = NULL;
+static CUcontext		cuda_context = NULL;
+static dlist_head		resource_tracker_slots[ResourceTrackerNumSlots];
+static dlist_head		resource_tracker_free;
+
+/*
+ * tracker of file descriptor
+ */
+static void
+registerFileDescriptor(int fdesc)
+{
+	ResourceTracker *tracker;
+	cl_uint		index;
+
+	if (dlist_is_empty(&resource_tracker_free))
+	{
+		tracker = MemoryContextAlloc(CacheMemoryContext,
+									 sizeof(ResourceTracker));
+	}
+	else
+	{
+		dlist_node *dnode = dlist_pop_head_node(&resource_tracker_free);
+		tracker = dlist_container(ResourceTracker, chain, dnode);
+	}
+	memset(tracker, 0, sizeof(ResourceTracker));
+	tracker->resclass = RESOURCE_TRACKER_CLASS__FILEDESC;
+	tracker->resource = Int32GetDatum(fdesc);
+	index = (hash_any(&tracker->resclass, offsetof(ResourceTracker, chain))
+			 % ResourceTrackerNumSlots);
+	dlist_push_tail(&resource_tracker_slots[index], &tracker->chain);
+}
+
+static void
+closeFileDesc(int fdesc)
+{
+	ResourceTracker	temp;
+	cl_uint		index;
+	dlist_iter	iter;
+
+	memset(temp, 0, sizeof(ResourceTracker));
+	temp.resclass = RESOURCE_TRACKER_CLASS__FILEDESC;
+	temp.resource = Int32GetDatum(fdesc);
+	index = (hash_any(&temp, offsetof(ResourceTracker, chain))
+			 % ResourceTrackerNumSlots);
+
+	dlist_foreach(iter, &resource_tracker_slots[index])
+	{
+		ResourceTracker *tracker = (ResourceTracker *)
+			dlist_container(ResourceTracker, chain, iter.cur);
+
+		if (tracker->resclass == RESOURCE_TRACKER_CLASS__FILEDESC &&
+			tracker->resource == Int32GetDatum(fdesc))
+		{
+			dlist_delete(&tracker->chain);
+			dlist_push_tail(&resource_tracker_free, &tracker->chain);
+			if (close(fdesc) == 0)
+				return;
+			elog(ERROR, "failed on close(2): %m");
+		}
+	}
+	elog(ERROR, "fdesc %d was not registered", fdesc);
+}
+
+/*
+ * track of device memory allocation/free
+ */
+CUdeviceptr
+gpuMemAlloc_v2(size_t bytesize)
+{
+	ResourceTracker *tracker;
+	CUdeviceptr	devptr;
+	CUresult	rc;
+	cl_uint		index;
+
+	rc = cuMemAlloc(&devptr, bytesize);
+	if (rc != CUDA_SUCCESS)
+	{
+		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
+			return (CUdeviceptr)0UL;
+		elog(ERROR, "failed on cuMemAlloc: %s", errorText(rc));
+	}
+
+	if (dlist_is_empty(&resource_tracker_free))
+	{
+		tracker = MemoryContextAlloc(CacheMemoryContext,
+									 sizeof(ResourceTracker));
+	}
+	else
+	{
+		dlist_node *dnode = dlist_pop_head_node(&resource_tracker_free);
+		tracker = dlist_container(ResourceTracker, chain, dnode);
+	}
+	memset(tracker, 0, sizeof(ResourceTracker));
+	tracker->resclass = RESOURCE_TRACKER_CLASS__GPUMEMORY;
+	tracker->resource = (Datum) devptr;
+	index = (hash_any(&tracker->resclass, offsetof(ResourceTracker, chain))
+			 % ResourceTrackerNumSlots);
+	dlist_push_tail(&resource_tracker_slots[index], &tracker->chain);
+
+	return devptr;
+}
+
+void
+GpuMemFree_v2(CUdeviceptr devptr)
+{
+	ResourceTracker	temp;
+	dlist_iter		iter;
+
+	memset(&temp, 0, sizeof(ResourceTracker));
+	temp.resclass = RESOURCE_TRACKER_CLASS__GPUMEMORY;
+	temp.resource = (Datum) devptr;
+	index = (hash_any(&temp, offsetof(ResourceTracker, chain))
+			 % ResourceTrackerNumSlots);
+
+	dlist_foreach(iter, &resource_tracker_slots[index])
+	{
+		ResourceTracker *tracker = (ResourceTracker *)
+			dlist_container(ResourceTracker, chain, iter.cur);
+
+		if (tracker->resclass == RESOURCE_TRACKER_CLASS__GPUMEMORY &&
+			tracker->resource == (Datum) devptr)
+		{
+			dlist_delete(&tracker->chain);
+			dlist_push_tail(&resource_tracker_free, &tracker->chain);
+			rc = cuMemFree(devptr);
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on cuMemFree: %s", errorText(rc));
+			return;
+		}
+	}
+	elog(ERROR, "device addr %p was not tracker", devptr);
+}
+
+
+
+
+
 
 
 
@@ -117,8 +266,7 @@ gpuserv_recv_command(pgsocket sockfd, GpuServCommand *cmd, long timeout_ms)
 			elog(FATAL. "we cannot handle two or more cmsghdr at once");
 
 		peer_fd = ((int *)CMSG_DATA(cmsg))[0];
-		// TODO: register the peer FD to the current resource owner or
-		//       something other stuff
+		registerFileDescriptor(peer_fd);
 	}
 
 	if (retval == 0 || msg.msg_iovlen == 0)
@@ -218,6 +366,7 @@ gpuserv_accept_connection(void)
 	struct pollfd	pollbuf;
 	pgsocket		sockfd;
 	GpuServCommand	cmd;
+	GpuContext_v2  *gcontext;
 	int				retval;
 
 	pollbuf.fd = gpu_server_sock;
@@ -240,7 +389,7 @@ gpuserv_accept_connection(void)
 			return PGINVALID_SOCKET;
 		elog(ERROR, "failed on accept(2): %m");
 	}
-	// TODO: needs to register the sockfd to close on ERROR
+	registerFileDescriptor(sockfd);
 
 	/*
 	 * Each backend shall send OPEN command at first
@@ -265,9 +414,7 @@ gpuserv_accept_connection(void)
 	gcontext->server = MyProc;
 	SpinLockRelease(&gcontext->lock);
 
-	// TODO: attach GpuContext
-
-
+	CurrGpuContext = gcontext;
 
 	return sockfd;
 }
@@ -335,28 +482,52 @@ pgstrom_gpu_server_main(Datum server_id)
 	pqsignal(SIGTERM, gpuserv_got_sigterm);
 	BackgroundWorkerUnblockSignals();
 
+	CurrentMemoryContext = AllocSetContextCreate(TopMemoryContext,
+												 "GPU/CUDA Server",
+												 ALLOCSET_DEFAULT_MINSIZE,
+												 ALLOCSET_DEFAULT_INITSIZE,
+												 ALLOCSET_DEFAULT_MAXSIZE);
 	gpuserv_init_cuda_context(DatumGetUint32(server_id));
 
 	PG_TRY();
 	{
+		CurrGpuContext = NULL;
 		while (gpu_server_got_signal == 0)
 		{
+			Assert(CurrGpuContext != NULL);
 			sockfd = gpuserv_accept_connection();
 			if (sockfd == PGINVALID_SOCKET)
 				continue;
 
-			// initial link up
-			if (!...)
+			// probably, controller logic is needed
+			// process has to check both of CUDA callback and
+			// message come from the socket.
+			// CUDA callback can up latch of the current proceess.
+			while (sockfd != PGINVALID_SOCKET &&
+				   gpuserv_recv_command() == 0)
 			{
-				close(sockfd);
-				continue;
+				switch (cmd.command)
+				{
+					case GPUSERV_CMD_GPUSCAN:
+						break;
+					case GPUSERV_CMD_CLOSE:
+						closeFileDesc(sockfd);
+						sockfd = PGINVALID_SOCKET;
+						break;
+					default:
+						elog(ERROR, "unexpected GPU Server command: %d",
+							 cmd.command);
+				}
 			}
+			// check leaked resources
+			// if any resources are leaked, unavailable to reuse CUDA
+			// context
 
 
 
-
-
-
+			MemoryContextReset(); // for each session
+			// put gpucontext
+			MyGpuContext = NULL;
 		}
 	}
 	PG_CATCH();
@@ -520,4 +691,11 @@ pgstrom_init_gpu_server(void)
 	RequestAddinShmemSpace(MAXALIGN(sizeof(GpuContext) * numGpuContexts));
 	shmem_startup_hook_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_gpu_server;
+
+	/*
+	 * Misc init of static variables
+	 */
+	for (i=0; i < ResourceTrackerNumSlots; i++)
+		dlist_init(&resource_tracker_slots[i]);
+	dlist_init(&resource_tracker_free);
 }
