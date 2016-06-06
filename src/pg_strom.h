@@ -87,6 +87,8 @@
 #include "gpu_device.h"
 #include "perfmon.h"
 
+
+
 /*
  * GpuContext_v2
  *
@@ -94,37 +96,31 @@
  *
  *
  */
+#define GPUCONTEXT_INIT_STATUS			1
+#define GPUCONTEXT_READY_STATUS			2
+#define GPUCONTEXT_ATTACHED_STATUS		3
+#define GPUCONTEXT_ERROR_STATUS			4
+
 typedef struct GpuContext_v2
 {
-	cl_int		context_id;		/* unique ID of this GpuContext */
+	dlist_node	chain;
 
 	slock_t		lock;			/* lock of the field below */
-	cl_int		refcnt;			/* reference count */
-	cl_int		pgprocno;		/* MyProc->pgprocno, or -1 */
+	cl_uint		refcnt;			/* reference counter */
+	PGPROC	   *backend;		/* PGPROC of Backend Process */
+	PGPROC	   *server;			/* PGPROC of GPU/CUDA Server */
 
-	/*
-	 * Shared resource tracker
-	 */
-	// shared memory ...
-
+	// tracker of the portable shared memory blocks
 
 
 	/*
-	 * CUDA resource owned by CUDA GPU server
-	 * (Never touch from the backend side!)
+	 * Error status on the GPU/CUDA server
 	 */
-	cl_int		device_id;		/* key of cuDeviceGet */
-	CUdevice	cuda_device;
-	CUcontext	cuda_context;
-
-	/*
-	 * Error status on the CUDA server
-	 */
-	const char *error_file;
-	const char *error_func;
+	cl_int		error_code;
+	const char *error_filename;
 	cl_int		error_lineno;
-	cl_int      error_code;
-	cl_char     error_buf[512];	
+	const char *error_funcname;
+	cl_char		error_message[512];
 } GpuContext_v2;
 
 #define INVALID_GPU_CONTEXT_ID		(-1)

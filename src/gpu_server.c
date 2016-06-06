@@ -19,569 +19,300 @@
 
 #include "pg_strom.h"
 
+typedef struct GpuServerState
+{
+	slock_t			lock;
+	cl_uint			num_free_servers;
+} GpuServerState;
+
 typedef struct GpuContextHead
 {
-	pg_atomic_uint32	num_free_context;
-	GpuContext_v2		gpucxt[FLEXIBLE_ARRAY_MEMBER];
+	slock_t			lock;	/* lock of the list below */
+	dlist_head		active_gpu_context_list;
+	dlist_head		free_gpu_context_list;
+	GpuContext_v2	gpu_contexts[FLEXIBLE_ARRAY_MEMBER];
 } GpuContextHead;
-
-typedef struct GpuWorkerState
-{
-	dlist_node		chain;
-	pthread_t		thread;
-
-	GpuContext_v2  *gcontext;
-	GpuServComm		comm;
-	// track of device memory?
-} GpuWorkerState;
 
 /*
  * static variables
  */
 static shmem_startup_hook_type shmem_startup_hook_next = NULL;
-static GpuContextHead  *gpuCtxHead = NULL;
-static int				numGpuCtx = 0;
-static struct sockaddr_un gpuserv_addr;
-static CUdevice			cuda_master_device;
-static CUcontext		cuda_master_context;
+static pgsocket			gpu_server_sock = -1;
+static int				gpu_server_got_signal = 0;
+static GpuServerState  *gpuServState = NULL;
+static GpuContextHead  *gpuContextHead;
+static int				numGpuServers;	/* GUC */
+static int				numGpuContexts;	/* GUC */
+static CUdevice			cuda_device = NULL;
+static CUcontext		cuda_context = NULL;
 
-static slock_t			gpuserv_workers_list_lock;
-static dlist_head		gpuserv_active_workers_list;
-static dlist_head		gpuserv_dead_workers_list;
 
-static bool				gpuserv_loop;
-static bool				is_gpuserv_proc = false;
+#define GPUSERV_CMD_OPEN
+#define GPUSERV_CMD_GPUSCAN
+#define GPUSERV_CMD_GPUJOIN
+#define GPUSERV_CMD_GPUPREAGG
+#define GPUSERV_CMD_GPUSORT
+#define GPUSERV_CMD_PLCUDA
+#define GPUSERV_CMD_CLOSE
 
-/*
- * is_gpuserver_process - returns true, if caller is GPU server process
- */
-bool
-is_gpuserver_process(void)
+typedef struct GpuServCommand
 {
-	return is_gpuserv_proc;
-}
+	cl_int		command;	/* one of the GPUSERV_CMD_* */
+	cl_int		peer_fd;	/* if SCM_RIGHTS, elsewhere -1 */
+	union {
+		struct {
+			cl_uint		context_id;
+			BackendId	backend_id;
+		} open;
+		struct {
+//			portable_addr_t gask;
+			uintptr_t gtask;
+		} task;
+	} u;
+} GpuServCommand;
 
-/*
- * alloc_gpu_context - look up a free GpuContext and assign CUDA context
- * on the caller's thread
- */
-static GpuContext_v2 *
-gpuserv_alloc_gpucontext(cl_int pgprocno)
+
+
+
+
+static int
+gpuserv_recv_command(pgsocket sockfd, GpuServCommand *cmd, long timeout_ms)
 {
-	int		i;
+	GpuServCommand *__cmd;
+	struct msghdr	msg;
+	struct iovec	iov;
+	struct cmsghdr *cmsg;
+	unsigned char	cmsgbuf[CMSG_SPACE(sizeof(int))];
+	int				peer_fd = -1;
+	ssize_t			retval;
 
-	if (pg_atomic_read_u32(&gpuCtxHead->num_free_context) > 0)
+	retval = WaitLatchOrSocket(MyProc->procLatch,
+							   WL_LATCH_SET |
+							   WL_POSTMASTER_DEATH |
+							   WL_SOCKET_READABLE,
+							   sockfd,
+							   timeout_ms);
+	if ((retval & WL_SOCKET_READABLE) == 0)
+		return (int)retval;
+
+	memset(&msg, 0, sizeof(msg));
+	memset(&iov, 0, sizeof(iov));
+	msg.msg_iov = &iov;
+	msg.msg_iovlen = 1;
+	msg.msg_control = cmsgbuf;
+	msg.msg_controllen = sizeof(cmsgbuf);
+
+	retval = recvmsg(sockfd, &msg, MSG_CMSG_CLOEXEC | MSG_DONTWAIT);
+	if (retval < 0)
+		elog(ERROR, "failed on recvmsg: %m");
+	if ((cmsg = CMSG_FIRSTHDR(&msg)) != NULL)
 	{
-		for (i=0; i < numGpuCtx; i++)
-		{
-			GpuContext_v2  *gcontext = &gpuCtxHead->gpucxt[i];
+		if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS)
+			elog(ERROR, "unexpected cmsghdr {cmsg_level=%d cmsg_type=%d}",
+				 cmsg->cmsg_level, cmsg->cmsg_type);
+		/* needs to exit once then restart server */
+		if ((cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int) > 1)
+			elog(FATAL, "we cannot handle two or more FDs at once");
+		if (CMSG_NXTHDR(&msg, cmsg) != NULL)
+			elog(FATAL. "we cannot handle two or more cmsghdr at once");
 
-			SpinLockAcquire(&gcontext->lock);
-			if (gcontext->refcnt == 0)
-			{
-				Assert(gcontext->pgprocno < 0);
-				gcontext->pgprocno = pgprocno;
-				gcontext->refcnt = 1;
-
-				pg_atomic_fetch_sub_u32(&gpuCtxHead->num_free_context, 1);
-				SpinLockRelease(&gcontext->lock);
-
-				return gcontext;
-			}
-			SpinLockRelease(&gcontext->lock);
-		}
+		peer_fd = ((int *)CMSG_DATA(cmsg))[0];
+		// TODO: register the peer FD to the current resource owner or
+		//       something other stuff
 	}
-	return NULL;
-}
 
-GpuContext_v2 *
-gpuserv_get_gpucontext(cl_int context_id)
-{
-	GpuContext_v2  *gcontext;
-
-	if (context_id < 0 || context_id >= numGpuCtx)
-		return NULL;	/* out of range */
-
-	gcontext = &gpuCtxHead->gpucxt[context_id];
-	SpinLockAcquire(&gcontext->lock);
-	if (gcontext->refcnt == 0 ||
-		gcontext->backend_id != InvalidBackendId)
+	if (retval == 0 || msg.msg_iovlen == 0)
 	{
-		SpinLockRelease(&gcontext->lock);
-		return NULL;	/* gcontext status is a bit strange */
+		cmd->command = GPUSERV_CMD_CLOSE;
+		cmd->peer_fd = peer_fd;
+		elog(LOG, "no bytes received, likely connection closed");
+		return 0;
 	}
-	gcontext->backend_id = MyProc->backendId;
-	gcontext->refcnt++;
-
-	SpinLockRelease(&gcontext->lock);
-	return gcontext;
-}
-
-void
-gpuserv_put_gpucontext(GpuContext_v2 *gcontext)
-{
-	SpinLockAcquire(&gcontext->lock);
-	if (--gcontext->refcnt == 0)
+	else if (msg.msg_iovlen > 1 ||
+			 iov.iov_len != sizeof(GpuServCommand))
 	{
-		gcontext->pgprocno = -1;
-
-		pg_atomic_fetch_add_u32(&gpuCtxHead->num_free_context, 1);
-		// TODO: Release Shared Memory
-		// TODO: Release CUDA Resources if remained
+		elog(ERROR, "recvmsg(2) returned unexpected bytes format");
 	}
-	SpinLockRelease(&gcontext->lock);
-}
 
-/*
- * gpuserv_send_command
- *
- * send a command like to GPU Server/Backend
- */
-bool
-gpuserv_send_command(GpuServComm *comm, int cmd, Datum arg)
-{
-	struct pollfd pollbuf;
-	char		sendbuf[128];
-	time_t		timeout_end = time(NULL) + 20;	/* 20sec */
-	int			timeout;
-	ssize_t		cmd_len;
-	ssize_t		sent_len;
-	int			rv;
-
-	switch (cmd)
+	__cmd = (GpuServCommand *) iov.iov_base;
+	cmd->command = __cmd->command;
+	cmd->peer_fd = peer_fd;
+	switch (cmd->command)
 	{
 		case GPUSERV_CMD_OPEN:
-		case GPUSERV_CMD_CONTEXT:
-		case GPUSERV_CMD_CONFIEM:
-		case GPUSERV_CMD_GPUTASK:
-		case GPUSERV_CMD_RESPOND:
-			cmd_len = snprintf(sendbuf, sizeof(sendbuf), "%c %lu\n", cmd, arg);
+			cmd->context_id = __cmd->context_id;
+			cmd->backend_id = __cmd->backend_id;
+			if (cmd->peer_fd)
+				elog(ERROR, "OPEN command never takes Peer-FD");
+			break;
+		case GPUSERV_CMD_GPUSCAN:
+		case GPUSERV_CMD_GPUJOIN:
+		case GPUSERV_CMD_GPUPREAGG:
+		case GPUSERV_CMD_GPUSORT:
+		case GPUSERV_CMD_PLCUDA:
+		case GPUSERV_CMD_CLOSE:
+			cmd->gputask = __cmd->gputask;
 			break;
 		default:
-			fprintf(stderr, "%s: unknown command: %c %lu\n",
-					__FUNCTION__, cmd, arg);
-			return false;
+			elog(ERROR, "unexpected GpuServCommand: %d", __cmd->command);
+			break;
 	}
 
-retry:
-	pollbuf.fd = comm->sockfd;
-	pollbuf.events = POLLOUT | POLLERR;
-	pollbuf.revents = 0;
-
-	timeout = (time(NULL) >= timeout_end ? 0 : 500);
-	rv = poll(&pollbuf, 1, timeout);
-	if (rv < 0)
-	{
-		fprintf(stderr, "%s: failed on poll(2): %m\n", __FUNCTION__);
-		return false;
-	}
-	else if (rv == 0)
-	{
-		if (!is_gpuserver_process())
-			CHECK_FOR_INTERRUPTS();
-		else if (!gpuserv_loop)
-			return false;
-		goto retry;
-	}
-	else if ((pollbuf.revents & POLLOUT) == 0)
-	{
-		fprintf(stderr, "%s: unable to write socket: revents = %d\n",
-				__FUNCTION__, pollbuf.revents);
-		return false;
-	}
-
-	/* write out */
-	sent_len = 0;
-	do {
-		rv = write(comm->sockfd, sendbuf + sent_len, cmd_len - sent_len);
-		if (rv > 0)
-			sent_len += rv;
-		else
-		{
-			if (rv == 0)
-				fprintf(stderr, "%s: no bytes were sent\n", __FUNCTION__);
-			else
-				fprintf(stderr, "failed on write(2): %m\n");
-			return false;
-		}
-	} while (sent_len < cmd_len);
-
-	return true;
+	return 0;
 }
+
+static bool
+gpuserv_send_command(pgsocket sockfd, GpuServCommand *cmd, long timeout_ms)
+{
+	struct msghdr	msg;
+	struct iovec	iov;
+	unsigned char	cmsgbuf[CMSG_SPACE(sizeof(int))];
+	int				retval;
+
+	retval = WaitLatchOrSocket(MyProc->procLatch,
+							   WL_LATCH_SET |
+							   WL_POSTMASTER_DEATH |
+							   WL_SOCKET_WRITABLE,
+							   sockfd,
+							   timeout_ms);
+	if ((retval & WL_SOCKET_WRITABLE) == 0)
+		return retval;
+
+	memset(&msg, 0, sizeof(struct msghdr));
+	msg.msg_iov = &iov;
+	msg.msg_iovlen = 1;
+	iov.iov_base = cmd;
+	iov.iov_len = sizeof(GpuServCommand);
+
+	if (cmd->peer_fd >= 0)
+	{
+		struct cmsghdr *cmsg;
+
+		msg.msg_control = cmsgbuf;
+		msg.msg_controllen = sizeof(cmsgbuf);
+		cmsg = CMSG_FIRSTHDR(&msg);
+		cmsg->cmsg_level = SOL_SOCKET;
+		cmsg->cmsg_type = SCM_RIGHTS;
+		cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+		((int *)CMSG_DATA(cmsg))[0] = cmd->peer_fd;
+	}
+
+	retval = sendmsg(sockfd, &msg, 0);
+	if (retval < 0)
+		elog(ERROR, "failed on sendmsg, peer_fd=%d: %m", peer_fd);
+	else if (retval == 0)
+		elog(ERROR, "no bytes send using sendmsg, peer_fd=%d: %m", peer_fd);
+
+	return 0;
+}
+
+
+
 
 /*
- * gpuserv_recv_command
- *
- * read a command like from GPU Server/Backend
- */
-bool
-gpuserv_recv_command(GpuServComm *comm, int *p_cmd, Datum *p_arg)
-{
-	struct pollfd pollbuf;
-	char	   *pos, *head, *end;
-	int			rv;
-
-	for (;;)
-	{
-		/* try to parse a command line on recvbuf */
-		for (head = pos = comm->recvbuf + comm->bufpos,
-			 end = comm->recvbuf + comm->bufend; pos < end; pos++)
-		{
-			cl_int		cmd;
-			cl_ulong	arg;
-
-			if (*pos == '\n')
-			{
-				comm->bufpos = pos + 1 - comm->recvbuf;
-				*pos = '\0';
-				if (sscanf(head, "%c %lu", &cmd, &arg) != 2)
-				{
-					fprintf(stderr, "%s: invalid command format [%s]\n",
-							__FUNCTION__, head);
-					return false;
-				}
-
-				if (cmd == GPUSERV_CMD_OPEN ||
-					cmd == GPUSERV_CMD_CONTEXT ||
-					cmd == GPUSERV_CMD_CONFIRM ||
-					cmd == GPUSERV_CMD_GPUTASK ||
-					cmd == GPUSERV_CMD_RESPOND)
-				{
-					*p_cmd = cmd;
-					*p_arg = arg;
-					return true;
-				}
-				fprintf(stderr, "%s: unknown command [%s]\n",
-						__FUNCTION__, head);
-				return false;
-			}
-		}
-
-		/* shift to the head */
-		if (comm->bufpos > 0)
-		{
-			memmove(comm->recvbuf,
-					comm->recvbuf + comm->bufpos,
-					comm->bufend - comm->bufpos);
-			comm->bufend -= comm->bufpos;
-			comm->bufpos = 0;
-		}
-
-	retry:
-		pollbuf.fd = comm->sockfd;
-		pollbuf.events = POLLIN | POLLERR;
-		pollbuf.revents = 0;
-
-		timeout = (time(NULL) >= timeout_end ? 0 : 500);
-		rv = poll(&pollbuf, 1, timeout);
-		if (rv < 0)
-		{
-			fprintf(stderr, "%s: failed on poll(2): %m\n", __FUNCTION__);
-			return false;
-		}
-		else if (rv == 0)
-		{
-			if (!is_gpuserver_process())
-				CHECK_FOR_INTERRUPTS();
-			else if (!gpuserv_loop)
-				return false;
-			goto retry;
-		}
-		else if ((pollbuf.revents & POLLIN) == 0)
-		{
-			fprintf(stderr, "%s: unable to read from the socket: %08x\n",
-					__FUNCTION__, pollbuf.revents);
-			return false;
-		}
-
-		/* OK, read a line from the socket */
-		rv = read(comm->sockfd,
-				  comm->recvbuf + comm->bufend,
-				  sizeof(comm->recvbuf) - comm->bufend);
-		if (rv <= 0)
-		{
-			if (rv == 0)
-				fprintf(stderr, "%s: no bytes were read\n", __FUNCTION__);
-			else
-				fprintf(stderr, "failed on read(2): %m\n");
-			return false;
-		}
-		comm->bufend += rv;
-	}
-}
-
-/*
- *
- */
-static void *
-gpuserv_worker_main(void *thread_arg)
-{
-	GpuWorkerState	   *wstate = (GpuWorkerState *) thread_arg;
-	GpuContext_v2	   *gcontext = NULL;
-	int					cmd;
-	Datum				cmdarg;
-
-	/* Get backendId from the peer */
-	if (!gpuserv_recv_command(&wstate->comm, &cmd, &cmdarg) ||
-		cmd != GPUSERV_CMD_OPEN)
-		goto out_exit;
-
-	/* Lookup a free GpuContext */
-	gcontext = gpuserv_alloc_gpucontext(DatumGetInt32(cmdarg));
-	if (!gcontext)
-		goto out_exit;
-
-	/* Send back context_id and wait for acknowledge */
-	if (!gpuserv_send_command(&wstate->comm,
-							  GPUSERV_CMD_CONTEXT,
-							  Int32GetDatum(gcontext->context_id)))
-		goto out_exit;
-
-	if (!gpuserv_recv_command(&wstate->comm, &cmd, &cmdarg) ||
-		cmd != GPUSERV_CMD_CONFIRM || !DatumGetBool(cmdarg))
-		goto out_exit;
-
-	/* OK, assign CUDA context on this thread */
-	rc = cuCtxPushCurrent(gcontext->cuda_context);
-	if (rc != CUDA_SUCCESS)
-		goto ...;
-
-	if (sigsetjmp(...) == 0)
-	{
-		/* wait for user's request */
-		while (gpuserv_recv_command(&wstate->comm, &cmd, &cmdarg) &&
-			   cmd == GPUSERV_CMD_GPUTASK)
-		{
-			// transform the portable address to local address
-			// enqueue the task to pending list.
-
-
-			// enqueue the task to pending list.
-
-			// TODO: unblocked recv_command
-
-			
-		}
-		// close the socket
-
-	}
-	else
-	{
-		// close the socket
-
-		// destroy the CUDA context
-
-		// reconstruct the CUDA context
-
-
-
-	}
-	// put GpuContext -- release host pinned memory if any
-
-
-
-
-	// enqueue a pending list
-	// fetch a task from pending list
-	// call the cb_process callback in this context
-
-	// error handling
-	// once error happen, put error status on device context
-	// then destroy the current cuda context.
-	// it implies all the device memory an relevant resource
-	// shall be released
-
-	// host pinned memory shall be released when DevContext
-	// become unreferenced
-
-
-	return NULL;
-}
-
-static void
-gpuserv_launch_worker(pgsocket sockfd)
-{
-	GpuWorkerState *wstate;
-	dlist_node	   *dnode;
-
-	wstate = malloc(sizeof(GpuWorkerState));
-	if (!wstate)
-	{
-		GELOG("out of memory: %m");
-		close(sockfd);
-		return;
-	}
-	memset(wstate, 0, sizeof(GpuWorkerState));
-	wstate->comm.sockfd = sockfd;
-
-	/* tracked as an active worker */
-	SpinLockAcquire(&gpuserv_workers_list_lock);
-	dlist_push_tail(&gpuserv_active_workers_list, &wstate->chain);
-	SpinLockRelease(&gpuserv_workers_list_lock);
-
-	/* launch a new worker thread */
-	if (pthread_create(&wstate->thread, NULL,
-					   gpuserv_worker_main, wstate) != 0)
-	{
-		CELOG("failed on pthread_create: %m");
-		SpinLockAcquire(&gpuserv_workers_list_lock);
-		dlist_delete(&wstate->chain);
-		SpinLockRelease(&gpuserv_workers_list_lock);
-		close(wstate->comm.sockfd);
-		free(wstate);
-	}
-}
-
-static void
-gpuserv_reclaim_worker(bool sync_actives)
-{
-	GpuWorkerState *wstate;
-	dlist_node	   *dnode;
-
-	if (sync_actives)
-	{
-		/*
-		 * NOTE: GpuWorkerState object shall be moved to the dead_list
-		 * at the tail of worker's main, so we don't need to move wstate
-		 * into the dead_list by ourself.
-		 */
-		SpinLockAcquire(&gpuserv_workers_list_lock);
-		while (!dlist_is_empty(&gpuserv_active_workers_list))
-		{
-			wstate = dlist_head_element(GpuWorkerState, chain,
-										&gpuserv_active_workers_list);
-			SpinLockRelease(&gpuserv_workers_list_lock);
-			if (pthread_join(&wstate->thread, NULL) != 0)
-				GELOG("failed on pthread_join: %m");
-			SpinLockAcquire(&gpuserv_workers_list_lock);
-		}
-		SpinLockRelease(&gpuserv_workers_list_lock);
-	}
-
-	SpinLockAcquire(&gpuserv_workers_list_lock);
-	while (!dlist_is_empty(&gpuserv_dead_workers_list))
-	{
-		dnode = dlist_pop_head_node(&gpuserv_dead_workers_list);
-		wstate = dlist_container(GpuWorkerState, chain, dnode);
-		SpinLockRelease(&gpuserv_workers_list_lock);
-
-		if (pthread_join(&wstate->thread, NULL) != 0)
-			GELOG("failed on pthread_join: %m");
-		SpinLockAcquire(&gpuserv_workers_list_lock);
-	}
-	SpinLockRelease(&gpuserv_workers_list_lock);
-}
-
-/*
- * gpuserv_init_cuda_context - construction of the master CUDA context;
- * that is never used to run GPU kernel, but used to pin shared DMA
- * buffer region, for reusing.
- */
-static void
-gpuserv_init_cuda_context(void)
-{
-	CUresult	rc;
-
-	rc = cuInit(0);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuInit: %s", errorText(rc));
-
-	rc = cuDeviceGet(&cuda_master_device, devAttrs[0].DEV_ID);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuDeviceGet: %s", errorText(rc));
-
-	rc = cuCtxCreate(&cuda_master_context, 0, cuda_master_device);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuCtxCreate: %s", errorText(rc));
-
-	/* construction of GpuContext_v2 */
-	for (i=0; i < numGpuCtx; i++)
-	{
-		GpuContext_v2  *gcontext = &gpuCtxHead->gpucxt[i];
-		DevAttributes  *devattrs = &devAttrs[i % numDevAttrs];
-
-		memset(gcontext, 0, sizeof(*gcontext));
-		gcontext->context_id = i;
-		SpinLockInit(&gcontext->lock);
-		gcontext->refcnt = 0;
-		gcontext->backend_id = InvalidBackendId;
-		gcontext->device_id = devattrs->DEV_ID;
-
-		rc = cuDeviceGet(&gcontext->cuda_device, gcontext->device_id);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuDeviceGet: %s", errorText(rc));
-
-		rc = cuCtxCreate(&gcontext->cuda_context, 0, gcontext->cuda_device);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuCtxCreate: %s", errorText(rc));
-	}
-}
-
-/*
- * gpuserv_open_server_socket - open a unix domain socket for accept(2)
+ * gpuserv_accept_connection - accept a client connection
  */
 static pgsocket
-gpuserv_open_server_socket(void)
-{
-	pgsocket	sockfd;
-
-	sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
-	if (sockfd < 0)
-		elog();
-
-	if (bind(sockfd, (struct sockaddr *)uaddr, sizeof(uaddr)) != 0)
-		elog();
-
-	if (listen(sockfd, 10) != 0)
-		elog();
-
-	return sockfd;
-}
-
-/*
- * gpuserv_accept_server_socket - accept a client connection
- */
-static pgsocket
-gpuserv_accept_server_socket(pgsocket serv_sock)
+gpuserv_accept_connection(void)
 {
 	struct pollfd	pollbuf;
 	pgsocket		sockfd;
+	GpuServCommand	cmd;
 	int				retval;
 
-	pollbuf.fd = serv_sock;
+	pollbuf.fd = gpu_server_sock;
 	pollbuf.events = POLLERR | POLLIN;
 	pollbuf.revents = 0;
-
-	retval = poll(&pollbuf, 1, 800);	/* wake up per 0.8sec */
+	retval = poll(&pollbuf, 1, 600);	/* wake up per 0.6sec */
 	if (retval < 0)
 	{
-		fprintf(stderr, "failed on poll(2): %m\n");
-		gpuserv_loop = false;
+		if (gpu_server_got_signal == 0)
+			gpu_server_got_signal = (errno == 0 ? -1 : errno);
 		return PGINVALID_SOCKET;
 	}
 	else if (retval == 0)
-		return PGINVALID_SOCKET;
+		return PGINVALID_SOCKET;		/* no connection request arrived */
 
-	sockfd = accept(serv_sock, NULL, NULL);
+	sockfd = accept(gpu_server_sock, NULL, NULL);
 	if (sockfd < 0)
 	{
-		fprintf(stderr, "failed on accept(2): %m\n");
-		return PGINVALID_SOCKET;
+		if (errno == EAGAIN)
+			return PGINVALID_SOCKET;
+		elog(ERROR, "failed on accept(2): %m");
 	}
+	// TODO: needs to register the sockfd to close on ERROR
+
+	/*
+	 * Each backend shall send OPEN command at first
+	 */
+	if (gpuserv_recv_command(sockfd, &cmd, 1000) != 0 ||
+		cmd.command != GPUSERV_CMD_OPEN)
+		elog(ERROR, "could not receive OPEN command from the backend");
+
+	if (cmd->context_id >= numGpuContexts)
+		elog(ERROR, "supplied context_id is out of range");
+	gcontext = &gpuContextHead->gpu_contexts[cmd->context_id];
+	SpinLockAcquire(&gcontext->lock);
+	if (gcontext->refcnt == 0 ||		/* nobody own the GpuContext */
+		gcontext->backend == NULL ||	/* no backend assigned yet */
+		gcontext->server != NULL ||		/* server already assigned */
+		gcontext->backend->backendId != cmd->open.backend_id)
+	{
+		SpinLockRelease(&gcontext->lock);
+		elog(ERROR, "supplied context_id is incorrect");
+	}
+	gcontext->refcnt++;
+	gcontext->server = MyProc;
+	SpinLockRelease(&gcontext->lock);
+
+	// TODO: attach GpuContext
+
+
+
 	return sockfd;
 }
 
 /*
- * gpuserv_close_server_socket
+ * gpuserv_init_connection - ensure both backend/server are connected to
+ * a particular GpuContext
+ */
+static bool
+gpuserv_init_connection(....)
+{
+	// get a open connection message
+
+
+	// set latch of the backend
+
+
+}
+
+/*
+ * gpuserv_init_cuda_context
  */
 static void
-gpuserv_close_server_socket(pgsocket serv_sock)
+gpuserv_init_cuda_context(cl_uint server_id)
 {
-	if (close(serv_sock) != 0)
-		fprintf(stderr, "failed on close to CUDA server socket: %m\n");
+	static bool	cuda_runtime_initialized = false;
+	cl_int		device_id;
+	CUresult	rc;
 
-	if (unlink(uaddr.sun_path) != 0)
-		fprintf(stderr, "failed on unlink(\"%s\"): %m\n", uaddr.sun_path);
+	if (!cuda_runtime_initialized)
+	{
+		rc = cuInit(0);
+		if (rc != CUDA_SUCCESS)
+			elog(FATAL, "failed on cuInit: %s", errorText(rc));
+
+		device_id = devAttrs[server_id % numDevAttrs].DEV_ID;
+		rc = cuDeviceGet(&cuda_device, device_id);
+		if (rc != CUDA_SUCCESS)
+			elog(FATAL, "failed on cuDeviceGet: %s", errorText(rc));
+
+		cuda_runtime_initialized = true;
+	}
+	rc = cuCtxCreate(&cuda_context, 0, cuda_context);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuCtxCreate: %s", errorText(rc));
 }
 
 /*
@@ -597,46 +328,59 @@ gpuserv_got_sigterm(SIGNAL_ARGS)
  * pgstrom_cuda_serv_main - entrypoint of the CUDA server process
  */
 static void
-pgstrom_cuda_serv_main(Datum main_arg)
+pgstrom_gpu_server_main(Datum server_id)
 {
+	pgsocket	pgsocket;
+
 	pqsignal(SIGTERM, gpuserv_got_sigterm);
 	BackgroundWorkerUnblockSignals();
 
-	gpuserv_init_cuda_context();
-	serv_sock = gpuserv_open_server_socket();
+	gpuserv_init_cuda_context(DatumGetUint32(server_id));
 
-	SpinLockInit(&gpuserv_workers_list_lock);
-	dlist_init(&gpuserv_active_workers_list);
-	dlist_init(&gpuserv_dead_workers_list);
-
-	gpuserv_loop = true;
-	while (gpuserv_loop)
+	PG_TRY();
 	{
-		pgsocket		sockfd;
-		dlist_node	   *dnode;
-		GpuWorkerState *wstate;
+		while (gpu_server_got_signal == 0)
+		{
+			sockfd = gpuserv_accept_connection();
+			if (sockfd == PGINVALID_SOCKET)
+				continue;
 
-		sockfd = gpuserv_accept_server_socket(serv_sock);
-		if (sockfd != PGINVALID_SOCKET)
-			gpuserv_launch_worker(sockfd);
-		gpuserv_reclaim_worker(false);
+			// initial link up
+			if (!...)
+			{
+				close(sockfd);
+				continue;
+			}
+
+
+
+
+
+
+		}
 	}
-	gpuserv_close_server_socket(serv_sock);
-	gpuserv_reclaim_worker(true);
+	PG_CATCH();
+	{
+		// delete any cuda context
+		// put gpu context
+		// -> may release portable shared memory
+		// -> unpin the segment & shmem buffer
 
-	/*
-	 * No need to release individual CUDA resources because these will be
-	 * released on process exit time.
-	 */
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	// put gpu context
+
 
 
 }
 
 /*
- * pgstrom_startup_cuda_serv
+ * pgstrom_startup_gpu_server
  */
 static void
-pgstrom_startup_cuda_serv(void)
+pgstrom_startup_gpu_server(void)
 {
 	Size	length;
 	int		i;
@@ -644,24 +388,32 @@ pgstrom_startup_cuda_serv(void)
 	if (shmem_startup_hook_next)
 		(*shmem_startup_hook_next)();
 
-	length = MAXALIGN(offsetof(DevContextHead, devcontext[numDevContexts]));
-	devCtxHead = ShmemInitStruct("DevContextHead", length, &found);
+	/* gpuServState */
+	gpuServState = ShmemInitStruct("gpuServState",
+								   sizeof(GpuServerState),
+								   &found);
 	Assert(!found);
+	memset(gpuServState, 0, sizeof(GpuServerState));
 
-	/* init device context */
-	memset(devCtxHead, 0, length);
-	SpinLockInit(&devCxtHead->lock);
-	devCxtHead->num_free_context = numDevContexts;
+	/* gpuContextHead */
+	length = offsetof(GpuContextHead, gpu_context[numGpuContexts]);
+	gpuContextHead = ShmemInitStruct("gpuContextHead", length, &found);
+	Assert(!found);
+	memset(gpuContextHead, 0, length);
 
-	for (i=0; i < numDevContexts; i++)
+	SpinLockInit(&gpuContextHead->lock);
+	dlist_init(&gpuContextHead->active_gpu_context_list);
+	dlist_init(&gpuContextHead->free_gpu_context_list);
+
+	for (i=0; i < numGpuContexts; i++)
 	{
-		DevContext		devcxt = &devCtxHead->devcxt[i];
-		DevAttributes	dattrs = &devAttrs[i % numDevAttrs];
+		GpuContext_v2  *gcontext = &gpuContextHead->gpu_context[i];
 
-		devcxt->dev_id = dattrs->DEV_ID; 
-		devcxt->refcnt = 0;
-		devcxt->backend_id = InvalidBackendId;
-		devcxt->errcode = 0;
+		gcontext->refcnt = 0;
+		gcontext->backend = NULL;
+		gcontext->server = NULL;
+		dlist_push_tail(&gpuContextHead->free_gpu_context_list,
+						&gcontext->chain);
 	}
 }
 
@@ -675,11 +427,43 @@ pgstrom_init_gpu_server(void)
 	BackgroundWorker worker;
 	CUresult		rc;
 	long			suffix;
-	int				count;
+	uint32			TotalProcs;	/* see InitProcGlobal() */
 
 	/*
-	 * Setup path of the UNIX domain socket
+	 * Maximum number of GPU servers we can use concurrently.
+	 * (it is equivalent to the number of CUDA contexts)
 	 */
+	DefineCustomIntVariable("pg_strom.num_gpu_servers",
+							"number of GPU/CUDA intermediation servers",
+							NULL,
+							&numGpuServers,
+							2,
+							INT_MAX,
+							PGC_POSTMASTER,
+							GUC_NOT_IN_SAMPLE,
+							NULL, NULL, NULL);
+
+	/*
+	 * Maximum number of GPU context.
+	 */
+	TotalProcs = MaxBackends + NUM_AUXILIARY_PROCS + max_prepared_xacts;
+	DefineCustomIntVariable("pg_strom.num_gpu_contexts",
+							"maximum number of GpuContext",
+							NULL,
+							&numGpuContexts,
+							2 * TotalProcs,
+							MaxBackends,
+							INT_MAX,
+							PGC_POSTMASTER,
+							GUC_NOT_IN_SAMPLE,
+							NULL, NULL, NULL);
+	/*
+	 * Setup a UNIX domain socket for listen/accept
+	 */
+	gpu_server_sock = socket(AF_UNIX, SOCK_STREAM, 0);
+	if (gpu_server_sock < 0)
+		elog(ERROR, "failed to open a UNIX domain socket: %m");
+
 	suffix = (long) getpid();
 	for (;;)
 	{
@@ -687,79 +471,53 @@ pgstrom_init_gpu_server(void)
 		snprintf(gpuserv_addr.sun_path,
 				 sizeof(gpuserv_addr.sun_path),
 				 "base/pgsql_tmp/.pg_strom.sock.%u", suffix);
-		if (stat(gpuserv_addr.sun_path, &stbuf) == 0)
+		if (bind(gpu_server_sock,
+				 (struct sockaddr *) &gpuserv_addr,
+				 sizeof(gpuserv_addr)) == 0)
+			break;
+		else if (errno == EADDRINUSE)
+		{
+			elog(LOG, "UNIX domain socket \"%s\" is already in use: %m",
+				 gpuserv_addr.sun_path);
 			suffix ^= PostmasterRandom();
-		else if (errno == ENOENT)
-			break;	/* OK, We can create a UNIX domain socket */
+		}
 		else
-			elog(ERROR, "failed on stat(2) for \"%s\"", gpuserv_addr.sun_path);
+			elog(ERROR, "failed on bind(2): %m");
 	}
 
+	if (listen(gpu_server_sock, numGpuServers) != 0)
+		elog(ERROR, "failed on listen(2): %m");
+
+	/* 0.6sec timeout; also interval to check signals */
+	timeout.tv_sec = 0;
+	timeout.tv_usec = 600000;
+	if (setsockopt(gpu_server_sock, SOL_SOCKET, SO_RCVTIMEO,
+				   &timeout, sizeof(timeout)) != 0)
+		elog(ERROR, "failed on setsockopt(2): %m");
+
 	/*
-	 * Maximum number of CUDA context we can use concurrently.
+	 * Launch background worker processes for GPU/CUDA servers
 	 */
-	DefineCustomIntVariable("pg_strom.num_gpu_contexts",
-							"Number of GPU device context",
-							NULL,
-							&numDevContexts,
-							4 * numDevAttrs,
-							2,
-							INT_MAX,
-							PGC_POSTMASTER,
-							GUC_NOT_IN_SAMPLE,
-							NULL, NULL, NULL);
+	for (i=0; i < numGpuServers; i++)
+	{
+		BackgroundWorker	worker;
 
-	/* Launch a background worker process (CUDA Server) */
-	memset(&worker, 0, sizeof(BackgroundWorker));
-	strcpy(worker.bgw_name, "PG-Strom CUDA Server");
-	worker.bgw_flags = BGWORKER_SHMEM_ACCESS;
-	worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
-	worker.bgw_restart_time = 5;
-	worker.bgw_main = pgstrom_cuda_serv_main;
-	worker.bgw_main_arg = 0;
-
+		memset(&worker, 0, sizeof(BackgroundWorker));
+		snprintf(worker.bgw_name, sizeof(worker.bgw_name),
+				 "PG-Strom GPU/CUDA Server [%d]", i);
+		worker.bgw_flags = BGWORKER_SHMEM_ACCESS;
+		worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
+		worker.bgw_restart_time = 5;
+		worker.bgw_main = pgstrom_cuda_serv_main;
+		worker.bgw_main_arg = i;
+	}
 	RegisterBackgroundWorker(&worker);
 
-	/* acquire shared memory */
-	RequestAddinShmemSpace(MAXALIGN(offsetof(DevContextHead,
-											 devcontext[numDevContexts])));
-	shmem_startup_hook_next = shmem_startup_hook;
-	shmem_startup_hook = pgstrom_startup_cuda_serv;
-}
-
-/*
- * gpuserv_elog - a utility routine to dump log message from the multi-
- * threading environment
- */
-void
-gpuserv_elog(int elevel,
-			 const char *filename,
-			 int lineno,
-			 const char *funcname,
-			 const char *fmt,...)
-{
-	va_list		ap;
-	size_t		ofs = 0;
-	char		buf[2048];	/* usually enough size */
-
-	/* setting up a log message */
-	if (Log_error_verbosity == PGERROR_VERBOSE)
-		ofs += snprintf(buf+ofs, sizeof(buf)-ofs,
-						"LOG: (%s:%d, %s) ", filename, lineno, funcname);
-	else
-		ofs += snprintf(buf+ofs, sizeof(buf)-ofs,
-						"LOG: (%s:%d) ", filename, lineno);
-	va_start(ap, fmt);
-	ofs += vsnprintf(buf+ofs, sizeof(buf)-ofs, fmt, ap);
-	va_end(ap);
-	ofs += snprintf(buf+ofs, sizeof(buf)-ofs, "\n");
-
-	fprintf(stderr, "PG-Strom: %s\n", buf);
-
 	/*
-	 * TODO: write back error message to the backend
+	 * Acquire the shared memory segment
 	 */
-
-
-
+	RequestAddinShmemSpace(MAXALIGN(sizeof(GpuServerState)));
+	RequestAddinShmemSpace(MAXALIGN(sizeof(GpuContext) * numGpuContexts));
+	shmem_startup_hook_next = shmem_startup_hook;
+	shmem_startup_hook = pgstrom_startup_gpu_server;
 }
