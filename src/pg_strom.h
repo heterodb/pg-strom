@@ -101,17 +101,17 @@
 #define GPUCONTEXT_ATTACHED_STATUS		3
 #define GPUCONTEXT_ERROR_STATUS			4
 
-typedef struct GpuContext_v2
+typedef struct SharedGpuContext
 {
 	dlist_node	chain;
+	cl_uint		context_id;		/* a unique ID of the GpuContext */
 
 	slock_t		lock;			/* lock of the field below */
-	cl_uint		refcnt;			/* reference counter */
-	PGPROC	   *backend;		/* PGPROC of Backend Process */
+	cl_uint		refcnt;			/* refcount by backend/gpu-server */
 	PGPROC	   *server;			/* PGPROC of GPU/CUDA Server */
+	PGPROC	   *backend;		/* PGPROC of Backend Process */
 
 	// tracker of the portable shared memory blocks
-
 
 	/*
 	 * Error status on the GPU/CUDA server
@@ -121,9 +121,18 @@ typedef struct GpuContext_v2
 	cl_int		error_lineno;
 	const char *error_funcname;
 	cl_char		error_message[512];
-} GpuContext_v2;
+} SharedGpuContext;
 
 #define INVALID_GPU_CONTEXT_ID		(-1)
+
+typedef struct GpuContext_v2
+{
+	dlist_node		chain;
+	cl_int			refcnt;		/* refcount by local GpuTaskState */
+	pgsocket		sockfd;
+	ResourceOwner	resowner;
+	SharedGpuContext *shgcon;
+} GpuContext_v2;
 
 
 
@@ -330,36 +339,29 @@ typedef struct pgstrom_data_store
  */
 
 /*
+ * gpu_context.c
+ */
+extern GpuContext_v2 *GetGpuContext(void);
+extern SharedGpuContext *AttachGpuContext(cl_int context_id,
+										  BackendId backend_id);
+extern void PutGpuContext(GpuContext_v2 *gcontext);
+extern void PutSharedGpuContext(SharedGpuContext *shgcon);
+
+
+
+/*
  * gpu_server.c
  */
-#define GPUSERV_CMD_OPEN		'O'	/* backend->serv: arg=(pgprocno) */
-#define GPUSERV_CMD_CONTEXT		'G'	/* serv->backend: arg=(context_id) */
-#define GPUSERV_CMD_CONFIRM		'C'	/* backend->serv: arg=(status) */
-#define GPUSERV_CMD_GPUTASK		'T'	/* backend->serv: arg=GpuTask */
-#define GPUSERV_CMD_RESPOND		'R'	/* serv->backend: arg=GpuTask */
+extern bool IsGpuServerProcess(void);
 
-typedef struct GpuServComm
-{
-	pgsocket	sockfd;
-	int			bufpos;
-	int			bufend;
-	char		recvbuf[240];
-} GpuServComm;
 
-extern bool is_gpuserver_process(void);
-extern bool gpuserv_send_command(GpuServComm *comm, int cmd, Datum arg);
-extern bool gpuserv_recv_command(GpuServComm *comm, int *p_cmd, Datum *p_arg);
-extern GpuContext_v2 *gpuserv_get_gpucontext(cl_int context_id);
-extern void gpuserv_put_gpucontext(GpuContext_v2 *gcontext);
 extern void pgstrom_init_gpu_server(void);
 
-extern void gpuserv_elog(int elevel,
-						 const char *filename,
-						 int lineno,
-						 const char *funcname,
-						 const char *fmt, ...);
-#define GELOG(evelel,...)								\
-	gpuserv_elog((elevel),__FILE__,__LINE__,PG_FUNCNAME_MACRO,__VA_ARGS__)
+
+
+
+
+
 
 /*
  * cuda_mmgr.c
