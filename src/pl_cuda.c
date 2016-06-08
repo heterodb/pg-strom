@@ -524,8 +524,8 @@ ident_to_cstring(List *ident)
  *
  * (additional options)
  * #plcuda_include "cuda_xxx.h"
- * #plcuda_results_size {<value>|<function>}     (default: 0)
- * #plcuda_buffer_size {<value>|<function>}      (default: 0)
+ * #plcuda_results_bufsz {<value>|<function>}     (default: 0)
+ * #plcuda_working_bufsz {<value>|<function>}      (default: 0)
  * #plcuda_sanity_check {<function>}             (default: no fallback)
  * #plcuda_cpu_fallback {<function>}             (default: no fallback)
  */

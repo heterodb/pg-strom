@@ -431,7 +431,6 @@ These variables are kept in private area of each threads, thus, update of these 
 </p>
 </dd>
 
-<dl>
 <dt><code>#plcuda_end</code></dt>
 <dd>
 <span lang="en">
@@ -444,7 +443,6 @@ By the way, if a directive to start code block was put inside of the different c
 </span>
 </dd>
 
-<dl>
 <dt><code>#plcuda_decl</code></dt>
 <dd>
 <span lang="en">
@@ -463,7 +461,6 @@ Unlike other code blocks, the contents of this code block shall not be applied a
 </span>
 </dd>
 
-<dl>
 <dt><code>#plcuda_prep</code></dt>
 <dd>
 <span lang="en">
@@ -488,7 +485,6 @@ PL/CUDA関数の引数へは、本体カーネル関数と同様にアクセス�
 </span>
 </dd>
 
-<dl>
 <dt><code>#plcuda_post</code></dt>
 <dd>
 <span lang="en">
@@ -513,7 +509,6 @@ PL/CUDA関数の引数へは、本体カーネル関数と同様にアクセス�
 </span>
 </dd>
 
-<dl>
 <dt><code>#plcuda_num_threads (&lt;value&gt;|&lt;function&gt;)</code></dt>
 <dd>
 <span lang="en">
@@ -545,7 +540,6 @@ This SQL function takes identical arguments with PL/CUDA function, and returns <
 </p>
 </dd>
 
-<dl>
 <dt><code>#plcuda_shmem_unitsz (&lt;value&gt;|&lt;function&gt;)</code></dt>
 <dd>
 <p>
@@ -585,7 +579,6 @@ GPUカーネル関数の実行時に実際に確保される共有メモリの�
 </p>
 </dd>
 
-<dl>
 <dt><code>#plcuda_kernel_maxthreads</code></dt>
 <dd>
 <p>
@@ -616,7 +609,6 @@ Increase the number of threads per streaming-multiprocessor allows more threads 
 </p>
 </dd>
 
-<dl>
 <dt><code>#plcuda_include "library name"</code></dt>
 <dd>
 <span lang="en">
@@ -664,8 +656,8 @@ It is a collection of GPU runtime functions to process the date and time data ty
 SQLの日付時刻型を処理するためのGPUランタイム関数群です。
 </span>
 </p>
-
 </li>
+
 <li>
 <code>"cuda_textlib.h"</code>
 <p>
@@ -677,6 +669,7 @@ SQLのテキストデータ型、および<code>LIKE</code>オペレータを処
 </span>
 </p>
 </li>
+
 <li>
 <code>"cuda_numeric.h"</code>
 <p>
@@ -688,6 +681,7 @@ SQLのNumericデータ型を処理するためのGPUランタイム関数群で�
 </span>
 </p>
 </li>
+
 <li>
 <code>"cuda_mathlib.h"</code>
 <p>
@@ -699,6 +693,7 @@ SQLの数学関数や四則演算オペレータを処理するためのGPUラ�
 </span>
 </p>
 </li>
+
 <li>
 <code>"cuda_money.h"</code>
 <p>
@@ -713,8 +708,7 @@ SQLの通貨型を処理するためのGPUランタイム関数群です。
 </dl>
 </dd>
 
-<dl>
-<dt><code>#plcuda_results_size (&lt;value&gt;|&lt;function&gt;)</code></dt>
+<dt><code>#plcuda_results_bufsz (&lt;value&gt;|&lt;function&gt;)</code></dt>
 <dd>
 <p>
 <span lang="en">
@@ -755,7 +749,6 @@ GPUカーネル関数からは、結果バッファは引数<code>void *results<
 </p>
 </dd>
 
-<dl>
 <dt><code>#plcuda_working_bufsz (&lt;value&gt;|&lt;function&gt;)</code></dt>
 <dd>
 <p>
@@ -797,8 +790,35 @@ GPUカーネル関数からは、作業バッファは引数<code>void *workbuf<
 </p>
 </dd>
 
-<dl>
-<dt><code>#plcuda_cpu_fallback &lt;function%gt;</code></dt>
+<dt><code>#plcuda_sanity_checl &lt;function&gt;</code></dt>
+<dd>
+<p>
+<span lang="en">
+It allows to specify the sanity check function that preliminary checks adequacy of the supplied arguments, prior to GPU kernel launch.
+No sanity check function is configured on the default.
+</span>
+<span lang="ja">
+GPUカーネルの起動に先立って、引数の妥当性を検証するためのSQL関数をしています。
+デフォルトでは妥当性検証関数は設定されていません。
+</span>
+<span lang="en">
+Usually, launch of GPU kernel function is heavier task than call of another function on CPU.
+If supplied arguments have unacceptable values from the specification of the PL/CUDA function, a few thousands or millions (or more in some cases) of GPU kernel threads shall be launched just to check the arguments and return an error status. If sanity check can be applied prior to the launch of GPU kernel function with enough small cost, it is a valuable idea to raise an error using sanity check function prior to the GPU kernel function.
+</span>
+<span lang="ja">
+通常、GPUカーネル関数の起動はCPU上で別の関数を起動するよりも重い処理です。
+もし引数がPL/CUDA関数の仕様からは許容できない値を持っている場合、GPUカーネル関数を実行する数千～数百万（場合によってはそれ以上の）のGPUスレッドは、ただ引数の妥当性をチェックしてエラー状態を返却するためだけに起動されます。GPUカーネル関数を実行する前に、引数の妥当性チェックを十分小さなコストで行えるならば、妥当性検証関数を使用してGPUカーネル関数の実行前にエラーを発生させることを考慮すべきです。
+</span>
+<span lang="en">
+The sanity check function takes identical arguments with PL/CUDA function, and returns <code>bool</code> data type.
+</span>
+<span lang="ja">
+妥当性検証関数は、PL/CUDA関数と同じ型の引数を持ち、<code>bool</code>返す関数です。
+</span>
+</p>
+</dd>
+
+<dt><code>#plcuda_cpu_fallback &lt;function&gt;</code></dt>
 <dd>
 <p>
 <span lang="en">

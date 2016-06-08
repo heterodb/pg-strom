@@ -19,17 +19,16 @@ input[id="lang-en"]:checked ~ * *:lang(ja) {
     left:0;
     height:100%;
     margin:0;
-    padding:0 0 100px 0;
+    padding:0 0 200px 0;
     position:fixed !important;
     _position:absolute;
-    top:90px;
-    width:180px;
+    width:200px;
     overflow:auto;
 }
 #manual_body {
-    margin:0 0 0 180px;
-    padding-left: 2em;
-    padding-right: 2em;
+    margin:0 0 0 200px;
+    padding-left: 1em;
+    padding-right: 1em;
     height:100%;
     overflow:auto;
 }
