@@ -27,7 +27,15 @@
 
 typedef struct
 {
-	/* XXX - NOTE: varlena header is extracted by VARDATA_ANY */
+	/*
+	 * NOTE: We assume 4bytes varlena header for array type. It allows
+	 * aligned references to the array elements. Unlike CPU side, we
+	 * cannot have extra malloc to ensure 4bytes varlena header. It is
+	 * the reason why our ScalarArrayOp implementation does not support
+	 * array data type referenced by Var node; which is potentially has
+	 * short format.
+	 */
+	cl_uint		vl_len_;		/* don't touch this field */
 	cl_int		ndim;			/* # of dimensions */
 	cl_int		dataoffset;		/* offset to data, or 0 if no bitmap */
 	cl_uint		elemtype;		/* element type OID */
@@ -164,9 +172,9 @@ pg_matrix_sanitychecks(kern_context *kcxt, pg_matrix_t arg)
 STATIC_INLINE(void)
 pg_matrix_init_fields(MatrixType *matrix, cl_uint height, cl_uint width)
 {
-	size_t	len = sizeof(cl_float) * (size_t)height * (size_t)width;
+	size_t	nitems = (size_t)height * (size_t)width;
 
-	SET_VARSIZE(matrix, VARHDRSZ + len);
+	SET_VARSIZE(matrix, offsetof(MatrixType, values[nitems]));
 	matrix->ndim = 2;
 	matrix->dataoffset = 0;
 	matrix->elemtype = PG_FLOAT4OID;

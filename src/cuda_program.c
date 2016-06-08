@@ -29,6 +29,7 @@
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
+#include "utils/memutils.h"
 #include "utils/pg_crc.h"
 #include <nvrtc.h>
 #include <sys/stat.h>
@@ -47,6 +48,8 @@ typedef struct
 	pg_crc32		crc;	/* hash value by extra_flags + kern_source */
 	struct timeval	tv_build_end;	/* timestamp when build end */
 	Bitmapset	   *waiting_backends;
+	Oid				database_oid;
+	Oid				user_oid;
 	int				extra_flags;
 	char		   *kern_define;
 	char		   *kern_source;
@@ -772,6 +775,8 @@ __build_cuda_program(program_cache_entry *old_entry)
 	usage = 0;
 	new_entry->crc = old_entry->crc;
 	new_entry->waiting_backends = NULL;		/* no need to set latch */
+	new_entry->database_oid = old_entry->database_oid;
+	new_entry->user_oid = old_entry->user_oid;
 	new_entry->extra_flags = old_entry->extra_flags;
 
 	new_entry->kern_source = new_entry->data + usage;
@@ -846,9 +851,8 @@ __build_cuda_program(program_cache_entry *old_entry)
 }
 
 static void
-pgstrom_build_cuda_program(Datum cuda_program)
+pgstrom_build_cuda_program(program_cache_entry *entry)
 {
-	program_cache_entry *entry = (program_cache_entry *) cuda_program;
 	MemoryContext	memcxt = CurrentMemoryContext;
 	MemoryContext	oldcxt;
 
@@ -882,6 +886,32 @@ pgstrom_build_cuda_program(Datum cuda_program)
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
+}
+
+static void
+pgstrom_build_cuda_program_bgw_main(Datum cuda_program)
+{
+	program_cache_entry *entry = (program_cache_entry *) cuda_program;
+
+	/*
+	 * TODO: It is more preferable to use ParallelContext on v2.0
+	 */
+	BackgroundWorkerUnblockSignals();
+	/* Set up a memory context and resource owner. */
+	Assert(CurrentResourceOwner == NULL);
+	CurrentResourceOwner = ResourceOwnerCreate(NULL, "CUDA Async Builder");
+	CurrentMemoryContext = AllocSetContextCreate(TopMemoryContext,
+												 "CUDA Async Builder",
+												 ALLOCSET_DEFAULT_MINSIZE,
+												 ALLOCSET_DEFAULT_INITSIZE,
+												 ALLOCSET_DEFAULT_MAXSIZE);
+	/* Restore the database connection. */
+    BackgroundWorkerInitializeConnectionByOid(entry->database_oid,
+											  entry->user_oid);
+	/* Start dummy transaction */
+	StartTransactionCommand();
+	pgstrom_build_cuda_program(entry);
+	CommitTransactionCommand();
 }
 
 static CUmodule *
@@ -1033,6 +1063,9 @@ retry:
 	entry->waiting_backends->nwords = nwords;
 	memset(entry->waiting_backends->words, 0, sizeof(bitmapword) * nwords);
 	usage += MAXALIGN(offsetof(Bitmapset, words[nwords]));
+	/* session info who tries to build the program */
+	entry->database_oid = MyDatabaseId;
+	entry->user_oid = GetUserId();
 	/* device kernel source */
 	entry->extra_flags = extra_flags;
 	entry->kern_source = (char *)(entry->data + usage);
@@ -1061,10 +1094,11 @@ retry:
 	{
 		snprintf(worker.bgw_name, sizeof(worker.bgw_name),
 				 "nvcc launcher - crc %08x", crc);
-		worker.bgw_flags = BGWORKER_SHMEM_ACCESS;
+		worker.bgw_flags = (BGWORKER_SHMEM_ACCESS |
+							BGWORKER_BACKEND_DATABASE_CONNECTION);
 		worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
 		worker.bgw_restart_time = BGW_NEVER_RESTART;
-		worker.bgw_main = pgstrom_build_cuda_program;
+		worker.bgw_main = pgstrom_build_cuda_program_bgw_main;
 		worker.bgw_main_arg = PointerGetDatum(entry);
 
 		if (RegisterDynamicBackgroundWorker(&worker, NULL) || is_preload)
@@ -1076,7 +1110,7 @@ retry:
 	}
 	SpinLockRelease(&pgcache_head->lock);
 	/* build the device kernel synchronously */
-	pgstrom_build_cuda_program(PointerGetDatum(entry));
+	pgstrom_build_cuda_program(entry);
 	goto retry;
 }
 

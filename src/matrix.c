@@ -17,6 +17,7 @@
  */
 #include "postgres.h"
 #include "catalog/pg_type.h"
+#include "funcapi.h"
 #include "utils/array.h"
 #include "utils/arrayaccess.h"
 #include "utils/builtins.h"
@@ -557,6 +558,58 @@ make_matrix_final(PG_FUNCTION_ARGS)
 	PG_RETURN_POINTER(matrix);
 }
 PG_FUNCTION_INFO_V1(make_matrix_final);
+
+/*
+ * Unnest Matrix into multiple rows
+ */
+Datum
+matrix_unnest(PG_FUNCTION_ARGS)
+{
+	FuncCallContext	   *fncxt;
+	MatrixType		   *matrix = PG_GETARG_MATRIXTYPE_P(0);
+	TupleTableSlot	   *slot;
+	HeapTuple			tuple;
+	cl_int				i;
+	cl_float		   *source;
+
+	if (SRF_IS_FIRSTCALL())
+	{
+		TupleDesc		tupdesc;
+		MemoryContext	oldcxt;
+
+		fncxt = SRF_FIRSTCALL_INIT();
+		oldcxt = MemoryContextSwitchTo(fncxt->multi_call_memory_ctx);
+
+		tupdesc = CreateTemplateTupleDesc(matrix->width, false);
+		for (i=0; i < matrix->width; i++)
+		{
+			TupleDescInitEntry(tupdesc,
+							   (AttrNumber) i+1,
+							   psprintf("c%u", i+1),
+							   FLOAT4OID, -1, 0);
+		}
+		fncxt->tuple_desc = BlessTupleDesc(tupdesc);
+		fncxt->user_fctx = MakeSingleTupleTableSlot(fncxt->tuple_desc);
+
+		MemoryContextSwitchTo(oldcxt);
+	}
+	fncxt = SRF_PERCALL_SETUP();
+
+	if (fncxt->call_cntr >= matrix->height)
+		SRF_RETURN_DONE(fncxt);
+
+	source = matrix->values + fncxt->call_cntr;
+	slot = (TupleTableSlot *) fncxt->user_fctx;
+	ExecClearTuple(slot);
+	ExecStoreVirtualTuple(slot);
+	memset(slot->tts_isnull, 0, sizeof(bool) * matrix->width);
+	for (i=0; i < matrix->width; i++, source += matrix->height)
+		slot->tts_values[i] = Float4GetDatum(*source);
+
+	tuple = ExecMaterializeSlot(slot);
+	SRF_RETURN_NEXT(fncxt, HeapTupleGetDatum(tuple));
+}
+PG_FUNCTION_INFO_V1(matrix_unnest);
 
 /*
  * Get properties of matrix
