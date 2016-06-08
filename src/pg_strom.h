@@ -639,6 +639,7 @@ extern Datum matrix_to_float8array(PG_FUNCTION_ARGS);
 extern Datum matrix_to_numericarray(PG_FUNCTION_ARGS);
 extern Datum make_matrix_accum(PG_FUNCTION_ARGS);
 extern Datum make_matrix_final(PG_FUNCTION_ARGS);
+extern Datum matrix_unnest(PG_FUNCTION_ARGS);
 extern Datum matrix_height(PG_FUNCTION_ARGS);
 extern Datum matrix_width(PG_FUNCTION_ARGS);
 extern Datum matrix_rawsize(PG_FUNCTION_ARGS);

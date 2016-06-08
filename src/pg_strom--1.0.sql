@@ -723,6 +723,11 @@ CREATE AGGREGATE pg_catalog.make_matrix(variadic numeric[])
   finalfunc = pgstrom.make_matrix_final
 );
 
+CREATE FUNCTION pg_catalog.unnest(matrix)
+  RETURNS SETOF record
+  AS 'MODULE_PATHNAME','matrix_unnest'
+  LANGUAGE C STRICT;
+
 CREATE FUNCTION pg_catalog.matrix_height(matrix)
   RETURNS int
   AS 'MODULE_PATHNAME','matrix_height'
