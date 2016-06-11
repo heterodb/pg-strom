@@ -137,52 +137,47 @@ typedef struct
 	cl_int		height;		/* width of the matrix; =dim2 */
 	cl_int		lbound1;	/* always 1 for matrix */
 	cl_int		lbound2;	/* always 1 for matrix */
-	cl_float	values[FLEXIBLE_ARRAY_MEMBER];
+	cl_char		values[FLEXIBLE_ARRAY_MEMBER];
 } MatrixType;
+
+#define INIT_ARRAY_MATRIX(matrix,_elemtype,_height,_width)	\
+	do {													\
+		(matrix)->ndim = 2;									\
+		(matrix)->dataoffset = 0;							\
+		(matrix)->elemtype = (_elemtype);					\
+		(matrix)->height = (_height);						\
+		(matrix)->width = (_width);							\
+		(matrix)->lbound1 = 1;								\
+		(matrix)->lbound2 = 1;								\
+	} while(0)
 
 #ifdef __CUDACC__
 
-STATIC_INLINE(cl_bool)
-pg_matrix_sanitychecks(kern_context *kcxt, pg_matrix_t arg)
-{
-	if (!arg.isnull)
-	{
-		MatrixType *matrix = (MatrixType *) arg.value;
+#define VALIDATE_ARRAY_MATRIX(matrix)			\
+	(VARATT_IS_4B(matrix) &&					\
+	 (matrix)->ndim == 2 &&						\
+	 (matrix)->dataoffset == 0 &&				\
+	 ((matrix)->elemtype == PG_INT2OID ||		\
+	  (matrix)->elemtype == PG_INT4OID ||		\
+	  (matrix)->elemtype == PG_INT8OID ||		\
+	  (matrix)->elemtype == PG_FLOAT4OID ||		\
+	  (matrix)->elemtype == PG_FLOAT8OID) &&	\
+	 (matrix)->lbound1 == 1 &&					\
+	 (matrix)->lbound2 == 1)
 
-		/* 1B varlena header is not supported */
-		if (VARATT_IS_1B(matrix))
-		{
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-			return false;
-		}
+#else	/* __CUDACC__ */
 
-		if (matrix->ndim != 2 ||
-			matrix->dataoffset != 0 ||
-			matrix->elemtype != PG_FLOAT4OID ||
-			matrix->lbound1 != 1 ||
-			matrix->lbound2 != 1)
-		{
-			STROM_SET_ERROR(&kcxt->e, StromError_InvalidValue);
-			return false;
-		}
-	}
-	return true;
-}
+#define VALIDATE_ARRAY_MATRIX(matrix)			\
+	(VARATT_IS_4B(matrix) &&					\
+	 (matrix)->ndim == 2 &&						\
+	 (matrix)->dataoffset == 0 &&				\
+	 ((matrix)->elemtype == INT2OID ||			\
+	  (matrix)->elemtype == INT4OID ||			\
+	  (matrix)->elemtype == INT8OID ||			\
+	  (matrix)->elemtype == FLOAT4OID ||		\
+	  (matrix)->elemtype == FLOAT8OID) &&		\
+	 (matrix)->lbound1 == 1 &&					\
+	 (matrix)->lbound2 == 1)
 
-STATIC_INLINE(void)
-pg_matrix_init_fields(MatrixType *matrix, cl_uint height, cl_uint width)
-{
-	size_t	nitems = (size_t)height * (size_t)width;
-
-	SET_VARSIZE(matrix, offsetof(MatrixType, values[nitems]));
-	matrix->ndim = 2;
-	matrix->dataoffset = 0;
-	matrix->elemtype = PG_FLOAT4OID;
-	matrix->height = height;
-	matrix->width = width;
-	matrix->lbound1 = 1;
-	matrix->lbound2 = 1;
-}
-
-#endif	/* __CUDACC__ */
+#endif
 #endif	/* CUDA_MATRIX_H */
