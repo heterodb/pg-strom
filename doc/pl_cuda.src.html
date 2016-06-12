@@ -13,11 +13,11 @@ This chapter introduces the way to implement GPU executable native program as SQ
 <div id="caution">
 <span lang="en">
 A series of discussion to support matrix data type is held in PostgreSQL developers' community now.
-Please note that the matrix data type provided by the current version of PG-Strom may change its data format in the future release.
+Please note that the array-based matrix data type provided by the current version of PG-Strom may change its data format in the future release.
 </span>
 <span lang="ja">
 現在、PostgreSQLコミュニティでは行列型（matrix型）のサポートについて議論が行われています。
-現バージョンのPG-Stromが独自に提供する行列型（matrix型）は、将来のバージョンにおいてフォーマットが変更となる可能性がある事に留意してください。
+現バージョンのPG-Stromが独自に提供する行列型（配列を用いたmatrix型）は、将来のバージョンにおいてフォーマットが変更となる可能性がある事に留意してください。
 </span>
 </div>
 </p>
@@ -852,26 +852,318 @@ PL/CUDA related functions
 PL/CUDA関連関数
 </span>
 </h3>
+<p>
 <span lang="en">
 This section introduces the SQL functions related to PL/CUDA.
 </span>
 <span lang="ja">
 本節ではPL/CUDAに関連するSQL関数について説明します。
 </span>
-<dt>
-<code>text plcuda_function_source(regproc)</code>
-</dt>
-<dd>
-<p>
+</p>
+
+<table class="manual">
+<caption class="manual">
+<span lang="en">SQL Functions related to PL/CUDA</span>
+<span lang="ja">PL/CUDA関連SQL関数</span>
+</caption>
+<thead class="manual">
+<tr>
+<th class="manual" style="width: 20em;">
+<span lang="en">Definition</span>
+<span lang="ja">関数定義</span>
+</th>
+<th class="manual" style="width: 8em;">
+<span lang="en">Return Value</span>
+<span lang="ja">戻り値</span>
+</th>
+<th class="manual" style="max-width: 40%;">
+<span lang="en">Description</span>
+<span lang="ja">説明</span>
+</th>
+</tr>
+</thead>
+
+<tbody>
+<tr>
+<td class="manual"><code>plcuda_function_source(regproc)</code></td>
+<td class="manual"><code>text</code></td>
+<td class="manual">
 <span lang="en">
 It returns source code of the GPU kernel generated from the PL/CUDA function, towards the OID input of PL/CUDA function as argument.
 </span>
 <span lang="ja">
-引数としてPL/CUDA関数のOIDを与えると、PL/CUDA関数から生成されるGPUカーネルのソースコードを出力します。
+引数としてPL/CUDA関数のOIDを与えると、PL/CUDA関数から生成されるGPUカーネルのソースコードを返します。
+</span>
+</td>
+</tr>
+</tbody>
+</table>
+
+<h3>
+<span lang="en">Array-based matrix type</span>
+<span lang="ja">配列ベースの行列型</span>
+</h3>
+<p>
+<span lang="en">
+This section introduces the SQL functions that supports array-based matrix types provided by PG-Strom.
+</span>
+<span lang="ja">
+本節ではPG-Stromの提供する配列ベースの行列型をサポートするSQL関数について説明します。
 </span>
 </p>
-</dd>
+</p>
+<p>
+<span lang="en">
+
+</span>
+<span lang="ja">
+PostgreSQL v9.5の時点では、行列を表現するための標準のデータ型は存在していませんが、以下の条件を満たす二次元配列をあたかも行列であるかのように取り扱う事が可能です。
+</span>
+</p>
+<dl>
+<li>
+<span lang="en">2-dimensional Array</span>
+<span lang="ja">二次元配列である</span>
+</li>
+
+<li>
+<span lang="en">Element of array begins from 1 for each dimension</span>
+<span lang="ja">各次元の配列要素が1から始まる</span>
+</li>
+
+<li>
+<span lang="en">No NULL value is contained</span>
+<span lang="ja">NULL値を含まない</span>
+</li>
+
+<li>
+<span lang="en">Length of the array is less than 1GB, due to the restriction of variable length datum in PostgreSQL</span>
+<span lang="ja">配列の大きさが1GBを越えない。（PostgreSQL可変長データ表現による制約）</span>
+</li>
+
+<li>
+<span lang="en">Array with <code>smallint</code>, <code>int</code>, <code>bigint</code>, <code>real</code> or <code>float</code> data type</span>
+<span lang="ja"><code>smallint</code>、<code>int</code>、<code>bigint</code>、<code>real</code>または<code>float</code>型の配列である</span>
+</li>
+
 </dl>
+<p>
+<span lang="en">
+If and when the array satisfies the above terms, we can determine the location of <i>(i,j)</i> element of the array by the index uniquely, and it enables GPU thread to fetch the datum to be processed very efficiently.
+Also, array-based matrix packs only the data to be used for calculation, unlike usual row-based format, so it has advantaged on memory consumption and data transfer.
+
+</span>
+<span lang="ja">
+配列がこれらの条件を満たす時、行列の<i>(i,j)</i>要素の位置は添え字から一意に特定する事ができ、GPUスレッドが自らの処理すべきデータを効率的に取り出す事を可能とします。また、通常の行形式データとは異なり、計算に必要なデータのみをロードする事になりますので、メモリ消費やデータ転送の点で有利です。
+PG-Stromは、この様な疑似的な行列型をサポートするため、以下に示すSQL関数を提供しています。
+</span>
+</p>
+
+<table class="manual">
+<caption class="manual">
+<span lang="en">SQL Functions related to Array-based Matrix</span>
+<span lang="ja">配列ベース行列関連 SQL関数</span>
+</caption>
+<thead class="manual">
+<tr>
+<th class="manual" style="width: 16em;">
+<span lang="en">Definition</span>
+<span lang="ja">関数定義</span>
+</th>
+<th class="manual" style="width: 4em;">
+<span lang="en">Return Value</span>
+<span lang="ja">戻り値</span>
+</th>
+<th class="manual" style="max-width: 50%;">
+<span lang="en">Description</span>
+<span lang="ja">説明</span>
+</th>
+</tr>
+</thead>
+
+<tbody>
+<tr>
+<td class="manual"><code>array_matrix(variadic <i>arg</i>, ...)</code></td>
+<td class="manual"><code><i>array</i></code></td>
+<td class="manual">
+<span lang="en">
+It is an aggregate function that combines all the rows supplied. For example, when 3 <code>float</code> arguments were supplied by 1000 rows, it returns an array-based matrix with 3 columns X 1000 rows, <code>float</code> data type.
+</span>
+<span lang="ja">
+入力された行を全て連結した配列ベース行列を返す集約関数です。例えば、<code>float</code>型の引数<i>x</i>、<i>y</i>、<i>z</i>を1000行入力すると、同じ<code>float</code>型で3列×1000行の配列ベース行列を返します。
+</span>
+<br>
+<span lang="en">
+This function is declared to take variable length arguments. The <i>arg</i> takes one or more scalar values of either <code>smallint</code>, <code>int</code>, <code>bigint</code>, <code>real</code> or <code>float</code>. All the <i>arg</i> must have same data types.
+
+</span>
+<span lang="ja">
+この関数は可変長引数を取るよう定義されており、<i>arg</i>は1個以上の<code>smallint</code>、<code>int</code>、<code>bigint</code>、<code>real</code>または<code>float</code>型のスカラー値で、全ての<i>arg</i>値は同じデータ型を持つ必要があります。
+</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual"><code>matrix_unnest(<i>array</i>)</code></td>
+<td class="manual"><code>record</code></td>
+<td class="manual">
+<span lang="en">
+It is a set function that extracts the array-based matrix to set of records. <i>array</i> is an array of <code>smallint</code>, <code>int</code>, <code>bigint</code>, <code>real</code> or <code>float</code> data.
+It returns <code>record</code> type which consists of more than one columns according to the width of matrix.
+For example, in case of a matrix with 10 columns X 500 rows, each records contains 10 of columns with element type of the matrix, then it generates 500 of the records.
+</span>
+<span lang="ja">
+配列ベース行列を行の集合に展開する集合関数です。<i>array</i>は<code>smallint</code>、<code>int</code>、<code>bigint</code>、<code>real</code>または<code>float</code>型の配列で、行列の幅に応じて1個以上のカラムからなる<code>record</code>型を返却します。例えば、10列×500行から成る行列の場合、各レコードは行列要素のデータ型を持つ10個のカラムからなり、これが500行生成されます。
+</span>
+<br>
+<span lang="en">
+It is similar to the standard <code>unnest</code> function, but generates <code>record</code> type, thus, it requires to specify the record type to be returned using <code>AS (colname1 type[, ...])</code> clause.
+</span>
+<span lang="ja">
+標準の<code>unnest</code>関数と似ていますが、<code>record</code>型を生成するため、<code>AS (colname1 type[, ...])</code>句を用いて返却されるべきレコードの型を指定する必要があります。
+</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual"><code>rbind(<i>array</i>, <i>array</i>)</code></td>
+<td class="manual"><code><i>array</i></code></td>
+<td class="manual">
+<span lang="en">
+<i>array</i> is an array of <code>smallint</code>, <code>int</code>, <code>bigint</code>, <code>real</code> or <code>float</code> data.
+</span>
+<span lang="ja">
+<i>array</i>は<code>smallint</code>、<code>int</code>、<code>bigint</code>、<code>real</code>または<code>float</code>型の配列です。
+</span>
+<br>
+<span lang="en">
+<i>array</i> is an array of <code>smallint</code>, <code>int</code>, <code>bigint</code>, <code>real</code> or <code>float</code> data. This function combines the supplied two matrices vertically. Both matrices needs to have same element data type. If width of matrices are not equivalent, it fills up the padding area by zero.
+</span>
+<span lang="ja">
+二つの配列ベース行列を縦方向に結合します。双方の行列は同一の要素データ型を持つ必要があり、行列の幅が等しくない場合は足りない部分を0で埋めます。
+</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual"><code>rbind(<i>array</i>)</code></td>
+<td class="manual"><code><i>array</i></code></td>
+<td class="manual">
+<span lang="en">
+<i>array</i> is an array of <code>smallint</code>, <code>int</code>, <code>bigint</code>, <code>real</code> or <code>float</code> data.
+This function is similar to <code>rbind(<i>array</i>, <i>array</i>)</code>, but performs as an aggregate function, then combines all the input matrices into one result vertically.
+</span>
+<span lang="ja">
+<i>array</i>は<code>smallint</code>、<code>int</code>、<code>bigint</code>、<code>real</code>または<code>float</code>型の配列です。
+<code>rbind(<i>array</i>, <i>array</i>)</code>と似ていますが、集合関数として動作し入力された全ての配列ベース行列を縦方向に結合します。
+</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual"><code>cbind(<i>array</i>, <i>array</i>)</code></td>
+<td class="manual"><code><i>array</i></code></td>
+<td class="manual">
+<span lang="en">
+<i>array</i> is an array of <code>smallint</code>, <code>int</code>, <code>bigint</code>, <code>real</code> or <code>float</code> data. This function combines the supplied two matrices horizontally. Both matrices needs to have same element data type. If height of matrices are not equivalent, it fills up the padding area by zero.
+</span>
+<span lang="ja">
+<i>array</i>は<code>smallint</code>、<code>int</code>、<code>bigint</code>、<code>real</code>または<code>float</code>型の配列で、二つの配列ベース行列を横方向に結合します。双方の行列は同一の要素データ型を持つ必要があり、行列の高さ等しくない場合は足りない部分を0で埋めます。
+</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual"><code>cbind(<i>array</i>)</code></td>
+<td class="manual"><code><i>array</i></code></td>
+<td class="manual">
+<span lang="en">
+<i>array</i> is an array of <code>smallint</code>, <code>int</code>, <code>bigint</code>, <code>real</code> or <code>float</code> data. This function is similar to <code>rbind(<i>array</i>, <i>array</i>)</code>, but performs as an aggregate function, then combines all the input matrices into one result horizontally.
+</span>
+<span lang="ja">
+<i>array</i>は<code>smallint</code>、<code>int</code>、<code>bigint</code>、<code>real</code>または<code>float</code>型の配列で、<code>rbind(<i>array</i>, <i>array</i>)</code>と似ていますが、集合関数として動作し入力された全ての配列ベース行列を横方向に結合します。
+</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual"><code>transpose(<i>array</i>)</code></td>
+<td class="manual"><code><i>array</i></code></td>
+<td class="manual">
+<span lang="en">
+<i>array</i> is an array of <code>smallint</code>, <code>int</code>, <code>bigint</code>, <code>real</code> or <code>float</code> data. This function makes  a transposed matrix that swaps height and width of the supplied matrix.
+</span>
+<span lang="ja">
+<i>array</i>は<code>smallint</code>、<code>int</code>、<code>bigint</code>、<code>real</code>または<code>float</code>型の配列で、行列の幅と高さが入れ替わった転置行列を生成します。
+</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual"><code>array_matrix_validation(anyarray)</code></td>
+<td class="manual"><code>bool</code></td>
+<td class="manual">
+<span lang="en">
+It validates whether the supplied array (<i>anyarray</i>) is adequate for the array-based matrix. It is intended to use for sanity check prior to invocation of PL/CUDA function, or check constraint on domain type definition.
+</span>
+<span lang="ja">
+入力された配列（<i>anyarray</i>）が、配列ベース行列として妥当かどうかを検査します。
+PL/CUDA関数実行前の引数の妥当性検証や、DOMAIN型を定義する時の検査制約としての利用を想定しています。
+</span>
+</td>
+</tr>
+<tr>
+<td class="manual"><code>array_matrix_height(<i>array</i>)</code></td>
+<td class="manual"><code>int</code></td>
+<td class="manual">
+<span lang="en">
+<i>array</i> is an array of either <code>smallint</code>, <code>int</code>, <code>bigint</code>, <code>real</code> or <code>float</code> data. This function returns the height of the supplied matrix.
+</span>
+<span lang="ja">
+<i>array</i>は<code>smallint</code>、<code>int</code>、<code>bigint</code>、<code>real</code>または<code>float</code>型の配列で、行列の高さを返却します。
+</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual"><code>array_matrix_width(<i>array</i>)</code></td>
+<td class="manual"><code>int</code></td>
+<td class="manual">
+<span lang="en">
+<i>array</i> is an array of either <code>smallint</code>, <code>int</code>, <code>bigint</code>, <code>real</code> or <code>float</code> data. This function returns the width of the supplied matrix.
+</span>
+<span lang="ja">
+<i>array</i>は<code>smallint</code>、<code>int</code>、<code>bigint</code>、<code>real</code>または<code>float</code>型の配列で、行列の幅を返却します。
+</span>
+</td>
+</tr>
+
+<tr>
+<td class="manual"><code>array_matrix_rawsize(regproc,int,int)</code></td>
+<td class="manual"><code>bigint</code></td>
+<td class="manual">
+<span lang="en">
+It returns the required length of memory to store an array-based matrix that has the data type specified by the 1st argument, height by the 2nd argument and width by the 3rd argument.
+It is intended to use for <code>#plcuda_results_bufsz</code> and <code>#plcuda_working_bufsz</code>.
+</span>
+<span lang="ja">
+第一引数で指定したデータ型、第二引数で指定した高さ、および第三引数で指定した幅の配列ベース行列の作成に必要なメモリ領域の大きさを返します。<code>#plcuda_results_bufsz</code>や<code>#plcuda_working_bufsz</code>での利用を意図しています。
+</span>
+</td>
+</tr>
+
+</tbody>
+</table>
+
+
+
+
+
+
+
+
+
+
 
 </section>
 

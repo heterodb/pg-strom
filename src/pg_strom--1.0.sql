@@ -685,7 +685,7 @@ CREATE FUNCTION pg_catalog.array_matrix_width(anyarray)
   AS 'MODULE_PATHNAME','array_matrix_width'
   LANGUAGE C STRICT;
 
-CREATE FUNCTION pg_catalog.array_matrix_rawsize(anyarray)
+CREATE FUNCTION pg_catalog.array_matrix_rawsize(regproc,int,int)
   RETURNS bigint
   AS 'MODULE_PATHNAME','array_matrix_rawsize'
   LANGUAGE C STRICT;
