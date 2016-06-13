@@ -133,51 +133,92 @@ typedef struct
 	cl_int		ndim;		/* always 2 for matrix */
 	cl_int		dataoffset;	/* always 0 for matrix */
 	cl_uint		elemtype;	/* always FLOAT4OID for matrix */
-	cl_int		width;		/* height of the matrix; =dim1 */
-	cl_int		height;		/* width of the matrix; =dim2 */
-	cl_int		lbound1;	/* always 1 for matrix */
-	cl_int		lbound2;	/* always 1 for matrix */
-	cl_char		values[FLEXIBLE_ARRAY_MEMBER];
+	union {
+		struct {
+			cl_int	width;		/* height of the matrix (=dim1) */
+			cl_int	height;		/* width of the matrix (=dim2) */
+			cl_int	lbound1;	/* always 1 for matrix */
+			cl_int	lbound2;	/* always 1 for matrix */
+			char	values[0];
+		} d2;
+		struct {
+			cl_int	height;		/* height of the vector */
+			cl_int	lbound1;	/* always 1 for vector */
+			char	values[0];
+		} d1;
+	};
 } MatrixType;
 
-#define INIT_ARRAY_MATRIX(matrix,_elemtype,_height,_width)	\
-	do {													\
-		(matrix)->ndim = 2;									\
-		(matrix)->dataoffset = 0;							\
-		(matrix)->elemtype = (_elemtype);					\
-		(matrix)->height = (_height);						\
-		(matrix)->width = (_width);							\
-		(matrix)->lbound1 = 1;								\
-		(matrix)->lbound2 = 1;								\
-	} while(0)
-
+STATIC_INLINE(cl_bool)
+VALIDATE_ARRAY_MATRIX(MatrixType *matrix)
+{
+	if (!VARATT_IS_4B(matrix))
+		return false;
+	if (matrix->dataoffset == 0 &&
 #ifdef __CUDACC__
-
-#define VALIDATE_ARRAY_MATRIX(matrix)			\
-	(VARATT_IS_4B(matrix) &&					\
-	 (matrix)->ndim == 2 &&						\
-	 (matrix)->dataoffset == 0 &&				\
-	 ((matrix)->elemtype == PG_INT2OID ||		\
-	  (matrix)->elemtype == PG_INT4OID ||		\
-	  (matrix)->elemtype == PG_INT8OID ||		\
-	  (matrix)->elemtype == PG_FLOAT4OID ||		\
-	  (matrix)->elemtype == PG_FLOAT8OID) &&	\
-	 (matrix)->lbound1 == 1 &&					\
-	 (matrix)->lbound2 == 1)
-
+		(matrix->elemtype == PG_INT2OID ||
+		 matrix->elemtype == PG_INT4OID ||
+		 matrix->elemtype == PG_INT8OID ||
+		 matrix->elemtype == PG_FLOAT4OID ||
+		 matrix->elemtype == PG_FLOAT8OID)
 #else	/* __CUDACC__ */
+		(matrix->elemtype == INT2OID ||
+		 matrix->elemtype == INT4OID ||
+		 matrix->elemtype == INT8OID ||
+		 matrix->elemtype == FLOAT4OID ||
+		 matrix->elemtype == FLOAT8OID)
+#endif	/* __CUDACC__ */
+		)
+	{
+		if (matrix->ndim == 2)
+		{
+			if (matrix->d2.width > 0 &&
+				matrix->d2.height > 0 &&
+				matrix->d2.lbound1 == 1 &&
+				matrix->d2.lbound2 == 1)
+				return true;
+		}
+		else if (matrix->ndim == 1)
+		{
+			if (matrix->d1.height > 0 &&
+				matrix->d1.lbound1 == 1)
+				return true;
+		}
+		else
+			return false;
+	}
+	return false;
+}
 
-#define VALIDATE_ARRAY_MATRIX(matrix)			\
-	(VARATT_IS_4B(matrix) &&					\
-	 (matrix)->ndim == 2 &&						\
-	 (matrix)->dataoffset == 0 &&				\
-	 ((matrix)->elemtype == INT2OID ||			\
-	  (matrix)->elemtype == INT4OID ||			\
-	  (matrix)->elemtype == INT8OID ||			\
-	  (matrix)->elemtype == FLOAT4OID ||		\
-	  (matrix)->elemtype == FLOAT8OID) &&		\
-	 (matrix)->lbound1 == 1 &&					\
-	 (matrix)->lbound2 == 1)
+#define ARRAY_MATRIX_ELEMTYPE(matrix)	((matrix)->elemtype)
+#define ARRAY_MATRIX_HEIGHT(matrix)					\
+	((matrix)->ndim == 2 ? (matrix)->d2.height	:	\
+	 (matrix)->ndim == 1 ? (matrix)->d1.height	: -1)
+#define ARRAY_MATRIX_WIDTH(matrix)					\
+	((matrix)->ndim == 2 ? (matrix)->d2.width	:	\
+	 (matrix)->ndim == 1 ? 1 : -1)
+#define ARRAY_MATRIX_DATAPTR(matrix)				\
+	((matrix)->ndim == 2 ? (matrix)->d2.values	:	\
+	 (matrix)->ndim == 1 ? (matrix)->d1.values : NULL)
+#define ARRAY_MATRIX_RAWSIZE(typlen,height,width)	\
+	offsetof(MatrixType, d2.values[(size_t)(typlen) *	\
+								   (size_t)(height) *	\
+								   (size_t)(width)])
+STATIC_INLINE(void)
+INIT_ARRAY_MATRIX(MatrixType *matrix,
+				  cl_uint elemtype, cl_int typlen,
+				  cl_int height, cl_int width)
+{
+	size_t		length = ARRAY_MATRIX_RAWSIZE(typlen, height, width);
 
-#endif
+	SET_VARSIZE(matrix, length);
+	matrix->ndim = 2;
+	matrix->dataoffset = 0;
+	matrix->elemtype = elemtype;
+	matrix->d2.height = height;
+	matrix->d2.width = width;
+	matrix->d2.lbound1 = 1;
+	matrix->d2.lbound2 = 1;
+}
+
 #endif	/* CUDA_MATRIX_H */
