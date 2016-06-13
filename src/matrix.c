@@ -185,13 +185,11 @@ PG_FUNCTION_INFO_V1(array_matrix_accum_varbit);
 		get_typlenbyvalalign((amstate)->elemtype,						\
 							 &typlen, &typbyval, &typalign);			\
 		Assert(typlen == sizeof(BASETYPE));								\
-		length = offsetof(MatrixType,									\
-						  values[(Size)typlen * width * height]);		\
+		length = ARRAY_MATRIX_RAWSIZE(typlen, height, width);			\
 		if (!AllocSizeIsValid(length))									\
 			elog(ERROR, "supplied array-matrix is too big");			\
 		R = palloc(length);												\
-		SET_VARSIZE(R, length);											\
-		INIT_ARRAY_MATRIX(R, (amstate)->elemtype, height, width);		\
+		INIT_ARRAY_MATRIX(R, (amstate)->elemtype, typlen, height, width); \
 																		\
 		row_index = 0;													\
 		foreach (lc, (amstate)->rows)									\
@@ -208,7 +206,7 @@ PG_FUNCTION_INFO_V1(array_matrix_accum_varbit);
 			/* sanity checks */											\
 			Assert(ARR_ELEMTYPE(array) == (amstate)->elemtype &&		\
 				   ARR_NDIM(array) == 1);								\
-			dest = ((BASETYPE *)(R)->values) + row_index;				\
+			dest = ((BASETYPE *)ARRAY_MATRIX_DATAPTR(R)) + row_index;	\
 			mask = (sizeof(BASETYPE) < sizeof(Datum)					\
 					? ((1UL << (sizeof(BASETYPE) * 8)) - 1)				\
 					: ~0UL);											\
@@ -328,7 +326,6 @@ array_matrix_rawsize(PG_FUNCTION_ARGS)
 	int32		height = PG_GETARG_INT32(1);
 	int32		width = PG_GETARG_INT32(2);
 	int16		typlen;
-	Size		length;
 
 	switch (elemtype)
 	{
@@ -343,9 +340,7 @@ array_matrix_rawsize(PG_FUNCTION_ARGS)
 			elog(ERROR, "unable to make array-matrix with '%s' type",
 				 format_type_be(elemtype));
 	}
-	length = MAXALIGN(offsetof(MatrixType, values) +
-					  (Size)typlen * (Size)height * (Size)width);
-	PG_RETURN_INT64(length);
+	PG_RETURN_INT64(ARRAY_MATRIX_RAWSIZE(typlen, height, width));
 }
 PG_FUNCTION_INFO_V1(array_matrix_rawsize);
 
@@ -357,7 +352,7 @@ array_matrix_height(PG_FUNCTION_ARGS)
 	if (VARATT_IS_EXPANDED_HEADER(M) ||
 		!VALIDATE_ARRAY_MATRIX(M))
 		elog(ERROR, "not a matrix-like array");
-	PG_RETURN_INT32(M->height);
+	PG_RETURN_INT32(ARRAY_MATRIX_HEIGHT(M));
 }
 PG_FUNCTION_INFO_V1(array_matrix_height);
 
@@ -369,7 +364,7 @@ array_matrix_width(PG_FUNCTION_ARGS)
 	if (VARATT_IS_EXPANDED_HEADER(M) ||
 		!VALIDATE_ARRAY_MATRIX(M))
 		elog(ERROR, "not a matrix-like array");
-	PG_RETURN_INT32(M->width);
+	PG_RETURN_INT32(ARRAY_MATRIX_WIDTH(M));
 }
 PG_FUNCTION_INFO_V1(array_matrix_width);
 
@@ -387,6 +382,8 @@ array_matrix_unnest(PG_FUNCTION_ARGS)
 	MatrixType		   *matrix;
 	TupleTableSlot	   *slot;
 	HeapTuple			tuple;
+	cl_int				height;
+	cl_int				width;
 	cl_int				i;
 	char			   *source;
 
@@ -412,13 +409,14 @@ array_matrix_unnest(PG_FUNCTION_ARGS)
 							 &state->typlen,
 							 &state->typbyval,
 							 &state->typalign);
-		tupdesc = CreateTemplateTupleDesc(matrix->width, false);
-		for (i=0; i < matrix->width; i++)
+		width = ARRAY_MATRIX_WIDTH(matrix);
+		tupdesc = CreateTemplateTupleDesc(width, false);
+		for (i=0; i < width; i++)
 		{
 			TupleDescInitEntry(tupdesc,
 							   (AttrNumber) i+1,
 							   psprintf("c%u", i+1),
-							   matrix->elemtype, -1, 0);
+							   ARRAY_MATRIX_ELEMTYPE(matrix), -1, 0);
 		}
 		fncxt->tuple_desc = BlessTupleDesc(tupdesc);
 
@@ -431,29 +429,31 @@ array_matrix_unnest(PG_FUNCTION_ARGS)
 	fncxt = SRF_PERCALL_SETUP();
 	state = fncxt->user_fctx;
 	matrix = state->matrix;
+	width = ARRAY_MATRIX_WIDTH(matrix);
+	height = ARRAY_MATRIX_HEIGHT(matrix);
 	slot = state->slot;
 
-	if (fncxt->call_cntr >= matrix->height)
+	if (fncxt->call_cntr >= height)
 		SRF_RETURN_DONE(fncxt);
 
-	source = matrix->values + state->typlen * fncxt->call_cntr;
+	source = ARRAY_MATRIX_DATAPTR(matrix) + state->typlen * fncxt->call_cntr;
 	ExecClearTuple(slot);
-	memset(slot->tts_isnull, 0, sizeof(bool) * matrix->width);
-	for (i=0; i < matrix->width; i++)
+	memset(slot->tts_isnull, 0, sizeof(bool) * width);
+	for (i=0; i < width; i++)
 	{
 		switch (state->typlen)
 		{
 			case sizeof(cl_ushort):
 				slot->tts_values[i] = *((cl_ushort *)source);
-				source += sizeof(cl_ushort) * matrix->height;
+				source += sizeof(cl_ushort) * height;
 				break;
 			case sizeof(cl_uint):
 				slot->tts_values[i] = *((cl_uint *)source);
-				source += sizeof(cl_uint) * matrix->height;
+				source += sizeof(cl_uint) * height;
 				break;
 			case sizeof(cl_ulong):
 				slot->tts_values[i] = *((cl_ulong *)source);
-				source += sizeof(cl_ulong) * matrix->height;
+				source += sizeof(cl_ulong) * height;
 				break;
 			default:
 				elog(ERROR, "unexpecter type length: %d", state->typlen);
@@ -473,8 +473,8 @@ static MatrixType *
 array_martix_rbind(Oid elemtype, MatrixType *X, MatrixType *Y)
 {
 	MatrixType *R;
-	cl_uint		height;
-	cl_uint		width;
+	cl_int		r_width, x_width, y_width;
+	cl_int		r_height, x_height, y_height;
 	int			typlen;
 	Size		length;
 	int			i;
@@ -485,38 +485,46 @@ array_martix_rbind(Oid elemtype, MatrixType *X, MatrixType *Y)
 		elog(ERROR, "ExpandedArrayHeader is not supported");
 	if (!VALIDATE_ARRAY_MATRIX(X) || !VALIDATE_ARRAY_MATRIX(Y))
 		elog(ERROR, "Not a matrix-like array");
-	if (elemtype != X->elemtype || elemtype != Y->elemtype)
+	if (elemtype != ARRAY_MATRIX_ELEMTYPE(X) ||
+		elemtype != ARRAY_MATRIX_ELEMTYPE(Y))
 		elog(ERROR, "Bug? not expected type");
 	typlen = get_typlen(elemtype);
 
-	width = Max(X->width, Y->width);
-	height = X->height + Y->height;
-	length = offsetof(MatrixType,
-					  values[typlen * (Size)width * (Size)height]);
+	x_width = ARRAY_MATRIX_WIDTH(X);
+	y_width = ARRAY_MATRIX_WIDTH(Y);
+	r_width = Max(x_width, y_width);
+	x_height = ARRAY_MATRIX_HEIGHT(X);
+	y_height = ARRAY_MATRIX_HEIGHT(Y);
+	r_height = x_height + y_height;
+	length = ARRAY_MATRIX_RAWSIZE(typlen, r_width, r_height);
 	R = palloc(length);
 	SET_VARSIZE(R, length);
-	INIT_ARRAY_MATRIX(R, elemtype, height, width);
+	INIT_ARRAY_MATRIX(R, elemtype, typlen, r_height, r_width);
 
 	/* copy from the top-matrix */
-	for (i=0, dst = R->values, src = X->values;
-		 i < width;
-		 i++, dst += typlen * height, src += typlen * X->height)
+	src = ARRAY_MATRIX_DATAPTR(X);
+	dst = ARRAY_MATRIX_DATAPTR(R);
+	for (i=0; i < r_width; i++)
 	{
-		if (i < X->width)
-			memcpy(dst, src, typlen * X->height);
+		if (i < x_width)
+			memcpy(dst, src, typlen * x_height);
 		else
-			memset(dst, 0, typlen * X->height);
+			memset(dst, 0, typlen * x_height);
+		dst += typlen * r_height;
+		src += typlen * x_height;
 	}
 
 	/* copy from the bottom-matrix */
-	for (i=0, dst = R->values + typlen * X->height, src = Y->values;
-		 i < width;
-		 i++, dst += typlen * height, src += typlen * Y->height)
+	src = ARRAY_MATRIX_DATAPTR(R) + typlen * x_height;
+	dst = ARRAY_MATRIX_DATAPTR(Y);
+	for (i=0; i < r_width; i++)
 	{
-		if (i < Y->width)
-			memcpy(dst, src, typlen * Y->height);
+		if (i < y_width)
+			memcpy(dst, src, typlen * y_height);
 		else
-			memset(dst, 0, typlen * Y->height);
+			memset(dst, 0, typlen * y_height);
+		dst += typlen * r_height;
+		src += typlen * y_height;
 	}
 	return R;
 }
@@ -573,8 +581,8 @@ static MatrixType *
 array_martix_cbind(Oid elemtype, MatrixType *X, MatrixType *Y)
 {
 	MatrixType *R;
-	cl_uint		height;
-	cl_uint		width;
+	cl_uint		r_height, x_height, y_height;
+	cl_uint		r_width, x_width, y_width;
 	int			typlen;
 	Size		length;
 	int			i;
@@ -585,37 +593,41 @@ array_martix_cbind(Oid elemtype, MatrixType *X, MatrixType *Y)
 		elog(ERROR, "ExpandedArrayHeader is not supported");
 	if (!VALIDATE_ARRAY_MATRIX(X) || !VALIDATE_ARRAY_MATRIX(Y))
 		elog(ERROR, "Not a matrix-like array");
-	if (elemtype != X->elemtype || elemtype != Y->elemtype)
+	if (elemtype != ARRAY_MATRIX_ELEMTYPE(X) ||
+		elemtype != ARRAY_MATRIX_ELEMTYPE(Y))
 		elog(ERROR, "Bug? not expected type");
 	typlen = get_typlen(elemtype);
 
-	width = X->width + Y->width;
-	height = Max(X->height, Y->height);
-	length = offsetof(MatrixType,
-					  values[typlen * (Size)width * (Size)height]);
+	x_width = ARRAY_MATRIX_WIDTH(X);
+	y_width = ARRAY_MATRIX_WIDTH(Y);
+	r_width = x_width + y_width;
+	x_height = ARRAY_MATRIX_HEIGHT(X);
+	y_height = ARRAY_MATRIX_HEIGHT(Y);
+	r_height = Max(x_height, y_height);
+	length = ARRAY_MATRIX_RAWSIZE(typlen, r_height, r_width);
 	R = palloc(length);
-	SET_VARSIZE(R, length);
-	INIT_ARRAY_MATRIX(R, elemtype, height, width);
+	INIT_ARRAY_MATRIX(R, elemtype, typlen, r_height, r_width);
 
-	for (i=0, src = X->values, dst = R->values;
-		 i < X->width;
-		 i++, src += typlen * X->height, dst += typlen * height)
+	src = ARRAY_MATRIX_DATAPTR(X);
+	dst = ARRAY_MATRIX_DATAPTR(R);
+	for (i=0; i < x_width; i++)
 	{
-		memcpy(dst, src, typlen * X->height);
-		if (X->height < height)
-			memset(dst + typlen * X->height, 0,
-				   typlen * (height - X->height));
+		memcpy(dst, src, typlen * x_height);
+		if (x_height < r_height)
+			memset(dst + typlen * x_height, 0, typlen * (r_height - x_height));
+		src += typlen * x_height;
+		dst += typlen * r_height;
 	}
 
-	for (i=0, src = Y->values, dst = (R->values +
-										 typlen * X->width * height);
-		 i < Y->width;
-		 i++, src += typlen * Y->height, dst += typlen * height)
+	src = ARRAY_MATRIX_DATAPTR(Y);
+	dst = ARRAY_MATRIX_DATAPTR(R) + typlen * x_width * r_height;
+	for (i=0; i < y_width; i++)
 	{
-		memcpy(dst, src, typlen * Y->height);
-		if (Y->height < height)
-			memset(dst + typlen * Y->height, 0,
-				   typlen * (height - Y->height));
+		memcpy(dst, src, typlen * y_height);
+		if (y_height < r_height)
+			memset(dst + typlen * y_height, 0, typlen * (r_height - y_height));
+		src += typlen * y_height;
+		dst += typlen * r_height;
 	}
 	return R;
 }
@@ -698,19 +710,19 @@ array_matrix_rbind_accum(PG_FUNCTION_ARGS)
 	if (PG_ARGISNULL(0))
 	{
 		mrstate = palloc0(sizeof(matrix_rbind_state));
-		mrstate->elemtype = X->elemtype;
+		mrstate->elemtype = ARRAY_MATRIX_ELEMTYPE(X);
 	}
 	else
 	{
 		mrstate = (matrix_rbind_state *)PG_GETARG_POINTER(0);
-		if (mrstate->elemtype == X->elemtype)
+		if (mrstate->elemtype == ARRAY_MATRIX_ELEMTYPE(X))
 			elog(ERROR, "element type of input array mismatch '%s' for '%s'",
-				 format_type_be(X->elemtype),
+				 format_type_be(ARRAY_MATRIX_ELEMTYPE(X)),
 				 format_type_be(mrstate->elemtype));
 	}
 
-	mrstate->width = Max(mrstate->width, X->width);
-	mrstate->height += X->height;
+	mrstate->width = Max(mrstate->width, ARRAY_MATRIX_ELEMTYPE(X));
+	mrstate->height += ARRAY_MATRIX_HEIGHT(X);
 	mrstate->matrix_list = lappend(mrstate->matrix_list, X);
 
 	MemoryContextSwitchTo(oldcxt);
@@ -748,31 +760,33 @@ array_matrix_rbind_final(matrix_rbind_state *mrstate)
 			elog(ERROR, "unsupported element type: %s",
 				 format_type_be(mrstate->elemtype));
 	}
-	length = MAXALIGN(offsetof(MatrixType,
-							   values[(Size)typlen * width * height]));
+	length = ARRAY_MATRIX_RAWSIZE(typlen, height, width);
 	if (!AllocSizeIsValid(length))
 		elog(ERROR, "supplied array-matrix is too big");
 	R = palloc(length);
-	SET_VARSIZE(R, length);
-	INIT_ARRAY_MATRIX(R, mrstate->elemtype, height, width);
+	INIT_ARRAY_MATRIX(R, mrstate->elemtype, typlen, height, width);
 
 	row_index = 0;
 	foreach (lc, mrstate->matrix_list)
 	{
 		MatrixType *X = lfirst(lc);
+		cl_int		x_width = ARRAY_MATRIX_WIDTH(X);
+		cl_int		x_height = ARRAY_MATRIX_HEIGHT(X);
 		cl_int		i;
 
 		Assert(VALIDATE_ARRAY_MATRIX(matrix));
-		for (i=0, src = X->values, dst = R->values + typlen * row_index;
-			 i < width;
-			 i++, src += typlen * X->height, dst += typlen * height)
+		src = ARRAY_MATRIX_DATAPTR(X);
+		dst = ARRAY_MATRIX_DATAPTR(X) + typlen * row_index;
+		for (i=0; i < width; i++)
 		{
-			if (i < X->width)
-				memcpy(dst, src, typlen * X->height);
+			if (i < x_width)
+				memcpy(dst, src, typlen * x_height);
 			else
-				memset(dst, 0, typlen * X->height);
+				memset(dst, 0, typlen * x_height);
+			src += typlen * x_height;
+			dst += typlen * height;
 		}
-		row_index += X->height;
+		row_index += x_height;
 	}
 	return R;
 }
@@ -875,18 +889,18 @@ array_matrix_cbind_accum(PG_FUNCTION_ARGS)
 	if (PG_ARGISNULL(0))
 	{
 		mcstate = palloc0(sizeof(matrix_cbind_state));
-		mcstate->elemtype = X->elemtype;
+		mcstate->elemtype = ARRAY_MATRIX_ELEMTYPE(X);
 	}
 	else
 	{
 		mcstate = (matrix_cbind_state *)PG_GETARG_POINTER(0);
-		if (mcstate->elemtype == X->elemtype)
+		if (mcstate->elemtype == ARRAY_MATRIX_ELEMTYPE(X))
 			elog(ERROR, "element type of input array mismatch '%s' for '%s'",
-				 format_type_be(X->elemtype),
+				 format_type_be(ARRAY_MATRIX_ELEMTYPE(X)),
 				 format_type_be(mcstate->elemtype));
 	}
-	mcstate->width += X->width;
-	mcstate->height = Max(mcstate->height, X->height);
+	mcstate->width += ARRAY_MATRIX_WIDTH(X);
+	mcstate->height = Max(mcstate->height, ARRAY_MATRIX_HEIGHT(X));
 	mcstate->matrix_list = lappend(mcstate->matrix_list, X);
 
 	MemoryContextSwitchTo(oldcxt);
@@ -923,29 +937,30 @@ array_matrix_cbind_final(matrix_cbind_state *mcstate)
 			elog(ERROR, "unsupported element type: %s",
 				 format_type_be(mcstate->elemtype));
     }
-	length = MAXALIGN(offsetof(MatrixType,
-							   values[(Size)typlen * width * height]));
+	length = ARRAY_MATRIX_RAWSIZE(typlen, height, width);
 	if (!AllocSizeIsValid(length))
 		elog(ERROR, "supplied array-matrix is too big");
 	R = palloc(length);
-	SET_VARSIZE(R, length);
-	INIT_ARRAY_MATRIX(R, mcstate->elemtype, height, width);
+	INIT_ARRAY_MATRIX(R, mcstate->elemtype, typlen, height, width);
 
-	dst = R->values;
+	dst = ARRAY_MATRIX_DATAPTR(R);
 	foreach (lc, mcstate->matrix_list)
 	{
 		MatrixType *X = lfirst(lc);
+		cl_int		x_width = ARRAY_MATRIX_WIDTH(X);
+		cl_int		x_height = ARRAY_MATRIX_HEIGHT(X);
 		cl_uint		i;
 
 		Assert(VALIDATE_ARRAY_MATRIX(X));
-		for (i=0, src = X->values;
-			 i < X->width;
-			 i++, src += typlen * X->height, dst += typlen * height)
+		src = ARRAY_MATRIX_DATAPTR(R);
+		for (i=0; i < x_width; i++)
 		{
-			memcpy(dst, src, typlen * X->height);
-			if (X->height < height)
-				memset(dst + typlen * X->height, 0,
-					   typlen * (height - X->height));
+			memcpy(dst, src, typlen * x_height);
+			if (x_height < height)
+				memset(dst + typlen * x_height, 0,
+					   typlen * (height - x_height));
+			src += typlen * x_height;
+			dst += typlen * height;
 		}
 	}
 	return R;
@@ -1021,24 +1036,25 @@ PG_FUNCTION_INFO_V1(array_matrix_cbind_final_float8);
  */
 #define ARRAY_MATRIX_TRANSPOSE_TEMPLATE(T,M,BASETYPE)					\
 	do {																\
-		Size	height = (M)->height;									\
-		Size	width = (M)->width;										\
+		Size	height = ARRAY_MATRIX_HEIGHT(M);						\
+		Size	width = ARRAY_MATRIX_WIDTH(M);							\
 		Size	i, nitems = width * height;								\
 		Size	length;													\
+		char   *T_values;												\
+		char   *M_values = ARRAY_MATRIX_DATAPTR(M);						\
 																		\
-		length = offsetof(MatrixType,									\
-						  values[sizeof(BASETYPE) * width * height]);	\
+		length = ARRAY_MATRIX_RAWSIZE(sizeof(BASETYPE), height, width);	\
 		if (!AllocSizeIsValid(length))									\
 			elog(ERROR, "matrix array size too large");					\
 		T = palloc(length);												\
-		SET_VARSIZE(T, length);											\
-		INIT_ARRAY_MATRIX(T, (M)->elemtype, width, height);				\
-																		\
+		INIT_ARRAY_MATRIX(T, ARRAY_MATRIX_ELEMTYPE(M),					\
+						  sizeof(BASETYPE), width, height);				\
+		T_values = ARRAY_MATRIX_DATAPTR(T);								\
 		for (i=0; i < nitems; i++)										\
 		{																\
-			*((BASETYPE *)(T->values + sizeof(BASETYPE) *				\
+			*((BASETYPE *)(T_values + sizeof(BASETYPE) *				\
 						   ((i % height) * width + (i / height)))) =	\
-				*((BASETYPE *)((M)->values + sizeof(BASETYPE) * i));	\
+				*((BASETYPE *)(M_values + sizeof(BASETYPE) * i));		\
 		}																\
 	} while(0)
 
