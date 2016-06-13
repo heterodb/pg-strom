@@ -1647,7 +1647,6 @@ skip:
 		pgstrom_data_store *pds_in = pgsort->pds_in;
 		pgstrom_gpusort	   *pgsort_new;
 		cl_uint				valid_nitems;
-		bool				shareride_done = false;
 
 		/*
 		 * No other task shall be attached on the segment that raised
@@ -1686,28 +1685,22 @@ skip:
 					(segment_temp->nitems_total +
 					 valid_nitems) <= segment_temp->kresults.nrooms)
 				{
+					SpinLockRelease(&gss->gts.lock);
+
 					/* OK, we can interrupt this segment */
-					PG_TRY();
-					{
-						pgsort_new = (pgstrom_gpusort *)
-							gpusort_create_task(gss, pds_in, valid_nitems,
-												false, segment_temp);
-						/* append it prior to the terminator */
-						dlist_insert_before(&pgsort_temp->task.chain,
-											&pgsort_new->task.chain);
-						gss->gts.num_pending_tasks++;
-						/* OK, we could have a share ride with others */
-						shareride_done = true;
-					}
-					PG_CATCH();
-					{
-						SpinLockRelease(&gss->gts.lock);
-						PG_RE_THROW();
-					}
-					PG_END_TRY();
-					break;
+					pgsort_new = (pgstrom_gpusort *)
+						gpusort_create_task(gss, pds_in, valid_nitems,
+											false, segment_temp);
+					/* append it prior to the terminator */
+					SpinLockAcquire(&gss->gts.lock);
+					dlist_insert_before(&pgsort_temp->task.chain,
+										&pgsort_new->task.chain);
+					gss->gts.num_pending_tasks++;
+					SpinLockRelease(&gss->gts.lock);
+					goto shareride_done;
 				}
 			}
+			SpinLockRelease(&gss->gts.lock);
 		}
 
 		/*
@@ -1715,16 +1708,15 @@ skip:
 		 * existing segment, so we will make a new segment, then attach
 		 * GpuTask on the tail.
 		 */
-		if (!shareride_done)
-		{
-			pgsort_new = (pgstrom_gpusort *)
-				gpusort_create_task(gss, pds_in, valid_nitems,
-									gss->gts.scan_done, NULL);
-			SpinLockAcquire(&gss->gts.lock);
-			dlist_push_tail(&gss->gts.pending_tasks, &pgsort_new->task.chain);
-			gss->gts.num_pending_tasks++;
-			SpinLockRelease(&gss->gts.lock);
-		}
+		pgsort_new = (pgstrom_gpusort *)
+			gpusort_create_task(gss, pds_in, valid_nitems,
+								gss->gts.scan_done, NULL);
+		SpinLockAcquire(&gss->gts.lock);
+		dlist_push_tail(&gss->gts.pending_tasks, &pgsort_new->task.chain);
+		gss->gts.num_pending_tasks++;
+		SpinLockRelease(&gss->gts.lock);
+	shareride_done:
+		;
 	}
 
 	/*
