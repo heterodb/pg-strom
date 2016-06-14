@@ -384,7 +384,8 @@ array_matrix_height(PG_FUNCTION_ARGS)
 
 	if (VARATT_IS_EXPANDED_HEADER(M) ||
 		!VALIDATE_ARRAY_MATRIX(M))
-		elog(ERROR, "not a matrix-like array");
+		abort();
+//		elog(ERROR, "not a matrix-like array");
 	PG_RETURN_INT32(ARRAY_MATRIX_HEIGHT(M));
 }
 PG_FUNCTION_INFO_V1(array_matrix_height);
@@ -396,7 +397,8 @@ array_matrix_width(PG_FUNCTION_ARGS)
 
 	if (VARATT_IS_EXPANDED_HEADER(M) ||
 		!VALIDATE_ARRAY_MATRIX(M))
-		elog(ERROR, "not a matrix-like array");
+		abort();
+//		elog(ERROR, "not a matrix-like array");
 	PG_RETURN_INT32(ARRAY_MATRIX_WIDTH(M));
 }
 PG_FUNCTION_INFO_V1(array_matrix_width);
@@ -438,6 +440,7 @@ array_matrix_unnest(PG_FUNCTION_ARGS)
 			elog(ERROR, "ExpandedArrayHeader is not supported");
 		if (!VALIDATE_ARRAY_MATRIX(matrix))
 			elog(ERROR, "Not a matrix-like array");
+
 		get_typlenbyvalalign(matrix->elemtype,
 							 &state->typlen,
 							 &state->typbyval,
@@ -468,9 +471,8 @@ array_matrix_unnest(PG_FUNCTION_ARGS)
 
 	if (fncxt->call_cntr >= height)
 		SRF_RETURN_DONE(fncxt);
-
-	source = ARRAY_MATRIX_DATAPTR(matrix) + state->typlen * fncxt->call_cntr;
 	ExecClearTuple(slot);
+	source = ARRAY_MATRIX_DATAPTR(matrix) + state->typlen * fncxt->call_cntr;
 	memset(slot->tts_isnull, 0, sizeof(bool) * width);
 	for (i=0; i < width; i++)
 	{
@@ -493,7 +495,6 @@ array_matrix_unnest(PG_FUNCTION_ARGS)
 		}
 	}
 	ExecStoreVirtualTuple(slot);
-
 	tuple = ExecMaterializeSlot(slot);
 	SRF_RETURN_NEXT(fncxt, HeapTupleGetDatum(tuple));
 }

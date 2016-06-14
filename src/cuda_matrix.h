@@ -139,12 +139,12 @@ typedef struct
 			cl_int	height;		/* width of the matrix (=dim2) */
 			cl_int	lbound1;	/* always 1 for matrix */
 			cl_int	lbound2;	/* always 1 for matrix */
-			char	values[0];
+			char	values[1];	/* to be variable length */
 		} d2;
 		struct {
 			cl_int	height;		/* height of the vector */
 			cl_int	lbound1;	/* always 1 for vector */
-			char	values[0];
+			char	values[1];	/* to be variable length */
 		} d1;
 	};
 } MatrixType;
@@ -190,54 +190,50 @@ VALIDATE_ARRAY_MATRIX(MatrixType *matrix)
 	return false;
 }
 
-#define ARRAY_MATRIX_ELEMTYPE(matrix)	((matrix)->elemtype)
-#define ARRAY_MATRIX_HEIGHT(matrix)					\
-	((matrix)->ndim == 2 ? (matrix)->d2.height	:	\
-	 (matrix)->ndim == 1 ? (matrix)->d1.height	: -1)
-#define ARRAY_MATRIX_WIDTH(matrix)					\
-	((matrix)->ndim == 2 ? (matrix)->d2.width	:	\
-	 (matrix)->ndim == 1 ? 1 : -1)
-#define ARRAY_MATRIX_DATAPTR(matrix)				\
-	((matrix)->ndim == 2 ? (matrix)->d2.values	:	\
-	 (matrix)->ndim == 1 ? (matrix)->d1.values : NULL)
-#define ARRAY_MATRIX_RAWSIZE(typlen,height,width)	\
+#define ARRAY_MATRIX_ELEMTYPE(X)			\
+	(((MatrixType *)(X))->elemtype)
+#define ARRAY_MATRIX_HEIGHT(X)											\
+	(((MatrixType *)(X))->ndim == 2 ? ((MatrixType *)(X))->d2.height :	\
+	 ((MatrixType *)(X))->ndim == 1 ? ((MatrixType *)(X))->d1.height : -1)
+#define ARRAY_MATRIX_WIDTH(X)											\
+	(((MatrixType *)(X))->ndim == 2 ? ((MatrixType *)(X))->d2.width :	\
+	 ((MatrixType *)(X))->ndim == 1 ? 1 : -1)
+#define ARRAY_MATRIX_DATAPTR(X)											\
+	(((MatrixType *)(X))->ndim == 2 ? ((MatrixType *)(X))->d2.values :	\
+	 ((MatrixType *)(X))->ndim == 1 ? ((MatrixType *)(X))->d1.values : NULL)
+#define ARRAY_MATRIX_RAWSIZE(typlen,height,width)		\
 	offsetof(MatrixType, d2.values[(size_t)(typlen) *	\
 								   (size_t)(height) *	\
 								   (size_t)(width)])
-#define ARRAY_VECTOR_RAWSIZE(typlen,nitems)		\
+#define ARRAY_VECTOR_RAWSIZE(typlen,nitems)				\
 	offsetof(MatrixType, d1.values[(size_t)(typlen) *	\
 								   (size_t)(nitems)])
 
-STATIC_INLINE(void)
-INIT_ARRAY_VECTOR(MatrixType *matrix,
-				  cl_uint elemtype, cl_int typlen,
-				  cl_int nitems)
-{
-	size_t		length = ARRAY_VECTOR_RAWSIZE(typlen, nitems);
+#define INIT_ARRAY_VECTOR(X,_elemtype,_typlen,_nitems)			\
+	do {														\
+		size_t	__len = ARRAY_VECTOR_RAWSIZE(_typlen,_nitems);	\
+																\
+		SET_VARSIZE(X, __len);									\
+		((MatrixType *)(X))->ndim = 1;							\
+		((MatrixType *)(X))->dataoffset = 0;					\
+		((MatrixType *)(X))->elemtype = (_elemtype);			\
+		((MatrixType *)(X))->d1.height = (_nitems);				\
+		((MatrixType *)(X))->d1.lbound1 = 1;					\
+	} while(0)
 
-	SET_VARSIZE(matrix, length);
-	matrix->ndim = 1;
-	matrix->dataoffset = 0;
-	matrix->elemtype = elemtype;
-	matrix->d1.height = nitems;
-	matrix->d1.lbound1 = 1;
-}
-
-STATIC_INLINE(void)
-INIT_ARRAY_MATRIX(MatrixType *matrix,
-				  cl_uint elemtype, cl_int typlen,
-				  cl_int height, cl_int width)
-{
-	size_t		length = ARRAY_MATRIX_RAWSIZE(typlen, height, width);
-
-	SET_VARSIZE(matrix, length);
-	matrix->ndim = 2;
-	matrix->dataoffset = 0;
-	matrix->elemtype = elemtype;
-	matrix->d2.height = height;
-	matrix->d2.width = width;
-	matrix->d2.lbound1 = 1;
-	matrix->d2.lbound2 = 1;
-}
+#define INIT_ARRAY_MATRIX(X,_elemtype,_typlen,_height,_width)	\
+	do {														\
+		size_t	__len = ARRAY_MATRIX_RAWSIZE((_typlen),			\
+											 (_height),			\
+											 (_width));			\
+		SET_VARSIZE(X, __len);									\
+		((MatrixType *)(X))->ndim = 2;							\
+		((MatrixType *)(X))->dataoffset = 0;					\
+		((MatrixType *)(X))->elemtype = (_elemtype);			\
+		((MatrixType *)(X))->d2.height = (_height);				\
+		((MatrixType *)(X))->d2.width = (_width);				\
+		((MatrixType *)(X))->d2.lbound1 = 1;					\
+		((MatrixType *)(X))->d2.lbound2 = 1;					\
+	} while(0)
 
 #endif	/* CUDA_MATRIX_H */
