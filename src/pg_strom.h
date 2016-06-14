@@ -629,6 +629,8 @@ extern void pgstrom_init_plcuda(void);
  */
 extern Datum array_matrix_accum(PG_FUNCTION_ARGS);
 extern Datum array_matrix_accum_varbit(PG_FUNCTION_ARGS);
+extern Datum varbit_to_int4_array(PG_FUNCTION_ARGS);
+extern Datum int4_array_to_varbit(PG_FUNCTION_ARGS);
 extern Datum array_matrix_final_int2(PG_FUNCTION_ARGS);
 extern Datum array_matrix_final_int4(PG_FUNCTION_ARGS);
 extern Datum array_matrix_final_int8(PG_FUNCTION_ARGS);

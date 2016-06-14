@@ -603,6 +603,25 @@ CREATE FUNCTION pgstrom.array_matrix_accum_varbit(internal, bit)
   AS 'MODULE_PATHNAME','array_matrix_accum_varbit'
   LANGUAGE C CALLED ON NULL INPUT;
 
+-- type case varbit <--> int4[]
+CREATE FUNCTION pgstrom.varbit_to_int4_array(bit)
+  RETURNS int4[]
+  AS 'MODULE_PATHNAME','varbit_to_int4_array'
+  LANGUAGE C STRICT;
+
+CREATE CAST (bit AS int4[])
+  WITH FUNCTION pgstrom.varbit_to_int4_array(bit)
+  AS ASSIGNMENT;
+
+CREATE FUNCTION pgstrom.int4_array_to_varbit(int4[])
+  RETURNS bit
+  AS 'MODULE_PATHNAME','int4_array_to_varbit'
+  LANGUAGE C STRICT;
+
+CREATE CAST (int4[] AS bit)
+  WITH FUNCTION pgstrom.int4_array_to_varbit(int4[])
+  AS ASSIGNMENT;
+
 CREATE FUNCTION pgstrom.array_matrix_final_int2(internal)
   RETURNS int2[]
   AS 'MODULE_PATHNAME','array_matrix_final_int2'

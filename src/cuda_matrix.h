@@ -204,6 +204,25 @@ VALIDATE_ARRAY_MATRIX(MatrixType *matrix)
 	offsetof(MatrixType, d2.values[(size_t)(typlen) *	\
 								   (size_t)(height) *	\
 								   (size_t)(width)])
+#define ARRAY_VECTOR_RAWSIZE(typlen,nitems)		\
+	offsetof(MatrixType, d1.values[(size_t)(typlen) *	\
+								   (size_t)(nitems)])
+
+STATIC_INLINE(void)
+INIT_ARRAY_VECTOR(MatrixType *matrix,
+				  cl_uint elemtype, cl_int typlen,
+				  cl_int nitems)
+{
+	size_t		length = ARRAY_VECTOR_RAWSIZE(typlen, nitems);
+
+	SET_VARSIZE(matrix, length);
+	matrix->ndim = 1;
+	matrix->dataoffset = 0;
+	matrix->elemtype = elemtype;
+	matrix->d1.height = nitems;
+	matrix->d1.lbound1 = 1;
+}
+
 STATIC_INLINE(void)
 INIT_ARRAY_MATRIX(MatrixType *matrix,
 				  cl_uint elemtype, cl_int typlen,

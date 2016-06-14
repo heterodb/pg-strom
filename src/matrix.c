@@ -100,59 +100,92 @@ array_matrix_accum(PG_FUNCTION_ARGS)
 }
 PG_FUNCTION_INFO_V1(array_matrix_accum);
 
+static MatrixType *
+__varbit_to_int_vector(VarBit *varbit)
+{
+	MatrixType *matrix;
+	Size		nitems;
+	Size		len;
+
+	if (!varbit)
+	{
+		len = ARRAY_VECTOR_RAWSIZE(sizeof(cl_int), 0);
+		matrix = palloc0(len);
+		INIT_ARRAY_VECTOR(matrix, INT4OID, sizeof(cl_int), 0);
+	}
+	else
+	{
+		nitems = ((varbit->bit_len + sizeof(cl_int) * BITS_PER_BYTE - 1)
+				  / (sizeof(cl_int) * BITS_PER_BYTE));
+
+		len = ARRAY_VECTOR_RAWSIZE(sizeof(cl_int), nitems);
+		matrix = palloc0(len);
+		INIT_ARRAY_VECTOR(matrix, INT4OID, sizeof(cl_int), nitems);
+		memcpy(matrix->d1.values, varbit->bit_dat,
+			   (varbit->bit_len + BITS_PER_BYTE - 1) / BITS_PER_BYTE);
+	}
+	return matrix;
+}
+
+Datum
+varbit_to_int4_array(PG_FUNCTION_ARGS)
+{
+	VarBit	   *varbit = PG_GETARG_VARBIT_P(0);
+
+	PG_RETURN_POINTER(__varbit_to_int_vector(varbit));
+}
+PG_FUNCTION_INFO_V1(varbit_to_int4_array);
+
+Datum
+int4_array_to_varbit(PG_FUNCTION_ARGS)
+{
+	AnyArrayType   *array = PG_GETARG_ANY_ARRAY(0);
+	VarBit		   *varbit;
+	Size			len;
+	cl_int			i, nitems;
+	Datum			datum;
+	bool			isnull;
+	array_iter		iter;
+
+	/* sanity check - only vector like array is valid */
+	if (AARR_NDIM(array) != 1)
+		elog(ERROR, "Only 1D array is supported");
+	nitems = AARR_DIMS(array)[0];
+
+	len = MAXALIGN(offsetof(VarBit, bit_dat[sizeof(cl_int) * nitems]));
+	varbit = palloc0(len);
+	SET_VARSIZE(varbit, len);
+	varbit->bit_len = sizeof(cl_int) * BITS_PER_BYTE * nitems;
+
+	array_iter_setup(&iter, array);
+	for (i=0; i < nitems; i++)
+	{
+		datum = array_iter_next(&iter, &isnull, i,
+								sizeof(cl_int), true, 'i');
+		if (isnull)
+			continue;
+		((cl_int *)varbit->bit_dat)[i] =  DatumGetInt32(datum);
+	}
+	PG_RETURN_POINTER(varbit);
+}
+PG_FUNCTION_INFO_V1(int4_array_to_varbit);
+
 Datum
 array_matrix_accum_varbit(PG_FUNCTION_ARGS)
 {
 	array_matrix_state *amstate;
 	MemoryContext	aggcxt;
 	MemoryContext	oldcxt;
-	ArrayType	   *array;
-	Datum		   *values;
-	Size			i, nitems;
-	int16			typlen;
-	bool			typbyval;
-	char			typalign;
+	VarBit		   *varbit = NULL;
+	MatrixType	   *matrix;
 
 	if (!AggCheckCallContext(fcinfo, &aggcxt))
 		elog(ERROR, "aggregate function called in non-aggregate context");
-	get_typlenbyvalalign(INT4OID, &typlen, &typbyval, &typalign);
 
-	if (PG_ARGISNULL(1))
-	{
-		oldcxt = MemoryContextSwitchTo(aggcxt);
-		/* an empty int32 array */
-		array = construct_array(NULL, 0, INT4OID,
-								typlen, typbyval, typalign);
-		nitems = 0;
-	}
-	else
-	{
-		VarBit	   *varbit = PG_GETARG_VARBIT_P(1);
-		Size		pos;
-
-		nitems = (varbit->bit_len / BITS_PER_BYTE +
-				  sizeof(cl_int) - 1) / sizeof(cl_int);
-		values = palloc0(sizeof(Datum) * nitems);
-		for (i=0, pos = sizeof(cl_int) * BITS_PER_BYTE;
-			 i < nitems;
-			 i++, pos += sizeof(cl_int) * BITS_PER_BYTE)
-		{
-			cl_int	code = ((cl_int *)varbit->bit_dat)[i];
-			cl_int	shift;
-
-			if (varbit->bit_len < pos)
-			{
-				Assert(pos - varbit->bit_len < sizeof(cl_int) * BITS_PER_BYTE);
-				shift = (sizeof(cl_int) * BITS_PER_BYTE -
-						 (pos - varbit->bit_len));
-				code &= (1UL << shift) - 1;
-			}
-			values[i] = Int32GetDatum(code);
-		}
-		oldcxt = MemoryContextSwitchTo(aggcxt);
-		array = construct_array(values, nitems, INT4OID,
-								typlen, typbyval, typalign);
-	}
+	oldcxt = MemoryContextSwitchTo(aggcxt);
+	if (!PG_ARGISNULL(1))
+		varbit = PG_GETARG_VARBIT_P(1);
+	matrix = __varbit_to_int_vector(varbit);
 
 	if (PG_ARGISNULL(0))
 	{
@@ -162,8 +195,8 @@ array_matrix_accum_varbit(PG_FUNCTION_ARGS)
 	else
 		amstate = (array_matrix_state *)PG_GETARG_POINTER(0);
 
-	amstate->width = Max(amstate->width, nitems);
-	amstate->rows = lappend(amstate->rows, array);
+	amstate->width = Max(amstate->width, ARRAY_MATRIX_HEIGHT(matrix));
+	amstate->rows = lappend(amstate->rows, matrix);
 
 	MemoryContextSwitchTo(oldcxt);
 
