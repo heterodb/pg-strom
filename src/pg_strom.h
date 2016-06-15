@@ -144,8 +144,6 @@ typedef struct GpuContext_v2
 
 
 
-
-
 /*
  *
  *

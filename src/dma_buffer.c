@@ -76,9 +76,7 @@ static void	  (*sighandler_sigbus_orig)(int,siginfo_t *,void *) = NULL;
 #define DMABUF_CHUNKSZ_MAX			(1UL << DMABUF_CHUNKSZ_MAX_BIT)
 #define DMABUF_CHUNKSZ_MIN			(1UL << DMABUF_CHUNKSZ_MIN_BIT)
 #define DMABUF_CHUNK_DATA(chunk)	((chunk)->data)
-#define DMABUF_CHUNK_MAGIC_HEAD		0xDEADBEAF
-#define DMABUF_CHUNK_MAGIC_TAIL		0xCAFEF00D
-
+#define DMABUF_CHUNK_MAGIC_CODE		0xDEADBEAF
 
 typedef struct dmaBufferChunk
 {
@@ -91,10 +89,18 @@ typedef struct dmaBufferChunk
 	char		data[FLEXIBLE_ARRAY_MEMBER];
 } dmaBufferChunk;
 
+#define DMABUF_CHUNK_MAGIC_HEAD(chunk)			((chunk)->magic_head)
+#define DMABUF_CHUNK_MAGIC_TAIL(chunk)			\
+	*((cl_int *)((chunk)->data + INTALIGN((chunk)->required)))
+
+
+
 typedef struct dmaBufferSegment
 {
-	
-	plist_head		free_chunks[DMABUF_CHUNKSZ_MAX_BIT + 1];
+	slock_t		lock;
+	cl_uint		num_actives;	/* number of active chunks */
+	dlist_head	addr_chunks;	/* chunks in address order */
+	dlist_head	free_chunks[DMABUF_CHUNKSZ_MAX_BIT + 1];
 } dmaBufferSegment;
 
 /*
@@ -102,7 +108,7 @@ typedef struct dmaBufferSegment
  *
  * NOTE: caller must have lock on &dmaBufferEntry->lock
  */
-static bool
+static void
 create_dma_buffer_segment(dmaBufferEntry *entry)
 {
 	dmaBufferLocalMap *l_map;
@@ -118,12 +124,13 @@ create_dma_buffer_segment(dmaBufferEntry *entry)
 	SHMSEGMENT_NAME(namebuf, entry->segment_id);
 	fdesc = shm_open(namebuf, O_RDWR | O_CREAT | O_EXCL, 0600);
 	if (fdesc < 0)
-		return false;
+		elog(ERROR, "failed on shm_open('%s'): %m", namebuf);
 
 	if (ftruncate(fdesc, dma_segment_size) != 0)
 	{
 		close(fdesc);
 		shm_unlink(namebuf);
+		elog(ERROR, "failed on ftruncate(): %m");
 	}
 
 	mmap_ptr = mmap(l_map->mmap_ptr, dma_segment_size,
@@ -134,6 +141,7 @@ create_dma_buffer_segment(dmaBufferEntry *entry)
 	{
 		close(fdesc);
 		shm_unlink(namebuf);
+		elog(ERROR, "failed on mmap: %m");
 	}
 	Assert(mmap_ptr == l_map->mmap_ptr);
 
@@ -144,8 +152,6 @@ create_dma_buffer_segment(dmaBufferEntry *entry)
 
 	l_map->fdesc = fdesc;
 	l_map->cuda_pinned = false;
-
-	return true;
 }
 
 /*
@@ -320,33 +326,138 @@ attach_dma_buffer_on_demand(int signum, siginfo_t *siginfo, void *unused)
 }
 
 
+/*
+ * dmaBufferSplitChunk
+ *
+ */
+static bool
+dmaBufferSplitChunk(dmaBufferSegment *segment, int mclass)
+{
+	// split it
+
+}
+
+/*
+ * dmaBufferAllocChunk
+ *
+ * NOTE: caller must have &dmaBufferSegment->lock
+ */
+static void *
+dmaBufferAllocChunk(dmaBufferSegment *segment, int mclass, Size required)
+{
+	dmaBufferChunk *chunk;
+
+	if (dlist_is_empty(&segment->free_chunks[mclass]))
+	{
+		if (!dmaBufferSplitChunk(segment, mclass + 1))
+			return NULL;
+	}
+	Assert(!dlist_is_empty(&segment->free_chunks[mclass]));
+
+	dnode = dlist_pop_head_node(&segment->free_chunks[mclass]);
+	chunk = dlist_container(dmaBufferChunk, free_chain, dnode);
+	/* init dmaBufferChunk */
+	memset(&chunk->free_chain, 0, sizeof(dlist_node));
+	chunk->shgcon = CurrentSharedGpuContext;
+	chunk->required = required;
+	chunk->mclass = mclass;
+	DMABUF_CHUNK_MAGIC_HEAD(chunk) = DMABUF_CHUNK_MAGIC_CODE;
+	DMABUF_CHUNK_MAGIC_TAIL(chunk) = DMABUF_CHUNK_MAGIC_CODE;
+
+	/* TODO: register this chunk to GpuContext */
 
 
+	/* update dmaBufferSegment status */
+	segment->num_actives++;
 
+	return chunk->data;
+}
 
-
-
-
-
-
-
-
-
-
-
+/*
+ * __dmaBufferAlloc
+ *
+ */
 void *
 __dmaBufferAlloc(SharedGpuContext *shgcon, Size required)
 {
+	dmaBufferEntry	   *entry;
+	dmaBufferLocalMap  *l_map;
+	dmaBufferSegment   *segment;
+	dlist_node		   *dnode;
+	Size				chunk_size;
+	int					mclass;
+	bool				has_exclusive_lock = false;
 
+	/* normalize the required size to 2^N of chunks size */
+	chunk_size = MAXALIGN(offsetof(dmaBufferChunk, data) +
+						  required +
+						  sizeof(cl_uint));
+	chunk_size = Max(chunk_size, DMABUF_CHUNKSZ_MIN);
+	mclass = get_next_log2(chunk_size);
+	if ((1UL << mclass) > dma_segment_size / 2)
+		elog(ERROR, "DMA buffer request %zu bytes too large", required);
+
+	/* find out an available segment */
+	LWLockAcquire(&dmaBufEntryHead->mutex, LW_SHARED);
+retry:
+	dlist_foreach(iter, &dmaBufEntryHead->active_segment_list)
+	{
+		entry = dlist_container(dmaBufferEntry, chain, iter.cur);
+		Assert(entry->has_shmseg);
+		l_map = &dmaBufLocalMaps[entry->segment_id];
+		segment = (dmaBufferSegment *) l_map->mmap_ptr;
+
+		SpinLockAcquire(&segment->lock);
+		result = dmaBufferAllocChunk(segment, mclass, required);
+		if (result)
+		{
+			SpinLockRelease(&segment->lock);
+			LWLockRelease(&dmaBufEntryHead->mutex);
+			return result;
+		}
+		SpinLockRelease(&segment->lock);
+	}
+	/* Oops, no available free chunks in the active list */
+
+	if (!has_exclusive_lock)
+	{
+		LWLockRelease(&dmaBufEntryHead->mutex);
+		LWLockAcquire(&dmaBufEntryHead->mutex, LW_EXCLUSIVE);
+		has_exclusive_lock = true;
+		goto retry;
+	}
+
+	if (dlist_is_empty(&dmaBufEntryHead->inactive_segment_list))
+		elog(ERROR, "out of DMA buffer segment");
+
+	/* create a new DMA buffer segment and attach it */
+	dnode = dlist_pop_head_node(&dmaBufEntryHead->inactive_segment_list);
+	entry = dlist_container(dmaBufferEntry, chain, dnode);
+	SpinLockAcquire(&entry->lock);
+	Assert(!entry->has_shmseg);
+	Assert(entry->map_count == 0);
+	create_dma_buffer_segment(entry);
+	SpinLockRelease(&entry->lock);
+
+	dlist_push_head(&dmaBufEntryHead->active_segment_list,
+					&entry->&chain);
+	goto retry;
 }
 
 void *
 dmaBufferAlloc(GpuContext_v2 *gcontext, Size required)
 {
-	SharedGpuContext   *shgcon = (gcontext ? gcontext->shgcon : NULL);
+	SharedGpuContext   *shgcon = gcontext->shgcon;
 
-	return __dmaBufferAlloc(shgcon);
+	return __dmaBufferAlloc(shgcon, required);
 }
+
+
+
+
+void *
+dmaBufferRealloc(void *pointer, Size required)
+{}
 
 void
 dmaBufferFree(void *l_ptr)
@@ -450,7 +561,7 @@ pgstrom_init_dma_buffer(void)
 							&dma_segment_size_kb,
 							2 << 20,		/* 2GB */
 							256 << 10,		/* 256MB */
-							64 << 20,		/* 64GB */
+							1UL << (DMABUF_CHUNKSZ_MAX_BIT - 10),	/* 64GB */
 							PGC_POSTMASTER,
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
 							NULL, NULL, NULL);
