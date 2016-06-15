@@ -347,7 +347,12 @@ extern SharedGpuContext *AttachGpuContext(cl_int context_id,
 extern void PutGpuContext(GpuContext_v2 *gcontext);
 extern void PutSharedGpuContext(SharedGpuContext *shgcon);
 
-
+/*
+ * dma_buffer.c
+ */
+extern void *dmaBufferAlloc(GpuContext_v2 *gcontext);
+extern void dmaBufferFree(void *l_ptr);
+extern void pgstrom_init_dma_buffer(void);
 
 /*
  * gpu_server.c

@@ -18,7 +18,7 @@
  */
 #ifndef DMA_BUFFER_H
 #define DMA_BUFFER_H
-
+#if 0
 /* definition of the portable shared address */
 typedef cl_ulong		port_addr_t;
 
@@ -161,4 +161,5 @@ plist_tail_node(plist_head *head)
 		 (iter).cur != (iter).end;								\
 		 (iter).cur = paddr_to_local((iter).next))
 
+#endif
 #endif	/* DMA_BUFFER_H */

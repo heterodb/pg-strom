@@ -22,57 +22,54 @@
 /*
  * dmaBufferEntryHead / dmaBufferEntry
  *
- * It represents the status of DSM segments already exists, but may not be
- * mapped on the private address space of individual processes. Once a
- * portable address that points a DMA buffer not mapped but exists, it will
- * map the segment on demand.
- *
- * Note that dmaBufferEntryHead and dmaBufferEntry are allocated on the
- * static shared memory region, thus, we can use dlist instead of plist.
+ * It manages the current status of DMA buffers.
  */
 typedef struct dmaBufferEntry
 {
-	dlist_node		chain;
-	cl_uint			segment_id;
-	slock_t			lock;		/* also used for alloc/free */
-	cl_int			map_count;
-	dsm_handle		handle;
+	dlist_node	chain;
+	cl_uint		segment_id;
+	slock_t		lock;
+	cl_bool		has_shmseg;
+	cl_int		map_count;
 } dmaBufferEntry;
 
 typedef struct dmaBufferEntryHead
 {
-	LWLock			mutex;
-	dlist_head		active_segment_list;
-	dlist_head		inactive_segment_list;
-	dmaBufferEntry	entries[FLEXIBLE_ARRAY_MEMBER];
+	char	   *vaddr_head;
+	char	   *vaddr_tail;
+	LWLock		mutex;
+	dlist_head	active_segment_list;
+	dlist_head	inactive_segment_list;
+	dmaBufferEntry entries[FLEXIBLE_ARRAY_MEMBER];
 } dmaBufferEntryHead;
 
 /*
- * dmaBufferLocalEntry - status of local mapping of dmaBuffer
+ * dmaBufferLocalMap - status of local mapping of dmaBuffer
  */
 typedef struct dmaBufferLocalEntry
 {
-	dmaBufferEntry *entry;
-	dsm_segment	   *segment;	/* system DSM segment */
-	port_addr_t		p_addr;		/* shared portable address */
-} dmaBufferLocalEntry;
+	dmaBufferEntry *entry;		/* reference to the global entry */
+	void	   *mmap_ptr;		/* address for mmap(2) */
+	int			fdesc;			/* valid FD, if segment is mapped */
+	bool		cuda_pinned;	/* true, if already pinned by CUDA */
+} dmaBufferLocalMap;
 
 /*
  * static variables
  */
-static dmaBufferEntryHead	   *dmaBufEntryHead = NULL;		/* shared memory */
-static dmaBufferLocalEntry	   *dmaBufLocalEntry = NULL;
-static dmaBufferLocalEntry	  **dmaBufLocalIndex = NULL;	/* index by addr */
-static int						dmaBufLocalCount = 0;
-static size_t		dma_segment_size;
-static int			dma_segment_size_kb;	/* GUC */
-static int			max_dma_segment_nums;	/* GUC */
-static int			min_dma_segment_nums;	/* GUC */
-static int			port_addr_shift;
-static port_addr_t	port_addr_mask;
+static dmaBufferEntryHead  *dmaBufEntryHead = NULL;		/* shared memory */
+static dmaBufferLocalMap   *dmaBufLocalMaps = NULL;
+static size_t	dma_segment_size;
+static int		dma_segment_size_kb;	/* GUC */
+static int		max_dma_segment_nums;	/* GUC */
+static int		min_dma_segment_nums;	/* GUC */
+static void	  (*sighandler_sigsegv_orig)(int,siginfo_t *,void *) = NULL;
+static void	  (*sighandler_sigbus_orig)(int,siginfo_t *,void *) = NULL;
 
-#define PADDR_GET_SEG_ID(paddr)		((paddr) >> port_addr_shift)
-#define PADDR_GET_SEG_OFFSET(paddr)	((paddr) & port_addr_mask)
+#define SHMSEGMENT_NAME(namebuf, segment_id)				\
+	snprintf((namebuf),sizeof(namebuf),"/.pg_strom.%u.%u",	\
+			 PostPortNumber, (segment_id))
+
 
 #define DMABUF_CHUNKSZ_MAX_BIT		36
 #define DMABUF_CHUNKSZ_MIN_BIT		8
@@ -80,17 +77,18 @@ static port_addr_t	port_addr_mask;
 #define DMABUF_CHUNKSZ_MIN			(1UL << DMABUF_CHUNKSZ_MIN_BIT)
 #define DMABUF_CHUNK_DATA(chunk)	((chunk)->data)
 #define DMABUF_CHUNK_MAGIC_HEAD		0xDEADBEAF
-#define DMABUF_CHUNK_MAGIC_TAIL		0x
-#define DMABUF_CHUNK_
+#define DMABUF_CHUNK_MAGIC_TAIL		0xCAFEF00D
+
 
 typedef struct dmaBufferChunk
 {
-	// offset from the dmaBufferSegment
-	plist_node		addr_chain;		/* link by addr order */
-	plist_node		free_chain;		/* link to free chunks, or zero if active*/
-
-	cl_uint			magic_head;		/* = DMABUF_CHUNK_MAGIC_HEAD */
-	char			data[FLEXIBLE_ARRAY_MEMBER];
+	dlist_node	addr_chain;		/* link by address order */
+	dlist_node	free_chain;		/* link to free chunks, or zero if active */
+	SharedGpuContext *shgcon;	/* GpuContext that owns this chunk */
+	size_t		required;		/* required length */
+	cl_uint		mclass;			/* class of the chunk size */
+	cl_uint		magic_head;		/* = DMABUF_CHUNK_MAGIC_HEAD */
+	char		data[FLEXIBLE_ARRAY_MEMBER];
 } dmaBufferChunk;
 
 typedef struct dmaBufferSegment
@@ -99,274 +97,236 @@ typedef struct dmaBufferSegment
 	plist_head		free_chunks[DMABUF_CHUNKSZ_MAX_BIT + 1];
 } dmaBufferSegment;
 
-
-
-
-static inline dmaBufferLocalEntry *
-lookupDmaBufferLocalEntry(const void *addr)
+/*
+ * create_dma_buffer_segment - create a new DMA buffer segment
+ *
+ * NOTE: caller must have lock on &dmaBufferEntry->lock
+ */
+static bool
+create_dma_buffer_segment(dmaBufferEntry *entry)
 {
-	dmaBufferLocalEntry *l_ent;
-	cl_uint		i_head = 0;
-	cl_uint		i_tail = dmaBufLocalCount;
-	cl_uint		i_curr;
-	cl_uint		i;
+	dmaBufferLocalMap *l_map;
+	char		namebuf[80];
+	int			fdesc;
 
-	while (i_head < i_tail)
-	{
-		i_curr = (i_head + i_tail) / 2;
+	Assert(entry->segment_id < max_dma_segment_nums);
+	Assert(!entry->has_shmseg);
 
-		Assert(i_curr < dmaBufLocalCount);
-		l_ent = dmaBufLocalIndex[i_curr];
-		if (addr < (const char *)dsm_segment_address(l_ent->segment))
-			i_tail = i_curr - 1;
-		else if (addr >= ((const char *)dsm_segment_address(l_ent->segment)
-						  + dma_segment_size))
-			i_head = i_curr + 1;
-		else
-			return l_ent;
-	}
-	elog(WARNING, "dmaBufferLocalEntry for addr=%p not found", addr);
-	for (i=0; i < dmaBufLocalCount; i++)
+	l_map = &dmaBufLocalMaps[entry->segment_id];
+	Assert(l_map->fdesc < 0);
+
+	SHMSEGMENT_NAME(namebuf, entry->segment_id);
+	fdesc = shm_open(namebuf, O_RDWR | O_CREAT | O_EXCL, 0600);
+	if (fdesc < 0)
+		return false;
+
+	if (ftruncate(fdesc, dma_segment_size) != 0)
 	{
-		elog(WARNING, "dmaBufLocalEntry[%d] (%p-%p) {DSM=%p, PADDR=%p}",
-			 i,
-			 (char *)dsm_segment_address(l_ent->segment),
-			 (char *)dsm_segment_address(l_ent->segment) + dma_segment_size,
-			 l_ent->segment,
-			 l_ent->p_addr);
+		close(fdesc);
+		shm_unlink(namebuf);
 	}
-	return NULL;
+
+	mmap_ptr = mmap(l_map->mmap_ptr, dma_segment_size,
+					PROT_READ | PROT_WRITE,
+					MAP_SHARED | MAP_FIXED | MAP_HUGETLB,
+					fdesc, 0);
+	if (mmap_ptr == (void *)(~0UL))
+	{
+		close(fdesc);
+		shm_unlink(namebuf);
+	}
+	Assert(mmap_ptr == l_map->mmap_ptr);
+
+	/* OK, shared memory segment gets successfully created */
+	entry->has_shmseg = true;
+	entry->map_count++;
+	Assert(entry->map_count == 1);
+
+	l_map->fdesc = fdesc;
+	l_map->cuda_pinned = false;
+
+	return true;
 }
 
 /*
- * callback on dsm_detach
+ * attach_dma_buffer_segment - attach an existing DMA buffer segment
+ *
+ * NOTE: caller must have lock on &dmaBufferEntry->lock
+ */
+static bool
+attach_dma_buffer_segment(dmaBufferEntry *entry)
+{
+	dmaBufferLocalMap  *l_map = &dmaBufLocalMaps[entry->segment_id];
+	char		namebuf[80];
+	int			fdesc;
+	char	   *mmap_ptr;
+
+	/* sanity checks */
+	if (!entry->has_shmseg)
+	{
+		fprintf(stderr, "Bug? DMA buffer (seg=%u) not exists, but attached\n",
+				entry->segment_id);
+		return false;
+	}
+	Assert(entry->map_count > 0 ||
+		   entry->segment_id < min_dma_segment_nums);
+
+	if (l_map->fdesc >= 0)
+	{
+		fprintf(stderr, "Bug? DMA buffer (seg=%u at %p) is already attached\n",
+				entry->segment_id, l_map->mmap_ptr);
+		return false;
+	}
+
+	/* open an existing shared memory segment */
+	SHMSEGMENT_NAME(namebuf, entry->segment_id);
+	fdesc = shm_open(namebuf, O_RDWR, 0600);
+	if (fdesc < 0)
+	{
+		fprintf(stderr, "failed on shm_open('%s') : %m\n", namebuf);
+		return false;
+	}
+
+	/*
+	 * NOTE: no need to call ftruncate(2) here because somebody who
+	 * created the segment should already expand the segment
+	 */
+
+	/* map this shared memory segment */
+	mmap_ptr = mmap(l_map->mmap_ptr, dma_segment_size,
+					PROT_READ | PROT_WRITE,
+					MAP_SHARED | MAP_FIXED | MAP_HUGETLB,
+					fdesc, 0);
+	if (mmap_ptr == (void *)(~0UL))
+	{
+		fprintf(stderr, "failed on mmap : %m\n", mmap_ptr);
+		close(fdesc);
+		return false;
+	}
+	Assert(mmap_ptr == l_map->mmap_ptr);
+
+	/* OK, this segment is successfully mapped */
+	l_map->fdesc = fdesc;
+	entry->map_count++;
+
+	return true;
+}
+
+/*
+ * detach_dma_buffer_segment - detach a DMA buffer segment already attached
+ *
+ * NOTE: caller must have lock on &dmaBufferEntry->lock
  */
 static void
-on_detach_dma_buffer_segment(dsm_segment *segment, Datum arg)
+detach_dma_buffer_segment(dmaBufferEntry *entry)
 {
-	dmaBufferLocalEntry *l_ent;
-	dmaBufferEntry *entry;
-	cl_int			segment_id = DatumGetInt32(arg);
-	bool			mutex_locked = false;
-	cl_int			i;
+	dmaBufferLocalMap  *l_map = &dmaBufLocalMaps[entry->segment_id];
+	char		namebuf[80];
 
-	Assert(segment_id >= 0 && segment_id < max_dma_segment_nums);
-	l_ent = &dmaBufLocalEntry[segment_id];
-	Assert(!segment || l_ent->segment == segment);
-	entry = l_ent->entry;
-	Assert(entry->segment_id == segment_id);
+	/* sanity checks */
+	Assert(l_map->fdesc >= 0);
+	Assert(entry->map_count > 0);
 
-retry:
-	SpinLockAcquire(&entry->lock);
-	Assert(entry->map_count > 0);	/* must be active segment */
-	if (entry->map_count == 1)
+	/* map invalid area, instead of the shared memory segment */
+	if (mmap(l_map->mmap_ptr, dma_segment_size,
+			 PROT_NONE,
+			 MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
+			 -1, 0) == (void *)(~0UL))
+		fprintf(stderr, "failed to mmap(PROT_NONE) (seg=%u at %p): %m\n",
+				entry->segment_id, l_map->mmap_ptr);
+
+	/* close file; just warning for errors */
+	if (close(l_map->fdesc) != 0)
+		fprintf(stderr, "failed to close DMA buffer handler (seg=%u): %m\n",
+				entry->segment_id);
+
+	/* unmap the shared memory segment */
+	if (--entry->map_count == 0 && entry->segment_id >= min_dma_segment_nums)
 	{
-		if (!mutex_locked)
-		{
-			SpinLockRelease(&entry->lock);
-			LWLockAcquire(&dmaBufEntryHead->mutex, LW_EXCLUSIVE);
-			mutex_locked = true;
-			goto retry;
-		}
-		dlist_delete(&entry->chain);
-		entry->map_count--;
-		entry->handle = 0x12345678;
-		dlist_push_tail(&dmaBufEntryHead->inactive_segment_list,
-						&entry->chain);
-	}
-	SpinLockRelease(&entry->lock);
-	if (mutex_locked)
-		LWLockRelease(&dmaBufEntryHead->mutex);
-
-	/* clean up local entry */
-	memset(l_ent, 0, sizeof(dmaBufferLocalEntry));
-
-	/* remove from the index, if any */
-	for (i=0; i < dmaBufLocalCount; i++)
-	{
-		if (dmaBufLocalIndex[i] == l_ent)
-		{
-			memmove(&dmaBufLocalIndex[i],
-					&dmaBufLocalIndex[i+1],
-					sizeof(dmaBufferLocalEntry *) *
-					(dmaBufLocalCount - (i + 1)));
-			dmaBufLocalCount--;
-			break;
-		}
+		SHMSEGMENT_NAME(namebuf, entry->segment_id);
+		if (shm_unlink(namebuf) != 0)
+			fprintf(stderr, "failed to unlink DMA buffer (seg=%u): %m\n",
+					entry->segment_id);
+		entry->has_shmseg = false;
 	}
 }
 
 /*
- * common post process for both of create and attach
+ * attach_dma_buffer_on_demand
+ *
+ * A signal handler to be called on SIGBUS/SIGSEGV. If memory address which
+ * caused a fault is in a range of virtual DMA buffer mapping, it tries to
+ * map the shared buffer page.
+ * Note that this handler never create a new DMA buffer segment but maps
+ * an existing range, because nobody (except for buggy code) will point
+ * the location which not mapped yet.
  */
-static inline void
-__post_dsm_attach(dmaBufferLocalEntry *l_ent)
+static void
+attach_dma_buffer_on_demand(int signum, siginfo_t *siginfo, void *unused)
 {
-	void   *map_addr;
-	int		i;
-	/*
-	 * index of the dmaBufferLocalEntry, according to the local address
-	 * of the shared segment attached.
-	 */
-	map_addr = dsm_segment_address(l_ent->segment);
-	for (i=0; i < dmaBufLocalCount; i++)
+	static bool	internal_error = false;
+	int			save_errno;
+
+	if (internal_error)
 	{
-		if (dsm_segment_address(dmaBufLocalIndex[i]->segment) > map_addr)
+		internal_error = true;	/* prevent infinite loop */
+		save_errno = errno;
+		PG_SETMASK(&BlockSig);
+
+		if (dmaBufEntryHead &&
+			dmaBufEntryHead->vaddr_head <= siginfo->sa_addr &&
+			dmaBufEntryHead->vaddr_tail >  siginfo->sa_addr)
 		{
-			memmove(&dmaBufLocalIndex[i+1],
-					&dmaBufLocalIndex[i],
-					sizeof(dmaBufferLocalEntry *) * (dmaBufLocalCount - i));
-			dmaBufLocalIndex[i] = l_ent;
-			dmaBufLocalCount++;
+			dmaBufferLocalMap  *l_map;
+			int		seg_id;
+
+			seg_id = ((uintptr_t)siginfo->sa_addr -
+					  (uintptr_t)dmaBufEntryHead->vaddr_head)
+				/ dma_segment_size;
+			Assert(seg_id < max_dma_segment_nums);
+			l_map = &dmaBufLocalMaps[seg_id];
+			if (l_map->fdesc >= 0)
+			{
+				fprintf(stderr, "%s on mapped DMA buffer (seg=%u at %p)\n",
+						strsignal(signum), seg_id, siginfo->sa_addr);
+				goto default_handle;
+			}
+
+			SpinLockAcquire(&entry->lock);
+			if (!attach_dma_buffer_segment(entry))
+			{
+				SpinLockRelease(&entry->lock);
+				goto default_handle;
+			}
+			SpinLockRelease(&entry->lock);
 			return;
 		}
+	default_handle:
+		PG_SETMASK(&UnBlockSig);
+		errno = save_errno;
 	}
-	dmaBufLocalIndex[dmaBufLocalCount++] = l_ent;
 
-	/*
-	 * Pin the DSM segment, if GpuServer.
-	 */
-	if (IsGpuServerProcess())
+	if (signum == SIGSEGV)
+		(*sighandler_sigsegv_orig)(signum, siginfo, unused);
+	else if (signum == SIGBUS)
+		(*sighandler_sigbus_orig)(signum, siginfo, unused);
+	else
 	{
-		CUresult	rc;
-
-		rc = cuMemHostRegister(map_addr, dma_segment_size, 0);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuMemHostRegister: %s", errorText(rc));
+		fprintf(stderr, "%s was called for %s\n",
+				__FUNCTION__, strsignal(signum));
+		proc_exit(2);	/* panic */
 	}
-
+	internal_error = false;		/* reset */
 }
 
-/*
- * create_dma_buffer_segment - create a new DMA segment and attach it
- */
-static cl_uint
-create_dma_buffer_segment(void)
-{
-	dlist_node	   *dnode;
-	dsm_segment	   *segment;
-	dmaBufferEntry *entry;
-	dmaBufferLocalEntry *l_ent;
-	int				i;
 
-	LWLockAcquire(&dmaBufEntryHead->mutex, LW_EXCLUSIVE);
-	if (dlist_is_empty(&dmaBufEntryHead->inactive_segment_list))
-		elog(ERROR, "out of DMA buffer segment entries");
-	dnode = dlist_pop_head_node(&dmaBufEntryHead->inactive_segment_list);
-	entry = dlist_container(dmaBufferEntry, chain, dnode);
-	Assert(entry->segment_id < max_dma_segment_nums);
-	Assert(entry->map_count == 0);
-	l_ent = dmaBufLocalEntry[entry->segment_id];
-	Assert(l_ent->segment == NULL && l_ent->entry == NULL);
 
-	PG_TRY();
-	{
-		segment = dsm_create(dma_segment_size, 0);
-		/*
-		 * NOTE: DSM segment shall be managed by resource owner indirectly.
-		 * Individual chunks in the segment are managed by GpuContext, and
-		 * GpuContext is owned by resource owner. So, once DSM segment gets
-		 * unreferenced by all the GpuContext that had chunks on the DSM,
-		 * it is the time for detach.
-		 */
-		dsm_pin_mapping(segment);
 
-		/* unsure to decrement map_count on detach */
-		on_dsm_detach(segment, on_detach_dma_buffer_segment,
-					  Int32GetDatum(entry->segment_id));
 
-		/* init shared entry */
-		entry->map_count = 1;
-		entry->handle = dsm_segment_handle(segment);
 
-		/* init local entry */
-		l_ent->entry = entry;
-		l_ent->segment = segment;
-		l_ent->p_addr = (port_addr_t)entry->segment_id << port_addr_shift;
 
-		/* mark it as an active segment */
-		dlist_push_tail(&dmaBufEntryHead->active_segment_list,
-						&entry->chain);
-	}
-	PG_CATCH();
-	{
-		dlist_push_head(&dmaBufEntryHead->inactive_segment_list,
-						&entry->chain);
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-	LWLockRelease(&dmaBufEntryHead->mutex);
-	/* common post process */
-	__post_dsm_attach(l_ent);
-}
 
-/*
- * attach_dma_buffer_segment - attach an exist DMA buffer segment on the
- * current process's local address space.
- */
-static void
-attach_dma_buffer_segment(cl_int segment_id)
-{
-	dsm_segment	   *segment = NULL;
-	dsm_handle		handle;
-	dmaBufferEntry *entry;
-	dmaBufferLocalEntry *l_ent;
 
-	Assert(segment_id >= 0 && segment_id < max_dma_segment_nums);
-	l_ent = &dmaBufLocalEntry[segment_id];
-	Assert(l_ent->segment == NULL && l_ent->entry == NULL);
-
-	entry = &dmaBufEntryHead->entries[segment_id];
-	SpinLockAcquire(&entry->lock);
-	Assert(entry->map_count > 0);	/* must be an exist segment */
-	entry->map_count++;
-	l_ent->entry = entry;
-	handle = entry->handle;
-	SpinLockRelease(&entry->lock);
-
-	PG_TRY();
-	{
-		segment = dsm_attach(handle);
-		on_dsm_detach(segment, on_detach_dma_buffer_segment,
-					  Int32GetDatum(segment_id));
-	}
-	PG_CATCH();
-	{
-		on_detach_dma_buffer_segment(segment, Int32GetDatum(segment_id));
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-	l_ent->segment = segment;
-	l_ent->p_addr = (port_addr_t)segment_id << port_addr_shift;
-	/* common post process */
-	__post_dsm_attach(l_ent);
-}
-
-/*
- * detach_dma_buffer_segment - detach this segment
- */
-static void
-detach_dma_buffer_segment(cl_uint segment_id)
-{
-	l_ent = &dmaBufLocalEntry[segment_id];
-	Assert(l_ent->segment != NULL && l_ent->entry != NULL);
-	dsm_detach(l_ent->segment);
-	Assert(l_ent->segment == NULL && l_ent->entry == NULL);
-}
-
-/*
- * paddr_to_local - transform a portable shared address to local pointer
- */
-void *
-paddr_to_local(port_addr_t paddr)
-{}
-
-/*
- * local_to_paddr - transform a local pointer to a portable shared address
- */
-port_addr_t
-local_to_paddr(void *l_ptr)
-{}
 
 
 
@@ -406,6 +366,14 @@ dmaBufferFree(void *l_ptr)
 
 
 
+
+
+
+
+
+
+
+
 /*
  * pgstrom_startup_dma_buffer
  */
@@ -425,24 +393,39 @@ pgstrom_startup_dma_buffer(void)
 	Assert(!found);
 	memset(dmaBufEntryHead, 0, length);
 
-	length = sizeof(dmaBufferLocalEntry) * max_dma_segment_nums;
-	dmaBufLocalEntry = MemoryContextAllocZero(TopMemoryContext, length);
-
-	length = sizeof(dmaBufferLocalEntry *) * max_dma_segment_nums;
-	dmaBufLocalIndex = MemoryContextAllocZero(TopMemoryContext, length);
+	length = sizeof(dmaBufferLocalMap) * max_dma_segment_nums;
+	dmaBufLocalMaps = MemoryContextAllocZero(TopMemoryContext, length);
 
 	LWLockInitialize(&dmaBufEntryHead->mutex);
 	dlist_init(&dmaBufEntryHead->active_segment_list);
 	dlist_init(&dmaBufEntryHead->inactive_segment_list);
 
+	/* preserve private address space but no physical memory */
+	length = (Size)max_dma_segment_nums * dma_segment_size;
+	dmaBufEntryHead->vaddr_head = mmap(NULL, length,
+									   PROT_NONE,
+									   MAP_PRIVATE | MAP_ANONYMOUS,
+									   -1, 0);
+	if (dmaBufEntryHead->vaddr_head == (void *)(~0UL))
+		elog(ERROR, "failed on mmap(PROT_NONE, len=%zu) : %m", length);
+	dmaBufEntryHead->vaddr_tail = dmaBufEntryHead->vaddr_head + length;
+
 	for (i=0; i < max_dma_segment_nums; i++)
 	{
-		dmaBufferEntry *entry = &dmaBufEntryHead->entries[i];
+		dmaBufferEntry	   *entry = &dmaBufEntryHead->entries[i];
+		dmaBufferLocalMap  *l_map = &dmaBufLocalMaps[i];
 
+		memset(entry, 0, sizeof(dmaBufferEntry));
+		entry->segment_id = i;
+		SpinLockInit(&entry->lock);
 		dlist_push_tail(&dmaBufEntryHead->inactive_segment_list,
 						&entry->chain);
-		entry->segment_id = i;
-		entry->map_count = 0;
+
+		l_map->entry = entry;
+		l_map->mmap_ptr = (dmaBufEntryHead->vaddr_head +
+						   (Size)i * dma_segment_size);
+		l_map->fdesc = -1;
+		l_map->cuda_pinned = false;
 	}
 }
 
@@ -452,7 +435,9 @@ pgstrom_startup_dma_buffer(void)
 void
 pgstrom_init_dma_buffer(void)
 {
-
+	struct sigaction	sigact;
+	struct sigaction	oldact;
+	char				namebuf[80];
 
 	/*
 	 * Unit size of DMA buffer segment
@@ -500,15 +485,35 @@ pgstrom_init_dma_buffer(void)
 							GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
 
+	/*
+	 * Clean up shmem segment, if any
+	 */
+	for (i=0; i < max_dma_segment_nums; i++)
+	{
+		SHMSEGMENT_NAME(namebuf, i);
+		if (shm_unlink(namebuf) && errno != ENOENT)
+			elog(LOG, "shm_unlink('%s') : %m", namebuf);
+	}
+
+	/*
+	 * registration of signal handles for DMA buffers
+	 */
+	memset(&sigact, 0, sizeof(struct aigaction));
+	sigact.sa_sigaction = attach_dma_buffer_on_demand;
+	sigemptyset(&sigact.sa_mask);
+	sigact.sa_flags = SA_SIGINFO;
+
+	if (sigaction(SIGSEGV, &sigact, &oldact) != 0)
+		elog(ERROR, "failed on sigaction for SIGSEGV: %m");
+	sighandler_sigsegv_orig = oldact.sa_sigaction;
+
+	if (sigaction(SIGBUS, &sigact, &oldact) != 0)
+		elog(ERROR, "failed on sigaction for SIGBUS: %m");
+	sighandler_sigbus_orig = oldact.sa_sigaction;
+
 	/* request for the static shared memory */
 	RequestAddinShmemSpace(offsetof(dmaBufferEntryHead,
 									entries[max_dma_segment_nums]));
 	shmem_startup_hook_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_dma_buffer;
 }
-
-
-
-
-
-
