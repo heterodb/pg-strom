@@ -808,7 +808,7 @@ array_matrix_rbind_final(matrix_rbind_state *mrstate)
 		cl_int		x_height = ARRAY_MATRIX_HEIGHT(X);
 		cl_int		i;
 
-		Assert(VALIDATE_ARRAY_MATRIX(matrix));
+		Assert(VALIDATE_ARRAY_MATRIX(X));
 		src = ARRAY_MATRIX_DATAPTR(X);
 		dst = ARRAY_MATRIX_DATAPTR(X) + typlen * row_index;
 		for (i=0; i < width; i++)
