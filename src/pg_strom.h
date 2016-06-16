@@ -111,7 +111,7 @@ typedef struct SharedGpuContext
 	PGPROC	   *server;			/* PGPROC of GPU/CUDA Server */
 	PGPROC	   *backend;		/* PGPROC of Backend Process */
 
-	// tracker of the portable shared memory blocks
+	dlist_head	dma_buffer_list;/* tracker of DMA buffers */
 
 	/*
 	 * Error status on the GPU/CUDA server
@@ -348,8 +348,9 @@ extern void PutSharedGpuContext(SharedGpuContext *shgcon);
 /*
  * dma_buffer.c
  */
-extern void *dmaBufferAlloc(GpuContext_v2 *gcontext);
-extern void dmaBufferFree(void *l_ptr);
+extern void *dmaBufferAlloc(GpuContext_v2 *gcontext, Size required);
+extern void *dmaBufferRealloc(void *pointer, Size required);
+extern void dmaBufferFree(void *pointer);
 extern void pgstrom_init_dma_buffer(void);
 
 /*
