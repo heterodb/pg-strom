@@ -751,6 +751,37 @@ dmaBufferRealloc(void *pointer, Size required)
 	return result;
 }
 
+/*
+ * dmaBufferSize - tells the length caller can use
+ */
+Size
+dmaBufferSize(void *pointer)
+{
+	dmaBufferSegment   *seg;
+	dmaBufferChunk	   *chunk;
+
+	chunk = pointer_validation(pointer, &seg);
+
+	return chunk->required;
+}
+
+/*
+ * dmaBufferChunkSize - return the length physically allocated (always 2^N)
+ */
+Size
+dmaBufferChunkSize(void *pointer)
+{
+	dmaBufferSegment   *seg;
+	dmaBufferChunk	   *chunk;
+
+	chunk = pointer_validation(pointer, &seg);
+
+	return (1UL << chunk->mclass);
+}
+
+/*
+ * dmaBufferFree
+ */
 void
 dmaBufferFree(void *pointer)
 {

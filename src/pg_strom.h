@@ -341,6 +341,8 @@ typedef struct pgstrom_data_store
  */
 extern void *dmaBufferAlloc(GpuContext_v2 *gcontext, Size required);
 extern void *dmaBufferRealloc(void *pointer, Size required);
+extern Size dmaBufferSize(void *pointer);
+extern Size dmaBufferChunkSize(void *pointer);
 extern void dmaBufferFree(void *pointer);
 extern void dmaBufferFreeAll(SharedGpuContext *shgcon);
 extern Datum pgstrom_dma_buffer_alloc(PG_FUNCTION_ARGS);
