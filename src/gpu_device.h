@@ -36,8 +36,8 @@ typedef struct DevAttributes
 	cl_int		MAX_GRID_DIM_Z;
 	cl_int		MAX_SHARED_MEMORY_PER_BLOCK;
 	cl_int		TOTAL_CONSTANT_MEMORY;
-	cl_int		ATTRIBUTE_WARP_SIZE;
-	cl_int		ATTRIBUTE_MAX_PITCH;
+	cl_int		WARP_SIZE;
+	cl_int		MAX_PITCH;
 	cl_int		MAX_REGISTERS_PER_BLOCK;
 	cl_int		REGISTERS_PER_BLOCK;
 	cl_int		CLOCK_RATE;

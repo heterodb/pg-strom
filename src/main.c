@@ -385,9 +385,15 @@ _PG_init(void)
 	elog(LOG, "PG-Strom version %s built for PostgreSQL %s",
 		 PGSTROM_VERSION, PG_MAJORVERSION);
 
-	/* initialization of CUDA related stuff */
+	/* init GPU/CUDA infrastracture */
+	pgstrom_init_dma_buffer();
 	pgstrom_init_gpu_device();
-	pgstrom_init_gpu_server();
+	pgstrom_init_gpu_context();
+
+
+	/* initialization of CUDA related stuff */
+//	pgstrom_init_gpu_device();
+//	pgstrom_init_gpu_server();
 
 
 

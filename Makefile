@@ -41,7 +41,7 @@ PG_MAX_VERSION_NUM=$(shell echo $(PG_MAX_VERSION) | awk '{print $$NF}'	\
 __STROM_OBJS = main.o codegen.o datastore.o aggfuncs.o \
 		cuda_control.o cuda_program.o cuda_mmgr.o \
 		gpuscan.o gpujoin.o gpupreagg.o gpusort.o \
-		gpu_server.o gpu_context.o gpu_device.o dma_buffer.o \
+		dma_buffer.o gpu_device.o gpu_context.o \
 		pl_cuda.o matrix.o
 
 STROM_OBJS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__STROM_OBJS))

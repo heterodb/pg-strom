@@ -6,6 +6,29 @@ CREATE SCHEMA IF NOT EXISTS pgstrom;
 --
 -- pg_strom installation queries
 --
+CREATE TYPE pgstrom.__pgstrom_dma_buffer_info AS (
+  seg_id    int4,
+  revision  int4,
+  mclass    int4,
+  actives   int4,
+  frees     int4
+);
+CREATE FUNCTION pg_catalog.pgstrom_dma_buffer_info()
+  RETURNS SETOF pgstrom.__pgstrom_dma_buffer_info
+  AS 'MODULE_PATHNAME','pgstrom_dma_buffer_info'
+  LANGUAGE C STRICT;
+
+-- for debug
+CREATE FUNCTION pg_catalog.pgstrom_dma_buffer_alloc(bigint)
+  RETURNS bigint
+  AS 'MODULE_PATHNAME','pgstrom_dma_buffer_alloc'
+  LANGUAGE C STRICT;
+-- for debug
+CREATE FUNCTION pg_catalog.pgstrom_dma_buffer_free(bigint)
+  RETURNS bigint
+  AS 'MODULE_PATHNAME','pgstrom_dma_buffer_free'
+  LANGUAGE C STRICT;
+
 CREATE TYPE __pgstrom_device_info AS (
   id		int4,
   property	text,

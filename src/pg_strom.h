@@ -337,26 +337,34 @@ typedef struct pgstrom_data_store
  */
 
 /*
- * gpu_context.c
- */
-extern GpuContext_v2 *GetGpuContext(void);
-extern SharedGpuContext *AttachGpuContext(cl_int context_id,
-										  BackendId backend_id);
-extern void PutGpuContext(GpuContext_v2 *gcontext);
-extern void PutSharedGpuContext(SharedGpuContext *shgcon);
-
-/*
  * dma_buffer.c
  */
 extern void *dmaBufferAlloc(GpuContext_v2 *gcontext, Size required);
 extern void *dmaBufferRealloc(void *pointer, Size required);
 extern void dmaBufferFree(void *pointer);
+extern void dmaBufferFreeAll(SharedGpuContext *shgcon);
+extern Datum pgstrom_dma_buffer_alloc(PG_FUNCTION_ARGS);
+extern Datum pgstrom_dma_buffer_free(PG_FUNCTION_ARGS);
+extern Datum pgstrom_dma_buffer_info(PG_FUNCTION_ARGS);
 extern void pgstrom_init_dma_buffer(void);
+
+/*
+ * gpu_context.c
+ */
+extern GpuContext_v2 *MasterGpuContext(void);
+extern GpuContext_v2 *GetGpuContext(void);
+extern SharedGpuContext *AttachGpuContext(cl_int context_id,
+										  BackendId backend_id);
+extern void PutGpuContext(GpuContext_v2 *gcontext);
+extern void PutSharedGpuContext(SharedGpuContext *shgcon);
+extern void pgstrom_init_gpu_context(void);
 
 /*
  * gpu_server.c
  */
-extern bool IsGpuServerProcess(void);
+//extern bool IsGpuServerProcess(void);
+// for debug
+#define IsGpuServerProcess()	false
 
 
 extern void pgstrom_init_gpu_server(void);

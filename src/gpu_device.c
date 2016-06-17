@@ -16,7 +16,9 @@
  * GNU General Public License for more details.
  */
 #include "postgres.h"
+#include "catalog/pg_type.h"
 #include "funcapi.h"
+#include "utils/builtins.h"
 #include "utils/guc.h"
 #include "pg_strom.h"
 #include "gpu_device.h"
@@ -26,25 +28,25 @@ DevAttributes  *devAttrs = NULL;
 cl_int			numDevAttrs = 0;
 
 /* catalog of device attributes */
-enum DevAttrKind {
+typedef enum {
 	DEVATTRKIND__BOOL,
 	DEVATTRKIND__INT,
 	DEVATTRKIND__SIZE,
 	DEVATTRKIND__KHZ,
 	DEVATTRKIND__COMP_MODE,
 	DEVATTRKIND__BITS,
-};
+} DevAttrKind;
 
 static struct {
-	enum CUdevice_attribute	attr_id;
-	enum DevAttrKind attr_kind;
+	CUdevice_attribute	attr_id;
+	DevAttrKind	attr_kind;
 	size_t		attr_offset;
 	const char *attr_desc;
 } DevAttrCatalog[] = {
-#define _DEVATTR(ATTLABEL,ATTKIND,ATTDESC)				\
-	{ CU_DEVICE_ATTRIBUTE_##ATTLABEL,					\
-	  DEVATTRKIND__##ATTKIND,							\
-	  offsetof(struct DevAttributesData, ATTLABEL),		\
+#define _DEVATTR(ATTLABEL,ATTKIND,ATTDESC)			\
+	{ CU_DEVICE_ATTRIBUTE_##ATTLABEL,				\
+	  DEVATTRKIND__##ATTKIND,						\
+	  offsetof(struct DevAttributes, ATTLABEL),		\
 	  (ATTDESC) }
 	_DEVATTR(MAX_THREADS_PER_BLOCK, INT,
 			 "Max number of threads per block"),
@@ -242,7 +244,7 @@ collect_gpu_device_attributes(void)
 	{
 		DevAttributes  *dattrs = &devAttrs[j];
 
-		memset(dattrs, 0, sizeof(DevAttributesData));
+		memset(dattrs, 0, sizeof(DevAttributes));
 		dattrs->DEV_ID = i;
 
 		rc = cuDeviceGet(&dev, dattrs->DEV_ID);
@@ -289,6 +291,7 @@ collect_gpu_device_attributes(void)
 		{
 			elog(LOG, "PG-Strom: GPU%d %s - capability %d.%d is not supported",
 				 dattrs->DEV_ID,
+				 dattrs->DEV_NAME,
 				 dattrs->COMPUTE_CAPABILITY_MAJOR,
 				 dattrs->COMPUTE_CAPABILITY_MINOR);
 			continue;
@@ -403,6 +406,7 @@ Datum
 pgstrom_device_info(PG_FUNCTION_ARGS)
 {
 	FuncCallContext *fncxt;
+	DevAttributes  *dattrs;
 	int				dindex;
 	int				aindex;
 	const char	   *att_name;
@@ -444,7 +448,7 @@ pgstrom_device_info(PG_FUNCTION_ARGS)
 	if (aindex == 0)
 	{
 		att_name = "GPU Device ID";
-		att_velue = psprintf("%d", dattrs->DEV_ID);
+		att_value = psprintf("%d", dattrs->DEV_ID);
 	}
 	else if (aindex == 1)
 	{
@@ -463,7 +467,7 @@ pgstrom_device_info(PG_FUNCTION_ARGS)
 								  DevAttrCatalog[i].attr_offset));
 
 		att_name = DevAttrCatalog[i].attr_desc;
-		switch (DevAttrCatalog[i].attkind)
+		switch (DevAttrCatalog[i].attr_kind)
 		{
 			case DEVATTRKIND__BOOL:
 				att_value = psprintf("%s", value != 0 ? "True" : "False");
@@ -483,7 +487,7 @@ pgstrom_device_info(PG_FUNCTION_ARGS)
 					att_value = psprintf("%d kHz", value);
 				break;
 			case DEVATTRKIND__COMP_MODE:
-				if (value)
+				switch (value)
 				{
 					case CU_COMPUTEMODE_DEFAULT:
 						att_value = "Default";
@@ -507,7 +511,7 @@ pgstrom_device_info(PG_FUNCTION_ARGS)
 				break;
 			default:
 				elog(ERROR, "Bug? unknown DevAttrKind: %d",
-					 (int)DevAttrCatalog[i].attkind);
+					 (int)DevAttrCatalog[i].attr_kind);
 		}
 	}
 	memset(isnull, 0, sizeof(isnull));

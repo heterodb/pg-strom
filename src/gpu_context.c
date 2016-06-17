@@ -16,6 +16,9 @@
  * GNU General Public License for more details.
  */
 #include "postgres.h"
+#include "access/twophase.h"
+#include "storage/ipc.h"
+#include "utils/guc.h"
 #include "utils/memutils.h"
 #include "utils/resowner.h"
 #include "pg_strom.h"
@@ -25,33 +28,46 @@ typedef struct SharedGpuContextHead
 	slock_t			lock;
 	dlist_head		active_list;
 	dlist_head		free_list;
+	SharedGpuContext master_context;
 	SharedGpuContext context_array[FLEXIBLE_ARRAY_MEMBER];
 } SharedGpuContextHead;
 
 /* static variables */
 static shmem_startup_hook_type shmem_startup_hook_next = NULL;
 static SharedGpuContextHead *sharedGpuContextHead = NULL;
-static int			numGpuContexts;	/* GUC */
+static GpuContext_v2	masterGpuContext;
+static int				numGpuContexts;		/* GUC */
 
 static dlist_head		localGpuContextList;
 static dlist_head		inactiveGpuContextList;
 
 /*
+ * MasterGpuContext - acquire the persistent GpuContext; to allocate shared
+ * memory segment valid until Postmaster die. No need to put.
+ */
+GpuContext_v2 *
+MasterGpuContext(void)
+{
+	return &masterGpuContext;
+}
+
+/*
  * GetGpuContext - acquire a free GpuContext
  */
-static GpuContext_v2 *
+GpuContext_v2 *
 GetGpuContext(void)
 {
 	GpuContext_v2  *gcontext = NULL;
 	SharedGpuContext *shgcon;
 	dlist_iter		iter;
 	dlist_node	   *dnode;
+	pgsocket		sockfd;
 
 	if (!IsGpuServerProcess())
 		elog(FATAL, "Bug? Only backend process can get a new GpuContext");
 
 	/*
-	 * Find out an existing local GpuContext
+	 * Lookup an existing active GpuContext
 	 */
 	dlist_foreach(iter, &localGpuContextList)
 	{
@@ -65,7 +81,7 @@ GetGpuContext(void)
 	}
 
 	/*
-	 * OK, let's create a new GpuContext
+	 * Not found, let's create a new GpuContext
 	 */
 	if (dlist_is_empty(&inactiveGpuContextList))
 		gcontext = MemoryContextAlloc(CacheMemoryContext,
@@ -102,10 +118,11 @@ GetGpuContext(void)
 	gcontext->shgcon = shgcon;
 	dlist_push_head(&localGpuContextList, &gcontext->chain);
 	/*
-	 * After the point, we can release GpuContext automatically because
+	 * At this point, we can release GpuContext automatically because
 	 * it is already tracked by resource owner.
 	 */
 
+#if 0
 	/* try to open the connection for GpuServer */
 	sockfd = gpuserv_open_connection();
 	if (sockfd == PGINVALID_SOCKET)
@@ -114,7 +131,7 @@ GetGpuContext(void)
 		return NULL;
 	}
 	gcontext->sockfd = sockfd;
-
+#endif
 	return gcontext;
 }
 
@@ -127,7 +144,7 @@ AttachGpuContext(cl_int context_id, BackendId backend_id)
 {
 	SharedGpuContext   *shgcon;
 
-	if (cmd->context_id >= numGpuContexts)
+	if (context_id >= numGpuContexts)
 		elog(ERROR, "supplied context_id (%d) is out of range", context_id);
 
 	shgcon = &sharedGpuContextHead->context_array[context_id];
@@ -135,7 +152,7 @@ AttachGpuContext(cl_int context_id, BackendId backend_id)
 	if (shgcon->refcnt == 0 ||		/* nobody own the GpuContext */
 		shgcon->backend == NULL ||	/* no backend assigned yet */
 		shgcon->server != NULL ||	/* server already assigned */
-		shgcon->backend->backendId != cmd->open.backend_id)
+		shgcon->backend->backendId != backend_id)
 	{
 		SpinLockRelease(&shgcon->lock);
 		elog(ERROR, "supplied context_id (%d) has strange state", context_id);
@@ -169,10 +186,13 @@ PutSharedGpuContext(SharedGpuContext *shgcon)
 		dlist_delete(&shgcon->chain);
 		SpinLockRelease(&shgcon->lock);
 
-		/*
-		 * TODO: Release shared memory here
-		 */
-		dlist_push_head(&sharedGpuContextHead->free_list, &shgcon->chain);
+		/* release DMA buffer segments */
+		dmaBufferFreeAll(shgcon);
+
+		SpinLockAcquire(&sharedGpuContextHead->lock);
+		dlist_push_head(&sharedGpuContextHead->free_list,
+						&shgcon->chain);
+		SpinLockRelease(&sharedGpuContextHead->lock);
 	}
 }
 
@@ -235,13 +255,37 @@ gpucontext_cleanup_callback(ResourceReleasePhase phase,
 }
 
 /*
+ * gpucontext_proc_exit_cleanup - cleanup callback when process exit
+ */
+static void
+gpucontext_proc_exit_cleanup(int code, Datum arg)
+{
+	GpuContext_v2  *gcontext;
+	dlist_iter		iter;
+
+	if (!IsUnderPostmaster)
+		return;
+
+	dlist_foreach(iter, &localGpuContextList)
+	{
+		gcontext = dlist_container(GpuContext_v2, chain, iter.cur);
+
+		elog(WARNING, "GpuContext (ID=%u) remained at pid=%u, cleanup",
+			 gcontext->shgcon->context_id, MyProcPid);
+		PutSharedGpuContext(gcontext->shgcon);
+	}
+}
+
+/*
  * pgstrom_startup_gpu_context
  */
-void
+static void
 pgstrom_startup_gpu_context(void)
 {
-	Size	length;
-	int		i;
+	SharedGpuContext *shgcon;
+	Size		length;
+	int			i;
+	bool		found;
 
 	if (shmem_startup_hook_next)
 		(*shmem_startup_hook_next)();
@@ -259,14 +303,30 @@ pgstrom_startup_gpu_context(void)
 
 	for (i=0; i < numGpuContexts; i++)
 	{
-		SharedGpuContext   *shgcon = &sharedGpuContextHead->context_array[i];
-
+		shgcon = &sharedGpuContextHead->context_array[i];
 		shgcon->context_id = i;
+		SpinLockInit(&shgcon->lock);
 		shgcon->refcnt = 0;
 		shgcon->backend = NULL;
 		shgcon->server = NULL;
+		dlist_init(&shgcon->dma_buffer_list);
 		dlist_push_tail(&sharedGpuContextHead->free_list, &shgcon->chain);
 	}
+
+	/*
+	 * construction of MasterGpuContext
+	 */
+	shgcon = &sharedGpuContextHead->master_context;
+	shgcon->context_id = -1;
+	SpinLockInit(&shgcon->lock);
+	shgcon->refcnt = 1;
+	dlist_init(&shgcon->dma_buffer_list);
+
+	memset(&masterGpuContext, 0, sizeof(GpuContext_v2));
+	masterGpuContext.refcnt = 1;
+	masterGpuContext.sockfd = PGINVALID_SOCKET;
+	masterGpuContext.resowner = NULL;
+	masterGpuContext.shgcon = shgcon;
 }
 
 /*
@@ -276,7 +336,6 @@ void
 pgstrom_init_gpu_context(void)
 {
 	uint32		TotalProcs;	/* see InitProcGlobal() */
-	int			i;
 
 	/*
 	 * Maximum number of GPU context - it is preferable to preserve
@@ -298,16 +357,13 @@ pgstrom_init_gpu_context(void)
 	dlist_init(&localGpuContextList);
 	dlist_init(&inactiveGpuContextList);
 
-	for (i=0; i < ResourceTrackerNumSlots; i++)
-		dlist_init(&resource_tracker_slots[i]);
-	dlist_init(&resource_tracker_free);
-
 	/* require the static shared memory */
 	RequestAddinShmemSpace(MAXALIGN(offsetof(SharedGpuContextHead,
 											 context_array[numGpuContexts])));
 	shmem_startup_hook_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_gpu_context;
 
-	/* register the callback */
+	/* register the callback to clean up resources */
 	RegisterResourceReleaseCallback(gpucontext_cleanup_callback, NULL);
+	before_shmem_exit(gpucontext_proc_exit_cleanup, 0);
 }
