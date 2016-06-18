@@ -43,61 +43,39 @@ typedef struct
 {
 	dlist_node		hash_chain;
 	dlist_node		lru_chain;
-	int				shift;	/* block class of this entry */
-	int				refcnt;	/* 0 means free entry */
-	pg_crc32		crc;	/* hash value by extra_flags + kern_source */
-	struct timeval	tv_build_end;	/* timestamp when build end */
+	cl_int			refcnt;
 	Bitmapset	   *waiting_backends;
-	Oid				database_oid;
-	Oid				user_oid;
-	int				extra_flags;
-	char		   *kern_define;
+	Oid				database_oid;	/* for async build */
+	Oid				user_oid;		/* for async build */
+	pg_crc32		crc;			/* hash value by extra_flags */
+	int				extra_flags;	/*             + kern_define */
+	char		   *kern_define;	/*             + kern_source */
 	char		   *kern_source;
-	char		   *bin_image;
+	char		   *bin_image;		/* may be CUDA_PROGRAM_BUILD_FAILURE */
 	size_t			bin_length;
 	char		   *error_msg;
+	struct timeval	tv_build_end;	/* timestamp when build end */
 	char			data[FLEXIBLE_ARRAY_MEMBER];
 } program_cache_entry;
 
-#define PGCACHE_ACTIVE_ENTRY(entry)				\
-	((entry)->lru_chain.prev && (entry)->lru_chain.next)
-#define PGCACHE_FREE_ENTRY(entry)				\
-	(!(entry)->lru_chain.prev && !(entry)->lru_chain.next)
-#define PGCACHE_MAGIC					0xabadcafe
-#define PGCACHE_MAGIC_CODE(entry)				\
-	*((cl_uint *)((char *)(entry) + (1UL << (entry)->shift) - sizeof(cl_uint)))
-#define PGCACHE_CHECK_ACTIVE(entry)				\
-	Assert(PGCACHE_ACTIVE_ENTRY(entry) &&		\
-		   (entry)->refcnt > 0 &&				\
-		   PGCACHE_MAGIC_CODE(entry) == PGCACHE_MAGIC)
-#define PGCACHE_CHECK_FREE(entry)				\
-	Assert(PGCACHE_FREE_ENTRY(entry) &&			\
-		   (entry)->refcnt == 0 &&				\
-		   PGCACHE_MAGIC_CODE(entry) == PGCACHE_MAGIC)
 #define PGCACHE_MIN_ERRORMSG_BUFSIZE	256
-#define PGCACHE_ERRORMSG_LEN(entry)				\
-	((uintptr_t)(entry) +						\
-	 (1UL << (entry)->shift) -					\
-	 sizeof(uint) -								\
-	 (uintptr_t)(entry)->error_msg)
+#define PGCACHE_ERRORMSG_LEN(entry)		\
+	(dmaBufferSize(entry) -				\
+	 ((uintptr_t)(entry)->error_msg -	\
+	  (uintptr_t)(entry)))
+
 #define CUDA_PROGRAM_BUILD_FAILURE			((void *)(~0UL))
 
-#define PGCACHE_MIN_BITS		10		/* 1KB */
-#define PGCACHE_MAX_BITS		24		/* 16MB */	
-#define PGCACHE_HASH_SIZE		1024
-
-#define WORDNUM(x)		((x) / BITS_PER_BITMAPWORD)
-#define BITNUM(x)		((x) % BITS_PER_BITMAPWORD)
+#define PGCACHE_HASH_SIZE	1024
+#define WORDNUM(x)			((x) / BITS_PER_BITMAPWORD)
+#define BITNUM(x)			((x) % BITS_PER_BITMAPWORD)
 
 typedef struct
 {
 	volatile slock_t lock;
-	dlist_head	free_list[PGCACHE_MAX_BITS + 1];
-	dlist_head	active_list[PGCACHE_HASH_SIZE];
+	Size		program_cache_usage;
+	dlist_head	hash_slots[PGCACHE_HASH_SIZE];
 	dlist_head	lru_list;
-	program_cache_entry *entry_begin;	/* start address of entries */
-	program_cache_entry *entry_end;		/* end address of entries */
-	char		data[FLEXIBLE_ARRAY_MEMBER];
 } program_cache_head;
 
 /* ---- GUC variables ---- */
@@ -107,10 +85,6 @@ static bool		pgstrom_enable_cuda_coredump;
 /* ---- static variables ---- */
 static shmem_startup_hook_type shmem_startup_next;
 static program_cache_head *pgcache_head = NULL;
-
-/* ---- static functions ---- */
-static program_cache_entry *pgstrom_program_cache_alloc(Size required);
-static void pgstrom_program_cache_free(program_cache_entry *entry);
 
 /*
  * pgstrom_wakeup_backends
@@ -143,204 +117,11 @@ pgstrom_wakeup_backends(Bitmapset *waiting_backends)
 }
 
 /*
- * pgstrom_program_cache_reclaim
- *
- * it tries to reclaim the shared memory if highly memory presure.
+ * pgstrom_put_cuda_program
  */
-static bool
-pgstrom_program_cache_reclaim(int shift_min)
-{
-	program_cache_entry *entry;
-
-	while (!dlist_is_empty(&pgcache_head->lru_list))
-	{
-		dlist_node *dnode = dlist_tail_node(&pgcache_head->lru_list);
-		int			shift;
-
-		entry = dlist_container(program_cache_entry, lru_chain, dnode);
-		PGCACHE_CHECK_ACTIVE(entry);
-		/* remove from the list not to be reclaimed again */
-		dlist_delete(&entry->hash_chain);
-		dlist_delete(&entry->lru_chain);
-		memset(&entry->hash_chain, 0, sizeof(dlist_node));
-		memset(&entry->lru_chain, 0, sizeof(dlist_node));
-
-		if (--entry->refcnt == 0)
-		{
-			pgstrom_program_cache_free(entry);
-
-			/* check whether the required size is allocatable */
-			for (shift = shift_min; shift <= PGCACHE_MAX_BITS; shift++)
-			{
-				if (!dlist_is_empty(&pgcache_head->free_list[shift]))
-					return true;
-			}
-		}
-	}
-	return false;
-}
-
-/*
- * pgstrom_program_cache_*
- *
- * a simple buddy memory allocation on the shared memory segment.
- */
-static bool
-pgstrom_program_cache_split(int shift)
-{
-	program_cache_entry *entry;
-	dlist_node	   *dnode;
-
-	Assert(shift > PGCACHE_MIN_BITS && shift <= PGCACHE_MAX_BITS);
-	if (dlist_is_empty(&pgcache_head->free_list[shift]))
-	{
-		if (shift == PGCACHE_MAX_BITS ||
-			!pgstrom_program_cache_split(shift + 1))
-			return false;
-	}
-	Assert(!dlist_is_empty(&pgcache_head->free_list[shift]));
-
-	dnode = dlist_pop_head_node(&pgcache_head->free_list[shift]);
-
-	entry = dlist_container(program_cache_entry, hash_chain, dnode);
-	Assert(entry->shift == shift);
-	Assert((((uintptr_t)entry - (uintptr_t)pgcache_head->entry_begin)
-			& ((1UL << shift) - 1)) == 0);
-	shift--;
-
-	/* earlier half */
-	memset(entry, 0, offsetof(program_cache_entry, data[0]));
-	entry->shift = shift;
-	entry->refcnt = 0;
-	PGCACHE_MAGIC_CODE(entry) = PGCACHE_MAGIC;
-	dlist_push_tail(&pgcache_head->free_list[shift], &entry->hash_chain);
-
-	/* later half */
-	entry = (program_cache_entry *)((char *)entry + (1UL << shift));
-	memset(entry, 0, offsetof(program_cache_entry, data[0]));
-	entry->shift = shift;
-	entry->refcnt = 0;
-	PGCACHE_MAGIC_CODE(entry) = PGCACHE_MAGIC;
-	dlist_push_tail(&pgcache_head->free_list[shift], &entry->hash_chain);
-
-	return true;
-}
-
-static program_cache_entry *
-pgstrom_program_cache_alloc(Size required)
-{
-	program_cache_entry *entry;
-	dlist_node *dnode;
-	Size		total_size;
-	int			shift;
-
-	total_size = offsetof(program_cache_entry, data[0])
-		+ MAXALIGN(required)
-		+ PGCACHE_MIN_ERRORMSG_BUFSIZE
-		+ sizeof(cl_uint);
-
-	/* required size too large? */
-	if (total_size > (1UL << PGCACHE_MAX_BITS))
-		return NULL;
-
-	shift = get_next_log2(total_size);
-	if (shift < PGCACHE_MIN_BITS)
-		shift = PGCACHE_MIN_BITS;
-
-	if (dlist_is_empty(&pgcache_head->free_list[shift]))
-	{
-		/*
-		 * If no entries are free in the suitable class,
-		 * we try to split larger blocks first, then try
-		 * to reclaim entries according to LRU.
-		 * If both of them make no sense, we give up!
-		 */
-		while (!pgstrom_program_cache_split(shift + 1))
-		{
-			if (!pgstrom_program_cache_reclaim(shift))
-				return NULL;
-		}
-	}
-	Assert(!dlist_is_empty(&pgcache_head->free_list[shift]));
-
-	dnode = dlist_pop_head_node(&pgcache_head->free_list[shift]);
-	entry = dlist_container(program_cache_entry, hash_chain, dnode);
-	Assert(entry->shift == shift);
-
-	memset(entry, 0, sizeof(program_cache_entry));
-	entry->shift = shift;
-	entry->refcnt = 1;
-	PGCACHE_MAGIC_CODE(entry) = PGCACHE_MAGIC;
-
-	return entry;
-}
-
 static void
-pgstrom_program_cache_free(program_cache_entry *entry)
+pgstrom_put_cuda_program_nolock(program_cache_entry *entry)
 {
-	int			shift = entry->shift;
-	Size		offset;
-
-	Assert(entry->refcnt == 0);
-	Assert(!entry->hash_chain.next && !entry->hash_chain.prev);
-	Assert(!entry->lru_chain.next && !entry->lru_chain.prev);
-
-	offset = (uintptr_t)entry - (uintptr_t)pgcache_head->entry_begin;
-	Assert((offset & ((1UL << shift) - 1)) == 0);
-
-	/* try to merge buddy entry, if it is also free */
-	while (shift < PGCACHE_MAX_BITS)
-	{
-		program_cache_entry *buddy;
-
-		offset = (uintptr_t) entry - (uintptr_t)pgcache_head->entry_begin;
-		if ((offset & (1UL << shift)) == 0)
-			buddy = (program_cache_entry *)((char *)entry + (1UL << shift));
-		else
-			buddy = (program_cache_entry *)((char *)entry - (1UL << shift));
-
-		if (buddy >= pgcache_head->entry_end ||		/* out of range? */
-			buddy->shift != shift ||				/* same size? */
-			PGCACHE_ACTIVE_ENTRY(buddy))			/* and free entry? */
-			break;
-#ifdef NOT_USED
-		/* Sanity check - buddy should be in free list */
-		do {
-			dlist_head	   *free_list = pgcache_head->free_list + shift;
-			dlist_iter		iter;
-			bool			found = false;
-
-			dlist_foreach (iter, free_list)
-			{
-				program_cache_entry *temp
-					= dlist_container(program_cache_entry,
-									  hash_chain, iter.cur);
-				if (temp == buddy)
-				{
-					found = true;
-					break;
-				}
-			}
-			Assert(found);
-		} while(0);
-#endif
-		/* OK, chunk and buddy can be merged */
-		PGCACHE_CHECK_FREE(buddy);
-		dlist_delete(&buddy->hash_chain);	/* remove from free_list */
-		memset(&buddy->hash_chain, 0, sizeof(dlist_node));
-		if (buddy < entry)
-			entry = buddy;
-		entry->shift = ++shift;
-		PGCACHE_MAGIC_CODE(entry) = PGCACHE_MAGIC;
-	}
-	PGCACHE_CHECK_FREE(entry);
-	dlist_push_head(&pgcache_head->free_list[shift], &entry->hash_chain);
-}
-
-static void
-pgstrom_put_cuda_program(program_cache_entry *entry)
-{
-	SpinLockAcquire(&pgcache_head->lock);
 	if (--entry->refcnt == 0)
 	{
 		/*
@@ -350,9 +131,42 @@ pgstrom_put_cuda_program(program_cache_entry *entry)
 		 */
 		Assert(!entry->hash_chain.next && !entry->hash_chain.prev);
 		Assert(!entry->lru_chain.next && !entry->lru_chain.prev);
-		pgstrom_program_cache_free(entry);
+		pgcache_head->program_cache_usage -= dmaBufferChunkSize(entry);
+		elog(INFO, "dmaBufferFree(%zu)", dmaBufferSize(entry));
+		dmaBufferFree(entry);
 	}
+}
+
+static void
+pgstrom_put_cuda_program(program_cache_entry *entry)
+{
+	SpinLockAcquire(&pgcache_head->lock);
+	pgstrom_put_cuda_program_nolock(entry);
 	SpinLockRelease(&pgcache_head->lock);
+}
+
+/*
+ * pgstrom_program_cache_reclaim
+ *
+ * it tries to reclaim the shared memory if highly memory presure.
+ */
+static void
+pgstrom_program_cache_reclaim(void)
+{
+	program_cache_entry *entry;
+
+	while (pgcache_head->program_cache_usage > program_cache_size &&
+		   !dlist_is_empty(&pgcache_head->lru_list))
+	{
+		entry = dlist_container(program_cache_entry, lru_chain,
+								dlist_tail_node(&pgcache_head->lru_list));
+		/* remove from the list not to be reclaimed again */
+		dlist_delete(&entry->hash_chain);
+		dlist_delete(&entry->lru_chain);
+		memset(&entry->hash_chain, 0, sizeof(dlist_node));
+		memset(&entry->lru_chain, 0, sizeof(dlist_node));
+		pgstrom_put_cuda_program_nolock(entry);
+	}
 }
 
 /*
@@ -766,68 +580,75 @@ __build_cuda_program(program_cache_entry *old_entry)
 	required += 512;	/* margin for error message */
 
 	SpinLockAcquire(&pgcache_head->lock);
-	new_entry = pgstrom_program_cache_alloc(required);
-	if (!new_entry)
+	PG_TRY();
+	{
+		usage = 0;
+
+		new_entry = dmaBufferAlloc(MasterGpuContext(), required);
+		elog(INFO, "%d: dmaBufferAlloc(%zu)", __LINE__, required);
+		new_entry->refcnt = 1;
+		new_entry->waiting_backends = NULL;	/* no need to set latch */
+		new_entry->database_oid = old_entry->database_oid;
+		new_entry->user_oid = old_entry->user_oid;
+		new_entry->crc = old_entry->crc;
+		new_entry->extra_flags = old_entry->extra_flags;
+
+		new_entry->kern_define = new_entry->data + usage;
+		length = strlen(old_entry->kern_define);
+		memcpy(new_entry->kern_define,
+			   old_entry->kern_define, length + 1);
+		usage += MAXALIGN(length + 1);
+
+		new_entry->kern_source = new_entry->data + usage;
+		length = strlen(old_entry->kern_source);
+		memcpy(new_entry->kern_source,
+			   old_entry->kern_source, length + 1);
+		usage += MAXALIGN(length + 1);
+
+		if (!bin_image)
+		{
+			new_entry->bin_image = CUDA_PROGRAM_BUILD_FAILURE;
+			new_entry->bin_length = 0;
+		}
+		else
+		{
+			new_entry->bin_image = new_entry->data + usage;
+			new_entry->bin_length = bin_length;
+			memcpy(new_entry->bin_image, bin_image, bin_length);
+			usage += MAXALIGN(bin_length);
+		}
+
+		new_entry->error_msg = new_entry->data + usage;
+
+		length = PGCACHE_ERRORMSG_LEN(new_entry);
+		if (source_pathname)
+			snprintf(new_entry->error_msg, length,
+					 "build: %s\n%s\nsource: %s\n",
+					 !bin_image ? "failed" : "success",
+					 build_log,
+					 source_pathname);
+		else
+			snprintf(new_entry->error_msg, length,
+					 "build: %s\n%s",
+					 !bin_image ? "failed" : "success",
+					 build_log);
+		/* record timestamp of the build end */
+		gettimeofday(&new_entry->tv_build_end, NULL);
+
+		/* add new_entry to the hash slot */
+		hindex = new_entry->crc % PGCACHE_HASH_SIZE;
+		dlist_push_head(&pgcache_head->hash_slots[hindex],
+						&new_entry->hash_chain);
+		dlist_push_head(&pgcache_head->lru_list,
+						&new_entry->lru_chain);
+		pgcache_head->program_cache_usage += dmaBufferChunkSize(new_entry);
+	}
+	PG_CATCH();
 	{
 		SpinLockRelease(&pgcache_head->lock);
-		elog(ERROR, "out of shared memory");
+		PG_RE_THROW();
 	}
-	usage = 0;
-	new_entry->crc = old_entry->crc;
-	new_entry->waiting_backends = NULL;		/* no need to set latch */
-	new_entry->database_oid = old_entry->database_oid;
-	new_entry->user_oid = old_entry->user_oid;
-	new_entry->extra_flags = old_entry->extra_flags;
-
-	new_entry->kern_source = new_entry->data + usage;
-	length = strlen(old_entry->kern_source);
-	memcpy(new_entry->kern_source,
-		   old_entry->kern_source, length + 1);
-	usage += MAXALIGN(length + 1);
-
-	new_entry->kern_define = new_entry->data + usage;
-	length = strlen(old_entry->kern_define);
-	memcpy(new_entry->kern_define,
-		   old_entry->kern_define, length + 1);
-	usage += MAXALIGN(length + 1);
-
-	if (!bin_image)
-	{
-		new_entry->bin_image = CUDA_PROGRAM_BUILD_FAILURE;
-		new_entry->bin_length = 0;
-	}
-	else
-	{
-		new_entry->bin_image = new_entry->data + usage;
-		new_entry->bin_length = bin_length;
-		memcpy(new_entry->bin_image, bin_image, bin_length);
-		usage += MAXALIGN(bin_length);
-	}
-	new_entry->error_msg = new_entry->data + usage;
-	length = PGCACHE_ERRORMSG_LEN(new_entry);
-	if (source_pathname)
-		snprintf(new_entry->error_msg, length,
-				 "build: %s\n%s\nsource: %s\n",
-				 !bin_image ? "failed" : "success",
-				 build_log,
-				 source_pathname);
-	else
-		snprintf(new_entry->error_msg, length,
-				 "build: %s\n%s",
-				 !bin_image ? "failed" : "success",
-				 build_log);
-
-	/* record timestamp of the build end */
-	gettimeofday(&new_entry->tv_build_end, NULL);
-
-	/*
-	 * Add new_entry to the hash slot
-	 */
-	hindex = new_entry->crc % PGCACHE_HASH_SIZE;
-	dlist_push_head(&pgcache_head->active_list[hindex],
-					&new_entry->hash_chain);
-	dlist_push_head(&pgcache_head->lru_list,
-					&new_entry->lru_chain);
+	PG_END_TRY();
 
 	/*
 	 * Waking up blocking tasks, and detach old_entry from
@@ -845,9 +666,12 @@ __build_cuda_program(program_cache_entry *old_entry)
 	dlist_delete(&old_entry->lru_chain);
 	memset(&old_entry->hash_chain, 0, sizeof(dlist_node));
 	memset(&old_entry->lru_chain, 0, sizeof(dlist_node));
-	SpinLockRelease(&pgcache_head->lock);
+	pgstrom_put_cuda_program_nolock(old_entry);
 
-	pgstrom_put_cuda_program(old_entry);
+	if (pgcache_head->program_cache_usage > program_cache_size)
+		pgstrom_program_cache_reclaim();
+
+	SpinLockRelease(&pgcache_head->lock);
 }
 
 static void
@@ -942,12 +766,13 @@ __pgstrom_load_cuda_program(GpuContext *gcontext,
 	INIT_LEGACY_CRC32(crc);
 	COMP_LEGACY_CRC32(crc, &extra_flags, sizeof(int32));
 	COMP_LEGACY_CRC32(crc, kern_source, kern_source_len);
+	COMP_LEGACY_CRC32(crc, kern_define, kern_define_len);
 	FIN_LEGACY_CRC32(crc);
 
 retry:
 	hindex = crc % PGCACHE_HASH_SIZE;
 	SpinLockAcquire(&pgcache_head->lock);
-	dlist_foreach (iter, &pgcache_head->active_list[hindex])
+	dlist_foreach (iter, &pgcache_head->hash_slots[hindex])
 	{
 		entry = dlist_container(program_cache_entry, hash_chain, iter.cur);
 
@@ -1052,42 +877,62 @@ retry:
 	required += MAXALIGN(offsetof(Bitmapset, words[nwords]));
 	required += MAXALIGN(kern_source_len + 1);
 	required += MAXALIGN(kern_define_len + 1);
-	required += 512;	/* margin for error message */
+	required += PGCACHE_MIN_ERRORMSG_BUFSIZE;
 	usage = 0;
 
-	entry = pgstrom_program_cache_alloc(required);
-	entry->crc = crc;
-	memset(&entry->tv_build_end, 0, sizeof(struct timeval));
-	/* bitmap for waiting backends */
-	entry->waiting_backends = (Bitmapset *) entry->data;
-	entry->waiting_backends->nwords = nwords;
-	memset(entry->waiting_backends->words, 0, sizeof(bitmapword) * nwords);
-	usage += MAXALIGN(offsetof(Bitmapset, words[nwords]));
-	/* session info who tries to build the program */
-	entry->database_oid = MyDatabaseId;
-	entry->user_oid = GetUserId();
-	/* device kernel source */
-	entry->extra_flags = extra_flags;
-	entry->kern_source = (char *)(entry->data + usage);
-	memcpy(entry->kern_source, kern_source, kern_source_len + 1);
-	usage += MAXALIGN(kern_source_len + 1);
-	entry->kern_define = (char *)(entry->data + usage);
-	memcpy(entry->kern_define, kern_define, kern_define_len + 1);
-	usage += MAXALIGN(kern_define_len + 1);
-	/* no cuda binary yet */
-	entry->bin_image = NULL;
-	entry->bin_length = 0;
-	/* remaining are for error message */
-	entry->error_msg = (char *)(entry->data + usage);
+	PG_TRY();
+	{
+		entry = dmaBufferAlloc(MasterGpuContext(), required);
+		elog(INFO, "%d: dmaBufferAlloc(%zu)", __LINE__, required);
+		entry->refcnt = 1;
+		/* bitmap for waiting backends */
+		entry->waiting_backends = (Bitmapset *) entry->data;
+		entry->waiting_backends->nwords = nwords;
+		memset(entry->waiting_backends->words, 0, sizeof(bitmapword) * nwords);
+		usage += MAXALIGN(offsetof(Bitmapset, words[nwords]));
 
-	/* at least, caller is waiting for build */
-	entry->waiting_backends = entry->waiting_backends;
-	entry->waiting_backends->words[WORDNUM(MyProc->pgprocno)]
-		|= (1 << BITNUM(MyProc->pgprocno));
+		/* session info who tries to build the program */
+		entry->database_oid = MyDatabaseId;
+		entry->user_oid = GetUserId();
 
-	/* to be acquired by program builder */
-	dlist_push_head(&pgcache_head->active_list[hindex], &entry->hash_chain);
-	dlist_push_head(&pgcache_head->lru_list, &entry->lru_chain);
+		/* device kernel source */
+		entry->crc = crc;
+		entry->extra_flags = extra_flags;
+
+		entry->kern_define = (char *)(entry->data + usage);
+		memcpy(entry->kern_define, kern_define, kern_define_len + 1);
+		usage += MAXALIGN(kern_define_len + 1);
+
+		entry->kern_source = (char *)(entry->data + usage);
+		memcpy(entry->kern_source, kern_source, kern_source_len + 1);
+		usage += MAXALIGN(kern_source_len + 1);
+
+		/* no cuda binary yet */
+		entry->bin_image = NULL;
+		entry->bin_length = 0;
+		/* remaining are for error message */
+		entry->error_msg = (char *)(entry->data + usage);
+
+		/* at least, caller is waiting for build */
+		entry->waiting_backends = entry->waiting_backends;
+		entry->waiting_backends->words[WORDNUM(MyProc->pgprocno)]
+			|= (1 << BITNUM(MyProc->pgprocno));
+
+		/* add an entry for program build in-progress */
+		dlist_push_head(&pgcache_head->hash_slots[hindex],
+						&entry->hash_chain);
+		dlist_push_head(&pgcache_head->lru_list,
+						&entry->lru_chain);
+		pgcache_head->program_cache_usage += dmaBufferChunkSize(entry);
+		if (pgcache_head->program_cache_usage > program_cache_size)
+			pgstrom_program_cache_reclaim();
+	}
+	PG_CATCH();
+	{
+		SpinLockRelease(&pgcache_head->lock);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 
 	/* Kick a dynamic background worker to build */
 	if (with_async_build)
@@ -1390,76 +1235,77 @@ typedef struct
 	text	   *backends;
 } program_info;
 
-static List *
-__collect_program_info(void)
+static program_info *
+__collect_program_info(program_cache_entry *entry)
 {
-	program_cache_entry *entry = pgcache_head->entry_begin;
-	List	   *results = NIL;
+	program_info   *pinfo = palloc0(sizeof(program_info));
 
-	while (entry < pgcache_head->entry_end)
+	pinfo->addr = (int64) entry;
+	pinfo->length = dmaBufferChunkSize(entry);
+	pinfo->active = true;  // no longer needed 
+	if (entry->bin_image == CUDA_PROGRAM_BUILD_FAILURE)
+		pinfo->status = "Build Failed";
+	else if (!entry->bin_image)
+		pinfo->status = "In Progress";
+	else
+		pinfo->status = "Ready";
+	pinfo->crc32 = entry->crc;
+	pinfo->flags = entry->extra_flags;
+	if (entry->kern_define)
+		pinfo->kern_define = cstring_to_text(entry->kern_define);
+	if (entry->kern_source)
+		pinfo->kern_source = cstring_to_text(entry->kern_source);
+	if (entry->bin_image != NULL &&
+		entry->bin_image != CUDA_PROGRAM_BUILD_FAILURE)
+		pinfo->kern_binary = (bytea *)
+			cstring_to_text_with_len(entry->bin_image,
+									 entry->bin_length);
+	if (entry->error_msg)
+		pinfo->error_msg = cstring_to_text(entry->error_msg);
+	if (entry->waiting_backends)
 	{
-		program_info   *pinfo = palloc0(sizeof(program_info));
+		StringInfoData	buf;
+		struct PGPROC  *proc;
+		int				i = -1;
 
-		pinfo->addr = (int64) entry;
-		pinfo->length = (1UL << entry->shift);
-		pinfo->active = PGCACHE_ACTIVE_ENTRY(entry);
-		if (entry->bin_image == CUDA_PROGRAM_BUILD_FAILURE)
-			pinfo->status = "Build Failed";
-		else if (!entry->bin_image)
-			pinfo->status = "In Progress";
-		else
-			pinfo->status = "Ready";
-		pinfo->crc32 = entry->crc;
-		pinfo->flags = entry->extra_flags;
-		if (entry->kern_define)
-			pinfo->kern_define = cstring_to_text(entry->kern_define);
-		if (entry->kern_source)
-			pinfo->kern_source = cstring_to_text(entry->kern_source);
-		if (entry->bin_image != NULL &&
-			entry->bin_image != CUDA_PROGRAM_BUILD_FAILURE)
-			pinfo->kern_binary = (bytea *)
-				cstring_to_text_with_len(entry->bin_image,
-										 entry->bin_length);
-		if (entry->error_msg)
-			pinfo->error_msg = cstring_to_text(entry->error_msg);
-		if (entry->waiting_backends)
+		initStringInfo(&buf);
+		while ((i = bms_next_member(entry->waiting_backends, i)) >= 0)
 		{
-			StringInfoData	buf;
-			struct PGPROC  *proc;
-			int				i = -1;
+			Assert(i < ProcGlobal->allProcCount);
+			proc = &ProcGlobal->allProcs[i];
 
-			initStringInfo(&buf);
-			while ((i = bms_next_member(entry->waiting_backends, i)) >= 0)
-			{
-				Assert(i < ProcGlobal->allProcCount);
-				proc = &ProcGlobal->allProcs[i];
-
-				if (buf.len > 0)
-					appendStringInfo(&buf, ", ");
-				appendStringInfo(&buf, "%d (pid: %u)",
-								 proc->backendId, proc->pid);
-			}
 			if (buf.len > 0)
-				pinfo->backends = cstring_to_text(buf.data);
-			pfree(buf.data);
+				appendStringInfo(&buf, ", ");
+			appendStringInfo(&buf, "%d (pid: %u)",
+							 proc->backendId, proc->pid);
 		}
-		results = lappend(results, pinfo);
-
-		/* next entry */
-		entry = (program_cache_entry *)((char *)entry + (1UL << entry->shift));
+		if (buf.len > 0)
+			pinfo->backends = cstring_to_text(buf.data);
+		pfree(buf.data);
 	}
-	return results;
+	return pinfo;
 }
 
 static List *
 collect_program_info(void)
 {
-	List   *results;
+	program_cache_entry *entry;
+	List	   *results = NIL;
+	dlist_iter	iter;
+	int			i;
 
 	SpinLockAcquire(&pgcache_head->lock);
 	PG_TRY();
 	{
-		results = __collect_program_info();
+		for (i=0; i < PGCACHE_HASH_SIZE; i++)
+		{
+			dlist_foreach(iter, &pgcache_head->hash_slots[i])
+			{
+				entry = dlist_container(program_cache_entry,
+										hash_chain, iter.cur);
+				results = lappend(results, __collect_program_info(entry));
+			}
+		}
 	}
 	PG_CATCH();
 	{
@@ -1578,52 +1424,24 @@ PG_FUNCTION_INFO_V1(pgstrom_program_info);
 static void
 pgstrom_startup_cuda_program(void)
 {
-	program_cache_entry *entry;
 	bool		found;
 	int			i;
-	int			shift;
-	char	   *curr_addr;
-	char	   *end_addr;
 
 	if (shmem_startup_next)
 		(*shmem_startup_next)();
 
-	pgcache_head = ShmemInitStruct("PG-Strom program cache",
-								   program_cache_size, &found);
+	pgcache_head = ShmemInitStruct("PG-Strom Program Cache",
+								   sizeof(program_cache_head),
+								   &found);
 	if (found)
 		elog(ERROR, "Bug? shared memory for program cache already exists");
 
 	/* initialize program cache header */
 	memset(pgcache_head, 0, sizeof(program_cache_head));
 	SpinLockInit(&pgcache_head->lock);
-	for (i=0; i < PGCACHE_MAX_BITS; i++)
-		dlist_init(&pgcache_head->free_list[i]);
 	for (i=0; i < PGCACHE_HASH_SIZE; i++)
-		dlist_init(&pgcache_head->active_list[i]);
+		dlist_init(&pgcache_head->hash_slots[i]);
 	dlist_init(&pgcache_head->lru_list);
-	pgcache_head->entry_begin = (program_cache_entry *)
-		BUFFERALIGN(pgcache_head->data);
-
-	/* makes free entries */
-	curr_addr = (char *) pgcache_head->entry_begin;
-	end_addr = ((char *) pgcache_head) + program_cache_size;
-	shift = PGCACHE_MAX_BITS;
-	while (shift >= PGCACHE_MIN_BITS)
-	{
-		if (curr_addr + (1UL << shift) > end_addr)
-		{
-			shift--;
-			continue;
-		}
-		entry = (program_cache_entry *) curr_addr;
-		memset(entry, 0, sizeof(program_cache_entry));
-		entry->shift = shift;
-		entry->refcnt = 0;
-		dlist_push_tail(&pgcache_head->free_list[shift], &entry->hash_chain);
-
-		curr_addr += (1UL << shift);
-	}
-	pgcache_head->entry_end = (program_cache_entry *)curr_addr;
 }
 
 void
@@ -1681,7 +1499,7 @@ pgstrom_init_cuda_program(void)
 		 major, minor);
 
 	/* allocation of static shared memory */
-	RequestAddinShmemSpace(program_cache_size);
+	RequestAddinShmemSpace(sizeof(program_cache_head));
 	shmem_startup_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_cuda_program;
 }
