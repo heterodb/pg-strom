@@ -117,21 +117,21 @@ GetGpuContext(void)
 	gcontext->resowner = CurrentResourceOwner;
 	gcontext->shgcon = shgcon;
 	dlist_push_head(&localGpuContextList, &gcontext->chain);
+
 	/*
-	 * At this point, we can release GpuContext automatically because
-	 * it is already tracked by resource owner.
+	 * At this point, GpuContext can be reclaimed automatically because
+	 * it is now already tracked by resource owner.
 	 */
 
-#if 0
-	/* try to open the connection for GpuServer */
-	sockfd = gpuserv_open_connection();
+	/* try to open the connection to GpuServer */
+	sockfd = gpuservOpenConnection();
 	if (sockfd == PGINVALID_SOCKET)
 	{
 		PutGpuContext(gcontext);
 		return NULL;
 	}
 	gcontext->sockfd = sockfd;
-#endif
+
 	return gcontext;
 }
 

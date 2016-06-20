@@ -238,45 +238,43 @@ GpuMemFree_v2(CUdeviceptr devptr)
 /*
  * gpuservRecvCommand
  *
- *
  */
 static bool
 gpuservRecvCommandTimeout(pgsocket sockfd, GpuServCommand *cmd, long timeout)
 {
-
-static int
-gpuserv_recv_command(pgsocket sockfd, GpuServCommand *cmd)
-{
-	GpuServCommand *__cmd;
+	GpuServCommand	__cmd;
 	struct msghdr	msg;
 	struct iovec	iov;
 	struct cmsghdr *cmsg;
 	unsigned char	cmsgbuf[CMSG_SPACE(sizeof(int))];
 	int				peer_fd = -1;
-	ssize_t			retval;
+	int				rc;
+	ssize_t			len;
 
-	retval = WaitLatchOrSocket(MyProc->procLatch,
-							   WL_LATCH_SET |
-							   WL_POSTMASTER_DEATH |
-							   WL_SOCKET_READABLE,
-							   sockfd,
-							   (long)GpuServerCommTimeout);
-	if ((retval & WL_POSTMASTER_DEATH) != 0)
-		elog(ERROR, "Urgent bailout by crash of postmaster");
-	if ((retval & WL_SOCKET_READABLE) == 0)
-		return false;	/* something happen, caller must check */
+	rc = WaitLatchOrSocket(MyLatch,
+						   WL_LATCH_SET |
+						   WL_POSTMASTER_DEATH |
+						   WL_SOCKET_READABLE |
+						   (timeout < 0 ? 0 : WL_TIMEOUT),
+						   sockfd,
+						   timeout);
+	if ((rc & WL_SOCKET_READABLE) == 0)
+		return false;
 
 	/* fetch a message from the socket */
 	memset(&msg, 0, sizeof(msg));
 	memset(&iov, 0, sizeof(iov));
+	iov.iov_base = &__cmd;;
+	iov.iov_len = sizeof(GpuServCommand);
 	msg.msg_iov = &iov;
 	msg.msg_iovlen = 1;
 	msg.msg_control = cmsgbuf;
 	msg.msg_controllen = sizeof(cmsgbuf);
 
-	retval = recvmsg(sockfd, &msg, MSG_CMSG_CLOEXEC | MSG_DONTWAIT);
-	if (retval < 0)
+	len = recvmsg(sockfd, &msg, 0);
+	if (len < 0)
 		elog(ERROR, "failed on recvmsg: %m");
+	/* pick up peer FD, if any */
 	if ((cmsg = CMSG_FIRSTHDR(&msg)) != NULL)
 	{
 		if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS)
@@ -295,47 +293,42 @@ gpuserv_recv_command(pgsocket sockfd, GpuServCommand *cmd)
 			elog(FATAL, "Bug? backend never receive peer FD");
 	}
 
+	/* a dummy command if connection refused */
 	if (retval == 0 || msg.msg_iovlen == 0)
 	{
+		if (peer_fd >= 0)
+			elog(ERROR, "Bug? peer-FD was moved with connection closed");
 		cmd->command = GPUSERV_CMD_CLOSE;
-		cmd->peer_fd = peer_fd;
+		cmd->peer_fd = -1;
 		elog(LOG, "no bytes received, likely connection closed");
-		return false;
-	}
-	else if (msg.msg_iovlen > 1 ||
-			 iov.iov_len != sizeof(GpuServCommand))
-	{
-		elog(ERROR, "recvmsg(2) returned unexpected bytes format");
+		return true;
 	}
 
-	__cmd = (GpuServCommand *) iov.iov_base;
-	cmd->command = __cmd->command;
+	if (msg.msg_iovlen > 1 || iov.iov_len != sizeof(GpuServCommand))
+		elog(ERROR, "recvmsg(2) received unexpected bytes format");
+
+	cmd->command = __cmd.command;
 	cmd->peer_fd = peer_fd;
 	switch (cmd->command)
 	{
 		case GPUSERV_CMD_OPEN:
-			cmd->context_id = __cmd->context_id;
-			cmd->backend_id = __cmd->backend_id;
-			if (cmd->peer_fd)
-				elog(ERROR, "OPEN command never takes Peer-FD");
+			cmd->open.context_id = __cmd.open.context_id;
+			cmd->open.backend_id = __cmd.open.backend_id;
+			if (cmd->peer_fd >= 0)
+				elog(ERROR, "OPEN command cannot carry peer-FDs");
 			break;
 		case GPUSERV_CMD_GPUSCAN:
 		case GPUSERV_CMD_GPUJOIN:
 		case GPUSERV_CMD_GPUPREAGG:
 		case GPUSERV_CMD_GPUSORT:
 		case GPUSERV_CMD_PLCUDA:
-		case GPUSERV_CMD_CLOSE:
-			cmd->gputask = __cmd->gputask;
+			cmd->task.gtask = __cmd.task.gtask;
 			break;
 		default:
 			elog(ERROR, "unexpected GpuServCommand: %d", __cmd->command);
 			break;
 	}
 	return true;
-}
-
-
-
 }
 
 bool
@@ -462,21 +455,13 @@ gpuservOpenConnection(void)
 		 *
 		 *
 		 */
+
+		// send OPEN command
 		gpuservSendCommantTimeout(sockfd, cmd, 200);
 
+		// wait for latch with very short time
+		// server process will set latch
 
-		/*
-		 * Revert timeout: note that 
-		 *
-		 *
-		 */
-
-
-		// setup timeout for message passing
-
-		if (GpuServerCommTimeout < 0)
-
-		timeout.tv_sec = 0;
 
 
 
@@ -553,6 +538,9 @@ __gpuservAcceptConnection(WaitEventSet *wset)
 	if (sockfd < 0)
 		return PGINVALID_SOCKET;	/* something happen */
 
+	// will get OPEN command
+	gpuservRecvCommandTimeout(sockfd, &cmd, 200);
+	// will set latch of the client within 200ms
 
 
 

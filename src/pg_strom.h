@@ -364,10 +364,8 @@ extern void pgstrom_init_gpu_context(void);
 /*
  * gpu_server.c
  */
-//extern bool IsGpuServerProcess(void);
-// for debug
-#define IsGpuServerProcess()	false
-
+extern bool IsGpuServerProcess(void);
+extern pgsocket gpuservOpenConnection(void);
 
 extern void pgstrom_init_gpu_server(void);
 
