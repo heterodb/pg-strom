@@ -389,12 +389,7 @@ _PG_init(void)
 	pgstrom_init_dma_buffer();
 	pgstrom_init_gpu_device();
 	pgstrom_init_gpu_context();
-
-
-	/* initialization of CUDA related stuff */
-//	pgstrom_init_gpu_device();
-//	pgstrom_init_gpu_server();
-
+	pgstrom_init_gpu_server();
 
 
 	/* initialization of CUDA related stuff */
@@ -415,6 +410,7 @@ _PG_init(void)
 	pgstrom_init_plcuda();
 
 	/* overall planner hook registration */
+	/* XXX to be deprecated XXX */
 	planner_hook_next = planner_hook;
 	planner_hook = pgstrom_planner_entrypoint;
 }

@@ -20,13 +20,6 @@
 #include "utils/memutils.h"
 #include "pg_strom.h"
 
-typedef struct GpuContextHead
-{
-	slock_t			lock;	/* lock of the list below */
-	dlist_head		active_gpuctx_list;
-	dlist_head		free_gpuctx_list;
-	GpuContext_v2	gpuctx_array[FLEXIBLE_ARRAY_MEMBER];
-} GpuContextHead;
 
 #define GPUSERV_CMD_OPEN
 #define GPUSERV_CMD_GPUSCAN
@@ -35,6 +28,13 @@ typedef struct GpuContextHead
 #define GPUSERV_CMD_GPUSORT
 #define GPUSERV_CMD_PLCUDA
 #define GPUSERV_CMD_CLOSE
+
+typedef struct GpuServConnState
+{
+	slock_t		lock;
+	cl_int		num_wait_servs;
+	cl_int		num_pending_conn;
+} GpuServConnState;
 
 typedef struct GpuServCommand
 {
@@ -46,8 +46,7 @@ typedef struct GpuServCommand
 			BackendId	backend_id;
 		} open;
 		struct {
-//			portable_addr_t gask;
-			uintptr_t gtask;
+			void	   *gtask;	/* to be located on the shared segment */
 		} task;
 	} u;
 } GpuServCommand;
@@ -62,22 +61,16 @@ static GpuContext_v2   *CurrentGpuContext = NULL;
  * static variables
  */
 static shmem_startup_hook_type shmem_startup_hook_next = NULL;
+static GpuServConnState	*gpuServConnState = NULL;
 static struct sockaddr_un gpuserv_addr;
 static pgsocket			gpu_server_sock = -1;
 static bool				gpu_server_process = false;
 static int				gpuServGotSignal = 0;
 static int				numGpuServers;			/* GUC */
-static int				GpuServerConnTimeout;	/* GUC */
+static int				GpuServerCommTimeout;	/* GUC */
 static CUdevice			cuda_device = NULL;
 static CUcontext		cuda_context = NULL;
 
-#define GPUSERV_CHECK_FOR_INTERRUPTS()							\
-	do {														\
-		if (gpuServGotSignal)									\
-			elog(ERROR, "GPU Server %u detected signal: %s",	\
-				 getpid(), strsignal(gpuServGotSignal));		\
-		CHECK_FOR_INTERRUPTS();									\
-	} while(0)
 
 /*
  * IsGpuServerProcess - returns true, if current process is gpu server
@@ -238,6 +231,19 @@ GpuMemFree_v2(CUdeviceptr devptr)
 
 
 
+
+
+
+
+/*
+ * gpuservRecvCommand
+ *
+ *
+ */
+static bool
+gpuservRecvCommandTimeout(pgsocket sockfd, GpuServCommand *cmd, long timeout)
+{
+
 static int
 gpuserv_recv_command(pgsocket sockfd, GpuServCommand *cmd)
 {
@@ -254,7 +260,7 @@ gpuserv_recv_command(pgsocket sockfd, GpuServCommand *cmd)
 							   WL_POSTMASTER_DEATH |
 							   WL_SOCKET_READABLE,
 							   sockfd,
-							   (long)GpuServerConnTimeout);
+							   (long)GpuServerCommTimeout);
 	if ((retval & WL_POSTMASTER_DEATH) != 0)
 		elog(ERROR, "Urgent bailout by crash of postmaster");
 	if ((retval & WL_SOCKET_READABLE) == 0)
@@ -328,24 +334,39 @@ gpuserv_recv_command(pgsocket sockfd, GpuServCommand *cmd)
 	return true;
 }
 
+
+
+}
+
+bool
+gpuservRecvCommand(pgsocket sockfd, GpuServCommand *cmd)
+{
+	return gpuservRecvCommandTimeout(sockfd, cmd, GpuServerCommTimeout);
+}
+
+/*
+ * gpuservSendCommand
+ *
+ * send a command to the peer side
+ */
 static bool
-gpuserv_send_command(pgsocket sockfd, GpuServCommand *cmd, long timeout_ms)
+gpuservSendCommandTimeout(pgsocket sockfd, GpuServCommand *cmd, long timeout)
 {
 	struct msghdr	msg;
 	struct iovec	iov;
 	unsigned char	cmsgbuf[CMSG_SPACE(sizeof(int))];
 	int				retval;
 
-	retval = WaitLatchOrSocket(MyProc->procLatch,
+	retval = WaitLatchOrSocket(MyLatch,
 							   WL_LATCH_SET |
 							   WL_POSTMASTER_DEATH |
-							   WL_SOCKET_WRITABLE,
+							   WL_SOCKET_WRITABLE |
+							   (timeout < 0 ? 0 : WL_TIMEOUT),
 							   sockfd,
-							   timeout_ms);
-	if ((retval & WL_POSTMASTER_DEATH) != 0)
-		elog(ERROR, "Urgent bailout by crash of postmaster");
+							   timeout);
+	/* Is the socket writable? */
 	if ((retval & WL_SOCKET_WRITABLE) == 0)
-		return false;	/* something happen, caller must check */
+		return false;
 
 	memset(&msg, 0, sizeof(struct msghdr));
 	msg.msg_iov = &iov;
@@ -353,6 +374,7 @@ gpuserv_send_command(pgsocket sockfd, GpuServCommand *cmd, long timeout_ms)
 	iov.iov_base = cmd;
 	iov.iov_len = sizeof(GpuServCommand);
 
+	/* do we attach a file-descriptor with this message? */
 	if (cmd->peer_fd >= 0)
 	{
 		struct cmsghdr *cmsg;
@@ -368,14 +390,21 @@ gpuserv_send_command(pgsocket sockfd, GpuServCommand *cmd, long timeout_ms)
 		if (IsGpuServerProcess())
 			elog(FATAL, "Bug? GpuServer never send peer FD");
 	}
-
 	retval = sendmsg(sockfd, &msg, 0);
 	if (retval < 0)
-		elog(ERROR, "failed on sendmsg, peer_fd=%d: %m", peer_fd);
+		elog(ERROR, "failed on sendmsg(2), PeerFD=%d: %m",
+			 cmd->peer_fd);
 	else if (retval == 0)
-		elog(ERROR, "no bytes send using sendmsg, peer_fd=%d: %m", peer_fd);
+		elog(ERROR, "no bytes sent using sendmsg(2), PeerFD=%d, %m",
+			 cmd->peer_fd);
 
 	return true;
+}
+
+bool
+gpuservSendCommand(pgsocket sockfd, GpuServCommand *cmd)
+{
+	return gpuservSendCommandTimeout(sockfd, cmd, GpuServerCommTimeout);
 }
 
 /*
@@ -383,39 +412,106 @@ gpuserv_send_command(pgsocket sockfd, GpuServCommand *cmd, long timeout_ms)
  * (it may fail if no available GPU server)
  */
 pgsocket
-gpuserv_open_connection(void)
+gpuservOpenConnection(void)
 {
 	pgsocket	sockfd;
+	int			num_conn_in_progress;
+	int			num_waiting_servers;
 	int			flags;
 
 	Assert(!IsGpuServerProcess());
 
-	sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
-	if (sockfd < 0)
+
+
+	/*
+	 * Confirm the number of waiting server process and backend processes
+	 * which is in-progress for connections. If we have no chance to make
+	 * a connection with servers, give up making a connection.
+	 */
+	SpinLockAcquire(&gpuServConnState->lock);
+	if (gpuServConnState->num_pending_conn >= gpuServConnState->num_wait_servs)
+	{
+		SpinLockRelease(&gpuServConnState->lock);
 		return PGINVALID_SOCKET;
-
-	flags = fcntl(sockfd, F_GETFL, 0);
-	if (flags == -1)
-	{
-		close(sockfd);
-		elog(ERROR, "failed on fcntl(F_GETFL): %m");
 	}
+	gpuServConnState->num_pending_conn++;
+	SpinLockRelease(&gpuServConnState->lock);
 
-	flags &= ~O_NONBLOCK;
-	if (fcntl(sockfd, F_SETFL, flags) != 0)
+	PG_TRY();
 	{
-		close(sockfd);
-		elog(ERROR, "failed on fcntl(F_SETFL): %m");
+		struct timeval	timeout;
+
+		sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
+		if (sockfd < 0)
+			elog(ERROR, "failed on socket(2): %m");
+
+		while (connect(sockfd, (struct sockaddr *)&gpuserv_addr,
+					   sizeof(gpuserv_addr)) != 0)
+		{
+			if (errno != EINTR)
+				elog(ERROR, "failed on connect(2): %m");
+			CHECK_FOR_INTERRUPTS();
+		}
+
+		/*
+		 * NOTE: A very short timeout to detect 
+		 *
+		 *
+		 *
+		 *
+		 *
+		 *
+		 */
+		gpuservSendCommantTimeout(sockfd, cmd, 200);
+
+
+		/*
+		 * Revert timeout: note that 
+		 *
+		 *
+		 */
+
+
+		// setup timeout for message passing
+
+		if (GpuServerCommTimeout < 0)
+
+		timeout.tv_sec = 0;
+
+
+
 	}
+	PG_CATCH();
+	{
+		/* close the socket if opened */
+		if (sockfd >= 0)
+			close(sockfd);
+		/* revert the number of pending clients */
+		SpinLockAcquire(&gpuServConnState->lock);
+		gpuServConnState->num_pending_conn--;
+		SpinLockRelease(&gpuServConnState->lock);
+	}
+	PG_END_TRY();
+
+	return sockfd;
+	
+
+
+
+	// setup timeout very short (0.2sec)
+
+
+
+	// wait for acknowledge
+
+	// revert the timeout
+
+
+
+
 
 retry:
-	if (connect(sockfd,
-				(struct sockaddr *)&gpuserv_addr,
-				sizeof(gpuserv_addr)) != 0)
-	{
-		CHECK_FOR_INTERRUPTS();
-		if (errno == EINTR)
-			goto retry;
+
 		if (errno == EAGAIN || errno == ECONNREFUSED)
 		{
 			close(sockfd);
@@ -431,8 +527,38 @@ retry:
  * gpuserv_accept_connection - accept a client connection
  */
 static pgsocket
-gpuserv_accept_connection(void)
+__gpuservAcceptConnection(WaitEventSet *wset)
 {
+	long			timeout = 400;	/* 400msec sufficient for timeout */
+	WaitEvent		event;
+	pgsocket		sockfd;
+	int				retval;
+
+	ResetLatch(MyLatch);
+	retval = WaitEventSetWait(wset, timeout, &event, 1);
+	if (retval == 0)
+		return PGINVALID_SOCKET;	/* timeout */
+	else if ((event.events & (WL_LATCH_SET |
+							  WL_POSTMASTER_DEATH)) != 0)
+		return PGINVALID_SOCKET;	/* something urgent we have to care */
+
+
+
+
+
+
+
+	/* accept a connection */
+	sockfd = accept(gpu_server_sock, NULL, NULL);
+	if (sockfd < 0)
+		return PGINVALID_SOCKET;	/* something happen */
+
+
+
+
+
+
+
 	struct pollfd	pollbuf;
 	pgsocket		sockfd;
 	GpuServCommand	cmd;
@@ -471,32 +597,39 @@ gpuserv_accept_connection(void)
 	return sockfd;
 }
 
-/*
- * gpuserv_init_cuda_context
- */
-static void
-gpuserv_init_cuda_context(cl_uint server_id)
+static pgsocket
+gpuservAcceptConnection(WaitEventSet *wset)
 {
-	static bool	cuda_runtime_initialized = false;
-	cl_int		device_id;
-	CUresult	rc;
+	pgsocket	sockfd;
 
-	if (!cuda_runtime_initialized)
+	/* Server is not waiting */
+	SpinLockAcquire(&gpuServConnState->lock);
+	gpuServConnState->num_waiting_servers++;
+	SpinLockRelease(&gpuServConnState->lock);
+
+	PG_TRY();
 	{
-		rc = cuInit(0);
-		if (rc != CUDA_SUCCESS)
-			elog(FATAL, "failed on cuInit: %s", errorText(rc));
-
-		device_id = devAttrs[server_id % numDevAttrs].DEV_ID;
-		rc = cuDeviceGet(&cuda_device, device_id);
-		if (rc != CUDA_SUCCESS)
-			elog(FATAL, "failed on cuDeviceGet: %s", errorText(rc));
-
-		cuda_runtime_initialized = true;
+		do {
+			sockfd = __gpuservAcceptConnection(wset);
+			CHECK_FOR_INTERRUPTS();
+		} while (sockfd == PGINVALID_SOCKET && !gpuServGotSignal);
 	}
-	rc = cuCtxCreate(&cuda_context, 0, cuda_context);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuCtxCreate: %s", errorText(rc));
+	PG_CATCH();
+	{
+		/* Server break for waiting */
+		SpinLockAcquire(&gpuServConnState->lock);
+		gpuServConnState->num_waiting_servers--;
+		SpinLockRelease(&gpuServConnState->lock);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	/* Server break for waiting */
+	SpinLockAcquire(&gpuServConnState->lock);
+	gpuServConnState->num_waiting_servers--;
+	SpinLockRelease(&gpuServConnState->lock);
+
+	return sockfd;
 }
 
 /*
@@ -540,40 +673,53 @@ gpuserv_session_main(pgsocket sockfd)
  * pgstrom_cuda_serv_main - entrypoint of the CUDA server process
  */
 static void
-gpuserv_main(Datum server_id)
+gpuserv_main(Datum __server_id)
 {
-	pgsocket	pgsocket;
+	cl_int		server_id = DatumGetUint32(__server_id);
+	cl_int		device_id;
+	pgsocket	sockfd;
+	WaitEventSet *wset;
+	CUresult	rc;
 
 	/* I am a GPU server process */
 	gpu_server_process = true;
-
 	pqsignal(SIGTERM, gpuserv_got_sigterm);
 	BackgroundWorkerUnblockSignals();
 
+	/* Init CUDA runtime */
+	rc = cuInit(0);
+	if (rc != CUDA_SUCCESS)
+		elog(FATAL, "failed on cuInit(0): %s", errorText(rc));
+
+	device_id = devAttrs[server_id % numDevAttrs].DEV_ID;
+	rc = cuDeviceGet(&cuda_device, device_id);
+	if (rc != CUDA_SUCCESS)
+		elog(FATAL, "failed on cuDeviceGet: %s", errorText(rc));
+
+	/* see the comments in WaitLatchOrSocket() */
+	wset = WaitEventSet(TopMemoryContext, 3);
+	AddWaitEventToSet(wset, WL_LATCH_SET, PGINVALID_SOCKET, MyLatch, NULL);
+	AddWaitEventToSet(wset, WL_POSTMASTER_DEATH, PGINVALID_SOCKET, NULL, NULL);
+	AddWaitEventToSet(wset, WL_SOCKET_READABLE, gpu_server_sock, NULL, NULL);
+
+	/* memory context per session duration */
 	CurrentMemoryContext = AllocSetContextCreate(TopMemoryContext,
-												 "GPU/CUDA Server",
+												 "GPU Server per Session",
 												 ALLOCSET_DEFAULT_MINSIZE,
 												 ALLOCSET_DEFAULT_INITSIZE,
 												 ALLOCSET_DEFAULT_MAXSIZE);
-	gpuserv_init_cuda_context(DatumGetUint32(server_id));
-
 	PG_TRY();
 	{
-		currentSharedGpuContext = NULL;
-		while (GpuServGotSignal == 0)
+		while (!gpuServGotSignal)
 		{
-			sockfd = gpuserv_accept_connection();
+			sockfd = gpuservAcceptConnection(wset);
 			if (sockfd == PGINVALID_SOCKET)
-				continue;
+				break;
 
-			gpuserv_session_main(sockfd);
-
+			gpuservSessionMain(sockfd);
 			closeFileDesc(sockfd);
-			PutSharedGpuContext(currentSharedGpuContext);
-			// if we still have pending/ready tasks, drop them here
 
-			currentSharedGpuContext = NULL;
-
+			// clean up orphan resources
 			MemoryContextReset(CurrentMemoryContext);
 		}
 	}
@@ -588,14 +734,28 @@ gpuserv_main(Datum server_id)
 		 */
 		if (currentSharedGpuContext)
 			PutSharedGpuContext(currentSharedGpuContext);
-
-		PG_RE_THROW();		/* proc_exit(1) */
 	}
-	PG_END_TRY();
+	PG_ENT_TRY();
 
 	/* detach shared resources if any */
 	if (currentSharedGpuContext)
 		PutSharedGpuContext(currentSharedGpuContext);
+}
+
+/*
+ * pgstrom_startup_gpu_server
+ */
+static void
+pgstrom_startup_gpu_server(void)
+{
+	if (shmem_startup_hook_next)
+		(*shmem_startup_hook_next)();
+
+	gpuServConnState = ShmemInitStruct("gpuServConnState",
+									   sizeof(GpuServConnState), &found);
+	Assert(!found);
+	memset(gpuServConnState, 0, sizeof(GpuServConnState));
+	SpinLockInit(&gpuServConnState->lock);
 }
 
 /*
@@ -626,10 +786,10 @@ pgstrom_init_gpu_server(void)
 	 * Connection timeout on unix domain socket between the backend and
 	 * the GPU server.
 	 */
-	DefineCustomIntVariable("pg_strom.gpu_server_conn_timeout",
-							"timeout [ms] of the local GPU server connection",
+	DefineCustomIntVariable("pg_strom.gpu_server_comm_timeout",
+							"timeous[ms] for communication with GPU server",
 							NULL,
-							&GpuServerConnTimeout,
+							&GpuServerCommTimeout,
 							-1,		/* no timeout */
 							-1,
 							INT_MAX,
@@ -668,13 +828,6 @@ pgstrom_init_gpu_server(void)
 	if (listen(gpu_server_sock, numGpuServers) != 0)
 		elog(ERROR, "failed on listen(2): %m");
 
-	/* 0.6sec timeout; also interval to check signals */
-	timeout.tv_sec = 0;
-	timeout.tv_usec = 600000;
-	if (setsockopt(gpu_server_sock, SOL_SOCKET, SO_RCVTIMEO,
-				   &timeout, sizeof(timeout)) != 0)
-		elog(ERROR, "failed on setsockopt(2): %m");
-
 	/*
 	 * Launch background worker processes for GPU/CUDA servers
 	 */
@@ -692,4 +845,9 @@ pgstrom_init_gpu_server(void)
 		worker.bgw_main_arg = i;
 	}
 	RegisterBackgroundWorker(&worker);
+
+	/* request for the static shared memory */
+	RequestAddinShmemSpace(sizeof(GpuServConnState));
+	shmem_startup_hook_next = shmem_startup_hook;
+	shmem_startup_hook = pgstrom_startup_gpu_server;
 }
