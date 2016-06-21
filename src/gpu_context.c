@@ -287,7 +287,6 @@ GetGpuContext(void)
 	SharedGpuContext *shgcon;
 	dlist_iter		iter;
 	dlist_node	   *dnode;
-	pgsocket		sockfd;
 	int				i;
 
 	if (!IsGpuServerProcess())
@@ -355,14 +354,12 @@ GetGpuContext(void)
 	 */
 
 	/* try to open the connection to GpuServer */
-	sockfd = gpuservOpenConnection();
-	if (sockfd == PGINVALID_SOCKET)
+	if (!gpuservOpenConnection(gcontext))
 	{
 		PutGpuContext(gcontext);
 		return NULL;
 	}
-	gcontext->sockfd = sockfd;
-
+	Assert(gcontext->sockfd != PGINVALID_SOCKET);
 	return gcontext;
 }
 

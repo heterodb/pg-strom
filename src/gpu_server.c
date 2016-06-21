@@ -100,9 +100,11 @@ IsGpuServerProcess(void)
  *
  */
 static bool
-gpuservRecvCommandTimeout(GpuContext_v2 *gcontext,
-						  GpuServCommand *cmd, long timeout)
+__gpuservRecvCommandTimeout(pgsocket sockfd,
+							GpuServCommand *cmd, long timeout)
 {
+	/* a little bit high level interface to fetch GpuTask from the socket */
+
 	GpuServCommand	__cmd;
 	struct msghdr	msg;
 	struct iovec	iov;
@@ -117,7 +119,7 @@ gpuservRecvCommandTimeout(GpuContext_v2 *gcontext,
 						   WL_POSTMASTER_DEATH |
 						   WL_SOCKET_READABLE |
 						   (timeout < 0 ? 0 : WL_TIMEOUT),
-						   gcontext->sockfd,
+						   sockfd,
 						   timeout);
 	if ((ev & WL_SOCKET_READABLE) == 0)
 		return false;
@@ -132,7 +134,7 @@ gpuservRecvCommandTimeout(GpuContext_v2 *gcontext,
 	msg.msg_control = cmsgbuf;
 	msg.msg_controllen = sizeof(cmsgbuf);
 
-	retval = recvmsg(gcontext->sockfd, &msg, 0);
+	retval = recvmsg(sockfd, &msg, 0);
 	if (retval < 0)
 		elog(ERROR, "failed on recvmsg: %m");
 
@@ -167,30 +169,8 @@ gpuservRecvCommandTimeout(GpuContext_v2 *gcontext,
 		}
 		else if (msg.msg_iovlen == 1 && iov.iov_len == sizeof(GpuServCommand))
 		{
-			cmd->command = __cmd.command;
+			memcpy(cmd, &__cmd, sizeof(GpuServCommand));
 			cmd->peer_fd = peer_fd;
-
-			switch (cmd->command)
-			{
-				case GPUSERV_CMD_OPEN:
-					cmd->u.open.context_id = __cmd.u.open.context_id;
-					cmd->u.open.backend_id = __cmd.u.open.backend_id;
-					if (cmd->peer_fd >= 0)
-						elog(ERROR, "OPEN command cannot carry peer-FDs");
-					break;
-
-				case GPUSERV_CMD_GPUSCAN:
-				case GPUSERV_CMD_GPUJOIN:
-				case GPUSERV_CMD_GPUPREAGG:
-				case GPUSERV_CMD_GPUSORT:
-				case GPUSERV_CMD_PLCUDA:
-					cmd->u.task.gtask = __cmd.u.task.gtask;
-					break;
-				default:
-					elog(ERROR, "unexpected GpuServCommand: %d",
-						 __cmd.command);
-					break;
-			}
 		}
 		else
 		{
@@ -208,10 +188,45 @@ gpuservRecvCommandTimeout(GpuContext_v2 *gcontext,
 	return true;
 }
 
-bool
-gpuservRecvCommand(GpuContext_v2 *gcontext, GpuServCommand *cmd)
+static GpuTask *
+gpuservRecvTaskTimeout(GpuContext_v2 *gcontext, int *p_peer_fd, long timeout)
 {
-	return gpuservRecvCommandTimeout(gcontext, cmd, GpuServerCommTimeout);
+	GpuServCommand	cmd;
+
+retry:
+
+	// if false, need to check signal state
+	// if true, one of GpuTask, or NULL if CMD_CLOSE
+	// elsewhere, unexpected state?
+
+
+
+	// TODO: close(peer_fd) prior to raise an error
+
+	if (!gpuservRecvTaskTimeout(gcontext->sockfd, &cmd, timeout))
+		return false;
+
+	switch (cmd)
+	{
+		case GPUSERV_CMD_GPUSCAN:
+		case GPUSERV_CMD_GPUJOIN:
+		case GPUSERV_CMD_GPUPREAGG:
+		case GPUSERV_CMD_GPUSORT:
+		case GPUSERV_CMD_PLCUDA:
+
+		case CPUSERV_CMD_CLOSE:
+			break;
+		default:
+			break;
+	}
+
+
+}
+
+GpuTask *
+gpuservRecvTaskTimeout(GpuContext_v2 *gcontext, int *p_peer_fd)
+{
+	return gpuservRecvTaskTimeout(gcontext, p_peer_fd, GpuServerCommTimeout);
 }
 
 /*
@@ -282,12 +297,14 @@ gpuservSendCommand(GpuContext_v2 *gcontext, GpuServCommand *cmd)
  * gpuserv_open_connection - open a unix domain socket from the backend
  * (it may fail if no available GPU server)
  */
-pgsocket
-gpuservOpenConnection(void)
+bool
+gpuservOpenConnection(GpuContext_v2 *gcontext)
 {
 	pgsocket	sockfd = PGINVALID_SOCKET;
 
 	Assert(!IsGpuServerProcess());
+	Assert(gcontext->sockfd == PGINVALID_SOCKET);
+
 	/*
 	 * Confirm the number of waiting server process and backend processes
 	 * which is in-progress for connections. If we have no chance to make
@@ -342,15 +359,19 @@ gpuservOpenConnection(void)
 			GpuServCommand	cmd;
 			int				ev;
 
+			/* assign sockfd on the GpuContext */
+			gcontext->sockfd = sockfd;
+
 			/* send OPEN command, with 100ms timeout */
 			cmd.command = GPUSERV_CMD_OPEN;
 			cmd.peer_fd = -1;
-			cmd.u.open.context_id = ...;
+			cmd.u.open.context_id = gcontext->shgcon->context_id;
 			cmd.u.open.backend_id = MyProc->backendId;
-			if (!gpuservSendCommandTimeout(sockfd, &cmd, 100))
+			if (!gpuservSendCommandTimeout(gcontext, &cmd, 100))
 			{
+				/* ...revert it... */
+				gcontext->sockfd = PGINVALID_SOCKET;
 				close(sockfd);
-				sockfd = PGINVALID_SOCKET;
 			}
 			else
 			{
@@ -367,8 +388,9 @@ gpuservOpenConnection(void)
 							   100);	/* 100ms */
 				if ((ev & WL_LATCH_SET) == 0)
 				{
+					/* ...revert it... */
+					gcontext->sockfd = PGINVALID_SOCKET;
 					close(sockfd);
-					sockfd = PGINVALID_SOCKET;
 				}
 			}
 		}
@@ -390,7 +412,7 @@ gpuservOpenConnection(void)
 	gpuServConnState->num_pending_conn--;
 	SpinLockRelease(&gpuServConnState->lock);
 
-	return sockfd;
+	return (gcontext->sockfd != PGINVALID_SOCKET ? true : false);
 }
 
 /*
