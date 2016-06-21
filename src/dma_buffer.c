@@ -669,7 +669,8 @@ pointer_validation(void *pointer, dmaBufferSegment **p_seg)
 		chunk->free_chain.next != NULL)
 		elog(ERROR, "Bug? %p points a free DMA buffer", pointer);
 
-	*p_seg = seg;
+	if (p_seg)
+		*p_seg = seg;
 	return chunk;
 }
 
@@ -747,6 +748,28 @@ dmaBufferRealloc(void *pointer, Size required)
 	result = __dmaBufferAlloc(chunk->shgcon, required);
 	memcpy(result, chunk->data, chunk->required);
 	dmaBufferFree(pointer);
+
+	return result;
+}
+
+/*
+ * dmaBufferValidatePtr - validate the supplied pointer
+ */
+bool
+dmaBufferValidatePtr(void *pointer)
+{
+	bool	result = true;
+
+	PG_TRY();
+	{
+		(void) pointer_validation(pointer, NULL);
+	}
+	PG_CATCH();
+	{
+		FlushErrorState();
+		result = false;
+	}
+	PG_END_TRY();
 
 	return result;
 }

@@ -337,6 +337,7 @@ typedef struct pgstrom_data_store
  */
 extern void *dmaBufferAlloc(GpuContext_v2 *gcontext, Size required);
 extern void *dmaBufferRealloc(void *pointer, Size required);
+extern bool dmaBufferValidatePtr(void *pointer);
 extern Size dmaBufferSize(void *pointer);
 extern Size dmaBufferChunkSize(void *pointer);
 extern void dmaBufferFree(void *pointer);
@@ -370,6 +371,9 @@ extern void pgstrom_init_gpu_context(void);
  */
 extern bool IsGpuServerProcess(void);
 extern bool gpuservOpenConnection(GpuContext_v2 *gcontext);
+extern bool gpuservSendGpuTask(GpuContext_v2 *gcontext,
+							   GpuTask *gtask, int peer_fd);
+extern GpuTask *gpuservRecvGpuTask(GpuContext_v2 *gcontext, int *peer_fd);
 
 extern void pgstrom_init_gpu_server(void);
 

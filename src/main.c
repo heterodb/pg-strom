@@ -391,7 +391,6 @@ _PG_init(void)
 	pgstrom_init_gpu_context();
 	pgstrom_init_gpu_server();
 
-
 	/* initialization of CUDA related stuff */
 	pgstrom_init_cuda_control();
 	pgstrom_init_cuda_program();
