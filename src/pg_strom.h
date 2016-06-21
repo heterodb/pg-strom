@@ -96,11 +96,6 @@
  *
  *
  */
-#define GPUCONTEXT_INIT_STATUS			1
-#define GPUCONTEXT_READY_STATUS			2
-#define GPUCONTEXT_ATTACHED_STATUS		3
-#define GPUCONTEXT_ERROR_STATUS			4
-
 typedef struct SharedGpuContext
 {
 	dlist_node	chain;
@@ -129,9 +124,10 @@ typedef struct GpuContext_v2
 {
 	dlist_node		chain;
 	cl_int			refcnt;		/* refcount by local GpuTaskState */
-	pgsocket		sockfd;
+	pgsocket		sockfd;		/* connection between backend <-> server */
 	ResourceOwner	resowner;
 	SharedGpuContext *shgcon;
+	dlist_head		restrack[FLEXIBLE_ARRAY_MEMBER];
 } GpuContext_v2;
 
 
@@ -355,10 +351,18 @@ extern void pgstrom_init_dma_buffer(void);
  */
 extern GpuContext_v2 *MasterGpuContext(void);
 extern GpuContext_v2 *GetGpuContext(void);
-extern SharedGpuContext *AttachGpuContext(cl_int context_id,
-										  BackendId backend_id);
+extern GpuContext_v2 *AttachGpuContext(pgsocket sockfd,
+									   cl_int context_id,
+									   BackendId backend_id);
 extern void PutGpuContext(GpuContext_v2 *gcontext);
 extern void PutSharedGpuContext(SharedGpuContext *shgcon);
+
+extern void	trackFileDesc(GpuContext_v2 *gcontext, int fdesc);
+extern int	closeFileDesc(GpuContext_v2 *gcontext, int fdesc);
+extern CUresult	gpuMemAlloc_v2(GpuContext_v2 *gcontext,
+							   CUdeviceptr *p_devptr, size_t bytesize);
+extern CUresult	gpuMemFree_v2(GpuContext_v2 *gcontext, CUdeviceptr devptr);
+
 extern void pgstrom_init_gpu_context(void);
 
 /*
