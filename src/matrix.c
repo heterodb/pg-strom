@@ -121,7 +121,7 @@ __varbit_to_int_vector(VarBit *varbit)
 		len = ARRAY_VECTOR_RAWSIZE(sizeof(cl_int), nitems);
 		matrix = palloc0(len);
 		INIT_ARRAY_VECTOR(matrix, INT4OID, sizeof(cl_int), nitems);
-		memcpy(matrix->d1.values, varbit->bit_dat,
+		memcpy(matrix->u.d1.values, varbit->bit_dat,
 			   (varbit->bit_len + BITS_PER_BYTE - 1) / BITS_PER_BYTE);
 	}
 	return matrix;
