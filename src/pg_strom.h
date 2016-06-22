@@ -22,6 +22,7 @@
 #include "nodes/plannodes.h"
 #include "nodes/primnodes.h"
 #include "nodes/relation.h"
+#include "storage/buf.h"
 #include "storage/fd.h"
 #include "storage/latch.h"
 #include "storage/lock.h"
@@ -266,8 +267,6 @@ struct GpuTaskState
 	bool			be_row_format;	/* true, if KDS_FORMAT_ROW is required */
 	bool			outer_bulk_exec;/* true, if it bulk-exec on outer-node */
 	Instrumentation	outer_instrument; /* run time statistics */
-	BlockNumber		curr_blknum;	/* current block number to scan table */
-	BlockNumber		last_blknum;	/* last block number to scan table */
 	TupleTableSlot *scan_overflow;	/* temp buffer, if unable to load */
 	cl_long			curr_index;		/* current position on the curr_task */
 	struct GpuTask *curr_task;		/* a task currently processed */
@@ -565,7 +564,7 @@ extern int PDS_insert_block(pgstrom_data_store *pds,
 							Relation rel,
 							BlockNumber blknum,
 							Snapshot snapshot,
-							bool page_prune);
+							BufferAccessStrategy strategy);
 extern bool PDS_insert_tuple(pgstrom_data_store *pds,
 							 TupleTableSlot *slot);
 extern bool PDS_insert_hashitem(pgstrom_data_store *pds,
