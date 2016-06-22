@@ -236,4 +236,436 @@ VALIDATE_ARRAY_MATRIX(MatrixType *matrix)
 		((MatrixType *)(X))->d2.lbound2 = 1;					\
 	} while(0)
 
+#if 0
+/* ----------------------------------------------------------------
+ *
+ * Bitonic Sorting Support for PL/CUDA functions
+ *
+ * pgstromBitonicSortFP32
+ *
+ *
+ *
+ *
+ *
+ *
+ *
+ *
+ *
+ *
+ *
+ * ----------------------------------------------------------------
+ */
+
+#define PGSTROM_BITONIC_SORT_TEMPLATE(SUFFIX,BASETYPE)					\
+	STATIC_INLINE(cl_int)												\
+	pgstrom_bitonic_keycomp_#SUFFIX(BASETYPE *data_ptr,					\
+									cl_uint	height,						\
+									cl_uint	width,						\
+									cl_uint  *sortkeys,					\
+									cl_uint	num_keys,					\
+									cl_uint	x_index,					\
+									cl_uint	y_index)					\
+	{																	\
+		cl_uint		i, j;												\
+		BASETYPE	x_value;											\
+		BASETYPE	y_value;											\
+																		\
+		for (i=0; i < num_keys; i++)									\
+		{																\
+			j = sortkeys[i];											\
+			assert(j < width);											\
+																		\
+			x_value = data_ptr[j * height + x_index];					\
+			y_value = data_ptr[j * height + y_index];					\
+																		\
+			if (x_value < y_value)										\
+				return -1;												\
+			else if (x_value > y_value)									\
+				return -1;												\
+		}																\
+		return 0;	/* both rows are equivalent */						\
+	}																	\
+																		\
+	KERNEL_FUNCTION_MAXTHREADS(void)									\
+	pgstrom_bitonic_local_#SUFFIX(BASETYPE *data_ptr,					\
+								  cl_uint height,						\
+								  cl_uint width,						\
+								  cl_uint *row_index,					\
+								  cl_uint *sortkeys,					\
+								  cl_uint num_keys,						\
+								  cl_int direction)						\
+	{																	\
+		cl_uint	   *localIdx = SHARED_WORKMEM(cl_uint);					\
+		cl_uint		localLimit;											\
+		cl_uint		partSize = 2 * get_local_size();					\
+		cl_uint		partBase = get_global_index() * partSize;			\
+		cl_uint		blockSize;											\
+		cl_uint		unitSize;											\
+		cl_uint		i;													\
+																		\
+		/* Load index to localIdx[] */									\
+		localLimit = (partBase + partSize <= height						\
+					  ? partSize										\
+					  : height - partBase);								\
+		for (i = get_local_id();										\
+			 i < localLimit;											\
+			 i += get_local_size())										\
+			localIdx[i] = partBase + i;									\
+		__syncthreads();												\
+																		\
+		for (blockSize = 2;	blockSize <= partSize; blockSize *= 2)		\
+		{																\
+			for (unitSize = blockSize; unitSize >= 2; unitSize /= 2)	\
+			{															\
+				cl_uint		unitMask		= (unitSize - 1);			\
+				cl_uint		halfUnitSize	= (unitSize >> 1);			\
+				cl_uint		halfUnitMask	= (halfUnitSize - 1);		\
+				cl_uint		idx0, idx1;									\
+																		\
+				idx0 = (((get_local_id() & ~halfUnitMask) << 1) +		\
+						(get_local_id() & halfUnitMask));				\
+				idx1 = (unitSize == blockSize							\
+						? ((idx0 & ~unitMask) | (~idx0 & unitMask))		\
+						: (halfUnitSize + idx0));						\
+				if (idx1 < localLimit)									\
+				{														\
+					cl_uint		pos0 = localIdx[idx0];					\
+					cl_uint		pos1 = localIdx[idx1];					\
+																		\
+					if (__pgstrom_bitonic_keycomp(data_ptr,				\
+												  height,				\
+												  width,				\
+												  sortkeys,				\
+												  num_keys,				\
+												  pos0,					\
+												  pos1) == direction)	\
+					{													\
+						/* swap */										\
+						localIdx[idx0] = pos1;							\
+						localIdx[idx1] = pos0;							\
+					}													\
+				}														\
+				__syncthreads();										\
+			}															\
+		}																\
+		/* write back the sorting result of this local block */			\
+		for (i = get_local_id(); i < partSize; i += get_local_size())	\
+			row_index[partBase + i] = localIdx[i];						\
+		__syncthreads();												\
+	}																	\
+																		\
+	KERNEL_FUNCTION_MAXTHREADS(void)									\
+	pgstrom_bitonic_step_#SUFFIX(BASETYPE  *data_ptr,					\
+								 cl_uint	height,						\
+								 cl_uint	width,						\
+								 cl_uint   *row_index,					\
+								 cl_uint   *sortkeys,					\
+								 cl_uint	num_keys,					\
+								 cl_int		direction,					\
+								 cl_uint	unitSize,					\
+								 cl_bool	reversing)					\
+	{																	\
+		cl_uint		unitMask = unitSize - 1;							\
+		cl_uint		halfUnitSize = unitSize >> 1;						\
+		cl_uint		halfUnitMask = halfUnitSize - 1;					\
+		cl_uint		idx0, idx1;											\
+		cl_uint		pos0, pos1;											\
+																		\
+		idx0 = (((get_global_id() & ~halfUnitMask) << 1)				\
+				+ (get_global_id() & halfUnitMask));					\
+		idx1 = (reversing												\
+				? ((idx0 & ~unitMask) | (~idx0 & unitMask))				\
+				: (idx0 + halfUnitSize));								\
+		if (idx1 < height)												\
+		{																\
+			pos0 = row_index[idx0];										\
+			pos1 = row_index[idx1];										\
+																		\
+			if (__pgstrom_bitonic_keycomp(data_ptr,						\
+										  height,						\
+										  width,						\
+										  sortkeys,						\
+										  num_keys,						\
+										  pos0,							\
+										  pos1) == direction)			\
+			{															\
+				/* swap */												\
+				row_index[idx0] = pos1;									\
+				row_index[idx1] = pos0;									\
+			}															\
+		}																\
+	}																	\
+																		\
+	KERNEL_FUNCTION_MAXTHREADS(void)									\
+	pgstrom_bitonic_merge_#SUFFIX(BASETYPE *data_ptr,					\
+								  cl_uint	height,						\
+								  cl_uint	width,						\
+								  cl_uint  *row_index,					\
+								  cl_uint  *sortkeys,					\
+								  cl_uint	num_keys,					\
+								  cl_int	direction)					\
+	{																	\
+		cl_uint	   *localIdx = SHARED_WORKMEM(cl_uint);					\
+		cl_uint		localLimit;											\
+		cl_uint		partSize = 2 * get_local_size();					\
+		cl_uint		partBase = get_global_index() * partSize;			\
+		cl_uint		blockSize = partSize;								\
+		cl_uint		unitSize;											\
+		cl_uint		i;													\
+																		\
+		/* Load index to localIdx[] */									\
+		localLimit = (partBase + partSize <= height						\
+					  ? partSize										\
+					  : height - partBase);								\
+		for (i = get_local_id(); i < localLimit; i += get_local_size())	\
+			localIdx[i] = row_index[partBase + i];						\
+		__syncthreads();												\
+																		\
+		/* merge two sorted blocks */									\
+		for (unitSize = blockSize; unitSize >= 2; unitSize >>= 1)		\
+		{																\
+			cl_uint		halfUnitSize = (unitSize >> 1);					\
+			cl_uint		halfUnitMask = (halfUnitSize - 1);				\
+			cl_uint		idx0, idx1;										\
+																		\
+			idx0 = (((get_local_id() & ~halfUnitMask) << 1)				\
+					+ (get_local_id() & halfUnitMask));					\
+			idx1 = halfUnitSize + idx0;									\
+																		\
+			if (idx1 < localLimit)										\
+			{															\
+				cl_uint		pos0 = localIdx[idx0];						\
+				cl_uint		pos1 = localIdx[idx1];						\
+																		\
+				if (__pgstrom_bitonic_keycomp(data_ptr,					\
+											  height,					\
+											  width,					\
+											  sortkeys,					\
+											  num_keys,					\
+											  pos0,						\
+											  pos1) == direction)		\
+				{														\
+					/* swap */											\
+					row_index[idx0] = pos1;								\
+					row_index[idx1] = pos0;								\
+				}														\
+			}															\
+			__syncthreads();											\
+		}																\
+		/* update the row_index[] */									\
+		for (i = get_local_id(); i < partSize; i += get_local_size())	\
+			row_index[partBase + i] = localIdx[i];						\
+		__syncthreads();												\
+	}																	\
+																		\
+	KERNEL_FUNCTION(void)												\
+	pgstrom_matrix_copy_#SUFFIX(BASETYPE   *src_ptr,					\
+								BASETYPE   *dst_ptr,					\
+								cl_uint		height,						\
+								cl_uint		width,						\
+								cl_uint	   *row_index)					\
+	{																	\
+		if (get_global_id() < height)									\
+		{																\
+			cl_uint		src_idx = row_index[get_global_id()];			\
+			cl_uint		dst_idx = get_global_id();						\
+			cl_uint		i, offset;										\
+																		\
+			for (i=0, offset=0; i < width; i++, offset += height)		\
+			{															\
+				dst_ptr[offset + dst_idx] = src_ptr[offset + src_idx];	\
+			}															\
+		}																\
+	}
+
+PGSTROM_BITONIC_SORT_TEMPLATE(fp32, cl_float)
+PGSTROM_BITONIC_SORT_TEMPLATE(fp64, cl_double)
+
+STATIC_FUNCTION(cudaError_t)
+pgstrom_bitonic_sort_fp32(MatrixType   *M,
+						  MatrixType   *R,
+						  void		   *row_index,
+						  cl_uint	   *sort_keys,
+						  cl_uint		num_keys,
+						  cl_bool		is_descending)
+{
+	cl_uint		height = ARRAY_MATRIX_HEIGHT(M);
+	cl_uint		width = ARRAY_MATRIX_WIDTH(M);
+	cl_int		direction = (is_descending ? 1 : -1);
+	dim3		grid_sz;
+	dim3		block_sz;
+	cl_uint		__block_sz = UINT_MAX;
+	Datum		__kern_args[7];
+	Datum	   *kern_args;
+	void	   *kern_funcs[3];
+	cudaError_t	status = cudaSuccess;
+
+	if (ARRAY_MATRIX_ELEMTYPE(M) != PG_FLOAT4OID)
+		return cudaErrorInvalidValue;
+
+	/* nothing to sort */
+	if (num_keys == 0)
+		return cudaSuccess;
+
+	/* setup common kernel arguments */
+	__sort_keys = malloc(sizeof(cl_uint) * num_keys);
+	if (!__sort_keys)
+		return cudaErrorMemoryAllocation;
+	memcpy(__sort_keys, sort_keys, sizeof(cl_uint) * num_keys);
+
+	__kern_args[0] = (Datum)ARRAY_MATRIX_DATAPTR(M);
+	__kern_args[1] = (Datum)(height);
+	__kern_args[2] = (Datum)(width);
+	__kern_args[3] = (Datum)(row_index);
+	__kern_args[4] = (Datum)(__sort_keys);
+	__kern_args[5] = (Datum)(num_keys);
+	__kern_args[6] = (Datum)(is_descending ? 1 : -1);
+
+	/*
+	 * Ensure max available block size for each kernel functions.
+	 * These are declared with KERNEL_FUNCTION_MAXTHREADS, we
+	 * expect largest workgroup size is equivalent to H/W limit.
+	 */
+	kern_funcs[0] = (void *)pgstrom_bitonic_local_fp32;
+	kern_funcs[1] = (void *)pgstrom_bitonic_step_fp32;
+	kern_funcs[2] = (void *)pgstrom_bitonic_merge_fp32;
+	for (i=0; i < 3; i++)
+	{
+		cl_uint		__temp_sz;
+
+		status = pgstrom_largest_workgroup_size(
+			&grid_sz,
+			&block_sz,
+			kern_funcs[i],
+			(height + 1) / 2,
+			2 * sizeof(cl_uint));
+		if (status != cudaSuccess)
+			goto out;
+		__temp_sz = 1 << (get_next_log2(block_sz.x + 1) - 1);
+		__block_sz = Min(__block_sz, __temp_sz);
+	}
+	assert((__block_sz & (__block_sz - 1)) == 0);	/* to be 2^N */
+	block_sz.x = __block_sz;
+	block_sz.y = 1;
+	block_sz.z = 1;
+
+	/* nhalf is the least power of two value that is larger than
+	 * or equal to half of the nitems. */
+	nhalf = 1UL << (get_next_log2(height + 1) - 1);
+
+	/*
+	 * KERNEL_FUNCTION_MAXTHREADS(void)
+	 * pgstrom_bitonic_local_#SUFFIX(...)
+	 */
+	kern_args = (Datum *)
+		cudaGetParameterBuffer(sizeof(Datum)
+							   sizeof(Datum) * 7);
+	if (!kern_args)
+	{
+		status = cudaErrorLaunchOutOfResources;
+		goto out;
+	}
+	memcpy(kern_args, __kern_args, sizeof(Datum) * 7);
+
+	status = cudaLaunchDevice((void *)pgstrom_bitonic_local_fp32,
+							  kern_args, grid_sz, block_sz,
+							  2 * sizeof(cl_uint) * block_sz.x,
+							  NULL);
+	if (status != cudaSuccess)
+		goto out;
+	status = cudaDeviceSynchronize();
+	if (status != cudaSuccess)
+		goto out;
+
+	/* inter blocks bitonic sorting */
+	for (i = block_sz.x; i < nhalf; i *= 2)
+	{
+		for (j = 2 * i; j > block_sz.x; j /= 2)
+		{
+			cl_uint		unitSize = 2 * j;
+			cl_uint		workSize;
+
+			/*
+			 * KERNEL_FUNCTION_MAXTHREADS(void)
+			 * pgstrom_bitonic_step_#SUFFIX(...)
+			 */
+			kern_args = (Datum *)
+				cudaGetParameterBuffer(sizeof(Datum)
+									   sizeof(Datum) * 9);
+			if (!kern_args)
+			{
+				status = cudaErrorLaunchOutOfResources;
+				goto out;
+			}
+			memcpy(kern_args, __kern_args, sizeof(Datum) * 7);
+			kern_args[7] = (Datum)(unitSize);
+			kern_args[8] = (Datum)(j == 2 * i ? true : false);
+
+			workSize = (((height + unitSize - 1)
+						 / unitSize) * unitSize / 2);
+			grid_sz.x = (work_size + block_sz.x - 1) / block_sz.x;
+			grid_sz.y = 1;
+			grid_sz.z = 1;
+
+			status = cudaLaunchDevice((void *)pgstrom_bitonic_step_fp32,
+									  kern_args, grid_sz, block_sz,
+									  0,
+									  NULL);
+			if (status != cudaSuccess)
+				goto out;
+			status = cudaDeviceSynchronize();
+			if (status != cudaSuccess)
+				goto out;
+		}
+
+		/*
+		 * Launch: pgstrom_bitonic_merge_SUFFIX
+		 */
+		kern_args = (Datum *)
+			cudaGetParameterBuffer(sizeof(Datum)
+								   sizeof(Datum) * 7);
+		if (!kern_args)
+		{
+			status = cudaErrorLaunchOutOfResources;
+			goto out;
+		}
+		memcpy(kern_args, __kern_args, sizeof(Datum) * 7);
+
+		grid_sz.x = ((height + 1) / 2 + block_sz.x - 1) / block_sz.x;
+		grid_sz.y = 1;
+		grid_sz.z = 1;
+
+		status = cudaLaunchDevice((void *)pgstrom_bitonic_merge_fp32,
+								  kern_args, grid_sz, block_sz,
+								  2 * sizeof(cl_uint) * block_sz.x,
+								  NULL);
+		if (status != cudaSuccess)
+			goto out;
+		status = cudaDeviceSynchronize();
+		if (status != cudaSuccess)
+			goto out;
+	}
+
+	/*
+	 * KERNEL_FUNCTION(void)
+	 * pgstrom_matrix_copy_#SUFFIX(...)
+	 */
+	__kern_args[0] = (Datum)ARRAY_MATRIX_DATAPTR(M);
+	__kern_args[1] = (Datum)ARRAY_MATRIX_DATAPTR(R);
+	__kern_args[2] = (Datum)(height);
+	__kern_args[3] = (Datum)(width);
+	__kern_args[4] = (Datum)(row_index);
+
+	status = pgstromLaunchDynamicKernel(pgstrom_matrix_copy_fp32,
+										__kern_args, 5,
+										height,
+										0);
+out:
+	free(__sort_keys);
+	return status;
+}
+#endif
+
+
+
 #endif	/* CUDA_MATRIX_H */

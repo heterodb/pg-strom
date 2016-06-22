@@ -312,6 +312,54 @@ pgstrom_largest_workgroup_size(dim3 *p_grid_sz,
 
 	return WORKGROUPSIZE_RESULT_SUCCESS;
 }
+
+/*
+ * pgstromLaunchDynamicKernel 
+ *
+ * A utility routine to launch a kernel function, and then wait for its
+ * completion
+ */
+STATIC_FUNCTION(cudaError_t)
+pgstromLaunchDynamicKernel(void	   *kern_function,
+						   Datum   *kern_argbuf,
+						   cl_int	kern_nargs,
+						   size_t	num_threads,
+						   cl_uint	shmem_per_thread)
+{
+	Datum	   *__kern_args;
+	dim3		grid_sz;
+	dim3		block_sz;
+	cudaError_t	status;
+
+	__kern_args = (Datum *)
+		cudaGetParameterBuffer(sizeof(Datum),
+							   sizeof(Datum) * kern_nargs);
+	if (!__kern_args)
+		return cudaErrorLaunchOutOfResources;
+	memcpy(__kern_args, kern_argbuf, sizeof(Datum) * kern_nargs);
+
+	status = pgstrom_optimal_workgroup_size(&grid_sz,
+											&block_sz,
+											kern_function,
+											num_threads,
+											shmem_per_thread);
+	if (status != cudaSuccess)
+		return status;
+
+	status = cudaLaunchDevice(kern_function,
+							  __kern_args, grid_sz, block_sz,
+							  shmem_per_thread * block_sz.x,
+							  NULL);
+	if (status != cudaSuccess)
+		return status;
+
+	status = cudaDeviceSynchronize();
+	if (status != cudaSuccess)
+		return status;
+
+	return cudaSuccess;
+}
+
 #endif	/* __CUDACC__ */
 #undef WORKGROUPSIZE_RESULT_TYPE
 #undef WORKGROUPSIZE_RESULT_SUCCESS
