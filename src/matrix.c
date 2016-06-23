@@ -373,7 +373,7 @@ array_matrix_rawsize(PG_FUNCTION_ARGS)
 			elog(ERROR, "unable to make array-matrix with '%s' type",
 				 format_type_be(elemtype));
 	}
-	PG_RETURN_INT64(ARRAY_MATRIX_RAWSIZE(typlen, height, width));
+	PG_RETURN_INT64(MAXALIGN(ARRAY_MATRIX_RAWSIZE(typlen, height, width)));
 }
 PG_FUNCTION_INFO_V1(array_matrix_rawsize);
 

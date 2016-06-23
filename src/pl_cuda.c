@@ -470,7 +470,7 @@ plcuda_lookup_helper(List *options, oidvector *arg_types, Oid result_type,
 
 		/* OK, helper function is valid */
 		*p_func_oid = helper_oid;
-		if (*p_size_value)
+		if (p_size_value)
 			*p_size_value = 0;	/* no const value */
 
 		return true;

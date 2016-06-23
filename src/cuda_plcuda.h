@@ -68,5 +68,10 @@ typedef struct
 		STROM_SET_ERROR(&kcxt->e, (errcode));	\
 		return;									\
 	} while(0)
+#define PLCUDA_RUNTIME_ERROR_RETURN(errcode)	\
+	do {										\
+		STROM_SET_RUNTIME_ERROR(&kcxt->e, (errcode));	\
+		return;									\
+	} while(0)
 
 #endif	/* CUDA_PLCUDA.H */
