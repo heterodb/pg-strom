@@ -353,7 +353,7 @@ gpusort_bitonic_local(kern_gpusort *kgpusort,
 		}
 	}
 	/* write back local sorted result */
-	for (i = get_local_id(); i < part_size; i += get_local_size())
+	for (i = get_local_id(); i < localLimit; i += get_local_size())
 		kresults->results[part_base + i] = localIdx[i];
 	__syncthreads();
 
@@ -463,7 +463,7 @@ gpusort_bitonic_merge(kern_gpusort *kgpusort,
 		__syncthreads();
 	}
 	/* Save index to kresults[] */
-	for (i = get_local_id(); i < part_size; i += get_local_size())
+	for (i = get_local_id(); i < localLimit; i += get_local_size())
 		kresults->results[part_base + i] = localIdx[i];
 	__syncthreads();
 
