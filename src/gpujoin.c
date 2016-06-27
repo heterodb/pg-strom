@@ -6935,12 +6935,12 @@ colocate_outer_join_maps_to_device(pgstrom_multirels *pmrels, GpuTask *gtask)
 		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
 
 	/* calculation of the optimal number of threads */
-	pgstrom_optimal_workgroup_size(&grid_size,
-								   &block_size,
-								   kern_colocate,
-								   pgjoin->task.cuda_device,
-								   ojmap_length / sizeof(cl_uint),
-								   0);	/* no shared memory usage */
+	optimal_workgroup_size(&grid_size,
+						   &block_size,
+						   kern_colocate,
+						   pgjoin->task.cuda_device,
+						   ojmap_length / sizeof(cl_uint),
+						   0);	/* no shared memory usage */
 
 	/* destination address on device side */
 	dst_ojmaps = pmrels->m_ojmaps[cuda_index] + sizeof(cl_bool) * ojmap_length;

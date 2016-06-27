@@ -540,11 +540,11 @@ gpusort_main(kern_gpusort *kgpusort,
 	kern_funcs[2] = (const void *)gpusort_bitonic_merge;
 	for (i=0; i < 3; i++)
 	{
-		status = pgstrom_largest_workgroup_size(&grid_sz,
-												&block_sz,
-												kern_funcs[i],
-												(nitems + 1) / 2,
-												2 * sizeof(cl_uint));
+		status = largest_workgroup_size(&grid_sz,
+										&block_sz,
+										kern_funcs[i],
+										(nitems + 1) / 2,
+										2 * sizeof(cl_uint));
 		if (status != cudaSuccess)
 		{
 			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
@@ -726,12 +726,12 @@ gpusort_main(kern_gpusort *kgpusort,
 		kern_args[1] = kresults;
 		kern_args[2] = kds_slot;
 
-		status = pgstrom_optimal_workgroup_size(&grid_sz,
-												&block_sz,
-												(const void *)
-												gpusort_fixup_pointers,
-												kresults->nitems,
-												sizeof(cl_uint));
+		status = optimal_workgroup_size(&grid_sz,
+										&block_sz,
+										(const void *)
+										gpusort_fixup_pointers,
+										kresults->nitems,
+										sizeof(cl_uint));
 		if (status != cudaSuccess)
 		{
 			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);

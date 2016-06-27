@@ -1968,16 +1968,16 @@ gpuMaxThreadsPerBlock(void)
 }
 
 /*
- * pgstrom_optimal_workgroup_size - calculates the optimal block size
+ * optimal_workgroup_size - calculates the optimal block size
  * according to the function and device attributes
  */
 void
-pgstrom_optimal_workgroup_size(size_t *p_grid_size,
-							   size_t *p_block_size,
-							   CUfunction function,
-							   CUdevice device,
-							   size_t nitems,
-							   size_t dynamic_shmem_per_thread)
+optimal_workgroup_size(size_t *p_grid_size,
+					   size_t *p_block_size,
+					   CUfunction function,
+					   CUdevice device,
+					   size_t nitems,
+					   size_t dynamic_shmem_per_thread)
 {
 	cl_uint		grid_size;
 	cl_uint		block_size;
@@ -2023,17 +2023,17 @@ pgstrom_optimal_workgroup_size(size_t *p_grid_size,
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
 
-	rc = __pgstrom_optimal_workgroup_size(&grid_size,
-										  &block_size,
-										  nitems,
-										  function,
-										  funcMaxThreadsPerBlock,
-										  staticShmemSize,
-										  dynamic_shmem_per_thread,
-										  warpSize,
-										  devMaxThreadsPerBlock,
-										  maxThreadsPerMultiProcessor,
-										  0);
+	rc = __optimal_workgroup_size(&grid_size,
+								  &block_size,
+								  nitems,
+								  function,
+								  funcMaxThreadsPerBlock,
+								  staticShmemSize,
+								  dynamic_shmem_per_thread,
+								  warpSize,
+								  devMaxThreadsPerBlock,
+								  maxThreadsPerMultiProcessor,
+								  0);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on calculation of optimal workgroup size: %s",
 			 errorText(rc));
@@ -2042,12 +2042,12 @@ pgstrom_optimal_workgroup_size(size_t *p_grid_size,
 }
 
 void
-pgstrom_largest_workgroup_size(size_t *p_grid_size,
-							   size_t *p_block_size,
-							   CUfunction function,
-							   CUdevice device,
-							   size_t nitems,
-							   size_t dynamic_shmem_per_thread)
+largest_workgroup_size(size_t *p_grid_size,
+					   size_t *p_block_size,
+					   CUfunction function,
+					   CUdevice device,
+					   size_t nitems,
+					   size_t dynamic_shmem_per_thread)
 {
 	cl_uint		grid_size;
 	cl_uint		block_size;
@@ -2085,14 +2085,14 @@ pgstrom_largest_workgroup_size(size_t *p_grid_size,
     if (rc != CUDA_SUCCESS)
         elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
 
-	rc = __pgstrom_largest_workgroup_size(&grid_size,
-										  &block_size,
-										  nitems,
-										  kernel_max_blocksz,
-										  static_shmem_sz,
-										  dynamic_shmem_per_thread,
-										  warp_size,
-										  max_shmem_per_block);
+	rc = __largest_workgroup_size(&grid_size,
+								  &block_size,
+								  nitems,
+								  kernel_max_blocksz,
+								  static_shmem_sz,
+								  dynamic_shmem_per_thread,
+								  warp_size,
+								  max_shmem_per_block);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on calculation of largest workgroup size: %s",
 			 errorText(rc));
