@@ -1183,6 +1183,9 @@ pgstrom_release_gputaskstate(GpuTaskState *gts)
 	CUresult	rc;
 	int			i;
 
+	/* release scan-desc if any */
+	if (gts->css.ss.ss_currentScanDesc)
+		heap_endscan(gts->css.ss.ss_currentScanDesc);
 	/* obviously, the GpuTaskState shall be deactivated */
 	pgstrom_deactivate_gputaskstate(gts);
 	/* clean-up and release any concurrent tasks */
@@ -1232,14 +1235,14 @@ pgstrom_init_gputaskstate(GpuContext *gcontext,
 	if ((estate->es_instrument & INSTRUMENT_TIMER) != 0)
 		gts->outer_instrument.need_timer = true;
 #endif
-	gts->curr_blknum = 0;
 	if (gts->css.ss.ss_currentRelation)
 	{
-		Relation	scan_rel = gts->css.ss.ss_currentRelation;
-		gts->last_blknum = RelationGetNumberOfBlocks(scan_rel);
+		Relation		scan_rel = gts->css.ss.ss_currentRelation;
+		HeapScanDesc	scan_desc = heap_beginscan(scan_rel,
+												   estate->es_snapshot,
+												   0, NULL);
+		gts->css.ss.ss_currentScanDesc = scan_desc;
 	}
-	else
-		gts->last_blknum = 0;
 	gts->scan_overflow = NULL;
 	SpinLockInit(&gts->lock);
 	dlist_init(&gts->tracked_tasks);

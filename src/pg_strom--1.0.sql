@@ -593,213 +593,353 @@ CREATE LANGUAGE plcuda
 COMMENT ON LANGUAGE plcuda IS 'PL/CUDA procedural language';
 
 --
--- Matrix data type
+-- Matrix like 2D-Array type support
 --
-CREATE FUNCTION pgstrom.matrix_in(cstring)
-  RETURNS pg_catalog.matrix
-  AS 'MODULE_PATHNAME', 'matrix_in'
-  LANGUAGE C STRICT IMMUTABLE;
-CREATE FUNCTION pgstrom.matrix_out(pg_catalog.matrix)
-  RETURNS cstring
-  AS 'MODULE_PATHNAME', 'matrix_out'
-  LANGUAGE C STRICT IMMUTABLE;
-CREATE FUNCTION pgstrom.matrix_recv(internal)
-  RETURNS pg_catalog.matrix
-  AS 'MODULE_PATHNAME', 'matrix_recv'
-  LANGUAGE C STRICT IMMUTABLE;
-CREATE FUNCTION pgstrom.matrix_send(pg_catalog.matrix)
-  RETURNS bytea
-  AS 'MODULE_PATHNAME', 'matrix_send'
-  LANGUAGE C STRICT IMMUTABLE;
+CREATE FUNCTION pgstrom.array_matrix_accum(internal, variadic int2[])
+  RETURNS internal
+  AS 'MODULE_PATHNAME','array_matrix_accum'
+  LANGUAGE C CALLED ON NULL INPUT;
 
-CREATE TYPE pg_catalog.matrix (
-  INPUT = pgstrom.matrix_in,
-  OUTPUT = pgstrom.matrix_out,
-  RECEIVE = pgstrom.matrix_recv,
-  SEND = pgstrom.matrix_send,
-  ANALYZE = pg_catalog.array_typanalyze,
-  STORAGE = main,
-  CATEGORY = 'A'
-);
+CREATE FUNCTION pgstrom.array_matrix_accum(internal, variadic int4[])
+  RETURNS internal
+  AS 'MODULE_PATHNAME','array_matrix_accum'
+  LANGUAGE C CALLED ON NULL INPUT;
 
-CREATE FUNCTION pgstrom.float4array_to_matrix(float4[])
-  RETURNS pg_catalog.matrix
-  AS 'MODULE_PATHNAME', 'float4array_to_matrix'
-  LANGUAGE C STRICT IMMUTABLE;
-CREATE FUNCTION pgstrom.float8array_to_matrix(float8[])
-  RETURNS pg_catalog.matrix
-  AS 'MODULE_PATHNAME', 'float8array_to_matrix'
-  LANGUAGE C STRICT IMMUTABLE;
-CREATE FUNCTION pgstrom.numericarray_to_matrix(numeric[])
-  RETURNS pg_catalog.matrix
-  AS 'MODULE_PATHNAME', 'numericarray_to_matrix'
-  LANGUAGE C STRICT IMMUTABLE;
+CREATE FUNCTION pgstrom.array_matrix_accum(internal, variadic int8[])
+  RETURNS internal
+  AS 'MODULE_PATHNAME','array_matrix_accum'
+  LANGUAGE C CALLED ON NULL INPUT;
 
-CREATE FUNCTION pgstrom.matrix_to_float4array(pg_catalog.matrix)
+CREATE FUNCTION pgstrom.array_matrix_accum(internal, variadic real[])
+  RETURNS internal
+  AS 'MODULE_PATHNAME','array_matrix_accum'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE FUNCTION pgstrom.array_matrix_accum(internal, variadic float[])
+  RETURNS internal
+  AS 'MODULE_PATHNAME','array_matrix_accum'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+-- varbit as matrix of int4[]
+CREATE FUNCTION pgstrom.array_matrix_accum_varbit(internal, bit)
+  RETURNS internal
+  AS 'MODULE_PATHNAME','array_matrix_accum_varbit'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+-- type case varbit <--> int4[]
+CREATE FUNCTION pgstrom.varbit_to_int4_array(bit)
+  RETURNS int4[]
+  AS 'MODULE_PATHNAME','varbit_to_int4_array'
+  LANGUAGE C STRICT;
+
+CREATE CAST (bit AS int4[])
+  WITH FUNCTION pgstrom.varbit_to_int4_array(bit)
+  AS ASSIGNMENT;
+
+CREATE FUNCTION pgstrom.int4_array_to_varbit(int4[])
+  RETURNS bit
+  AS 'MODULE_PATHNAME','int4_array_to_varbit'
+  LANGUAGE C STRICT;
+
+CREATE CAST (int4[] AS bit)
+  WITH FUNCTION pgstrom.int4_array_to_varbit(int4[])
+  AS ASSIGNMENT;
+
+CREATE FUNCTION pgstrom.array_matrix_final_int2(internal)
+  RETURNS int2[]
+  AS 'MODULE_PATHNAME','array_matrix_final_int2'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE FUNCTION pgstrom.array_matrix_final_int4(internal)
+  RETURNS int4[]
+  AS 'MODULE_PATHNAME','array_matrix_final_int4'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE FUNCTION pgstrom.array_matrix_final_int8(internal)
+  RETURNS int8[]
+  AS 'MODULE_PATHNAME','array_matrix_final_int8'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE FUNCTION pgstrom.array_matrix_final_float4(internal)
   RETURNS float4[]
-  AS 'MODULE_PATHNAME', 'matrix_to_float4array'
-  LANGUAGE C STRICT IMMUTABLE;
-CREATE FUNCTION pgstrom.matrix_to_float8array(pg_catalog.matrix)
+  AS 'MODULE_PATHNAME','array_matrix_final_float4'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE FUNCTION pgstrom.array_matrix_final_float8(internal)
   RETURNS float8[]
-  AS 'MODULE_PATHNAME', 'matrix_to_float8array'
-  LANGUAGE C STRICT IMMUTABLE;
-CREATE FUNCTION pgstrom.matrix_to_numericarray(pg_catalog.matrix)
-  RETURNS numeric[]
-  AS 'MODULE_PATHNAME', 'matrix_to_numericarray'
-  LANGUAGE C STRICT IMMUTABLE;
-
-CREATE CAST (float4[] AS pg_catalog.matrix)
-  WITH FUNCTION pgstrom.float4array_to_matrix(float4[])
-  AS ASSIGNMENT;
-CREATE CAST (float8[] AS pg_catalog.matrix)
-  WITH FUNCTION pgstrom.float8array_to_matrix(float8[])
-  AS ASSIGNMENT;
-CREATE CAST (numeric[] AS pg_catalog.matrix)
-  WITH FUNCTION pgstrom.numericarray_to_matrix(numeric[])
-  AS ASSIGNMENT;
-
-CREATE CAST (pg_catalog.matrix AS float4[])
-  WITH FUNCTION pgstrom.matrix_to_float4array(pg_catalog.matrix)
-  AS ASSIGNMENT;
-CREATE CAST (pg_catalog.matrix AS float8[])
-  WITH FUNCTION pgstrom.matrix_to_float8array(pg_catalog.matrix)
-  AS ASSIGNMENT;
-CREATE CAST (pg_catalog.matrix AS numeric[])
-  WITH FUNCTION pgstrom.matrix_to_numericarray(pg_catalog.matrix)
-  AS ASSIGNMENT;
-
-
-CREATE FUNCTION pgstrom.make_matrix_accum(internal, variadic int2[])
-  RETURNS internal
-  AS 'MODULE_PATHNAME','make_matrix_accum'
+  AS 'MODULE_PATHNAME','array_matrix_final_float8'
   LANGUAGE C CALLED ON NULL INPUT;
 
-CREATE FUNCTION pgstrom.make_matrix_accum(internal, variadic int4[])
-  RETURNS internal
-  AS 'MODULE_PATHNAME','make_matrix_accum'
-  LANGUAGE C CALLED ON NULL INPUT;
-
-CREATE FUNCTION pgstrom.make_matrix_accum(internal, variadic int8[])
-  RETURNS internal
-  AS 'MODULE_PATHNAME','make_matrix_accum'
-  LANGUAGE C CALLED ON NULL INPUT;
-
-CREATE FUNCTION pgstrom.make_matrix_accum(internal, variadic float4[])
-  RETURNS internal
-  AS 'MODULE_PATHNAME','make_matrix_accum'
-  LANGUAGE C CALLED ON NULL INPUT;
-
-CREATE FUNCTION pgstrom.make_matrix_accum(internal, variadic float8[])
-  RETURNS internal
-  AS 'MODULE_PATHNAME','make_matrix_accum'
-  LANGUAGE C CALLED ON NULL INPUT;
-
-CREATE FUNCTION pgstrom.make_matrix_accum(internal, variadic numeric[])
-  RETURNS internal
-  AS 'MODULE_PATHNAME','make_matrix_accum'
-  LANGUAGE C CALLED ON NULL INPUT;
-
-CREATE FUNCTION pgstrom.make_matrix_final(internal)
-  RETURNS matrix
-  AS 'MODULE_PATHNAME', 'make_matrix_final'
-  LANGUAGE C CALLED ON NULL INPUT;
-
-CREATE AGGREGATE pg_catalog.make_matrix(variadic int2[])
+CREATE AGGREGATE pg_catalog.array_matrix(variadic int2[])
 (
-  sfunc = pgstrom.make_matrix_accum,
+  sfunc = pgstrom.array_matrix_accum,
   stype = internal,
-  finalfunc = pgstrom.make_matrix_final
+  finalfunc = pgstrom.array_matrix_final_int2
 );
 
-CREATE AGGREGATE pg_catalog.make_matrix(variadic int4[])
+CREATE AGGREGATE pg_catalog.array_matrix(variadic int4[])
 (
-  sfunc = pgstrom.make_matrix_accum,
+  sfunc = pgstrom.array_matrix_accum,
   stype = internal,
-  finalfunc = pgstrom.make_matrix_final
+  finalfunc = pgstrom.array_matrix_final_int4
 );
 
-CREATE AGGREGATE pg_catalog.make_matrix(variadic int8[])
+CREATE AGGREGATE pg_catalog.array_matrix(variadic int8[])
 (
-  sfunc = pgstrom.make_matrix_accum,
+  sfunc = pgstrom.array_matrix_accum,
   stype = internal,
-  finalfunc = pgstrom.make_matrix_final
+  finalfunc = pgstrom.array_matrix_final_int8
 );
 
-CREATE AGGREGATE pg_catalog.make_matrix(variadic float4[])
+CREATE AGGREGATE pg_catalog.array_matrix(variadic float4[])
 (
-  sfunc = pgstrom.make_matrix_accum,
+  sfunc = pgstrom.array_matrix_accum,
   stype = internal,
-  finalfunc = pgstrom.make_matrix_final
+  finalfunc = pgstrom.array_matrix_final_float4
 );
 
-CREATE AGGREGATE pg_catalog.make_matrix(variadic float8[])
+CREATE AGGREGATE pg_catalog.array_matrix(variadic float8[])
 (
-  sfunc = pgstrom.make_matrix_accum,
+  sfunc = pgstrom.array_matrix_accum,
   stype = internal,
-  finalfunc = pgstrom.make_matrix_final
+  finalfunc = pgstrom.array_matrix_final_float8
 );
 
-CREATE AGGREGATE pg_catalog.make_matrix(variadic numeric[])
+CREATE AGGREGATE pg_catalog.array_matrix(bit)
 (
-  sfunc = pgstrom.make_matrix_accum,
+  sfunc = pgstrom.array_matrix_accum_varbit,
   stype = internal,
-  finalfunc = pgstrom.make_matrix_final
+  finalfunc = pgstrom.array_matrix_final_int4
 );
 
-CREATE FUNCTION pg_catalog.unnest(matrix)
-  RETURNS SETOF record
-  AS 'MODULE_PATHNAME','matrix_unnest'
+CREATE FUNCTION pg_catalog.array_matrix_validation(anyarray)
+  RETURNS bool
+  AS 'MODULE_PATHNAME','array_matrix_validation'
   LANGUAGE C STRICT;
 
-CREATE FUNCTION pg_catalog.matrix_height(matrix)
+CREATE FUNCTION pg_catalog.array_matrix_height(anyarray)
   RETURNS int
-  AS 'MODULE_PATHNAME','matrix_height'
+  AS 'MODULE_PATHNAME','array_matrix_height'
   LANGUAGE C STRICT;
 
-CREATE FUNCTION pg_catalog.matrix_width(matrix)
+CREATE FUNCTION pg_catalog.array_matrix_width(anyarray)
   RETURNS int
-  AS 'MODULE_PATHNAME','matrix_width'
+  AS 'MODULE_PATHNAME','array_matrix_width'
   LANGUAGE C STRICT;
 
-CREATE FUNCTION pg_catalog.matrix_rawsize(int,int)
+CREATE FUNCTION pg_catalog.array_matrix_rawsize(regtype,int,int)
   RETURNS bigint
-  AS 'MODULE_PATHNAME','matrix_rawsize'
+  AS 'MODULE_PATHNAME','array_matrix_rawsize'
   LANGUAGE C STRICT;
 
-CREATE FUNCTION pg_catalog.matrix_transpose(matrix)
-  RETURNS matrix
-  AS 'MODULE_PATHNAME','matrix_transpose'
+CREATE FUNCTION pg_catalog.matrix_unnest(anyarray)
+  RETURNS SETOF record
+  AS 'MODULE_PATHNAME','array_matrix_unnest'
   LANGUAGE C STRICT;
 
-CREATE FUNCTION pgstrom.matrix_add(matrix, matrix)
-  RETURNS matrix
-  AS 'MODULE_PATHNAME','matrix_add'
+CREATE FUNCTION pg_catalog.rbind(int2[], int2[])
+  RETURNS int2[]
+  AS 'MODULE_PATHNAME','array_matrix_rbind_int2'
   LANGUAGE C STRICT;
 
-CREATE FUNCTION pgstrom.matrix_sub(matrix, matrix)
-  RETURNS matrix
-  AS 'MODULE_PATHNAME','matrix_sub'
+CREATE FUNCTION pg_catalog.rbind(int4[], int4[])
+  RETURNS int4[]
+  AS 'MODULE_PATHNAME','array_matrix_rbind_int4'
   LANGUAGE C STRICT;
 
-CREATE FUNCTION pgstrom.matrix_mul(matrix, matrix)
-  RETURNS matrix
-  AS 'MODULE_PATHNAME','matrix_mul'
+CREATE FUNCTION pg_catalog.rbind(int8[], int8[])
+  RETURNS int8[]
+  AS 'MODULE_PATHNAME','array_matrix_rbind_int8'
   LANGUAGE C STRICT;
 
-CREATE OPERATOR pg_catalog.+ (
-  PROCEDURE = pgstrom.matrix_add,
-  LEFTARG = pg_catalog.matrix,
-  RIGHTARG = pg_catalog.matrix
+CREATE FUNCTION pg_catalog.rbind(float4[], float4[])
+  RETURNS float4[]
+  AS 'MODULE_PATHNAME','array_matrix_rbind_float4'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.rbind(float8[], float8[])
+  RETURNS float8[]
+  AS 'MODULE_PATHNAME','array_matrix_rbind_float8'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.cbind(int2[], int2[])
+  RETURNS int2[]
+  AS 'MODULE_PATHNAME','array_matrix_cbind_int2'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.cbind(int4[], int4[])
+  RETURNS int4[]
+  AS 'MODULE_PATHNAME','array_matrix_cbind_int4'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.cbind(int8[], int8[])
+  RETURNS int8[]
+  AS 'MODULE_PATHNAME','array_matrix_cbind_int8'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.cbind(float4[], float4[])
+  RETURNS float4[]
+  AS 'MODULE_PATHNAME','array_matrix_cbind_float4'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.cbind(float8[], float8[])
+  RETURNS float8[]
+  AS 'MODULE_PATHNAME','array_matrix_cbind_float8'
+  LANGUAGE C STRICT;
+
+
+CREATE FUNCTION pgstrom.array_matrix_rbind_accum(internal, anyarray)
+  RETURNS internal
+  AS 'MODULE_PATHNAME','array_matrix_rbind_accum'
+  LANGUAGE C CALLED ON NULL INPUT;;
+
+CREATE FUNCTION pgstrom.array_matrix_rbind_final_int2(internal)
+  RETURNS int2[]
+  AS 'MODULE_PATHNAME','array_matrix_rbind_final_int2'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE FUNCTION pgstrom.array_matrix_rbind_final_int4(internal)
+  RETURNS int4[]
+  AS 'MODULE_PATHNAME','array_matrix_rbind_final_int4'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE FUNCTION pgstrom.array_matrix_rbind_final_int8(internal)
+  RETURNS int8[]
+  AS 'MODULE_PATHNAME','array_matrix_rbind_final_int8'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE FUNCTION pgstrom.array_matrix_rbind_final_float4(internal)
+  RETURNS float4[]
+  AS 'MODULE_PATHNAME','array_matrix_rbind_final_float4'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE FUNCTION pgstrom.array_matrix_rbind_final_float8(internal)
+  RETURNS float8[]
+  AS 'MODULE_PATHNAME','array_matrix_rbind_final_float8'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE AGGREGATE pg_catalog.rbind(int2[])
+(
+  sfunc = pgstrom.array_matrix_rbind_accum,
+  stype = internal,
+  finalfunc = pgstrom.array_matrix_rbind_final_int2
 );
 
-CREATE OPERATOR pg_catalog.- (
-  PROCEDURE = pgstrom.matrix_sub,
-  LEFTARG = pg_catalog.matrix,
-  RIGHTARG = pg_catalog.matrix
+CREATE AGGREGATE pg_catalog.rbind(int4[])
+(
+  sfunc = pgstrom.array_matrix_rbind_accum,
+  stype = internal,
+  finalfunc = pgstrom.array_matrix_rbind_final_int4
 );
 
-CREATE OPERATOR pg_catalog.* (
-  PROCEDURE = pgstrom.matrix_mul,
-  LEFTARG = pg_catalog.matrix,
-  RIGHTARG = pg_catalog.matrix
+CREATE AGGREGATE pg_catalog.rbind(int8[])
+(
+  sfunc = pgstrom.array_matrix_rbind_accum,
+  stype = internal,
+  finalfunc = pgstrom.array_matrix_rbind_final_int8
 );
+
+CREATE AGGREGATE pg_catalog.rbind(float4[])
+(
+  sfunc = pgstrom.array_matrix_rbind_accum,
+  stype = internal,
+  finalfunc = pgstrom.array_matrix_rbind_final_float4
+);
+
+CREATE AGGREGATE pg_catalog.rbind(float8[])
+(
+  sfunc = pgstrom.array_matrix_rbind_accum,
+  stype = internal,
+  finalfunc = pgstrom.array_matrix_rbind_final_float8
+);
+
+
+CREATE FUNCTION pgstrom.array_matrix_cbind_accum(internal, anyarray)
+  RETURNS internal
+  AS 'MODULE_PATHNAME','array_matrix_cbind_accum'
+  LANGUAGE C CALLED ON NULL INPUT;;
+
+CREATE FUNCTION pgstrom.array_matrix_cbind_final_int2(internal)
+  RETURNS int2[]
+  AS 'MODULE_PATHNAME','array_matrix_cbind_final_int2'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE FUNCTION pgstrom.array_matrix_cbind_final_int4(internal)
+  RETURNS int4[]
+  AS 'MODULE_PATHNAME','array_matrix_cbind_final_int4'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE FUNCTION pgstrom.array_matrix_cbind_final_int8(internal)
+  RETURNS int8[]
+  AS 'MODULE_PATHNAME','array_matrix_cbind_final_int8'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE FUNCTION pgstrom.array_matrix_cbind_final_float4(internal)
+  RETURNS float4[]
+  AS 'MODULE_PATHNAME','array_matrix_cbind_final_float4'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE FUNCTION pgstrom.array_matrix_cbind_final_float8(internal)
+  RETURNS float8[]
+  AS 'MODULE_PATHNAME','array_matrix_cbind_final_float8'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE AGGREGATE pg_catalog.cbind(int2[])
+(
+  sfunc = pgstrom.array_matrix_cbind_accum,
+  stype = internal,
+  finalfunc = pgstrom.array_matrix_cbind_final_int2
+);
+
+CREATE AGGREGATE pg_catalog.cbind(int4[])
+(
+  sfunc = pgstrom.array_matrix_cbind_accum,
+  stype = internal,
+  finalfunc = pgstrom.array_matrix_cbind_final_int4
+);
+
+CREATE AGGREGATE pg_catalog.cbind(int8[])
+(
+  sfunc = pgstrom.array_matrix_cbind_accum,
+  stype = internal,
+  finalfunc = pgstrom.array_matrix_cbind_final_int8
+);
+
+CREATE AGGREGATE pg_catalog.cbind(float4[])
+(
+  sfunc = pgstrom.array_matrix_cbind_accum,
+  stype = internal,
+  finalfunc = pgstrom.array_matrix_cbind_final_float4
+);
+
+CREATE AGGREGATE pg_catalog.cbind(float8[])
+(
+  sfunc = pgstrom.array_matrix_cbind_accum,
+  stype = internal,
+  finalfunc = pgstrom.array_matrix_cbind_final_float8
+);
+
+CREATE FUNCTION pg_catalog.transpose(int2[])
+  RETURNS int2[]
+  AS 'MODULE_PATHNAME','array_matrix_transpose_int2'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.transpose(int4[])
+  RETURNS int4[]
+  AS 'MODULE_PATHNAME','array_matrix_transpose_int4'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.transpose(int8[])
+  RETURNS int8[]
+  AS 'MODULE_PATHNAME','array_matrix_transpose_int8'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.transpose(float4[])
+  RETURNS float4[]
+  AS 'MODULE_PATHNAME','array_matrix_transpose_float4'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.transpose(float8[])
+  RETURNS float8[]
+  AS 'MODULE_PATHNAME','array_matrix_transpose_float8'
+  LANGUAGE C STRICT;

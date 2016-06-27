@@ -16,6 +16,7 @@
  * GNU General Public License for more details.
  */
 #include "postgres.h"
+#include "access/relscan.h"
 #include "access/sysattr.h"
 #include "access/xact.h"
 #include "catalog/heap.h"
@@ -1872,13 +1873,20 @@ pgstrom_exec_scan_chunk(GpuTaskState *gts, Size chunk_length)
 {
 	Relation		base_rel = gts->css.ss.ss_currentRelation;
 	TupleDesc		tupdesc = RelationGetDescr(base_rel);
-	Snapshot		snapshot = gts->css.ss.ps.state->es_snapshot;
+	HeapScanDesc	scan = gts->css.ss.ss_currentScanDesc;
 	pgstrom_data_store *pds = NULL;
+	bool			finished = false;
 	struct timeval	tv1, tv2;
 
-	/* no more blocks to read */
-	if (gts->curr_blknum >= gts->last_blknum)
+	/* return NULL if relation is empty */
+	if (scan->rs_nblocks == 0 || scan->rs_numblocks == 0)
 		return NULL;
+
+	if (scan->rs_cblock == InvalidBlockNumber)
+		scan->rs_cblock = scan->rs_startblock;
+	else if (scan->rs_cblock == scan->rs_startblock)
+		return NULL;	/* already goes around the relation */
+	Assert(scan->rs_cblock < scan->rs_nblocks);
 
 	InstrStartNode(&gts->outer_instrument);
 	PERFMON_BEGIN(&gts->pfm, &tv1);
@@ -1896,11 +1904,26 @@ pgstrom_exec_scan_chunk(GpuTaskState *gts, Size chunk_length)
 	 */
 
 	/* fill up this data-store */
-	while (gts->curr_blknum < gts->last_blknum &&
-		   PDS_insert_block(pds, base_rel,
-							gts->curr_blknum,
-							snapshot, true) >= 0)
-		gts->curr_blknum++;
+	while (!finished)
+	{
+		if (PDS_insert_block(pds, base_rel,
+							 scan->rs_cblock,
+							 scan->rs_snapshot,
+							 scan->rs_strategy) < 0)
+			break;
+
+		/* move to the next block */
+		scan->rs_cblock++;
+		if (scan->rs_cblock >= scan->rs_nblocks)
+			scan->rs_cblock = 0;
+		if (scan->rs_syncscan)
+			ss_report_location(scan->rs_rd, scan->rs_cblock);
+		/* end of the scan? */
+		if (scan->rs_cblock == scan->rs_startblock ||
+			(scan->rs_numblocks != InvalidBlockNumber &&
+			 --scan->rs_numblocks == 0))
+			break;
+	}
 
 	if (pds->kds->nitems == 0)
 	{
@@ -1921,7 +1944,7 @@ pgstrom_rewind_scan_chunk(GpuTaskState *gts)
 {
 	InstrEndLoop(&gts->outer_instrument);
 	Assert(gts->css.ss.ss_currentRelation != NULL);
-	gts->curr_blknum = 0;
+	heap_rescan(gts->css.ss.ss_currentScanDesc, NULL);
 }
 
 static GpuTask *
@@ -2110,7 +2133,6 @@ gpuscan_end(CustomScanState *node)
 	/* reset fallback resources */
 	if (gss->base_slot)
 		ExecDropSingleTupleTableSlot(gss->base_slot);
-
 	pgstrom_release_gputaskstate(&gss->gts);
 }
 

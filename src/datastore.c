@@ -583,7 +583,8 @@ PDS_create_hash(GpuContext *gcontext,
 int
 PDS_insert_block(pgstrom_data_store *pds,
 				 Relation rel, BlockNumber blknum,
-				 Snapshot snapshot, bool page_prune)
+				 Snapshot snapshot,
+				 BufferAccessStrategy strategy)
 {
 	kern_data_store	*kds = pds->kds;
 	Buffer			buffer;
@@ -603,14 +604,17 @@ PDS_insert_block(pgstrom_data_store *pds,
 	CHECK_FOR_INTERRUPTS();
 
 	/* Load the target buffer */
-	buffer = ReadBuffer(rel, blknum);
+	//buffer = ReadBuffer(rel, blknum);
+	buffer = ReadBufferExtended(rel, MAIN_FORKNUM, blknum,
+								RBM_NORMAL, strategy);
 
+#if 1
 	/* Just like heapgetpage(), however, jobs we focus on is OLAP
 	 * workload, so it's uncertain whether we should vacuum the page
 	 * here.
 	 */
-	if (page_prune)
-		heap_page_prune_opt(rel, buffer);
+	heap_page_prune_opt(rel, buffer);
+#endif
 
 	/* we will check tuple's visibility under the shared lock */
 	LockBuffer(buffer, BUFFER_LOCK_SHARE);

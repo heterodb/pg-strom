@@ -14,7 +14,8 @@ endif
 #
 # PG-Strom versioning
 #
-PGSTROM_VERSION=1.9devel
+PGSTROM_VERSION=2.0devel
+
 PGSTROM_VERSION_NUM=$(shell echo $(PGSTROM_VERSION)			\
 	| sed -e 's/\./ /g' -e 's/[A-Za-z].*$$//g'			\
 	| awk '{printf "%d%02d%02d", $$1, $$2, (NF >=3) ? $$3 : 0}')
@@ -45,7 +46,8 @@ __STROM_OBJS = main.o codegen.o datastore.o aggfuncs.o \
 		pl_cuda.o matrix.o
 
 STROM_OBJS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__STROM_OBJS))
-STROM_SOURCES = $(STROM_OBJS:.o=.c)
+__STROM_SOURCES = $(__STROM_OBJS:.o=.c)
+STROM_SOURCES = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__STROM_SOURCES))
 
 #
 # Source file of GPU portion
@@ -65,7 +67,8 @@ __CUDA_OBJS = cuda_common.o \
 	cuda_plcuda.o  \
 	cuda_terminal.o
 CUDA_OBJS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__CUDA_OBJS))
-CUDA_SOURCES = $(CUDA_OBJS:.o=.c)
+__CUDA_SOURCES = $(__CUDA_OBJS:.o=.c)
+CUDA_SOURCES = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__CUDA_SOURCES))
 
 __GPUINFO_CMD = gpuinfo
 GPUINFO_CMD = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__GPUINFO_CMD))
@@ -73,12 +76,16 @@ GPUINFO_CMD = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__GPUINFO_CMD))
 #
 # Files to be packaged
 #
+__RPM_SPECFILE = pg_strom.spec
+RPM_SPECFILE = $(addprefix $(STROM_BUILD_ROOT)/, $(__RPM_SPECFILE))
 __MISC_FILES = LICENSE README.md pg_strom.control Makefile \
 	src/Makefile src/pg_strom.h src/pg_strom--1.0.sql \
 	src/$(__GPUINFO_CMD).c
-PACKAGE_FILES = $(STROM_SOURCES) $(CUDA_OBJS:.o=.h) \
-	$(addprefix $(STROM_BUILD_ROOT)/, $(__MISC_FILES))
-STROM_TGZ = pg_strom-$(PGSTROM_VERSION).tar.gz
+PACKAGE_FILES = $(__MISC_FILES)			\
+	$(addprefix src/,$(__STROM_SOURCES))	\
+	$(addprefix src/,$(__CUDA_SOURCES:.c=.h))
+__STROM_TGZ = pg_strom-$(PGSTROM_VERSION).tar.gz
+STROM_TGZ = $(addprefix $(STROM_BUILD_ROOT)/, $(__STROM_TGZ))
 
 #
 # Source file of HTML document
@@ -236,17 +243,16 @@ $(HTML_FILES): $(HTML_SOURCES) $(HTML_TEMPLATE)
 
 html: $(HTML_FILES)
 
-$(STROM_TGZ): $(PACKAGE_FILES)
+$(STROM_TGZ): $(addprefix $(STROM_BUILD_ROOT)/, $(PACKAGE_FILES))
 	$(MKDIR_P) $(STROM_BUILD_ROOT)/__tarball/$(@:.tar.gz=)/src
-	$(foreach x,$^,cp -f $x $(STROM_BUILD_ROOT)/__tarball/$(@:.tar.gz=)/$(x);)
+	$(foreach x,$(PACKAGE_FILES),cp -f $(STROM_BUILD_ROOT)/$x $(STROM_BUILD_ROOT)/__tarball/$(@:.tar.gz=)/$(x);)
 	tar zc -C $(STROM_BUILD_ROOT)/__tarball $(@:.tar.gz=) > $@
 
 tarball: $(STROM_TGZ)
 
-rpm: tarball pg_strom.spec
+rpm: tarball $(RPM_SPECFILE)
 	$(MKDIR_P) $(shell rpmbuild -E %{_sourcedir})
-	cp -f $(STROM_BUILD_ROOT)/$(STROM_TGZ) \
-	      $(shell rpmbuild -E %{_sourcedir})
-	rpmbuild $(RPMBUILD_PARAMS) -ba pg_strom.spec
+	cp -f $(STROM_TGZ) $(shell rpmbuild -E %{_sourcedir})
+	rpmbuild $(RPMBUILD_PARAMS) -ba $(RPM_SPECFILE)
 
 endif

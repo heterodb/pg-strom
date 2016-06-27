@@ -312,6 +312,329 @@ pgstrom_largest_workgroup_size(dim3 *p_grid_sz,
 
 	return WORKGROUPSIZE_RESULT_SUCCESS;
 }
+
+/*
+ * kern_arg_t - a uniformed data type to deliver kernel arguments.
+ */
+typedef devptr_t		kern_arg_t;
+
+/*
+ * pgstromLaunchDynamicKernelXX 
+ *
+ * A utility routine to launch a kernel function, and then wait for its
+ * completion
+ */
+STATIC_FUNCTION(cudaError_t)
+__pgstromLaunchDynamicKernel(void		   *kern_function,
+							 kern_arg_t	   *kern_argbuf,
+							 size_t			num_threads,
+							 cl_uint		shmem_per_thread,
+							 cl_uint		shmem_per_block)
+{
+	dim3		grid_sz;
+	dim3		block_sz;
+	cudaError_t	status;
+
+	status = pgstrom_optimal_workgroup_size(&grid_sz,
+											&block_sz,
+											kern_function,
+											num_threads,
+											shmem_per_thread);
+	if (status != cudaSuccess)
+		return status;
+
+	status = cudaLaunchDevice(kern_function,
+							  kern_argbuf,
+							  grid_sz, block_sz,
+							  shmem_per_block +
+							  shmem_per_thread * block_sz.x,
+							  NULL);
+	if (status != cudaSuccess)
+		return status;
+
+	status = cudaDeviceSynchronize();
+	if (status != cudaSuccess)
+		return status;
+
+	return cudaSuccess;
+}
+
+STATIC_FUNCTION(cudaError_t)
+pgstromLaunchDynamicKernel0(void	   *kern_function,
+							size_t		num_threads,
+							cl_uint		shmem_per_thread,
+							cl_uint		shmem_per_block)
+{
+	kern_arg_t  *kern_args = NULL;
+
+	return __pgstromLaunchDynamicKernel(kern_function,
+										kern_args,
+										num_threads,
+										shmem_per_thread,
+										shmem_per_block);
+}
+
+STATIC_FUNCTION(cudaError_t)
+pgstromLaunchDynamicKernel1(void	   *kern_function,
+							kern_arg_t	karg0,
+							size_t		num_threads,
+							cl_uint		shmem_per_thread,
+							cl_uint		shmem_per_block)
+{
+	kern_arg_t  *kern_args = (kern_arg_t *)
+		cudaGetParameterBuffer(sizeof(kern_arg_t),
+							   sizeof(kern_arg_t) * 1);
+	if (!kern_args)
+		return cudaErrorLaunchOutOfResources;
+
+	kern_args[0] = karg0;
+	return __pgstromLaunchDynamicKernel(kern_function,
+										kern_args,
+										num_threads,
+										shmem_per_thread,
+										shmem_per_block);
+}
+
+STATIC_FUNCTION(cudaError_t)
+pgstromLaunchDynamicKernel2(void	   *kern_function,
+							kern_arg_t	karg0,
+							kern_arg_t	karg1,
+							size_t		num_threads,
+							cl_uint		shmem_per_thread,
+							cl_uint		shmem_per_block)
+{
+	kern_arg_t  *kern_args = (kern_arg_t *)
+		cudaGetParameterBuffer(sizeof(kern_arg_t),
+							   sizeof(kern_arg_t) * 2);
+	if (!kern_args)
+		return cudaErrorLaunchOutOfResources;
+
+	kern_args[0] = karg0;
+	kern_args[1] = karg1;
+	return __pgstromLaunchDynamicKernel(kern_function,
+										kern_args,
+										num_threads,
+										shmem_per_thread,
+										shmem_per_block);
+}
+
+STATIC_FUNCTION(cudaError_t)
+pgstromLaunchDynamicKernel3(void	   *kern_function,
+							kern_arg_t	karg0,
+							kern_arg_t	karg1,
+							kern_arg_t	karg2,
+							size_t		num_threads,
+							cl_uint		shmem_per_thread,
+							cl_uint		shmem_per_block)
+{
+	kern_arg_t  *kern_args = (kern_arg_t *)
+		cudaGetParameterBuffer(sizeof(kern_arg_t),
+							   sizeof(kern_arg_t) * 3);
+	if (!kern_args)
+		return cudaErrorLaunchOutOfResources;
+
+	kern_args[0] = karg0;
+	kern_args[1] = karg1;
+	kern_args[2] = karg2;
+	return __pgstromLaunchDynamicKernel(kern_function,
+										kern_args,
+										num_threads,
+										shmem_per_thread,
+										shmem_per_block);
+}
+
+STATIC_FUNCTION(cudaError_t)
+pgstromLaunchDynamicKernel4(void	   *kern_function,
+							kern_arg_t	karg0,
+							kern_arg_t	karg1,
+							kern_arg_t	karg2,
+							kern_arg_t	karg3,
+							size_t		num_threads,
+							cl_uint		shmem_per_thread,
+							cl_uint		shmem_per_block)
+{
+	kern_arg_t  *kern_args = (kern_arg_t *)
+		cudaGetParameterBuffer(sizeof(kern_arg_t),
+							   sizeof(kern_arg_t) * 4);
+	if (!kern_args)
+		return cudaErrorLaunchOutOfResources;
+
+	kern_args[0] = karg0;
+	kern_args[1] = karg1;
+	kern_args[2] = karg2;
+	kern_args[3] = karg3;
+	return __pgstromLaunchDynamicKernel(kern_function,
+										kern_args,
+										num_threads,
+										shmem_per_thread,
+										shmem_per_block);
+}
+
+STATIC_FUNCTION(cudaError_t)
+pgstromLaunchDynamicKernel5(void	   *kern_function,
+							kern_arg_t	karg0,
+							kern_arg_t	karg1,
+							kern_arg_t	karg2,
+							kern_arg_t	karg3,
+							kern_arg_t	karg4,
+							size_t		num_threads,
+							cl_uint		shmem_per_thread,
+							cl_uint		shmem_per_block)
+{
+	kern_arg_t  *kern_args = (kern_arg_t *)
+		cudaGetParameterBuffer(sizeof(kern_arg_t),
+							   sizeof(kern_arg_t) * 5);
+	if (!kern_args)
+		return cudaErrorLaunchOutOfResources;
+
+	kern_args[0] = karg0;
+	kern_args[1] = karg1;
+	kern_args[2] = karg2;
+	kern_args[3] = karg3;
+	kern_args[4] = karg4;
+	return __pgstromLaunchDynamicKernel(kern_function,
+										kern_args,
+										num_threads,
+										shmem_per_thread,
+										shmem_per_block);
+}
+
+STATIC_FUNCTION(cudaError_t)
+pgstromLaunchDynamicKernel6(void	   *kern_function,
+							kern_arg_t	karg0,
+							kern_arg_t	karg1,
+							kern_arg_t	karg2,
+							kern_arg_t	karg3,
+							kern_arg_t	karg4,
+							kern_arg_t	karg5,
+							size_t		num_threads,
+							cl_uint		shmem_per_thread,
+							cl_uint		shmem_per_block)
+{
+	kern_arg_t  *kern_args = (kern_arg_t *)
+		cudaGetParameterBuffer(sizeof(kern_arg_t),
+							   sizeof(kern_arg_t) * 6);
+	if (!kern_args)
+		return cudaErrorLaunchOutOfResources;
+
+	kern_args[0] = karg0;
+	kern_args[1] = karg1;
+	kern_args[2] = karg2;
+	kern_args[3] = karg3;
+	kern_args[4] = karg4;
+	kern_args[5] = karg5;
+	return __pgstromLaunchDynamicKernel(kern_function,
+										kern_args,
+										num_threads,
+										shmem_per_thread,
+										shmem_per_block);
+}
+
+STATIC_FUNCTION(cudaError_t)
+pgstromLaunchDynamicKernel7(void	   *kern_function,
+							kern_arg_t	karg0,
+							kern_arg_t	karg1,
+							kern_arg_t	karg2,
+							kern_arg_t	karg3,
+							kern_arg_t	karg4,
+							kern_arg_t	karg5,
+							kern_arg_t	karg6,
+							size_t		num_threads,
+							cl_uint		shmem_per_thread,
+							cl_uint		shmem_per_block)
+{
+	kern_arg_t  *kern_args = (kern_arg_t *)
+		cudaGetParameterBuffer(sizeof(kern_arg_t),
+							   sizeof(kern_arg_t) * 7);
+	if (!kern_args)
+		return cudaErrorLaunchOutOfResources;
+
+	kern_args[0] = karg0;
+	kern_args[1] = karg1;
+	kern_args[2] = karg2;
+	kern_args[3] = karg3;
+	kern_args[4] = karg4;
+	kern_args[5] = karg5;
+	kern_args[6] = karg6;
+	return __pgstromLaunchDynamicKernel(kern_function,
+										kern_args,
+										num_threads,
+										shmem_per_thread,
+										shmem_per_block);
+}
+
+STATIC_FUNCTION(cudaError_t)
+pgstromLaunchDynamicKernel8(void	   *kern_function,
+							kern_arg_t	karg0,
+							kern_arg_t	karg1,
+							kern_arg_t	karg2,
+							kern_arg_t	karg3,
+							kern_arg_t	karg4,
+							kern_arg_t	karg5,
+							kern_arg_t	karg6,
+							kern_arg_t	karg7,
+							size_t		num_threads,
+							cl_uint		shmem_per_thread,
+							cl_uint		shmem_per_block)
+{
+	kern_arg_t  *kern_args = (kern_arg_t *)
+		cudaGetParameterBuffer(sizeof(kern_arg_t),
+							   sizeof(kern_arg_t) * 8);
+	if (!kern_args)
+		return cudaErrorLaunchOutOfResources;
+
+	kern_args[0] = karg0;
+	kern_args[1] = karg1;
+	kern_args[2] = karg2;
+	kern_args[3] = karg3;
+	kern_args[4] = karg4;
+	kern_args[5] = karg5;
+	kern_args[6] = karg6;
+	kern_args[7] = karg7;
+	return __pgstromLaunchDynamicKernel(kern_function,
+										kern_args,
+										num_threads,
+										shmem_per_thread,
+										shmem_per_block);
+}
+
+STATIC_FUNCTION(cudaError_t)
+pgstromLaunchDynamicKernel9(void	   *kern_function,
+							kern_arg_t	karg0,
+							kern_arg_t	karg1,
+							kern_arg_t	karg2,
+							kern_arg_t	karg3,
+							kern_arg_t	karg4,
+							kern_arg_t	karg5,
+							kern_arg_t	karg6,
+							kern_arg_t	karg7,
+							kern_arg_t	karg8,
+							size_t		num_threads,
+							cl_uint		shmem_per_thread,
+							cl_uint		shmem_per_block)
+{
+	kern_arg_t  *kern_args = (kern_arg_t *)
+		cudaGetParameterBuffer(sizeof(kern_arg_t),
+							   sizeof(kern_arg_t) * 9);
+	if (!kern_args)
+		return cudaErrorLaunchOutOfResources;
+
+	kern_args[0] = karg0;
+	kern_args[1] = karg1;
+	kern_args[2] = karg2;
+	kern_args[3] = karg3;
+	kern_args[4] = karg4;
+	kern_args[5] = karg5;
+	kern_args[6] = karg6;
+	kern_args[7] = karg7;
+	kern_args[8] = karg8;
+	return __pgstromLaunchDynamicKernel(kern_function,
+										kern_args,
+										num_threads,
+										shmem_per_thread,
+										shmem_per_block);
+}
+
 #endif	/* __CUDACC__ */
 #undef WORKGROUPSIZE_RESULT_TYPE
 #undef WORKGROUPSIZE_RESULT_SUCCESS

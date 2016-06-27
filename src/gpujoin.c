@@ -2789,9 +2789,7 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 	 */
 	if (gjs->gts.css.ss.ss_currentRelation)
 	{
-		TupleDesc	outer_tupdesc
-			= RelationGetDescr(gjs->gts.css.ss.ss_currentRelation);
-		nattrs = outer_tupdesc->natts;
+		nattrs = RelationGetDescr(gjs->gts.css.ss.ss_currentRelation)->natts;
 	}
 	else
 	{

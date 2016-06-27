@@ -1131,38 +1131,71 @@ gpusort_put_segment(gpusort_segment *segment)
 	}
 }
 
-
 static GpuTask *
 gpusort_create_task(GpuSortState *gss, pgstrom_data_store *pds_in,
-					cl_uint valid_nitems)
+					cl_uint valid_nitems, bool is_last_chunk,
+					gpusort_segment *segment)
 {
 	GpuContext		   *gcontext = gss->gts.gcontext;
-	pgstrom_gpusort	   *pgsort = NULL;
-	gpusort_segment	   *segment = gss->curr_segment;
-	cl_uint				seg_ev_index;
-	cl_bool				is_terminator = false;
+	pgstrom_gpusort	   *pgsort;
 
-	if (!segment || segment->has_terminator)
+	/* construction of pgstrom_gpusort */
+	pgsort = MemoryContextAllocZero(gcontext->memcxt,
+									offsetof(pgstrom_gpusort, kern) +
+									offsetof(kern_gpusort, kparams) +
+									gss->gts.kern_params->length);
+	pgstrom_init_gputask(&gss->gts, &pgsort->task);
+	pgsort->pds_in = pds_in;
+	pgsort->segment = NULL;			/* to be set below */
+	pgsort->is_terminator = false;	/* to be set below */
+	pgsort->seg_ev_index = 0;		/* to be set below */
+
+	memcpy(&pgsort->kern.kparams,
+		   gss->gts.kern_params,
+		   gss->gts.kern_params->length);
+
+	if (segment)
 	{
-		segment = gpusort_create_segment(gss);
-		if (gss->num_segments == gss->num_segments_limit)
+		/*
+		 * MEMO: Caller may give a certain segment to attach.
+		 * It is available only when the supplied segment has enough space
+		 * and its terminator task was not launched yet; = the terminator
+		 * task is still in the pending list.
+		 *
+		 * The caller has to ensure the target segment is available for
+		 * this share ride
+		 */
+		Assert(segment->has_terminator);
+		Assert(segment->num_chunks < segment->max_chunks);
+		Assert(segment->nitems_total +
+			   valid_nitems <= segment->kresults.nrooms);
+	}
+	else
+	{
+		segment = gss->curr_segment;
+
+		if (!segment || segment->has_terminator)
 		{
-			gss->num_segments_limit += Max(10, gss->num_segments_limit);
-			gss->seg_slots = repalloc(gss->seg_slots,
-									  sizeof(pgstrom_data_store *) *
-									  gss->num_segments_limit);
-			gss->seg_results = repalloc(gss->seg_results,
-										sizeof(kern_resultbuf *) *
-										gss->num_segments_limit);
+			segment = gpusort_create_segment(gss);
+			if (gss->num_segments == gss->num_segments_limit)
+			{
+				gss->num_segments_limit += Max(20, gss->num_segments_limit);
+				gss->seg_slots = repalloc(gss->seg_slots,
+										  sizeof(pgstrom_data_store *) *
+										  gss->num_segments_limit);
+				gss->seg_results = repalloc(gss->seg_results,
+											sizeof(kern_resultbuf *) *
+											gss->num_segments_limit);
+			}
+			segment->segid = gss->num_segments;
+			gss->seg_slots[gss->num_segments] = segment->pds_slot;
+			gss->seg_results[gss->num_segments] = &segment->kresults;
+			gss->num_segments++;
+			gss->curr_segment = segment;
 		}
-		segment->segid = gss->num_segments;
-		gss->seg_slots[gss->num_segments] = segment->pds_slot;
-		gss->seg_results[gss->num_segments] = &segment->kresults;
-		gss->num_segments++;
-		gss->curr_segment = segment;
 	}
 	Assert(segment->num_chunks < segment->max_chunks);
-	seg_ev_index = segment->num_chunks++;
+	pgsort->seg_ev_index = segment->num_chunks++;
 	Assert(valid_nitems <= pds_in->kds->nitems);
 	segment->nitems_total += valid_nitems;
 
@@ -1170,28 +1203,16 @@ gpusort_create_task(GpuSortState *gss, pgstrom_data_store *pds_in,
 	 * This task shall perform as a terminator if no more tasks shall be
 	 * added or no more space for data load obviously.
 	 */
-	if (segment->num_chunks == segment->max_chunks ||
+	if (is_last_chunk ||
+		segment->num_chunks == segment->max_chunks ||
         segment->nitems_total > segment->kresults.nrooms)
-		is_terminator = true;
-	if (is_terminator)
+	{
+		pgsort->is_terminator = true;
 		segment->has_terminator = true;
-
-	pgsort = MemoryContextAllocZero(gcontext->memcxt,
-									offsetof(pgstrom_gpusort, kern) +
-									offsetof(kern_gpusort, kparams) +
-									gss->gts.kern_params->length);
-	pgstrom_init_gputask(&gss->gts, &pgsort->task);
-	pgsort->task.cuda_index = segment->cuda_index;	/* bind on a GPU */
-	pgsort->pds_in = pds_in;
+	}
 	pgsort->segment = gpusort_get_segment(segment);
-	pgsort->is_terminator = is_terminator;
-	pgsort->seg_ev_index = seg_ev_index;
-
 	pgsort->kern.segid = pgsort->segment->segid;
-	memcpy(&pgsort->kern.kparams,
-		   gss->gts.kern_params,
-		   gss->gts.kern_params->length);
-
+	pgsort->task.cuda_index = segment->cuda_index;	/* bind to the same GPU */
 	return &pgsort->task;
 }
 
@@ -1203,6 +1224,7 @@ gpusort_next_chunk(GpuTaskState *gts)
 	TupleDesc			tupdesc = GTS_GET_SCAN_TUPDESC(gts);
 	pgstrom_data_store *pds = NULL;
 	TupleTableSlot	   *slot;
+	bool				is_last_chunk = false;
 	struct timeval		tv1, tv2;
 
 	/*
@@ -1223,6 +1245,7 @@ gpusort_next_chunk(GpuTaskState *gts)
 				slot = ExecProcNode(outerPlanState(gss));
 				if (TupIsNull(slot))
 				{
+					is_last_chunk = true;
 					pgstrom_deactivate_gputaskstate(gts);
 					break;
 				}
@@ -1251,14 +1274,21 @@ gpusort_next_chunk(GpuTaskState *gts)
 												 pgstrom_chunk_size());
 		pds = gss->overflow_pds;
 		if (pds)
+		{
 			gss->overflow_pds = BulkExecProcNode(subnode,
 												 pgstrom_chunk_size());
-		else
-			pgstrom_deactivate_gputaskstate(&gss->gts);
+			if (!gss->overflow_pds)
+			{
+				is_last_chunk = true;
+				pgstrom_deactivate_gputaskstate(&gss->gts);
+			}
+		}
 	}
 	PERFMON_END(&gts->pfm, time_outer_load, &tv1, &tv2);
-
-	return !pds ? NULL : gpusort_create_task(gss, pds, pds->kds->nitems);
+	if (!pds)
+		return NULL;
+	return gpusort_create_task(gss, pds, pds->kds->nitems,
+							   is_last_chunk, NULL);
 }
 
 /*
@@ -1598,6 +1628,19 @@ skip:
 	 * At least, we have to move the remaining tuples to the new segment.
 	 * Also, we have to terminate the segment if no terminator task was
 	 * not assigned yet.
+	 *
+	 * We need to pay attention whether further chunks will be generated
+	 * any more, or not. If we may have any further stream of chunks
+	 * (when !gss->gts.scan_done), it will become a terminator, so no
+	 * need to have special handling on termination.
+	 *
+	 * If we already reached end of the scan, no further rows shall be
+	 * supplied. It means the last GpuSort task is terminator, but it
+	 * is not certain whether the last segment is really filled up by
+	 * the input stream.
+	 * So, in case when the last segment still has space and the terminator
+	 * task is not launched yet, we can inject this chunk prior to the
+	 * segment.
 	 */
 	if (pgsort->kern.kerror.errcode == StromError_DataStoreNoSpace)
 	{
@@ -1605,52 +1648,82 @@ skip:
 		pgstrom_gpusort	   *pgsort_new;
 		cl_uint				valid_nitems;
 
-		/* No other task shall be attached on the filled segment any more */
+		/*
+		 * No other task shall be attached on the segment that raised
+		 * StromError_DataStoreNoSpace error
+		 */
 		if (gss->curr_segment == segment)
 			gss->curr_segment = NULL;
 
-		/* Create a new task to move the remainins rows, then enqueue it */
-		pgsort->pds_in = NULL;		/* detach the last PDS */
+		/* some rows are remained */
 		Assert(pds_in->kds->nitems > pgsort->kern.n_loaded);
 		valid_nitems = pds_in->kds->nitems - pgsort->kern.n_loaded;
-		pgsort_new = (pgstrom_gpusort *)
-			gpusort_create_task(gss, pds_in, valid_nitems);
-		SpinLockAcquire(&gss->gts.lock);
-		dlist_push_head(&gss->gts.pending_tasks, &pgsort_new->task.chain);
-		gss->gts.num_pending_tasks++;
-		SpinLockRelease(&gss->gts.lock);
+		/* detach PDS from the old task */
+		pgsort->pds_in = NULL;
 
 		/*
-		 * If last segment had no terminator, this task will perform
-		 * as a terminator of the segment. Its PDS was already detached,
-		 * so only gpusort_main() shall be launched.
+		 * The retry task may be able to ride on a exising and terminated
+		 * segment, if scan is already completed but terminator task is
+		 * not launched yet and its segment has enough space.
 		 */
-		if (!segment->has_terminator)
+		if (gss->gts.scan_done)
 		{
-			Assert(!pgsort->is_terminator);
-			pgsort->is_terminator = true;
-			segment->has_terminator = true;
+			gpusort_segment	   *segment_temp;
+			pgstrom_gpusort	   *pgsort_temp;
+			dlist_iter			iter;
 
 			SpinLockAcquire(&gss->gts.lock);
-			dlist_push_head(&gss->gts.pending_tasks, &pgsort->task.chain);
-			gss->gts.num_pending_tasks++;
-			SpinLockRelease(&gss->gts.lock);
+			dlist_reverse_foreach (iter, &gss->gts.pending_tasks)
+			{
+				pgsort_temp = dlist_container(pgstrom_gpusort,
+											  task.chain, iter.cur);
+				segment_temp = pgsort_temp->segment;
+				Assert(segment_temp->has_terminator);
 
-			return false;
+				if (pgsort_temp->is_terminator &&
+					segment_temp->num_chunks < segment_temp->max_chunks &&
+					(segment_temp->nitems_total +
+					 valid_nitems) <= segment_temp->kresults.nrooms)
+				{
+					SpinLockRelease(&gss->gts.lock);
+
+					/* OK, we can interrupt this segment */
+					pgsort_new = (pgstrom_gpusort *)
+						gpusort_create_task(gss, pds_in, valid_nitems,
+											false, segment_temp);
+					/* append it prior to the terminator */
+					SpinLockAcquire(&gss->gts.lock);
+					dlist_insert_before(&pgsort_temp->task.chain,
+										&pgsort_new->task.chain);
+					gss->gts.num_pending_tasks++;
+					SpinLockRelease(&gss->gts.lock);
+					goto shareride_done;
+				}
+			}
+			SpinLockRelease(&gss->gts.lock);
 		}
+
+		/*
+		 * Elsewhere, we have no chance to have a share ride with other
+		 * existing segment, so we will make a new segment, then attach
+		 * GpuTask on the tail.
+		 */
+		pgsort_new = (pgstrom_gpusort *)
+			gpusort_create_task(gss, pds_in, valid_nitems,
+								gss->gts.scan_done, NULL);
+		SpinLockAcquire(&gss->gts.lock);
+		dlist_push_tail(&gss->gts.pending_tasks, &pgsort_new->task.chain);
+		gss->gts.num_pending_tasks++;
+		SpinLockRelease(&gss->gts.lock);
+	shareride_done:
+		;
 	}
 
 	/*
-	 * Usually, final segment leaves unused buffer space, thus, we cannot
-	 * mark 'is_terminator' flag on the tasks associated with.
-	 * So, if the segment has no terminator and we have no possibility of
-	 * new tasks any more, we try to enqueue this task again to terminate
-	 * the segment again.
-	 * 
-	 *
-	 *
-	 *
-	 *
+	 * Only final GpuTask shall be backed to the main logic because all the
+	 * valuable data is already moved to gpusort_segment, thus, no need to
+	 * maintain the pgstrom_gpusort and pgstrom_data_store structure any
+	 * more.
 	 */
 	if (gss->gts.scan_done)
 	{
@@ -1659,32 +1732,15 @@ skip:
 			dlist_is_empty(&gss->gts.pending_tasks) &&
 			dlist_is_empty(&gss->gts.completed_tasks))
 		{
-			if (!segment->has_terminator)
-			{
-				/* detach PDS */
-				PDS_release(pgsort->pds_in);
-				pgsort->pds_in = NULL;
-
-				/* mark this task as a terminator */
-				Assert(!pgsort->is_terminator);
-				pgsort->is_terminator = true;
-				segment->has_terminator = true;
-				/* enqueue it */
-				dlist_push_tail(&gss->gts.pending_tasks,
-								&pgsort->task.chain);
-				gss->gts.num_pending_tasks++;
-                SpinLockRelease(&gss->gts.lock);
-				return false;
-			}
+			/* sanity checks */
+			Assert(pgsort->is_terminator);
 			SpinLockRelease(&gss->gts.lock);
-			return true;	/* to be returned to the main logic */
+			return true;	/* OK, this task is exactly the last one */
 		}
 		SpinLockRelease(&gss->gts.lock);
 	}
-
 	/*
-	 * Only final chunk shall be backed to the main logic.
-	 * Other task shall be released immediately.
+	 * Other tasks shall be released immediately
 	 */
 	SpinLockAcquire(&gss->gts.lock);
 	dlist_delete(&pgsort->task.tracker);

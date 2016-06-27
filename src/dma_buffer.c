@@ -640,7 +640,6 @@ dmaBufferAlloc(GpuContext_v2 *gcontext, Size required)
 static dmaBufferChunk *
 pointer_validation(void *pointer, dmaBufferSegment **p_seg)
 {
-	dmaBufferLocalMap  *l_map;
 	dmaBufferSegment   *seg;
 	dmaBufferChunk	   *chunk;
 	int					seg_id;
@@ -656,8 +655,7 @@ pointer_validation(void *pointer, dmaBufferSegment **p_seg)
 			  (uintptr_t)dma_segment_vaddr_head) / dma_segment_size;
 	Assert(seg_id < max_dma_segment_nums);
 	seg = &dmaBufSegHead->segments[seg_id];
-	l_map = &dmaBufLocalMaps[seg_id];
-	Assert(l_map->is_attached);
+	Assert(dmaBufLocalMaps[seg_id].is_attached);
 
 	if (offsetof(dmaBufferChunk, data) +
 		chunk->required + sizeof(cl_uint) > (1UL << chunk->mclass) ||
@@ -932,7 +930,7 @@ dmaBufferFreeAll(SharedGpuContext *shgcon)
 	{
 		chunk = dlist_container(dmaBufferChunk, gcxt_chain, iter.cur);
 		Assert(chunk->shgcon == shgcon);
-		//dmaBufferFree(chunk->data);
+		dmaBufferFree(chunk->data);
 	}
 	fprintf(stderr, "%s: %d\n", __FUNCTION__, __LINE__);
 }
