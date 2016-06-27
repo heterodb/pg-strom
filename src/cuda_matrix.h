@@ -291,6 +291,7 @@ matrix_sort_local_fp32(cl_uint	   *row_index,
 					   cl_float	   *data_ptr,
 					   kern_arg_t	height,
 					   kern_arg_t	width,
+					   kern_arg_t   valid_nrows,
 					   cl_uint	   *sortkeys,
 					   kern_arg_t	num_keys,
 					   kern_arg_t	__direction)
@@ -305,9 +306,10 @@ matrix_sort_local_fp32(cl_uint	   *row_index,
 	cl_uint		i;
 
 	/* Load index to localIdx[] */
-	localLimit = (partBase + partSize <= height
+	assert(valid_nrows <= height);
+	localLimit = (partBase + partSize <= valid_nrows
 				  ? partSize
-				  : height - partBase);
+				  : valid_nrows - partBase);
 	for (i = get_local_id(); i < localLimit; i += get_local_size())
 		localIdx[i] = row_index[partBase + i];
 	__syncthreads();
@@ -352,7 +354,7 @@ matrix_sort_local_fp32(cl_uint	   *row_index,
 	/* write back the sorting result of this local block */
 	for (i = get_local_id(); i < localLimit; i += get_local_size())
 	{
-		assert(partBase + i < height);
+		assert(partBase + i < valid_nrows);
 		row_index[partBase + i] = localIdx[i];
 	}
 	__syncthreads();
@@ -363,6 +365,7 @@ matrix_sort_step_fp32(cl_uint	   *row_index,
 					  cl_float	   *data_ptr,
 					  kern_arg_t	height,
 					  kern_arg_t	width,
+					  kern_arg_t    valid_nrows,
 					  cl_uint	   *sortkeys,
 					  kern_arg_t	num_keys,
 					  kern_arg_t	__direction,
@@ -373,7 +376,6 @@ matrix_sort_step_fp32(cl_uint	   *row_index,
 	cl_uint		unitMask = unitSize - 1;
 	cl_uint		halfUnitSize = unitSize >> 1;
 	cl_uint		halfUnitMask = halfUnitSize - 1;
-	cl_uint		index;
 	cl_uint		idx0, idx1;
 	cl_uint		pos0, pos1;
 
@@ -382,7 +384,7 @@ matrix_sort_step_fp32(cl_uint	   *row_index,
 	idx1 = (reversing
 			? ((idx0 & ~unitMask) | (~idx0 & unitMask))
 			: (idx0 + halfUnitSize));
-	if (idx1 < height)
+	if (idx1 < valid_nrows)
 	{
 		pos0 = row_index[idx0];
 		pos1 = row_index[idx1];
@@ -406,6 +408,7 @@ matrix_sort_merge_fp32(cl_uint	   *row_index,
 					   cl_float	   *data_ptr,
 					   kern_arg_t	height,
 					   kern_arg_t	width,
+					   kern_arg_t   valid_nrows,
 					   cl_uint	   *sortkeys,
 					   kern_arg_t	num_keys,
 					   kern_arg_t	__direction)
@@ -420,9 +423,9 @@ matrix_sort_merge_fp32(cl_uint	   *row_index,
 	cl_uint		i;
 
 	/* Load index to localIdx[] */
-	localLimit = (partBase + partSize <= height
+	localLimit = (partBase + partSize <= valid_nrows
 				  ? partSize
-				  : height - partBase);
+				  : valid_nrows - partBase);
 	for (i = get_local_id(); i < localLimit; i += get_local_size())
 		localIdx[i] = row_index[partBase + i];
 	__syncthreads();
@@ -465,18 +468,19 @@ matrix_sort_merge_fp32(cl_uint	   *row_index,
 }
 
 STATIC_FUNCTION(cudaError_t)
-pgstromMatrixSortFP32(cl_uint	   *row_index,
-					  MatrixType   *M,
-					  cl_uint	   *sort_keys,
-					  cl_uint		num_keys,
-					  cl_bool		is_descending)
+pgstromMatrixPartialSortFP32(cl_uint     *row_index,
+							 MatrixType  *matrix,
+							 cl_uint      valid_nrows,
+							 cl_uint     *sort_keys,
+							 cl_uint      num_keys,
+							 cl_bool      is_descending)
 {
-	cl_uint		height = ARRAY_MATRIX_HEIGHT(M);
-	cl_uint		width = ARRAY_MATRIX_WIDTH(M);
+	cl_uint		height = ARRAY_MATRIX_HEIGHT(matrix);
+	cl_uint		width = ARRAY_MATRIX_WIDTH(matrix);
 	dim3		grid_sz;
 	dim3		block_sz;
 	cl_uint		min_block_sz = UINT_MAX;
-	kern_arg_t	kern_argbuf[7];
+	kern_arg_t	kern_argbuf[8];
 	kern_arg_t *__kern_args;
 	void	   *kern_funcs[3];
 	cl_uint	   *__sort_keys;
@@ -484,7 +488,7 @@ pgstromMatrixSortFP32(cl_uint	   *row_index,
 	cudaError_t	status = cudaSuccess;
 
 	/* sanity checks */
-	if (ARRAY_MATRIX_ELEMTYPE(M) != PG_FLOAT4OID)
+	if (ARRAY_MATRIX_ELEMTYPE(matrix) != PG_FLOAT4OID)
 		return cudaErrorInvalidValue;
 	if (num_keys == 0)
 		return cudaErrorInvalidValue;
@@ -496,12 +500,13 @@ pgstromMatrixSortFP32(cl_uint	   *row_index,
 	memcpy(__sort_keys, sort_keys, sizeof(cl_uint) * num_keys);
 
 	kern_argbuf[0] = (kern_arg_t)(row_index);
-	kern_argbuf[1] = (kern_arg_t)ARRAY_MATRIX_DATAPTR(M);
+	kern_argbuf[1] = (kern_arg_t)ARRAY_MATRIX_DATAPTR(matrix);
 	kern_argbuf[2] = (kern_arg_t)(height);
 	kern_argbuf[3] = (kern_arg_t)(width);
-	kern_argbuf[4] = (kern_arg_t)(__sort_keys);
-	kern_argbuf[5] = (kern_arg_t)(num_keys);
-	kern_argbuf[6] = (kern_arg_t)(is_descending ? -1 : 1);
+	kern_argbuf[4] = (kern_arg_t)(valid_nrows);
+	kern_argbuf[5] = (kern_arg_t)(__sort_keys);
+	kern_argbuf[6] = (kern_arg_t)(num_keys);
+	kern_argbuf[7] = (kern_arg_t)(is_descending ? -1 : 1);
 
 	/*
 	 * Ensure max available block size for each kernel functions.
@@ -516,7 +521,7 @@ pgstromMatrixSortFP32(cl_uint	   *row_index,
 		status = pgstrom_largest_workgroup_size(&grid_sz,
 												&block_sz,
 												kern_funcs[i],
-												(height + 1) / 2,
+												(valid_nrows + 1) / 2,
 												2 * sizeof(cl_uint));
 		if (status != cudaSuccess)
 			goto out;
@@ -536,15 +541,15 @@ pgstromMatrixSortFP32(cl_uint	   *row_index,
 	 */
 	__kern_args = (kern_arg_t *)
 		cudaGetParameterBuffer(sizeof(kern_arg_t),
-							   sizeof(kern_arg_t) * 7);
+							   sizeof(kern_arg_t) * 8);
 	if (!__kern_args)
 	{
 		status = cudaErrorLaunchOutOfResources;
 		goto out;
 	}
-	memcpy(__kern_args, kern_argbuf, sizeof(kern_arg_t) * 7);
+	memcpy(__kern_args, kern_argbuf, sizeof(kern_argbuf));
 
-	grid_sz.x = ((height + 1) / 2 + block_sz.x - 1) / block_sz.x;
+	grid_sz.x = ((valid_nrows + 1) / 2 + block_sz.x - 1) / block_sz.x;
 	grid_sz.y = 1;
 	grid_sz.z = 1;
 	status = cudaLaunchDevice((void *)matrix_sort_local_fp32,
@@ -571,17 +576,17 @@ pgstromMatrixSortFP32(cl_uint	   *row_index,
 			 */
 			__kern_args = (kern_arg_t *)
 				cudaGetParameterBuffer(sizeof(kern_arg_t),
-									   sizeof(kern_arg_t) * 9);
+									   sizeof(kern_arg_t) * 10);
 			if (!__kern_args)
 			{
 				status = cudaErrorLaunchOutOfResources;
 				goto out;
 			}
-			memcpy(__kern_args, kern_argbuf, sizeof(kern_arg_t) * 7);
-			__kern_args[7] = (kern_arg_t)(unitSize);
-			__kern_args[8] = (kern_arg_t)(j == 2 * i ? true : false);
+			memcpy(__kern_args, kern_argbuf, sizeof(kern_argbuf));
+			__kern_args[8] = (kern_arg_t)(unitSize);
+			__kern_args[9] = (kern_arg_t)(j == 2 * i ? true : false);
 
-			workSize = (((height + unitSize - 1)
+			workSize = (((valid_nrows + unitSize - 1)
 						 / unitSize) * unitSize / 2);
 			grid_sz.x = (workSize + block_sz.x - 1) / block_sz.x;
 			grid_sz.y = 1;
@@ -604,15 +609,15 @@ pgstromMatrixSortFP32(cl_uint	   *row_index,
 		 */
 		__kern_args = (kern_arg_t *)
 			cudaGetParameterBuffer(sizeof(kern_arg_t),
-								   sizeof(kern_arg_t) * 7);
+								   sizeof(kern_arg_t) * 8);
 		if (!__kern_args)
 		{
 			status = cudaErrorLaunchOutOfResources;
 			goto out;
 		}
-		memcpy(__kern_args, kern_argbuf, sizeof(kern_arg_t) * 7);
+		memcpy(__kern_args, kern_argbuf, sizeof(kern_argbuf));
 
-		grid_sz.x = ((height + 1) / 2 + block_sz.x - 1) / block_sz.x;
+		grid_sz.x = ((valid_nrows + 1) / 2 + block_sz.x - 1) / block_sz.x;
 		grid_sz.y = 1;
 		grid_sz.z = 1;
 
@@ -626,9 +631,25 @@ pgstromMatrixSortFP32(cl_uint	   *row_index,
 		if (status != cudaSuccess)
 			goto out;
 	}
+
 out:
 	free(__sort_keys);
 	return status;
+}
+
+STATIC_INLINE(cudaError_t)
+pgstromMatrixSortFP32(cl_uint	   *row_index,
+					  MatrixType   *matrix,
+					  cl_uint	   *sort_keys,
+					  cl_uint		num_keys,
+					  cl_bool		is_descending)
+{
+	return pgstromMatrixPartialSortFP32(row_index,
+										matrix,
+										ARRAY_MATRIX_HEIGHT(matrix),
+										sort_keys,
+										num_keys,
+										is_descending);
 }
 
 #endif	/* __CUDACC__ */
