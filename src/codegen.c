@@ -288,7 +288,8 @@ pgstrom_codegen_typeoid_declarations(StringInfo source)
  *
  * attributes:
  * 'a' : this function needs an alias, instead of SQL function name
- * 'c' : this function is locale aware, so unavailable if not simple collation
+ * 'c' : this function is locale aware, thus, available only if simple
+ *       collation configuration (none, and C-locale).
  * 'm' : this function needs cuda_mathlib.h
  * 'n' : this function needs cuda_numeric.h
  * 's' : this function needs cuda_textlib.h
@@ -898,6 +899,11 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "notlike",     2, {TEXTOID, TEXTOID},   "s/F:textnlike" },
 	{ "textnlike",   2, {TEXTOID, TEXTOID},   "s/F:textnlike" },
 	{ "bpcharnlike", 2, {BPCHAROID, TEXTOID}, "s/F:textnlike" },
+	/* ILIKE operators */
+	{ "texticlike",    2, {TEXTOID, TEXTOID},   "sc/F:texticlike" },
+	{ "bpchariclike",  2, {TEXTOID, TEXTOID},   "sc/F:texticlike" },
+	{ "texticnlike",   2, {TEXTOID, TEXTOID},   "sc/F:texticnlike" },
+	{ "bpcharicnlike", 2, {BPCHAROID, TEXTOID}, "sc/F:texticnlike" },	
 };
 
 static void
