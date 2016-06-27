@@ -538,11 +538,11 @@ VALIDATE_ARRAY_MATRIX(MatrixType *matrix)
 		kern_funcs[2] = (void *)matrix_sort_merge_##SUFFIX;				\
 		for (i=0; i < 3; i++)											\
 		{																\
-			status = pgstrom_largest_workgroup_size(&grid_sz,			\
-													&block_sz,			\
-													kern_funcs[i],		\
-													(valid_nrows + 1) / 2, \
-													2 * sizeof(cl_uint)); \
+			status = largest_workgroup_size(&grid_sz,					\
+											&block_sz,					\
+											kern_funcs[i],				\
+											(valid_nrows + 1) / 2,		\
+											2 * sizeof(cl_uint));		\
 			if (status != cudaSuccess)									\
 				goto out;												\
 			min_block_sz = Min(min_block_sz, block_sz.x);				\

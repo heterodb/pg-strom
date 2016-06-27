@@ -42,28 +42,28 @@
 #endif	/* __CUDACC__ */
 
 /*
- * __pgstrom_optimal_workgroup_size
+ * __optimal_workgroup_size
  *
  * Logic is equivalent to cudaOccupancyMaxPotentialBlockSize(),
  * but is not supported by the device runtime at CUDA-7.5.
  * So, we ported the same calculation logic here.
  */
 STATIC_INLINE(WORKGROUPSIZE_RESULT_TYPE)
-__pgstrom_optimal_workgroup_size(cl_uint *p_grid_sz,
-								 cl_uint *p_block_sz,
-								 cl_uint nitems,
+__optimal_workgroup_size(cl_uint *p_grid_sz,
+						 cl_uint *p_block_sz,
+						 cl_uint nitems,
 #ifdef __CUDACC__
-								 const void *kernel_func,
+						 const void *kernel_func,
 #else
-								 CUfunction kernel_func,
+						 CUfunction kernel_func,
 #endif
-								 cl_int funcMaxThreadsPerBlock,
-                                 cl_uint staticShmemSize,
-                                 cl_uint dynamicShmemPerThread,
-								 cl_int warpSize,
-								 cl_int devMaxThreadsPerBlock,
-								 cl_int maxThreadsPerMultiProcessor,
-								 cl_int flags)
+						 cl_int funcMaxThreadsPerBlock,
+						 cl_uint staticShmemSize,
+						 cl_uint dynamicShmemPerThread,
+						 cl_int warpSize,
+						 cl_int devMaxThreadsPerBlock,
+						 cl_int maxThreadsPerMultiProcessor,
+						 cl_int flags)
 {
 	WORKGROUPSIZE_RESULT_TYPE status;
 	/* Limits */
@@ -151,11 +151,11 @@ __pgstrom_optimal_workgroup_size(cl_uint *p_grid_sz,
  *
  */
 STATIC_FUNCTION(cudaError_t)
-pgstrom_optimal_workgroup_size(dim3 *p_grid_sz,
-                               dim3 *p_block_sz,
-							   const void *kernel_func,
-                               size_t nitems,
-                               size_t dynamic_shmem_per_thread)
+optimal_workgroup_size(dim3 *p_grid_sz,
+					   dim3 *p_block_sz,
+					   const void *kernel_func,
+					   size_t nitems,
+					   size_t dynamic_shmem_per_thread)
 {
 	cudaError_t	status;
 	/* Device and function properties */
@@ -199,17 +199,17 @@ pgstrom_optimal_workgroup_size(dim3 *p_grid_sz,
 	/*
 	 * Estimate an optimal workgroup size
 	 */
-	status = __pgstrom_optimal_workgroup_size(&p_grid_sz->x,
-											  &p_block_sz->x,
-											  nitems,
-											  kernel_func,
-											  attrs.maxThreadsPerBlock,
-											  attrs.sharedSizeBytes,
-											  dynamic_shmem_per_thread,
-											  warpSize,
-											  devMaxThreadsPerBlock,
-											  maxThreadsPerMultiProcessor,
-											  0);
+	status = __optimal_workgroup_size(&p_grid_sz->x,
+									  &p_block_sz->x,
+									  nitems,
+									  kernel_func,
+									  attrs.maxThreadsPerBlock,
+									  attrs.sharedSizeBytes,
+									  dynamic_shmem_per_thread,
+									  warpSize,
+									  devMaxThreadsPerBlock,
+									  maxThreadsPerMultiProcessor,
+									  0);
 	if (status != cudaSuccess)
 		return status;
 
@@ -223,14 +223,14 @@ pgstrom_optimal_workgroup_size(dim3 *p_grid_sz,
 #endif	/* __CADACC__ */
 
 STATIC_INLINE(WORKGROUPSIZE_RESULT_TYPE)
-__pgstrom_largest_workgroup_size(cl_uint *p_grid_sz,
-								 cl_uint *p_block_sz,
-								 cl_uint nitems,
-								 cl_uint kernel_max_blocksz,
-								 cl_uint static_shmem_sz,
-								 cl_uint dynamic_shmem_per_thread,
-								 cl_uint warp_size,
-								 cl_uint max_shmem_per_block)
+__largest_workgroup_size(cl_uint *p_grid_sz,
+						 cl_uint *p_block_sz,
+						 cl_uint nitems,
+						 cl_uint kernel_max_blocksz,
+						 cl_uint static_shmem_sz,
+						 cl_uint dynamic_shmem_per_thread,
+						 cl_uint warp_size,
+						 cl_uint max_shmem_per_block)
 {
 	cl_uint		block_size = kernel_max_blocksz;
 
@@ -257,11 +257,11 @@ __pgstrom_largest_workgroup_size(cl_uint *p_grid_sz,
 
 #ifdef __CUDACC__
 STATIC_FUNCTION(cudaError_t)
-pgstrom_largest_workgroup_size(dim3 *p_grid_sz,
-							   dim3 *p_block_sz,
-							   const void *kernel_func,
-							   size_t nitems,
-							   size_t dynamic_shmem_per_thread)
+largest_workgroup_size(dim3 *p_grid_sz,
+					   dim3 *p_block_sz,
+					   const void *kernel_func,
+					   size_t nitems,
+					   size_t dynamic_shmem_per_thread)
 {
 	cudaError_t	status;
 	cl_int		device;
@@ -294,14 +294,14 @@ pgstrom_largest_workgroup_size(dim3 *p_grid_sz,
 	if (status != cudaSuccess)
 		return status;
 
-	status = __pgstrom_largest_workgroup_size(&p_grid_sz->x,
-											  &p_block_sz->x,
-											  nitems,
-											  attrs.maxThreadsPerBlock,
-											  attrs.sharedSizeBytes,
-											  dynamic_shmem_per_thread,
-											  warp_size,
-											  max_shmem_per_block);
+	status = __largest_workgroup_size(&p_grid_sz->x,
+									  &p_block_sz->x,
+									  nitems,
+									  attrs.maxThreadsPerBlock,
+									  attrs.sharedSizeBytes,
+									  dynamic_shmem_per_thread,
+									  warp_size,
+									  max_shmem_per_block);
 	if (status != cudaSuccess)
 		return status;
 
@@ -335,11 +335,11 @@ __pgstromLaunchDynamicKernel(void		   *kern_function,
 	dim3		block_sz;
 	cudaError_t	status;
 
-	status = pgstrom_optimal_workgroup_size(&grid_sz,
-											&block_sz,
-											kern_function,
-											num_threads,
-											shmem_per_thread);
+	status = optimal_workgroup_size(&grid_sz,
+									&block_sz,
+									kern_function,
+									num_threads,
+									shmem_per_thread);
 	if (status != cudaSuccess)
 		return status;
 

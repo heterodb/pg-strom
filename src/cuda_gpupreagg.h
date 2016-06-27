@@ -1658,12 +1658,12 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 	kern_args[2] = kds_slot;
 	kern_args[3] = g_hash;
 
-	status = pgstrom_optimal_workgroup_size(&grid_sz,
-											&block_sz,
-											(const void *)
-											gpupreagg_preparation,
-											kds_row->nitems,
-											sizeof(kern_errorbuf));
+	status = optimal_workgroup_size(&grid_sz,
+									&block_sz,
+									(const void *)
+									gpupreagg_preparation,
+									kds_row->nitems,
+									sizeof(kern_errorbuf));
 	if (status != cudaSuccess)
 	{
 		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
@@ -1724,13 +1724,13 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 		kern_args[1] = kds_slot;
 		kern_args[2] = kresults_src;
 		kern_args[3] = kresults_dst;
-		status = pgstrom_largest_workgroup_size(&grid_sz,
-												&block_sz,
-												(const void *)
-												gpupreagg_nogroup_reduction,
-												kds_slot->nitems,
-												Max(sizeof(pagg_datum),
-													sizeof(kern_errorbuf)));
+		status = largest_workgroup_size(&grid_sz,
+										&block_sz,
+										(const void *)
+										gpupreagg_nogroup_reduction,
+										kds_slot->nitems,
+										Max(sizeof(pagg_datum),
+											sizeof(kern_errorbuf)));
 		if (status != cudaSuccess)
 		{
 			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
@@ -1773,13 +1773,13 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
         kern_args[1] = kds_slot;
 		kern_args[2] = kresults_dst;	/* reverse */
         kern_args[3] = kresults_src;	/* reverse */
-		status = pgstrom_largest_workgroup_size(&grid_sz,
-												&block_sz,
-												(const void *)
-												gpupreagg_nogroup_reduction,
-												kresults_dst->nitems,
-												Max(sizeof(pagg_datum),
-                                                    sizeof(kern_errorbuf)));
+		status = largest_workgroup_size(&grid_sz,
+										&block_sz,
+										(const void *)
+										gpupreagg_nogroup_reduction,
+										kresults_dst->nitems,
+										Max(sizeof(pagg_datum),
+											sizeof(kern_errorbuf)));
 		if (status != cudaSuccess)
 		{
 			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
@@ -1841,12 +1841,12 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 			kern_args[0] = kgpreagg;
 			kern_args[1] = kds_slot;		/* in */
 			kern_args[2] = kresults_src;	/* out */
-			status = pgstrom_largest_workgroup_size(&grid_sz,
-													&block_sz,
-													(const void *)
-													gpupreagg_local_reduction,
-													kds_slot->nitems,
-													dynamic_shmem_unitsz);
+			status = largest_workgroup_size(&grid_sz,
+											&block_sz,
+											(const void *)
+											gpupreagg_local_reduction,
+											kds_slot->nitems,
+											dynamic_shmem_unitsz);
 			if (status != cudaSuccess)
 			{
 				STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
@@ -1904,14 +1904,14 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 		kern_args[2] = kresults_src;
 		kern_args[3] = kresults_dst;
 		kern_args[4] = g_hash;
-		status = pgstrom_largest_workgroup_size(&grid_sz,
-												&block_sz,
-												(const void *)
-												gpupreagg_global_reduction,
-												kresults_src->all_visible
-												? kds_slot->nitems
-												: kresults_src->nitems,
-												sizeof(kern_errorbuf));
+		status = largest_workgroup_size(&grid_sz,
+										&block_sz,
+										(const void *)
+										gpupreagg_global_reduction,
+										kresults_src->all_visible
+										? kds_slot->nitems
+										: kresults_src->nitems,
+										sizeof(kern_errorbuf));
 		if (status != cudaSuccess)
 		{
 			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
@@ -1985,14 +1985,14 @@ final_retry:
 	kern_args[4] = kresults_dst;
 	kern_args[5] = f_hash;
 
-	status = pgstrom_optimal_workgroup_size(&grid_sz,
-											&block_sz,
-											(const void *)
-											gpupreagg_final_reduction,
-											kresults_src->all_visible
-											? kds_slot->nitems
-											: kresults_src->nitems,
-											sizeof(kern_errorbuf));
+	status = optimal_workgroup_size(&grid_sz,
+									&block_sz,
+									(const void *)
+									gpupreagg_final_reduction,
+									kresults_src->all_visible
+									? kds_slot->nitems
+									: kresults_src->nitems,
+									sizeof(kern_errorbuf));
 	if (status != cudaSuccess)
 	{
 		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);

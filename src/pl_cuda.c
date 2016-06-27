@@ -1566,12 +1566,12 @@ __launch_plcuda_kernels(plcudaState *state,
 		/* kernel launch of the prep function */
 		if (state->kern_prep)
 		{
-			pgstrom_optimal_workgroup_size(&grid_size,
-										   &block_size,
-										   state->kern_prep,
-										   cuda_device,
-										   kplcuda->prep_num_threads,
-										   kplcuda->prep_shmem_unitsz);
+			optimal_workgroup_size(&grid_size,
+								   &block_size,
+								   state->kern_prep,
+								   cuda_device,
+								   kplcuda->prep_num_threads,
+								   kplcuda->prep_shmem_unitsz);
 
 			rc = cuLaunchKernel(state->kern_prep,
 								grid_size, 1, 1,
@@ -1590,12 +1590,12 @@ __launch_plcuda_kernels(plcudaState *state,
 		}
 
 		/* kernel launch of the main function */
-		pgstrom_optimal_workgroup_size(&grid_size,
-									   &block_size,
-									   state->kern_main,
-									   cuda_device,
-									   kplcuda->main_num_threads,
-									   kplcuda->main_shmem_unitsz);
+		optimal_workgroup_size(&grid_size,
+							   &block_size,
+							   state->kern_main,
+							   cuda_device,
+							   kplcuda->main_num_threads,
+							   kplcuda->main_shmem_unitsz);
 
 		rc = cuLaunchKernel(state->kern_main,
 							grid_size, 1, 1,
@@ -1615,12 +1615,12 @@ __launch_plcuda_kernels(plcudaState *state,
 		/* kernel launch of the post function */
 		if (state->kern_post)
 		{
-			pgstrom_optimal_workgroup_size(&grid_size,
-										   &block_size,
-										   state->kern_post,
-										   cuda_device,
-										   kplcuda->post_num_threads,
-										   kplcuda->post_shmem_unitsz);
+			optimal_workgroup_size(&grid_size,
+								   &block_size,
+								   state->kern_post,
+								   cuda_device,
+								   kplcuda->post_num_threads,
+								   kplcuda->post_shmem_unitsz);
 
 			rc = cuLaunchKernel(state->kern_post,
 								grid_size, 1, 1,

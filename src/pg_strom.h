@@ -441,18 +441,18 @@ extern bool pgstrom_recheck_gputask(GpuTaskState *gts, TupleTableSlot *slot);
 extern void pgstrom_cleanup_gputask_cuda_resources(GpuTask *gtask);
 extern size_t gpuLocalMemSize(void);
 extern cl_uint gpuMaxThreadsPerBlock(void);
-extern void pgstrom_optimal_workgroup_size(size_t *p_grid_size,
-										   size_t *p_block_size,
-										   CUfunction function,
-										   CUdevice device,
-										   size_t nitems,
-										   size_t dynamic_shmem_per_thread);
-extern void pgstrom_largest_workgroup_size(size_t *p_grid_size,
-										   size_t *p_block_size,
-										   CUfunction function,
-										   CUdevice device,
-										   size_t nitems,
-										   size_t dynamic_shmem_per_thread);
+extern void optimal_workgroup_size(size_t *p_grid_size,
+								   size_t *p_block_size,
+								   CUfunction function,
+								   CUdevice device,
+								   size_t nitems,
+								   size_t dynamic_shmem_per_thread);
+extern void largest_workgroup_size(size_t *p_grid_size,
+								   size_t *p_block_size,
+								   CUfunction function,
+								   CUdevice device,
+								   size_t nitems,
+								   size_t dynamic_shmem_per_thread);
 extern void pgstrom_init_cuda_control(void);
 extern cl_ulong pgstrom_baseline_cuda_capability(void);
 extern const char *errorText(int errcode);
