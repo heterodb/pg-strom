@@ -242,415 +242,440 @@ VALIDATE_ARRAY_MATRIX(MatrixType *matrix)
  *
  * Bitonic Sorting Support for PL/CUDA functions
  *
- * pgstromMatrixSortFP32
+ * pgstromMatrixSort(FP32|FP64)(cl_uint    *row_index,		:out
+ *                              MatrixType *matrix,			:in
+ *                              cl_uint    *sort_keys,		:in
+ *                              cl_uint     num_keys,		:in
+ *                              cl_bool     is_descending)	:in
  *
- *
- *
- *
- *
- *
- *
- *
- *
- *
+ * This service routine supports to sort the supplied matrix according
+ * to the key values specified by the 'sort_keys' and 'num_keys'.
+ * Its sorting results shall be saved at the 'row_index'. It assumes
+ * that 'row_index' is initialized to point a particular row of the
+ * matrix uniquely, and any of row_index[] is less than the height of
+ * matrix. (usually, it shall be initialized by sequential number)
+ * The 'sort_keys' is an array of column index of the supplied matrix.
+ * Its range is between 0 and (width of the matrix - 1).
  *
  * ----------------------------------------------------------------
  */
-
-STATIC_INLINE(cl_int)
-matrix_sort_keycomp_fp32(cl_float *data_ptr,
-						 cl_uint	height,
-						 cl_uint	width,
-						 cl_uint   *sortkeys,
-						 cl_uint	num_keys,
-						 cl_uint	x_index,
-						 cl_uint	y_index)
-{
-	cl_uint		i, j;
-	cl_float	x_value;
-	cl_float	y_value;
-
-	for (i=0; i < num_keys; i++)
-	{
-		j = sortkeys[i];
-		assert(j < width);
-
-		x_value = data_ptr[j * height + x_index];
-		y_value = data_ptr[j * height + y_index];
-
-		if (x_value < y_value)
-			return -1;
-		else if (x_value > y_value)
-			return 1;
-	}
-	return 0;	/* both rows are equivalent */
-}
-
-KERNEL_FUNCTION_MAXTHREADS(void)
-matrix_sort_local_fp32(cl_uint	   *row_index,
-					   cl_float	   *data_ptr,
-					   kern_arg_t	height,
-					   kern_arg_t	width,
-					   kern_arg_t   valid_nrows,
-					   cl_uint	   *sortkeys,
-					   kern_arg_t	num_keys,
-					   kern_arg_t	__direction)
-{
-	cl_int		direction = __direction;
-	cl_uint	   *localIdx = SHARED_WORKMEM(cl_uint);
-	cl_uint		localLimit;
-	cl_uint		partSize = 2 * get_local_size();
-	cl_uint		partBase = get_global_index() * partSize;
-	cl_uint		blockSize;
-	cl_uint		unitSize;
-	cl_uint		i;
-
-	/* Load index to localIdx[] */
-	assert(valid_nrows <= height);
-	localLimit = (partBase + partSize <= valid_nrows
-				  ? partSize
-				  : valid_nrows - partBase);
-	for (i = get_local_id(); i < localLimit; i += get_local_size())
-		localIdx[i] = row_index[partBase + i];
-	__syncthreads();
-
-	for (blockSize = 2;	blockSize <= partSize; blockSize *= 2)
-	{
-		for (unitSize = blockSize; unitSize >= 2; unitSize /= 2)
-		{
-			cl_uint		unitMask		= (unitSize - 1);
-			cl_uint		halfUnitSize	= (unitSize >> 1);
-			cl_uint		halfUnitMask	= (halfUnitSize - 1);
-			cl_uint		idx0, idx1;
-
-			idx0 = (((get_local_id() & ~halfUnitMask) << 1) +
-					(get_local_id() & halfUnitMask));
-			idx1 = (unitSize == blockSize
-					? ((idx0 & ~unitMask) | (~idx0 & unitMask))
-					: (halfUnitSize + idx0));
-			if (idx1 < localLimit)
-			{
-				cl_uint		pos0 = localIdx[idx0];
-				cl_uint		pos1 = localIdx[idx1];
-
-				assert(pos0 < height && pos1 < height);
-
-				if (matrix_sort_keycomp_fp32(data_ptr,
-											 height,
-											 width,
-											 sortkeys,
-											 num_keys,
-											 pos0,
-											 pos1) == direction)
-				{
-					/* swap */
-					localIdx[idx0] = pos1;
-					localIdx[idx1] = pos0;
-				}
-			}
-			__syncthreads();
-		}
-	}
-	/* write back the sorting result of this local block */
-	for (i = get_local_id(); i < localLimit; i += get_local_size())
-	{
-		assert(partBase + i < valid_nrows);
-		row_index[partBase + i] = localIdx[i];
-	}
-	__syncthreads();
-}
-
-KERNEL_FUNCTION_MAXTHREADS(void)
-matrix_sort_step_fp32(cl_uint	   *row_index,
-					  cl_float	   *data_ptr,
-					  kern_arg_t	height,
-					  kern_arg_t	width,
-					  kern_arg_t    valid_nrows,
-					  cl_uint	   *sortkeys,
-					  kern_arg_t	num_keys,
-					  kern_arg_t	__direction,
-					  kern_arg_t	unitSize,
-					  kern_arg_t	reversing)
-{
-	cl_int		direction = __direction;
-	cl_uint		unitMask = unitSize - 1;
-	cl_uint		halfUnitSize = unitSize >> 1;
-	cl_uint		halfUnitMask = halfUnitSize - 1;
-	cl_uint		idx0, idx1;
-	cl_uint		pos0, pos1;
-
-	idx0 = (((get_global_id() & ~halfUnitMask) << 1)
-			+ (get_global_id() & halfUnitMask));
-	idx1 = (reversing
-			? ((idx0 & ~unitMask) | (~idx0 & unitMask))
-			: (idx0 + halfUnitSize));
-	if (idx1 < valid_nrows)
-	{
-		pos0 = row_index[idx0];
-		pos1 = row_index[idx1];
-		if (matrix_sort_keycomp_fp32(data_ptr,
-									 height,
-									 width,
-									 sortkeys,
-									 num_keys,
-									 pos0,
-									 pos1) == direction)
-		{
-			/* swap */
-			row_index[idx0] = pos1;
-			row_index[idx1] = pos0;
-		}
-	}
-}
-
-KERNEL_FUNCTION_MAXTHREADS(void)
-matrix_sort_merge_fp32(cl_uint	   *row_index,
-					   cl_float	   *data_ptr,
-					   kern_arg_t	height,
-					   kern_arg_t	width,
-					   kern_arg_t   valid_nrows,
-					   cl_uint	   *sortkeys,
-					   kern_arg_t	num_keys,
-					   kern_arg_t	__direction)
-{
-	cl_int		direction = __direction;
-	cl_uint	   *localIdx = SHARED_WORKMEM(cl_uint);
-	cl_uint		localLimit;
-	cl_uint		partSize = 2 * get_local_size();
-	cl_uint		partBase = get_global_index() * partSize;
-	cl_uint		blockSize = partSize;
-	cl_uint		unitSize;
-	cl_uint		i;
-
-	/* Load index to localIdx[] */
-	localLimit = (partBase + partSize <= valid_nrows
-				  ? partSize
-				  : valid_nrows - partBase);
-	for (i = get_local_id(); i < localLimit; i += get_local_size())
-		localIdx[i] = row_index[partBase + i];
-	__syncthreads();
-
-	/* merge two sorted blocks */
-	for (unitSize = blockSize; unitSize >= 2; unitSize >>= 1)
-	{
-		cl_uint		halfUnitSize = (unitSize >> 1);
-		cl_uint		halfUnitMask = (halfUnitSize - 1);
-		cl_uint		idx0, idx1;
-
-		idx0 = (((get_local_id() & ~halfUnitMask) << 1)
-				+ (get_local_id() & halfUnitMask));
-		idx1 = halfUnitSize + idx0;
-
-		if (idx1 < localLimit)
-		{
-			cl_uint		pos0 = localIdx[idx0];
-			cl_uint		pos1 = localIdx[idx1];
-
-			if (matrix_sort_keycomp_fp32(data_ptr,
-										 height,
-										 width,
-										 sortkeys,
-										 num_keys,
-										 pos0,
-										 pos1) == direction)
-			{
-				/* swap */
-				localIdx[idx0] = pos1;
-				localIdx[idx1] = pos0;
-			}
-		}
-		__syncthreads();
-	}
-	/* update the row_index[] */
-	for (i = get_local_id(); i < localLimit; i += get_local_size())
-		row_index[partBase + i] = localIdx[i];
-	__syncthreads();
-}
-
-STATIC_FUNCTION(cudaError_t)
-pgstromMatrixPartialSortFP32(cl_uint     *row_index,
-							 MatrixType  *matrix,
-							 cl_uint      valid_nrows,
-							 cl_uint     *sort_keys,
-							 cl_uint      num_keys,
-							 cl_bool      is_descending)
-{
-	cl_uint		height = ARRAY_MATRIX_HEIGHT(matrix);
-	cl_uint		width = ARRAY_MATRIX_WIDTH(matrix);
-	dim3		grid_sz;
-	dim3		block_sz;
-	cl_uint		min_block_sz = UINT_MAX;
-	kern_arg_t	kern_argbuf[8];
-	kern_arg_t *__kern_args;
-	void	   *kern_funcs[3];
-	cl_uint	   *__sort_keys;
-	cl_uint		i, j, nhalf;
-	cudaError_t	status = cudaSuccess;
-
-	/* sanity checks */
-	if (ARRAY_MATRIX_ELEMTYPE(matrix) != PG_FLOAT4OID)
-		return cudaErrorInvalidValue;
-	if (num_keys == 0)
-		return cudaErrorInvalidValue;
-
-	/* setup common kernel arguments */
-	__sort_keys = (cl_uint *)malloc(sizeof(cl_uint) * num_keys);
-	if (!__sort_keys)
-		return cudaErrorMemoryAllocation;
-	memcpy(__sort_keys, sort_keys, sizeof(cl_uint) * num_keys);
-
-	kern_argbuf[0] = (kern_arg_t)(row_index);
-	kern_argbuf[1] = (kern_arg_t)ARRAY_MATRIX_DATAPTR(matrix);
-	kern_argbuf[2] = (kern_arg_t)(height);
-	kern_argbuf[3] = (kern_arg_t)(width);
-	kern_argbuf[4] = (kern_arg_t)(valid_nrows);
-	kern_argbuf[5] = (kern_arg_t)(__sort_keys);
-	kern_argbuf[6] = (kern_arg_t)(num_keys);
-	kern_argbuf[7] = (kern_arg_t)(is_descending ? -1 : 1);
-
-	/*
-	 * Ensure max available block size for each kernel functions.
-	 * These are declared with KERNEL_FUNCTION_MAXTHREADS, we
-	 * expect largest workgroup size is equivalent to H/W limit.
-	 */
-	kern_funcs[0] = (void *)matrix_sort_local_fp32;
-	kern_funcs[1] = (void *)matrix_sort_step_fp32;
-	kern_funcs[2] = (void *)matrix_sort_merge_fp32;
-	for (i=0; i < 3; i++)
-	{
-		status = pgstrom_largest_workgroup_size(&grid_sz,
-												&block_sz,
-												kern_funcs[i],
-												(valid_nrows + 1) / 2,
-												2 * sizeof(cl_uint));
-		if (status != cudaSuccess)
-			goto out;
-		min_block_sz = Min(min_block_sz, block_sz.x);
-	}
-	block_sz.x = (1 << (get_next_log2(min_block_sz + 1) - 1));	/* 2^N */
-	block_sz.y = 1;
-	block_sz.z = 1;
-
-	/* nhalf is the least power of two value that is larger than
-	 * or equal to half of the nitems. */
-	nhalf = 1UL << (get_next_log2(height + 1) - 1);
-
-	/*
-	 * KERNEL_FUNCTION_MAXTHREADS(void)
-	 * pgstrom_bitonic_local_#SUFFIX(...)
-	 */
-	__kern_args = (kern_arg_t *)
-		cudaGetParameterBuffer(sizeof(kern_arg_t),
-							   sizeof(kern_arg_t) * 8);
-	if (!__kern_args)
-	{
-		status = cudaErrorLaunchOutOfResources;
-		goto out;
-	}
-	memcpy(__kern_args, kern_argbuf, sizeof(kern_argbuf));
-
-	grid_sz.x = ((valid_nrows + 1) / 2 + block_sz.x - 1) / block_sz.x;
-	grid_sz.y = 1;
-	grid_sz.z = 1;
-	status = cudaLaunchDevice((void *)matrix_sort_local_fp32,
-							  __kern_args, grid_sz, block_sz,
-							  2 * sizeof(cl_uint) * block_sz.x,
-							  NULL);
-	if (status != cudaSuccess)
-		goto out;
-	status = cudaDeviceSynchronize();
-	if (status != cudaSuccess)
-		goto out;
-
-	/* inter blocks bitonic sorting */
-	for (i = block_sz.x; i < nhalf; i *= 2)
-	{
-		for (j = 2 * i; j > block_sz.x; j /= 2)
-		{
-			cl_uint		unitSize = 2 * j;
-			cl_uint		workSize;
-
-			/*
-			 * KERNEL_FUNCTION_MAXTHREADS(void)
-			 * pgstrom_bitonic_step_#SUFFIX(...)
-			 */
-			__kern_args = (kern_arg_t *)
-				cudaGetParameterBuffer(sizeof(kern_arg_t),
-									   sizeof(kern_arg_t) * 10);
-			if (!__kern_args)
-			{
-				status = cudaErrorLaunchOutOfResources;
-				goto out;
-			}
-			memcpy(__kern_args, kern_argbuf, sizeof(kern_argbuf));
-			__kern_args[8] = (kern_arg_t)(unitSize);
-			__kern_args[9] = (kern_arg_t)(j == 2 * i ? true : false);
-
-			workSize = (((valid_nrows + unitSize - 1)
-						 / unitSize) * unitSize / 2);
-			grid_sz.x = (workSize + block_sz.x - 1) / block_sz.x;
-			grid_sz.y = 1;
-			grid_sz.z = 1;
-
-			status = cudaLaunchDevice(
-				(void *)matrix_sort_step_fp32,
-				__kern_args, grid_sz, block_sz,
-				0,
-				NULL);
-			if (status != cudaSuccess)
-				goto out;
-			status = cudaDeviceSynchronize();
-			if (status != cudaSuccess)
-				goto out;
-		}
-
-		/*
-		 * Launch: pgstrom_bitonic_merge_SUFFIX
-		 */
-		__kern_args = (kern_arg_t *)
-			cudaGetParameterBuffer(sizeof(kern_arg_t),
-								   sizeof(kern_arg_t) * 8);
-		if (!__kern_args)
-		{
-			status = cudaErrorLaunchOutOfResources;
-			goto out;
-		}
-		memcpy(__kern_args, kern_argbuf, sizeof(kern_argbuf));
-
-		grid_sz.x = ((valid_nrows + 1) / 2 + block_sz.x - 1) / block_sz.x;
-		grid_sz.y = 1;
-		grid_sz.z = 1;
-
-		status = cudaLaunchDevice((void *)matrix_sort_merge_fp32,
-								  __kern_args, grid_sz, block_sz,
-								  2 * sizeof(cl_uint) * block_sz.x,
-								  NULL);
-		if (status != cudaSuccess)
-			goto out;
-		status = cudaDeviceSynchronize();
-		if (status != cudaSuccess)
-			goto out;
+#define PGSTROM_MATRIX_SORT_KEYCOMP_TEMPLATE(SUFFIX,BASETYPE)			\
+	STATIC_INLINE(cl_int)												\
+	matrix_sort_keycomp_##SUFFIX(BASETYPE *data_ptr,					\
+								 cl_uint	height,						\
+								 cl_uint	width,						\
+								 cl_uint   *sortkeys,					\
+								 cl_uint	num_keys,					\
+								 cl_uint	x_index,					\
+								 cl_uint	y_index)					\
+	{																	\
+		cl_uint		i, j;												\
+		BASETYPE	x_value;											\
+		BASETYPE	y_value;											\
+																		\
+		for (i=0; i < num_keys; i++)									\
+		{																\
+			j = sortkeys[i];											\
+			assert(j < width);											\
+																		\
+			x_value = data_ptr[j * height + x_index];					\
+			y_value = data_ptr[j * height + y_index];					\
+																		\
+			if (x_value < y_value)										\
+				return -1;												\
+			else if (x_value > y_value)									\
+				return 1;												\
+		}																\
+		return 0;	/* both rows are equivalent */						\
 	}
 
-out:
-	free(__sort_keys);
-	return status;
-}
+#define PGSTROM_MATRIX_SORT_LOCAL_TEMPLATE(SUFFIX,BASETYPE)				\
+	KERNEL_FUNCTION_MAXTHREADS(void)									\
+	matrix_sort_local_##SUFFIX(cl_uint	   *row_index,					\
+							   BASETYPE	   *data_ptr,					\
+							   kern_arg_t	height,						\
+							   kern_arg_t	width,						\
+							   kern_arg_t   valid_nrows,				\
+							   cl_uint	   *sortkeys,					\
+							   kern_arg_t	num_keys,					\
+							   kern_arg_t	__direction)				\
+	{																	\
+		cl_int		direction = __direction;							\
+		cl_uint	   *localIdx = SHARED_WORKMEM(cl_uint);					\
+		cl_uint		localLimit;											\
+		cl_uint		partSize = 2 * get_local_size();					\
+		cl_uint		partBase = get_global_index() * partSize;			\
+		cl_uint		blockSize;											\
+		cl_uint		unitSize;											\
+		cl_uint		i;													\
+																		\
+		/* Load index to localIdx[] */									\
+		assert(valid_nrows <= height);									\
+		localLimit = (partBase + partSize <= valid_nrows				\
+					  ? partSize										\
+					  : valid_nrows - partBase);						\
+		for (i = get_local_id();										\
+			 i < localLimit;											\
+			 i += get_local_size())										\
+			localIdx[i] = row_index[partBase + i];						\
+		__syncthreads();												\
+																		\
+		for (blockSize = 2;	blockSize <= partSize; blockSize *= 2)		\
+		{																\
+			for (unitSize = blockSize; unitSize >= 2; unitSize /= 2)	\
+			{															\
+				cl_uint		unitMask		= (unitSize - 1);			\
+				cl_uint		halfUnitSize	= (unitSize >> 1);			\
+				cl_uint		halfUnitMask	= (halfUnitSize - 1);		\
+				cl_uint		idx0, idx1;									\
+																		\
+				idx0 = (((get_local_id() & ~halfUnitMask) << 1) +		\
+						(get_local_id() & halfUnitMask));				\
+				idx1 = (unitSize == blockSize							\
+						? ((idx0 & ~unitMask) | (~idx0 & unitMask))		\
+						: (halfUnitSize + idx0));						\
+				if (idx1 < localLimit)									\
+				{														\
+					cl_uint		pos0 = localIdx[idx0];					\
+					cl_uint		pos1 = localIdx[idx1];					\
+																		\
+					assert(pos0 < height && pos1 < height);				\
+																		\
+					if (matrix_sort_keycomp_##SUFFIX(data_ptr,			\
+													 height,			\
+													 width,				\
+													 sortkeys,			\
+													 num_keys,			\
+													 pos0,				\
+													 pos1) == direction) \
+					{													\
+						/* swap */										\
+						localIdx[idx0] = pos1;							\
+						localIdx[idx1] = pos0;							\
+					}													\
+				}														\
+				__syncthreads();										\
+			}															\
+		}																\
+		/* write back the sorting result of this local block */			\
+		for (i = get_local_id();										\
+			 i < localLimit;											\
+			 i += get_local_size())										\
+		{																\
+			assert(partBase + i < valid_nrows);							\
+			row_index[partBase + i] = localIdx[i];						\
+		}																\
+		__syncthreads();												\
+	}
 
-STATIC_INLINE(cudaError_t)
-pgstromMatrixSortFP32(cl_uint	   *row_index,
-					  MatrixType   *matrix,
-					  cl_uint	   *sort_keys,
-					  cl_uint		num_keys,
-					  cl_bool		is_descending)
-{
-	return pgstromMatrixPartialSortFP32(row_index,
-										matrix,
-										ARRAY_MATRIX_HEIGHT(matrix),
-										sort_keys,
-										num_keys,
-										is_descending);
-}
+#define PGSTROM_MATRIX_SORT_STEP_TEMPLATE(SUFFIX,BASETYPE)				\
+	KERNEL_FUNCTION_MAXTHREADS(void)									\
+	matrix_sort_step_##SUFFIX(cl_uint	   *row_index,					\
+							  BASETYPE	   *data_ptr,					\
+							  kern_arg_t	height,						\
+							  kern_arg_t	width,						\
+							  kern_arg_t    valid_nrows,				\
+							  cl_uint	   *sortkeys,					\
+							  kern_arg_t	num_keys,					\
+							  kern_arg_t	__direction,				\
+							  kern_arg_t	unitSize,					\
+							  kern_arg_t	reversing)					\
+	{																	\
+		cl_int		direction = __direction;							\
+		cl_uint		unitMask = unitSize - 1;							\
+		cl_uint		halfUnitSize = unitSize >> 1;						\
+		cl_uint		halfUnitMask = halfUnitSize - 1;					\
+		cl_uint		idx0, idx1;											\
+		cl_uint		pos0, pos1;											\
+																		\
+		idx0 = (((get_global_id() & ~halfUnitMask) << 1)				\
+				+ (get_global_id() & halfUnitMask));					\
+		idx1 = (reversing												\
+				? ((idx0 & ~unitMask) | (~idx0 & unitMask))				\
+				: (idx0 + halfUnitSize));								\
+		if (idx1 < valid_nrows)											\
+		{																\
+			pos0 = row_index[idx0];										\
+			pos1 = row_index[idx1];										\
+			if (matrix_sort_keycomp_##SUFFIX(data_ptr,					\
+											 height,					\
+											 width,						\
+											 sortkeys,					\
+											 num_keys,					\
+											 pos0,						\
+											 pos1) == direction)		\
+			{															\
+				/* swap */												\
+				row_index[idx0] = pos1;									\
+				row_index[idx1] = pos0;									\
+			}															\
+		}																\
+	}
+
+#define PGSTROM_MATRIX_SORT_MERGE_TEMPLATE(SUFFIX,BASETYPE)				\
+	KERNEL_FUNCTION_MAXTHREADS(void)									\
+	matrix_sort_merge_##SUFFIX(cl_uint	   *row_index,					\
+							   BASETYPE	   *data_ptr,					\
+							   kern_arg_t	height,						\
+							   kern_arg_t	width,						\
+							   kern_arg_t   valid_nrows,				\
+							   cl_uint	   *sortkeys,					\
+							   kern_arg_t	num_keys,					\
+							   kern_arg_t	__direction)				\
+	{																	\
+		cl_int		direction = __direction;							\
+		cl_uint	   *localIdx = SHARED_WORKMEM(cl_uint);					\
+		cl_uint		localLimit;											\
+		cl_uint		partSize = 2 * get_local_size();					\
+		cl_uint		partBase = get_global_index() * partSize;			\
+		cl_uint		blockSize = partSize;								\
+		cl_uint		unitSize;											\
+		cl_uint		i;													\
+																		\
+		/* Load index to localIdx[] */									\
+		localLimit = (partBase + partSize <= valid_nrows				\
+					  ? partSize										\
+					  : valid_nrows - partBase);						\
+		for (i = get_local_id();										\
+			 i < localLimit;											\
+			 i += get_local_size())										\
+			localIdx[i] = row_index[partBase + i];						\
+		__syncthreads();												\
+																		\
+		/* merge two sorted blocks */									\
+		for (unitSize = blockSize; unitSize >= 2; unitSize >>= 1)		\
+		{																\
+			cl_uint		halfUnitSize = (unitSize >> 1);					\
+			cl_uint		halfUnitMask = (halfUnitSize - 1);				\
+			cl_uint		idx0, idx1;										\
+																		\
+			idx0 = (((get_local_id() & ~halfUnitMask) << 1)				\
+					+ (get_local_id() & halfUnitMask));					\
+			idx1 = halfUnitSize + idx0;									\
+																		\
+			if (idx1 < localLimit)										\
+			{															\
+				cl_uint		pos0 = localIdx[idx0];						\
+				cl_uint		pos1 = localIdx[idx1];						\
+																		\
+				if (matrix_sort_keycomp_##SUFFIX(data_ptr,				\
+												 height,				\
+												 width,					\
+												 sortkeys,				\
+												 num_keys,				\
+												 pos0,					\
+												 pos1) == direction)	\
+				{														\
+					/* swap */											\
+					localIdx[idx0] = pos1;								\
+					localIdx[idx1] = pos0;								\
+				}														\
+			}															\
+			__syncthreads();											\
+		}																\
+		/* update the row_index[] */									\
+		for (i = get_local_id();										\
+			 i < localLimit;											\
+			 i += get_local_size())										\
+			row_index[partBase + i] = localIdx[i];						\
+		__syncthreads();												\
+	}
+
+#define PGSTROM_MATRIX_SORT_TEMPLATE(SUFFIX,BASETYPE,PG_TYPEOID)		\
+	PGSTROM_MATRIX_SORT_KEYCOMP_TEMPLATE(SUFFIX,BASETYPE)				\
+	PGSTROM_MATRIX_SORT_LOCAL_TEMPLATE(SUFFIX,BASETYPE)					\
+	PGSTROM_MATRIX_SORT_STEP_TEMPLATE(SUFFIX,BASETYPE)					\
+	PGSTROM_MATRIX_SORT_MERGE_TEMPLATE(SUFFIX,BASETYPE)					\
+																		\
+	STATIC_FUNCTION(cudaError_t)										\
+	pgstromMatrixPartialSort##SUFFIX(cl_uint     *row_index,			\
+									 MatrixType  *matrix,				\
+									 cl_uint      valid_nrows,			\
+									 cl_uint     *sort_keys,			\
+									 cl_uint      num_keys,				\
+									 cl_bool      is_descending)		\
+	{																	\
+		cl_uint		height = ARRAY_MATRIX_HEIGHT(matrix);				\
+		cl_uint		width = ARRAY_MATRIX_WIDTH(matrix);					\
+		dim3		grid_sz;											\
+		dim3		block_sz;											\
+		cl_uint		min_block_sz = UINT_MAX;							\
+		kern_arg_t	kern_argbuf[8];										\
+		kern_arg_t *__kern_args;										\
+		void	   *kern_funcs[3];										\
+		cl_uint	   *__sort_keys;										\
+		cl_uint		i, j, nhalf;										\
+		cudaError_t	status = cudaSuccess;								\
+																		\
+		/* sanity checks */												\
+		if (ARRAY_MATRIX_ELEMTYPE(matrix) != (PG_TYPEOID))				\
+			return cudaErrorInvalidValue;								\
+		if (num_keys == 0)												\
+			return cudaErrorInvalidValue;								\
+																		\
+		/* setup common kernel arguments */								\
+		__sort_keys = (cl_uint *)malloc(sizeof(cl_uint) * num_keys);	\
+		if (!__sort_keys)												\
+			return cudaErrorMemoryAllocation;							\
+		memcpy(__sort_keys, sort_keys, sizeof(cl_uint) * num_keys);		\
+																		\
+		kern_argbuf[0] = (kern_arg_t)(row_index);						\
+		kern_argbuf[1] = (kern_arg_t)ARRAY_MATRIX_DATAPTR(matrix);		\
+		kern_argbuf[2] = (kern_arg_t)(height);							\
+		kern_argbuf[3] = (kern_arg_t)(width);							\
+		kern_argbuf[4] = (kern_arg_t)(valid_nrows);						\
+		kern_argbuf[5] = (kern_arg_t)(__sort_keys);						\
+		kern_argbuf[6] = (kern_arg_t)(num_keys);						\
+		kern_argbuf[7] = (kern_arg_t)(is_descending ? -1 : 1);			\
+																		\
+		/*																\
+		 * Ensure max available block size for each kernel functions.	\
+		 * These are declared with KERNEL_FUNCTION_MAXTHREADS, we		\
+		 * expect largest workgroup size is equivalent to H/W limit.	\
+		 */																\
+		kern_funcs[0] = (void *)matrix_sort_local_##SUFFIX;				\
+		kern_funcs[1] = (void *)matrix_sort_step_##SUFFIX;				\
+		kern_funcs[2] = (void *)matrix_sort_merge_##SUFFIX;				\
+		for (i=0; i < 3; i++)											\
+		{																\
+			status = pgstrom_largest_workgroup_size(&grid_sz,			\
+													&block_sz,			\
+													kern_funcs[i],		\
+													(valid_nrows + 1) / 2, \
+													2 * sizeof(cl_uint)); \
+			if (status != cudaSuccess)									\
+				goto out;												\
+			min_block_sz = Min(min_block_sz, block_sz.x);				\
+		}																\
+		/* block size to be 2^N */										\
+		block_sz.x = (1 << (get_next_log2(min_block_sz + 1) - 1));		\
+		block_sz.y = 1;													\
+		block_sz.z = 1;													\
+																		\
+		/* nhalf is the least power of two value that is larger than	\
+		 * or equal to half of the nitems. */							\
+		nhalf = 1UL << (get_next_log2(height + 1) - 1);					\
+																		\
+		/*																\
+		 * KERNEL_FUNCTION_MAXTHREADS(void)								\
+		 * pgstrom_bitonic_local_#SUFFIX(...)							\
+		 */																\
+		__kern_args = (kern_arg_t *)									\
+			cudaGetParameterBuffer(sizeof(kern_arg_t),					\
+								   sizeof(kern_arg_t) * 8);				\
+		if (!__kern_args)												\
+		{																\
+			status = cudaErrorLaunchOutOfResources;						\
+			goto out;													\
+		}																\
+		memcpy(__kern_args, kern_argbuf, sizeof(kern_argbuf));			\
+																		\
+		grid_sz.x = ((valid_nrows + 1) / 2 +							\
+					 block_sz.x - 1) / block_sz.x;						\
+		grid_sz.y = 1;													\
+		grid_sz.z = 1;													\
+		status = cudaLaunchDevice((void *)matrix_sort_local_##SUFFIX,	\
+								  __kern_args, grid_sz, block_sz,		\
+								  2 * sizeof(cl_uint) * block_sz.x,		\
+								  NULL);								\
+		if (status != cudaSuccess)										\
+			goto out;													\
+		status = cudaDeviceSynchronize();								\
+		if (status != cudaSuccess)										\
+			goto out;													\
+																		\
+		/* inter blocks bitonic sorting */								\
+		for (i = block_sz.x; i < nhalf; i *= 2)							\
+		{																\
+			for (j = 2 * i; j > block_sz.x; j /= 2)						\
+			{															\
+				cl_uint		unitSize = 2 * j;							\
+				cl_uint		workSize;									\
+																		\
+				/*														\
+				 * KERNEL_FUNCTION_MAXTHREADS(void)						\
+				 * pgstrom_bitonic_step_#SUFFIX(...)					\
+				 */														\
+				__kern_args = (kern_arg_t *)							\
+					cudaGetParameterBuffer(sizeof(kern_arg_t),			\
+										   sizeof(kern_arg_t) * 10);	\
+				if (!__kern_args)										\
+				{														\
+					status = cudaErrorLaunchOutOfResources;				\
+					goto out;											\
+				}														\
+				memcpy(__kern_args, kern_argbuf, sizeof(kern_argbuf));	\
+				__kern_args[8] = (kern_arg_t)(unitSize);				\
+				__kern_args[9] = (kern_arg_t)(j == 2 * i ? true : false); \
+																		\
+				workSize = (((valid_nrows + unitSize - 1)				\
+							 / unitSize) * unitSize / 2);				\
+				grid_sz.x = (workSize + block_sz.x - 1) / block_sz.x;	\
+				grid_sz.y = 1;											\
+				grid_sz.z = 1;											\
+																		\
+				status = cudaLaunchDevice(								\
+					(void *)matrix_sort_step_##SUFFIX,					\
+					__kern_args, grid_sz, block_sz,						\
+					0,													\
+					NULL);												\
+				if (status != cudaSuccess)								\
+					goto out;											\
+				status = cudaDeviceSynchronize();						\
+				if (status != cudaSuccess)								\
+					goto out;											\
+			}															\
+																		\
+			/*															\
+			 * Launch: pgstrom_bitonic_merge_SUFFIX						\
+			 */															\
+			__kern_args = (kern_arg_t *)								\
+				cudaGetParameterBuffer(sizeof(kern_arg_t),				\
+									   sizeof(kern_arg_t) * 8);			\
+			if (!__kern_args)											\
+			{															\
+				status = cudaErrorLaunchOutOfResources;					\
+				goto out;												\
+			}															\
+			memcpy(__kern_args, kern_argbuf, sizeof(kern_argbuf));		\
+																		\
+			grid_sz.x = ((valid_nrows + 1) / 2 +						\
+						 block_sz.x - 1) / block_sz.x;					\
+			grid_sz.y = 1;												\
+			grid_sz.z = 1;												\
+																		\
+			status = cudaLaunchDevice((void *)matrix_sort_merge_##SUFFIX, \
+									  __kern_args, grid_sz, block_sz,	\
+									  2 * sizeof(cl_uint) * block_sz.x,	\
+									  NULL);							\
+			if (status != cudaSuccess)									\
+				goto out;												\
+			status = cudaDeviceSynchronize();							\
+			if (status != cudaSuccess)									\
+				goto out;												\
+		}																\
+	out:																\
+		free(__sort_keys);												\
+		return status;													\
+	}																	\
+																		\
+	STATIC_INLINE(cudaError_t)											\
+	pgstromMatrixSort##SUFFIX(cl_uint	   *row_index,					\
+							  MatrixType   *matrix,						\
+							  cl_uint	   *sort_keys,					\
+							  cl_uint		num_keys,					\
+							  cl_bool		is_descending)				\
+	{																	\
+		return pgstromMatrixPartialSort##SUFFIX(row_index,				\
+											matrix,						\
+											ARRAY_MATRIX_HEIGHT(matrix), \
+											sort_keys,					\
+											num_keys,					\
+											is_descending);				\
+	}
+
+PGSTROM_MATRIX_SORT_TEMPLATE(FP32,cl_float,PG_FLOAT4OID)
+PGSTROM_MATRIX_SORT_TEMPLATE(FP64,cl_double, PG_FLOAT8OID)
 
 #endif	/* __CUDACC__ */
 #endif	/* CUDA_MATRIX_H */
