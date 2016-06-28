@@ -677,5 +677,200 @@ VALIDATE_ARRAY_MATRIX(MatrixType *matrix)
 PGSTROM_MATRIX_SORT_TEMPLATE(FP32,cl_float,PG_FLOAT4OID)
 PGSTROM_MATRIX_SORT_TEMPLATE(FP64,cl_double, PG_FLOAT8OID)
 
+/* ----------------------------------------------------------------
+ *
+ * Group-by Support for PL/CUDA functions
+ *
+ * pgstromMatrixGroupAdd(FP32|FP64)(MatrixType *dst_matrix,
+ *                                  MatrixType *src_matrix,
+ *                                  cl_uint    *group_keys);
+ * pgstromMatrixGroupMax(FP32|FP64)(...)
+ * pgstromMatrixGroupMin(FP32|FP64)(...)
+ *
+ * These service routines support to make a summary according to the
+ * grouping keys. Unlike SQL cases, grouping keys have to be integer
+ * value between 0 and ARRAY_MATRIX_HEIGHT(dst_matrix) - 1.
+ * The 'dst_matrix' has to be K rows x M columns matrix, the 'src_matrix'
+ * has to be N rows x M columns matrix, and 'group_keys' have to be
+ * an unsigned integer array with N-length that indicates the group of
+ * individual rows of 'src_matrix'.
+ * Each column of the 'dst_matrix' shall be added or updated on the row
+ * indicated by the group_keys[].
+ * We have two reduction mode: local and global. In case when large N
+ * is mapped to small K, local reduction works well, then global reduction
+ * will make the final results with less atomic confliction.
+ * If 'K' is larger than 512, we try to update the 'dst_matrix' using atomic
+ * operation directly, with no local reduction. It is heuristically better
+ * choice than two step approach.
+ * ----------------------------------------------------------------
+ */
+typedef struct
+{
+	cl_uint			errcode;
+} matrixGroupState;
+
+KERNEL_FUNCTION_MAXTHREADS(void)
+matrix_group_add_twophase_fp32(matrixGroupState *state,
+							   MatrixType  *dst_matrix,
+							   MatrixType  *src_matrix,
+							   cl_uint	   *group_keys)
+{
+	cl_uint		width = ARRAY_MATRIX_WIDTH(src_matrix);
+	cl_float   *src_addr;
+	cl_float   *dst_addr;
+	cl_float   *l_values;
+	cl_uint	   *l_counts;
+	cl_uint		dst_index;
+	cl_uint		i, j, k, n;
+	cl_bool		is_owner = false;
+
+	k = ARRAY_MATRIX_HEIGHT(dst_matrix);
+	n = ARRAY_MATRIX_HEIGHT(src_matrix);
+
+	/* determine who is the owner of key */
+	l_counts = SHARED_WORKMEM(cl_uint);
+	for (i = get_local_id(); i < k; i++)
+		l_counts[i] = 0;
+	__syncthreads();
+
+	if (get_global_id() < n)
+	{
+		dst_index = group_keys[get_global_id()];
+		if (dst_index < k)
+		{
+			if (atomicAdd(&l_counts[dst_index], 1) == 0)
+				is_owner = true;
+		}
+		else
+		{
+			/* invalid grouping key */
+			atomicCAS(&state->errcode,
+					  StromError_Success,
+					  StromError_InvalidValue);
+		}
+	}
+	else
+		dst_index = (cl_uint)(-1U);	/* for compiler quiet */
+	__syncthreads();
+
+	src_addr = (cl_float *)ARRAY_MATRIX_DATAPTR(src_matrix);
+	dst_addr = (cl_float *)ARRAY_MATRIX_DATAPTR(dst_matrix);
+	for (i=0; i < width; i++)
+	{
+		/* clear the local summary buffer */
+		l_values = SHARED_WORKMEM(cl_float);
+		for (j = get_local_id(); j < k; j += get_local_size())
+			l_values[j] = 0;
+		__syncthreads();
+
+		/* make a local summary of this column */
+		if (get_global_id() < n && dst_index < k)
+			atomicAdd(&l_values[dst_index], src_addr[get_global_id()]);
+		__syncthreads();
+
+		/* put this local summary to the dst_matrix */
+		if (is_owner)
+		{
+			assert(dst_index < k);
+			atomicAdd(&dst_addr[dst_index], l_values[dst_index]);
+		}
+		src_addr += n;
+		dst_addr += k;
+	}
+}
+
+KERNEL_FUNCTION(void)
+matrix_group_add_direct_fp32(matrixGroupState *state,
+							 MatrixType *dst_matrix,
+							 MatrixType *src_matrix,
+							 cl_uint     *group_keys)
+{
+	cl_uint		width = ARRAY_MATRIX_WIDTH(src_matrix);
+	cl_float   *src_addr;
+	cl_float   *dst_addr;
+	cl_uint		dst_index;
+	cl_uint		i, k, n;
+
+	k = ARRAY_MATRIX_HEIGHT(dst_matrix);
+	n = ARRAY_MATRIX_HEIGHT(src_matrix);
+	if (get_global_id() < n)
+	{
+		dst_index = group_keys[get_global_id()];
+		if (dst_index >= k)
+			atomicCAS(&state->errcode,
+					  StromError_Success,
+					  StromError_InvalidValue);
+	}
+	else
+		dst_index = (cl_uint)(0xffffffff);
+
+	src_addr = (cl_float *)ARRAY_MATRIX_DATAPTR(src_matrix);
+	dst_addr = (cl_float *)ARRAY_MATRIX_DATAPTR(dst_matrix);
+	for (i=0; i < width; i++)
+	{
+		if (dst_index < k && get_global_id() < n)
+			atomicAdd(&dst_addr[dst_index], src_addr[get_global_id()]);
+		src_addr += n;
+		dst_addr += k;
+	}
+}
+
+STATIC_FUNCTION(cudaError_t)
+pgstromMatrixGroupAddFP32(MatrixType   *dst_matrix,
+						  MatrixType   *src_matrix,
+						  cl_uint	   *group_keys)
+{
+	matrixGroupState *state;
+	cl_uint		k, n;
+	void	   *kern_function;
+	cudaError_t	status;
+
+	/* sanity checks */
+	assert(ARRAY_MATRIX_ELEMTYPE(src_matrix) == PG_FLOAT4OID);
+	assert(ARRAY_MATRIX_ELEMTYPE(dst_matrix) == PG_FLOAT4OID);
+	assert(ARRAY_MATRIX_WIDTH(src_matrix) == ARRAY_MATRIX_WIDTH(dst_matrix));
+
+	state = (matrixGroupState *)malloc(sizeof(matrixGroupState));
+	if (!state)
+		return cudaErrorMemoryAllocation;
+
+	state->errcode = StromError_Success;
+	n = ARRAY_MATRIX_HEIGHT(src_matrix);
+	k = ARRAY_MATRIX_HEIGHT(dst_matrix);
+	if (k > 512)
+	{
+		kern_function = (void *)matrix_group_add_direct_fp32;
+		status = pgstromLaunchDynamicKernel4(kern_function,
+											 (kern_arg_t)(state),
+											 (kern_arg_t)(dst_matrix),
+											 (kern_arg_t)(src_matrix),
+											 (kern_arg_t)(group_keys),
+											 n,
+											 0,
+											 0);
+		if (status != cudaSuccess)
+			goto out;
+	}
+	else
+	{
+		kern_function = (void *)matrix_group_add_twophase_fp32;
+		status = pgstromLaunchDynamicKernel4(kern_function,
+											 (kern_arg_t)(state),
+											 (kern_arg_t)(dst_matrix),
+											 (kern_arg_t)(src_matrix),
+											 (kern_arg_t)(group_keys),
+											 n,
+											 0,
+											 0);
+		if (status != cudaSuccess)
+			goto out;
+	}
+
+	if (state->errcode)
+		status = cudaErrorInvalidValue;
+out:
+	free(state);
+	return status;
+}
 #endif	/* __CUDACC__ */
 #endif	/* CUDA_MATRIX_H */
