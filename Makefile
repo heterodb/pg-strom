@@ -24,8 +24,8 @@ PG_VERSION_NUM=$(shell $(PG_CONFIG) --version | awk '{print $$NF}'	\
 	| awk '{printf "%d%02d%02d", $$1, $$2, (NF >=3) ? $$3 : 0}')
 
 # available platform versions
-PG_MIN_VERSION=9.5.0
-PG_MAX_VERSION=9.6.0
+PG_MIN_VERSION=9.6.0
+PG_MAX_VERSION=
 CUDA_MIN_VERSION=7.0
 CUDA_MAX_VERSION=
 
@@ -41,9 +41,10 @@ PG_MAX_VERSION_NUM=$(shell echo $(PG_MAX_VERSION) | awk '{print $$NF}'	\
 #
 __STROM_OBJS = main.o codegen.o datastore.o aggfuncs.o \
 		cuda_control.o cuda_program.o cuda_mmgr.o \
-		gpuscan.o gpujoin.o gpupreagg.o gpusort.o \
 		dma_buffer.o gpu_device.o gpu_context.o gpu_server.o \
-		pl_cuda.o matrix.o
+		pl_cuda.o matrix.o \
+		gpuscan.o #gpujoin.o gpupreagg.o gpusort.o
+
 
 STROM_OBJS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__STROM_OBJS))
 __STROM_SOURCES = $(__STROM_OBJS:.o=.c)
@@ -120,18 +121,20 @@ MENUGEN_PY = $(addprefix $(STROM_BUILD_ROOT)/doc/, $(__MENUGEN_PY))
 # Parameters for RPM package build
 #
 __PGSQL_PKGS = $(shell rpm -q -g 'Applications/Databases' | grep -E '^postgresql[0-9]+-')
-PGSQL_PKG_VERSION := $(shell if [ -n "$(__PGSQL_PKGS)" ];				\
-                             then							\
-                                 rpm -q $(__PGSQL_PKGS) --queryformat '%{version}\n';	\
-                             else							\
-                                 $(PG_CONFIG) --version | awk '{print $$NF}';		\
-                             fi | uniq | sort -V | tail -1 |				\
-                             sed -e 's/\./ /g' -e 's/[A-Za-z].*$$//g' |			\
-                             awk '{printf "%d%d", $$1, $$2}')
-CUDA_PKG_VERSION := $(shell rpm -q cuda --queryformat '%{version}\n' | 	\
-                      sort -V | tail -1 |				\
-                      sed -e 's/\./ /g' -e 's/[A-Za-z].*$$//g' |	\
-                      awk '{printf "%d-%d", $$1, $$2}')
+PGSQL_PKG_VERSION := $(shell \
+        if [ -n "$(__PGSQL_PKGS)" ];								\
+        then														\
+            rpm -q $(__PGSQL_PKGS) --queryformat '%{version}\n';	\
+        else														\
+            $(PG_CONFIG) --version | awk '{print $$NF}';			\
+        fi | uniq | sort -V | tail -1 |								\
+        sed -e 's/\./ /g' -e 's/[A-Za-z].*$$//g' |					\
+        awk '{printf "%d%d", $$1, $$2}')
+CUDA_PKG_VERSION := $(shell \
+        rpm -q cuda --queryformat '%{version}\n' |	 	\
+        sort -V | tail -1 |								\
+        sed -e 's/\./ /g' -e 's/[A-Za-z].*$$//g' |		\
+        awk '{printf "%d-%d", $$1, $$2}')
 
 RPMBUILD_PARAMS := $(shell				\
     test -n "$(PGSTROM_VERSION)" &&			\
@@ -170,8 +173,14 @@ LPATH := $(CUDA_PATH)/lib64
 PGSTROM_FLAGS += $(PGSTROM_FLAGS_CUSTOM)
 PGSTROM_FLAGS += -DPGSTROM_VERSION=\"$(PGSTROM_VERSION)\"
 PGSTROM_FLAGS += -DPGSTROM_VERSION_NUM=$(PGSTROM_VERSION_NUM)
-PGSTROM_FLAGS += -DPG_MIN_VERSION_NUM=$(PG_MIN_VERSION_NUM)
-PGSTROM_FLAGS += -DPG_MAX_VERSION_NUM=$(PG_MAX_VERSION_NUM)
+PGSTROM_FLAGS += $(shell	\
+        if [ -n "$(PG_MIN_VERSION)" ]; then \
+            echo "-DPG_MIN_VERSION_NUM=$(PG_MIN_VERSION_NUM)"; \
+        fi)
+PGSTROM_FLAGS += $(shell	\
+        if [ -n "$(PG_MAX_VERSION)" ]; then \
+            echo "-DPG_MAX_VERSION_NUM=$(PG_MAX_VERSION_NUM)"; \
+        fi)
 PGSTROM_FLAGS += -DCUDA_INCLUDE_PATH=\"$(IPATH)\"
 PGSTROM_FLAGS += -DCUDA_LIBRARY_PATH=\"$(LPATH)\"
 PGSTROM_FLAGS += -DCMD_GPUINFO_PATH=\"$(shell $(PG_CONFIG) --bindir)/gpuinfo\"

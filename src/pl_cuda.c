@@ -31,9 +31,11 @@
 #include "pg_strom.h"
 #include "cuda_plcuda.h"
 
-
+#define PLCUDAINFO_EXNODE_NAME	"plcudaInfo"
 typedef struct plcudaInfo
 {
+	ExtensibleNode	ex;
+	/* kernel requirement */
 	cl_uint	extra_flags;
 	/* kernel declarations */
 	char   *kern_decl;
@@ -73,232 +75,6 @@ typedef struct plcudaInfo
 	Oid		fn_sanity_check;
 	Oid		fn_cpu_fallback;
 } plcudaInfo;
-
-#if PG_VERSION_NUM < 90600
-/*
- * to be revised when we rebase PostgreSQL to v9.6
- */
-static void
-outToken(StringInfo str, const char *s)
-{
-	if (s == NULL || *s == '\0')
-	{
-		appendStringInfoString(str, "<>");
-		return;
-	}
-
-	/*
-	 * Look for characters or patterns that are treated specially by read.c
-	 * (either in pg_strtok() or in nodeRead()), and therefore need a
-	 * protective backslash.
-	 */
-
-	/* These characters only need to be quoted at the start of the string */
-	if (*s == '<' ||
-		*s == '"' ||
-		isdigit((unsigned char) *s) ||
-		((*s == '+' || *s == '-') &&
-		 (isdigit((unsigned char) s[1]) || s[1] == '.')))
-		appendStringInfoChar(str, '\\');
-	while (*s)
-	{
-		/* These chars must be backslashed anywhere in the string */
-		if (*s == ' ' || *s == '\n' || *s == '\t' ||
-			*s == '(' || *s == ')' || *s == '{' || *s == '}' ||
-			*s == '\\')
-			appendStringInfoChar(str, '\\');
-		appendStringInfoChar(str, *s++);
-	}
-}
-
-static char *pg_strtok_ptr = NULL;
-
-static char *
-readToken(int *length)
-{
-	char	   *local_str;		/* working pointer to string */
-	char	   *ret_str;		/* start of token to return */
-
-	local_str = pg_strtok_ptr;
-
-	while (*local_str == ' ' || *local_str == '\n' || *local_str == '\t')
-		local_str++;
-
-	if (*local_str == '\0')
-	{
-		*length = 0;
-		pg_strtok_ptr = local_str;
-		return NULL;            /* no more tokens */
-	}
-
-	/*
-	 * Now pointing at start of next token.
-	 */
-	ret_str = local_str;
-
-	if (*local_str == '(' || *local_str == ')' ||
-		*local_str == '{' || *local_str == '}')
-	{
-		/* special 1-character token */
-		local_str++;
-	}
-	else
-	{
-		/* Normal token, possibly containing backslashes */
-		while (*local_str != '\0' &&
-			   *local_str != ' ' && *local_str != '\n' &&
-			   *local_str != '\t' &&
-			   *local_str != '(' && *local_str != ')' &&
-			   *local_str != '{' && *local_str != '}')
-		{
-			if (*local_str == '\\' && local_str[1] != '\0')
-				local_str += 2;
-			else
-				local_str++;
-		}
-	}
-
-	*length = local_str - ret_str;
-	/* Recognize special case for "empty" token */
-	if (*length == 2 && ret_str[0] == '<' && ret_str[1] == '>')
-		*length = 0;
-
-	pg_strtok_ptr = local_str;
-
-	return ret_str;
-}
-
-#endif /* PG_VERSION_NUM */
-
-#define WRITE_BOOL_FIELD(fldname)							\
-	appendStringInfo(&str, " :" CppAsString(fldname) " %s",	\
-					 (node->fldname) ? "true" : "false")
-#define WRITE_OID_FIELD(fldname)							\
-	appendStringInfo(&str, " :" CppAsString(fldname) " %u",	\
-					 node->fldname)
-#define WRITE_UINT_FIELD(fldname)							\
-    appendStringInfo(&str, " :" CppAsString(fldname) " %u",	\
-					 node->fldname)
-#define WRITE_LONG_FIELD(fldname)							\
-	appendStringInfo(&str, " :" CppAsString(fldname) " %ld",\
-					 node->fldname)
-#define  WRITE_STRING_FIELD(fldname)						\
-	(appendStringInfo(&str, " :" CppAsString(fldname) " "),	\
-	 outToken(&str, node->fldname))
-
-static text *
-form_plcuda_info(plcudaInfo *node)
-{
-	StringInfoData	str;
-
-	initStringInfo(&str);
-	/* extra_flags */
-	WRITE_UINT_FIELD(extra_flags);
-	/* declarations */
-	WRITE_STRING_FIELD(kern_decl);
-	/* prep kernel */
-	WRITE_STRING_FIELD(kern_prep);
-	WRITE_BOOL_FIELD(kern_prep_maxthreads);
-	WRITE_OID_FIELD(fn_prep_num_threads);
-	WRITE_LONG_FIELD(val_prep_num_threads);
-	WRITE_OID_FIELD(fn_prep_shmem_unitsz);
-	WRITE_LONG_FIELD(val_prep_shmem_unitsz);
-	/* main kernel */
-	WRITE_STRING_FIELD(kern_main);
-	WRITE_BOOL_FIELD(kern_main_maxthreads);
-	WRITE_OID_FIELD(fn_main_num_threads);
-	WRITE_LONG_FIELD(val_main_num_threads);
-	WRITE_OID_FIELD(fn_main_shmem_unitsz);
-	WRITE_LONG_FIELD(val_main_shmem_unitsz);
-	/* post kernel */
-	WRITE_STRING_FIELD(kern_post);
-	WRITE_BOOL_FIELD(kern_post_maxthreads);
-	WRITE_OID_FIELD(fn_post_num_threads);
-	WRITE_LONG_FIELD(val_post_num_threads);
-	WRITE_OID_FIELD(fn_post_shmem_unitsz);
-	WRITE_LONG_FIELD(val_post_shmem_unitsz);
-	/* working buffer */
-	WRITE_OID_FIELD(fn_working_bufsz);
-	WRITE_LONG_FIELD(val_working_bufsz);
-	/* results buffer */
-	WRITE_OID_FIELD(fn_results_bufsz);
-	WRITE_LONG_FIELD(val_results_bufsz);
-	/* comprehensive functions */
-	WRITE_OID_FIELD(fn_sanity_check);
-	WRITE_OID_FIELD(fn_cpu_fallback);
-
-	return cstring_to_text(str.data);
-}
-
-#define READ_BOOL_FIELD(fldname)		\
-	token = readToken(&length);			\
-	token = readToken(&length);			\
-	local_node->fldname = (*token == 't' ? true : false)
-#define READ_UINT_FIELD(fldname)		\
-    token = readToken(&length);			\
-    token = readToken(&length);			\
-    local_node->fldname = (cl_uint) strtoul((token), NULL, 10)
-#define READ_OID_FIELD(fldname)			\
-    token = readToken(&length);			\
-    token = readToken(&length);			\
-    local_node->fldname = (Oid) strtoul(token, NULL, 10)
-#define READ_LONG_FIELD(fldname)		\
-	token = readToken(&length);			\
-    token = readToken(&length);			\
-    local_node->fldname = atol(token)
-#define READ_STRING_FIELD(fldname)		\
-    token = readToken(&length);			\
-    token = readToken(&length);			\
-    local_node->fldname = (length == 0 ? NULL : debackslash(token, length))
-
-static plcudaInfo *
-deform_plcuda_info(text *cf_info_text)
-{
-	plcudaInfo *local_node = palloc0(sizeof(plcudaInfo));
-	char	   *save_strtok = pg_strtok_ptr;
-	char	   *token;
-	int			length;
-
-	pg_strtok_ptr = text_to_cstring(cf_info_text);
-
-	READ_UINT_FIELD(extra_flags);
-	/* declarations */
-	READ_STRING_FIELD(kern_decl);
-	/* prep kernel */
-	READ_STRING_FIELD(kern_prep);
-	READ_BOOL_FIELD(kern_prep_maxthreads);
-	READ_OID_FIELD(fn_prep_num_threads);
-	READ_LONG_FIELD(val_prep_num_threads);
-	READ_OID_FIELD(fn_prep_shmem_unitsz);
-	READ_LONG_FIELD(val_prep_shmem_unitsz);
-	/* main kernel */
-	READ_STRING_FIELD(kern_main);
-	READ_BOOL_FIELD(kern_main_maxthreads);
-	READ_OID_FIELD(fn_main_num_threads);
-	READ_LONG_FIELD(val_main_num_threads);
-	READ_OID_FIELD(fn_main_shmem_unitsz);
-	READ_LONG_FIELD(val_main_shmem_unitsz);
-	/* post kernel  */
-	READ_STRING_FIELD(kern_post);
-	READ_BOOL_FIELD(kern_post_maxthreads);
-	READ_OID_FIELD(fn_post_num_threads);
-	READ_LONG_FIELD(val_post_num_threads);
-	READ_OID_FIELD(fn_post_shmem_unitsz);
-	READ_LONG_FIELD(val_post_shmem_unitsz);
-	/* working buffer */
-	READ_OID_FIELD(fn_working_bufsz);
-	READ_LONG_FIELD(val_working_bufsz);
-	/* results buffer */
-	READ_OID_FIELD(fn_results_bufsz);
-	READ_LONG_FIELD(val_results_bufsz);
-	/* comprehensive functions */
-	READ_OID_FIELD(fn_sanity_check);
-	READ_OID_FIELD(fn_cpu_fallback);
-
-	pg_strtok_ptr = save_strtok;
-
-	return local_node;
-}
 
 /*
  * plcudaState - runtime state of pl/cuda functions
@@ -1285,6 +1061,8 @@ plcuda_function_validator(PG_FUNCTION_ARGS)
 	 * Do syntax checks and construction of plcudaInfo
 	 */
 	memset(&cf_info, 0, sizeof(plcudaInfo));
+	cf_info.ex.type = T_ExtensibleNode;
+	cf_info.ex.extnodename = PLCUDAINFO_EXNODE_NAME;
 	cf_info.extra_flags = extra_flags;
 	cf_info.val_prep_num_threads = 1;	/* default */
 	cf_info.val_main_num_threads = 1;	/* default */
@@ -1301,7 +1079,7 @@ plcuda_function_validator(PG_FUNCTION_ARGS)
 	 */
 	isnull[Anum_pg_proc_probin - 1] = false;
 	values[Anum_pg_proc_probin - 1] =
-		PointerGetDatum(form_plcuda_info(&cf_info));
+		PointerGetDatum(nodeToString(&cf_info));
 
 	newtup = heap_form_tuple(RelationGetDescr(rel), values, isnull);
 	simple_heap_update(rel, &tuple->t_self, newtup);
@@ -1775,7 +1553,7 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 								 &isnull);
 		if (isnull)
 			elog(ERROR, "Bug? plcudaInfo was not built yet");
-		cf_info = deform_plcuda_info(DatumGetTextP(probin));
+		cf_info = stringToNode(TextDatumGetCString(probin));
 
 		state = plcuda_exec_begin((Form_pg_proc) GETSTRUCT(tuple), cf_info);
 
@@ -2019,7 +1797,7 @@ plcuda_function_source(PG_FUNCTION_ARGS)
 							 &isnull);
 	if (isnull)
 		elog(ERROR, "Bug? plcudaInfo was not built yet");
-	cf_info = deform_plcuda_info(DatumGetTextP(probin));
+	cf_info = stringToNode(TextDatumGetCString(probin));
 
 	/* construct source text */
 	initStringInfo(&str);
@@ -2059,6 +1837,163 @@ plcuda_function_source(PG_FUNCTION_ARGS)
 PG_FUNCTION_INFO_V1(plcuda_function_source);
 
 /*
+ * Extensible node callbacks for plcudaInfo
+ */
+static void
+plcudaInfoCopy(ExtensibleNode *__newnode, const ExtensibleNode *__oldnode)
+{
+	plcudaInfo	   *newnode = (plcudaInfo *)__newnode;
+	plcudaInfo	   *oldnode = (plcudaInfo *)__oldnode;
+
+	COPY_SCALAR_FIELD(extra_flags);
+	COPY_STRING_FIELD(kern_decl);
+
+	COPY_STRING_FIELD(kern_prep);
+	COPY_SCALAR_FIELD(kern_prep_maxthreads);
+	COPY_SCALAR_FIELD(fn_prep_num_threads);
+	COPY_SCALAR_FIELD(val_prep_num_threads);
+	COPY_SCALAR_FIELD(fn_prep_shmem_unitsz);
+	COPY_SCALAR_FIELD(val_prep_shmem_unitsz);
+
+	COPY_STRING_FIELD(kern_main);
+	COPY_SCALAR_FIELD(kern_main_maxthreads);
+	COPY_SCALAR_FIELD(fn_main_num_threads);
+	COPY_SCALAR_FIELD(val_main_num_threads);
+	COPY_SCALAR_FIELD(fn_main_shmem_unitsz);
+	COPY_SCALAR_FIELD(val_main_shmem_unitsz);
+
+	COPY_STRING_FIELD(kern_post);
+	COPY_SCALAR_FIELD(kern_post_maxthreads);
+	COPY_SCALAR_FIELD(fn_post_num_threads);
+	COPY_SCALAR_FIELD(val_post_num_threads);
+	COPY_SCALAR_FIELD(fn_post_shmem_unitsz);
+	COPY_SCALAR_FIELD(val_post_shmem_unitsz);
+
+	COPY_SCALAR_FIELD(fn_working_bufsz);
+	COPY_SCALAR_FIELD(val_working_bufsz);
+	COPY_SCALAR_FIELD(fn_results_bufsz);
+	COPY_SCALAR_FIELD(val_results_bufsz);
+	COPY_SCALAR_FIELD(fn_sanity_check);
+	COPY_SCALAR_FIELD(fn_cpu_fallback);
+}
+
+static bool
+plcudaInfoEqual(const ExtensibleNode *__a, const ExtensibleNode *__b)
+{
+	const plcudaInfo   *a = (const plcudaInfo *)__a;
+	const plcudaInfo   *b = (const plcudaInfo *)__b;
+
+	COMPARE_SCALAR_FIELD(extra_flags);
+	COMPARE_STRING_FIELD(kern_decl);
+
+	COMPARE_STRING_FIELD(kern_prep);
+	COMPARE_SCALAR_FIELD(kern_prep_maxthreads);
+	COMPARE_SCALAR_FIELD(fn_prep_num_threads);
+	COMPARE_SCALAR_FIELD(val_prep_num_threads);
+	COMPARE_SCALAR_FIELD(fn_prep_shmem_unitsz);
+	COMPARE_SCALAR_FIELD(val_prep_shmem_unitsz);
+
+	COMPARE_STRING_FIELD(kern_main);
+	COMPARE_SCALAR_FIELD(kern_main_maxthreads);
+	COMPARE_SCALAR_FIELD(fn_main_num_threads);
+	COMPARE_SCALAR_FIELD(val_main_num_threads);
+	COMPARE_SCALAR_FIELD(fn_main_shmem_unitsz);
+	COMPARE_SCALAR_FIELD(val_main_shmem_unitsz);
+
+	COMPARE_STRING_FIELD(kern_post);
+	COMPARE_SCALAR_FIELD(kern_post_maxthreads);
+	COMPARE_SCALAR_FIELD(fn_post_num_threads);
+	COMPARE_SCALAR_FIELD(val_post_num_threads);
+	COMPARE_SCALAR_FIELD(fn_post_shmem_unitsz);
+	COMPARE_SCALAR_FIELD(val_post_shmem_unitsz);
+
+	COMPARE_SCALAR_FIELD(fn_working_bufsz);
+	COMPARE_SCALAR_FIELD(val_working_bufsz);
+	COMPARE_SCALAR_FIELD(fn_results_bufsz);
+	COMPARE_SCALAR_FIELD(val_results_bufsz);
+	COMPARE_SCALAR_FIELD(fn_sanity_check);
+	COMPARE_SCALAR_FIELD(fn_cpu_fallback);
+
+	return true;
+}
+
+static void
+plcudaInfoOut(StringInfo str, const ExtensibleNode *__node)
+{
+	const plcudaInfo *node = (const plcudaInfo *)__node;
+
+	WRITE_UINT_FIELD(extra_flags);
+	WRITE_STRING_FIELD(kern_decl);
+
+	WRITE_STRING_FIELD(kern_prep);
+	WRITE_BOOL_FIELD(kern_prep_maxthreads);
+	WRITE_OID_FIELD(fn_prep_num_threads);
+	WRITE_LONG_FIELD(val_prep_num_threads);
+	WRITE_OID_FIELD(fn_prep_shmem_unitsz);
+	WRITE_LONG_FIELD(val_prep_shmem_unitsz);
+
+	WRITE_STRING_FIELD(kern_main);
+	WRITE_BOOL_FIELD(kern_main_maxthreads);
+	WRITE_OID_FIELD(fn_main_num_threads);
+	WRITE_LONG_FIELD(val_main_num_threads);
+	WRITE_OID_FIELD(fn_main_shmem_unitsz);
+	WRITE_LONG_FIELD(val_main_shmem_unitsz);
+
+	WRITE_STRING_FIELD(kern_post);
+	WRITE_BOOL_FIELD(kern_post_maxthreads);
+	WRITE_OID_FIELD(fn_post_num_threads);
+	WRITE_LONG_FIELD(val_post_num_threads);
+	WRITE_OID_FIELD(fn_post_shmem_unitsz);
+	WRITE_LONG_FIELD(val_post_shmem_unitsz);
+
+	WRITE_OID_FIELD(fn_working_bufsz);
+	WRITE_LONG_FIELD(val_working_bufsz);
+	WRITE_OID_FIELD(fn_results_bufsz);
+	WRITE_LONG_FIELD(val_results_bufsz);
+	WRITE_OID_FIELD(fn_sanity_check);
+	WRITE_OID_FIELD(fn_cpu_fallback);
+}
+
+static void
+plcudaInfoRead(ExtensibleNode *node)
+{
+	READ_LOCALS(plcudaInfo);
+
+	READ_UINT_FIELD(extra_flags);
+	READ_STRING_FIELD(kern_decl);
+
+	READ_STRING_FIELD(kern_prep);
+	READ_BOOL_FIELD(kern_prep_maxthreads);
+	READ_OID_FIELD(fn_prep_num_threads);
+	READ_LONG_FIELD(val_prep_num_threads);
+	READ_OID_FIELD(fn_prep_shmem_unitsz);
+	READ_LONG_FIELD(val_prep_shmem_unitsz);
+
+	READ_STRING_FIELD(kern_main);
+	READ_BOOL_FIELD(kern_main_maxthreads);
+	READ_OID_FIELD(fn_main_num_threads);
+	READ_LONG_FIELD(val_main_num_threads);
+	READ_OID_FIELD(fn_main_shmem_unitsz);
+	READ_LONG_FIELD(val_main_shmem_unitsz);
+
+	READ_STRING_FIELD(kern_post);
+	READ_BOOL_FIELD(kern_post_maxthreads);
+	READ_OID_FIELD(fn_post_num_threads);
+	READ_LONG_FIELD(val_post_num_threads);
+	READ_OID_FIELD(fn_post_shmem_unitsz);
+	READ_LONG_FIELD(val_post_shmem_unitsz);
+
+	READ_OID_FIELD(fn_working_bufsz);
+	READ_LONG_FIELD(val_working_bufsz);
+	READ_OID_FIELD(fn_results_bufsz);
+	READ_LONG_FIELD(val_results_bufsz);
+	READ_OID_FIELD(fn_sanity_check);
+	READ_OID_FIELD(fn_cpu_fallback);
+}
+
+static ExtensibleNodeMethods plcudaInfoMethods;
+
+/*
  * pgstrom_init_plcuda
  */
 void
@@ -2067,4 +2002,13 @@ pgstrom_init_plcuda(void)
 	dlist_init(&plcuda_state_list);
 
 	RegisterResourceReleaseCallback(plcuda_cleanup_resources, NULL);
+
+	/* serialization of plcudaInfo */
+	plcudaInfoMethods.extnodename	= PLCUDAINFO_EXNODE_NAME;
+	plcudaInfoMethods.node_size		= sizeof(plcudaInfo);
+	plcudaInfoMethods.nodeCopy		= plcudaInfoCopy;
+	plcudaInfoMethods.nodeEqual		= plcudaInfoEqual;
+	plcudaInfoMethods.nodeOut		= plcudaInfoOut;
+	plcudaInfoMethods.nodeRead		= plcudaInfoRead;
+	RegisterExtensibleNodeMethods(&plcudaInfoMethods);
 }

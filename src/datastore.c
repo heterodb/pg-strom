@@ -116,14 +116,14 @@ cl_uint
 estimate_num_chunks(Path *pathnode)
 {
 	RelOptInfo *rel = pathnode->parent;
-	int			ncols = list_length(rel->reltargetlist);
+	int			ncols = list_length(rel->reltarget->exprs);
     Size        htup_size;
 	cl_uint		num_chunks;
 
 	htup_size = MAXALIGN(offsetof(HeapTupleHeaderData,
 								  t_bits[BITMAPLEN(ncols)]));
 	if (rel->reloptkind != RELOPT_BASEREL)
-		htup_size += MAXALIGN(rel->width);
+		htup_size += MAXALIGN(rel->reltarget->width);
 	else
 	{
 		double      heap_size = (double)

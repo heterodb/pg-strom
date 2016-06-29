@@ -38,11 +38,6 @@
 PG_MODULE_MAGIC;
 
 /*
- * Misc static variables
- */
-static planner_hook_type	planner_hook_next;
-
-/*
  * miscellaneous GUC parameters
  */
 bool		pgstrom_enabled;
@@ -187,6 +182,7 @@ pgstrom_init_misc_guc(void)
 							 NULL, NULL, NULL);
 }
 
+#if 0
 /*
  * pgstrom_recursive_grafter
  *
@@ -362,6 +358,7 @@ pgstrom_planner_entrypoint(Query *parse,
 	}
 	return result;
 }
+#endif
 
 /*
  * _PG_init
@@ -399,19 +396,14 @@ _PG_init(void)
 
 	/* registration of custom-scan providers */
 	pgstrom_init_gpuscan();
-	pgstrom_init_gpujoin();
-	pgstrom_init_gpupreagg();
-	pgstrom_init_gpusort();
+//	pgstrom_init_gpujoin();
+//	pgstrom_init_gpupreagg();
+//	pgstrom_init_gpusort();
 
 	/* miscellaneous initializations */
 	pgstrom_init_misc_guc();
 	pgstrom_init_codegen();
-	pgstrom_init_plcuda();
-
-	/* overall planner hook registration */
-	/* XXX to be deprecated XXX */
-	planner_hook_next = planner_hook;
-	planner_hook = pgstrom_planner_entrypoint;
+//	pgstrom_init_plcuda();
 }
 
 /* ------------------------------------------------------------
