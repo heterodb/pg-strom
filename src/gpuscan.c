@@ -32,6 +32,7 @@
 #include "optimizer/paths.h"
 #include "optimizer/plancat.h"
 #include "optimizer/restrictinfo.h"
+#include "optimizer/tlist.h"
 #include "optimizer/var.h"
 #include "parser/parsetree.h"
 #include "storage/bufmgr.h"
@@ -47,6 +48,7 @@
 #include "cuda_gpuscan.h"
 
 static set_rel_pathlist_hook_type	set_rel_pathlist_next;
+static ExtensibleNodeMethods gpuscan_info_methods;
 static CustomPathMethods	gpuscan_path_methods;
 static CustomScanMethods	gpuscan_plan_methods;
 static CustomExecMethods	gpuscan_exec_methods;
@@ -66,8 +68,9 @@ typedef struct {
  * form/deform interface of private field of CustomScan(GpuScan)
  */
 typedef struct {
-	char	   *kern_source;	/* source of opencl kernel */
-	int32		extra_flags;	/* extra libraries to be included */
+	ExtensibleNode	ex;
+	char	   *kern_source;	/* source of the CUDA kernel */
+	cl_uint		extra_flags;	/* extra libraries to be included */
 	List	   *func_defs;		/* list of declared functions */
 	List	   *expr_defs;		/* list of special expression in use */
 	List	   *used_params;	/* list of Const/Param in use */
@@ -77,6 +80,8 @@ typedef struct {
     cl_int      proj_fixed_width; /* width of fixed fields on projection */
     cl_int      proj_extra_width; /* width of extra buffer on projection */
 } GpuScanInfo;
+
+#define GPUSCANINFO_EXNODE_NAME		"GpuScanInfo"
 
 static inline void
 form_gpuscan_info(CustomScan *cscan, GpuScanInfo *gs_info)
@@ -167,100 +172,142 @@ static void pgstrom_release_gpuscan(GpuTask *gtask);
 static GpuTask *gpuscan_next_chunk(GpuTaskState *gts);
 static TupleTableSlot *gpuscan_next_tuple(GpuTaskState *gts);
 
-/* dummy kernel source if no device qualifier is given */
-#define GPUSCAN_KERN_SOURCE_NO_DEVQUAL					\
-	"STATIC_FUNCTION(cl_bool)\n"						\
-	"gpuscan_quals_eval(kern_context *kcxt,\n"			\
-	"                   kern_data_store *kds,\n"		\
-	"                   size_t kds_index)\n"			\
-	"{\n"												\
-	"  return true;\n"									\
-	"}\n"
-
-#if 0
 /*
- * cost_gpuscan
+ * cost_discount_gpu_projection
  *
- * Cost estimation of GpuScan - Note that we may need to call this function
- * on the planner_hook context.
+ * Because of the current optimizer's design of PostgreSQL, an exact
+ * target-list is not informed during path consideration.
+ * It shall be attached prior to the plan creation stage once entire
+ * path gets determined based on the estimated cost.
+ * If GpuProjection does not make sense, it returns false,
+ *
+ * Note that it is just a cost reduction factor, don't set complex
+ * expression on the rel->reltarget. Right now, PostgreSQL does not
+ * expect such an intelligence.
+ */
+bool
+cost_discount_gpu_projection(PlannerInfo *root, RelOptInfo *rel,
+							 Cost *p_discount_per_tuple)
+{
+	Query	   *parse = root->parse;
+	bool		have_grouping = false;
+	bool		may_gpu_projection = false;
+	List	   *proj_var_list = NIL;
+	List	   *proj_phv_list = NIL;
+	cl_uint		proj_num_attrs = 0;
+	cl_uint		normal_num_attrs = 0;
+	Cost		discount_per_tuple = 0.0;
+	double		gpu_ratio = pgstrom_gpu_operator_cost / cpu_operator_cost;
+	ListCell   *lc;
+
+	/* GpuProjection makes sense only if top-level of scan/join */
+	if (!bms_equal(root->all_baserels, rel->relids))
+		return false;
+
+	/*
+	 * In case when this scan/join path is underlying other grouping
+	 * clauses, or aggregations, scan/join will generate expressions
+	 * only if it is grouping/sorting keys. Other expressions shall
+	 * be broken down into Var nodes, then calculated in the later
+	 * stage.
+	 */
+	if (parse->groupClause || parse->groupingSets ||
+		parse->hasAggs || root->hasHavingQual)
+		have_grouping = true;
+
+	/*
+	 * Walk on the prospective final target list.
+	 */
+	foreach (lc, root->processed_tlist)
+	{
+		TargetEntry	   *tle = lfirst(lc);
+
+		if (IsA(tle->expr, Var))
+		{
+			if (!list_member(proj_var_list, tle->expr))
+				proj_var_list = lappend(proj_var_list, tle->expr);
+			normal_num_attrs++;
+		}
+		else if (IsA(tle->expr, PlaceHolderVar))
+		{
+			if (!list_member(proj_phv_list, tle->expr))
+				proj_phv_list = lappend(proj_phv_list, tle->expr);
+			normal_num_attrs++;
+		}
+		else if (IsA(tle->expr, Const) || IsA(tle->expr, Param))
+		{
+			proj_num_attrs++;
+			normal_num_attrs++;
+		}
+		else if ((!have_grouping ||
+				  (tle->ressortgroupref &&
+				   parse->groupClause &&
+				   get_sortgroupref_clause_noerr(tle->ressortgroupref,
+												 parse->groupClause) != NULL))
+				 && pgstrom_device_expression(tle->expr))
+		{
+			QualCost	qcost;
+
+			cost_qual_eval_node(&qcost, (Node *)tle->expr, root);
+			discount_per_tuple += (qcost.per_tuple *
+								   Max(1.0 - gpu_ratio, 0.0) / 8.0);
+			proj_num_attrs++;
+			normal_num_attrs++;
+			may_gpu_projection = true;
+
+			elog(INFO, "GpuProjection: %s", nodeToString(tle->expr));
+		}
+		else
+		{
+			List	   *temp_vars;
+			ListCell   *temp_lc;
+
+			temp_vars = pull_var_clause((Node *)tle->expr,
+										PVC_RECURSE_AGGREGATES |
+										PVC_RECURSE_WINDOWFUNCS |
+										PVC_INCLUDE_PLACEHOLDERS);
+			foreach (temp_lc, temp_vars)
+			{
+				Expr   *temp_expr = lfirst(temp_lc);
+
+				if (IsA(temp_expr, Var))
+				{
+					if (!list_member(proj_var_list, temp_expr))
+						proj_var_list = lappend(proj_var_list, temp_expr);
+				}
+				else if (IsA(temp_expr, PlaceHolderVar))
+				{
+					if (!list_member(proj_phv_list, temp_expr))
+						proj_phv_list = lappend(proj_phv_list, temp_expr);
+				}
+				else
+					elog(ERROR, "Bug? unexpected node: %s",
+						 nodeToString(temp_expr));
+			}
+			normal_num_attrs++;
+		}
+	}
+
+	proj_num_attrs += (list_length(proj_var_list) +
+					   list_length(proj_phv_list));
+	if (proj_num_attrs > normal_num_attrs)
+		discount_per_tuple -= cpu_tuple_cost *
+			(double)(proj_num_attrs - normal_num_attrs);
+
+	list_free(proj_var_list);
+	list_free(proj_phv_list);
+
+	*p_discount_per_tuple = (may_gpu_projection ? discount_per_tuple : 0.0);
+
+	return may_gpu_projection;
+}
+
+/*
+ * cost_gpuscan_path - calculation of the GpuScan path cost
  */
 static void
-cost_gpuscan(AttrNumber ncols,		/* number of columns */
-			 Oid tablespace_oid,	/* OID of tablespace */
-			 BlockNumber num_pages,	/* number of base blocks */
-			 double num_tuples,		/* number of base tuples */
-			 double num_rows,		/* number of returned rows */
-			 Selectivity dev_sel,	/* selectivity by dev_quals */
-			 List *dev_quals,		/* List of device quals */
-			 List *host_quals,		/* List of host quals */
-			 List *ppi_quals,		/* List of PPI quals */
-			 Cost *p_startup_cost,	/* out: startup_cost */
-			 Cost *p_total_cost)	/* out: total_cost */
-{
-	Cost		startup_cost = pgstrom_gpu_setup_cost;
-	Cost		run_cost = 0.0;
-	Cost		startup_delay = 0.0;
-	Cost		gpu_per_tuple;
-	Cost		cpu_per_tuple;
-	QualCost	dev_cost;
-	QualCost	host_cost;
-	QualCost	ppi_cost;
-	double		spc_seq_page_cost;
-	double		heap_size;
-	cl_uint		htup_size;
-	cl_uint		num_chunks;
-
-	/* estimate number of chunks */
-	heap_size = (double)(BLCKSZ - SizeOfPageHeaderData) * num_pages;
-	htup_size = (MAXALIGN(offsetof(HeapTupleHeaderData,
-								   t_bits[BITMAPLEN(ncols)])) +
-				 MAXALIGN(heap_size / Max(num_tuples, 1.0) -
-						  sizeof(ItemIdData) - SizeofHeapTupleHeader));
-	num_chunks = (cl_uint)
-		((double)(htup_size + sizeof(cl_int)) * num_tuples /
-		 (double)(pgstrom_chunk_size() -
-				  STROMALIGN(offsetof(kern_data_store, colmeta[ncols]))));
-	num_chunks = Max(num_chunks, 1);
-
-	/* fetch estimated page cost for tablespace containing the table */
-	get_tablespace_page_costs(tablespace_oid, NULL, &spc_seq_page_cost);
-
-	/* Disk costs */
-	run_cost += spc_seq_page_cost * num_pages;
-
-	/* GPU costs */
-	cost_qual_eval(&dev_cost, dev_quals, NULL);
-	if (cpu_tuple_cost > 0.0)
-		dev_cost.per_tuple *= pgstrom_gpu_operator_cost / cpu_operator_cost;
-	else
-		dev_cost.per_tuple += disable_cost;
-
-	/* CPU costs */
-	cost_qual_eval(&host_cost, host_quals, NULL);
-
-	/* PPI costs (as a part of host quals, if any) */
-	cost_qual_eval(&ppi_cost, ppi_quals, NULL);
-	host_cost.startup += ppi_cost.startup;
-	host_cost.per_tuple += ppi_cost.per_tuple;
-
-	/* total path cost */
-	startup_cost += dev_cost.startup + host_cost.startup;
-	cpu_per_tuple = host_cost.per_tuple + cpu_tuple_cost;
-	gpu_per_tuple = dev_cost.per_tuple;
-
-	run_cost += gpu_per_tuple * num_tuples;
-	if (dev_quals != NIL)
-		startup_delay = run_cost * (1.0 / (double)num_chunks);
-	run_cost += cpu_per_tuple * dev_sel * num_tuples;
-
-	*p_startup_cost = startup_cost + startup_delay;
-	*p_total_cost = startup_cost + run_cost;
-}
-#endif
-
-static void
 cost_gpuscan_path(PlannerInfo *root, CustomPath *pathnode,
-				  List *final_tlist, List *dev_quals, List *host_quals)
+				  List *dev_quals, List *host_quals, Cost discount_per_tuple)
 {
 	RelOptInfo	   *baserel = pathnode->path.parent;
 	ParamPathInfo  *param_info = pathnode->path.param_info;
@@ -327,44 +374,8 @@ cost_gpuscan_path(PlannerInfo *root, CustomPath *pathnode,
 	/* Cost for DMA transfer */
 	run_cost += pgstrom_gpu_dma_cost * (double) num_chunks;
 
-	/* Cost discount it GPU Projection off-loads CPU workloads */
-	if (final_tlist != NIL)
-	{
-		Cost		discount_per_tuple = 0.0;
-		Cost		discount_total;
-		cl_uint		num_vars = 0;
-		ListCell   *lc;
-		Bitmapset  *varattnos = NULL;
-
-		foreach (lc, final_tlist)
-		{
-			TargetEntry	   *tle = lfirst(lc);
-
-			if (IsA(tle->expr, Var))
-				varattnos = bms_add_member(varattnos,
-										   ((Var *)tle->expr)->varno -
-										   FirstLowInvalidHeapAttributeNumber);
-			else if (IsA(tle->expr, Const) || IsA(tle->expr, Param))
-				num_vars++;
-			else if (pgstrom_device_expression(tle->expr))
-			{
-				cost_qual_eval_node(&qcost, (Node *)tle->expr, root);
-				discount_per_tuple += (qcost.per_tuple *
-									   Max(1.0 - gpu_ratio, 0.0) / 10.0);
-				num_vars++;
-			}
-			else
-			{
-				pull_varattnos((Node *)tle->expr, baserel->relid, &varattnos);
-			}
-		}
-		if (num_vars > baserel->max_attr)
-			discount_per_tuple -= cpu_tuple_cost *
-				(double)(num_vars - baserel->max_attr);
-		discount_total = discount_per_tuple * baserel->rows;
-
-		run_cost = Max(run_cost - discount_total, 0.0);
-	}
+	/* Cost discount by GPU Projection */
+	run_cost = Max(run_cost - discount_per_tuple * ntuples, 0.0);
 
 	/* Latency to get the first chunk */
 	startup_delay = run_cost * (1.0 / (double) num_chunks);
@@ -380,11 +391,10 @@ gpuscan_add_scan_path(PlannerInfo *root,
 					  RangeTblEntry *rte)
 {
 	CustomPath	   *pathnode;
-	List		   *final_tlist = NIL;
 	List		   *dev_quals = NIL;
 	List		   *host_quals = NIL;
-	ListCell	   *cell;
-	codegen_context	context;
+	ListCell	   *lc;
+	Cost			discount_per_tuple;
 
 	/* call the secondary hook */
 	if (set_rel_pathlist_next)
@@ -410,31 +420,10 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	if (get_rel_namespace(rte->relid) == PG_CATALOG_NAMESPACE)
 		return;
 
-	/* Is this path responsible to evaluation of final target-list? */
-	if (bms_equal(root->all_baserels, baserel->relids))
+	/* Check whether the qualifier can run on GPU device */
+	foreach (lc, baserel->baserestrictinfo)
 	{
-		foreach (cell, root->parse->targetList)
-		{
-			TargetEntry	   *tle = lfirst(cell);
-
-			if (!IsA(tle->expr, Var) &&
-				!IsA(tle->expr, Const) &&
-				!IsA(tle->expr, Param) &&
-				pgstrom_device_expression(tle->expr))
-			{
-				final_tlist = root->parse->targetList;
-				break;
-			}
-		}
-	}
-
-	/*
-	 * check whether the qualifier can run on GPU device, or not
-	 */
-	pgstrom_init_codegen_context(&context);
-	foreach (cell, baserel->baserestrictinfo)
-	{
-		RestrictInfo   *rinfo = lfirst(cell);
+		RestrictInfo   *rinfo = lfirst(lc);
 
 		if (pgstrom_device_expression(rinfo->clause))
 			dev_quals = lappend(dev_quals, rinfo);
@@ -443,11 +432,17 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	}
 
 	/*
-	 * GpuScan does not make sense if neither final_tlist nor dev_quals valid.
-	 * It is almost equivalent to SeqScan.
+	 * Check whether the GPU Projection may be available
 	 */
-	if (final_tlist == NIL && dev_quals == NIL)
-		return;
+	if (!cost_discount_gpu_projection(root, baserel, &discount_per_tuple))
+	{
+		/*
+		 * GpuScan does not make sense if neither qualifier nor target-
+		 * list are runnable on GPU device.
+		 */
+		if (dev_quals == NIL)
+			return;
+	}
 
 	/*
 	 * Construction of a custom-plan node.
@@ -455,6 +450,7 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	pathnode = makeNode(CustomPath);
 	pathnode->path.pathtype = T_CustomScan;
 	pathnode->path.parent = baserel;
+	pathnode->path.pathtarget = baserel->reltarget;
 	pathnode->path.param_info
 		= get_baserel_parampathinfo(root, baserel, baserel->lateral_relids);
 	pathnode->path.pathkeys = NIL;	/* unsorted result */
@@ -462,14 +458,14 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	pathnode->custom_private = NIL;	/* we don't use private field */
 	pathnode->methods = &gpuscan_path_methods;
 
-	/* cost estimation */
-	cost_gpuscan_path(root, pathnode, final_tlist, dev_quals, host_quals);
-
-	/*
-	 * FIXME: needs to pay attention for projection cost?
-	 */
+	cost_gpuscan_path(root, pathnode,
+					  dev_quals, host_quals, discount_per_tuple);
 	add_path(baserel, &pathnode->path);
 }
+
+
+
+// FIXME: outer pull-up shall be done during the planning stage
 
 /*
  * pgstrom_pullup_outer_scan
@@ -555,39 +551,135 @@ pgstrom_pullup_outer_scan(Plan *plannode,
 /*
  * Code generator for GpuScan's qualifier
  */
-static char *
-gpuscan_codegen_exec_quals(codegen_context *context, List *dev_quals)
+void
+gpuscan_codegen_scan_quals(StringInfo kern,
+						   codegen_context *context, List *dev_quals)
 {
-	StringInfoData	body;
+	devtype_info   *dtype;
+	Var			   *var;
 	char		   *expr_code;
+	ListCell	   *lc;
 
+	appendStringInfoString(kern,
+						   "STATIC_FUNCTION(cl_bool)\n"
+						   "gpuscan_quals_eval(kern_context *kcxt,\n"
+						   "                   kern_data_store *kds,\n"
+						   "                   size_t kds_index)\n");
 	if (dev_quals == NULL)
-		return GPUSCAN_KERN_SOURCE_NO_DEVQUAL;
+	{
+		appendStringInfoString(kern,
+							   "{\n"
+							   "  return true;\n"
+							   "}\n");
+		return;
+	}
 
 	/* Let's walk on the device expression tree */
 	expr_code = pgstrom_codegen_expression((Node *)dev_quals, context);
+	appendStringInfoString(kern, "{\n");
+	/* Const/Param declarations */
+	pgstrom_codegen_param_declarations(kern, context);
+	/*
+	 * Var declarations - if qualifier uses only one variables (like x > 0),
+	 * the pg_xxxx_vref() service routine is more efficient because it may
+	 * use attcacheoff to skip walking on tuple attributes.
+	 */
+	if (list_length(context->used_vars) < 2)
+	{
+		foreach (lc, context->used_vars)
+		{
+			var = lfirst(lc);
 
-	initStringInfo(&body);
-	appendStringInfo(
-		&body,
-		"STATIC_FUNCTION(cl_bool)\n"
-		"gpuscan_quals_eval(kern_context *kcxt,\n"
-		"                   kern_data_store *kds,\n"
-		"                   size_t kds_index)\n"
-		"{\n");
-	/* add parameter declarations */
-	pgstrom_codegen_param_declarations(&body, context);
-	/* add variables declarations */
-	pgstrom_codegen_var_declarations(&body, context);
+			dtype = pgstrom_devtype_lookup(var->vartype);
+			if (!dtype)
+				elog(ERROR, "failed to lookup device type: %s",
+					 format_type_be(var->vartype));
+			Assert(var->varattno > InvalidAttrNumber);
 
+			appendStringInfo(
+				kern,
+				"  pg_%s_t %s_%u = pg_%s_vref(%s,kcxt,%u,%s);\n",
+				dtype->type_name,
+				context->var_label,
+				var->varattno,
+				dtype->type_name,
+				context->kds_label,
+				var->varattno - 1,
+				context->kds_index_label);
+		}
+	}
+	else
+	{
+		AttrNumber		anum, varattno_max = 0;
+
+		/* declarations */
+		foreach (lc, context->used_vars)
+		{
+			var = lfirst(lc);
+
+			dtype = pgstrom_devtype_lookup(var->vartype);
+			if (!dtype)
+				elog(ERROR, "failed to lookup device type: %s",
+					 format_type_be(var->vartype));
+			Assert(var->varattno > InvalidAttrNumber);
+
+			appendStringInfo(
+				kern,
+				"  pg_%s_t %s_%u;\n",
+				dtype->type_name,
+                context->var_label,
+				var->varattno);
+			varattno_max = Max(varattno_max, var->varattno);
+		}
+
+		/* walking on the HeapTuple */
+		appendStringInfoString(
+			kern,
+			"  HeapTupleHeaderData *htup;\n"
+            "  char *addr;\n"
+			"\n"
+			"  htup = kern_get_tuple_row(kds, row_index);\n"
+			"  assert(htup != NULL);\n"
+			"  EXTRACT_HEAP_TUPLE_BEGIN(addr, kds, htup);\n");
+
+		for (anum=1; anum <= varattno_max; anum++)
+		{
+			foreach (lc, context->used_vars)
+			{
+				var = lfirst(lc);
+
+				if (var->varattno == anum)
+				{
+					dtype = pgstrom_devtype_lookup(var->vartype);
+					if (!dtype)
+						elog(ERROR, "failed to lookup device type: %s",
+							 format_type_be(var->vartype));
+
+					appendStringInfo(
+						kern,
+						"  %s_%u = pg_%s_datum_ref(kcxt, addr, false);\n",
+						context->var_label,
+						var->varattno,
+						dtype->type_name);
+					break;	/* no need to read same value twice */
+				}
+			}
+
+			if (anum < varattno_max)
+				appendStringInfoString(
+					kern,
+					"  EXTRACT_HEAP_TUPLE_NEXT(addr);\n");
+		}
+		appendStringInfoString(
+			kern,
+			"  EXTRACT_HEAP_TUPLE_END();\n");
+	}
 	appendStringInfo(
-		&body,
+		kern,
 		"\n"
 		"  return EVAL(%s);\n"
 		"}\n",
 		expr_code);
-
-	return body.data;
 }
 
 static Plan *
@@ -603,7 +695,7 @@ create_gpuscan_plan(PlannerInfo *root,
 	List		   *host_quals = NIL;
 	List		   *dev_quals = NIL;
 	ListCell	   *cell;
-	char		   *kern_source;
+	StringInfoData	kern;
 	codegen_context	context;
 
 	/* It should be a base relation */
@@ -632,10 +724,15 @@ create_gpuscan_plan(PlannerInfo *root,
     dev_quals = extract_actual_clauses(dev_quals, false);
 
 	/*
-	 * Construct OpenCL kernel code
+	 * Code construction for the CUDA kernel code
 	 */
+	initStringInfo(&kern);
 	pgstrom_init_codegen_context(&context);
-	kern_source = gpuscan_codegen_exec_quals(&context, dev_quals);
+	gpuscan_codegen_scan_quals(&kern, &context, dev_quals);
+
+	elog(INFO, "source = %s", kern.data);
+
+//	gpuscan_codegen_projection(&kern, &context, ....);
 
 	/*
 	 * Construction of GpuScanPlan node; on top of CustomPlan node
@@ -648,13 +745,20 @@ create_gpuscan_plan(PlannerInfo *root,
 	cscan->scan.scanrelid = rel->relid;
 
 	memset(&gs_info, 0, sizeof(GpuScanInfo));
-	gs_info.kern_source = kern_source;
+	gs_info.kern_source = kern.data;
 	gs_info.extra_flags = context.extra_flags | DEVKERNEL_NEEDS_GPUSCAN;
 	gs_info.func_defs = context.func_defs;
 	gs_info.expr_defs = context.expr_defs;
 	gs_info.used_params = context.used_params;
 	gs_info.used_vars = context.used_vars;
 	gs_info.dev_quals = dev_quals;
+	// expression has to be keps in custom_exprs separately
+
+	elog(INFO, "rel->tlist = %s", nodeToString(rel->reltarget->exprs));
+	elog(ERROR, "tlist = %s", nodeToString(tlist));
+
+
+
 	form_gpuscan_info(cscan, &gs_info);
 	cscan->flags = best_path->flags;
 	cscan->methods = &gpuscan_plan_methods;
@@ -2178,6 +2282,83 @@ gpuscan_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	pgstrom_explain_gputaskstate(&gss->gts, es);
 }
 
+
+
+/*
+ * Extensible node support for GpuScanInfo
+ */
+static void
+gpuscan_info_copy(ExtensibleNode *__newnode, const ExtensibleNode *__oldnode)
+{
+	GpuScanInfo		   *newnode = (GpuScanInfo *)__newnode;
+	const GpuScanInfo  *oldnode = (const GpuScanInfo *)__oldnode;
+
+	COPY_STRING_FIELD(kern_source);
+	COPY_SCALAR_FIELD(extra_flags);
+	COPY_NODE_FIELD(func_defs);
+	COPY_NODE_FIELD(expr_defs);
+	COPY_NODE_FIELD(used_params);
+	COPY_NODE_FIELD(used_vars);
+	COPY_NODE_FIELD(dev_quals);
+	COPY_SCALAR_FIELD(base_fixed_width);
+	COPY_SCALAR_FIELD(proj_fixed_width);
+	COPY_SCALAR_FIELD(proj_extra_width);
+}
+
+static bool
+gpuscan_info_equal(const ExtensibleNode *__a, const ExtensibleNode *__b)
+{
+	GpuScanInfo		   *a = (GpuScanInfo *)__a;
+	const GpuScanInfo  *b = (GpuScanInfo *)__b;
+
+	COMPARE_STRING_FIELD(kern_source);
+	COMPARE_SCALAR_FIELD(extra_flags);
+	COMPARE_NODE_FIELD(func_defs);
+	COMPARE_NODE_FIELD(expr_defs);
+	COMPARE_NODE_FIELD(used_params);
+	COMPARE_NODE_FIELD(used_vars);
+	COMPARE_NODE_FIELD(dev_quals);
+	COMPARE_SCALAR_FIELD(base_fixed_width);
+	COMPARE_SCALAR_FIELD(proj_fixed_width);
+	COMPARE_SCALAR_FIELD(proj_extra_width);
+
+	return true;
+}
+
+static void
+gpuscan_info_out(StringInfo str, const ExtensibleNode *__node)
+{
+	const GpuScanInfo  *node = (const GpuScanInfo *)__node;
+
+	WRITE_STRING_FIELD(kern_source);
+	WRITE_UINT_FIELD(extra_flags);
+	WRITE_NODE_FIELD(func_defs);
+	WRITE_NODE_FIELD(expr_defs);
+	WRITE_NODE_FIELD(used_params);
+	WRITE_NODE_FIELD(used_vars);
+	WRITE_NODE_FIELD(dev_quals);
+	WRITE_INT_FIELD(base_fixed_width);
+	WRITE_INT_FIELD(proj_fixed_width);
+	WRITE_INT_FIELD(proj_extra_width);
+}
+
+static void
+gpuscan_info_read(ExtensibleNode *node)
+{
+	READ_LOCALS(GpuScanInfo);
+
+	READ_STRING_FIELD(kern_source);
+	READ_UINT_FIELD(extra_flags);
+	READ_NODE_FIELD(func_defs);
+	READ_NODE_FIELD(expr_defs);
+	READ_NODE_FIELD(used_params);
+	READ_NODE_FIELD(used_vars);
+	READ_NODE_FIELD(dev_quals);
+	READ_INT_FIELD(base_fixed_width);
+	READ_INT_FIELD(proj_fixed_width);
+	READ_INT_FIELD(proj_extra_width);
+}
+
 void
 pgstrom_init_gpuscan(void)
 {
@@ -2199,6 +2380,15 @@ pgstrom_init_gpuscan(void)
 							 PGC_USERSET,
                              GUC_NOT_IN_SAMPLE,
                              NULL, NULL, NULL);
+	/* setup GpuScanInfo serialization */
+	memset(&gpuscan_info_methods, 0, sizeof(gpuscan_info_methods));
+	gpuscan_info_methods.extnodename	= GPUSCANINFO_EXNODE_NAME;
+	gpuscan_info_methods.node_size		= sizeof(GpuScanInfo);
+	gpuscan_info_methods.nodeCopy		= gpuscan_info_copy;
+	gpuscan_info_methods.nodeEqual		= gpuscan_info_equal;
+	gpuscan_info_methods.nodeOut		= gpuscan_info_out;
+	gpuscan_info_methods.nodeRead		= gpuscan_info_read;
+	RegisterExtensibleNodeMethods(&gpuscan_info_methods);
 
 	/* setup path methods */
 	memset(&gpuscan_path_methods, 0, sizeof(gpuscan_path_methods));

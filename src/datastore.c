@@ -94,10 +94,10 @@ check_guc_chunk_limit(int *newval, void **extra, GucSource source)
 bool
 pgstrom_bulk_exec_supported(const PlanState *planstate)
 {
-	if (pgstrom_plan_is_gpuscan(planstate->plan) ||
-        pgstrom_plan_is_gpujoin(planstate->plan) ||
-        pgstrom_plan_is_gpupreagg(planstate->plan) ||
-        pgstrom_plan_is_gpusort(planstate->plan))
+	if (pgstrom_plan_is_gpuscan(planstate->plan)) // ||
+//        pgstrom_plan_is_gpujoin(planstate->plan) ||
+		//      pgstrom_plan_is_gpupreagg(planstate->plan) ||
+//        pgstrom_plan_is_gpusort(planstate->plan))
 	{
 		GpuTaskState   *gts = (GpuTaskState *) planstate;
 

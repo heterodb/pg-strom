@@ -22,7 +22,6 @@
 #include "catalog/objectaddress.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
-#include "nodes/readfuncs.h"
 #include "parser/parse_func.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
@@ -75,6 +74,8 @@ typedef struct plcudaInfo
 	Oid		fn_sanity_check;
 	Oid		fn_cpu_fallback;
 } plcudaInfo;
+
+static ExtensibleNodeMethods plcudaInfoMethods;
 
 /*
  * plcudaState - runtime state of pl/cuda functions
@@ -1990,8 +1991,6 @@ plcudaInfoRead(ExtensibleNode *node)
 	READ_OID_FIELD(fn_sanity_check);
 	READ_OID_FIELD(fn_cpu_fallback);
 }
-
-static ExtensibleNodeMethods plcudaInfoMethods;
 
 /*
  * pgstrom_init_plcuda
