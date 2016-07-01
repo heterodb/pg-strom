@@ -567,12 +567,15 @@ extern void pgstrom_init_datastore(void);
  */
 extern bool cost_discount_gpu_projection(PlannerInfo *root, RelOptInfo *rel,
 										 Cost *p_discount_per_tuple);
-extern void gpuscan_codegen_scan_quals(StringInfo kern,
-									   codegen_context *context,
-									   List *dev_quals);
+extern void codegen_gpuscan_quals(StringInfo kern,
+								  codegen_context *context,
+								  Index scanrelid,
+								  List *dev_quals);
+#if 0
 extern bool pgstrom_pullup_outer_scan(Plan *plannode,
 									  bool allow_expression,
 									  List **p_outer_qual);
+#endif
 extern bool pgstrom_path_is_gpuscan(const Path *path);
 extern bool pgstrom_plan_is_gpuscan(const Plan *plan);
 extern Node *replace_varnode_with_tlist_dev(Node *node, List *tlist_dev);
@@ -847,7 +850,6 @@ typealign_get_width(char type_align)
 		return sizeof(cl_int);
 	else if (type_align == 'd')
 		return sizeof(cl_long);
-	Assert(false);
 	elog(ERROR, "unexpected type alignment: %c", type_align);
 	return -1;	/* be compiler quiet */
 }

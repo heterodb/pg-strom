@@ -73,61 +73,34 @@ typedef struct {
 	cl_uint		extra_flags;	/* extra libraries to be included */
 	List	   *func_defs;		/* list of declared functions */
 	List	   *expr_defs;		/* list of special expression in use */
-	List	   *used_params;	/* list of Const/Param in use */
-	List	   *used_vars;		/* list of Var in use */
-	List	   *dev_quals;		/* qualifiers to be run on device */
-	cl_int      base_fixed_width; /* width of fixed fields on base rel */
-    cl_int      proj_fixed_width; /* width of fixed fields on projection */
-    cl_int      proj_extra_width; /* width of extra buffer on projection */
+	cl_uint		proj_row_extra;	/* extra requirements if row format */
+	cl_uint		proj_slot_extra;/* extra requirements if slot format */
+
+	cl_uint		proj_tuple_width;
+	cl_uint		proj_extra_width;
 } GpuScanInfo;
 
 #define GPUSCANINFO_EXNODE_NAME		"GpuScanInfo"
 
 static inline void
-form_gpuscan_info(CustomScan *cscan, GpuScanInfo *gs_info)
+form_gpuscan_custom_exprs(CustomScan *cscan,
+						  List *used_params,
+						  List *dev_quals)
 {
-	List	   *privs = NIL;
-	List	   *exprs = NIL;
-
-	privs = lappend(privs, makeString(gs_info->kern_source ?
-									  pstrdup(gs_info->kern_source) :
-									  NULL));
-	privs = lappend(privs, makeInteger(gs_info->extra_flags));
-	privs = lappend(privs, gs_info->func_defs);
-	privs = lappend(privs, gs_info->expr_defs);
-	exprs = lappend(exprs, gs_info->used_params);
-	exprs = lappend(exprs, gs_info->used_vars);
-	exprs = lappend(exprs, gs_info->dev_quals);
-	privs = lappend(privs, makeInteger(gs_info->base_fixed_width));
-	privs = lappend(privs, makeInteger(gs_info->proj_fixed_width));
-	privs = lappend(privs, makeInteger(gs_info->proj_extra_width));
-
-	cscan->custom_private = privs;
-    cscan->custom_exprs = exprs;
+	cscan->custom_exprs = list_make2(used_params, dev_quals);
 }
 
-static GpuScanInfo *
-deform_gpuscan_info(CustomScan *cscan)
+static inline void
+deform_gpuscan_custom_exprs(CustomScan *cscan,
+							List **p_used_params,
+							List **p_dev_quals)
 {
-	GpuScanInfo	   *gs_info = palloc0(sizeof(GpuScanInfo));
-	List		   *privs = cscan->custom_private;
-	List		   *exprs = cscan->custom_exprs;
-	int				pindex = 0;
-	int				eindex = 0;
+	ListCell   *cell = list_head(cscan->custom_exprs);
 
-	Assert(IsA(cscan, CustomScan));
-	gs_info->kern_source = strVal(list_nth(privs, pindex++));
-	gs_info->extra_flags = intVal(list_nth(privs, pindex++));
-	gs_info->func_defs = list_nth(privs, pindex++);
-	gs_info->expr_defs = list_nth(privs, pindex++);
-	gs_info->used_params = list_nth(exprs, eindex++);
-	gs_info->used_vars = list_nth(exprs, eindex++);
-	gs_info->dev_quals = list_nth(exprs, eindex++);
-	gs_info->base_fixed_width = intVal(list_nth(privs, pindex++));
-	gs_info->proj_fixed_width = intVal(list_nth(privs, pindex++));
-	gs_info->proj_extra_width = intVal(list_nth(privs, pindex++));
-
-	return gs_info;
+	Assert(list_length(cscan->custom_exprs) == 2);
+	*p_used_params = lfirst(cell);
+	cell = lnext(cell);
+	*p_dev_quals = lfirst(cell);
 }
 
 typedef struct
@@ -157,9 +130,8 @@ typedef struct {
 	List		   *dev_tlist;		/* tlist to be returned from the device */
 	List		   *dev_quals;		/* quals to be run on the device */
 	bool			dev_projection;	/* true, if device projection is valid */
-	cl_int			base_fixed_width; /* width of fixed fields on base rel */
-	cl_int			proj_fixed_width; /* width of fixed fields on projection */
-	cl_int			proj_extra_width; /* width of extra buffer on projection */
+	cl_uint			proj_tuple_width;
+	cl_uint			proj_extra_width;
 	/* resource for CPU fallback */
 	TupleTableSlot *base_slot;
 	ProjectionInfo *base_proj;
@@ -465,6 +437,8 @@ gpuscan_add_scan_path(PlannerInfo *root,
 
 
 
+
+#if 0
 // FIXME: outer pull-up shall be done during the planning stage
 
 /*
@@ -547,13 +521,14 @@ pgstrom_pullup_outer_scan(Plan *plannode,
 
 	return true;
 }
+#endif
 
 /*
  * Code generator for GpuScan's qualifier
  */
 void
-gpuscan_codegen_scan_quals(StringInfo kern,
-						   codegen_context *context, List *dev_quals)
+codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
+					  Index scanrelid, List *dev_quals)
 {
 	devtype_info   *dtype;
 	Var			   *var;
@@ -579,6 +554,21 @@ gpuscan_codegen_scan_quals(StringInfo kern,
 	appendStringInfoString(kern, "{\n");
 	/* Const/Param declarations */
 	pgstrom_codegen_param_declarations(kern, context);
+	/* Sanity check of used_vars */
+	foreach (lc, context->used_vars)
+	{
+		var = lfirst(lc);
+		if (var->varno != scanrelid)
+			elog(ERROR, "unexpected var-node reference: %s expected %u",
+				 nodeToString(var), scanrelid);
+		if (var->varattno <= InvalidAttrNumber)
+			elog(ERROR, "cannot reference system column or whole-row on GPU");
+		dtype = pgstrom_devtype_lookup(var->vartype);
+		if (!dtype)
+			elog(ERROR, "failed to lookup device type: %s",
+				 format_type_be(var->vartype));
+	}
+
 	/*
 	 * Var declarations - if qualifier uses only one variables (like x > 0),
 	 * the pg_xxxx_vref() service routine is more efficient because it may
@@ -589,12 +579,7 @@ gpuscan_codegen_scan_quals(StringInfo kern,
 		foreach (lc, context->used_vars)
 		{
 			var = lfirst(lc);
-
 			dtype = pgstrom_devtype_lookup(var->vartype);
-			if (!dtype)
-				elog(ERROR, "failed to lookup device type: %s",
-					 format_type_be(var->vartype));
-			Assert(var->varattno > InvalidAttrNumber);
 
 			appendStringInfo(
 				kern,
@@ -616,12 +601,7 @@ gpuscan_codegen_scan_quals(StringInfo kern,
 		foreach (lc, context->used_vars)
 		{
 			var = lfirst(lc);
-
 			dtype = pgstrom_devtype_lookup(var->vartype);
-			if (!dtype)
-				elog(ERROR, "failed to lookup device type: %s",
-					 format_type_be(var->vartype));
-			Assert(var->varattno > InvalidAttrNumber);
 
 			appendStringInfo(
 				kern,
@@ -651,9 +631,6 @@ gpuscan_codegen_scan_quals(StringInfo kern,
 				if (var->varattno == anum)
 				{
 					dtype = pgstrom_devtype_lookup(var->vartype);
-					if (!dtype)
-						elog(ERROR, "failed to lookup device type: %s",
-							 format_type_be(var->vartype));
 
 					appendStringInfo(
 						kern,
@@ -682,25 +659,950 @@ gpuscan_codegen_scan_quals(StringInfo kern,
 		expr_code);
 }
 
+/*
+ * Code generator for GpuScan's projection
+ */
+static List *
+codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
+						   Index scanrelid, Relation relation,
+						   List *tlist_dev)
+{
+	TupleDesc		tupdesc = RelationGetDescr(relation);
+	AttrNumber	   *varremaps;
+	Bitmapset	   *varattnos;
+	ListCell	   *lc;
+	int				prev;
+	int				i, j, k;
+	bool			needs_vlbuf;
+	devtype_info   *dtype;
+	StringInfoData	decl;
+	StringInfoData	body;
+	StringInfoData	temp;
+
+	initStringInfo(&decl);
+	initStringInfo(&body);
+	initStringInfo(&temp);
+
+
+	/*
+	 * step.1 - declaration of functions and KVAR_xx for expressions
+	 */
+	appendStringInfoString(
+		&decl,
+		"STATIC_FUNCTION(void)\n"
+		"gpuscan_projection(kern_context *kcxt,\n"
+		"                   kern_data_store *kds_src,\n"
+		"                   kern_tupitem *tupitem,\n"
+		"                   kern_data_store *kds_dst,\n"
+		"                   cl_uint dst_nitems,\n"
+		"                   Datum *tup_values,\n"
+		"                   cl_bool *tup_isnull,\n"
+		"                   cl_bool *tup_internal)\n"
+		"{\n"
+		"  HeapTupleHeaderData *htup;\n"
+		"  char *curr;\n");
+
+	varremaps = palloc0(sizeof(AttrNumber) * tupdesc->natts);
+	varattnos = NULL;
+	foreach (lc, tlist_dev)
+	{
+		TargetEntry	   *tle = lfirst(lc);
+
+		Assert(tle->resno > 0);
+		/*
+		 * NOTE: If expression of TargetEntry is a simple Var-node,
+		 * we can load the value into tup_values[]/tup_isnull[]
+		 * array regardless of the data type. We have to track which
+		 * column is the source of this TargetEntry.
+		 * Elsewhere, we will construct device side expression using
+		 * KVAR_xx variables.
+		 */
+		if (IsA(tle->expr, Var))
+		{
+			Var	   *var = (Var *) tle->expr;
+
+			Assert(var->varno == scanrelid);
+			Assert(var->varattno > FirstLowInvalidHeapAttributeNumber &&
+				   var->varattno != InvalidAttrNumber &&
+				   var->varattno <= tupdesc->natts);
+			varremaps[tle->resno - 1] = var->varattno;
+		}
+		else
+		{
+			pull_varattnos((Node *)tle->expr, scanrelid, &varattnos);
+		}
+	}
+
+	prev = -1;
+	while ((prev = bms_next_member(varattnos, prev)) >= 0)
+	{
+		Form_pg_attribute attr;
+		AttrNumber		anum = prev + FirstLowInvalidHeapAttributeNumber;
+
+		/* system column should not appear within device expression */
+		Assert(anum > 0);
+		attr = tupdesc->attrs[anum - 1];
+
+		dtype = pgstrom_devtype_lookup(attr->atttypid);
+		if (!dtype)
+			elog(ERROR, "Bug? failed to lookup device supported type: %s",
+				 format_type_be(attr->atttypid));
+		appendStringInfo(&decl,
+						 "  pg_%s_t KVAR_%u;\n",
+						 dtype->type_name, anum);
+	}
+
+	/*
+	 * step.2 - extract tuples and load values to KVAR or values/isnull
+	 * array (only if tupitem_src is valid, of course)
+	 */
+	appendStringInfoString(
+		&body,
+		"  htup = (!tupitem ? NULL : &tupitem->htup);\n");
+
+	/*
+	 * System columns reference if any
+	 */
+	for (j=0; j < list_length(tlist_dev); j++)
+	{
+		if (varremaps[j] < 0)
+		{
+			Form_pg_attribute attr
+				= SystemAttributeDefinition(varremaps[j], true);
+
+			appendStringInfo(
+				&body,
+				"  /* %s system column */\n"
+				"  if (!htup)\n"
+				"    tup_isnull[%d] = true;\n"
+				"  else\n"
+				"  {\n"
+				"    tup_isnull[%d] = false;\n"
+				"    tup_values[%d] = kern_getsysatt_%s(kds_src, htup);\n"
+				"  }\n",
+				NameStr(attr->attname),
+				j, j, j,
+				NameStr(attr->attname));
+		}
+	}
+
+	/*
+	 * Extract regular tuples
+	 */
+	appendStringInfoString(
+		&temp,
+		"  EXTRACT_HEAP_TUPLE_BEGIN(curr, kds_src, htup);\n");
+
+	for (i=0; i < tupdesc->natts; i++)
+	{
+		Form_pg_attribute attr = tupdesc->attrs[i];
+		bool		referenced = false;
+
+		dtype = pgstrom_devtype_lookup(attr->atttypid);
+		k = attr->attnum - FirstLowInvalidHeapAttributeNumber;
+
+		/* Put values on tup_values/tup_isnull if referenced */
+		for (j=0; j < list_length(tlist_dev); j++)
+		{
+			if (varremaps[j] != attr->attnum)
+				continue;
+
+			appendStringInfo(
+				&temp,
+				"  if (!curr)\n"
+				"    tup_isnull[%d] = true;\n"
+				"  else\n"
+				"  {\n"
+				"    tup_isnull[%d] = false;\n",
+				j, j);
+			if (attr->attbyval)
+			{
+				appendStringInfo(
+					&temp,
+					"    tup_values[%d] = *((%s *) curr);\n",
+					j,
+					(attr->attlen == sizeof(cl_long) ? "cl_long" :
+					 attr->attlen == sizeof(cl_int)  ? "cl_int"  :
+					 attr->attlen == sizeof(cl_short) ? "cl_short" :
+					 "cl_char"));
+			}
+			else
+			{
+				appendStringInfo(
+					&temp,
+					"    tup_values[%d] = PointerGetDatum(curr);\n",
+					j);
+			}
+			appendStringInfo(
+				&temp,
+				"  }\n");
+			referenced = true;
+		}
+		/* Load values to KVAR_xx */
+		k = attr->attnum - FirstLowInvalidHeapAttributeNumber;
+		if (bms_is_member(k, varattnos))
+		{
+			appendStringInfo(
+				&temp,
+				"    KVAR_%u = pg_%s_datum_ref(kcxt, curr, false);\n",
+				attr->attnum,
+				dtype->type_name);
+			referenced = true;
+		}
+
+		if (referenced)
+		{
+			appendStringInfoString(&body, temp.data);
+			resetStringInfo(&temp);
+		}
+		appendStringInfoString(
+			&temp,
+			"  EXTRACT_HEAP_TUPLE_NEXT(curr);\n");
+	}
+	appendStringInfoString(
+		&body,
+		"  EXTRACT_HEAP_TUPLE_END();\n");
+
+	/*
+	 * step.3 - execute expression node, then store the result onto KVAR_xx
+	 */
+    foreach (lc, tlist_dev)
+    {
+        TargetEntry    *tle = lfirst(lc);
+		Oid				type_oid;
+
+
+		hoge; // Const/Params 
+		// put codegen expression, but no KPARAMS?
+		if (IsA(tle->expr, Var))
+			continue;
+		else if (IsA(tle->expr, Const) ||
+				 IsA(tle->expr, Param))
+		{
+			/* register the parameter but no need to have KPARAMS? */
+			(void)pgstrom_codegen_expression((Node *) tle->expr, context));
+
+
+			continue;
+		}
+
+
+		type_oid = exprType((Node *)tle->expr);
+		dtype = pgstrom_devtype_lookup(type_oid);
+		if (!dtype)
+			elog(ERROR, "Bug? device supported type is missing: %s",
+				 format_type_be(type_oid));
+		appendStringInfo(
+			&decl,
+			"  pg_%s_t expr_%u_v;\n",
+			dtype->type_name,
+			tle->resno);
+		appendStringInfo(
+			&body,
+			"  expr_%u_v = %s;\n",
+			tle->resno,
+			pgstrom_codegen_expression((Node *) tle->expr, context));
+	}
+	appendStringInfoChar(&body, '\n');
+
+	/*
+	 * step.4 (only KDS_FORMAT_SLOT)
+	 *
+	 * We have to allocate extra buffer for indirect or numeric data type.
+	 * Also, any pointer values have to be fixed up to the host pointer.
+	 */
+	appendStringInfo(
+		&body,
+		"  if (kds_dst->format == KDS_FORMAT_SLOT)\n"
+		"  {\n");
+
+	resetStringInfo(&temp);
+	appendStringInfo(
+		&temp,
+		"    cl_uint vl_len = 0;\n"
+		"    char   *vl_buf = NULL;\n"
+		"    cl_uint offset;\n"
+		"    cl_uint count;\n"
+		"    cl_uint __shared__ base;\n"
+		"\n"
+		"    if (htup)\n"
+		"    {\n");
+
+	needs_vlbuf = false;
+	foreach (lc, tlist_dev)
+	{
+		TargetEntry	   *tle = lfirst(lc);
+		Oid				type_oid;
+
+		if (IsA(tle->expr, Var) ||		/* just reference to kds_src */
+			IsA(tle->expr, Const) ||	/* just reference to kparams */
+			IsA(tle->expr, Param))		/* just reference to kparams */
+			continue;
+
+		type_oid = exprType((Node *)tle->expr);
+		dtype = pgstrom_devtype_lookup(type_oid);
+		if (!dtype)
+			elog(ERROR, "Bug? device supported type is missing: %s",
+				 format_type_be(type_oid));
+
+		if (type_oid == NUMERICOID)
+		{
+			appendStringInfo(
+				&temp,
+				"      if (!temp_%u_v.isnull)\n"
+				"        vl_len = TYPEALIGN(sizeof(cl_uint), vl_len)\n"
+				"               + pg_numeric_to_varlena(kcxt,NULL,\n"
+				"                                       expr_%u_v.value,\n"
+				"                                       expr_%u_v.isnull);\n",
+				tle->resno,
+				tle->resno,
+				tle->resno);
+			needs_vlbuf = true;
+		}
+		else if (!dtype->type_byval)
+		{
+			/* varlena is not supported yet */
+			Assert(dtype->type_length > 0);
+
+			appendStringInfo(
+				&temp,
+				"      if (!expr_%u_v.isnull)\n"
+				"        vl_len = TYPEALIGN(%u, vl_len) + %u;\n",
+				tle->resno,
+				dtype->type_align,
+				dtype->type_length);
+			needs_vlbuf = true;
+		}
+	}
+
+	if (needs_vlbuf)
+	{
+		appendStringInfo(
+			&temp,
+			"    }\n"
+			"\n"
+			"    /* allocation of variable length buffer */\n"
+			"    vl_len = MAXALIGN(vl_len);\n"
+			"    offset = arithmetic_stairlike_add(vl_len, &count);\n"
+			"    if (get_local_id() == 0)\n"
+			"    {\n"
+			"      if (count > 0)\n"
+			"        base = atomicAdd(&kds_dst->usage, count);\n"
+			"      else\n"
+			"        base = 0;\n"
+			"    }\n"
+			"    __syncthreads();\n"
+			"\n"
+			"    if (KERN_DATA_STORE_SLOT_LENGTH(kds_dst, dst_nitems) +\n"
+			"        base + count > kds_dst->length)\n"
+			"    {\n"
+			"      STROM_SET_ERROR(&kcxt->e, StromError_DataStoreNoSpace);\n"
+			"      return;\n"
+			"    }\n"
+			"    vl_buf = (char *)kds_dst + kds_dst->length\n"
+			"           - (base + offset + vl_len);\n");
+		appendStringInfoString(&body, "%s", temp.data);
+	}
+
+	/*
+	 * step.5 (only FDW_FORMAT_SLOT) - Store the KVAR_xx on the slot.
+	 * pointer types must be host pointer
+	 */
+
+	hoge;
+	// TODO: Const/Param has to be adjusted by parambuf
+
+	appendStringInfo(
+		&body,
+		"    if (htup)\n"
+		"    {\n");
+
+	foreach (lc, tlist_dev)
+	{
+		TargetEntry	   *tle = lfirst(lc);
+		Oid				type_oid;
+
+		if (IsA(tle->expr, Var))
+		{
+			/* transform to the host pointer */
+
+			continue;
+		}
+		else if (IsA(tle->expr, Const) ||
+				 IsA(tle->expr, Param))
+		{
+			/* transform to the host pointer */
+
+			continue;
+		}
+
+
+
+
+
+
+
+		type_oid = exprType((Node *)tle->expr);
+		dtype = pgstrom_devtype_lookup(type_oid);
+		if (!dtype)
+			elog(ERROR, "Bug? device supported type is missing: %u", type_oid);
+
+		appendStringInfo(
+			&body,
+			"      tup_isnull[%d] = temp_%u_v.isnull;\n",
+			tle->resno - 1, tle->resno);
+
+		if (type_oid == NUMERICOID)
+		{
+			appendStringInfo(
+				&body,
+				"      if (!temp_%u_v.isnull)\n"
+				"      {\n"
+				"        vl_buf = (char *)TYPEALIGN(sizeof(cl_int), vl_buf);\n"
+				"        tup_values[%d] = devptr_to_host(kds_dst, vl_buf);\n"
+				"        vl_buf += pg_numeric_to_varlena(kcxt, vl_buf,\n"
+				"                                        temp_%u_v.value,\n"
+				"                                        temp_%u_v.isnull);\n"
+				"       }\n",
+				tle->resno,
+				tle->resno - 1,
+				tle->resno,
+				tle->resno);
+		}
+		else if (dtype->type_byval)
+		{
+			appendStringInfo(
+				&body,
+				"      if (!temp_%u_v.isnull)\n"
+				"        tup_values[%d] = pg_%s_to_datum(temp_%u_v.value);\n",
+				tle->resno,
+				tle->resno - 1,
+				dtype->type_name,
+				tle->resno);
+		}
+		else
+		{
+			Assert(dtype->type_length > 0);
+			appendStringInfo(
+				&body,
+				"      if (!temp_%u_v.isnull)\n"
+				"      {\n"
+				"        vl_buf = (char *)TYPEALIGN(%u, vl_buf);\n"
+				"        tup_values[%d] = devptr_to_host(kds_dst, vl_buf);\n"
+				"        memcpy(vl_buf, &temp_%u_v.value, %d);\n"
+				"        vl_buf += %d;\n"
+				"      }\n",
+				tle->resno,
+				dtype->type_align,
+				tle->resno - 1,
+				tle->resno, dtype->type_length,
+				dtype->type_length);
+		}
+	}
+	appendStringInfo(
+		&body,
+		"    }\n"
+		"  }\n");
+
+	/*
+	 * step.6 (only FDW_FORMAT_ROW) - Stora the KVAR_xx on the slot.
+	 * pointer types must be device pointer.
+	 */
+	appendStringInfo(
+		&body,
+		"  else\n"
+		"  {\n"
+		"    if (htup)\n"
+		"    {\n");
+
+	foreach (lc, tlist_dev)
+	{
+		TargetEntry	   *tle = lfirst(lc);
+		Oid				type_oid;
+
+		if (IsA(tle->expr, Var))
+			continue;
+
+		type_oid = exprType((Node *)tle->expr);
+		dtype = pgstrom_devtype_lookup(type_oid);
+		if (!dtype)
+			elog(ERROR, "Bug? device supported type is missing: %u", type_oid);
+
+		appendStringInfo(
+			&body,
+			"      tup_isnull[%d] = temp_%u_v.isnull;\n",
+			tle->resno - 1, tle->resno);
+
+		if (type_oid == NUMERICOID)
+		{
+			appendStringInfo(
+				&body,
+				"      tup_internal[%d] = true;\n"
+				"      if (!temp_%u_v.isnull)\n"
+				"        tup_values[%d] = temp_%u_v.value;\n",
+				tle->resno - 1,
+				tle->resno,
+				tle->resno - 1, tle->resno);
+		}
+		else if (dtype->type_byval)
+		{
+			appendStringInfo(
+				&body,
+				"      if (!temp_%u_v.isnull)\n"
+				"        tup_values[%d] = temp_%u_v.value;\n",
+				tle->resno,
+				tle->resno - 1, tle->resno);
+		}
+		else
+		{
+			Assert(dtype->type_length > 0);
+			appendStringInfo(
+				&body,
+				"      if (!temp_%u_v.isnull)\n"
+				"      {\n"
+				"        vl_buf = (char *)TYPEALIGN(%u, vl_buf);\n"
+				"        tup_values[%d] = devptr_to_host(kds_dst, vl_buf);\n"
+				"        memcpy(vl_buf, &temp_%u_v.value, %u);\n"
+				"        vl_buf += %u;\n"
+				"      }\n",
+				tle->resno,
+				dtype->type_align,
+				tle->resno - 1,
+				tle->resno, dtype->type_length,
+				dtype->type_length);
+		}
+	}
+	appendStringInfo(
+		&body,
+		"    }\n"
+		"  }\n"
+		"}\n");
+
+	/* parameter references */
+	pgstrom_codegen_param_declarations(&decl, context);
+
+	/* OK, write back the kernel source */
+	appendStringInfo(kern, "%s\n%s", decl.data, body.data);
+	pfree(decl.data);
+	pfree(body.data);
+}
+
+/*
+ * add_unique_expression - adds an expression node on the supplied
+ * target-list, then returns the varattno to reference the entry.
+ */
+AttrNumber
+add_unique_expression(Expr *expr, List **p_targetlist, bool resjunk)
+{
+	TargetEntry	   *tle;
+	ListCell	   *lc;
+	AttrNumber		resno;
+
+	foreach (lc, *p_targetlist)
+	{
+		tle = (TargetEntry *) lfirst(lc);
+		if (equal(expr, tle->expr))
+			return tle->resno;
+	}
+	/* Not found, so add this expression */
+	resno = list_length(*p_targetlist) + 1;
+	tle = makeTargetEntry(copyObject(expr), resno, NULL, resjunk);
+	*p_targetlist = lappend(*p_targetlist, tle);
+
+	return resno;
+}
+
+/*
+ * replace_varnode_with_tlist_dev - replaces the Var node in the supplied
+ * expression node to reference tlist_dev, instead of the original.
+ */
+Node *
+replace_varnode_with_tlist_dev(Node *node, List *tlist_dev)
+{
+	if (node == NULL)
+		return NULL;
+
+	if (IsA(node, Var))
+	{
+		Var		   *var = (Var *) node;
+		ListCell   *lc;
+
+		Assert(var->varlevelsup == 0);
+		foreach (lc, tlist_dev)
+		{
+			TargetEntry	   *tle = lfirst(lc);
+			Var			   *var_dev;
+			Var			   *var_new;
+
+			if (!IsA(tle->expr, Var))
+				continue;
+			var_dev = (Var *) tle->expr;
+
+			Assert(var_dev->varno == var->varno);
+			if (var_dev->varattno == var->varattno)
+			{
+				Assert(var_dev->vartype == var->vartype &&
+					   var_dev->vartypmod == var->vartypmod &&
+					   var_dev->varcollid == var->varcollid);
+
+				var_new = makeVar(INDEX_VAR,
+								  tle->resno,
+								  var->vartype,
+								  var->vartypmod,
+								  var->varcollid,
+								  0);
+				var_new->varnoold = var->varno;
+				var_new->varoattno = var->varattno;
+
+				return (Node *) var_new;
+			}
+		}
+		elog(ERROR, "Bug? referenced Var-node (%s) not in tlist_dev: %s",
+			 nodeToString(var),
+			 nodeToString(tlist_dev));
+	}
+	return expression_tree_mutator(node, replace_varnode_with_tlist_dev,
+								   tlist_dev);
+}
+
+/*
+ * build_gpuscan_projection
+ *
+ * It checks whether the GpuProjection of GpuScan makes sense.
+ * If executor may require the physically compatible tuple as result,
+ * we don't need to have a projection in GPU side.
+ */
+static bool
+build_gpuscan_projection(Index scanrelid,
+						 Relation relation,
+						 List *tlist_old,		/* given tlist from planner */
+						 List **p_tlist_new,	/* tlist to be assigned */
+						 List **p_tlist_dev,	/* tlist GPU should return */
+						 List **p_host_quals)	/* host qualifier, if any */
+{
+	Oid			relid = RelationGetRelid(relation);
+	TupleDesc	tupdesc = RelationGetDescr(relation);
+	List	   *tlist_new = NIL;
+	List	   *tlist_dev = NIL;
+	AttrNumber	attnum = 1;
+	cl_int		proj_row_extra;
+	cl_int		proj_slot_extra;
+	bool		compatible_tlist = true;
+	ListCell   *lc;
+
+	foreach (lc, tlist_old)
+	{
+		TargetEntry	   *tle = lfirst(lc);
+		TargetEntry	   *tle_new;
+		Var			   *var_new;
+		AttrNumber		varattno;
+
+		if (IsA(tle->expr, Var))
+		{
+			Var	   *var = (Var *) tle->expr;
+
+			/* if these Asserts fail, planner messed up */
+			Assert(var->varno == scanrelid);
+			Assert(var->varlevelsup == 0);
+
+			/* GPU projection cannot contain whole-row var */
+			if (var->varattno == InvalidAttrNumber)
+				return false;
+
+			/*
+			 * check whether the original tlist matches the physical layout
+			 * of the base relation. GPU can reorder the var reference
+			 * regardless of the data-type support.
+			 */
+			if (var->varattno != attnum || attnum > tupdesc->natts)
+				compatible_tlist = false;
+			else
+			{
+				Form_pg_attribute	attr = tupdesc->attrs[attnum-1];
+
+				/* should not be a reference to dropped columns */
+				Assert(!attr->attisdropped);
+				/* See the logic in tlist_matches_tupdesc */
+				if (var->vartype != attr->atttypid ||
+					(var->vartypmod != attr->atttypmod &&
+					 var->vartypmod != -1))
+					compatible_tlist = false;
+			}
+			/* add a primitive var-node on the tlist_dev */
+			varattno = add_unique_expression((Expr *) var, &tlist_dev, false);
+			/* add a pseudo var-node on the tlist_new */
+			var_new = makeVar(INDEX_VAR,
+							  varattno,
+							  var->vartype,
+							  var->vartypmod,
+							  var->varcollid,
+							  0);
+			tle_new = makeTargetEntry((Expr *)var_new,
+									  list_length(tlist_new) + 1,
+									  tle->resname,
+									  tle->resjunk);
+			tlist_new = lappend(tlist_new, tle_new);
+		}
+		else if (pgstrom_device_expression(tle->expr))
+		{
+			/* add device executable expression onto the tlist_dev */
+			varattno = add_unique_expression(tle->expr, &tlist_dev, false);
+			/* then, CPU just references the calculation result */
+			var_new = makeVar(INDEX_VAR,
+							  varattno,
+							  exprType((Node *)tle->expr),
+							  exprTypmod((Node *)tle->expr),
+							  exprCollation((Node *)tle->expr),
+							  0);
+			tle_new = makeTargetEntry((Expr *)var_new,
+									  list_length(tlist_new) + 1,
+									  tle->resname,
+									  tle->resjunk);
+			tlist_new = lappend(tlist_new, tle_new);
+			/* of course, it is not a physically compatible tlist */
+			compatible_tlist = false;
+		}
+		else
+		{
+			/*
+			 * Elsewhere, expression is not device executable
+			 *
+			 * MEMO: We may be able to process Const/Param but no data-type
+			 * support on the device side, as long as its length is small
+			 * enought. However, we don't think it has frequent use cases
+			 * right now.
+			 */
+			Bitmapset  *varattnos = NULL;
+			int			prev = -1;
+			Node	   *expr_new;
+
+			/* pick up all the var-nodes in the expression */
+			pull_varattnos((Node *)tle->expr, scanrelid, &varattnos);
+
+			/* add var-nodes to tlist_dev */
+			while ((prev = bms_next_member(varattnos, prev)) >= 0)
+			{
+				Form_pg_attribute	attr;
+				int		colnum = prev + FirstLowInvalidHeapAttributeNumber;
+
+				/* GPU projection cannot contain whole-row var */
+				if (colnum == InvalidAttrNumber)
+					return false;
+
+				/* add var-nodes to tlist_dev */
+				if (colnum < 0)
+					attr = SystemAttributeDefinition(colnum, true);
+				else
+					attr = tupdesc->attrs[colnum - 1];
+
+				var_new = makeVar(scanrelid,
+								  attr->attnum,
+								  attr->atttypid,
+								  attr->atttypmod,
+								  attr->attcollation,
+								  0);
+				add_unique_expression((Expr *)var_new, &tlist_dev, false);
+			}
+			/* replace the varnode in the expression */
+			expr_new = replace_varnode_with_tlist_dev((Node *)tle->expr,
+													  tlist_dev);
+			/* then, modified expression is attached to tlist_new */
+			tle_new = makeTargetEntry((Expr *)expr_new,
+									  list_length(tlist_new) + 1,
+									  tle->resname,
+									  tle->resjunk);
+			tlist_new = lappend(tlist_new, tle_new);
+			/* of course, it is not a physically compatible tlist */
+			compatible_tlist = false;
+		}
+		attnum++;
+	}
+
+	/* Is the tlist shorter than relation's definition? */
+	if (RelationGetNumberOfAttributes(relation) != attnum)
+		compatible_tlist = false;
+
+	/*
+	 * Add just var-nodes if host-quals may reference var-nodes that will
+	 * not appear on the result tuple
+	 */
+	if (p_host_quals && *p_host_quals != NIL)
+	{
+		Node	   *host_quals = (Node *)*p_host_quals;
+		Bitmapset  *varattnos = NULL;
+		int			prev = -1;
+		Node	   *temp;
+
+		/* pick up all the var-nodes in the expression */
+		pull_varattnos(host_quals, scanrelid, &varattnos);
+
+		/* add var-nodes to tlist_dev */
+		while ((prev = bms_next_member(varattnos, prev)) >= 0)
+		{
+			Form_pg_attribute   attr;
+			int			colnum = prev + FirstLowInvalidHeapAttributeNumber;
+			Var		   *var_new;
+
+			/* GPU projection cannot contain whole-row var */
+			if (colnum == InvalidAttrNumber)
+				return false;
+
+			/* add var-nodes to tlist_dev */
+			if (colnum < 0)
+				attr = SystemAttributeDefinition(colnum, true);
+			else
+				attr = tupdesc->attrs[colnum - 1];
+
+			var_new = makeVar(scanrelid,
+							  attr->attnum,
+							  attr->atttypid,
+							  attr->atttypmod,
+							  attr->attcollation,
+							  0);
+			add_unique_expression((Expr *)var_new, &tlist_dev, false);
+		}
+		/* replace the varnode in the expression */
+		temp = replace_varnode_with_tlist_dev(host_quals, tlist_dev);
+		*p_host_quals = (List *)temp;
+		/* of course, it is not a physically compatible tlist */
+		compatible_tlist = false;
+	}
+
+	/*
+	 * At this point, device projection is "executable".
+	 * However, if compatible_tlist == true, it implies the upper node
+	 * expects physically compatible tuple, thus, it is uncertain whether
+	 * we should run GpuProjection for this GpuScan.
+	 */
+	*p_tlist_new = tlist_new;
+	*p_tlist_dev = tlist_dev;
+
+	return !compatible_tlist;
+}
+
+/*
+ * bufsz_estimate_gpuscan_projection - GPU Projection may need larger
+ * destination buffer than the source buffer. 
+ */
+static void
+bufsz_estimate_gpuscan_projection(RelOptInfo *baserel, Relation relation,
+								  cl_int *p_proj_row_extra,
+								  cl_int *p_proj_slot_extra)
+{
+	TupleDesc	tupdesc = RelationGetDescr(relation);
+	cl_int		proj_src_extra;
+	cl_int		proj_row_extra;
+	cl_int		proj_slot_extra;
+	AttrNumber	anum;
+	int16		typlen;
+	bool		typbyval;
+	char		typalign;
+	ListCell   *lc;
+
+	proj_row_extra = offsetof(HeapTupleHeaderData,
+							  t_bits[BITMAPLEN(list_length(tlist_dev))]);
+	proj_slot_extra = 0;
+
+	foreach (lc, tlist_dev)
+	{
+		TargetEntry *tle = lfirst(lc);
+		Oid		type_oid = exprType((Node *)tle->expr);
+		int32	type_mod = exprTypmod((Node *)tle->expr);
+
+		/* alignment */
+		get_typlenbyvalalign(type_oid, &typlen, &typbyval, &typalign);
+		proj_row_extra = att_align_nominal(proj_row_extra, typalign);
+
+		if (IsA(tle->expr, Var))
+		{
+			Var	   *var = (Var *) lfirst(lc);
+
+			Assert(var->vartype == type_oid &&
+				   var->vartypmod == type_mod);
+			Assert(var->varno == baserel->relid &&
+				   var->varattno >= baserel->min_attr &&
+				   var->varattno <= baserel->max_attr);
+			proj_row_extra += baserel->attr_widths[var->varattno -
+												   baserel->min_attr];
+		}
+		else if (IsA(tle->expr, Const))
+		{
+			Const  *con = (Const *) lfirst(lc);
+
+			/* raw-data is the most reliable information source :) */
+			if (!con->constisnull)
+			{
+				proj_row_extra += (con->constlen > 0
+								   ? con->constlen
+								   : VARSIZE_ANY(con->constvalue));
+			}
+		}
+		else
+		{
+			proj_row_extra = att_align_nominal(proj_row_extra, typalign);
+			proj_row_extra += get_typavgwidth(type_oid, type_mod);
+
+			/*
+			 * In case of KDS_FORMAT_SLOT, it needs extra buffer only when
+			 * expression has data-type (a) with internal format (like
+			 * NUMERIC right now), or (b) with fixed-length but indirect
+			 * references.
+			 */
+			if (type_oid == NUMERICOID)
+				proj_slot_extra += 32;	/* enough space for internal format */
+			else if (typlen > 0 && !typbyval)
+				proj_slot_extra += MAXALIGN(typlen);
+		}
+	}
+	proj_row_extra = MAXALIGN(proj_row_extra);
+
+	/*
+	 * Length of the source relation
+	 */
+	proj_src_extra = offsetof(HeapTupleHeaderData,
+							  t_bits[BITMAPLEN(baserel->max_attr)]);
+	for (anum = 1; anum <= baserel->max_attr; anum++)
+	{
+		Form_pg_attribute	attr = tupdesc->attrs[anum - 1];
+
+		proj_src_extra = att_align_nominal(proj_src_extra, attr->attalign);
+		proj_src_extra += baserel->attr_widths[anum - baserel->min_attr];
+	}
+	proj_src_extra = MAXALIGN(proj_src_extra);
+
+	*p_proj_row_extra = (proj_row_extra > proj_src_extra
+						 ? proj_row_extra - proj_src_extra : 0);
+	*p_proj_slot_extra = proj_slot_extra;
+}
+
+/*
+ * create_gpuscan_plan - construction of a new GpuScan plan node
+ */
 static Plan *
 create_gpuscan_plan(PlannerInfo *root,
-					RelOptInfo *rel,
+					RelOptInfo *baserel,
 					CustomPath *best_path,
 					List *tlist,
 					List *clauses,
 					List *custom_children)
 {
 	CustomScan	   *cscan;
-	GpuScanInfo		gs_info;
+	RangeTblEntry  *rte;
+	Relation		relation;
+	GpuScanInfo	   *gs_info;
 	List		   *host_quals = NIL;
 	List		   *dev_quals = NIL;
+	List		   *tlist_new = NIL;
+	List		   *tlist_dev = NIL;
 	ListCell	   *cell;
+	cl_uint			proj_tuple_width;
+	cl_uint			proj_extra_width;
 	StringInfoData	kern;
 	codegen_context	context;
 
 	/* It should be a base relation */
-	Assert(rel->relid > 0);
-	Assert(rel->rtekind == RTE_RELATION);
+	Assert(baserel->relid > 0);
+	Assert(baserel->rtekind == RTE_RELATION);
 	Assert(custom_children == NIL);
 
 	/*
@@ -726,42 +1628,53 @@ create_gpuscan_plan(PlannerInfo *root,
 	/*
 	 * Code construction for the CUDA kernel code
 	 */
+	rte = planner_rt_fetch(baserel->relid, root);
+	relation = heap_open(rte->relid, NoLock);
+
 	initStringInfo(&kern);
 	pgstrom_init_codegen_context(&context);
-	gpuscan_codegen_scan_quals(&kern, &context, dev_quals);
+	codegen_gpuscan_quals(&kern, &context, baserel->relid, dev_quals);
+	if (build_gpuscan_projection(rte->relid, relation, tlist,
+								 &tlist_new, &tlist_dev, &host_quals))
+	{
+		bufsz_estimate_gpuscan_projection(baserel, relation,
+										  &proj_row_extra,
+										  &proj_slot_extra);
+		context.param_refs = NULL;
+		codegen_gpuscan_projection(&kern, &context,
+								   rte->relid, relation, tlist_dev);
+	}
+	else
+	{
+		tlist_new = tlist;		/* unchanged */
+		Assert(tlist_dev == NIL);
+	}
+	heap_close(relation, NoLock);
 
 	elog(INFO, "source = %s", kern.data);
-
-//	gpuscan_codegen_projection(&kern, &context, ....);
 
 	/*
 	 * Construction of GpuScanPlan node; on top of CustomPlan node
 	 */
 	cscan = makeNode(CustomScan);
-	cscan->scan.plan.targetlist = tlist;
+	cscan->scan.plan.targetlist = tlist_new;
 	cscan->scan.plan.qual = host_quals;
 	cscan->scan.plan.lefttree = NULL;
 	cscan->scan.plan.righttree = NULL;
 	cscan->scan.scanrelid = rel->relid;
-
-	memset(&gs_info, 0, sizeof(GpuScanInfo));
-	gs_info.kern_source = kern.data;
-	gs_info.extra_flags = context.extra_flags | DEVKERNEL_NEEDS_GPUSCAN;
-	gs_info.func_defs = context.func_defs;
-	gs_info.expr_defs = context.expr_defs;
-	gs_info.used_params = context.used_params;
-	gs_info.used_vars = context.used_vars;
-	gs_info.dev_quals = dev_quals;
-	// expression has to be keps in custom_exprs separately
-
-	elog(INFO, "rel->tlist = %s", nodeToString(rel->reltarget->exprs));
-	elog(ERROR, "tlist = %s", nodeToString(tlist));
-
-
-
-	form_gpuscan_info(cscan, &gs_info);
 	cscan->flags = best_path->flags;
 	cscan->methods = &gpuscan_plan_methods;
+
+	cscan->custom_plans = NIL;	/* TODO: alternative plan as fallback */
+
+	gs_info = palloc0(sizeof(GpuScanInfo));
+	gs_info->kern_source = kern.data;
+	gs_info->extra_flags = context.extra_flags | DEVKERNEL_NEEDS_GPUSCAN;
+	gs_info->func_defs = context.func_defs;
+	gs_info->expr_defs = context.expr_defs;
+	cscan->custom_private = list_make1(gs_info);
+	form_gpuscan_custom_exprs(cscan, context.used_params, dev_quals);
+	cscan->custom_scan_tlist = tlist_dev;
 
 	return &cscan->scan.plan;
 }
@@ -796,6 +1709,7 @@ pgstrom_plan_is_gpuscan(const Plan *plan)
 	return false;
 }
 
+#if 0
 /*
  * codegen_device_projection
  *
@@ -1322,84 +2236,6 @@ codegen_device_projection(StringInfo source,
 }
 
 /*
- * replace_varnode_with_tlist_dev - replaces the Var node in the supplied
- * expression node to reference tlist_dev, instead of the original.
- */
-Node *
-replace_varnode_with_tlist_dev(Node *node, List *tlist_dev)
-{
-	if (node == NULL)
-		return NULL;
-
-	if (IsA(node, Var))
-	{
-		Var		   *var = (Var *) node;
-		ListCell   *lc;
-
-		Assert(var->varlevelsup == 0);
-		foreach (lc, tlist_dev)
-		{
-			TargetEntry	   *tle = lfirst(lc);
-			Var			   *var_dev;
-			Var			   *var_new;
-
-			if (!IsA(tle->expr, Var))
-				continue;
-			var_dev = (Var *) tle->expr;
-
-			Assert(var_dev->varno == var->varno);
-			if (var_dev->varattno == var->varattno)
-			{
-				Assert(var_dev->vartype == var->vartype &&
-					   var_dev->vartypmod == var->vartypmod &&
-					   var_dev->varcollid == var->varcollid);
-
-				var_new = makeVar(INDEX_VAR,
-								  tle->resno,
-								  var->vartype,
-								  var->vartypmod,
-								  var->varcollid,
-								  0);
-				var_new->varnoold = var->varno;
-				var_new->varoattno = var->varattno;
-
-				return (Node *) var_new;
-			}
-		}
-		elog(ERROR, "Bug? referenced Var-node (%s) not in tlist_dev: %s",
-			 nodeToString(var),
-			 nodeToString(tlist_dev));
-	}
-	return expression_tree_mutator(node, replace_varnode_with_tlist_dev,
-								   tlist_dev);
-}
-
-/*
- * add_unique_expression - adds an expression node on the supplied
- * target-list, then returns the varattno to reference the entry.
- */
-AttrNumber
-add_unique_expression(Expr *expr, List **p_targetlist, bool resjunk)
-{
-	TargetEntry	   *tle;
-	ListCell	   *lc;
-	AttrNumber		resno;
-
-	foreach (lc, *p_targetlist)
-	{
-		tle = (TargetEntry *) lfirst(lc);
-		if (equal(expr, tle->expr))
-			return tle->resno;
-	}
-	/* Not found, so add this expression */
-	resno = list_length(*p_targetlist) + 1;
-	tle = makeTargetEntry(copyObject(expr), resno, NULL, resjunk);
-	*p_targetlist = lappend(*p_targetlist, tle);
-
-	return resno;
-}
-
-/*
  * build_device_projection
  *
  * It divides the original target-list into two portions; tlist_dev
@@ -1640,7 +2476,7 @@ pgstrom_post_planner_gpuscan(PlannedStmt *pstmt, Plan **p_curr_plan)
 	context.func_defs = gs_info->func_defs;		/* restore */
 	context.expr_defs = gs_info->expr_defs;		/* restore */
 	context.used_params = gs_info->used_params;	/* restore */
-	context.used_vars = gs_info->used_vars;		/* restore */
+//	context.used_vars = gs_info->used_vars;		/* restore */
 
 	if (build_device_projection(cscan->scan.scanrelid,
 								tupdesc,
@@ -1749,11 +2585,12 @@ pgstrom_post_planner_gpuscan(PlannedStmt *pstmt, Plan **p_curr_plan)
 	gs_info->func_defs = context.func_defs;
 	gs_info->expr_defs = context.expr_defs;
 	gs_info->used_params = context.used_params;
-	gs_info->used_vars = context.used_vars;
+//	gs_info->used_vars = context.used_vars;
 	form_gpuscan_info(cscan, gs_info);
 
 	heap_close(baserel, NoLock);
 }
+#endif
 
 /*
  * assign_gpuscan_session_info
@@ -1805,7 +2642,11 @@ gpuscan_begin(CustomScanState *node, EState *estate, int eflags)
 	GpuContext	   *gcontext = NULL;
 	GpuScanState   *gss = (GpuScanState *) node;
 	CustomScan	   *cscan = (CustomScan *)node->ss.ps.plan;
-	GpuScanInfo	   *gs_info = deform_gpuscan_info(cscan);
+	GpuScanInfo	   *gs_info = linitial(cscan->custom_private);
+	List		   *used_params;
+	List		   *dev_quals;
+
+	deform_gpuscan_custom_exprs(cscan, &used_params, &dev_quals);
 
 	/* gpuscan should not have inner/outer plan right now */
 	Assert(outerPlan(node) == NULL);
@@ -1833,18 +2674,17 @@ gpuscan_begin(CustomScanState *node, EState *estate, int eflags)
 		ExecInitExpr((Expr *) cscan->custom_scan_tlist, &gss->gts.css.ss.ps);
 	/* initialize device qualifiers also, for fallback */
 	gss->dev_quals = (List *)
-		ExecInitExpr((Expr *) gs_info->dev_quals, &gss->gts.css.ss.ps);
+		ExecInitExpr((Expr *) dev_quals, &gss->gts.css.ss.ps);
 	/* true, if device projection is needed */
 	gss->dev_projection = (cscan->custom_scan_tlist != NIL);
 	/* device projection related resource consumption */
-	gss->base_fixed_width = gs_info->base_fixed_width;
-	gss->proj_fixed_width = gs_info->proj_fixed_width;
+	gss->proj_tuple_width = gs_info->proj_tuple_width;
 	gss->proj_extra_width = gs_info->proj_extra_width;
 	/* 'tableoid' should not change during relation scan */
 	gss->scan_tuple.t_tableOid = RelationGetRelid(scan_rel);
 	/* assign kernel source and flags */
 	pgstrom_assign_cuda_program(&gss->gts,
-								gs_info->used_params,
+								used_params,
 								gs_info->kern_source,
 								gs_info->extra_flags);
 	/* preload the CUDA program, if actually executed */
@@ -1918,6 +2758,8 @@ create_pgstrom_gpuscan_task(GpuScanState *gss, pgstrom_data_store *pds_src)
 			pds_dst = NULL;
 		else
 		{
+			hoge
+
 			length = (kds_src->length +
 					  Max(gss->proj_fixed_width -
 						  gss->base_fixed_width, 0) * kds_src->nitems);
@@ -2297,11 +3139,7 @@ gpuscan_info_copy(ExtensibleNode *__newnode, const ExtensibleNode *__oldnode)
 	COPY_SCALAR_FIELD(extra_flags);
 	COPY_NODE_FIELD(func_defs);
 	COPY_NODE_FIELD(expr_defs);
-	COPY_NODE_FIELD(used_params);
-	COPY_NODE_FIELD(used_vars);
-	COPY_NODE_FIELD(dev_quals);
-	COPY_SCALAR_FIELD(base_fixed_width);
-	COPY_SCALAR_FIELD(proj_fixed_width);
+	COPY_SCALAR_FIELD(proj_tuple_width);
 	COPY_SCALAR_FIELD(proj_extra_width);
 }
 
@@ -2315,11 +3153,7 @@ gpuscan_info_equal(const ExtensibleNode *__a, const ExtensibleNode *__b)
 	COMPARE_SCALAR_FIELD(extra_flags);
 	COMPARE_NODE_FIELD(func_defs);
 	COMPARE_NODE_FIELD(expr_defs);
-	COMPARE_NODE_FIELD(used_params);
-	COMPARE_NODE_FIELD(used_vars);
-	COMPARE_NODE_FIELD(dev_quals);
-	COMPARE_SCALAR_FIELD(base_fixed_width);
-	COMPARE_SCALAR_FIELD(proj_fixed_width);
+	COMPARE_SCALAR_FIELD(proj_tuple_width);
 	COMPARE_SCALAR_FIELD(proj_extra_width);
 
 	return true;
@@ -2334,11 +3168,7 @@ gpuscan_info_out(StringInfo str, const ExtensibleNode *__node)
 	WRITE_UINT_FIELD(extra_flags);
 	WRITE_NODE_FIELD(func_defs);
 	WRITE_NODE_FIELD(expr_defs);
-	WRITE_NODE_FIELD(used_params);
-	WRITE_NODE_FIELD(used_vars);
-	WRITE_NODE_FIELD(dev_quals);
-	WRITE_INT_FIELD(base_fixed_width);
-	WRITE_INT_FIELD(proj_fixed_width);
+	WRITE_INT_FIELD(proj_tuple_width);
 	WRITE_INT_FIELD(proj_extra_width);
 }
 
@@ -2351,11 +3181,7 @@ gpuscan_info_read(ExtensibleNode *node)
 	READ_UINT_FIELD(extra_flags);
 	READ_NODE_FIELD(func_defs);
 	READ_NODE_FIELD(expr_defs);
-	READ_NODE_FIELD(used_params);
-	READ_NODE_FIELD(used_vars);
-	READ_NODE_FIELD(dev_quals);
-	READ_INT_FIELD(base_fixed_width);
-	READ_INT_FIELD(proj_fixed_width);
+	READ_INT_FIELD(proj_tuple_width);
 	READ_INT_FIELD(proj_extra_width);
 }
 
