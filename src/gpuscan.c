@@ -75,9 +75,6 @@ typedef struct {
 	List	   *expr_defs;		/* list of special expression in use */
 	cl_uint		proj_row_extra;	/* extra requirements if row format */
 	cl_uint		proj_slot_extra;/* extra requirements if slot format */
-
-	cl_uint		proj_tuple_width;
-	cl_uint		proj_extra_width;
 } GpuScanInfo;
 
 #define GPUSCANINFO_EXNODE_NAME		"GpuScanInfo"
@@ -130,8 +127,8 @@ typedef struct {
 	List		   *dev_tlist;		/* tlist to be returned from the device */
 	List		   *dev_quals;		/* quals to be run on the device */
 	bool			dev_projection;	/* true, if device projection is valid */
-	cl_uint			proj_tuple_width;
-	cl_uint			proj_extra_width;
+	cl_uint			proj_row_extra;
+	cl_uint			proj_slot_extra;
 	/* resource for CPU fallback */
 	TupleTableSlot *base_slot;
 	ProjectionInfo *base_proj;
@@ -662,12 +659,13 @@ codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
 /*
  * Code generator for GpuScan's projection
  */
-static List *
+static void
 codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 						   Index scanrelid, Relation relation,
-						   List *tlist_dev)
+						   List *__tlist_dev)
 {
 	TupleDesc		tupdesc = RelationGetDescr(relation);
+	List		   *tlist_dev = NIL;
 	AttrNumber	   *varremaps;
 	Bitmapset	   *varattnos;
 	ListCell	   *lc;
@@ -682,7 +680,16 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 	initStringInfo(&decl);
 	initStringInfo(&body);
 	initStringInfo(&temp);
+	/*
+	 * step.0 - extract non-junk attributes
+	 */
+	foreach (lc, __tlist_dev)
+	{
+		TargetEntry	   *tle = lfirst(lc);
 
+		if (!tle->resjunk)
+			tlist_dev = lappend(tlist_dev, tle);
+	}
 
 	/*
 	 * step.1 - declaration of functions and KVAR_xx for expressions
@@ -700,6 +707,7 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 		"                   cl_bool *tup_internal)\n"
 		"{\n"
 		"  HeapTupleHeaderData *htup;\n"
+		"  cl_bool dst_format_slot = (kds_dst->format == KDS_FORMAT_SLOT);\n"
 		"  char *curr;\n");
 
 	varremaps = palloc0(sizeof(AttrNumber) * tupdesc->natts);
@@ -828,9 +836,12 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 			}
 			else
 			{
+				/* KDS_FORMAT_SLOT needs host pointer */
 				appendStringInfo(
 					&temp,
-					"    tup_values[%d] = PointerGetDatum(curr);\n",
+					"    tup_values[%d] = (dst_format_slot\n"
+					"                      ? devptr_to_host(kds_src, curr)\n"
+					"                      : PointerGetDatum(curr));\n",
 					j);
 			}
 			appendStringInfo(
@@ -844,7 +855,7 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 		{
 			appendStringInfo(
 				&temp,
-				"    KVAR_%u = pg_%s_datum_ref(kcxt, curr, false);\n",
+				"  KVAR_%u = pg_%s_datum_ref(kcxt, curr, false);\n",
 				attr->attnum,
 				dtype->type_name);
 			referenced = true;
@@ -861,7 +872,8 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 	}
 	appendStringInfoString(
 		&body,
-		"  EXTRACT_HEAP_TUPLE_END();\n");
+		"  EXTRACT_HEAP_TUPLE_END();\n"
+		"\n");
 
 	/*
 	 * step.3 - execute expression node, then store the result onto KVAR_xx
@@ -871,21 +883,9 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
         TargetEntry    *tle = lfirst(lc);
 		Oid				type_oid;
 
-
-		hoge; // Const/Params 
-		// put codegen expression, but no KPARAMS?
 		if (IsA(tle->expr, Var))
 			continue;
-		else if (IsA(tle->expr, Const) ||
-				 IsA(tle->expr, Param))
-		{
-			/* register the parameter but no need to have KPARAMS? */
-			(void)pgstrom_codegen_expression((Node *) tle->expr, context));
-
-
-			continue;
-		}
-
+		/* NOTE: Const/Param are once loaded to expr_%u variable. */
 
 		type_oid = exprType((Node *)tle->expr);
 		dtype = pgstrom_devtype_lookup(type_oid);
@@ -1001,17 +1001,13 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 			"    }\n"
 			"    vl_buf = (char *)kds_dst + kds_dst->length\n"
 			"           - (base + offset + vl_len);\n");
-		appendStringInfoString(&body, "%s", temp.data);
+		appendStringInfoString(&body, temp.data);
 	}
 
 	/*
 	 * step.5 (only FDW_FORMAT_SLOT) - Store the KVAR_xx on the slot.
 	 * pointer types must be host pointer
 	 */
-
-	hoge;
-	// TODO: Const/Param has to be adjusted by parambuf
-
 	appendStringInfo(
 		&body,
 		"    if (htup)\n"
@@ -1022,25 +1018,12 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 		TargetEntry	   *tle = lfirst(lc);
 		Oid				type_oid;
 
-		if (IsA(tle->expr, Var))
+		/* host pointer should be already set */
+		if (varremaps[tle->resno-1])
 		{
-			/* transform to the host pointer */
-
+			Assert(IsA(tle->expr, Var));
 			continue;
 		}
-		else if (IsA(tle->expr, Const) ||
-				 IsA(tle->expr, Param))
-		{
-			/* transform to the host pointer */
-
-			continue;
-		}
-
-
-
-
-
-
 
 		type_oid = exprType((Node *)tle->expr);
 		dtype = pgstrom_devtype_lookup(type_oid);
@@ -1049,7 +1032,7 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 
 		appendStringInfo(
 			&body,
-			"      tup_isnull[%d] = temp_%u_v.isnull;\n",
+			"      tup_isnull[%d] = expr_%u_v.isnull;\n",
 			tle->resno - 1, tle->resno);
 
 		if (type_oid == NUMERICOID)
@@ -1061,8 +1044,8 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 				"        vl_buf = (char *)TYPEALIGN(sizeof(cl_int), vl_buf);\n"
 				"        tup_values[%d] = devptr_to_host(kds_dst, vl_buf);\n"
 				"        vl_buf += pg_numeric_to_varlena(kcxt, vl_buf,\n"
-				"                                        temp_%u_v.value,\n"
-				"                                        temp_%u_v.isnull);\n"
+				"                                        expr_%u_v.value,\n"
+				"                                        expr_%u_v.isnull);\n"
 				"       }\n",
 				tle->resno,
 				tle->resno - 1,
@@ -1073,11 +1056,26 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 		{
 			appendStringInfo(
 				&body,
-				"      if (!temp_%u_v.isnull)\n"
-				"        tup_values[%d] = pg_%s_to_datum(temp_%u_v.value);\n",
+				"      if (!expr_%u_v.isnull)\n"
+				"        tup_values[%d] = pg_%s_to_datum(expr_%u_v.value);\n",
 				tle->resno,
 				tle->resno - 1,
 				dtype->type_name,
+				tle->resno);
+		}
+		else if (IsA(tle->expr, Const) || IsA(tle->expr, Param))
+		{
+			/*
+			 * Const/Param shall be stored in kparams, thus, we don't need
+			 * to allocate extra buffer again. Just referemce it.
+			 */
+			appendStringInfo(
+				&body,
+				"      if (!expr_%u_v.isnull)\n"
+				"        tup_values[%d] = devptr_to_host(kcxt->kparams,\n"
+				"                                        expr_%u_v.value);\n",
+				tle->resno,
+				tle->resno - 1,
 				tle->resno);
 		}
 		else
@@ -1085,11 +1083,11 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 			Assert(dtype->type_length > 0);
 			appendStringInfo(
 				&body,
-				"      if (!temp_%u_v.isnull)\n"
+				"      if (!expr_%u_v.isnull)\n"
 				"      {\n"
 				"        vl_buf = (char *)TYPEALIGN(%u, vl_buf);\n"
 				"        tup_values[%d] = devptr_to_host(kds_dst, vl_buf);\n"
-				"        memcpy(vl_buf, &temp_%u_v.value, %d);\n"
+				"        memcpy(vl_buf, &expr_%u_v.value, %d);\n"
 				"        vl_buf += %d;\n"
 				"      }\n",
 				tle->resno,
@@ -1120,8 +1118,11 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 		TargetEntry	   *tle = lfirst(lc);
 		Oid				type_oid;
 
-		if (IsA(tle->expr, Var))
+		if (varremaps[tle->resno-1])
+		{
+			Assert(IsA(tle->expr, Var));
 			continue;
+		}
 
 		type_oid = exprType((Node *)tle->expr);
 		dtype = pgstrom_devtype_lookup(type_oid);
@@ -1130,7 +1131,7 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 
 		appendStringInfo(
 			&body,
-			"      tup_isnull[%d] = temp_%u_v.isnull;\n",
+			"      tup_isnull[%d] = expr_%u_v.isnull;\n",
 			tle->resno - 1, tle->resno);
 
 		if (type_oid == NUMERICOID)
@@ -1138,8 +1139,8 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 			appendStringInfo(
 				&body,
 				"      tup_internal[%d] = true;\n"
-				"      if (!temp_%u_v.isnull)\n"
-				"        tup_values[%d] = temp_%u_v.value;\n",
+				"      if (!expr_%u_v.isnull)\n"
+				"        tup_values[%d] = expr_%u_v.value;\n",
 				tle->resno - 1,
 				tle->resno,
 				tle->resno - 1, tle->resno);
@@ -1148,21 +1149,33 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 		{
 			appendStringInfo(
 				&body,
-				"      if (!temp_%u_v.isnull)\n"
-				"        tup_values[%d] = temp_%u_v.value;\n",
+				"      if (!expr_%u_v.isnull)\n"
+				"        tup_values[%d] = pg_%s_to_datum(expr_%u_v.value);\n",
 				tle->resno,
-				tle->resno - 1, tle->resno);
+				tle->resno - 1,
+				dtype->type_name,
+				tle->resno);
+		}
+		else if (IsA(tle->expr, Const) || IsA(tle->expr, Param))
+		{
+			appendStringInfo(
+				&body,
+				"      if (!expr_%u_v.isnull)\n"
+				"        tup_values[%d] = PointerGetDatum(expr_%u_v.value);\n",
+				tle->resno,
+				tle->resno - 1,
+				tle->resno);
 		}
 		else
 		{
 			Assert(dtype->type_length > 0);
 			appendStringInfo(
 				&body,
-				"      if (!temp_%u_v.isnull)\n"
+				"      if (!expr_%u_v.isnull)\n"
 				"      {\n"
 				"        vl_buf = (char *)TYPEALIGN(%u, vl_buf);\n"
-				"        tup_values[%d] = devptr_to_host(kds_dst, vl_buf);\n"
-				"        memcpy(vl_buf, &temp_%u_v.value, %u);\n"
+				"        tup_values[%d] = PointerGetDatum(vl_buf);\n"
+				"        memcpy(vl_buf, &expr_%u_v.value, %u);\n"
 				"        vl_buf += %u;\n"
 				"      }\n",
 				tle->resno,
@@ -1183,15 +1196,17 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 
 	/* OK, write back the kernel source */
 	appendStringInfo(kern, "%s\n%s", decl.data, body.data);
+	list_free(tlist_dev);
+	pfree(temp.data);
 	pfree(decl.data);
 	pfree(body.data);
 }
 
 /*
  * add_unique_expression - adds an expression node on the supplied
- * target-list, then returns the varattno to reference the entry.
+ * target-list, then returns true, if new target-entry was added.
  */
-AttrNumber
+bool
 add_unique_expression(Expr *expr, List **p_targetlist, bool resjunk)
 {
 	TargetEntry	   *tle;
@@ -1202,67 +1217,14 @@ add_unique_expression(Expr *expr, List **p_targetlist, bool resjunk)
 	{
 		tle = (TargetEntry *) lfirst(lc);
 		if (equal(expr, tle->expr))
-			return tle->resno;
+			return false;
 	}
 	/* Not found, so add this expression */
 	resno = list_length(*p_targetlist) + 1;
 	tle = makeTargetEntry(copyObject(expr), resno, NULL, resjunk);
 	*p_targetlist = lappend(*p_targetlist, tle);
 
-	return resno;
-}
-
-/*
- * replace_varnode_with_tlist_dev - replaces the Var node in the supplied
- * expression node to reference tlist_dev, instead of the original.
- */
-Node *
-replace_varnode_with_tlist_dev(Node *node, List *tlist_dev)
-{
-	if (node == NULL)
-		return NULL;
-
-	if (IsA(node, Var))
-	{
-		Var		   *var = (Var *) node;
-		ListCell   *lc;
-
-		Assert(var->varlevelsup == 0);
-		foreach (lc, tlist_dev)
-		{
-			TargetEntry	   *tle = lfirst(lc);
-			Var			   *var_dev;
-			Var			   *var_new;
-
-			if (!IsA(tle->expr, Var))
-				continue;
-			var_dev = (Var *) tle->expr;
-
-			Assert(var_dev->varno == var->varno);
-			if (var_dev->varattno == var->varattno)
-			{
-				Assert(var_dev->vartype == var->vartype &&
-					   var_dev->vartypmod == var->vartypmod &&
-					   var_dev->varcollid == var->varcollid);
-
-				var_new = makeVar(INDEX_VAR,
-								  tle->resno,
-								  var->vartype,
-								  var->vartypmod,
-								  var->varcollid,
-								  0);
-				var_new->varnoold = var->varno;
-				var_new->varoattno = var->varattno;
-
-				return (Node *) var_new;
-			}
-		}
-		elog(ERROR, "Bug? referenced Var-node (%s) not in tlist_dev: %s",
-			 nodeToString(var),
-			 nodeToString(tlist_dev));
-	}
-	return expression_tree_mutator(node, replace_varnode_with_tlist_dev,
-								   tlist_dev);
+	return true;
 }
 
 /*
@@ -1272,30 +1234,22 @@ replace_varnode_with_tlist_dev(Node *node, List *tlist_dev)
  * If executor may require the physically compatible tuple as result,
  * we don't need to have a projection in GPU side.
  */
-static bool
+static List *
 build_gpuscan_projection(Index scanrelid,
 						 Relation relation,
-						 List *tlist_old,		/* given tlist from planner */
-						 List **p_tlist_new,	/* tlist to be assigned */
-						 List **p_tlist_dev,	/* tlist GPU should return */
-						 List **p_host_quals)	/* host qualifier, if any */
+						 List *tlist,
+						 List *host_quals,
+						 List *dev_quals)
 {
-	Oid			relid = RelationGetRelid(relation);
 	TupleDesc	tupdesc = RelationGetDescr(relation);
-	List	   *tlist_new = NIL;
 	List	   *tlist_dev = NIL;
 	AttrNumber	attnum = 1;
-	cl_int		proj_row_extra;
-	cl_int		proj_slot_extra;
 	bool		compatible_tlist = true;
 	ListCell   *lc;
 
-	foreach (lc, tlist_old)
+	foreach (lc, tlist)
 	{
 		TargetEntry	   *tle = lfirst(lc);
-		TargetEntry	   *tle_new;
-		Var			   *var_new;
-		AttrNumber		varattno;
 
 		if (IsA(tle->expr, Var))
 		{
@@ -1307,7 +1261,7 @@ build_gpuscan_projection(Index scanrelid,
 
 			/* GPU projection cannot contain whole-row var */
 			if (var->varattno == InvalidAttrNumber)
-				return false;
+				return NIL;
 
 			/*
 			 * check whether the original tlist matches the physical layout
@@ -1329,36 +1283,13 @@ build_gpuscan_projection(Index scanrelid,
 					compatible_tlist = false;
 			}
 			/* add a primitive var-node on the tlist_dev */
-			varattno = add_unique_expression((Expr *) var, &tlist_dev, false);
-			/* add a pseudo var-node on the tlist_new */
-			var_new = makeVar(INDEX_VAR,
-							  varattno,
-							  var->vartype,
-							  var->vartypmod,
-							  var->varcollid,
-							  0);
-			tle_new = makeTargetEntry((Expr *)var_new,
-									  list_length(tlist_new) + 1,
-									  tle->resname,
-									  tle->resjunk);
-			tlist_new = lappend(tlist_new, tle_new);
+			if (!add_unique_expression((Expr *) var, &tlist_dev, false))
+				compatible_tlist = false;
 		}
 		else if (pgstrom_device_expression(tle->expr))
 		{
 			/* add device executable expression onto the tlist_dev */
-			varattno = add_unique_expression(tle->expr, &tlist_dev, false);
-			/* then, CPU just references the calculation result */
-			var_new = makeVar(INDEX_VAR,
-							  varattno,
-							  exprType((Node *)tle->expr),
-							  exprTypmod((Node *)tle->expr),
-							  exprCollation((Node *)tle->expr),
-							  0);
-			tle_new = makeTargetEntry((Expr *)var_new,
-									  list_length(tlist_new) + 1,
-									  tle->resname,
-									  tle->resjunk);
-			tlist_new = lappend(tlist_new, tle_new);
+			add_unique_expression(tle->expr, &tlist_dev, false);
 			/* of course, it is not a physically compatible tlist */
 			compatible_tlist = false;
 		}
@@ -1372,46 +1303,17 @@ build_gpuscan_projection(Index scanrelid,
 			 * enought. However, we don't think it has frequent use cases
 			 * right now.
 			 */
-			Bitmapset  *varattnos = NULL;
-			int			prev = -1;
-			Node	   *expr_new;
+			List	   *vars_list = pull_vars_of_level((Node *)tle->expr, 0);
+			ListCell   *cell;
 
-			/* pick up all the var-nodes in the expression */
-			pull_varattnos((Node *)tle->expr, scanrelid, &varattnos);
-
-			/* add var-nodes to tlist_dev */
-			while ((prev = bms_next_member(varattnos, prev)) >= 0)
+			foreach (cell, vars_list)
 			{
-				Form_pg_attribute	attr;
-				int		colnum = prev + FirstLowInvalidHeapAttributeNumber;
-
-				/* GPU projection cannot contain whole-row var */
-				if (colnum == InvalidAttrNumber)
-					return false;
-
-				/* add var-nodes to tlist_dev */
-				if (colnum < 0)
-					attr = SystemAttributeDefinition(colnum, true);
-				else
-					attr = tupdesc->attrs[colnum - 1];
-
-				var_new = makeVar(scanrelid,
-								  attr->attnum,
-								  attr->atttypid,
-								  attr->atttypmod,
-								  attr->attcollation,
-								  0);
-				add_unique_expression((Expr *)var_new, &tlist_dev, false);
+				Var	   *var = lfirst(cell);
+				if (var->varattno == InvalidAttrNumber)
+					return NIL;		/* no whole-row support */
+				add_unique_expression((Expr *)var, &tlist_dev, false);
 			}
-			/* replace the varnode in the expression */
-			expr_new = replace_varnode_with_tlist_dev((Node *)tle->expr,
-													  tlist_dev);
-			/* then, modified expression is attached to tlist_new */
-			tle_new = makeTargetEntry((Expr *)expr_new,
-									  list_length(tlist_new) + 1,
-									  tle->resname,
-									  tle->resjunk);
-			tlist_new = lappend(tlist_new, tle_new);
+			list_free(vars_list);
 			/* of course, it is not a physically compatible tlist */
 			compatible_tlist = false;
 		}
@@ -1423,49 +1325,39 @@ build_gpuscan_projection(Index scanrelid,
 		compatible_tlist = false;
 
 	/*
-	 * Add just var-nodes if host-quals may reference var-nodes that will
-	 * not appear on the result tuple
+	 * Host quals needs 
 	 */
-	if (p_host_quals && *p_host_quals != NIL)
+	if (host_quals)
 	{
-		Node	   *host_quals = (Node *)*p_host_quals;
-		Bitmapset  *varattnos = NULL;
-		int			prev = -1;
-		Node	   *temp;
+		List	   *vars_list = pull_vars_of_level((Node *)host_quals, 0);
+		ListCell   *cell;
 
-		/* pick up all the var-nodes in the expression */
-		pull_varattnos(host_quals, scanrelid, &varattnos);
-
-		/* add var-nodes to tlist_dev */
-		while ((prev = bms_next_member(varattnos, prev)) >= 0)
+		foreach (cell, vars_list)
 		{
-			Form_pg_attribute   attr;
-			int			colnum = prev + FirstLowInvalidHeapAttributeNumber;
-			Var		   *var_new;
-
-			/* GPU projection cannot contain whole-row var */
-			if (colnum == InvalidAttrNumber)
-				return false;
-
-			/* add var-nodes to tlist_dev */
-			if (colnum < 0)
-				attr = SystemAttributeDefinition(colnum, true);
-			else
-				attr = tupdesc->attrs[colnum - 1];
-
-			var_new = makeVar(scanrelid,
-							  attr->attnum,
-							  attr->atttypid,
-							  attr->atttypmod,
-							  attr->attcollation,
-							  0);
-			add_unique_expression((Expr *)var_new, &tlist_dev, false);
+			Var	   *var = lfirst(cell);
+			if (var->varattno == InvalidAttrNumber)
+				return NIL;		/* no whole-row support */
+			add_unique_expression((Expr *)var, &tlist_dev, false);
 		}
-		/* replace the varnode in the expression */
-		temp = replace_varnode_with_tlist_dev(host_quals, tlist_dev);
-		*p_host_quals = (List *)temp;
-		/* of course, it is not a physically compatible tlist */
-		compatible_tlist = false;
+		list_free(vars_list);
+	}
+
+	/*
+	 * Device quals need junk var-nodes
+	 */
+	if (dev_quals)
+	{
+		List	   *vars_list = pull_vars_of_level((Node *)dev_quals, 0);
+		ListCell   *cell;
+
+		foreach (cell, vars_list)
+		{
+			Var	   *var = lfirst(cell);
+			if (var->varattno == InvalidAttrNumber)
+				return NIL;		/* no whole-row support */
+			add_unique_expression((Expr *)var, &tlist_dev, true);
+		}
+		list_free(vars_list);
 	}
 
 	/*
@@ -1474,10 +1366,9 @@ build_gpuscan_projection(Index scanrelid,
 	 * expects physically compatible tuple, thus, it is uncertain whether
 	 * we should run GpuProjection for this GpuScan.
 	 */
-	*p_tlist_new = tlist_new;
-	*p_tlist_dev = tlist_dev;
-
-	return !compatible_tlist;
+	if (compatible_tlist)
+		return NIL;
+	return tlist_dev;
 }
 
 /*
@@ -1486,6 +1377,7 @@ build_gpuscan_projection(Index scanrelid,
  */
 static void
 bufsz_estimate_gpuscan_projection(RelOptInfo *baserel, Relation relation,
+								  List *tlist_dev,
 								  cl_int *p_proj_row_extra,
 								  cl_int *p_proj_slot_extra)
 {
@@ -1515,7 +1407,7 @@ bufsz_estimate_gpuscan_projection(RelOptInfo *baserel, Relation relation,
 
 		if (IsA(tle->expr, Var))
 		{
-			Var	   *var = (Var *) lfirst(lc);
+			Var	   *var = (Var *) tle->expr;
 
 			Assert(var->vartype == type_oid &&
 				   var->vartypmod == type_mod);
@@ -1527,7 +1419,7 @@ bufsz_estimate_gpuscan_projection(RelOptInfo *baserel, Relation relation,
 		}
 		else if (IsA(tle->expr, Const))
 		{
-			Const  *con = (Const *) lfirst(lc);
+			Const  *con = (Const *) tle->expr;
 
 			/* raw-data is the most reliable information source :) */
 			if (!con->constisnull)
@@ -1592,11 +1484,10 @@ create_gpuscan_plan(PlannerInfo *root,
 	GpuScanInfo	   *gs_info;
 	List		   *host_quals = NIL;
 	List		   *dev_quals = NIL;
-	List		   *tlist_new = NIL;
 	List		   *tlist_dev = NIL;
 	ListCell	   *cell;
-	cl_uint			proj_tuple_width;
-	cl_uint			proj_extra_width;
+	cl_int			proj_row_extra;
+	cl_int			proj_slot_extra;
 	StringInfoData	kern;
 	codegen_context	context;
 
@@ -1634,34 +1525,29 @@ create_gpuscan_plan(PlannerInfo *root,
 	initStringInfo(&kern);
 	pgstrom_init_codegen_context(&context);
 	codegen_gpuscan_quals(&kern, &context, baserel->relid, dev_quals);
-	if (build_gpuscan_projection(rte->relid, relation, tlist,
-								 &tlist_new, &tlist_dev, &host_quals))
+
+	tlist_dev = build_gpuscan_projection(baserel->relid, relation,
+										 tlist, host_quals, dev_quals);
+	if (tlist_dev != NIL)
 	{
-		bufsz_estimate_gpuscan_projection(baserel, relation,
+		bufsz_estimate_gpuscan_projection(baserel, relation, tlist_dev,
 										  &proj_row_extra,
 										  &proj_slot_extra);
 		context.param_refs = NULL;
-		codegen_gpuscan_projection(&kern, &context,
-								   rte->relid, relation, tlist_dev);
-	}
-	else
-	{
-		tlist_new = tlist;		/* unchanged */
-		Assert(tlist_dev == NIL);
+		codegen_gpuscan_projection(&kern, &context, baserel->relid,
+								   relation, tlist_dev);
 	}
 	heap_close(relation, NoLock);
-
-	elog(INFO, "source = %s", kern.data);
 
 	/*
 	 * Construction of GpuScanPlan node; on top of CustomPlan node
 	 */
 	cscan = makeNode(CustomScan);
-	cscan->scan.plan.targetlist = tlist_new;
+	cscan->scan.plan.targetlist = tlist;
 	cscan->scan.plan.qual = host_quals;
 	cscan->scan.plan.lefttree = NULL;
 	cscan->scan.plan.righttree = NULL;
-	cscan->scan.scanrelid = rel->relid;
+	cscan->scan.scanrelid = baserel->relid;
 	cscan->flags = best_path->flags;
 	cscan->methods = &gpuscan_plan_methods;
 
@@ -1675,6 +1561,8 @@ create_gpuscan_plan(PlannerInfo *root,
 	cscan->custom_private = list_make1(gs_info);
 	form_gpuscan_custom_exprs(cscan, context.used_params, dev_quals);
 	cscan->custom_scan_tlist = tlist_dev;
+
+	elog(INFO, "source = %s", kern.data);
 
 	return &cscan->scan.plan;
 }
@@ -1708,889 +1596,6 @@ pgstrom_plan_is_gpuscan(const Plan *plan)
 		return true;
 	return false;
 }
-
-#if 0
-/*
- * codegen_device_projection
- *
- * It makes GPU code to perform device projection to extract a valid
- * kern_tupitem into tup_values/tup_isnull form.
- */
-static void
-codegen_device_projection(StringInfo source,
-						  codegen_context *context,
-						  Index scanrelid,
-						  TupleDesc tupdesc,
-						  List *tlist_dev)
-{
-	AttrNumber	   *varremaps;
-	Bitmapset	   *varattnos;
-	ListCell	   *lc;
-	int				prev;
-	int				i, j, k;
-	bool			needs_vlbuf = false;
-	devtype_info   *dtype;
-	StringInfoData	decl;
-	StringInfoData	body;
-	StringInfoData	temp;
-
-	initStringInfo(&decl);
-	initStringInfo(&body);
-	initStringInfo(&temp);
-
-	/*
-	 * step.1 - declaration of function and KVAR_xx for expressions
-	 */
-	appendStringInfoString(
-		&decl,
-		"STATIC_FUNCTION(void)\n"
-		"gpuscan_projection(kern_context *kcxt,\n"
-		"					kern_data_store *kds_src,\n"
-		"                   kern_tupitem *tupitem,\n"
-		"                   kern_data_store *kds_dst,\n"
-		"                   cl_uint dst_nitems,\n"
-		"                   Datum *tup_values,\n"
-		"                   cl_bool *tup_isnull,\n"
-		"                   cl_bool *tup_internal)\n"
-		"{\n"
-		"  HeapTupleHeaderData *htup;\n");
-
-	varremaps = palloc0(sizeof(AttrNumber) * list_length(tlist_dev));
-	varattnos = NULL;
-	foreach (lc, tlist_dev)
-	{
-		TargetEntry	   *tle = lfirst(lc);
-
-		/*
-		 * NOTE: If expression of TargetEntry is a simple Var-node,
-		 * we can load the value into tup_values[]/tup_isnull[]
-		 * array regardless of the data type. We have to track which
-		 * column is the source of this TargetEntry.
-		 * Elsewhere, we will construct device side expression using
-		 * KVAR_xx variables.
-		 */
-		if (IsA(tle->expr, Var))
-		{
-			Var	   *var = (Var *) tle->expr;
-
-			Assert(var->varno == scanrelid);
-			Assert(var->varattno > FirstLowInvalidHeapAttributeNumber &&
-				   var->varattno != InvalidAttrNumber &&
-				   var->varattno <= tupdesc->natts);
-			varremaps[tle->resno - 1] = var->varattno;
-		}
-		else
-		{
-			pull_varattnos((Node *) tle->expr, scanrelid, &varattnos);
-		}
-	}
-
-	prev = -1;
-	while ((prev = bms_next_member(varattnos, prev)) >= 0)
-	{
-		Form_pg_attribute attr;
-		AttrNumber	anum = prev + FirstLowInvalidHeapAttributeNumber;
-
-		/* system column should not appear within device expression */
-		Assert(anum > 0);
-		attr = tupdesc->attrs[anum - 1];
-
-		dtype = pgstrom_devtype_lookup(attr->atttypid);
-		if (!dtype)
-			elog(ERROR, "Bug? failed to lookup device supported type: %s",
-				 format_type_be(attr->atttypid));
-		appendStringInfo(&decl,
-						 "  pg_%s_t KVAR_%u;\n",
-						 dtype->type_name, anum);
-	}
-
-	/*
-	 * step.2 - extract tuples and load values to KVAR or values/isnull array
-	 * (only if tupitem_src is valid, of course)
-	 */
-	appendStringInfo(
-		&body,
-		"  htup = (!tupitem ? NULL : &tupitem->htup);\n"
-		"  if (htup)\n"
-		"  {\n"
-		"    char    *curr = (char *)htup + htup->t_hoff;\n"
-		"    cl_bool  heap_hasnull = ((htup->t_infomask & HEAP_HASNULL)!=0);\n"
-		"    kern_colmeta cmeta;\n"
-		"\n"
-		"    assert((devptr_t)curr == MAXALIGN(curr));\n");
-
-	/* system columns reference if any */
-	for (j=0; j < list_length(tlist_dev); j++)
-	{
-		if (varremaps[j] < 0)
-		{
-			Form_pg_attribute	attr
-				= SystemAttributeDefinition(varremaps[j], true);
-
-			appendStringInfo(
-				&body,
-				"    /* %s system column */\n"
-				"    tup_isnull[%d] = false;\n"
-				"    tup_values[%d] = kern_getsysatt_%s(kds_src, htup);\n",
-				NameStr(attr->attname),
-				j, j,
-				NameStr(attr->attname));
-		}
-	}
-
-	for (i=0; i < tupdesc->natts; i++)
-	{
-		Form_pg_attribute	attr = tupdesc->attrs[i];
-		bool		referenced = false;
-
-		dtype = pgstrom_devtype_lookup(attr->atttypid);
-		k = attr->attnum - FirstLowInvalidHeapAttributeNumber;
-
-		appendStringInfo(
-			&temp,
-			"    /* attribute %d */\n"
-			"    cmeta = kds_src->colmeta[%d];\n"
-			"    if (!heap_hasnull || !att_isnull(%d, htup->t_bits))\n"
-			"    {\n",
-			attr->attnum,
-			attr->attnum - 1,
-			attr->attnum - 1);
-
-		/* current offset alignment */
-		if (attr->attlen > 0)
-			appendStringInfoString(
-				&temp,
-				"      curr = (char *)TYPEALIGN(cmeta.attalign, curr);\n");
-		else
-			appendStringInfoString(
-				&temp,
-				"      if (!VARATT_NOT_PAD_BYTE(curr))\n"
-				"        curr = (char *)TYPEALIGN(cmeta.attalign, curr);\n");
-
-		/* Put values on tup_values/tup_isnull and KVAR_xx if referenced */
-		for (j=0; j < list_length(tlist_dev); j++)
-		{
-			if (varremaps[j] != attr->attnum)
-				continue;
-
-			appendStringInfo(
-				&temp,
-				"      tup_isnull[%d] = false;\n", j);
-			if (attr->attbyval)
-			{
-				appendStringInfo(
-					&temp,
-					"      tup_values[%d] = *((%s *) curr);\n",
-					j,
-					(attr->attlen == sizeof(cl_long) ? "cl_long"
-					 : attr->attlen == sizeof(cl_int) ? "cl_int"
-					 : attr->attlen == sizeof(cl_short) ? "cl_short"
-					 : "cl_char"));
-			}
-			else
-			{
-				appendStringInfo(
-					&temp,
-					"      tup_values[%d] = devptr_to_host(kds_src,curr);\n",
-					j);
-			}
-			referenced = true;
-		}
-
-		k = attr->attnum - FirstLowInvalidHeapAttributeNumber;
-		if (bms_is_member(k, varattnos))
-		{
-			appendStringInfo(
-				&temp,
-				"      KVAR_%u = pg_%s_datum_ref(kcxt, curr, false);\n",
-				attr->attnum,
-				dtype->type_name);
-			referenced = true;
-		}
-		/* make advance the offset */
-		appendStringInfoString(
-			&temp,
-			"      curr += (cmeta.attlen > 0 ?\n"
-			"               cmeta.attlen :\n"
-			"               VARSIZE_ANY(curr));\n"
-			"    }\n");
-
-		/* Put NULL on tup_isnull and KVAR_xx, if needed */
-		if (referenced)
-		{
-			appendStringInfo(
-				&temp,
-				"    else\n"
-				"    {\n");
-
-			for (j=0; j < list_length(tlist_dev); j++)
-			{
-				if (varremaps[j] == attr->attnum)
-					appendStringInfo(
-						&temp,
-						"      tup_isnull[%d] = true;\n", j);
-			}
-			k = attr->attnum - FirstLowInvalidHeapAttributeNumber;
-			if (bms_is_member(k, varattnos))
-			{
-				appendStringInfo(
-					&temp,
-					"      KVAR_%u = pg_%s_datum_ref(kcxt, NULL, false);\n",
-					attr->attnum,
-					dtype->type_name);
-			}
-			appendStringInfo(
-				&temp,
-				"    }\n");
-			/* we have to walk on until this column at least */
-			appendStringInfoString(&body, temp.data);
-			resetStringInfo(&temp);
-		}
-	}
-
-	/*
-	 * step.3 - execute expression node, then store the result onto KVAR_xx
-	 */
-    foreach (lc, tlist_dev)
-    {
-        TargetEntry    *tle = lfirst(lc);
-		Oid				type_oid;
-
-		if (IsA(tle->expr, Var))
-			continue;
-
-		type_oid = exprType((Node *)tle->expr);
-		dtype = pgstrom_devtype_lookup(type_oid);
-		if (!dtype)
-			elog(ERROR, "Bug? device supported type is missing: %u", type_oid);
-
-		appendStringInfo(
-			&decl,
-			"  pg_%s_t temp_%u_v;\n",
-			dtype->type_name,
-			tle->resno);
-		appendStringInfo(
-			&body,
-			"    temp_%u_v = %s;\n",
-			tle->resno,
-			pgstrom_codegen_expression((Node *) tle->expr, context));
-	}
-
-	appendStringInfo(
-		&body,
-		"  }\n"
-		"\n");
-
-	/*
-	 * step.4 (only KDS_FORMAT_SLOT) - We have to acquire variable length
-	 * buffer for indirect or numeric data type.
-	 */
-	appendStringInfo(
-		&body,
-		"  if (kds_dst->format == KDS_FORMAT_SLOT)\n"
-		"  {\n");
-
-	resetStringInfo(&temp);
-	appendStringInfo(
-		&temp,
-		"    cl_uint vl_len = 0;\n"
-		"    char   *vl_buf = NULL;\n"
-		"    cl_uint offset;\n"
-		"    cl_uint count;\n"
-		"    cl_uint __shared__ base;\n"
-		"\n"
-		"    if (htup)\n"
-		"    {\n");
-
-	foreach (lc, tlist_dev)
-	{
-		TargetEntry	   *tle = lfirst(lc);
-		Oid				type_oid;
-
-		if (IsA(tle->expr, Var))
-			continue;
-
-		type_oid = exprType((Node *)tle->expr);
-		dtype = pgstrom_devtype_lookup(type_oid);
-		if (!dtype)
-			elog(ERROR, "Bug? device supported type is missing: %u", type_oid);
-
-		if (type_oid == NUMERICOID)
-		{
-			appendStringInfo(
-				&temp,
-				"      if (!temp_%u_v.isnull)\n"
-				"        vl_len = TYPEALIGN(sizeof(cl_uint), vl_len)\n"
-				"               + pg_numeric_to_varlena(kcxt,NULL,\n"
-				"                                       temp_%u_v.value,\n"
-				"                                       temp_%u_v.isnull);\n",
-				tle->resno,
-				tle->resno,
-				tle->resno);
-			needs_vlbuf = true;
-		}
-		else if (!dtype->type_byval)
-		{
-			/* varlena is not supported yet */
-			Assert(dtype->type_length > 0);
-
-			appendStringInfo(
-				&temp,
-				"      if (!temp_%u_v.isnull)\n"
-				"        vl_len = TYPEALIGN(%u, vl_len) + %u;\n",
-				tle->resno,
-				dtype->type_align,
-				dtype->type_length);
-			needs_vlbuf = true;
-		}
-	}
-
-	appendStringInfo(
-		&temp,
-		"    }\n"
-		"\n"
-		"    /* allocation of variable length buffer */\n"
-		"    vl_len = MAXALIGN(vl_len);\n"
-		"    offset = arithmetic_stairlike_add(vl_len, &count);\n"
-		"    if (get_local_id() == 0)\n"
-		"    {\n"
-		"      if (count > 0)\n"
-		"        base = atomicAdd(&kds_dst->usage, count);\n"
-		"      else\n"
-		"        base = 0;\n"
-		"    }\n"
-		"    __syncthreads();\n"
-		"\n"
-		"    if (KERN_DATA_STORE_SLOT_LENGTH(kds_dst, dst_nitems) +\n"
-		"        base + count > kds_dst->length)\n"
-		"    {\n"
-		"      STROM_SET_ERROR(&kcxt->e, StromError_DataStoreNoSpace);\n"
-		"      return;\n"
-		"    }\n"
-		"    vl_buf = (char *)kds_dst + kds_dst->length\n"
-		"           - (base + offset + vl_len);\n");
-
-	if (needs_vlbuf)
-		appendStringInfo(&body, "%s", temp.data);
-
-	/*
-	 * step.5 (only FDW_FORMAT_SLOT) - Store the KVAR_xx on the slot.
-	 * pointer types must be host pointer
-	 */
-	appendStringInfo(
-		&body,
-		"    if (htup)\n"
-		"    {\n");
-
-	foreach (lc, tlist_dev)
-	{
-		TargetEntry	   *tle = lfirst(lc);
-		Oid				type_oid;
-
-		if (IsA(tle->expr, Var))
-			continue;
-
-		type_oid = exprType((Node *)tle->expr);
-		dtype = pgstrom_devtype_lookup(type_oid);
-		if (!dtype)
-			elog(ERROR, "Bug? device supported type is missing: %u", type_oid);
-
-		appendStringInfo(
-			&body,
-			"      tup_isnull[%d] = temp_%u_v.isnull;\n",
-			tle->resno - 1, tle->resno);
-
-		if (type_oid == NUMERICOID)
-		{
-			appendStringInfo(
-				&body,
-				"      if (!temp_%u_v.isnull)\n"
-				"      {\n"
-				"        vl_buf = (char *)TYPEALIGN(sizeof(cl_int), vl_buf);\n"
-				"        tup_values[%d] = devptr_to_host(kds_dst, vl_buf);\n"
-				"        vl_buf += pg_numeric_to_varlena(kcxt, vl_buf,\n"
-				"                                        temp_%u_v.value,\n"
-				"                                        temp_%u_v.isnull);\n"
-				"       }\n",
-				tle->resno,
-				tle->resno - 1,
-				tle->resno,
-				tle->resno);
-		}
-		else if (dtype->type_byval)
-		{
-			appendStringInfo(
-				&body,
-				"      if (!temp_%u_v.isnull)\n"
-				"        tup_values[%d] = pg_%s_to_datum(temp_%u_v.value);\n",
-				tle->resno,
-				tle->resno - 1,
-				dtype->type_name,
-				tle->resno);
-		}
-		else
-		{
-			Assert(dtype->type_length > 0);
-			appendStringInfo(
-				&body,
-				"      if (!temp_%u_v.isnull)\n"
-				"      {\n"
-				"        vl_buf = (char *)TYPEALIGN(%u, vl_buf);\n"
-				"        tup_values[%d] = devptr_to_host(kds_dst, vl_buf);\n"
-				"        memcpy(vl_buf, &temp_%u_v.value, %d);\n"
-				"        vl_buf += %d;\n"
-				"      }\n",
-				tle->resno,
-				dtype->type_align,
-				tle->resno - 1,
-				tle->resno, dtype->type_length,
-				dtype->type_length);
-		}
-	}
-	appendStringInfo(
-		&body,
-		"    }\n"
-		"  }\n");
-
-	/*
-	 * step.6 (only FDW_FORMAT_ROW) - Stora the KVAR_xx on the slot.
-	 * pointer types must be device pointer.
-	 */
-	appendStringInfo(
-		&body,
-		"  else\n"
-		"  {\n"
-		"    if (htup)\n"
-		"    {\n");
-
-	foreach (lc, tlist_dev)
-	{
-		TargetEntry	   *tle = lfirst(lc);
-		Oid				type_oid;
-
-		if (IsA(tle->expr, Var))
-			continue;
-
-		type_oid = exprType((Node *)tle->expr);
-		dtype = pgstrom_devtype_lookup(type_oid);
-		if (!dtype)
-			elog(ERROR, "Bug? device supported type is missing: %u", type_oid);
-
-		appendStringInfo(
-			&body,
-			"      tup_isnull[%d] = temp_%u_v.isnull;\n",
-			tle->resno - 1, tle->resno);
-
-		if (type_oid == NUMERICOID)
-		{
-			appendStringInfo(
-				&body,
-				"      tup_internal[%d] = true;\n"
-				"      if (!temp_%u_v.isnull)\n"
-				"        tup_values[%d] = temp_%u_v.value;\n",
-				tle->resno - 1,
-				tle->resno,
-				tle->resno - 1, tle->resno);
-		}
-		else if (dtype->type_byval)
-		{
-			appendStringInfo(
-				&body,
-				"      if (!temp_%u_v.isnull)\n"
-				"        tup_values[%d] = temp_%u_v.value;\n",
-				tle->resno,
-				tle->resno - 1, tle->resno);
-		}
-		else
-		{
-			Assert(dtype->type_length > 0);
-			appendStringInfo(
-				&body,
-				"      if (!temp_%u_v.isnull)\n"
-				"      {\n"
-				"        vl_buf = (char *)TYPEALIGN(%u, vl_buf);\n"
-				"        tup_values[%d] = devptr_to_host(kds_dst, vl_buf);\n"
-				"        memcpy(vl_buf, &temp_%u_v.value, %u);\n"
-				"        vl_buf += %u;\n"
-				"      }\n",
-				tle->resno,
-				dtype->type_align,
-				tle->resno - 1,
-				tle->resno, dtype->type_length,
-				dtype->type_length);
-		}
-	}
-	appendStringInfo(
-		&body,
-		"    }\n"
-		"  }\n"
-		"}\n");
-
-	/* parameter references */
-	pgstrom_codegen_param_declarations(&decl, context);
-
-	/* OK, write back the kernel source */
-	appendStringInfo(source, "%s\n%s", decl.data, body.data);
-	pfree(decl.data);
-	pfree(body.data);
-}
-
-/*
- * build_device_projection
- *
- * It divides the original target-list into two portions; tlist_dev
- * that shall be executed on the device side, and tlist_new that shall
- * be executed on the host side on top of tlist_dev.
- * So, it expects performance improvement if target-list contains
- * complicated formula but executable on the device, because all host
- * side has to do is just reference the preliminary computed result.
- *
- * 'scanrelid'		rtindex of the base relation to be scanned
- * 'tupdesc'		Descriptor of the base relation to be scanned
- * 'tlist_old'		The original target-list
- * 'allow_hostonly' True, if caller allows host-only expression in
- *					the tlist_new.
- * 'p_tlist_new'	The tlist_new shall be set on success
- * 'p_tlist_dev'	The tlist_dev shall be set on success
- * 'p_tlist_compatible' True, if tlist_dev is compatible with the base
- *						relation, thus no actual projection is needed
- */
-static bool
-build_device_projection(Index scanrelid,
-						TupleDesc tupdesc,
-						List *tlist_old,
-						bool allow_hostonly,
-						List **p_tlist_new,
-						List **p_tlist_dev,
-						bool *p_tlist_compatible)
-{
-	AttrNumber	attnum;
-	ListCell   *lc;
-	List	   *tlist_new = NIL;
-	List	   *tlist_dev = NIL;
-	bool		tlist_compatible = true;
-
-	attnum = 1;
-	foreach (lc, tlist_old)
-	{
-		TargetEntry	   *tle = lfirst(lc);
-		TargetEntry	   *tle_new;
-		AttrNumber		varattno;
-
-		if (IsA(tle->expr, Var))
-		{
-			Var	   *var = (Var *) tle->expr;
-
-			/* if these Asserts fail, planner messed up */
-			Assert(var->varno == scanrelid);
-			Assert(var->varlevelsup == 0);
-
-			/* GPU projection cannot contain whole-row reference */
-			if (var->varattno == InvalidAttrNumber)
-				return false;
-
-			/*
-			 * check whether the original tlist matches the physical layout
-			 * of the base relation. GPU can reorder the var reference
-			 * regardless of the data-type support.
-			 */
-			if (var->varattno != attnum || attnum > tupdesc->natts)
-				tlist_compatible = false;
-			else
-			{
-				Form_pg_attribute	attr = tupdesc->attrs[attnum - 1];
-
-				/* How to reference the dropped column? */
-				Assert(!attr->attisdropped);
-				/* See the logic in tlist_matches_tupdesc */
-				if (var->vartype != attr->atttypid ||
-					(var->vartypmod != attr->atttypmod &&
-					 var->vartypmod != -1))
-					tlist_compatible = false;
-			}
-			/* add primitive Var-node on the tlist_dev */
-			varattno = add_unique_expression((Expr *) var, &tlist_dev, false);
-
-			/* add pseudo Var-node on the tlist_new */
-			tle_new = makeTargetEntry((Expr *) makeVar(INDEX_VAR,
-													   varattno,
-													   var->vartype,
-													   var->vartypmod,
-													   var->varcollid,
-													   0),
-									  list_length(tlist_new) + 1,
-									  tle->resname,
-									  tle->resjunk);
-			tlist_new = lappend(tlist_new, tle_new);
-		}
-		else if (pgstrom_device_expression(tle->expr))
-		{
-			Oid		type_oid = exprType((Node *)tle->expr);
-			Oid		type_mod = exprTypmod((Node *)tle->expr);
-			Oid		coll_oid = exprCollation((Node *)tle->expr);
-
-			/* Add device executable expression onto the tlist_dev */
-			varattno = add_unique_expression(tle->expr, &tlist_dev, false);
-
-			/* Then, CPU just referenced the calculation result */
-			tle_new = makeTargetEntry((Expr *) makeVar(INDEX_VAR,
-													   varattno,
-													   type_oid,
-													   type_mod,
-													   coll_oid,
-													   0),
-									  list_length(tlist_new) + 1,
-									  tle->resname,
-									  tle->resjunk);
-			tlist_new = lappend(tlist_new, tle_new);
-
-			/* obviously, we need GPU projection */
-			tlist_compatible = false;
-		}
-		else
-		{
-			/* Elsewhere, expression is not device executable */
-			Bitmapset  *varattnos = NULL;
-			int			prev = -1;
-			Node	   *expr_new;
-
-			/* Does caller allow host-only expression? */
-			if (!allow_hostonly)
-				return false;
-
-			/* 1. Pull varnodes within the expression*/
-			pull_varattnos((Node *) tle->expr, scanrelid, &varattnos);
-
-			/* 2. Add varnodes to tlist_dev */
-			while ((prev = bms_next_member(varattnos, prev)) >= 0)
-			{
-				Form_pg_attribute	attr;
-				int		anum = prev + FirstLowInvalidHeapAttributeNumber;
-
-				/* GPU projection cannot contain whole-row reference */
-				if (anum == InvalidAttrNumber)
-					return false;
-
-				/* Add varnodes to tlist_dev */
-				if (anum > 0)
-					attr = tupdesc->attrs[anum - 1];
-				else
-					attr = SystemAttributeDefinition(anum, true);
-
-				add_unique_expression((Expr *) makeVar(scanrelid,
-													   attr->attnum,
-													   attr->atttypid,
-													   attr->atttypmod,
-													   attr->attcollation,
-													   0),
-									  &tlist_dev,
-									  false);
-			}
-			/* 3. replace varnode of the expression */
-			expr_new = replace_varnode_with_tlist_dev((Node *) tle->expr,
-													  tlist_dev);
-			/* 4. add modified expression to tlist_new */
-			tle_new = makeTargetEntry((Expr *)expr_new,
-									  list_length(tlist_new) + 1,
-									  tle->resname,
-									  tle->resjunk);
-			tlist_new = lappend(tlist_new, tle_new);
-
-			/* obviously, we need GPU projection */
-			tlist_compatible = false;
-		}
-		attnum++;
-	}
-
-	/*
-	 * tlist_old has smaller number of attributes than base relation's
-	 * definition.
-	 */
-	if (attnum != tupdesc->natts)
-		tlist_compatible = false;
-
-	/*
-	 * NOTE: The reason why we don't need to add target-entries with
-	 * resjunk==true is, all the varnodes in host-/device-qualifiers
-	 * references the base relation, thus we don't need special
-	 * translation for them.
-	 */
-
-	/* put results */
-	*p_tlist_new = tlist_new;
-	*p_tlist_dev = tlist_dev;
-	*p_tlist_compatible = tlist_compatible;
-
-	return true;
-}
-
-/*
- * pgstrom_post_planner_gpuscan
- *
- * Applies projection of GpuScan if needed.
- */
-void
-pgstrom_post_planner_gpuscan(PlannedStmt *pstmt, Plan **p_curr_plan)
-{
-	Plan		   *plan = *p_curr_plan;
-	CustomScan	   *cscan = (CustomScan *) (plan);
-	GpuScanInfo	   *gs_info;
-	RangeTblEntry  *rte;
-	Relation		baserel;
-	TupleDesc		tupdesc;
-	codegen_context	context;
-	List		   *tlist_new = NIL;
-	List		   *tlist_dev = NIL;
-	bool			tlist_compatible;
-	ListCell	   *lc;
-	QualCost		qcost;
-	Cost			actual_old_cost = 0.0;
-	Cost			actual_new_cost = 0.0;
-	AttrNumber		attnum;
-
-	/* quick bailout if not supported anyway */
-	if (!pgstrom_plan_is_gpuscan(plan) && !IsA(plan, SeqScan))
-		return;
-
-	/* compute 'actual' cost that includes evaluation of targetlist */
-	cost_qual_eval(&qcost, plan->targetlist, NULL);
-	actual_old_cost = plan->total_cost
-		+ qcost.startup
-		+ qcost.per_tuple * plan->plan_rows;
-
-	/*
-	 * This plan is at least either of GpuScan or SeqScan.
-	 * For more optimal plan by surgery, we try to open the relation
-	 * and tries to replace SeqScan by GpuScan if reasonable.
-	 */
-	rte = rt_fetch(cscan->scan.scanrelid, pstmt->rtable);
-	Assert(rte->rtekind == RTE_RELATION);
-	baserel = heap_open(rte->relid, NoLock);
-	tupdesc = RelationGetDescr(baserel);
-
-	/* extract private fields */
-	gs_info = deform_gpuscan_info(cscan);
-
-	pgstrom_init_codegen_context(&context);
-	context.extra_flags = gs_info->extra_flags;	/* restore */
-	context.func_defs = gs_info->func_defs;		/* restore */
-	context.expr_defs = gs_info->expr_defs;		/* restore */
-	context.used_params = gs_info->used_params;	/* restore */
-//	context.used_vars = gs_info->used_vars;		/* restore */
-
-	if (build_device_projection(cscan->scan.scanrelid,
-								tupdesc,
-								cscan->scan.plan.targetlist,
-								true,	/* allow host-only */
-								&tlist_new,
-								&tlist_dev,
-								&tlist_compatible) &&
-		!tlist_compatible)		/* device projection does not make much
-								 * sense on the compatible base relation */
-	{
-		cl_int		base_fixed_width = 0;
-		cl_int		proj_fixed_width = 0;
-		cl_int		proj_extra_width = 0;
-
-		/*
-		 * Count width of the fixed-length fields for simple/indirect types,
-		 * and width of the fixed-length fields of the base relation also.
-		 */
-		for (attnum = 1; attnum < tupdesc->natts; attnum++)
-		{
-			Form_pg_attribute	attr = tupdesc->attrs[attnum - 1];
-
-			if (attr->attlen >= 0)
-				base_fixed_width += attr->attlen;
-		}
-
-		foreach (lc, tlist_dev)
-		{
-			TargetEntry	   *tle = lfirst(lc);
-			Oid				type_oid = exprType((Node *) tle->expr);
-			int16			type_len;
-			bool			type_byval;
-
-			if (type_oid == NUMERICOID)
-			{
-				proj_fixed_width += 32;	// XXX - TO BE FIXED LATER
-				proj_extra_width += 32;	// XXX - TO BE FIXED LATER
-			}
-			else
-			{
-				get_typlenbyval(type_oid, &type_len, &type_byval);
-				if (type_len < 0)
-					continue;
-				proj_fixed_width += type_len;
-				if (!type_byval)
-					proj_extra_width += type_len;
-			}
-		}
-
-		/*
-		 * compute 'actual' cost based on device projection
-		 */
-		actual_new_cost = cscan->scan.plan.total_cost;
-		/* cost for device projection */
-		cost_qual_eval(&qcost, tlist_dev, NULL);
-		qcost.per_tuple *= pgstrom_gpu_operator_cost / cpu_operator_cost;
-		actual_new_cost += (qcost.startup +
-							qcost.per_tuple * plan->plan_rows);
-		/* cost for device projection */
-		cost_qual_eval(&qcost, tlist_new, NULL);
-		actual_new_cost += (qcost.startup +
-							qcost.per_tuple * plan->plan_rows);
-
-		/* if GpuScan is actually cheaper than original, replace it */
-		if (actual_new_cost < actual_old_cost)
-		{
-			StringInfoData	kern;
-
-			/* update GpuScanInfo to support device projection */
-			initStringInfo(&kern);
-			appendStringInfoString(&kern, gs_info->kern_source);
-			codegen_device_projection(&kern,
-									  &context,
-									  cscan->scan.scanrelid,
-									  tupdesc,
-									  tlist_dev);
-			gs_info->kern_source = kern.data;
-			gs_info->base_fixed_width = base_fixed_width;
-			gs_info->proj_fixed_width = proj_fixed_width;
-			gs_info->proj_extra_width = proj_extra_width;
-
-			/* update targetlist */
-			cscan->scan.plan.targetlist = tlist_new;
-			cscan->custom_scan_tlist = tlist_dev;
-
-			if (*p_curr_plan != &cscan->scan.plan)
-				*p_curr_plan = &cscan->scan.plan;
-		}
-	}
-
-	/*
-	 * Declaration of functions/special expressions
-	 */
-	if (context.func_defs != NULL || context.expr_defs != NULL)
-	{
-		StringInfoData	kern;
-
-		initStringInfo(&kern);
-		pgstrom_codegen_func_declarations(&kern, &context);
-		pgstrom_codegen_expr_declarations(&kern, &context);
-		appendStringInfoString(&kern, gs_info->kern_source);
-		gs_info->kern_source = kern.data;
-	}
-	gs_info->extra_flags = context.extra_flags;
-	gs_info->func_defs = context.func_defs;
-	gs_info->expr_defs = context.expr_defs;
-	gs_info->used_params = context.used_params;
-//	gs_info->used_vars = context.used_vars;
-	form_gpuscan_info(cscan, gs_info);
-
-	heap_close(baserel, NoLock);
-}
-#endif
 
 /*
  * assign_gpuscan_session_info
@@ -2678,8 +1683,8 @@ gpuscan_begin(CustomScanState *node, EState *estate, int eflags)
 	/* true, if device projection is needed */
 	gss->dev_projection = (cscan->custom_scan_tlist != NIL);
 	/* device projection related resource consumption */
-	gss->proj_tuple_width = gs_info->proj_tuple_width;
-	gss->proj_extra_width = gs_info->proj_extra_width;
+	gss->proj_row_extra = gs_info->proj_row_extra;
+	gss->proj_slot_extra = gs_info->proj_slot_extra;
 	/* 'tableoid' should not change during relation scan */
 	gss->scan_tuple.t_tableOid = RelationGetRelid(scan_rel);
 	/* assign kernel source and flags */
@@ -2758,23 +1763,18 @@ create_pgstrom_gpuscan_task(GpuScanState *gss, pgstrom_data_store *pds_src)
 			pds_dst = NULL;
 		else
 		{
-			hoge
-
-			length = (kds_src->length +
-					  Max(gss->proj_fixed_width -
-						  gss->base_fixed_width, 0) * kds_src->nitems);
 			pds_dst = PDS_create_row(gcontext,
 									 scan_tupdesc,
-									 length);
+									 kds_src->length +
+									 gss->proj_row_extra * kds_src->nitems);
 		}
 	}
 	else
 	{
-		length = gss->proj_extra_width * kds_src->nitems;
 		pds_dst = PDS_create_slot(gcontext,
 								  scan_tupdesc,
 								  kds_src->nitems,
-								  length,
+								  gss->proj_slot_extra * kds_src->nitems,
 								  false);
 	}
 
@@ -3100,10 +2100,13 @@ gpuscan_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 {
 	GpuScanState   *gss = (GpuScanState *) node;
 	CustomScan	   *cscan = (CustomScan *) gss->gts.css.ss.ps.plan;
-	GpuScanInfo	   *gsinfo = deform_gpuscan_info(cscan);
+	List		   *used_params;
+	List		   *dev_quals;
 	List		   *context;
 	List		   *dev_proj = NIL;
 	ListCell	   *lc;
+
+	deform_gpuscan_custom_exprs(cscan, &used_params, &dev_quals);
 
 	/* Set up deparsing context */
 	context = set_deparse_context_planstate(es->deparse_cxt,
@@ -3111,12 +2114,17 @@ gpuscan_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 											ancestors);
 	/* Show device projection */
 	foreach (lc, cscan->custom_scan_tlist)
-		dev_proj = lappend(dev_proj, ((TargetEntry *) lfirst(lc))->expr);
+	{
+		TargetEntry	   *tle = lfirst(lc);
+
+		if (!tle->resjunk)
+			dev_proj = lappend(dev_proj, tle->expr);
+	}
 	pgstrom_explain_expression(dev_proj, "GPU Projection",
 							   &gss->gts.css.ss.ps, context,
 							   ancestors, es, false, false);
 	/* Show device filter */
-	pgstrom_explain_expression(gsinfo->dev_quals, "GPU Filter",
+	pgstrom_explain_expression(dev_quals, "GPU Filter",
 							   &gss->gts.css.ss.ps, context,
                                ancestors, es, false, true);
 	// TODO: Add number of rows filtered by the device side
@@ -3139,8 +2147,8 @@ gpuscan_info_copy(ExtensibleNode *__newnode, const ExtensibleNode *__oldnode)
 	COPY_SCALAR_FIELD(extra_flags);
 	COPY_NODE_FIELD(func_defs);
 	COPY_NODE_FIELD(expr_defs);
-	COPY_SCALAR_FIELD(proj_tuple_width);
-	COPY_SCALAR_FIELD(proj_extra_width);
+	COPY_SCALAR_FIELD(proj_row_extra);
+	COPY_SCALAR_FIELD(proj_slot_extra);
 }
 
 static bool
@@ -3153,8 +2161,8 @@ gpuscan_info_equal(const ExtensibleNode *__a, const ExtensibleNode *__b)
 	COMPARE_SCALAR_FIELD(extra_flags);
 	COMPARE_NODE_FIELD(func_defs);
 	COMPARE_NODE_FIELD(expr_defs);
-	COMPARE_SCALAR_FIELD(proj_tuple_width);
-	COMPARE_SCALAR_FIELD(proj_extra_width);
+	COMPARE_SCALAR_FIELD(proj_row_extra);
+	COMPARE_SCALAR_FIELD(proj_slot_extra);
 
 	return true;
 }
@@ -3168,8 +2176,8 @@ gpuscan_info_out(StringInfo str, const ExtensibleNode *__node)
 	WRITE_UINT_FIELD(extra_flags);
 	WRITE_NODE_FIELD(func_defs);
 	WRITE_NODE_FIELD(expr_defs);
-	WRITE_INT_FIELD(proj_tuple_width);
-	WRITE_INT_FIELD(proj_extra_width);
+	WRITE_INT_FIELD(proj_row_extra);
+	WRITE_INT_FIELD(proj_slot_extra);
 }
 
 static void
@@ -3181,8 +2189,8 @@ gpuscan_info_read(ExtensibleNode *node)
 	READ_UINT_FIELD(extra_flags);
 	READ_NODE_FIELD(func_defs);
 	READ_NODE_FIELD(expr_defs);
-	READ_INT_FIELD(proj_tuple_width);
-	READ_INT_FIELD(proj_extra_width);
+	READ_INT_FIELD(proj_row_extra);
+	READ_INT_FIELD(proj_slot_extra);
 }
 
 void

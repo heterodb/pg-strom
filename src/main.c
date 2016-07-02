@@ -418,10 +418,8 @@ pgstrom_explain_expression(List *expr_list, const char *qlabel,
 						   List *ancestors, ExplainState *es,
 						   bool force_prefix, bool convert_to_and)
 {
-	bool        useprefix;
+	bool        useprefix = (force_prefix | es->verbose);
 	char       *exprstr;
-
-	useprefix = (force_prefix || es->verbose);
 
 	/* No work if empty expression list */
 	if (expr_list == NIL)

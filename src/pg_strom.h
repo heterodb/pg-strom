@@ -571,6 +571,7 @@ extern void codegen_gpuscan_quals(StringInfo kern,
 								  codegen_context *context,
 								  Index scanrelid,
 								  List *dev_quals);
+extern bool add_unique_expression(Expr *expr, List **p_tlist, bool resjunk);
 #if 0
 extern bool pgstrom_pullup_outer_scan(Plan *plannode,
 									  bool allow_expression,
@@ -578,9 +579,7 @@ extern bool pgstrom_pullup_outer_scan(Plan *plannode,
 #endif
 extern bool pgstrom_path_is_gpuscan(const Path *path);
 extern bool pgstrom_plan_is_gpuscan(const Plan *plan);
-extern Node *replace_varnode_with_tlist_dev(Node *node, List *tlist_dev);
-extern AttrNumber add_unique_expression(Expr *expr, List **p_targetlist,
-										bool resjunk);
+
 extern pgstrom_data_store *pgstrom_exec_scan_chunk(GpuTaskState *gts,
 												   Size chunk_length);
 extern void pgstrom_rewind_scan_chunk(GpuTaskState *gts);
