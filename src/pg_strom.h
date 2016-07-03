@@ -684,6 +684,8 @@ extern double	pgstrom_chunk_size_margin;
 extern void _PG_init(void);
 extern const char *pgstrom_strerror(cl_int errcode);
 
+extern Path *copyPathNode(const Path *pathnode);
+
 extern void pgstrom_explain_expression(List *expr_list, const char *qlabel,
 									   PlanState *planstate,
 									   List *deparse_context,

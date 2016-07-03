@@ -56,23 +56,12 @@ static bool					enable_gpuscan;
 static bool					enable_pullup_outer_scan;
 
 /*
- * Path information of GpuScan
- */
-typedef struct {
-	CustomPath	cpath;
-	List	   *host_quals;		/* RestrictInfo run on host */
-	List	   *dev_quals;		/* RestrictInfo run on device */
-} GpuScanPath;
-
-/*
  * form/deform interface of private field of CustomScan(GpuScan)
  */
 typedef struct {
 	ExtensibleNode	ex;
 	char	   *kern_source;	/* source of the CUDA kernel */
 	cl_uint		extra_flags;	/* extra libraries to be included */
-	List	   *func_defs;		/* list of declared functions */
-	List	   *expr_defs;		/* list of special expression in use */
 	cl_uint		proj_row_extra;	/* extra requirements if row format */
 	cl_uint		proj_slot_extra;/* extra requirements if slot format */
 } GpuScanInfo;
@@ -360,6 +349,7 @@ gpuscan_add_scan_path(PlannerInfo *root,
 					  RangeTblEntry *rte)
 {
 	CustomPath	   *pathnode;
+	Path		   *fallback;
 	List		   *dev_quals = NIL;
 	List		   *host_quals = NIL;
 	ListCell	   *lc;
@@ -414,6 +404,11 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	}
 
 	/*
+	 * Fallback path if GpuScan cannot get a working GpuContext
+	 */
+	fallback = copyPathNode(linitial(baserel->pathlist));
+
+	/*
 	 * Construction of a custom-plan node.
 	 */
 	pathnode = makeNode(CustomPath);
@@ -424,28 +419,32 @@ gpuscan_add_scan_path(PlannerInfo *root,
 		= get_baserel_parampathinfo(root, baserel, baserel->lateral_relids);
 	pathnode->path.pathkeys = NIL;	/* unsorted result */
 	pathnode->flags = 0;
+	pathnode->custom_paths = list_make1(fallback);
 	pathnode->custom_private = NIL;	/* we don't use private field */
 	pathnode->methods = &gpuscan_path_methods;
 
 	cost_gpuscan_path(root, pathnode,
 					  dev_quals, host_quals, discount_per_tuple);
 	add_path(baserel, &pathnode->path);
+#if 0
+	/* If appropriate, consider parallel GpuScan */
+	if (baserel->consider_parallel && required_outer == NULL)
+	{
+		// see create_plain_partial_paths()
+
+	}
+#endif
 }
 
-
-
-
 #if 0
-// FIXME: outer pull-up shall be done during the planning stage
-
 /*
  * pgstrom_pullup_outer_scan
  *
- * It tries to pull up underlying SeqScan or GpuScan node if it is mergeable
- * to the upper node.
+ * It checks whether the supplied outer path can be pulled up, by GpuJoin,
+ * GpuPreAgg, or GpuSort.
  */
 bool
-pgstrom_pullup_outer_scan(Plan *plannode,
+pgstrom_pullup_outer_scan(Path *pathnode,
 						  bool allow_expression,
 						  List **p_outer_quals)
 {
@@ -615,7 +614,7 @@ codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
 			"  HeapTupleHeaderData *htup;\n"
             "  char *addr;\n"
 			"\n"
-			"  htup = kern_get_tuple_row(kds, row_index);\n"
+			"  htup = kern_get_tuple_row(kds, kds_index);\n"
 			"  assert(htup != NULL);\n"
 			"  EXTRACT_HEAP_TUPLE_BEGIN(addr, kds, htup);\n");
 
@@ -707,7 +706,7 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 		"                   cl_bool *tup_internal)\n"
 		"{\n"
 		"  HeapTupleHeaderData *htup;\n"
-		"  cl_bool dst_format_slot = (kds_dst->format == KDS_FORMAT_SLOT);\n"
+		"  cl_bool is_slot_format __attribute__((unused));\n"
 		"  char *curr;\n");
 
 	varremaps = palloc0(sizeof(AttrNumber) * tupdesc->natts);
@@ -766,7 +765,8 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 	 */
 	appendStringInfoString(
 		&body,
-		"  htup = (!tupitem ? NULL : &tupitem->htup);\n");
+		"  htup = (!tupitem ? NULL : &tupitem->htup);\n"
+		"  is_slot_format = (kds_dst->format == KDS_FORMAT_SLOT);\n");
 
 	/*
 	 * System columns reference if any
@@ -778,19 +778,32 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 			Form_pg_attribute attr
 				= SystemAttributeDefinition(varremaps[j], true);
 
-			appendStringInfo(
-				&body,
-				"  /* %s system column */\n"
-				"  if (!htup)\n"
-				"    tup_isnull[%d] = true;\n"
-				"  else\n"
-				"  {\n"
-				"    tup_isnull[%d] = false;\n"
-				"    tup_values[%d] = kern_getsysatt_%s(kds_src, htup);\n"
-				"  }\n",
-				NameStr(attr->attname),
-				j, j, j,
-				NameStr(attr->attname));
+			if (attr->attbyval)
+				appendStringInfo(
+					&body,
+					"  /* %s system column */\n"
+					"  tup_isnull[%d] = !htup;\n"
+					"  if (htup)\n"
+					"    tup_values[%d] = kern_getsysatt_%s(kds_src, htup));\n",
+					NameStr(attr->attname),
+					j,
+					j, NameStr(attr->attname));
+			else
+				appendStringInfo(
+					&body,
+					"  /* %s system column */\n"
+					"  tup_isnull[%d] = !htup;\n"
+					"  if (htup)\n"
+					"  {\n"
+					"    void *__ptr = kern_getsysatt_%s(kds_src,htup);\n"
+					"    if (is_slot_format)\n"
+					"      __ptr = devptr_to_host(kds_src, __ptr);\n"
+					"    tup_values[%d] = PointerGetDatum(__ptr);\n"
+					"  }\n",
+					NameStr(attr->attname),
+					j,
+					NameStr(attr->attname),
+					j);
 		}
 	}
 
@@ -817,12 +830,10 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 
 			appendStringInfo(
 				&temp,
-				"  if (!curr)\n"
-				"    tup_isnull[%d] = true;\n"
-				"  else\n"
-				"  {\n"
-				"    tup_isnull[%d] = false;\n",
-				j, j);
+				"  tup_isnull[%d] = !curr;\n"
+				"  if (curr)\n"
+				"  {\n",
+				j);
 			if (attr->attbyval)
 			{
 				appendStringInfo(
@@ -839,7 +850,7 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 				/* KDS_FORMAT_SLOT needs host pointer */
 				appendStringInfo(
 					&temp,
-					"    tup_values[%d] = (dst_format_slot\n"
+					"    tup_values[%d] = (is_slot_format\n"
 					"                      ? devptr_to_host(kds_src, curr)\n"
 					"                      : PointerGetDatum(curr));\n",
 					j);
@@ -911,16 +922,12 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 	 * We have to allocate extra buffer for indirect or numeric data type.
 	 * Also, any pointer values have to be fixed up to the host pointer.
 	 */
-	appendStringInfo(
-		&body,
-		"  if (kds_dst->format == KDS_FORMAT_SLOT)\n"
-		"  {\n");
-
 	resetStringInfo(&temp);
 	appendStringInfo(
 		&temp,
+		"  if (kds_dst->format == KDS_FORMAT_SLOT)\n"
+        "  {\n"
 		"    cl_uint vl_len = 0;\n"
-		"    char   *vl_buf = NULL;\n"
 		"    cl_uint offset;\n"
 		"    cl_uint count;\n"
 		"    cl_uint __shared__ base;\n"
@@ -949,7 +956,7 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 		{
 			appendStringInfo(
 				&temp,
-				"      if (!temp_%u_v.isnull)\n"
+				"      if (!expr_%u_v.isnull)\n"
 				"        vl_len = TYPEALIGN(sizeof(cl_uint), vl_len)\n"
 				"               + pg_numeric_to_varlena(kcxt,NULL,\n"
 				"                                       expr_%u_v.value,\n"
@@ -1000,19 +1007,18 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 			"      return;\n"
 			"    }\n"
 			"    vl_buf = (char *)kds_dst + kds_dst->length\n"
-			"           - (base + offset + vl_len);\n");
+			"           - (base + offset + vl_len);\n"
+			"  }\n\n");
+		appendStringInfoString(&decl, "  char *vl_buf = NULL;\n");
 		appendStringInfoString(&body, temp.data);
 	}
 
 	/*
-	 * step.5 (only FDW_FORMAT_SLOT) - Store the KVAR_xx on the slot.
-	 * pointer types must be host pointer
+	 * step.5 - Store the expressions on the slot.
+	 * If FDW_FORMAT_SLOT, any pointer type must be adjusted to the host-
+	 * pointer. Elsewhere, the caller expects device pointer.
 	 */
-	appendStringInfo(
-		&body,
-		"    if (htup)\n"
-		"    {\n");
-
+	resetStringInfo(&temp);
 	foreach (lc, tlist_dev)
 	{
 		TargetEntry	   *tle = lfirst(lc);
@@ -1031,33 +1037,42 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 			elog(ERROR, "Bug? device supported type is missing: %u", type_oid);
 
 		appendStringInfo(
-			&body,
-			"      tup_isnull[%d] = expr_%u_v.isnull;\n",
+			&temp,
+			"    tup_isnull[%d] = expr_%u_v.isnull;\n",
 			tle->resno - 1, tle->resno);
 
 		if (type_oid == NUMERICOID)
 		{
 			appendStringInfo(
-				&body,
-				"      if (!temp_%u_v.isnull)\n"
+				&temp,
+				"    if (!expr_%u_v.isnull)\n"
+				"    {\n"
+				"      if (is_slot_format)\n"
 				"      {\n"
 				"        vl_buf = (char *)TYPEALIGN(sizeof(cl_int), vl_buf);\n"
 				"        tup_values[%d] = devptr_to_host(kds_dst, vl_buf);\n"
 				"        vl_buf += pg_numeric_to_varlena(kcxt, vl_buf,\n"
 				"                                        expr_%u_v.value,\n"
 				"                                        expr_%u_v.isnull);\n"
-				"       }\n",
+				"      }\n"
+				"      else\n"
+				"      {\n"
+				"        tup_values[%d] = expr_%u_v.value;\n"
+				"      }\n"
+				"    }\n",
+				tle->resno,
+                tle->resno - 1,
+				tle->resno,
 				tle->resno,
 				tle->resno - 1,
-				tle->resno,
 				tle->resno);
 		}
 		else if (dtype->type_byval)
 		{
 			appendStringInfo(
-				&body,
-				"      if (!expr_%u_v.isnull)\n"
-				"        tup_values[%d] = pg_%s_to_datum(expr_%u_v.value);\n",
+				&temp,
+				"    if (!expr_%u_v.isnull)\n"
+				"      tup_values[%d] = pg_%s_to_datum(expr_%u_v.value);\n",
 				tle->resno,
 				tle->resno - 1,
 				dtype->type_name,
@@ -1066,136 +1081,65 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 		else if (IsA(tle->expr, Const) || IsA(tle->expr, Param))
 		{
 			/*
-			 * Const/Param shall be stored in kparams, thus, we don't need
-			 * to allocate extra buffer again. Just referemce it.
-			 */
-			appendStringInfo(
-				&body,
-				"      if (!expr_%u_v.isnull)\n"
-				"        tup_values[%d] = devptr_to_host(kcxt->kparams,\n"
-				"                                        expr_%u_v.value);\n",
-				tle->resno,
-				tle->resno - 1,
+             * Const/Param shall be stored in kparams, thus, we don't need
+             * to allocate extra buffer again. Just referemce it.
+             */
+            appendStringInfo(
+                &temp,
+                "    if (!expr_%u_v.isnull)\n"
+                "      tup_values[%d] = (is_slot_format"
+				"                 ? devptr_to_host(kcxt->kparams,\n"
+				"                                  expr_%u_v.value)\n"
+				"                 : PointerGetDatum(expr_%u_v.value));\n",
+                tle->resno,
+                tle->resno - 1,
+                tle->resno,
 				tle->resno);
 		}
 		else
 		{
 			Assert(dtype->type_length > 0);
 			appendStringInfo(
-				&body,
-				"      if (!expr_%u_v.isnull)\n"
+				&temp,
+				"    if (!expr_%u_v.isnull)\n"
+				"    {\n"
+				"      if (is_slot_format)\n"
 				"      {\n"
 				"        vl_buf = (char *)TYPEALIGN(%u, vl_buf);\n"
 				"        tup_values[%d] = devptr_to_host(kds_dst, vl_buf);\n"
 				"        memcpy(vl_buf, &expr_%u_v.value, %d);\n"
 				"        vl_buf += %d;\n"
-				"      }\n",
+				"      }\n"
+				"      else\n"
+				"      {\n"
+				"        tup_values[%d] = PointerGetDatum(expr_%u_v.value);\n"
+				"      }\n"
+				"    }\n",
 				tle->resno,
 				dtype->type_align,
 				tle->resno - 1,
 				tle->resno, dtype->type_length,
-				dtype->type_length);
-		}
-	}
-	appendStringInfo(
-		&body,
-		"    }\n"
-		"  }\n");
-
-	/*
-	 * step.6 (only FDW_FORMAT_ROW) - Stora the KVAR_xx on the slot.
-	 * pointer types must be device pointer.
-	 */
-	appendStringInfo(
-		&body,
-		"  else\n"
-		"  {\n"
-		"    if (htup)\n"
-		"    {\n");
-
-	foreach (lc, tlist_dev)
-	{
-		TargetEntry	   *tle = lfirst(lc);
-		Oid				type_oid;
-
-		if (varremaps[tle->resno-1])
-		{
-			Assert(IsA(tle->expr, Var));
-			continue;
-		}
-
-		type_oid = exprType((Node *)tle->expr);
-		dtype = pgstrom_devtype_lookup(type_oid);
-		if (!dtype)
-			elog(ERROR, "Bug? device supported type is missing: %u", type_oid);
-
-		appendStringInfo(
-			&body,
-			"      tup_isnull[%d] = expr_%u_v.isnull;\n",
-			tle->resno - 1, tle->resno);
-
-		if (type_oid == NUMERICOID)
-		{
-			appendStringInfo(
-				&body,
-				"      tup_internal[%d] = true;\n"
-				"      if (!expr_%u_v.isnull)\n"
-				"        tup_values[%d] = expr_%u_v.value;\n",
-				tle->resno - 1,
-				tle->resno,
+				dtype->type_length,
 				tle->resno - 1, tle->resno);
 		}
-		else if (dtype->type_byval)
-		{
-			appendStringInfo(
-				&body,
-				"      if (!expr_%u_v.isnull)\n"
-				"        tup_values[%d] = pg_%s_to_datum(expr_%u_v.value);\n",
-				tle->resno,
-				tle->resno - 1,
-				dtype->type_name,
-				tle->resno);
-		}
-		else if (IsA(tle->expr, Const) || IsA(tle->expr, Param))
-		{
-			appendStringInfo(
-				&body,
-				"      if (!expr_%u_v.isnull)\n"
-				"        tup_values[%d] = PointerGetDatum(expr_%u_v.value);\n",
-				tle->resno,
-				tle->resno - 1,
-				tle->resno);
-		}
-		else
-		{
-			Assert(dtype->type_length > 0);
-			appendStringInfo(
-				&body,
-				"      if (!expr_%u_v.isnull)\n"
-				"      {\n"
-				"        vl_buf = (char *)TYPEALIGN(%u, vl_buf);\n"
-				"        tup_values[%d] = PointerGetDatum(vl_buf);\n"
-				"        memcpy(vl_buf, &expr_%u_v.value, %u);\n"
-				"        vl_buf += %u;\n"
-				"      }\n",
-				tle->resno,
-				dtype->type_align,
-				tle->resno - 1,
-				tle->resno, dtype->type_length,
-				dtype->type_length);
-		}
 	}
+
+	if (temp.len > 0)
+		appendStringInfo(
+			&body,
+			"  if (htup != NULL)\n"
+			"  {\n"
+			"%s"
+			"  }\n", temp.data);
 	appendStringInfo(
 		&body,
-		"    }\n"
-		"  }\n"
 		"}\n");
 
 	/* parameter references */
 	pgstrom_codegen_param_declarations(&decl, context);
 
 	/* OK, write back the kernel source */
-	appendStringInfo(kern, "%s\n%s", decl.data, body.data);
+	appendStringInfo(kern, "%s\n%s\n", decl.data, body.data);
 	list_free(tlist_dev);
 	pfree(temp.data);
 	pfree(decl.data);
@@ -1489,12 +1433,13 @@ create_gpuscan_plan(PlannerInfo *root,
 	cl_int			proj_row_extra;
 	cl_int			proj_slot_extra;
 	StringInfoData	kern;
+	StringInfoData	source;
 	codegen_context	context;
 
 	/* It should be a base relation */
 	Assert(baserel->relid > 0);
 	Assert(baserel->rtekind == RTE_RELATION);
-	Assert(custom_children == NIL);
+	Assert(list_length(custom_children) == 1);
 
 	/*
 	 * Distribution of clauses into device executable and others.
@@ -1523,6 +1468,7 @@ create_gpuscan_plan(PlannerInfo *root,
 	relation = heap_open(rte->relid, NoLock);
 
 	initStringInfo(&kern);
+	initStringInfo(&source);
 	pgstrom_init_codegen_context(&context);
 	codegen_gpuscan_quals(&kern, &context, baserel->relid, dev_quals);
 
@@ -1539,6 +1485,11 @@ create_gpuscan_plan(PlannerInfo *root,
 	}
 	heap_close(relation, NoLock);
 
+	pgstrom_codegen_func_declarations(&source, &context);
+	pgstrom_codegen_expr_declarations(&source, &context);
+	appendStringInfoString(&source, kern.data);
+	pfree(kern.data);
+
 	/*
 	 * Construction of GpuScanPlan node; on top of CustomPlan node
 	 */
@@ -1550,19 +1501,16 @@ create_gpuscan_plan(PlannerInfo *root,
 	cscan->scan.scanrelid = baserel->relid;
 	cscan->flags = best_path->flags;
 	cscan->methods = &gpuscan_plan_methods;
-
-	cscan->custom_plans = NIL;	/* TODO: alternative plan as fallback */
+	cscan->custom_plans = custom_children;	/* fallback */
 
 	gs_info = palloc0(sizeof(GpuScanInfo));
-	gs_info->kern_source = kern.data;
+	gs_info->kern_source = source.data;
 	gs_info->extra_flags = context.extra_flags | DEVKERNEL_NEEDS_GPUSCAN;
-	gs_info->func_defs = context.func_defs;
-	gs_info->expr_defs = context.expr_defs;
+	gs_info->proj_row_extra = proj_row_extra;
+	gs_info->proj_slot_extra = proj_slot_extra;
 	cscan->custom_private = list_make1(gs_info);
 	form_gpuscan_custom_exprs(cscan, context.used_params, dev_quals);
 	cscan->custom_scan_tlist = tlist_dev;
-
-	elog(INFO, "source = %s", kern.data);
 
 	return &cscan->scan.plan;
 }
@@ -2095,6 +2043,37 @@ gpuscan_rescan(CustomScanState *node)
 	pgstrom_rewind_scan_chunk(&gss->gts);
 }
 
+/*
+ * gpuscan_estimate_dsm - tells required size of shared memory
+ */
+static Size
+gpuscan_estimate_dsm(CustomScanState *node,
+					 ParallelContext *pcxt)
+{
+	return 0;
+}
+
+/*
+ * gpuscan_init_dsm - initialize the coordinate memory on the master backend
+ */
+static void
+gpuscan_init_dsm(CustomScanState *node,
+				 ParallelContext *pcxt,
+				 void *coordinate)
+{}
+
+/*
+ * gpuscan_init_worker - initialize GpuScan on the backend worker process
+ */
+static void
+gpuscan_init_worker(CustomScanState *node,
+					shm_toc *toc,
+					void *coordinate)
+{}
+
+/*
+ * gpuscan_explain - EXPLAIN callback
+ */
 static void
 gpuscan_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 {
@@ -2145,8 +2124,6 @@ gpuscan_info_copy(ExtensibleNode *__newnode, const ExtensibleNode *__oldnode)
 
 	COPY_STRING_FIELD(kern_source);
 	COPY_SCALAR_FIELD(extra_flags);
-	COPY_NODE_FIELD(func_defs);
-	COPY_NODE_FIELD(expr_defs);
 	COPY_SCALAR_FIELD(proj_row_extra);
 	COPY_SCALAR_FIELD(proj_slot_extra);
 }
@@ -2159,8 +2136,6 @@ gpuscan_info_equal(const ExtensibleNode *__a, const ExtensibleNode *__b)
 
 	COMPARE_STRING_FIELD(kern_source);
 	COMPARE_SCALAR_FIELD(extra_flags);
-	COMPARE_NODE_FIELD(func_defs);
-	COMPARE_NODE_FIELD(expr_defs);
 	COMPARE_SCALAR_FIELD(proj_row_extra);
 	COMPARE_SCALAR_FIELD(proj_slot_extra);
 
@@ -2174,8 +2149,6 @@ gpuscan_info_out(StringInfo str, const ExtensibleNode *__node)
 
 	WRITE_STRING_FIELD(kern_source);
 	WRITE_UINT_FIELD(extra_flags);
-	WRITE_NODE_FIELD(func_defs);
-	WRITE_NODE_FIELD(expr_defs);
 	WRITE_INT_FIELD(proj_row_extra);
 	WRITE_INT_FIELD(proj_slot_extra);
 }
@@ -2187,8 +2160,6 @@ gpuscan_info_read(ExtensibleNode *node)
 
 	READ_STRING_FIELD(kern_source);
 	READ_UINT_FIELD(extra_flags);
-	READ_NODE_FIELD(func_defs);
-	READ_NODE_FIELD(expr_defs);
 	READ_INT_FIELD(proj_row_extra);
 	READ_INT_FIELD(proj_slot_extra);
 }
@@ -2241,6 +2212,9 @@ pgstrom_init_gpuscan(void)
 	gpuscan_exec_methods.ExecCustomScan     = gpuscan_exec;
 	gpuscan_exec_methods.EndCustomScan      = gpuscan_end;
 	gpuscan_exec_methods.ReScanCustomScan   = gpuscan_rescan;
+	gpuscan_exec_methods.EstimateDSMCustomScan = gpuscan_estimate_dsm;
+	gpuscan_exec_methods.InitializeDSMCustomScan = gpuscan_init_dsm;
+	gpuscan_exec_methods.InitializeWorkerCustomScan = gpuscan_init_worker;
 	gpuscan_exec_methods.ExplainCustomScan  = gpuscan_explain;
 
 	/* hook registration */

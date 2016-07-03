@@ -182,184 +182,6 @@ pgstrom_init_misc_guc(void)
 							 NULL, NULL, NULL);
 }
 
-#if 0
-/*
- * pgstrom_recursive_grafter
- *
- * It tries to inject GpuPreAgg and GpuSort (these are not "officially"
- * supported by planner) on the pre-built plan tree.
- */
-static void
-pgstrom_recursive_grafter(PlannedStmt *pstmt, Plan *parent, Plan **p_curr_plan)
-{
-	Plan	   *plan = *p_curr_plan;
-	ListCell   *lc;
-
-	Assert(plan != NULL);
-
-	switch (nodeTag(plan))
-	{
-		case T_Agg:
-			/*
-			 * Try to inject GpuPreAgg plan if cost of the aggregate plan
-			 * is enough expensive to justify preprocess by GPU.
-			 */
-			pgstrom_try_insert_gpupreagg(pstmt, (Agg *) plan);
-			break;
-
-		case T_SubqueryScan:
-			{
-				SubqueryScan   *subquery = (SubqueryScan *) plan;
-				Plan		  **p_subplan = &subquery->subplan;
-				pgstrom_recursive_grafter(pstmt, plan, p_subplan);
-			}
-			break;
-		case T_ModifyTable:
-			{
-				ModifyTable *mtplan = (ModifyTable *) plan;
-
-				foreach (lc, mtplan->plans)
-				{
-					Plan  **p_subplan = (Plan **) &lfirst(lc);
-					pgstrom_recursive_grafter(pstmt, plan, p_subplan);
-				}
-			}
-			break;
-		case T_Append:
-			{
-				Append *aplan = (Append *) plan;
-
-				foreach (lc, aplan->appendplans)
-				{
-					Plan  **p_subplan = (Plan **) &lfirst(lc);
-					pgstrom_recursive_grafter(pstmt, plan, p_subplan);
-				}
-			}
-			break;
-		case T_MergeAppend:
-			{
-				MergeAppend *maplan = (MergeAppend *) plan;
-
-				foreach (lc, maplan->mergeplans)
-				{
-					Plan  **p_subplan = (Plan **) &lfirst(lc);
-					pgstrom_recursive_grafter(pstmt, plan, p_subplan);
-				}
-			}
-			break;
-		case T_BitmapAnd:
-			{
-				BitmapAnd  *baplan = (BitmapAnd *) plan;
-
-				foreach (lc, baplan->bitmapplans)
-				{
-					Plan  **p_subplan = (Plan **) &lfirst(lc);
-					pgstrom_recursive_grafter(pstmt, plan, p_subplan);
-				}
-			}
-			break;
-		case T_BitmapOr:
-			{
-				BitmapOr   *boplan = (BitmapOr *) plan;
-
-				foreach (lc, boplan->bitmapplans)
-				{
-					Plan  **p_subplan = (Plan **) &lfirst(lc);
-					pgstrom_recursive_grafter(pstmt, plan, p_subplan);
-				}
-			}
-			break;
-		case T_CustomScan:
-			{
-				CustomScan *cscan = (CustomScan *) plan;
-
-				foreach (lc, cscan->custom_plans)
-				{
-					Plan  **p_subplan = (Plan **) &lfirst(lc);
-					pgstrom_recursive_grafter(pstmt, plan, p_subplan);
-				}
-			}
-			break;
-		default:
-			/* nothing to do, keep existgin one */
-			break;
-	}
-
-	/* also walk down left and right child plan sub-tree, if any */
-	if (plan->lefttree)
-		pgstrom_recursive_grafter(pstmt, plan, &plan->lefttree);
-	if (plan->righttree)
-		pgstrom_recursive_grafter(pstmt, plan, &plan->righttree);
-
-	switch (nodeTag(plan))
-	{
-		case T_Sort:
-			/*
-			 * Heuristically, we should avoid to replace Sort-node just
-			 * below the Limit-node, because Limit-node informs Sort-node
-			 * minimum required number of rows then Sort-node takes special
-			 * optimization. It is not easy to win with GpuSort...
-			 */
-			if (parent && IsA(parent, Limit))
-				break;
-
-			/*
-			 * Try to replace Sort node by GpuSort node if cost of
-			 * the alternative plan is enough reasonable to replace.
-			 */
-			pgstrom_try_insert_gpusort(pstmt, p_curr_plan);
-			break;
-
-		case T_CustomScan:
-			if (pgstrom_plan_is_gpuscan(plan))
-				pgstrom_post_planner_gpuscan(pstmt, p_curr_plan);
-			else if (pgstrom_plan_is_gpujoin(plan))
-				pgstrom_post_planner_gpujoin(pstmt, p_curr_plan);
-			break;
-
-		default:
-			/* nothing to do, keep existing one */
-			break;
-	}
-}
-
-/*
- * pgstrom_planner_entrypoint
- *
- * It overrides the planner_hook for two purposes.
- * 1. To inject GpuPreAgg and GpuSort on the PlannedStmt once built.
- *    (Note that it is not a usual way to inject paths, so we have
- *     to be careful to inject it)
- */
-static PlannedStmt *
-pgstrom_planner_entrypoint(Query *parse,
-						   int cursorOptions,
-						   ParamListInfo boundParams)
-{
-	PlannedStmt	*result;
-
-	if (planner_hook_next)
-		result = planner_hook_next(parse, cursorOptions, boundParams);
-	else
-		result = standard_planner(parse, cursorOptions, boundParams);
-
-	if (pgstrom_enabled)
-	{
-		ListCell   *cell;
-
-		Assert(result->planTree != NULL);
-		pgstrom_recursive_grafter(result, NULL, &result->planTree);
-
-		foreach (cell, result->subplans)
-		{
-			Plan  **p_subplan = (Plan **) &cell->data.ptr_value;
-			pgstrom_recursive_grafter(result, NULL, p_subplan);
-		}
-	}
-	return result;
-}
-#endif
-
 /*
  * _PG_init
  *
@@ -405,6 +227,79 @@ _PG_init(void)
 	pgstrom_init_codegen();
 //	pgstrom_init_plcuda();
 }
+
+/* ------------------------------------------------------------
+ *
+ * Misc support routines for path-construction
+ *
+ * ------------------------------------------------------------
+ */
+/*
+ * copyPathNode
+ *
+ * It copies a path-node but not recursive. When add_path() replaces the
+ * existing cheapest path, it shall be released. It means, even if our
+ * path node still wants to use the second-best path as fallback, it has
+ * already gone. However, add_path() just release the top-level path node,
+ * so flat copy is sufficient to keep the second-best path for our purpose.
+ */
+Path *
+copyPathNode(const Path *pathnode)
+{
+	Path   *newnode;
+	Size	len;
+
+#define PATHNODE_ENTRY(NodeType)		\
+	case T_##NodeType:					\
+		len = sizeof(NodeType);			\
+		break
+
+	switch (nodeTag(pathnode))
+	{
+		PATHNODE_ENTRY(Path);
+		PATHNODE_ENTRY(IndexPath);
+		PATHNODE_ENTRY(BitmapHeapPath);
+		PATHNODE_ENTRY(BitmapAndPath);
+		PATHNODE_ENTRY(BitmapOrPath);
+		PATHNODE_ENTRY(TidPath);
+		PATHNODE_ENTRY(SubqueryScanPath);
+		PATHNODE_ENTRY(ForeignPath);
+		PATHNODE_ENTRY(CustomPath);
+		PATHNODE_ENTRY(NestPath);
+		PATHNODE_ENTRY(MergePath);
+		PATHNODE_ENTRY(HashPath);
+		PATHNODE_ENTRY(AppendPath);
+		PATHNODE_ENTRY(MergeAppendPath);
+		PATHNODE_ENTRY(ResultPath);
+		PATHNODE_ENTRY(MaterialPath);
+		PATHNODE_ENTRY(UniquePath);
+		PATHNODE_ENTRY(GatherPath);
+		PATHNODE_ENTRY(ProjectionPath);
+		PATHNODE_ENTRY(SortPath);
+		PATHNODE_ENTRY(GroupPath);
+		PATHNODE_ENTRY(UpperUniquePath);
+		PATHNODE_ENTRY(AggPath);
+		PATHNODE_ENTRY(GroupingSetsPath);
+		PATHNODE_ENTRY(MinMaxAggPath);
+		PATHNODE_ENTRY(WindowAggPath);
+		PATHNODE_ENTRY(SetOpPath);
+		PATHNODE_ENTRY(RecursiveUnionPath);
+		PATHNODE_ENTRY(LockRowsPath);
+		PATHNODE_ENTRY(ModifyTablePath);
+		PATHNODE_ENTRY(LimitPath);
+		default:
+			elog(ERROR, "Bug? unexpected Path node: %s",
+				 nodeToString(pathnode));
+			break;
+	}
+#undef PATHNODE_ENTRY
+
+	newnode = palloc(len);
+	memcpy(newnode, pathnode, len);
+
+	return newnode;
+}
+
 
 /* ------------------------------------------------------------
  *

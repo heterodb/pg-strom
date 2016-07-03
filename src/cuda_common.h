@@ -1795,7 +1795,7 @@ kern_getsysatt_ctid(kern_data_store *kds, HeapTupleHeaderData *htup)
 	ItemPointerData	   *p_self = (ItemPointerData *)
 		((char *)htup - (offsetof(kern_tupitem, htup) -
 						 offsetof(kern_tupitem, t_self)));
-	return (Datum) devptr_to_host(kds, p_self);
+	return PointerGetDatum(p_self);
 }
 
 STATIC_INLINE(Datum)
