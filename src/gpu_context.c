@@ -51,17 +51,18 @@ static dlist_head		inactiveResourceTracker;
  */
 #define RESTRACK_HASHSIZE		27
 
-#define RESTRACK_CLASS__FILEDESC	1
-#define RESTRACK_CLASS__GPUMEMORY	2
-
+#define RESTRACK_CLASS__FILEDESC		1
+#define RESTRACK_CLASS__GPUMEMORY		2
+#define RESTRACK_CLASS__GPUPROGRAM		3
 typedef struct ResourceTracker
 {
 	dlist_node	chain;
 	pg_crc32	crc;
 	cl_int		resclass;
 	union {
-		int			fdesc;	/* RESTRACK_CLASS__FILEDESC */
-		CUdeviceptr	devptr;	/* RESTRACK_CLASS__GPUMEMORY */
+		int			fdesc;		/* RESTRACK_CLASS__FILEDESC */
+		CUdeviceptr	devptr;		/* RESTRACK_CLASS__GPUMEMORY */
+		ProgramId	program_id;	/* RESTRACK_CLASS__GPUPROGRAM */
 	} u;
 } ResourceTracker;
 
@@ -206,6 +207,31 @@ gpuMemFree_v2(GpuContext_v2 *gcontext, CUdeviceptr devptr)
 }
 
 /*
+ * resource tracker for GPU program
+ */
+void
+trackCudaProgram(GpuContext_v2 *gcontext, ProgramId program_id)
+{
+	ResourceTracker *tracker = resource_tracker_alloc();
+	pg_crc32	crc;
+
+	crc = resource_tracker_hashval(RESTRACK_CLASS__GPUPROGRAM,
+								   &program_id, sizeof(ProgramId));
+	tracker->crc = crc;
+	tracker->resclass = RESTRACK_CLASS__GPUPROGRAM;
+	tracker->u.program_id = program_id;
+
+	dlist_push_tail(&gcontext->restrack[crc % RESTRACK_HASHSIZE],
+					&tracker->chain);
+}
+
+void
+untrackCudaProgram(GpuContext_v2 *gcontext, ProgramId program_id)
+{
+	pgstrom_put_cuda_program(NULL, program_id);
+}
+
+/*
  * ReleaseLocalResources - release all the private resources tracked by
  * the resource tracker of GpuContext
  */
@@ -245,6 +271,9 @@ ReleaseLocalResources(GpuContext_v2 *gcontext)
 					if (rc != CUDA_SUCCESS)
 						elog(WARNING, "failed on cuMemFree(%p): %s",
 							 (void *)tracker->u.devptr, errorText(rc));
+					break;
+				case RESTRACK_CLASS__GPUPROGRAM:
+					untrackCudaProgram(NULL, tracker->u.program_id);
 					break;
 				default:
 					elog(WARNING, "Bug? unknown resource tracker class: %d",

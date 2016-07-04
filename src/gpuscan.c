@@ -1430,8 +1430,8 @@ create_gpuscan_plan(PlannerInfo *root,
 	List		   *dev_quals = NIL;
 	List		   *tlist_dev = NIL;
 	ListCell	   *cell;
-	cl_int			proj_row_extra;
-	cl_int			proj_slot_extra;
+	cl_int			proj_row_extra = 0;
+	cl_int			proj_slot_extra = 0;
 	StringInfoData	kern;
 	StringInfoData	source;
 	codegen_context	context;

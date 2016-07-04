@@ -131,6 +131,10 @@ typedef struct GpuContext_v2
 	dlist_head		restrack[FLEXIBLE_ARRAY_MEMBER];
 } GpuContext_v2;
 
+/* Identifier of the Gpu Programs */
+typedef cl_long					ProgramId;
+#define INVALID_PROGRAM_ID		(-1L)
+
 
 
 
@@ -362,6 +366,8 @@ extern int	closeFileDesc(GpuContext_v2 *gcontext, int fdesc);
 extern CUresult	gpuMemAlloc_v2(GpuContext_v2 *gcontext,
 							   CUdeviceptr *p_devptr, size_t bytesize);
 extern CUresult	gpuMemFree_v2(GpuContext_v2 *gcontext, CUdeviceptr devptr);
+extern void trackCudaProgram(GpuContext_v2 *gcontext, ProgramId program_id);
+extern void untrackCudaProgram(GpuContext_v2 *gcontext, ProgramId program_id);
 
 extern void pgstrom_init_gpu_context(void);
 
@@ -452,14 +458,26 @@ extern Datum pgstrom_device_info(PG_FUNCTION_ARGS);
 /*
  * cuda_program.c
  */
+extern void pgstrom_get_cuda_program(GpuContext_v2 *gcontext,
+									 ProgramId program_id);
+extern void pgstrom_put_cuda_program(GpuContext_v2 *gcontext,
+									 ProgramId program_id);
+extern ProgramId pgstrom_create_cuda_program(GpuContext_v2 *gcontext,
+											 const char *kern_source,
+											 const char *kern_define,
+											 cl_uint extra_flags,
+											 bool try_async_build);
+extern bool pgstrom_wait_cuda_program(ProgramId program_id, long timeout);
+
+
+
 extern const char *pgstrom_cuda_source_file(GpuTaskState *gts);
 extern bool pgstrom_load_cuda_program(GpuTaskState *gts, bool is_preload);
 extern CUmodule *plcuda_load_cuda_program(GpuContext *gcontext,
 										  const char *kern_source,
 										  cl_uint extra_flags);
-extern char *pgstrom_build_session_info(GpuTaskState *gts,
-										const char *kern_source,
-										cl_uint extra_flags);
+extern char *pgstrom_build_session_info(cl_uint extra_flags,
+										GpuTaskState *gts);
 extern void pgstrom_assign_cuda_program(GpuTaskState *gts,
 										List *used_params,
 										const char *kern_source,
