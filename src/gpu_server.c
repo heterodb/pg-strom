@@ -30,13 +30,20 @@
 #define GPUSERV_CMD_TASK		0x102
 #define GPUSERV_CMD_CLOSE		0x103
 
-typedef struct GpuServConnState
+typedef struct GpuServProc
+{
+	dlist_node		chain;
+	PGPROC		   *pgproc;
+} GpuServProc;
+
+typedef struct GpuServState
 {
 	slock_t			lock;
 	cl_int			num_wait_servs;
 	cl_int			num_pending_conn;
-	volatile Latch *waiters_latch[FLEXIBLE_ARRAY_MEMBER];
-} GpuServConnState;
+	dlist_head		serv_procs_list;
+	GpuServProc		serv_procs[FLEXIBLE_ARRAY_MEMBER];
+} GpuServState;
 
 typedef struct GpuServCommand
 {
@@ -62,7 +69,7 @@ SharedGpuContext	   *currentSharedGpuContext = NULL;
  * static variables
  */
 static shmem_startup_hook_type shmem_startup_hook_next = NULL;
-static GpuServConnState	*gpuServConnState = NULL;
+static GpuServState	   *gpuServState = NULL;
 static struct sockaddr_un gpuserv_addr;
 static pgsocket			gpu_server_sock = PGINVALID_SOCKET;
 static int				gpu_server_id = -1;
@@ -87,42 +94,30 @@ IsGpuServerProcess(void)
 void
 gpuservWakeUpProcesses(cl_uint max_procs)
 {
-	Bitmapset  *waiting_servers = &gpuServConnState->waiting_servers;
-	PGPROC	   *proc;
-	cl_int		idx = -1;
+	dlist_iter		iter;
+	GpuServProc	   *serv_proc;
+	PGPROC		   *pgproc;
 
-	Assert(max_procs > 0);
-	SpinLockAcquire(&gpuServConnState->lock);
-	while ((idx = bms_next_member(waiting_servers, idx)) >= 0)
+	if (max_procs == 0)
+		return;
+	SpinLockAcquire(&gpuServState->lock);
+	dlist_foreach(iter, &gpuServState->serv_procs_list)
 	{
-		Assert(idx < ProcGlobal->allProcCount);
-
-		proc = &ProcGlobal->allProcs[idx];
-		SetLatch(&proc->procLatch);
-		bms_del_member(waiting_servers, idx);
-
+		serv_proc = dlist_container(GpuServProc, chain, iter.cur);
+		Assert(serv_proc->pgproc != NULL);
+		pgproc = serv_proc->pgproc;
+		/* skip latches already set */
+		pg_memory_barrier();
+		if (pgproc->procLatch.is_set)
+			continue;
+		/* wake up a server process */
+		SetLatch(&pgproc->procLatch);
 		if (--max_procs == 0)
 			break;
 	}
-	SpinLockRelease(&gpuServConnState->lock);
+	SpinLockRelease(&gpuServState->lock);
 }
 
-/*
- * gpuservWaitForEvents - wait for the upcoming event; it is a simple wrapper
- * for WaitLatchOrSocket, except for registration to waiting_servers
- */
-static int
-gpuservWaitForEvents(volatile Latch *latch,
-					 int wakeEvents, pgsocket sock, long timeout)
-{
-	cl_int		procno = MyProc->pgprocno;
-
-	SpinLockAcquire(&gpuServConnState->lock);
-	bms_add_member(&gpuServConnState->waiting_servers, procno);
-	SpinLockRelease(&gpuServConnState->lock);
-
-	return WaitLatchOrSocket(latch, wakeEvents, sock, timeout);
-}
 
 
 
@@ -172,13 +167,13 @@ gpuservSendCommand(GpuContext_v2 *gcontext, GpuServCommand *cmd, long timeout)
 	int				retval;
 	int				ev;
 
-	ev = gpuservWaitForEvents(MyLatch,
-							  WL_LATCH_SET |
-							  WL_POSTMASTER_DEATH |
-							  WL_SOCKET_WRITEABLE |
-							  (timeout < 0 ? 0 : WL_TIMEOUT),
-							  gcontext->sockfd,
-							  timeout);
+	ev = WaitLatchOrSocket(MyLatch,
+						   WL_LATCH_SET |
+						   WL_POSTMASTER_DEATH |
+						   WL_SOCKET_WRITEABLE |
+						   (timeout < 0 ? 0 : WL_TIMEOUT),
+						   gcontext->sockfd,
+						   timeout);
 	/* Is the socket writable? */
 	if ((ev & WL_SOCKET_WRITEABLE) == 0)
 		return false;
@@ -256,13 +251,13 @@ gpuservRecvCommand(pgsocket sockfd, GpuServCommand *cmd, long timeout)
 	int				ev;
 	ssize_t			retval;
 
-	ev = gpuservWaitForEvents(MyLatch,
-							  WL_LATCH_SET |
-							  WL_POSTMASTER_DEATH |
-							  WL_SOCKET_READABLE |
-							  (timeout < 0 ? 0 : WL_TIMEOUT),
-							  sockfd,
-							  timeout);
+	ev = WaitLatchOrSocket(MyLatch,
+						   WL_LATCH_SET |
+						   WL_POSTMASTER_DEATH |
+						   WL_SOCKET_READABLE |
+						   (timeout < 0 ? 0 : WL_TIMEOUT),
+						   sockfd,
+						   timeout);
 	if ((ev & WL_SOCKET_READABLE) == 0)
 		return false;
 
@@ -345,6 +340,8 @@ gpuservRecvGpuTask(GpuContext_v2 *gcontext, int *peer_fd)
 		GPUSERV_CHECK_FOR_INTERRUPTS();
 
 		// TODO: flush out if completed task is not empty
+		// TODO: build CUDA program
+		pgstrom_try_build_cuda_program();
 	}
 
 	if (cmd.command == GPUSERV_CMD_TASK)
@@ -401,14 +398,14 @@ gpuservOpenConnection(GpuContext_v2 *gcontext)
 	 * which is in-progress for connections. If we have no chance to make
 	 * a connection with servers, give up making a connection.
 	 */
-	SpinLockAcquire(&gpuServConnState->lock);
-	if (gpuServConnState->num_pending_conn >= gpuServConnState->num_wait_servs)
+	SpinLockAcquire(&gpuServState->lock);
+	if (gpuServState->num_pending_conn >= gpuServState->num_wait_servs)
 	{
-		SpinLockRelease(&gpuServConnState->lock);
+		SpinLockRelease(&gpuServState->lock);
 		return false;
 	}
-	gpuServConnState->num_pending_conn++;
-	SpinLockRelease(&gpuServConnState->lock);
+	gpuServState->num_pending_conn++;
+	SpinLockRelease(&gpuServState->lock);
 
 	PG_TRY();
 	{
@@ -490,16 +487,16 @@ gpuservOpenConnection(GpuContext_v2 *gcontext)
 		if (sockfd >= 0)
 			close(sockfd);
 		/* revert the number of pending clients */
-		SpinLockAcquire(&gpuServConnState->lock);
-		gpuServConnState->num_pending_conn--;
-		SpinLockRelease(&gpuServConnState->lock);
+		SpinLockAcquire(&gpuServState->lock);
+		gpuServState->num_pending_conn--;
+		SpinLockRelease(&gpuServState->lock);
 	}
 	PG_END_TRY();
 
 	/* revert the number of pending clients */
-	SpinLockAcquire(&gpuServConnState->lock);
-	gpuServConnState->num_pending_conn--;
-	SpinLockRelease(&gpuServConnState->lock);
+	SpinLockAcquire(&gpuServState->lock);
+	gpuServState->num_pending_conn--;
+	SpinLockRelease(&gpuServState->lock);
 
 	return (gcontext->sockfd != PGINVALID_SOCKET ? true : false);
 }
@@ -516,34 +513,37 @@ gpuservAcceptConnection(void)
 	Assert(IsGpuServerProcess());
 
 	/* server is now waiting */
-	SpinLockAcquire(&gpuServConnState->lock);
-	gpuServConnState->num_wait_servs++;
-	SpinLockRelease(&gpuServConnState->lock);
+	SpinLockAcquire(&gpuServState->lock);
+	gpuServState->num_wait_servs++;
+	SpinLockRelease(&gpuServState->lock);
 
 	PG_TRY();
 	{
+		ResetLatch(MyLatch);
 		while ((sockfd = accept(gpu_server_sock, NULL, NULL)) < 0)
 		{
 			GPUSERV_CHECK_FOR_INTERRUPTS();
 			if (errno != EINTR && errno != EAGAIN)
 				elog(ERROR, "failed on accept(2): %m");
+			pgstrom_try_build_cuda_program();
+			ResetLatch(MyLatch);
 		}
 	}
 	PG_CATCH();
 	{
 		/* server now stopped waiting */
-		SpinLockAcquire(&gpuServConnState->lock);
-		gpuServConnState->num_wait_servs--;
-		SpinLockRelease(&gpuServConnState->lock);
+		SpinLockAcquire(&gpuServState->lock);
+		gpuServState->num_wait_servs--;
+		SpinLockRelease(&gpuServState->lock);
 
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
 
 	/* server now stopped waiting */
-	SpinLockAcquire(&gpuServConnState->lock);
-	gpuServConnState->num_wait_servs--;
-	SpinLockRelease(&gpuServConnState->lock);
+	SpinLockAcquire(&gpuServState->lock);
+	gpuServState->num_wait_servs--;
+	SpinLockRelease(&gpuServState->lock);
 
 	if (sockfd < 0)
 		return NULL;
@@ -581,6 +581,7 @@ gpuservSessionMain(GpuContext_v2 *gcontext)
 
 		elog(LOG, "%u wake up", getpid());
 		/* do something for each gtask */
+		pgstrom_try_build_cuda_program();
 	}
 }
 
@@ -590,13 +591,15 @@ gpuservSessionMain(GpuContext_v2 *gcontext)
 static void
 gpuserv_main(Datum __server_id)
 {
+	GpuServProc *serv_proc;
 	cl_int		device_id;
 	cl_int		dindex;
 	CUresult	rc;
 
 	/* I am a GPU server process */
 	gpu_server_id = DatumGetInt32(__server_id);
-	Assert(gpu_server_id >= 0);
+	Assert(gpu_server_id >= 0 && gpu_server_id < numGpuServers);
+	serv_proc = &gpuServState->serv_procs[gpu_server_id];
 	pqsignal(SIGTERM, gpuserv_got_sigterm);
 	BackgroundWorkerUnblockSignals();
 
@@ -627,6 +630,12 @@ gpuserv_main(Datum __server_id)
 	elog(LOG, "PG-Strom GPU/CUDA Server [%d] is now ready on GPU-%d %s",
 		 gpu_server_id, devAttrs[dindex].DEV_ID, devAttrs[dindex].DEV_NAME);
 
+	/* ready to handle async tasks */
+	SpinLockAcquire(&gpuServState->lock);
+	serv_proc->pgproc = MyProc;
+	dlist_push_head(&gpuServState->serv_procs_list, &serv_proc->chain);
+    SpinLockRelease(&gpuServState->lock);
+
 	PG_TRY();
 	{
 		GpuContext_v2  *gcontext;
@@ -636,9 +645,23 @@ gpuserv_main(Datum __server_id)
 			gcontext = gpuservAcceptConnection();
 			if (gcontext)
 			{
+				/* move to the tail for lower priority of async tasks */
+				SpinLockAcquire(&gpuServState->lock);
+				dlist_delete(&serv_proc->chain);
+				dlist_push_tail(&gpuServState->serv_procs_list,
+								&serv_proc->chain);
+				SpinLockRelease(&gpuServState->lock);
+
 				gpuservSessionMain(gcontext);
 				PutGpuContext(gcontext);
 				MemoryContextReset(CurrentMemoryContext);
+
+				/* move to the tail for higher priority of async tasks */
+				SpinLockAcquire(&gpuServState->lock);
+				dlist_delete(&serv_proc->chain);
+				dlist_push_head(&gpuServState->serv_procs_list,
+								&serv_proc->chain);
+				SpinLockRelease(&gpuServState->lock);
 			}
 		}
 	}
@@ -655,6 +678,11 @@ gpuserv_main(Datum __server_id)
 			PutSharedGpuContext(currentSharedGpuContext);
 	}
 	PG_END_TRY();
+	/* this server process can take async tasks no longer */
+	SpinLockAcquire(&gpuServState->lock);
+	dlist_delete(&serv_proc->chain);
+	memset(serv_proc, 0, sizeof(GpuServProc));
+	SpinLockRelease(&gpuServState->lock);
 
 	/* detach shared resources if any */
 	if (currentSharedGpuContext)
@@ -687,27 +715,13 @@ pgstrom_startup_gpu_server(void)
 	if (shmem_startup_hook_next)
 		(*shmem_startup_hook_next)();
 
-	RequestAddinShmemSpace(offsetof(GpuServConnState,
-                                    waiters_latch[numGpuServers]));
-    shmem_startup_hook_next = shmem_startup_hook;
-    shmem_startup_hook = pgstrom_startup_gpu_server;
-
-	required = offsetof(GpuServConnState,
-						waiters_latch[numGpuServers])):
-	gpuServConnState = ShmemInitStruct("gpuServConnState",
-									   REQUIRED<
-									   &found);
+	required = offsetof(GpuServState, serv_procs[numGpuServers]);
+	gpuServState = ShmemInitStruct("gpuServState", required, &found);
 	Assert(!found);
-	memset(gpuServConnState, 0, sizeof(GpuServConnState));
-	SpinLockInit(&gpuServConnState->lock);
-	memset(GpuServConnState->waiters_latch,0,sizeof(Latch *) * numGpuServers);
 
-
-    nwords = (ProcGlobal->allProcCount +
-			  BITS_PER_BITMAPWORD - 1) / BITS_PER_BITMAPWORD;
-	gpuServConnState->waiting_servers.nwords = nwords;
-	memset(gpuServConnState->waiting_servers.words,
-		   0, sizeof(bitmapword) * nwords);
+	memset(gpuServState, 0, required);
+	SpinLockInit(&gpuServState->lock);
+	dlist_init(&gpuServState->serv_procs_list);
 }
 
 /*
@@ -780,9 +794,9 @@ pgstrom_init_gpu_server(void)
 	if (listen(gpu_server_sock, numGpuServers) != 0)
 		elog(ERROR, "failed on listen(2): %m");
 
-	/* check signal for each 500ms during accept(2) */
+	/* check signal for each 400ms during accept(2) */
 	timeout.tv_sec = 0;
-	timeout.tv_usec = 500 * 1000;	/* 500ms */
+	timeout.tv_usec = 400 * 1000;	/* 400ms */
 	if (setsockopt(gpu_server_sock, SOL_SOCKET, SO_RCVTIMEO,
 				   &timeout, sizeof(timeout)) != 0)
 		elog(ERROR, "failed on setsockopt(2): %m");
@@ -806,8 +820,7 @@ pgstrom_init_gpu_server(void)
 	}
 
 	/* request for the static shared memory */
-	RequestAddinShmemSpace(offsetof(GpuServConnState,
-									waiters_latch[numGpuServers]));
+	RequestAddinShmemSpace(offsetof(GpuServState, serv_procs[numGpuServers]));
 	shmem_startup_hook_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_gpu_server;
 	/* cleanup of UNIX domain socket */
