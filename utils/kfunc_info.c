@@ -374,9 +374,9 @@ build_kernel_source(const char *source_file, long target_capability)
 	rc = nvrtcGetProgramLog(program, build_log);
 	if (rc != NVRTC_SUCCESS)
 		nvrtc_error(rc, "nvrtcGetProgramLog");
-	build_log[build_log_len] = '\0';
 
-	printf("build log:\n%s\n%zu", build_log, build_log_len);
+	if (build_log_len > 1)
+		printf("build log:\n%s\n", build_log);
 	if (build_failure)
 		exit(1);
 
@@ -477,18 +477,17 @@ static void print_function_attrs(CUmodule cuda_module, const char *func_name)
 	if (rc != CUDA_SUCCESS)
 		cuda_error(rc, "cuOccupancyMaxPotentialBlockSize");
 
-	printf("\n------\n"
-		   "Kernel Function: %s\n"
-		   "  Max threads per block: %d\n"
-		   "  Shared memory usage:   %d\n"
-		   "  Constant memory usage: %d\n"
-		   "  Local memory usage:    %d\n"
-		   "  Number of registers:   %d\n"
-		   "  PTX version:           %d\n"
-		   "  Binary version:        %d\n"
-		   "  Global memory caching: %s\n"
-		   "  Max block size:        %u\n"
-		   "  (shmem usage: %ld/thread + %ld/block)\n"
+	printf("Kernel Function:    %s\n"
+		   "  Max threads per block:    %d\n"
+		   "  Shared memory usage:      %d\n"
+		   "  Constant memory usage:    %d\n"
+		   "  Local memory usage:       %d\n"
+		   "  Number of registers:      %d\n"
+		   "  PTX version:              %d\n"
+		   "  Binary version:           %d\n"
+		   "  Global memory caching:    %s\n"
+		   "  Max potential block size: %u\n"
+		   "  (shmem usage: %ld/thread + %ld/block)\n",
 		   func_name,
 		   max_threads_per_block,
 		   shared_mem_sz,
@@ -665,6 +664,8 @@ int main(int argc, char *argv[])
 
 	for (i=0; i < kfunc_index; i++)
 	{
+		if (i > 0)
+			putchar('\n');
 		print_function_attrs(cuda_module, kfunc_names[i]);
 	}
 
