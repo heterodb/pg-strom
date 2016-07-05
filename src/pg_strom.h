@@ -375,6 +375,7 @@ extern void pgstrom_init_gpu_context(void);
  * gpu_server.c
  */
 extern bool IsGpuServerProcess(void);
+extern void gpuservWakeUpProcesses(cl_uint max_procs);
 extern bool gpuservOpenConnection(GpuContext_v2 *gcontext);
 extern bool gpuservSendGpuTask(GpuContext_v2 *gcontext,
 							   GpuTask *gtask, int peer_fd);
@@ -469,7 +470,7 @@ extern ProgramId pgstrom_create_cuda_program(GpuContext_v2 *gcontext,
 											 bool try_async_build);
 extern bool pgstrom_wait_cuda_program(ProgramId program_id, long timeout);
 
-
+extern ProgramId pgstrom_try_build_cuda_program(void);
 
 extern const char *pgstrom_cuda_source_file(GpuTaskState *gts);
 extern bool pgstrom_load_cuda_program(GpuTaskState *gts, bool is_preload);

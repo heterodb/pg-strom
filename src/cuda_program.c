@@ -44,21 +44,21 @@ typedef struct
 	dlist_node		pgid_chain;
 	dlist_node		hash_chain;
 	dlist_node		lru_chain;
+	dlist_node		build_chain;
+	char		   *extra_buf;		/* extra memory for build/link */
 	/* fields below are never updated once entry is constructed */
 	ProgramId		program_id;
-	Oid				database_oid;	/* for async build */
-	Oid				user_oid;		/* for async build */
 	pg_crc32		crc;			/* hash value by extra_flags */
 	int				extra_flags;	/*             + kern_define */
 	char		   *kern_define;	/*             + kern_source */
 	char		   *kern_source;
 	/* fields above are never updated once entry is constructed */
 	cl_int			refcnt;
-	Bitmapset	   *waiting_backends;
+	Bitmapset	   *waiting_backends;	/* DEPRECATED */
 	char		   *bin_image;		/* may be CUDA_PROGRAM_BUILD_FAILURE */
 	size_t			bin_length;
 	char		   *error_msg;
-	char		   *extra_buf;		/* alloc pointer for bin_image/error_msg */
+	int				error_code;
 	struct timeval	tv_build_end;	/* timestamp when build end */
 	char			data[FLEXIBLE_ARRAY_MEMBER];
 } program_cache_entry;
@@ -83,6 +83,7 @@ typedef struct
 	dlist_head	pgid_slots[PGCACHE_HASH_SIZE];
 	dlist_head	hash_slots[PGCACHE_HASH_SIZE];
 	dlist_head	lru_list;
+	dlist_head	build_list;		/* build pending list */
 } program_cache_head;
 
 /* ---- GUC variables ---- */
@@ -92,6 +93,7 @@ static Size		program_cache_size;
 static shmem_startup_hook_type shmem_startup_next;
 static program_cache_head *pgcache_head = NULL;
 
+#if 1
 /*
  * pgstrom_wakeup_backends
  *
@@ -110,7 +112,10 @@ pgstrom_wakeup_backends(Bitmapset *waiting_backends)
 		proc = &ProcGlobal->allProcs[idx];
 		SetLatch(&proc->procLatch);
 	}
+	memset(waiting_backends->words, 0,
+		   sizeof(bitmapword) * waiting_backends->nwords);
 }
+#endif
 
 /*
  * lookup_cuda_program_entry_nolock - lookup a program_cache_entry by the
@@ -180,6 +185,7 @@ put_cuda_program_entry_nolock(program_cache_entry *entry)
 	}
 }
 
+#if 0
 /*
  * put_cuda_program_entry
  */
@@ -190,6 +196,7 @@ put_cuda_program_entry(program_cache_entry *entry)
 	put_cuda_program_entry_nolock(entry);
 	SpinLockRelease(&pgcache_head->lock);
 }
+#endif
 
 /*
  * reclaim_cuda_program_entry
@@ -222,7 +229,8 @@ reclaim_cuda_program_entry(void)
  */
 static char *
 construct_flat_cuda_source(const char *kern_source,
-						   const char *kern_define, uint32 extra_flags)
+						   const char *kern_define,
+						   uint32 extra_flags)
 {
 	StringInfoData		source;
 
@@ -249,8 +257,6 @@ construct_flat_cuda_source(const char *kern_source,
 					 "#ifdef __cplusplus\n"
 					 "extern \"C\" {\n"
 					 "#endif	/* __cplusplus */\n");
-	/* Declaration of device type oids */
-	pgstrom_codegen_typeoid_declarations(&source);
 
 	/* Common PG-Strom device routine */
 	appendStringInfoString(&source, pgstrom_cuda_common_code);
@@ -321,7 +327,6 @@ static void
 link_cuda_libraries(char *ptx_image, size_t ptx_length, cl_uint extra_flags,
 					void **p_bin_image, size_t *p_bin_length)
 {
-	GpuContext	   *gcontext;
 	CUlinkState		lstate;
 	CUresult		rc;
 	CUjit_option	jit_options[10];
@@ -336,14 +341,9 @@ link_cuda_libraries(char *ptx_image, size_t ptx_length, cl_uint extra_flags,
 
 	/*
 	 * NOTE: cuLinkXXXX() APIs works under a particular CUDA context,
-	 * so we pick up one of the available GPU device contexts. In case
-	 * of background worker, we also have to initialize CUDA library,
-	 * pgstrom_get_gpucontext() does it internally.
+	 * so it must be processed by the process which has a valid CUDA
+	 * context; that is GPU intermediation server.
 	 */
-	gcontext = pgstrom_get_gpucontext();
-	rc = cuCtxPushCurrent(gcontext->gpu[0].cuda_context);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuCtxPushCurrent");
 
 	/*
 	 * JIT Options
@@ -364,6 +364,12 @@ link_cuda_libraries(char *ptx_image, size_t ptx_length, cl_uint extra_flags,
 
 	jit_options[jit_index] = CU_JIT_GENERATE_LINE_INFO;
 	jit_option_values[jit_index] = (void *)1UL;
+	jit_index++;
+#endif
+#if 1
+	/* how much effective? */
+	jit_options[jit_index] = CU_JIT_CACHE_MODE;
+	jit_option_values[jit_index] = (void *)CU_JIT_CACHE_OPTION_CA;
 	jit_index++;
 #endif
 
@@ -394,11 +400,6 @@ link_cuda_libraries(char *ptx_image, size_t ptx_length, cl_uint extra_flags,
 	rc = cuLinkComplete(lstate, &bin_image, &bin_length);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuLinkComplete: %s", errorText(rc));
-
-	rc = cuCtxPopCurrent(NULL);
-	if (rc != CUDA_SUCCESS)
-		elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
-	pgstrom_put_gpucontext(gcontext);
 
 	*p_bin_image = bin_image;
 	*p_bin_length = bin_length;
@@ -653,9 +654,10 @@ __build_cuda_program(program_cache_entry *entry)
 	entry->error_msg = error_msg_new;
 	entry->extra_buf = extra_buf;		/* to be released later */
 	pgcache_head->program_cache_usage += dmaBufferChunkSize(extra_buf);
+#if 1
 	/* wake up backends which wait for build */
 	pgstrom_wakeup_backends(entry->waiting_backends);
-	entry->waiting_backends = NULL;
+#endif
 	/* reclaim the older buffer if overconsumption */
 	dlist_move_head(&pgcache_head->lru_list, &entry->lru_chain);
 	if (pgcache_head->program_cache_usage > program_cache_size)
@@ -671,27 +673,63 @@ __build_cuda_program(program_cache_entry *entry)
 	return build_success;
 }	
 
-static bool
-pgstrom_build_cuda_program(program_cache_entry *entry)
+/*
+ * pgstrom_try_build_cuda_program
+ *
+ * It picks up a program entry that is not built yet, if any, then runs
+ * NVRTC and linker to construct an executable binary.
+ * Because linker process needs a valid CUDA context, only GPU server
+ * can call this function.
+ */
+ProgramId
+pgstrom_try_build_cuda_program(void)
 {
-	MemoryContext memcxt = CurrentMemoryContext;
-	MemoryContext oldcxt;
-	bool		retval;
+	static MemoryContext memcxt = NULL;
+	MemoryContext	oldcxt;
+	dlist_node	   *dnode;
+	program_cache_entry	*entry;
 
+	/* memory context during the code build (to be reused) */
+	if (!memcxt)
+	{
+		memcxt = AllocSetContextCreate(CurrentMemoryContext,
+									   "CUDA program build context",
+									   ALLOCSET_DEFAULT_MINSIZE,
+									   ALLOCSET_DEFAULT_INITSIZE,
+									   ALLOCSET_DEFAULT_MAXSIZE);
+	}
+
+	/* Is there any pending CUDA program? */
+	SpinLockAcquire(&pgcache_head->lock);
+	if (dlist_is_empty(&pgcache_head->build_list))
+	{
+		SpinLockRelease(&pgcache_head->lock);
+		return INVALID_PROGRAM_ID;	/* nothing to do */
+	}
+	dnode = dlist_pop_head_node(&pgcache_head->build_list);
+	entry = dlist_container(program_cache_entry, build_chain, dnode);
+
+	memset(&entry->build_chain, 0, sizeof(dlist_node));
+	Assert(!entry->bin_image);	/* must be build in-progress */
+	get_cuda_program_entry_nolock(entry);
+	SpinLockRelease(&pgcache_head->lock);
+
+	oldcxt = MemoryContextSwitchTo(memcxt);
 	PG_TRY();
 	{
-		retval = __build_cuda_program(entry);
+		__build_cuda_program(entry);
 	}
 	PG_CATCH();
 	{
 		ErrorData  *errdata;
 
-		oldcxt = MemoryContextSwitchTo(memcxt);
+		MemoryContextSwitchTo(memcxt);
 		errdata = CopyErrorData();
 
 		SpinLockAcquire(&pgcache_head->lock);
 		if (!entry->bin_image)
 		{
+			entry->error_code = errdata->sqlerrcode;
 			snprintf(entry->error_msg, PGCACHE_ERRORMSG_LEN(entry),
 					 "(%s:%d, %s) %s",
 					 errdata->filename,
@@ -700,62 +738,21 @@ pgstrom_build_cuda_program(program_cache_entry *entry)
 					 errdata->message);
 			entry->bin_image = CUDA_PROGRAM_BUILD_FAILURE;
 		}
+		/* wake up waiting backends */
 		pgstrom_wakeup_backends(entry->waiting_backends);
-		entry->waiting_backends = NULL;
+		/* release this program entry */
+		put_cuda_program_entry_nolock(entry);
 		SpinLockRelease(&pgcache_head->lock);
-		MemoryContextSwitchTo(oldcxt);
-		PG_RE_THROW();
+		/* revert the error status */
+		FreeErrorData(errdata);
+		FlushErrorState();
 	}
 	PG_END_TRY();
+	/* reset memory context */
+	MemoryContextSwitchTo(oldcxt);
+	MemoryContextReset(memcxt);
 
-	return retval;
-}
-
-static void
-build_cuda_program_async_main(Datum bgw_arg)
-{
-	ProgramId	program_id = (ProgramId) bgw_arg;
-	program_cache_entry *entry;
-
-	BackgroundWorkerUnblockSignals();
-	/* Fetch database_oid/user_oid */
-	SpinLockAcquire(&pgcache_head->lock);
-	entry = lookup_cuda_program_entry_nolock(program_id);
-	if (!entry)
-	{
-		SpinLockRelease(&pgcache_head->lock);
-		elog(WARNING, "Bug? CUDA Program ID=%lu has already gone", program_id);
-		return;
-	}
-	get_cuda_program_entry_nolock(entry);
-	SpinLockRelease(&pgcache_head->lock);
-
-	/* Set up a memory context and resource owner. */
-	Assert(CurrentResourceOwner == NULL);
-	CurrentResourceOwner = ResourceOwnerCreate(NULL, "CUDA Async Builder");
-	CurrentMemoryContext = AllocSetContextCreate(TopMemoryContext,
-												 "CUDA Async Builder",
-												 ALLOCSET_DEFAULT_MINSIZE,
-												 ALLOCSET_DEFAULT_INITSIZE,
-												 ALLOCSET_DEFAULT_MAXSIZE);
-	/* Restore the database connection. */
-    BackgroundWorkerInitializeConnectionByOid(entry->database_oid,
-											  entry->user_oid);
-	/* Start dummy transaction */
-	StartTransactionCommand();
-	PG_TRY();
-	{
-		pgstrom_build_cuda_program(entry);
-	}
-	PG_CATCH();
-	{
-		put_cuda_program_entry(entry);
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-	CommitTransactionCommand();
-	/* Unpin the entry */
-	put_cuda_program_entry(entry);
+	return true;
 }
 
 /*
@@ -782,7 +779,9 @@ pgstrom_create_cuda_program(GpuContext_v2 *gcontext,
 	int			hindex;
 	dlist_iter	iter;
 	pg_crc32	crc;
-	BackgroundWorker worker;
+
+	/* Only backend server can create CUDA program entry */
+	Assert(!IsGpuServerProcess());
 
 	/* makes a hash value */
 	INIT_LEGACY_CRC32(crc);
@@ -809,10 +808,13 @@ pgstrom_create_cuda_program(GpuContext_v2 *gcontext,
 			if (entry->bin_image == CUDA_PROGRAM_BUILD_FAILURE)
 			{
 				SpinLockRelease(&pgcache_head->lock);
-				elog(ERROR, "%s", entry->error_msg);
+				ereport(ERROR,
+						(errcode(entry->error_code),
+						 errmsg("%s", entry->error_msg)));
 			}
+
 			/*
-			 * Kernel build is still in-progress, so register myself a list
+			 * Kernel build is still in-progress, so register myself
 			 * of wakeup backend processes.
 			 */
 			if (!entry->bin_image)
@@ -821,6 +823,7 @@ pgstrom_create_cuda_program(GpuContext_v2 *gcontext,
 				waiting_backends->words[WORDNUM(MyProc->pgprocno)]
 					|= (1 << BITNUM(MyProc->pgprocno));
 			}
+
 			/*
 			 * OK, this CUDA program already exist (even though it may be
 			 * under the asynchronous build in-progress)
@@ -880,9 +883,6 @@ pgstrom_create_cuda_program(GpuContext_v2 *gcontext,
 				goto retry_program_id;
 		}
 		entry->program_id = program_id;
-		/* session info for asynchronous build */
-		entry->database_oid = MyDatabaseId;
-		entry->user_oid = GetUserId();
 
 		/* device kernel source */
 		entry->crc = crc;
@@ -903,7 +903,7 @@ pgstrom_create_cuda_program(GpuContext_v2 *gcontext,
 		entry->waiting_backends = (Bitmapset *)(entry->data + usage);
 		entry->waiting_backends->nwords = nwords;
 		memset(entry->waiting_backends->words, 0, sizeof(bitmapword) * nwords);
-		usage += MAXALIGN(offsetof(Bitmapset, words[nwords]));
+		usage += MAXALIGN(offsetof(Bitmapset, words[nwords]));;
 
 		/* no cuda binary at this moment */
 		entry->bin_image = NULL;
@@ -925,9 +925,15 @@ pgstrom_create_cuda_program(GpuContext_v2 *gcontext,
 						&entry->hash_chain);
 		dlist_push_head(&pgcache_head->lru_list,
 						&entry->lru_chain);
+		dlist_push_head(&pgcache_head->build_list,
+						&entry->build_chain);
 		pgcache_head->program_cache_usage += dmaBufferChunkSize(entry);
 		if (pgcache_head->program_cache_usage > program_cache_size)
 			reclaim_cuda_program_entry();
+		/*
+		 * Waking up GPU server which are in sleep.
+		 */
+		gpuservWakeUpProcesses(1);
 	}
 	PG_CATCH();
 	{
@@ -938,7 +944,7 @@ pgstrom_create_cuda_program(GpuContext_v2 *gcontext,
 	SpinLockRelease(&pgcache_head->lock);
 
 	/*
-	 * track this new entry locally
+	 * Also, track this new entry locally
 	 */
 	PG_TRY();
 	{
@@ -953,28 +959,7 @@ pgstrom_create_cuda_program(GpuContext_v2 *gcontext,
 	}
 	PG_END_TRY();
 
-	/*
-	 * Kick a dynamic background worker to build
-	 */
-	if (try_async_build)
-	{
-		snprintf(worker.bgw_name, sizeof(worker.bgw_name),
-				 "NVRTC launcher - program_id = %lu, crc %08x",
-				 program_id, crc);
-		worker.bgw_flags = (BGWORKER_SHMEM_ACCESS |
-							BGWORKER_BACKEND_DATABASE_CONNECTION);
-		worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
-		worker.bgw_restart_time = BGW_NEVER_RESTART;
-		worker.bgw_main = build_cuda_program_async_main;
-		worker.bgw_main_arg = Int64GetDatum(program_id);
-		if (RegisterDynamicBackgroundWorker(&worker, NULL))
-			return program_id;
-	}
-	/* synchronous build, or fallback if failed to launch BGworker */
-	if (!pgstrom_build_cuda_program(entry))
-		elog(ERROR, "%s", entry->error_msg);
-
-	return entry->program_id;
+	return program_id;
 }
 
 /*
@@ -1420,18 +1405,22 @@ pgstrom_build_session_info(cl_uint extra_flags,
 {
 	StringInfoData	buf;
 
+	initStringInfo(&buf);
+
+	/* OID declaration of types */
+	pgstrom_codegen_typeoid_declarations(&buf);
+
 	if ((extra_flags & (DEVKERNEL_NEEDS_TIMELIB |
 						DEVKERNEL_NEEDS_MONEY   |
 						DEVKERNEL_NEEDS_TEXTLIB |
 						DEVKERNEL_NEEDS_GPUSCAN |
 						DEVKERNEL_NEEDS_GPUJOIN |
 						DEVKERNEL_NEEDS_GPUSORT)) == 0)
-		return "";	/* no session specific code */
+		return buf.data;
 
 	Assert(gts != NULL || (extra_flags & (DEVKERNEL_NEEDS_GPUSCAN |
 										  DEVKERNEL_NEEDS_GPUJOIN |
 										  DEVKERNEL_NEEDS_GPUSORT)) == 0);
-	initStringInfo(&buf);
 
 	/* put timezone info */
 	if ((extra_flags & DEVKERNEL_NEEDS_TIMELIB) != 0)
@@ -1503,6 +1492,7 @@ pgstrom_startup_cuda_program(void)
 		dlist_init(&pgcache_head->hash_slots[i]);
 	}
 	dlist_init(&pgcache_head->lru_list);
+	dlist_init(&pgcache_head->build_list);
 }
 
 void
