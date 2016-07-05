@@ -68,8 +68,8 @@ CUDA_OBJS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__CUDA_OBJS))
 __CUDA_SOURCES = $(__CUDA_OBJS:.o=.c)
 CUDA_SOURCES = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__CUDA_SOURCES))
 
-__GPUINFO_CMD = gpuinfo
-GPUINFO_CMD = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__GPUINFO_CMD))
+__STROM_UTILS = gpuinfo kfunc_info
+STROM_UTILS = $(addprefix $(STROM_BUILD_ROOT)/utils/, $(__STROM_UTILS))
 
 #
 # Files to be packaged
@@ -77,11 +77,12 @@ GPUINFO_CMD = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__GPUINFO_CMD))
 __RPM_SPECFILE = pg_strom.spec
 RPM_SPECFILE = $(addprefix $(STROM_BUILD_ROOT)/, $(__RPM_SPECFILE))
 __MISC_FILES = LICENSE README.md pg_strom.control Makefile \
-	src/Makefile src/pg_strom.h src/pg_strom--1.0.sql \
-	src/$(__GPUINFO_CMD).c
-PACKAGE_FILES = $(__MISC_FILES)			\
-	$(addprefix src/,$(__STROM_SOURCES))	\
-	$(addprefix src/,$(__CUDA_SOURCES:.c=.h))
+	src/Makefile src/pg_strom.h src/pg_strom--1.0.sql
+
+PACKAGE_FILES = $(__MISC_FILES)					\
+	$(addprefix src/,$(__STROM_SOURCES))		\
+	$(addprefix src/,$(__CUDA_SOURCES:.c=.h))	\
+	$(addprefix utils/,$(addsuffix .c,$(__STROM_UTILS)))
 __STROM_TGZ = pg_strom-$(PGSTROM_VERSION).tar.gz
 STROM_TGZ = $(addprefix $(STROM_BUILD_ROOT)/, $(__STROM_TGZ))
 
@@ -205,9 +206,9 @@ DATA = $(addprefix $(STROM_BUILD_ROOT)/src/, pg_strom--1.0.sql)
 endif
 
 # Support utilities
-SCRIPTS_built = $(GPUINFO_CMD)
+SCRIPTS_built = $(STROM_UTILS)
 # Extra files to be cleaned
-EXTRA_CLEAN = $(CUDA_SOURCES) $(HTML_FILES) $(GPUINFO_CMD) \
+EXTRA_CLEAN = $(CUDA_SOURCES) $(HTML_FILES) $(STROM_UTILS) \
 	$(shell test pg_strom.control -ef $(addprefix $(STROM_BUILD_ROOT)/src/, pg_strom.control) || echo pg_strom.control) \
 	$(STROM_BUILD_ROOT)/__tarball $(STROM_TGZ)
 
@@ -228,8 +229,8 @@ $(CUDA_SOURCES): $(CUDA_SOURCES:.c=.h)
 	      -e 's/^/  "/g' -e 's/$$/\\n"/g' < $*.h;		\
 	  echo ";") > $@
 
-$(GPUINFO_CMD): $(addsuffix .c,$(GPUINFO_CMD))
-	$(CC) $(CFLAGS) $^ $(PGSTROM_FLAGS) -I $(IPATH) -L $(LPATH) -lcuda -o $@$(X)
+$(STROM_UTILS): $(addsuffix .c,$(STROM_UTILS))
+	$(CC) $(CFLAGS) $(addsuffix .c,$@) $(PGSTROM_FLAGS) -I $(IPATH) -L $(LPATH) -lcuda -lnvrtc -o $@$(X)
 
 $(HTML_FILES): $(HTML_SOURCES) $(HTML_TEMPLATE)
 	@$(MKDIR_P) $(STROM_BUILD_ROOT)/doc/html
@@ -243,6 +244,7 @@ html: $(HTML_FILES)
 
 $(STROM_TGZ): $(addprefix $(STROM_BUILD_ROOT)/, $(PACKAGE_FILES))
 	$(MKDIR_P) $(STROM_BUILD_ROOT)/__tarball/$(@:.tar.gz=)/src
+	$(MKDIR_P) $(STROM_BUILD_ROOT)/__tarball/$(@:.tar.gz=)/utils
 	$(foreach x,$(PACKAGE_FILES),cp -f $(STROM_BUILD_ROOT)/$x $(STROM_BUILD_ROOT)/__tarball/$(@:.tar.gz=)/$(x);)
 	tar zc -C $(STROM_BUILD_ROOT)/__tarball $(@:.tar.gz=) > $@
 
