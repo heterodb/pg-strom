@@ -310,17 +310,6 @@ typedef struct plcudaState
 	GpuContext	   *gcontext;
 	plcudaInfo		cf_info;
 	kern_plcuda	   *kplcuda_head;	/* template */
-	/* helper functions */
-	FmgrInfo		fmgr_prep_num_threads;
-	FmgrInfo		fmgr_prep_shmem_unitsz;
-	FmgrInfo		fmgr_main_num_threads;
-	FmgrInfo		fmgr_main_shmem_unitsz;
-	FmgrInfo		fmgr_post_num_threads;
-	FmgrInfo		fmgr_post_shmem_unitsz;
-	FmgrInfo		fmgr_working_bufsz;
-	FmgrInfo		fmgr_results_bufsz;
-	FmgrInfo		fmgr_sanity_check;
-	FmgrInfo		fmgr_cpu_fallback;
 	/* GPU resources */
 	cl_int			cuda_index;
 	CUfunction		kern_prep;
@@ -1119,38 +1108,6 @@ plcuda_exec_begin(Form_pg_proc procForm, plcudaInfo *cf_info)
 		kplcuda->__retval[sizeof(CUdeviceptr)] = true;
 	state->kplcuda_head = kplcuda;
 
-	/* helper functions */
-	if (OidIsValid(cf_info->fn_prep_num_threads))
-		fmgr_info(cf_info->fn_prep_num_threads,
-				  &state->fmgr_prep_num_threads);
-	if (OidIsValid(cf_info->fn_prep_shmem_unitsz))
-		fmgr_info(cf_info->fn_prep_shmem_unitsz,
-				  &state->fmgr_prep_shmem_unitsz);
-	if (OidIsValid(cf_info->fn_main_num_threads))
-		fmgr_info(cf_info->fn_main_num_threads,
-				  &state->fmgr_main_num_threads);
-	if (OidIsValid(cf_info->fn_main_shmem_unitsz))
-		fmgr_info(cf_info->fn_main_shmem_unitsz,
-				  &state->fmgr_main_shmem_unitsz);
-	if (OidIsValid(cf_info->fn_post_num_threads))
-		fmgr_info(cf_info->fn_post_num_threads,
-				  &state->fmgr_post_num_threads);
-	if (OidIsValid(cf_info->fn_post_shmem_unitsz))
-		fmgr_info(cf_info->fn_post_shmem_unitsz,
-				  &state->fmgr_post_shmem_unitsz);
-	if (OidIsValid(cf_info->fn_working_bufsz))
-		fmgr_info(cf_info->fn_working_bufsz,
-				  &state->fmgr_working_bufsz);
-	if (OidIsValid(cf_info->fn_results_bufsz))
-		fmgr_info(cf_info->fn_results_bufsz,
-				  &state->fmgr_results_bufsz);
-	if (OidIsValid(cf_info->fn_sanity_check))
-		fmgr_info(cf_info->fn_sanity_check,
-				  &state->fmgr_sanity_check);
-	if (OidIsValid(cf_info->fn_cpu_fallback))
-		fmgr_info(cf_info->fn_cpu_fallback,
-				  &state->fmgr_cpu_fallback);
-
 	/* track state */
 	dlist_push_head(&plcuda_state_list, &state->chain);
 
@@ -1411,29 +1368,39 @@ PG_FUNCTION_INFO_V1(plcuda_function_validator);
 
 
 static inline Datum
-kernel_launch_param(FunctionCallInfo fcinfo,
-					FmgrInfo *__flinfo, Datum const_setting)
+kernel_launch_helper(FunctionCallInfo __fcinfo,	/* PL/CUDA's fcinfo */
+					 Oid helper_func_oid,
+					 Datum static_config,
+					 bool *p_isnull)	/* may be NULL, if don't allow NULL */
 {
-	FunctionCallInfoData __fcinfo;
-	Datum		__result;
+    FunctionCallInfoData fcinfo;
+	FmgrInfo	flinfo;
+	Datum		result;
 
-	if (!OidIsValid(__flinfo->fn_oid))
-		return const_setting;
+	if (!OidIsValid(helper_func_oid))
+		return static_config;
 
-	InitFunctionCallInfoData(__fcinfo, __flinfo,
-							 fcinfo->nargs,
-							 fcinfo->fncollation,
+	elog(INFO, "call function %u", helper_func_oid);
+	fmgr_info(helper_func_oid, &flinfo);
+	InitFunctionCallInfoData(fcinfo, &flinfo,
+							 __fcinfo->nargs,
+							 __fcinfo->fncollation,
 							 NULL, NULL);
-	memcpy(__fcinfo.arg, fcinfo->arg,
-		   sizeof(Datum) * fcinfo->nargs);
-	memcpy(__fcinfo.argnull, fcinfo->argnull,
-		   sizeof(bool) * fcinfo->nargs);
+	memcpy(fcinfo.arg, __fcinfo->arg,
+		   sizeof(Datum) * fcinfo.nargs);
+	memcpy(fcinfo.argnull, __fcinfo->argnull,
+		   sizeof(bool) * fcinfo.nargs);
 
-	__result = FunctionCallInvoke(&__fcinfo);
-	if (__fcinfo.isnull)
-		elog(ERROR, "function %u returned NULL", __fcinfo.flinfo->fn_oid);
-
-	return __result;
+	result = FunctionCallInvoke(&fcinfo);
+	if (fcinfo.isnull)
+	{
+		if (p_isnull)
+			*p_isnull = true;
+		else
+			elog(ERROR, "helper function %s returned NULL",
+				 format_procedure(helper_func_oid));
+	}
+	return result;
 }
 
 static kern_plcuda *
@@ -1763,7 +1730,6 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 	{
 		HeapTuple	tuple;
 		Datum		probin;
-		bool		isnull;
 
 		tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(flinfo->fn_oid));
 		if (!HeapTupleIsValid(tuple))
@@ -1785,21 +1751,24 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 	cf_info = &state->cf_info;
 
 	/* sanitycheck of the supplied arguments, prior to GPU launch */
-	if (!DatumGetBool(kernel_launch_param(fcinfo,
-										  &state->fmgr_sanity_check,
-										  BoolGetDatum(true))))
+	if (!DatumGetBool(kernel_launch_helper(fcinfo,
+										   cf_info->fn_sanity_check,
+										   BoolGetDatum(true),
+										   NULL)))
 		elog(ERROR, "function '%s' argument sanity check failed",
-			 format_procedure(state->fmgr_sanity_check.fn_oid));
+			 format_procedure(cf_info->fn_sanity_check));
 
 	/* determine the kernel launch parameters */
 	working_bufsz =
-		DatumGetInt64(kernel_launch_param(fcinfo,
-										  &state->fmgr_working_bufsz,
-										  cf_info->val_working_bufsz));
+		DatumGetInt64(kernel_launch_helper(fcinfo,
+										   cf_info->fn_working_bufsz,
+										   cf_info->val_working_bufsz,
+										   NULL));
 	results_bufsz =
-		DatumGetInt64(kernel_launch_param(fcinfo,
-										  &state->fmgr_results_bufsz,
-										  cf_info->val_results_bufsz));
+		DatumGetInt64(kernel_launch_helper(fcinfo,
+										   cf_info->fn_results_bufsz,
+										   cf_info->val_results_bufsz,
+										   NULL));
 	elog(DEBUG2, "working_bufsz = %zu, results_bufsz = %zu",
 		 working_bufsz, results_bufsz);
 
@@ -1811,13 +1780,15 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 	if (state->kern_prep)
 	{
 		kplcuda->prep_num_threads
-			= kernel_launch_param(fcinfo,
-								  &state->fmgr_prep_num_threads,
-								  cf_info->val_prep_num_threads);
+			= kernel_launch_helper(fcinfo,
+								   cf_info->fn_prep_num_threads,
+								   cf_info->val_prep_num_threads,
+								   NULL);
 		kplcuda->prep_shmem_unitsz
-			= kernel_launch_param(fcinfo,
-								  &state->fmgr_prep_shmem_unitsz,
-								  cf_info->val_prep_shmem_unitsz);
+			= kernel_launch_helper(fcinfo,
+								   cf_info->fn_prep_shmem_unitsz,
+								   cf_info->val_prep_shmem_unitsz,
+								   NULL);
 		elog(DEBUG2, "prep_num_threads = %u, prep_shmem_unitsz = %u",
 			 kplcuda->prep_num_threads, kplcuda->prep_shmem_unitsz);
 	}
@@ -1825,13 +1796,15 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 	if (state->kern_main)
 	{
 		kplcuda->main_num_threads
-			= kernel_launch_param(fcinfo,
-								  &state->fmgr_main_num_threads,
-								  cf_info->val_main_num_threads);
+			= kernel_launch_helper(fcinfo,
+								   cf_info->fn_main_num_threads,
+								   cf_info->val_main_num_threads,
+								   NULL);
 		kplcuda->main_shmem_unitsz
-			= kernel_launch_param(fcinfo,
-								  &state->fmgr_main_shmem_unitsz,
-								  cf_info->val_main_shmem_unitsz);
+			= kernel_launch_helper(fcinfo,
+								   cf_info->fn_main_shmem_unitsz,
+								   cf_info->val_main_shmem_unitsz,
+								   NULL);
 		elog(DEBUG2, "main_num_threads = %u, main_shmem_unitsz = %u",
 			 kplcuda->main_num_threads, kplcuda->main_shmem_unitsz);
 	}
@@ -1839,13 +1812,15 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 	if (state->kern_post)
 	{
 		kplcuda->post_num_threads
-			= kernel_launch_param(fcinfo,
-								  &state->fmgr_post_num_threads,
-								  cf_info->val_post_num_threads);
+			= kernel_launch_helper(fcinfo,
+								   cf_info->fn_post_num_threads,
+								   cf_info->val_post_num_threads,
+								   NULL);
 		kplcuda->post_shmem_unitsz
-			= kernel_launch_param(fcinfo,
-								  &state->fmgr_post_shmem_unitsz,
-								  cf_info->val_post_shmem_unitsz);
+			= kernel_launch_helper(fcinfo,
+								   cf_info->fn_post_shmem_unitsz,
+								   cf_info->val_post_shmem_unitsz,
+								   NULL);
 		elog(DEBUG2, "post_num_threads = %u, post_shmem_unitsz = %u",
 			 kplcuda->post_num_threads, kplcuda->post_shmem_unitsz);
 	}
@@ -1947,23 +1922,14 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 
 	if (kerror.errcode != StromError_Success)
 	{
-		FunctionCallInfoData __fcinfo;
-
 		if (kerror.errcode == StromError_CpuReCheck &&
-			OidIsValid(state->fmgr_cpu_fallback.fn_oid))
+			OidIsValid(cf_info->fn_cpu_fallback))
 		{
 			/* CPU fallback, if any */
-			InitFunctionCallInfoData(__fcinfo, &state->fmgr_cpu_fallback,
-									 fcinfo->nargs,
-									 fcinfo->fncollation,
-									 NULL, NULL);
-			memcpy(__fcinfo.arg, fcinfo->arg,
-				   sizeof(Datum) * fcinfo->nargs);
-			memcpy(__fcinfo.argnull, fcinfo->argnull,
-				   sizeof(bool) * fcinfo->nargs);
-
-			retval = FunctionCallInvoke(&__fcinfo);
-			isnull = __fcinfo.isnull;
+			retval = kernel_launch_helper(fcinfo,
+										  cf_info->fn_cpu_fallback,
+										  (Datum)0,
+										  &isnull);
 		}
 		else
 		{
