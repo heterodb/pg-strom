@@ -1165,3 +1165,43 @@ array_matrix_transpose_float8(PG_FUNCTION_ARGS)
 	PG_RETURN_POINTER(result);
 }
 PG_FUNCTION_INFO_V1(array_matrix_transpose_float8);
+
+/*
+ * float4_as_int4, int4_as_float4
+ * float8_as_int8, int8_as_float8
+ *
+ * Re-interpretation of integer/floating-point values.
+ * When we want to back a pair of integer + floating-point, because of the
+ * characteristict of matrix, either of them have to be packed to others.
+ * However, simple cast may make problem because FP32 has only 22-bit for
+ * mantissa; it is not sufficient to pack ID value more than 4M.
+ * Usual type cast makes problem for these values. So, we provide several
+ * type re-interpretation routines as CUDA doing.
+ */
+Datum
+float4_as_int4(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_DATUM(GET_4_BYTES(PG_GETARG_DATUM(0)));
+}
+PG_FUNCTION_INFO_V1(float4_as_int4);
+
+Datum
+int4_as_float4(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_DATUM(GET_4_BYTES(PG_GETARG_DATUM(0)));
+}
+PG_FUNCTION_INFO_V1(int4_as_float4);
+
+Datum
+float8_as_int8(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_DATUM(GET_8_BYTES(PG_GETARG_DATUM(0)));
+}
+PG_FUNCTION_INFO_V1(float8_as_int8);
+
+Datum
+int8_as_float8(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_DATUM(GET_8_BYTES(PG_GETARG_DATUM(0)));
+}
+PG_FUNCTION_INFO_V1(int8_as_float8);
