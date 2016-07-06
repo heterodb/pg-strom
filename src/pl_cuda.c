@@ -554,7 +554,14 @@ plcuda_code_validation(plcudaInfo *cf_info,
 	{
 		const char *cmd;
 		const char *pos;
+		char	   *end;
 		List	   *options;
+
+		/* Trimming of whitespace in the tail */
+		/* NOTE: DOS/Windows uses '\r\n' for line-feed */
+		end = line + strlen(line) - 1;
+		while (line <= end && isspace(*end))
+			*end-- = '\0';
 
 		/* put a non pl/cuda command line*/
 		if (strncmp(line, "#plcuda_", 8) != 0)
