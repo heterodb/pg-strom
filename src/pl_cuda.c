@@ -1380,7 +1380,6 @@ kernel_launch_helper(FunctionCallInfo __fcinfo,	/* PL/CUDA's fcinfo */
 	if (!OidIsValid(helper_func_oid))
 		return static_config;
 
-	elog(INFO, "call function %u", helper_func_oid);
 	fmgr_info(helper_func_oid, &flinfo);
 	InitFunctionCallInfoData(fcinfo, &flinfo,
 							 __fcinfo->nargs,

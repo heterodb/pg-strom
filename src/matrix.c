@@ -384,8 +384,7 @@ array_matrix_height(PG_FUNCTION_ARGS)
 
 	if (VARATT_IS_EXPANDED_HEADER(M) ||
 		!VALIDATE_ARRAY_MATRIX(M))
-		abort();
-//		elog(ERROR, "not a matrix-like array");
+		elog(ERROR, "not a matrix-like array");
 	PG_RETURN_INT32(ARRAY_MATRIX_HEIGHT(M));
 }
 PG_FUNCTION_INFO_V1(array_matrix_height);
@@ -397,8 +396,7 @@ array_matrix_width(PG_FUNCTION_ARGS)
 
 	if (VARATT_IS_EXPANDED_HEADER(M) ||
 		!VALIDATE_ARRAY_MATRIX(M))
-		abort();
-//		elog(ERROR, "not a matrix-like array");
+		elog(ERROR, "not a matrix-like array");
 	PG_RETURN_INT32(ARRAY_MATRIX_WIDTH(M));
 }
 PG_FUNCTION_INFO_V1(array_matrix_width);
@@ -530,6 +528,7 @@ array_martix_rbind(Oid elemtype, MatrixType *X, MatrixType *Y)
 	x_height = ARRAY_MATRIX_HEIGHT(X);
 	y_height = ARRAY_MATRIX_HEIGHT(Y);
 	r_height = x_height + y_height;
+
 	length = ARRAY_MATRIX_RAWSIZE(typlen, r_width, r_height);
 	R = palloc(length);
 	SET_VARSIZE(R, length);
@@ -749,13 +748,13 @@ array_matrix_rbind_accum(PG_FUNCTION_ARGS)
 	else
 	{
 		mrstate = (matrix_rbind_state *)PG_GETARG_POINTER(0);
-		if (mrstate->elemtype == ARRAY_MATRIX_ELEMTYPE(X))
+		if (mrstate->elemtype != ARRAY_MATRIX_ELEMTYPE(X))
 			elog(ERROR, "element type of input array mismatch '%s' for '%s'",
 				 format_type_be(ARRAY_MATRIX_ELEMTYPE(X)),
 				 format_type_be(mrstate->elemtype));
 	}
 
-	mrstate->width = Max(mrstate->width, ARRAY_MATRIX_ELEMTYPE(X));
+	mrstate->width = Max(mrstate->width, ARRAY_MATRIX_WIDTH(X));
 	mrstate->height += ARRAY_MATRIX_HEIGHT(X);
 	mrstate->matrix_list = lappend(mrstate->matrix_list, X);
 
@@ -810,7 +809,7 @@ array_matrix_rbind_final(matrix_rbind_state *mrstate)
 
 		Assert(VALIDATE_ARRAY_MATRIX(X));
 		src = ARRAY_MATRIX_DATAPTR(X);
-		dst = ARRAY_MATRIX_DATAPTR(X) + typlen * row_index;
+		dst = ARRAY_MATRIX_DATAPTR(R) + typlen * row_index;
 		for (i=0; i < width; i++)
 		{
 			if (i < x_width)
@@ -928,7 +927,7 @@ array_matrix_cbind_accum(PG_FUNCTION_ARGS)
 	else
 	{
 		mcstate = (matrix_cbind_state *)PG_GETARG_POINTER(0);
-		if (mcstate->elemtype == ARRAY_MATRIX_ELEMTYPE(X))
+		if (mcstate->elemtype != ARRAY_MATRIX_ELEMTYPE(X))
 			elog(ERROR, "element type of input array mismatch '%s' for '%s'",
 				 format_type_be(ARRAY_MATRIX_ELEMTYPE(X)),
 				 format_type_be(mcstate->elemtype));
