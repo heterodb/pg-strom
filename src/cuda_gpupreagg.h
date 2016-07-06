@@ -551,7 +551,7 @@ gpupreagg_preparation(kern_gpupreagg *kgpreagg,
 	/* calculation of total number of rows to be processed in this work-
 	 * group.
 	 */
-	offset = arithmetic_stairlike_add(tupitem != NULL ? 1 : 0, &count);
+	offset = pgstromStairlikeSum(tupitem != NULL ? 1 : 0, &count);
 
 	/* Allocation of the result slot on the kds_src. */
 	if (get_local_id() == 0)
@@ -861,8 +861,8 @@ gpupreagg_local_reduction(kern_gpupreagg *kgpreagg,
 	 * have same hash-index with get_local_id(0)) takes a place on the
 	 * destination kern_data_store.
 	 */
-	index = arithmetic_stairlike_add(get_local_id() == owner_index ? 1 : 0,
-									 &count);
+	index = pgstromStairlikeSum(get_local_id() == owner_index ? 1 : 0,
+								&count);
 	if (get_local_id() == 0)
 		base = atomicAdd(&kresults->nitems, count);
 	__syncthreads();
@@ -1127,9 +1127,9 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 	 * So, we can use kds->nrooms to check array boundary.
 	 */
 	__syncthreads();
-	index = arithmetic_stairlike_add(owner_index != (cl_uint)(0xffffffff) &&
-									 owner_index == kds_index ? 1 : 0,
-									 &count);
+	index = pgstromStairlikeSum(owner_index != (cl_uint)(0xffffffff) &&
+								owner_index == kds_index ? 1 : 0,
+								&count);
 	if (count > 0)
 	{
 		if (get_local_id() == 0)
@@ -1177,7 +1177,7 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 	}
 out:
 	/* collect run-time statistics */
-	arithmetic_stairlike_add(nconflicts, &count);
+	pgstromStairlikeSum(nconflicts, &count);
 	if (count > 0 && get_local_id() == 0)
 		atomicAdd(&kgpreagg->ghash_conflicts, count);
 	__syncthreads();
@@ -1455,8 +1455,8 @@ retry_minor:
 out:
 	/* Do we try to update kds_final again on the next kernel call? */
 	__syncthreads();
-	index = arithmetic_stairlike_add(owner_index == 0xfffffffeU ? 1 : 0,
-									 &count);
+	index = pgstromStairlikeSum(owner_index == 0xfffffffeU ? 1 : 0,
+								&count);
 	if (count > 0)
 	{
 		__shared__ cl_uint base;
@@ -1469,17 +1469,17 @@ out:
 	}
 
 	/* update run-time statistics */
-	arithmetic_stairlike_add(isOwner ? 1 : 0, &count);
+	pgstromStairlikeSum(isOwner ? 1 : 0, &count);
 	if (count > 0 && get_local_id() == 0)
 		atomicAdd(&kgpreagg->num_groups, count);
 	__syncthreads();
 
-	arithmetic_stairlike_add(allocated, &count);
+	pgstromStairlikeSum(allocated, &count);
 	if (count > 0 && get_local_id() == 0)
 		atomicAdd(&kgpreagg->varlena_usage, count);
 	__syncthreads();
 
-	arithmetic_stairlike_add(nconflicts, &count);
+	pgstromStairlikeSum(nconflicts, &count);
 	if (count > 0 && get_local_id() == 0)
 		atomicAdd(&kgpreagg->fhash_conflicts, count);
 	__syncthreads();
@@ -1543,7 +1543,7 @@ gpupreagg_fixup_varlena(kern_gpupreagg *kgpreagg,
 			}
 		}
 		/* allocation of the extra buffer on demand */
-		offset = arithmetic_stairlike_add(numeric_len, &count);
+		offset = pgstromStairlikeSum(numeric_len, &count);
 		if (get_local_id() == 0)
 		{
 			if (count > 0)

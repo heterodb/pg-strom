@@ -1712,7 +1712,7 @@ STROMCL_VARLENA_TYPE_TEMPLATE(bytea)
  * ------------------------------------------------------------------ */
 
 /*
- * arithmetic_stairlike_add
+ * pgstromStairlikeSum
  *
  * A utility routine to calculate sum of values when we have N items and 
  * want to know sum of items[i=0...k] (k < N) for each k, using reduction
@@ -1747,7 +1747,7 @@ STROMCL_VARLENA_TYPE_TEMPLATE(bytea)
  * use within if-blocks.
  */
 STATIC_FUNCTION(cl_uint)
-arithmetic_stairlike_add(cl_uint my_value, cl_uint *total_sum)
+pgstromStairlikeSum(cl_uint my_value, cl_uint *total_sum)
 {
 	cl_uint	   *items = SHARED_WORKMEM(cl_uint);
 	cl_uint		local_sz;

@@ -238,7 +238,7 @@ gpujoin_exec_outerscan(kern_gpujoin *kgjoin,
 		matched = false;
 
 	/* expand kresults->nitems */
-	offset = arithmetic_stairlike_add(matched ? 1 : 0, &count);
+	offset = pgstromStairlikeSum(matched ? 1 : 0, &count);
 	if (count > 0)
 	{
 		if (get_local_id() == 0)
@@ -339,7 +339,7 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 	/*
 	 * Expand kresults_dst->nitems, and put values
 	 */
-	offset = arithmetic_stairlike_add(is_matched ? 1 : 0, &count);
+	offset = pgstromStairlikeSum(is_matched ? 1 : 0, &count);
 	if (count > 0)
 	{
 		if (get_local_id() == 0)
@@ -477,7 +477,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 			is_matched = false;
 
 		/* Expand kresults_dst->nitems */
-		offset = arithmetic_stairlike_add(is_matched ? 1 : 0, &count);
+		offset = pgstromStairlikeSum(is_matched ? 1 : 0, &count);
 		if (count > 0)
 		{
 			if (get_local_id() == 0)
@@ -502,7 +502,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 		 * (NOTE: this routine contains reduction operation)
 		 */
 		khitem = KERN_HASH_NEXT_ITEM(kds_hash, khitem);
-		arithmetic_stairlike_add(khitem != NULL ? 1 : 0, &count);
+		pgstromStairlikeSum(khitem != NULL ? 1 : 0, &count);
 	} while (count > 0);
 
 	/*
@@ -525,7 +525,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 		else
 			is_matched = false;
 
-		offset = arithmetic_stairlike_add(is_matched ? 1 : 0, &count);
+		offset = pgstromStairlikeSum(is_matched ? 1 : 0, &count);
 		if (count > 0)
 		{
 			if (get_local_id() == 0)
@@ -631,7 +631,7 @@ gpujoin_outer_nestloop(kern_gpujoin *kgjoin,
 	 * relations. Then, we allocates slot in kresults_dst for outer-join
 	 * tuples.
 	 */
-	offset = arithmetic_stairlike_add(needs_outer_row ? 1 : 0, &count);
+	offset = pgstromStairlikeSum(needs_outer_row ? 1 : 0, &count);
 	if (count > 0)
 	{
 		if (get_local_id() == 0)
@@ -721,7 +721,7 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 		needs_outer_row = false;
 
 	/* expand kresults->nitems */
-	offset = arithmetic_stairlike_add(needs_outer_row ? 1 : 0, &count);
+	offset = pgstromStairlikeSum(needs_outer_row ? 1 : 0, &count);
 	if (count > 0)
 	{
 		if (get_local_id() == 0)
@@ -829,7 +829,7 @@ gpujoin_projection_row(kern_gpujoin *kgjoin,
 	/*
 	 * Step.2 - increment the buffer usage of kds_dst
 	 */
-	offset = arithmetic_stairlike_add(required, &count);
+	offset = pgstromStairlikeSum(required, &count);
 	if (count > 0)
 	{
 		if (get_local_id() == 0)
@@ -932,7 +932,7 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 	 */
 	assert(extra_len <= GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE);
 	assert(extra_len == MAXALIGN(extra_len));
-	offset = arithmetic_stairlike_add(extra_len, &count);
+	offset = pgstromStairlikeSum(extra_len, &count);
 	if (count > 0)
 	{
 		if (get_local_id() == 0)

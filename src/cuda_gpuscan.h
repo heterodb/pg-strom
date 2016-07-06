@@ -140,7 +140,7 @@ gpuscan_exec_quals(kern_gpuscan *kgpuscan,
 		rc = false;
 
 	/* expand kresults buffer */
-	offset = arithmetic_stairlike_add(rc ? 1 : 0, &count);
+	offset = pgstromStairlikeSum(rc ? 1 : 0, &count);
 	if (count > 0)
 	{
 		if (get_local_id() == 0)
@@ -250,7 +250,7 @@ gpuscan_projection_row(kern_gpuscan *kgpuscan,
 	/*
 	 * step.2 - increment the buffer usage of kds_dst
 	 */
-	offset = arithmetic_stairlike_add(required, &count);
+	offset = pgstromStairlikeSum(required, &count);
 	if (count > 0)
 	{
 		if (get_local_id() == 0)
