@@ -990,7 +990,7 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 			"\n"
 			"    /* allocation of variable length buffer */\n"
 			"    vl_len = MAXALIGN(vl_len);\n"
-			"    offset = arithmetic_stairlike_add(vl_len, &count);\n"
+			"    offset = pgstromStairlikeSum(vl_len, &count);\n"
 			"    if (get_local_id() == 0)\n"
 			"    {\n"
 			"      if (count > 0)\n"

@@ -943,3 +943,26 @@ CREATE FUNCTION pg_catalog.transpose(float8[])
   RETURNS float8[]
   AS 'MODULE_PATHNAME','array_matrix_transpose_float8'
   LANGUAGE C STRICT;
+
+--
+-- Type re-interpretation routines
+--
+CREATE FUNCTION pg_catalog.float4_as_int4(float4)
+  RETURNS int4
+  AS 'MODULE_PATHNAME','float4_as_int4'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.int4_as_float4(int4)
+  RETURNS float4
+  AS 'MODULE_PATHNAME','int4_as_float4'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.float8_as_int8(float8)
+  RETURNS int8
+  AS 'MODULE_PATHNAME','float8_as_int8'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.int8_as_float8(int8)
+  RETURNS int8
+  AS 'MODULE_PATHNAME','int8_as_float8'
+  LANGUAGE C STRICT;

@@ -124,7 +124,7 @@ gpusort_projection(kern_gpusort *kgpusort,
 		tupitem = (kern_tupitem *)((char *)kds_in +
 								   row_index[get_global_id()]);
 	}
-	nrows_ofs = arithmetic_stairlike_add(tupitem != NULL ? 1 : 0, &nrows_sum);
+	nrows_ofs = pgstromStairlikeSum(tupitem != NULL ? 1 : 0, &nrows_sum);
 
 	/*
 	 * Quick bailout if we have no hope for buffer allocation on the current
@@ -175,7 +175,7 @@ gpusort_projection(kern_gpusort *kgpusort,
 		assert(extra_len == MAXALIGN(extra_len));
 	}
 	/* consumption of the extra buffer by this block */
-	extra_ofs = arithmetic_stairlike_add(extra_len, &extra_sum);
+	extra_ofs = pgstromStairlikeSum(extra_len, &extra_sum);
 
 	/* buffer allocation on the current sorting block, by atomic operations */
 	if (get_local_id() == 0)
