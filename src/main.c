@@ -217,6 +217,7 @@ _PG_init(void)
 	pgstrom_init_datastore();
 
 	/* registration of custom-scan providers */
+	pgstrom_init_gputasks();
 	pgstrom_init_gpuscan();
 //	pgstrom_init_gpujoin();
 //	pgstrom_init_gpupreagg();

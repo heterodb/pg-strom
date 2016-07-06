@@ -43,7 +43,7 @@ __STROM_OBJS = main.o codegen.o datastore.o aggfuncs.o \
 		cuda_control.o cuda_program.o cuda_mmgr.o \
 		dma_buffer.o gpu_device.o gpu_context.o gpu_server.o \
 		pl_cuda.o matrix.o \
-		gpuscan.o #gpujoin.o gpupreagg.o gpusort.o
+		gputasks.o gpuscan.o #gpujoin.o gpupreagg.o gpusort.o
 
 
 STROM_OBJS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__STROM_OBJS))

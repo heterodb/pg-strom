@@ -135,12 +135,66 @@ typedef struct GpuContext_v2
 typedef cl_long					ProgramId;
 #define INVALID_PROGRAM_ID		(-1L)
 
+/* Identifier of GpuTask */
+typedef enum {
+	GpuTaskKind_GpuScan,
+	GpuTaskKind_GpuJoin,
+	GpuTaskKind_GpuPreAgg,
+	GpuTaskKind_GpuSort,
+	GpuTaskKind_PL_CUDA,
+} GpuTaskKind;
 
+struct GpuTask_v2;
 
+/*
+ * GpuTaskState_v2
+ *
+ * A common structure of the state machine of GPU related tasks.
+ */
+struct GpuTaskState_v2
+{
+	CustomScanState	css;
+	GpuContext_v2  *gcontext;
+	GpuTaskKind		task_kind;		/* one of GpuTaskKind_* */
+	ProgramId		program_id;		/* CUDA Program (to be acquired) */
+	cl_uint			revision;		/* incremented for each ExecRescan */
+	kern_parambuf  *kern_params;	/* Const/Param buffer */
+	bool			scan_done;		/* True, if no more rows to read */
+	bool			row_format;		/* True, if KDS_FORMAT_ROW is required */
 
+	bool			outer_bulk_exec;/* True, if it scans outer by bulk-exec */
+	Instrumentation	outer_instrument; /* runtime statistics, if any */
+	TupleTableSlot *scan_overflow;	/* temporary buffer, if no space on PDS */
 
+	cl_long			curr_index;		/* current position on the curr_task */
+	struct GpuTask_v2 *curr_task;	/* a GpuTask currently processed */
 
+	dlist_head		ready_tasks;	/* list of tasks already processed */
+	cl_uint			num_running_tasks; /* # of tasks sent to GPU server */
+	cl_uint			num_ready_tasks;/* length of the 'ready_tasks' */
+	pgstrom_perfmon	pfm;			/* performance monitor */
+};
+typedef struct GpuTaskState_v2 GpuTaskState_v2;
 
+/*
+ * GpuTask
+ *
+ * It is a unit of task to be sent GPU server. Thus, this object must be
+ * allocated on the DMA buffer area.
+ */
+struct GpuTask_v2
+{
+	GpuTaskKind		task_kind;		/* same with GTS's one */
+	ProgramId		program_id;		/* same with GTS's one */
+	cl_uint			revision;		/* same with GTS's one when kicked */
+	dlist_head		chain;			/* link to the task state list */
+	GpuTaskState_v2 *gts;			/* GTS reference in the backend */
+	CUstream		cuda_stream;	/* CUDA stream for this task */
+	CUmodule		cuda_module;	/* CUDA module for this task */
+	bool			cpu_fallback;	/* true, if task needs CPU fallback */
+	kern_errorbuf	kerror;			/* error status on CUDA kernel */
+};
+typedef struct GpuTask_v2 GpuTask_v2;
 
 
 
@@ -383,7 +437,19 @@ extern GpuTask *gpuservRecvGpuTask(GpuContext_v2 *gcontext, int *peer_fd);
 
 extern void pgstrom_init_gpu_server(void);
 
-
+/* service routines */
+extern void optimal_workgroup_size(size_t *p_grid_size,
+								   size_t *p_block_size,
+								   CUfunction function,
+								   CUdevice device,
+								   size_t nitems,
+								   size_t dynamic_shmem_per_thread);
+extern void largest_workgroup_size(size_t *p_grid_size,
+								   size_t *p_block_size,
+								   CUfunction function,
+								   CUdevice device,
+								   size_t nitems,
+								   size_t dynamic_shmem_per_thread);
 
 
 
@@ -437,24 +503,19 @@ extern bool pgstrom_recheck_gputask(GpuTaskState *gts, TupleTableSlot *slot);
 extern void pgstrom_cleanup_gputask_cuda_resources(GpuTask *gtask);
 extern size_t gpuLocalMemSize(void);
 extern cl_uint gpuMaxThreadsPerBlock(void);
-extern void optimal_workgroup_size(size_t *p_grid_size,
-								   size_t *p_block_size,
-								   CUfunction function,
-								   CUdevice device,
-								   size_t nitems,
-								   size_t dynamic_shmem_per_thread);
-extern void largest_workgroup_size(size_t *p_grid_size,
-								   size_t *p_block_size,
-								   CUfunction function,
-								   CUdevice device,
-								   size_t nitems,
-								   size_t dynamic_shmem_per_thread);
 extern void pgstrom_init_cuda_control(void);
 extern cl_ulong pgstrom_baseline_cuda_capability(void);
-extern const char *errorText(int errcode);
-extern const char *errorTextKernel(kern_errorbuf *kerror);
 extern Datum pgstrom_scoreboard_info(PG_FUNCTION_ARGS);
 extern Datum pgstrom_device_info(PG_FUNCTION_ARGS);
+
+/*
+ * gpu_tasks.c
+ */
+
+
+extern const char *errorText(int errcode);
+extern const char *errorTextKernel(kern_errorbuf *kerror);
+extern void pgstrom_init_gputasks(void);
 
 /*
  * cuda_program.c

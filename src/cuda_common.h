@@ -215,7 +215,7 @@ typedef uintptr_t		hostptr_t;
 #define StromError_DataStoreOutOfRange		2002 /* out of KDS range access */
 #define StromError_SanityCheckViolation		2003 /* sanity check violation */
 #define StromError_WrongCodeGeneration		2004 /* Bugs on code generation */
-#define StromError_CudaDevRunTimeBase	   10000 /* Base value for runtime */
+#define StromError_CudaDevRunTimeBase	 1000000 /* Base value for runtime */
 
 /*
  * Kernel functions identifier

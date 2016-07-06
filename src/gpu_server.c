@@ -22,6 +22,7 @@
 #include "utils/guc.h"
 #include "utils/memutils.h"
 #include "pg_strom.h"
+#include "cuda_dynpara.h"
 
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -825,4 +826,145 @@ pgstrom_init_gpu_server(void)
 	shmem_startup_hook = pgstrom_startup_gpu_server;
 	/* cleanup of UNIX domain socket */
 	on_proc_exit(gpuserv_on_postmaster_exit, 0);
+}
+
+/* ----------------------------------------------------------------
+ *
+ * Service routines for handlers working on GPU server context
+ *
+ * ----------------------------------------------------------------
+ */
+
+/*
+ * optimal_workgroup_size - calculates the optimal block size
+ * according to the function and device attributes
+ */
+void
+optimal_workgroup_size(size_t *p_grid_size,
+					   size_t *p_block_size,
+					   CUfunction function,
+					   CUdevice device,
+					   size_t nitems,
+					   size_t dynamic_shmem_per_thread)
+{
+	cl_uint		grid_size;
+	cl_uint		block_size;
+	cl_int		funcMaxThreadsPerBlock;
+	cl_int		staticShmemSize;
+	cl_int		warpSize;
+	cl_int		devMaxThreadsPerBlock;
+	cl_int		maxThreadsPerMultiProcessor;
+	CUresult	rc;
+
+	/* get max number of thread per block on this kernel function */
+	rc = cuFuncGetAttribute(&funcMaxThreadsPerBlock,
+							CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK,
+							function);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
+
+	/* get statically allocated shared memory */
+	rc = cuFuncGetAttribute(&staticShmemSize,
+							CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES,
+							function);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
+
+	/* get device warp size */
+	rc = cuDeviceGetAttribute(&warpSize,
+							  CU_DEVICE_ATTRIBUTE_WARP_SIZE,
+							  device);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
+
+	/* get device limit of thread/block ratio */
+	rc = cuDeviceGetAttribute(&devMaxThreadsPerBlock,
+							  CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK,
+							  device);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
+
+	/* get device limit of thread/multiprocessor ratio */
+	rc = cuDeviceGetAttribute(&maxThreadsPerMultiProcessor,
+						CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_MULTIPROCESSOR,
+							  device);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
+
+	rc = __optimal_workgroup_size(&grid_size,
+								  &block_size,
+								  nitems,
+								  function,
+								  funcMaxThreadsPerBlock,
+								  staticShmemSize,
+								  dynamic_shmem_per_thread,
+								  warpSize,
+								  devMaxThreadsPerBlock,
+								  maxThreadsPerMultiProcessor,
+								  0);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on calculation of optimal workgroup size: %s",
+			 errorText(rc));
+	*p_grid_size = (size_t) grid_size;
+	*p_block_size = (size_t) block_size;
+}
+
+void
+largest_workgroup_size(size_t *p_grid_size,
+					   size_t *p_block_size,
+					   CUfunction function,
+					   CUdevice device,
+					   size_t nitems,
+					   size_t dynamic_shmem_per_thread)
+{
+	cl_uint		grid_size;
+	cl_uint		block_size;
+	cl_int		kernel_max_blocksz;
+	cl_int		static_shmem_sz;
+	cl_int		warp_size;
+	cl_int		max_shmem_per_block;
+	CUresult	rc;
+
+    /* get max number of thread per block on this kernel function */
+    rc = cuFuncGetAttribute(&kernel_max_blocksz,
+                            CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK,
+                            function);
+    if (rc != CUDA_SUCCESS)
+        elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
+
+    /* get statically allocated shared memory */
+    rc = cuFuncGetAttribute(&static_shmem_sz,
+                            CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES,
+                            function);
+    if (rc != CUDA_SUCCESS)
+        elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
+
+    /* get device warp size */
+    rc = cuDeviceGetAttribute(&warp_size,
+                              CU_DEVICE_ATTRIBUTE_WARP_SIZE,
+                              device);
+    if (rc != CUDA_SUCCESS)
+        elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
+
+    /* get device limit of thread/block ratio */
+    rc = cuDeviceGetAttribute(&max_shmem_per_block,
+                              CU_DEVICE_ATTRIBUTE_SHARED_MEMORY_PER_BLOCK,
+                              device);
+    if (rc != CUDA_SUCCESS)
+        elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
+
+	rc = __largest_workgroup_size(&grid_size,
+								  &block_size,
+								  nitems,
+								  kernel_max_blocksz,
+								  static_shmem_sz,
+								  dynamic_shmem_per_thread,
+								  warp_size,
+								  max_shmem_per_block);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on calculation of largest workgroup size: %s",
+			 errorText(rc));
+
+	*p_grid_size = (size_t) grid_size;
+	*p_block_size = (size_t) block_size;
 }
