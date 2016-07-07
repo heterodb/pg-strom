@@ -21,6 +21,350 @@
 #include "pg_strom.h"
 
 
+/*
+ * construct_kern_parambuf
+ *
+ * It construct a kernel parameter buffer to deliver Const/Param nodes.
+ *
+ * TODO: make this function static once we move all logics v2.0 based
+ */
+kern_parambuf *
+construct_kern_parambuf(List *used_params, ExprContext *econtext)
+{
+	StringInfoData	str;
+	kern_parambuf  *kparams;
+	char		padding[STROMALIGN_LEN];
+	ListCell   *cell;
+	Size		offset;
+	int			index = 0;
+	int			nparams = list_length(used_params);
+
+	memset(padding, 0, sizeof(padding));
+
+	/* seek to the head of variable length field */
+	offset = STROMALIGN(offsetof(kern_parambuf, poffset[nparams]));
+	initStringInfo(&str);
+	enlargeStringInfo(&str, offset);
+	memset(str.data, 0, offset);
+	str.len = offset;
+	/* walks on the Para/Const list */
+	foreach (cell, used_params)
+	{
+		Node   *node = lfirst(cell);
+
+		if (IsA(node, Const))
+		{
+			Const  *con = (Const *) node;
+
+			kparams = (kern_parambuf *)str.data;
+			if (con->constisnull)
+				kparams->poffset[index] = 0;	/* null */
+			else if (con->constbyval)
+			{
+				Assert(con->constlen > 0);
+				kparams->poffset[index] = str.len;
+				appendBinaryStringInfo(&str,
+									   (char *)&con->constvalue,
+									   con->constlen);
+			}
+			else
+			{
+				kparams->poffset[index] = str.len;
+				if (con->constlen > 0)
+					appendBinaryStringInfo(&str,
+										   DatumGetPointer(con->constvalue),
+										   con->constlen);
+				else
+					appendBinaryStringInfo(&str,
+                                           DatumGetPointer(con->constvalue),
+                                           VARSIZE(con->constvalue));
+			}
+		}
+		else if (IsA(node, Param))
+		{
+			ParamListInfo param_info = econtext->ecxt_param_list_info;
+			Param  *param = (Param *) node;
+
+			if (param_info &&
+				param->paramid > 0 && param->paramid <= param_info->numParams)
+			{
+				ParamExternData	*prm = &param_info->params[param->paramid - 1];
+
+				/* give hook a chance in case parameter is dynamic */
+				if (!OidIsValid(prm->ptype) && param_info->paramFetch != NULL)
+					(*param_info->paramFetch) (param_info, param->paramid);
+
+				kparams = (kern_parambuf *)str.data;
+				if (!OidIsValid(prm->ptype))
+				{
+					elog(INFO, "debug: Param has no particular data type");
+					kparams->poffset[index++] = 0;	/* null */
+					continue;
+				}
+				/* safety check in case hook did something unexpected */
+				if (prm->ptype != param->paramtype)
+					ereport(ERROR,
+							(errcode(ERRCODE_DATATYPE_MISMATCH),
+							 errmsg("type of parameter %d (%s) does not match that when preparing the plan (%s)",
+									param->paramid,
+									format_type_be(prm->ptype),
+									format_type_be(param->paramtype))));
+				if (prm->isnull)
+					kparams->poffset[index] = 0;	/* null */
+				else
+				{
+					int16	typlen;
+					bool	typbyval;
+
+					get_typlenbyval(prm->ptype, &typlen, &typbyval);
+					if (typbyval)
+					{
+						appendBinaryStringInfo(&str,
+											   (char *)&prm->value,
+											   typlen);
+					}
+					else if (typlen > 0)
+					{
+						appendBinaryStringInfo(&str,
+											   DatumGetPointer(prm->value),
+											   typlen);
+					}
+					else
+					{
+						appendBinaryStringInfo(&str,
+											   DatumGetPointer(prm->value),
+											   VARSIZE(prm->value));
+					}
+				}
+			}
+			else
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_UNDEFINED_OBJECT),
+						 errmsg("no value found for parameter %d",
+								param->paramid)));
+			}
+		}
+		else
+			elog(ERROR, "unexpected node: %s", nodeToString(node));
+
+		/* alignment */
+		if (STROMALIGN(str.len) != str.len)
+			appendBinaryStringInfo(&str, padding,
+								   STROMALIGN(str.len) - str.len);
+		index++;
+	}
+	Assert(STROMALIGN(str.len) == str.len);
+	kparams = (kern_parambuf *)str.data;
+	kparams->hostptr = (hostptr_t) &kparams->hostptr;
+	kparams->xactStartTimestamp = GetCurrentTransactionStartTimestamp();
+	kparams->length = str.len;
+	kparams->nparams = nparams;
+
+	return kparams;
+}
+
+
+
+
+
+
+
+
+
+
+/*
+ * pgstromInitGpuTaskState
+ */
+void
+pgstromInitGpuTaskState(GpuTaskState_v2 *gts,
+						GpuContext_v2 *gcontext,
+						GpuTaskKind task_kind,
+						ProgramId program_id,
+						List *used_params,
+						EState *estate)
+{
+	ExprContext	   *econtext = gts->css.ss.ps.ps_ExprContext;
+
+	gts->gcontext = gcontext;
+	gts->task_kind = task_kind;
+	gts->program_id = program_id;
+	gts->revision = 1;
+	gts->kern_params = construct_kern_parambuf(used_params, econtext);
+	gts->scan_done = false;
+	gts->row_format = false;
+
+	gts->outer_bulk_exec = false;
+	gts->outer_dev_quals = ;
+	InstrInit(&gts->outer_instrument, estate->es_instrument);
+	if (gts->css.ss.ss_currentRelation)
+	{
+		Relation		scan_rel = gts->css.ss.ss_currentRelation;
+		HeapScanDesc	scan_desc = heap_beginscan(scan_rel,
+												   estate->es_snapshot,
+												   0, NULL);
+		gts->css.ss.ss_currentScanDesc = scan_desc;
+	}
+	gts->scan_overflow = NULL;
+
+	/* callbacks shall be set by the caller */
+
+	dlist_init(&gts->ready_tasks);
+	gts->num_running_tasks = 0;
+	gts->num_ready_tasks = 0;
+
+	/* performance monitor */
+	memset(&gts->pfm, 0, sizeof(pgstrom_perfmon));
+	gts->pfm.enabled = pgstrom_perfmon_enabled;
+	gts->pfm.prime_in_gpucontext = (gcontext->refcnt == 1);
+	// FIXME: pfm should has GpuTaskKind instead of extra_flags in v2.0
+	switch (task_kind)
+	{
+		case GpuTaskKind_GpuScan:
+			gts->pfm.extra_flags = DEVKERNEL_NEEDS_GPUSCAN;
+			break;
+		case GpuTaskKind_GpuJoin:
+			gts->pfm.extra_flags = DEVKERNEL_NEEDS_GPUJOIN:
+			break;
+		case GpuTaskKind_GpuPreAgg:
+			gts->pfm.extra_flags = DEVKERNEL_NEEDS_GPUPREAGG;
+			break;
+		case GpuTaskKind_GpuSort:
+			gts->pfm.extra_flags = DEVKERNEL_NEEDS_GPUSORT;
+			break;
+		default:
+			elog(ERROR, "unexpected GpuTaskKind: %d", (int)task_kind);
+	}
+}
+
+/*
+ * fetch_next_gputask
+ *
+ *
+ */
+static GpuTask_v2 *
+fetch_next_gputask(GpuTaskState_v2 *gts)
+{
+	GpuContext_v2  *gcontext = gts->gcontext;
+	GpuTask_v2	   *gtask;
+
+	/*
+	 * If no server connection is established, GpuTask cannot be processed
+	 * by GPU devices. All we can do is CPU fallback instead of the GPU
+	 * processing.
+	 */
+	if (gcontext->sockfd == PGINVALID_SOCKET)
+	{
+		gtask = gts->cb_next_task(gts);
+		gtask->cpu_fallback = true;
+		return gtask;
+	}
+
+
+	// pop all the tasks already returned, if any
+
+	if (!gts->scan_done)
+	{
+		// read untils next response is backed, or reached to max_async
+
+
+	}
+
+	// wait for remote task if empty
+
+
+	// poll the response from the server
+	// if any back it
+	// prior to this, push some asynchronous tasks 
+
+
+
+	/*
+	 * Error handling
+	 */
+	if (gtask->kerror.errnode != StromError_Success)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("PG-Strom: CUDA execution error (%s)",
+						errorTextKernel(&gtask->kerror))));
+	}
+	return gtask;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/*
+ * pgstromExecGpuTaskState
+ */
+TupleTableSlot *
+pgstromExecGpuTaskState(GpuTaskState_v2 *gts)
+{
+	TupleTableSlot *slot = gts->css.ss.ss_ScanTupleSlot;
+
+	while (!gts->curr_task || !(slot = gts->cb_next_tuple(gts)))
+	{
+		GpuTask	   *gtask = gts->curr_task;
+
+		/* release the current GpuTask object that was already scanned */
+		if (gtask)
+		{
+
+
+		}
+		/* reload next chunk to be scanned */
+		gtask = fetch_next;
+		if (!gtask)
+			break;
+		gts->curr_task = gtask;
+		gts->curr_index = 0;
+		/* notify a new task is assigned */
+		if (gts->cb_switch_task)
+			gts->cb_switch_task(gts, gtask);
+	}
+	return slot;
+}
+
+/*
+ * pgstromRecheckGTS
+ */
+bool
+pgstromRecheckGpuTaskState(GpuTaskState_v2 *gts)
+{
+	// if scanrelid > 0
+	// check device qualifier, if any
+
+}
+
+/*
+ * pgstromRescanGpuTaskState
+ */
+void
+pgstromRescanGpuTaskState(GpuTaskState_v2 *gts)
+{
+
+}
+
+/*
+ * pgstromReleaseGpuTaskState
+ */
+void
+pgstromReleaseGpuTaskState(GpuTaskState_v2 *gts)
+{
+
+}
 
 /*
  * errorText - string form of the error code

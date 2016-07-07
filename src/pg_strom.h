@@ -135,7 +135,10 @@ typedef struct GpuContext_v2
 typedef cl_long					ProgramId;
 #define INVALID_PROGRAM_ID		(-1L)
 
-/* Identifier of GpuTask */
+/*
+ * GpuTask and related
+ */
+
 typedef enum {
 	GpuTaskKind_GpuScan,
 	GpuTaskKind_GpuJoin,
@@ -144,10 +147,11 @@ typedef enum {
 	GpuTaskKind_PL_CUDA,
 } GpuTaskKind;
 
-struct GpuTask_v2;
+typedef struct GpuTask_v2		GpuTask_v2;
+typedef struct GpuTaskState_v2	GpuTaskState_v2;
 
 /*
- * GpuTaskState_v2
+ * GpuTaskState
  *
  * A common structure of the state machine of GPU related tasks.
  */
@@ -163,18 +167,33 @@ struct GpuTaskState_v2
 	bool			row_format;		/* True, if KDS_FORMAT_ROW is required */
 
 	bool			outer_bulk_exec;/* True, if it scans outer by bulk-exec */
+	List		   *outer_dev_quals;/* Outer quals to be executed on device */
 	Instrumentation	outer_instrument; /* runtime statistics, if any */
 	TupleTableSlot *scan_overflow;	/* temporary buffer, if no space on PDS */
 
 	cl_long			curr_index;		/* current position on the curr_task */
 	struct GpuTask_v2 *curr_task;	/* a GpuTask currently processed */
 
+	/* callbacks used by gputasks.c */
+	GpuTask_v2	 *(*cb_next_task)(GpuTaskState_v2 *gts);
+	void		 *(*cb_switch_task)(GpuTaskState_v2 *gts, GpuTask_v2 *gtask);
+	TupleTableSlot *(*cb_next_tuple)(GpuTaskState_v2 *gts);
+	void		 *(*cb_task_release)(GpuTask_v2 *gtask);
+
+//	bool		  (*cb_task_process)(GpuTask *gtask);
+//	bool		  (*cb_task_complete)(GpuTask *gtask);
+//	void		  (*cb_task_release)(GpuTask *gtask);
+//	GpuTask		 *(*cb_next_chunk)(GpuTaskState *gts);
+//	void		  (*cb_switch_task)(GpuTaskState *gts, GpuTask *gtask);
+//	TupleTableSlot *(*cb_next_tuple)(GpuTaskState *gts);
+
+
+	/* list to manage GpuTasks */
 	dlist_head		ready_tasks;	/* list of tasks already processed */
 	cl_uint			num_running_tasks; /* # of tasks sent to GPU server */
 	cl_uint			num_ready_tasks;/* length of the 'ready_tasks' */
 	pgstrom_perfmon	pfm;			/* performance monitor */
 };
-typedef struct GpuTaskState_v2 GpuTaskState_v2;
 
 /*
  * GpuTask
@@ -434,6 +453,8 @@ extern bool gpuservOpenConnection(GpuContext_v2 *gcontext);
 extern bool gpuservSendGpuTask(GpuContext_v2 *gcontext,
 							   GpuTask *gtask, int peer_fd);
 extern GpuTask *gpuservRecvGpuTask(GpuContext_v2 *gcontext, int *peer_fd);
+extern GpuTask *gpuservRecvGpuTaskTimeout(GpuContext_v2 *gcontext,
+										  int *peer_fd, long timeout);
 
 extern void pgstrom_init_gpu_server(void);
 
@@ -454,7 +475,7 @@ extern void largest_workgroup_size(size_t *p_grid_size,
 
 
 
-
+#if 1
 /*
  * cuda_mmgr.c
  */
@@ -507,11 +528,18 @@ extern void pgstrom_init_cuda_control(void);
 extern cl_ulong pgstrom_baseline_cuda_capability(void);
 extern Datum pgstrom_scoreboard_info(PG_FUNCTION_ARGS);
 extern Datum pgstrom_device_info(PG_FUNCTION_ARGS);
+#endif
 
 /*
- * gpu_tasks.c
+ * gputasks.c
  */
+extern kern_parambuf *construct_kern_parambuf(List *used_params,
+											  ExprContext *econtext);
 
+extern void pgstromInitGpuTaskState(GpuTaskState_v2 *gts);
+extern TupleTableSlot *pgstromExecGpuTaskState(GpuTaskState_v2 *gts);
+extern bool pgstromRecheckGpuTaskState(GpuTaskState_v2 *gts);
+extern void pgstromReleaseGpuTaskState(GpuTaskState_v2 *gts);
 
 extern const char *errorText(int errcode);
 extern const char *errorTextKernel(kern_errorbuf *kerror);

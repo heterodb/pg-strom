@@ -140,15 +140,18 @@ gpuserv_got_sigterm(SIGNAL_ARGS)
 	errno = save_errno;
 }
 
-#define GPUSERV_CHECK_FOR_INTERRUPTS()									\
+#define CHECK_FOR_INTERRUPTS_GPUSERV()									\
 	do {																\
-		CHECK_FOR_INTERRUPTS();											\
-		if (gpu_server_got_sigterm)										\
-			ereport(FATAL,												\
-					(errcode(ERRCODE_ADMIN_SHUTDOWN),					\
-					 errmsg("Terminating PG-Strom GPU/CUDA Server[%d]",	\
-							gpu_server_id)));							\
+		if (IsGpuServerProcess())										\
+		{																\
+			if (gpu_server_got_sigterm)									\
+				ereport(FATAL,											\
+						(errcode(ERRCODE_ADMIN_SHUTDOWN),				\
+						 errmsg("Terminating PG-Strom GPU/CUDA Server[%d]", \
+								gpu_server_id)));						\
+		}																\
 	} while(0)
+
 
 
 
@@ -175,6 +178,11 @@ gpuservSendCommand(GpuContext_v2 *gcontext, GpuServCommand *cmd, long timeout)
 						   (timeout < 0 ? 0 : WL_TIMEOUT),
 						   gcontext->sockfd,
 						   timeout);
+	/* urgent bailout if postmaster is dead */
+	if (ev & WL_POSTMASTER_DEATH)
+		ereport(FATAL,
+				(errcode(ERRCODE_ADMIN_SHUTDOWN),
+				 errmsg("Urgent termination by unexpected postmaster dead")));
 	/* Is the socket writable? */
 	if ((ev & WL_SOCKET_WRITEABLE) == 0)
 		return false;
@@ -219,21 +227,43 @@ bool
 gpuservSendGpuTask(GpuContext_v2 *gcontext, GpuTask *gtask, int peer_fd)
 {
 	GpuServCommand	cmd;
+	long			timeout = 5000;		/* 5.0sec; usually enough */
+	struct timeval	tv1, tv2;
 
 	cmd.command = GPUSERV_CMD_TASK;
 	cmd.peer_fd = peer_fd;
 	cmd.u.task.gtask = gtask;
 
-	while (!gpuservSendCommand(gcontext, &cmd,
-							   GpuServerCommTimeout))
+	gettimeofday(&tv1, NULL);
+	for (;;)
 	{
-		GPUSERV_CHECK_FOR_INTERRUPTS();
-	}
+		ResetLatch();
 
-	/*
-	 * TODO: A proper handling when client closed the connection
-	 * prior to send a response
-	 */
+		if (gpuservSendCommand(gcontext, &cmd, timeout))
+			break;
+
+		CHECK_FOR_INTERRUPTS();
+		if (IsGpuServerProcess())
+		{
+			CHECK_FOR_INTERRUPTS_GPUSERV();
+
+			/* we should not flush out completed tasks here */
+			/* because message send is already blocked by some reason */
+
+			/* build a new CUDA program if nothing to do */
+			pgstrom_try_build_cuda_program();
+		}
+	   	gettimeofday(&tv2, NULL);
+
+		if (timeout >= 0)
+		{
+			timeout -= ((tv2.tv_sec * 1000 + tv2.tv_usec / 1000) -
+						(tv1.tv_sec * 1000 + tv1.tv_usec / 1000));
+			if (timeout <= 0)
+				return false;
+		}
+		tv1 = tv2;
+	}
 	return true;
 }
 
@@ -259,6 +289,12 @@ gpuservRecvCommand(pgsocket sockfd, GpuServCommand *cmd, long timeout)
 						   (timeout < 0 ? 0 : WL_TIMEOUT),
 						   sockfd,
 						   timeout);
+	/* urgent bailout if postmaster is dead */
+	if (ev & WL_POSTMASTER_DEATH)
+		ereport(FATAL,
+				(errcode(ERRCODE_ADMIN_SHUTDOWN),
+				 errmsg("Urgent termination by unexpected postmaster dead")));
+
 	if ((ev & WL_SOCKET_READABLE) == 0)
 		return false;
 
@@ -330,19 +366,40 @@ gpuservRecvCommand(pgsocket sockfd, GpuServCommand *cmd, long timeout)
  * gpuservRecvGpuTask - fetch a GpuTask from the socket
  */
 GpuTask *
-gpuservRecvGpuTask(GpuContext_v2 *gcontext, int *peer_fd)
+gpuservRecvGpuTaskTimeout(GpuContext_v2 *gcontext, int *peer_fd, long timeout)
 {
 	GpuServCommand	cmd;
 	GpuTask		   *gtask = NULL;
+	struct timeval	tv1, tv2;
 
-	while (!gpuservRecvCommand(gcontext->sockfd, &cmd,
-							   GpuServerCommTimeout))
+	gettimeofday(&tv1, NULL);
+	for (;;)
 	{
-		GPUSERV_CHECK_FOR_INTERRUPTS();
+		ResetLatch();
 
-		// TODO: flush out if completed task is not empty
-		// TODO: build CUDA program
-		pgstrom_try_build_cuda_program();
+		if (gpuservRecvCommand(gcontext->sockfd, &cmd, timeout))
+			break;		/* OK, successfully received a message */
+
+		CHECK_FOR_INTERRUPTS();
+		if (IsGpuServerProcess())
+		{
+			CHECK_FOR_INTERRUPTS_GPUSERV();
+
+			// TODO: flush out if completed task is not empty
+
+			/* build a new CUDA program if nothing to do */
+			pgstrom_try_build_cuda_program();
+		}
+		gettimeofday(&tv2, NULL);
+
+		if (timeout >= 0)
+		{
+			timeout -= ((tv2.tv_sec * 1000 + tv2.tv_usec / 1000) -
+						(tv1.tv_sec * 1000 + tv1.tv_usec / 1000));
+			if (timeout <= 0)
+				return NULL;
+		}
+		tv1 = tv2;
 	}
 
 	if (cmd.command == GPUSERV_CMD_TASK)
@@ -380,6 +437,12 @@ gpuservRecvGpuTask(GpuContext_v2 *gcontext, int *peer_fd)
 		elog(ERROR, "Bug? unexpected GpuServCommand %d", cmd.command);
 
 	return gtask;
+}
+
+GpuTask *
+gpuservRecvGpuTask(GpuContext_v2 *gcontext, int *peer_fd)
+{
+	return gpuservRecvGpuTask(gcontext, peer_fd, GpuServerCommTimeout);
 }
 
 /*
@@ -576,7 +639,8 @@ gpuservSessionMain(GpuContext_v2 *gcontext)
 		GPUSERV_CHECK_FOR_INTERRUPTS();
 
 		elog(LOG, "wait for recv packet");
-		gtask = gpuservRecvGpuTask(gcontext, &peer_fd);
+		gtask = gpuservRecvGpuTask(gcontext, &peer_fd,
+								   GpuServerCommTimeout);
 		if (!gtask)
 			break;		/* EOF */
 
