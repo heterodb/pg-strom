@@ -860,9 +860,9 @@ plcuda_exec_begin(Form_pg_proc procForm, plcudaInfo *cf_info)
 
 	/* construct a flat kernel source then load cuda module */
 	kern_source = plcuda_codegen(procForm, cf_info);
-	cuda_modules = plcuda_load_cuda_program(gcontext,
-											kern_source,
-											cf_info->extra_flags);
+	cuda_modules = plcuda_load_cuda_program_legacy(gcontext,
+												   kern_source,
+												   cf_info->extra_flags);
 	/* construct plcudaState */
 	state = MemoryContextAllocZero(gcontext->memcxt,
 								   sizeof(plcudaState));

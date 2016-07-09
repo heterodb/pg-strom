@@ -1368,7 +1368,7 @@ launch_pending_tasks(GpuTaskState *gts)
 	 */
 	if (!gts->cuda_modules)
 	{
-		if (!pgstrom_load_cuda_program(gts, false))
+		if (!pgstrom_load_cuda_program_legacy(gts, false))
 			return;
 	}
 
@@ -1477,7 +1477,7 @@ __waitfor_ready_tasks(GpuTaskState *gts)
 	 * Unless CUDA module is not loaded, we cannot launch process
 	 * of GpuTask callback. So, we go on the long-waut path.
 	 */
-	if (gts->cuda_modules || pgstrom_load_cuda_program(gts, false))
+	if (gts->cuda_modules || pgstrom_load_cuda_program_legacy(gts, false))
 	{
 		SpinLockAcquire(&gts->lock);
 		if (!dlist_is_empty(&gts->ready_tasks))

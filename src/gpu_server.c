@@ -80,6 +80,30 @@ static int				GpuServerCommTimeout;	/* GUC */
 static CUdevice			cuda_device = NULL;
 static CUcontext		cuda_context = NULL;
 
+/* CUDA module lookup cache */
+#define CUDA_MODULES_SLOTSIZE		200
+static dlist_head		cuda_modules_slot[CUDA_MODULES_SLOTSIZE];
+
+typedef struct
+{
+	dlist_node		chain;
+	ProgramId		program_id;
+	CUmodule		cuda_module;
+} cudaModuleCache;
+
+/* SIGTERM handler */
+static void
+gpuservGotSigterm(SIGNAL_ARGS)
+{
+	int		save_errno = errno;
+
+	gpu_server_got_sigterm = true;
+
+	SetLatch(MyLatch);
+
+	errno = save_errno;
+}
+
 /*
  * IsGpuServerProcess - returns true, if current process is gpu server
  */
@@ -87,6 +111,33 @@ bool
 IsGpuServerProcess(void)
 {
 	return (bool)(gpu_server_id >= 0);
+}
+
+/*
+ * gpuservHandleLazyJobs
+ */
+void
+gpuservHandleLazyJobs(bool flush_completed)
+{
+	/* Exit, if SIGTERM was delivered */
+	if (gpu_server_got_sigterm)
+		ereport(FATAL,
+				(errcode(ERRCODE_ADMIN_SHUTDOWN),
+				 errmsg("Terminating PG-Strom GPU/CUDA Server[%d]",
+						gpu_server_id)));
+	/*
+	 * Flush completed tasks
+	 */
+	if (flush_completed)
+	{
+
+
+	}
+
+	/*
+	 * Build a new CUDA program, if any
+	 */
+	pgstrom_try_build_cuda_program();
 }
 
 /*
@@ -127,30 +178,6 @@ gpuservWakeUpProcesses(cl_uint max_procs)
 
 
 
-/* SIGTERM handler */
-static void
-gpuserv_got_sigterm(SIGNAL_ARGS)
-{
-	int		save_errno = errno;
-
-	gpu_server_got_sigterm = true;
-
-	SetLatch(MyLatch);
-
-	errno = save_errno;
-}
-
-#define CHECK_FOR_INTERRUPTS_GPUSERV()									\
-	do {																\
-		if (IsGpuServerProcess())										\
-		{																\
-			if (gpu_server_got_sigterm)									\
-				ereport(FATAL,											\
-						(errcode(ERRCODE_ADMIN_SHUTDOWN),				\
-						 errmsg("Terminating PG-Strom GPU/CUDA Server[%d]", \
-								gpu_server_id)));						\
-		}																\
-	} while(0)
 
 
 
@@ -237,22 +264,14 @@ gpuservSendGpuTask(GpuContext_v2 *gcontext, GpuTask *gtask, int peer_fd)
 	gettimeofday(&tv1, NULL);
 	for (;;)
 	{
-		ResetLatch();
+		ResetLatch(MyLatch);
 
 		if (gpuservSendCommand(gcontext, &cmd, timeout))
 			break;
 
 		CHECK_FOR_INTERRUPTS();
 		if (IsGpuServerProcess())
-		{
-			CHECK_FOR_INTERRUPTS_GPUSERV();
-
-			/* we should not flush out completed tasks here */
-			/* because message send is already blocked by some reason */
-
-			/* build a new CUDA program if nothing to do */
-			pgstrom_try_build_cuda_program();
-		}
+			gpuservHandleLazyJobs(false);
 	   	gettimeofday(&tv2, NULL);
 
 		if (timeout >= 0)
@@ -375,21 +394,14 @@ gpuservRecvGpuTaskTimeout(GpuContext_v2 *gcontext, int *peer_fd, long timeout)
 	gettimeofday(&tv1, NULL);
 	for (;;)
 	{
-		ResetLatch();
+		ResetLatch(MyLatch);
 
 		if (gpuservRecvCommand(gcontext->sockfd, &cmd, timeout))
 			break;		/* OK, successfully received a message */
 
 		CHECK_FOR_INTERRUPTS();
 		if (IsGpuServerProcess())
-		{
-			CHECK_FOR_INTERRUPTS_GPUSERV();
-
-			// TODO: flush out if completed task is not empty
-
-			/* build a new CUDA program if nothing to do */
-			pgstrom_try_build_cuda_program();
-		}
+			gpuservHandleLazyJobs(true);
 		gettimeofday(&tv2, NULL);
 
 		if (timeout >= 0)
@@ -442,7 +454,7 @@ gpuservRecvGpuTaskTimeout(GpuContext_v2 *gcontext, int *peer_fd, long timeout)
 GpuTask *
 gpuservRecvGpuTask(GpuContext_v2 *gcontext, int *peer_fd)
 {
-	return gpuservRecvGpuTask(gcontext, peer_fd, GpuServerCommTimeout);
+	return gpuservRecvGpuTaskTimeout(gcontext, peer_fd, GpuServerCommTimeout);
 }
 
 /*
@@ -489,8 +501,9 @@ gpuservOpenConnection(GpuContext_v2 *gcontext)
 			}
 			else if (errno != EINTR)
 				elog(ERROR, "failed on connect(2): %m");
-			GPUSERV_CHECK_FOR_INTERRUPTS();
+			CHECK_FOR_INTERRUPTS();
 		}
+		gcontext->sockfd = sockfd;
 
 		/*
 		 * NOTE: Exchange message with very short timeout to handle a corner
@@ -508,40 +521,73 @@ gpuservOpenConnection(GpuContext_v2 *gcontext)
 		{
 			GpuServCommand	cmd;
 			int				ev;
+			struct timeval	tv1, tv2;
 
-			/* assign sockfd on the GpuContext */
-			gcontext->sockfd = sockfd;
+			/*
+			 * Once GPU server successfully processed the OPEN command,
+			 * it shall set backend's latch with a reasonable delay.
+			 */
+			ResetLatch(MyLatch);
 
-			/* send OPEN command, with 100ms timeout */
+			/* Send OPEN command, with 100ms timeout */
 			cmd.command = GPUSERV_CMD_OPEN;
 			cmd.peer_fd = -1;
 			cmd.u.open.context_id = gcontext->shgcon->context_id;
 			cmd.u.open.backend_id = MyProc->backendId;
-			if (!gpuservSendCommand(gcontext, &cmd, 100))
+			if (gpuservSendCommand(gcontext, &cmd, 100))
+			{
+				long	timeout = 100;	/* 100ms */
+
+				gettimeofday(&tv1, NULL);
+				for (;;)
+				{
+					ev = WaitLatch(MyLatch,
+								   WL_LATCH_SET |
+								   WL_TIMEOUT |
+								   WL_POSTMASTER_DEATH,
+								   timeout);
+					/* urgent bailout if postmaster is dead */
+					if (ev & WL_POSTMASTER_DEATH)
+						ereport(FATAL,
+								(errcode(ERRCODE_ADMIN_SHUTDOWN),
+							errmsg("Urgent termination by postmaster dead")));
+					if (ev & WL_LATCH_SET)
+					{
+						SharedGpuContext   *shgcon = gcontext->shgcon;
+
+						SpinLockAcquire(&shgcon->lock);
+						/* OK, session is successfully open */
+						if (shgcon->server != NULL)
+						{
+							SpinLockRelease(&shgcon->lock);
+							break;
+						}
+						SpinLockRelease(&shgcon->lock);
+					}
+					if (ev & WL_TIMEOUT)
+						timeout = 0;
+					else
+					{
+						gettimeofday(&tv2, NULL);
+
+						timeout -= ((tv2.tv_sec * 1000 + tv2.tv_usec / 1000) -
+									(tv1.tv_sec * 1000 + tv1.tv_usec / 1000));
+					}
+
+					if (timeout <= 0)
+					{
+						/* ...revert it... */
+						gcontext->sockfd = PGINVALID_SOCKET;
+						close(sockfd);
+						break;
+					}
+				}
+			}
+			else
 			{
 				/* ...revert it... */
 				gcontext->sockfd = PGINVALID_SOCKET;
 				close(sockfd);
-			}
-			else
-			{
-				/*
-				 * If GPU server successfully processes the OPEN command, it
-				 * shall set backend's latch with a reasonable delay.
-				 */
-				ResetLatch(MyLatch);
-
-				ev = WaitLatch(MyLatch,
-							   WL_LATCH_SET |
-							   WL_TIMEOUT |
-							   WL_POSTMASTER_DEATH,
-							   100);	/* 100ms */
-				if ((ev & WL_LATCH_SET) == 0)
-				{
-					/* ...revert it... */
-					gcontext->sockfd = PGINVALID_SOCKET;
-					close(sockfd);
-				}
 			}
 		}
 	}
@@ -583,14 +629,16 @@ gpuservAcceptConnection(void)
 
 	PG_TRY();
 	{
-		ResetLatch(MyLatch);
-		while ((sockfd = accept(gpu_server_sock, NULL, NULL)) < 0)
+		for (;;)
 		{
-			GPUSERV_CHECK_FOR_INTERRUPTS();
+			ResetLatch(MyLatch);
+			sockfd = accept(gpu_server_sock, NULL, NULL);
+			if (sockfd >= 0)
+				break;
 			if (errno != EINTR && errno != EAGAIN)
 				elog(ERROR, "failed on accept(2): %m");
-			pgstrom_try_build_cuda_program();
-			ResetLatch(MyLatch);
+			CHECK_FOR_INTERRUPTS();
+			gpuservHandleLazyJobs(false);
 		}
 	}
 	PG_CATCH();
@@ -625,28 +673,75 @@ gpuservAcceptConnection(void)
 }
 
 /*
+ * lookup_cuda_module
+ */
+static CUmodule
+lookup_cuda_module(ProgramId program_id)
+{
+	dlist_iter	iter;
+	int			index;
+	cudaModuleCache *mod_cache;
+
+	/* Is the cuda module already loaded? */
+	index = program_id % CUDA_MODULES_SLOTSIZE;
+	dlist_foreach (iter, &cuda_modules_slot[index])
+	{
+		mod_cache = dlist_container(cudaModuleCache, chain, iter.cur);
+
+		if (mod_cache->program_id == program_id)
+			return mod_cache->cuda_module;
+	}
+
+	/* Program was not loaded to the current context yet */
+	mod_cache = palloc0(sizeof(cudaModuleCache));
+	mod_cache->program_id = program_id;
+	mod_cache->cuda_module = pgstrom_load_cuda_program(program_id, -1);
+	if (!mod_cache->cuda_module)
+	{
+		pfree(mod_cache);
+		return NULL;
+	}
+	dlist_push_head(&cuda_modules_slot[index], &mod_cache->chain);
+
+	return mod_cache->cuda_module;
+}
+
+/*
  * gpuserv_session_main - it processes a session once established
  */
 static void
 gpuservSessionMain(GpuContext_v2 *gcontext)
 {
-	GpuTask		   *gtask;
-	int				peer_fd;
+	GpuTask	   *gtask;
+	int			peer_fd;
+	int			i;
 
-	while (true	/* untila connection closed? */)
+	while ((gtask = gpuservRecvGpuTask(gcontext, &peer_fd)) != NULL)
 	{
-		// TODO: Flush completed tasks to the backend
-		GPUSERV_CHECK_FOR_INTERRUPTS();
+		// add gtask to pending list
 
-		elog(LOG, "wait for recv packet");
-		gtask = gpuservRecvGpuTask(gcontext, &peer_fd,
-								   GpuServerCommTimeout);
-		if (!gtask)
-			break;		/* EOF */
+		// process all the pending tasks
 
-		elog(LOG, "%u wake up", getpid());
-		/* do something for each gtask */
-		pgstrom_try_build_cuda_program();
+		// back all the completed 
+
+	}
+
+	/* Unload all the CUDA modules */
+	for (i=0; i < CUDA_MODULES_SLOTSIZE; i++)
+	{
+		cudaModuleCache *cache;
+		dlist_node *dnode;
+		CUresult	rc;
+
+		while (!dlist_is_empty(&cuda_modules_slot[i]))
+		{
+			dnode = dlist_pop_head_node(&cuda_modules_slot[i]);
+			cache = dlist_container(cudaModuleCache, chain, dnode);
+
+			rc = cuModuleUnload(cache->cuda_module);
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on cuModuleUnload: %s", errorText(rc));
+		}
 	}
 }
 
@@ -659,13 +754,14 @@ gpuserv_main(Datum __server_id)
 	GpuServProc *serv_proc;
 	cl_int		device_id;
 	cl_int		dindex;
+	cl_int		i;
 	CUresult	rc;
 
 	/* I am a GPU server process */
 	gpu_server_id = DatumGetInt32(__server_id);
 	Assert(gpu_server_id >= 0 && gpu_server_id < numGpuServers);
 	serv_proc = &gpuServState->serv_procs[gpu_server_id];
-	pqsignal(SIGTERM, gpuserv_got_sigterm);
+	pqsignal(SIGTERM, gpuservGotSigterm);
 	BackgroundWorkerUnblockSignals();
 
 	/* Init CUDA runtime */
@@ -684,6 +780,9 @@ gpuserv_main(Datum __server_id)
 					 cuda_device);
 	if (rc != CUDA_SUCCESS)
 		elog(FATAL, "failed on cuCtxCreate: %s", errorText(rc));
+
+	for (i=0; i < CUDA_MODULES_SLOTSIZE; i++)
+		dlist_init(&cuda_modules_slot[i]);
 
 	/* memory context per session duration */
 	CurrentResourceOwner = ResourceOwnerCreate(NULL, "GPU Server");
@@ -705,7 +804,7 @@ gpuserv_main(Datum __server_id)
 	{
 		GpuContext_v2  *gcontext;
 
-		while (true)
+		for (;;)
 		{
 			gcontext = gpuservAcceptConnection();
 			if (gcontext)

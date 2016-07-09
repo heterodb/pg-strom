@@ -167,7 +167,6 @@ struct GpuTaskState_v2
 	bool			row_format;		/* True, if KDS_FORMAT_ROW is required */
 
 	bool			outer_bulk_exec;/* True, if it scans outer by bulk-exec */
-	List		   *outer_dev_quals;/* Outer quals to be executed on device */
 	Instrumentation	outer_instrument; /* runtime statistics, if any */
 	TupleTableSlot *scan_overflow;	/* temporary buffer, if no space on PDS */
 
@@ -211,7 +210,15 @@ struct GpuTask_v2
 	CUstream		cuda_stream;	/* CUDA stream for this task */
 	CUmodule		cuda_module;	/* CUDA module for this task */
 	bool			cpu_fallback;	/* true, if task needs CPU fallback */
-	kern_errorbuf	kerror;			/* error status on CUDA kernel */
+	/* error status on server side */
+	struct {
+		int			errcode;
+		const char *filename;
+		int			lineno;
+		const char *funcname;
+		const char *message;
+		char		buffer[160];	/* buffer for short error message */
+	} error;
 };
 typedef struct GpuTask_v2 GpuTask_v2;
 
@@ -448,6 +455,7 @@ extern void pgstrom_init_gpu_context(void);
  * gpu_server.c
  */
 extern bool IsGpuServerProcess(void);
+extern void gpuservHandleLazyJobs(bool flush_completed);
 extern void gpuservWakeUpProcesses(cl_uint max_procs);
 extern bool gpuservOpenConnection(GpuContext_v2 *gcontext);
 extern bool gpuservSendGpuTask(GpuContext_v2 *gcontext,
@@ -536,9 +544,14 @@ extern Datum pgstrom_device_info(PG_FUNCTION_ARGS);
 extern kern_parambuf *construct_kern_parambuf(List *used_params,
 											  ExprContext *econtext);
 
-extern void pgstromInitGpuTaskState(GpuTaskState_v2 *gts);
+extern void pgstromInitGpuTaskState(GpuTaskState_v2 *gts,
+									GpuContext_v2 *gcontext,
+									GpuTaskKind task_kind,
+									ProgramId program_id,
+									List *used_params,
+									EState *estate);
 extern TupleTableSlot *pgstromExecGpuTaskState(GpuTaskState_v2 *gts);
-extern bool pgstromRecheckGpuTaskState(GpuTaskState_v2 *gts);
+extern void pgstromRescanGpuTaskState(GpuTaskState_v2 *gts);
 extern void pgstromReleaseGpuTaskState(GpuTaskState_v2 *gts);
 
 extern const char *errorText(int errcode);
@@ -557,15 +570,17 @@ extern ProgramId pgstrom_create_cuda_program(GpuContext_v2 *gcontext,
 											 const char *kern_define,
 											 cl_uint extra_flags,
 											 bool try_async_build);
+extern CUmodule pgstrom_load_cuda_program(ProgramId program_id, long timeout);
 extern bool pgstrom_wait_cuda_program(ProgramId program_id, long timeout);
 
 extern ProgramId pgstrom_try_build_cuda_program(void);
 
 extern const char *pgstrom_cuda_source_file(GpuTaskState *gts);
-extern bool pgstrom_load_cuda_program(GpuTaskState *gts, bool is_preload);
-extern CUmodule *plcuda_load_cuda_program(GpuContext *gcontext,
-										  const char *kern_source,
-										  cl_uint extra_flags);
+extern bool pgstrom_load_cuda_program_legacy(GpuTaskState *gts,
+											 bool is_preload);
+extern CUmodule *plcuda_load_cuda_program_legacy(GpuContext *gcontext,
+												 const char *kern_source,
+												 cl_uint extra_flags);
 extern char *pgstrom_build_session_info(cl_uint extra_flags,
 										GpuTaskState *gts);
 extern void pgstrom_assign_cuda_program(GpuTaskState *gts,

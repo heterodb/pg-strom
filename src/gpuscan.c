@@ -1642,7 +1642,7 @@ gpuscan_begin(CustomScanState *node, EState *estate, int eflags)
 								gs_info->extra_flags);
 	/* preload the CUDA program, if actually executed */
 	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
-		pgstrom_load_cuda_program(&gss->gts, true);
+		pgstrom_load_cuda_program_legacy(&gss->gts, true);
 	/* initialize resource for CPU fallback */
 	gss->base_slot = MakeSingleTupleTableSlot(RelationGetDescr(scan_rel));
 	if (gss->dev_projection)

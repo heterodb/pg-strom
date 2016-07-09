@@ -16,8 +16,9 @@
  * GNU General Public License for more details.
  */
 #include "postgres.h"
-
-
+#include "access/xact.h"
+#include "utils/builtins.h"
+#include "utils/lsyscache.h"
 #include "pg_strom.h"
 
 
@@ -195,7 +196,6 @@ pgstromInitGpuTaskState(GpuTaskState_v2 *gts,
 	gts->row_format = false;
 
 	gts->outer_bulk_exec = false;
-	gts->outer_dev_quals = ;
 	InstrInit(&gts->outer_instrument, estate->es_instrument);
 	if (gts->css.ss.ss_currentRelation)
 	{
@@ -224,7 +224,7 @@ pgstromInitGpuTaskState(GpuTaskState_v2 *gts,
 			gts->pfm.extra_flags = DEVKERNEL_NEEDS_GPUSCAN;
 			break;
 		case GpuTaskKind_GpuJoin:
-			gts->pfm.extra_flags = DEVKERNEL_NEEDS_GPUJOIN:
+			gts->pfm.extra_flags = DEVKERNEL_NEEDS_GPUJOIN;
 			break;
 		case GpuTaskKind_GpuPreAgg:
 			gts->pfm.extra_flags = DEVKERNEL_NEEDS_GPUPREAGG;
@@ -280,14 +280,19 @@ fetch_next_gputask(GpuTaskState_v2 *gts)
 
 
 	/*
-	 * Error handling
+	 * Error handling - See definition of ereport(). What we have to report
+	 * is an error on the server side where it actually happen.
 	 */
-	if (gtask->kerror.errnode != StromError_Success)
+	if (gtask->error.errcode != 0)
 	{
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("PG-Strom: CUDA execution error (%s)",
-						errorTextKernel(&gtask->kerror))));
+		if (errstart(ERROR,
+					 gtask->error.filename,
+					 gtask->error.lineno,
+					 gtask->error.filename,
+					 TEXTDOMAIN))
+			errfinish(errcode(gtask->error.errcode),
+					  errmsg("%s", gtask->error.message));
+		pg_unreachable();
 	}
 	return gtask;
 }
@@ -316,16 +321,17 @@ pgstromExecGpuTaskState(GpuTaskState_v2 *gts)
 
 	while (!gts->curr_task || !(slot = gts->cb_next_tuple(gts)))
 	{
-		GpuTask	   *gtask = gts->curr_task;
+		GpuTask_v2	   *gtask = gts->curr_task;
 
 		/* release the current GpuTask object that was already scanned */
 		if (gtask)
 		{
-
-
+			gts->cb_task_release(gtask);
+			gts->curr_task = NULL;
+			gts->curr_index = 0;
 		}
 		/* reload next chunk to be scanned */
-		gtask = fetch_next;
+		gtask = fetch_next_gputask(gts);
 		if (!gtask)
 			break;
 		gts->curr_task = gtask;
@@ -338,22 +344,19 @@ pgstromExecGpuTaskState(GpuTaskState_v2 *gts)
 }
 
 /*
- * pgstromRecheckGTS
- */
-bool
-pgstromRecheckGpuTaskState(GpuTaskState_v2 *gts)
-{
-	// if scanrelid > 0
-	// check device qualifier, if any
-
-}
-
-/*
  * pgstromRescanGpuTaskState
  */
 void
 pgstromRescanGpuTaskState(GpuTaskState_v2 *gts)
 {
+	/*
+	 * Once revision number of GTS is changed, any asynchronous GpuTasks
+	 * are discarded when 
+	 *
+	 *
+	 */
+	gts->revision++;
+
 
 }
 

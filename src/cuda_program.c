@@ -170,7 +170,7 @@ put_cuda_program_entry_nolock(program_cache_entry *entry)
 	{
 		/*
 		 * NOTE: unless either reclaim_cuda_program_entry() or
-		 * __build_cuda_program() don't detach entry from active
+		 * build_cuda_program() don't detach entry from active
 		 * entries hash, it never goes to refcnt == 0.
 		 */
 		Assert(!entry->pgid_chain.next && !entry->pgid_chain.prev);
@@ -185,7 +185,6 @@ put_cuda_program_entry_nolock(program_cache_entry *entry)
 	}
 }
 
-#if 0
 /*
  * put_cuda_program_entry
  */
@@ -196,7 +195,6 @@ put_cuda_program_entry(program_cache_entry *entry)
 	put_cuda_program_entry_nolock(entry);
 	SpinLockRelease(&pgcache_head->lock);
 }
-#endif
 
 /*
  * reclaim_cuda_program_entry
@@ -489,7 +487,10 @@ pgstrom_cuda_source_file(GpuTaskState *gts)
 	return writeout_cuda_source_file(cuda_source);
 }
 
-static bool
+/*
+ * build_cuda_program - an interface to run synchronous build process
+ */
+static void
 __build_cuda_program(program_cache_entry *entry)
 {
 	char		   *source;
@@ -669,25 +670,14 @@ __build_cuda_program(program_cache_entry *entry)
 	if (rc != NVRTC_SUCCESS)
    		elog(WARNING, "failed on nvrtcDestroyProgram: %s",
 			 nvrtcGetErrorString(rc));
-
-	return build_success;
 }	
 
-/*
- * pgstrom_try_build_cuda_program
- *
- * It picks up a program entry that is not built yet, if any, then runs
- * NVRTC and linker to construct an executable binary.
- * Because linker process needs a valid CUDA context, only GPU server
- * can call this function.
- */
-ProgramId
-pgstrom_try_build_cuda_program(void)
+static void
+build_cuda_program(program_cache_entry *entry)
 {
 	static MemoryContext memcxt = NULL;
 	MemoryContext	oldcxt;
-	dlist_node	   *dnode;
-	program_cache_entry	*entry;
+	bool			wakeup_done = false;
 
 	/* memory context during the code build (to be reused) */
 	if (!memcxt)
@@ -698,21 +688,6 @@ pgstrom_try_build_cuda_program(void)
 									   ALLOCSET_DEFAULT_INITSIZE,
 									   ALLOCSET_DEFAULT_MAXSIZE);
 	}
-
-	/* Is there any pending CUDA program? */
-	SpinLockAcquire(&pgcache_head->lock);
-	if (dlist_is_empty(&pgcache_head->build_list))
-	{
-		SpinLockRelease(&pgcache_head->lock);
-		return INVALID_PROGRAM_ID;	/* nothing to do */
-	}
-	dnode = dlist_pop_head_node(&pgcache_head->build_list);
-	entry = dlist_container(program_cache_entry, build_chain, dnode);
-
-	memset(&entry->build_chain, 0, sizeof(dlist_node));
-	Assert(!entry->bin_image);	/* must be build in-progress */
-	get_cuda_program_entry_nolock(entry);
-	SpinLockRelease(&pgcache_head->lock);
 
 	oldcxt = MemoryContextSwitchTo(memcxt);
 	PG_TRY();
@@ -726,6 +701,7 @@ pgstrom_try_build_cuda_program(void)
 		MemoryContextSwitchTo(memcxt);
 		errdata = CopyErrorData();
 
+		/* put build error log and wakeup other processes */
 		SpinLockAcquire(&pgcache_head->lock);
 		if (!entry->bin_image)
 		{
@@ -738,21 +714,69 @@ pgstrom_try_build_cuda_program(void)
 					 errdata->message);
 			entry->bin_image = CUDA_PROGRAM_BUILD_FAILURE;
 		}
-		/* wake up waiting backends */
+		/* wake up processes which wait for this program */
 		pgstrom_wakeup_backends(entry->waiting_backends);
-		/* release this program entry */
-		put_cuda_program_entry_nolock(entry);
+		wakeup_done = true;
 		SpinLockRelease(&pgcache_head->lock);
 		/* revert the error status */
 		FreeErrorData(errdata);
 		FlushErrorState();
 	}
 	PG_END_TRY();
+
 	/* reset memory context */
 	MemoryContextSwitchTo(oldcxt);
 	MemoryContextReset(memcxt);
 
-	return true;
+	/* wake up processes which wait for this program */
+	if (!wakeup_done)
+	{
+		SpinLockAcquire(&pgcache_head->lock);
+		pgstrom_wakeup_backends(entry->waiting_backends);
+		SpinLockRelease(&pgcache_head->lock);
+	}
+}
+
+/*
+ * pgstrom_try_build_cuda_program
+ *
+ * It picks up a program entry that is not built yet, if any, then runs
+ * NVRTC and linker to construct an executable binary.
+ * Because linker process needs a valid CUDA context, only GPU server
+ * can call this function.
+ */
+ProgramId
+pgstrom_try_build_cuda_program(void)
+{
+	dlist_node	   *dnode;
+	program_cache_entry *entry;
+	ProgramId		program_id;
+
+	/* Is there any pending CUDA program? */
+	SpinLockAcquire(&pgcache_head->lock);
+	if (dlist_is_empty(&pgcache_head->build_list))
+	{
+		SpinLockRelease(&pgcache_head->lock);
+		return INVALID_PROGRAM_ID;		/* nothing to do */
+	}
+	dnode = dlist_pop_head_node(&pgcache_head->build_list);
+	entry = dlist_container(program_cache_entry, build_chain, dnode);
+
+	/*
+	 * !bin_image && build_chain==0 means build is in-progress,
+	 * so it can block concurrent program build any more
+	 */
+	program_id = entry->program_id;
+	memset(&entry->build_chain, 0, sizeof(dlist_node));
+	Assert(!entry->bin_image);	/* must be build in-progress */
+	get_cuda_program_entry_nolock(entry);
+	SpinLockRelease(&pgcache_head->lock);
+
+	build_cuda_program(entry);
+
+	put_cuda_program_entry(entry);
+
+	return program_id;
 }
 
 /*
@@ -859,9 +883,11 @@ pgstrom_create_cuda_program(GpuContext_v2 *gcontext,
 	 */
 	PG_TRY();
 	{
+		uint32		totalProcs;		/* see InitProcGlobal() */
+
+		totalProcs = MaxBackends + NUM_AUXILIARY_PROCS + max_prepared_xacts;
 		required = offsetof(program_cache_entry, data[0]);
-		nwords = (ProcGlobal->allProcCount +
-				  BITS_PER_BITMAPWORD - 1) / BITS_PER_BITMAPWORD;
+		nwords = (totalProcs + BITS_PER_BITMAPWORD - 1) / BITS_PER_BITMAPWORD;
 		required += MAXALIGN(offsetof(Bitmapset, words[nwords]));
 		required += MAXALIGN(kern_source_len + 1);
 		required += MAXALIGN(kern_define_len + 1);
@@ -1027,84 +1053,141 @@ pgstrom_put_cuda_program(GpuContext_v2 *gcontext, ProgramId program_id)
 }
 
 /*
- * pgstrom_wait_cuda_program
+ * pgstrom_load_cuda_program
  *
- * wait for asynchronous build completion of the CUDA program.
- * timeout == 0 means non-blocked status check.
+ *
  */
-bool
-pgstrom_wait_cuda_program(ProgramId program_id, long timeout)
+CUmodule
+pgstrom_load_cuda_program(ProgramId program_id, long timeout)
 {
 	program_cache_entry *entry;
-	struct timeval	tv_last;
-	struct timeval	tv_curr;
-	int				ev;
-	bool			retval = false;
+	CUmodule	cuda_module;
+	CUresult	rc;
+	char	   *bin_image;
 
-	gettimeofday(&tv_last, NULL);
-	for (;;)
+	Assert(IsGpuServerProcess());
+
+	SpinLockAcquire(&pgcache_head->lock);
+	entry = lookup_cuda_program_entry_nolock(program_id);
+	if (!entry)
 	{
-		ResetLatch(MyLatch);
+		SpinLockRelease(&pgcache_head->lock);
+		elog(ERROR, "CUDA Program ID=%lu was not found", program_id);
+	}
 
-		SpinLockAcquire(&pgcache_head->lock);
-		entry = lookup_cuda_program_entry_nolock(program_id);
-		if (!entry)
+	if (entry->bin_image == CUDA_PROGRAM_BUILD_FAILURE)
+	{
+		const char *error_msg = entry->error_msg;
+
+		SpinLockRelease(&pgcache_head->lock);
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
+				 errmsg("CUDA Program ID=%lu build failed:\n%s",
+						program_id, error_msg)));
+	}
+	get_cuda_program_entry_nolock(entry);
+
+	if (!entry->bin_image)
+	{
+		if (entry->build_chain.prev || entry->build_chain.next)
 		{
-			SpinLockRelease(&pgcache_head->lock);
-			elog(ERROR, "CUDA Program ID=%lu was not found", program_id);
-		}
-
-		if (entry->bin_image == NULL)
-		{
-			/* program build is in-progress */
-			if (timeout == 0)
-				break;
-			/* elsewhere, wait for completion of async build */
+			/*
+			 * It looks to me nobody picked up this CUDA program for build,
+			 * so we try to build by ourself, synchronously.
+			 */
 			SpinLockRelease(&pgcache_head->lock);
 
-			ev = WaitLatch(MyLatch,
-						   WL_LATCH_SET |
-						   WL_TIMEOUT |
-						   WL_POSTMASTER_DEATH,
-						   timeout);
-			/* emergency bailout if postmaster is dead */
-			if (ev & WL_POSTMASTER_DEATH)
-				proc_exit(1);
-			/* check status again, but never wait any more */
-			if (ev & WL_TIMEOUT)
-				timeout = 0;
-			else
+			build_cuda_program(entry);
+
+			SpinLockAcquire(&pgcache_head->lock);
+			Assert(entry->bin_image != NULL);
+			if (entry->bin_image == CUDA_PROGRAM_BUILD_FAILURE)
 			{
-				/*
-				 * elsewhere, someone set a latch; likely, asynchronous build
-				 * gets completed. Check it again. If it is false signal, we
-				 * try to sleep with shorter timeout.
-				 */
-				gettimeofday(&tv_curr, NULL);
+				const char *error_msg = entry->error_msg;
 
-				timeout -= (tv_curr.tv_sec * 1000 + tv_curr.tv_usec / 1000 -
-							tv_last.tv_sec * 1000 + tv_curr.tv_usec / 1000);
-				timeout = Max(timeout, 0);
-
-				tv_last = tv_curr;
+				put_cuda_program_entry_nolock(entry);
+				SpinLockRelease(&pgcache_head->lock);
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
+						 errmsg("CUDA Program (id=%lu) build failed:\n%s",
+								program_id, error_msg)));
 			}
 		}
 		else
 		{
-			/* program is already built (or failure to build) */
-			if (entry->bin_image != CUDA_PROGRAM_BUILD_FAILURE)
-				retval = true;
-			break;
+			struct timeval	tv1, tv2;
+			int				ev;
+			/*
+			 * wait for the build completion until timeout
+			 */
+			gettimeofday(&tv1, NULL);
+			for (;;)
+			{
+				if (timeout == 0)
+				{
+					put_cuda_program_entry_nolock(entry);
+					SpinLockRelease(&pgcache_head->lock);
+					return NULL;
+				}
+				/* register myself on the waiter list */
+				ResetLatch(MyLatch);
+				entry->waiting_backends->words[WORDNUM(MyProc->pgprocno)]
+					|= (1 << BITNUM(MyProc->pgprocno));
+				SpinLockRelease(&pgcache_head->lock);
+
+				ev = WaitLatch(MyLatch,
+							   WL_LATCH_SET |
+							   WL_POSTMASTER_DEATH |
+							   (timeout < 0 ? 0 : WL_TIMEOUT),
+							   timeout);
+				/* emergency bailout if postmaster is dead */
+				if (ev & WL_POSTMASTER_DEATH)
+					ereport(FATAL,
+							(errcode(ERRCODE_ADMIN_SHUTDOWN),
+							 errmsg("Urgent termination by postmaster dead")));
+				if (ev & WL_TIMEOUT)
+					timeout = 0;	/* no wait any more */
+				else
+				{
+					gettimeofday(&tv2, NULL);
+					if (timeout >= 0)
+					{
+						timeout -= ((tv2.tv_sec * 1000 + tv2.tv_usec / 1000) -
+									(tv1.tv_sec * 1000 + tv1.tv_usec / 1000));
+						timeout = Max(timeout, 0);
+						tv1 = tv2;
+					}
+				}
+
+				/* check status of the entry->bin_image */
+				SpinLockAcquire(&pgcache_head->lock);
+				if (entry->bin_image == CUDA_PROGRAM_BUILD_FAILURE)
+				{
+					const char *error_msg = entry->error_msg;
+
+					put_cuda_program_entry_nolock(entry);
+					SpinLockRelease(&pgcache_head->lock);
+					ereport(ERROR,
+							(errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
+							 errmsg("CUDA Program (id=%lu) build failed:\n%s",
+									program_id, error_msg)));
+				}
+				else if (entry->bin_image)
+					break;
+			}
 		}
 	}
+	bin_image = entry->bin_image;
 	SpinLockRelease(&pgcache_head->lock);
 
-	return retval;
+	rc = cuModuleLoadData(&cuda_module, bin_image);
+	if (rc != CUDA_SUCCESS)
+	{
+		put_cuda_program_entry(entry);
+		elog(ERROR, "failed on cuModuleLoadData: %s", errorText(rc));
+	}
+	return cuda_module;
 }
-
-
-
-
 
 
 
@@ -1200,12 +1283,12 @@ __load_cuda_program(GpuContext *gcontext, ProgramId program_id)
 }
 
 /*
- * pgstrom_load_cuda_program
+ * pgstrom_load_cuda_program_legacy
  *
  * a legacy interface to assign cuda_modules on the GpuTaskState
  */
 bool
-pgstrom_load_cuda_program(GpuTaskState *gts, bool is_preload)
+pgstrom_load_cuda_program_legacy(GpuTaskState *gts, bool is_preload)
 {
 	ProgramId		program_id;
 	CUmodule	   *cuda_modules;
@@ -1225,15 +1308,15 @@ pgstrom_load_cuda_program(GpuTaskState *gts, bool is_preload)
 }
 
 /*
- * plcuda_load_cuda_program
+ * plcuda_load_cuda_program_legacy
  *
  * It builds the program synchronously and load CUmodule.
  * Used for pl/cuda functions
  */
 CUmodule *
-plcuda_load_cuda_program(GpuContext *gcontext,
-						 const char *kern_source,
-						 cl_uint extra_flags)
+plcuda_load_cuda_program_legacy(GpuContext *gcontext,
+								const char *kern_source,
+								cl_uint extra_flags)
 {
 	ProgramId		program_id;
 	char		   *kern_define
