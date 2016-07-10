@@ -104,19 +104,17 @@ typedef struct SharedGpuContext
 
 	slock_t		lock;			/* lock of the field below */
 	cl_uint		refcnt;			/* refcount by backend/gpu-server */
+	cl_uint		device_id;		/* a unique index of the GPU device */
 	PGPROC	   *server;			/* PGPROC of GPU/CUDA Server */
 	PGPROC	   *backend;		/* PGPROC of Backend Process */
 
 	dlist_head	dma_buffer_list;/* tracker of DMA buffers */
-
 	/*
-	 * Error status on the GPU/CUDA server
+	 * Status of GpuTasks
 	 */
-	cl_int		error_code;
-	const char *error_filename;
-	cl_int		error_lineno;
-	const char *error_funcname;
-	cl_char		error_message[512];
+	cl_int		num_pending_tasks;
+	cl_int		num_running_tasks;
+	cl_int		num_completed_tasks;
 } SharedGpuContext;
 
 #define INVALID_GPU_CONTEXT_ID		(-1)
@@ -205,7 +203,7 @@ struct GpuTask_v2
 	GpuTaskKind		task_kind;		/* same with GTS's one */
 	ProgramId		program_id;		/* same with GTS's one */
 	cl_uint			revision;		/* same with GTS's one when kicked */
-	dlist_head		chain;			/* link to the task state list */
+	dlist_node		chain;			/* link to the task state list */
 	GpuTaskState_v2 *gts;			/* GTS reference in the backend */
 	CUstream		cuda_stream;	/* CUDA stream for this task */
 	CUmodule		cuda_module;	/* CUDA module for this task */
@@ -437,7 +435,8 @@ extern GpuContext_v2 *MasterGpuContext(void);
 extern GpuContext_v2 *GetGpuContext(void);
 extern GpuContext_v2 *AttachGpuContext(pgsocket sockfd,
 									   cl_int context_id,
-									   BackendId backend_id);
+									   BackendId backend_id,
+									   cl_int device_id);
 extern void PutGpuContext(GpuContext_v2 *gcontext);
 extern void PutSharedGpuContext(SharedGpuContext *shgcon);
 
@@ -455,11 +454,13 @@ extern void pgstrom_init_gpu_context(void);
  * gpu_server.c
  */
 extern bool IsGpuServerProcess(void);
-extern void gpuservHandleLazyJobs(bool flush_completed);
+extern void gpuservHandleLazyJobs(bool flush_completed,
+								  bool process_pending);
 extern void gpuservWakeUpProcesses(cl_uint max_procs);
+extern void notifierGpuMemFree(cl_int device_id);
 extern bool gpuservOpenConnection(GpuContext_v2 *gcontext);
 extern bool gpuservSendGpuTask(GpuContext_v2 *gcontext,
-							   GpuTask *gtask, int peer_fd);
+							   GpuTask_v2 *gtask, int peer_fd);
 extern GpuTask *gpuservRecvGpuTask(GpuContext_v2 *gcontext, int *peer_fd);
 extern GpuTask *gpuservRecvGpuTaskTimeout(GpuContext_v2 *gcontext,
 										  int *peer_fd, long timeout);

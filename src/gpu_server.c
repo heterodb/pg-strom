@@ -33,7 +33,9 @@
 
 typedef struct GpuServProc
 {
-	dlist_node		chain;
+	dlist_node		active_chain;
+	dlist_node		devmem_chain;
+	cl_int			device_id;
 	PGPROC		   *pgproc;
 } GpuServProc;
 
@@ -42,7 +44,8 @@ typedef struct GpuServState
 	slock_t			lock;
 	cl_int			num_wait_servs;
 	cl_int			num_pending_conn;
-	dlist_head		serv_procs_list;
+	dlist_head		active_servers_list;
+	dlist_head		devmem_waiters_list;
 	GpuServProc		serv_procs[FLEXIBLE_ARRAY_MEMBER];
 } GpuServState;
 
@@ -79,6 +82,12 @@ static int				numGpuServers;			/* GUC */
 static int				GpuServerCommTimeout;	/* GUC */
 static CUdevice			cuda_device = NULL;
 static CUcontext		cuda_context = NULL;
+/* per session state */
+static int				session_device_id;
+static GpuContext_v2   *session_gpu_context = NULL;
+static dlist_head		session_pending_tasks;
+static dlist_head		session_running_tasks;
+static dlist_head		session_completed_tasks;
 
 /* CUDA module lookup cache */
 #define CUDA_MODULES_SLOTSIZE		200
@@ -90,6 +99,12 @@ typedef struct
 	ProgramId		program_id;
 	CUmodule		cuda_module;
 } cudaModuleCache;
+
+/*
+ * static functions
+ */
+static void process_pending_tasks(void);
+static void flushout_completed_tasks(void);
 
 /* SIGTERM handler */
 static void
@@ -117,7 +132,7 @@ IsGpuServerProcess(void)
  * gpuservHandleLazyJobs
  */
 void
-gpuservHandleLazyJobs(bool flush_completed)
+gpuservHandleLazyJobs(bool flush_completed, bool process_pending)
 {
 	/* Exit, if SIGTERM was delivered */
 	if (gpu_server_got_sigterm)
@@ -126,12 +141,28 @@ gpuservHandleLazyJobs(bool flush_completed)
 				 errmsg("Terminating PG-Strom GPU/CUDA Server[%d]",
 						gpu_server_id)));
 	/*
-	 * Flush completed tasks
+	 * Flush completed tasks, if any
 	 */
 	if (flush_completed)
 	{
 
+	}
 
+	/*
+	 * Process pending tasks, if any
+	 */
+	if (process_pending)
+	{
+
+
+	}
+
+	/*
+	 * Flush completed tasks, if any
+	 */
+	if (flush_completed)
+	{
+		
 	}
 
 	/*
@@ -153,9 +184,9 @@ gpuservWakeUpProcesses(cl_uint max_procs)
 	if (max_procs == 0)
 		return;
 	SpinLockAcquire(&gpuServState->lock);
-	dlist_foreach(iter, &gpuServState->serv_procs_list)
+	dlist_foreach(iter, &gpuServState->active_servers_list)
 	{
-		serv_proc = dlist_container(GpuServProc, chain, iter.cur);
+		serv_proc = dlist_container(GpuServProc, active_chain, iter.cur);
 		Assert(serv_proc->pgproc != NULL);
 		pgproc = serv_proc->pgproc;
 		/* skip latches already set */
@@ -170,18 +201,31 @@ gpuservWakeUpProcesses(cl_uint max_procs)
 	SpinLockRelease(&gpuServState->lock);
 }
 
+/*
+ * notifierGpuMemFree - wake up processes that wait for free GPU RAM
+ */
+void
+notifierGpuMemFree(cl_int device_id)
+{
+	dlist_mutable_iter  iter;
+	GpuServProc	   *serv_proc;
+	PGPROC		   *pgproc;
 
+	SpinLockAcquire(&gpuServState->lock);
+	dlist_foreach_modify(iter, &gpuServState->devmem_waiters_list)
+	{
+		serv_proc = dlist_container(GpuServProc, devmem_chain, iter.cur);
 
-
-
-
-
-
-
-
-
-
-
+		if (serv_proc->device_id == device_id)
+		{
+			dlist_delete(&serv_proc->devmem_chain);
+			memset(&serv_proc->devmem_chain, 0, sizeof(dlist_node));
+			/* wake up the waiter process */
+			pgproc = serv_proc->pgproc;
+			SetLatch(&pgproc->procLatch);
+		}
+	}
+}
 
 
 
@@ -251,7 +295,7 @@ gpuservSendCommand(GpuContext_v2 *gcontext, GpuServCommand *cmd, long timeout)
  * gpuservSendGpuTask - enqueue a GpuTask to the socket
  */
 bool
-gpuservSendGpuTask(GpuContext_v2 *gcontext, GpuTask *gtask, int peer_fd)
+gpuservSendGpuTask(GpuContext_v2 *gcontext, GpuTask_v2 *gtask, int peer_fd)
 {
 	GpuServCommand	cmd;
 	long			timeout = 5000;		/* 5.0sec; usually enough */
@@ -271,7 +315,7 @@ gpuservSendGpuTask(GpuContext_v2 *gcontext, GpuTask *gtask, int peer_fd)
 
 		CHECK_FOR_INTERRUPTS();
 		if (IsGpuServerProcess())
-			gpuservHandleLazyJobs(false);
+			gpuservHandleLazyJobs(false, false);
 	   	gettimeofday(&tv2, NULL);
 
 		if (timeout >= 0)
@@ -401,7 +445,7 @@ gpuservRecvGpuTaskTimeout(GpuContext_v2 *gcontext, int *peer_fd, long timeout)
 
 		CHECK_FOR_INTERRUPTS();
 		if (IsGpuServerProcess())
-			gpuservHandleLazyJobs(true);
+			gpuservHandleLazyJobs(true, true);
 		gettimeofday(&tv2, NULL);
 
 		if (timeout >= 0)
@@ -638,7 +682,7 @@ gpuservAcceptConnection(void)
 			if (errno != EINTR && errno != EAGAIN)
 				elog(ERROR, "failed on accept(2): %m");
 			CHECK_FOR_INTERRUPTS();
-			gpuservHandleLazyJobs(false);
+			gpuservHandleLazyJobs(false, false);
 		}
 	}
 	PG_CATCH();
@@ -669,7 +713,8 @@ gpuservAcceptConnection(void)
 	}
 	return AttachGpuContext(sockfd,
 							cmd.u.open.context_id,
-							cmd.u.open.backend_id);
+							cmd.u.open.backend_id,
+							session_device_id);
 }
 
 /*
@@ -707,23 +752,155 @@ lookup_cuda_module(ProgramId program_id)
 }
 
 /*
+ * process_pending_tasks 
+ */
+static void
+process_pending_tasks(void)
+{
+	SharedGpuContext *shgcon = session_gpu_context->shgcon;
+	MemoryContext	memcxt = CurrentMemoryContext;
+	MemoryContext	oldcxt;
+	dlist_node	   *dnode;
+	GpuTask_v2	   *gtask;
+	bool			retval;
+
+	SpinLockAcquire(&shgcon->lock);
+	while (dlist_is_empty(&session_pending_tasks))
+	{
+		dnode = dlist_pop_head_node(&session_pending_tasks);
+		gtask = dlist_container(GpuTask_v2, chain, dnode);
+
+		Assert(shgcon->num_pending_tasks > 0);
+        shgcon->num_pending_tasks--;
+        SpinLockRelease(&shgcon->lock);
+
+		PG_TRY();
+		{
+			retval = pgstromProcessGpuTask(gtask);
+		}
+		PG_CATCH();
+		{
+			ErrorData  *errdata;
+			Size		required;
+			char	   *buf;
+
+			/*
+			 * Prior to the ereport() to exit server once, we deliver
+			 * the error detail to the backend to cause an ereport on
+			 * the backend side also.
+			 */
+			oldcxt = MemoryContextSwitchTo(memcxt);
+			errdata = CopyErrorData();
+
+			required = (MAXALIGN(strlen(errdata->filename) + 1) +
+						MAXALIGN(strlen(errdata->funcname) + 1) +
+						MAXALIGN(strlen(errdata->message) + 1));
+			if (required <= sizeof(gtask->error.buffer))
+				buf = gtask->error.buffer;
+			else
+				buf = dmaBufferAlloc(session_gpu_context, required);
+
+			gtask->error.errcode = (errdata->sqlerrcode == 0
+									? ERRCODE_INTERNAL_ERROR
+									: errdata->sqlerrcode);
+			gtask->error.filename = strcpy(buf, errdata->filename);
+			buf += MAXALIGN(strlen(errdata->filename) + 1);
+			gtask->error.lineno = errdata->lineno;
+			gtask->error.funcname = strcpy(buf, errdata->funcname);
+			buf += MAXALIGN(strlen(errdata->funcname) + 1);
+			gtask->error.message = strcpy(buf, errdata->message);
+
+			/* update status */
+			SpinLockAcquire(&shgcon->lock);
+			Assert(shgcon->num_running_tasks > 0);
+			shgcon->num_running_tasks--;
+			shgcon->num_completed_tasks++;
+			SpinLockRelease(&shgcon->lock);
+
+			/* urgent returns to the backend */
+			gpuservSendGpuTask(session_gpu_context, gtask, -1);
+
+			MemoryContextSwitchTo(oldcxt);
+
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+
+		/*
+		 * pgstromProcessGpuTask() may return false if GpuTask cannot be
+		 * queued due to lack of GPU memory. In this case, we can retry
+		 * after the free of GPU memory.
+		 * Even if we still have multiple tasks in the pending tasks list,
+		 * we once break the processing.
+		 */
+		SpinLockAcquire(&shgcon->lock);
+		if (retval)
+		{
+			dlist_push_tail(&session_running_tasks, &gtask->chain);
+			shgcon->num_running_tasks++;
+		}
+		else
+		{
+			dlist_push_head(&session_pending_tasks, &gtask->chain);
+			shgcon->num_pending_tasks++;
+
+			/*
+			 * Please wake me up when somebody releases a particular
+			 * amount of device memory.
+			 */
+			SpinLockAcquire(&gpuServState->lock);
+			if (!serv_proc->devmem_chain.prev &&
+				!serv_proc->devmem_chain.next)
+			{
+				serv_proc->device_id = shgcon->device_id;
+				dlist_push_head(&gpuServState->devmem_waiters_list,
+								&serv_proc->devmem_chain);
+			}
+			SpinLockRelease(&gpuServState->lock);
+			break;
+		}
+	}
+	SpinLockRelease(&shgcon->lock);
+}
+
+/*
+ * flushout_completed_tasks
+ */
+static void
+flushout_completed_tasks(void)
+{
+	while (!dlist_is_empty(&session_completed_tasks))
+	{
+
+
+
+
+
+
+
+
+
+	}
+}
+
+/*
  * gpuserv_session_main - it processes a session once established
  */
 static void
-gpuservSessionMain(GpuContext_v2 *gcontext)
+gpuservSessionMain(void)
 {
 	GpuTask	   *gtask;
 	int			peer_fd;
 	int			i;
 
-	while ((gtask = gpuservRecvGpuTask(gcontext, &peer_fd)) != NULL)
+	while ((gtask = gpuservRecvGpuTask(session_gpu_context,
+									   &peer_fd)) != NULL)
 	{
-		// add gtask to pending list
-
-		// process all the pending tasks
-
-		// back all the completed 
-
+		dlist_push_tail(&session_pending_tasks, &gtask->chain);
+		/* process all the pending tasks */
+		process_pending_tasks();
+		/* flush out all the completed tasks */
+		flushout_completed_tasks();
 	}
 
 	/* Unload all the CUDA modules */
@@ -752,7 +929,6 @@ static void
 gpuserv_main(Datum __server_id)
 {
 	GpuServProc *serv_proc;
-	cl_int		device_id;
 	cl_int		dindex;
 	cl_int		i;
 	CUresult	rc;
@@ -770,8 +946,8 @@ gpuserv_main(Datum __server_id)
 		elog(FATAL, "failed on cuInit(0): %s", errorText(rc));
 
 	dindex = gpu_server_id % numDevAttrs;
-	device_id = devAttrs[dindex].DEV_ID;
-	rc = cuDeviceGet(&cuda_device, device_id);
+	session_device_id = devAttrs[dindex].DEV_ID;
+	rc = cuDeviceGet(&cuda_device, session_device_id);
 	if (rc != CUDA_SUCCESS)
 		elog(FATAL, "failed on cuDeviceGet: %s", errorText(rc));
 
@@ -797,40 +973,49 @@ gpuserv_main(Datum __server_id)
 	/* ready to handle async tasks */
 	SpinLockAcquire(&gpuServState->lock);
 	serv_proc->pgproc = MyProc;
-	dlist_push_head(&gpuServState->serv_procs_list, &serv_proc->chain);
+	dlist_push_head(&gpuServState->active_servers_list,
+					&serv_proc->active_chain);
     SpinLockRelease(&gpuServState->lock);
 
 	PG_TRY();
 	{
-		GpuContext_v2  *gcontext;
-
 		for (;;)
 		{
-			gcontext = gpuservAcceptConnection();
-			if (gcontext)
+			dlist_init(&session_pending_tasks);
+			dlist_init(&session_running_tasks);
+			dlist_init(&session_completed_tasks);
+
+			session_gpu_context = gpuservAcceptConnection();
+			if (session_gpu_context)
 			{
 				/* move to the tail for lower priority of async tasks */
 				SpinLockAcquire(&gpuServState->lock);
-				dlist_delete(&serv_proc->chain);
-				dlist_push_tail(&gpuServState->serv_procs_list,
-								&serv_proc->chain);
+				dlist_delete(&serv_proc->active_chain);
+				dlist_push_tail(&gpuServState->active_servers_list,
+								&serv_proc->active_chain);
 				SpinLockRelease(&gpuServState->lock);
 
-				gpuservSessionMain(gcontext);
-				PutGpuContext(gcontext);
+				gpuservSessionMain();
+				PutGpuContext(session_gpu_context);
 				MemoryContextReset(CurrentMemoryContext);
 
 				/* move to the tail for higher priority of async tasks */
 				SpinLockAcquire(&gpuServState->lock);
-				dlist_delete(&serv_proc->chain);
-				dlist_push_head(&gpuServState->serv_procs_list,
-								&serv_proc->chain);
+				dlist_delete(&serv_proc->active_chain);
+				dlist_push_head(&gpuServState->active_servers_list,
+								&serv_proc->active_chain);
 				SpinLockRelease(&gpuServState->lock);
 			}
 		}
 	}
 	PG_CATCH();
 	{
+		SpinLockAcquire(&gpuServState->lock);
+		dlist_delete(&serv_proc->active_chain);
+		if (serv_proc->devmem_chain.prev && serv_proc->devmem_chain.next)
+			dlist_delete(&serv_proc->devmem_chain);
+		SpinLockRelease(&gpuServState->lock);
+
 		/*
 		 * NOTE: ereport() eventually kills the background worker process.
 		 * It also releases any CUDA resources privately held by this worker,
@@ -840,11 +1025,14 @@ gpuserv_main(Datum __server_id)
 		 */
 		if (currentSharedGpuContext)
 			PutSharedGpuContext(currentSharedGpuContext);
+		PG_RE_THROW();
 	}
 	PG_END_TRY();
 	/* this server process can take async tasks no longer */
 	SpinLockAcquire(&gpuServState->lock);
-	dlist_delete(&serv_proc->chain);
+	dlist_delete(&serv_proc->active_chain);
+	if (serv_proc->devmem_chain.prev && serv_proc->devmem_chain.next)
+		dlist_delete(&serv_proc->devmem_chain);
 	memset(serv_proc, 0, sizeof(GpuServProc));
 	SpinLockRelease(&gpuServState->lock);
 
@@ -885,7 +1073,8 @@ pgstrom_startup_gpu_server(void)
 
 	memset(gpuServState, 0, required);
 	SpinLockInit(&gpuServState->lock);
-	dlist_init(&gpuServState->serv_procs_list);
+	dlist_init(&gpuServState->active_servers_list);
+	dlist_init(&gpuServState->devmem_waiters_list);
 }
 
 /*

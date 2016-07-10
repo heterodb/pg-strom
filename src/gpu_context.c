@@ -49,7 +49,7 @@ static dlist_head		inactiveResourceTracker;
  * It enables to track various resources with GpuContext, to detect resource
  * leaks.
  */
-#define RESTRACK_HASHSIZE		27
+#define RESTRACK_HASHSIZE				27
 
 #define RESTRACK_CLASS__FILEDESC		1
 #define RESTRACK_CLASS__GPUMEMORY		2
@@ -177,9 +177,11 @@ gpuMemAlloc_v2(GpuContext_v2 *gcontext, CUdeviceptr *p_devptr, size_t bytesize)
 CUresult
 gpuMemFree_v2(GpuContext_v2 *gcontext, CUdeviceptr devptr)
 {
+	SharedGpuContext *shgcon = gcontext->shgcon;
 	dlist_head *restrack_list;
 	dlist_iter	iter;
 	pg_crc32	crc;
+	CUresult	rc;
 
 	crc = resource_tracker_hashval(RESTRACK_CLASS__GPUMEMORY,
 								   &devptr, sizeof(CUdeviceptr));
@@ -198,12 +200,16 @@ gpuMemFree_v2(GpuContext_v2 *gcontext, CUdeviceptr devptr)
 			memset(tracker, 0, sizeof(ResourceTracker));
 			dlist_push_head(&inactiveResourceTracker,
 							&tracker->chain);
-			return cuMemFree(devptr);
+			rc = cuMemFree(devptr);
+			notifierGpuMemFree(shgcon->device_id);
+			return rc;
         }
     }
     elog(WARNING, "Bug? device pointer %p was not tracked", (void *)devptr);
 
-	return cuMemFree(devptr);
+	rc = cuMemFree(devptr);
+	notifierGpuMemFree(shgcon->device_id);
+	return rc;
 }
 
 /*
@@ -367,7 +373,6 @@ GetGpuContext(void)
 	shgcon->refcnt = 1;
 	shgcon->server = NULL;
 	shgcon->backend = MyProc;
-	shgcon->error_code = 0;
 
 	gcontext->refcnt = 1;
 	gcontext->sockfd = PGINVALID_SOCKET;
@@ -397,7 +402,10 @@ GetGpuContext(void)
  * which is already acquired by a certain backend.
  */
 GpuContext_v2 *
-AttachGpuContext(pgsocket sockfd, cl_int context_id, BackendId backend_id)
+AttachGpuContext(pgsocket sockfd,
+				 cl_int context_id,
+				 BackendId backend_id,
+				 cl_int device_id)
 {
 	GpuContext_v2	   *gcontext;
 	SharedGpuContext   *shgcon;
@@ -437,7 +445,11 @@ AttachGpuContext(pgsocket sockfd, cl_int context_id, BackendId backend_id)
 			 context_id);
 	}
 	shgcon->refcnt++;
+	shgcon->device_id = device_id;
 	shgcon->server = MyProc;
+	shgcon->num_pending_tasks = 0;
+	shgcon->num_running_tasks = 0;
+	shgcon->num_completed_tasks = 0;
 	SetLatch(&shgcon->backend->procLatch);
 	SpinLockRelease(&shgcon->lock);
 
