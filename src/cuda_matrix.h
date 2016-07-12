@@ -542,7 +542,7 @@ VALIDATE_ARRAY_MATRIX(MatrixType *matrix)
 											&block_sz,					\
 											kern_funcs[i],				\
 											(valid_nrows + 1) / 2,		\
-											2 * sizeof(cl_uint));		\
+											0, 2 * sizeof(cl_uint));	\
 			if (status != cudaSuccess)									\
 				goto out;												\
 			min_block_sz = Min(min_block_sz, block_sz.x);				\

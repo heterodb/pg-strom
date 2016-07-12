@@ -2478,7 +2478,7 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 							   gpuscan->kern_exec_quals,
 							   gpuscan->task.cuda_device,
 							   src_nitems,
-							   sizeof(kern_errorbuf));
+							   0, sizeof(kern_errorbuf));
 		kern_args[0] = &gpuscan->m_gpuscan;
 		kern_args[1] = &gpuscan->m_kds_src;
 
@@ -2507,7 +2507,7 @@ __pgstrom_process_gpuscan(pgstrom_gpuscan *gpuscan)
 							   gpuscan->kern_dev_proj, 
 							   gpuscan->task.cuda_device,
 							   src_nitems,
-							   sizeof(kern_errorbuf));
+							   0, sizeof(kern_errorbuf));
 		kern_args[0] = &gpuscan->m_gpuscan;
 		kern_args[1] = &gpuscan->m_kds_src;
 		kern_args[2] = &gpuscan->m_kds_dst;

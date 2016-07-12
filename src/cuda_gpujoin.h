@@ -1505,7 +1505,7 @@ retry_major:
 												(const void *)
 												gpujoin_exec_outerscan,
 												kds_src->nitems,
-												sizeof(kern_errorbuf));
+												0, sizeof(kern_errorbuf));
 				if (status != cudaSuccess)
 				{
 					STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
@@ -1597,7 +1597,7 @@ retry_major:
 												gpujoin_exec_nestloop,
 												(size_t)kresults_src->nitems *
 												(size_t)window_size,
-												sizeof(kern_errorbuf));
+												0, sizeof(kern_errorbuf));
 				if (status != cudaSuccess)
 				{
 					STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
@@ -1695,7 +1695,7 @@ retry_major:
 												(const void *)
 												gpujoin_outer_nestloop,
 												window_size,
-												sizeof(kern_errorbuf));
+												0, sizeof(kern_errorbuf));
 				if (status != cudaSuccess)
 				{
 					STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
@@ -1786,7 +1786,7 @@ retry_major:
 												(const void *)
 												gpujoin_exec_hashjoin,
 												kresults_src->nitems,
-												sizeof(kern_errorbuf));
+												0, sizeof(kern_errorbuf));
 				if (status != cudaSuccess)
 				{
 					STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
@@ -1878,7 +1878,7 @@ retry_major:
 												(const void *)
 												gpujoin_outer_hashjoin,
 												window_size,
-												sizeof(kern_errorbuf));
+												0, sizeof(kern_errorbuf));
 				if (status != cudaSuccess)
 				{
 					STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
@@ -2019,7 +2019,7 @@ retry_major:
 										&block_sz,
 										kernel_projection,
 										kresults_src->nitems,
-										sizeof(kern_errorbuf));
+										0, sizeof(kern_errorbuf));
 		if (status != cudaSuccess)
 		{
 			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);

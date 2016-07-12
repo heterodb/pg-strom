@@ -3932,7 +3932,7 @@ gpupreagg_setup_segment(pgstrom_gpupreagg *gpreagg, bool perfmon_enabled)
 							   kern_final_prep,
 							   gpreagg->task.cuda_device,
 							   segment->f_hashsize,
-							   sizeof(kern_errorbuf));
+							   0, sizeof(kern_errorbuf));
 		kern_args[0] = &segment->f_hashsize;
 		kern_args[1] = &m_hashslot_final;
 		rc = cuLaunchKernel(kern_final_prep,
@@ -4895,7 +4895,7 @@ __gpupreagg_task_process(pgstrom_gpupreagg *gpreagg)
 								   gpreagg->kern_fixvar,
 								   gpreagg->task.cuda_device,
 								   final_nrooms,
-								   sizeof(kern_errorbuf));
+								   0, sizeof(kern_errorbuf));
 			kern_args[0] = &gpreagg->m_gpreagg;
 			kern_args[1] = &segment->m_kds_final;
 

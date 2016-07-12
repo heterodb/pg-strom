@@ -446,12 +446,14 @@ extern void optimal_workgroup_size(size_t *p_grid_size,
 								   CUfunction function,
 								   CUdevice device,
 								   size_t nitems,
+								   size_t dynamic_shmem_per_block,
 								   size_t dynamic_shmem_per_thread);
 extern void largest_workgroup_size(size_t *p_grid_size,
 								   size_t *p_block_size,
 								   CUfunction function,
 								   CUdevice device,
 								   size_t nitems,
+								   size_t dynamic_shmem_per_block,
 								   size_t dynamic_shmem_per_thread);
 extern void pgstrom_init_cuda_control(void);
 extern cl_ulong pgstrom_baseline_cuda_capability(void);

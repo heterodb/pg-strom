@@ -1998,7 +1998,7 @@ __gpusort_task_process(GpuSortState *gss, pgstrom_gpusort *pgsort)
 							   pgsort->kern_proj,
 							   pgsort->task.cuda_device,
 							   pds_in->kds->nitems,
-							   sizeof(cl_uint));
+							   0, sizeof(cl_uint));
 		kern_args[0] = &pgsort->m_gpusort;
 		kern_args[1] = &segment->m_kresults;
 		kern_args[2] = &segment->m_kds_slot;
