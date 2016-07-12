@@ -490,38 +490,63 @@ pgstromReleaseGpuTaskState(GpuTaskState_v2 *gts)
 }
 
 /*
- * pgstromProcessGpuTask - processing handler of GpuTask
+ * pgstromProcessTask - processing handler of GpuTask
  */
 bool
-pgstromProcessGpuTask(GpuTask_v2 *gtask,
-					  CUmodule cuda_module,
-					  CUstream cuda_stream)
+pgstromProcessTask(GpuTask_v2 *gtask,
+				   CUmodule cuda_module,
+				   CUstream cuda_stream)
 {
+	bool	retval;
+
 	Assert(IsGpuServerProcess());
 
-
-	return true;
+	switch (gtask->task_kind)
+	{
+		case GpuTaskKind_GpuScan:
+			retval = gpuscan_process_task(gtask, cuda_module, cuda_stream);
+			break;
+		default:
+			elog(ERROR, "Unknown GpuTask kind: %d", gtask->task_kind);
+			break;
+	}
+	return retval;
 }
 
 /*
  * pgstromCompleteGpuTask - completion handler of GpuTask
  */
 void
-pgstromCompleteGpuTask(GpuTask_v2 *gtask)
+pgstromCompleteTask(GpuTask_v2 *gtask)
 {
 	Assert(IsGpuServerProcess());
 
-
+	switch (gtask->task_kind)
+	{
+		case GpuTaskKind_GpuScan:
+			gpuscan_complete_task(gtask);
+			break;
+		default:
+			elog(ERROR, "Unknown GpuTask kind: %d", (int)gtask->task_kind);
+			break;
+	}
 }
 
 /*
  * pgstromReleaseGpuTask - release of GpuTask
  */
 void
-pgstromReleaseGpuTask(GpuTask_v2 *gtask)
+pgstromReleaseTask(GpuTask_v2 *gtask)
 {
-
-
+	switch (gtask->task_kind)
+	{
+		case GpuTaskKind_GpuScan:
+			gpuscan_release_task(gtask);
+			break;
+		default:
+			elog(ERROR, "Unknown GpuTask kind: %d", (int)gtask->task_kind);
+			break;
+	}
 }
 
 /*
@@ -736,7 +761,7 @@ errorTextKernel(kern_errorbuf *kerror)
 void
 pgstrom_init_gputasks(void)
 {
-
+	/* nothing to do */
 }
 
 

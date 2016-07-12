@@ -158,11 +158,14 @@ struct GpuTaskState_v2
 	kern_parambuf  *kern_params;	/* Const/Param buffer */
 	bool			scan_done;		/* True, if no more rows to read */
 	bool			row_format;		/* True, if KDS_FORMAT_ROW is required */
+	bool			perfmon;		/* True, if perfmon info is needed */
 
+	/* fields for outer scan */
 	bool			outer_bulk_exec;/* True, if it scans outer by bulk-exec */
 	Instrumentation	outer_instrument; /* runtime statistics, if any */
 	TupleTableSlot *scan_overflow;	/* temporary buffer, if no space on PDS */
 
+	/* fields for current task */
 	cl_long			curr_index;		/* current position on the curr_task */
 	struct GpuTask_v2 *curr_task;	/* a GpuTask currently processed */
 
@@ -192,6 +195,7 @@ struct GpuTask_v2
 	GpuTaskState_v2 *gts;			/* GTS reference in the backend */
 	cl_uint			revision;		/* same with GTS's one when kicked */
 	cl_int			file_desc;		/* FD to be shared with server */
+	bool			row_format;		/* true, if row-format is preferred */
 	bool			cpu_fallback;	/* true, if task needs CPU fallback */
 	/* fields below are valid only server */
 	cl_int			peer_fdesc;		/* duplication of file_desc on server */
@@ -433,6 +437,10 @@ extern void pgstrom_init_gpu_context(void);
 /*
  * gpu_server.c
  */
+extern GpuContext_v2   *gpuserv_gpu_context;
+extern CUdevice			gpuserv_cuda_device;
+extern CUcontext		gpuserv_cuda_context;
+
 extern bool IsGpuServerProcess(void);
 extern void gpuservHandleLazyJobs(bool flush_completed,
 								  bool process_pending);
@@ -694,7 +702,16 @@ extern bool pgstrom_plan_is_gpuscan(const Plan *plan);
 extern pgstrom_data_store *pgstrom_exec_scan_chunk(GpuTaskState *gts,
 												   Size chunk_length);
 extern void pgstrom_rewind_scan_chunk(GpuTaskState *gts);
-extern void pgstrom_post_planner_gpuscan(PlannedStmt *pstmt, Plan **p_plan);
+
+
+extern void gpuscan_process_task(GpuTask_v2 *gtask,
+								 CUmodule cuda_module,
+								 CUstream cuda_stream);
+extern void gpuscan_complete_task(GpuTask_v2 *gtask);
+extern void gpuscan_release_task(GpuTask_v2 *gtask);
+
+
+
 extern void assign_gpuscan_session_info(StringInfo buf, GpuTaskState *gts);
 extern void pgstrom_init_gpuscan(void);
 

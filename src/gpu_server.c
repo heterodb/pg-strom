@@ -85,7 +85,7 @@ typedef struct GpuServCommand
 SharedGpuContext	   *currentSharedGpuContext = NULL;
 
 /*
- * static variables
+ * static/public variables
  */
 static shmem_startup_hook_type shmem_startup_hook_next = NULL;
 static GpuServState	   *gpuServState = NULL;
@@ -95,11 +95,10 @@ static int				gpu_server_id = -1;
 static bool				gpu_server_got_sigterm = false;
 static int				numGpuServers;			/* GUC */
 static int				GpuServerCommTimeout;	/* GUC */
-static CUdevice			cuda_device = NULL;
-static CUcontext		cuda_context = NULL;
+GpuContext_v2		   *gpuserv_gpu_context = NULL;
+CUdevice				gpuserv_cuda_device = NULL;
+CUcontext				gpuserv_cuda_context = NULL;
 /* per session state */
-static int				session_device_id;
-static GpuContext_v2   *session_gpu_context = NULL;
 static slock_t			session_tasks_lock;
 static dlist_head		session_pending_tasks;
 static dlist_head		session_running_tasks;
@@ -215,7 +214,7 @@ ReportErrorForBackend(GpuTask_v2 *gtask, MemoryContext memcxt)
 	}
 	else
 	{
-		buf = dmaBufferAlloc(session_gpu_context, required);
+		buf = dmaBufferAlloc(gpuserv_gpu_context, required);
 		cmd.u.error.buffer_external = buf;
 	}
 	cmd.command                 = GPUSERV_CMD_ERROR;
@@ -250,7 +249,7 @@ ReportErrorForBackend(GpuTask_v2 *gtask, MemoryContext memcxt)
 		ResetLatch(MyLatch);
 
 		CHECK_FOR_INTERRUPTS();
-		if (gpuservSendCommand(session_gpu_context, &cmd, timeout))
+		if (gpuservSendCommand(gpuserv_gpu_context, &cmd, timeout))
 			break;
 
 		/* adjust timeout */
@@ -274,7 +273,7 @@ ReportErrorForBackend(GpuTask_v2 *gtask, MemoryContext memcxt)
 static void
 gpuservProcessPendingTasks(void)
 {
-	SharedGpuContext *shgcon = session_gpu_context->shgcon;
+	SharedGpuContext *shgcon = gpuserv_gpu_context->shgcon;
 	MemoryContext	memcxt = CurrentMemoryContext;
 	dlist_node	   *dnode;
 	GpuTask_v2	   *gtask;
@@ -1046,7 +1045,7 @@ gpuservAcceptConnection(void)
 			gcontext = AttachGpuContext(sockfd,
 										cmd.u.open.context_id,
 										cmd.u.open.backend_id,
-										session_device_id);
+										gpuserv_device_id);
 		}
 	}
 	PG_CATCH();
@@ -1068,7 +1067,7 @@ gpuservSessionMain(void)
 	GpuTask_v2 *gtask;
 	int			i, ev;
 
-	while ((gtask = gpuservRecvGpuTask(session_gpu_context)) != NULL)
+	while ((gtask = gpuservRecvGpuTask(gpuserv_gpu_context)) != NULL)
 	{
 		SpinLockAcquire(&session_tasks_lock);
 		dlist_push_tail(&session_pending_tasks, &gtask->chain);
@@ -1146,14 +1145,14 @@ gpuserv_main(Datum __server_id)
 		elog(FATAL, "failed on cuInit(0): %s", errorText(rc));
 
 	dindex = gpu_server_id % numDevAttrs;
-	session_device_id = devAttrs[dindex].DEV_ID;
-	rc = cuDeviceGet(&cuda_device, session_device_id);
+	gpuserv_device_id = devAttrs[dindex].DEV_ID;
+	rc = cuDeviceGet(&gpuserv_cuda_device, gpuserv_device_id);
 	if (rc != CUDA_SUCCESS)
 		elog(FATAL, "failed on cuDeviceGet: %s", errorText(rc));
 
-	rc = cuCtxCreate(&cuda_context,
+	rc = cuCtxCreate(&gpuserv_cuda_context,
 					 CU_CTX_SCHED_AUTO,
-					 cuda_device);
+					 gpuserv_cuda_device);
 	if (rc != CUDA_SUCCESS)
 		elog(FATAL, "failed on cuCtxCreate: %s", errorText(rc));
 
@@ -1184,8 +1183,8 @@ gpuserv_main(Datum __server_id)
 			dlist_init(&session_pending_tasks);
 			dlist_init(&session_running_tasks);
 			dlist_init(&session_completed_tasks);
-			session_gpu_context = gpuservAcceptConnection();
-			if (session_gpu_context)
+			gpuserv_gpu_context = gpuservAcceptConnection();
+			if (gpuserv_gpu_context)
 			{
 				/* move to the tail for lower priority of async tasks */
 				SpinLockAcquire(&gpuServState->lock);
@@ -1196,7 +1195,7 @@ gpuserv_main(Datum __server_id)
 
 				gpuservSessionMain();
 
-				PutGpuContext(session_gpu_context);
+				PutGpuContext(gpuserv_gpu_context);
 				MemoryContextReset(CurrentMemoryContext);
 
 				/* move to the tail for higher priority of async tasks */
