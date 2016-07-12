@@ -171,8 +171,8 @@ BulkExecProcNode(GpuTaskState *gts, size_t chunk_size)
 		/* must provide our own instrumentation support */
 		if (plannode->instrument)
 			InstrStopNode(plannode->instrument,
-						  !pds ? 0.0 : (double)pds->kds->nitems);
-		Assert(!pds || pds->kds->nitems > 0);
+						  !pds ? 0.0 : (double)pds->kds.nitems);
+		Assert(!pds || pds->kds.nitems > 0);
 		return pds;
 	}
 	elog(ERROR, "Bug? exec_chunk callback was not implemented");
@@ -234,7 +234,7 @@ pgstrom_fetch_data_store(TupleTableSlot *slot,
 						 size_t row_index,
 						 HeapTuple tuple)
 {
-	return kern_fetch_data_store(slot, pds->kds, row_index, tuple);
+	return kern_fetch_data_store(slot, &pds->kds, row_index, tuple);
 }
 
 pgstrom_data_store *
@@ -252,17 +252,7 @@ PDS_release(pgstrom_data_store *pds)
 {
 	Assert(pds->refcnt > 0);
 	if (--pds->refcnt == 0)
-	{
-		/* detach from the GpuContext */
-		if (pds->pds_chain.prev && pds->pds_chain.next)
-		{
-			dlist_delete(&pds->pds_chain);
-			memset(&pds->pds_chain, 0, sizeof(dlist_node));
-		}
-		/* release body of the data store */
-		pfree(pds->kds);
-		pfree(pds);
-	}
+		dmaBufferFree(pds);
 }
 
 void
@@ -338,41 +328,41 @@ init_kernel_data_store(kern_data_store *kds,
 	}
 }
 
-void
-PDS_expand_size(GpuContext *gcontext,
-				pgstrom_data_store *pds,
+pgstrom_data_store *
+PDS_expand_size(GpuContext_v2 *gcontext,
+				pgstrom_data_store *pds_old,
 				Size kds_length_new)
 {
-	kern_data_store	   *kds_old = pds->kds;
-	kern_data_store	   *kds_new;
-	Size				kds_length_old = kds_old->length;
-	Size				kds_usage = kds_old->usage;
-	cl_uint				i, nitems = kds_old->nitems;
+	pgstrom_data_store *pds_new;
+	Size		kds_length_old = pds_old->kds.length;
+	Size		kds_usage = pds_old->kds.usage;
+	cl_uint		i, nitems = pds_old->kds.nitems;
 
 	/* sanity checks */
-	Assert(pds->kds_length == kds_length_old);
-	Assert(kds_old->format == KDS_FORMAT_ROW ||
-		   kds_old->format == KDS_FORMAT_HASH);
-	Assert(kds_old->nslots == 0);
+	Assert(pds_old->kds.format == KDS_FORMAT_ROW ||
+		   pds_old->kds.format == KDS_FORMAT_HASH);
+	Assert(pds_old->kds.nslots == 0);
 
 	/* no need to expand? */
-	if (kds_length_old >= kds_length_new)
-		return;
+	kds_length_new = STROMALIGN_DOWN(kds_length_new);
+	if (pds_old->kds.length >= kds_length_new)
+		return pds_old;
 
-	kds_new = MemoryContextAllocHuge(gcontext->memcxt,
-									 kds_length_new);
-	memcpy(kds_new, kds_old, KERN_DATA_STORE_HEAD_LENGTH(kds_old));
-	kds_new->hostptr = (hostptr_t)&kds_new->hostptr;
-	kds_new->length = kds_length_new;
+	pds_new = dmaBufferAlloc(gcontext, offsetof(pgstrom_data_store,
+												kds) + kds_length_new);
+	memcpy(pds_new, pds_old, (offsetof(pgstrom_data_store, kds) +
+							  KERN_DATA_STORE_HEAD_LENGTH(&pds_old->kds)));
+	pds_new->kds.hostptr = (hostptr_t)&pds_new->kds.hostptr;
+	pds_new->kds.length  = kds_length_new;
 
 	/*
 	 * Move the contents to new buffer from the old one
 	 */
-	if (kds_new->format == KDS_FORMAT_ROW ||
-		kds_new->format == KDS_FORMAT_HASH)
+	if (pds_new->kds.format == KDS_FORMAT_ROW ||
+		pds_new->kds.format == KDS_FORMAT_HASH)
 	{
-		cl_uint	   *row_index_old = KERN_DATA_STORE_ROWINDEX(kds_old);
-		cl_uint	   *row_index_new = KERN_DATA_STORE_ROWINDEX(kds_new);
+		cl_uint	   *row_index_old = KERN_DATA_STORE_ROWINDEX(&pds_old->kds);
+		cl_uint	   *row_index_new = KERN_DATA_STORE_ROWINDEX(&pds_new->kds);
 		size_t		shift = STROMALIGN_DOWN(kds_length_new - kds_length_old);
 		size_t		offset = kds_length_old - kds_usage;
 
@@ -380,48 +370,47 @@ PDS_expand_size(GpuContext *gcontext,
 		 * If supplied new nslots is too big, larger than the expanded,
 		 * it does not make sense to expand the buffer.
 		 */
-		if ((kds_new->format == KDS_FORMAT_HASH
-			 ? KDS_CALCULATE_HASH_LENGTH(kds_new->ncols,
-										 kds_new->nitems,
-										 kds_new->usage)
-			 : KDS_CALCULATE_ROW_LENGTH(kds_new->ncols,
-										kds_new->nitems,
-										kds_new->usage)) >= kds_new->length)
+		if ((pds_new->kds.format == KDS_FORMAT_HASH
+			 ? KDS_CALCULATE_HASH_LENGTH(pds_new->kds.ncols,
+										 pds_new->kds.nitems,
+										 pds_new->kds.usage)
+			 : KDS_CALCULATE_ROW_LENGTH(pds_new->kds.ncols,
+										pds_new->kds.nitems,
+										pds_new->kds.usage)) >= kds_length_new)
 			elog(ERROR, "New nslots consumed larger than expanded");
 
-		memcpy((char *)kds_new + offset + shift,
-			   (char *)kds_old + offset,
+		memcpy((char *)&pds_new->kds + offset + shift,
+			   (char *)&pds_old->kds + offset,
 			   kds_length_old - offset);
 		for (i = 0; i < nitems; i++)
 			row_index_new[i] = row_index_old[i] + shift;
 	}
-	else if (kds_new->format == KDS_FORMAT_SLOT)
+	else if (pds_new->kds.format == KDS_FORMAT_SLOT)
 	{
 		/*
 		 * We cannot expand KDS_FORMAT_SLOT with extra area because we don't
 		 * know the way to fix pointers that reference the extra area.
 		 */
-		if (kds_new->usage > 0)
+		if (pds_new->kds.usage > 0)
 			elog(ERROR, "cannot expand KDS_FORMAT_SLOT with extra area");
 		/* copy the values/isnull pair */
-		memcpy(KERN_DATA_STORE_BODY(kds_new),
-			   KERN_DATA_STORE_BODY(kds_old),
-			   KERN_DATA_STORE_SLOT_LENGTH(kds_old, kds_old->nitems));
+		memcpy(KERN_DATA_STORE_BODY(&pds_new->kds),
+			   KERN_DATA_STORE_BODY(&pds_old->kds),
+			   KERN_DATA_STORE_SLOT_LENGTH(&pds_old->kds,
+										   pds_old->kds.nitems));
 	}
 	else
-		elog(ERROR, "unexpected KDS format: %d", kds_new->format);
-	/* old KDS is no longer referenced */
-	pfree(kds_old);
+		elog(ERROR, "unexpected KDS format: %d", pds_new->kds.format);
 
-	/* update length and kernel buffer */
-	pds->kds_length = kds_length_new;
-	pds->kds = kds_new;
+	/* release the old PDS, and return the new one */
+	dmaBufferFree(pds_old);
+	return pds_new;
 }
 
 void
 PDS_shrink_size(pgstrom_data_store *pds)
 {
-	kern_data_store	   *kds = pds->kds;
+	kern_data_store	   *kds = &pds->kds;
 	size_t				new_length;
 
 	if (kds->format == KDS_FORMAT_ROW ||
@@ -495,38 +484,29 @@ PDS_shrink_size(pgstrom_data_store *pds)
 
 	Assert(new_length <= kds->length);
 	kds->length = new_length;
-	pds->kds_length = new_length;
 }
 
 pgstrom_data_store *
-PDS_create_row(GpuContext *gcontext, TupleDesc tupdesc, Size length)
+PDS_create_row(GpuContext_v2 *gcontext, TupleDesc tupdesc, Size length)
 {
 	pgstrom_data_store *pds;
-	MemoryContext	gmcxt = gcontext->memcxt;
+	Size		kds_length = STROMALIGN_DOWN(length);
 
-	/* allocation of pds */
-	pds = MemoryContextAllocZero(gmcxt, sizeof(pgstrom_data_store));
+	pds = dmaBufferAlloc(gcontext, offsetof(pgstrom_data_store,
+											kds) + kds_length);
 	pds->refcnt = 1;	/* owned by the caller at least */
 
-	/* allocation of kds */
-	pds->kds_length = STROMALIGN_DOWN(length);
-	pds->kds = MemoryContextAllocHuge(gmcxt, pds->kds_length);
-
 	/*
-	 * initialize common part of kds. Note that row-format cannot
+	 * initialize common part of KDS. Note that row-format cannot
 	 * determine 'nrooms' preliminary, so INT_MAX instead.
 	 */
-	init_kernel_data_store(pds->kds, tupdesc, pds->kds_length,
+	init_kernel_data_store(&pds->kds, tupdesc, kds_length,
 						   KDS_FORMAT_ROW, INT_MAX, false);
-
-	/* OK, it is now tracked by GpuContext */
-	dlist_push_tail(&gcontext->pds_list, &pds->pds_chain);
-
 	return pds;
 }
 
 pgstrom_data_store *
-PDS_create_slot(GpuContext *gcontext,
+PDS_create_slot(GpuContext_v2 *gcontext,
 				TupleDesc tupdesc,
 				cl_uint nrooms,
 				Size extra_length,
@@ -534,49 +514,38 @@ PDS_create_slot(GpuContext *gcontext,
 {
 	pgstrom_data_store *pds;
 	size_t			kds_length;
-	MemoryContext	gmcxt = gcontext->memcxt;
 
-	/* allocation of pds */
-	pds = MemoryContextAllocZero(gmcxt, sizeof(pgstrom_data_store));
-	pds->refcnt = 1;	/* owned by the caller at least */
-
-	/* allocation of kds */
 	kds_length = (STROMALIGN(offsetof(kern_data_store,
 									  colmeta[tupdesc->natts])) +
 				  STROMALIGN(LONGALIGN((sizeof(Datum) + sizeof(char)) *
-									   tupdesc->natts) * nrooms));
-	kds_length += STROMALIGN(extra_length);
+									   tupdesc->natts) * nrooms) +
+				  STROMALIGN(extra_length));
+	pds = dmaBufferAlloc(gcontext, offsetof(pgstrom_data_store,
+											kds) + kds_length);
+	pds->refcnt = 1;	/* owned by the caller at least */
 
-	pds->kds_length = kds_length;
-	pds->kds = MemoryContextAllocHuge(gmcxt, pds->kds_length);
-
-	init_kernel_data_store(pds->kds, tupdesc, pds->kds_length,
+	init_kernel_data_store(&pds->kds, tupdesc, kds_length,
 						   KDS_FORMAT_SLOT, nrooms, use_internal);
-
-	/* OK, now it is tracked by GpuContext */
-	dlist_push_tail(&gcontext->pds_list, &pds->pds_chain);
-
 	return pds;
 }
 
 pgstrom_data_store *
-PDS_create_hash(GpuContext *gcontext,
+PDS_create_hash(GpuContext_v2 *gcontext,
 				TupleDesc tupdesc,
 				Size length)
 {
 	pgstrom_data_store *pds;
+	Size		kds_length = STROMALIGN_DOWN(length);
 
-	if (KDS_CALCULATE_HEAD_LENGTH(tupdesc->natts) > length)
+	if (KDS_CALCULATE_HEAD_LENGTH(tupdesc->natts) > kds_length)
 		elog(ERROR, "Required length for KDS-Hash is too short");
 
-	/*
-	 * KDS_FORMAT_HASH has almost same initialization to KDS_FORMAT_ROW,
-	 * so we once create it as _row format, then fixup the pds/kds.
-	 */
-	pds = PDS_create_row(gcontext, tupdesc, length);
-	pds->kds->format = KDS_FORMAT_HASH;
-	Assert(pds->kds->nslots == 0);	/* to be set later */
+	pds = dmaBufferAlloc(gcontext, offsetof(pgstrom_data_store,
+											kds) + kds_length);
+	pds->refcnt = 1;
 
+	init_kernel_data_store(&pds->kds, tupdesc, kds_length,
+						   KDS_FORMAT_HASH, INT_MAX, false);
 	return pds;
 }
 
@@ -586,7 +555,7 @@ PDS_insert_block(pgstrom_data_store *pds,
 				 Snapshot snapshot,
 				 BufferAccessStrategy strategy)
 {
-	kern_data_store	*kds = pds->kds;
+	kern_data_store	*kds = &pds->kds;
 	Buffer			buffer;
 	Page			page;
 	int				lines;
@@ -700,13 +669,11 @@ PDS_insert_block(pgstrom_data_store *pds,
 bool
 PDS_insert_tuple(pgstrom_data_store *pds, TupleTableSlot *slot)
 {
-	kern_data_store	   *kds = pds->kds;
+	kern_data_store	   *kds = &pds->kds;
 	size_t				required;
 	HeapTuple			tuple;
 	cl_uint			   *tup_index;
 	kern_tupitem	   *tup_item;
-
-	Assert(pds->kds_length == kds->length);
 
 	/* No room to store a new kern_rowitem? */
 	if (kds->nitems >= kds->nrooms)
@@ -750,13 +717,11 @@ PDS_insert_hashitem(pgstrom_data_store *pds,
 					TupleTableSlot *slot,
 					cl_uint hash_value)
 {
-	kern_data_store	   *kds = pds->kds;
+	kern_data_store	   *kds = &pds->kds;
 	cl_uint			   *row_index = KERN_DATA_STORE_ROWINDEX(kds);
 	Size				required;
 	HeapTuple			tuple;
 	kern_hashitem	   *khitem;
-
-	Assert(pds->kds_length == kds->length);
 
 	/* No room to store a new kern_hashitem? */
 	if (kds->nitems >= kds->nrooms)
@@ -774,7 +739,7 @@ PDS_insert_hashitem(pgstrom_data_store *pds,
 	Assert(kds->usage == MAXALIGN(kds->usage));
 	if (KDS_CALCULATE_HASH_LENGTH(kds->ncols,
 								  kds->nitems + 1,
-								  required + kds->usage) > pds->kds_length)
+								  required + kds->usage) > pds->kds.length)
 		return false;	/* no more space to put */
 
 	/* OK, put a tuple */
@@ -802,7 +767,7 @@ PDS_insert_hashitem(pgstrom_data_store *pds,
 void
 PDS_build_hashtable(pgstrom_data_store *pds)
 {
-	kern_data_store *kds = pds->kds;
+	kern_data_store *kds = &pds->kds;
 	cl_uint		   *row_index = KERN_DATA_STORE_ROWINDEX(kds);
 	cl_uint		   *hash_slot = KERN_DATA_STORE_HASHSLOT(kds);
 	cl_uint			i, j, nslots = __KDS_NSLOTS(kds->nitems);

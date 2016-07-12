@@ -378,15 +378,14 @@ typedef struct devexpr_info {
 } devexpr_info;
 
 /*
- * pgstrom_data_store - a data structure with row- or column- format
- * to exchange a data chunk between the host and opencl server.
+ * pgstrom_data_store - a data structure with various format to exchange
+ * a data chunk between the host and CUDA server.
  */
 typedef struct pgstrom_data_store
 {
-	dlist_node	pds_chain;	/* link to GpuContext->pds_list */
 	cl_int		refcnt;		/* reference counter */
-	Size		kds_length;	/* length of the kernel data store */
-	kern_data_store *kds;
+	char		__padding__[4];
+	kern_data_store kds;	/* data chunk in kernel portion */
 } pgstrom_data_store;
 
 /*
@@ -646,9 +645,9 @@ extern bool kern_fetch_data_store(TupleTableSlot *slot,
 								  HeapTuple tuple);
 extern pgstrom_data_store *PDS_retain(pgstrom_data_store *pds);
 extern void PDS_release(pgstrom_data_store *pds);
-extern void PDS_expand_size(GpuContext *gcontext,
-							pgstrom_data_store *pds,
-							Size kds_length_new);
+extern pgstrom_data_store *PDS_expand_size(GpuContext_v2 *gcontext,
+										   pgstrom_data_store *pds,
+										   Size kds_length_new);
 extern void PDS_shrink_size(pgstrom_data_store *pds);
 extern void init_kernel_data_store(kern_data_store *kds,
 								   TupleDesc tupdesc,
@@ -657,15 +656,15 @@ extern void init_kernel_data_store(kern_data_store *kds,
 								   uint nrooms,
 								   bool use_internal);
 
-extern pgstrom_data_store *PDS_create_row(GpuContext *gcontext,
+extern pgstrom_data_store *PDS_create_row(GpuContext_v2 *gcontext,
 										  TupleDesc tupdesc,
 										  Size length);
-extern pgstrom_data_store *PDS_create_slot(GpuContext *gcontext,
+extern pgstrom_data_store *PDS_create_slot(GpuContext_v2 *gcontext,
 										   TupleDesc tupdesc,
 										   cl_uint nrooms,
 										   Size extra_length,
 										   bool use_internal);
-extern pgstrom_data_store *PDS_create_hash(GpuContext *gcontext,
+extern pgstrom_data_store *PDS_create_hash(GpuContext_v2 *gcontext,
 										   TupleDesc tupdesc,
 										   Size length);
 extern int PDS_insert_block(pgstrom_data_store *pds,
