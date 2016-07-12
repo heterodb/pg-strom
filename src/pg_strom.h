@@ -109,12 +109,7 @@ typedef struct SharedGpuContext
 	PGPROC	   *backend;		/* PGPROC of Backend Process */
 
 	dlist_head	dma_buffer_list;/* tracker of DMA buffers */
-	/*
-	 * Status of GpuTasks
-	 */
-	cl_int		num_pending_tasks;
-	cl_int		num_running_tasks;
-	cl_int		num_completed_tasks;
+	cl_int		num_async_tasks;/* num of tasks passed to GPU server */
 } SharedGpuContext;
 
 #define INVALID_GPU_CONTEXT_ID		(-1)
@@ -177,18 +172,9 @@ struct GpuTaskState_v2
 	TupleTableSlot *(*cb_next_tuple)(GpuTaskState_v2 *gts);
 	void		 *(*cb_task_release)(GpuTask_v2 *gtask);
 
-//	bool		  (*cb_task_process)(GpuTask *gtask);
-//	bool		  (*cb_task_complete)(GpuTask *gtask);
-//	void		  (*cb_task_release)(GpuTask *gtask);
-//	GpuTask		 *(*cb_next_chunk)(GpuTaskState *gts);
-//	void		  (*cb_switch_task)(GpuTaskState *gts, GpuTask *gtask);
-//	TupleTableSlot *(*cb_next_tuple)(GpuTaskState *gts);
-
-
 	/* list to manage GpuTasks */
 	dlist_head		ready_tasks;	/* list of tasks already processed */
-	cl_uint			num_running_tasks; /* # of tasks sent to GPU server */
-	cl_uint			num_ready_tasks;/* length of the 'ready_tasks' */
+	cl_uint			num_ready_tasks;/* length of the list above */
 	pgstrom_perfmon	pfm;			/* performance monitor */
 };
 
@@ -200,29 +186,22 @@ struct GpuTaskState_v2
  */
 struct GpuTask_v2
 {
+	dlist_node		chain;			/* link to the task state list */
 	GpuTaskKind		task_kind;		/* same with GTS's one */
 	ProgramId		program_id;		/* same with GTS's one */
-	cl_uint			revision;		/* same with GTS's one when kicked */
-	dlist_node		chain;			/* link to the task state list */
 	GpuTaskState_v2 *gts;			/* GTS reference in the backend */
-	CUstream		cuda_stream;	/* CUDA stream for this task */
-	CUmodule		cuda_module;	/* CUDA module for this task */
+	cl_uint			revision;		/* same with GTS's one when kicked */
+	cl_int			file_desc;		/* FD to be shared with server */
 	bool			cpu_fallback;	/* true, if task needs CPU fallback */
-	/* error status on server side */
-	struct {
-		int			errcode;
-		const char *filename;
-		int			lineno;
-		const char *funcname;
-		const char *message;
-		char		buffer[160];	/* buffer for short error message */
-	} error;
+	/* fields below are valid only server */
+	cl_int			peer_fdesc;		/* duplication of file_desc on server */
 };
 typedef struct GpuTask_v2 GpuTask_v2;
 
 
 
 
+#if 1
 /*
  *
  *
@@ -332,6 +311,7 @@ struct GpuTask
 	CUmodule		cuda_module;	/* just reference, no cleanup needed */
 	kern_errorbuf	kerror;		/* error status on CUDA kernel execution */
 };
+#endif
 
 /*
  * Type declarations for code generator
@@ -459,11 +439,10 @@ extern void gpuservHandleLazyJobs(bool flush_completed,
 extern void gpuservWakeUpProcesses(cl_uint max_procs);
 extern void notifierGpuMemFree(cl_int device_id);
 extern bool gpuservOpenConnection(GpuContext_v2 *gcontext);
-extern bool gpuservSendGpuTask(GpuContext_v2 *gcontext,
-							   GpuTask_v2 *gtask, int peer_fd);
-extern GpuTask *gpuservRecvGpuTask(GpuContext_v2 *gcontext, int *peer_fd);
-extern GpuTask *gpuservRecvGpuTaskTimeout(GpuContext_v2 *gcontext,
-										  int *peer_fd, long timeout);
+extern bool gpuservSendGpuTask(GpuContext_v2 *gcontext, GpuTask_v2 *gtask);
+extern GpuTask_v2 *gpuservRecvGpuTask(GpuContext_v2 *gcontext);
+extern GpuTask_v2 *gpuservRecvGpuTaskTimeout(GpuContext_v2 *gcontext,
+										  long timeout);
 
 extern void pgstrom_init_gpu_server(void);
 
@@ -554,6 +533,12 @@ extern void pgstromInitGpuTaskState(GpuTaskState_v2 *gts,
 extern TupleTableSlot *pgstromExecGpuTaskState(GpuTaskState_v2 *gts);
 extern void pgstromRescanGpuTaskState(GpuTaskState_v2 *gts);
 extern void pgstromReleaseGpuTaskState(GpuTaskState_v2 *gts);
+
+extern bool pgstromProcessGpuTask(GpuTask_v2 *gtask,
+								  CUmodule cuda_module,
+								  CUstream cuda_stream);
+extern void pgstromCompleteGpuTask(GpuTask_v2 *gtask);
+extern void pgstromReleaseGpuTask(GpuTask_v2 *gtask);
 
 extern const char *errorText(int errcode);
 extern const char *errorTextKernel(kern_errorbuf *kerror);

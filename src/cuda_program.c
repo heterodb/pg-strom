@@ -1117,22 +1117,25 @@ pgstrom_load_cuda_program(ProgramId program_id, long timeout)
 		{
 			struct timeval	tv1, tv2;
 			int				ev;
+
 			/*
-			 * wait for the build completion until timeout
+			 * It looks to me somebody else already picks up this CUDA
+			 * program, and then kicked build process but not finished.
 			 */
 			gettimeofday(&tv1, NULL);
 			for (;;)
 			{
+				/* register myself on the waiter list */
+				ResetLatch(MyLatch);
+				entry->waiting_backends->words[WORDNUM(MyProc->pgprocno)]
+					|= (1 << BITNUM(MyProc->pgprocno));
+
 				if (timeout == 0)
 				{
 					put_cuda_program_entry_nolock(entry);
 					SpinLockRelease(&pgcache_head->lock);
 					return NULL;
 				}
-				/* register myself on the waiter list */
-				ResetLatch(MyLatch);
-				entry->waiting_backends->words[WORDNUM(MyProc->pgprocno)]
-					|= (1 << BITNUM(MyProc->pgprocno));
 				SpinLockRelease(&pgcache_head->lock);
 
 				ev = WaitLatch(MyLatch,

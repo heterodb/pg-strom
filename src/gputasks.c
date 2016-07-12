@@ -106,7 +106,8 @@ construct_kern_parambuf(List *used_params, ExprContext *econtext)
 				if (prm->ptype != param->paramtype)
 					ereport(ERROR,
 							(errcode(ERRCODE_DATATYPE_MISMATCH),
-							 errmsg("type of parameter %d (%s) does not match that when preparing the plan (%s)",
+							 errmsg("type of parameter %d (%s) does not match "
+									"that when preparing the plan (%s)",
 									param->paramid,
 									format_type_be(prm->ptype),
 									format_type_be(param->paramtype))));
@@ -210,7 +211,6 @@ pgstromInitGpuTaskState(GpuTaskState_v2 *gts,
 	/* callbacks shall be set by the caller */
 
 	dlist_init(&gts->ready_tasks);
-	gts->num_running_tasks = 0;
 	gts->num_ready_tasks = 0;
 
 	/* performance monitor */
@@ -245,8 +245,13 @@ pgstromInitGpuTaskState(GpuTaskState_v2 *gts,
 static GpuTask_v2 *
 fetch_next_gputask(GpuTaskState_v2 *gts)
 {
-	GpuContext_v2  *gcontext = gts->gcontext;
-	GpuTask_v2	   *gtask;
+	GpuContext_v2	   *gcontext = gts->gcontext;
+	SharedGpuContext   *shgcon = gcontext->shgcon;
+	GpuTaskState_v2	   *__gts;
+	GpuTask_v2		   *gtask;
+	dlist_node		   *dnode;
+	cl_uint				num_recv_tasks = 0;
+	cl_uint				num_sent_tasks = 0;
 
 	/*
 	 * If no server connection is established, GpuTask cannot be processed
@@ -260,43 +265,158 @@ fetch_next_gputask(GpuTaskState_v2 *gts)
 		return gtask;
 	}
 
-
-	// pop all the tasks already returned, if any
-
-	if (!gts->scan_done)
+retry_scan:
+	/*
+	 * Fetch all the tasks already processed by the server side, if any.
+	 * It is non-blocking operations, so we never wait for tasks currently
+	 * running.
+	 */
+	while ((gtask = gpuservRecvGpuTaskTimeout(gcontext, 0)) != NULL)
 	{
-		// read untils next response is backed, or reached to max_async
+		__gts = gtask->gts;
 
+		dlist_push_tail(&__gts->ready_tasks, &gtask->chain);
+		__gts->num_ready_tasks++;
 
+		if (gts == __gts)
+			num_recv_tasks++;
 	}
 
-	// wait for remote task if empty
+	/*
+	 * Fetch and send GpuTasks - We already fetched several tasks that were
+	 * processed on the GPU server side. Unless GTS does not have many ready
+	 * tasks, we try to push similar amount of tasks not to starvate GPU
+	 * server, but one task at least.
+	 * In addition to the above fixed-number of norm, we try to make advance
+	 * the underlying scan until new asynchronous task is arrived, but as
+	 * long as the number of asynchronous tasks does not touch the threshold.
+	 */
+	while (!gts->scan_done)
+	{
+		/* Do we already have enough processed GpuTask? */
+		if (gts->num_ready_tasks > pgstrom_max_async_tasks / 2)
+			break;
 
+		/* Fixed number of norm to scan */
+		if (num_sent_tasks <= num_recv_tasks)
+		{
+			gtask = gts->cb_next_task(gts);
+			if (!gtask)
+			{
+				gts->scan_done = true;
+				elog(DEBUG2, "scan done (%s)",
+					 gts->css.methods->CustomName);
+				break;
+			}
 
-	// poll the response from the server
-	// if any back it
-	// prior to this, push some asynchronous tasks 
+			if (!gpuservSendGpuTask(gcontext, gtask))
+				elog(ERROR, "failed to send GpuTask to GPU server");
+			num_sent_tasks++;
+		}
+		else
+		{
+			/*
+			 * Make advance the underlying scan until arrive of the next
+			 * asynchronous task
+			 */
+			SpinLockAcquire(&shgcon->lock);
+			if (shgcon->num_async_tasks < pgstrom_max_async_tasks)
+			{
+				SpinLockRelease(&shgcon->lock);
 
+				gtask = gpuservRecvGpuTaskTimeout(gcontext, 0);
+				if (gtask)
+				{
+					__gts = gtask->gts;
 
+					dlist_push_tail(&__gts->ready_tasks, &gtask->chain);
+					__gts->num_ready_tasks++;
+
+					if (gts == __gts)
+						break;
+				}
+
+				gtask = gts->cb_next_task(gts);
+				if (!gtask)
+				{
+					gts->scan_done = true;
+					elog(DEBUG2, "scan done (%s)",
+						 gts->css.methods->CustomName);
+					break;
+				}
+
+				if (!gpuservSendGpuTask(gcontext, gtask))
+					elog(ERROR, "failed to send GpuTask to GPU server");
+			}
+			else
+			{
+				SpinLockRelease(&shgcon->lock);
+				break;
+			}
+		}
+	}
+
+retry_fetch:
+	/*
+	 * In case when GTS has no ready tasks yet, we try to wait the response
+	 * synchronously.
+	 */
+	while (dlist_is_empty(&gts->ready_tasks))
+	{
+		Assert(gts->num_ready_tasks == 0);
+
+		SpinLockAcquire(&shgcon->lock);
+		if (shgcon->num_async_tasks == 0)
+		{
+			SpinLockRelease(&shgcon->lock);
+			/*
+			 * If we have no ready tasks, no asynchronous tasks and no further
+			 * chunks to scan, it means this GTS gets end of the scan.
+			 * If GTS may read further blocks, it needs to retry scan. (We
+			 * might give up scan because of larger number of async tasks)
+			 */
+			if (!gts->scan_done)
+				return NULL;
+			goto retry_scan;
+		}
+		SpinLockRelease(&shgcon->lock);
+
+		/*
+		 * If we have any asynchronous tasks, try synchronous receive to
+		 * get next task.
+		 */
+		gtask = gpuservRecvGpuTask(gcontext);
+		if (gtask)
+		{
+			__gts = gtask->gts;
+			dlist_push_tail(&__gts->ready_tasks, &gtask->chain);
+			__gts->num_ready_tasks++;
+		}
+		else
+			elog(ERROR, "GPU server response timeout...");
+	}
+
+	/* OK, pick up GpuTask from the head */
+	Assert(gts->num_ready_tasks > 0);
+	dnode = dlist_pop_head_node(&gts->ready_tasks);
+	gtask = dlist_container(GpuTask_v2, chain, dnode);
+	gts->num_ready_tasks--;
 
 	/*
-	 * Error handling - See definition of ereport(). What we have to report
-	 * is an error on the server side where it actually happen.
+	 * Discard GpuTask if revision number mismatch. ExecRescan() rewind the
+	 * scan status then restart scan with new parameters. It means all the
+	 * results of asynchronous tasks shall be discarded.
+	 * To avoid synchronization here, all the GpuTask has a revision number
+	 * copied from the GTS when it is constructed. It matched, the GpuTask
+	 * is launched under the current GTS state.
 	 */
-	if (gtask->error.errcode != 0)
+	if (gtask->revision != gts->revision)
 	{
-		if (errstart(ERROR,
-					 gtask->error.filename,
-					 gtask->error.lineno,
-					 gtask->error.filename,
-					 TEXTDOMAIN))
-			errfinish(errcode(gtask->error.errcode),
-					  errmsg("%s", gtask->error.message));
-		pg_unreachable();
+		pgstromReleaseGpuTask(gtask);
+		goto retry_fetch;
 	}
 	return gtask;
 }
-
 
 
 
@@ -366,6 +486,41 @@ pgstromRescanGpuTaskState(GpuTaskState_v2 *gts)
 void
 pgstromReleaseGpuTaskState(GpuTaskState_v2 *gts)
 {
+
+}
+
+/*
+ * pgstromProcessGpuTask - processing handler of GpuTask
+ */
+bool
+pgstromProcessGpuTask(GpuTask_v2 *gtask,
+					  CUmodule cuda_module,
+					  CUstream cuda_stream)
+{
+	Assert(IsGpuServerProcess());
+
+
+	return true;
+}
+
+/*
+ * pgstromCompleteGpuTask - completion handler of GpuTask
+ */
+void
+pgstromCompleteGpuTask(GpuTask_v2 *gtask)
+{
+	Assert(IsGpuServerProcess());
+
+
+}
+
+/*
+ * pgstromReleaseGpuTask - release of GpuTask
+ */
+void
+pgstromReleaseGpuTask(GpuTask_v2 *gtask)
+{
+
 
 }
 
