@@ -447,9 +447,7 @@ AttachGpuContext(pgsocket sockfd,
 	shgcon->refcnt++;
 	shgcon->device_id = device_id;
 	shgcon->server = MyProc;
-	shgcon->num_pending_tasks = 0;
-	shgcon->num_running_tasks = 0;
-	shgcon->num_completed_tasks = 0;
+	shgcon->num_async_tasks = 0;
 	SetLatch(&shgcon->backend->procLatch);
 	SpinLockRelease(&shgcon->lock);
 

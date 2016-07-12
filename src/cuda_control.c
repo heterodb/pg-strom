@@ -1967,7 +1967,6 @@ gpuMaxThreadsPerBlock(void)
 	return cuda_max_threads_per_block;
 }
 
-
 /*
  * Device properties referenced to log messages on starting-up time,
  * and validate devices to be used.

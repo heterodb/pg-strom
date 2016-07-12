@@ -1663,7 +1663,7 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 									(const void *)
 									gpupreagg_preparation,
 									kds_row->nitems,
-									sizeof(kern_errorbuf));
+									0, sizeof(kern_errorbuf));
 	if (status != cudaSuccess)
 	{
 		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
@@ -1729,8 +1729,8 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 										(const void *)
 										gpupreagg_nogroup_reduction,
 										kds_slot->nitems,
-										Max(sizeof(pagg_datum),
-											sizeof(kern_errorbuf)));
+										0, Max(sizeof(pagg_datum),
+											   sizeof(kern_errorbuf)));
 		if (status != cudaSuccess)
 		{
 			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
@@ -1778,8 +1778,8 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 										(const void *)
 										gpupreagg_nogroup_reduction,
 										kresults_dst->nitems,
-										Max(sizeof(pagg_datum),
-											sizeof(kern_errorbuf)));
+										0, Max(sizeof(pagg_datum),
+											   sizeof(kern_errorbuf)));
 		if (status != cudaSuccess)
 		{
 			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
@@ -1846,7 +1846,7 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 											(const void *)
 											gpupreagg_local_reduction,
 											kds_slot->nitems,
-											dynamic_shmem_unitsz);
+											0, dynamic_shmem_unitsz);
 			if (status != cudaSuccess)
 			{
 				STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
@@ -1911,7 +1911,7 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 										kresults_src->all_visible
 										? kds_slot->nitems
 										: kresults_src->nitems,
-										sizeof(kern_errorbuf));
+										0, sizeof(kern_errorbuf));
 		if (status != cudaSuccess)
 		{
 			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
@@ -1992,7 +1992,7 @@ final_retry:
 									kresults_src->all_visible
 									? kds_slot->nitems
 									: kresults_src->nitems,
-									sizeof(kern_errorbuf));
+									0, sizeof(kern_errorbuf));
 	if (status != cudaSuccess)
 	{
 		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);

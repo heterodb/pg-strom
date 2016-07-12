@@ -1323,7 +1323,7 @@ __launch_plcuda_kernels(plcudaState *state,
 								   state->kern_prep,
 								   cuda_device,
 								   kplcuda->prep_num_threads,
-								   kplcuda->prep_shmem_unitsz);
+								   0, kplcuda->prep_shmem_unitsz);
 
 			rc = cuLaunchKernel(state->kern_prep,
 								grid_size, 1, 1,
@@ -1347,7 +1347,7 @@ __launch_plcuda_kernels(plcudaState *state,
 							   state->kern_main,
 							   cuda_device,
 							   kplcuda->main_num_threads,
-							   kplcuda->main_shmem_unitsz);
+							   0, kplcuda->main_shmem_unitsz);
 
 		rc = cuLaunchKernel(state->kern_main,
 							grid_size, 1, 1,
@@ -1372,7 +1372,7 @@ __launch_plcuda_kernels(plcudaState *state,
 								   state->kern_post,
 								   cuda_device,
 								   kplcuda->post_num_threads,
-								   kplcuda->post_shmem_unitsz);
+								   0, kplcuda->post_shmem_unitsz);
 
 			rc = cuLaunchKernel(state->kern_post,
 								grid_size, 1, 1,

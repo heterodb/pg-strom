@@ -544,7 +544,7 @@ gpusort_main(kern_gpusort *kgpusort,
 										&block_sz,
 										kern_funcs[i],
 										(nitems + 1) / 2,
-										2 * sizeof(cl_uint));
+										0, 2 * sizeof(cl_uint));
 		if (status != cudaSuccess)
 		{
 			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
@@ -731,7 +731,7 @@ gpusort_main(kern_gpusort *kgpusort,
 										(const void *)
 										gpusort_fixup_pointers,
 										kresults->nitems,
-										sizeof(cl_uint));
+										0, sizeof(cl_uint));
 		if (status != cudaSuccess)
 		{
 			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);

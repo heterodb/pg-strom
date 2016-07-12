@@ -6940,7 +6940,7 @@ colocate_outer_join_maps_to_device(pgstrom_multirels *pmrels, GpuTask *gtask)
 						   kern_colocate,
 						   pgjoin->task.cuda_device,
 						   ojmap_length / sizeof(cl_uint),
-						   0);	/* no shared memory usage */
+						   0, 0);	/* no shared memory usage */
 
 	/* destination address on device side */
 	dst_ojmaps = pmrels->m_ojmaps[cuda_index] + sizeof(cl_bool) * ojmap_length;

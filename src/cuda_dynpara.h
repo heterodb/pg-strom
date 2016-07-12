@@ -18,18 +18,9 @@
  */
 #ifndef CUDA_DYNPARA_H
 #define CUDA_DYNPARA_H
-#ifdef __CUDACC__
-#include <device_launch_parameters.h>
-#define WORKGROUPSIZE_RESULT_TYPE		cudaError_t
-#define WORKGROUPSIZE_RESULT_SUCCESS	cudaSuccess
-#define WORKGROUPSIZE_RESULT_EINVAL		cudaErrorInvalidValue
-#else
-#define WORKGROUPSIZE_RESULT_TYPE		CUresult
-#define WORKGROUPSIZE_RESULT_SUCCESS	CUDA_SUCCESS
-#define WORKGROUPSIZE_RESULT_EINVAL		CUDA_ERROR_INVALID_VALUE
-#endif
 
 #ifdef __CUDACC__
+#include <device_launch_parameters.h>
 /*
  * Macro to track timeval and increment usage.
  */
@@ -39,51 +30,100 @@
 		(ktask)->pfm.tv_##field +=									\
 			((cl_float)(GlobalTimer() - (tv_start)) / 1000000.0);	\
 	} while(0)
-#endif	/* __CUDACC__ */
 
 /*
- * __optimal_workgroup_size
+ * __occupancy_max_potential_block_size
  *
- * Logic is equivalent to cudaOccupancyMaxPotentialBlockSize(),
- * but is not supported by the device runtime at CUDA-7.5.
- * So, we ported the same calculation logic here.
+ * Equivalent logic with cudaOccupancyMaxPotentialBlockSize, but not supported
+ * by the device runtime at CUDA 7.5, so we ported the same calculation logic
+ * here.
  */
-STATIC_INLINE(WORKGROUPSIZE_RESULT_TYPE)
-__optimal_workgroup_size(cl_uint *p_grid_sz,
-						 cl_uint *p_block_sz,
-						 cl_uint nitems,
-#ifdef __CUDACC__
-						 const void *kernel_func,
-#else
-						 CUfunction kernel_func,
-#endif
-						 cl_int funcMaxThreadsPerBlock,
-						 cl_uint staticShmemSize,
-						 cl_uint dynamicShmemPerThread,
-						 cl_int warpSize,
-						 cl_int devMaxThreadsPerBlock,
-						 cl_int maxThreadsPerMultiProcessor,
-						 cl_int flags)
+STATIC_INLINE(cudaError_t)
+__occupancy_max_potential_block_size(cl_uint *p_minGridSize,
+									 cl_uint *p_maxBlockSize,
+									 const void *kernel_function,
+									 cl_uint dynamicShmemPerBlock,
+									 cl_uint dynamicShmemPerThread,
+									 cl_uint blockSizeLimit)
 {
-	WORKGROUPSIZE_RESULT_TYPE status;
-	/* Limits */
-	cl_int		blockSizeLimit = (nitems > 0 ? nitems : 1);
-	cl_int		occupancyLimit = maxThreadsPerMultiProcessor;
+	cudaError_t		status;
+
+	/* Device and function properties */
+	struct cudaFuncAttributes attr;
+	int				device;
+
+    /* Limits */
+	int				maxThreadsPerMultiProcessor;
+	int				warpSize;
+	int				devMaxThreadsPerBlock;
+	int				multiProcessorCount;
+	int				funcMaxThreadsPerBlock;
+	int				occupancyLimit;
 
     /* Recorded maximum */
-	cl_int		maxBlockSize = 0;
-	cl_int		maxOccupancy = 0;
+    int				maxBlockSize = 0;
+    int				numBlocks    = 0;
+    int				maxOccupancy = 0;
 
     /* Temporary */
-	cl_int		blockSizeToTryAligned;
-	cl_int		blockSizeToTry;
-	cl_int		blockSizeLimitAligned;
-	cl_int		occupancyInBlocks;
-	cl_int		occupancyInThreads;
+    int				blockSizeToTryAligned;
+    int				blockSizeToTry;
+    int				blockSizeLimitAligned;
+    int				occupancyInBlocks;
+    int				occupancyInThreads;
+    int				dynamicSMemSize;
 
-	/*
-	 * Try each block size, and pick the block size with maximum occupancy
-	 */
+	/* ------------------------------------------------
+	 *  Sanity checks
+	 * ------------------------------------------------ */
+	if (!p_minGridSize || !p_maxBlockSize || !kernel_function)
+		return cudaErrorInvalidValue;
+
+	/* ------------------------------------------------
+	 *  Obtain device and function properties
+	 * ------------------------------------------------ */
+	status = cudaGetDevice(&device);
+	if (status != cudaSuccess)
+		return status;
+
+	status = cudaDeviceGetAttribute(&maxThreadsPerMultiProcessor,
+									cudaDevAttrMaxThreadsPerMultiProcessor,
+									device);
+    if (status != cudaSuccess)
+		return status;
+
+	status = cudaDeviceGetAttribute(&warpSize,
+									cudaDevAttrWarpSize,
+									device);
+	if (status != cudaSuccess)
+        return status;
+
+	status = cudaDeviceGetAttribute(&devMaxThreadsPerBlock,
+									cudaDevAttrMaxThreadsPerBlock,
+									device);
+	if (status != cudaSuccess)
+        return status;
+
+    status = cudaDeviceGetAttribute(&multiProcessorCount,
+									cudaDevAttrMultiProcessorCount,
+									device);
+    if (status != cudaSuccess)
+        return status;
+
+	status = cudaFuncGetAttributes(&attr, kernel_function);
+	if (status != cudaSuccess)
+		return status;
+	funcMaxThreadsPerBlock = attr.maxThreadsPerBlock;
+
+	/* ------------------------------------------------
+	 *  Try each block size, and pick the block size with
+	 *  maximum occupancy
+	 * ------------------------------------------------ */
+	occupancyLimit = maxThreadsPerMultiProcessor;
+
+	if (blockSizeLimit == 0)
+		blockSizeLimit = devMaxThreadsPerBlock;
+
 	if (devMaxThreadsPerBlock < blockSizeLimit)
 		blockSizeLimit = devMaxThreadsPerBlock;
 
@@ -101,82 +141,109 @@ __optimal_workgroup_size(cl_uint *p_grid_sz,
 		 * This is needed for the first iteration, because
 		 * blockSizeLimitAligned could be greater than blockSizeLimit
 		 */
-		if (blockSizeLimit < blockSizeToTryAligned)
+        if (blockSizeLimit < blockSizeToTryAligned)
 			blockSizeToTry = blockSizeLimit;
 		else
-			blockSizeToTry = blockSizeToTryAligned;
-#ifdef __CUDACC__
-		status = cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(
+            blockSizeToTry = blockSizeToTryAligned;
+
+		dynamicSMemSize = (dynamicShmemPerBlock +
+						   dynamicShmemPerThread * blockSizeToTry);
+
+        status = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
 			&occupancyInBlocks,
-			kernel_func,
+			kernel_function,
 			blockSizeToTry,
-			dynamicShmemPerThread * blockSizeToTry,
-			flags);
+			dynamicSMemSize);
 		if (status != cudaSuccess)
 			return status;
-#else
-		status = cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(
-			&occupancyInBlocks,
-			kernel_func,
-			blockSizeToTry,
-			dynamicShmemPerThread * blockSizeToTry,
-			flags);
-		if (status != CUDA_SUCCESS)
-			return status;
-#endif
+
 		occupancyInThreads = blockSizeToTry * occupancyInBlocks;
 
 		if (occupancyInThreads > maxOccupancy)
 		{
 			maxBlockSize = blockSizeToTry;
+			numBlocks    = occupancyInBlocks;
 			maxOccupancy = occupancyInThreads;
 		}
 
-        /* Early out if we have reached the maximum */
+		/*
+		 * Early out if we have reached the maximum
+		 */
 		if (occupancyLimit == maxOccupancy)
 			break;
 	}
 
-	/*
-	 * Return best availability
-	 */
-	*p_grid_sz = Max((nitems + maxBlockSize - 1) / maxBlockSize, 1);
-	*p_block_sz = Max(maxBlockSize, 1);
+	/* --------------------------------
+	 *  Return best available
+	 * -------------------------------- */
+	*p_minGridSize  = numBlocks * multiProcessorCount;
+	*p_maxBlockSize = maxBlockSize;
 
-	return WORKGROUPSIZE_RESULT_SUCCESS;
+	return status;
 }
 
-#ifdef __CUDACC__
 /*
- *
+ * optimal_workgroup_size - lead an optimal block_size from the standpoint
+ * of performance.
  */
 STATIC_FUNCTION(cudaError_t)
 optimal_workgroup_size(dim3 *p_grid_sz,
 					   dim3 *p_block_sz,
-					   const void *kernel_func,
+					   const void *kernel_function,
 					   size_t nitems,
+					   size_t dynamic_shmem_per_block,
 					   size_t dynamic_shmem_per_thread)
 {
 	cudaError_t	status;
-	/* Device and function properties */
-	cudaFuncAttributes attrs;
-	int			device;
-	int			maxThreadsPerMultiProcessor;
-	int			warpSize;
-	int			devMaxThreadsPerBlock;
+	cl_uint		minGridSize;
+	cl_uint		maxBlockSize;
 
-	/* Sanity checks */
-	if (!p_grid_sz || !p_block_sz || !kernel_func)
-		return cudaErrorInvalidValue;
-
-	/* Obtain device and function properties */
-	status = cudaGetDevice(&device);
+	status = __occupancy_max_potential_block_size(&minGridSize,
+												  &maxBlockSize,
+												  kernel_function,
+												  dynamic_shmem_per_block,
+												  dynamic_shmem_per_thread,
+												  nitems);
 	if (status != cudaSuccess)
 		return status;
 
-	status = cudaDeviceGetAttribute(&maxThreadsPerMultiProcessor,
-									cudaDevAttrMaxThreadsPerMultiProcessor,
-									device);
+	p_block_sz->x = maxBlockSize;
+	p_block_sz->y = 1;
+	p_block_sz->z = 1;
+	p_grid_sz->x = (nitems + (size_t)maxBlockSize - 1) / (size_t)maxBlockSize;
+	p_grid_sz->y = 1;
+	p_grid_sz->z = 1;
+
+	return cudaSuccess;
+}
+
+/*
+ * largest_workgroup_size - lead an optimal block_size from the standpoint
+ * of number of threads per block
+ */
+STATIC_FUNCTION(cudaError_t)
+largest_workgroup_size(dim3 *p_grid_sz,
+					   dim3 *p_block_sz,
+					   const void *kernel_function,
+					   size_t nitems,
+					   size_t dynamic_shmem_per_block,
+					   size_t dynamic_shmem_per_thread)
+{
+	cudaError_t	status;
+	cl_int		device;
+	cl_int		warpSize;
+	cl_int		maxBlockSize;
+	cl_int		staticShmemSize;
+	cl_int		maxShmemSize;
+	cl_int		shmemSizeTotal;
+	cudaFuncAttributes attrs;
+
+	/* Sanity checks */
+	if (!p_grid_sz || !p_block_sz || !kernel_function)
+		return cudaErrorInvalidValue;
+
+	/* Get device and function's attribute */
+	status = cudaGetDevice(&device);
 	if (status != cudaSuccess)
 		return status;
 
@@ -186,131 +253,49 @@ optimal_workgroup_size(dim3 *p_grid_sz,
 	if (status != cudaSuccess)
 		return status;
 
-	status = cudaDeviceGetAttribute(&devMaxThreadsPerBlock,
-									cudaDevAttrMaxThreadsPerBlock,
-									device);
-	if (status != cudaSuccess)
-		return status;
-
-	status = cudaFuncGetAttributes(&attrs, kernel_func);
-	if (status != cudaSuccess)
-		return status;
-
-	/*
-	 * Estimate an optimal workgroup size
-	 */
-	status = __optimal_workgroup_size(&p_grid_sz->x,
-									  &p_block_sz->x,
-									  nitems,
-									  kernel_func,
-									  attrs.maxThreadsPerBlock,
-									  attrs.sharedSizeBytes,
-									  dynamic_shmem_per_thread,
-									  warpSize,
-									  devMaxThreadsPerBlock,
-									  maxThreadsPerMultiProcessor,
-									  0);
-	if (status != cudaSuccess)
-		return status;
-
-	p_grid_sz->y = 1;
-	p_grid_sz->z = 1;
-	p_block_sz->y = 1;
-	p_block_sz->z = 1;
-
-	return cudaSuccess;
-}
-#endif	/* __CADACC__ */
-
-STATIC_INLINE(WORKGROUPSIZE_RESULT_TYPE)
-__largest_workgroup_size(cl_uint *p_grid_sz,
-						 cl_uint *p_block_sz,
-						 cl_uint nitems,
-						 cl_uint kernel_max_blocksz,
-						 cl_uint static_shmem_sz,
-						 cl_uint dynamic_shmem_per_thread,
-						 cl_uint warp_size,
-						 cl_uint max_shmem_per_block)
-{
-	cl_uint		block_size = kernel_max_blocksz;
-
-	/* special case if nitems == 0 */
-	if (nitems == 0)
-		nitems = 1;
-	if (nitems < block_size)
-		block_size = (nitems + warp_size - 1) & ~(warp_size - 1);
-	if (static_shmem_sz +
-		dynamic_shmem_per_thread * block_size > max_shmem_per_block)
-	{
-		block_size = (max_shmem_per_block -
-					  static_shmem_sz) / dynamic_shmem_per_thread;
-		block_size &= ~(warp_size - 1);
-
-		if (block_size < warp_size)
-			return WORKGROUPSIZE_RESULT_EINVAL;
-	}
-	*p_block_sz = block_size;
-	*p_grid_sz = (nitems + block_size - 1) / block_size;
-
-	return WORKGROUPSIZE_RESULT_SUCCESS;
-}
-
-#ifdef __CUDACC__
-STATIC_FUNCTION(cudaError_t)
-largest_workgroup_size(dim3 *p_grid_sz,
-					   dim3 *p_block_sz,
-					   const void *kernel_func,
-					   size_t nitems,
-					   size_t dynamic_shmem_per_thread)
-{
-	cudaError_t	status;
-	cl_int		device;
-	cl_int		warp_size;
-	cl_int		max_shmem_per_block;
-	cudaFuncAttributes attrs;
-
-	/* Sanity checks */
-	if (!p_grid_sz || !p_block_sz || !kernel_func)
-		return cudaErrorInvalidValue;
-
-	/* Get device and function's attribute */
-	status = cudaGetDevice(&device);
-	if (status != cudaSuccess)
-		return status;
-
-	status = cudaDeviceGetAttribute(&warp_size,
-									cudaDevAttrWarpSize,
-									device);
-	if (status != cudaSuccess)
-		return status;
-
-	status = cudaDeviceGetAttribute(&max_shmem_per_block,
+	status = cudaDeviceGetAttribute(&maxShmemSize,
 									cudaDevAttrMaxSharedMemoryPerBlock,
 									device);
 	if (status != cudaSuccess)
 		return status;
 
-	status = cudaFuncGetAttributes(&attrs, kernel_func);
+	status = cudaFuncGetAttributes(&attrs, kernel_function);
 	if (status != cudaSuccess)
 		return status;
+	maxBlockSize    = attrs.maxThreadsPerBlock;
+	staticShmemSize = attrs.sharedSizeBytes;
 
-	status = __largest_workgroup_size(&p_grid_sz->x,
-									  &p_block_sz->x,
-									  nitems,
-									  attrs.maxThreadsPerBlock,
-									  attrs.sharedSizeBytes,
-									  dynamic_shmem_per_thread,
-									  warp_size,
-									  max_shmem_per_block);
-	if (status != cudaSuccess)
-		return status;
+	/* only shared memory consumption is what we have to control */
+	shmemSizeTotal = (staticShmemSize +
+					  dynamic_shmem_per_block +
+					  dynamic_shmem_per_thread * maxBlockSize);
+	if (shmemSizeTotal > maxShmemSize)
+	{
+		if (dynamic_shmem_per_thread > 0 &&
+			staticShmemSize +
+			dynamic_shmem_per_block +
+			dynamic_shmem_per_thread * warpSize <= maxShmemSize)
+		{
+			maxBlockSize = (maxShmemSize -
+							staticShmemSize -
+							dynamic_shmem_per_block)/dynamic_shmem_per_thread;
+			maxBlockSize = (maxBlockSize / warpSize) * warpSize;
+		}
+		else
+		{
+			/* adjust of block-size makes no sense! */
+			return cudaErrorInvalidValue;
+		}
+	}
 
-	p_grid_sz->y = 1;
-	p_grid_sz->z = 1;
+	p_block_sz->x = maxBlockSize;
 	p_block_sz->y = 1;
 	p_block_sz->z = 1;
+	p_grid_sz->x = (nitems + maxBlockSize - 1) / maxBlockSize;
+	p_grid_sz->y = 1;
+	p_grid_sz->z = 1;
 
-	return WORKGROUPSIZE_RESULT_SUCCESS;
+	return cudaSuccess;
 }
 
 /*
@@ -328,8 +313,8 @@ STATIC_FUNCTION(cudaError_t)
 __pgstromLaunchDynamicKernel(void		   *kern_function,
 							 kern_arg_t	   *kern_argbuf,
 							 size_t			num_threads,
-							 cl_uint		shmem_per_thread,
-							 cl_uint		shmem_per_block)
+							 cl_uint		shmem_per_block,
+							 cl_uint		shmem_per_thread)
 {
 	dim3		grid_sz;
 	dim3		block_sz;
@@ -339,6 +324,7 @@ __pgstromLaunchDynamicKernel(void		   *kern_function,
 									&block_sz,
 									kern_function,
 									num_threads,
+									shmem_per_block,
 									shmem_per_thread);
 	if (status != cudaSuccess)
 		return status;
@@ -362,24 +348,24 @@ __pgstromLaunchDynamicKernel(void		   *kern_function,
 STATIC_FUNCTION(cudaError_t)
 pgstromLaunchDynamicKernel0(void	   *kern_function,
 							size_t		num_threads,
-							cl_uint		shmem_per_thread,
-							cl_uint		shmem_per_block)
+							cl_uint		shmem_per_block,
+							cl_uint		shmem_per_thread)
 {
 	kern_arg_t  *kern_args = NULL;
 
 	return __pgstromLaunchDynamicKernel(kern_function,
 										kern_args,
 										num_threads,
-										shmem_per_thread,
-										shmem_per_block);
+										shmem_per_block,
+										shmem_per_thread);
 }
 
 STATIC_FUNCTION(cudaError_t)
 pgstromLaunchDynamicKernel1(void	   *kern_function,
 							kern_arg_t	karg0,
 							size_t		num_threads,
-							cl_uint		shmem_per_thread,
-							cl_uint		shmem_per_block)
+							cl_uint		shmem_per_block,
+							cl_uint		shmem_per_thread)
 {
 	kern_arg_t  *kern_args = (kern_arg_t *)
 		cudaGetParameterBuffer(sizeof(kern_arg_t),
@@ -391,8 +377,8 @@ pgstromLaunchDynamicKernel1(void	   *kern_function,
 	return __pgstromLaunchDynamicKernel(kern_function,
 										kern_args,
 										num_threads,
-										shmem_per_thread,
-										shmem_per_block);
+										shmem_per_block,
+										shmem_per_thread);
 }
 
 STATIC_FUNCTION(cudaError_t)
@@ -400,8 +386,8 @@ pgstromLaunchDynamicKernel2(void	   *kern_function,
 							kern_arg_t	karg0,
 							kern_arg_t	karg1,
 							size_t		num_threads,
-							cl_uint		shmem_per_thread,
-							cl_uint		shmem_per_block)
+							cl_uint		shmem_per_block,
+							cl_uint		shmem_per_thread)
 {
 	kern_arg_t  *kern_args = (kern_arg_t *)
 		cudaGetParameterBuffer(sizeof(kern_arg_t),
@@ -414,8 +400,8 @@ pgstromLaunchDynamicKernel2(void	   *kern_function,
 	return __pgstromLaunchDynamicKernel(kern_function,
 										kern_args,
 										num_threads,
-										shmem_per_thread,
-										shmem_per_block);
+										shmem_per_block,
+										shmem_per_thread);
 }
 
 STATIC_FUNCTION(cudaError_t)
@@ -424,8 +410,8 @@ pgstromLaunchDynamicKernel3(void	   *kern_function,
 							kern_arg_t	karg1,
 							kern_arg_t	karg2,
 							size_t		num_threads,
-							cl_uint		shmem_per_thread,
-							cl_uint		shmem_per_block)
+							cl_uint		shmem_per_block,
+							cl_uint		shmem_per_thread)
 {
 	kern_arg_t  *kern_args = (kern_arg_t *)
 		cudaGetParameterBuffer(sizeof(kern_arg_t),
@@ -439,8 +425,8 @@ pgstromLaunchDynamicKernel3(void	   *kern_function,
 	return __pgstromLaunchDynamicKernel(kern_function,
 										kern_args,
 										num_threads,
-										shmem_per_thread,
-										shmem_per_block);
+										shmem_per_block,
+										shmem_per_thread);
 }
 
 STATIC_FUNCTION(cudaError_t)
@@ -450,8 +436,8 @@ pgstromLaunchDynamicKernel4(void	   *kern_function,
 							kern_arg_t	karg2,
 							kern_arg_t	karg3,
 							size_t		num_threads,
-							cl_uint		shmem_per_thread,
-							cl_uint		shmem_per_block)
+							cl_uint		shmem_per_block,
+							cl_uint		shmem_per_thread)
 {
 	kern_arg_t  *kern_args = (kern_arg_t *)
 		cudaGetParameterBuffer(sizeof(kern_arg_t),
@@ -466,8 +452,8 @@ pgstromLaunchDynamicKernel4(void	   *kern_function,
 	return __pgstromLaunchDynamicKernel(kern_function,
 										kern_args,
 										num_threads,
-										shmem_per_thread,
-										shmem_per_block);
+										shmem_per_block,
+										shmem_per_thread);
 }
 
 STATIC_FUNCTION(cudaError_t)
@@ -478,8 +464,8 @@ pgstromLaunchDynamicKernel5(void	   *kern_function,
 							kern_arg_t	karg3,
 							kern_arg_t	karg4,
 							size_t		num_threads,
-							cl_uint		shmem_per_thread,
-							cl_uint		shmem_per_block)
+							cl_uint		shmem_per_block,
+							cl_uint		shmem_per_thread)
 {
 	kern_arg_t  *kern_args = (kern_arg_t *)
 		cudaGetParameterBuffer(sizeof(kern_arg_t),
@@ -495,8 +481,8 @@ pgstromLaunchDynamicKernel5(void	   *kern_function,
 	return __pgstromLaunchDynamicKernel(kern_function,
 										kern_args,
 										num_threads,
-										shmem_per_thread,
-										shmem_per_block);
+										shmem_per_block,
+										shmem_per_thread);
 }
 
 STATIC_FUNCTION(cudaError_t)
@@ -508,8 +494,8 @@ pgstromLaunchDynamicKernel6(void	   *kern_function,
 							kern_arg_t	karg4,
 							kern_arg_t	karg5,
 							size_t		num_threads,
-							cl_uint		shmem_per_thread,
-							cl_uint		shmem_per_block)
+							cl_uint		shmem_per_block,
+							cl_uint		shmem_per_thread)
 {
 	kern_arg_t  *kern_args = (kern_arg_t *)
 		cudaGetParameterBuffer(sizeof(kern_arg_t),
@@ -526,8 +512,8 @@ pgstromLaunchDynamicKernel6(void	   *kern_function,
 	return __pgstromLaunchDynamicKernel(kern_function,
 										kern_args,
 										num_threads,
-										shmem_per_thread,
-										shmem_per_block);
+										shmem_per_block,
+										shmem_per_thread);
 }
 
 STATIC_FUNCTION(cudaError_t)
@@ -540,8 +526,8 @@ pgstromLaunchDynamicKernel7(void	   *kern_function,
 							kern_arg_t	karg5,
 							kern_arg_t	karg6,
 							size_t		num_threads,
-							cl_uint		shmem_per_thread,
-							cl_uint		shmem_per_block)
+							cl_uint		shmem_per_block,
+							cl_uint		shmem_per_thread)
 {
 	kern_arg_t  *kern_args = (kern_arg_t *)
 		cudaGetParameterBuffer(sizeof(kern_arg_t),
@@ -559,8 +545,8 @@ pgstromLaunchDynamicKernel7(void	   *kern_function,
 	return __pgstromLaunchDynamicKernel(kern_function,
 										kern_args,
 										num_threads,
-										shmem_per_thread,
-										shmem_per_block);
+										shmem_per_block,
+										shmem_per_thread);
 }
 
 STATIC_FUNCTION(cudaError_t)
@@ -574,8 +560,8 @@ pgstromLaunchDynamicKernel8(void	   *kern_function,
 							kern_arg_t	karg6,
 							kern_arg_t	karg7,
 							size_t		num_threads,
-							cl_uint		shmem_per_thread,
-							cl_uint		shmem_per_block)
+							cl_uint		shmem_per_block,
+							cl_uint		shmem_per_thread)
 {
 	kern_arg_t  *kern_args = (kern_arg_t *)
 		cudaGetParameterBuffer(sizeof(kern_arg_t),
@@ -594,8 +580,8 @@ pgstromLaunchDynamicKernel8(void	   *kern_function,
 	return __pgstromLaunchDynamicKernel(kern_function,
 										kern_args,
 										num_threads,
-										shmem_per_thread,
-										shmem_per_block);
+										shmem_per_block,
+										shmem_per_thread);
 }
 
 STATIC_FUNCTION(cudaError_t)
@@ -610,8 +596,8 @@ pgstromLaunchDynamicKernel9(void	   *kern_function,
 							kern_arg_t	karg7,
 							kern_arg_t	karg8,
 							size_t		num_threads,
-							cl_uint		shmem_per_thread,
-							cl_uint		shmem_per_block)
+							cl_uint		shmem_per_block,
+							cl_uint		shmem_per_thread)
 {
 	kern_arg_t  *kern_args = (kern_arg_t *)
 		cudaGetParameterBuffer(sizeof(kern_arg_t),
@@ -631,8 +617,8 @@ pgstromLaunchDynamicKernel9(void	   *kern_function,
 	return __pgstromLaunchDynamicKernel(kern_function,
 										kern_args,
 										num_threads,
-										shmem_per_thread,
-										shmem_per_block);
+										shmem_per_block,
+										shmem_per_thread);
 }
 
 #endif	/* __CUDACC__ */
