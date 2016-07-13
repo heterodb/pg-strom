@@ -225,9 +225,9 @@ reclaim_cuda_program_entry(void)
  * It makes a flat cstring kernel source.
  */
 static char *
-construct_flat_cuda_source(const char *kern_source,
+construct_flat_cuda_source(uint32 extra_flags,
 						   const char *kern_define,
-						   uint32 extra_flags)
+						   const char *kern_source)
 {
 	StringInfoData		source;
 
@@ -477,13 +477,32 @@ writeout_cuda_source_file(char *cuda_source)
 	return tempfilepath;
 }
 
+/*
+ * pgstrom_cuda_source_file - write out a CUDA program to temp-file
+ */
 const char *
-pgstrom_cuda_source_file(GpuTaskState *gts)
+pgstrom_cuda_source_file(ProgramId program_id)
 {
-	char   *cuda_source = construct_flat_cuda_source(gts->kern_source,
-													 gts->kern_define,
-													 gts->extra_flags);
-	return writeout_cuda_source_file(cuda_source);
+	program_cache_entry *entry;
+	char	   *source;
+
+	SpinLockAcquire(&pgcache_head->lock);
+	entry = lookup_cuda_program_entry_nolock(program_id);
+	if (!entry)
+	{
+		SpinLockRelease(&pgcache_head->lock);
+		elog(ERROR, "ProgramId=%lu not found", program_id);
+	}
+	get_cuda_program_entry_nolock(entry);
+	SpinLockRelease(&pgcache_head->lock);
+
+	source = construct_flat_cuda_source(entry->extra_flags,
+										entry->kern_define,
+										entry->kern_source);
+
+	put_cuda_program_entry(entry);
+
+	return writeout_cuda_source_file(source);
 }
 
 /*
@@ -511,9 +530,9 @@ __build_cuda_program(program_cache_entry *entry)
 	/*
 	 * Make a nvrtcProgram object
 	 */
-	source = construct_flat_cuda_source(entry->kern_source,
+	source = construct_flat_cuda_source(entry->extra_flags,
 										entry->kern_define,
-										entry->extra_flags);
+										entry->kern_source);
 	rc = nvrtcCreateProgram(&program,
 							source,
 							"pg_strom",

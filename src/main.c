@@ -890,6 +890,7 @@ pgstrom_explain_gputaskstate(GpuTaskState *gts, ExplainState *es)
 			ExplainPropertyText("Extra", temp, es);
 	}
 
+#if 0
 	/*
 	 * Show source path of the GPU kernel
 	 */
@@ -901,6 +902,7 @@ pgstrom_explain_gputaskstate(GpuTaskState *gts, ExplainState *es)
 
 		ExplainPropertyText("Kernel Source", cuda_source, es);
 	}
+#endif
 
 	/*
 	 * Show performance information

@@ -613,7 +613,7 @@ pgstromExplainGpuTaskState(GpuTaskState_v2 *gts, ExplainState *es)
 		gts->program_id != INVALID_PROGRAM_ID &&
 		pgstrom_debug_kernel_source)
 	{
-		const char *cuda_source = pgstrom_cuda_source_file(gts);
+		const char *cuda_source = pgstrom_cuda_source_file(gts->program_id);
 
 		ExplainPropertyText("Kernel Source", cuda_source, es);
 	}
