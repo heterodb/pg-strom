@@ -85,12 +85,6 @@
 #endif
 
 /*
- * Relevant Header Files
- */
-#include "gpu_device.h"
-#include "perfmon.h"
-
-/*
  * GpuContext_v2
  *
  * 
@@ -103,13 +97,23 @@ typedef struct SharedGpuContext
 	cl_uint		context_id;		/* a unique ID of the GpuContext */
 
 	slock_t		lock;			/* lock of the field below */
-	cl_uint		refcnt;			/* refcount by backend/gpu-server */
-	cl_uint		device_id;		/* a unique index of the GPU device */
+	cl_int		refcnt;			/* refcount by backend/gpu-server */
+	cl_int		device_id;		/* a unique index of the GPU device */
 	PGPROC	   *server;			/* PGPROC of GPU/CUDA Server */
 	PGPROC	   *backend;		/* PGPROC of Backend Process */
-
+	/* state of asynchronous tasks */
 	dlist_head	dma_buffer_list;/* tracker of DMA buffers */
 	cl_int		num_async_tasks;/* num of tasks passed to GPU server */
+	/* performance monitor */
+	bool		perfmon;
+	cl_uint		num_dmabuf_alloc;
+	cl_uint		num_dmabuf_free;
+	cl_uint		num_gpumem_alloc;
+	cl_uint		num_gpumem_free;
+	cl_double	time_dmabuf_alloc;
+	cl_double	time_dmabuf_free;
+	cl_double	time_gpumem_alloc;
+	cl_double	time_gpumem_free;
 } SharedGpuContext;
 
 #define INVALID_GPU_CONTEXT_ID		(-1)
@@ -131,7 +135,6 @@ typedef cl_long					ProgramId;
 /*
  * GpuTask and related
  */
-
 typedef enum {
 	GpuTaskKind_GpuScan,
 	GpuTaskKind_GpuJoin,
@@ -139,6 +142,12 @@ typedef enum {
 	GpuTaskKind_GpuSort,
 	GpuTaskKind_PL_CUDA,
 } GpuTaskKind;
+
+/*
+ * Relevant Header Files
+ */
+#include "gpu_device.h"
+#include "perfmon.h"
 
 typedef struct GpuTask_v2		GpuTask_v2;
 typedef struct GpuTaskState_v2	GpuTaskState_v2;
@@ -158,7 +167,6 @@ struct GpuTaskState_v2
 	kern_parambuf  *kern_params;	/* Const/Param buffer */
 	bool			scan_done;		/* True, if no more rows to read */
 	bool			row_format;		/* True, if KDS_FORMAT_ROW is required */
-	bool			perfmon;		/* True, if perfmon info is needed */
 
 	/* fields for outer scan */
 	bool			outer_bulk_exec;/* True, if it scans outer by bulk-exec */
@@ -173,8 +181,8 @@ struct GpuTaskState_v2
 	GpuTask_v2	 *(*cb_next_task)(GpuTaskState_v2 *gts);
 	void		 *(*cb_switch_task)(GpuTaskState_v2 *gts, GpuTask_v2 *gtask);
 	TupleTableSlot *(*cb_next_tuple)(GpuTaskState_v2 *gts);
-	void		 *(*cb_task_release)(GpuTask_v2 *gtask);
-
+	struct pgstrom_data_store *(*cb_bulk_exec)(GpuTaskState_v2 *gts,
+											   size_t chunk_size);
 	/* list to manage GpuTasks */
 	dlist_head		ready_tasks;	/* list of tasks already processed */
 	cl_uint			num_ready_tasks;/* length of the list above */
@@ -197,8 +205,10 @@ struct GpuTask_v2
 	cl_int			file_desc;		/* FD to be shared with server */
 	bool			row_format;		/* true, if row-format is preferred */
 	bool			cpu_fallback;	/* true, if task needs CPU fallback */
+	bool			perfmon;		/* true, if perfmon is required */
 	/* fields below are valid only server */
 	cl_int			peer_fdesc;		/* duplication of file_desc on server */
+	CUstream		cuda_stream;	/* stream object assigned on the task */
 };
 typedef struct GpuTask_v2 GpuTask_v2;
 
@@ -260,6 +270,7 @@ struct GpuTaskState
 {
 	CustomScanState	css;
 	GpuContext	   *gcontext;
+	GpuContext_v2  *gcontext2;		// for temporary
 	kern_parambuf  *kern_params;	/* Const/Param buffer */
 	const char	   *kern_define;	/* per session definition */
 	const char	   *kern_source;	/* GPU kernel source on the fly */
@@ -415,7 +426,7 @@ extern void pgstrom_init_dma_buffer(void);
  * gpu_context.c
  */
 extern GpuContext_v2 *MasterGpuContext(void);
-extern GpuContext_v2 *GetGpuContext(void);
+extern GpuContext_v2 *GetGpuContext(bool with_connection);
 extern GpuContext_v2 *AttachGpuContext(pgsocket sockfd,
 									   cl_int context_id,
 									   BackendId backend_id,
@@ -450,6 +461,7 @@ extern bool gpuservSendGpuTask(GpuContext_v2 *gcontext, GpuTask_v2 *gtask);
 extern GpuTask_v2 *gpuservRecvGpuTask(GpuContext_v2 *gcontext);
 extern GpuTask_v2 *gpuservRecvGpuTaskTimeout(GpuContext_v2 *gcontext,
 										  long timeout);
+extern void gpuservCompleteGpuTask(GpuTask_v2 *gtask, bool is_urgent);
 
 extern void pgstrom_init_gpu_server(void);
 
@@ -536,17 +548,26 @@ extern kern_parambuf *construct_kern_parambuf(List *used_params,
 extern void pgstromInitGpuTaskState(GpuTaskState_v2 *gts,
 									GpuContext_v2 *gcontext,
 									GpuTaskKind task_kind,
-									ProgramId program_id,
 									List *used_params,
 									EState *estate);
 extern TupleTableSlot *pgstromExecGpuTaskState(GpuTaskState_v2 *gts);
+extern pgstrom_data_store *pgstromBulkExecGpuTaskState(GpuTaskState_v2 *gts,
+													   size_t chunk_size);
 extern void pgstromRescanGpuTaskState(GpuTaskState_v2 *gts);
 extern void pgstromReleaseGpuTaskState(GpuTaskState_v2 *gts);
+extern void pgstromExplainGpuTaskState(GpuTaskState_v2 *gts,
+									   ExplainState *es);
+extern void pgstromExplainOuterBulkExec(GpuTaskState_v2 *gts,
+										List *deparse_context,
+										List *ancestors,
+										ExplainState *es);
 
-extern bool pgstromProcessGpuTask(GpuTask_v2 *gtask,
+
+extern void pgstromInitGpuTask(GpuTaskState_v2 *gts, GpuTask_v2 *gtask);
+extern int	pgstromProcessGpuTask(GpuTask_v2 *gtask,
 								  CUmodule cuda_module,
 								  CUstream cuda_stream);
-extern void pgstromCompleteGpuTask(GpuTask_v2 *gtask);
+extern int	pgstromCompleteGpuTask(GpuTask_v2 *gtask);
 extern void pgstromReleaseGpuTask(GpuTask_v2 *gtask);
 
 extern const char *errorText(int errcode);
@@ -561,10 +582,12 @@ extern void pgstrom_get_cuda_program(GpuContext_v2 *gcontext,
 extern void pgstrom_put_cuda_program(GpuContext_v2 *gcontext,
 									 ProgramId program_id);
 extern ProgramId pgstrom_create_cuda_program(GpuContext_v2 *gcontext,
+											 cl_uint extra_flags,
 											 const char *kern_source,
 											 const char *kern_define,
-											 cl_uint extra_flags,
 											 bool try_async_build);
+extern char *pgstrom_build_session_info(cl_uint extra_flags,
+										GpuTaskState_v2 *gts);
 extern CUmodule pgstrom_load_cuda_program(ProgramId program_id, long timeout);
 extern bool pgstrom_wait_cuda_program(ProgramId program_id, long timeout);
 
@@ -576,8 +599,6 @@ extern bool pgstrom_load_cuda_program_legacy(GpuTaskState *gts,
 extern CUmodule *plcuda_load_cuda_program_legacy(GpuContext *gcontext,
 												 const char *kern_source,
 												 cl_uint extra_flags);
-extern char *pgstrom_build_session_info(cl_uint extra_flags,
-										GpuTaskState *gts);
 extern void pgstrom_assign_cuda_program(GpuTaskState *gts,
 										List *used_params,
 										const char *kern_source,
@@ -698,20 +719,23 @@ extern bool pgstrom_pullup_outer_scan(Plan *plannode,
 extern bool pgstrom_path_is_gpuscan(const Path *path);
 extern bool pgstrom_plan_is_gpuscan(const Plan *plan);
 
-extern pgstrom_data_store *pgstrom_exec_scan_chunk(GpuTaskState *gts,
-												   Size chunk_length);
-extern void pgstrom_rewind_scan_chunk(GpuTaskState *gts);
+
+extern void gpuscan_rewind_position(GpuTaskState_v2 *gts);
 
 
-extern void gpuscan_process_task(GpuTask_v2 *gtask,
+extern pgstrom_data_store *gpuscanExecScanChunk(GpuTaskState_v2 *gts,
+												Size chunk_length);
+extern void gpuscanRewindScanChunk(GpuTaskState_v2 *gts);
+
+extern int	gpuscan_process_task(GpuTask_v2 *gtask,
 								 CUmodule cuda_module,
 								 CUstream cuda_stream);
-extern void gpuscan_complete_task(GpuTask_v2 *gtask);
+extern int	gpuscan_complete_task(GpuTask_v2 *gtask);
 extern void gpuscan_release_task(GpuTask_v2 *gtask);
 
 
 
-extern void assign_gpuscan_session_info(StringInfo buf, GpuTaskState *gts);
+extern void assign_gpuscan_session_info(StringInfo buf, GpuTaskState_v2 *gts);
 extern void pgstrom_init_gpuscan(void);
 
 /*
@@ -800,6 +824,7 @@ extern Datum array_matrix_rawsize(PG_FUNCTION_ARGS);
  */
 extern bool		pgstrom_enabled;
 extern bool		pgstrom_perfmon_enabled;
+extern bool		pgstrom_debug_kernel_source;
 extern bool		pgstrom_bulkexec_enabled;
 extern bool		pgstrom_cpu_fallback_enabled;
 extern int		pgstrom_max_async_tasks;

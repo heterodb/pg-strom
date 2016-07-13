@@ -95,10 +95,14 @@ static int				gpu_server_id = -1;
 static bool				gpu_server_got_sigterm = false;
 static int				numGpuServers;			/* GUC */
 static int				GpuServerCommTimeout;	/* GUC */
+static int				gpuserv_device_id = -1;
 GpuContext_v2		   *gpuserv_gpu_context = NULL;
 CUdevice				gpuserv_cuda_device = NULL;
 CUcontext				gpuserv_cuda_context = NULL;
-/* per session state */
+/*
+ * per session state - these list might be updated by the callbacl of CUDA,
+ * thus, it must be touched under the lock
+ */
 static slock_t			session_tasks_lock;
 static dlist_head		session_pending_tasks;
 static dlist_head		session_running_tasks;
@@ -284,7 +288,7 @@ gpuservProcessPendingTasks(void)
 		CUmodule	cuda_module;
 		CUstream	cuda_stream;
 		CUresult	rc;
-		bool		retval;
+		cl_int		retval;
 
 		dnode = dlist_pop_head_node(&session_pending_tasks);
 		gtask = dlist_container(GpuTask_v2, chain, dnode);
@@ -302,7 +306,7 @@ gpuservProcessPendingTasks(void)
 				 * So, we can expect MyLatch will be set when CUDA program
 				 * build gets completed.
 				 */
-				retval = false;
+				retval = 1;
 			}
 			else
 			{
@@ -310,6 +314,18 @@ gpuservProcessPendingTasks(void)
 				if (rc != CUDA_SUCCESS)
 					elog(ERROR, "failed on cuStreamCreate: %s", errorText(rc));
 
+				/*
+				 * pgstromProcessGpuTask() returns the following status:
+				 *
+				 *  0 : GpuTask is successfully queued to the stream.
+				 *      It's now running, and then callback will inform its
+				 *      completion later.
+				 *  1 : Unable to launch GpuTask due to lack of GPU resource.
+				 *      It shall be released later, so, back to the pending
+				 *      list again.
+				 * -1 : GpuTask handler managed its status by itself.
+				 *      So, gputasks.c does not need to deal with any more.
+				 */
 				retval = pgstromProcessGpuTask(gtask,
 											   cuda_module,
 											   cuda_stream);
@@ -319,7 +335,7 @@ gpuservProcessPendingTasks(void)
 				 * case, we will retry the task after the free of GPU
 				 * memory.
 				 */
-				if (!retval)
+				if (retval > 0)
 				{
 					Bitmapset  *waiters;
 
@@ -345,9 +361,9 @@ gpuservProcessPendingTasks(void)
 		 * Process shall be waken up by gpuMemFree().
 		 */
 		SpinLockAcquire(&session_tasks_lock);
-		if (retval)
+		if (retval == 0)
 			dlist_push_tail(&session_running_tasks, &gtask->chain);
-		else
+		else if (retval > 0)
 		{
 			dlist_push_head(&session_pending_tasks, &gtask->chain);
 			break;
@@ -365,17 +381,68 @@ gpuservFlushOutCompletedTasks(void)
 	MemoryContext	memcxt = CurrentMemoryContext;
 	dlist_node	   *dnode;
 	GpuTask_v2	   *gtask;
+	int				retval;
+	CUresult		rc;
 
 	SpinLockAcquire(&session_tasks_lock);
 	while (dlist_is_empty(&session_completed_tasks))
 	{
 		dnode = dlist_pop_head_node(&session_pending_tasks);
 		gtask = dlist_container(GpuTask_v2, chain, dnode);
+		memset(&gtask->chain, 0, sizeof(dlist_node));
 		SpinLockRelease(&session_tasks_lock);
 
 		PG_TRY();
 		{
-			pgstromCompleteGpuTask(gtask);
+			/*
+			 * pgstromCompleteGpuTask returns the following status:
+			 *
+			 *  0: GpuTask is successfully completed. So, let's return to
+			 *     the backend process over the socket.
+			 *  1: GpuTask needs to retry GPU kernel execution. So, let's
+			 *     attach pending list again.
+			 * -1: GpuTask wants to be released here. So, task shall be
+			 *     removed and num_async_tasks shall be decremented.
+			 */
+			retval = pgstromCompleteGpuTask(gtask);
+
+			/* release of CUDA stream is caller's job */
+			rc = cuStreamDestroy(gtask->cuda_stream);
+			if (rc != CUDA_SUCCESS)
+				elog(WARNING, "failed on cuStreamDestroy: %s", errorText(rc));
+
+			if (retval == 0)
+			{
+				if (!gpuservSendGpuTask(gpuserv_gpu_context, gtask))
+					elog(ERROR, "failed on gpuservSendGpuTask");
+			}
+			else if (retval > 0)
+			{
+				/*
+				 * GpuTask wants to execute GPU kernel again, so attach it
+				 * on the pending list again.
+				 */
+				SpinLockAcquire(&session_tasks_lock);
+				dlist_push_head(&session_pending_tasks, &gtask->chain);
+				SpinLockRelease(&session_tasks_lock);
+			}
+			else
+			{
+				/*
+				 * GpuTask wants to release this task without message-back.
+				 * So, we have to decrement num_async_tasks and set latch
+				 * of the backend process (it may wait for the last task).
+				 */
+				SharedGpuContext *shgcon = gpuserv_gpu_context->shgcon;
+
+				pgstromReleaseGpuTask(gtask);
+
+				SpinLockAcquire(&shgcon->lock);
+				shgcon->num_async_tasks--;
+				SpinLockRelease(&shgcon->lock);
+
+				SetLatch(&shgcon->backend->procLatch);
+			}
 		}
 		PG_CATCH();
 		{
@@ -672,7 +739,7 @@ gpuservRecvCommand(pgsocket sockfd, GpuServCommand *cmd, long timeout)
 		{
 			if (msg.msg_iovlen != 0 ||
 				iov.iov_len < offsetof(GpuServCommand, u))
-				elog(ERROR, "Bug? unexpected message format");
+				elog(ERROR, "Bug? unexpected message format msg_iovlen=%zu iov_len=%zu", msg.msg_iovlen, iov.iov_len);
 
 			cmd->command = __cmd.command;
 			if (__cmd.command == GPUSERV_CMD_TASK)
@@ -1056,6 +1123,24 @@ gpuservAcceptConnection(void)
 	PG_END_TRY();
 
 	return gcontext;
+}
+
+/*
+ * gpuservCompleteGpuTask - A routine for CUDA callback to register GpuTask
+ * on the completed list.
+ */
+void
+gpuservCompleteGpuTask(GpuTask_v2 *gtask, bool is_urgent)
+{
+	SpinLockAcquire(&session_tasks_lock);
+	dlist_delete(&gtask->chain);
+	if (is_urgent)
+		dlist_push_head(&session_completed_tasks, &gtask->chain);
+	else
+		dlist_push_tail(&session_completed_tasks, &gtask->chain);
+	SpinLockRelease(&session_tasks_lock);
+
+	SetLatch(MyLatch);
 }
 
 /*

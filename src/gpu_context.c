@@ -152,12 +152,17 @@ closeFileDesc(GpuContext_v2 *gcontext, int fdesc)
 CUresult
 gpuMemAlloc_v2(GpuContext_v2 *gcontext, CUdeviceptr *p_devptr, size_t bytesize)
 {
+	SharedGpuContext *shgcon = gcontext->shgcon;
 	ResourceTracker *tracker;
-	CUdeviceptr	devptr;
-    CUresult	rc;
-	pg_crc32	crc;
+	CUdeviceptr		devptr;
+    CUresult		rc;
+	pg_crc32		crc;
+	struct timeval	tv1, tv2;
 
 	Assert(IsGpuServerProcess());
+	if (shgcon->perfmon)
+		gettimeofday(&tv1, NULL);
+
 	rc = cuMemAlloc(&devptr, bytesize);
 	if (rc != CUDA_SUCCESS)
 		return rc;
@@ -171,6 +176,16 @@ gpuMemAlloc_v2(GpuContext_v2 *gcontext, CUdeviceptr *p_devptr, size_t bytesize)
 	dlist_push_tail(&gcontext->restrack[crc % RESTRACK_HASHSIZE],
 					&tracker->chain);
 	*p_devptr = devptr;
+
+	if (shgcon->perfmon)
+	{
+		gettimeofday(&tv2, NULL);
+
+		SpinLockAcquire(&shgcon->lock);
+		shgcon->num_gpumem_alloc++;
+		shgcon->time_gpumem_alloc += PERFMON_TIMEVAL_DIFF(tv1,tv2);
+		SpinLockRelease(&shgcon->lock);
+	}
 	return rc;
 }
 
@@ -178,10 +193,14 @@ CUresult
 gpuMemFree_v2(GpuContext_v2 *gcontext, CUdeviceptr devptr)
 {
 	SharedGpuContext *shgcon = gcontext->shgcon;
-	dlist_head *restrack_list;
-	dlist_iter	iter;
-	pg_crc32	crc;
-	CUresult	rc;
+	dlist_head	   *restrack_list;
+	dlist_iter		iter;
+	pg_crc32		crc;
+	CUresult		rc;
+	struct timeval	tv1, tv2;
+
+	if (shgcon->perfmon)
+		gettimeofday(&tv1, NULL);
 
 	crc = resource_tracker_hashval(RESTRACK_CLASS__GPUMEMORY,
 								   &devptr, sizeof(CUdeviceptr));
@@ -209,6 +228,16 @@ gpuMemFree_v2(GpuContext_v2 *gcontext, CUdeviceptr devptr)
 
 	rc = cuMemFree(devptr);
 	notifierGpuMemFree(shgcon->device_id);
+
+	if (shgcon->perfmon)
+	{
+		gettimeofday(&tv2, NULL);
+
+		SpinLockAcquire(&shgcon->lock);
+		shgcon->num_gpumem_free++;
+		shgcon->time_gpumem_free += PERFMON_TIMEVAL_DIFF(tv1,tv2);
+		SpinLockRelease(&shgcon->lock);
+	}
 	return rc;
 }
 
@@ -316,7 +345,7 @@ MasterGpuContext(void)
  * GetGpuContext - acquire a free GpuContext
  */
 GpuContext_v2 *
-GetGpuContext(void)
+GetGpuContext(bool with_connection)
 {
 	GpuContext_v2  *gcontext = NULL;
 	SharedGpuContext *shgcon;
@@ -324,7 +353,7 @@ GetGpuContext(void)
 	dlist_node	   *dnode;
 	int				i;
 
-	if (!IsGpuServerProcess())
+	if (IsGpuServerProcess())
 		elog(FATAL, "Bug? Only backend process can get a new GpuContext");
 
 	/*
@@ -334,7 +363,10 @@ GetGpuContext(void)
 	{
 		gcontext = dlist_container(GpuContext_v2, chain, iter.cur);
 
-		if (gcontext->resowner == CurrentResourceOwner)
+		if (gcontext->resowner == CurrentResourceOwner &&
+			(with_connection
+			 ? gcontext->sockfd != PGINVALID_SOCKET
+			 : gcontext->sockfd == PGINVALID_SOCKET))
 		{
 			gcontext->refcnt++;
 			return gcontext;
@@ -371,9 +403,23 @@ GetGpuContext(void)
 
 	Assert(shgcon == &sharedGpuContextHead->context_array[shgcon->context_id]);
 	shgcon->refcnt = 1;
+	shgcon->device_id = -1;		/* set on GPU server attachment */
 	shgcon->server = NULL;
 	shgcon->backend = MyProc;
+	dlist_init(&shgcon->dma_buffer_list);
+	shgcon->num_async_tasks = 0;
+	/* perfmon fields */
+	shgcon->perfmon = pgstrom_perfmon_enabled;
+	shgcon->num_dmabuf_alloc  = 0;
+	shgcon->num_dmabuf_free   = 0;
+	shgcon->num_gpumem_alloc  = 0;
+	shgcon->num_gpumem_free   = 0;
+	shgcon->time_dmabuf_alloc = 0.0;
+	shgcon->time_dmabuf_free  = 0.0;
+	shgcon->time_gpumem_alloc = 0.0;
+	shgcon->time_gpumem_free  = 0.0;
 
+	/* init local GpuContext */
 	gcontext->refcnt = 1;
 	gcontext->sockfd = PGINVALID_SOCKET;
 	gcontext->resowner = CurrentResourceOwner;
@@ -383,17 +429,21 @@ GetGpuContext(void)
 	dlist_push_head(&activeGpuContextList, &gcontext->chain);
 
 	/*
+	 * ------------------------------------------------------------------
 	 * At this point, GpuContext can be reclaimed automatically because
 	 * it is now already tracked by resource owner.
+	 * ------------------------------------------------------------------
 	 */
 
-	/* try to open the connection to GpuServer */
-	if (!gpuservOpenConnection(gcontext))
-	{
-		PutGpuContext(gcontext);
-		return NULL;
-	}
-	Assert(gcontext->sockfd != PGINVALID_SOCKET);
+	/*
+	 * Open the connection on demand, however, connection may often fails
+	 * because of GPU server resources. In these cases, 'unconnected GPU
+	 * context' shall be returned.
+	 */
+	if (!with_connection ||
+		!gpuservOpenConnection(gcontext))
+		gcontext->sockfd = PGINVALID_SOCKET;
+
 	return gcontext;
 }
 
@@ -520,11 +570,11 @@ gpucontext_cleanup_callback(ResourceReleasePhase phase,
 							bool isTopLevel,
 							void *arg)
 {
-	dlist_iter		iter;
+	dlist_mutable_iter	iter;
 
 	if (phase == RESOURCE_RELEASE_BEFORE_LOCKS)
 	{
-		dlist_foreach(iter, &activeGpuContextList)
+		dlist_foreach_modify(iter, &activeGpuContextList)
 		{
 			GpuContext_v2  *gcontext = (GpuContext_v2 *)
 				dlist_container(GpuContext_v2, chain, iter.cur);

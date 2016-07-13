@@ -4318,10 +4318,11 @@ gpupreagg_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	GpuPreAggState *gpas = (GpuPreAggState *) node;
 	CustomScan	   *cscan = (CustomScan *) node->ss.ps.plan;
 	GpuPreAggInfo  *gpa_info = deform_gpupreagg_info(cscan);
-	List		   *context;
+	List		   *dcontext;
 	List		   *dev_proj = NIL;
 	ListCell	   *lc;
 	const char	   *policy;
+	char		   *exprstr;
 	char			temp[2048];
 
 	if (gpas->reduction_mode == GPUPREAGG_NOGROUP_REDUCTION)
@@ -4337,21 +4338,29 @@ gpupreagg_explain(CustomScanState *node, List *ancestors, ExplainState *es)
 	ExplainPropertyText("Reduction", policy, es);
 
 	/* Set up deparsing context */
-	context = set_deparse_context_planstate(es->deparse_cxt,
+	dcontext = set_deparse_context_planstate(es->deparse_cxt,
                                             (Node *)&gpas->gts.css.ss.ps,
                                             ancestors);
 	/* Show device projection */
 	foreach (lc, gpa_info->tlist_dev)
 		dev_proj = lappend(dev_proj, ((TargetEntry *) lfirst(lc))->expr);
-	pgstrom_explain_expression(dev_proj, "GPU Projection",
-							   &gpas->gts.css.ss.ps, context,
-							   ancestors, es, false, false);
+	if (dev_proj != NIL)
+	{
+		exprstr = deparse_expression((Node *)dev_proj, dcontext,
+									 es->verbose, false);
+		ExplainPropertyText("GPU Projection", exprstr, es);
+	}
 	/* statistics for outer scan, if it was pulled-up */
 	pgstrom_explain_outer_bulkexec(&gpas->gts, context, ancestors, es);
 	/* Show device filter */
-	pgstrom_explain_expression(gpa_info->outer_quals, "GPU Filter",
-							   &gpas->gts.css.ss.ps, context,
-							   ancestors, es, false, true);
+	if (gpa_info->outer_quals != NIL)
+	{
+		Node	   *outer_quals
+			= (Node *) make_ands_explicit(gpa_info->outer_quals);
+		exprstr = deparse_expression(outer_quals, dcontext,
+									 es->verbose, false);
+		ExplainPropertyText("GPU Filter", exprstr, es);
+	}
 	// TODO: Add number of rows filtered by the device side
 
 	if (es->verbose)

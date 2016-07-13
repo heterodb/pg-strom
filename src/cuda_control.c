@@ -1017,6 +1017,9 @@ pgstrom_release_gpucontext(GpuContext *gcontext, bool sanity_release)
 	if (rc != CUDA_SUCCESS)
 		elog(WARNING, "failed on cuCtxSetCurrent(NULL): %s", errorText(rc));
 
+#if 0
+	// we don't track PDS individually. It is just a memory chunk
+
 	/*
 	 * Release pgstrom_data_store; because KDS_FORMAT_ROW may have mmap(2)
 	 * state in case of file-mapped data-store, so we have to ensure
@@ -1035,6 +1038,7 @@ pgstrom_release_gpucontext(GpuContext *gcontext, bool sanity_release)
 		PDS_release(pds);
 		keep_context = false;
 	}
+#endif
 
 	/*
 	 * Release all the GPU device memory
@@ -1821,7 +1825,7 @@ pgstrom_exec_chunk_gputask(GpuTaskState *gts, size_t chunk_size)
 			 */
 			if (!pds_dst)
 			{
-				pds_dst = PDS_create_row(gts->gcontext,
+				pds_dst = PDS_create_row(gts->gcontext2,
 										 slot->tts_tupleDescriptor,
 										 chunk_size);
 			}
@@ -1842,7 +1846,7 @@ pgstrom_exec_chunk_gputask(GpuTaskState *gts, size_t chunk_size)
 				 * At least one tuple can be stored, unless the supplied
 				 * chunk_size is not too small.
 				 */
-				if (pds_dst->kds->nitems == 0)
+				if (pds_dst->kds.nitems == 0)
 				{
 					HeapTuple	tuple = ExecFetchSlotTuple(slot);
 					elog(ERROR,

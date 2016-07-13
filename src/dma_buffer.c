@@ -558,6 +558,10 @@ __dmaBufferAlloc(SharedGpuContext *shgcon, Size required)
 	Size				chunk_size;
 	int					mclass;
 	bool				has_exclusive_lock = false;
+	struct timeval		tv1, tv2;
+
+	if (shgcon->perfmon)
+		gettimeofday(&tv1, NULL);
 
 	/* normalize the required size to 2^N of chunks size */
 	chunk_size = MAXALIGN(offsetof(dmaBufferChunk, data) +
@@ -619,10 +623,18 @@ retry:
 found:
 	LWLockRelease(&dmaBufSegHead->mutex);
 
+	if (shgcon->perfmon)
+		gettimeofday(&tv2, NULL);
+
 	/* track this chunk with GpuContext */
 	SpinLockAcquire(&shgcon->lock);
 	chunk->shgcon = shgcon;
 	dlist_push_tail(&shgcon->dma_buffer_list, &chunk->gcxt_chain);
+	if (shgcon->perfmon)
+	{
+		shgcon->num_dmabuf_alloc++;
+		shgcon->time_dmabuf_alloc += PERFMON_TIMEVAL_DIFF(tv1, tv2);
+	}
 	SpinLockRelease(&shgcon->lock);
 
 	return chunk->data;
@@ -810,6 +822,7 @@ dmaBufferFree(void *pointer)
 	dmaBufferChunk	   *chunk;
 	dmaBufferChunk	   *buddy;
 	SharedGpuContext   *shgcon;
+	struct timeval		tv1, tv2;
 	bool				has_exclusive_mutex = false;
 
 	/* sanity checks */
@@ -817,6 +830,8 @@ dmaBufferFree(void *pointer)
 
 	/* detach chunk from the GpuContext */
 	shgcon = chunk->shgcon;
+	if (shgcon->perfmon)
+		gettimeofday(&tv1, NULL);
 	SpinLockAcquire(&shgcon->lock);
 	dlist_delete(&chunk->gcxt_chain);
 	SpinLockRelease(&shgcon->lock);
@@ -913,6 +928,16 @@ retry:
 
 	if (has_exclusive_mutex)
 		LWLockRelease(&dmaBufSegHead->mutex);
+
+	if (shgcon->perfmon)
+	{
+		gettimeofday(&tv2, NULL);
+
+		SpinLockAcquire(&shgcon->lock);
+		shgcon->num_dmabuf_free++;
+		shgcon->time_dmabuf_free += PERFMON_TIMEVAL_DIFF(tv1, tv2);
+		SpinLockRelease(&shgcon->lock);
+	}
 }
 
 /*

@@ -787,9 +787,9 @@ pgstrom_try_build_cuda_program(void)
  */
 ProgramId
 pgstrom_create_cuda_program(GpuContext_v2 *gcontext,
+							cl_uint extra_flags,
 							const char *kern_source,
 							const char *kern_define,
-							cl_uint extra_flags,
 							bool try_async_build)
 {
 	program_cache_entry	*entry;
@@ -1052,6 +1052,59 @@ pgstrom_put_cuda_program(GpuContext_v2 *gcontext, ProgramId program_id)
    	SpinLockRelease(&pgcache_head->lock);
 }
 
+
+/*
+ * pgstrom_build_session_info
+ *
+ * it build a session specific code. if extra_flags contains a particular
+ * custom_scan node related GPU routine, GpuTaskState must be provided.
+ */
+char *
+pgstrom_build_session_info(cl_uint extra_flags,
+						   GpuTaskState_v2 *gts)
+{
+	StringInfoData	buf;
+
+	initStringInfo(&buf);
+
+	/* OID declaration of types */
+	pgstrom_codegen_typeoid_declarations(&buf);
+
+	if ((extra_flags & (DEVKERNEL_NEEDS_TIMELIB |
+						DEVKERNEL_NEEDS_MONEY   |
+						DEVKERNEL_NEEDS_TEXTLIB |
+						DEVKERNEL_NEEDS_GPUSCAN |
+						DEVKERNEL_NEEDS_GPUJOIN |
+						DEVKERNEL_NEEDS_GPUSORT)) == 0)
+		return buf.data;
+
+	Assert(gts != NULL || (extra_flags & (DEVKERNEL_NEEDS_GPUSCAN |
+										  DEVKERNEL_NEEDS_GPUJOIN |
+										  DEVKERNEL_NEEDS_GPUSORT)) == 0);
+
+	/* put timezone info */
+	if ((extra_flags & DEVKERNEL_NEEDS_TIMELIB) != 0)
+		assign_timelib_session_info(&buf);
+	/* put currency info */
+	if ((extra_flags & DEVKERNEL_NEEDS_MONEY) != 0)
+		assign_moneylib_session_info(&buf);
+	/* put text/string info */
+	if ((extra_flags & DEVKERNEL_NEEDS_TEXTLIB) != 0)
+		assign_textlib_session_info(&buf);
+
+	/* enables device projection? */
+	if ((extra_flags & DEVKERNEL_NEEDS_GPUSCAN) != 0)
+		assign_gpuscan_session_info(&buf, gts);
+	/* enables device projection? */
+//	if ((extra_flags & DEVKERNEL_NEEDS_GPUJOIN) != 0)
+//		assign_gpujoin_session_info(&buf, gts);
+	/* enables device projection? */
+//	if ((extra_flags & DEVKERNEL_NEEDS_GPUSORT) != 0)
+//		assign_gpusort_session_info(&buf, gts);
+
+	return buf.data;
+}
+
 /*
  * pgstrom_load_cuda_program
  *
@@ -1297,9 +1350,9 @@ pgstrom_load_cuda_program_legacy(GpuTaskState *gts, bool is_preload)
 	CUmodule	   *cuda_modules;
 
 	program_id = pgstrom_create_cuda_program(NULL,
+											 gts->extra_flags,
 											 gts->kern_source,
 											 gts->kern_define,
-											 gts->extra_flags,
 											 true);
 	cuda_modules = __load_cuda_program(gts->gcontext, program_id);
 	if (cuda_modules != NULL)
@@ -1325,9 +1378,9 @@ plcuda_load_cuda_program_legacy(GpuContext *gcontext,
 	char		   *kern_define
 		= pgstrom_build_session_info(extra_flags, NULL);
 	program_id =  pgstrom_create_cuda_program(NULL,
+											  extra_flags,
 											  kern_source,
 											  kern_define,
-											  extra_flags,
 											  false);
 	/*
 	 * FIXME: we need to pay attention if __load_cuda_program() returns NULL;
@@ -1337,58 +1390,6 @@ plcuda_load_cuda_program_legacy(GpuContext *gcontext,
 	return __load_cuda_program(gcontext, program_id);
 }
 #endif
-
-/*
- * pgstrom_build_session_info
- *
- * it build a session specific code. if extra_flags contains a particular
- * custom_scan node related GPU routine, GpuTaskState must be provided.
- */
-char *
-pgstrom_build_session_info(cl_uint extra_flags,
-						   GpuTaskState *gts)
-{
-	StringInfoData	buf;
-
-	initStringInfo(&buf);
-
-	/* OID declaration of types */
-	pgstrom_codegen_typeoid_declarations(&buf);
-
-	if ((extra_flags & (DEVKERNEL_NEEDS_TIMELIB |
-						DEVKERNEL_NEEDS_MONEY   |
-						DEVKERNEL_NEEDS_TEXTLIB |
-						DEVKERNEL_NEEDS_GPUSCAN |
-						DEVKERNEL_NEEDS_GPUJOIN |
-						DEVKERNEL_NEEDS_GPUSORT)) == 0)
-		return buf.data;
-
-	Assert(gts != NULL || (extra_flags & (DEVKERNEL_NEEDS_GPUSCAN |
-										  DEVKERNEL_NEEDS_GPUJOIN |
-										  DEVKERNEL_NEEDS_GPUSORT)) == 0);
-
-	/* put timezone info */
-	if ((extra_flags & DEVKERNEL_NEEDS_TIMELIB) != 0)
-		assign_timelib_session_info(&buf);
-	/* put currency info */
-	if ((extra_flags & DEVKERNEL_NEEDS_MONEY) != 0)
-		assign_moneylib_session_info(&buf);
-	/* put text/string info */
-	if ((extra_flags & DEVKERNEL_NEEDS_TEXTLIB) != 0)
-		assign_textlib_session_info(&buf);
-
-	/* enables device projection? */
-	if ((extra_flags & DEVKERNEL_NEEDS_GPUSCAN) != 0)
-		assign_gpuscan_session_info(&buf, gts);
-	/* enables device projection? */
-//	if ((extra_flags & DEVKERNEL_NEEDS_GPUJOIN) != 0)
-//		assign_gpujoin_session_info(&buf, gts);
-	/* enables device projection? */
-//	if ((extra_flags & DEVKERNEL_NEEDS_GPUSORT) != 0)
-//		assign_gpusort_session_info(&buf, gts);
-
-	return buf.data;
-}
 
 /*
  * pgstrom_assign_cuda_program
@@ -1405,7 +1406,7 @@ pgstrom_assign_cuda_program(GpuTaskState *gts,
 {
 	ExprContext	   *econtext = gts->css.ss.ps.ps_ExprContext;
 	const char	   *kern_define
-		= pgstrom_build_session_info(extra_flags, gts);
+		= pgstrom_build_session_info(extra_flags, (GpuTaskState_v2 *)gts);
 
 	gts->kern_params = construct_kern_parambuf(used_params, econtext);
 	gts->kern_source = kern_source;

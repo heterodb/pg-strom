@@ -17,9 +17,15 @@
  */
 #include "postgres.h"
 #include "access/xact.h"
+#include "parser/parsetree.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "pg_strom.h"
+
+/*
+ * static functions
+ */
+static void pgstrom_explain_perfmon(GpuTaskState_v2 *gts, ExplainState *es);
 
 
 /*
@@ -182,7 +188,6 @@ void
 pgstromInitGpuTaskState(GpuTaskState_v2 *gts,
 						GpuContext_v2 *gcontext,
 						GpuTaskKind task_kind,
-						ProgramId program_id,
 						List *used_params,
 						EState *estate)
 {
@@ -190,7 +195,7 @@ pgstromInitGpuTaskState(GpuTaskState_v2 *gts,
 
 	gts->gcontext = gcontext;
 	gts->task_kind = task_kind;
-	gts->program_id = program_id;
+	gts->program_id = INVALID_PROGRAM_ID;	/* to be set later */
 	gts->revision = 1;
 	gts->kern_params = construct_kern_parambuf(used_params, econtext);
 	gts->scan_done = false;
@@ -217,6 +222,8 @@ pgstromInitGpuTaskState(GpuTaskState_v2 *gts,
 	memset(&gts->pfm, 0, sizeof(pgstrom_perfmon));
 	gts->pfm.enabled = pgstrom_perfmon_enabled;
 	gts->pfm.prime_in_gpucontext = (gcontext->refcnt == 1);
+	gts->pfm.task_kind = task_kind;
+#if 1
 	// FIXME: pfm should has GpuTaskKind instead of extra_flags in v2.0
 	switch (task_kind)
 	{
@@ -235,6 +242,7 @@ pgstromInitGpuTaskState(GpuTaskState_v2 *gts,
 		default:
 			elog(ERROR, "unexpected GpuTaskKind: %d", (int)task_kind);
 	}
+#endif
 }
 
 /*
@@ -261,7 +269,8 @@ fetch_next_gputask(GpuTaskState_v2 *gts)
 	if (gcontext->sockfd == PGINVALID_SOCKET)
 	{
 		gtask = gts->cb_next_task(gts);
-		gtask->cpu_fallback = true;
+		if (gtask)
+			gtask->cpu_fallback = true;
 		return gtask;
 	}
 
@@ -418,19 +427,6 @@ retry_fetch:
 	return gtask;
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
 /*
  * pgstromExecGpuTaskState
  */
@@ -446,7 +442,7 @@ pgstromExecGpuTaskState(GpuTaskState_v2 *gts)
 		/* release the current GpuTask object that was already scanned */
 		if (gtask)
 		{
-			gts->cb_task_release(gtask);
+			pgstromReleaseGpuTask(gtask);
 			gts->curr_task = NULL;
 			gts->curr_index = 0;
 		}
@@ -461,6 +457,86 @@ pgstromExecGpuTaskState(GpuTaskState_v2 *gts)
 			gts->cb_switch_task(gts, gtask);
 	}
 	return slot;
+}
+
+/*
+ * pgstromBulkExecGpuTaskState
+ */
+pgstrom_data_store *
+pgstromBulkExecGpuTaskState(GpuTaskState_v2 *gts, size_t chunk_size)
+{
+	pgstrom_data_store *pds_dst = NULL;
+	TupleTableSlot	   *slot;
+
+	/* GTS should not have neither host qualifier nor projection */
+	Assert(gts->css.ss.ps.qual == NIL);
+	Assert(gts->css.ss.ps.ps_ProjInfo == NULL);
+
+	do {
+		GpuTask_v2	   *gtask = gts->curr_task;
+
+		/* Reload next GpuTask to be scanned, if needed */
+		if (!gtask)
+		{
+			gtask = fetch_next_gputask(gts);
+			if (!gtask)
+				break;	/* end of the scan */
+			gts->curr_task = gtask;
+			gts->curr_index = 0;
+			if (gts->cb_switch_task)
+				gts->cb_switch_task(gts, gtask);
+		}
+		Assert(gtask != NULL);
+
+		while ((slot = gts->cb_next_tuple(gts)) != NULL)
+		{
+			/*
+			 * Creation of the destination store on demand.
+			 */
+			if (!pds_dst)
+			{
+				pds_dst = PDS_create_row(gts->gcontext,
+										 slot->tts_tupleDescriptor,
+										 chunk_size);
+			}
+
+			/*
+			 * Move rows from the source data-store to the destination store
+			 * until:
+			 *  The destination store still has space.
+			 *  The source store still has unread rows.
+			 */
+			if (!PDS_insert_tuple(pds_dst, slot))
+			{
+				/* Rewind the source PDS, if destination gets filled up */
+				Assert(gts->curr_index > 0);
+				gts->curr_index--;
+
+				/*
+				 * At least one tuple can be stored, unless the supplied
+				 * chunk_size is not too small.
+				 */
+				if (pds_dst->kds.nitems == 0)
+				{
+					HeapTuple	tuple = ExecFetchSlotTuple(slot);
+					elog(ERROR,
+						 "Bug? Too short chunk_size (%zu) for tuple (len=%u)",
+						 chunk_size, tuple->t_len);
+				}
+				return pds_dst;
+			}
+		}
+
+		/*
+		 * All the rows in pds_src are already fetched,
+		 * so current GpuTask shall be detached.
+		 */
+		pgstromReleaseGpuTask(gtask);
+		gts->curr_task = NULL;
+		gts->curr_index = 0;
+	} while (true);
+
+	return pds_dst;
 }
 
 /*
@@ -490,14 +566,95 @@ pgstromReleaseGpuTaskState(GpuTaskState_v2 *gts)
 }
 
 /*
- * pgstromProcessTask - processing handler of GpuTask
+ * pgstromExplainGpuTaskState
  */
-bool
-pgstromProcessTask(GpuTask_v2 *gtask,
-				   CUmodule cuda_module,
-				   CUstream cuda_stream)
+void
+pgstromExplainGpuTaskState(GpuTaskState_v2 *gts, ExplainState *es)
 {
-	bool	retval;
+	/*
+	 * Extra features if any
+	 */
+	if (es->verbose)
+	{
+		char	temp[256];
+		int		ofs = 0;
+
+		/* run per-chunk-execution? */
+		if (gts->outer_bulk_exec)
+			ofs += snprintf(temp+ofs, sizeof(temp) - ofs,
+							"%souter-bulk-exec",
+							ofs > 0 ? ", " : "");
+		/* per-chunk-execution support? */
+		if (gts->cb_bulk_exec != NULL)
+			ofs += snprintf(temp+ofs, sizeof(temp) - ofs,
+							"%sbulk-exec-support",
+							ofs > 0 ? ", " : "");
+		/* preferable result format */
+		if (gts->row_format)
+			ofs += snprintf(temp+ofs, sizeof(temp) - ofs, "%srow-format",
+							ofs > 0 ? ", " : "");
+		if (ofs > 0)
+			ExplainPropertyText("Extra", temp, es);
+	}
+
+	/*
+	 * Show source path of the GPU kernel
+	 */
+	if (es->verbose &&
+		gts->program_id != INVALID_PROGRAM_ID &&
+		pgstrom_debug_kernel_source)
+	{
+		const char *cuda_source = pgstrom_cuda_source_file(gts);
+
+		ExplainPropertyText("Kernel Source", cuda_source, es);
+	}
+
+	/*
+	 * Show performance information
+	 */
+	if (es->analyze && gts->pfm.enabled)
+		pgstrom_explain_perfmon(gts, es);
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+/*
+ * pgstromInitGpuTask
+ */
+void
+pgstromInitGpuTask(GpuTaskState_v2 *gts, GpuTask_v2 *gtask)
+{
+	gtask->task_kind    = gts->task_kind;
+	gtask->program_id   = gts->program_id;
+	gtask->gts          = gts;
+	gtask->revision     = gts->revision;
+	gtask->file_desc    = -1;
+	gtask->row_format   = gts->row_format;
+	gtask->cpu_fallback = false;
+	gtask->perfmon      = gts->pfm.enabled;
+	gtask->peer_fdesc   = -1;
+	gtask->cuda_stream  = NULL;
+}
+
+/*
+ * pgstromProcessGpuTask - processing handler of GpuTask
+ */
+int
+pgstromProcessGpuTask(GpuTask_v2 *gtask,
+					  CUmodule cuda_module,
+					  CUstream cuda_stream)
+{
+	int		retval;
 
 	Assert(IsGpuServerProcess());
 
@@ -516,27 +673,30 @@ pgstromProcessTask(GpuTask_v2 *gtask,
 /*
  * pgstromCompleteGpuTask - completion handler of GpuTask
  */
-void
-pgstromCompleteTask(GpuTask_v2 *gtask)
+int
+pgstromCompleteGpuTask(GpuTask_v2 *gtask)
 {
+	int		retval;
+
 	Assert(IsGpuServerProcess());
 
 	switch (gtask->task_kind)
 	{
 		case GpuTaskKind_GpuScan:
-			gpuscan_complete_task(gtask);
+			retval = gpuscan_complete_task(gtask);
 			break;
 		default:
 			elog(ERROR, "Unknown GpuTask kind: %d", (int)gtask->task_kind);
 			break;
 	}
+	return retval;
 }
 
 /*
  * pgstromReleaseGpuTask - release of GpuTask
  */
 void
-pgstromReleaseTask(GpuTask_v2 *gtask)
+pgstromReleaseGpuTask(GpuTask_v2 *gtask)
 {
 	switch (gtask->task_kind)
 	{
@@ -754,6 +914,562 @@ errorTextKernel(kern_errorbuf *kerror)
 			 errorText(kerror->errcode));
 	return buffer;
 }
+
+/* ------------------------------------------------------------ *
+ *   Misc routines to support EXPLAIN command
+ * ------------------------------------------------------------ */
+#if 0
+void
+pgstrom_explain_expression(List *expr_list, const char *qlabel,
+						   PlanState *planstate, List *deparse_context,
+						   List *ancestors, ExplainState *es,
+						   bool force_prefix, bool convert_to_and)
+{
+	bool        useprefix = (force_prefix | es->verbose);
+	char       *exprstr;
+
+	/* No work if empty expression list */
+	if (expr_list == NIL)
+		return;
+
+	/* Deparse the expression */
+	/* List shall be replaced by explicit AND, if needed */
+	exprstr = deparse_expression(convert_to_and
+								 ? (Node *) make_ands_explicit(expr_list)
+								 : (Node *) expr_list,
+								 deparse_context,
+								 useprefix,
+								 false);
+	/* And add to es->str */
+	ExplainPropertyText(qlabel, exprstr, es);
+}
+#endif
+
+/*
+ * pgstromExplainOuterBulkExec
+ *
+ * A utility routine to explain status of the outer-scan execution.
+ *
+ * TODO: add information to explain number of rows filtered
+ */
+void
+pgstromExplainOuterBulkExec(GpuTaskState_v2 *gts,
+							List *deparse_context,
+							List *ancestors,
+							ExplainState *es)
+{
+	Plan		   *plannode = gts->css.ss.ps.plan;
+	Index			scanrelid = ((Scan *) plannode)->scanrelid;
+	StringInfoData	str;
+
+	/* Does this GpuTaskState has outer simple scan? */
+	if (scanrelid == 0)
+		return;
+
+	/* Is it EXPLAIN ANALYZE? */
+	if (!es->analyze)
+		return;
+
+	/*
+	 * We have to forcibly clean up the instrumentation state because we
+	 * haven't done ExecutorEnd yet.  This is pretty grotty ...
+	 * See the comment in ExplainNode()
+	 */
+	InstrEndLoop(&gts->outer_instrument);
+
+	/*
+	 * See the logic in ExplainTargetRel()
+	 */
+	initStringInfo(&str);
+	if (es->format == EXPLAIN_FORMAT_TEXT)
+	{
+		RangeTblEntry  *rte = rt_fetch(scanrelid, es->rtable);
+		char		   *refname;
+		char		   *relname;
+
+		refname = (char *) list_nth(es->rtable_names, scanrelid - 1);
+		if (refname == NULL)
+			refname = rte->eref->aliasname;
+		relname = get_rel_name(rte->relid);
+		if (es->verbose)
+		{
+			char	   *nspname
+				= get_namespace_name(get_rel_namespace(rte->relid));
+
+			appendStringInfo(&str, "%s.%s",
+							 quote_identifier(nspname),
+							 quote_identifier(relname));
+		}
+		else if (relname != NULL)
+			appendStringInfo(&str, "%s", quote_identifier(relname));
+		if (strcmp(relname, refname) != 0)
+			appendStringInfo(&str, " %s", quote_identifier(refname));
+	}
+
+	if (gts->outer_instrument.nloops > 0)
+	{
+		Instrumentation *instrument = &gts->outer_instrument;
+		double		nloops = instrument->nloops;
+		double		startup_sec = 1000.0 * instrument->startup / nloops;
+		double		total_sec = 1000.0 * instrument->total / nloops;
+		double		rows = instrument->ntuples / nloops;
+
+		if (es->format == EXPLAIN_FORMAT_TEXT)
+		{
+			if (es->timing)
+				appendStringInfo(
+					&str,
+					" (actual time=%.3f..%.3f rows=%.0f loops=%.0f)",
+					startup_sec, total_sec, rows, nloops);
+		else
+			appendStringInfo(
+				&str,
+				" (actual rows=%.0f loops=%.0f)",
+				rows, nloops);
+		}
+		else
+		{
+			if (es->timing)
+			{
+				ExplainPropertyFloat("Outer Actual Startup Time",
+									 startup_sec, 3, es);
+				ExplainPropertyFloat("Outer Actual Total Time",
+									 total_sec, 3, es);
+			}
+			ExplainPropertyFloat("Outer Actual Rows", rows, 0, es);
+			ExplainPropertyFloat("Outer Actual Loops", nloops, 0, es);
+		}
+	}
+	else
+	{
+		if (es->format == EXPLAIN_FORMAT_TEXT)
+			appendStringInfoString(&str, " (never executed)");
+		else
+		{
+			if (es->timing)
+			{
+				ExplainPropertyFloat("Outer Actual Startup Time", 0.0, 3, es);
+				ExplainPropertyFloat("Outer Actual Total Time", 0.0, 3, es);
+			}
+			ExplainPropertyFloat("Outer Actual Rows", 0.0, 0, es);
+			ExplainPropertyFloat("Outer Actual Loops", 0.0, 0, es);
+		}
+	}
+
+	/*
+	 * Logic copied from show_buffer_usage()
+	 */
+	if (es->buffers)
+	{
+		BufferUsage *usage = &gts->outer_instrument.bufusage;
+
+		if (es->format == EXPLAIN_FORMAT_TEXT)
+		{
+			bool	has_shared = (usage->shared_blks_hit > 0 ||
+								  usage->shared_blks_read > 0 ||
+								  usage->shared_blks_dirtied > 0 ||
+								  usage->shared_blks_written > 0);
+			bool	has_local = (usage->local_blks_hit > 0 ||
+								 usage->local_blks_read > 0 ||
+								 usage->local_blks_dirtied > 0 ||
+							   	 usage->local_blks_written > 0);
+			bool	has_temp = (usage->temp_blks_read > 0 ||
+								usage->temp_blks_written > 0);
+			bool	has_timing = (!INSTR_TIME_IS_ZERO(usage->blk_read_time) ||
+								  !INSTR_TIME_IS_ZERO(usage->blk_write_time));
+
+			/* Show only positive counter values. */
+			if (has_shared || has_local || has_temp)
+			{
+				appendStringInfoChar(&str, '\n');
+				appendStringInfoSpaces(&str, es->indent * 2 + 12);
+				appendStringInfoString(&str, "buffers:");
+
+				if (has_shared)
+				{
+					appendStringInfoString(&str, " shared");
+					if (usage->shared_blks_hit > 0)
+						appendStringInfo(&str, " hit=%ld",
+										 usage->shared_blks_hit);
+					if (usage->shared_blks_read > 0)
+						appendStringInfo(&str, " read=%ld",
+										 usage->shared_blks_read);
+					if (usage->shared_blks_dirtied > 0)
+						appendStringInfo(&str, " dirtied=%ld",
+										 usage->shared_blks_dirtied);
+					if (usage->shared_blks_written > 0)
+						appendStringInfo(&str, " written=%ld",
+										 usage->shared_blks_written);
+					if (has_local || has_temp)
+						appendStringInfoChar(&str, ',');
+				}
+				if (has_local)
+				{
+					appendStringInfoString(&str, " local");
+					if (usage->local_blks_hit > 0)
+						appendStringInfo(&str, " hit=%ld",
+										 usage->local_blks_hit);
+					if (usage->local_blks_read > 0)
+						appendStringInfo(&str, " read=%ld",
+										 usage->local_blks_read);
+					if (usage->local_blks_dirtied > 0)
+						appendStringInfo(&str, " dirtied=%ld",
+										 usage->local_blks_dirtied);
+					if (usage->local_blks_written > 0)
+						appendStringInfo(&str, " written=%ld",
+										 usage->local_blks_written);
+					if (has_temp)
+						appendStringInfoChar(&str, ',');
+				}
+				if (has_temp)
+				{
+					appendStringInfoString(&str, " temp");
+					if (usage->temp_blks_read > 0)
+						appendStringInfo(&str, " read=%ld",
+										 usage->temp_blks_read);
+					if (usage->temp_blks_written > 0)
+						appendStringInfo(&str, " written=%ld",
+										 usage->temp_blks_written);
+				}
+			}
+
+			/* As above, show only positive counter values. */
+			if (has_timing)
+			{
+				if (has_shared || has_local || has_temp)
+					appendStringInfo(&str, ", ");
+				appendStringInfoString(&str, "I/O Timings:");
+				if (!INSTR_TIME_IS_ZERO(usage->blk_read_time))
+					appendStringInfo(&str, " read=%0.3f",
+							INSTR_TIME_GET_MILLISEC(usage->blk_read_time));
+				if (!INSTR_TIME_IS_ZERO(usage->blk_write_time))
+					appendStringInfo(&str, " write=%0.3f",
+							INSTR_TIME_GET_MILLISEC(usage->blk_write_time));
+			}
+		}
+		else
+		{
+			double		time_value;
+			ExplainPropertyLong("Outer Shared Hit Blocks",
+								usage->shared_blks_hit, es);
+			ExplainPropertyLong("Outer Shared Read Blocks",
+								usage->shared_blks_read, es);
+			ExplainPropertyLong("Outer Shared Dirtied Blocks",
+								usage->shared_blks_dirtied, es);
+			ExplainPropertyLong("Outer Shared Written Blocks",
+								usage->shared_blks_written, es);
+			ExplainPropertyLong("Outer Local Hit Blocks",
+								usage->local_blks_hit, es);
+			ExplainPropertyLong("Outer Local Read Blocks",
+								usage->local_blks_read, es);
+			ExplainPropertyLong("Outer Local Dirtied Blocks",
+								usage->local_blks_dirtied, es);
+			ExplainPropertyLong("Outer Local Written Blocks",
+								usage->local_blks_written, es);
+			ExplainPropertyLong("Outer Temp Read Blocks",
+								usage->temp_blks_read, es);
+			ExplainPropertyLong("Outer Temp Written Blocks",
+								usage->temp_blks_written, es);
+			time_value = INSTR_TIME_GET_MILLISEC(usage->blk_read_time);
+			ExplainPropertyFloat("Outer I/O Read Time", time_value, 3, es);
+			time_value = INSTR_TIME_GET_MILLISEC(usage->blk_write_time);
+			ExplainPropertyFloat("Outer I/O Write Time", time_value, 3, es);
+		}
+	}
+
+	if (es->format == EXPLAIN_FORMAT_TEXT)
+		ExplainPropertyText("Outer Scan", str.data, es);
+}
+
+#if 0
+void
+show_scan_qual(List *qual, const char *qlabel,
+               PlanState *planstate, List *ancestors,
+               ExplainState *es)
+{
+	bool        useprefix;
+	Node	   *node;
+	List       *context;
+	char       *exprstr;
+
+	useprefix = (IsA(planstate->plan, SubqueryScan) || es->verbose);
+
+	/* No work if empty qual */
+	if (qual == NIL)
+		return;
+
+	/* Convert AND list to explicit AND */
+	node = (Node *) make_ands_explicit(qual);
+
+	/* Set up deparsing context */
+	context = set_deparse_context_planstate(es->deparse_cxt,
+											(Node *) planstate,
+											ancestors);
+	/* Deparse the expression */
+	exprstr = deparse_expression(node, context, useprefix, false);
+
+	/* And add to es->str */
+	ExplainPropertyText(qlabel, exprstr, es);
+}
+#endif
+#if 0
+/*
+ * If it's EXPLAIN ANALYZE, show instrumentation information for a plan node
+ *
+ * "which" identifies which instrumentation counter to print
+ */
+void
+show_instrumentation_count(const char *qlabel, int which,
+						   PlanState *planstate, ExplainState *es)
+{
+	double		nfiltered;
+	double		nloops;
+
+	if (!es->analyze || !planstate->instrument)
+		return;
+
+	if (which == 2)
+		nfiltered = planstate->instrument->nfiltered2;
+	else
+		nfiltered = planstate->instrument->nfiltered1;
+	nloops = planstate->instrument->nloops;
+
+	/* In text mode, suppress zero counts; they're not interesting enough */
+	if (nfiltered > 0 || es->format != EXPLAIN_FORMAT_TEXT)
+	{
+		if (nloops > 0)
+			ExplainPropertyFloat(qlabel, nfiltered / nloops, 0, es);
+		else
+			ExplainPropertyFloat(qlabel, 0.0, 0, es);
+	}
+}
+#endif
+
+/*
+ * pgstrom_explain_perfmon - common routine to explain performance info
+ */
+static void
+pgstrom_explain_perfmon(GpuTaskState_v2 *gts, ExplainState *es)
+{
+	pgstrom_perfmon	   *pfm = &gts->pfm;
+	char				buf[1024];
+
+	if (!pfm->enabled)
+		return;
+
+	/* common performance statistics */
+	ExplainPropertyInteger("Number of tasks", pfm->num_tasks, es);
+
+#define EXPLAIN_KERNEL_PERFMON(label,num_field,tv_field)		\
+	do {														\
+		if (pfm->num_field > 0)									\
+		{														\
+			snprintf(buf, sizeof(buf),							\
+					 "total: %s, avg: %s, count: %u",			\
+					 format_millisec(pfm->tv_field),			\
+					 format_millisec(pfm->tv_field /			\
+									 (double)pfm->num_field),	\
+					 pfm->num_field);							\
+			ExplainPropertyText(label, buf, es);				\
+		}														\
+	} while(0)
+
+	switch (pfm->task_kind)
+	{
+		case GpuTaskKind_GpuScan:
+			EXPLAIN_KERNEL_PERFMON("gpuscan_exec_quals",
+								   gscan.num_kern_exec_quals,
+								   gscan.tv_kern_exec_quals);
+			EXPLAIN_KERNEL_PERFMON("gpuscan_projection",
+								   gscan.num_kern_projection,
+								   gscan.tv_kern_projection);
+			break;
+
+		case GpuTaskKind_GpuJoin:
+			EXPLAIN_KERNEL_PERFMON("gpujoin_main()",
+								   gjoin.num_kern_main,
+								   gjoin.tv_kern_main);
+			EXPLAIN_KERNEL_PERFMON(" - gpujoin_exec_outerscan",
+								   gjoin.num_kern_outer_scan,
+								   gjoin.tv_kern_outer_scan);
+			EXPLAIN_KERNEL_PERFMON(" - gpujoin_exec_nestloop",
+								   gjoin.num_kern_exec_nestloop,
+								   gjoin.tv_kern_exec_nestloop);
+			EXPLAIN_KERNEL_PERFMON(" - gpujoin_exec_hashjoin",
+								   gjoin.num_kern_exec_hashjoin,
+								   gjoin.tv_kern_exec_hashjoin);
+			EXPLAIN_KERNEL_PERFMON(" - gpujoin_outer_nestloop",
+								   gjoin.num_kern_outer_nestloop,
+								   gjoin.tv_kern_outer_nestloop);
+			EXPLAIN_KERNEL_PERFMON(" - gpujoin_outer_hashjoin",
+								   gjoin.num_kern_outer_hashjoin,
+								   gjoin.tv_kern_outer_hashjoin);
+			EXPLAIN_KERNEL_PERFMON(" - gpujoin_projection",
+								   gjoin.num_kern_projection,
+								   gjoin.tv_kern_projection);
+			EXPLAIN_KERNEL_PERFMON(" - gpujoin_count_rows_dist",
+								   gjoin.num_kern_rows_dist,
+								   gjoin.tv_kern_rows_dist);
+			if (pfm->gjoin.num_global_retry > 0 ||
+				pfm->gjoin.num_major_retry > 0 ||
+				pfm->gjoin.num_minor_retry > 0)
+			{
+				snprintf(buf, sizeof(buf), "global: %u, major: %u, minor: %u",
+						 pfm->gjoin.num_global_retry,
+						 pfm->gjoin.num_major_retry,
+						 pfm->gjoin.num_minor_retry);
+				ExplainPropertyText("Retry Loops", buf, es);
+			}
+			break;
+
+		case GpuTaskKind_GpuPreAgg:
+			EXPLAIN_KERNEL_PERFMON("gpupreagg_main()",
+								   gpreagg.num_kern_main,
+								   gpreagg.tv_kern_main);
+			EXPLAIN_KERNEL_PERFMON(" - gpupreagg_preparation()",
+								   gpreagg.num_kern_prep,
+								   gpreagg.tv_kern_prep);
+			EXPLAIN_KERNEL_PERFMON(" - gpupreagg_nogroup_reduction()",
+								   gpreagg.num_kern_nogrp,
+								   gpreagg.tv_kern_nogrp);
+			EXPLAIN_KERNEL_PERFMON(" - gpupreagg_local_reduction()",
+								   gpreagg.num_kern_lagg,
+								   gpreagg.tv_kern_lagg);
+			EXPLAIN_KERNEL_PERFMON(" - gpupreagg_global_reduction()",
+								   gpreagg.num_kern_gagg,
+								   gpreagg.tv_kern_gagg);
+			EXPLAIN_KERNEL_PERFMON(" - gpupreagg_final_reduction()",
+								   gpreagg.num_kern_fagg,
+								   gpreagg.tv_kern_fagg);
+			EXPLAIN_KERNEL_PERFMON(" - gpupreagg_fixup_varlena()",
+								   gpreagg.num_kern_fixvar,
+								   gpreagg.tv_kern_fixvar);
+			break;
+
+		case GpuTaskKind_GpuSort:
+			EXPLAIN_KERNEL_PERFMON("gpusort_projection()",
+								   gsort.num_kern_proj,
+								   gsort.tv_kern_proj);
+			EXPLAIN_KERNEL_PERFMON("gpusort_main()",
+								   gsort.num_kern_main,
+								   gsort.tv_kern_main);
+			EXPLAIN_KERNEL_PERFMON(" - gpusort_bitonic_local()",
+								   gsort.num_kern_lsort,
+								   gsort.tv_kern_lsort);
+			EXPLAIN_KERNEL_PERFMON(" - gpusort_bitonic_step()",
+								   gsort.num_kern_ssort,
+								   gsort.tv_kern_ssort);
+			EXPLAIN_KERNEL_PERFMON(" - gpusort_bitonic_merge()",
+								   gsort.num_kern_msort,
+								   gsort.tv_kern_msort);
+			EXPLAIN_KERNEL_PERFMON(" - gpusort_fixup_pointers()",
+								   gsort.num_kern_fixvar,
+								   gsort.tv_kern_fixvar);
+			snprintf(buf, sizeof(buf), "total: %s",
+					 format_millisec(pfm->gsort.tv_cpu_sort));
+			ExplainPropertyText("CPU merge sort", buf, es);
+			break;
+
+		default:
+			elog(ERROR, "unexpected GpuTaskKind: %d", (int)pfm->task_kind);
+			break;
+	}
+#undef EXPLAIN_KERNEL_PERFMON
+
+	/* Time of I/O stuff */
+	if (pfm->task_kind == GpuTaskKind_GpuJoin)
+	{
+		snprintf(buf, sizeof(buf), "%s",
+				 format_millisec(pfm->time_inner_load));
+		ExplainPropertyText("Time of inner load", buf, es);
+		snprintf(buf, sizeof(buf), "%s",
+				 format_millisec(pfm->time_outer_load));
+		ExplainPropertyText("Time of outer load", buf, es);
+	}
+	else
+	{
+		snprintf(buf, sizeof(buf), "%s",
+				 format_millisec(pfm->time_outer_load));
+		ExplainPropertyText("Time of load", buf, es);
+	}
+
+	snprintf(buf, sizeof(buf), "%s",
+			 format_millisec(pfm->time_materialize));
+	ExplainPropertyText("Time of materialize", buf, es);
+
+	/* DMA Send/Recv performance */
+	if (pfm->num_dma_send > 0)
+	{
+		Size	band = (Size)((double)pfm->bytes_dma_send *
+							  1000.0 / pfm->time_dma_send);
+		snprintf(buf, sizeof(buf),
+				 "%s/sec, len: %s, time: %s, count: %u",
+				 format_bytesz(band),
+				 format_bytesz((double)pfm->bytes_dma_send),
+				 format_millisec(pfm->time_dma_send),
+				 pfm->num_dma_send);
+		ExplainPropertyText("DMA send", buf, es);
+	}
+
+	if (pfm->num_dma_recv > 0)
+	{
+		Size	band = (Size)((double)pfm->bytes_dma_recv *
+							  1000.0 / pfm->time_dma_recv);
+		snprintf(buf, sizeof(buf),
+				 "%s/sec, len: %s, time: %s, count: %u",
+				 format_bytesz(band),
+				 format_bytesz((double)pfm->bytes_dma_recv),
+				 format_millisec(pfm->time_dma_recv),
+				 pfm->num_dma_recv);
+		ExplainPropertyText("DMA recv", buf, es);
+	}
+
+	/* Time to build CUDA code */
+	if (pfm->tv_build_start.tv_sec > 0 &&
+		pfm->tv_build_end.tv_sec > 0 &&
+		(pfm->tv_build_start.tv_sec < pfm->tv_build_end.tv_sec ||
+		 (pfm->tv_build_start.tv_sec == pfm->tv_build_end.tv_sec &&
+		  pfm->tv_build_start.tv_usec < pfm->tv_build_end.tv_usec)))
+	{
+		cl_double	tv_cuda_build = PERFMON_TIMEVAL_DIFF(pfm->tv_build_start,
+														 pfm->tv_build_end);
+		snprintf(buf, sizeof(buf), "%s", format_millisec(tv_cuda_build));
+		ExplainPropertyText("Build CUDA Program", buf, es);
+	}
+
+	/* Host/Device Memory Allocation (only prime node) */
+	if (pfm->prime_in_gpucontext)
+	{
+		GpuContext_v2  *gcontext = gts->gcontext;
+		SharedGpuContext *shgcon = gcontext->shgcon;
+		cl_uint		num_dmabuf_alloc  = shgcon->num_dmabuf_alloc;
+		cl_uint		num_dmabuf_free   = shgcon->num_dmabuf_free;
+		cl_uint		num_gpumem_alloc  = shgcon->num_gpumem_alloc;
+		cl_uint		num_gpumem_free   = shgcon->num_gpumem_free;
+		cl_double	time_dmabuf_alloc = shgcon->time_dmabuf_alloc;
+		cl_double	time_dmabuf_free  = shgcon->time_dmabuf_free;
+		cl_double	time_gpumem_alloc = shgcon->time_gpumem_alloc;
+		cl_double	time_gpumem_free  = shgcon->time_gpumem_free;
+
+		snprintf(buf, sizeof(buf),
+				 "alloc (count: %u, time: %s), free (count: %u, time: %s)",
+				 num_dmabuf_alloc, format_millisec(time_dmabuf_alloc),
+				 num_dmabuf_free, format_millisec(time_dmabuf_free));
+		ExplainPropertyText("DMA Buffer", buf, es);
+
+		snprintf(buf, sizeof(buf),
+				 "alloc (count: %u, time: %s), free (count: %u, time: %s)",
+				 num_gpumem_alloc, format_millisec(time_gpumem_alloc),
+				 num_gpumem_free, format_millisec(time_gpumem_free));
+		ExplainPropertyText("GPU Memory", buf, es);
+	}
+}
+
+
+
+
+
+
 
 /*
  * pgstrom_init_gputasks

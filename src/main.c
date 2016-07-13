@@ -42,7 +42,7 @@ PG_MODULE_MAGIC;
  */
 bool		pgstrom_enabled;
 bool		pgstrom_perfmon_enabled;
-static bool	pgstrom_debug_kernel_source;
+bool		pgstrom_debug_kernel_source;
 bool		pgstrom_bulkexec_enabled;
 bool		pgstrom_cpu_fallback_enabled;
 int			pgstrom_max_async_tasks;
@@ -301,7 +301,8 @@ copyPathNode(const Path *pathnode)
 	return newnode;
 }
 
-
+#if 1
+// legacy interface
 /* ------------------------------------------------------------
  *
  * Misc routines to support EXPLAIN command
@@ -818,8 +819,8 @@ pgstrom_explain_perfmon(GpuTaskState *gts, ExplainState *es)
 		 (pfm->tv_build_start.tv_sec == pfm->tv_build_end.tv_sec &&
 		  pfm->tv_build_start.tv_usec < pfm->tv_build_end.tv_usec)))
 	{
-		cl_double	tv_cuda_build = PFMON_TIMEVAL_DIFF(&pfm->tv_build_start,
-													   &pfm->tv_build_end);
+		cl_double	tv_cuda_build = PERFMON_TIMEVAL_DIFF(pfm->tv_build_start,
+														 pfm->tv_build_end);
 		snprintf(buf, sizeof(buf), "%s", format_millisec(tv_cuda_build));
 		ExplainPropertyText("Build CUDA Program", buf, es);
 	}
@@ -907,3 +908,4 @@ pgstrom_explain_gputaskstate(GpuTaskState *gts, ExplainState *es)
 	if (es->analyze && gts->pfm.enabled)
 		pgstrom_explain_perfmon(gts, es);
 }
+#endif

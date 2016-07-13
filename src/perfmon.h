@@ -24,7 +24,8 @@
 typedef struct {
 	cl_bool		enabled;
 	cl_bool		prime_in_gpucontext;
-	cl_uint		extra_flags;	/* one of DEVKERNEL_NEEDS_GPUXXXX */
+	GpuTaskKind	task_kind;
+	cl_uint		extra_flags;	/* deprecated */
 	/*-- memory allocation counter --*/
 	cl_uint		num_host_malloc;
 	cl_uint		num_host_mfree;
@@ -141,6 +142,66 @@ typedef struct {
 		}										\
 	} while(0)
 
+#define PERFMON_EVENT_RECORD(node,ev_field,cuda_stream)			\
+	do {														\
+		if (((GpuTask_v2 *)(node))->perfmon)					\
+		{														\
+			CUresult __rc = cuEventRecord((node)->ev_field,		\
+										  cuda_stream);			\
+			if (__rc != CUDA_SUCCESS)							\
+				elog(ERROR, "failed on cuEventRecord: %s",		\
+					 errorText(__rc));							\
+		}														\
+	} while(0)
+
+#define PFMON_EVENT_CREATE(node,ev_field)						\
+	do {														\
+		if (((GpuTask_v2 *)(node))->perfmon)					\
+		{														\
+			CUresult	__rc = cuEventCreate(&(node)->ev_field,	\
+											 CU_EVENT_DEFAULT);	\
+			if (__rc != CUDA_SUCCESS)							\
+				elog(ERROR, "failed on cuEventCreate: %s",		\
+					 errorText(__rc));							\
+		}														\
+	} while(0)
+
+#define PERFMON_EVENT_DESTROY(node,ev_field)					\
+	do {														\
+		if ((node)->ev_field)									\
+		{														\
+			CUresult __rc = cuEventDestroy((node)->ev_field);	\
+			if (__rc != CUDA_SUCCESS)                           \
+				elog(WARNING, "failed on cuEventDestroy: %s",   \
+					 errorText(__rc));                          \
+			(node)->ev_field = NULL;                            \
+		}														\
+	} while(0)
+
+#define PERFMON_EVENT_ELAPSED(node,tv_field,ev_start,ev_stop)	\
+	do {														\
+		CUresult	__rc;										\
+		float		__elapsed;									\
+																\
+		if ((node)->ev_start && (node)->ev_stop)				\
+		{														\
+			__rc = cuEventElapsedTime(&__elapsed,				\
+									  (node)->ev_start,			\
+									  (node)->ev_stop);			\
+			if (__rc == CUDA_SUCCESS)							\
+				(node)->tv_field += __elapsed;					\
+			else												\
+			{													\
+				elog(WARNING, "failed on cuEventElapsedTime: %s", \
+					 errorText(__rc));							\
+				((GpuTask_v2 *)(node))->perfmon = false;		\
+			}													\
+		}														\
+	} while(0)
+
+
+#if 1
+
 #define CUDA_EVENT_RECORD(node,ev_field)						\
 	do {														\
 		if (((GpuTask *)(node))->gts->pfm.enabled)				\
@@ -177,6 +238,7 @@ typedef struct {
 		}														\
 	} while(0)
 
+
 #define CUDA_EVENT_ELAPSED(node,pfm_field,ev_start,ev_stop,bailout) \
 	do {														\
 		CUresult	__rc;										\
@@ -188,18 +250,21 @@ typedef struct {
 									  (ev_start),				\
 									  (ev_stop));				\
 			if (__rc != CUDA_SUCCESS)							\
-			{													\
+			{														\
 				elog(WARNING, "failed on cuEventElapsedTime: %s",	\
-					 errorText(__rc));							\
-				goto bailout;									\
-			}													\
+					 errorText(__rc));								\
+				goto bailout;										\
+			}														\
 			((GpuTask *)(node))->gts->pfm.pfm_field += __elapsed;	\
-		}														\
+		}															\
 	} while(0)
 
-#define PFMON_TIMEVAL_DIFF(tv1,tv2)								\
-	((cl_double)(((tv2)->tv_sec * 1000000 + (tv2)->tv_usec) -	\
-				 ((tv1)->tv_sec * 1000000 + (tv1)->tv_usec)) / 1000000.0)
+#endif
+
+#define PERFMON_TIMEVAL_DIFF(TV1,TV2)							\
+		((cl_double)((TV2.tv_sec * 1000000 + TV2.tv_usec) -		\
+					 (TV1.tv_sec * 1000000 + TV1.tv_usec)) / 1000000.0)
+
 
 #define PFMON_ADD_TIMEVAL(tv_sum,tv1,tv2)						\
 	do {														\
