@@ -1627,6 +1627,7 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 
 	/* activate a GpuContext for CUDA kernel execution */
 	gcontext = GetGpuContext(with_connection);
+
 	/* setup common GpuTaskState fields */
 	pgstromInitGpuTaskState(&gss->gts,
 							gcontext,
@@ -1902,6 +1903,7 @@ gpuscan_create_task(GpuScanState *gss, pgstrom_data_store *pds_src)
 	gscan = dmaBufferAlloc(gcontext, length);
 	memset(gscan, 0, offsetof(GpuScanTask, kern));
 	pgstromInitGpuTask(&gss->gts, &gscan->task);
+	gscan->dev_projection = gss->dev_projection;
 	gscan->pds_src = pds_src;
 	gscan->pds_dst = pds_dst;
 

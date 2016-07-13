@@ -177,7 +177,6 @@ put_cuda_program_entry_nolock(program_cache_entry *entry)
 		Assert(!entry->hash_chain.next && !entry->hash_chain.prev);
 		Assert(!entry->lru_chain.next && !entry->lru_chain.prev);
 		pgcache_head->program_cache_usage -= dmaBufferChunkSize(entry);
-		elog(INFO, "dmaBufferFree(%zu)", dmaBufferSize(entry));
 		if (entry->bin_image != NULL &&
 			entry->bin_image != CUDA_PROGRAM_BUILD_FAILURE)
 			dmaBufferFree(entry->bin_image);
@@ -895,7 +894,6 @@ pgstrom_create_cuda_program(GpuContext_v2 *gcontext,
 		usage = 0;
 
 		entry = dmaBufferAlloc(MasterGpuContext(), required);
-		elog(INFO, "%d: dmaBufferAlloc(%zu)", __LINE__, required);
 
 		/* find out a unique program_id */
 	retry_program_id:

@@ -72,7 +72,7 @@ resource_tracker_alloc(void)
 	ResourceTracker	   *restrack;
 
 	if (dlist_is_empty(&inactiveResourceTracker))
-		return MemoryContextAllocZero(CacheMemoryContext,
+		return MemoryContextAllocZero(TopMemoryContext,
 									  sizeof(ResourceTracker));
 
 	restrack = dlist_container(ResourceTracker, chain,
@@ -138,6 +138,7 @@ closeFileDesc(GpuContext_v2 *gcontext, int fdesc)
 			memset(tracker, 0, sizeof(ResourceTracker));
 			dlist_push_head(&inactiveResourceTracker,
 							&tracker->chain);
+			elog(INFO, "fdesc=%d closed", fdesc);
 			return close(fdesc);
 		}
 	}
@@ -263,7 +264,31 @@ trackCudaProgram(GpuContext_v2 *gcontext, ProgramId program_id)
 void
 untrackCudaProgram(GpuContext_v2 *gcontext, ProgramId program_id)
 {
-	pgstrom_put_cuda_program(NULL, program_id);
+	pg_crc32	crc;
+	cl_int		index;
+	dlist_iter	iter;
+
+	crc = resource_tracker_hashval(RESTRACK_CLASS__GPUPROGRAM,
+								   &program_id, sizeof(ProgramId));
+	index = crc % RESTRACK_HASHSIZE;
+
+	dlist_foreach(iter, &gcontext->restrack[index])
+	{
+		ResourceTracker *tracker
+			= dlist_container(ResourceTracker, chain, iter.cur);
+
+		if (tracker->crc == crc &&
+			tracker->resclass == RESTRACK_CLASS__GPUPROGRAM &&
+			tracker->u.program_id == program_id)
+		{
+			dlist_delete(&tracker->chain);
+			memset(tracker, 0, sizeof(ResourceTracker));
+			dlist_push_head(&inactiveResourceTracker,
+							&tracker->chain);
+			return;
+		}
+	}
+	elog(WARNING, "Bug? CUDA Program %lu was not tracked", program_id);
 }
 
 /*
@@ -271,7 +296,7 @@ untrackCudaProgram(GpuContext_v2 *gcontext, ProgramId program_id)
  * the resource tracker of GpuContext
  */
 static void
-ReleaseLocalResources(GpuContext_v2 *gcontext)
+ReleaseLocalResources(GpuContext_v2 *gcontext, bool normal_exit)
 {
 	ResourceTracker *tracker;
 	dlist_node		*dnode;
@@ -296,19 +321,31 @@ ReleaseLocalResources(GpuContext_v2 *gcontext)
 			switch (tracker->resclass)
 			{
 				case RESTRACK_CLASS__FILEDESC:
+					if (normal_exit)
+						elog(WARNING, "file-descriotor %d is likely leaked",
+							 tracker->u.fdesc);
+
 					if (close(tracker->u.fdesc) != 0)
 						elog(WARNING, "failed on close(%d): %m",
 							 tracker->u.fdesc);
 					break;
 
 				case RESTRACK_CLASS__GPUMEMORY:
+					if (normal_exit)
+						elog(WARNING, "GPU memory %p likely leaked",
+							 (void *)tracker->u.devptr);
+
 					rc = cuMemFree(tracker->u.devptr);
 					if (rc != CUDA_SUCCESS)
 						elog(WARNING, "failed on cuMemFree(%p): %s",
 							 (void *)tracker->u.devptr, errorText(rc));
 					break;
 				case RESTRACK_CLASS__GPUPROGRAM:
-					untrackCudaProgram(NULL, tracker->u.program_id);
+					if (normal_exit)
+						elog(WARNING, "CUDA Program ID=%lu is likely leaked",
+							 tracker->u.program_id);
+
+					pgstrom_put_cuda_program(NULL, tracker->u.program_id);
 					break;
 				default:
 					elog(WARNING, "Bug? unknown resource tracker class: %d",
@@ -379,7 +416,7 @@ GetGpuContext(bool with_connection)
 	if (dlist_is_empty(&inactiveGpuContextList))
 	{
 		Size	len = offsetof(GpuContext_v2, restrack[RESTRACK_HASHSIZE]);
-		gcontext = MemoryContextAllocZero(CacheMemoryContext, len);
+		gcontext = MemoryContextAllocZero(TopMemoryContext, len);
 	}
 	else
 	{
@@ -472,7 +509,7 @@ AttachGpuContext(pgsocket sockfd,
 	if (dlist_is_empty(&inactiveGpuContextList))
 	{
 		Size	len = offsetof(GpuContext_v2, restrack[RESTRACK_HASHSIZE]);
-		gcontext = MemoryContextAllocZero(CacheMemoryContext, len);
+		gcontext = MemoryContextAllocZero(TopMemoryContext, len);
 	}
 	else
 	{
@@ -549,12 +586,11 @@ PutSharedGpuContext(SharedGpuContext *shgcon)
 void
 PutGpuContext(GpuContext_v2 *gcontext)
 {
-	Assert(!IsGpuServerProcess());
 	Assert(gcontext->refcnt > 0);
 	if (--gcontext->refcnt == 0)
 	{
 		dlist_delete(&gcontext->chain);
-		ReleaseLocalResources(gcontext);
+		ReleaseLocalResources(gcontext, true);
 		PutSharedGpuContext(gcontext->shgcon);
 		memset(gcontext, 0, sizeof(GpuContext_v2));
 		dlist_push_head(&inactiveGpuContextList, &gcontext->chain);
@@ -586,7 +622,7 @@ gpucontext_cleanup_callback(ResourceReleasePhase phase,
 						gcontext->refcnt);
 
 				dlist_delete(&gcontext->chain);
-				ReleaseLocalResources(gcontext);
+				ReleaseLocalResources(gcontext, isCommit);
 				PutSharedGpuContext(gcontext->shgcon);
 				memset(gcontext, 0, sizeof(GpuContext_v2));
 				dlist_push_head(&inactiveGpuContextList,

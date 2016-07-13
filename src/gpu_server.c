@@ -283,7 +283,7 @@ gpuservProcessPendingTasks(void)
 	GpuTask_v2	   *gtask;
 
 	SpinLockAcquire(&session_tasks_lock);
-	while (dlist_is_empty(&session_pending_tasks))
+	while (!dlist_is_empty(&session_pending_tasks))
 	{
 		CUmodule	cuda_module;
 		CUstream	cuda_stream;
@@ -310,9 +310,16 @@ gpuservProcessPendingTasks(void)
 			}
 			else
 			{
-				rc = cuStreamCreate(&cuda_stream, CU_STREAM_DEFAULT);
-				if (rc != CUDA_SUCCESS)
-					elog(ERROR, "failed on cuStreamCreate: %s", errorText(rc));
+				if (gtask->cuda_stream)
+					cuda_stream = gtask->cuda_stream;
+				else
+				{
+					rc = cuStreamCreate(&cuda_stream, CU_STREAM_DEFAULT);
+					if (rc != CUDA_SUCCESS)
+						elog(ERROR, "failed on cuStreamCreate: %s",
+							 errorText(rc));
+				}
+				gtask->cuda_stream = cuda_stream;
 
 				/*
 				 * pgstromProcessGpuTask() returns the following status:
@@ -385,9 +392,9 @@ gpuservFlushOutCompletedTasks(void)
 	CUresult		rc;
 
 	SpinLockAcquire(&session_tasks_lock);
-	while (dlist_is_empty(&session_completed_tasks))
+	while (!dlist_is_empty(&session_completed_tasks))
 	{
-		dnode = dlist_pop_head_node(&session_pending_tasks);
+		dnode = dlist_pop_head_node(&session_completed_tasks);
 		gtask = dlist_container(GpuTask_v2, chain, dnode);
 		memset(&gtask->chain, 0, sizeof(dlist_node));
 		SpinLockRelease(&session_tasks_lock);
@@ -410,6 +417,7 @@ gpuservFlushOutCompletedTasks(void)
 			rc = cuStreamDestroy(gtask->cuda_stream);
 			if (rc != CUDA_SUCCESS)
 				elog(WARNING, "failed on cuStreamDestroy: %s", errorText(rc));
+			gtask->cuda_stream = NULL;
 
 			if (retval == 0)
 			{
@@ -547,7 +555,7 @@ gpuservSendCommand(GpuContext_v2 *gcontext, GpuServCommand *cmd, long timeout)
 	struct msghdr	msg;
 	struct iovec	iov;
 	unsigned char	cmsgbuf[CMSG_SPACE(sizeof(int))];
-	int				retval;
+	ssize_t			retval;
 	int				ev;
 
 	memset(&msg, 0, sizeof(struct msghdr));
@@ -560,7 +568,7 @@ gpuservSendCommand(GpuContext_v2 *gcontext, GpuServCommand *cmd, long timeout)
 
 		Assert(dmaBufferValidatePtr(gtask));
 		/* Is the file-descriptor attached on the message? */
-		if (!IsGpuServerProcess() && gtask->file_desc)
+		if (!IsGpuServerProcess() && gtask->file_desc >= 0)
 		{
 			struct cmsghdr *cmsg;
 
@@ -584,6 +592,7 @@ gpuservSendCommand(GpuContext_v2 *gcontext, GpuServCommand *cmd, long timeout)
 		iov.iov_len = (offsetof(GpuServCommand, u.error.buffer_inline) +
 					   cmd->u.error.buffer_usage);
 		Assert(iov.iov_len < sizeof(GpuServCommand));
+		Assert(IsGpuServerProcess());
 	}
 	else
 		elog(ERROR, "Bug? unexpected GPUSERV_CMD_* tag: %d", cmd->command);
@@ -609,6 +618,9 @@ gpuservSendCommand(GpuContext_v2 *gcontext, GpuServCommand *cmd, long timeout)
 		elog(ERROR, "failed on sendmsg(2): %m");
 	else if (retval == 0)
 		elog(ERROR, "no bytes sent using sendmsg(2): %m");
+	else if (retval != iov.iov_len)
+		elog(ERROR, "incorrect size of message sent: %zu but %zu expected",
+			 retval, iov.iov_len);
 
 	return true;
 }
@@ -737,17 +749,16 @@ gpuservRecvCommand(pgsocket sockfd, GpuServCommand *cmd, long timeout)
 		}
 		else
 		{
-			if (msg.msg_iovlen != 0 ||
-				iov.iov_len < offsetof(GpuServCommand, u))
-				elog(ERROR, "Bug? unexpected message format msg_iovlen=%zu iov_len=%zu", msg.msg_iovlen, iov.iov_len);
+			if (retval < offsetof(GpuServCommand, u))
+				elog(ERROR, "Bug? unexpected message format");
 
 			cmd->command = __cmd.command;
 			if (__cmd.command == GPUSERV_CMD_TASK)
 			{
 				GpuTask_v2 *gtask;
 
-				if (iov.iov_len != (offsetof(GpuServCommand, u) +
-									sizeof(__cmd.u.task)))
+				if (retval != (offsetof(GpuServCommand, u) +
+							   sizeof(__cmd.u.task)))
 					elog(ERROR, "GPUSERV_CMD_TASK has unexpected format");
 
 				gtask = __cmd.u.task.gtask;
@@ -759,12 +770,13 @@ gpuservRecvCommand(pgsocket sockfd, GpuServCommand *cmd, long timeout)
 					Assert(gtask->file_desc >= 0);
 					gtask->peer_fdesc = peer_fdesc;
 				}
+				Assert(!gtask->cuda_stream);
 				cmd->u.task.gtask = gtask;
 			}
 			else if (__cmd.command == GPUSERV_CMD_OPEN)
 			{
-				if (iov.iov_len != (offsetof(GpuServCommand, u) +
-									sizeof(__cmd.u.open)))
+				if (retval != (offsetof(GpuServCommand, u) +
+							   sizeof(__cmd.u.open)))
 					elog(ERROR, "GPUSERV_CMD_OPEN has unexpected format");
 
 				if (peer_fdesc >= 0)
@@ -783,8 +795,8 @@ gpuservRecvCommand(pgsocket sockfd, GpuServCommand *cmd, long timeout)
 				const char *message;
 				const char *buf;
 
-				if (iov.iov_len != offsetof(GpuServCommand,
-											u.error.buffer_inline))
+				if (retval != offsetof(GpuServCommand,
+									   u.error.buffer_inline))
 					elog(ERROR, "GPUSERV_CMD_ERROR has unexpected format");
 
 				if (peer_fdesc >= 0)
@@ -798,9 +810,9 @@ gpuservRecvCommand(pgsocket sockfd, GpuServCommand *cmd, long timeout)
 				else
 				{
 					buf = __cmd.u.error.buffer_external;
-					if (iov.iov_len < (offsetof(GpuServCommand,
-												u.error.buffer_inline) +
-									   __cmd.u.error.buffer_usage))
+					if (retval < (offsetof(GpuServCommand,
+										   u.error.buffer_inline) +
+								  __cmd.u.error.buffer_usage))
 						elog(ERROR, "Message of GPUSERV_CMD_ERROR is missing");
 				}
 				filename = buf + __cmd.u.error.filename_offset;
@@ -1036,7 +1048,7 @@ gpuservOpenConnection(GpuContext_v2 *gcontext)
 	PG_CATCH();
 	{
 		/* close the socket if opened */
-		if (sockfd >= 0)
+	   	if (sockfd >= 0)
 			close(sockfd);
 		/* revert the number of pending clients */
 		SpinLockAcquire(&gpuServState->lock);

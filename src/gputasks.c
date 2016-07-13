@@ -275,6 +275,8 @@ fetch_next_gputask(GpuTaskState_v2 *gts)
 	}
 
 retry_scan:
+	CHECK_FOR_INTERRUPTS();
+
 	/*
 	 * Fetch all the tasks already processed by the server side, if any.
 	 * It is non-blocking operations, so we never wait for tasks currently
@@ -384,7 +386,7 @@ retry_fetch:
 			 * If GTS may read further blocks, it needs to retry scan. (We
 			 * might give up scan because of larger number of async tasks)
 			 */
-			if (!gts->scan_done)
+			if (gts->scan_done)
 				return NULL;
 			goto retry_scan;
 		}
@@ -562,7 +564,14 @@ pgstromRescanGpuTaskState(GpuTaskState_v2 *gts)
 void
 pgstromReleaseGpuTaskState(GpuTaskState_v2 *gts)
 {
-
+	/* release scan-desc if any */
+	if (gts->css.ss.ss_currentScanDesc)
+		heap_endscan(gts->css.ss.ss_currentScanDesc);
+	/* unreference CUDA program */
+	if (gts->program_id != INVALID_PROGRAM_ID)
+		pgstrom_put_cuda_program(gts->gcontext, gts->program_id);
+	/* unreference GpuContext */
+	PutGpuContext(gts->gcontext);
 }
 
 /*

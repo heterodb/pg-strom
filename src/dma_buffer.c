@@ -433,12 +433,12 @@ dmaBufferAttachSegmentOnDemand(int signum, siginfo_t *siginfo, void *unused)
 			/* ok, this segment is successfully mapped */
 			l_map->revision = revision;
 			l_map->is_attached = true;
-
+#if 0
 			fprintf(stderr, "%s: pid=%u got %s, then attached shared memory "
 					"segment (id=%u at %p, rev=%u)\n",
 					__FUNCTION__, MyProcPid, strsignal(signum),
 					seg->segment_id, seg->mmap_ptr, revision);
-
+#endif
 			PG_SETMASK(&UnBlockSig);
 			errno = save_errno;
 			internal_error = false;
@@ -667,7 +667,7 @@ pointer_validation(void *pointer, dmaBufferSegment **p_seg)
 			  (uintptr_t)dma_segment_vaddr_head) / dma_segment_size;
 	Assert(seg_id < max_dma_segment_nums);
 	seg = &dmaBufSegHead->segments[seg_id];
-	Assert(dmaBufLocalMaps[seg_id].is_attached);
+	Assert(SHMSEG_EXISTS(pg_atomic_read_u32(&seg->revision)));
 
 	if (offsetof(dmaBufferChunk, data) +
 		chunk->required + sizeof(cl_uint) > (1UL << chunk->mclass) ||
@@ -947,17 +947,16 @@ retry:
 void
 dmaBufferFreeAll(SharedGpuContext *shgcon)
 {
-	dlist_iter		iter;
 	dmaBufferChunk *chunk;
+	dlist_node	   *dnode;
 
-	fprintf(stderr, "%s: %d\n", __FUNCTION__, __LINE__);
-	dlist_foreach(iter, &shgcon->dma_buffer_list)
+	while (!dlist_is_empty(&shgcon->dma_buffer_list))
 	{
-		chunk = dlist_container(dmaBufferChunk, gcxt_chain, iter.cur);
+		dnode = dlist_pop_head_node(&shgcon->dma_buffer_list);
+		chunk = dlist_container(dmaBufferChunk, gcxt_chain, dnode);
 		Assert(chunk->shgcon == shgcon);
 		dmaBufferFree(chunk->data);
 	}
-	fprintf(stderr, "%s: %d\n", __FUNCTION__, __LINE__);
 }
 
 /*
