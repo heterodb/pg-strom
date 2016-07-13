@@ -72,6 +72,7 @@ typedef struct dmaBufferSegment
 {
 	dlist_node	chain;		/* link to active/inactive list */
 	cl_uint		segment_id;	/* (const) unique identifier of the segment */
+	bool		persistent;	/* (const) this segment will never released */
 	void	   *mmap_ptr;	/* (const) address to be attached */
 	pg_atomic_uint32 revision; /* revision of the shared memory segment and
 								* its status. Odd number, if segment exists.
@@ -440,6 +441,15 @@ dmaBufferAttachSegmentOnDemand(int signum, siginfo_t *siginfo, void *unused)
 					seg->segment_id, seg->mmap_ptr, revision);
 #endif
 			PG_SETMASK(&UnBlockSig);
+#if 1
+			if (IsGpuServerProcess())
+			{
+				/*
+				 * Maybe, register host memory here, but not certain
+				 * whether we can use this API inside signal handler.
+				 */
+			}
+#endif
 			errno = save_errno;
 			internal_error = false;
 			return;		/* problem solved */
@@ -914,7 +924,7 @@ retry:
 	seg->num_chunks--;
 
 	/* move the segment to inactive list, and remove shm segment */
-	if (seg->num_chunks > 0)
+	if (seg->num_chunks > 0 || seg->persistent)
 		SpinLockRelease(&seg->lock);
 	else
 	{
@@ -1181,6 +1191,7 @@ pgstrom_startup_dma_buffer(void)
 		/* dmaBufferSegment */
 		memset(segment, 0, sizeof(dmaBufferSegment));
 		segment->segment_id = i;
+		segment->persistent = (i < min_dma_segment_nums);
 		segment->mmap_ptr = mmap_ptr;
 		pg_atomic_init_u32(&segment->revision, 0);
 		SpinLockInit(&segment->lock);
@@ -1203,8 +1214,10 @@ pgstrom_startup_dma_buffer(void)
 void
 pgstrom_init_dma_buffer(void)
 {
-	struct sigaction	sigact;
-	struct sigaction	oldact;
+	struct sigaction sigact;
+	struct sigaction oldact;
+	Size		totalGpuMemSz;
+	int			i, num_segs;
 
 	/*
 	 * Unit size of DMA buffer segment
@@ -1240,13 +1253,21 @@ pgstrom_init_dma_buffer(void)
 							GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
 	/*
-	 * Amount of reserved DMA buffer segment
+	 * Amount of persistent DMA buffer segment
+	 *
+	 * The default configuration is auto-adjustment.
+	 * (2 * total GPU size) shall be reserved for DMA buffer segment
 	 */
+	totalGpuMemSz = 0;
+	for (i=0; i < numDevAttrs; i++)
+		totalGpuMemSz += devAttrs[i].DEV_TOTAL_MEMSZ;
+	num_segs = Max((2 * totalGpuMemSz) / dma_segment_size, 2);
+
 	DefineCustomIntVariable("pg_strom.min_dma_segment_nums",
 							"number of reserved DMA buffer segment",
 							NULL,
 							&min_dma_segment_nums,
-							2,
+							num_segs,
 							0,
 							max_dma_segment_nums,
 							PGC_POSTMASTER,
