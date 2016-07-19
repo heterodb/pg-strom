@@ -2003,15 +2003,29 @@ optimal_workgroup_size(size_t *p_grid_size,
 
 	__dynamic_shmem_per_block = dynamic_shmem_per_block;
 	__dynamic_shmem_per_thread = dynamic_shmem_per_thread;
+
+	/*
+	 * NOTE: Block-size is usually restricted by hardware limitation
+	 * rather than small amount of nitems. It may be a reason why the
+	 * 'blockSizeLimit' argument of cuOccupancyMaxPotentialBlockSize
+	 * is declared as 32bit integer.
+	 * If we gives larger 'nitems' than INT_MAX, it makes occupancy
+	 * calculation confused.
+	 */
 	rc = cuOccupancyMaxPotentialBlockSize(&min_grid_sz,
 										  &max_block_sz,
 										  function,
 										  blocksize_to_shmemsize_helper,
 										  0,
-										  nitems);
+										  Min((size_t)nitems,
+											  (size_t)INT_MAX));
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuOccupancyMaxPotentialBlockSize: %s",
 			 errorText(rc));
+
+	if ((size_t)max_block_sz * (size_t)INT_MAX < nitems)
+		elog(ERROR, "to large nitems (%zu) to launch kernel (blockSz=%d)",
+			 nitems, max_block_sz);
 
 	*p_block_size = (size_t)max_block_sz;
 	*p_grid_size  = (nitems + (size_t)max_block_sz - 1) / (size_t)max_block_sz;
@@ -2085,6 +2099,10 @@ largest_workgroup_size(size_t *p_grid_size,
 				 dynamic_shmem_per_block,
 				 dynamic_shmem_per_thread);
 	}
+
+	if ((size_t)maxBlockSize * (size_t)INT_MAX < nitems)
+		elog(ERROR, "to large nitems (%zu) to launch kernel (blockSz=%d)",
+			 nitems, maxBlockSize);
 
 	*p_block_size = (size_t)maxBlockSize;
 	*p_grid_size = (nitems + maxBlockSize - 1) / maxBlockSize;

@@ -44,7 +44,7 @@ __occupancy_max_potential_block_size(cl_uint *p_minGridSize,
 									 const void *kernel_function,
 									 cl_uint dynamicShmemPerBlock,
 									 cl_uint dynamicShmemPerThread,
-									 cl_uint blockSizeLimit)
+									 size_t blockSizeLimit)
 {
 	cudaError_t		status;
 
@@ -207,6 +207,10 @@ optimal_workgroup_size(dim3 *p_grid_sz,
 	if (status != cudaSuccess)
 		return status;
 
+	/* nitems must be less than blockSz.x * gridSz.x */
+	if ((size_t)maxBlockSize * (size_t)INT_MAX < nitems)
+		return cudaErrorInvalidValue;
+
 	p_block_sz->x = maxBlockSize;
 	p_block_sz->y = 1;
 	p_block_sz->z = 1;
@@ -280,6 +284,8 @@ largest_workgroup_size(dim3 *p_grid_sz,
 							staticShmemSize -
 							dynamic_shmem_per_block)/dynamic_shmem_per_thread;
 			maxBlockSize = (maxBlockSize / warpSize) * warpSize;
+			if (maxBlockSize < warpSize)
+				return cudaErrorInvalidValue;
 		}
 		else
 		{
@@ -287,6 +293,9 @@ largest_workgroup_size(dim3 *p_grid_sz,
 			return cudaErrorInvalidValue;
 		}
 	}
+	/* nitems must be less than blockSz.x * gridSz.x */
+	if ((size_t)maxBlockSize * (size_t)INT_MAX < nitems)
+		return cudaErrorInvalidValue;
 
 	p_block_sz->x = maxBlockSize;
 	p_block_sz->y = 1;
