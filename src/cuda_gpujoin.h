@@ -302,9 +302,9 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 	 * and index of inner tuple 'y_index'.
 	 */
 	x_limit = kresults_src->nitems;
-	x_index = get_global_id() % x_limit;
+	x_index = lget_global_id() % x_limit;
 	y_limit = min(window_base + window_size, kds_in->nitems);
-	y_index = window_base + (get_global_id() / x_limit);
+	y_index = window_base + (lget_global_id() / x_limit);
 
 	/* will be valid, if LEFT OUTER JOIN */
 	oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth, outer_join_map);
@@ -1369,7 +1369,7 @@ gpujoin_try_next_window(kern_gpujoin *kgjoin,
 			{
 				if (last_nitems == 0)
 					jscale[i].window_size = (curr_nitems -
-											 jscale[i].window_size);
+											 jscale[i].window_base);
 				else
 				{
 					jscale[i].window_size = (cl_uint)
