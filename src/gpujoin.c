@@ -5282,6 +5282,9 @@ gpujoin_next_tuple_fallback(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 		 * We have to fill up outer columns with NULLs, then walk down into
 		 * the inner depths.
 		 */
+		econtext->ecxt_scantuple = gjs->slot_fallback;
+		ResetExprContext(econtext);
+
 		if (gjs->fallback_outer_index < 0)
 		{
 			gpujoin_fallback_tuple_extract(gjs->slot_fallback,
