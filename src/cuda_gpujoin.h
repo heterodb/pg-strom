@@ -1375,7 +1375,7 @@ gpujoin_try_next_window(kern_gpujoin *kgjoin,
 					jscale[i].window_size = (cl_uint)
 						((double)jscale[i].window_size * ratio);
 					if (jscale[i].window_base +
-						jscale[i].window_size < curr_nitems)
+						jscale[i].window_size > curr_nitems)
 						jscale[i].window_size = (curr_nitems -
 												 jscale[i].window_base);
 				}
