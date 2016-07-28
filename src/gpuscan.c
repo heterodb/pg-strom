@@ -278,11 +278,11 @@ cost_discount_gpu_projection(PlannerInfo *root, RelOptInfo *rel,
  * cost_gpuscan_path - calculation of the GpuScan path cost
  */
 static void
-cost_gpuscan_path(PlannerInfo *root, CustomPath *pathnode,
+cost_gpuscan_path(PlannerInfo *root, CustomPath *cpath,
 				  List *dev_quals, List *host_quals, Cost discount_per_tuple)
 {
-	RelOptInfo	   *baserel = pathnode->path.parent;
-	ParamPathInfo  *param_info = pathnode->path.param_info;
+	RelOptInfo	   *baserel = cpath->path.parent;
+	ParamPathInfo  *param_info = cpath->path.param_info;
 	List		   *ppi_quals = param_info ? param_info->ppi_clauses : NIL;
 	Cost			startup_cost = pgstrom_gpu_setup_cost;
 	Cost			run_cost = 0.0;
@@ -297,27 +297,15 @@ cost_gpuscan_path(PlannerInfo *root, CustomPath *pathnode,
 	double			ntuples = baserel->tuples;
 	double			gpu_ratio = pgstrom_gpu_operator_cost / cpu_operator_cost;
 
-	pathnode->path.rows = (param_info
-						   ? param_info->ppi_rows
-						   : baserel->rows);
+	cpath->path.rows = (param_info
+						? param_info->ppi_rows
+						: baserel->rows);
 	/* estimate selectivity */
 	selectivity = clauselist_selectivity(root,
 										 dev_quals,
 										 baserel->relid,
 										 JOIN_INNER,
 										 NULL);
-	/* estimate number of chunks */
-	heap_size = (double)(BLCKSZ - SizeOfPageHeaderData) * baserel->pages;
-	htup_size = (MAXALIGN(offsetof(HeapTupleHeaderData,
-								   t_bits[BITMAPLEN(baserel->max_attr)])) +
-				 MAXALIGN(heap_size / Max(baserel->tuples, 1.0) -
-						  sizeof(ItemIdData) - SizeofHeapTupleHeader));
-	num_chunks = (Size)
-		(((double)(offsetof(kern_tupitem, htup) + htup_size +
-				   sizeof(cl_uint)) * Max(baserel->tuples, 1.0)) /
-		 ((double)(pgstrom_chunk_size() -
-				   KDS_CALCULATE_HEAD_LENGTH(baserel->max_attr))));
-	num_chunks = Max(num_chunks, 1);
 
 	/* fetch estimated page cost for tablespace containing the table */
 	get_tablespace_page_costs(baserel->reltablespace,
@@ -325,10 +313,44 @@ cost_gpuscan_path(PlannerInfo *root, CustomPath *pathnode,
 	/* Disk costs */
 	run_cost += spc_seq_page_cost * (double)baserel->pages;
 
+	/*
+	 * Adjust costing for parallelism, if used.
+	 * (overall logic is equivalent to cost_seqscan())
+	 */
+	if (cpath->path.parallel_workers > 0)
+	{
+		double		parallel_divisor = cpath->path.parallel_workers;
+		double		leader_contribution;
+
+		/* How much leader process can contribute query execution? */
+		leader_contribution = 1.0 - (0.3 * cpath->path.parallel_workers);
+		if (leader_contribution > 0)
+			parallel_divisor += leader_contribution;
+
+		cpath->path.rows = clamp_row_est(cpath->path.rows / parallel_divisor);
+
+		/* number of tuples to be processed by this GpuScan */
+		ntuples /= parallel_divisor;
+	}
+
+	/* estimation for number of chunks (assume KDS_FORMAT_ROW) */
+	heap_size = (double)(BLCKSZ - SizeOfPageHeaderData) * baserel->pages;
+	htup_size = (MAXALIGN(offsetof(HeapTupleHeaderData,
+								   t_bits[BITMAPLEN(baserel->max_attr)])) +
+				 MAXALIGN(heap_size / Max(baserel->tuples, 1.0) -
+						  sizeof(ItemIdData) - SizeofHeapTupleHeader));
+	num_chunks = (Size)
+		(((double)(offsetof(kern_tupitem, htup) + htup_size +
+				   sizeof(cl_uint)) * Max(ntuples, 1.0)) /
+		 ((double)(pgstrom_chunk_size() -
+				   KDS_CALCULATE_HEAD_LENGTH(baserel->max_attr))));
+	num_chunks = Max(num_chunks, 1);
+
 	/* Cost for GPU qualifiers */
 	cost_qual_eval(&qcost, dev_quals, root);
 	startup_cost += qcost.startup;
 	run_cost += qcost.per_tuple * gpu_ratio * ntuples;
+	elog(INFO, "NP=%d ntuples %f -> %f", cpath->path.parallel_workers, ntuples, ntuples * selectivity);
 	ntuples *= selectivity;
 
 	/* Cost for CPU qualifiers */
@@ -352,22 +374,59 @@ cost_gpuscan_path(PlannerInfo *root, CustomPath *pathnode,
 	/* Latency to get the first chunk */
 	startup_delay = run_cost * (1.0 / (double) num_chunks);
 
-	pathnode->path.startup_cost = startup_cost + startup_delay;
-	pathnode->path.total_cost = startup_cost + run_cost;
+	cpath->path.startup_cost = startup_cost + startup_delay;
+	cpath->path.total_cost = startup_cost + run_cost;
 }
 
+/*
+ * create_gpuscan_path - constructor of CustomPath(GpuScan) node
+ */
+static Path *
+create_gpuscan_path(PlannerInfo *root,
+					RelOptInfo *baserel,
+					List *dev_quals,
+					List *host_quals,
+					Cost discount_per_tuple,
+					int parallel_workers)
+{
+	CustomPath	   *cpath = makeNode(CustomPath);
+
+	cpath->path.pathtype = T_CustomScan;
+	cpath->path.parent = baserel;
+	cpath->path.pathtarget = baserel->reltarget;
+	cpath->path.param_info
+		= get_baserel_parampathinfo(root, baserel,
+									baserel->lateral_relids);
+	cpath->path.parallel_aware = parallel_workers > 0 ? true : false;
+	cpath->path.parallel_safe = baserel->consider_parallel;
+	cpath->path.parallel_workers = parallel_workers;
+
+	cpath->path.pathkeys = NIL;	/* unsorted results */
+	cpath->flags = 0;
+	cpath->custom_paths = NIL;
+	cpath->custom_private = NIL;
+	cpath->methods = &gpuscan_path_methods;
+
+	cost_gpuscan_path(root, cpath,
+					  dev_quals, host_quals, discount_per_tuple);
+
+	return &cpath->path;
+}
+
+/*
+ * gpuscan_add_scan_path - entrypoint of the set_rel_pathlist_hook
+ */
 static void
 gpuscan_add_scan_path(PlannerInfo *root,
 					  RelOptInfo *baserel,
 					  Index rtindex,
 					  RangeTblEntry *rte)
 {
-	CustomPath	   *pathnode;
-	Path		   *fallback;
-	List		   *dev_quals = NIL;
-	List		   *host_quals = NIL;
-	ListCell	   *lc;
-	Cost			discount_per_tuple;
+	Path	   *pathnode;
+	List	   *dev_quals = NIL;
+	List	   *host_quals = NIL;
+	ListCell   *lc;
+	Cost		discount_per_tuple;
 
 	/* call the secondary hook */
 	if (set_rel_pathlist_next)
@@ -387,10 +446,6 @@ gpuscan_add_scan_path(PlannerInfo *root,
 
 	/* only base relation we can handle */
 	if (baserel->rtekind != RTE_RELATION || baserel->relid == 0)
-		return;
-
-	/* system catalog is not supported */
-	if (get_rel_namespace(rte->relid) == PG_CATALOG_NAMESPACE)
 		return;
 
 	/* Check whether the qualifier can run on GPU device */
@@ -417,37 +472,69 @@ gpuscan_add_scan_path(PlannerInfo *root,
 			return;
 	}
 
-	/*
-	 * Fallback path if GpuScan cannot get a working GpuContext
-	 */
-	fallback = copyPathNode(linitial(baserel->pathlist));
+	/* add GpuScan path in single process */
+	pathnode = create_gpuscan_path(root, baserel,
+								   dev_quals, host_quals,
+								   discount_per_tuple,
+								   0);
+	add_path(baserel, pathnode);
 
-	/*
-	 * Construction of a custom-plan node.
-	 */
-	pathnode = makeNode(CustomPath);
-	pathnode->path.pathtype = T_CustomScan;
-	pathnode->path.parent = baserel;
-	pathnode->path.pathtarget = baserel->reltarget;
-	pathnode->path.param_info
-		= get_baserel_parampathinfo(root, baserel, baserel->lateral_relids);
-	pathnode->path.pathkeys = NIL;	/* unsorted result */
-	pathnode->flags = 0;
-	pathnode->custom_paths = list_make1(fallback);
-	pathnode->custom_private = NIL;	/* we don't use private field */
-	pathnode->methods = &gpuscan_path_methods;
-
-	cost_gpuscan_path(root, pathnode,
-					  dev_quals, host_quals, discount_per_tuple);
-	add_path(baserel, &pathnode->path);
-#if 0
 	/* If appropriate, consider parallel GpuScan */
-	if (baserel->consider_parallel && required_outer == NULL)
+	if (baserel->consider_parallel && baserel->lateral_relids == NULL)
 	{
-		// see create_plain_partial_paths()
+		int		parallel_workers;
+		int		parallel_threshold;
 
+		/*
+		 * We follow the logic of create_plain_partial_paths to determine
+		 * the number of parallel workers as baseline. Then, it shall be
+		 * adjusted according to the PG-Strom configuration.
+		 */
+		if (baserel->rel_parallel_workers != -1)
+			parallel_workers = baserel->rel_parallel_workers;
+		else
+		{
+			/* relation is too small for parallel execution? */
+			if (baserel->pages < (BlockNumber) min_parallel_relation_size &&
+				baserel->reloptkind == RELOPT_BASEREL)
+				return;
+
+			/*
+			 * select the number of workers based on the log of the size of
+			 * the relation.
+			 */
+			parallel_workers = 1;
+			parallel_threshold = Max(min_parallel_relation_size, 1);
+			while (baserel->pages >= (BlockNumber) (parallel_threshold * 3))
+			{
+				parallel_workers++;
+				parallel_threshold *= 3;
+				if (parallel_threshold > INT_MAX / 3)
+					break;			/* avoid overflow */
+			}
+		}
+		
+		/*
+		 * TODO: Put something specific to GpuScan to adjust parallel_workers
+		 */
+
+		/* max_parallel_workers_per_gather is the upper limit  */
+		parallel_workers = Min(parallel_workers,
+							   max_parallel_workers_per_gather);
+		if (parallel_workers <= 0)
+			return;
+
+		/* add GpuScan path performing on parallel workers */
+		pathnode = create_gpuscan_path(root, baserel,
+									   copyObject(dev_quals),
+									   copyObject(host_quals),
+									   discount_per_tuple,
+									   parallel_workers);
+		add_partial_path(baserel, pathnode);
+
+		/* then, potentially generate Gather + GpuScan path */
+		generate_gather_paths(root, baserel);
 	}
-#endif
 }
 
 #if 0
@@ -1453,7 +1540,7 @@ create_gpuscan_plan(PlannerInfo *root,
 	/* It should be a base relation */
 	Assert(baserel->relid > 0);
 	Assert(baserel->rtekind == RTE_RELATION);
-	Assert(list_length(custom_children) == 1);
+	Assert(custom_children == NIL);
 
 	/*
 	 * Distribution of clauses into device executable and others.
@@ -1515,9 +1602,11 @@ create_gpuscan_plan(PlannerInfo *root,
 	cscan->scan.scanrelid = baserel->relid;
 	cscan->flags = best_path->flags;
 	cscan->methods = &gpuscan_plan_methods;
-	cscan->custom_plans = custom_children;	/* fallback */
+	cscan->custom_plans = NIL;
 
-	gs_info = palloc0(sizeof(GpuScanInfo));
+	gs_info = (GpuScanInfo *)newNode(sizeof(GpuScanInfo),
+									 T_ExtensibleNode);
+	gs_info->ex.extnodename = GPUSCANINFO_EXNODE_NAME;
 	gs_info->kern_source = source.data;
 	gs_info->extra_flags = context.extra_flags | DEVKERNEL_NEEDS_GPUSCAN;
 	gs_info->proj_row_extra = proj_row_extra;
@@ -1773,6 +1862,12 @@ static Size
 ExecGpuScanEstimateDSM(CustomScanState *node,
 					   ParallelContext *pcxt)
 {
+	EState	   *estate = node->ss.ps.state;
+
+	node->pscan_len = heap_parallelscan_estimate(estate->es_snapshot);
+	shm_toc_estimate_chunk(&pcxt->estimator, node->pscan_len);
+	shm_toc_estimate_keys(&pcxt->estimator, 1);
+
 	return 0;
 }
 
@@ -1783,7 +1878,18 @@ static void
 ExecGpuScanInitDSM(CustomScanState *node,
 				   ParallelContext *pcxt,
 				   void *coordinate)
-{}
+{
+	EState	   *estate = node->ss.ps.state;
+	ParallelHeapScanDesc pscan;
+
+	pscan = shm_toc_allocate(pcxt->toc, node->pscan_len);
+	heap_parallelscan_initialize(pscan,
+								 node->ss.ss_currentRelation,
+								 estate->es_snapshot);
+	shm_toc_insert(pcxt->toc, node->ss.ps.plan->plan_node_id, pscan);
+	node->ss.ss_currentScanDesc =
+		heap_beginscan_parallel(node->ss.ss_currentRelation, pscan);
+}
 
 /*
  * ExecGpuScanInitWorker - initialize GpuScan on the backend worker process
@@ -1792,7 +1898,13 @@ static void
 ExecGpuScanInitWorker(CustomScanState *node,
 					  shm_toc *toc,
 					  void *coordinate)
-{}
+{
+	ParallelHeapScanDesc pscan;
+
+	pscan = shm_toc_lookup(toc, node->ss.ps.plan->plan_node_id);
+	node->ss.ss_currentScanDesc =
+		heap_beginscan_parallel(node->ss.ss_currentRelation, pscan);
+}
 
 /*
  * ExplainGpuScan - EXPLAIN callback
