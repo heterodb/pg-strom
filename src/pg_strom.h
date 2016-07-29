@@ -208,6 +208,7 @@ struct GpuTask_v2
 	bool			perfmon;		/* true, if perfmon is required */
 	/* fields below are valid only server */
 	cl_int			peer_fdesc;		/* duplication of file_desc on server */
+	GpuContext_v2  *gcontext;		/* session info of GPU server */
 	CUstream		cuda_stream;	/* stream object assigned on the task */
 };
 typedef struct GpuTask_v2 GpuTask_v2;
@@ -454,7 +455,7 @@ extern CUcontext		gpuserv_cuda_context;
 extern bool IsGpuServerProcess(void);
 extern void gpuservHandleLazyJobs(bool flush_completed,
 								  bool process_pending);
-extern void gpuservWakeUpProcesses(cl_uint max_procs);
+extern void gpuservWakeUpProc(void);
 extern void notifierGpuMemFree(cl_int device_id);
 extern bool gpuservOpenConnection(GpuContext_v2 *gcontext);
 extern bool gpuservSendGpuTask(GpuContext_v2 *gcontext, GpuTask_v2 *gtask);
