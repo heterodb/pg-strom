@@ -1945,6 +1945,7 @@ pgstrom_rewind_scan_chunk(GpuTaskState *gts)
 	InstrEndLoop(&gts->outer_instrument);
 	Assert(gts->css.ss.ss_currentRelation != NULL);
 	heap_rescan(gts->css.ss.ss_currentScanDesc, NULL);
+	ExecScanReScan(&gts->css.ss);
 }
 
 static GpuTask *

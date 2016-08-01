@@ -69,6 +69,8 @@ typedef struct
 								 * window resize. larger score means more
 								 * distributed depth, thus to be target of
 								 * the window split */
+	cl_uint		window_base_saved;	/* internal: last value of 'window_base' */
+	cl_uint		window_size_saved;	/* internal: last value of 'window_size' */
 	cl_uint		inner_nitems_stage;	/* internal: # of inner join results */
 	cl_uint		right_nitems_stage;	/* internal: # of right join results */
 } kern_join_scale;
@@ -1131,6 +1133,9 @@ gpujoin_resize_window(kern_context *kcxt,
 	cl_ulong		tv_start;
 	cudaError_t		status = cudaSuccess;
 
+	/* To be called with an error status */
+	assert(kerror.errcode != StromError_Success);
+
 	/*
 	 * Even if we got StromError_DataStoreNoSpace once, it may not make much
 	 * sense to investigate an optimal window size when more than half of the
@@ -1139,7 +1144,28 @@ gpujoin_resize_window(kern_context *kcxt,
 	 * out new optimal window size and retry.
 	 */
 	if (2 * dest_consumed > kds_dst->length)
+	{
+		kern_join_scale	   *jscale = kgjoin->jscale;
+		/*
+		 * NOTE: jscale[*]->window_base and window_size must be reverted
+		 * if we give up next try with smaller window size.
+		 * The host code considers (window_base ... window_base + window_size)
+		 * are already completed and kds_dst contains the results from this
+		 * range, however, it is not processed actually. The next GpuJoin task
+		 * has to begin from the last window_base with proper size.
+		 *
+		 * Also note that, window_(base|size)_saved is initialized at end of
+		 * the last trial. However, dest_consumed is zero until first trial,
+		 * so we never reference these variables without second or later
+		 * trials.
+		 */
+		for (depth=0; depth <= kgjoin->num_rels; depth++)
+		{
+			jscale[depth].window_base = jscale[depth].window_base_saved;
+			jscale[depth].window_size = jscale[depth].window_size_saved;
+		}
 		return -1;
+	}
 
 	/* get max available block size */
 	status = cudaFuncGetAttributes(&fattrs, (const void *)
@@ -1247,9 +1273,10 @@ gpujoin_resize_window(kern_context *kcxt,
 		= kgjoin->jscale[target_depth].window_size / nsplits + 1;
 	if (kgjoin->jscale[target_depth].window_size <= 1)
 	{
+		/* The original error code shall be set, and exit */
 		if (kcxt->e.errcode == StromError_Success)
 			kcxt->e = kerror;
-		return -1;		/* caller has to set original error code */
+		return -1;
 	}
 
 	/*
@@ -1346,9 +1373,9 @@ gpujoin_try_next_window(kern_gpujoin *kgjoin,
 			{
 				cl_uint		nitems;
 
-				jscale[j].window_base = 0;
-
 				nitems = KERN_MULTIRELS_INNER_KDS(kmrels, j)->nitems;
+
+				jscale[j].window_base = 0;
 				if (!meet_partition &&
 					jscale[j].window_size != nitems)
 				{
@@ -1500,11 +1527,12 @@ retry_major:
 				kern_args[1] = kds_src;
 				kern_args[2] = kresults_src;
 
+				window_size = kgjoin->jscale[0].window_size;
 				status = optimal_workgroup_size(&grid_sz,
 												&block_sz,
 												(const void *)
 												gpujoin_exec_outerscan,
-												kds_src->nitems,
+												window_size,
 												0, sizeof(kern_errorbuf));
 				if (status != cudaSuccess)
 				{
@@ -2106,11 +2134,17 @@ retry_major:
 	assert(kds_dst->nitems <= kds_dst->nrooms);
 	assert(dest_usage_saved <= kds_dst->usage);
 
-	/* update statistics to be informed to the host side */
+	/*
+	 * - update statistics to be informed to the host side
+	 * - save the current position of window_base/size for give-up of
+	 *   the next try.
+	 */
 	for (depth = 0; depth <= kgjoin->num_rels; depth++)
 	{
 		jscale[depth].inner_nitems += jscale[depth].inner_nitems_stage;
 		jscale[depth].right_nitems += jscale[depth].right_nitems_stage;
+		jscale[depth].window_base_saved = jscale[depth].window_base;
+		jscale[depth].window_size_saved = jscale[depth].window_size;
 	}
 
 	/*
