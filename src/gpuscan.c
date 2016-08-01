@@ -2252,6 +2252,7 @@ gpuscanRewindScanChunk(GpuTaskState_v2 *gts)
 	InstrEndLoop(&gts->outer_instrument);
 	Assert(gts->css.ss.ss_currentRelation != NULL);
 	heap_rescan(gts->css.ss.ss_currentScanDesc, NULL);
+	ExecScanReScan(&gts->css.ss);
 }
 
 
