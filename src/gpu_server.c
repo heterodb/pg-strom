@@ -63,11 +63,11 @@ typedef struct GpuServState
  */
 #define GPUSERV_CMD_TASK		0x102
 #define GPUSERV_CMD_ERROR		0x103
-#define GPUSERV_CMD_CLOSE		0x104
 
 typedef struct GpuServCommand
 {
-	cl_int		command;	/* one of the GPUSERV_CMD_* */
+	cl_uint		command;	/* one of the GPUSERV_CMD_* */
+	cl_uint		length;		/* length of the command */
 	union {
 		struct {
 			GpuTask_v2 *gtask;	/* to be located on the DMA buffer */
@@ -79,9 +79,7 @@ typedef struct GpuServCommand
 			cl_int		lineno;
 			cl_uint		funcname_offset;
 			cl_uint		message_offset;
-			cl_uint		buffer_usage;
-			char	   *buffer_external;
-			char		buffer_inline[200];
+			char		buffer[FLEXIBLE_ARRAY_MEMBER];
 		} error;
 	} u;
 } GpuServCommand;
@@ -196,7 +194,9 @@ lookupCudaModuleCache(ProgramId program_id)
  * It send back a error command to the backend immediately.
  */
 static void
-ReportErrorForBackend(GpuTask_v2 *gtask, MemoryContext memcxt)
+ReportErrorForBackend(GpuTask_v2 *gtask,
+					  GpuContext_v2 *gcontext,
+					  MemoryContext memcxt)
 {
 	GpuServCommand	cmd;
 	MemoryContext	oldcxt;
@@ -215,41 +215,29 @@ ReportErrorForBackend(GpuTask_v2 *gtask, MemoryContext memcxt)
 	oldcxt = MemoryContextSwitchTo(memcxt);
 	errdata = CopyErrorData();
 
-	required = (MAXALIGN(strlen(errdata->filename) + 1) +
+	required = (offsetof(GpuServCommand, u.error.buffer) +
+				MAXALIGN(strlen(errdata->filename) + 1) +
 				MAXALIGN(strlen(errdata->funcname) + 1) +
 				MAXALIGN(strlen(errdata->message) + 1));
-	if (required <= sizeof(cmd.u.error.buffer_inline))
-	{
-		buf = cmd.u.error.buffer_inline;
-		cmd.u.error.buffer_external = NULL;
-	}
-	else
-	{
-		buf = dmaBufferAlloc(gpuserv_gpu_context, required);
-		cmd.u.error.buffer_external = buf;
-	}
-	cmd.command                 = GPUSERV_CMD_ERROR;
-	cmd.u.error.elevel          = errdata->elevel;
-	cmd.u.error.sqlerrcode      = errdata->sqlerrcode;
+	cmd = palloc(required);
+	cmd->command            = GPUSERV_CMD_ERROR;
+	cmd->length             = required;
+	cmd->u.error.elevel     = errdata->elevel;
+	cmd->u.error.sqlerrcode = errdata->sqlerrcode;
 
-	cmd.u.error.filename_offset = offset;
-	strcpy(buf + offset, errdata->filename);
+	cmd->u.error.filename_offset = offset;
+	strcpy(cmd->u.error.buffer + offset, errdata->filename);
 	offset += MAXALIGN(strlen(errdata->filename) + 1);
 
-	cmd.u.error.lineno          = errdata->lineno;
+	cmd->u.error.lineno     = errdata->lineno;
 
-	cmd.u.error.funcname_offset = offset;
-	strcpy(buf + offset, errdata->funcname);
+	cmd->u.error.funcname_offset = offset;
+	strcpy(cmd->u.error.buffer + offset, errdata->funcname);
 	offset += MAXALIGN(strlen(errdata->funcname) + 1);
 
-	cmd.u.error.message_offset = offset;
-	strcpy(buf + offset, errdata->message);
+	cmd->u.error.message_offset = offset;
+	strcpy(cmd->u.error.buffer + offset, errdata->message);
 	offset += MAXALIGN(strlen(errdata->message) + 1);
-
-	if (!cmd.u.error.buffer_external)
-		cmd.u.error.buffer_usage = offset;
-	else
-		cmd.u.error.buffer_usage = 0;	/* no count for external buffer */
 
 	/*
 	 * Urgent return to the backend
@@ -257,9 +245,14 @@ ReportErrorForBackend(GpuTask_v2 *gtask, MemoryContext memcxt)
 	gettimeofday(&tv1, NULL);
 	for (;;)
 	{
+		CHECK_FOR_INTERRUPTS();
 		ResetLatch(MyLatch);
 
-		CHECK_FOR_INTERRUPTS();
+		if (gpuservSendCommand(gcontext, cmd, timeout))
+			break;
+
+
+
 		if (gpuservSendCommand(gpuserv_gpu_context, &cmd, timeout))
 			break;
 
@@ -607,128 +600,125 @@ notifierGpuMemFree(cl_int device_id)
 /*
  * gpuservSendCommand - an internal low-level interface
  */
-static bool
+static void
 gpuservSendCommand(GpuContext_v2 *gcontext, GpuServCommand *cmd, long timeout)
 {
 	struct msghdr	msg;
-	struct iovec	iov;
+	struct iovec	iov[2];
 	unsigned char	cmsgbuf[CMSG_SPACE(sizeof(int))];
 	ssize_t			retval;
 	int				ev;
 
 	memset(&msg, 0, sizeof(struct msghdr));
-	msg.msg_iov = &iov;
-	msg.msg_iovlen = 1;
-	iov.iov_base = cmd;
+	memset(iov, 0, sizeof(iov));
 	if (cmd->command == GPUSERV_CMD_TASK)
 	{
 		GpuTask_v2 *gtask = cmd->u.task.gtask;
 
 		Assert(dmaBufferValidatePtr(gtask));
-		/* Is the file-descriptor attached on the message? */
+
+		msg.msg_iov = iov;
+		msg.msg_iovlen = 1;
+		iov[0].iov_base = cmd;
+		iov[0].iov_len = (offsetof(GpuServCommand, u.task) +
+						  sizeof(cmd->u.task));
+		/* Is a file-descriptor attached on the command? */
 		if (!IsGpuServerProcess() && gtask->file_desc >= 0)
 		{
 			struct cmsghdr *cmsg;
 
-			Assert(!IsGpuServerProcess());
 			msg.msg_control = cmsgbuf;
 			msg.msg_controllen = sizeof(cmsgbuf);
+
 			cmsg = CMSG_FIRSTHDR(&msg);
 			cmsg->cmsg_level = SOL_SOCKET;
 			cmsg->cmsg_type = SCM_RIGHTS;
 			cmsg->cmsg_len = CMSG_LEN(sizeof(int));
 			((int *)CMSG_DATA(cmsg))[0] = gtask->file_desc;
 		}
-		iov.iov_len = offsetof(GpuServCommand, u.task) + sizeof(cmd->u.task);
-	}
-	else if (cmd->command == GPUSERV_CMD_OPEN)
-	{
-		iov.iov_len = offsetof(GpuServCommand, u.open) + sizeof(cmd->u.open);
+		Assert(cmd->length == iov[0].iov_len);
 	}
 	else if (cmd->command == GPUSERV_CMD_ERROR)
 	{
-		iov.iov_len = (offsetof(GpuServCommand, u.error.buffer_inline) +
-					   cmd->u.error.buffer_usage);
-		Assert(iov.iov_len < sizeof(GpuServCommand));
 		Assert(IsGpuServerProcess());
+
+		msg.msg_iov = iov;
+		msg.msg_iovlen = 2;
+		iov[0].iov_base = cmd;
+		iov[0].iov_len = offsetof(GpuServCommand, u.error.buffer);
+		iov[1].iov_base = cmd->u.error.buffer;
+		iov[1].iov_len = cmd->length - iov[0].iov_len;
 	}
 	else
 		elog(ERROR, "Bug? unexpected GPUSERV_CMD_* tag: %d", cmd->command);
 
-	ev = WaitLatchOrSocket(MyLatch,
-						   WL_LATCH_SET |
-						   WL_POSTMASTER_DEATH |
-						   WL_SOCKET_WRITEABLE |
-						   (timeout < 0 ? 0 : WL_TIMEOUT),
-						   gcontext->sockfd,
-						   timeout);
-	/* urgent bailout if postmaster is dead */
-	if (ev & WL_POSTMASTER_DEATH)
-		ereport(FATAL,
-				(errcode(ERRCODE_ADMIN_SHUTDOWN),
-				 errmsg("Urgent termination by unexpected postmaster dead")));
-	/* Is the socket writable? */
-	if ((ev & WL_SOCKET_WRITEABLE) == 0)
-		return false;
-
-	retval = sendmsg(gcontext->sockfd, &msg, 0);
-	if (retval < 0)
-		elog(ERROR, "failed on sendmsg(2): %m");
-	else if (retval == 0)
-		elog(ERROR, "no bytes sent using sendmsg(2): %m");
-	else if (retval != iov.iov_len)
-		elog(ERROR, "incorrect size of message sent: %zu but %zu expected",
-			 retval, iov.iov_len);
-
-	return true;
-}
-
-/*
- * gpuservSendGpuTask - enqueue a GpuTask to the socket
- */
-bool
-gpuservSendGpuTask(GpuContext_v2 *gcontext, GpuTask_v2 *gtask)
-{
-	SharedGpuContext *shgcon = gcontext->shgcon;
-	GpuServCommand	cmd;
-	long			timeout = 5000;		/* 5.0sec; usually enough */
-	struct timeval	tv1, tv2;
-
-	cmd.command = GPUSERV_CMD_TASK;
-	cmd.u.task.gtask = gtask;
-
 	gettimeofday(&tv1, NULL);
 	for (;;)
 	{
+		CHECK_FOR_INTERRUPTS();
 		ResetLatch(MyLatch);
 
-		CHECK_FOR_INTERRUPTS();
-		if (IsGpuServerProcess())
-			gpuservHandleLazyJobs(false, false);
-
-		if (gpuservSendCommand(gcontext, &cmd, timeout))
+		ev = WaitLatchOrSocket(MyLatch,
+							   WL_SOCKET_WRITEABLE |
+							   WL_POSTMASTER_DEATH |
+							   (timeout < 0 ? 0 : WL_TIMEOUT),
+							   gcontext->sockfd,
+							   timeout);
+		/* urgent bailout if postmaster is dead */
+		if (ev & WL_POSTMASTER_DEATH)
+			ereport(FATAL,
+					(errcode(ERRCODE_ADMIN_SHUTDOWN),
+					 errmsg("Urgent termination by postmaster dead")));
+		/* Is the socket writable? */
+		if (ev & WL_SOCKET_WRITEABLE)
 		{
-			SpinLockAcquire(&shgcon->lock);
-			if (IsGpuServerProcess())
-				shgcon->num_async_tasks--;
-			else
-				shgcon->num_async_tasks++;
-			SpinLockRelease(&shgcon->lock);
-			break;
+			retval = sendmsg(gcontext->sockfd, &msg, 0);
+			if (retval < 0)
+				elog(ERROR, "failed on sendmsg(2): %m");
+			else if (retval == 0)
+				elog(ERROR, "no bytes sent using sengmsg(2): %m");
+			else if (retval != iov[0].iov_len + iov[1].iov_len)
+				elog(ERROR, "incomplete size of message sent: %zu of %zu",
+					 retval, iov[0].iov_len, iov[1].iov_len);
+			return;		/* success to send */
 		}
-
-		/* adjust timeout */
-	   	gettimeofday(&tv2, NULL);
+		/* check timeout? */
+		gettimeofday(&tv2, NULL);
 		if (timeout >= 0)
 		{
 			timeout -= ((tv2.tv_sec * 1000 + tv2.tv_usec / 1000) -
 						(tv1.tv_sec * 1000 + tv1.tv_usec / 1000));
 			if (timeout <= 0)
-				return false;
+				break;	/* give up to send a command */
 		}
 		tv1 = tv2;
 	}
-	return true;
+	elog(ERROR, "failed on sendmsg(2) by timeout");
+}
+
+/*
+ * gpuservSendGpuTask - enqueue a GpuTask to the socket
+ */
+void
+gpuservSendGpuTask(GpuContext_v2 *gcontext, GpuTask_v2 *gtask)
+{
+	SharedGpuContext *shgcon = gcontext->shgcon;
+	GpuServCommand	cmd;
+	long			timeout = 5000;		/* 5.0sec; usually enough */
+
+	cmd.command = GPUSERV_CMD_TASK;
+	cmd.length = offsetof(GpuServCommand, u.task) + sizeof(cmd->u.task);
+	cmd.u.task.gtask = gtask;
+
+	gpuservSendCommand(gcontext, &cmd, timeout);
+
+	/* update num_async_tasks */
+	SpinLockAcquire(&shgcon->lock);
+	if (IsGpuServerProcess())
+		shgcon->num_async_tasks--;
+	else
+		shgcon->num_async_tasks++;
+	SpinLockRelease(&shgcon->lock);
 }
 
 /*
