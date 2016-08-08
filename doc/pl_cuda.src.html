@@ -556,6 +556,7 @@ This directive allows specifying amount of the shared memory per thread to be di
 このディレクティブが<code>#plcuda_prep</code>、<code>#plcuda_begin</code>、および<code>#plcuda_post</code>コードブロックの内側で指定されると、それぞれのGPUカーネル関数を起動する際に動的に確保するスレッドあたり共有メモリのサイズを指定する事ができます。
 </span>
 </p>
+
 <p>
 <span lang="en">
 If a constant value is specified, PL/CUDA runtime kicks GPU kernel function with the specified amount of the shared memory per thread.
@@ -575,6 +576,36 @@ For example, if amount of shared memory per thread is 8 bytes and the number of 
 <span lang="ja">
 GPUカーネル関数の実行時に実際に確保される共有メモリのサイズは、本ディレクティブによって指定したスレッドあたり共有メモリのサイズだけでなく、実行ユニットあたりのスレッド数に依存する事に留意してください。（また、実行ユニットあたりのスレッド数は<code>#plcuda_num_threads</code>で指定した値とも異なる概念である事に留意してください。）
 例えば、スレッドあたり共有メモリのサイズが8バイトであり、実行ユニットあたりのスレッド数が384である場合、実行ユニット毎に3KBの共有メモリが確保されます。この時、<code>#plcuda_num_threads</code>で指定したスレッド数が32768であれば、このGPUカーネルは86個の実行ユニットを使用して実行されますが、実行ユニットにタスクが投入されるタイミングを決めるのはスケジューラの役割ですので、必ずしも3KB x 86個 = 258KBの共有メモリが一度に消費されるわけではありません。
+</span>
+</p>
+</dd>
+
+<dt><code>#plcuda_shmem_blocksz (&lt;value&gt;|&lt;function&gt;)</code></dt>
+<dd>
+<p>
+<span lang="en">
+Use of this directive is optional. If not specified, the default is a constant value <code>0</code>.
+</span>
+<span lang="ja">
+このディレクティブの使用は任意です。未指定の場合のデフォルト値は定数<code>0</code>です
+</span>
+</p>
+<p>
+This directive allows specifying amount of the shared memory per block to be dinamically allocated on GPU kernel execution, if it is used in the code block of <code>#plcuda_prep</code>, <code>#plcuda_begin</code>, or <code>#plcuda_post</code>.
+<span lang="ja">
+このディレクティブが<code>#plcuda_prep</code>、<code>#plcuda_begin</code>、および<code>#plcuda_post</code>コードブロックの内側で指定されると、それぞれのGPUカーネル関数を起動する際に動的に確保するブロックあたり共有メモリのサイズを指定する事ができます。
+</span>
+</p>
+
+<p>
+<span lang="en">
+If a constant value is specified, PL/CUDA runtime kicks GPU kernel function with the specified amount of the shared memory per block.
+If a SQL function name is specified, PL/CUDA runtime call the specified SQL function, and then result of the function shall be applied as the amount of the shared memory per block to run the GPU kernel function.
+This SQL function takes identical arguments with PL/CUDA function, and returns <code>bigint</code> data type.
+</span>
+<span lang="ja">
+数値が指定されると、PL/CUDAランタイムは指定された大きさのブロック毎共有メモリを確保してGPUカーネル関数を実行します。
+関数名が指定されると、PL/CUDAランタイムは指定されたSQL関数を呼び出し、戻り値で指定された大きさのブロックあたり共有メモリを確保してGPUカーネル関数を実行します。このSQL関数は、PL/CUDA関数と同一の引数を取り、<code>bigint</code>型を返す必要があります。
 </span>
 </p>
 </dd>

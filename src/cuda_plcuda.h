@@ -39,10 +39,13 @@ typedef struct
 	char			__retval[__DATATYPE_MAX_WIDTH];
 	cl_uint			prep_num_threads;
 	cl_uint			prep_shmem_unitsz;
+	cl_uint			prep_shmem_blocksz;
 	cl_uint			main_num_threads;
 	cl_uint			main_shmem_unitsz;
+	cl_uint			main_shmem_blocksz;
 	cl_uint			post_num_threads;
 	cl_uint			post_shmem_unitsz;
+	cl_uint			post_shmem_blocksz;
 	cl_ulong		working_bufsz;
 	cl_ulong		working_usage;
 	cl_ulong		results_bufsz;
