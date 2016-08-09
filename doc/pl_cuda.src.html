@@ -610,7 +610,7 @@ This SQL function takes identical arguments with PL/CUDA function, and returns <
 </p>
 </dd>
 
-<dt><code>#plcuda_kernel_maxthreads</code></dt>
+<dt><code>#plcuda_kernel_blocksz (&lt;value&gt;|&lt;function&gt;)</code></dt>
 <dd>
 <p>
 <span lang="en">
@@ -622,14 +622,28 @@ Use of this directive is optional.
 </p>
 <p>
 <span lang="en">
-This directive switches the optimization policy of GPU kernel function, from maximization of execution efficiency to maximization of number of threads per streaming-multiprocessor.
-Usually, it enables to launch 1024 threads per streaming-multiprocessor.
+This directive allows specifying the number of threads per streaming-multiprocessor, if it is used in the code block of <code>#plcuda_prep</code>, <code>#plcuda_begin</code>, or <code>#plcuda_post</code>.
+It is usually a multiple number of the warp value of the device, and equal to or less than 1024.
+In the default, an optimal value is applied according to the resource consumption of the GPU kernel function, therefore, this directive shall not be used unless you have no special reason; a larger block size is preferable due to characteristics of the algorithm for example.
 </span>
 <span lang="ja">
-<code>#plcuda_prep</code>、<code>#plcuda_begin</code>、および<code>#plcuda_post</code>コードブロックの内側でこのディレクティブを指定すると、GPUカーネル関数の最適化ポリシーを『実行効率最適化』から『ブロックあたりスレッド数最大化』に切り替えます。
-通常、実行ユニットあたり1024個のスレッドを起動できるようになります。
+<code>#plcuda_prep</code>、<code>#plcuda_begin</code>、および<code>#plcuda_post</code>コードブロックの内側でこのディレクティブを指定すると、実行ユニットあたりのスレッド数を指定する事ができます。通常、この値はデバイスのWARP値の倍数であり1024以下です。
+デフォルトでは、GPUカーネル関数のリソース消費量に基づいた最適な値が使用されます。したがって、アルゴリズムの性質上大きなブロックサイズが望ましいなどの理由がない限り、本ディレクティブを使用すべきではありません。
 </span>
 </p>
+
+<p>
+<span lang="en">
+If a constant value is specified, PL/CUDA runtime kicks GPU kernel function with the specified amount of the shared memory per block.
+If a SQL function name is specified, PL/CUDA runtime call the specified SQL function, and then result of the function shall be applied as the amount of the shared memory per block to run the GPU kernel function.
+This SQL function takes identical arguments with PL/CUDA function, and returns <code>bigint</code> data type.
+</span>
+<span lang="ja">
+数値が指定されると、PL/CUDAランタイムは指定された大きさのブロックを設定してGPUカーネル関数を実行します。
+関数名が指定されると、PL/CUDAランタイムは指定されたSQL関数を呼び出し、戻り値で指定された大きさのブロックを設定してGPUカーネル関数を実行します。このSQL関数は、PL/CUDA関数と同一の引数を取り、<code>bigint</code>型を返す必要があります。
+</span>
+</p>
+
 <p>
 <span lang="en">
 Increase the number of threads per streaming-multiprocessor allows more threads to synchronize other threads using the shared memory, on the other hands, it leads decrease of the amount of registers a thread can use, thus, it may have performance degradation by private variables allocation on the (slow) global memory for example.

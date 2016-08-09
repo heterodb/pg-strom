@@ -31,7 +31,6 @@
 #include "pg_strom.h"
 #include "cuda_plcuda.h"
 
-
 typedef struct plcudaInfo
 {
 	cl_uint	extra_flags;
@@ -39,7 +38,8 @@ typedef struct plcudaInfo
 	char   *kern_decl;
 	/* kernel prep function */
 	char   *kern_prep;
-	bool	kern_prep_maxthreads;
+	Oid		fn_prep_kern_blocksz;
+	long	val_prep_kern_blocksz;
 	Oid		fn_prep_num_threads;
 	Size	val_prep_num_threads;
 	Oid		fn_prep_shmem_unitsz;
@@ -49,7 +49,8 @@ typedef struct plcudaInfo
 
 	/* kernel function */
 	char   *kern_main;
-	bool	kern_main_maxthreads;
+	Oid		fn_main_kern_blocksz;
+	long	val_main_kern_blocksz;
 	Oid		fn_main_num_threads;
 	Size	val_main_num_threads;
 	Oid		fn_main_shmem_unitsz;
@@ -59,7 +60,8 @@ typedef struct plcudaInfo
 
 	/* kernel post function */
     char   *kern_post;
-	bool	kern_post_maxthreads;
+	Oid		fn_post_kern_blocksz;
+	long	val_post_kern_blocksz;
 	Oid		fn_post_num_threads;
 	Size	val_post_num_threads;
 	Oid		fn_post_shmem_unitsz;
@@ -69,11 +71,11 @@ typedef struct plcudaInfo
 
 	/* device memory size for working buffer */
 	Oid		fn_working_bufsz;
-	Size	val_working_bufsz;
+	long	val_working_bufsz;
 
 	/* device memory size for result buffer */
 	Oid		fn_results_bufsz;
-	Size	val_results_bufsz;
+	long	val_results_bufsz;
 
 	/* comprehensive functions */
 	Oid		fn_sanity_check;
@@ -176,9 +178,6 @@ readToken(int *length)
 
 #endif /* PG_VERSION_NUM */
 
-#define WRITE_BOOL_FIELD(fldname)							\
-	appendStringInfo(&str, " :" CppAsString(fldname) " %s",	\
-					 (node->fldname) ? "true" : "false")
 #define WRITE_OID_FIELD(fldname)							\
 	appendStringInfo(&str, " :" CppAsString(fldname) " %u",	\
 					 node->fldname)
@@ -204,7 +203,8 @@ form_plcuda_info(plcudaInfo *node)
 	WRITE_STRING_FIELD(kern_decl);
 	/* prep kernel */
 	WRITE_STRING_FIELD(kern_prep);
-	WRITE_BOOL_FIELD(kern_prep_maxthreads);
+	WRITE_OID_FIELD(fn_prep_kern_blocksz);
+	WRITE_LONG_FIELD(val_prep_kern_blocksz);
 	WRITE_OID_FIELD(fn_prep_num_threads);
 	WRITE_LONG_FIELD(val_prep_num_threads);
 	WRITE_OID_FIELD(fn_prep_shmem_unitsz);
@@ -213,7 +213,8 @@ form_plcuda_info(plcudaInfo *node)
 	WRITE_LONG_FIELD(val_prep_shmem_blocksz);
 	/* main kernel */
 	WRITE_STRING_FIELD(kern_main);
-	WRITE_BOOL_FIELD(kern_main_maxthreads);
+	WRITE_OID_FIELD(fn_main_kern_blocksz);
+	WRITE_LONG_FIELD(val_main_kern_blocksz);
 	WRITE_OID_FIELD(fn_main_num_threads);
 	WRITE_LONG_FIELD(val_main_num_threads);
 	WRITE_OID_FIELD(fn_main_shmem_unitsz);
@@ -222,7 +223,8 @@ form_plcuda_info(plcudaInfo *node)
 	WRITE_LONG_FIELD(val_main_shmem_blocksz);
 	/* post kernel */
 	WRITE_STRING_FIELD(kern_post);
-	WRITE_BOOL_FIELD(kern_post_maxthreads);
+	WRITE_OID_FIELD(fn_post_kern_blocksz);
+	WRITE_LONG_FIELD(val_post_kern_blocksz);
 	WRITE_OID_FIELD(fn_post_num_threads);
 	WRITE_LONG_FIELD(val_post_num_threads);
 	WRITE_OID_FIELD(fn_post_shmem_unitsz);
@@ -242,10 +244,6 @@ form_plcuda_info(plcudaInfo *node)
 	return cstring_to_text(str.data);
 }
 
-#define READ_BOOL_FIELD(fldname)		\
-	token = readToken(&length);			\
-	token = readToken(&length);			\
-	local_node->fldname = (*token == 't' ? true : false)
 #define READ_UINT_FIELD(fldname)		\
     token = readToken(&length);			\
     token = readToken(&length);			\
@@ -278,7 +276,8 @@ deform_plcuda_info(text *cf_info_text)
 	READ_STRING_FIELD(kern_decl);
 	/* prep kernel */
 	READ_STRING_FIELD(kern_prep);
-	READ_BOOL_FIELD(kern_prep_maxthreads);
+	READ_OID_FIELD(fn_prep_kern_blocksz);
+	READ_LONG_FIELD(val_prep_kern_blocksz);
 	READ_OID_FIELD(fn_prep_num_threads);
 	READ_LONG_FIELD(val_prep_num_threads);
 	READ_OID_FIELD(fn_prep_shmem_unitsz);
@@ -287,7 +286,8 @@ deform_plcuda_info(text *cf_info_text)
 	READ_LONG_FIELD(val_prep_shmem_blocksz);
 	/* main kernel */
 	READ_STRING_FIELD(kern_main);
-	READ_BOOL_FIELD(kern_main_maxthreads);
+	READ_OID_FIELD(fn_main_kern_blocksz);
+	READ_LONG_FIELD(val_main_kern_blocksz);
 	READ_OID_FIELD(fn_main_num_threads);
 	READ_LONG_FIELD(val_main_num_threads);
 	READ_OID_FIELD(fn_main_shmem_unitsz);
@@ -296,7 +296,8 @@ deform_plcuda_info(text *cf_info_text)
 	READ_LONG_FIELD(val_main_shmem_blocksz);
 	/* post kernel  */
 	READ_STRING_FIELD(kern_post);
-	READ_BOOL_FIELD(kern_post_maxthreads);
+	READ_OID_FIELD(fn_post_kern_blocksz);
+	READ_LONG_FIELD(val_post_kern_blocksz);
 	READ_OID_FIELD(fn_post_num_threads);
 	READ_LONG_FIELD(val_post_num_threads);
 	READ_OID_FIELD(fn_post_shmem_unitsz);
@@ -425,7 +426,7 @@ plcuda_parse_cmd_options(const char *linebuf, List **p_options)
 
 static bool
 plcuda_lookup_helper(List *options, oidvector *arg_types, Oid result_type,
-					 Oid *p_func_oid, Size *p_size_value)
+					 Oid *p_func_oid, long *p_size_value)
 {
 	List	   *names;
 
@@ -511,21 +512,21 @@ ident_to_cstring(List *ident)
  * #plcuda_prep (optional)
  * #plcuda_num_threads (value|function)
  * #plcuda_shmem_size  (value|function)
- * #plcuda_kernel_maxthreads
+ * #plcuda_kernel_blocksz
  *      :
  * #plcuda_end
  *
  * #plcuda_begin
  * #plcuda_num_threads (value|function)
  * #plcuda_shmem_size  (value|function)
- * #plcuda_kernel_maxthreads
+ * #plcuda_kernel_blocksz
  *      :
  * #plcuda_end
  *
  * #plcuda_post (optional)
  * #plcuda_num_threads (value|function)
  * #plcuda_shmem_size  (value|function)
- * #plcuda_kernel_maxthreads
+ * #plcuda_kernel_blocksz
  *      :
  * #plcuda_end
  *
@@ -665,7 +666,7 @@ plcuda_code_validation(plcudaInfo *cf_info,
 			else if (strcmp(cmd, "#plcuda_num_threads") == 0)
 			{
 				Oid		fn_num_threads;
-				Size	val_num_threads;
+				long	val_num_threads;
 
 				if (!curr)
 					EMSG("%s appeared outside of code block", cmd);
@@ -699,7 +700,7 @@ plcuda_code_validation(plcudaInfo *cf_info,
 			else if (strcmp(cmd, "#plcuda_shmem_unitsz") == 0)
 			{
 				Oid		fn_shmem_unitsz;
-				Size	val_shmem_unitsz;
+				long	val_shmem_unitsz;
 
 				if (!curr)
 					EMSG("%s appeared outside of code block", cmd);
@@ -733,7 +734,7 @@ plcuda_code_validation(plcudaInfo *cf_info,
 			else if (strcmp(cmd, "#plcuda_shmem_blocksz") == 0)
 			{
 				Oid		fn_shmem_blocksz;
-				Size	val_shmem_blocksz;
+				long	val_shmem_blocksz;
 
 				if (!curr)
 					EMSG("%s appeared outside of code block", cmd);
@@ -764,20 +765,39 @@ plcuda_code_validation(plcudaInfo *cf_info,
 					EMSG("\"%s\" was not a valid value or function",
 						 ident_to_cstring(options));
 			}
-			else if (strcmp(cmd, "#plcuda_kernel_maxthreads") == 0)
+			else if (strcmp(cmd, "#plcuda_kernel_blocksz") == 0)
 			{
+				Oid		fn_kern_blocksz;
+				long	val_kern_blocksz;
+
 				if (!curr)
 					EMSG("%s appeared outside of code block", cmd);
-				else if (list_length(options) > 0)
-					EMSG("syntax error:\n  %s\n", line);
-				else if (curr == &prep_src)
-					cf_info->kern_prep_maxthreads = true;
-				else if (curr == &main_src)
-					cf_info->kern_main_maxthreads = true;
-				else if (curr == &post_src)
-					cf_info->kern_post_maxthreads = true;
+				else if (plcuda_lookup_helper(options,
+											  argtypes, INT8OID,
+											  &fn_kern_blocksz,
+											  &val_kern_blocksz))
+				{
+					if (curr == &prep_src)
+					{
+						cf_info->fn_prep_kern_blocksz = fn_kern_blocksz;
+						cf_info->val_prep_kern_blocksz = val_kern_blocksz;
+					}
+					else if (curr == &main_src)
+					{
+						cf_info->fn_main_kern_blocksz = fn_kern_blocksz;
+						cf_info->val_main_kern_blocksz = val_kern_blocksz;
+					}
+					else if (curr == &post_src)
+					{
+						cf_info->fn_post_kern_blocksz = fn_kern_blocksz;
+						cf_info->val_post_kern_blocksz = val_kern_blocksz;
+					}
+					else
+						EMSG("cannot use \"%s\" in this code block", cmd);
+				}
 				else
-					EMSG("cannot use \"%s\" in this code block", cmd);
+					EMSG("\"%s\" was not a valid value or function",
+						 ident_to_cstring(options));
 			}
 			else if (strcmp(cmd, "#plcuda_working_bufsz") == 0)
 			{
@@ -1019,7 +1039,8 @@ plcuda_codegen(Form_pg_proc procForm,
 	{
 		__plcuda_codegen(&kern, "_prep",
 						 cf_info->kern_prep,
-						 cf_info->kern_prep_maxthreads,
+						 (!OidIsValid(cf_info->fn_prep_kern_blocksz) ||
+						  cf_info->val_prep_kern_blocksz > 0),
 						 procForm,
 						 last_stage);
 		last_stage = "_prep";
@@ -1028,7 +1049,8 @@ plcuda_codegen(Form_pg_proc procForm,
 	{
 		__plcuda_codegen(&kern, "_main",
 						 cf_info->kern_main,
-						 cf_info->kern_main_maxthreads,
+						 (!OidIsValid(cf_info->fn_main_kern_blocksz) ||
+						  cf_info->val_main_kern_blocksz > 0),
 						 procForm,
 						 last_stage);
 		last_stage = "_main";
@@ -1037,7 +1059,8 @@ plcuda_codegen(Form_pg_proc procForm,
 	{
 		__plcuda_codegen(&kern, "_post",
 						 cf_info->kern_post,
-						 cf_info->kern_post_maxthreads,
+						 (!OidIsValid(cf_info->fn_post_kern_blocksz) ||
+						  cf_info->val_post_kern_blocksz > 0),
 						 procForm,
 						 last_stage);
 		last_stage = "_post";
@@ -1302,6 +1325,9 @@ plcuda_function_validator(PG_FUNCTION_ARGS)
 	 */
 	memset(&cf_info, 0, sizeof(plcudaInfo));
 	cf_info.extra_flags = extra_flags;
+	cf_info.val_prep_kern_blocksz = -1;	/* default; performance optimal */
+	cf_info.val_main_kern_blocksz = -1;	/* default; performance optimal */
+	cf_info.val_post_kern_blocksz = -1;	/* default; performance optimal */
 	cf_info.val_prep_num_threads = 1;	/* default */
 	cf_info.val_main_num_threads = 1;	/* default */
 	cf_info.val_post_num_threads = 1;	/* default */
@@ -1332,6 +1358,14 @@ plcuda_function_validator(PG_FUNCTION_ARGS)
 	myself.objectSubId = 0;
 
 	/* dependency to kernel function for prep */
+	if (OidIsValid(cf_info.fn_prep_kern_blocksz))
+	{
+		referenced.classId = ProcedureRelationId;
+		referenced.objectId = cf_info.fn_prep_kern_blocksz;
+		referenced.objectSubId = 0;
+		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
+	}
+
 	if (OidIsValid(cf_info.fn_prep_num_threads))
 	{
 		referenced.classId = ProcedureRelationId;
@@ -1357,6 +1391,14 @@ plcuda_function_validator(PG_FUNCTION_ARGS)
 	}
 
 	/* dependency to kernel function for main */
+	if (OidIsValid(cf_info.fn_main_kern_blocksz))
+	{
+		referenced.classId = ProcedureRelationId;
+		referenced.objectId = cf_info.fn_main_kern_blocksz;
+		referenced.objectSubId = 0;
+		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
+	}
+
 	if (OidIsValid(cf_info.fn_main_num_threads))
 	{
 		referenced.classId = ProcedureRelationId;
@@ -1382,6 +1424,14 @@ plcuda_function_validator(PG_FUNCTION_ARGS)
 	}
 
 	/* dependency to kernel function for post */
+	if (OidIsValid(cf_info.fn_post_kern_blocksz))
+	{
+		referenced.classId = ProcedureRelationId;
+		referenced.objectId = cf_info.fn_post_kern_blocksz;
+		referenced.objectSubId = 0;
+		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
+	}
+
 	if (OidIsValid(cf_info.fn_post_num_threads))
 	{
 		referenced.classId = ProcedureRelationId;
@@ -1586,6 +1636,7 @@ __launch_plcuda_kernels(plcudaState *state,
 	void	   *kern_args[5];
 	size_t		grid_size;
 	size_t		block_size;
+	int			warp_size;
 	CUdevice	cuda_device;
 	CUresult	rc;
 	Datum		retval;
@@ -1596,6 +1647,12 @@ __launch_plcuda_kernels(plcudaState *state,
 	rc = cuStreamCreate(&stream, CU_STREAM_DEFAULT);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuStreamCreate: %s", errorText(rc));
+
+	rc = cuDeviceGetAttribute(&warp_size, CU_DEVICE_ATTRIBUTE_WARP_SIZE,
+							  cuda_device);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
+	Assert((warp_size & (warp_size - 1)) == 0);
 
 	PG_TRY();
 	{
@@ -1615,13 +1672,23 @@ __launch_plcuda_kernels(plcudaState *state,
 		/* kernel launch of the prep function */
 		if (state->kern_prep)
 		{
-			optimal_workgroup_size(&grid_size,
-								   &block_size,
-								   state->kern_prep,
-								   cuda_device,
-								   kplcuda->prep_num_threads,
-								   kplcuda->prep_shmem_blocksz,
-								   kplcuda->prep_shmem_unitsz);
+			if (kplcuda->prep_kern_blocksz > 0)
+			{
+				block_size = (kplcuda->prep_kern_blocksz +
+							  warp_size - 1) & ~(warp_size - 1);
+				grid_size = (kplcuda->prep_num_threads +
+							 block_size - 1) / block_size;
+			}
+			else
+			{
+				optimal_workgroup_size(&grid_size,
+									   &block_size,
+									   state->kern_prep,
+									   cuda_device,
+									   kplcuda->prep_num_threads,
+									   kplcuda->prep_shmem_blocksz,
+									   kplcuda->prep_shmem_unitsz);
+			}
 
 			rc = cuLaunchKernel(state->kern_prep,
 								grid_size, 1, 1,
@@ -1632,23 +1699,38 @@ __launch_plcuda_kernels(plcudaState *state,
 								kern_args,
 								NULL);
 			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
+				ereport(ERROR,
+						(errcode(ERRCODE_INTERNAL_ERROR),
+						 errmsg("failed on cuLaunchKernel: %s", errorText(rc)),
+						 errhint("prep-kernel: grid=%u block=%u shmem=%zu",
+								 (cl_uint)grid_size, (cl_uint)block_size,
+								 kplcuda->prep_shmem_blocksz +
+								 kplcuda->prep_shmem_unitsz * block_size)));
 
-			elog(DEBUG2, "PL/CUDA prep kernel, "
-				 "grid=(%u,1,1), block=(%u,1,1), shmem=%zu",
+			elog(DEBUG2, "PL/CUDA prep-kernel: grid=%u block=%u shmem=%zu",
 				 (cl_uint)grid_size, (cl_uint)block_size,
 				 kplcuda->prep_shmem_blocksz +
 				 kplcuda->prep_shmem_unitsz * block_size);
 		}
 
 		/* kernel launch of the main function */
-		optimal_workgroup_size(&grid_size,
-							   &block_size,
-							   state->kern_main,
-							   cuda_device,
-							   kplcuda->main_num_threads,
-							   kplcuda->main_shmem_blocksz,
-							   kplcuda->main_shmem_unitsz);
+		if (kplcuda->main_kern_blocksz > 0)
+		{
+			block_size = (kplcuda->main_kern_blocksz +
+						  warp_size - 1) & ~(warp_size - 1);
+			grid_size = (kplcuda->main_num_threads +
+						 block_size - 1) / block_size;
+		}
+		else
+		{
+			optimal_workgroup_size(&grid_size,
+								   &block_size,
+								   state->kern_main,
+								   cuda_device,
+								   kplcuda->main_num_threads,
+								   kplcuda->main_shmem_blocksz,
+								   kplcuda->main_shmem_unitsz);
+		}
 
 		rc = cuLaunchKernel(state->kern_main,
 							grid_size, 1, 1,
@@ -1659,25 +1741,39 @@ __launch_plcuda_kernels(plcudaState *state,
 							kern_args,
 							NULL);
 		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("failed on cuLaunchKernel: %s", errorText(rc)),
+					 errhint("main-kernel: grid=%u block=%u shmem=%zu",
+							 (cl_uint)grid_size, (cl_uint)block_size,
+							 kplcuda->main_shmem_blocksz +
+							 kplcuda->main_shmem_unitsz * block_size)));
 
-			elog(DEBUG2, "PL/CUDA main kernel, "
-				 "grid=(%u,1,1), block=(%u,1,1), shmem=%zu",
-				 (cl_uint)grid_size, (cl_uint)block_size,
-				 kplcuda->main_shmem_blocksz +
-				 kplcuda->main_shmem_unitsz * block_size);
+		elog(DEBUG2, "PL/CUDA main-kernel: grid=%u block=%u shmem=%zu",
+			 (cl_uint)grid_size, (cl_uint)block_size,
+		   	 kplcuda->main_shmem_blocksz +
+		   	 kplcuda->main_shmem_unitsz * block_size);
 
 		/* kernel launch of the post function */
 		if (state->kern_post)
 		{
-			optimal_workgroup_size(&grid_size,
-								   &block_size,
-								   state->kern_post,
-								   cuda_device,
-								   kplcuda->post_num_threads,
-								   kplcuda->post_shmem_blocksz,
-								   kplcuda->post_shmem_unitsz);
-
+			if (kplcuda->post_kern_blocksz > 0)
+			{
+				block_size = (kplcuda->post_kern_blocksz +
+							  warp_size - 1) & ~(warp_size - 1);
+				grid_size = (kplcuda->post_num_threads +
+							 block_size - 1) / block_size;
+			}
+			else
+			{
+				optimal_workgroup_size(&grid_size,
+									   &block_size,
+									   state->kern_post,
+									   cuda_device,
+									   kplcuda->post_num_threads,
+									   kplcuda->post_shmem_blocksz,
+									   kplcuda->post_shmem_unitsz);
+			}
 			rc = cuLaunchKernel(state->kern_post,
 								grid_size, 1, 1,
 								block_size, 1, 1,
@@ -1687,10 +1783,15 @@ __launch_plcuda_kernels(plcudaState *state,
 								kern_args,
 								NULL);
 			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
+				ereport(ERROR,
+						(errcode(ERRCODE_INTERNAL_ERROR),
+						 errmsg("failed on cuLaunchKernel: %s", errorText(rc)),
+						 errhint("post-kernel: grid=%u block=%u shmem=%zu",
+								 (cl_uint)grid_size, (cl_uint)block_size,
+								 kplcuda->post_shmem_blocksz +
+								 kplcuda->post_shmem_unitsz * block_size)));
 
-			elog(DEBUG2, "PL/CUDA post kernel, "
-				 "grid=(%u,1,1), block=(%u,1,1), shmem=%zu",
+			elog(DEBUG2, "PL/CUDA post-kernel: grid=%u block=%u shmem=%zu",
 				 (cl_uint)grid_size, (cl_uint)block_size,
 				 kplcuda->post_shmem_blocksz +
 				 kplcuda->post_shmem_unitsz * block_size);
@@ -1870,22 +1971,42 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 
 	if (state->kern_prep)
 	{
-		kplcuda->prep_num_threads
-			= kernel_launch_helper(fcinfo,
-								   cf_info->fn_prep_num_threads,
-								   cf_info->val_prep_num_threads,
-								   NULL);
-		kplcuda->prep_shmem_unitsz
-			= kernel_launch_helper(fcinfo,
-								   cf_info->fn_prep_shmem_unitsz,
-								   cf_info->val_prep_shmem_unitsz,
-								   NULL);
-		kplcuda->prep_shmem_blocksz
-			= kernel_launch_helper(fcinfo,
-								   cf_info->fn_prep_shmem_blocksz,
-								   cf_info->val_prep_shmem_blocksz,
-								   NULL);
-		elog(DEBUG2, "prep{num_threads=%u, shmem_unitsz=%u, shmem_blocksz=%u}",
+		int64		v;
+
+		v = DatumGetInt64(kernel_launch_helper(fcinfo,
+											   cf_info->fn_prep_num_threads,
+											   cf_info->val_prep_num_threads,
+											   NULL));
+		if (v <= 0)
+			elog(ERROR, "kern_prep: invalid number of threads: %ld", v);
+		kplcuda->prep_num_threads = (cl_ulong)v;
+
+		v = DatumGetInt64(kernel_launch_helper(fcinfo,
+											   cf_info->fn_prep_kern_blocksz,
+											   cf_info->val_prep_kern_blocksz,
+											   NULL));
+		if (v <= 0 || v > INT_MAX)
+			elog(ERROR, "kern_prep: invalid kernel block size: %ld", v);
+		kplcuda->prep_kern_blocksz = (cl_uint)v;
+
+		v = DatumGetInt64(kernel_launch_helper(fcinfo,
+											   cf_info->fn_prep_shmem_unitsz,
+											   cf_info->val_prep_shmem_unitsz,
+											   NULL));
+		if (v <= 0 || v > INT_MAX)
+			elog(ERROR, "kern_prep: invalid shared memory required: %ld", v);
+		kplcuda->prep_shmem_unitsz = (cl_uint)v;
+
+		v = DatumGetInt64(kernel_launch_helper(fcinfo,
+											   cf_info->fn_prep_shmem_blocksz,
+											   cf_info->val_prep_shmem_blocksz,
+											   NULL));
+		if (v <= 0 || v > INT_MAX)
+			elog(ERROR, "kern_prep: invalid shared memory required: %ld", v);
+		kplcuda->prep_shmem_blocksz = v;
+
+		elog(DEBUG2, "kern_prep {blocksz=%u, nitems=%lu, shmem=%u,%u}",
+			 kplcuda->prep_kern_blocksz,
 			 kplcuda->prep_num_threads,
 			 kplcuda->prep_shmem_unitsz,
 			 kplcuda->prep_shmem_blocksz);
@@ -1893,22 +2014,42 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 
 	if (state->kern_main)
 	{
-		kplcuda->main_num_threads
-			= kernel_launch_helper(fcinfo,
-								   cf_info->fn_main_num_threads,
-								   cf_info->val_main_num_threads,
-								   NULL);
-		kplcuda->main_shmem_unitsz
-			= kernel_launch_helper(fcinfo,
-								   cf_info->fn_main_shmem_unitsz,
-								   cf_info->val_main_shmem_unitsz,
-								   NULL);
-		kplcuda->main_shmem_blocksz
-			= kernel_launch_helper(fcinfo,
-								   cf_info->fn_main_shmem_blocksz,
-								   cf_info->val_main_shmem_blocksz,
-								   NULL);
-		elog(DEBUG2, "main{num_threads=%u, shmem_unitsz=%u, shmem_blocksz=%u}",
+		int64		v;
+
+		v = DatumGetInt64(kernel_launch_helper(fcinfo,
+											   cf_info->fn_main_num_threads,
+											   cf_info->val_main_num_threads,
+											   NULL));
+		if (v <= 0)
+			elog(ERROR, "kern_main: invalid number of threads: %ld", v);
+		kplcuda->main_num_threads = (cl_ulong)v;
+
+		v = DatumGetInt64(kernel_launch_helper(fcinfo,
+											   cf_info->fn_main_kern_blocksz,
+											   cf_info->val_main_kern_blocksz,
+											   NULL));
+		if (v <= 0 || v > INT_MAX)
+			elog(ERROR, "kern_main: invalid kernel block size: %ld", v);
+		kplcuda->main_kern_blocksz = (cl_uint)v;
+
+		v = DatumGetInt64(kernel_launch_helper(fcinfo,
+											   cf_info->fn_main_shmem_unitsz,
+											   cf_info->val_main_shmem_unitsz,
+											   NULL));
+		if (v <= 0 || v > INT_MAX)
+			elog(ERROR, "kern_main: invalid shared memory required: %ld", v);
+		kplcuda->main_shmem_unitsz = (cl_uint)v;
+
+		v = DatumGetInt64(kernel_launch_helper(fcinfo,
+											   cf_info->fn_main_shmem_blocksz,
+											   cf_info->val_main_shmem_blocksz,
+											   NULL));
+		if (v <= 0 || v > INT_MAX)
+			elog(ERROR, "kern_main: invalid shared memory required: %ld", v);
+		kplcuda->main_shmem_blocksz = v;
+
+		elog(DEBUG2, "kern_main {blocksz=%u, nitems=%lu, shmem=%u,%u}",
+			 kplcuda->main_kern_blocksz,
 			 kplcuda->main_num_threads,
 			 kplcuda->main_shmem_unitsz,
 			 kplcuda->main_shmem_blocksz);
@@ -1916,22 +2057,42 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 
 	if (state->kern_post)
 	{
-		kplcuda->post_num_threads
-			= kernel_launch_helper(fcinfo,
-								   cf_info->fn_post_num_threads,
-								   cf_info->val_post_num_threads,
-								   NULL);
-		kplcuda->post_shmem_unitsz
-			= kernel_launch_helper(fcinfo,
-								   cf_info->fn_post_shmem_unitsz,
-								   cf_info->val_post_shmem_unitsz,
-								   NULL);
-		kplcuda->post_shmem_blocksz
-			= kernel_launch_helper(fcinfo,
-								   cf_info->fn_post_shmem_blocksz,
-								   cf_info->val_post_shmem_blocksz,
-								   NULL);
-		elog(DEBUG2, "post{num_threads=%u, shmem_unitsz=%u, shmem_blocksz=%u}",
+		int64		v;
+
+		v = DatumGetInt64(kernel_launch_helper(fcinfo,
+											   cf_info->fn_post_num_threads,
+											   cf_info->val_post_num_threads,
+											   NULL));
+		if (v <= 0)
+			elog(ERROR, "kern_post: invalid number of threads: %ld", v);
+		kplcuda->post_num_threads = (cl_ulong)v;
+
+		v = DatumGetInt64(kernel_launch_helper(fcinfo,
+											   cf_info->fn_post_kern_blocksz,
+											   cf_info->val_post_kern_blocksz,
+											   NULL));
+		if (v <= 0 || v > INT_MAX)
+			elog(ERROR, "kern_post: invalid kernel block size: %ld", v);
+		kplcuda->post_kern_blocksz = (cl_uint)v;
+
+		v = DatumGetInt64(kernel_launch_helper(fcinfo,
+											   cf_info->fn_post_shmem_unitsz,
+											   cf_info->val_post_shmem_unitsz,
+											   NULL));
+		if (v <= 0 || v > INT_MAX)
+			elog(ERROR, "kern_post: invalid shared memory required: %ld", v);
+		kplcuda->post_shmem_unitsz = (cl_uint)v;
+
+		v = DatumGetInt64(kernel_launch_helper(fcinfo,
+											   cf_info->fn_post_shmem_blocksz,
+											   cf_info->val_post_shmem_blocksz,
+											   NULL));
+		if (v <= 0 || v > INT_MAX)
+			elog(ERROR, "kern_post: invalid shared memory required: %ld", v);
+		kplcuda->post_shmem_blocksz = v;
+
+		elog(DEBUG2, "kern_post {blocksz=%u, nitems=%lu, shmem=%u,%u}",
+			 kplcuda->post_kern_blocksz,
 			 kplcuda->post_num_threads,
 			 kplcuda->post_shmem_unitsz,
 			 kplcuda->post_shmem_blocksz);
