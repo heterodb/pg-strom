@@ -1325,9 +1325,9 @@ plcuda_function_validator(PG_FUNCTION_ARGS)
 	 */
 	memset(&cf_info, 0, sizeof(plcudaInfo));
 	cf_info.extra_flags = extra_flags;
-	cf_info.val_prep_kern_blocksz = -1;	/* default; performance optimal */
-	cf_info.val_main_kern_blocksz = -1;	/* default; performance optimal */
-	cf_info.val_post_kern_blocksz = -1;	/* default; performance optimal */
+	cf_info.val_prep_kern_blocksz = 0;	/* default; performance optimal */
+	cf_info.val_main_kern_blocksz = 0;	/* default; performance optimal */
+	cf_info.val_post_kern_blocksz = 0;	/* default; performance optimal */
 	cf_info.val_prep_num_threads = 1;	/* default */
 	cf_info.val_main_num_threads = 1;	/* default */
 	cf_info.val_post_num_threads = 1;	/* default */
@@ -1985,7 +1985,7 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 											   cf_info->fn_prep_kern_blocksz,
 											   cf_info->val_prep_kern_blocksz,
 											   NULL));
-		if (v <= 0 || v > INT_MAX)
+		if (v < 0 || v > INT_MAX)
 			elog(ERROR, "kern_prep: invalid kernel block size: %ld", v);
 		kplcuda->prep_kern_blocksz = (cl_uint)v;
 
@@ -1993,7 +1993,7 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 											   cf_info->fn_prep_shmem_unitsz,
 											   cf_info->val_prep_shmem_unitsz,
 											   NULL));
-		if (v <= 0 || v > INT_MAX)
+		if (v < 0 || v > INT_MAX)
 			elog(ERROR, "kern_prep: invalid shared memory required: %ld", v);
 		kplcuda->prep_shmem_unitsz = (cl_uint)v;
 
@@ -2001,7 +2001,7 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 											   cf_info->fn_prep_shmem_blocksz,
 											   cf_info->val_prep_shmem_blocksz,
 											   NULL));
-		if (v <= 0 || v > INT_MAX)
+		if (v < 0 || v > INT_MAX)
 			elog(ERROR, "kern_prep: invalid shared memory required: %ld", v);
 		kplcuda->prep_shmem_blocksz = v;
 
@@ -2028,7 +2028,7 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 											   cf_info->fn_main_kern_blocksz,
 											   cf_info->val_main_kern_blocksz,
 											   NULL));
-		if (v <= 0 || v > INT_MAX)
+		if (v < 0 || v > INT_MAX)
 			elog(ERROR, "kern_main: invalid kernel block size: %ld", v);
 		kplcuda->main_kern_blocksz = (cl_uint)v;
 
@@ -2036,7 +2036,7 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 											   cf_info->fn_main_shmem_unitsz,
 											   cf_info->val_main_shmem_unitsz,
 											   NULL));
-		if (v <= 0 || v > INT_MAX)
+		if (v < 0 || v > INT_MAX)
 			elog(ERROR, "kern_main: invalid shared memory required: %ld", v);
 		kplcuda->main_shmem_unitsz = (cl_uint)v;
 
@@ -2044,7 +2044,7 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 											   cf_info->fn_main_shmem_blocksz,
 											   cf_info->val_main_shmem_blocksz,
 											   NULL));
-		if (v <= 0 || v > INT_MAX)
+		if (v < 0 || v > INT_MAX)
 			elog(ERROR, "kern_main: invalid shared memory required: %ld", v);
 		kplcuda->main_shmem_blocksz = v;
 
@@ -2071,7 +2071,7 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 											   cf_info->fn_post_kern_blocksz,
 											   cf_info->val_post_kern_blocksz,
 											   NULL));
-		if (v <= 0 || v > INT_MAX)
+		if (v < 0 || v > INT_MAX)
 			elog(ERROR, "kern_post: invalid kernel block size: %ld", v);
 		kplcuda->post_kern_blocksz = (cl_uint)v;
 
@@ -2079,7 +2079,7 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 											   cf_info->fn_post_shmem_unitsz,
 											   cf_info->val_post_shmem_unitsz,
 											   NULL));
-		if (v <= 0 || v > INT_MAX)
+		if (v < 0 || v > INT_MAX)
 			elog(ERROR, "kern_post: invalid shared memory required: %ld", v);
 		kplcuda->post_shmem_unitsz = (cl_uint)v;
 
@@ -2087,7 +2087,7 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 											   cf_info->fn_post_shmem_blocksz,
 											   cf_info->val_post_shmem_blocksz,
 											   NULL));
-		if (v <= 0 || v > INT_MAX)
+		if (v < 0 || v > INT_MAX)
 			elog(ERROR, "kern_post: invalid shared memory required: %ld", v);
 		kplcuda->post_shmem_blocksz = v;
 
