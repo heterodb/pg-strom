@@ -1039,7 +1039,7 @@ plcuda_codegen(Form_pg_proc procForm,
 	{
 		__plcuda_codegen(&kern, "_prep",
 						 cf_info->kern_prep,
-						 (!OidIsValid(cf_info->fn_prep_kern_blocksz) ||
+						 (OidIsValid(cf_info->fn_prep_kern_blocksz) ||
 						  cf_info->val_prep_kern_blocksz > 0),
 						 procForm,
 						 last_stage);
@@ -1049,7 +1049,7 @@ plcuda_codegen(Form_pg_proc procForm,
 	{
 		__plcuda_codegen(&kern, "_main",
 						 cf_info->kern_main,
-						 (!OidIsValid(cf_info->fn_main_kern_blocksz) ||
+						 (OidIsValid(cf_info->fn_main_kern_blocksz) ||
 						  cf_info->val_main_kern_blocksz > 0),
 						 procForm,
 						 last_stage);
@@ -1059,7 +1059,7 @@ plcuda_codegen(Form_pg_proc procForm,
 	{
 		__plcuda_codegen(&kern, "_post",
 						 cf_info->kern_post,
-						 (!OidIsValid(cf_info->fn_post_kern_blocksz) ||
+						 (OidIsValid(cf_info->fn_post_kern_blocksz) ||
 						  cf_info->val_post_kern_blocksz > 0),
 						 procForm,
 						 last_stage);
