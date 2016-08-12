@@ -16,6 +16,7 @@
  * GNU General Public License for more details.
  */
 #include "postgres.h"
+#include "access/tuptoaster.h"
 #include "access/xact.h"
 #include "catalog/dependency.h"
 #include "catalog/indexing.h"
@@ -1565,7 +1566,7 @@ __build_kern_plcuda(FunctionCallInfo fcinfo,
 		if (cmeta.attlen > 0)
 			total_length += MAXALIGN(cmeta.attlen);
 		else
-			total_length += MAXALIGN(VARSIZE_ANY(fcinfo->arg[i]));
+			total_length += MAXALIGN(toast_raw_datum_size(fcinfo->arg[i]));
 	}
 	total_length = STROMALIGN(total_length);
 
@@ -1604,7 +1605,7 @@ __build_kern_plcuda(FunctionCallInfo fcinfo,
 			}
 			else
 			{
-				char   *vl_ptr = DatumGetPointer(fcinfo->arg[i]);
+				char   *vl_ptr = (char *)PG_DETOAST_DATUM(fcinfo->arg[i]);
 				Size	vl_len = VARSIZE_ANY(vl_ptr);
 
 				memcpy((char *)kparams + offset, vl_ptr, vl_len);

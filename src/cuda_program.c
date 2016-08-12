@@ -1209,9 +1209,11 @@ construct_kern_parambuf(List *used_params, ExprContext *econtext)
 										   DatumGetPointer(con->constvalue),
 										   con->constlen);
 				else
-					appendBinaryStringInfo(&str,
-                                           DatumGetPointer(con->constvalue),
-                                           VARSIZE(con->constvalue));
+				{
+					void   *vl_val = PG_DETOAST_DATUM(con->constvalue);
+
+					appendBinaryStringInfo(&str, vl_val, VARSIZE(vl_val));
+				}
 			}
 		}
 		else if (IsA(node, Param))
@@ -1265,9 +1267,9 @@ construct_kern_parambuf(List *used_params, ExprContext *econtext)
 					}
 					else
 					{
-						appendBinaryStringInfo(&str,
-											   DatumGetPointer(prm->value),
-											   VARSIZE(prm->value));
+						void   *vl_val = PG_DETOAST_DATUM(prm->value);
+
+						appendBinaryStringInfo(&str, vl_val, VARSIZE(vl_val));
 					}
 				}
 			}
