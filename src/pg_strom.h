@@ -202,12 +202,10 @@ struct GpuTask_v2
 	ProgramId		program_id;		/* same with GTS's one */
 	GpuTaskState_v2 *gts;			/* GTS reference in the backend */
 	cl_uint			revision;		/* same with GTS's one when kicked */
-	cl_int			file_desc;		/* FD to be shared with server */
 	bool			row_format;		/* true, if row-format is preferred */
 	bool			cpu_fallback;	/* true, if task needs CPU fallback */
 	bool			perfmon;		/* true, if perfmon is required */
 	/* fields below are valid only server */
-	cl_int			peer_fdesc;		/* duplication of file_desc on server */
 	GpuContext_v2  *gcontext;		/* session info of GPU server */
 	CUstream		cuda_stream;	/* stream object assigned on the task */
 };
