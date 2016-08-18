@@ -255,9 +255,9 @@ fetch_next_gputask(GpuTaskState_v2 *gts)
 {
 	GpuContext_v2	   *gcontext = gts->gcontext;
 	SharedGpuContext   *shgcon = gcontext->shgcon;
-	GpuTaskState_v2	   *__gts;
 	GpuTask_v2		   *gtask;
 	dlist_node		   *dnode;
+	cl_uint				num_ready_tasks;
 	cl_uint				num_recv_tasks = 0;
 	cl_uint				num_sent_tasks = 0;
 
@@ -282,16 +282,9 @@ retry_scan:
 	 * It is non-blocking operations, so we never wait for tasks currently
 	 * running.
 	 */
-	while ((gtask = gpuservRecvGpuTaskTimeout(gcontext, 0)) != NULL)
-	{
-		__gts = gtask->gts;
-
-		dlist_push_tail(&__gts->ready_tasks, &gtask->chain);
-		__gts->num_ready_tasks++;
-
-		if (gts == __gts)
-			num_recv_tasks++;
-	}
+	num_ready_tasks = gts->num_ready_tasks;
+	while (gpuservRecvGpuTasks(gcontext, 0));
+	num_recv_tasks = gts->num_ready_tasks - num_ready_tasks;
 
 	/*
 	 * Fetch and send GpuTasks - We already fetched several tasks that were
@@ -335,15 +328,10 @@ retry_scan:
 			{
 				SpinLockRelease(&shgcon->lock);
 
-				gtask = gpuservRecvGpuTaskTimeout(gcontext, 0);
-				if (gtask)
+				num_ready_tasks = gts->num_ready_tasks;
+				if (gpuservRecvGpuTasks(gcontext, 0))
 				{
-					__gts = gtask->gts;
-
-					dlist_push_tail(&__gts->ready_tasks, &gtask->chain);
-					__gts->num_ready_tasks++;
-
-					if (gts == __gts)
+					if (gts->num_ready_tasks > num_ready_tasks)
 						break;
 				}
 
@@ -396,14 +384,7 @@ retry_fetch:
 		 * If we have any asynchronous tasks, try synchronous receive to
 		 * get next task.
 		 */
-		gtask = gpuservRecvGpuTask(gcontext);
-		if (gtask)
-		{
-			__gts = gtask->gts;
-			dlist_push_tail(&__gts->ready_tasks, &gtask->chain);
-			__gts->num_ready_tasks++;
-		}
-		else
+		if (!gpuservRecvGpuTasks(gcontext, -1))
 			elog(ERROR, "GPU server response timeout...");
 	}
 

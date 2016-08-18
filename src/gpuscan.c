@@ -2331,7 +2331,7 @@ gpuscan_cleanup_cuda_resources(GpuScanTask *gscan)
 
 	if (gscan->m_gpuscan)
 	{
-		rc = gpuMemFree_v2(gpuserv_gpu_context, gscan->m_gpuscan);
+		rc = gpuMemFree_v2(gscan->task.gcontext, gscan->m_gpuscan);
 		if (rc != CUDA_SUCCESS)
 			elog(WARNING, "failed on gpuMemFree: %s", errorText(rc));
 	}
@@ -2376,11 +2376,11 @@ gpuscan_respond_task(CUstream stream, CUresult status, void *private)
  * gpuscan_process_task
  */
 int
-gpuscan_process_task(GpuTask_v2 *gputask,
+gpuscan_process_task(GpuTask_v2 *gtask,
 					 CUmodule cuda_module,
 					 CUstream cuda_stream)
 {
-	GpuScanTask		   *gscan = (GpuScanTask *) gputask;
+	GpuScanTask		   *gscan = (GpuScanTask *) gtask;
 	pgstrom_data_store *pds_src = gscan->pds_src;
 	pgstrom_data_store *pds_dst = gscan->pds_dst;
 	cl_uint				src_nitems = pds_src->kds.nitems;
@@ -2419,7 +2419,7 @@ gpuscan_process_task(GpuTask_v2 *gputask,
 	if (pds_dst)
 		length += GPUMEMALIGN(KERN_DATA_STORE_LENGTH(&pds_dst->kds));
 
-	rc = gpuMemAlloc_v2(gpuserv_gpu_context, &gscan->m_gpuscan, length);
+	rc = gpuMemAlloc_v2(gtask->gcontext, &gscan->m_gpuscan, length);
 	if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		goto out_of_resource;
 	else if (rc != CUDA_SUCCESS)
@@ -2600,9 +2600,9 @@ out_of_resource:
  * gpuscan_complete_task
  */
 int
-gpuscan_complete_task(GpuTask_v2 *gputask)
+gpuscan_complete_task(GpuTask_v2 *gtask)
 {
-	GpuScanTask	   *gscan = (GpuScanTask *) gputask;
+	GpuScanTask	   *gscan = (GpuScanTask *) gtask;
 
 	if (gscan->kern.kerror.errcode != StromError_Success)
 		elog(ERROR, "GPU kernel internal error: %s",
@@ -2630,9 +2630,9 @@ gpuscan_complete_task(GpuTask_v2 *gputask)
  * gpuscan_release_task
  */
 void
-gpuscan_release_task(GpuTask_v2 *gputask)
+gpuscan_release_task(GpuTask_v2 *gtask)
 {
-	GpuScanTask	   *gscan = (GpuScanTask *) gputask;
+	GpuScanTask	   *gscan = (GpuScanTask *) gtask;
 
 	if (gscan->pds_src)
 		PDS_release(gscan->pds_src);

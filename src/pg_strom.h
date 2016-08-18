@@ -205,9 +205,11 @@ struct GpuTask_v2
 	bool			row_format;		/* true, if row-format is preferred */
 	bool			cpu_fallback;	/* true, if task needs CPU fallback */
 	bool			perfmon;		/* true, if perfmon is required */
+	int				file_desc;		/* file-descriptor on backend side */
 	/* fields below are valid only server */
 	GpuContext_v2  *gcontext;		/* session info of GPU server */
 	CUstream		cuda_stream;	/* stream object assigned on the task */
+	int				peer_fdesc;		/* FD moved via SCM_RIGHTS */
 };
 typedef struct GpuTask_v2 GpuTask_v2;
 
@@ -447,20 +449,15 @@ extern void pgstrom_init_gpu_context(void);
 /*
  * gpu_server.c
  */
-extern GpuContext_v2   *gpuserv_gpu_context;
 extern CUdevice			gpuserv_cuda_device;
 extern CUcontext		gpuserv_cuda_context;
 
 extern bool IsGpuServerProcess(void);
-extern void gpuservHandleLazyJobs(bool flush_completed,
-								  bool process_pending);
-extern void gpuservWakeUpProc(void);
+extern void gpuservTryToWakeUp(void);
 extern void notifierGpuMemFree(cl_int device_id);
 extern bool gpuservOpenConnection(GpuContext_v2 *gcontext);
 extern bool gpuservSendGpuTask(GpuContext_v2 *gcontext, GpuTask_v2 *gtask);
-extern GpuTask_v2 *gpuservRecvGpuTask(GpuContext_v2 *gcontext);
-extern GpuTask_v2 *gpuservRecvGpuTaskTimeout(GpuContext_v2 *gcontext,
-										  long timeout);
+extern bool gpuservRecvGpuTasks(GpuContext_v2 *gcontext, long timeout);
 extern void gpuservCompleteGpuTask(GpuTask_v2 *gtask, bool is_urgent);
 
 extern void pgstrom_init_gpu_server(void);

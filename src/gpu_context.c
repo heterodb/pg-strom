@@ -390,6 +390,7 @@ AllocGpuContext(bool with_connection)
 	dlist_node	   *dnode;
 	int				i;
 
+	Assert(!IsGpuServerProcess());
 	if (IsGpuServerProcess())
 		elog(FATAL, "Bug? Only backend process can get a new GpuContext");
 

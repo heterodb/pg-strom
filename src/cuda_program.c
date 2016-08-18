@@ -973,10 +973,9 @@ pgstrom_create_cuda_program(GpuContext_v2 *gcontext,
 		pgcache_head->program_cache_usage += dmaBufferChunkSize(entry);
 		if (pgcache_head->program_cache_usage > program_cache_size)
 			reclaim_cuda_program_entry();
-		/*
-		 * Waking up GPU server which are in sleep.
-		 */
-		gpuservWakeUpProcesses(1);
+
+		/* try to wake up a GPU server process (likely inactive) */
+		gpuservTryToWakeUp();
 	}
 	PG_CATCH();
 	{
