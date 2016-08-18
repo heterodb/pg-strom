@@ -382,7 +382,7 @@ MasterGpuContext(void)
  * GetGpuContext - acquire a free GpuContext
  */
 GpuContext_v2 *
-GetGpuContext(bool with_connection)
+AllocGpuContext(bool with_connection)
 {
 	GpuContext_v2  *gcontext = NULL;
 	SharedGpuContext *shgcon;
@@ -550,6 +550,17 @@ AttachGpuContext(pgsocket sockfd,
 }
 
 /*
+ * GetGpuContext - increment reference counter
+ */
+GpuContext_v2 *
+GetGpuContext(GpuContext_v2 *gcontext)
+{
+	Assert(gcontext > 0);
+	gcontext->refcnt++;
+	return gcontext;
+}
+
+/*
  * PutSharedGpuContext - detach SharedGpuContext
  */
 void
@@ -583,18 +594,23 @@ PutSharedGpuContext(SharedGpuContext *shgcon)
 /*
  * PutGpuContext - detach GpuContext; to be called by only backend
  */
-void
+bool
 PutGpuContext(GpuContext_v2 *gcontext)
 {
+	bool	is_last_one = false;
+
 	Assert(gcontext->refcnt > 0);
 	if (--gcontext->refcnt == 0)
 	{
+		is_last_one = true;
+
 		dlist_delete(&gcontext->chain);
 		ReleaseLocalResources(gcontext, true);
 		PutSharedGpuContext(gcontext->shgcon);
 		memset(gcontext, 0, sizeof(GpuContext_v2));
 		dlist_push_head(&inactiveGpuContextList, &gcontext->chain);
 	}
+	return is_last_one;
 }
 
 /*

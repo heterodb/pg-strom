@@ -31,11 +31,6 @@
 #include <sys/un.h>
 #include <unistd.h>
 
-typedef struct GpuServSocket
-{
-	pgsocket		sockfd;
-	struct sockaddr_un sockadd;
-} GpuServSocket;
 
 typedef struct GpuServProc
 {
@@ -265,6 +260,134 @@ ReportErrorForBackend(GpuTask_v2 *gtask, MemoryContext memcxt)
 }
 
 /*
+ * gpuservPutGpuContext
+ *
+ * Put a GpuContext for a particular backend, and takes some extra stuff
+ * to update the session info.
+ */
+static void
+gpuservPutGpuContext(GpuContext_v2 *gcontext)
+{
+	if (PutGpuContext(gcontext))
+	{
+		cl_int		i;
+
+		/* It shall be already closed */
+		Assert(gcontext->sockfd == PGINVALID_SOCKET);
+
+		/*
+		 * Remove the closed session from the WaitEventSet
+		 *
+		 * NOTE: It should NOT be removed when a connection gets closed
+		 * immediately, because asynchronous tasks may be still running
+		 * when peer backend closed the UNIX domain socket.
+		 * If this asynchronous task raised an error after the connection
+		 * closed, try...catch block forces to detach SharedGpuContext
+		 * not to leak shared memory region. However, if we would remove
+		 * the WaitEvent immediately, error handler cannot reference the
+		 * SharedGpuContext, then it leads memory leak!
+		 */
+		for (i=0; i < session_num_clients; i++)
+		{
+			if (session_events[i].user_data != (void *)gcontext)
+				continue;
+
+			if (i + 1 < session_num_clients)
+				memmove(session_events + i,
+						session_events + i + 1,
+						sizeof(WaitEvent) * (session_num_clients - (i + 1)));
+			session_num_clients--;
+
+			/*
+			 * Then, reconstruct WaitEventSet with remained sessions
+			 *
+			 * TODO: We hope an interface to remove a particular WaitEvent
+			 * from the WaitEventSet, but not provided at PostgreSQL 9.6. :-(
+			 */
+			FreeWaitEventSet(session_event_set);
+			session_event_set = CreateWaitEventSet(TopMemoryContext,
+												   MaxBackends);
+			AddWaitEventToSet(session_event_set,
+							  WL_POSTMASTER_DEATH |
+							  WL_LATCH_SET |
+							  WL_SOCKET_READABLE,
+							  gpuserv_server_sockfd,
+							  MyLatch, NULL);
+			for (i=0; i < session_num_clients; i++)
+			{
+				AddWaitEventToSet(session_event_set,
+								  session_events[i].events,
+								  session_events[i].fd,
+								  NULL,		/* no latch */
+								  session_events[i].user_data);
+			}
+
+			/*
+			 * Inactivates this GPU server process - If supplied GpuContext
+			 * is the last session of the backends group, this GPU server
+			 * will become able to accept connection from any other unrelated
+			 * sessions again.
+			 */
+			if (session_num_clients == 0)
+			{
+				bool	unload_cuda_modules = true;
+
+				SpinLockAcquire(&gpuServState->lock);
+				if (gpuServProc->backend_id != InvalidBackendId)
+				{
+					/*
+					 * NOTE: Oh, it is an extreme corver case. Last session
+					 * was closed just moment before, however, a new sibling
+					 * backend trying to accept(2).
+					 * Next WaitEventSetWait() will return immediately because
+					 * the backend already issued connect(2) system call. So,
+					 * we don't need to inactivate this GPU server.
+					 */
+					unload_cuda_modules = false;
+				}
+				else
+				{
+					dlist_head	   *dhead;
+
+					gpuServProc->backend_leader_id = InvalidBackendId;
+					gpuServProc->backend_id = InvalidBackendId;
+					gpuServProc->gcontext_id = INVALID_GPU_CONTEXT_ID;
+
+					dhead = &gpuServState->serv_procs_list[gpuserv_dindex];
+					dlist_delete(&gpuServProc->chain);
+					dlist_push_tail(dhead, &gpuServProc->chain);
+				}
+				SpinLockRelease(&gpuServState->lock);
+
+				/* Unload all the CUDA modules used by this session */
+				if (unload_cuda_modules)
+				{
+					cudaModuleCache	   *cache;
+                    dlist_node		   *dnode;
+                    CUresult			rc;
+
+					for (i=0; i < CUDA_MODULES_SLOTSIZE; i++)
+					{
+						while (!dlist_is_empty(&cuda_modules_slot[i]))
+						{
+							dnode = dlist_pop_head_node(&cuda_modules_slot[i]);
+							cache = dlist_container(cudaModuleCache,
+													chain, dnode);
+							rc = cuModuleUnload(cache->cuda_module);
+							if (rc != CUDA_SUCCESS)
+								elog(WARNING, "failed on cuModuleUnload: %s",
+									 errorText(rc));
+						}
+					}
+				}
+			}
+			return;
+		}
+		elog(FATAL, "Bug? GPU server misses the GpuContext");
+	}
+}
+
+/*
  * gpuservProcessPendingTasks
  */
 static void
@@ -361,7 +484,7 @@ gpuservProcessPendingTasks(void)
 }
 
 /*
- * flushout_completed_tasks
+ * gpuservFlushOutCompletedTasks
  */
 static void
 gpuservFlushOutCompletedTasks(void)
@@ -407,6 +530,7 @@ gpuservFlushOutCompletedTasks(void)
 				gtask->gcontext = NULL;
 				if (!gpuservSendGpuTask(gcontext, gtask))
 					elog(ERROR, "failed on gpuservSendGpuTask");
+				gpuservPutGpuContext(gcontext);
 			}
 			else if (retval > 0)
 			{
@@ -425,7 +549,8 @@ gpuservFlushOutCompletedTasks(void)
 				 * So, we have to decrement num_async_tasks and set latch
 				 * of the backend process (it may wait for the last task).
 				 */
-				SharedGpuContext *shgcon = gpuserv_gpu_context->shgcon;
+				GpuContext_v2	   *gcontext = gtask->gcontext;
+				SharedGpuContext   *shgcon = gcontext->shgcon;
 
 				pgstromReleaseGpuTask(gtask);
 
@@ -434,6 +559,8 @@ gpuservFlushOutCompletedTasks(void)
 				SpinLockRelease(&shgcon->lock);
 
 				SetLatch(&shgcon->backend->procLatch);
+
+				gpuservPutGpuContext(gcontext);
 			}
 		}
 		PG_CATCH();
@@ -448,32 +575,6 @@ gpuservFlushOutCompletedTasks(void)
 	SpinLockRelease(&session_tasks_lock);
 }
 
-#if 0
-/*
- * gpuservHandleLazyJobs
- */
-void
-gpuservHandleLazyJobs(bool flushout_completed, bool process_pending)
-{
-	/* Exit, if SIGTERM was delivered */
-	if (gpuserv_got_sigterm)
-		ereport(FATAL,
-				(errcode(ERRCODE_ADMIN_SHUTDOWN),
-				 errmsg("Terminating PG-Strom GPU/CUDA Server[%d]",
-						gpuserv_id)));
-	/* flush out completed tasks, if any */
-	if (flushout_completed)
-		gpuservFlushOutCompletedTasks();
-	/* process pending tasks, if any */
-	if (process_pending)
-		gpuservProcessPendingTasks();
-	/* flush out completed tasks again, if any */
-	if (flushout_completed)
-		gpuservFlushOutCompletedTasks();
-	/* build a new CUDA program, if any */
-	pgstrom_try_build_cuda_program();
-}
-#endif
 /*
  * gpuservWakeUpProc - wakes up a sleeping GPU server process
  */
@@ -926,102 +1027,6 @@ gpuservAcceptConnection(void)
 }
 
 /*
- * gpuservCloseConnection
- */
-static void
-gpuservCloseConnection(GpuContext_v2 *gcontext)
-{
-	cl_int		i;
-
-	Assert(IsGpuServerProcess());
-
-	/*
-	 * Close the session.
-	 *
-	 * PutGpuContext() will also close the socket, however, peer socket
-	 * is already closed at this point. If any asynchronous tasks are
-	 * still running, it is waste of time to wait for ready of socket
-	 * writable. Thus, we close the socket immediately.
-	 * The completed tasks shall be reclaimed, simply.
-	 */
-	if (gcontext->sockfd != PGINVALID_SOCKET)
-	{
-		if (close(gcontext->sockfd) != 0)
-			elog(WARNING, "failed on close(%d) socket: %m",
-				 gcontext->sockfd);
-		gcontext->sockfd = PGINVALID_SOCKET;
-	}
-	PutGpuContext(gcontext);
-
-	/*
-	 * remove the closed session from the WaitEventSet
-	 */
-	for (i=0; i < session_num_clients; i++)
-	{
-		if (session_events[i].user_data != (void *)gcontext)
-			continue;
-
-		if (i + 1 < session_num_clients)
-			memmove(session_events + i,
-					session_events + i + 1,
-					sizeof(WaitEvent) * (session_num_clients - (i+1)));
-		session_num_clients--;
-
-		/* then, reconstruct WaitEventSet with remained sessions */
-		FreeWaitEventSet(session_event_set);
-		session_event_set = CreateWaitEventSet(TopMemoryContext,
-											   MaxBackends);
-		AddWaitEventToSet(session_event_set,
-						  WL_POSTMASTER_DEATH |
-						  WL_LATCH_SET |
-						  WL_SOCKET_READABLE,
-						  gpuserv_server_sockfd,
-						  MyLatch, NULL);
-		for (i=0; i < session_num_clients; i++)
-		{
-			AddWaitEventToSet(session_event_set,
-							  session_events[i].events,
-							  session_events[i].fd,
-							  NULL,		/* no latch */
-							  session_events[i].user_data);
-		}
-
-		/*
-		 * Inactivates this GPU server process - If supplied GpuContext is
-		 * the last session of the group of backends, this GPU server can
-		 * accept connection from any other unrelated sessions again.
-		 */
-		if (session_num_clients == 0)
-		{
-			SpinLockAcquire(&gpuServState->lock);
-			if (gpuServProc->backend_id != InvalidBackendId)
-			{
-				/*
-				 * NOTE: Oh, it is an extreme corver case. Last session was
-				 * closed just moment before, however, a new sibling backend
-				 * trying to accept(2).
-				 * Next WaitEventSetWait() will return immediately because
-				 * the backend already issued connect(2) system call. So, we
-				 * don't need to inactivate this GPU server.
-				 */
-			}
-			else
-			{
-				gpuServProc->backend_leader_id = InvalidBackendId;
-				gpuServProc->backend_id = InvalidBackendId;
-				gpuServProc->gcontext_id = INVALID_GPU_CONTEXT_ID;
-				dlist_delete(&gpuServProc->chain);
-				dlist_push_tail(&gpuServState->serv_procs_list[gpuserv_dindex],
-								&gpuServProc->chain);
-			}
-			SpinLockRelease(&gpuServState->lock);
-		}
-		return;
-	}
-	elog(FATAL, "Bug? GPU server misses the GpuContext");
-}
-
-/*
  * gpuservRecvCommands
  */
 static bool
@@ -1083,8 +1088,8 @@ gpuservRecvCommands(GpuContext_v2 *gcontext)
 
 			if (IsGpuServerProcess())
 			{
-				// we need an api to just inc refcnt
-				gtask->gcontext = GetGpuContext(gcontext)
+				/* add refcnt by GpuTask */
+				gtask->gcontext = GetGpuContext(gcontext);
 
 				SpinLockAcquire(&session_tasks_lock);
 				dlist_push_tail(&session_pending_tasks, &gtask->chain);
@@ -1212,32 +1217,21 @@ gpuserv_session_main(void)
 					GpuContext_v2  *gcontext = event.user_data;
 
 					if (!gpuservRecvCommands(gcontext))
-						gpuservCloseConnection(gcontext);
+					{
+						/* peer connection closed */
+						if (gcontext->sockfd != PGINVALID_SOCKET)
+						{
+							if (close(gcontext->sockfd) != 0)
+								elog(WARNING, "failed on close(%d) socket: %m",
+									 gcontext->sockfd);
+							gcontext->sockfd = PGINVALID_SOCKET;
+						}
+						gpuservPutGpuContext(gcontext);
+					}
 				}
 			}
 		}
 	}
-
-
-#if 0
-	/* Unload all the CUDA modules;  */ --> once deactivated;
-	for (i=0; i < CUDA_MODULES_SLOTSIZE; i++)
-	{
-		cudaModuleCache *cache;
-		dlist_node *dnode;
-		CUresult	rc;
-
-		while (!dlist_is_empty(&cuda_modules_slot[i]))
-		{
-			dnode = dlist_pop_head_node(&cuda_modules_slot[i]);
-			cache = dlist_container(cudaModuleCache, chain, dnode);
-
-			rc = cuModuleUnload(cache->cuda_module);
-			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on cuModuleUnload: %s", errorText(rc));
-		}
-	}
-#endif
 }
 
 /*
@@ -1246,7 +1240,6 @@ gpuserv_session_main(void)
 static void
 gpuserv_bgworker_main(Datum __server_id)
 {
-	pgsocket		sockfd;
 	CUresult		rc;
 	cl_int			i;
 	struct timeval	timeout;
@@ -1260,7 +1253,7 @@ gpuserv_bgworker_main(Datum __server_id)
 
 	/* Open the server socket */
 	gpuserv_server_sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
-	if (sockfd < 0)
+	if (gpuserv_server_sockfd < 0)
 		elog(ERROR, "failed on socket(AF_UNIX, SOCK_STREAM, 0): %m");
 
 	if (bind(gpuserv_server_sockfd,
@@ -1365,10 +1358,18 @@ gpuserv_bgworker_main(Datum __server_id)
 		/*
 		 * Destroy the CUDA context not to wake up the callback functions
 		 * any more, regardless of the status of asynchronous GpuTasks.
+		 *
+		 * NOTE: We should never force to detach SharedGpuContext prior
+		 * to destroy of CUDA context, because asynchronous tasks are
+		 * still in-progress, thus, it may touch DMA buffer allocated
+		 * on the shared memory segment. Once PutSharedGpuContext() is
+		 * called, here is no guarantee the shared memory segment is
+		 * assigned to the GpuTask. Eventually, it may lead memory
+		 * corruption hard to find out.
 		 */
 		rc = cuCtxDestroy(gpuserv_cuda_context);
 		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuCtxDestroy: %s", errorText(rc));
+			elog(FATAL, "failed on cuCtxDestroy: %s", errorText(rc));
 
 		/*
 		 * Shared portion of GpuContext has to be detached regardless of

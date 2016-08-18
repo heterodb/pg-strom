@@ -425,12 +425,13 @@ extern void pgstrom_init_dma_buffer(void);
  * gpu_context.c
  */
 extern GpuContext_v2 *MasterGpuContext(void);
-extern GpuContext_v2 *GetGpuContext(bool with_connection);
+extern GpuContext_v2 *AllocGpuContext(bool with_connection);
 extern GpuContext_v2 *AttachGpuContext(pgsocket sockfd,
 									   cl_int context_id,
 									   BackendId backend_id,
 									   cl_int device_id);
-extern void PutGpuContext(GpuContext_v2 *gcontext);
+extern GpuContext_v2 *GetGpuContext(GpuContext_v2 *gcontext);
+extern bool PutGpuContext(GpuContext_v2 *gcontext);
 extern void PutSharedGpuContext(SharedGpuContext *shgcon);
 
 extern void	trackFileDesc(GpuContext_v2 *gcontext, int fdesc);

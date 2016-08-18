@@ -1715,7 +1715,7 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	Assert(innerPlan(node) == NULL);
 
 	/* activate a GpuContext for CUDA kernel execution */
-	gcontext = GetGpuContext(with_connection);
+	gcontext = AllocGpuContext(with_connection);
 
 	/* setup common GpuTaskState fields */
 	pgstromInitGpuTaskState(&gss->gts,
