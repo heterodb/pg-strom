@@ -206,9 +206,8 @@ lookupCudaModuleCache(ProgramId program_id)
  * It send back a error command to the backend immediately.
  */
 static void
-ReportErrorForBackend(GpuTask_v2 *gtask, MemoryContext memcxt)
+ReportErrorForBackend(GpuContext_v2 *gcontext, MemoryContext memcxt)
 {
-	GpuContext_v2  *gcontext = gtask->gcontext;
 	MemoryContext	oldcxt;
 	ErrorData	   *errdata;
 	GpuServCommand *cmd;
@@ -322,9 +321,6 @@ gpuservPutGpuContext(GpuContext_v2 *gcontext)
 	{
 		cl_int		i;
 
-		/* It shall be already closed */
-		Assert(gcontext->sockfd == PGINVALID_SOCKET);
-
 		/*
 		 * Remove the closed session from the WaitEventSet
 		 *
@@ -424,6 +420,7 @@ gpuservProcessPendingTasks(void)
 	MemoryContext	memcxt = CurrentMemoryContext;
 	dlist_node	   *dnode;
 	GpuTask_v2	   *gtask;
+	GpuContext_v2  *gcontext;
 
 	SpinLockAcquire(&session_tasks_lock);
 	while (!dlist_is_empty(&session_pending_tasks))
@@ -437,6 +434,7 @@ gpuservProcessPendingTasks(void)
 		gtask = dlist_container(GpuTask_v2, chain, dnode);
 		SpinLockRelease(&session_tasks_lock);
 
+		gcontext = gtask->gcontext;
 		PG_TRY();
 		{
 			cuda_module = lookupCudaModuleCache(gtask->program_id);
@@ -488,7 +486,7 @@ gpuservProcessPendingTasks(void)
 		}
 		PG_CATCH();
 		{
-			ReportErrorForBackend(gtask, memcxt);
+			ReportErrorForBackend(gcontext, memcxt);
 			PG_RE_THROW();
 		}
 		PG_END_TRY();
@@ -520,6 +518,8 @@ gpuservFlushOutCompletedTasks(void)
 	MemoryContext	memcxt = CurrentMemoryContext;
 	dlist_node	   *dnode;
 	GpuTask_v2	   *gtask;
+	GpuContext_v2  *gcontext;
+	int				peer_fdesc;
 	int				retval;
 	CUresult		rc;
 
@@ -531,6 +531,8 @@ gpuservFlushOutCompletedTasks(void)
 		memset(&gtask->chain, 0, sizeof(dlist_node));
 		SpinLockRelease(&session_tasks_lock);
 
+		gcontext = gtask->gcontext;
+		peer_fdesc = gtask->peer_fdesc;
 		PG_TRY();
 		{
 			/*
@@ -553,9 +555,6 @@ gpuservFlushOutCompletedTasks(void)
 
 			if (retval == 0)
 			{
-				GpuContext_v2  *gcontext = gtask->gcontext;
-				int				peer_fdesc = gtask->peer_fdesc;
-
 				gtask->gcontext = NULL;
 				gtask->peer_fdesc = -1;
 				if (!gpuservSendGpuTask(gcontext, gtask))
@@ -581,7 +580,6 @@ gpuservFlushOutCompletedTasks(void)
 				 * So, we have to decrement num_async_tasks and set latch
 				 * of the backend process (it may wait for the last task).
 				 */
-				GpuContext_v2	   *gcontext = gtask->gcontext;
 				SharedGpuContext   *shgcon = gcontext->shgcon;
 
 				pgstromReleaseGpuTask(gtask);
@@ -592,12 +590,14 @@ gpuservFlushOutCompletedTasks(void)
 
 				SetLatch(&shgcon->backend->procLatch);
 
+				if (peer_fdesc >= 0)
+					close(peer_fdesc);
 				gpuservPutGpuContext(gcontext);
 			}
 		}
 		PG_CATCH();
 		{
-			ReportErrorForBackend(gtask, memcxt);
+			ReportErrorForBackend(gcontext, memcxt);
 			PG_RE_THROW();
 		}
 		PG_END_TRY();
@@ -788,6 +788,7 @@ gpuservOpenConnection(GpuContext_v2 *gcontext)
 	GpuServProc	   *serv_proc;
 	pgsocket		sockfd = PGINVALID_SOCKET;
 	BackendId		MyBackendLeaderId;
+	cl_int			gpuserv_id;
 	cl_int			dindex;
 	cl_int			dindex_first;
 	cl_long			timeout = 400;	/* up to 400ms for connect(2) */
@@ -877,11 +878,8 @@ retry_lookup:
 	serv_proc->gcontext_id = gcontext->shgcon->context_id;
 	SpinLockRelease(&gpuServState->lock);
 
-	// FIXME: above fields in serv_proc must be reverted if socket(2) or
-	// others made an error.
-
 	/*
-	 * open the connection
+	 * Open the connection
 	 */
 	sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (sockfd < 0)
@@ -918,6 +916,8 @@ retry_lookup:
 	{
 		int		ev;
 
+		CHECK_FOR_INTERRUPTS();
+
 		ResetLatch(MyLatch);
 
 		ev = WaitLatch(MyLatch,
@@ -945,7 +945,9 @@ retry_lookup:
 		close(sockfd);
 		elog(ERROR, "Bug? server's PGPROC was not set correctly");
 	}
+	elog(DEBUG2, "connect socket %d to GPU server %d", sockfd, gpuserv_id);
 	gcontext->sockfd = sockfd;
+
 	return true;		/* OK, connection established */
 }
 
@@ -1297,7 +1299,7 @@ gpuservRecvGpuTasks(GpuContext_v2 *gcontext, long timeout)
 		ev = WaitLatchOrSocket(MyLatch,
 							   WL_LATCH_SET |
 							   WL_SOCKET_READABLE |
-							   (timeout > 0 ? WL_TIMEOUT : 0) |
+							   (timeout >= 0 ? WL_TIMEOUT : 0) |
 							   WL_POSTMASTER_DEATH,
 							   gcontext->sockfd,
 							   timeout);
@@ -1317,10 +1319,12 @@ gpuservRecvGpuTasks(GpuContext_v2 *gcontext, long timeout)
 					if (close(gcontext->sockfd) != 0)
 						elog(WARNING, "failed on close(%d) socket: %m",
 							 gcontext->sockfd);
+					else
+						elog(NOTICE, "sockfd=%d closed", gcontext->sockfd);
 					gcontext->sockfd = PGINVALID_SOCKET;
 				}
-				break;
 			}
+			break;
 		}
 		/* adjust timeout */
 		if (timeout > 0)
@@ -1329,8 +1333,10 @@ gpuservRecvGpuTasks(GpuContext_v2 *gcontext, long timeout)
 
 			timeout -= ((tv2.tv_sec * 1000 + tv2.tv_usec / 1000) -
 						(tv1.tv_sec * 1000 + tv1.tv_usec / 1000));
+			if (timeout < 0)
+				break;
 		}
-	} while (timeout > 0);
+	} while (timeout != 0);
 
 	return retval;
 }
@@ -1407,7 +1413,10 @@ gpuserv_session_main(void)
 			if (event.events & WL_SOCKET_READABLE)
 			{
 				if (!event.user_data)
+				{
 					gpuservAcceptConnection();
+					elog(LOG, "accept connection");
+				}
 				else
 				{
 					GpuContext_v2  *gcontext = event.user_data;

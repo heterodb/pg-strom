@@ -120,6 +120,7 @@ closeFileDesc(GpuContext_v2 *gcontext, int fdesc)
 	dlist_head *restrack_list;
 	dlist_iter	iter;
 	pg_crc32	crc;
+	int			rc;
 
 	crc = resource_tracker_hashval(RESTRACK_CLASS__FILEDESC,
 								   &fdesc, sizeof(int));
@@ -138,12 +139,14 @@ closeFileDesc(GpuContext_v2 *gcontext, int fdesc)
 			memset(tracker, 0, sizeof(ResourceTracker));
 			dlist_push_head(&inactiveResourceTracker,
 							&tracker->chain);
-			elog(INFO, "fdesc=%d closed", fdesc);
-			return close(fdesc);
+			if ((rc = close(fdesc)) != 0)
+				elog(WARNING, "failed on socket close(%d): %m", fdesc);
+			else
+				elog(DEBUG2, "socket %d was closed", fdesc);
+			return rc;
 		}
 	}
 	elog(WARNING, "Bug? file-descriptor %d was not tracked", fdesc);
-
 	return close(fdesc);
 }
 
@@ -309,6 +312,9 @@ ReleaseLocalResources(GpuContext_v2 *gcontext, bool normal_exit)
 		if (close(gcontext->sockfd) != 0)
 			elog(WARNING, "failed on close(%d) socket: %m",
 				 gcontext->sockfd);
+		else
+			elog(DEBUG2, "socket %d was closed", gcontext->sockfd);
+		gcontext->sockfd = PGINVALID_SOCKET;
 	}
 
 	for (i=0; i < RESTRACK_HASHSIZE; i++)
@@ -328,6 +334,8 @@ ReleaseLocalResources(GpuContext_v2 *gcontext, bool normal_exit)
 					if (close(tracker->u.fdesc) != 0)
 						elog(WARNING, "failed on close(%d): %m",
 							 tracker->u.fdesc);
+					else
+						elog(DEBUG2, "socket %d was closed", tracker->u.fdesc);
 					break;
 
 				case RESTRACK_CLASS__GPUMEMORY:
@@ -608,6 +616,14 @@ PutGpuContext(GpuContext_v2 *gcontext)
 		dlist_delete(&gcontext->chain);
 		ReleaseLocalResources(gcontext, true);
 		PutSharedGpuContext(gcontext->shgcon);
+		if (gcontext->sockfd != PGINVALID_SOCKET)
+		{
+			if (close(gcontext->sockfd) != 0)
+				elog(WARNING, "failed on close socket(%d): %m",
+					 gcontext->sockfd);
+			else
+				elog(DEBUG2, "socket %d was closed", gcontext->sockfd);
+		}
 		memset(gcontext, 0, sizeof(GpuContext_v2));
 		dlist_push_head(&inactiveGpuContextList, &gcontext->chain);
 	}
