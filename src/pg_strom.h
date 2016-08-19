@@ -701,6 +701,13 @@ extern void PDS_build_hashtable(pgstrom_data_store *pds);
 extern void pgstrom_init_datastore(void);
 
 /*
+ * nvme_strom.c
+ */
+extern CUresult gpuMemAllocIOMap();
+extern CUresult gpuMemFreeIOMap();
+extern void pgstrom_init_nvme_strom(void);
+
+/*
  * gpuscan.c
  */
 extern bool cost_discount_gpu_projection(PlannerInfo *root, RelOptInfo *rel,

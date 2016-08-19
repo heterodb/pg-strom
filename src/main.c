@@ -209,6 +209,7 @@ _PG_init(void)
 	pgstrom_init_dma_buffer();
 	pgstrom_init_gpu_context();
 	pgstrom_init_gpu_server();
+	pgstrom_init_nvme_strom();
 
 	/* initialization of CUDA related stuff */
 	pgstrom_init_cuda_control();
