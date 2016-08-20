@@ -39,23 +39,23 @@ CREATE FUNCTION pgstrom_device_info()
   AS 'MODULE_PATHNAME'
   LANGUAGE C STRICT;
 
-CREATE TYPE __pgstrom_program_info AS (
-  addr			int8,
-  length		int8,
-  active		bool,
-  status		text,
-  crc32			int4,
-  flags			int4,
-  kern_define   text,
-  kern_source	text,
-  kern_binary	bytea,
-  error_msg		text,
-  backends		text
-);
-CREATE FUNCTION pgstrom_program_info()
-  RETURNS SETOF __pgstrom_program_info
-  AS 'MODULE_PATHNAME'
-  LANGUAGE C STRICT;
+--CREATE TYPE __pgstrom_program_info AS (
+--  addr			int8,
+--  length		int8,
+--  active		bool,
+--  status		text,
+--  crc32			int4,
+--  flags			int4,
+--  kern_define   text,
+--  kern_source	text,
+--  kern_binary	bytea,
+--  error_msg		text,
+--  backends		text
+--);
+--CREATE FUNCTION pgstrom_program_info()
+--  RETURNS SETOF __pgstrom_program_info
+--  AS 'MODULE_PATHNAME'
+--  LANGUAGE C STRICT;
 
 CREATE TYPE __pgstrom_iomap_buffer_info AS (
   gpuid			int,
@@ -68,6 +68,17 @@ CREATE FUNCTION pgstrom_iomap_buffer_info()
   RETURNS SETOF __pgstrom_iomap_buffer_info
   AS 'MODULE_PATHNAME'
   LANGUAGE C STRICT;
+
+-- for debug
+-- CREATE FUNCTION pg_catalog.pgstrom_iomap_buffer_alloc(bigint)
+--  RETURNS bigint
+--  AS 'MODULE_PATHNAME','pgstrom_iomap_buffer_alloc'
+--  LANGUAGE C STRICT;
+-- for debug
+-- CREATE FUNCTION pg_catalog.pgstrom_iomap_buffer_free(bigint)
+--  RETURNS text
+--  AS 'MODULE_PATHNAME','pgstrom_iomap_buffer_free'
+--  LANGUAGE C STRICT;
 
 --
 -- functions for GpuPreAgg

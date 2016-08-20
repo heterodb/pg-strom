@@ -449,7 +449,7 @@ extern void pgstrom_init_gpu_context(void);
 /*
  * gpu_server.c
  */
-extern int				gpuserv_cuda_index;
+extern int				gpuserv_cuda_dindex;
 extern CUdevice			gpuserv_cuda_device;
 extern CUcontext		gpuserv_cuda_context;
 

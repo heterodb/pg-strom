@@ -41,29 +41,29 @@ typedef struct
 
 typedef struct
 {
+	CUipcMemHandle		cuda_mhandle;
+	unsigned long		iomap_handle;
+	uint32_t			gpu_page_sz;
+	uint32_t			gpu_npages;
+	/* fields below are protected by the lock */
 	slock_t				lock;
-	dlist_head			addr_chunks;	/* chunks in order of address */
 	dlist_head			free_chunks[IOMAPBUF_CHUNKSZ_MAX_BIT + 1];
 	IOMapBufferChunk	iomap_chunks[FLEXIBLE_ARRAY_MEMBER];
 } IOMapBufferSegment;
 
-typedef struct
-{
-	IOMapBufferSegment *iomap_seg;		/* reference to shared memory */
-	unsigned long		iomap_handle;
-	uint32_t			gpu_page_sz;
-	uint32_t			gpu_npages;
-	CUdevice			cuda_device;
-	CUcontext			cuda_context;
-	CUdeviceptr			cuda_devptr;
-	CUipcMemHandle		cuda_mhandle;
-} IOMapBufferHead;
-
 static shmem_startup_hook_type shmem_startup_next = NULL;
 static const char	   *nvme_strom_ioctl_pathname = "/proc/nvme-strom";
-static IOMapBufferHead *iomap_buffer_heads = NULL;	/* for each device */
+static void			   *iomap_buffer_segments = NULL;
 static CUdeviceptr		iomap_buffer_base = 0UL;	/* per process vaddr */
 static Size				iomap_buffer_size;			/* GUC */
+
+#define SizeOfIOMapBufferSegment								\
+	MAXALIGN(offsetof(IOMapBufferSegment,						\
+					  iomap_chunks[iomap_buffer_size >>			\
+								   IOMAPBUF_CHUNKSZ_MIN_BIT]))
+#define GetIOMapBufferSegment(dindex)							\
+	((IOMapBufferSegment *)((char *)iomap_buffer_segments +		\
+							SizeOfIOMapBufferSegment * (dindex)))
 
 /*
  * nvme_strom_ioctl
@@ -76,7 +76,7 @@ nvme_strom_ioctl(int cmd, const void *arg)
 	if (fdesc_nvme_strom < 0)
 	{
 		fdesc_nvme_strom = open(nvme_strom_ioctl_pathname, O_RDONLY);
-		if (fdesc_nvme_strom)
+		if (fdesc_nvme_strom < 0)
 			elog(ERROR, "failed to open %s: %m", nvme_strom_ioctl_pathname);
 	}
 	return ioctl(fdesc_nvme_strom, cmd, arg);
@@ -129,24 +129,23 @@ CUresult
 gpuDmaMemAllocIOMap(GpuContext_v2 *gcontext,
 					CUdeviceptr *p_devptr, size_t bytesize)
 {
-	IOMapBufferHead	   *iomap_head;
 	IOMapBufferSegment *iomap_seg;
 	IOMapBufferChunk   *iomap_chunk;
 	int					mclass;
+	int					index;
 	dlist_node		   *dnode;
 	CUresult			rc;
 
 	Assert(IsGpuServerProcess());
 
-	if (!iomap_buffer_heads)
+	if (!iomap_buffer_segments)
 		return CUDA_ERROR_OUT_OF_MEMORY;
-	iomap_head = &iomap_buffer_heads[gpuserv_cuda_index];
-	iomap_seg = iomap_head->iomap_seg;
+	iomap_seg = GetIOMapBufferSegment(gpuserv_cuda_dindex);
 
 	if (!iomap_buffer_base)
 	{
 		rc = cuIpcOpenMemHandle(&iomap_buffer_base,
-								iomap_head->cuda_mhandle,
+								iomap_seg->cuda_mhandle,
 								CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuIpcOpenMemHandle: %s", errorText(rc));
@@ -180,6 +179,10 @@ gpuDmaMemAllocIOMap(GpuContext_v2 *gcontext,
 	memset(&iomap_chunk->free_chain, 0, sizeof(dlist_node));
 	SpinLockRelease(&iomap_seg->lock);
 
+	Assert(iomap_chunk >= iomap_seg->iomap_chunks);
+	index = iomap_chunk - iomap_seg->iomap_chunks;
+	Assert(index < iomap_buffer_size >> IOMAPBUF_CHUNKSZ_MIN_BIT);
+
 	*p_devptr = iomap_buffer_base + ((Size)index << IOMAPBUF_CHUNKSZ_MIN_BIT);
 
 	return CUDA_SUCCESS;
@@ -193,7 +196,6 @@ gpuDmaMemAllocIOMap(GpuContext_v2 *gcontext,
 CUresult
 gpuDmaMemFreeIOMap(GpuContext_v2 *gcontext, CUdeviceptr devptr)
 {
-	IOMapBufferHead	   *iomap_head;
 	IOMapBufferSegment *iomap_seg;
 	IOMapBufferChunk   *iomap_chunk;
 	IOMapBufferChunk   *iomap_buddy;
@@ -207,11 +209,10 @@ gpuDmaMemFreeIOMap(GpuContext_v2 *gcontext, CUdeviceptr devptr)
 		devptr > iomap_buffer_base + iomap_buffer_size)
 		return CUDA_ERROR_INVALID_VALUE;
 
-	Assert((devptr & (IOMAPBUF_CHUNKSZ_MIN - 1)) == 0);
-	iomap_head = &iomap_buffer_heads[gpuserv_cuda_index];
-	iomap_seg = iomap_head->iomap_seg;
+	iomap_seg = GetIOMapBufferSegment(gpuserv_cuda_dindex);
 
 	SpinLockAcquire(&iomap_seg->lock);
+	Assert((devptr & (IOMAPBUF_CHUNKSZ_MIN - 1)) == 0);
 	index = (devptr - iomap_buffer_base) >> IOMAPBUF_CHUNKSZ_MIN_BIT;
 	iomap_chunk = &iomap_seg->iomap_chunks[index];
 	Assert(!iomap_chunk->free_chain.prev &&
@@ -269,6 +270,64 @@ gpuDmaMemFreeIOMap(GpuContext_v2 *gcontext, CUdeviceptr devptr)
 
 	return CUDA_SUCCESS;
 }
+
+#if 0
+/*
+ * pgstrom_iomap_buffer_alloc - for debugging
+ */
+Datum pgstrom_iomap_buffer_alloc(PG_FUNCTION_ARGS);
+
+Datum
+pgstrom_iomap_buffer_alloc(PG_FUNCTION_ARGS)
+{
+	int64		required = PG_GETARG_INT64(0);
+	CUdeviceptr	pointer;
+	CUresult	rc;
+
+	if (!iomap_buffer_base)
+	{
+		CUdevice	cuda_device;
+		CUcontext	cuda_context;
+
+		rc = cuInit(0);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuInit: %s", errorText(rc));
+
+		rc = cuDeviceGet(&cuda_device, devAttrs[0].DEV_ID);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuDeviceGet: %s", errorText(rc));
+
+		rc = cuCtxCreate(&cuda_context, CU_CTX_SCHED_AUTO, cuda_device);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuCtxCreate: %s", errorText(rc));
+
+		gpuserv_cuda_dindex = 0;
+	}
+	rc = gpuDmaMemAllocIOMap(NULL, &pointer, required);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on gpuDmaMemAllocIOMap: %s", errorText(rc));
+
+	PG_RETURN_INT64(pointer);
+}
+PG_FUNCTION_INFO_V1(pgstrom_iomap_buffer_alloc);
+
+/*
+ * pgstrom_iomap_buffer_free - for debug
+ */
+Datum pgstrom_iomap_buffer_free(PG_FUNCTION_ARGS);
+
+Datum
+pgstrom_iomap_buffer_free(PG_FUNCTION_ARGS)
+{
+	int64		pointer = PG_GETARG_INT64(0);
+	CUresult	rc;
+
+	rc = gpuDmaMemFreeIOMap(NULL, pointer);
+
+	PG_RETURN_TEXT_P(cstring_to_text(errorText(rc)));
+}
+PG_FUNCTION_INFO_V1(pgstrom_iomap_buffer_free);
+#endif
 
 /*
  * pgstrom_iomap_buffer_info
@@ -335,7 +394,7 @@ pgstrom_iomap_buffer_info(PG_FUNCTION_ARGS)
 						   INT8OID, -1, 0);
 		TupleDescInitEntry(tupdesc, (AttrNumber) 3, "length",
 						   INT8OID, -1, 0);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "state",
+		TupleDescInitEntry(tupdesc, (AttrNumber) 4, "state",
 						   TEXTOID, -1, 0);
 		fncxt->tuple_desc = BlessTupleDesc(tupdesc);
 
@@ -343,12 +402,11 @@ pgstrom_iomap_buffer_info(PG_FUNCTION_ARGS)
 		iomap_info = palloc(offsetof(iomap_buffer_info,
 									 chunks[max_nchunks * numDevAttrs]));
 		iomap_info->nitems = 0;
-		if (iomap_buffer_heads)
+		if (iomap_buffer_segments)
 		{
 			for (i=0; i < numDevAttrs; i++)
 			{
-				IOMapBufferSegment *iomap_seg
-					= iomap_buffer_heads[i].iomap_seg;
+				IOMapBufferSegment *iomap_seg = GetIOMapBufferSegment(i);
 				cl_int		gpuid = devAttrs[i].DEV_ID;
 
 				setup_iomap_buffer_info(iomap_seg, gpuid, iomap_info);
@@ -383,7 +441,6 @@ PG_FUNCTION_INFO_V1(pgstrom_iomap_buffer_info);
 static void
 pgstrom_startup_nvme_strom(void)
 {
-	Size		max_nchunks;
 	Size		required;
 	char	   *pos;
 	bool		found;
@@ -403,27 +460,22 @@ pgstrom_startup_nvme_strom(void)
 				 errhint("nvme-strom.ko may not be installed on the system")));
 
 	/* allocation of static shared memory */
-	iomap_buffer_heads = malloc(sizeof(IOMapBufferHead) * numDevAttrs);
-	if (!iomap_buffer_heads)
-		elog(ERROR, "out of memory");
-
-	max_nchunks = iomap_buffer_size / IOMAPBUF_CHUNKSZ_MIN;
-	required = offsetof(IOMapBufferSegment, iomap_chunks[max_nchunks]);
-	pos = ShmemInitStruct("iomap_buffer_heads",
-						  MAXALIGN(required) * numDevAttrs,
-						  &found);
+	required = SizeOfIOMapBufferSegment * numDevAttrs,
+	iomap_buffer_segments = ShmemInitStruct("iomap_buffer_segments",
+											required,
+											&found);
 	Assert(!found);
-	memset(pos, 0, MAXALIGN(required) * numDevAttrs);
+	memset(iomap_buffer_segments, 0, required);
 
 	/* setup i/o mapped device memory for each GPU device */
 	rc = cuInit(0);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuInit: %s", errorText(rc));
 
+	pos = iomap_buffer_segments;
 	for (i=0; i < numDevAttrs; i++)
 	{
-		IOMapBufferHead	   *iomap_head = &iomap_buffer_heads[i];
-		IOMapBufferSegment *iomap_seg = (IOMapBufferSegment *)pos;
+		IOMapBufferSegment *iomap_seg = GetIOMapBufferSegment(i);
 		CUdevice			cuda_device;
 		CUcontext			cuda_context;
 		CUdeviceptr			cuda_devptr;
@@ -458,9 +510,22 @@ pgstrom_startup_nvme_strom(void)
 			elog(WARNING, "i/o mapped GPU memory size (%zu) is not aligned to GPU page size(%u)",
 				 iomap_buffer_size, cmd.gpu_page_sz);
 
-		/* IOMapBufferSegment */
+		/* setup IOMapBufferSegment */
+		elog(LOG, "cuda_mhandle = %08x %08x %08x %08x %08x %08x %08x %08x",
+			 ((int *)cuda_mhandle.reserved)[0],
+			 ((int *)cuda_mhandle.reserved)[1],
+			 ((int *)cuda_mhandle.reserved)[2],
+			 ((int *)cuda_mhandle.reserved)[3],
+			 ((int *)cuda_mhandle.reserved)[4],
+			 ((int *)cuda_mhandle.reserved)[5],
+			 ((int *)cuda_mhandle.reserved)[6],
+			 ((int *)cuda_mhandle.reserved)[7]);
+		memcpy(&iomap_seg->cuda_mhandle, &cuda_mhandle,
+			   sizeof(CUipcMemHandle));
+		iomap_seg->iomap_handle = cmd.handle;
+		iomap_seg->gpu_page_sz = cmd.gpu_page_sz;
+		iomap_seg->gpu_npages = cmd.gpu_npages;
 		SpinLockInit(&iomap_seg->lock);
-		dlist_init(&iomap_seg->addr_chunks);
 		for (j=0; j <= IOMAPBUF_CHUNKSZ_MAX_BIT; j++)
 			dlist_init(&iomap_seg->free_chunks[j]);
 
@@ -485,20 +550,7 @@ pgstrom_startup_nvme_strom(void)
 				j += (chunk_sz >> IOMAPBUF_CHUNKSZ_MIN_BIT);
 			}
 		}
-
-		/* IOMapBufferHead */
-		iomap_head->iomap_seg		= iomap_seg;
-		iomap_head->iomap_handle	= cmd.handle;
-		iomap_head->gpu_page_sz		= cmd.gpu_page_sz;
-		iomap_head->gpu_npages		= cmd.gpu_npages;
-		iomap_head->cuda_device		= cuda_device;
-		iomap_head->cuda_context	= cuda_context;
-		iomap_head->cuda_devptr		= cuda_devptr;
-		memcpy(&iomap_head->cuda_mhandle,
-			   &cuda_mhandle,
-			   sizeof(CUipcMemHandle));
-
-		pos += MAXALIGN(required);
+		pos += SizeOfIOMapBufferSegment;
 	}
 }
 
