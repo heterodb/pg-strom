@@ -57,6 +57,18 @@ CREATE FUNCTION pgstrom_program_info()
   AS 'MODULE_PATHNAME'
   LANGUAGE C STRICT;
 
+CREATE TYPE __pgstrom_iomap_buffer_info AS (
+  gpuid			int,
+  paddr			int8,
+  length		int8,
+  state			text
+);
+
+CREATE FUNCTION pgstrom_iomap_buffer_info()
+  RETURNS SETOF __pgstrom_iomap_buffer_info
+  AS 'MODULE_PATHNAME'
+  LANGUAGE C STRICT;
+
 --
 -- functions for GpuPreAgg
 --

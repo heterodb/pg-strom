@@ -449,6 +449,7 @@ extern void pgstrom_init_gpu_context(void);
 /*
  * gpu_server.c
  */
+extern int				gpuserv_cuda_index;
 extern CUdevice			gpuserv_cuda_device;
 extern CUcontext		gpuserv_cuda_context;
 
@@ -703,8 +704,11 @@ extern void pgstrom_init_datastore(void);
 /*
  * nvme_strom.c
  */
-extern CUresult gpuMemAllocIOMap();
-extern CUresult gpuMemFreeIOMap();
+extern CUresult	gpuDmaMemAllocIOMap(GpuContext_v2 *gcontext,
+									CUdeviceptr *p_devptr, size_t bytesize);
+extern CUresult	gpuDmaMemFreeIOMap(GpuContext_v2 *gcontext,
+								   CUdeviceptr devptr);
+extern Datum pgstrom_iomap_buffer_info(PG_FUNCTION_ARGS);
 extern void pgstrom_init_nvme_strom(void);
 
 /*

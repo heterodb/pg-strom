@@ -98,8 +98,8 @@ static int				numGpuServers;			/* GUC */
 static int				GpuServerCommTimeout;	/* GUC */
 static bool				gpuserv_got_sigterm = false;
 static int				gpuserv_id = -1;
-static int				gpuserv_dindex = -1;
 static pgsocket			gpuserv_server_sockfd = PGINVALID_SOCKET;
+int						gpuserv_cuda_dindex = -1;
 CUdevice				gpuserv_cuda_device = NULL;
 CUcontext				gpuserv_cuda_context = NULL;
 /* GPU server session info */
@@ -377,7 +377,7 @@ gpuservPutGpuContext(GpuContext_v2 *gcontext)
 					gpuServProc->backend_id = InvalidBackendId;
 					gpuServProc->gcontext_id = INVALID_GPU_CONTEXT_ID;
 
-					dhead = &gpuServState->serv_procs_list[gpuserv_dindex];
+					dhead = &gpuServState->serv_procs_list[gpuserv_cuda_dindex];
 					dlist_delete(&gpuServProc->chain);
 					dlist_push_tail(dhead, &gpuServProc->chain);
 				}
@@ -1003,7 +1003,7 @@ gpuservAcceptConnection(void)
 	gpuServProc->backend_id  = InvalidBackendId;
 	gpuServProc->gcontext_id = INVALID_GPU_CONTEXT_ID;
 	/* move to the list head because of its activeness */
-	dlist_move_head(&gpuServState->serv_procs_list[gpuserv_dindex],
+	dlist_move_head(&gpuServState->serv_procs_list[gpuserv_cuda_dindex],
 					&gpuServProc->chain);
 	SpinLockRelease(&gpuServState->lock);
 
@@ -1016,7 +1016,7 @@ gpuservAcceptConnection(void)
 		gcontext = AttachGpuContext(sockfd,
 									gcontext_id,
 									backend_id,
-									devAttrs[gpuserv_dindex].DEV_ID);
+									devAttrs[gpuserv_cuda_dindex].DEV_ID);
 		/* expand session's WaitEventSet */
 		Assert(i < MaxBackends);
 		session_events[i].pos = session_num_clients;
@@ -1379,8 +1379,8 @@ gpuserv_session_main(void)
 		if (gpuserv_got_sigterm)
 			elog(FATAL, "GPU/CUDA Server [%d] (GPU-%d %s) was terminated",
 				 gpuserv_id,
-				 devAttrs[gpuserv_dindex].DEV_ID,
-				 devAttrs[gpuserv_dindex].DEV_NAME);
+				 devAttrs[gpuserv_cuda_dindex].DEV_ID,
+				 devAttrs[gpuserv_cuda_dindex].DEV_NAME);
 
 		/* flush out if any completed tasks */
 		gpuservFlushOutCompletedTasks();
@@ -1486,9 +1486,9 @@ gpuserv_bgworker_main(Datum __server_id)
 	if (rc != CUDA_SUCCESS)
 		elog(FATAL, "failed on cuInit(0): %s", errorText(rc));
 
-	gpuserv_dindex = gpuserv_id % numDevAttrs;
+	gpuserv_cuda_dindex = gpuserv_id % numDevAttrs;
 	rc = cuDeviceGet(&gpuserv_cuda_device,
-					 devAttrs[gpuserv_dindex].DEV_ID);
+					 devAttrs[gpuserv_cuda_dindex].DEV_ID);
 	if (rc != CUDA_SUCCESS)
 		elog(FATAL, "failed on cuDeviceGet: %s", errorText(rc));
 
@@ -1524,14 +1524,14 @@ gpuserv_bgworker_main(Datum __server_id)
 	gpuServProc->backend_id = InvalidBackendId;
 	gpuServProc->gcontext_id = INVALID_GPU_CONTEXT_ID;
 	gpuServProc->pgproc = MyProc;
-	dlist_push_tail(&gpuServState->serv_procs_list[gpuserv_dindex],
+	dlist_push_tail(&gpuServState->serv_procs_list[gpuserv_cuda_dindex],
 					&gpuServProc->chain);
 	SpinLockRelease(&gpuServState->lock);
 
 	elog(LOG, "PG-Strom GPU/CUDA Server [%d] is now ready on GPU-%d %s",
 		 gpuserv_id,
-		 devAttrs[gpuserv_dindex].DEV_ID,
-		 devAttrs[gpuserv_dindex].DEV_NAME);
+		 devAttrs[gpuserv_cuda_dindex].DEV_ID,
+		 devAttrs[gpuserv_cuda_dindex].DEV_NAME);
 
 	PG_TRY();
 	{
