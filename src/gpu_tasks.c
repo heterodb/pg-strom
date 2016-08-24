@@ -864,7 +864,8 @@ errorTextKernel(kern_errorbuf *kerror)
 	switch (kerror->kernel)
 	{
 		KERN_ENTRY(CudaRuntime);
-		KERN_ENTRY(gpuscan_exec_quals);
+		KERN_ENTRY(gpuscan_exec_quals_block);
+		KERN_ENTRY(gpuscan_exec_quals_row);
 		KERN_ENTRY(gpuscan_projection_row);
 		KERN_ENTRY(gpuscan_projection_slot);
 		KERN_ENTRY(gpuscan_main);

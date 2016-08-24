@@ -91,6 +91,123 @@ typedef struct {
 
 #ifdef __CUDACC__
 /*
+ * Routines to support KDS_FORMAT_BLOCKS - This KDS format is used to load
+ * raw PostgreSQL heap blocks to GPU without modification by CPU.
+ * All CPU has to pay attention is, not to load rows which should not be
+ * visible to the current scan snapshot.
+ */
+typedef cl_uint		TransactionId;
+
+/* definitions at storage/itemid.h */
+typedef struct ItemIdData
+{
+	unsigned	lp_off:15,		/* offset to tuple (from start of page) */
+				lp_flags:2,		/* state of item pointer, see below */
+				lp_len:15;		/* byte length of tuple */
+} ItemIdData;
+
+#define LP_UNUSED		0		/* unused (should always have lp_len=0) */
+#define LP_NORMAL		1		/* used (should always have lp_len>0) */
+#define LP_REDIRECT		2		/* HOT redirect (should have lp_len=0) */
+#define LP_DEAD			3		/* dead, may or may not have storage */
+
+#define ItemIdGetOffset(itemId)		((itemId).lp_off)
+#define ItemIdGetLength(itemId)		((itemId).lp_len)
+#define ItemIdIsUsed(itemId)		((itemId).lp_flags != LP_UNUSED)
+#define ItemIdIsNormal(itemId)		((itemId).lp_flags == LP_NORMAL)
+#define ItemIdIsRedirected(itemId)	((itemId).lp_flags == LP_REDIRECT)
+#define ItemIdIsDead(itemId)		((itemId).lp_flags == LP_DEAD)
+#define ItemIdHasStorage(itemId)	((itemId).lp_len != 0)
+
+/* definitions at storage/off.h */
+typedef cl_ushort		OffsetNumber;
+
+#define InvalidOffsetNumber		((OffsetNumber) 0)
+#define FirstOffsetNumber		((OffsetNumber) 1)
+#define MaxOffsetNumber			((OffsetNumber) (BLCKSZ / sizeof(ItemIdData)))
+#define OffsetNumberMask		(0xffff)	/* valid uint16 bits */
+
+/* definitions at storage/bufpage.h */
+typedef struct
+{
+	cl_uint			xlogid;			/* high bits */
+	cl_uint			xrecoff;		/* low bits */
+} PageXLogRecPtr;
+
+typedef cl_ushort	LocationIndex;
+
+typedef struct PageHeaderData
+{
+	/* XXX LSN is member of *any* block, not only page-organized ones */
+	PageXLogRecPtr	pd_lsn;			/* LSN: next byte after last byte of xlog
+									 * record for last change to this page */
+	cl_ushort		pd_checksum;	/* checksum */
+	cl_ushort		pd_flags;		/* flag bits, see below */
+	LocationIndex	pd_lower;		/* offset to start of free space */
+	LocationIndex	pd_upper;		/* offset to end of free space */
+	LocationIndex	pd_special;		/* offset to start of special space */
+	cl_ushort		pd_pagesize_version;
+	TransactionId pd_prune_xid;		/* oldest prunable XID, or zero if none */
+	ItemIdData		pd_linp[FLEXIBLE_ARRAY_MEMBER]; /* line pointer array */
+} PageHeaderData;
+
+#define SizeOfPageHeaderData	(offsetof(PageHeaderData, pd_linp))
+
+#define PD_HAS_FREE_LINES	0x0001	/* are there any unused line pointers? */
+#define PD_PAGE_FULL		0x0002	/* not enough free space for new tuple? */
+#define PD_ALL_VISIBLE		0x0004	/* all tuples on page are visible to
+									 * everyone */
+#define PD_VALID_FLAG_BITS  0x0007	/* OR of all valid pd_flags bits */
+
+#define PageGetItemId(page, offsetNumber)				\
+	(((PageHeaderData *)(page))->pd_linp[(offsetNumber) - 1])
+#define PageGetItem(page, itemId)				\
+	((char *)(page) + ItemIdGetOffset(itemId))
+STATIC_INLINE(cl_uint)
+PageGetMaxOffsetNumber(PageHeaderData *page)
+{
+	cl_uint		pd_lower = __ldg(page->pd_lower);
+
+	return (pd_lower <= SizeOfPageHeaderData ? 0 :
+			(pd_lower - SizeOfPageHeaderData) / sizeof(ItemIdData));
+}
+
+/*
+ * KERN_DATA_STORE_BLOCK_TUPITEM - setup a kern_tupitem from an offset
+ * to itemId from the head of KDS
+ */
+STATIC_INLINE(void)
+KERN_DATA_STORE_BLOCK_TUPITEM(kern_tupitem *tupitem,
+							  kern_data_store *kds,
+							  cl_uint lp_offset)
+{
+	ItemIdData	   *lpp = *((ItemIdData *)((char *)kds + lp_offset));
+	ItemIdData		lp;
+	cl_uint			head_size;
+	cl_uint			block_id;
+	BlockNumber		block_nr;
+	PageHeaderData *pg_page;
+
+	assert(__ldg(kds->format) == KDS_FORMAT_BLOCK);
+	head_size = (KERN_DATA_STORE_HEAD_LENGTH(kds) +
+				 STROMALIGN(sizeof(BlockNumber) * __ldg(kds->nrooms)));
+	assert(lp_offset >= head_size &&
+		   lp_offset <  head_size + BLCKSZ * __ldg(kds->nitems));
+	block_id = (lp_offset - head_size) / BLOCKSZ;
+	block_nr = KERN_DATA_STORE_BLOCK_BLCKNR(kds, block_id);
+	pg_page = KERN_DATA_STORE_BLOCK_PGPAGE(kds, block_id);
+
+	assert(lpp >= pg_page->pd_linp &&
+		   lpp -  pg_page->pd_linp <  PageGetMaxOffsetNumber(pg_page));
+
+	tupitem->t_len	= ItemIdGetLength(*lpp);
+	tupitem->t_self.ip_blkid.bi_hi = block_nr >> 16;
+	tupitem->t_self.ip_blkid.bi_lo = block_nr & 0xffff;
+	tupitem->t_self.ip_posid	= lpp - pg_page->pd_linp;
+	tupitem->htup	= (HeapTupleHeaderData *)PageGetItem(pg_page, *lpp);
+}
+
+/*
  * forward declaration of the function to be generated on the fly
  */
 STATIC_FUNCTION(cl_bool)
@@ -112,7 +229,128 @@ gpuscan_projection(kern_context *kcxt,
 				   cl_bool *tup_internal);
 
 /*
- * kernel entrypoint of gpuscan
+ * gpuscan_exec_quals_block
+ *
+ * kernel entrypoint of GpuScan for KDS_FORMAT_BLOCK
+ */
+KERNEL_FUNCTION(void)
+gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
+						 kern_data_store *kds_src)
+{
+	kern_parambuf	   *kparams = KERN_GPUSCAN_PARAMBUF(kgpuscan);
+	kern_resultbuf	   *kresults = KERN_GPUSCAN_RESULTBUF(kgpuscan);
+	kern_context		kcxt;
+	cl_uint				part_id;	/* partition index */
+	cl_uint				part_sz;	/* partition size */
+	cl_uint				curr_id;	/* index within partition */
+	cl_uint				n_lines;
+	cl_bool				rc;
+	__shared__ cl_uint	gang_flag;
+	__shared__ cl_uint	base;
+	cl_uint				offset;
+	cl_uint				count;
+	PageHeaderData	   *pg_page;
+	HeapTupleHeaderData *htup;
+
+	/* sanity checks */
+	assert(__ldg(kds_src->format) == KDS_FORMAT_BLOCK);
+	assert(__ldg(kds_src->nrows_per_block) > 1);
+	part_sz = (__ldg(kds_src->nrows_per_block) + WARP_SZ - 1) & ~(WARP_SZ - 1);
+	part_sz = Min(part_sz, get_local_size());
+	assert(get_local_size() % part_sz == 0);
+	part_id = (get_global_index() * (get_local_size() / part_id) +
+			   get_local_id() / part_sz);
+	/* get a PostgreSQL block on which this thread will perform on */
+	if (part_id < kds_src->nitems)
+	{
+		pg_page = KERN_DATA_STORE_BLOCK_PGPAGE(kds_src, part_id);
+		n_lines = PageGetMaxOffsetNumber(pg_page);
+	}
+	else
+	{
+		pg_page = NULL;
+		n_lines = 0;
+	}
+
+	/*
+	 * Walks on pd_linep[] array on the assigned PostgreSQL block.
+	 * If a CUDA block is assigned to multiple PostgreSQL blocks, CUDA
+	 * block should not exit until all the PostgreSQL blocks are processed
+	 * due to restriction of thread synchronization.
+	 */
+	n_lines = PageGetMaxOffsetNumber(pg_page);
+	curr_id = get_local_id() % part_sz;
+	do {
+		/* fetch a heap_tuple if valid */
+		if (curr_id < n_lines)
+		{
+			ItemIdData	lp = PageGetItemId(pg_page, curr_id + 1);
+
+			if (ItemIdIsNormal(lp))
+				htup = PageGetItem(pg_page, lp);
+			else
+				htup = NULL;
+		}
+		else
+			htup = NULL;
+
+		/* evaluation of the qualifier */
+		if (htup)
+			rc = gpuscan_quals_eval(&kcxt, kds_src, htup);
+		else
+			rc = false;
+		__syncthreads();
+
+		/* expand kresults to store the row offset */
+		offset = pgstromStairlikeSum(rc ? 1 : 0, &count);
+		if (count > 0)
+		{
+			if (get_local_id() == 0)
+				base = atomicAdd(&kresults->nitems, count);
+			__syncthreads();
+
+			if (base + count > __ldg(kresults->nrooms))
+			{
+				STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
+				goto out;
+			}
+			else if (rc)
+			{
+				/* OK, store the result */
+				kresults->results[base + offset] = (cl_uint)....;
+			}
+		}
+		__syncthreads();
+
+		/*
+		 * Move to the next line item. If no threads in CUDA block wants to
+		 * continue scan any more, we soon exit the loop.
+		 */
+		curr_id += part_sz;
+		if (get_local_id() == 0)
+			gang_flag = 0;
+		__syncthreads();
+		if (get_local_id() % part_sz == 0 && curr_id < part_sz)
+			atomicExch(&gand_flag, 1);
+		__syncthreads();
+	} while (gang_flag);
+out:		
+	/* write back error status if any */
+	kern_writeback_error_status(&kgpuscan->kerror, kcxt.e);
+}
+
+
+
+
+
+
+
+
+
+/*
+ * gpuscan_exec_quals_row
+ *
+ * kernel entrypoint of GpuScan for KDS_FORMAT_ROW
  */
 KERNEL_FUNCTION(void)
 gpuscan_exec_quals(kern_gpuscan *kgpuscan,
@@ -131,7 +369,7 @@ gpuscan_exec_quals(kern_gpuscan *kgpuscan,
 	assert(kds_src->format == KDS_FORMAT_ROW);
 	assert(!kresults->all_visible);
 
-	INIT_KERNEL_CONTEXT(&kcxt,gpuscan_exec_quals,kparams);
+	INIT_KERNEL_CONTEXT(&kcxt,gpuscan_exec_quals_row,kparams);
 
 	/* evaluate device qualifier */
 	if (kds_index < kds_src->nitems)
@@ -307,7 +545,7 @@ gpuscan_projection_slot(kern_gpuscan *kgpuscan,
 	kcxt.e = kgpuscan->kerror;
 	if (kcxt.e.errcode != StromError_Success)
 		goto out;
-	INIT_KERNEL_CONTEXT(&kcxt, gpuscan_projection_row, kparams);
+	INIT_KERNEL_CONTEXT(&kcxt, gpuscan_projection_slot, kparams);
 
 	/* sanity checks */
 	assert(kresults->nrels == 1);

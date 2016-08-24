@@ -175,6 +175,7 @@ extern __shared__ cl_ulong __pgstrom_dynamic_shared_workmem[];
 #define __constant__	/* address space qualifier is noise on host */
 #define __shared__		/* address space qualifier is noise on host */
 typedef uintptr_t		hostptr_t;
+#define __ldg(x)		/* cache access hint is just a noise on host */
 #endif
 
 /*
@@ -234,9 +235,10 @@ typedef uintptr_t		hostptr_t;
  */
 #define StromKernel_HostPGStrom						0x0001
 #define StromKernel_CudaRuntime						0x0002
-#define StromKernel_gpuscan_exec_quals				0x0101
-#define StromKernel_gpuscan_projection_row			0x0102
-#define StromKernel_gpuscan_projection_slot			0x0103
+#define StromKernel_gpuscan_exec_quals_row			0x0101
+#define StromKernel_gpuscan_exec_quals_block		0x0102
+#define StromKernel_gpuscan_projection_row			0x0103
+#define StromKernel_gpuscan_projection_slot			0x0104
 #define StromKernel_gpuscan_main					0x0199
 #define StromKernel_gpujoin_exec_outerscan			0x0201
 #define StromKernel_gpujoin_exec_nestloop			0x0202
@@ -435,9 +437,15 @@ STATIC_INLINE(cl_ulong) GlobalTimer(void)
 	return ret;
 }
 
-/*
- * We need to re-define HeapTupleHeaderData and t_infomask related stuff
- */
+/* definitions at storage/block.h */
+typedef cl_uint		BlockNumber;
+#define InvalidBlockNumber		((BlockNumber) 0xFFFFFFFF)
+#define MaxBlockNumber			((BlockNumber) 0xFFFFFFFE)
+
+/* details are defined at cuda_gpuscan.h */
+struct PageHeaderData;
+
+/* definitions at access/htup_details.h */
 typedef struct {
 	struct {
 		cl_ushort	bi_hi;
@@ -510,119 +518,58 @@ typedef struct {
 #define GPUMEMALIGN(LEN)		TYPEALIGN(GPUMEMALIGN_LEN,(LEN))
 #define GPUMEMALIGN_DOWN(LEN)	TYPEALIGN_DOWN(GPUMEMALIGN_LEN,(LEN))
 
-#ifdef __CUDACC__
-/*
- * alignment aware value reference
- */
-STATIC_INLINE(cl_short)
-get_uint16_val(const void *addr)
-{
-	return ((devptr_t)addr & (sizeof(cl_ushort) - 1)) == 0
-		? *((cl_ushort *) addr)
-		: ((cl_ushort)((cl_uchar *)addr)[0] |
-		   (cl_ushort)((cl_uchar *)addr)[1] << 8);
-}
-
-STATIC_INLINE(cl_uint)
-get_uint32_val(const void *addr)
-{
-	switch ((devptr_t)addr & (sizeof(cl_uint) - 1))
-	{
-		case 0:
-			return *((cl_uint *) addr);
-		case 2:
-			return ((cl_uint)(*((cl_ushort *)((char *)addr))) |
-					(cl_uint)(*((cl_ushort *)((char *)addr + 2))) << 16);
-		default:
-			return ((cl_uint)(*((cl_uchar *) ((char *)addr))) |
-					(cl_uint)(*((cl_ushort *)((char *)addr + 1))) << 8 |
-					(cl_uint)(*((cl_uchar *) ((char *)addr + 3))) << 24);
-	}
-}
-
-STATIC_INLINE(cl_ulong)
-get_uint64_val(const void *addr)
-{
-	switch ((devptr_t)addr & (sizeof(cl_ulong) - 1))
-	{
-		case 0:
-			return *((cl_ulong *)addr);
-		case 4:
-			return ((cl_ulong)(*((cl_uint *)((char *)addr))) |
-					(cl_ulong)(*((cl_uint *)((char *)addr + 4))));
-		case 2:
-		case 6:
-			return ((cl_ulong)(*((cl_ushort *)((char *)addr))) |
-					(cl_ulong)(*((cl_uint *)  ((char *)addr + 2))) << 16 |
-					(cl_ulong)(*((cl_ushort *)((char *)addr + 6))) << 48);
-		case 1:
-		case 5:
-			return ((cl_ulong)(*((cl_uchar *) ((char *)addr))) |
-					(cl_ulong)(*((cl_ushort *)((char *)addr + 1))) <<  8 |
-					(cl_ulong)(*((cl_uint *)  ((char *)addr + 3))) << 24 |
-					(cl_ulong)(*((cl_uchar *) ((char *)addr + 7))) << 56);
-		default:	/* 3 or 7 */
-			return ((cl_ulong)(*((cl_uchar *) ((char *)addr))) |
-					(cl_ulong)(*((cl_uint *)  ((char *)addr + 1))) <<  8 |
-					(cl_ulong)(*((cl_ushort *)((char *)addr + 5))) << 40 |
-					(cl_ulong)(*((cl_uchar *) ((char *)addr + 7))) << 56);
-	}
-}
-
-#define get_int16_val(ADDR)		((cl_int)get_uint16_val(ADDR))
-#define get_int32_val(ADDR)		((cl_int)get_uint32_val(ADDR))
-#define get_int64_val(ADDR)		((cl_int)get_uint64_val(ADDR))
-#define get_float32_val(ADDR)	__int_as_float(get_uint32_val(ADDR))
-#define get_float64_val(ADDR)	__longlong_as_double(get_int64_val(ADDR))
-#endif	/* __CUDACC__ */
-
 /*
  * kern_data_store
  *
- * +----------------------------------------------+
- * | Common header portion of the kern_data_store |
- * |         :                                    |
- * | 'format' determines the layout below         |
- * +----------------------------------------------+
- * | Attributes of columns                        |
- * |                                              |
- * | kern_colmeta colmeta[0]                      |
- * | kern_colmeta colmeta[1]                      |
- * |        :                                     |
- * | kern_colmeta colmeta[M-1]                    |
- * +----------------------------------------------+
- * | <slot format> | <row format> / <hash format> |
- * +---------------+------------------------------+  -----
- * | values/isnull | Offset to the first hash-    |
- * | pair of the   | item for each slot (*).      |
- * | 1st tuple     |                              |
- * | +-------------+ (*) nslots=0 if row-format,  |
- * | | values[0]   | thus, it has no offset to    |
- * | |    :        | hash items.                  |
- * | | values[M-1] |                              |
- * | +-------------+  hash_slot[0]                |
- * | | isnull[0]   |  hash_slot[1]                |
- * | |    :        |      :                       |
- * | | isnull[M-1] |  hash_slot[nslots-1]         |
- * +-+-------------+------------------------------+
- * | values/isnull | Offset to the individual     |
- * | pair of the   | kern_tupitem.                |
- * | 2nd tuple     |                              |
- * | +-------------+ row_index[0]                 |
- * | | values[0]   | row_index[1]                 |
- * | |    :        |    :                         |
- * | | values[M-1] | row_index[nitems-1]          |
- * | +-------------+--------------+---------------+
- * | | isnull[0]   |    :         |       :       |
- * | |    :        +--------------+---------------+
- * | | isnull[M-1] | kern_tupitem | kern_hashitem |
- * +-+-------------+--------------+---------------+
- * | values/isnull | kern_tupitem | kern_hashitem |
- * | pair of the   +--------------+---------------+
- * | 3rd tuple     | kern_tupitem | kern_hashitem |
- * |      :        |     :        |     :         |
- * |      :        |     :        |     :         |
- * +---------------+--------------+---------------+
+ * +---------------------------------------------------------------+
+ * | Common header portion of the kern_data_store                  |
+ * |         :                                                     |
+ * | 'format' determines the layout below                          |
+ * |                                                               |
+ * | 'nitems' and 'nrooms' mean number of tuples except for BLOCK  |
+ * | format. In BLOCK format, these fields mean number of the      |
+ * | PostgreSQL blocks. We cannot know exact number of tuples      |
+ * | without scanning of the data-store                            |
+ * +---------------------------------------------------------------+
+ * | Attributes of columns                                         |
+ * |                                                               |
+ * | kern_colmeta colmeta[0]                                       |
+ * | kern_colmeta colmeta[1]                                       |
+ * |        :                                                      |
+ * | kern_colmeta colmeta[M-1]                                     |
+ * +----------------------------------------------+----------------+
+ * | <slot format> | <row format> / <hash format> | <block format> |
+ * +---------------+------------------------------+----------------+
+ * | values/isnull | Offset to the first hash-    | BlockNumber of |
+ * | pair of the   | item for each slot (*).      | PostgreSQL;    |
+ * | 1st tuple     |                              | used to setup  |
+ * | +-------------+ (*) nslots=0 if row-format,  | ctid system    |
+ * | | values[0]   | thus, it has no offset to    | column.        |
+ * | |    :        | hash items.                  |                |
+ * | | values[M-1] |                              | (*) N=nitems   |
+ * | +-------------+  hash_slot[0]                | block_num[0]   |
+ * | | isnull[0]   |  hash_slot[1]                | block_num[1]   |
+ * | |    :        |      :                       |      :         |
+ * | | isnull[M-1] |  hash_slot[nslots-1]         |      :         |
+ * +-+-------------+------------------------------+ block_num[N-1] |
+ * | values/isnull | Offset to the individual     +----------------+ 
+ * | pair of the   | kern_tupitem.                |     ^          |
+ * | 2nd tuple     |                              |     |          |
+ * | +-------------+ row_index[0]                 | Raw PostgreSQL |
+ * | | values[0]   | row_index[1]                 | Block-0        |
+ * | |    :        |    :                         |     |          |
+ * | | values[M-1] | row_index[nitems-1]          |   BLCKSZ(8KB)  |
+ * | +-------------+--------------+---------------+     |          |
+ * | | isnull[0]   |    :         |       :       |     v          |
+ * | |    :        +--------------+---------------+----------------+
+ * | | isnull[M-1] | kern_tupitem | kern_hashitem |                |
+ * +-+-------------+--------------+---------------+                |   
+ * | values/isnull | kern_tupitem | kern_hashitem | Raw PostgreSQL |
+ * | pair of the   +--------------+---------------+ Block-1        |
+ * | 3rd tuple     | kern_tupitem | kern_hashitem |                |
+ * |      :        |     :        |     :         |     :          |
+ * |      :        |     :        |     :         |     :          |
+ * +---------------+--------------+---------------+----------------+
  */
 typedef struct {
 	/* true, if column is held by value. Elsewhere, a reference */
@@ -666,6 +613,7 @@ typedef struct
 #define KDS_FORMAT_ROW			1
 #define KDS_FORMAT_SLOT			2
 #define KDS_FORMAT_HASH			3	/* inner hash table for GpuHashJoin */
+#define KDS_FORMAT_BLOCK		4	/* raw blocks for direct loading */
 
 typedef struct {
 	hostptr_t		hostptr;	/* address of kds on the host */
@@ -684,6 +632,8 @@ typedef struct {
 	cl_uint			nslots;		/* width of hash-slot (only HASH format) */
 	cl_uint			hash_min;	/* minimum hash-value (only HASH format) */
 	cl_uint			hash_max;	/* maximum hash-value (only HASH format) */
+	cl_uint			nrows_per_block; /* average number of rows per PG-block
+									  * (only BLOCK format) */
 	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER]; /* metadata of columns */
 } kern_data_store;
 
@@ -756,18 +706,6 @@ typedef struct {
 	 ((char *)KERN_DATA_STORE_TUPITEM(kds,kds_index) -	\
 	  offsetof(kern_hashitem, t)))
 
-/* access macro for tuple-slot format */
-#define KERN_DATA_STORE_SLOT_LENGTH(kds,nitems)				\
-	KDS_CALCULATE_SLOT_LENGTH((kds)->ncols,(nitems))
-
-#define KERN_DATA_STORE_VALUES(kds,kds_index)				\
-	((Datum *)((char *)(kds) +								\
-			   KDS_CALCULATE_SLOT_LENGTH((kds)->ncols,(kds_index))))
-
-#define KERN_DATA_STORE_ISNULL(kds,kds_index)				\
-	((char *)(KERN_DATA_STORE_VALUES((kds),(kds_index)) + (kds)->ncols))
-
-
 STATIC_INLINE(kern_hashitem *)
 KERN_HASH_FIRST_ITEM(kern_data_store *kds, cl_uint hash)
 {
@@ -786,6 +724,27 @@ KERN_HASH_NEXT_ITEM(kern_data_store *kds, kern_hashitem *khitem)
 		return NULL;
 	return (kern_hashitem *)((char *)kds + khitem->next);
 }
+
+/* access macro for tuple-slot format */
+#define KERN_DATA_STORE_SLOT_LENGTH(kds,nitems)				\
+	KDS_CALCULATE_SLOT_LENGTH((kds)->ncols,(nitems))
+
+#define KERN_DATA_STORE_VALUES(kds,kds_index)				\
+	((Datum *)((char *)(kds) +								\
+			   KDS_CALCULATE_SLOT_LENGTH((kds)->ncols,(kds_index))))
+
+#define KERN_DATA_STORE_ISNULL(kds,kds_index)				\
+	((char *)(KERN_DATA_STORE_VALUES((kds),(kds_index)) + (kds)->ncols))
+
+/* access macro for block format */
+#define KERN_DATA_STORE_BLOCK_BLCKNR(kds, kds_index)			\
+	(((BlockNumber *)KERN_DATA_STORE_BODY(kds))[(kds_index)])
+
+#define KERN_DATA_STORE_BLOCK_PGPAGE(kds, kds_index)				\
+	(struct PageHeaderData *)(KERN_DATA_STORE_BODY(kds) +			\
+							  STROMALIGN(sizeof(BlockNumber) *		\
+										 __ldg((kds)->nrooms)) +	\
+							  BLCKSZ * kds_index)
 
 /* transform device pointer to host address */
 #define devptr_to_host(kds,devptr)		\
