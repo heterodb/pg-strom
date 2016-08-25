@@ -111,13 +111,13 @@ typedef struct ItemIdData
 #define LP_REDIRECT		2		/* HOT redirect (should have lp_len=0) */
 #define LP_DEAD			3		/* dead, may or may not have storage */
 
-#define ItemIdGetOffset(itemId)		((itemId).lp_off)
-#define ItemIdGetLength(itemId)		((itemId).lp_len)
-#define ItemIdIsUsed(itemId)		((itemId).lp_flags != LP_UNUSED)
-#define ItemIdIsNormal(itemId)		((itemId).lp_flags == LP_NORMAL)
-#define ItemIdIsRedirected(itemId)	((itemId).lp_flags == LP_REDIRECT)
-#define ItemIdIsDead(itemId)		((itemId).lp_flags == LP_DEAD)
-#define ItemIdHasStorage(itemId)	((itemId).lp_len != 0)
+#define ItemIdGetOffset(itemId)		((itemId)->lp_off)
+#define ItemIdGetLength(itemId)		((itemId)->lp_len)
+#define ItemIdIsUsed(itemId)		((itemId)->lp_flags != LP_UNUSED)
+#define ItemIdIsNormal(itemId)		((itemId)->lp_flags == LP_NORMAL)
+#define ItemIdIsRedirected(itemId)	((itemId)->lp_flags == LP_REDIRECT)
+#define ItemIdIsDead(itemId)		((itemId)->lp_flags == LP_DEAD)
+#define ItemIdHasStorage(itemId)	((itemId)->lp_len != 0)
 
 /* definitions at storage/off.h */
 typedef cl_ushort		OffsetNumber;
@@ -160,13 +160,13 @@ typedef struct PageHeaderData
 #define PD_VALID_FLAG_BITS  0x0007	/* OR of all valid pd_flags bits */
 
 #define PageGetItemId(page, offsetNumber)				\
-	(((PageHeaderData *)(page))->pd_linp[(offsetNumber) - 1])
-#define PageGetItem(page, itemId)				\
-	((char *)(page) + ItemIdGetOffset(itemId))
+	(&((PageHeaderData *)(page))->pd_linp[(offsetNumber) - 1])
+#define PageGetItem(page, lpp)							\
+	((HeapTupleHeaderData *)((char *)(page) + ItemIdGetOffset(lpp)))
 STATIC_INLINE(cl_uint)
 PageGetMaxOffsetNumber(PageHeaderData *page)
 {
-	cl_uint		pd_lower = __ldg(page->pd_lower);
+	cl_uint		pd_lower = __ldg(&page->pd_lower);
 
 	return (pd_lower <= SizeOfPageHeaderData ? 0 :
 			(pd_lower - SizeOfPageHeaderData) / sizeof(ItemIdData));
@@ -176,35 +176,35 @@ PageGetMaxOffsetNumber(PageHeaderData *page)
  * KERN_DATA_STORE_BLOCK_TUPITEM - setup a kern_tupitem from an offset
  * to itemId from the head of KDS
  */
-STATIC_INLINE(void)
-KERN_DATA_STORE_BLOCK_TUPITEM(kern_tupitem *tupitem,
-							  kern_data_store *kds,
-							  cl_uint lp_offset)
+STATIC_INLINE(HeapTupleHeaderData *)
+KERN_DATA_STORE_BLOCK_TUPITEM(kern_data_store *kds,
+							  cl_uint lp_offset,
+							  ItemPointerData *p_self)
 {
-	ItemIdData	   *lpp = *((ItemIdData *)((char *)kds + lp_offset));
-	ItemIdData		lp;
+	ItemIdData	   *lpp = (ItemIdData *)((char *)kds + lp_offset);
 	cl_uint			head_size;
 	cl_uint			block_id;
 	BlockNumber		block_nr;
 	PageHeaderData *pg_page;
 
-	assert(__ldg(kds->format) == KDS_FORMAT_BLOCK);
+	assert(__ldg(&kds->format) == KDS_FORMAT_BLOCK);
 	head_size = (KERN_DATA_STORE_HEAD_LENGTH(kds) +
-				 STROMALIGN(sizeof(BlockNumber) * __ldg(kds->nrooms)));
+				 STROMALIGN(sizeof(BlockNumber) * __ldg(&kds->nrooms)));
 	assert(lp_offset >= head_size &&
-		   lp_offset <  head_size + BLCKSZ * __ldg(kds->nitems));
-	block_id = (lp_offset - head_size) / BLOCKSZ;
+		   lp_offset <  head_size + BLCKSZ * __ldg(&kds->nitems));
+	block_id = (lp_offset - head_size) / BLCKSZ;
 	block_nr = KERN_DATA_STORE_BLOCK_BLCKNR(kds, block_id);
 	pg_page = KERN_DATA_STORE_BLOCK_PGPAGE(kds, block_id);
 
 	assert(lpp >= pg_page->pd_linp &&
 		   lpp -  pg_page->pd_linp <  PageGetMaxOffsetNumber(pg_page));
-
-	tupitem->t_len	= ItemIdGetLength(*lpp);
-	tupitem->t_self.ip_blkid.bi_hi = block_nr >> 16;
-	tupitem->t_self.ip_blkid.bi_lo = block_nr & 0xffff;
-	tupitem->t_self.ip_posid	= lpp - pg_page->pd_linp;
-	tupitem->htup	= (HeapTupleHeaderData *)PageGetItem(pg_page, *lpp);
+	if (p_self)
+	{
+		p_self->ip_blkid.bi_hi	= block_nr >> 16;
+		p_self->ip_blkid.bi_lo	= block_nr & 0xffff;
+		p_self->ip_posid		= lpp - pg_page->pd_linp;
+	}
+	return (HeapTupleHeaderData *)PageGetItem(pg_page, lpp);
 }
 
 /*
@@ -213,7 +213,8 @@ KERN_DATA_STORE_BLOCK_TUPITEM(kern_tupitem *tupitem,
 STATIC_FUNCTION(cl_bool)
 gpuscan_quals_eval(kern_context *kcxt,
 				   kern_data_store *kds,
-				   size_t kds_index);
+				   ItemPointerData *t_self,
+				   HeapTupleHeaderData *htup);
 
 /*
  * forward declaration of the function to be generated on the fly
@@ -227,6 +228,8 @@ gpuscan_projection(kern_context *kcxt,
 				   Datum *tup_values,
 				   cl_bool *tup_isnull,
 				   cl_bool *tup_internal);
+
+// TODO: common outer processing routine for GpuJoin, GpuPreAgg also
 
 /*
  * gpuscan_exec_quals_block
@@ -250,21 +253,31 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 	cl_uint				offset;
 	cl_uint				count;
 	PageHeaderData	   *pg_page;
+	ItemPointerData		t_self;
 	HeapTupleHeaderData *htup;
 
+	INIT_KERNEL_CONTEXT(&kcxt, gpuscan_exec_quals_block, kparams);
+
 	/* sanity checks */
-	assert(__ldg(kds_src->format) == KDS_FORMAT_BLOCK);
-	assert(__ldg(kds_src->nrows_per_block) > 1);
-	part_sz = (__ldg(kds_src->nrows_per_block) + WARP_SZ - 1) & ~(WARP_SZ - 1);
+	assert(__ldg(&kds_src->format) == KDS_FORMAT_BLOCK);
+	assert(__ldg(&kds_src->nrows_per_block) > 1);
+	part_sz = (__ldg(&kds_src->nrows_per_block) +
+			   warpSize - 1) & ~(warpSize - 1);
 	part_sz = Min(part_sz, get_local_size());
 	assert(get_local_size() % part_sz == 0);
-	part_id = (get_global_index() * (get_local_size() / part_id) +
+	part_id = (get_global_index() * (get_local_size() / part_sz) +
 			   get_local_id() / part_sz);
 	/* get a PostgreSQL block on which this thread will perform on */
 	if (part_id < kds_src->nitems)
 	{
+		BlockNumber	block_nr;
+
 		pg_page = KERN_DATA_STORE_BLOCK_PGPAGE(kds_src, part_id);
 		n_lines = PageGetMaxOffsetNumber(pg_page);
+		block_nr = KERN_DATA_STORE_BLOCK_BLCKNR(kds_src, part_id);
+		t_self.ip_blkid.bi_hi = block_nr >> 16;
+		t_self.ip_blkid.bi_lo = block_nr & 0xffff;
+		t_self.ip_posid = InvalidOffsetNumber;
 	}
 	else
 	{
@@ -281,13 +294,17 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 	n_lines = PageGetMaxOffsetNumber(pg_page);
 	curr_id = get_local_id() % part_sz;
 	do {
+		ItemIdData	   *lpp;
+
 		/* fetch a heap_tuple if valid */
 		if (curr_id < n_lines)
 		{
-			ItemIdData	lp = PageGetItemId(pg_page, curr_id + 1);
-
-			if (ItemIdIsNormal(lp))
-				htup = PageGetItem(pg_page, lp);
+			lpp = PageGetItemId(pg_page, curr_id + 1);
+			if (ItemIdIsNormal(lpp))
+			{
+				htup = PageGetItem(pg_page, lpp);
+				t_self.ip_posid = curr_id + 1;
+			}
 			else
 				htup = NULL;
 		}
@@ -296,7 +313,7 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 
 		/* evaluation of the qualifier */
 		if (htup)
-			rc = gpuscan_quals_eval(&kcxt, kds_src, htup);
+			rc = gpuscan_quals_eval(&kcxt, kds_src, &t_self, htup);
 		else
 			rc = false;
 		__syncthreads();
@@ -309,7 +326,7 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 				base = atomicAdd(&kresults->nitems, count);
 			__syncthreads();
 
-			if (base + count > __ldg(kresults->nrooms))
+			if (base + count > __ldg(&kresults->nrooms))
 			{
 				STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
 				goto out;
@@ -317,7 +334,8 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 			else if (rc)
 			{
 				/* OK, store the result */
-				kresults->results[base + offset] = (cl_uint)....;
+				kresults->results[base + offset] = (cl_uint)((char *)lpp -
+															 (char *)kds_src);
 			}
 		}
 		__syncthreads();
@@ -331,7 +349,7 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 			gang_flag = 0;
 		__syncthreads();
 		if (get_local_id() % part_sz == 0 && curr_id < part_sz)
-			atomicExch(&gand_flag, 1);
+			atomicExch(&gang_flag, 1);
 		__syncthreads();
 	} while (gang_flag);
 out:		
@@ -359,7 +377,7 @@ gpuscan_exec_quals(kern_gpuscan *kgpuscan,
 	kern_parambuf  *kparams = KERN_GPUSCAN_PARAMBUF(kgpuscan);
 	kern_resultbuf *kresults = KERN_GPUSCAN_RESULTBUF(kgpuscan);
 	kern_context	kcxt;
-	size_t			kds_index = get_global_id();
+	kern_tupitem   *tupitem = NULL;
 	cl_bool			rc;
 	cl_uint			offset;
 	cl_uint			count;
@@ -371,11 +389,17 @@ gpuscan_exec_quals(kern_gpuscan *kgpuscan,
 
 	INIT_KERNEL_CONTEXT(&kcxt,gpuscan_exec_quals_row,kparams);
 
-	/* evaluate device qualifier */
-	if (kds_index < kds_src->nitems)
-		rc = gpuscan_quals_eval(&kcxt, kds_src, kds_index);
+	if (get_global_id() < kds_src->nitems)
+	{
+		tupitem = KERN_DATA_STORE_TUPITEM(kds_src, get_global_id());
+		rc = gpuscan_quals_eval(&kcxt, kds_src,
+								&tupitem->t_self,
+								&tupitem->htup);
+	}
 	else
+	{
 		rc = false;
+	}
 
 	/* expand kresults buffer */
 	offset = pgstromStairlikeSum(rc ? 1 : 0, &count);
@@ -393,9 +417,8 @@ gpuscan_exec_quals(kern_gpuscan *kgpuscan,
 		else if (rc)
 		{
 			/* OK, store the result */
-			kresults->results[base + offset] = (cl_uint)
-				((char *)KERN_DATA_STORE_TUPITEM(kds_src, kds_index) -
-				 (char *)kds_src);
+			kresults->results[base + offset] = (cl_uint)((char *)tupitem -
+														 (char *)kds_src);
 		}
 	}
 	__syncthreads();

@@ -743,7 +743,7 @@ KERN_HASH_NEXT_ITEM(kern_data_store *kds, kern_hashitem *khitem)
 #define KERN_DATA_STORE_BLOCK_PGPAGE(kds, kds_index)				\
 	(struct PageHeaderData *)(KERN_DATA_STORE_BODY(kds) +			\
 							  STROMALIGN(sizeof(BlockNumber) *		\
-										 __ldg((kds)->nrooms)) +	\
+										 __ldg(&(kds)->nrooms)) +	\
 							  BLCKSZ * kds_index)
 
 /* transform device pointer to host address */
