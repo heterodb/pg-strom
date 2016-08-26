@@ -580,6 +580,81 @@ PDS_create_block(GpuContext_v2 *gcontext,
 	return pds;
 }
 
+/*
+ * PDS_insert_block_block
+ *
+ *
+ */
+static int
+PDS_insert_block_block(pgstrom_data_store *pds,
+					   Relation rel, BlockNumber blknum,
+					   Snapshot snapshot,
+					   BufferAccessStrategy strategy)
+{
+	/*
+	 * 
+	 *
+	 *
+	 *
+	 */
+	if (RelationUsesLocalBuffers(rel) ||
+		RelationCanUseNvmeStrom(rel))
+	{}
+
+
+
+
+	// error if local relation (temp)
+
+	/* create a tag so we can lookup the buffer */
+	INIT_BUFFERTAG(newTag, smgr->smgr_rnode.node, forkNum, blockNum);
+
+	/* determine its hash code and partition lock ID */
+    newHash = BufTableHashCode(&newTag);
+    newPartitionLock = BufMappingPartitionLock(newHash);
+
+	// exist on shared buffer?
+	LWLockAcquire(newPartitionLock, LW_SHARED);
+	buf_id = BufTableLookup(&newTag, newHash);
+	if (buf_id >= 0)
+	{
+		// block is exists on the shared buffer
+
+
+
+	}
+	else
+	{
+		// block is not exists on the shared buffer
+		// visibility check!
+
+        if (!VM_ALL_VISIBLE(scandesc->heapRelation,
+                            ItemPointerGetBlockNumber(tid),
+                            &node->ioss_VMBuffer))
+		{
+			// we have to have sync read
+		}
+		else
+		{
+			// enqueue file desc + file pos + BLCKSZ
+
+		}
+
+
+	}
+
+	// if not all visible, --> sync read
+	// or direct DMA is disabled
+
+
+	// if all visible and direct DMA enabled 
+
+
+}
+
+
+
+
 int
 PDS_insert_block(pgstrom_data_store *pds,
 				 Relation rel, BlockNumber blknum,
@@ -694,8 +769,8 @@ PDS_insert_block(pgstrom_data_store *pds,
 /*
  * PDS_insert_tuple
  *
- * It inserts a tuple on the data store. Unlike block read mode, we can use
- * this interface for both of row and column data store.
+ * It inserts a tuple onto the data store. Unlike block read mode, we cannot
+ * use this API only for row-format.
  */
 bool
 PDS_insert_tuple(pgstrom_data_store *pds, TupleTableSlot *slot)

@@ -56,6 +56,7 @@ static const char	   *nvme_strom_ioctl_pathname = "/proc/nvme-strom";
 static void			   *iomap_buffer_segments = NULL;
 static CUdeviceptr		iomap_buffer_base = 0UL;	/* per process vaddr */
 static Size				iomap_buffer_size;			/* GUC */
+static HTAB			   *vfs_nvme_htable = NULL;
 
 #define SizeOfIOMapBufferSegment								\
 	MAXALIGN(offsetof(IOMapBufferSegment,						\
@@ -328,6 +329,165 @@ pgstrom_iomap_buffer_free(PG_FUNCTION_ARGS)
 }
 PG_FUNCTION_INFO_V1(pgstrom_iomap_buffer_free);
 #endif
+
+/*
+ * RelationCanUseNvmeStrom
+ */
+typedef struct
+{
+	Oid		tablespace_oid;
+	bool	nvme_strom_supported;
+} vfs_nvme_status;
+
+static void
+vfs_nvme_cache_callback(Datum private)
+{
+	/* invalidate all the cached status */
+	if (vfs_nvme_htable)
+	{
+		hash_destroy(vfs_nvme_htable);
+		vfs_nvme_htable = NULL;
+	}
+}
+
+bool
+RelationCanUseNvmeStrom(Relation relation)
+{
+	vfs_nvme_status *entry;
+	Oid			tablespace_oid;
+	bool		found;
+
+	/* is it enabled? */
+	if (iomap_buffer_size == 0)
+		return false;
+
+	tablespace_oid = RelationGetForm(relation)->reltablespace;
+	if (!OidIsValid(tablespace_oid))
+		tablespace_oid = MyDatabaseTableSpace;
+
+	if (!vfs_nvme_htable)
+	{
+		HASHCTL		ctl;
+
+		memset(&ctl, 0, sizeof(HASHCTL));
+		ctl.keysize = sizeof(Oid);
+		ctl.entrysize = sizeof(tablespace_nvme_status);
+		vfs_nvme_htable = hash_create("VFS:NVMe-Strom status", 64,
+									  &ctl, HASH_ELEM | HASH_BLOBS);
+		CacheRegisterSyscacheCallback(TABLESPACEOID,
+									  vfs_nvme_cache_callback, (Datum) 0);
+	}
+
+	entry = (vfs_nvme_status *) hash_search(vfs_nvme_htable,
+											&tablespace_oid,
+											HASH_ENTER, &found);
+	PG_TRY();
+	{
+		if (!found)
+		{
+			const char *pathname = GetDatabasePath(MyDatabaseId,
+												   tablespace_oid);
+			int			fdesc;
+
+			entry->tablespace_oid = tablespace_oid;
+			entry->nvme_strom_supported = false;
+
+			fdesc = open(pathname, O_RDONLY | O_DIRECTORY);
+			if (fdesc < 0)
+			{
+				elog(WARNING, "failed to open \"%s\" as tablespace \"%s\": %m",
+					 pathname, get_tablespace_name(tablespace_oid));
+			}
+			else
+			{
+				StromCmd__CheckFile cmd;
+
+				cmd.fdesc = fdesc;
+				if (nvme_strom_ioctl(STROM_IOCTL__CHECK_FILE, &cmd))
+				{
+					elog(NOTICE, "nvme-strom: tablespace \"%s\" is not supported",
+						 get_tablespace_name(tablespace_oid));
+
+				}
+				else
+				{
+
+
+
+				}
+			}
+
+			
+			
+
+
+
+
+		}
+	}
+	PG_CATCH();
+	{
+		/* avoid incorrect status of the cache */
+		vfs_nvme_cache_callback();
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+
+
+	if (!entry)
+	{
+
+		
+
+
+
+
+	}
+	return entry->nvme_strom_supported;
+
+	if (entry)
+		return entry->nvme_strom_supported;
+
+		
+
+	entry = (tablespace_nvme_status *) hash_search(tablespace_htable,
+												   (void *) &tablespace_oid,
+												   HASH_ENTER, &found);
+	if (!found)
+	{
+		const char *pathname = GetDatabasePath(MyDatabaseId,
+											   tablespace_oid);
+
+
+
+
+		entry->tablespace_oid = tablespace_oid;
+		entry->is_supported = ;
+
+
+
+	}
+
+
+	char *
+		GetDatabasePath(Oid dbNode, Oid spcNode)
+
+
+#if 0
+	/*
+	 * MEMO: RelationGetNumberOfBlocks eventually calls mdnblocks() which
+	 * internally opens all the file of underlying storage system. So, we
+	 * can reference file-descriptor of the relation.
+	 * Of course, it is true for the current storage layer at PgSQL v9.6.
+	 */
+	nr_blocks = RelationGetNumberOfBlocks(relation);
+#endif
+
+	//RelationGetNumberOfBlocks();
+	//internally opens the relevant FDs! yeah
+
+}
 
 /*
  * pgstrom_iomap_buffer_info

@@ -708,6 +708,7 @@ extern void pgstrom_init_datastore(void);
 /*
  * nvme_strom.c
  */
+extern bool nvme_strom_is_enabled(void);
 extern CUresult	gpuDmaMemAllocIOMap(GpuContext_v2 *gcontext,
 									CUdeviceptr *p_devptr, size_t bytesize);
 extern CUresult	gpuDmaMemFreeIOMap(GpuContext_v2 *gcontext,
