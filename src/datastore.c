@@ -549,6 +549,37 @@ PDS_create_hash(GpuContext_v2 *gcontext,
 	return pds;
 }
 
+pgstrom_data_store *
+PDS_create_block(GpuContext_v2 *gcontext,
+				 TupleDesc tupdesc,
+				 Size length)
+{
+	pgstrom_data_store *pds;
+	Size		kds_length = STROMALIGN_DOWN(length);
+	cl_uint		nrooms;
+
+	if (KDS_CALCULATE_HEAD_LENGTH(tupdesc->natts) > kds_length)
+		elog(ERROR, "Required length for KDS-Block is too short");
+
+	pds = dmaBufferAlloc(gcontext, offsetof(pgstrom_data_store,
+											kds) + kds_length);
+	pds->refcnt = 1;
+
+	nrooms = (kds_length - KDS_CALCULATE_HEAD_LENGTH(tupdesc->natts))
+		/ (sizeof(BlockNumber) + BLCKSZ);
+	while (KDS_CALCULATE_HEAD_LENGTH(tupdesc->natts) +
+		   STROMALIGN(sizeof(BlockNumber) * nrooms) +
+		   BLCKSZ * nrooms > kds_length)
+		nrooms--;
+	if (nrooms < 1)
+		elog(ERROR, "Required length for KDS-Block is too short");
+
+	init_kernel_data_store(&pds->kds, tupdesc, kds_length,
+						   KDS_FORMAT_BLOCK, nrooms, false);
+
+	return pds;
+}
+
 int
 PDS_insert_block(pgstrom_data_store *pds,
 				 Relation rel, BlockNumber blknum,

@@ -688,6 +688,10 @@ extern pgstrom_data_store *PDS_create_slot(GpuContext_v2 *gcontext,
 extern pgstrom_data_store *PDS_create_hash(GpuContext_v2 *gcontext,
 										   TupleDesc tupdesc,
 										   Size length);
+extern pgstrom_data_store *PDS_create_block(GpuContext_v2 *gcontext,
+											TupleDesc tupdesc,
+											Size length);
+
 extern int PDS_insert_block(pgstrom_data_store *pds,
 							Relation rel,
 							BlockNumber blknum,
