@@ -2462,7 +2462,7 @@ gpupreagg_codegen_projection_corr(StringInfo body, cl_int dst_index,
 		")\n"
 		"  {\n"
 		"    temp.float8_v.isnull = true;\n"
-		"    temp_float8_v.value = 0.0;\n"
+		"    temp.float8_v.value = 0.0;\n"
 		"  }\n"
 		"  else\n");
 
@@ -2528,7 +2528,7 @@ gpupreagg_codegen_projection_corr(StringInfo body, cl_int dst_index,
 		"  if (temp.float8_v.isnull)\n"
 		"    dst_values[%d] = 0.0;\n"
 		"  else\n"
-		"    dst_values[%d] = temp.float8_v.value;\n",
+		"    dst_values[%d] = pg_float8_to_datum(temp.float8_v.value);\n",
 		dst_index - 1,
 		dst_index - 1,
 		dst_index - 1);
