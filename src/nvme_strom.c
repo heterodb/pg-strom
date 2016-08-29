@@ -25,6 +25,7 @@
 #include "nvme_strom.h"
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -350,12 +351,15 @@ vfs_nvme_cache_callback(Datum private)
 	}
 }
 
-bool
-RelationCanUseNvmeStrom(Relation relation)
+static bool
+__RelationCanUseNvmeStrom(Relation relation)
 {
 	vfs_nvme_status *entry;
-	Oid			tablespace_oid;
-	bool		found;
+	struct statvfs	st_buf;
+	const char	   *pathname;
+	Oid				tablespace_oid;
+	int				fdesc;
+	bool			found;
 
 	if (iomap_buffer_size == 0)
 		return false;	/* NVMe-Strom is not enabled */
@@ -381,48 +385,76 @@ RelationCanUseNvmeStrom(Relation relation)
 	}
 	entry = (vfs_nvme_status *) hash_search(vfs_nvme_htable,
 											&tablespace_oid,
-											HASH_ENTER, &found);
-	PG_TRY();
+											HASH_ENTER,
+											&found);
+	if (found)
+		return entry->nvme_strom_supported;
+
+	/* check whether the tablespace is supported */
+	entry->tablespace_oid = tablespace_oid;
+	entry->nvme_strom_supported = false;
+
+	pathname = GetDatabasePath(MyDatabaseId, tablespace_oid);
+	if (statvfs(pathname, &st_buf) != 0)
 	{
-		if (!found)
+		elog(WARNING, "failed on statvfs('%s') for tablespace \"%s\": %m",
+			 pathname, get_tablespace_name(tablespace_oid));
+	}
+	else if ((st_buf.f_flag & ST_MANDLOCK) == 0)
+	{
+		ereport(NOTICE,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("nvme_strom does not support tablespace \"%s\" "
+						"because of no mandatory locks on the filesystem",
+						get_tablespace_name(tablespace_oid)),
+				 errhint("Add -o mand option when you mount: \"%s\"",
+						 pathname)));
+	}
+	else
+	{
+		fdesc = open(pathname, O_RDONLY | O_DIRECTORY);
+		if (fdesc < 0)
 		{
-			const char *pathname = GetDatabasePath(MyDatabaseId,
-												   tablespace_oid);
-			int			fdesc;
+			elog(WARNING, "failed to open \"%s\" of tablespace \"%s\": %m",
+				 pathname, get_tablespace_name(tablespace_oid));
+		}
+		else
+		{
+			StromCmd__CheckFile cmd;
 
-			entry->tablespace_oid = tablespace_oid;
-			entry->nvme_strom_supported = false;
-
-			fdesc = open(pathname, O_RDONLY | O_DIRECTORY);
-			if (fdesc < 0)
-			{
-				elog(WARNING, "failed to open \"%s\" of tablespace \"%s\": %m",
-					 pathname, get_tablespace_name(tablespace_oid));
-			}
+			cmd.fdesc = fdesc;
+			if (nvme_strom_ioctl(STROM_IOCTL__CHECK_FILE, &cmd) == 0)
+				entry->nvme_strom_supported = true;
 			else
 			{
-				StromCmd__CheckFile cmd;
-
-				cmd.fdesc = fdesc;
-				if (nvme_strom_ioctl(STROM_IOCTL__CHECK_FILE, &cmd) == 0)
-					entry->nvme_strom_supported = true;
-				else
-				{
-					elog(NOTICE, "nvme_strom does not support \"%s\" of tablespace \"%s\"",
-						 get_tablespace_name(tablespace_oid));
-				}
+				ereport(NOTICE,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						errmsg("nvme_strom does not support tablespace \"%s\"",
+							   get_tablespace_name(tablespace_oid))));
 			}
 		}
 	}
+	return entry->nvme_strom_supported;
+}
+
+bool
+RelationCanUseNvmeStrom(Relation relation)
+{
+	bool	retval;
+
+	PG_TRY();
+	{
+		retval = __RelationCanUseNvmeStrom(relation);
+	}
 	PG_CATCH();
 	{
-		/* avoid incorrect status of the cache */
+		/* clean up the cache if any error */
 		vfs_nvme_cache_callback();
-		PG_RE_THROW();
+        PG_RE_THROW();
 	}
 	PG_END_TRY();
 
-	return entry->nvme_strom_supported;
+	return retval;
 }
 
 /*
