@@ -64,6 +64,7 @@ typedef struct {
 	cl_uint		extra_flags;	/* extra libraries to be included */
 	cl_uint		proj_row_extra;	/* extra requirements if row format */
 	cl_uint		proj_slot_extra;/* extra requirements if slot format */
+	cl_uint		nrows_per_block;/* estimated tuple density per block */
 } GpuScanInfo;
 
 #define GPUSCANINFO_EXNODE_NAME		"GpuScanInfo"
@@ -1533,6 +1534,7 @@ create_gpuscan_plan(PlannerInfo *root,
 	ListCell	   *cell;
 	cl_int			proj_row_extra = 0;
 	cl_int			proj_slot_extra = 0;
+	cl_uint			nrows_per_block;
 	StringInfoData	kern;
 	StringInfoData	source;
 	codegen_context	context;
@@ -1592,6 +1594,22 @@ create_gpuscan_plan(PlannerInfo *root,
 	pfree(kern.data);
 
 	/*
+	 * estimation of the tuple density per block - this logic follows
+	 * the manner in estimate_rel_size()
+	 */
+	if (baserel->pages > 0)
+		nrows_per_block = ceil(baserel->tuples / (double) baserel->pages);
+	else
+	{
+		int32		tuple_width = get_rel_data_width(relation, NULL);
+
+		tuple_width += MAXALIGN(SizeofHeapTupleHeader);
+		tuple_width += sizeof(ItemIdData);
+		/* note: integer division is intentional here */
+		nrows_per_block = (BLCKSZ - SizeOfPageHeaderData) / tuple_width;
+	}
+
+	/*
 	 * Construction of GpuScanPlan node; on top of CustomPlan node
 	 */
 	cscan = makeNode(CustomScan);
@@ -1611,6 +1629,7 @@ create_gpuscan_plan(PlannerInfo *root,
 	gs_info->extra_flags = context.extra_flags | DEVKERNEL_NEEDS_GPUSCAN;
 	gs_info->proj_row_extra = proj_row_extra;
 	gs_info->proj_slot_extra = proj_slot_extra;
+	gs_info->nrows_per_block = nrows_per_block;
 	cscan->custom_private = list_make1(gs_info);
 	form_gpuscan_custom_exprs(cscan, context.used_params, dev_quals);
 	cscan->custom_scan_tlist = tlist_dev;
@@ -2276,6 +2295,7 @@ gpuscan_info_copy(ExtensibleNode *__newnode, const ExtensibleNode *__oldnode)
 	COPY_SCALAR_FIELD(extra_flags);
 	COPY_SCALAR_FIELD(proj_row_extra);
 	COPY_SCALAR_FIELD(proj_slot_extra);
+	COPY_SCALAR_FIELD(nrows_per_block);
 }
 
 static bool
@@ -2288,6 +2308,7 @@ gpuscan_info_equal(const ExtensibleNode *__a, const ExtensibleNode *__b)
 	COMPARE_SCALAR_FIELD(extra_flags);
 	COMPARE_SCALAR_FIELD(proj_row_extra);
 	COMPARE_SCALAR_FIELD(proj_slot_extra);
+	COMPARE_SCALAR_FIELD(nrows_per_block);
 
 	return true;
 }
@@ -2301,6 +2322,7 @@ gpuscan_info_out(StringInfo str, const ExtensibleNode *__node)
 	WRITE_UINT_FIELD(extra_flags);
 	WRITE_INT_FIELD(proj_row_extra);
 	WRITE_INT_FIELD(proj_slot_extra);
+	WRITE_UINT_FIELD(nrows_per_block);
 }
 
 static void
@@ -2312,6 +2334,7 @@ gpuscan_info_read(ExtensibleNode *node)
 	READ_UINT_FIELD(extra_flags);
 	READ_INT_FIELD(proj_row_extra);
 	READ_INT_FIELD(proj_slot_extra);
+	READ_UINT_FIELD(nrows_per_block);
 }
 
 

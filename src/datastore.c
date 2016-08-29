@@ -39,10 +39,12 @@
 #include <sys/types.h>
 
 /*
- * GUC variables
+ * static variables
  */
 static int		pgstrom_chunk_size_kb;
 static int		pgstrom_chunk_limit_kb = INT_MAX;
+static long		sysconf_pagesize;		/* _SC_PAGESIZE */
+static long		sysconf_phys_pages;		/* _SC_PHYS_PAGES */
 
 /*
  * pgstrom_chunk_size - configured chunk size
@@ -280,6 +282,8 @@ init_kernel_data_store(kern_data_store *kds,
 	kds->nslots = 0;				/* caller shall set, if any */
 	kds->hash_min = 0;
 	kds->hash_max = UINT_MAX;
+	kds->nblocks_uncached = 0;
+	kds->nrows_per_block = 0;
 
 	attcacheoff = offsetof(HeapTupleHeaderData, t_bits);
 	if (tupdesc->tdhasoid)
@@ -552,7 +556,8 @@ PDS_create_hash(GpuContext_v2 *gcontext,
 pgstrom_data_store *
 PDS_create_block(GpuContext_v2 *gcontext,
 				 TupleDesc tupdesc,
-				 Size length)
+				 Size length,
+				 cl_uint nrows_per_tuple)
 {
 	pgstrom_data_store *pds;
 	Size		kds_length = STROMALIGN_DOWN(length);
@@ -576,72 +581,194 @@ PDS_create_block(GpuContext_v2 *gcontext,
 
 	init_kernel_data_store(&pds->kds, tupdesc, kds_length,
 						   KDS_FORMAT_BLOCK, nrooms, false);
+	pds->kds.nrows_per_block = nrows_per_tuple;
 
 	return pds;
 }
 
 /*
- * PDS_insert_block_block
- *
- *
+ * support for bulkload onto ROW/BLOCK format
+ */
+
+/* see storage/smgr/md.c */
+typedef struct _MdfdVec
+{
+	File			mdfd_vfd;		/* fd number in fd.c's pool */
+	BlockNumber		mdfd_segno;		/* segment number, from 0 */
+	struct _MdfdVec *mdfd_chain;	/* next segment, or NULL */
+} MdfdVec;
+
+typedef struct PDSScanState
+{
+	BlockNumber		curr_segno;
+	Buffer			curr_vmbuffer;
+	struct {
+		File		vfd;
+		BlockNumber	segno;
+	} mdfd[FLEXIBLE_ARRAY_MEMBER];
+} PDSScanState;
+
+/*
+ * PDS_begin_heapscan
+ */
+void
+PDS_begin_heapscan(GpuTaskState_v2 *gts)
+{
+	Relation		relation = gts->css.ss.ss_currentRelation;
+	EState		   *estate = gts->css.ss.ps.state;
+	BlockNumber		nr_blocks;
+	BlockNumber		nr_segs;
+	MdfdVec		   *vec;
+	PDSScanState   *sstate;
+	cl_uint			i;
+
+	/*
+	 * NOTE: RelationGetNumberOfBlocks() has a significant side-effect.
+	 * It opens all the underlying files of MAIN_FORKNUM, then set @rd_smgr
+	 * of the relation.
+	 * It allows extension to touch file descriptors without invocation of
+	 * ReadBuffer().
+	 */
+	nr_blocks = RelationGetNumberOfBlocks(relation);
+	nr_segs = (nr_blocks + (BlockNumber) RELSEG_SIZE - 1) / RELSEG_SIZE;
+
+	pds_sstate = MemoryContextAlloc(state->es_query_cxt,
+									offsetof(PDSScanState, mdfd[nr_segs]));
+	memset(pds_sstate, -1, offsetof(PDSScanState, mdfd[nr_segs]));
+	pds_sstate->curr_segno = InvalidBlockNumber;
+	pds_sstate->curr_vmbuffer = InvalidBuffer;
+
+	vec = relation->rd_smgr->md_fd[MAIN_FORKNUM];
+	while (vec)
+	{
+		if (vec->mdfd_vfd < 0 ||
+			vec->mdfd_segno >= nr_segs)
+			elog(ERROR, "Bug? MdfdVec {vfd=%d segno=%u} is out of range",
+				 vec->mdfd_vfd, vec->mdfd_segno);
+		pds_sstate->mdfd[vec->mdfd_segno].segno	= vec->mdfd_segno;
+		pds_sstate->mdfd[vec->mdfd_segno].vfd	= vec->mdfd_vfd;
+		vec = vec->mdfd_chain;
+	}
+
+	/* sanity checks */
+	for (i=0; i < nr_segs; i++)
+	{
+		if (pds_sstate->mdfd[i].segno >= nr_segs ||
+			pds_sstate->mdfd[i].vfd < 0)
+			elog(ERROR, "Bug? Here is a hole segment which was not open");
+	}
+	gts->pds_sstate = pds_sstate;
+}
+
+/*
+ * PDS_end_heapscan
+ */
+void
+PDS_end_heapscan(GpuTaskState_v2 *gts)
+{
+	PDSScanState   *pds_sstate = gts->pds_sstate;
+
+	if (pds_sstate)
+	{
+		/* release visibility map, if any */
+		if (pds_sstate->curr_vmbuffer != InvalidBuffer)
+		{
+			ReleaseBuffer(pds_sstate->curr_vmbuffer);
+			pds_sstate->curr_vmbuffer = InvalidBuffer;
+		}
+		pfree(pds_sstate);
+		gts->pds_sstate = NULL;
+	}
+}
+
+/*
+ * PDS_exec_heapscan_block - PDS scan for KDS_FORMAT_BLOCK format
  */
 static int
-PDS_insert_block_block(pgstrom_data_store *pds,
-					   Relation rel, BlockNumber blknum,
-					   Snapshot snapshot,
-					   BufferAccessStrategy strategy)
+PDS_exec_heapscan_block(pgstrom_data_store *pds,
+						Relation relation,
+						HeapScanDesc hscan,
+						PDSScanState *pds_sstate)
 {
+	BlockNumber		blknum = hscan->rs_cblock;
+	Snapshot		snapshot = hscan->rs_snapshot;
+	BufferAccessStrategy strategy = hscan->rs_strategy;
+	SMgrRelation   *smgr = relation->rd_smgr;
+	BufferTag		newTag;
+	uint32			newHash;
+	LWLock		   *newPartitionLock = NULL;
+	int				buf_id;
+
 	/*
-	 * 
-	 *
-	 *
-	 *
+	 * Always sync read if NVMe-Strom does not support the relation
+	 * (likely, incorrect decision in the caller)
 	 */
-	if (RelationUsesLocalBuffers(rel) ||
-		RelationCanUseNvmeStrom(rel))
-	{}
+	if (!RelationCanUseNvmeStrom(relation))
+		goto sync_read_buffer;
 
-
-
-
-	// error if local relation (temp)
+	/* check whether the target block is all-visible */
+	if (!VM_ALL_VISIBLE(relation, blknum,
+						&pds_sstate->curr_vmbuffer))
+		goto sync_read_buffer;
 
 	/* create a tag so we can lookup the buffer */
-	INIT_BUFFERTAG(newTag, smgr->smgr_rnode.node, forkNum, blockNum);
-
+	INIT_BUFFERTAG(newTag, smgr->smgr_rnode.node, MAIN_FORKNUM, blknum);
 	/* determine its hash code and partition lock ID */
-    newHash = BufTableHashCode(&newTag);
-    newPartitionLock = BufMappingPartitionLock(newHash);
+	newHash = BufTableHashCode(&newTag);
+	newPartitionLock = BufMappingPartitionLock(newHash);
 
-	// exist on shared buffer?
+	/* check whether the block exists on the shared buffer? */
 	LWLockAcquire(newPartitionLock, LW_SHARED);
 	buf_id = BufTableLookup(&newTag, newHash);
 	if (buf_id >= 0)
-	{
-		// block is exists on the shared buffer
+		goto sync_read_buffer;	/* already loaded */
+
+	// Here is 128 BufMappingPartitionLock() 
+	// Each process can hold up to 200 locks
+	// Likely, long BufMappingPartitionLock hold prevents concurrency
+	// Do we have any other mechanism to lock file write?
+	// Linux's mandatory lock - needs to set group's bit
+	// Is it possible to overwrite by kernel module?
+	// anyway, write lock to page-cache is sufficient
+
+
+	/*
+	 * OK, the source block is not loaded to the buffer and it shall be
+	 * all visible.
+	 */
 
 
 
-	}
-	else
-	{
-		// block is not exists on the shared buffer
-		// visibility check!
-
-        if (!VM_ALL_VISIBLE(scandesc->heapRelation,
-                            ItemPointerGetBlockNumber(tid),
-                            &node->ioss_VMBuffer))
-		{
-			// we have to have sync read
-		}
-		else
-		{
-			// enqueue file desc + file pos + BLCKSZ
-
-		}
 
 
-	}
+	return;
+
+
+
+	/*
+	 * MEMO: cuMemcpyHtoDAsync() will take higher performance as long as
+	 * we can load the entire table blocks onto main memory.
+	 * SSD-to-GPU Direct DMA involeves raw i/o operations with less
+	 * intermediation by VFS, however, its throughput is less than RAM.
+	 * So, we like to avoid SSD-to-GPU Direct DMA for tables that are
+	 * enough small to cache.
+	 */
+	nr_blocks = RelationGetNumberOfBlocks(relation);
+
+
+
+
+
+
+
+
+
+
+
+
+	/* create a tag so we can lookup the buffer */
+	INIT_BUFFERTAG(newTag, smgr->smgr_rnode.node, MAIN_FORKNUM, blknum);
+
 
 	// if not all visible, --> sync read
 	// or direct DMA is disabled
@@ -650,9 +777,50 @@ PDS_insert_block_block(pgstrom_data_store *pds,
 	// if all visible and direct DMA enabled 
 
 
+
+
+sync_read_buffer:
+	if (newPartitionLock)
+		LWLockRelease(newPartitionLock);
+
+
+
 }
 
+/*
+ * PDS_exec_heapscan_row - PDS scan for KDS_FORMAT_ROW format
+ */
+static int
+PDS_exec_heapscan_row(pgstrom_data_store *pds,
+					  Relation relation,
+					  HeapScanDesc hscan,
+					  PDSScanState *pds_sstate)
+{
 
+
+
+}
+
+/*
+ * PDS_exec_heapscan - PDS scan entrypoint
+ */
+int
+PDS_exec_heapscan(pgstrom_data_store *pds, GpuScanState_v2 *gts)
+{
+	Relation		relation = gts->css.ss.ss_currentRelation;
+	HeapScanDesc	hscan = gts->css.ss.ss_currentScanDesc;
+	PDSScanState   *pds_sstate = gts->pds_sstate;
+	int				retval;
+
+	if (pds->kds.format == KDS_FORMAT_ROW)
+		retval = PDS_exec_heapscan_row(pds, relation, hscan, pds_sstate);
+	else if (pds->kds.format == KDS_FORMAT_BLOCK)
+		retval = PDS_exec_heapscan_block(pds, relatioin, hscan, pds_sstate);
+	else
+		elog(ERROR, "Bug? unexpected PDS format: %d", pds->kds.format);
+
+	return retval;
+}
 
 
 int
@@ -900,14 +1068,23 @@ PDS_build_hashtable(pgstrom_data_store *pds)
 void
 pgstrom_init_datastore(void)
 {
+	/* get system configuration */
+	sysconf_pagesize = sysconf(_SC_PAGESIZE);
+	if (sysconf_pagesize < 0)
+		elog(ERROR, "failed on sysconf(_SC_PAGESIZE): %m");
+	sysconf_phys_pages = sysconf(_SC_PHYS_PAGES);
+	if (sysconf_phys_pages < 0)
+		elog(ERROR, "failed on sysconf(_SC_PHYS_PAGES): %m");
+	
+	/* init GUC variables */
 	DefineCustomIntVariable("pg_strom.chunk_size",
 							"default size of pgstrom_data_store",
 							NULL,
 							&pgstrom_chunk_size_kb,
-							15872,
+							32768 - (2 * BLCKSZ / 1024),	/* almost 32MB */
 							4096,
 							MAX_KILOBYTES,
-							PGC_USERSET,
+							PGC_INTERNAL,
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
 							check_guc_chunk_size, NULL, NULL);
 	DefineCustomIntVariable("pg_strom.chunk_limit",
@@ -917,7 +1094,7 @@ pgstrom_init_datastore(void)
 							5 * pgstrom_chunk_size_kb,
 							4096,
 							MAX_KILOBYTES,
-							PGC_USERSET,
+							PGC_INTERNAL,
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
 							check_guc_chunk_limit, NULL, NULL);
 }

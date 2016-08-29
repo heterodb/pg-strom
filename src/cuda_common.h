@@ -632,8 +632,15 @@ typedef struct {
 	cl_uint			nslots;		/* width of hash-slot (only HASH format) */
 	cl_uint			hash_min;	/* minimum hash-value (only HASH format) */
 	cl_uint			hash_max;	/* maximum hash-value (only HASH format) */
-	cl_uint			nrows_per_block; /* average number of rows per PG-block
-									  * (only BLOCK format) */
+	cl_uint			nblocks_uncached;	/* number of uncached blocks; thus,
+										 * these blocks are not loaded to
+										 * the KDS, but an array of
+										 * strom_dma_chunk[] is not the tail
+										 * of KDS. (only BLOCK format)
+										 */
+	cl_uint			nrows_per_block;	/* average number of rows per block
+										 * of PostgreSQL (only BLOCK format)
+										 */
 	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER]; /* metadata of columns */
 } kern_data_store;
 

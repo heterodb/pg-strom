@@ -357,9 +357,11 @@ RelationCanUseNvmeStrom(Relation relation)
 	Oid			tablespace_oid;
 	bool		found;
 
-	/* is it enabled? */
 	if (iomap_buffer_size == 0)
-		return false;
+		return false;	/* NVMe-Strom is not enabled */
+
+	if (RelationUsesLocalBuffers(relation))
+		return false;	/* SSD2GPU on temp relation is not supported */
 
 	tablespace_oid = RelationGetForm(relation)->reltablespace;
 	if (!OidIsValid(tablespace_oid))
@@ -377,7 +379,6 @@ RelationCanUseNvmeStrom(Relation relation)
 		CacheRegisterSyscacheCallback(TABLESPACEOID,
 									  vfs_nvme_cache_callback, (Datum) 0);
 	}
-
 	entry = (vfs_nvme_status *) hash_search(vfs_nvme_htable,
 											&tablespace_oid,
 											HASH_ENTER, &found);
@@ -395,7 +396,7 @@ RelationCanUseNvmeStrom(Relation relation)
 			fdesc = open(pathname, O_RDONLY | O_DIRECTORY);
 			if (fdesc < 0)
 			{
-				elog(WARNING, "failed to open \"%s\" as tablespace \"%s\": %m",
+				elog(WARNING, "failed to open \"%s\" of tablespace \"%s\": %m",
 					 pathname, get_tablespace_name(tablespace_oid));
 			}
 			else
@@ -403,26 +404,14 @@ RelationCanUseNvmeStrom(Relation relation)
 				StromCmd__CheckFile cmd;
 
 				cmd.fdesc = fdesc;
-				if (nvme_strom_ioctl(STROM_IOCTL__CHECK_FILE, &cmd))
-				{
-					elog(NOTICE, "nvme-strom: tablespace \"%s\" is not supported",
-						 get_tablespace_name(tablespace_oid));
-
-				}
+				if (nvme_strom_ioctl(STROM_IOCTL__CHECK_FILE, &cmd) == 0)
+					entry->nvme_strom_supported = true;
 				else
 				{
-
-
-
+					elog(NOTICE, "nvme_strom does not support \"%s\" of tablespace \"%s\"",
+						 get_tablespace_name(tablespace_oid));
 				}
 			}
-
-			
-			
-
-
-
-
 		}
 	}
 	PG_CATCH();
@@ -433,60 +422,7 @@ RelationCanUseNvmeStrom(Relation relation)
 	}
 	PG_END_TRY();
 
-
-
-	if (!entry)
-	{
-
-		
-
-
-
-
-	}
 	return entry->nvme_strom_supported;
-
-	if (entry)
-		return entry->nvme_strom_supported;
-
-		
-
-	entry = (tablespace_nvme_status *) hash_search(tablespace_htable,
-												   (void *) &tablespace_oid,
-												   HASH_ENTER, &found);
-	if (!found)
-	{
-		const char *pathname = GetDatabasePath(MyDatabaseId,
-											   tablespace_oid);
-
-
-
-
-		entry->tablespace_oid = tablespace_oid;
-		entry->is_supported = ;
-
-
-
-	}
-
-
-	char *
-		GetDatabasePath(Oid dbNode, Oid spcNode)
-
-
-#if 0
-	/*
-	 * MEMO: RelationGetNumberOfBlocks eventually calls mdnblocks() which
-	 * internally opens all the file of underlying storage system. So, we
-	 * can reference file-descriptor of the relation.
-	 * Of course, it is true for the current storage layer at PgSQL v9.6.
-	 */
-	nr_blocks = RelationGetNumberOfBlocks(relation);
-#endif
-
-	//RelationGetNumberOfBlocks();
-	//internally opens the relevant FDs! yeah
-
 }
 
 /*
@@ -724,6 +660,7 @@ pgstrom_init_nvme_strom(void)
 	Size		max_nchunks;
 	Size		required;
 
+	/* pg_strom.iomap_buffer_size */
 	DefineCustomIntVariable("pg_strom.iomap_buffer_size",
 							"I/O mapped buffer size for SSD-to-GPU Direct DMA",
 							NULL,

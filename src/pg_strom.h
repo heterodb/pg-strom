@@ -157,6 +157,8 @@ typedef struct GpuTaskState_v2	GpuTaskState_v2;
  *
  * A common structure of the state machine of GPU related tasks.
  */
+struct PDSScanState;
+
 struct GpuTaskState_v2
 {
 	CustomScanState	css;
@@ -172,6 +174,7 @@ struct GpuTaskState_v2
 	bool			outer_bulk_exec;/* True, if it scans outer by bulk-exec */
 	Instrumentation	outer_instrument; /* runtime statistics, if any */
 	TupleTableSlot *scan_overflow;	/* temporary buffer, if no space on PDS */
+	struct PDSScanState *pds_sstate;/* state for a base relation scan */
 
 	/* fields for current task */
 	cl_long			curr_index;		/* current position on the curr_task */
@@ -396,6 +399,19 @@ typedef struct devexpr_info {
 typedef struct pgstrom_data_store
 {
 	cl_int		refcnt;		/* reference counter */
+	/*
+	 * NOTE: Extra information for KDS_FORMAT_BLOCK.
+	 * @nblocks is number of PostgreSQL blocks, to be processed by NVMe-Strom.
+	 * 
+	 *
+	 *
+	 */
+	cl_uint		nblocks;
+	
+
+	hoge
+
+
 	char		__padding__[4];
 	kern_data_store kds;	/* data chunk in kernel portion */
 } pgstrom_data_store;
@@ -690,7 +706,8 @@ extern pgstrom_data_store *PDS_create_hash(GpuContext_v2 *gcontext,
 										   Size length);
 extern pgstrom_data_store *PDS_create_block(GpuContext_v2 *gcontext,
 											TupleDesc tupdesc,
-											Size length);
+											Size length,
+											cl_uint nrows_per_block);
 
 extern int PDS_insert_block(pgstrom_data_store *pds,
 							Relation rel,
