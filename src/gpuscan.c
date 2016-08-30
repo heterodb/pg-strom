@@ -633,17 +633,19 @@ codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
 	char		   *expr_code;
 	ListCell	   *lc;
 
-	appendStringInfoString(kern,
-						   "STATIC_FUNCTION(cl_bool)\n"
-						   "gpuscan_quals_eval(kern_context *kcxt,\n"
-						   "                   kern_data_store *kds,\n"
-						   "                   size_t kds_index)\n");
+	appendStringInfoString(
+		kern,
+		"STATIC_FUNCTION(cl_bool)\n"
+		"gpuscan_quals_eval(kern_context *kcxt,\n"
+		"                   kern_data_store *kds,\n"
+		"                   ItemPointerData *t_self,\n"
+		"                   HeapTupleHeaderData *htup)\n");
 	if (dev_quals == NULL)
 	{
 		appendStringInfoString(kern,
 							   "{\n"
 							   "  return true;\n"
-							   "}\n");
+							   "}\n\n");
 		return;
 	}
 
@@ -677,18 +679,20 @@ codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
 		foreach (lc, context->used_vars)
 		{
 			var = lfirst(lc);
-			dtype = pgstrom_devtype_lookup(var->vartype);
 
+			/* we don't support system columns in expression now */
+			Assert(var->varattno > 0);
+
+			dtype = pgstrom_devtype_lookup(var->vartype);
 			appendStringInfo(
 				kern,
-				"  pg_%s_t %s_%u = pg_%s_vref(%s,kcxt,%u,%s);\n",
+				"  char *addr = kern_get_datum_tuple(kds->colmeta,htup,%u)\n"
+				"  pg_%s_t %s_%u = pg_%s_datum_ref(kcxt,addr,false);\n",
+				var->varattno,
 				dtype->type_name,
 				context->var_label,
 				var->varattno,
-				dtype->type_name,
-				context->kds_label,
-				var->varattno - 1,
-				context->kds_index_label);
+				dtype->type_name);
 		}
 	}
 	else
@@ -713,10 +717,8 @@ codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
 		/* walking on the HeapTuple */
 		appendStringInfoString(
 			kern,
-			"  HeapTupleHeaderData *htup;\n"
-            "  char *addr;\n"
+			"  char *addr;\n"
 			"\n"
-			"  htup = kern_get_tuple_row(kds, kds_index);\n"
 			"  assert(htup != NULL);\n"
 			"  EXTRACT_HEAP_TUPLE_BEGIN(addr, kds, htup);\n");
 
@@ -753,7 +755,7 @@ codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
 		kern,
 		"\n"
 		"  return EVAL(%s);\n"
-		"}\n",
+		"}\n\n",
 		expr_code);
 }
 
