@@ -175,7 +175,7 @@ extern __shared__ cl_ulong __pgstrom_dynamic_shared_workmem[];
 #define __constant__	/* address space qualifier is noise on host */
 #define __shared__		/* address space qualifier is noise on host */
 typedef uintptr_t		hostptr_t;
-#define __ldg(x)		/* cache access hint is just a noise on host */
+#define __ldg(x)		(*(x))	/* cache access hint is just a noise on host */
 #endif
 
 /*

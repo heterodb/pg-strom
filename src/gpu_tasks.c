@@ -545,12 +545,15 @@ pgstromRescanGpuTaskState(GpuTaskState_v2 *gts)
 void
 pgstromReleaseGpuTaskState(GpuTaskState_v2 *gts)
 {
+	/* cleanup per-query PDS-scan state, if any */
+	PDS_cleanup_heapscan_state(gts);
 	/* release scan-desc if any */
 	if (gts->css.ss.ss_currentScanDesc)
 		heap_endscan(gts->css.ss.ss_currentScanDesc);
 	/* unreference CUDA program */
 	if (gts->program_id != INVALID_PROGRAM_ID)
 		pgstrom_put_cuda_program(gts->gcontext, gts->program_id);
+
 	/* unreference GpuContext */
 	PutGpuContext(gts->gcontext);
 }

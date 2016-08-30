@@ -1601,7 +1601,7 @@ create_gpuscan_plan(PlannerInfo *root,
 		nrows_per_block = ceil(baserel->tuples / (double) baserel->pages);
 	else
 	{
-		int32		tuple_width = get_rel_data_width(relation, NULL);
+		int32		tuple_width = get_relation_data_width(rte->relid, NULL);
 
 		tuple_width += MAXALIGN(SizeofHeapTupleHeader);
 		tuple_width += sizeof(ItemIdData);
@@ -2101,12 +2101,8 @@ gpuscanExecScanChunk(GpuTaskState_v2 *gts, Size chunk_length)
 	/* fill up this data-store */
 	while (!finished)
 	{
-		if (PDS_insert_block(pds, base_rel,
-							 scan->rs_cblock,
-							 scan->rs_snapshot,
-							 scan->rs_strategy) < 0)
+		if (!PDS_exec_heapscan(gts, pds, NULL))
 			break;
-
 		/* move to the next block */
 		scan->rs_cblock++;
 		if (scan->rs_cblock >= scan->rs_nblocks)

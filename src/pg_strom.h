@@ -398,21 +398,14 @@ typedef struct devexpr_info {
  */
 typedef struct pgstrom_data_store
 {
-	cl_int		refcnt;		/* reference counter */
+	cl_int		refcnt;			/* reference counter */
 	/*
 	 * NOTE: Extra information for KDS_FORMAT_BLOCK.
-	 * @nblocks is number of PostgreSQL blocks, to be processed by NVMe-Strom.
-	 * 
-	 *
-	 *
+	 * @nblocks_uncached is number of PostgreSQL blocks, to be processed
+	 * by NVMe-Strom. If @nblocks_uncached > 0, the tail of PDS shall be
+	 * filled up by an array of strom_dma_chunk.
 	 */
-	cl_uint		nblocks;
-	
-
-	hoge
-
-
-	char		__padding__[4];
+	cl_uint		nblocks_uncached;
 	kern_data_store kds;	/* data chunk in kernel portion */
 } pgstrom_data_store;
 
@@ -708,12 +701,11 @@ extern pgstrom_data_store *PDS_create_block(GpuContext_v2 *gcontext,
 											TupleDesc tupdesc,
 											Size length,
 											cl_uint nrows_per_block);
+extern void PDS_cleanup_heapscan_state(GpuTaskState_v2 *gts);
+extern bool PDS_exec_heapscan(GpuTaskState_v2 *gts,
+							  pgstrom_data_store *pds,
+							  int *p_filedesc);
 
-extern int PDS_insert_block(pgstrom_data_store *pds,
-							Relation rel,
-							BlockNumber blknum,
-							Snapshot snapshot,
-							BufferAccessStrategy strategy);
 extern bool PDS_insert_tuple(pgstrom_data_store *pds,
 							 TupleTableSlot *slot);
 extern bool PDS_insert_hashitem(pgstrom_data_store *pds,
@@ -732,6 +724,8 @@ extern CUresult	gpuDmaMemFreeIOMap(GpuContext_v2 *gcontext,
 								   CUdeviceptr devptr);
 extern Datum pgstrom_iomap_buffer_info(PG_FUNCTION_ARGS);
 extern void pgstrom_init_nvme_strom(void);
+
+extern bool RelationCanUseNvmeStrom(Relation relation);
 
 /*
  * gpuscan.c

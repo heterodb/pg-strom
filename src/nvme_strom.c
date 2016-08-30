@@ -17,10 +17,14 @@
  */
 #include "postgres.h"
 #include "catalog/pg_type.h"
+#include "commands/tablespace.h"
 #include "funcapi.h"
 #include "storage/ipc.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
+#include "utils/inval.h"
+#include "utils/rel.h"
+#include "utils/syscache.h"
 #include "pg_strom.h"
 #include "nvme_strom.h"
 #include <sys/ioctl.h>
@@ -341,7 +345,7 @@ typedef struct
 } vfs_nvme_status;
 
 static void
-vfs_nvme_cache_callback(Datum private)
+vfs_nvme_cache_callback(Datum arg, int cacheid, uint32 hashvalue)
 {
 	/* invalidate all the cached status */
 	if (vfs_nvme_htable)
@@ -377,7 +381,7 @@ __RelationCanUseNvmeStrom(Relation relation)
 
 		memset(&ctl, 0, sizeof(HASHCTL));
 		ctl.keysize = sizeof(Oid);
-		ctl.entrysize = sizeof(tablespace_nvme_status);
+		ctl.entrysize = sizeof(vfs_nvme_status);
 		vfs_nvme_htable = hash_create("VFS:NVMe-Strom status", 64,
 									  &ctl, HASH_ELEM | HASH_BLOBS);
 		CacheRegisterSyscacheCallback(TABLESPACEOID,
@@ -449,7 +453,7 @@ RelationCanUseNvmeStrom(Relation relation)
 	PG_CATCH();
 	{
 		/* clean up the cache if any error */
-		vfs_nvme_cache_callback();
+		vfs_nvme_cache_callback(0, 0, 0);
         PG_RE_THROW();
 	}
 	PG_END_TRY();
