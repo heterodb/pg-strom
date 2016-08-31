@@ -227,8 +227,6 @@ cost_discount_gpu_projection(PlannerInfo *root, RelOptInfo *rel,
 			proj_num_attrs++;
 			normal_num_attrs++;
 			may_gpu_projection = true;
-
-			elog(INFO, "GpuProjection: %s", nodeToString(tle->expr));
 		}
 		else
 		{
@@ -802,14 +800,14 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 		"STATIC_FUNCTION(void)\n"
 		"gpuscan_projection(kern_context *kcxt,\n"
 		"                   kern_data_store *kds_src,\n"
-		"                   kern_tupitem *tupitem,\n"
+		"                   HeapTupleHeaderData *htup,\n"
+		"                   ItemPointerData *t_self,\n"
 		"                   kern_data_store *kds_dst,\n"
 		"                   cl_uint dst_nitems,\n"
 		"                   Datum *tup_values,\n"
 		"                   cl_bool *tup_isnull,\n"
 		"                   cl_bool *tup_internal)\n"
 		"{\n"
-		"  HeapTupleHeaderData *htup;\n"
 		"  cl_bool is_slot_format __attribute__((unused));\n"
 		"  char *curr;\n");
 
@@ -869,7 +867,6 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 	 */
 	appendStringInfoString(
 		&body,
-		"  htup = (!tupitem ? NULL : &tupitem->htup);\n"
 		"  is_slot_format = (kds_dst->format == KDS_FORMAT_SLOT);\n");
 
 	/*
@@ -877,38 +874,38 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 	 */
 	for (j=0; j < list_length(tlist_dev); j++)
 	{
-		if (varremaps[j] < 0)
-		{
-			Form_pg_attribute attr
-				= SystemAttributeDefinition(varremaps[j], true);
+		Form_pg_attribute	attr;
 
-			if (attr->attbyval)
-				appendStringInfo(
-					&body,
-					"  /* %s system column */\n"
-					"  tup_isnull[%d] = !htup;\n"
-					"  if (htup)\n"
-					"    tup_values[%d] = kern_getsysatt_%s(kds_src, htup));\n",
-					NameStr(attr->attname),
-					j,
-					j, NameStr(attr->attname));
-			else
-				appendStringInfo(
-					&body,
-					"  /* %s system column */\n"
-					"  tup_isnull[%d] = !htup;\n"
-					"  if (htup)\n"
-					"  {\n"
-					"    void *__ptr = kern_getsysatt_%s(kds_src,htup);\n"
-					"    if (is_slot_format)\n"
-					"      __ptr = devptr_to_host(kds_src, __ptr);\n"
-					"    tup_values[%d] = PointerGetDatum(__ptr);\n"
-					"  }\n",
-					NameStr(attr->attname),
-					j,
-					NameStr(attr->attname),
-					j);
-		}
+		if (varremaps[j] >= 0)
+			continue;
+
+		attr = SystemAttributeDefinition(varremaps[j], true);
+		if (attr->attbyval)
+			appendStringInfo(
+				&body,
+				"  /* %s system column */\n"
+				"  tup_isnull[%d] = !htup;\n"
+				"  if (htup)\n"
+				"    tup_values[%d] = kern_getsysatt_%s(kds_src,htup,t_self);\n",
+				NameStr(attr->attname),
+				j,
+				j, NameStr(attr->attname));
+		else
+			appendStringInfo(
+				&body,
+				"  /* %s system column */\n"
+				"  tup_isnull[%d] = !htup;\n"
+				"  if (htup)\n"
+				"  {\n"
+				"    void *__ptr = kern_getsysatt_%s(kds_src,htup,t_self);\n"
+				"    if (is_slot_format)\n"
+				"      __ptr = devptr_to_host(kds_src, __ptr);\n"
+				"    tup_values[%d] = PointerGetDatum(__ptr);\n"
+				"  }\n",
+				NameStr(attr->attname),
+				j,
+				NameStr(attr->attname),
+				j);
 	}
 
 	/*
@@ -2401,23 +2398,26 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 					 CUmodule cuda_module,
 					 CUstream cuda_stream)
 {
-	GpuScanTask		   *gscan = (GpuScanTask *) gtask;
+	GpuScanTask	   *gscan = (GpuScanTask *) gtask;
 	pgstrom_data_store *pds_src = gscan->pds_src;
 	pgstrom_data_store *pds_dst = gscan->pds_dst;
-	cl_uint				src_nitems = pds_src->kds.nitems;
-	void			   *kern_args[5];
-	size_t				offset;
-	size_t				length;
-	size_t				grid_size;
-	size_t				block_size;
-	CUresult			rc;
+	cl_uint			src_nitems = pds_src->kds.nitems;
+	void		   *kern_args[5];
+	size_t			offset;
+	size_t			length;
+	size_t			grid_size;
+	size_t			block_size;
+	bool			with_nvme_strom;
+	CUresult		rc;
 
 	/*
 	 * Lookup GPU kernel functions
 	 */
 	rc = cuModuleGetFunction(&gscan->kern_exec_quals,
 							 cuda_module,
-							 "gpuscan_exec_quals");
+							 pds_src->kds.format == KDS_FORMAT_ROW
+							 ? "gpuscan_exec_quals_row"
+							 : "gpuscan_exec_quals_block");
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
 
@@ -2435,6 +2435,11 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 	/*
 	 * Allocation of device memory
 	 */
+	with_nvme_strom = (pds_src->kds.format == KDS_FORMAT_BLOCK &&
+					   pds_src->nblocks_uncached > 0);
+
+	// pds_src must be allocated from PCI BAR area if BLOCK mode
+
 	length = (GPUMEMALIGN(KERN_GPUSCAN_LENGTH(&gscan->kern)) +
 			  GPUMEMALIGN(KERN_DATA_STORE_LENGTH(&pds_src->kds)));
 	if (pds_dst)
@@ -2480,15 +2485,27 @@ gpuscan_process_task(GpuTask_v2 *gtask,
     gscan->num_dma_send++;
 
 	/*  kern_data_store *kds_src */
-	length = KERN_DATA_STORE_LENGTH(&pds_src->kds);
-	rc = cuMemcpyHtoDAsync(gscan->m_kds_src,
-						   &pds_src->kds,
-						   length,
-						   cuda_stream);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-    gscan->bytes_dma_send += length;
-	gscan->num_dma_send++;
+	if (pds_src->kds.format == KDS_FORMAT_ROW)
+	{
+		length = KERN_DATA_STORE_LENGTH(&pds_src->kds);
+		rc = cuMemcpyHtoDAsync(gscan->m_kds_src,
+							   &pds_src->kds,
+							   length,
+							   cuda_stream);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+		gscan->bytes_dma_send += length;
+		gscan->num_dma_send++;
+	}
+	else
+	{
+		// early half by RAM2GPU DMA
+
+
+		// later half by SSD2GPU DMA
+
+
+	}
 
 	/* kern_data_store *kds_dst, if any */
 	if (pds_dst)
@@ -2508,8 +2525,8 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 
 	/*
 	 * KERNEL_FUNCTION(void)
-	 * gpuscan_exec_quals(kern_gpuscan *kgpuscan,
-	 *                    kern_data_store *kds_src)
+	 * gpuscan_exec_quals_(row|block)(kern_gpuscan *kgpuscan,
+	 *                                kern_data_store *kds_src)
 	 */
 	if (gscan->dev_projection)
 	{
@@ -2535,6 +2552,7 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 	}
 	else
 	{
+		// Bug??
 		/* no device qualifiers, thus, all rows are visible to projection */
 		Assert(KERN_GPUSCAN_RESULTBUF(&gscan->kern)->all_visible);
 	}
@@ -2575,6 +2593,12 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 	 * Recv DMA call
 	 */
 	PERFMON_EVENT_RECORD(gscan, ev_dma_recv_start, cuda_stream);
+
+	// if pds_src == BLOCK && nblocks_uncached > 0
+	// may need reverse DMA
+
+
+
 
 	offset = KERN_GPUSCAN_DMARECV_OFFSET(&gscan->kern);
 	length = KERN_GPUSCAN_DMARECV_LENGTH(&gscan->kern,

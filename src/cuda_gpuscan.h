@@ -173,13 +173,14 @@ PageGetMaxOffsetNumber(PageHeaderData *page)
 }
 
 /*
- * KERN_DATA_STORE_BLOCK_TUPITEM - setup a kern_tupitem from an offset
- * to itemId from the head of KDS
+ * KERN_DATA_STORE_BLOCK_HTUP
+ *
+ * It pulls a HeapTupleHeader by a pair of KDS and lp_offset; 
  */
 STATIC_INLINE(HeapTupleHeaderData *)
-KERN_DATA_STORE_BLOCK_TUPITEM(kern_data_store *kds,
-							  cl_uint lp_offset,
-							  ItemPointerData *p_self)
+KERN_DATA_STORE_BLOCK_HTUP(kern_data_store *kds,
+						   cl_uint lp_offset,
+						   ItemPointerData *p_self)
 {
 	ItemIdData	   *lpp = (ItemIdData *)((char *)kds + lp_offset);
 	cl_uint			head_size;
@@ -222,14 +223,13 @@ gpuscan_quals_eval(kern_context *kcxt,
 STATIC_FUNCTION(void)
 gpuscan_projection(kern_context *kcxt,
 				   kern_data_store *kds_src,
-				   kern_tupitem *tupitem,
+				   HeapTupleHeaderData *htup,
+				   ItemPointerData *t_self,
 				   kern_data_store *kds_dst,
 				   cl_uint dst_nitems,
 				   Datum *tup_values,
 				   cl_bool *tup_isnull,
 				   cl_bool *tup_internal);
-
-// TODO: common outer processing routine for GpuJoin, GpuPreAgg also
 
 /*
  * gpuscan_exec_quals_block
@@ -260,6 +260,7 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 
 	/* sanity checks */
 	assert(__ldg(&kds_src->format) == KDS_FORMAT_BLOCK);
+	assert(!__ldg(&kresults->all_visible));
 	assert(__ldg(&kds_src->nrows_per_block) > 1);
 	part_sz = (__ldg(&kds_src->nrows_per_block) +
 			   warpSize - 1) & ~(warpSize - 1);
@@ -357,22 +358,14 @@ out:
 	kern_writeback_error_status(&kgpuscan->kerror, kcxt.e);
 }
 
-
-
-
-
-
-
-
-
 /*
  * gpuscan_exec_quals_row
  *
  * kernel entrypoint of GpuScan for KDS_FORMAT_ROW
  */
 KERNEL_FUNCTION(void)
-gpuscan_exec_quals(kern_gpuscan *kgpuscan,
-				   kern_data_store *kds_src)
+gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
+					   kern_data_store *kds_src)
 {
 	kern_parambuf  *kparams = KERN_GPUSCAN_PARAMBUF(kgpuscan);
 	kern_resultbuf *kresults = KERN_GPUSCAN_RESULTBUF(kgpuscan);
@@ -445,14 +438,18 @@ gpuscan_projection_row(kern_gpuscan *kgpuscan,
 	kern_resultbuf *kresults = KERN_GPUSCAN_RESULTBUF(kgpuscan);
 	kern_context	kcxt;
 	cl_uint			dst_nitems;
+	cl_uint			kds_offset;
 	cl_uint			offset;
 	cl_uint			count;
 	__shared__ cl_uint base;
 	cl_uint			required;
+	kern_tupitem   *tupitem;
 	Datum			tup_values[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
 	cl_bool			tup_isnull[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
 	cl_bool			tup_internal[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
 	cl_uint		   *tup_index = KERN_DATA_STORE_ROWINDEX(kds_dst);
+	HeapTupleHeaderData *htup;
+	ItemPointerData t_self;
 
 	/*
 	 * immediate bailout if previous stage already have error status
@@ -464,7 +461,8 @@ gpuscan_projection_row(kern_gpuscan *kgpuscan,
 
 	/* sanity checks */
 	assert(kresults->nrels == 1);
-	assert(kds_src->format == KDS_FORMAT_ROW);
+	assert(kds_src->format == KDS_FORMAT_ROW ||
+		   (kds_src->format == KDS_FORMAT_BLOCK && !kresults->all_visible));
 	assert(kds_dst->format == KDS_FORMAT_ROW && kds_dst->nslots == 0);
 	/* update number of visible items */
 	dst_nitems = (kresults->all_visible ? kds_src->nitems : kresults->nitems);
@@ -483,16 +481,31 @@ gpuscan_projection_row(kern_gpuscan *kgpuscan,
 
 	if (get_global_id() < dst_nitems)
 	{
-		kern_tupitem   *tupitem_src;
-
-		if (kresults->all_visible)
-			tupitem_src = KERN_DATA_STORE_TUPITEM(kds_src, get_global_id());
+		if (kds_src->format == KDS_FORMAT_ROW)
+		{
+			if (kresults->all_visible)
+			{
+				tupitem = KERN_DATA_STORE_TUPITEM(kds_src, get_global_id());
+				t_self = tupitem->t_self;
+				htup = &tupitem->htup;
+			}
+			else
+			{
+				kds_offset = kresults->results[get_global_id()];
+				htup = KERN_DATA_STORE_ROW_HTUP(kds_src, kds_offset, &t_self);
+			}
+		}
 		else
-			tupitem_src = (kern_tupitem *)((char *)kds_src +
-										   kresults->results[get_global_id()]);
+		{
+			assert(!kresults->all_visible);
+			kds_offset = kresults->results[get_global_id()];
+			htup = KERN_DATA_STORE_BLOCK_HTUP(kds_src, kds_offset, &t_self);
+		}
+		/* extract to the private buffer */
 		gpuscan_projection(&kcxt,
 						   kds_src,
-						   tupitem_src,
+						   htup,
+						   &t_self,
 						   kds_dst,
 						   dst_nitems,
 						   tup_values,
@@ -506,7 +519,7 @@ gpuscan_projection_row(kern_gpuscan *kgpuscan,
 												   tup_internal));
 	}
 	else
-		required = 0;		/* not consume any buffer */
+		required = 0;		/* out of range; never write anything */
 
 	/*
 	 * step.2 - increment the buffer usage of kds_dst
@@ -531,12 +544,11 @@ gpuscan_projection_row(kern_gpuscan *kgpuscan,
 			 * step.3 - extract the result heap-tuple
 			 */
 			cl_uint			pos = kds_dst->length - (base + offset + required);
-			kern_tupitem   *tupitem_dst
-				= (kern_tupitem *)((char *)kds_dst + pos);
 
 			tup_index[get_global_id()] = pos;
-			form_kern_heaptuple(&kcxt, kds_dst, tupitem_dst,
-								tup_values, tup_isnull, tup_internal);
+			tupitem = (kern_tupitem *)((char *)kds_dst + pos);
+			form_kern_heaptuple(&kcxt, kds_dst, tupitem,
+								&t_self, tup_values, tup_isnull, tup_internal);
 		}
 	}
 	__syncthreads();
@@ -555,12 +567,14 @@ gpuscan_projection_slot(kern_gpuscan *kgpuscan,
 	kern_resultbuf *kresults = KERN_GPUSCAN_RESULTBUF(kgpuscan);
 	kern_context	kcxt;
 	cl_uint			dst_nitems;
-	kern_tupitem   *tupitem;
+	cl_uint			kds_offset;
 	Datum		   *tup_values;
 	cl_bool		   *tup_isnull;
 #ifdef GPUSCAN_DEVICE_PROJECTION
 	cl_bool			tup_internal[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
 #endif
+	HeapTupleHeaderData *htup;
+	ItemPointerData	t_self;
 
 	/*
 	 * immediate bailout if previous stage already have error status
@@ -572,57 +586,74 @@ gpuscan_projection_slot(kern_gpuscan *kgpuscan,
 
 	/* sanity checks */
 	assert(kresults->nrels == 1);
-	assert(kds_src->format == KDS_FORMAT_ROW);
+	assert(kds_src->format == KDS_FORMAT_ROW ||
+		   (kds_src->format == KDS_FORMAT_BLOCK && !kresults->all_visible));
 	assert(kds_dst->format == KDS_FORMAT_SLOT);
-	if (kresults->nitems > kds_dst->nrooms)
-	{
-		STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
-		goto out;
-	}
+
 	/* update number of visible items */
 	dst_nitems = (kresults->all_visible ? kds_src->nitems : kresults->nitems);
-	if (get_global_id() == 0)
-		kds_dst->nitems = dst_nitems;
 	if (dst_nitems > kds_dst->nrooms)
 	{
 		STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
 		goto out;
 	}
-	/* fetch the source tuple */
+	if (get_global_id() == 0)
+		kds_dst->nitems = dst_nitems;
+
+	assert(get_global_size() >= kds_dst->nrooms);
+	/*
+	 * Fetch a HeapTuple / ItemPointer from KDS
+	 */
 	if (get_global_id() < dst_nitems)
 	{
-		if (kresults->all_visible)
-			tupitem = KERN_DATA_STORE_TUPITEM(kds_src, get_global_id());
+		if (kds_src->format == KDS_FORMAT_ROW)
+		{
+			if (kresults->all_visible)
+			{
+				kern_tupitem   *tupitem
+					= KERN_DATA_STORE_TUPITEM(kds_src, get_global_id());
+				t_self = tupitem->t_self;
+				htup = &tupitem->htup;
+			}
+			else
+			{
+				kds_offset = kresults->results[get_global_id()];
+				htup = KERN_DATA_STORE_ROW_HTUP(kds_src, kds_offset, &t_self);
+			}
+		}
 		else
-			tupitem = (kern_tupitem *)((char *)kds_src +
-									   kresults->results[get_global_id()]);
+		{
+			assert(!kresults->all_visible);
+			kds_offset = kresults->results[get_global_id()];
+			htup = KERN_DATA_STORE_BLOCK_HTUP(kds_src, kds_offset, &t_self);
+		}
 	}
 	else
-		tupitem = NULL;
+		htup = NULL;	/* out of range */
 
+	/* destination buffer */
 	tup_values = KERN_DATA_STORE_VALUES(kds_dst, get_global_id());
 	tup_isnull = KERN_DATA_STORE_ISNULL(kds_dst, get_global_id());
+
 #ifdef GPUSCAN_DEVICE_PROJECTION
 	assert(kds_dst->ncols == GPUSCAN_DEVICE_PROJECTION_NFIELDS);
 	gpuscan_projection(&kcxt,
 					   kds_src,
-					   tupitem,
+					   htup,
+					   &t_self,
 					   kds_dst,
 					   dst_nitems,
 					   tup_values,
 					   tup_isnull,
 					   tup_internal);
 #else
-	if (tupitem != NULL)
-	{
-		deform_kern_heaptuple(&kcxt,
-							  kds_src,
-							  tupitem,
-							  kds_dst->ncols,
-							  true,
-							  tup_values,
-							  tup_isnull);
-	}
+	deform_kern_heaptuple(&kcxt,
+						  kds_src,
+						  htup,
+						  kds_dst->ncols,
+						  true,
+						  tup_values,
+						  tup_isnull);
 #endif
 out:
 	/* write back error status if any */

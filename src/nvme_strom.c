@@ -89,10 +89,10 @@ nvme_strom_ioctl(int cmd, const void *arg)
 }
 
 /*
- * gpuDmaMemSplitIOMap
+ * gpuMemSplitIOMap
  */
 static bool
-gpuDmaMemSplitIOMap(IOMapBufferSegment *iomap_seg, int mclass)
+gpuMemSplitIOMap(IOMapBufferSegment *iomap_seg, int mclass)
 {
 	IOMapBufferChunk   *iomap_chunk_1;
 	IOMapBufferChunk   *iomap_chunk_2;
@@ -105,7 +105,7 @@ gpuDmaMemSplitIOMap(IOMapBufferSegment *iomap_seg, int mclass)
 
 	if (dlist_is_empty(&iomap_seg->free_chunks[mclass]))
 	{
-		if (!gpuDmaMemSplitIOMap(iomap_seg, mclass + 1))
+		if (!gpuMemSplitIOMap(iomap_seg, mclass + 1))
 			return false;
 	}
 	Assert(!dlist_is_empty(&iomap_seg->free_chunks[mclass]));
@@ -127,13 +127,13 @@ gpuDmaMemSplitIOMap(IOMapBufferSegment *iomap_seg, int mclass)
 }
 
 /*
- * gpuDmaMemAllocIOMap
+ * gpuMemAllocIOMap
  *
  * Allocation of device memory which is mapped to I/O address space
  */
 CUresult
-gpuDmaMemAllocIOMap(GpuContext_v2 *gcontext,
-					CUdeviceptr *p_devptr, size_t bytesize)
+gpuMemAllocIOMap(GpuContext_v2 *gcontext,
+				 CUdeviceptr *p_devptr, size_t bytesize)
 {
 	IOMapBufferSegment *iomap_seg;
 	IOMapBufferChunk   *iomap_chunk;
@@ -170,7 +170,7 @@ gpuDmaMemAllocIOMap(GpuContext_v2 *gcontext,
 	if (dlist_is_empty(&iomap_seg->free_chunks[mclass]))
 	{
 		/* split larger mclass */
-		if (!gpuDmaMemSplitIOMap(iomap_seg, mclass + 1))
+		if (!gpuMemSplitIOMap(iomap_seg, mclass + 1))
 		{
 			SpinLockRelease(&iomap_seg->lock);
 			return CUDA_ERROR_OUT_OF_MEMORY;
@@ -195,12 +195,12 @@ gpuDmaMemAllocIOMap(GpuContext_v2 *gcontext,
 }
 
 /*
- * gpuDmaMemFreeIOMap
+ * gpuMemFreeIOMap
  *
  * Release of device memory which is mapped to I/O address space
  */
 CUresult
-gpuDmaMemFreeIOMap(GpuContext_v2 *gcontext, CUdeviceptr devptr)
+gpuMemFreeIOMap(GpuContext_v2 *gcontext, CUdeviceptr devptr)
 {
 	IOMapBufferSegment *iomap_seg;
 	IOMapBufferChunk   *iomap_chunk;
@@ -277,6 +277,120 @@ gpuDmaMemFreeIOMap(GpuContext_v2 *gcontext, CUdeviceptr devptr)
 	return CUDA_SUCCESS;
 }
 
+/*
+ * __gpuMemCopyFromSSD - common part to kick SSD-to-GPU Direct DMA
+ */
+static inline StromCmd__MemCpySsdToGpu *
+__gpuMemCopyFromSSD(CUdeviceptr destptr,
+					int file_desc,
+					int nchunks,
+					strom_dma_chunk *src_chunks)
+{
+	StromCmd__MemCpySsdToGpu *cmd;
+	IOMapBufferSegment *iomap_seg;
+	int			i;
+
+	Assert(IsGpuServerProcess());
+	/* Is NVMe-Strom configured? */
+	if (!iomap_buffer_segments)
+		elog(ERROR, "NVMe-Strom is not configured");
+	iomap_seg = GetIOMapBufferSegment(gpuserv_cuda_dindex);
+
+	/* Device memory should be already imported on allocation time */
+	Assert(iomap_buffer_base != 0UL);
+
+	if (destptr < iomap_buffer_base)
+		elog(ERROR, "NVMe-Strom: Direct DMA destination out of range");
+
+	cmd = palloc(offsetof(StromCmd__MemCpySsdToGpu, chunks[nchunks]));
+	cmd->dma_task_id	= 0;
+	cmd->status			= 0;
+	cmd->handle			= iomap_seg->iomap_handle;
+	cmd->fdesc			= file_desc;
+	cmd->nchunks		= nchunks;
+	for (i=0; i < nchunks; i++)
+	{
+		Size		offset = src_chunks[i].offset;
+		Size		length = src_chunks[i].length;
+
+		if (offset + length >= iomap_buffer_size)
+			elog(ERROR, "NVMe-Strom: Direct DMA destination out of range");
+		cmd->chunks[i].fpos		= src_chunks[i].fpos;
+		cmd->chunks[i].offset	= offset;
+		cmd->chunks[i].length	= length;
+	}
+	return cmd;
+}
+
+/*
+ * gpuMemCopyFromSSD - kick SSD-to-GPU Direct DMA in synchronous mode
+ */
+void
+gpuMemCopyFromSSD(CUdeviceptr destptr,
+				  int file_desc,
+				  int nchunks,
+				  strom_dma_chunk *src_chunks)
+{
+	StromCmd__MemCpySsdToGpu *cmd;
+
+	cmd = __gpuMemCopyFromSSD(destptr, file_desc, nchunks, src_chunks);
+	if (nvme_strom_ioctl(STROM_IOCTL__MEMCPY_SSD2GPU, cmd) != 0)
+		elog(ERROR, "failed on STROM_IOCTL__MEMCPY_SSD2GPU: %m");
+	if (cmd->status != 0)
+		elog(ERROR, "NVMe-Strom: Direct DMA Status=0x%lx", cmd->status);
+    pfree(cmd);
+}
+
+/*
+ * gpuMemCopyFromSSDWait - callback to wait for SSD-to-GPU Direct DMA done
+ */
+static void
+gpuMemCopyFromSSDWait(CUstream cuda_stream, CUresult status, void *private)
+{
+	StromCmd__MemCpySsdToGpuWait cmd;
+	unsigned long	dma_task_id = (unsigned long) private;
+
+	cmd.ntasks = 1;
+	cmd.nwaits = 1;
+	cmd.status = 0;
+	cmd.dma_task_id[0] = dma_task_id;
+
+	// FIXME: How to inform the error status to GpuTask?
+	//        callback is called in the different thread.
+
+	if (nvme_strom_ioctl(STROM_IOCTL__MEMCPY_SSD2GPU_WAIT, &cmd) != 0)
+		fprintf(stderr, "failed on STROM_IOCTL__MEMCPY_SSD2GPU_WAIT: %m");
+	if (cmd.status != 0)
+		fprintf(stderr, "NVMe-Strom: Direct DMA Status=0x%lx", cmd.status);
+}
+
+/*
+ * gpuMemCopyFromSSDAsync - kick SSD-to-GPU Direct DMA in asynchronous mode
+ */
+void
+gpuMemCopyFromSSDAsync(CUdeviceptr destptr,
+					   int file_desc,
+					   int nchunks,
+					   strom_dma_chunk *src_chunks,
+					   CUstream cuda_stream)
+{
+	StromCmd__MemCpySsdToGpu *cmd;
+	CUresult		rc;
+
+	cmd = __gpuMemCopyFromSSD(destptr, file_desc, nchunks, src_chunks);
+	if (nvme_strom_ioctl(STROM_IOCTL__MEMCPY_SSD2GPU_ASYNC, cmd) != 0)
+		elog(ERROR, "failed on STROM_IOCTL__MEMCPY_SSD2GPU_ASYNC: %m");
+
+	// FIXME: We need tracker of SSD2GPU DMA for synchronization on the
+	//        error context, to prevent unexpected memory breakage.
+	rc = cuStreamAddCallback(cuda_stream,
+							 gpuMemCopyFromSSDWait,
+							 (void *)cmd->dma_task_id, 0);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuStreamAddCallback: %s", errorText(rc));
+	pfree(cmd);
+}
+
 #if 0
 /*
  * pgstrom_iomap_buffer_alloc - for debugging
@@ -309,9 +423,9 @@ pgstrom_iomap_buffer_alloc(PG_FUNCTION_ARGS)
 
 		gpuserv_cuda_dindex = 0;
 	}
-	rc = gpuDmaMemAllocIOMap(NULL, &pointer, required);
+	rc = gpuMemAllocIOMap(NULL, &pointer, required);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on gpuDmaMemAllocIOMap: %s", errorText(rc));
+		elog(ERROR, "failed on gpuMemAllocIOMap: %s", errorText(rc));
 
 	PG_RETURN_INT64(pointer);
 }
@@ -328,7 +442,7 @@ pgstrom_iomap_buffer_free(PG_FUNCTION_ARGS)
 	int64		pointer = PG_GETARG_INT64(0);
 	CUresult	rc;
 
-	rc = gpuDmaMemFreeIOMap(NULL, pointer);
+	rc = gpuMemFreeIOMap(NULL, pointer);
 
 	PG_RETURN_TEXT_P(cstring_to_text(errorText(rc)));
 }

@@ -210,6 +210,13 @@ pgstromInitGpuTaskState(GpuTaskState_v2 *gts,
 												   estate->es_snapshot,
 												   0, NULL);
 		gts->css.ss.ss_currentScanDesc = scan_desc;
+
+		/*
+		 * Try to choose NVMe-Strom, if relation is deployed on the supported
+		 * tablespace and expected total i/o size is enough large than cache-
+		 * only scan.
+		 */
+		PDS_init_heapscan_state(gts);
 	}
 	gts->scan_overflow = NULL;
 
@@ -546,7 +553,7 @@ void
 pgstromReleaseGpuTaskState(GpuTaskState_v2 *gts)
 {
 	/* cleanup per-query PDS-scan state, if any */
-	PDS_cleanup_heapscan_state(gts);
+	PDS_end_heapscan_state(gts);
 	/* release scan-desc if any */
 	if (gts->css.ss.ss_currentScanDesc)
 		heap_endscan(gts->css.ss.ss_currentScanDesc);

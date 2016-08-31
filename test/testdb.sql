@@ -62,4 +62,4 @@ INSERT INTO t0 (SELECT x, CASE floor(random()*26)
                        floor(random() * 100000 + 1),
                        floor(random() * 100000 + 1),
                        floor(random() * 100000 + 1)
-					   FROM generate_series(1,100000000) x);
+					   FROM generate_series(1,10000000) x);

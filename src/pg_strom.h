@@ -174,8 +174,10 @@ struct GpuTaskState_v2
 	bool			outer_bulk_exec;/* True, if it scans outer by bulk-exec */
 	Instrumentation	outer_instrument; /* runtime statistics, if any */
 	TupleTableSlot *scan_overflow;	/* temporary buffer, if no space on PDS */
-	struct PDSScanState *pds_sstate;/* state for a base relation scan */
-
+	struct PDSScanState *pds_sstate;/* per-query state for raw-block read.
+									 * If not NULL, GTS prefers BLOCK format
+									 * with NVMe-Strom support.
+									 */
 	/* fields for current task */
 	cl_long			curr_index;		/* current position on the curr_task */
 	struct GpuTask_v2 *curr_task;	/* a GpuTask currently processed */
@@ -701,7 +703,8 @@ extern pgstrom_data_store *PDS_create_block(GpuContext_v2 *gcontext,
 											TupleDesc tupdesc,
 											Size length,
 											cl_uint nrows_per_block);
-extern void PDS_cleanup_heapscan_state(GpuTaskState_v2 *gts);
+extern void PDS_init_heapscan_state(GpuTaskState_v2 *gts);
+extern void PDS_end_heapscan_state(GpuTaskState_v2 *gts);
 extern bool PDS_exec_heapscan(GpuTaskState_v2 *gts,
 							  pgstrom_data_store *pds,
 							  int *p_filedesc);
@@ -717,11 +720,23 @@ extern void pgstrom_init_datastore(void);
 /*
  * nvme_strom.c
  */
+#include "nvme_strom.h"
+
 extern bool nvme_strom_is_enabled(void);
-extern CUresult	gpuDmaMemAllocIOMap(GpuContext_v2 *gcontext,
-									CUdeviceptr *p_devptr, size_t bytesize);
-extern CUresult	gpuDmaMemFreeIOMap(GpuContext_v2 *gcontext,
-								   CUdeviceptr devptr);
+extern CUresult	gpuMemAllocIOMap(GpuContext_v2 *gcontext,
+								 CUdeviceptr *p_devptr, size_t bytesize);
+extern CUresult	gpuMemFreeIOMap(GpuContext_v2 *gcontext,
+								CUdeviceptr devptr);
+extern void gpuMemCopyFromSSD(CUdeviceptr dstptr,
+							  int file_desc,
+							  int nchunks,
+							  strom_dma_chunk *ssd_chunks);
+extern void gpuMemCopyFromSSDAsync(CUdeviceptr dstptr,
+								   int file_desc,
+								   int nchunks,
+								   strom_dma_chunk *ssd_chunks,
+								   CUstream cuda_stream);
+
 extern Datum pgstrom_iomap_buffer_info(PG_FUNCTION_ARGS);
 extern void pgstrom_init_nvme_strom(void);
 

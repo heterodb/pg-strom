@@ -49,6 +49,7 @@ static int		pgstrom_chunk_size_kb;
 static int		pgstrom_chunk_limit_kb = INT_MAX;
 static long		sysconf_pagesize;		/* _SC_PAGESIZE */
 static long		sysconf_phys_pages;		/* _SC_PHYS_PAGES */
+static long		nvme_strom_threshold;
 
 /*
  * pgstrom_chunk_size - configured chunk size
@@ -615,10 +616,11 @@ typedef struct PDSScanState
 } PDSScanState;
 
 /*
- * PDS_setup_heapscan_block - construct per query state for KDS_FORMAT_BLOCK
+ * PDS_init_heapscan_state - construct a per-query state for heap-scan
+ * with KDS_FORMAT_BLOCK / NVMe-Strom.
  */
-static void
-PDS_setup_heapscan_block(GpuTaskState_v2 *gts)
+void
+PDS_init_heapscan_state(GpuTaskState_v2 *gts)
 {
 	Relation		relation = gts->css.ss.ss_currentRelation;
 	EState		   *estate = gts->css.ss.ps.state;
@@ -628,6 +630,10 @@ PDS_setup_heapscan_block(GpuTaskState_v2 *gts)
 	PDSScanState   *pds_sstate;
 	cl_uint			i;
 
+	/* Raw-block scan needs NVMe-Strom is configured */
+	if (!RelationCanUseNvmeStrom(relation))
+		return;
+
 	/*
 	 * NOTE: RelationGetNumberOfBlocks() has a significant side-effect.
 	 * It opens all the underlying files of MAIN_FORKNUM, then set @rd_smgr
@@ -636,6 +642,9 @@ PDS_setup_heapscan_block(GpuTaskState_v2 *gts)
 	 * ReadBuffer().
 	 */
 	nr_blocks = RelationGetNumberOfBlocks(relation);
+	if (nr_blocks < nvme_strom_threshold)
+		return;
+
 	nr_segs = (nr_blocks + (BlockNumber) RELSEG_SIZE - 1) / RELSEG_SIZE;
 
 	pds_sstate = MemoryContextAlloc(estate->es_query_cxt,
@@ -669,10 +678,10 @@ PDS_setup_heapscan_block(GpuTaskState_v2 *gts)
 }
 
 /*
- * PDS_cleanup_heapscan_state
+ * PDS_end_heapscan_state
  */
 void
-PDS_cleanup_heapscan_state(GpuTaskState_v2 *gts)
+PDS_end_heapscan_state(GpuTaskState_v2 *gts)
 {
 	PDSScanState   *pds_sstate = gts->pds_sstate;
 
@@ -1007,8 +1016,7 @@ PDS_exec_heapscan(GpuTaskState_v2 *gts,
 		retval = PDS_exec_heapscan_row(pds, relation, hscan);
 	else if (pds->kds.format == KDS_FORMAT_BLOCK)
 	{
-		if (!gts->pds_sstate)
-			PDS_setup_heapscan_block(gts);
+		Assert(gts->pds_sstate);
 		retval = PDS_exec_heapscan_block(pds, relation, hscan,
 										 gts->pds_sstate, p_filedesc);
 	}
@@ -1152,6 +1160,8 @@ PDS_build_hashtable(pgstrom_data_store *pds)
 void
 pgstrom_init_datastore(void)
 {
+	Size	shared_buffer_size = (Size)NBuffers * (Size)BLCKSZ;
+
 	/* get system configuration */
 	sysconf_pagesize = sysconf(_SC_PAGESIZE);
 	if (sysconf_pagesize < 0)
@@ -1159,7 +1169,21 @@ pgstrom_init_datastore(void)
 	sysconf_phys_pages = sysconf(_SC_PHYS_PAGES);
 	if (sysconf_phys_pages < 0)
 		elog(ERROR, "failed on sysconf(_SC_PHYS_PAGES): %m");
-	
+	if (sysconf_pagesize * sysconf_phys_pages < shared_buffer_size)
+		elog(ERROR, "Bug? shared_buffer is larger than system RAM");
+
+	/*
+	 * MEMO: Threshold of table's physical size to use NVMe-Strom:
+	 *   ((System RAM size) -
+	 *    (shared_buffer size)) * 0.67 + (shared_buffer size)
+	 *
+	 * If table size is enough large to issue real i/o, NVMe-Strom will
+	 * make advantage by higher i/o performance.
+	 */
+	nvme_strom_threshold = ((sysconf_pagesize * sysconf_phys_pages -
+							 shared_buffer_size) * 2 / 3 +
+							shared_buffer_size) / BLCKSZ;
+
 	/* init GUC variables */
 	DefineCustomIntVariable("pg_strom.chunk_size",
 							"default size of pgstrom_data_store",
