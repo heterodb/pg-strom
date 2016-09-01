@@ -19,46 +19,20 @@
 #define CUDA_GPUSCAN_H
 
 /*
- * Sequential Scan using GPU/MIC acceleration
- *
- * It packs a kern_parambuf and kern_resultbuf structure within a continuous
- * memory ares, to transfer (usually) small chunk by one DMA call.
- *
- * +----------------+       -----
- * | kern_parambuf  |         ^
- * | +--------------+         |
- * | | length   o--------------------+
- * | +--------------+         |      | kern_vrelation is located just after
- * | | nparams      |         |      | the kern_parambuf (because of DMA
- * | +--------------+         |      | optimization), so head address of
- * | | poffset[0]   |         |      | kern_gpuscan + parambuf.length
- * | | poffset[1]   |         |      | points kern_resultbuf.
- * | |    :         |         |      |
- * | | poffset[M-1] |         |      |
- * | +--------------+         |      |
- * | | variable     |         |      |
- * | | length field |         |      |
- * | | for Param /  |         |      |
- * | | Const values |         |      |
- * | |     :        |         |      |
- * +-+--------------+  -----  |  <---+
- * | kern_resultbuf |    ^    |
- * | +--------------+    |    |  Area to be sent to OpenCL device.
- * | | nrels (=1)   |    |    |  Forward DMA shall be issued here.
- * | +--------------+    |    |
- * | | nitems       |    |    |
- * | +--------------+    |    |
- * | | nrooms (=N)  |    |    |
- * | +--------------+    |    |
- * | | errcode      |    |    V
- * | +--------------+    |  -----
- * | | rindex[0]    |    |
- * | | rindex[1]    |    |  Area to be written back from OpenCL device.
- * | |     :        |    |  Reverse DMA shall be issued here.
- * | | rindex[N-1]  |    V
- * +-+--------------+  -----
- *
- * Gpuscan kernel code assumes all the fields shall be initialized to zero.
+ * +-----------------+
+ * | kern_gpuscan    |
+ * | +---------------+
+ * | | kern_errbuf   |
+ * | +---------------+ ---
+ * | | kern_parembuf |  ^
+ * | |     :         |  | parameter buffer length
+ * | |     :         |  v
+ * | +---------------+ ---
+ * | | kern_results  |
+ * | |  @nrels = 1   |
+ * | |     :         |
+ * | |     :         |
+ * +-+---------------+
  */
 typedef struct {
 	kern_errorbuf	kerror;
@@ -82,11 +56,13 @@ typedef struct {
 	 KERN_GPUSCAN_RESULTBUF_LENGTH(kgpuscan))
 #define KERN_GPUSCAN_DMASEND_OFFSET(kgpuscan)	0
 #define KERN_GPUSCAN_DMASEND_LENGTH(kgpuscan)	\
-	(KERN_GPUSCAN_PARAMBUF_LENGTH(kgpuscan) +	\
+	(offsetof(kern_gpuscan, kparams) +			\
+	 KERN_GPUSCAN_PARAMBUF_LENGTH(kgpuscan) +	\
 	 offsetof(kern_resultbuf, results[0]))
 #define KERN_GPUSCAN_DMARECV_OFFSET(kgpuscan)	0
 #define KERN_GPUSCAN_DMARECV_LENGTH(kgpuscan, nitems)	\
-	(KERN_GPUSCAN_PARAMBUF_LENGTH(kgpuscan) +			\
+	(offsetof(kern_gpuscan, kparams) +					\
+	 KERN_GPUSCAN_PARAMBUF_LENGTH(kgpuscan) +			\
 	 offsetof(kern_resultbuf, results[(nitems)]))
 
 #ifdef __CUDACC__
@@ -422,7 +398,7 @@ gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
 	__syncthreads();
 out:
 	/* write back error status if any */
-	kern_writeback_error_status(&kgpuscan->kerror, kcxt.e);
+	kern_writeback_error_status(&kresults->kerror, kcxt.e);
 }
 
 #ifdef GPUSCAN_DEVICE_PROJECTION
@@ -606,8 +582,8 @@ gpuscan_projection_slot(kern_gpuscan *kgpuscan,
 	}
 	if (get_global_id() == 0)
 		kds_dst->nitems = dst_nitems;
+	assert(get_global_size() >= dst_nitems);
 
-	assert(get_global_size() >= kds_dst->nrooms);
 	/*
 	 * Fetch a HeapTuple / ItemPointer from KDS
 	 */
@@ -668,5 +644,182 @@ out:
 	/* write back error status if any */
 	kern_writeback_error_status(&kgpuscan->kerror, kcxt.e);
 }
+
+/*
+ * gpuscan_main - controller function of GpuScan logic
+ */
+KERNEL_FUNCTION(void)
+gpuscan_main(kern_gpuscan *kgpuscan,
+			 kern_data_store *kds_src,
+			 kern_data_store *kds_dst)
+{
+	kern_parambuf  *kparams = KERN_GPUSCAN_PARAMBUF(kgpuscan);
+	kern_resultbuf *kresults = KERN_GPUSCAN_RESULTBUF(kgpuscan);
+	kern_context	kcxt;
+	void		   *kernel_func;
+	void		  **kernel_args;
+	dim3			grid_sz;
+	dim3			block_sz;
+	cl_uint			part_sz;
+	cl_uint			ntuples;
+	cudaError_t		status = cudaSuccess;
+
+	INIT_KERNEL_CONTEXT(&kcxt, gpuscan_main, kparams);
+	/* sanity checks */
+	assert(get_global_size() == 1);		/* only single thread */
+	assert(kds_src->format == KDS_FORMAT_ROW ||
+		   (kds_src->format == KDS_FORMAT_BLOCK && !kresults->all_visible));
+	assert(!kds_dst ||
+		   kds_dst->format == KDS_FORMAT_ROW ||
+		   kds_dst->format == KDS_FORMAT_SLOT);
+	/*
+	 * (1) Evaluation of Scan qualifiers
+	 */
+	if (!kresults->all_visible)
+	{
+		if (kds_src->format == KDS_FORMAT_ROW)
+		{
+			kernel_func = (void *)gpuscan_exec_quals_row;
+			part_sz = 0;
+			ntuples = kds_src->nitems;
+		}
+		else
+		{
+			kernel_func = (void *)gpuscan_exec_quals_block;
+			part_sz = (kds_src->nrows_per_block +
+					   warpSize - 1) & ~(warpSize - 1);
+			ntuples = part_sz * kds_src->nitems;
+		}
+		status = optimal_workgroup_size(&grid_sz,
+										&block_sz,
+										kernel_func,
+										ntuples,
+										0,
+										sizeof(cl_uint));
+		if (status != cudaSuccess)
+		{
+			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+			goto out;
+		}
+
+		/*
+		 * adjust block-size if KDS_FORMAT_BLOCK and partition size is
+		 * less than the block-size.
+		 */
+		if (kds_src->format == KDS_FORMAT_BLOCK &&
+			part_sz < block_sz.x)
+		{
+			cl_uint		nparts_per_block = block_sz.x / part_sz;
+
+			block_sz.x = nparts_per_block * part_sz;
+			grid_sz.x = (kds_src->nitems +
+						 nparts_per_block - 1) / nparts_per_block;
+		}
+
+		kernel_args = (void **)
+			cudaGetParameterBuffer(sizeof(void *),
+								   sizeof(void *) * 2);
+		if (!kernel_args)
+		{
+			STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelArgs);
+			goto out;
+		}
+		kernel_args[0] = kgpuscan;
+		kernel_args[1] = kds_src;
+
+		status = cudaLaunchDevice(kernel_func,
+								  kernel_args,
+								  grid_sz,
+								  block_sz,
+								  sizeof(cl_uint) * block_sz.x,
+								  NULL);
+		if (status != cudaSuccess)
+		{
+			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+			goto out;
+		}
+
+		status = cudaDeviceSynchronize();
+		if (status != cudaSuccess)
+		{
+			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+			goto out;
+		}
+
+		if (kresults->kerror.errcode != StromError_Success)
+		{
+			kcxt.e = kresults->kerror;
+			goto out;
+		}
+		ntuples = kresults->nitems;
+	}
+	else
+	{
+		/* all-visible, thus all the source tuples are valid input */
+		ntuples = kds_src->nitems;
+	}
+
+	/*
+     * (2) Projection of the results
+     */
+	if (kds_dst && ntuples > 0)
+	{
+		if (kds_dst->format == KDS_FORMAT_ROW)
+			kernel_func = (void *)gpuscan_projection_row;
+		else
+			kernel_func = (void *)gpuscan_projection_slot;
+
+		status = optimal_workgroup_size(&grid_sz,
+                                        &block_sz,
+										kernel_func,
+										ntuples,
+										0, sizeof(cl_uint));
+		if (status != cudaSuccess)
+		{
+			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+			goto out;
+		}
+
+		kernel_args = (void **)
+			cudaGetParameterBuffer(sizeof(void *),
+								   sizeof(void *) * 3);
+		if (!kernel_args)
+		{
+			STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelArgs);
+			goto out;
+		}
+		kernel_args[0] = kgpuscan;
+		kernel_args[1] = kds_src;
+		kernel_args[2] = kds_dst;
+
+		status = cudaLaunchDevice(kernel_func,
+								  kernel_args,
+								  grid_sz,
+								  block_sz,
+								  sizeof(cl_uint) * block_sz.x,
+								  NULL);
+		if (status != cudaSuccess)
+		{
+			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+			goto out;
+		}
+
+		status = cudaDeviceSynchronize();
+		if (status != cudaSuccess)
+		{
+			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+			goto out;
+		}
+
+		if (kresults->kerror.errcode != StromError_Success)
+		{
+			kcxt.e = kresults->kerror;
+			goto out;
+		}
+	}
+out:
+	kern_writeback_error_status(&kgpuscan->kerror, kcxt.e);
+}
+
 #endif	/* __CUDACC__ */
 #endif	/* CUDA_GPUSCAN_H */

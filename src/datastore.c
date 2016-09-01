@@ -303,7 +303,6 @@ init_kernel_data_store(kern_data_store *kds,
 	kds->nslots = 0;				/* caller shall set, if any */
 	kds->hash_min = 0;
 	kds->hash_max = UINT_MAX;
-	kds->nblocks_uncached = 0;
 	kds->nrows_per_block = 0;
 
 	attcacheoff = offsetof(HeapTupleHeaderData, t_bits);
@@ -527,6 +526,7 @@ PDS_create_row(GpuContext_v2 *gcontext, TupleDesc tupdesc, Size length)
 	 */
 	init_kernel_data_store(&pds->kds, tupdesc, kds_length,
 						   KDS_FORMAT_ROW, INT_MAX, false);
+	pds->nblocks_uncached = 0;
 	return pds;
 }
 
@@ -551,6 +551,7 @@ PDS_create_slot(GpuContext_v2 *gcontext,
 
 	init_kernel_data_store(&pds->kds, tupdesc, kds_length,
 						   KDS_FORMAT_SLOT, nrooms, use_internal);
+	pds->nblocks_uncached = 0;
 	return pds;
 }
 
@@ -571,6 +572,7 @@ PDS_create_hash(GpuContext_v2 *gcontext,
 
 	init_kernel_data_store(&pds->kds, tupdesc, kds_length,
 						   KDS_FORMAT_HASH, INT_MAX, false);
+	pds->nblocks_uncached = 0;
 	return pds;
 }
 
@@ -603,6 +605,7 @@ PDS_create_block(GpuContext_v2 *gcontext,
 	init_kernel_data_store(&pds->kds, tupdesc, kds_length,
 						   KDS_FORMAT_BLOCK, nrooms, false);
 	pds->kds.nrows_per_block = nvme_sstate->nrows_per_block;
+	pds->nblocks_uncached = 0;
 
 	return pds;
 }

@@ -95,8 +95,7 @@ typedef struct
 	GpuTask_v2			task;
 	bool				dev_projection;		/* true, if device projection */
 	/* CUDA resources (only server side) */
-	CUfunction			kern_exec_quals;
-	CUfunction			kern_projection;
+	CUfunction			kern_gpuscan_main;
 	CUdeviceptr			m_gpuscan;
 	CUdeviceptr			m_kds_src;
 	CUdeviceptr			m_kds_dst;
@@ -1625,7 +1624,8 @@ create_gpuscan_plan(PlannerInfo *root,
 									 T_ExtensibleNode);
 	gs_info->ex.extnodename = GPUSCANINFO_EXNODE_NAME;
 	gs_info->kern_source = source.data;
-	gs_info->extra_flags = context.extra_flags | DEVKERNEL_NEEDS_GPUSCAN;
+	gs_info->extra_flags = context.extra_flags |
+		DEVKERNEL_NEEDS_DYNPARA | DEVKERNEL_NEEDS_GPUSCAN;
 	gs_info->proj_row_extra = proj_row_extra;
 	gs_info->proj_slot_extra = proj_slot_extra;
 	gs_info->nrows_per_block = nrows_per_block;
@@ -2431,8 +2431,9 @@ gpuscan_cleanup_cuda_resources(GpuScanTask *gscan)
 			elog(WARNING, "failed on gpuMemFreeIOMap: %s", errorText(rc));
 	}
 	/* ensure pointers are NULL */
-	gscan->kern_exec_quals = NULL;
-	gscan->kern_projection = NULL;
+//	gscan->kern_exec_quals = NULL;
+//	gscan->kern_projection = NULL;
+	gscan->kern_gpuscan_main = NULL;
 	gscan->m_gpuscan = 0UL;
 	gscan->m_kds_src = 0UL;
 	gscan->m_kds_dst = 0UL;
@@ -2478,46 +2479,22 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 	GpuScanTask	   *gscan = (GpuScanTask *) gtask;
 	pgstrom_data_store *pds_src = gscan->pds_src;
 	pgstrom_data_store *pds_dst = gscan->pds_dst;
-	cl_uint			src_ntuples;
+	kern_resultbuf *kresults = KERN_GPUSCAN_RESULTBUF(&gscan->kern);
+	cl_uint			ntuples;
 	void		   *kern_args[5];
 	size_t			offset;
 	size_t			length;
-	size_t			grid_size;
-	size_t			block_size;
 	bool			with_nvme_strom;
 	CUresult		rc;
-
-	/* expected number of source rows */
-	if (pds_src->kds.format != KDS_FORMAT_BLOCK)
-        src_ntuples = pds_src->kds.nitems;
-	else
-	{
-		src_ntuples = (pgstrom_chunk_size_margin *
-					   (double)pds_src->kds.nrooms *
-					   (double)pds_src->kds.nrows_per_block);
-	}
 
 	/*
 	 * Lookup GPU kernel functions
 	 */
-	rc = cuModuleGetFunction(&gscan->kern_exec_quals,
+	rc = cuModuleGetFunction(&gscan->kern_gpuscan_main,
 							 cuda_module,
-							 pds_src->kds.format == KDS_FORMAT_ROW
-							 ? "gpuscan_exec_quals_row"
-							 : "gpuscan_exec_quals_block");
+							 "gpuscan_main");
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
-
-	if (pds_dst)
-	{
-		rc = cuModuleGetFunction(&gscan->kern_projection,
-								 cuda_module,
-								 gscan->task.row_format
-								 ? "gpuscan_projection_row"
-								 : "gpuscan_projection_slot");
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
-	}
 
 	/*
 	 * Allocation of device memory
@@ -2657,94 +2634,36 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 	}
 	PERFMON_EVENT_RECORD(gscan, ev_dma_send_stop, cuda_stream);
 
-	// TODO: I want to use dynparallel for GpuScan also because
-	// most of threads in GpuProjection is waste of resources
-
 	/*
 	 * KERNEL_FUNCTION(void)
-	 * gpuscan_exec_quals_(row|block)(kern_gpuscan *kgpuscan,
-	 *                                kern_data_store *kds_src)
+	 * gpuscan_main(kern_gpuscan *kgpuscan,
+	 *              kern_data_store *kds_src,
+	 *              kern_data_store *kds_dst)
 	 */
-	if (gscan->dev_projection)
-	{
-		optimal_workgroup_size(&grid_size,
-							   &block_size,
-							   gscan->kern_exec_quals,
-							   gpuserv_cuda_device,
-							   src_ntuples,
-							   0, sizeof(cl_uint));
-		// adjust block size if source is block format
-		if (pds_src->kds.format == KDS_FORMAT_BLOCK)
-		{
-			cl_uint	part_sz = (pds_src->kds.nrows_per_block + 0x1f) & ~0x1f;
+	kern_args[0] = &gscan->m_gpuscan;
+	kern_args[1] = &gscan->m_kds_src;
+	kern_args[2] = &gscan->m_kds_dst;
 
-			if (part_sz < block_size)
-			{
-				block_size = ((block_size + part_sz - 1) / part_sz) * part_sz;
-			}
-		}
-
-		kern_args[0] = &gscan->m_gpuscan;
-		kern_args[1] = &gscan->m_kds_src;
-
-		rc = cuLaunchKernel(gscan->kern_exec_quals,
-							grid_size, 1, 1,
-							block_size, 1, 1,
-                            sizeof(cl_uint) * block_size,
-							cuda_stream,
-							kern_args,
-							NULL);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
-		gscan->num_kern_exec_quals++;
-	}
-	else
-	{
-		// Bug??
-		/* no device qualifiers, thus, all rows are visible to projection */
-		Assert(KERN_GPUSCAN_RESULTBUF(&gscan->kern)->all_visible);
-	}
-
-	PERFMON_EVENT_RECORD(gscan, ev_kern_exec_quals, cuda_stream);
-
-	/*
-	 * KERNEL_FUNCTION(void)
-	 * gpuscan_projection_(row|slot)(kern_gpuscan *kgpuscan,
-	 *                               kern_data_store *kds_src,
-	 *                               kern_data_store *kds_dst)
-	 */
-	if (pds_dst)
-	{
-		optimal_workgroup_size(&grid_size,
-							   &block_size,
-							   gscan->kern_projection,
-							   gpuserv_cuda_device,
-							   src_ntuples,
-							   0, sizeof(cl_uint));
-		kern_args[0] = &gscan->m_gpuscan;
-		kern_args[1] = &gscan->m_kds_src;
-		kern_args[2] = &gscan->m_kds_dst;
-
-		rc = cuLaunchKernel(gscan->kern_projection,
-							grid_size, 1, 1,
-							block_size, 1, 1,
-                            sizeof(cl_uint) * block_size,
-							cuda_stream,
-							kern_args,
-							NULL);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
-		gscan->num_kern_projection++;
-	}
+	rc = cuLaunchKernel(gscan->kern_gpuscan_main,
+						1, 1, 1,
+						1, 1, 1,
+						0,
+						cuda_stream,
+						kern_args,
+						NULL);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
 
 	/*
 	 * Recv DMA call
 	 */
 	PERFMON_EVENT_RECORD(gscan, ev_dma_recv_start, cuda_stream);
-
+	if (pds_src->kds.format != KDS_FORMAT_BLOCK)
+		ntuples = pds_src->kds.nitems;
+	else
+		ntuples = kresults->nrooms;
 	offset = KERN_GPUSCAN_DMARECV_OFFSET(&gscan->kern);
-	length = KERN_GPUSCAN_DMARECV_LENGTH(&gscan->kern,
-										 pds_dst ? 0 : pds_src->kds.nitems);
+	length = KERN_GPUSCAN_DMARECV_LENGTH(&gscan->kern, pds_dst ? 0 : ntuples);
 	rc = cuMemcpyDtoHAsync((char *)&gscan->kern + offset,
 						   gscan->m_gpuscan + offset,
 						   length,
