@@ -157,7 +157,7 @@ typedef struct GpuTaskState_v2	GpuTaskState_v2;
  *
  * A common structure of the state machine of GPU related tasks.
  */
-struct PDSScanState;
+struct NVMEScanState;
 
 struct GpuTaskState_v2
 {
@@ -174,12 +174,24 @@ struct GpuTaskState_v2
 	bool			outer_bulk_exec;/* True, if it scans outer by bulk-exec */
 	Instrumentation	outer_instrument; /* runtime statistics, if any */
 	TupleTableSlot *scan_overflow;	/* temporary buffer, if no space on PDS */
-	struct PDSScanState *pds_sstate;/* per-query state for raw-block read.
-									 * If not NULL, GTS prefers BLOCK format
-									 * with NVMe-Strom support.
-									 */
-	/* fields for current task */
+	struct NVMEScanState *nvme_sstate;/* A state object for NVMe-Strom.
+									   * If not NULL, GTS prefers BLOCK format
+									   * as source data store. Then, SSD2GPU
+									   * Direct DMA will be kicked.
+									   */
+	/*
+	 * fields to fetch rows from the current task
+	 *
+	 * NOTE: @curr_index is sufficient to point a particular row of KDS,
+	 * if format is ROW, HASH and SLOT. However, BLOCK format has no direct
+	 * pointer for each rows. It contains @nitems blocks and individual block
+	 * contains uncertain number of rows. So, at BLOCK format, @curr_index
+	 * is index of the current block, and @curr_lp_index is also index of
+	 * the current line pointer.
+	 * For all format, @curr_index == @nitems means no rows any more.
+	 */
 	cl_long			curr_index;		/* current position on the curr_task */
+	cl_long			curr_lp_index;	/* index of LinePointer in a block */
 	struct GpuTask_v2 *curr_task;	/* a GpuTask currently processed */
 
 	/* callbacks used by gputasks.c */
@@ -558,7 +570,8 @@ extern void pgstromInitGpuTaskState(GpuTaskState_v2 *gts,
 									GpuContext_v2 *gcontext,
 									GpuTaskKind task_kind,
 									List *used_params,
-									EState *estate);
+									EState *estate,
+									cl_uint nrows_per_block);
 extern TupleTableSlot *pgstromExecGpuTaskState(GpuTaskState_v2 *gts);
 extern pgstrom_data_store *pgstromBulkExecGpuTaskState(GpuTaskState_v2 *gts,
 													   size_t chunk_size);
@@ -702,8 +715,9 @@ extern pgstrom_data_store *PDS_create_hash(GpuContext_v2 *gcontext,
 extern pgstrom_data_store *PDS_create_block(GpuContext_v2 *gcontext,
 											TupleDesc tupdesc,
 											Size length,
-											cl_uint nrows_per_block);
-extern void PDS_init_heapscan_state(GpuTaskState_v2 *gts);
+											struct NVMEScanState *nvme_sstate);
+extern void PDS_init_heapscan_state(GpuTaskState_v2 *gts,
+									cl_uint nrows_per_block);
 extern void PDS_end_heapscan_state(GpuTaskState_v2 *gts);
 extern bool PDS_exec_heapscan(GpuTaskState_v2 *gts,
 							  pgstrom_data_store *pds,

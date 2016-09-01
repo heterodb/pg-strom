@@ -52,6 +52,22 @@ static long		sysconf_phys_pages;		/* _SC_PHYS_PAGES */
 static long		nvme_strom_threshold;
 
 /*
+ * State structure of NVMe-Strom per GpuTaskState
+ */
+typedef struct NVMEScanState
+{
+	cl_uint			nrows_per_block;
+	BlockNumber		curr_segno;
+	Buffer			curr_vmbuffer;
+	BlockNumber		nr_segs;
+	struct {
+		File		vfd;
+		BlockNumber	segno;
+		bool		flock_is_ready;
+	} mdfd[FLEXIBLE_ARRAY_MEMBER];
+} NVMEScanState;
+
+/*
  * pgstrom_chunk_size - configured chunk size
  */
 Size
@@ -562,7 +578,7 @@ pgstrom_data_store *
 PDS_create_block(GpuContext_v2 *gcontext,
 				 TupleDesc tupdesc,
 				 Size length,
-				 cl_uint nrows_per_tuple)
+				 NVMEScanState *nvme_sstate)
 {
 	pgstrom_data_store *pds;
 	Size		kds_length = STROMALIGN_DOWN(length);
@@ -586,7 +602,7 @@ PDS_create_block(GpuContext_v2 *gcontext,
 
 	init_kernel_data_store(&pds->kds, tupdesc, kds_length,
 						   KDS_FORMAT_BLOCK, nrooms, false);
-	pds->kds.nrows_per_block = nrows_per_tuple;
+	pds->kds.nrows_per_block = nvme_sstate->nrows_per_block;
 
 	return pds;
 }
@@ -594,7 +610,6 @@ PDS_create_block(GpuContext_v2 *gcontext,
 /*
  * support for bulkload onto ROW/BLOCK format
  */
-
 /* see storage/smgr/md.c */
 typedef struct _MdfdVec
 {
@@ -603,31 +618,20 @@ typedef struct _MdfdVec
 	struct _MdfdVec *mdfd_chain;	/* next segment, or NULL */
 } MdfdVec;
 
-typedef struct PDSScanState
-{
-	BlockNumber		curr_segno;
-	Buffer			curr_vmbuffer;
-	BlockNumber		nr_segs;
-	struct {
-		File		vfd;
-		BlockNumber	segno;
-		bool		flock_is_ready;
-	} mdfd[FLEXIBLE_ARRAY_MEMBER];
-} PDSScanState;
-
 /*
  * PDS_init_heapscan_state - construct a per-query state for heap-scan
  * with KDS_FORMAT_BLOCK / NVMe-Strom.
  */
 void
-PDS_init_heapscan_state(GpuTaskState_v2 *gts)
+PDS_init_heapscan_state(GpuTaskState_v2 *gts,
+						cl_uint nrows_per_block)
 {
 	Relation		relation = gts->css.ss.ss_currentRelation;
 	EState		   *estate = gts->css.ss.ps.state;
 	BlockNumber		nr_blocks;
 	BlockNumber		nr_segs;
 	MdfdVec		   *vec;
-	PDSScanState   *pds_sstate;
+	NVMEScanState  *nvme_sstate;
 	cl_uint			i;
 
 	/* Raw-block scan needs NVMe-Strom is configured */
@@ -647,12 +651,13 @@ PDS_init_heapscan_state(GpuTaskState_v2 *gts)
 
 	nr_segs = (nr_blocks + (BlockNumber) RELSEG_SIZE - 1) / RELSEG_SIZE;
 
-	pds_sstate = MemoryContextAlloc(estate->es_query_cxt,
-									offsetof(PDSScanState, mdfd[nr_segs]));
-	memset(pds_sstate, -1, offsetof(PDSScanState, mdfd[nr_segs]));
-	pds_sstate->curr_segno = InvalidBlockNumber;
-	pds_sstate->curr_vmbuffer = InvalidBuffer;
-	pds_sstate->nr_segs = nr_segs;
+	nvme_sstate = MemoryContextAlloc(estate->es_query_cxt,
+									 offsetof(NVMEScanState, mdfd[nr_segs]));
+	memset(nvme_sstate, -1, offsetof(NVMEScanState, mdfd[nr_segs]));
+	nvme_sstate->nrows_per_block = nrows_per_block;
+	nvme_sstate->curr_segno = InvalidBlockNumber;
+	nvme_sstate->curr_vmbuffer = InvalidBuffer;
+	nvme_sstate->nr_segs = nr_segs;
 
 	vec = relation->rd_smgr->md_fd[MAIN_FORKNUM];
 	while (vec)
@@ -661,20 +666,20 @@ PDS_init_heapscan_state(GpuTaskState_v2 *gts)
 			vec->mdfd_segno >= nr_segs)
 			elog(ERROR, "Bug? MdfdVec {vfd=%d segno=%u} is out of range",
 				 vec->mdfd_vfd, vec->mdfd_segno);
-		pds_sstate->mdfd[vec->mdfd_segno].segno	= vec->mdfd_segno;
-		pds_sstate->mdfd[vec->mdfd_segno].vfd	= vec->mdfd_vfd;
-		pds_sstate->mdfd[vec->mdfd_segno].flock_is_ready = false;
+		nvme_sstate->mdfd[vec->mdfd_segno].segno	= vec->mdfd_segno;
+		nvme_sstate->mdfd[vec->mdfd_segno].vfd	= vec->mdfd_vfd;
+		nvme_sstate->mdfd[vec->mdfd_segno].flock_is_ready = false;
 		vec = vec->mdfd_chain;
 	}
 
 	/* sanity checks */
 	for (i=0; i < nr_segs; i++)
 	{
-		if (pds_sstate->mdfd[i].segno >= nr_segs ||
-			pds_sstate->mdfd[i].vfd < 0)
+		if (nvme_sstate->mdfd[i].segno >= nr_segs ||
+			nvme_sstate->mdfd[i].vfd < 0)
 			elog(ERROR, "Bug? Here is a hole segment which was not open");
 	}
-	gts->pds_sstate = pds_sstate;
+	gts->nvme_sstate = nvme_sstate;
 }
 
 /*
@@ -683,18 +688,18 @@ PDS_init_heapscan_state(GpuTaskState_v2 *gts)
 void
 PDS_end_heapscan_state(GpuTaskState_v2 *gts)
 {
-	PDSScanState   *pds_sstate = gts->pds_sstate;
+	NVMEScanState   *nvme_sstate = gts->nvme_sstate;
 
-	if (pds_sstate)
+	if (nvme_sstate)
 	{
 		/* release visibility map, if any */
-		if (pds_sstate->curr_vmbuffer != InvalidBuffer)
+		if (nvme_sstate->curr_vmbuffer != InvalidBuffer)
 		{
-			ReleaseBuffer(pds_sstate->curr_vmbuffer);
-			pds_sstate->curr_vmbuffer = InvalidBuffer;
+			ReleaseBuffer(nvme_sstate->curr_vmbuffer);
+			nvme_sstate->curr_vmbuffer = InvalidBuffer;
 		}
-		pfree(pds_sstate);
-		gts->pds_sstate = NULL;
+		pfree(nvme_sstate);
+		gts->nvme_sstate = NULL;
 	}
 }
 
@@ -703,7 +708,7 @@ PDS_end_heapscan_state(GpuTaskState_v2 *gts)
  */
 static inline int
 __exec_heapscan_block(pgstrom_data_store *pds,
-					  PDSScanState *pds_sstate,
+					  NVMEScanState *nvme_sstate,
 					  BlockNumber blknum,
 					  int *p_filedesc)
 {
@@ -711,8 +716,8 @@ __exec_heapscan_block(pgstrom_data_store *pds,
 	int				filedesc;
 	strom_dma_chunk *dma_chunk;
 
-	Assert(segno < pds_sstate->nr_segs);
-	filedesc = FileGetRawDesc(pds_sstate->mdfd[segno].vfd);
+	Assert(segno < nvme_sstate->nr_segs);
+	filedesc = FileGetRawDesc(nvme_sstate->mdfd[segno].vfd);
 
 	/*
 	 * NOTE: We cannot mix up multiple source files in a single PDS chunk.
@@ -725,7 +730,7 @@ __exec_heapscan_block(pgstrom_data_store *pds,
 	/*
 	 * Get a mandatory file lock
 	 */
-	if (!pds_sstate->mdfd[segno].flock_is_ready)
+	if (!nvme_sstate->mdfd[segno].flock_is_ready)
 	{
 		struct stat		st_buf;
 
@@ -775,7 +780,7 @@ static bool
 PDS_exec_heapscan_block(pgstrom_data_store *pds,
 						Relation relation,
 						HeapScanDesc hscan,
-						PDSScanState *pds_sstate,
+						NVMEScanState *nvme_sstate,
 						int *p_filedesc)
 {
 	BlockNumber		blknum = hscan->rs_cblock;
@@ -802,7 +807,7 @@ PDS_exec_heapscan_block(pgstrom_data_store *pds,
 	 */
 	if (RelationCanUseNvmeStrom(relation) &&
 		VM_ALL_VISIBLE(relation, blknum,
-					   &pds_sstate->curr_vmbuffer))
+					   &nvme_sstate->curr_vmbuffer))
 	{
 		BufferTag	newTag;
 		uint32		newHash;
@@ -821,7 +826,7 @@ PDS_exec_heapscan_block(pgstrom_data_store *pds,
 		buf_id = BufTableLookup(&newTag, newHash);
 		if (buf_id < 0)
 		{
-			retval = __exec_heapscan_block(pds, pds_sstate, blknum,
+			retval = __exec_heapscan_block(pds, nvme_sstate, blknum,
 										   p_filedesc);
 			LWLockRelease(newPartitionLock);
 
@@ -882,7 +887,8 @@ PDS_exec_heapscan_block(pgstrom_data_store *pds,
 		}
 	}
 	UnlockReleaseBuffer(buffer);
-
+	/* dpage became all-visible also */
+	PageSetAllVisible(dpage);
 	pds->kds.nitems++;
 
 	return true;
@@ -1016,9 +1022,9 @@ PDS_exec_heapscan(GpuTaskState_v2 *gts,
 		retval = PDS_exec_heapscan_row(pds, relation, hscan);
 	else if (pds->kds.format == KDS_FORMAT_BLOCK)
 	{
-		Assert(gts->pds_sstate);
+		Assert(gts->nvme_sstate);
 		retval = PDS_exec_heapscan_block(pds, relation, hscan,
-										 gts->pds_sstate, p_filedesc);
+										 gts->nvme_sstate, p_filedesc);
 	}
 	else
 		elog(ERROR, "Bug? unexpected PDS format: %d", pds->kds.format);

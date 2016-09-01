@@ -349,7 +349,7 @@ cost_gpuscan_path(PlannerInfo *root, CustomPath *cpath,
 	cost_qual_eval(&qcost, dev_quals, root);
 	startup_cost += qcost.startup;
 	run_cost += qcost.per_tuple * gpu_ratio * ntuples;
-	elog(INFO, "NP=%d ntuples %f -> %f", cpath->path.parallel_workers, ntuples, ntuples * selectivity);
+	//elog(INFO, "NP=%d ntuples %f -> %f", cpath->path.parallel_workers, ntuples, ntuples * selectivity);
 	ntuples *= selectivity;
 
 	/* Cost for CPU qualifiers */
@@ -638,7 +638,7 @@ codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
 		"                   kern_data_store *kds,\n"
 		"                   ItemPointerData *t_self,\n"
 		"                   HeapTupleHeaderData *htup)\n");
-	if (dev_quals == NULL)
+	if (dev_quals == NIL)
 	{
 		appendStringInfoString(kern,
 							   "{\n"
@@ -1740,7 +1740,8 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 							gcontext,
 							GpuTaskKind_GpuScan,
 							used_params,
-							estate);
+							estate,
+							gs_info->nrows_per_block);
 	gss->gts.cb_next_task   = gpuscan_next_task;
 	gss->gts.cb_next_tuple  = gpuscan_next_tuple;
 	gss->gts.cb_switch_task = NULL;
@@ -1987,11 +1988,21 @@ gpuscan_create_task(GpuScanState *gss, pgstrom_data_store *pds_src)
 {
 	TupleDesc			scan_tupdesc = GTS_GET_SCAN_TUPDESC(gss);
 	GpuContext_v2	   *gcontext = gss->gts.gcontext;
-	kern_data_store	   *kds_src = &pds_src->kds;
 	kern_resultbuf	   *kresults;
 	pgstrom_data_store *pds_dst;
 	GpuScanTask		   *gscan;
+	Size				ntuples;
 	Size				length;
+
+	if (pds_src->kds.format != KDS_FORMAT_BLOCK)
+		ntuples = pds_src->kds.nitems;
+	else
+	{
+		/* we cannot know exact number of tuples unless scans block actually */
+		ntuples = (pgstrom_chunk_size_margin *
+				   (double)pds_src->kds.nrooms *
+				   (double)pds_src->kds.nrows_per_block);
+	}
 
 	/*
 	 * allocation of the destination buffer
@@ -2010,16 +2021,16 @@ gpuscan_create_task(GpuScanState *gss, pgstrom_data_store *pds_src)
 		{
 			pds_dst = PDS_create_row(gcontext,
 									 scan_tupdesc,
-									 kds_src->length +
-									 gss->proj_row_extra * kds_src->nitems);
+									 pds_src->kds.length +
+									 gss->proj_row_extra * ntuples);
 		}
 	}
 	else
 	{
 		pds_dst = PDS_create_slot(gcontext,
 								  scan_tupdesc,
-								  kds_src->nitems,
-								  gss->proj_slot_extra * kds_src->nitems,
+								  ntuples,
+								  gss->proj_slot_extra * ntuples,
 								  false);
 	}
 
@@ -2029,7 +2040,7 @@ gpuscan_create_task(GpuScanState *gss, pgstrom_data_store *pds_src)
 	length = (STROMALIGN(offsetof(GpuScanTask, kern.kparams)) +
 			  STROMALIGN(gss->gts.kern_params->length) +
 			  STROMALIGN(offsetof(kern_resultbuf,
-								  results[pds_dst ? 0 : kds_src->nitems])));
+								  results[pds_dst ? 0 : ntuples])));
 	gscan = dmaBufferAlloc(gcontext, length);
 	memset(gscan, 0, offsetof(GpuScanTask, kern));
 	pgstromInitGpuTask(&gss->gts, &gscan->task);
@@ -2045,8 +2056,8 @@ gpuscan_create_task(GpuScanState *gss, pgstrom_data_store *pds_src)
 	kresults = KERN_GPUSCAN_RESULTBUF(&gscan->kern);
 	memset(kresults, 0, sizeof(kern_resultbuf));
 	kresults->nrels = 1;
-	if (gss->dev_quals != NIL)
-		kresults->nrooms = kds_src->nitems;
+	if (gss->dev_quals != NIL || pds_src->kds.format == KDS_FORMAT_BLOCK)
+		kresults->nrooms = ntuples;
 	else
 		kresults->all_visible = true;
 	gscan->kresults = kresults;
@@ -2061,7 +2072,6 @@ pgstrom_data_store *
 gpuscanExecScanChunk(GpuTaskState_v2 *gts, Size chunk_length)
 {
 	Relation		base_rel = gts->css.ss.ss_currentRelation;
-	TupleDesc		tupdesc = RelationGetDescr(base_rel);
 	HeapScanDesc	scan = gts->css.ss.ss_currentScanDesc;
 	pgstrom_data_store *pds = NULL;
 	bool			finished = false;
@@ -2079,9 +2089,15 @@ gpuscanExecScanChunk(GpuTaskState_v2 *gts, Size chunk_length)
 
 	InstrStartNode(&gts->outer_instrument);
 	PERFMON_BEGIN(&gts->pfm, &tv1);
-	pds = PDS_create_row(gts->gcontext,
-						 tupdesc,
-						 chunk_length);
+	if (gts->nvme_sstate)
+		pds = PDS_create_block(gts->gcontext,
+							   RelationGetDescr(base_rel),
+							   chunk_length,
+							   gts->nvme_sstate);
+	else
+		pds = PDS_create_row(gts->gcontext,
+							 RelationGetDescr(base_rel),
+							 chunk_length);
 	pds->kds.table_oid = RelationGetRelid(base_rel);
 
 	/*
@@ -2102,6 +2118,7 @@ gpuscanExecScanChunk(GpuTaskState_v2 *gts, Size chunk_length)
 	{
 		if (!PDS_exec_heapscan(gts, pds, NULL))
 			break;
+		// TODO: needs to consider scan->rs_parallel
 		/* move to the next block */
 		scan->rs_cblock++;
 		if (scan->rs_cblock >= scan->rs_nblocks)
@@ -2145,111 +2162,160 @@ gpuscan_next_task(GpuTaskState_v2 *gts)
 }
 
 /*
+ * gpuscan_next_tuple_fallback - GPU fallback case
+ */
+static TupleTableSlot *
+gpuscan_next_tuple_fallback(GpuScanState *gss, GpuScanTask *gscan)
+{
+	pgstrom_data_store *pds_src = gscan->pds_src;
+	TupleTableSlot	   *slot = NULL;
+	ExprContext		   *econtext;
+	ExprDoneCond		is_done;
+
+	while (gss->gts.curr_index < pds_src->kds.nitems)
+	{
+		ExecClearTuple(gss->base_slot);
+
+		if (pds_src->kds.format == KDS_FORMAT_ROW)
+		{
+			cl_uint		index = gss->gts.curr_index++;
+
+			if (!pgstrom_fetch_data_store(gss->base_slot, pds_src, index,
+										  &gss->scan_tuple))
+				elog(ERROR, "failed to fetch a record from pds");
+		}
+		else
+		{
+			HeapTuple	tuple = &gss->scan_tuple;
+			BlockNumber	block_nr;
+			PageHeader	hpage;
+			cl_uint		max_lp_index;
+			ItemId		lpp;
+
+			block_nr = KERN_DATA_STORE_BLOCK_BLCKNR(&pds_src->kds,
+													gss->gts.curr_index);
+			hpage = KERN_DATA_STORE_BLOCK_PGPAGE(&pds_src->kds,
+												 gss->gts.curr_index);
+			Assert(PageIsAllVisible(hpage));
+			max_lp_index = PageGetMaxOffsetNumber(hpage);
+			while (gss->gts.curr_lp_index < max_lp_index)
+			{
+				cl_uint		lp_index = gss->gts.curr_lp_index++;
+
+				lpp = &hpage->pd_linp[lp_index];
+				if (!ItemIdIsNormal(lpp))
+					continue;
+
+				tuple->t_len = ItemIdGetLength(lpp);
+				BlockIdSet(&tuple->t_self.ip_blkid, block_nr);
+				tuple->t_self.ip_posid = lp_index;
+				tuple->t_data = (HeapTupleHeader)((char *)hpage +
+												  ItemIdGetOffset(lpp));
+				ExecStoreTuple(tuple, gss->base_slot, InvalidBuffer, false);
+				break;
+			}
+
+			/* move to the next block if no rows any more */
+			if (gss->gts.curr_lp_index >= max_lp_index)
+			{
+				gss->gts.curr_index++;
+				gss->gts.curr_lp_index = 0;
+				continue;
+			}
+		}
+		econtext = gss->gts.css.ss.ps.ps_ExprContext;
+		ResetExprContext(econtext);
+		econtext->ecxt_scantuple = gss->base_slot;
+
+		/*
+		 * (1) - Evaluation of dev_quals if any
+		 */
+		if (gss->dev_quals != NIL)
+		{
+			if (!ExecQual(gss->dev_quals, econtext, false))
+				continue;
+		}
+
+		/*
+		 * (2) - Makes a projection if any
+		 */
+		if (!gss->base_proj)
+			slot = gss->base_slot;
+		else
+		{
+			slot = ExecProject(gss->base_proj, &is_done);
+			if (is_done == ExprMultipleResult)
+				gss->gts.css.ss.ps.ps_TupFromTlist = true;
+			else if (is_done != ExprEndResult)
+				gss->gts.css.ss.ps.ps_TupFromTlist = false;
+		}
+		break;
+	}
+	return slot;
+}
+
+/*
  * gpuscan_next_tuple
  */
 static TupleTableSlot *
 gpuscan_next_tuple(GpuTaskState_v2 *gts)
 {
-	GpuScanState   *gss = (GpuScanState *) gts;
-	GpuScanTask	   *gscan = (GpuScanTask *) gts->curr_task;
-	TupleTableSlot *slot = NULL;
-	struct timeval	tv1, tv2;
+	GpuScanState	   *gss = (GpuScanState *) gts;
+	GpuScanTask		   *gscan = (GpuScanTask *) gts->curr_task;
+	TupleTableSlot	   *slot = NULL;
+	struct timeval		tv1, tv2;
 
 	PERFMON_BEGIN(&gss->gts.pfm, &tv1);
-	if (!gscan->task.cpu_fallback)
+	if (gscan->task.cpu_fallback)
+		slot = gpuscan_next_tuple_fallback(gss, gscan);
+	else if (gscan->pds_dst)
 	{
-		if (gscan->pds_dst)
+		pgstrom_data_store *pds_dst = gscan->pds_dst;
+
+		if (gss->gts.curr_index < pds_dst->kds.nitems)
 		{
-			pgstrom_data_store *pds_dst = gscan->pds_dst;
-
-			if (gss->gts.curr_index < pds_dst->kds.nitems)
-			{
-				slot = gss->gts.css.ss.ss_ScanTupleSlot;
-				ExecClearTuple(slot);
-				if (!pgstrom_fetch_data_store(slot, pds_dst,
-											  gss->gts.curr_index++,
-											  &gss->scan_tuple))
-					elog(ERROR, "failed to fetch a record from pds");
-			}
-		}
-		else
-		{
-			pgstrom_data_store *pds_src = gscan->pds_src;
-			kern_resultbuf	   *kresults = gscan->kresults;
-
-			/*
-			 * We should not inject GpuScan for all-visible with no device
-			 * projection; GPU has no actual works in other words.
-			 * NOTE: kresults->results[] keeps offset from the head of
-			 * kds_src.
-			 */
-			Assert(!kresults->all_visible);
-			if (gss->gts.curr_index < kresults->nitems)
-			{
-				HeapTuple		tuple = &gss->scan_tuple;
-				kern_tupitem   *tupitem = (kern_tupitem *)
-					((char *)&pds_src->kds +
-					 kresults->results[gss->gts.curr_index++]);
-
-				slot = gss->gts.css.ss.ss_ScanTupleSlot;
-				tuple->t_len = tupitem->t_len;
-				tuple->t_self = tupitem->t_self;
-				tuple->t_data = &tupitem->htup;
-				ExecStoreTuple(tuple, slot, InvalidBuffer, false);
-			}
+			slot = gss->gts.css.ss.ss_ScanTupleSlot;
+			ExecClearTuple(slot);
+			if (!pgstrom_fetch_data_store(slot, pds_dst,
+										  gss->gts.curr_index++,
+										  &gss->scan_tuple))
+				elog(ERROR, "failed to fetch a record from pds");
 		}
 	}
 	else
 	{
-		/*
-		 * If GPU kernel returned StromError_CpuReCheck, we have to
-		 * evaluate dev_quals by ourselves, then adjust tuple format
-		 * according to custom_scan_tlist.
-		 */
 		pgstrom_data_store *pds_src = gscan->pds_src;
+		kern_resultbuf	   *kresults = gscan->kresults;
 
-		while (gss->gts.curr_index < pds_src->kds.nitems)
+		/*
+		 * We should not inject GpuScan for all-visible with no device
+		 * projection; GPU has no actual works in other words.
+		 * NOTE: kresults->results[] keeps offset from the head of
+		 * kds_src.
+		 */
+		Assert(!kresults->all_visible);
+		if (gss->gts.curr_index < kresults->nitems)
 		{
-			cl_uint			index = gss->gts.curr_index++;
-			ExprContext	   *econtext = gss->gts.css.ss.ps.ps_ExprContext;
-			ExprDoneCond	is_done;
+			HeapTuple	tuple = &gss->scan_tuple;
+			cl_uint		kds_offset;
 
-			ExecClearTuple(gss->base_slot);
-			if (!pgstrom_fetch_data_store(gss->base_slot, pds_src, index,
-										  &gss->scan_tuple))
-				elog(ERROR, "failed to fetch a record from pds");
-
-			ResetExprContext(econtext);
-			econtext->ecxt_scantuple = gss->base_slot;
-
-			/*
-			 * step.1 - evaluate dev_quals if any
-			 */
-			if (gss->dev_quals != NIL)
+			kds_offset = kresults->results[gss->gts.curr_index++];
+			if (pds_src->kds.format == KDS_FORMAT_ROW)
 			{
-				if (!ExecQual(gss->dev_quals, econtext, false))
-					continue;
+				tuple->t_data = KERN_DATA_STORE_ROW_HTUP(&pds_src->kds,
+														 kds_offset,
+														 &tuple->t_self,
+														 &tuple->t_len);
 			}
-
-			/*
-			 * step.2 - makes a projection if any
-			 */
-			if (gss->base_proj == NULL)
-				slot = gss->base_slot;
 			else
 			{
-				slot = ExecProject(gss->base_proj, &is_done);
-				if (is_done == ExprEndResult)
-				{
-					/* tuple fails qual, so free per-tuple memory and try
-					 * again.
-					 * XXX - Is logic really right? needs to be checked */
-					ResetExprContext(econtext);
-					slot = NULL;
-					continue;
-				}
+				tuple->t_data = KERN_DATA_STORE_BLOCK_HTUP(&pds_src->kds,
+														   kds_offset,
+														   &tuple->t_self,
+														   &tuple->t_len);
 			}
-			break;
+			slot = gss->gts.css.ss.ss_ScanTupleSlot;
+			ExecStoreTuple(tuple, slot, InvalidBuffer, false);
 		}
 	}
 	PERFMON_END(&gss->gts.pfm, time_materialize, &tv1, &tv2);
@@ -2339,6 +2405,8 @@ gpuscan_info_read(ExtensibleNode *node)
 static void
 gpuscan_cleanup_cuda_resources(GpuScanTask *gscan)
 {
+	pgstrom_data_store *pds_src = gscan->pds_src;
+	bool		with_nvme_strom;
 	CUresult	rc;
 
 	PERFMON_EVENT_DESTROY(gscan, ev_dma_send_start);
@@ -2347,11 +2415,20 @@ gpuscan_cleanup_cuda_resources(GpuScanTask *gscan)
 	PERFMON_EVENT_DESTROY(gscan, ev_dma_recv_start);
 	PERFMON_EVENT_DESTROY(gscan, ev_dma_recv_stop);
 
+	with_nvme_strom = (pds_src->kds.format == KDS_FORMAT_BLOCK &&
+					   pds_src->nblocks_uncached > 0);
 	if (gscan->m_gpuscan)
 	{
 		rc = gpuMemFree_v2(gscan->task.gcontext, gscan->m_gpuscan);
 		if (rc != CUDA_SUCCESS)
 			elog(WARNING, "failed on gpuMemFree: %s", errorText(rc));
+	}
+
+	if (with_nvme_strom && gscan->m_kds_src)
+	{
+		rc = gpuMemFreeIOMap(gscan->task.gcontext, gscan->m_kds_src);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on gpuMemFreeIOMap: %s", errorText(rc));
 	}
 	/* ensure pointers are NULL */
 	gscan->kern_exec_quals = NULL;
@@ -2401,7 +2478,7 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 	GpuScanTask	   *gscan = (GpuScanTask *) gtask;
 	pgstrom_data_store *pds_src = gscan->pds_src;
 	pgstrom_data_store *pds_dst = gscan->pds_dst;
-	cl_uint			src_nitems = pds_src->kds.nitems;
+	cl_uint			src_ntuples;
 	void		   *kern_args[5];
 	size_t			offset;
 	size_t			length;
@@ -2409,6 +2486,16 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 	size_t			block_size;
 	bool			with_nvme_strom;
 	CUresult		rc;
+
+	/* expected number of source rows */
+	if (pds_src->kds.format != KDS_FORMAT_BLOCK)
+        src_ntuples = pds_src->kds.nitems;
+	else
+	{
+		src_ntuples = (pgstrom_chunk_size_margin *
+					   (double)pds_src->kds.nrooms *
+					   (double)pds_src->kds.nrows_per_block);
+	}
 
 	/*
 	 * Lookup GPU kernel functions
@@ -2437,27 +2524,50 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 	 */
 	with_nvme_strom = (pds_src->kds.format == KDS_FORMAT_BLOCK &&
 					   pds_src->nblocks_uncached > 0);
-
-	// pds_src must be allocated from PCI BAR area if BLOCK mode
-
-	length = (GPUMEMALIGN(KERN_GPUSCAN_LENGTH(&gscan->kern)) +
-			  GPUMEMALIGN(KERN_DATA_STORE_LENGTH(&pds_src->kds)));
+	length = GPUMEMALIGN(KERN_GPUSCAN_LENGTH(&gscan->kern));
+	if (!with_nvme_strom)
+		length += GPUMEMALIGN(pds_src->kds.length);
 	if (pds_dst)
-		length += GPUMEMALIGN(KERN_DATA_STORE_LENGTH(&pds_dst->kds));
+		length += GPUMEMALIGN(pds_dst->kds.length);
 
 	rc = gpuMemAlloc_v2(gtask->gcontext, &gscan->m_gpuscan, length);
 	if (rc == CUDA_ERROR_OUT_OF_MEMORY)
+	{
 		goto out_of_resource;
+	}
 	else if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on gpuMemAlloc: %s", errorText(rc));
 
-	gscan->m_kds_src = gscan->m_gpuscan +
-		GPUMEMALIGN(KERN_GPUSCAN_LENGTH(&gscan->kern));
-	if (pds_dst)
-		gscan->m_kds_dst = gscan->m_kds_src +
-			GPUMEMALIGN(KERN_DATA_STORE_LENGTH(&pds_src->kds));
+	/*
+	 * NVMe-Strom requires the DMA destination address is mapped to
+	 * PCI BAR area.
+	 */
+	if (with_nvme_strom)
+	{
+		rc = gpuMemAllocIOMap(gtask->gcontext,
+							  &gscan->m_kds_src,
+							  pds_src->kds.length);
+		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
+			goto out_of_resource;
+		else if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on gpuMemAllocIOMap: %s", errorText(rc));
+
+		if (pds_dst)
+			gscan->m_kds_dst = gscan->m_gpuscan +
+				GPUMEMALIGN(KERN_GPUSCAN_LENGTH(&gscan->kern));
+		else
+			gscan->m_kds_dst = 0UL;
+	}
 	else
-		gscan->m_kds_dst = 0UL;
+	{
+		gscan->m_kds_src = gscan->m_gpuscan +
+			GPUMEMALIGN(KERN_GPUSCAN_LENGTH(&gscan->kern));
+		if (pds_dst)
+			gscan->m_kds_dst = (gscan->m_kds_src +
+								GPUMEMALIGN(pds_src->kds.length));
+		else
+			gscan->m_kds_dst = 0UL;
+	}
 
 	/*
 	 * Creation of event objects, if needed
@@ -2485,9 +2595,9 @@ gpuscan_process_task(GpuTask_v2 *gtask,
     gscan->num_dma_send++;
 
 	/*  kern_data_store *kds_src */
-	if (pds_src->kds.format == KDS_FORMAT_ROW)
+	if (pds_src->kds.format == KDS_FORMAT_ROW || !with_nvme_strom)
 	{
-		length = KERN_DATA_STORE_LENGTH(&pds_src->kds);
+		length = pds_src->kds.length;
 		rc = cuMemcpyHtoDAsync(gscan->m_kds_src,
 							   &pds_src->kds,
 							   length,
@@ -2499,12 +2609,37 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 	}
 	else
 	{
-		// early half by RAM2GPU DMA
+		strom_dma_chunk *ssd_chunks;
+		cl_uint		nr_loaded;
 
+		Assert(pds_src->nblocks_uncached <= pds_src->kds.nitems);
+		nr_loaded = pds_src->kds.nitems - pds_src->nblocks_uncached;
 
-		// later half by SSD2GPU DMA
+		/* Early half by RAM2GPU DMA */
+		length = ((char *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds_src->kds,
+													   nr_loaded) -
+				  (char *)&pds_src->kds);
+		rc = cuMemcpyHtoDAsync(gscan->m_kds_src,
+							   &pds_src->kds,
+							   length,
+							   cuda_stream);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+		gscan->bytes_dma_send += length;
+		gscan->num_dma_send++;
 
-
+		/* Later half by SSD2GPU DMA */
+		ssd_chunks = (strom_dma_chunk *)
+			((char *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds_src->kds,
+												  pds_src->kds.nrooms) -
+			 sizeof(strom_dma_chunk) * pds_src->nblocks_uncached);
+		gpuMemCopyFromSSDAsync(gscan->m_kds_src + length,
+							   gscan->task.file_desc,
+							   pds_src->nblocks_uncached,
+							   ssd_chunks,
+							   cuda_stream);
+		gscan->bytes_dma_send += BLCKSZ * pds_src->nblocks_uncached;
+		gscan->num_dma_send++;
 	}
 
 	/* kern_data_store *kds_dst, if any */
@@ -2520,8 +2655,10 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 		gscan->bytes_dma_send += length;
 		gscan->num_dma_send++;
 	}
-
 	PERFMON_EVENT_RECORD(gscan, ev_dma_send_stop, cuda_stream);
+
+	// TODO: I want to use dynparallel for GpuScan also because
+	// most of threads in GpuProjection is waste of resources
 
 	/*
 	 * KERNEL_FUNCTION(void)
@@ -2534,8 +2671,19 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 							   &block_size,
 							   gscan->kern_exec_quals,
 							   gpuserv_cuda_device,
-							   src_nitems,
+							   src_ntuples,
 							   0, sizeof(cl_uint));
+		// adjust block size if source is block format
+		if (pds_src->kds.format == KDS_FORMAT_BLOCK)
+		{
+			cl_uint	part_sz = (pds_src->kds.nrows_per_block + 0x1f) & ~0x1f;
+
+			if (part_sz < block_size)
+			{
+				block_size = ((block_size + part_sz - 1) / part_sz) * part_sz;
+			}
+		}
+
 		kern_args[0] = &gscan->m_gpuscan;
 		kern_args[1] = &gscan->m_kds_src;
 
@@ -2571,7 +2719,7 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 							   &block_size,
 							   gscan->kern_projection,
 							   gpuserv_cuda_device,
-							   src_nitems,
+							   src_ntuples,
 							   0, sizeof(cl_uint));
 		kern_args[0] = &gscan->m_gpuscan;
 		kern_args[1] = &gscan->m_kds_src;
@@ -2593,12 +2741,6 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 	 * Recv DMA call
 	 */
 	PERFMON_EVENT_RECORD(gscan, ev_dma_recv_start, cuda_stream);
-
-	// if pds_src == BLOCK && nblocks_uncached > 0
-	// may need reverse DMA
-
-
-
 
 	offset = KERN_GPUSCAN_DMARECV_OFFSET(&gscan->kern);
 	length = KERN_GPUSCAN_DMARECV_LENGTH(&gscan->kern,
@@ -2637,6 +2779,7 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 	return 0;
 
 out_of_resource:
+	fprintf(stderr, "out of resource\n");
 	gpuscan_cleanup_cuda_resources(gscan);
 	return 1;
 }
@@ -2652,6 +2795,10 @@ gpuscan_complete_task(GpuTask_v2 *gtask)
 	if (gscan->kern.kerror.errcode != StromError_Success)
 		elog(ERROR, "GPU kernel internal error: %s",
 			 errorTextKernel(&gscan->kern.kerror));
+
+	// If CpuRecheck error, and with NVMe-Strom, needs to write back
+	// pds_src for data blocks host side does not seen
+
 
 	PERFMON_EVENT_ELAPSED(gscan, time_dma_send,
 						  ev_dma_send_start,

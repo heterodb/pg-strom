@@ -70,6 +70,8 @@ typedef double				cl_double;
 #define true			((cl_bool) 1)
 #define false			((cl_bool) 0)
 
+#define Assert(cond)	assert(cond)
+
 /* Another basic type definitions */
 typedef cl_ulong	hostptr_t;
 typedef size_t		devptr_t;
@@ -711,11 +713,14 @@ typedef struct {
 STATIC_INLINE(HeapTupleHeaderData *)
 KERN_DATA_STORE_ROW_HTUP(kern_data_store *kds,
 						 cl_uint tup_offset,
-						 ItemPointerData *p_self)
+						 ItemPointerData *p_self,
+						 cl_uint *p_len)
 {
 	kern_tupitem   *tupitem = (kern_tupitem *)((char *)kds + tup_offset);
 	if (p_self)
 		*p_self = tupitem->t_self;
+	if (p_len)
+		*p_len = tupitem->t_len;
 	return &tupitem->htup;
 }
 
@@ -744,8 +749,8 @@ KERN_HASH_NEXT_ITEM(kern_data_store *kds, kern_hashitem *khitem)
 	return (kern_hashitem *)((char *)kds + khitem->next);
 }
 
-#define KERN_DATA_STORE_HASH_HTUP(kds,tup_offset,p_self)	\
-	KERN_DATA_STORE_ROW_HTUP((kds),(tup_offset),(p_self))
+#define KERN_DATA_STORE_HASH_HTUP(kds,tup_offset,p_self,p_len)	\
+	KERN_DATA_STORE_ROW_HTUP((kds),(tup_offset),(p_self),(p_len))
 
 /* access macro for tuple-slot format */
 #define KERN_DATA_STORE_SLOT_LENGTH(kds,nitems)				\

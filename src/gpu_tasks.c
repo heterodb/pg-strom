@@ -189,7 +189,8 @@ pgstromInitGpuTaskState(GpuTaskState_v2 *gts,
 						GpuContext_v2 *gcontext,
 						GpuTaskKind task_kind,
 						List *used_params,
-						EState *estate)
+						EState *estate,
+						cl_uint nrows_per_block)
 {
 	ExprContext	   *econtext = gts->css.ss.ps.ps_ExprContext;
 
@@ -216,7 +217,7 @@ pgstromInitGpuTaskState(GpuTaskState_v2 *gts,
 		 * tablespace and expected total i/o size is enough large than cache-
 		 * only scan.
 		 */
-		PDS_init_heapscan_state(gts);
+		PDS_init_heapscan_state(gts, nrows_per_block);
 	}
 	gts->scan_overflow = NULL;
 
@@ -435,6 +436,7 @@ pgstromExecGpuTaskState(GpuTaskState_v2 *gts)
 			pgstromReleaseGpuTask(gtask);
 			gts->curr_task = NULL;
 			gts->curr_index = 0;
+			gts->curr_lp_index = 0;
 		}
 		/* reload next chunk to be scanned */
 		gtask = fetch_next_gputask(gts);
@@ -442,6 +444,7 @@ pgstromExecGpuTaskState(GpuTaskState_v2 *gts)
 			break;
 		gts->curr_task = gtask;
 		gts->curr_index = 0;
+		gts->curr_lp_index = 0;
 		/* notify a new task is assigned */
 		if (gts->cb_switch_task)
 			gts->cb_switch_task(gts, gtask);
@@ -473,6 +476,7 @@ pgstromBulkExecGpuTaskState(GpuTaskState_v2 *gts, size_t chunk_size)
 				break;	/* end of the scan */
 			gts->curr_task = gtask;
 			gts->curr_index = 0;
+			gts->curr_lp_index = 0;
 			if (gts->cb_switch_task)
 				gts->cb_switch_task(gts, gtask);
 		}
@@ -499,7 +503,7 @@ pgstromBulkExecGpuTaskState(GpuTaskState_v2 *gts, size_t chunk_size)
 			if (!PDS_insert_tuple(pds_dst, slot))
 			{
 				/* Rewind the source PDS, if destination gets filled up */
-				Assert(gts->curr_index > 0);
+				Assert(gts->curr_index > 0 && gts->curr_lp_index == 0);
 				gts->curr_index--;
 
 				/*
@@ -524,6 +528,7 @@ pgstromBulkExecGpuTaskState(GpuTaskState_v2 *gts, size_t chunk_size)
 		pgstromReleaseGpuTask(gtask);
 		gts->curr_task = NULL;
 		gts->curr_index = 0;
+		gts->curr_lp_index = 0;
 	} while (true);
 
 	return pds_dst;

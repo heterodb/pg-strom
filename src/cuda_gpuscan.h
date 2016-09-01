@@ -171,6 +171,7 @@ PageGetMaxOffsetNumber(PageHeaderData *page)
 	return (pd_lower <= SizeOfPageHeaderData ? 0 :
 			(pd_lower - SizeOfPageHeaderData) / sizeof(ItemIdData));
 }
+#endif	/* __CUDACC__ */
 
 /*
  * KERN_DATA_STORE_BLOCK_HTUP
@@ -180,7 +181,8 @@ PageGetMaxOffsetNumber(PageHeaderData *page)
 STATIC_INLINE(HeapTupleHeaderData *)
 KERN_DATA_STORE_BLOCK_HTUP(kern_data_store *kds,
 						   cl_uint lp_offset,
-						   ItemPointerData *p_self)
+						   ItemPointerData *p_self,
+						   cl_uint *p_len)
 {
 	ItemIdData	   *lpp = (ItemIdData *)((char *)kds + lp_offset);
 	cl_uint			head_size;
@@ -188,16 +190,16 @@ KERN_DATA_STORE_BLOCK_HTUP(kern_data_store *kds,
 	BlockNumber		block_nr;
 	PageHeaderData *pg_page;
 
-	assert(__ldg(&kds->format) == KDS_FORMAT_BLOCK);
+	Assert(__ldg(&kds->format) == KDS_FORMAT_BLOCK);
 	head_size = (KERN_DATA_STORE_HEAD_LENGTH(kds) +
 				 STROMALIGN(sizeof(BlockNumber) * __ldg(&kds->nrooms)));
-	assert(lp_offset >= head_size &&
+	Assert(lp_offset >= head_size &&
 		   lp_offset <  head_size + BLCKSZ * __ldg(&kds->nitems));
 	block_id = (lp_offset - head_size) / BLCKSZ;
 	block_nr = KERN_DATA_STORE_BLOCK_BLCKNR(kds, block_id);
 	pg_page = KERN_DATA_STORE_BLOCK_PGPAGE(kds, block_id);
 
-	assert(lpp >= pg_page->pd_linp &&
+	Assert(lpp >= pg_page->pd_linp &&
 		   lpp -  pg_page->pd_linp <  PageGetMaxOffsetNumber(pg_page));
 	if (p_self)
 	{
@@ -205,9 +207,12 @@ KERN_DATA_STORE_BLOCK_HTUP(kern_data_store *kds,
 		p_self->ip_blkid.bi_lo	= block_nr & 0xffff;
 		p_self->ip_posid		= lpp - pg_page->pd_linp;
 	}
+	if (p_len)
+		*p_len = ItemIdGetLength(lpp);
 	return (HeapTupleHeaderData *)PageGetItem(pg_page, lpp);
 }
 
+#ifdef __CUDACC__
 /*
  * forward declaration of the function to be generated on the fly
  */
@@ -492,14 +497,16 @@ gpuscan_projection_row(kern_gpuscan *kgpuscan,
 			else
 			{
 				kds_offset = kresults->results[get_global_id()];
-				htup = KERN_DATA_STORE_ROW_HTUP(kds_src, kds_offset, &t_self);
+				htup = KERN_DATA_STORE_ROW_HTUP(kds_src, kds_offset,
+												&t_self, NULL);
 			}
 		}
 		else
 		{
 			assert(!kresults->all_visible);
 			kds_offset = kresults->results[get_global_id()];
-			htup = KERN_DATA_STORE_BLOCK_HTUP(kds_src, kds_offset, &t_self);
+			htup = KERN_DATA_STORE_BLOCK_HTUP(kds_src, kds_offset,
+											  &t_self, NULL);
 		}
 		/* extract to the private buffer */
 		gpuscan_projection(&kcxt,
@@ -618,14 +625,16 @@ gpuscan_projection_slot(kern_gpuscan *kgpuscan,
 			else
 			{
 				kds_offset = kresults->results[get_global_id()];
-				htup = KERN_DATA_STORE_ROW_HTUP(kds_src, kds_offset, &t_self);
+				htup = KERN_DATA_STORE_ROW_HTUP(kds_src, kds_offset,
+												&t_self, NULL);
 			}
 		}
 		else
 		{
 			assert(!kresults->all_visible);
 			kds_offset = kresults->results[get_global_id()];
-			htup = KERN_DATA_STORE_BLOCK_HTUP(kds_src, kds_offset, &t_self);
+			htup = KERN_DATA_STORE_BLOCK_HTUP(kds_src, kds_offset,
+											  &t_self, NULL);
 		}
 	}
 	else
