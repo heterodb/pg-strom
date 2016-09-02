@@ -47,6 +47,7 @@
  */
 static int		pgstrom_chunk_size_kb;
 static int		pgstrom_chunk_limit_kb = INT_MAX;
+static bool		debug_force_nvme_strom = false;
 static long		sysconf_pagesize;		/* _SC_PAGESIZE */
 static long		sysconf_phys_pages;		/* _SC_PHYS_PAGES */
 static long		nvme_strom_threshold;
@@ -637,8 +638,12 @@ PDS_init_heapscan_state(GpuTaskState_v2 *gts,
 	NVMEScanState  *nvme_sstate;
 	cl_uint			i;
 
-	/* Raw-block scan needs NVMe-Strom is configured */
-	if (!RelationCanUseNvmeStrom(relation))
+	/*
+	 * Raw-block scan is valuable only when NVMe-Strom is configured,
+	 * except for debugging.
+	 */
+	if (!debug_force_nvme_strom &&
+		!RelationCanUseNvmeStrom(relation))
 		return;
 
 	/*
@@ -649,7 +654,8 @@ PDS_init_heapscan_state(GpuTaskState_v2 *gts,
 	 * ReadBuffer().
 	 */
 	nr_blocks = RelationGetNumberOfBlocks(relation);
-	if (nr_blocks < nvme_strom_threshold)
+	if (!debug_force_nvme_strom &&
+		nr_blocks < nvme_strom_threshold)
 		return;
 
 	nr_segs = (nr_blocks + (BlockNumber) RELSEG_SIZE - 1) / RELSEG_SIZE;
@@ -1214,4 +1220,14 @@ pgstrom_init_datastore(void)
 							PGC_INTERNAL,
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
 							check_guc_chunk_limit, NULL, NULL);
+#if 1
+	DefineCustomBoolVariable("pg_strom.debug_force_nvme_strom",
+							 "(DEBUG) force to use raw block scan mode",
+							 NULL,
+							 &debug_force_nvme_strom,
+							 false,
+							 PGC_SUSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+#endif
 }

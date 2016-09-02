@@ -1984,7 +1984,8 @@ ExplainGpuScan(CustomScanState *node, List *ancestors, ExplainState *es)
  * gpuscan_create_task - constructor of GpuScanTask
  */
 static GpuScanTask *
-gpuscan_create_task(GpuScanState *gss, pgstrom_data_store *pds_src)
+gpuscan_create_task(GpuScanState *gss,
+					pgstrom_data_store *pds_src, int file_desc)
 {
 	TupleDesc			scan_tupdesc = GTS_GET_SCAN_TUPDESC(gss);
 	GpuContext_v2	   *gcontext = gss->gts.gcontext;
@@ -2044,6 +2045,7 @@ gpuscan_create_task(GpuScanState *gss, pgstrom_data_store *pds_src)
 	gscan = dmaBufferAlloc(gcontext, length);
 	memset(gscan, 0, offsetof(GpuScanTask, kern));
 	pgstromInitGpuTask(&gss->gts, &gscan->task);
+	gscan->task.file_desc = file_desc;
 	gscan->dev_projection = gss->dev_projection;
 	gscan->pds_src = pds_src;
 	gscan->pds_dst = pds_dst;
@@ -2069,7 +2071,7 @@ gpuscan_create_task(GpuScanState *gss, pgstrom_data_store *pds_src)
  * gpuscanExecScanChunk - read the relation by one chunk
  */
 pgstrom_data_store *
-gpuscanExecScanChunk(GpuTaskState_v2 *gts, Size chunk_length)
+gpuscanExecScanChunk(GpuTaskState_v2 *gts, Size chunk_length, int *p_filedesc)
 {
 	Relation		base_rel = gts->css.ss.ss_currentRelation;
 	HeapScanDesc	scan = gts->css.ss.ss_currentScanDesc;
@@ -2116,7 +2118,7 @@ gpuscanExecScanChunk(GpuTaskState_v2 *gts, Size chunk_length)
 	/* fill up this data-store */
 	while (!finished)
 	{
-		if (!PDS_exec_heapscan(gts, pds, NULL))
+		if (!PDS_exec_heapscan(gts, pds, p_filedesc))
 			break;
 		// TODO: needs to consider scan->rs_parallel
 		/* move to the next block */
@@ -2152,11 +2154,12 @@ gpuscan_next_task(GpuTaskState_v2 *gts)
 	GpuScanState	   *gss = (GpuScanState *) gts;
 	GpuScanTask		   *gscan;
 	pgstrom_data_store *pds;
+	int					filedesc = -1;
 
-	pds = gpuscanExecScanChunk(gts, pgstrom_chunk_size());
+	pds = gpuscanExecScanChunk(gts, pgstrom_chunk_size(), &filedesc);
 	if (!pds)
 		return NULL;
-	gscan = gpuscan_create_task(gss, pds);
+	gscan = gpuscan_create_task(gss, pds, filedesc);
 
 	return &gscan->task;
 }

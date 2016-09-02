@@ -779,7 +779,8 @@ extern void gpuscan_rewind_position(GpuTaskState_v2 *gts);
 
 
 extern pgstrom_data_store *gpuscanExecScanChunk(GpuTaskState_v2 *gts,
-												Size chunk_length);
+												Size chunk_length,
+												int *p_filedesc);
 extern void gpuscanRewindScanChunk(GpuTaskState_v2 *gts);
 
 extern int	gpuscan_process_task(GpuTask_v2 *gtask,

@@ -249,6 +249,7 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 	assert(get_local_size() % part_sz == 0);
 	part_id = (get_global_index() * (get_local_size() / part_sz) +
 			   get_local_id() / part_sz);
+
 	/* get a PostgreSQL block on which this thread will perform on */
 	if (part_id < kds_src->nitems)
 	{
@@ -273,7 +274,6 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 	 * block should not exit until all the PostgreSQL blocks are processed
 	 * due to restriction of thread synchronization.
 	 */
-	n_lines = PageGetMaxOffsetNumber(pg_page);
 	curr_id = get_local_id() % part_sz;
 	do {
 		ItemIdData	   *lpp;
