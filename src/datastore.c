@@ -689,6 +689,7 @@ PDS_init_heapscan_state(GpuTaskState_v2 *gts,
 			elog(ERROR, "Bug? Here is a hole segment which was not open");
 	}
 	gts->nvme_sstate = nvme_sstate;
+	elog(INFO, "nvme_sstate = %p", nvme_sstate);
 }
 
 /*
@@ -750,7 +751,7 @@ __exec_heapscan_block(pgstrom_data_store *pds,
 		{
 			mode_t	new_mode = st_buf.st_mode;
 
-			new_mode &= S_IXGRP;
+			new_mode &= ~S_IXGRP;
 			new_mode |= S_ISGID;
 			if (fchmod(filedesc, new_mode) != 0)
 				elog(ERROR, "failed on fchmode: %m");
@@ -774,12 +775,13 @@ __exec_heapscan_block(pgstrom_data_store *pds,
 		*p_filedesc = filedesc;
 
 	/* update PDS */
-	pds->nblocks_uncached++;
 	dma_chunk = (strom_dma_chunk *)
-		(KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds, pds->kds.nrooms) -
-		 sizeof(strom_dma_chunk) * pds->nblocks_uncached);
+		((char *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds, pds->kds.nrooms) -
+		 sizeof(strom_dma_chunk) * (pds->nblocks_uncached + 1));
 	dma_chunk->fpos   = (blknum % RELSEG_SIZE) * BLCKSZ;
+	dma_chunk->offset = BLCKSZ * pds->nblocks_uncached;
 	dma_chunk->length = BLCKSZ;
+	pds->nblocks_uncached++;
 	pds->kds.nitems++;
 
 	return true;

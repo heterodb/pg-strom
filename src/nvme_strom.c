@@ -288,6 +288,7 @@ __gpuMemCopyFromSSD(CUdeviceptr destptr,
 {
 	StromCmd__MemCpySsdToGpu *cmd;
 	IOMapBufferSegment *iomap_seg;
+	size_t		base;
 	int			i;
 
 	Assert(IsGpuServerProcess());
@@ -299,8 +300,12 @@ __gpuMemCopyFromSSD(CUdeviceptr destptr,
 	/* Device memory should be already imported on allocation time */
 	Assert(iomap_buffer_base != 0UL);
 
+	// TODO: We need a check whether destination is in the range of
+	//       the chunk which contains @destptr
+
 	if (destptr < iomap_buffer_base)
 		elog(ERROR, "NVMe-Strom: Direct DMA destination out of range");
+	base = destptr - iomap_buffer_base;
 
 	cmd = palloc(offsetof(StromCmd__MemCpySsdToGpu, chunks[nchunks]));
 	cmd->dma_task_id	= 0;
@@ -313,10 +318,10 @@ __gpuMemCopyFromSSD(CUdeviceptr destptr,
 		Size		offset = src_chunks[i].offset;
 		Size		length = src_chunks[i].length;
 
-		if (offset + length >= iomap_buffer_size)
+		if (base + offset + length >= iomap_buffer_size)
 			elog(ERROR, "NVMe-Strom: Direct DMA destination out of range");
 		cmd->chunks[i].fpos		= src_chunks[i].fpos;
-		cmd->chunks[i].offset	= offset;
+		cmd->chunks[i].offset	= base + offset;
 		cmd->chunks[i].length	= length;
 	}
 	return cmd;
@@ -531,6 +536,7 @@ __RelationCanUseNvmeStrom(Relation relation)
 	else
 	{
 		fdesc = open(pathname, O_RDONLY | O_DIRECTORY);
+		elog(INFO, "pathname = %s fdesc = %d", pathname, fdesc);
 		if (fdesc < 0)
 		{
 			elog(WARNING, "failed to open \"%s\" of tablespace \"%s\": %m",
@@ -613,6 +619,44 @@ setup_iomap_buffer_info(IOMapBufferSegment *iomap_seg,
 	}
 	SpinLockRelease(&iomap_seg->lock);
 }
+
+#if 1
+void
+dump_iomap_buffer_info(void)
+{
+	iomap_buffer_info *iomap_info;
+	int			i, max_nchunks;
+
+	max_nchunks = iomap_buffer_size / IOMAPBUF_CHUNKSZ_MIN;
+	iomap_info = palloc(offsetof(iomap_buffer_info,
+								 chunks[max_nchunks * numDevAttrs]));
+	iomap_info->nitems = 0;
+	if (iomap_buffer_segments)
+	{
+		for (i=0; i < numDevAttrs; i++)
+		{
+			IOMapBufferSegment *iomap_seg = GetIOMapBufferSegment(i);
+			cl_int      gpuid = devAttrs[i].DEV_ID;
+
+			setup_iomap_buffer_info(iomap_seg, gpuid, iomap_info);
+		}
+
+		if (iomap_info->nitems > 0)
+			fputc('\n', stderr);
+		for (i=0; i < iomap_info->nitems; i++)
+		{
+			fprintf(stderr, "GPU%d 0x%p - 0x%p len=%zu %s\n",
+					iomap_info->chunks[i].gpuid,
+					(char *)(iomap_info->chunks[i].offset),
+					(char *)(iomap_info->chunks[i].offset +
+							 iomap_info->chunks[i].length),
+					(size_t)(iomap_info->chunks[i].length),
+					iomap_info->chunks[i].is_used ? "used" : "free");
+		}
+	}
+	pfree(iomap_info);
+}
+#endif
 
 Datum
 pgstrom_iomap_buffer_info(PG_FUNCTION_ARGS)
@@ -752,20 +796,16 @@ pgstrom_startup_nvme_strom(void)
 		cmd.length = iomap_buffer_size;
 		if (nvme_strom_ioctl(STROM_IOCTL__MAP_GPU_MEMORY, &cmd) != 0)
 			elog(ERROR, "STROM_IOCTL__MAP_GPU_MEMORY failed: %m");
+
 		if (iomap_buffer_size % cmd.gpu_page_sz != 0)
 			elog(WARNING, "i/o mapped GPU memory size (%zu) is not aligned to GPU page size(%u)",
 				 iomap_buffer_size, cmd.gpu_page_sz);
 
 		/* setup IOMapBufferSegment */
-		elog(LOG, "cuda_mhandle = %08x %08x %08x %08x %08x %08x %08x %08x",
-			 ((int *)cuda_mhandle.reserved)[0],
-			 ((int *)cuda_mhandle.reserved)[1],
-			 ((int *)cuda_mhandle.reserved)[2],
-			 ((int *)cuda_mhandle.reserved)[3],
-			 ((int *)cuda_mhandle.reserved)[4],
-			 ((int *)cuda_mhandle.reserved)[5],
-			 ((int *)cuda_mhandle.reserved)[6],
-			 ((int *)cuda_mhandle.reserved)[7]);
+		elog(LOG, "GPU Device Memory (0x%p-0x%p) mapped with handle: %016lx",
+			 (char *)cuda_devptr,
+			 (char *)cuda_devptr + iomap_buffer_size - 1,
+			 cmd.handle);
 		memcpy(&iomap_seg->cuda_mhandle, &cuda_mhandle,
 			   sizeof(CUipcMemHandle));
 		iomap_seg->iomap_handle = cmd.handle;

@@ -414,13 +414,14 @@ gpuservPutGpuContext(GpuContext_v2 *gcontext)
 /*
  * gpuservProcessPendingTasks
  */
-static void
+static bool
 gpuservProcessPendingTasks(void)
 {
 	MemoryContext	memcxt = CurrentMemoryContext;
 	dlist_node	   *dnode;
 	GpuTask_v2	   *gtask;
 	GpuContext_v2  *gcontext;
+	bool			has_completed;
 
 	SpinLockAcquire(&session_tasks_lock);
 	while (!dlist_is_empty(&session_pending_tasks))
@@ -506,7 +507,11 @@ gpuservProcessPendingTasks(void)
 			break;
 		}
 	}
+	has_completed = !dlist_is_empty(&session_completed_tasks);
+
 	SpinLockRelease(&session_tasks_lock);
+
+	return has_completed;
 }
 
 /*
@@ -1180,8 +1185,8 @@ gpuservRecvCommands(GpuContext_v2 *gcontext)
 				const char *funcname;
 				const char *message;
 
-				if (!IsGpuServerProcess())
-					elog(FATAL, "Bug? only GPU server can deliver ERROR");
+				if (IsGpuServerProcess())
+					elog(FATAL, "Bug? Only GPU server can deliver ERROR");
 				unitsz = offsetof(GpuServCommand, u.error.buffer);
 				if (unitsz > remain)
 					continue;
@@ -1382,14 +1387,14 @@ gpuserv_session_main(void)
 				 devAttrs[gpuserv_cuda_dindex].DEV_ID,
 				 devAttrs[gpuserv_cuda_dindex].DEV_NAME);
 
-		/* flush out if any completed tasks */
-		gpuservFlushOutCompletedTasks();
-
-		/* process pending tasks */
-		gpuservProcessPendingTasks();
-
-		/* flush out if any completed tasks again */
-		gpuservFlushOutCompletedTasks();
+		do {
+			/*
+			 * Flush out completed tasks (it also releases GPU resource),
+			 * then process pending tasks. If any tasks get completed
+			 * during task processing, retry this process again.
+			 */
+			gpuservFlushOutCompletedTasks();
+		} while (gpuservProcessPendingTasks());
 
 		/* picks up pending code compile, if no running tasks */
 		SpinLockAcquire(&session_tasks_lock);
@@ -1415,7 +1420,6 @@ gpuserv_session_main(void)
 				if (!event.user_data)
 				{
 					gpuservAcceptConnection();
-					elog(LOG, "accept connection");
 				}
 				else
 				{

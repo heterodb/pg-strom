@@ -751,6 +751,7 @@ extern void gpuMemCopyFromSSDAsync(CUdeviceptr dstptr,
 								   strom_dma_chunk *ssd_chunks,
 								   CUstream cuda_stream);
 
+extern void dump_iomap_buffer_info(void);
 extern Datum pgstrom_iomap_buffer_info(PG_FUNCTION_ARGS);
 extern void pgstrom_init_nvme_strom(void);
 

@@ -2429,13 +2429,12 @@ gpuscan_cleanup_cuda_resources(GpuScanTask *gscan)
 
 	if (with_nvme_strom && gscan->m_kds_src)
 	{
+		elog(LOG, "gpuMemFreeIOMap %p", (void *)gscan->m_kds_src);
 		rc = gpuMemFreeIOMap(gscan->task.gcontext, gscan->m_kds_src);
 		if (rc != CUDA_SUCCESS)
 			elog(WARNING, "failed on gpuMemFreeIOMap: %s", errorText(rc));
 	}
 	/* ensure pointers are NULL */
-//	gscan->kern_exec_quals = NULL;
-//	gscan->kern_projection = NULL;
 	gscan->kern_gpuscan_main = NULL;
 	gscan->m_gpuscan = 0UL;
 	gscan->m_kds_src = 0UL;
@@ -2548,6 +2547,7 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 		else
 			gscan->m_kds_dst = 0UL;
 	}
+	Assert(pds_src->kds.format == KDS_FORMAT_BLOCK);
 
 	/*
 	 * Creation of event objects, if needed
@@ -2599,6 +2599,7 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 		length = ((char *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds_src->kds,
 													   nr_loaded) -
 				  (char *)&pds_src->kds);
+		elog(LOG, "nrooms=%u nitems=%u nblocks=%u length=%zu", pds_src->kds.nrooms, pds_src->kds.nitems, pds_src->nblocks_uncached, length);
 		rc = cuMemcpyHtoDAsync(gscan->m_kds_src,
 							   &pds_src->kds,
 							   length,
@@ -2614,7 +2615,7 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 												  pds_src->kds.nrooms) -
 			 sizeof(strom_dma_chunk) * pds_src->nblocks_uncached);
 		gpuMemCopyFromSSDAsync(gscan->m_kds_src + length,
-							   gscan->task.file_desc,
+							   gscan->task.peer_fdesc,
 							   pds_src->nblocks_uncached,
 							   ssd_chunks,
 							   cuda_stream);
