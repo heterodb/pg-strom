@@ -683,9 +683,9 @@ codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
 			dtype = pgstrom_devtype_lookup(var->vartype);
 			appendStringInfo(
 				kern,
-				"  char *addr = kern_get_datum_tuple(kds->colmeta,htup,%u)\n"
+				"  void *addr = kern_get_datum_tuple(kds->colmeta,htup,%u)\n"
 				"  pg_%s_t %s_%u = pg_%s_datum_ref(kcxt,addr,false);\n",
-				var->varattno,
+				var->varattno - 1,
 				dtype->type_name,
 				context->var_label,
 				var->varattno,
