@@ -2444,26 +2444,34 @@ static void
 gpuscan_respond_task(CUstream stream, CUresult status, void *private)
 {
 	GpuScanTask	   *gscan = private;
-	bool			is_urgent;
+	bool			is_urgent = false;
 
 	/* OK, routine is called back in the usual context */
 	if (status == CUDA_SUCCESS)
 	{
-		if (pgstrom_cpu_fallback_enabled &&
-			(gscan->kern.kerror.errcode == StromError_CpuReCheck ||
-			 gscan->kern.kerror.errcode == StromError_DataStoreNoSpace))
+		if (gscan->kern.kerror.errcode != StromError_Success)
 		{
-			/* clear the error code instead of the CPU fallback */
-			gscan->kern.kerror.errcode = StromError_Success;
-			gscan->task.cpu_fallback = true;
+			if (pgstrom_cpu_fallback_enabled &&
+				(gscan->kern.kerror.errcode == StromError_CpuReCheck ||
+				 gscan->kern.kerror.errcode == StromError_DataStoreNoSpace))
+			{
+				gscan->task.cpu_fallback = true;
+			}
+			else if (!gscan->task.kerror.errcode)
+			{
+				gscan->task.kerror = gscan->kern.kerror;
+			}
+			is_urgent = true;
 		}
-		is_urgent = ( gscan->kern.kerror.errcode != StromError_Success);
 	}
 	else
 	{
-		gscan->kern.kerror.errcode = status;
-		gscan->kern.kerror.kernel = StromKernel_CudaRuntime;
-		gscan->kern.kerror.lineno = 0;
+		if (!gscan->task.kerror.errcode)
+		{
+			gscan->task.kerror.errcode = status;
+			gscan->task.kerror.kernel = StromKernel_CudaRuntime;
+			gscan->task.kerror.lineno = 0;
+		}
 		is_urgent = true;
 	}
 	gpuservCompleteGpuTask(&gscan->task, is_urgent);
@@ -2612,8 +2620,8 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 			((char *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds_src->kds,
 												  pds_src->kds.nrooms) -
 			 sizeof(strom_dma_chunk) * pds_src->nblocks_uncached);
-		gpuMemCopyFromSSDAsync(gscan->m_kds_src + length,
-							   gscan->task.peer_fdesc,
+		gpuMemCopyFromSSDAsync(&gscan->task,
+							   gscan->m_kds_src + length,
 							   pds_src->nblocks_uncached,
 							   ssd_chunks,
 							   cuda_stream);
@@ -2712,15 +2720,6 @@ int
 gpuscan_complete_task(GpuTask_v2 *gtask)
 {
 	GpuScanTask	   *gscan = (GpuScanTask *) gtask;
-
-	Assert(gscan->kern.kerror.errcode == StromError_Success);
-	if (gscan->kern.kerror.errcode != StromError_Success)
-		elog(ERROR, "GPU kernel internal error: %s",
-			 errorTextKernel(&gscan->kern.kerror));
-
-	// If CpuRecheck error, and with NVMe-Strom, needs to write back
-	// pds_src for data blocks host side does not seen
-
 
 	PERFMON_EVENT_ELAPSED(gscan, time_dma_send,
 						  ev_dma_send_start,

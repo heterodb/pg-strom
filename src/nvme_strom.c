@@ -360,28 +360,43 @@ static void
 gpuMemCopyFromSSDWait(CUstream cuda_stream, CUresult status, void *private)
 {
 	StromCmd__MemCpySsdToGpuWait cmd;
-	unsigned long	dma_task_id = (unsigned long) private;
+	GpuTask_v2	   *gtask = (GpuTask_v2 *)private;
 
 	cmd.ntasks = 1;
 	cmd.nwaits = 1;
 	cmd.status = 0;
-	cmd.dma_task_id[0] = dma_task_id;
-
-	// FIXME: How to inform the error status to GpuTask?
-	//        callback is called in the different thread.
+	cmd.dma_task_id[0] = gtask->dma_task_id;
 
 	if (nvme_strom_ioctl(STROM_IOCTL__MEMCPY_SSD2GPU_WAIT, &cmd) != 0)
+	{
 		fprintf(stderr, "failed on STROM_IOCTL__MEMCPY_SSD2GPU_WAIT: %m");
-	if (cmd.status != 0)
+		if (gtask->kerror.errcode == 0)
+		{
+			gtask->kerror.errcode = StromError_Ssd2GpuDirectDma;
+			gtask->kerror.kernel = StromKernel_NVMeStrom;
+			gtask->kerror.lineno = 0;
+		}
+	}
+	else if (cmd.status != 0)
+	{
 		fprintf(stderr, "NVMe-Strom: Direct DMA Status=0x%lx", cmd.status);
+		if (gtask->kerror.errcode == 0)
+		{
+			gtask->kerror.errcode = StromError_Ssd2GpuDirectDma;
+			gtask->kerror.kernel = StromKernel_NVMeStrom;
+			gtask->kerror.lineno = 0;
+		}
+	}
+	// TODO: we may need to handle signal interrupt
+	//       however, it is worker thread context. How to do?
 }
 
 /*
  * gpuMemCopyFromSSDAsync - kick SSD-to-GPU Direct DMA in asynchronous mode
  */
 void
-gpuMemCopyFromSSDAsync(CUdeviceptr destptr,
-					   int file_desc,
+gpuMemCopyFromSSDAsync(GpuTask_v2 *gtask,
+					   CUdeviceptr destptr,
 					   int nchunks,
 					   strom_dma_chunk *src_chunks,
 					   CUstream cuda_stream)
@@ -389,15 +404,15 @@ gpuMemCopyFromSSDAsync(CUdeviceptr destptr,
 	StromCmd__MemCpySsdToGpu *cmd;
 	CUresult		rc;
 
-	cmd = __gpuMemCopyFromSSD(destptr, file_desc, nchunks, src_chunks);
+	Assert(IsGpuServerProcess());
+	cmd = __gpuMemCopyFromSSD(destptr, gtask->peer_fdesc, nchunks, src_chunks);
 	if (nvme_strom_ioctl(STROM_IOCTL__MEMCPY_SSD2GPU_ASYNC, cmd) != 0)
 		elog(ERROR, "failed on STROM_IOCTL__MEMCPY_SSD2GPU_ASYNC: %m");
+	gtask->dma_task_id = cmd->dma_task_id;
 
-	// FIXME: We need tracker of SSD2GPU DMA for synchronization on the
-	//        error context, to prevent unexpected memory breakage.
 	rc = cuStreamAddCallback(cuda_stream,
 							 gpuMemCopyFromSSDWait,
-							 (void *)cmd->dma_task_id, 0);
+							 gtask, 0);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuStreamAddCallback: %s", errorText(rc));
 	pfree(cmd);

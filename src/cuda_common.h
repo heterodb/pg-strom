@@ -224,6 +224,7 @@ typedef uintptr_t		hostptr_t;
 #define StromError_OutOfMemory				1002 /* Out of memory */
 #define StromError_OutOfSharedMemory		1003 /* Out of shared memory */
 #define StromError_OutOfKernelArgs			1004 /* Out of kernel arguments */
+#define StromError_Ssd2GpuDirectDma			1005 /* SSD2GPU Direct DMA error */
 #define StromError_InvalidValue				1999 /* Something invalid */
 #define StromError_DataStoreCorruption		2000 /* KDS corrupted */
 #define StromError_DataStoreNoSpace			2001 /* KDS has no space */
@@ -237,6 +238,7 @@ typedef uintptr_t		hostptr_t;
  */
 #define StromKernel_HostPGStrom						0x0001
 #define StromKernel_CudaRuntime						0x0002
+#define StromKernel_NVMeStrom						0x0003
 #define StromKernel_gpuscan_exec_quals_row			0x0101
 #define StromKernel_gpuscan_exec_quals_block		0x0102
 #define StromKernel_gpuscan_projection_row			0x0103

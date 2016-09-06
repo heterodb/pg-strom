@@ -214,6 +214,7 @@ struct GpuTaskState_v2
  */
 struct GpuTask_v2
 {
+	kern_errorbuf	kerror;			/* error status of the task */
 	dlist_node		chain;			/* link to the task state list */
 	GpuTaskKind		task_kind;		/* same with GTS's one */
 	ProgramId		program_id;		/* same with GTS's one */
@@ -227,6 +228,7 @@ struct GpuTask_v2
 	GpuContext_v2  *gcontext;		/* session info of GPU server */
 	CUstream		cuda_stream;	/* stream object assigned on the task */
 	int				peer_fdesc;		/* FD moved via SCM_RIGHTS */
+	unsigned long	dma_task_id;	/* Task-ID of Async SSD2GPU DMA */
 };
 typedef struct GpuTask_v2 GpuTask_v2;
 
@@ -750,8 +752,8 @@ extern void gpuMemCopyFromSSD(CUdeviceptr dstptr,
 							  int file_desc,
 							  int nchunks,
 							  strom_dma_chunk *ssd_chunks);
-extern void gpuMemCopyFromSSDAsync(CUdeviceptr dstptr,
-								   int file_desc,
+extern void gpuMemCopyFromSSDAsync(GpuTask_v2 *gtask,
+								   CUdeviceptr dstptr,
 								   int nchunks,
 								   strom_dma_chunk *ssd_chunks,
 								   CUstream cuda_stream);

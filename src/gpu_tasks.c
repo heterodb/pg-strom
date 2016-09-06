@@ -685,6 +685,11 @@ pgstromCompleteGpuTask(GpuTask_v2 *gtask)
 
 	Assert(IsGpuServerProcess());
 
+	/* raise any kernel internal error */
+	if (gtask->kerror.errcode != StromError_Success)
+		elog(ERROR, "GpuScan kernel internal error: %s",
+			 errorTextKernel(&gtask->kerror));
+
 	switch (gtask->task_kind)
 	{
 		case GpuTaskKind_GpuScan:
@@ -878,7 +883,9 @@ errorTextKernel(kern_errorbuf *kerror)
 
 	switch (kerror->kernel)
 	{
+		KERN_ENTRY(HostPGStrom);
 		KERN_ENTRY(CudaRuntime);
+		KERN_ENTRY(NVMeStrom);
 		KERN_ENTRY(gpuscan_exec_quals_block);
 		KERN_ENTRY(gpuscan_exec_quals_row);
 		KERN_ENTRY(gpuscan_projection_row);
