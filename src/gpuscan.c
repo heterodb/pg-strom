@@ -2554,7 +2554,6 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 		else
 			gscan->m_kds_dst = 0UL;
 	}
-	Assert(pds_src->kds.format == KDS_FORMAT_BLOCK);
 
 	/*
 	 * Creation of event objects, if needed
