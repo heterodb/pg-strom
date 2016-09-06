@@ -466,7 +466,12 @@ extern CUresult	gpuMemAlloc_v2(GpuContext_v2 *gcontext,
 extern CUresult	gpuMemFree_v2(GpuContext_v2 *gcontext, CUdeviceptr devptr);
 extern void trackCudaProgram(GpuContext_v2 *gcontext, ProgramId program_id);
 extern void untrackCudaProgram(GpuContext_v2 *gcontext, ProgramId program_id);
-
+extern void trackIOMapMem(GpuContext_v2 *gcontext, CUdeviceptr devptr);
+extern void untrackIOMapMem(GpuContext_v2 *gcontext, CUdeviceptr devptr);
+extern void trackSSD2GPUDMA(GpuContext_v2 *gcontext,
+							unsigned long dma_task_id);
+extern void untrackSSD2GPUDMA(GpuContext_v2 *gcontext,
+							  unsigned long dma_task_id);
 extern void pgstrom_init_gpu_context(void);
 
 /*

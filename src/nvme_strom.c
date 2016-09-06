@@ -140,6 +140,7 @@ gpuMemAllocIOMap(GpuContext_v2 *gcontext,
 	int					mclass;
 	int					index;
 	dlist_node		   *dnode;
+	CUdeviceptr			devptr;
 	CUresult			rc;
 
 	Assert(IsGpuServerProcess());
@@ -189,7 +190,10 @@ gpuMemAllocIOMap(GpuContext_v2 *gcontext,
 	index = iomap_chunk - iomap_seg->iomap_chunks;
 	Assert(index < iomap_buffer_size >> IOMAPBUF_CHUNKSZ_MIN_BIT);
 
-	*p_devptr = iomap_buffer_base + ((Size)index << IOMAPBUF_CHUNKSZ_MIN_BIT);
+	devptr = iomap_buffer_base + ((Size)index << IOMAPBUF_CHUNKSZ_MIN_BIT);
+	trackIOMapMem(gcontext, devptr);
+
+	*p_devptr = devptr;
 
 	return CUDA_SUCCESS;
 }
@@ -207,6 +211,9 @@ gpuMemFreeIOMap(GpuContext_v2 *gcontext, CUdeviceptr devptr)
 	IOMapBufferChunk   *iomap_buddy;
 	int					index;
 	int					shift;
+
+	if (gcontext)
+		untrackIOMapMem(gcontext, devptr);
 
 	Assert(IsGpuServerProcess());
 	if (!iomap_buffer_base)

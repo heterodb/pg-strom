@@ -49,11 +49,14 @@ static dlist_head		inactiveResourceTracker;
  * It enables to track various resources with GpuContext, to detect resource
  * leaks.
  */
-#define RESTRACK_HASHSIZE				27
+#define RESTRACK_HASHSIZE				53
 
 #define RESTRACK_CLASS__FILEDESC		1
 #define RESTRACK_CLASS__GPUMEMORY		2
 #define RESTRACK_CLASS__GPUPROGRAM		3
+#define RESTRACK_CLASS__IOMAPMEMORY		4
+#define RESTRACK_CLASS__SSD2GPUDMA		5
+
 typedef struct ResourceTracker
 {
 	dlist_node	chain;
@@ -61,8 +64,10 @@ typedef struct ResourceTracker
 	cl_int		resclass;
 	union {
 		int			fdesc;		/* RESTRACK_CLASS__FILEDESC */
-		CUdeviceptr	devptr;		/* RESTRACK_CLASS__GPUMEMORY */
+		CUdeviceptr	devptr;		/* RESTRACK_CLASS__GPUMEMORY
+								 * RESTRACK_CLASS__IOMAPMEMORY */
 		ProgramId	program_id;	/* RESTRACK_CLASS__GPUPROGRAM */
+		unsigned long dma_task_id; /* RESTRACK_CLASS__SSD2GPUDMA */
 	} u;
 } ResourceTracker;
 
@@ -295,6 +300,105 @@ untrackCudaProgram(GpuContext_v2 *gcontext, ProgramId program_id)
 }
 
 /*
+ * resource tracker for i/o mapped memory
+ */
+void
+trackIOMapMem(GpuContext_v2 *gcontext, CUdeviceptr devptr)
+{
+	ResourceTracker *tracker = resource_tracker_alloc();
+	pg_crc32	crc;
+
+	crc = resource_tracker_hashval(RESTRACK_CLASS__IOMAPMEMORY,
+								   &devptr, sizeof(CUdeviceptr));
+	tracker->crc = crc;
+	tracker->resclass = RESTRACK_CLASS__IOMAPMEMORY;
+	tracker->u.devptr = devptr;
+
+	dlist_push_tail(&gcontext->restrack[crc % RESTRACK_HASHSIZE],
+					&tracker->chain);
+}
+
+void
+untrackIOMapMem(GpuContext_v2 *gcontext, CUdeviceptr devptr)
+{
+	pg_crc32	crc;
+	cl_int		index;
+	dlist_iter	iter;
+
+	crc = resource_tracker_hashval(RESTRACK_CLASS__IOMAPMEMORY,
+								   &devptr, sizeof(CUdeviceptr));
+	index = crc % RESTRACK_HASHSIZE;
+
+	dlist_foreach (iter, &gcontext->restrack[index])
+	{
+		ResourceTracker *tracker
+			= dlist_container(ResourceTracker, chain, iter.cur);
+
+		if (tracker->crc == crc &&
+			tracker->resclass == RESTRACK_CLASS__IOMAPMEMORY &&
+			tracker->u.devptr == devptr)
+		{
+			dlist_delete(&tracker->chain);
+			memset(tracker, 0, sizeof(ResourceTracker));
+			dlist_push_head(&inactiveResourceTracker,
+							&tracker->chain);
+			return;
+		}
+	}
+	elog(WARNING, "Bug? I/O Mapped Memory %p was not tracked", (void *)devptr);
+}
+
+/*
+ * resource tracker for SSD-to-GPU Direct DMA task
+ */
+void
+trackSSD2GPUDMA(GpuContext_v2 *gcontext, unsigned long dma_task_id)
+{
+	ResourceTracker *tracker = resource_tracker_alloc();
+	pg_crc32	crc;
+
+	crc = resource_tracker_hashval(RESTRACK_CLASS__SSD2GPUDMA,
+								   &dma_task_id, sizeof(unsigned long));
+	tracker->crc = crc;
+	tracker->resclass = RESTRACK_CLASS__SSD2GPUDMA;
+	tracker->u.dma_task_id = dma_task_id;
+
+	dlist_push_tail(&gcontext->restrack[crc % RESTRACK_HASHSIZE],
+					&tracker->chain);
+}
+
+void
+untrackSSD2GPUDMA(GpuContext_v2 *gcontext, unsigned long dma_task_id)
+{
+	pg_crc32	crc;
+	cl_int		index;
+	dlist_iter	iter;
+
+	crc = resource_tracker_hashval(RESTRACK_CLASS__SSD2GPUDMA,
+								   &dma_task_id, sizeof(unsigned long));
+	index = crc % RESTRACK_HASHSIZE;
+
+	dlist_foreach (iter, &gcontext->restrack[index])
+	{
+		ResourceTracker *tracker
+			= dlist_container(ResourceTracker, chain, iter.cur);
+
+		if (tracker->crc == crc &&
+			tracker->resclass == RESTRACK_CLASS__SSD2GPUDMA &&
+			tracker->u.dma_task_id == dma_task_id)
+		{
+			dlist_delete(&tracker->chain);
+			memset(tracker, 0, sizeof(ResourceTracker));
+			dlist_push_head(&inactiveResourceTracker,
+							&tracker->chain);
+			return;
+		}
+	}
+	elog(WARNING, "Bug? SSD-to-GPU Direct DMA (%p) was not tracked",
+		 (void *)dma_task_id);
+}
+
+/*
  * ReleaseLocalResources - release all the private resources tracked by
  * the resource tracker of GpuContext
  */
@@ -317,6 +421,36 @@ ReleaseLocalResources(GpuContext_v2 *gcontext, bool normal_exit)
 		gcontext->sockfd = PGINVALID_SOCKET;
 	}
 
+	/*
+	 * NOTE: RESTRACK_CLASS__SSD2GPUDMA (only available if NVMe-Strom is
+	 * installed) must be released prior to any i/o mapped memory, because
+	 * we have no way to cancel asynchronous DMA request once submitted,
+	 * thus, release of i/o mapped memory prior to Async DMA will cause
+	 * unexpected device memory corruption.
+	 */
+	for (i=0; i < RESTRACK_HASHSIZE; i++)
+	{
+		dlist_mutable_iter	iter;
+
+		dlist_foreach_modify(iter, &gcontext->restrack[i])
+		{
+			tracker = dlist_container(ResourceTracker, chain, iter.cur);
+			if (tracker->resclass != RESTRACK_CLASS__SSD2GPUDMA)
+				continue;
+
+			dlist_delete(&tracker->chain);
+			// wait for completion of DMA
+			elog(NOTICE, "SSD2GPU DMA %p is not completed",
+				 (void *)tracker->u.dma_task_id);
+
+			memset(tracker, 0, sizeof(ResourceTracker));
+			dlist_push_head(&inactiveResourceTracker, &tracker->chain);
+		}
+	}
+
+	/*
+	 * OK, release other resources
+	 */
 	for (i=0; i < RESTRACK_HASHSIZE; i++)
 	{
 		while (!dlist_is_empty(&gcontext->restrack[i]))
@@ -354,6 +488,15 @@ ReleaseLocalResources(GpuContext_v2 *gcontext, bool normal_exit)
 							 tracker->u.program_id);
 
 					pgstrom_put_cuda_program(NULL, tracker->u.program_id);
+					break;
+				case RESTRACK_CLASS__IOMAPMEMORY:
+					if (normal_exit)
+						elog(WARNING, "I/O Mapped Memory %p likely leaked",
+							 (void *)tracker->u.devptr);
+					rc = gpuMemFreeIOMap(NULL, tracker->u.devptr);
+					if (rc != CUDA_SUCCESS)
+						elog(WARNING, "failed on gpuMemFreeIOMap(%p): %s",
+							 (void *)tracker->u.devptr, errorText(rc));
 					break;
 				default:
 					elog(WARNING, "Bug? unknown resource tracker class: %d",
