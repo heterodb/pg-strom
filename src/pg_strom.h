@@ -577,8 +577,7 @@ extern void pgstromInitGpuTaskState(GpuTaskState_v2 *gts,
 									GpuContext_v2 *gcontext,
 									GpuTaskKind task_kind,
 									List *used_params,
-									EState *estate,
-									cl_uint nrows_per_block);
+									EState *estate);
 extern TupleTableSlot *pgstromExecGpuTaskState(GpuTaskState_v2 *gts);
 extern pgstrom_data_store *pgstromBulkExecGpuTaskState(GpuTaskState_v2 *gts,
 													   size_t chunk_size);

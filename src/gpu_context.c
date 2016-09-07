@@ -652,8 +652,6 @@ AttachGpuContext(pgsocket sockfd,
 
 	/* to be called by the GPU server process */
 	Assert(IsGpuServerProcess());
-	/* GPU server should have up to one GpuContext at a time */
-	Assert(dlist_is_empty(&activeGpuContextList));
 
 	if (context_id >= numGpuContexts)
 		elog(ERROR, "context_id (%d) is out of range", context_id);

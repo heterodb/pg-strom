@@ -133,6 +133,7 @@ typedef struct {
 	bool			dev_projection;	/* true, if device projection is valid */
 	cl_uint			proj_row_extra;
 	cl_uint			proj_slot_extra;
+	cl_uint			nrows_per_block;
 	/* resource for CPU fallback */
 	TupleTableSlot *base_slot;
 	ProjectionInfo *base_proj;
@@ -348,7 +349,6 @@ cost_gpuscan_path(PlannerInfo *root, CustomPath *cpath,
 	cost_qual_eval(&qcost, dev_quals, root);
 	startup_cost += qcost.startup;
 	run_cost += qcost.per_tuple * gpu_ratio * ntuples;
-	//elog(INFO, "NP=%d ntuples %f -> %f", cpath->path.parallel_workers, ntuples, ntuples * selectivity);
 	ntuples *= selectivity;
 
 	/* Cost for CPU qualifiers */
@@ -517,8 +517,9 @@ gpuscan_add_scan_path(PlannerInfo *root,
 		 */
 
 		/* max_parallel_workers_per_gather is the upper limit  */
-		parallel_workers = Min(parallel_workers,
-							   max_parallel_workers_per_gather);
+		parallel_workers = Min3(parallel_workers,
+								4 * numDevAttrs,
+								max_parallel_workers_per_gather);
 		if (parallel_workers <= 0)
 			return;
 
@@ -528,6 +529,8 @@ gpuscan_add_scan_path(PlannerInfo *root,
 									   copyObject(host_quals),
 									   discount_per_tuple,
 									   parallel_workers);
+		pathnode->total_cost = 10.0;
+		pathnode->startup_cost = 10.0;
 		add_partial_path(baserel, pathnode);
 
 		/* then, potentially generate Gather + GpuScan path */
@@ -600,7 +603,7 @@ codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
 			dtype = pgstrom_devtype_lookup(var->vartype);
 			appendStringInfo(
 				kern,
-				"  void *addr = kern_get_datum_tuple(kds->colmeta,htup,%u)\n"
+				"  void *addr = kern_get_datum_tuple(kds->colmeta,htup,%u);\n"
 				"  pg_%s_t %s_%u = pg_%s_datum_ref(kcxt,addr,false);\n",
 				var->varattno - 1,
 				dtype->type_name,
@@ -1657,8 +1660,7 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 							gcontext,
 							GpuTaskKind_GpuScan,
 							used_params,
-							estate,
-							gs_info->nrows_per_block);
+							estate);
 	gss->gts.cb_next_task   = gpuscan_next_task;
 	gss->gts.cb_next_tuple  = gpuscan_next_tuple;
 	gss->gts.cb_switch_task = NULL;
@@ -1680,6 +1682,8 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	/* device projection related resource consumption */
 	gss->proj_row_extra = gs_info->proj_row_extra;
 	gss->proj_slot_extra = gs_info->proj_slot_extra;
+	/* estimated number of rows per block */
+	gss->nrows_per_block = gs_info->nrows_per_block;
 	/* 'tableoid' should not change during relation scan */
 	gss->scan_tuple.t_tableOid = RelationGetRelid(scan_rel);
 	/* initialize resource for CPU fallback */
@@ -1800,11 +1804,7 @@ ExecGpuScanEstimateDSM(CustomScanState *node,
 {
 	EState	   *estate = node->ss.ps.state;
 
-	node->pscan_len = heap_parallelscan_estimate(estate->es_snapshot);
-	shm_toc_estimate_chunk(&pcxt->estimator, node->pscan_len);
-	shm_toc_estimate_keys(&pcxt->estimator, 1);
-
-	return 0;
+	return heap_parallelscan_estimate(estate->es_snapshot);
 }
 
 /*
@@ -1816,13 +1816,11 @@ ExecGpuScanInitDSM(CustomScanState *node,
 				   void *coordinate)
 {
 	EState	   *estate = node->ss.ps.state;
-	ParallelHeapScanDesc pscan;
+	ParallelHeapScanDesc pscan = coordinate;
 
-	pscan = shm_toc_allocate(pcxt->toc, node->pscan_len);
 	heap_parallelscan_initialize(pscan,
 								 node->ss.ss_currentRelation,
 								 estate->es_snapshot);
-	shm_toc_insert(pcxt->toc, node->ss.ps.plan->plan_node_id, pscan);
 	node->ss.ss_currentScanDesc =
 		heap_beginscan_parallel(node->ss.ss_currentRelation, pscan);
 }
@@ -1891,11 +1889,6 @@ ExplainGpuScan(CustomScanState *node, List *ancestors, ExplainState *es)
 	/* common portion of EXPLAIN */
 	pgstromExplainGpuTaskState(&gss->gts, es);
 }
-
-
-
-
-
 
 /*
  * gpuscan_create_task - constructor of GpuScanTask
@@ -1986,26 +1979,139 @@ gpuscan_create_task(GpuScanState *gss,
 }
 
 /*
+ * heap_parallelscan_nextpage - see access/heap/heapam.c
+ */
+static BlockNumber
+heap_parallelscan_nextpage(HeapScanDesc scan)
+{
+	BlockNumber		page = InvalidBlockNumber;
+	BlockNumber		sync_startpage = InvalidBlockNumber;
+	BlockNumber		report_page = InvalidBlockNumber;
+	ParallelHeapScanDesc parallel_scan;
+
+	Assert(scan->rs_parallel);
+	parallel_scan = scan->rs_parallel;
+
+retry:
+	/* Grab the spinlock. */
+	SpinLockAcquire(&parallel_scan->phs_mutex);
+
+	/*
+	 * If the scan's startblock has not yet been initialized, we must do so
+	 * now.  If this is not a synchronized scan, we just start at block 0, but
+	 * if it is a synchronized scan, we must get the starting position from
+	 * the synchronized scan machinery.  We can't hold the spinlock while
+	 * doing that, though, so release the spinlock, get the information we
+	 * need, and retry.  If nobody else has initialized the scan in the
+	 * meantime, we'll fill in the value we fetched on the second time
+	 * through.
+	 */
+	if (parallel_scan->phs_startblock == InvalidBlockNumber)
+	{
+		if (!parallel_scan->phs_syncscan)
+			parallel_scan->phs_startblock = 0;
+		else if (sync_startpage != InvalidBlockNumber)
+			parallel_scan->phs_startblock = sync_startpage;
+		else
+		{
+			SpinLockRelease(&parallel_scan->phs_mutex);
+			sync_startpage = ss_get_location(scan->rs_rd, scan->rs_nblocks);
+			goto retry;
+		}
+		parallel_scan->phs_cblock = parallel_scan->phs_startblock;
+	}
+
+	/*
+	 * The current block number is the next one that needs to be scanned,
+	 * unless it's InvalidBlockNumber already, in which case there are no more
+	 * blocks to scan.  After remembering the current value, we must advance
+	 * it so that the next call to this function returns the next block to be
+	 * scanned.
+	 */
+	page = parallel_scan->phs_cblock;
+	if (page != InvalidBlockNumber)
+	{
+		parallel_scan->phs_cblock++;
+		if (parallel_scan->phs_cblock >= scan->rs_nblocks)
+			parallel_scan->phs_cblock = 0;
+		if (parallel_scan->phs_cblock == parallel_scan->phs_startblock)
+		{
+			parallel_scan->phs_cblock = InvalidBlockNumber;
+			report_page = parallel_scan->phs_startblock;
+		}
+	}
+
+	/* Release the lock. */
+	SpinLockRelease(&parallel_scan->phs_mutex);
+
+	/*
+	 * Report scan location.  Normally, we report the current page number.
+	 * When we reach the end of the scan, though, we report the starting page,
+	 * not the ending page, just so the starting positions for later scans
+	 * doesn't slew backwards.  We only report the position at the end of the
+	 * scan once, though: subsequent callers will have report nothing, since
+	 * they will have page == InvalidBlockNumber.
+	 */
+	if (scan->rs_syncscan)
+	{
+		if (report_page == InvalidBlockNumber)
+			report_page = page;
+		if (report_page != InvalidBlockNumber)
+			ss_report_location(scan->rs_rd, report_page);
+	}
+	return page;
+}
+
+/*
  * gpuscanExecScanChunk - read the relation by one chunk
  */
 pgstrom_data_store *
 gpuscanExecScanChunk(GpuTaskState_v2 *gts, Size chunk_length, int *p_filedesc)
 {
 	Relation		base_rel = gts->css.ss.ss_currentRelation;
-	HeapScanDesc	scan = gts->css.ss.ss_currentScanDesc;
+	HeapScanDesc	scan;
 	pgstrom_data_store *pds = NULL;
-	bool			finished = false;
 	struct timeval	tv1, tv2;
 
-	/* return NULL if relation is empty */
-	if (scan->rs_nblocks == 0 || scan->rs_numblocks == 0)
-		return NULL;
+	/*
+	 * Setup scan-descriptor, if the scan is not parallel, of if we're
+	 * executing a scan that was intended to be parallel serially.
+	 */
+	if (!gts->css.ss.ss_currentScanDesc)
+	{
+		EState	   *estate = gts->css.ss.ps.state;
 
-	if (scan->rs_cblock == InvalidBlockNumber)
-		scan->rs_cblock = scan->rs_startblock;
-	else if (scan->rs_cblock == scan->rs_startblock)
-		return NULL;	/* already goes around the relation */
-	Assert(scan->rs_cblock < scan->rs_nblocks);
+		gts->css.ss.ss_currentScanDesc = heap_beginscan(base_rel,
+														estate->es_snapshot,
+														0, NULL);
+		/*
+		 * Try to choose NVMe-Strom, if relation is deployed on the supported
+		 * tablespace and expected total i/o size is enough large than cache-
+		 * only scan.
+		 */
+		PDS_init_heapscan_state(gts, ((GpuScanState *)gts)->nrows_per_block);
+	}
+	scan = gts->css.ss.ss_currentScanDesc;
+
+	if (!scan->rs_inited)
+	{
+		/* return null immediately if relation is empty */
+		if (scan->rs_nblocks == 0 || scan->rs_numblocks == 0)
+		{
+			Assert(!BufferIsValid(scan->rs_cbuf));
+			return NULL;
+		}
+
+		if (scan->rs_parallel)
+			scan->rs_cblock = heap_parallelscan_nextpage(scan);
+		else
+			scan->rs_cblock = scan->rs_startblock;
+
+		scan->rs_inited = true;
+	}
+	/* already done? */
+	if (!BlockNumberIsValid(scan->rs_cblock))
+		return NULL;
 
 	InstrStartNode(&gts->outer_instrument);
 	PERFMON_BEGIN(&gts->pfm, &tv1);
@@ -2027,29 +2133,29 @@ gpuscanExecScanChunk(GpuTaskState_v2 *gts, Size chunk_length, int *p_filedesc)
 	 * specify smaller chunk by caller. GpuScan may become wise using
 	 * adaptive buffer size control by row selevtivity on run-time.
 	 */
-
-	/*
-	 * TODO: Block number has to be fetched from the shared memory region,
-	 * when GpuScan is parallel-aware
-	 */
-
-	/* fill up this data-store */
-	while (!finished)
+	while (BlockNumberIsValid(scan->rs_cblock))
 	{
+		/* try to load scan->rs_cblock */
+		Assert(scan->rs_cblock < scan->rs_nblocks);
 		if (!PDS_exec_heapscan(gts, pds, p_filedesc))
 			break;
-		// TODO: needs to consider scan->rs_parallel
+
 		/* move to the next block */
-		scan->rs_cblock++;
-		if (scan->rs_cblock >= scan->rs_nblocks)
-			scan->rs_cblock = 0;
-		if (scan->rs_syncscan)
-			ss_report_location(scan->rs_rd, scan->rs_cblock);
-		/* end of the scan? */
-		if (scan->rs_cblock == scan->rs_startblock ||
-			(scan->rs_numblocks != InvalidBlockNumber &&
-			 --scan->rs_numblocks == 0))
-			break;
+		if (scan->rs_parallel)
+			scan->rs_cblock = heap_parallelscan_nextpage(scan);
+		else
+		{
+			scan->rs_cblock++;
+			if (scan->rs_cblock >= scan->rs_nblocks)
+				scan->rs_cblock = 0;
+			if (scan->rs_syncscan)
+				ss_report_location(scan->rs_rd, scan->rs_cblock);
+			/* end of the scan? */
+			if (scan->rs_cblock == scan->rs_startblock ||
+				(BlockNumberIsValid(scan->rs_numblocks) &&
+				 --scan->rs_numblocks == 0))
+				scan->rs_cblock = InvalidBlockNumber;
+		}
 	}
 
 	if (pds->kds.nitems == 0)
@@ -2721,6 +2827,7 @@ pgstrom_init_gpuscan(void)
 	memset(&gpuscan_plan_methods, 0, sizeof(gpuscan_plan_methods));
 	gpuscan_plan_methods.CustomName			= "GpuScan";
 	gpuscan_plan_methods.CreateCustomScanState = gpuscan_create_scan_state;
+	RegisterCustomScanMethods(&gpuscan_plan_methods);
 
 	/* setup exec methods */
 	memset(&gpuscan_exec_methods, 0, sizeof(gpuscan_exec_methods));

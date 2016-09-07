@@ -189,8 +189,7 @@ pgstromInitGpuTaskState(GpuTaskState_v2 *gts,
 						GpuContext_v2 *gcontext,
 						GpuTaskKind task_kind,
 						List *used_params,
-						EState *estate,
-						cl_uint nrows_per_block)
+						EState *estate)
 {
 	ExprContext	   *econtext = gts->css.ss.ps.ps_ExprContext;
 
@@ -204,6 +203,7 @@ pgstromInitGpuTaskState(GpuTaskState_v2 *gts,
 
 	gts->outer_bulk_exec = false;
 	InstrInit(&gts->outer_instrument, estate->es_instrument);
+#if 0
 	if (gts->css.ss.ss_currentRelation)
 	{
 		Relation		scan_rel = gts->css.ss.ss_currentRelation;
@@ -219,6 +219,7 @@ pgstromInitGpuTaskState(GpuTaskState_v2 *gts,
 		 */
 		PDS_init_heapscan_state(gts, nrows_per_block);
 	}
+#endif
 	gts->scan_overflow = NULL;
 
 	/* callbacks shall be set by the caller */

@@ -1111,7 +1111,13 @@ gpuservRecvCommands(GpuContext_v2 *gcontext, bool *p_peer_sock_closed)
 					if (remain > 0 &&
 						(errno == EAGAIN || errno == EWOULDBLOCK))
 						elog(ERROR, "Bug? GpuServCommand message corruption");
-					elog(ERROR, "failed on recvmsg(2): %m");
+					if (errno == ECONNRESET)
+					{
+						/* The peer socket was closed */
+						*p_peer_sock_closed = true;
+						break;
+					}
+					elog(ERROR, "failed on recvmsg(2) %d: %m", errno);
 				}
 				if (retval == 0)
 				{
