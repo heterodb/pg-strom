@@ -1815,14 +1815,17 @@ ExecGpuScanInitDSM(CustomScanState *node,
 				   ParallelContext *pcxt,
 				   void *coordinate)
 {
-	EState	   *estate = node->ss.ps.state;
+	GpuScanState   *gss = (GpuScanState *) node;
+	EState		   *estate = node->ss.ps.state;
 	ParallelHeapScanDesc pscan = coordinate;
 
 	heap_parallelscan_initialize(pscan,
-								 node->ss.ss_currentRelation,
+								 gss->gts.css.ss.ss_currentRelation,
 								 estate->es_snapshot);
 	node->ss.ss_currentScanDesc =
-		heap_beginscan_parallel(node->ss.ss_currentRelation, pscan);
+		heap_beginscan_parallel(gss->gts.css.ss.ss_currentRelation, pscan);
+	/* Try to choose NVMe-Strom, if available */
+	PDS_init_heapscan_state(&gss->gts, gss->nrows_per_block);
 }
 
 /*
@@ -1833,11 +1836,14 @@ ExecGpuScanInitWorker(CustomScanState *node,
 					  shm_toc *toc,
 					  void *coordinate)
 {
+	GpuScanState   *gss = (GpuScanState *) node;
 	ParallelHeapScanDesc pscan;
 
-	pscan = shm_toc_lookup(toc, node->ss.ps.plan->plan_node_id);
+	pscan = shm_toc_lookup(toc, gss->gts.css.ss.ps.plan->plan_node_id);
 	node->ss.ss_currentScanDesc =
-		heap_beginscan_parallel(node->ss.ss_currentRelation, pscan);
+		heap_beginscan_parallel(gss->gts.css.ss.ss_currentRelation, pscan);
+	/* Try to choose NVMe-Strom, if available */
+	PDS_init_heapscan_state(&gss->gts, gss->nrows_per_block);
 }
 
 /*
