@@ -1052,10 +1052,10 @@ gpuservAcceptConnection(void)
 }
 
 /*
- * gpuservRecvCommands
+ * gpuservRecvCommands - returns number of the commands received
  */
-static bool
-gpuservRecvCommands(GpuContext_v2 *gcontext)
+static int
+gpuservRecvCommands(GpuContext_v2 *gcontext, bool *p_peer_sock_closed)
 {
 	struct msghdr	msg;
 	struct iovec	iov;
@@ -1064,6 +1064,7 @@ gpuservRecvCommands(GpuContext_v2 *gcontext)
 	char			cmsgbuf[CMSG_SPACE(sizeof(int))];
 	char		   *pos;
 	GpuServCommand *cmd;
+	int				num_received = 0;
 	int				recvmsg_flags = 0;
 	int				peer_fdesc = -1;
 	size_t			unitsz;
@@ -1072,7 +1073,10 @@ gpuservRecvCommands(GpuContext_v2 *gcontext)
 
 	/* socket already closed? */
 	if (gcontext->sockfd == PGINVALID_SOCKET)
+	{
+		*p_peer_sock_closed = true;
 		return false;
+	}
 
 	PG_TRY();
 	{
@@ -1113,7 +1117,9 @@ gpuservRecvCommands(GpuContext_v2 *gcontext)
 				{
 					if (remain > 0)
 						elog(ERROR, "Bug? GpuServCommand message corruption");
-					return false;	/* likely, EOF of the socket */
+					/* Likely, the peer socket was closed */
+					*p_peer_sock_closed = true;
+					break;
 				}
 				remain += retval;
 
@@ -1178,6 +1184,7 @@ gpuservRecvCommands(GpuContext_v2 *gcontext)
 					dlist_push_tail(&gts->ready_tasks, &gtask->chain);
 					gts->num_ready_tasks++;
 				}
+				num_received++;
 			}
 			else if (cmd->command == GPUSERV_CMD_ERROR)
 			{
@@ -1242,7 +1249,7 @@ gpuservRecvCommands(GpuContext_v2 *gcontext)
 	}
 	PG_END_TRY();
 
-	return true;	/* one or more commands were received */
+	return num_received;
 }
 
 /*
@@ -1314,20 +1321,19 @@ gpuservRecvGpuTasks(GpuContext_v2 *gcontext, long timeout)
 					 errmsg("Urgent termination by postmaster dead")));
 		if (ev & WL_SOCKET_READABLE)
 		{
-			if (gpuservRecvCommands(gcontext))
+			bool		peer_sock_closed = false;
+
+			if (gpuservRecvCommands(gcontext, &peer_sock_closed) > 0)
 				retval = true;
-			else
+			if (peer_sock_closed &&
+				gcontext->sockfd != PGINVALID_SOCKET)
 			{
-				/* peer connection closed */
-				if (gcontext->sockfd != PGINVALID_SOCKET)
-				{
-					if (close(gcontext->sockfd) != 0)
-						elog(WARNING, "failed on close(%d) socket: %m",
-							 gcontext->sockfd);
-					else
-						elog(NOTICE, "sockfd=%d closed", gcontext->sockfd);
-					gcontext->sockfd = PGINVALID_SOCKET;
-				}
+				if (close(gcontext->sockfd) != 0)
+					elog(WARNING, "failed on close(%d) socket: %m",
+						 gcontext->sockfd);
+				else
+					elog(NOTICE, "sockfd=%d closed", gcontext->sockfd);
+				gcontext->sockfd = PGINVALID_SOCKET;
 			}
 			break;
 		}
@@ -1424,10 +1430,11 @@ gpuserv_session_main(void)
 				else
 				{
 					GpuContext_v2  *gcontext = event.user_data;
+					bool			peer_sock_closed = false;
 
-					if (!gpuservRecvCommands(gcontext))
+					gpuservRecvCommands(gcontext, &peer_sock_closed);
+					if (peer_sock_closed)
 					{
-						/* peer connection closed */
 						if (gcontext->sockfd != PGINVALID_SOCKET)
 						{
 							if (close(gcontext->sockfd) != 0)
