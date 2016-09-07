@@ -351,7 +351,7 @@ link_cuda_libraries(char *ptx_image, size_t ptx_length, cl_uint extra_flags,
 	 * of pgstrom_baseline_cuda_capability.
 	 */
 	jit_options[jit_index] = CU_JIT_TARGET;
-	jit_option_values[jit_index] = (void *)pgstrom_baseline_cuda_capability();
+	jit_option_values[jit_index] = (void *)devComputeCapability;
 	jit_index++;
 
 #ifdef PGSTROM_DEBUG
@@ -549,7 +549,7 @@ __build_cuda_program(program_cache_entry *entry)
 	options[opt_index++] = "-I " CUDA_INCLUDE_PATH;
 	options[opt_index++] =
 		psprintf("--gpu-architecture=compute_%lu",
-				 pgstrom_baseline_cuda_capability());
+				 devComputeCapability);
 #ifdef PGSTROM_DEBUG
 	options[opt_index++] = "--device-debug";
 	options[opt_index++] = "--generate-line-info";
@@ -1266,7 +1266,7 @@ pgstrom_load_cuda_program(ProgramId program_id, long timeout)
 
 
 
-#if 1
+#if 0
 /* The legacy interface; to be revised at v9.6 support */
 static CUmodule *
 __load_cuda_program(GpuContext *gcontext, ProgramId program_id)
@@ -1405,7 +1405,6 @@ plcuda_load_cuda_program_legacy(GpuContext *gcontext,
 	 */
 	return __load_cuda_program(gcontext, program_id);
 }
-#endif
 
 /*
  * pgstrom_assign_cuda_program
@@ -1429,6 +1428,7 @@ pgstrom_assign_cuda_program(GpuTaskState *gts,
 	gts->kern_define = kern_define;
 	gts->extra_flags = extra_flags;
 }
+#endif
 
 static void
 pgstrom_startup_cuda_program(void)

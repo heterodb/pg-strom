@@ -26,6 +26,7 @@
 /* public variable declaration */
 DevAttributes  *devAttrs = NULL;
 cl_int			numDevAttrs = 0;
+cl_ulong		devComputeCapability = UINT_MAX;
 
 /* catalog of device attributes */
 typedef enum {
@@ -226,6 +227,7 @@ collect_gpu_device_attributes(void)
 	StringInfoData buf;
 	CUdevice	dev;
 	CUresult	rc;
+	cl_uint		compute_capability;
 	int			count;
 	int			i, j, k;
 
@@ -296,7 +298,10 @@ collect_gpu_device_attributes(void)
 				 dattrs->COMPUTE_CAPABILITY_MINOR);
 			continue;
 		}
-
+		compute_capability = (dattrs->COMPUTE_CAPABILITY_MAJOR * 10 +
+								  dattrs->COMPUTE_CAPABILITY_MINOR);
+		devComputeCapability = Min(devComputeCapability,
+								   compute_capability);
 		/*
 		 * Number of CUDA cores (determined by CC)
 		 */

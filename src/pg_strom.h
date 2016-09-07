@@ -205,6 +205,10 @@ struct GpuTaskState_v2
 	cl_uint			num_ready_tasks;/* length of the list above */
 	pgstrom_perfmon	pfm;			/* performance monitor */
 };
+#define GTS_GET_SCAN_TUPDESC(gts)				\
+	(((GpuTaskState_v2 *)(gts))->css.ss.ss_ScanTupleSlot->tts_tupleDescriptor)
+#define GTS_GET_RESULT_TUPDESC(gts)				\
+	(((GpuTaskState_v2 *)(gts))->css.ss.ps.ps_ResultTupleSlot->tts_tupleDescriptor)
 
 /*
  * GpuTask
@@ -235,7 +239,7 @@ typedef struct GpuTask_v2 GpuTask_v2;
 
 
 
-#if 1
+#if 0
 /*
  *
  *
@@ -327,10 +331,6 @@ struct GpuTaskState
 	/* performance counter  */
 	pgstrom_perfmon	pfm;
 };
-#define GTS_GET_SCAN_TUPDESC(gts)				\
-	(((GpuTaskState *)(gts))->css.ss.ss_ScanTupleSlot->tts_tupleDescriptor)
-#define GTS_GET_RESULT_TUPDESC(gts)				\
-  (((GpuTaskState *)(gts))->css.ss.ps.ps_ResultTupleSlot->tts_tupleDescriptor)
 
 struct GpuTask
 {
@@ -346,7 +346,7 @@ struct GpuTask
 	CUmodule		cuda_module;	/* just reference, no cleanup needed */
 	kern_errorbuf	kerror;		/* error status on CUDA kernel execution */
 };
-#endif
+#endif		/* legacy GpuTask */
 
 /*
  * Type declarations for code generator
@@ -512,7 +512,7 @@ extern void largest_workgroup_size(size_t *p_grid_size,
 
 
 
-#if 1
+#if 0
 /*
  * cuda_mmgr.c
  */
@@ -623,7 +623,7 @@ extern bool pgstrom_wait_cuda_program(ProgramId program_id, long timeout);
 extern ProgramId pgstrom_try_build_cuda_program(void);
 
 extern const char *pgstrom_cuda_source_file(ProgramId program_id);
-#if 1
+#if 0
 extern bool pgstrom_load_cuda_program_legacy(GpuTaskState *gts,
 											 bool is_preload);
 extern CUmodule *plcuda_load_cuda_program_legacy(GpuContext *gcontext,
@@ -685,8 +685,6 @@ extern Size pgstrom_chunk_size(void);
 extern Size pgstrom_chunk_size_limit(void);
 extern bool pgstrom_bulk_exec_supported(const PlanState *planstate);
 extern cl_uint estimate_num_chunks(Path *pathnode);
-extern pgstrom_data_store *BulkExecProcNode(GpuTaskState *gts,
-											 size_t chunk_size);
 extern bool pgstrom_fetch_data_store(TupleTableSlot *slot,
 									 pgstrom_data_store *pds,
 									 size_t row_index,
@@ -808,7 +806,7 @@ extern void pgstrom_init_gpuscan(void);
 extern bool pgstrom_path_is_gpujoin(Path *pathnode);
 extern bool pgstrom_plan_is_gpujoin(const Plan *plannode);
 extern void pgstrom_post_planner_gpujoin(PlannedStmt *pstmt, Plan **p_plan);
-extern void assign_gpujoin_session_info(StringInfo buf, GpuTaskState *gts);
+extern void assign_gpujoin_session_info(StringInfo buf, GpuTaskState_v2 *gts);
 extern void	pgstrom_init_gpujoin(void);
 
 /*
@@ -823,7 +821,7 @@ extern void pgstrom_init_gpupreagg(void);
  */
 extern void pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan);
 extern bool pgstrom_plan_is_gpusort(const Plan *plan);
-extern void assign_gpusort_session_info(StringInfo buf, GpuTaskState *gts);
+extern void assign_gpusort_session_info(StringInfo buf, GpuTaskState_v2 *gts);
 extern void pgstrom_init_gpusort(void);
 
 /*
@@ -912,17 +910,20 @@ extern void pgstrom_explain_expression(List *expr_list, const char *qlabel,
 									   List *ancestors, ExplainState *es,
 									   bool force_prefix,
 									   bool convert_to_and);
+#if 0
 extern void pgstrom_explain_outer_bulkexec(GpuTaskState *gts,
 										   List *deparse_context,
 										   List *ancestors,
 										   ExplainState *es);
+#endif
 extern void show_scan_qual(List *qual, const char *qlabel,
 						   PlanState *planstate, List *ancestors,
 						   ExplainState *es);
 extern void show_instrumentation_count(const char *qlabel, int which,
 									   PlanState *planstate, ExplainState *es);
-extern void pgstrom_init_perfmon(GpuTaskState *gts);
-extern void pgstrom_explain_gputaskstate(GpuTaskState *gts, ExplainState *es);
+//extern void pgstrom_init_perfmon(GpuTaskState *gts);
+//extern void pgstrom_explain_gputaskstate(GpuTaskState *gts,
+//										 ExplainState *es);
 
 /*
  * Device Code generated from cuda_*.h

@@ -211,10 +211,9 @@ _PG_init(void)
 	pgstrom_init_gpu_server();
 	pgstrom_init_nvme_strom();
 
-	/* initialization of CUDA related stuff */
-	pgstrom_init_cuda_control();
+	/* init NVRTC (run-time compiler) stuff */
 	pgstrom_init_cuda_program();
-	/* initialization of data store support */
+	/* init data-store stuff */
 	pgstrom_init_datastore();
 
 	/* registration of custom-scan providers */
@@ -335,6 +334,7 @@ pgstrom_explain_expression(List *expr_list, const char *qlabel,
 	ExplainPropertyText(qlabel, exprstr, es);
 }
 
+#if 0
 void
 pgstrom_explain_outer_bulkexec(GpuTaskState *gts,
 							   List *deparse_context,
@@ -563,6 +563,7 @@ pgstrom_explain_outer_bulkexec(GpuTaskState *gts,
 	if (es->format == EXPLAIN_FORMAT_TEXT)
 		ExplainPropertyText("Outer Scan", str.data, es);
 }
+#endif
 
 void
 show_scan_qual(List *qual, const char *qlabel,
@@ -625,6 +626,7 @@ show_instrumentation_count(const char *qlabel, int which,
 	}
 }
 
+#if 0
 void
 pgstrom_init_perfmon(GpuTaskState *gts)
 {
@@ -911,4 +913,5 @@ pgstrom_explain_gputaskstate(GpuTaskState *gts, ExplainState *es)
 	if (es->analyze && gts->pfm.enabled)
 		pgstrom_explain_perfmon(gts, es);
 }
+#endif
 #endif

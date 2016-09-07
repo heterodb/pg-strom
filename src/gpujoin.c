@@ -2707,7 +2707,7 @@ gpujoin_create_scan_state(CustomScan *node)
 }
 
 static void
-gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
+ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 {
 	GpuContext	   *gcontext = NULL;
 	GpuJoinState   *gjs = (GpuJoinState *) node;
@@ -3065,7 +3065,7 @@ gpujoin_begin(CustomScanState *node, EState *estate, int eflags)
 }
 
 static TupleTableSlot *
-gpujoin_exec(CustomScanState *node)
+ExecGpuJoin(CustomScanState *node)
 {
 	return ExecScan(&node->ss,
 					(ExecScanAccessMtd) pgstrom_exec_gputask,
@@ -3073,7 +3073,7 @@ gpujoin_exec(CustomScanState *node)
 }
 
 static void
-gpujoin_end(CustomScanState *node)
+ExecEndGpuJoin(CustomScanState *node)
 {
 	GpuJoinState   *gjs = (GpuJoinState *) node;
 	int				i;
@@ -3099,7 +3099,7 @@ gpujoin_end(CustomScanState *node)
 }
 
 static void
-gpujoin_rescan(CustomScanState *node)
+ExecReScanGpuJoin(CustomScanState *node)
 {
 	GpuJoinState   *gjs = (GpuJoinState *) node;
 	bool			keep_inners = true;
@@ -3161,7 +3161,7 @@ gpujoin_rescan(CustomScanState *node)
 }
 
 static void
-gpujoin_explain(CustomScanState *node, List *ancestors, ExplainState *es)
+ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 {
 	GpuJoinState   *gjs = (GpuJoinState *) node;
 	CustomScan	   *cscan = (CustomScan *) node->ss.ps.plan;
@@ -7105,13 +7105,16 @@ pgstrom_init_gpujoin(void)
 
 	/* setup exec methods */
 	gpujoin_exec_methods.CustomName				= "GpuJoin";
-	gpujoin_exec_methods.BeginCustomScan		= gpujoin_begin;
-	gpujoin_exec_methods.ExecCustomScan			= gpujoin_exec;
-	gpujoin_exec_methods.EndCustomScan			= gpujoin_end;
-	gpujoin_exec_methods.ReScanCustomScan		= gpujoin_rescan;
+	gpujoin_exec_methods.BeginCustomScan		= ExecInitGpuJoin;
+	gpujoin_exec_methods.ExecCustomScan			= ExecGpuJoin;
+	gpujoin_exec_methods.EndCustomScan			= ExecEndGpuJoin;
+	gpujoin_exec_methods.ReScanCustomScan		= ExecReScanGpuJoin;
 	gpujoin_exec_methods.MarkPosCustomScan		= NULL;
 	gpujoin_exec_methods.RestrPosCustomScan		= NULL;
-	gpujoin_exec_methods.ExplainCustomScan		= gpujoin_explain;
+	gpujoin_exec_methods.EstimateDSMCustomScan  = ExecGpuJoinEstimateDSM;
+	gpujoin_exec_methods.InitializeDSMCustomScan = ExecGpuJoinInitDSM;
+	gpujoin_exec_methods.InitializeWorkerCustomScan = ExecGpuJoinInitWorker;
+	gpujoin_exec_methods.ExplainCustomScan		= ExplainGpuJoin;
 
 	/* hook registration */
 	set_join_pathlist_next = set_join_pathlist_hook;

@@ -115,6 +115,7 @@ typedef struct DevAttributes
 
 extern DevAttributes   *devAttrs;
 extern cl_int			numDevAttrs;
+extern cl_ulong			devComputeCapability;
 
 extern void pgstrom_init_gpu_device(void);
 extern Datum pgstrom_device_info(PG_FUNCTION_ARGS);

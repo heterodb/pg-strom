@@ -123,7 +123,7 @@ pgstrom_bulk_exec_supported(const PlanState *planstate)
 		//      pgstrom_plan_is_gpupreagg(planstate->plan) ||
 //        pgstrom_plan_is_gpusort(planstate->plan))
 	{
-		GpuTaskState   *gts = (GpuTaskState *) planstate;
+		GpuTaskState_v2	   *gts = (GpuTaskState_v2 *) planstate;
 
 		if (gts->cb_bulk_exec != NULL)
 			return true;
@@ -165,6 +165,9 @@ estimate_num_chunks(Path *pathnode)
 	return num_chunks;
 }
 
+#if 0
+// use pgstromBulkExecGpuTaskState instead
+
 /*
  * BulkExecProcNode
  *
@@ -201,6 +204,7 @@ BulkExecProcNode(GpuTaskState *gts, size_t chunk_size)
 	}
 	elog(ERROR, "Bug? exec_chunk callback was not implemented");
 }
+#endif
 
 bool
 kern_fetch_data_store(TupleTableSlot *slot,
