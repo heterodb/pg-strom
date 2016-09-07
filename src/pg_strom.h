@@ -772,11 +772,6 @@ extern void codegen_gpuscan_quals(StringInfo kern,
 								  Index scanrelid,
 								  List *dev_quals);
 extern bool add_unique_expression(Expr *expr, List **p_tlist, bool resjunk);
-#if 0
-extern bool pgstrom_pullup_outer_scan(Plan *plannode,
-									  bool allow_expression,
-									  List **p_outer_qual);
-#endif
 extern bool pgstrom_path_is_gpuscan(const Path *path);
 extern bool pgstrom_plan_is_gpuscan(const Plan *plan);
 
