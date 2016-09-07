@@ -1729,7 +1729,7 @@ pgstrom_init_gpu_server(void)
 				 "PG-Strom GPU/CUDA Server [%d]", i);
 		worker.bgw_flags = BGWORKER_SHMEM_ACCESS;
 		worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
-		worker.bgw_restart_time = 4;
+		worker.bgw_restart_time = 1;
 		worker.bgw_main = gpuserv_bgworker_main;
 		worker.bgw_main_arg = i;
 		RegisterBackgroundWorker(&worker);

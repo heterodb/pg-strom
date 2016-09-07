@@ -2043,7 +2043,8 @@ gpuscan_create_task(GpuScanState *gss,
 			  STROMALIGN(offsetof(kern_resultbuf,
 								  results[pds_dst ? 0 : ntuples])));
 	gscan = dmaBufferAlloc(gcontext, length);
-	memset(gscan, 0, offsetof(GpuScanTask, kern));
+	memset(gscan, 0, (offsetof(GpuScanTask, kern) +
+					  offsetof(kern_gpuscan, kparams)));
 	pgstromInitGpuTask(&gss->gts, &gscan->task);
 	gscan->task.file_desc = file_desc;
 	gscan->dev_projection = gss->dev_projection;
@@ -2719,6 +2720,13 @@ int
 gpuscan_complete_task(GpuTask_v2 *gtask)
 {
 	GpuScanTask	   *gscan = (GpuScanTask *) gtask;
+
+	/* raise any kernel internal error */
+	Assert(gtask->kerror.errcode == StromError_Success ||
+		   gtask->kerror.errcode == StromError_CpuReCheck);
+	if (gtask->kerror.errcode != StromError_Success)
+		elog(ERROR, "GpuScan kernel internal error: %s",
+			 errorTextKernel(&gtask->kerror));
 
 	PERFMON_EVENT_ELAPSED(gscan, time_dma_send,
 						  ev_dma_send_start,
