@@ -219,6 +219,8 @@ dmaBufferCreateSegment(dmaBufferSegment *seg)
 	close(fdesc);
 
 	/* successfully mapped, init this segment */
+	for (mclass=0; mclass <= DMABUF_CHUNKSZ_MAX_BIT; mclass++)
+		dlist_init(&seg->free_chunks[mclass]);
 	head_ptr = (char *)seg->mmap_ptr;
 	tail_ptr = (char *)seg->mmap_ptr + dma_segment_size;
 	mclass = DMABUF_CHUNKSZ_MAX_BIT;
