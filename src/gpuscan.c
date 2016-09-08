@@ -94,6 +94,7 @@ typedef struct
 {
 	GpuTask_v2			task;
 	bool				dev_projection;		/* true, if device projection */
+	bool				with_nvme_strom;
 	/* CUDA resources (only server side) */
 	CUfunction			kern_gpuscan_main;
 	CUdeviceptr			m_gpuscan;
@@ -1964,6 +1965,8 @@ gpuscan_create_task(GpuScanState *gss,
 	pgstromInitGpuTask(&gss->gts, &gscan->task);
 	gscan->task.file_desc = file_desc;
 	gscan->dev_projection = gss->dev_projection;
+	gscan->with_nvme_strom = (pds_src->kds.format == KDS_FORMAT_BLOCK &&
+							  pds_src->nblocks_uncached > 0);
 	gscan->pds_src = pds_src;
 	gscan->pds_dst = pds_dst;
 
@@ -2438,8 +2441,6 @@ gpuscan_info_read(ExtensibleNode *node)
 static void
 gpuscan_cleanup_cuda_resources(GpuScanTask *gscan)
 {
-	pgstrom_data_store *pds_src = gscan->pds_src;
-	bool		with_nvme_strom;
 	CUresult	rc;
 
 	PERFMON_EVENT_DESTROY(gscan, ev_dma_send_start);
@@ -2448,8 +2449,6 @@ gpuscan_cleanup_cuda_resources(GpuScanTask *gscan)
 	PERFMON_EVENT_DESTROY(gscan, ev_dma_recv_start);
 	PERFMON_EVENT_DESTROY(gscan, ev_dma_recv_stop);
 
-	with_nvme_strom = (pds_src->kds.format == KDS_FORMAT_BLOCK &&
-					   pds_src->nblocks_uncached > 0);
 	if (gscan->m_gpuscan)
 	{
 		rc = gpuMemFree_v2(gscan->task.gcontext, gscan->m_gpuscan);
@@ -2457,7 +2456,7 @@ gpuscan_cleanup_cuda_resources(GpuScanTask *gscan)
 			elog(WARNING, "failed on gpuMemFree: %s", errorText(rc));
 	}
 
-	if (with_nvme_strom && gscan->m_kds_src)
+	if (gscan->with_nvme_strom && gscan->m_kds_src)
 	{
 		rc = gpuMemFreeIOMap(gscan->task.gcontext, gscan->m_kds_src);
 		if (rc != CUDA_SUCCESS)
@@ -2523,7 +2522,6 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 	void		   *kern_args[5];
 	size_t			offset;
 	size_t			length;
-	bool			with_nvme_strom;
 	CUresult		rc;
 
 	/*
@@ -2538,10 +2536,8 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 	/*
 	 * Allocation of device memory
 	 */
-	with_nvme_strom = (pds_src->kds.format == KDS_FORMAT_BLOCK &&
-					   pds_src->nblocks_uncached > 0);
 	length = GPUMEMALIGN(KERN_GPUSCAN_LENGTH(&gscan->kern));
-	if (!with_nvme_strom)
+	if (!gscan->with_nvme_strom)
 		length += GPUMEMALIGN(pds_src->kds.length);
 	if (pds_dst)
 		length += GPUMEMALIGN(pds_dst->kds.length);
@@ -2558,7 +2554,7 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 	 * NVMe-Strom requires the DMA destination address is mapped to
 	 * PCI BAR area.
 	 */
-	if (with_nvme_strom)
+	if (gscan->with_nvme_strom)
 	{
 		rc = gpuMemAllocIOMap(gtask->gcontext,
 							  &gscan->m_kds_src,
@@ -2611,7 +2607,7 @@ gpuscan_process_task(GpuTask_v2 *gtask,
     gscan->num_dma_send++;
 
 	/*  kern_data_store *kds_src */
-	if (pds_src->kds.format == KDS_FORMAT_ROW || !with_nvme_strom)
+	if (pds_src->kds.format == KDS_FORMAT_ROW || !gscan->with_nvme_strom)
 	{
 		length = pds_src->kds.length;
 		rc = cuMemcpyHtoDAsync(gscan->m_kds_src,
