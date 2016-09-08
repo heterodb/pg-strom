@@ -459,7 +459,7 @@ extern GpuContext_v2 *AttachGpuContext(pgsocket sockfd,
 									   cl_int device_id);
 extern GpuContext_v2 *GetGpuContext(GpuContext_v2 *gcontext);
 extern bool PutGpuContext(GpuContext_v2 *gcontext);
-extern void PutSharedGpuContext(SharedGpuContext *shgcon);
+extern bool ForcePutGpuContext(GpuContext_v2 *gcontext);
 
 extern void	trackFileDesc(GpuContext_v2 *gcontext, int fdesc);
 extern int	closeFileDesc(GpuContext_v2 *gcontext, int fdesc);

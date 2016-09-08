@@ -476,7 +476,12 @@ ReleaseLocalResources(GpuContext_v2 *gcontext, bool normal_exit)
 					if (normal_exit)
 						elog(WARNING, "GPU memory %p likely leaked",
 							 (void *)tracker->u.devptr);
-
+					/*
+					 * normal device memory should be already released
+					 * once CUDA context is destroyed
+					 */
+					if (!gpuserv_cuda_context)
+						break;
 					rc = cuMemFree(tracker->u.devptr);
 					if (rc != CUDA_SUCCESS)
 						elog(WARNING, "failed on cuMemFree(%p): %s",
@@ -486,7 +491,6 @@ ReleaseLocalResources(GpuContext_v2 *gcontext, bool normal_exit)
 					if (normal_exit)
 						elog(WARNING, "CUDA Program ID=%lu is likely leaked",
 							 tracker->u.program_id);
-
 					pgstrom_put_cuda_program(NULL, tracker->u.program_id);
 					break;
 				case RESTRACK_CLASS__IOMAPMEMORY:
@@ -713,7 +717,7 @@ GetGpuContext(GpuContext_v2 *gcontext)
 /*
  * PutSharedGpuContext - detach SharedGpuContext
  */
-void
+static void
 PutSharedGpuContext(SharedGpuContext *shgcon)
 {
 	SpinLockAcquire(&shgcon->lock);
@@ -772,6 +776,37 @@ PutGpuContext(GpuContext_v2 *gcontext)
 }
 
 /*
+ * ForcePutGpuContext
+ *
+ * It detach GpuContext and release relevant resources regardless of
+ * the reference count. Although it is fundamentally a danger operation,
+ * we may need to keep the status of shared resource correct.
+ * We intend this routine is called only when the final error cleanup
+ * just before the process exit.
+ */
+bool
+ForcePutGpuContext(GpuContext_v2 *gcontext)
+{
+	bool	is_last_one = (gcontext->refcnt < 2 ? true : false);
+
+	dlist_delete(&gcontext->chain);
+	ReleaseLocalResources(gcontext, false);
+	PutSharedGpuContext(gcontext->shgcon);
+	if (gcontext->sockfd != PGINVALID_SOCKET)
+	{
+		if (close(gcontext->sockfd) != 0)
+			elog(WARNING, "failed on close socket(%d): %m",
+				 gcontext->sockfd);
+		else
+			elog(DEBUG2, "socket %d was closed", gcontext->sockfd);
+	}
+	memset(gcontext, 0, sizeof(GpuContext_v2));
+	dlist_push_head(&inactiveGpuContextList, &gcontext->chain);
+
+	return is_last_one;
+}
+
+/*
  * gpucontext_cleanup_callback - cleanup callback when drop of ResourceOwner
  */
 static void
@@ -824,7 +859,7 @@ gpucontext_proc_exit_cleanup(int code, Datum arg)
 
 		elog(WARNING, "GpuContext (ID=%u) remained at pid=%u, cleanup",
 			 gcontext->shgcon->context_id, MyProcPid);
-		PutSharedGpuContext(gcontext->shgcon);
+		ForcePutGpuContext(gcontext);
 	}
 }
 

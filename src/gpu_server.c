@@ -1588,6 +1588,7 @@ gpuserv_bgworker_main(Datum __server_id)
 		rc = cuCtxDestroy(gpuserv_cuda_context);
 		if (rc != CUDA_SUCCESS)
 			elog(FATAL, "failed on cuCtxDestroy: %s", errorText(rc));
+		gpuserv_cuda_context = NULL;
 
 		/*
 		 * Shared portion of GpuContext has to be detached regardless of
@@ -1599,7 +1600,7 @@ gpuserv_bgworker_main(Datum __server_id)
 		{
 			GpuContext_v2  *gcontext = session_events[i].user_data;
 
-			PutSharedGpuContext(gcontext->shgcon);
+			ForcePutGpuContext(gcontext);
 		}
 		PG_RE_THROW();
 	}
