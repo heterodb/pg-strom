@@ -378,21 +378,10 @@ dmaBufferAttachSegmentOnDemand(int signum, siginfo_t *siginfo, void *unused)
 					goto normal_crash;
 				}
 
-				/*
-				 * MEMO: According to the simple test program at:
-				 *   https://devtalk.nvidia.com/default/topic/942684/
-				 * The virtual address range registered by cuMemHostRegister()
-				 * is valid even if host memory is unmapped or remapped.
-				 * However, we are not certain whether it is expected and
-				 * guaranteed behavior, or a potential bug; that kicks
-				 * zero-copy DMA on the memory region where it can be
-				 * swapped out.
-				 * So, right now, we enforce to unregister this segment
-				 * once, prior to the registration next time.
-				 */
+#if NOT_USED
 				if (l_map->cuda_status == dmaBufCudaStatusRegistered)
 					l_map->cuda_status = dmaBufCudaStatusRegisteredButInvalid;
-
+#endif
 				/* unmap the old/invalid segment */
 				if (munmap(seg->mmap_ptr, dma_segment_size) != 0)
 				{
@@ -436,7 +425,7 @@ dmaBufferAttachSegmentOnDemand(int signum, siginfo_t *siginfo, void *unused)
 			/* ok, this segment is successfully mapped */
 			l_map->revision = revision;
 			l_map->is_attached = true;
-#if 0
+#if NOT_USED
 			fprintf(stderr, "%s: pid=%u got %s, then attached shared memory "
 					"segment (id=%u at %p, rev=%u)\n",
 					__FUNCTION__, MyProcPid, strsignal(signum),
@@ -444,12 +433,37 @@ dmaBufferAttachSegmentOnDemand(int signum, siginfo_t *siginfo, void *unused)
 #endif
 			PG_SETMASK(&UnBlockSig);
 #if 1
-			if (IsGpuServerProcess())
+			/*
+			 * MEMO: According to the simple test program at:
+			 *   https://devtalk.nvidia.com/default/topic/942684/
+			 * implies the virtual address range once registered by
+			 * cuMemHostRegister() is valid even if this host memory
+			 * range is unmapped or remapped.
+			 * However, we are not certain whether it is expected and
+			 * guaranteed behavior.
+			 * In addition, CUDA documentation introduces nothing about
+			 * availability of CUDA driver APIs within signal handler.
+			 *
+			 * Right now, we don't unregister the mapped memory region
+			 * and we registers the memory region in signal handler.
+			 * However, it may have a risk to cause undocumented behavior
+			 * somewhere. So, we may need to use a state of
+			 * dmaBufCudaStatusRegisteredButInvalid to register the
+			 * host memory region later, if our current implementation
+			 * is problematic.
+			 */
+			if (IsGpuServerProcess() &&
+				l_map->cuda_status != dmaBufCudaStatusRegistered)
 			{
-				/*
-				 * Maybe, register host memory here, but not certain
-				 * whether we can use this API inside signal handler.
-				 */
+				CUresult	rc;
+
+				rc = cuMemHostRegister(seg->mmap_ptr, dma_segment_size,
+									   CU_MEMHOSTREGISTER_PORTABLE);
+				if (rc == CUDA_SUCCESS)
+					l_map->cuda_status = dmaBufCudaStatusRegistered;
+				else
+					fprintf(stderr, "failed on cuMemHostRegister: %s\n",
+							errorText(rc));
 			}
 #endif
 			errno = save_errno;
