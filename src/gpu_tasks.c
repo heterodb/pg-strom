@@ -172,15 +172,6 @@ construct_kern_parambuf(List *used_params, ExprContext *econtext)
 	return kparams;
 }
 
-
-
-
-
-
-
-
-
-
 /*
  * pgstromInitGpuTaskState
  */
@@ -203,27 +194,15 @@ pgstromInitGpuTaskState(GpuTaskState_v2 *gts,
 
 	gts->outer_bulk_exec = false;
 	InstrInit(&gts->outer_instrument, estate->es_instrument);
-#if 0
-	if (gts->css.ss.ss_currentRelation)
-	{
-		Relation		scan_rel = gts->css.ss.ss_currentRelation;
-		HeapScanDesc	scan_desc = heap_beginscan(scan_rel,
-												   estate->es_snapshot,
-												   0, NULL);
-		gts->css.ss.ss_currentScanDesc = scan_desc;
-
-		/*
-		 * Try to choose NVMe-Strom, if relation is deployed on the supported
-		 * tablespace and expected total i/o size is enough large than cache-
-		 * only scan.
-		 */
-		PDS_init_heapscan_state(gts, nrows_per_block);
-	}
-#endif
 	gts->scan_overflow = NULL;
 
-	/* callbacks shall be set by the caller */
+	/*
+	 * NOTE: initialization of HeapScanDesc was moved to the first try of
+	 * ExecGpuXXX() call to support CPU parallel. A local HeapScanDesc shall
+	 * be setup only when it is not responsible to partial read.
+	 */
 
+	/* callbacks shall be set by the caller */
 	dlist_init(&gts->ready_tasks);
 	gts->num_ready_tasks = 0;
 
@@ -544,7 +523,6 @@ pgstromRescanGpuTaskState(GpuTaskState_v2 *gts)
 	/*
 	 * Once revision number of GTS is changed, any asynchronous GpuTasks
 	 * are discarded when 
-	 *
 	 *
 	 */
 	gts->revision++;

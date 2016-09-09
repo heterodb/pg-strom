@@ -461,8 +461,6 @@ extern GpuContext_v2 *GetGpuContext(GpuContext_v2 *gcontext);
 extern bool PutGpuContext(GpuContext_v2 *gcontext);
 extern bool ForcePutGpuContext(GpuContext_v2 *gcontext);
 
-extern void	trackFileDesc(GpuContext_v2 *gcontext, int fdesc);
-extern int	closeFileDesc(GpuContext_v2 *gcontext, int fdesc);
 extern CUresult	gpuMemAlloc_v2(GpuContext_v2 *gcontext,
 							   CUdeviceptr *p_devptr, size_t bytesize);
 extern CUresult	gpuMemFree_v2(GpuContext_v2 *gcontext, CUdeviceptr devptr);

@@ -64,7 +64,6 @@ typedef struct NVMEScanState
 	struct {
 		File		vfd;
 		BlockNumber	segno;
-		bool		flock_is_ready;
 	} mdfd[FLEXIBLE_ARRAY_MEMBER];
 } NVMEScanState;
 
@@ -164,47 +163,6 @@ estimate_num_chunks(Path *pathnode)
 
 	return num_chunks;
 }
-
-#if 0
-// use pgstromBulkExecGpuTaskState instead
-
-/*
- * BulkExecProcNode
- *
- * It runs the underlying sub-plan managed by PG-Strom in bulk-execution
- * mode. Caller can expect the data-store shall be filled up by the rows
- * read from the sub-plan.
- */
-pgstrom_data_store *
-BulkExecProcNode(GpuTaskState *gts, size_t chunk_size)
-{
-	PlanState		   *plannode = &gts->css.ss.ps;
-	pgstrom_data_store *pds;
-
-	CHECK_FOR_INTERRUPTS();
-
-	if (plannode->chgParam != NULL)			/* If something changed, */
-		ExecReScan(&gts->css.ss.ps);		/* let ReScan handle this */
-
-	Assert(IsA(gts, CustomScanState));		/* rough checks */
-	if (gts->cb_bulk_exec)
-	{
-		/* must provide our own instrumentation support */
-		if (plannode->instrument)
-			InstrStartNode(plannode->instrument);
-		/* execution per chunk */
-		pds = gts->cb_bulk_exec(gts, chunk_size);
-
-		/* must provide our own instrumentation support */
-		if (plannode->instrument)
-			InstrStopNode(plannode->instrument,
-						  !pds ? 0.0 : (double)pds->kds.nitems);
-		Assert(!pds || pds->kds.nitems > 0);
-		return pds;
-	}
-	elog(ERROR, "Bug? exec_chunk callback was not implemented");
-}
-#endif
 
 bool
 kern_fetch_data_store(TupleTableSlot *slot,
@@ -679,9 +637,8 @@ PDS_init_heapscan_state(GpuTaskState_v2 *gts,
 			vec->mdfd_segno >= nr_segs)
 			elog(ERROR, "Bug? MdfdVec {vfd=%d segno=%u} is out of range",
 				 vec->mdfd_vfd, vec->mdfd_segno);
-		nvme_sstate->mdfd[vec->mdfd_segno].segno	= vec->mdfd_segno;
-		nvme_sstate->mdfd[vec->mdfd_segno].vfd	= vec->mdfd_vfd;
-		nvme_sstate->mdfd[vec->mdfd_segno].flock_is_ready = false;
+		nvme_sstate->mdfd[vec->mdfd_segno].segno = vec->mdfd_segno;
+		nvme_sstate->mdfd[vec->mdfd_segno].vfd   = vec->mdfd_vfd;
 		vec = vec->mdfd_chain;
 	}
 
@@ -740,39 +697,6 @@ __exec_heapscan_block(pgstrom_data_store *pds,
 	 */
 	if (*p_filedesc >= 0 && *p_filedesc != filedesc)
 		return false;
-
-	/*
-	 * Get a mandatory file lock
-	 */
-	if (!nvme_sstate->mdfd[segno].flock_is_ready)
-	{
-		struct stat		st_buf;
-
-		/* Is mandatory lock available on this file? */
-		if (fstat(filedesc, &st_buf) != 0)
-			elog(ERROR, "failed on fstat: %m");
-		if ((st_buf.st_mode & (S_ISGID | S_IXGRP)) != S_ISGID)
-		{
-			mode_t	new_mode = st_buf.st_mode;
-
-			new_mode &= ~S_IXGRP;
-			new_mode |= S_ISGID;
-			if (fchmod(filedesc, new_mode) != 0)
-				elog(ERROR, "failed on fchmode: %m");
-		}
-		/*
-		 * Let's get shared lock on the file
-		 *
-		 * likely we have pay attention to lock file per process
-		 * manner. It means, if a query plan that my scan same file
-		 * twice, the end of earlier plan should not release read
-		 * lock of the file.
-		 *
-		 * FIXME: At this moment, we don't lock the region.
-		 * FIXME: We need to take try-lock and iteration to avoid
-		 *        dead-locking
-		 */
-	}
 
 	/* inform the source file descriptor */
 	if (*p_filedesc < 0)

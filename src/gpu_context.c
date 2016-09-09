@@ -51,7 +51,6 @@ static dlist_head		inactiveResourceTracker;
  */
 #define RESTRACK_HASHSIZE				53
 
-#define RESTRACK_CLASS__FILEDESC		1
 #define RESTRACK_CLASS__GPUMEMORY		2
 #define RESTRACK_CLASS__GPUPROGRAM		3
 #define RESTRACK_CLASS__IOMAPMEMORY		4
@@ -63,7 +62,6 @@ typedef struct ResourceTracker
 	pg_crc32	crc;
 	cl_int		resclass;
 	union {
-		int			fdesc;		/* RESTRACK_CLASS__FILEDESC */
 		CUdeviceptr	devptr;		/* RESTRACK_CLASS__GPUMEMORY
 								 * RESTRACK_CLASS__IOMAPMEMORY */
 		ProgramId	program_id;	/* RESTRACK_CLASS__GPUPROGRAM */
@@ -98,61 +96,6 @@ resource_tracker_hashval(cl_int resclass, void *data, size_t len)
 	FIN_LEGACY_CRC32(crc);
 
 	return crc;
-}
-
-/*
- * resource tracker for file descriptor
- */
-void
-trackFileDesc(GpuContext_v2 *gcontext, int fdesc)
-{
-	ResourceTracker *tracker = resource_tracker_alloc();
-	pg_crc32	crc;
-
-	crc = resource_tracker_hashval(RESTRACK_CLASS__FILEDESC,
-								   &fdesc, sizeof(int));
-	tracker->crc = crc;
-	tracker->resclass = RESTRACK_CLASS__FILEDESC;
-	tracker->u.fdesc = fdesc;
-
-	dlist_push_tail(&gcontext->restrack[crc % RESTRACK_HASHSIZE],
-					&tracker->chain);
-}
-
-int
-closeFileDesc(GpuContext_v2 *gcontext, int fdesc)
-{
-	dlist_head *restrack_list;
-	dlist_iter	iter;
-	pg_crc32	crc;
-	int			rc;
-
-	crc = resource_tracker_hashval(RESTRACK_CLASS__FILEDESC,
-								   &fdesc, sizeof(int));
-	restrack_list = &gcontext->restrack[crc % RESTRACK_HASHSIZE];
-
-	dlist_foreach(iter, restrack_list)
-	{
-		ResourceTracker *tracker
-			= dlist_container(ResourceTracker, chain, iter.cur);
-
-		if (tracker->crc == crc &&
-			tracker->resclass == RESTRACK_CLASS__FILEDESC &&
-			tracker->u.fdesc == fdesc)
-		{
-			dlist_delete(&tracker->chain);
-			memset(tracker, 0, sizeof(ResourceTracker));
-			dlist_push_head(&inactiveResourceTracker,
-							&tracker->chain);
-			if ((rc = close(fdesc)) != 0)
-				elog(WARNING, "failed on socket close(%d): %m", fdesc);
-			else
-				elog(DEBUG2, "socket %d was closed", fdesc);
-			return rc;
-		}
-	}
-	elog(WARNING, "Bug? file-descriptor %d was not tracked", fdesc);
-	return close(fdesc);
 }
 
 /*
@@ -460,18 +403,6 @@ ReleaseLocalResources(GpuContext_v2 *gcontext, bool normal_exit)
 
 			switch (tracker->resclass)
 			{
-				case RESTRACK_CLASS__FILEDESC:
-					if (normal_exit)
-						elog(WARNING, "file-descriotor %d is likely leaked",
-							 tracker->u.fdesc);
-
-					if (close(tracker->u.fdesc) != 0)
-						elog(WARNING, "failed on close(%d): %m",
-							 tracker->u.fdesc);
-					else
-						elog(DEBUG2, "socket %d was closed", tracker->u.fdesc);
-					break;
-
 				case RESTRACK_CLASS__GPUMEMORY:
 					if (normal_exit)
 						elog(WARNING, "GPU memory %p likely leaked",
