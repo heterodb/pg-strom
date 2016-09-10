@@ -2788,9 +2788,11 @@ pgstrom_device_info(PG_FUNCTION_ARGS)
 					case CU_COMPUTEMODE_DEFAULT:
 						att_value = "Default";
 						break;
+#if CUDA_VERSION < 8000
 					case CU_COMPUTEMODE_EXCLUSIVE:
 						att_value = "Exclusive";
 						break;
+#endif
 					case CU_COMPUTEMODE_PROHIBITED:
 						att_value = "Prohibited";
 						break;

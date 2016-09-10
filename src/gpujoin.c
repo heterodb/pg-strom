@@ -2185,7 +2185,7 @@ codegen_device_projection(CustomScan *cscan, GpuJoinInfo *gj_info,
 				dtype->type_name,
 				tle->resno - 1);
 		}
-		else if (!dtype->type_length > 0)
+		else if (dtype->type_length > 0)
 		{
 			/* fixed length pointer data type */
 			extra_maxlen += MAXALIGN(dtype->type_length);

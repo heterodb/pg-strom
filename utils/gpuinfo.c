@@ -350,9 +350,11 @@ static void output_device(CUdevice device, int dev_id)
 					case CU_COMPUTEMODE_DEFAULT:
 						temp = "default";
 						break;
+#if CUDA_VERSION < 8000
 					case CU_COMPUTEMODE_EXCLUSIVE:
 						temp = "exclusive";
 						break;
+#endif
 					case CU_COMPUTEMODE_PROHIBITED:
 						temp = "prohibited";
 						break;
