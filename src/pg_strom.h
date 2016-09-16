@@ -724,6 +724,10 @@ extern void PDS_end_heapscan_state(GpuTaskState_v2 *gts);
 extern bool PDS_exec_heapscan(GpuTaskState_v2 *gts,
 							  pgstrom_data_store *pds,
 							  int *p_filedesc);
+#define PGSTROM_DATA_STORE_BLOCK_FILEPOS(pds)							\
+	((loff_t *)((char *)KERN_DATA_STORE_BLOCK_PGPAGE(&(pds)->kds,		\
+													 (pds)->kds.nrooms) - \
+				(sizeof(loff_t) * (pds)->nblocks_uncached)))
 
 extern bool PDS_insert_tuple(pgstrom_data_store *pds,
 							 TupleTableSlot *slot);
@@ -743,15 +747,14 @@ extern CUresult	gpuMemAllocIOMap(GpuContext_v2 *gcontext,
 								 CUdeviceptr *p_devptr, size_t bytesize);
 extern CUresult	gpuMemFreeIOMap(GpuContext_v2 *gcontext,
 								CUdeviceptr devptr);
-extern void gpuMemCopyFromSSD(CUdeviceptr dstptr,
-							  int file_desc,
-							  int nchunks,
-							  strom_dma_chunk *ssd_chunks);
-extern void gpuMemCopyFromSSDAsync(GpuTask_v2 *gtask,
-								   CUdeviceptr dstptr,
-								   int nchunks,
-								   strom_dma_chunk *ssd_chunks,
-								   CUstream cuda_stream);
+extern cl_uint gpuMemCopyFromSSDAsync(GpuTask_v2 *gtask,
+									  CUdeviceptr destptr,
+									  int nchunks,
+									  BlockNumber *block_nums,
+									  void *block_data,
+									  loff_t *file_pos);
+extern void gpuMemCopyFromSSDWait(GpuTask_v2 *gtask,
+								  CUstream cuda_stream);
 
 extern void dump_iomap_buffer_info(void);
 extern Datum pgstrom_iomap_buffer_info(PG_FUNCTION_ARGS);

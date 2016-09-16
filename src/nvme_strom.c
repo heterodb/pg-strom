@@ -285,82 +285,14 @@ gpuMemFreeIOMap(GpuContext_v2 *gcontext, CUdeviceptr devptr)
 }
 
 /*
- * __gpuMemCopyFromSSD - common part to kick SSD-to-GPU Direct DMA
- */
-static inline StromCmd__MemCpySsdToGpu *
-__gpuMemCopyFromSSD(CUdeviceptr destptr,
-					int file_desc,
-					int nchunks,
-					strom_dma_chunk *src_chunks)
-{
-	StromCmd__MemCpySsdToGpu *cmd;
-	IOMapBufferSegment *iomap_seg;
-	size_t		base;
-	int			i;
-
-	Assert(IsGpuServerProcess());
-	/* Is NVMe-Strom configured? */
-	if (!iomap_buffer_segments)
-		elog(ERROR, "NVMe-Strom is not configured");
-	iomap_seg = GetIOMapBufferSegment(gpuserv_cuda_dindex);
-
-	/* Device memory should be already imported on allocation time */
-	Assert(iomap_buffer_base != 0UL);
-
-	// TODO: We need a check whether destination is in the range of
-	//       the chunk which contains @destptr
-
-	if (destptr < iomap_buffer_base)
-		elog(ERROR, "NVMe-Strom: Direct DMA destination out of range");
-	base = destptr - iomap_buffer_base;
-
-	cmd = palloc(offsetof(StromCmd__MemCpySsdToGpu, chunks[nchunks]));
-	cmd->dma_task_id	= 0;
-	cmd->status			= 0;
-	cmd->handle			= iomap_seg->iomap_handle;
-	cmd->fdesc			= file_desc;
-	cmd->nchunks		= nchunks;
-	for (i=0; i < nchunks; i++)
-	{
-		Size		offset = src_chunks[i].offset;
-		Size		length = src_chunks[i].length;
-
-		if (base + offset + length >= iomap_buffer_size)
-			elog(ERROR, "NVMe-Strom: Direct DMA destination out of range");
-		cmd->chunks[i].fpos		= src_chunks[i].fpos;
-		cmd->chunks[i].offset	= base + offset;
-		cmd->chunks[i].length	= length;
-	}
-	return cmd;
-}
-
-/*
- * gpuMemCopyFromSSD - kick SSD-to-GPU Direct DMA in synchronous mode
- */
-void
-gpuMemCopyFromSSD(CUdeviceptr destptr,
-				  int file_desc,
-				  int nchunks,
-				  strom_dma_chunk *src_chunks)
-{
-	StromCmd__MemCpySsdToGpu *cmd;
-
-	cmd = __gpuMemCopyFromSSD(destptr, file_desc, nchunks, src_chunks);
-	if (nvme_strom_ioctl(STROM_IOCTL__MEMCPY_SSD2GPU, cmd) != 0)
-		elog(ERROR, "failed on STROM_IOCTL__MEMCPY_SSD2GPU: %m");
-	if (cmd->status != 0)
-		elog(ERROR, "NVMe-Strom: Direct DMA Status=0x%lx", cmd->status);
-    pfree(cmd);
-}
-
-/*
  * gpuMemCopyFromSSDWait - callback to wait for SSD-to-GPU Direct DMA done
  */
 static void
-gpuMemCopyFromSSDWait(CUstream cuda_stream, CUresult status, void *private)
+__MemCopyFromSSDWaitCallback(CUstream cuda_stream,
+							 CUresult status, void *private)
 {
 	StromCmd__MemCpySsdToGpuWait cmd;
-	GpuTask_v2	   *gtask = (GpuTask_v2 *)private;
+	GpuTask_v2	   *gtask = (GpuTask_v2 *) private;
 
 	cmd.ntasks = 1;
 	cmd.nwaits = 1;
@@ -389,33 +321,80 @@ gpuMemCopyFromSSDWait(CUstream cuda_stream, CUresult status, void *private)
 	}
 	// TODO: we may need to handle signal interrupt
 	//       however, it is worker thread context. How to do?
+
+	/* no concurrent SSD2GPU P2P DMA */
+	gtask->dma_task_id = 0;
+}
+
+void
+gpuMemCopyFromSSDWait(GpuTask_v2 *gtask, CUstream cuda_stream)
+{
+	CUresult	rc;
+
+	Assert(gtask->dma_task_id != 0UL);
+	rc = cuStreamAddCallback(cuda_stream,
+							 __MemCopyFromSSDWaitCallback,
+							 gtask,
+							 0);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuStreamAddCallback: %s", errorText(rc));
 }
 
 /*
  * gpuMemCopyFromSSDAsync - kick SSD-to-GPU Direct DMA in asynchronous mode
  */
-void
+cl_uint
 gpuMemCopyFromSSDAsync(GpuTask_v2 *gtask,
 					   CUdeviceptr destptr,
 					   int nchunks,
-					   strom_dma_chunk *src_chunks,
-					   CUstream cuda_stream)
+					   BlockNumber *block_nums,
+					   void *block_data,
+					   loff_t *file_pos)
 {
-	StromCmd__MemCpySsdToGpu *cmd;
-	CUresult		rc;
+	StromCmd__MemCpySsdToGpuWriteBack *cmd;
+	IOMapBufferSegment *iomap_seg;
+	unsigned int	nr_ssd2gpu;
+	int				i, j;
 
 	Assert(IsGpuServerProcess());
-	cmd = __gpuMemCopyFromSSD(destptr, gtask->peer_fdesc, nchunks, src_chunks);
-	if (nvme_strom_ioctl(STROM_IOCTL__MEMCPY_SSD2GPU_ASYNC, cmd) != 0)
-		elog(ERROR, "failed on STROM_IOCTL__MEMCPY_SSD2GPU_ASYNC: %m");
-	gtask->dma_task_id = cmd->dma_task_id;
+	if (!iomap_buffer_segments)
+		elog(ERROR, "NVMe-Strom is not configured");
+	iomap_seg = GetIOMapBufferSegment(gpuserv_cuda_dindex);
+	/* Device memory should be already imported on allocation time */
+	Assert(iomap_buffer_base != 0UL);
+	/* Right now, GpuTask has only a field to store DMA task ID */
+	Assert(gtask->dma_task_id == 0UL);
 
-	rc = cuStreamAddCallback(cuda_stream,
-							 gpuMemCopyFromSSDWait,
-							 gtask, 0);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuStreamAddCallback: %s", errorText(rc));
+	/* TODO: We need a check whether destination is in the range of
+	 *       the chunk which contains @devptr
+	 */
+	if (destptr < iomap_buffer_base)
+		elog(ERROR, "NVMe-Strom: Direct DMA destination out of range");
+
+	cmd = palloc(offsetof(StromCmd__MemCpySsdToGpuWriteBack,
+						  chunks[nchunks]));
+	cmd->dma_task_id	= 0;
+	cmd->nr_ram2gpu		= 0;
+	cmd->nr_ssd2gpu		= 0;
+	cmd->handle			= iomap_seg->iomap_handle;
+	cmd->offset			= destptr - iomap_buffer_base;
+	cmd->unitsz			= BLCKSZ;
+	cmd->block_nums		= block_nums;
+	cmd->block_data		= block_data;
+	cmd->fdesc			= gtask->peer_fdesc;
+	cmd->nchunks		= nchunks;
+	for (i=0, j = nchunks-1; i < nchunks; i++, j--)
+		cmd->chunks[i] = file_pos[j];
+
+	if (nvme_strom_ioctl(STROM_IOCTL__MEMCPY_SSD2GPU_WRITEBACK, cmd) != 0)
+		elog(ERROR, "failed on STROM_IOCTL__MEMCPY_SSD2GPU_WRITEBACK: %m");
+	gtask->dma_task_id	= cmd->dma_task_id;
+	Assert(cmd->nr_ram2gpu + cmd->nr_ssd2gpu == nchunks);
+	nr_ssd2gpu			= cmd->nr_ssd2gpu;
+
 	pfree(cmd);
+
+	return nr_ssd2gpu;
 }
 
 #if 0
@@ -500,7 +479,7 @@ static bool
 __RelationCanUseNvmeStrom(Relation relation)
 {
 	vfs_nvme_status *entry;
-	struct statvfs	st_buf;
+//	struct statvfs	st_buf;
 	const char	   *pathname;
 	Oid				tablespace_oid;
 	int				fdesc;
@@ -540,6 +519,8 @@ __RelationCanUseNvmeStrom(Relation relation)
 	entry->nvme_strom_supported = false;
 
 	pathname = GetDatabasePath(MyDatabaseId, tablespace_oid);
+#if 0
+	// posix lock is no longer needed
 	if (statvfs(pathname, &st_buf) != 0)
 	{
 		elog(WARNING, "failed on statvfs('%s') for tablespace \"%s\": %m",
@@ -556,6 +537,7 @@ __RelationCanUseNvmeStrom(Relation relation)
 						 pathname)));
 	}
 	else
+#endif
 	{
 		fdesc = open(pathname, O_RDONLY | O_DIRECTORY);
 		elog(INFO, "pathname = %s fdesc = %d", pathname, fdesc);

@@ -2621,37 +2621,73 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 	}
 	else
 	{
-		strom_dma_chunk *ssd_chunks;
-		cl_uint		nr_loaded;
+		cl_uint			nr_loaded;
+		cl_uint			nr_ssd2gpu;
+		BlockNumber	   *block_nums;
+		void		   *block_data;
+		loff_t		   *file_pos;
 
 		Assert(pds_src->nblocks_uncached <= pds_src->kds.nitems);
 		nr_loaded = pds_src->kds.nitems - pds_src->nblocks_uncached;
 
-		/* Early half by RAM2GPU DMA */
-		length = ((char *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds_src->kds,
+		/* (1) SSD-to-GPU Peer-to-Peer DMA */
+		block_nums = (BlockNumber *)KERN_DATA_STORE_BODY(&pds_src->kds);
+		block_data = KERN_DATA_STORE_BLOCK_PGPAGE(&pds_src->kds, nr_loaded);
+		file_pos = PGSTROM_DATA_STORE_BLOCK_FILEPOS(pds_src);
+		offset = ((char *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds_src->kds,
 													   nr_loaded) -
 				  (char *)&pds_src->kds);
+		elog(INFO, "");
+
+		nr_ssd2gpu = gpuMemCopyFromSSDAsync(&gscan->task,
+											gscan->m_kds_src + offset,
+											pds_src->nblocks_uncached,
+											block_nums,
+											block_data,
+											file_pos);
+		gscan->bytes_dma_send += BLCKSZ * nr_ssd2gpu;
+		gscan->num_dma_send++;
+
+		/* (2) Early half by RAM2GPU DMA
+		 *
+		 * NOTE: gpuMemCopyFromSSDAsync() may modify the BlockNumber[] array
+		 * according to the state of the page cache. So, RAM2GPU copy has to
+		 * be kicked after SSD2GPU copy.
+		 */
 		rc = cuMemcpyHtoDAsync(gscan->m_kds_src,
 							   &pds_src->kds,
-							   length,
+							   offset,
 							   cuda_stream);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-		gscan->bytes_dma_send += length;
+		gscan->bytes_dma_send += offset;
 		gscan->num_dma_send++;
 
-		/* Later half by SSD2GPU DMA */
-		ssd_chunks = (strom_dma_chunk *)
-			((char *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds_src->kds,
-												  pds_src->kds.nrooms) -
-			 sizeof(strom_dma_chunk) * pds_src->nblocks_uncached);
-		gpuMemCopyFromSSDAsync(&gscan->task,
-							   gscan->m_kds_src + length,
-							   pds_src->nblocks_uncached,
-							   ssd_chunks,
-							   cuda_stream);
-		gscan->bytes_dma_send += BLCKSZ * pds_src->nblocks_uncached;
-		gscan->num_dma_send++;
+		/* (3) Later half by SSD2GPU DMA (if written back) */
+		if (nr_ssd2gpu < pds_src->nblocks_uncached)
+		{
+			cl_uint		nr_ram2gpu = pds_src->nblocks_uncached - nr_ssd2gpu;
+			cl_uint		kds_index = pds_src->kds.nitems - nr_ram2gpu;
+
+			elog(LOG, "nitems=%u uncached=%u (RAM:%u, SSD:%u)",
+				 pds_src->kds.nitems, pds_src->nblocks_uncached,
+				 nr_ram2gpu, nr_ssd2gpu);
+
+			offset = ((char *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds_src->kds,
+														   kds_index) -
+					  (char *)&pds_src->kds);
+			rc = cuMemcpyHtoDAsync(gscan->m_kds_src + offset,
+								   (char *)&pds_src->kds + offset,
+								   BLCKSZ * nr_ram2gpu,
+								   cuda_stream);
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+			gscan->bytes_dma_send += BLCKSZ * nr_ram2gpu;
+			gscan->num_dma_send++;
+		}
+
+		/* (4) Wait for completion of SSD2GPU P2P DMA */
+		gpuMemCopyFromSSDWait(&gscan->task, cuda_stream);
 	}
 
 	/*
