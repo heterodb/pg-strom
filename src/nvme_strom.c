@@ -343,18 +343,16 @@ gpuMemCopyFromSSDWait(GpuTask_v2 *gtask, CUstream cuda_stream)
 /*
  * gpuMemCopyFromSSDAsync - kick SSD-to-GPU Direct DMA in asynchronous mode
  */
-cl_uint
+void
 gpuMemCopyFromSSDAsync(GpuTask_v2 *gtask,
 					   CUdeviceptr destptr,
 					   int nchunks,
-					   BlockNumber *block_nums,
-					   void *block_data,
-					   loff_t *file_pos)
+					   strom_dma_chunk *src_chunks)
 {
-	StromCmd__MemCpySsdToGpuWriteBack *cmd;
+	StromCmd__MemCpySsdToGpu *cmd;
 	IOMapBufferSegment *iomap_seg;
-	unsigned int	nr_ssd2gpu;
-	int				i, j;
+	size_t		base;
+	int			i;
 
 	Assert(IsGpuServerProcess());
 	if (!iomap_buffer_segments)
@@ -362,7 +360,10 @@ gpuMemCopyFromSSDAsync(GpuTask_v2 *gtask,
 	iomap_seg = GetIOMapBufferSegment(gpuserv_cuda_dindex);
 	/* Device memory should be already imported on allocation time */
 	Assert(iomap_buffer_base != 0UL);
-	/* Right now, GpuTask has only a field to store DMA task ID */
+	/*
+	 * Right now, we don't support enqueuing multiple NVMe-Strom request
+	 * concurrently. (here is no technical reason)
+	 */
 	Assert(gtask->dma_task_id == 0UL);
 
 	/* TODO: We need a check whether destination is in the range of
@@ -370,31 +371,25 @@ gpuMemCopyFromSSDAsync(GpuTask_v2 *gtask,
 	 */
 	if (destptr < iomap_buffer_base)
 		elog(ERROR, "NVMe-Strom: Direct DMA destination out of range");
+	base = destptr - iomap_buffer_base;
 
-	cmd = palloc(offsetof(StromCmd__MemCpySsdToGpuWriteBack,
+	cmd = palloc(offsetof(StromCmd__MemCpySsdToGpu,
 						  chunks[nchunks]));
 	cmd->dma_task_id	= 0;
-	cmd->nr_ram2gpu		= 0;
-	cmd->nr_ssd2gpu		= 0;
+	cmd->status			= 0;
 	cmd->handle			= iomap_seg->iomap_handle;
-	cmd->offset			= destptr - iomap_buffer_base;
-	cmd->unitsz			= BLCKSZ;
-	cmd->block_nums		= block_nums;
-	cmd->block_data		= block_data;
 	cmd->fdesc			= gtask->peer_fdesc;
 	cmd->nchunks		= nchunks;
-	for (i=0, j = nchunks-1; i < nchunks; i++, j--)
-		cmd->chunks[i] = file_pos[j];
-
-	if (nvme_strom_ioctl(STROM_IOCTL__MEMCPY_SSD2GPU_WRITEBACK, cmd) != 0)
+	for (i=0; i < nchunks; i++)
+	{
+		cmd->chunks[i] = src_chunks[i];
+		cmd->chunks[i].offset += base;
+	}
+	if (nvme_strom_ioctl(STROM_IOCTL__MEMCPY_SSD2GPU_ASYNC, cmd) != 0)
 		elog(ERROR, "failed on STROM_IOCTL__MEMCPY_SSD2GPU_WRITEBACK: %m");
-	gtask->dma_task_id	= cmd->dma_task_id;
-	Assert(cmd->nr_ram2gpu + cmd->nr_ssd2gpu == nchunks);
-	nr_ssd2gpu			= cmd->nr_ssd2gpu;
+	gtask->dma_task_id  = cmd->dma_task_id;
 
 	pfree(cmd);
-
-	return nr_ssd2gpu;
 }
 
 #if 0

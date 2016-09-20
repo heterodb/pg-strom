@@ -36,6 +36,7 @@
 #include "utils/tqual.h"
 #include "pg_strom.h"
 #include "cuda_numeric.h"
+#include "nvme_strom.h"
 #include <float.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -682,9 +683,9 @@ __exec_heapscan_block(pgstrom_data_store *pds,
 					  BlockNumber blknum,
 					  int *p_filedesc)
 {
-	BlockNumber	segno = blknum / RELSEG_SIZE;
-	int			filedesc;
-	loff_t	   *file_pos;
+	BlockNumber			segno = blknum / RELSEG_SIZE;
+	int					filedesc;
+	strom_dma_chunk	   *dma_chunk;
 
 	Assert(segno < nvme_sstate->nr_segs);
 	filedesc = FileGetRawDesc(nvme_sstate->mdfd[segno].vfd);
@@ -702,10 +703,12 @@ __exec_heapscan_block(pgstrom_data_store *pds,
 		*p_filedesc = filedesc;
 
 	/* update PDS */
-	file_pos = (loff_t *)
+	dma_chunk = (strom_dma_chunk *)
 		((char *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds, pds->kds.nrooms) -
-		 sizeof(loff_t) * (pds->nblocks_uncached + 1));
-	*file_pos = (blknum % RELSEG_SIZE) * BLCKSZ;
+		 sizeof(strom_dma_chunk) * (pds->nblocks_uncached + 1));
+	dma_chunk->fpos		= (blknum % RELSEG_SIZE) * BLCKSZ;
+	dma_chunk->offset	= BLCKSZ * pds->nblocks_uncached;
+	dma_chunk->length	= BLCKSZ;
 	pds->nblocks_uncached++;
 	pds->kds.nitems++;
 
