@@ -352,7 +352,7 @@ gpuMemCopyFromSSDAsync(GpuTask_v2 *gtask,
 	StromCmd__MemCpySsdToGpu *cmd;
 	IOMapBufferSegment *iomap_seg;
 	size_t		base;
-	int			i;
+	int			i, j;
 
 	Assert(IsGpuServerProcess());
 	if (!iomap_buffer_segments)
@@ -380,15 +380,15 @@ gpuMemCopyFromSSDAsync(GpuTask_v2 *gtask,
 	cmd->handle			= iomap_seg->iomap_handle;
 	cmd->fdesc			= gtask->peer_fdesc;
 	cmd->nchunks		= nchunks;
-	for (i=0; i < nchunks; i++)
+	for (i=0, j=nchunks-1; i < nchunks; i++, j--)
 	{
-		cmd->chunks[i] = src_chunks[i];
-		cmd->chunks[i].offset += base;
+		cmd->chunks[i].fpos   = src_chunks[j].fpos;
+		cmd->chunks[i].offset = src_chunks[j].offset + base;
+		cmd->chunks[i].length = src_chunks[j].length;
 	}
 	if (nvme_strom_ioctl(STROM_IOCTL__MEMCPY_SSD2GPU_ASYNC, cmd) != 0)
 		elog(ERROR, "failed on STROM_IOCTL__MEMCPY_SSD2GPU_WRITEBACK: %m");
 	gtask->dma_task_id  = cmd->dma_task_id;
-
 	pfree(cmd);
 }
 

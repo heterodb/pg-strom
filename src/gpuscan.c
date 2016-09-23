@@ -2659,40 +2659,6 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 		}
 	}
 
-	/*
-	 * NOTE: varlena variables in the result references pds_src as buffer
-	 * of variable length datum. So, if and when all the blocks are NOT
-	 * yet loaded to the pds_src and pds_dst may contain varlena variables,
-	 * we need to write back blocks unread from GPU to CPU/RAM.
-	 */
-	if (pds_src->kds.format == KDS_FORMAT_BLOCK &&
-		pds_src->nblocks_uncached > 0 &&
-		(!pds_dst
-		 ? pds_src->kds.has_notbyval
-		 : pds_dst->kds.has_notbyval))
-	{
-		cl_uint	nr_loaded = pds_src->kds.nitems - pds_src->nblocks_uncached;
-
-		offset = ((char *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds_src->kds,
-													   nr_loaded) -
-				  (char *)&pds_src->kds);
-		length = pds_src->nblocks_uncached * BLCKSZ;
-		rc = cuMemcpyHtoDAsync(gscan->m_kds_src + offset,
-							   (char *)&pds_src->kds + offset,
-							   length,
-							   cuda_stream);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-		gscan->bytes_dma_send += length;
-		gscan->num_dma_send++;
-		/*
-		 * NOTE: Once GPU-to-GPU DMA gets completed, "uncached" blocks are
-		 * no longer uncached, so we clear the @nblocks_uncached not to
-		 * write back GPU RAM twice even if CPU fallback.
-		 */
-		pds_src->nblocks_uncached = 0;
-	}
-
 	/* kern_data_store *kds_dst, if any */
 	if (pds_dst)
 	{
@@ -2746,6 +2712,41 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 		elog(ERROR, "cuMemcpyDtoHAsync: %s", errorText(rc));
     gscan->bytes_dma_recv += length;
     gscan->num_dma_recv++;
+
+	/*
+	 * NOTE: varlena variables in the result references pds_src as buffer
+	 * of variable length datum. So, if and when all the blocks are NOT
+	 * yet loaded to the pds_src and pds_dst may contain varlena variables,
+	 * we need to write back blocks unread from GPU to CPU/RAM.
+	 */
+	if (pds_src->kds.format == KDS_FORMAT_BLOCK &&
+		pds_src->nblocks_uncached > 0 &&
+		(!pds_dst
+		 ? pds_src->kds.has_notbyval
+		 : (pds_dst->kds.has_notbyval &&
+			pds_dst->kds.format == KDS_FORMAT_SLOT)))
+	{
+		cl_uint	nr_loaded = pds_src->kds.nitems - pds_src->nblocks_uncached;
+
+		offset = ((char *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds_src->kds,
+													   nr_loaded) -
+				  (char *)&pds_src->kds);
+		length = pds_src->nblocks_uncached * BLCKSZ;
+		rc = cuMemcpyDtoHAsync((char *)&pds_src->kds + offset,
+							   gscan->m_kds_src + offset,
+							   length,
+							   cuda_stream);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+		gscan->bytes_dma_recv += length;
+		gscan->num_dma_recv++;
+		/*
+		 * NOTE: Once GPU-to-GPU DMA gets completed, "uncached" blocks are
+		 * no longer uncached, so we clear the @nblocks_uncached not to
+		 * write back GPU RAM twice even if CPU fallback.
+		 */
+		pds_src->nblocks_uncached = 0;
+	}
 
 	if (pds_dst)
 	{
