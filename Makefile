@@ -3,6 +3,7 @@
 #
 PG_CONFIG := $(shell which pg_config)
 PYTHON_CMD := $(shell which python)
+HAS_RPM_CMD := $(shell if which rpm > /dev/null; then echo 1; else echo 0; fi)
 
 ifndef STROM_BUILD_ROOT
 STROM_BUILD_ROOT = .
@@ -119,6 +120,7 @@ MENUGEN_PY = $(addprefix $(STROM_BUILD_ROOT)/doc/, $(__MENUGEN_PY))
 #
 # Parameters for RPM package build
 #
+ifeq ($(HAS_RPM_CMD), 1)
 __PGSQL_PKGS = $(shell rpm -q -g 'Applications/Databases' | grep -E '^postgresql[0-9]+-')
 PGSQL_PKG_VERSION := $(shell \
         if [ -n "$(__PGSQL_PKGS)" ];								\
@@ -151,6 +153,7 @@ RPMBUILD_PARAMS := $(shell				\
     test -n "$(CUDA_MAX_VERSION)" &&			\
         echo " -D 'cuda_maxver $(CUDA_MAX_VERSION)'";	\
 )
+endif
 
 #
 # Header and Libraries of CUDA
@@ -259,9 +262,10 @@ $(STROM_TGZ): $(addprefix $(STROM_BUILD_ROOT)/, $(PACKAGE_FILES))
 
 tarball: $(STROM_TGZ)
 
+ifeq ($(HAS_RPM_CMD), 1)
 rpm: tarball $(RPM_SPECFILE)
 	$(MKDIR_P) $(shell rpmbuild -E %{_sourcedir})
 	cp -f $(STROM_TGZ) $(shell rpmbuild -E %{_sourcedir})
 	rpmbuild $(RPMBUILD_PARAMS) -ba $(RPM_SPECFILE)
-
+endif
 endif
