@@ -196,7 +196,7 @@ struct GpuTaskState_v2
 
 	/* callbacks used by gputasks.c */
 	GpuTask_v2	 *(*cb_next_task)(GpuTaskState_v2 *gts);
-	void		 *(*cb_switch_task)(GpuTaskState_v2 *gts, GpuTask_v2 *gtask);
+	void		  (*cb_switch_task)(GpuTaskState_v2 *gts, GpuTask_v2 *gtask);
 	TupleTableSlot *(*cb_next_tuple)(GpuTaskState_v2 *gts);
 	struct pgstrom_data_store *(*cb_bulk_exec)(GpuTaskState_v2 *gts,
 											   size_t chunk_size);
@@ -728,6 +728,7 @@ extern bool PDS_exec_heapscan(GpuTaskState_v2 *gts,
 	((loff_t *)((char *)KERN_DATA_STORE_BLOCK_PGPAGE(&(pds)->kds,		\
 													 (pds)->kds.nrooms) - \
 				(sizeof(loff_t) * (pds)->nblocks_uncached)))
+extern void PDS_fillup_blocks(pgstrom_data_store *pds, int file_desc);
 
 extern bool PDS_insert_tuple(pgstrom_data_store *pds,
 							 TupleTableSlot *slot);

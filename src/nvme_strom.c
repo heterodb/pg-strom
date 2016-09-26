@@ -801,10 +801,10 @@ pgstrom_startup_nvme_strom(void)
 				 iomap_buffer_size, cmd.gpu_page_sz);
 
 		/* setup IOMapBufferSegment */
-		elog(LOG, "GPU Device Memory (0x%p-0x%p) mapped with handle: %016lx",
+		elog(LOG, "NVMe-Strom: GPU Device Memory (%p-%p; %zuMB) is mapped",
 			 (char *)cuda_devptr,
 			 (char *)cuda_devptr + iomap_buffer_size - 1,
-			 cmd.handle);
+			 (size_t)(iomap_buffer_size >> 20));
 		memcpy(&iomap_seg->cuda_mhandle, &cuda_mhandle,
 			   sizeof(CUipcMemHandle));
 		iomap_seg->iomap_handle = cmd.handle;

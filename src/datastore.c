@@ -1071,6 +1071,74 @@ PDS_insert_hashitem(pgstrom_data_store *pds,
 }
 
 /*
+ * PDS_fillup_blocks
+ *
+ * It fills up uncached blocks using synchronous read APIs.
+ */
+void
+PDS_fillup_blocks(pgstrom_data_store *pds, int file_desc)
+{
+	strom_dma_chunk *dma_chunks;
+	cl_int		i, nr_loaded;
+	ssize_t		nbytes;
+	char	   *dest_addr;
+	char	   *temp;
+	loff_t		curr_fpos;
+	size_t		curr_size;
+
+	if (pds->kds.format != KDS_FORMAT_BLOCK)
+		elog(ERROR, "Bug? only KDS_FORMAT_BLOCK can be filled up");
+
+	if (pds->nblocks_uncached == 0)
+		return;		/* already filled up */
+	Assert(pds->nblocks_uncached <= pds->kds.nitems);
+	nr_loaded = pds->kds.nitems - pds->nblocks_uncached;
+
+	dma_chunks = (strom_dma_chunk *)
+		((char *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds,
+											  pds->kds.nrooms) -
+		 sizeof(strom_dma_chunk) * pds->nblocks_uncached);
+
+	dest_addr = (char *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds, nr_loaded);
+	curr_fpos = 0;
+	curr_size = 0;
+
+	for (i=pds->nblocks_uncached-1; i >= 0; i--)
+	{
+		Assert(dma_chunks[i].length == BLCKSZ);
+		if (curr_size > 0 &&
+			curr_fpos + curr_size == dma_chunks[i].fpos)
+		{
+			/* merge with the pending i/o */
+			curr_size += dma_chunks[i].length;
+		}
+		else
+		{
+			if (curr_size > 0)
+			{
+				nbytes = pread(file_desc, dest_addr, curr_size, curr_fpos);
+				if (nbytes != curr_size)
+					elog(ERROR, "failed on pread(2): %m");
+				dest_addr += curr_size;
+			}
+			curr_fpos = dma_chunks[i].fpos;
+			curr_size = dma_chunks[i].length;
+		}
+	}
+	if (curr_size > 0)
+	{
+		nbytes = pread(file_desc, dest_addr, curr_size, curr_fpos);
+		if (nbytes != curr_size)
+			elog(ERROR, "failed on pread(2): %m");
+		dest_addr += curr_size;
+	}
+	temp = (char *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds,
+												pds->kds.nitems);
+	Assert(dest_addr == temp);
+	pds->nblocks_uncached = 0;
+}
+
+/*
  * PDS_build_hashtable
  *
  * construct hash table according to the current contents

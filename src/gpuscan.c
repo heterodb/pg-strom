@@ -145,6 +145,7 @@ typedef struct {
  */
 static GpuTask_v2  *gpuscan_next_task(GpuTaskState_v2 *gts);
 static TupleTableSlot *gpuscan_next_tuple(GpuTaskState_v2 *gts);
+static void gpuscan_switch_task(GpuTaskState_v2 *gts, GpuTask_v2 *gtask);
 
 /*
  * cost_discount_gpu_projection
@@ -1664,7 +1665,7 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 							estate);
 	gss->gts.cb_next_task   = gpuscan_next_task;
 	gss->gts.cb_next_tuple  = gpuscan_next_tuple;
-	gss->gts.cb_switch_task = NULL;
+	gss->gts.cb_switch_task = gpuscan_switch_task;
 	if (pgstrom_bulkexec_enabled &&
 		gss->gts.css.ss.ps.qual == NIL &&		/* no host quals */
 		gss->gts.css.ss.ps.ps_ProjInfo == NULL)	/* no host projection */
@@ -2178,6 +2179,19 @@ gpuscanExecScanChunk(GpuTaskState_v2 *gts, Size chunk_length, int *p_filedesc)
 	return pds;
 }
 
+static void
+gpuscan_switch_task(GpuTaskState_v2 *gts, GpuTask_v2 *gtask)
+{
+	GpuScanTask		   *gscan = (GpuScanTask *) gtask;
+	pgstrom_data_store *pds_src = gscan->pds_src;
+
+	if (pds_src->nblocks_uncached > 0)
+	{
+		Assert(pds_src->kds.format == KDS_FORMAT_BLOCK);
+		PDS_fillup_blocks(pds_src, gscan->task.file_desc);
+	}
+}
+
 /*
  * gpuscan_next_task
  */
@@ -2535,24 +2549,11 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 
 	/*
 	 * Allocation of device memory
-	 */
-	length = GPUMEMALIGN(KERN_GPUSCAN_LENGTH(&gscan->kern));
-	if (!gscan->with_nvme_strom)
-		length += GPUMEMALIGN(pds_src->kds.length);
-	if (pds_dst)
-		length += GPUMEMALIGN(pds_dst->kds.length);
-
-	rc = gpuMemAlloc_v2(gtask->gcontext, &gscan->m_gpuscan, length);
-	if (rc == CUDA_ERROR_OUT_OF_MEMORY)
-	{
-		goto out_of_resource;
-	}
-	else if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on gpuMemAlloc: %s", errorText(rc));
-
-	/*
-	 * NVMe-Strom requires the DMA destination address is mapped to
-	 * PCI BAR area.
+	 *
+	 * MEMO: NVMe-Strom requires the DMA destination address is mapped to
+	 * PCI BAR area, but it is usually a small window thus easy to run out.
+	 * So, if we cannot allocate i/o mapped device memory, we try to read
+	 * the blocks synchronously then kicks usual RAM->GPU DMA.
 	 */
 	if (gscan->with_nvme_strom)
 	{
@@ -2560,26 +2561,38 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 							  &gscan->m_kds_src,
 							  pds_src->kds.length);
 		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
-			goto out_of_resource;
+		{
+			PDS_fillup_blocks(pds_src, gtask->peer_fdesc);
+			gscan->m_kds_src = 0UL;
+			gscan->with_nvme_strom = false;
+		}
 		else if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on gpuMemAllocIOMap: %s", errorText(rc));
+	}
 
-		if (pds_dst)
-			gscan->m_kds_dst = gscan->m_gpuscan +
-				GPUMEMALIGN(KERN_GPUSCAN_LENGTH(&gscan->kern));
-		else
-			gscan->m_kds_dst = 0UL;
-	}
-	else
+	length = offset = GPUMEMALIGN(KERN_GPUSCAN_LENGTH(&gscan->kern));
+	if (!gscan->with_nvme_strom)
+		length += GPUMEMALIGN(pds_src->kds.length);
+	if (pds_dst)
+		length += GPUMEMALIGN(pds_dst->kds.length);
+
+	rc = gpuMemAlloc_v2(gtask->gcontext, &gscan->m_gpuscan, length);
+	if (rc == CUDA_ERROR_OUT_OF_MEMORY)
+		goto out_of_resource;
+	else if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on gpuMemAlloc: %s", errorText(rc));
+
+	if (!gscan->with_nvme_strom)
 	{
-		gscan->m_kds_src = gscan->m_gpuscan +
-			GPUMEMALIGN(KERN_GPUSCAN_LENGTH(&gscan->kern));
-		if (pds_dst)
-			gscan->m_kds_dst = (gscan->m_kds_src +
-								GPUMEMALIGN(pds_src->kds.length));
-		else
-			gscan->m_kds_dst = 0UL;
+		Assert(!gscan->m_kds_src);
+		gscan->m_kds_src = gscan->m_gpuscan + offset;
+		offset += GPUMEMALIGN(pds_src->kds.length);
 	}
+
+	if (pds_dst)
+		gscan->m_kds_dst = gscan->m_gpuscan + offset;
+	else
+		gscan->m_kds_dst = 0UL;
 
 	/*
 	 * Creation of event objects, if needed
