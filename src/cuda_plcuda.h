@@ -26,6 +26,7 @@ typedef struct
 	kern_errorbuf	kerror_prep;
 	kern_errorbuf	kerror_main;
 	kern_errorbuf	kerror_post;
+
 	/*
 	 * NOTE: __retval is the primary result buffer. It shall be initialized
 	 * on kernel invocation (prior to the prep-kernel) as follows:
@@ -37,6 +38,21 @@ typedef struct
 	 *   --> valid varlena if 'results' != NULL
 	 */
 	char			__retval[__DATATYPE_MAX_WIDTH];
+
+	/*
+	 * NOTE: The PL/CUDA code can use the debug counter below. If and when
+	 * non-zero value is set on the variables below.
+	 */
+	cl_ulong		plcuda_debug_count0;
+	cl_ulong		plcuda_debug_count1;
+	cl_ulong		plcuda_debug_count2;
+	cl_ulong		plcuda_debug_count3;
+	cl_ulong		plcuda_debug_count4;
+	cl_ulong		plcuda_debug_count5;
+	cl_ulong		plcuda_debug_count6;
+	cl_ulong		plcuda_debug_count7;
+
+	/* parameters to launch kernel */
 	cl_ulong		prep_num_threads;
 	cl_uint			prep_kern_blocksz;
 	cl_uint			prep_shmem_unitsz;
@@ -53,7 +69,7 @@ typedef struct
 	cl_ulong		working_usage;
 	cl_ulong		results_bufsz;
 	cl_ulong		results_usage;
-	cl_uint			total_length;	/* total lenght including kparams buffer */
+	cl_uint			total_length;	/* total lenght including kparams */
 	cl_uint			nargs;
 	kern_colmeta	retmeta;
 	kern_colmeta	argmeta[FLEXIBLE_ARRAY_MEMBER];	/* metadata of arguments */

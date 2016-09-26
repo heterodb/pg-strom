@@ -1962,6 +1962,34 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 	rc = cuCtxPopCurrent(NULL);
 	if (rc != CUDA_SUCCESS)
 		elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
+
+	/*
+	 * Dump the debug counter if valid values are set by kernel function
+	 */
+	if (kplcuda->plcuda_debug_count0)
+		elog(NOTICE, "PL/CUDA debug count0 => %lu",
+			 kplcuda->plcuda_debug_count0);
+	if (kplcuda->plcuda_debug_count1)
+		elog(NOTICE, "PL/CUDA debug count1 => %lu",
+			 kplcuda->plcuda_debug_count1);
+	if (kplcuda->plcuda_debug_count2)
+		elog(NOTICE, "PL/CUDA debug count2 => %lu",
+			 kplcuda->plcuda_debug_count2);
+	if (kplcuda->plcuda_debug_count3)
+		elog(NOTICE, "PL/CUDA debug count3 => %lu",
+			 kplcuda->plcuda_debug_count3);
+	if (kplcuda->plcuda_debug_count4)
+		elog(NOTICE, "PL/CUDA debug count4 => %lu",
+			 kplcuda->plcuda_debug_count4);
+	if (kplcuda->plcuda_debug_count5)
+		elog(NOTICE, "PL/CUDA debug count5 => %lu",
+			 kplcuda->plcuda_debug_count5);
+	if (kplcuda->plcuda_debug_count6)
+		elog(NOTICE, "PL/CUDA debug count6 => %lu",
+			 kplcuda->plcuda_debug_count6);
+	if (kplcuda->plcuda_debug_count7)
+		elog(NOTICE, "PL/CUDA debug count7 => %lu",
+			 kplcuda->plcuda_debug_count7);
 	pfree(kplcuda);
 
 	if (kerror.errcode != StromError_Success)
