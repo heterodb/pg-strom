@@ -1082,7 +1082,6 @@ PDS_fillup_blocks(pgstrom_data_store *pds, int file_desc)
 	cl_int		i, nr_loaded;
 	ssize_t		nbytes;
 	char	   *dest_addr;
-	char	   *temp;
 	loff_t		curr_fpos;
 	size_t		curr_size;
 
@@ -1132,9 +1131,8 @@ PDS_fillup_blocks(pgstrom_data_store *pds, int file_desc)
 			elog(ERROR, "failed on pread(2): %m");
 		dest_addr += curr_size;
 	}
-	temp = (char *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds,
-												pds->kds.nitems);
-	Assert(dest_addr == temp);
+	Assert(dest_addr == (char *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds,
+															 pds->kds.nitems));
 	pds->nblocks_uncached = 0;
 }
 
