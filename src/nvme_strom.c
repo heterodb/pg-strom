@@ -62,6 +62,8 @@ static void			   *iomap_buffer_segments = NULL;
 static CUdeviceptr		iomap_buffer_base = 0UL;	/* per process vaddr */
 static Size				iomap_buffer_size;			/* GUC */
 static HTAB			   *vfs_nvme_htable = NULL;
+static Oid				nvme_last_tablespace_oid = InvalidOid;
+static bool				nvme_last_tablespace_supported;
 
 #define SizeOfIOMapBufferSegment								\
 	MAXALIGN(offsetof(IOMapBufferSegment,						\
@@ -294,10 +296,8 @@ __MemCopyFromSSDWaitCallback(CUstream cuda_stream,
 	StromCmd__MemCpySsdToGpuWait cmd;
 	GpuTask_v2	   *gtask = (GpuTask_v2 *) private;
 
-	cmd.ntasks = 1;
-	cmd.nwaits = 1;
-	cmd.status = 0;
-	cmd.dma_task_id[0] = gtask->dma_task_id;
+	memset(&cmd, 0, sizeof(StromCmd__MemCpySsdToGpuWait));
+	cmd.dma_task_id = gtask->dma_task_id;
 
 	if (nvme_strom_ioctl(STROM_IOCTL__MEMCPY_SSD2GPU_WAIT, &cmd) != 0)
 	{
@@ -467,6 +467,7 @@ vfs_nvme_cache_callback(Datum arg, int cacheid, uint32 hashvalue)
 	{
 		hash_destroy(vfs_nvme_htable);
 		vfs_nvme_htable = NULL;
+		nvme_last_tablespace_oid = InvalidOid;
 	}
 }
 
@@ -490,6 +491,10 @@ __RelationCanUseNvmeStrom(Relation relation)
 	if (!OidIsValid(tablespace_oid))
 		tablespace_oid = MyDatabaseTableSpace;
 
+	if (OidIsValid(nvme_last_tablespace_oid) &&
+		nvme_last_tablespace_oid == tablespace_oid)
+		return nvme_last_tablespace_supported;
+
 	if (!vfs_nvme_htable)
 	{
 		HASHCTL		ctl;
@@ -507,56 +512,41 @@ __RelationCanUseNvmeStrom(Relation relation)
 											HASH_ENTER,
 											&found);
 	if (found)
+	{
+		nvme_last_tablespace_oid = tablespace_oid;
+		nvme_last_tablespace_supported = entry->nvme_strom_supported;
 		return entry->nvme_strom_supported;
+	}
 
 	/* check whether the tablespace is supported */
 	entry->tablespace_oid = tablespace_oid;
 	entry->nvme_strom_supported = false;
 
 	pathname = GetDatabasePath(MyDatabaseId, tablespace_oid);
-#if 0
-	// posix lock is no longer needed
-	if (statvfs(pathname, &st_buf) != 0)
+	fdesc = open(pathname, O_RDONLY | O_DIRECTORY);
+	elog(INFO, "pathname = %s fdesc = %d", pathname, fdesc);
+	if (fdesc < 0)
 	{
-		elog(WARNING, "failed on statvfs('%s') for tablespace \"%s\": %m",
+		elog(WARNING, "failed to open \"%s\" of tablespace \"%s\": %m",
 			 pathname, get_tablespace_name(tablespace_oid));
 	}
-	else if ((st_buf.f_flag & ST_MANDLOCK) == 0)
-	{
-		ereport(NOTICE,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("nvme_strom does not support tablespace \"%s\" "
-						"because of no mandatory locks on the filesystem",
-						get_tablespace_name(tablespace_oid)),
-				 errhint("Add -o mand option when you mount: \"%s\"",
-						 pathname)));
-	}
 	else
-#endif
 	{
-		fdesc = open(pathname, O_RDONLY | O_DIRECTORY);
-		elog(INFO, "pathname = %s fdesc = %d", pathname, fdesc);
-		if (fdesc < 0)
-		{
-			elog(WARNING, "failed to open \"%s\" of tablespace \"%s\": %m",
-				 pathname, get_tablespace_name(tablespace_oid));
-		}
+		StromCmd__CheckFile cmd;
+
+		cmd.fdesc = fdesc;
+		if (nvme_strom_ioctl(STROM_IOCTL__CHECK_FILE, &cmd) == 0)
+			entry->nvme_strom_supported = true;
 		else
 		{
-			StromCmd__CheckFile cmd;
-
-			cmd.fdesc = fdesc;
-			if (nvme_strom_ioctl(STROM_IOCTL__CHECK_FILE, &cmd) == 0)
-				entry->nvme_strom_supported = true;
-			else
-			{
-				ereport(NOTICE,
-						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						errmsg("nvme_strom does not support tablespace \"%s\"",
-							   get_tablespace_name(tablespace_oid))));
-			}
+			ereport(NOTICE,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("nvme_strom does not support tablespace \"%s\"",
+							get_tablespace_name(tablespace_oid))));
 		}
 	}
+	nvme_last_tablespace_oid = tablespace_oid;
+	nvme_last_tablespace_supported = entry->nvme_strom_supported;
 	return entry->nvme_strom_supported;
 }
 

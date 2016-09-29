@@ -94,15 +94,8 @@ typedef struct StromCmd__MemCpySsdToGpu
 /* STROM_IOCTL__MEMCPY_SSD2GPU_WAIT */
 typedef struct StromCmd__MemCpySsdToGpuWait
 {
-	unsigned int	ntasks;		/* in: length of the dma_task_id[] array */
-	unsigned int	nwaits;		/* in: Min number of DMA tasks to wait 
-								 * out: num of DMA tasks actually completed;
-								 *      it may be less than input @nwaits,
-								 *      if any DMA task made error status.
-								 */
-	long			status;		/* out: error code if any */
-	unsigned long	dma_task_id[1];	/* in: ID of the DMA tasks
-									 * out: ID of the completed DMA tasks */
+	unsigned long	dma_task_id;/* in: ID of the DMA task to wait */
+	long			status;		/* out: status of the DMA task */
 } StromCmd__MemCpySsdToGpuWait;
 
 #endif /* NVME_STROM_H */
