@@ -392,64 +392,6 @@ gpuMemCopyFromSSDAsync(GpuTask_v2 *gtask,
 	pfree(cmd);
 }
 
-#if 0
-/*
- * pgstrom_iomap_buffer_alloc - for debugging
- */
-Datum pgstrom_iomap_buffer_alloc(PG_FUNCTION_ARGS);
-
-Datum
-pgstrom_iomap_buffer_alloc(PG_FUNCTION_ARGS)
-{
-	int64		required = PG_GETARG_INT64(0);
-	CUdeviceptr	pointer;
-	CUresult	rc;
-
-	if (!iomap_buffer_base)
-	{
-		CUdevice	cuda_device;
-		CUcontext	cuda_context;
-
-		rc = cuInit(0);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuInit: %s", errorText(rc));
-
-		rc = cuDeviceGet(&cuda_device, devAttrs[0].DEV_ID);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuDeviceGet: %s", errorText(rc));
-
-		rc = cuCtxCreate(&cuda_context, CU_CTX_SCHED_AUTO, cuda_device);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuCtxCreate: %s", errorText(rc));
-
-		gpuserv_cuda_dindex = 0;
-	}
-	rc = gpuMemAllocIOMap(NULL, &pointer, required);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on gpuMemAllocIOMap: %s", errorText(rc));
-
-	PG_RETURN_INT64(pointer);
-}
-PG_FUNCTION_INFO_V1(pgstrom_iomap_buffer_alloc);
-
-/*
- * pgstrom_iomap_buffer_free - for debug
- */
-Datum pgstrom_iomap_buffer_free(PG_FUNCTION_ARGS);
-
-Datum
-pgstrom_iomap_buffer_free(PG_FUNCTION_ARGS)
-{
-	int64		pointer = PG_GETARG_INT64(0);
-	CUresult	rc;
-
-	rc = gpuMemFreeIOMap(NULL, pointer);
-
-	PG_RETURN_TEXT_P(cstring_to_text(errorText(rc)));
-}
-PG_FUNCTION_INFO_V1(pgstrom_iomap_buffer_free);
-#endif
-
 /*
  * RelationCanUseNvmeStrom
  */
@@ -475,7 +417,6 @@ static bool
 __RelationCanUseNvmeStrom(Relation relation)
 {
 	vfs_nvme_status *entry;
-//	struct statvfs	st_buf;
 	const char	   *pathname;
 	Oid				tablespace_oid;
 	int				fdesc;

@@ -69,17 +69,6 @@ CREATE FUNCTION pgstrom_iomap_buffer_info()
   AS 'MODULE_PATHNAME'
   LANGUAGE C STRICT;
 
--- for debug
--- CREATE FUNCTION pg_catalog.pgstrom_iomap_buffer_alloc(bigint)
---  RETURNS bigint
---  AS 'MODULE_PATHNAME','pgstrom_iomap_buffer_alloc'
---  LANGUAGE C STRICT;
--- for debug
--- CREATE FUNCTION pg_catalog.pgstrom_iomap_buffer_free(bigint)
---  RETURNS text
---  AS 'MODULE_PATHNAME','pgstrom_iomap_buffer_free'
---  LANGUAGE C STRICT;
-
 --
 -- functions for GpuPreAgg
 --
