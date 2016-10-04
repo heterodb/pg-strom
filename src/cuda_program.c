@@ -1101,10 +1101,31 @@ retry:
 		worker.bgw_main = pgstrom_build_cuda_program_bgw_main;
 		worker.bgw_main_arg = PointerGetDatum(entry);
 
-		if (RegisterDynamicBackgroundWorker(&worker, NULL) || is_preload)
+		if (RegisterDynamicBackgroundWorker(&worker, NULL))
 		{
 			SpinLockRelease(&pgcache_head->lock);
 			return NULL;	/* now bgworker building the device kernel */
+		}
+		else if (is_preload)
+		{
+			/*
+			 * Revert the new program_cache_entry if no background worker is
+			 * available but kernel build as a preload.
+			 * @entry->bin_image == NULL means somebody is still in-progress
+			 * of the code build, thus other concurrent tasks will wait for
+			 * completion. Unless caller does not take this job, we cannot
+			 * leave the CUDA program entry.
+			 */
+			Assert(entry->refcnt == 1);
+			dlist_delete(&entry->hash_chain);
+			dlist_delete(&entry->lru_chain);
+			memset(&entry->hash_chain, 0, sizeof(dlist_node));
+			memset(&entry->lru_chain, 0, sizeof(dlist_node));
+
+			pgstrom_program_cache_free(entry);
+
+			SpinLockRelease(&pgcache_head->lock);
+			return NULL;
 		}
 		elog(LOG, "failed to launch async NVRTC build, try sync mode");
 	}
