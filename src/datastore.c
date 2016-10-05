@@ -431,6 +431,7 @@ PDS_shrink_size(pgstrom_data_store *pds)
 		cl_uint	   *row_index = KERN_DATA_STORE_ROWINDEX(kds);
 		cl_uint		i, nslots = kds->nslots;
 		size_t		shift;
+		size_t		headsz;
 		char	   *baseptr;
 
 		/* small shift has less advantage than CPU cycle consumption */
@@ -447,12 +448,11 @@ PDS_shrink_size(pgstrom_data_store *pds)
 			return;
 
 		/* move the kern_tupitem / kern_hashitem */
-		baseptr = (char *)kds + (kds->format == KDS_FORMAT_HASH
-								 ? KDS_CALCULATE_HASH_FRONTLEN(kds->ncols,
-															   kds->nitems)
-								 : KDS_CALCULATE_ROW_FRONTLEN(kds->ncols,
-															  kds->nitems));
-		memmove(baseptr, baseptr + shift, kds->length - shift);
+		headsz = (kds->format == KDS_FORMAT_HASH
+				  ? KDS_CALCULATE_HASH_FRONTLEN(kds->ncols, kds->nitems)
+				  : KDS_CALCULATE_ROW_FRONTLEN(kds->ncols, kds->nitems));
+		baseptr = (char *)kds + headsz;
+		memmove(baseptr, baseptr + shift, kds->length - (headsz + shift));
 
 		/* clear the hash slot once */
 		if (nslots > 0)
