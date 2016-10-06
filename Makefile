@@ -15,7 +15,7 @@ endif
 #
 # PG-Strom versioning
 #
-PGSTROM_VERSION=1.0devel
+PGSTROM_VERSION=1.0
 PGSTROM_VERSION_NUM=$(shell echo $(PGSTROM_VERSION)			\
 	| sed -e 's/\./ /g' -e 's/[A-Za-z].*$$//g'			\
 	| awk '{printf "%d%02d%02d", $$1, $$2, (NF >=3) ? $$3 : 0}')
