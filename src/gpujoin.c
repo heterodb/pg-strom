@@ -2254,7 +2254,7 @@ codegen_device_projection(CustomScan *cscan, GpuJoinInfo *gj_info,
 					"    tup_depth[%d] = -9999; /* never referenced */\n"
 					"  else if (pointer_on_kparams(temp.varlena_v.value,\n"
 					"                              kcxt->kparams))\n"
-					"    tup_depth[%d] = -2;\n"		/* parambuf */
+					"    tup_depth[%d] = -2;\n"
 					"  else if (pointer_on_kds(temp.varlena_v.value,\n"
 					"                          kds_dst))\n"
 					"    tup_depth[%d] = -1;\n"

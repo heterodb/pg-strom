@@ -802,8 +802,8 @@ KERN_HASH_NEXT_ITEM(kern_data_store *kds, kern_hashitem *khitem)
 STATIC_INLINE(cl_bool)
 pointer_on_kds(void *ptr, kern_data_store *kds)
 {
-	return ((char *)ptr >= (char *)kds &&
-			(char *)ptr <  (char *)kds + kds->length);
+	return kds && ((char *)ptr >= (char *)kds &&
+				   (char *)ptr <  (char *)kds + kds->length);
 }
 
 /*
@@ -841,8 +841,8 @@ kparam_get_value(kern_parambuf *kparams, cl_uint pindex)
 STATIC_INLINE(cl_bool)
 pointer_on_kparams(void *ptr, kern_parambuf *kparams)
 {
-	return ((char *)ptr >= (char *)kparams &&
-			(char *)ptr <  (char *)kparams + kparams->length);
+	return kparams && ((char *)ptr >= (char *)kparams &&
+					   (char *)ptr <  (char *)kparams + kparams->length);
 }
 
 /*
