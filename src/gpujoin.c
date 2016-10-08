@@ -2217,20 +2217,69 @@ codegen_device_projection(CustomScan *cscan, GpuJoinInfo *gj_info,
 			/*
 			 * variable length pointer data type
 			 *
-			 * NOTE: Right now, we have no device function that can return
-			 * varlena data type, thus, only Const or Param are expected.
+			 * Pay attention for the case when expression may return varlena
+			 * data type, even though we have no device function that can
+			 * return a varlena function. Like:
+			 *   CASE WHEN x IS NOT NULL THEN x ELSE 'no value' END
+			 * In this case, a varlena data returned by the expression is
+			 * located on either any of KDS buffer or KPARAMS buffer.
+			 *
+			 * Unless it is not obvious by the node type, we have to walk on
+			 * the possible buffer range to find out right one. :-(
 			 */
-			Assert(IsA(tle->expr, Const) || IsA(tle->expr, Param));
 			appendStringInfo(
 				&body,
 				"  temp.varlena_v = %s;\n"
 				"  tup_isnull[%d] = temp.varlena_v.isnull;\n"
-				"  tup_values[%d] = PointerGetDatum(temp.varlena_v.value);\n"
-				"  tup_depth[%d] = -2;\n",	/* reference to kparams buffer */
+				"  tup_values[%d] = PointerGetDatum(temp.varlena_v.value);\n",
 				pgstrom_codegen_expression((Node *)tle->expr, context),
 				tle->resno - 1,
-				tle->resno - 1,
 				tle->resno - 1);
+
+			if (IsA(tle->expr, Const) || IsA(tle->expr, Param))
+			{
+				/* always references to the kparams buffer */
+				appendStringInfo(
+					&body,
+					"  tup_depth[%d] = -2;\n",
+					tle->resno - 1);
+			}
+			else
+			{
+				cl_int		i;
+
+				appendStringInfo(
+					&body,
+					"  if (temp.varlena_v.isnull)\n"
+					"    tup_depth[%d] = -9999; /* never referenced */\n"
+					"  else if (pointer_on_kparams(temp.varlena_v.value,\n"
+					"                              kcxt->kparams))\n"
+					"    tup_depth[%d] = -2;\n"
+					"  else if (pointer_on_kds(temp.varlena_v.value,\n"
+					"                          kds_dst))\n"
+					"    tup_depth[%d] = -1;\n"
+					"  else if (pointer_on_kds(temp.varlena_v.value,\n"
+					"                          kds_src))\n"
+					"    tup_depth[%d] = 0;\n",
+					tle->resno - 1,
+					tle->resno - 1,
+					tle->resno - 1,
+					tle->resno - 1);
+				for (i=1; i <= gj_info->num_rels; i++)
+				{
+					appendStringInfo(
+						&body,
+						"  else if (pointer_on_kds(temp.varlena_v.value,\n"
+						"           KERN_MULTIRELS_INNER_KDS(kmrels,%d)))\n"
+						"    tup_depth[%d] = %d;\n",
+						i, tle->resno - 1, i);
+				}
+				appendStringInfo(
+					&body,
+					"  else\n"
+					"    tup_depth[%d] = -9999; /* should never happen */\n",
+					tle->resno - 1);
+			}
 		}
 	}
 	/* how much extra field required? */

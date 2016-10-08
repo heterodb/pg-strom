@@ -779,6 +779,14 @@ KERN_HASH_NEXT_ITEM(kern_data_store *kds, kern_hashitem *khitem)
 	 (hostptr_t)((kds)->hostptr) +		\
 	 (hostptr_t)(&(kds)->hostptr))
 
+/* check pointer's location */
+STATIC_INLINE(cl_bool)
+pointer_on_kds(void *ptr, kern_data_store *kds)
+{
+	return kds && ((char *)ptr >= (char *)kds &&
+				   (char *)ptr <  (char *)kds + kds->length);
+}
+
 /*
  * kern_parambuf
  *
@@ -809,6 +817,13 @@ kparam_get_value(kern_parambuf *kparams, cl_uint pindex)
 	if (kparams->poffset[pindex] == 0)
 		return NULL;
 	return (char *)kparams + kparams->poffset[pindex];
+}
+
+STATIC_INLINE(cl_bool)
+pointer_on_kparams(void *ptr, kern_parambuf *kparams)
+{
+	return kparams && ((char *)ptr >= (char *)kparams &&
+					   (char *)ptr <  (char *)kparams + kparams->length);
 }
 
 /*
