@@ -1217,6 +1217,8 @@ gpujoin_add_join_path(PlannerInfo *root,
 	 */
 	outer_path = gpujoin_find_cheapest_path(root, joinrel, outerrel);
 	inner_path = gpujoin_find_cheapest_path(root, joinrel, innerrel);
+	if (!outer_path || !inner_path)
+		return;		/* no available path */
 	restrict_clauses = extra->restrictlist;
 	ip_item = palloc0(sizeof(inner_path_item));
 	ip_item->join_type = jointype;
