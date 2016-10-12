@@ -853,19 +853,19 @@ pgstrom_startup_gpu_context(void)
 void
 pgstrom_init_gpu_context(void)
 {
-	uint32		TotalProcs;	/* see InitProcGlobal() */
+	uint32		numBackends;	/* # of normal backends + background worker */
 
 	/*
 	 * Maximum number of GPU context - it is preferable to preserve
 	 * enough number of SharedGpuContext items.
 	 */
-	TotalProcs = MaxBackends + NUM_AUXILIARY_PROCS + max_prepared_xacts;
+	numBackends = MaxConnections + max_worker_processes + 100;
 	DefineCustomIntVariable("pg_strom.num_gpu_contexts",
 							"maximum number of GpuContext",
 							NULL,
 							&numGpuContexts,
-							2 * TotalProcs,
-							MaxBackends,
+							numBackends,
+							numBackends,
 							INT_MAX,
 							PGC_POSTMASTER,
 							GUC_NOT_IN_SAMPLE,

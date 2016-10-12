@@ -20,6 +20,7 @@
 #include "access/twophase.h"
 #include "postmaster/bgworker.h"
 #include "storage/ipc.h"
+#include "storage/lwlock.h"
 #include "utils/guc.h"
 #include "utils/memutils.h"
 #include "pg_strom.h"
@@ -34,12 +35,12 @@
 
 typedef struct GpuServProc
 {
-	cl_uint			gpuserv_id;	/* identifier of this GPU server */
 	dlist_node		chain;		/* link to serv_procs_list */
-	BackendId		backend_leader_id;	/* backend id of the leader */
+	cl_uint			gpuserv_id;	/* identifier of this GPU server */
+	cl_uint			num_clients;/* number of the clients */
+	PGPROC		   *pgproc;		/* reference to the server's PGPROC */
 	BackendId		backend_id;	/* backend which is going to connect to */
 	cl_uint			gcontext_id;/* gcontext which is going to be assigned to */
-	PGPROC		   *pgproc;		/* reference to the server's PGPROC */
 } GpuServProc;
 
 #define GPUSERV_IS_ACTIVE(gsproc)								\
@@ -321,6 +322,11 @@ gpuservPutGpuContext(GpuContext_v2 *gcontext)
 	{
 		cl_int		i;
 
+		/* update the shared scoreboard */
+		SpinLockAcquire(&gpuServState->lock);
+		gpuServProc->num_clients--;
+		SpinLockRelease(&gpuServState->lock);
+
 		/*
 		 * Remove the closed session from the WaitEventSet
 		 *
@@ -373,7 +379,6 @@ gpuservPutGpuContext(GpuContext_v2 *gcontext)
 				{
 					dlist_head	   *dhead;
 
-					gpuServProc->backend_leader_id = InvalidBackendId;
 					gpuServProc->backend_id = InvalidBackendId;
 					gpuServProc->gcontext_id = INVALID_GPU_CONTEXT_ID;
 
@@ -618,11 +623,8 @@ gpuservFlushOutCompletedTasks(void)
 void
 gpuservTryToWakeUp(void)
 {
-	dlist_head	   *dhead;
-	dlist_node	   *dnode;
-	GpuServProc	   *serv_proc;
-	int				i, j, k;
-	int				only_inactive = 1;
+	int			i, j, k;
+	int			only_inactive = 1;
 
 	k = pg_atomic_fetch_add_u32(&gpuServState->rr_count, 1);
 	SpinLockAcquire(&gpuServState->lock);
@@ -633,33 +635,42 @@ gpuservTryToWakeUp(void)
 		 */
 		for (i=0; i < numDevAttrs; i++)
 		{
+			dlist_iter		iter;
+			GpuServProc	   *victim = NULL;
+
 			j = (i + k) % numDevAttrs;
 
-			dhead = &gpuServState->serv_procs_list[j];
-			if (dlist_is_empty(dhead))
-				continue;
-
-			dnode = dlist_tail_node(dhead);
-			while (dnode)
+			dlist_foreach(iter, &gpuServState->serv_procs_list[j])
 			{
-				serv_proc = dlist_container(GpuServProc, chain, dnode);
-
-				if (serv_proc->pgproc &&	/* only living server process */
-					(!only_inactive ||
-					 serv_proc->backend_leader_id == InvalidBackendId))
+				GpuServProc	   *curr = dlist_container(GpuServProc,
+													   chain, iter.cur);
+				if (only_inactive)
 				{
-					/* OK, wake up this GPU server process */
-					SetLatch(&serv_proc->pgproc->procLatch);
-
-					SpinLockRelease(&gpuServState->lock);
-					return;
+					if (curr->num_clients == 0 &&
+						curr->backend_id == InvalidBackendId)
+					{
+						victim = curr;
+						break;
+					}
 				}
-				if (!dlist_has_prev(dhead, dnode))
-					break;
-				dnode = dlist_prev_node(dhead, dnode);
+				else if (!victim ||
+						 (curr->num_clients +
+						  (curr->backend_id != InvalidBackendId ? 1 : 0)) <
+						 (victim->num_clients +
+						  (victim->backend_id != InvalidBackendId ? 1 : 0)))
+				{
+					victim = curr;
+				}
+			}
+			/* OK, wake up this victim GPU server */
+			if (victim)
+			{
+				SetLatch(&victim->pgproc->procLatch);
+				SpinLockRelease(&gpuServState->lock);
+				return;
 			}
 		}
-	} while (only_inactive-- > 0);
+	} while (--only_inactive >= 0);
 
 	/*
 	 * Hmm... we cannot wake up any GPU server processes. However, it means
@@ -784,69 +795,90 @@ gpuservSendCommand(GpuContext_v2 *gcontext, GpuServCommand *cmd, long timeout)
 }
 
 /*
- * gpuserv_open_connection - open a unix domain socket from the backend
+ * gpuservOpenConnection - open a unix domain socket from the backend
  * (it may fail if no available GPU server)
  */
-bool
-gpuservOpenConnection(GpuContext_v2 *gcontext)
+static int
+__gpuservOpenConnection(GpuContext_v2 *gcontext, long timeout)
 {
-	GpuServProc	   *serv_proc;
+	GpuServProc	   *serv_proc = NULL;
 	pgsocket		sockfd = PGINVALID_SOCKET;
-	BackendId		MyBackendLeaderId;
 	cl_int			gpuserv_id;
 	cl_int			dindex;
 	cl_int			dindex_first;
-	cl_long			timeout = 400;	/* up to 400ms for connect(2) */
+	const char	   *elog_message = NULL;
 	struct timeval	tv1, tv2;
 
 	Assert(!IsGpuServerProcess());
 	Assert(gcontext->sockfd == PGINVALID_SOCKET);
 
 	gettimeofday(&tv1, NULL);
-
-	/* determine the device we use */
+	/*
+	 * Look up a proper GPU server, according to the policy below
+	 *
+	 * 1. Determine the device to use
+	 * 2. Find an inactive server in the target device
+	 * 3. If not found, try to find out an inactive server on the other
+	 *    target device.
+	 * 4. If not found, try to connect to the active server that has least
+	 *    number of clients right now.
+	 */
 	dindex = pg_atomic_fetch_add_u32(&gpuServState->rr_count, 1) % numDevAttrs;
 	dindex_first = dindex;
 
-	MyBackendLeaderId = (ParallelMasterBackendId == InvalidBackendId
-						 ? MyBackendId
-						 : ParallelMasterBackendId);
-	/* look up a proper GPU server */
 	SpinLockAcquire(&gpuServState->lock);
-retry_lookup:
-	serv_proc = NULL;
-	for (;;)
-	{
+	do {
 		dlist_iter		iter;
 
 		dlist_foreach(iter, &gpuServState->serv_procs_list[dindex])
 		{
 			GpuServProc	   *curr = dlist_container(GpuServProc,
 												   chain, iter.cur);
-			if (curr->backend_leader_id == InvalidBackendId)
-				serv_proc = curr;	/* candidate of inactive server */
-			else if (curr->backend_leader_id == MyBackendLeaderId)
+			if (curr->num_clients == 0 &&
+				curr->backend_id == InvalidBackendId)
 			{
 				serv_proc = curr;
 				break;
 			}
 		}
-
-		if (serv_proc)
-			break;
-
-		/* try to connect other device if no available GPU server */
+		/* try to move other GPU device if no inactive GPU server now */
 		dindex = (dindex + 1) % numDevAttrs;
-		if (dindex == dindex_first)
+	} while (serv_proc == NULL && dindex != dindex_first);
+
+	if (!serv_proc)
+	{
+		/*
+		 * we have no inactive server now, let's connect to an active server
+		 * but with least number of clients.
+		 */
+		dlist_iter		iter;
+		GpuServProc	   *temp = NULL;
+
+		dlist_foreach(iter, &gpuServState->serv_procs_list[dindex_first])
+		{
+			GpuServProc	   *curr = dlist_container(GpuServProc,
+												   chain, iter.cur);
+			if (!temp ||
+				(temp->num_clients +
+				 (temp->backend_id != InvalidBackendId ? 1 : 0)) >
+				(curr->num_clients +
+				 (curr->backend_id != InvalidBackendId ? 1 : 0)))
+				temp = curr;
+		}
+
+		/* All the GPU server is now dead? */
+		if (!temp)
 		{
 			SpinLockRelease(&gpuServState->lock);
-			elog(NOTICE, "no available GPU server");
-			return false;
+			elog(NOTICE, "No available GPU server");
+			return 99999;	/* don't retry other server any more */
 		}
+		serv_proc = temp;
 	}
+	gpuserv_id = serv_proc->gpuserv_id;
 
 	/*
-	 * If connect(2) - accept(2) by other sibling backend is in-progress,
+	 * If and when connect(2) by other sibling backend is in-progress,
 	 * we have to wait for a short moment to get the slot.
 	 */
 	while (serv_proc->backend_id != InvalidBackendId)
@@ -858,27 +890,11 @@ retry_lookup:
 					(tv1.tv_sec * 1000 + tv2.tv_usec / 1000));
 		tv1 = tv2;
 		if (timeout < 0)
-		{
-			elog(NOTICE, "time out for connection to GPU server");
-			return false;
-		}
+			return 1;	/* timeout and retry */
 		pg_usleep(5000L);	/* 5ms */
 		CHECK_FOR_INTERRUPTS();
 		SpinLockAcquire(&gpuServState->lock);
-		/*
-		 * A corner case - the other sibling backend closed the session
-		 * soon, then GPU server might be attached to unrelated backend
-		 * during the short sleep. In this case, we retry lookup.
-		 */
-		if (serv_proc->backend_leader_id != InvalidBackendId &&
-			serv_proc->backend_leader_id != MyBackendLeaderId)
-		{
-			dindex = dindex_first;
-			goto retry_lookup;
-		}
 	}
-	gpuserv_id = serv_proc->gpuserv_id;
-	serv_proc->backend_leader_id = MyBackendLeaderId;
 	serv_proc->backend_id = MyBackendId;
 	serv_proc->gcontext_id = gcontext->shgcon->context_id;
 	SpinLockRelease(&gpuServState->lock);
@@ -888,7 +904,10 @@ retry_lookup:
 	 */
 	sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (sockfd < 0)
-		elog(ERROR, "failed on socket(2): %m");
+	{
+		elog_message = psprintf("failed on socket(2): %m");
+		goto error_cleanup;
+	}
 
 	for (;;)
 	{
@@ -899,19 +918,16 @@ retry_lookup:
 
 		if (errno != EINTR)
 		{
-			close(sockfd);
-			elog(ERROR, "failed on connect(2): %m");
+			elog_message = psprintf("failed on connect(2): %m");
+			goto error_cleanup;
 		}
+
 		gettimeofday(&tv2, NULL);
 		timeout -= ((tv2.tv_sec * 1000 + tv2.tv_usec / 1000) -
 					(tv1.tv_sec * 1000 + tv2.tv_usec / 1000));
 		tv1 = tv2;
 		if (timeout < 0)
-		{
-			close(sockfd);
-			elog(NOTICE, "time out for connection to GPU server");
-			return false;
-		}
+			goto error_cleanup;		/* retry */
 	}
 
 	/*
@@ -935,25 +951,57 @@ retry_lookup:
 					(errcode(ERRCODE_ADMIN_SHUTDOWN),
 					 errmsg("Urgent termination by postmaster dead")));
 		if (ev & WL_LATCH_SET)
-			break;
+		{
+			/*
+			 * check status of the connection - it may be unrelated latch set.
+			 */
+			if (gcontext->shgcon->server)
+				break;
 
-		close(sockfd);
-		elog(NOTICE, "timeout for accept(2) by the GPU server");
-		return false;
-	}
-
-	/*
-	 * check status of the connection
-	 */
-	if (!gcontext->shgcon->server)
-	{
-		close(sockfd);
-		elog(ERROR, "Bug? server's PGPROC was not set correctly");
+			gettimeofday(&tv2, NULL);
+			timeout -= ((tv2.tv_sec * 1000 + tv2.tv_usec / 1000) -
+						(tv1.tv_sec * 1000 + tv2.tv_usec / 1000));
+			tv1 = tv2;
+			if (timeout >= 0)
+				continue;
+		}
+		goto error_cleanup;
 	}
 	elog(DEBUG2, "connect socket %d to GPU server %d", sockfd, gpuserv_id);
 	gcontext->sockfd = sockfd;
 
-	return true;		/* OK, connection established */
+	return 0;		/* OK, connection gets established */
+
+error_cleanup:
+	/* release the right for connection, if caller still hold */
+	SpinLockAcquire(&gpuServState->lock);
+	if (serv_proc->backend_id == MyBackendId)
+	{
+		serv_proc->backend_id = InvalidBackendId;
+		serv_proc->gcontext_id = INVALID_GPU_CONTEXT_ID;
+	}
+	SpinLockRelease(&gpuServState->lock);
+	if (sockfd >= 0)
+		close(sockfd);
+	if (elog_message != NULL)
+		elog(ERROR, "%s", elog_message);
+	return 1;	/* retry */
+}
+
+bool
+gpuservOpenConnection(GpuContext_v2 *gcontext)
+{
+	int		retry_count = 2;
+	int		retval;
+
+	while (retry_count > 0)
+	{
+		retval = __gpuservOpenConnection(gcontext, 200);
+		if (!retval)
+			return true;
+		retry_count -= retval;
+	}
+	return false;
 }
 
 /*
@@ -1007,9 +1055,14 @@ gpuservAcceptConnection(void)
 	gcontext_id = gpuServProc->gcontext_id;
 	gpuServProc->backend_id  = InvalidBackendId;
 	gpuServProc->gcontext_id = INVALID_GPU_CONTEXT_ID;
-	/* move to the list head because of its activeness */
-	dlist_move_head(&gpuServState->serv_procs_list[gpuserv_cuda_dindex],
-					&gpuServProc->chain);
+	/* any error on client side before the accept(2)? */
+	if (backend_id == InvalidBackendId)
+	{
+		SpinLockRelease(&gpuServState->lock);
+		close(sockfd);
+		return;
+	}
+	gpuServProc->num_clients++;
 	SpinLockRelease(&gpuServState->lock);
 
 	PG_TRY();
@@ -1041,8 +1094,12 @@ gpuservAcceptConnection(void)
 	}
 	PG_CATCH();
 	{
-		/* Note that client socket shall be released automatically once
-		 * it is attached to GpuContext.
+		SpinLockAcquire(&gpuServState->lock);
+		gpuServProc->num_clients--;
+		SpinLockRelease(&gpuServState->lock);
+		/*
+		 * Note that the client socket shall be released automatically
+		 * once it is attached on the GpuContext.
 		 */
 		if (!gcontext)
 			close(sockfd);
@@ -1537,11 +1594,11 @@ gpuserv_bgworker_main(Datum __server_id)
 	/* register myself on the shared GpuServProc structure */
 	SpinLockAcquire(&gpuServState->lock);
 	gpuServProc->gpuserv_id = gpuserv_id;
-	gpuServProc->backend_leader_id = InvalidBackendId;
+	gpuServProc->num_clients = 0;
+	gpuServProc->pgproc = MyProc;
 	gpuServProc->backend_id = InvalidBackendId;
 	gpuServProc->gcontext_id = INVALID_GPU_CONTEXT_ID;
-	gpuServProc->pgproc = MyProc;
-	dlist_push_tail(&gpuServState->serv_procs_list[gpuserv_cuda_dindex],
+	dlist_push_head(&gpuServState->serv_procs_list[gpuserv_cuda_dindex],
 					&gpuServProc->chain);
 	SpinLockRelease(&gpuServState->lock);
 
@@ -1565,10 +1622,9 @@ gpuserv_bgworker_main(Datum __server_id)
 
 		/* this bgworker process goes to die */
 		SpinLockAcquire(&gpuServState->lock);
-		gpuServProc->backend_leader_id = InvalidBackendId;
+		gpuServProc->pgproc = NULL;
 		gpuServProc->backend_id = InvalidBackendId;
 		gpuServProc->gcontext_id = INVALID_GPU_CONTEXT_ID;
-		gpuServProc->pgproc = NULL;
 		dlist_delete(&gpuServProc->chain);
 		memset(&gpuServProc->chain, 0, sizeof(dlist_node));
 		SpinLockRelease(&gpuServState->lock);
