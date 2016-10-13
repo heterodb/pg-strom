@@ -683,9 +683,9 @@ __exec_heapscan_block(pgstrom_data_store *pds,
 					  BlockNumber blknum,
 					  int *p_filedesc)
 {
-	BlockNumber			segno = blknum / RELSEG_SIZE;
-	int					filedesc;
-	strom_dma_chunk	   *dma_chunk;
+	BlockNumber	segno = blknum / RELSEG_SIZE;
+	int			filedesc;
+	loff_t	   *file_pos;
 
 	Assert(segno < nvme_sstate->nr_segs);
 	filedesc = FileGetRawDesc(nvme_sstate->mdfd[segno].vfd);
@@ -702,15 +702,14 @@ __exec_heapscan_block(pgstrom_data_store *pds,
 	if (*p_filedesc < 0)
 		*p_filedesc = filedesc;
 
-	/* update PDS */
-	dma_chunk = (strom_dma_chunk *)
-		((char *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds, pds->kds.nrooms) -
-		 sizeof(strom_dma_chunk) * (pds->nblocks_uncached + 1));
-	dma_chunk->fpos		= (blknum % RELSEG_SIZE) * BLCKSZ;
-	dma_chunk->offset	= BLCKSZ * pds->nblocks_uncached;
-	dma_chunk->length	= BLCKSZ;
+	/* increment the pointer */
 	pds->nblocks_uncached++;
 	pds->kds.nitems++;
+
+	/* put file_pos on the tail of PDS */
+	file_pos = (loff_t *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds,
+													  pds->kds.nrooms);
+	file_pos[-pds->nblocks_uncached] = (blknum % RELSEG_SIZE) * BLCKSZ;
 
 	return true;
 }
@@ -723,6 +722,7 @@ PDS_exec_heapscan_block(pgstrom_data_store *pds,
 						int *p_filedesc)
 {
 	BlockNumber		blknum = hscan->rs_cblock;
+	BlockNumber	   *block_nums;
 	Snapshot		snapshot = hscan->rs_snapshot;
 	BufferAccessStrategy strategy = hscan->rs_strategy;
 	SMgrRelation	smgr = relation->rd_smgr;
@@ -738,6 +738,9 @@ PDS_exec_heapscan_block(pgstrom_data_store *pds,
 	/* PDS cannot eat any blocks more, obviously */
 	if (pds->kds.nitems >= pds->kds.nrooms)
 		return false;
+
+	/* array of block numbers */
+	block_nums = (BlockNumber *)KERN_DATA_STORE_BODY(&pds->kds);
 
 	/*
 	 * NVMe-Strom can be applied only when filesystem supports the feature,
@@ -765,8 +768,37 @@ PDS_exec_heapscan_block(pgstrom_data_store *pds,
 		buf_id = BufTableLookup(&newTag, newHash);
 		if (buf_id < 0)
 		{
-			retval = __exec_heapscan_block(pds, nvme_sstate, blknum,
-										   p_filedesc);
+			BlockNumber	segno = blknum / RELSEG_SIZE;
+			int			filedesc;
+			loff_t	   *file_pos;
+
+			Assert(segno < nvme_sstate->nr_segs);
+			filedesc = FileGetRawDesc(nvme_sstate->mdfd[segno].vfd);
+
+			/*
+			 * We cannot mix up multiple source files in a single PDS chunk.
+			 * If heapscan_block comes across segment boundary, rest of the
+			 * blocks must be read on the next PDS chunk.
+			 */
+			if (*p_filedesc >= 0 && *p_filedesc != filedesc)
+				retval = false;
+			else
+			{
+				if (*p_filedesc < 0)
+					*p_filedesc = filedesc;
+				/* increment the index */
+				pds->nblocks_uncached++;
+				pds->kds.nitems++;
+
+				/* put file_pos on the tail of PDS */
+				file_pos = (loff_t *)
+					KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds, pds->kds.nrooms);
+				file_pos[-((int)pds->nblocks_uncached)]
+					= (blknum % RELSEG_SIZE) * BLCKSZ;
+				block_nums[pds->kds.nrooms - pds->nblocks_uncached] = blknum;
+
+				retval = true;
+			}
 			LWLockRelease(newPartitionLock);
 
 			return retval;
@@ -791,6 +823,10 @@ PDS_exec_heapscan_block(pgstrom_data_store *pds,
 	spage = (Page) BufferGetPage(buffer);
 	dpage = (Page) KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds, npages);
 	memcpy(dpage, spage, BLCKSZ);
+
+	/* fill-up block number from the head */
+	block_nums = (BlockNumber *)KERN_DATA_STORE_BODY(&pds->kds);
+	block_nums[pds->kds.nitems] = blknum;
 
 	/*
 	 * Logic is almost same as heapgetpage() doing. We have to invalidate
@@ -1078,8 +1114,8 @@ PDS_insert_hashitem(pgstrom_data_store *pds,
 void
 PDS_fillup_blocks(pgstrom_data_store *pds, int file_desc)
 {
-	strom_dma_chunk *dma_chunks;
 	cl_int		i, nr_loaded;
+	loff_t	   *file_pos;
 	ssize_t		nbytes;
 	char	   *dest_addr;
 	loff_t		curr_fpos;
@@ -1092,48 +1128,54 @@ PDS_fillup_blocks(pgstrom_data_store *pds, int file_desc)
 		return;		/* already filled up */
 	Assert(pds->nblocks_uncached <= pds->kds.nitems);
 	nr_loaded = pds->kds.nitems - pds->nblocks_uncached;
-
-	dma_chunks = (strom_dma_chunk *)
-		((char *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds,
-											  pds->kds.nrooms) -
-		 sizeof(strom_dma_chunk) * pds->nblocks_uncached);
-
+	file_pos = palloc(sizeof(loff_t) * pds->nblocks_uncached);
+	memcpy(file_pos,
+		   (loff_t *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds,
+												  pds->kds.nrooms) -
+		   pds->nblocks_uncached,
+		   sizeof(loff_t) * pds->nblocks_uncached);
 	dest_addr = (char *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds, nr_loaded);
 	curr_fpos = 0;
 	curr_size = 0;
-
-	for (i=pds->nblocks_uncached-1; i >= 0; i--)
+	for (i=pds->nblocks_uncached-1; i >=0; i--)
 	{
-		Assert(dma_chunks[i].length == BLCKSZ);
 		if (curr_size > 0 &&
-			curr_fpos + curr_size == dma_chunks[i].fpos)
+			curr_fpos + curr_size == file_pos[i])
 		{
 			/* merge with the pending i/o */
-			curr_size += dma_chunks[i].length;
+			curr_size += BLCKSZ;
 		}
 		else
 		{
-			if (curr_size > 0)
+			while (curr_size > 0)
 			{
 				nbytes = pread(file_desc, dest_addr, curr_size, curr_fpos);
-				if (nbytes != curr_size)
+				Assert(nbytes <= curr_size);
+				if (nbytes < 0 || (nbytes == 0 && errno != EINTR))
 					elog(ERROR, "failed on pread(2): %m");
-				dest_addr += curr_size;
+				dest_addr += nbytes;
+				curr_fpos += nbytes;
+				curr_size -= nbytes;
 			}
-			curr_fpos = dma_chunks[i].fpos;
-			curr_size = dma_chunks[i].length;
+			curr_fpos = file_pos[i];
+			curr_size = BLCKSZ;
 		}
 	}
-	if (curr_size > 0)
+
+	while (curr_size > 0)
 	{
 		nbytes = pread(file_desc, dest_addr, curr_size, curr_fpos);
-		if (nbytes != curr_size)
+		Assert(nbytes <= curr_size);
+		if (nbytes < 0 || (nbytes == 0 && errno != EINTR))
 			elog(ERROR, "failed on pread(2): %m");
-		dest_addr += curr_size;
+		dest_addr += nbytes;
+		curr_fpos += nbytes;
+		curr_size -= nbytes;
 	}
 	Assert(dest_addr == (char *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds,
 															 pds->kds.nitems));
 	pds->nblocks_uncached = 0;
+	pfree(file_pos);
 }
 
 /*

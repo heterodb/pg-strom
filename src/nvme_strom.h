@@ -22,6 +22,7 @@ enum {
 	STROM_IOCTL__MEMCPY_SSD2GPU				= _IO('S',0x85),
 	STROM_IOCTL__MEMCPY_SSD2GPU_ASYNC		= _IO('S',0x86),
 	STROM_IOCTL__MEMCPY_SSD2GPU_WAIT		= _IO('S',0x87),
+	STROM_IOCTL__MEMCPY_SSD2GPU_WRITEBACK	= _IO('S',0x88),
 };
 
 /* path of ioctl(2) entrypoint */
@@ -97,5 +98,23 @@ typedef struct StromCmd__MemCpySsdToGpuWait
 	unsigned long	dma_task_id;/* in: ID of the DMA task to wait */
 	long			status;		/* out: status of the DMA task */
 } StromCmd__MemCpySsdToGpuWait;
+
+/* STROM_IOCTL__MEMCPY_SSD2GPU_WRITEBACK */
+typedef struct StromCmd__MemCpySsdToGpuWriteBack
+{
+	unsigned long	dma_task_id;/* out: ID of the DMA task */
+	unsigned int	nr_ram2gpu;	/* out: # of RAM2GPU chunks */
+	unsigned int	nr_ssd2gpu;	/* out: # of SSD2GPU chunks */
+	unsigned int	nr_dma_submit; /* out: # of SSD2GPU DMA submit */
+	unsigned int	nr_dma_blocks; /* out: # of SSD2GPU DMA blocks */
+	unsigned long	handle;		/* in: handle of the mapped GPU memory */
+	size_t			offset;		/* in: offset from the head of GPU memory */
+	size_t			block_size;	/* in: size of a block */
+	uint32_t __user *block_nums;	/* in: array of BlockNumber (optional) */
+	char __user	   *block_data;	/* in: pointer of write-back buffer */
+	int				file_desc;	/* in: file descriptor of the source file */
+	int				nchunks;	/* in: number of blocks to be sent */
+	loff_t			file_pos[1];/* in: file position of blocks */
+} StromCmd__MemCpySsdToGpuWriteBack;
 
 #endif /* NVME_STROM_H */

@@ -550,7 +550,7 @@ typedef struct {
  * | +-------------+ (*) nslots=0 if row-format,  | ctid system    |
  * | | values[0]   | thus, it has no offset to    | column.        |
  * | |    :        | hash items.                  |                |
- * | | values[M-1] |                              | (*) N=nitems   |
+ * | | values[M-1] |                              | (*) N=nrooms   |
  * | +-------------+  hash_slot[0]                | block_num[0]   |
  * | | isnull[0]   |  hash_slot[1]                | block_num[1]   |
  * | |    :        |      :                       |      :         |

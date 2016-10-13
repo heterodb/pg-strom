@@ -749,9 +749,9 @@ extern CUresult	gpuMemAllocIOMap(GpuContext_v2 *gcontext,
 extern CUresult	gpuMemFreeIOMap(GpuContext_v2 *gcontext,
 								CUdeviceptr devptr);
 extern void gpuMemCopyFromSSDAsync(GpuTask_v2 *gtask,
-								   CUdeviceptr destptr,
-								   int nchunks,
-								   struct strom_dma_chunk *src_chunks);
+								   CUdeviceptr m_kds,
+								   pgstrom_data_store *pds,
+								   CUstream cuda_stream);
 extern void gpuMemCopyFromSSDWait(GpuTask_v2 *gtask,
 								  CUstream cuda_stream);
 

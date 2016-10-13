@@ -2173,6 +2173,28 @@ gpuscanExecScanChunk(GpuTaskState_v2 *gts, Size chunk_length, int *p_filedesc)
 		PDS_release(pds);
 		pds = NULL;
 	}
+	else if (pds->kds.format == KDS_FORMAT_ROW &&
+			 pds->kds.nitems < pds->kds.nrooms &&
+			 pds->nblocks_uncached > 0)
+	{
+		/*
+		 * MEMO: Special case handling if KDS_FORMAT_ROW was not filled up
+		 * entirely. KDS_FORMAT_ROW has an array of block-number to support
+		 * "ctid" system column, located on next to the KDS-head.
+		 * Block-numbers of pre-loaded blocks (hit on shared buffer) are
+		 * used from the head, and others (to be read from the file) are
+		 * used from the tail. If nitems < nrooms, this array has a hole
+		 * on the middle of array.
+		 * So, we have to move later half of the array to close the hole
+		 * and make a flat array.
+		 */
+		BlockNumber	   *block_nums
+			= (BlockNumber *)KERN_DATA_STORE_BODY(&pds->kds);
+
+		memmove(block_nums + (pds->kds.nitems - pds->nblocks_uncached),
+				block_nums + (pds->kds.nrooms - pds->nblocks_uncached),
+				sizeof(BlockNumber) * (pds->kds.nrooms - pds->kds.nitems));
+	}
 	PERFMON_END(&gts->pfm, time_outer_load, &tv1, &tv2);
 	InstrStopNode(&gts->outer_instrument,
 				  !pds ? 0.0 : (double)pds->kds.nitems);
@@ -2634,42 +2656,12 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 	}
 	else
 	{
-		cl_uint			nr_loaded;
-
-		Assert(pds_src->nblocks_uncached <= pds_src->kds.nitems);
-		nr_loaded = pds_src->kds.nitems - pds_src->nblocks_uncached;
-
-		/* (1) RAM-to-GPU DMA */
-		length = ((char *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds_src->kds,
-													   nr_loaded) -
-				  (char *)&pds_src->kds);
-		rc = cuMemcpyHtoDAsync(gscan->m_kds_src,
-							   &pds_src->kds,
-							   length,
+		gpuMemCopyFromSSDAsync(&gscan->task,
+							   gscan->m_kds_src,
+							   pds_src,
 							   cuda_stream);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-
-		/* (2) SSD-to-GPU P2P DMA, if any */
-		if (pds_src->nblocks_uncached > 0)
-		{
-			strom_dma_chunk *dma_chunks;
-
-			dma_chunks = (strom_dma_chunk *)
-				((char *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds_src->kds,
-													  pds_src->kds.nrooms) -
-				 sizeof(strom_dma_chunk) * pds_src->nblocks_uncached);
-
-			gpuMemCopyFromSSDAsync(&gscan->task,
-								   gscan->m_kds_src + length,
-								   pds_src->nblocks_uncached,
-								   dma_chunks);
-			gscan->bytes_dma_send += BLCKSZ * pds_src->nblocks_uncached;
-			gscan->num_dma_send++;
-
-			gpuMemCopyFromSSDWait(&gscan->task,
-								  cuda_stream);
-		}
+		gpuMemCopyFromSSDWait(&gscan->task,
+							  cuda_stream);
 	}
 
 	/* kern_data_store *kds_dst, if any */
