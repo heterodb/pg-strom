@@ -314,7 +314,7 @@ dmaBufferDetachSegment(dmaBufferSegment *seg)
 	if (shm_unlink(namebuf) < 0)
 		elog(WARNING, "failed on shm_unlink('%s'): %m", namebuf);
 
-	Assert(SHMSEG_EXISTS(pg_atomic_read_u32(&seg->revision)));
+	Assert(!SHMSEG_EXISTS(pg_atomic_read_u32(&seg->revision)));
 }
 
 /*
