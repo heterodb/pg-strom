@@ -609,11 +609,11 @@ AttachGpuContext(pgsocket sockfd,
 	if (shgcon->refcnt == 0 ||		/* nobody own the GpuContext */
 		shgcon->backend == NULL ||	/* no backend assigned yet */
 		shgcon->server != NULL ||	/* a server is already assigned */
-		shgcon->backend->backendId != backend_id)	/* wrond backend */
+		shgcon->backend->backendId != backend_id)	/* wrong backend */
 	{
 		SpinLockRelease(&shgcon->lock);
 		dlist_push_head(&inactiveGpuContextList, &gcontext->chain);
-		elog(ERROR, "Bug? GpuContext (context_id=%d) has wrond state",
+		elog(FATAL, "Bug? GpuContext (context_id=%d) has wrong state",
 			 context_id);
 	}
 	shgcon->refcnt++;

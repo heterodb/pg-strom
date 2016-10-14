@@ -798,8 +798,8 @@ gpuservSendCommand(GpuContext_v2 *gcontext, GpuServCommand *cmd, long timeout)
  * gpuservOpenConnection - open a unix domain socket from the backend
  * (it may fail if no available GPU server)
  */
-static int
-__gpuservOpenConnection(GpuContext_v2 *gcontext, long timeout)
+bool
+gpuservOpenConnection(GpuContext_v2 *gcontext)
 {
 	GpuServProc	   *serv_proc = NULL;
 	pgsocket		sockfd = PGINVALID_SOCKET;
@@ -807,6 +807,7 @@ __gpuservOpenConnection(GpuContext_v2 *gcontext, long timeout)
 	cl_int			dindex;
 	cl_int			dindex_first;
 	const char	   *elog_message = NULL;
+	long			timeout = 30000;	/* 30s */
 	struct timeval	tv1, tv2;
 
 	Assert(!IsGpuServerProcess());
@@ -870,8 +871,7 @@ __gpuservOpenConnection(GpuContext_v2 *gcontext, long timeout)
 		if (!temp)
 		{
 			SpinLockRelease(&gpuServState->lock);
-			elog(NOTICE, "No available GPU server");
-			return 99999;	/* don't retry other server any more */
+			elog(ERROR, "No available GPU servers");
 		}
 		serv_proc = temp;
 	}
@@ -890,9 +890,9 @@ __gpuservOpenConnection(GpuContext_v2 *gcontext, long timeout)
 					(tv1.tv_sec * 1000 + tv2.tv_usec / 1000));
 		tv1 = tv2;
 		if (timeout < 0)
-			return 1;	/* timeout and retry */
-		pg_usleep(5000L);	/* 5ms */
+			elog(ERROR, "open connection by other siblings took too long");
 		CHECK_FOR_INTERRUPTS();
+		pg_usleep(5000L);	/* 5ms */
 		SpinLockAcquire(&gpuServState->lock);
 	}
 	serv_proc->backend_id = MyBackendId;
@@ -921,13 +921,16 @@ __gpuservOpenConnection(GpuContext_v2 *gcontext, long timeout)
 			elog_message = psprintf("failed on connect(2): %m");
 			goto error_cleanup;
 		}
-
 		gettimeofday(&tv2, NULL);
 		timeout -= ((tv2.tv_sec * 1000 + tv2.tv_usec / 1000) -
 					(tv1.tv_sec * 1000 + tv2.tv_usec / 1000));
 		tv1 = tv2;
 		if (timeout < 0)
+		{
+			elog_message = psprintf("timeout on connect(2)");
 			goto error_cleanup;		/* retry */
+		}
+		CHECK_FOR_INTERRUPTS();
 	}
 
 	/*
@@ -941,6 +944,9 @@ __gpuservOpenConnection(GpuContext_v2 *gcontext, long timeout)
 
 		ResetLatch(MyLatch);
 
+		if (gcontext->shgcon->server)
+			break;
+
 		ev = WaitLatch(MyLatch,
 					   WL_LATCH_SET |
 					   WL_TIMEOUT |
@@ -952,25 +958,25 @@ __gpuservOpenConnection(GpuContext_v2 *gcontext, long timeout)
 					 errmsg("Urgent termination by postmaster dead")));
 		if (ev & WL_LATCH_SET)
 		{
-			/*
-			 * check status of the connection - it may be unrelated latch set.
-			 */
 			if (gcontext->shgcon->server)
 				break;
-
-			gettimeofday(&tv2, NULL);
-			timeout -= ((tv2.tv_sec * 1000 + tv2.tv_usec / 1000) -
-						(tv1.tv_sec * 1000 + tv2.tv_usec / 1000));
-			tv1 = tv2;
-			if (timeout >= 0)
-				continue;
 		}
+
+		/* timeout? */
+		gettimeofday(&tv2, NULL);
+		timeout -= ((tv2.tv_sec * 1000 + tv2.tv_usec / 1000) -
+					(tv1.tv_sec * 1000 + tv2.tv_usec / 1000));
+		tv1 = tv2;
+		if (timeout >= 0)
+			continue;
+
+		elog_message = psprintf("timeout on connection establish");
 		goto error_cleanup;
 	}
 	elog(DEBUG2, "connect socket %d to GPU server %d", sockfd, gpuserv_id);
 	gcontext->sockfd = sockfd;
 
-	return 0;		/* OK, connection gets established */
+	return true;	/* OK, connection gets established */
 
 error_cleanup:
 	/* release the right for connection, if caller still hold */
@@ -983,25 +989,7 @@ error_cleanup:
 	SpinLockRelease(&gpuServState->lock);
 	if (sockfd >= 0)
 		close(sockfd);
-	if (elog_message != NULL)
-		elog(ERROR, "%s", elog_message);
-	return 1;	/* retry */
-}
-
-bool
-gpuservOpenConnection(GpuContext_v2 *gcontext)
-{
-	int		retry_count = 2;
-	int		retval;
-
-	while (retry_count > 0)
-	{
-		retval = __gpuservOpenConnection(gcontext, 200);
-		if (!retval)
-			return true;
-		retry_count -= retval;
-	}
-	return false;
+	elog(ERROR, "%s", elog_message);
 }
 
 /*
