@@ -484,7 +484,7 @@ extern CUcontext		gpuserv_cuda_context;
 extern bool IsGpuServerProcess(void);
 extern void gpuservTryToWakeUp(void);
 extern void notifierGpuMemFree(cl_int device_id);
-extern bool gpuservOpenConnection(GpuContext_v2 *gcontext);
+extern void gpuservOpenConnection(GpuContext_v2 *gcontext);
 extern bool gpuservSendGpuTask(GpuContext_v2 *gcontext, GpuTask_v2 *gtask);
 extern bool gpuservRecvGpuTasks(GpuContext_v2 *gcontext, long timeout);
 extern void gpuservCompleteGpuTask(GpuTask_v2 *gtask, bool is_urgent);

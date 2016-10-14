@@ -564,8 +564,9 @@ AllocGpuContext(bool with_connection)
 	 * because of GPU server resources. In these cases, 'unconnected GPU
 	 * context' shall be returned.
 	 */
-	if (!with_connection ||
-		!gpuservOpenConnection(gcontext))
+	if (with_connection)
+		gpuservOpenConnection(gcontext);
+	else
 		gcontext->sockfd = PGINVALID_SOCKET;
 
 	return gcontext;

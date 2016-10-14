@@ -798,7 +798,7 @@ gpuservSendCommand(GpuContext_v2 *gcontext, GpuServCommand *cmd, long timeout)
  * gpuservOpenConnection - open a unix domain socket from the backend
  * (it may fail if no available GPU server)
  */
-bool
+void
 gpuservOpenConnection(GpuContext_v2 *gcontext)
 {
 	GpuServProc	   *serv_proc = NULL;
@@ -806,7 +806,6 @@ gpuservOpenConnection(GpuContext_v2 *gcontext)
 	cl_int			gpuserv_id;
 	cl_int			dindex;
 	cl_int			dindex_first;
-	const char	   *elog_message = NULL;
 	long			timeout = 30000;	/* 30s */
 	struct timeval	tv1, tv2;
 
@@ -899,97 +898,91 @@ gpuservOpenConnection(GpuContext_v2 *gcontext)
 	serv_proc->gcontext_id = gcontext->shgcon->context_id;
 	SpinLockRelease(&gpuServState->lock);
 
-	/*
-	 * Open the connection
-	 */
-	sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
-	if (sockfd < 0)
+	PG_TRY();
 	{
-		elog_message = psprintf("failed on socket(2): %m");
-		goto error_cleanup;
-	}
+		/*
+		 * Open the connection
+		 */
+		sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
+		if (sockfd < 0)
+			elog(ERROR, "failed on socket(2): %m");
 
-	for (;;)
-	{
-		if (connect(sockfd,
-					(struct sockaddr *)&gpuServSockAddr[gpuserv_id],
-					sizeof(struct sockaddr_un)) == 0)
-			break;
-
-		if (errno != EINTR)
+		for (;;)
 		{
-			elog_message = psprintf("failed on connect(2): %m");
-			goto error_cleanup;
+			if (connect(sockfd,
+						(struct sockaddr *)&gpuServSockAddr[gpuserv_id],
+						sizeof(struct sockaddr_un)) == 0)
+				break;
+
+			if (errno != EINTR)
+				elog(ERROR, "failed on connect(2): %m");
+
+			gettimeofday(&tv2, NULL);
+			timeout -= ((tv2.tv_sec * 1000 + tv2.tv_usec / 1000) -
+						(tv1.tv_sec * 1000 + tv2.tv_usec / 1000));
+			tv1 = tv2;
+			if (timeout < 0)
+				elog(ERROR, "timeout on connect(2)");
+			CHECK_FOR_INTERRUPTS();
 		}
-		gettimeofday(&tv2, NULL);
-		timeout -= ((tv2.tv_sec * 1000 + tv2.tv_usec / 1000) -
-					(tv1.tv_sec * 1000 + tv2.tv_usec / 1000));
-		tv1 = tv2;
-		if (timeout < 0)
+
+		/*
+		 * wait for server's accept(2)
+		 */
+		for (;;)
 		{
-			elog_message = psprintf("timeout on connect(2)");
-			goto error_cleanup;		/* retry */
-		}
-		CHECK_FOR_INTERRUPTS();
-	}
+			int		ev;
 
-	/*
-	 * wait for server's accept(2)
-	 */
-	for (;;)
-	{
-		int		ev;
+			CHECK_FOR_INTERRUPTS();
 
-		CHECK_FOR_INTERRUPTS();
+			ResetLatch(MyLatch);
 
-		ResetLatch(MyLatch);
-
-		if (gcontext->shgcon->server)
-			break;
-
-		ev = WaitLatch(MyLatch,
-					   WL_LATCH_SET |
-					   WL_TIMEOUT |
-					   WL_POSTMASTER_DEATH,
-					   timeout);
-		if (ev & WL_POSTMASTER_DEATH)
-			ereport(FATAL,
-					(errcode(ERRCODE_ADMIN_SHUTDOWN),
-					 errmsg("Urgent termination by postmaster dead")));
-		if (ev & WL_LATCH_SET)
-		{
 			if (gcontext->shgcon->server)
 				break;
+
+			ev = WaitLatch(MyLatch,
+						   WL_LATCH_SET |
+						   WL_TIMEOUT |
+						   WL_POSTMASTER_DEATH,
+						   timeout);
+			if (ev & WL_POSTMASTER_DEATH)
+				ereport(FATAL,
+						(errcode(ERRCODE_ADMIN_SHUTDOWN),
+						 errmsg("Urgent termination by postmaster dead")));
+			if (ev & WL_LATCH_SET)
+			{
+				if (gcontext->shgcon->server)
+					break;
+			}
+
+			/* timeout? */
+			gettimeofday(&tv2, NULL);
+			timeout -= ((tv2.tv_sec * 1000 + tv2.tv_usec / 1000) -
+						(tv1.tv_sec * 1000 + tv2.tv_usec / 1000));
+			tv1 = tv2;
+			if (timeout < 0)
+				elog(ERROR, "timeout on connection establish");
 		}
-
-		/* timeout? */
-		gettimeofday(&tv2, NULL);
-		timeout -= ((tv2.tv_sec * 1000 + tv2.tv_usec / 1000) -
-					(tv1.tv_sec * 1000 + tv2.tv_usec / 1000));
-		tv1 = tv2;
-		if (timeout >= 0)
-			continue;
-
-		elog_message = psprintf("timeout on connection establish");
-		goto error_cleanup;
+		elog(DEBUG2, "connect socket %d to GPU server %d", sockfd, gpuserv_id);
+		gcontext->sockfd = sockfd;
 	}
-	elog(DEBUG2, "connect socket %d to GPU server %d", sockfd, gpuserv_id);
-	gcontext->sockfd = sockfd;
-
-	return true;	/* OK, connection gets established */
-
-error_cleanup:
-	/* release the right for connection, if caller still hold */
-	SpinLockAcquire(&gpuServState->lock);
-	if (serv_proc->backend_id == MyBackendId)
+	PG_CATCH();
 	{
-		serv_proc->backend_id = InvalidBackendId;
-		serv_proc->gcontext_id = INVALID_GPU_CONTEXT_ID;
+		/* release the right for connection, if caller still hold */
+		SpinLockAcquire(&gpuServState->lock);
+		if (serv_proc->backend_id == MyBackendId)
+		{
+			serv_proc->backend_id = InvalidBackendId;
+			serv_proc->gcontext_id = INVALID_GPU_CONTEXT_ID;
+		}
+		SpinLockRelease(&gpuServState->lock);
+
+		/* also close the socket */
+		if (sockfd >= 0)
+			close(sockfd);
+		PG_RE_THROW();
 	}
-	SpinLockRelease(&gpuServState->lock);
-	if (sockfd >= 0)
-		close(sockfd);
-	elog(ERROR, "%s", elog_message);
+	PG_END_TRY();
 }
 
 /*
