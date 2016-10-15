@@ -1103,7 +1103,7 @@ gpuservRecvCommands(GpuContext_v2 *gcontext, bool *p_peer_sock_closed)
 	char		   *pos;
 	GpuServCommand *cmd;
 	int				num_received = 0;
-	int				recvmsg_flags = 0;
+	int				recvmsg_flags = MSG_DONTWAIT;
 	int				peer_fdesc = -1;
 	size_t			unitsz;
 	ssize_t			remain;
@@ -1146,9 +1146,13 @@ gpuservRecvCommands(GpuContext_v2 *gcontext, bool *p_peer_sock_closed)
 				retval = recvmsg(gcontext->sockfd, &msg, recvmsg_flags);
 				if (retval < 0)
 				{
-					if (remain > 0 &&
-						(errno == EAGAIN || errno == EWOULDBLOCK))
-						elog(ERROR, "Bug? GpuServCommand message corruption");
+					if (errno == EAGAIN || errno == EWOULDBLOCK)
+					{
+						if (remain > 0)
+							elog(ERROR, "GpuServCommand message corruption");
+						Assert(remain == 0);
+						break;		/* no message arrived yet */
+					}
 					if (errno == ECONNRESET)
 					{
 						/* The peer socket was closed */
@@ -1307,12 +1311,6 @@ gpuservSendGpuTask(GpuContext_v2 *gcontext, GpuTask_v2 *gtask)
 	long			timeout = 5000;		/* 5.0sec; usually enough */
 	bool			result;
 
-	cmd.command = GPUSERV_CMD_TASK;
-	cmd.length = offsetof(GpuServCommand, u.task) + sizeof(cmd.u.task);
-	cmd.u.task.gtask = gtask;
-
-	result = gpuservSendCommand(gcontext, &cmd, timeout);
-
 	/* update num_async_tasks */
 	SpinLockAcquire(&shgcon->lock);
 	if (IsGpuServerProcess())
@@ -1320,6 +1318,11 @@ gpuservSendGpuTask(GpuContext_v2 *gcontext, GpuTask_v2 *gtask)
 	else
 		shgcon->num_async_tasks++;
 	SpinLockRelease(&shgcon->lock);
+
+	cmd.command = GPUSERV_CMD_TASK;
+	cmd.length = offsetof(GpuServCommand, u.task) + sizeof(cmd.u.task);
+	cmd.u.task.gtask = gtask;
+	result = gpuservSendCommand(gcontext, &cmd, timeout);
 
 	return result;
 }
@@ -1334,8 +1337,6 @@ bool
 gpuservRecvGpuTasks(GpuContext_v2 *gcontext, long timeout)
 {
 	struct timeval	tv1, tv2;
-	bool			retval = false;
-	int				ev;
 
 	if (gcontext->sockfd == PGINVALID_SOCKET)
 		return 0;
@@ -1348,9 +1349,27 @@ gpuservRecvGpuTasks(GpuContext_v2 *gcontext, long timeout)
 
 	gettimeofday(&tv1, NULL);
 	do {
-		ResetLatch(MyLatch);
+		bool		peer_sock_closed = false;
+		int			ev;
 
 		CHECK_FOR_INTERRUPTS();
+		ResetLatch(MyLatch);
+
+		if (gpuservRecvCommands(gcontext, &peer_sock_closed) > 0)
+			return true;
+		if (peer_sock_closed)
+		{
+			Assert(gcontext->sockfd != PGINVALID_SOCKET);
+			if (close(gcontext->sockfd) != 0)
+				elog(WARNING, "failed on close(%d) socket: %m",
+					 gcontext->sockfd);
+			else
+				elog(NOTICE, "sockfd=%d closed", gcontext->sockfd);
+			gcontext->sockfd = PGINVALID_SOCKET;
+			return false;
+		}
+		if (timeout == 0)
+			break;
 
 		ev = WaitLatchOrSocket(MyLatch,
 							   WL_LATCH_SET |
@@ -1363,37 +1382,19 @@ gpuservRecvGpuTasks(GpuContext_v2 *gcontext, long timeout)
 			ereport(FATAL,
 					(errcode(ERRCODE_ADMIN_SHUTDOWN),
 					 errmsg("Urgent termination by postmaster dead")));
-		if (ev & WL_SOCKET_READABLE)
-		{
-			bool		peer_sock_closed = false;
-
-			if (gpuservRecvCommands(gcontext, &peer_sock_closed) > 0)
-				retval = true;
-			if (peer_sock_closed &&
-				gcontext->sockfd != PGINVALID_SOCKET)
-			{
-				if (close(gcontext->sockfd) != 0)
-					elog(WARNING, "failed on close(%d) socket: %m",
-						 gcontext->sockfd);
-				else
-					elog(NOTICE, "sockfd=%d closed", gcontext->sockfd);
-				gcontext->sockfd = PGINVALID_SOCKET;
-			}
-			break;
-		}
-		/* adjust timeout */
+		/* elsewhere wake up by WL_LATCH_SET or WL_SOCKET_READABLE */
+		gettimeofday(&tv2, NULL);
 		if (timeout > 0)
 		{
-			gettimeofday(&tv2, NULL);
-
 			timeout -= ((tv2.tv_sec * 1000 + tv2.tv_usec / 1000) -
 						(tv1.tv_sec * 1000 + tv1.tv_usec / 1000));
+			tv1 = tv2;
 			if (timeout < 0)
-				break;
+				timeout = 0;
 		}
 	} while (timeout != 0);
 
-	return retval;
+	return false;
 }
 
 /*
