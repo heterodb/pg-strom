@@ -523,6 +523,8 @@ AllocGpuContext(bool with_connection)
 	dnode = dlist_pop_head_node(&sharedGpuContextHead->free_list);
 	shgcon = (SharedGpuContext *)
 		dlist_container(SharedGpuContext, chain, dnode);
+	memset(&shgcon->chain, 0, sizeof(dlist_node));
+
 	SpinLockRelease(&sharedGpuContextHead->lock);
 
 	Assert(shgcon == &sharedGpuContextHead->context_array[shgcon->context_id]);
@@ -664,7 +666,7 @@ PutSharedGpuContext(SharedGpuContext *shgcon)
 	else
 	{
 		Assert(!shgcon->server && !shgcon->backend);
-		dlist_delete(&shgcon->chain);
+		Assert(!shgcon->chain.prev && !shgcon->chain.next);
 		SpinLockRelease(&shgcon->lock);
 
 		/* release DMA buffer segments */
