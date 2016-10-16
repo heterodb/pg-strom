@@ -105,15 +105,24 @@ typedef struct SharedGpuContext
 	dlist_head	dma_buffer_list;/* tracker of DMA buffers */
 	cl_int		num_async_tasks;/* num of tasks passed to GPU server */
 	/* performance monitor */
-	bool		perfmon;
-	cl_uint		num_dmabuf_alloc;
-	cl_uint		num_dmabuf_free;
-	cl_uint		num_gpumem_alloc;
-	cl_uint		num_gpumem_free;
-	cl_double	time_dmabuf_alloc;
-	cl_double	time_dmabuf_free;
-	cl_double	time_gpumem_alloc;
-	cl_double	time_gpumem_free;
+	struct {
+		bool		enabled;
+		cl_uint		num_dmabuf_alloc;
+		cl_uint		num_dmabuf_free;
+		cl_uint		num_gpumem_alloc;
+		cl_uint		num_gpumem_free;
+		cl_uint		num_iomapped_alloc;
+		cl_uint		num_iomapped_free;
+		cl_float	tv_dmabuf_alloc;
+		cl_float	tv_dmabuf_free;
+		cl_float	tv_gpumem_alloc;
+		cl_float	tv_gpumem_free;
+		cl_float	tv_iomapped_alloc;
+		cl_float	tv_iomapped_free;
+		size_t		size_dmabuf_total;
+		size_t		size_gpumem_total;
+		size_t		size_iomapped_total;
+	} pfm;
 } SharedGpuContext;
 
 #define INVALID_GPU_CONTEXT_ID		(-1)
@@ -203,7 +212,10 @@ struct GpuTaskState_v2
 	/* list to manage GpuTasks */
 	dlist_head		ready_tasks;	/* list of tasks already processed */
 	cl_uint			num_ready_tasks;/* length of the list above */
-	pgstrom_perfmon	pfm;			/* performance monitor */
+
+	/* performance monitor */
+	pgstrom_perfmon	pfm;			/* local counter */
+	pgstrom_perfmon *pfm_master;	/* shared state, if under Gather */
 };
 #define GTS_GET_SCAN_TUPDESC(gts)				\
 	(((GpuTaskState_v2 *)(gts))->css.ss.ss_ScanTupleSlot->tts_tupleDescriptor)

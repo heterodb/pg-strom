@@ -25,6 +25,7 @@
 /*
  * static functions
  */
+static void pgstrom_collect_perfmon(GpuTaskState_v2 *gts);
 static void pgstrom_explain_perfmon(GpuTaskState_v2 *gts, ExplainState *es);
 
 
@@ -211,26 +212,8 @@ pgstromInitGpuTaskState(GpuTaskState_v2 *gts,
 	gts->pfm.enabled = pgstrom_perfmon_enabled;
 	gts->pfm.prime_in_gpucontext = (gcontext->refcnt == 1);
 	gts->pfm.task_kind = task_kind;
-#if 1
-	// FIXME: pfm should has GpuTaskKind instead of extra_flags in v2.0
-	switch (task_kind)
-	{
-		case GpuTaskKind_GpuScan:
-			gts->pfm.extra_flags = DEVKERNEL_NEEDS_GPUSCAN;
-			break;
-		case GpuTaskKind_GpuJoin:
-			gts->pfm.extra_flags = DEVKERNEL_NEEDS_GPUJOIN;
-			break;
-		case GpuTaskKind_GpuPreAgg:
-			gts->pfm.extra_flags = DEVKERNEL_NEEDS_GPUPREAGG;
-			break;
-		case GpuTaskKind_GpuSort:
-			gts->pfm.extra_flags = DEVKERNEL_NEEDS_GPUSORT;
-			break;
-		default:
-			elog(ERROR, "unexpected GpuTaskKind: %d", (int)task_kind);
-	}
-#endif
+	SpinLockInit(&gts->pfm.lock);
+	gts->pfm_master = NULL;		/* setup by DSM init handler */
 }
 
 /*
@@ -526,8 +509,6 @@ pgstromRescanGpuTaskState(GpuTaskState_v2 *gts)
 	 *
 	 */
 	gts->revision++;
-
-
 }
 
 /*
@@ -536,6 +517,8 @@ pgstromRescanGpuTaskState(GpuTaskState_v2 *gts)
 void
 pgstromReleaseGpuTaskState(GpuTaskState_v2 *gts)
 {
+	/* collect perfmon statistics */
+	pgstrom_collect_perfmon(gts);
 	/* cleanup per-query PDS-scan state, if any */
 	PDS_end_heapscan_state(gts);
 	/* release scan-desc if any */
@@ -1232,6 +1215,132 @@ show_instrumentation_count(const char *qlabel, int which,
 }
 #endif
 
+
+
+/*
+ * pgstrom_collect_perfmon - collect perfmon information
+ */
+static void
+pgstrom_collect_perfmon(GpuTaskState_v2 *gts)
+{
+#define PFM_ADD(FIELD)			pfm_master->FIELD += pfm_local->FIELD
+#define PFM_ADD_SHGCON(FIELD)	pfm_master->FIELD += shgcon->pfm.FIELD
+	pgstrom_perfmon	   *pfm_master = gts->pfm_master;
+	pgstrom_perfmon	   *pfm_local = &gts->pfm;
+	SharedGpuContext   *shgcon = gts->gcontext->shgcon;
+
+	/* Is pg_strom.perfmon==on? */
+	if (!pfm_local->enabled)
+		return;
+	/* Is parallel worker used? */
+	if (!pfm_master)
+		return;
+
+	SpinLockAcquire(&pfm_master->lock);
+	/* memory allocation counter */
+	PFM_ADD_SHGCON(num_dmabuf_alloc);
+	PFM_ADD_SHGCON(num_dmabuf_free);
+	PFM_ADD_SHGCON(num_gpumem_alloc);
+	PFM_ADD_SHGCON(num_gpumem_free);
+	PFM_ADD_SHGCON(num_iomapped_alloc);
+	PFM_ADD_SHGCON(num_iomapped_free);
+	PFM_ADD_SHGCON(tv_dmabuf_alloc);
+	PFM_ADD_SHGCON(tv_dmabuf_free);
+	PFM_ADD_SHGCON(tv_gpumem_alloc);
+	PFM_ADD_SHGCON(tv_gpumem_free);
+	PFM_ADD_SHGCON(tv_iomapped_alloc);
+	PFM_ADD_SHGCON(tv_iomapped_free);
+	PFM_ADD_SHGCON(size_dmabuf_total);
+	PFM_ADD_SHGCON(size_gpumem_total);
+	PFM_ADD_SHGCON(size_iomapped_total);
+
+	/* build cuda program */
+	// no idea how to track...
+
+	/* time for i/o stuff */
+	PFM_ADD(time_inner_load);
+	PFM_ADD(time_outer_load);
+	PFM_ADD(time_materialize);
+
+	/* dma data transfer */
+	PFM_ADD(num_dma_send);
+	PFM_ADD(num_dma_recv);
+	PFM_ADD(bytes_dma_send);
+	PFM_ADD(bytes_dma_recv);
+	PFM_ADD(time_dma_send);
+	PFM_ADD(time_dma_recv);
+
+	/* common GPU tasks */
+	PFM_ADD(num_tasks);
+	PFM_ADD(time_launch_cuda);
+	PFM_ADD(time_sync_tasks);
+
+	/* GpuScan */
+	PFM_ADD(gscan.num_kern_main);
+	PFM_ADD(gscan.tv_kern_main);
+	PFM_ADD(gscan.tv_kern_exec_quals);
+	PFM_ADD(gscan.tv_kern_projection);
+
+	/* GpuJoin */
+	PFM_ADD(gjoin.num_kern_main);
+	PFM_ADD(gjoin.num_kern_outer_scan);
+	PFM_ADD(gjoin.num_kern_exec_nestloop);
+	PFM_ADD(gjoin.num_kern_exec_hashjoin);
+	PFM_ADD(gjoin.num_kern_outer_nestloop);
+	PFM_ADD(gjoin.num_kern_outer_hashjoin);
+	PFM_ADD(gjoin.num_kern_projection);
+	PFM_ADD(gjoin.num_kern_rows_dist);
+	PFM_ADD(gjoin.num_global_retry);
+	PFM_ADD(gjoin.num_major_retry);
+	PFM_ADD(gjoin.num_minor_retry);
+	PFM_ADD(gjoin.tv_kern_main);
+	PFM_ADD(gjoin.tv_kern_outer_scan);
+	PFM_ADD(gjoin.tv_kern_exec_nestloop);
+	PFM_ADD(gjoin.tv_kern_exec_hashjoin);
+	PFM_ADD(gjoin.tv_kern_outer_nestloop);
+	PFM_ADD(gjoin.tv_kern_outer_hashjoin);
+	PFM_ADD(gjoin.tv_kern_projection);
+	PFM_ADD(gjoin.tv_kern_rows_dist);
+	PFM_ADD(gjoin.num_inner_dma_send);
+	PFM_ADD(gjoin.bytes_inner_dma_send);
+	PFM_ADD(gjoin.tv_inner_dma_send);
+
+	/* GpuPreAgg */
+	PFM_ADD(gpreagg.num_kern_main);
+	PFM_ADD(gpreagg.num_kern_prep);
+	PFM_ADD(gpreagg.num_kern_nogrp);
+	PFM_ADD(gpreagg.num_kern_lagg);
+	PFM_ADD(gpreagg.num_kern_gagg);
+	PFM_ADD(gpreagg.num_kern_fagg);
+	PFM_ADD(gpreagg.num_kern_fixvar);
+	PFM_ADD(gpreagg.tv_kern_main);
+	PFM_ADD(gpreagg.tv_kern_prep);
+	PFM_ADD(gpreagg.tv_kern_nogrp);
+	PFM_ADD(gpreagg.tv_kern_lagg);
+	PFM_ADD(gpreagg.tv_kern_gagg);
+	PFM_ADD(gpreagg.tv_kern_fagg);
+	PFM_ADD(gpreagg.tv_kern_fixvar);
+
+	/* GpuSort */
+	PFM_ADD(gsort.num_kern_proj);
+	PFM_ADD(gsort.num_kern_main);
+	PFM_ADD(gsort.num_kern_lsort);
+	PFM_ADD(gsort.num_kern_ssort);
+	PFM_ADD(gsort.num_kern_msort);
+	PFM_ADD(gsort.num_kern_fixvar);
+	PFM_ADD(gsort.tv_kern_proj);
+	PFM_ADD(gsort.tv_kern_main);
+	PFM_ADD(gsort.tv_kern_lsort);
+	PFM_ADD(gsort.tv_kern_ssort);
+	PFM_ADD(gsort.tv_kern_msort);
+	PFM_ADD(gsort.tv_kern_fixvar);
+	PFM_ADD(gsort.tv_cpu_sort);
+
+	SpinLockRelease(&pfm_master->lock);
+#undef PFM_ADD
+#undef PFM_ADD_SHGCON
+}
+
 /*
  * pgstrom_explain_perfmon - common routine to explain performance info
  */
@@ -1240,6 +1349,9 @@ pgstrom_explain_perfmon(GpuTaskState_v2 *gts, ExplainState *es)
 {
 	pgstrom_perfmon	   *pfm = &gts->pfm;
 	char				buf[1024];
+
+	if (gts->pfm_master)
+		pfm = gts->pfm_master;
 
 	if (!pfm->enabled)
 		return;
@@ -1264,11 +1376,14 @@ pgstrom_explain_perfmon(GpuTaskState_v2 *gts, ExplainState *es)
 	switch (pfm->task_kind)
 	{
 		case GpuTaskKind_GpuScan:
-			EXPLAIN_KERNEL_PERFMON("gpuscan_exec_quals",
-								   gscan.num_kern_exec_quals,
+			EXPLAIN_KERNEL_PERFMON("gpuscan_main()",
+								   gscan.num_kern_main,
+								   gscan.tv_kern_main);
+			EXPLAIN_KERNEL_PERFMON(" - gpuscan_exec_quals",
+								   gscan.num_kern_main,
 								   gscan.tv_kern_exec_quals);
-			EXPLAIN_KERNEL_PERFMON("gpuscan_projection",
-								   gscan.num_kern_projection,
+			EXPLAIN_KERNEL_PERFMON(" - gpuscan_projection",
+								   gscan.num_kern_main,
 								   gscan.tv_kern_projection);
 			break;
 
@@ -1427,36 +1542,85 @@ pgstrom_explain_perfmon(GpuTaskState_v2 *gts, ExplainState *es)
 	/* Host/Device Memory Allocation (only prime node) */
 	if (pfm->prime_in_gpucontext)
 	{
-		GpuContext_v2  *gcontext = gts->gcontext;
-		SharedGpuContext *shgcon = gcontext->shgcon;
-		cl_uint		num_dmabuf_alloc  = shgcon->num_dmabuf_alloc;
-		cl_uint		num_dmabuf_free   = shgcon->num_dmabuf_free;
-		cl_uint		num_gpumem_alloc  = shgcon->num_gpumem_alloc;
-		cl_uint		num_gpumem_free   = shgcon->num_gpumem_free;
-		cl_double	time_dmabuf_alloc = shgcon->time_dmabuf_alloc;
-		cl_double	time_dmabuf_free  = shgcon->time_dmabuf_free;
-		cl_double	time_gpumem_alloc = shgcon->time_gpumem_alloc;
-		cl_double	time_gpumem_free  = shgcon->time_gpumem_free;
+		if (pfm->num_dmabuf_alloc > 0 ||
+			pfm->num_dmabuf_free > 0)
+		{
+			if (pfm->num_dmabuf_alloc == pfm->num_dmabuf_free)
+			{
+				snprintf(buf, sizeof(buf),
+						 "total: %s, count: %u, time: %s",
+						 format_bytesz(pfm->size_dmabuf_total),
+						 pfm->num_dmabuf_alloc,
+						 format_millisec(pfm->tv_dmabuf_alloc +
+										 pfm->tv_dmabuf_free));
+			}
+			else
+			{
+				snprintf(buf, sizeof(buf),
+						 "total: %s, alloc (count: %u, time: %s) "
+						 "free (count: %u, time: %s)",
+						 format_bytesz(pfm->size_dmabuf_total),
+						 pfm->num_dmabuf_alloc,
+						 format_millisec(pfm->tv_dmabuf_alloc),
+						 pfm->num_dmabuf_free,
+						 format_millisec(pfm->tv_dmabuf_free));
+			}
+			ExplainPropertyText("DMA Buffer", buf, es);
+		}
 
-		snprintf(buf, sizeof(buf),
-				 "alloc (count: %u, time: %s), free (count: %u, time: %s)",
-				 num_dmabuf_alloc, format_millisec(time_dmabuf_alloc),
-				 num_dmabuf_free, format_millisec(time_dmabuf_free));
-		ExplainPropertyText("DMA Buffer", buf, es);
+		if (pfm->num_gpumem_alloc > 0 ||
+			pfm->num_gpumem_free > 0)
+		{
+			if (pfm->num_gpumem_alloc == pfm->num_gpumem_free)
+			{
+				snprintf(buf, sizeof(buf),
+						 "total: %s, count: %u, time: %s",
+						 format_bytesz(pfm->size_gpumem_total),
+						 pfm->num_gpumem_alloc,
+						 format_millisec(pfm->tv_gpumem_alloc +
+										 pfm->tv_gpumem_free));
+			}
+			else
+			{
+				snprintf(buf, sizeof(buf),
+						 "total: %s, alloc (count: %u, time: %s) "
+						 "free (count: %u, time: %s)",
+						 format_bytesz(pfm->size_gpumem_total),
+						 pfm->num_gpumem_alloc,
+						 format_millisec(pfm->tv_gpumem_alloc),
+						 pfm->num_gpumem_free,
+						 format_millisec(pfm->tv_gpumem_free));
+			}
+			ExplainPropertyText("GPU Memory", buf, es);
+		}
 
-		snprintf(buf, sizeof(buf),
-				 "alloc (count: %u, time: %s), free (count: %u, time: %s)",
-				 num_gpumem_alloc, format_millisec(time_gpumem_alloc),
-				 num_gpumem_free, format_millisec(time_gpumem_free));
-		ExplainPropertyText("GPU Memory", buf, es);
+		if (pfm->num_iomapped_alloc > 0 ||
+			pfm->num_iomapped_free > 0)
+		{
+			if (pfm->num_iomapped_alloc == pfm->num_iomapped_free)
+			{
+				snprintf(buf, sizeof(buf),
+						 "total: %s, count: %u, time: %s",
+						 format_bytesz(pfm->size_iomapped_total),
+						 pfm->num_iomapped_alloc,
+						 format_millisec(pfm->tv_iomapped_alloc +
+										 pfm->tv_iomapped_free));
+			}
+			else
+			{
+				snprintf(buf, sizeof(buf),
+						 "total: %s, alloc (count: %u, time: %s) "
+						 "free (count: %u, time: %s)",
+						 format_bytesz(pfm->size_iomapped_total),
+						 pfm->num_iomapped_alloc,
+						 format_millisec(pfm->tv_iomapped_alloc),
+						 pfm->num_iomapped_free,
+						 format_millisec(pfm->tv_iomapped_free));
+			}
+			ExplainPropertyText("I/O Mapped Memory", buf, es);
+		}
 	}
 }
-
-
-
-
-
-
 
 /*
  * pgstrom_init_gputasks

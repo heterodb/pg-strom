@@ -112,7 +112,7 @@ gpuMemAlloc_v2(GpuContext_v2 *gcontext, CUdeviceptr *p_devptr, size_t bytesize)
 	struct timeval	tv1, tv2;
 
 	Assert(IsGpuServerProcess());
-	if (shgcon->perfmon)
+	if (shgcon->pfm.enabled)
 		gettimeofday(&tv1, NULL);
 
 	rc = cuMemAlloc(&devptr, bytesize);
@@ -129,13 +129,14 @@ gpuMemAlloc_v2(GpuContext_v2 *gcontext, CUdeviceptr *p_devptr, size_t bytesize)
 					&tracker->chain);
 	*p_devptr = devptr;
 
-	if (shgcon->perfmon)
+	if (shgcon->pfm.enabled)
 	{
 		gettimeofday(&tv2, NULL);
 
 		SpinLockAcquire(&shgcon->lock);
-		shgcon->num_gpumem_alloc++;
-		shgcon->time_gpumem_alloc += PERFMON_TIMEVAL_DIFF(tv1,tv2);
+		shgcon->pfm.num_gpumem_alloc++;
+		shgcon->pfm.tv_gpumem_alloc += PERFMON_TIMEVAL_DIFF(tv1,tv2);
+		shgcon->pfm.size_gpumem_total += bytesize;
 		SpinLockRelease(&shgcon->lock);
 	}
 	return rc;
@@ -151,7 +152,7 @@ gpuMemFree_v2(GpuContext_v2 *gcontext, CUdeviceptr devptr)
 	CUresult		rc;
 	struct timeval	tv1, tv2;
 
-	if (shgcon->perfmon)
+	if (shgcon->pfm.enabled)
 		gettimeofday(&tv1, NULL);
 
 	crc = resource_tracker_hashval(RESTRACK_CLASS__GPUMEMORY,
@@ -181,13 +182,13 @@ gpuMemFree_v2(GpuContext_v2 *gcontext, CUdeviceptr devptr)
 	rc = cuMemFree(devptr);
 	notifierGpuMemFree(shgcon->device_id);
 
-	if (shgcon->perfmon)
+	if (shgcon->pfm.enabled)
 	{
 		gettimeofday(&tv2, NULL);
 
 		SpinLockAcquire(&shgcon->lock);
-		shgcon->num_gpumem_free++;
-		shgcon->time_gpumem_free += PERFMON_TIMEVAL_DIFF(tv1,tv2);
+		shgcon->pfm.num_gpumem_free++;
+		shgcon->pfm.tv_gpumem_free += PERFMON_TIMEVAL_DIFF(tv1,tv2);
 		SpinLockRelease(&shgcon->lock);
 	}
 	return rc;
@@ -535,15 +536,8 @@ AllocGpuContext(bool with_connection)
 	dlist_init(&shgcon->dma_buffer_list);
 	shgcon->num_async_tasks = 0;
 	/* perfmon fields */
-	shgcon->perfmon = pgstrom_perfmon_enabled;
-	shgcon->num_dmabuf_alloc  = 0;
-	shgcon->num_dmabuf_free   = 0;
-	shgcon->num_gpumem_alloc  = 0;
-	shgcon->num_gpumem_free   = 0;
-	shgcon->time_dmabuf_alloc = 0.0;
-	shgcon->time_dmabuf_free  = 0.0;
-	shgcon->time_gpumem_alloc = 0.0;
-	shgcon->time_gpumem_free  = 0.0;
+	memset(&shgcon->pfm, 0, sizeof(shgcon->pfm));
+	shgcon->pfm.enabled = pgstrom_perfmon_enabled;
 
 	/* init local GpuContext */
 	gcontext->refcnt = 1;

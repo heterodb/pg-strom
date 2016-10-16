@@ -36,6 +36,11 @@
  */
 typedef struct {
 	kern_errorbuf	kerror;
+	/* performance profile */
+	struct {
+		cl_float	tv_kern_exec_quals;
+		cl_float	tv_kern_projection;
+	} pfm;
 	kern_parambuf	kparams;
 } kern_gpuscan;
 
@@ -662,6 +667,7 @@ gpuscan_main(kern_gpuscan *kgpuscan,
 	dim3			block_sz;
 	cl_uint			part_sz;
 	cl_uint			ntuples;
+	cl_ulong		tv1, tv2;
 	cudaError_t		status = cudaSuccess;
 
 	INIT_KERNEL_CONTEXT(&kcxt, gpuscan_main, kparams);
@@ -677,6 +683,8 @@ gpuscan_main(kern_gpuscan *kgpuscan,
 	 */
 	if (!kresults->all_visible)
 	{
+		tv1 = GlobalTimer();
+
 		if (kds_src->format == KDS_FORMAT_ROW)
 		{
 			kernel_func = (void *)gpuscan_exec_quals_row;
@@ -752,18 +760,25 @@ gpuscan_main(kern_gpuscan *kgpuscan,
 			goto out;
 		}
 		ntuples = kresults->nitems;
+
+		tv2 = GlobalTimer();
 	}
 	else
 	{
 		/* all-visible, thus all the source tuples are valid input */
 		ntuples = kds_src->nitems;
+		/* gpuscan_exec_quals_* was not executed  */
+		tv1 = tv2 = 0;
 	}
+	kgpuscan->pfm.tv_kern_exec_quals = (cl_float)(tv2 - tv1) / 1000000.0;
 
 	/*
      * (2) Projection of the results
      */
 	if (kds_dst && ntuples > 0)
 	{
+		tv1 = GlobalTimer();
+
 		if (kds_dst->format == KDS_FORMAT_ROW)
 			kernel_func = (void *)gpuscan_projection_row;
 		else
@@ -816,7 +831,14 @@ gpuscan_main(kern_gpuscan *kgpuscan,
 			kcxt.e = kresults->kerror;
 			goto out;
 		}
+		tv2 = GlobalTimer();
 	}
+	else
+	{
+		/* gpuscan_projection_* was not launched */
+		tv1 = tv2 = 0;
+	}
+	kgpuscan->pfm.tv_kern_projection = (cl_float)(tv2 - tv1) / 1000000.0;
 out:
 	kern_writeback_error_status(&kgpuscan->kerror, kcxt.e);
 }

@@ -589,6 +589,12 @@ gpuservFlushOutCompletedTasks(void)
 				 * GpuTask wants to release this task without message-back.
 				 * So, we have to decrement num_async_tasks and set latch
 				 * of the backend process (it may wait for the last task).
+				 *
+				 * NOTE: We may not have this option because performance
+				 * counter data needs to be written back to the backend
+				 * process. Omit of message-back will give us small
+				 * optimization benefit, but it makes performance counter
+				 * code complicated...
 				 */
 				SharedGpuContext   *shgcon = gcontext->shgcon;
 

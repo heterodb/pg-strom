@@ -22,44 +22,50 @@
  * Performance monitor structure
  */
 typedef struct {
-	cl_bool		enabled;
-	cl_bool		prime_in_gpucontext;
-	GpuTaskKind	task_kind;
-	cl_uint		extra_flags;	/* deprecated */
+	cl_bool			enabled;
+	cl_bool			prime_in_gpucontext;
+	GpuTaskKind		task_kind;
+	/*-- lock of the performance counter below --*/
+	slock_t			lock;
 	/*-- memory allocation counter --*/
-	cl_uint		num_host_malloc;
-	cl_uint		num_host_mfree;
-	cl_uint		num_dev_malloc;
-	cl_uint		num_dev_mfree;
-	cl_double	tv_host_malloc;
-	cl_double	tv_host_mfree;
-	cl_double	tv_dev_malloc;
-	cl_double	tv_dev_mfree;
+	cl_uint			num_dmabuf_alloc;
+	cl_uint			num_dmabuf_free;
+	cl_uint			num_gpumem_alloc;
+	cl_uint			num_gpumem_free;
+	cl_uint			num_iomapped_alloc;
+	cl_uint			num_iomapped_free;
+	cl_double		tv_dmabuf_alloc;
+	cl_double		tv_dmabuf_free;
+	cl_double		tv_gpumem_alloc;
+	cl_double		tv_gpumem_free;
+	cl_double		tv_iomapped_alloc;
+	cl_double		tv_iomapped_free;
+	size_t			size_dmabuf_total;
+	size_t			size_gpumem_total;
+	size_t			size_iomapped_total;
 	/*-- build cuda program --*/
 	struct timeval	tv_build_start;
 	struct timeval	tv_build_end;
 	/*-- time for task pending --*/
 
 	/*-- time for I/O stuff --*/
-	cl_double	time_inner_load;	/* time to load the inner relation */
-	cl_double	time_outer_load;	/* time to load the outer relation */
-	cl_double	time_materialize;	/* time to materialize the result */
+	cl_double		time_inner_load;	/* time to load the inner relation */
+	cl_double		time_outer_load;	/* time to load the outer relation */
+	cl_double		time_materialize;	/* time to materialize the result */
 	/*-- DMA data transfer --*/
-	cl_uint		num_dma_send;	/* number of DMA send request */
-	cl_uint		num_dma_recv;	/* number of DMA receive request */
-	cl_ulong	bytes_dma_send;	/* bytes of DMA send */
-	cl_ulong	bytes_dma_recv;	/* bytes of DMA receive */
-	cl_double	time_dma_send;	/* time to send host=>device data */
-	cl_double	time_dma_recv;	/* time to receive device=>host data */
+	cl_uint			num_dma_send;	/* number of DMA send request */
+	cl_uint			num_dma_recv;	/* number of DMA receive request */
+	cl_ulong		bytes_dma_send;	/* bytes of DMA send */
+	cl_ulong		bytes_dma_recv;	/* bytes of DMA receive */
+	cl_double		time_dma_send;	/* time to send host=>device data */
+	cl_double		time_dma_recv;	/* time to receive device=>host data */
 	/*-- specific items for each GPU logic --*/
-	cl_uint		num_tasks;			/* number of tasks completed */
-	cl_double	time_launch_cuda;	/* time to kick CUDA commands */
-	cl_double	time_sync_tasks;	/* time to synchronize tasks */
+	cl_uint			num_tasks;			/* number of tasks completed */
+	cl_double		time_launch_cuda;	/* time to kick CUDA commands */
+	cl_double		time_sync_tasks;	/* time to synchronize tasks */
 	/*-- for each GPU logic --*/
 	struct {
 		cl_uint		num_kern_main;
-		cl_uint		num_kern_exec_quals;
-		cl_uint		num_kern_projection;
 		cl_double	tv_kern_main;
 		cl_double	tv_kern_exec_quals;
 		cl_double	tv_kern_projection;

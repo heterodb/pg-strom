@@ -102,16 +102,13 @@ typedef struct
 	CUdeviceptr			m_kds_dst;
 	CUevent				ev_dma_send_start;
 	CUevent				ev_dma_send_stop;
-	CUevent				ev_kern_exec_quals;
 	CUevent				ev_dma_recv_start;
 	CUevent				ev_dma_recv_stop;
 	/* Performance counters */
 	cl_uint				num_kern_main;
-	cl_uint				num_kern_exec_quals;
-	cl_uint				num_kern_projection;
-	cl_double			time_kern_main;
-	cl_double			time_kern_exec_quals;
-	cl_double			time_kern_projection;
+	cl_double			tv_kern_main;
+	cl_double			tv_kern_exec_quals;
+	cl_double			tv_kern_projection;
 	cl_uint				num_dma_send;
 	cl_uint				num_dma_recv;
 	Size				bytes_dma_send;
@@ -1797,6 +1794,13 @@ ExecReScanGpuScan(CustomScanState *node)
 	gpuscanRewindScanChunk(&gss->gts);
 }
 
+/* shared state of GpuScan for CPU parallel */
+typedef struct
+{
+	pgstrom_perfmon	   *pfm_master;
+	ParallelHeapScanDescData pscan;
+} GpuScanParallelDSM;
+
 /*
  * ExecGpuScanEstimateDSM - return required size of shared memory
  */
@@ -1804,9 +1808,10 @@ static Size
 ExecGpuScanEstimateDSM(CustomScanState *node,
 					   ParallelContext *pcxt)
 {
-	EState	   *estate = node->ss.ps.state;
+	EState		   *estate = node->ss.ps.state;
 
-	return heap_parallelscan_estimate(estate->es_snapshot);
+	return (offsetof(GpuScanParallelDSM, pscan) +
+			heap_parallelscan_estimate(estate->es_snapshot));
 }
 
 /*
@@ -1819,13 +1824,29 @@ ExecGpuScanInitDSM(CustomScanState *node,
 {
 	GpuScanState   *gss = (GpuScanState *) node;
 	EState		   *estate = node->ss.ps.state;
-	ParallelHeapScanDesc pscan = coordinate;
+	GpuScanParallelDSM *gpdsm = coordinate;
 
-	heap_parallelscan_initialize(pscan,
+	if (!gss->gts.pfm.enabled)
+		gpdsm->pfm_master = NULL;
+	else
+	{
+		gpdsm->pfm_master = dmaBufferAlloc(gss->gts.gcontext,
+										   sizeof(pgstrom_perfmon));
+		if (!gpdsm->pfm_master)
+			elog(ERROR, "out of shared memory");
+		memset(gpdsm->pfm_master, 0, sizeof(pgstrom_perfmon));
+		memcpy(gpdsm->pfm_master, &gss->gts.pfm,
+			   offsetof(pgstrom_perfmon, lock));
+		SpinLockInit(&gpdsm->pfm_master->lock);
+	}
+	gss->gts.pfm_master = gpdsm->pfm_master;
+
+	heap_parallelscan_initialize(&gpdsm->pscan,
 								 gss->gts.css.ss.ss_currentRelation,
 								 estate->es_snapshot);
 	node->ss.ss_currentScanDesc =
-		heap_beginscan_parallel(gss->gts.css.ss.ss_currentRelation, pscan);
+		heap_beginscan_parallel(gss->gts.css.ss.ss_currentRelation,
+								&gpdsm->pscan);
 	/* Try to choose NVMe-Strom, if available */
 	PDS_init_heapscan_state(&gss->gts, gss->nrows_per_block);
 }
@@ -1839,11 +1860,14 @@ ExecGpuScanInitWorker(CustomScanState *node,
 					  void *coordinate)
 {
 	GpuScanState   *gss = (GpuScanState *) node;
-	ParallelHeapScanDesc pscan;
+	GpuScanParallelDSM *gpdsm = coordinate;
 
-	pscan = shm_toc_lookup(toc, gss->gts.css.ss.ps.plan->plan_node_id);
+	if (gss->gts.pfm.enabled)
+		gss->gts.pfm_master = gpdsm->pfm_master;
+
 	node->ss.ss_currentScanDesc =
-		heap_beginscan_parallel(gss->gts.css.ss.ss_currentRelation, pscan);
+		heap_beginscan_parallel(gss->gts.css.ss.ss_currentRelation,
+								&gpdsm->pscan);
 	/* Try to choose NVMe-Strom, if available */
 	PDS_init_heapscan_state(&gss->gts, gss->nrows_per_block);
 }
@@ -2212,6 +2236,22 @@ gpuscan_switch_task(GpuTaskState_v2 *gts, GpuTask_v2 *gtask)
 		Assert(pds_src->kds.format == KDS_FORMAT_BLOCK);
 		PDS_fillup_blocks(pds_src, gscan->task.file_desc);
 	}
+
+	/* move the server side perfmon counter to local pfm */
+	if (gscan->task.perfmon)
+	{
+		gts->pfm.num_dma_send	+= gscan->num_dma_send;
+		gts->pfm.num_dma_recv	+= gscan->num_dma_recv;
+		gts->pfm.bytes_dma_send	+= gscan->bytes_dma_send;
+		gts->pfm.bytes_dma_recv	+= gscan->bytes_dma_recv;
+		gts->pfm.time_dma_send	+= gscan->time_dma_send;
+		gts->pfm.time_dma_recv	+= gscan->time_dma_recv;
+
+		gts->pfm.gscan.num_kern_main	+= gscan->num_kern_main;
+		gts->pfm.gscan.tv_kern_main		+= gscan->tv_kern_main;
+		gts->pfm.gscan.tv_kern_exec_quals += gscan->tv_kern_exec_quals;
+		gts->pfm.gscan.tv_kern_projection += gscan->tv_kern_projection;
+	}
 }
 
 /*
@@ -2481,7 +2521,6 @@ gpuscan_cleanup_cuda_resources(GpuScanTask *gscan)
 
 	PERFMON_EVENT_DESTROY(gscan, ev_dma_send_start);
 	PERFMON_EVENT_DESTROY(gscan, ev_dma_send_stop);
-	PERFMON_EVENT_DESTROY(gscan, ev_kern_exec_quals);
 	PERFMON_EVENT_DESTROY(gscan, ev_dma_recv_start);
 	PERFMON_EVENT_DESTROY(gscan, ev_dma_recv_stop);
 
@@ -2621,7 +2660,6 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 	 */
 	PFMON_EVENT_CREATE(gscan, ev_dma_send_start);
 	PFMON_EVENT_CREATE(gscan, ev_dma_send_stop);
-	PFMON_EVENT_CREATE(gscan, ev_kern_exec_quals);
 	PFMON_EVENT_CREATE(gscan, ev_dma_recv_start);
 	PFMON_EVENT_CREATE(gscan, ev_dma_recv_stop);
 
@@ -2698,6 +2736,7 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 						NULL);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
+	gscan->num_kern_main++;
 
 	/*
 	 * Recv DMA call
@@ -2801,15 +2840,14 @@ gpuscan_complete_task(GpuTask_v2 *gtask)
 	PERFMON_EVENT_ELAPSED(gscan, time_dma_send,
 						  ev_dma_send_start,
 						  ev_dma_send_stop);
-	PERFMON_EVENT_ELAPSED(gscan, time_kern_exec_quals,
+	PERFMON_EVENT_ELAPSED(gscan, tv_kern_main,
 						  ev_dma_send_stop,
-						  ev_kern_exec_quals);
-	PERFMON_EVENT_ELAPSED(gscan, time_kern_projection,
-						  ev_kern_exec_quals,
 						  ev_dma_recv_start);
 	PERFMON_EVENT_ELAPSED(gscan, time_dma_recv,
 						  ev_dma_recv_start,
 						  ev_dma_recv_stop);
+	gscan->tv_kern_exec_quals = gscan->kern.pfm.tv_kern_exec_quals;
+	gscan->tv_kern_projection = gscan->kern.pfm.tv_kern_projection;
 
 	gpuscan_cleanup_cuda_resources(gscan);
 
