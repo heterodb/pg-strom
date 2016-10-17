@@ -172,13 +172,11 @@ gpuMemFree_v2(GpuContext_v2 *gcontext, CUdeviceptr devptr)
 			memset(tracker, 0, sizeof(ResourceTracker));
 			dlist_push_head(&inactiveResourceTracker,
 							&tracker->chain);
-			rc = cuMemFree(devptr);
-			notifierGpuMemFree(shgcon->device_id);
-			return rc;
-        }
+			goto found;
+		}
     }
     elog(WARNING, "Bug? device pointer %p was not tracked", (void *)devptr);
-
+found:
 	rc = cuMemFree(devptr);
 	notifierGpuMemFree(shgcon->device_id);
 

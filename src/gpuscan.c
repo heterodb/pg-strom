@@ -137,6 +137,13 @@ typedef struct {
 	ProjectionInfo *base_proj;
 } GpuScanState;
 
+/* shared state of GpuScan for CPU parallel */
+typedef struct
+{
+	pgstrom_perfmon	   *pfm_master;
+	ParallelHeapScanDescData pscan;	/* flexible length */
+} GpuScanParallelDSM;
+
 /*
  * static functions
  */
@@ -1794,13 +1801,6 @@ ExecReScanGpuScan(CustomScanState *node)
 	gpuscanRewindScanChunk(&gss->gts);
 }
 
-/* shared state of GpuScan for CPU parallel */
-typedef struct
-{
-	pgstrom_perfmon	   *pfm_master;
-	ParallelHeapScanDescData pscan;
-} GpuScanParallelDSM;
-
 /*
  * ExecGpuScanEstimateDSM - return required size of shared memory
  */
@@ -1827,20 +1827,19 @@ ExecGpuScanInitDSM(CustomScanState *node,
 	GpuScanParallelDSM *gpdsm = coordinate;
 
 	if (!gss->gts.pfm.enabled)
-		gpdsm->pfm_master = NULL;
+		gss->gts.pfm_master = NULL;
 	else
 	{
-		gpdsm->pfm_master = dmaBufferAlloc(gss->gts.gcontext,
-										   sizeof(pgstrom_perfmon));
-		if (!gpdsm->pfm_master)
+		gss->gts.pfm_master = dmaBufferAlloc(gss->gts.gcontext,
+											 sizeof(pgstrom_perfmon));
+		if (!gss->gts.pfm_master)
 			elog(ERROR, "out of shared memory");
-		memset(gpdsm->pfm_master, 0, sizeof(pgstrom_perfmon));
-		memcpy(gpdsm->pfm_master, &gss->gts.pfm,
+		memset(gss->gts.pfm_master, 0, sizeof(pgstrom_perfmon));
+		memcpy(gss->gts.pfm_master, &gss->gts.pfm,
 			   offsetof(pgstrom_perfmon, lock));
-		SpinLockInit(&gpdsm->pfm_master->lock);
+		SpinLockInit(&gss->gts.pfm_master->lock);
 	}
-	gss->gts.pfm_master = gpdsm->pfm_master;
-
+	gpdsm->pfm_master = gss->gts.pfm_master;
 	heap_parallelscan_initialize(&gpdsm->pscan,
 								 gss->gts.css.ss.ss_currentRelation,
 								 estate->es_snapshot);
@@ -1862,9 +1861,7 @@ ExecGpuScanInitWorker(CustomScanState *node,
 	GpuScanState   *gss = (GpuScanState *) node;
 	GpuScanParallelDSM *gpdsm = coordinate;
 
-	if (gss->gts.pfm.enabled)
-		gss->gts.pfm_master = gpdsm->pfm_master;
-
+	gss->gts.pfm_master = (gss->gts.pfm.enabled ? gpdsm->pfm_master : NULL);
 	node->ss.ss_currentScanDesc =
 		heap_beginscan_parallel(gss->gts.css.ss.ss_currentRelation,
 								&gpdsm->pscan);

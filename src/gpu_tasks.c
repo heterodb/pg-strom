@@ -25,7 +25,8 @@
 /*
  * static functions
  */
-static void pgstrom_collect_perfmon(GpuTaskState_v2 *gts);
+static void pgstrom_collect_perfmon_master(GpuTaskState_v2 *gts);
+static void pgstrom_collect_perfmon_worker(GpuTaskState_v2 *gts);
 static void pgstrom_explain_perfmon(GpuTaskState_v2 *gts, ExplainState *es);
 
 
@@ -517,8 +518,24 @@ pgstromRescanGpuTaskState(GpuTaskState_v2 *gts)
 void
 pgstromReleaseGpuTaskState(GpuTaskState_v2 *gts)
 {
-	/* collect perfmon statistics */
-	pgstrom_collect_perfmon(gts);
+	/*
+	 * collect perfmon statistics if parallel worker
+	 *
+	 * NOTE: ExplainCustomScan() shall be called prior to EndCustomScan() of
+	 * the leader process. Thus, collection of perfmon count makes sense only
+	 * when it is parallel worker context.
+	 * In addition, ExecEndGather() releases parallel context and DSM segment
+	 * prior to EndCustomScan(), so any reference to @pfm_master on the leader
+	 * process context will make SEGV.
+	 */
+	if (ParallelMasterBackendId != InvalidBackendId)
+		pgstrom_collect_perfmon_worker(gts);
+	else if (gts->pfm_master)
+	{
+		/* shared performance counter is no longer needed */
+		dmaBufferFree(gts->pfm_master);
+		gts->pfm_master = NULL;
+	}
 	/* cleanup per-query PDS-scan state, if any */
 	PDS_end_heapscan_state(gts);
 	/* release scan-desc if any */
@@ -1220,39 +1237,25 @@ show_instrumentation_count(const char *qlabel, int which,
 /*
  * pgstrom_collect_perfmon - collect perfmon information
  */
-static void
-pgstrom_collect_perfmon(GpuTaskState_v2 *gts)
+static inline void
+__pgstrom_collect_perfmon(pgstrom_perfmon *pfm_dst, pgstrom_perfmon *pfm_src)
 {
-#define PFM_ADD(FIELD)			pfm_master->FIELD += pfm_local->FIELD
-#define PFM_ADD_SHGCON(FIELD)	pfm_master->FIELD += shgcon->pfm.FIELD
-	pgstrom_perfmon	   *pfm_master = gts->pfm_master;
-	pgstrom_perfmon	   *pfm_local = &gts->pfm;
-	SharedGpuContext   *shgcon = gts->gcontext->shgcon;
-
-	/* Is pg_strom.perfmon==on? */
-	if (!pfm_local->enabled)
-		return;
-	/* Is parallel worker used? */
-	if (!pfm_master)
-		return;
-
-	SpinLockAcquire(&pfm_master->lock);
-	/* memory allocation counter */
-	PFM_ADD_SHGCON(num_dmabuf_alloc);
-	PFM_ADD_SHGCON(num_dmabuf_free);
-	PFM_ADD_SHGCON(num_gpumem_alloc);
-	PFM_ADD_SHGCON(num_gpumem_free);
-	PFM_ADD_SHGCON(num_iomapped_alloc);
-	PFM_ADD_SHGCON(num_iomapped_free);
-	PFM_ADD_SHGCON(tv_dmabuf_alloc);
-	PFM_ADD_SHGCON(tv_dmabuf_free);
-	PFM_ADD_SHGCON(tv_gpumem_alloc);
-	PFM_ADD_SHGCON(tv_gpumem_free);
-	PFM_ADD_SHGCON(tv_iomapped_alloc);
-	PFM_ADD_SHGCON(tv_iomapped_free);
-	PFM_ADD_SHGCON(size_dmabuf_total);
-	PFM_ADD_SHGCON(size_gpumem_total);
-	PFM_ADD_SHGCON(size_iomapped_total);
+#define PFM_ADD(FIELD)			pfm_dst->FIELD += pfm_src->FIELD
+	PFM_ADD(num_dmabuf_alloc);
+	PFM_ADD(num_dmabuf_free);
+	PFM_ADD(num_gpumem_alloc);
+	PFM_ADD(num_gpumem_free);
+	PFM_ADD(num_iomapped_alloc);
+	PFM_ADD(num_iomapped_free);
+	PFM_ADD(tv_dmabuf_alloc);
+	PFM_ADD(tv_dmabuf_free);
+	PFM_ADD(tv_gpumem_alloc);
+	PFM_ADD(tv_gpumem_free);
+	PFM_ADD(tv_iomapped_alloc);
+	PFM_ADD(tv_iomapped_free);
+	PFM_ADD(size_dmabuf_total);
+	PFM_ADD(size_gpumem_total);
+	PFM_ADD(size_iomapped_total);
 
 	/* build cuda program */
 	// no idea how to track...
@@ -1335,10 +1338,61 @@ pgstrom_collect_perfmon(GpuTaskState_v2 *gts)
 	PFM_ADD(gsort.tv_kern_msort);
 	PFM_ADD(gsort.tv_kern_fixvar);
 	PFM_ADD(gsort.tv_cpu_sort);
-
-	SpinLockRelease(&pfm_master->lock);
 #undef PFM_ADD
-#undef PFM_ADD_SHGCON
+}
+
+static inline void
+pgstrom_collect_perfmon_shared_gcontext(GpuTaskState_v2 *gts)
+{
+#define PFM_MOVE(FIELD)	gts->pfm.FIELD = shgcon->pfm.FIELD
+	SharedGpuContext   *shgcon = gts->gcontext->shgcon;
+
+	PFM_MOVE(num_dmabuf_alloc);
+	PFM_MOVE(num_dmabuf_free);
+	PFM_MOVE(num_gpumem_alloc);
+	PFM_MOVE(num_gpumem_free);
+	PFM_MOVE(num_iomapped_alloc);
+	PFM_MOVE(num_iomapped_free);
+	PFM_MOVE(tv_dmabuf_alloc);
+	PFM_MOVE(tv_dmabuf_free);
+	PFM_MOVE(tv_gpumem_alloc);
+	PFM_MOVE(tv_gpumem_free);
+	PFM_MOVE(tv_iomapped_alloc);
+	PFM_MOVE(tv_iomapped_free);
+	PFM_MOVE(size_dmabuf_total);
+	PFM_MOVE(size_gpumem_total);
+	PFM_MOVE(size_iomapped_total);
+#undef PFM_MOVE
+}
+
+static void
+pgstrom_collect_perfmon_master(GpuTaskState_v2 *gts)
+{
+	Assert(ParallelMasterBackendId == InvalidBackendId);
+	if (!gts->pfm.enabled)
+		return;
+	pgstrom_collect_perfmon_shared_gcontext(gts);
+	if (gts->pfm_master)
+	{
+		SpinLockAcquire(&gts->pfm_master->lock);
+		__pgstrom_collect_perfmon(&gts->pfm, gts->pfm_master);
+		SpinLockRelease(&gts->pfm_master->lock);
+	}
+}
+
+static void
+pgstrom_collect_perfmon_worker(GpuTaskState_v2 *gts)
+{
+	Assert(ParallelMasterBackendId != InvalidBackendId);
+	if (!gts->pfm.enabled)
+		return;
+	pgstrom_collect_perfmon_shared_gcontext(gts);
+	if (gts->pfm_master)
+	{
+		SpinLockAcquire(&gts->pfm_master->lock);
+		__pgstrom_collect_perfmon(gts->pfm_master, &gts->pfm);
+		SpinLockRelease(&gts->pfm_master->lock);
+	}
 }
 
 /*
@@ -1350,11 +1404,9 @@ pgstrom_explain_perfmon(GpuTaskState_v2 *gts, ExplainState *es)
 	pgstrom_perfmon	   *pfm = &gts->pfm;
 	char				buf[1024];
 
-	if (gts->pfm_master)
-		pfm = gts->pfm_master;
-
 	if (!pfm->enabled)
 		return;
+	pgstrom_collect_perfmon_master(gts);
 
 	/* common performance statistics */
 	ExplainPropertyInteger("Number of tasks", pfm->num_tasks, es);

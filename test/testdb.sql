@@ -1,4 +1,4 @@
-DROP TABLE IF EXISTS t0;
+DROP TABLE IF EXISTS t;
 DROP TABLE IF EXISTS t1;
 DROP TABLE IF EXISTS t2;
 DROP TABLE IF EXISTS t3;
@@ -8,6 +8,7 @@ DROP TABLE IF EXISTS t6;
 DROP TABLE IF EXISTS t7;
 DROP TABLE IF EXISTS t8;
 
+CREATE TABLE tbl (id int primary key, cat text, x float, y float, z float);
 CREATE TABLE t0 (id int primary key, cat text, aid int, bid int, cid int, did int, eid int, fid int, gid int, hid int);
 CREATE TABLE t1 (aid int, atext text, ax float);
 CREATE TABLE t2 (bid int, btext text, bx float);
@@ -63,3 +64,36 @@ INSERT INTO t0 (SELECT x, CASE floor(random()*26)
                        floor(random() * 100000 + 1),
                        floor(random() * 100000 + 1)
 					   FROM generate_series(1,10000000) x);
+
+INSERT INTO tbl (SELECT x, CASE floor(random()*26)
+                          WHEN  0 THEN 'aaa'
+                          WHEN  1 THEN 'bbb'
+                          WHEN  2 THEN 'ccc'
+                          WHEN  3 THEN 'ddd'
+                          WHEN  4 THEN 'eee'
+                          WHEN  5 THEN 'fff'
+                          WHEN  6 THEN 'ggg'
+                          WHEN  7 THEN 'hhh'
+                          WHEN  8 THEN 'iii'
+                          WHEN  9 THEN 'jjj'
+                          WHEN 10 THEN 'kkk'
+                          WHEN 11 THEN 'lll'
+                          WHEN 12 THEN 'mmm'
+                          WHEN 13 THEN 'nnn'
+                          WHEN 14 THEN 'ooo'
+                          WHEN 15 THEN 'ppp'
+                          WHEN 16 THEN 'qqq'
+                          WHEN 17 THEN 'rrr'
+                          WHEN 18 THEN 'sss'
+                          WHEN 19 THEN 'ttt'
+                          WHEN 20 THEN 'uuu'
+                          WHEN 21 THEN 'vvv'
+                          WHEN 22 THEN 'www'
+                          WHEN 23 THEN 'xxx'
+                          WHEN 24 THEN 'yyy'
+                          ELSE 'zzz'
+                          END,
+                       random() * 1000,
+                       random() * 1000,
+                       random() * 1000
+                       FROM generate_series(1,40000000) x);
