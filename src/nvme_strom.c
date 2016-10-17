@@ -435,9 +435,9 @@ gpuMemCopyFromSSDAsync(GpuTask_v2 *gtask,
 		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
 
 	/* (3) kick RAM2GPU DMA (later half; if any) */
-	if (cmd->nr_ssd2gpu > 0)
+	if (cmd->nr_ram2gpu > 0)
 	{
-		length = BLCKSZ * cmd->nr_ssd2gpu;
+		length = BLCKSZ * cmd->nr_ram2gpu;
 		offset = ((char *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds,
 													   pds->kds.nitems) -
 				  (char *)&pds->kds) - length;
