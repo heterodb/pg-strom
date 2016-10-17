@@ -284,7 +284,8 @@ cost_discount_gpu_projection(PlannerInfo *root, RelOptInfo *rel,
  */
 static void
 cost_gpuscan_path(PlannerInfo *root, CustomPath *cpath,
-				  List *dev_quals, List *host_quals, Cost discount_per_tuple)
+				  List *dev_quals, List *host_quals,
+				  Cost discount_per_tuple)
 {
 	RelOptInfo	   *baserel = cpath->path.parent;
 	ParamPathInfo  *param_info = cpath->path.param_info;
@@ -332,9 +333,8 @@ cost_gpuscan_path(PlannerInfo *root, CustomPath *cpath,
 		if (leader_contribution > 0)
 			parallel_divisor += leader_contribution;
 
-		cpath->path.rows = clamp_row_est(cpath->path.rows / parallel_divisor);
-
 		/* number of tuples to be processed by this GpuScan */
+		cpath->path.rows = clamp_row_est(cpath->path.rows / parallel_divisor);
 		ntuples /= parallel_divisor;
 	}
 
@@ -367,7 +367,7 @@ cost_gpuscan_path(PlannerInfo *root, CustomPath *cpath,
 	startup_cost += qcost.startup;
 	cpu_per_tuple += qcost.per_tuple;
 
-	run_cost += (cpu_per_tuple + cpu_tuple_cost) * ntuples;
+	run_cost += (cpu_per_tuple + cpu_tuple_cost) * cpath->path.rows;
 
 	/* Cost for DMA transfer */
 	run_cost += pgstrom_gpu_dma_cost * (double) num_chunks;
@@ -391,7 +391,7 @@ create_gpuscan_path(PlannerInfo *root,
 					List *dev_quals,
 					List *host_quals,
 					Cost discount_per_tuple,
-					int parallel_workers)
+					int parallel_nworkers)
 {
 	CustomPath	   *cpath = makeNode(CustomPath);
 
@@ -401,9 +401,9 @@ create_gpuscan_path(PlannerInfo *root,
 	cpath->path.param_info
 		= get_baserel_parampathinfo(root, baserel,
 									baserel->lateral_relids);
-	cpath->path.parallel_aware = parallel_workers > 0 ? true : false;
+	cpath->path.parallel_aware = parallel_nworkers > 0 ? true : false;
 	cpath->path.parallel_safe = baserel->consider_parallel;
-	cpath->path.parallel_workers = parallel_workers;
+	cpath->path.parallel_workers = parallel_nworkers;
 
 	cpath->path.pathkeys = NIL;	/* unsorted results */
 	cpath->flags = 0;
@@ -412,8 +412,8 @@ create_gpuscan_path(PlannerInfo *root,
 	cpath->methods = &gpuscan_path_methods;
 
 	cost_gpuscan_path(root, cpath,
-					  dev_quals, host_quals, discount_per_tuple);
-
+					  dev_quals, host_quals,
+					  discount_per_tuple);
 	return &cpath->path;
 }
 
@@ -486,7 +486,7 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	/* If appropriate, consider parallel GpuScan */
 	if (baserel->consider_parallel && baserel->lateral_relids == NULL)
 	{
-		int		parallel_workers;
+		int		parallel_nworkers;
 		int		parallel_threshold;
 
 		/*
@@ -495,7 +495,7 @@ gpuscan_add_scan_path(PlannerInfo *root,
 		 * adjusted according to the PG-Strom configuration.
 		 */
 		if (baserel->rel_parallel_workers != -1)
-			parallel_workers = baserel->rel_parallel_workers;
+			parallel_nworkers = baserel->rel_parallel_workers;
 		else
 		{
 			/* relation is too small for parallel execution? */
@@ -507,11 +507,11 @@ gpuscan_add_scan_path(PlannerInfo *root,
 			 * select the number of workers based on the log of the size of
 			 * the relation.
 			 */
-			parallel_workers = 1;
+			parallel_nworkers = 1;
 			parallel_threshold = Max(min_parallel_relation_size, 1);
 			while (baserel->pages >= (BlockNumber) (parallel_threshold * 3))
 			{
-				parallel_workers++;
+				parallel_nworkers++;
 				parallel_threshold *= 3;
 				if (parallel_threshold > INT_MAX / 3)
 					break;			/* avoid overflow */
@@ -523,10 +523,10 @@ gpuscan_add_scan_path(PlannerInfo *root,
 		 */
 
 		/* max_parallel_workers_per_gather is the upper limit  */
-		parallel_workers = Min3(parallel_workers,
+		parallel_nworkers = Min3(parallel_nworkers,
 								4 * numDevAttrs,
 								max_parallel_workers_per_gather);
-		if (parallel_workers <= 0)
+		if (parallel_nworkers <= 0)
 			return;
 
 		/* add GpuScan path performing on parallel workers */
@@ -534,9 +534,7 @@ gpuscan_add_scan_path(PlannerInfo *root,
 									   copyObject(dev_quals),
 									   copyObject(host_quals),
 									   discount_per_tuple,
-									   parallel_workers);
-		pathnode->total_cost = 10.0;
-		pathnode->startup_cost = 10.0;
+									   parallel_nworkers);
 		add_partial_path(baserel, pathnode);
 
 		/* then, potentially generate Gather + GpuScan path */
@@ -2443,14 +2441,6 @@ gpuscanRewindScanChunk(GpuTaskState_v2 *gts)
 	heap_rescan(gts->css.ss.ss_currentScanDesc, NULL);
 	ExecScanReScan(&gts->css.ss);
 }
-
-
-
-
-
-
-
-
 
 /*
  * Extensible node support for GpuScanInfo
