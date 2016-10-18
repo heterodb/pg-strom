@@ -56,6 +56,17 @@ typedef struct
 	IOMapBufferChunk	iomap_chunks[FLEXIBLE_ARRAY_MEMBER];
 } IOMapBufferSegment;
 
+typedef struct
+{
+	int					num_devices;
+	struct {
+		CUdevice		cuda_device;
+		CUcontext		cuda_context;
+		CUdeviceptr		cuda_devptr;
+		CUipcMemHandle	cuda_mhandle;		
+	} dev[FLEXIBLE_ARRAY_MEMBER];
+} IOMapCUDAResources;
+
 static shmem_startup_hook_type shmem_startup_next = NULL;
 static const char	   *nvme_strom_ioctl_pathname = "/proc/nvme-strom";
 static void			   *iomap_buffer_segments = NULL;
@@ -64,6 +75,7 @@ static Size				iomap_buffer_size;			/* GUC */
 static HTAB			   *vfs_nvme_htable = NULL;
 static Oid				nvme_last_tablespace_oid = InvalidOid;
 static bool				nvme_last_tablespace_supported;
+static IOMapCUDAResources *iomap_cuda_resources = NULL;
 
 #define SizeOfIOMapBufferSegment								\
 	MAXALIGN(offsetof(IOMapBufferSegment,						\
@@ -738,18 +750,56 @@ pgstrom_startup_nvme_strom(void)
 						nvme_strom_ioctl_pathname),
 				 errhint("nvme-strom.ko may not be installed on the system")));
 
+	/*
+	 * setup of the stable CUDA resource
+	 *
+	 * NOTE: PostmasterStateMachine() may call the shared memory startup
+	 * code again, but not exit of the postmaster process, if and when
+	 * child processes are terminated abnormally.
+	 * In this case, we have to ensure the previous CUDA context and
+	 * relevant GPU resources are destroyed, to avoid memory leaks by
+	 * the orphan CUDA context.
+	 * (We may be able to reuse the CUDA context, however, child processes
+	 * were crashed by some error condition, so we like to choose a safer
+	 * option here.)
+	 */
+	if (!iomap_cuda_resources)
+	{
+		iomap_cuda_resources = calloc(1, offsetof(IOMapCUDAResources,
+												  dev[numDevAttrs]));
+		if (!iomap_cuda_resources)
+			elog(ERROR, "out of memory");
+
+		rc = cuInit(0);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuInit: %s", errorText(rc));
+	}
+	else
+	{
+		for (i=0; i < iomap_cuda_resources->num_devices; i++)
+		{
+			if (!iomap_cuda_resources->dev[i].cuda_context)
+				continue;
+			rc = cuCtxDestroy(iomap_cuda_resources->dev[i].cuda_context);
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on cuCtxDestroy: %s", errorText(rc));
+		}
+		iomap_cuda_resources = realloc(iomap_cuda_resources,
+									   offsetof(IOMapCUDAResources,
+												dev[numDevAttrs]));
+		memset(iomap_cuda_resources, 0, offsetof(IOMapCUDAResources,
+												 dev[numDevAttrs]));
+	}
+	iomap_cuda_resources->num_devices = numDevAttrs;
+
 	/* allocation of static shared memory */
 	required = SizeOfIOMapBufferSegment * numDevAttrs,
 	iomap_buffer_segments = ShmemInitStruct("iomap_buffer_segments",
 											required,
 											&found);
-	Assert(!found);
+	if (found)
+		elog(FATAL, "Bug? \"iomap_buffer_segments\" is already initialized");
 	memset(iomap_buffer_segments, 0, required);
-
-	/* setup i/o mapped device memory for each GPU device */
-	rc = cuInit(0);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuInit: %s", errorText(rc));
 
 	pos = iomap_buffer_segments;
 	for (i=0; i < numDevAttrs; i++)
@@ -789,6 +839,12 @@ pgstrom_startup_nvme_strom(void)
 		if (iomap_buffer_size % cmd.gpu_page_sz != 0)
 			elog(WARNING, "i/o mapped GPU memory size (%zu) is not aligned to GPU page size(%u)",
 				 iomap_buffer_size, cmd.gpu_page_sz);
+
+		/* save resources on iomap_cuda_resources */
+		iomap_cuda_resources->dev[i].cuda_device = cuda_device;
+		iomap_cuda_resources->dev[i].cuda_context = cuda_context;
+		iomap_cuda_resources->dev[i].cuda_devptr = cuda_devptr;
+		iomap_cuda_resources->dev[i].cuda_mhandle = cuda_mhandle;
 
 		/* setup IOMapBufferSegment */
 		elog(LOG, "NVMe-Strom: GPU Device Memory (%p-%p; %zuMB) is mapped",
