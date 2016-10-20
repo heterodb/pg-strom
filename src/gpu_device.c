@@ -215,6 +215,20 @@ static struct {
 			 "Device is on a multi-GPU board"),
 	_DEVATTR(MULTI_GPU_BOARD_GROUP_ID, INT,
 			 "Unique ID within a multi-GPU board"),
+#if CUDA_VERSION >= 8000
+	_DEVATTR(HOST_NATIVE_ATOMIC_SUPPORTED, BOOL,
+			 ""),
+	_DEVATTR(SINGLE_TO_DOUBLE_PRECISION_PERF_RATIO, INT,
+			 "Ratio of FP32 performance to FP64"),
+	_DEVATTR(PAGEABLE_MEMORY_ACCESS, BOOL,
+			 "Device supports coherently accessing pageable memory"),
+	_DEVATTR(CONCURRENT_MANAGED_ACCESS, BOOL,
+			 "Device can coherently access managed memory concurrently"),
+	_DEVATTR(COMPUTE_PREEMPTION_SUPPORTED, BOOL,
+			 "Device supports compute preemption"),
+	_DEVATTR(CAN_USE_HOST_POINTER_FOR_REGISTERED_MEM, BOOL,
+			 "Device can access host registered memory using same vaddr"),
+#endif
 #undef _DEVATTR	
 };
 
@@ -497,9 +511,11 @@ pgstrom_device_info(PG_FUNCTION_ARGS)
 					case CU_COMPUTEMODE_DEFAULT:
 						att_value = "Default";
 						break;
+#if CUDA_VERSION < 8000
 					case CU_COMPUTEMODE_EXCLUSIVE:
 						att_value = "Exclusive";
 						break;
+#endif
 					case CU_COMPUTEMODE_PROHIBITED:
 						att_value = "Prohibited";
 						break;

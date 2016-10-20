@@ -111,6 +111,12 @@ typedef struct DevAttributes
 	cl_int		MANAGED_MEMORY;
 	cl_int		MULTI_GPU_BOARD;
 	cl_int		MULTI_GPU_BOARD_GROUP_ID;
+	cl_int		HOST_NATIVE_ATOMIC_SUPPORTED;
+	cl_int		SINGLE_TO_DOUBLE_PRECISION_PERF_RATIO;
+	cl_int		PAGEABLE_MEMORY_ACCESS;
+	cl_int		CONCURRENT_MANAGED_ACCESS;
+	cl_int		COMPUTE_PREEMPTION_SUPPORTED;
+	cl_int		CAN_USE_HOST_POINTER_FOR_REGISTERED_MEM;
 } DevAttributes;
 
 extern DevAttributes   *devAttrs;
