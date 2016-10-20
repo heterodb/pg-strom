@@ -370,7 +370,6 @@ gpuMemCopyFromSSDAsync(GpuTask_v2 *gtask,
 	size_t			length;
 	cl_uint			nr_loaded;
 	CUresult		rc;
-	int				i, j;
 
 	Assert(IsGpuServerProcess());
 	if (!iomap_buffer_segments)
@@ -424,12 +423,11 @@ gpuMemCopyFromSSDAsync(GpuTask_v2 *gtask,
 	cmd->handle		= iomap_seg->iomap_handle;
 	cmd->offset		= offset;
 	cmd->block_size	= BLCKSZ;
-	cmd->block_nums	= block_nums;
-	cmd->block_data	= block_data;
+	cmd->block_nums	= block_nums;	/* array of BlockNumber */
+	cmd->block_data	= block_data;	/* buffer of uncached area */
 	cmd->file_desc	= gtask->peer_fdesc;
 	cmd->nchunks	= pds->nblocks_uncached;
-	for (i=0, j=pds->nblocks_uncached-1; i < pds->nblocks_uncached; i++, j--)
-		cmd->file_pos[i] = file_pos[j];
+	memcpy(cmd->file_pos, file_pos, sizeof(loff_t) * pds->nblocks_uncached);
 
 	/* (1) kick SSD2GPU P2P DMA */
 	if (nvme_strom_ioctl(STROM_IOCTL__MEMCPY_SSD2GPU_WRITEBACK, cmd) != 0)

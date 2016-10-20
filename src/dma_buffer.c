@@ -98,25 +98,11 @@ typedef struct dmaBufferSegmentHead
 /*
  * dmaBufferLocalMap - status of local mapping of dmaBuffer
  */
-typedef enum dmaBufferCudaStatus
-{
-	/* no cuHostMemRegister() yet */
-	dmaBufCudaStatusUnregistered			= 0,
-	/* cuHostMemRegister() already done */
-	dmaBufCudaStatusRegistered				= 1,
-	/* cuHostMemRegister() is done, but underlying pages get invalidated;
-	 * It needs to unregister the segment once, prior to the next
-	 * registration.
-	 */
-	dmaBufCudaStatusRegisteredButInvalid	= 2,
-} dmaBufferCudaStatus;
-
 typedef struct dmaBufferLocalMap
 {
 	dmaBufferSegment *segment;	/* (const) reference to the segment */
 	uint32		revision;		/* revision number when mapped */
 	bool		is_attached;	/* true, if segment is already attached */
-	dmaBufferCudaStatus cuda_status;
 } dmaBufferLocalMap;
 
 /*
@@ -170,25 +156,23 @@ dmaBufferCreateSegment(dmaBufferSegment *seg)
 	 */
 	if (l_map->is_attached)
 	{
-		if (l_map->cuda_status != dmaBufCudaStatusUnregistered)
+		if (IsGpuServerProcess())
 		{
 			CUresult	rc;
 
-			Assert(IsGpuServerProcess());
 			rc = cuMemHostUnregister(seg->mmap_ptr);
 			if (rc != CUDA_SUCCESS)
-				elog(WARNING, "failed on cuMemHostUnregister: %s",
+				elog(FATAL, "failed on cuMemHostUnregister: %s",
 					 errorText(rc));
-			l_map->cuda_status = dmaBufCudaStatusUnregistered;
 		}
 		/* unmap the older/invalid segment first */
 		if (munmap(seg->mmap_ptr, dma_segment_size) != 0)
-			elog(WARNING, "failed on munmap('%s'): %m", namebuf);
+			elog(FATAL, "failed on munmap('%s'): %m", namebuf);
 		if (mmap(seg->mmap_ptr, dma_segment_size,
 				 PROT_NONE,
 				 MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
 				 -1, 0) != seg->mmap_ptr)
-			elog(WARNING, "failed on mmap(PROT_NONE) for seg=%u at %p: %m",
+			elog(FATAL, "failed on mmap(PROT_NONE) for seg=%u at %p: %m",
 				 seg->segment_id, seg->mmap_ptr);
 		l_map->is_attached = false;
 	}
@@ -218,6 +202,25 @@ dmaBufferCreateSegment(dmaBufferSegment *seg)
 	}
 	close(fdesc);
 
+	if (IsGpuServerProcess())
+	{
+		CUresult	rc;
+
+		rc = cuMemHostRegister(seg->mmap_ptr, dma_segment_size, 0);
+		if (rc != CUDA_SUCCESS)
+		{
+			if (munmap(seg->mmap_ptr, dma_segment_size) != 0)
+				elog(FATAL, "failed on munmap('%s'): %m", namebuf);
+			if (mmap(seg->mmap_ptr, dma_segment_size,
+					 PROT_NONE,
+					 MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
+					 -1, 0) != seg->mmap_ptr)
+				elog(FATAL, "failed on mmap(PROT_NONE) for seg=%u at %p: %m",
+					 seg->segment_id, seg->mmap_ptr);
+			elog(ERROR, "failed on cuMemHostRegister: %s", errorText(rc));
+		}
+	}
+
 	/* successfully mapped, init this segment */
 	for (mclass=0; mclass <= DMABUF_CHUNKSZ_MAX_BIT; mclass++)
 		dlist_init(&seg->free_chunks[mclass]);
@@ -244,7 +247,6 @@ dmaBufferCreateSegment(dmaBufferSegment *seg)
 
 	/* Also, update local mapping */
 	l_map->is_attached = true;
-	l_map->cuda_status = dmaBufCudaStatusUnregistered;
 	l_map->revision = pg_atomic_add_fetch_u32(&seg->revision, 1);
 }
 
@@ -272,27 +274,25 @@ dmaBufferDetachSegment(dmaBufferSegment *seg)
 	 */
 	if (l_map->is_attached)
 	{
-		/* unregister host pinned memory, if any */
-		if (l_map->cuda_status != dmaBufCudaStatusUnregistered)
+		/* unregister host pinned memory, if server process */
+		if (IsGpuServerProcess())
 		{
-			Assert(IsGpuServerProcess());
 			rc = cuMemHostUnregister(seg->mmap_ptr);
 			if (rc != CUDA_SUCCESS)
-				elog(WARNING, "failed on cuMemHostUnregister: %s",
+				elog(FATAL, "failed on cuMemHostUnregister: %s",
 					 errorText(rc));
-			l_map->cuda_status = dmaBufCudaStatusUnregistered;
 		}
 
 		/* unmap segment from private virtula address space */
 		if (munmap(seg->mmap_ptr, dma_segment_size) != 0)
-			elog(WARNING, "failed on munmap(seg=%u:%u at %p): %m",
+			elog(FATAL, "failed on munmap(seg=%u:%u at %p): %m",
 				 seg->segment_id, l_map->revision/2, seg->mmap_ptr);
 		/* and map invalid area instead */
 		if (mmap(seg->mmap_ptr, dma_segment_size,
 				 PROT_NONE,
 				 MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
 				 -1, 0) != seg->mmap_ptr)
-			elog(WARNING, "failed on mmap(PROT_NONE) for seg=%u at %p: %m",
+			elog(FATAL, "failed on mmap(PROT_NONE) for seg=%u at %p: %m",
 				 seg->segment_id, seg->mmap_ptr);
 		l_map->is_attached = false;
 	}
@@ -308,11 +308,11 @@ dmaBufferDetachSegment(dmaBufferSegment *seg)
 	SHMSEGMENT_NAME(namebuf, seg->segment_id, revision);
 	fdesc = shm_open(namebuf, O_RDWR | O_TRUNC, 0600);
 	if (fdesc < 0)
-		elog(WARNING, "failed on shm_open('%s', O_TRUNC): %m", namebuf);
+		elog(FATAL, "failed on shm_open('%s', O_TRUNC): %m", namebuf);
 	close(fdesc);
 
 	if (shm_unlink(namebuf) < 0)
-		elog(WARNING, "failed on shm_unlink('%s'): %m", namebuf);
+		elog(FATAL, "failed on shm_unlink('%s'): %m", namebuf);
 
 	Assert(!SHMSEG_EXISTS(pg_atomic_read_u32(&seg->revision)));
 }
@@ -349,6 +349,7 @@ dmaBufferAttachSegmentOnDemand(int signum, siginfo_t *siginfo, void *unused)
 			uint32		revision;
 			char		namebuf[80];
 			int			fdesc;
+			CUresult	rc;
 
 			seg_id = ((uintptr_t)siginfo->si_addr -
 					  (uintptr_t)dma_segment_vaddr_head) / dma_segment_size;
@@ -378,10 +379,18 @@ dmaBufferAttachSegmentOnDemand(int signum, siginfo_t *siginfo, void *unused)
 					goto normal_crash;
 				}
 
-#if NOT_USED
-				if (l_map->cuda_status == dmaBufCudaStatusRegistered)
-					l_map->cuda_status = dmaBufCudaStatusRegisteredButInvalid;
-#endif
+				/* unregister host pinned memory */
+				if (IsGpuServerProcess())
+				{
+					rc = cuMemHostUnregister(seg->mmap_ptr);
+					if (rc != CUDA_SUCCESS)
+					{
+						fprintf(stderr, "%s: failed on cuMemHostUnregister(id=%u at %p): %s\n",
+								__FUNCTION__, seg->segment_id, seg->mmap_ptr,
+								errorText(rc));
+						goto normal_crash;
+					}
+				}
 				/* unmap the old/invalid segment */
 				if (munmap(seg->mmap_ptr, dma_segment_size) != 0)
 				{
@@ -422,6 +431,19 @@ dmaBufferAttachSegmentOnDemand(int signum, siginfo_t *siginfo, void *unused)
 			}
 			close(fdesc);
 
+			/* host registered pinned memory, if GPU server */
+			if (IsGpuServerProcess())
+			{
+				rc = cuMemHostRegister(seg->mmap_ptr, dma_segment_size, 0);
+				if (rc != CUDA_SUCCESS)
+				{
+					fprintf(stderr, "%s: failed on cuMemHostRegister(id=%u at %p): %s\n",
+							__FUNCTION__, seg->segment_id, seg->mmap_ptr,
+							errorText(rc));
+					goto normal_crash;
+				}
+			}
+
 			/* ok, this segment is successfully mapped */
 			l_map->revision = revision;
 			l_map->is_attached = true;
@@ -432,40 +454,7 @@ dmaBufferAttachSegmentOnDemand(int signum, siginfo_t *siginfo, void *unused)
 					seg->segment_id, seg->mmap_ptr, revision);
 #endif
 			PG_SETMASK(&UnBlockSig);
-#if 1
-			/*
-			 * MEMO: According to the simple test program at:
-			 *   https://devtalk.nvidia.com/default/topic/942684/
-			 * implies the virtual address range once registered by
-			 * cuMemHostRegister() is valid even if this host memory
-			 * range is unmapped or remapped.
-			 * However, we are not certain whether it is expected and
-			 * guaranteed behavior.
-			 * In addition, CUDA documentation introduces nothing about
-			 * availability of CUDA driver APIs within signal handler.
-			 *
-			 * Right now, we don't unregister the mapped memory region
-			 * and we registers the memory region in signal handler.
-			 * However, it may have a risk to cause undocumented behavior
-			 * somewhere. So, we may need to use a state of
-			 * dmaBufCudaStatusRegisteredButInvalid to register the
-			 * host memory region later, if our current implementation
-			 * is problematic.
-			 */
-			if (IsGpuServerProcess() &&
-				l_map->cuda_status != dmaBufCudaStatusRegistered)
-			{
-				CUresult	rc;
 
-				rc = cuMemHostRegister(seg->mmap_ptr, dma_segment_size,
-									   CU_MEMHOSTREGISTER_PORTABLE);
-				if (rc == CUDA_SUCCESS)
-					l_map->cuda_status = dmaBufCudaStatusRegistered;
-				else
-					fprintf(stderr, "failed on cuMemHostRegister: %s\n",
-							errorText(rc));
-			}
-#endif
 			errno = save_errno;
 			internal_error = false;
 			return;		/* problem solved */
@@ -664,6 +653,8 @@ found:
 	}
 	SpinLockRelease(&shgcon->lock);
 
+	memset(chunk->data, 0xAE, chunk->required);
+
 	return chunk->data;
 }
 
@@ -854,6 +845,7 @@ dmaBufferFree(void *pointer)
 
 	/* sanity checks */
 	chunk = pointer_validation(pointer, &seg);
+	memset(chunk->data, 0xf5, chunk->required);
 
 	/* detach chunk from the GpuContext */
 	shgcon = chunk->shgcon;
@@ -1221,7 +1213,6 @@ pgstrom_startup_dma_buffer(void)
 		l_map->segment = segment;
 		l_map->revision = pg_atomic_read_u32(&segment->revision);
 		l_map->is_attached = false;
-		l_map->cuda_status = dmaBufCudaStatusUnregistered;
 	}
 }
 

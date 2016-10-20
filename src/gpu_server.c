@@ -1715,7 +1715,7 @@ pgstrom_init_gpu_server(void)
 							NULL,
 							&numGpuServers,
 							2,
-							2,
+							1,
 							INT_MAX,
 							PGC_POSTMASTER,
 							GUC_NOT_IN_SAMPLE,

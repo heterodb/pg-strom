@@ -2781,6 +2781,8 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 
 	if (pds_dst)
 	{
+		Assert(pds_dst->kds.format == KDS_FORMAT_ROW ||
+			   pds_dst->kds.format == KDS_FORMAT_SLOT);
 		length = KERN_DATA_STORE_LENGTH(&pds_dst->kds);
 		rc = cuMemcpyDtoHAsync(&pds_dst->kds,
 							   gscan->m_kds_dst,
