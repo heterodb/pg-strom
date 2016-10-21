@@ -677,43 +677,6 @@ PDS_end_heapscan_state(GpuTaskState_v2 *gts)
 /*
  * PDS_exec_heapscan_block - PDS scan for KDS_FORMAT_BLOCK format
  */
-static inline int
-__exec_heapscan_block(pgstrom_data_store *pds,
-					  NVMEScanState *nvme_sstate,
-					  BlockNumber blknum,
-					  int *p_filedesc)
-{
-	BlockNumber	segno = blknum / RELSEG_SIZE;
-	int			filedesc;
-	loff_t	   *file_pos;
-
-	Assert(segno < nvme_sstate->nr_segs);
-	filedesc = FileGetRawDesc(nvme_sstate->mdfd[segno].vfd);
-
-	/*
-	 * NOTE: We cannot mix up multiple source files in a single PDS chunk.
-	 * If heapscan_block comes across segment boundary, rest of blocks
-	 * must be read on the next PDS chunk.
-	 */
-	if (*p_filedesc >= 0 && *p_filedesc != filedesc)
-		return false;
-
-	/* inform the source file descriptor */
-	if (*p_filedesc < 0)
-		*p_filedesc = filedesc;
-
-	/* increment the pointer */
-	pds->nblocks_uncached++;
-	pds->kds.nitems++;
-
-	/* put file_pos on the tail of PDS */
-	file_pos = (loff_t *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds,
-													  pds->kds.nrooms);
-	file_pos[-pds->nblocks_uncached] = (blknum % RELSEG_SIZE) * BLCKSZ;
-
-	return true;
-}
-
 static bool
 PDS_exec_heapscan_block(pgstrom_data_store *pds,
 						Relation relation,
@@ -729,7 +692,7 @@ PDS_exec_heapscan_block(pgstrom_data_store *pds,
 	Buffer			buffer;
 	Page			spage;
 	Page			dpage;
-	cl_uint			npages;
+	cl_uint			nr_loaded;
 	bool			all_visible;
 
 	/* file-desc must be initialized to -1 */
@@ -793,14 +756,13 @@ PDS_exec_heapscan_block(pgstrom_data_store *pds,
 				/* put file_pos on the tail of PDS */
 				file_pos = (loff_t *)
 					KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds, pds->kds.nrooms);
-				file_pos[-((int)pds->nblocks_uncached)]
-					= (blknum % RELSEG_SIZE) * BLCKSZ;
+				file_pos[-((long)pds->nblocks_uncached)]
+					= (blknum % (BlockNumber)RELSEG_SIZE) * BLCKSZ;
 				block_nums[pds->kds.nrooms - pds->nblocks_uncached] = blknum;
 
 				retval = true;
 			}
 			LWLockRelease(newPartitionLock);
-
 			return retval;
 		}
 		LWLockRelease(newPartitionLock);
@@ -819,14 +781,11 @@ PDS_exec_heapscan_block(pgstrom_data_store *pds,
 #endif
 	/* we will check tuple's visibility under the shared lock */
 	LockBuffer(buffer, BUFFER_LOCK_SHARE);
-	npages = pds->kds.nitems - pds->nblocks_uncached;
+	nr_loaded = pds->kds.nitems - pds->nblocks_uncached;
 	spage = (Page) BufferGetPage(buffer);
-	dpage = (Page) KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds, npages);
+	dpage = (Page) KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds, nr_loaded);
 	memcpy(dpage, spage, BLCKSZ);
-
-	/* fill-up block number from the head */
-	block_nums = (BlockNumber *)KERN_DATA_STORE_BODY(&pds->kds);
-	block_nums[pds->kds.nitems] = blknum;
+	block_nums[nr_loaded] = blknum;
 
 	/*
 	 * Logic is almost same as heapgetpage() doing. We have to invalidate
@@ -1114,33 +1073,31 @@ PDS_insert_hashitem(pgstrom_data_store *pds,
 void
 PDS_fillup_blocks(pgstrom_data_store *pds, int file_desc)
 {
-	cl_int		i, nr_loaded;
-	loff_t	   *file_pos;
-	ssize_t		nbytes;
-	char	   *dest_addr;
-	loff_t		curr_fpos;
-	size_t		curr_size;
+	cl_int			i, nr_loaded;
+	ssize_t			nbytes;
+	char		   *dest_addr;
+	loff_t			curr_fpos;
+	size_t			curr_size;
+	BlockNumber	   *block_nums;
 
 	if (pds->kds.format != KDS_FORMAT_BLOCK)
 		elog(ERROR, "Bug? only KDS_FORMAT_BLOCK can be filled up");
 
 	if (pds->nblocks_uncached == 0)
 		return;		/* already filled up */
+
 	Assert(pds->nblocks_uncached <= pds->kds.nitems);
 	nr_loaded = pds->kds.nitems - pds->nblocks_uncached;
-	file_pos = palloc(sizeof(loff_t) * pds->nblocks_uncached);
-	memcpy(file_pos,
-		   (loff_t *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds,
-												  pds->kds.nrooms) -
-		   pds->nblocks_uncached,
-		   sizeof(loff_t) * pds->nblocks_uncached);
+	block_nums = (BlockNumber *)KERN_DATA_STORE_BODY(&pds->kds);
 	dest_addr = (char *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds, nr_loaded);
 	curr_fpos = 0;
 	curr_size = 0;
 	for (i=pds->nblocks_uncached-1; i >=0; i--)
 	{
+		loff_t	file_pos = (block_nums[i] & (RELSEG_SIZE - 1)) * BLCKSZ;
+
 		if (curr_size > 0 &&
-			curr_fpos + curr_size == file_pos[i])
+			curr_fpos + curr_size == file_pos)
 		{
 			/* merge with the pending i/o */
 			curr_size += BLCKSZ;
@@ -1157,7 +1114,7 @@ PDS_fillup_blocks(pgstrom_data_store *pds, int file_desc)
 				curr_fpos += nbytes;
 				curr_size -= nbytes;
 			}
-			curr_fpos = file_pos[i];
+			curr_fpos = file_pos;
 			curr_size = BLCKSZ;
 		}
 	}
@@ -1175,7 +1132,6 @@ PDS_fillup_blocks(pgstrom_data_store *pds, int file_desc)
 	Assert(dest_addr == (char *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds,
 															 pds->kds.nitems));
 	pds->nblocks_uncached = 0;
-	pfree(file_pos);
 }
 
 /*

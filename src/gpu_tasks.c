@@ -574,8 +574,12 @@ pgstromExplainGpuTaskState(GpuTaskState_v2 *gts, ExplainState *es)
 							"%sbulk-exec-support",
 							ofs > 0 ? ", " : "");
 		/* preferable result format */
-		if (gts->row_format)
-			ofs += snprintf(temp+ofs, sizeof(temp) - ofs, "%srow-format",
+		ofs += snprintf(temp+ofs, sizeof(temp) - ofs, "%s%s-format",
+						ofs > 0 ? ", " : "",
+						gts->row_format ? "row" : "slot");
+		/* availability of NVMe-Strom */
+		if (gts->nvme_sstate)
+			ofs += snprintf(temp+ofs, sizeof(temp) - ofs, "%snvme-strom",
 							ofs > 0 ? ", " : "");
 		if (ofs > 0)
 			ExplainPropertyText("Extra", temp, es);

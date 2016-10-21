@@ -2189,16 +2189,17 @@ gpuscanExecScanChunk(GpuTaskState_v2 *gts, Size chunk_length, int *p_filedesc)
 
 	if (pds->kds.nitems == 0)
 	{
+		Assert(!BlockNumberIsValid(scan->rs_cblock));
 		PDS_release(pds);
 		pds = NULL;
 	}
-	else if (pds->kds.format == KDS_FORMAT_ROW &&
+	else if (pds->kds.format == KDS_FORMAT_BLOCK &&
 			 pds->kds.nitems < pds->kds.nrooms &&
 			 pds->nblocks_uncached > 0)
 	{
 		/*
-		 * MEMO: Special case handling if KDS_FORMAT_ROW was not filled up
-		 * entirely. KDS_FORMAT_ROW has an array of block-number to support
+		 * MEMO: Special case handling if KDS_FORMAT_BLOCK was not filled up
+		 * entirely. KDS_FORMAT_BLOCK has an array of block-number to support
 		 * "ctid" system column, located on next to the KDS-head.
 		 * Block-numbers of pre-loaded blocks (hit on shared buffer) are
 		 * used from the head, and others (to be read from the file) are
@@ -2212,7 +2213,7 @@ gpuscanExecScanChunk(GpuTaskState_v2 *gts, Size chunk_length, int *p_filedesc)
 
 		memmove(block_nums + (pds->kds.nitems - pds->nblocks_uncached),
 				block_nums + (pds->kds.nrooms - pds->nblocks_uncached),
-				sizeof(BlockNumber) * (pds->kds.nrooms - pds->kds.nitems));
+				sizeof(BlockNumber) * pds->nblocks_uncached);
 	}
 	PERFMON_END(&gts->pfm, time_outer_load, &tv1, &tv2);
 	InstrStopNode(&gts->outer_instrument,
@@ -2605,9 +2606,13 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 	 */
 	if (gscan->with_nvme_strom)
 	{
+#if 0
 		rc = gpuMemAllocIOMap(gtask->gcontext,
 							  &gscan->m_kds_src,
 							  pds_src->kds.length);
+#endif
+		rc = CUDA_ERROR_OUT_OF_MEMORY;
+
 		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		{
 			PDS_fillup_blocks(pds_src, gtask->peer_fdesc);
@@ -2681,6 +2686,7 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 	}
 	else
 	{
+		elog(WARNING, "Why? gpuMemCopyFromSSDAsync");
 		gpuMemCopyFromSSDAsync(&gscan->task,
 							   gscan->m_kds_src,
 							   pds_src,

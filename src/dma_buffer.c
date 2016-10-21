@@ -440,6 +440,7 @@ dmaBufferAttachSegmentOnDemand(int signum, siginfo_t *siginfo, void *unused)
 					fprintf(stderr, "%s: failed on cuMemHostRegister(id=%u at %p): %s\n",
 							__FUNCTION__, seg->segment_id, seg->mmap_ptr,
 							errorText(rc));
+					abort();
 					goto normal_crash;
 				}
 			}
