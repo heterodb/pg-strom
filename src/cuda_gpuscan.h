@@ -335,7 +335,7 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 		if (get_local_id() == 0)
 			gang_flag = 0;
 		__syncthreads();
-		if (get_local_id() % part_sz == 0 && curr_id < part_sz)
+		if (get_local_id() % part_sz == 0 && curr_id < n_lines)
 			atomicExch(&gang_flag, 1);
 		__syncthreads();
 	} while (gang_flag);

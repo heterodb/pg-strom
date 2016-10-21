@@ -2606,13 +2606,9 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 	 */
 	if (gscan->with_nvme_strom)
 	{
-#if 0
 		rc = gpuMemAllocIOMap(gtask->gcontext,
 							  &gscan->m_kds_src,
 							  pds_src->kds.length);
-#endif
-		rc = CUDA_ERROR_OUT_OF_MEMORY;
-
 		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		{
 			PDS_fillup_blocks(pds_src, gtask->peer_fdesc);
@@ -2686,7 +2682,6 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 	}
 	else
 	{
-		elog(WARNING, "Why? gpuMemCopyFromSSDAsync");
 		gpuMemCopyFromSSDAsync(&gscan->task,
 							   gscan->m_kds_src,
 							   pds_src,
