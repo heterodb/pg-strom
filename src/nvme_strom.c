@@ -84,6 +84,15 @@ static IOMapCUDAResources *iomap_cuda_resources = NULL;
 #define GetIOMapBufferSegment(dindex)							\
 	((IOMapBufferSegment *)((char *)iomap_buffer_segments +		\
 							SizeOfIOMapBufferSegment * (dindex)))
+/*
+ * gpuMemSizeIOMap - returns configured size of the i/o mapped device memory;
+ * never guaranteed it is actually allocated and mapped.
+ */
+Size
+gpuMemSizeIOMap(void)
+{
+	return iomap_buffer_size;
+}
 
 /*
  * nvme_strom_ioctl

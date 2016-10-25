@@ -686,36 +686,6 @@ gpuservTryToWakeUp(void)
 }
 
 /*
- * notifierGpuMemFree - wake up processes that wait for free GPU RAM
- */
-void
-notifierGpuMemFree(cl_int device_id)
-{
-	// to be implemented later
-#if 0
-	Bitmapset  *waiters;
-	PGPROC	   *pgproc;
-	int			prev = -1;
-
-	Assert(device_id >= 0 && device_id < numDevAttrs);
-
-	SpinLockAcquire(&gpuServState->lock);
-	waiters = gpuServState->gpumem_waiters[device_id];
-	while ((prev = bms_next_member(waiters, prev)) >= 0)
-	{
-		Assert(prev < ProcGlobal->allProcCount);
-		pgproc = &ProcGlobal->allProcs[prev];
-		SetLatch(&pgproc->procLatch);
-	}
-	memset(waiters->words, 0, sizeof(bitmapword) * waiters->nwords);
-	SpinLockRelease(&gpuServState->lock);
-#endif
-}
-
-
-
-
-/*
  * gpuservSendCommand - an internal low-level interface
  */
 static bool

@@ -62,8 +62,10 @@ typedef struct ResourceTracker
 	pg_crc32	crc;
 	cl_int		resclass;
 	union {
-		CUdeviceptr	devptr;		/* RESTRACK_CLASS__GPUMEMORY
-								 * RESTRACK_CLASS__IOMAPMEMORY */
+		struct {
+			CUdeviceptr	ptr;	/* RESTRACK_CLASS__GPUMEMORY */
+			size_t		size;	/* RESTRACK_CLASS__IOMAPMEMORY */
+		} devmem;
 		ProgramId	program_id;	/* RESTRACK_CLASS__GPUPROGRAM */
 		unsigned long dma_task_id; /* RESTRACK_CLASS__SSD2GPUDMA */
 	} u;
@@ -106,38 +108,57 @@ gpuMemAlloc_v2(GpuContext_v2 *gcontext, CUdeviceptr *p_devptr, size_t bytesize)
 {
 	SharedGpuContext *shgcon = gcontext->shgcon;
 	ResourceTracker *tracker;
-	CUdeviceptr		devptr;
+	CUdeviceptr		devptr = 0UL;
     CUresult		rc;
 	pg_crc32		crc;
 	struct timeval	tv1, tv2;
 
 	Assert(IsGpuServerProcess());
+	if (!gpu_scoreboard_mem_alloc(bytesize))
+		return CUDA_ERROR_OUT_OF_MEMORY;
+
 	if (shgcon->pfm.enabled)
 		gettimeofday(&tv1, NULL);
 
 	rc = cuMemAlloc(&devptr, bytesize);
 	if (rc != CUDA_SUCCESS)
-		return rc;
-
-	tracker = resource_tracker_alloc();
-	crc = resource_tracker_hashval(RESTRACK_CLASS__GPUMEMORY,
-								   &devptr, sizeof(CUdeviceptr));
-	tracker->crc = crc;
-	tracker->resclass = RESTRACK_CLASS__GPUMEMORY;
-	tracker->u.devptr = devptr;
-	dlist_push_tail(&gcontext->restrack[crc % RESTRACK_HASHSIZE],
-					&tracker->chain);
-	*p_devptr = devptr;
-
-	if (shgcon->pfm.enabled)
+		gpu_scoreboard_mem_free(bytesize);
+	else
 	{
-		gettimeofday(&tv2, NULL);
+		PG_TRY();
+		{
+			tracker = resource_tracker_alloc();
+			crc = resource_tracker_hashval(RESTRACK_CLASS__GPUMEMORY,
+										   &devptr, sizeof(CUdeviceptr));
+			tracker->crc = crc;
+			tracker->resclass = RESTRACK_CLASS__GPUMEMORY;
+			tracker->u.devmem.ptr = devptr;
+			tracker->u.devmem.size = TYPEALIGN(64*1024, bytesize);
+			dlist_push_tail(&gcontext->restrack[crc % RESTRACK_HASHSIZE],
+							&tracker->chain);
+			*p_devptr = devptr;
 
-		SpinLockAcquire(&shgcon->lock);
-		shgcon->pfm.num_gpumem_alloc++;
-		shgcon->pfm.tv_gpumem_alloc += PERFMON_TIMEVAL_DIFF(tv1,tv2);
-		shgcon->pfm.size_gpumem_total += bytesize;
-		SpinLockRelease(&shgcon->lock);
+			if (shgcon->pfm.enabled)
+			{
+				gettimeofday(&tv2, NULL);
+
+				SpinLockAcquire(&shgcon->lock);
+				shgcon->pfm.num_gpumem_alloc++;
+				shgcon->pfm.tv_gpumem_alloc += PERFMON_TIMEVAL_DIFF(tv1,tv2);
+				shgcon->pfm.size_gpumem_total += bytesize;
+				SpinLockRelease(&shgcon->lock);
+			}
+		}
+		PG_CATCH();
+		{
+			rc = cuMemFree(devptr);
+			if (rc != CUDA_SUCCESS)
+				elog(WARNING, "failed on cuMemFree: %s", errorText(rc));
+			gpu_scoreboard_mem_free(bytesize);
+
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
 	}
 	return rc;
 }
@@ -150,6 +171,7 @@ gpuMemFree_v2(GpuContext_v2 *gcontext, CUdeviceptr devptr)
 	dlist_iter		iter;
 	pg_crc32		crc;
 	CUresult		rc;
+	size_t			nbytes = 0;
 	struct timeval	tv1, tv2;
 
 	if (shgcon->pfm.enabled)
@@ -166,19 +188,21 @@ gpuMemFree_v2(GpuContext_v2 *gcontext, CUdeviceptr devptr)
 
 		if (tracker->crc == crc &&
 			tracker->resclass == RESTRACK_CLASS__GPUMEMORY &&
-			tracker->u.devptr == devptr)
+			tracker->u.devmem.ptr == devptr)
 		{
 			dlist_delete(&tracker->chain);
 			memset(tracker, 0, sizeof(ResourceTracker));
 			dlist_push_head(&inactiveResourceTracker,
 							&tracker->chain);
+			nbytes = tracker->u.devmem.size;
 			goto found;
 		}
     }
     elog(WARNING, "Bug? device pointer %p was not tracked", (void *)devptr);
 found:
 	rc = cuMemFree(devptr);
-	notifierGpuMemFree(shgcon->device_id);
+	if (rc == CUDA_SUCCESS)
+		gpu_scoreboard_mem_free(nbytes);
 
 	if (shgcon->pfm.enabled)
 	{
@@ -254,8 +278,13 @@ trackIOMapMem(GpuContext_v2 *gcontext, CUdeviceptr devptr)
 								   &devptr, sizeof(CUdeviceptr));
 	tracker->crc = crc;
 	tracker->resclass = RESTRACK_CLASS__IOMAPMEMORY;
-	tracker->u.devptr = devptr;
-
+	tracker->u.devmem.ptr = devptr;
+	tracker->u.devmem.size = 0;
+	/*
+	 * NOTE: length of the i/o mapped memory is already counted
+	 * on the GPU-scoreboard on the initialization time, so we
+	 * don't need to count up/down device memory usage any more.
+	 */
 	dlist_push_tail(&gcontext->restrack[crc % RESTRACK_HASHSIZE],
 					&tracker->chain);
 }
@@ -278,7 +307,7 @@ untrackIOMapMem(GpuContext_v2 *gcontext, CUdeviceptr devptr)
 
 		if (tracker->crc == crc &&
 			tracker->resclass == RESTRACK_CLASS__IOMAPMEMORY &&
-			tracker->u.devptr == devptr)
+			tracker->u.devmem.ptr == devptr)
 		{
 			dlist_delete(&tracker->chain);
 			memset(tracker, 0, sizeof(ResourceTracker));
@@ -405,17 +434,19 @@ ReleaseLocalResources(GpuContext_v2 *gcontext, bool normal_exit)
 				case RESTRACK_CLASS__GPUMEMORY:
 					if (normal_exit)
 						elog(WARNING, "GPU memory %p likely leaked",
-							 (void *)tracker->u.devptr);
+							 (void *)tracker->u.devmem.ptr);
 					/*
 					 * normal device memory should be already released
 					 * once CUDA context is destroyed
 					 */
 					if (!gpuserv_cuda_context)
 						break;
-					rc = cuMemFree(tracker->u.devptr);
+					rc = cuMemFree(tracker->u.devmem.ptr);
 					if (rc != CUDA_SUCCESS)
 						elog(WARNING, "failed on cuMemFree(%p): %s",
-							 (void *)tracker->u.devptr, errorText(rc));
+							 (void *)tracker->u.devmem.ptr, errorText(rc));
+					else
+						gpu_scoreboard_mem_free(tracker->u.devmem.size);
 					break;
 				case RESTRACK_CLASS__GPUPROGRAM:
 					if (normal_exit)
@@ -426,11 +457,11 @@ ReleaseLocalResources(GpuContext_v2 *gcontext, bool normal_exit)
 				case RESTRACK_CLASS__IOMAPMEMORY:
 					if (normal_exit)
 						elog(WARNING, "I/O Mapped Memory %p likely leaked",
-							 (void *)tracker->u.devptr);
-					rc = gpuMemFreeIOMap(NULL, tracker->u.devptr);
+							 (void *)tracker->u.devmem.ptr);
+					rc = gpuMemFreeIOMap(NULL, tracker->u.devmem.ptr);
 					if (rc != CUDA_SUCCESS)
 						elog(WARNING, "failed on gpuMemFreeIOMap(%p): %s",
-							 (void *)tracker->u.devptr, errorText(rc));
+							 (void *)tracker->u.devmem.ptr, errorText(rc));
 					break;
 				default:
 					elog(WARNING, "Bug? unknown resource tracker class: %d",

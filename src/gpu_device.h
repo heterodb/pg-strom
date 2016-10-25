@@ -123,6 +123,9 @@ extern DevAttributes   *devAttrs;
 extern cl_int			numDevAttrs;
 extern cl_ulong			devComputeCapability;
 
+extern bool	gpu_scoreboard_mem_alloc(size_t nbytes);
+extern void	gpu_scoreboard_mem_free(size_t nbytes);
+
 extern void pgstrom_init_gpu_device(void);
 extern Datum pgstrom_device_info(PG_FUNCTION_ARGS);
 

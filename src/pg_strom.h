@@ -495,7 +495,6 @@ extern CUcontext		gpuserv_cuda_context;
 
 extern bool IsGpuServerProcess(void);
 extern void gpuservTryToWakeUp(void);
-extern void notifierGpuMemFree(cl_int device_id);
 extern void gpuservOpenConnection(GpuContext_v2 *gcontext);
 extern bool gpuservSendGpuTask(GpuContext_v2 *gcontext, GpuTask_v2 *gtask);
 extern bool gpuservRecvGpuTasks(GpuContext_v2 *gcontext, long timeout);
@@ -755,7 +754,7 @@ extern void pgstrom_init_datastore(void);
  */
 #include "nvme_strom.h"
 
-extern bool nvme_strom_is_enabled(void);
+extern Size gpuMemSizeIOMap(void);
 extern CUresult	gpuMemAllocIOMap(GpuContext_v2 *gcontext,
 								 CUdeviceptr *p_devptr, size_t bytesize);
 extern CUresult	gpuMemFreeIOMap(GpuContext_v2 *gcontext,
