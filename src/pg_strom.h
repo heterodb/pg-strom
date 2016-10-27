@@ -152,10 +152,7 @@ typedef enum {
 	GpuTaskKind_PL_CUDA,
 } GpuTaskKind;
 
-/*
- * Relevant Header Files
- */
-#include "gpu_device.h"
+/* definition of performance-monitor structure */
 #include "perfmon.h"
 
 typedef struct GpuTask_v2		GpuTask_v2;
@@ -444,6 +441,31 @@ typedef struct pgstrom_data_store
  *
  * --------------------------------------------------------------------
  */
+
+/*
+ * gpu_device.c
+ */
+typedef struct DevAttributes
+{
+	cl_int		DEV_ID;
+	char		DEV_NAME[256];
+	size_t		DEV_TOTAL_MEMSZ;
+	cl_int		CORES_PER_MPU;
+#define DEV_ATTR(LABEL,a,b,c)					\
+	cl_int		LABEL;
+#include "device_attrs.h"
+#undef DEV_ATTR
+} DevAttributes;
+
+extern DevAttributes   *devAttrs;
+extern cl_int			numDevAttrs;
+extern cl_ulong			devComputeCapability;
+
+extern bool	gpu_scoreboard_mem_alloc(size_t nbytes);
+extern void	gpu_scoreboard_mem_free(size_t nbytes);
+
+extern void pgstrom_init_gpu_device(void);
+extern Datum pgstrom_device_info(PG_FUNCTION_ARGS);
 
 /*
  * dma_buffer.c

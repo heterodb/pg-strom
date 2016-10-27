@@ -22,7 +22,6 @@
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "pg_strom.h"
-#include "gpu_device.h"
 
 /* scoreboard for resource management */
 typedef struct GpuScoreBoard
@@ -77,11 +76,12 @@ gpu_scoreboard_mem_free(size_t nbytes)
 
 /* catalog of device attributes */
 typedef enum {
-	DEVATTRKIND__BOOL,
 	DEVATTRKIND__INT,
-	DEVATTRKIND__SIZE,
+	DEVATTRKIND__BYTES,
+	DEVATTRKIND__KB,
 	DEVATTRKIND__KHZ,
-	DEVATTRKIND__COMP_MODE,
+	DEVATTRKIND__COMPUTEMODE,
+	DEVATTRKIND__BOOL,
 	DEVATTRKIND__BITS,
 } DevAttrKind;
 
@@ -91,192 +91,13 @@ static struct {
 	size_t		attr_offset;
 	const char *attr_desc;
 } DevAttrCatalog[] = {
-#define _DEVATTR(ATTLABEL,ATTKIND,ATTDESC)			\
-	{ CU_DEVICE_ATTRIBUTE_##ATTLABEL,				\
-	  DEVATTRKIND__##ATTKIND,						\
-	  offsetof(struct DevAttributes, ATTLABEL),		\
-	  (ATTDESC) }
-	_DEVATTR(MAX_THREADS_PER_BLOCK, INT,
-			 "Max number of threads per block"),
-	_DEVATTR(MAX_BLOCK_DIM_X, INT,
-			 "Max block dimension X"),
-	_DEVATTR(MAX_BLOCK_DIM_Y, INT,
-			 "Max block dimension Y"),
-	_DEVATTR(MAX_BLOCK_DIM_Z, INT,
-			 "Max block dimension Z"),
-	_DEVATTR(MAX_GRID_DIM_X, INT,
-			 "Max grid dimension X"),
-	_DEVATTR(MAX_GRID_DIM_Y, INT,
-			 "Max grid dimension Y"),
-	_DEVATTR(MAX_GRID_DIM_Z, INT,
-			 "Max grid dimension Z"),
-	_DEVATTR(MAX_SHARED_MEMORY_PER_BLOCK, SIZE,
-			 "Max shared memory available per block"),
-	_DEVATTR(TOTAL_CONSTANT_MEMORY, SIZE,
-			 "Constant memory available on device"),
-	_DEVATTR(WARP_SIZE, INT,
-			 "Warp size in threads"),
-	_DEVATTR(MAX_PITCH, SIZE,
-			 "Max pitch in bytes allowed by memory copies"),
-	_DEVATTR(MAX_REGISTERS_PER_BLOCK, INT,
-			 "Max number of 32-bit registers per block"),
-	_DEVATTR(CLOCK_RATE, KHZ,
-			 "Typical clock frequency in kHz"),
-	_DEVATTR(TEXTURE_ALIGNMENT, BOOL,
-			 "Alignment requirement for textures"),
-	_DEVATTR(MULTIPROCESSOR_COUNT, INT,
-			 "Number of multiprocessors on device"),
-	_DEVATTR(KERNEL_EXEC_TIMEOUT, BOOL,
-			 "Whether there is a run time limit on kernels"),
-	_DEVATTR(INTEGRATED, BOOL,
-			 "Device is integrated with host memory"),
-	_DEVATTR(CAN_MAP_HOST_MEMORY, BOOL,
-			 "Device can map host memory into CUDA address space"),
-	_DEVATTR(COMPUTE_MODE, COMP_MODE,
-			 "Device compute mode"),
-	_DEVATTR(MAXIMUM_TEXTURE1D_WIDTH, INT,
-			 "Max 1D texture width"),
-	_DEVATTR(MAXIMUM_TEXTURE2D_WIDTH, INT,
-			 "Max 2D texture width"),
-	_DEVATTR(MAXIMUM_TEXTURE2D_HEIGHT, INT,
-			 "Max 2D texture height"),
-	_DEVATTR(MAXIMUM_TEXTURE3D_WIDTH, INT,
-			 "Max 3D texture width"),
-	_DEVATTR(MAXIMUM_TEXTURE3D_HEIGHT, INT,
-			 "Max 3D texture height"),
-	_DEVATTR(MAXIMUM_TEXTURE3D_DEPTH, INT,
-			 "Max 3D texture depth"),
-	_DEVATTR(MAXIMUM_TEXTURE2D_LAYERED_WIDTH, INT,
-			 "Max 2D layered texture width"),
-	_DEVATTR(MAXIMUM_TEXTURE2D_LAYERED_HEIGHT, INT,
-			 "Max 2D layered texture height"),
-	_DEVATTR(MAXIMUM_TEXTURE2D_LAYERED_LAYERS, INT,
-			 "Max layers in a 2D layered texture"),
-	_DEVATTR(SURFACE_ALIGNMENT, INT,
-			 "Alignment requirement for surfaces"),
-	_DEVATTR(CONCURRENT_KERNELS, BOOL,
-			 "Device supports concurrent kernel execution"),
-	_DEVATTR(ECC_ENABLED, BOOL,
-			 "Device has ECC support enabled"),
-	_DEVATTR(PCI_BUS_ID, INT,
-			 "PCI bus ID of the device"),
-	_DEVATTR(PCI_DEVICE_ID, INT,
-			 "PCI device ID of the device"),
-	_DEVATTR(TCC_DRIVER, BOOL,
-			 "Device is using TCC driver model"),
-	_DEVATTR(MEMORY_CLOCK_RATE, KHZ,
-			 "Peak memory clock frequency in kHz"),
-	_DEVATTR(GLOBAL_MEMORY_BUS_WIDTH, BITS,
-			 "Global memory bus width in bits"),
-	_DEVATTR(L2_CACHE_SIZE, SIZE,
-			 "Size of L2 cache in bytes"),
-	_DEVATTR(MAX_THREADS_PER_MULTIPROCESSOR, INT,
-			 "Max resident threads per multiprocessor"),
-	_DEVATTR(ASYNC_ENGINE_COUNT, INT,
-			 "Number of asynchronous engines"),
-	_DEVATTR(UNIFIED_ADDRESSING, BOOL,
-			 "Device shares a unified address space with the host"),
-	_DEVATTR(MAXIMUM_TEXTURE1D_LAYERED_WIDTH, INT,
-			 "Max 1D layered texture width"),
-	_DEVATTR(MAXIMUM_TEXTURE1D_LAYERED_LAYERS, INT,
-			 "Max layers in a 1D layered texture"),
-	_DEVATTR(MAXIMUM_TEXTURE2D_GATHER_WIDTH, INT,
-			 "Max 2D texture width if CUDA_ARRAY3D_TEXTURE_GATHER"),
-	_DEVATTR(MAXIMUM_TEXTURE2D_GATHER_HEIGHT, INT,
-			"Max 2D texture height if CUDA_ARRAY3D_TEXTURE_GATHER"),
-	_DEVATTR(MAXIMUM_TEXTURE3D_WIDTH_ALTERNATE, INT,
-			 "Alternate maximum 3D texture width"),
-	_DEVATTR(MAXIMUM_TEXTURE3D_HEIGHT_ALTERNATE, INT,
-			 "Alternate maximum 3D texture height"),
-	_DEVATTR(MAXIMUM_TEXTURE3D_DEPTH_ALTERNATE, INT,
-			 "Alternate maximum 3D texture depth"),
-	_DEVATTR(PCI_DOMAIN_ID, INT,
-			 "PCI domain ID of the device"),
-	_DEVATTR(TEXTURE_PITCH_ALIGNMENT, INT,
-			 "Pitch alignment requirement for textures"),
-	_DEVATTR(MAXIMUM_TEXTURECUBEMAP_WIDTH, INT,
-			 "Max cubemap texture width/height"),
-	_DEVATTR(MAXIMUM_TEXTURECUBEMAP_LAYERED_WIDTH, INT,
-			 "Max cubemap layered texture width/height"),
-	_DEVATTR(MAXIMUM_TEXTURECUBEMAP_LAYERED_LAYERS, INT,
-			 "Max layers in a cubemap layered texture"),
-	_DEVATTR(MAXIMUM_SURFACE1D_WIDTH, INT,
-			 "Max 1D surface width"),
-	_DEVATTR(MAXIMUM_SURFACE2D_WIDTH, INT,
-			 "Max 2D surface width"),
-	_DEVATTR(MAXIMUM_SURFACE2D_HEIGHT, INT,
-			 "Max 2D surface height"),
-	_DEVATTR(MAXIMUM_SURFACE3D_WIDTH, INT,
-			 "Max 3D surface width"),
-	_DEVATTR(MAXIMUM_SURFACE3D_HEIGHT, INT,
-			 "Max 3D surface height"),
-	_DEVATTR(MAXIMUM_SURFACE3D_DEPTH, INT,
-			 "Max 3D surface depth"),
-	_DEVATTR(MAXIMUM_SURFACE1D_LAYERED_WIDTH, INT,
-			 "Max 1D layered surface width"),
-	_DEVATTR(MAXIMUM_SURFACE1D_LAYERED_LAYERS, INT,
-			 "Max layers in a 1D layered surface"),
-	_DEVATTR(MAXIMUM_SURFACE2D_LAYERED_WIDTH, INT,
-			 "Max 2D layered surface width"),
-	_DEVATTR(MAXIMUM_SURFACE2D_LAYERED_HEIGHT, INT,
-			 "Max 2D layered surface height"),
-	_DEVATTR(MAXIMUM_SURFACE2D_LAYERED_LAYERS, INT,
-			 "Max layers in a 2D layered surface"),
-	_DEVATTR(MAXIMUM_SURFACECUBEMAP_WIDTH, INT,
-			 "Max cubemap surface width"),
-	_DEVATTR(MAXIMUM_SURFACECUBEMAP_LAYERED_WIDTH, INT,
-			 "Max cubemap layered surface width"),
-	_DEVATTR(MAXIMUM_SURFACECUBEMAP_LAYERED_LAYERS, INT,
-			 "Max layers in a cubemap layered surface"),
-	_DEVATTR(MAXIMUM_TEXTURE1D_LINEAR_WIDTH, INT,
-			 "Max 1D linear texture width"),
-	_DEVATTR(MAXIMUM_TEXTURE2D_LINEAR_WIDTH, INT,
-			 "Max 2D linear texture width"),
-	_DEVATTR(MAXIMUM_TEXTURE2D_LINEAR_HEIGHT, INT,
-			 "Max 2D linear texture height"),
-	_DEVATTR(MAXIMUM_TEXTURE2D_LINEAR_PITCH, INT,
-			 "Max 2D linear texture pitch in bytes"),
-	_DEVATTR(MAXIMUM_TEXTURE2D_MIPMAPPED_WIDTH, INT,
-			 "Max mipmapped 2D texture width"),
-	_DEVATTR(MAXIMUM_TEXTURE2D_MIPMAPPED_HEIGHT, INT,
-			 "Max mipmapped 2D texture height"),
-	_DEVATTR(COMPUTE_CAPABILITY_MAJOR, INT,
-			 "Major compute capability number"),
-	_DEVATTR(COMPUTE_CAPABILITY_MINOR, INT,
-			 "Minor compute capability number"),
-	_DEVATTR(MAXIMUM_TEXTURE1D_MIPMAPPED_WIDTH, INT,
-			 "Max mipmapped 1D texture width"),
-	_DEVATTR(STREAM_PRIORITIES_SUPPORTED, BOOL,
-			 "Device supports stream priorities"),
-	_DEVATTR(GLOBAL_L1_CACHE_SUPPORTED, BOOL,
-			 "Device supports caching globals in L1"),
-	_DEVATTR(LOCAL_L1_CACHE_SUPPORTED, BOOL,
-			 "Device supports caching locals in L1"),
-	_DEVATTR(MAX_SHARED_MEMORY_PER_MULTIPROCESSOR, SIZE,
-			 "Max shared memory per multiprocessor"),
-	_DEVATTR(MAX_REGISTERS_PER_MULTIPROCESSOR, INT,
-			"Max number of 32bit registers per multiprocessor"),
-	_DEVATTR(MANAGED_MEMORY, BOOL,
-			 "Device can allocate managed memory"),
-	_DEVATTR(MULTI_GPU_BOARD, BOOL,
-			 "Device is on a multi-GPU board"),
-	_DEVATTR(MULTI_GPU_BOARD_GROUP_ID, INT,
-			 "Unique ID within a multi-GPU board"),
-#if CUDA_VERSION >= 8000
-	_DEVATTR(HOST_NATIVE_ATOMIC_SUPPORTED, BOOL,
-			 ""),
-	_DEVATTR(SINGLE_TO_DOUBLE_PRECISION_PERF_RATIO, INT,
-			 "Ratio of FP32 performance to FP64"),
-	_DEVATTR(PAGEABLE_MEMORY_ACCESS, BOOL,
-			 "Device supports coherently accessing pageable memory"),
-	_DEVATTR(CONCURRENT_MANAGED_ACCESS, BOOL,
-			 "Device can coherently access managed memory concurrently"),
-	_DEVATTR(COMPUTE_PREEMPTION_SUPPORTED, BOOL,
-			 "Device supports compute preemption"),
-	_DEVATTR(CAN_USE_HOST_POINTER_FOR_REGISTERED_MEM, BOOL,
-			 "Device can access host registered memory using same vaddr"),
-#endif
-#undef _DEVATTR	
+#define DEV_ATTR(LABEL,KIND,a,DESC)				\
+	{ CU_DEVICE_ATTRIBUTE_##LABEL,				\
+	  DEVATTRKIND__##KIND,						\
+	  offsetof(struct DevAttributes, LABEL),	\
+	  DESC },
+#include "device_attrs.h"
+#undef DEV_ATTR
 };
 
 /*
@@ -433,6 +254,201 @@ collect_gpu_device_attributes(void)
 }
 
 /*
+ * pgstrom_collect_gpu_device
+ */
+static void
+pgstrom_collect_gpu_device(void)
+{
+	char	   *cmdline;
+	char		linebuf[2048];
+	FILE	   *filp;
+	char	   *tok_attr;
+	char	   *tok_val;
+	char	   *pos;
+	char	   *cuda_runtime_version = NULL;
+	char	   *nvidia_driver_version = NULL;
+	int			num_devices = -1;	/* total num of GPUs; incl legacy models */
+	int			i, j;
+
+	cmdline = psprintf("%s -md", CMD_GPUINFO_PATH);
+	filp = OpenPipeStream(cmdline, PG_BINARY_R);
+
+	while (fgets(linebuf, sizeof(linebuf), filp) != NULL)
+	{
+		/* trim '\n' on the tail */
+		pos = linebuf + strlen(linebuf);
+		while (pos > linebuf && isspace(*--pos))
+			*pos = '\0';
+		/* empty line? */
+		if (linebuf[0] == '\0')
+			continue;
+
+		tok_attr = strchr(linebuf, ':');
+		if (!tok_attr)
+			elog(ERROR, "unexpected gpuinfo -md format");
+		*tok_attr++ = '\0';
+
+		tok_val = strchr(tok_attr, '=');
+		if (!tok_val)
+			elog(ERROR, "incorrect gpuinfo -md format");
+		*tok_val++ = '\0';
+
+		if (strcmp(linebuf, "PLATFORM") == 0)
+		{
+			if (strcmp(tok_attr, "CUDA_RUNTIME_VERSION") == 0)
+				cuda_runtime_version = pstrdup(tok_val);
+			else if (strcmp(tok_attr, "NVIDIA_DRIVER_VERSION") == 0)
+				nvidia_driver_version = pstrdup(tok_val);
+			else if (strcmp(tok_attr, "NUMBER_OF_DEVICES") == 0)
+			{
+				num_devices = atoi(tok_val);
+				if (num_devices < 0)
+					elog(ERROR, "NUMBER_OF_DEVICES is not correct");
+			}
+			else
+				elog(ERROR, "unknown PLATFORM attribute");
+		}
+		else if (strncmp(linebuf, "DEVICE", 6) == 0)
+		{
+			int		dev_id = atoi(linebuf + 6);
+
+			if (!devAttrs)
+			{
+				if (!cuda_runtime_version ||
+					!nvidia_driver_version ||
+					num_devices < 0)
+					elog(ERROR, "incorrect gpuinfo -md format");
+				Assert(num_devices > 0);
+				devAttrs = MemoryContextAllocZero(TopMemoryContext,
+												  sizeof(DevAttributes) *
+												  num_devices);
+			}
+
+			if (dev_id < 0 || dev_id >= num_devices)
+				elog(ERROR, "incorrect device attribute");
+
+#define DEV_ATTR(LABEL,a,b,c)						\
+			else if (strcmp(tok_attr, #LABEL) == 0)	\
+				devAttrs[dev_id].LABEL = atoi(tok_val);
+
+			if (strcmp(tok_attr, "DEVICE_ID") == 0)
+			{
+				if (dev_id != atoi(tok_val))
+					elog(ERROR, "incorrect gpuinfo -md format");
+				devAttrs[dev_id].DEV_ID = dev_id;
+			}
+			else if (strcmp(tok_attr, "DEVICE_NAME") == 0)
+			{
+				strncpy(devAttrs[dev_id].DEV_NAME, tok_val,
+						sizeof(devAttrs[dev_id].DEV_NAME));
+			}
+			else if (strcmp(tok_attr, "GLOBAL_MEMORY_SIZE") == 0)
+				devAttrs[dev_id].DEV_TOTAL_MEMSZ = atol(tok_val);
+#include "device_attrs.h"
+			else
+				elog(ERROR, "incorrect gpuinfo -md format");
+#undef DEV_ATTR
+		}
+		else
+			elog(ERROR, "unexpected gpuinfo -md input:\n%s", linebuf);
+	}
+	ClosePipeStream(filp);
+
+	for (i=0, j=0; i < num_devices; i++)
+	{
+		DevAttributes  *dattrs = &devAttrs[dev_id];
+
+		/* Is it supported CC? */
+		if (dattrs->COMPUTE_CAPABILITY_MAJOR < 3 ||
+			(dattrs->COMPUTE_CAPABILITY_MAJOR == 3 &&
+			 dattrs->COMPUTE_CAPABILITY_MINOR < 5))
+		{
+			elog(LOG, "PG-Strom: GPU%d %s - CC %d.%d is not supported",
+				 dattrs->DEV_ID,
+				 dattrs->DEV_NAME,
+				 dattrs->COMPUTE_CAPABILITY_MAJOR,
+				 dattrs->COMPUTE_CAPABILITY_MINOR);
+			continue;
+		}
+
+		/* Update baseline CC for code build */
+		compute_capability = (dattrs->COMPUTE_CAPABILITY_MAJOR * 10 +
+							  dattrs->COMPUTE_CAPABILITY_MINOR);
+		devComputeCapability = Min(devComputeCapability,
+								   compute_capability);
+
+		/* Determine CORES_PER_MPU by CC */
+		if (dattrs->COMPUTE_CAPABILITY_MAJOR == 1)
+			dattrs->CORES_PER_MPU = 8;
+		else if (dattrs->COMPUTE_CAPABILITY_MAJOR == 2)
+		{
+			if (dattrs->COMPUTE_CAPABILITY_MINOR == 0)
+				dattrs->CORES_PER_MPU = 32;
+			else if (dattrs->COMPUTE_CAPABILITY_MINOR == 1)
+				dattrs->CORES_PER_MPU = 48;
+			else
+				dattrs->CORES_PER_MPU = -1;
+		}
+		else if (dattrs->COMPUTE_CAPABILITY_MAJOR == 3)
+			dattrs->CORES_PER_MPU = 192;
+		else if (dattrs->COMPUTE_CAPABILITY_MAJOR == 5)
+			dattrs->CORES_PER_MPU = 128;
+		else if (dattrs->COMPUTE_CAPABILITY_MAJOR == 6)
+		{
+			if (dattrs->COMPUTE_CAPABILITY_MINOR == 0)
+				dattrs->CORES_PER_MPU = 64;
+			else
+				dattrs->CORES_PER_MPU = 128;
+		}
+		else
+			dattrs->CORES_PER_MPU = 0;	/* unknown */
+
+		/* Log brief CUDA device properties */
+		resetStringInfo(&buf);
+		appendStringInfo(&buf, "GPU%d %s (", dattrs->DEV_ID, dattrs->DEV_NAME);
+		if (dattrs->CORES_PER_MPU > 0)
+			appendStringInfo(&buf, "%d CUDA cores",
+							 dattrs->CORES_PER_MPU *
+							 dattrs->MULTIPROCESSOR_COUNT);
+		else
+			appendStringInfo(&buf, "%d SMXs",
+							 dattrs->MULTIPROCESSOR_COUNT);
+		appendStringInfo(&buf, "), %dMHz, L2 %dkB",
+						 dattrs->CLOCK_RATE / 1000,
+						 dattrs->L2_CACHE_SIZE >> 10);
+		if (dattrs->DEV_TOTAL_MEMSZ > (4UL << 30))
+			appendStringInfo(&buf, ", RAM %.2fGB",
+							 ((double)dattrs->DEV_TOTAL_MEMSZ /
+							  (double)(1UL << 20)));
+		else
+			appendStringInfo(&buf, ", RAM %zuMB",
+							 dattrs->DEV_TOTAL_MEMSZ >> 20);
+		if (dattrs->MEMORY_CLOCK_RATE > (1UL << 20))
+			appendStringInfo(&buf, " (%dbits, %.2fGHz)",
+							 dattrs->GLOBAL_MEMORY_BUS_WIDTH,
+							 ((double)dattrs->MEMORY_CLOCK_RATE /
+							  (double)(1UL << 20)));
+		else
+			appendStringInfo(&buf, " (%dbits, %dMHz)",
+							 dattrs->GLOBAL_MEMORY_BUS_WIDTH,
+							 dattrs->MEMORY_CLOCK_RATE >> 10);
+		appendStringInfo(&buf, ", capability %d.%d",
+						 dattrs->COMPUTE_CAPABILITY_MAJOR,
+						 dattrs->COMPUTE_CAPABILITY_MINOR);
+		elog(LOG, "PG-Strom: %s", buf.data);
+
+		if (i != j)
+			memcpy(&devAttrs[j], &devAttrs[i], sizeof(DevAttributes));
+
+		j++;
+	}
+	Assert(j <= num_devices);
+	numDevAttrs = j;
+	if (numDevAttrs == 0)
+		elog(ERROR, "PG-Strom: no supported GPU devices found");
+}
+
+/*
  * pgstrom_startup_gpu_device
  */
 static void
@@ -467,7 +483,6 @@ void
 pgstrom_init_gpu_device(void)
 {
 	static char	   *cuda_visible_devices = NULL;
-	CUresult		rc;
 
 	/*
 	 * Set CUDA_VISIBLE_DEVICES environment variable prior to CUDA
@@ -506,14 +521,8 @@ pgstrom_init_gpu_device(void)
 							GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
 
-	/* collect device properties */
-	rc = cuInit(0);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "PG-Strom: failed on cuInit: %s", errorText(rc));
-
-	numDevAttrs = collect_gpu_device_attributes();
-	if (numDevAttrs == 0)
-		elog(ERROR, "PG-Strom: no supported GPU devices found");
+	/* collect device properties by gpuinfo command */
+	pgstrom_collect_gpu_device();
 
 	/* require shared memory for score-board */
 	RequestAddinShmemSpace(MAXALIGN(sizeof(gpuScoreBoard) * numDevAttrs));
@@ -588,14 +597,14 @@ pgstrom_device_info(PG_FUNCTION_ARGS)
 		att_name = DevAttrCatalog[i].attr_desc;
 		switch (DevAttrCatalog[i].attr_kind)
 		{
-			case DEVATTRKIND__BOOL:
-				att_value = psprintf("%s", value != 0 ? "True" : "False");
-				break;
 			case DEVATTRKIND__INT:
 				att_value = psprintf("%d", value);
 				break;
-			case DEVATTRKIND__SIZE:
-				att_value = format_bytesz((Size) value);
+			case DEVATTRKIND__BYTES:
+				att_value = psprintf("%dbytes", value); 
+				break;
+			case DEVATTRKIND__KB:
+				att_value = psprintf("%dKB", value);
 				break;
 			case DEVATTRKIND__KHZ:
 				if (value > 2 * 1000 * 1000)	/* more than 2.0GHz */
@@ -605,7 +614,7 @@ pgstrom_device_info(PG_FUNCTION_ARGS)
 				else
 					att_value = psprintf("%d kHz", value);
 				break;
-			case DEVATTRKIND__COMP_MODE:
+			case DEVATTRKIND__COMPUTEMODE:
 				switch (value)
 				{
 					case CU_COMPUTEMODE_DEFAULT:
@@ -627,8 +636,11 @@ pgstrom_device_info(PG_FUNCTION_ARGS)
 						break;
 				}
 				break;
+			case DEVATTRKIND__BOOL:
+				att_value = psprintf("%s", value != 0 ? "True" : "False");
+				break;
 			case DEVATTRKIND__BITS:
-				att_value = psprintf("%d bits", value);
+				att_value = psprintf("%dbits", value);
 				break;
 			default:
 				elog(ERROR, "Bug? unknown DevAttrKind: %d",

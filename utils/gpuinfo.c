@@ -70,10 +70,11 @@ __error_exit(const char *file_name, int lineno,
 #define ATTRCLASS_KHZ			4
 #define ATTRCLASS_COMPUTEMODE	5
 #define ATTRCLASS_BOOL			6
+#define ATTRCLASS_BITS			7
 
-#define DEV_ATTR(label,class,only_detail, desc)		\
+#define DEV_ATTR(label,class,is_minor,desc)			\
 	{ CU_DEVICE_ATTRIBUTE_##label,					\
-	  ATTRCLASS_##class, desc, #label, only_detail }
+	  ATTRCLASS_##class, desc, #label, is_minor },
 
 static struct
 {
@@ -81,7 +82,7 @@ static struct
 	int			attclass;
 	const char *attname_h;
 	const char *attname_m;
-	int			attdetail;	/* skip without -d option */
+	int			attisminor;		/* skip without -d option */
 } attribute_catalog[] = {
 #include "../src/device_attrs.h"
 };
@@ -122,92 +123,72 @@ static void output_device(CUdevice device, int dev_id)
 	for (i=0; i < lengthof(attribute_catalog); i++)
 	{
 		CUdevice_attribute attcode = attribute_catalog[i].attcode;
-		int         attclass  = attribute_catalog[i].attclass;
-		const char *attname_h = attribute_catalog[i].attname_h;
-		const char *attname_m = attribute_catalog[i].attname_m;
-		int         attdetail = attribute_catalog[i].attdetail;
-		const char *temp;
+		int         attclass   = attribute_catalog[i].attclass;
+		const char *attname_h  = attribute_catalog[i].attname_h;
+		const char *attname_m  = attribute_catalog[i].attname_m;
+		int         attisminor = attribute_catalog[i].attisminor;
 
 		/* no need to output, if not detailed mode */
-		if (attdetail && !detailed_output)
+		if (attisminor && !detailed_output)
 			continue;
 
 		rc = cuDeviceGetAttribute(&dev_prop, attcode, device);
 		if (rc != CUDA_SUCCESS)
 			error_exit(rc, "failed on cuDeviceGetAttribute");
 
-		switch (attclass)
+		if (machine_format)
+			printf("DEVICE%d:%s=%d\n", dev_id, attname_m, dev_prop);
+		else
 		{
-			case ATTRCLASS_INT:
-				if (!machine_format)
+			switch (attclass)
+			{
+				case ATTRCLASS_INT:
 					printf("%s: %d\n", attname_h, dev_prop);
-				else
-					printf("DEVICE%d:%s=%d\n", dev_id, attname_m, dev_prop);
-				break;
+					break;
 
 			case ATTRCLASS_BYTES:
-				if (!machine_format)
-					printf("%s: %dbytes\n", attname_h, dev_prop);
-				else
-					printf("DEVICE%d:%s=%d\n", dev_id, attname_m, dev_prop);
+				printf("%s: %dbytes\n", attname_h, dev_prop);
 				break;
 
 			case ATTRCLASS_KB:
-				if (!machine_format)
-					printf("%s: %dKB\n", attname_h, dev_prop);
-				else
-					printf("DEVICE%d:%s=%d\n", dev_id, attname_m, dev_prop);
+				printf("%s: %dKB\n", attname_h, dev_prop);
 				break;
 
 			case ATTRCLASS_KHZ:
-				if (!machine_format)
-					printf("%s: %dKHZ\n", attname_h, dev_prop);
-				else
-					printf("DEVICE%d:%s=%d\n", dev_id, attname_m, dev_prop);
+				printf("%s: %dKHZ\n", attname_h, dev_prop);
 				break;
 
 			case ATTRCLASS_COMPUTEMODE:
 				switch (dev_prop)
 				{
 					case CU_COMPUTEMODE_DEFAULT:
-						temp = "default";
+						printf("%s: default\n", attname_h);
 						break;
 #if CUDA_VERSION < 8000
 					case CU_COMPUTEMODE_EXCLUSIVE:
-						temp = "exclusive";
+						printf("%s: exclusive\n", attname_h);
 						break;
 #endif
 					case CU_COMPUTEMODE_PROHIBITED:
-						temp = "prohibited";
+						printf("%s: prohibited\n", attname_h);
 						break;
 					case CU_COMPUTEMODE_EXCLUSIVE_PROCESS:
-						temp = "exclusive process";
+						printf("%s: exclusive process\n", attname_h);
 						break;
 					default:
-						temp = "unknown";
+						printf("%s: unknown\n", attname_h);
 						break;
 				}
-				if (!machine_format)
-					printf("%s: %s\n", attname_h, temp);
-				else
-					printf("DEVICE%d:%s=%s\n", dev_id, attname_m, temp);
 				break;
 
 			case ATTRCLASS_BOOL:
-				if (!machine_format)
-					printf("%s: %s\n", attname_h,
-						   dev_prop ? "true" : "false");
-				else
-					printf("DEVICE%d:%s=%s\n", dev_id, attname_m,
-						   dev_prop ? "true" : "false");
+				printf("%s: %s\n", attname_h, dev_prop ? "true" : "false");
 				break;
 
 			default:
-				if (!machine_format)
-					printf("%s: %d\n", attname_h, dev_prop);
-				else
-					printf("DEVICE%d:%s=%d\n", dev_id, attname_m, dev_prop);
+				printf("%s: %d\n", attname_h, dev_prop);
 				break;
+			}
 		}
 	}
 }
