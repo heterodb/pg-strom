@@ -985,7 +985,7 @@ dmaBufferFreeAll(SharedGpuContext *shgcon)
 static void
 dmaBufferCleanupOnPostmasterExit(int code, Datum arg)
 {
-	if (MyProcPid == PostmasterPid)
+	if (dmaBufSegHead && MyProcPid == PostmasterPid)
 	{
 		dlist_iter	iter;
 		char		namebuf[80];
