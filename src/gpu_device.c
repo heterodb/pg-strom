@@ -21,6 +21,7 @@
 #include "storage/ipc.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
+#include "utils/memutils.h"
 #include "pg_strom.h"
 
 /* scoreboard for resource management */
@@ -101,164 +102,12 @@ static struct {
 };
 
 /*
- * collect_gpu_device_attributes
- */
-static cl_int
-collect_gpu_device_attributes(void)
-{
-	StringInfoData buf;
-	CUdevice	dev;
-	CUresult	rc;
-	cl_uint		compute_capability;
-	int			count;
-	int			i, j, k;
-
-	rc = cuDeviceGetCount(&count);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "PG-Strom: failed on cuDeviceGetCount: %s", errorText(rc));
-	if (count == 0)
-		return 0;	/* no device found */
-
-	devAttrs = malloc(sizeof(DevAttributes) * count);
-	if (!devAttrs)
-		elog(ERROR, "out of memory");
-
-	initStringInfo(&buf);
-	for (i=0, j=0; i < count; i++)
-	{
-		DevAttributes  *dattrs = &devAttrs[j];
-
-		memset(dattrs, 0, sizeof(DevAttributes));
-		dattrs->DEV_ID = i;
-
-		rc = cuDeviceGet(&dev, dattrs->DEV_ID);
-		if (rc != CUDA_SUCCESS)
-		{
-			elog(LOG, "failed on cuDeviceGet, for device %d: %s",
-				 i, errorText(rc));
-			continue;
-		}
-
-		/* fill up DevAttributeData */
-		rc = cuDeviceGetName(dattrs->DEV_NAME, sizeof(dattrs->DEV_NAME), dev);
-		if (rc != CUDA_SUCCESS)
-		{
-			elog(LOG, "failed on cuDeviceGetName, for device %d: %s",
-				 i, errorText(rc));
-			continue;
-		}
-
-		rc = cuDeviceTotalMem(&dattrs->DEV_TOTAL_MEMSZ, dev);
-		if (rc != CUDA_SUCCESS)
-		{
-			elog(LOG, "failed on cuDeviceTotalMem, for device %s: %s",
-				 dattrs->DEV_NAME, errorText(rc));
-			continue;
-		}
-
-		for (k=0; k < lengthof(DevAttrCatalog); k++)
-		{
-			rc = cuDeviceGetAttribute((int *)((char *)dattrs +
-											  DevAttrCatalog[k].attr_offset),
-									  DevAttrCatalog[k].attr_id, dev);
-			if (rc != CUDA_SUCCESS)
-			{
-				elog(LOG, "failed on cuDeviceGetAttribute on %s: %s",
-					 dattrs->DEV_NAME, errorText(rc));
-				continue;
-			}
-		}
-
-		if (dattrs->COMPUTE_CAPABILITY_MAJOR < 3 ||
-			(dattrs->COMPUTE_CAPABILITY_MAJOR == 3 &&
-			 dattrs->COMPUTE_CAPABILITY_MINOR < 5))
-		{
-			elog(LOG, "PG-Strom: GPU%d %s - capability %d.%d is not supported",
-				 dattrs->DEV_ID,
-				 dattrs->DEV_NAME,
-				 dattrs->COMPUTE_CAPABILITY_MAJOR,
-				 dattrs->COMPUTE_CAPABILITY_MINOR);
-			continue;
-		}
-		compute_capability = (dattrs->COMPUTE_CAPABILITY_MAJOR * 10 +
-								  dattrs->COMPUTE_CAPABILITY_MINOR);
-		devComputeCapability = Min(devComputeCapability,
-								   compute_capability);
-		/*
-		 * Number of CUDA cores (determined by CC)
-		 */
-		if (dattrs->COMPUTE_CAPABILITY_MAJOR == 1)
-			dattrs->CORES_PER_MPU = 8;
-		else if (dattrs->COMPUTE_CAPABILITY_MAJOR == 2)
-		{
-			if (dattrs->COMPUTE_CAPABILITY_MINOR == 0)
-				dattrs->CORES_PER_MPU = 32;
-			else if (dattrs->COMPUTE_CAPABILITY_MINOR == 1)
-				dattrs->CORES_PER_MPU = 48;
-			else
-				dattrs->CORES_PER_MPU = -1;
-		}
-		else if (dattrs->COMPUTE_CAPABILITY_MAJOR == 3)
-			dattrs->CORES_PER_MPU = 192;
-		else if (dattrs->COMPUTE_CAPABILITY_MAJOR == 5)
-			dattrs->CORES_PER_MPU = 128;
-		else if (dattrs->COMPUTE_CAPABILITY_MAJOR == 6)
-		{
-			if (dattrs->COMPUTE_CAPABILITY_MINOR == 0)
-				dattrs->CORES_PER_MPU = 64;
-			else if (dattrs->COMPUTE_CAPABILITY_MINOR == 1)
-				dattrs->CORES_PER_MPU = 128;
-			else
-				dattrs->CORES_PER_MPU = -1;
-		}
-		else
-			dattrs->CORES_PER_MPU = -1;		/* unknows */
-
-		/* Log brief CUDA device properties */
-		resetStringInfo(&buf);
-		appendStringInfo(&buf, "GPU%d %s (", dattrs->DEV_ID, dattrs->DEV_NAME);
-		if (dattrs->CORES_PER_MPU > 0)
-			appendStringInfo(&buf, "%d CUDA cores",
-							 dattrs->CORES_PER_MPU *
-							 dattrs->MULTIPROCESSOR_COUNT);
-		else
-			appendStringInfo(&buf, "%d SMXs",
-							 dattrs->MULTIPROCESSOR_COUNT);
-		appendStringInfo(&buf, "), %dMHz, L2 %dkB",
-						 dattrs->CLOCK_RATE / 1000,
-						 dattrs->L2_CACHE_SIZE >> 10);
-		if (dattrs->DEV_TOTAL_MEMSZ > (4UL << 30))
-			appendStringInfo(&buf, ", RAM %.2fGB",
-							 ((double)dattrs->DEV_TOTAL_MEMSZ /
-							  (double)(1UL << 20)));
-		else
-			appendStringInfo(&buf, ", RAM %zuMB",
-							 dattrs->DEV_TOTAL_MEMSZ >> 20);
-		if (dattrs->MEMORY_CLOCK_RATE > (1UL << 20))
-			appendStringInfo(&buf, " (%dbits, %.2fGHz)",
-							 dattrs->GLOBAL_MEMORY_BUS_WIDTH,
-							 ((double)dattrs->MEMORY_CLOCK_RATE /
-							  (double)(1UL << 20)));
-		else
-			appendStringInfo(&buf, " (%dbits, %dMHz)",
-							 dattrs->GLOBAL_MEMORY_BUS_WIDTH,
-							 dattrs->MEMORY_CLOCK_RATE >> 10);
-		appendStringInfo(&buf, ", capability %d.%d",
-						 dattrs->COMPUTE_CAPABILITY_MAJOR,
-						 dattrs->COMPUTE_CAPABILITY_MINOR);
-		elog(LOG, "PG-Strom: %s", buf.data);
-		j++;
-	}
-	pfree(buf.data);
-	return j;	/* number of supported devices */
-}
-
-/*
  * pgstrom_collect_gpu_device
  */
 static void
 pgstrom_collect_gpu_device(void)
 {
+	StringInfoData str;
 	char	   *cmdline;
 	char		linebuf[2048];
 	FILE	   *filp;
@@ -269,6 +118,8 @@ pgstrom_collect_gpu_device(void)
 	char	   *nvidia_driver_version = NULL;
 	int			num_devices = -1;	/* total num of GPUs; incl legacy models */
 	int			i, j;
+
+	initStringInfo(&str);
 
 	cmdline = psprintf("%s -md", CMD_GPUINFO_PATH);
 	filp = OpenPipeStream(cmdline, PG_BINARY_R);
@@ -310,7 +161,7 @@ pgstrom_collect_gpu_device(void)
 		}
 		else if (strncmp(linebuf, "DEVICE", 6) == 0)
 		{
-			int		dev_id = atoi(linebuf + 6);
+			int		dindex = atoi(linebuf + 6);
 
 			if (!devAttrs)
 			{
@@ -324,26 +175,26 @@ pgstrom_collect_gpu_device(void)
 												  num_devices);
 			}
 
-			if (dev_id < 0 || dev_id >= num_devices)
-				elog(ERROR, "incorrect device attribute");
+			if (dindex < 0 || dindex >= num_devices)
+				elog(ERROR, "device index out of range");
 
 #define DEV_ATTR(LABEL,a,b,c)						\
 			else if (strcmp(tok_attr, #LABEL) == 0)	\
-				devAttrs[dev_id].LABEL = atoi(tok_val);
+				devAttrs[dindex].LABEL = atoi(tok_val);
 
 			if (strcmp(tok_attr, "DEVICE_ID") == 0)
 			{
-				if (dev_id != atoi(tok_val))
+				if (dindex != atoi(tok_val))
 					elog(ERROR, "incorrect gpuinfo -md format");
-				devAttrs[dev_id].DEV_ID = dev_id;
+				devAttrs[dindex].DEV_ID = dindex;
 			}
 			else if (strcmp(tok_attr, "DEVICE_NAME") == 0)
 			{
-				strncpy(devAttrs[dev_id].DEV_NAME, tok_val,
-						sizeof(devAttrs[dev_id].DEV_NAME));
+				strncpy(devAttrs[dindex].DEV_NAME, tok_val,
+						sizeof(devAttrs[dindex].DEV_NAME));
 			}
 			else if (strcmp(tok_attr, "GLOBAL_MEMORY_SIZE") == 0)
-				devAttrs[dev_id].DEV_TOTAL_MEMSZ = atol(tok_val);
+				devAttrs[dindex].DEV_TOTAL_MEMSZ = atol(tok_val);
 #include "device_attrs.h"
 			else
 				elog(ERROR, "incorrect gpuinfo -md format");
@@ -356,7 +207,8 @@ pgstrom_collect_gpu_device(void)
 
 	for (i=0, j=0; i < num_devices; i++)
 	{
-		DevAttributes  *dattrs = &devAttrs[dev_id];
+		DevAttributes  *dattrs = &devAttrs[i];
+		int				compute_capability;
 
 		/* Is it supported CC? */
 		if (dattrs->COMPUTE_CAPABILITY_MAJOR < 3 ||
@@ -404,38 +256,39 @@ pgstrom_collect_gpu_device(void)
 			dattrs->CORES_PER_MPU = 0;	/* unknown */
 
 		/* Log brief CUDA device properties */
-		resetStringInfo(&buf);
-		appendStringInfo(&buf, "GPU%d %s (", dattrs->DEV_ID, dattrs->DEV_NAME);
+		resetStringInfo(&str);
+		appendStringInfo(&str, "GPU%d %s (",
+						 dattrs->DEV_ID, dattrs->DEV_NAME);
 		if (dattrs->CORES_PER_MPU > 0)
-			appendStringInfo(&buf, "%d CUDA cores",
+			appendStringInfo(&str, "%d CUDA cores",
 							 dattrs->CORES_PER_MPU *
 							 dattrs->MULTIPROCESSOR_COUNT);
 		else
-			appendStringInfo(&buf, "%d SMXs",
+			appendStringInfo(&str, "%d SMs",
 							 dattrs->MULTIPROCESSOR_COUNT);
-		appendStringInfo(&buf, "), %dMHz, L2 %dkB",
+		appendStringInfo(&str, "; %dMHz, L2 %dkB)",
 						 dattrs->CLOCK_RATE / 1000,
 						 dattrs->L2_CACHE_SIZE >> 10);
 		if (dattrs->DEV_TOTAL_MEMSZ > (4UL << 30))
-			appendStringInfo(&buf, ", RAM %.2fGB",
+			appendStringInfo(&str, ", RAM %.2fGB",
 							 ((double)dattrs->DEV_TOTAL_MEMSZ /
-							  (double)(1UL << 20)));
+							  (double)(1UL << 30)));
 		else
-			appendStringInfo(&buf, ", RAM %zuMB",
+			appendStringInfo(&str, ", RAM %zuMB",
 							 dattrs->DEV_TOTAL_MEMSZ >> 20);
 		if (dattrs->MEMORY_CLOCK_RATE > (1UL << 20))
-			appendStringInfo(&buf, " (%dbits, %.2fGHz)",
+			appendStringInfo(&str, " (%dbits, %.2fGHz)",
 							 dattrs->GLOBAL_MEMORY_BUS_WIDTH,
 							 ((double)dattrs->MEMORY_CLOCK_RATE /
 							  (double)(1UL << 20)));
 		else
-			appendStringInfo(&buf, " (%dbits, %dMHz)",
+			appendStringInfo(&str, " (%dbits, %dMHz)",
 							 dattrs->GLOBAL_MEMORY_BUS_WIDTH,
 							 dattrs->MEMORY_CLOCK_RATE >> 10);
-		appendStringInfo(&buf, ", capability %d.%d",
+		appendStringInfo(&str, ", CC %d.%d",
 						 dattrs->COMPUTE_CAPABILITY_MAJOR,
 						 dattrs->COMPUTE_CAPABILITY_MINOR);
-		elog(LOG, "PG-Strom: %s", buf.data);
+		elog(LOG, "PG-Strom: %s", str.data);
 
 		if (i != j)
 			memcpy(&devAttrs[j], &devAttrs[i], sizeof(DevAttributes));
@@ -601,15 +454,15 @@ pgstrom_device_info(PG_FUNCTION_ARGS)
 				att_value = psprintf("%d", value);
 				break;
 			case DEVATTRKIND__BYTES:
-				att_value = psprintf("%dbytes", value); 
+				att_value = format_bytesz((size_t)value);
 				break;
 			case DEVATTRKIND__KB:
-				att_value = psprintf("%dKB", value);
+				att_value = format_bytesz((size_t)value * 1024);
 				break;
 			case DEVATTRKIND__KHZ:
-				if (value > 2 * 1000 * 1000)	/* more than 2.0GHz */
-					att_value = psprintf("%.2f", (double) value / 1000000.0);
-				else if (value > 2 * 1000)		/* more than 40MHz */
+				if (value > 4000000)
+					att_value = psprintf("%.2f GHz", (double)value/1000000.0);
+				else if (value > 4000)
 					att_value = psprintf("%d MHz", value / 1000);
 				else
 					att_value = psprintf("%d kHz", value);

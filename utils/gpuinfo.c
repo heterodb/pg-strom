@@ -147,15 +147,39 @@ static void output_device(CUdevice device, int dev_id)
 					break;
 
 			case ATTRCLASS_BYTES:
-				printf("%s: %dbytes\n", attname_h, dev_prop);
+				if (dev_prop > (4UL << 30))
+					printf("%s: %.1fGB\n", attname_h,
+						   (double)dev_prop / (double)(1UL << 30));
+				else if (dev_prop > (4UL << 20))
+					printf("%s: %.1fMB\n", attname_h,
+						   (double)dev_prop / (double)(1UL << 20));
+				else if (dev_prop > (4UL << 10))
+					printf("%s: %.1fKB\n", attname_h,
+						   (double)dev_prop / (double)(1UL << 10));
+				else
+					printf("%s: %dbytes\n", attname_h, dev_prop);
 				break;
 
 			case ATTRCLASS_KB:
-				printf("%s: %dKB\n", attname_h, dev_prop);
+				if (dev_prop > (4UL << 20))
+					printf("%s: %.1fGB\n", attname_h,
+						   (double)dev_prop / (double)(1UL << 20));
+				else if (dev_prop > (4UL << 10))
+					printf("%s: %.1fMB\n", attname_h,
+						   (double)dev_prop / (double)(1UL << 10));
+				else
+					printf("%s: %dKB\n", attname_h, dev_prop);
 				break;
 
 			case ATTRCLASS_KHZ:
-				printf("%s: %dKHZ\n", attname_h, dev_prop);
+				if (dev_prop > 4000000UL)
+					printf("%s: %.1fGHz\n", attname_h,
+						   (double)dev_prop / 1000000.0);
+				else if (dev_prop > 4000UL)
+					printf("%s: %.1fMHz\n", attname_h,
+						   (double)dev_prop / 1000.0);
+				else
+					printf("%s: %dKHz\n", attname_h, dev_prop);
 				break;
 
 			case ATTRCLASS_COMPUTEMODE:
