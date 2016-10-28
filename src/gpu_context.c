@@ -191,10 +191,10 @@ gpuMemFree_v2(GpuContext_v2 *gcontext, CUdeviceptr devptr)
 			tracker->u.devmem.ptr == devptr)
 		{
 			dlist_delete(&tracker->chain);
+			nbytes = tracker->u.devmem.size;
 			memset(tracker, 0, sizeof(ResourceTracker));
 			dlist_push_head(&inactiveResourceTracker,
 							&tracker->chain);
-			nbytes = tracker->u.devmem.size;
 			goto found;
 		}
     }
