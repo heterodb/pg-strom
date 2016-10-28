@@ -548,6 +548,8 @@ PDS_create_block(GpuContext_v2 *gcontext,
 	pgstrom_data_store *pds;
 	Size		kds_length = STROMALIGN_DOWN(length);
 	cl_uint		nrooms;
+	cl_uint		nchunks;
+	cl_uint		nrooms_max;
 
 	if (KDS_CALCULATE_HEAD_LENGTH(tupdesc->natts) > kds_length)
 		elog(ERROR, "Required length for KDS-Block is too short");
@@ -556,14 +558,35 @@ PDS_create_block(GpuContext_v2 *gcontext,
 											kds) + kds_length);
 	pds->refcnt = 1;
 
-	nrooms = (kds_length - KDS_CALCULATE_HEAD_LENGTH(tupdesc->natts))
+	/*
+	 * 1. maximum available @nrooms to the required @length
+	 */
+	nrooms_max = (kds_length - KDS_CALCULATE_HEAD_LENGTH(tupdesc->natts))
 		/ (sizeof(BlockNumber) + BLCKSZ);
 	while (KDS_CALCULATE_HEAD_LENGTH(tupdesc->natts) +
-		   STROMALIGN(sizeof(BlockNumber) * nrooms) +
-		   BLCKSZ * nrooms > kds_length)
-		nrooms--;
-	if (nrooms < 1)
-		elog(ERROR, "Required length for KDS-Block is too short");
+		   STROMALIGN(sizeof(BlockNumber) * nrooms_max) +
+		   BLCKSZ * nrooms_max > kds_length)
+		nrooms_max--;
+	if (nrooms_max < 1)
+		elog(ERROR, "Required length for PDS-Block is too short");
+
+	/*
+	 * 2. adjust to the optimal @nrooms for load balancing
+	 *
+	 * NOTE: The @nrooms calculated on the 1st step allows to load maximum
+	 * number of blocks onto the PDS with @length, however, it will lead
+	 * unbalanced smaller chunk around the bound of segment.
+	 * So, we try to reduce @nrooms to balance chunk size all around the
+	 * relation scan.
+	 */
+	nchunks = (RELSEG_SIZE + nrooms_max - 1) / nrooms_max;
+	nrooms = (RELSEG_SIZE + nchunks - 1) / nchunks;
+	Assert(nrooms <= nrooms_max);
+
+	/* adjust @kds_length for smaller DMA size */
+	kds_length = (KDS_CALCULATE_HEAD_LENGTH(tupdesc->natts) +
+				  STROMALIGN(sizeof(BlockNumber) * nrooms) +
+				  BLCKSZ * nrooms);
 
 	init_kernel_data_store(&pds->kds, tupdesc, kds_length,
 						   KDS_FORMAT_BLOCK, nrooms, false);
