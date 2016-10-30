@@ -2095,11 +2095,12 @@ retry:
  * gpuscanExecScanChunk - read the relation by one chunk
  */
 pgstrom_data_store *
-gpuscanExecScanChunk(GpuTaskState_v2 *gts, Size chunk_length, int *p_filedesc)
+gpuscanExecScanChunk(GpuTaskState_v2 *gts, int *p_filedesc)
 {
 	Relation		base_rel = gts->css.ss.ss_currentRelation;
 	HeapScanDesc	scan;
 	pgstrom_data_store *pds = NULL;
+	cl_uint			nblocks_atonce = 1;
 	struct timeval	tv1, tv2;
 
 	/*
@@ -2121,6 +2122,19 @@ gpuscanExecScanChunk(GpuTaskState_v2 *gts, Size chunk_length, int *p_filedesc)
 		PDS_init_heapscan_state(gts, ((GpuScanState *)gts)->nrows_per_block);
 	}
 	scan = gts->css.ss.ss_currentScanDesc;
+
+	/*
+	 * MEMO: A key of i/o performance is consolidation of continuous block
+	 * reads with a small number of system-call invocation.
+	 * The default one-by-one block read logic tend to generate i/o request
+	 * fragmentation, and it will increase submit of i/o request and slow
+	 * down the performance. So, in case of NVMe-Strom under CPU parallel,
+	 * we make advance the @scan->rs_cblock pointer by multiple blocks at
+	 * once. It ensures block numbers to read are continuous, thus, i/o
+	 * stack can load data blocks with minimum number of DMA requests.
+	 */
+	if (scan->rs_parallel && gts->nvme_sstate)
+		nblocks_atonce = gts->nvme_sstate->nblocks_per_chunk;
 
 	if (!scan->rs_inited)
 	{
@@ -2147,12 +2161,11 @@ gpuscanExecScanChunk(GpuTaskState_v2 *gts, Size chunk_length, int *p_filedesc)
 	if (gts->nvme_sstate)
 		pds = PDS_create_block(gts->gcontext,
 							   RelationGetDescr(base_rel),
-							   chunk_length,
 							   gts->nvme_sstate);
 	else
 		pds = PDS_create_row(gts->gcontext,
 							 RelationGetDescr(base_rel),
-							 chunk_length);
+							 pgstrom_chunk_size());
 	pds->kds.table_oid = RelationGetRelid(base_rel);
 
 	/*
@@ -2261,7 +2274,7 @@ gpuscan_next_task(GpuTaskState_v2 *gts)
 	pgstrom_data_store *pds;
 	int					filedesc = -1;
 
-	pds = gpuscanExecScanChunk(gts, pgstrom_chunk_size(), &filedesc);
+	pds = gpuscanExecScanChunk(gts, &filedesc);
 	if (!pds)
 		return NULL;
 	gscan = gpuscan_create_task(gss, pds, filedesc);

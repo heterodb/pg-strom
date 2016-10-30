@@ -53,21 +53,6 @@ static long		sysconf_phys_pages;		/* _SC_PHYS_PAGES */
 static long		nvme_strom_threshold;
 
 /*
- * State structure of NVMe-Strom per GpuTaskState
- */
-typedef struct NVMEScanState
-{
-	cl_uint			nrows_per_block;
-	BlockNumber		curr_segno;
-	Buffer			curr_vmbuffer;
-	BlockNumber		nr_segs;
-	struct {
-		File		vfd;
-		BlockNumber	segno;
-	} mdfd[FLEXIBLE_ARRAY_MEMBER];
-} NVMEScanState;
-
-/*
  * pgstrom_chunk_size - configured chunk size
  */
 Size
@@ -542,51 +527,25 @@ PDS_create_hash(GpuContext_v2 *gcontext,
 pgstrom_data_store *
 PDS_create_block(GpuContext_v2 *gcontext,
 				 TupleDesc tupdesc,
-				 Size length,
 				 NVMEScanState *nvme_sstate)
 {
 	pgstrom_data_store *pds;
-	Size		kds_length = STROMALIGN_DOWN(length);
-	cl_uint		nrooms;
-	cl_uint		nchunks;
-	cl_uint		nrooms_max;
+	cl_uint		nrooms = nvme_sstate->nblocks_per_chunk;
+	Size		kds_length;
 
-	if (KDS_CALCULATE_HEAD_LENGTH(tupdesc->natts) > kds_length)
-		elog(ERROR, "Required length for KDS-Block is too short");
+	kds_length = KDS_CALCULATE_HEAD_LENGTH(tupdesc->natts)
+		+ STROMALIGN(sizeof(BlockNumber) * nrooms)
+		+ BLCKSZ * nrooms;
+	if (offsetof(pgstrom_data_store, kds) + kds_length > pgstrom_chunk_size())
+		elog(WARNING,
+			 "Bug? PDS length (%zu) is larger than pg_strom.chunk_size(%zu)",
+			 offsetof(pgstrom_data_store, kds) + kds_length,
+			 pgstrom_chunk_size());
 
+	/* allocation */
 	pds = dmaBufferAlloc(gcontext, offsetof(pgstrom_data_store,
 											kds) + kds_length);
 	pds->refcnt = 1;
-
-	/*
-	 * 1. maximum available @nrooms to the required @length
-	 */
-	nrooms_max = (kds_length - KDS_CALCULATE_HEAD_LENGTH(tupdesc->natts))
-		/ (sizeof(BlockNumber) + BLCKSZ);
-	while (KDS_CALCULATE_HEAD_LENGTH(tupdesc->natts) +
-		   STROMALIGN(sizeof(BlockNumber) * nrooms_max) +
-		   BLCKSZ * nrooms_max > kds_length)
-		nrooms_max--;
-	if (nrooms_max < 1)
-		elog(ERROR, "Required length for PDS-Block is too short");
-
-	/*
-	 * 2. adjust to the optimal @nrooms for load balancing
-	 *
-	 * NOTE: The @nrooms calculated on the 1st step allows to load maximum
-	 * number of blocks onto the PDS with @length, however, it will lead
-	 * unbalanced smaller chunk around the bound of segment.
-	 * So, we try to reduce @nrooms to balance chunk size all around the
-	 * relation scan.
-	 */
-	nchunks = (RELSEG_SIZE + nrooms_max - 1) / nrooms_max;
-	nrooms = (RELSEG_SIZE + nchunks - 1) / nchunks;
-	Assert(nrooms <= nrooms_max);
-
-	/* adjust @kds_length for smaller DMA size */
-	kds_length = (KDS_CALCULATE_HEAD_LENGTH(tupdesc->natts) +
-				  STROMALIGN(sizeof(BlockNumber) * nrooms) +
-				  BLCKSZ * nrooms);
 
 	init_kernel_data_store(&pds->kds, tupdesc, kds_length,
 						   KDS_FORMAT_BLOCK, nrooms, false);
@@ -616,11 +575,15 @@ PDS_init_heapscan_state(GpuTaskState_v2 *gts,
 						cl_uint nrows_per_block)
 {
 	Relation		relation = gts->css.ss.ss_currentRelation;
+	TupleDesc		tupdesc = RelationGetDescr(relation);
 	EState		   *estate = gts->css.ss.ps.state;
 	BlockNumber		nr_blocks;
 	BlockNumber		nr_segs;
 	MdfdVec		   *vec;
 	NVMEScanState  *nvme_sstate;
+	cl_uint			nrooms_max;
+	cl_uint			nchunks;
+	cl_uint			nblocks_per_chunk;
 	cl_uint			i;
 
 	/*
@@ -643,12 +606,36 @@ PDS_init_heapscan_state(GpuTaskState_v2 *gts,
 		nr_blocks < nvme_strom_threshold)
 		return;
 
-	nr_segs = (nr_blocks + (BlockNumber) RELSEG_SIZE - 1) / RELSEG_SIZE;
+	/*
+	 * Calculation of an optimal number of data-blocks for each PDS.
+	 *
+	 * We intend to load maximum available blocks onto the PDS which has
+	 * configured chunk size, however, it will lead unbalanced smaller
+	 * chunk around the bound of storage file segment.
+	 * (Typically, 32 of 4091blocks + 1 of 160 blocks)
+	 * So, we will adjust @nblocks_per_chunk to balance chunk size all
+	 * around the relation scan.
+	 */
+	nrooms_max = (pgstrom_chunk_size() -
+				  KDS_CALCULATE_HEAD_LENGTH(tupdesc->natts))
+		/ (sizeof(BlockNumber) + BLCKSZ);
+	while (KDS_CALCULATE_HEAD_LENGTH(tupdesc->natts) +
+		   STROMALIGN(sizeof(BlockNumber) * nrooms_max) +
+		   BLCKSZ * nrooms_max > pgstrom_chunk_size())
+		nrooms_max--;
+	if (nrooms_max < 1)
+		return;
 
+	nchunks = (RELSEG_SIZE + nrooms_max - 1) / nrooms_max;
+	nblocks_per_chunk = (RELSEG_SIZE + nchunks - 1) / nchunks;
+
+	/* allocation of NVMEScanState structure */
+	nr_segs = (nr_blocks + (BlockNumber) RELSEG_SIZE - 1) / RELSEG_SIZE;
 	nvme_sstate = MemoryContextAlloc(estate->es_query_cxt,
 									 offsetof(NVMEScanState, mdfd[nr_segs]));
 	memset(nvme_sstate, -1, offsetof(NVMEScanState, mdfd[nr_segs]));
 	nvme_sstate->nrows_per_block = nrows_per_block;
+	nvme_sstate->nblocks_per_chunk = nblocks_per_chunk;
 	nvme_sstate->curr_segno = InvalidBlockNumber;
 	nvme_sstate->curr_vmbuffer = InvalidBuffer;
 	nvme_sstate->nr_segs = nr_segs;

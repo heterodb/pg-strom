@@ -435,6 +435,22 @@ typedef struct pgstrom_data_store
 } pgstrom_data_store;
 
 /*
+ * State structure of NVMe-Strom per GpuTaskState
+ */
+typedef struct NVMEScanState
+{
+	cl_uint			nrows_per_block;
+	cl_uint			nblocks_per_chunk;
+	BlockNumber		curr_segno;
+	Buffer			curr_vmbuffer;
+	BlockNumber		nr_segs;
+	struct {
+		File		vfd;
+		BlockNumber	segno;
+	} mdfd[FLEXIBLE_ARRAY_MEMBER];
+} NVMEScanState;
+
+/*
  * --------------------------------------------------------------------
  *
  * Function Declarations
@@ -749,7 +765,6 @@ extern pgstrom_data_store *PDS_create_hash(GpuContext_v2 *gcontext,
 										   Size length);
 extern pgstrom_data_store *PDS_create_block(GpuContext_v2 *gcontext,
 											TupleDesc tupdesc,
-											Size length,
 											struct NVMEScanState *nvme_sstate);
 extern void PDS_init_heapscan_state(GpuTaskState_v2 *gts,
 									cl_uint nrows_per_block);
@@ -757,6 +772,8 @@ extern void PDS_end_heapscan_state(GpuTaskState_v2 *gts);
 extern bool PDS_exec_heapscan(GpuTaskState_v2 *gts,
 							  pgstrom_data_store *pds,
 							  int *p_filedesc);
+extern cl_uint NVMESS_NBlocksPerChunk(struct NVMEScanState *nvme_sstate);
+
 #define PGSTROM_DATA_STORE_BLOCK_FILEPOS(pds)							\
 	((loff_t *)((char *)KERN_DATA_STORE_BLOCK_PGPAGE(&(pds)->kds,		\
 													 (pds)->kds.nrooms) - \
@@ -812,7 +829,6 @@ extern void gpuscan_rewind_position(GpuTaskState_v2 *gts);
 
 
 extern pgstrom_data_store *gpuscanExecScanChunk(GpuTaskState_v2 *gts,
-												Size chunk_length,
 												int *p_filedesc);
 extern void gpuscanRewindScanChunk(GpuTaskState_v2 *gts);
 
