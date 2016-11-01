@@ -39,6 +39,7 @@ static int						minGpuMemoryPreserved;
 DevAttributes				   *devAttrs = NULL;
 cl_int							numDevAttrs = 0;
 cl_ulong						devComputeCapability = UINT_MAX;
+cl_ulong						devBaselineMemorySize = ULONG_MAX;
 
 /*
  * gpu_scoreboard_mem_alloc
@@ -244,11 +245,13 @@ pgstrom_collect_gpu_device(void)
 			continue;
 		}
 
-		/* Update baseline CC for code build */
+		/* Update the baseline device capability */
 		compute_capability = (dattrs->COMPUTE_CAPABILITY_MAJOR * 10 +
 							  dattrs->COMPUTE_CAPABILITY_MINOR);
 		devComputeCapability = Min(devComputeCapability,
 								   compute_capability);
+		devBaselineMemorySize = Min(devBaselineMemorySize,
+									dattrs->DEV_TOTAL_MEMSZ);
 
 		/* Determine CORES_PER_MPU by CC */
 		if (dattrs->COMPUTE_CAPABILITY_MAJOR == 1)

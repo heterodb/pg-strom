@@ -101,6 +101,20 @@ resource_tracker_hashval(cl_int resclass, void *data, size_t len)
 }
 
 /*
+ * gpuMemMaxAllocSize - hard limit for device memory allocation
+ */
+Size
+gpuMemMaxAllocSize(void)
+{
+	/*
+	 * NOTE: We don't allow to allocate more than 4GB as a single device
+	 * memory chunk, because most of our GPU code uses cl_uint for offset
+	 * values, so larger chunk than 4GB potentially leads a problem.
+	 */
+	return Min(devBaselineMemorySize / 3, 0x100000000UL);
+}
+
+/*
  * resource tracker for device memory
  */
 CUresult
@@ -114,6 +128,9 @@ gpuMemAlloc_v2(GpuContext_v2 *gcontext, CUdeviceptr *p_devptr, size_t bytesize)
 	struct timeval	tv1, tv2;
 
 	Assert(IsGpuServerProcess());
+	if (bytesize > gpuMemMaxAllocSize())
+		return CUDA_ERROR_INVALID_VALUE;
+
 	if (!gpu_scoreboard_mem_alloc(bytesize))
 		return CUDA_ERROR_OUT_OF_MEMORY;
 

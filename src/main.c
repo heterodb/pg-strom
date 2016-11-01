@@ -219,7 +219,7 @@ _PG_init(void)
 	/* registration of custom-scan providers */
 	pgstrom_init_gputasks();
 	pgstrom_init_gpuscan();
-//	pgstrom_init_gpujoin();
+	pgstrom_init_gpujoin();
 //	pgstrom_init_gpupreagg();
 //	pgstrom_init_gpusort();
 

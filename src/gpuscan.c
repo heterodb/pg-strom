@@ -1560,6 +1560,56 @@ create_gpuscan_plan(PlannerInfo *root,
 	return &cscan->scan.plan;
 }
 
+/*
+ * pgstrom_pullup_outer_scan - pull up outer_path if it is a simple relation
+ * scan with device executable qualifiers.
+ */
+bool
+pgstrom_pullup_outer_scan(const Path *outer_path,
+						  Index *p_outer_relid,
+						  List **p_outer_quals)
+{
+	RelOptInfo *baserel = outer_path->parent;
+	PathTarget *reltarget = baserel->reltarget;
+	ListCell   *lc;
+
+	if (!enable_pullup_outer_scan)
+		return false;
+
+	if (outer_path->pathtype != T_SeqScan &&
+		!pgstrom_path_is_gpuscan(outer_path))
+		return false;
+
+	/* qualifier has to be device executable */
+	foreach (lc, baserel->baserestrictinfo)
+	{
+		RestrictInfo   *rinfo = lfirst(lc);
+
+		if (!pgstrom_device_expression(rinfo->clause))
+			return false;
+	}
+
+	/* target entry has to be */
+	foreach (lc, reltarget->exprs)
+	{
+		Expr   *expr = (Expr *) lfirst(lc);
+
+		if (IsA(expr, Var))
+		{
+			Var	   *var = (Var *) expr;
+
+			/* we don't support whole-row reference */
+			if (var->varattno == InvalidAttrNumber)
+				return false;
+		}
+		else if (!pgstrom_device_expression(expr))
+			return false;
+	}
+	*p_outer_relid = baserel->relid;
+	*p_outer_quals = baserel->baserestrictinfo;
+	return true;
+}
+
 #if 1
 /*
  * pgstrom_path_is_gpuscan

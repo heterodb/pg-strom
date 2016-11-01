@@ -476,6 +476,7 @@ typedef struct DevAttributes
 extern DevAttributes   *devAttrs;
 extern cl_int			numDevAttrs;
 extern cl_ulong			devComputeCapability;
+extern cl_ulong			devBaselineMemorySize;
 
 extern bool	gpu_scoreboard_mem_alloc(size_t nbytes);
 extern void	gpu_scoreboard_mem_free(size_t nbytes);
@@ -512,6 +513,7 @@ extern GpuContext_v2 *GetGpuContext(GpuContext_v2 *gcontext);
 extern bool PutGpuContext(GpuContext_v2 *gcontext);
 extern bool ForcePutGpuContext(GpuContext_v2 *gcontext);
 
+extern Size gpuMemMaxAllocSize(void);
 extern CUresult	gpuMemAlloc_v2(GpuContext_v2 *gcontext,
 							   CUdeviceptr *p_devptr, size_t bytesize);
 extern CUresult	gpuMemFree_v2(GpuContext_v2 *gcontext, CUdeviceptr devptr);
@@ -556,64 +558,6 @@ extern void largest_workgroup_size(size_t *p_grid_size,
 								   size_t nitems,
 								   size_t dynamic_shmem_per_block,
 								   size_t dynamic_shmem_per_thread);
-
-
-
-
-#if 0
-/*
- * cuda_mmgr.c
- */
-extern void cudaHostMemAssert(void *pointer);
-
-extern MemoryContext
-HostPinMemContextCreate(MemoryContext parent,
-                        const char *name,
-						CUcontext cuda_context,
-                        Size block_size_init,
-                        Size block_size_max,
-						cl_int **pp_keep_freemem,
-						cl_int **pp_num_host_malloc,
-						cl_int **pp_num_host_mfree,
-						struct timeval **pp_tv_host_malloc,
-						struct timeval **pp_tv_host_mfree);
-/*
- * cuda_control.c
- */
-extern Size gpuMemMaxAllocSize(void);
-extern CUdeviceptr __gpuMemAlloc(GpuContext *gcontext,
-								 int cuda_index,
-								 size_t bytesize);
-extern void __gpuMemFree(GpuContext *gcontext,
-						 int cuda_index,
-						 CUdeviceptr dptr);
-extern CUdeviceptr gpuMemAlloc(GpuTask *gtask, size_t bytesize);
-extern void gpuMemFree(GpuTask *gtask, CUdeviceptr dptr);
-extern GpuContext *pgstrom_get_gpucontext(void);
-extern void pgstrom_put_gpucontext(GpuContext *gcontext);
-
-extern void pgstrom_cleanup_gputaskstate(GpuTaskState *gts);
-extern void pgstrom_release_gputaskstate(GpuTaskState *gts);
-extern void pgstrom_init_gputaskstate(GpuContext *gcontext,
-									  GpuTaskState *gts,
-									  EState *estate);
-extern void pgstrom_activate_gputaskstate(GpuTaskState *gts);
-extern void pgstrom_deactivate_gputaskstate(GpuTaskState *gts);
-extern void pgstrom_init_gputask(GpuTaskState *gts, GpuTask *gtask);
-extern void pgstrom_release_gputask(GpuTask *gtask);
-extern GpuTask *pgstrom_fetch_gputask(GpuTaskState *gts);
-extern pgstrom_data_store *pgstrom_exec_chunk_gputask(GpuTaskState *gts,
-													  size_t chunk_size);
-extern TupleTableSlot *pgstrom_exec_gputask(GpuTaskState *gts);
-extern bool pgstrom_recheck_gputask(GpuTaskState *gts, TupleTableSlot *slot);
-extern void pgstrom_cleanup_gputask_cuda_resources(GpuTask *gtask);
-extern size_t gpuLocalMemSize(void);
-extern cl_uint gpuMaxThreadsPerBlock(void);
-extern void pgstrom_init_cuda_control(void);
-extern cl_ulong pgstrom_baseline_cuda_capability(void);
-extern Datum pgstrom_scoreboard_info(PG_FUNCTION_ARGS);
-extern Datum pgstrom_device_info(PG_FUNCTION_ARGS);
-#endif
 
 /*
  * gputasks.c
@@ -822,6 +766,9 @@ extern void codegen_gpuscan_quals(StringInfo kern,
 								  Index scanrelid,
 								  List *dev_quals);
 extern bool add_unique_expression(Expr *expr, List **p_tlist, bool resjunk);
+extern bool pgstrom_pullup_outer_scan(const Path *outer_path,
+									  Index *p_outer_relid,
+									  List **p_outer_quals);
 extern bool pgstrom_path_is_gpuscan(const Path *path);
 extern bool pgstrom_plan_is_gpuscan(const Plan *plan);
 
@@ -849,7 +796,6 @@ extern void pgstrom_init_gpuscan(void);
  */
 extern bool pgstrom_path_is_gpujoin(Path *pathnode);
 extern bool pgstrom_plan_is_gpujoin(const Plan *plannode);
-extern void pgstrom_post_planner_gpujoin(PlannedStmt *pstmt, Plan **p_plan);
 extern void assign_gpujoin_session_info(StringInfo buf, GpuTaskState_v2 *gts);
 extern void	pgstrom_init_gpujoin(void);
 
