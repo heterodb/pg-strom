@@ -66,7 +66,7 @@ void
 gpu_scoreboard_mem_free(size_t nbytes)
 {
 	GpuScoreBoard  *gscore = &gpuScoreBoard[gpuserv_cuda_dindex];
-	size_t			new_value;
+	size_t			new_value __attribute__((unused));
 
 	Assert(IsGpuServerProcess());
 	Assert(gpuserv_cuda_dindex < numDevAttrs);
@@ -74,6 +74,27 @@ gpu_scoreboard_mem_free(size_t nbytes)
 	Assert(new_value >= gscore->mem_least ||	/* free more than alloc? */
 		   new_value <  (size_t)(1UL << 60));	/* underflow? */
 }
+
+/*
+ * gpu_scoreboard_dump
+ */
+void
+gpu_scoreboard_dump(void)
+{
+	int		i;
+
+	for (i=0; i < numDevAttrs; i++)
+	{
+		GpuScoreBoard  *gscore = &gpuScoreBoard[i];
+
+		elog(INFO, "GPU[%d] mem_usage=%zu mem_least=%zu mem_total=%zu",
+			 i, (size_t)pg_atomic_read_u64(&gscore->mem_usage),
+			 (size_t)gscore->mem_least,
+			 (size_t)gscore->mem_total);
+	}
+}
+
+
 
 /* catalog of device attributes */
 typedef enum {

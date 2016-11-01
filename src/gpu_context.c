@@ -133,7 +133,7 @@ gpuMemAlloc_v2(GpuContext_v2 *gcontext, CUdeviceptr *p_devptr, size_t bytesize)
 			tracker->crc = crc;
 			tracker->resclass = RESTRACK_CLASS__GPUMEMORY;
 			tracker->u.devmem.ptr = devptr;
-			tracker->u.devmem.size = TYPEALIGN(64*1024, bytesize);
+			tracker->u.devmem.size = bytesize;
 			dlist_push_tail(&gcontext->restrack[crc % RESTRACK_HASHSIZE],
 							&tracker->chain);
 			*p_devptr = devptr;
@@ -153,8 +153,10 @@ gpuMemAlloc_v2(GpuContext_v2 *gcontext, CUdeviceptr *p_devptr, size_t bytesize)
 		{
 			rc = cuMemFree(devptr);
 			if (rc != CUDA_SUCCESS)
-				elog(WARNING, "failed on cuMemFree: %s", errorText(rc));
-			gpu_scoreboard_mem_free(bytesize);
+				elog(WARNING, "failed on cuMemFree(%p): %s",
+					 (void *)devptr, errorText(rc));
+			else
+				gpu_scoreboard_mem_free(bytesize);
 
 			PG_RE_THROW();
 		}
@@ -201,7 +203,10 @@ gpuMemFree_v2(GpuContext_v2 *gcontext, CUdeviceptr devptr)
     elog(WARNING, "Bug? device pointer %p was not tracked", (void *)devptr);
 found:
 	rc = cuMemFree(devptr);
-	if (rc == CUDA_SUCCESS)
+	if (rc != CUDA_SUCCESS)
+		elog(WARNING, "failed on cuMemFree(%p): %s",
+			 (void *)devptr, errorText(rc));
+	else
 		gpu_scoreboard_mem_free(nbytes);
 
 	if (shgcon->pfm.enabled)
