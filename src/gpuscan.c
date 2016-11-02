@@ -2197,7 +2197,7 @@ gpuscanExecScanChunk(GpuTaskState_v2 *gts, int *p_filedesc)
 	scan = gts->css.ss.ss_currentScanDesc;
 
 	InstrStartNode(&gts->outer_instrument);
-	PERFMON_BEGIN(&gts->pfm, &tv1);
+	PFMON_BEGIN(&gts->pfm, &tv1);
 
 	/* return NULL immediately if relation is empty */
 	if (!scan->rs_inited &&
@@ -2336,7 +2336,7 @@ gpuscanExecScanChunk(GpuTaskState_v2 *gts, int *p_filedesc)
 				sizeof(BlockNumber) * pds->nblocks_uncached);
 	}
 out:
-	PERFMON_END(&gts->pfm, time_outer_load, &tv1, &tv2);
+	PFMON_END(&gts->pfm, time_outer_load, &tv1, &tv2);
 	InstrStopNode(&gts->outer_instrument,
 				  !pds ? 0.0 : (double)pds->kds.nitems);
 	return pds;
@@ -2494,7 +2494,7 @@ gpuscan_next_tuple(GpuTaskState_v2 *gts)
 	TupleTableSlot	   *slot = NULL;
 	struct timeval		tv1, tv2;
 
-	PERFMON_BEGIN(&gss->gts.pfm, &tv1);
+	PFMON_BEGIN(&gss->gts.pfm, &tv1);
 	if (gscan->task.cpu_fallback)
 		slot = gpuscan_next_tuple_fallback(gss, gscan);
 	else if (gscan->pds_dst)
@@ -2547,7 +2547,7 @@ gpuscan_next_tuple(GpuTaskState_v2 *gts)
 			ExecStoreTuple(tuple, slot, InvalidBuffer, false);
 		}
 	}
-	PERFMON_END(&gss->gts.pfm, time_materialize, &tv1, &tv2);
+	PFMON_END(&gss->gts.pfm, time_materialize, &tv1, &tv2);
 
 	return slot;
 }
@@ -2775,7 +2775,7 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 	/*
 	 * OK, enqueue a series of requests
 	 */
-	PERFMON_EVENT_RECORD(gscan, ev_dma_send_start, cuda_stream);
+	PFMON_EVENT_RECORD(gscan, ev_dma_send_start, cuda_stream);
 
 	offset = KERN_GPUSCAN_DMASEND_OFFSET(&gscan->kern);
 	length = KERN_GPUSCAN_DMASEND_LENGTH(&gscan->kern);
@@ -2824,7 +2824,7 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 		gscan->bytes_dma_send += length;
 		gscan->num_dma_send++;
 	}
-	PERFMON_EVENT_RECORD(gscan, ev_dma_send_stop, cuda_stream);
+	PFMON_EVENT_RECORD(gscan, ev_dma_send_stop, cuda_stream);
 
 	/*
 	 * KERNEL_FUNCTION(void)
@@ -2850,7 +2850,7 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 	/*
 	 * Recv DMA call
 	 */
-	PERFMON_EVENT_RECORD(gscan, ev_dma_recv_start, cuda_stream);
+	PFMON_EVENT_RECORD(gscan, ev_dma_recv_start, cuda_stream);
 	if (pds_src->kds.format != KDS_FORMAT_BLOCK)
 		ntuples = pds_src->kds.nitems;
 	else
@@ -2915,7 +2915,7 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 		gscan->bytes_dma_recv += length;
 		gscan->num_dma_recv++;
 	}
-	PERFMON_EVENT_RECORD(gscan, ev_dma_recv_stop, cuda_stream);
+	PFMON_EVENT_RECORD(gscan, ev_dma_recv_stop, cuda_stream);
 
 	/*
 	 * register the callback

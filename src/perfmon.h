@@ -131,13 +131,13 @@ typedef struct {
 /*
  * macro definitions for performance counter
  */
-#define PERFMON_BEGIN(pfm,tv1)					\
+#define PFMON_BEGIN(pfm,tv1)					\
 	do {										\
 		if ((pfm)->enabled)						\
 			gettimeofday((tv1), NULL);			\
 	} while(0)
 
-#define PERFMON_END(pfm,field,tv1,tv2)			\
+#define PFMON_END(pfm,field,tv1,tv2)			\
 	do {										\
 		if ((pfm)->enabled)						\
 		{										\
@@ -148,7 +148,7 @@ typedef struct {
 		}										\
 	} while(0)
 
-#define PERFMON_EVENT_RECORD(node,ev_field,cuda_stream)			\
+#define PFMON_EVENT_RECORD(node,ev_field,cuda_stream)			\
 	do {														\
 		if (((GpuTask_v2 *)(node))->perfmon)					\
 		{														\
@@ -172,7 +172,7 @@ typedef struct {
 		}														\
 	} while(0)
 
-#define PERFMON_EVENT_DESTROY(node,ev_field)					\
+#define PFMON_EVENT_DESTROY(node,ev_field)						\
 	do {														\
 		if ((node)->ev_field)									\
 		{														\
@@ -206,7 +206,7 @@ typedef struct {
 	} while(0)
 
 
-#if 1
+#if 0
 
 #define CUDA_EVENT_RECORD(node,ev_field)						\
 	do {														\

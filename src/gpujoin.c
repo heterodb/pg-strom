@@ -31,6 +31,7 @@
 #include "optimizer/paths.h"
 #include "optimizer/planmain.h"
 #include "optimizer/restrictinfo.h"
+#include "optimizer/tlist.h"
 #include "optimizer/var.h"
 #include "parser/parsetree.h"
 #include "utils/builtins.h"
@@ -306,12 +307,14 @@ typedef struct pgstrom_multirels
 	Size			usage_length;	/* length actually in use */
 	pgstrom_data_store **inner_chunks;	/* array of inner PDS */
 	cl_bool			needs_outer_join;	/* true, if OJ is needed */
+	/* fields below can be updated by both of backend / GPU server */
+	slock_t			lock;
 	cl_int			n_attached;	/* Number of attached tasks */
-	cl_int		   *refcnt;		/* Reference counter of each GpuContext */
-	CUdeviceptr	   *m_kmrels;	/* GPU memory for each CUDA context */
-	CUevent		   *ev_loaded;	/* Sync object for each CUDA context */
-	CUdeviceptr	   *m_ojmaps;	/* GPU memory for outer join maps */
-	cl_bool		   *host_ojmaps;/* Host memory for outer join maps */
+	cl_int			refcnt;		/* Refcount of device memory resource */
+	CUdeviceptr		m_kmrels;	/* GPU memory for inner relations */
+	CUevent			ev_loaded;	/* Sync object for load of pmrels */
+	CUdeviceptr		m_ojmaps;	/* GPU memory for outer join map */
+	cl_bool		   *h_ojmaps;	/* Host memory for outer join map */
 	kern_multirels	kern;
 } pgstrom_multirels;
 
@@ -347,10 +350,7 @@ static bool					enable_gpunestloop;
 static bool					enable_gpuhashjoin;
 
 /* static functions */
-static bool	gpujoin_task_process(GpuTask_v2 *gtask);
-static bool	gpujoin_task_complete(GpuTask_v2 *gtask);
-static void	gpujoin_task_release(GpuTask_v2 *gtask);
-static GpuTask_v2 *gpujoin_next_chunk(GpuTaskState_v2 *gts);
+static GpuTask_v2 *gpujoin_next_task(GpuTaskState_v2 *gts);
 static void gpujoin_switch_task(GpuTaskState_v2 *gts, GpuTask_v2 *gtask);
 static TupleTableSlot *gpujoin_next_tuple(GpuTaskState_v2 *gts);
 static TupleTableSlot *gpujoin_next_tuple_fallback(GpuJoinState *gjs,
@@ -369,14 +369,16 @@ static char *gpujoin_codegen(PlannerInfo *root,
 static void gpujoin_inner_unload(GpuJoinState *gjs, bool needs_rescan);
 static pgstrom_multirels *gpujoin_inner_getnext(GpuJoinState *gjs);
 static pgstrom_multirels *multirels_attach_buffer(pgstrom_multirels *pmrels);
-static bool multirels_get_buffer(pgstrom_multirels *pmrels,
-								 pgstrom_gpujoin *pgjoin);
-static void multirels_put_buffer(pgstrom_multirels *pmrels, GpuTask_v2 *gtask);
-static void multirels_send_buffer(pgstrom_multirels *pmrels, GpuTask_v2 *gtask);
+static bool multirels_get_buffer(pgstrom_gpujoin *pgjoin,
+								 CUstream cuda_stream);
+static void multirels_put_buffer(pgstrom_gpujoin *pgjoin);
+
 static void colocate_outer_join_maps_to_host(pgstrom_multirels *pmrels);
-static void colocate_outer_join_maps_to_device(pgstrom_multirels *pmrels,
-											   GpuTask_v2 *gtask);
-static void multirels_detach_buffer(pgstrom_multirels *pmrels,
+static void colocate_outer_join_maps_to_device(pgstrom_gpujoin *pgjoin,
+											   CUmodule cuda_module,
+											   CUstream cuda_stream);
+static void multirels_detach_buffer(GpuJoinState *gjs,
+									pgstrom_multirels *pmrels,
 									bool may_kick_outer_join,
 									const char *caller);
 /*
@@ -1666,6 +1668,29 @@ build_device_tlist_walker(Node *node, build_device_tlist_context *context)
 		elog(ERROR, "Bug? uncertain origin of PlaceHolderVar-node: %s",
 			 nodeToString(phvnode));
 	}
+	else if (!context->resjunk &&
+			 pgstrom_device_expression((Expr *)node))
+	{
+		TargetEntry	   *ps_tle;
+
+		foreach (cell, context->ps_tlist)
+		{
+			TargetEntry	   *tle = lfirst(cell);
+
+			if (equal(node, tle->expr))
+				return false;
+		}
+
+		ps_tle = makeTargetEntry((Expr *) copyObject(node),
+								 list_length(context->ps_tlist) + 1,
+								 NULL,
+								 context->resjunk);
+		context->ps_tlist = lappend(context->ps_tlist, ps_tle);
+		context->ps_depth = lappend_int(context->ps_depth, -1);	/* dummy */
+		context->ps_resno = lappend_int(context->ps_resno, -1);	/* dummy */
+
+		return false;
+	}
 	return expression_tree_walker(node, build_device_tlist_walker,
 								  (void *) context);
 }
@@ -1695,6 +1720,9 @@ build_device_targetlist(GpuJoinPath *gpath,
 	 * Above are host referenced columns. On the other hands, the columns
 	 * newly added below are device-only columns, so it will never
 	 * referenced by the host-side. We mark it resjunk=true.
+	 *
+	 * Also note that any Var nodes in the device executable expression
+	 * must be added with resjunk=true to solve the variable name.
 	 */
 	context.resjunk = true;
 	build_device_tlist_walker((Node *)gj_info->outer_quals, &context);
@@ -1702,6 +1730,7 @@ build_device_targetlist(GpuJoinPath *gpath,
 	build_device_tlist_walker((Node *)gj_info->other_quals, &context);
 	build_device_tlist_walker((Node *)gj_info->hash_inner_keys, &context);
 	build_device_tlist_walker((Node *)gj_info->hash_outer_keys, &context);
+	build_device_tlist_walker((Node *)targetlist, &context);
 
 	Assert(list_length(context.ps_tlist) == list_length(context.ps_depth) &&
 		   list_length(context.ps_tlist) == list_length(context.ps_resno));
@@ -1870,445 +1899,6 @@ create_gpujoin_plan(PlannerInfo *root,
 	form_gpujoin_info(cscan, &gj_info);
 
 	return &cscan->scan.plan;
-}
-
-/*
- * codegen_device_projection
- *
- * It makes a function for device projection.
- */
-static const char *
-codegen_device_projection(PlannerInfo *root,
-						  CustomScan *cscan,
-						  GpuJoinInfo *gj_info,
-						  codegen_context *context,
-						  cl_uint *p_extra_maxlen)
-{
-	List		   *tlist_dev = cscan->custom_scan_tlist;
-	List		   *ps_src_depth = gj_info->ps_src_depth;
-	List		   *ps_src_resno = gj_info->ps_src_resno;
-	ListCell	   *lc1;
-	ListCell	   *lc2;
-	ListCell	   *lc3;
-	AttrNumber	   *varattmaps;
-	Bitmapset	   *refs_by_vars = NULL;
-	Bitmapset	   *refs_by_expr = NULL;
-	StringInfoData	decl;
-	StringInfoData	body;
-	StringInfoData	temp;
-	cl_int			depth;
-	cl_uint			extra_maxlen;
-	cl_bool			is_first;
-
-	varattmaps = palloc(sizeof(AttrNumber) * list_length(tlist_dev));
-	initStringInfo(&decl);
-	initStringInfo(&body);
-	initStringInfo(&temp);
-
-	/* Pick up all the var-node referenced by entries with no resjunk */
-	forthree (lc1, tlist_dev,
-			  lc2, ps_src_depth,
-			  lc3, ps_src_resno)
-	{
-		TargetEntry	*tle = lfirst(lc1);
-		cl_int		src_depth = lfirst_int(lc2);
-
-		if (tle->resjunk)
-			continue;
-		if (src_depth >= 0)
-			refs_by_vars = bms_add_member(refs_by_vars, tle->resno -
-										  FirstLowInvalidHeapAttributeNumber);
-		else
-			pull_varattnos((Node *) tle->expr, INDEX_VAR, &refs_by_expr);
-	}
-
-	appendStringInfoString(
-		&decl,
-		"STATIC_FUNCTION(void)\n"
-		"gpujoin_projection(kern_context *kcxt,\n"
-		"                   kern_data_store *kds_src,\n"
-		"                   kern_multirels *kmrels,\n"
-		"                   cl_uint *r_buffer,\n"
-		"                   kern_data_store *kds_dst,\n"
-		"                   Datum *tup_values,\n"
-		"                   cl_bool *tup_isnull,\n"
-		"                   cl_short *tup_depth,\n"
-		"                   cl_char *extra_buf,\n"
-		"                   cl_uint *extra_len)\n"
-		"{\n"
-		"  HeapTupleHeaderData *htup    __attribute__((unused));\n"
-		"  kern_data_store *kds_in      __attribute__((unused));\n"
-		"  char *addr                   __attribute__((unused));\n"
-		"  char *extra_pos = extra_buf;\n");
-	codegen_tempvar_declaration(&decl, "temp");
-
-	for (depth=0; depth <= gj_info->num_rels; depth++)
-	{
-		List	   *kvars_srcnum = NIL;
-		List	   *kvars_dstnum = NIL;
-		cl_int		i, nattrs = -1;
-
-		/* collect information in this depth */
-		memset(varattmaps, 0, sizeof(AttrNumber) * list_length(tlist_dev));
-
-		forthree (lc1, tlist_dev,
-				  lc2, ps_src_depth,
-				  lc3, ps_src_resno)
-		{
-			TargetEntry *tle = lfirst(lc1);
-			cl_int		src_depth = lfirst_int(lc2);
-			cl_int		src_resno = lfirst_int(lc3);
-			cl_int		k = tle->resno - FirstLowInvalidHeapAttributeNumber;
-
-			if (depth != src_depth)
-				continue;
-			if (bms_is_member(k, refs_by_vars))
-				varattmaps[tle->resno - 1] = src_resno;
-
-			if (bms_is_member(k, refs_by_expr))
-			{
-				kvars_srcnum = lappend_int(kvars_srcnum, src_resno);
-				kvars_dstnum = lappend_int(kvars_dstnum, tle->resno);
-			}
-			if (bms_is_member(k, refs_by_vars) ||
-				bms_is_member(k, refs_by_expr))
-				nattrs = Max(nattrs, src_resno);
-		}
-
-		/* no need to extract inner/outer tuple in this depth */
-		if (nattrs < 1)
-			continue;
-
-		appendStringInfo(
-			&body,
-			"  /* ---- extract %s relation (depth=%d) */\n",
-			depth > 0 ? "inner" : "outer", depth);
-		if (depth > 0)
-			appendStringInfo(
-				&body,
-				"  kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, %d);\n", depth);
-		appendStringInfo(
-			&body,
-			"  htup = (HeapTupleHeaderData *)\n"
-			"    (r_buffer[%d] == 0 ? NULL : ((char *)%s + r_buffer[%d]));\n",
-			depth,
-			depth == 0 ? "kds_src" : "kds_in",
-			depth);
-
-		/* System column reference if any */
-		foreach (lc1, tlist_dev)
-		{
-			TargetEntry		   *tle = lfirst(lc1);
-			Form_pg_attribute	attr;
-
-			if (varattmaps[tle->resno-1] >= 0)
-				continue;
-			attr = SystemAttributeDefinition(varattmaps[tle->resno-1], true);
-			appendStringInfo(
-				&body,
-				"    /* %s system column */\n"
-				"    if (!htup)\n"
-				"      tup_isnull[%d] = true;\n"
-				"    else {\n"
-				"      tup_isnull[%d] = false;\n"
-				"      tup_values[%d] = kern_getsysatt_%s(kds_src, htup);\n"
-				"    }\n",
-				NameStr(attr->attname),
-				tle->resno-1,
-				tle->resno-1,
-				tle->resno-1,
-				NameStr(attr->attname));
-		}
-
-		/* begin to walk on the tuple */
-		appendStringInfo(
-			&body,
-			"  EXTRACT_HEAP_TUPLE_BEGIN(addr, %s, htup);\n",
-			depth == 0 ? "kds_src" : "kds_in");
-
-		resetStringInfo(&temp);
-		for (i=1; i <= nattrs; i++)
-		{
-			TargetEntry	   *tle;
-			int16			typelen;
-			bool			typebyval;
-			cl_bool			referenced = false;
-
-			foreach (lc1, tlist_dev)
-			{
-				tle = lfirst(lc1);
-
-				if (varattmaps[tle->resno - 1] != i)
-					continue;
-				/* attribute shall be directly copied */
-				get_typlenbyval(exprType((Node *)tle->expr),
-								&typelen, &typebyval);
-				if (!typebyval)
-				{
-					appendStringInfo(
-						&temp,
-						"  tup_isnull[%d] = (addr != NULL ? false : true);\n"
-						"  tup_values[%d] = PointerGetDatum(addr);\n"
-						"  tup_depth[%d] = %d;\n",
-						tle->resno - 1,
-						tle->resno - 1,
-						tle->resno - 1, depth);
-				}
-				else
-				{
-					appendStringInfo(
-						&temp,
-						"  tup_isnull[%d] = (addr != NULL ? false : true);\n"
-						"  if (addr)\n"
-						"    tup_values[%d] = *((%s *) addr);\n"
-						"  tup_depth[%d] = %d;\n",
-						tle->resno - 1,
-                        tle->resno - 1,
-						(typelen == sizeof(cl_long)  ? "cl_long" :
-						 typelen == sizeof(cl_int)   ? "cl_int" :
-						 typelen == sizeof(cl_short) ? "cl_short"
-													 : "cl_char"),
-						tle->resno - 1, depth);
-				}
-				referenced = true;
-			}
-
-			forboth (lc1, kvars_srcnum,
-					 lc2, kvars_dstnum)
-			{
-				devtype_info   *dtype;
-				cl_int			src_num = lfirst_int(lc1);
-				cl_int			dst_num = lfirst_int(lc2);
-				Oid				type_oid;
-
-				if (src_num != i)
-					continue;
-				/* add KVAR_%u declarations */
-				tle = list_nth(tlist_dev, dst_num - 1);
-				type_oid = exprType((Node *)tle->expr);
-				dtype = pgstrom_devtype_lookup(type_oid);
-				if (!dtype)
-					elog(ERROR, "cache lookup failed for device type: %s",
-						 format_type_be(type_oid));
-
-				appendStringInfo(
-					&decl,
-					"  pg_%s_t KVAR_%u;\n",
-					dtype->type_name,
-					dst_num);
-				appendStringInfo(
-					&temp,
-					"  KVAR_%u = pg_%s_datum_ref(kcxt, addr, false);\n",
-					dst_num,
-					dtype->type_name);
-
-				referenced = true;
-			}
-
-			/* flush to the main buffer */
-			if (referenced)
-			{
-				appendStringInfoString(&body, temp.data);
-				resetStringInfo(&temp);
-			}
-			appendStringInfoString(
-				&temp,
-				"  EXTRACT_HEAP_TUPLE_NEXT(addr);\n");
-		}
-		appendStringInfoString(
-			&body,
-			"  EXTRACT_HEAP_TUPLE_END();\n");
-	}
-
-	/*
-	 * Execution of the expression
-	 */
-	is_first = true;
-	extra_maxlen = 0;
-	forboth (lc1, tlist_dev,
-			 lc2, ps_src_depth)
-	{
-		TargetEntry	   *tle = lfirst(lc1);
-		cl_int			src_depth = lfirst_int(lc2);
-		devtype_info   *dtype;
-
-		if (tle->resjunk || src_depth >= 0)
-			continue;
-
-		if (is_first)
-		{
-			appendStringInfoString(
-				&body,
-				"\n"
-				"  /* calculation of expressions */\n");
-			is_first = false;
-		}
-
-		dtype = pgstrom_devtype_lookup(exprType((Node *) tle->expr));
-		if (!dtype)
-			elog(ERROR, "cache lookup failed for device type: %s",
-				 format_type_be(exprType((Node *) tle->expr)));
-
-		if (dtype->type_oid == NUMERICOID)
-		{
-			extra_maxlen += 32;
-			appendStringInfo(
-				&body,
-				"  temp.%s_v = %s;\n"
-				"  tup_isnull[%d] = temp.%s_v.isnull;\n"
-				"  if (!temp.%s_v.isnull)\n"
-				"  {\n"
-				"    cl_uint numeric_len =\n"
-				"        pg_numeric_to_varlena(kcxt, extra_pos,\n"
-				"                              temp.%s_v.value,\n"
-				"                              temp.%s_v.isnull);\n"
-				"    tup_values[%d] = PointerGetDatum(extra_pos);\n"
-				"    extra_pos += MAXALIGN(numeric_len);\n"
-				"  }\n"
-				"  tup_depth[%d] = -1;\n",	/* use of local extra_buf */
-				dtype->type_name,
-				pgstrom_codegen_expression((Node *)tle->expr, context),
-				tle->resno - 1,
-				dtype->type_name,
-				dtype->type_name,
-				dtype->type_name,
-				dtype->type_name,
-				tle->resno - 1,
-				tle->resno - 1);
-		}
-		else if (dtype->type_byval)
-		{
-			/* fixed length built-in data type */
-			appendStringInfo(
-				&body,
-				"  temp.%s_v = %s;\n"
-				"  tup_isnull[%d] = temp.%s_v.isnull;\n"
-				"  if (!temp.%s_v.isnull)\n"
-				"    tup_values[%d] = pg_%s_to_datum(temp.%s_v.value);\n"
-				"  tup_depth[%d] = -255;\n",	/* just a poison */
-				dtype->type_name,
-				pgstrom_codegen_expression((Node *)tle->expr, context),
-				tle->resno - 1,
-				dtype->type_name,
-				dtype->type_name,
-				tle->resno - 1,
-				dtype->type_name,
-				dtype->type_name,
-				tle->resno - 1);
-		}
-		else if (dtype->type_length > 0)
-		{
-			/* fixed length pointer data type */
-			extra_maxlen += MAXALIGN(dtype->type_length);
-			appendStringInfo(
-				&body,
-				"  temp.%s_v = %s;\n"
-				"  tup_isnull[%d] = temp.%s_v.isnull;\n"
-				"  if (!temp.%s_v.isnull)\n"
-				"  {\n"
-				"    memcpy(extra_pos, &temp.%s_v.value,\n"
-				"           sizeof(temp.%s_v.value));\n"
-				"    tup_values[%d] = PointerGetDatum(extra_pos);\n"
-				"    extra_pos += MAXALIGN(sizeof(temp.%s_v.value));\n"
-				"  }\n"
-				"  tup_depth[%d] = -1;\n",	/* use of local extra_buf */
-				dtype->type_name,
-				pgstrom_codegen_expression((Node *)tle->expr, context),
-				tle->resno - 1,
-				dtype->type_name,
-				dtype->type_name,
-				dtype->type_name,
-				dtype->type_name,
-				tle->resno - 1,
-				dtype->type_name,
-				tle->resno - 1);
-		}
-		else
-		{
-			/*
-			 * variable length pointer data type
-			 *
-			 * Pay attention for the case when expression may return varlena
-			 * data type, even though we have no device function that can
-			 * return a varlena function. Like:
-			 *   CASE WHEN x IS NOT NULL THEN x ELSE 'no value' END
-			 * In this case, a varlena data returned by the expression is
-			 * located on either any of KDS buffer or KPARAMS buffer.
-			 *
-			 * Unless it is not obvious by the node type, we have to walk on
-			 * the possible buffer range to find out right one. :-(
-			 */
-			appendStringInfo(
-				&body,
-				"  temp.varlena_v = %s;\n"
-				"  tup_isnull[%d] = temp.varlena_v.isnull;\n"
-				"  tup_values[%d] = PointerGetDatum(temp.varlena_v.value);\n",
-				pgstrom_codegen_expression((Node *)tle->expr, context),
-				tle->resno - 1,
-				tle->resno - 1);
-
-			if (IsA(tle->expr, Const) || IsA(tle->expr, Param))
-			{
-				/* always references to the kparams buffer */
-				appendStringInfo(
-					&body,
-					"  tup_depth[%d] = -2;\n",
-					tle->resno - 1);
-			}
-			else
-			{
-				cl_int		i;
-
-				appendStringInfo(
-					&body,
-					"  if (temp.varlena_v.isnull)\n"
-					"    tup_depth[%d] = -9999; /* never referenced */\n"
-					"  else if (pointer_on_kparams(temp.varlena_v.value,\n"
-					"                              kcxt->kparams))\n"
-					"    tup_depth[%d] = -2;\n"
-					"  else if (pointer_on_kds(temp.varlena_v.value,\n"
-					"                          kds_dst))\n"
-					"    tup_depth[%d] = -1;\n"
-					"  else if (pointer_on_kds(temp.varlena_v.value,\n"
-					"                          kds_src))\n"
-					"    tup_depth[%d] = 0;\n",
-					tle->resno - 1,
-					tle->resno - 1,
-					tle->resno - 1,
-					tle->resno - 1);
-				for (i=1; i <= gj_info->num_rels; i++)
-				{
-					appendStringInfo(
-						&body,
-						"  else if (pointer_on_kds(temp.varlena_v.value,\n"
-						"           KERN_MULTIRELS_INNER_KDS(kmrels,%d)))\n"
-						"    tup_depth[%d] = %d;\n",
-						i, tle->resno - 1, i);
-				}
-				appendStringInfo(
-					&body,
-					"  else\n"
-					"    tup_depth[%d] = -9999; /* should never happen */\n",
-					tle->resno - 1);
-			}
-		}
-	}
-	/* how much extra field required? */
-	appendStringInfoString(
-		&body,
-		"\n"
-		"  *extra_len = (cl_uint)(extra_pos - extra_buf);\n");
-	/* add parameter declarations */
-	pgstrom_codegen_param_declarations(&decl, context);
-	/* merge with declaration part */
-	appendStringInfo(&decl, "\n%s}\n", body.data);
-
-	*p_extra_maxlen = extra_maxlen;
-
-	pfree(body.data);
-	pfree(temp.data);
-
-	return decl.data;
 }
 
 #ifdef NOT_USED
@@ -2668,6 +2258,7 @@ pgstrom_post_planner_gpujoin(PlannedStmt *pstmt, Plan **p_curr_plan)
 
 	form_gpujoin_info(cscan, gj_info);
 }
+#endif	/* __NOT_USED__ */
 
 typedef struct
 {
@@ -2721,7 +2312,6 @@ fixup_varnode_to_origin(int depth, List *ps_src_depth, List *ps_src_resno,
 	return (List *) fixup_varnode_to_origin_mutator((Node *) expr_list,
 													&context);
 }
-#endif
 
 /*
  * assign_gpujoin_session_info
@@ -2729,7 +2319,7 @@ fixup_varnode_to_origin(int depth, List *ps_src_depth, List *ps_src_resno,
  * Gives some definitions to the static portion of GpuJoin implementation
  */
 void
-assign_gpujoin_session_info(StringInfo buf, GpuTaskState *gts)
+assign_gpujoin_session_info(StringInfo buf, GpuTaskState_v2 *gts)
 {
 	TupleTableSlot *slot = gts->css.ss.ss_ScanTupleSlot;
 	TupleDesc		tupdesc = slot->tts_tupleDescriptor;
@@ -2771,7 +2361,7 @@ gpujoin_create_scan_state(CustomScan *node)
 static void
 ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 {
-	GpuContext	   *gcontext = NULL;
+	GpuContext_v2  *gcontext = NULL;
 	GpuJoinState   *gjs = (GpuJoinState *) node;
 	ScanState	   *ss = &gjs->gts.css.ss;
 	CustomScan	   *cscan = (CustomScan *) node->ss.ps.plan;
@@ -2786,10 +2376,12 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	ListCell	   *lc2;
 	cl_int			i, j, nattrs;
 	cl_int			first_right_outer_depth = -1;
+	char		   *kern_define;
+	ProgramId		program_id;
+	bool			with_connection = ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0);
 
-	/* activate GpuContext for device execution */
-	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
-		gcontext = pgstrom_get_gpucontext();
+	/* activate a GpuContext for CUDA kernel execution */
+	gcontext = AllocGpuContext(with_connection);
 
 	/*
 	 * Re-initialization of scan tuple-descriptor and projection-info,
@@ -2808,17 +2400,18 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	ExecAssignScanProjectionInfoWithVarno(&gjs->gts.css.ss, INDEX_VAR);
 
 	/* Setup common GpuTaskState fields */
-	pgstrom_init_gputaskstate(gcontext, &gjs->gts, estate);
-	gjs->gts.cb_task_process = gpujoin_task_process;
-	gjs->gts.cb_task_complete = gpujoin_task_complete;
-	gjs->gts.cb_task_release = gpujoin_task_release;
-	gjs->gts.cb_next_chunk = gpujoin_next_chunk;
-	gjs->gts.cb_switch_task = gpujoin_switch_task;
+	pgstromInitGpuTaskState(&gjs->gts,
+							gcontext,
+							GpuTaskKind_GpuJoin,
+							gj_info->used_params,
+							estate);
+	gjs->gts.cb_next_task = gpujoin_next_task;
 	gjs->gts.cb_next_tuple = gpujoin_next_tuple;
+	gjs->gts.cb_switch_task = gpujoin_switch_task;
 	if (pgstrom_bulkexec_enabled &&
 		gjs->gts.css.ss.ps.qual == NIL &&
 		gjs->gts.css.ss.ps.ps_ProjInfo == NULL)
-		gjs->gts.cb_bulk_exec = pgstrom_exec_chunk_gputask;
+		gjs->gts.cb_bulk_exec = pgstromBulkExecGpuTaskState;
 
 	/*
 	 * NOTE: outer_quals, hash_outer_keys and join_quals are intended
@@ -3095,6 +2688,7 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 		gjs->gts.css.custom_ps = lappend(gjs->gts.css.custom_ps,
 										 istate->state);
 	}
+
 	/*
 	 * Track the first RIGHT/FULL OUTER JOIN depth, if any
 	 */
@@ -3108,12 +2702,14 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	 * to be set prior to the program assignment.
 	 */
 	gjs->extra_maxlen = gj_info->extra_maxlen;
-	pgstrom_assign_cuda_program(&gjs->gts,
-								gj_info->used_params,
-								gj_info->kern_source,
-								gj_info->extra_flags);
-	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
-		pgstrom_load_cuda_program_legacy(&gjs->gts, true);
+
+	kern_define = pgstrom_build_session_info(gj_info->extra_flags, &gjs->gts);
+	program_id = pgstrom_create_cuda_program(gcontext,
+											 gj_info->extra_flags,
+											 gj_info->kern_source,
+											 kern_define,
+											 with_connection);
+	gjs->gts.program_id = program_id;
 
 	/* expected kresults buffer expand rate */
 	gjs->result_width =
@@ -3123,15 +2719,31 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 		MAXALIGN(cscan->scan.plan.plan_width);	/* average width */
 
 	/* init perfmon */
-	pgstrom_init_perfmon(&gjs->gts);
+	//pgstrom_init_perfmon(&gjs->gts);
+}
+
+/*
+ * ExecReCheckGpuJoin
+ *
+ * Routine of EPQ recheck on GpuJoin. Join condition shall be checked on
+ * the EPQ tuples.
+ */
+static bool
+ExecReCheckGpuJoin(CustomScanState *node, TupleTableSlot *slot)
+{
+	/*
+	 * TODO: Extract EPQ tuples on CPU fallback slot, then check
+	 * join condition by CPU
+	 */
+	return true;
 }
 
 static TupleTableSlot *
 ExecGpuJoin(CustomScanState *node)
 {
 	return ExecScan(&node->ss,
-					(ExecScanAccessMtd) pgstrom_exec_gputask,
-					(ExecScanRecheckMtd) pgstrom_recheck_gputask);
+					(ExecScanAccessMtd) pgstromExecGpuTaskState,
+					(ExecScanRecheckMtd) ExecReCheckGpuJoin);
 }
 
 static void
@@ -3145,7 +2757,7 @@ ExecEndGpuJoin(CustomScanState *node)
 	 */
 	if (gjs->curr_pmrels)
 	{
-		multirels_detach_buffer(gjs->curr_pmrels, false, __FUNCTION__);
+		multirels_detach_buffer(gjs, gjs->curr_pmrels, false, __FUNCTION__);
 		gjs->curr_pmrels = NULL;
 	}
 	gpujoin_inner_unload(gjs, false);
@@ -3157,7 +2769,7 @@ ExecEndGpuJoin(CustomScanState *node)
 	for (i=0; i < gjs->num_rels; i++)
 		ExecEndNode(gjs->inners[i].state);
 	/* then other generic resources */
-	pgstrom_release_gputaskstate(&gjs->gts);
+	pgstromReleaseGpuTaskState(&gjs->gts);
 }
 
 static void
@@ -3167,10 +2779,8 @@ ExecReScanGpuJoin(CustomScanState *node)
 	bool			keep_inners = true;
 	cl_int			i;
 
-	/* inform this GpuTaskState will produce more rows, prior to cleanup */
-	pgstrom_activate_gputaskstate(&gjs->gts);
-	/* clean-up and release any concurrent tasks */
-	pgstrom_cleanup_gputaskstate(&gjs->gts);
+	/* common rescan handling */
+	pgstromRescanGpuTaskState(&gjs->gts);
 
 	/*
 	 * NOTE: ExecReScan() does not pay attention on the PlanState within
@@ -3191,7 +2801,7 @@ ExecReScanGpuJoin(CustomScanState *node)
 	 * Rewind the outer relation
 	 */
 	if (gjs->gts.css.ss.ss_currentRelation)
-		pgstrom_rewind_scan_chunk(&gjs->gts);
+		gpuscanRewindScanChunk(&gjs->gts);
 	else
 		ExecReScan(outerPlanState(gjs));
 	gjs->gts.scan_overflow = NULL;
@@ -3202,7 +2812,8 @@ ExecReScanGpuJoin(CustomScanState *node)
 	 */
 	if (gjs->curr_pmrels)
 	{
-		multirels_detach_buffer(gjs->curr_pmrels, false, __FUNCTION__);
+		multirels_detach_buffer(gjs, gjs->curr_pmrels, false,
+								__FUNCTION__);
 		gjs->curr_pmrels = NULL;
 	}
 
@@ -3273,7 +2884,7 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 	ExplainPropertyText("GPU Projection", str.data, es);
 
 	/* statistics for outer scan, if it was pulled-up */
-	pgstrom_explain_outer_bulkexec(&gjs->gts, context, ancestors, es);
+	//pgstrom_explain_outer_bulkexec(&gjs->gts, context, ancestors, es);
 
 	/* outer qualifier if any */
 	if (gj_info->outer_quals)
@@ -3461,7 +3072,7 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 					if (lc1 != list_head(istate->pds_list))
 						appendStringInfo(&str, ", ");
 					appendStringInfo(&str, "%s",
-									 format_bytesz(pds->kds->length));
+									 format_bytesz(pds->kds.length));
 				}
 				appendStringInfo(&str, ")");
 			}
@@ -3479,7 +3090,7 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 		}
 	}
 	/* other common field */
-	pgstrom_explain_gputaskstate(&gjs->gts, es);
+	pgstromExplainGpuTaskState(&gjs->gts, es);
 }
 
 /*
@@ -3894,6 +3505,460 @@ gpujoin_codegen_hash_value(StringInfo source,
 	pfree(body.data);
 }
 
+/*
+ * gpujoin_codegen_projection
+ *
+ * It makes a device function for device projection.
+ */
+static void
+gpujoin_codegen_projection(StringInfo source,
+						   CustomScan *cscan,
+						   GpuJoinInfo *gj_info,
+						   codegen_context *context,
+						   cl_uint *p_extra_maxlen)
+{
+	List		   *tlist_dev = cscan->custom_scan_tlist;
+	List		   *ps_src_depth = gj_info->ps_src_depth;
+	List		   *ps_src_resno = gj_info->ps_src_resno;
+	ListCell	   *lc1;
+	ListCell	   *lc2;
+	ListCell	   *lc3;
+	AttrNumber	   *varattmaps;
+	Bitmapset	   *refs_by_vars = NULL;
+	Bitmapset	   *refs_by_expr = NULL;
+	StringInfoData	body;
+	StringInfoData	temp;
+	cl_int			depth;
+	cl_uint			extra_maxlen;
+	cl_bool			is_first;
+
+	varattmaps = palloc(sizeof(AttrNumber) * list_length(tlist_dev));
+	initStringInfo(&body);
+	initStringInfo(&temp);
+
+	/*
+	 * Pick up all the var-node referenced directly or indirectly by
+	 * device expressions; which are resjunk==false.
+	 */
+	forthree (lc1, tlist_dev,
+			  lc2, ps_src_depth,
+			  lc3, ps_src_resno)
+	{
+		TargetEntry	*tle = lfirst(lc1);
+		cl_int		src_depth = lfirst_int(lc2);
+
+		if (tle->resjunk)
+			continue;
+		if (src_depth >= 0)
+		{
+			refs_by_vars = bms_add_member(refs_by_vars, tle->resno -
+										  FirstLowInvalidHeapAttributeNumber);
+		}
+		else
+		{
+			List	   *expr_vars = pull_vars_of_level((Node *)tle->expr, 0);
+			ListCell   *cell;
+
+			foreach (cell, expr_vars)
+			{
+				TargetEntry	   *__tle = tlist_member(lfirst(cell), tlist_dev);
+
+				if (!__tle)
+					elog(ERROR, "Bug? no indirectly referenced Var-node exists in custom_scan_tlist");
+
+				refs_by_expr = bms_add_member(refs_by_vars, __tle->resno -
+										FirstLowInvalidHeapAttributeNumber);
+			}
+			list_free(expr_vars);
+		}
+	}
+
+	appendStringInfoString(
+		source,
+		"STATIC_FUNCTION(void)\n"
+		"gpujoin_projection(kern_context *kcxt,\n"
+		"                   kern_data_store *kds_src,\n"
+		"                   kern_multirels *kmrels,\n"
+		"                   cl_uint *r_buffer,\n"
+		"                   kern_data_store *kds_dst,\n"
+		"                   Datum *tup_values,\n"
+		"                   cl_bool *tup_isnull,\n"
+		"                   cl_short *tup_depth,\n"
+		"                   cl_char *extra_buf,\n"
+		"                   cl_uint *extra_len)\n"
+		"{\n"
+		"  HeapTupleHeaderData *htup    __attribute__((unused));\n"
+		"  kern_data_store *kds_in      __attribute__((unused));\n"
+		"  char *addr                   __attribute__((unused));\n"
+		"  char *extra_pos = extra_buf;\n");
+	codegen_tempvar_declaration(source, "temp");
+
+	for (depth=0; depth <= gj_info->num_rels; depth++)
+	{
+		List	   *kvars_srcnum = NIL;
+		List	   *kvars_dstnum = NIL;
+		cl_int		i, nattrs = -1;
+
+		/* collect information in this depth */
+		memset(varattmaps, 0, sizeof(AttrNumber) * list_length(tlist_dev));
+
+		forthree (lc1, tlist_dev,
+				  lc2, ps_src_depth,
+				  lc3, ps_src_resno)
+		{
+			TargetEntry *tle = lfirst(lc1);
+			cl_int		src_depth = lfirst_int(lc2);
+			cl_int		src_resno = lfirst_int(lc3);
+			cl_int		k = tle->resno - FirstLowInvalidHeapAttributeNumber;
+
+			if (depth != src_depth)
+				continue;
+			if (bms_is_member(k, refs_by_vars))
+				varattmaps[tle->resno - 1] = src_resno;
+			if (bms_is_member(k, refs_by_expr))
+			{
+				kvars_srcnum = lappend_int(kvars_srcnum, src_resno);
+				kvars_dstnum = lappend_int(kvars_dstnum, tle->resno);
+			}
+			if (bms_is_member(k, refs_by_vars) ||
+				bms_is_member(k, refs_by_expr))
+				nattrs = Max(nattrs, src_resno);
+		}
+
+		/* no need to extract inner/outer tuple in this depth */
+		if (nattrs < 1)
+			continue;
+
+		appendStringInfo(
+			&body,
+			"  /* ---- extract %s relation (depth=%d) */\n",
+			depth > 0 ? "inner" : "outer", depth);
+		if (depth > 0)
+			appendStringInfo(
+				&body,
+				"  kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, %d);\n", depth);
+		appendStringInfo(
+			&body,
+			"  htup = (HeapTupleHeaderData *)\n"
+			"    (r_buffer[%d] == 0 ? NULL : ((char *)%s + r_buffer[%d]));\n",
+			depth,
+			depth == 0 ? "kds_src" : "kds_in",
+			depth);
+
+		/* System column reference if any */
+		foreach (lc1, tlist_dev)
+		{
+			TargetEntry		   *tle = lfirst(lc1);
+			Form_pg_attribute	attr;
+
+			if (varattmaps[tle->resno-1] >= 0)
+				continue;
+			attr = SystemAttributeDefinition(varattmaps[tle->resno-1], true);
+			appendStringInfo(
+				&body,
+				"    /* %s system column */\n"
+				"    if (!htup)\n"
+				"      tup_isnull[%d] = true;\n"
+				"    else {\n"
+				"      tup_isnull[%d] = false;\n"
+				"      tup_values[%d] = kern_getsysatt_%s(kds_src, htup);\n"
+				"    }\n",
+				NameStr(attr->attname),
+				tle->resno-1,
+				tle->resno-1,
+				tle->resno-1,
+				NameStr(attr->attname));
+		}
+
+		/* begin to walk on the tuple */
+		appendStringInfo(
+			&body,
+			"  EXTRACT_HEAP_TUPLE_BEGIN(addr, %s, htup);\n",
+			depth == 0 ? "kds_src" : "kds_in");
+
+		resetStringInfo(&temp);
+		for (i=1; i <= nattrs; i++)
+		{
+			TargetEntry	   *tle;
+			int16			typelen;
+			bool			typebyval;
+			cl_bool			referenced = false;
+
+			foreach (lc1, tlist_dev)
+			{
+				tle = lfirst(lc1);
+
+				if (varattmaps[tle->resno - 1] != i)
+					continue;
+				/* attribute shall be directly copied */
+				get_typlenbyval(exprType((Node *)tle->expr),
+								&typelen, &typebyval);
+				if (!typebyval)
+				{
+					appendStringInfo(
+						&temp,
+						"  tup_isnull[%d] = (addr != NULL ? false : true);\n"
+						"  tup_values[%d] = PointerGetDatum(addr);\n"
+						"  tup_depth[%d] = %d;\n",
+						tle->resno - 1,
+						tle->resno - 1,
+						tle->resno - 1, depth);
+				}
+				else
+				{
+					appendStringInfo(
+						&temp,
+						"  tup_isnull[%d] = (addr != NULL ? false : true);\n"
+						"  if (addr)\n"
+						"    tup_values[%d] = *((%s *) addr);\n"
+						"  tup_depth[%d] = %d;\n",
+						tle->resno - 1,
+                        tle->resno - 1,
+						(typelen == sizeof(cl_long)  ? "cl_long" :
+						 typelen == sizeof(cl_int)   ? "cl_int" :
+						 typelen == sizeof(cl_short) ? "cl_short"
+													 : "cl_char"),
+						tle->resno - 1, depth);
+				}
+				referenced = true;
+			}
+
+			forboth (lc1, kvars_srcnum,
+					 lc2, kvars_dstnum)
+			{
+				devtype_info   *dtype;
+				cl_int			src_num = lfirst_int(lc1);
+				cl_int			dst_num = lfirst_int(lc2);
+				Oid				type_oid;
+
+				if (src_num != i)
+					continue;
+				/* add KVAR_%u declarations */
+				tle = list_nth(tlist_dev, dst_num - 1);
+				type_oid = exprType((Node *)tle->expr);
+				dtype = pgstrom_devtype_lookup(type_oid);
+				if (!dtype)
+					elog(ERROR, "cache lookup failed for device type: %s",
+						 format_type_be(type_oid));
+
+				appendStringInfo(
+					source,
+					"  pg_%s_t KVAR_%u;\n",
+					dtype->type_name,
+					dst_num);
+				appendStringInfo(
+					&temp,
+					"  KVAR_%u = pg_%s_datum_ref(kcxt, addr, false);\n",
+					dst_num,
+					dtype->type_name);
+
+				referenced = true;
+			}
+
+			/* flush to the main buffer */
+			if (referenced)
+			{
+				appendStringInfoString(&body, temp.data);
+				resetStringInfo(&temp);
+			}
+			appendStringInfoString(
+				&temp,
+				"  EXTRACT_HEAP_TUPLE_NEXT(addr);\n");
+		}
+		appendStringInfoString(
+			&body,
+			"  EXTRACT_HEAP_TUPLE_END();\n");
+	}
+
+	/*
+	 * Execution of the expression
+	 */
+	is_first = true;
+	extra_maxlen = 0;
+	forboth (lc1, tlist_dev,
+			 lc2, ps_src_depth)
+	{
+		TargetEntry	   *tle = lfirst(lc1);
+		cl_int			src_depth = lfirst_int(lc2);
+		devtype_info   *dtype;
+
+		if (tle->resjunk || src_depth >= 0)
+			continue;
+
+		if (is_first)
+		{
+			appendStringInfoString(
+				&body,
+				"\n"
+				"  /* calculation of expressions */\n");
+			is_first = false;
+		}
+
+		dtype = pgstrom_devtype_lookup(exprType((Node *) tle->expr));
+		if (!dtype)
+			elog(ERROR, "cache lookup failed for device type: %s",
+				 format_type_be(exprType((Node *) tle->expr)));
+
+		if (dtype->type_oid == NUMERICOID)
+		{
+			extra_maxlen += 32;
+			appendStringInfo(
+				&body,
+				"  temp.%s_v = %s;\n"
+				"  tup_isnull[%d] = temp.%s_v.isnull;\n"
+				"  if (!temp.%s_v.isnull)\n"
+				"  {\n"
+				"    cl_uint numeric_len =\n"
+				"        pg_numeric_to_varlena(kcxt, extra_pos,\n"
+				"                              temp.%s_v.value,\n"
+				"                              temp.%s_v.isnull);\n"
+				"    tup_values[%d] = PointerGetDatum(extra_pos);\n"
+				"    extra_pos += MAXALIGN(numeric_len);\n"
+				"  }\n"
+				"  tup_depth[%d] = -1;\n",	/* use of local extra_buf */
+				dtype->type_name,
+				pgstrom_codegen_expression((Node *)tle->expr, context),
+				tle->resno - 1,
+				dtype->type_name,
+				dtype->type_name,
+				dtype->type_name,
+				dtype->type_name,
+				tle->resno - 1,
+				tle->resno - 1);
+		}
+		else if (dtype->type_byval)
+		{
+			/* fixed length built-in data type */
+			appendStringInfo(
+				&body,
+				"  temp.%s_v = %s;\n"
+				"  tup_isnull[%d] = temp.%s_v.isnull;\n"
+				"  if (!temp.%s_v.isnull)\n"
+				"    tup_values[%d] = pg_%s_to_datum(temp.%s_v.value);\n"
+				"  tup_depth[%d] = -255;\n",	/* just a poison */
+				dtype->type_name,
+				pgstrom_codegen_expression((Node *)tle->expr, context),
+				tle->resno - 1,
+				dtype->type_name,
+				dtype->type_name,
+				tle->resno - 1,
+				dtype->type_name,
+				dtype->type_name,
+				tle->resno - 1);
+		}
+		else if (dtype->type_length > 0)
+		{
+			/* fixed length pointer data type */
+			extra_maxlen += MAXALIGN(dtype->type_length);
+			appendStringInfo(
+				&body,
+				"  temp.%s_v = %s;\n"
+				"  tup_isnull[%d] = temp.%s_v.isnull;\n"
+				"  if (!temp.%s_v.isnull)\n"
+				"  {\n"
+				"    memcpy(extra_pos, &temp.%s_v.value,\n"
+				"           sizeof(temp.%s_v.value));\n"
+				"    tup_values[%d] = PointerGetDatum(extra_pos);\n"
+				"    extra_pos += MAXALIGN(sizeof(temp.%s_v.value));\n"
+				"  }\n"
+				"  tup_depth[%d] = -1;\n",	/* use of local extra_buf */
+				dtype->type_name,
+				pgstrom_codegen_expression((Node *)tle->expr, context),
+				tle->resno - 1,
+				dtype->type_name,
+				dtype->type_name,
+				dtype->type_name,
+				dtype->type_name,
+				tle->resno - 1,
+				dtype->type_name,
+				tle->resno - 1);
+		}
+		else
+		{
+			/*
+			 * variable length pointer data type
+			 *
+			 * Pay attention for the case when expression may return varlena
+			 * data type, even though we have no device function that can
+			 * return a varlena function. Like:
+			 *   CASE WHEN x IS NOT NULL THEN x ELSE 'no value' END
+			 * In this case, a varlena data returned by the expression is
+			 * located on either any of KDS buffer or KPARAMS buffer.
+			 *
+			 * Unless it is not obvious by the node type, we have to walk on
+			 * the possible buffer range to find out right one. :-(
+			 */
+			appendStringInfo(
+				&body,
+				"  temp.varlena_v = %s;\n"
+				"  tup_isnull[%d] = temp.varlena_v.isnull;\n"
+				"  tup_values[%d] = PointerGetDatum(temp.varlena_v.value);\n",
+				pgstrom_codegen_expression((Node *)tle->expr, context),
+				tle->resno - 1,
+				tle->resno - 1);
+
+			if (IsA(tle->expr, Const) || IsA(tle->expr, Param))
+			{
+				/* always references to the kparams buffer */
+				appendStringInfo(
+					&body,
+					"  tup_depth[%d] = -2;\n",
+					tle->resno - 1);
+			}
+			else
+			{
+				cl_int		i;
+
+				appendStringInfo(
+					&body,
+					"  if (temp.varlena_v.isnull)\n"
+					"    tup_depth[%d] = -9999; /* never referenced */\n"
+					"  else if (pointer_on_kparams(temp.varlena_v.value,\n"
+					"                              kcxt->kparams))\n"
+					"    tup_depth[%d] = -2;\n"
+					"  else if (pointer_on_kds(temp.varlena_v.value,\n"
+					"                          kds_dst))\n"
+					"    tup_depth[%d] = -1;\n"
+					"  else if (pointer_on_kds(temp.varlena_v.value,\n"
+					"                          kds_src))\n"
+					"    tup_depth[%d] = 0;\n",
+					tle->resno - 1,
+					tle->resno - 1,
+					tle->resno - 1,
+					tle->resno - 1);
+				for (i=1; i <= gj_info->num_rels; i++)
+				{
+					appendStringInfo(
+						&body,
+						"  else if (pointer_on_kds(temp.varlena_v.value,\n"
+						"           KERN_MULTIRELS_INNER_KDS(kmrels,%d)))\n"
+						"    tup_depth[%d] = %d;\n",
+						i, tle->resno - 1, i);
+				}
+				appendStringInfo(
+					&body,
+					"  else\n"
+					"    tup_depth[%d] = -9999; /* should never happen */\n",
+					tle->resno - 1);
+			}
+		}
+	}
+	/* how much extra field required? */
+	appendStringInfoString(
+		&body,
+		"\n"
+		"  *extra_len = (cl_uint)(extra_pos - extra_buf);\n");
+	/* add parameter declarations */
+	pgstrom_codegen_param_declarations(source, context);
+	/* merge with declaration part */
+	appendStringInfo(source, "\n%s}\n", body.data);
+
+	*p_extra_maxlen = extra_maxlen;
+
+	pfree(body.data);
+	pfree(temp.data);
+}
+
 static char *
 gpujoin_codegen(PlannerInfo *root,
 				CustomScan *cscan,
@@ -3907,10 +3972,17 @@ gpujoin_codegen(PlannerInfo *root,
 
 	initStringInfo(&source);
 
-	/* gpujoin_outer_quals  */
+	/*
+	 * gpujoin_outer_quals 
+	 *
+	 * TODO: For better KDS_FORMAT_ROW/BLOCK support, we should include
+	 * cuda_gpuscan.h instead.
+	 */
 	gpujoin_codegen_outer_quals(&source, gj_info, context);
 
-	/* gpujoin_join_quals */
+	/*
+	 * gpujoin_join_quals
+	 */
 	for (depth=1; depth <= gj_info->num_rels; depth++)
 		gpujoin_codegen_join_quals(&source, gj_info, depth, context);
 	appendStringInfo(
@@ -3953,7 +4025,9 @@ gpujoin_codegen(PlannerInfo *root,
 		depth++;
 	}
 
-	/* gpujoin_hash_value */
+	/*
+	 * gpujoin_hash_value
+	 */
 	appendStringInfo(
 		&source,
 		"STATIC_FUNCTION(cl_uint)\n"
@@ -3995,11 +4069,8 @@ gpujoin_codegen(PlannerInfo *root,
 	/*
 	 * gpujoin_projection
 	 */
-
-
-
-
-
+	gpujoin_codegen_projection(&source, cscan, gj_info, context,
+							   &gj_info->extra_maxlen);
 
 	return source.data;
 }
@@ -4113,7 +4184,7 @@ gpujoin_exec_estimate_nitems(GpuJoinState *gjs,
 		else
 		{
 			pgstrom_data_store *pds_in = pmrels->inner_chunks[depth - 1];
-			cl_uint				nitems_in = pds_in->kds->nitems;
+			cl_uint				nitems_in = pds_in->kds.nitems;
 
 			plan_ratio = istate->nrows_ratio;
 			if (gjs->inner_nitems[depth - 1] +
@@ -4164,7 +4235,7 @@ gpujoin_exec_estimate_nitems(GpuJoinState *gjs,
 				 *
 				 * XXX - We may need more exact statistics on outer_join_map
 				 */
-				cl_uint	nitems_in = pds_in->kds->nitems;
+				cl_uint	nitems_in = pds_in->kds.nitems;
 				double	match_ratio;
 
 				if (nitems_in == 0)
@@ -4195,7 +4266,7 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs,
 							 pgstrom_gpujoin *pgjoin,
 							 double ntuples, cl_int target_depth)
 {
-	GpuContext	   *gcontext = gjs->gts.gcontext;
+	GpuContext_v2  *gcontext = gjs->gts.gcontext;
 	TupleTableSlot *tupslot = gjs->gts.css.ss.ss_ScanTupleSlot;
 	TupleDesc		tupdesc = tupslot->tts_tupleDescriptor;
 	cl_int			ncols = tupdesc->natts;
@@ -4212,7 +4283,7 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs,
 	 */
 
 
-	if (!gjs->gts.be_row_format)
+	if (!gjs->gts.row_format)
 	{
 		/* KDS_FORMAT_SLOT */
 		Size	length = (STROMALIGN(offsetof(kern_data_store,
@@ -4338,13 +4409,14 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs,
  *
  *
  */
-static GpuTask *
+static GpuTask_v2 *
 gpujoin_create_task(GpuJoinState *gjs,
 					pgstrom_multirels *pmrels,
 					pgstrom_data_store *pds_src,
+					int file_desc,
 					kern_join_scale *jscale_old)
 {
-	GpuContext		   *gcontext = gjs->gts.gcontext;
+	GpuContext_v2	   *gcontext = gjs->gts.gcontext;
 	pgstrom_gpujoin	   *pgjoin;
 	double				ntuples;
 	double				ntuples_next;
@@ -4356,18 +4428,18 @@ gpujoin_create_task(GpuJoinState *gjs,
 	cl_int				target_depth;
 	cl_double			target_row_dist_score;
 	cl_bool				jscale_rewind = false;
-
 	kern_parambuf	   *kparams __attribute__((unused));
 
 	/*
 	 * Allocation of pgstrom_gpujoin task object
 	 */
-	required = (offsetof(pgstrom_gpujoin, kern) +
-				STROMALIGN(offsetof(kern_gpujoin,
-									jscale[gjs->num_rels + 1])) +
-				STROMALIGN(gjs->gts.kern_params->length));
-	pgjoin = MemoryContextAllocZero(gcontext->memcxt, required);
-	pgstrom_init_gputask(&gjs->gts, &pgjoin->task);
+	length = offsetof(pgstrom_gpujoin, kern) +
+		STROMALIGN(offsetof(kern_gpujoin, jscale[gjs->num_rels + 1]));
+	required = length + STROMALIGN(gjs->gts.kern_params->length);
+	pgjoin = dmaBufferAlloc(gcontext, required);
+	memset(pgjoin, 0, length);
+
+	pgstromInitGpuTask(&gjs->gts, &pgjoin->task);
 	pgjoin->pmrels = multirels_attach_buffer(pmrels);
 	pgjoin->pds_src = pds_src;
 	pgjoin->pds_dst = NULL;		/* to be set later */
@@ -4397,9 +4469,9 @@ gpujoin_create_task(GpuJoinState *gjs,
 		cl_uint				nitems;
 
 		if (i == 0)
-			nitems = (!pgjoin->pds_src ? 0 : pgjoin->pds_src->kds->nitems);
+			nitems = (!pgjoin->pds_src ? 0 : pgjoin->pds_src->kds.nitems);
 		else
-			nitems = pmrels->inner_chunks[i-1]->kds->nitems;
+			nitems = pmrels->inner_chunks[i-1]->kds.nitems;
 
 		if (!jscale_old)
 		{
@@ -4565,11 +4637,21 @@ major_retry:
 	pgjoin->kern.kresults_max_items = max_items;
 	pgjoin->kern.num_rels = gjs->num_rels;
 
+#ifdef NOT_USED
+	/*
+	 * v9.6 or later, a backend connect to a particular GPU server which
+	 * is bound to a particular GPU, so we don't need to pay attention
+	 * multi GPU support.
+	 */
+
+
+
+
 	/*
 	 * Attach the inner multi-relations buffer, if here is at least one
 	 * active one; that already has device memory and no need to kick
 	 * inner DMA again.
-	 * gpujoin_task_complete() unreference the device memory soon, if no
+	 * gpujoin_complete_task() unreference the device memory soon, if no
 	 * other task acquired the segment. So, getting the buffer here, prior
 	 * to the launch of task, enables to reduce number of inner DMA.
 	 *
@@ -4589,15 +4671,17 @@ major_retry:
 			break;
 		}
 	}
+#endif
 	return &pgjoin->task;
 }
 
 
-static GpuTask *
-gpujoin_next_chunk(GpuTaskState *gts)
+static GpuTask_v2 *
+gpujoin_next_task(GpuTaskState_v2 *gts)
 {
 	GpuJoinState   *gjs = (GpuJoinState *) gts;
 	pgstrom_data_store *pds = NULL;
+	int				filedesc = -1;
 	struct timeval	tv1, tv2;
 
 	/*
@@ -4622,7 +4706,8 @@ gpujoin_next_chunk(GpuTaskState *gts)
 			if (gjs->curr_pmrels)
 			{
 				Assert(gjs->outer_scan_done);
-				multirels_detach_buffer(gjs->curr_pmrels, true, __FUNCTION__);
+				multirels_detach_buffer(gjs, gjs->curr_pmrels, true,
+										__FUNCTION__);
 				gjs->curr_pmrels = NULL;
 			}
 
@@ -4642,18 +4727,18 @@ gpujoin_next_chunk(GpuTaskState *gts)
 			if (gjs->outer_scan_done)
 			{
 				if (gjs->gts.css.ss.ss_currentRelation)
-					pgstrom_rewind_scan_chunk(&gjs->gts);
+					gpuscanRewindScanChunk(&gjs->gts);
 				else
 					ExecReScan(outerPlanState(gjs));
 				gjs->outer_scan_done = false;
 			}
 		}
 
-		PERFMON_BEGIN(&gts->pfm, &tv1);
+		PFMON_BEGIN(&gts->pfm, &tv1);
 		if (gjs->gts.css.ss.ss_currentRelation)
 		{
 			/* Scan and load the outer relation by itself */
-			pds = pgstrom_exec_scan_chunk(gts, pgstrom_chunk_size());
+			pds = gpuscanExecScanChunk(gts, &filedesc);
 			if (!pds)
 				gjs->outer_scan_done = true;
 		}
@@ -4697,7 +4782,7 @@ gpujoin_next_chunk(GpuTaskState *gts)
 				}
 			}
 		}
-		PERFMON_END(&gjs->gts.pfm, time_outer_load, &tv1, &tv2);
+		PFMON_END(&gjs->gts.pfm, time_outer_load, &tv1, &tv2);
 
 		/*
 		 * We also need to check existence of next inner hash-chunks,
@@ -4707,7 +4792,7 @@ gpujoin_next_chunk(GpuTaskState *gts)
 		 */
 	} while (!pds);
 
-	return gpujoin_create_task(gjs, gjs->curr_pmrels, pds, NULL);
+	return gpujoin_create_task(gjs, gjs->curr_pmrels, pds, filedesc, NULL);
 }
 
 /*
@@ -4715,7 +4800,7 @@ gpujoin_next_chunk(GpuTaskState *gts)
  * and assigned on the gts->curr_task.
  */
 static void
-gpujoin_switch_task(GpuTaskState *gts, GpuTask *gtask)
+gpujoin_switch_task(GpuTaskState_v2 *gts, GpuTask_v2 *gtask)
 {
 	GpuJoinState	   *gjs = (GpuJoinState *) gts;
 	pgstrom_gpujoin	   *pgjoin = (pgstrom_gpujoin *) gtask;
@@ -4738,22 +4823,23 @@ gpujoin_switch_task(GpuTaskState *gts, GpuTask *gtask)
 		 * We don't need to have the inner pmrels buffer no longer, if GPU
 		 * task gets successfully done.
 		 */
-		multirels_detach_buffer(pgjoin->pmrels, true, __FUNCTION__);
+		multirels_detach_buffer(gjs, pgjoin->pmrels, true,
+								__FUNCTION__);
 		pgjoin->pmrels = NULL;
 	}
 }
 
 static TupleTableSlot *
-gpujoin_next_tuple(GpuTaskState *gts)
+gpujoin_next_tuple(GpuTaskState_v2 *gts)
 {
 	GpuJoinState	   *gjs = (GpuJoinState *) gts;
 	TupleTableSlot	   *slot = gjs->gts.css.ss.ss_ScanTupleSlot;
 	pgstrom_gpujoin	   *pgjoin = (pgstrom_gpujoin *)gjs->gts.curr_task;
 	pgstrom_data_store *pds_dst = pgjoin->pds_dst;
-	kern_data_store	   *kds_dst = pds_dst->kds;
+	kern_data_store	   *kds_dst = &pds_dst->kds;
 	struct timeval		tv1, tv2;
 
-	PERFMON_BEGIN(&gjs->gts.pfm, &tv1);
+	PFMON_BEGIN(&gjs->gts.pfm, &tv1);
 	if (pgjoin->task.cpu_fallback)
 	{
 		/*
@@ -4791,7 +4877,7 @@ gpujoin_next_tuple(GpuTaskState *gts)
 	if (slot != NULL)
 		(void) ExecMaterializeSlot(slot);
 #endif
-	PERFMON_END(&gjs->gts.pfm, time_materialize, &tv1, &tv2);
+	PFMON_END(&gjs->gts.pfm, time_materialize, &tv1, &tv2);
 	return slot;
 }
 
@@ -5004,7 +5090,7 @@ gpujoin_fallback_inner_recurse(GpuJoinState *gjs,
 	bool				reload_inner_next;
 
 	Assert(depth > 0 && depth <= gjs->num_rels);
-	kds_in = pmrels->inner_chunks[depth-1]->kds;
+	kds_in = &pmrels->inner_chunks[depth-1]->kds;
 	jscale = &pgjoin->kern.jscale[depth];
 
 	reload_inner_next = (istate->fallback_inner_index < 0 ||
@@ -5282,7 +5368,7 @@ gpujoin_next_tuple_fallback(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 
 	if (pgjoin->pds_src)
 	{
-		kern_data_store	   *kds_src = pgjoin->pds_src->kds;
+		kern_data_store	   *kds_src = &pgjoin->pds_src->kds;
 		kern_join_scale	   *jscale = pgjoin->kern.jscale;
 		kern_tupitem	   *tupitem;
 		bool				reload_outer_next;
@@ -5310,7 +5396,7 @@ gpujoin_next_tuple_fallback(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 					 * to the point of CPU fallback end, if needed. So, we
 					 * have to detach here.
 					 */
-					multirels_detach_buffer(pgjoin->pmrels, true,
+					multirels_detach_buffer(gjs, pgjoin->pmrels, true,
 											__FUNCTION__);
 					pgjoin->pmrels = NULL;
 					return NULL;
@@ -5392,13 +5478,13 @@ gpujoin_next_tuple_fallback(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 static void
 gpujoin_cleanup_cuda_resources(pgstrom_gpujoin *pgjoin)
 {
-	CUDA_EVENT_DESTROY(pgjoin, ev_dma_send_start);
-	CUDA_EVENT_DESTROY(pgjoin, ev_dma_send_stop);
-	CUDA_EVENT_DESTROY(pgjoin, ev_dma_recv_start);
-	CUDA_EVENT_DESTROY(pgjoin, ev_dma_recv_stop);
+	PFMON_EVENT_DESTROY(pgjoin, ev_dma_send_start);
+	PFMON_EVENT_DESTROY(pgjoin, ev_dma_send_stop);
+	PFMON_EVENT_DESTROY(pgjoin, ev_dma_recv_start);
+	PFMON_EVENT_DESTROY(pgjoin, ev_dma_recv_stop);
 
 	if (pgjoin->m_kgjoin)
-		gpuMemFree(&pgjoin->task, pgjoin->m_kgjoin);
+		gpuMemFree_v2(pgjoin->task.gcontext, pgjoin->m_kgjoin);
 	if (pgjoin->m_kmrels)
 		multirels_put_buffer(pgjoin->pmrels, &pgjoin->task);
 
@@ -5414,8 +5500,8 @@ gpujoin_cleanup_cuda_resources(pgstrom_gpujoin *pgjoin)
 	pgjoin->ev_dma_recv_stop = NULL;
 }
 
-static void
-gpujoin_task_release(GpuTask *gtask)
+void
+gpujoin_release_task(GpuTask_v2 *gtask)
 {
 	pgstrom_gpujoin	   *pgjoin = (pgstrom_gpujoin *) gtask;
 
@@ -5423,7 +5509,9 @@ gpujoin_task_release(GpuTask *gtask)
 	gpujoin_cleanup_cuda_resources(pgjoin);
 	/* detach multi-relations buffer, if any */
 	if (pgjoin->pmrels)
-		multirels_detach_buffer(pgjoin->pmrels, false, __FUNCTION__);
+		multirels_detach_buffer((GpuJoinState *)gtask->gts,
+								pgjoin->pmrels, false,
+								__FUNCTION__);
 	/* unlink source data store */
 	if (pgjoin->pds_src)
 		PDS_release(pgjoin->pds_src);
@@ -5434,8 +5522,8 @@ gpujoin_task_release(GpuTask *gtask)
 	pfree(pgjoin);
 }
 
-static bool
-gpujoin_task_complete(GpuTask *gtask)
+int
+gpujoin_complete_task(GpuTask_v2 *gtask)
 {
 	pgstrom_gpujoin	   *pgjoin = (pgstrom_gpujoin *) gtask;
 	GpuJoinState	   *gjs = (GpuJoinState *) gtask->gts;
@@ -5447,32 +5535,32 @@ gpujoin_task_complete(GpuTask *gtask)
 		if (pgjoin->is_inner_loader)
 		{
 			CUevent ev_inner_loaded =
-				pgjoin->pmrels->ev_loaded[gtask->cuda_index];
+				pgjoin->pmrels->ev_loaded[0];
 
-			CUDA_EVENT_ELAPSED(pgjoin, gjoin.tv_inner_dma_send,
-							   pgjoin->ev_dma_send_start,
-							   ev_inner_loaded,
-							   skip);
-			CUDA_EVENT_ELAPSED(pgjoin, time_dma_send,
-							   ev_inner_loaded,
-							   pgjoin->ev_dma_send_stop,
-							   skip);
+			PFMON_EVENT_ELAPSED(pgjoin, gjoin.tv_inner_dma_send,
+								pgjoin->ev_dma_send_start,
+								ev_inner_loaded,
+								skip);
+			PFMON_EVENT_ELAPSED(pgjoin, time_dma_send,
+								ev_inner_loaded,
+								pgjoin->ev_dma_send_stop,
+								skip);
 		}
 		else
 		{
-			CUDA_EVENT_ELAPSED(pgjoin, time_dma_send,
-							   pgjoin->ev_dma_send_start,
-							   pgjoin->ev_dma_send_stop,
-							   skip);
+			PFMON_EVENT_ELAPSED(pgjoin, time_dma_send,
+								pgjoin->ev_dma_send_start,
+								pgjoin->ev_dma_send_stop,
+								skip);
 		}
-		CUDA_EVENT_ELAPSED(pgjoin, gjoin.tv_kern_main,
-						   pgjoin->ev_dma_send_stop,
-						   pgjoin->ev_dma_recv_start,
-						   skip);
-		CUDA_EVENT_ELAPSED(pgjoin, time_dma_recv,
-						   pgjoin->ev_dma_recv_start,
-						   pgjoin->ev_dma_recv_stop,
-						   skip);
+		PFMON_EVENT_ELAPSED(pgjoin, gjoin.tv_kern_main,
+							pgjoin->ev_dma_send_stop,
+							pgjoin->ev_dma_recv_start,
+							skip);
+		PFMON_EVENT_ELAPSED(pgjoin, time_dma_recv,
+							pgjoin->ev_dma_recv_start,
+							pgjoin->ev_dma_recv_stop,
+							skip);
 		/* update performance */
 		pfm->gjoin.num_kern_outer_scan
 			+= pgjoin->kern.pfm.num_kern_outer_scan;
@@ -5538,8 +5626,8 @@ skip:
 				gjs->row_dist_score[i] += jscale[i].row_dist_score;
 			}
 		}
-		gjs->results_nitems += pds_dst->kds->nitems;
-		gjs->results_usage += pds_dst->kds->usage;
+		gjs->results_nitems += pds_dst->kds.nitems;
+		gjs->results_usage += pds_dst->kds.usage;
 
 		/*
 		 * Enqueue another GpuJoin taks if completed one run on a part of
@@ -5555,11 +5643,11 @@ skip:
 			cl_uint				nitems;
 
 			if (i == 0)
-				nitems = (!pgjoin->pds_src ? 0 : pgjoin->pds_src->kds->nitems);
+				nitems = (!pgjoin->pds_src ? 0 : pgjoin->pds_src->kds.nitems);
 			else
 			{
 				pgstrom_data_store *pds = pmrels->inner_chunks[i-1];
-				nitems = pds->kds->nitems;
+				nitems = pds->kds.nitems;
 			}
 
 			if (jscale[i].window_base + jscale[i].window_size < nitems)
@@ -5589,7 +5677,7 @@ skip:
 					{
 						pgstrom_data_store *pds = pmrels->inner_chunks[i];
 
-						jscale[i+1].window_size = (pds->kds->nitems -
+						jscale[i+1].window_size = (pds->kds.nitems -
 												   jscale[i+1].window_base);
 					}
 					break;
@@ -5608,6 +5696,7 @@ skip:
 					gpujoin_create_task(gjs,
 										pgjoin->pmrels,
 										pds_src,
+										-1,
 										jscale);
 
 				/* add this new task to the pending list */
@@ -5693,7 +5782,8 @@ gpujoin_task_respond(CUstream stream, CUresult status, void *private)
 }
 
 static bool
-__gpujoin_task_process(pgstrom_gpujoin *pgjoin)
+__gpujoin_process_task(pgstrom_gpujoin *pgjoin,
+					   CUmodule cuda_module, CUstream cuda_stream)
 {
 	GpuJoinState	   *gjs = (GpuJoinState *) pgjoin->task.gts;
 	pgstrom_multirels  *pmrels = pgjoin->pmrels;
@@ -5707,9 +5797,9 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 	/*
 	 * sanity checks
 	 */
-	Assert(pds_src == NULL || pds_src->kds->format == KDS_FORMAT_ROW);
-	Assert(pds_dst->kds->format == KDS_FORMAT_ROW ||
-		   pds_dst->kds->format == KDS_FORMAT_SLOT);
+	Assert(pds_src == NULL || pds_src->kds.format == KDS_FORMAT_ROW);
+	Assert(pds_dst->kds.format == KDS_FORMAT_ROW ||
+		   pds_dst->kds.format == KDS_FORMAT_SLOT);
 	/*
 	 * GPU kernel function lookup
 	 */
@@ -5751,19 +5841,25 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 	/*
 	 * Creation of event objects, if needed
 	 */
-	CUDA_EVENT_CREATE(pgjoin, ev_dma_send_start);
-	CUDA_EVENT_CREATE(pgjoin, ev_dma_send_stop);
-	CUDA_EVENT_CREATE(pgjoin, ev_dma_recv_start);
-	CUDA_EVENT_CREATE(pgjoin, ev_dma_recv_stop);
+	PFMON_EVENT_CREATE(pgjoin, ev_dma_send_start);
+	PFMON_EVENT_CREATE(pgjoin, ev_dma_send_stop);
+	PFMON_EVENT_CREATE(pgjoin, ev_dma_recv_start);
+	PFMON_EVENT_CREATE(pgjoin, ev_dma_recv_stop);
 
 	/*
 	 * OK, all the device memory and kernel objects are successfully
 	 * constructed. Let's enqueue DMA send/recv and kernel invocations.
 	 */
-	CUDA_EVENT_RECORD(pgjoin, ev_dma_send_start);
+	PFMON_EVENT_RECORD(pgjoin, ev_dma_send_start);
 
 	/* inner multi relations */
-	multirels_send_buffer(pmrels, &pgjoin->task);
+	//multirels_send_buffer(pmrels, &pgjoin->task);
+	//HOGE:
+	if (multirels_get_buffer(..., cuda_stream))
+		goto out_of_resource;
+
+
+
 	/* kern_gpujoin + static portion of kern_resultbuf */
 	length = KERN_GPUJOIN_HEAD_LENGTH(&pgjoin->kern);
 	rc = cuMemcpyHtoDAsync(pgjoin->m_kgjoin,
@@ -5791,7 +5887,8 @@ __gpujoin_task_process(pgstrom_gpujoin *pgjoin)
 	else
 	{
 		/* colocation of the outer join map */
-		colocate_outer_join_maps_to_device(pmrels, &pgjoin->task);
+		//HOGE: we can skip colocation if no CPU fallback happen
+		colocate_outer_join_maps_to_device(pgjoin, cuda_module, cuda_stream);
 	}
 
 	/* kern_data_store (dst of head) */
@@ -5876,39 +5973,24 @@ out_of_resource:
 	return false;
 }
 
-static bool
-gpujoin_task_process(GpuTask *gtask)
+int
+gpujoin_process_task(GpuTask_v2 *gtask,
+					 CUmodule cuda_module,
+					 CUstream cuda_stream)
 {
 	pgstrom_gpujoin *pgjoin = (pgstrom_gpujoin *) gtask;
-	bool		status = false;
-	CUresult	rc;
+	int			status;
 
-	/* switch CUDA context */
-	rc = cuCtxPushCurrent(gtask->cuda_context);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
 	PG_TRY();
 	{
-		if (pgjoin->m_kmrels != 0UL ||
-			multirels_get_buffer(pgjoin->pmrels, pgjoin))
-			status = __gpujoin_task_process(pgjoin);
-		else
-			status = false;
+		status = __gpujoin_process_task(pgjoin, cuda_module, cuda_stream);
 	}
 	PG_CATCH();
 	{
-		rc = cuCtxPopCurrent(NULL);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
 		gpujoin_cleanup_cuda_resources(pgjoin);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
-
-	/* reset CUDA context */
-	rc = cuCtxPopCurrent(NULL);
-	if (rc != CUDA_SUCCESS)
-		elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
 
 	return status;
 }
@@ -5946,23 +6028,23 @@ gpujoin_task_process(GpuTask *gtask)
 static void
 add_extra_randomness(pgstrom_data_store *pds)
 {
-	kern_data_store	   *kds = pds->kds;
-	cl_uint				x, y, temp;
+	cl_uint		x, y, temp;
 
-	return;
+	return;		//????
 
-	if (kds->format == KDS_FORMAT_ROW ||
-		kds->format == KDS_FORMAT_HASH)
+	if (pds->kds.format == KDS_FORMAT_ROW ||
+		pds->kds.format == KDS_FORMAT_HASH)
 	{
 		cl_uint		   *row_index = KERN_DATA_STORE_ROWINDEX(kds);
+		cl_uint			nitems = pds->kds.nitems;
 
-		for (x=0; x < kds->nitems; x++)
+		for (x=0; x < nitems; x++)
 		{
-			y = rand() % kds->nitems;
+			y = rand() % nitems;
 			if (x == y)
 				continue;
 
-			if (kds->format == KDS_FORMAT_HASH)
+			if (pds->kds.format == KDS_FORMAT_HASH)
 			{
 				kern_hashitem  *khitem_x = KERN_DATA_STORE_HASHITEM(kds, x);
 				kern_hashitem  *khitem_y = KERN_DATA_STORE_HASHITEM(kds, y);
@@ -6158,8 +6240,8 @@ gpujoin_inner_hash_preload_TS(GpuJoinState *gjs,
 			pds_hash = PDS_create_hash(gjs->gts.gcontext,
 									   scan_desc,
 									   kds_length);
-			pds_hash->kds->hash_min = hash_min;
-			pds_hash->kds->hash_max = hash_max;
+			pds_hash->kds.hash_min = hash_min;
+			pds_hash->kds.hash_max = hash_max;
 
 			pds_list = lappend(pds_list, pds_hash);
 			hash_max_list = lappend_int(hash_max_list, (int) hash_max);
@@ -6180,8 +6262,8 @@ gpujoin_inner_hash_preload_TS(GpuJoinState *gjs,
 	pds_hash = PDS_create_hash(gjs->gts.gcontext,
 							   scan_desc,
 							   kds_length);
-	pds_hash->kds->hash_min = hash_min;
-	pds_hash->kds->hash_max = UINT_MAX;
+	pds_hash->kds.hash_min = hash_min;
+	pds_hash->kds.hash_max = UINT_MAX;
 	pds_list = lappend(pds_list, pds_hash);
 	hash_max_list = lappend_int(hash_max_list, (int) UINT_MAX);
 
@@ -6391,7 +6473,7 @@ retry:
 	{
 		PDS_expand_size(gjs->gts.gcontext,
 						pds_hash,
-						2 * pds_hash->kds_length);
+						2 * pds_hash->kds.length);
 		goto retry;
 	}
 	*p_total_usage += KDS_HASH_USAGE_GROWTH(istate->ntuples,
@@ -6476,7 +6558,7 @@ gpujoin_inner_heap_preload(GpuJoinState *gjs,
 	{
 		pds_heap = PDS_create_row(gjs->gts.gcontext,
 								  scan_desc,
-								  pds_heap->kds_length);
+								  pds_heap->kds.length);
 		istate->pds_list = lappend(istate->pds_list, pds_heap);
 		istate->consumed = KDS_CALCULATE_HEAD_LENGTH(scan_desc->natts);
 		istate->ntuples = 0;
@@ -6487,7 +6569,7 @@ retry:
 	{
 		PDS_expand_size(gjs->gts.gcontext,
 						pds_heap,
-						2 * pds_heap->kds_length);
+						2 * pds_heap->kds.length);
 		goto retry;
 	}
 	*p_total_usage += KDS_ROW_USAGE_GROWTH(istate->ntuples,
@@ -6506,13 +6588,13 @@ retry:
 static pgstrom_multirels *
 gpujoin_create_multirels(GpuJoinState *gjs)
 {
-	GpuContext *gcontext = gjs->gts.gcontext;
+	GpuContext_v2  *gcontext = gjs->gts.gcontext;
 	pgstrom_multirels  *pmrels;
-	Size		ojmap_length = 0;
-	Size		head_length;
-	Size		alloc_length;
-	int			i;
-	char	   *pos;
+	Size			ojmap_length = 0;
+	Size			head_length;
+	Size			required;
+	int				i;
+	char		   *pos;
 
 	/* calculation of outer-join map length */
 	for (i=0; i < gjs->num_rels; i++)
@@ -6524,39 +6606,32 @@ gpujoin_create_multirels(GpuJoinState *gjs)
 		{
 			pgstrom_data_store *pds = list_nth(istate->pds_list,
 											   istate->pds_index - 1);
-			ojmap_length += STROMALIGN(pds->kds->nitems);
+			ojmap_length += STROMALIGN(pds->kds.nitems);
 		}
 	}
 
 	/* calculate total length and allocate */
 	head_length = STROMALIGN(offsetof(pgstrom_multirels,
 									  kern.chunks[gjs->num_rels]));
-	alloc_length = head_length +
+	required = head_length +
 		STROMALIGN(sizeof(pgstrom_data_store *) * gjs->num_rels) +
-		STROMALIGN(sizeof(cl_int) * gcontext->num_context) +
-		STROMALIGN(sizeof(CUdeviceptr) * gcontext->num_context) +
-		STROMALIGN(sizeof(CUevent) * gcontext->num_context) +
-		STROMALIGN(sizeof(CUdeviceptr) * gcontext->num_context) +
 		2 * sizeof(cl_bool) * STROMALIGN(ojmap_length);
+	pmrels = dmaBufferAlloc(gcontext, required);
+	memset(pmrels, 0, required);
+	pos = (char *)pmrels + head_length;
 
-	pmrels = MemoryContextAllocZero(gcontext->memcxt, alloc_length);
-	pmrels->gjs = gjs;
+	pmrels->gjs = gjs;	// deprecated
 	pmrels->head_length = head_length;
 	pmrels->usage_length = head_length;
-	pmrels->n_attached = 1;		/* already attached to the caller */
-
-	pos = (char *)pmrels + head_length;
 	pmrels->inner_chunks = (pgstrom_data_store **) pos;
 	pos += STROMALIGN(sizeof(pgstrom_data_store *) * gjs->num_rels);
-	pmrels->refcnt = (cl_int *) pos;
-	pos += STROMALIGN(sizeof(cl_int) * gcontext->num_context);
-	pmrels->m_kmrels = (CUdeviceptr *) pos;
-	pos += STROMALIGN(sizeof(CUdeviceptr) * gcontext->num_context);
-	pmrels->ev_loaded = (CUevent *) pos;
-	pos += STROMALIGN(sizeof(CUevent) * gcontext->num_context);
-	pmrels->m_ojmaps = (CUdeviceptr *) pos;
-	pos += STROMALIGN(sizeof(CUdeviceptr) * gcontext->num_context);
-	pmrels->host_ojmaps = (cl_bool *)(ojmap_length > 0 ? pos : NULL);
+	SpinLockInit(&pmrels->lock);
+	pmrels->n_attached = 1;
+	pmrels->refcnt = 0;
+	pmrels->m_kmrels = 0UL;
+	pmrels->ev_loaded = NULL;
+	pmrels->m_ojmaps = 0UL;
+	pmrels->h_ojmaps = (cl_bool *)(ojmap_length > 0 ? pos : NULL);
 
 	memcpy(pmrels->kern.pg_crc32_table,
 		   pg_crc32_table,
@@ -6576,7 +6651,7 @@ gpujoin_create_multirels(GpuJoinState *gjs)
 
 		pmrels->inner_chunks[i] = PDS_retain(pds);
 		pmrels->kern.chunks[i].chunk_offset = pmrels->usage_length;
-		pmrels->usage_length += STROMALIGN(pds->kds->length);
+		pmrels->usage_length += STROMALIGN(pds->kds.length);
 
 		if (!istate->hash_outer_keys)
 			pmrels->kern.chunks[i].is_nestloop = true;
@@ -6586,7 +6661,7 @@ gpujoin_create_multirels(GpuJoinState *gjs)
 		{
 			pmrels->kern.chunks[i].right_outer = true;
 			pmrels->kern.chunks[i].ojmap_offset = pmrels->kern.ojmap_length;
-			pmrels->kern.ojmap_length += STROMALIGN(pds->kds->nitems);
+			pmrels->kern.ojmap_length += STROMALIGN(pds->kds.nitems);
 			pmrels->needs_outer_join = true;
 		}
 		if (istate->join_type == JOIN_LEFT ||
@@ -6616,7 +6691,7 @@ gpujoin_inner_preload(GpuJoinState *gjs)
 	struct timeval	tv1, tv2;
 
 
-	PERFMON_BEGIN(&gjs->gts.pfm, &tv1);
+	PFMON_BEGIN(&gjs->gts.pfm, &tv1);
 	/*
 	 * Half of the max allocatable GPU memory (and minus some margin) is
 	 * the current hard limit of the inner relations buffer.
@@ -6671,7 +6746,7 @@ gpujoin_inner_preload(GpuJoinState *gjs)
 			kmrels_size_fixed = true;
 		}
 	}
-	PERFMON_END(&gjs->gts.pfm, time_inner_load, &tv1, &tv2);
+	PFMON_END(&gjs->gts.pfm, time_inner_load, &tv1, &tv2);
 
 	/*
 	 * XXX - It is ideal case; all the inner chunk can be loaded to
@@ -6702,7 +6777,7 @@ gpujoin_inner_preload(GpuJoinState *gjs)
 		{
 			pgstrom_data_store *pds_in = linitial(istate->pds_list);
 
-			if (pds_in->kds->nitems == 0)
+			if (pds_in->kds.nitems == 0)
 				return false;
 		}
 	}
@@ -6773,101 +6848,173 @@ gpujoin_inner_getnext(GpuJoinState *gjs)
 static pgstrom_multirels *
 multirels_attach_buffer(pgstrom_multirels *pmrels)
 {
-	int		i, num_rels = pmrels->kern.nrels;
-
+	SpinLockAcquire(&pmrels->lock);
 	/* attach this pmrels */
 	Assert(pmrels->n_attached > 0);
 	pmrels->n_attached++;
-	/* also, data store */
-	for (i=0; i < num_rels; i++)
-		PDS_retain(pmrels->inner_chunks[i]);
+	SpinLockRelease(&pmrels->lock);
 
 	return pmrels;
 }
 
-/*****/
-static bool
-multirels_get_buffer(pgstrom_multirels *pmrels, pgstrom_gpujoin *pgjoin)
+/*
+ * multirels_get_buffer
+ *
+ *
+ */
+static inline bool
+__multirels_get_buffer(pgstrom_gpujoin *pgjoin,
+					   pgstrom_multirels *pmrels,
+					   CUstream cuda_stream)
 {
-	cl_int		cuda_index = pgjoin->task.cuda_index;
-	CUresult	rc;
+	GpuContext_v2  *gcontext = pgjoin->task.gcontext;
+	CUdeviceptr		m_kmrels = 0UL;
+	CUdeviceptr		m_ojmaps = 0UL;
+	CUevent			ev_loaded;
+	Size			length;
+	Size			offset;
+	Size			total_length = 0;
+	int				i;
+	CUresult		rc;
 
-	Assert(&pmrels->gjs->gts == pgjoin->task.gts);
+	/* buffer allocation for the inner multi-relations */
+	rc = gpuMemAlloc_v2(gcontext, &m_kmrels, pmrels->usage_length);
+	if (rc == CUDA_ERROR_OUT_OF_MEMORY)
+		return false;
+	else if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on gpuMemAlloc_v2: %s", errorText(rc));
 
-	if (pmrels->refcnt[cuda_index] == 0)
+	/* buffer allocation for the OUTER JOIN maps, if needed */
+	if (pmrels->kern.ojmap_length > 0 && !pmrels->m_ojmaps)
 	{
-		CUdeviceptr	m_kmrels = 0UL;
-		CUdeviceptr	m_ojmaps = 0UL;
-
-		/* buffer for the inner multi-relations */
-		m_kmrels = gpuMemAlloc(&pgjoin->task, pmrels->usage_length);
-		if (!m_kmrels)
-			return false;
-
-		if (pmrels->kern.ojmap_length > 0 && !pmrels->m_ojmaps[cuda_index])
+		length = 2 * sizeof(cl_bool) * STROMALIGN(pmrels->kern.ojmap_length);
+		rc = gpuMemAlloc_v2(gcontext, &m_ojmaps, length);
+		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		{
-			Size	length = 2 * sizeof(cl_bool) * pmrels->kern.ojmap_length;
-
-			m_ojmaps = gpuMemAlloc(&pgjoin->task, length);
-			if (!m_ojmaps)
-			{
-				gpuMemFree(&pgjoin->task, m_kmrels);
-				return false;
-			}
-			/*
-			 * Zero clear the left-outer map in sync manner
-			 */
-			rc = cuMemsetD32(m_ojmaps, 0, length / sizeof(int));
-			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on cuMemsetD32: %s", errorText(rc));
-			Assert(!pmrels->m_ojmaps[cuda_index]);
-			pmrels->m_ojmaps[cuda_index] = m_ojmaps;
+			gpuMemFree_v2(gcontext, m_kmrels);
+			return false;
 		}
-		Assert(!pmrels->m_kmrels[cuda_index]);
-		Assert(!pmrels->ev_loaded[cuda_index]);
-		pmrels->m_kmrels[cuda_index] = m_kmrels;
+		else if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on gpuMemAlloc_v2: %s", errorText(rc));
+
+		/* Zero clear of the LEFT OUTER map */
+		rc = cuMemsetD32Async(m_ojmaps, 0, length / sizeof(int),
+							  cuda_stream);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuMemsetD32Async: %s", errorText(rc));
+	}
+	/* Synchronization Event for other concurrent tasks */
+	rc = cuEventCreate(&ev_loaded, CU_EVENT_DEFAULT);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
+
+	/* DMA send to the kern_multirels buffer */
+	length = offsetof(kern_multirels, chunks[pmrels->kern.nrels]);
+	rc = cuMemcpyHtoDAsync(m_kmrels, &pmrels->kern, length, cuda_stream);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+	total_length += length;
+
+	for (i=0; i < pmrels->kern.nrels; i++)
+	{
+		pgstrom_data_store *pds = pmrels->inner_chunks[i];
+
+		offset = pmrels->kern.chunks[i].chunk_offset;
+		rc = cuMemcpyHtoDAsync(m_kmrels + offset, &pds->kds, pds->kds.length,
+							   cuda_stream);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+		total_length += pds->kds.length;
 	}
 
-	pmrels->refcnt[cuda_index]++;
-	pgjoin->m_kmrels = pmrels->m_kmrels[cuda_index];
-	pgjoin->m_ojmaps = pmrels->m_ojmaps[cuda_index];
+	/* DMA send synchronization */
+	rc = cuEventRecord(ev_loaded, cuda_stream);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuEventRecord: %s", errorText(rc));
+	/* Save the event object and device memory */
+	pmrels->ev_loaded = ev_loaded;
+	pgjoin->m_kmrels = m_kmrels;
+	pgjoin->m_ojmaps = m_ojmaps;
 
 	return true;
 }
 
-static void
-multirels_put_buffer(pgstrom_multirels *pmrels, GpuTask *gtask)
+static bool
+multirels_get_buffer(pgstrom_gpujoin *pgjoin, CUstream cuda_stream)
 {
-	cl_int		cuda_index = gtask->cuda_index;
-	CUresult	rc;
+	pgstrom_multirels *pmrels = pgjoin->pmrels;
+	bool		status = true;
 
-	Assert(&pmrels->gjs->gts == gtask->gts);
-	Assert(pmrels->refcnt[cuda_index] > 0);
-	if (--pmrels->refcnt[cuda_index] == 0)
+	PG_TRY();
 	{
-		/*
-		 * OK, no concurrent tasks did not reference the inner-relations
-		 * buffer any more, so release it and mark the pointer as NULL.
-		 */
-		Assert(pmrels->m_kmrels[cuda_index] != 0UL);
-		gpuMemFree(gtask, pmrels->m_kmrels[cuda_index]);
-		pmrels->m_kmrels[cuda_index] = 0UL;
-
-		/*
-		 * Also, event object if any
-		 */
-		if (pmrels->ev_loaded[cuda_index])
-		{
-			rc = cuEventDestroy(pmrels->ev_loaded[cuda_index]);
-			if (rc != CUDA_SUCCESS)
-				elog(WARNING, "failed on cuEventDestroy: %s", errorText(rc));
-			pmrels->ev_loaded[cuda_index] = NULL;
-		}
-		/* should not be dettached prior to device memory release */
+		SpinLockAcquire(&pmrels->lock);
 		Assert(pmrels->n_attached > 0);
+		Assert(pmrels->refcnt >= 0);
+		if (pmrels->refcnt++ == 0)
+		{
+			if (!__multirels_get_buffer(pgjoin, pmrels, cuda_stream))
+				status = false;
+			/* this task is inner loader */
+            pgjoin->is_inner_loader = true;
+		}
+		else
+		{
+			CUevent		ev_loaded = pmrels->ev_loaded;
+			CUresult	rc;
+
+			Assert(ev_loaded != NULL);
+			rc = cuStreamWaitEvent(cuda_stream, ev_loaded, 0);
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on cuStreamWaitEvent: %s", errorText(rc));
+			/* this task is not inner loader */
+			pgjoin->is_inner_loader = false;
+		}
+		SpinLockRelease(&pmrels->lock);
 	}
+	PG_CATCH();
+	{
+		SpinLockRelease(&pmrels->lock);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	return status;
 }
 
+static void
+multirels_put_buffer(pgstrom_gpujoin *pgjoin)
+{
+	pgstrom_multirels *pmrels = pgjoin->pmrels;
+	CUresult	rc;
+
+	SpinLockAcquire(&pmrels->lock);
+	Assert(pmrels->n_attached > 0);
+	Assert(pmrels->refcnt > 0);
+	if (--pmrels->refcnt == 0)
+	{
+		/*
+		 * OK, it looks no concurrent tasks didn't reference the inner-
+		 * relations buffer any more, so release the device memory and
+		 * set NULL on the pointer.
+		 */
+		Assert(pmrels->m_kmrels != 0UL);
+		rc = gpuMemFree_v2(pgjoin->task.gcontext, pmrels->m_kmrels);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on gpuMemFree_v2: %s", errorText(rc));
+		pmrels->m_kmrels = 0UL;
+
+		/*
+		 * Also destroy the event object
+		 */
+		rc = cuEventDestroy(pmrels->ev_loaded);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuEventDestroy: %s", errorText(rc));
+		pmrels->ev_loaded = NULL;
+	}
+	SpinLockRelease(&pmrels->lock);
+}
+
+#if 0
 static void
 multirels_send_buffer(pgstrom_multirels *pmrels, GpuTask *gtask)
 {
@@ -6933,46 +7080,32 @@ multirels_send_buffer(pgstrom_multirels *pmrels, GpuTask *gtask)
 		((pgstrom_gpujoin *)gtask)->is_inner_loader = false;
 	}
 }
+#endif
 
 static void
 colocate_outer_join_maps_to_host(pgstrom_multirels *pmrels)
 {
-	GpuContext *gcontext = pmrels->gjs->gts.gcontext;
+//	GpuContext *gcontext = pmrels->gjs->gts.gcontext;
 	Size		ojmap_length = pmrels->kern.ojmap_length;
-	cl_bool	   *host_ojmaps = pmrels->host_ojmaps;
-	cl_bool	   *recv_ojmaps = pmrels->host_ojmaps + ojmap_length;
-	cl_int		i, j, n;
+	cl_bool	   *host_ojmaps = pmrels->h_ojmaps;
+	cl_bool	   *recv_ojmaps = pmrels->h_ojmaps + ojmap_length;
+	cl_int		i, n;
+	CUresult	rc;
 
 	Assert(ojmap_length % sizeof(cl_ulong) == 0);
-	for (i=0; i < gcontext->num_context; i++)
+	if (ojmap_length > 0)
 	{
-		CUresult	rc;
-
-		/* never executed on this device */
-		if (!pmrels->m_ojmaps[i])
-			continue;
-
-		/* move data from the device memory */
-		rc = cuCtxPushCurrent(gcontext->gpu[i].cuda_context);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
-
 		rc = cuMemcpyDtoH(recv_ojmaps,
-						  pmrels->m_ojmaps[i],
+						  pmrels->m_ojmaps,
 						  sizeof(cl_bool) * ojmap_length);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuMemcpyDtoH: %s", errorText(rc));
 
-		rc = cuCtxPopCurrent(NULL);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
-
-		/* merge recv_ojmaps with host_ojmaps */
 		n = ojmap_length / sizeof(cl_ulong);
-		for (j=0; j < n; j++)
+		for (i=0; i < n; i++)
 		{
-			cl_ulong   *dest = (cl_ulong *)host_ojmaps + j;
-			cl_ulong   *recv = (cl_ulong *)recv_ojmaps + j;
+			cl_ulong   *dest = (cl_ulong *)host_ojmaps + i;
+			cl_ulong   *recv = (cl_ulong *)recv_ojmaps + i;
 
 			*dest |= *recv;
 		}
@@ -6980,31 +7113,24 @@ colocate_outer_join_maps_to_host(pgstrom_multirels *pmrels)
 }
 
 static void
-colocate_outer_join_maps_to_device(pgstrom_multirels *pmrels, GpuTask *gtask)
+colocate_outer_join_maps_to_device(pgstrom_gpujoin *pgjoin,
+								   CUmodule cuda_module,
+								   CUstream cuda_stream)
 {
-	GpuContext	   *gcontext = pmrels->gjs->gts.gcontext;
-	pgstrom_gpujoin *pgjoin = (pgstrom_gpujoin *) gtask;
-	cl_int			ndevs = gcontext->num_context;
+	pgstrom_multirels *pmrels = pgjoin->pmrels;
 	cl_uint			ojmap_length = pmrels->kern.ojmap_length;
-	cl_int			cuda_index = gtask->cuda_index;
-	CUstream		cuda_stream = gtask->cuda_stream;
-	CUcontext		dst_context = gtask->cuda_context;
-	CUcontext		src_context;
 	CUdeviceptr		dst_ojmaps;
-	CUdeviceptr		src_ojmaps;
+//	CUdeviceptr		src_ojmaps;
 	CUfunction		kern_colocate;
 	void		   *kern_args[2];
 	size_t			grid_size;
 	size_t			block_size;
-	cl_int			i;
 	CUresult		rc;
 
-	Assert(pmrels->m_ojmaps[cuda_index] != 0UL);
-	Assert(gcontext->gpu[cuda_index].cuda_context == gtask->cuda_context);
+	Assert(pmrels->m_ojmaps != 0UL);
 
-	/* GPU kernel function lookup */
-	rc = cuModuleGetFunction(&kern_colocate,
-							 pgjoin->task.cuda_module,
+	/* Lookup GPU kernel function */
+	rc = cuModuleGetFunction(&kern_colocate, cuda_module,
 							 "gpujoin_colocate_outer_join_map");
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
@@ -7013,58 +7139,16 @@ colocate_outer_join_maps_to_device(pgstrom_multirels *pmrels, GpuTask *gtask)
 	optimal_workgroup_size(&grid_size,
 						   &block_size,
 						   kern_colocate,
-						   pgjoin->task.cuda_device,
+						   gpuserv_cuda_device,
 						   ojmap_length / sizeof(cl_uint),
 						   0, 0);	/* no shared memory usage */
 
-	/* destination address on device side */
-	dst_ojmaps = pmrels->m_ojmaps[cuda_index] + sizeof(cl_bool) * ojmap_length;
+	/* destination address on the device side */
+	dst_ojmaps = pmrels->m_ojmaps + sizeof(cl_bool) * ojmap_length;
 
-	/* device-to-device colocation */
-	for (i=0; i < ndevs; i++)
-	{
-		/* no need to copy from the destination device */
-		if (i == cuda_index)
-			continue;
-		/* never executed on this device */
-		if (!pmrels->m_ojmaps[i])
-			continue;
-
-		src_context = gcontext->gpu[i].cuda_context;
-		src_ojmaps = pmrels->m_ojmaps[i];
-
-		/*
-		 * Move the INNER JOIN results in other GPUs to the later half of
-		 * outer-join-map of the target GPU.
-		 */
-		rc = cuMemcpyPeerAsync(dst_ojmaps, dst_context,
-							   src_ojmaps, src_context,
-							   sizeof(cl_bool) * ojmap_length,
-							   cuda_stream);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuMemcpyPeerAsync: %s", errorText(rc));
-
-		/*
-		 * KERNEL_FUNCTION(void)
-		 * gpujoin_collocate_outer_join_map(kern_multirels *kmrels,
-		 *                                  cl_bool *outer_join_map)
-		 */
-		kern_args[0] = &pgjoin->m_kmrels;
-		kern_args[1] = &pgjoin->m_ojmaps;
-
-		rc = cuLaunchKernel(kern_colocate,
-							grid_size, 1, 1,
-							block_size, 1, 1,
-							0,	/* no shmem usage */
-							pgjoin->task.cuda_stream,
-							kern_args,
-							NULL);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
-	}
 	/* host-to-device colocation */
 	rc = cuMemcpyHtoDAsync(dst_ojmaps,
-						   pmrels->host_ojmaps,
+						   pmrels->h_ojmaps,
 						   sizeof(cl_bool) * ojmap_length,
 						   cuda_stream);
 	if (rc != CUDA_SUCCESS)
@@ -7082,7 +7166,7 @@ colocate_outer_join_maps_to_device(pgstrom_multirels *pmrels, GpuTask *gtask)
 						grid_size, 1, 1,
 						block_size, 1, 1,
 						0,	/* no shmem usage */
-						pgjoin->task.cuda_stream,
+						cuda_stream,
 						kern_args,
 						NULL);
 	if (rc != CUDA_SUCCESS)
@@ -7090,13 +7174,18 @@ colocate_outer_join_maps_to_device(pgstrom_multirels *pmrels, GpuTask *gtask)
 }
 
 static void
-multirels_detach_buffer(pgstrom_multirels *pmrels, bool may_kick_outer_join,
+multirels_detach_buffer(GpuJoinState *gjs,
+						pgstrom_multirels *pmrels,
+						bool may_kick_outer_join,
 						const char *caller)
 {
-	int		i, num_rels = pmrels->kern.nrels;
+	pgstrom_gpujoin *pgjoin_new;
+	int		i;
 
+	Assert(!IsGpuServerProcess());
+retry:
+	SpinLockAcquire(&pmrels->lock);
 	Assert(pmrels->n_attached > 0);
-
 	/*
 	 * NOTE: Invocation of multirels_detach_buffer with n_attached==1 means
 	 * release of pgstrom_multirels buffer. If GpuJoin contains RIGHT or
@@ -7107,38 +7196,38 @@ multirels_detach_buffer(pgstrom_multirels *pmrels, bool may_kick_outer_join,
 		pmrels->n_attached == 1 &&
 		pmrels->needs_outer_join)
 	{
-		GpuJoinState	   *gjs = pmrels->gjs;
-		pgstrom_gpujoin	   *pgjoin_new = (pgstrom_gpujoin *)
-			gpujoin_create_task(gjs, pmrels, NULL, NULL);
-
-		/* Enqueue OUTER JOIN task here */
-		SpinLockAcquire(&gjs->gts.lock);
-		dlist_push_tail(&gjs->gts.pending_tasks, &pgjoin_new->task.chain);
-		gjs->gts.num_pending_tasks++;
-		SpinLockRelease(&gjs->gts.lock);
-
-		/* no need to kick outer join task twice */
+		/* no need to kick OUTER JOIN task twice */
 		pmrels->needs_outer_join = false;
+		SpinLockRelease(&pmrels->lock);
+
+		/* construct a GpuJoin task for OUTER JOIN, then send a request */
+
+		//HOGE: do we need to give GJS here?
+		pgjoin_new = (pgstrom_gpujoin *)
+			gpujoin_create_task(gjs, pmrels, NULL, -1, NULL);
+		gpuservSendGpuTask(gjs->gts.gcontext, &pgjoin_new->task);
+
+		goto retry;
 	}
 
-	/* release data store */
-	for (i=0; i < num_rels; i++)
-		PDS_release(pmrels->inner_chunks[i]);
-
-	/* Also, this pmrels */
+	/*
+	 * Last GpuJoin task dettached @pmrels, so release relevant resources
+	 */
 	if (--pmrels->n_attached == 0)
 	{
-		GpuContext *gcontext = pmrels->gjs->gts.gcontext;
-		int			index;
+		/*
+		 * Nobody should reference the device memory no longer.
+		 */
+		Assert(pmrels->refcnt == 0);
+		Assert(pmrels->m_kmrels == 0UL);
+		Assert(pmrels->ev_loaded == NULL);
+		Assert(pmrels->m_ojmaps == 0UL);
 
-		for (index=0; index < gcontext->num_context; index++)
-		{
-			Assert(pmrels->refcnt[index] == 0);
-			if (pmrels->m_ojmaps[index] != 0UL)
-				__gpuMemFree(gcontext, index, pmrels->m_ojmaps[index]);
-		}
-		pfree(pmrels);
+		for (i=0; i < pmrels->kern.nrels; i++)
+			PDS_release(pmrels->inner_chunks[i]);
+		dmaBufferFree(pmrels);
 	}
+	SpinLockRelease(&pmrels->lock);
 }
 
 /*
@@ -7183,9 +7272,9 @@ pgstrom_init_gpujoin(void)
 	gpujoin_exec_methods.ReScanCustomScan		= ExecReScanGpuJoin;
 	gpujoin_exec_methods.MarkPosCustomScan		= NULL;
 	gpujoin_exec_methods.RestrPosCustomScan		= NULL;
-	gpujoin_exec_methods.EstimateDSMCustomScan  = ExecGpuJoinEstimateDSM;
-	gpujoin_exec_methods.InitializeDSMCustomScan = ExecGpuJoinInitDSM;
-	gpujoin_exec_methods.InitializeWorkerCustomScan = ExecGpuJoinInitWorker;
+//	gpujoin_exec_methods.EstimateDSMCustomScan  = ExecGpuJoinEstimateDSM;
+//	gpujoin_exec_methods.InitializeDSMCustomScan = ExecGpuJoinInitDSM;
+//	gpujoin_exec_methods.InitializeWorkerCustomScan = ExecGpuJoinInitWorker;
 	gpujoin_exec_methods.ExplainCustomScan		= ExplainGpuJoin;
 
 	/* hook registration */

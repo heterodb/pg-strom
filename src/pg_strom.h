@@ -785,10 +785,8 @@ extern int	gpuscan_process_task(GpuTask_v2 *gtask,
 								 CUstream cuda_stream);
 extern int	gpuscan_complete_task(GpuTask_v2 *gtask);
 extern void gpuscan_release_task(GpuTask_v2 *gtask);
-
-
-
-extern void assign_gpuscan_session_info(StringInfo buf, GpuTaskState_v2 *gts);
+extern void assign_gpuscan_session_info(StringInfo buf,
+										GpuTaskState_v2 *gts);
 extern void pgstrom_init_gpuscan(void);
 
 /*
@@ -796,7 +794,13 @@ extern void pgstrom_init_gpuscan(void);
  */
 extern bool pgstrom_path_is_gpujoin(Path *pathnode);
 extern bool pgstrom_plan_is_gpujoin(const Plan *plannode);
-extern void assign_gpujoin_session_info(StringInfo buf, GpuTaskState_v2 *gts);
+extern int	gpujoin_process_task(GpuTask_v2 *gtask,
+								 CUmodule cuda_module,
+								 CUstream cuda_stream);
+extern int	gpujoin_complete_task(GpuTask_v2 *gtask);
+extern void	gpujoin_release_task(GpuTask_v2 *gtask);
+extern void assign_gpujoin_session_info(StringInfo buf,
+										GpuTaskState_v2 *gts);
 extern void	pgstrom_init_gpujoin(void);
 
 /*
