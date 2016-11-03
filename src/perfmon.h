@@ -184,7 +184,7 @@ typedef struct {
 		}														\
 	} while(0)
 
-#define PERFMON_EVENT_ELAPSED(node,tv_field,ev_start,ev_stop)	\
+#define PFMON_EVENT_ELAPSED(node,tv_field,ev_start,ev_stop)		\
 	do {														\
 		CUresult	__rc;										\
 		float		__elapsed;									\

@@ -2628,10 +2628,10 @@ gpuscan_cleanup_cuda_resources(GpuScanTask *gscan)
 {
 	CUresult	rc;
 
-	PERFMON_EVENT_DESTROY(gscan, ev_dma_send_start);
-	PERFMON_EVENT_DESTROY(gscan, ev_dma_send_stop);
-	PERFMON_EVENT_DESTROY(gscan, ev_dma_recv_start);
-	PERFMON_EVENT_DESTROY(gscan, ev_dma_recv_stop);
+	PFMON_EVENT_DESTROY(gscan, ev_dma_send_start);
+	PFMON_EVENT_DESTROY(gscan, ev_dma_send_stop);
+	PFMON_EVENT_DESTROY(gscan, ev_dma_recv_start);
+	PFMON_EVENT_DESTROY(gscan, ev_dma_recv_stop);
 
 	if (gscan->m_gpuscan)
 	{

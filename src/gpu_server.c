@@ -1374,6 +1374,29 @@ gpuservRecvGpuTasks(GpuContext_v2 *gcontext, long timeout)
 }
 
 /*
+ * gpuservPushGpuTask - attach a GpuTask to the queue by GPU server itself
+ */
+void
+gpuservPushGpuTask(GpuContext_v2 *gcontext, GpuTask_v2 *gtask)
+{
+	SharedGpuContext *shgcon = gcontext->shgcon;
+
+	if (!IsGpuServerProcess())
+		elog(FATAL, "Bug? %s is called out of GPU server's context",
+			__FUNCTION__);
+	SpinLockAcquire(&shgcon->lock);
+	shgcon->num_async_tasks++;
+	SpinLockRelease(&shgcon->lock);
+	/* increment refcnt by GpuTask */
+	gtask->gcontext = GetGpuContext(gcontext);
+	//TODO: How to handle the peer_fdesc? dup(2)?
+
+	SpinLockAcquire(&session_tasks_lock);
+	dlist_push_tail(&session_pending_tasks, &gtask->chain);
+	SpinLockRelease(&session_tasks_lock);
+}
+
+/*
  * gpuservCompleteGpuTask - A routine for CUDA callback to register GpuTask
  * on the completed list.
  */

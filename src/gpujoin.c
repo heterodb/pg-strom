@@ -229,6 +229,25 @@ typedef struct
 	cl_bool				fallback_right_outer;
 } innerState;
 
+/*
+ * run-time statistics; to be allocated on the shared memory
+ */
+typedef struct
+{
+	int				num_rels;		/* number of inner relations */
+	slock_t			lock;
+	size_t			source_ntasks;	/* number of sampled tasks */
+	size_t			source_nitems;	/* number of sampled source items */
+	size_t			results_nitems;	/* number of joined result items */
+	size_t			results_usage;	/* sum of kds_dst->usage */
+	size_t		   *inner_nitems;	/* number of inner join results items */
+	size_t		   *right_nitems;	/* number of right join results items */
+	cl_double	   *row_dist_score;	/* degree of result row distribution */
+	bool			row_dist_score_valid; /* true, if RDS is valid */
+	size_t			inner_dma_nums;	/* number of inner DMA calls */
+	size_t			inner_dma_size;	/* total length of inner DMA calls */
+} runtimeState;
+
 typedef struct
 {
 	GpuTaskState_v2	gts;
@@ -278,6 +297,7 @@ typedef struct
 	/*
 	 * Runtime statistics
 	 */
+#if 0
 	int				num_rels;
 	size_t			source_ntasks;	/* number of sampled tasks */
 	size_t			source_nitems;	/* number of sampled source items */
@@ -289,10 +309,11 @@ typedef struct
 	bool			row_dist_score_valid;	/* true, if RDS is valid */
 	size_t			inner_dma_nums;	/* number of inner DMA calls */
 	size_t			inner_dma_size;	/* total length of inner DMA calls */
-
+#endif
 	/*
 	 * Properties of underlying inner relations
 	 */
+	int				num_rels;
 	bool			inner_preloaded;
 	innerState		inners[FLEXIBLE_ARRAY_MEMBER];
 } GpuJoinState;
@@ -5118,7 +5139,7 @@ gpujoin_fallback_inner_recurse(GpuJoinState *gjs,
 				if (istate->join_type == JOIN_RIGHT ||
 					istate->join_type == JOIN_FULL)
 				{
-					cl_bool	   *host_ojmap = pmrels->host_ojmaps;
+					cl_bool	   *host_ojmap = pmrels->h_ojmaps;
 
 					Assert(host_ojmap != NULL);
 					host_ojmap += pmrels->kern.chunks[depth-1].ojmap_offset;
@@ -5294,7 +5315,7 @@ gpujoin_fallback_inner_recurse(GpuJoinState *gjs,
 				if (istate->join_type == JOIN_RIGHT ||
 					istate->join_type == JOIN_FULL)
 				{
-					cl_bool	   *host_ojmaps = pmrels->host_ojmaps;
+					cl_bool	   *host_ojmaps = pmrels->h_ojmaps;
 
 					Assert(host_ojmaps != NULL);
 					host_ojmaps += pmrels->kern.chunks[depth-1].ojmap_offset;
@@ -5486,7 +5507,7 @@ gpujoin_cleanup_cuda_resources(pgstrom_gpujoin *pgjoin)
 	if (pgjoin->m_kgjoin)
 		gpuMemFree_v2(pgjoin->task.gcontext, pgjoin->m_kgjoin);
 	if (pgjoin->m_kmrels)
-		multirels_put_buffer(pgjoin->pmrels, &pgjoin->task);
+		multirels_put_buffer(pgjoin);
 
 	/* clear the pointers */
 	pgjoin->kern_main = NULL;
@@ -5529,38 +5550,32 @@ gpujoin_complete_task(GpuTask_v2 *gtask)
 	GpuJoinState	   *gjs = (GpuJoinState *) gtask->gts;
 	pgstrom_perfmon	   *pfm = &gjs->gts.pfm;
 
+#if 0
+	// do it later
 	if (pfm->enabled)
 	{
 		pfm->num_tasks++;
 		if (pgjoin->is_inner_loader)
 		{
-			CUevent ev_inner_loaded =
-				pgjoin->pmrels->ev_loaded[0];
-
-			PFMON_EVENT_ELAPSED(pgjoin, gjoin.tv_inner_dma_send,
-								pgjoin->ev_dma_send_start,
-								ev_inner_loaded,
-								skip);
+			PFMON_EVENT_ELAPSED(pgjoin, tv_inner_dma_send,
+								ev_dma_send_start,
+								pmrels->ev_loaded);
 			PFMON_EVENT_ELAPSED(pgjoin, time_dma_send,
-								ev_inner_loaded,
-								pgjoin->ev_dma_send_stop,
-								skip);
+								pmrels->ev_loaded,
+								ev_dma_send_stop);
 		}
 		else
 		{
 			PFMON_EVENT_ELAPSED(pgjoin, time_dma_send,
 								pgjoin->ev_dma_send_start,
-								pgjoin->ev_dma_send_stop,
-								skip);
+								pgjoin->ev_dma_send_stop);
 		}
 		PFMON_EVENT_ELAPSED(pgjoin, gjoin.tv_kern_main,
 							pgjoin->ev_dma_send_stop,
-							pgjoin->ev_dma_recv_start,
-							skip);
+							pgjoin->ev_dma_recv_start);
 		PFMON_EVENT_ELAPSED(pgjoin, time_dma_recv,
 							pgjoin->ev_dma_recv_start,
-							pgjoin->ev_dma_recv_stop,
-							skip);
+							pgjoin->ev_dma_recv_stop);
 		/* update performance */
 		pfm->gjoin.num_kern_outer_scan
 			+= pgjoin->kern.pfm.num_kern_outer_scan;
@@ -5596,6 +5611,7 @@ gpujoin_complete_task(GpuTask_v2 *gtask)
 		pfm->gjoin.num_minor_retry += pgjoin->kern.pfm.num_minor_retry;
 	}
 skip:
+#endif
 	if (pgjoin->task.kerror.errcode == StromError_Success)
 	{
 		pgstrom_data_store *pds_src = pgjoin->pds_src;
@@ -5683,6 +5699,11 @@ skip:
 					break;
 				}
 
+				//HOGE: we have to add support to create a new task
+				//      in the GPU server side.
+
+
+
 				/*
 				 * Instead of detach and attach PDS here, we simply give
 				 * the previous PDS to the new pgjoin, to reduce waste of
@@ -5700,11 +5721,7 @@ skip:
 										jscale);
 
 				/* add this new task to the pending list */
-				SpinLockAcquire(&gjs->gts.lock);
-				dlist_push_tail(&gjs->gts.pending_tasks,
-								&pgjoin_new->task.chain);
-				gjs->gts.num_pending_tasks++;
-				SpinLockRelease(&gjs->gts.lock);
+				gpuservPushGpuTask(gcontext, &pgjoin->task);
 
 				gjs->gts.pfm.gjoin.num_global_retry++;
 				break;
