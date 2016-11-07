@@ -246,7 +246,7 @@ typedef struct
 	bool			row_dist_score_valid; /* true, if RDS is valid */
 	size_t			inner_dma_nums;	/* number of inner DMA calls */
 	size_t			inner_dma_size;	/* total length of inner DMA calls */
-} runtimeState;
+} runtimeStatistics;
 
 typedef struct
 {
@@ -297,6 +297,8 @@ typedef struct
 	/*
 	 * Runtime statistics
 	 */
+	runtimeStatistics *rt_stat;
+
 #if 0
 	int				num_rels;
 	size_t			source_ntasks;	/* number of sampled tasks */
@@ -2739,6 +2741,12 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 				 (result_tupdesc->tdhasoid ? sizeof(Oid) : 0)) +
 		MAXALIGN(cscan->scan.plan.plan_width);	/* average width */
 
+	/*
+	 * run-time statistics shall be initialized on the first call of
+	 * executor or DSM initialization if parallel query
+	 */
+	gjs->rt_stat = NULL;
+
 	/* init perfmon */
 	//pgstrom_init_perfmon(&gjs->gts);
 }
@@ -2759,9 +2767,50 @@ ExecReCheckGpuJoin(CustomScanState *node, TupleTableSlot *slot)
 	return true;
 }
 
+/*
+ * InitRuntimeStatistics
+ */
+static inline void
+setup_runtime_statistics(GpuJoinState *gjs)
+{
+	if (!gjs->rt_stat)
+	{
+		runtimeStatistics *rt_stat;
+		Size		required;
+		char	   *pos;
+
+		required = (STROMALIGN(sizeof(runtimeStatistics)) +
+					STROMALIGN(sizeof(size_t) * gjs->num_rels) +
+					STROMALIGN(sizeof(size_t) * gjs->num_rels) +
+					STROMALIGN(sizeof(cl_double) * gjs->num_rels));
+
+		rt_stat = dmaBufferAlloc(gjs->gts.gcontext, required);
+		if (!rt_stat)
+			elog(ERROR, "out of DMA buffer");
+		memset(gjs->rt_stat, 0, sizeof(runtimeStatistics));
+		rt_stat->num_rels = gjs->num_rels;
+		SpinLockInit(&rt_stat->lock);
+		pos = (char *)rt_stat + STROMALIGN(sizeof(runtimeStatistics));
+		rt_stat->inner_nitems = (size_t *)pos;
+		pos += STROMALIGN(sizeof(size_t) * gjs->num_rels);
+		rt_stat->right_nitems = (size_t *)pos;
+		pos += STROMALIGN(sizeof(size_t) * gjs->num_rels);
+		rt_stat->row_dist_score = (cl_double *)pos;
+
+		gjs->rt_stat = rt_stat;
+	}
+}
+
+/*
+ * ExecGpuJoin
+ */
 static TupleTableSlot *
 ExecGpuJoin(CustomScanState *node)
 {
+	GpuJoinState   *gjs = (GpuJoinState *) node;
+
+	if (!gjs->rt_stat)
+		setup_runtime_statistics(gjs);
 	return ExecScan(&node->ss,
 					(ExecScanAccessMtd) pgstromExecGpuTaskState,
 					(ExecScanRecheckMtd) ExecReCheckGpuJoin);
