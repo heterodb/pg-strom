@@ -2948,15 +2948,15 @@ gpuscan_complete_task(GpuTask_v2 *gtask)
 		elog(ERROR, "GpuScan kernel internal error: %s",
 			 errorTextKernel(&gtask->kerror));
 
-	PERFMON_EVENT_ELAPSED(gscan, time_dma_send,
-						  ev_dma_send_start,
-						  ev_dma_send_stop);
-	PERFMON_EVENT_ELAPSED(gscan, tv_kern_main,
-						  ev_dma_send_stop,
-						  ev_dma_recv_start);
-	PERFMON_EVENT_ELAPSED(gscan, time_dma_recv,
-						  ev_dma_recv_start,
-						  ev_dma_recv_stop);
+	PFMON_EVENT_ELAPSED(gscan, time_dma_send,
+						ev_dma_send_start,
+						ev_dma_send_stop);
+	PFMON_EVENT_ELAPSED(gscan, tv_kern_main,
+						ev_dma_send_stop,
+						ev_dma_recv_start);
+	PFMON_EVENT_ELAPSED(gscan, time_dma_recv,
+						ev_dma_recv_start,
+						ev_dma_recv_stop);
 	gscan->tv_kern_exec_quals = gscan->kern.pfm.tv_kern_exec_quals;
 	gscan->tv_kern_projection = gscan->kern.pfm.tv_kern_projection;
 

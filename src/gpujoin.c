@@ -246,7 +246,7 @@ typedef struct
 	bool			row_dist_score_valid; /* true, if RDS is valid */
 	size_t			inner_dma_nums;	/* number of inner DMA calls */
 	size_t			inner_dma_size;	/* total length of inner DMA calls */
-} runtimeStatistics;
+} runtimeStat;
 
 typedef struct
 {
@@ -297,21 +297,8 @@ typedef struct
 	/*
 	 * Runtime statistics
 	 */
-	runtimeStatistics *rt_stat;
+	runtimeStat	   *rt_stat;
 
-#if 0
-	int				num_rels;
-	size_t			source_ntasks;	/* number of sampled tasks */
-	size_t			source_nitems;	/* number of sampled source items */
-	size_t			results_nitems;	/* number of joined result items */
-	size_t			results_usage;	/* sum of kds_dst->usage */
-	size_t		   *inner_nitems;	/* number of inner join results items */
-	size_t		   *right_nitems;	/* number of right join results items */
-	cl_double	   *row_dist_score;	/* degree of result row distribution */
-	bool			row_dist_score_valid;	/* true, if RDS is valid */
-	size_t			inner_dma_nums;	/* number of inner DMA calls */
-	size_t			inner_dma_size;	/* total length of inner DMA calls */
-#endif
 	/*
 	 * Properties of underlying inner relations
 	 */
@@ -358,6 +345,7 @@ typedef struct
 	CUevent			ev_dma_recv_start;
 	CUevent			ev_dma_recv_stop;
 	bool			is_inner_loader;
+	runtimeStat	   *rt_stat;
 	pgstrom_multirels  *pmrels;		/* inner multi relations (heap or hash) */
 	pgstrom_data_store *pds_src;	/* data store of outer relation */
 	pgstrom_data_store *pds_dst;	/* data store of result buffer */
@@ -2364,19 +2352,11 @@ gpujoin_create_scan_state(CustomScan *node)
 	cl_int			num_rels = gj_info->num_rels;
 
 	Assert(num_rels == list_length(node->custom_plans));
-	gjs = palloc0(offsetof(GpuJoinState, inners[num_rels]) +
-				  sizeof(size_t) * (num_rels + 1) +
-				  sizeof(size_t) * (num_rels + 1) +
-				  sizeof(cl_double) * (num_rels + 1));
+	gjs = palloc0(offsetof(GpuJoinState, inners[num_rels]));
 
-	/* Set tag and executor callbacks */
 	NodeSetTag(gjs, T_CustomScanState);
 	gjs->gts.css.flags = node->flags;
 	gjs->gts.css.methods = &gpujoin_exec_methods;
-	gjs->inner_nitems = (size_t *)((char *)gjs + offsetof(GpuJoinState,
-														  inners[num_rels]));
-	gjs->right_nitems = (size_t *)(gjs->inner_nitems + num_rels + 1);
-	gjs->row_dist_score = (cl_double *)(gjs->right_nitems + num_rels + 1);
 
 	return (Node *) gjs;
 }
@@ -2775,28 +2755,28 @@ setup_runtime_statistics(GpuJoinState *gjs)
 {
 	if (!gjs->rt_stat)
 	{
-		runtimeStatistics *rt_stat;
-		Size		required;
-		char	   *pos;
+		runtimeStat	   *rt_stat;
+		Size			required;
 
-		required = (STROMALIGN(sizeof(runtimeStatistics)) +
-					STROMALIGN(sizeof(size_t) * gjs->num_rels) +
-					STROMALIGN(sizeof(size_t) * gjs->num_rels) +
-					STROMALIGN(sizeof(cl_double) * gjs->num_rels));
+		required = (STROMALIGN(sizeof(runtimeStat)) +
+					STROMALIGN(sizeof(size_t) * (gjs->num_rels + 1)) +
+					STROMALIGN(sizeof(size_t) * (gjs->num_rels + 1)) +
+					STROMALIGN(sizeof(cl_double) * (gjs->num_rels + 1)));
 
 		rt_stat = dmaBufferAlloc(gjs->gts.gcontext, required);
 		if (!rt_stat)
 			elog(ERROR, "out of DMA buffer");
-		memset(gjs->rt_stat, 0, sizeof(runtimeStatistics));
+		memset(rt_stat, 0, sizeof(runtimeStat));
 		rt_stat->num_rels = gjs->num_rels;
 		SpinLockInit(&rt_stat->lock);
-		pos = (char *)rt_stat + STROMALIGN(sizeof(runtimeStatistics));
-		rt_stat->inner_nitems = (size_t *)pos;
-		pos += STROMALIGN(sizeof(size_t) * gjs->num_rels);
-		rt_stat->right_nitems = (size_t *)pos;
-		pos += STROMALIGN(sizeof(size_t) * gjs->num_rels);
-		rt_stat->row_dist_score = (cl_double *)pos;
-
+		rt_stat->inner_nitems = (size_t *)
+			((char *)rt_stat + STROMALIGN(sizeof(runtimeStat)));
+		rt_stat->right_nitems = (size_t *)
+			((char *)rt_stat->inner_nitems + STROMALIGN(sizeof(size_t) *
+														(gjs->num_rels + 1)));
+		rt_stat->row_dist_score = (cl_double *)
+			((char *)rt_stat->right_nitems + STROMALIGN(sizeof(size_t) *
+														(gjs->num_rels + 1)));
 		gjs->rt_stat = rt_stat;
 	}
 }
@@ -2909,6 +2889,7 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 	GpuJoinState   *gjs = (GpuJoinState *) node;
 	CustomScan	   *cscan = (CustomScan *) node->ss.ps.plan;
 	GpuJoinInfo	   *gj_info = deform_gpujoin_info(cscan);
+	runtimeStat	   *rt_stat = gjs->rt_stat;
 	List		   *context;
 	ListCell	   *lc1;
 	ListCell	   *lc2;
@@ -2920,7 +2901,6 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 	StringInfoData	str;
 
 	initStringInfo(&str);
-
 	/* name lookup context */
 	context =  set_deparse_context_planstate(es->deparse_cxt,
 											 (Node *) node,
@@ -2964,9 +2944,9 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 		if (es->analyze)
 			temp = psprintf("%s (%.2f%%, expected %.2f%%)",
 							temp,
-							100.0 * ((double)(gjs->inner_nitems[0] +
-											  gjs->right_nitems[0]) /
-									 (double) gjs->source_nitems),
+							100.0 * ((double)(rt_stat->inner_nitems[0] +
+											  rt_stat->right_nitems[0]) /
+									 (double) rt_stat->source_nitems),
 							100.0 * gj_info->outer_ratio);
 		else
 			temp = psprintf("%s (%.2f%%)",
@@ -3047,10 +3027,10 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 		if (es->analyze)
 		{
 			innerState *istate = &gjs->inners[depth-1];
-			size_t		nrows_in = (gjs->inner_nitems[depth - 1] +
-									gjs->right_nitems[depth - 1]);
-			size_t		nrows_out1 = gjs->inner_nitems[depth];
-			size_t		nrows_out2 = gjs->right_nitems[depth];
+			size_t		nrows_in = (rt_stat->inner_nitems[depth - 1] +
+									rt_stat->right_nitems[depth - 1]);
+			size_t		nrows_out1 = rt_stat->inner_nitems[depth];
+			size_t		nrows_out2 = rt_stat->right_nitems[depth];
 			cl_float	nrows_ratio
 				= int_as_float(list_nth_int(gj_info->nrows_ratio, depth - 1));
 
@@ -4160,7 +4140,12 @@ gpujoin_exec_estimate_nitems(GpuJoinState *gjs,
 {
 	pgstrom_multirels  *pmrels = pgjoin->pmrels;
 	innerState		   *istate = (depth > 0 ? gjs->inners + depth - 1 : NULL);
+	runtimeStat		   *rt_stat = gjs->rt_stat;
 	kern_join_scale	   *jscale = pgjoin->kern.jscale;
+	size_t				source_ntasks;
+	size_t				source_nitems;
+	size_t				inner_nitems;
+	size_t				right_nitems;
 	double				ntuples_next;
 	double				merge_ratio;
 	double				plan_ratio;
@@ -4170,9 +4155,13 @@ gpujoin_exec_estimate_nitems(GpuJoinState *gjs,
 	 * Nrows estimation based on plan estimation and exec statistics.
 	 * It shall be merged according to the task progress.
 	 */
-	merge_ratio = Max((double) gjs->source_ntasks / 20.0,
+	SpinLockAcquire(&rt_stat->lock);
+	source_ntasks = rt_stat->source_ntasks;
+	source_nitems = rt_stat->source_nitems;
+	SpinLockRelease(&rt_stat->lock);
+	merge_ratio = Max((double) source_ntasks / 20.0,
 					  gjs->outer_nrows > 0.0
-					  ? ((double)(gjs->source_nitems) /
+					  ? ((double)(source_nitems) /
 						 (double)(0.30 * gjs->outer_nrows))
 					  : 0.0);
 	merge_ratio = Min(1.0, merge_ratio);	/* up to 100% */
@@ -4205,11 +4194,17 @@ gpujoin_exec_estimate_nitems(GpuJoinState *gjs,
 		if (!gjs->outer_quals)
 			return (double) jscale[0].window_size;
 
+		SpinLockAcquire(&rt_stat->lock);
+		inner_nitems = rt_stat->inner_nitems[0];
+		right_nitems = rt_stat->right_nitems[0];
+		source_nitems = rt_stat->source_nitems;
+		SpinLockRelease(&rt_stat->lock);
+
 		/*
 		 * If no run-time statistics, we entirely have to rely on the
 		 * plan estimation
 		 */
-		if (gjs->source_nitems == 0)
+		if (source_nitems == 0)
 			return (double) jscale[0].window_size * gjs->outer_ratio;
 
 		/*
@@ -4218,9 +4213,8 @@ gpujoin_exec_estimate_nitems(GpuJoinState *gjs,
 		 * to 100%, plan estimation shall be entirely ignored.
 		 */
 		plan_ratio = gjs->outer_ratio;
-		exec_ratio = ((double)(gjs->inner_nitems[0] +
-							   gjs->right_nitems[0]) /
-					  (double)(gjs->source_nitems));
+		exec_ratio = ((double)(inner_nitems + right_nitems) /
+					  (double)(source_nitems));
 		return ((exec_ratio * merge_ratio +
 				 plan_ratio * (1.0 - merge_ratio)) *
 				(double) jscale[0].window_size);
@@ -4254,14 +4248,19 @@ gpujoin_exec_estimate_nitems(GpuJoinState *gjs,
 		else
 		{
 			pgstrom_data_store *pds_in = pmrels->inner_chunks[depth - 1];
-			cl_uint				nitems_in = pds_in->kds.nitems;
+			cl_uint			nitems_in = pds_in->kds.nitems;
+			size_t			next_nitems;
+
+			SpinLockAcquire(&rt_stat->lock);
+			inner_nitems = rt_stat->inner_nitems[depth - 1];
+			right_nitems = rt_stat->right_nitems[depth - 1];
+			next_nitems = rt_stat->inner_nitems[depth];
+			SpinLockRelease(&rt_stat->lock);
 
 			plan_ratio = istate->nrows_ratio;
-			if (gjs->inner_nitems[depth - 1] +
-				gjs->right_nitems[depth - 1] > 0)
-				exec_ratio = ((double)(gjs->inner_nitems[depth]) /
-							  (double)(gjs->inner_nitems[depth - 1] +
-									   gjs->right_nitems[depth - 1]));
+			if (inner_nitems + right_nitems > 0)
+				exec_ratio = ((double)(next_nitems) /
+							  (double)(inner_nitems + right_nitems));
 			else
 				exec_ratio = 0.0;
 
@@ -4312,8 +4311,11 @@ gpujoin_exec_estimate_nitems(GpuJoinState *gjs,
 					match_ratio = 1.0;	/* an obvious case */
 				else
 				{
-					match_ratio = sqrt((double)(gjs->inner_nitems[depth] +
-												gjs->right_nitems[depth]) /
+					SpinLockAcquire(&rt_stat->lock);
+					inner_nitems = rt_stat->inner_nitems[depth];
+					right_nitems = rt_stat->right_nitems[depth];
+					SpinLockRelease(&rt_stat->lock);
+					match_ratio = sqrt((double)(inner_nitems + right_nitems) /
 									   (double)(nitems_in));
 					match_ratio = 1.0 - Min(1.0, match_ratio);
 					match_ratio = Max(0.05, match_ratio);	/* at least 5% */
@@ -4341,6 +4343,7 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs,
 	TupleDesc		tupdesc = tupslot->tts_tupleDescriptor;
 	cl_int			ncols = tupdesc->natts;
 	Size			nrooms = (Size)(ntuples * pgstrom_chunk_size_margin);
+	runtimeStat	   *rt_stat = pgjoin->rt_stat;
 	pgstrom_data_store *pds_dst;
 
 	/*
@@ -4412,31 +4415,42 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs,
 		/* KDS_FORMAT_ROW */
 		double		merge_ratio;
 		double		tup_width;
+		size_t		source_ntasks;
+		size_t		source_nitems;
+		size_t		results_nitems;
+		size_t		results_usage;
 		Size		length;
 
 		/*
 		 * Tuple width estimation also follow the logic when we estimate
 		 * number of rows.
 		 */
-		merge_ratio = Max((double) gjs->source_ntasks / 20.0,
-						  (double) gjs->source_nitems /
+		SpinLockAcquire(&rt_stat->lock);
+		source_ntasks = rt_stat->source_ntasks;
+		source_nitems = rt_stat->source_nitems;
+		results_nitems = rt_stat->results_nitems;
+		results_usage = rt_stat->results_usage;
+		SpinLockRelease(&rt_stat->lock);
+
+		merge_ratio = Max((double) source_ntasks / 20.0,
+						  (double) source_nitems /
 						  (double)(0.30 * gjs->outer_nrows));
-		if (gjs->results_nitems == 0)
+		if (results_nitems == 0)
 		{
 			tup_width = gjs->result_width;
 		}
 		else if (merge_ratio < 1.0)
 		{
 			double	plan_width = gjs->result_width;
-			double	exec_width = ((double) gjs->results_usage /
-								  (double) gjs->results_nitems);
+			double	exec_width = ((double) results_usage /
+								  (double) results_nitems);
 			tup_width = (plan_width * (1.0 - merge_ratio) +
 						 exec_width * merge_ratio);
 		}
 		else
 		{
-			tup_width = ((double) gjs->results_usage /
-						 (double) gjs->results_nitems);
+			tup_width = ((double) results_usage /
+						 (double) results_nitems);
 		}
 
 		/* Expected buffer length */
@@ -4487,6 +4501,7 @@ gpujoin_create_task(GpuJoinState *gjs,
 					kern_join_scale *jscale_old)
 {
 	GpuContext_v2	   *gcontext = gjs->gts.gcontext;
+	runtimeStat		   *rt_stat = gjs->rt_stat;
 	pgstrom_gpujoin	   *pgjoin;
 	double				ntuples;
 	double				ntuples_next;
@@ -4586,11 +4601,37 @@ gpujoin_create_task(GpuJoinState *gjs,
 	 */
 major_retry:
 	target_depth = 0;
-	target_row_dist_score = gjs->row_dist_score[0];
 	length = 0;
 	ntuples = 0.0;
 	ntuples_delta = 0.0;
 	max_items = 0;
+
+	/*
+	 * Find out the largest distributed depth (if run-time statistics
+	 * exists), or depth with largest delta elsewhere, for window-size
+	 * reduction in the later stage.
+	 * It might be a bit paranoia, however, all the score needs to be
+	 * compared atomically.
+	 */
+	SpinLockAcquire(&rt_stat->lock);
+	if (rt_stat->row_dist_score_valid)
+	{
+		target_row_dist_score = rt_stat->row_dist_score[0];
+		for (depth=1; depth < gjs->num_rels; depth++)
+		{
+			if (target_row_dist_score < rt_stat->row_dist_score[depth])
+			{
+				target_row_dist_score = rt_stat->row_dist_score[depth];
+				target_depth = depth;
+			}
+		}
+	}
+	else
+	{
+		/* cannot determine by the runtime-stat, so use delta of ntuples */
+		target_row_dist_score = -1.0;
+	}
+	SpinLockRelease(&rt_stat->lock);
 
 	for (depth = 0;
 		 depth <= gjs->num_rels;
@@ -4613,28 +4654,6 @@ major_retry:
 			STROMALIGN(offsetof(kern_resultbuf, results[max_items_temp])) +
 			STROMALIGN(offsetof(kern_resultbuf, results[max_items_temp]));
 
-		/*
-		 * Remember the largest distributed depth (if run-time statistics
-		 * exists), or depth with largest delta elsewhere, for later
-		 * window reduction.
-		 */
-		if (depth > 0)
-		{
-			if (gjs->row_dist_score_valid)
-			{
-				if (target_row_dist_score < gjs->row_dist_score[depth])
-				{
-					target_row_dist_score = gjs->row_dist_score[depth];
-					target_depth = depth;
-				}
-			}
-			else if (depth == 1 || ntuples_next - ntuples > ntuples_delta)
-			{
-				ntuples_delta = Max(ntuples_next - ntuples, 0.0);
-				target_depth = depth;
-			}
-		}
-
 		/* split inner window if too large */
 		if (length > 2 * pgstrom_chunk_size())
 		{
@@ -4653,12 +4672,11 @@ major_retry:
 		max_items = Max(max_items, max_items_temp);
 
 		/*
-		 * Save the depth with largest row growth
-		 *
-		 * TODO: We may be able to utilize in-kernel joined row distribution
-		 *       histgram for better separation point.
+		 * Determine the target depth by delta of ntuples if run-time
+		 * statistics are not available.
 		 */
-		if (depth > 0 &&
+		if (target_row_dist_score < 0 &&
+			depth > 0 &&
 			(depth == 1 || ntuples_next - ntuples > ntuples_delta))
 		{
 			ntuples_delta = Max(ntuples_next - ntuples, 0.0);
@@ -5666,6 +5684,7 @@ skip:
 		pgstrom_data_store *pds_src = pgjoin->pds_src;
 		pgstrom_data_store *pds_dst = pgjoin->pds_dst;
 		pgstrom_multirels  *pmrels = pgjoin->pmrels;
+		runtimeStat		   *rt_stat = pgjoin->rt_stat;
 		pgstrom_gpujoin	   *pgjoin_new;
 		kern_join_scale	   *jscale = pgjoin->kern.jscale;
 		cl_int				i;
@@ -5676,23 +5695,25 @@ skip:
 		 * In case of OUTER JOIN task, we don't count source items because
 		 * it is generated as result of unmatched tuples.
 		 */
-		gjs->source_ntasks++;
-		gjs->source_nitems += (jscale[0].window_base +
-							   jscale[0].window_size -
-							   jscale[0].window_orig);
+		SpinLockAcquire(&rt_stat->lock);
+		rt_stat->source_ntasks++;
+		rt_stat->source_nitems += (jscale[0].window_base +
+								   jscale[0].window_size -
+								   jscale[0].window_orig);
 
-		for (i=0; i <= gjs->num_rels; i++)
+		for (i=0; i <= rt_stat->num_rels; i++)
 		{
-			gjs->inner_nitems[i] += jscale[i].inner_nitems;
-			gjs->right_nitems[i] += jscale[i].right_nitems;
+			rt_stat->inner_nitems[i] += jscale[i].inner_nitems;
+			rt_stat->right_nitems[i] += jscale[i].right_nitems;
 			if (jscale[i].row_dist_score > 0.0)
 			{
-				gjs->row_dist_score_valid = true;
-				gjs->row_dist_score[i] += jscale[i].row_dist_score;
+				rt_stat->row_dist_score_valid = true;
+				rt_stat->row_dist_score[i] += jscale[i].row_dist_score;
 			}
 		}
-		gjs->results_nitems += pds_dst->kds.nitems;
-		gjs->results_usage += pds_dst->kds.usage;
+		rt_stat->results_nitems += pds_dst->kds.nitems;
+		rt_stat->results_usage += pds_dst->kds.usage;
+		SpinLockRelease(&rt_stat->lock);
 
 		/*
 		 * Enqueue another GpuJoin taks if completed one run on a part of
