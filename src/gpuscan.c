@@ -2905,14 +2905,13 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 	{
 		Assert(pds_dst->kds.format == KDS_FORMAT_ROW ||
 			   pds_dst->kds.format == KDS_FORMAT_SLOT);
-		length = KERN_DATA_STORE_LENGTH(&pds_dst->kds);
 		rc = cuMemcpyDtoHAsync(&pds_dst->kds,
 							   gscan->m_kds_dst,
-							   length,
+							   pds_dst->kds.length,
 							   cuda_stream);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "cuMemcpyDtoHAsync: %s", errorText(rc));
-		gscan->bytes_dma_recv += length;
+		gscan->bytes_dma_recv += pds_dst->kds.length;
 		gscan->num_dma_recv++;
 	}
 	PFMON_EVENT_RECORD(gscan, ev_dma_recv_stop, cuda_stream);
@@ -2949,17 +2948,17 @@ gpuscan_complete_task(GpuTask_v2 *gtask)
 			 errorTextKernel(&gtask->kerror));
 
 	PFMON_EVENT_ELAPSED(gscan, time_dma_send,
-						ev_dma_send_start,
-						ev_dma_send_stop);
+						gscan->ev_dma_send_start,
+						gscan->ev_dma_send_stop);
 	PFMON_EVENT_ELAPSED(gscan, tv_kern_main,
-						ev_dma_send_stop,
-						ev_dma_recv_start);
+						gscan->ev_dma_send_stop,
+						gscan->ev_dma_recv_start);
 	PFMON_EVENT_ELAPSED(gscan, time_dma_recv,
-						ev_dma_recv_start,
-						ev_dma_recv_stop);
+						gscan->ev_dma_recv_start,
+						gscan->ev_dma_recv_stop);
 	gscan->tv_kern_exec_quals = gscan->kern.pfm.tv_kern_exec_quals;
 	gscan->tv_kern_projection = gscan->kern.pfm.tv_kern_projection;
-
+skip_perfmon:
 	gpuscan_cleanup_cuda_resources(gscan);
 
 	return 0;

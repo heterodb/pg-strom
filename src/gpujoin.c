@@ -346,6 +346,35 @@ typedef struct
 	CUevent			ev_dma_recv_stop;
 	bool			is_inner_loader;
 	runtimeStat	   *rt_stat;
+
+	/* Performance counters */
+	cl_uint			num_dma_send;
+	cl_uint			num_dma_recv;
+	Size			bytes_dma_send;
+	Size			bytes_dma_recv;
+	cl_float		tv_inner_dma_send;
+	cl_float		tv_outer_dma_send;
+	cl_float		tv_dma_recv;
+	cl_float		tv_kern_main;
+	cl_uint			num_kern_main;
+	cl_uint			num_kern_outer_scan;
+	cl_uint			num_kern_exec_nestloop;
+	cl_uint			num_kern_exec_hashjoin;
+	cl_uint			num_kern_outer_nestloop;
+	cl_uint			num_kern_outer_hashjoin;
+	cl_uint			num_kern_projection;
+	cl_uint			num_kern_rows_dist;
+	cl_float		tv_kern_outer_scan;
+	cl_float		tv_kern_exec_nestloop;
+	cl_float		tv_kern_exec_hashjoin;
+	cl_float		tv_kern_outer_nestloop;
+	cl_float		tv_kern_outer_hashjoin;
+	cl_float		tv_kern_projection;
+	cl_float		tv_kern_rows_dist;
+	cl_uint			num_major_retry;
+	cl_uint			num_minor_retry;
+
+	/* DMA buffers */
 	pgstrom_multirels  *pmrels;		/* inner multi relations (heap or hash) */
 	pgstrom_data_store *pds_src;	/* data store of outer relation */
 	pgstrom_data_store *pds_dst;	/* data store of result buffer */
@@ -974,6 +1003,7 @@ create_gpujoin_path(PlannerInfo *root,
 	NodeSetTag(gjpath, T_CustomPath);
 	gjpath->cpath.path.pathtype = T_CustomScan;
 	gjpath->cpath.path.parent = joinrel;
+	gjpath->cpath.path.pathtarget = joinrel->reltarget;
 	gjpath->cpath.path.param_info = param_info;	// XXXXXX
 	gjpath->cpath.path.pathkeys = NIL;
 	gjpath->cpath.path.rows = joinrel->rows;	// XXXXXX
@@ -5614,80 +5644,61 @@ int
 gpujoin_complete_task(GpuTask_v2 *gtask)
 {
 	pgstrom_gpujoin	   *pgjoin = (pgstrom_gpujoin *) gtask;
-	GpuJoinState	   *gjs = (GpuJoinState *) gtask->gts;
-	pgstrom_perfmon	   *pfm = &gjs->gts.pfm;
+	pgstrom_multirels  *pmrels = pgjoin->pmrels;
 
-#if 0
-	// do it later
-	if (pfm->enabled)
+	if (pgjoin->task.perfmon)
 	{
-		pfm->num_tasks++;
+		kern_gpujoin   *kgjoin = &pgjoin->kern;
+
 		if (pgjoin->is_inner_loader)
 		{
 			PFMON_EVENT_ELAPSED(pgjoin, tv_inner_dma_send,
-								ev_dma_send_start,
+								pgjoin->ev_dma_send_start,
 								pmrels->ev_loaded);
-			PFMON_EVENT_ELAPSED(pgjoin, time_dma_send,
+			PFMON_EVENT_ELAPSED(pgjoin, tv_outer_dma_send,
 								pmrels->ev_loaded,
-								ev_dma_send_stop);
+								pgjoin->ev_dma_send_stop);
 		}
 		else
 		{
-			PFMON_EVENT_ELAPSED(pgjoin, time_dma_send,
+			PFMON_EVENT_ELAPSED(pgjoin, tv_outer_dma_send,
 								pgjoin->ev_dma_send_start,
 								pgjoin->ev_dma_send_stop);
 		}
-		PFMON_EVENT_ELAPSED(pgjoin, gjoin.tv_kern_main,
+		PFMON_EVENT_ELAPSED(pgjoin, tv_kern_main,
 							pgjoin->ev_dma_send_stop,
 							pgjoin->ev_dma_recv_start);
-		PFMON_EVENT_ELAPSED(pgjoin, time_dma_recv,
+        PFMON_EVENT_ELAPSED(pgjoin, tv_dma_recv,
 							pgjoin->ev_dma_recv_start,
 							pgjoin->ev_dma_recv_stop);
-		/* update performance */
-		pfm->gjoin.num_kern_outer_scan
-			+= pgjoin->kern.pfm.num_kern_outer_scan;
-		pfm->gjoin.num_kern_exec_nestloop
-			+= pgjoin->kern.pfm.num_kern_exec_nestloop;
-		pfm->gjoin.num_kern_exec_hashjoin
-			+= pgjoin->kern.pfm.num_kern_exec_hashjoin;
-		pfm->gjoin.num_kern_outer_nestloop
-			+= pgjoin->kern.pfm.num_kern_outer_nestloop;
-		pfm->gjoin.num_kern_outer_hashjoin
-			+= pgjoin->kern.pfm.num_kern_outer_hashjoin;
-		pfm->gjoin.num_kern_projection
-			+= pgjoin->kern.pfm.num_kern_projection;
-		pfm->gjoin.num_kern_rows_dist
-			+= pgjoin->kern.pfm.num_kern_rows_dist;
 
-		pfm->gjoin.tv_kern_outer_scan
-			+= pgjoin->kern.pfm.tv_kern_outer_scan;
-		pfm->gjoin.tv_kern_exec_nestloop
-			+= pgjoin->kern.pfm.tv_kern_exec_nestloop;
-		pfm->gjoin.tv_kern_exec_hashjoin
-			+= pgjoin->kern.pfm.tv_kern_exec_hashjoin;
-		pfm->gjoin.tv_kern_outer_nestloop
-			+= pgjoin->kern.pfm.tv_kern_outer_nestloop;
-		pfm->gjoin.tv_kern_outer_hashjoin
-			+= pgjoin->kern.pfm.tv_kern_outer_hashjoin;
-		pfm->gjoin.tv_kern_projection
-			+= pgjoin->kern.pfm.tv_kern_projection;
-		pfm->gjoin.tv_kern_rows_dist
-			+= pgjoin->kern.pfm.tv_kern_rows_dist;
-
-		pfm->gjoin.num_major_retry += pgjoin->kern.pfm.num_major_retry;
-		pfm->gjoin.num_minor_retry += pgjoin->kern.pfm.num_minor_retry;
+		pgjoin->num_kern_outer_scan		+= kgjoin->pfm.num_kern_outer_scan;
+		pgjoin->num_kern_exec_nestloop	+= kgjoin->pfm.num_kern_exec_nestloop;
+		pgjoin->num_kern_exec_hashjoin	+= kgjoin->pfm.num_kern_exec_hashjoin;
+		pgjoin->num_kern_outer_nestloop	+= kgjoin->pfm.num_kern_outer_nestloop;
+		pgjoin->num_kern_outer_hashjoin	+= kgjoin->pfm.num_kern_outer_hashjoin;
+		pgjoin->num_kern_projection		+= kgjoin->pfm.num_kern_projection;
+		pgjoin->num_kern_rows_dist		+= kgjoin->pfm.num_kern_rows_dist;
+		pgjoin->tv_kern_outer_scan		+= kgjoin->pfm.tv_kern_outer_scan;
+		pgjoin->tv_kern_exec_nestloop	+= kgjoin->pfm.tv_kern_exec_nestloop;
+		pgjoin->tv_kern_exec_hashjoin	+= kgjoin->pfm.tv_kern_exec_hashjoin;
+		pgjoin->tv_kern_outer_nestloop	+= kgjoin->pfm.tv_kern_outer_nestloop;
+		pgjoin->tv_kern_outer_hashjoin	+= kgjoin->pfm.tv_kern_outer_hashjoin;
+		pgjoin->tv_kern_projection		+= kgjoin->pfm.tv_kern_projection;
+		pgjoin->tv_kern_rows_dist		+= kgjoin->pfm.tv_kern_rows_dist;
+		pgjoin->num_major_retry			+= kgjoin->pfm.num_major_retry;
+		pgjoin->num_minor_retry			+= kgjoin->pfm.num_minor_retry;
 	}
-skip:
-#endif
+skip_perfmon:
+
 	if (pgjoin->task.kerror.errcode == StromError_Success)
 	{
 		pgstrom_data_store *pds_src = pgjoin->pds_src;
 		pgstrom_data_store *pds_dst = pgjoin->pds_dst;
-		pgstrom_multirels  *pmrels = pgjoin->pmrels;
 		runtimeStat		   *rt_stat = pgjoin->rt_stat;
 		pgstrom_gpujoin	   *pgjoin_new;
 		kern_join_scale	   *jscale = pgjoin->kern.jscale;
-		cl_int				i;
+		cl_int				i, num_rels = pmrels->kern.nrels;
 
 		/*
 		 * Update run-time statistics information according to the number
@@ -5701,7 +5712,7 @@ skip:
 								   jscale[0].window_size -
 								   jscale[0].window_orig);
 
-		for (i=0; i <= rt_stat->num_rels; i++)
+		for (i=0; i <= num_rels; i++)
 		{
 			rt_stat->inner_nitems[i] += jscale[i].inner_nitems;
 			rt_stat->right_nitems[i] += jscale[i].right_nitems;
@@ -5723,7 +5734,7 @@ skip:
 		 * size of result buffer and chunk size limitation.
 		 * (The new inner_size[] shall become baseline of the next inner scale)
 		 */
-		for (i = gjs->num_rels; i >= 0; i--)
+		for (i = num_rels; i >= 0; i--)
 		{
 			kern_join_scale	   *jscale = pgjoin->kern.jscale;
 			cl_uint				nitems;
@@ -5759,7 +5770,7 @@ skip:
 				 */
 				if (!pgjoin->pds_src && pgjoin->task.cpu_fallback)
 				{
-					for (i=0; i < gjs->num_rels; i++)
+					for (i=0; i < num_rels; i++)
 					{
 						pgstrom_data_store *pds = pmrels->inner_chunks[i];
 
@@ -5784,16 +5795,17 @@ skip:
 				 */
 				pgjoin->pds_src = NULL;
 				pgjoin_new = (pgstrom_gpujoin *)
-					gpujoin_create_task(gjs,
+					gpujoin_create_task(NULL, //gjs, //tentative
 										pgjoin->pmrels,
 										pds_src,
 										-1,
 										jscale);
 
 				/* add this new task to the pending list */
-				gpuservPushGpuTask(gcontext, &pgjoin->task);
-
-				gjs->gts.pfm.gjoin.num_global_retry++;
+				//HOGE: needs to correct gcontext handling!
+				//      this is executed on the server side!!!
+				gpuservPushGpuTask(pgjoin_new->task.gcontext,
+								   &pgjoin_new->task);
 				break;
 			}
 			Assert(jscale[i].window_base + jscale[i].window_size == nitems);
@@ -5821,12 +5833,9 @@ static void
 gpujoin_task_respond(CUstream stream, CUresult status, void *private)
 {
 	pgstrom_gpujoin	   *pgjoin = private;
-	GpuTaskState	   *gts = pgjoin->task.gts;
+	bool				is_urgent;
 
-	/* See comments in pgstrom_respond_gpuscan() */
-	if (status == CUDA_ERROR_INVALID_CONTEXT || !IsTransactionState())
-		return;
-
+	/* OK, routine is called back in the usual context */
 	if (status == CUDA_SUCCESS)
 	{
 		pgjoin->task.kerror = pgjoin->kern.kerror;
@@ -5838,42 +5847,28 @@ gpujoin_task_respond(CUstream stream, CUresult status, void *private)
 			pgjoin->task.kerror.errcode = StromError_Success;
 			pgjoin->task.cpu_fallback = true;
 		}
+		is_urgent = (pgjoin->task.kerror.errcode != StromError_Success);
 	}
 	else
 	{
-		pgjoin->task.kerror.errcode = status;
-		pgjoin->task.kerror.kernel = StromKernel_CudaRuntime;
-		pgjoin->task.kerror.lineno = 0;
+		if (!pgjoin->task.kerror.errcode)
+		{
+			pgjoin->task.kerror.errcode = status;
+			pgjoin->task.kerror.kernel = StromKernel_CudaRuntime;
+			pgjoin->task.kerror.lineno = 0;
+		}
+		is_urgent = true;
 	}
-
-	/*
-	 * Remove the GpuTask from the running_tasks list, and attach it
-	 * on the completed_tasks list again. Note that this routine may
-	 * be called by CUDA runtime, prior to attachment of GpuTask on
-	 * the running_tasks by cuda_control.c.
-	 */
-	SpinLockAcquire(&gts->lock);
-	if (pgjoin->task.chain.prev && pgjoin->task.chain.next)
-	{
-		dlist_delete(&pgjoin->task.chain);
-		gts->num_running_tasks--;
-	}
-	if (pgjoin->task.kerror.errcode == StromError_Success)
-		dlist_push_tail(&gts->completed_tasks, &pgjoin->task.chain);
-	else
-		dlist_push_head(&gts->completed_tasks, &pgjoin->task.chain);
-	gts->num_completed_tasks++;
-	SpinLockRelease(&gts->lock);
-
-	SetLatch(&MyProc->procLatch);
+	gpuservCompleteGpuTask(&pgjoin->task, is_urgent);
 }
 
 static bool
 __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 					   CUmodule cuda_module, CUstream cuda_stream)
 {
-	GpuJoinState	   *gjs = (GpuJoinState *) pgjoin->task.gts;
-	pgstrom_multirels  *pmrels = pgjoin->pmrels;
+//	GpuJoinState	   *gjs = (GpuJoinState *) pgjoin->task.gts;
+	GpuContext_v2	   *gcontext = pgjoin->task.gcontext;
+//	pgstrom_multirels  *pmrels = pgjoin->pmrels;
 	pgstrom_data_store *pds_src = pgjoin->pds_src;
 	pgstrom_data_store *pds_dst = pgjoin->pds_dst;
 	Size			length;
@@ -5891,7 +5886,7 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 	 * GPU kernel function lookup
 	 */
 	rc = cuModuleGetFunction(&pgjoin->kern_main,
-							 pgjoin->task.cuda_module,
+							 cuda_module,
 							 "gpujoin_main");
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
@@ -5903,12 +5898,14 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 			  pgjoin->kern.kresults_2_offset - pgjoin->kern.kresults_1_offset);
 	total_length = GPUMEMALIGN(length);
 	if (pds_src)
-		total_length += GPUMEMALIGN(KERN_DATA_STORE_LENGTH(pds_src->kds));
-	total_length += GPUMEMALIGN(KERN_DATA_STORE_LENGTH(pds_dst->kds));
+		total_length += GPUMEMALIGN(pds_src->kds.length);
+	total_length += GPUMEMALIGN(pds_dst->kds.length);
 
-	pgjoin->m_kgjoin = gpuMemAlloc(&pgjoin->task, total_length);
-	if (!pgjoin->m_kgjoin)
+	rc = gpuMemAlloc_v2(gcontext, &pgjoin->m_kgjoin, total_length);
+	if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		goto out_of_resource;
+	else if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on gpuMemAlloc: %s", errorText(rc));
 
 	/*
 	 * m_kds_src may be NULL, if OUTER JOIN
@@ -5917,7 +5914,7 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 	{
 		pgjoin->m_kds_src = pgjoin->m_kgjoin + GPUMEMALIGN(length);
 		pgjoin->m_kds_dst = pgjoin->m_kds_src +
-			GPUMEMALIGN(KERN_DATA_STORE_LENGTH(pds_src->kds));
+			GPUMEMALIGN(pds_src->kds.length);
 	}
 	else
 	{
@@ -5937,12 +5934,12 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 	 * OK, all the device memory and kernel objects are successfully
 	 * constructed. Let's enqueue DMA send/recv and kernel invocations.
 	 */
-	PFMON_EVENT_RECORD(pgjoin, ev_dma_send_start);
+	PFMON_EVENT_RECORD(pgjoin, ev_dma_send_start, cuda_stream);
 
 	/* inner multi relations */
 	//multirels_send_buffer(pmrels, &pgjoin->task);
 	//HOGE:
-	if (multirels_get_buffer(..., cuda_stream))
+	if (multirels_get_buffer(pgjoin, cuda_stream))
 		goto out_of_resource;
 
 
@@ -5955,21 +5952,20 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 						   pgjoin->task.cuda_stream);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-	gjs->gts.pfm.bytes_dma_send += length;
-	gjs->gts.pfm.num_dma_send++;
+	pgjoin->bytes_dma_send += length;
+	pgjoin->num_dma_send++;
 
 	if (pds_src)
 	{
 		/* source outer relation */
-		length = KERN_DATA_STORE_LENGTH(pds_src->kds);
 		rc = cuMemcpyHtoDAsync(pgjoin->m_kds_src,
-							   pds_src->kds,
-							   length,
-							   pgjoin->task.cuda_stream);
+							   &pds_src->kds,
+							   pds_src->kds.length,
+							   cuda_stream);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-		gjs->gts.pfm.bytes_dma_send += length;
-		gjs->gts.pfm.num_dma_send++;
+		pgjoin->bytes_dma_send += pds_src->kds.length;
+		pgjoin->num_dma_send++;
 	}
 	else
 	{
@@ -5979,17 +5975,16 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 	}
 
 	/* kern_data_store (dst of head) */
-	length = KERN_DATA_STORE_HEAD_LENGTH(pds_dst->kds);
 	rc = cuMemcpyHtoDAsync(pgjoin->m_kds_dst,
-						   pds_dst->kds,
-						   length,
-						   pgjoin->task.cuda_stream);
+						   &pds_dst->kds,
+						   pds_dst->kds.length,
+						   cuda_stream);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-	gjs->gts.pfm.bytes_dma_send += length;
-	gjs->gts.pfm.num_dma_send++;
+	pgjoin->bytes_dma_send += length;
+	pgjoin->num_dma_send++;
 
-	CUDA_EVENT_RECORD(pgjoin, ev_dma_send_stop);
+	PFMON_EVENT_RECORD(pgjoin, ev_dma_send_stop, cuda_stream);
 
 	/* Lunch:
 	 * KERNEL_FUNCTION(void)
@@ -6005,49 +6000,48 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 	kern_args[2] = &pgjoin->m_ojmaps;
 	kern_args[3] = &pgjoin->m_kds_src;
 	kern_args[4] = &pgjoin->m_kds_dst;
-	kern_args[5] = &pgjoin->task.cuda_index;
+	kern_args[5] = &gpuserv_cuda_dindex;
 
 	rc = cuLaunchKernel(pgjoin->kern_main,
 						1, 1, 1,
 						1, 1, 1,
 						sizeof(kern_errorbuf),
-						pgjoin->task.cuda_stream,
+						cuda_stream,
 						kern_args,
 						NULL);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
-	gjs->gts.pfm.gjoin.num_kern_main++;
+	pgjoin->num_kern_main++;
 
-	CUDA_EVENT_RECORD(pgjoin, ev_dma_recv_start);
+	PFMON_EVENT_RECORD(pgjoin, ev_dma_recv_start, cuda_stream);
 
 	/* DMA Recv: kern_gpujoin *kgjoin */
-	length = offsetof(kern_gpujoin, jscale[gjs->num_rels+1]);
+	length = offsetof(kern_gpujoin, jscale[pgjoin->kern.num_rels + 1]);
 	rc = cuMemcpyDtoHAsync(&pgjoin->kern,
 						   pgjoin->m_kgjoin,
 						   length,
-						   pgjoin->task.cuda_stream);
+						   cuda_stream);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "cuMemcpyDtoHAsync: %s", errorText(rc));
-	gjs->gts.pfm.bytes_dma_recv += length;
-	gjs->gts.pfm.num_dma_recv++;
+	pgjoin->bytes_dma_recv += length;
+	pgjoin->num_dma_recv++;
 
 	/* DMA Recv: kern_data_store *kds_dst */
-	length = KERN_DATA_STORE_LENGTH(pds_dst->kds);
-	rc = cuMemcpyDtoHAsync(pds_dst->kds,
+	rc = cuMemcpyDtoHAsync(&pds_dst->kds,
 						   pgjoin->m_kds_dst,
-						   length,
-						   pgjoin->task.cuda_stream);
+						   pds_dst->kds.length,
+						   cuda_stream);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "cuMemcpyDtoHAsync: %s", errorText(rc));
-	gjs->gts.pfm.bytes_dma_recv += length;
-	gjs->gts.pfm.num_dma_recv++;
+	pgjoin->bytes_dma_recv += pds_dst->kds.length;
+	pgjoin->num_dma_recv++;
 
-	CUDA_EVENT_RECORD(pgjoin, ev_dma_recv_stop);
+	PFMON_EVENT_RECORD(pgjoin, ev_dma_recv_stop, cuda_stream);
 
 	/*
 	 * Register the callback
 	 */
-	rc = cuStreamAddCallback(pgjoin->task.cuda_stream,
+	rc = cuStreamAddCallback(cuda_stream,
 							 gpujoin_task_respond,
 							 pgjoin, 0);
 	if (rc != CUDA_SUCCESS)
@@ -6115,15 +6109,16 @@ gpujoin_process_task(GpuTask_v2 *gtask,
 static void
 add_extra_randomness(pgstrom_data_store *pds)
 {
-	cl_uint		x, y, temp;
+	kern_data_store	   *kds = &pds->kds;
+	cl_uint				x, y, temp;
 
 	return;		//????
 
 	if (pds->kds.format == KDS_FORMAT_ROW ||
 		pds->kds.format == KDS_FORMAT_HASH)
 	{
-		cl_uint		   *row_index = KERN_DATA_STORE_ROWINDEX(kds);
-		cl_uint			nitems = pds->kds.nitems;
+		cl_uint	   *row_index = KERN_DATA_STORE_ROWINDEX(kds);
+		cl_uint		nitems = pds->kds.nitems;
 
 		for (x=0; x < nitems; x++)
 		{
@@ -6529,7 +6524,7 @@ retry:
 			 * by hash-value, we once needs to move all the entries to
 			 * the tuple-store, then reconstruct them as PDS.
 			 */
-			kern_data_store	   *kds_hash = pds_hash->kds;
+			kern_data_store	   *kds_hash = &pds_hash->kds;
 			kern_hashitem	   *khitem;
 			HeapTupleData		tupData;
 

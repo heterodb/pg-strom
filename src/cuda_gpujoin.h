@@ -859,7 +859,7 @@ gpujoin_projection_row(kern_gpujoin *kgjoin,
 
 		assert(pos == (pos & ~7));
 		tup_pos[dest_index] = pos;
-		form_kern_heaptuple(&kcxt, kds_dst, tupitem,
+		form_kern_heaptuple(&kcxt, kds_dst, tupitem, NULL,
 							tup_values, tup_isnull, NULL);
 	}
 out:

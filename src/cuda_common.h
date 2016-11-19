@@ -679,9 +679,6 @@ typedef struct {
 	 STROMALIGN(sizeof(cl_uint) * __KDS_NSLOTS(nitems)) +	\
 	 MAXALIGN(consumption))
 
-/* length of kern_data_store */
-#define KERN_DATA_STORE_LENGTH(kds)		((kds)->length)
-
 /* length of the header portion of kern_data_store */
 #define KERN_DATA_STORE_HEAD_LENGTH(kds)			\
 	KDS_CALCULATE_HEAD_LENGTH((kds)->ncols)
