@@ -1205,6 +1205,8 @@ gpuservRecvCommands(GpuContext_v2 *gcontext, bool *p_peer_sock_closed)
 				{
 					GpuTaskState_v2	   *gts = gtask->gts;
 
+					if (gts->cb_ready_task)
+						gts->cb_ready_task(gts, gtask);
 					dlist_push_tail(&gts->ready_tasks, &gtask->chain);
 					gts->num_ready_tasks++;
 				}

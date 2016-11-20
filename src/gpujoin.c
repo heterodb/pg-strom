@@ -391,6 +391,7 @@ static bool					enable_gpuhashjoin;
 
 /* static functions */
 static GpuTask_v2 *gpujoin_next_task(GpuTaskState_v2 *gts);
+static void gpujoin_ready_task(GpuTaskState_v2 *gts, GpuTask_v2 *gtask);
 static void gpujoin_switch_task(GpuTaskState_v2 *gts, GpuTask_v2 *gtask);
 static TupleTableSlot *gpujoin_next_tuple(GpuTaskState_v2 *gts);
 static TupleTableSlot *gpujoin_next_tuple_fallback(GpuJoinState *gjs,
@@ -2438,9 +2439,10 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 							GpuTaskKind_GpuJoin,
 							gj_info->used_params,
 							estate);
-	gjs->gts.cb_next_task = gpujoin_next_task;
-	gjs->gts.cb_next_tuple = gpujoin_next_tuple;
-	gjs->gts.cb_switch_task = gpujoin_switch_task;
+	gjs->gts.cb_next_task	= gpujoin_next_task;
+	gjs->gts.cb_next_tuple	= gpujoin_next_tuple;
+	gjs->gts.cb_ready_task	= gpujoin_ready_task;
+	gjs->gts.cb_switch_task	= gpujoin_switch_task;
 	if (pgstrom_bulkexec_enabled &&
 		gjs->gts.css.ss.ps.qual == NIL &&
 		gjs->gts.css.ss.ps.ps_ProjInfo == NULL)
@@ -4914,6 +4916,16 @@ gpujoin_next_task(GpuTaskState_v2 *gts)
 }
 
 /*
+ * gpujoin_ready_task - callback when a pgstrom_gpujoin task gets processed
+ * on the GPU server process then returned to the backend process again.
+ */
+static void
+gpujoin_ready_task(GpuTaskState_v2 *gts, GpuTask_v2 *gtask)
+{
+
+}
+
+/*
  * gpujoin_switch_task - callback when a pgstrom_gpujoin task gets completed
  * and assigned on the gts->curr_task.
  */
@@ -5726,6 +5738,13 @@ skip_perfmon:
 		rt_stat->results_usage += pds_dst->kds.usage;
 		SpinLockRelease(&rt_stat->lock);
 
+#ifdef NOT_USED
+
+		//HOGE: We have to do this task on the backend side.
+		//      likely, when backend receives a new ready task immediately
+
+
+
 		/*
 		 * Enqueue another GpuJoin taks if completed one run on a part of
 		 * inner window, and we still have another window to be executed.
@@ -5810,7 +5829,7 @@ skip_perfmon:
 			}
 			Assert(jscale[i].window_base + jscale[i].window_size == nitems);
 		}
-
+#endif
 		/*
 		 * In case of CPU fallback, we have to move the entire outer-
 		 * join map into the host side, prior to fallback execution.
