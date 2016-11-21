@@ -224,7 +224,9 @@ gpuscan_projection(kern_context *kcxt,
  */
 KERNEL_FUNCTION(void)
 gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
-						 kern_data_store *kds_src)
+						 kern_data_store *kds_src,
+						 kern_arg_t window_base,
+						 kern_arg_t window_size)
 {
 	kern_parambuf	   *kparams = KERN_GPUSCAN_PARAMBUF(kgpuscan);
 	kern_resultbuf	   *kresults = KERN_GPUSCAN_RESULTBUF(kgpuscan);
@@ -248,15 +250,16 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 	assert(__ldg(&kds_src->format) == KDS_FORMAT_BLOCK);
 	assert(!__ldg(&kresults->all_visible));
 	assert(__ldg(&kds_src->nrows_per_block) > 1);
+	assert(window_base + window_size <= kds_src->nitems);
 	part_sz = (__ldg(&kds_src->nrows_per_block) +
 			   warpSize - 1) & ~(warpSize - 1);
 	part_sz = Min(part_sz, get_local_size());
 	assert(get_local_size() % part_sz == 0);
 	part_id = (get_global_index() * (get_local_size() / part_sz) +
-			   get_local_id() / part_sz);
+			   get_local_id() / part_sz) + window_base;
 
 	/* get a PostgreSQL block on which this thread will perform on */
-	if (part_id < kds_src->nitems)
+	if (part_id < window_base + window_size)
 	{
 		BlockNumber	block_nr;
 
@@ -351,7 +354,9 @@ out:
  */
 KERNEL_FUNCTION(void)
 gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
-					   kern_data_store *kds_src)
+					   kern_data_store *kds_src,
+					   kern_arg_t window_base,
+					   kern_arg_t window_size)
 {
 	kern_parambuf  *kparams = KERN_GPUSCAN_PARAMBUF(kgpuscan);
 	kern_resultbuf *kresults = KERN_GPUSCAN_RESULTBUF(kgpuscan);
@@ -365,12 +370,14 @@ gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
 	/* sanity checks */
 	assert(kds_src->format == KDS_FORMAT_ROW);
 	assert(!kresults->all_visible);
+	assert(window_base + window_size <= kds_src->nitems);
 
 	INIT_KERNEL_CONTEXT(&kcxt,gpuscan_exec_quals_row,kparams);
 
-	if (get_global_id() < kds_src->nitems)
+	if (get_global_id() < window_size)
 	{
-		tupitem = KERN_DATA_STORE_TUPITEM(kds_src, get_global_id());
+		tupitem = KERN_DATA_STORE_TUPITEM(kds_src, (window_base +
+													get_global_id()));
 		rc = gpuscan_quals_eval(&kcxt, kds_src,
 								&tupitem->t_self,
 								&tupitem->htup);
@@ -726,7 +733,7 @@ gpuscan_main(kern_gpuscan *kgpuscan,
 
 		kernel_args = (void **)
 			cudaGetParameterBuffer(sizeof(void *),
-								   sizeof(void *) * 2);
+								   sizeof(void *) * 4);
 		if (!kernel_args)
 		{
 			STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelArgs);
@@ -734,6 +741,8 @@ gpuscan_main(kern_gpuscan *kgpuscan,
 		}
 		kernel_args[0] = kgpuscan;
 		kernel_args[1] = kds_src;
+		kernel_args[2] = (void *)(0);				/* window_base */
+		kernel_args[3] = (void *)(kds_src->nitems);	/* window_size */
 
 		status = cudaLaunchDevice(kernel_func,
 								  kernel_args,
