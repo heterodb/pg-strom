@@ -4922,7 +4922,89 @@ gpujoin_next_task(GpuTaskState_v2 *gts)
 static void
 gpujoin_ready_task(GpuTaskState_v2 *gts, GpuTask_v2 *gtask)
 {
+	GpuJoinState	   *gjs = (GpuJoinState *)gts;
+	pgstrom_gpujoin	   *pgjoin = (pgstrom_gpujoin *)gtask;
+	pgstrom_gpujoin	   *pgjoin_new;
+	pgstrom_multirels  *pmrels = pgjoin->pmrels;
+	int					i, num_rels = gjs->num_rels;
 
+	if (pgjoin->task.kerror.errcode != StromError_Success)
+		elog(ERROR, "GpuJoin kernel internal error: %s",
+			 errorTextKernel(&gtask->kerror));
+
+	/*
+	 * Enqueue another GpuJoin taks if completed one run on a part of
+	 * inner window, and we still have another window to be executed.
+	 * gpujoin_create_task() expects inner_base[] points the base offset
+	 * of next task, and inner_size[] shall be adjusted according to the
+	 * size of result buffer and chunk size limitation.
+	 * (The new inner_size[] shall become baseline of the next inner scale)
+	 */
+	for (i = num_rels; i >= 0; i--)
+	{
+		kern_join_scale	   *jscale = pgjoin->kern.jscale;
+		cl_uint				nitems;
+
+		if (i == 0)
+			nitems = (!pgjoin->pds_src ? 0 : pgjoin->pds_src->kds.nitems);
+		else
+		{
+			pgstrom_data_store *pds = pmrels->inner_chunks[i-1];
+			nitems = pds->kds.nitems;
+		}
+
+		if (jscale[i].window_base + jscale[i].window_size < nitems)
+		{
+			/*
+			 * NOTE: consideration to a corner case - If CpuReCheck
+			 * error was returned on JOIN_RIGHT/FULL processing, we
+			 * cannot continue asynchronous task execution no longer,
+			 * because outer-join-map may be updated during execution
+			 * of the last task (with no valid outer PDS/KDS).
+			 * For example, if depth=2 and depth=4 is RIGHT JOIN,
+			 * depth=2 will produce half-NULL'ed tuples according to
+			 * the outer-join-map. Thie tuple shall be processed in
+			 * the depth=3 and later, according to INNER JOIN manner.
+			 * It may add new match on the depth=4, then it updates
+			 * the outer-join-map.
+			 * If a particular portion of RIGHT JOIN are executed on
+			 * both of CPU and GPU concurrently, we cannot guarantee
+			 * the outer-join-map is consistent.
+			 * Thus, once a pgstrom_gpujoin task got CpuReCheck error,
+			 * we will process remaining RIGHT JOIN stuff on CPU
+			 * entirely.
+			 */
+			if (!pgjoin->pds_src && pgjoin->task.cpu_fallback)
+			{
+				for (i=0; i < num_rels; i++)
+				{
+					pgstrom_data_store *pds = pmrels->inner_chunks[i];
+
+					jscale[i+1].window_size = (pds->kds.nitems -
+											   jscale[i+1].window_base);
+				}
+				break;
+			}
+
+			/*
+			 * Instead of retain and release of PDS, we simply copy its
+			 * pointer to reduce waste of spinlocks.
+			 * Also note that the inner buffer (pmrels) shall be retained
+			 * in the gpujoin_create_task(), so no need to do something
+			 * special.
+			 */
+			pgjoin_new = (pgstrom_gpujoin *)
+				gpujoin_create_task(gjs,
+									pgjoin->pmrels,
+									pgjoin->pds_src,
+									-1,
+									jscale);
+			pgjoin->pds_src = NULL;
+			gpuservSendGpuTask(gjs->gts.gcontext, &pgjoin_new->task);
+			break;
+		}
+		Assert(jscale[i].window_base + jscale[i].window_size == nitems);
+	}
 }
 
 /*
@@ -5705,10 +5787,8 @@ skip_perfmon:
 
 	if (pgjoin->task.kerror.errcode == StromError_Success)
 	{
-		pgstrom_data_store *pds_src = pgjoin->pds_src;
 		pgstrom_data_store *pds_dst = pgjoin->pds_dst;
 		runtimeStat		   *rt_stat = pgjoin->rt_stat;
-		pgstrom_gpujoin	   *pgjoin_new;
 		kern_join_scale	   *jscale = pgjoin->kern.jscale;
 		cl_int				i, num_rels = pmrels->kern.nrels;
 
@@ -5738,98 +5818,6 @@ skip_perfmon:
 		rt_stat->results_usage += pds_dst->kds.usage;
 		SpinLockRelease(&rt_stat->lock);
 
-#ifdef NOT_USED
-
-		//HOGE: We have to do this task on the backend side.
-		//      likely, when backend receives a new ready task immediately
-
-
-
-		/*
-		 * Enqueue another GpuJoin taks if completed one run on a part of
-		 * inner window, and we still have another window to be executed.
-		 * gpujoin_create_task() expects inner_base[] points the base offset
-		 * of next task, and inner_size[] shall be adjusted according to the
-		 * size of result buffer and chunk size limitation.
-		 * (The new inner_size[] shall become baseline of the next inner scale)
-		 */
-		for (i = num_rels; i >= 0; i--)
-		{
-			kern_join_scale	   *jscale = pgjoin->kern.jscale;
-			cl_uint				nitems;
-
-			if (i == 0)
-				nitems = (!pgjoin->pds_src ? 0 : pgjoin->pds_src->kds.nitems);
-			else
-			{
-				pgstrom_data_store *pds = pmrels->inner_chunks[i-1];
-				nitems = pds->kds.nitems;
-			}
-
-			if (jscale[i].window_base + jscale[i].window_size < nitems)
-			{
-				/*
-				 * NOTE: consideration to a corner case - If CpuReCheck
-				 * error was returned on JOIN_RIGHT/FULL processing, we
-				 * cannot continue asynchronous task execution no longer,
-				 * because outer-join-map may be updated during execution
-				 * of the last task (with no valid outer PDS/KDS).
-				 * For example, if depth=2 and depth=4 is RIGHT JOIN,
-				 * depth=2 will produce half-NULL'ed tuples according to
-				 * the outer-join-map. Thie tuple shall be processed in
-				 * the depth=3 and later, according to INNER JOIN manner.
-				 * It may add new match on the depth=4, then it updates
-				 * the outer-join-map.
-				 * If a particular portion of RIGHT JOIN are executed on
-				 * both of CPU and GPU concurrently, we cannot guarantee
-				 * the outer-join-map is consistent.
-				 * Thus, once a pgstrom_gpujoin task got CpuReCheck error,
-				 * we will process remaining RIGHT JOIN stuff on CPU
-				 * entirely.
-				 */
-				if (!pgjoin->pds_src && pgjoin->task.cpu_fallback)
-				{
-					for (i=0; i < num_rels; i++)
-					{
-						pgstrom_data_store *pds = pmrels->inner_chunks[i];
-
-						jscale[i+1].window_size = (pds->kds.nitems -
-												   jscale[i+1].window_base);
-					}
-					break;
-				}
-
-				//HOGE: we have to add support to create a new task
-				//      in the GPU server side.
-
-
-
-				/*
-				 * Instead of detach and attach PDS here, we simply give
-				 * the previous PDS to the new pgjoin, to reduce waste of
-				 * spinlocks.
-				 *
-				 * NOTE: The inner buffer (pmrels) shall be attached within
-				 * gpujoin_create_task, so don't need to attach it here.
-				 */
-				pgjoin->pds_src = NULL;
-				pgjoin_new = (pgstrom_gpujoin *)
-					gpujoin_create_task(NULL, //gjs, //tentative
-										pgjoin->pmrels,
-										pds_src,
-										-1,
-										jscale);
-
-				/* add this new task to the pending list */
-				//HOGE: needs to correct gcontext handling!
-				//      this is executed on the server side!!!
-				gpuservPushGpuTask(pgjoin_new->task.gcontext,
-								   &pgjoin_new->task);
-				break;
-			}
-			Assert(jscale[i].window_base + jscale[i].window_size == nitems);
-		}
-#endif
 		/*
 		 * In case of CPU fallback, we have to move the entire outer-
 		 * join map into the host side, prior to fallback execution.
