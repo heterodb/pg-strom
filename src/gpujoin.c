@@ -3335,14 +3335,19 @@ gpujoin_codegen_projection(StringInfo source,
 		appendStringInfo(
 			&body,
 			"  if (r_buffer[%d] == 0)\n"
-			"    htup = NULL;\n"
-			"  else if (%s->format != KDS_FORMAT_BLOCK)\n"
-			"    htup = KDS_ROW_REF_HTUP(%s,r_buffer[%d],&t_self,NULL);\n"
+			"    htup = NULL;\n",
+			depth);
+		if (depth == 0)
+			appendStringInfo(
+				&body,
+				"  else if (%s->format == KDS_FORMAT_BLOCK)\n"
+				"    htup = KDS_BLOCK_REF_HTUP(%s,r_buffer[%d],&t_self,NULL);\n",
+				kds_label,
+				kds_label, depth);
+		appendStringInfo(
+			&body,
 			"  else\n"
-			"    htup = KDS_BLOCK_REF_HTUP(%s,r_buffer[%d],&t_self,NULL);\n",
-			depth,
-			kds_label,
-			kds_label, depth,
+			"    htup = KDS_ROW_REF_HTUP(%s,r_buffer[%d],&t_self,NULL);\n",
 			kds_label, depth);
 
 		/* System column reference if any */

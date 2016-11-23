@@ -401,8 +401,8 @@ gpuscan_exec_quals_row(kern_parambuf *kparams,
 		else if (rc)
 		{
 			/* OK, store the result */
-			kresults->results[base + offset] = (cl_uint)((char *)tupitem -
-														 (char *)kds_src);
+			kresults->results[base + offset] = (cl_uint)
+				((char *)(&tupitem->htup) - (char *)(kds_src));
 		}
 	}
 	__syncthreads();

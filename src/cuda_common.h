@@ -708,7 +708,9 @@ KDS_ROW_REF_HTUP(kern_data_store *kds,
 				 ItemPointerData *p_self,
 				 cl_uint *p_len)
 {
-	kern_tupitem   *tupitem = (kern_tupitem *)((char *)kds + tup_offset);
+	kern_tupitem   *tupitem = (kern_tupitem *)((char *)(kds)
+											   + tup_offset
+											   - offsetof(kern_tupitem, htup));
 	if (p_self)
 		*p_self = tupitem->t_self;
 	if (p_len)
