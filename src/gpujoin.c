@@ -78,8 +78,6 @@ typedef struct
 	int			num_rels;
 	char	   *kern_source;
 	int			extra_flags;
-	List	   *func_defs;
-	List	   *expr_defs;
 	List	   *used_params;
 	Expr	   *outer_quals;
 	double		outer_ratio;
@@ -109,8 +107,6 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 	privs = lappend(privs, makeInteger(gj_info->num_rels));
 	privs = lappend(privs, makeString(pstrdup(gj_info->kern_source)));
 	privs = lappend(privs, makeInteger(gj_info->extra_flags));
-	privs = lappend(privs, gj_info->func_defs);
-	privs = lappend(privs, gj_info->expr_defs);
 	exprs = lappend(exprs, gj_info->used_params);
 	exprs = lappend(exprs, gj_info->outer_quals);
 	privs = lappend(privs, makeInteger(double_as_long(gj_info->outer_ratio)));
@@ -146,8 +142,6 @@ deform_gpujoin_info(CustomScan *cscan)
 	gj_info->num_rels = intVal(list_nth(privs, pindex++));
 	gj_info->kern_source = strVal(list_nth(privs, pindex++));
 	gj_info->extra_flags = intVal(list_nth(privs, pindex++));
-	gj_info->func_defs = list_nth(privs, pindex++);
-	gj_info->expr_defs = list_nth(privs, pindex++);
 	gj_info->used_params = list_nth(exprs, eindex++);
 	gj_info->outer_quals = list_nth(exprs, eindex++);
 	gj_info->outer_ratio = long_as_double(intVal(list_nth(privs, pindex++)));
@@ -1801,6 +1795,7 @@ create_gpujoin_plan(PlannerInfo *root,
 	GpuJoinInfo		gj_info;
 	CustomScan	   *cscan;
 	codegen_context	context;
+	char		   *kern_source;
 	Plan		   *outer_plan;
 	ListCell	   *lc;
 	double			outer_nrows;
@@ -1928,14 +1923,23 @@ create_gpujoin_plan(PlannerInfo *root,
 	 */
 	pgstrom_init_codegen_context(&context);
 	context.pseudo_tlist = cscan->custom_scan_tlist;
+	kern_source = gpujoin_codegen(root, cscan, &gj_info, tlist, &context);
+	if (context.func_defs || context.expr_defs)
+	{
+		StringInfoData	buf;
 
-	gj_info.kern_source = gpujoin_codegen(root, cscan, &gj_info, tlist,
-										  &context);
-	gj_info.extra_flags = (DEVKERNEL_NEEDS_GPUJOIN |
+		initStringInfo(&buf);
+		pgstrom_codegen_func_declarations(&buf, &context);
+		pgstrom_codegen_expr_declarations(&buf, &context);
+		appendStringInfo(&buf, "%s", kern_source);
+
+		kern_source = buf.data;
+	}
+	gj_info.kern_source = kern_source;
+	gj_info.extra_flags = (DEVKERNEL_NEEDS_GPUSCAN |
+						   DEVKERNEL_NEEDS_GPUJOIN |
 						   DEVKERNEL_NEEDS_DYNPARA |
 						   context.extra_flags);
-	gj_info.func_defs = context.func_defs;
-	gj_info.expr_defs = context.expr_defs;
 	gj_info.used_params = context.used_params;
 
 	form_gpujoin_info(cscan, &gj_info);
@@ -3176,54 +3180,6 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 }
 
 /*
- * codegen for:
- * STATIC_FUNCTION(cl_bool)
- * gpujoin_outer_quals(kern_context *kcxt,
- *                     kern_data_store *kds,
- *                     size_t kds_index)
- */
-static void
-gpujoin_codegen_outer_quals(StringInfo source,
-							GpuJoinInfo *gj_info,
-							codegen_context *context)
-{
-	appendStringInfo(
-		source,
-		"STATIC_FUNCTION(cl_bool)\n"
-		"gpujoin_outer_quals(kern_context *kcxt,\n"
-		"                    kern_data_store *kds,\n"
-		"                    size_t kds_index)\n"
-		"{\n");
-	if (!gj_info->outer_quals)
-	{
-		appendStringInfo(
-			source,
-			"  return true;\n");
-	}
-	else
-	{
-		List   *pseudo_tlist_saved = context->pseudo_tlist;
-		Node   *outer_quals = (Node *) gj_info->outer_quals;
-		char   *expr_text;
-
-		context->pseudo_tlist = NIL;
-		expr_text = pgstrom_codegen_expression(outer_quals, context);
-		pgstrom_codegen_param_declarations(source, context);
-		pgstrom_codegen_var_declarations(source, context);
-
-		appendStringInfo(
-			source,
-			"\n"
-			"  return EVAL(%s);\n",
-			expr_text);
-		context->pseudo_tlist = pseudo_tlist_saved;
-	}
-	appendStringInfo(
-		source,
-		"}\n\n");
-}
-
-/*
  * gpujoin_codegen_var_decl
  *
  * declaration of the variables in 'used_var' list
@@ -3356,13 +3312,18 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 			if (keynode->varno == 0)
 			{
 				/* htup from KDS */
-				appendStringInfo(
+				appendStringInfoString(
 					source,
 					"  /* variable load in depth-0 (outer KDS) */\n"
 					"  colmeta = kds->colmeta;\n"
-					"  htup = (!o_buffer ? NULL :\n"
-					"          GPUJOIN_REF_HTUP(kds,o_buffer[0]));\n"
-					);
+					"  if (!o_buffer)\n"
+					"    htup = NULL;\n"
+					"  else if (kds->format != KDS_FORMAT_BLOCK)\n"
+					"    htup = KDS_ROW_REF_HTUP(kds,o_buffer[0],\n"
+					"                            NULL,NULL);\n"
+					"  else\n"
+					"    htup = KDS_BLOCK_REF_HTUP(kds,o_buffer[0],\n"
+					"                              NULL,NULL);\n");
 			}
 			else
 			{
@@ -3383,8 +3344,11 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 				if (keynode->varno < cur_depth)
 					appendStringInfo(
 						source,
-						"  htup = (!o_buffer ? NULL :\n"
-						"          GPUJOIN_REF_HTUP(kds_in,o_buffer[%d]));\n",
+						"  if (!o_buffer)\n"
+						"    htup = NULL;\n"
+						"  else\n"
+						"    htup = KDS_ROW_REF_HTUP(kds_in,o_buffer[%d],\n"
+						"                            NULL, NULL);\n",
 						keynode->varno);
 				else if (keynode->varno == cur_depth)
 					appendStringInfo(
@@ -3647,8 +3611,7 @@ gpujoin_codegen_projection(StringInfo source,
 
 				if (!__tle)
 					elog(ERROR, "Bug? no indirectly referenced Var-node exists in custom_scan_tlist");
-
-				refs_by_expr = bms_add_member(refs_by_vars, __tle->resno -
+				refs_by_expr = bms_add_member(refs_by_expr, __tle->resno -
 										FirstLowInvalidHeapAttributeNumber);
 			}
 			list_free(expr_vars);
@@ -3671,6 +3634,7 @@ gpujoin_codegen_projection(StringInfo source,
 		"{\n"
 		"  HeapTupleHeaderData *htup    __attribute__((unused));\n"
 		"  kern_data_store *kds_in      __attribute__((unused));\n"
+		"  ItemPointerData  t_self      __attribute__((unused));\n"
 		"  char *addr                   __attribute__((unused));\n"
 		"  char *extra_pos = extra_buf;\n");
 	codegen_tempvar_declaration(source, "temp");
@@ -3679,6 +3643,7 @@ gpujoin_codegen_projection(StringInfo source,
 	{
 		List	   *kvars_srcnum = NIL;
 		List	   *kvars_dstnum = NIL;
+		const char *kds_label;
 		cl_int		i, nattrs = -1;
 
 		/* collect information in this depth */
@@ -3715,17 +3680,29 @@ gpujoin_codegen_projection(StringInfo source,
 			&body,
 			"  /* ---- extract %s relation (depth=%d) */\n",
 			depth > 0 ? "inner" : "outer", depth);
-		if (depth > 0)
+
+		if (depth == 0)
+			kds_label = "kds_src";
+		else
+		{
 			appendStringInfo(
 				&body,
-				"  kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, %d);\n", depth);
+				"  kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, %d);\n",
+				depth);
+			kds_label = "kds_in";
+		}
 		appendStringInfo(
 			&body,
-			"  htup = (HeapTupleHeaderData *)\n"
-			"    (r_buffer[%d] == 0 ? NULL : ((char *)%s + r_buffer[%d]));\n",
+			"  if (r_buffer[%d] == 0)\n"
+			"    htup = NULL;\n"
+			"  else if (%s->format != KDS_FORMAT_BLOCK)\n"
+			"    htup = KDS_ROW_REF_HTUP(%s,r_buffer[%d],&t_self,NULL);\n"
+			"  else\n"
+			"    htup = KDS_BLOCK_REF_HTUP(%s,r_buffer[%d],&t_self,NULL);\n",
 			depth,
-			depth == 0 ? "kds_src" : "kds_in",
-			depth);
+			kds_label,
+			kds_label, depth,
+			kds_label, depth);
 
 		/* System column reference if any */
 		foreach (lc1, tlist_dev)
@@ -3738,25 +3715,25 @@ gpujoin_codegen_projection(StringInfo source,
 			attr = SystemAttributeDefinition(varattmaps[tle->resno-1], true);
 			appendStringInfo(
 				&body,
-				"    /* %s system column */\n"
-				"    if (!htup)\n"
-				"      tup_isnull[%d] = true;\n"
-				"    else {\n"
-				"      tup_isnull[%d] = false;\n"
-				"      tup_values[%d] = kern_getsysatt_%s(kds_src, htup);\n"
-				"    }\n",
+				"  /* %s system column */\n"
+				"  if (!htup)\n"
+				"    tup_isnull[%d] = true;\n"
+				"  else {\n"
+				"    tup_isnull[%d] = false;\n"
+				"    tup_values[%d] = kern_getsysatt_%s(%s, htup, &t_self);\n"
+				"  }\n",
 				NameStr(attr->attname),
 				tle->resno-1,
 				tle->resno-1,
 				tle->resno-1,
-				NameStr(attr->attname));
+				NameStr(attr->attname),
+				kds_label);
 		}
 
 		/* begin to walk on the tuple */
 		appendStringInfo(
 			&body,
-			"  EXTRACT_HEAP_TUPLE_BEGIN(addr, %s, htup);\n",
-			depth == 0 ? "kds_src" : "kds_in");
+			"  EXTRACT_HEAP_TUPLE_BEGIN(addr, %s, htup);\n", kds_label);
 
 		resetStringInfo(&temp);
 		for (i=1; i <= nattrs; i++)
@@ -4050,17 +4027,20 @@ gpujoin_codegen(PlannerInfo *root,
 {
 	StringInfoData source;
 	int			depth;
+	List	   *pseudo_tlist_saved;
 	ListCell   *cell;
 
 	initStringInfo(&source);
 
 	/*
-	 * gpujoin_outer_quals 
-	 *
-	 * TODO: For better KDS_FORMAT_ROW/BLOCK support, we should include
-	 * cuda_gpuscan.h instead.
+	 * gpuscan_quals_eval
 	 */
-	gpujoin_codegen_outer_quals(&source, gj_info, context);
+	pseudo_tlist_saved = context->pseudo_tlist;
+	codegen_gpuscan_quals(&source,
+						  context,
+						  cscan->scan.scanrelid,
+						  (List *)gj_info->outer_quals);
+	context->pseudo_tlist = pseudo_tlist_saved;
 
 	/*
 	 * gpujoin_join_quals

@@ -205,59 +205,6 @@ typedef struct
 	cl_uint				window_size;
 } kern_join_args_t;
 
-/*
- * gpujoin_exec_outerscan
- *
- * Evaluation of outer-relation's qualifier, if any. Elsewhere, it always
- * returns true.
- */
-STATIC_FUNCTION(cl_bool)
-gpujoin_outer_quals(kern_context *kcxt,
-					kern_data_store *kds,
-					size_t kds_index);
-
-KERNEL_FUNCTION(void)
-gpujoin_exec_outerscan(kern_gpujoin *kgjoin,
-					   kern_data_store *kds,
-					   kern_resultbuf *kresults)
-{
-	kern_parambuf  *kparams = KERN_GPUJOIN_PARAMBUF(kgjoin);
-	kern_context	kcxt;
-	cl_uint			window_base = kgjoin->jscale[0].window_base;
-	cl_uint			window_size = kgjoin->jscale[0].window_size;
-	cl_uint			kds_index = window_base + get_global_id();
-	cl_uint			count;
-	cl_uint			offset;
-	cl_bool			matched;
-	__shared__ cl_int base;
-
-	INIT_KERNEL_CONTEXT(&kcxt,gpujoin_exec_outerscan,kparams);
-	assert(kresults->nrels == 1);	/* only happen if depth == 1 */
-
-	if (kds_index < min(kds->nitems, window_base + window_size))
-		matched = gpujoin_outer_quals(&kcxt, kds, kds_index);
-	else
-		matched = false;
-
-	/* expand kresults->nitems */
-	offset = pgstromStairlikeSum(matched ? 1 : 0, &count);
-	if (count > 0)
-	{
-		if (get_local_id() == 0)
-			base = atomicAdd(&kresults->nitems, count);
-		__syncthreads();
-
-		if (base + offset >= kresults->nrooms)
-			STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
-		else if (matched)
-		{
-			HeapTupleHeaderData *htup = kern_get_tuple_row(kds, kds_index);
-			kresults->results[base + offset] = (size_t)htup - (size_t)kds;
-		}
-	}
-	kern_writeback_error_status(&kresults->kerror, kcxt.e);
-}
-
 KERNEL_FUNCTION(void)
 gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 					  kern_data_store *kds,
@@ -1444,6 +1391,7 @@ gpujoin_main(kern_gpujoin *kgjoin,		/* in/out: misc stuffs */
 	kern_resultbuf	   *kresults_tmp;
 	kern_join_scale	   *jscale = kgjoin->jscale;
 	kern_context		kcxt;
+	const void		   *kernel_func;
 	const void		   *kernel_projection;
 	void			  **kern_args;
 	kern_join_args_t   *kern_join_args;
@@ -1505,43 +1453,77 @@ retry_major:
 			kresults_src->nrooms = kresults_max_items / depth;
 			if (kds_src != NULL)
 			{
-				/* only happen if depth == 1 */
-				assert(depth == 1);
+				cl_uint		ntuples;
+				cl_uint		part_sz;
 
 				/* Launch:
-				 * gpujoin_exec_outerscan(kern_gpujoin *kgjoin,
-				 *                        kern_data_store *kds,
-				 *                        kern_resultbuf *kresults)
+				 * KERNEL_FUNCTION(void)
+				 * gpuscan_exec_quals_XXXX(kern_parambuf *kparams,
+				 *                         kern_resultbuf *kresults,
+				 *                         kern_data_store *kds_src,
+				 *                         kern_arg_t window_base,
+				 *                         kern_arg_t window_size)
 				 */
 				tv_start = GlobalTimer();
-
-				kern_args = (void **)
-					cudaGetParameterBuffer(sizeof(void *),
-										   sizeof(void *) * 3);
-				if (!kern_args)
-				{
-					STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelArgs);
-					goto out;
-				}
-				kern_args[0] = kgjoin;
-				kern_args[1] = kds_src;
-				kern_args[2] = kresults_src;
-
+				window_base = kgjoin->jscale[0].window_base;
 				window_size = kgjoin->jscale[0].window_size;
+
+				if (kds_src->format == KDS_FORMAT_ROW)
+				{
+					kernel_func = (void *)gpuscan_exec_quals_row;
+					part_sz = 0;
+					ntuples = window_size;
+				}
+				else
+				{
+					kernel_func = (void *)gpuscan_exec_quals_block;
+					part_sz = (kds_src->nrows_per_block +
+							   warpSize - 1) & ~(warpSize - 1);
+					ntuples = part_sz * window_size;
+				}
 				status = optimal_workgroup_size(&grid_sz,
 												&block_sz,
-												(const void *)
-												gpujoin_exec_outerscan,
-												window_size,
-												0, sizeof(kern_errorbuf));
+												kernel_func,
+												ntuples,
+												0,
+												sizeof(cl_uint));
 				if (status != cudaSuccess)
 				{
 					STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
 					goto out;
 				}
 
-				status = cudaLaunchDevice((void *)gpujoin_exec_outerscan,
-										  kern_args, grid_sz, block_sz,
+				/*
+				 * adjust block-size if KDS_FORMAT_BLOCK and partition size
+				 * is less than the block-size.
+				 */
+				if (kds_src->format == KDS_FORMAT_BLOCK &&
+					part_sz < block_sz.x)
+				{
+					cl_uint		nparts_per_block = block_sz.x / part_sz;
+
+					block_sz.x = nparts_per_block * part_sz;
+					grid_sz.x = (kds_src->nitems +
+								 nparts_per_block - 1) / nparts_per_block;
+				}
+
+				/* call the gpuscan_exec_quals_XXXX */
+				kern_args = (void **)
+					cudaGetParameterBuffer(sizeof(void *),
+										   sizeof(void *) * 5);
+				if (!kern_args)
+				{
+					STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelArgs);
+					goto out;
+				}
+				kern_args[0] = KERN_GPUJOIN_PARAMBUF(kgjoin);
+				kern_args[1] = kresults_src;
+				kern_args[2] = kds_src;
+				kern_args[3] = (void *)(window_base);
+				kern_args[4] = (void *)(window_size);
+
+				status = cudaLaunchDevice((void *)kernel_func, kern_args,
+										  grid_sz, block_sz,
 										  sizeof(kern_errorbuf) * block_sz.x,
 										  NULL);
 				if (status != cudaSuccess)

@@ -1164,6 +1164,7 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 
 	/* OK, write back the kernel source */
 	appendStringInfo(kern, "%s\n%s\n", decl.data, body.data);
+	appendStringInfoString(kern, "#define CUDA_GPUSCAN_HAS_PROJECTION 1\n");
 	list_free(tlist_dev);
 	pfree(temp.data);
 	pfree(decl.data);
@@ -1652,7 +1653,8 @@ assign_gpuscan_session_info(StringInfo buf, GpuTaskState_v2 *gts)
 {
 	CustomScan *cscan = (CustomScan *)gts->css.ss.ps.plan;
 
-	Assert(pgstrom_plan_is_gpuscan((Plan *) cscan));
+	Assert(pgstrom_plan_is_gpuscan((Plan *) cscan) ||
+		   pgstrom_plan_is_gpujoin((Plan *) cscan));
 
 	if (cscan->custom_scan_tlist != NIL)
 	{
@@ -2531,17 +2533,17 @@ gpuscan_next_tuple(GpuTaskState_v2 *gts)
 			kds_offset = kresults->results[gss->gts.curr_index++];
 			if (pds_src->kds.format == KDS_FORMAT_ROW)
 			{
-				tuple->t_data = KERN_DATA_STORE_ROW_HTUP(&pds_src->kds,
-														 kds_offset,
-														 &tuple->t_self,
-														 &tuple->t_len);
+				tuple->t_data = KDS_ROW_REF_HTUP(&pds_src->kds,
+												 kds_offset,
+												 &tuple->t_self,
+												 &tuple->t_len);
 			}
 			else
 			{
-				tuple->t_data = KERN_DATA_STORE_BLOCK_HTUP(&pds_src->kds,
-														   kds_offset,
-														   &tuple->t_self,
-														   &tuple->t_len);
+				tuple->t_data = KDS_BLOCK_REF_HTUP(&pds_src->kds,
+												   kds_offset,
+												   &tuple->t_self,
+												   &tuple->t_len);
 			}
 			slot = gss->gts.css.ss.ss_ScanTupleSlot;
 			ExecStoreTuple(tuple, slot, InvalidBuffer, false);

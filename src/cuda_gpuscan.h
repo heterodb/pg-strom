@@ -155,15 +155,15 @@ PageGetMaxOffsetNumber(PageHeaderData *page)
 #endif	/* __CUDACC__ */
 
 /*
- * KERN_DATA_STORE_BLOCK_HTUP
+ * KDS_BLOCK_REF_HTUP
  *
  * It pulls a HeapTupleHeader by a pair of KDS and lp_offset; 
  */
 STATIC_INLINE(HeapTupleHeaderData *)
-KERN_DATA_STORE_BLOCK_HTUP(kern_data_store *kds,
-						   cl_uint lp_offset,
-						   ItemPointerData *p_self,
-						   cl_uint *p_len)
+KDS_BLOCK_REF_HTUP(kern_data_store *kds,
+				   cl_uint lp_offset,
+				   ItemPointerData *p_self,
+				   cl_uint *p_len)
 {
 	ItemIdData	   *lpp = (ItemIdData *)((char *)kds + lp_offset);
 	cl_uint			head_size;
@@ -223,13 +223,12 @@ gpuscan_projection(kern_context *kcxt,
  * kernel entrypoint of GpuScan for KDS_FORMAT_BLOCK
  */
 KERNEL_FUNCTION(void)
-gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
+gpuscan_exec_quals_block(kern_parambuf *kparams,
+						 kern_resultbuf *kresults,
 						 kern_data_store *kds_src,
 						 kern_arg_t window_base,
 						 kern_arg_t window_size)
 {
-	kern_parambuf	   *kparams = KERN_GPUSCAN_PARAMBUF(kgpuscan);
-	kern_resultbuf	   *kresults = KERN_GPUSCAN_RESULTBUF(kgpuscan);
 	kern_context		kcxt;
 	cl_uint				part_id;	/* partition index */
 	cl_uint				part_sz;	/* partition size */
@@ -344,7 +343,7 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 	} while (gang_flag);
 out:		
 	/* write back error status if any */
-	kern_writeback_error_status(&kgpuscan->kerror, kcxt.e);
+	kern_writeback_error_status(&kresults->kerror, kcxt.e);
 }
 
 /*
@@ -353,13 +352,12 @@ out:
  * kernel entrypoint of GpuScan for KDS_FORMAT_ROW
  */
 KERNEL_FUNCTION(void)
-gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
+gpuscan_exec_quals_row(kern_parambuf *kparams,
+					   kern_resultbuf *kresults,
 					   kern_data_store *kds_src,
 					   kern_arg_t window_base,
 					   kern_arg_t window_size)
 {
-	kern_parambuf  *kparams = KERN_GPUSCAN_PARAMBUF(kgpuscan);
-	kern_resultbuf *kresults = KERN_GPUSCAN_RESULTBUF(kgpuscan);
 	kern_context	kcxt;
 	kern_tupitem   *tupitem = NULL;
 	cl_bool			rc;
@@ -485,16 +483,14 @@ gpuscan_projection_row(kern_gpuscan *kgpuscan,
 			else
 			{
 				kds_offset = kresults->results[get_global_id()];
-				htup = KERN_DATA_STORE_ROW_HTUP(kds_src, kds_offset,
-												&t_self, NULL);
+				htup = KDS_ROW_REF_HTUP(kds_src, kds_offset, &t_self, NULL);
 			}
 		}
 		else
 		{
 			assert(!kresults->all_visible);
 			kds_offset = kresults->results[get_global_id()];
-			htup = KERN_DATA_STORE_BLOCK_HTUP(kds_src, kds_offset,
-											  &t_self, NULL);
+			htup = KDS_BLOCK_REF_HTUP(kds_src, kds_offset, &t_self, NULL);
 		}
 		/* extract to the private buffer */
 		gpuscan_projection(&kcxt,
@@ -613,16 +609,14 @@ gpuscan_projection_slot(kern_gpuscan *kgpuscan,
 			else
 			{
 				kds_offset = kresults->results[get_global_id()];
-				htup = KERN_DATA_STORE_ROW_HTUP(kds_src, kds_offset,
-												&t_self, NULL);
+				htup = KDS_ROW_REF_HTUP(kds_src, kds_offset, &t_self, NULL);
 			}
 		}
 		else
 		{
 			assert(!kresults->all_visible);
 			kds_offset = kresults->results[get_global_id()];
-			htup = KERN_DATA_STORE_BLOCK_HTUP(kds_src, kds_offset,
-											  &t_self, NULL);
+			htup = KDS_BLOCK_REF_HTUP(kds_src, kds_offset, &t_self, NULL);
 		}
 	}
 	else
@@ -733,16 +727,17 @@ gpuscan_main(kern_gpuscan *kgpuscan,
 
 		kernel_args = (void **)
 			cudaGetParameterBuffer(sizeof(void *),
-								   sizeof(void *) * 4);
+								   sizeof(void *) * 5);
 		if (!kernel_args)
 		{
 			STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelArgs);
 			goto out;
 		}
-		kernel_args[0] = kgpuscan;
-		kernel_args[1] = kds_src;
-		kernel_args[2] = (void *)(0);				/* window_base */
-		kernel_args[3] = (void *)(kds_src->nitems);	/* window_size */
+		kernel_args[0] = KERN_GPUSCAN_PARAMBUF(kgpuscan);
+		kernel_args[1] = KERN_GPUSCAN_RESULTBUF(kgpuscan);
+		kernel_args[2] = kds_src;
+		kernel_args[3] = (void *)(0);				/* window_base */
+		kernel_args[4] = (void *)(kds_src->nitems);	/* window_size */
 
 		status = cudaLaunchDevice(kernel_func,
 								  kernel_args,

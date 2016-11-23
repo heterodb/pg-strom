@@ -18,6 +18,29 @@
 #ifndef CUDA_TERMINAL_H
 #define CUDA_TERMINAL_H
 
+#ifdef CUDA_GPUSCAN_H
+/*
+ * If cuda_gpuscan.h is required by GpuJoin or GpuPreAgg, it does not define
+ * gpuscan_projection of course. So, we need to have a stub in this case.
+ */
+#ifndef CUDA_GPUSCAN_HAS_PROJECTION
+STATIC_FUNCTION(void)
+gpuscan_projection(kern_context *kcxt,
+                   kern_data_store *kds_src,
+                   HeapTupleHeaderData *htup,
+                   ItemPointerData *t_self,
+                   kern_data_store *kds_dst,
+                   cl_uint dst_nitems,
+                   Datum *tup_values,
+                   cl_bool *tup_isnull,
+                   cl_bool *tup_internal)
+{
+	STROM_SET_ERROR(&kcxt->e, StromError_WrongCodeGeneration);
+	return;
+}
+#endif	/* CUDA_GPUSCAN_HAS_PROJECTION */
+#endif	/* CUDA_GPUSCAN_H */
+
 #ifndef CUDA_NUMERIC_H
 /*
  * pg_numeric_to_varlena - has to be defined in cuda_numeric.h if NUMERIC

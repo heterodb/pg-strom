@@ -703,10 +703,10 @@ typedef struct {
 
 /* access macro for row-format by tup-offset */
 STATIC_INLINE(HeapTupleHeaderData *)
-KERN_DATA_STORE_ROW_HTUP(kern_data_store *kds,
-						 cl_uint tup_offset,
-						 ItemPointerData *p_self,
-						 cl_uint *p_len)
+KDS_ROW_REF_HTUP(kern_data_store *kds,
+				 cl_uint tup_offset,
+				 ItemPointerData *p_self,
+				 cl_uint *p_len)
 {
 	kern_tupitem   *tupitem = (kern_tupitem *)((char *)kds + tup_offset);
 	if (p_self)
@@ -741,8 +741,8 @@ KERN_HASH_NEXT_ITEM(kern_data_store *kds, kern_hashitem *khitem)
 	return (kern_hashitem *)((char *)kds + khitem->next);
 }
 
-#define KERN_DATA_STORE_HASH_HTUP(kds,tup_offset,p_self,p_len)	\
-	KERN_DATA_STORE_ROW_HTUP((kds),(tup_offset),(p_self),(p_len))
+#define KDS_HASH_REF_HTUP(kds,tup_offset,p_self,p_len)	\
+	KDS_HASH_REF_HTUP((kds),(tup_offset),(p_self),(p_len))
 
 /* access macro for tuple-slot format */
 #define KERN_DATA_STORE_SLOT_LENGTH(kds,nitems)				\
