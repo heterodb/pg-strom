@@ -1947,365 +1947,6 @@ create_gpujoin_plan(PlannerInfo *root,
 	return &cscan->scan.plan;
 }
 
-#ifdef NOT_USED
-/*
- * fixup_device_only_expr - replace varnode with INDEX_VAR based on
- * the previous custom_scan_tlist, by newer tlist_dev.
- */
-static Node *
-fixup_device_only_expr(Node *node, List **p_tlist_dev)
-{
-	if (node == NULL)
-		return NULL;
-
-	if (IsA(node, Var))
-	{
-		TargetEntry	   *tle_new;
-		Var			   *var = (Var *) node;
-		ListCell	   *lc;
-
-		Assert(var->varno == INDEX_VAR);
-		Assert(var->varlevelsup == 0);
-
-		foreach (lc, *p_tlist_dev)
-		{
-			TargetEntry	   *tle = lfirst(lc);
-			Var			   *curr = (Var *) tle->expr;
-
-			if (!IsA(curr, Var))
-				continue;
-
-			if (var->varno == curr->varno &&
-				var->varattno == curr->varattno)
-			{
-				return (Node *) makeVar(INDEX_VAR,
-										tle->resno,
-										var->vartype,
-										var->vartypmod,
-										var->varcollid,
-										0);
-			}
-		}
-		/* not found, so add a new junk target-entry */
-		tle_new = makeTargetEntry((Expr *) copyObject(var),
-								  list_length(*p_tlist_dev) + 1,
-								  NULL,
-								  true);
-		*p_tlist_dev = lappend(*p_tlist_dev, tle_new);
-
-		return (Node *) makeVar(INDEX_VAR,
-								tle_new->resno,
-								var->vartype,
-								var->vartypmod,
-								var->varcollid,
-								0);
-	}
-	return expression_tree_mutator(node, fixup_device_only_expr, p_tlist_dev);
-}
-
-/*
- * finalize_device_only_expr
- *
- * 
- *
- */
-typedef struct
-{
-	List	   *old_tlist_dev;
-	List	   *old_src_depth;
-	List	   *old_src_resno;
-	List	   *new_tlist_dev;
-	List	   *new_src_depth;
-	List	   *new_src_resno;
-} finalize_device_only_expr_context;
-
-static bool
-finalize_device_only_expr(Node *node, finalize_device_only_expr_context *con)
-{
-	if (!node)
-		return false;
-	if (IsA(node, Var))
-	{
-		Var			   *var = (Var *) node;
-		int				src_depth;
-		int				src_resno;
-		ListCell	   *lc1;
-		ListCell	   *lc2;
-		ListCell	   *lc3;
-
-		Assert(var->varno == INDEX_VAR);
-		src_depth = list_nth_int(con->old_src_depth, var->varattno - 1);
-		src_resno = list_nth_int(con->old_src_resno, var->varattno - 1);
-		forthree (lc1, con->new_tlist_dev,
-				  lc2, con->new_src_depth,
-				  lc3, con->new_src_resno)
-		{
-			TargetEntry	   *tle_new = lfirst(lc1);
-			int				new_depth = lfirst_int(lc2);
-			int				new_resno = lfirst_int(lc3);
-
-			if (src_depth == new_depth &&
-				src_resno == new_resno)
-			{
-				Oid		expr_typoid = exprType((Node *)tle_new->expr);
-				int32	expr_typmod = exprTypmod((Node *)tle_new->expr);
-				Oid		expr_collid = exprCollation((Node *)tle_new->expr);
-
-				if (var->vartype != expr_typoid ||
-					var->vartypmod != expr_typmod ||
-					var->varcollid != expr_collid)
-					elog(ERROR, "Bug? depth/resno mismatch");
-
-				var->varno = INDEX_VAR;
-				var->varattno = tle_new->resno;
-				return false;
-			}
-		}
-		elog(ERROR, "Bug? Var referenced by device expression was not found");
-	}
-	return expression_tree_walker(node, finalize_device_only_expr, con);
-}
-
-/*
- * pgstrom_post_planner_gpujoin
- *
- * Applies device projection of GpuJoin
- */
-void
-pgstrom_post_planner_gpujoin(PlannedStmt *pstmt, Plan **p_curr_plan)
-{
-	CustomScan	   *cscan = (CustomScan *)(*p_curr_plan);
-	GpuJoinInfo	   *gj_info = deform_gpujoin_info(cscan);
-	List		   *tlist_old = cscan->scan.plan.targetlist;
-	List		   *tlist_new = NIL;
-	List		   *tlist_dev = NIL;
-	List		   *junk_vars = NIL;
-	List		   *new_src_depth = NIL;
-	List		   *new_src_resno = NIL;
-	const char	   *devproj_function;
-	cl_uint			extra_maxlen;
-	codegen_context	context;
-	StringInfoData	source;
-	ListCell	   *lc;
-
-	Assert(pgstrom_plan_is_gpujoin((Plan *) cscan));
-
-	/*
-	 * First of all, we try to push down complicated expression into
-	 * the device projection if it is device executable.
-	 */
-	foreach (lc, tlist_old)
-	{
-		TargetEntry	   *tle = lfirst(lc);
-		TargetEntry	   *tle_new;
-		AttrNumber		varattno;
-
-		if (IsA(tle->expr, Var))
-		{
-			Var	   *var = (Var *) tle->expr;
-
-			/* sanity checks */
-			Assert(var->varno == INDEX_VAR);
-			Assert(var->varlevelsup == 0);
-			/* add primitive Var-node on the tlist_dev */
-			varattno = add_unique_expression(tle->expr, &tlist_dev, false);
-			/* add a varnode to reference above entry */
-			tle_new = makeTargetEntry((Expr *) makeVar(INDEX_VAR,
-													   varattno,
-													   var->vartype,
-													   var->vartypmod,
-													   var->varcollid,
-													   0),
-									  list_length(tlist_new) + 1,
-									  tle->resname,
-									  tle->resjunk);
-			tlist_new = lappend(tlist_new, tle_new);
-		}
-		else if (pgstrom_device_expression(tle->expr))
-		{
-			Oid		type_oid = exprType((Node *)tle->expr);
-			int32	type_mod = exprTypmod((Node *)tle->expr);
-			Oid		coll_oid = exprCollation((Node *)tle->expr);
-			List   *temp = pull_vars_of_level((Node *)tle->expr, 0);
-
-			/* Add device executable expression onto the tlist_dev */
-			varattno = add_unique_expression(tle->expr, &tlist_dev, false);
-			/* add a varnode to reference above expression */
-			tle_new = makeTargetEntry((Expr *) makeVar(INDEX_VAR,
-													   varattno,
-													   type_oid,
-													   type_mod,
-													   coll_oid,
-													   0),
-									  list_length(tlist_new) + 1,
-									  tle->resname,
-									  tle->resjunk);
-			tlist_new = lappend(tlist_new, tle_new);
-			/* var-nodes in the expression node has to be added later */
-			junk_vars = list_concat(junk_vars, temp);
-		}
-		else
-		{
-			List	   *vars_list;
-			ListCell   *cell;
-			Node	   *expr_new;
-			/*
-			 * Elsewhere, expression is not device executable, thus
-			 * we have to run host side projection to run host-only
-			 * expression node on the ExecProject().
-			 */
-			vars_list = pull_vars_of_level((Node *) tle->expr, 0);
-			foreach (cell, vars_list)
-			{
-				Var			   *var = (Var *) lfirst(cell);
-
-				Assert(var->varno == INDEX_VAR);
-				add_unique_expression((Expr *) var, &tlist_dev, false);
-			}
-			expr_new = replace_varnode_with_tlist_dev((Node *) tle->expr,
-													  tlist_dev);
-			tle_new = makeTargetEntry((Expr *) expr_new,
-									  list_length(tlist_new) + 1,
-									  tle->resname,
-									  tle->resjunk);
-			tlist_new = lappend(tlist_new, tle_new);
-		}
-	}
-
-	/*
-	 * NOTE: var-nodes in device executable expression also have to be
-	 * added to the tlist_dev as junk attribute, because
-	 * - KVAR_%u needs to have an index on tlist_dev
-	 * - src_depth/src_resno also associated with index on tlist_dev
-	 */
-	foreach (lc, junk_vars)
-		add_unique_expression(lfirst(lc), &tlist_dev, true);
-
-	/*
-	 * tlist_dev shall become new custom_scan_tlist, thus, it also used
-	 * to solve the column name in EXPLAIN command. If join-qualifiers
-	 * and others references untracked var-nodes, we need to add target
-	 * entries with resjunk=true.
-	 */
-	gj_info->hash_outer_keys = (List *)
-		fixup_device_only_expr((Node *) gj_info->hash_outer_keys, &tlist_dev);
-	gj_info->hash_inner_keys = (List *)
-		fixup_device_only_expr((Node *) gj_info->hash_inner_keys, &tlist_dev);
-	gj_info->join_quals = (List *)
-		fixup_device_only_expr((Node *) gj_info->join_quals, &tlist_dev);
-	gj_info->other_quals = (List *)
-		fixup_device_only_expr((Node *) gj_info->other_quals, &tlist_dev);
-	gj_info->outer_quals = (Expr *)
-		fixup_device_only_expr((Node *) gj_info->outer_quals, &tlist_dev);
-
-	/*
-	 * At this point, all the varnodes in tlist_new has varno==INDEX_VAR,
-	 * and references a particular target-entry on the tlist_dev.
-	 * The tlist_dev also contains the varnodes with varno==INDEV_VAR,
-	 * however, its varattno assumes a target-entry on the original
-	 * custom_scan_tlist, but to be replaced by tlist_dev.
-	 * So, tlist_dev has to be fixed up to reference correct columns.
-	 */
-
-	// 1st: replace Var node to the new policy
-	foreach (lc, tlist_dev)
-	{
-		TargetEntry	   *tle = lfirst(lc);
-		cl_int			src_depth;
-		cl_int			src_resno;
-
-		if (IsA(tle->expr, Var))
-		{
-			Var			   *var_cur = (Var *) tle->expr;
-			TargetEntry	   *tle_old;
-			cl_int			index = var_cur->varattno - 1;
-
-			Assert(var_cur->varno == INDEX_VAR);
-			tle_old = list_nth(cscan->custom_scan_tlist, index);
-			Assert(exprType((Node *)var_cur) ==
-				   exprType((Node *)tle_old->expr));
-			Assert(exprTypmod((Node *)var_cur) ==
-				   exprTypmod((Node *)tle_old->expr));
-			Assert(exprCollation((Node *)var_cur) ==
-				   exprCollation((Node *)tle_old->expr));
-			tle->expr = copyObject(tle_old->expr);
-			/* update src_depth/src_resno */
-			src_depth = list_nth_int(gj_info->ps_src_depth, index);
-			src_resno = list_nth_int(gj_info->ps_src_resno, index);
-		}
-		else
-		{
-			/* set dummy src_depth/src_resno */
-			src_depth = -1;
-			src_resno = -1;
-		}
-		new_src_depth = lappend_int(new_src_depth, src_depth);
-		new_src_resno = lappend_int(new_src_resno, src_resno);
-	}
-
-	// 2nd: replace Expression node to the new tlist
-	foreach (lc, tlist_dev)
-	{
-		TargetEntry	   *tle = lfirst(lc);
-
-		if (!IsA(tle->expr, Var))
-		{
-			finalize_device_only_expr_context con;
-			/*
-			 * Also fixup varnodes in this expression, but it will
-			 * reference the varnode in the new tlist_dev.
-			 */
-			con.old_tlist_dev = cscan->custom_scan_tlist;
-			con.old_src_depth = gj_info->ps_src_depth;
-			con.old_src_resno = gj_info->ps_src_resno;
-			con.new_tlist_dev = tlist_dev;
-			con.new_src_depth = new_src_depth;
-			con.new_src_resno = new_src_resno;
-			finalize_device_only_expr((Node *) tle->expr, &con);
-		}
-	}
-
-	/*
-	 * TODO: We need to compare two scenarios; whether device projection
-	 * is actually cheaper than CPU projection. In most usages, device
-	 * projection has advantages, however, we may pay attention if result
-	 * width is larger than CPU projection case.
-	 */
-	cscan->scan.plan.targetlist = tlist_new;
-	cscan->custom_scan_tlist = tlist_dev;
-	gj_info->ps_src_depth = new_src_depth;
-	gj_info->ps_src_resno = new_src_resno;
-
-	/*
-	 * Then, construct kernel functions including device projections,
-	 * according to the new target-list.
-	 */
-	initStringInfo(&source);
-
-	pgstrom_init_codegen_context(&context);
-	context.func_defs = gj_info->func_defs;
-	context.expr_defs = gj_info->expr_defs;
-	context.used_params = gj_info->used_params;
-	context.extra_flags = gj_info->extra_flags;
-
-	devproj_function = codegen_device_projection(cscan, gj_info, &context,
-												 &extra_maxlen);
-	pgstrom_codegen_func_declarations(&source, &context);
-	pgstrom_codegen_expr_declarations(&source, &context);
-	appendStringInfo(&source, "%s\n", gj_info->kern_source);
-	appendStringInfo(&source, "%s\n", devproj_function);
-
-	gj_info->func_defs = context.func_defs;
-	gj_info->expr_defs = context.expr_defs;
-	gj_info->used_params = context.used_params;
-	gj_info->extra_flags = context.extra_flags;
-	gj_info->kern_source = source.data;
-	gj_info->extra_maxlen = extra_maxlen;
-
-	form_gpujoin_info(cscan, gj_info);
-}
-#endif	/* __NOT_USED__ */
-
 typedef struct
 {
 	int		depth;
@@ -4540,6 +4181,7 @@ gpujoin_create_task(GpuJoinState *gjs,
 	pgjoin->pmrels = multirels_attach_buffer(pmrels);
 	pgjoin->pds_src = pds_src;
 	pgjoin->pds_dst = NULL;		/* to be set later */
+	pgjoin->rt_stat = gjs->rt_stat;
 
 	pgjoin->kern.kresults_1_offset = 0xe7e7e7e7;	/* to be set later */
 	pgjoin->kern.kresults_2_offset = 0x7e7e7e7e;	/* to be set later */
@@ -4737,41 +4379,6 @@ major_retry:
 	pgjoin->kern.kresults_max_items = max_items;
 	pgjoin->kern.num_rels = gjs->num_rels;
 
-#ifdef NOT_USED
-	/*
-	 * v9.6 or later, a backend connect to a particular GPU server which
-	 * is bound to a particular GPU, so we don't need to pay attention
-	 * multi GPU support.
-	 */
-
-
-
-
-	/*
-	 * Attach the inner multi-relations buffer, if here is at least one
-	 * active one; that already has device memory and no need to kick
-	 * inner DMA again.
-	 * gpujoin_complete_task() unreference the device memory soon, if no
-	 * other task acquired the segment. So, getting the buffer here, prior
-	 * to the launch of task, enables to reduce number of inner DMA.
-	 *
-	 * One other side-effect is, it becomes to tend to use a particular GPU
-	 * device, rather than the round robin assignment. However, round-robin
-	 * GPU assignment within a process will not make sense no longer, because
-	 * PostgreSQL v9.6 support CustomScan under the Gather node, for CPU level
-	 * parallelism. So, even if a particular process sticks on a particular
-	 * GPU, it shall be distributed to the multiple GPUs in CPU level.
-	 */
-	for (i=0; i < gcontext->num_context; i++)
-	{
-		if (pmrels->refcnt[i] > 0)
-		{
-			pgjoin->task.cuda_index = i;
-			multirels_get_buffer(pmrels, pgjoin);
-			break;
-		}
-	}
-#endif
 	return &pgjoin->task;
 }
 
@@ -5926,7 +5533,7 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 	/* inner multi relations */
 	//multirels_send_buffer(pmrels, &pgjoin->task);
 	//HOGE:
-	if (multirels_get_buffer(pgjoin, cuda_stream))
+	if (!multirels_get_buffer(pgjoin, cuda_stream))
 		goto out_of_resource;
 
 
@@ -7002,6 +6609,8 @@ __multirels_get_buffer(pgstrom_gpujoin *pgjoin,
 		elog(ERROR, "failed on cuEventRecord: %s", errorText(rc));
 	/* Save the event object and device memory */
 	pmrels->ev_loaded = ev_loaded;
+	pmrels->m_kmrels = m_kmrels;
+	pmrels->m_ojmaps = m_ojmaps;
 	pgjoin->m_kmrels = m_kmrels;
 	pgjoin->m_ojmaps = m_ojmaps;
 
@@ -7073,6 +6682,14 @@ multirels_put_buffer(pgstrom_gpujoin *pgjoin)
 		pmrels->m_kmrels = 0UL;
 
 		/*
+		 * TODO: We have to care about outer-join map, if no concurrent
+		 * task does not exist.
+		 * colocation is not a lightweight task and oj-map is small chunk,
+		 * so it is an option to keep it on the device side.
+		 * In this case, who should own the region?
+		 */
+
+		/*
 		 * Also destroy the event object
 		 */
 		rc = cuEventDestroy(pmrels->ev_loaded);
@@ -7082,74 +6699,6 @@ multirels_put_buffer(pgstrom_gpujoin *pgjoin)
 	}
 	SpinLockRelease(&pmrels->lock);
 }
-
-#if 0
-static void
-multirels_send_buffer(pgstrom_multirels *pmrels, GpuTask *gtask)
-{
-	cl_int		cuda_index = gtask->cuda_index;
-	CUstream	cuda_stream = gtask->cuda_stream;
-	CUevent		ev_loaded;
-	CUresult	rc;
-
-	Assert(&pmrels->gjs->gts == gtask->gts);
-	if (!pmrels->ev_loaded[cuda_index])
-	{
-		GpuJoinState   *gjs = pmrels->gjs;
-		CUdeviceptr		m_kmrels = pmrels->m_kmrels[cuda_index];
-		Size			total_length = 0;
-		Size			length;
-		cl_int			i;
-
-		rc = cuEventCreate(&ev_loaded, CU_EVENT_DEFAULT);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
-
-		/* DMA send to the kern_multirels buffer */
-		length = offsetof(kern_multirels, chunks[pmrels->kern.nrels]);
-		rc = cuMemcpyHtoDAsync(m_kmrels, &pmrels->kern, length, cuda_stream);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-		total_length += length;
-
-		for (i=0; i < pmrels->kern.nrels; i++)
-		{
-			pgstrom_data_store *pds = pmrels->inner_chunks[i];
-			kern_data_store	   *kds = pds->kds;
-			Size				offset = pmrels->kern.chunks[i].chunk_offset;
-
-			rc = cuMemcpyHtoDAsync(m_kmrels + offset, kds, kds->length,
-								   cuda_stream);
-			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-			total_length += kds->length;
-		}
-		/* DMA Send synchronization */
-		rc = cuEventRecord(ev_loaded, cuda_stream);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuEventRecord: %s", errorText(rc));
-		/* save the event */
-		pmrels->ev_loaded[cuda_index] = ev_loaded;
-
-		/* this task is the inner loader */
-		((pgstrom_gpujoin *)gtask)->is_inner_loader = true;
-
-		/* update statistics */
-		gjs->gts.pfm.gjoin.num_inner_dma_send++;
-		gjs->gts.pfm.gjoin.bytes_inner_dma_send += total_length;
-	}
-	else
-	{
-		/* DMA Send synchronization, kicked by other task */
-		ev_loaded = pmrels->ev_loaded[cuda_index];
-		rc = cuStreamWaitEvent(cuda_stream, ev_loaded, 0);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuStreamWaitEvent: %s", errorText(rc));
-		/* this task is not an inner loader */
-		((pgstrom_gpujoin *)gtask)->is_inner_loader = false;
-	}
-}
-#endif
 
 static void
 colocate_outer_join_maps_to_host(pgstrom_multirels *pmrels)
