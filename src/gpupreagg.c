@@ -46,6 +46,8 @@
 #include "cuda_numeric.h"
 #include "cuda_gpupreagg.h"
 
+static create_upper_paths_hook_type create_upper_paths_next;
+static CustomPathMethods		gpupreagg_path_methods;
 static CustomScanMethods		gpupreagg_scan_methods;
 static CustomExecMethods		gpupreagg_exec_methods;
 static bool						enable_gpupreagg;
@@ -145,7 +147,7 @@ deform_gpupreagg_info(CustomScan *cscan)
 
 typedef struct
 {
-	GpuTaskState	gts;
+	GpuTaskState_v2	gts;
 	ProjectionInfo *bulk_proj;
 	TupleTableSlot *bulk_slot;
 	cl_int			safety_limit;
@@ -219,7 +221,7 @@ typedef struct gpupreagg_segment
  */
 typedef struct
 {
-	GpuTask			task;
+	GpuTask_v2		task;
 	gpupreagg_segment *segment;		/* reference to the preagg segment */
 	cl_int			segment_id;		/* my index within segment */
 	bool			is_terminator;	/* If true, collector of final result */
@@ -242,11 +244,11 @@ typedef struct
 } pgstrom_gpupreagg;
 
 /* declaration of static functions */
-static bool		gpupreagg_task_process(GpuTask *gtask);
-static bool		gpupreagg_task_complete(GpuTask *gtask);
-static void		gpupreagg_task_release(GpuTask *gtask);
-static GpuTask *gpupreagg_next_chunk(GpuTaskState *gts);
-static TupleTableSlot *gpupreagg_next_tuple(GpuTaskState *gts);
+static bool		gpupreagg_task_process(GpuTask_v2 *gtask);
+static bool		gpupreagg_task_complete(GpuTask_v2 *gtask);
+static void		gpupreagg_task_release(GpuTask_v2 *gtask);
+static GpuTask_v2 *gpupreagg_next_chunk(GpuTaskState_v2 *gts);
+static TupleTableSlot *gpupreagg_next_tuple(GpuTaskState_v2 *gts);
 
 /*
  * Arguments of alternative functions.
@@ -735,6 +737,175 @@ aggfunc_lookup_by_oid(Oid aggfnoid)
 	return NULL;
 }
 
+
+
+
+
+
+/*
+ * gpupreagg_device_executable
+ *
+ * checks whether the aggregate function/grouping clause are executable
+ * on the device side.
+ */
+static bool
+gpupreagg_device_executable(PlannerInfo *root,
+							RelOptInfo *input_rel,
+							RelOptInfo *output_rel)
+{
+	Query		   *parse = root->parse;
+	PathTarget	   *target = root->upper_targets[UPPERREL_GROUP_AGG];
+	devtype_info   *dtype;
+	devfunc_info   *dfunc;
+	int				resno = 1;
+	bool			agg_nogroup = true;
+	ListCell	   *lc;
+	ListCell	   *cell;
+
+	foreach (lc, target->exprs)
+	{
+		Expr   *expr = lfirst(lc);
+
+		if (IsA(expr, Aggref))
+		{
+			Aggref	   *aggref = (Aggref *) expr;
+			const aggfunc_catalog_t *aggfn_cat;
+
+			if (target->sortgrouprefs[resno - 1] > 0)
+			{
+				elog(WARNING, "Bug? Aggregation is referenced by GROUP BY");
+				return false;
+			}
+
+			/*
+			 * Aggregate function must be supported by GpuPreAgg
+			 */
+			aggfn_cat = aggfunc_lookup_by_oid(aggref->aggfnoid);
+			if (!aggfn_cat)
+			{
+				elog(DEBUG2, "Aggref is not supported: %s",
+					 nodeToString(aggref));
+				return false;
+			}
+
+			/*
+			 * If arguments of aggregate function are expression, it must be
+			 * constructable on the device side.
+			 */
+			foreach (cell, aggref->args)
+			{
+				TargetEntry *tle = lfirst(cell);
+
+				Assert(IsA(tle, TargetEntry));
+				if (!IsA(tle->expr, Var) &&
+					!IsA(tle->expr, PlaceHolderVar) &&
+					!IsA(tle->expr, Const) &&
+					!IsA(tle->expr, Param) &&
+					!pgstrom_device_expression(tle->expr))
+				{
+					elog(DEBUG2, "Expression is not device executable: %s",
+						 nodeToString(tle->expr));
+					return false;
+				}
+			}
+		}
+		else
+		{
+			if (target->sortgrouprefs[resno - 1] == 0)
+			{
+				elog(WARNING, "Bug? Neither grouping-key nor aggregation");
+				return false;
+			}
+
+			/*
+			 * Data type of grouping-key must support equality function
+			 * for hash-based algorithm.
+			 */
+			dtype = pgstrom_devtype_lookup(exprType((Node *)expr));
+			if (!dtype)
+			{
+				elog(DEBUG2, "device type %s is not supported",
+					 format_type_be(exprType((Node *)expr)));
+				return false;
+			}
+			dfunc = pgstrom_devfunc_lookup(dtype->type_eqfunc, InvalidOid);
+			if (!dfunc)
+			{
+				elog(DEBUG2, "device function %s is not supported",
+					 format_procedure(dtype->type_eqfunc));
+				return false;
+			}
+
+			/*
+			 * If input is not a simple Var reference, expression must be
+			 * constructable on the device side.
+			 */
+			if (!IsA(expr, Var) &&
+				!IsA(expr, PlaceHolderVar) &&
+				!IsA(expr, Const) &&
+				!IsA(expr, Param) &&
+				!pgstrom_device_expression(expr))
+			{
+				elog(DEBUG2, "Expression is not device executable: %s",
+					 nodeToString(expr));
+				return false;
+			}
+		}
+		resno++;
+	}
+
+
+
+	return true;
+}
+
+
+
+/*
+ * gpupreagg_add_grouping_paths
+ *
+ * entrypoint to add grouping path by GpuPreAgg logic
+ */
+static void
+gpupreagg_add_grouping_paths(PlannerInfo *root,
+							 UpperRelationKind stage,
+							 RelOptInfo *input_rel,
+							 RelOptInfo *output_rel)
+{
+	Query  *parse = root->parse;
+
+	if (stage != UPPERREL_GROUP_AGG)
+		return;
+	if (!gpupreagg_device_executable(root, input_rel, output_rel))
+		return;
+
+//	elog(INFO, "processed_tlist => %s", nodeToString(root->processed_tlist));
+	elog(INFO, "groupClause => %s", nodeToString(parse->groupClause));
+//	elog(INFO, "group_pathkeys => %s", nodeToString(root->group_pathkeys));
+	elog(INFO, "grouping tlist => %s",
+		 nodeToString(root->upper_targets[UPPERREL_GROUP_AGG]));
+	elog(INFO, "input tlist => %s",
+		 nodeToString(input_rel->reltarget->exprs));
+	elog(INFO, "output tlist => %s",
+		 nodeToString(output_rel->reltarget->exprs));
+
+	// check whether we can add GpuPreAgg here
+
+	// construct a GpuPreAgg (partial)
+
+
+	// make a final grouping path
+
+	// make a final grouping path + gather
+
+
+
+	
+	
+	
+}
+
+#ifdef HOGEHOGEHOGE
 /*
  * cost_gpupreagg
  *
@@ -3455,7 +3626,7 @@ gpupreagg_create_scan_state(CustomScan *cscan)
 }
 
 static void
-gpupreagg_begin(CustomScanState *node, EState *estate, int eflags)
+ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 {
 	GpuContext	   *gcontext = NULL;
 	GpuPreAggState *gpas = (GpuPreAggState *) node;
@@ -4273,13 +4444,13 @@ gpupreagg_next_tuple(GpuTaskState *gts)
 }
 
 static TupleTableSlot *
-gpupreagg_exec(CustomScanState *node)
+ExecGpuPreAgg(CustomScanState *node)
 {
 	return pgstrom_exec_gputask((GpuTaskState *) node);
 }
 
 static void
-gpupreagg_end(CustomScanState *node)
+ExecEndGpuPreAgg(CustomScanState *node)
 {
 	GpuPreAggState	   *gpas = (GpuPreAggState *) node;
 
@@ -4297,7 +4468,7 @@ gpupreagg_end(CustomScanState *node)
 }
 
 static void
-gpupreagg_rescan(CustomScanState *node)
+ExecReScanGpuPreAgg(CustomScanState *node)
 {
 	GpuPreAggState	   *gpas = (GpuPreAggState *) node;
 
@@ -4313,7 +4484,7 @@ gpupreagg_rescan(CustomScanState *node)
 }
 
 static void
-gpupreagg_explain(CustomScanState *node, List *ancestors, ExplainState *es)
+ExplainGpuPreAgg(CustomScanState *node, List *ancestors, ExplainState *es)
 {
 	GpuPreAggState *gpas = (GpuPreAggState *) node;
 	CustomScan	   *cscan = (CustomScan *) node->ss.ps.plan;
@@ -5005,6 +5176,7 @@ gpupreagg_task_process(GpuTask *gtask)
 
 	return status;
 }
+#endif //HOGEHOGEHOGE
 
 /*
  * entrypoint of GpuPreAgg
@@ -5030,6 +5202,11 @@ pgstrom_init_gpupreagg(void)
 							 PGC_USERSET,
                              GUC_NOT_IN_SAMPLE,
                              NULL, NULL, NULL);
+#if 0
+	/* initialization of path method table */
+	memset(&gpupreagg_path_methods, 0, sizeof(CustomPathMethods));
+	gpupreagg_path_methods.CustomName          = "GpuPreAgg";
+	gpupreagg_path_methods.PlanCustomPath      = create_gpupreagg_path;
 
 	/* initialization of plan method table */
 	memset(&gpupreagg_scan_methods, 0, sizeof(CustomScanMethods));
@@ -5040,9 +5217,13 @@ pgstrom_init_gpupreagg(void)
 	/* initialization of exec method table */
 	memset(&gpupreagg_exec_methods, 0, sizeof(CustomExecMethods));
 	gpupreagg_exec_methods.CustomName          = "GpuPreAgg";
-   	gpupreagg_exec_methods.BeginCustomScan     = gpupreagg_begin;
-	gpupreagg_exec_methods.ExecCustomScan      = gpupreagg_exec;
-	gpupreagg_exec_methods.EndCustomScan       = gpupreagg_end;
-	gpupreagg_exec_methods.ReScanCustomScan    = gpupreagg_rescan;
-	gpupreagg_exec_methods.ExplainCustomScan   = gpupreagg_explain;
+   	gpupreagg_exec_methods.BeginCustomScan     = ExecInitGpuPreAgg;
+	gpupreagg_exec_methods.ExecCustomScan      = ExecGpuPreAgg;
+	gpupreagg_exec_methods.EndCustomScan       = ExecEndGpuPreAgg;
+	gpupreagg_exec_methods.ReScanCustomScan    = ExecReScanGpuPreAgg;
+	gpupreagg_exec_methods.ExplainCustomScan   = ExplainGpuPreAgg;
+#endif
+	/* hook registration */
+	create_upper_paths_next = create_upper_paths_hook;
+	create_upper_paths_hook = gpupreagg_add_grouping_paths;
 }
