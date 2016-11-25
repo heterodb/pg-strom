@@ -2443,7 +2443,7 @@ setup_runtime_statistics(GpuJoinState *gjs)
 		rt_stat = dmaBufferAlloc(gjs->gts.gcontext, required);
 		if (!rt_stat)
 			elog(ERROR, "out of DMA buffer");
-		memset(rt_stat, 0, sizeof(runtimeStat));
+		memset(rt_stat, 0, required);
 		rt_stat->num_rels = gjs->num_rels;
 		SpinLockInit(&rt_stat->lock);
 		rt_stat->inner_nitems = (size_t *)
