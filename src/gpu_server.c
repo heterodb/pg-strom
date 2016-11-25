@@ -426,10 +426,12 @@ gpuservProcessPendingTasks(void)
 	dlist_node	   *dnode;
 	GpuTask_v2	   *gtask;
 	GpuContext_v2  *gcontext;
+	bool			process_continue = true;
 	bool			has_completed;
 
 	SpinLockAcquire(&session_tasks_lock);
-	while (!dlist_is_empty(&session_pending_tasks))
+	while (process_continue &&
+		   !dlist_is_empty(&session_pending_tasks))
 	{
 		CUmodule	cuda_module;
 		CUstream	cuda_stream;
@@ -438,6 +440,7 @@ gpuservProcessPendingTasks(void)
 
 		dnode = dlist_pop_head_node(&session_pending_tasks);
 		gtask = dlist_container(GpuTask_v2, chain, dnode);
+		dlist_push_tail(&session_running_tasks, &gtask->chain);
 		SpinLockRelease(&session_tasks_lock);
 
 		gcontext = gtask->gcontext;
@@ -453,7 +456,10 @@ gpuservProcessPendingTasks(void)
 				 * So, we can expect MyLatch will be set when CUDA program
 				 * build gets completed.
 				 */
-				retval = 1;
+				SpinLockAcquire(&session_tasks_lock);
+				dlist_delete(&gtask->chain);
+				dlist_push_head(&session_pending_tasks, &gtask->chain);
+				process_continue = false;
 			}
 			else
 			{
@@ -483,11 +489,13 @@ gpuservProcessPendingTasks(void)
 				retval = pgstromProcessGpuTask(gtask,
 											   cuda_module,
 											   cuda_stream);
-				/*
-				 * TODO: We may need to put a code to wait for release of
-				 * GPU memory if pgstromProcessGpuTask failed due to lack
-				 * of the GPU memory
-				 */
+				SpinLockAcquire(&session_tasks_lock);
+				if (retval)
+				{
+					dlist_delete(&gtask->chain);
+					dlist_push_head(&session_pending_tasks, &gtask->chain);
+					process_continue = false;
+				}
 			}
 		}
 		PG_CATCH();
@@ -496,21 +504,6 @@ gpuservProcessPendingTasks(void)
 			PG_RE_THROW();
 		}
 		PG_END_TRY();
-
-		/*
-		 * When we give up to kick a GpuTask due to lack of GPU memory,
-		 * we once break processing the pending tasks, even if we still
-		 * have multiple tasks in the pending list.
-		 * Process shall be waken up by gpuMemFree().
-		 */
-		SpinLockAcquire(&session_tasks_lock);
-		if (retval == 0)
-			dlist_push_tail(&session_running_tasks, &gtask->chain);
-		else if (retval > 0)
-		{
-			dlist_push_head(&session_pending_tasks, &gtask->chain);
-			break;
-		}
 	}
 	has_completed = !dlist_is_empty(&session_completed_tasks);
 
@@ -1440,6 +1433,7 @@ gpuserv_session_main(void)
 				 devAttrs[gpuserv_cuda_dindex].DEV_NAME);
 
 		do {
+			CHECK_FOR_INTERRUPTS();
 			/*
 			 * Flush out completed tasks (it also releases GPU resource),
 			 * then process pending tasks. If any tasks get completed

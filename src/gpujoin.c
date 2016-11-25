@@ -5323,7 +5323,7 @@ gpujoin_release_task(GpuTask_v2 *gtask)
 	if (pgjoin->pds_dst)
 		PDS_release(pgjoin->pds_dst);
 	/* release this gpu-task itself */
-	pfree(pgjoin);
+	dmaBufferFree(pgjoin);
 }
 
 int
@@ -5425,7 +5425,7 @@ skip_perfmon:
 	 */
 	gpujoin_cleanup_cuda_resources(pgjoin);
 
-	return true;
+	return 0;
 }
 
 static void
@@ -5461,13 +5461,11 @@ gpujoin_task_respond(CUstream stream, CUresult status, void *private)
 	gpuservCompleteGpuTask(&pgjoin->task, is_urgent);
 }
 
-static bool
+static int
 __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 					   CUmodule cuda_module, CUstream cuda_stream)
 {
-//	GpuJoinState	   *gjs = (GpuJoinState *) pgjoin->task.gts;
 	GpuContext_v2	   *gcontext = pgjoin->task.gcontext;
-//	pgstrom_multirels  *pmrels = pgjoin->pmrels;
 	pgstrom_data_store *pds_src = pgjoin->pds_src;
 	pgstrom_data_store *pds_dst = pgjoin->pds_dst;
 	Size			length;
@@ -5481,6 +5479,7 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 	Assert(pds_src == NULL || pds_src->kds.format == KDS_FORMAT_ROW);
 	Assert(pds_dst->kds.format == KDS_FORMAT_ROW ||
 		   pds_dst->kds.format == KDS_FORMAT_SLOT);
+
 	/*
 	 * GPU kernel function lookup
 	 */
@@ -5536,12 +5535,8 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 	PFMON_EVENT_RECORD(pgjoin, ev_dma_send_start, cuda_stream);
 
 	/* inner multi relations */
-	//multirels_send_buffer(pmrels, &pgjoin->task);
-	//HOGE:
 	if (!multirels_get_buffer(pgjoin, cuda_stream))
 		goto out_of_resource;
-
-
 
 	/* kern_gpujoin + static portion of kern_resultbuf */
 	length = KERN_GPUJOIN_HEAD_LENGTH(&pgjoin->kern);
@@ -5646,11 +5641,11 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "cuStreamAddCallback: %s", errorText(rc));
 
-	return true;
+	return 0;
 
 out_of_resource:
 	gpujoin_cleanup_cuda_resources(pgjoin);
-	return false;
+	return 1;
 }
 
 int
@@ -6650,6 +6645,8 @@ multirels_get_buffer(pgstrom_gpujoin *pgjoin, CUstream cuda_stream)
 			if (rc != CUDA_SUCCESS)
 				elog(ERROR, "failed on cuStreamWaitEvent: %s", errorText(rc));
 			/* this task is not inner loader */
+			pgjoin->m_kmrels = pmrels->m_kmrels;
+			pgjoin->m_ojmaps = pmrels->m_ojmaps;
 			pgjoin->is_inner_loader = false;
 		}
 		SpinLockRelease(&pmrels->lock);
@@ -6702,6 +6699,8 @@ multirels_put_buffer(pgstrom_gpujoin *pgjoin)
 			elog(WARNING, "failed on cuEventDestroy: %s", errorText(rc));
 		pmrels->ev_loaded = NULL;
 	}
+	pgjoin->m_kmrels = 0UL;
+	pgjoin->m_ojmaps = 0UL;
 	SpinLockRelease(&pmrels->lock);
 }
 
