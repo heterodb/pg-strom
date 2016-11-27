@@ -29,7 +29,9 @@
 #include "parser/parse_func.h"
 #include "optimizer/clauses.h"
 #include "optimizer/cost.h"
+#include "optimizer/pathnode.h"
 #include "optimizer/planner.h"
+#include "optimizer/tlist.h"
 #include "optimizer/var.h"
 #include "parser/parsetree.h"
 #include "utils/builtins.h"
@@ -749,16 +751,11 @@ aggfunc_lookup_by_oid(Oid aggfnoid)
  * on the device side.
  */
 static bool
-gpupreagg_device_executable(PlannerInfo *root,
-							RelOptInfo *input_rel,
-							RelOptInfo *output_rel)
+gpupreagg_device_executable(PlannerInfo *root, PathTarget *target)
 {
-	Query		   *parse = root->parse;
-	PathTarget	   *target = root->upper_targets[UPPERREL_GROUP_AGG];
 	devtype_info   *dtype;
 	devfunc_info   *dfunc;
 	int				resno = 1;
-	bool			agg_nogroup = true;
 	ListCell	   *lc;
 	ListCell	   *cell;
 
@@ -794,7 +791,7 @@ gpupreagg_device_executable(PlannerInfo *root,
 			 */
 			foreach (cell, aggref->args)
 			{
-				TargetEntry *tle = lfirst(cell);
+				TargetEntry	   *tle = lfirst(cell);
 
 				Assert(IsA(tle, TargetEntry));
 				if (!IsA(tle->expr, Var) &&
@@ -811,12 +808,6 @@ gpupreagg_device_executable(PlannerInfo *root,
 		}
 		else
 		{
-			if (target->sortgrouprefs[resno - 1] == 0)
-			{
-				elog(WARNING, "Bug? Neither grouping-key nor aggregation");
-				return false;
-			}
-
 			/*
 			 * Data type of grouping-key must support equality function
 			 * for hash-based algorithm.
@@ -853,13 +844,283 @@ gpupreagg_device_executable(PlannerInfo *root,
 		}
 		resno++;
 	}
-
-
-
 	return true;
 }
 
+/*
+ * cost_gpupreagg
+ *
+ * cost estimation for GpuPreAgg node
+ */
+static bool
+cost_gpupreagg(CustomPath *cpath,
+			   PlannerInfo *root,
+			   PathTarget *target,
+			   Path *input_path,
+			   double num_groups,
+			   AggClauseCosts *agg_costs)
+{
+	double		input_ntuples = input_path->rows;
+	Cost		startup_cost = input_path->total_cost;
+	Cost		run_cost = 0.0;
+	QualCost	qual_cost;
+	int			num_grp_keys = 0;
+	Size		extra_width = 0;
+	Size		kds_length;
+	double		gpu_cpu_ratio;
+	cl_uint		ncols;
+	cl_uint		nrooms;
+	ListCell   *lc;
 
+	/* Fixed cost to setup/launch GPU kernel */
+	startup_cost += pgstrom_gpu_setup_cost;
+
+	/*
+	 * Estimation of the result buffer. It must fit to the target GPU device
+	 * memory size.
+	 */
+	foreach (lc, target->exprs)
+	{
+		Expr	   *expr = lfirst(lc);
+		Oid			type_oid = exprType((Node *)expr);
+		int32		type_mod = exprTypmod((Node *)expr);
+		int16		typlen;
+		bool		typbyval;
+
+		/* extra buffer */
+		if (type_oid == NUMERICOID)
+			extra_width += 32;
+		else
+		{
+			get_typlenbyval(type_oid, &typlen, &typbyval);
+			if (!typbyval)
+				extra_width += get_typavgwidth(type_oid, type_mod);
+		}
+		/* count # of grouping keys */
+		if (!IsA(expr, Aggref))
+			num_grp_keys++;
+	}
+
+	ncols = list_length(target->exprs);
+	nrooms = (cl_uint)(2.5 * num_groups);
+	kds_length = (STROMALIGN(offsetof(kern_data_store, colmeta[ncols])) +
+				  (STROMALIGN(sizeof(Datum) * nrooms) +
+				   STROMALIGN(sizeof(bool) * nrooms)) * ncols +
+				  STROMALIGN(extra_width) * nrooms);
+	if (kds_length > gpuMemMaxAllocSize())
+		return false;	/* expected buffer size is too large */
+
+	/* Cost estimation to setup initial values */
+	gpu_cpu_ratio = pgstrom_gpu_operator_cost / cpu_operator_cost;
+	startup_cost += (qual_cost.startup +
+					 qual_cost.per_tuple * input_ntuples) * gpu_cpu_ratio;
+	/* Cost estimation for grouping */
+	startup_cost += pgstrom_gpu_operator_cost * num_grp_keys * input_ntuples;
+	/* Cost estimation for aggregate function */
+	startup_cost += (agg_costs->transCost.startup +
+					 agg_costs->transCost.per_tuple *
+					 gpu_cpu_ratio * input_ntuples);
+	/* Cost estimation to fetch results */
+	run_cost += cpu_tuple_cost * num_groups;
+
+	cpath->path.rows = num_groups;
+	cpath->path.startup_cost = startup_cost;
+	cpath->path.total_cost = startup_cost + run_cost;
+}
+
+/*
+ * make_partial_grouping_target
+ *
+ * see optimizer/plan/planner.c
+ */
+static PathTarget *
+make_partial_grouping_target(PlannerInfo *root, PathTarget *grouping_target)
+{
+	Query	   *parse = root->parse;
+	PathTarget *partial_target;
+	List	   *non_group_cols;
+	List	   *non_group_exprs;
+	int			i;
+	ListCell   *lc;
+
+	partial_target = create_empty_pathtarget();
+	non_group_cols = NIL;
+
+	i = 0;
+	foreach(lc, grouping_target->exprs)
+	{
+		Expr	   *expr = (Expr *) lfirst(lc);
+		Index		sgref = get_pathtarget_sortgroupref(grouping_target, i);
+
+		if (sgref && parse->groupClause &&
+			get_sortgroupref_clause_noerr(sgref, parse->groupClause) != NULL)
+		{
+			/*
+			 * It's a grouping column, so add it to the partial_target as-is.
+			 * (This allows the upper agg step to repeat the grouping calcs.)
+			 */
+			add_column_to_pathtarget(partial_target, expr, sgref);
+		}
+		else
+		{
+			/*
+			 * Non-grouping column, so just remember the expression for later
+			 * call to pull_var_clause.
+			 */
+			non_group_cols = lappend(non_group_cols, expr);
+		}
+		i++;
+	}
+
+	/*
+	 * If there's a HAVING clause, we'll need the Vars/Aggrefs it uses, too.
+	 */
+	if (parse->havingQual)
+		non_group_cols = lappend(non_group_cols, parse->havingQual);
+
+	/*
+	 * Pull out all the Vars, PlaceHolderVars, and Aggrefs mentioned in
+	 * non-group cols (plus HAVING), and add them to the partial_target if not
+	 * already present.  (An expression used directly as a GROUP BY item will
+	 * be present already.)  Note this includes Vars used in resjunk items, so
+	 * we are covering the needs of ORDER BY and window specifications.
+	 */
+	non_group_exprs = pull_var_clause((Node *) non_group_cols,
+									  PVC_INCLUDE_AGGREGATES |
+									  PVC_RECURSE_WINDOWFUNCS |
+									  PVC_INCLUDE_PLACEHOLDERS);
+
+	add_new_columns_to_pathtarget(partial_target, non_group_exprs);
+
+	/*
+	 * Adjust Aggrefs to put them in partial mode.  At this point all Aggrefs
+	 * are at the top level of the target list, so we can just scan the list
+	 * rather than recursing through the expression trees.
+	 */
+	foreach(lc, partial_target->exprs)
+	{
+		Aggref	   *aggref = (Aggref *) lfirst(lc);
+		Aggref	   *newaggref;
+
+		if (IsA(aggref, Aggref))
+		{
+			/*
+			 * We shouldn't need to copy the substructure of the Aggref node,
+			 * but flat-copy the node itself to avoid damaging other trees.
+			 */
+			newaggref = makeNode(Aggref);
+			memcpy(newaggref, aggref, sizeof(Aggref));
+
+			/* For now, assume serialization is required */
+			mark_partial_aggref(newaggref, AGGSPLIT_INITIAL_SERIAL);
+
+			lfirst(lc) = newaggref;
+		}
+	}
+
+	/* clean up cruft */
+	list_free(non_group_exprs);
+	list_free(non_group_cols);
+
+	/* XXX this causes some redundant cost calculation ... */
+	return set_pathtarget_cost_width(root, partial_target);
+}
+
+/*
+ * estimate_hashagg_tablesize
+ *
+ * See optimizer/plan/planner.c
+ */
+static Size
+estimate_hashagg_tablesize(Path *path, const AggClauseCosts *agg_costs,
+                           double dNumGroups)
+{
+	Size		hashentrysize;
+
+	/* Estimate per-hash-entry space at tuple width... */
+	hashentrysize = MAXALIGN(path->pathtarget->width) +
+		MAXALIGN(SizeofMinimalTupleHeader);
+
+	/* plus space for pass-by-ref transition values... */
+	hashentrysize += agg_costs->transitionSpace;
+	/* plus the per-hash-entry overhead */
+	hashentrysize += hash_agg_entry_size(agg_costs->numAggs);
+
+	return hashentrysize * dNumGroups;
+}
+
+/*
+ * gpupreagg_construct_path
+ *
+ * constructor of the GpuPreAgg path node
+ */
+static CustomPath *
+gpupreagg_construct_path(PlannerInfo *root,
+						 PathTarget *target,
+						 RelOptInfo *group_rel,
+						 Path *input_path,
+						 double num_groups)
+{
+	CustomPath	   *cpath = makeNode(CustomPath);
+	List		   *custom_paths = NIL;
+	List		   *custom_private = NIL;
+	Index			outer_relid;
+	List		   *outer_quals;
+	PathTarget	   *partial_target;
+	AggClauseCosts	agg_partial_costs;
+
+	/* obviously, not suitable for GpuPreAgg */
+	if (num_groups < 1.0 || num_groups > (double)INT_MAX)
+		return false;
+
+	/* PathTarget of the partial stage */
+	partial_target = make_partial_grouping_target(root, target);
+	get_agg_clause_costs(root, (Node *) partial_target->exprs,
+						 AGGSPLIT_INITIAL_SERIAL,
+						 &agg_partial_costs);
+
+	/*
+	 * cost estimation - if cpath's total cost is larger than the existing
+	 * cheapest path, it makes no sense to construct the path any more.
+	 */
+	if (!cost_gpupreagg(cpath, root, target, input_path,
+						num_groups, &agg_partial_costs))
+	{
+		pfree(cpath);
+		return NULL;
+	}
+
+	/*
+	 * Try to pull up input_path if it is enough simple scan.
+	 */
+	if (pgstrom_pullup_outer_scan(input_path,
+								  &outer_relid,
+								  &outer_quals))
+	{
+		custom_private = list_make2(makeInteger(outer_relid),
+									outer_quals);
+	}
+	else
+	{
+		custom_paths = list_make1(input_path);
+	}
+
+	/* Setup CustomPath */
+	cpath->path.pathtype = T_CustomScan;
+	cpath->path.parent = group_rel;
+	cpath->path.pathtarget = partial_target;
+	cpath->path.param_info = NULL;
+	cpath->path.parallel_aware = false;
+	cpath->path.parallel_safe = (group_rel->consider_parallel &&
+								 input_path->parallel_safe);
+	cpath->path.parallel_workers = input_path->parallel_workers;
+	cpath->path.pathkeys = NIL;
+	cpath->custom_paths = custom_paths;
+	cpath->custom_private = custom_private;
+	cpath->methods = &gpupreagg_path_methods;
+
+	return cpath;
+}
 
 /*
  * gpupreagg_add_grouping_paths
@@ -870,226 +1131,408 @@ static void
 gpupreagg_add_grouping_paths(PlannerInfo *root,
 							 UpperRelationKind stage,
 							 RelOptInfo *input_rel,
-							 RelOptInfo *output_rel)
+							 RelOptInfo *group_rel)
 {
-	Query  *parse = root->parse;
+	Query		   *parse = root->parse;
+	PathTarget	   *target = root->upper_targets[UPPERREL_GROUP_AGG];
+	CustomPath	   *cpath;
+	Path		   *input_path;
+	Path		   *final_path;
+	Path		   *sort_path;
+//	Path		   *gather_path;
+	double			num_groups;
+	bool			can_sort;
+	bool			can_hash;
+	AggClauseCosts	agg_final_costs;
+
+	if (create_upper_paths_next)
+		(*create_upper_paths_next)(root, stage, input_rel, group_rel);
 
 	if (stage != UPPERREL_GROUP_AGG)
 		return;
-	if (!gpupreagg_device_executable(root, input_rel, output_rel))
+
+	if (!pgstrom_enabled ||
+		!enable_gpupreagg ||
+		!gpupreagg_device_executable(root, target))
 		return;
 
-//	elog(INFO, "processed_tlist => %s", nodeToString(root->processed_tlist));
-	elog(INFO, "groupClause => %s", nodeToString(parse->groupClause));
-//	elog(INFO, "group_pathkeys => %s", nodeToString(root->group_pathkeys));
-	elog(INFO, "grouping tlist => %s",
-		 nodeToString(root->upper_targets[UPPERREL_GROUP_AGG]));
-	elog(INFO, "input tlist => %s",
-		 nodeToString(input_rel->reltarget->exprs));
-	elog(INFO, "output tlist => %s",
-		 nodeToString(output_rel->reltarget->exprs));
+	/* number of estimated groups */
+	if (!parse->groupClause)
+		num_groups = 1.0;
+	else
+	{
+		Path	   *pathnode = linitial(group_rel->pathlist);
 
-	// check whether we can add GpuPreAgg here
+		num_groups = pathnode->rows;
+	}
 
-	// construct a GpuPreAgg (partial)
+	/* get cost of aggregations */
+	memset(&agg_final_costs, 0, sizeof(AggClauseCosts));
+	if (parse->hasAggs)
+	{
+		get_agg_clause_costs(root, (Node *)root->processed_tlist,
+							 AGGSPLIT_SIMPLE, &agg_final_costs);
+		get_agg_clause_costs(root, parse->havingQual,
+							 AGGSPLIT_SIMPLE, &agg_final_costs);
+	}
 
+	/* GpuPreAgg does not support ordered aggregation */
+	if (agg_final_costs.numOrderedAggs > 0)
+		return;
 
-	// make a final grouping path
+	/*
+	 * construction of GpuPreAgg pathnode on top of the cheapest total
+	 * cost pathnode (partial aggregation)
+	 */
+	input_path = input_rel->cheapest_total_path;
+	cpath = gpupreagg_construct_path(root, target, group_rel,
+									 input_path, num_groups);
+	if (!cpath)
+		return;
 
-	// make a final grouping path + gather
+	/* strategy of the final aggregation */
+	can_sort = grouping_is_sortable(parse->groupClause);
+	can_hash = (parse->groupClause != NIL &&
+				parse->groupingSets == NIL &&
+				agg_final_costs.numOrderedAggs == 0 &&
+				grouping_is_hashable(parse->groupClause));
 
+	/* make a final grouping path (nogroup) */
+	if (!parse->groupClause)
+	{
+		final_path = (Path *)create_agg_path(root,
+											 group_rel,
+											 &cpath->path,
+											 target,
+											 AGG_PLAIN,
+											 AGGSPLIT_FINAL_DESERIAL,
+											 parse->groupClause,
+											 (List *) parse->havingQual,
+											 &agg_final_costs,
+											 num_groups);
+		add_path(group_rel, final_path);
+		// TODO: make a parallel grouping path (nogroup) */
+	}
+	else
+	{
+		/* make a final grouping path (sort) */
+		if (can_sort)
+		{
+			sort_path = (Path *)
+				create_sort_path(root,
+								 group_rel,
+								 &cpath->path,
+								 root->group_pathkeys,
+								 -1.0);
+			if (parse->groupingSets)
+			{
+				List	   *rollup_lists = NIL;
+				List	   *rollup_groupclauses = NIL;
+				bool		found = false;
+				ListCell   *lc;
 
+				/*
+				 * TODO: In this version, we expect group_rel->pathlist have
+				 * a GroupingSetsPath constructed by the built-in code.
+				 * It may not be right, if multiple CSP/FDW is installed and
+				 * cheaper path already eliminated the standard path.
+				 * However, it is a corner case now, and we don't support
+				 * this scenario _right now_.
+				 */
+				foreach (lc, group_rel->pathlist)
+				{
+					GroupingSetsPath   *pathnode = lfirst(lc);
 
-	
-	
-	
+					if (IsA(pathnode, GroupingSetsPath))
+					{
+						rollup_groupclauses = pathnode->rollup_groupclauses;
+						rollup_lists = pathnode->rollup_lists;
+						found = true;
+						break;
+					}
+				}
+				if (!found)
+					return;		/* give up */
+				final_path = (Path *)
+					create_groupingsets_path(root,
+											 group_rel,
+											 sort_path,
+											 target,
+											 (List *)parse->havingQual,
+											 rollup_lists,
+											 rollup_groupclauses,
+											 &agg_final_costs,
+											 num_groups);
+			}
+			else if (parse->hasAggs)
+				final_path = (Path *)
+					create_agg_path(root,
+									group_rel,
+									sort_path,
+									target,
+									AGG_SORTED,
+									AGGSPLIT_FINAL_DESERIAL,
+									parse->groupClause,
+									(List *)parse->havingQual,
+									&agg_final_costs,
+									num_groups);
+			else if (parse->groupClause)
+				final_path = (Path *)
+					create_group_path(root,
+									  group_rel,
+									  sort_path,
+									  target,
+									  parse->groupClause,
+									  (List *)parse->havingQual,
+									  num_groups);
+			else
+				elog(ERROR, "Bug? unexpected AGG/GROUP BY requirement");
+
+			add_path(group_rel, final_path);
+			// TODO: make a parallel grouping path (sort) */
+		}
+
+		/* make a final grouping path (hash) */
+		if (can_hash)
+		{
+			Size	hashaggtablesize
+				= estimate_hashagg_tablesize(&cpath->path,
+											 &agg_final_costs,
+											 num_groups);
+			if (hashaggtablesize < work_mem * 1024L)
+			{
+				final_path = (Path *)
+					create_agg_path(root,
+									group_rel,
+									&cpath->path,
+									target,
+									AGG_HASHED,
+									AGGSPLIT_FINAL_DESERIAL,
+									parse->groupClause,
+									(List *) parse->havingQual,
+									&agg_final_costs,
+									num_groups);
+				add_path(group_rel, final_path);
+			}
+			/* TODO: make a parallel grouping path (hash+gather) */
+		}
+	}	
 }
+
+
+
+
+/*
+ * make_custom_scan_tlist
+ *
+ * constructor for the custom_scan_tlist of CustomScan node. It is equivalent
+ * to the initial values of reduction steps.
+ */
+static List *
+make_custom_scan_tlist()
+{
+	PathTarget	   *target = best_path->pathtarget;
+	ListCell	   *lc;
+	cl_int			index = 0;
+
+	foreach (lc, tlist)
+	{
+		TargetEntry	   *tle = lfirst(lc);
+		bool			is_group_key;
+
+		if (IsA(tle->expr, Aggref))
+		{
+			Aggref	   *aggref = (Aggref *)tle->expr;
+			Oid			namespace_oid;
+			FuncExpr   *altfunc_expr;
+			const char *altfunc_name;
+			oidvector  *altfunc_argtypes;
+			HeapTuple	tuple;
+			const aggfunc_catalog_t *agg_func;
+
+			Assert(target->sortgrouprefs[index] == 0);
+			agg_func = aggfunc_lookup_by_oid(aggref->aggfnoid);
+			if (!agg_func)
+				elog(ERROR, "lookup failed on aggregate function: %u",
+					 aggref->aggfnoid);
+			/*
+			 * Lookup an alternative function that generates partial state
+			 * of the final aggregate function.
+			 */
+			if (strncmp(agg_func->altfn_name, "c:", 2) == 0)
+				namespace_oid = PG_CATALOG_NAMESPACE;
+			else if (strncmp(agg_func->altfn_name, "s:", 2) == 0)
+			{
+				namespace_oid = get_namespace_oid("pgstrom", true);
+				if (!OidIsValid(namespace_oid))
+					ereport(ERROR,
+							(errcode(ERRCODE_UNDEFINED_SCHEMA),
+						     errmsg("schema \"pgstrom\" was not found"),
+							 errhint("Run: CREATE EXTENSION pg_strom")));
+			}
+			else
+				elog(ERROR, "Bug? unknown namespace of alternative function");
+
+			altfunc_name = agg_func->altfn_name + 2;
+			altfunc_argtypes = buildoidvector(agg_func->altfn_argtypes,
+											  agg_func->altfn_nargs);
+			tuple = SearchSysCache3(PROCNAMEARGSNSP,
+									PointerGetDatum(altfunc_name),
+									PointerGetDatum(altfunc_argtypes),
+									ObjectIdGetDatum(namespace_oid));
+			if (!HeapTupleIsValid(tuple))
+				ereport(ERROR,
+						(errcode(ERRCODE_UNDEFINED_SCHEMA),
+						 errmsg("no alternative function \"%s\" not found",
+								funcname_signature_string(
+									altfunc_name,
+									agg_func->altfn_nargs,
+									NIL,
+									agg_func->altfn_argtypes)),
+						 errhint("Run: CREATE EXTENSION pg_strom")));
+			altfunc_form = (Form_pg_proc) GETSTRUCT(tuple);
+
+			//HOGE: add arguments of altfunc to tlist_dev
+			for (i=0; i < agg_func->altfn_nargs; i++)
+			{
+				int		argexpr = agg_func->altfn_argexprs[i];
+
+				//add expression to tlist_dev, if not exists
+				//then, append it on the altfunc_arg
+
+			}
+
+			altfunc_expr = makeNode(FuncExpr);
+			altfunc_expr->funcid = HeapTupleGetOid(tuple);
+			altfunc_expr->funcresulttype = altfunc_form->prorettype;
+			altfunc_expr->funcretset = altfunc_form->proretset;
+			altfunc_expr->funcvariadic = OidIsValid(altfunc_form->provariadic);
+			altfunc_expr->funcformat = COERCE_EXPLICIT_CALL;
+			altfunc_expr->funccollid = aggref->aggcollid;
+			altfunc_expr->inputcollid = aggref->inputcollid;
+			altfunc_expr->args = ; // list of Vars to reference tlist_dev
+			altfunc_expr->location = aggref->location;
+
+			ReleaseSysCache(tuple);
+
+			tlist_host = lappend(tlist_host,
+								 makeTargetEntry((Expr *)altfunc_expr,
+												 tle->resno,
+												 tle->resname,
+												 tle->resjunk));
+
+
+
+
+			// lookup alternative aggregate function
+
+			// add alternative (normal) function to tlist
+			// add alternative functions's argument to tlist_dev
+
+
+
+
+
+			is_group_key = false;
+		}
+		else
+		{
+			tlist_host = lappend(tlist_host, copyObject(tle));
+			tlist_dev = lappend(tlist_dev, copyObject(tle));
+
+			is_group_key = (target->sortgrouprefs[index] > 0);
+		}
+		index++;
+	}
+
+
+
+
+}
+
+/*
+ * PlanGpuPreAggPath
+ *
+ * Entrypoint to create CustomScan node
+ */
+static Plan *
+PlanGpuPreAggPath(PlannerInfo *root,
+				  RelOptInfo *rel,
+				  struct CustomPath *best_path,
+				  List *tlist,
+				  List *clauses,
+				  List *custom_plans)
+{
+	CustomScan	   *cscan = makeNode(CustomScan);
+	GpuPreAggInfo	gpa_info;
+	Plan		   *outer_plan = NULL;
+	Index			outer_scanrelid = 0;
+	List		   *outer_quals = NIL;
+	List		   *tlist_dev;
+	StringInfoData	kern;
+	codegen_context	context;
+
+	initStringInfo(&kern);
+	pgstrom_init_codegen_context(&context);
+
+	/* Does it have outer sub-plan? or scan table by itself? */
+	if (custom_plans != NIL)
+	{
+		Assert(list_length(custom_plans) == 1);
+		Assert(!best_path->custom_private);
+		outer_plan = linitial(custom_plans);
+		outer_tlist = outer_plan->targetlist;
+	}
+	else
+	{
+		Assert(list_length(best_path->custom_private) == 2);
+		outer_scanrelid = intVal(linitial(best_path->custom_private));
+		outer_quals		= lsecond(best_path->custom_private);
+	}
+
+	/*
+	 * construction of custom_scan_tlist; which reflects the initial value
+	 * of the reduction process later.
+	 */
+	tlist_dev = make_initial_
+
+
+
+
+		codegen_gpuscan_quals(&kern,
+							  &context,
+							  outer_scanrelid,
+							  outer_quals);
+		context.extra_flags |= DEVKERNEL_NEEDS_GPUSCAN;
+
+
+	// construct dev_tlist
+
+	// codegen
+
+
+
+
+
+	elog(INFO, "best_path => %s", nodeToString(best_path));
+	elog(INFO, "tlist => %s", nodeToString(tlist));
+	elog(INFO, "custom_plans => %s", nodeToString(custom_plans));
+
+	elog(ERROR, "hogehoge");
+
+
+	memset(&gpa_info, 0, sizeof(GpuPreAggInfo));
+	
+
+
+
+	form_gpupreagg_info(cscan, &gpu_info);
+
+	return NULL;
+}
+
 
 #ifdef HOGEHOGEHOGE
-/*
- * cost_gpupreagg
- *
- * cost estimation of Aggregate if GpuPreAgg is injected
- */
-#define LOG2(x)		(log(x) / 0.693147180559945)
-
-static void
-cost_gpupreagg(const Agg *agg, const Sort *sort, const Plan *outer_plan,
-			   AggStrategy new_agg_strategy,
-			   List *gpupreagg_tlist,
-			   AggClauseCosts *agg_clause_costs,
-			   Plan *p_newcost_agg,
-			   Plan *p_newcost_sort,
-			   Plan *p_newcost_gpreagg,
-			   double num_groups,
-			   cl_int *p_num_chunks,
-			   cl_int safety_limit)
-{
-	Cost		startup_cost;
-	Cost		run_cost;
-	QualCost	qual_cost;
-	int			gpagg_width;
-	double		outer_rows;
-	double		nrows_per_chunk;
-	double		num_chunks;
-	double		segment_width;
-	double		num_segments;
-	double		gpagg_nrows;
-	double		gpu_cpu_ratio;
-	cl_uint		ncols;
-	Size		htup_size;
-	ListCell   *lc;
-	Path		dummy;
-
-	Assert(outer_plan != NULL);
-
-	/*
-	 * Fixed cost come from outer relation
-	 */
-	startup_cost = outer_plan->startup_cost;
-	run_cost = outer_plan->total_cost - startup_cost;
-	outer_rows = outer_plan->plan_rows;
-
-	/*
-	 * Fixed cost to setup/launch GPU kernel
-	 */
-	startup_cost += pgstrom_gpu_setup_cost;
-
-	/*
-	 * Estimate number of chunks and nrows per chunk
-	 */
-	ncols = list_length(outer_plan->targetlist);
-	htup_size = MAXALIGN(offsetof(HeapTupleHeaderData,
-								  t_bits[BITMAPLEN(ncols)]));
-	foreach (lc, outer_plan->targetlist)
-	{
-		TargetEntry	   *tle = lfirst(lc);
-
-		/*
-		 * For more correctness, we'd like to reference table's
-		 * statistics if underlying outer-plan is Scan plan on
-		 * regular relation.
-		 */
-		htup_size += get_typavgwidth(exprType((Node *) tle->expr),
-									 exprTypmod((Node *) tle->expr));
-	}
-	nrows_per_chunk = (pgstrom_chunk_size() -
-					   STROMALIGN(offsetof(kern_data_store,
-										   colmeta[ncols])))
-		/ (MAXALIGN(htup_size) + sizeof(cl_uint));
-	nrows_per_chunk = Min(nrows_per_chunk, outer_rows);
-	num_chunks = Max(outer_rows / nrows_per_chunk, 1.0);
-	segment_width = Max(num_groups / nrows_per_chunk, 1.0);
-	num_segments = Max(num_chunks / (segment_width * safety_limit), 1.0);
-
-	/* write back */
-	*p_num_chunks = num_chunks;
-
-	/*
-	 * Then, how much rows does GpuPreAgg will produce?
-	 */
-	gpagg_nrows = num_segments * num_groups;
-
-	/*
-	 * Cost estimation of internal Hash operations on GPU
-	 */
-	gpu_cpu_ratio = pgstrom_gpu_operator_cost / cpu_operator_cost;
-	memset(&qual_cost, 0, sizeof(QualCost));
-	gpagg_width = 0;
-	foreach (lc, gpupreagg_tlist)
-	{
-		TargetEntry	   *tle = lfirst(lc);
-		QualCost		cost;
-
-		/* no code uses PlannerInfo here. NULL may be OK */
-		cost_qual_eval_node(&cost, (Node *) tle->expr, NULL);
-		qual_cost.startup += cost.startup;
-		qual_cost.per_tuple += cost.per_tuple;
-
-		gpagg_width += get_typavgwidth(exprType((Node *) tle->expr),
-									  exprTypmod((Node *) tle->expr));
-	}
-	startup_cost += qual_cost.startup * gpu_cpu_ratio;
-
-	qual_cost.per_tuple += cpu_operator_cost * Max(agg->numCols, 1);
-
-	/*
-	 * TODO: run_cost of GPU execution depends on
-	 * - policy: nogroup, local+global, global
-	 * - probability of hash colision
-	 */
-	run_cost += qual_cost.per_tuple * gpu_cpu_ratio *
-		nrows_per_chunk * num_chunks;
-
-	/*
-	 * Cost to communicate upper node
-	 */
-	run_cost += cpu_tuple_cost * gpagg_nrows;
-
-
-	/*
-	 * set cost values on GpuPreAgg
-	 */
-	p_newcost_gpreagg->startup_cost = startup_cost;
-	p_newcost_gpreagg->total_cost = startup_cost + run_cost;
-	p_newcost_gpreagg->plan_rows = gpagg_nrows;
-	p_newcost_gpreagg->plan_width = gpagg_width;
-
-	/*
-	 * Update estimated sorting cost, if any.
-	 */
-	if (sort != NULL)
-	{
-		cost_sort(&dummy,
-				  NULL,		/* PlannerInfo is not referenced! */
-				  NIL,		/* NIL is acceptable */
-				  p_newcost_gpreagg->total_cost,
-				  p_newcost_gpreagg->plan_rows,
-				  p_newcost_gpreagg->plan_width,
-				  0.0,
-				  work_mem,
-				  -1.0);
-		p_newcost_sort->startup_cost = dummy.startup_cost;
-		p_newcost_sort->total_cost = dummy.total_cost;
-		p_newcost_sort->plan_rows = gpagg_nrows;
-		p_newcost_sort->plan_width = gpagg_width;
-		/*
-		 * increase of startup_cost/run_cost according to the Sort
-		 * to be injected between Agg and GpuPreAgg.
-		 */
-		startup_cost = dummy.startup_cost;
-		run_cost     = dummy.total_cost - dummy.startup_cost;
-	}
-
-	/*
-	 * Update estimated aggregate cost.
-	 * Calculation logic is cost_agg() as built-in code doing.
-	 */
-	cost_agg(&dummy,
-			 NULL,		/* PlannerInfo is not referenced! */
-			 new_agg_strategy,
-			 agg_clause_costs,
-			 agg->numCols,
-			 (double) agg->numGroups,
-			 startup_cost,
-			 startup_cost + run_cost,
-			 gpagg_nrows);
-	p_newcost_agg->startup_cost = dummy.startup_cost;
-	p_newcost_agg->total_cost   = dummy.total_cost;
-	p_newcost_agg->plan_rows    = agg->plan.plan_rows;
-	p_newcost_agg->plan_width   = agg->plan.plan_width;
-
-	/* cost for HAVING clause, if any */
-	if (agg->plan.qual)
-	{
-		cost_qual_eval(&qual_cost, agg->plan.qual, NULL);
-		p_newcost_agg->startup_cost += qual_cost.startup;
-		p_newcost_agg->total_cost += qual_cost.startup +
-			qual_cost.per_tuple * gpagg_nrows;
-	}
-	/* cost for tlist */
-	add_tlist_costs_to_plan(NULL, p_newcost_agg, agg->plan.targetlist);
-}
 
 /*
  * expr_fixup_varno - create a copy of expression node, but varno of Var
@@ -5202,12 +5645,13 @@ pgstrom_init_gpupreagg(void)
 							 PGC_USERSET,
                              GUC_NOT_IN_SAMPLE,
                              NULL, NULL, NULL);
-#if 0
+
 	/* initialization of path method table */
 	memset(&gpupreagg_path_methods, 0, sizeof(CustomPathMethods));
 	gpupreagg_path_methods.CustomName          = "GpuPreAgg";
-	gpupreagg_path_methods.PlanCustomPath      = create_gpupreagg_path;
+	gpupreagg_path_methods.PlanCustomPath      = PlanGpuPreAggPath;
 
+#if 0
 	/* initialization of plan method table */
 	memset(&gpupreagg_scan_methods, 0, sizeof(CustomScanMethods));
 	gpupreagg_scan_methods.CustomName          = "GpuPreAgg";
