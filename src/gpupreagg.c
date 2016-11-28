@@ -237,8 +237,11 @@ typedef struct
 
 /* declaration of static functions */
 static char	   *gpupreagg_codegen(codegen_context *context,
+								  CustomScan *cscan,
 								  List *tlist_dev,
-								  List *tlist_dev_action);
+								  List *tlist_dev_action,
+								  List *outer_tlist,
+								  List *outer_quals);
 static bool		gpupreagg_task_process(GpuTask_v2 *gtask);
 static bool		gpupreagg_task_complete(GpuTask_v2 *gtask);
 static void		gpupreagg_task_release(GpuTask_v2 *gtask);
@@ -1907,8 +1910,11 @@ PlanGpuPreAggPath(PlannerInfo *root,
 							DEVKERNEL_NEEDS_GPUSCAN |
 							DEVKERNEL_NEEDS_GPUPREAGG);
 	kern_source = gpupreagg_codegen(&context,
+									cscan,
 									tlist_dev,
-									tlist_dev_action);
+									tlist_dev_action,
+									outer_tlist,
+									outer_quals);
 
 	memset(&gpa_info, 0, sizeof(GpuPreAggInfo));
 	gpa_info.extra_flags = context.extra_flags;
@@ -1927,21 +1933,188 @@ PlanGpuPreAggPath(PlannerInfo *root,
 
 
 
+/*
+ * gpupreagg_codegen_hashvalue - code generator for
+ *
+ * STATIC_FUNCTION(cl_uint)
+ * gpupreagg_hashvalue(kern_context *kcxt,
+ *                     cl_uint *crc32_table,
+ *                     cl_uint hash_value,
+ *                     kern_data_store *kds,
+ *                     size_t kds_index);
+ */
+static void
+gpupreagg_codegen_hashvalue(StringInfo kern,
+							codegen_context *context,
+							List *tlist_dev,
+							List *tlist_dev_action)
+{
+	StringInfoData	decl;
+	StringInfoData	body;
+	ListCell	   *lc1;
+	ListCell	   *lc2;
+	int				i;
 
+	initStringInfo(&decl);
+    initStringInfo(&body);
+	context->param_refs = NULL;
 
+	appendStringInfo(
+		&decl,
+		"STATIC_FUNCTION(cl_uint)\n"
+		"gpupreagg_hashvalue(kern_context *kcxt,\n"
+		"                    cl_uint *crc32_table,\n"
+		"                    cl_uint hash_value,\n"
+		"                    kern_data_store *kds,\n"
+		"                    size_t kds_index)\n"
+		"{\n");
 
+	forboth (lc1, tlist_dev,
+			 lc2, tlist_dev_action)
+	{
+		TargetEntry	   *tle = lfirst(lc1);
+		int				action = lfirst_int(lc2);
+		Oid				type_oid;
+		devtype_info   *dtype;
 
+		if (action != ALTFUNC_GROUPING_KEY)
+			continue;
 
+		type_oid = exprType((Node *)tle->expr);
+		dtype = pgstrom_devtype_lookup_and_track(type_oid, context);
+		if (!dtype || !OidIsValid(dtype->type_cmpfunc))
+			elog(ERROR, "Bug? type (%s) is not supported",
+				 format_type_be(type_oid));
+		/* variable declarations */
+		appendStringInfo(
+			&decl,
+			"  pg_%s_t keyval_%u = pg_%s_vref(kds,kcxt,%u,kds_index);\n",
+			dtype->type_name, tle->resno,
+			dtype->type_name, tle->resno - 1);
+		/* compute crc32 value */
+		appendStringInfo(
+			&body,
+			"  hash_value = pg_%s_comp_crc32(crc32_table,\n"
+			"                                hash_value, keyval_%u);\n",
+			dtype->type_name, tle->resno);
+	}
+	/* no constants should appear */
+	Assert(bms_is_empty(context->param_refs));
 
+	appendStringInfo(kern,
+					 "%s\n"
+					 "%s\n"
+					 "  return hash_value;\n"
+					 "}\n\n",
+					 decl.data,
+					 body.data);
+	pfree(decl.data);
+	pfree(body.data);
+}
 
+/*
+ * gpupreagg_codegen_keymatch - code generator for
+ *
+ *
+ * STATIC_FUNCTION(cl_bool)
+ * gpupreagg_keymatch(kern_context *kcxt,
+ *                    kern_data_store *x_kds, size_t x_index,
+ *                    kern_data_store *y_kds, size_t y_index);
+ */
+static void
+gpupreagg_codegen_keymatch(StringInfo kern,
+						   codegen_context *context,
+						   List *tlist_dev,
+						   List *tlist_dev_action)
+{
+	StringInfoData	decl;
+	StringInfoData	body;
+	ListCell	   *lc1;
+	ListCell	   *lc2;
+
+	initStringInfo(&decl);
+	initStringInfo(&body);
+	context->param_refs = NULL;
+
+	appendStringInfoString(
+		kern,
+		"STATIC_FUNCTION(cl_bool)\n"
+		"gpupreagg_keymatch(kern_context *kcxt,\n"
+		"                   kern_data_store *x_kds, size_t x_index,\n"
+		"                   kern_data_store *y_kds, size_t y_index)\n"
+		"{\n");
+	codegen_tempvar_declaration(&decl, "temp_x");
+	codegen_tempvar_declaration(&decl, "temp_y");
+	appendStringInfoChar(kern, '\n');
+
+	forboth (lc1, tlist_dev,
+			 lc2, tlist_dev_action)
+	{
+		TargetEntry	   *tle = lfirst(lc1);
+		int				action = lfirst_int(lc2);
+		Oid				type_oid;
+		Oid				coll_oid;
+		devtype_info   *dtype;
+		devfunc_info   *dfunc;
+
+		if (action != ALTFUNC_GROUPING_KEY)
+			continue;
+
+		/* find the function to compare this data-type */
+		type_oid = exprType((Node *)tle->expr);
+		coll_oid = exprCollation((Node *)tle->expr);
+		dtype = pgstrom_devtype_lookup_and_track(type_oid, context);
+		if (!dtype || !OidIsValid(dtype->type_eqfunc))
+			elog(ERROR, "Bug? type (%s) has no device comparison function",
+				 format_type_be(type_oid));
+
+		dfunc = pgstrom_devfunc_lookup_and_track(dtype->type_eqfunc,
+												 coll_oid,
+												 context);
+		if (!dfunc)
+			elog(ERROR, "Bug? device function (%u) was not found",
+				 dtype->type_eqfunc);
+
+		/* load the key values, and compare */
+		appendStringInfo(
+			kern,
+			"  temp_x.%s_v = pg_%s_vref(x_kds,kcxt,%u,x_index);\n"
+			"  temp_y.%s_v = pg_%s_vref(y_kds,kcxt,%u,y_index);\n"
+			"  if (!temp_x.%_v.isnull && !temp_y.%s_v.isnull)\n"
+			"  {\n"
+			"    if (!EVAL(pgfn_%s(kcxt, temp_x.%s_v, temp_y.%s_v)))\n"
+			"      return false;\n"
+			"  }\n"
+			"  else if ((temp_x.%_v.isnull && !temp_y.%s_v.isnull) ||\n"
+			"           (!temp_x.%_v.isnull && temp_y.%s_v.isnull))\n"
+			"      return false;\n"
+			"\n",
+			dtype->type_name, dtype->type_name, tle->resno - 1,
+			dtype->type_name, dtype->type_name, tle->resno - 1,
+			dtype->type_name, dtype->type_name,
+			dfunc->func_devname, dtype->type_name, dtype->type_name,
+			dtype->type_name, dtype->type_name,
+			dtype->type_name, dtype->type_name);
+	}
+	/* no constant values should be referenced */
+	Assert(bms_is_empty(context->param_refs));
+
+	appendStringInfoString(
+		kern,
+		"  return true;\n"
+		"}\n\n");
+}
 
 /*
  * gpupreagg_codegen - entrypoint of code-generator for GpuPreAgg
  */
 static char *
 gpupreagg_codegen(codegen_context *context,
+				  CustomScan *cscan,
 				  List *tlist_dev,
-				  List *tlist_dev_action)
+				  List *tlist_dev_action,
+				  List *outer_tlist,
+				  List *outer_quals)
 {
 	StringInfoData	kern;
 	StringInfoData	body;
@@ -1956,12 +2129,13 @@ gpupreagg_codegen(codegen_context *context,
 	context->used_params = list_make1(makeNullConst(BYTEAOID, -1, InvalidOid));
 	pgstrom_devtype_lookup_and_track(BYTEAOID, context);
 
-	/**/
-	gpupreagg_codegen_qual_eval(&kern,
-								outer...);
+	/* outer quals */
+
 	/* gpupreagg_hashvalue */
+	gpupreagg_codegen_hashvalue(&kern, context, tlist_dev, tlist_dev_action);
 
 	/* gpupreagg_keymatch */
+	gpupreagg_codegen_keymatch(&kern, context, tlist_dev, tlist_dev_action);
 
 	/* gpupreagg_local_calc */
 
@@ -1993,7 +2167,7 @@ gpupreagg_codegen(codegen_context *context,
 void
 assign_gpupreagg_session_info(StringInfo buf, GpuTaskState_v2 *gts)
 {
-	CustomScan	   *cscan = (CustomScan *)gts->css.ss.ps->plan;
+	CustomScan	   *cscan = (CustomScan *)gts->css.ss.ps.plan;
 
 	Assert(pgstrom_plan_is_gpupreagg(&cscan->scan.plan));
 	/*
@@ -2731,68 +2905,6 @@ gpupreagg_codegen_hashvalue(GpuPreAggInfo *gpa_info,
 							List *tlist_gpa,
 							codegen_context *context)
 {
-	StringInfoData	str;
-	StringInfoData	decl;
-	StringInfoData	body;
-	int				i;
-
-	initStringInfo(&str);
-	initStringInfo(&decl);
-    initStringInfo(&body);
-	context->param_refs = NULL;
-
-	appendStringInfo(&decl,
-					 "STATIC_FUNCTION(cl_uint)\n"
-					 "gpupreagg_hashvalue(kern_context *kcxt,\n"
-					 "                    cl_uint *crc32_table,\n"
-					 "                    cl_uint hash_value,\n"
-					 "                    kern_data_store *kds,\n"
-					 "                    size_t kds_index)\n"
-					 "{\n");
-
-	for (i=0; i < gpa_info->numCols; i++)
-	{
-		TargetEntry	   *tle;
-		AttrNumber		resno = gpa_info->grpColIdx[i];
-		devtype_info   *dtype;
-		Var			   *var;
-
-		tle = get_tle_by_resno(tlist_gpa, resno);
-		var = (Var *) tle->expr;
-		if (!IsA(var, Var) || var->varno != INDEX_VAR)
-			elog(ERROR, "Bug? A simple Var node is expected for group key: %s",
-				 nodeToString(var));
-
-		/* find a datatype for comparison */
-		dtype = pgstrom_devtype_lookup_and_track(var->vartype, context);
-		if (!OidIsValid(dtype->type_cmpfunc))
-			elog(ERROR, "Bug? type (%u) has no comparison function",
-				 var->vartype);
-
-		/* variable declarations */
-		appendStringInfo(
-			&decl,
-			"  pg_%s_t keyval_%u = pg_%s_vref(kds,kcxt,%u,kds_index);\n",
-			dtype->type_name, resno,
-			dtype->type_name, resno - 1);
-
-		/* crc32 computing */
-		appendStringInfo(
-			&body,
-			"  hash_value = pg_%s_comp_crc32(crc32_table,\n"
-			"                                hash_value, keyval_%u);\n",
-			dtype->type_name, resno);
-	}
-	/* no constants should be appear */
-	Assert(bms_is_empty(context->param_refs));
-
-	appendStringInfo(&decl,
-					 "%s\n"
-					 "  return hash_value;\n"
-					 "}\n", body.data);
-	pfree(body.data);
-
-	return decl.data;
 }
 
 /*
@@ -2810,97 +2922,6 @@ gpupreagg_codegen_keycomp(GpuPreAggInfo *gpa_info,
 						  List *tlist_gpa,
 						  codegen_context *context)
 {
-	StringInfoData	str;
-	StringInfoData	decl;
-	StringInfoData	body;
-	int				i;
-
-	initStringInfo(&str);
-	initStringInfo(&decl);
-    initStringInfo(&body);
-	context->param_refs = NULL;
-
-	for (i=0; i < gpa_info->numCols; i++)
-	{
-		TargetEntry	   *tle;
-		AttrNumber		resno = gpa_info->grpColIdx[i];
-		Var			   *var;
-		devtype_info   *dtype;
-		devfunc_info   *dfunc;
-
-		tle = get_tle_by_resno(tlist_gpa, resno);
-		var = (Var *) tle->expr;
-		if (!IsA(var, Var) || var->varno != INDEX_VAR)
-			elog(ERROR, "Bug? A simple Var node is expected for group key: %s",
-				 nodeToString(var));
-
-		/* find a function to compare this data-type */
-		/* find a datatype for comparison */
-		dtype = pgstrom_devtype_lookup_and_track(var->vartype, context);
-		if (!OidIsValid(dtype->type_eqfunc))
-			elog(ERROR, "Bug? type (%u) has no equality function",
-				 var->vartype);
-		dfunc = pgstrom_devfunc_lookup_and_track(dtype->type_eqfunc,
-												 var->varcollid,
-												 context);
-		/* variable declarations */
-		appendStringInfo(&decl,
-						 "  pg_%s_t xkeyval_%u;\n"
-						 "  pg_%s_t ykeyval_%u;\n",
-						 dtype->type_name, resno,
-						 dtype->type_name, resno);
-		/*
-		 * values comparison
-		 *
-		 * XXX - note that NUMERIC data type is already transformed to
-		 * the internal format on projection timing, so not a good idea
-		 * to use pg_numeric_vref() here, because it assumes Numeric in
-		 * varlena format.
-		 */
-		appendStringInfo(
-			&body,
-			"  xkeyval_%u = pg_%s_vref(x_kds,kcxt,%u,x_index);\n"
-			"  ykeyval_%u = pg_%s_vref(y_kds,kcxt,%u,y_index);\n"
-			"  if (!xkeyval_%u.isnull && !ykeyval_%u.isnull)\n"
-			"  {\n"
-			"    if (!EVAL(pgfn_%s(kcxt, xkeyval_%u, ykeyval_%u)))\n"
-			"      return false;\n"
-			"  }\n"
-			"  else if ((xkeyval_%u.isnull  && !ykeyval_%u.isnull) ||\n"
-			"           (!xkeyval_%u.isnull &&  ykeyval_%u.isnull))\n"
-			"      return false;\n",
-			resno, dtype->type_name, resno - 1,
-			resno, dtype->type_name, resno - 1,
-			resno, resno,
-			dfunc->func_devname, resno, resno,
-			resno, resno,
-			resno, resno);
-	}
-	/* add parameters, if referenced */
-	if (!bms_is_empty(context->param_refs))
-	{
-		pgstrom_codegen_param_declarations(&decl, context);
-		bms_free(context->param_refs);
-	}
-
-	/* make a whole key-compare function */
-	appendStringInfo(
-		&str,
-		"STATIC_FUNCTION(cl_bool)\n"
-		"gpupreagg_keymatch(kern_context *kcxt,\n"
-		"                   kern_data_store *x_kds, size_t x_index,\n"
-		"                   kern_data_store *y_kds, size_t y_index)\n"
-		"{\n"
-		"%s"	/* variable/params declarations */
-		"%s"
-		"  return true;\n"
-		"}\n",
-		decl.data,
-		body.data);
-	pfree(decl.data);
-	pfree(body.data);
-
-	return str.data;
 }
 
 /*
