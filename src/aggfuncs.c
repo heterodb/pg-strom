@@ -29,8 +29,16 @@
 /*
  * declarations
  */
-Datum gpupreagg_partial_nrows(PG_FUNCTION_ARGS);
-Datum gpupreagg_pseudo_expr(PG_FUNCTION_ARGS);
+Datum pgstrom_partial_avg_int4(PG_FUNCTION_ARGS);
+Datum pgstrom_partial_avg_int8(PG_FUNCTION_ARGS);
+Datum pgstrom_partial_avg_numeric(PG_FUNCTION_ARGS);
+Datum pgstrom_partial_avg_fp8(PG_FUNCTION_ARGS);
+Datum pgstrom_partial_sum_int8(PG_FUNCTION_ARGS);
+Datum pgstrom_partial_sum_numeric(PG_FUNCTION_ARGS);
+Datum pgstrom_partial_variance_fp8(PG_FUNCTION_ARGS);
+Datum pgstrom_partial_covar_fp8(PG_FUNCTION_ARGS);
+
+#if NOT_USED
 Datum gpupreagg_psum_int(PG_FUNCTION_ARGS);
 Datum gpupreagg_psum_float4(PG_FUNCTION_ARGS);
 Datum gpupreagg_psum_float8(PG_FUNCTION_ARGS);
@@ -59,37 +67,204 @@ Datum pgstrom_numeric_var_samp(PG_FUNCTION_ARGS);
 Datum pgstrom_numeric_var_pop(PG_FUNCTION_ARGS);
 Datum pgstrom_numeric_stddev_samp(PG_FUNCTION_ARGS);
 Datum pgstrom_numeric_stddev_pop(PG_FUNCTION_ARGS);
+#endif
+
+/* copy from utils/adt/numeric.c */
+typedef int16 NumericDigit;
+
+/* copy from utils/adt/numeric.c */
+typedef struct NumericVar
+{
+	int			ndigits;		/* # of digits in digits[] - can be 0! */
+	int			weight;			/* weight of first digit */
+	int			sign;			/* NUMERIC_POS, NUMERIC_NEG, or NUMERIC_NAN */
+	int			dscale;			/* display scale */
+	NumericDigit *buf;			/* start of palloc'd space for digits[] */
+	NumericDigit *digits;		/* base-NBASE digits */
+} NumericVar;
+
+/* copy from utils/adt/numeric.c */
+typedef struct NumericAggState
+{
+	bool		calcSumX2;		/* if true, calculate sumX2 */
+	MemoryContext agg_context;	/* context we're calculating in */
+	int64		N;				/* count of processed numbers */
+	NumericVar	sumX;			/* sum of processed numbers */
+	NumericVar	sumX2;			/* sum of squares of processed numbers */
+	int			maxScale;		/* maximum scale seen so far */
+	int64		maxScaleCount;	/* number of values seen with maximum scale */
+	int64		NaNcount;		/* count of NaN values (not included in N!) */
+} NumericAggState;
+
+/* copy from utils/adt/numeric.c */
+static inline NumericAggState *
+makeNumericAggState(bool calcSumX2)
+{
+	NumericAggState *state = palloc0(sizeof(NumericAggState));
+
+	state->calcSumX2 = calcSumX2;
+	state->agg_context = CurrentMemoryContext;
+
+	return state;
+}
+
+/* copy from utils/adt/numeric.c */
+#ifdef HAVE_INT128
+typedef struct Int128AggState
+{
+	bool		calcSumX2;      /* if true, calculate sumX2 */
+	int64		N;              /* count of processed numbers */
+	int128		sumX;           /* sum of processed numbers */
+	int128		sumX2;          /* sum of squares of processed numbers */
+} Int128AggState;
+
+static inline Int128AggState *
+makeInt128AggState(bool calcSumX2)
+{
+	Int128AggState *state = palloc0(sizeof(Int128AggState));
+
+	state->calcSumX2 = calcSumX2;
+
+	return state;
+}
+#define makePolyNumAggState	makeInt128AggState
+typedef Int128AggState		PolyNumAggState;
+#else
+#define makePolyNumAggState	makeNumericAggState
+typedef NumericAggState		PolyNumAggState;
+#endif
 
 /*
- * gpupreagg_partial_nrows - alternative partial aggregate function for
- * row count; which returns the supplied int8 as is.
+ * pgstrom_partial_avg_int4 - alternative function for AVG(int2/int4)
  */
 Datum
-gpupreagg_partial_nrows(PG_FUNCTION_ARGS)
+pgstrom_partial_avg_int4(PG_FUNCTION_ARGS)
 {
+	ArrayType  *result;
+	Datum		items[2];
 
-
-	int		i;
-
-	for (i=0; i < PG_NARGS(); i++)
-	{
-		if (PG_ARGISNULL(i) || !PG_GETARG_BOOL(i))
-			PG_RETURN_INT32(0);
-	}
-	PG_RETURN_INT32(1);
+	items[0] = PG_GETARG_DATUM(0);	/* nrows(int8) */
+	items[1] = PG_GETARG_DATUM(1);	/* p_sum(int8) */
+	result = construct_array(items, 2, INT8OID,
+							 sizeof(int64), FLOAT8PASSBYVAL, 'd');
+	PG_RETURN_ARRAYTYPE_P(result);
 }
-PG_FUNCTION_INFO_V1(gpupreagg_partial_nrows);
 
-/* gpupreagg_pseudo_expr - placeholder function that returns the supplied
- * variable as is (even if it is NULL). Used to MIX(), MAX() placeholder.
+/*
+ * pgstrom_partial_avg_int8 - alternative function for AVG(int8)
  */
 Datum
-gpupreagg_pseudo_expr(PG_FUNCTION_ARGS)
+pgstrom_partial_avg_int8(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_DATUM(PG_GETARG_DATUM(0));
-}
-PG_FUNCTION_INFO_V1(gpupreagg_pseudo_expr);
+	PolyNumAggState *state = makePolyNumAggState(false);
+	int64		nrows = PG_GETARG_INT64(0);		/* nrows */
 
+	DirectFunctionCall2(int8_avg_accum,
+						PointerGetDatum(state),
+						PG_GETARG_DATUM(1));	/* partial sum */
+	state->N = nrows;	/* overwrite nrows */
+
+	PG_RETURN_POINTER(state);
+}
+
+/*
+ * pgstrom_partial_avg_numeric - alternative function for AVG(numeric)
+ */
+Datum
+pgstrom_partial_avg_numeric(PG_FUNCTION_ARGS)
+{
+	NumericAggState *state = makeNumericAggState(false);
+	int64		nrows = PG_GETARG_INT64(0);		/* nrows */
+
+	DirectFunctionCall2(numeric_avg_accum,
+						PointerGetDatum(state),
+						PG_GETARG_DATUM(1));	/* partial sum */
+	state->N = nrows;	/* overwrite nrows */
+
+	PG_RETURN_POINTER(state);
+}
+
+/*
+ * pgstrom_partial_avg_float - alternative function for AVG(float4/float8)
+ */
+Datum
+pgstrom_partial_avg_fp8(PG_FUNCTION_ARGS)
+{
+	ArrayType  *result;
+	Datum		items[2];
+
+	items[0] = PG_GETARG_DATUM(0);	/* nrows(int8) */
+	items[1] = PG_GETARG_DATUM(1);	/* p_sum(int8) */
+	result = construct_array(items, 2, FLOAT8OID,
+							 sizeof(float8), FLOAT8PASSBYVAL, 'd');
+	PG_RETURN_ARRAYTYPE_P(result);
+}
+
+/*
+ * gpupreagg_psum_int8 - alternative function for SUM(int8)
+ */
+Datum
+pgstrom_partial_sum_int8(PG_FUNCTION_ARGS)
+{
+	PolyNumAggState *state = makePolyNumAggState(false);
+	DirectFunctionCall2(int8_avg_accum,
+						PointerGetDatum(state),
+						PG_GETARG_DATUM(0));    /* partial sum */
+	PG_RETURN_POINTER(state);
+}
+
+/*
+ * gpupreagg_psum_numeric - alternative function for SUM(numeric)
+ */
+Datum
+pgstrom_partial_sum_numeric(PG_FUNCTION_ARGS)
+{
+	NumericAggState *state = makeNumericAggState(false);
+	DirectFunctionCall2(numeric_avg_accum,
+						PointerGetDatum(state),
+						PG_GETARG_DATUM(0));	/* partial sum */
+	PG_RETURN_POINTER(state);
+}
+
+/*
+ * pgstrom_partial_variance_fp8 - alternative function for variance and similar
+ */
+Datum
+pgstrom_partial_variance_fp8(PG_FUNCTION_ARGS)
+{
+	ArrayType  *state;
+	Datum		items[3];
+
+	items[0] = Float8GetDatum((double)PG_GETARG_INT64(0));	/* nrows(int8) */
+	items[1] = PG_GETARG_DATUM(1);	/* sum of X */
+	items[2] = PG_GETARG_DATUM(2);	/* sum of X^2 */
+    state = construct_array(items, 3, FLOAT8OID,
+							sizeof(float8), FLOAT8PASSBYVAL, 'd');
+	PG_RETURN_ARRAYTYPE_P(state);
+}
+
+/*
+ * pgstrom_partial_covar_fp8 - alternative function for covariance and similar
+ */
+Datum
+pgstrom_partial_covar_fp8(PG_FUNCTION_ARGS)
+{
+	ArrayType  *state;
+	Datum		items[6];
+
+	items[0] = Float8GetDatum((double)PG_GETARG_INT64(0));	/* nrows(int8) */
+	items[1] = PG_GETARG_DATUM(1);	/* sum of X */
+	items[2] = PG_GETARG_DATUM(2);	/* sum of X^2 */
+	items[3] = PG_GETARG_DATUM(3);	/* sum of Y */
+	items[4] = PG_GETARG_DATUM(4);	/* sum of Y^2 */
+	items[5] = PG_GETARG_DATUM(5);	/* sum of X*Y */
+	state = construct_array(items, 6, FLOAT8OID,
+							sizeof(float8), FLOAT8PASSBYVAL, 'd');
+	PG_RETURN_ARRAYTYPE_P(state);
+}
+
+
+#ifdef NOT_USED
 /* gpupreagg_psum_* - placeholder function that generates partial sum
  * of the arguments. _x2 generates square value of the input
  */
@@ -808,3 +983,4 @@ pgstrom_covariance_float8_accum(PG_FUNCTION_ARGS)
 	}
 }
 PG_FUNCTION_INFO_V1(pgstrom_covariance_float8_accum);
+#endif

@@ -53,7 +53,6 @@ static CustomPathMethods		gpupreagg_path_methods;
 static CustomScanMethods		gpupreagg_scan_methods;
 static CustomExecMethods		gpupreagg_exec_methods;
 static bool						enable_gpupreagg;
-static bool						debug_force_gpupreagg;
 
 typedef struct
 {
@@ -237,6 +236,9 @@ typedef struct
 } pgstrom_gpupreagg;
 
 /* declaration of static functions */
+static char	   *gpupreagg_codegen(codegen_context *context,
+								  List *tlist_dev,
+								  List *tlist_dev_action);
 static bool		gpupreagg_task_process(GpuTask_v2 *gtask);
 static bool		gpupreagg_task_complete(GpuTask_v2 *gtask);
 static void		gpupreagg_task_release(GpuTask_v2 *gtask);
@@ -248,6 +250,7 @@ static TupleTableSlot *gpupreagg_next_tuple(GpuTaskState_v2 *gts);
  */
 #define ALTFUNC_GROUPING_KEY		 50	/* GROUPING KEY */
 #define ALTFUNC_CONST_VALUE			 51	/* other constant values */
+#define ALTFUNC_CONST_NULL			 52	/* NULL constant value */
 #define ALTFUNC_EXPR_NROWS			101	/* NROWS(X) */
 #define ALTFUNC_EXPR_PMIN			102	/* PMIN(X) */
 #define ALTFUNC_EXPR_PMAX			103	/* PMAX(X) */
@@ -291,29 +294,29 @@ typedef struct {
 static aggfunc_catalog_t  aggfunc_catalog[] = {
 	/* HOGE: AVG(X) = EX_AVG(NROWS(), PSUM(X)) */
 	{ "avg",    1, {INT2OID},
-	  "s:avg",  2, {INT4OID, INT8OID},
+	  "s:pavg_int4", 2, {INT8OID, INT8OID},
 	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, 0, INT_MAX
 	},
 	{ "avg",    1, {INT4OID},
-	  "s:avg",  2, {INT4OID, INT8OID},
+	  "s:pavg_int4", 2, {INT8OID, INT8OID},
 	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, 0, INT_MAX
 	},
 	{ "avg",    1, {INT8OID},
-	  "s:avg_int8",  2, {INT4OID, INT8OID},
-	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, 0, INT_MAX
+	  "s:pavg_int8",  3, {INTERNALOID, INT8OID, INT8OID},
+	  {ALTFUNC_CONST_NULL, ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, 0, INT_MAX
 	},
 	{ "avg",    1, {FLOAT4OID},
-	  "s:avg",  2, {INT4OID, FLOAT8OID},
+	  "s:pavg_fp8", 2, {INT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, 0, INT_MAX
 	},
 	{ "avg",    1, {FLOAT8OID},
-	  "s:avg",  2, {INT4OID, FLOAT8OID},
+	  "s:pavg_fp8", 2, {INT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, 0, INT_MAX
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "avg",	1, {NUMERICOID},
-	  "s:avg_numeric",	2, {INT4OID, NUMERICOID},
-	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM},
+	  "s:pavg_numeric",	3, {INTERNALOID, INT8OID, NUMERICOID},
+	  {ALTFUNC_CONST_NULL, ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM},
 	  DEVKERNEL_NEEDS_NUMERIC, 100
 	},
 #endif
@@ -424,167 +427,172 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 
 	/* HOGE: SUM(X) = SUM(PSUM(X)) */
 	{ "sum", 1, {INT2OID},
-	  "s:sum", 1, {INT8OID},
+	  "varref", 1, {INT8OID},
 	  {ALTFUNC_EXPR_PSUM}, 0, INT_MAX
 	},
 	{ "sum", 1, {INT4OID},
-	  "s:sum", 1, {INT8OID},
+	  "varref", 1, {INT8OID},
 	  {ALTFUNC_EXPR_PSUM}, 0, INT_MAX
 	},
 	{ "sum", 1, {INT8OID},
-	  "c:sum", 1, {INT8OID},
-	  {ALTFUNC_EXPR_PSUM}, 0, INT_MAX
+	  "s:psum", 2, {INTERNALOID,INT8OID},
+	  {ALTFUNC_CONST_NULL,ALTFUNC_EXPR_PSUM}, 0, INT_MAX
 	},
 	{ "sum", 1, {FLOAT4OID},
-	  "c:sum", 1, {FLOAT4OID},
+	  "varref", 1, {FLOAT4OID},
 	  {ALTFUNC_EXPR_PSUM}, 0, INT_MAX
 	},
 	{ "sum", 1, {FLOAT8OID},
-	  "c:sum", 1, {FLOAT8OID},
+	  "varref", 1, {FLOAT8OID},
 	  {ALTFUNC_EXPR_PSUM}, 0, INT_MAX
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "sum", 1, {NUMERICOID},
-	  "c:sum", 1, {NUMERICOID},
-	  {ALTFUNC_EXPR_PSUM}, DEVKERNEL_NEEDS_NUMERIC, 100
+	  "s:psum", 2, {INTERNALOID,NUMERICOID},
+	  {ALTFUNC_CONST_NULL,ALTFUNC_EXPR_PSUM}, DEVKERNEL_NEEDS_NUMERIC, 100
 	},
 #endif
 	{ "sum", 1, {CASHOID},
-	  "c:sum", 1, {CASHOID},
+	  "varref", 1, {CASHOID},
 	  {ALTFUNC_EXPR_PSUM}, DEVKERNEL_NEEDS_MONEY, INT_MAX
 	},
-	/* HOGE: STDDEV(X) = EX_STDDEV(NROWS(),PSUM(X),PSUM(X*X)) */
+	/* STDDEV(X) = EX_STDDEV(NROWS(),PSUM(X),PSUM(X*X)) */
 	{ "stddev", 1, {FLOAT4OID},
-	  "s:stddev", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
+	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
 	},
 	{ "stddev", 1, {FLOAT8OID},
-	  "s:stddev", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
+	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
 	},
-#ifdef GPUPREAGG_SUPPORT_NUMERIC
+#ifdef NOT_USED
+	/* X^2 of numeric is risky for overflow */
 	{ "stddev", 1, {NUMERICOID},
-	  "s:stddev", 3, {INT4OID, NUMERICOID, NUMERICOID},
+	  "s:pvariance", 3, {INT8OID, NUMERICOID, NUMERICOID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, DEVKERNEL_NEEDS_NUMERIC, 32
 	},
 #endif
 	{ "stddev_pop", 1, {FLOAT4OID},
-	  "s:stddev_pop", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
+	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
 	},
 	{ "stddev_pop", 1, {FLOAT8OID},
-	  "s:stddev_pop", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
+	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
 	},
-#ifdef GPUPREAGG_SUPPORT_NUMERIC
+#ifdef NOT_USED
+	/* X^2 of numeric is risky for overflow */
 	{ "stddev_pop", 1, {NUMERICOID},
-	  "s:stddev_pop", 3, {INT4OID, NUMERICOID, NUMERICOID},
+	  "s:pvariance", 3, {INT8OID, NUMERICOID, NUMERICOID},
 	  {ALTFUNC_EXPR_NROWS,
        ALTFUNC_EXPR_PSUM,
        ALTFUNC_EXPR_PSUM_X2}, DEVKERNEL_NEEDS_NUMERIC, 32
 	},
 #endif
 	{ "stddev_samp", 1, {FLOAT4OID},
-	  "s:stddev_samp", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
+	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
 	},
 	{ "stddev_samp", 1, {FLOAT8OID},
-	  "s:stddev_samp", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
+	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
 	},
-#ifdef GPUPREAGG_SUPPORT_NUMERIC
+#ifdef NOT_USED
+	/* X^2 of numeric is risky for overflow */
 	{ "stddev_samp", 1, {NUMERICOID},
-	  "s:stddev_samp", 3, {INT4OID, NUMERICOID, NUMERICOID},
+	  "s:pvariance", 3, {INT8OID, NUMERICOID, NUMERICOID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, DEVKERNEL_NEEDS_NUMERIC, 32
 	},
 #endif
-	/* HOGE: VARIANCE(X) = PGSTROM.VARIANCE(NROWS(), PSUM(X),PSUM(X^2)) */
+	/* VARIANCE(X) = PGSTROM.VARIANCE(NROWS(), PSUM(X),PSUM(X^2)) */
 	{ "variance", 1, {FLOAT4OID},
-	  "s:variance", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
+	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
 	},
 	{ "variance", 1, {FLOAT8OID},
-	  "s:variance", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
+	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
 	},
-#ifdef GPUPREAGG_SUPPORT_NUMERIC
+#ifdef NOT_USED
+	/* X^2 of numeric is risky for overflow */
 	{ "variance", 1, {NUMERICOID},
-	  "s:variance", 3, {INT4OID, NUMERICOID, NUMERICOID},
+	  "s:pvariance", 3, {INT8OID, NUMERICOID, NUMERICOID},
 	  {ALTFUNC_EXPR_NROWS,
        ALTFUNC_EXPR_PSUM,
        ALTFUNC_EXPR_PSUM_X2}, DEVKERNEL_NEEDS_NUMERIC, 32
 	},
 #endif
 	{ "var_pop", 1, {FLOAT4OID},
-	  "s:var_pop", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
+	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
 	},
 	{ "var_pop", 1, {FLOAT8OID},
-	  "s:var_pop", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
+	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
 	},
-#ifdef GPUPREAGG_SUPPORT_NUMERIC
+#ifdef NOT_USED
+	/* X^2 of numeric is risky for overflow */
 	{ "var_pop", 1, {NUMERICOID},
-	  "s:var_pop", 3, {INT4OID, NUMERICOID, NUMERICOID},
+	  "s:pvariance", 3, {INT8OID, NUMERICOID, NUMERICOID},
 	  {ALTFUNC_EXPR_NROWS,
        ALTFUNC_EXPR_PSUM,
        ALTFUNC_EXPR_PSUM_X2}, DEVKERNEL_NEEDS_NUMERIC, 32
 	},
 #endif
 	{ "var_samp", 1, {FLOAT4OID},
-	  "s:var_samp", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
+	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
 	},
 	{ "var_samp", 1, {FLOAT8OID},
-	  "s:var_samp", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
+	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
 	},
-#ifdef GPUPREAGG_SUPPORT_NUMERIC
+#ifdef NOT_USED
+	/* X^2 of numeric is risky for overflow */
 	{ "var_samp", 1, {NUMERICOID},
-	  "s:var_samp", 3, {INT4OID, NUMERICOID, NUMERICOID},
+	  "s:pvariance", 3, {INT8OID, NUMERICOID, NUMERICOID},
 	  {ALTFUNC_EXPR_NROWS,
        ALTFUNC_EXPR_PSUM,
        ALTFUNC_EXPR_PSUM_X2}, DEVKERNEL_NEEDS_NUMERIC, 32
 	},
 #endif
 	/*
-	 * HOGE:
 	 * CORR(X,Y) = PGSTROM.CORR(NROWS(X,Y),
 	 *                          PCOV_X(X,Y),  PCOV_Y(X,Y)
 	 *                          PCOV_X2(X,Y), PCOV_Y2(X,Y),
 	 *                          PCOV_XY(X,Y))
 	 */
 	{ "corr", 2, {FLOAT8OID, FLOAT8OID},
-	  "s:corr", 6,
-	  {INT4OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID},
+	  "s:pcovar", 6,
+	  {INT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PCOV_X,
 	   ALTFUNC_EXPR_PCOV_X2,
@@ -593,8 +601,8 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_XY}, 0, SHRT_MAX
 	},
 	{ "covar_pop", 2, {FLOAT8OID, FLOAT8OID},
-	  "s:covar_pop", 6,
-	  {INT4OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID},
+	  "s:pcovar", 6,
+	  {INT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PCOV_X,
 	   ALTFUNC_EXPR_PCOV_X2,
@@ -603,8 +611,8 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_XY}, 0, SHRT_MAX
 	},
 	{ "covar_samp", 2, {FLOAT8OID, FLOAT8OID},
-	  "s:covar_samp", 6,
-	  {INT4OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID},
+	  "s:pcovar", 6,
+	  {INT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PCOV_X,
 	   ALTFUNC_EXPR_PCOV_X2,
@@ -613,15 +621,14 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_XY}, 0, SHRT_MAX
 	},
 	/*
-	 * HOGE:
 	 * Aggregation to support least squares method
 	 *
 	 * That takes PSUM_X, PSUM_Y, PSUM_X2, PSUM_Y2, PSUM_XY according
 	 * to the function
 	 */
 	{ "regr_avgx", 2, {FLOAT8OID, FLOAT8OID},
-	  "s:regr_avgx", 6,
-	  {INT4OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID},
+	  "s:pcovar", 6,
+	  {INT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
        ALTFUNC_EXPR_PCOV_X,
        ALTFUNC_EXPR_PCOV_X2,
@@ -630,8 +637,8 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
        ALTFUNC_EXPR_PCOV_XY}, 0, SHRT_MAX
 	},
 	{ "regr_avgy", 2, {FLOAT8OID, FLOAT8OID},
-	  "s:regr_avgy", 6,
-	  {INT4OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID},
+	  "s:pcovar", 6,
+	  {INT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PCOV_X,
 	   ALTFUNC_EXPR_PCOV_X2,
@@ -640,11 +647,11 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_XY}, 0, SHRT_MAX
 	},
 	{ "regr_count", 2, {FLOAT8OID, FLOAT8OID},
-	  "s:regr_count", 1, {INT4OID}, {ALTFUNC_EXPR_NROWS}, 0
+	  "varref", 1, {INT8OID}, {ALTFUNC_EXPR_NROWS}, 0
 	},
 	{ "regr_intercept", 2, {FLOAT8OID, FLOAT8OID},
-	  "s:regr_intercept", 6,
-	  {INT4OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID},
+	  "s:pcovar", 6,
+	  {INT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PCOV_X,
 	   ALTFUNC_EXPR_PCOV_X2,
@@ -653,8 +660,8 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_XY}, 0, SHRT_MAX
 	},
 	{ "regr_r2", 2, {FLOAT8OID, FLOAT8OID},
-	  "s:regr_r2", 6,
-	  {INT4OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID},
+	  "s:pcovar", 6,
+	  {INT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PCOV_X,
 	   ALTFUNC_EXPR_PCOV_X2,
@@ -663,8 +670,8 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_XY}, 0, SHRT_MAX
 	},
 	{ "regr_slope", 2, {FLOAT8OID, FLOAT8OID},
-	  "s:regr_slope", 6,
-	  {INT4OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID},
+	  "s:pcovar", 6,
+	  {INT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PCOV_X,
 	   ALTFUNC_EXPR_PCOV_X2,
@@ -673,8 +680,8 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_XY}, 0, SHRT_MAX
 	},
 	{ "regr_sxx", 2, {FLOAT8OID, FLOAT8OID},
-	  "s:regr_sxx", 6,
-	  {INT4OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID},
+	  "s:pcovar", 6,
+	  {INT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PCOV_X,
 	   ALTFUNC_EXPR_PCOV_X2,
@@ -683,8 +690,8 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_XY}, 0, SHRT_MAX
 	},
 	{ "regr_sxy", 2, {FLOAT8OID, FLOAT8OID},
-	  "s:regr_sxy", 6,
-	  {INT4OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID},
+	  "s:pcovar", 6,
+	  {INT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PCOV_X,
 	   ALTFUNC_EXPR_PCOV_X2,
@@ -693,8 +700,8 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_XY}, 0, SHRT_MAX
 	},
 	{ "regr_syy", 2, {FLOAT8OID, FLOAT8OID},
-	  "s:regr_syy", 6,
-	  {INT4OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID},
+	  "s:pcovar", 6,
+	  {INT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PCOV_X,
 	   ALTFUNC_EXPR_PCOV_X2,
@@ -1371,11 +1378,14 @@ make_expr_conditional(Expr *expr, Expr *filter, bool zero_if_unmatched)
 }
 
 
-
-
-
-
-
+/*
+ * make_altfunc_nrows_expr - constructor of dummy NULL for 'internal' type
+ */
+static Expr *
+make_altfunc_null_const(Aggref *aggref)
+{
+	return (Expr *)makeNullConst(INTERNALOID, -1, InvalidOid);
+}
 
 /*
  * make_altfunc_nrows_expr - constructor of the partial number of rows
@@ -1482,25 +1492,25 @@ make_altfunc_psum_x2(Aggref *aggref)
 static Expr *
 make_altfunc_pcov_xy(Aggref *aggref, int action)
 {
-	Expr	   *arg_x;
-	Expr	   *arg_y;
-	NullTest   *nulltest_x;
-	NullTest   *nulltest_y;
-	List	   *arg_checks = NIL;
-	Expr	   *expr;
+	TargetEntry	   *tle_x;
+	TargetEntry	   *tle_y;
+	NullTest	   *nulltest_x;
+	NullTest	   *nulltest_y;
+	List		   *arg_checks = NIL;
+	Expr		   *expr;
 
 	Assert(list_length(aggref->args) == 2);
-	arg_x = linitial(aggref->args);
-	arg_y = lsecond(aggref->args);
-	if (exprType((Node *)arg_x) != FLOAT8OID ||
-		exprType((Node *)arg_y) != FLOAT8OID)
+	tle_x = linitial(aggref->args);
+	tle_y = lsecond(aggref->args);
+	if (exprType((Node *)tle_x->expr) != FLOAT8OID ||
+		exprType((Node *)tle_y->expr) != FLOAT8OID)
 		elog(ERROR, "Bug? unexpected argument type for co-variance");
 
 	if (aggref->aggfilter)
 		arg_checks = lappend(arg_checks, aggref->aggfilter);
 	/* nulltest for X-argument */
 	nulltest_x = makeNode(NullTest);
-	nulltest_x->arg = copyObject(arg_x);
+	nulltest_x->arg = copyObject(tle_x->expr);
 	nulltest_x->nulltesttype = IS_NOT_NULL;
 	nulltest_x->argisrow = false;
 	nulltest_x->location = aggref->location;
@@ -1508,7 +1518,7 @@ make_altfunc_pcov_xy(Aggref *aggref, int action)
 
 	/* nulltest for Y-argument */
 	nulltest_y = makeNode(NullTest);
-	nulltest_y->arg = copyObject(arg_y);
+	nulltest_y->arg = copyObject(tle_y->expr);
 	nulltest_y->nulltesttype = IS_NOT_NULL;
 	nulltest_y->argisrow = false;
 	nulltest_y->location = aggref->location;
@@ -1517,15 +1527,16 @@ make_altfunc_pcov_xy(Aggref *aggref, int action)
 	switch (action)
 	{
 		case ALTFUNC_EXPR_PCOV_X:	/* PCOV_X(X,Y) */
-			expr = arg_x;
+			expr = tle_x->expr;
 			break;
 		case ALTFUNC_EXPR_PCOV_Y:	/* PCOV_Y(X,Y) */
-			expr = arg_y;
+			expr = tle_y->expr;
 			break;
 		case ALTFUNC_EXPR_PCOV_X2:	/* PCOV_X2(X,Y) */
 			expr = (Expr *)makeFuncExpr(F_FLOAT8MUL,
 										FLOAT8OID,
-										list_make2(arg_x, arg_x),
+										list_make2(tle_x->expr,
+												   tle_x->expr),
 										InvalidOid,
 										InvalidOid,
 										COERCE_EXPLICIT_CALL);
@@ -1533,7 +1544,8 @@ make_altfunc_pcov_xy(Aggref *aggref, int action)
 		case ALTFUNC_EXPR_PCOV_Y2:	/* PCOV_Y2(X,Y) */
 			expr = (Expr *)makeFuncExpr(F_FLOAT8MUL,
 										FLOAT8OID,
-										list_make2(arg_y, arg_y),
+										list_make2(tle_y->expr,
+												   tle_y->expr),
 										InvalidOid,
 										InvalidOid,
 										COERCE_EXPLICIT_CALL);
@@ -1541,7 +1553,8 @@ make_altfunc_pcov_xy(Aggref *aggref, int action)
 		case ALTFUNC_EXPR_PCOV_XY:	/* PCOV_XY(X,Y) */
 			expr = (Expr *)makeFuncExpr(F_FLOAT8MUL,
 										FLOAT8OID,
-										list_make2(arg_x, arg_y),
+										list_make2(tle_x->expr,
+												   tle_y->expr),
 										InvalidOid,
 										InvalidOid,
 										COERCE_EXPLICIT_CALL);
@@ -1550,6 +1563,67 @@ make_altfunc_pcov_xy(Aggref *aggref, int action)
 			elog(ERROR, "Bug? unexpected action type for co-variance ");
 	}
 	return make_expr_conditional(expr, make_andclause(arg_checks), false);
+}
+
+/*
+ * make_expr_typecast - constructor of type cast
+ */
+static Expr *
+make_expr_typecast(Expr *expr, Oid target_type)
+{
+	Oid			source_type = exprType((Node *) expr);
+	HeapTuple	tup;
+	Form_pg_cast cast;
+
+	/*
+	 * NOTE: Var->vano shall be replaced to INDEX_VAR on the following
+	 * make_altfunc_expr(), so we keep the expression as-is, at this
+	 * moment.
+	 */
+	if (source_type == target_type)
+		return expr;
+
+	tup = SearchSysCache2(CASTSOURCETARGET,
+						  ObjectIdGetDatum(source_type),
+						  ObjectIdGetDatum(target_type));
+	if (!HeapTupleIsValid(tup))
+		elog(ERROR, "could not find tuple for cast (%u,%u)",
+			 source_type, target_type);
+	cast = (Form_pg_cast) GETSTRUCT(tup);
+	if (cast->castmethod == COERCION_METHOD_FUNCTION)
+	{
+		FuncExpr	   *func;
+
+		Assert(OidIsValid(cast->castfunc));
+		func = makeFuncExpr(cast->castfunc,
+							target_type,
+							list_make1(expr),
+							InvalidOid,	/* always right? */
+							exprCollation((Node *) expr),
+							COERCE_EXPLICIT_CAST);
+		expr = (Expr *) func;
+	}
+	else if (cast->castmethod == COERCION_METHOD_BINARY)
+	{
+		RelabelType	   *relabel = makeNode(RelabelType);
+
+		relabel->arg = expr;
+		relabel->resulttype = target_type;
+		relabel->resulttypmod = exprTypmod((Node *) expr);
+		relabel->resultcollid = exprCollation((Node *) expr);
+		relabel->relabelformat = COERCE_EXPLICIT_CAST;
+		relabel->location = -1;
+
+		expr = (Expr *) relabel;
+	}
+	else
+	{
+		elog(ERROR, "cast-method '%c' is not supported in opencl kernel",
+			 cast->castmethod);
+	}
+	ReleaseSysCache(tup);
+
+	return expr;
 }
 
 /*
@@ -1597,12 +1671,26 @@ build_custom_scan_tlist(PathTarget *target,
 				ListCell	   *cell1;
 				ListCell	   *cell2;
 				cl_int			action = aggfn_cat->altfn_argexprs[j];
+				Oid				argtype = aggfn_cat->altfn_argtypes[j];
 				Expr		   *expr;
 				TargetEntry	   *temp;
 				cl_int			temp_action;
 
 				switch (action)
 				{
+					case ALTFUNC_CONST_NULL:
+						/*
+						 * NOTE: PostgreSQL does not allows to define
+						 * functions that return 'internal' data type
+						 * unless it has an 'internal' arguments.
+						 * So, some of alternative functions need to have
+						 * a dummay argument to avoid the restriction.
+						 * It is ignored in the device code, thus, we don't
+						 * need to add this entry on the tlist_dev.
+						 */
+						expr = make_altfunc_null_const(aggref);
+						goto found_tlist_dev_entry;	/* skip to add tlist_dev */
+
 					case ALTFUNC_EXPR_NROWS:	/* NROWS(X) */
 						expr = make_altfunc_nrows_expr(aggref);
 						break;
@@ -1628,6 +1716,9 @@ build_custom_scan_tlist(PathTarget *target,
 							 action);
 						break;
 				}
+				/* force type cast if mismatch */
+				expr = make_expr_typecast(expr, argtype);
+
 				/*
 				 * lookup same entity on the tlist_dev, then append it
 				 * if not found. Resno is tracked to construct FuncExpr.
@@ -1640,7 +1731,7 @@ build_custom_scan_tlist(PathTarget *target,
 
 					if (temp_action == action &&
 						equal(expr, temp->expr))
-						goto found_tentry;
+						goto found_tlist_dev_entry;
 				}
 				temp = makeTargetEntry(expr,
 									   list_length(tlist_dev) + 1,
@@ -1649,7 +1740,7 @@ build_custom_scan_tlist(PathTarget *target,
 				tlist_dev = lappend(tlist_dev, temp);
 				tlist_dev_action = lappend_int(tlist_dev_action, action);
 
-			found_tentry:
+			found_tlist_dev_entry:
 				altfn_args = lappend(altfn_args, expr);
 			}
 
@@ -1770,11 +1861,8 @@ PlanGpuPreAggPath(PlannerInfo *root,
 	List		   *tlist_host;
 	List		   *tlist_dev;
 	List		   *tlist_dev_action;
-	StringInfoData	kern;
+	char		   *kern_source;
 	codegen_context	context;
-
-	initStringInfo(&kern);
-	pgstrom_init_codegen_context(&context);
 
 	/* Does it have outer sub-plan? or scan table by itself? */
 	if (custom_plans != NIL)
@@ -1811,42 +1899,63 @@ PlanGpuPreAggPath(PlannerInfo *root,
 	cscan->custom_scan_tlist = tlist_dev;
 	cscan->methods = &gpupreagg_scan_methods;
 
-
-
-
-#if 0
-		codegen_gpuscan_quals(&kern,
-							  &context,
-							  outer_scanrelid,
-							  outer_quals);
-		context.extra_flags |= DEVKERNEL_NEEDS_GPUSCAN;
-#endif
-
-	// construct dev_tlist
-
-	// codegen
-
-
-	elog(INFO, "best_path => %s", nodeToString(best_path));
-	elog(INFO, "tlist_orig => %s", nodeToString(tlist));
-	elog(INFO, "tlist_host => %s", nodeToString(tlist_host));
-	elog(INFO, "tlist_dev => %s", nodeToString(tlist_dev));
-
-
-//	elog(INFO, "custom_plans => %s", nodeToString(custom_plans));
-
-	elog(ERROR, "hogehoge");
-
+	/*
+	 * construction of the GPU kernel code
+	 */
+	pgstrom_init_codegen_context(&context);
+	context.extra_flags |= (DEVKERNEL_NEEDS_DYNPARA |
+							DEVKERNEL_NEEDS_GPUSCAN |
+							DEVKERNEL_NEEDS_GPUPREAGG);
+	kern_source = gpupreagg_codegen(&context,
+									tlist_dev,
+									tlist_dev_action);
 
 	memset(&gpa_info, 0, sizeof(GpuPreAggInfo));
-	
+	gpa_info.extra_flags = context.extra_flags;
+	gpa_info.kern_source = kern_source;
 
-
+	elog(INFO, "tlist_orig => %s", nodeToString(tlist));
+	elog(INFO, "tlist_dev => %s", nodeToString(tlist_dev));
+	elog(INFO, "tlist_dev_action => %s", nodeToString(tlist_dev_action));
+	elog(ERROR, "hogehoge");
 
 	form_gpupreagg_info(cscan, &gpa_info);
 
+	return &cscan->scan.plan;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+/*
+ * gpupreagg_codegen - entrypoint of code-generator for GpuPreAgg
+ */
+static char *
+gpupreagg_codegen(codegen_context *context,
+				  List *tlist_dev,
+				  List *tlist_dev_action)
+{
+
+
+
 	return NULL;
 }
+
+
+
+
+
+
+
+
 
 
 #ifdef HOGEHOGEHOGE
@@ -1942,63 +2051,6 @@ makeZeroConst(Oid consttype, int32 consttypmod, Oid constcollid)
  * make_altfunc_nrows_expr() - makes expression node of number or rows.
  * make_altfunc_expr_pcov() - makes expression node of covariances.
  */
-static Expr *
-make_expr_typecast(Expr *expr, Oid target_type)
-{
-	Oid			source_type = exprType((Node *) expr);
-	HeapTuple	tup;
-	Form_pg_cast cast;
-
-	/*
-	 * NOTE: Var->vano shall be replaced to INDEX_VAR on the following
-	 * make_altfunc_expr(), so we keep the expression as-is, at this
-	 * moment.
-	 */
-	if (source_type == target_type)
-		return expr;
-
-	tup = SearchSysCache2(CASTSOURCETARGET,
-						  ObjectIdGetDatum(source_type),
-						  ObjectIdGetDatum(target_type));
-	if (!HeapTupleIsValid(tup))
-		elog(ERROR, "could not find tuple for cast (%u,%u)",
-			 source_type, target_type);
-	cast = (Form_pg_cast) GETSTRUCT(tup);
-	if (cast->castmethod == COERCION_METHOD_FUNCTION)
-	{
-		FuncExpr	   *func;
-
-		Assert(OidIsValid(cast->castfunc));
-		func = makeFuncExpr(cast->castfunc,
-							target_type,
-							list_make1(expr),
-							InvalidOid,	/* always right? */
-							exprCollation((Node *) expr),
-							COERCE_EXPLICIT_CAST);
-		expr = (Expr *) func;
-	}
-	else if (cast->castmethod == COERCION_METHOD_BINARY)
-	{
-		RelabelType	   *relabel = makeNode(RelabelType);
-
-		relabel->arg = expr;
-		relabel->resulttype = target_type;
-		relabel->resulttypmod = exprTypmod((Node *) expr);
-		relabel->resultcollid = exprCollation((Node *) expr);
-		relabel->relabelformat = COERCE_EXPLICIT_CAST;
-		relabel->location = -1;
-
-		expr = (Expr *) relabel;
-	}
-	else
-	{
-		elog(ERROR, "cast-method '%c' is not supported in opencl kernel",
-			 cast->castmethod);
-	}
-	ReleaseSysCache(tup);
-
-	return expr;
-}
 
 
 /*
@@ -5856,15 +5908,6 @@ pgstrom_init_gpupreagg(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
-	/* pg_strom.debug_force_gpupreagg */
-	DefineCustomBoolVariable("pg_strom.debug_force_gpupreagg",
-							 "Force GpuPreAgg regardless of the cost (debug)",
-							 NULL,
-							 &debug_force_gpupreagg,
-							 false,
-							 PGC_USERSET,
-                             GUC_NOT_IN_SAMPLE,
-                             NULL, NULL, NULL);
 
 	/* initialization of path method table */
 	memset(&gpupreagg_path_methods, 0, sizeof(CustomPathMethods));
