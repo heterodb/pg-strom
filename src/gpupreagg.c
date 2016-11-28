@@ -55,15 +55,6 @@ static CustomExecMethods		gpupreagg_exec_methods;
 static bool						enable_gpupreagg;
 static bool						debug_force_gpupreagg;
 
-#if 0
-/* list of reduction mode */
-#define GPUPREAGG_NOGROUP_REDUCTION		1
-#define GPUPREAGG_LOCAL_REDUCTION		2
-#define GPUPREAGG_GLOBAL_REDUCTION		3
-#define GPUPREAGG_FINAL_REDUCTION		4
-#define GPUPREAGG_ONLY_TERMINATION		99	/* used to urgent termination */
-#endif
-
 typedef struct
 {
 	List		   *tlist_dev;		/* requirement of device projection */
@@ -255,6 +246,8 @@ static TupleTableSlot *gpupreagg_next_tuple(GpuTaskState_v2 *gts);
 /*
  * Arguments of alternative functions.
  */
+#define ALTFUNC_GROUPING_KEY		 50	/* GROUPING KEY */
+#define ALTFUNC_CONST_VALUE			 51	/* other constant values */
 #define ALTFUNC_EXPR_NROWS			101	/* NROWS(X) */
 #define ALTFUNC_EXPR_PMIN			102	/* PMIN(X) */
 #define ALTFUNC_EXPR_PMAX			103	/* PMAX(X) */
@@ -296,7 +289,7 @@ typedef struct {
 	int			safety_limit;
 } aggfunc_catalog_t;
 static aggfunc_catalog_t  aggfunc_catalog[] = {
-	/* AVG(X) = EX_AVG(NROWS(), PSUM(X)) */
+	/* HOGE: AVG(X) = EX_AVG(NROWS(), PSUM(X)) */
 	{ "avg",    1, {INT2OID},
 	  "s:avg",  2, {INT4OID, INT8OID},
 	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, 0, INT_MAX
@@ -326,110 +319,110 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 #endif
 	/* COUNT(*) = SUM(NROWS(*|X)) */
 	{ "count", 0, {},
-	  "s:count", 1, {INT4OID},
+	  "varref", 1, {INT8OID},
 	  {ALTFUNC_EXPR_NROWS}, 0, INT_MAX
 	},
 	{ "count", 1, {ANYOID},
-	  "s:count", 1, {INT4OID},
+	  "varref", 1, {INT8OID},
 	  {ALTFUNC_EXPR_NROWS}, 0, INT_MAX
 	},
 	/* MAX(X) = MAX(PMAX(X)) */
 	{ "max", 1, {INT2OID},
-	  "c:max", 1, {INT2OID},
+	  "varref", 1, {INT2OID},
 	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
 	},
 	{ "max", 1, {INT4OID},
-	  "c:max", 1, {INT4OID},
+	  "varref", 1, {INT4OID},
 	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
 	},
 	{ "max", 1, {INT8OID},
-	  "c:max", 1, {INT8OID},
+	  "varref", 1, {INT8OID},
 	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
 	},
 	{ "max", 1, {FLOAT4OID},
-	  "c:max", 1, {FLOAT4OID},
+	  "varref", 1, {FLOAT4OID},
 	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
 	},
 	{ "max", 1, {FLOAT8OID},
-	  "c:max", 1, {FLOAT8OID},
+	  "varref", 1, {FLOAT8OID},
 	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "max", 1, {NUMERICOID},
-	  "c:max", 1, {NUMERICOID},
+	  "varref", 1, {NUMERICOID},
 	  {ALTFUNC_EXPR_PMAX}, DEVKERNEL_NEEDS_NUMERIC, INT_MAX
 	},
 #endif
 	{ "max", 1, {CASHOID},
-	  "c:max", 1, {CASHOID},
+	  "varref", 1, {CASHOID},
 	  {ALTFUNC_EXPR_PMAX}, DEVKERNEL_NEEDS_MONEY, INT_MAX
 	},
 	{ "max", 1, {DATEOID},
-	  "c:max", 1, {DATEOID},
+	  "varref", 1, {DATEOID},
 	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
 	},
 	{ "max", 1, {TIMEOID},
-	  "c:max", 1, {TIMEOID},
+	  "varref", 1, {TIMEOID},
 	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
 	},
 	{ "max", 1, {TIMESTAMPOID},
-	  "c:max", 1, {TIMESTAMPOID},
+	  "varref", 1, {TIMESTAMPOID},
 	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
 	},
 	{ "max", 1, {TIMESTAMPTZOID},
-	  "c:max", 1, {TIMESTAMPTZOID},
+	  "varref", 1, {TIMESTAMPTZOID},
 	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
 	},
 
 	/* MIX(X) = MIN(PMIN(X)) */
 	{ "min", 1, {INT2OID},
-	  "c:min", 1, {INT2OID},
+	  "varref", 1, {INT2OID},
 	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
 	},
 	{ "min", 1, {INT4OID},
-	  "c:min", 1, {INT4OID},
+	  "varref", 1, {INT4OID},
 	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
 	},
 	{ "min", 1, {INT8OID},
-	  "c:min", 1, {INT8OID},
+	  "varref", 1, {INT8OID},
 	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
 	},
 	{ "min", 1, {FLOAT4OID},
-	  "c:min", 1, {FLOAT4OID},
+	  "varref", 1, {FLOAT4OID},
 	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
 	},
 	{ "min", 1, {FLOAT8OID},
-	  "c:min", 1, {FLOAT8OID},
+	  "varref", 1, {FLOAT8OID},
 	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "min", 1, {NUMERICOID},
-	  "c:min", 1, {NUMERICOID},
+	  "varref", 1, {NUMERICOID},
 	  {ALTFUNC_EXPR_PMIN}, DEVKERNEL_NEEDS_NUMERIC, INT_MAX
 	},
 #endif
 	{ "min", 1, {CASHOID},
-	  "c:max", 1, {CASHOID},
+	  "varref", 1, {CASHOID},
 	  {ALTFUNC_EXPR_PMAX}, DEVKERNEL_NEEDS_MONEY, INT_MAX
 	},
 	{ "min", 1, {DATEOID},
-	  "c:min", 1, {DATEOID},
+	  "varref", 1, {DATEOID},
 	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
 	},
 	{ "min", 1, {TIMEOID},
-	  "c:min", 1, {TIMEOID},
+	  "varref", 1, {TIMEOID},
 	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
 	},
 	{ "min", 1, {TIMESTAMPOID},
-	  "c:min", 1, {TIMESTAMPOID},
+	  "varref", 1, {TIMESTAMPOID},
 	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
 	},
 	{ "min", 1, {TIMESTAMPTZOID},
-	  "c:min", 1, {TIMESTAMPTZOID},
+	  "varref", 1, {TIMESTAMPTZOID},
 	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
 	},
 
-	/* SUM(X) = SUM(PSUM(X)) */
+	/* HOGE: SUM(X) = SUM(PSUM(X)) */
 	{ "sum", 1, {INT2OID},
 	  "s:sum", 1, {INT8OID},
 	  {ALTFUNC_EXPR_PSUM}, 0, INT_MAX
@@ -460,7 +453,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  "c:sum", 1, {CASHOID},
 	  {ALTFUNC_EXPR_PSUM}, DEVKERNEL_NEEDS_MONEY, INT_MAX
 	},
-	/* STDDEV(X) = EX_STDDEV(NROWS(),PSUM(X),PSUM(X*X)) */
+	/* HOGE: STDDEV(X) = EX_STDDEV(NROWS(),PSUM(X),PSUM(X*X)) */
 	{ "stddev", 1, {FLOAT4OID},
 	  "s:stddev", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
@@ -521,7 +514,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PSUM_X2}, DEVKERNEL_NEEDS_NUMERIC, 32
 	},
 #endif
-	/* VARIANCE(X) = PGSTROM.VARIANCE(NROWS(), PSUM(X),PSUM(X^2)) */
+	/* HOGE: VARIANCE(X) = PGSTROM.VARIANCE(NROWS(), PSUM(X),PSUM(X^2)) */
 	{ "variance", 1, {FLOAT4OID},
 	  "s:variance", 3, {INT4OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
@@ -583,6 +576,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	},
 #endif
 	/*
+	 * HOGE:
 	 * CORR(X,Y) = PGSTROM.CORR(NROWS(X,Y),
 	 *                          PCOV_X(X,Y),  PCOV_Y(X,Y)
 	 *                          PCOV_X2(X,Y), PCOV_Y2(X,Y),
@@ -619,6 +613,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_XY}, 0, SHRT_MAX
 	},
 	/*
+	 * HOGE:
 	 * Aggregation to support least squares method
 	 *
 	 * That takes PSUM_X, PSUM_Y, PSUM_X2, PSUM_Y2, PSUM_XY according
@@ -926,6 +921,8 @@ cost_gpupreagg(CustomPath *cpath,
 	cpath->path.rows = num_groups;
 	cpath->path.startup_cost = startup_cost;
 	cpath->path.total_cost = startup_cost + run_cost;
+
+	return true;
 }
 
 /*
@@ -1079,10 +1076,7 @@ gpupreagg_construct_path(PlannerInfo *root,
 						 AGGSPLIT_INITIAL_SERIAL,
 						 &agg_partial_costs);
 
-	/*
-	 * cost estimation - if cpath's total cost is larger than the existing
-	 * cheapest path, it makes no sense to construct the path any more.
-	 */
+	/* cost estimation */
 	if (!cost_gpupreagg(cpath, root, target, input_path,
 						num_groups, &agg_partial_costs))
 	{
@@ -1211,6 +1205,7 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 											 &agg_final_costs,
 											 num_groups);
 		add_path(group_rel, final_path);
+
 		// TODO: make a parallel grouping path (nogroup) */
 	}
 	else
@@ -1289,6 +1284,7 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 				elog(ERROR, "Bug? unexpected AGG/GROUP BY requirement");
 
 			add_path(group_rel, final_path);
+
 			// TODO: make a parallel grouping path (sort) */
 		}
 
@@ -1322,132 +1318,434 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 
 
 
+
 /*
- * make_custom_scan_tlist
+ * make_expr_conditional - constructor of CASE ... WHEN ... END expression
+ * which returns the supplied expression if condition is valid.
+ */
+static Expr *
+make_expr_conditional(Expr *expr, Expr *filter, bool zero_if_unmatched)
+{
+	Oid			expr_typeoid = exprType((Node *)expr);
+	int32		expr_typemod = exprTypmod((Node *)expr);
+	Oid			expr_collid = exprCollation((Node *)expr);
+	CaseWhen   *case_when;
+	CaseExpr   *case_expr;
+	Expr	   *defresult;
+
+	Assert(exprType((Node *) filter) == BOOLOID);
+	if (!zero_if_unmatched)
+		defresult = (Expr *) makeNullConst(expr_typeoid,
+										   expr_typemod,
+										   expr_collid);
+	else
+	{
+		int16	typlen;
+		bool	typbyval;
+
+		get_typlenbyval(expr_typeoid, &typlen, &typbyval);
+		defresult = (Expr *) makeConst(expr_typeoid,
+									   expr_typemod,
+									   expr_collid,
+									   (int) typlen,
+									   (Datum) 0,
+									   false,
+									   typbyval);
+	}
+
+	/* in case when the 'filter' is matched */
+	case_when = makeNode(CaseWhen);
+	case_when->expr = filter;
+	case_when->result = expr;
+	case_when->location = -1;
+
+	/* case body */
+	case_expr = makeNode(CaseExpr);
+	case_expr->casetype = exprType((Node *) expr);
+	case_expr->arg = NULL;
+	case_expr->args = list_make1(case_when);
+	case_expr->defresult = defresult;
+	case_expr->location = -1;
+
+	return (Expr *) case_expr;
+}
+
+
+
+
+
+
+
+
+/*
+ * make_altfunc_nrows_expr - constructor of the partial number of rows
+ */
+static Expr *
+make_altfunc_nrows_expr(Aggref *aggref)
+{
+	Expr	   *nrows_expr;
+	List	   *nrows_args = NIL;
+	ListCell   *lc;
+
+	foreach (lc, aggref->args)
+	{
+		TargetEntry *tle = lfirst(lc);
+		NullTest	*ntest = makeNode(NullTest);
+
+		Assert(IsA(tle, TargetEntry));
+		ntest->arg = copyObject(tle->expr);
+		ntest->nulltesttype = IS_NOT_NULL;
+		ntest->argisrow = false;
+
+		nrows_args = lappend(nrows_args, ntest);
+	}
+	if (aggref->aggfilter)
+		nrows_args = lappend(nrows_args, copyObject(aggref->aggfilter));
+
+	nrows_expr = (Expr *) makeConst(INT8OID,
+									-1,
+									InvalidOid,
+									sizeof(int64),
+									(Datum) 1,
+									false,
+									true);
+	if (nrows_args == NIL)
+		return nrows_expr;
+
+	return make_expr_conditional(nrows_expr,
+								 list_length(nrows_args) <= 1
+								 ? linitial(nrows_args)
+								 : make_andclause(nrows_args),
+								 true);
+}
+
+/*
+ * make_altfunc_pmin_expr - constructor of a simple variable reference
+ */
+static Expr *
+make_altfunc_simple_expr(Aggref *aggref, bool zero_if_unmatched)
+{
+	TargetEntry	   *tle;
+	Expr   *expr;
+
+	Assert(list_length(aggref->args) == 1);
+	tle = linitial(aggref->args);
+	Assert(IsA(tle, TargetEntry));
+	expr = tle->expr;
+	if (aggref->aggfilter)
+		expr = make_expr_conditional(expr, aggref->aggfilter,
+									 zero_if_unmatched);
+	return expr;
+}
+
+/*
+ * make_altfunc_psum_x2 - constructor of a simple (variable)^2 reference
+ */
+static Expr *
+make_altfunc_psum_x2(Aggref *aggref)
+{
+	TargetEntry	   *tle;
+	FuncExpr	   *func_expr;
+	Oid				type_oid;
+	Oid				func_oid;
+
+	Assert(list_length(aggref->args) == 1);
+	tle = linitial(aggref->args);
+	Assert(IsA(tle, TargetEntry));
+
+	type_oid = exprType((Node *) tle->expr);
+	if (type_oid == FLOAT4OID)
+		func_oid = F_FLOAT4MUL;
+	else if (type_oid == FLOAT8OID)
+		func_oid = F_FLOAT8MUL;
+	else if (type_oid == NUMERICOID)
+		func_oid = F_NUMERIC_MUL;
+	else
+		elog(ERROR, "Bug? unexpected expression data type");
+
+	func_expr = makeFuncExpr(func_oid,
+							 type_oid,
+							 list_make2(copyObject(tle->expr),
+										copyObject(tle->expr)),
+							 InvalidOid,
+							 InvalidOid,
+							 COERCE_EXPLICIT_CALL);
+	if (!aggref->aggfilter)
+		return (Expr *)func_expr;
+
+	return make_expr_conditional((Expr *)func_expr, aggref->aggfilter, false);
+}
+
+/*
+ * make_altfunc_pcov_xy - constructor of a co-variance arguments
+ */
+static Expr *
+make_altfunc_pcov_xy(Aggref *aggref, int action)
+{
+	Expr	   *arg_x;
+	Expr	   *arg_y;
+	NullTest   *nulltest_x;
+	NullTest   *nulltest_y;
+	List	   *arg_checks = NIL;
+	Expr	   *expr;
+
+	Assert(list_length(aggref->args) == 2);
+	arg_x = linitial(aggref->args);
+	arg_y = lsecond(aggref->args);
+	if (exprType((Node *)arg_x) != FLOAT8OID ||
+		exprType((Node *)arg_y) != FLOAT8OID)
+		elog(ERROR, "Bug? unexpected argument type for co-variance");
+
+	if (aggref->aggfilter)
+		arg_checks = lappend(arg_checks, aggref->aggfilter);
+	/* nulltest for X-argument */
+	nulltest_x = makeNode(NullTest);
+	nulltest_x->arg = copyObject(arg_x);
+	nulltest_x->nulltesttype = IS_NOT_NULL;
+	nulltest_x->argisrow = false;
+	nulltest_x->location = aggref->location;
+	arg_checks = lappend(arg_checks, nulltest_x);
+
+	/* nulltest for Y-argument */
+	nulltest_y = makeNode(NullTest);
+	nulltest_y->arg = copyObject(arg_y);
+	nulltest_y->nulltesttype = IS_NOT_NULL;
+	nulltest_y->argisrow = false;
+	nulltest_y->location = aggref->location;
+	arg_checks = lappend(arg_checks, nulltest_y);
+
+	switch (action)
+	{
+		case ALTFUNC_EXPR_PCOV_X:	/* PCOV_X(X,Y) */
+			expr = arg_x;
+			break;
+		case ALTFUNC_EXPR_PCOV_Y:	/* PCOV_Y(X,Y) */
+			expr = arg_y;
+			break;
+		case ALTFUNC_EXPR_PCOV_X2:	/* PCOV_X2(X,Y) */
+			expr = (Expr *)makeFuncExpr(F_FLOAT8MUL,
+										FLOAT8OID,
+										list_make2(arg_x, arg_x),
+										InvalidOid,
+										InvalidOid,
+										COERCE_EXPLICIT_CALL);
+			break;
+		case ALTFUNC_EXPR_PCOV_Y2:	/* PCOV_Y2(X,Y) */
+			expr = (Expr *)makeFuncExpr(F_FLOAT8MUL,
+										FLOAT8OID,
+										list_make2(arg_y, arg_y),
+										InvalidOid,
+										InvalidOid,
+										COERCE_EXPLICIT_CALL);
+			break;
+		case ALTFUNC_EXPR_PCOV_XY:	/* PCOV_XY(X,Y) */
+			expr = (Expr *)makeFuncExpr(F_FLOAT8MUL,
+										FLOAT8OID,
+										list_make2(arg_x, arg_y),
+										InvalidOid,
+										InvalidOid,
+										COERCE_EXPLICIT_CALL);
+			break;
+		default:
+			elog(ERROR, "Bug? unexpected action type for co-variance ");
+	}
+	return make_expr_conditional(expr, make_andclause(arg_checks), false);
+}
+
+/*
+ * build_custom_scan_tlist
  *
  * constructor for the custom_scan_tlist of CustomScan node. It is equivalent
  * to the initial values of reduction steps.
  */
-static List *
-make_custom_scan_tlist()
+static void
+build_custom_scan_tlist(PathTarget *target,
+						List *tlist_orig,
+						List **p_tlist_host,
+						List **p_tlist_dev,
+						List **p_tlist_dev_action)
 {
-	PathTarget	   *target = best_path->pathtarget;
-	ListCell	   *lc;
-	cl_int			index = 0;
+	List	   *tlist_host = NIL;
+	List	   *tlist_dev = NIL;
+	List	   *tlist_dev_action = NIL;
+	ListCell   *lc;
+	cl_int		index = 0;
 
-	foreach (lc, tlist)
+	foreach (lc, tlist_orig)
 	{
 		TargetEntry	   *tle = lfirst(lc);
-		bool			is_group_key;
 
 		if (IsA(tle->expr, Aggref))
 		{
 			Aggref	   *aggref = (Aggref *)tle->expr;
-			Oid			namespace_oid;
-			FuncExpr   *altfunc_expr;
-			const char *altfunc_name;
-			oidvector  *altfunc_argtypes;
-			HeapTuple	tuple;
-			const aggfunc_catalog_t *agg_func;
+			List	   *altfn_args = NIL;
+			cl_int		j;
+			const aggfunc_catalog_t *aggfn_cat;
 
-			Assert(target->sortgrouprefs[index] == 0);
-			agg_func = aggfunc_lookup_by_oid(aggref->aggfnoid);
-			if (!agg_func)
+			Assert(target->sortgrouprefs == NULL ||
+				   target->sortgrouprefs[index] == 0);
+			aggfn_cat = aggfunc_lookup_by_oid(aggref->aggfnoid);
+			if (!aggfn_cat)
 				elog(ERROR, "lookup failed on aggregate function: %u",
 					 aggref->aggfnoid);
+
+			/*
+			 * construction of the initial partial aggregation
+			 */
+			for (j=0; j < aggfn_cat->altfn_nargs; j++)
+			{
+				ListCell	   *cell1;
+				ListCell	   *cell2;
+				cl_int			action = aggfn_cat->altfn_argexprs[j];
+				Expr		   *expr;
+				TargetEntry	   *temp;
+				cl_int			temp_action;
+
+				switch (action)
+				{
+					case ALTFUNC_EXPR_NROWS:	/* NROWS(X) */
+						expr = make_altfunc_nrows_expr(aggref);
+						break;
+					case ALTFUNC_EXPR_PMIN:		/* PMIN(X) */
+					case ALTFUNC_EXPR_PMAX:		/* PMAX(X) */
+						expr = make_altfunc_simple_expr(aggref, false);
+						break;
+					case ALTFUNC_EXPR_PSUM:		/* PSUM(X) */
+						expr = make_altfunc_simple_expr(aggref, true);
+						break;
+					case ALTFUNC_EXPR_PSUM_X2:	/* PSUM_X2(X) = PSUM(X^2) */
+						expr = make_altfunc_psum_x2(aggref);
+						break;
+					case ALTFUNC_EXPR_PCOV_X:	/* PCOV_X(X,Y) */
+					case ALTFUNC_EXPR_PCOV_Y:	/* PCOV_Y(X,Y) */
+					case ALTFUNC_EXPR_PCOV_X2:	/* PCOV_X2(X,Y) */
+					case ALTFUNC_EXPR_PCOV_Y2:	/* PCOV_Y2(X,Y) */
+					case ALTFUNC_EXPR_PCOV_XY:	/* PCOV_XY(X,Y) */
+						expr = make_altfunc_pcov_xy(aggref, action);
+						break;
+					default:
+						elog(ERROR, "unknown alternative function code: %d",
+							 action);
+						break;
+				}
+				/*
+				 * lookup same entity on the tlist_dev, then append it
+				 * if not found. Resno is tracked to construct FuncExpr.
+				 */
+				forboth (cell1, tlist_dev,
+						 cell2, tlist_dev_action)
+				{
+					temp = lfirst(cell1);
+					temp_action = lfirst_int(cell2);
+
+					if (temp_action == action &&
+						equal(expr, temp->expr))
+						goto found_tentry;
+				}
+				temp = makeTargetEntry(expr,
+									   list_length(tlist_dev) + 1,
+									   NULL,
+									   false);
+				tlist_dev = lappend(tlist_dev, temp);
+				tlist_dev_action = lappend_int(tlist_dev_action, action);
+
+			found_tentry:
+				altfn_args = lappend(altfn_args, expr);
+			}
+
 			/*
 			 * Lookup an alternative function that generates partial state
-			 * of the final aggregate function.
+			 * of the final aggregate function, or varref if internal state
+			 * of aggregation is as-is.
 			 */
-			if (strncmp(agg_func->altfn_name, "c:", 2) == 0)
-				namespace_oid = PG_CATALOG_NAMESPACE;
-			else if (strncmp(agg_func->altfn_name, "s:", 2) == 0)
+			if (strcmp(aggfn_cat->altfn_name, "varref") == 0)
 			{
-				namespace_oid = get_namespace_oid("pgstrom", true);
-				if (!OidIsValid(namespace_oid))
-					ereport(ERROR,
-							(errcode(ERRCODE_UNDEFINED_SCHEMA),
-						     errmsg("schema \"pgstrom\" was not found"),
-							 errhint("Run: CREATE EXTENSION pg_strom")));
+				Assert(list_length(altfn_args) == 1);
+
+				tlist_host = lappend(tlist_host,
+									 makeTargetEntry(linitial(altfn_args),
+													 tle->resno,
+													 tle->resname,
+													 tle->resjunk));
 			}
 			else
-				elog(ERROR, "Bug? unknown namespace of alternative function");
-
-			altfunc_name = agg_func->altfn_name + 2;
-			altfunc_argtypes = buildoidvector(agg_func->altfn_argtypes,
-											  agg_func->altfn_nargs);
-			tuple = SearchSysCache3(PROCNAMEARGSNSP,
-									PointerGetDatum(altfunc_name),
-									PointerGetDatum(altfunc_argtypes),
-									ObjectIdGetDatum(namespace_oid));
-			if (!HeapTupleIsValid(tuple))
-				ereport(ERROR,
-						(errcode(ERRCODE_UNDEFINED_SCHEMA),
-						 errmsg("no alternative function \"%s\" not found",
-								funcname_signature_string(
-									altfunc_name,
-									agg_func->altfn_nargs,
-									NIL,
-									agg_func->altfn_argtypes)),
-						 errhint("Run: CREATE EXTENSION pg_strom")));
-			altfunc_form = (Form_pg_proc) GETSTRUCT(tuple);
-
-			//HOGE: add arguments of altfunc to tlist_dev
-			for (i=0; i < agg_func->altfn_nargs; i++)
 			{
-				int		argexpr = agg_func->altfn_argexprs[i];
+				Oid				namespace_oid;
+				FuncExpr	   *altfn_expr;
+				const char	   *altfn_name;
+				oidvector	   *altfn_argtypes;
+				HeapTuple		tuple;
+				Form_pg_proc	altfn_form;
 
-				//add expression to tlist_dev, if not exists
-				//then, append it on the altfunc_arg
+				if (strncmp(aggfn_cat->altfn_name, "c:", 2) == 0)
+					namespace_oid = PG_CATALOG_NAMESPACE;
+				else if (strncmp(aggfn_cat->altfn_name, "s:", 2) == 0)
+				{
+					namespace_oid = get_namespace_oid("pgstrom", true);
+					if (!OidIsValid(namespace_oid))
+						ereport(ERROR,
+								(errcode(ERRCODE_UNDEFINED_SCHEMA),
+								 errmsg("schema \"pgstrom\" was not found"),
+								 errhint("Run: CREATE EXTENSION pg_strom")));
+				}
+				else
+					elog(ERROR, "Bug? incorrect alternative function catalog");
 
+				altfn_name = aggfn_cat->altfn_name + 2;
+				altfn_argtypes = buildoidvector(aggfn_cat->altfn_argtypes,
+												aggfn_cat->altfn_nargs);
+				tuple = SearchSysCache3(PROCNAMEARGSNSP,
+										PointerGetDatum(altfn_name),
+										PointerGetDatum(altfn_argtypes),
+										ObjectIdGetDatum(namespace_oid));
+				if (!HeapTupleIsValid(tuple))
+					ereport(ERROR,
+							(errcode(ERRCODE_UNDEFINED_SCHEMA),
+							 errmsg("no alternative function \"%s\" not found",
+									funcname_signature_string(
+										altfn_name,
+										aggfn_cat->altfn_nargs,
+										NIL,
+										aggfn_cat->altfn_argtypes)),
+							 errhint("Run: CREATE EXTENSION pg_strom")));
+				altfn_form = (Form_pg_proc) GETSTRUCT(tuple);
+
+				altfn_expr = makeNode(FuncExpr);
+				altfn_expr->funcid = HeapTupleGetOid(tuple);
+				altfn_expr->funcresulttype = altfn_form->prorettype;
+				altfn_expr->funcretset = altfn_form->proretset;
+				altfn_expr->funcvariadic = OidIsValid(altfn_form->provariadic);
+				altfn_expr->funcformat = COERCE_EXPLICIT_CALL;
+				altfn_expr->funccollid = aggref->aggcollid;
+				altfn_expr->inputcollid = aggref->inputcollid;
+				altfn_expr->args = altfn_args;
+				altfn_expr->location = aggref->location;
+
+				ReleaseSysCache(tuple);
+
+				tlist_host = lappend(tlist_host,
+									 makeTargetEntry((Expr *)altfn_expr,
+													 tle->resno,
+													 tle->resname,
+													 tle->resjunk));
 			}
-
-			altfunc_expr = makeNode(FuncExpr);
-			altfunc_expr->funcid = HeapTupleGetOid(tuple);
-			altfunc_expr->funcresulttype = altfunc_form->prorettype;
-			altfunc_expr->funcretset = altfunc_form->proretset;
-			altfunc_expr->funcvariadic = OidIsValid(altfunc_form->provariadic);
-			altfunc_expr->funcformat = COERCE_EXPLICIT_CALL;
-			altfunc_expr->funccollid = aggref->aggcollid;
-			altfunc_expr->inputcollid = aggref->inputcollid;
-			altfunc_expr->args = ; // list of Vars to reference tlist_dev
-			altfunc_expr->location = aggref->location;
-
-			ReleaseSysCache(tuple);
-
-			tlist_host = lappend(tlist_host,
-								 makeTargetEntry((Expr *)altfunc_expr,
-												 tle->resno,
-												 tle->resname,
-												 tle->resjunk));
-
-
-
-
-			// lookup alternative aggregate function
-
-			// add alternative (normal) function to tlist
-			// add alternative functions's argument to tlist_dev
-
-
-
-
-
-			is_group_key = false;
 		}
 		else
 		{
-			tlist_host = lappend(tlist_host, copyObject(tle));
 			tlist_dev = lappend(tlist_dev, copyObject(tle));
-
-			is_group_key = (target->sortgrouprefs[index] > 0);
+			tlist_dev_action = lappend_int(tlist_dev_action,
+										   target->sortgrouprefs == NULL ||
+										   target->sortgrouprefs[index] > 0
+										   ? ALTFUNC_GROUPING_KEY
+										   : ALTFUNC_CONST_VALUE);
+			tlist_host = lappend(tlist_host, copyObject(tle));
 		}
 		index++;
 	}
-
-
-
-
+	/* return the results */
+	*p_tlist_host = tlist_host;
+	*p_tlist_dev = tlist_dev;
+	*p_tlist_dev_action = tlist_dev_action;
 }
 
 /*
@@ -1468,7 +1766,10 @@ PlanGpuPreAggPath(PlannerInfo *root,
 	Plan		   *outer_plan = NULL;
 	Index			outer_scanrelid = 0;
 	List		   *outer_quals = NIL;
+	List		   *outer_tlist;
+	List		   *tlist_host;
 	List		   *tlist_dev;
+	List		   *tlist_dev_action;
 	StringInfoData	kern;
 	codegen_context	context;
 
@@ -1491,32 +1792,48 @@ PlanGpuPreAggPath(PlannerInfo *root,
 	}
 
 	/*
-	 * construction of custom_scan_tlist; which reflects the initial value
-	 * of the reduction process later.
+	 * construction of the alternative targetlist.
+	 * @tlist_host: tlist of partial aggregation status
+	 * @tlist_dev:  tlist of initial state on device reduction.
+	 * @tlist_dev_action: one of ALTFUNC_* for each tlist_dev
 	 */
-	tlist_dev = make_initial_
+	build_custom_scan_tlist(best_path->path.pathtarget,
+							tlist,
+							&tlist_host,
+							&tlist_dev,
+							&tlist_dev_action);
+
+	cscan->scan.plan.targetlist = tlist_host;
+	cscan->scan.plan.qual = NIL;
+	outerPlan(cscan) = outer_plan;
+	cscan->scan.scanrelid = outer_scanrelid;
+	cscan->flags = best_path->flags;
+	cscan->custom_scan_tlist = tlist_dev;
+	cscan->methods = &gpupreagg_scan_methods;
 
 
 
 
+#if 0
 		codegen_gpuscan_quals(&kern,
 							  &context,
 							  outer_scanrelid,
 							  outer_quals);
 		context.extra_flags |= DEVKERNEL_NEEDS_GPUSCAN;
-
+#endif
 
 	// construct dev_tlist
 
 	// codegen
 
 
-
-
-
 	elog(INFO, "best_path => %s", nodeToString(best_path));
-	elog(INFO, "tlist => %s", nodeToString(tlist));
-	elog(INFO, "custom_plans => %s", nodeToString(custom_plans));
+	elog(INFO, "tlist_orig => %s", nodeToString(tlist));
+	elog(INFO, "tlist_host => %s", nodeToString(tlist_host));
+	elog(INFO, "tlist_dev => %s", nodeToString(tlist_dev));
+
+
+//	elog(INFO, "custom_plans => %s", nodeToString(custom_plans));
 
 	elog(ERROR, "hogehoge");
 
@@ -1526,7 +1843,7 @@ PlanGpuPreAggPath(PlannerInfo *root,
 
 
 
-	form_gpupreagg_info(cscan, &gpu_info);
+	form_gpupreagg_info(cscan, &gpa_info);
 
 	return NULL;
 }
@@ -1683,107 +2000,6 @@ make_expr_typecast(Expr *expr, Oid target_type)
 	return expr;
 }
 
-static Expr *
-make_expr_conditional(Expr *expr, Expr *filter, Expr *defresult)
-{
-	CaseWhen   *case_when;
-	CaseExpr   *case_expr;
-
-	/*
-	 * NOTE: Var->vano shall be replaced to INDEX_VAR on the following
-	 * make_altfunc_expr(), so we keep the expression as-is, at this
-	 * moment.
-	 */
-	Assert(exprType((Node *) filter) == BOOLOID);
-	if (defresult)
-		defresult = expr_fixup_varno(defresult, OUTER_VAR, INDEX_VAR);
-	else
-	{
-		defresult = (Expr *) makeNullConst(exprType((Node *) expr),
-										   exprTypmod((Node *) expr),
-										   exprCollation((Node *) expr));
-	}
-	Assert(exprType((Node *) expr) == exprType((Node *) defresult));
-
-	/* in case when the 'filter' is matched */
-	case_when = makeNode(CaseWhen);
-	case_when->expr = filter;
-	case_when->result = expr;
-	case_when->location = -1;
-
-	/* case body */
-	case_expr = makeNode(CaseExpr);
-	case_expr->casetype = exprType((Node *) expr);
-	case_expr->arg = NULL;
-	case_expr->args = list_make1(case_when);
-	case_expr->defresult = defresult;
-	case_expr->location = -1;
-
-	return (Expr *) case_expr;
-}
-
-static Expr *
-make_altfunc_expr(const char *func_name, List *args)
-{
-	Oid			namespace_oid = get_namespace_oid("pgstrom", false);
-	Oid			typebuf[8];
-	oidvector  *func_argtypes;
-	HeapTuple	tuple;
-	Form_pg_proc proc_form;
-	Expr	   *expr;
-	ListCell   *cell;
-	int			i = 0;
-
-	/* set up oidvector */
-	foreach (cell, args)
-		typebuf[i++] = exprType((Node *) lfirst(cell));
-	func_argtypes = buildoidvector(typebuf, i);
-
-	/* find an alternative aggregate function */
-	tuple = SearchSysCache3(PROCNAMEARGSNSP,
-							PointerGetDatum(func_name),
-							PointerGetDatum(func_argtypes),
-							ObjectIdGetDatum(namespace_oid));
-	if (!HeapTupleIsValid(tuple))
-		return NULL;
-	proc_form = (Form_pg_proc) GETSTRUCT(tuple);
-	expr = (Expr *) makeFuncExpr(HeapTupleGetOid(tuple),
-								 proc_form->prorettype,
-								 expr_fixup_varno(args, OUTER_VAR, INDEX_VAR),
-								 InvalidOid,
-								 InvalidOid,
-								 COERCE_EXPLICIT_CALL);
-	ReleaseSysCache(tuple);
-	return expr;
-}
-
-static Expr *
-make_altfunc_nrows_expr(Aggref *aggref)
-{
-	List	   *nrows_args = NIL;
-	ListCell   *cell;
-
-	/* NOTE: make_altfunc_expr() translates OUTER_VAR to INDEX_VAR,
-	 * so we don't need to translate the expression nodes at this
-	 * moment.
-	 */
-	if (aggref->aggfilter)
-		nrows_args = lappend(nrows_args, copyObject(aggref->aggfilter));
-
-	foreach (cell, aggref->args)
-	{
-		TargetEntry *tle = lfirst(cell);
-		NullTest	*ntest = makeNode(NullTest);
-
-		Assert(IsA(tle, TargetEntry));
-		ntest->arg = copyObject(tle->expr);
-		ntest->nulltesttype = IS_NOT_NULL;
-		ntest->argisrow = false;
-
-		nrows_args = lappend(nrows_args, ntest);
-	}
-	return make_altfunc_expr("nrows", nrows_args);
-}
 
 /*
  * make_altfunc_pcov_expr - constructs an expression node for partial
@@ -1804,6 +2020,10 @@ make_altfunc_pcov_expr(Aggref *aggref, const char *func_name)
 	return make_altfunc_expr(func_name,
 							 list_make3(filter, tle_1->expr, tle_2->expr));
 }
+
+
+
+
 
 /*
  * make_gpupreagg_refnode

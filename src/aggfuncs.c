@@ -60,12 +60,15 @@ Datum pgstrom_numeric_var_pop(PG_FUNCTION_ARGS);
 Datum pgstrom_numeric_stddev_samp(PG_FUNCTION_ARGS);
 Datum pgstrom_numeric_stddev_pop(PG_FUNCTION_ARGS);
 
-/* gpupreagg_partial_nrows - placeholder function that generate number
- * of rows being included in this partial group.
+/*
+ * gpupreagg_partial_nrows - alternative partial aggregate function for
+ * row count; which returns the supplied int8 as is.
  */
 Datum
 gpupreagg_partial_nrows(PG_FUNCTION_ARGS)
 {
+
+
 	int		i;
 
 	for (i=0; i < PG_NARGS(); i++)
