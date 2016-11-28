@@ -1085,19 +1085,6 @@ pgstrom_build_session_info(cl_uint extra_flags,
 
 	/* OID declaration of types */
 	pgstrom_codegen_typeoid_declarations(&buf);
-
-	if ((extra_flags & (DEVKERNEL_NEEDS_TIMELIB |
-						DEVKERNEL_NEEDS_MONEY   |
-						DEVKERNEL_NEEDS_TEXTLIB |
-						DEVKERNEL_NEEDS_GPUSCAN |
-						DEVKERNEL_NEEDS_GPUJOIN |
-						DEVKERNEL_NEEDS_GPUSORT)) == 0)
-		return buf.data;
-
-	Assert(gts != NULL || (extra_flags & (DEVKERNEL_NEEDS_GPUSCAN |
-										  DEVKERNEL_NEEDS_GPUJOIN |
-										  DEVKERNEL_NEEDS_GPUSORT)) == 0);
-
 	/* put timezone info */
 	if ((extra_flags & DEVKERNEL_NEEDS_TIMELIB) != 0)
 		assign_timelib_session_info(&buf);
@@ -1114,6 +1101,10 @@ pgstrom_build_session_info(cl_uint extra_flags,
 	/* enables device projection? */
 	if ((extra_flags & DEVKERNEL_NEEDS_GPUJOIN) != 0)
 		assign_gpujoin_session_info(&buf, gts);
+	/* enables outer-quals evaluation? */
+	if ((extra_flags & DEVKERNEL_NEEDS_GPUPREAGG) != 0)
+		assign_gpupreagg_session_info(&buf, gts);
+
 	/* enables device projection? */
 //	if ((extra_flags & DEVKERNEL_NEEDS_GPUSORT) != 0)
 //		assign_gpusort_session_info(&buf, gts);

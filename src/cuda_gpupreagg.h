@@ -1619,7 +1619,7 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 			   kern_data_store *kds_slot,		/* KDS_FORMAT_SLOT */
 			   kern_global_hashslot *g_hash,	/* For global reduction */
 			   kern_data_store *kds_final,		/* KDS_FORMAT_SLOT + Extra */
-			   kern_global_hashslot *f_hash)
+			   kern_global_hashslot *f_hash)	/* For final reduction */
 {
 	kern_parambuf	   *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	kern_resultbuf	   *kresults_src = KERN_GPUPREAGG_1ST_RESULTBUF(kgpreagg);
@@ -2176,7 +2176,11 @@ pg_atomic_max_double(cl_double *addr, cl_double value)
 STATIC_INLINE(cl_double)
 pg_atomic_add_double(cl_double *addr, cl_double value)
 {
+#if __CUDA_ARCH__ < 600
 	PG_ATOMIC_DOUBLE_TEMPLATE(Add, addr, value);
+#else
+	return atomicAdd(addr, value);
+#endif
 }
 
 /* macro to check overflow on accumlate operation */

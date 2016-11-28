@@ -698,6 +698,8 @@ extern void	pgstrom_init_gpujoin(void);
  */
 extern void pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg);
 extern bool pgstrom_plan_is_gpupreagg(const Plan *plan);
+extern void assign_gpupreagg_session_info(StringInfo buf,
+										  GpuTaskState_v2 *gts);
 extern void pgstrom_init_gpupreagg(void);
 
 /*

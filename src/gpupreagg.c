@@ -1943,10 +1943,43 @@ gpupreagg_codegen(codegen_context *context,
 				  List *tlist_dev,
 				  List *tlist_dev_action)
 {
+	StringInfoData	kern;
+	StringInfoData	body;
 
+	initStringInfo(&kern);
+	initStringInfo(&body);
+	/*
+	 * System constants of GpuPreAgg:
+	 * KPARAM_0 is an array of cl_char to inform which field is grouping
+	 * keys, or target of (partial) aggregate function.
+	 */
+	context->used_params = list_make1(makeNullConst(BYTEAOID, -1, InvalidOid));
+	pgstrom_devtype_lookup_and_track(BYTEAOID, context);
 
+	/**/
+	gpupreagg_codegen_qual_eval(&kern,
+								outer...);
+	/* gpupreagg_hashvalue */
 
-	return NULL;
+	/* gpupreagg_keymatch */
+
+	/* gpupreagg_local_calc */
+
+	/* gpupreagg_global_calc */
+
+	/* gpupreagg_nogroup_calc */
+
+	/* gpupreagg_projection */
+
+	/* function declarations */
+	pgstrom_codegen_func_declarations(&kern, context);
+	/* special expression declarations */
+	pgstrom_codegen_expr_declarations(&kern, context);
+	/* merge above kernel functions */
+	appendStringInfoString(&kern, body.data);
+	pfree(body.data);
+
+	return kern.data;
 }
 
 
@@ -1954,6 +1987,23 @@ gpupreagg_codegen(codegen_context *context,
 
 
 
+/*
+ * assign_gpupreagg_session_info
+ */
+void
+assign_gpupreagg_session_info(StringInfo buf, GpuTaskState_v2 *gts)
+{
+	CustomScan	   *cscan = (CustomScan *)gts->css.ss.ps->plan;
+
+	Assert(pgstrom_plan_is_gpupreagg(&cscan->scan.plan));
+	/*
+	 * Put GPUPREAGG_PULLUP_OUTER_SCAN if GpuPreAgg pulled up outer scan
+	 * node regardless of the outer-quals (because KDS may be BLOCK format,
+	 * and only gpuscan_exec_quals_block() can extract it).
+	 */
+	if (cscan->scan.scanrelid > 0)
+		appendStringInfo(buf, "#define GPUPREAGG_PULLUP_OUTER_SCAN 1\n");
+}
 
 
 
