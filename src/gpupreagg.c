@@ -2453,6 +2453,217 @@ gpupreagg_codegen_keymatch(StringInfo kern,
 }
 
 /*
+ * gpupreagg_codegen_common_calc
+ *
+ * common portion of the gpupreagg_xxxx_calc() kernels
+ */
+static void
+gpupreagg_codegen_common_calc(StringInfo kern,
+							  codegen_context *context,
+							  List *tlist_dev,
+							  List *tlist_dev_action,
+							  const char *aggcalc_class,
+							  const char *aggcalc_args)
+{
+	ListCell   *lc1;
+	ListCell   *lc2;
+
+	appendStringInfoString(
+		kern,
+		"  switch (attnum)\n"
+		"  {\n");
+
+	forboth (lc1, tlist_dev,
+			 lc2, tlist_dev_action)
+	{
+		TargetEntry	   *tle = lfirst(lc1);
+		int				action = lfirst_int(lc2);
+		Oid				type_oid = exprType((Node *)tle->expr);
+		devtype_info   *dtype;
+		const char	   *aggcalc_ops;
+		const char	   *aggcalc_type;
+
+		/* not aggregate-function's argument */
+		if (action < ALTFUNC_EXPR_NROWS)
+			continue;
+
+		dtype = pgstrom_devtype_lookup_and_track(type_oid, context);
+		if (!dtype)
+			elog(ERROR, "failed on device type lookup: %s",
+				 format_type_be(type_oid));
+
+		switch (dtype->type_oid)
+		{
+			case INT2OID:
+				aggcalc_type = "SHORT";
+				break;
+			case INT4OID:
+			case DATEOID:
+				aggcalc_type = "INT";
+				break;
+			case INT8OID:
+			case CASHOID:
+			case TIMEOID:
+			case TIMESTAMPOID:
+			case TIMESTAMPTZOID:
+				aggcalc_type = "LONG";
+				break;
+			case FLOAT4OID:
+				aggcalc_type = "FLOAT";
+				break;
+			case FLOAT8OID:
+				aggcalc_type = "DOUBLE";
+				break;
+			case NUMERICOID:
+				aggcalc_type = "NUMERIC";
+				break;
+			default:
+				elog(ERROR, "Bug? %s is not expected to use for GpuPreAgg",
+					 format_type_be(dtype->type_oid));
+		}
+
+		if (action == ALTFUNC_EXPR_PMIN)
+			aggcalc_ops = "PMIN";
+		else if (action == ALTFUNC_EXPR_PMAX)
+			aggcalc_ops = "PMAX";
+		else
+			aggcalc_ops = "PADD";
+
+		appendStringInfo(
+			kern,
+			"  case %d:\n"
+			"    AGGCALC_%s_%s_%s(%s);\n"
+			"    break;\n",
+			tle->resno - 1,
+			aggcalc_class,
+			aggcalc_ops,
+			aggcalc_type,
+			aggcalc_args);
+	}
+	appendStringInfoString(
+		kern,
+		"  default:\n"
+		"    break;\n"
+		"  }\n");
+}
+
+/*
+ * gpupreagg_codegen_local_calc - code generator for
+ *
+ * STATIC_FUNCTION(void)
+ * gpupreagg_local_calc(kern_context *kcxt,
+ *                      cl_int attnum,
+ *                      pagg_datum *accum,
+ *                      pagg_datum *newval);
+ */
+static void
+gpupreagg_codegen_local_calc(StringInfo kern,
+							 codegen_context *context,
+							 List *tlist_dev,
+							 List *tlist_dev_action)
+{
+	appendStringInfoString(
+		kern,
+		"STATIC_FUNCTION(void)\n"
+		"gpupreagg_local_calc(kern_context *kcxt,\n"
+		"                     cl_int attnum,\n"
+		"                     pagg_datum *accum,\n"
+		"                     pagg_datum *newval)\n"
+		"{\n");
+	gpupreagg_codegen_common_calc(kern,
+								  context,
+								  tlist_dev,
+								  tlist_dev_action,
+								  "LOCAL",
+								  "kcxt,accum,newval");
+	appendStringInfoString(
+		kern,
+		"}\n\n");
+}
+
+/*
+ * gpupreagg_codegen_global_calc - code generator for
+ *
+ * STATIC_FUNCTION(void)
+ * gpupreagg_global_calc(kern_context *kcxt,
+ *                       cl_int attnum,
+ *                       kern_data_store *accum_kds,  size_t accum_index,
+ *                       kern_data_store *newval_kds, size_t newval_index);
+ */
+static void
+gpupreagg_codegen_global_calc(StringInfo kern,
+							  codegen_context *context,
+							  List *tlist_dev,
+							  List *tlist_dev_action)
+{
+	appendStringInfoString(
+		kern,
+		"STATIC_FUNCTION(void)\n"
+		"gpupreagg_global_calc(kern_context *kcxt,\n"
+		"                      cl_int attnum,\n"
+		"                      kern_data_store *accum_kds,\n"
+		"                      size_t accum_index,\n"
+		"                      kern_data_store *newval_kds,\n"
+		"                      size_t newval_index)\n"
+		"{\n"
+		"  char    *accum_isnull    __attribute__((unused))\n"
+		"   = KERN_DATA_STORE_ISNULL(accum_kds,accum_index) + attnum;\n"
+		"  Datum   *accum_value     __attribute__((unused))\n"
+		"   = KERN_DATA_STORE_VALUES(accum_kds,accum_index) + attnum;\n"
+		"  char     new_isnull      __attribute__((unused))\n"
+		"   = KERN_DATA_STORE_ISNULL(newval_kds,newval_index)[attnum];\n"
+		"  Datum    new_value       __attribute__((unused))\n"
+		"   = KERN_DATA_STORE_VALUES(newval_kds,newval_index)[attnum];\n"
+		"\n"
+		"  assert(accum_kds->format == KDS_FORMAT_SLOT);\n"
+		"  assert(newval_kds->format == KDS_FORMAT_SLOT);\n"
+		"\n");
+	gpupreagg_codegen_common_calc(kern,
+								  context,
+								  tlist_dev,
+								  tlist_dev_action,
+								  "GLOBAL",
+						"kcxt,accum_isnull,accum_value,new_isnull,new_value");
+	appendStringInfoString(
+		kern,
+		"}\n\n");
+}
+
+/*
+ * gpupreagg_codegen_nogroup_calc - code generator for
+ *
+ * STATIC_FUNCTION(void)
+ * gpupreagg_nogroup_calc(kern_context *kcxt,
+ *                        cl_int attnum,
+ *                        pagg_datum *accum,
+ *                        pagg_datum *newval);
+ */
+static void
+gpupreagg_codegen_nogroup_calc(StringInfo kern,
+							   codegen_context *context,
+							   List *tlist_dev,
+							   List *tlist_dev_action)
+{
+	appendStringInfoString(
+        kern,
+		"STATIC_FUNCTION(void)\n"
+		"gpupreagg_nogroup_calc(kern_context *kcxt,\n"
+		"                       cl_int attnum,\n"
+		"                       pagg_datum *accum,\n"
+		"                       pagg_datum *newval)\n"
+		"{\n");
+	gpupreagg_codegen_common_calc(kern,
+								  context,
+                                  tlist_dev,
+                                  tlist_dev_action,
+								  "NOGROUP",
+								  "kcxt,accum,newval");
+	appendStringInfoString(
+        kern,
+		"}\n\n");
+}
+
+/*
  * gpupreagg_codegen - entrypoint of code-generator for GpuPreAgg
  */
 static char *
@@ -2485,18 +2696,20 @@ gpupreagg_codegen(codegen_context *context,
 								 cscan->scan.scanrelid, outer_tlist);
 
 	/* gpupreagg_hashvalue */
-	gpupreagg_codegen_hashvalue(&kern, context, tlist_dev, tlist_dev_action);
-
+	gpupreagg_codegen_hashvalue(&kern, context,
+								tlist_dev, tlist_dev_action);
 	/* gpupreagg_keymatch */
-	gpupreagg_codegen_keymatch(&kern, context, tlist_dev, tlist_dev_action);
-
+	gpupreagg_codegen_keymatch(&kern, context,
+							   tlist_dev, tlist_dev_action);
 	/* gpupreagg_local_calc */
-
+	gpupreagg_codegen_local_calc(&kern, context,
+								 tlist_dev, tlist_dev_action);
 	/* gpupreagg_global_calc */
-
+	gpupreagg_codegen_global_calc(&kern, context,
+								  tlist_dev, tlist_dev_action);
 	/* gpupreagg_nogroup_calc */
-
-
+	gpupreagg_codegen_nogroup_calc(&kern, context,
+								   tlist_dev, tlist_dev_action);
 	/* function declarations */
 	pgstrom_codegen_func_declarations(&kern, context);
 	/* special expression declarations */
@@ -2507,11 +2720,6 @@ gpupreagg_codegen(codegen_context *context,
 
 	return kern.data;
 }
-
-
-
-
-
 
 /*
  * assign_gpupreagg_session_info

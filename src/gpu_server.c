@@ -670,6 +670,7 @@ gpuservTryToWakeUp(void)
 			}
 		}
 	} while (--only_inactive >= 0);
+	SpinLockRelease(&gpuServState->lock);
 
 	/*
 	 * Hmm... we cannot wake up any GPU server processes. However, it means
