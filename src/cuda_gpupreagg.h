@@ -244,7 +244,7 @@ gpupreagg_nogroup_calc(kern_context *kcxt,
 STATIC_FUNCTION(void)
 gpupreagg_projection(kern_context *kcxt,
 					 kern_data_store *kds_src,	/* in */
-					 kern_tupitem *tupitem,		/* in */
+					 HeapTupleHeaderData *htup,	/* in */
 					 kern_data_store *kds_dst,	/* out */
 					 Datum *dst_values,			/* out */
 					 cl_char *dst_isnull);		/* out */

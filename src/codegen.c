@@ -46,8 +46,10 @@ static List	   *devfunc_info_slot[1024];
  * naming convension of types:
  *   pg_<type_name>_t
  */
-#define DEVTYPE_DECL(type_name,type_oid,type_base,type_flags)	\
-	{ "pg_catalog", type_name, type_oid, #type_oid, type_base, type_flags }
+#define DEVTYPE_DECL(type_name,type_oid,type_base,						\
+					 min_const,max_const,zero_const,type_flags)			\
+	{ "pg_catalog", type_name, type_oid, #type_oid, type_base,			\
+	  min_const, max_const, zero_const, type_flags }
 
 static struct {
 	const char	   *type_schema;
@@ -55,42 +57,83 @@ static struct {
 	Oid				type_oid_static;
 	const char	   *type_oid_label;
 	const char	   *type_base;
+	const char	   *max_const;
+	const char	   *min_const;
+	const char	   *zero_const;
 	int32			type_flags;		/* library to declare this type */
 } devtype_catalog[] = {
-	/* primitive datatypes */
-	DEVTYPE_DECL("bool",   BOOLOID,   "cl_bool",   0),		/* bool */
-	DEVTYPE_DECL("int2",   INT2OID,   "cl_short",  0),		/* smallint */
-	DEVTYPE_DECL("int4",   INT4OID,   "cl_int",    0),		/* int */
-	DEVTYPE_DECL("int8",   INT8OID,   "cl_long",   0),		/* bigint */
-	DEVTYPE_DECL("float4", FLOAT4OID, "cl_float",  0),		/* real */
-	DEVTYPE_DECL("float8", FLOAT8OID, "cl_double", 0),		/* float */
+	/*
+	 * Primitive datatypes
+	 */
+	DEVTYPE_DECL("bool",   BOOLOID,   "cl_bool",
+				 NULL, NULL, "false",
+				 0),
+	DEVTYPE_DECL("int2",   INT2OID,   "cl_short",
+				 "SHRT_MAX", "SHRT_MIN", "0",
+				 0),
+	DEVTYPE_DECL("int4",   INT4OID,   "cl_int",
+				 "INT_MAX", "INT_MIN", "0",
+				 0),
+	DEVTYPE_DECL("int8",   INT8OID,   "cl_long",
+				 "LONG_MAX", "LONG_MIN", "0",
+				 0),
+	DEVTYPE_DECL("float4", FLOAT4OID, "cl_float",
+				 "FLT_MAX", "(-FLT_MAX)", "0.0",
+				 0),
+	DEVTYPE_DECL("float8", FLOAT8OID, "cl_double",
+				 "DBL_MAX", "(-DBL_MAX)", "0.0",
+				 0),
 	DEVTYPE_DECL("money",  CASHOID,   "cl_long",
-				 DEVKERNEL_NEEDS_MONEY),	/* money */
-	/* date and time datatypes */
-	DEVTYPE_DECL("date", DATEOID, "DateADT", DEVKERNEL_NEEDS_TIMELIB),
-	DEVTYPE_DECL("time", TIMEOID, "TimeADT", DEVKERNEL_NEEDS_TIMELIB),
-	DEVTYPE_DECL("timetz", TIMETZOID, "TimeTzADT", DEVKERNEL_NEEDS_TIMELIB),
+				 "LONG_MAX", "LONG_MIN", "0",
+				 DEVKERNEL_NEEDS_MONEY),
+	/*
+	 * Date and time datatypes
+	 */
+	DEVTYPE_DECL("date", DATEOID, "DateADT",
+				 "INT_MAX", "INT_MIN", "0",
+				 DEVKERNEL_NEEDS_TIMELIB),
+	DEVTYPE_DECL("time", TIMEOID, "TimeADT",
+				 "LONG_MAX", "LONG_MIN", "0",
+				 DEVKERNEL_NEEDS_TIMELIB),
+	DEVTYPE_DECL("timetz", TIMETZOID, "TimeTzADT",
+				 NULL, NULL, NULL,
+				 DEVKERNEL_NEEDS_TIMELIB),
 	DEVTYPE_DECL("timestamp", TIMESTAMPOID,"Timestamp",
+				 "LONG_MAX", "LONG_MIN", "0",
 				 DEVKERNEL_NEEDS_TIMELIB),
 	DEVTYPE_DECL("timestamptz", TIMESTAMPTZOID, "TimestampTz",
+				 "LONG_MAX", "LONG_MIN", "0",
 				 DEVKERNEL_NEEDS_TIMELIB),
 	DEVTYPE_DECL("interval", INTERVALOID, "Interval",
+				 NULL, NULL, NULL,
 				 DEVKERNEL_NEEDS_TIMELIB),
-	/* variable length datatypes */
-	DEVTYPE_DECL("bpchar",  BPCHAROID,  "varlena *", DEVKERNEL_NEEDS_TEXTLIB),
-	DEVTYPE_DECL("varchar", VARCHAROID, "varlena *", DEVKERNEL_NEEDS_TEXTLIB),
-	DEVTYPE_DECL("numeric", NUMERICOID, "cl_ulong",  DEVKERNEL_NEEDS_NUMERIC),
-	DEVTYPE_DECL("bytea",   BYTEAOID,   "varlena *", 0),
-	DEVTYPE_DECL("text",    TEXTOID,    "varlena *", DEVKERNEL_NEEDS_TEXTLIB),
-	/* pl/cuda datatypes */
-	{"pg_catalog", "matrix", InvalidOid, "MATRIXOID",
-	 "varlena *", DEVKERNEL_NEEDS_MATRIX },
+	/*
+	 * variable length datatypes
+	 */
+	DEVTYPE_DECL("bpchar",  BPCHAROID,  "varlena *",
+				 NULL, NULL, NULL,
+				 DEVKERNEL_NEEDS_TEXTLIB),
+	DEVTYPE_DECL("varchar", VARCHAROID, "varlena *",
+				 NULL, NULL, NULL,
+				 DEVKERNEL_NEEDS_TEXTLIB),
+	DEVTYPE_DECL("numeric", NUMERICOID, "cl_ulong",
+				 NULL, NULL, NULL,
+				 DEVKERNEL_NEEDS_NUMERIC),
+	DEVTYPE_DECL("bytea",   BYTEAOID,   "varlena *",
+				 NULL, NULL, NULL,
+				 0),
+	DEVTYPE_DECL("text",    TEXTOID,    "varlena *",
+				 NULL, NULL, NULL,
+				 DEVKERNEL_NEEDS_TEXTLIB),
 };
 
 static devtype_info *
 build_devtype_info_entry(Oid type_oid,
 						 int32 type_flags,
 						 const char *type_basename,
+						 const char *max_const,
+						 const char *min_const,
+						 const char *zero_const,
 						 devtype_info *element)
 {
 	HeapTuple		tuple;
@@ -127,7 +170,9 @@ build_devtype_info_entry(Oid type_oid,
 	else
 		entry->type_name = pstrdup("array");
 	entry->type_base = pstrdup(type_basename);
-
+	entry->max_const = max_const;	/* may be NULL */
+	entry->min_const = min_const;	/* may be NULL */
+	entry->zero_const = zero_const;	/* may be NULL */
    	entry->type_eqfunc = get_opcode(tcache->eq_opr);
 	entry->type_cmpfunc = tcache->cmp_proc;
 	if (!element)
@@ -135,6 +180,9 @@ build_devtype_info_entry(Oid type_oid,
 													 type_flags |
 													 DEVKERNEL_NEEDS_MATRIX,
 													 "varlena *",
+													 NULL,
+													 NULL,
+													 NULL,
 													 entry);
 	else
 		entry->type_element = element;
@@ -178,6 +226,9 @@ build_devtype_info(void)
 		(void) build_devtype_info_entry(typ_oid,
 										devtype_catalog[i].type_flags,
 										devtype_catalog[i].type_base,
+										devtype_catalog[i].max_const,
+										devtype_catalog[i].min_const,
+										devtype_catalog[i].zero_const,
 										NULL);
 	}
 	MemoryContextSwitchTo(oldcxt);

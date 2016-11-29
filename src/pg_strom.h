@@ -278,6 +278,9 @@ typedef struct devtype_info {
 	/* oid of type related functions */
 	Oid			type_eqfunc;	/* function to check equality */
 	Oid			type_cmpfunc;	/* function to compare two values */
+	const char *max_const;		/* static initializer, if any */
+	const char *min_const;		/* static initializer, if any */
+	const char *zero_const;		/* static initializer, if any */
 	const struct devtype_info *type_array;	/* array type of itself, if any */
 	const struct devtype_info *type_element;/* element type of array, if any */
 } devtype_info;

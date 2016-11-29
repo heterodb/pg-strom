@@ -237,6 +237,7 @@ typedef struct
 
 /* declaration of static functions */
 static char	   *gpupreagg_codegen(codegen_context *context,
+								  PlannerInfo *root,
 								  CustomScan *cscan,
 								  List *tlist_dev,
 								  List *tlist_dev_action,
@@ -1860,7 +1861,7 @@ PlanGpuPreAggPath(PlannerInfo *root,
 	Plan		   *outer_plan = NULL;
 	Index			outer_scanrelid = 0;
 	List		   *outer_quals = NIL;
-	List		   *outer_tlist;
+	List		   *outer_tlist = NIL;
 	List		   *tlist_host;
 	List		   *tlist_dev;
 	List		   *tlist_dev_action;
@@ -1910,11 +1911,13 @@ PlanGpuPreAggPath(PlannerInfo *root,
 							DEVKERNEL_NEEDS_GPUSCAN |
 							DEVKERNEL_NEEDS_GPUPREAGG);
 	kern_source = gpupreagg_codegen(&context,
+									root,
 									cscan,
 									tlist_dev,
 									tlist_dev_action,
 									outer_tlist,
 									outer_quals);
+	elog(INFO, "source:\n%s", kern_source);
 
 	memset(&gpa_info, 0, sizeof(GpuPreAggInfo));
 	gpa_info.extra_flags = context.extra_flags;
@@ -1930,8 +1933,354 @@ PlanGpuPreAggPath(PlannerInfo *root,
 	return &cscan->scan.plan;
 }
 
+/*
+ * pgstrom_plan_is_gpupreagg - returns true if GpuPreAgg
+ */
+bool
+pgstrom_plan_is_gpupreagg(const Plan *plan)
+{
+	if (IsA(plan, CustomScan) &&
+		((CustomScan *) plan)->methods == &gpupreagg_scan_methods)
+		return true;
+	return false;
+}
 
+/*
+ * make_tlist_device_projection
+ *
+ * It pulls a set of referenced resource numbers according to the supplied
+ * outer_scanrelid/outer_tlist.
+ */
+typedef struct
+{
+	Bitmapset  *outer_refs;
+	Index		outer_scanrelid;
+	List	   *outer_tlist;
+} make_tlist_device_projection_context;
 
+static Node *
+__make_tlist_device_projection(Node *node, void *__con)
+{
+	make_tlist_device_projection_context *con = __con;
+	int		k;
+
+	if (!node)
+		return false;
+	if (con->outer_scanrelid > 0)
+	{
+		Assert(con->outer_tlist == NIL);
+		if (IsA(node, Var))
+		{
+			Var	   *varnode = (Var *) node;
+
+			if (varnode->varno != con->outer_scanrelid)
+				elog(ERROR, "Bug? varnode references unknown relid: %s",
+					 nodeToString(varnode));
+			k = varnode->varattno - FirstLowInvalidHeapAttributeNumber;
+			con->outer_refs = bms_add_member(con->outer_refs, k);
+
+			Assert(varnode->varlevelsup == 0);
+			return (Node *)makeVar(INDEX_VAR,
+								   varnode->varattno,
+								   varnode->vartype,
+								   varnode->vartypmod,
+								   varnode->varcollid,
+								   varnode->varlevelsup);
+		}
+	}
+	else
+	{
+		ListCell	   *lc;
+
+		foreach (lc, con->outer_tlist)
+		{
+			TargetEntry    *tle = lfirst(lc);
+			Var			   *varnode;
+
+			if (equal(node, tle->expr))
+			{
+				k = tle->resno - FirstLowInvalidHeapAttributeNumber;
+				con->outer_refs = bms_add_member(con->outer_refs, k);
+
+				varnode = makeVar(INDEX_VAR,
+								  tle->resno,
+								  exprType((Node *)tle->expr),
+								  exprTypmod((Node *)tle->expr),
+								  exprCollation((Node *)tle->expr),
+								  0);
+				return (Node *)varnode;
+			}
+		}
+
+		if (IsA(node, Var))
+			elog(ERROR, "Bug? varnode (%s) references unknown outer entry: %s",
+				 nodeToString(node),
+				 nodeToString(con->outer_tlist));
+	}
+	return expression_tree_mutator(node, __make_tlist_device_projection, con);
+}
+
+static List *
+make_tlist_device_projection(List *tlist_dev,
+							 Index outer_scanrelid,
+							 List *outer_tlist,
+							 Bitmapset **p_outer_refs)
+{
+	make_tlist_device_projection_context con;
+	List	   *tlist_alt;
+
+	memset(&con, 0, sizeof(con));
+	con.outer_scanrelid = outer_scanrelid;
+	con.outer_tlist = outer_tlist;
+
+	tlist_alt = (List *)
+		__make_tlist_device_projection((Node *)tlist_dev, &con);
+	*p_outer_refs = con.outer_refs;
+
+	return tlist_alt;
+}
+
+/*
+ * gpupreagg_codegen_projection - code generator for
+ *
+ * STATIC_FUNCTION(void)
+ * gpupreagg_projection(kern_context *kcxt,
+ *                      kern_data_store *kds_src,
+ *                      kern_tupitem *tupitem,
+ *                      kern_data_store *kds_dst,
+ *                      Datum *dst_values,
+ *                      cl_char *dst_isnull);
+ */
+static void
+gpupreagg_codegen_projection(StringInfo kern,
+							 codegen_context *context,
+							 PlannerInfo *root,
+							 List *tlist_dev,
+							 List *tlist_dev_action,
+							 Index outer_scanrelid,
+							 List *outer_tlist)
+{
+	StringInfoData	decl;
+	StringInfoData	body;
+	StringInfoData	temp;
+	Relation		outer_rel = NULL;
+	TupleDesc		outer_desc = NULL;
+	Bitmapset	   *outer_refs = NULL;
+	List		   *tlist_alt;
+	ListCell	   *lc1;
+	ListCell	   *lc2;
+	int				i, k, nattrs;
+
+	initStringInfo(&decl);
+	initStringInfo(&body);
+	initStringInfo(&temp);
+	context->param_refs = NULL;
+
+	appendStringInfoString(
+		&decl,
+		"STATIC_FUNCTION(void)\n"
+		"gpupreagg_projection(kern_context *kcxt,\n"
+		"                     kern_data_store *kds_src,\n"
+		"                     HeapTupleHeaderData *htup,\n"
+		"                     kern_data_store *kds_dst,\n"
+		"                     Datum *dst_values,\n"
+		"                     cl_char *dst_isnull)\n"
+		"{\n"
+		"  void *addr       __attribute__((unused));\n");
+
+	/* open relation if GpuPreAgg looks at physical relation */
+	if (outer_tlist == NIL)
+	{
+		RangeTblEntry  *rte;
+
+		Assert(outer_scanrelid > 0 &&
+			   outer_scanrelid < root->simple_rel_array_size);
+		rte = root->simple_rte_array[outer_scanrelid];
+		outer_rel = heap_open(rte->relid, NoLock);
+		outer_desc = RelationGetDescr(outer_rel);
+		nattrs = outer_desc->natts;
+	}
+	else
+	{
+		Assert(outer_scanrelid == 0);
+		nattrs = list_length(outer_tlist);
+	}
+
+	/* pick up columns which are referenced on the initial projection */
+	tlist_alt = make_tlist_device_projection(tlist_dev,
+											 outer_scanrelid,
+											 outer_tlist,
+											 &outer_refs);
+	Assert(list_length(tlist_alt) == list_length(tlist_dev));
+
+	/* extract the supplied tuple and load variables */
+	if (!bms_is_empty(outer_refs))
+	{
+		for (i=0; i > FirstLowInvalidHeapAttributeNumber; i--)
+		{
+			k = i - FirstLowInvalidHeapAttributeNumber;
+			if (bms_is_member(k, outer_refs))
+				elog(ERROR, "Bug? system column or whole-row is referenced");
+		}
+
+		appendStringInfoString(
+			&body,
+			"\n"
+			"  /* extract the given htup and load variables */\n"
+			"  EXTRACT_HEAP_TUPLE_BEGIN(addr, kds_src, htup);\n");
+		for (i=1; i <= nattrs; i++)
+		{
+			k = i - FirstLowInvalidHeapAttributeNumber;
+			if (bms_is_member(k, outer_refs))
+			{
+				devtype_info   *dtype;
+
+				/* data type of the outer relation input stream */
+				if (outer_tlist == NIL)
+				{
+					Form_pg_attribute	attr = outer_desc->attrs[i-1];
+					
+					dtype = pgstrom_devtype_lookup_and_track(attr->atttypid,
+															 context);
+					if (!dtype)
+						elog(ERROR, "device type lookup failed: %s",
+							 format_type_be(attr->atttypid));
+				}
+				else
+				{
+					TargetEntry	   *tle = list_nth(outer_tlist, i-1);
+					Oid				type_oid = exprType((Node *)tle->expr);
+
+					dtype = pgstrom_devtype_lookup_and_track(type_oid,
+															 context);
+					if (!dtype)
+						elog(ERROR, "device type lookup failed: %s",
+							 format_type_be(type_oid));
+				}
+
+				appendStringInfo(
+					&decl,
+					"  pg_%s_t KVAR_%u;\n",
+					dtype->type_name, i);
+				appendStringInfo(
+					&temp,
+					"  KVAR_%u = pg_%s_datum_ref(kcxt,addr,false);\n",
+					i, dtype->type_name);
+				/*
+				 * MEMO: kds_src is either ROW or BLOCK format, so these KDS
+				 * shall never have 'internal' format of NUMERIC data types.
+				 */
+				appendStringInfoString(&body, temp.data);
+				resetStringInfo(&temp);
+			}
+			appendStringInfoString(
+				&temp,
+				"  EXTRACT_HEAP_TUPLE_NEXT(addr);\n");
+		}
+		appendStringInfoString(
+			&body,
+			"  EXTRACT_HEAP_TUPLE_END();\n");
+	}
+
+	/*
+	 * Execute expression and store the value on dst_values/dst_isnull
+	 */
+	codegen_tempvar_declaration(&decl, "temp");
+
+	forboth (lc1, tlist_alt,
+			 lc2, tlist_dev_action)
+	{
+		TargetEntry	   *tle = lfirst(lc1);
+		Expr		   *expr = tle->expr;
+		Oid				type_oid = exprType((Node *)expr);
+		int				action = lfirst_int(lc2);
+		devtype_info   *dtype;
+		char		   *kvar_label;
+
+		dtype = pgstrom_devtype_lookup_and_track(type_oid, context);
+		if (!dtype)
+			elog(ERROR, "device type lookup failed: %s",
+				 format_type_be(type_oid));
+		appendStringInfo(
+			&body,
+			"\n"
+			"  /* initial attribute %d (%s) */\n",
+			tle->resno,
+			(action == ALTFUNC_GROUPING_KEY ? "group-key" :
+			 action <  ALTFUNC_EXPR_NROWS   ? "const-value" : "aggfn-arg"));
+
+		if (IsA(expr, Var))
+		{
+			Var	   *varnode = (Var *)expr;
+
+			Assert(varnode->varno == INDEX_VAR);
+			kvar_label = psprintf("KVAR_%u", varnode->varattno);
+		}
+		else
+		{
+			kvar_label = psprintf("temp.%s_v", dtype->type_name);
+			appendStringInfo(
+				&body,
+				"  %s = %s;\n",
+				kvar_label,
+				pgstrom_codegen_expression((Node *)expr, context));
+		}
+
+		appendStringInfo(
+			&body,
+			"  dst_isnull[%d] = %s.isnull;\n"
+			"  if (!%s.isnull)\n"
+			"    dst_values[%d] = pg_%s_to_datum(%s.value);\n",
+			tle->resno - 1, kvar_label,
+			kvar_label,
+			tle->resno - 1, dtype->type_name, kvar_label);
+		/*
+		 * dst_value must be also initialized to an proper initial value,
+		 * even if dst_isnull would be NULL, because atomic operation
+		 * expects dst_value has a particular initial value.
+		 */
+		if (action >= ALTFUNC_EXPR_NROWS)
+		{
+			const char	   *null_const_value;
+
+			switch (action)
+			{
+				case ALTFUNC_EXPR_PMIN:
+					null_const_value = dtype->min_const;
+					break;
+				case ALTFUNC_EXPR_PMAX:
+					null_const_value = dtype->max_const;
+					break;
+				default:
+					null_const_value = dtype->zero_const;
+					break;
+			}
+
+			if (!null_const_value)
+				elog(ERROR, "Bug? unable to use type %s in GpuPreAgg",
+					 format_type_be(dtype->type_oid));
+
+			appendStringInfo(
+				&body,
+				"  else\n"
+				"    dst_values[%d] = pg_%s_to_datum(%s);\n",
+				tle->resno - 1, dtype->type_name, null_const_value);
+		}
+	}
+	/* const/params */
+	pgstrom_codegen_param_declarations(&decl, context);
+	appendStringInfo(
+		&decl,
+		"%s"
+		"}\n\n", body.data);
+
+	if (outer_rel)
+		heap_close(outer_rel, NoLock);
+
+	appendStringInfoString(kern, decl.data);
+	pfree(decl.data);
+	pfree(body.data);
+}
 
 /*
  * gpupreagg_codegen_hashvalue - code generator for
@@ -1953,7 +2302,6 @@ gpupreagg_codegen_hashvalue(StringInfo kern,
 	StringInfoData	body;
 	ListCell	   *lc1;
 	ListCell	   *lc2;
-	int				i;
 
 	initStringInfo(&decl);
     initStringInfo(&body);
@@ -1994,8 +2342,7 @@ gpupreagg_codegen_hashvalue(StringInfo kern,
 		/* compute crc32 value */
 		appendStringInfo(
 			&body,
-			"  hash_value = pg_%s_comp_crc32(crc32_table,\n"
-			"                                hash_value, keyval_%u);\n",
+			"  hash_value = pg_%s_comp_crc32(crc32_table, hash_value, keyval_%u);\n",
 			dtype->type_name, tle->resno);
 	}
 	/* no constants should appear */
@@ -2043,8 +2390,8 @@ gpupreagg_codegen_keymatch(StringInfo kern,
 		"                   kern_data_store *x_kds, size_t x_index,\n"
 		"                   kern_data_store *y_kds, size_t y_index)\n"
 		"{\n");
-	codegen_tempvar_declaration(&decl, "temp_x");
-	codegen_tempvar_declaration(&decl, "temp_y");
+	codegen_tempvar_declaration(kern, "temp_x");
+	codegen_tempvar_declaration(kern, "temp_y");
 	appendStringInfoChar(kern, '\n');
 
 	forboth (lc1, tlist_dev,
@@ -2080,13 +2427,13 @@ gpupreagg_codegen_keymatch(StringInfo kern,
 			kern,
 			"  temp_x.%s_v = pg_%s_vref(x_kds,kcxt,%u,x_index);\n"
 			"  temp_y.%s_v = pg_%s_vref(y_kds,kcxt,%u,y_index);\n"
-			"  if (!temp_x.%_v.isnull && !temp_y.%s_v.isnull)\n"
+			"  if (!temp_x.%s_v.isnull && !temp_y.%s_v.isnull)\n"
 			"  {\n"
 			"    if (!EVAL(pgfn_%s(kcxt, temp_x.%s_v, temp_y.%s_v)))\n"
 			"      return false;\n"
 			"  }\n"
-			"  else if ((temp_x.%_v.isnull && !temp_y.%s_v.isnull) ||\n"
-			"           (!temp_x.%_v.isnull && temp_y.%s_v.isnull))\n"
+			"  else if ((temp_x.%s_v.isnull && !temp_y.%s_v.isnull) ||\n"
+			"           (!temp_x.%s_v.isnull && temp_y.%s_v.isnull))\n"
 			"      return false;\n"
 			"\n",
 			dtype->type_name, dtype->type_name, tle->resno - 1,
@@ -2110,6 +2457,7 @@ gpupreagg_codegen_keymatch(StringInfo kern,
  */
 static char *
 gpupreagg_codegen(codegen_context *context,
+				  PlannerInfo *root,
 				  CustomScan *cscan,
 				  List *tlist_dev,
 				  List *tlist_dev_action,
@@ -2131,6 +2479,11 @@ gpupreagg_codegen(codegen_context *context,
 
 	/* outer quals */
 
+	/* gpupreagg_projection */
+	gpupreagg_codegen_projection(&kern, context, root,
+								 tlist_dev, tlist_dev_action,
+								 cscan->scan.scanrelid, outer_tlist);
+
 	/* gpupreagg_hashvalue */
 	gpupreagg_codegen_hashvalue(&kern, context, tlist_dev, tlist_dev_action);
 
@@ -2143,7 +2496,6 @@ gpupreagg_codegen(codegen_context *context,
 
 	/* gpupreagg_nogroup_calc */
 
-	/* gpupreagg_projection */
 
 	/* function declarations */
 	pgstrom_codegen_func_declarations(&kern, context);
@@ -4389,14 +4741,6 @@ pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg)
 	}
 }
 
-bool
-pgstrom_plan_is_gpupreagg(const Plan *plan)
-{
-	if (IsA(plan, CustomScan) &&
-		((CustomScan *) plan)->methods == &gpupreagg_scan_methods)
-		return true;
-	return false;
-}
 
 static Node *
 gpupreagg_create_scan_state(CustomScan *cscan)
