@@ -56,6 +56,7 @@ static bool						enable_gpupreagg;
 
 typedef struct
 {
+	cl_int			num_grp_keys;	/* number of grouping keys */
 	double			plan_ngroups;	/* planned number of groups */
 	cl_int			plan_nchunks;	/* planned number of chunks */
 	cl_int			plan_extra_sz;	/* planned size of extra-sz per tuple */
@@ -75,6 +76,7 @@ form_gpupreagg_info(CustomScan *cscan, GpuPreAggInfo *gpa_info)
 	List	   *privs = NIL;
 	List	   *exprs = NIL;
 
+	privs = lappend(privs, makeInteger(gpa_info->num_grp_keys));
 	privs = lappend(privs, makeInteger(double_as_long(gpa_info->plan_ngroups)));
 	privs = lappend(privs, makeInteger(gpa_info->plan_nchunks));
 	privs = lappend(privs, makeInteger(gpa_info->plan_extra_sz));
@@ -99,6 +101,7 @@ deform_gpupreagg_info(CustomScan *cscan)
 	int			pindex = 0;
 	int			eindex = 0;
 
+	gpa_info->num_grp_keys = intVal(privs, pindex++);
 	gpa_info->plan_ngroups = long_as_double(intVal(list_nth(privs, pindex++)));
 	gpa_info->plan_nchunks = intVal(list_nth(privs, pindex++));
 	gpa_info->plan_extra_sz = intVal(list_nth(privs, pindex++));
@@ -113,12 +116,31 @@ deform_gpupreagg_info(CustomScan *cscan)
 	return gpa_info;
 }
 
+/*
+ * run-time statistics; to be allocated on the shared memory
+ */
+typedef struct
+{
+	slock_t				lock;
+	pgstrom_data_store *pds_final;
+	CUdeviceptr			m_hashslot_final;	/* final global hashslot */
+	CUdeviceptr			m_kds_final;		/* final kernel data store */
+	cl_uint				f_ncols;	/* @ncols of kds_final (constant) */
+	cl_uint				f_nrooms;	/* @nrooms of kds_final (constant) */
+	cl_uint				f_nitems;	/* latest nitems of kds_final on device */
+	cl_uint				f_usage;	/* latest usage of kds_final on device */
+} runtimeState;
+
+
+
+
+
 typedef struct
 {
 	GpuTaskState_v2	gts;
-	ProjectionInfo *bulk_proj;
-	TupleTableSlot *bulk_slot;
-	cl_int			safety_limit;
+//	ProjectionInfo *bulk_proj;
+//	TupleTableSlot *bulk_slot;
+//	cl_int			safety_limit;
 	cl_int			key_dist_salt;
 	cl_int			reduction_mode;
 	List		   *outer_quals;
@@ -140,6 +162,7 @@ typedef struct
 	double			stat_varlena_unitsz;/* unitsz of varlena buffer in plan */
 } GpuPreAggState;
 
+#if 0
 /*
  * gpupreagg_segment
  *
@@ -179,6 +202,7 @@ typedef struct gpupreagg_segment
 	size_t			total_varlena;		/* total usage of varlena buffer */
 	size_t			delta_ngroups;		/* delta of the last task */
 } gpupreagg_segment;
+#endif
 
 /*
  * pgstrom_gpupreagg
@@ -2744,12 +2768,11 @@ assign_gpupreagg_session_info(StringInfo buf, GpuTaskState_v2 *gts)
 		appendStringInfo(buf, "#define GPUPREAGG_PULLUP_OUTER_SCAN 1\n");
 }
 
-
-
-
-#ifdef HOGEHOGEHOGE
+/*
+ * CreateGpuPreAggScanState - constructor of GpuPreAggState
+ */
 static Node *
-gpupreagg_create_scan_state(CustomScan *cscan)
+CreateGpuPreAggScanState(CustomScan *cscan)
 {
 	GpuPreAggState *gpas = palloc0(sizeof(GpuPreAggState));
 
@@ -2761,9 +2784,82 @@ gpupreagg_create_scan_state(CustomScan *cscan)
 	return (Node *) gpas;
 }
 
+/*
+ * ExecInitGpuPreAgg
+ */
 static void
 ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 {
+	Relation		scan_rel = node->ss.ss_currentRelation;
+	GpuContext_v2  *gcontext = NULL;
+	GpuPreAggState *gpas = (GpuPreAggState *) node;
+	CustomScan	   *cscan = (CustomScan *) node->ss.ps.plan;
+	GpuPreAggInfo  *gpa_info = deform_gpupreagg_info(cscan);
+	bool			with_connection = ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0);
+
+	Assert(scan_rel ? outerPlan(node) == NULL : outerPlan(node) != NULL);
+	/* activate a GpuContext for CUDA kernel execution */
+	gcontext = AllocGpuContext(with_connection);
+
+	/* setup common GpuTaskState fields */
+	pgstromInitGpuTaskState(&gpa->gts,
+							gcontext,
+							GpuTaskKind_GpuPreAgg,
+							gpa_info->used_params,
+							estate);
+	gpa->gts.cb_next_task = ;
+	gpa->gts.cb_ready_task = ;
+	gpa->gts.cb_switch_task = ;
+	gpa->gts.cb_next_tuple = ;
+
+
+	// move gpa_info to GPA
+	//HOGE
+
+
+
+
+
+
+	/* Initialization of the source relation */
+	if (outerPlan(cscan))
+	{
+		PlanState  *outer_ps;
+
+		Assert(scan_rel == NULL);
+		outer_ps = ExecInitNode(outerPlan(cscan), estate, eflags);
+		if (pgstrom_bulk_exec_supported(outer_ps))
+		{
+			((GpuTaskState *) outer_ps)->be_row_format = true;
+			gpas->gts.outer_bulk_exec = true;
+		}
+		outerPlanState(gpas) = outer_ps;
+		// probably, GpuPreAgg don't need re-initialization of projection info
+		outer_tupdesc = outer_ps->ps_ResultTupleSlot->tts_tupleDescriptor;
+    }
+    else
+    {
+		Assert(scan_rel != NULL);
+		outer_tupdesc = RelationGetDescr(scan_rel);
+	}
+	/* Get CUDA program and async build if any */
+	kern_define = pgstrom_build_session_info(gpa_info->extra_flags, &gpa->gts);
+	program_id = pgstrom_create_cuda_program(gcontext,
+											 gpa_info->extra_flags,
+											 gpa_info->kern_source,
+											 kern_define,
+											 with_connection);
+	gss->gts.program_id = program_id;
+
+	/* Init stuff for CPU fallback */
+	
+
+
+
+
+
+
+	/* below is older version */
 	GpuContext	   *gcontext = NULL;
 	GpuPreAggState *gpas = (GpuPreAggState *) node;
 	PlanState	   *ps = &node->ss.ps;
@@ -2860,6 +2956,7 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 	pgstrom_init_perfmon(&gpas->gts);
 }
 
+#ifdef HOGEHOGEHOGE
 /*
  * gpupreagg_check_segment_capacity
  *
@@ -4335,17 +4432,17 @@ pgstrom_init_gpupreagg(void)
 	gpupreagg_path_methods.CustomName          = "GpuPreAgg";
 	gpupreagg_path_methods.PlanCustomPath      = PlanGpuPreAggPath;
 
-#if 0
 	/* initialization of plan method table */
 	memset(&gpupreagg_scan_methods, 0, sizeof(CustomScanMethods));
 	gpupreagg_scan_methods.CustomName          = "GpuPreAgg";
 	gpupreagg_scan_methods.CreateCustomScanState
-		= gpupreagg_create_scan_state;
+		= CreateGpuPreAggScanState;
 
 	/* initialization of exec method table */
 	memset(&gpupreagg_exec_methods, 0, sizeof(CustomExecMethods));
 	gpupreagg_exec_methods.CustomName          = "GpuPreAgg";
    	gpupreagg_exec_methods.BeginCustomScan     = ExecInitGpuPreAgg;
+#if 0
 	gpupreagg_exec_methods.ExecCustomScan      = ExecGpuPreAgg;
 	gpupreagg_exec_methods.EndCustomScan       = ExecEndGpuPreAgg;
 	gpupreagg_exec_methods.ReScanCustomScan    = ExecReScanGpuPreAgg;
