@@ -40,6 +40,7 @@ DevAttributes				   *devAttrs = NULL;
 cl_int							numDevAttrs = 0;
 cl_ulong						devComputeCapability = UINT_MAX;
 cl_ulong						devBaselineMemorySize = ULONG_MAX;
+cl_uint							devBaselineMaxThreadsPerBlock = UINT_MAX;
 
 /*
  * gpu_scoreboard_mem_alloc
@@ -252,6 +253,8 @@ pgstrom_collect_gpu_device(void)
 								   compute_capability);
 		devBaselineMemorySize = Min(devBaselineMemorySize,
 									dattrs->DEV_TOTAL_MEMSZ);
+		devBaselineMaxThreadsPerBlock = Min(devBaselineMaxThreadsPerBlock,
+											dattrs->MAX_THREADS_PER_BLOCK);
 
 		/* Determine CORES_PER_MPU by CC */
 		if (dattrs->COMPUTE_CAPABILITY_MAJOR == 1)

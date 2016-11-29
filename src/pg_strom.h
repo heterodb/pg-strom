@@ -369,6 +369,7 @@ extern DevAttributes   *devAttrs;
 extern cl_int			numDevAttrs;
 extern cl_ulong			devComputeCapability;
 extern cl_ulong			devBaselineMemorySize;
+extern cl_uint			devBaselineMaxThreadsPerBlock;
 
 extern bool	gpu_scoreboard_mem_alloc(size_t nbytes);
 extern void	gpu_scoreboard_mem_free(size_t nbytes);
@@ -557,7 +558,6 @@ extern void pgstrom_codegen_param_declarations(StringInfo buf,
 											   codegen_context *context);
 extern void pgstrom_codegen_var_declarations(StringInfo buf,
 											 codegen_context *context);
-extern void codegen_tempvar_declaration(StringInfo buf, const char *varname);
 extern bool pgstrom_device_expression(Expr *expr);
 extern void pgstrom_init_codegen_context(codegen_context *context);
 extern void pgstrom_init_codegen(void);

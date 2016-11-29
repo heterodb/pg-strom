@@ -3134,14 +3134,12 @@ gpujoin_codegen_hash_value(StringInfo source,
 		"                           kern_multirels *kmrels,\n"
 		"                           cl_uint *o_buffer,\n"
 		"                           cl_bool *p_is_null_keys)\n"
-		"{\n",
-		cur_depth);
-	codegen_tempvar_declaration(source, "temp");
-	appendStringInfo(
-		source,
+		"{\n"
+		"  pg_anytype_t temp    __attribute__((unused));\n"
 		"  cl_uint hash;\n"
 		"  cl_bool is_null_keys = true;\n"
-		"\n");
+		"\n",
+		cur_depth);
 
 	context->used_vars = NIL;
 	context->param_refs = NULL;
@@ -3277,8 +3275,8 @@ gpujoin_codegen_projection(StringInfo source,
 		"  kern_data_store *kds_in      __attribute__((unused));\n"
 		"  ItemPointerData  t_self      __attribute__((unused));\n"
 		"  char *addr                   __attribute__((unused));\n"
-		"  char *extra_pos = extra_buf;\n");
-	codegen_tempvar_declaration(source, "temp");
+		"  char *extra_pos = extra_buf;\n"
+		"  pg_anytype_t temp            __attribute__((unused));\n");
 
 	for (depth=0; depth <= gj_info->num_rels; depth++)
 	{

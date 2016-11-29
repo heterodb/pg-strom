@@ -1606,12 +1606,8 @@ out:
 /*
  * gpupreagg_main
  *
- * The controller kernel function that launches a 
- *
- *
- *
- *
- *
+ * The entrypoint of GpuPreAgg logic; which calls relevant kernels to handle
+ * reduction processes.
  */
 KERNEL_FUNCTION(void)
 gpupreagg_main(kern_gpupreagg *kgpreagg,
@@ -1638,6 +1634,13 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 	assert(get_global_size() == 1);	/* !!single thread!! */
 	assert(kgpreagg->reduction_mode != GPUPREAGG_ONLY_TERMINATION);
 
+#ifdef GPUPREAGG_PULLUP_OUTER_SCAN
+	// this code block is valid only when outer-scan pulled up.
+	// In this case, we have to run outer-quel
+#else
+	// elsewhere, all the input rows are valid
+
+#endif
 	/* Launch:
 	 * KERNEL_FUNCTION(void)
 	 * gpupreagg_preparation(kern_gpupreagg *kgpreagg,

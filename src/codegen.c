@@ -2176,10 +2176,10 @@ codegen_scalar_array_op_expression(ScalarArrayOpExpr *opexpr,
 		"  cl_int     i, nitems;\n"
 		"  char      *dataptr;\n"
 		"  char      *bitmap;\n"
-		"  int        bitmask;\n",
+		"  int        bitmask;\n"
+		"  pg_anytype_t temp  __attribute__((unused));\n",
 		devexpr.expr_name,
 		dtype1->type_name);
-	codegen_tempvar_declaration(&decl, "temp");
 
 	appendStringInfo(
 		&decl,
@@ -2457,44 +2457,6 @@ pgstrom_codegen_var_declarations(StringInfo buf, codegen_context *context)
 			var->varattno - 1,
 			context->kds_index_label);
 	}
-}
-
-/*
- * codegen_tempvar_declarations - it declares a temporary variable
- * that can store any data type supported by PG-Strom.
- */
-void
-codegen_tempvar_declaration(StringInfo buf, const char *varname)
-{
-	appendStringInfo(
-		buf,
-		"  union {\n"
-		"    pg_varlena_t     varlena_v;\n"
-		"    pg_bool_t        bool_v;\n"
-		"    pg_int2_t        int2_v;\n"
-		"    pg_int4_t        int4_v;\n"
-		"    pg_int8_t        int8_v;\n"
-		"    pg_float4_t      float4_v;\n"
-		"    pg_float8_t      float8_v;\n"
-		"#ifdef CUDA_NUMERIC_H\n"
-		"    pg_numeric_t     numeric_v;\n"
-		"#endif\n"
-		"#ifdef CUDA_MONEY_H\n"
-		"    pg_money_t       money_v;\n"
-		"#endif\n"
-		"#ifdef CUDA_TIMELIB_H\n"
-		"    pg_date_t        date_v;\n"
-		"    pg_time_t        time_v;\n"
-		"    pg_timestamp_t   timestamp_v;\n"
-		"    pg_timestamptz_t timestamptz_v;\n"
-		"#endif\n"
-		"#ifdef CUDA_TEXTLIB_H\n"
-		"    pg_bpchar_t      bpchar_v;\n"
-		"    pg_text_t        text_v;\n"
-		"    pg_varchar_t     varchar_v;\n"
-		"#endif\n"
-		"  } %s	__attribute__ ((unused));\n",
-		varname);
 }
 
 /*

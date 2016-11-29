@@ -284,6 +284,35 @@ construct_flat_cuda_source(uint32 extra_flags,
 	/* cuda matrix.h */
 	if (extra_flags & DEVKERNEL_NEEDS_MATRIX)
 		appendStringInfoString(&source, pgstrom_cuda_matrix_code);
+	/* pg_anytype_t declaration */
+	appendStringInfoString(
+		&source,
+		"typedef union {\n"
+		"    pg_varlena_t     varlena_v;\n"
+		"    pg_bool_t        bool_v;\n"
+		"    pg_int2_t        int2_v;\n"
+		"    pg_int4_t        int4_v;\n"
+		"    pg_int8_t        int8_v;\n"
+		"    pg_float4_t      float4_v;\n"
+		"    pg_float8_t      float8_v;\n"
+		"#ifdef CUDA_NUMERIC_H\n"
+		"    pg_numeric_t     numeric_v;\n"
+		"#endif\n"
+		"#ifdef CUDA_MONEY_H\n"
+		"    pg_money_t       money_v;\n"
+		"#endif\n"
+		"#ifdef CUDA_TIMELIB_H\n"
+		"    pg_date_t        date_v;\n"
+		"    pg_time_t        time_v;\n"
+		"    pg_timestamp_t   timestamp_v;\n"
+		"    pg_timestamptz_t timestamptz_v;\n"
+		"#endif\n"
+		"#ifdef CUDA_TEXTLIB_H\n"
+		"    pg_bpchar_t      bpchar_v;\n"
+		"    pg_text_t        text_v;\n"
+		"    pg_varchar_t     varchar_v;\n"
+		"#endif\n"
+		"  } pg_anytype_t;\n\n");
 
 	/* Main logic of each GPU tasks */
 

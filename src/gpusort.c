@@ -456,11 +456,9 @@ pgstrom_gpusort_codegen(Sort *sort, codegen_context *context)
 		"                kern_data_store *kds_slot,\n"
 		"                size_t x_index,\n"
 		"                size_t y_index)\n"
-		"{\n");
-	codegen_tempvar_declaration(&body, "KVAR_X");
-	codegen_tempvar_declaration(&body, "KVAR_Y");
-	appendStringInfo(
-		&body,
+		"{\n"
+		"  pg_anytype_t KVAR_X  __attribute__((unused));\n"
+		"  pg_anytype_t KVAR_Y  __attribute__((unused));\n"
 		"  pg_int4_t comp;\n\n"
 		"  assert(kds_slot->format == KDS_FORMAT_SLOT);\n\n");
 
