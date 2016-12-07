@@ -24,6 +24,7 @@
 #include "nodes/primnodes.h"
 #include "nodes/readfuncs.h"
 #include "nodes/relation.h"
+#include "port/atomics.h"
 #include "storage/buf.h"
 #include "storage/fd.h"
 #include "storage/latch.h"
@@ -315,15 +316,28 @@ typedef struct devexpr_info {
  */
 typedef struct pgstrom_data_store
 {
-	cl_int		refcnt;			/* reference counter */
+	pg_atomic_uint32	refcnt;		/* reference counter */
+
 	/*
 	 * NOTE: Extra information for KDS_FORMAT_BLOCK.
 	 * @nblocks_uncached is number of PostgreSQL blocks, to be processed
 	 * by NVMe-Strom. If @nblocks_uncached > 0, the tail of PDS shall be
 	 * filled up by an array of strom_dma_chunk.
 	 */
-	cl_uint		nblocks_uncached;
-	kern_data_store kds;	/* data chunk in kernel portion */
+	cl_uint				nblocks_uncached;
+
+	/*
+	 * NOTE: @ntasks_running is an independent counter regardless of the
+	 * @refcnt. It is used to track number of concurrent tasks that reference
+	 * a particular shared data-store. If a data-store will be never attached
+	 * no longer, and once @ntasks_running gets backed to zero, it means the
+	 * caller task is the last context which references the data-store.
+	 * Right now, this mechanism is only used for the final PDS of GpuPreAgg.
+	 */
+	pg_atomic_uint32	ntasks_running;
+
+	/* data chunk in kernel portion */
+	kern_data_store kds;
 } pgstrom_data_store;
 
 /*
@@ -701,6 +715,11 @@ extern void	pgstrom_init_gpujoin(void);
  */
 extern void pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg);
 extern bool pgstrom_plan_is_gpupreagg(const Plan *plan);
+extern int	gpupreagg_process_task(GpuTask_v2 *gtask,
+								   CUmodule cuda_module,
+								   CUstream cuda_stream);
+extern int	gpupreagg_complete_task(GpuTask_v2 *gtask);
+extern void	gpupreagg_release_task(GpuTask_v2 *gtask);
 extern void assign_gpupreagg_session_info(StringInfo buf,
 										  GpuTaskState_v2 *gts);
 extern void pgstrom_init_gpupreagg(void);
@@ -810,9 +829,6 @@ extern void show_scan_qual(List *qual, const char *qlabel,
 						   ExplainState *es);
 extern void show_instrumentation_count(const char *qlabel, int which,
 									   PlanState *planstate, ExplainState *es);
-//extern void pgstrom_init_perfmon(GpuTaskState *gts);
-//extern void pgstrom_explain_gputaskstate(GpuTaskState *gts,
-//										 ExplainState *es);
 
 /*
  * Device Code generated from cuda_*.h

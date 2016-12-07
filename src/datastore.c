@@ -211,9 +211,11 @@ pgstrom_fetch_data_store(TupleTableSlot *slot,
 pgstrom_data_store *
 PDS_retain(pgstrom_data_store *pds)
 {
-	Assert(pds->refcnt > 0);
+	int32		refcnt_old	__attribute__((unused));
 
-	pds->refcnt++;
+	refcnt_old = (int32)pg_atomic_fetch_add_u32(&pds->refcnt, 1);
+
+	Assert(refcnt_old > 0);
 
 	return pds;
 }
@@ -221,8 +223,11 @@ PDS_retain(pgstrom_data_store *pds)
 void
 PDS_release(pgstrom_data_store *pds)
 {
-	Assert(pds->refcnt > 0);
-	if (--pds->refcnt == 0)
+	int32		refcnt_new;
+
+	refcnt_new = (int32)pg_atomic_fetch_sub_u32(&pds->refcnt, 1);
+	Assert(refcnt_new >= 0);
+	if (refcnt_new == 0)
 		dmaBufferFree(pds);
 }
 
@@ -466,7 +471,8 @@ PDS_create_row(GpuContext_v2 *gcontext, TupleDesc tupdesc, Size length)
 
 	pds = dmaBufferAlloc(gcontext, offsetof(pgstrom_data_store,
 											kds) + kds_length);
-	pds->refcnt = 1;	/* owned by the caller at least */
+	/* owned by the caller at least */
+	pg_atomic_init_u32(&pds->refcnt, 1);
 
 	/*
 	 * initialize common part of KDS. Note that row-format cannot
@@ -475,6 +481,7 @@ PDS_create_row(GpuContext_v2 *gcontext, TupleDesc tupdesc, Size length)
 	init_kernel_data_store(&pds->kds, tupdesc, kds_length,
 						   KDS_FORMAT_ROW, INT_MAX, false);
 	pds->nblocks_uncached = 0;
+	pg_atomic_init_u32(&pds->ntasks_running, 0);
 	return pds;
 }
 
@@ -495,11 +502,13 @@ PDS_create_slot(GpuContext_v2 *gcontext,
 				  STROMALIGN(extra_length));
 	pds = dmaBufferAlloc(gcontext, offsetof(pgstrom_data_store,
 											kds) + kds_length);
-	pds->refcnt = 1;	/* owned by the caller at least */
+	/* owned by the caller at least */
+	pg_atomic_init_u32(&pds->refcnt, 1);
 
 	init_kernel_data_store(&pds->kds, tupdesc, kds_length,
 						   KDS_FORMAT_SLOT, nrooms, use_internal);
 	pds->nblocks_uncached = 0;
+	pg_atomic_init_u32(&pds->ntasks_running, 0);
 	return pds;
 }
 
@@ -516,11 +525,13 @@ PDS_create_hash(GpuContext_v2 *gcontext,
 
 	pds = dmaBufferAlloc(gcontext, offsetof(pgstrom_data_store,
 											kds) + kds_length);
-	pds->refcnt = 1;
+	/* owned by the caller at least */
+	pg_atomic_init_u32(&pds->refcnt, 1);
 
 	init_kernel_data_store(&pds->kds, tupdesc, kds_length,
 						   KDS_FORMAT_HASH, INT_MAX, false);
 	pds->nblocks_uncached = 0;
+	pg_atomic_init_u32(&pds->ntasks_running, 0);
 	return pds;
 }
 
@@ -545,13 +556,14 @@ PDS_create_block(GpuContext_v2 *gcontext,
 	/* allocation */
 	pds = dmaBufferAlloc(gcontext, offsetof(pgstrom_data_store,
 											kds) + kds_length);
-	pds->refcnt = 1;
+	/* owned by the caller at least */
+	pg_atomic_init_u32(&pds->refcnt, 1);
 
 	init_kernel_data_store(&pds->kds, tupdesc, kds_length,
 						   KDS_FORMAT_BLOCK, nrooms, false);
 	pds->kds.nrows_per_block = nvme_sstate->nrows_per_block;
 	pds->nblocks_uncached = 0;
-
+	pg_atomic_init_u32(&pds->ntasks_running, 0);
 	return pds;
 }
 

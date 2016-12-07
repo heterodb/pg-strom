@@ -26,7 +26,8 @@
 #define GPUPREAGG_LOCAL_REDUCTION		2
 #define GPUPREAGG_GLOBAL_REDUCTION		3
 #define GPUPREAGG_FINAL_REDUCTION		4
-#define GPUPREAGG_ONLY_TERMINATION		99	/* used to urgent termination */
+#define GPUPREAGG_ONLY_TERMINATION	   99	/* used to urgent termination */
+#define GPUPREAGG_INVALID_REDUCTION  9999	/* reduction mode TBD */
 
 /*
  * +--------------------+
@@ -1639,6 +1640,9 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 	// In this case, we have to run outer-quel
 #else
 	// elsewhere, all the input rows are valid
+
+
+	//
 
 #endif
 	/* Launch:
