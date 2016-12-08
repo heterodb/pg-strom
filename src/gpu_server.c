@@ -1369,6 +1369,7 @@ gpuservRecvGpuTasks(GpuContext_v2 *gcontext, long timeout)
 	return false;
 }
 
+#if 0
 /*
  * gpuservPushGpuTask - attach a GpuTask to the queue by GPU server itself
  */
@@ -1391,6 +1392,7 @@ gpuservPushGpuTask(GpuContext_v2 *gcontext, GpuTask_v2 *gtask)
 	dlist_push_tail(&session_pending_tasks, &gtask->chain);
 	SpinLockRelease(&session_tasks_lock);
 }
+#endif
 
 /*
  * gpuservCompleteGpuTask - A routine for CUDA callback to register GpuTask

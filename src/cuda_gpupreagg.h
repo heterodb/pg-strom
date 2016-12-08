@@ -99,11 +99,9 @@ typedef struct
 	((uintptr_t)(kgpreagg)->kresults_1_offset +			\
 	 2 * ((uintptr_t)(kgpreagg)->kresults_2_offset -	\
 		  (uintptr_t)(kgpreagg)->kresults_1_offset))
-#define KERN_GPUPREAGG_DMASEND_OFFSET(kgpreagg)		0
 #define KERN_GPUPREAGG_DMASEND_LENGTH(kgpreagg)			\
 	(offsetof(kern_gpupreagg, kparams) +				\
 	 KERN_GPUPREAGG_PARAMBUF_LENGTH(kgpreagg))
-#define KERN_GPUPREAGG_DMARECV_OFFSET(kgpreagg)		0
 #define KERN_GPUPREAGG_DMARECV_LENGTH(kgpreagg)			\
 	offsetof(kern_gpupreagg, pg_crc32_table[0])
 
