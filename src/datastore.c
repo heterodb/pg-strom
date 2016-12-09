@@ -481,7 +481,9 @@ PDS_create_row(GpuContext_v2 *gcontext, TupleDesc tupdesc, Size length)
 	init_kernel_data_store(&pds->kds, tupdesc, kds_length,
 						   KDS_FORMAT_ROW, INT_MAX, false);
 	pds->nblocks_uncached = 0;
-	pg_atomic_init_u32(&pds->ntasks_running, 0);
+	pds->ntasks_running = 0;
+	pds->is_dereferenced = false;
+
 	return pds;
 }
 
@@ -508,7 +510,9 @@ PDS_create_slot(GpuContext_v2 *gcontext,
 	init_kernel_data_store(&pds->kds, tupdesc, kds_length,
 						   KDS_FORMAT_SLOT, nrooms, use_internal);
 	pds->nblocks_uncached = 0;
-	pg_atomic_init_u32(&pds->ntasks_running, 0);
+	pds->ntasks_running = 0;
+	pds->is_dereferenced = false;
+
 	return pds;
 }
 
@@ -531,7 +535,9 @@ PDS_create_hash(GpuContext_v2 *gcontext,
 	init_kernel_data_store(&pds->kds, tupdesc, kds_length,
 						   KDS_FORMAT_HASH, INT_MAX, false);
 	pds->nblocks_uncached = 0;
-	pg_atomic_init_u32(&pds->ntasks_running, 0);
+	pds->ntasks_running = 0;
+	pds->is_dereferenced = false;
+
 	return pds;
 }
 
@@ -563,7 +569,9 @@ PDS_create_block(GpuContext_v2 *gcontext,
 						   KDS_FORMAT_BLOCK, nrooms, false);
 	pds->kds.nrows_per_block = nvme_sstate->nrows_per_block;
 	pds->nblocks_uncached = 0;
-	pg_atomic_init_u32(&pds->ntasks_running, 0);
+	pds->ntasks_running = 0;
+	pds->is_dereferenced = false;
+
 	return pds;
 }
 

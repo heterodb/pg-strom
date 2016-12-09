@@ -51,7 +51,11 @@
 typedef struct
 {
 	kern_errorbuf	kerror;				/* kernel error information */
-	cl_uint			reduction_mode;		/* one of GPUPREAGG_* above */
+	cl_ushort		reduction_mode;		/* one of GPUPREAGG_* above */
+	cl_bool			progress_reduction;	/* true, if moved to reduction stage */
+	cl_bool			progress_final;		/* true, if moved to final reduction,
+										 * thus pds_final might be updated
+										 * by the task. */
 	/* -- runtime statistics -- */
 	cl_uint			num_conflicts;		/* only used in kernel space */
 	cl_uint			num_groups;			/* out: # of new groups */
@@ -1694,6 +1698,12 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 	else if (kgpreagg->kerror.errcode != StromError_Success)
 		return;
 
+	/*
+	 * MEMO: Informs to the host code the initial projection was
+	 * successfully done. It means the maximum available rooms for
+	 * kds_slot / ghash are sufficient for this kds_in.
+	 */
+	kgpreagg->progress_reduction = true;
 	TIMEVAL_RECORD(kgpreagg,kern_prep,tv_start);
 
 	if (kgpreagg->reduction_mode == GPUPREAGG_NOGROUP_REDUCTION)
@@ -1959,6 +1969,13 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 		kresults_src->nrooms = kresults_nrooms;
 		kresults_src->all_visible = true;
 	}
+
+	/*
+	 * MEMO: Informs to the host code this GPU kernel moved to the final
+	 * reduction stage, thus, PDS_final might be updated. It means we
+	 * cannot recover the CpuReCheck error once we moved across this point.
+	 */
+	kgpreagg->progress_final = true;
 
 	/* Launch:
 	 * KERNEL_FUNCTION(void)
