@@ -2399,88 +2399,39 @@ static TupleTableSlot *
 gpuscan_next_tuple_fallback(GpuScanState *gss, GpuScanTask *gscan)
 {
 	pgstrom_data_store *pds_src = gscan->pds_src;
+	ExprContext		   *econtext = gss->gts.css.ss.ps.ps_ExprContext;
 	TupleTableSlot	   *slot = NULL;
-	ExprContext		   *econtext;
 	ExprDoneCond		is_done;
 
-	while (gss->gts.curr_index < pds_src->kds.nitems)
+retry_next:
+	ExecClearTuple(gss->base_slot);
+	if (!PDS_fetch_tuple(gss->base_slot, pds_src, &gss->gts))
+		return NULL;
+
+	ResetExprContext(econtext);
+	econtext->ecxt_scantuple = gss->base_slot;
+
+	/*
+	 * (1) - Evaluation of dev_quals if any
+	 */
+	if (gss->dev_quals != NIL)
 	{
-		ExecClearTuple(gss->base_slot);
+		if (!ExecQual(gss->dev_quals, econtext, false))
+			goto retry_next;
+	}
 
-		if (pds_src->kds.format == KDS_FORMAT_ROW)
-		{
-			cl_uint		index = gss->gts.curr_index++;
-
-			if (!pgstrom_fetch_data_store(gss->base_slot, pds_src, index,
-										  &gss->scan_tuple))
-				elog(ERROR, "failed to fetch a record from pds");
-		}
-		else
-		{
-			HeapTuple	tuple = &gss->scan_tuple;
-			BlockNumber	block_nr;
-			PageHeader	hpage;
-			cl_uint		max_lp_index;
-			ItemId		lpp;
-
-			block_nr = KERN_DATA_STORE_BLOCK_BLCKNR(&pds_src->kds,
-													gss->gts.curr_index);
-			hpage = KERN_DATA_STORE_BLOCK_PGPAGE(&pds_src->kds,
-												 gss->gts.curr_index);
-			Assert(PageIsAllVisible(hpage));
-			max_lp_index = PageGetMaxOffsetNumber(hpage);
-			while (gss->gts.curr_lp_index < max_lp_index)
-			{
-				cl_uint		lp_index = gss->gts.curr_lp_index++;
-
-				lpp = &hpage->pd_linp[lp_index];
-				if (!ItemIdIsNormal(lpp))
-					continue;
-
-				tuple->t_len = ItemIdGetLength(lpp);
-				BlockIdSet(&tuple->t_self.ip_blkid, block_nr);
-				tuple->t_self.ip_posid = lp_index;
-				tuple->t_data = (HeapTupleHeader)((char *)hpage +
-												  ItemIdGetOffset(lpp));
-				ExecStoreTuple(tuple, gss->base_slot, InvalidBuffer, false);
-				break;
-			}
-
-			/* move to the next block if no rows any more */
-			if (gss->gts.curr_lp_index >= max_lp_index)
-			{
-				gss->gts.curr_index++;
-				gss->gts.curr_lp_index = 0;
-				continue;
-			}
-		}
-		econtext = gss->gts.css.ss.ps.ps_ExprContext;
-		ResetExprContext(econtext);
-		econtext->ecxt_scantuple = gss->base_slot;
-
-		/*
-		 * (1) - Evaluation of dev_quals if any
-		 */
-		if (gss->dev_quals != NIL)
-		{
-			if (!ExecQual(gss->dev_quals, econtext, false))
-				continue;
-		}
-
-		/*
-		 * (2) - Makes a projection if any
-		 */
-		if (!gss->base_proj)
-			slot = gss->base_slot;
-		else
-		{
-			slot = ExecProject(gss->base_proj, &is_done);
-			if (is_done == ExprMultipleResult)
-				gss->gts.css.ss.ps.ps_TupFromTlist = true;
-			else if (is_done != ExprEndResult)
-				gss->gts.css.ss.ps.ps_TupFromTlist = false;
-		}
-		break;
+	/*
+	 * (2) - Makes a projection if any
+	 */
+	if (!gss->base_proj)
+		slot = gss->base_slot;
+	else
+	{
+		slot = ExecProject(gss->base_proj, &is_done);
+		if (is_done == ExprMultipleResult)
+			gss->gts.css.ss.ps.ps_TupFromTlist = true;
+		else if (is_done != ExprEndResult)
+			gss->gts.css.ss.ps.ps_TupFromTlist = false;
 	}
 	return slot;
 }
@@ -2503,15 +2454,10 @@ gpuscan_next_tuple(GpuTaskState_v2 *gts)
 	{
 		pgstrom_data_store *pds_dst = gscan->pds_dst;
 
-		if (gss->gts.curr_index < pds_dst->kds.nitems)
-		{
-			slot = gss->gts.css.ss.ss_ScanTupleSlot;
-			ExecClearTuple(slot);
-			if (!pgstrom_fetch_data_store(slot, pds_dst,
-										  gss->gts.curr_index++,
-										  &gss->scan_tuple))
-				elog(ERROR, "failed to fetch a record from pds");
-		}
+		slot = gss->gts.css.ss.ss_ScanTupleSlot;
+		ExecClearTuple(slot);
+		if (!PDS_fetch_tuple(slot, pds_dst, &gss->gts))
+			slot = NULL;
 	}
 	else
 	{

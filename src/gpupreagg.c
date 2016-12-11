@@ -163,7 +163,7 @@ typedef struct
 } GpuPreAggState;
 
 /*
- * pgstrom_gpupreagg
+ * GpuPreAggTask
  *
  * Host side representation of kern_gpupreagg. It can perform as a message
  * object of PG-Strom, has key of OpenCL device program, a source row/column
@@ -174,9 +174,8 @@ typedef struct
 	GpuTask_v2			task;
 	GpuPreAggSharedState *gpa_sstate;
 	bool				with_nvme_strom;/* true, if NVMe-Strom */
-	bool				is_terminator;	/* true, if final gpupreagg task */
+	bool				is_last_task;	/* true, if last task */
 	bool				is_retry;		/* true, if task is retried */
-//	cl_uint				nrows_per_block;/* copy from NVMEScanState, if any */
 
 	/* CUDA resources */
 	CUdeviceptr			m_gpreagg;		/* kern_gpupreagg */
@@ -3056,7 +3055,7 @@ static GpuTask_v2 *
 gpupreagg_create_task(GpuPreAggState *gpas,
 					  pgstrom_data_store *pds_in,
 					  int file_desc,
-					  bool is_terminator)
+					  bool is_last_task)
 {
 	GpuContext_v2  *gcontext = gpas->gts.gcontext;
 	GpuPreAggTask  *gpreagg;
@@ -3088,7 +3087,7 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 	pgstromInitGpuTask(&gpas->gts, &gpreagg->task);
 	gpreagg->gpa_sstate = get_gpupreagg_shared_state(gpas->gpa_sstate);
 	gpreagg->with_nvme_strom = with_nvme_strom;
-	gpreagg->is_terminator = is_terminator;
+	gpreagg->is_last_task = is_last_task;
 	gpreagg->is_retry = false;
 	gpreagg->nitems_real = nitems_real;
 	gpreagg->pds_in = pds_in;
@@ -3141,7 +3140,7 @@ gpupreagg_next_task(GpuTaskState_v2 *gts)
 	GpuPreAggState	   *gpas = (GpuPreAggState *) gts;
 	pgstrom_data_store *pds = NULL;
 	int					filedesc = -1;
-	bool				is_terminator = false;
+	bool				is_last_task = false;
 	struct timeval		tv1, tv2;
 
 	PFMON_BEGIN(&gts->pfm, &tv1);
@@ -3156,7 +3155,7 @@ gpupreagg_next_task(GpuTaskState_v2 *gts)
 			gpas->outer_pds = NULL;
 		/* any more chunks expected? */
 		if (!gpas->outer_pds)
-			is_terminator = true;
+			is_last_task = true;
 	}
 	else
 	{
@@ -3196,17 +3195,19 @@ gpupreagg_next_task(GpuTaskState_v2 *gts)
 			}
 		}
 		if (!gpas->gts.scan_overflow)
-			is_terminator = true;
+			is_last_task = true;
 	}
 	PFMON_END(&gpas->gts.pfm, time_outer_load, &tv1, &tv2);
 
-	return gpupreagg_create_task(gpas, pds, filedesc, is_terminator);
+	return gpupreagg_create_task(gpas, pds, filedesc, is_last_task);
 }
 
 
 static void
 gpupreagg_ready_task(GpuTaskState_v2 *gts, GpuTask_v2 *gtask)
 {
+	// needs a feature to drop task?
+	// or, complete returns -1 to discard the task
 	
 }
 
@@ -3214,10 +3215,66 @@ static void
 gpupreagg_switch_task(GpuTaskState_v2 *gts, GpuTask_v2 *gtask)
 {}
 
+/*
+ * gpupreagg_next_tuple_fallback
+ */
+static TupleTableSlot *
+gpupreagg_next_tuple_fallback(GpuPreAggState *gpas, GpuPreAggTask *gpreagg)
+{
+	TupleTableSlot	   *slot = gpas->pseudo_slot;
+	ExprContext		   *econtext = gpas->gts.css.ss.ps.ps_ExprContext;
+	pgstrom_data_store *pds_in = gpreagg->pds_in;
+
+retry:
+	/* fetch a tuple from the data-store */
+	ExecClearTuple(slot);
+	if (!PDS_fetch_tuple(slot, pds_in, &gpas->gts))
+		return NULL;
+
+	/* filter out the tuple, if any outer quals */
+	if (gpas->outer_quals != NIL)
+	{
+		econtext->ecxt_scantuple = slot;
+		if (!ExecQual(gpas->outer_quals, econtext, false))
+			goto retry;
+	}
+
+	/* ok, makes projection from outer-scan to pseudo-tlist */
+	if (gpas->outer_proj)
+	{
+		ExprDoneCond	is_done;
+
+		slot = ExecProject(gpas->outer_proj, &is_done);
+		if (is_done == ExprEndResult)
+			goto retry;	/* really right? */
+	}
+	return slot;
+}
+
+/*
+ * gpupreagg_next_tuple
+ */
 static TupleTableSlot *
 gpupreagg_next_tuple(GpuTaskState_v2 *gts)
 {
-	return NULL;
+	GpuPreAggState	   *gpas = (GpuPreAggState *) gts;
+	GpuPreAggTask	   *gpreagg = (GpuPreAggTask *) gpas->gts.curr_task;
+	pgstrom_data_store *pds_final = gpreagg->pds_final;
+	TupleTableSlot	   *slot = NULL;
+	struct timeval		tv1, tv2;
+
+	PFMON_BEGIN(&gts->pfm, &tv1);
+	if (gpreagg->task.cpu_fallback)
+		slot = gpupreagg_next_tuple_fallback(gpas, gpreagg);
+	else if (gpas->gts.curr_index < pds_final->kds.nitems)
+	{
+		slot = gpas->pseudo_slot;
+		ExecClearTuple(slot);
+		PDS_fetch_tuple(slot, pds_final, &gpas->gts);
+	}
+	PFMON_END(&gts->pfm, time_materialize, &tv1, &tv2);
+
+	return slot;
 }
 
 
@@ -3252,8 +3309,13 @@ gpupreagg_setup_strategy(GpuPreAggTask *gpreagg, CUstream cuda_stream)
 	{
 		cl_double	real_ngroups;
 		cl_double	exec_ratio;
+		cl_double	num_tasks;
 
-		exec_ratio = (double)Min(gpa_sstate->n_tasks, 30) / 30.0;
+		num_tasks = (cl_double)(gpa_sstate->n_tasks_nogrp +
+								gpa_sstate->n_tasks_local +
+								gpa_sstate->n_tasks_global +
+								gpa_sstate->n_tasks_final);
+		exec_ratio = Min(num_tasks, 30.0) / 30.0;
 		real_ngroups = ((double)gpa_sstate->plan_ngroups * (1.0 - exec_ratio) +
 						(double)gpa_sstate->exec_ngroups * exec_ratio);
 		if (real_ngroups < devBaselineMaxThreadsPerBlock / 4)
@@ -3286,6 +3348,10 @@ gpupreagg_setup_strategy(GpuPreAggTask *gpreagg, CUstream cuda_stream)
 
 	/* also mark this pds_final is in use by kernel function */
 	gpreagg->pds_final->ntasks_running++;
+	/* the last task, so force to be dereferenced */
+	if (gpreagg->is_last_task)
+		gpreagg->pds_final->is_dereferenced = true;
+
 	SpinLockRelease(&gpa_sstate->lock);
 }
 
@@ -3293,7 +3359,6 @@ static bool
 gpupreagg_cleanup_strategy(GpuPreAggTask *gpreagg)
 {
 	GpuPreAggSharedState *gpa_sstate = gpreagg->gpa_sstate;
-	bool		is_terminator = false;
 
 	SpinLockAcquire(&gpa_sstate->lock);
 
@@ -3361,7 +3426,7 @@ gpupreagg_respond_task(CUstream stream, CUresult status, void *private)
 
 			SpinLockAcquire(&gpa_sstate->lock);
 			gpa_sstate->f_nitems += gpreagg->kern.num_groups;
-			gpa_sstate->f_extra_sz += gpreagg->kern.allocated;
+			gpa_sstate->f_extra_sz += gpreagg->kern.varlena_usage;
 
 			gpa_sstate->last_ngroups = gpa_sstate->exec_ngroups;
 			gpa_sstate->exec_ngroups = Max(gpa_sstate->exec_ngroups,
@@ -3399,10 +3464,10 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 {
 	GpuPreAggSharedState *gpa_sstate = gpreagg->gpa_sstate;
 	pgstrom_data_store *pds_in = gpreagg->pds_in;
-	pgstrom_data_store *pds_final = gpreagg->pds_final;
 	CUfunction	kern_main;
 	CUdeviceptr	devptr;
 	Size		length;
+	void	   *kern_args[6];
 	CUresult	rc;
 
 	/*
@@ -3411,12 +3476,6 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 	rc = cuModuleGetFunction(&kern_main,
 							 cuda_module,
 							 "gpupreagg_main");
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
-
-	rc = cuModuleGetFunction(&gpreagg->kern_fixvar,
-							 cuda_module,
-							 "gpupreagg_fixup_varlena");
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
 
@@ -3627,6 +3686,7 @@ gpupreagg_process_termination_task(GpuPreAggTask *gpreagg,
 	pgstrom_data_store *pds_final = gpreagg->pds_final;
 	CUfunction	kern_fixvar;
 	CUresult	rc;
+	Size		length;
 
 	PFMON_EVENT_CREATE(gpreagg, ev_kern_fixvar);
 	PFMON_EVENT_CREATE(gpreagg, ev_dma_recv_start);
@@ -3637,8 +3697,9 @@ gpupreagg_process_termination_task(GpuPreAggTask *gpreagg,
 	 */
 	if (pds_final->kds.has_notbyval)
 	{
-		size_t		grid_sz;
-		size_t		block_sz;
+		size_t		grid_size;
+		size_t		block_size;
+		void	   *kern_args[2];
 
 		/* kernel to fixup varlena/numeric */
 		rc = cuModuleGetFunction(&kern_fixvar,
@@ -3677,9 +3738,9 @@ gpupreagg_process_termination_task(GpuPreAggTask *gpreagg,
 		kern_args[1] = &gpreagg->m_kds_final;
 
 		rc = cuLaunchKernel(kern_fixvar,
-							grid_sz, 1, 1,
-							block_sz, 1, 1,
-							sizeof(kern_errorbuf) * block_sz,
+							grid_size, 1, 1,
+							block_size, 1, 1,
+							sizeof(kern_errorbuf) * block_size,
 							cuda_stream,
 							kern_args,
 							NULL);
@@ -3690,7 +3751,7 @@ gpupreagg_process_termination_task(GpuPreAggTask *gpreagg,
 		/*
 		 * DMA Recv of individual kern_gpupreagg
 		 */
-		CUDA_EVENT_RECORD(gpreagg, ev_dma_recv_start);
+		PFMON_EVENT_RECORD(gpreagg, ev_dma_recv_start, cuda_stream);
 
 		length = KERN_GPUPREAGG_DMARECV_LENGTH(&gpreagg->kern);
 		rc = cuMemcpyDtoHAsync(&gpreagg->kern,
@@ -3704,14 +3765,14 @@ gpupreagg_process_termination_task(GpuPreAggTask *gpreagg,
 	}
 	else
 	{
-		CUDA_EVENT_RECORD(gpreagg, ev_dma_recv_start);
+		PFMON_EVENT_RECORD(gpreagg, ev_dma_recv_start, cuda_stream);
 	}
 
 	/*
 	 * DMA Recv of the final result buffer
 	 */
 	length = pds_final->kds.length;
-	rc = cuMemcpyDtoHAsync(pds_final->kds,
+	rc = cuMemcpyDtoHAsync(&pds_final->kds,
 						   gpreagg->m_kds_final,
 						   length,
 						   cuda_stream);
@@ -3720,18 +3781,22 @@ gpupreagg_process_termination_task(GpuPreAggTask *gpreagg,
 	gpreagg->bytes_dma_recv += length;
 	gpreagg->num_dma_recv++;
 
-	CUDA_EVENT_RECORD(gpreagg, ev_dma_recv_stop);
+	PFMON_EVENT_RECORD(gpreagg, ev_dma_recv_stop, cuda_stream);
 
 	/*
 	 * Register the callback
 	 */
 	rc = cuStreamAddCallback(cuda_stream,
-							 gpupreagg_task_respond,
+							 gpupreagg_respond_task,
 							 gpreagg, 0);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "cuStreamAddCallback: %s", errorText(rc));
 
 	return true;
+
+out_of_resource:
+	gpupreagg_cleanup_cuda_resources(gpreagg);
+	return false;
 }
 
 /*
@@ -3869,13 +3934,12 @@ gpupreagg_complete_task(GpuTask_v2 *gtask)
 			/* detach pds_final */;
 		else if (gpreagg->task.kerror.errcode == StromError_Success)
 		{
-			/* go to the termination mode */;
-
-
+			/* go to the termination mode, then bring back the pds_final */
+			gpreagg->kern.reduction_mode = GPUPREAGG_ONLY_TERMINATION;
 			retval = 1;		/* enqueue the task pending list again */
 		}
 		else
-			/**/;
+			/* other errors */;
 	}
 	return retval;
 }
@@ -4464,7 +4528,7 @@ gpupreagg_next_chunk(GpuTaskState *gts)
 	if (gpas->gts.scan_done)
 		return NULL;
 
-	PERFMON_BEGIN(&gts->pfm, &tv1);
+	PFMON_BEGIN(&gts->pfm, &tv1);
 	if (gpas->gts.css.ss.ss_currentRelation)
 	{
 		/* Load a bunch of records at once on the first time */
@@ -4539,7 +4603,7 @@ gpupreagg_next_chunk(GpuTaskState *gts)
 		if (!gpas->outer_pds)
 			is_terminator = true;
 	}
-	PERFMON_END(&gts->pfm, time_outer_load, &tv1, &tv2);
+	PFMON_END(&gts->pfm, time_outer_load, &tv1, &tv2);
 
 	if (!pds)
 		return NULL;	/* no more tuples to read */
@@ -4591,97 +4655,7 @@ retry_segment:
 	return &gpreagg->task;
 }
 
-/*
- * gpupreagg_next_tuple_fallback - a fallback routine if GPU returned
- * StromError_CpuReCheck, to suggest the backend to handle request
- * by itself. A fallback process looks like construction of special
- * partial aggregations that consist of individual rows; so here is
- * no performance benefit once it happen.
- */
-static TupleTableSlot *
-gpupreagg_next_tuple_fallback(GpuPreAggState *gpas, gpupreagg_segment *segment)
-{
-	TupleTableSlot	   *slot = gpas->gts.css.ss.ss_ScanTupleSlot;
-	ExprContext		   *econtext = gpas->gts.css.ss.ps.ps_ExprContext;
-	pgstrom_data_store *pds;
-	cl_uint				row_index;
-	HeapTupleData		tuple;
 
-retry:
-	if (segment->idx_chunks == 0)
-		return NULL;
-	pds = segment->pds_src[segment->idx_chunks - 1];
-	Assert(pds != NULL);
-
-	row_index = gpas->gts.curr_index++;
-
-	/*
-     * Fetch a tuple from the data-store
-     */
-	ExecClearTuple(slot);
-	if (!pgstrom_fetch_data_store(slot, pds, row_index, &tuple))
-	{
-		PDS_release(pds);
-		segment->pds_src[segment->idx_chunks - 1] = NULL;
-		segment->idx_chunks--;
-		gpas->gts.curr_index = 0;
-		goto retry;
-	}
-	econtext->ecxt_scantuple = slot;
-
-	/*
-	 * Filter out the tuple, if any outer_quals
-	 */
-	if (gpas->outer_quals != NULL &&
-		!ExecQual(gpas->outer_quals, econtext, false))
-		goto retry;
-
-	/*
-	 * Projection from scan-tuple to result-tuple, if any
-	 */
-	if (gpas->gts.css.ss.ps.ps_ProjInfo != NULL)
-	{
-		ExprDoneCond	is_done;
-
-		slot = ExecProject(gpas->gts.css.ss.ps.ps_ProjInfo, &is_done);
-		if (is_done == ExprEndResult)
-			goto retry;
-	}
-	return slot;
-}
-
-static TupleTableSlot *
-gpupreagg_next_tuple(GpuTaskState *gts)
-{
-	GpuPreAggState	   *gpas = (GpuPreAggState *) gts;
-	pgstrom_gpupreagg  *gpreagg = (pgstrom_gpupreagg *) gpas->gts.curr_task;
-	gpupreagg_segment  *segment = gpreagg->segment;
-	pgstrom_data_store *pds_final = segment->pds_final;
-	kern_data_store	   *kds_final = pds_final->kds;
-	TupleTableSlot	   *slot = NULL;
-	HeapTupleData		tuple;
-	struct timeval		tv1, tv2;
-
-	Assert(gpreagg->is_terminator);
-
-	PERFMON_BEGIN(&gts->pfm, &tv1);
-	if (segment->needs_fallback)
-		slot = gpupreagg_next_tuple_fallback(gpas, segment);
-	else if (gpas->gts.curr_index < kds_final->nitems)
-	{
-		size_t		index = gpas->gts.curr_index++;
-
-		slot = gts->css.ss.ps.ps_ResultTupleSlot;
-		ExecClearTuple(slot);
-		if (!pgstrom_fetch_data_store(slot, pds_final, index, &tuple))
-		{
-			elog(NOTICE, "Bug? empty slot was specified by kern_resultbuf");
-			slot = NULL;
-		}
-	}
-	PERFMON_END(&gts->pfm, time_materialize, &tv1, &tv2);
-	return slot;
-}
 
 
 static void

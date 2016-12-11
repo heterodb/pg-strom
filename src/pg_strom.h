@@ -199,6 +199,7 @@ struct GpuTaskState_v2
 	 */
 	cl_long			curr_index;		/* current position on the curr_task */
 	cl_long			curr_lp_index;	/* index of LinePointer in a block */
+	HeapTupleData	curr_tuple;		/* internal use of PDS_fetch() */
 	struct GpuTask_v2 *curr_task;	/* a GpuTask currently processed */
 
 	/* callbacks used by gputasks.c */
@@ -589,10 +590,15 @@ extern bool pgstrom_fetch_data_store(TupleTableSlot *slot,
 									 pgstrom_data_store *pds,
 									 size_t row_index,
 									 HeapTuple tuple);
+/*
 extern bool kern_fetch_data_store(TupleTableSlot *slot,
 								  kern_data_store *kds,
 								  size_t row_index,
 								  HeapTuple tuple);
+*/
+extern bool PDS_fetch_tuple(TupleTableSlot *slot,
+							pgstrom_data_store *pds,
+							GpuTaskState_v2 *gts);
 extern pgstrom_data_store *PDS_retain(pgstrom_data_store *pds);
 extern void PDS_release(pgstrom_data_store *pds);
 extern pgstrom_data_store *PDS_expand_size(GpuContext_v2 *gcontext,

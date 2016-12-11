@@ -149,6 +149,7 @@ estimate_num_chunks(Path *pathnode)
 	return num_chunks;
 }
 
+#ifdef NOT_USED
 bool
 kern_fetch_data_store(TupleTableSlot *slot,
 					  kern_data_store *kds,
@@ -195,6 +196,15 @@ kern_fetch_data_store(TupleTableSlot *slot,
 		ExecStoreVirtualTuple(slot);
 		return true;
 	}
+	/* in case of KDS_FORMAT_BLOCK */
+	if (kds->format == KDS_FORMAT_BLOCK)
+	{
+		/* upper 16bits are block index */
+		/* lower 16bits are lineitem */
+
+
+
+	}
 	elog(ERROR, "Bug? unexpected data-store format: %d", kds->format);
 	return false;
 }
@@ -207,7 +217,132 @@ pgstrom_fetch_data_store(TupleTableSlot *slot,
 {
 	return kern_fetch_data_store(slot, &pds->kds, row_index, tuple);
 }
+#endif
 
+/*
+ * PDS_fetch_tuple - fetch a tuple from the PDS
+ */
+static inline bool
+KDS_fetch_tuple_row(TupleTableSlot *slot,
+					kern_data_store *kds,
+					GpuTaskState_v2 *gts)
+{
+	if (gts->curr_index < kds->nitems)
+	{
+		size_t			row_index = gts->curr_index++;
+		Relation		rel = gts->css.ss.ss_currentRelation;
+		kern_tupitem   *tup_item;
+		HeapTuple		tuple = &gts->curr_tuple;
+
+		tup_item = KERN_DATA_STORE_TUPITEM(kds, row_index);
+		ExecClearTuple(slot);
+		tuple->t_len  = tup_item->t_len;
+		tuple->t_self = tup_item->t_self;
+		tuple->t_tableOid = (rel ? RelationGetRelid(rel) : InvalidOid);
+		tuple->t_data = &tup_item->htup;
+
+		ExecStoreTuple(tuple, slot, InvalidBuffer, false);
+
+		return true;
+	}
+	return false;
+}
+
+static inline bool
+KDS_fetch_tuple_slot(TupleTableSlot *slot,
+					 kern_data_store *kds,
+					 GpuTaskState_v2 *gts)
+{
+	if (gts->curr_index < kds->nitems)
+	{
+		size_t	row_index = gts->curr_index++;
+		Datum  *tts_values = KERN_DATA_STORE_VALUES(kds, row_index);
+		bool   *tts_isnull = KERN_DATA_STORE_ISNULL(kds, row_index);
+		int		natts = slot->tts_tupleDescriptor->natts;
+
+		memcpy(slot->tts_values, tts_values, sizeof(Datum) * natts);
+		memcpy(slot->tts_isnull, tts_isnull, sizeof(bool) * natts);
+#ifdef NOT_USED
+		/*
+		 * XXX - pointer reference is better than memcpy from performance
+		 * perspectives, however, we need to ensure tts_values/tts_isnull
+		 * shall be restored when pgstrom-data-store is released.
+		 * It will be cause of complicated / invisible bugs.
+		 */
+		slot->tts_values = tts_values;
+		slot->tts_isnull = tts_isnull;
+#endif
+		ExecStoreVirtualTuple(slot);
+		return true;
+	}
+	return false;
+}
+
+static inline bool
+KDS_fetch_tuple_block(TupleTableSlot *slot,
+					  kern_data_store *kds,
+					  GpuTaskState_v2 *gts)
+{
+	Relation	rel = gts->css.ss.ss_currentRelation;
+	HeapTuple	tuple = &gts->curr_tuple;
+	BlockNumber	block_nr;
+	PageHeader	hpage;
+	cl_uint		max_lp_index;
+	ItemId		lpp;
+
+	while (gts->curr_index < kds->nitems)
+	{
+		block_nr = KERN_DATA_STORE_BLOCK_BLCKNR(kds, gts->curr_index);
+		hpage = KERN_DATA_STORE_BLOCK_PGPAGE(kds, gts->curr_index);
+		Assert(PageIsAllVisible(hpage));
+		max_lp_index = PageGetMaxOffsetNumber(hpage);
+		while (gts->curr_lp_index < max_lp_index)
+		{
+			cl_uint		lp_index = gts->curr_lp_index++;
+
+			lpp = &hpage->pd_linp[lp_index];
+			if (!ItemIdIsNormal(lpp))
+				continue;
+
+			tuple->t_len = ItemIdGetLength(lpp);
+			BlockIdSet(&tuple->t_self.ip_blkid, block_nr);
+			tuple->t_self.ip_posid = lp_index;
+			tuple->t_tableOid = (rel ? RelationGetRelid(rel) : InvalidOid);
+			tuple->t_data = (HeapTupleHeader)((char *)hpage +
+											  ItemIdGetOffset(lpp));
+			ExecStoreTuple(tuple, slot, InvalidBuffer, false);
+			return true;
+		}
+		/* move to the next block */
+		gts->curr_index++;
+		gts->curr_lp_index = 0;
+	}
+	return false;	/* end of the PDS */
+}
+
+bool
+PDS_fetch_tuple(TupleTableSlot *slot,
+				pgstrom_data_store *pds,
+				GpuTaskState_v2 *gts)
+{
+	switch (pds->kds.format)
+	{
+		case KDS_FORMAT_ROW:
+		case KDS_FORMAT_HASH:
+			return KDS_fetch_tuple_row(slot, &pds->kds, gts);
+		case KDS_FORMAT_SLOT:
+			return KDS_fetch_tuple_slot(slot, &pds->kds, gts);
+		case KDS_FORMAT_BLOCK:
+			return KDS_fetch_tuple_block(slot, &pds->kds, gts);
+		default:
+			elog(ERROR, "Bug? unsupported data store format: %d",
+				pds->kds.format);
+	}
+}
+
+/*
+ * PDS_retain
+ */
 pgstrom_data_store *
 PDS_retain(pgstrom_data_store *pds)
 {
@@ -220,6 +355,9 @@ PDS_retain(pgstrom_data_store *pds)
 	return pds;
 }
 
+/*
+ * PDS_release
+ */
 void
 PDS_release(pgstrom_data_store *pds)
 {

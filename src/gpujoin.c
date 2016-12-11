@@ -4638,7 +4638,6 @@ gpujoin_next_tuple(GpuTaskState_v2 *gts)
 	TupleTableSlot	   *slot = gjs->gts.css.ss.ss_ScanTupleSlot;
 	pgstrom_gpujoin	   *pgjoin = (pgstrom_gpujoin *)gjs->gts.curr_task;
 	pgstrom_data_store *pds_dst = pgjoin->pds_dst;
-	kern_data_store	   *kds_dst = &pds_dst->kds;
 	struct timeval		tv1, tv2;
 
 	PFMON_BEGIN(&gjs->gts.pfm, &tv1);
@@ -4653,22 +4652,13 @@ gpujoin_next_tuple(GpuTaskState_v2 *gts)
 		 */
 		slot = gpujoin_next_tuple_fallback(gjs, pgjoin);
 	}
-	else if (gjs->gts.curr_index < kds_dst->nitems)
-	{
-		int		index = gjs->gts.curr_index++;
-
-		/* fetch a result tuple */
-		ExecClearTuple(slot);
-		pgstrom_fetch_data_store(slot,
-								 pds_dst,
-								 index,
-								 &gjs->curr_tuple);
-	}
 	else
 	{
-		slot = NULL;	/* try next chunk */
+		/* fetch a result tuple */
+		ExecClearTuple(slot);
+		if (!PDS_fetch_tuple(slot, pds_dst, &gjs->gts))
+			slot = NULL;
 	}
-
 #if 0
 	/*
 	 * MEMO: If GpuJoin generates a corrupted tuple, it may lead crash on
