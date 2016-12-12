@@ -449,7 +449,7 @@ extern void gpuservTryToWakeUp(void);
 extern void gpuservOpenConnection(GpuContext_v2 *gcontext);
 extern bool gpuservSendGpuTask(GpuContext_v2 *gcontext, GpuTask_v2 *gtask);
 extern bool gpuservRecvGpuTasks(GpuContext_v2 *gcontext, long timeout);
-//extern void gpuservPushGpuTask(GpuContext_v2 *gcontext, GpuTask_v2 *gtask);
+extern void gpuservPushGpuTask(GpuContext_v2 *gcontext, GpuTask_v2 *gtask);
 extern void gpuservCompleteGpuTask(GpuTask_v2 *gtask, bool is_urgent);
 
 extern void pgstrom_init_gpu_server(void);

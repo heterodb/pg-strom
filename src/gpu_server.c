@@ -1369,7 +1369,6 @@ gpuservRecvGpuTasks(GpuContext_v2 *gcontext, long timeout)
 	return false;
 }
 
-#if 0
 /*
  * gpuservPushGpuTask - attach a GpuTask to the queue by GPU server itself
  */
@@ -1386,13 +1385,13 @@ gpuservPushGpuTask(GpuContext_v2 *gcontext, GpuTask_v2 *gtask)
 	SpinLockRelease(&shgcon->lock);
 	/* increment refcnt by GpuTask */
 	gtask->gcontext = GetGpuContext(gcontext);
-	//TODO: How to handle the peer_fdesc? dup(2)?
+	/* TODO: How to handle peer_fdesc if any? */
+	Assert(gtask->peer_fdesc < 0);
 
 	SpinLockAcquire(&session_tasks_lock);
 	dlist_push_tail(&session_pending_tasks, &gtask->chain);
 	SpinLockRelease(&session_tasks_lock);
 }
-#endif
 
 /*
  * gpuservCompleteGpuTask - A routine for CUDA callback to register GpuTask

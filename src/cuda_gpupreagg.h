@@ -57,6 +57,7 @@ typedef struct
 										 * thus pds_final might be updated
 										 * by the task. */
 	/* -- runtime statistics -- */
+	cl_uint			nitems_real;		/* out: # of outer nrows */
 	cl_uint			num_conflicts;		/* only used in kernel space */
 	cl_uint			num_groups;			/* out: # of new groups */
 	cl_uint			varlena_usage;		/* out: size of varlena usage */
