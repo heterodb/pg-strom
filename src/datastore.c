@@ -655,6 +655,41 @@ PDS_create_slot(GpuContext_v2 *gcontext,
 }
 
 pgstrom_data_store *
+PDS_duplicate_slot(GpuContext_v2 *gcontext,
+				   kern_data_store *kds_head,
+				   cl_uint nrooms,
+				   cl_uint extra_unitsz)
+{
+	pgstrom_data_store *pds;
+	size_t			required;
+
+	required = (STROMALIGN(offsetof(kern_data_store,
+									colmeta[kds_head->ncols])) +
+				STROMALIGN((sizeof(Datum) + sizeof(char)) *
+						   kds_head->ncols) * nrooms +
+				STROMALIGN(extra_unitsz) * nrooms);
+
+	pds = dmaBufferAlloc(gcontext, offsetof(pgstrom_data_store,
+											kds) + required);
+	/* owned by the caller at least */
+	pg_atomic_init_u32(&pds->refcnt, 1);
+	pds->ntasks_running = 0;
+	pds->is_dereferenced = false;
+
+	/* setup KDS using the template */
+	memcpy(&pds->kds, kds_head,
+		   offsetof(kern_data_store,
+					colmeta[kds_head->ncols]));
+	pds->kds.hostptr = (hostptr_t)&pds->kds.hostptr;
+	pds->kds.length  = required;
+	pds->kds.usage   = 0;
+	pds->kds.nrooms  = nrooms;
+	pds->kds.nitems  = 0;
+
+	return pds;
+}
+
+pgstrom_data_store *
 PDS_create_hash(GpuContext_v2 *gcontext,
 				TupleDesc tupdesc,
 				Size length)

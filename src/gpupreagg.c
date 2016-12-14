@@ -128,8 +128,9 @@ typedef struct
 	CUdeviceptr			m_kds_final;/* final kernel data store (slot) */
 	CUdeviceptr			m_fhash;	/* final global hash slot */
 	CUevent				ev_kds_final;/* sync object for kds_final buffer */
-	cl_uint				f_ncols;	/* @ncols of kds_final (constant) */
-	cl_uint				f_nrooms;	/* @nrooms of kds_final (constant) */
+	cl_uint				f_key_dist_salt; /* current key_dist_salt setting */
+	cl_uint				f_ncols;	/* @nroms of kds_final (constant) */
+	cl_uint				f_nrooms;	/* @nrooms of the current kds_final */
 	cl_uint				f_nitems;	/* latest nitems of kds_final on device */
 	cl_uint				f_extra_sz;	/* latest usage of kds_final on device */
 
@@ -138,11 +139,12 @@ typedef struct
 	cl_uint				n_tasks_local;	/* num of local reduction tasks */
 	cl_uint				n_tasks_global;	/* num of global reduction tasks */
 	cl_uint				n_tasks_final;	/* num of final reduction tasks */
-	cl_uint				plan_ngroups;	/* num of groups planned */
-	cl_uint				exec_ngroups;	/* num of groups actually */
-	cl_uint				last_ngroups;	/* num of groups last time */
-	cl_uint				exec_extra_sz;	/* size of varlena actually */
-	cl_uint				last_extra_sz;	/* size of varlena last time */
+	size_t				plan_nrows_in;	/* num of outer nrows planned */
+	size_t				exec_nrows_in;	/* num of outer nrows actually */
+	size_t				plan_ngroups;	/* num of groups planned */
+	size_t				exec_ngroups;	/* num of groups actually */
+	size_t				plan_extra_sz;	/* size of varlena planned */
+	size_t				exec_extra_sz;	/* size of varlena actually */
 } GpuPreAggSharedState;
 
 typedef struct
@@ -2940,47 +2942,23 @@ create_gpupreagg_shared_state(GpuPreAggState *gpas, TupleDesc tupdesc)
 {
 	GpuContext_v2  *gcontext = gpas->gts.gcontext;
 	GpuPreAggSharedState   *gpa_sstate;
-	cl_uint			nrooms;
-	Size			head_sz;
-	Size			unit_sz;
-	Size			length;
 
 	Assert(tupdesc->natts > 0);
-	/* expected number of groups + safety margin */
-	nrooms = (cl_uint)(gpas->plan_ngroups * 2.5 + 200.0);
-	head_sz = (STROMALIGN(offsetof(kern_data_store,
-								   colmeta[tupdesc->natts])));
-	unit_sz = (STROMALIGN(LONGALIGN((sizeof(Datum) + sizeof(char)))) +
-			   STROMALIGN(gpas->plan_extra_sz));
-	length = head_sz + unit_sz * nrooms;
-
-	/*
-	 * Expand nrooms if length of kds_final is expected small, because
-	 * planner tends to estimate # of groups smaller than actual.
-	 */
-	if (length < pgstrom_chunk_size() / 2)
-		nrooms = (pgstrom_chunk_size() - head_sz) / unit_sz;
-	else if (length < pgstrom_chunk_size())
-		nrooms = (2 * pgstrom_chunk_size() - head_sz) / unit_sz;
-	else if (length < 3 * pgstrom_chunk_size())
-		nrooms = (3 * pgstrom_chunk_size() - head_sz) / unit_sz;
-
 	gpa_sstate = dmaBufferAlloc(gcontext, sizeof(GpuPreAggSharedState));
 	memset(gpa_sstate, 0, sizeof(GpuPreAggSharedState));
 	pg_atomic_init_u32(&gpa_sstate->refcnt, 1);
 	SpinLockInit(&gpa_sstate->lock);
-	gpa_sstate->pds_final = PDS_create_slot(gcontext,
-											tupdesc,
-											nrooms,
-											gpas->plan_extra_sz,
-											true);
-	gpa_sstate->m_fhash = 0UL;
-	gpa_sstate->m_kds_final = 0UL;
-	gpa_sstate->ev_kds_final = NULL;
+	gpa_sstate->pds_final = NULL;		/* creation on demand */
+	gpa_sstate->m_fhash = 0UL;			/* creation on demand */
+	gpa_sstate->m_kds_final = 0UL;		/* creation on demand */
+	gpa_sstate->ev_kds_final = NULL;	/* creation on demand */
+	gpa_sstate->f_key_dist_salt = gpas->key_dist_salt;
 	gpa_sstate->f_ncols = tupdesc->natts;
-	gpa_sstate->f_nrooms = nrooms;
+	gpa_sstate->f_nrooms = 0;
 	gpa_sstate->f_nitems = 0;
 	gpa_sstate->f_extra_sz = 0;
+	gpa_sstate->plan_ngroups = gpas->plan_ngroups;
+	gpa_sstate->plan_extra_sz = gpas->plan_extra_sz;
 
 	return gpa_sstate;
 }
@@ -3069,7 +3047,7 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 	kds_len = STROMALIGN(offsetof(kern_data_store,
 								  colmeta[tupdesc->natts]));
 	gpreagg = dmaBufferAlloc(gcontext, head_sz + kds_len);
-	memset(gpreagg, 0, head_sz);
+	memset(gpreagg, 0, offsetof(GpuPreAggTask, kern.kparams));
 
 	pgstromInitGpuTask(&gpas->gts, &gpreagg->task);
 	gpreagg->gpa_sstate = get_gpupreagg_shared_state(gpas->gpa_sstate);
@@ -3264,26 +3242,110 @@ gpupreagg_next_tuple(GpuTaskState_v2 *gts)
 	return slot;
 }
 
+/*
+ * adjust_final_buffer_size
+ *
+ * It calculates @nrooms/@extra_sz of the pds_final buffer to be allocated,
+ * according to the run-time statistics or plan estimation if no statistics.
+ *
+ * NOTE: This function shall be called under the @gpa_sstate->lock
+ */
+static void
+adjust_final_buffer_size(GpuPreAggSharedState *gpa_sstate,
+						 size_t *p_key_dist_salt,
+						 size_t *p_nrooms,
+						 size_t *p_extra_sz,
+						 size_t *p_hashsize)
+{
+	size_t		curr_ngroups;
+	size_t		curr_nrows_in;
+	size_t		head_sz;
+	size_t		unit_sz;
+	size_t		length;
+	size_t		f_key_dist_salt;
+	size_t		f_nrooms;
+	size_t		f_extra_sz;
+	double		alpha;
 
+	/*
+	 * If we have no run-time statistics, all we can do is relying on
+	 * the plan time estimation.
+	 * Elsewhere, we assume number of groups grows up according to:
+	 *   (ngroups) = A * ln(nrows_in)
+	 * We can determine "A" by the statistics, 
+	 */
+	if (gpa_sstate->exec_nrows_in < 1000)
+		curr_ngroups = gpa_sstate->plan_ngroups;
+	else
+	{
+		alpha = ((double)gpa_sstate->exec_ngroups
+		   / log((double)gpa_sstate->exec_nrows_in));
+
+		if (gpa_sstate->exec_nrows_in < gpa_sstate->plan_nrows_in / 2)
+			curr_nrows_in = gpa_sstate->plan_nrows_in;
+		else
+			curr_nrows_in = 2 * gpa_sstate->exec_nrows_in;
+
+		curr_ngroups = (size_t)(alpha * log((double)curr_nrows_in));
+	}
+
+	/* determine the unit size of extra buffer */
+	if (gpa_sstate->exec_ngroups < 100)
+		f_extra_sz = gpa_sstate->plan_extra_sz;
+	else
+	{
+		f_extra_sz = (gpa_sstate->exec_extra_sz +
+					  gpa_sstate->exec_ngroups - 1) / gpa_sstate->exec_ngroups;
+		f_extra_sz = Max(f_extra_sz, gpa_sstate->plan_extra_sz);
+	}
+
+	/* update key_dist_salt */
+	if (curr_ngroups < (devBaselineMaxThreadsPerBlock / 5))
+	{
+		f_key_dist_salt = devBaselineMaxThreadsPerBlock / (5 * curr_ngroups);
+		f_key_dist_salt = Max(f_key_dist_salt, 1);
+	}
+	else
+		f_key_dist_salt = 1;
+
+	/* f_nrooms will have 250% of the nrooms for the estimated ngroups */
+	f_nrooms = (double)(curr_ngroups * f_key_dist_salt) * 2.5 + 200.0;
+	head_sz = KDS_CALCULATE_HEAD_LENGTH(gpa_sstate->f_ncols);
+	unit_sz = (STROMALIGN((sizeof(Datum) +
+						   sizeof(char)) * gpa_sstate->f_ncols) +
+			   STROMALIGN(f_extra_sz));
+	length = head_sz + unit_sz * f_nrooms;
+
+	/*
+	 * Expand nrooms if estimated length of the kds_final is small,
+	 * because planner may estimate the number groups smaller than actual.
+	 */
+	if (length < pgstrom_chunk_size() / 2)
+		f_nrooms = (pgstrom_chunk_size() - head_sz) / unit_sz;
+	else if (length < pgstrom_chunk_size())
+		f_nrooms = (2 * pgstrom_chunk_size() - head_sz) / unit_sz;
+	else if (length < 3 * pgstrom_chunk_size())
+		f_nrooms = (3 * pgstrom_chunk_size() - head_sz) / unit_sz;
+
+	*p_key_dist_salt = f_key_dist_salt;
+	*p_nrooms = f_nrooms;
+	*p_extra_sz = f_extra_sz;
+	*p_hashsize = 2 * f_nrooms;
+}
 
 /*
- * gpupreagg_setup_strategy
+ * gpupreagg_alloc_final_buffer
  *
- * It determines the strategy to run GpuPreAgg kernel according to the run-
- * time statistics.
- * Number of groups is the most important decision. If estimated number of
- * group is larger than the maximum block size, local reduction makes no
- * sense. If too small, final reduction without local/global reduction will
- * lead massive amount of atomic contention.
- * In addition, this function switches the @pds_final buffer if remaining
- * space is not sufficient to hold the groups appear.
+ * It allocates the @pds_final buffer on demand.
+ *
+ * NOTE: This function shall be called under the @gpa_sstate->lock
  */
 static bool
-__gpupreagg_setup_strategy(GpuPreAggTask *gpreagg,
-						   CUmodule cuda_module,
-						   CUstream cuda_stream)
+gpupreagg_alloc_final_buffer(GpuPreAggTask *gpreagg,
+							 CUmodule cuda_module,
+							 CUstream cuda_stream)
 {
-//	GpuPreAggSharedState   *gpa_sstate = gpreagg->gpa_sstate;
+	GpuPreAggSharedState   *gpa_sstate = gpreagg->gpa_sstate;
 	kern_data_store		   *kds_head = gpreagg->kds_head;
 	pgstrom_data_store	   *pds_final = NULL;
 	CUdeviceptr				m_kds_final = 0UL;
@@ -3296,38 +3358,28 @@ __gpupreagg_setup_strategy(GpuPreAggTask *gpreagg,
 
 	PG_TRY();
 	{
-		//cl_uint		f_nrooms; how to determine the best?
-		//cl_uint		f_extra_sz; how to determine the best?
-		//cl_uint		f_hashsz;
-		Size		required;
+		size_t		f_key_dist_salt;
+		size_t		f_nrooms;
+		size_t		f_extra_sz;
+		size_t		f_hashsize;
+		size_t		required;
 		size_t		grid_size;
 		size_t		block_size;
 
-		required = (STROMALIGN(offsetof(kern_data_store,
-										colmeta[kds_head->ncols])) +
-					STROMALIGN(LONGALIGN((sizeof(Datum) + sizeof(char)) *
-										 kds_head->ncols) * f_nrooms) +
-					STROMALIGN(extra_length));
-		pds_final = dmaBufferAlloc(gpreagg->task.gcontext,
-								   offsetof(pgstrom_data_store,
-											kds) + required);
-		pg_atomic_init_u32(&pds_final->refcnt, 1);
-		pds_final->nblocks_uncached = 0;
-		pds_final->ntasks_running   = 1;
-		pds_final->is_dereferenced  = false;
-		memcpy(&pds_final->kds, kds_head,
-			   offsetof(kern_data_store, colmeta[kds_head->ncols]));
-		pds_final->kds.hostptr = (hostptr_t)&pds_final->kds.hostptr;
-		pds_final->kds.length = required;
-		pds_final->kds.usage  = 0;
-		pds_final->kds.nrooms = f_nrooms;
-		pds_final->kds.nitems = 0;
-
+		adjust_final_buffer_size(gpa_sstate,
+								 &f_key_dist_salt,
+								 &f_nrooms,
+								 &f_extra_sz,
+								 &f_hashsize);
+		pds_final = PDS_duplicate_slot(gpreagg->task.gcontext,
+									   kds_head,
+									   f_nrooms,
+									   f_extra_sz);
 		/* allocation of device memory */
 		required = (GPUMEMALIGN(pds_final->kds.length) +
 					GPUMEMALIGN(offsetof(kern_global_hashslot,
 										 hash_slot[f_hashsize])));
-		rc = gpuMemAlloc_v2(gpreagg->task.context,
+		rc = gpuMemAlloc_v2(gpreagg->task.gcontext,
 							&m_kds_final,
 							required);
 		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
@@ -3387,10 +3439,14 @@ __gpupreagg_setup_strategy(GpuPreAggTask *gpreagg,
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuStreamWaitEvent: %s", errorText(rc));
 
-		gpreagg->pds_final = pds_final;
-		gpreagg->m_kds_final = m_kds_final;
-		gpreagg->m_fhash = m_fhash;
-		gpreagg->ev_kds_final = ev_kds_final;
+		gpa_sstate->pds_final = pds_final;
+		gpa_sstate->m_kds_final = m_kds_final;
+		gpa_sstate->m_fhash = m_fhash;
+		gpa_sstate->ev_kds_final = ev_kds_final;
+		gpa_sstate->f_key_dist_salt = f_key_dist_salt;
+		gpa_sstate->f_nrooms = pds_final->kds.nrooms;
+		gpa_sstate->f_nitems = 0;
+		gpa_sstate->f_extra_sz = 0;
 	bailout:
 		;
 	}
@@ -3423,10 +3479,24 @@ __gpupreagg_setup_strategy(GpuPreAggTask *gpreagg,
 	return retval;
 }
 
+/*
+ * gpupreagg_get_strategy
+ *
+ * It determines the strategy to run GpuPreAgg kernel according to the run-
+ * time statistics.
+ * Number of groups is the most important decision. If estimated number of
+ * group is larger than the maximum block size, local reduction makes no
+ * sense. If too small, final reduction without local/global reduction will
+ * lead massive amount of atomic contention.
+ * In addition, this function switches the @pds_final buffer if remaining
+ * space is not sufficient to hold the groups appear.
+ *
+ * NOTE: This function shall be called under the @gpa_sstate->lock
+ */
 static bool
-gpupreagg_setup_strategy(GpuPreAggTask *gpreagg,
-						 CUmodule cuda_module,
-						 CUstream cuda_stream)
+gpupreagg_get_strategy(GpuPreAggTask *gpreagg,
+					   CUmodule cuda_module,
+					   CUstream cuda_stream)
 {
 	GpuPreAggSharedState   *gpa_sstate = gpreagg->gpa_sstate;
 	pgstrom_data_store	   *pds_in = gpreagg->pds_in;
@@ -3436,55 +3506,54 @@ gpupreagg_setup_strategy(GpuPreAggTask *gpreagg,
 	Assert(pds_in->kds.format == KDS_FORMAT_ROW ||
 		   pds_in->kds.format == KDS_FORMAT_BLOCK);
 	SpinLockAcquire(&gpa_sstate->lock);
-	//TODO: hash_size / key_dist_salt shall be updated also
-
-	/* decision for the reduction mode */
-	if (gpreagg->kern.reduction_mode == GPUPREAGG_INVALID_REDUCTION)
-	{
-		cl_double	plan_ngroups = (double)gpa_sstate->plan_ngroups;
-		cl_double	exec_ngroups = (double)gpa_sstate->exec_ngroups;
-		cl_double	real_ngroups;
-		cl_double	exec_ratio;
-		cl_double	num_tasks;
-
-		num_tasks = (cl_double)(gpa_sstate->n_tasks_nogrp +
-								gpa_sstate->n_tasks_local +
-								gpa_sstate->n_tasks_global +
-								gpa_sstate->n_tasks_final);
-		exec_ratio = Min(num_tasks, 30.0) / 30.0;
-		real_ngroups = (plan_ngroups * (1.0 - exec_ratio) +
-						exec_ngroups * exec_ratio);
-		if (real_ngroups < devBaselineMaxThreadsPerBlock / 4)
-			gpreagg->kern.reduction_mode = GPUPREAGG_LOCAL_REDUCTION;
-		else if (real_ngroups < gpreagg->kern.nitems_real / 4)
-			gpreagg->kern.reduction_mode = GPUPREAGG_GLOBAL_REDUCTION;
-		else
-			gpreagg->kern.reduction_mode = GPUPREAGG_FINAL_REDUCTION;
-	}
-	else
-	{
-		Assert(gpreagg->kern.reduction_mode == GPUPREAGG_NOGROUP_REDUCTION);
-	}
-
-	/* attach pds_final and relevant CUDA resources */
 	PG_TRY();
 	{
+		/* decision for the reduction mode */
+		if (gpreagg->kern.reduction_mode == GPUPREAGG_INVALID_REDUCTION)
+		{
+			cl_double	plan_ngroups = (double)gpa_sstate->plan_ngroups;
+			cl_double	exec_ngroups = (double)gpa_sstate->exec_ngroups;
+			cl_double	real_ngroups;
+			cl_double	exec_ratio;
+			cl_double	num_tasks;
+
+			num_tasks = (cl_double)(gpa_sstate->n_tasks_nogrp +
+									gpa_sstate->n_tasks_local +
+									gpa_sstate->n_tasks_global +
+									gpa_sstate->n_tasks_final);
+			exec_ratio = Min(num_tasks, 30.0) / 30.0;
+			real_ngroups = (plan_ngroups * (1.0 - exec_ratio) +
+							exec_ngroups * exec_ratio);
+			if (real_ngroups < devBaselineMaxThreadsPerBlock / 4)
+				gpreagg->kern.reduction_mode = GPUPREAGG_LOCAL_REDUCTION;
+			else if (real_ngroups < gpreagg->kern.nitems_real / 4)
+				gpreagg->kern.reduction_mode = GPUPREAGG_GLOBAL_REDUCTION;
+			else
+				gpreagg->kern.reduction_mode = GPUPREAGG_FINAL_REDUCTION;
+		}
+		else
+		{
+			Assert(gpreagg->kern.reduction_mode==GPUPREAGG_NOGROUP_REDUCTION);
+		}
+		/* attach pds_final and relevant CUDA resources */
 		if (!gpa_sstate->pds_final)
-			retval = __gpupreagg_setup_strategy(gpreagg,
-												cuda_module,
-												cuda_stream);
+		{
+			retval = gpupreagg_alloc_final_buffer(gpreagg,
+												  cuda_module,
+												  cuda_stream);
+		}
 		else
 		{
 			rc = cuStreamWaitEvent(cuda_stream, gpa_sstate->ev_kds_final, 0);
 			if (rc != CUDA_SUCCESS)
 				elog(ERROR, "failed on cuStreamWaitEvent: %s", errorText(rc));
-
-			gpreagg->pds_final    = PDS_retain(gpa_sstate->pds_final);
-			gpreagg->pds_final->ntasks_running++;
-			gpreagg->m_fhash      = gpa_sstate->m_fhash;
-			gpreagg->m_kds_final  = gpa_sstate->m_kds_final;
-			gpreagg->ev_kds_final = gpa_sstate->ev_kds_final;
 		}
+		gpreagg->pds_final    = PDS_retain(gpa_sstate->pds_final);
+		gpreagg->pds_final->ntasks_running++;
+		gpreagg->m_fhash      = gpa_sstate->m_fhash;
+		gpreagg->m_kds_final  = gpa_sstate->m_kds_final;
+		gpreagg->ev_kds_final = gpa_sstate->ev_kds_final;
+		gpreagg->kern.key_dist_salt = gpa_sstate->f_key_dist_salt;
 	}
 	PG_CATCH();
 	{
@@ -3581,11 +3650,9 @@ gpupreagg_respond_task(CUstream stream, CUresult status, void *private)
 			SpinLockAcquire(&gpa_sstate->lock);
 			gpa_sstate->f_nitems += gpreagg->kern.num_groups;
 			gpa_sstate->f_extra_sz += gpreagg->kern.varlena_usage;
-
-			gpa_sstate->last_ngroups = gpa_sstate->exec_ngroups;
+			gpa_sstate->exec_nrows_in += gpreagg->kern.nitems_real;
 			gpa_sstate->exec_ngroups = Max(gpa_sstate->exec_ngroups,
 										   gpa_sstate->f_nitems);
-			gpa_sstate->last_extra_sz = gpa_sstate->exec_extra_sz;
 			gpa_sstate->exec_extra_sz = Max(gpa_sstate->exec_extra_sz,
 											gpa_sstate->f_extra_sz);
 			SpinLockRelease(&gpa_sstate->lock);
@@ -3623,6 +3690,12 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 	Size		length;
 	void	   *kern_args[6];
 	CUresult	rc;
+
+	/*
+	 * Get GpuPreAgg execution strategy
+	 */
+	if (!gpupreagg_get_strategy(gpreagg, cuda_module, cuda_stream))
+		return 1;	/* retry later */
 
 	/*
 	 * Lookup kernel functions
@@ -3816,11 +3889,11 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 							 gpreagg, 0);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "cuStreamAddCallback: %s", errorText(rc));
-	return true;
+	return 0;
 
 out_of_resource:
 	gpupreagg_cleanup_cuda_resources(gpreagg);
-	return false;
+	return 1;	/* retry later */
 }
 
 /*
@@ -3940,11 +4013,11 @@ gpupreagg_process_termination_task(GpuPreAggTask *gpreagg,
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "cuStreamAddCallback: %s", errorText(rc));
 
-	return true;
+	return 0;
 
 out_of_resource:
 	gpupreagg_cleanup_cuda_resources(gpreagg);
-	return false;
+	return 1;	/* retry later */
 }
 
 /*
@@ -3962,9 +4035,6 @@ gpupreagg_process_task(GpuTask_v2 *gtask,
 	{
 		if (gpreagg->kern.reduction_mode != GPUPREAGG_ONLY_TERMINATION)
 		{
-			gpupreagg_setup_strategy(gpreagg,
-									 cuda_module,
-									 cuda_stream);
 			retval = gpupreagg_process_reduction_task(gpreagg,
 													  cuda_module,
 													  cuda_stream);

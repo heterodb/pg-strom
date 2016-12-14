@@ -620,6 +620,10 @@ extern pgstrom_data_store *PDS_create_slot(GpuContext_v2 *gcontext,
 										   cl_uint nrooms,
 										   Size extra_length,
 										   bool use_internal);
+extern pgstrom_data_store *PDS_duplicate_slot(GpuContext_v2 *gcontext,
+											  kern_data_store *kds_head,
+											  cl_uint nrooms,
+											  cl_uint extra_unitsz);
 extern pgstrom_data_store *PDS_create_hash(GpuContext_v2 *gcontext,
 										   TupleDesc tupdesc,
 										   Size length);
