@@ -531,7 +531,7 @@ gpupreagg_preparation(kern_gpupreagg *kgpreagg,
 	assert(kds_src->format == KDS_FORMAT_SLOT);
 
 	/* init global hash slot */
-	hash_size = kgpreagg->hash_size;;
+	hash_size = kgpreagg->hash_size;
 	if (get_global_id() == 0)
 	{
 		g_hash->hash_usage = 0;
