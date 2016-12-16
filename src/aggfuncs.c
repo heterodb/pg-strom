@@ -29,45 +29,27 @@
 /*
  * declarations
  */
-Datum pgstrom_partial_avg_int4(PG_FUNCTION_ARGS);
+Datum pgstrom_partial_nrows(PG_FUNCTION_ARGS);
 Datum pgstrom_partial_avg_int8(PG_FUNCTION_ARGS);
+Datum pgstrom_partial_avg_float8(PG_FUNCTION_ARGS);
 Datum pgstrom_partial_avg_numeric(PG_FUNCTION_ARGS);
+Datum pgstrom_final_avg_int8_accum(PG_FUNCTION_ARGS);
+Datum pgstrom_final_avg_int8(PG_FUNCTION_ARGS);
+Datum pgstrom_final_avg_float8_accum(PG_FUNCTION_ARGS);
+Datum pgstrom_final_avg_float8(PG_FUNCTION_ARGS);
+Datum pgstrom_final_avg_numeric_accum(PG_FUNCTION_ARGS);
+Datum pgstrom_final_avg_numeric(PG_FUNCTION_ARGS);
+
+
+
+
 Datum pgstrom_partial_avg_fp8(PG_FUNCTION_ARGS);
 Datum pgstrom_partial_sum_int8(PG_FUNCTION_ARGS);
 Datum pgstrom_partial_sum_numeric(PG_FUNCTION_ARGS);
 Datum pgstrom_partial_variance_fp8(PG_FUNCTION_ARGS);
 Datum pgstrom_partial_covar_fp8(PG_FUNCTION_ARGS);
 
-#if NOT_USED
-Datum gpupreagg_psum_int(PG_FUNCTION_ARGS);
-Datum gpupreagg_psum_float4(PG_FUNCTION_ARGS);
-Datum gpupreagg_psum_float8(PG_FUNCTION_ARGS);
-Datum gpupreagg_psum_x2_float(PG_FUNCTION_ARGS);
-Datum gpupreagg_psum_numeric(PG_FUNCTION_ARGS);
-Datum gpupreagg_psum_x2_numeric(PG_FUNCTION_ARGS);
-Datum gpupreagg_psum_money(PG_FUNCTION_ARGS);
-Datum gpupreagg_corr_psum_x(PG_FUNCTION_ARGS);
-Datum gpupreagg_corr_psum_y(PG_FUNCTION_ARGS);
-Datum gpupreagg_corr_psum_x2(PG_FUNCTION_ARGS);
-Datum gpupreagg_corr_psum_y2(PG_FUNCTION_ARGS);
-Datum gpupreagg_corr_psum_xy(PG_FUNCTION_ARGS);
 
-Datum pgstrom_avg_int8_accum(PG_FUNCTION_ARGS);	/* name confusing? */
-Datum pgstrom_sum_int8_accum(PG_FUNCTION_ARGS);	/* name confusing? */
-Datum pgstrom_sum_int8_final(PG_FUNCTION_ARGS);	/* name confusing? */
-Datum pgstrom_sum_float8_accum(PG_FUNCTION_ARGS);
-Datum pgstrom_variance_float8_accum(PG_FUNCTION_ARGS);
-Datum pgstrom_covariance_float8_accum(PG_FUNCTION_ARGS);
-
-Datum pgstrom_int8_avg_accum(PG_FUNCTION_ARGS);
-Datum pgstrom_numeric_avg_accum(PG_FUNCTION_ARGS);
-Datum pgstrom_numeric_avg_final(PG_FUNCTION_ARGS);
-Datum pgstrom_numeric_var_accum(PG_FUNCTION_ARGS);
-Datum pgstrom_numeric_var_samp(PG_FUNCTION_ARGS);
-Datum pgstrom_numeric_var_pop(PG_FUNCTION_ARGS);
-Datum pgstrom_numeric_stddev_samp(PG_FUNCTION_ARGS);
-Datum pgstrom_numeric_stddev_pop(PG_FUNCTION_ARGS);
-#endif
 
 /* copy from utils/adt/numeric.c */
 typedef int16 NumericDigit;
@@ -134,11 +116,25 @@ typedef Int128AggState		PolyNumAggState;
 typedef NumericAggState		PolyNumAggState;
 #endif
 
-/*
- * pgstrom_partial_avg_int4 - alternative function for AVG(int2/int4)
- */
+
+
+
+
 Datum
-pgstrom_partial_avg_int4(PG_FUNCTION_ARGS)
+pgstrom_partial_nrows(PG_FUNCTION_ARGS)
+{
+	int		i;
+
+	for (i=0; i < PG_NARGS(); i++)
+	{
+		if (PG_ARGISNULL(i) || !PG_GETARG_BOOL(i))
+			PG_RETURN_INT64(0);
+	}
+	PG_RETURN_INT64(1);
+}
+
+Datum
+pgstrom_partial_avg_int8(PG_FUNCTION_ARGS)
 {
 	ArrayType  *result;
 	Datum		items[2];
@@ -150,55 +146,192 @@ pgstrom_partial_avg_int4(PG_FUNCTION_ARGS)
 	PG_RETURN_ARRAYTYPE_P(result);
 }
 
-/*
- * pgstrom_partial_avg_int8 - alternative function for AVG(int8)
- */
 Datum
-pgstrom_partial_avg_int8(PG_FUNCTION_ARGS)
+pgstrom_partial_avg_float8(PG_FUNCTION_ARGS)
 {
-	PolyNumAggState *state = makePolyNumAggState(false);
-	int64		nrows = PG_GETARG_INT64(0);		/* nrows */
-
-	DirectFunctionCall2(int8_avg_accum,
-						PointerGetDatum(state),
-						PG_GETARG_DATUM(1));	/* partial sum */
-	state->N = nrows;	/* overwrite nrows */
-
-	PG_RETURN_POINTER(state);
-}
-
-/*
- * pgstrom_partial_avg_numeric - alternative function for AVG(numeric)
- */
-Datum
-pgstrom_partial_avg_numeric(PG_FUNCTION_ARGS)
-{
-	NumericAggState *state = makeNumericAggState(false);
-	int64		nrows = PG_GETARG_INT64(0);		/* nrows */
-
-	DirectFunctionCall2(numeric_avg_accum,
-						PointerGetDatum(state),
-						PG_GETARG_DATUM(1));	/* partial sum */
-	state->N = nrows;	/* overwrite nrows */
-
-	PG_RETURN_POINTER(state);
-}
-
-/*
- * pgstrom_partial_avg_float - alternative function for AVG(float4/float8)
- */
-Datum
-pgstrom_partial_avg_fp8(PG_FUNCTION_ARGS)
-{
+	int64		nrows = PG_GETARG_INT64(0);
 	ArrayType  *result;
 	Datum		items[2];
 
-	items[0] = PG_GETARG_DATUM(0);	/* nrows(int8) */
-	items[1] = PG_GETARG_DATUM(1);	/* p_sum(int8) */
+	items[0] = Float8GetDatum((float8)nrows);
+	items[1] = PG_GETARG_DATUM(1);	/* p_sum(float8) */
 	result = construct_array(items, 2, FLOAT8OID,
 							 sizeof(float8), FLOAT8PASSBYVAL, 'd');
 	PG_RETURN_ARRAYTYPE_P(result);
 }
+
+Datum
+pgstrom_partial_avg_numeric(PG_FUNCTION_ARGS)
+{
+	ArrayType  *result;
+	Datum		items[2];
+
+	items[0] = DirectFunctionCall1(int8_numeric,
+								   PG_GETARG_DATUM(0));	/* nrows(int8) */
+	items[1] = PG_GETARG_DATUM(1);	/* p_sum(numeric) */
+	result = construct_array(items, 2, NUMERICOID,
+							 -1, false, 'i');
+	PG_RETURN_ARRAYTYPE_P(result);
+}
+
+Datum
+pgstrom_final_avg_int8_accum(PG_FUNCTION_ARGS)
+{
+	MemoryContext	aggcxt;
+	MemoryContext	oldcxt;
+	ArrayType	   *xarray;
+	ArrayType	   *yarray;
+	int64		   *x, *y;
+
+	if (!AggCheckCallContext(fcinfo, &aggcxt))
+		elog(ERROR, "aggregate function called in non-aggregate context");
+	if (PG_ARGISNULL(1))
+		elog(ERROR, "Null state was supplied");
+
+	if (PG_ARGISNULL(0))
+	{
+		oldcxt = MemoryContextSwitchTo(aggcxt);
+		xarray = PG_GETARG_ARRAYTYPE_P_COPY(1);
+		MemoryContextSwitchTo(oldcxt);
+	}
+	else
+	{
+		xarray = PG_GETARG_ARRAYTYPE_P(0);
+		yarray = PG_GETARG_ARRAYTYPE_P(1);
+		x = (int64 *)ARR_DATA_PTR(xarray);
+		y = (int64 *)ARR_DATA_PTR(yarray);
+
+		x[0] += y[0];
+		x[1] += y[0];
+	}
+	PG_RETURN_POINTER(xarray);
+}
+
+Datum
+pgstrom_final_avg_int8(PG_FUNCTION_ARGS)
+{
+	ArrayType	   *xarray = PG_GETARG_ARRAYTYPE_P(0);
+	int64		   *x = (int64 *)ARR_DATA_PTR(xarray);
+
+	return DirectFunctionCall2(numeric_div,
+							   DirectFunctionCall1(int8_numeric,
+												   Int64GetDatum(x[0])),
+							   DirectFunctionCall1(int8_numeric,
+												   Int64GetDatum(x[1])));
+}
+
+Datum
+pgstrom_final_avg_float8_accum(PG_FUNCTION_ARGS)
+{
+	MemoryContext	aggcxt;
+	MemoryContext	oldcxt;
+	ArrayType	   *xarray;
+	ArrayType	   *yarray;
+	float8		   *x, *y;
+
+	if (!AggCheckCallContext(fcinfo, &aggcxt))
+		elog(ERROR, "aggregate function called in non-aggregate context");
+	if (PG_ARGISNULL(1))
+		elog(ERROR, "Null state was supplied");
+
+	if (PG_ARGISNULL(0))
+	{
+		oldcxt = MemoryContextSwitchTo(aggcxt);
+		xarray = PG_GETARG_ARRAYTYPE_P_COPY(1);
+		MemoryContextSwitchTo(oldcxt);
+	}
+	else
+	{
+		xarray = PG_GETARG_ARRAYTYPE_P(0);
+		yarray = PG_GETARG_ARRAYTYPE_P(1);
+		x = (float8 *)ARR_DATA_PTR(xarray);
+		y = (float8 *)ARR_DATA_PTR(yarray);
+
+		x[0] += y[0];
+		x[1] += y[0];
+	}
+	PG_RETURN_POINTER(xarray);
+}
+
+Datum
+pgstrom_final_avg_float8(PG_FUNCTION_ARGS)
+{
+	ArrayType	   *xarray = PG_GETARG_ARRAYTYPE_P(0);
+	float8		   *x = (float8 *)ARR_DATA_PTR(xarray);
+
+	PG_RETURN_FLOAT8(x[1] / x[0]);
+}
+
+Datum
+pgstrom_final_avg_numeric_accum(PG_FUNCTION_ARGS)
+{
+	MemoryContext	aggcxt;
+	MemoryContext	oldcxt;
+	ArrayType	   *xarray;
+	ArrayType	   *yarray;
+	Datum			x0, x1;
+	Datum			y0, y1;
+	Datum			items[2];
+	bool			isnull[4];
+	int				index;
+
+	if (!AggCheckCallContext(fcinfo, &aggcxt))
+		elog(ERROR, "aggregate function called in non-aggregate context");
+	if (PG_ARGISNULL(1))
+		elog(ERROR, "Null state was supplied");
+
+	if (PG_ARGISNULL(0))
+	{
+		oldcxt = MemoryContextSwitchTo(aggcxt);
+		xarray = PG_GETARG_ARRAYTYPE_P_COPY(1);
+		MemoryContextSwitchTo(oldcxt);
+	}
+	else
+	{
+		xarray = PG_GETARG_ARRAYTYPE_P(0);
+		yarray = PG_GETARG_ARRAYTYPE_P(1);
+
+		index = 0;
+		x0 = array_ref(xarray, 1, &index, -1, -1, false, 'i', &isnull[0]);
+		y0 = array_ref(yarray, 1, &index, -1, -1, false, 'i', &isnull[1]);
+		index = 1;
+		x1 = array_ref(xarray, 1, &index, -1, -1, false, 'i', &isnull[2]);
+		y1 = array_ref(yarray, 1, &index, -1, -1, false, 'i', &isnull[3]);
+
+		if (isnull[0] || isnull[1] || isnull[2] || isnull[3])
+			elog(ERROR, "unexpected internal state");
+
+		items[0] = DirectFunctionCall2(numeric_add, x0, y0);
+		items[1] = DirectFunctionCall2(numeric_add, x1, y1);
+
+		oldcxt = MemoryContextSwitchTo(aggcxt);
+		xarray = construct_array(items, 2, NUMERICOID,
+								 -1, false, 'i');
+		MemoryContextSwitchTo(oldcxt);
+	}
+	PG_RETURN_POINTER(xarray);
+}
+
+Datum
+pgstrom_final_avg_numeric(PG_FUNCTION_ARGS)
+{
+	ArrayType  *xarray = PG_GETARG_ARRAYTYPE_P(0);
+	Datum		nrows;
+	Datum		sum;
+	int			index = 0;
+	bool		isnull[2];
+
+	nrows = array_ref(xarray, 1, &index, -1, -1, false, 'i', &isnull[0]);
+	index++;
+	sum = array_ref(xarray, 1, &index, -1, -1, false, 'i', &isnull[1]);
+
+	if (isnull[0] || isnull[1])
+		elog(ERROR, "unexpected internal state");
+
+	return DirectFunctionCall2(numeric_div, sum, nrows);
+}
+
+
 
 /*
  * gpupreagg_psum_int8 - alternative function for SUM(int8)
@@ -230,7 +363,7 @@ pgstrom_partial_sum_numeric(PG_FUNCTION_ARGS)
  * pgstrom_partial_variance_fp8 - alternative function for variance and similar
  */
 Datum
-pgstrom_partial_variance_fp8(PG_FUNCTION_ARGS)
+pgstrom_partial_variance_float8(PG_FUNCTION_ARGS)
 {
 	ArrayType  *state;
 	Datum		items[3];

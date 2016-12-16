@@ -722,7 +722,6 @@ extern void	pgstrom_init_gpujoin(void);
 /*
  * gpupreagg.c
  */
-extern void pgstrom_try_insert_gpupreagg(PlannedStmt *pstmt, Agg *agg);
 extern bool pgstrom_plan_is_gpupreagg(const Plan *plan);
 extern int	gpupreagg_process_task(GpuTask_v2 *gtask,
 								   CUmodule cuda_module,
@@ -827,12 +826,6 @@ extern void pgstrom_explain_expression(List *expr_list, const char *qlabel,
 									   List *ancestors, ExplainState *es,
 									   bool force_prefix,
 									   bool convert_to_and);
-#if 0
-extern void pgstrom_explain_outer_bulkexec(GpuTaskState *gts,
-										   List *deparse_context,
-										   List *ancestors,
-										   ExplainState *es);
-#endif
 extern void show_scan_qual(List *qual, const char *qlabel,
 						   PlanState *planstate, List *ancestors,
 						   ExplainState *es);
