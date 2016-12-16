@@ -473,9 +473,6 @@ extern void largest_workgroup_size(size_t *p_grid_size,
 /*
  * gputasks.c
  */
-extern kern_parambuf *construct_kern_parambuf(List *used_params,
-											  ExprContext *econtext);
-
 extern void pgstromInitGpuTaskState(GpuTaskState_v2 *gts,
 									GpuContext_v2 *gcontext,
 									GpuTaskKind task_kind,

@@ -1654,7 +1654,8 @@ assign_gpuscan_session_info(StringInfo buf, GpuTaskState_v2 *gts)
 	CustomScan *cscan = (CustomScan *)gts->css.ss.ps.plan;
 
 	Assert(pgstrom_plan_is_gpuscan((Plan *) cscan) ||
-		   pgstrom_plan_is_gpujoin((Plan *) cscan));
+		   pgstrom_plan_is_gpujoin((Plan *) cscan) ||
+		   pgstrom_plan_is_gpupreagg((Plan *) cscan));
 
 	if (cscan->custom_scan_tlist != NIL)
 	{

@@ -1220,7 +1220,6 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 											 &agg_final_costs,
 											 num_groups);
 		add_path(group_rel, final_path);
-
 		// TODO: make a parallel grouping path (nogroup) */
 	}
 	else
@@ -1401,7 +1400,7 @@ make_altfunc_null_const(Aggref *aggref)
 static Expr *
 make_altfunc_nrows_expr(Aggref *aggref)
 {
-	Expr	   *nrows_expr;
+	Const	   *nrows_const;
 	List	   *nrows_args = NIL;
 	ListCell   *lc;
 
@@ -1420,17 +1419,17 @@ make_altfunc_nrows_expr(Aggref *aggref)
 	if (aggref->aggfilter)
 		nrows_args = lappend(nrows_args, copyObject(aggref->aggfilter));
 
-	nrows_expr = (Expr *) makeConst(INT8OID,
-									-1,
-									InvalidOid,
-									sizeof(int64),
-									(Datum) 1,
-									false,
-									true);
+	nrows_const = makeConst(INT8OID,
+							-1,
+							InvalidOid,
+							sizeof(int64),
+							(Datum) 1,
+							false,
+							true);
 	if (nrows_args == NIL)
-		return nrows_expr;
+		return (Expr *)nrows_const;
 
-	return make_expr_conditional(nrows_expr,
+	return make_expr_conditional((Expr *)nrows_const,
 								 list_length(nrows_args) <= 1
 								 ? linitial(nrows_args)
 								 : make_andclause(nrows_args),
@@ -1912,16 +1911,16 @@ PlanGpuPreAggPath(PlannerInfo *root,
 									tlist_dev_action,
 									outer_tlist,
 									gpa_info->outer_quals);
-	elog(INFO, "source:\n%s", kern_source);
+//	elog(INFO, "source:\n%s", kern_source);
 
 	gpa_info->kern_source = kern_source;
 	gpa_info->extra_flags = context.extra_flags;
 	gpa_info->used_params = context.used_params;
 
-
-	elog(INFO, "tlist_orig => %s", nodeToString(tlist));
-	elog(INFO, "tlist_dev => %s", nodeToString(tlist_dev));
-	elog(INFO, "tlist_dev_action => %s", nodeToString(tlist_dev_action));
+//	elog(INFO, "tlist_orig => %s", nodeToString(tlist));
+//	elog(INFO, "tlist_dev => %s", nodeToString(tlist_dev));
+//	elog(INFO, "tlist_dev_action => %s", nodeToString(tlist_dev_action));
+//	elog(INFO, "used_params => %s", nodeToString(gpa_info->used_params));
 
 	form_gpupreagg_info(cscan, gpa_info);
 
@@ -2709,12 +2708,10 @@ gpupreagg_codegen(codegen_context *context,
 							  outer_quals);
 		context->extra_flags |= DEVKERNEL_NEEDS_GPUSCAN;
 	}
-
 	/* gpupreagg_projection */
 	gpupreagg_codegen_projection(&kern, context, root,
 								 tlist_dev, tlist_dev_action,
 								 cscan->scan.scanrelid, outer_tlist);
-
 	/* gpupreagg_hashvalue */
 	gpupreagg_codegen_hashvalue(&kern, context,
 								tlist_dev, tlist_dev_action);
@@ -2811,9 +2808,6 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 	gpas->gts.cb_switch_task = gpupreagg_switch_task;
 	gpas->gts.cb_next_tuple  = gpupreagg_next_tuple;
 
-//	gpas->plan_ngroups       = gpa_info->plan_ngroups;
-//	gpas->plan_nchunks       = gpa_info->plan_nchunks;
-//	gpas->plan_extra_sz      = gpa_info->plan_extra_sz;
 	gpas->num_group_keys     = gpa_info->num_group_keys;
 
 	/* initialization of the outer relation */
@@ -4048,6 +4042,7 @@ gpupreagg_process_termination_task(GpuPreAggTask *gpreagg,
 
 #ifdef USE_ASSERT_CHECKING
 	/* @pds_final shall be already dereferenced and nobody is running on */
+	gpa_sstate = gpreagg->gpa_sstate;
 	SpinLockAcquire(&gpa_sstate->lock);
 	Assert(pds_final->ntasks_running == 0 &&
 		   pds_final->is_dereferenced);
@@ -4174,42 +4169,47 @@ gpupreagg_process_task(GpuTask_v2 *gtask,
 	GpuPreAggTask  *gpreagg = (GpuPreAggTask *) gtask;
 	int				retval;
 
-	PG_TRY();
+	if (gpreagg->kern.reduction_mode != GPUPREAGG_ONLY_TERMINATION)
 	{
-		if (gpreagg->kern.reduction_mode != GPUPREAGG_ONLY_TERMINATION)
+		PG_TRY();
 		{
 			retval = gpupreagg_process_reduction_task(gpreagg,
 													  cuda_module,
 													  cuda_stream);
 		}
-		else
+		PG_CATCH();
+		{
+			bool	release_any = gpupreagg_put_strategy(gpreagg);
+
+			gpupreagg_cleanup_cuda_resources(gpreagg, release_any);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+	}
+	else
+	{
+		PG_TRY();
 		{
 			retval = gpupreagg_process_termination_task(gpreagg,
 														cuda_module,
 														cuda_stream);
 		}
-	}
-	PG_CATCH();
-	{
-		bool	is_terminator = false;
-
-		if (gpreagg->kern.reduction_mode == GPUPREAGG_ONLY_TERMINATION)
-			is_terminator = true;
-		else
+		PG_CATCH();
 		{
+#ifdef USE_ASSERT_CHECKING
+			/* pds_final should be already dereferenced */
 			GpuPreAggSharedState   *gpa_sstate = gpreagg->gpa_sstate;
-
+			pgstrom_data_store	   *pds_final  = gpreagg->pds_final;
 			SpinLockAcquire(&gpa_sstate->lock);
-			if (--pds_final->ntasks_running == 0 && pds_final->is_dereferenced)
-				is_terminator = true;
+			Assert(pds_final->ntasks_running == 0 &&
+				   pds_final->is_dereferenced);
 			SpinLockRelease(&gpa_sstate->lock);
+#endif
+			gpupreagg_cleanup_cuda_resources(gpreagg, true);
+			PG_RE_THROW();
 		}
-		gpupreagg_cleanup_cuda_resources(gpreagg, is_terminator);
-
-		PG_RE_THROW();
+		PG_END_TRY();
 	}
-	PG_END_TRY();
-
 	return retval;
 }
 
@@ -4272,7 +4272,6 @@ gpupreagg_complete_task(GpuTask_v2 *gtask)
 {
 	GpuPreAggTask		   *gpreagg = (GpuPreAggTask *) gtask;
 	GpuPreAggSharedState   *gpa_sstate = gpreagg->gpa_sstate;
-	pgstrom_data_store	   *pds_final = gpreagg->pds_final;
 	int						retval;
 
 	/*

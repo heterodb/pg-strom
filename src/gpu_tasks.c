@@ -34,11 +34,10 @@ static void pgstrom_explain_perfmon(GpuTaskState_v2 *gts, ExplainState *es);
  * construct_kern_parambuf
  *
  * It construct a kernel parameter buffer to deliver Const/Param nodes.
- *
- * TODO: make this function static once we move all logics v2.0 based
  */
-kern_parambuf *
-construct_kern_parambuf(List *used_params, ExprContext *econtext)
+static kern_parambuf *
+construct_kern_parambuf(List *used_params, ExprContext *econtext,
+						List *custom_scan_tlist)
 {
 	StringInfoData	str;
 	kern_parambuf  *kparams;
@@ -60,7 +59,9 @@ construct_kern_parambuf(List *used_params, ExprContext *econtext)
 	foreach (cell, used_params)
 	{
 		Node   *node = lfirst(cell);
+		bool	nested_custom_scan_tlist = false;
 
+	retry_custom_scan_tlist:
 		if (IsA(node, Const))
 		{
 			Const  *con = (Const *) node;
@@ -155,6 +156,26 @@ construct_kern_parambuf(List *used_params, ExprContext *econtext)
 								param->paramid)));
 			}
 		}
+		else if (!nested_custom_scan_tlist &&
+				 IsA(node, Var) &&
+				 custom_scan_tlist != NIL &&
+				 ((Var *)node)->varno == INDEX_VAR &&
+				 ((Var *)node)->varattno <= list_length(custom_scan_tlist))
+		{
+			/*
+			 * NOTE: setrefs.c often replaces the Const/Param expressions on
+			 * the @used_params, if custom_scan_tlist has an identical TLE.
+			 * So, if expression is a references to the custom_scan_tlist,
+			 * we try to solve the underlying value, then retry.
+			 */
+			AttrNumber		varattno = ((Var *)node)->varattno;
+			TargetEntry	   *tle = list_nth(custom_scan_tlist, varattno - 1);
+
+			node = (Node *)tle->expr;
+
+			nested_custom_scan_tlist = true;
+			goto retry_custom_scan_tlist;
+		}
 		else
 			elog(ERROR, "unexpected node: %s", nodeToString(node));
 
@@ -185,12 +206,14 @@ pgstromInitGpuTaskState(GpuTaskState_v2 *gts,
 						EState *estate)
 {
 	ExprContext	   *econtext = gts->css.ss.ps.ps_ExprContext;
+	CustomScan	   *cscan = (CustomScan *)(gts->css.ss.ps.plan);
 
 	gts->gcontext = gcontext;
 	gts->task_kind = task_kind;
 	gts->program_id = INVALID_PROGRAM_ID;	/* to be set later */
 	gts->revision = 1;
-	gts->kern_params = construct_kern_parambuf(used_params, econtext);
+	gts->kern_params = construct_kern_parambuf(used_params, econtext,
+											   cscan->custom_scan_tlist);
 	gts->scan_done = false;
 	gts->row_format = false;
 
