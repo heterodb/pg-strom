@@ -85,6 +85,8 @@
 #error PG-Strom expects timestamp has 64bit integer format
 #endif
 
+#define PGSTROM_SCHEMA_NAME		"pgstrom"
+
 /*
  * GpuContext_v2
  *

@@ -18,6 +18,7 @@
 #include "postgres.h"
 #include "access/sysattr.h"
 #include "access/xact.h"
+#include "catalog/pg_aggregate.h"
 #include "catalog/pg_cast.h"
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_proc.h"
@@ -219,6 +220,11 @@ typedef struct
 } GpuPreAggTask;
 
 /* declaration of static functions */
+static void		gpupreagg_build_path_target(PlannerInfo *root,
+											PathTarget *target_orig,
+											PathTarget *target_upper,
+											PathTarget *target_host,
+											PathTarget *target_dev);
 static char	   *gpupreagg_codegen(codegen_context *context,
 								  PlannerInfo *root,
 								  CustomScan *cscan,
@@ -291,8 +297,7 @@ typedef struct {
 	 * s: pgstrom    ... PG-Strom's special ones
 	 */
 	const char *uppfn_name;
-	int			uppfn_nargs;
-	Oid			uppfn_argtypes[8];
+	Oid			uppfn_argtype;
 	const char *altfn_name;
 	int			altfn_nargs;
 	Oid			altfn_argtypes[8];
@@ -303,285 +308,285 @@ typedef struct {
 static aggfunc_catalog_t  aggfunc_catalog[] = {
 	/* AVG(X) = EX_AVG(NROWS(), PSUM(X)) */
 	{ "avg",    1, {INT2OID},
-	  "s:favg", 1, {INT8ARRAYOID},
+	  "s:favg",     INT8ARRAYOID,
 	  "s:pavg", 2, {INT8OID, INT8OID},
 	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, 0, INT_MAX
 	},
 	{ "avg",    1, {INT4OID},
-	  "s:favg", 1, {INT8ARRAYOID},
+	  "s:favg",     INT8ARRAYOID,
 	  "s:pavg", 2, {INT8OID, INT8OID},
 	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, 0, INT_MAX
 	},
 	{ "avg",    1, {INT8OID},
-	  "s:favg", 1, {INT8ARRAYOID},
+	  "s:favg",     INT8ARRAYOID,
 	  "s:pavg", 2, {INT8OID, INT8OID},
 	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, 0, INT_MAX
 	},
 	{ "avg",    1, {FLOAT4OID},
-	  "s:favg", 1, {FLOAT8ARRAYOID},
+	  "s:favg",     FLOAT8ARRAYOID,
 	  "s:pavg", 2, {INT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, 0, INT_MAX
 	},
 	{ "avg",    1, {FLOAT8OID},
-	  "s:favg", 1, {FLOAT8ARRAYOID},
+	  "s:favg",     FLOAT8ARRAYOID,
 	  "s:pavg", 2, {INT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, 0, INT_MAX
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "avg",	1, {NUMERICOID},
-	  "s:favg", 1, {NUMERICARRAYOID},
+	  "s:favg",     NUMERICARRAYOID,
 	  "s:pavg", 2, {INT8OID, NUMERICOID},
 	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, DEVKERNEL_NEEDS_NUMERIC, 100
 	},
 #endif
 	/* COUNT(*) = SUM(NROWS(*|X)) */
-	{ "count", 0, {},
-	  "c:sum", 1, {INT8OID},
+	{ "count",  0, {},
+	  "c:sum",      INT8OID,
 	  "varref", 1, {INT8OID},
 	  {ALTFUNC_EXPR_NROWS}, 0, INT_MAX
 	},
-	{ "count", 1, {ANYOID},
-	  "c:sum", 1, {INT8OID},
+	{ "count",  1, {ANYOID},
+	  "c:sum",      INT8OID,
 	  "varref", 1, {INT8OID},
 	  {ALTFUNC_EXPR_NROWS}, 0, INT_MAX
 	},
 	/* MAX(X) = MAX(PMAX(X)) */
-	{ "max", 1, {INT2OID},
-	  "c:max", 1, {INT2OID},
+	{ "max",    1, {INT2OID},
+	  "c:max",      INT2OID,
 	  "varref", 1, {INT2OID},
 	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
 	},
-	{ "max", 1, {INT4OID},
-	  "c:max", 1, {INT4OID},
+	{ "max",    1, {INT4OID},
+	  "c:max",      INT4OID,
 	  "varref", 1, {INT4OID},
 	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
 	},
-	{ "max", 1, {INT8OID},
-	  "c:max", 1, {INT8OID},
+	{ "max",    1, {INT8OID},
+	  "c:max",      INT8OID,
 	  "varref", 1, {INT8OID},
 	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
 	},
-	{ "max", 1, {FLOAT4OID},
-	  "c:max", 1, {FLOAT4OID},
+	{ "max",    1, {FLOAT4OID},
+	  "c:max",      FLOAT4OID,
 	  "varref", 1, {FLOAT4OID},
 	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
 	},
-	{ "max", 1, {FLOAT8OID},
-	  "c:max", 1, {FLOAT8OID},
+	{ "max",    1, {FLOAT8OID},
+	  "c:max",      FLOAT8OID,
 	  "varref", 1, {FLOAT8OID},
 	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
-	{ "max", 1, {NUMERICOID},
-	  "c:max", 1, {NUMERICOID},
+	{ "max",    1, {NUMERICOID},
+	  "c:max",      NUMERICOID,
 	  "varref", 1, {NUMERICOID},
 	  {ALTFUNC_EXPR_PMAX}, DEVKERNEL_NEEDS_NUMERIC, INT_MAX
 	},
 #endif
-	{ "max", 1, {CASHOID},
-	  "c:max", 1, {CASHOID},
+	{ "max",    1, {CASHOID},
+	  "c:max",      CASHOID,
 	  "varref", 1, {CASHOID},
 	  {ALTFUNC_EXPR_PMAX}, DEVKERNEL_NEEDS_MONEY, INT_MAX
 	},
-	{ "max", 1, {DATEOID},
-	  "c:max", 1, {DATEOID},
+	{ "max",    1, {DATEOID},
+	  "c:max",      DATEOID,
 	  "varref", 1, {DATEOID},
 	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
 	},
-	{ "max", 1, {TIMEOID},
-	  "c:max", 1, {TIMEOID},
+	{ "max",    1, {TIMEOID},
+	  "c:max",      TIMEOID,
 	  "varref", 1, {TIMEOID},
 	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
 	},
-	{ "max", 1, {TIMESTAMPOID},
-	  "c:max", 1, {TIMESTAMPOID},
+	{ "max",    1, {TIMESTAMPOID},
+	  "c:max",      TIMESTAMPOID,
 	  "varref", 1, {TIMESTAMPOID},
 	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
 	},
-	{ "max", 1, {TIMESTAMPTZOID},
-	  "c:max", 1, {TIMESTAMPTZOID},
+	{ "max",    1, {TIMESTAMPTZOID},
+	  "c:max",      TIMESTAMPTZOID,
 	  "varref", 1, {TIMESTAMPTZOID},
 	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
 	},
 
 	/* MIX(X) = MIN(PMIN(X)) */
-	{ "min", 1, {INT2OID},
-	  "c:min", 1, {INT2OID},
+	{ "min",    1, {INT2OID},
+	  "c:min",      INT2OID,
 	  "varref", 1, {INT2OID},
 	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
 	},
-	{ "min", 1, {INT4OID},
-	  "c:min", 1, {INT4OID},
+	{ "min",    1, {INT4OID},
+	  "c:min",      INT4OID,
 	  "varref", 1, {INT4OID},
 	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
 	},
-	{ "min", 1, {INT8OID},
-	  "c:min", 1, {INT8OID},
+	{ "min",    1, {INT8OID},
+	  "c:min",      INT8OID,
 	  "varref", 1, {INT8OID},
 	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
 	},
-	{ "min", 1, {FLOAT4OID},
-	  "c:min", 1, {FLOAT4OID},
+	{ "min",    1, {FLOAT4OID},
+	  "c:min",      FLOAT4OID,
 	  "varref", 1, {FLOAT4OID},
 	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
 	},
-	{ "min", 1, {FLOAT8OID},
-	  "c:min", 1, {FLOAT8OID},
+	{ "min",    1, {FLOAT8OID},
+	  "c:min",      FLOAT8OID,
 	  "varref", 1, {FLOAT8OID},
 	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
-	{ "min", 1, {NUMERICOID},
-	  "c:min", 1, {NUMERICOID},
+	{ "min",    1, {NUMERICOID},
+	  "c:min",      NUMERICOID,
 	  "varref", 1, {NUMERICOID},
 	  {ALTFUNC_EXPR_PMIN}, DEVKERNEL_NEEDS_NUMERIC, INT_MAX
 	},
 #endif
-	{ "min", 1, {CASHOID},
-	  "c:min", 1, {CASHOID},
+	{ "min",    1, {CASHOID},
+	  "c:min",      CASHOID,
 	  "varref", 1, {CASHOID},
 	  {ALTFUNC_EXPR_PMAX}, DEVKERNEL_NEEDS_MONEY, INT_MAX
 	},
-	{ "min", 1, {DATEOID},
-	  "c:min", 1, {DATEOID},
+	{ "min",    1, {DATEOID},
+	  "c:min",      DATEOID,
 	  "varref", 1, {DATEOID},
 	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
 	},
-	{ "min", 1, {TIMEOID},
-	  "c:min", 1, {TIMEOID},
+	{ "min",    1, {TIMEOID},
+	  "c:min",      TIMEOID,
 	  "varref", 1, {TIMEOID},
 	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
 	},
-	{ "min", 1, {TIMESTAMPOID},
-	  "c:min", 1, {TIMESTAMPOID},
+	{ "min",    1, {TIMESTAMPOID},
+	  "c:min",      TIMESTAMPOID,
 	  "varref", 1, {TIMESTAMPOID},
 	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
 	},
-	{ "min", 1, {TIMESTAMPTZOID},
-	  "c:min", 1, {TIMESTAMPTZOID},
+	{ "min",    1, {TIMESTAMPTZOID},
+	  "c:min",      TIMESTAMPTZOID,
 	  "varref", 1, {TIMESTAMPTZOID},
 	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
 	},
 
 	/* SUM(X) = SUM(PSUM(X)) */
-	{ "sum", 1, {INT2OID},
-	  "s:sum", 1, {INT8OID},
+	{ "sum",    1, {INT2OID},
+	  "s:sum",      INT8OID,
 	  "varref", 1, {INT8OID},
 	  {ALTFUNC_EXPR_PSUM}, 0, INT_MAX
 	},
-	{ "sum", 1, {INT4OID},
-	  "s:sum", 1, {INT8OID},
+	{ "sum",    1, {INT4OID},
+	  "s:sum",      INT8OID,
 	  "varref", 1, {INT8OID},
 	  {ALTFUNC_EXPR_PSUM}, 0, INT_MAX
 	},
-	{ "sum", 1, {INT8OID},
-	  "c:sum", 1, {INT8OID},
+	{ "sum",    1, {INT8OID},
+	  "c:sum",      INT8OID,
 	  "varref", 1, {INT8OID},
 	  {ALTFUNC_EXPR_PSUM}, 0, INT_MAX
 	},
-	{ "sum", 1, {FLOAT4OID},
-	  "c:sum", 1, {FLOAT4OID},
+	{ "sum",    1, {FLOAT4OID},
+	  "c:sum",      FLOAT4OID,
 	  "varref", 1, {FLOAT4OID},
 	  {ALTFUNC_EXPR_PSUM}, 0, INT_MAX
 	},
-	{ "sum", 1, {FLOAT8OID},
-	  "c:sum", 1, {FLOAT8OID},
+	{ "sum",    1, {FLOAT8OID},
+	  "c:sum",      FLOAT8OID,
 	  "varref", 1, {FLOAT8OID},
 	  {ALTFUNC_EXPR_PSUM}, 0, INT_MAX
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
-	{ "sum", 1, {NUMERICOID},
-	  "c:sum", 1, {NUMERICOID},
+	{ "sum",    1, {NUMERICOID},
+	  "c:sum",      NUMERICOID,
 	  "varref", 1, {NUMERICOID},
 	  {ALTFUNC_EXPR_PSUM}, DEVKERNEL_NEEDS_NUMERIC, 100
 	},
 #endif
-	{ "sum", 1, {CASHOID},
-	  "c:sum", 1, {CASHOID},
+	{ "sum",    1, {CASHOID},
+	  "c:sum",      CASHOID,
 	  "varref", 1, {CASHOID},
 	  {ALTFUNC_EXPR_PSUM}, DEVKERNEL_NEEDS_MONEY, INT_MAX
 	},
 	/* STDDEV(X) = EX_STDDEV(NROWS(),PSUM(X),PSUM(X*X)) */
-	{ "stddev", 1, {FLOAT4OID},
-	  "s:stddev", 1, {FLOAT8ARRAYOID},
+	{ "stddev",      1, {FLOAT4OID},
+	  "s:stddev",        FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
 	},
-	{ "stddev", 1, {FLOAT8OID},
-	  "s:stddev", 1, {FLOAT8ARRAYOID},
+	{ "stddev",      1, {FLOAT8OID},
+	  "s:stddev",        FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
 	},
-	{ "stddev_pop", 1, {FLOAT4OID},
-	  "s:stddev_pop", 1, {FLOAT8ARRAYOID},
+	{ "stddev_pop",  1, {FLOAT4OID},
+	  "s:stddev_pop",    FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
 	},
-	{ "stddev_pop", 1, {FLOAT8OID},
-	  "s:stddev_pop", 1, {FLOAT8ARRAYOID},
+	{ "stddev_pop",  1, {FLOAT8OID},
+	  "s:stddev_pop",    FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
 	},
 	{ "stddev_samp", 1, {FLOAT4OID},
-	  "s:stddev_samp", 1, {FLOAT8ARRAYOID},
+	  "s:stddev_samp",   FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
 	},
 	{ "stddev_samp", 1, {FLOAT8OID},
-	  "s:stddev_samp", 1, {FLOAT8ARRAYOID},
+	  "s:stddev_samp",   FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
 	},
 	/* VARIANCE(X) = PGSTROM.VARIANCE(NROWS(), PSUM(X),PSUM(X^2)) */
-	{ "variance", 1, {FLOAT4OID},
-	  "s:variance", 1, {FLOAT8ARRAYOID},
+	{ "variance",    1, {FLOAT4OID},
+	  "s:variance",      FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
 	},
-	{ "variance", 1, {FLOAT8OID},
-	  "s:variance", 1, {FLOAT8ARRAYOID},
+	{ "variance",    1, {FLOAT8OID},
+	  "s:variance",      FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
 	},
-	{ "var_pop", 1, {FLOAT4OID},
-	  "s:var_pop", 1, {FLOAT8ARRAYOID},
+	{ "var_pop",     1, {FLOAT4OID},
+	  "s:var_pop",       FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
 	},
-	{ "var_pop", 1, {FLOAT8OID},
-	  "s:var_pop", 1, {FLOAT8ARRAYOID},
+	{ "var_pop",     1, {FLOAT8OID},
+	  "s:var_pop",       FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
 	},
-	{ "var_samp", 1, {FLOAT4OID},
-	  "s:var_samp", 1, {FLOAT8ARRAYOID},
+	{ "var_samp",    1, {FLOAT4OID},
+	  "s:var_samp",      FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
 	},
-	{ "var_samp", 1, {FLOAT8OID},
-	  "s:var_samp", 1, {FLOAT8ARRAYOID},
+	{ "var_samp",    1, {FLOAT8OID},
+	  "s:var_samp",      FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
@@ -593,8 +598,8 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	 *                          PCOV_X2(X,Y), PCOV_Y2(X,Y),
 	 *                          PCOV_XY(X,Y))
 	 */
-	{ "corr", 2, {FLOAT8OID, FLOAT8OID},
-	  "s:corr", 1, {FLOAT8ARRAYOID},
+	{ "corr",     2, {FLOAT8OID, FLOAT8OID},
+	  "s:corr",       FLOAT8ARRAYOID,
 	  "s:pcovar", 6,
 	  {INT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
@@ -605,7 +610,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_XY}, 0, SHRT_MAX
 	},
 	{ "covar_pop", 2, {FLOAT8OID, FLOAT8OID},
-	  "s:covar_pop", 1, {FLOAT8ARRAYOID},
+	  "s:covar_pop",   FLOAT8ARRAYOID,
 	  "s:pcovar", 6,
 	  {INT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
@@ -616,7 +621,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_XY}, 0, SHRT_MAX
 	},
 	{ "covar_samp", 2, {FLOAT8OID, FLOAT8OID},
-	  "s:covar_samp", 1, {FLOAT8ARRAYOID},
+	  "s:covar_samp",   FLOAT8ARRAYOID,
 	  "s:pcovar", 6,
 	  {INT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
@@ -633,7 +638,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	 * to the function
 	 */
 	{ "regr_avgx", 2, {FLOAT8OID, FLOAT8OID},
-	  "s:regr_avgx", 1, {FLOAT8ARRAYOID},
+	  "s:regr_avgx",   FLOAT8ARRAYOID,
 	  "s:pcovar", 6,
 	  {INT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
@@ -644,7 +649,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
        ALTFUNC_EXPR_PCOV_XY}, 0, SHRT_MAX
 	},
 	{ "regr_avgy", 2, {FLOAT8OID, FLOAT8OID},
-	  "s:regr_avgy", 1, {FLOAT8ARRAYOID},
+	  "s:regr_avgy",   FLOAT8ARRAYOID,
 	  "s:pcovar", 6,
 	  {INT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
@@ -655,12 +660,12 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_XY}, 0, SHRT_MAX
 	},
 	{ "regr_count", 2, {FLOAT8OID, FLOAT8OID},
-	  "s:sum", 1, {INT8OID},
+	  "s:sum",      INT8OID,
 	  "varref", 1, {INT8OID},
 	  {ALTFUNC_EXPR_NROWS}, 0
 	},
 	{ "regr_intercept", 2, {FLOAT8OID, FLOAT8OID},
-	  "s:regr_intercept", 1, {FLOAT8ARRAYOID},
+	  "s:regr_intercept",   FLOAT8ARRAYOID,
 	  "s:pcovar", 6,
 	  {INT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
@@ -671,7 +676,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_XY}, 0, SHRT_MAX
 	},
 	{ "regr_r2", 2, {FLOAT8OID, FLOAT8OID},
-	  "s:regr_r2", 1, {FLOAT8ARRAYOID},
+	  "s:regr_r2",   FLOAT8ARRAYOID,
 	  "s:pcovar", 6,
 	  {INT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
@@ -682,7 +687,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_XY}, 0, SHRT_MAX
 	},
 	{ "regr_slope", 2, {FLOAT8OID, FLOAT8OID},
-	  "s:regr_slope", 1, {FLOAT8ARRAYOID},
+	  "s:regr_slope",   FLOAT8ARRAYOID,
 	  "s:pcovar", 6,
 	  {INT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
@@ -693,7 +698,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_XY}, 0, SHRT_MAX
 	},
 	{ "regr_sxx", 2, {FLOAT8OID, FLOAT8OID},
-	  "s:regr_sxx", 1, {FLOAT8ARRAYOID},
+	  "s:regr_sxx",   FLOAT8ARRAYOID,
 	  "s:pcovar", 6,
 	  {INT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
@@ -704,7 +709,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_XY}, 0, SHRT_MAX
 	},
 	{ "regr_sxy", 2, {FLOAT8OID, FLOAT8OID},
-	  "s:regr_sxy", 1, {FLOAT8ARRAYOID},
+	  "s:regr_sxy",   FLOAT8ARRAYOID,
 	  "s:pcovar", 6,
 	  {INT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
@@ -715,7 +720,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PCOV_XY}, 0, SHRT_MAX
 	},
 	{ "regr_syy", 2, {FLOAT8OID, FLOAT8OID},
-	  "s:regr_syy", 1, {FLOAT8ARRAYOID},
+	  "s:regr_syy",   FLOAT8ARRAYOID,
 	  "s:pcovar", 6,
 	  {INT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
@@ -1097,7 +1102,8 @@ estimate_hashagg_tablesize(Path *path, const AggClauseCosts *agg_costs,
  */
 static CustomPath *
 gpupreagg_construct_path(PlannerInfo *root,
-						 PathTarget *target,
+						 PathTarget *target_host,
+						 PathTarget *target_dev,
 						 RelOptInfo *group_rel,
 						 Path *input_path,
 						 double num_groups)
@@ -1112,11 +1118,13 @@ gpupreagg_construct_path(PlannerInfo *root,
 	if (num_groups < 1.0 || num_groups > (double)INT_MAX)
 		return false;
 
+#if 0
 	/* PathTarget of the partial stage */
 	partial_target = make_partial_grouping_target(root, target);
 	get_agg_clause_costs(root, (Node *) partial_target->exprs,
 						 AGGSPLIT_INITIAL_SERIAL,
 						 &agg_partial_costs);
+#endif
 
 	/* cost estimation */
 	if (!cost_gpupreagg(cpath, gpa_info,
@@ -1165,6 +1173,9 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 {
 	Query		   *parse = root->parse;
 	PathTarget	   *target = root->upper_targets[UPPERREL_GROUP_AGG];
+	PathTarget	   *target_upper;
+	PathTarget	   *target_host;
+	PathTarget	   *target_dev;
 	CustomPath	   *cpath;
 	Path		   *input_path;
 	Path		   *final_path;
@@ -1181,9 +1192,19 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 	if (stage != UPPERREL_GROUP_AGG)
 		return;
 
-	if (!pgstrom_enabled ||
-		!enable_gpupreagg ||
-		!gpupreagg_device_executable(root, target))
+	if (!pgstrom_enabled || !enable_gpupreagg)
+		return;
+
+	if (get_namespace_oid("pgstrom", true) == InvalidOid)
+	{
+		ereport(WARNING,
+				(errcode(ERRCODE_UNDEFINED_SCHEMA),
+				 errmsg("schema \"pgstrom\" was not found"),
+				 errhint("Run: CREATE EXTENSION pg_strom")));
+		return;
+	}
+
+	if (!gpupreagg_device_executable(root, target))
 		return;
 
 	/* number of estimated groups */
@@ -1211,6 +1232,21 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 		return;
 
 	/*
+	 * construction of PathTarget to be attached on
+	 *
+	 * @target_upper: PathTarget for final Agg node (includes Aggref)
+	 * @target_host:  PathTarget for host-side of CustomScan
+	 * @target_dev:   PathTarget of device results or CPU fallback
+	 */
+	target_upper = create_empty_pathtarget();
+	target_host = create_empty_pathtarget();
+	target_dev = create_empty_pathtarget();
+	gpupreagg_build_path_target(root, target,
+								target_upper,
+								target_host,
+								target_dev);
+
+	/*
 	 * construction of GpuPreAgg pathnode on top of the cheapest total
 	 * cost pathnode (partial aggregation)
 	 */
@@ -1233,9 +1269,9 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 		final_path = (Path *)create_agg_path(root,
 											 group_rel,
 											 &cpath->path,
-											 target,
+											 target_upper,
 											 AGG_PLAIN,
-											 AGGSPLIT_FINAL_DESERIAL,
+											 AGGSPLIT_SIMPLE,
 											 parse->groupClause,
 											 (List *) parse->havingQual,
 											 &agg_final_costs,
@@ -1287,7 +1323,7 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 					create_groupingsets_path(root,
 											 group_rel,
 											 sort_path,
-											 target,
+											 target_upper,
 											 (List *)parse->havingQual,
 											 rollup_lists,
 											 rollup_groupclauses,
@@ -1299,9 +1335,9 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 					create_agg_path(root,
 									group_rel,
 									sort_path,
-									target,
+									target_upper,
 									AGG_SORTED,
-									AGGSPLIT_FINAL_DESERIAL,
+									AGGSPLIT_SIMPLE,
 									parse->groupClause,
 									(List *)parse->havingQual,
 									&agg_final_costs,
@@ -1311,7 +1347,7 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 					create_group_path(root,
 									  group_rel,
 									  sort_path,
-									  target,
+									  target_upper,
 									  parse->groupClause,
 									  (List *)parse->havingQual,
 									  num_groups);
@@ -1336,9 +1372,9 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 					create_agg_path(root,
 									group_rel,
 									&cpath->path,
-									target,
+									target_upper,
 									AGG_HASHED,
-									AGGSPLIT_FINAL_DESERIAL,
+									AGGSPLIT_SIMPLE,
 									parse->groupClause,
 									(List *) parse->havingQual,
 									&agg_final_costs,
@@ -1406,10 +1442,10 @@ make_expr_conditional(Expr *expr, Expr *filter, bool zero_if_unmatched)
 }
 
 /*
- * make_altfunc_pgstrom_schema - constructor of the function under "pgstrom"
+ * make_altfunc_simple_expr
  */
 static Expr *
-make_altfunc_pgstrom_schema(const char *func_name, List *func_args)
+make_altfunc_simple_expr(const char *func_name, List *func_args)
 {
 	Oid			namespace_oid = get_namespace_oid("pgstrom", false);
 	Oid			typebuf[8];
@@ -1466,29 +1502,103 @@ make_altfunc_nrows_expr(Aggref *aggref)
 		nrows_args = lappend(nrows_args, ntest);
 	}
 	if (aggref->aggfilter)
+	{
+		Assert(exprType(aggref->aggfilter) == BOOLOID);
 		nrows_args = lappend(nrows_args, copyObject(aggref->aggfilter));
-
-	return make_altfunc_pgstrom_schema("nrows", nrows_args);
+	}
+	return make_altfunc_simple_expr("nrows", nrows_args);
 }
 
 /*
- * make_altfunc_pmin_expr - constructor of a simple variable reference
+ * make_altfunc_minmax_expr
  */
 static Expr *
-make_altfunc_simple_expr(Aggref *aggref, bool zero_if_unmatched)
+make_altfunc_minmax_expr(Aggref *aggref, const char *func_name)
 {
-	TargetEntry	   *tle;
-	Expr   *expr;
+	Oid			namespace_oid = get_namespace_oid("pgstrom", false);
+	Oid			anyelement_typeoid = ANYELEMENTOID;
+	oidvector  *func_argtypes;
+	HeapTuple	tuple;
+	Form_pg_proc proc_form;
+	Expr	   *expr;
+	ListCell   *lc;
+	int			i = 0;
+
+	Assert(list_length(aggref->args) == 1);
+    tle = linitial(aggref->args);
+    Assert(IsA(tle, TargetEntry));
+    expr = tle->expr;
+    if (aggref->aggfilter)
+	{
+		Assert(exprType(aggref->aggfilter) == BOOLOID);
+        expr = make_expr_conditional(expr, aggref->aggfilter, false);
+	}
+	/* find the partial min/max function */
+	func_argtypes = buildoidvector(&anyelement_typeoid, 1);
+	tuple = SearchSysCache3(PROCNAMEARGSNSP,
+							PointerGetDatum(func_name),
+							PointerGetDatum(func_argtypes),
+							ObjectIdGetDatum(namespace_oid));
+	if (!HeapTupleIsValid(tuple))
+		elog(ERROR, "cache lookup failed for function: %s",
+			 funcname_signature_string(func_name,
+									   1, NIL, &anyelement_typeoid));
+	proc_form = (Form_pg_proc) GETSTRUCT(tuple);
+	expr = (Expr *) makeFuncExpr(HeapTupleGetOid(tuple),
+								 proc_form->prorettype,
+								 list_make1(expr),	/* argument */
+								 InvalidOid,
+                                 InvalidOid,
+                                 COERCE_EXPLICIT_CALL);
+	ReleaseSysCache(tuple);
+
+	return expr;
+}
+
+/*
+ * make_altfunc_psum - constructor of a SUM/SUM_X2 reference
+ */
+static Expr *
+make_altfunc_psum_expr(Aggref *aggref, const char *func_name, Oid psum_typeoid)
+{
+
 
 	Assert(list_length(aggref->args) == 1);
 	tle = linitial(aggref->args);
 	Assert(IsA(tle, TargetEntry));
-	expr = tle->expr;
+
+	/* cast to psum_typeoid, if mismatch */
+	expr = make_expr_typecast(tle->expr, psum_typeoid);
+
+	/* make conditional if aggref has no filter */
 	if (aggref->aggfilter)
-		expr = make_expr_conditional(expr, aggref->aggfilter,
-									 zero_if_unmatched);
+	{
+		Assert(exprType(aggref->aggfilter) == BOOLOID);
+		expr = make_expr_conditional(expr, aggref->aggfilter, true);
+	}
+
+	/* find the partial min/max function */
+	func_argtypes = buildoidvector(&anyelement_typeoid, 1);
+	tuple = SearchSysCache3(PROCNAMEARGSNSP,
+							PointerGetDatum(func_name),
+							PointerGetDatum(func_argtypes),
+							ObjectIdGetDatum(namespace_oid));
+	if (!HeapTupleIsValid(tuple))
+		elog(ERROR, "cache lookup failed for function: %s",
+			 funcname_signature_string(func_name,
+									   1, NIL, &anyelement_typeoid));
+	proc_form = (Form_pg_proc) GETSTRUCT(tuple);
+	expr = (Expr *) makeFuncExpr(HeapTupleGetOid(tuple),
+								 proc_form->prorettype,
+								 list_make1(expr),	/* argument */
+								 InvalidOid,
+                                 InvalidOid,
+                                 COERCE_EXPLICIT_CALL);
+	ReleaseSysCache(tuple);
+
 	return expr;
 }
+
 
 /*
  * make_altfunc_psum_x2 - constructor of a simple (variable)^2 reference
@@ -1669,6 +1779,250 @@ make_expr_typecast(Expr *expr, Oid target_type)
 }
 
 /*
+ * gpupreagg_build_path_target
+ *
+ *
+ *
+ */
+static void
+gpupreagg_build_path_target(PlannerInfo *root,
+							PathTarget *target_orig,
+							PathTarget *target_upper,
+							PathTarget *target_host,
+							PathTarget *target_dev)
+{
+	List	   *tlist_upper = NIL;
+	List	   *tlist_host = NIL;
+	List	   *tlist_dev = NIL;
+	ListCell   *lc;
+	cl_int		i;
+
+	foreach (lc, target_orig->exprs)
+	{
+		TargetEntry	   *tle = lfirst(lc);
+		TargetEntry	   *tle_host;
+		TargetEntry	   *tle_upper;
+		List		   *altfn_args = NIL;
+
+		if (IsA(tle->expr, Aggref))
+		{
+			Aggref		   *aggref = (Aggref *)tle->expr;
+			Aggref		   *aggref_new;
+			Oid				namespace_oid;
+			FuncExpr	   *func_expr;
+			const char	   *func_name;
+			oidvector	   *func_argtypes;
+			HeapTuple		tuple;
+			HeapTuple		agg_tuple;
+			Form_pg_aggregate agg_form;
+			Form_pg_proc	proc_form;
+			Oid				aggfn_oid;
+			const aggfunc_catalog_t *aggfn_cat;
+
+			Assert(target_orig->sortgrouprefs == NULL ||
+				   target_orig->sortgrouprefs[tle->resno - 1] == 0);
+			aggfn_cat = aggfunc_lookup_by_oid(aggref->aggfnoid);
+			if (!aggfn_cat)
+				elog(ERROR, "lookup failed on aggregate function: %u",
+					 aggref->aggfnoid);
+			/*
+			 * construction of the initial partial aggregation
+			 */
+			for (i=0; i < aggfn_cat->altfn_nargs; i++)
+			{
+				cl_int		action = aggfn_cat->altfn_argexprs[i];
+				cl_int		argtype = aggfn_cat->altfn_argtypes[i];
+				Expr	   *expr;
+
+				switch (action)
+				{
+					case ALTFUNC_EXPR_NROWS:    /* NROWS(X) */
+						expr = make_altfunc_nrows_expr(aggref);
+						break;
+					case ALTFUNC_EXPR_PMIN:     /* PMIN(X) */
+						expr = make_altfunc_minmax_expr(aggref, "pmin");
+						break;
+					case ALTFUNC_EXPR_PMAX:     /* PMAX(X) */
+						expr = make_altfunc_minmax_expr(aggref, "pmax");
+						break;
+					case ALTFUNC_EXPR_PSUM:     /* PSUM(X) */
+						expr = make_altfunc_psum_expr(aggref, "psum", argtype);
+						break;
+					case ALTFUNC_EXPR_PSUM_X2:  /* PSUM_X2(X) = PSUM(X^2) */
+						expr = make_altfunc_psum_expr(aggref, "psum_x2",
+													  argtype);
+						break;
+					case ALTFUNC_EXPR_PCOV_X:   /* PCOV_X(X,Y) */
+					case ALTFUNC_EXPR_PCOV_Y:   /* PCOV_Y(X,Y) */
+					case ALTFUNC_EXPR_PCOV_X2:  /* PCOV_X2(X,Y) */
+					case ALTFUNC_EXPR_PCOV_Y2:  /* PCOV_Y2(X,Y) */
+					case ALTFUNC_EXPR_PCOV_XY:  /* PCOV_XY(X,Y) */
+						expr = make_altfunc_pcov_xy(aggref, action);
+						break;
+					default:
+						elog(ERROR, "unknown alternative function code: %d",
+							 action);
+						break;
+				}
+				/* force type cast if mismatch */
+				expr = make_expr_typecast(expr, argtype);
+
+				if (!tlist_member((Node *)expr, tlist_dev))
+				{
+					TargetEntry	   *tle_new
+						= makeTargetEntry(copyObject(expr),
+										  list_length(tlist_dev) + 1,
+										  NULL,
+										  false);
+					tlist_dev = lappend(tlist_dev, tle_new);
+				}
+				altfn_args = lappend(altfn_args, expr);
+			}
+
+			/*
+			 * Lookup an alternative function that generates partial state
+			 * of the final aggregate function, or varref if internal state
+			 * of aggregation is as-is.
+			 */
+			if (strcmp(aggfn_cat->altfn_name, "varref") == 0)
+			{
+				Assert(list_length(altfn_args) == 1);
+				tle_host = makeTargetEntry(copyObject(linitial(altfn_args)),
+										   tle->resno,
+										   tle->resname,
+										   tle->resjunk);
+			}
+			else
+			{
+				if (strncmp(aggfn_cat->altfn_name, "c:", 2) == 0)
+					namespace_oid = PG_CATALOG_NAMESPACE;
+				else if (strncmp(aggfn_cat->altfn_name, "s:", 2) == 0)
+					namespace_oid = get_namespace_oid("pgstrom", false);
+				else
+					elog(ERROR, "Bug? incorrect alternative function catalog");
+
+				func_name = aggfn_cat->altfn_name + 2;
+				func_argtypes = buildoidvector(aggfn_cat->altfn_argtypes,
+											   aggfn_cat->altfn_nargs);
+				tuple = SearchSysCache3(PROCNAMEARGSNSP,
+										PointerGetDatum(func_name),
+										PointerGetDatum(func_argtypes),
+										ObjectIdGetDatum(namespace_oid));
+				if (!HeapTupleIsValid(tuple))
+					elog(ERROR, "cache lookup failed for function %s",
+						 funcname_signature_string(func_name,
+												   aggfn_cat->altfn_nargs,
+												   NIL,
+												   aggfn_cat->altfn_argtypes));
+				proc_form = (Form_pg_proc) GETSTRUCT(tuple);
+				func_expr = makeFuncExpr(HeapTupleGetOid(tuple),
+										 proc_form->prorettype,
+										 altfn_args,
+										 InvalidOid,
+										 InvalidOid,
+										 COERCE_EXPLICIT_CALL);
+				tle_host = makeTargetEntry((Expr *)func_expr,
+										   tle->resno,
+										   tle->resname,
+										   tle->resjunk);
+				ReleaseSysCache(tuple);
+			}
+			tlist_host = lappend(tlist_host, tle_host);
+
+			/*
+			 * setting up Aggref node of the upper node
+			 */
+			if (strncmp(aggfn_cat->altfn_name, "c:", 2) == 0)
+				namespace_oid = PG_CATALOG_NAMESPACE;
+			else if (strncmp(aggfn_cat->altfn_name, "s:", 2) == 0)
+				namespace_oid = get_namespace_oid("pgstrom", false);
+			else
+				elog(ERROR, "Bug? incorrect alternative function catalog");
+
+			Assert(aggfn_cat->uppfn_argtype == exprType((Node *)tle->expr));
+
+			func_name = aggfn_cat->uppfn_name;
+			func_argtypes = buildoidvector(&aggfn_cat->uppfn_argtype, 1);
+			tuple = SearchSysCache3(PROCNAMEARGSNSP,
+									PointerGetDatum(func_name),
+									PointerGetDatum(func_argtypes),
+									ObjectIdGetDatum(namespace_oid));
+			if (!HeapTupleIsValid(tuple))
+				elog(ERROR, "cache lookup failed for function \"%s\"",
+					 funcname_signature_string(func_name, 1, NIL,
+											   &aggfn_cat->uppfn_argtype));
+			aggfn_oid = HeapTupleGetOid(tuple);
+			proc_form = (Form_pg_proc) GETSTRUCT(tuple);
+			if (!proc_form->proisagg)
+				elog(ERROR, "Bug? %s is not an aggregate function",
+					 format_procedure(aggfn_oid));
+
+			agg_tuple = SearchSysCache1(AGGFNOID, ObjectIdGetDatum(aggfn_oid));
+			if (!HeapTupleIsValid(tuple))
+				elog(ERROR, "cache lookup failed for aggregate function %s",
+					 format_procedure(aggfn_oid));
+			agg_form = (Form_pg_aggregate) GETSTRUCT(agg_tuple);
+
+			aggref_new = makeNode(Aggref);
+			aggref_new->aggfnoid = HeapTupleGetOid(tuple);
+			aggref_new->aggtype = proc_form->prorettype;
+			aggref_new->aggcollid = aggref->aggcollid;
+			aggref_new->inputcollid = InvalidOid;
+			aggref_new->aggtranstype = agg_form->aggtranstype;
+			aggref_new->aggargtypes = list_make1_oid(aggfn_cat->uppfn_argtype);
+			aggref_new->aggdirectargs = NIL;
+			aggref_new->args = list_make1(copyObject(tle_host->expr));
+			aggref_new->aggorder = NIL;
+			aggref_new->aggdistinct = NIL;
+			aggref_new->aggfilter = NULL;
+			aggref_new->aggstar = false;
+			aggref_new->aggvariadic = false;
+			aggref_new->aggkind = AGGKIND_NORMAL;
+			aggref_new->agglevelsup = 0;
+			aggref_new->aggsplit = AGGSPLIT_SIMPLE;
+			aggref_new->location = -1;
+
+			tle_upper = makeTargetEntry((Expr *)aggref_new,
+										tle->resno,
+										tle->resname,
+										tle->resjunk);
+			tlist_upper = lappend(tlist_upper, tle_upper);
+
+			ReleaseSysCache(agg_tuple);
+			ReleaseSysCache(tuple);
+		}
+		else
+		{
+			if (!tlist_member((Node *)tle->expr, tlist_dev))
+			{
+				TargetEntry    *tle_new
+					= makeTargetEntry(copyObject(tle->expr),
+									  list_length(tlist_dev) + 1,
+									  NULL,
+									  false);
+				tlist_dev = lappend(tlist_dev, tle_new);
+			}
+			tle_host = makeTargetEntry(copyObject(tle->expr),
+									   tle->resno,
+									   tle->resname,
+									   tle->resjunk);
+			tlist_host = lappend(tlist_host, tle_host);
+			tlist_upper = lappend(tlist_upper, tle_host);
+		}
+	}
+	/* setup results */
+	Assert(list_length(target_orig->exprs) == list_length(tlist_upper));
+	target_upper->exprs = tlist_upper;
+	target_upper->sortgrouprefs = target_orig->sortgrouprefs;
+	set_pathtarget_cost_width(root, target_upper);
+	target_host->exprs  = tlist_host;
+	set_pathtarget_cost_width(root, target_host);
+	target_dev->exprs   = tlist_dev;
+	set_pathtarget_cost_width(root, target_dev);
+}
+
+#if 0
+/*
  * build_custom_scan_tlist
  *
  * constructor for the custom_scan_tlist of CustomScan node. It is equivalent
@@ -1800,14 +2154,7 @@ build_custom_scan_tlist(PathTarget *target,
 				if (strncmp(aggfn_cat->altfn_name, "c:", 2) == 0)
 					namespace_oid = PG_CATALOG_NAMESPACE;
 				else if (strncmp(aggfn_cat->altfn_name, "s:", 2) == 0)
-				{
-					namespace_oid = get_namespace_oid("pgstrom", true);
-					if (!OidIsValid(namespace_oid))
-						ereport(ERROR,
-								(errcode(ERRCODE_UNDEFINED_SCHEMA),
-								 errmsg("schema \"pgstrom\" was not found"),
-								 errhint("Run: CREATE EXTENSION pg_strom")));
-				}
+					namespace_oid = get_namespace_oid("pgstrom", false);
 				else
 					elog(ERROR, "Bug? incorrect alternative function catalog");
 
@@ -1867,6 +2214,7 @@ build_custom_scan_tlist(PathTarget *target,
 	*p_tlist_dev = tlist_dev;
 	*p_tlist_dev_action = tlist_dev_action;
 }
+#endif
 
 /*
  * PlanGpuPreAggPath

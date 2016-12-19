@@ -166,7 +166,7 @@ CREATE AGGREGATE pgstrom.favg(numeric[])
   finalfunc = pgstrom.
 );
 
--- MIN()/MAX()
+-- PMIN()/PMAX()
 CREATE FUNCTION pgstrom.pmin(anyelement)
   RETURNS anyelement
   AS 'MODULE_PATHNAME', 'pgstrom_partial_min'
@@ -177,8 +177,11 @@ CREATE FUNCTION pgstrom.pmax(anyelement)
   AS 'MODULE_PATHNAME', 'pgstrom_partial_min'
   LANGUAGE C STRICT;
 
--- SUM()
-
+-- PSUM()/PSUM_X2()
+CREATE FUNCTION pgstrom.psum(anyelement)
+  RETURNS anyelement
+  AS 'MODULE_PATHNAME', 'pgstrom_partial_sum'
+  LANGUAGE C STRICT;
 
 CREATE AGGREGATE pgstrom.sum(int8)
 (

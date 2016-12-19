@@ -39,10 +39,12 @@ Datum pgstrom_final_avg_float8_accum(PG_FUNCTION_ARGS);
 Datum pgstrom_final_avg_float8(PG_FUNCTION_ARGS);
 Datum pgstrom_final_avg_numeric_accum(PG_FUNCTION_ARGS);
 Datum pgstrom_final_avg_numeric(PG_FUNCTION_ARGS);
+Datum pgstrom_partial_min(PG_FUNCTION_ARGS);
+Datum pgstrom_partial_max(PG_FUNCTION_ARGS);
+Datum pgstrom_partial_sum(PG_FUNCTION_ARGS);
 
 
-
-
+#if 0
 Datum pgstrom_partial_avg_fp8(PG_FUNCTION_ARGS);
 Datum pgstrom_partial_sum_int8(PG_FUNCTION_ARGS);
 Datum pgstrom_partial_sum_numeric(PG_FUNCTION_ARGS);
@@ -115,7 +117,7 @@ typedef Int128AggState		PolyNumAggState;
 #define makePolyNumAggState	makeNumericAggState
 typedef NumericAggState		PolyNumAggState;
 #endif
-
+#endif
 
 
 
@@ -331,8 +333,38 @@ pgstrom_final_avg_numeric(PG_FUNCTION_ARGS)
 	return DirectFunctionCall2(numeric_div, sum, nrows);
 }
 
+/*
+ * pgstrom.pmin(anyelement)
+ */
+Datum
+pgstrom_partial_min(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_DATUM(PG_GETARG_DATUM(0));
+}
+
+/*
+ * pgstrom.pmax(anyelement)
+ */
+Datum
+pgstrom_partial_max(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_DATUM(PG_GETARG_DATUM(0));
+}
+
+/*
+ * pgstrom.psum(anyelement)
+ */
+Datum
+pgstrom_partial_sum(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_DATUM(PG_GETARG_DATUM(0));
+}
 
 
+
+
+
+#ifdef NOT_USED
 /*
  * gpupreagg_psum_int8 - alternative function for SUM(int8)
  */
@@ -396,8 +428,6 @@ pgstrom_partial_covar_fp8(PG_FUNCTION_ARGS)
 	PG_RETURN_ARRAYTYPE_P(state);
 }
 
-
-#ifdef NOT_USED
 /* gpupreagg_psum_* - placeholder function that generates partial sum
  * of the arguments. _x2 generates square value of the input
  */
