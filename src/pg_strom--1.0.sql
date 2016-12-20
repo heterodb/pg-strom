@@ -84,20 +84,12 @@ CREATE FUNCTION pgstrom.nrows(bool)
   AS 'MODULE_PATHNAME','pgstrom_partial_nrows'
   LANGUAGE C STRICT;
 
-CREATE FUNCTION pgstrom.nrows(bool,bool)
-  RETURN bigint
-  AS 'MODULE_PATHNAME','pgstrom_partial_nrows'
-  LANGUAGE C STRICT;
-
-CREATE FUNCTION pgstrom.nrows(bool,bool,bool)
-  RETURN bigint
-  AS 'MODULE_PATHNAME','pgstrom_partial_nrows'
-  LANGUAGE C STRICT;
-
-CREATE FUNCTION pgstrom.nrows(bool,bool,bool,bool)
-  RETURN bigint
-  AS 'MODULE_PATHNAME','pgstrom_partial_nrows'
-  LANGUAGE C STRICT;
+CREATE AGGREGATE pgstrom.sum(int8)
+(
+  sfunc = pg_catalog.int8pl,
+  stype = int8,
+  initcond = 0
+);
 
 -- AVG()
 CREATE FUNCTION pgstrom.pavg(int8,int8)
@@ -178,17 +170,71 @@ CREATE FUNCTION pgstrom.pmax(anyelement)
   LANGUAGE C STRICT;
 
 -- PSUM()/PSUM_X2()
-CREATE FUNCTION pgstrom.psum(anyelement)
-  RETURNS anyelement
-  AS 'MODULE_PATHNAME', 'pgstrom_partial_sum'
+CREATE FUNCTION pgstrom.psum(int8)
+  RETURNS int8
+  AS 'MODULE_PATHNAME', 'pgstrom_partial_sum_any'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE FUNCTION pgstrom.psum(float8)
+  RETURNS float8
+  AS 'MODULE_PATHNAME', 'pgstrom_partial_sum_any'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE FUNCTION pgstrom.psum(float4)
+  RETURNS float4
+  AS 'MODULE_PATHNAME', 'pgstrom_partial_sum_any'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE FUNCTION pgstrom.psum(numeric)
+  RETURNS numeric
+  AS 'MODULE_PATHNAME', 'pgstrom_partial_sum_any'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE FUNCTION pgstrom.psum(money)
+  RETURNS money
+  AS 'MODULE_PATHNAME', 'pgstrom_partial_sum_any'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE FUNCTION pgstrom.psum_x2(float4)
+  RETURNS float4
+  AS 'MODULE_PATHNAME', 'pgstrom_partial_sum_x2_float4'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE FUNCTION pgstrom.psum_x2(float8)
+  RETURNS float8
+  AS 'MODULE_PATHNAME', 'pgstrom_partial_sum_x2_float8'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE FUNCTION pgstrom.psum_x2(numeric)
+  RETURNS numeric
+  AS 'MODULE_PATHNAME', 'pgstrom_partial_sum_x2_numeric'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+-- PCOV_*
+CREATE FUNCTION pgstrom.pcov_x(bool,float8,float8)
+  RETURNS float8
+  AS 'MODULE_PATHNAME', 'pgstrom_partial_cov_x'
   LANGUAGE C STRICT;
 
-CREATE AGGREGATE pgstrom.sum(int8)
-(
-  sfunc = pg_catalog.int8pl,
-  stype = int8,
-  initcond = 0
-);
+CREATE FUNCTION pgstrom.pcov_y(bool,float8,float8)
+  RETURNS float8
+  AS 'MODULE_PATHNAME', 'pgstrom_partial_cov_y'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pgstrom.pcov_x2(bool,float8,float8)
+  RETURNS float8
+  AS 'MODULE_PATHNAME', 'pgstrom_partial_cov_x2'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pgstrom.pcov_y2(bool,float8,float8)
+  RETURNS float8
+  AS 'MODULE_PATHNAME', 'pgstrom_partial_cov_y2'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pgstrom.pcov_xy(bool,float8,float8)
+  RETURNS float8
+  AS 'MODULE_PATHNAME', 'pgstrom_partial_cov_xy'
+  LANGUAGE C STRICT;
 
 -- STDDEV/STDDEV_POP/STDDEV_SAMP
 -- VARIANCE/VAR_POP/VAR_SAM

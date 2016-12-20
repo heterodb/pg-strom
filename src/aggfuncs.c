@@ -41,7 +41,15 @@ Datum pgstrom_final_avg_numeric_accum(PG_FUNCTION_ARGS);
 Datum pgstrom_final_avg_numeric(PG_FUNCTION_ARGS);
 Datum pgstrom_partial_min(PG_FUNCTION_ARGS);
 Datum pgstrom_partial_max(PG_FUNCTION_ARGS);
-Datum pgstrom_partial_sum(PG_FUNCTION_ARGS);
+Datum pgstrom_partial_sum_any(PG_FUNCTION_ARGS);
+Datum pgstrom_partial_sum_x2_float4(PG_FUNCTION_ARGS);
+Datum pgstrom_partial_sum_x2_float8(PG_FUNCTION_ARGS);
+Datum pgstrom_partial_sum_x2_numeric(PG_FUNCTION_ARGS);
+Datum pgstrom_partial_cov_x(PG_FUNCTION_ARGS);
+Datum pgstrom_partial_cov_y(PG_FUNCTION_ARGS);
+Datum pgstrom_partial_cov_x2(PG_FUNCTION_ARGS);
+Datum pgstrom_partial_cov_y2(PG_FUNCTION_ARGS);
+Datum pgstrom_partial_cov_xy(PG_FUNCTION_ARGS);
 
 
 #if 0
@@ -355,10 +363,123 @@ pgstrom_partial_max(PG_FUNCTION_ARGS)
  * pgstrom.psum(anyelement)
  */
 Datum
-pgstrom_partial_sum(PG_FUNCTION_ARGS)
+pgstrom_partial_sum_any(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_DATUM(PG_GETARG_DATUM(0));
 }
+
+/*
+ * pgstrom.psum_x2(float4)
+ */
+Datum
+pgstrom_partial_sum_x2_float4(PG_FUNCTION_ARGS)
+{
+	float4		value = (PG_ARGISNULL(0) ? 0.0 : PG_GETARG_FLOAT4(0));
+
+	PG_RETURN_FLOAT4(value * value);
+}
+
+/*
+ * pgstrom.psum_x2(float8)
+ */
+Datum
+pgstrom_partial_sum_x2_float8(PG_FUNCTION_ARGS)
+{
+	float8		value = (PG_ARGISNULL(0) ? 0.0 : PG_GETARG_FLOAT8(0));
+
+	PG_RETURN_FLOAT8(value * value);	
+}
+
+/*
+ * pgstrom.psum_x2(numeric)
+ */
+Datum
+pgstrom_partial_sum_x2_numeric(PG_FUNCTION_ARGS)
+{
+	Datum		value;
+
+	if (!PG_ARGISNULL(0))
+		value = PG_GETARG_DATUM(0);	/* a valid numeric value */
+	else
+		value = DirectFunctionCall3(numeric_in,
+									CStringGetDatum("0"),
+									ObjectIdGetDatum(InvalidOid),
+									Int32GetDatum(-1));
+	return DirectFunctionCall2(numeric_mul, value, value);
+}
+
+/*
+ * pgstrom.pcov_x(float8)
+ */
+Datum
+pgstrom_partial_cov_x(PG_FUNCTION_ARGS)
+{
+	if (!PG_GETARG_BOOL(0))
+		PG_RETURN_NULL();
+	PG_RETURN_DATUM(PG_GETARG_DATUM(1));
+}
+
+/*
+ * pgstrom.pcov_y(float8)
+ */
+Datum
+pgstrom_partial_cov_y(PG_FUNCTION_ARGS)
+{
+	if (!PG_GETARG_BOOL(0))
+		PG_RETURN_NULL();
+	PG_RETURN_DATUM(PG_GETARG_DATUM(2));
+}
+
+/*
+ * pgstrom.pcov_x2(float8)
+ */
+Datum
+pgstrom_partial_cov_x2(PG_FUNCTION_ARGS)
+{
+	float8		value = PG_GETARG_FLOAT8(1);
+
+	if (!PG_GETARG_BOOL(0))
+		PG_RETURN_NULL();
+	PG_RETURN_FLOAT8(value * value);
+}
+
+/*
+ * pgstrom.pcov_y2(float8)
+ */
+Datum
+pgstrom_partial_cov_y2(PG_FUNCTION_ARGS)
+{
+	float8		value = PG_GETARG_FLOAT8(2);
+
+	if (!PG_GETARG_BOOL(0))
+		PG_RETURN_NULL();
+	PG_RETURN_FLOAT8(value * value);
+}
+
+/*
+ * pgstrom.pcov_xy(float8)
+ */
+Datum
+pgstrom_partial_cov_xy(PG_FUNCTION_ARGS)
+{
+	float8	x_value = PG_GETARG_FLOAT8(1);
+	float8	y_value = PG_GETARG_FLOAT8(2);
+
+	if (!PG_GETARG_BOOL(0))
+		PG_RETURN_NULL();
+	PG_RETURN_FLOAT8(x_value * y_value);
+}
+
+
+
+
+
+
+
+
+
+
+
 
 
 

@@ -975,104 +975,6 @@ cost_gpupreagg(CustomPath *cpath,
 }
 
 /*
- * make_partial_grouping_target
- *
- * see optimizer/plan/planner.c
- */
-static PathTarget *
-make_partial_grouping_target(PlannerInfo *root, PathTarget *grouping_target)
-{
-	Query	   *parse = root->parse;
-	PathTarget *partial_target;
-	List	   *non_group_cols;
-	List	   *non_group_exprs;
-	int			i;
-	ListCell   *lc;
-
-	partial_target = create_empty_pathtarget();
-	non_group_cols = NIL;
-
-	i = 0;
-	foreach(lc, grouping_target->exprs)
-	{
-		Expr	   *expr = (Expr *) lfirst(lc);
-		Index		sgref = get_pathtarget_sortgroupref(grouping_target, i);
-
-		if (sgref && parse->groupClause &&
-			get_sortgroupref_clause_noerr(sgref, parse->groupClause) != NULL)
-		{
-			/*
-			 * It's a grouping column, so add it to the partial_target as-is.
-			 * (This allows the upper agg step to repeat the grouping calcs.)
-			 */
-			add_column_to_pathtarget(partial_target, expr, sgref);
-		}
-		else
-		{
-			/*
-			 * Non-grouping column, so just remember the expression for later
-			 * call to pull_var_clause.
-			 */
-			non_group_cols = lappend(non_group_cols, expr);
-		}
-		i++;
-	}
-
-	/*
-	 * If there's a HAVING clause, we'll need the Vars/Aggrefs it uses, too.
-	 */
-	if (parse->havingQual)
-		non_group_cols = lappend(non_group_cols, parse->havingQual);
-
-	/*
-	 * Pull out all the Vars, PlaceHolderVars, and Aggrefs mentioned in
-	 * non-group cols (plus HAVING), and add them to the partial_target if not
-	 * already present.  (An expression used directly as a GROUP BY item will
-	 * be present already.)  Note this includes Vars used in resjunk items, so
-	 * we are covering the needs of ORDER BY and window specifications.
-	 */
-	non_group_exprs = pull_var_clause((Node *) non_group_cols,
-									  PVC_INCLUDE_AGGREGATES |
-									  PVC_RECURSE_WINDOWFUNCS |
-									  PVC_INCLUDE_PLACEHOLDERS);
-
-	add_new_columns_to_pathtarget(partial_target, non_group_exprs);
-
-	/*
-	 * Adjust Aggrefs to put them in partial mode.  At this point all Aggrefs
-	 * are at the top level of the target list, so we can just scan the list
-	 * rather than recursing through the expression trees.
-	 */
-	foreach(lc, partial_target->exprs)
-	{
-		Aggref	   *aggref = (Aggref *) lfirst(lc);
-		Aggref	   *newaggref;
-
-		if (IsA(aggref, Aggref))
-		{
-			/*
-			 * We shouldn't need to copy the substructure of the Aggref node,
-			 * but flat-copy the node itself to avoid damaging other trees.
-			 */
-			newaggref = makeNode(Aggref);
-			memcpy(newaggref, aggref, sizeof(Aggref));
-
-			/* For now, assume serialization is required */
-			mark_partial_aggref(newaggref, AGGSPLIT_INITIAL_SERIAL);
-
-			lfirst(lc) = newaggref;
-		}
-	}
-
-	/* clean up cruft */
-	list_free(non_group_exprs);
-	list_free(non_group_cols);
-
-	/* XXX this causes some redundant cost calculation ... */
-	return set_pathtarget_cost_width(root, partial_target);
-}
-
-/*
  * estimate_hashagg_tablesize
  *
  * See optimizer/plan/planner.c
@@ -1117,14 +1019,6 @@ gpupreagg_construct_path(PlannerInfo *root,
 	/* obviously, not suitable for GpuPreAgg */
 	if (num_groups < 1.0 || num_groups > (double)INT_MAX)
 		return false;
-
-#if 0
-	/* PathTarget of the partial stage */
-	partial_target = make_partial_grouping_target(root, target);
-	get_agg_clause_costs(root, (Node *) partial_target->exprs,
-						 AGGSPLIT_INITIAL_SERIAL,
-						 &agg_partial_costs);
-#endif
 
 	/* cost estimation */
 	if (!cost_gpupreagg(cpath, gpa_info,
@@ -1389,334 +1283,6 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 
 
 
-
-/*
- * make_expr_conditional - constructor of CASE ... WHEN ... END expression
- * which returns the supplied expression if condition is valid.
- */
-static Expr *
-make_expr_conditional(Expr *expr, Expr *filter, bool zero_if_unmatched)
-{
-	Oid			expr_typeoid = exprType((Node *)expr);
-	int32		expr_typemod = exprTypmod((Node *)expr);
-	Oid			expr_collid = exprCollation((Node *)expr);
-	CaseWhen   *case_when;
-	CaseExpr   *case_expr;
-	Expr	   *defresult;
-
-	Assert(exprType((Node *) filter) == BOOLOID);
-	if (!zero_if_unmatched)
-		defresult = (Expr *) makeNullConst(expr_typeoid,
-										   expr_typemod,
-										   expr_collid);
-	else
-	{
-		int16	typlen;
-		bool	typbyval;
-
-		get_typlenbyval(expr_typeoid, &typlen, &typbyval);
-		defresult = (Expr *) makeConst(expr_typeoid,
-									   expr_typemod,
-									   expr_collid,
-									   (int) typlen,
-									   (Datum) 0,
-									   false,
-									   typbyval);
-	}
-
-	/* in case when the 'filter' is matched */
-	case_when = makeNode(CaseWhen);
-	case_when->expr = filter;
-	case_when->result = expr;
-	case_when->location = -1;
-
-	/* case body */
-	case_expr = makeNode(CaseExpr);
-	case_expr->casetype = exprType((Node *) expr);
-	case_expr->arg = NULL;
-	case_expr->args = list_make1(case_when);
-	case_expr->defresult = defresult;
-	case_expr->location = -1;
-
-	return (Expr *) case_expr;
-}
-
-/*
- * make_altfunc_simple_expr
- */
-static Expr *
-make_altfunc_simple_expr(const char *func_name, List *func_args)
-{
-	Oid			namespace_oid = get_namespace_oid("pgstrom", false);
-	Oid			typebuf[8];
-	oidvector  *func_argtypes;
-	HeapTuple	tuple;
-	Form_pg_proc proc_form;
-	Expr	   *expr;
-	ListCell   *lc;
-	int			i = 0;
-
-	/* set up oidvector */
-	foreach (lc, func_args)
-		typebuf[i++] = exprType((Node *) lfirst(lc));
-	func_argtypes = buildoidvector(typebuf, i);
-
-	/* find an alternative aggregate function */
-	tuple = SearchSysCache3(PROCNAMEARGSNSP,
-							PointerGetDatum(func_name),
-							PointerGetDatum(func_argtypes),
-							ObjectIdGetDatum(namespace_oid));
-	if (!HeapTupleIsValid(tuple))
-		return NULL;
-	proc_form = (Form_pg_proc) GETSTRUCT(tuple);
-	expr = (Expr *) makeFuncExpr(HeapTupleGetOid(tuple),
-								 proc_form->prorettype,
-								 func_args,
-								 InvalidOid,
-								 InvalidOid,
-								 COERCE_EXPLICIT_CALL);
-	ReleaseSysCache(tuple);
-
-	return expr;
-}
-
-/*
- * make_altfunc_nrows_expr - constructor of the partial number of rows
- */
-static Expr *
-make_altfunc_nrows_expr(Aggref *aggref)
-{
-	List	   *nrows_args = NIL;
-	ListCell   *lc;
-
-	foreach (lc, aggref->args)
-	{
-		TargetEntry *tle = lfirst(lc);
-		NullTest	*ntest = makeNode(NullTest);
-
-		Assert(IsA(tle, TargetEntry));
-		ntest->arg = copyObject(tle->expr);
-		ntest->nulltesttype = IS_NOT_NULL;
-		ntest->argisrow = false;
-
-		nrows_args = lappend(nrows_args, ntest);
-	}
-	if (aggref->aggfilter)
-	{
-		Assert(exprType(aggref->aggfilter) == BOOLOID);
-		nrows_args = lappend(nrows_args, copyObject(aggref->aggfilter));
-	}
-	return make_altfunc_simple_expr("nrows", nrows_args);
-}
-
-/*
- * make_altfunc_minmax_expr
- */
-static Expr *
-make_altfunc_minmax_expr(Aggref *aggref, const char *func_name)
-{
-	Oid			namespace_oid = get_namespace_oid("pgstrom", false);
-	Oid			anyelement_typeoid = ANYELEMENTOID;
-	oidvector  *func_argtypes;
-	HeapTuple	tuple;
-	Form_pg_proc proc_form;
-	Expr	   *expr;
-	ListCell   *lc;
-	int			i = 0;
-
-	Assert(list_length(aggref->args) == 1);
-    tle = linitial(aggref->args);
-    Assert(IsA(tle, TargetEntry));
-    expr = tle->expr;
-    if (aggref->aggfilter)
-	{
-		Assert(exprType(aggref->aggfilter) == BOOLOID);
-        expr = make_expr_conditional(expr, aggref->aggfilter, false);
-	}
-	/* find the partial min/max function */
-	func_argtypes = buildoidvector(&anyelement_typeoid, 1);
-	tuple = SearchSysCache3(PROCNAMEARGSNSP,
-							PointerGetDatum(func_name),
-							PointerGetDatum(func_argtypes),
-							ObjectIdGetDatum(namespace_oid));
-	if (!HeapTupleIsValid(tuple))
-		elog(ERROR, "cache lookup failed for function: %s",
-			 funcname_signature_string(func_name,
-									   1, NIL, &anyelement_typeoid));
-	proc_form = (Form_pg_proc) GETSTRUCT(tuple);
-	expr = (Expr *) makeFuncExpr(HeapTupleGetOid(tuple),
-								 proc_form->prorettype,
-								 list_make1(expr),	/* argument */
-								 InvalidOid,
-                                 InvalidOid,
-                                 COERCE_EXPLICIT_CALL);
-	ReleaseSysCache(tuple);
-
-	return expr;
-}
-
-/*
- * make_altfunc_psum - constructor of a SUM/SUM_X2 reference
- */
-static Expr *
-make_altfunc_psum_expr(Aggref *aggref, const char *func_name, Oid psum_typeoid)
-{
-
-
-	Assert(list_length(aggref->args) == 1);
-	tle = linitial(aggref->args);
-	Assert(IsA(tle, TargetEntry));
-
-	/* cast to psum_typeoid, if mismatch */
-	expr = make_expr_typecast(tle->expr, psum_typeoid);
-
-	/* make conditional if aggref has no filter */
-	if (aggref->aggfilter)
-	{
-		Assert(exprType(aggref->aggfilter) == BOOLOID);
-		expr = make_expr_conditional(expr, aggref->aggfilter, true);
-	}
-
-	/* find the partial min/max function */
-	func_argtypes = buildoidvector(&anyelement_typeoid, 1);
-	tuple = SearchSysCache3(PROCNAMEARGSNSP,
-							PointerGetDatum(func_name),
-							PointerGetDatum(func_argtypes),
-							ObjectIdGetDatum(namespace_oid));
-	if (!HeapTupleIsValid(tuple))
-		elog(ERROR, "cache lookup failed for function: %s",
-			 funcname_signature_string(func_name,
-									   1, NIL, &anyelement_typeoid));
-	proc_form = (Form_pg_proc) GETSTRUCT(tuple);
-	expr = (Expr *) makeFuncExpr(HeapTupleGetOid(tuple),
-								 proc_form->prorettype,
-								 list_make1(expr),	/* argument */
-								 InvalidOid,
-                                 InvalidOid,
-                                 COERCE_EXPLICIT_CALL);
-	ReleaseSysCache(tuple);
-
-	return expr;
-}
-
-
-/*
- * make_altfunc_psum_x2 - constructor of a simple (variable)^2 reference
- */
-static Expr *
-make_altfunc_psum_x2(Aggref *aggref)
-{
-	TargetEntry	   *tle;
-	FuncExpr	   *func_expr;
-	Oid				type_oid;
-	Oid				func_oid;
-
-	Assert(list_length(aggref->args) == 1);
-	tle = linitial(aggref->args);
-	Assert(IsA(tle, TargetEntry));
-
-	type_oid = exprType((Node *) tle->expr);
-	if (type_oid == FLOAT4OID)
-		func_oid = F_FLOAT4MUL;
-	else if (type_oid == FLOAT8OID)
-		func_oid = F_FLOAT8MUL;
-	else if (type_oid == NUMERICOID)
-		func_oid = F_NUMERIC_MUL;
-	else
-		elog(ERROR, "Bug? unexpected expression data type");
-
-	func_expr = makeFuncExpr(func_oid,
-							 type_oid,
-							 list_make2(copyObject(tle->expr),
-										copyObject(tle->expr)),
-							 InvalidOid,
-							 InvalidOid,
-							 COERCE_EXPLICIT_CALL);
-	if (!aggref->aggfilter)
-		return (Expr *)func_expr;
-
-	return make_expr_conditional((Expr *)func_expr, aggref->aggfilter, false);
-}
-
-/*
- * make_altfunc_pcov_xy - constructor of a co-variance arguments
- */
-static Expr *
-make_altfunc_pcov_xy(Aggref *aggref, int action)
-{
-	TargetEntry	   *tle_x;
-	TargetEntry	   *tle_y;
-	NullTest	   *nulltest_x;
-	NullTest	   *nulltest_y;
-	List		   *arg_checks = NIL;
-	Expr		   *expr;
-
-	Assert(list_length(aggref->args) == 2);
-	tle_x = linitial(aggref->args);
-	tle_y = lsecond(aggref->args);
-	if (exprType((Node *)tle_x->expr) != FLOAT8OID ||
-		exprType((Node *)tle_y->expr) != FLOAT8OID)
-		elog(ERROR, "Bug? unexpected argument type for co-variance");
-
-	if (aggref->aggfilter)
-		arg_checks = lappend(arg_checks, aggref->aggfilter);
-	/* nulltest for X-argument */
-	nulltest_x = makeNode(NullTest);
-	nulltest_x->arg = copyObject(tle_x->expr);
-	nulltest_x->nulltesttype = IS_NOT_NULL;
-	nulltest_x->argisrow = false;
-	nulltest_x->location = aggref->location;
-	arg_checks = lappend(arg_checks, nulltest_x);
-
-	/* nulltest for Y-argument */
-	nulltest_y = makeNode(NullTest);
-	nulltest_y->arg = copyObject(tle_y->expr);
-	nulltest_y->nulltesttype = IS_NOT_NULL;
-	nulltest_y->argisrow = false;
-	nulltest_y->location = aggref->location;
-	arg_checks = lappend(arg_checks, nulltest_y);
-
-	switch (action)
-	{
-		case ALTFUNC_EXPR_PCOV_X:	/* PCOV_X(X,Y) */
-			expr = tle_x->expr;
-			break;
-		case ALTFUNC_EXPR_PCOV_Y:	/* PCOV_Y(X,Y) */
-			expr = tle_y->expr;
-			break;
-		case ALTFUNC_EXPR_PCOV_X2:	/* PCOV_X2(X,Y) */
-			expr = (Expr *)makeFuncExpr(F_FLOAT8MUL,
-										FLOAT8OID,
-										list_make2(tle_x->expr,
-												   tle_x->expr),
-										InvalidOid,
-										InvalidOid,
-										COERCE_EXPLICIT_CALL);
-			break;
-		case ALTFUNC_EXPR_PCOV_Y2:	/* PCOV_Y2(X,Y) */
-			expr = (Expr *)makeFuncExpr(F_FLOAT8MUL,
-										FLOAT8OID,
-										list_make2(tle_y->expr,
-												   tle_y->expr),
-										InvalidOid,
-										InvalidOid,
-										COERCE_EXPLICIT_CALL);
-			break;
-		case ALTFUNC_EXPR_PCOV_XY:	/* PCOV_XY(X,Y) */
-			expr = (Expr *)makeFuncExpr(F_FLOAT8MUL,
-										FLOAT8OID,
-										list_make2(tle_x->expr,
-												   tle_y->expr),
-										InvalidOid,
-										InvalidOid,
-										COERCE_EXPLICIT_CALL);
-			break;
-		default:
-			elog(ERROR, "Bug? unexpected action type for co-variance ");
-	}
-	return make_expr_conditional(expr, make_andclause(arg_checks), false);
-}
-
 /*
  * make_expr_typecast - constructor of type cast
  */
@@ -1776,6 +1342,233 @@ make_expr_typecast(Expr *expr, Oid target_type)
 	ReleaseSysCache(tup);
 
 	return expr;
+}
+
+/*
+ * make_expr_conditional - constructor of CASE ... WHEN ... END expression
+ * which returns the supplied expression if condition is valid.
+ */
+static Expr *
+make_expr_conditional(Expr *expr, Expr *filter, bool zero_if_unmatched)
+{
+	Oid			expr_typeoid = exprType((Node *)expr);
+	int32		expr_typemod = exprTypmod((Node *)expr);
+	Oid			expr_collid = exprCollation((Node *)expr);
+	CaseWhen   *case_when;
+	CaseExpr   *case_expr;
+	Expr	   *defresult;
+
+	if (!filter)
+		return expr;
+
+	Assert(exprType((Node *) filter) == BOOLOID);
+	if (!zero_if_unmatched)
+		defresult = (Expr *) makeNullConst(expr_typeoid,
+										   expr_typemod,
+										   expr_collid);
+	else
+	{
+		int16	typlen;
+		bool	typbyval;
+
+		get_typlenbyval(expr_typeoid, &typlen, &typbyval);
+		defresult = (Expr *) makeConst(expr_typeoid,
+									   expr_typemod,
+									   expr_collid,
+									   (int) typlen,
+									   (Datum) 0,
+									   false,
+									   typbyval);
+	}
+
+	/* in case when the 'filter' is matched */
+	case_when = makeNode(CaseWhen);
+	case_when->expr = filter;
+	case_when->result = expr;
+	case_when->location = -1;
+
+	/* case body */
+	case_expr = makeNode(CaseExpr);
+	case_expr->casetype = exprType((Node *) expr);
+	case_expr->arg = NULL;
+	case_expr->args = list_make1(case_when);
+	case_expr->defresult = defresult;
+	case_expr->location = -1;
+
+	return (Expr *) case_expr;
+}
+
+/*
+ * make_altfunc_simple_expr - constructor of simple function call
+ */
+static Expr *
+make_altfunc_simple_expr(const char *func_name,
+						 Expr *func_arg, Oid argtype_oid)
+{
+	Oid			namespace_oid = get_namespace_oid("pgstrom", false);
+	oidvector  *func_argtypes;
+	HeapTuple	tuple;
+	Form_pg_proc proc_form;
+	Expr	   *expr;
+
+	if (func_arg)
+	{
+		func_argtypes = buildoidvector(&argtype_oid, 1);
+		/* cast to psum_typeoid, if mismatch */
+		func_arg = make_expr_typecast(func_arg, argtype_oid);
+	}
+	else
+		func_argtypes = buildoidvector(NULL, 0);
+
+	/* find an alternative partial function */
+	tuple = SearchSysCache3(PROCNAMEARGSNSP,
+							PointerGetDatum(func_name),
+							PointerGetDatum(func_argtypes),
+							ObjectIdGetDatum(namespace_oid));
+	if (!HeapTupleIsValid(tuple))
+		elog(ERROR, "alternative function not found: %s",
+			 func_arg != NULL
+			 ? funcname_signature_string(func_name, 1, NIL, &argtype_oid)
+			 : funcname_signature_string(func_name, 0, NIL, NULL));
+
+	proc_form = (Form_pg_proc) GETSTRUCT(tuple);
+	expr = (Expr *) makeFuncExpr(HeapTupleGetOid(tuple),
+								 proc_form->prorettype,
+								 list_make1(func_arg),
+								 InvalidOid,
+								 InvalidOid,
+								 COERCE_EXPLICIT_CALL);
+	ReleaseSysCache(tuple);
+
+	return expr;
+}
+
+/*
+ * make_altfunc_nrows_expr - constructor of the partial number of rows
+ */
+static Expr *
+make_altfunc_nrows_expr(Aggref *aggref)
+{
+	List	   *nrows_args = NIL;
+	ListCell   *lc;
+	Expr	   *expr;
+
+	foreach (lc, aggref->args)
+	{
+		TargetEntry *tle = lfirst(lc);
+		NullTest	*ntest = makeNode(NullTest);
+
+		Assert(IsA(tle, TargetEntry));
+		ntest->arg = copyObject(tle->expr);
+		ntest->nulltesttype = IS_NOT_NULL;
+		ntest->argisrow = false;
+
+		nrows_args = lappend(nrows_args, ntest);
+	}
+
+	if (aggref->aggfilter)
+	{
+		Assert(exprType((Node *)aggref->aggfilter) == BOOLOID);
+		nrows_args = lappend(nrows_args, copyObject(aggref->aggfilter));
+	}
+
+	if (nrows_args == NIL)
+		expr = NULL;
+	else if (list_length(nrows_args) == 1)
+		expr = linitial(nrows_args);
+	else
+		expr = make_andclause(nrows_args);
+
+	return make_altfunc_simple_expr("nrows", expr, BOOLOID);
+}
+
+/*
+ * make_altfunc_minmax_expr
+ */
+static Expr *
+make_altfunc_minmax_expr(Aggref *aggref, const char *func_name)
+{
+	TargetEntry	   *tle;
+	Expr		   *expr;
+
+	Assert(list_length(aggref->args) == 1);
+    tle = linitial(aggref->args);
+    Assert(IsA(tle, TargetEntry));
+	/* make conditional if aggref has any filter */
+	expr = make_expr_conditional(expr, aggref->aggfilter, false);
+
+	return make_altfunc_simple_expr(func_name, expr, ANYELEMENTOID);
+}
+
+/*
+ * make_altfunc_psum - constructor of a SUM/SUM_X2 reference
+ */
+static Expr *
+make_altfunc_psum_expr(Aggref *aggref, const char *func_name, Oid psum_typeoid)
+{
+	TargetEntry	   *tle;
+	Expr		   *expr;
+
+	Assert(list_length(aggref->args) == 1);
+	tle = linitial(aggref->args);
+	Assert(IsA(tle, TargetEntry));
+
+	/* cast to psum_typeoid, if mismatch */
+	expr = make_expr_typecast(tle->expr, psum_typeoid);
+	/* make conditional if aggref has any filter */
+	expr = make_expr_conditional(expr, aggref->aggfilter, true);
+
+	return make_altfunc_simple_expr(func_name, expr, ANYELEMENTOID);
+}
+
+/*
+ * make_altfunc_pcov_xy - constructor of a co-variance arguments
+ */
+static Expr *
+make_altfunc_pcov_xy(Aggref *aggref, const char *func_name)
+{
+	Oid				namespace_oid = get_namespace_oid("pgstrom", false);
+	oidvector	   *func_argtypes;
+	Oid				func_argtypes_oid[2];
+	Oid				func_oid;
+	TargetEntry	   *tle_x;
+	TargetEntry	   *tle_y;
+	Expr		   *filter_expr;
+
+	Assert(list_length(aggref->args) == 2);
+	tle_x = linitial(aggref->args);
+	tle_y = lsecond(aggref->args);
+	if (exprType((Node *)tle_x->expr) != FLOAT8OID ||
+		exprType((Node *)tle_y->expr) != FLOAT8OID)
+		elog(ERROR, "Bug? unexpected argument type for co-variance");
+
+	/* lookup pcov_XXX functions */
+	func_argtypes_oid[0] = BOOLOID;
+	func_argtypes_oid[1] = FLOAT8OID;
+	func_argtypes_oid[2] = FLOAT8OID;
+	func_argtypes = buildoidvector(func_argtypes_oid, 3);
+	func_oid = GetSysCacheOid3(PROCNAMEARGSNSP,
+							   PointerGetDatum(func_name),
+							   PointerGetDatum(func_argtypes),
+							   ObjectIdGetDatum(namespace_oid));
+	if (!OidIsValid(func_oid))
+		elog(ERROR, "alternative function not found: %s",
+			 funcname_signature_string(func_name, 2, NIL, func_argtypes_oid));
+
+	/* filter if any */
+	if (aggref->aggfilter)
+		filter_expr = aggref->aggfilter;
+	else
+		filter_expr = (Expr *)makeBoolConst(true, false);
+
+	return (Expr *)makeFuncExpr(func_oid,
+								FLOAT8OID,
+								list_make3(filter_expr,
+										   tle_x->expr,
+										   tle_y->expr),
+								InvalidOid,
+								InvalidOid,
+								COERCE_EXPLICIT_CALL);
 }
 
 /*
@@ -1846,26 +1639,33 @@ gpupreagg_build_path_target(PlannerInfo *root,
 						expr = make_altfunc_minmax_expr(aggref, "pmax");
 						break;
 					case ALTFUNC_EXPR_PSUM:     /* PSUM(X) */
-						expr = make_altfunc_psum_expr(aggref, "psum", argtype);
+						expr = make_altfunc_psum_expr(aggref, "psum",
+													  argtype);
 						break;
 					case ALTFUNC_EXPR_PSUM_X2:  /* PSUM_X2(X) = PSUM(X^2) */
 						expr = make_altfunc_psum_expr(aggref, "psum_x2",
 													  argtype);
 						break;
 					case ALTFUNC_EXPR_PCOV_X:   /* PCOV_X(X,Y) */
+						expr = make_altfunc_pcov_xy(aggref, "pcov_x");
+						break;
 					case ALTFUNC_EXPR_PCOV_Y:   /* PCOV_Y(X,Y) */
+						expr = make_altfunc_pcov_xy(aggref, "pcov_y");
+						break;
 					case ALTFUNC_EXPR_PCOV_X2:  /* PCOV_X2(X,Y) */
+						expr = make_altfunc_pcov_xy(aggref, "pcov_x2");
+						break;
 					case ALTFUNC_EXPR_PCOV_Y2:  /* PCOV_Y2(X,Y) */
+						expr = make_altfunc_pcov_xy(aggref, "pcov_y2");
+						break;
 					case ALTFUNC_EXPR_PCOV_XY:  /* PCOV_XY(X,Y) */
-						expr = make_altfunc_pcov_xy(aggref, action);
+						expr = make_altfunc_pcov_xy(aggref, "pcov_xy");
 						break;
 					default:
 						elog(ERROR, "unknown alternative function code: %d",
 							 action);
 						break;
 				}
-				/* force type cast if mismatch */
-				expr = make_expr_typecast(expr, argtype);
 
 				if (!tlist_member((Node *)expr, tlist_dev))
 				{
@@ -2020,201 +1820,6 @@ gpupreagg_build_path_target(PlannerInfo *root,
 	target_dev->exprs   = tlist_dev;
 	set_pathtarget_cost_width(root, target_dev);
 }
-
-#if 0
-/*
- * build_custom_scan_tlist
- *
- * constructor for the custom_scan_tlist of CustomScan node. It is equivalent
- * to the initial values of reduction steps.
- */
-static void
-build_custom_scan_tlist(PathTarget *target,
-						List *tlist_orig,
-						List **p_tlist_host,
-						List **p_tlist_dev,
-						List **p_tlist_dev_action)
-{
-	List	   *tlist_host = NIL;
-	List	   *tlist_dev = NIL;
-	List	   *tlist_dev_action = NIL;
-	ListCell   *lc;
-	cl_int		index = 0;
-
-	foreach (lc, tlist_orig)
-	{
-		TargetEntry	   *tle = lfirst(lc);
-
-		if (IsA(tle->expr, Aggref))
-		{
-			Aggref	   *aggref = (Aggref *)tle->expr;
-			List	   *altfn_args = NIL;
-			cl_int		j;
-			const aggfunc_catalog_t *aggfn_cat;
-
-			Assert(target->sortgrouprefs == NULL ||
-				   target->sortgrouprefs[index] == 0);
-			aggfn_cat = aggfunc_lookup_by_oid(aggref->aggfnoid);
-			if (!aggfn_cat)
-				elog(ERROR, "lookup failed on aggregate function: %u",
-					 aggref->aggfnoid);
-
-			/*
-			 * construction of the initial partial aggregation
-			 */
-			for (j=0; j < aggfn_cat->altfn_nargs; j++)
-			{
-				ListCell	   *cell1;
-				ListCell	   *cell2;
-				cl_int			action = aggfn_cat->altfn_argexprs[j];
-				Oid				argtype = aggfn_cat->altfn_argtypes[j];
-				Expr		   *expr;
-				TargetEntry	   *temp;
-				cl_int			temp_action;
-
-				switch (action)
-				{
-					case ALTFUNC_EXPR_NROWS:	/* NROWS(X) */
-						expr = make_altfunc_nrows_expr(aggref);
-						break;
-					case ALTFUNC_EXPR_PMIN:		/* PMIN(X) */
-					case ALTFUNC_EXPR_PMAX:		/* PMAX(X) */
-						expr = make_altfunc_simple_expr(aggref, false);
-						break;
-					case ALTFUNC_EXPR_PSUM:		/* PSUM(X) */
-						expr = make_altfunc_simple_expr(aggref, true);
-						break;
-					case ALTFUNC_EXPR_PSUM_X2:	/* PSUM_X2(X) = PSUM(X^2) */
-						expr = make_altfunc_psum_x2(aggref);
-						break;
-					case ALTFUNC_EXPR_PCOV_X:	/* PCOV_X(X,Y) */
-					case ALTFUNC_EXPR_PCOV_Y:	/* PCOV_Y(X,Y) */
-					case ALTFUNC_EXPR_PCOV_X2:	/* PCOV_X2(X,Y) */
-					case ALTFUNC_EXPR_PCOV_Y2:	/* PCOV_Y2(X,Y) */
-					case ALTFUNC_EXPR_PCOV_XY:	/* PCOV_XY(X,Y) */
-						expr = make_altfunc_pcov_xy(aggref, action);
-						break;
-					default:
-						elog(ERROR, "unknown alternative function code: %d",
-							 action);
-						break;
-				}
-				/* force type cast if mismatch */
-				expr = make_expr_typecast(expr, argtype);
-
-				/*
-				 * lookup same entity on the tlist_dev, then append it
-				 * if not found. Resno is tracked to construct FuncExpr.
-				 */
-				forboth (cell1, tlist_dev,
-						 cell2, tlist_dev_action)
-				{
-					temp = lfirst(cell1);
-					temp_action = lfirst_int(cell2);
-
-					if (temp_action == action &&
-						equal(expr, temp->expr))
-						goto found_tlist_dev_entry;
-				}
-				temp = makeTargetEntry(expr,
-									   list_length(tlist_dev) + 1,
-									   NULL,
-									   false);
-				tlist_dev = lappend(tlist_dev, temp);
-				tlist_dev_action = lappend_int(tlist_dev_action, action);
-
-			found_tlist_dev_entry:
-				altfn_args = lappend(altfn_args, expr);
-			}
-
-			/*
-			 * Lookup an alternative function that generates partial state
-			 * of the final aggregate function, or varref if internal state
-			 * of aggregation is as-is.
-			 */
-			if (strcmp(aggfn_cat->altfn_name, "varref") == 0)
-			{
-				Assert(list_length(altfn_args) == 1);
-
-				tlist_host = lappend(tlist_host,
-									 makeTargetEntry(linitial(altfn_args),
-													 tle->resno,
-													 tle->resname,
-													 tle->resjunk));
-			}
-			else
-			{
-				Oid				namespace_oid;
-				FuncExpr	   *altfn_expr;
-				const char	   *altfn_name;
-				oidvector	   *altfn_argtypes;
-				HeapTuple		tuple;
-				Form_pg_proc	altfn_form;
-
-				if (strncmp(aggfn_cat->altfn_name, "c:", 2) == 0)
-					namespace_oid = PG_CATALOG_NAMESPACE;
-				else if (strncmp(aggfn_cat->altfn_name, "s:", 2) == 0)
-					namespace_oid = get_namespace_oid("pgstrom", false);
-				else
-					elog(ERROR, "Bug? incorrect alternative function catalog");
-
-				altfn_name = aggfn_cat->altfn_name + 2;
-				altfn_argtypes = buildoidvector(aggfn_cat->altfn_argtypes,
-												aggfn_cat->altfn_nargs);
-				tuple = SearchSysCache3(PROCNAMEARGSNSP,
-										PointerGetDatum(altfn_name),
-										PointerGetDatum(altfn_argtypes),
-										ObjectIdGetDatum(namespace_oid));
-				if (!HeapTupleIsValid(tuple))
-					ereport(ERROR,
-							(errcode(ERRCODE_UNDEFINED_SCHEMA),
-							 errmsg("no alternative function \"%s\" not found",
-									funcname_signature_string(
-										altfn_name,
-										aggfn_cat->altfn_nargs,
-										NIL,
-										aggfn_cat->altfn_argtypes)),
-							 errhint("Run: CREATE EXTENSION pg_strom")));
-				altfn_form = (Form_pg_proc) GETSTRUCT(tuple);
-
-				altfn_expr = makeNode(FuncExpr);
-				altfn_expr->funcid = HeapTupleGetOid(tuple);
-				altfn_expr->funcresulttype = altfn_form->prorettype;
-				altfn_expr->funcretset = altfn_form->proretset;
-				altfn_expr->funcvariadic = OidIsValid(altfn_form->provariadic);
-				altfn_expr->funcformat = COERCE_EXPLICIT_CALL;
-				altfn_expr->funccollid = aggref->aggcollid;
-				altfn_expr->inputcollid = aggref->inputcollid;
-				altfn_expr->args = altfn_args;
-				altfn_expr->location = aggref->location;
-
-				ReleaseSysCache(tuple);
-
-				tlist_host = lappend(tlist_host,
-									 makeTargetEntry((Expr *)altfn_expr,
-													 tle->resno,
-													 tle->resname,
-													 tle->resjunk));
-			}
-		}
-		else
-		{
-			tlist_dev = lappend(tlist_dev, copyObject(tle));
-			tlist_dev_action = lappend_int(tlist_dev_action,
-										   target->sortgrouprefs == NULL ||
-										   target->sortgrouprefs[index] > 0
-										   ? ALTFUNC_GROUPING_KEY
-										   : ALTFUNC_CONST_VALUE);
-			tlist_host = lappend(tlist_host, copyObject(tle));
-		}
-		index++;
-	}
-	/* return the results */
-	*p_tlist_host = tlist_host;
-	*p_tlist_dev = tlist_dev;
-	*p_tlist_dev_action = tlist_dev_action;
-}
-#endif
 
 /*
  * PlanGpuPreAggPath
