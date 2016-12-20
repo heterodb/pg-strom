@@ -1953,7 +1953,9 @@ pgstrom_plan_is_gpupreagg(const Plan *plan)
  */
 typedef struct
 {
-	Bitmapset  *outer_refs;
+	Bitmapset  *outer_refs_any;
+	Bitmapset  *outer_refs_expr;
+	bool		in_expression;
 	Index		outer_scanrelid;
 	List	   *outer_tlist;
 } make_tlist_device_projection_context;
@@ -1962,10 +1964,12 @@ static Node *
 __make_tlist_device_projection(Node *node, void *__con)
 {
 	make_tlist_device_projection_context *con = __con;
+	bool	in_expression_saved = con->in_expression;
 	int		k;
+	Node   *newnode;
 
 	if (!node)
-		return false;
+		return NULL;
 	if (con->outer_scanrelid > 0)
 	{
 		Assert(con->outer_tlist == NIL);
@@ -1977,7 +1981,9 @@ __make_tlist_device_projection(Node *node, void *__con)
 				elog(ERROR, "Bug? varnode references unknown relid: %s",
 					 nodeToString(varnode));
 			k = varnode->varattno - FirstLowInvalidHeapAttributeNumber;
-			con->outer_refs = bms_add_member(con->outer_refs, k);
+			con->outer_refs_any = bms_add_member(con->outer_refs_any, k);
+			if (con->in_expression)
+				con->outer_refs_expr = bms_add_member(con->outer_refs_expr, k);
 
 			Assert(varnode->varlevelsup == 0);
 			return (Node *)makeVar(INDEX_VAR,
@@ -2000,8 +2006,10 @@ __make_tlist_device_projection(Node *node, void *__con)
 			if (equal(node, tle->expr))
 			{
 				k = tle->resno - FirstLowInvalidHeapAttributeNumber;
-				con->outer_refs = bms_add_member(con->outer_refs, k);
-
+				con->outer_refs_any = bms_add_member(con->outer_refs_any, k);
+				if (con->in_expression)
+					con->outer_refs_expr = bms_add_member(con->outer_refs_expr,
+														  k);
 				varnode = makeVar(INDEX_VAR,
 								  tle->resno,
 								  exprType((Node *)tle->expr),
@@ -2017,27 +2025,44 @@ __make_tlist_device_projection(Node *node, void *__con)
 				 nodeToString(node),
 				 nodeToString(con->outer_tlist));
 	}
-	return expression_tree_mutator(node, __make_tlist_device_projection, con);
+	con->in_expression = true;
+	newnode = expression_tree_mutator(node,
+									  __make_tlist_device_projection,
+									  con);
+	con->in_expression = is_expression_saved;
+
+	return newnode;
 }
 
 static List *
 make_tlist_device_projection(List *tlist_dev,
 							 Index outer_scanrelid,
 							 List *outer_tlist,
-							 Bitmapset **p_outer_refs)
+							 Bitmapset **p_outer_refs_any,
+							 Bitmapset **p_outer_refs_expr)
 {
 	make_tlist_device_projection_context con;
-	List	   *tlist_alt;
+	List	   *tlist_alt = NIL;
+	ListCell   *lc;
 
 	memset(&con, 0, sizeof(con));
 	con.outer_scanrelid = outer_scanrelid;
 	con.outer_tlist = outer_tlist;
 
-	tlist_alt = (List *)
-		__make_tlist_device_projection((Node *)tlist_dev, &con);
-	*p_outer_refs = con.outer_refs;
+	foreach (lc, tlist_dev)
+	{
+		TargetEntry	   *tle = lfirst(lc);
+		TargetEntry	   *tle_new = flatCopyTargetEntry(tle);
 
-	return tlist_alt;
+		con.in_expression = false;
+		tle_new->expr =
+			__make_tlist_device_projection((Node *)tle->expr, &con);
+		tlist_dev_alt = lappend(tlist_dev_alt, tle_new);
+	}
+	*p_outer_refs_any = con.outer_refs_any;
+	*p_outer_refs_expr = con.outer_refs_expr;
+
+	return tlist_dev_alt;
 }
 
 /*
@@ -2064,10 +2089,10 @@ gpupreagg_codegen_projection(StringInfo kern,
 	StringInfoData	temp;
 	Relation		outer_rel = NULL;
 	TupleDesc		outer_desc = NULL;
-	Bitmapset	   *outer_refs = NULL;
-	List		   *tlist_alt;
-	ListCell	   *lc1;
-	ListCell	   *lc2;
+	Bitmapset	   *outer_refs_any = NULL;
+	Bitmapset	   *outer_refs_expr = NULL;
+	List		   *tlist_dev_alt;
+	ListCell	   *lc;
 	int				i, k, nattrs;
 
 	initStringInfo(&decl);
@@ -2106,21 +2131,26 @@ gpupreagg_codegen_projection(StringInfo kern,
 		nattrs = list_length(outer_tlist);
 	}
 
-	HOGE;
-	/* pick up columns which are referenced on the initial projection */
-	tlist_alt = make_tlist_device_projection(tlist_dev,
-											 outer_scanrelid,
-											 outer_tlist,
-											 &outer_refs);
-	Assert(list_length(tlist_alt) == list_length(tlist_dev));
+	/*
+	 * pick up columns which are referenced by the initial projection, 
+	 * then returns an alternative tlist that contains Var-node with
+	 * INDEX_VAR + resno, for convenience of the later stages.
+	 */
+	tlist_dev_alt = make_tlist_device_projection(tlist_dev,
+												 outer_scanrelid,
+												 outer_tlist,
+												 &outer_refs_any,
+												 &outer_refs_expr);
+	Assert(list_length(tlist_dev_alt) == list_length(tlist_dev));
+	Assert(bms_subset(outer_refs_expr, outer_refs_any));
 
 	/* extract the supplied tuple and load variables */
-	if (!bms_is_empty(outer_refs))
+	if (!bms_is_empty(outer_refs_any))
 	{
 		for (i=0; i > FirstLowInvalidHeapAttributeNumber; i--)
 		{
 			k = i - FirstLowInvalidHeapAttributeNumber;
-			if (bms_is_member(k, outer_refs))
+			if (bms_is_member(k, outer_refs_any))
 				elog(ERROR, "Bug? system column or whole-row is referenced");
 		}
 
@@ -2132,9 +2162,10 @@ gpupreagg_codegen_projection(StringInfo kern,
 		for (i=1; i <= nattrs; i++)
 		{
 			k = i - FirstLowInvalidHeapAttributeNumber;
-			if (bms_is_member(k, outer_refs))
+			if (bms_is_member(k, outer_refs_any))
 			{
 				devtype_info   *dtype;
+				const char	   *kvarname;
 
 				/* data type of the outer relation input stream */
 				if (outer_tlist == NIL)
@@ -2159,20 +2190,60 @@ gpupreagg_codegen_projection(StringInfo kern,
 							 format_type_be(type_oid));
 				}
 
-				appendStringInfo(
-					&decl,
-					"  pg_%s_t KVAR_%u;\n",
-					dtype->type_name, i);
-				appendStringInfo(
-					&temp,
-					"  KVAR_%u = pg_%s_datum_ref(kcxt,addr,false);\n",
-					i, dtype->type_name);
 				/*
 				 * MEMO: kds_src is either ROW or BLOCK format, so these KDS
-				 * shall never have 'internal' format of NUMERIC data types.
+				 * shall never has 'internal' format of NUMERIC data types.
+				 * We don't need to pay attention to read internal-numeric
+				 * here.
 				 */
+				if (bms_is_member(k, outer_refs_expr))
+				{
+					appendStringInfo(
+						&decl,
+						"  pg_%s_t KVAR_%u;\n",
+						dtype->type_name, i);
+					appendStringInfo(
+						&temp,
+						"  KVAR_%u = pg_%s_datum_ref(kcxt,addr,false);\n",
+						i, dtype->type_name);
+					kvarname = psprintf("KVAR_%u", i);
+				}
+				else
+				{
+					appendStringInfo(
+                        &temp,
+						"  temp.%s_v = pg_%s_datum_ref(kcxt,addr,false);\n",
+						dtype->type_name, dtype->type_name);
+					kvarname = psprintf("temp.%s_v", dtype->type_name);
+				}
+
+				foreach (lc, tlist_dev_alt)
+				{
+					TargetEntry	   *tle = lfirst(lc);
+					Var			   *varnode;
+
+					if (!IsA(tle->expr, Var))
+						continue;
+					varnode = (Var *) tle->expr;
+					if (varnode->varno != INDEX_VAR ||
+						varnode->varattno < 1 ||
+						varnode->varattno > nattrs)
+						elog(ERROR, "Bug? unexpected varnode: %s",
+							 nodeToString(varnode));
+
+					appendStringInfo(
+						&temp,
+						"  dst_isnull[%d] = %s.isnull;\n"
+						"  if (!%s.isnull)\n"
+						"    dst_values[%d] = pg_%s_to_datum(%s.value);\n",
+						tle->resno - 1, kvarname,
+						kvarname,
+						tle->resno - 1, dtype->type_name, kvarname);
+				}
+				pfree(kvarname);
+
 				appendStringInfoString(&body, temp.data);
-				resetStringInfo(&temp);
+                resetStringInfo(&temp);
 			}
 			appendStringInfoString(
 				&temp,
@@ -2186,85 +2257,115 @@ gpupreagg_codegen_projection(StringInfo kern,
 	/*
 	 * Execute expression and store the value on dst_values/dst_isnull
 	 */
-	forboth (lc1, tlist_alt,
-			 lc2, tlist_dev_action)
+	foreach (lc, tlist_dev_alt)
 	{
-		TargetEntry	   *tle = lfirst(lc1);
-		Expr		   *expr = tle->expr;
-		Oid				type_oid = exprType((Node *)expr);
-		int				action = lfirst_int(lc2);
+		TargetEntry	   *tle = lfirst(lc);
+		Expr		   *expr;
 		devtype_info   *dtype;
-		char		   *kvar_label;
+		const char	   *null_const_value;
 
-		dtype = pgstrom_devtype_lookup_and_track(type_oid, context);
+		if (IsA(tle->expr, Var))
+			continue;	/* it should be already loaded */
+		else if (tle->ressortgroupref > 0)
+			expr = tle->expr;
+		else if (IsA(tle->expr, FuncExpr))
+		{
+			FuncExpr   *func_expr = (FuncExpr *) tle->expr;
+			const char *func_name = get_func_name(func_expr->funcid);
+
+			if (!func_name)
+				elog(ERROR, "cache lookup failed for function: %u",
+					 func_expr->funcid);
+			if (strcmp(func_name, "nrows") == 0)
+			{
+				// 1 if argument is true
+				null_const_value = dtype->zero_const;
+			}
+			else if (strcmp(func_name, "pmin") == 0)
+			{
+				Assert(list_length(func_expr->args) == 1);
+				expr = linitial(func_expr->args);
+				null_const_value = dtype->max_const;
+			}
+			else if (strcmp(func_name, "pmax") == 0)
+			{
+				Assert(list_length(func_expr->args) == 1);
+				expr = linitial(func_expr->args);
+				null_const_value = dtype->max_const;
+			}
+			else if (strcmp(func_name, "psum") == 0)
+			{
+				Assert(list_length(func_expr->args) == 1);
+				expr = linitial(func_expr->args);
+				null_const_value = dtype->zero_const;
+			}
+			else if (strcmp(func_name, "psum_x2") == 0)
+			{
+				Assert(list_length(func_expr->args) == 1);
+				expr = linitial(func_expr->args);
+				Assert(exprType((Node *)expr) == FLOAT8OID);
+				expr = makeFuncExpr(F_FLOAT8MUL,
+									FLOAT8OID,
+									list_make2(expr, expr),
+									InvalidOid,
+                                    InvalidOid,
+                                    COERCE_EXPLICIT_CALL);
+			}
+			else if (strcmp(func_name, "pcov_x") == 0)
+			{
+				// arg2, if arg1 is true
+
+			}
+			else if (strcmp(func_name, "pcov_y") == 0)
+			{
+				// arg3, if arg1 is true
+			}
+			else if (strcmp(func_name, "pcov_x2") == 0)
+			{
+				// arg2 * arg2, if arg1 is true
+
+			}
+			else if (strcmp(func_name, "pcov_y2") == 0)
+			{
+				// arg3 * arg3, if arg1 is true
+
+			}
+			else if (strcmp(func_name, "pcov_xy") == 0)
+			{
+				// arg2 * arg3, if arg1 is true
+
+			}
+			else
+				elog(ERROR, "Bug? unexpected partial function: %s",
+					 format_procedure(func_expr->funcid));
+		}
+		else
+			elog(ERROR, "Bug? unexpected expression: %s",
+				 nodeToString(tle->expr));
+
+		dtype = pgstrom_devtype_lookup_and_track(exprType((Node *)tle->expr),
+												 context);
 		if (!dtype)
 			elog(ERROR, "device type lookup failed: %s",
 				 format_type_be(type_oid));
 		appendStringInfo(
 			&body,
 			"\n"
-			"  /* initial attribute %d (%s) */\n",
+			"  /* initial attribute %d (%s) */\n"
+			"  temp.%s_v = %s;\n"
+			"  dst_isnull[%d] = temp.%s_v.isnull;\n"
+			"  if (!temp.%s_v.isnull)\n"
+			"    dst_values[%d] = pg_%s_to_datum(temp.%s_v.value);\n"
+			"  else\n"
+			"    dst_values[%d] = %s;\n",
 			tle->resno,
-			(action == ALTFUNC_GROUPING_KEY ? "group-key" :
-			 action <  ALTFUNC_EXPR_NROWS   ? "const-value" : "aggfn-arg"));
-
-		if (IsA(expr, Var))
-		{
-			Var	   *varnode = (Var *)expr;
-
-			Assert(varnode->varno == INDEX_VAR);
-			kvar_label = psprintf("KVAR_%u", varnode->varattno);
-		}
-		else
-		{
-			kvar_label = psprintf("temp.%s_v", dtype->type_name);
-			appendStringInfo(
-				&body,
-				"  %s = %s;\n",
-				kvar_label,
-				pgstrom_codegen_expression((Node *)expr, context));
-		}
-
-		appendStringInfo(
-			&body,
-			"  dst_isnull[%d] = %s.isnull;\n"
-			"  if (!%s.isnull)\n"
-			"    dst_values[%d] = pg_%s_to_datum(%s.value);\n",
-			tle->resno - 1, kvar_label,
-			kvar_label,
-			tle->resno - 1, dtype->type_name, kvar_label);
-		/*
-		 * dst_value must be also initialized to an proper initial value,
-		 * even if dst_isnull would be NULL, because atomic operation
-		 * expects dst_value has a particular initial value.
-		 */
-		if (action >= ALTFUNC_EXPR_NROWS)
-		{
-			const char	   *null_const_value;
-
-			switch (action)
-			{
-				case ALTFUNC_EXPR_PMIN:
-					null_const_value = dtype->min_const;
-					break;
-				case ALTFUNC_EXPR_PMAX:
-					null_const_value = dtype->max_const;
-					break;
-				default:
-					null_const_value = dtype->zero_const;
-					break;
-			}
-
-			if (!null_const_value)
-				elog(ERROR, "Bug? unable to use type %s in GpuPreAgg",
-					 format_type_be(dtype->type_oid));
-
-			appendStringInfo(
-				&body,
-				"  else\n"
-				"    dst_values[%d] = pg_%s_to_datum(%s);\n",
-				tle->resno - 1, dtype->type_name, null_const_value);
-		}
+			tle->ressortgroupref == 0 ? "aggfunc-arg" : "grouping-key",
+			dtype->type_name,
+			pgstrom_codegen_expression((Node *)expr, context),
+			tle->resno - 1, dtype->type_name,
+			dtype->type_name,
+			tle->resno - 1, dtype->type_name,
+			tle->resno - 1, null_const_value);
 	}
 	/* const/params */
 	pgstrom_codegen_param_declarations(&decl, context);
