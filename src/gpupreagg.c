@@ -229,7 +229,6 @@ static char	   *gpupreagg_codegen(codegen_context *context,
 								  PlannerInfo *root,
 								  CustomScan *cscan,
 								  List *tlist_dev,
-								  List *tlist_dev_action,
 								  List *outer_tlist,
 								  List *outer_quals);
 static GpuPreAggSharedState *
@@ -1439,7 +1438,7 @@ make_altfunc_simple_expr(const char *func_name,
 	proc_form = (Form_pg_proc) GETSTRUCT(tuple);
 	expr = (Expr *) makeFuncExpr(HeapTupleGetOid(tuple),
 								 proc_form->prorettype,
-								 list_make1(func_arg),
+								 func_arg ? list_make1(func_arg) : NIL,
 								 InvalidOid,
 								 InvalidOid,
 								 COERCE_EXPLICIT_CALL);
@@ -1594,23 +1593,22 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 	List	   *tlist_dev = NIL;
 	List	   *tlist_dev_grouprefs = NIL;
 	ListCell   *lc;
-	cl_int		i;
+	cl_int		i, resno = 1;
 
 	foreach (lc, target_orig->exprs)
 	{
-		TargetEntry	   *tle = lfirst(lc);
-		TargetEntry	   *tle_host;
-		TargetEntry	   *tle_upper;
-		List		   *altfn_args = NIL;
-		Index			sortgroupref;
+		Expr	   *expr = lfirst(lc);
+		Expr	   *expr_host;
+		List	   *altfn_args = NIL;
+		ListCell   *cell;
+		Index		sortgroupref;
 
-		sortgroupref = target_orig->sortgrouprefs[tle->resno - 1];
-		if (IsA(tle->expr, Aggref))
+		sortgroupref = target_orig->sortgrouprefs[resno - 1];
+		if (IsA(expr, Aggref))
 		{
-			Aggref		   *aggref = (Aggref *)tle->expr;
+			Aggref		   *aggref = (Aggref *)expr;
 			Aggref		   *aggref_new;
 			Oid				namespace_oid;
-			FuncExpr	   *func_expr;
 			const char	   *func_name;
 			oidvector	   *func_argtypes;
 			HeapTuple		tuple;
@@ -1621,7 +1619,7 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 			const aggfunc_catalog_t *aggfn_cat;
 
 			Assert(target_orig->sortgrouprefs == NULL ||
-				   target_orig->sortgrouprefs[tle->resno - 1] == 0);
+				   target_orig->sortgrouprefs[resno - 1] == 0);
 			aggfn_cat = aggfunc_lookup_by_oid(aggref->aggfnoid);
 			if (!aggfn_cat)
 				elog(ERROR, "lookup failed on aggregate function: %u",
@@ -1675,17 +1673,17 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 						break;
 				}
 
-				if (!tlist_member((Node *)expr, tlist_dev))
+				/* add expression if unique */
+				foreach (cell, tlist_dev)
 				{
-					TargetEntry	   *tle_new
-						= makeTargetEntry(copyObject(expr),
-										  list_length(tlist_dev) + 1,
-										  NULL,
-										  false);
-					tlist_dev = lappend(tlist_dev, tle_new);
-					Assert(sortgroupref == 0);
+					if (equal(expr, lfirst(cell)))
+						break;
+				}
+				if (!cell)
+				{
+					tlist_dev = lappend(tlist_dev, copyObject(expr));
 					tlist_dev_grouprefs = lappend_int(tlist_dev_grouprefs,
-													 sortgroupref);
+													  sortgroupref);
 				}
 				altfn_args = lappend(altfn_args, expr);
 			}
@@ -1698,13 +1696,11 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 			if (strcmp(aggfn_cat->altfn_name, "varref") == 0)
 			{
 				Assert(list_length(altfn_args) == 1);
-				tle_host = makeTargetEntry(copyObject(linitial(altfn_args)),
-										   tle->resno,
-										   tle->resname,
-										   tle->resjunk);
+				expr_host = linitial(altfn_args);
 			}
 			else
 			{
+				Assert(list_length(altfn_args) == aggfn_cat->altfn_nargs);
 				if (strncmp(aggfn_cat->altfn_name, "c:", 2) == 0)
 					namespace_oid = PG_CATALOG_NAMESPACE;
 				else if (strncmp(aggfn_cat->altfn_name, "s:", 2) == 0)
@@ -1726,33 +1722,29 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 												   NIL,
 												   aggfn_cat->altfn_argtypes));
 				proc_form = (Form_pg_proc) GETSTRUCT(tuple);
-				func_expr = makeFuncExpr(HeapTupleGetOid(tuple),
-										 proc_form->prorettype,
-										 altfn_args,
-										 InvalidOid,
-										 InvalidOid,
-										 COERCE_EXPLICIT_CALL);
-				tle_host = makeTargetEntry((Expr *)func_expr,
-										   tle->resno,
-										   tle->resname,
-										   tle->resjunk);
+				expr_host = (Expr *)makeFuncExpr(HeapTupleGetOid(tuple),
+												 proc_form->prorettype,
+												 altfn_args,
+												 InvalidOid,
+												 InvalidOid,
+												 COERCE_EXPLICIT_CALL);
 				ReleaseSysCache(tuple);
 			}
-			tlist_host = lappend(tlist_host, tle_host);
+			tlist_host = lappend(tlist_host, expr_host);
 
 			/*
 			 * setting up Aggref node of the upper node
 			 */
-			if (strncmp(aggfn_cat->altfn_name, "c:", 2) == 0)
+			if (strncmp(aggfn_cat->uppfn_name, "c:", 2) == 0)
 				namespace_oid = PG_CATALOG_NAMESPACE;
-			else if (strncmp(aggfn_cat->altfn_name, "s:", 2) == 0)
+			else if (strncmp(aggfn_cat->uppfn_name, "s:", 2) == 0)
 				namespace_oid = get_namespace_oid("pgstrom", false);
 			else
 				elog(ERROR, "Bug? incorrect alternative function catalog");
 
-			Assert(aggfn_cat->uppfn_argtype == exprType((Node *)tle->expr));
+			Assert(aggfn_cat->uppfn_argtype == exprType((Node *)expr_host));
 
-			func_name = aggfn_cat->uppfn_name;
+			func_name = aggfn_cat->uppfn_name + 2;
 			func_argtypes = buildoidvector(&aggfn_cat->uppfn_argtype, 1);
 			tuple = SearchSysCache3(PROCNAMEARGSNSP,
 									PointerGetDatum(func_name),
@@ -1782,7 +1774,10 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 			aggref_new->aggtranstype = agg_form->aggtranstype;
 			aggref_new->aggargtypes = list_make1_oid(aggfn_cat->uppfn_argtype);
 			aggref_new->aggdirectargs = NIL;
-			aggref_new->args = list_make1(copyObject(tle_host->expr));
+			aggref_new->args = list_make1(makeTargetEntry(expr_host,
+														  1,
+														  NULL,
+														  false));
 			aggref_new->aggorder = NIL;
 			aggref_new->aggdistinct = NIL;
 			aggref_new->aggfilter = NULL;
@@ -1793,11 +1788,7 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 			aggref_new->aggsplit = AGGSPLIT_SIMPLE;
 			aggref_new->location = -1;
 
-			tle_upper = makeTargetEntry((Expr *)aggref_new,
-										tle->resno,
-										tle->resname,
-										tle->resjunk);
-			tlist_upper = lappend(tlist_upper, tle_upper);
+			tlist_upper = lappend(tlist_upper, aggref_new);
 
 			ReleaseSysCache(agg_tuple);
 			ReleaseSysCache(tuple);
@@ -1806,25 +1797,22 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 		{
 			if (sortgroupref > 0)
 			{
-				if (!tlist_member((Node *)tle->expr, tlist_dev))
+				foreach (cell, tlist_dev)
 				{
-					TargetEntry    *tle_new
-						= makeTargetEntry(copyObject(tle->expr),
-										  list_length(tlist_dev) + 1,
-										  NULL,
-										  false);
-					tlist_dev = lappend(tlist_dev, tle_new);
+					if (equal(expr, lfirst(cell)))
+						break;
+				}
+				if (!cell)
+				{
+					tlist_dev = lappend(tlist_dev, copyObject(expr));
 					tlist_dev_grouprefs = lappend_int(tlist_dev_grouprefs,
 													  sortgroupref);
 				}
 			}
-			tle_host = makeTargetEntry(copyObject(tle->expr),
-									   tle->resno,
-									   tle->resname,
-									   tle->resjunk);
-			tlist_host = lappend(tlist_host, tle_host);
-			tlist_upper = lappend(tlist_upper, tle_host);
+			tlist_host = lappend(tlist_host, copyObject(expr));
+			tlist_upper = lappend(tlist_upper, copyObject(expr));
 		}
+		resno++;
 	}
 	/* setup results */
 	Assert(list_length(target_orig->exprs) == list_length(tlist_upper));
@@ -1914,7 +1902,6 @@ PlanGpuPreAggPath(PlannerInfo *root,
 									root,
 									cscan,
 									tlist_dev,
-									tlist_dev_action,
 									outer_tlist,
 									gpa_info->outer_quals);
 //	elog(INFO, "source:\n%s", kern_source);
@@ -2029,7 +2016,7 @@ __make_tlist_device_projection(Node *node, void *__con)
 	newnode = expression_tree_mutator(node,
 									  __make_tlist_device_projection,
 									  con);
-	con->in_expression = is_expression_saved;
+	con->in_expression = in_expression_saved;
 
 	return newnode;
 }
@@ -2042,7 +2029,7 @@ make_tlist_device_projection(List *tlist_dev,
 							 Bitmapset **p_outer_refs_expr)
 {
 	make_tlist_device_projection_context con;
-	List	   *tlist_alt = NIL;
+	List	   *tlist_dev_alt = NIL;
 	ListCell   *lc;
 
 	memset(&con, 0, sizeof(con));
@@ -2055,7 +2042,7 @@ make_tlist_device_projection(List *tlist_dev,
 		TargetEntry	   *tle_new = flatCopyTargetEntry(tle);
 
 		con.in_expression = false;
-		tle_new->expr =
+		tle_new->expr = (Expr *)
 			__make_tlist_device_projection((Node *)tle->expr, &con);
 		tlist_dev_alt = lappend(tlist_dev_alt, tle_new);
 	}
@@ -2076,6 +2063,144 @@ make_tlist_device_projection(List *tlist_dev,
  *                      Datum *dst_values,
  *                      cl_char *dst_isnull);
  */
+static Expr *
+codegen_projection_partial_funcion(FuncExpr *f,
+								   codegen_context *context,
+								   const char **p_null_const_value)
+{
+	HeapTuple		tuple;
+	Form_pg_proc	proc_form;
+	const char	   *proc_name;
+	devtype_info   *dtype;
+	Expr		   *expr;
+
+	tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(f->funcid));
+	if (!HeapTupleIsValid(tuple))
+		elog(ERROR, "cache lookup failed for function %u", f->funcid);
+	proc_form = (Form_pg_proc) GETSTRUCT(tuple);
+	proc_name = NameStr(proc_form->proname);
+	if (proc_form->pronamespace != get_namespace_oid("pgstrom", false))
+		elog(ERROR, "Bug? unexpected partial aggregate function: %s",
+			 format_procedure(f->funcid));
+
+	if (strcmp(proc_name, "nrows") == 0)
+	{
+		Assert(list_length(f->args) <= 1);
+		expr = (Expr *)makeConst(INT8OID,
+								 -1,
+								 InvalidOid,
+								 sizeof(int64),
+								 1,
+								 false,
+								 FLOAT8PASSBYVAL);
+		if (f->args)
+			expr = make_expr_conditional(expr, linitial(f->args), true);
+		*p_null_const_value = "0";
+	}
+	else if (strcmp(proc_name, "pmin") == 0 ||
+			 strcmp(proc_name, "pmax") == 0)
+	{
+		Assert(list_length(f->args) == 1);
+		expr = linitial(f->args);
+		dtype = pgstrom_devtype_lookup_and_track(exprType((Node *)expr),
+												 context);
+		if (!dtype)
+			elog(ERROR, "device type lookup failed: %s",
+				 format_type_be(exprType((Node *)expr)));
+		*p_null_const_value = (strcmp(proc_name, "pmin") == 0
+							   ? dtype->max_const
+							   : dtype->min_const);
+	}
+	else if (strcmp(proc_name, "psum") == 0 ||
+			 strcmp(proc_name, "psum_x2") == 0)
+	{
+		Assert(list_length(f->args) == 1);
+		expr = linitial(f->args);
+		dtype = pgstrom_devtype_lookup_and_track(exprType((Node *)expr),
+												 context);
+		if (!dtype)
+			elog(ERROR, "device type lookup failed: %s",
+				 format_type_be(exprType((Node *)expr)));
+		if (strcmp(proc_name, "psum_x2") == 0)
+		{
+			Assert(dtype->type_oid == FLOAT8OID);
+			expr = (Expr *)makeFuncExpr(F_FLOAT8MUL,
+										FLOAT8OID,
+										list_make2(copyObject(expr),
+												   copyObject(expr)),
+										InvalidOid,
+										InvalidOid,
+										COERCE_EXPLICIT_CALL);
+		}
+		*p_null_const_value = dtype->zero_const;		
+	}
+	else if (strcmp(proc_name, "pcov_x") == 0 ||
+			 strcmp(proc_name, "pcov_y") == 0 ||
+			 strcmp(proc_name, "pcov_x2") == 0 ||
+			 strcmp(proc_name, "pcov_y2") == 0 ||
+			 strcmp(proc_name, "pcov_xy") == 0)
+	{
+		Expr	   *filter;
+		Expr	   *x_value;
+		Expr	   *y_value;
+
+		Assert(list_length(f->args) == 3);
+		filter = linitial(f->args);
+		x_value = lsecond(f->args);
+		y_value = lthird(f->args);
+
+		if (strcmp(proc_name, "pcov_x") == 0)
+			expr = x_value;
+		else if (strcmp(proc_name, "pcov_y") == 0)
+			expr = y_value;
+		else if (strcmp(proc_name, "pcov_x2") == 0)
+			expr = (Expr *)makeFuncExpr(F_FLOAT8MUL,
+										FLOAT8OID,
+										list_make2(x_value,
+												   x_value),
+										InvalidOid,
+										InvalidOid,
+										COERCE_EXPLICIT_CALL);
+		else if (strcmp(proc_name, "pcov_y2") == 0)
+			expr = (Expr *)makeFuncExpr(F_FLOAT8MUL,
+										FLOAT8OID,
+										list_make2(y_value,
+												   y_value),
+										InvalidOid,
+										InvalidOid,
+										COERCE_EXPLICIT_CALL);
+		else if (strcmp(proc_name, "pcov_xy") == 0)
+			expr = (Expr *)makeFuncExpr(F_FLOAT8MUL,
+										FLOAT8OID,
+										list_make2(x_value,
+												   y_value),
+										InvalidOid,
+										InvalidOid,
+										COERCE_EXPLICIT_CALL);
+		else
+			elog(ERROR, "Bug? unexpected code path");
+
+		Assert(exprType((Node *)filter) == BOOLOID);
+		if (IsA(filter, Const) &&
+			DatumGetBool(((Const *)filter)->constvalue) &&
+			!((Const *)filter)->constisnull)
+		{
+			*p_null_const_value = "0.0";
+		}
+		else
+		{
+			expr = make_expr_conditional(expr, filter, true);
+		}
+	}
+	else
+		elog(ERROR, "Bug? unexpected partial aggregate function: %s",
+			 format_procedure(f->funcid));
+
+	ReleaseSysCache(tuple);
+
+	return expr;
+}
+
 static void
 gpupreagg_codegen_projection(StringInfo kern,
 							 codegen_context *context,
@@ -2142,7 +2267,7 @@ gpupreagg_codegen_projection(StringInfo kern,
 												 &outer_refs_any,
 												 &outer_refs_expr);
 	Assert(list_length(tlist_dev_alt) == list_length(tlist_dev));
-	Assert(bms_subset(outer_refs_expr, outer_refs_any));
+	Assert(bms_is_subset(outer_refs_expr, outer_refs_any));
 
 	/* extract the supplied tuple and load variables */
 	if (!bms_is_empty(outer_refs_any))
@@ -2165,7 +2290,7 @@ gpupreagg_codegen_projection(StringInfo kern,
 			if (bms_is_member(k, outer_refs_any))
 			{
 				devtype_info   *dtype;
-				const char	   *kvarname;
+				char		   *kvarname;
 
 				/* data type of the outer relation input stream */
 				if (outer_tlist == NIL)
@@ -2230,6 +2355,8 @@ gpupreagg_codegen_projection(StringInfo kern,
 						varnode->varattno > nattrs)
 						elog(ERROR, "Bug? unexpected varnode: %s",
 							 nodeToString(varnode));
+					if (varnode->varattno != i)
+						continue;
 
 					appendStringInfo(
 						&temp,
@@ -2262,92 +2389,28 @@ gpupreagg_codegen_projection(StringInfo kern,
 		TargetEntry	   *tle = lfirst(lc);
 		Expr		   *expr;
 		devtype_info   *dtype;
-		const char	   *null_const_value;
+		const char	   *null_const_value = NULL;
 
 		if (IsA(tle->expr, Var))
 			continue;	/* it should be already loaded */
 		else if (tle->ressortgroupref > 0)
-			expr = tle->expr;
-		else if (IsA(tle->expr, FuncExpr))
 		{
-			FuncExpr   *func_expr = (FuncExpr *) tle->expr;
-			const char *func_name = get_func_name(func_expr->funcid);
-
-			if (!func_name)
-				elog(ERROR, "cache lookup failed for function: %u",
-					 func_expr->funcid);
-			if (strcmp(func_name, "nrows") == 0)
-			{
-				// 1 if argument is true
-				null_const_value = dtype->zero_const;
-			}
-			else if (strcmp(func_name, "pmin") == 0)
-			{
-				Assert(list_length(func_expr->args) == 1);
-				expr = linitial(func_expr->args);
-				null_const_value = dtype->max_const;
-			}
-			else if (strcmp(func_name, "pmax") == 0)
-			{
-				Assert(list_length(func_expr->args) == 1);
-				expr = linitial(func_expr->args);
-				null_const_value = dtype->max_const;
-			}
-			else if (strcmp(func_name, "psum") == 0)
-			{
-				Assert(list_length(func_expr->args) == 1);
-				expr = linitial(func_expr->args);
-				null_const_value = dtype->zero_const;
-			}
-			else if (strcmp(func_name, "psum_x2") == 0)
-			{
-				Assert(list_length(func_expr->args) == 1);
-				expr = linitial(func_expr->args);
-				Assert(exprType((Node *)expr) == FLOAT8OID);
-				expr = makeFuncExpr(F_FLOAT8MUL,
-									FLOAT8OID,
-									list_make2(expr, expr),
-									InvalidOid,
-                                    InvalidOid,
-                                    COERCE_EXPLICIT_CALL);
-			}
-			else if (strcmp(func_name, "pcov_x") == 0)
-			{
-				// arg2, if arg1 is true
-
-			}
-			else if (strcmp(func_name, "pcov_y") == 0)
-			{
-				// arg3, if arg1 is true
-			}
-			else if (strcmp(func_name, "pcov_x2") == 0)
-			{
-				// arg2 * arg2, if arg1 is true
-
-			}
-			else if (strcmp(func_name, "pcov_y2") == 0)
-			{
-				// arg3 * arg3, if arg1 is true
-
-			}
-			else if (strcmp(func_name, "pcov_xy") == 0)
-			{
-				// arg2 * arg3, if arg1 is true
-
-			}
-			else
-				elog(ERROR, "Bug? unexpected partial function: %s",
-					 format_procedure(func_expr->funcid));
+			expr = tle->expr;
+			null_const_value = "0";
 		}
+		else if (IsA(tle->expr, FuncExpr))
+			expr = codegen_projection_partial_funcion((FuncExpr *)tle->expr,
+													  context,
+													  &null_const_value);
 		else
 			elog(ERROR, "Bug? unexpected expression: %s",
 				 nodeToString(tle->expr));
 
-		dtype = pgstrom_devtype_lookup_and_track(exprType((Node *)tle->expr),
+		dtype = pgstrom_devtype_lookup_and_track(exprType((Node *)expr),
 												 context);
 		if (!dtype)
 			elog(ERROR, "device type lookup failed: %s",
-				 format_type_be(type_oid));
+				 format_type_be(exprType((Node *)expr)));
 		appendStringInfo(
 			&body,
 			"\n"
@@ -2355,17 +2418,23 @@ gpupreagg_codegen_projection(StringInfo kern,
 			"  temp.%s_v = %s;\n"
 			"  dst_isnull[%d] = temp.%s_v.isnull;\n"
 			"  if (!temp.%s_v.isnull)\n"
-			"    dst_values[%d] = pg_%s_to_datum(temp.%s_v.value);\n"
-			"  else\n"
-			"    dst_values[%d] = %s;\n",
+			"    dst_values[%d] = pg_%s_to_datum(temp.%s_v.value);\n",
 			tle->resno,
 			tle->ressortgroupref == 0 ? "aggfunc-arg" : "grouping-key",
 			dtype->type_name,
 			pgstrom_codegen_expression((Node *)expr, context),
 			tle->resno - 1, dtype->type_name,
 			dtype->type_name,
-			tle->resno - 1, dtype->type_name,
-			tle->resno - 1, null_const_value);
+			tle->resno - 1, dtype->type_name, dtype->type_name);
+
+		if (null_const_value)
+		{
+			appendStringInfo(
+				&body,
+				"  else\n"
+				"    dst_values[%d] = pg_%s_to_datum(%s);\n",
+				tle->resno - 1, dtype->type_name, null_const_value);
+		}
 	}
 	/* const/params */
 	pgstrom_codegen_param_declarations(&decl, context);
@@ -2395,13 +2464,11 @@ gpupreagg_codegen_projection(StringInfo kern,
 static void
 gpupreagg_codegen_hashvalue(StringInfo kern,
 							codegen_context *context,
-							List *tlist_dev,
-							List *tlist_dev_action)
+							List *tlist_dev)
 {
 	StringInfoData	decl;
 	StringInfoData	body;
-	ListCell	   *lc1;
-	ListCell	   *lc2;
+	ListCell	   *lc;
 
 	initStringInfo(&decl);
     initStringInfo(&body);
@@ -2417,15 +2484,13 @@ gpupreagg_codegen_hashvalue(StringInfo kern,
 		"                    size_t kds_index)\n"
 		"{\n");
 
-	forboth (lc1, tlist_dev,
-			 lc2, tlist_dev_action)
+	foreach (lc, tlist_dev)
 	{
-		TargetEntry	   *tle = lfirst(lc1);
-		int				action = lfirst_int(lc2);
+		TargetEntry	   *tle = lfirst(lc);
 		Oid				type_oid;
 		devtype_info   *dtype;
 
-		if (action != ALTFUNC_GROUPING_KEY)
+		if (tle->ressortgroupref == 0)
 			continue;
 
 		type_oid = exprType((Node *)tle->expr);
@@ -2471,13 +2536,11 @@ gpupreagg_codegen_hashvalue(StringInfo kern,
 static void
 gpupreagg_codegen_keymatch(StringInfo kern,
 						   codegen_context *context,
-						   List *tlist_dev,
-						   List *tlist_dev_action)
+						   List *tlist_dev)
 {
 	StringInfoData	decl;
 	StringInfoData	body;
-	ListCell	   *lc1;
-	ListCell	   *lc2;
+	ListCell	   *lc;
 
 	initStringInfo(&decl);
 	initStringInfo(&body);
@@ -2494,17 +2557,15 @@ gpupreagg_codegen_keymatch(StringInfo kern,
 		"  pg_anytype_t temp_y  __attribute__((unused));\n"
 		"\n");
 
-	forboth (lc1, tlist_dev,
-			 lc2, tlist_dev_action)
+	foreach (lc, tlist_dev)
 	{
-		TargetEntry	   *tle = lfirst(lc1);
-		int				action = lfirst_int(lc2);
+		TargetEntry	   *tle = lfirst(lc);
 		Oid				type_oid;
 		Oid				coll_oid;
 		devtype_info   *dtype;
 		devfunc_info   *dfunc;
 
-		if (action != ALTFUNC_GROUPING_KEY)
+		if (tle->ressortgroupref == 0)
 			continue;
 
 		/* find the function to compare this data-type */
@@ -2561,36 +2622,56 @@ static void
 gpupreagg_codegen_common_calc(StringInfo kern,
 							  codegen_context *context,
 							  List *tlist_dev,
-							  List *tlist_dev_action,
 							  const char *aggcalc_class,
 							  const char *aggcalc_args)
 {
-	ListCell   *lc1;
-	ListCell   *lc2;
+	ListCell   *lc;
 
 	appendStringInfoString(
 		kern,
 		"  switch (attnum)\n"
 		"  {\n");
 
-	forboth (lc1, tlist_dev,
-			 lc2, tlist_dev_action)
+	foreach (lc, tlist_dev)
 	{
-		TargetEntry	   *tle = lfirst(lc1);
-		int				action = lfirst_int(lc2);
-		Oid				type_oid = exprType((Node *)tle->expr);
+		TargetEntry	   *tle = lfirst(lc);
+		FuncExpr	   *f = (FuncExpr *)tle->expr;
+		char		   *func_name;
 		devtype_info   *dtype;
 		const char	   *aggcalc_ops;
 		const char	   *aggcalc_type;
 
-		/* not aggregate-function's argument */
-		if (action < ALTFUNC_EXPR_NROWS)
+		/* not arguments of aggregate functions */
+		if (tle->ressortgroupref > 0)
 			continue;
 
-		dtype = pgstrom_devtype_lookup_and_track(type_oid, context);
+		/* expression should be one of partial functions */
+		if (!IsA(f, FuncExpr))
+			elog(ERROR, "Bug? not a partial function expression: %s",
+				 nodeToString(f));
+		func_name = get_func_name(f->funcid);
+		if (strcmp(func_name, "pmin") == 0)
+			aggcalc_ops = "PMIN";
+		else if (strcmp(func_name, "pmax") == 0)
+			aggcalc_ops = "PMAX";
+		else
+		{
+			Assert(strcmp(func_name, "nrows") == 0 ||
+				   strcmp(func_name, "psum") == 0 ||
+				   strcmp(func_name, "psum_x2") == 0 ||
+				   strcmp(func_name, "pcov_x") == 0 ||
+				   strcmp(func_name, "pcov_y") == 0 ||
+				   strcmp(func_name, "pcov_x2") == 0 ||
+				   strcmp(func_name, "pcov_y2") == 0 ||
+				   strcmp(func_name, "pcov_xy") == 0);
+			aggcalc_ops = "PADD";
+		}
+		pfree(func_name);
+
+		dtype = pgstrom_devtype_lookup_and_track(f->funcresulttype, context);
 		if (!dtype)
 			elog(ERROR, "failed on device type lookup: %s",
-				 format_type_be(type_oid));
+				 format_type_be(f->funcresulttype));
 
 		switch (dtype->type_oid)
 		{
@@ -2622,13 +2703,6 @@ gpupreagg_codegen_common_calc(StringInfo kern,
 					 format_type_be(dtype->type_oid));
 		}
 
-		if (action == ALTFUNC_EXPR_PMIN)
-			aggcalc_ops = "PMIN";
-		else if (action == ALTFUNC_EXPR_PMAX)
-			aggcalc_ops = "PMAX";
-		else
-			aggcalc_ops = "PADD";
-
 		appendStringInfo(
 			kern,
 			"  case %d:\n"
@@ -2659,8 +2733,7 @@ gpupreagg_codegen_common_calc(StringInfo kern,
 static void
 gpupreagg_codegen_local_calc(StringInfo kern,
 							 codegen_context *context,
-							 List *tlist_dev,
-							 List *tlist_dev_action)
+							 List *tlist_dev)
 {
 	appendStringInfoString(
 		kern,
@@ -2673,7 +2746,6 @@ gpupreagg_codegen_local_calc(StringInfo kern,
 	gpupreagg_codegen_common_calc(kern,
 								  context,
 								  tlist_dev,
-								  tlist_dev_action,
 								  "LOCAL",
 								  "kcxt,accum,newval");
 	appendStringInfoString(
@@ -2693,8 +2765,7 @@ gpupreagg_codegen_local_calc(StringInfo kern,
 static void
 gpupreagg_codegen_global_calc(StringInfo kern,
 							  codegen_context *context,
-							  List *tlist_dev,
-							  List *tlist_dev_action)
+							  List *tlist_dev)
 {
 	appendStringInfoString(
 		kern,
@@ -2721,7 +2792,6 @@ gpupreagg_codegen_global_calc(StringInfo kern,
 	gpupreagg_codegen_common_calc(kern,
 								  context,
 								  tlist_dev,
-								  tlist_dev_action,
 								  "GLOBAL",
 						"kcxt,accum_isnull,accum_value,new_isnull,new_value");
 	appendStringInfoString(
@@ -2741,8 +2811,7 @@ gpupreagg_codegen_global_calc(StringInfo kern,
 static void
 gpupreagg_codegen_nogroup_calc(StringInfo kern,
 							   codegen_context *context,
-							   List *tlist_dev,
-							   List *tlist_dev_action)
+							   List *tlist_dev)
 {
 	appendStringInfoString(
         kern,
@@ -2755,7 +2824,6 @@ gpupreagg_codegen_nogroup_calc(StringInfo kern,
 	gpupreagg_codegen_common_calc(kern,
 								  context,
                                   tlist_dev,
-                                  tlist_dev_action,
 								  "NOGROUP",
 								  "kcxt,accum,newval");
 	appendStringInfoString(
@@ -2815,24 +2883,18 @@ gpupreagg_codegen(codegen_context *context,
 		context->extra_flags |= DEVKERNEL_NEEDS_GPUSCAN;
 	}
 	/* gpupreagg_projection */
-	gpupreagg_codegen_projection(&kern, context, root,
-								 tlist_dev, tlist_dev_action,
+	gpupreagg_codegen_projection(&kern, context, root, tlist_dev,
 								 cscan->scan.scanrelid, outer_tlist);
 	/* gpupreagg_hashvalue */
-	gpupreagg_codegen_hashvalue(&kern, context,
-								tlist_dev, tlist_dev_action);
+	gpupreagg_codegen_hashvalue(&kern, context, tlist_dev);
 	/* gpupreagg_keymatch */
-	gpupreagg_codegen_keymatch(&kern, context,
-							   tlist_dev, tlist_dev_action);
+	gpupreagg_codegen_keymatch(&kern, context, tlist_dev);
 	/* gpupreagg_local_calc */
-	gpupreagg_codegen_local_calc(&kern, context,
-								 tlist_dev, tlist_dev_action);
+	gpupreagg_codegen_local_calc(&kern, context, tlist_dev);
 	/* gpupreagg_global_calc */
-	gpupreagg_codegen_global_calc(&kern, context,
-								  tlist_dev, tlist_dev_action);
+	gpupreagg_codegen_global_calc(&kern, context, tlist_dev);
 	/* gpupreagg_nogroup_calc */
-	gpupreagg_codegen_nogroup_calc(&kern, context,
-								   tlist_dev, tlist_dev_action);
+	gpupreagg_codegen_nogroup_calc(&kern, context, tlist_dev);
 	/* function declarations */
 	pgstrom_codegen_func_declarations(&kern, context);
 	/* special expression declarations */
@@ -3208,7 +3270,7 @@ put_gpupreagg_shared_state(GpuPreAggSharedState *gpa_sstate)
 	{
 		Assert(!gpa_sstate->pds_final);
 		Assert(gpa_sstate->m_fhash == 0UL);
-		Assert(gpa_sstate->m_kds_final);
+		Assert(gpa_sstate->m_kds_final == 0UL);
 		dmaBufferFree(gpa_sstate);
 	}
 }

@@ -75,12 +75,12 @@ CREATE FUNCTION pgstrom_iomap_buffer_info()
 
 -- NROWS()
 CREATE FUNCTION pgstrom.nrows()
-  RETURN bigint
+  RETURNS bigint
   AS 'MODULE_PATHNAME','pgstrom_partial_nrows'
   LANGUAGE C STRICT;
 
 CREATE FUNCTION pgstrom.nrows(bool)
-  RETURN bigint
+  RETURNS bigint
   AS 'MODULE_PATHNAME','pgstrom_partial_nrows'
   LANGUAGE C STRICT;
 
@@ -112,9 +112,9 @@ CREATE FUNCTION pgstrom.favg_accum(int8[], int8[])
   AS 'MODULE_PATHNAME', 'pgstrom_final_avg_int8_accum'
   LANGUAGE C CALLED ON NULL INPUT;
 
-CREATE FUNCTION pgstrom.favg(int8[])
+CREATE FUNCTION pgstrom.favg_final(int8[])
   RETURNS numeric
-  AS 'MODULE_PATHNAME', 'pgstrom_final_avg_int8'
+  AS 'MODULE_PATHNAME', 'pgstrom_final_avg_int8_final'
   LANGUAGE C STRICT;
 
 CREATE FUNCTION pgstrom.favg_accum(float8[], float8[])
@@ -122,9 +122,9 @@ CREATE FUNCTION pgstrom.favg_accum(float8[], float8[])
   AS 'MODULE_PATHNAME', 'pgstrom_final_avg_float8_accum'
   LANGUAGE C CALLED ON NULL INPUT;
 
-CREATE FUNCTION pgstrom.favg(float8[])
+CREATE FUNCTION pgstrom.favg_final(float8[])
   RETURNS float8
-  AS 'MODULE_PATHNAME', 'pgstrom_final_avg_float8'
+  AS 'MODULE_PATHNAME', 'pgstrom_final_avg_float8_final'
   LANGUAGE C STRICT;
 
 CREATE FUNCTION pgstrom.favg_accum(numeric[], numeric[])
@@ -132,30 +132,30 @@ CREATE FUNCTION pgstrom.favg_accum(numeric[], numeric[])
   AS 'MODULE_PATHNAME', 'pgstrom_final_avg_numeric_accum'
   LANGUAGE C CALLED ON NULL INPUT;
 
-CREATE FUNCTION pgstrom.favg(numeric[])
+CREATE FUNCTION pgstrom.favg_final(numeric[])
   RETURNS numeric
-  AS 'MODULE_PATHNAME', 'pgstrom_final_avg_numeric'
+  AS 'MODULE_PATHNAME', 'pgstrom_final_avg_numeric_final'
   LANGUAGE C STRICT;
 
 CREATE AGGREGATE pgstrom.favg(int8[])
 (
-  sfunc = pgstrom.favg_,
+  sfunc = pgstrom.favg_accum,
   stype = int8[],
   finalfunc = pgstrom.favg_final
 );
 
 CREATE AGGREGATE pgstrom.favg(float8[])
 (
-  sfunc = pgstrom.favg_,
+  sfunc = pgstrom.favg_accum,
   stype = float8[],
-  finalfunc = pgstrom.
+  finalfunc = pgstrom.favg_final
 );
 
 CREATE AGGREGATE pgstrom.favg(numeric[])
 (
-  sfunc = pgstrom.favg,
+  sfunc = pgstrom.favg_accum,
   stype = numeric[],
-  finalfunc = pgstrom.
+  finalfunc = pgstrom.favg_final
 );
 
 -- PMIN()/PMAX()
@@ -294,7 +294,7 @@ CREATE AGGREGATE pgstrom.var_samp(float8[])
 -- REGR_*
 CREATE FUNCTION pgstrom.pcovar(int8,float8,float8,float8,float8,float8)
   RETURNS float8[]
-  AS 'MODULE_PATHNAME', 'pgstrom_partial_covar_float8'
+  AS 'MODULE_PATHNAME', 'pgstrom_partial_covariance_float8'
   LANGUAGE C STRICT;
 
 CREATE AGGREGATE pgstrom.corr(float8[])

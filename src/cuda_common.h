@@ -1704,7 +1704,12 @@ pg_varlena_comp_crc32(const cl_uint *crc32_table,
 	STROMCL_VARLENA_VARSTORE_TEMPLATE(NAME)			\
 	STROMCL_VARLENA_PARAMREF_TEMPLATE(NAME)			\
 	STROMCL_VARLENA_NULLTEST_TEMPLATE(NAME)			\
-	STROMCL_VARLENA_COMP_CRC32_TEMPLATE(NAME)
+	STROMCL_VARLENA_COMP_CRC32_TEMPLATE(NAME)		\
+	STATIC_INLINE(Datum)							\
+	pg_##NAME##_to_datum(varlena *value)			\
+	{												\
+		return PointerGetDatum(value);				\
+	}
 
 /* pg_bytea_t */
 #ifndef PG_BYTEA_TYPE_DEFINED

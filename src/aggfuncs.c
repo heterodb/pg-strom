@@ -34,11 +34,11 @@ Datum pgstrom_partial_avg_int8(PG_FUNCTION_ARGS);
 Datum pgstrom_partial_avg_float8(PG_FUNCTION_ARGS);
 Datum pgstrom_partial_avg_numeric(PG_FUNCTION_ARGS);
 Datum pgstrom_final_avg_int8_accum(PG_FUNCTION_ARGS);
-Datum pgstrom_final_avg_int8(PG_FUNCTION_ARGS);
+Datum pgstrom_final_avg_int8_final(PG_FUNCTION_ARGS);
 Datum pgstrom_final_avg_float8_accum(PG_FUNCTION_ARGS);
-Datum pgstrom_final_avg_float8(PG_FUNCTION_ARGS);
+Datum pgstrom_final_avg_float8_final(PG_FUNCTION_ARGS);
 Datum pgstrom_final_avg_numeric_accum(PG_FUNCTION_ARGS);
-Datum pgstrom_final_avg_numeric(PG_FUNCTION_ARGS);
+Datum pgstrom_final_avg_numeric_final(PG_FUNCTION_ARGS);
 Datum pgstrom_partial_min(PG_FUNCTION_ARGS);
 Datum pgstrom_partial_max(PG_FUNCTION_ARGS);
 Datum pgstrom_partial_sum_any(PG_FUNCTION_ARGS);
@@ -50,13 +50,13 @@ Datum pgstrom_partial_cov_y(PG_FUNCTION_ARGS);
 Datum pgstrom_partial_cov_x2(PG_FUNCTION_ARGS);
 Datum pgstrom_partial_cov_y2(PG_FUNCTION_ARGS);
 Datum pgstrom_partial_cov_xy(PG_FUNCTION_ARGS);
-
+Datum pgstrom_partial_variance_float8(PG_FUNCTION_ARGS);
+Datum pgstrom_partial_covariance_float8(PG_FUNCTION_ARGS);
 
 #if 0
 Datum pgstrom_partial_avg_fp8(PG_FUNCTION_ARGS);
 Datum pgstrom_partial_sum_int8(PG_FUNCTION_ARGS);
 Datum pgstrom_partial_sum_numeric(PG_FUNCTION_ARGS);
-Datum pgstrom_partial_variance_fp8(PG_FUNCTION_ARGS);
 Datum pgstrom_partial_covar_fp8(PG_FUNCTION_ARGS);
 
 
@@ -142,6 +142,7 @@ pgstrom_partial_nrows(PG_FUNCTION_ARGS)
 	}
 	PG_RETURN_INT64(1);
 }
+PG_FUNCTION_INFO_V1(pgstrom_partial_nrows);
 
 Datum
 pgstrom_partial_avg_int8(PG_FUNCTION_ARGS)
@@ -155,6 +156,7 @@ pgstrom_partial_avg_int8(PG_FUNCTION_ARGS)
 							 sizeof(int64), FLOAT8PASSBYVAL, 'd');
 	PG_RETURN_ARRAYTYPE_P(result);
 }
+PG_FUNCTION_INFO_V1(pgstrom_partial_avg_int8);
 
 Datum
 pgstrom_partial_avg_float8(PG_FUNCTION_ARGS)
@@ -169,6 +171,7 @@ pgstrom_partial_avg_float8(PG_FUNCTION_ARGS)
 							 sizeof(float8), FLOAT8PASSBYVAL, 'd');
 	PG_RETURN_ARRAYTYPE_P(result);
 }
+PG_FUNCTION_INFO_V1(pgstrom_partial_avg_float8);
 
 Datum
 pgstrom_partial_avg_numeric(PG_FUNCTION_ARGS)
@@ -183,6 +186,7 @@ pgstrom_partial_avg_numeric(PG_FUNCTION_ARGS)
 							 -1, false, 'i');
 	PG_RETURN_ARRAYTYPE_P(result);
 }
+PG_FUNCTION_INFO_V1(pgstrom_partial_avg_numeric);
 
 Datum
 pgstrom_final_avg_int8_accum(PG_FUNCTION_ARGS)
@@ -216,9 +220,10 @@ pgstrom_final_avg_int8_accum(PG_FUNCTION_ARGS)
 	}
 	PG_RETURN_POINTER(xarray);
 }
+PG_FUNCTION_INFO_V1(pgstrom_final_avg_int8_accum);
 
 Datum
-pgstrom_final_avg_int8(PG_FUNCTION_ARGS)
+pgstrom_final_avg_int8_final(PG_FUNCTION_ARGS)
 {
 	ArrayType	   *xarray = PG_GETARG_ARRAYTYPE_P(0);
 	int64		   *x = (int64 *)ARR_DATA_PTR(xarray);
@@ -229,6 +234,7 @@ pgstrom_final_avg_int8(PG_FUNCTION_ARGS)
 							   DirectFunctionCall1(int8_numeric,
 												   Int64GetDatum(x[1])));
 }
+PG_FUNCTION_INFO_V1(pgstrom_final_avg_int8_final);
 
 Datum
 pgstrom_final_avg_float8_accum(PG_FUNCTION_ARGS)
@@ -262,15 +268,17 @@ pgstrom_final_avg_float8_accum(PG_FUNCTION_ARGS)
 	}
 	PG_RETURN_POINTER(xarray);
 }
+PG_FUNCTION_INFO_V1(pgstrom_final_avg_float8_accum);
 
 Datum
-pgstrom_final_avg_float8(PG_FUNCTION_ARGS)
+pgstrom_final_avg_float8_final(PG_FUNCTION_ARGS)
 {
 	ArrayType	   *xarray = PG_GETARG_ARRAYTYPE_P(0);
 	float8		   *x = (float8 *)ARR_DATA_PTR(xarray);
 
 	PG_RETURN_FLOAT8(x[1] / x[0]);
 }
+PG_FUNCTION_INFO_V1(pgstrom_final_avg_float8_final);
 
 Datum
 pgstrom_final_avg_numeric_accum(PG_FUNCTION_ARGS)
@@ -321,9 +329,10 @@ pgstrom_final_avg_numeric_accum(PG_FUNCTION_ARGS)
 	}
 	PG_RETURN_POINTER(xarray);
 }
+PG_FUNCTION_INFO_V1(pgstrom_final_avg_numeric_accum);
 
 Datum
-pgstrom_final_avg_numeric(PG_FUNCTION_ARGS)
+pgstrom_final_avg_numeric_final(PG_FUNCTION_ARGS)
 {
 	ArrayType  *xarray = PG_GETARG_ARRAYTYPE_P(0);
 	Datum		nrows;
@@ -340,6 +349,7 @@ pgstrom_final_avg_numeric(PG_FUNCTION_ARGS)
 
 	return DirectFunctionCall2(numeric_div, sum, nrows);
 }
+PG_FUNCTION_INFO_V1(pgstrom_final_avg_numeric_final);
 
 /*
  * pgstrom.pmin(anyelement)
@@ -349,6 +359,7 @@ pgstrom_partial_min(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_DATUM(PG_GETARG_DATUM(0));
 }
+PG_FUNCTION_INFO_V1(pgstrom_partial_min);
 
 /*
  * pgstrom.pmax(anyelement)
@@ -358,6 +369,7 @@ pgstrom_partial_max(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_DATUM(PG_GETARG_DATUM(0));
 }
+PG_FUNCTION_INFO_V1(pgstrom_partial_max);
 
 /*
  * pgstrom.psum(anyelement)
@@ -367,6 +379,7 @@ pgstrom_partial_sum_any(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_DATUM(PG_GETARG_DATUM(0));
 }
+PG_FUNCTION_INFO_V1(pgstrom_partial_sum_any);
 
 /*
  * pgstrom.psum_x2(float4)
@@ -378,6 +391,7 @@ pgstrom_partial_sum_x2_float4(PG_FUNCTION_ARGS)
 
 	PG_RETURN_FLOAT4(value * value);
 }
+PG_FUNCTION_INFO_V1(pgstrom_partial_sum_x2_float4);
 
 /*
  * pgstrom.psum_x2(float8)
@@ -389,6 +403,7 @@ pgstrom_partial_sum_x2_float8(PG_FUNCTION_ARGS)
 
 	PG_RETURN_FLOAT8(value * value);	
 }
+PG_FUNCTION_INFO_V1(pgstrom_partial_sum_x2_float8);
 
 /*
  * pgstrom.psum_x2(numeric)
@@ -407,6 +422,7 @@ pgstrom_partial_sum_x2_numeric(PG_FUNCTION_ARGS)
 									Int32GetDatum(-1));
 	return DirectFunctionCall2(numeric_mul, value, value);
 }
+PG_FUNCTION_INFO_V1(pgstrom_partial_sum_x2_numeric);
 
 /*
  * pgstrom.pcov_x(float8)
@@ -418,6 +434,7 @@ pgstrom_partial_cov_x(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 	PG_RETURN_DATUM(PG_GETARG_DATUM(1));
 }
+PG_FUNCTION_INFO_V1(pgstrom_partial_cov_x);
 
 /*
  * pgstrom.pcov_y(float8)
@@ -429,6 +446,7 @@ pgstrom_partial_cov_y(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 	PG_RETURN_DATUM(PG_GETARG_DATUM(2));
 }
+PG_FUNCTION_INFO_V1(pgstrom_partial_cov_y);
 
 /*
  * pgstrom.pcov_x2(float8)
@@ -442,6 +460,7 @@ pgstrom_partial_cov_x2(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 	PG_RETURN_FLOAT8(value * value);
 }
+PG_FUNCTION_INFO_V1(pgstrom_partial_cov_x2);
 
 /*
  * pgstrom.pcov_y2(float8)
@@ -455,6 +474,7 @@ pgstrom_partial_cov_y2(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 	PG_RETURN_FLOAT8(value * value);
 }
+PG_FUNCTION_INFO_V1(pgstrom_partial_cov_y2);
 
 /*
  * pgstrom.pcov_xy(float8)
@@ -469,7 +489,46 @@ pgstrom_partial_cov_xy(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 	PG_RETURN_FLOAT8(x_value * y_value);
 }
+PG_FUNCTION_INFO_V1(pgstrom_partial_cov_xy);
 
+/*
+ * pgstrom_partial_variance_float8
+ */
+Datum
+pgstrom_partial_variance_float8(PG_FUNCTION_ARGS)
+{
+	ArrayType  *state;
+	Datum		items[3];
+
+	items[0] = Float8GetDatum((double)PG_GETARG_INT64(0));	/* nrows(int8) */
+	items[1] = PG_GETARG_DATUM(1);	/* sum of X */
+	items[2] = PG_GETARG_DATUM(2);	/* sum of X^2 */
+    state = construct_array(items, 3, FLOAT8OID,
+							sizeof(float8), FLOAT8PASSBYVAL, 'd');
+	PG_RETURN_ARRAYTYPE_P(state);
+}
+PG_FUNCTION_INFO_V1(pgstrom_partial_variance_float8);
+
+/*
+ * pgstrom_partial_covariance_float8
+ */
+Datum
+pgstrom_partial_covariance_float8(PG_FUNCTION_ARGS)
+{
+	ArrayType  *state;
+	Datum		items[6];
+
+	items[0] = Float8GetDatum((double)PG_GETARG_INT64(0));	/* nrows(int8) */
+	items[1] = PG_GETARG_DATUM(1);	/* sum of X */
+	items[2] = PG_GETARG_DATUM(2);	/* sum of X^2 */
+	items[3] = PG_GETARG_DATUM(3);	/* sum of Y */
+	items[4] = PG_GETARG_DATUM(4);	/* sum of Y^2 */
+	items[5] = PG_GETARG_DATUM(5);	/* sum of X*Y */
+	state = construct_array(items, 6, FLOAT8OID,
+							sizeof(float8), FLOAT8PASSBYVAL, 'd');
+	PG_RETURN_ARRAYTYPE_P(state);
+}
+PG_FUNCTION_INFO_V1(pgstrom_partial_covariance_float8);
 
 
 
@@ -529,25 +588,6 @@ pgstrom_partial_variance_float8(PG_FUNCTION_ARGS)
 	PG_RETURN_ARRAYTYPE_P(state);
 }
 
-/*
- * pgstrom_partial_covar_fp8 - alternative function for covariance and similar
- */
-Datum
-pgstrom_partial_covar_fp8(PG_FUNCTION_ARGS)
-{
-	ArrayType  *state;
-	Datum		items[6];
-
-	items[0] = Float8GetDatum((double)PG_GETARG_INT64(0));	/* nrows(int8) */
-	items[1] = PG_GETARG_DATUM(1);	/* sum of X */
-	items[2] = PG_GETARG_DATUM(2);	/* sum of X^2 */
-	items[3] = PG_GETARG_DATUM(3);	/* sum of Y */
-	items[4] = PG_GETARG_DATUM(4);	/* sum of Y^2 */
-	items[5] = PG_GETARG_DATUM(5);	/* sum of X*Y */
-	state = construct_array(items, 6, FLOAT8OID,
-							sizeof(float8), FLOAT8PASSBYVAL, 'd');
-	PG_RETURN_ARRAYTYPE_P(state);
-}
 
 /* gpupreagg_psum_* - placeholder function that generates partial sum
  * of the arguments. _x2 generates square value of the input
