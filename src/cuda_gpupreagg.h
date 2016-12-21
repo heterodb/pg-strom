@@ -249,7 +249,6 @@ STATIC_FUNCTION(void)
 gpupreagg_projection(kern_context *kcxt,
 					 kern_data_store *kds_src,	/* in */
 					 HeapTupleHeaderData *htup,	/* in */
-					 kern_data_store *kds_dst,	/* out */
 					 Datum *dst_values,			/* out */
 					 cl_char *dst_isnull);		/* out */
 
@@ -494,11 +493,49 @@ gpupreagg_final_data_move(kern_context *kcxt,
 	return alloc_size;
 }
 
+/*
+ * gpupreagg_init_global_hash
+ *
+ * It initialize the g_hash slot prior to gpupreagg_global_reduction
+ */
+KERNEL_FUNCTION(void)
+gpupreagg_init_global_hash(size_t g_hashsize,
+						   kern_global_hashslot *g_hash)
+{
+	size_t		hash_index;
+
+	if (get_global_id() == 0)
+	{
+		g_hash->hash_usage	= 0;
+		g_hash->hash_size	= g_hashsize;
+	}
+
+	for (hash_index = get_global_id();
+		 hash_index < g_hashsize;
+		 hash_index += get_global_size())
+	{
+		g_hash->hash_slot[hash_index].s.hash = 0;
+		g_hash->hash_slot[hash_index].s.index = (cl_uint)(0xffffffff);
+	}
+}
+
+
+
+
+
+
+
+
+
+
 
 /*
- * gpupreagg_preparation - It translaes an input kern_data_store (that
- * reflects outer relation's tupdesc) into the form of running total
- * and final result of gpupreagg (that reflects target-list of GpuPreAgg).
+ * gpupreagg_initial_projection
+ *
+ * It transforms the supplied source KDS (with ROW or BLOCK format) into
+ * the initial projection form for the reduction steps later.
+ *
+ *
  *
  * Pay attention on a case when the kern_data_store with row-format is
  * translated. Row-format does not have toast buffer because variable-
@@ -508,81 +545,56 @@ gpupreagg_final_data_move(kern_context *kcxt,
  * stage) as toast buffer if the source kds has row-format.
  */
 KERNEL_FUNCTION(void)
-gpupreagg_preparation(kern_gpupreagg *kgpreagg,
-					  kern_data_store *kds_in,	/* in: KDS_FORMAT_ROW */
-					  kern_data_store *kds_src,	/* out: KDS_FORMAT_SLOT */
-					  kern_global_hashslot *g_hash)
+gpupreagg_initial_projection(kern_gpupreagg *kgpreagg,
+							 kern_resultbuf *kresults,
+							 kern_data_store *kds_src,	/* in: row or block */
+							 kern_data_store *kds_slot)	/* out */
 {
 	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	kern_context	kcxt;
+	cl_uint			kds_index = get_global_id();
+	cl_uint			kds_offset;
 	kern_tupitem   *tupitem;
-	cl_uint			offset;
-	cl_uint			count;
-	size_t			kds_index = get_global_id();
-	size_t			hash_size;
-	size_t			hash_index;
-	__shared__ cl_uint base;
+	HeapTupleHeaderData *htup = NULL;
 
 	INIT_KERNEL_CONTEXT(&kcxt,gpupreagg_preparation,kparams);
 
 	/* sanity checks */
-	assert(kgpreagg->key_dist_salt > 0);
-	assert(kds_in->format == KDS_FORMAT_ROW);
+	assert(kds_src->format == KDS_FORMAT_ROW ||
+		   kds_src->format == KDS_FORMAT_BLOCK);
 	assert(kds_src->format == KDS_FORMAT_SLOT);
 
-	/* init global hash slot */
-	hash_size = kgpreagg->hash_size;
-	if (get_global_id() == 0)
+	if (kds_src->format == KDS_FORMAT_ROW)
 	{
-		g_hash->hash_usage = 0;
-		g_hash->hash_size = hash_size;
+		if (kresults->all_visible)
+		{
+			if (kds_index < kds_src->nitems)
+			{
+				tupitem = KERN_DATA_STORE_TUPITEM(kds_src, kds_index);
+				htup = &tupitem->htup;
+			}
+		}
+		else if (kds_index < kresults->nitems)
+		{
+			kds_offset = kresults->results[kds_index];
+			htup = KDS_ROW_REF_HTUP(kds_src, kds_offset, NULL, NULL);
+		}
 	}
-	for (hash_index = get_global_id();
-		 hash_index < hash_size;
-		 hash_index += get_global_size())
+	else if (kds_src->format == KDS_FORMAT_BLOCK &&
+			 kds_index < kresults->nitems)
 	{
-		g_hash->hash_slot[hash_index].s.hash = 0;
-		g_hash->hash_slot[hash_index].s.index = (cl_uint)(0xffffffff);
+		assert(!kresults->all_visible);
+		kds_offset = kresults->results[kds_index];
+		htup = KDS_BLOCK_REF_HTUP(kds_src, kds_offset, NULL, NULL);
 	}
 
-	/* check qualifiers */
-	if (kds_index < kds_in->nitems &&
-		gpupreagg_qual_eval(&kcxt, kds_in, kds_index))
-		tupitem = KERN_DATA_STORE_TUPITEM(kds_in, kds_index);
-	else
-		tupitem = NULL;		/* not a visible tuple */
-
-	/* calculation of total number of rows to be processed in this work-
-	 * group.
-	 */
-	offset = pgstromStairlikeSum(tupitem != NULL ? 1 : 0, &count);
-
-	/* Allocation of the result slot on the kds_src. */
-	if (get_local_id() == 0)
+	if (htup)
 	{
-		if (count > 0)
-			base = atomicAdd(&kds_src->nitems, count);
-		else
-			base = 0;
-	}
-	__syncthreads();
-
-	/* GpuPreAgg should never increase number of items */
-	assert(base + count <= kds_src->nrooms);
-
-	/* do projection */
-	if (tupitem != NULL)
-	{
-		cl_uint		dst_index = base + offset;
-		Datum	   *dst_values = KERN_DATA_STORE_VALUES(kds_src, dst_index);
-		cl_char	   *dst_isnull = KERN_DATA_STORE_ISNULL(kds_src, dst_index);
-
 		gpupreagg_projection(&kcxt,
-							 kds_in,		/* input kds */
-							 tupitem,		/* input tuple */
-							 kds_src,		/* destination kds */
-							 dst_values,	/* destination values[] array */
-							 dst_isnull);	/* destination isnull[] array */
+							 kds_src,
+							 htup,
+							 KERN_DATA_STORE_VALUES(kds_slot, kds_index),
+							 KERN_DATA_STORE_ISNULL(kds_slot, kds_index));
 	}
 	/* write-back execution status into host-side */
 	kern_writeback_error_status(&kgpreagg->kerror, kcxt.e);
@@ -1191,13 +1203,13 @@ out:
 }
 
 /*
- * gpupreagg_final_preparation
+ * gpupreagg_init_final_hash
  *
  * It initializes the f_hash prior to gpupreagg_final_reduction
  */
 KERNEL_FUNCTION(void)
-gpupreagg_final_preparation(size_t f_hashsize,
-							kern_global_hashslot *f_hash)
+gpupreagg_init_final_hash(size_t f_hashsize,
+						  kern_global_hashslot *f_hash)
 {
 	size_t		hash_index;
 
@@ -1627,6 +1639,8 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 	kern_resultbuf	   *kresults_tmp;
 	cl_uint				kresults_nrooms = kds_row->nitems;
 	kern_context		kcxt;
+	void			   *kern_func;
+	size_t				num_threads;
 	void			  **kern_args;
 	dim3				grid_sz;
 	dim3				block_sz;
@@ -1638,59 +1652,75 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 	assert(get_global_size() == 1);	/* !!single thread!! */
 	assert(kgpreagg->reduction_mode != GPUPREAGG_ONLY_TERMINATION);
 
+	if (kgpreagg->progress_final)
+	{
+		printf("due to task retry (%p), jump to final reduction\n", kgpreagg);
+		goto final_reduction_step;
+	}
+	else if (kgpreagg->progress_reduction)
+	{
+		printf("due to task retry (%p), jump to reduction\n", kgpreagg);
+		goto private_reduction_step;
+	}
+
+	memset(kresults_src, 0, offsetof(kern_resultbuf, results[0]));
+	kresults_src->nrels = 1;
+	kresults_src->nrooms = kresults_nrooms;
 #ifdef GPUPREAGG_PULLUP_OUTER_SCAN
-	// this code block is valid only when outer-scan pulled up.
-	// In this case, we have to run outer-quel
+	/*
+	 * This code block is valid only when outer-scan gets pulled up.
+	 * In this case, we have to run outer-quals to filter out invidible
+	 * rows, prior to the reduction steps.
+	 */
+	if (kds_row->format == KDS_FORMAT_ROW)
+	{
+		kern_func = (void *)gpuscan_exec_quals_row;
+		num_threads = kds_row->nitems;
+	}
+	else
+	{
+		kern_func = (void *)gpuscan_exec_quals_block;
+		num_threads = kds_row->nitems * kds_row->nrows_per_block;
+	}
+	status = pgstromLaunchDynamicKernel5(kern_func,
+										 (kern_arg_t)(kparams),
+										 (kern_arg_t)(kresults_src),
+										 (kern_arg_t)(kds_row),
+										 (kern_arg_t)(0),
+										 (kern_arg_t)(kds_row->nitems),
+										 num_threads,
+										 0,
+										 sizeof(cl_uint));
+	if (status != cudaSuccess)
+	{
+		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+		goto out;
+	}
+	num_threads = kresults_src->nitems;
 #else
-	// elsewhere, all the input rows are valid
-
-
-	//
-
+	/*
+	 * Elsewhere, we can assume KDS_FORMAT_ROW, and all the input rows are
+	 * visible for the reduction steps.
+	 */
+	assert(kds_row->format == KDS_FORMAT_ROW);
+	kresults_src->all_visible = true;
+	num_threads = kds_row->nitems;
 #endif
+
 	/* Launch:
 	 * KERNEL_FUNCTION(void)
-	 * gpupreagg_preparation(kern_gpupreagg *kgpreagg,
-	 *                       kern_data_store *kds_row,
-	 *                       kern_data_store *kds_slot,
-	 *                       kern_global_hashslot *g_hash)
+	 * gpupreagg_initial_projection(kern_gpupreagg *kgpreagg,
+	 *                              kern_resultbuf *kresults,
+	 *                              kern_data_store *kds_src,
+	 *                              kern_data_store *kds_slot)
 	 */
 	tv_start = GlobalTimer();
-	kern_args = (void **)cudaGetParameterBuffer(sizeof(void *),
-												sizeof(void *) * 4);
-	if (!kern_args)
-	{
-		STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelArgs);
-		goto out;
-	}
-	kern_args[0] = kgpreagg;
-	kern_args[1] = kds_row;
-	kern_args[2] = kds_slot;
-	kern_args[3] = g_hash;
-
-	status = optimal_workgroup_size(&grid_sz,
-									&block_sz,
-									(const void *)
-									gpupreagg_preparation,
-									kds_row->nitems,
-									0, sizeof(kern_errorbuf));
-	if (status != cudaSuccess)
-	{
-		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
-		goto out;
-	}
-
-	status = cudaLaunchDevice((void *)gpupreagg_preparation,
-							  kern_args, grid_sz, block_sz,
-							  sizeof(kern_errorbuf) * block_sz.x,
-							  NULL);
-	if (status != cudaSuccess)
-	{
-		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
-		goto out;
-	}
-
-	status = cudaDeviceSynchronize();
+	status = pgstromLaunchDynamicKernel4((void *)gpupreagg_initial_projection,
+										 (kern_arg_t)(kgpreagg),
+										 (kern_arg_t)(kresults_src),
+										 (kern_arg_t)(kds_row),
+										 (kern_arg_t)(kds_slot),
+										 num_threads, 0, 0);
 	if (status != cudaSuccess)
 	{
 		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
@@ -1706,6 +1736,8 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 	 */
 	kgpreagg->progress_reduction = true;
 	TIMEVAL_RECORD(kgpreagg,kern_prep,tv_start);
+private_reduction_step:
+	;
 
 	if (kgpreagg->reduction_mode == GPUPREAGG_NOGROUP_REDUCTION)
 	{
@@ -1898,6 +1930,26 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 			kresults_src->all_visible = true;
 		}
 
+		tv_start = GlobalTimer();
+		/*
+		 * Launch:
+		 * KERNEL_FUNCTION(void)
+		 * gpupreagg_init_global_hash(size_t g_hashsize,
+		 *                            kern_global_hashslot *g_hash)
+		 */
+		status = pgstromLaunchDynamicKernel2(
+			(void *)gpupreagg_init_global_hash,
+			(kern_arg_t)(kgpreagg->hash_size),
+			(kern_arg_t)(g_hash),
+			kgpreagg->hash_size,
+			0,
+			0);
+		if (status != cudaSuccess)
+		{
+			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+			goto out;
+		}
+
 		/*
 		 * Launch:
 		 * KERNEL_FUNCTION(void)
@@ -1907,7 +1959,6 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 		 *                            kern_resultbuf *kresults_dst,
 		 *                            kern_global_hashslot *g_hash)
 		 */
-		tv_start = GlobalTimer();
 		kern_args = (void **)cudaGetParameterBuffer(sizeof(void *),
 													sizeof(void *) * 5);
 		if (!kern_args)
@@ -1977,6 +2028,7 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 	 * cannot recover the CpuReCheck error once we moved across this point.
 	 */
 	kgpreagg->progress_final = true;
+final_reduction_step:
 
 	/* Launch:
 	 * KERNEL_FUNCTION(void)

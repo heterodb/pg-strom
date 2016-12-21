@@ -2058,8 +2058,7 @@ make_tlist_device_projection(List *tlist_dev,
  * STATIC_FUNCTION(void)
  * gpupreagg_projection(kern_context *kcxt,
  *                      kern_data_store *kds_src,
- *                      kern_tupitem *tupitem,
- *                      kern_data_store *kds_dst,
+ *                      HeapTupleHeaderData *htup,
  *                      Datum *dst_values,
  *                      cl_char *dst_isnull);
  */
@@ -2231,7 +2230,6 @@ gpupreagg_codegen_projection(StringInfo kern,
 		"gpupreagg_projection(kern_context *kcxt,\n"
 		"                     kern_data_store *kds_src,\n"
 		"                     HeapTupleHeaderData *htup,\n"
-		"                     kern_data_store *kds_dst,\n"
 		"                     Datum *dst_values,\n"
 		"                     cl_char *dst_isnull)\n"
 		"{\n"
@@ -3686,12 +3684,12 @@ gpupreagg_alloc_final_buffer(GpuPreAggTask *gpreagg,
 
 		/* Launch:
 		 * KERNEL_FUNCTION(void)
-		 * gpupreagg_final_preparation(size_t hash_size,
-		 *                             kern_global_hashslot *f_hashslot)
+		 * gpupreagg_init_final_hash(size_t hash_size,
+		 *                           kern_global_hashslot *f_hashslot)
 		 */
 		rc = cuModuleGetFunction(&kern_final_prep,
 								 cuda_module,
-								 "gpupreagg_final_preparation");
+								 "gpupreagg_init_final_hash");
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
 
