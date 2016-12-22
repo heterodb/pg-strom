@@ -2620,15 +2620,17 @@ static void
 gpupreagg_codegen_common_calc(StringInfo kern,
 							  codegen_context *context,
 							  List *tlist_dev,
+							  bool calc_per_attribute,
 							  const char *aggcalc_class,
 							  const char *aggcalc_args)
 {
 	ListCell   *lc;
 
-	appendStringInfoString(
-		kern,
-		"  switch (attnum)\n"
-		"  {\n");
+	if (calc_per_attribute)
+		appendStringInfoString(
+			kern,
+			"  switch (attnum)\n"
+			"  {\n");
 
 	foreach (lc, tlist_dev)
 	{
@@ -2701,22 +2703,33 @@ gpupreagg_codegen_common_calc(StringInfo kern,
 					 format_type_be(dtype->type_oid));
 		}
 
-		appendStringInfo(
-			kern,
-			"  case %d:\n"
-			"    AGGCALC_%s_%s_%s(%s);\n"
-			"    break;\n",
-			tle->resno - 1,
-			aggcalc_class,
-			aggcalc_ops,
-			aggcalc_type,
-			aggcalc_args);
+		if (calc_per_attribute)
+			appendStringInfo(
+				kern,
+				"  case %d:\n"
+				"    AGGCALC_%s_%s_%s(%s);\n"
+				"    break;\n",
+				tle->resno - 1,
+				aggcalc_class,
+				aggcalc_ops,
+				aggcalc_type,
+				aggcalc_args);
+		else
+			appendStringInfo(
+				kern,
+				"  AGGCALC_%s_%s_%s(%s);\n",
+				aggcalc_class,
+                aggcalc_ops,
+                aggcalc_type,
+                aggcalc_args);
 	}
-	appendStringInfoString(
-		kern,
-		"  default:\n"
-		"    break;\n"
-		"  }\n");
+
+	if (calc_per_attribute)
+		appendStringInfoString(
+			kern,
+			"  default:\n"
+			"    break;\n"
+			"  }\n");
 }
 
 /*
@@ -2744,6 +2757,7 @@ gpupreagg_codegen_local_calc(StringInfo kern,
 	gpupreagg_codegen_common_calc(kern,
 								  context,
 								  tlist_dev,
+								  true,
 								  "LOCAL",
 								  "kcxt,accum,newval");
 	appendStringInfoString(
@@ -2756,7 +2770,6 @@ gpupreagg_codegen_local_calc(StringInfo kern,
  *
  * STATIC_FUNCTION(void)
  * gpupreagg_global_calc(kern_context *kcxt,
- *                       cl_int attnum,
  *                       kern_data_store *accum_kds,  size_t accum_index,
  *                       kern_data_store *newval_kds, size_t newval_index);
  */
@@ -2790,6 +2803,7 @@ gpupreagg_codegen_global_calc(StringInfo kern,
 	gpupreagg_codegen_common_calc(kern,
 								  context,
 								  tlist_dev,
+								  false,
 								  "GLOBAL",
 						"kcxt,accum_isnull,accum_value,new_isnull,new_value");
 	appendStringInfoString(
@@ -2822,6 +2836,7 @@ gpupreagg_codegen_nogroup_calc(StringInfo kern,
 	gpupreagg_codegen_common_calc(kern,
 								  context,
                                   tlist_dev,
+								  true,
 								  "NOGROUP",
 								  "kcxt,accum,newval");
 	appendStringInfoString(

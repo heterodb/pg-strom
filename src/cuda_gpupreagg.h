@@ -562,7 +562,7 @@ gpupreagg_initial_projection(kern_gpupreagg *kgpreagg,
 	/* sanity checks */
 	assert(kds_src->format == KDS_FORMAT_ROW ||
 		   kds_src->format == KDS_FORMAT_BLOCK);
-	assert(kds_src->format == KDS_FORMAT_SLOT);
+	assert(kds_slot->format == KDS_FORMAT_SLOT);
 
 	if (kds_src->format == KDS_FORMAT_ROW)
 	{
@@ -1450,7 +1450,7 @@ retry_minor:
 			{
 				if (gpagg_atts[i] != GPUPREAGG_FIELD_IS_AGGFUNC)
 					continue;
-			
+
 				/*
 				 * Reduction, using global atomic operation
 				 *
@@ -1627,7 +1627,7 @@ out:
  */
 KERNEL_FUNCTION(void)
 gpupreagg_main(kern_gpupreagg *kgpreagg,
-			   kern_data_store *kds_row,		/* KDS_FORMAT_ROW */
+			   kern_data_store *kds_src,		/* KDS_FORMAT_ROW/BLOCK */
 			   kern_data_store *kds_slot,		/* KDS_FORMAT_SLOT */
 			   kern_global_hashslot *g_hash,	/* For global reduction */
 			   kern_data_store *kds_final,		/* KDS_FORMAT_SLOT + Extra */
@@ -1637,9 +1637,9 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 	kern_resultbuf	   *kresults_src = KERN_GPUPREAGG_1ST_RESULTBUF(kgpreagg);
 	kern_resultbuf	   *kresults_dst = KERN_GPUPREAGG_2ND_RESULTBUF(kgpreagg);
 	kern_resultbuf	   *kresults_tmp;
-	cl_uint				kresults_nrooms = kds_row->nitems;
+	cl_uint				kresults_nrooms = kds_src->nitems;
 	kern_context		kcxt;
-	void			   *kern_func;
+	void			   *kern_function	__attribute__((unused));
 	size_t				num_threads;
 	void			  **kern_args;
 	dim3				grid_sz;
@@ -1651,8 +1651,6 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 	INIT_KERNEL_CONTEXT(&kcxt, gpupreagg_main, kparams);
 	assert(get_global_size() == 1);	/* !!single thread!! */
 	assert(kgpreagg->reduction_mode != GPUPREAGG_ONLY_TERMINATION);
-
-	return;
 
 	if (kgpreagg->progress_final)
 	{
@@ -1674,22 +1672,22 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 	 * In this case, we have to run outer-quals to filter out invidible
 	 * rows, prior to the reduction steps.
 	 */
-	if (kds_row->format == KDS_FORMAT_ROW)
+	if (kds_src->format == KDS_FORMAT_ROW)
 	{
-		kern_func = (void *)gpuscan_exec_quals_row;
-		num_threads = kds_row->nitems;
+		kern_function = (void *)gpuscan_exec_quals_row;
+		num_threads = kds_src->nitems;
 	}
 	else
 	{
-		kern_func = (void *)gpuscan_exec_quals_block;
-		num_threads = kds_row->nitems * kds_row->nrows_per_block;
+		kern_function = (void *)gpuscan_exec_quals_block;
+		num_threads = kds_src->nitems * kds_src->nrows_per_block;
 	}
-	status = pgstromLaunchDynamicKernel5(kern_func,
+	status = pgstromLaunchDynamicKernel5(kern_function,
 										 (kern_arg_t)(kparams),
 										 (kern_arg_t)(kresults_src),
-										 (kern_arg_t)(kds_row),
+										 (kern_arg_t)(kds_src),
 										 (kern_arg_t)(0),
-										 (kern_arg_t)(kds_row->nitems),
+										 (kern_arg_t)(kds_src->nitems),
 										 num_threads,
 										 0,
 										 sizeof(cl_uint));
@@ -1704,9 +1702,9 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 	 * Elsewhere, we can assume KDS_FORMAT_ROW, and all the input rows are
 	 * visible for the reduction steps.
 	 */
-	assert(kds_row->format == KDS_FORMAT_ROW);
+	assert(kds_src->format == KDS_FORMAT_ROW);
 	kresults_src->all_visible = true;
-	num_threads = kds_row->nitems;
+	num_threads = kds_src->nitems;
 #endif
 
 	/* Launch:
@@ -1720,7 +1718,7 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 	status = pgstromLaunchDynamicKernel4((void *)gpupreagg_initial_projection,
 										 (kern_arg_t)(kgpreagg),
 										 (kern_arg_t)(kresults_src),
-										 (kern_arg_t)(kds_row),
+										 (kern_arg_t)(kds_src),
 										 (kern_arg_t)(kds_slot),
 										 num_threads, 0, 0);
 	if (status != cudaSuccess)
