@@ -52,10 +52,9 @@ typedef struct
 {
 	kern_errorbuf	kerror;				/* kernel error information */
 	cl_ushort		reduction_mode;		/* one of GPUPREAGG_* above */
-	cl_bool			progress_reduction;	/* true, if moved to reduction stage */
-	cl_bool			progress_final;		/* true, if moved to final reduction,
-										 * thus pds_final might be updated
-										 * by the task. */
+	cl_bool			private_reduction_in_progress;
+	cl_bool			final_reduction_in_progress;
+
 	/* -- runtime statistics -- */
 	cl_uint			nitems_real;		/* out: # of outer nrows */
 	cl_uint			num_conflicts;		/* only used in kernel space */
@@ -1652,12 +1651,12 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 	assert(get_global_size() == 1);	/* !!single thread!! */
 	assert(kgpreagg->reduction_mode != GPUPREAGG_ONLY_TERMINATION);
 
-	if (kgpreagg->progress_final)
+	if (kgpreagg->final_reduction_in_progress)
 	{
 		printf("due to task retry (%p), jump to final reduction\n", kgpreagg);
 		goto final_reduction_step;
 	}
-	else if (kgpreagg->progress_reduction)
+	else if (kgpreagg->private_reduction_in_progress)
 	{
 		printf("due to task retry (%p), jump to reduction\n", kgpreagg);
 		goto private_reduction_step;
@@ -1734,7 +1733,7 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 	 * successfully done. It means the maximum available rooms for
 	 * kds_slot / ghash are sufficient for this kds_in.
 	 */
-	kgpreagg->progress_reduction = true;
+	kgpreagg->private_reduction_in_progress = true;
 	TIMEVAL_RECORD(kgpreagg,kern_prep,tv_start);
 private_reduction_step:
 	;
@@ -2027,7 +2026,7 @@ private_reduction_step:
 	 * reduction stage, thus, PDS_final might be updated. It means we
 	 * cannot recover the CpuReCheck error once we moved across this point.
 	 */
-	kgpreagg->progress_final = true;
+	kgpreagg->final_reduction_in_progress = true;
 final_reduction_step:
 
 	/* Launch:

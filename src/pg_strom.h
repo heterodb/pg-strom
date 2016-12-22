@@ -330,19 +330,20 @@ typedef struct pgstrom_data_store
 	cl_uint				nblocks_uncached;
 
 	/*
-	 * NOTE: @ntasks_running is an independent counter regardless of
-	 * @refcnt. It is used to track number of concurrent tasks that
-	 * reference the PDS. Once the PDS gets dereferenced from the further
-	 * tasks (@is_dereferenced = true), then, if @ntasks_running gets back
-	 * to zero, it means the caller task is the last context which
-	 * references the PDS.
-	 * GpuPreAgg uses this mechanism to terminate its final reduction.
+	 * NOTE: @ntasks_running is an independent counter regardless of the
+	 * @refcnt. It represents number of concurrent tasks which reference
+	 * the PDS. So, once @ntasks_running gets back to zero when no new
+	 * tasks will be never attached any more, we can determine it is the
+	 * last task that references this PDS.
+	 * GpuPreAgg uses this mechanism to terminate its final reduction
+	 * buffer.
+	 * datastore.c does not care about this counter, so individual logics
+	 * have to manage the counter with proper locking mechanism by itself.
 	 */
 	cl_uint				ntasks_running;
-	cl_bool				is_dereferenced;
 
 	/* data chunk in kernel portion */
-	kern_data_store kds;
+	kern_data_store kds	__attribute__ ((aligned (sizeof(cl_ulong))));
 } pgstrom_data_store;
 
 /*
