@@ -363,7 +363,7 @@ PDS_release(pgstrom_data_store *pds)
 {
 	int32		refcnt_new;
 
-	refcnt_new = (int32)pg_atomic_fetch_sub_u32(&pds->refcnt, 1);
+	refcnt_new = (int32)pg_atomic_sub_fetch_u32(&pds->refcnt, 1);
 	Assert(refcnt_new >= 0);
 	if (refcnt_new == 0)
 		dmaBufferFree(pds);

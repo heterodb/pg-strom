@@ -1311,7 +1311,7 @@ gpuservRecvGpuTasks(GpuContext_v2 *gcontext, long timeout)
 	struct timeval	tv1, tv2;
 
 	if (gcontext->sockfd == PGINVALID_SOCKET)
-		return 0;
+		return false;
 
 	Assert(!IsGpuServerProcess());
 
@@ -1321,8 +1321,8 @@ gpuservRecvGpuTasks(GpuContext_v2 *gcontext, long timeout)
 
 	gettimeofday(&tv1, NULL);
 	do {
-		bool		peer_sock_closed = false;
-		int			ev;
+		bool	peer_sock_closed = false;
+		int		ev;
 
 		CHECK_FOR_INTERRUPTS();
 		ResetLatch(MyLatch);
@@ -1341,7 +1341,7 @@ gpuservRecvGpuTasks(GpuContext_v2 *gcontext, long timeout)
 			return false;
 		}
 		if (timeout == 0)
-			break;
+			return false;
 
 		ev = WaitLatchOrSocket(MyLatch,
 							   WL_LATCH_SET |
@@ -1354,6 +1354,11 @@ gpuservRecvGpuTasks(GpuContext_v2 *gcontext, long timeout)
 			ereport(FATAL,
 					(errcode(ERRCODE_ADMIN_SHUTDOWN),
 					 errmsg("Urgent termination by postmaster dead")));
+		if (ev & WL_TIMEOUT)
+			elog(ERROR, "GPU server response timeout...");
+		if (ev & WL_LATCH_SET)
+			break;	/* something happen */
+
 		/* elsewhere wake up by WL_LATCH_SET or WL_SOCKET_READABLE */
 		gettimeofday(&tv2, NULL);
 		if (timeout > 0)

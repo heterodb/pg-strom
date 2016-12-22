@@ -1652,6 +1652,8 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 	assert(get_global_size() == 1);	/* !!single thread!! */
 	assert(kgpreagg->reduction_mode != GPUPREAGG_ONLY_TERMINATION);
 
+	return;
+
 	if (kgpreagg->progress_final)
 	{
 		printf("due to task retry (%p), jump to final reduction\n", kgpreagg);

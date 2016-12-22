@@ -379,8 +379,8 @@ retry_fetch:
 		 * If we have any asynchronous tasks, try synchronous receive to
 		 * get next task.
 		 */
-		if (!gpuservRecvGpuTasks(gcontext, -1))
-			elog(ERROR, "GPU server response timeout...");
+		gpuservRecvGpuTasks(gcontext, -1);
+		fprintf(stderr, "wake up from the sync wait\n");
 	}
 
 	/* OK, pick up GpuTask from the head */
