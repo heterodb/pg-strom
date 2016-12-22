@@ -159,14 +159,104 @@ CREATE AGGREGATE pgstrom.favg(numeric[])
 );
 
 -- PMIN()/PMAX()
-CREATE FUNCTION pgstrom.pmin(anyelement)
-  RETURNS anyelement
-  AS 'MODULE_PATHNAME', 'pgstrom_partial_min'
+CREATE FUNCTION pgstrom.pmin(int2)
+  RETURNS int2
+  AS 'MODULE_PATHNAME', 'pgstrom_partial_min_any'
   LANGUAGE C STRICT;
 
-CREATE FUNCTION pgstrom.pmax(anyelement)
-  RETURNS anyelement
-  AS 'MODULE_PATHNAME', 'pgstrom_partial_min'
+CREATE FUNCTION pgstrom.pmax(int2)
+  RETURNS int2
+  AS 'MODULE_PATHNAME', 'pgstrom_partial_max_any'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pgstrom.pmin(int4)
+  RETURNS int4
+  AS 'MODULE_PATHNAME', 'pgstrom_partial_min_any'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pgstrom.pmax(int4)
+  RETURNS int4
+  AS 'MODULE_PATHNAME', 'pgstrom_partial_max_any'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pgstrom.pmin(int8)
+  RETURNS int8
+  AS 'MODULE_PATHNAME', 'pgstrom_partial_min_any'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pgstrom.pmax(int8)
+  RETURNS int8
+  AS 'MODULE_PATHNAME', 'pgstrom_partial_max_any'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pgstrom.pmin(float4)
+  RETURNS float4
+  AS 'MODULE_PATHNAME', 'pgstrom_partial_min_any'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pgstrom.pmax(float4)
+  RETURNS float4
+  AS 'MODULE_PATHNAME', 'pgstrom_partial_max_any'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pgstrom.pmin(float8)
+  RETURNS float8
+  AS 'MODULE_PATHNAME', 'pgstrom_partial_min_any'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pgstrom.pmax(float8)
+  RETURNS float8
+  AS 'MODULE_PATHNAME', 'pgstrom_partial_max_any'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pgstrom.pmin(numeric)
+  RETURNS numeric
+  AS 'MODULE_PATHNAME', 'pgstrom_partial_min_any'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pgstrom.pmax(numeric)
+  RETURNS numeric
+  AS 'MODULE_PATHNAME', 'pgstrom_partial_max_any'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pgstrom.pmin(money)
+  RETURNS money
+  AS 'MODULE_PATHNAME', 'pgstrom_partial_min_any'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pgstrom.pmax(money)
+  RETURNS money
+  AS 'MODULE_PATHNAME', 'pgstrom_partial_max_any'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pgstrom.pmin(time)
+  RETURNS time
+  AS 'MODULE_PATHNAME', 'pgstrom_partial_min_any'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pgstrom.pmax(time)
+  RETURNS time
+  AS 'MODULE_PATHNAME', 'pgstrom_partial_max_any'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pgstrom.pmin(timestamp)
+  RETURNS timestamp
+  AS 'MODULE_PATHNAME', 'pgstrom_partial_min_any'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pgstrom.pmax(timestamp)
+  RETURNS timestamp
+  AS 'MODULE_PATHNAME', 'pgstrom_partial_max_any'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pgstrom.pmin(timestamp with time zone)
+  RETURNS timestamp with time zone
+  AS 'MODULE_PATHNAME', 'pgstrom_partial_min_any'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pgstrom.pmax(timestamp with time zone)
+  RETURNS timestamp with time zone
+  AS 'MODULE_PATHNAME', 'pgstrom_partial_max_any'
   LANGUAGE C STRICT;
 
 -- PSUM()/PSUM_X2()

@@ -1324,6 +1324,7 @@ make_expr_typecast(Expr *expr, Oid target_type)
 	tup = SearchSysCache2(CASTSOURCETARGET,
 						  ObjectIdGetDatum(source_type),
 						  ObjectIdGetDatum(target_type));
+	Assert(HeapTupleIsValid(tup));
 	if (!HeapTupleIsValid(tup))
 		elog(ERROR, "could not find tuple for cast (%u,%u)",
 			 source_type, target_type);
@@ -1381,7 +1382,6 @@ make_expr_conditional(Expr *expr, Expr *filter, bool zero_if_unmatched)
 	if (!filter)
 		return expr;
 
-	Assert(exprType((Node *) filter) == BOOLOID);
 	if (!zero_if_unmatched)
 		defresult = (Expr *) makeNullConst(expr_typeoid,
 										   expr_typemod,
@@ -1422,10 +1422,10 @@ make_expr_conditional(Expr *expr, Expr *filter, bool zero_if_unmatched)
  * make_altfunc_simple_expr - constructor of simple function call
  */
 static Expr *
-make_altfunc_simple_expr(const char *func_name,
-						 Expr *func_arg, Oid argtype_oid)
+make_altfunc_simple_expr(const char *func_name, Expr *func_arg)
 {
 	Oid			namespace_oid = get_namespace_oid("pgstrom", false);
+	Oid			argtype_oid = InvalidOid;
 	oidvector  *func_argtypes;
 	HeapTuple	tuple;
 	Form_pg_proc proc_form;
@@ -1433,6 +1433,7 @@ make_altfunc_simple_expr(const char *func_name,
 
 	if (func_arg)
 	{
+		argtype_oid = exprType((Node *)func_arg);
 		func_argtypes = buildoidvector(&argtype_oid, 1);
 		/* cast to psum_typeoid, if mismatch */
 		func_arg = make_expr_typecast(func_arg, argtype_oid);
@@ -1499,7 +1500,7 @@ make_altfunc_nrows_expr(Aggref *aggref)
 	else
 		expr = make_andclause(nrows_args);
 
-	return make_altfunc_simple_expr("nrows", expr, BOOLOID);
+	return make_altfunc_simple_expr("nrows", expr);
 }
 
 /*
@@ -1517,7 +1518,7 @@ make_altfunc_minmax_expr(Aggref *aggref, const char *func_name)
 	/* make conditional if aggref has any filter */
 	expr = make_expr_conditional(tle->expr, aggref->aggfilter, false);
 
-	return make_altfunc_simple_expr(func_name, expr, ANYELEMENTOID);
+	return make_altfunc_simple_expr(func_name, expr);
 }
 
 /*
@@ -1538,7 +1539,7 @@ make_altfunc_psum_expr(Aggref *aggref, const char *func_name, Oid psum_typeoid)
 	/* make conditional if aggref has any filter */
 	expr = make_expr_conditional(expr, aggref->aggfilter, true);
 
-	return make_altfunc_simple_expr(func_name, expr, ANYELEMENTOID);
+	return make_altfunc_simple_expr(func_name, expr);
 }
 
 /*

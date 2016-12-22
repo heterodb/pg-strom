@@ -39,8 +39,8 @@ Datum pgstrom_final_avg_float8_accum(PG_FUNCTION_ARGS);
 Datum pgstrom_final_avg_float8_final(PG_FUNCTION_ARGS);
 Datum pgstrom_final_avg_numeric_accum(PG_FUNCTION_ARGS);
 Datum pgstrom_final_avg_numeric_final(PG_FUNCTION_ARGS);
-Datum pgstrom_partial_min(PG_FUNCTION_ARGS);
-Datum pgstrom_partial_max(PG_FUNCTION_ARGS);
+Datum pgstrom_partial_min_any(PG_FUNCTION_ARGS);
+Datum pgstrom_partial_max_any(PG_FUNCTION_ARGS);
 Datum pgstrom_partial_sum_any(PG_FUNCTION_ARGS);
 Datum pgstrom_partial_sum_x2_float4(PG_FUNCTION_ARGS);
 Datum pgstrom_partial_sum_x2_float8(PG_FUNCTION_ARGS);
@@ -355,21 +355,21 @@ PG_FUNCTION_INFO_V1(pgstrom_final_avg_numeric_final);
  * pgstrom.pmin(anyelement)
  */
 Datum
-pgstrom_partial_min(PG_FUNCTION_ARGS)
+pgstrom_partial_min_any(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_DATUM(PG_GETARG_DATUM(0));
 }
-PG_FUNCTION_INFO_V1(pgstrom_partial_min);
+PG_FUNCTION_INFO_V1(pgstrom_partial_min_any);
 
 /*
  * pgstrom.pmax(anyelement)
  */
 Datum
-pgstrom_partial_max(PG_FUNCTION_ARGS)
+pgstrom_partial_max_any(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_DATUM(PG_GETARG_DATUM(0));
 }
-PG_FUNCTION_INFO_V1(pgstrom_partial_max);
+PG_FUNCTION_INFO_V1(pgstrom_partial_max_any);
 
 /*
  * pgstrom.psum(anyelement)
