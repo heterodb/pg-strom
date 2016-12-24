@@ -380,7 +380,6 @@ retry_fetch:
 		 * get next task.
 		 */
 		gpuservRecvGpuTasks(gcontext, -1);
-		fprintf(stderr, "wake up from the sync wait\n");
 	}
 
 	/* OK, pick up GpuTask from the head */

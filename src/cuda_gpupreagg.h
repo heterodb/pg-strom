@@ -52,7 +52,6 @@ typedef struct
 {
 	kern_errorbuf	kerror;				/* kernel error information */
 	cl_ushort		reduction_mode;		/* one of GPUPREAGG_* above */
-	cl_bool			private_reduction_in_progress;
 	cl_bool			final_reduction_in_progress;
 
 	/* -- runtime statistics -- */
@@ -579,13 +578,25 @@ gpupreagg_initial_projection(kern_gpupreagg *kgpreagg,
 			htup = KDS_ROW_REF_HTUP(kds_src, kds_offset, NULL, NULL);
 		}
 	}
-	else if (kds_src->format == KDS_FORMAT_BLOCK &&
-			 kds_index < kresults->nitems)
+	else if (kds_src->format == KDS_FORMAT_BLOCK)
 	{
 		assert(!kresults->all_visible);
-		kds_offset = kresults->results[kds_index];
-		htup = KDS_BLOCK_REF_HTUP(kds_src, kds_offset, NULL, NULL);
+		if (kds_index < kresults->nitems)
+		{
+			kds_offset = kresults->results[kds_index];
+			htup = KDS_BLOCK_REF_HTUP(kds_src, kds_offset, NULL, NULL);
+		}
 	}
+	else
+	{
+		STROM_SET_ERROR(&kcxt.e, StromError_DataStoreCorruption);
+		goto out;
+	}
+
+	if (get_global_id() == 0)
+		kds_slot->nitems = (kresults->all_visible
+							? kds_src->nitems
+							: kresults->nitems);
 
 	if (htup)
 	{
@@ -595,6 +606,7 @@ gpupreagg_initial_projection(kern_gpupreagg *kgpreagg,
 							 KERN_DATA_STORE_VALUES(kds_slot, kds_index),
 							 KERN_DATA_STORE_ISNULL(kds_slot, kds_index));
 	}
+out:
 	/* write-back execution status into host-side */
 	kern_writeback_error_status(&kgpreagg->kerror, kcxt.e);
 }
@@ -615,7 +627,7 @@ gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,
 	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	kern_context	kcxt;
 	varlena		   *kparam_0 = (varlena *)kparam_get_value(kparams, 0);
-	cl_char		   *gpagg_atts = (cl_char *)VARDATA(kparam_0);
+	cl_char		   *attr_is_groupref = (cl_char *)VARDATA(kparam_0);
 	pagg_datum	   *l_datum = SHARED_WORKMEM(pagg_datum);
 	cl_uint			i, ncols = kds_slot->ncols;
 	cl_uint			nvalids = 0;
@@ -685,8 +697,8 @@ gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,
 	{
 		size_t		dist;
 
-		/* if not GPUPREAGG_FIELD_IS_AGGFUNC, do nothing */
-		if (gpagg_atts[i] != GPUPREAGG_FIELD_IS_AGGFUNC)
+		/* Do nothing, if attribute is grouping key */
+		if (attr_is_groupref[i])
 			continue;
 
 		/* load this value from kds_slot onto pagg_datum */
@@ -743,7 +755,7 @@ gpupreagg_local_reduction(kern_gpupreagg *kgpreagg,
 	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	kern_context	kcxt;
 	varlena		   *kparam_0 = (varlena *)kparam_get_value(kparams, 0);
-	cl_char		   *gpagg_atts = (cl_char *) VARDATA(kparam_0);
+	cl_char		   *attr_is_groupref = (cl_char *) VARDATA(kparam_0);
 	size_t			hash_size = 2 * get_local_size();
 	cl_uint			owner_index;
 	cl_uint			key_dist_salt = kgpreagg->key_dist_salt;
@@ -900,13 +912,7 @@ gpupreagg_local_reduction(kern_gpupreagg *kgpreagg,
 	l_datum = SHARED_WORKMEM(pagg_datum);
 	for (i=0; i < ncols; i++)
 	{
-		/*
-		 * In case when this column is either a grouping-key or not-
-		 * referenced one (thus, not a partial aggregation), all we
-		 * need to do is copying the data from the source to the
-		 * destination; without modification anything.
-		 */
-		if (gpagg_atts[i] != GPUPREAGG_FIELD_IS_AGGFUNC)
+		if (attr_is_groupref[i])
 			continue;
 
 		/* Load aggregation item to pagg_datum */
@@ -979,7 +985,7 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	kern_context	kcxt;
 	varlena		   *kparam_0 = (varlena *) kparam_get_value(kparams, 0);
-	cl_char		   *gpagg_atts = (cl_char *) VARDATA(kparam_0);
+	cl_char		   *attr_is_groupref = (cl_char *) VARDATA(kparam_0);
 	size_t			g_hashsize = g_hash->hash_size;
 	size_t			g_hashlimit = GLOBAL_HASHSLOT_THRESHOLD(g_hashsize);
 	size_t			owner_index;
@@ -1181,7 +1187,7 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 	{
 		for (i=0; i < ncols; i++)
 		{
-			if (gpagg_atts[i] != GPUPREAGG_FIELD_IS_AGGFUNC)
+			if (attr_is_groupref[i])
 				continue;
 			assert(owner_index < kds_slot->nrooms);
 			gpupreagg_global_calc(&kcxt,
@@ -1241,7 +1247,7 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	kern_context	kcxt;
 	varlena		   *kparam_0 = (varlena *) kparam_get_value(kparams, 0);
-	cl_char		   *gpagg_atts = (cl_char *) VARDATA(kparam_0);
+	cl_char		   *attr_is_groupref = (cl_char *) VARDATA(kparam_0);
 	cl_uint			kds_index;
 	cl_uint			owner_index = (cl_uint)(0xffffffff); //INVALID
 	size_t			f_hashsize = f_hash->hash_size;
@@ -1447,7 +1453,7 @@ retry_minor:
 		{
 			for (i=0; i < ncols; i++)
 			{
-				if (gpagg_atts[i] != GPUPREAGG_FIELD_IS_AGGFUNC)
+				if (attr_is_groupref[i])
 					continue;
 
 				/*
@@ -1654,12 +1660,7 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 	if (kgpreagg->final_reduction_in_progress)
 	{
 		printf("due to task retry (%p), jump to final reduction\n", kgpreagg);
-		goto final_reduction_step;
-	}
-	else if (kgpreagg->private_reduction_in_progress)
-	{
-		printf("due to task retry (%p), jump to reduction\n", kgpreagg);
-		goto private_reduction_step;
+		goto final_reduction_start;
 	}
 
 	memset(kresults_src, 0, offsetof(kern_resultbuf, results[0]));
@@ -1728,16 +1729,7 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 	else if (kgpreagg->kerror.errcode != StromError_Success)
 		return;
 
-	/*
-	 * MEMO: Informs to the host code the initial projection was
-	 * successfully done. It means the maximum available rooms for
-	 * kds_slot / ghash are sufficient for this kds_in.
-	 */
-	kgpreagg->private_reduction_in_progress = true;
 	TIMEVAL_RECORD(kgpreagg,kern_prep,tv_start);
-private_reduction_step:
-	;
-
 	if (kgpreagg->reduction_mode == GPUPREAGG_NOGROUP_REDUCTION)
 	{
 		/* Launch:
@@ -2027,7 +2019,7 @@ private_reduction_step:
 	 * cannot recover the CpuReCheck error once we moved across this point.
 	 */
 	kgpreagg->final_reduction_in_progress = true;
-final_reduction_step:
+final_reduction_start:
 
 	/* Launch:
 	 * KERNEL_FUNCTION(void)
@@ -2039,7 +2031,7 @@ final_reduction_step:
 	 *                           kern_global_hashslot *f_hash)
 	 */
 	tv_start = GlobalTimer();
-final_retry:
+final_reduction_retry:
 	/* init destination kern_resultbuf */
 	memset(kresults_dst, 0, offsetof(kern_resultbuf, results[0]));
 	kresults_dst->nrels = 1;
@@ -2100,7 +2092,7 @@ final_retry:
 		kresults_dst = kresults_tmp;
 		/* increment num_kern_fagg */
 		kgpreagg->pfm.num_kern_fagg++;
-		goto final_retry;
+		goto final_reduction_retry;
 	}
 	TIMEVAL_RECORD(kgpreagg,kern_fagg,tv_start);
 
