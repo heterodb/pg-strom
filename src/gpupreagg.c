@@ -168,9 +168,9 @@ typedef struct
 	GpuPreAggSharedState *gpa_sstate;
 
 	cl_int			num_group_keys;
-	TupleTableSlot *pseudo_slot;
-
+	TupleTableSlot *gpreagg_slot;	/* Slot reflects tlist_dev (w/o junks) */
 	List		   *outer_quals;	/* List of ExprState */
+	TupleTableSlot *outer_slot;
 	ProjectionInfo *outer_proj;		/* outer tlist -> custom_scan_tlist */
 	pgstrom_data_store *outer_pds;
 } GpuPreAggState;
@@ -247,7 +247,7 @@ static char	   *gpupreagg_codegen(codegen_context *context,
 								  List *outer_quals);
 static GpuPreAggSharedState *
 create_gpupreagg_shared_state(GpuPreAggState *gpas, GpuPreAggInfo *gpa_info,
-							  TupleDesc pseudo_tupdesc);
+							  TupleDesc gpreagg_tupdesc);
 static GpuPreAggSharedState *
 get_gpupreagg_shared_state(GpuPreAggSharedState *gpa_sstate);
 static void
@@ -1829,6 +1829,25 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 		}
 		resno++;
 	}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 	/* setup results */
 	Assert(list_length(target_orig->exprs) == list_length(tlist_upper));
 	target_upper->exprs = tlist_upper;
@@ -1898,6 +1917,38 @@ PlanGpuPreAggPath(PlannerInfo *root,
 		resno++;
 	}
 
+	/*
+	 * In case when outer relation scan was pulled-up to the GpuPreAgg,
+	 * variables referenced by the outer quals may not appear in the
+	 * @tlist_dev. We need to add junk TLE to solve the variable reference.
+	 */
+	if (gpa_info->outer_quals != NIL)
+	{
+		List	   *outer_vars;
+		ListCell   *cell;
+
+		outer_vars = pull_vars_of_level((Node *)gpa_info->outer_quals, 0);
+		foreach (lc, outer_vars)
+		{
+			Var		   *varnode = lfirst(lc);
+
+			foreach (cell, tlist_dev)
+			{
+				if (equal(varnode, lfirst(cell)))
+					break;
+			}
+
+			if (!cell)
+			{
+				TargetEntry *tle = makeTargetEntry(copyObject(varnode),
+												   list_length(tlist_dev) + 1,
+												   NULL,
+												   true);
+				tlist_dev = lappend(tlist_dev, tle);
+			}
+		}
+	}
+
 	/* setup CustomScan node */
 	cscan->scan.plan.targetlist = tlist;
 	cscan->scan.plan.qual = NIL;
@@ -1933,6 +1984,39 @@ PlanGpuPreAggPath(PlannerInfo *root,
 	form_gpupreagg_info(cscan, gpa_info);
 
 	return &cscan->scan.plan;
+}
+
+/*
+ * fixup_outer_quals_to_original
+ *
+ * Var nodes in @outer_quals were transformed to INDEX_VAR + resno form
+ * through the planner stage, however, executor assumes @outer_quals shall
+ * be executed towards the raw-tuple fetched from the outer relation.
+ * So, we have to adjust its varno/varattno
+ */
+static Node *
+fixup_outer_quals_to_original(Node *node, List *custom_scan_tlist)
+{
+	if (!node)
+		return NULL;
+	if (IsA(node, Var))
+	{
+		TargetEntry *tle;
+		Var	   *varnode = (Var *) node;
+
+		Assert(varnode->varno == INDEX_VAR &&
+			   varnode->varattno > 0 &&
+			   varnode->varattno <= list_length(custom_scan_tlist));
+		tle = list_nth(custom_scan_tlist, varnode->varattno - 1);
+		if (!IsA(tle->expr, Var))
+			elog(WARNING,
+				 "Bug? varnode of outer-quals references an expression: %s",
+				 nodeToString(tle->expr));
+		return (Node *)copyObject(tle->expr);
+	}
+	return expression_tree_mutator(node,
+								   fixup_outer_quals_to_original,
+								   (void *)custom_scan_tlist);
 }
 
 /*
@@ -2657,7 +2741,7 @@ gpupreagg_codegen_common_calc(StringInfo kern,
 		const char	   *aggcalc_type;
 
 		/* not arguments of aggregate functions */
-		if (tle->ressortgroupref > 0)
+		if (tle->ressortgroupref > 0 || tle->resjunk)
 			continue;
 
 		/* expression should be one of partial functions */
@@ -2906,24 +2990,24 @@ gpupreagg_codegen(codegen_context *context,
 	/* gpuscan_quals_eval (optional) */
 	if (cscan->scan.scanrelid > 0)
 	{
-		codegen_gpuscan_quals(&kern, context,
+		codegen_gpuscan_quals(&body, context,
 							  cscan->scan.scanrelid,
 							  outer_quals);
 		context->extra_flags |= DEVKERNEL_NEEDS_GPUSCAN;
 	}
 	/* gpupreagg_projection */
-	gpupreagg_codegen_projection(&kern, context, root, tlist_dev,
+	gpupreagg_codegen_projection(&body, context, root, tlist_dev,
 								 cscan->scan.scanrelid, outer_tlist);
 	/* gpupreagg_hashvalue */
-	gpupreagg_codegen_hashvalue(&kern, context, tlist_dev);
+	gpupreagg_codegen_hashvalue(&body, context, tlist_dev);
 	/* gpupreagg_keymatch */
-	gpupreagg_codegen_keymatch(&kern, context, tlist_dev);
+	gpupreagg_codegen_keymatch(&body, context, tlist_dev);
 	/* gpupreagg_local_calc */
-	gpupreagg_codegen_local_calc(&kern, context, tlist_dev);
+	gpupreagg_codegen_local_calc(&body, context, tlist_dev);
 	/* gpupreagg_global_calc */
-	gpupreagg_codegen_global_calc(&kern, context, tlist_dev);
+	gpupreagg_codegen_global_calc(&body, context, tlist_dev);
 	/* gpupreagg_nogroup_calc */
-	gpupreagg_codegen_nogroup_calc(&kern, context, tlist_dev);
+	gpupreagg_codegen_nogroup_calc(&body, context, tlist_dev);
 	/* function declarations */
 	pgstrom_codegen_func_declarations(&kern, context);
 	/* special expression declarations */
@@ -2981,8 +3065,9 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 	GpuPreAggState *gpas = (GpuPreAggState *) node;
 	CustomScan	   *cscan = (CustomScan *) node->ss.ps.plan;
 	GpuPreAggInfo  *gpa_info = deform_gpupreagg_info(cscan);
+	List		   *tlist_dev = cscan->custom_scan_tlist;
 	List		   *pseudo_tlist;
-	TupleDesc		pseudo_tupdesc;
+	TupleDesc		gpreagg_tupdesc;
 	TupleDesc		outer_tupdesc;
 	char		   *kern_define;
 	ProgramId		program_id;
@@ -3026,9 +3111,13 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
     }
     else
     {
+		Node	   *original;
+
 		Assert(scan_rel != NULL);
+		original = fixup_outer_quals_to_original((Node *)gpa_info->outer_quals,
+												 tlist_dev);
 		gpas->outer_quals = (List *)
-			ExecInitExpr((Expr *)gpa_info->outer_quals, &gpas->gts.css.ss.ps);
+			ExecInitExpr((Expr *)original, &gpas->gts.css.ss.ps);
 		outer_tupdesc = RelationGetDescr(scan_rel);
 	}
 
@@ -3038,21 +3127,23 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 	 * Projection from the outer-relation to the custom_scan_tlist is a job
 	 * of CPU fallback. It is equivalent to the initial device projection.
 	 */
-	pseudo_tlist = (List *)
-		ExecInitExpr((Expr *)cscan->custom_scan_tlist, &gpas->gts.css.ss.ps);
+	pseudo_tlist = (List *)ExecInitExpr((Expr *)tlist_dev,
+										&gpas->gts.css.ss.ps);
 	if (!ExecContextForcesOids(&gpas->gts.css.ss.ps, &has_oid))
 		has_oid = false;
-	pseudo_tupdesc = ExecTypeFromTL(cscan->custom_scan_tlist, has_oid);
-	gpas->pseudo_slot = MakeSingleTupleTableSlot(pseudo_tupdesc);
+	gpreagg_tupdesc = ExecCleanTypeFromTL(tlist_dev, has_oid);
+	gpas->gpreagg_slot = MakeSingleTupleTableSlot(gpreagg_tupdesc);
+
+	gpas->outer_slot = MakeSingleTupleTableSlot(outer_tupdesc);
 	gpas->outer_proj = ExecBuildProjectionInfo(pseudo_tlist,
 											   econtext,
-											   gpas->pseudo_slot,
+											   gpas->gpreagg_slot,
 											   outer_tupdesc);
 	gpas->outer_pds = NULL;
 
 	/* Create a shared state object */
 	gpas->gpa_sstate = create_gpupreagg_shared_state(gpas, gpa_info,
-													 pseudo_tupdesc);
+													 gpreagg_tupdesc);
 
 	/* Get CUDA program and async build if any */
 	kern_define = pgstrom_build_session_info(gpa_info->extra_flags,
@@ -3097,12 +3188,16 @@ ExecEndGpuPreAgg(CustomScanState *node)
 {
 	GpuPreAggState	   *gpas = (GpuPreAggState *) node;
 
-	/* release the shared status */
-	put_gpupreagg_shared_state(gpas->gpa_sstate);
 	/* clean up subtree, if any */
 	if (outerPlanState(node))
 		ExecEndNode(outerPlanState(node));
+	/* release the shared status */
+	put_gpupreagg_shared_state(gpas->gpa_sstate);
 	/* release any other resources */
+	if (gpas->gpreagg_slot)
+		ExecDropSingleTupleTableSlot(gpas->gpreagg_slot);
+	if (gpas->outer_slot)
+		ExecDropSingleTupleTableSlot(gpas->outer_slot);
 	pgstromReleaseGpuTaskState(&gpas->gts);
 }
 
@@ -3241,12 +3336,12 @@ ExplainGpuPreAgg(CustomScanState *node, List *ancestors, ExplainState *es)
  */
 static GpuPreAggSharedState *
 create_gpupreagg_shared_state(GpuPreAggState *gpas, GpuPreAggInfo *gpa_info,
-							  TupleDesc pseudo_tupdesc)
+							  TupleDesc gpreagg_tupdesc)
 {
 	GpuContext_v2  *gcontext = gpas->gts.gcontext;
 	GpuPreAggSharedState   *gpa_sstate;
 
-	Assert(pseudo_tupdesc->natts > 0);
+	Assert(gpreagg_tupdesc->natts > 0);
 	gpa_sstate = dmaBufferAlloc(gcontext, sizeof(GpuPreAggSharedState));
 	memset(gpa_sstate, 0, sizeof(GpuPreAggSharedState));
 	pg_atomic_init_u32(&gpa_sstate->refcnt, 1);
@@ -3257,7 +3352,7 @@ create_gpupreagg_shared_state(GpuPreAggState *gpas, GpuPreAggInfo *gpa_info,
 	gpa_sstate->m_fhash = 0UL;			/* creation on demand */
 	gpa_sstate->m_kds_final = 0UL;		/* creation on demand */
 	gpa_sstate->ev_kds_final = NULL;	/* creation on demand */
-	gpa_sstate->f_ncols = pseudo_tupdesc->natts;
+	gpa_sstate->f_ncols = gpreagg_tupdesc->natts;
 	gpa_sstate->f_key_dist_salt = 1;	/* assign on demand */
 	gpa_sstate->f_nrooms = 0;			/* assign on demand */
 	gpa_sstate->f_nitems = 0;			/* runtime statistics */
@@ -3350,7 +3445,7 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 	}
 
 	/* allocation of GpuPreAggTask */
-	tupdesc = gpas->pseudo_slot->tts_tupleDescriptor;
+	tupdesc = gpas->gpreagg_slot->tts_tupleDescriptor;
 	head_sz = STROMALIGN(offsetof(GpuPreAggTask, kern.kparams) +
 						 gpas->gts.kern_params->length);
 	kds_len = STROMALIGN(offsetof(kern_data_store,
@@ -3492,18 +3587,14 @@ gpupreagg_next_task(GpuTaskState_v2 *gts)
 
 static void
 gpupreagg_ready_task(GpuTaskState_v2 *gts, GpuTask_v2 *gtask)
-{
-	GpuPreAggTask  *gpreagg = (GpuPreAggTask *)gtask;
-	pgstrom_data_store *pds_final = gpreagg->pds_final;
-	Datum *values = KERN_DATA_STORE_VALUES(&pds_final->kds, 0);
-	bool  *isnull = KERN_DATA_STORE_ISNULL(&pds_final->kds, 0);
-
-	fprintf(stderr, "task %p was returned\n", gtask);
-}
+{}
 
 static void
 gpupreagg_switch_task(GpuTaskState_v2 *gts, GpuTask_v2 *gtask)
-{}
+{
+	if (gtask->kerror.errcode != StromError_Success)
+		elog(ERROR, "GPU kernel error: %s", errorTextKernel(&gtask->kerror));
+}
 
 /*
  * gpupreagg_next_tuple_fallback
@@ -3511,33 +3602,29 @@ gpupreagg_switch_task(GpuTaskState_v2 *gts, GpuTask_v2 *gtask)
 static TupleTableSlot *
 gpupreagg_next_tuple_fallback(GpuPreAggState *gpas, GpuPreAggTask *gpreagg)
 {
-	TupleTableSlot	   *slot = gpas->pseudo_slot;
+	TupleTableSlot	   *slot;
 	ExprContext		   *econtext = gpas->gts.css.ss.ps.ps_ExprContext;
 	pgstrom_data_store *pds_src = gpreagg->pds_src;
+	ExprDoneCond		is_done;
 
 retry:
 	/* fetch a tuple from the data-store */
-	ExecClearTuple(slot);
-	if (!PDS_fetch_tuple(slot, pds_src, &gpas->gts))
+	ExecClearTuple(gpas->outer_slot);
+	if (!PDS_fetch_tuple(gpas->outer_slot, pds_src, &gpas->gts))
 		return NULL;
 
 	/* filter out the tuple, if any outer quals */
 	if (gpas->outer_quals != NIL)
 	{
-		econtext->ecxt_scantuple = slot;
+		econtext->ecxt_scantuple = gpas->outer_slot;
 		if (!ExecQual(gpas->outer_quals, econtext, false))
 			goto retry;
 	}
 
-	/* ok, makes projection from outer-scan to pseudo-tlist */
-	if (gpas->outer_proj)
-	{
-		ExprDoneCond	is_done;
-
-		slot = ExecProject(gpas->outer_proj, &is_done);
-		if (is_done == ExprEndResult)
-			goto retry;	/* really right? */
-	}
+	/* makes a projection from the outer-scan to the pseudo-tlist */
+	slot = ExecProject(gpas->outer_proj, &is_done);
+	if (is_done == ExprEndResult)
+		goto retry;		/* XXX is this logic really right? */
 	return slot;
 }
 
@@ -3558,7 +3645,7 @@ gpupreagg_next_tuple(GpuTaskState_v2 *gts)
 		slot = gpupreagg_next_tuple_fallback(gpas, gpreagg);
 	else if (gpas->gts.curr_index < pds_final->kds.nitems)
 	{
-		slot = gpas->pseudo_slot;
+		slot = gpas->gpreagg_slot;
 		ExecClearTuple(slot);
 		PDS_fetch_tuple(slot, pds_final, &gpas->gts);
 	}

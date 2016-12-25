@@ -1572,6 +1572,7 @@ pgstrom_pullup_outer_scan(const Path *outer_path,
 {
 	RelOptInfo *baserel = outer_path->parent;
 	PathTarget *reltarget = baserel->reltarget;
+	List	   *outer_quals = NIL;
 	ListCell   *lc;
 
 	if (!enable_pullup_outer_scan)
@@ -1588,6 +1589,7 @@ pgstrom_pullup_outer_scan(const Path *outer_path,
 
 		if (!pgstrom_device_expression(rinfo->clause))
 			return false;
+		outer_quals = lappend(outer_quals, rinfo->clause);
 	}
 
 	/* target entry has to be */
@@ -1607,7 +1609,7 @@ pgstrom_pullup_outer_scan(const Path *outer_path,
 			return false;
 	}
 	*p_outer_relid = baserel->relid;
-	*p_outer_quals = baserel->baserestrictinfo;
+	*p_outer_quals = outer_quals;
 	return true;
 }
 
