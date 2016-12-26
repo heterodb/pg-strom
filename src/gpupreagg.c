@@ -266,7 +266,6 @@ static void gpupreagg_push_terminator_task(GpuPreAggTask *gpreagg_old);
  */
 #define ALTFUNC_GROUPING_KEY		 50	/* GROUPING KEY */
 #define ALTFUNC_CONST_VALUE			 51	/* constant values */
-//#define ALTFUNC_CONST_NULL			 52	/* NULL constant value */
 #define ALTFUNC_EXPR_NROWS			101	/* NROWS(X) */
 #define ALTFUNC_EXPR_PMIN			102	/* PMIN(X) */
 #define ALTFUNC_EXPR_PMAX			103	/* PMAX(X) */
@@ -782,9 +781,48 @@ aggfunc_lookup_by_oid(Oid aggfnoid)
  * checks whether the aggregate function/grouping clause are executable
  * on the device side.
  */
-static bool
-gpupreagg_device_executable(PlannerInfo *root, PathTarget *target)
+static Node *
+fixup_device_executable_expression(Node *node, PathTarget *target_input)
 {
+	ListCell   *lc;
+	cl_int		resno = 1;
+
+	if (!node)
+		return NULL;
+
+	foreach (lc, target_input->exprs)
+	{
+		Expr   *expr = lfirst(lc);
+
+		if (equal(node, expr))
+		{
+			/*
+			 * In case when the expression shall be calculated on target-list
+			 * of the outer relation side, all GpuPreAgg needs to do is just
+			 * reference a variable, even if the expression itself is not
+			 * executable on the device side.
+			 * pgstrom_device_expression() does not check @varno of Var node,
+			 * so we set INDEX_VAR just for a placeholder.
+			 */
+			return (Node *)makeVar(INDEX_VAR,
+								   resno,
+								   exprType(node),
+								   exprTypmod(node),
+								   exprCollation(node),
+								   0);
+		}
+	}
+	return expression_tree_mutator(node,
+								   fixup_device_executable_expression,
+								   target_input);
+}
+
+static bool
+gpupreagg_device_executable(PlannerInfo *root,
+							PathTarget *target,
+							Path *input_path)
+{
+	PathTarget	   *target_input = input_path->pathtarget;
 	devtype_info   *dtype;
 	devfunc_info   *dfunc;
 	int				resno = 1;
@@ -794,18 +832,20 @@ gpupreagg_device_executable(PlannerInfo *root, PathTarget *target)
 	foreach (lc, target->exprs)
 	{
 		Expr   *expr = lfirst(lc);
+		Node   *dexpr;
 
 		if (IsA(expr, Aggref))
 		{
 			Aggref	   *aggref = (Aggref *) expr;
 			const aggfunc_catalog_t *aggfn_cat;
 
+#if 0
 			if (target->sortgrouprefs[resno - 1] > 0)
 			{
 				elog(WARNING, "Bug? Aggregation is referenced by GROUP BY");
 				return false;
 			}
-
+#endif
 			/*
 			 * Aggregate function must be supported by GpuPreAgg
 			 */
@@ -826,11 +866,9 @@ gpupreagg_device_executable(PlannerInfo *root, PathTarget *target)
 				TargetEntry	   *tle = lfirst(cell);
 
 				Assert(IsA(tle, TargetEntry));
-				if (!IsA(tle->expr, Var) &&
-					!IsA(tle->expr, PlaceHolderVar) &&
-					!IsA(tle->expr, Const) &&
-					!IsA(tle->expr, Param) &&
-					!pgstrom_device_expression(tle->expr))
+				dexpr = fixup_device_executable_expression((Node *)tle->expr,
+														   target_input);
+				if (!pgstrom_device_expression((Expr *)dexpr))
 				{
 					elog(DEBUG2, "Expression is not device executable: %s",
 						 nodeToString(tle->expr));
@@ -838,17 +876,19 @@ gpupreagg_device_executable(PlannerInfo *root, PathTarget *target)
 				}
 			}
 		}
-		else
+		else if (target_input->sortgrouprefs[resno - 1] > 0)
 		{
 			/*
-			 * Data type of grouping-key must support equality function
+			 * Data types for grouping-keys must support equality function
 			 * for hash-based algorithm.
 			 */
-			dtype = pgstrom_devtype_lookup(exprType((Node *)expr));
+			dexpr = fixup_device_executable_expression((Node *)expr,
+													   target_input);
+			dtype = pgstrom_devtype_lookup(exprType(dexpr));
 			if (!dtype)
 			{
 				elog(DEBUG2, "device type %s is not supported",
-					 format_type_be(exprType((Node *)expr)));
+					 format_type_be(exprType(dexpr)));
 				return false;
 			}
 			dfunc = pgstrom_devfunc_lookup(dtype->type_eqfunc, InvalidOid);
@@ -859,20 +899,18 @@ gpupreagg_device_executable(PlannerInfo *root, PathTarget *target)
 				return false;
 			}
 
-			/*
-			 * If input is not a simple Var reference, expression must be
-			 * constructable on the device side.
-			 */
-			if (!IsA(expr, Var) &&
-				!IsA(expr, PlaceHolderVar) &&
-				!IsA(expr, Const) &&
-				!IsA(expr, Param) &&
-				!pgstrom_device_expression(expr))
+			if (!pgstrom_device_expression((Expr *)dexpr))
 			{
 				elog(DEBUG2, "Expression is not device executable: %s",
 					 nodeToString(expr));
 				return false;
 			}
+		}
+		else
+		{
+			elog(DEBUG2, "Expression that is not sort/group key met: %s",
+				 nodeToString(expr));
+			return false;
 		}
 		resno++;
 	}
@@ -1119,7 +1157,8 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 		return;
 	}
 
-	if (!gpupreagg_device_executable(root, target))
+	input_path = input_rel->cheapest_total_path;	
+	if (!gpupreagg_device_executable(root, target, input_path))
 		return;
 
 	/* number of estimated groups */
@@ -1165,7 +1204,6 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 	 * construction of GpuPreAgg pathnode on top of the cheapest total
 	 * cost pathnode (partial aggregation)
 	 */
-	input_path = input_rel->cheapest_total_path;
 	cpath = gpupreagg_construct_path(root, group_rel,
 									 target_host, target_dev,
 									 input_path, num_groups);
@@ -2073,12 +2111,12 @@ __make_tlist_device_projection(Node *node, void *__con)
 				con->outer_refs_expr = bms_add_member(con->outer_refs_expr, k);
 
 			Assert(varnode->varlevelsup == 0);
-			return (Node *)makeVar(INDEX_VAR,
-								   varnode->varattno,
-								   varnode->vartype,
-								   varnode->vartypmod,
-								   varnode->varcollid,
-								   varnode->varlevelsup);
+			return (Node *) makeVar(INDEX_VAR,
+									varnode->varattno,
+									varnode->vartype,
+									varnode->vartypmod,
+									varnode->varcollid,
+									varnode->varlevelsup);
 		}
 	}
 	else
@@ -3085,8 +3123,7 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 	bool			has_oid;
 	bool			with_connection = ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0);
 
-	Assert(gpa_info->outer_scanrelid == cscan->scan.scanrelid);
-	Assert(scan_rel ? outerPlan(node) == NULL : outerPlan(node) != NULL);
+	Assert(scan_rel ? outerPlan(node) == NULL : outerPlan(cscan) != NULL);
 	/* activate a GpuContext for CUDA kernel execution */
 	gcontext = AllocGpuContext(with_connection);
 

@@ -1571,7 +1571,7 @@ pgstrom_pullup_outer_scan(const Path *outer_path,
 						  List **p_outer_quals)
 {
 	RelOptInfo *baserel = outer_path->parent;
-	PathTarget *reltarget = baserel->reltarget;
+	PathTarget *outer_target = outer_path->pathtarget;
 	List	   *outer_quals = NIL;
 	ListCell   *lc;
 
@@ -1593,7 +1593,7 @@ pgstrom_pullup_outer_scan(const Path *outer_path,
 	}
 
 	/* target entry has to be */
-	foreach (lc, reltarget->exprs)
+	foreach (lc, outer_target->exprs)
 	{
 		Expr   *expr = (Expr *) lfirst(lc);
 

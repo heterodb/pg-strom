@@ -557,8 +557,6 @@ gpupreagg_initial_projection(kern_gpupreagg *kgpreagg,
 	INIT_KERNEL_CONTEXT(&kcxt,gpupreagg_preparation,kparams);
 
 	/* sanity checks */
-	assert(kds_src->format == KDS_FORMAT_ROW ||
-		   kds_src->format == KDS_FORMAT_BLOCK);
 	assert(kds_slot->format == KDS_FORMAT_SLOT);
 
 	if (kds_src->format == KDS_FORMAT_ROW)
@@ -577,6 +575,7 @@ gpupreagg_initial_projection(kern_gpupreagg *kgpreagg,
 			htup = KDS_ROW_REF_HTUP(kds_src, kds_offset, NULL, NULL);
 		}
 	}
+#ifdef GPUPREAGG_PULLUP_OUTER_SCAN
 	else if (kds_src->format == KDS_FORMAT_BLOCK)
 	{
 		assert(!kresults->all_visible);
@@ -586,6 +585,7 @@ gpupreagg_initial_projection(kern_gpupreagg *kgpreagg,
 			htup = KDS_BLOCK_REF_HTUP(kds_src, kds_offset, NULL, NULL);
 		}
 	}
+#endif
 	else
 	{
 		STROM_SET_ERROR(&kcxt.e, StromError_DataStoreCorruption);
