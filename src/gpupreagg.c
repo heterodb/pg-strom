@@ -239,11 +239,13 @@ static void		gpupreagg_build_path_target(PlannerInfo *root,
 											PathTarget *target_orig,
 											PathTarget *target_upper,
 											PathTarget *target_host,
-											PathTarget *target_dev);
+											PathTarget *target_dev,
+											List **p_tlist_dev_action);
 static char	   *gpupreagg_codegen(codegen_context *context,
 								  PlannerInfo *root,
 								  CustomScan *cscan,
 								  List *tlist_dev,
+								  List *tlist_dev_action,
 								  List *outer_tlist,
 								  List *outer_quals);
 static GpuPreAggSharedState *
@@ -264,8 +266,8 @@ static void gpupreagg_push_terminator_task(GpuPreAggTask *gpreagg_old);
 /*
  * Arguments of alternative functions.
  */
-#define ALTFUNC_GROUPING_KEY		 50	/* GROUPING KEY */
-#define ALTFUNC_CONST_VALUE			 51	/* constant values */
+#define ALTFUNC_GROUPING_KEY		 20	/* GROUPING KEY */
+#define ALTFUNC_JUNK_ATTRIBUTE		 21	/* dummy attribute (resjunk=true) */
 #define ALTFUNC_EXPR_NROWS			101	/* NROWS(X) */
 #define ALTFUNC_EXPR_PMIN			102	/* PMIN(X) */
 #define ALTFUNC_EXPR_PMAX			103	/* PMAX(X) */
@@ -276,6 +278,8 @@ static void gpupreagg_push_terminator_task(GpuPreAggTask *gpreagg_old);
 #define ALTFUNC_EXPR_PCOV_X2		108	/* PCOV_X2(X,Y) */
 #define ALTFUNC_EXPR_PCOV_Y2		109	/* PCOV_Y2(X,Y) */
 #define ALTFUNC_EXPR_PCOV_XY		110	/* PCOV_XY(X,Y) */
+#define ALTFUNC_IS_PARTIAL_FUNC(action)			\
+	((action) < ALTFUNC_EXPR_NROWS)
 
 /*
  * XXX - GpuPreAgg with Numeric arguments are problematic because
@@ -1067,6 +1071,7 @@ gpupreagg_construct_path(PlannerInfo *root,
 						 RelOptInfo *group_rel,
 						 PathTarget *target_host,
 						 PathTarget *target_dev,
+						 List *tlist_dev_action,
 						 Path *input_path,
 						 double num_groups)
 {
@@ -1107,7 +1112,9 @@ gpupreagg_construct_path(PlannerInfo *root,
 	cpath->path.parallel_workers = input_path->parallel_workers;
 	cpath->path.pathkeys = NIL;
 	cpath->custom_paths = custom_paths;
-	cpath->custom_private = list_make2(gpa_info, target_dev);
+	cpath->custom_private = list_make3(gpa_info,
+									   target_dev,
+									   tlist_dev_action);
 	cpath->methods = &gpupreagg_path_methods;
 
 	return cpath;
@@ -1129,6 +1136,7 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 	PathTarget	   *target_upper;
 	PathTarget	   *target_host;
 	PathTarget	   *target_dev;
+	List		   *tlist_dev_action = NIL;
 	CustomPath	   *cpath;
 	Path		   *input_path;
 	Path		   *final_path;
@@ -1195,10 +1203,12 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 	target_upper = create_empty_pathtarget();
 	target_host = create_empty_pathtarget();
 	target_dev = create_empty_pathtarget();
+	tlist_dev_action = NIL;
 	gpupreagg_build_path_target(root, target,
 								target_upper,
 								target_host,
-								target_dev);
+								target_dev,
+								&tlist_dev_action);
 
 	/*
 	 * construction of GpuPreAgg pathnode on top of the cheapest total
@@ -1206,6 +1216,7 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 	 */
 	cpath = gpupreagg_construct_path(root, group_rel,
 									 target_host, target_dev,
+									 tlist_dev_action,
 									 input_path, num_groups);
 	if (!cpath)
 		return;
@@ -1640,12 +1651,14 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 							PathTarget *target_orig,	/* in */
 							PathTarget *target_upper,	/* out */
 							PathTarget *target_host,	/* out */
-							PathTarget *target_dev)		/* out */
+							PathTarget *target_dev,		/* out */
+							List **p_tlist_dev_action)	/* out */
 {
 	List	   *tlist_upper = NIL;
 	List	   *tlist_host = NIL;
 	List	   *tlist_dev = NIL;
 	List	   *tlist_dev_grouprefs = NIL;
+	List	   *tlist_dev_action = NIL;
 	ListCell   *lc;
 	cl_int		i, resno = 1;
 
@@ -1654,7 +1667,8 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 		Expr	   *expr = lfirst(lc);
 		Expr	   *expr_host;
 		List	   *altfn_args = NIL;
-		ListCell   *cell;
+		ListCell   *cell1;
+		ListCell   *cell2;
 		Index		sortgroupref;
 
 		sortgroupref = target_orig->sortgrouprefs[resno - 1];
@@ -1672,8 +1686,6 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 			Oid				aggfn_oid;
 			const aggfunc_catalog_t *aggfn_cat;
 
-			Assert(target_orig->sortgrouprefs == NULL ||
-				   target_orig->sortgrouprefs[resno - 1] == 0);
 			aggfn_cat = aggfunc_lookup_by_oid(aggref->aggfnoid);
 			if (!aggfn_cat)
 				elog(ERROR, "lookup failed on aggregate function: %u",
@@ -1728,16 +1740,21 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 				}
 
 				/* add expression if unique */
-				foreach (cell, tlist_dev)
+				Assert(list_length(tlist_dev) ==
+					   list_length(tlist_dev_action));
+				forboth (cell1, tlist_dev,
+						 cell2, tlist_dev_action)
 				{
-					if (equal(expr, lfirst(cell)))
+					if (equal(expr, lfirst(cell1)) &&
+						action == lfirst_int(cell2))
 						break;
 				}
-				if (!cell)
+				if (!cell1 && !cell2)
 				{
 					tlist_dev = lappend(tlist_dev, copyObject(expr));
 					tlist_dev_grouprefs = lappend_int(tlist_dev_grouprefs,
 													  sortgroupref);
+					tlist_dev_action = lappend_int(tlist_dev_action, action);
 				}
 				altfn_args = lappend(altfn_args, expr);
 			}
@@ -1851,16 +1868,23 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 		{
 			if (sortgroupref > 0)
 			{
-				foreach (cell, tlist_dev)
+				Assert(list_length(tlist_dev) ==
+					   list_length(tlist_dev_action));
+				forboth (cell1, tlist_dev,
+						 cell2, tlist_dev_action)
 				{
-					if (equal(expr, lfirst(cell)))
+					if (equal(expr, lfirst(cell1)) &&
+						ALTFUNC_GROUPING_KEY == lfirst_int(cell2))
 						break;
 				}
-				if (!cell)
+
+				if (!cell1 && !cell2)
 				{
 					tlist_dev = lappend(tlist_dev, copyObject(expr));
 					tlist_dev_grouprefs = lappend_int(tlist_dev_grouprefs,
 													  sortgroupref);
+					tlist_dev_action = lappend_int(tlist_dev_action,
+												   ALTFUNC_GROUPING_KEY);
 				}
 			}
 			tlist_host = lappend(tlist_host, copyObject(expr));
@@ -1868,19 +1892,6 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 		}
 		resno++;
 	}
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
@@ -1903,6 +1914,8 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 	foreach (lc, tlist_dev_grouprefs)
 		target_dev->sortgrouprefs[i++] = lfirst_int(lc);
 	set_pathtarget_cost_width(root, target_dev);
+
+	*p_tlist_dev_action = tlist_dev_action;
 }
 
 /*
@@ -1924,13 +1937,14 @@ PlanGpuPreAggPath(PlannerInfo *root,
 	Plan		   *outer_plan = NULL;
 	List		   *outer_tlist = NIL;
 	List		   *tlist_dev = NIL;
+	List		   *tlist_dev_action = NIL;
 	ListCell	   *lc;
 	AttrNumber		resno = 1;
 	char		   *kern_source;
 	codegen_context	context;
 
 	Assert(list_length(custom_plans) <= 1);
-	Assert(list_length(best_path->custom_private) == 2);
+	Assert(list_length(best_path->custom_private) == 3);
 	if (custom_plans != NIL)
 	{
 		outer_plan = linitial(custom_plans);
@@ -1938,6 +1952,7 @@ PlanGpuPreAggPath(PlannerInfo *root,
 	}
 	gpa_info = linitial(best_path->custom_private);
 	target_dev = lsecond(best_path->custom_private);
+	tlist_dev_action = lthird(best_path->custom_private);
 
 	/*
 	 * Build @custom_scan_tlist. We can ignore param_info because GpuPreAgg
@@ -1955,6 +1970,7 @@ PlanGpuPreAggPath(PlannerInfo *root,
 		tlist_dev = lappend(tlist_dev, tle);
 		resno++;
 	}
+	Assert(list_length(tlist_dev) == list_length(tlist_dev_action));
 
 	/*
 	 * In case when outer relation scan was pulled-up to the GpuPreAgg,
@@ -1964,26 +1980,30 @@ PlanGpuPreAggPath(PlannerInfo *root,
 	if (gpa_info->outer_quals != NIL)
 	{
 		List	   *outer_vars;
-		ListCell   *cell;
+		ListCell   *cell1;
+		ListCell   *cell2;
 
 		outer_vars = pull_vars_of_level((Node *)gpa_info->outer_quals, 0);
 		foreach (lc, outer_vars)
 		{
 			Var		   *varnode = lfirst(lc);
 
-			foreach (cell, tlist_dev)
+			forboth (cell1, tlist_dev,
+					 cell2, tlist_dev_action)
 			{
-				if (equal(varnode, lfirst(cell)))
+				if (equal(varnode, lfirst(cell1)) &&
+					ALTFUNC_JUNK_ATTRIBUTE == lfirst_int(cell2))
 					break;
 			}
-
-			if (!cell)
+			if (!cell1 && !cell2)
 			{
 				TargetEntry *tle = makeTargetEntry(copyObject(varnode),
 												   list_length(tlist_dev) + 1,
 												   NULL,
 												   true);
 				tlist_dev = lappend(tlist_dev, tle);
+				tlist_dev_action = lappend_int(tlist_dev_action,
+											   ALTFUNC_JUNK_ATTRIBUTE);
 			}
 		}
 	}
@@ -2007,6 +2027,7 @@ PlanGpuPreAggPath(PlannerInfo *root,
 									root,
 									cscan,
 									tlist_dev,
+									tlist_dev_action,
 									outer_tlist,
 									gpa_info->outer_quals);
 //	elog(INFO, "source:\n%s", kern_source);
@@ -2343,9 +2364,13 @@ gpupreagg_codegen_projection(StringInfo kern,
 							 codegen_context *context,
 							 PlannerInfo *root,
 							 List *tlist_dev,
+							 List *tlist_dev_action,
 							 Index outer_scanrelid,
 							 List *outer_tlist)
 {
+	hoge;	//needs to check logic to list attributes of initial projection
+	//if projection consists of simple var/const reference only,
+	//no need to process it with expression
 	StringInfoData	decl;
 	StringInfoData	body;
 	StringInfoData	temp;
@@ -2354,7 +2379,8 @@ gpupreagg_codegen_projection(StringInfo kern,
 	Bitmapset	   *outer_refs_any = NULL;
 	Bitmapset	   *outer_refs_expr = NULL;
 	List		   *tlist_dev_alt;
-	ListCell	   *lc;
+	ListCell	   *lc1;
+	ListCell	   *lc2;
 	int				i, k, nattrs;
 
 	initStringInfo(&decl);
@@ -2404,6 +2430,10 @@ gpupreagg_codegen_projection(StringInfo kern,
 												 &outer_refs_expr);
 	Assert(list_length(tlist_dev_alt) == list_length(tlist_dev));
 	Assert(bms_is_subset(outer_refs_expr, outer_refs_any));
+
+	elog(INFO, "tlist_dev => %s", nodeToString(tlist_dev));
+	elog(INFO, "tlist_dev_action => %s", nodeToString(tlist_dev_action));
+	elog(INFO, "tlist_dev_alt => %s", nodeToString(tlist_dev_alt));
 
 	/* extract the supplied tuple and load variables */
 	if (!bms_is_empty(outer_refs_any))
@@ -2478,9 +2508,11 @@ gpupreagg_codegen_projection(StringInfo kern,
 					kvarname = psprintf("temp.%s_v", dtype->type_name);
 				}
 
-				foreach (lc, tlist_dev_alt)
+				forboth (lc1, tlist_dev_alt,
+						 lc2, tlist_dev_action)
 				{
-					TargetEntry	   *tle = lfirst(lc);
+					TargetEntry	   *tle = lfirst(lc1);
+					int				action = lfirst_int(lc2);
 					Var			   *varnode;
 
 					if (!IsA(tle->expr, Var))
@@ -2520,9 +2552,11 @@ gpupreagg_codegen_projection(StringInfo kern,
 	/*
 	 * Execute expression and store the value on dst_values/dst_isnull
 	 */
-	foreach (lc, tlist_dev_alt)
+	forboth (lc1, tlist_dev_alt,
+			 lc2, tlist_dev_action)
 	{
-		TargetEntry	   *tle = lfirst(lc);
+		TargetEntry	   *tle = lfirst(lc1);
+		int				action = lfirst_int(lc2);
 		Expr		   *expr;
 		devtype_info   *dtype;
 		const char	   *null_const_value = NULL;
@@ -3001,6 +3035,7 @@ gpupreagg_codegen(codegen_context *context,
 				  PlannerInfo *root,
 				  CustomScan *cscan,
 				  List *tlist_dev,
+				  List *tlist_dev_action,
 				  List *outer_tlist,
 				  List *outer_quals)
 {
@@ -3010,6 +3045,8 @@ gpupreagg_codegen(codegen_context *context,
 	bytea		   *kparam_0;
 	ListCell	   *lc;
 	int				i = 0;
+
+	Assert(list_length(tlist_dev) == list_length(tlist_dev_action));
 
 	initStringInfo(&kern);
 	initStringInfo(&body);
@@ -3021,11 +3058,11 @@ gpupreagg_codegen(codegen_context *context,
 	length = sizeof(cl_char) * list_length(tlist_dev);
 	kparam_0 = palloc0(length + VARHDRSZ);
 	SET_VARSIZE(kparam_0, length + VARHDRSZ);
-	foreach (lc, tlist_dev)
+	foreach (lc, tlist_dev_action)
 	{
-		TargetEntry	   *tle = lfirst(lc);
+		int		action = lfirst_int(lc);
 
-		((cl_char *)VARDATA(kparam_0))[i++] = (tle->ressortgroupref > 0);
+		((cl_char *)VARDATA(kparam_0))[i++] = (action == ALTFUNC_GROUPING_KEY);
 	}
 	context->used_params = list_make1(makeConst(BYTEAOID,
 												-1,
@@ -3045,7 +3082,8 @@ gpupreagg_codegen(codegen_context *context,
 		context->extra_flags |= DEVKERNEL_NEEDS_GPUSCAN;
 	}
 	/* gpupreagg_projection */
-	gpupreagg_codegen_projection(&body, context, root, tlist_dev,
+	gpupreagg_codegen_projection(&body, context, root,
+								 tlist_dev, tlist_dev_action,
 								 cscan->scan.scanrelid, outer_tlist);
 	/* gpupreagg_hashvalue */
 	gpupreagg_codegen_hashvalue(&body, context, tlist_dev);
