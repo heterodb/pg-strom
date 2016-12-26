@@ -279,7 +279,7 @@ static void gpupreagg_push_terminator_task(GpuPreAggTask *gpreagg_old);
 #define ALTFUNC_EXPR_PCOV_Y2		109	/* PCOV_Y2(X,Y) */
 #define ALTFUNC_EXPR_PCOV_XY		110	/* PCOV_XY(X,Y) */
 #define ALTFUNC_IS_PARTIAL_FUNC(action)			\
-	((action) < ALTFUNC_EXPR_NROWS)
+	((action) >= ALTFUNC_EXPR_NROWS)
 
 /*
  * XXX - GpuPreAgg with Numeric arguments are problematic because
@@ -843,13 +843,6 @@ gpupreagg_device_executable(PlannerInfo *root,
 			Aggref	   *aggref = (Aggref *) expr;
 			const aggfunc_catalog_t *aggfn_cat;
 
-#if 0
-			if (target->sortgrouprefs[resno - 1] > 0)
-			{
-				elog(WARNING, "Bug? Aggregation is referenced by GROUP BY");
-				return false;
-			}
-#endif
 			/*
 			 * Aggregate function must be supported by GpuPreAgg
 			 */
@@ -2222,15 +2215,22 @@ make_tlist_device_projection(List *tlist_dev,
  *                      cl_char *dst_isnull);
  */
 static Expr *
-codegen_projection_partial_funcion(FuncExpr *f,
+codegen_projection_partial_funcion(Expr *pf_expr,
+								   int action,
 								   codegen_context *context,
 								   const char **p_null_const_value)
 {
+	FuncExpr	   *f;
 	HeapTuple		tuple;
 	Form_pg_proc	proc_form;
 	const char	   *proc_name;
 	devtype_info   *dtype;
 	Expr		   *expr;
+
+	if (!IsA(pf_expr, FuncExpr))
+		elog(ERROR, "Bug? unexpected partial function expression: %s",
+			 nodeToString(pf_expr));
+	f = (FuncExpr *) pf_expr;
 
 	tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(f->funcid));
 	if (!HeapTupleIsValid(tuple))
@@ -2243,6 +2243,7 @@ codegen_projection_partial_funcion(FuncExpr *f,
 
 	if (strcmp(proc_name, "nrows") == 0)
 	{
+		Assert(action == ALTFUNC_EXPR_NROWS);
 		Assert(list_length(f->args) <= 1);
 		expr = (Expr *)makeConst(INT8OID,
 								 -1,
@@ -2258,6 +2259,8 @@ codegen_projection_partial_funcion(FuncExpr *f,
 	else if (strcmp(proc_name, "pmin") == 0 ||
 			 strcmp(proc_name, "pmax") == 0)
 	{
+		Assert(action == ALTFUNC_EXPR_PMIN ||
+			   action == ALTFUNC_EXPR_PMAX);
 		Assert(list_length(f->args) == 1);
 		expr = linitial(f->args);
 		dtype = pgstrom_devtype_lookup_and_track(exprType((Node *)expr),
@@ -2272,6 +2275,8 @@ codegen_projection_partial_funcion(FuncExpr *f,
 	else if (strcmp(proc_name, "psum") == 0 ||
 			 strcmp(proc_name, "psum_x2") == 0)
 	{
+		Assert(action == ALTFUNC_EXPR_PSUM ||
+			   action == ALTFUNC_EXPR_PSUM_X2);
 		Assert(list_length(f->args) == 1);
 		expr = linitial(f->args);
 		dtype = pgstrom_devtype_lookup_and_track(exprType((Node *)expr),
@@ -2292,16 +2297,21 @@ codegen_projection_partial_funcion(FuncExpr *f,
 		}
 		*p_null_const_value = dtype->zero_const;		
 	}
-	else if (strcmp(proc_name, "pcov_x") == 0 ||
-			 strcmp(proc_name, "pcov_y") == 0 ||
+	else if (strcmp(proc_name, "pcov_x")  == 0 ||
+			 strcmp(proc_name, "pcov_y")  == 0 ||
 			 strcmp(proc_name, "pcov_x2") == 0 ||
 			 strcmp(proc_name, "pcov_y2") == 0 ||
 			 strcmp(proc_name, "pcov_xy") == 0)
 	{
-		Expr	   *filter;
-		Expr	   *x_value;
-		Expr	   *y_value;
+		Expr   *filter;
+		Expr   *x_value;
+		Expr   *y_value;
 
+		Assert(action == ALTFUNC_EXPR_PCOV_X ||
+			   action == ALTFUNC_EXPR_PCOV_Y ||
+			   action == ALTFUNC_EXPR_PCOV_X2 ||
+			   action == ALTFUNC_EXPR_PCOV_Y2 ||
+			   action == ALTFUNC_EXPR_PCOV_XY);
 		Assert(list_length(f->args) == 3);
 		filter = linitial(f->args);
 		x_value = lsecond(f->args);
@@ -2351,9 +2361,10 @@ codegen_projection_partial_funcion(FuncExpr *f,
 		}
 	}
 	else
+	{
 		elog(ERROR, "Bug? unexpected partial aggregate function: %s",
 			 format_procedure(f->funcid));
-
+	}
 	ReleaseSysCache(tuple);
 
 	return expr;
@@ -2368,9 +2379,6 @@ gpupreagg_codegen_projection(StringInfo kern,
 							 Index outer_scanrelid,
 							 List *outer_tlist)
 {
-	hoge;	//needs to check logic to list attributes of initial projection
-	//if projection consists of simple var/const reference only,
-	//no need to process it with expression
 	StringInfoData	decl;
 	StringInfoData	body;
 	StringInfoData	temp;
@@ -2430,10 +2438,6 @@ gpupreagg_codegen_projection(StringInfo kern,
 												 &outer_refs_expr);
 	Assert(list_length(tlist_dev_alt) == list_length(tlist_dev));
 	Assert(bms_is_subset(outer_refs_expr, outer_refs_any));
-
-	elog(INFO, "tlist_dev => %s", nodeToString(tlist_dev));
-	elog(INFO, "tlist_dev_action => %s", nodeToString(tlist_dev_action));
-	elog(INFO, "tlist_dev_alt => %s", nodeToString(tlist_dev_alt));
 
 	/* extract the supplied tuple and load variables */
 	if (!bms_is_empty(outer_refs_any))
@@ -2515,7 +2519,7 @@ gpupreagg_codegen_projection(StringInfo kern,
 					int				action = lfirst_int(lc2);
 					Var			   *varnode;
 
-					if (!IsA(tle->expr, Var))
+					if (action != ALTFUNC_GROUPING_KEY)
 						continue;
 					varnode = (Var *) tle->expr;
 					if (varnode->varno != INDEX_VAR ||
@@ -2561,17 +2565,22 @@ gpupreagg_codegen_projection(StringInfo kern,
 		devtype_info   *dtype;
 		const char	   *null_const_value = NULL;
 
+		if (tle->resjunk)
+			continue;
 		if (IsA(tle->expr, Var))
 			continue;	/* it should be already loaded */
-		else if (tle->ressortgroupref > 0)
+		else if (action == ALTFUNC_GROUPING_KEY)
 		{
 			expr = tle->expr;
 			null_const_value = "0";
 		}
-		else if (IsA(tle->expr, FuncExpr))
-			expr = codegen_projection_partial_funcion((FuncExpr *)tle->expr,
+		else if (ALTFUNC_IS_PARTIAL_FUNC(action))
+		{
+			expr = codegen_projection_partial_funcion(tle->expr,
+													  action,
 													  context,
 													  &null_const_value);
+		}
 		else
 			elog(ERROR, "Bug? unexpected expression: %s",
 				 nodeToString(tle->expr));
@@ -2590,7 +2599,7 @@ gpupreagg_codegen_projection(StringInfo kern,
 			"  if (!temp.%s_v.isnull)\n"
 			"    dst_values[%d] = pg_%s_to_datum(temp.%s_v.value);\n",
 			tle->resno,
-			tle->ressortgroupref == 0 ? "aggfunc-arg" : "grouping-key",
+			ALTFUNC_IS_PARTIAL_FUNC(action) ? "aggfunc-arg" : "grouping-key",
 			dtype->type_name,
 			pgstrom_codegen_expression((Node *)expr, context),
 			tle->resno - 1, dtype->type_name,
@@ -2634,11 +2643,13 @@ gpupreagg_codegen_projection(StringInfo kern,
 static void
 gpupreagg_codegen_hashvalue(StringInfo kern,
 							codegen_context *context,
-							List *tlist_dev)
+							List *tlist_dev,
+							List *tlist_dev_action)
 {
 	StringInfoData	decl;
 	StringInfoData	body;
-	ListCell	   *lc;
+	ListCell	   *lc1;
+	ListCell	   *lc2;
 
 	initStringInfo(&decl);
     initStringInfo(&body);
@@ -2654,13 +2665,15 @@ gpupreagg_codegen_hashvalue(StringInfo kern,
 		"                    size_t kds_index)\n"
 		"{\n");
 
-	foreach (lc, tlist_dev)
+	forboth (lc1, tlist_dev,
+			 lc2, tlist_dev_action)
 	{
-		TargetEntry	   *tle = lfirst(lc);
+		TargetEntry	   *tle = lfirst(lc1);
+		int				action = lfirst_int(lc2);
 		Oid				type_oid;
 		devtype_info   *dtype;
 
-		if (tle->ressortgroupref == 0)
+		if (action != ALTFUNC_GROUPING_KEY)
 			continue;
 
 		type_oid = exprType((Node *)tle->expr);
@@ -2706,11 +2719,13 @@ gpupreagg_codegen_hashvalue(StringInfo kern,
 static void
 gpupreagg_codegen_keymatch(StringInfo kern,
 						   codegen_context *context,
-						   List *tlist_dev)
+						   List *tlist_dev,
+						   List *tlist_dev_action)
 {
 	StringInfoData	decl;
 	StringInfoData	body;
-	ListCell	   *lc;
+	ListCell	   *lc1;
+	ListCell	   *lc2;
 
 	initStringInfo(&decl);
 	initStringInfo(&body);
@@ -2727,15 +2742,17 @@ gpupreagg_codegen_keymatch(StringInfo kern,
 		"  pg_anytype_t temp_y  __attribute__((unused));\n"
 		"\n");
 
-	foreach (lc, tlist_dev)
+	forboth (lc1, tlist_dev,
+			 lc2, tlist_dev_action)
 	{
-		TargetEntry	   *tle = lfirst(lc);
+		TargetEntry	   *tle = lfirst(lc1);
+		int				action = lfirst_int(lc2);
 		Oid				type_oid;
 		Oid				coll_oid;
 		devtype_info   *dtype;
 		devfunc_info   *dfunc;
 
-		if (tle->ressortgroupref == 0)
+		if (action != ALTFUNC_GROUPING_KEY)
 			continue;
 
 		/* find the function to compare this data-type */
@@ -2877,9 +2894,11 @@ gpupreagg_codegen_common_calc(TargetEntry *tle,
 static void
 gpupreagg_codegen_local_calc(StringInfo kern,
 							 codegen_context *context,
-							 List *tlist_dev)
+							 List *tlist_dev,
+							 List *tlist_dev_action)
 {
-	ListCell   *lc;
+	ListCell   *lc1;
+	ListCell   *lc2;
 
 	appendStringInfoString(
 		kern,
@@ -2891,13 +2910,16 @@ gpupreagg_codegen_local_calc(StringInfo kern,
 		"{\n"
 		"  switch (attnum)\n"
 		"  {\n");
-	foreach (lc, tlist_dev)
+	forboth (lc1, tlist_dev,
+			 lc2, tlist_dev_action)
 	{
-		TargetEntry	   *tle = lfirst(lc);
+		TargetEntry	   *tle = lfirst(lc1);
+		int				action = lfirst_int(lc2);
 		const char	   *label;
 
+		/* only partial aggregate function's arguments */
 		/* not an argument of aggregate functions */
-		if (tle->ressortgroupref > 0 || tle->resjunk)
+		if (!ALTFUNC_IS_PARTIAL_FUNC(action))
 			continue;
 
 		label = gpupreagg_codegen_common_calc(tle, context, "LOCAL");
@@ -2928,9 +2950,11 @@ gpupreagg_codegen_local_calc(StringInfo kern,
 static void
 gpupreagg_codegen_global_calc(StringInfo kern,
 							  codegen_context *context,
-							  List *tlist_dev)
+							  List *tlist_dev,
+							  List *tlist_dev_action)
 {
-	ListCell   *lc;
+	ListCell   *lc1;
+	ListCell   *lc2;
 
 	appendStringInfoString(
 		kern,
@@ -2953,13 +2977,15 @@ gpupreagg_codegen_global_calc(StringInfo kern,
 		"  assert(accum_kds->format == KDS_FORMAT_SLOT);\n"
 		"  assert(newval_kds->format == KDS_FORMAT_SLOT);\n"
 		"\n");
-	foreach (lc, tlist_dev)
+	forboth (lc1, tlist_dev,
+			 lc2, tlist_dev_action)
 	{
-		TargetEntry *tle = lfirst(lc);
-		const char	*label;
+		TargetEntry	   *tle = lfirst(lc1);
+		int				action = lfirst_int(lc2);
+		const char	   *label;
 
-		/* not arguments of aggregate functions */
-		if (tle->ressortgroupref > 0 || tle->resjunk)
+		/* only partial aggregate function's arguments */
+		if (!ALTFUNC_IS_PARTIAL_FUNC(action))
 			continue;
 		label = gpupreagg_codegen_common_calc(tle, context, "GLOBAL");
 		appendStringInfo(
@@ -2988,9 +3014,11 @@ gpupreagg_codegen_global_calc(StringInfo kern,
 static void
 gpupreagg_codegen_nogroup_calc(StringInfo kern,
 							   codegen_context *context,
-							   List *tlist_dev)
+							   List *tlist_dev,
+							   List *tlist_dev_action)
 {
-	ListCell   *lc;
+	ListCell   *lc1;
+	ListCell   *lc2;
 
 	appendStringInfoString(
         kern,
@@ -3002,13 +3030,15 @@ gpupreagg_codegen_nogroup_calc(StringInfo kern,
 		"{\n"
 		"  switch (attnum)\n"
 		"  {\n");
-	foreach (lc, tlist_dev)
+	forboth (lc1, tlist_dev,
+			 lc2, tlist_dev_action)
 	{
-		TargetEntry	   *tle = lfirst(lc);
+		TargetEntry	   *tle = lfirst(lc1);
+		int				action = lfirst_int(lc2);
 		const char	   *label;
 
-		/* not an argument of aggregate functions */
-		if (tle->ressortgroupref > 0 || tle->resjunk)
+		/* only partial aggregate function's arguments */
+		if (!ALTFUNC_IS_PARTIAL_FUNC(action))
 			continue;
 		label = gpupreagg_codegen_common_calc(tle, context, "NOGROUP");
 		appendStringInfo(
@@ -3086,15 +3116,20 @@ gpupreagg_codegen(codegen_context *context,
 								 tlist_dev, tlist_dev_action,
 								 cscan->scan.scanrelid, outer_tlist);
 	/* gpupreagg_hashvalue */
-	gpupreagg_codegen_hashvalue(&body, context, tlist_dev);
+	gpupreagg_codegen_hashvalue(&body, context,
+								tlist_dev, tlist_dev_action);
 	/* gpupreagg_keymatch */
-	gpupreagg_codegen_keymatch(&body, context, tlist_dev);
+	gpupreagg_codegen_keymatch(&body, context,
+							   tlist_dev, tlist_dev_action);
 	/* gpupreagg_local_calc */
-	gpupreagg_codegen_local_calc(&body, context, tlist_dev);
+	gpupreagg_codegen_local_calc(&body, context,
+								 tlist_dev, tlist_dev_action);
 	/* gpupreagg_global_calc */
-	gpupreagg_codegen_global_calc(&body, context, tlist_dev);
+	gpupreagg_codegen_global_calc(&body, context,
+								  tlist_dev, tlist_dev_action);
 	/* gpupreagg_nogroup_calc */
-	gpupreagg_codegen_nogroup_calc(&body, context, tlist_dev);
+	gpupreagg_codegen_nogroup_calc(&body, context,
+								   tlist_dev, tlist_dev_action);
 	/* function declarations */
 	pgstrom_codegen_func_declarations(&kern, context);
 	/* special expression declarations */

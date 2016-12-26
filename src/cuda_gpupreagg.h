@@ -626,7 +626,7 @@ gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,
 	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	kern_context	kcxt;
 	varlena		   *kparam_0 = (varlena *)kparam_get_value(kparams, 0);
-	cl_char		   *attr_is_groupref = (cl_char *)VARDATA(kparam_0);
+	cl_char		   *attr_is_groupkey = (cl_char *)VARDATA(kparam_0);
 	pagg_datum	   *l_datum = SHARED_WORKMEM(pagg_datum);
 	cl_uint			i, ncols = kds_slot->ncols;
 	cl_uint			nvalids = 0;
@@ -697,7 +697,7 @@ gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,
 		size_t		dist;
 
 		/* Do nothing, if attribute is grouping key */
-		if (attr_is_groupref[i])
+		if (attr_is_groupkey[i])
 			continue;
 
 		/* load this value from kds_slot onto pagg_datum */
@@ -754,7 +754,7 @@ gpupreagg_local_reduction(kern_gpupreagg *kgpreagg,
 	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	kern_context	kcxt;
 	varlena		   *kparam_0 = (varlena *)kparam_get_value(kparams, 0);
-	cl_char		   *attr_is_groupref = (cl_char *) VARDATA(kparam_0);
+	cl_char		   *attr_is_groupkey = (cl_char *) VARDATA(kparam_0);
 	size_t			hash_size = 2 * get_local_size();
 	cl_uint			owner_index;
 	cl_uint			key_dist_salt = kgpreagg->key_dist_salt;
@@ -911,7 +911,7 @@ gpupreagg_local_reduction(kern_gpupreagg *kgpreagg,
 	l_datum = SHARED_WORKMEM(pagg_datum);
 	for (i=0; i < ncols; i++)
 	{
-		if (attr_is_groupref[i])
+		if (attr_is_groupkey[i])
 			continue;
 
 		/* Load aggregation item to pagg_datum */
@@ -983,8 +983,6 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 {
 	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	kern_context	kcxt;
-//	varlena		   *kparam_0 = (varlena *) kparam_get_value(kparams, 0);
-//	cl_char		   *attr_is_groupref = (cl_char *) VARDATA(kparam_0);
 	size_t			g_hashsize = g_hash->hash_size;
 	size_t			g_hashlimit = GLOBAL_HASHSLOT_THRESHOLD(g_hashsize);
 	size_t			owner_index;
@@ -995,7 +993,6 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 	cl_uint			hash_value;
 	cl_uint			hash_value_base;
 	cl_uint			index;
-//	cl_uint			i, ncols = kds_slot->ncols;
 	cl_uint			nconflicts = 0;
 	cl_uint			count;
 	pg_int4_t		key_dist_factor;
@@ -1239,8 +1236,6 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 {
 	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	kern_context	kcxt;
-//	varlena		   *kparam_0 = (varlena *) kparam_get_value(kparams, 0);
-//	cl_char		   *attr_is_groupref = (cl_char *) VARDATA(kparam_0);
 	cl_uint			kds_index;
 	cl_uint			owner_index = (cl_uint)(0xffffffff); //INVALID
 	size_t			f_hashsize = f_hash->hash_size;
@@ -1249,7 +1244,6 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 	cl_uint			key_dist_index = 0;
 	cl_uint			hash_value;
 	cl_uint			hash_value_base;
-//	cl_uint			i, ncols = kds_slot->ncols;
 	cl_uint			index;
 	cl_uint			count;
 	cl_uint			nconflicts = 0;
