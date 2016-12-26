@@ -1749,6 +1749,8 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 				STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
 				goto out;
 			}
+			else if (kgpreagg->kerror.errcode != StromError_Success)
+				return;
 			/* swap kresults buffer */
 			kresults_tmp = kresults_src;
 			kresults_src = kresults_dst;
@@ -1776,9 +1778,6 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 
 		if (kgpreagg->reduction_mode == GPUPREAGG_LOCAL_REDUCTION)
 		{
-			size_t		dynamic_shmem_unitsz = Max3(sizeof(kern_errorbuf),
-													sizeof(pagg_hashslot) * 2,
-													sizeof(pagg_datum));
 			/*
 			 * Launch:
 			 * KERNEL_FUNCTION_MAXTHREADS(void)
@@ -1787,41 +1786,17 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 			 *                           kern_resultbuf *kresults
 			 */
 			tv_start = GlobalTimer();
-			kern_args = (void **)cudaGetParameterBuffer(sizeof(void *),
-														sizeof(void *) * 3);
-			if (!kern_args)
-			{
-				STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelArgs);
-				goto out;
-			}
-			kern_args[0] = kgpreagg;
-			kern_args[1] = kds_slot;		/* in */
-			kern_args[2] = kresults_src;	/* out */
-			status = largest_workgroup_size(&grid_sz,
-											&block_sz,
-											(const void *)
-											gpupreagg_local_reduction,
-											kds_slot->nitems,
-											0, dynamic_shmem_unitsz);
-			if (status != cudaSuccess)
-			{
-				STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
-				goto out;
-			}
-
-			status = cudaLaunchDevice((void *)gpupreagg_local_reduction,
-									  kern_args,
-									  grid_sz,
-									  block_sz,
-									  dynamic_shmem_unitsz * block_sz.x,
-									  NULL);
-			if (status != cudaSuccess)
-			{
-				STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
-				goto out;
-			}
-
-			status = cudaDeviceSynchronize();
+			status = pgstromLaunchDynamicKernelMaxThreads3(
+						(void *)gpupreagg_local_reduction,
+						(kern_arg_t)(kgpreagg),
+						(kern_arg_t)(kds_slot),
+						(kern_arg_t)(kresults_src),
+						1,					/* threads_unitsz */
+						kds_slot->nitems,	/* num_threads_units */
+						0,					/* shmem_per_block */
+						Max3(sizeof(cl_uint),
+							 sizeof(pagg_hashslot) * 2,
+							 sizeof(pagg_datum)));	/* shmem_per_thread */
 			if (status != cudaSuccess)
 			{
 				STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
@@ -1829,7 +1804,6 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 			}
 			else if (kgpreagg->kerror.errcode != StromError_Success)
 				return;
-			/* perfmon */
 			TIMEVAL_RECORD(kgpreagg,kern_lagg,tv_start);
 		}
 		else
@@ -1837,7 +1811,6 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 			/* if no local reduction, global reduction takes all the rows */
 			kresults_src->all_visible = true;
 		}
-
 		tv_start = GlobalTimer();
 		/*
 		 * Launch:
@@ -1846,12 +1819,12 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 		 *                            kern_global_hashslot *g_hash)
 		 */
 		status = pgstromLaunchDynamicKernel2(
-			(void *)gpupreagg_init_global_hash,
-			(kern_arg_t)(kgpreagg->hash_size),
-			(kern_arg_t)(g_hash),
-			kgpreagg->hash_size,
-			0,
-			0);
+					(void *)gpupreagg_init_global_hash,
+					(kern_arg_t)(kgpreagg->hash_size),
+					(kern_arg_t)(g_hash),
+					kgpreagg->hash_size,
+					0,
+					0);
 		if (status != cudaSuccess)
 		{
 			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
@@ -1867,45 +1840,19 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 		 *                            kern_resultbuf *kresults_dst,
 		 *                            kern_global_hashslot *g_hash)
 		 */
-		kern_args = (void **)cudaGetParameterBuffer(sizeof(void *),
-													sizeof(void *) * 5);
-		if (!kern_args)
-		{
-			STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelArgs);
-			goto out;
-		}
-		kern_args[0] = kgpreagg;
-		kern_args[1] = kds_slot;
-		kern_args[2] = kresults_src;
-		kern_args[3] = kresults_dst;
-		kern_args[4] = g_hash;
-		status = largest_workgroup_size(&grid_sz,
-										&block_sz,
-										(const void *)
-										gpupreagg_global_reduction,
-										kresults_src->all_visible
-										? kds_slot->nitems
-										: kresults_src->nitems,
-										0, sizeof(kern_errorbuf));
-		if (status != cudaSuccess)
-		{
-			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
-			goto out;
-		}
-
-		status = cudaLaunchDevice((void *)gpupreagg_global_reduction,
-								  kern_args,
-								  grid_sz,
-								  block_sz,
-								  sizeof(kern_errorbuf) * block_sz.x,
-								  NULL);
-		if (status != cudaSuccess)
-		{
-			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
-			goto out;
-		}
-
-		status = cudaDeviceSynchronize();
+		num_threads = (kresults_src->all_visible
+					   ? kds_slot->nitems
+					   : kresults_src->nitems);
+		status = pgstromLaunchDynamicKernel5(
+					(void *)gpupreagg_global_reduction,
+					(kern_arg_t)(kgpreagg),
+					(kern_arg_t)(kds_slot),
+					(kern_arg_t)(kresults_src),
+					(kern_arg_t)(kresults_dst),
+					(kern_arg_t)(g_hash),
+					num_threads,
+					0,
+					sizeof(sizeof(cl_uint)));
 		if (status != cudaSuccess)
 		{
 			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
@@ -1913,7 +1860,6 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 		}
 		else if (kgpreagg->kerror.errcode != StromError_Success)
 			return;
-
 		TIMEVAL_RECORD(kgpreagg,kern_gagg,tv_start);
 
 		/* swap */
@@ -1948,68 +1894,44 @@ final_reduction_start:
 	 *                           kern_global_hashslot *f_hash)
 	 */
 	tv_start = GlobalTimer();
-final_reduction_retry:
-	/* init destination kern_resultbuf */
-	memset(kresults_dst, 0, offsetof(kern_resultbuf, results[0]));
-	kresults_dst->nrels = 1;
-	kresults_dst->nrooms = kresults_nrooms;
+	for (;;)
+	{
+		/* init destination kern_resultbuf */
+		memset(kresults_dst, 0, offsetof(kern_resultbuf, results[0]));
+		kresults_dst->nrels = 1;
+		kresults_dst->nrooms = kresults_nrooms;
 
-	kern_args = (void **)cudaGetParameterBuffer(sizeof(void *),
-												sizeof(void *) * 6);
-	if (!kern_args)
-	{
-		STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelArgs);
-		goto out;
-	}
-	kern_args[0] = kgpreagg;
-	kern_args[1] = kds_slot;
-	kern_args[2] = kds_final;
-	kern_args[3] = kresults_src;
-	kern_args[4] = kresults_dst;
-	kern_args[5] = f_hash;
+		num_threads = (kresults_src->all_visible
+					   ? kds_slot->nitems
+					   : kresults_src->nitems);
+		status = pgstromLaunchDynamicKernel6(
+					(void *)gpupreagg_final_reduction,
+					(kern_arg_t)(kgpreagg),
+					(kern_arg_t)(kds_slot),
+					(kern_arg_t)(kds_final),
+					(kern_arg_t)(kresults_src),
+					(kern_arg_t)(kresults_dst),
+					(kern_arg_t)(f_hash),
+					num_threads,
+					0,
+					sizeof(cl_uint));
+		if (status != cudaSuccess)
+		{
+			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
+			goto out;
+		}
+		else if (kgpreagg->kerror.errcode != StromError_Success)
+			return;
 
-	status = optimal_workgroup_size(&grid_sz,
-									&block_sz,
-									(const void *)
-									gpupreagg_final_reduction,
-									kresults_src->all_visible
-									? kds_slot->nitems
-									: kresults_src->nitems,
-									0, sizeof(kern_errorbuf));
-	if (status != cudaSuccess)
-	{
-		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
-		goto out;
-	}
-	status = cudaLaunchDevice((void *)gpupreagg_final_reduction,
-							  kern_args,
-							  grid_sz,
-							  block_sz,
-							  sizeof(kern_errorbuf) * block_sz.x,
-							  NULL);
-	if (status != cudaSuccess)
-	{
-		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
-		goto out;
-	}
-	status = cudaDeviceSynchronize();
-	if (status != cudaSuccess)
-	{
-		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
-		goto out;
-	}
-	else if (kgpreagg->kerror.errcode != StromError_Success)
-		return;
-
-	if (kresults_dst->nitems > 0)
-	{
+		if (kresults_dst->nitems == 0)
+			break;	/* ok, no more tuples not merged yet */
+	
 		/* swap */
 		kresults_tmp = kresults_src;
 		kresults_src = kresults_dst;
 		kresults_dst = kresults_tmp;
 		/* increment num_kern_fagg */
 		kgpreagg->pfm.num_kern_fagg++;
-		goto final_reduction_retry;
 	}
 	TIMEVAL_RECORD(kgpreagg,kern_fagg,tv_start);
 
