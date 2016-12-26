@@ -224,7 +224,6 @@ gpupreagg_local_calc(kern_context *kcxt,
  */
 STATIC_FUNCTION(void)
 gpupreagg_global_calc(kern_context *kcxt,
-					  cl_int attnum,
 					  kern_data_store *accum_kds,  size_t accum_index,
 					  kern_data_store *newval_kds, size_t newval_index);
 
@@ -984,8 +983,8 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 {
 	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	kern_context	kcxt;
-	varlena		   *kparam_0 = (varlena *) kparam_get_value(kparams, 0);
-	cl_char		   *attr_is_groupref = (cl_char *) VARDATA(kparam_0);
+//	varlena		   *kparam_0 = (varlena *) kparam_get_value(kparams, 0);
+//	cl_char		   *attr_is_groupref = (cl_char *) VARDATA(kparam_0);
 	size_t			g_hashsize = g_hash->hash_size;
 	size_t			g_hashlimit = GLOBAL_HASHSLOT_THRESHOLD(g_hashsize);
 	size_t			owner_index;
@@ -1185,16 +1184,10 @@ gpupreagg_global_reduction(kern_gpupreagg *kgpreagg,
 	if (owner_index != 0xffffffffU &&		/* a valid thread? */
 		owner_index != kds_index)			/* not a owner thread? */
 	{
-		for (i=0; i < ncols; i++)
-		{
-			if (attr_is_groupref[i])
-				continue;
-			assert(owner_index < kds_slot->nrooms);
-			gpupreagg_global_calc(&kcxt,
-								  i,
-								  kds_slot, owner_index,
-								  kds_slot, kds_index);
-		}
+		assert(owner_index < kds_slot->nrooms);
+		gpupreagg_global_calc(&kcxt,
+							  kds_slot, owner_index,
+							  kds_slot, kds_index);
 	}
 out:
 	/* collect run-time statistics */
@@ -1246,8 +1239,8 @@ gpupreagg_final_reduction(kern_gpupreagg *kgpreagg,		/* in */
 {
 	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	kern_context	kcxt;
-	varlena		   *kparam_0 = (varlena *) kparam_get_value(kparams, 0);
-	cl_char		   *attr_is_groupref = (cl_char *) VARDATA(kparam_0);
+//	varlena		   *kparam_0 = (varlena *) kparam_get_value(kparams, 0);
+//	cl_char		   *attr_is_groupref = (cl_char *) VARDATA(kparam_0);
 	cl_uint			kds_index;
 	cl_uint			owner_index = (cl_uint)(0xffffffff); //INVALID
 	size_t			f_hashsize = f_hash->hash_size;
@@ -1451,26 +1444,9 @@ retry_minor:
 		if (owner_index < Min(kds_final->nitems,
 							  kds_final->nrooms))
 		{
-			for (i=0; i < ncols; i++)
-			{
-				if (attr_is_groupref[i])
-					continue;
-
-				/*
-				 * Reduction, using global atomic operation
-				 *
-				 * If thread is responsible to the grouping-key, other
-				 * threads but NOT responsible will accumlate their values
-				 * here, then it shall become aggregated result. So, we mark
-				 * the "responsible" thread identifier on the kern_row_map.
-				 * Once kernel execution gets done, this index points the
-				 * location of aggregate value.
-				 */
-				gpupreagg_global_calc(&kcxt,
-									  i,
-									  kds_final, owner_index,
-									  kds_slot, kds_index);
-			}
+			gpupreagg_global_calc(&kcxt,
+								  kds_final, owner_index,
+								  kds_slot, kds_index);
 		}
 	}
 out:

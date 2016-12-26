@@ -2716,120 +2716,81 @@ gpupreagg_codegen_keymatch(StringInfo kern,
  *
  * common portion of the gpupreagg_xxxx_calc() kernels
  */
-static void
-gpupreagg_codegen_common_calc(StringInfo kern,
+static const char *
+gpupreagg_codegen_common_calc(TargetEntry *tle,
 							  codegen_context *context,
-							  List *tlist_dev,
-							  bool calc_per_attribute,
-							  const char *aggcalc_class,
-							  const char *aggcalc_args)
+							  const char *aggcalc_class)
 {
-	ListCell   *lc;
+	FuncExpr	   *f = (FuncExpr *)tle->expr;
+	char		   *func_name;
+	devtype_info   *dtype;
+	const char	   *aggcalc_ops;
+	const char	   *aggcalc_type;
+	static char		sbuffer[128];
 
-	if (calc_per_attribute)
-		appendStringInfoString(
-			kern,
-			"  switch (attnum)\n"
-			"  {\n");
+	/* expression should be one of partial functions */
+	if (!IsA(f, FuncExpr))
+		elog(ERROR, "Bug? not a partial function expression: %s",
+			 nodeToString(f));
+	func_name = get_func_name(f->funcid);
+	if (strcmp(func_name, "pmin") == 0)
+		aggcalc_ops = "PMIN";
+	else if (strcmp(func_name, "pmax") == 0)
+		aggcalc_ops = "PMAX";
+	else if (strcmp(func_name, "nrows") == 0 ||
+			 strcmp(func_name, "psum") == 0 ||
+			 strcmp(func_name, "psum_x2") == 0 ||
+			 strcmp(func_name, "pcov_x") == 0 ||
+			 strcmp(func_name, "pcov_y") == 0 ||
+			 strcmp(func_name, "pcov_x2") == 0 ||
+			 strcmp(func_name, "pcov_y2") == 0 ||
+			 strcmp(func_name, "pcov_xy") == 0)
+		aggcalc_ops = "PADD";
+	else
+		elog(ERROR, "Bug? unexpected partial function expression: %s",
+			 nodeToString(f));
+	pfree(func_name);
 
-	foreach (lc, tlist_dev)
+	dtype = pgstrom_devtype_lookup_and_track(f->funcresulttype, context);
+	if (!dtype)
+		elog(ERROR, "failed on device type lookup: %s",
+			 format_type_be(f->funcresulttype));
+
+	switch (dtype->type_oid)
 	{
-		TargetEntry	   *tle = lfirst(lc);
-		FuncExpr	   *f = (FuncExpr *)tle->expr;
-		char		   *func_name;
-		devtype_info   *dtype;
-		const char	   *aggcalc_ops;
-		const char	   *aggcalc_type;
-
-		/* not arguments of aggregate functions */
-		if (tle->ressortgroupref > 0 || tle->resjunk)
-			continue;
-
-		/* expression should be one of partial functions */
-		if (!IsA(f, FuncExpr))
-			elog(ERROR, "Bug? not a partial function expression: %s",
-				 nodeToString(f));
-		func_name = get_func_name(f->funcid);
-		if (strcmp(func_name, "pmin") == 0)
-			aggcalc_ops = "PMIN";
-		else if (strcmp(func_name, "pmax") == 0)
-			aggcalc_ops = "PMAX";
-		else
-		{
-			Assert(strcmp(func_name, "nrows") == 0 ||
-				   strcmp(func_name, "psum") == 0 ||
-				   strcmp(func_name, "psum_x2") == 0 ||
-				   strcmp(func_name, "pcov_x") == 0 ||
-				   strcmp(func_name, "pcov_y") == 0 ||
-				   strcmp(func_name, "pcov_x2") == 0 ||
-				   strcmp(func_name, "pcov_y2") == 0 ||
-				   strcmp(func_name, "pcov_xy") == 0);
-			aggcalc_ops = "PADD";
-		}
-		pfree(func_name);
-
-		dtype = pgstrom_devtype_lookup_and_track(f->funcresulttype, context);
-		if (!dtype)
-			elog(ERROR, "failed on device type lookup: %s",
-				 format_type_be(f->funcresulttype));
-
-		switch (dtype->type_oid)
-		{
-			case INT2OID:
-				aggcalc_type = "SHORT";
-				break;
-			case INT4OID:
-			case DATEOID:
-				aggcalc_type = "INT";
-				break;
-			case INT8OID:
-			case CASHOID:
-			case TIMEOID:
-			case TIMESTAMPOID:
-			case TIMESTAMPTZOID:
-				aggcalc_type = "LONG";
-				break;
-			case FLOAT4OID:
-				aggcalc_type = "FLOAT";
-				break;
-			case FLOAT8OID:
-				aggcalc_type = "DOUBLE";
-				break;
-			case NUMERICOID:
-				aggcalc_type = "NUMERIC";
-				break;
-			default:
-				elog(ERROR, "Bug? %s is not expected to use for GpuPreAgg",
-					 format_type_be(dtype->type_oid));
-		}
-
-		if (calc_per_attribute)
-			appendStringInfo(
-				kern,
-				"  case %d:\n"
-				"    AGGCALC_%s_%s_%s(%s);\n"
-				"    break;\n",
-				tle->resno - 1,
-				aggcalc_class,
-				aggcalc_ops,
-				aggcalc_type,
-				aggcalc_args);
-		else
-			appendStringInfo(
-				kern,
-				"  AGGCALC_%s_%s_%s(%s);\n",
-				aggcalc_class,
-                aggcalc_ops,
-                aggcalc_type,
-                aggcalc_args);
+		case INT2OID:
+			aggcalc_type = "SHORT";
+			break;
+		case INT4OID:
+		case DATEOID:
+			aggcalc_type = "INT";
+			break;
+		case INT8OID:
+		case CASHOID:
+		case TIMEOID:
+		case TIMESTAMPOID:
+		case TIMESTAMPTZOID:
+			aggcalc_type = "LONG";
+			break;
+		case FLOAT4OID:
+			aggcalc_type = "FLOAT";
+			break;
+		case FLOAT8OID:
+			aggcalc_type = "DOUBLE";
+			break;
+		case NUMERICOID:
+			aggcalc_type = "NUMERIC";
+			break;
+		default:
+			elog(ERROR, "Bug? %s is not expected to use for GpuPreAgg",
+				 format_type_be(dtype->type_oid));
 	}
-
-	if (calc_per_attribute)
-		appendStringInfoString(
-			kern,
-			"  default:\n"
-			"    break;\n"
-			"  }\n");
+	snprintf(sbuffer, sizeof(sbuffer),
+			 "AGGCALC_%s_%s_%s",
+			 aggcalc_class,
+			 aggcalc_ops,
+			 aggcalc_type);
+	return sbuffer;
 }
 
 /*
@@ -2846,6 +2807,8 @@ gpupreagg_codegen_local_calc(StringInfo kern,
 							 codegen_context *context,
 							 List *tlist_dev)
 {
+	ListCell   *lc;
+
 	appendStringInfoString(
 		kern,
 		"STATIC_FUNCTION(void)\n"
@@ -2853,15 +2816,32 @@ gpupreagg_codegen_local_calc(StringInfo kern,
 		"                     cl_int attnum,\n"
 		"                     pagg_datum *accum,\n"
 		"                     pagg_datum *newval)\n"
-		"{\n");
-	gpupreagg_codegen_common_calc(kern,
-								  context,
-								  tlist_dev,
-								  true,
-								  "LOCAL",
-								  "kcxt,accum,newval");
+		"{\n"
+		"  switch (attnum)\n"
+		"  {\n");
+	foreach (lc, tlist_dev)
+	{
+		TargetEntry	   *tle = lfirst(lc);
+		const char	   *label;
+
+		/* not an argument of aggregate functions */
+		if (tle->ressortgroupref > 0 || tle->resjunk)
+			continue;
+
+		label = gpupreagg_codegen_common_calc(tle, context, "LOCAL");
+		appendStringInfo(
+			kern,
+			"  case %d:\n"
+			"    %s(kcxt,accum,newval);\n"
+			"    break;\n",
+			tle->resno - 1,
+			label);
+	}
 	appendStringInfoString(
 		kern,
+		"  default:\n"
+		"    break;\n"
+		"  }\n"
 		"}\n\n");
 }
 
@@ -2878,35 +2858,47 @@ gpupreagg_codegen_global_calc(StringInfo kern,
 							  codegen_context *context,
 							  List *tlist_dev)
 {
+	ListCell   *lc;
+
 	appendStringInfoString(
 		kern,
 		"STATIC_FUNCTION(void)\n"
 		"gpupreagg_global_calc(kern_context *kcxt,\n"
-		"                      cl_int attnum,\n"
 		"                      kern_data_store *accum_kds,\n"
 		"                      size_t accum_index,\n"
 		"                      kern_data_store *newval_kds,\n"
 		"                      size_t newval_index)\n"
 		"{\n"
-		"  char    *accum_isnull    __attribute__((unused))\n"
-		"   = KERN_DATA_STORE_ISNULL(accum_kds,accum_index) + attnum;\n"
-		"  Datum   *accum_value     __attribute__((unused))\n"
-		"   = KERN_DATA_STORE_VALUES(accum_kds,accum_index) + attnum;\n"
-		"  char     new_isnull      __attribute__((unused))\n"
-		"   = KERN_DATA_STORE_ISNULL(newval_kds,newval_index)[attnum];\n"
-		"  Datum    new_value       __attribute__((unused))\n"
-		"   = KERN_DATA_STORE_VALUES(newval_kds,newval_index)[attnum];\n"
+		"  char    *disnull     __attribute__((unused))\n"
+		"    = KERN_DATA_STORE_ISNULL(accum_kds,accum_index);\n"
+		"  Datum   *dvalues     __attribute__((unused))\n"
+		"    = KERN_DATA_STORE_VALUES(accum_kds,accum_index);\n"
+		"  char    *sisnull     __attribute__((unused))\n"
+		"    = KERN_DATA_STORE_ISNULL(newval_kds,newval_index);\n"
+		"  Datum   *svalues     __attribute__((unused))\n"
+		"    = KERN_DATA_STORE_VALUES(newval_kds,newval_index);\n"
 		"\n"
 		"  assert(accum_kds->format == KDS_FORMAT_SLOT);\n"
 		"  assert(newval_kds->format == KDS_FORMAT_SLOT);\n"
 		"\n");
+	foreach (lc, tlist_dev)
+	{
+		TargetEntry *tle = lfirst(lc);
+		const char	*label;
 
-	gpupreagg_codegen_common_calc(kern,
-								  context,
-								  tlist_dev,
-								  false,
-								  "GLOBAL",
-						"kcxt,accum_isnull,accum_value,new_isnull,new_value");
+		/* not arguments of aggregate functions */
+		if (tle->ressortgroupref > 0 || tle->resjunk)
+			continue;
+		label = gpupreagg_codegen_common_calc(tle, context, "GLOBAL");
+		appendStringInfo(
+			kern,
+			"  %s(kcxt, disnull+%d, dvalues+%d, sisnull[%d], svalues[%d]);\n",
+			label,
+			tle->resno - 1,
+			tle->resno - 1,
+			tle->resno - 1,
+			tle->resno - 1);
+	}
 	appendStringInfoString(
 		kern,
 		"}\n\n");
@@ -2926,6 +2918,8 @@ gpupreagg_codegen_nogroup_calc(StringInfo kern,
 							   codegen_context *context,
 							   List *tlist_dev)
 {
+	ListCell   *lc;
+
 	appendStringInfoString(
         kern,
 		"STATIC_FUNCTION(void)\n"
@@ -2933,15 +2927,31 @@ gpupreagg_codegen_nogroup_calc(StringInfo kern,
 		"                       cl_int attnum,\n"
 		"                       pagg_datum *accum,\n"
 		"                       pagg_datum *newval)\n"
-		"{\n");
-	gpupreagg_codegen_common_calc(kern,
-								  context,
-                                  tlist_dev,
-								  true,
-								  "NOGROUP",
-								  "kcxt,accum,newval");
+		"{\n"
+		"  switch (attnum)\n"
+		"  {\n");
+	foreach (lc, tlist_dev)
+	{
+		TargetEntry	   *tle = lfirst(lc);
+		const char	   *label;
+
+		/* not an argument of aggregate functions */
+		if (tle->ressortgroupref > 0 || tle->resjunk)
+			continue;
+		label = gpupreagg_codegen_common_calc(tle, context, "NOGROUP");
+		appendStringInfo(
+			kern,
+			"  case %d:\n"
+			"    %s(kcxt,accum,newval);\n"
+			"    break;\n",
+			tle->resno - 1,
+			label);
+	}
 	appendStringInfoString(
-        kern,
+		kern,
+		"  default:\n"
+		"    break;\n"
+		"  }\n"
 		"}\n\n");
 }
 
