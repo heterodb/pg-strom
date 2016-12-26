@@ -168,6 +168,7 @@ typedef struct
 	GpuPreAggSharedState *gpa_sstate;
 
 	cl_int			num_group_keys;
+	cl_ulong		num_fallback_rows; /* # of rows processed by fallback */
 	TupleTableSlot *gpreagg_slot;	/* Slot reflects tlist_dev (w/o junks) */
 	List		   *outer_quals;	/* List of ExprState */
 	TupleTableSlot *outer_slot;
@@ -3091,6 +3092,7 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 	gpas->gts.cb_next_tuple  = gpupreagg_next_tuple;
 
 	gpas->num_group_keys     = gpa_info->num_group_keys;
+	gpas->num_fallback_rows  = 0;
 
 	/* initialization of the outer relation */
 	if (outerPlan(cscan))
@@ -3187,6 +3189,10 @@ static void
 ExecEndGpuPreAgg(CustomScanState *node)
 {
 	GpuPreAggState	   *gpas = (GpuPreAggState *) node;
+
+	if (gpas->num_fallback_rows > 0)
+		elog(WARNING, "GpuPreAgg processed %lu rows by CPU fallback",
+			gpas->num_fallback_rows);
 
 	/* clean up subtree, if any */
 	if (outerPlanState(node))
@@ -3607,24 +3613,24 @@ gpupreagg_next_tuple_fallback(GpuPreAggState *gpas, GpuPreAggTask *gpreagg)
 	pgstrom_data_store *pds_src = gpreagg->pds_src;
 	ExprDoneCond		is_done;
 
-retry:
-	/* fetch a tuple from the data-store */
-	ExecClearTuple(gpas->outer_slot);
-	if (!PDS_fetch_tuple(gpas->outer_slot, pds_src, &gpas->gts))
-		return NULL;
-
-	/* filter out the tuple, if any outer quals */
-	if (gpas->outer_quals != NIL)
+	for (;;)
 	{
+		/* fetch a tuple from the data-store */
+		ExecClearTuple(gpas->outer_slot);
+		if (!PDS_fetch_tuple(gpas->outer_slot, pds_src, &gpas->gts))
+			return NULL;
 		econtext->ecxt_scantuple = gpas->outer_slot;
-		if (!ExecQual(gpas->outer_quals, econtext, false))
-			goto retry;
-	}
 
-	/* makes a projection from the outer-scan to the pseudo-tlist */
-	slot = ExecProject(gpas->outer_proj, &is_done);
-	if (is_done == ExprEndResult)
-		goto retry;		/* XXX is this logic really right? */
+		/* filter out the tuple, if any outer quals */
+		if (!ExecQual(gpas->outer_quals, econtext, false))
+			continue;
+
+		/* makes a projection from the outer-scan to the pseudo-tlist */
+		slot = ExecProject(gpas->outer_proj, &is_done);
+		if (is_done != ExprEndResult)
+			break;		/* XXX is this logic really right? */
+	}
+	gpas->num_fallback_rows++;
 	return slot;
 }
 
@@ -4598,7 +4604,6 @@ gpupreagg_push_terminator_task(GpuPreAggTask *gpreagg_old)
 	GpuContext_v2  *gcontext = gpreagg_old->task.gcontext;
 	GpuPreAggTask  *gpreagg_new;
 	Size			required;
-	CUresult		rc;
 
 	Assert(IsGpuServerProcess());
 	required = STROMALIGN(offsetof(GpuPreAggTask, kern.kparams) +
@@ -4618,20 +4623,19 @@ gpupreagg_push_terminator_task(GpuPreAggTask *gpreagg_old)
 	gpreagg_new->task.dma_task_id = 0UL;
 
 	/* GpuPreAggTask fields */
+	gpreagg_new->gpa_sstate
+		= get_gpupreagg_shared_state(gpreagg_old->gpa_sstate);
 	gpreagg_new->pds_src          = NULL;
 	gpreagg_new->kds_head         = NULL;	/* shall not be used */
 	gpreagg_new->pds_final        = gpreagg_old->pds_final;
 	gpreagg_new->m_kds_final      = gpreagg_old->m_kds_final;
-	gpreagg_new->m_ghash          = gpreagg_old->m_ghash;
+	gpreagg_new->m_fhash          = gpreagg_old->m_fhash;
+	gpreagg_new->ev_kds_final     = gpreagg_old->ev_kds_final;
 
 	gpreagg_old->pds_final        = NULL;
 	gpreagg_old->m_kds_final      = 0UL;
-	gpreagg_old->m_ghash          = 0UL;
-	rc = cuEventDestroy(gpreagg_old->ev_kds_final);
-	if (rc != CUDA_SUCCESS)
-		elog(FATAL, "failed on cuEventDestroy: %s", errorText(rc));
+	gpreagg_old->m_fhash          = 0UL;
 	gpreagg_old->ev_kds_final     = NULL;
-
 
 	/* kern_gpupreagg fields */
 	gpreagg_new->kern.reduction_mode = GPUPREAGG_ONLY_TERMINATION;

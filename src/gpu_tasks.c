@@ -729,44 +729,60 @@ pgstromReleaseGpuTask(GpuTask_v2 *gtask)
  * errorText - string form of the error code
  */
 const char *
-errorText(int errcode)
+__errorText(int errcode, const char *__filename, int lineno)
 {
-	static __thread char buffer[512];
-	const char	   *error_val;
-	const char	   *error_str;
+	static __thread char buffer[800];
+	const char	   *filename;
+	const char	   *label;
+
+	/* pick up the last component of the relative pathname */
+	filename = strrchr(__filename, '/');
+	filename = (!filename ? __filename : filename + 1);
 
 	switch (errcode)
 	{
 		case StromError_Success:
-			return "Suceess";
+			label = "Suceess";
+			break;
 		case StromError_CpuReCheck:
-			return "CPU ReCheck";
+			label = "CPU ReCheck";
+			break;
 		case StromError_CudaInternal:
-			return "CUDA Internal Error";
+			label = "CUDA Internal Error";
+			break;
 		case StromError_OutOfMemory:
-			return "Out of memory";
+			label = "Out of memory";
+			break;
 		case StromError_OutOfSharedMemory:
-			return "Out of shared memory";
+			label = "Out of shared memory";
+			break;
 		case StromError_OutOfKernelArgs:
-			return "Out of kernel argument buffer";
+			label = "Out of kernel argument buffer";
+			break;
 		case StromError_InvalidValue:
-			return "Invalid Value";
+			label = "Invalid Value";
+			break;
 		case StromError_DataStoreCorruption:
-			return "Data store corruption";
+			label = "Data store corruption";
+			break;
 		case StromError_DataStoreNoSpace:
-			return "Data store no space";
+			label = "Data store no space";
+			break;
 		case StromError_DataStoreOutOfRange:
-			return "Data store out of range";
+			label = "Data store out of range";
+			break;
 		case StromError_SanityCheckViolation:
-			return "Sanity check violation";
+			label = "Sanity check violation";
+			break;
 
 		/*
 		 * CUDA Runtime Error - we don't want to link entire CUDA runtime
 		 * for error code handling only.
 		 */
-#define RT_ERROR(ERRCODE, ERRNAME)								\
+#define RT_ERROR(ERRCODE, ERRNAME)										\
 			case (StromError_CudaDevRunTimeBase + (ERRCODE)):			\
-				return "CUDA Runtime Error " #ERRCODE " - " #ERRNAME
+				label = "CUDA Runtime Error " #ERRCODE " - " #ERRNAME;	\
+				break;
 			RT_ERROR(1, MissingConfiguration);
 			RT_ERROR(2, MemoryAllocation);
 			RT_ERROR(3, InitializationError);
@@ -850,28 +866,39 @@ errorText(int errcode)
 		default:
 			if (errcode <= CUDA_ERROR_UNKNOWN)
 			{
+				const char *error_val;
+				const char *error_str;
+
 				/* Likely CUDA driver error */
 				if (cuGetErrorName(errcode, &error_val) == CUDA_SUCCESS &&
 					cuGetErrorString(errcode, &error_str) == CUDA_SUCCESS)
-					snprintf(buffer, sizeof(buffer), "%s - %s",
-							 error_val, error_str);
+					snprintf(buffer, sizeof(buffer), "%s - %s (%s:%d)",
+							 error_val, error_str,
+							 filename, lineno);
 				else
-					snprintf(buffer, sizeof(buffer), "%d - unknown", errcode);
+					snprintf(buffer, sizeof(buffer), "%d - unknown (%s:%d)",
+							 errcode,
+							 filename, lineno);
 			}
 			else if (errcode >= StromError_CudaDevRunTimeBase)
 			{
 				/* Or, unknown CUDA runtime error */
 				snprintf(buffer, sizeof(buffer),
-						 "CUDA Runtime Error %d - unknown",
-						 errcode - StromError_CudaDevRunTimeBase);
+						 "CUDA Runtime Error %d - unknown (%s:%d)",
+						 errcode - StromError_CudaDevRunTimeBase,
+						 filename, lineno);
 			}
 			else
 			{
 				/* ??? Unknown PG-Strom error??? */
 				snprintf(buffer, sizeof(buffer),
-						 "Unexpected Error: %d", errcode);
+						 "Unexpected Error: %d (%s:%d)",
+						 errcode,
+						 filename, lineno);
 			}
+			return buffer;
 	}
+	snprintf(buffer, sizeof(buffer), "%s (%s:%d)", label, filename, lineno);
 	return buffer;
 }
 

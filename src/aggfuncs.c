@@ -216,7 +216,7 @@ pgstrom_final_avg_int8_accum(PG_FUNCTION_ARGS)
 		y = (int64 *)ARR_DATA_PTR(yarray);
 
 		x[0] += y[0];
-		x[1] += y[0];
+		x[1] += y[1];
 	}
 	PG_RETURN_POINTER(xarray);
 }
@@ -264,7 +264,7 @@ pgstrom_final_avg_float8_accum(PG_FUNCTION_ARGS)
 		y = (float8 *)ARR_DATA_PTR(yarray);
 
 		x[0] += y[0];
-		x[1] += y[0];
+		x[1] += y[1];
 	}
 	PG_RETURN_POINTER(xarray);
 }

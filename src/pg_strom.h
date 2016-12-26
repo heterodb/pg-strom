@@ -474,7 +474,7 @@ extern void largest_workgroup_size(size_t *p_grid_size,
 								   size_t dynamic_shmem_per_thread);
 
 /*
- * gputasks.c
+ * gpu_tasks.c
  */
 extern void pgstromInitGpuTaskState(GpuTaskState_v2 *gts,
 									GpuContext_v2 *gcontext,
@@ -501,7 +501,8 @@ extern int	pgstromProcessGpuTask(GpuTask_v2 *gtask,
 extern int	pgstromCompleteGpuTask(GpuTask_v2 *gtask);
 extern void pgstromReleaseGpuTask(GpuTask_v2 *gtask);
 
-extern const char *errorText(int errcode);
+extern const char *__errorText(int errcode, const char *filename, int lineno);
+#define errorText(errcode)		__errorText((errcode),__FILE__,__LINE__)
 extern const char *errorTextKernel(kern_errorbuf *kerror);
 extern void pgstrom_init_gputasks(void);
 
