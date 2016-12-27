@@ -55,6 +55,9 @@ double		pgstrom_gpu_dma_cost;
 double		pgstrom_gpu_operator_cost;
 double		pgstrom_gpu_tuple_cost;
 
+/* saved hooks */
+static planner_hook_type		planner_hook_next;
+
 static void
 pgstrom_init_misc_guc(void)
 {
@@ -183,6 +186,175 @@ pgstrom_init_misc_guc(void)
 }
 
 /*
+ * pgstrom_post_planner
+ *
+ *
+ *
+ *
+ *
+ */
+static void
+pgstrom_post_planner_recurse(PlannedStmt *pstmt, Plan *plan,
+							 void **gpupreagg_private)
+{
+	ListCell   *lc;
+
+	if (!plan)
+		return;
+
+	elog(INFO, "lv: %d", nodeTag(plan));
+
+	switch (nodeTag(plan))
+	{
+		case T_ModifyTable:
+			{
+				ModifyTable *splan = (ModifyTable *) plan;
+
+				foreach (lc, splan->plans)
+					pgstrom_post_planner_recurse(pstmt, (Plan *)lfirst(lc),
+												 gpupreagg_private);
+			}
+			break;
+			
+		case T_Append:
+			{
+				Append	   *splan = (Append *) plan;
+
+				foreach (lc, splan->appendplans)
+					pgstrom_post_planner_recurse(pstmt, (Plan *)lfirst(lc),
+												 gpupreagg_private);
+			}
+			break;
+
+		case T_MergeAppend:
+			{
+				MergeAppend *splan = (MergeAppend *) plan;
+
+				foreach (lc, splan->mergeplans)
+					pgstrom_post_planner_recurse(pstmt, (Plan *)lfirst(lc),
+												 gpupreagg_private);
+			}
+			break;
+
+		case T_BitmapAnd:
+			{
+				BitmapAnd  *splan = (BitmapAnd *) plan;
+
+				foreach (lc, splan->bitmapplans)
+					pgstrom_post_planner_recurse(pstmt, (Plan *)lfirst(lc),
+												 gpupreagg_private);
+			}
+			break;
+
+		case T_BitmapOr:
+			{
+				BitmapOr   *splan = (BitmapOr *) plan;
+
+				foreach (lc, splan->bitmapplans)
+					pgstrom_post_planner_recurse(pstmt, (Plan *)lfirst(lc),
+												 gpupreagg_private);
+			}
+			break;
+
+		case T_CustomScan:
+			{
+				CustomScan *cscan = (CustomScan *) plan;
+
+				foreach (lc, cscan->custom_plans)
+					pgstrom_post_planner_recurse(pstmt, (Plan *)lfirst(lc),
+												 gpupreagg_private);
+			}
+			break;
+
+		default:
+			break;
+	}
+
+	if (outerPlan(plan))
+		pgstrom_post_planner_recurse(pstmt, outerPlan(plan),
+									 gpupreagg_private);
+	if (innerPlan(plan))
+		pgstrom_post_planner_recurse(pstmt, innerPlan(plan),
+									 gpupreagg_private);
+
+	/*
+	 * NOTE: We need to adjust target-list of Agg-node just upon the GpuPreAgg
+	 * node; to replace the normal aggregate function by the self-defined
+	 * final aggregate function.
+	 * Because of the restriction at ExecInitExpr, we cannot have Aggref node
+	 * on CustomScan node. On the other hands, get_agg_combine_expr() raises
+	 * an error, if combined aggregation references regular expressions.
+	 * So, at the PostgreSQL v9.6, we need a surgery of target-list onto the
+	 * plan tree.
+	 * Also note that, it is not an option to give modified PathTarget during
+	 * the path construction stage, because some logic tries to put projection
+	 * to revert the self-define PathTarget to the original one.
+	 */
+	if (pgstrom_plan_is_gpupreagg(plan))
+	{
+		gpupreagg_post_planner(pstmt, (CustomScan *)plan,
+							   gpupreagg_private);
+		Assert(*gpupreagg_private);
+	}
+	else if (*gpupreagg_private)
+	{
+		if (IsA(plan, Agg))
+		{
+			pgstrom_agg_post_planner(pstmt, (Agg *)plan,
+									 *gpupreagg_private);
+			*gpupreagg_private = NULL;
+		}
+		else if (IsA(plan, Group))
+		{
+			pgstrom_group_post_planner(pstmt, (Agg *)plan,
+									   *gpupreagg_private);
+			*gpupreagg_private = NULL;
+		}
+		else if (IsA(plan, Sort))
+			pgstrom_sort_post_planner(pstmt, (Sort *)plan,
+									  *gpupreagg_private);
+		else if (IsA(plan, Gather))
+			pgstrom_gather_post_planner(pstmt, (Gather *)plan,
+										*gpupreagg_private);
+		else
+			elog(ERROR, "unexpected node between Agg and GpuPreAgg: %s",
+				 nodeToString(plan));
+	}
+}
+
+static PlannedStmt *
+pgstrom_post_planner(Query *parse,
+					 int cursorOptions,
+					 ParamListInfo boundParams)
+{
+	PlannedStmt	   *pstmt;
+	ListCell	   *lc;
+	void		   *gpupreagg_private;
+
+	if (planner_hook_next)
+		pstmt = planner_hook_next(parse, cursorOptions, boundParams);
+	else
+		pstmt = standard_planner(parse, cursorOptions, boundParams);
+
+	elog(INFO, "comes into pgstrom_post_planner hook");
+
+	gpupreagg_private = NULL;
+	pgstrom_post_planner_recurse(pstmt, pstmt->planTree,
+								 &gpupreagg_private);
+	Assert(!gpupreagg_private);
+
+	foreach (lc, pstmt->subplans)
+	{
+		gpupreagg_private = NULL;
+		pgstrom_post_planner_recurse(pstmt, (Plan *)lfirst(lc),
+									 &gpupreagg_private);
+		Assert(!gpupreagg_private);
+	}
+	return pstmt;
+}
+
+
+/*
  * _PG_init
  *
  * Main entrypoint of PG-Strom. It shall be invoked only once when postmaster
@@ -227,6 +399,10 @@ _PG_init(void)
 	pgstrom_init_misc_guc();
 	pgstrom_init_codegen();
 //	pgstrom_init_plcuda();
+
+	/* planner hook registration */
+	planner_hook_next = planner_hook;
+	planner_hook = pgstrom_post_planner;
 }
 
 /* ------------------------------------------------------------

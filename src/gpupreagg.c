@@ -62,6 +62,12 @@ typedef struct
 	cl_int			plan_nchunks;	/* planned number of chunks */
 	cl_int			plan_extra_sz;	/* planned size of extra-sz per tuple */
 
+	List		   *tlist_final;
+	List		   *tlist_host;
+	List		   *tlist_host_grouprefs;
+	List		   *tlist_dev;
+	List		   *tlist_dev_action;
+
 	double			outer_nrows;	/* number of estimated outer nrows */
 	Index			outer_scanrelid;/* RTI, if outer path pulled up */
 	List		   *outer_quals;	/* device executable quals of outer-scan */
@@ -81,6 +87,11 @@ form_gpupreagg_info(CustomScan *cscan, GpuPreAggInfo *gpa_info)
 					makeInteger(double_as_long(gpa_info->plan_ngroups)));
 	privs = lappend(privs, makeInteger(gpa_info->plan_nchunks));
 	privs = lappend(privs, makeInteger(gpa_info->plan_extra_sz));
+	exprs = lappend(exprs, gpa_info->tlist_final);
+	exprs = lappend(exprs, gpa_info->tlist_host);
+	privs = lappend(privs, gpa_info->tlist_host_grouprefs);
+	exprs = lappend(exprs, gpa_info->tlist_dev);
+	privs = lappend(privs, gpa_info->tlist_dev_action);
 	privs = lappend(privs, makeInteger(double_as_long(gpa_info->outer_nrows)));
 	privs = lappend(privs, makeInteger(gpa_info->outer_scanrelid));
 	exprs = lappend(exprs, gpa_info->outer_quals);
@@ -105,6 +116,11 @@ deform_gpupreagg_info(CustomScan *cscan)
 	gpa_info->plan_ngroups = long_as_double(intVal(list_nth(privs, pindex++)));
 	gpa_info->plan_nchunks = intVal(list_nth(privs, pindex++));
 	gpa_info->plan_extra_sz = intVal(list_nth(privs, pindex++));
+	gpa_info->tlist_final = list_nth(exprs, eindex++);
+	gpa_info->tlist_host = list_nth(exprs, eindex++);
+	gpa_info->tlist_host_grouprefs = list_nth(privs, pindex++);
+	gpa_info->tlist_dev = list_nth(exprs, eindex++);
+	gpa_info->tlist_dev_action = list_nth(privs, pindex++);
 	gpa_info->outer_nrows = long_as_double(intVal(list_nth(privs, pindex++)));
 	gpa_info->outer_scanrelid = intVal(list_nth(privs, pindex++));
 	gpa_info->outer_quals = list_nth(exprs, eindex++);
@@ -236,11 +252,8 @@ typedef struct
 
 /* declaration of static functions */
 static void		gpupreagg_build_path_target(PlannerInfo *root,
-											PathTarget *target_orig,
 											PathTarget *target_upper,
-											PathTarget *target_host,
-											PathTarget *target_dev,
-											List **p_tlist_dev_action);
+											GpuPreAggInfo *gpa_info);
 static char	   *gpupreagg_codegen(codegen_context *context,
 								  PlannerInfo *root,
 								  CustomScan *cscan,
@@ -313,8 +326,8 @@ typedef struct {
 	 * c: pg_catalog ... the system default
 	 * s: pgstrom    ... PG-Strom's special ones
 	 */
-	const char *uppfn_name;
-	Oid			uppfn_argtype;
+	const char *____uppfn_name;		//deprecated
+	Oid			____uppfn_argtype;	//deprecated
 	const char *altfn_name;
 	int			altfn_nargs;
 	Oid			altfn_argtypes[8];
@@ -920,11 +933,9 @@ gpupreagg_device_executable(PlannerInfo *root,
  * cost estimation for GpuPreAgg node
  */
 static bool
-cost_gpupreagg(CustomPath *cpath,
+cost_gpupreagg(PlannerInfo *root,
+			   CustomPath *cpath,
 			   GpuPreAggInfo *gpa_info,
-			   PlannerInfo *root,
-			   PathTarget *target_host,
-			   PathTarget *target_dev,
 			   Path *input_path,
 			   double num_groups,
 			   AggClauseCosts *agg_costs)
@@ -940,9 +951,9 @@ cost_gpupreagg(CustomPath *cpath,
 	double		gpu_cpu_ratio;
 	cl_uint		ncols;
 	cl_uint		nrooms;
-	cl_int		index;
 	cl_int		key_dist_salt;
-	ListCell   *lc;
+	ListCell   *lc1;
+	ListCell   *lc2;
 
 	/* Fixed cost to setup/launch GPU kernel */
 	startup_cost += pgstrom_gpu_setup_cost;
@@ -951,12 +962,13 @@ cost_gpupreagg(CustomPath *cpath,
 	 * Estimation of the result buffer. It must fit to the target GPU device
 	 * memory size.
 	 */
-	index = 0;
-	foreach (lc, target_dev->exprs)
+	forboth (lc1, gpa_info->tlist_dev,
+			 lc2, gpa_info->tlist_dev_action)
 	{
-		Expr	   *expr = lfirst(lc);
-		Oid			type_oid = exprType((Node *)expr);
-		int32		type_mod = exprTypmod((Node *)expr);
+		TargetEntry *tle = lfirst(lc1);
+		int			action = lfirst_int(lc2);
+		Oid			type_oid = exprType((Node *)tle->expr);
+		int32		type_mod = exprTypmod((Node *)tle->expr);
 		int16		typlen;
 		bool		typbyval;
 
@@ -970,9 +982,8 @@ cost_gpupreagg(CustomPath *cpath,
 				extra_sz += get_typavgwidth(type_oid, type_mod);
 		}
 		/* count up number of the grouping keys */
-		if (target_dev->sortgrouprefs[index] > 0)
+		if (action == ALTFUNC_GROUPING_KEY)
 			num_group_keys++;
-		index++;
 	}
 	if (num_group_keys == 0)
 		num_groups = 1.0;	/* AGG_PLAIN */
@@ -992,7 +1003,7 @@ cost_gpupreagg(CustomPath *cpath,
 		key_dist_salt = 1;
 	output_ntuples = num_groups * (double)key_dist_salt;
 
-	ncols = list_length(target_dev->exprs);
+	ncols = list_length(gpa_info->tlist_dev);
 	nrooms = (cl_uint)(2.5 * num_groups * (double)key_dist_salt);
 	kds_length = (STROMALIGN(offsetof(kern_data_store, colmeta[ncols])) +
 				  STROMALIGN((sizeof(Datum) +
@@ -1013,8 +1024,14 @@ cost_gpupreagg(CustomPath *cpath,
 					 agg_costs->transCost.per_tuple *
 					 gpu_cpu_ratio * input_ntuples);
 	/* Cost estimation for host side functions */
-	startup_cost += target_host->cost.startup;
-	run_cost += target_host->cost.per_tuple * output_ntuples;
+	foreach (lc1, gpa_info->tlist_host)
+	{
+		TargetEntry	   *tle = lfirst(lc1);
+
+		cost_qual_eval_node(&qual_cost, (Node *)tle->expr, root);
+		startup_cost += qual_cost.startup;
+		run_cost += qual_cost.per_tuple * output_ntuples;
+	}
 	/* Cost estimation to fetch results */
 	run_cost += cpu_tuple_cost * output_ntuples;
 
@@ -1029,6 +1046,107 @@ cost_gpupreagg(CustomPath *cpath,
 	gpa_info->outer_nrows		= input_ntuples;
 
 	return true;
+}
+
+/*
+ * make_partial_grouping_target
+ *    Generate appropriate PathTarget for output of partial aggregate
+ *    (or partial grouping, if there are no aggregates) nodes.
+ *
+ * See optimizer/plan/planner.c
+ */
+static PathTarget *
+make_partial_grouping_target(PlannerInfo *root, PathTarget *grouping_target)
+{
+	Query	   *parse = root->parse;
+	PathTarget *partial_target;
+	List	   *non_group_cols;
+	List	   *non_group_exprs;
+	int			i;
+	ListCell   *lc;
+
+	partial_target = create_empty_pathtarget();
+	non_group_cols = NIL;
+
+	i = 0;
+	foreach(lc, grouping_target->exprs)
+	{
+		Expr       *expr = (Expr *) lfirst(lc);
+		Index       sgref = get_pathtarget_sortgroupref(grouping_target, i);
+
+		if (sgref && parse->groupClause &&
+			get_sortgroupref_clause_noerr(sgref, parse->groupClause) != NULL)
+		{
+			/*
+			 * It's a grouping column, so add it to the partial_target as-is.
+			 * (This allows the upper agg step to repeat the grouping calcs.)
+			 */
+			add_column_to_pathtarget(partial_target, expr, sgref);
+		}
+		else
+		{
+			/*
+			 * Non-grouping column, so just remember the expression for later
+			 * call to pull_var_clause.
+			 */
+			non_group_cols = lappend(non_group_cols, expr);
+		}
+		i++;
+	}
+
+	/*
+	 * If there's a HAVING clause, we'll need the Vars/Aggrefs it uses, too.
+	 */
+	if (parse->havingQual)
+		non_group_cols = lappend(non_group_cols, parse->havingQual);
+
+	/*
+	 * Pull out all the Vars, PlaceHolderVars, and Aggrefs mentioned in
+	 * non-group cols (plus HAVING), and add them to the partial_target if not
+	 * already present.  (An expression used directly as a GROUP BY item will
+	 * be present already.)  Note this includes Vars used in resjunk items, so
+	 * we are covering the needs of ORDER BY and window specifications.
+	 */
+	non_group_exprs = pull_var_clause((Node *) non_group_cols,
+									  PVC_INCLUDE_AGGREGATES |
+									  PVC_RECURSE_WINDOWFUNCS |
+									  PVC_INCLUDE_PLACEHOLDERS);
+
+	add_new_columns_to_pathtarget(partial_target, non_group_exprs);
+
+	/*
+	 * Adjust Aggrefs to put them in partial mode.  At this point all Aggrefs
+	 * are at the top level of the target list, so we can just scan the list
+	 * rather than recursing through the expression trees.
+	 */
+	foreach(lc, partial_target->exprs)
+	{
+		Aggref	   *aggref = (Aggref *) lfirst(lc);
+
+		if (IsA(aggref, Aggref))
+		{
+			Aggref	   *newaggref;
+
+			/*
+			 * We shouldn't need to copy the substructure of the Aggref node,
+			 * but flat-copy the node itself to avoid damaging other trees.
+			 */
+			newaggref = makeNode(Aggref);
+			memcpy(newaggref, aggref, sizeof(Aggref));
+
+			/* For now, assume serialization is required */
+			mark_partial_aggref(newaggref, AGGSPLIT_INITIAL_SERIAL);
+
+			lfirst(lc) = newaggref;
+		}
+	}
+
+	/* clean up cruft */
+	list_free(non_group_exprs);
+	list_free(non_group_cols);
+
+	/* XXX this causes some redundant cost calculation ... */
+	return set_pathtarget_cost_width(root, partial_target);
 }
 
 /*
@@ -1062,9 +1180,7 @@ estimate_hashagg_tablesize(Path *path, const AggClauseCosts *agg_costs,
 static CustomPath *
 gpupreagg_construct_path(PlannerInfo *root,
 						 RelOptInfo *group_rel,
-						 PathTarget *target_host,
-						 PathTarget *target_dev,
-						 List *tlist_dev_action,
+						 PathTarget *target_upper,
 						 Path *input_path,
 						 double num_groups)
 {
@@ -1075,11 +1191,13 @@ gpupreagg_construct_path(PlannerInfo *root,
 
 	/* obviously, not suitable for GpuPreAgg */
 	if (num_groups < 1.0 || num_groups > (double)INT_MAX)
-		return false;
+		return NULL;
+
+	/* construction of the target-list for each level */
+	gpupreagg_build_path_target(root, target_upper, gpa_info);
 
 	/* cost estimation */
-	if (!cost_gpupreagg(cpath, gpa_info,
-						root, target_host, target_dev, input_path,
+	if (!cost_gpupreagg(root, cpath, gpa_info, input_path,
 						num_groups, &agg_partial_costs))
 	{
 		pfree(cpath);
@@ -1097,7 +1215,7 @@ gpupreagg_construct_path(PlannerInfo *root,
 	/* Setup CustomPath */
 	cpath->path.pathtype = T_CustomScan;
 	cpath->path.parent = group_rel;
-	cpath->path.pathtarget = target_host;
+	cpath->path.pathtarget = target_upper; /* dummy - to be replaced later */
 	cpath->path.param_info = NULL;
 	cpath->path.parallel_aware = false;
 	cpath->path.parallel_safe = (group_rel->consider_parallel &&
@@ -1105,9 +1223,7 @@ gpupreagg_construct_path(PlannerInfo *root,
 	cpath->path.parallel_workers = input_path->parallel_workers;
 	cpath->path.pathkeys = NIL;
 	cpath->custom_paths = custom_paths;
-	cpath->custom_private = list_make3(gpa_info,
-									   target_dev,
-									   tlist_dev_action);
+	cpath->custom_private = list_make1(gpa_info);
 	cpath->methods = &gpupreagg_path_methods;
 
 	return cpath;
@@ -1125,13 +1241,15 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 							 RelOptInfo *group_rel)
 {
 	Query		   *parse = root->parse;
-	PathTarget	   *target = root->upper_targets[UPPERREL_GROUP_AGG];
-	PathTarget	   *target_upper;
-	PathTarget	   *target_host;
-	PathTarget	   *target_dev;
+	PathTarget	   *target_final = root->upper_targets[UPPERREL_GROUP_AGG];
+	List		   *tlist_final = NIL;
+	List		   *tlist_host = NIL;
+	List		   *tlist_host_grouprefs = NIL;
+	List		   *tlist_dev = NIL;
 	List		   *tlist_dev_action = NIL;
 	CustomPath	   *cpath;
-	Path		   *input_path;
+	GpuPreAggInfo  *gpa_info;
+	Path		   *input_path = input_rel->cheapest_total_path;
 	Path		   *final_path;
 	Path		   *sort_path;
 //	Path		   *gather_path;
@@ -1149,6 +1267,14 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 	if (!pgstrom_enabled || !enable_gpupreagg)
 		return;
 
+elog(INFO, "final => %s", nodeToString(root->upper_targets[UPPERREL_FINAL]));
+elog(INFO, "window => %s", nodeToString(root->upper_targets[UPPERREL_WINDOW]));
+elog(INFO, "group => %s", nodeToString(root->upper_targets[UPPERREL_GROUP_AGG]));
+elog(INFO, "SortGroupClause => %s", nodeToString(parse->groupClause));
+
+
+	return;
+
 	if (get_namespace_oid("pgstrom", true) == InvalidOid)
 	{
 		ereport(WARNING,
@@ -1158,8 +1284,7 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 		return;
 	}
 
-	input_path = input_rel->cheapest_total_path;	
-	if (!gpupreagg_device_executable(root, target, input_path))
+	if (!gpupreagg_device_executable(root, target_final, input_path))
 		return;
 
 	/* number of estimated groups */
@@ -1187,29 +1312,10 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 		return;
 
 	/*
-	 * construction of PathTarget to be attached on
-	 *
-	 * @target_upper: PathTarget for final Agg node (includes Aggref)
-	 * @target_host:  PathTarget for host-side of CustomScan
-	 * @target_dev:   PathTarget of device results or CPU fallback
-	 */
-	target_upper = create_empty_pathtarget();
-	target_host = create_empty_pathtarget();
-	target_dev = create_empty_pathtarget();
-	tlist_dev_action = NIL;
-	gpupreagg_build_path_target(root, target,
-								target_upper,
-								target_host,
-								target_dev,
-								&tlist_dev_action);
-
-	/*
 	 * construction of GpuPreAgg pathnode on top of the cheapest total
 	 * cost pathnode (partial aggregation)
 	 */
-	cpath = gpupreagg_construct_path(root, group_rel,
-									 target_host, target_dev,
-									 tlist_dev_action,
+	cpath = gpupreagg_construct_path(root, group_rel, target_final,
 									 input_path, num_groups);
 	if (!cpath)
 		return;
@@ -1227,7 +1333,7 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 		final_path = (Path *)create_agg_path(root,
 											 group_rel,
 											 &cpath->path,
-											 target_upper,
+											 target_final,
 											 AGG_PLAIN,
 											 AGGSPLIT_SIMPLE,
 											 parse->groupClause,
@@ -1281,7 +1387,7 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 					create_groupingsets_path(root,
 											 group_rel,
 											 sort_path,
-											 target_upper,
+											 target_final,
 											 (List *)parse->havingQual,
 											 rollup_lists,
 											 rollup_groupclauses,
@@ -1293,7 +1399,7 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 					create_agg_path(root,
 									group_rel,
 									sort_path,
-									target_upper,
+									target_final,
 									AGG_SORTED,
 									AGGSPLIT_SIMPLE,
 									parse->groupClause,
@@ -1305,7 +1411,7 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 					create_group_path(root,
 									  group_rel,
 									  sort_path,
-									  target_upper,
+									  target_final,
 									  parse->groupClause,
 									  (List *)parse->havingQual,
 									  num_groups);
@@ -1330,7 +1436,7 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 					create_agg_path(root,
 									group_rel,
 									&cpath->path,
-									target_upper,
+									target_final,
 									AGG_HASHED,
 									AGGSPLIT_SIMPLE,
 									parse->groupClause,
@@ -1639,52 +1745,65 @@ make_altfunc_pcov_xy(Aggref *aggref, const char *func_name)
  *
  *
  */
+
+
 static void
-gpupreagg_build_path_target(PlannerInfo *root,			/* in */
-							PathTarget *target_orig,	/* in */
-							PathTarget *target_upper,	/* out */
-							PathTarget *target_host,	/* out */
-							PathTarget *target_dev,		/* out */
-							List **p_tlist_dev_action)	/* out */
+gpupreagg_build_path_target(PlannerInfo *root,
+							PathTarget *target_final,
+							GpuPreAggInfo *gpa_info)
 {
-	List	   *tlist_upper = NIL;
+#if 0
+	PathTarget *target_partial;
+
+
+
+
+
+
+	target_partial = make_partial_grouping_target(root, target_final);
+
+
+
+
+
+
+
+
+
+	List	   *tlist_final = NIL;
 	List	   *tlist_host = NIL;
+	List	   *tlist_host_grouprefs = NIL;
 	List	   *tlist_dev = NIL;
-	List	   *tlist_dev_grouprefs = NIL;
 	List	   *tlist_dev_action = NIL;
 	ListCell   *lc;
+	ListCell   *cell1;
+	ListCell   *cell2;
 	cl_int		i, resno = 1;
 
-	foreach (lc, target_orig->exprs)
+	foreach (lc, target_upper->exprs)
 	{
-		Expr	   *expr = lfirst(lc);
-		Expr	   *expr_host;
-		List	   *altfn_args = NIL;
-		ListCell   *cell1;
-		ListCell   *cell2;
-		Index		sortgroupref;
+		Node   *node = lfirst(lc);
+		Expr   *expr_host;
+		Index	sortgroupref = target_partial->sortgrouprefs[resno - 1];
 
-		sortgroupref = target_orig->sortgrouprefs[resno - 1];
-		if (IsA(expr, Aggref))
+		if (IsA(node, Aggref))
 		{
-			Aggref		   *aggref = (Aggref *)expr;
-			Aggref		   *aggref_new;
+			Aggref		   *aggref = (Aggref *) node;
 			Oid				namespace_oid;
 			const char	   *func_name;
 			oidvector	   *func_argtypes;
-			HeapTuple		tuple;
-			HeapTuple		agg_tuple;
-			Form_pg_aggregate agg_form;
-			Form_pg_proc	proc_form;
-			Oid				aggfn_oid;
+			List		   *altfn_args = NIL;
 			const aggfunc_catalog_t *aggfn_cat;
 
+			/*
+			 * Lookup properties of aggregate function
+			 */
 			aggfn_cat = aggfunc_lookup_by_oid(aggref->aggfnoid);
 			if (!aggfn_cat)
 				elog(ERROR, "lookup failed on aggregate function: %u",
 					 aggref->aggfnoid);
 			/*
-			 * construction of the initial partial aggregation
+			 * construct arguments list of the partial aggregation
 			 */
 			for (i=0; i < aggfn_cat->altfn_nargs; i++)
 			{
@@ -1731,10 +1850,7 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 							 action);
 						break;
 				}
-
 				/* add expression if unique */
-				Assert(list_length(tlist_dev) ==
-					   list_length(tlist_dev_action));
 				forboth (cell1, tlist_dev,
 						 cell2, tlist_dev_action)
 				{
@@ -1744,9 +1860,12 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 				}
 				if (!cell1 && !cell2)
 				{
-					tlist_dev = lappend(tlist_dev, copyObject(expr));
-					tlist_dev_grouprefs = lappend_int(tlist_dev_grouprefs,
-													  sortgroupref);
+					TargetEntry	*tle
+						= makeTargetEntry(copyObject(expr),
+										  list_length(tlist_dev) + 1,
+										  NULL,
+										  false);
+					tlist_dev = lappend(tlist_dev, tle);
 					tlist_dev_action = lappend_int(tlist_dev_action, action);
 				}
 				altfn_args = lappend(altfn_args, expr);
@@ -1764,6 +1883,9 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 			}
 			else
 			{
+				HeapTuple		tuple;
+				Form_pg_proc	proc_form;
+
 				Assert(list_length(altfn_args) == aggfn_cat->altfn_nargs);
 				if (strncmp(aggfn_cat->altfn_name, "c:", 2) == 0)
 					namespace_oid = PG_CATALOG_NAMESPACE;
@@ -1794,121 +1916,48 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 												 COERCE_EXPLICIT_CALL);
 				ReleaseSysCache(tuple);
 			}
-			tlist_host = lappend(tlist_host, expr_host);
-
-			/*
-			 * setting up Aggref node of the upper node
-			 */
-			if (strncmp(aggfn_cat->uppfn_name, "c:", 2) == 0)
-				namespace_oid = PG_CATALOG_NAMESPACE;
-			else if (strncmp(aggfn_cat->uppfn_name, "s:", 2) == 0)
-				namespace_oid = get_namespace_oid("pgstrom", false);
-			else
-				elog(ERROR, "Bug? incorrect alternative function catalog");
-
-			Assert(aggfn_cat->uppfn_argtype == exprType((Node *)expr_host));
-
-			func_name = aggfn_cat->uppfn_name + 2;
-			func_argtypes = buildoidvector(&aggfn_cat->uppfn_argtype, 1);
-			tuple = SearchSysCache3(PROCNAMEARGSNSP,
-									PointerGetDatum(func_name),
-									PointerGetDatum(func_argtypes),
-									ObjectIdGetDatum(namespace_oid));
-			if (!HeapTupleIsValid(tuple))
-				elog(ERROR, "cache lookup failed for function \"%s\"",
-					 funcname_signature_string(func_name, 1, NIL,
-											   &aggfn_cat->uppfn_argtype));
-			aggfn_oid = HeapTupleGetOid(tuple);
-			proc_form = (Form_pg_proc) GETSTRUCT(tuple);
-			if (!proc_form->proisagg)
-				elog(ERROR, "Bug? %s is not an aggregate function",
-					 format_procedure(aggfn_oid));
-
-			agg_tuple = SearchSysCache1(AGGFNOID, ObjectIdGetDatum(aggfn_oid));
-			if (!HeapTupleIsValid(tuple))
-				elog(ERROR, "cache lookup failed for aggregate function %s",
-					 format_procedure(aggfn_oid));
-			agg_form = (Form_pg_aggregate) GETSTRUCT(agg_tuple);
-
-			aggref_new = makeNode(Aggref);
-			aggref_new->aggfnoid = HeapTupleGetOid(tuple);
-			aggref_new->aggtype = proc_form->prorettype;
-			aggref_new->aggcollid = aggref->aggcollid;
-			aggref_new->inputcollid = InvalidOid;
-			aggref_new->aggtranstype = agg_form->aggtranstype;
-			aggref_new->aggargtypes = list_make1_oid(aggfn_cat->uppfn_argtype);
-			aggref_new->aggdirectargs = NIL;
-			aggref_new->args = list_make1(makeTargetEntry(expr_host,
-														  1,
-														  NULL,
-														  false));
-			aggref_new->aggorder = NIL;
-			aggref_new->aggdistinct = NIL;
-			aggref_new->aggfilter = NULL;
-			aggref_new->aggstar = false;
-			aggref_new->aggvariadic = false;
-			aggref_new->aggkind = AGGKIND_NORMAL;
-			aggref_new->agglevelsup = 0;
-			aggref_new->aggsplit = AGGSPLIT_SIMPLE;
-			aggref_new->location = -1;
-
-			tlist_upper = lappend(tlist_upper, aggref_new);
-
-			ReleaseSysCache(agg_tuple);
-			ReleaseSysCache(tuple);
 		}
 		else
 		{
 			if (sortgroupref > 0)
 			{
-				Assert(list_length(tlist_dev) ==
-					   list_length(tlist_dev_action));
 				forboth (cell1, tlist_dev,
 						 cell2, tlist_dev_action)
 				{
-					if (equal(expr, lfirst(cell1)) &&
+					if (equal(node, lfirst(cell1)) &&
 						ALTFUNC_GROUPING_KEY == lfirst_int(cell2))
 						break;
 				}
 
 				if (!cell1 && !cell2)
 				{
-					tlist_dev = lappend(tlist_dev, copyObject(expr));
-					tlist_dev_grouprefs = lappend_int(tlist_dev_grouprefs,
-													  sortgroupref);
+					TargetEntry	   *tle
+						= makeTargetEntry(copyObject(node),
+										  list_length(tlist_dev) + 1,
+										  NULL,
+										  false);
+					tlist_dev = lappend(tlist_dev, tle);
 					tlist_dev_action = lappend_int(tlist_dev_action,
 												   ALTFUNC_GROUPING_KEY);
 				}
 			}
-			tlist_host = lappend(tlist_host, copyObject(expr));
-			tlist_upper = lappend(tlist_upper, copyObject(expr));
+			expr_host = copyObject(node);
 		}
-		resno++;
+		tlist_host = lappend(tlist_host,
+							 makeTargetEntry(expr_host,
+											 resno++,
+											 NULL,
+											 false));
 	}
+	Assert(list_length(tlist_dev) == list_length(tlist_dev_action));
 
-
-
-
-
-
-	/* setup results */
-	Assert(list_length(target_orig->exprs) == list_length(tlist_upper));
-	target_upper->exprs = tlist_upper;
-	target_upper->sortgrouprefs = target_orig->sortgrouprefs;
-	set_pathtarget_cost_width(root, target_upper);
-
-	target_host->exprs  = tlist_host;
-	target_host->sortgrouprefs = target_orig->sortgrouprefs;
-	set_pathtarget_cost_width(root, target_host);
-
-	target_dev->exprs   = tlist_dev;
-	target_dev->sortgrouprefs = palloc(sizeof(Index) * list_length(tlist_dev));
-	i = 0;
-	foreach (lc, tlist_dev_grouprefs)
-		target_dev->sortgrouprefs[i++] = lfirst_int(lc);
-	set_pathtarget_cost_width(root, target_dev);
-
-	*p_tlist_dev_action = tlist_dev_action;
+	/* put results */
+	gpa_info->tlist_final = tlist_final;
+	gpa_info->tlist_host = tlist_host;
+	gpa_info->tlist_host_grouprefs = tlist_host_grouprefs;
+	gpa_info->tlist_dev = tlist_dev;
+	gpa_info->tlist_dev_action = tlist_dev_action;
+#endif
 }
 
 /*
@@ -1926,44 +1975,44 @@ PlanGpuPreAggPath(PlannerInfo *root,
 {
 	CustomScan	   *cscan = makeNode(CustomScan);
 	GpuPreAggInfo  *gpa_info;
-	PathTarget	   *target_dev;
 	Plan		   *outer_plan = NULL;
 	List		   *outer_tlist = NIL;
-	List		   *tlist_dev = NIL;
-	List		   *tlist_dev_action = NIL;
+	List		   *tlist_cheat = NIL;
 	ListCell	   *lc;
-	AttrNumber		resno = 1;
 	char		   *kern_source;
 	codegen_context	context;
 
+	elog(INFO, "GPA tlist => %s", nodeToString(tlist));
+
 	Assert(list_length(custom_plans) <= 1);
-	Assert(list_length(best_path->custom_private) == 3);
 	if (custom_plans != NIL)
 	{
 		outer_plan = linitial(custom_plans);
 		outer_tlist = outer_plan->targetlist;
 	}
+	Assert(list_length(best_path->custom_private) == 1);
 	gpa_info = linitial(best_path->custom_private);
-	target_dev = lsecond(best_path->custom_private);
-	tlist_dev_action = lthird(best_path->custom_private);
 
 	/*
-	 * Build @custom_scan_tlist. We can ignore param_info because GpuPreAgg
-	 * shall locate on any join, thus, no replace_nestloop_params() will
-	 * happen.
+	 * To cheat setrefs.c, Custom(GpuPreAgg) performs to have AggRef node
+	 * with AGGSPLIT_INITIAL_SERIAL flags.
 	 */
-	foreach (lc, target_dev->exprs)
+	foreach (lc, tlist)
 	{
-		TargetEntry *tle = makeTargetEntry((Expr *)lfirst(lc),
-										   resno,
-										   NULL,
-										   false);
-		if (target_dev->sortgrouprefs)
-			tle->ressortgroupref = target_dev->sortgrouprefs[resno - 1];
-		tlist_dev = lappend(tlist_dev, tle);
-		resno++;
+		TargetEntry *tle = lfirst(lc);
+
+		if (IsA(tle->expr, Aggref))
+		{
+			Aggref *aggref = copyObject(tle->expr);
+
+			aggref->aggsplit = AGGSPLIT_INITIAL_SERIAL;
+			tle = makeTargetEntry((Expr *)aggref,
+								  tle->resno,
+								  tle->resname,
+								  tle->resjunk);
+		}
+		tlist_cheat = lappend(tlist_cheat, tle);
 	}
-	Assert(list_length(tlist_dev) == list_length(tlist_dev_action));
 
 	/*
 	 * In case when outer relation scan was pulled-up to the GpuPreAgg,
@@ -1972,9 +2021,11 @@ PlanGpuPreAggPath(PlannerInfo *root,
 	 */
 	if (gpa_info->outer_quals != NIL)
 	{
-		List	   *outer_vars;
-		ListCell   *cell1;
-		ListCell   *cell2;
+		List		   *tlist_dev = gpa_info->tlist_dev;
+		List		   *tlist_dev_action = gpa_info->tlist_dev_action;
+		List		   *outer_vars;
+		ListCell	   *cell1;
+		ListCell	   *cell2;
 
 		outer_vars = pull_vars_of_level((Node *)gpa_info->outer_quals, 0);
 		foreach (lc, outer_vars)
@@ -1999,15 +2050,17 @@ PlanGpuPreAggPath(PlannerInfo *root,
 											   ALTFUNC_JUNK_ATTRIBUTE);
 			}
 		}
+		gpa_info->tlist_dev = tlist_dev;
+		gpa_info->tlist_dev_action = tlist_dev_action;
 	}
 
 	/* setup CustomScan node */
-	cscan->scan.plan.targetlist = tlist;
+	cscan->scan.plan.targetlist = tlist_cheat;
 	cscan->scan.plan.qual = NIL;
 	outerPlan(cscan) = outer_plan;
 	cscan->scan.scanrelid = gpa_info->outer_scanrelid;
 	cscan->flags = best_path->flags;
-	cscan->custom_scan_tlist = tlist_dev;
+	cscan->custom_scan_tlist = outer_tlist;
 	cscan->methods = &gpupreagg_scan_methods;
 
 	/*
@@ -2019,8 +2072,8 @@ PlanGpuPreAggPath(PlannerInfo *root,
 	kern_source = gpupreagg_codegen(&context,
 									root,
 									cscan,
-									tlist_dev,
-									tlist_dev_action,
+									gpa_info->tlist_dev,
+									gpa_info->tlist_dev_action,
 									outer_tlist,
 									gpa_info->outer_quals);
 //	elog(INFO, "source:\n%s", kern_source);
@@ -3139,6 +3192,203 @@ gpupreagg_codegen(codegen_context *context,
 	pfree(body.data);
 
 	return kern.data;
+}
+
+/*
+ * fixup_gpupreagg_tlist_host
+ *
+ * 
+ *
+ *
+ *
+ *
+ *
+ */
+static Node *
+fixup_gpupreagg_tlist_host(Node *node, List *tlist_dev)
+{
+	ListCell	   *lc;
+
+	if (!node)
+		return NULL;
+
+	foreach (lc, tlist_dev)
+	{
+		TargetEntry	   *tle = lfirst(lc);
+
+		if (equal(node, tle->expr))
+		{
+			return (Node *) makeVar(INDEX_VAR,
+									tle->resno,
+									exprType((Node *)tle->expr),
+									exprTypmod((Node *)tle->expr),
+									exprCollation((Node *)tle->expr),
+									0);
+		}
+	}
+	/* not found is the tlist_dev */
+	if (IsA(node, Var))
+		elog(ERROR, "Bug? Var-node was not found in tlist_dev: %s",
+			 nodeToString(node));
+	return expression_tree_mutator(node,
+								   fixup_gpupreagg_tlist_host,
+								   tlist_dev);
+}
+
+/*
+ * fixup_gpupreagg_outer_quals
+ *
+ * Var nodes in @outer_quals were transformed to INDEX_VAR + resno form
+ * through the planner stage, however, executor assumes @outer_quals shall
+ * be executed towards the raw-tuples fetched from the outer relation.
+ * So, we need to adjust its varno/varattno to reference the original
+ * column on the raw-tuple.
+ */
+static Node *
+fixup_gpupreagg_outer_quals(Node *node, List *tlist_dev)
+{
+	if (!node)
+		return NULL;
+	if (IsA(node, Var))
+	{
+		TargetEntry	   *tle;
+		Var			   *varnode = (Var *) node;
+
+		if (varnode->varno != INDEX_VAR ||
+			varnode->varattno <= 0 ||
+			varnode->varattno > list_length(tlist_dev))
+			elog(ERROR, "Bug? unexpected Var-node in outer-quals: %s",
+				 nodeToString(varnode));
+		tle = list_nth(tlist_dev, varnode->varattno - 1);
+		if (!IsA(tle->expr, Var))
+			elog(ERROR,
+				 "Bug? Var-node of outer quals references an expression: %s",
+				 nodeToString(varnode));
+		return (Node *) copyObject(tle->expr);
+	}
+	return expression_tree_mutator(node,
+								   fixup_gpupreagg_outer_quals,
+								   tlist_dev);
+}
+
+/*
+ * gpupreagg_post_planner
+ *
+ *
+ */
+void
+gpupreagg_post_planner(PlannedStmt *pstmt, CustomScan *cscan,
+					   void **p_gpupreagg_private)
+{
+	GpuPreAggInfo  *gpa_info = deform_gpupreagg_info(cscan);
+	List	   *tlist_host = NIL;
+	ListCell   *lc;
+
+	Assert(!*p_gpupreagg_private);
+
+	foreach (lc, gpa_info->tlist_host)
+	{
+		TargetEntry	   *tle = lfirst(lc);
+		Node		   *node;
+
+		node = fixup_gpupreagg_tlist_host((Node *)tle->expr,
+										  gpa_info->tlist_dev);
+		tlist_host = lappend(tlist_host,
+							 makeTargetEntry((Expr *)node,
+											 tle->resno,
+											 tle->resname,
+											 tle->resjunk));
+	}
+	gpa_info->tlist_host = tlist_host;
+
+	if (gpa_info->outer_quals)
+	{
+		gpa_info->outer_quals = (List *)
+			fixup_gpupreagg_outer_quals((Node *)gpa_info->outer_quals,
+										gpa_info->tlist_dev);
+	}
+	form_gpupreagg_info(cscan, gpa_info);
+	cscan->scan.plan.targetlist = tlist_host;
+	cscan->custom_scan_tlist = gpa_info->tlist_dev;
+
+	elog(INFO, "tlist => %s", nodeToString(cscan->scan.plan.targetlist));
+	elog(INFO, "tlist_host => %s", nodeToString(gpa_info->tlist_host));
+	elog(INFO, "tlist_dev => %s", nodeToString(gpa_info->tlist_dev));
+
+	*p_gpupreagg_private = gpa_info;
+}
+
+/*
+ * pgstrom_agg_post_planner
+ */
+void
+pgstrom_agg_post_planner(PlannedStmt *pstmt, Agg *aggnode,
+						 void *gpupreagg_private)
+{}
+
+/*
+ * pgstrom_group_post_planner
+ */
+void
+pgstrom_group_post_planner(PlannedStmt *pstmt, Group *group,
+						   void *gpupreagg_private)
+{}
+
+/*
+ * pgstrom_sort_post_planner
+ */
+void
+pgstrom_sort_post_planner(PlannedStmt *pstmt, Sort *sort,
+						  void *gpupreagg_private)
+{
+	GpuPreAggInfo *gpa_info = gpupreagg_private;
+	List	   *tlist = NIL;
+	ListCell   *lc;
+
+	foreach (lc, gpa_info->tlist_host)
+	{
+		TargetEntry *tle = lfirst(lc);
+		Var	   *varnode = makeVar(OUTER_VAR,
+								  tle->resno,
+								  exprType((Node *)tle->expr),
+								  exprTypmod((Node *)tle->expr),
+								  exprCollation((Node *)tle->expr),
+								  0);
+		tlist = lappend(tlist, makeTargetEntry((Expr *)varnode,
+											   tle->resno,
+											   tle->resname,
+											   tle->resjunk));
+	}
+	sort->plan.targetlist = tlist;
+	//needs to update sortkeys
+}
+
+/*
+ * pgstrom_gather_post_planner
+ */
+void
+pgstrom_gather_post_planner(PlannedStmt *pstmt, Gather *gather,
+							void *gpupreagg_private)
+{
+	GpuPreAggInfo *gpa_info = gpupreagg_private;
+	List	   *tlist = NIL;
+	ListCell   *lc;
+
+	foreach (lc, gpa_info->tlist_host)
+	{
+		TargetEntry *tle = lfirst(lc);
+		Var	   *varnode = makeVar(OUTER_VAR,
+								  tle->resno,
+								  exprType((Node *)tle->expr),
+								  exprTypmod((Node *)tle->expr),
+								  exprCollation((Node *)tle->expr),
+								  0);
+		tlist = lappend(tlist, makeTargetEntry((Expr *)varnode,
+											   tle->resno,
+											   tle->resname,
+											   tle->resjunk));
+	}
+	gather->plan.targetlist = tlist;
 }
 
 /*
