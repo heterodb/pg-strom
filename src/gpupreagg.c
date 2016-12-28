@@ -256,7 +256,8 @@ static bool		gpupreagg_build_path_target(PlannerInfo *root,
 											PathTarget *target_final,
 											PathTarget *target_partial,
 											PathTarget *target_device,
-											PathTarget *target_input);
+											PathTarget *target_input,
+											Node **p_havingQual);
 static char	   *gpupreagg_codegen(codegen_context *context,
 								  PlannerInfo *root,
 								  CustomScan *cscan,
@@ -374,168 +375,168 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	/* COUNT(*) = SUM(NROWS(*|X)) */
 	{ "count",  0, {},
 	  "c:sum",      INT8OID,
-	  "varref", 1, {INT8OID},
+	  "s:psum", 1, {INT8OID},
 	  {ALTFUNC_EXPR_NROWS}, 0, INT_MAX
 	},
 	{ "count",  1, {ANYOID},
 	  "c:sum",      INT8OID,
-	  "varref", 1, {INT8OID},
+	  "s:psum", 1, {INT8OID},
 	  {ALTFUNC_EXPR_NROWS}, 0, INT_MAX
 	},
 	/* MAX(X) = MAX(PMAX(X)) */
 	{ "max",    1, {INT2OID},
 	  "c:max",      INT2OID,
-	  "varref", 1, {INT2OID},
+	  "s:pmax", 1, {INT2OID},
 	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
 	},
 	{ "max",    1, {INT4OID},
 	  "c:max",      INT4OID,
-	  "varref", 1, {INT4OID},
+	  "s:pmax", 1, {INT4OID},
 	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
 	},
 	{ "max",    1, {INT8OID},
 	  "c:max",      INT8OID,
-	  "varref", 1, {INT8OID},
+	  "s:pmax", 1, {INT8OID},
 	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
 	},
 	{ "max",    1, {FLOAT4OID},
 	  "c:max",      FLOAT4OID,
-	  "varref", 1, {FLOAT4OID},
+	  "s:pmax", 1, {FLOAT4OID},
 	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
 	},
 	{ "max",    1, {FLOAT8OID},
 	  "c:max",      FLOAT8OID,
-	  "varref", 1, {FLOAT8OID},
+	  "s:pmax", 1, {FLOAT8OID},
 	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "max",    1, {NUMERICOID},
 	  "c:max",      NUMERICOID,
-	  "varref", 1, {NUMERICOID},
+	  "s:pmax", 1, {NUMERICOID},
 	  {ALTFUNC_EXPR_PMAX}, DEVKERNEL_NEEDS_NUMERIC, INT_MAX
 	},
 #endif
 	{ "max",    1, {CASHOID},
 	  "c:max",      CASHOID,
-	  "varref", 1, {CASHOID},
+	  "s:pmax", 1, {CASHOID},
 	  {ALTFUNC_EXPR_PMAX}, DEVKERNEL_NEEDS_MONEY, INT_MAX
 	},
 	{ "max",    1, {DATEOID},
 	  "c:max",      DATEOID,
-	  "varref", 1, {DATEOID},
+	  "s:pmax", 1, {DATEOID},
 	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
 	},
 	{ "max",    1, {TIMEOID},
 	  "c:max",      TIMEOID,
-	  "varref", 1, {TIMEOID},
+	  "s:pmax", 1, {TIMEOID},
 	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
 	},
 	{ "max",    1, {TIMESTAMPOID},
 	  "c:max",      TIMESTAMPOID,
-	  "varref", 1, {TIMESTAMPOID},
+	  "s:pmax", 1, {TIMESTAMPOID},
 	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
 	},
 	{ "max",    1, {TIMESTAMPTZOID},
 	  "c:max",      TIMESTAMPTZOID,
-	  "varref", 1, {TIMESTAMPTZOID},
+	  "s:pmax", 1, {TIMESTAMPTZOID},
 	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
 	},
 
 	/* MIX(X) = MIN(PMIN(X)) */
 	{ "min",    1, {INT2OID},
 	  "c:min",      INT2OID,
-	  "varref", 1, {INT2OID},
+	  "s:pmin", 1, {INT2OID},
 	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
 	},
 	{ "min",    1, {INT4OID},
 	  "c:min",      INT4OID,
-	  "varref", 1, {INT4OID},
+	  "s:pmin", 1, {INT4OID},
 	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
 	},
 	{ "min",    1, {INT8OID},
 	  "c:min",      INT8OID,
-	  "varref", 1, {INT8OID},
+	  "s:pmin", 1, {INT8OID},
 	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
 	},
 	{ "min",    1, {FLOAT4OID},
 	  "c:min",      FLOAT4OID,
-	  "varref", 1, {FLOAT4OID},
+	  "s:pmin", 1, {FLOAT4OID},
 	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
 	},
 	{ "min",    1, {FLOAT8OID},
 	  "c:min",      FLOAT8OID,
-	  "varref", 1, {FLOAT8OID},
+	  "s:pmin", 1, {FLOAT8OID},
 	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "min",    1, {NUMERICOID},
 	  "c:min",      NUMERICOID,
-	  "varref", 1, {NUMERICOID},
+	  "s:pmin", 1, {NUMERICOID},
 	  {ALTFUNC_EXPR_PMIN}, DEVKERNEL_NEEDS_NUMERIC, INT_MAX
 	},
 #endif
 	{ "min",    1, {CASHOID},
 	  "c:min",      CASHOID,
-	  "varref", 1, {CASHOID},
+	  "s:pmin", 1, {CASHOID},
 	  {ALTFUNC_EXPR_PMAX}, DEVKERNEL_NEEDS_MONEY, INT_MAX
 	},
 	{ "min",    1, {DATEOID},
 	  "c:min",      DATEOID,
-	  "varref", 1, {DATEOID},
+	  "s:pmin", 1, {DATEOID},
 	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
 	},
 	{ "min",    1, {TIMEOID},
 	  "c:min",      TIMEOID,
-	  "varref", 1, {TIMEOID},
+	  "s:pmin", 1, {TIMEOID},
 	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
 	},
 	{ "min",    1, {TIMESTAMPOID},
 	  "c:min",      TIMESTAMPOID,
-	  "varref", 1, {TIMESTAMPOID},
+	  "s:pmin", 1, {TIMESTAMPOID},
 	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
 	},
 	{ "min",    1, {TIMESTAMPTZOID},
 	  "c:min",      TIMESTAMPTZOID,
-	  "varref", 1, {TIMESTAMPTZOID},
+	  "s:pmin", 1, {TIMESTAMPTZOID},
 	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
 	},
 
 	/* SUM(X) = SUM(PSUM(X)) */
 	{ "sum",    1, {INT2OID},
 	  "s:sum",      INT8OID,
-	  "varref", 1, {INT8OID},
+	  "s:psum", 1, {INT8OID},
 	  {ALTFUNC_EXPR_PSUM}, 0, INT_MAX
 	},
 	{ "sum",    1, {INT4OID},
 	  "s:sum",      INT8OID,
-	  "varref", 1, {INT8OID},
+	  "s:psum", 1, {INT8OID},
 	  {ALTFUNC_EXPR_PSUM}, 0, INT_MAX
 	},
 	{ "sum",    1, {INT8OID},
 	  "c:sum",      INT8OID,
-	  "varref", 1, {INT8OID},
+	  "s:psum", 1, {INT8OID},
 	  {ALTFUNC_EXPR_PSUM}, 0, INT_MAX
 	},
 	{ "sum",    1, {FLOAT4OID},
 	  "c:sum",      FLOAT4OID,
-	  "varref", 1, {FLOAT4OID},
+	  "s:psum", 1, {FLOAT4OID},
 	  {ALTFUNC_EXPR_PSUM}, 0, INT_MAX
 	},
 	{ "sum",    1, {FLOAT8OID},
 	  "c:sum",      FLOAT8OID,
-	  "varref", 1, {FLOAT8OID},
+	  "s:psum", 1, {FLOAT8OID},
 	  {ALTFUNC_EXPR_PSUM}, 0, INT_MAX
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "sum",    1, {NUMERICOID},
 	  "c:sum",      NUMERICOID,
-	  "varref", 1, {NUMERICOID},
+	  "s:psum", 1, {NUMERICOID},
 	  {ALTFUNC_EXPR_PSUM}, DEVKERNEL_NEEDS_NUMERIC, 100
 	},
 #endif
 	{ "sum",    1, {CASHOID},
 	  "c:sum",      CASHOID,
-	  "varref", 1, {CASHOID},
+	  "s:psum", 1, {CASHOID},
 	  {ALTFUNC_EXPR_PSUM}, DEVKERNEL_NEEDS_MONEY, INT_MAX
 	},
 	/* STDDEV(X) = EX_STDDEV(NROWS(),PSUM(X),PSUM(X*X)) */
@@ -1011,6 +1012,7 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 	PathTarget	   *target_final;
 	PathTarget	   *target_partial;
 	PathTarget	   *target_device;
+	Node		   *havingQual;
 	CustomPath	   *cpath;
 	Path		   *input_path = input_rel->cheapest_total_path;
 	Path		   *final_path;
@@ -1072,7 +1074,8 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 									 target_final,
 									 target_partial,
 									 target_device,
-									 input_path->pathtarget))
+									 input_path->pathtarget,
+									 &havingQual))
 		return;
 
 	/*
@@ -1104,7 +1107,7 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 											 AGG_PLAIN,
 											 AGGSPLIT_SIMPLE,
 											 parse->groupClause,
-											 (List *) parse->havingQual,
+											 (List *) havingQual,
 											 &agg_final_costs,
 											 num_groups);
 		add_path(group_rel, pgstrom_create_dummy_path(root,
@@ -1172,7 +1175,7 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 									AGG_SORTED,
 									AGGSPLIT_SIMPLE,
 									parse->groupClause,
-									(List *)parse->havingQual,
+									(List *) havingQual,
 									&agg_final_costs,
 									num_groups);
 			else if (parse->groupClause)
@@ -1182,7 +1185,7 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 									  sort_path,
 									  target_final,
 									  parse->groupClause,
-									  (List *)parse->havingQual,
+									  (List *) havingQual,
 									  num_groups);
 			else
 				elog(ERROR, "Bug? unexpected AGG/GROUP BY requirement");
@@ -1210,7 +1213,7 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 									AGG_HASHED,
 									AGGSPLIT_SIMPLE,
 									parse->groupClause,
-									(List *) parse->havingQual,
+									(List *) havingQual,
 									&agg_final_costs,
 									num_groups);
 				add_path(group_rel, pgstrom_create_dummy_path(root,
@@ -1798,6 +1801,8 @@ make_alternative_aggref(Aggref *aggref,
 typedef struct
 {
 	bool		device_executable;
+	Query	   *parse;
+	PathTarget *target_upper;
 	PathTarget *target_partial;
 	PathTarget *target_device;
 	PathTarget *target_input;
@@ -1807,7 +1812,10 @@ static Node *
 replace_expression_by_altfunc(Node *node,
 							  gpupreagg_build_path_target_context *con)
 {
+	Query	   *parse = con->parse;
+	PathTarget *target_upper = con->target_upper;
 	ListCell   *lc;
+	int			i = 0;
 
 	if (!node)
 		return NULL;
@@ -1823,16 +1831,26 @@ replace_expression_by_altfunc(Node *node,
 	}
 
 	/*
-	 * If expression is identical with any of items in @target_partial,
-	 * it will be transformed to a simple var reference on run-time.
-	 * So, we don't need to dive into any more.
+	 * If expression is identical with any of grouping-keys, it shall be
+	 * transformed to a simple var reference on execution time, so we don't
+	 * need to dive into any more.
 	 */
-	foreach (lc, con->target_partial->exprs)
-	{
-		if (equal(node, lfirst(lc)))
-			return copyObject(node);
+	foreach (lc, target_upper->exprs)
+    {
+		Expr   *sortgroupkey = lfirst(lc);
+		Index	sortgroupref = get_pathtarget_sortgroupref(target_upper, i);
+
+		if (sortgroupref && parse->groupClause &&
+			get_sortgroupref_clause_noerr(sortgroupref,
+										  parse->groupClause) != NULL)
+        {
+			if (equal(node, sortgroupkey))
+				return copyObject(sortgroupkey);
+		}
+		i++;
 	}
-	/* not found */
+
+	/* Not found */
 	if (IsA(node, Var) || IsA(node, PlaceHolderVar))
 		elog(ERROR, "Bug? non-grouping key variables are referenced: %s",
 			 nodeToString(node));
@@ -1851,19 +1869,26 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 							PathTarget *target_final,	/* out */
 							PathTarget *target_partial,	/* out */
 							PathTarget *target_device,	/* out */
-							PathTarget *target_input)	/* in */
+							PathTarget *target_input,	/* in */
+							Node **p_havingQual)		/* out */
 {
 	gpupreagg_build_path_target_context con;
 	Query	   *parse = root->parse;
-	List	   *non_group_cols = NIL;
-	List	   *non_group_col_sgrefs = NIL;
-	ListCell   *lc1;
-	ListCell   *lc2;
+	Node	   *havingQual = NULL;
+	ListCell   *lc;
 	cl_int		i = 0;
 
-	foreach (lc1, target_upper->exprs)
+	memset(&con, 0, sizeof(con));
+	con.device_executable = true;
+	con.parse			= parse;
+	con.target_upper	= target_upper;
+	con.target_partial	= target_partial;
+	con.target_device	= target_device;
+	con.target_input	= target_input;
+
+	foreach (lc, target_upper->exprs)
 	{
-		Expr   *expr = lfirst(lc1);
+		Expr   *expr = lfirst(lc);
 		Index	sortgroupref = get_pathtarget_sortgroupref(target_upper, i);
 	
 		if (sortgroupref && parse->groupClause &&
@@ -1890,30 +1915,38 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 		}
 		else
 		{
-			/*
-			 * Non-grouping column, so just remember the expression for
-			 * the steps later
-			 */
-			non_group_cols = lappend(non_group_cols, expr);
-			non_group_col_sgrefs = lappend_int(non_group_col_sgrefs,
-											   sortgroupref);
+			expr = (Expr *)replace_expression_by_altfunc((Node *)expr, &con);
+			if (!con.device_executable)
+				return false;
+
+			add_column_to_pathtarget(target_final, expr, sortgroupref);
 		}
 		i++;
 	}
 
+	/*
+	 * If there's a HAVING clause, we'll need the Vars/Aggrefs it uses, too.
+	 */
+	if (parse->havingQual)
+	{
+		havingQual = replace_expression_by_altfunc(parse->havingQual, &con);
+		if (!con.device_executable)
+			return false;
+	}
+	*p_havingQual = havingQual;
+	  
+
+
+
+#if 0
 	/* If there's a HAVING clause, we'll need the Vars/Aggrefs it uses, too. */
 	if (parse->havingQual)
 	{
 		non_group_cols = lappend(non_group_cols, parse->havingQual);
 		non_group_col_sgrefs = lappend_int(non_group_col_sgrefs, 0);
 	}
-
-	memset(&con, 0, sizeof(con));
-	con.device_executable = true;
-	con.target_partial	= target_partial;
-	con.target_device	= target_device;
-	con.target_input	= target_input;
-
+#endif
+#if 0
 	forboth (lc1, non_group_cols,
 			 lc2, non_group_col_sgrefs)
 	{
@@ -1931,6 +1964,7 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 
 		add_column_to_pathtarget(target_final, expr, lfirst_int(lc2));
 	}
+#endif
 	return true;
 }
 
