@@ -282,8 +282,6 @@ static void gpupreagg_push_terminator_task(GpuPreAggTask *gpreagg_old);
 /*
  * Arguments of alternative functions.
  */
-#define ALTFUNC_GROUPING_KEY		 20	/* GROUPING KEY */
-#define ALTFUNC_JUNK_ATTRIBUTE		 21	/* dummy attribute (resjunk=true) */
 #define ALTFUNC_EXPR_NROWS			101	/* NROWS(X) */
 #define ALTFUNC_EXPR_PMIN			102	/* PMIN(X) */
 #define ALTFUNC_EXPR_PMAX			103	/* PMAX(X) */
@@ -294,8 +292,6 @@ static void gpupreagg_push_terminator_task(GpuPreAggTask *gpreagg_old);
 #define ALTFUNC_EXPR_PCOV_X2		108	/* PCOV_X2(X,Y) */
 #define ALTFUNC_EXPR_PCOV_Y2		109	/* PCOV_Y2(X,Y) */
 #define ALTFUNC_EXPR_PCOV_XY		110	/* PCOV_XY(X,Y) */
-#define ALTFUNC_IS_PARTIAL_FUNC(action)			\
-	((action) >= ALTFUNC_EXPR_NROWS)
 
 /*
  * XXX - GpuPreAgg with Numeric arguments are problematic because
@@ -324,17 +320,18 @@ typedef struct {
 	const char *aggfn_name;
 	int			aggfn_nargs;
 	Oid			aggfn_argtypes[4];
-	/* alternative function to generate same result.
-	 * prefix indicates the schema that stores the alternative functions
+	/*
+	 * A pair of final/partial function will generate same result.
+	 * Its prefix indicates the schema that stores these functions.
 	 * c: pg_catalog ... the system default
 	 * s: pgstrom    ... PG-Strom's special ones
 	 */
-	const char *uppfn_name;
-	Oid			uppfn_argtype;
-	const char *altfn_name;
-	int			altfn_nargs;
-	Oid			altfn_argtypes[8];
-	int			altfn_argexprs[8];
+	const char *finalfn_name;
+	Oid			finalfn_argtype;
+	const char *partfn_name;
+	int			partfn_nargs;
+	Oid			partfn_argtypes[8];
+	int			partfn_argexprs[8];
 	int			extra_flags;
 	int			safety_limit;
 } aggfunc_catalog_t;
@@ -1639,10 +1636,10 @@ make_alternative_aggref(Aggref *aggref,
 	/*
 	 * construct arguments list of the partial aggregation
 	 */
-	for (i=0; i < aggfn_cat->altfn_nargs; i++)
+	for (i=0; i < aggfn_cat->partfn_nargs; i++)
 	{
-		cl_int		action = aggfn_cat->altfn_argexprs[i];
-		cl_int		argtype = aggfn_cat->altfn_argtypes[i];
+		cl_int		action = aggfn_cat->partfn_argexprs[i];
+		cl_int		argtype = aggfn_cat->partfn_argtypes[i];
 		FuncExpr   *pfunc;
 
 		switch (action)
@@ -1707,24 +1704,24 @@ make_alternative_aggref(Aggref *aggref,
 	 * of the final aggregate function, or varref if internal state
 	 * of aggregation is as-is.
 	 */
-	if (strcmp(aggfn_cat->altfn_name, "varref") == 0)
+	if (strcmp(aggfn_cat->partfn_name, "varref") == 0)
 	{
 		Assert(list_length(altfunc_args) == 1);
 		expr_host = linitial(altfunc_args);
 	}
 	else
 	{
-		Assert(list_length(altfunc_args) == aggfn_cat->altfn_nargs);
-		if (strncmp(aggfn_cat->altfn_name, "c:", 2) == 0)
+		Assert(list_length(altfunc_args) == aggfn_cat->partfn_nargs);
+		if (strncmp(aggfn_cat->partfn_name, "c:", 2) == 0)
 			namespace_oid = PG_CATALOG_NAMESPACE;
-		else if (strncmp(aggfn_cat->altfn_name, "s:", 2) == 0)
+		else if (strncmp(aggfn_cat->partfn_name, "s:", 2) == 0)
 			namespace_oid = get_namespace_oid("pgstrom", false);
 		else
 			elog(ERROR, "Bug? incorrect alternative function catalog");
 
-		func_name = aggfn_cat->altfn_name + 2;
-		func_argtypes = buildoidvector(aggfn_cat->altfn_argtypes,
-									   aggfn_cat->altfn_nargs);
+		func_name = aggfn_cat->partfn_name + 2;
+		func_argtypes = buildoidvector(aggfn_cat->partfn_argtypes,
+									   aggfn_cat->partfn_nargs);
 		tuple = SearchSysCache3(PROCNAMEARGSNSP,
 								PointerGetDatum(func_name),
 								PointerGetDatum(func_argtypes),
@@ -1732,9 +1729,9 @@ make_alternative_aggref(Aggref *aggref,
 		if (!HeapTupleIsValid(tuple))
 			elog(ERROR, "cache lookup failed for function %s",
 				 funcname_signature_string(func_name,
-										   aggfn_cat->altfn_nargs,
+										   aggfn_cat->partfn_nargs,
 										   NIL,
-										   aggfn_cat->altfn_argtypes));
+										   aggfn_cat->partfn_argtypes));
 		proc_form = (Form_pg_proc) GETSTRUCT(tuple);
 		expr_host = (Expr *)makeFuncExpr(HeapTupleGetOid(tuple),
 										 proc_form->prorettype,
@@ -1748,15 +1745,15 @@ make_alternative_aggref(Aggref *aggref,
 	add_new_column_to_pathtarget(target_partial, expr_host);
 
 	/* construction of the final Aggref */
-	if (strncmp(aggfn_cat->uppfn_name, "c:", 2) == 0)
+	if (strncmp(aggfn_cat->finalfn_name, "c:", 2) == 0)
 		namespace_oid = PG_CATALOG_NAMESPACE;
-	else if (strncmp(aggfn_cat->altfn_name, "s:", 2) == 0)
+	else if (strncmp(aggfn_cat->finalfn_name, "s:", 2) == 0)
 		namespace_oid = get_namespace_oid("pgstrom", false);
 	else
 		elog(ERROR, "Bug? incorrect alternative function catalog");
 
-	func_name = aggfn_cat->uppfn_name + 2;
-	func_argtypes = buildoidvector(&aggfn_cat->uppfn_argtype, 1);
+	func_name = aggfn_cat->finalfn_name + 2;
+	func_argtypes = buildoidvector(&aggfn_cat->finalfn_argtype, 1);
 	func_oid = GetSysCacheOid3(PROCNAMEARGSNSP,
 							   PointerGetDatum(func_name),
 							   PointerGetDatum(func_argtypes),
@@ -1764,7 +1761,7 @@ make_alternative_aggref(Aggref *aggref,
 	if (!OidIsValid(func_oid))
 		elog(ERROR, "cache lookup failed for function %s",
 			 funcname_signature_string(func_name, 1, NIL,
-									   &aggfn_cat->uppfn_argtype));
+									   &aggfn_cat->finalfn_argtype));
 
 	tuple = SearchSysCache1(AGGFNOID, ObjectIdGetDatum(func_oid));
 	if (!HeapTupleIsValid(tuple))
