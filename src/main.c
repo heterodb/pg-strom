@@ -228,16 +228,28 @@ pgstrom_dummy_create_plan(PlannerInfo *root,
 {
 	CustomScan *cscan = makeNode(CustomScan);
 	Plan	   *outer_plan;
+	ListCell   *lc1;
+	ListCell   *lc2;
 
 	Assert(list_length(custom_plans) == 1);
 	outer_plan = linitial(custom_plans);
 
+	/* sanity check - tlist format has to be compatible */
+	forboth (lc1, tlist,
+			 lc2, outer_plan->targetlist)
+	{
+		Expr   *expr_1 = ((TargetEntry *)lfirst(lc1))->expr;
+		Expr   *expr_2 = ((TargetEntry *)lfirst(lc2))->expr;
+
+		if (exprType((Node *)expr_1) != exprType((Node *)expr_2))
+			elog(ERROR, "Bug? tlist of CustomScan(Dummy) is not compatible");
+	}
 	cscan->scan.plan.parallel_aware = best_path->path.parallel_aware;
-	cscan->scan.plan.targetlist = copyObject(outer_plan->targetlist);
+	cscan->scan.plan.targetlist = tlist;
 	cscan->scan.plan.qual = NIL;
 	cscan->scan.plan.lefttree = outer_plan;
 	cscan->scan.scanrelid = 0;
-	cscan->custom_scan_tlist = copyObject(outer_plan->targetlist);
+	cscan->custom_scan_tlist = tlist;
 	cscan->methods = &pgstrom_dummy_plan_methods;
 
 	return &cscan->scan.plan;
