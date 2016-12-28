@@ -1616,7 +1616,6 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 	kern_context		kcxt;
 	void			   *kern_function	__attribute__((unused));
 	size_t				num_threads;
-	void			  **kern_args;
 	dim3				grid_sz;
 	dim3				block_sz;
 	cl_ulong			tv_start;

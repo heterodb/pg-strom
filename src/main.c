@@ -55,8 +55,10 @@ double		pgstrom_gpu_dma_cost;
 double		pgstrom_gpu_operator_cost;
 double		pgstrom_gpu_tuple_cost;
 
-/* saved hooks */
-static planner_hook_type		planner_hook_next;
+/* misc static variables */
+static planner_hook_type	planner_hook_next;
+static CustomPathMethods	pgstrom_dummy_path_methods;
+static CustomScanMethods	pgstrom_dummy_plan_methods;
 
 static void
 pgstrom_init_misc_guc(void)
@@ -186,23 +188,85 @@ pgstrom_init_misc_guc(void)
 }
 
 /*
+ * pgstrom_create_dummy_path
+ */
+Path *
+pgstrom_create_dummy_path(PlannerInfo *root,
+						  Path *subpath,
+						  PathTarget *target)
+{
+	CustomPath *cpath = makeNode(CustomPath);
+
+	cpath->path.pathtype		= T_CustomScan;
+	cpath->path.parent			= subpath->parent;
+	cpath->path.pathtarget		= target;
+	cpath->path.param_info		= NULL;
+	cpath->path.parallel_aware	= subpath->parallel_aware;
+	cpath->path.parallel_safe	= subpath->parallel_safe;
+	cpath->path.parallel_workers = subpath->parallel_workers;
+	cpath->path.pathkeys		= subpath->pathkeys;
+	cpath->path.rows			= subpath->rows;
+	cpath->path.startup_cost	= subpath->startup_cost;
+	cpath->path.total_cost		= subpath->total_cost;
+
+	cpath->custom_paths			= list_make1(subpath);
+	cpath->methods      		= &pgstrom_dummy_path_methods;
+
+	return &cpath->path;
+}
+
+/*
+ * pgstrom_dummy_create_plan - PlanCustomPath callback
+ */
+static Plan *
+pgstrom_dummy_create_plan(PlannerInfo *root,
+						  RelOptInfo *rel,
+						  CustomPath *best_path,
+						  List *tlist,
+						  List *clauses,
+						  List *custom_plans)
+{
+	CustomScan *cscan = makeNode(CustomScan);
+	Plan	   *outer_plan;
+
+	Assert(list_length(custom_plans) == 1);
+	outer_plan = linitial(custom_plans);
+
+	cscan->scan.plan.parallel_aware = best_path->path.parallel_aware;
+	cscan->scan.plan.targetlist = copyObject(outer_plan->targetlist);
+	cscan->scan.plan.qual = NIL;
+	cscan->scan.plan.lefttree = outer_plan;
+	cscan->scan.scanrelid = 0;
+	cscan->custom_scan_tlist = copyObject(outer_plan->targetlist);
+	cscan->methods = &pgstrom_dummy_plan_methods;
+
+	return &cscan->scan.plan;
+}
+
+/*
+ * pgstrom_dummy_create_scan_state - CreateCustomScanState callback
+ */
+static Node *
+pgstrom_dummy_create_scan_state(CustomScan *cscan)
+{
+	elog(ERROR, "Bug? dummy custom scan node still remain on executor stage");
+}
+
+/*
  * pgstrom_post_planner
  *
- *
+ * remove 'dummy' custom scan node.
  *
  *
  *
  */
 static void
-pgstrom_post_planner_recurse(PlannedStmt *pstmt, Plan *plan,
-							 void **gpupreagg_private)
+pgstrom_post_planner_recurse(PlannedStmt *pstmt, Plan **p_plan)
 {
+	Plan	   *plan = *p_plan;
 	ListCell   *lc;
 
-	if (!plan)
-		return;
-
-	elog(INFO, "lv: %d", nodeTag(plan));
+	Assert(plan != NULL);
 
 	switch (nodeTag(plan))
 	{
@@ -211,8 +275,7 @@ pgstrom_post_planner_recurse(PlannedStmt *pstmt, Plan *plan,
 				ModifyTable *splan = (ModifyTable *) plan;
 
 				foreach (lc, splan->plans)
-					pgstrom_post_planner_recurse(pstmt, (Plan *)lfirst(lc),
-												 gpupreagg_private);
+					pgstrom_post_planner_recurse(pstmt, (Plan **)&lfirst(lc));
 			}
 			break;
 			
@@ -221,8 +284,7 @@ pgstrom_post_planner_recurse(PlannedStmt *pstmt, Plan *plan,
 				Append	   *splan = (Append *) plan;
 
 				foreach (lc, splan->appendplans)
-					pgstrom_post_planner_recurse(pstmt, (Plan *)lfirst(lc),
-												 gpupreagg_private);
+					pgstrom_post_planner_recurse(pstmt, (Plan **)&lfirst(lc));
 			}
 			break;
 
@@ -231,8 +293,7 @@ pgstrom_post_planner_recurse(PlannedStmt *pstmt, Plan *plan,
 				MergeAppend *splan = (MergeAppend *) plan;
 
 				foreach (lc, splan->mergeplans)
-					pgstrom_post_planner_recurse(pstmt, (Plan *)lfirst(lc),
-												 gpupreagg_private);
+					pgstrom_post_planner_recurse(pstmt, (Plan **)&lfirst(lc));
 			}
 			break;
 
@@ -241,8 +302,7 @@ pgstrom_post_planner_recurse(PlannedStmt *pstmt, Plan *plan,
 				BitmapAnd  *splan = (BitmapAnd *) plan;
 
 				foreach (lc, splan->bitmapplans)
-					pgstrom_post_planner_recurse(pstmt, (Plan *)lfirst(lc),
-												 gpupreagg_private);
+					pgstrom_post_planner_recurse(pstmt, (Plan **)&lfirst(lc));
 			}
 			break;
 
@@ -251,8 +311,7 @@ pgstrom_post_planner_recurse(PlannedStmt *pstmt, Plan *plan,
 				BitmapOr   *splan = (BitmapOr *) plan;
 
 				foreach (lc, splan->bitmapplans)
-					pgstrom_post_planner_recurse(pstmt, (Plan *)lfirst(lc),
-												 gpupreagg_private);
+					pgstrom_post_planner_recurse(pstmt, (Plan **)&lfirst(lc));
 			}
 			break;
 
@@ -260,9 +319,23 @@ pgstrom_post_planner_recurse(PlannedStmt *pstmt, Plan *plan,
 			{
 				CustomScan *cscan = (CustomScan *) plan;
 
+				if (cscan->methods == &pgstrom_dummy_plan_methods)
+				{
+					Assert(outerPlan(cscan) != NULL &&
+						   innerPlan(cscan) == NULL &&
+						   cscan->custom_plans == NIL);
+					/*
+					 * remove this 'dummy' custom scan from the plan tree
+					 */
+					*p_plan = outerPlan(cscan);
+					pgstrom_post_planner_recurse(pstmt, p_plan);
+					return;
+				}
+				else if (pgstrom_plan_is_gpupreagg(&cscan->scan.plan))
+					gpupreagg_post_planner(pstmt, cscan);
+
 				foreach (lc, cscan->custom_plans)
-					pgstrom_post_planner_recurse(pstmt, (Plan *)lfirst(lc),
-												 gpupreagg_private);
+					pgstrom_post_planner_recurse(pstmt, (Plan **)&lfirst(lc));
 			}
 			break;
 
@@ -270,56 +343,10 @@ pgstrom_post_planner_recurse(PlannedStmt *pstmt, Plan *plan,
 			break;
 	}
 
-	if (outerPlan(plan))
-		pgstrom_post_planner_recurse(pstmt, outerPlan(plan),
-									 gpupreagg_private);
-	if (innerPlan(plan))
-		pgstrom_post_planner_recurse(pstmt, innerPlan(plan),
-									 gpupreagg_private);
-
-	/*
-	 * NOTE: We need to adjust target-list of Agg-node just upon the GpuPreAgg
-	 * node; to replace the normal aggregate function by the self-defined
-	 * final aggregate function.
-	 * Because of the restriction at ExecInitExpr, we cannot have Aggref node
-	 * on CustomScan node. On the other hands, get_agg_combine_expr() raises
-	 * an error, if combined aggregation references regular expressions.
-	 * So, at the PostgreSQL v9.6, we need a surgery of target-list onto the
-	 * plan tree.
-	 * Also note that, it is not an option to give modified PathTarget during
-	 * the path construction stage, because some logic tries to put projection
-	 * to revert the self-define PathTarget to the original one.
-	 */
-	if (pgstrom_plan_is_gpupreagg(plan))
-	{
-		gpupreagg_post_planner(pstmt, (CustomScan *)plan,
-							   gpupreagg_private);
-		Assert(*gpupreagg_private);
-	}
-	else if (*gpupreagg_private)
-	{
-		if (IsA(plan, Agg))
-		{
-			pgstrom_agg_post_planner(pstmt, (Agg *)plan,
-									 *gpupreagg_private);
-			*gpupreagg_private = NULL;
-		}
-		else if (IsA(plan, Group))
-		{
-			pgstrom_group_post_planner(pstmt, (Agg *)plan,
-									   *gpupreagg_private);
-			*gpupreagg_private = NULL;
-		}
-		else if (IsA(plan, Sort))
-			pgstrom_sort_post_planner(pstmt, (Sort *)plan,
-									  *gpupreagg_private);
-		else if (IsA(plan, Gather))
-			pgstrom_gather_post_planner(pstmt, (Gather *)plan,
-										*gpupreagg_private);
-		else
-			elog(ERROR, "unexpected node between Agg and GpuPreAgg: %s",
-				 nodeToString(plan));
-	}
+	if (plan->lefttree)
+		pgstrom_post_planner_recurse(pstmt, &plan->lefttree);
+	if (plan->righttree)
+		pgstrom_post_planner_recurse(pstmt, &plan->righttree);
 }
 
 static PlannedStmt *
@@ -329,27 +356,16 @@ pgstrom_post_planner(Query *parse,
 {
 	PlannedStmt	   *pstmt;
 	ListCell	   *lc;
-	void		   *gpupreagg_private;
 
 	if (planner_hook_next)
 		pstmt = planner_hook_next(parse, cursorOptions, boundParams);
 	else
 		pstmt = standard_planner(parse, cursorOptions, boundParams);
 
-	elog(INFO, "comes into pgstrom_post_planner hook");
-
-	gpupreagg_private = NULL;
-	pgstrom_post_planner_recurse(pstmt, pstmt->planTree,
-								 &gpupreagg_private);
-	Assert(!gpupreagg_private);
-
+	pgstrom_post_planner_recurse(pstmt, &pstmt->planTree);
 	foreach (lc, pstmt->subplans)
-	{
-		gpupreagg_private = NULL;
-		pgstrom_post_planner_recurse(pstmt, (Plan *)lfirst(lc),
-									 &gpupreagg_private);
-		Assert(!gpupreagg_private);
-	}
+		pgstrom_post_planner_recurse(pstmt, (Plan **)&lfirst(lc));
+
 	return pstmt;
 }
 
@@ -400,81 +416,20 @@ _PG_init(void)
 	pgstrom_init_codegen();
 //	pgstrom_init_plcuda();
 
+	/* dummy custom-scan node */
+	memset(&pgstrom_dummy_path_methods, 0, sizeof(CustomPathMethods));
+	pgstrom_dummy_path_methods.CustomName	= "Dummy";
+	pgstrom_dummy_path_methods.PlanCustomPath
+		= pgstrom_dummy_create_plan;
+
+	memset(&pgstrom_dummy_plan_methods, 0, sizeof(CustomScanMethods));
+	pgstrom_dummy_plan_methods.CustomName	= "Dummy";
+	pgstrom_dummy_plan_methods.CreateCustomScanState
+		= pgstrom_dummy_create_scan_state;
+
 	/* planner hook registration */
 	planner_hook_next = planner_hook;
 	planner_hook = pgstrom_post_planner;
-}
-
-/* ------------------------------------------------------------
- *
- * Misc support routines for path-construction
- *
- * ------------------------------------------------------------
- */
-/*
- * copyPathNode
- *
- * It copies a path-node but not recursive. When add_path() replaces the
- * existing cheapest path, it shall be released. It means, even if our
- * path node still wants to use the second-best path as fallback, it has
- * already gone. However, add_path() just release the top-level path node,
- * so flat copy is sufficient to keep the second-best path for our purpose.
- */
-Path *
-copyPathNode(const Path *pathnode)
-{
-	Path   *newnode;
-	Size	len;
-
-#define PATHNODE_ENTRY(NodeType)		\
-	case T_##NodeType:					\
-		len = sizeof(NodeType);			\
-		break
-
-	switch (nodeTag(pathnode))
-	{
-		PATHNODE_ENTRY(Path);
-		PATHNODE_ENTRY(IndexPath);
-		PATHNODE_ENTRY(BitmapHeapPath);
-		PATHNODE_ENTRY(BitmapAndPath);
-		PATHNODE_ENTRY(BitmapOrPath);
-		PATHNODE_ENTRY(TidPath);
-		PATHNODE_ENTRY(SubqueryScanPath);
-		PATHNODE_ENTRY(ForeignPath);
-		PATHNODE_ENTRY(CustomPath);
-		PATHNODE_ENTRY(NestPath);
-		PATHNODE_ENTRY(MergePath);
-		PATHNODE_ENTRY(HashPath);
-		PATHNODE_ENTRY(AppendPath);
-		PATHNODE_ENTRY(MergeAppendPath);
-		PATHNODE_ENTRY(ResultPath);
-		PATHNODE_ENTRY(MaterialPath);
-		PATHNODE_ENTRY(UniquePath);
-		PATHNODE_ENTRY(GatherPath);
-		PATHNODE_ENTRY(ProjectionPath);
-		PATHNODE_ENTRY(SortPath);
-		PATHNODE_ENTRY(GroupPath);
-		PATHNODE_ENTRY(UpperUniquePath);
-		PATHNODE_ENTRY(AggPath);
-		PATHNODE_ENTRY(GroupingSetsPath);
-		PATHNODE_ENTRY(MinMaxAggPath);
-		PATHNODE_ENTRY(WindowAggPath);
-		PATHNODE_ENTRY(SetOpPath);
-		PATHNODE_ENTRY(RecursiveUnionPath);
-		PATHNODE_ENTRY(LockRowsPath);
-		PATHNODE_ENTRY(ModifyTablePath);
-		PATHNODE_ENTRY(LimitPath);
-		default:
-			elog(ERROR, "Bug? unexpected Path node: %s",
-				 nodeToString(pathnode));
-			break;
-	}
-#undef PATHNODE_ENTRY
-
-	newnode = palloc(len);
-	memcpy(newnode, pathnode, len);
-
-	return newnode;
 }
 
 #if 1

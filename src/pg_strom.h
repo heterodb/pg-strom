@@ -727,16 +727,7 @@ extern void	pgstrom_init_gpujoin(void);
  * gpupreagg.c
  */
 extern bool pgstrom_plan_is_gpupreagg(const Plan *plan);
-extern void gpupreagg_post_planner(PlannedStmt *pstmt, CustomScan *cscan,
-								   void **gpupreagg_private);
-extern void pgstrom_agg_post_planner(PlannedStmt *pstmt, Agg *aggnode,
-									 void *gpupreagg_private);
-extern void pgstrom_group_post_planner(PlannedStmt *pstmt, Group *aggnode,
-									   void *gpupreagg_private);
-extern void pgstrom_sort_post_planner(PlannedStmt *pstmt, Sort *sort,
-									  void *gpupreagg_private);
-extern void pgstrom_gather_post_planner(PlannedStmt *pstmt, Gather *gather,
-										void *gpupreagg_private);
+extern void gpupreagg_post_planner(PlannedStmt *pstmt, CustomScan *cscan);
 extern int	gpupreagg_process_task(GpuTask_v2 *gtask,
 								   CUmodule cuda_module,
 								   CUstream cuda_stream);
@@ -829,10 +820,11 @@ extern double	pgstrom_nrows_growth_margin;
 extern double	pgstrom_num_threads_margin;
 extern double	pgstrom_chunk_size_margin;
 
+extern Path *pgstrom_create_dummy_path(PlannerInfo *root,
+									   Path *subpath,
+									   PathTarget *target);
 extern void _PG_init(void);
 extern const char *pgstrom_strerror(cl_int errcode);
-
-extern Path *copyPathNode(const Path *pathnode);
 
 extern void pgstrom_explain_expression(List *expr_list, const char *qlabel,
 									   PlanState *planstate,
