@@ -1954,7 +1954,7 @@ PlanGpuPreAggPath(PlannerInfo *root,
 	CustomScan	   *cscan = makeNode(CustomScan);
 	GpuPreAggInfo  *gpa_info;
 	PathTarget	   *target_device;
-	List		   *tlist_dev;
+	List		   *tlist_dev = NIL;
 	Plan		   *outer_plan = NULL;
 	List		   *outer_tlist = NIL;
 	ListCell	   *lc;
@@ -2044,16 +2044,9 @@ PlanGpuPreAggPath(PlannerInfo *root,
 									tlist_dev,
 									outer_tlist,
 									gpa_info->outer_quals);
-//	elog(INFO, "source:\n%s", kern_source);
-
 	gpa_info->kern_source = kern_source;
 	gpa_info->extra_flags = context.extra_flags;
 	gpa_info->used_params = context.used_params;
-
-//	elog(INFO, "tlist_orig => %s", nodeToString(tlist));
-//	elog(INFO, "tlist_dev => %s", nodeToString(tlist_dev));
-//	elog(INFO, "tlist_dev_action => %s", nodeToString(tlist_dev_action));
-//	elog(INFO, "used_params => %s", nodeToString(gpa_info->used_params));
 
 	form_gpupreagg_info(cscan, gpa_info);
 
@@ -3707,20 +3700,20 @@ gpupreagg_next_task(GpuTaskState_v2 *gts)
 					gpas->gts.scan_done = true;
 					break;
 				}
+			}
 
-				/* create a new data-store on demand */
-				if (!pds)
-				{
-					pds = PDS_create_row(gpas->gts.gcontext,
-										 tupdesc,
-										 pgstrom_chunk_size());
-				}
+			/* create a new data-store on demand */
+			if (!pds)
+			{
+				pds = PDS_create_row(gpas->gts.gcontext,
+									 tupdesc,
+									 pgstrom_chunk_size());
+			}
 
-				if (!PDS_insert_tuple(pds, slot))
-				{
-					gpas->gts.scan_overflow = slot;
-					break;
-				}
+			if (!PDS_insert_tuple(pds, slot))
+			{
+				gpas->gts.scan_overflow = slot;
+				break;
 			}
 		}
 		if (!gpas->gts.scan_overflow)
