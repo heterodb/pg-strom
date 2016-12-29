@@ -1034,11 +1034,13 @@ create_gpujoin_path(PlannerInfo *root,
 					 final_tlist, required_outer))
 	{
 		List   *custom_paths = list_make1(outer_path);
+		bool	parallel_aware;
 
 		/* a valid @outer_relid shall be set, if outer scan pull-up */
 		pgstrom_pullup_outer_scan(outer_path,
 								  &gjpath->outer_relid,
-								  &gjpath->outer_quals);
+								  &gjpath->outer_quals,
+								  &parallel_aware);
 		/* informs planner a list of child pathnodes */
 		for (i=0; i < num_rels; i++)
 			custom_paths = lappend(custom_paths,
@@ -6873,6 +6875,7 @@ pgstrom_init_gpujoin(void)
 	/* setup plan methods */
 	gpujoin_plan_methods.CustomName				= "GpuJoin";
 	gpujoin_plan_methods.CreateCustomScanState	= gpujoin_create_scan_state;
+	RegisterCustomScanMethods(&gpujoin_plan_methods);
 
 	/* setup exec methods */
 	gpujoin_exec_methods.CustomName				= "GpuJoin";

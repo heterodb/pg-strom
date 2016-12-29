@@ -688,18 +688,25 @@ extern void codegen_gpuscan_quals(StringInfo kern,
 extern bool add_unique_expression(Expr *expr, List **p_tlist, bool resjunk);
 extern bool pgstrom_pullup_outer_scan(const Path *outer_path,
 									  Index *p_outer_relid,
-									  List **p_outer_quals);
+									  List **p_outer_quals,
+									  bool *parallel_aware);
 extern bool pgstrom_path_is_gpuscan(const Path *path);
 extern bool pgstrom_plan_is_gpuscan(const Plan *plan);
 
-
 extern void gpuscan_rewind_position(GpuTaskState_v2 *gts);
-
 
 extern pgstrom_data_store *gpuscanExecScanChunk(GpuTaskState_v2 *gts,
 												int *p_filedesc);
 extern void gpuscanRewindScanChunk(GpuTaskState_v2 *gts);
 
+extern Size ExecGpuScanEstimateDSM(CustomScanState *node,
+								   ParallelContext *pcxt);
+extern void ExecGpuScanInitDSM(CustomScanState *node,
+							   ParallelContext *pcxt,
+							   void *coordinate);
+extern void ExecGpuScanInitWorker(CustomScanState *node,
+								  shm_toc *toc,
+								  void *coordinate);
 extern int	gpuscan_process_task(GpuTask_v2 *gtask,
 								 CUmodule cuda_module,
 								 CUstream cuda_stream);

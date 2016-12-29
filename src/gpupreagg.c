@@ -61,13 +61,6 @@ typedef struct
 	double			plan_ngroups;	/* planned number of groups */
 	cl_int			plan_nchunks;	/* planned number of chunks */
 	cl_int			plan_extra_sz;	/* planned size of extra-sz per tuple */
-
-	List		   *tlist_final;
-	List		   *tlist_host;
-	List		   *tlist_host_grouprefs;
-	List		   *tlist_dev;
-	List		   *tlist_dev_action;
-
 	double			outer_nrows;	/* number of estimated outer nrows */
 	Index			outer_scanrelid;/* RTI, if outer path pulled up */
 	List		   *outer_quals;	/* device executable quals of outer-scan */
@@ -83,16 +76,10 @@ form_gpupreagg_info(CustomScan *cscan, GpuPreAggInfo *gpa_info)
 	List	   *exprs = NIL;
 
 	privs = lappend(privs, makeInteger(gpa_info->num_group_keys));
-	privs = lappend(privs,
-					makeInteger(double_as_long(gpa_info->plan_ngroups)));
+	privs = lappend(privs, makeFloat(psprintf("%f", gpa_info->plan_ngroups)));
 	privs = lappend(privs, makeInteger(gpa_info->plan_nchunks));
 	privs = lappend(privs, makeInteger(gpa_info->plan_extra_sz));
-	exprs = lappend(exprs, gpa_info->tlist_final);
-	exprs = lappend(exprs, gpa_info->tlist_host);
-	privs = lappend(privs, gpa_info->tlist_host_grouprefs);
-	exprs = lappend(exprs, gpa_info->tlist_dev);
-	privs = lappend(privs, gpa_info->tlist_dev_action);
-	privs = lappend(privs, makeInteger(double_as_long(gpa_info->outer_nrows)));
+	privs = lappend(privs, makeFloat(psprintf("%f", gpa_info->outer_nrows)));
 	privs = lappend(privs, makeInteger(gpa_info->outer_scanrelid));
 	exprs = lappend(exprs, gpa_info->outer_quals);
 	privs = lappend(privs, makeString(gpa_info->kern_source));
@@ -113,15 +100,10 @@ deform_gpupreagg_info(CustomScan *cscan)
 	int			eindex = 0;
 
 	gpa_info->num_group_keys = intVal(list_nth(privs, pindex++));
-	gpa_info->plan_ngroups = long_as_double(intVal(list_nth(privs, pindex++)));
+	gpa_info->plan_ngroups = floatVal(list_nth(privs, pindex++));
 	gpa_info->plan_nchunks = intVal(list_nth(privs, pindex++));
 	gpa_info->plan_extra_sz = intVal(list_nth(privs, pindex++));
-	gpa_info->tlist_final = list_nth(exprs, eindex++);
-	gpa_info->tlist_host = list_nth(exprs, eindex++);
-	gpa_info->tlist_host_grouprefs = list_nth(privs, pindex++);
-	gpa_info->tlist_dev = list_nth(exprs, eindex++);
-	gpa_info->tlist_dev_action = list_nth(privs, pindex++);
-	gpa_info->outer_nrows = long_as_double(intVal(list_nth(privs, pindex++)));
+	gpa_info->outer_nrows = floatVal(list_nth(privs, pindex++));
 	gpa_info->outer_scanrelid = intVal(list_nth(privs, pindex++));
 	gpa_info->outer_quals = list_nth(exprs, eindex++);
 	gpa_info->kern_source = strVal(list_nth(privs, pindex++));
@@ -953,6 +935,7 @@ make_gpupreagg_path(PlannerInfo *root,
 	CustomPath	   *cpath = makeNode(CustomPath);
 	GpuPreAggInfo  *gpa_info = palloc0(sizeof(GpuPreAggInfo));
 	List		   *custom_paths = NIL;
+	bool			parallel_aware = false;
 
 	/* obviously, not suitable for GpuPreAgg */
 	if (num_groups < 1.0 || num_groups > (double)INT_MAX)
@@ -972,7 +955,8 @@ make_gpupreagg_path(PlannerInfo *root,
 	 */
 	if (!pgstrom_pullup_outer_scan(input_path,
 								   &gpa_info->outer_scanrelid,
-								   &gpa_info->outer_quals))
+								   &gpa_info->outer_quals,
+								   &parallel_aware))
 		custom_paths = list_make1(input_path);
 
 	/* Setup CustomPath */
@@ -980,7 +964,7 @@ make_gpupreagg_path(PlannerInfo *root,
 	cpath->path.parent = group_rel;
 	cpath->path.pathtarget = target_partial;
 	cpath->path.param_info = NULL;
-	cpath->path.parallel_aware = (gpa_info->outer_scanrelid > 0);
+	cpath->path.parallel_aware = parallel_aware;
 	cpath->path.parallel_safe = (group_rel->consider_parallel &&
 								 input_path->parallel_safe);
 	cpath->path.parallel_workers = input_path->parallel_workers;
@@ -1009,6 +993,7 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 	PathTarget	   *target_partial	= create_empty_pathtarget();
 	PathTarget	   *target_device	= create_empty_pathtarget();
 	CustomPath	   *cpath;
+	Path		   *partial_path;
 	Path		   *final_path;
 	Path		   *sort_path;
 	Node		   *havingQual;
@@ -1062,6 +1047,29 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 	if (!cpath)
 		return;
 
+	/*
+	 * If GpuPreAgg pathnode is parallel-safe, inject Gather node prior to
+	 * the final aggregation step.
+	 */
+	if (cpath->path.parallel_safe)
+	{
+		double		total_groups = (cpath->path.rows *
+									cpath->path.parallel_workers);
+
+		if (!agg_final_costs.hasNonPartial &&
+			!agg_final_costs.hasNonSerial)
+			return;
+
+		partial_path = (Path *)create_gather_path(root,
+												  group_rel,
+												  &cpath->path,
+												  target_partial,
+												  NULL,
+												  &total_groups);
+	}
+	else
+		partial_path = &cpath->path;
+
 	/* strategy of the final aggregation */
 	can_sort = grouping_is_sortable(parse->groupClause);
 	can_hash = (parse->groupClause != NIL &&
@@ -1074,7 +1082,7 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 	{
 		final_path = (Path *)create_agg_path(root,
 											 group_rel,
-											 &cpath->path,
+											 partial_path,
 											 target_final,
 											 AGG_PLAIN,
 											 AGGSPLIT_SIMPLE,
@@ -1094,7 +1102,7 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 			sort_path = (Path *)
 				create_sort_path(root,
 								 group_rel,
-								 &cpath->path,
+								 partial_path,
 								 root->group_pathkeys,
 								 -1.0);
 			if (parse->groupingSets)
@@ -1170,7 +1178,7 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 		if (can_hash)
 		{
 			Size	hashaggtablesize
-				= estimate_hashagg_tablesize(&cpath->path,
+				= estimate_hashagg_tablesize(partial_path,
 											 &agg_final_costs,
 											 num_groups);
 			if (hashaggtablesize < work_mem * 1024L)
@@ -1178,7 +1186,7 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 				final_path = (Path *)
 					create_agg_path(root,
 									group_rel,
-									&cpath->path,
+									partial_path,
 									target_final,
 									AGG_HASHED,
 									AGGSPLIT_SIMPLE,
@@ -1206,6 +1214,7 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 							 RelOptInfo *group_rel)
 {
 	Path	   *input_path;
+	ListCell   *lc;
 
 	if (create_upper_paths_next)
 		(*create_upper_paths_next)(root, stage, input_rel, group_rel);
@@ -1228,6 +1237,18 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 	/* traditional GpuPreAgg + Agg path consideration */
 	input_path = input_rel->cheapest_total_path;
 	try_add_gpupreagg_paths(root, group_rel, input_path);
+
+	/*
+	 * add GpuPreAgg + Gather + Agg path for CPU+GPU hybrid parallel
+	 */
+	if (group_rel->consider_parallel)
+	{
+		foreach (lc, input_rel->partial_pathlist)
+		{
+			input_path = lfirst(lc);
+			try_add_gpupreagg_paths(root, group_rel, input_path);
+		}
+	}
 }
 
 /*
@@ -1941,6 +1962,10 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 			return false;
 	}
 	*p_havingQual = havingQual;
+
+	set_pathtarget_cost_width(root, target_final);
+	set_pathtarget_cost_width(root, target_partial);
+	set_pathtarget_cost_width(root, target_device);
 
 	return true;
 }
@@ -3300,7 +3325,6 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 	/* Create a shared state object */
 	gpas->gpa_sstate = create_gpupreagg_shared_state(gpas, gpa_info,
 													 gpreagg_tupdesc);
-
 	/* Get CUDA program and async build if any */
 	kern_define = pgstrom_build_session_info(gpa_info->extra_flags,
 											 &gpas->gts);
@@ -3375,6 +3399,44 @@ ExecReScanGpuPreAgg(CustomScanState *node)
 	gpuscanRewindScanChunk(&gpas->gts);
 }
 
+/*
+ * ExecGpuPreAggEstimateDSM
+ */
+static Size
+ExecGpuPreAggEstimateDSM(CustomScanState *node, ParallelContext *pcxt)
+{
+	if (node->ss.ss_currentRelation)
+		return ExecGpuScanEstimateDSM(node, pcxt);
+	return 0;
+}
+
+/*
+ * ExecGpuPreAggInitDSM
+ */
+static void
+ExecGpuPreAggInitDSM(CustomScanState *node,
+					 ParallelContext *pcxt,
+					 void *coordinate)
+{
+	if (node->ss.ss_currentRelation)
+		ExecGpuScanInitDSM(node, pcxt, coordinate);
+}
+
+/*
+ * ExecGpuPreAggInitWorker
+ */
+static void
+ExecGpuPreAggInitWorker(CustomScanState *node,
+						shm_toc *toc,
+						void *coordinate)
+{
+	if (node->ss.ss_currentRelation)
+		ExecGpuScanInitWorker(node, toc, coordinate);
+}
+
+/*
+ * ExplainGpuPreAgg
+ */
 static void
 ExplainGpuPreAgg(CustomScanState *node, List *ancestors, ExplainState *es)
 {
@@ -3560,23 +3622,6 @@ put_gpupreagg_shared_state(GpuPreAggSharedState *gpa_sstate)
 		dmaBufferFree(gpa_sstate);
 	}
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 /*
  * gpupreagg_create_task - constructor of GpuPreAggTask
@@ -5009,6 +5054,7 @@ pgstrom_init_gpupreagg(void)
 	gpupreagg_scan_methods.CustomName          = "GpuPreAgg";
 	gpupreagg_scan_methods.CreateCustomScanState
 		= CreateGpuPreAggScanState;
+	RegisterCustomScanMethods(&gpupreagg_scan_methods);
 
 	/* initialization of exec method table */
 	memset(&gpupreagg_exec_methods, 0, sizeof(CustomExecMethods));
@@ -5017,11 +5063,9 @@ pgstrom_init_gpupreagg(void)
 	gpupreagg_exec_methods.ExecCustomScan      = ExecGpuPreAgg;
 	gpupreagg_exec_methods.EndCustomScan       = ExecEndGpuPreAgg;
 	gpupreagg_exec_methods.ReScanCustomScan    = ExecReScanGpuPreAgg;
-#if 0
 	gpupreagg_exec_methods.EstimateDSMCustomScan = ExecGpuPreAggEstimateDSM;
     gpupreagg_exec_methods.InitializeDSMCustomScan = ExecGpuPreAggInitDSM;
     gpupreagg_exec_methods.InitializeWorkerCustomScan = ExecGpuPreAggInitWorker;
-#endif
 	gpupreagg_exec_methods.ExplainCustomScan   = ExplainGpuPreAgg;
 	/* hook registration */
 	create_upper_paths_next = create_upper_paths_hook;

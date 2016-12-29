@@ -1568,7 +1568,8 @@ create_gpuscan_plan(PlannerInfo *root,
 bool
 pgstrom_pullup_outer_scan(const Path *outer_path,
 						  Index *p_outer_relid,
-						  List **p_outer_quals)
+						  List **p_outer_quals,
+						  bool *p_parallel_aware)
 {
 	RelOptInfo *baserel = outer_path->parent;
 	PathTarget *outer_target = outer_path->pathtarget;
@@ -1578,9 +1579,24 @@ pgstrom_pullup_outer_scan(const Path *outer_path,
 	if (!enable_pullup_outer_scan)
 		return false;
 
-	if (outer_path->pathtype != T_SeqScan &&
-		!pgstrom_path_is_gpuscan(outer_path))
-		return false;
+	for (;;)
+	{
+		if (outer_path->pathtype == T_SeqScan)
+			break;	/* OK */
+		if (pgstrom_path_is_gpuscan(outer_path))
+			break;	/* OK, only if GpuScan */
+		if (outer_path->pathtype == T_Result)
+		{
+			ProjectionPath *ppath = (ProjectionPath *) outer_path;
+
+			if (ppath->dummypp)
+			{
+				outer_path = ppath->subpath;
+				continue;	/* Dive into one more deep level */
+			}
+		}
+		return false;	/* Elsewhere, we cannot pull-up the scan path */
+	}
 
 	/* qualifier has to be device executable */
 	foreach (lc, baserel->baserestrictinfo)
@@ -1610,6 +1626,7 @@ pgstrom_pullup_outer_scan(const Path *outer_path,
 	}
 	*p_outer_relid = baserel->relid;
 	*p_outer_quals = outer_quals;
+	*p_parallel_aware = outer_path->parallel_aware;
 	return true;
 }
 
@@ -1857,7 +1874,7 @@ ExecReScanGpuScan(CustomScanState *node)
 /*
  * ExecGpuScanEstimateDSM - return required size of shared memory
  */
-static Size
+Size
 ExecGpuScanEstimateDSM(CustomScanState *node,
 					   ParallelContext *pcxt)
 {
@@ -1870,7 +1887,7 @@ ExecGpuScanEstimateDSM(CustomScanState *node,
 /*
  * ExecGpuScanInitDSM - initialize the coordinate memory on the master backend
  */
-static void
+void
 ExecGpuScanInitDSM(CustomScanState *node,
 				   ParallelContext *pcxt,
 				   void *coordinate)
@@ -1906,7 +1923,7 @@ ExecGpuScanInitDSM(CustomScanState *node,
 /*
  * ExecGpuScanInitWorker - initialize GpuScan on the backend worker process
  */
-static void
+void
 ExecGpuScanInitWorker(CustomScanState *node,
 					  shm_toc *toc,
 					  void *coordinate)
