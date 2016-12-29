@@ -994,12 +994,12 @@ make_gpupreagg_path(PlannerInfo *root,
 }
 
 /*
- * try_make_gpupreagg_path
+ * try_add_gpupreagg_paths
  *
  *
  */
-static Path *
-try_make_gpupreagg_path(PlannerInfo *root,
+static void
+try_add_gpupreagg_paths(PlannerInfo *root,
 						RelOptInfo *group_rel,
 						Path *input_path)
 {
@@ -1008,7 +1008,6 @@ try_make_gpupreagg_path(PlannerInfo *root,
 	PathTarget	   *target_final	= create_empty_pathtarget();
 	PathTarget	   *target_partial	= create_empty_pathtarget();
 	PathTarget	   *target_device	= create_empty_pathtarget();
-	Path		   *dummy_path		= NULL;
 	CustomPath	   *cpath;
 	Path		   *final_path;
 	Path		   *sort_path;
@@ -1026,20 +1025,20 @@ try_make_gpupreagg_path(PlannerInfo *root,
 									 target_device,
 									 input_path->pathtarget,
 									 &havingQual))
-		return NULL;
+		return;
 
 	/* Get cost of aggregations */
 	memset(&agg_final_costs, 0, sizeof(AggClauseCosts));
 	if (parse->hasAggs)
 	{
-		get_agg_clause_costs(root, (Node *)root->processed_tlist,
+		get_agg_clause_costs(root, (Node *)target_final->exprs,
 							 AGGSPLIT_SIMPLE, &agg_final_costs);
-		get_agg_clause_costs(root, parse->havingQual,
+		get_agg_clause_costs(root, havingQual,
 							 AGGSPLIT_SIMPLE, &agg_final_costs);
 	}
 	/* GpuPreAgg does not support ordered aggregation */
 	if (agg_final_costs.numOrderedAggs > 0)
-		return NULL;
+		return;
 
 	/* Estimated number of groups */
 	if (!parse->groupClause)
@@ -1051,9 +1050,6 @@ try_make_gpupreagg_path(PlannerInfo *root,
 		num_groups = pathnode->rows;
 	}
 
-
-
-
 	/*
 	 * construction of GpuPreAgg pathnode on top of the cheapest total
 	 * cost pathnode (partial aggregation)
@@ -1064,7 +1060,7 @@ try_make_gpupreagg_path(PlannerInfo *root,
 								input_path,
 								num_groups);
 	if (!cpath)
-		return NULL;
+		return;
 
 	/* strategy of the final aggregation */
 	can_sort = grouping_is_sortable(parse->groupClause);
@@ -1086,9 +1082,9 @@ try_make_gpupreagg_path(PlannerInfo *root,
 											 (List *) havingQual,
 											 &agg_final_costs,
 											 num_groups);
-		dummy_path = pgstrom_create_dummy_path(root,
-											   final_path,
-											   target_upper);
+		add_path(group_rel, pgstrom_create_dummy_path(root,
+													  final_path,
+													  target_upper));
 	}
 	else
 	{
@@ -1129,7 +1125,7 @@ try_make_gpupreagg_path(PlannerInfo *root,
 					}
 				}
 				if (!found)
-					return NULL;	/* give up */
+					return;		/* give up */
 				final_path = (Path *)
 					create_groupingsets_path(root,
 											 group_rel,
@@ -1165,9 +1161,9 @@ try_make_gpupreagg_path(PlannerInfo *root,
 			else
 				elog(ERROR, "Bug? unexpected AGG/GROUP BY requirement");
 
-			dummy_path = pgstrom_create_dummy_path(root,
-												   final_path,
-												   target_upper);
+			add_path(group_rel, pgstrom_create_dummy_path(root,
+														  final_path,
+														  target_upper));
 		}
 
 		/* make a final grouping path (hash) */
@@ -1190,13 +1186,12 @@ try_make_gpupreagg_path(PlannerInfo *root,
 									(List *) havingQual,
 									&agg_final_costs,
 									num_groups);
-				dummy_path = pgstrom_create_dummy_path(root,
-													   final_path,
-													   target_upper);
+				add_path(group_rel, pgstrom_create_dummy_path(root,
+															  final_path,
+															  target_upper));
 			}
 		}
 	}
-	return dummy_path;
 }
 
 /*
@@ -1211,7 +1206,6 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 							 RelOptInfo *group_rel)
 {
 	Path	   *input_path;
-	Path	   *gpreagg_path;
 
 	if (create_upper_paths_next)
 		(*create_upper_paths_next)(root, stage, input_rel, group_rel);
@@ -1231,15 +1225,9 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 		return;
 	}
 
-	/* try to make a CPU sequential execution path */
+	/* traditional GpuPreAgg + Agg path consideration */
 	input_path = input_rel->cheapest_total_path;
-	gpreagg_path = try_make_gpupreagg_path(root,
-										   group_rel,
-										   input_path);
-	if (gpreagg_path)
-		add_path(group_rel, gpreagg_path);
-
-
+	try_add_gpupreagg_paths(root, group_rel, input_path);
 }
 
 /*
