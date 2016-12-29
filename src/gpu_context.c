@@ -852,6 +852,7 @@ pgstrom_startup_gpu_context(void)
 	Size		length;
 	int			i;
 	bool		found;
+	void	   *ptr;
 
 	if (shmem_startup_hook_next)
 		(*shmem_startup_hook_next)();
@@ -893,6 +894,14 @@ pgstrom_startup_gpu_context(void)
 	masterGpuContext.sockfd = PGINVALID_SOCKET;
 	masterGpuContext.resowner = NULL;
 	masterGpuContext.shgcon = shgcon;
+
+	/*
+	 * pre-fault of the first segment of DMA buffer
+	 */
+	ptr = dmaBufferAlloc(MasterGpuContext(), BLCKSZ);
+	if (!ptr)
+		elog(ERROR, "failed on pre-fault of DMA buffer allocation");
+	dmaBufferFree(ptr);
 }
 
 /*
