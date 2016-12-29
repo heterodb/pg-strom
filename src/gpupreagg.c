@@ -371,169 +371,169 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 #endif
 	/* COUNT(*) = SUM(NROWS(*|X)) */
 	{ "count",  0, {},
-	  "c:sum",      INT8OID,
-	  "s:psum", 1, {INT8OID},
+	  "s:sum",      INT8OID,
+	  "varref", 1, {INT8OID},
 	  {ALTFUNC_EXPR_NROWS}, 0, INT_MAX
 	},
 	{ "count",  1, {ANYOID},
-	  "c:sum",      INT8OID,
-	  "s:psum", 1, {INT8OID},
+	  "s:sum",      INT8OID,
+	  "varref", 1, {INT8OID},
 	  {ALTFUNC_EXPR_NROWS}, 0, INT_MAX
 	},
 	/* MAX(X) = MAX(PMAX(X)) */
 	{ "max",    1, {INT2OID},
 	  "c:max",      INT2OID,
-	  "s:pmax", 1, {INT2OID},
+	  "varref", 1, {INT2OID},
 	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
 	},
 	{ "max",    1, {INT4OID},
 	  "c:max",      INT4OID,
-	  "s:pmax", 1, {INT4OID},
+	  "varref", 1, {INT4OID},
 	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
 	},
 	{ "max",    1, {INT8OID},
 	  "c:max",      INT8OID,
-	  "s:pmax", 1, {INT8OID},
+	  "varref", 1, {INT8OID},
 	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
 	},
 	{ "max",    1, {FLOAT4OID},
 	  "c:max",      FLOAT4OID,
-	  "s:pmax", 1, {FLOAT4OID},
+	  "varref", 1, {FLOAT4OID},
 	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
 	},
 	{ "max",    1, {FLOAT8OID},
 	  "c:max",      FLOAT8OID,
-	  "s:pmax", 1, {FLOAT8OID},
+	  "varref", 1, {FLOAT8OID},
 	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "max",    1, {NUMERICOID},
 	  "c:max",      NUMERICOID,
-	  "s:pmax", 1, {NUMERICOID},
+	  "varref", 1, {NUMERICOID},
 	  {ALTFUNC_EXPR_PMAX}, DEVKERNEL_NEEDS_NUMERIC, INT_MAX
 	},
 #endif
 	{ "max",    1, {CASHOID},
 	  "c:max",      CASHOID,
-	  "s:pmax", 1, {CASHOID},
+	  "varref", 1, {CASHOID},
 	  {ALTFUNC_EXPR_PMAX}, DEVKERNEL_NEEDS_MONEY, INT_MAX
 	},
 	{ "max",    1, {DATEOID},
 	  "c:max",      DATEOID,
-	  "s:pmax", 1, {DATEOID},
+	  "varref", 1, {DATEOID},
 	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
 	},
 	{ "max",    1, {TIMEOID},
 	  "c:max",      TIMEOID,
-	  "s:pmax", 1, {TIMEOID},
+	  "varref", 1, {TIMEOID},
 	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
 	},
 	{ "max",    1, {TIMESTAMPOID},
 	  "c:max",      TIMESTAMPOID,
-	  "s:pmax", 1, {TIMESTAMPOID},
+	  "varref", 1, {TIMESTAMPOID},
 	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
 	},
 	{ "max",    1, {TIMESTAMPTZOID},
 	  "c:max",      TIMESTAMPTZOID,
-	  "s:pmax", 1, {TIMESTAMPTZOID},
+	  "varref", 1, {TIMESTAMPTZOID},
 	  {ALTFUNC_EXPR_PMAX}, 0, INT_MAX
 	},
 
 	/* MIX(X) = MIN(PMIN(X)) */
 	{ "min",    1, {INT2OID},
 	  "c:min",      INT2OID,
-	  "s:pmin", 1, {INT2OID},
+	  "varref", 1, {INT2OID},
 	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
 	},
 	{ "min",    1, {INT4OID},
 	  "c:min",      INT4OID,
-	  "s:pmin", 1, {INT4OID},
+	  "varref", 1, {INT4OID},
 	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
 	},
 	{ "min",    1, {INT8OID},
 	  "c:min",      INT8OID,
-	  "s:pmin", 1, {INT8OID},
+	  "varref", 1, {INT8OID},
 	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
 	},
 	{ "min",    1, {FLOAT4OID},
 	  "c:min",      FLOAT4OID,
-	  "s:pmin", 1, {FLOAT4OID},
+	  "varref", 1, {FLOAT4OID},
 	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
 	},
 	{ "min",    1, {FLOAT8OID},
 	  "c:min",      FLOAT8OID,
-	  "s:pmin", 1, {FLOAT8OID},
+	  "varref", 1, {FLOAT8OID},
 	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "min",    1, {NUMERICOID},
 	  "c:min",      NUMERICOID,
-	  "s:pmin", 1, {NUMERICOID},
+	  "varref", 1, {NUMERICOID},
 	  {ALTFUNC_EXPR_PMIN}, DEVKERNEL_NEEDS_NUMERIC, INT_MAX
 	},
 #endif
 	{ "min",    1, {CASHOID},
 	  "c:min",      CASHOID,
-	  "s:pmin", 1, {CASHOID},
+	  "varref", 1, {CASHOID},
 	  {ALTFUNC_EXPR_PMAX}, DEVKERNEL_NEEDS_MONEY, INT_MAX
 	},
 	{ "min",    1, {DATEOID},
 	  "c:min",      DATEOID,
-	  "s:pmin", 1, {DATEOID},
+	  "varref", 1, {DATEOID},
 	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
 	},
 	{ "min",    1, {TIMEOID},
 	  "c:min",      TIMEOID,
-	  "s:pmin", 1, {TIMEOID},
+	  "varref", 1, {TIMEOID},
 	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
 	},
 	{ "min",    1, {TIMESTAMPOID},
 	  "c:min",      TIMESTAMPOID,
-	  "s:pmin", 1, {TIMESTAMPOID},
+	  "varref", 1, {TIMESTAMPOID},
 	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
 	},
 	{ "min",    1, {TIMESTAMPTZOID},
 	  "c:min",      TIMESTAMPTZOID,
-	  "s:pmin", 1, {TIMESTAMPTZOID},
+	  "varref", 1, {TIMESTAMPTZOID},
 	  {ALTFUNC_EXPR_PMIN}, 0, INT_MAX
 	},
 
 	/* SUM(X) = SUM(PSUM(X)) */
 	{ "sum",    1, {INT2OID},
 	  "s:sum",      INT8OID,
-	  "s:psum", 1, {INT8OID},
+	  "varref", 1, {INT8OID},
 	  {ALTFUNC_EXPR_PSUM}, 0, INT_MAX
 	},
 	{ "sum",    1, {INT4OID},
 	  "s:sum",      INT8OID,
-	  "s:psum", 1, {INT8OID},
+	  "varref", 1, {INT8OID},
 	  {ALTFUNC_EXPR_PSUM}, 0, INT_MAX
 	},
 	{ "sum",    1, {INT8OID},
 	  "c:sum",      INT8OID,
-	  "s:psum", 1, {INT8OID},
+	  "varref", 1, {INT8OID},
 	  {ALTFUNC_EXPR_PSUM}, 0, INT_MAX
 	},
 	{ "sum",    1, {FLOAT4OID},
 	  "c:sum",      FLOAT4OID,
-	  "s:psum", 1, {FLOAT4OID},
+	  "varref", 1, {FLOAT4OID},
 	  {ALTFUNC_EXPR_PSUM}, 0, INT_MAX
 	},
 	{ "sum",    1, {FLOAT8OID},
 	  "c:sum",      FLOAT8OID,
-	  "s:psum", 1, {FLOAT8OID},
+	  "varref", 1, {FLOAT8OID},
 	  {ALTFUNC_EXPR_PSUM}, 0, INT_MAX
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "sum",    1, {NUMERICOID},
 	  "c:sum",      NUMERICOID,
-	  "s:psum", 1, {NUMERICOID},
+	  "varref", 1, {NUMERICOID},
 	  {ALTFUNC_EXPR_PSUM}, DEVKERNEL_NEEDS_NUMERIC, 100
 	},
 #endif
 	{ "sum",    1, {CASHOID},
 	  "c:sum",      CASHOID,
-	  "s:psum", 1, {CASHOID},
+	  "varref", 1, {CASHOID},
 	  {ALTFUNC_EXPR_PSUM}, DEVKERNEL_NEEDS_MONEY, INT_MAX
 	},
 	/* STDDEV(X) = EX_STDDEV(NROWS(),PSUM(X),PSUM(X*X)) */
@@ -1011,7 +1011,7 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 	PathTarget	   *target_device;
 	Node		   *havingQual;
 	CustomPath	   *cpath;
-	Path		   *input_path = input_rel->cheapest_total_path;
+	Path		   *input_path;
 	Path		   *final_path;
 	Path		   *sort_path;
 //	Path		   *gather_path;
@@ -1066,6 +1066,7 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 	target_final = create_empty_pathtarget();
 	target_partial = create_empty_pathtarget();
 	target_device = create_empty_pathtarget();
+	input_path = input_rel->cheapest_total_path;
 	if (!gpupreagg_build_path_target(root,
 									 target_upper,
 									 target_final,
@@ -1762,6 +1763,8 @@ make_alternative_aggref(Aggref *aggref,
 		elog(ERROR, "cache lookup failed for function %s",
 			 funcname_signature_string(func_name, 1, NIL,
 									   &aggfn_cat->finalfn_argtype));
+	/* sanity checks */
+	Assert(aggref->aggtype == get_func_rettype(func_oid));
 
 	tuple = SearchSysCache1(AGGFNOID, ObjectIdGetDatum(func_oid));
 	if (!HeapTupleIsValid(tuple))
@@ -1931,37 +1934,7 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 			return false;
 	}
 	*p_havingQual = havingQual;
-	  
 
-
-
-#if 0
-	/* If there's a HAVING clause, we'll need the Vars/Aggrefs it uses, too. */
-	if (parse->havingQual)
-	{
-		non_group_cols = lappend(non_group_cols, parse->havingQual);
-		non_group_col_sgrefs = lappend_int(non_group_col_sgrefs, 0);
-	}
-#endif
-#if 0
-	forboth (lc1, non_group_cols,
-			 lc2, non_group_col_sgrefs)
-	{
-		/*
-		 * Not a grouping keys. Expression is added to the target_final,
-		 * but Aggref contained-in is replaced by final/partial function
-		 * calls. Its arguments are added to target_partial and
-		 * target_device on demand.
-		 */
-		Expr   *expr = (Expr *)
-			replace_expression_by_altfunc(lfirst(lc1), &con);
-
-		if (!con.device_executable)
-			return false;
-
-		add_column_to_pathtarget(target_final, expr, lfirst_int(lc2));
-	}
-#endif
 	return true;
 }
 

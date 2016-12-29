@@ -19,6 +19,7 @@
 #include "access/hash.h"
 #include "fmgr.h"
 #include "miscadmin.h"
+#include "nodes/nodeFuncs.h"
 #include "optimizer/clauses.h"
 #include "optimizer/cost.h"
 #include "optimizer/pathnode.h"
@@ -263,16 +264,28 @@ pgstrom_dummy_remove_plan(PlannedStmt *pstmt, CustomScan *cscan)
 		TargetEntry	   *tle_1 = lfirst(lc1);
 		TargetEntry	   *tle_2 = lfirst(lc2);
 
+		if (exprType((Node *)tle_1->expr) != exprType((Node *)tle_2->expr))
+			elog(ERROR, "Bug? dummy custom scan node has incompatible tlist");
+
 		if (tle_2->resname != NULL &&
 			(tle_1->resname == NULL ||
 			 strcmp(tle_1->resname, tle_2->resname) != 0))
 		{
-			elog(INFO, "attribute %d of subplan: [%s] is over-written by [%s]",
+			elog(DEBUG2,
+				 "attribute %d of subplan: [%s] is over-written by [%s]",
 				 tle_2->resno,
 				 tle_2->resname,
 				 tle_1->resname);
 		}
+		if (tle_1->resjunk != tle_2->resjunk)
+			elog(DEBUG2,
+				 "attribute %d of subplan: [%s] is marked as %s attribute",
+				 tle_2->resno,
+                 tle_2->resname,
+				 tle_1->resjunk ? "junk" : "non-junk");
+
 		tle_2->resname = tle_1->resname;
+		tle_2->resjunk = tle_1->resjunk;
 	}
 	return outerPlan(cscan);
 }
