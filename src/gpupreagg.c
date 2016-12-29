@@ -994,51 +994,54 @@ make_gpupreagg_path(PlannerInfo *root,
 }
 
 /*
- * gpupreagg_add_grouping_paths
+ * try_make_gpupreagg_path
  *
- * entrypoint to add grouping path by GpuPreAgg logic
+ *
  */
-static void
-gpupreagg_add_grouping_paths(PlannerInfo *root,
-							 UpperRelationKind stage,
-							 RelOptInfo *input_rel,
-							 RelOptInfo *group_rel)
+static Path *
+try_make_gpupreagg_path(PlannerInfo *root,
+						RelOptInfo *group_rel,
+						Path *input_path)
 {
 	Query		   *parse = root->parse;
-	PathTarget	   *target_upper = root->upper_targets[UPPERREL_GROUP_AGG];
-	PathTarget	   *target_final;
-	PathTarget	   *target_partial;
-	PathTarget	   *target_device;
-	Node		   *havingQual;
+	PathTarget	   *target_upper	= root->upper_targets[UPPERREL_GROUP_AGG];
+	PathTarget	   *target_final	= create_empty_pathtarget();
+	PathTarget	   *target_partial	= create_empty_pathtarget();
+	PathTarget	   *target_device	= create_empty_pathtarget();
+	Path		   *dummy_path		= NULL;
 	CustomPath	   *cpath;
-	Path		   *input_path;
 	Path		   *final_path;
 	Path		   *sort_path;
-//	Path		   *gather_path;
+	Node		   *havingQual;
 	double			num_groups;
 	bool			can_sort;
 	bool			can_hash;
 	AggClauseCosts	agg_final_costs;
 
-	if (create_upper_paths_next)
-		(*create_upper_paths_next)(root, stage, input_rel, group_rel);
+	/* construction of the target-list for each level */
+	if (!gpupreagg_build_path_target(root,
+									 target_upper,
+									 target_final,
+									 target_partial,
+									 target_device,
+									 input_path->pathtarget,
+									 &havingQual))
+		return NULL;
 
-	if (stage != UPPERREL_GROUP_AGG)
-		return;
-
-	if (!pgstrom_enabled || !enable_gpupreagg)
-		return;
-
-	if (get_namespace_oid("pgstrom", true) == InvalidOid)
+	/* Get cost of aggregations */
+	memset(&agg_final_costs, 0, sizeof(AggClauseCosts));
+	if (parse->hasAggs)
 	{
-		ereport(WARNING,
-				(errcode(ERRCODE_UNDEFINED_SCHEMA),
-				 errmsg("schema \"pgstrom\" was not found"),
-				 errhint("Run: CREATE EXTENSION pg_strom")));
-		return;
+		get_agg_clause_costs(root, (Node *)root->processed_tlist,
+							 AGGSPLIT_SIMPLE, &agg_final_costs);
+		get_agg_clause_costs(root, parse->havingQual,
+							 AGGSPLIT_SIMPLE, &agg_final_costs);
 	}
+	/* GpuPreAgg does not support ordered aggregation */
+	if (agg_final_costs.numOrderedAggs > 0)
+		return NULL;
 
-	/* number of estimated groups */
+	/* Estimated number of groups */
 	if (!parse->groupClause)
 		num_groups = 1.0;
 	else
@@ -1048,33 +1051,8 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 		num_groups = pathnode->rows;
 	}
 
-	/* get cost of aggregations */
-	memset(&agg_final_costs, 0, sizeof(AggClauseCosts));
-	if (parse->hasAggs)
-	{
-		get_agg_clause_costs(root, (Node *)root->processed_tlist,
-							 AGGSPLIT_SIMPLE, &agg_final_costs);
-		get_agg_clause_costs(root, parse->havingQual,
-							 AGGSPLIT_SIMPLE, &agg_final_costs);
-	}
 
-	/* GpuPreAgg does not support ordered aggregation */
-	if (agg_final_costs.numOrderedAggs > 0)
-		return;
 
-	/* construction of the target-list for each level */
-	target_final = create_empty_pathtarget();
-	target_partial = create_empty_pathtarget();
-	target_device = create_empty_pathtarget();
-	input_path = input_rel->cheapest_total_path;
-	if (!gpupreagg_build_path_target(root,
-									 target_upper,
-									 target_final,
-									 target_partial,
-									 target_device,
-									 input_path->pathtarget,
-									 &havingQual))
-		return;
 
 	/*
 	 * construction of GpuPreAgg pathnode on top of the cheapest total
@@ -1086,7 +1064,7 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 								input_path,
 								num_groups);
 	if (!cpath)
-		return;
+		return NULL;
 
 	/* strategy of the final aggregation */
 	can_sort = grouping_is_sortable(parse->groupClause);
@@ -1108,10 +1086,9 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 											 (List *) havingQual,
 											 &agg_final_costs,
 											 num_groups);
-		add_path(group_rel, pgstrom_create_dummy_path(root,
-													  final_path,
-													  target_upper));
-		// TODO: make a parallel grouping path (nogroup) */
+		dummy_path = pgstrom_create_dummy_path(root,
+											   final_path,
+											   target_upper);
 	}
 	else
 	{
@@ -1152,7 +1129,7 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 					}
 				}
 				if (!found)
-					return;		/* give up */
+					return NULL;	/* give up */
 				final_path = (Path *)
 					create_groupingsets_path(root,
 											 group_rel,
@@ -1188,10 +1165,9 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 			else
 				elog(ERROR, "Bug? unexpected AGG/GROUP BY requirement");
 
-			add_path(group_rel, pgstrom_create_dummy_path(root,
-														  final_path,
-														  target_upper));
-			// TODO: make a parallel grouping path (sort) */
+			dummy_path = pgstrom_create_dummy_path(root,
+												   final_path,
+												   target_upper);
 		}
 
 		/* make a final grouping path (hash) */
@@ -1214,13 +1190,56 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 									(List *) havingQual,
 									&agg_final_costs,
 									num_groups);
-				add_path(group_rel, pgstrom_create_dummy_path(root,
-															  final_path,
-															  target_upper));
+				dummy_path = pgstrom_create_dummy_path(root,
+													   final_path,
+													   target_upper);
 			}
-			/* TODO: make a parallel grouping path (hash+gather) */
 		}
-	}	
+	}
+	return dummy_path;
+}
+
+/*
+ * gpupreagg_add_grouping_paths
+ *
+ * entrypoint to add grouping path by GpuPreAgg logic
+ */
+static void
+gpupreagg_add_grouping_paths(PlannerInfo *root,
+							 UpperRelationKind stage,
+							 RelOptInfo *input_rel,
+							 RelOptInfo *group_rel)
+{
+	Path	   *input_path;
+	Path	   *gpreagg_path;
+
+	if (create_upper_paths_next)
+		(*create_upper_paths_next)(root, stage, input_rel, group_rel);
+
+	if (stage != UPPERREL_GROUP_AGG)
+		return;
+
+	if (!pgstrom_enabled || !enable_gpupreagg)
+		return;
+
+	if (get_namespace_oid("pgstrom", true) == InvalidOid)
+	{
+		ereport(WARNING,
+				(errcode(ERRCODE_UNDEFINED_SCHEMA),
+				 errmsg("schema \"pgstrom\" was not found"),
+				 errhint("Run: CREATE EXTENSION pg_strom")));
+		return;
+	}
+
+	/* try to make a CPU sequential execution path */
+	input_path = input_rel->cheapest_total_path;
+	gpreagg_path = try_make_gpupreagg_path(root,
+										   group_rel,
+										   input_path);
+	if (gpreagg_path)
+		add_path(group_rel, gpreagg_path);
+
+
 }
 
 /*
