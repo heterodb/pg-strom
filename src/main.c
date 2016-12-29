@@ -227,32 +227,54 @@ pgstrom_dummy_create_plan(PlannerInfo *root,
 						  List *custom_plans)
 {
 	CustomScan *cscan = makeNode(CustomScan);
-	Plan	   *outer_plan;
-	ListCell   *lc1;
-	ListCell   *lc2;
 
 	Assert(list_length(custom_plans) == 1);
-	outer_plan = linitial(custom_plans);
-
-	/* sanity check - tlist format has to be compatible */
-	forboth (lc1, tlist,
-			 lc2, outer_plan->targetlist)
-	{
-		Expr   *expr_1 = ((TargetEntry *)lfirst(lc1))->expr;
-		Expr   *expr_2 = ((TargetEntry *)lfirst(lc2))->expr;
-
-		if (exprType((Node *)expr_1) != exprType((Node *)expr_2))
-			elog(ERROR, "Bug? tlist of CustomScan(Dummy) is not compatible");
-	}
 	cscan->scan.plan.parallel_aware = best_path->path.parallel_aware;
 	cscan->scan.plan.targetlist = tlist;
 	cscan->scan.plan.qual = NIL;
-	cscan->scan.plan.lefttree = outer_plan;
+	cscan->scan.plan.lefttree = linitial(custom_plans);
 	cscan->scan.scanrelid = 0;
 	cscan->custom_scan_tlist = tlist;
 	cscan->methods = &pgstrom_dummy_plan_methods;
 
 	return &cscan->scan.plan;
+}
+
+/*
+ * pgstrom_dummy_remove_plan
+ */
+static Plan *
+pgstrom_dummy_remove_plan(PlannedStmt *pstmt, CustomScan *cscan)
+{
+	Plan	   *subplan = outerPlan(cscan);
+	ListCell   *lc1;
+	ListCell   *lc2;
+
+	Assert(innerPlan(cscan) == NULL &&
+		   cscan->custom_plans == NIL);
+	Assert(list_length(cscan->scan.plan.targetlist) ==
+		   list_length(subplan->targetlist));
+	/*
+	 * Push down the resource name to subplan
+	 */
+	forboth (lc1, cscan->scan.plan.targetlist,
+			 lc2, subplan->targetlist)
+	{
+		TargetEntry	   *tle_1 = lfirst(lc1);
+		TargetEntry	   *tle_2 = lfirst(lc2);
+
+		if (tle_2->resname != NULL &&
+			(tle_1->resname == NULL ||
+			 strcmp(tle_1->resname, tle_2->resname) != 0))
+		{
+			elog(INFO, "attribute %d of subplan: [%s] is over-written by [%s]",
+				 tle_2->resno,
+				 tle_2->resname,
+				 tle_1->resname);
+		}
+		tle_2->resname = tle_1->resname;
+	}
+	return outerPlan(cscan);
 }
 
 /*
@@ -333,13 +355,7 @@ pgstrom_post_planner_recurse(PlannedStmt *pstmt, Plan **p_plan)
 
 				if (cscan->methods == &pgstrom_dummy_plan_methods)
 				{
-					Assert(outerPlan(cscan) != NULL &&
-						   innerPlan(cscan) == NULL &&
-						   cscan->custom_plans == NIL);
-					/*
-					 * remove this 'dummy' custom scan from the plan tree
-					 */
-					*p_plan = outerPlan(cscan);
+					*p_plan = pgstrom_dummy_remove_plan(pstmt, cscan);
 					pgstrom_post_planner_recurse(pstmt, p_plan);
 					return;
 				}
