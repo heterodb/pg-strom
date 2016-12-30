@@ -3361,7 +3361,9 @@ ExecGpuPreAgg(CustomScanState *node)
 static void
 ExecEndGpuPreAgg(CustomScanState *node)
 {
-	GpuPreAggState	   *gpas = (GpuPreAggState *) node;
+	GpuPreAggState *gpas = (GpuPreAggState *) node;
+	GpuPreAggSharedState *gpa_sstate = gpas->gpa_sstate;
+	Instrumentation	   *outer_instrument = &gpas->gts.outer_instrument;
 
 	if (gpas->num_fallback_rows > 0)
 		elog(WARNING, "GpuPreAgg processed %lu rows by CPU fallback",
@@ -3370,6 +3372,22 @@ ExecEndGpuPreAgg(CustomScanState *node)
 	/* clean up subtree, if any */
 	if (outerPlanState(node))
 		ExecEndNode(outerPlanState(node));
+
+	/*
+	 * contents of outer_instrument shall be written back to the master
+	 * backend using shared profile structure later.
+	 * However, number of valid rows (which means rows used for reduction
+	 * steps) and filtered rows are not correctly tracked because we cannot
+	 * know exact number of rows on the scan time if BLOCK format.
+	 * So, we need to update the outer_instrument based on GpuPreAgg specific
+	 * knowledge.
+	 */
+	outer_instrument->tuplecount = 0;
+	outer_instrument->ntuples = gpa_sstate->exec_nrows_in;
+	outer_instrument->nfiltered1 = gpa_sstate->exec_nrows_filtered;
+	outer_instrument->nfiltered2 = 0;
+	outer_instrument->nloops = 1;
+
 	/* release the shared status */
 	put_gpupreagg_shared_state(gpas->gpa_sstate);
 	/* release any other resources */

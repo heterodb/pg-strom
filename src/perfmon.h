@@ -27,6 +27,8 @@ typedef struct {
 	GpuTaskKind		task_kind;
 	/*-- lock of the performance counter below --*/
 	slock_t			lock;
+	/*-- parallel outer scan if pull-up --*/
+	Instrumentation	outer_instrument;
 	/*-- memory allocation counter --*/
 	cl_uint			num_dmabuf_alloc;
 	cl_uint			num_dmabuf_free;

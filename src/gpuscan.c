@@ -1872,6 +1872,9 @@ ExecEndGpuScan(CustomScanState *node)
 {
 	GpuScanState	   *gss = (GpuScanState *)node;
 
+	/* inform status of GpuScan to the master backend */
+    gss->gts.outer_instrument.nloops = 1;
+
 	/* reset fallback resources */
 	if (gss->base_slot)
 		ExecDropSingleTupleTableSlot(gss->base_slot);
@@ -1917,20 +1920,24 @@ ExecGpuScanInitDSM(CustomScanState *node,
 	EState		   *estate = node->ss.ps.state;
 	GpuScanParallelDSM *gpdsm = coordinate;
 
-	if (!gss->gts.pfm.enabled)
-		gss->gts.pfm_master = NULL;
-	else
-	{
-		gss->gts.pfm_master = dmaBufferAlloc(gss->gts.gcontext,
-											 sizeof(pgstrom_perfmon));
-		if (!gss->gts.pfm_master)
-			elog(ERROR, "out of shared memory");
-		memset(gss->gts.pfm_master, 0, sizeof(pgstrom_perfmon));
-		memcpy(gss->gts.pfm_master, &gss->gts.pfm,
-			   offsetof(pgstrom_perfmon, lock));
-		SpinLockInit(&gss->gts.pfm_master->lock);
-	}
+	/*
+	 * setup of shared performance counter
+	 *
+	 * NOTE: DSM segment shall be released prior to the ExecEnd callback,
+	 * so we have to allocate another shared memory segment at v9.6.
+	 */
+	gss->gts.pfm_master = dmaBufferAlloc(gss->gts.gcontext,
+										 sizeof(pgstrom_perfmon));
+	if (!gss->gts.pfm_master)
+		elog(ERROR, "out of shared memory");
+	memset(gss->gts.pfm_master, 0, sizeof(pgstrom_perfmon));
+	memcpy(gss->gts.pfm_master, &gss->gts.pfm,
+		   offsetof(pgstrom_perfmon, lock));
+	SpinLockInit(&gss->gts.pfm_master->lock);
+	InstrInit(&gss->gts.pfm_master->outer_instrument, INSTRUMENT_BUFFERS);
 	gpdsm->pfm_master = gss->gts.pfm_master;
+
+	/* setup of parallel scan descriptor */
 	heap_parallelscan_initialize(&gpdsm->pscan,
 								 gss->gts.css.ss.ss_currentRelation,
 								 estate->es_snapshot);
@@ -1952,7 +1959,7 @@ ExecGpuScanInitWorker(CustomScanState *node,
 	GpuScanState   *gss = (GpuScanState *) node;
 	GpuScanParallelDSM *gpdsm = coordinate;
 
-	gss->gts.pfm_master = (gss->gts.pfm.enabled ? gpdsm->pfm_master : NULL);
+	gss->gts.pfm_master = gpdsm->pfm_master;
 	node->ss.ss_currentScanDesc =
 		heap_beginscan_parallel(gss->gts.css.ss.ss_currentRelation,
 								&gpdsm->pscan);
@@ -2006,9 +2013,18 @@ ExplainGpuScan(CustomScanState *node, List *ancestors, ExplainState *es)
 									 es->verbose, false);
 		ExplainPropertyText("GPU Filter", exprstr, es);
 
+		/* pick up number of filtered rows */
+		if (gss->gts.pfm_master)
+		{
+			SpinLockAcquire(&gss->gts.pfm_master->lock);
+			InstrAggNode(&gss->gts.outer_instrument,
+						 &gss->gts.pfm_master->outer_instrument);
+			SpinLockRelease(&gss->gts.pfm_master->lock);
+		}
 		if (gss->gts.outer_instrument.nfiltered1 > 0.0)
 			ExplainPropertyFloat("Rows Removed by GPU Filter",
-								 gss->gts.outer_instrument.nfiltered1,
+								 gss->gts.outer_instrument.nfiltered1 /
+								 (gss->gts.outer_instrument.nloops + 1),
 								 0, es);
 	}
 	/* common portion of EXPLAIN */
