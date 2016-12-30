@@ -61,7 +61,10 @@ typedef struct
 	double			plan_ngroups;	/* planned number of groups */
 	cl_int			plan_nchunks;	/* planned number of chunks */
 	cl_int			plan_extra_sz;	/* planned size of extra-sz per tuple */
+	Cost			outer_startup_cost; /* copy of @startup_cost in outer */
+	Cost			outer_total_cost; /* copy of @total_cost in outer path */
 	double			outer_nrows;	/* number of estimated outer nrows */
+	int				outer_width;	/* copy of @plan_width in outer path */
 	Index			outer_scanrelid;/* RTI, if outer path pulled up */
 	List		   *outer_quals;	/* device executable quals of outer-scan */
 	char		   *kern_source;
@@ -79,7 +82,12 @@ form_gpupreagg_info(CustomScan *cscan, GpuPreAggInfo *gpa_info)
 	privs = lappend(privs, makeFloat(psprintf("%f", gpa_info->plan_ngroups)));
 	privs = lappend(privs, makeInteger(gpa_info->plan_nchunks));
 	privs = lappend(privs, makeInteger(gpa_info->plan_extra_sz));
+	privs = lappend(privs,
+					makeFloat(psprintf("%f", gpa_info->outer_startup_cost)));
+	privs = lappend(privs,
+					makeFloat(psprintf("%f", gpa_info->outer_total_cost)));
 	privs = lappend(privs, makeFloat(psprintf("%f", gpa_info->outer_nrows)));
+	privs = lappend(privs, makeInteger(gpa_info->outer_width));
 	privs = lappend(privs, makeInteger(gpa_info->outer_scanrelid));
 	exprs = lappend(exprs, gpa_info->outer_quals);
 	privs = lappend(privs, makeString(gpa_info->kern_source));
@@ -103,7 +111,10 @@ deform_gpupreagg_info(CustomScan *cscan)
 	gpa_info->plan_ngroups = floatVal(list_nth(privs, pindex++));
 	gpa_info->plan_nchunks = intVal(list_nth(privs, pindex++));
 	gpa_info->plan_extra_sz = intVal(list_nth(privs, pindex++));
+	gpa_info->outer_startup_cost = floatVal(list_nth(privs, pindex++));
+	gpa_info->outer_total_cost = floatVal(list_nth(privs, pindex++));
 	gpa_info->outer_nrows = floatVal(list_nth(privs, pindex++));
+	gpa_info->outer_width = intVal(list_nth(privs, pindex++));
 	gpa_info->outer_scanrelid = intVal(list_nth(privs, pindex++));
 	gpa_info->outer_quals = list_nth(exprs, eindex++);
 	gpa_info->kern_source = strVal(list_nth(privs, pindex++));
@@ -891,7 +902,10 @@ cost_gpupreagg(PlannerInfo *root,
 	gpa_info->plan_ngroups		= num_groups;
 	gpa_info->plan_nchunks		= estimate_num_chunks(input_path);
 	gpa_info->plan_extra_sz		= extra_sz;
+	gpa_info->outer_startup_cost= input_path->startup_cost;
+	gpa_info->outer_total_cost	= input_path->total_cost;;
 	gpa_info->outer_nrows		= input_ntuples;
+	gpa_info->outer_width		= input_path->pathtarget->width;
 
 	return true;
 }
@@ -2086,39 +2100,6 @@ PlanGpuPreAggPath(PlannerInfo *root,
 }
 
 /*
- * fixup_outer_quals_to_original
- *
- * Var nodes in @outer_quals were transformed to INDEX_VAR + resno form
- * through the planner stage, however, executor assumes @outer_quals shall
- * be executed towards the raw-tuple fetched from the outer relation.
- * So, we have to adjust its varno/varattno
- */
-static Node *
-fixup_outer_quals_to_original(Node *node, List *custom_scan_tlist)
-{
-	if (!node)
-		return NULL;
-	if (IsA(node, Var))
-	{
-		TargetEntry *tle;
-		Var	   *varnode = (Var *) node;
-
-		Assert(varnode->varno == INDEX_VAR &&
-			   varnode->varattno > 0 &&
-			   varnode->varattno <= list_length(custom_scan_tlist));
-		tle = list_nth(custom_scan_tlist, varnode->varattno - 1);
-		if (!IsA(tle->expr, Var))
-			elog(WARNING,
-				 "Bug? varnode of outer-quals references an expression: %s",
-				 nodeToString(tle->expr));
-		return (Node *)copyObject(tle->expr);
-	}
-	return expression_tree_mutator(node,
-								   fixup_outer_quals_to_original,
-								   (void *)custom_scan_tlist);
-}
-
-/*
  * pgstrom_plan_is_gpupreagg - returns true if GpuPreAgg
  */
 bool
@@ -3292,13 +3273,10 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
     }
     else
     {
-		Node	   *original;
-
 		Assert(scan_rel != NULL);
-		original = fixup_outer_quals_to_original((Node *)gpa_info->outer_quals,
-												 tlist_dev);
 		gpas->outer_quals = (List *)
-			ExecInitExpr((Expr *)original, &gpas->gts.css.ss.ps);
+			ExecInitExpr((Expr *)gpa_info->outer_quals,
+						 &gpas->gts.css.ss.ps);
 		outer_tupdesc = RelationGetDescr(scan_rel);
 	}
 
@@ -3538,17 +3516,12 @@ ExplainGpuPreAgg(CustomScanState *node, List *ancestors, ExplainState *es)
 	}
 
 	/* statistics for outer scan, if it was pulled-up */
-	//pgstrom_explain_outer_bulkexec(&gpas->gts, context, ancestors, es);
-
-	/* outer scan filter if any */
-	if (gpa_info->outer_quals != NIL)
-	{
-		Node	   *outer_quals
-			= (Node *) make_ands_explicit(gpa_info->outer_quals);
-		exprstr = deparse_expression(outer_quals, dcontext,
-									 es->verbose, false);
-		ExplainPropertyText("GPU Filter", exprstr, es);
-	}
+	pgstromExplainOuterScan(&gpas->gts, dcontext, ancestors, es,
+							gpa_info->outer_quals,
+							gpa_info->outer_startup_cost,
+							gpa_info->outer_total_cost,
+							gpa_info->outer_nrows,
+							gpa_info->outer_width);
 	/* other common fields */
 	pgstromExplainGpuTaskState(&gpas->gts, es);
 }

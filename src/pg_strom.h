@@ -180,7 +180,11 @@ struct GpuTaskState_v2
 	bool			row_format;		/* True, if KDS_FORMAT_ROW is required */
 
 	/* fields for outer scan */
-	bool			outer_bulk_exec;/* True, if it scans outer by bulk-exec */
+	bool			outer_bulk_exec;/* True, if bulk-exec mode is supported */
+	Cost			outer_startup_cost;	/* copy from the outer path node */
+	Cost			outer_total_cost;	/* copy from the outer path node */
+	double			outer_plan_rows;	/* copy from the outer path node */
+	int				outer_plan_width;	/* copy from the outer path node */
 	Instrumentation	outer_instrument; /* runtime statistics, if any */
 	TupleTableSlot *scan_overflow;	/* temporary buffer, if no space on PDS */
 	struct NVMEScanState *nvme_sstate;/* A state object for NVMe-Strom.
@@ -488,11 +492,15 @@ extern void pgstromRescanGpuTaskState(GpuTaskState_v2 *gts);
 extern void pgstromReleaseGpuTaskState(GpuTaskState_v2 *gts);
 extern void pgstromExplainGpuTaskState(GpuTaskState_v2 *gts,
 									   ExplainState *es);
-extern void pgstromExplainOuterBulkExec(GpuTaskState_v2 *gts,
-										List *deparse_context,
-										List *ancestors,
-										ExplainState *es);
-
+extern void pgstromExplainOuterScan(GpuTaskState_v2 *gts,
+									List *deparse_context,
+									List *ancestors,
+									ExplainState *es,
+									List *outer_quals,
+									Cost outer_startup_cost,
+									Cost outer_total_cost,
+									double outer_plan_rows,
+									int outer_plan_width);
 
 extern void pgstromInitGpuTask(GpuTaskState_v2 *gts, GpuTask_v2 *gtask);
 extern int	pgstromProcessGpuTask(GpuTask_v2 *gtask,
