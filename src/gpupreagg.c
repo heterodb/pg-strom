@@ -163,12 +163,14 @@ typedef struct
 	cl_uint				n_tasks_global;	/* num of global reduction tasks */
 	cl_uint				n_tasks_final;	/* num of final reduction tasks */
 	cl_uint				plan_nrows_per_chunk; /* planned nrows/chunk */
-	size_t				plan_nrows_in;	/* num of outer nrows planned */
-	size_t				exec_nrows_in;	/* num of outer nrows actually */
+	size_t				plan_nrows_in;	/* num of outer rows planned */
+	size_t				exec_nrows_in;	/* num of outer rows actually */
 	size_t				plan_ngroups;	/* num of groups planned */
 	size_t				exec_ngroups;	/* num of groups actually */
 	size_t				plan_extra_sz;	/* size of varlena planned */
 	size_t				exec_extra_sz;	/* size of varlena actually */
+	size_t				exec_nrows_filtered; /* num of outer rows filtered by
+											  * outer quals if any */
 } GpuPreAggSharedState;
 
 typedef struct
@@ -799,23 +801,49 @@ cost_gpupreagg(PlannerInfo *root,
 			   Path *input_path,
 			   double num_groups)
 {
-	double		input_ntuples = input_path->rows;
-	double		output_ntuples;
-	Cost		startup_cost = input_path->total_cost;
-	Cost		run_cost = 0.0;
+	double		gpu_cpu_ratio = pgstrom_gpu_operator_cost / cpu_operator_cost;
+	double		ntuples_out;
+	Cost		startup_cost;
+	Cost		run_cost;
 	QualCost	qual_cost;
 	int			num_group_keys = 0;
 	Size		extra_sz = 0;
 	Size		kds_length;
-	double		gpu_cpu_ratio;
 	cl_uint		ncols;
 	cl_uint		nrooms;
 	cl_int		key_dist_salt;
 	cl_int		index;
 	ListCell   *lc;
 
-	/* Fixed cost to setup/launch GPU kernel */
-	startup_cost += pgstrom_gpu_setup_cost;
+	/* Cost come from the underlying path */
+	if (gpa_info->outer_scanrelid == 0)
+	{
+		gpa_info->outer_startup_cost= input_path->startup_cost;
+		gpa_info->outer_total_cost	= input_path->total_cost;;
+
+		startup_cost = input_path->total_cost + pgstrom_gpu_setup_cost;
+		run_cost = 0.0;
+	}
+	else
+	{
+		double		ntuples;
+		double		nchunks;
+
+		cost_gpuscan_common(root,
+							input_path,
+							gpa_info->outer_quals,
+							&ntuples,
+							&nchunks,
+							&startup_cost,
+							&run_cost);
+		gpa_info->outer_startup_cost = startup_cost;
+		gpa_info->outer_total_cost	= startup_cost + run_cost;
+
+		startup_cost += run_cost;
+		run_cost = 0.0;
+	}
+	gpa_info->outer_nrows		= input_path->rows;
+	gpa_info->outer_width		= input_path->pathtarget->width;
 
 	/*
 	 * Estimation of the result buffer. It must fit to the target GPU device
@@ -860,7 +888,7 @@ cost_gpupreagg(PlannerInfo *root,
 	}
 	else
 		key_dist_salt = 1;
-	output_ntuples = num_groups * (double)key_dist_salt;
+	ntuples_out = num_groups * (double)key_dist_salt;
 
 	ncols = list_length(target_device->exprs);
 	nrooms = (cl_uint)(2.5 * num_groups * (double)key_dist_salt);
@@ -871,30 +899,25 @@ cost_gpupreagg(PlannerInfo *root,
 	if (kds_length > gpuMemMaxAllocSize())
 		return false;	/* expected buffer size is too large */
 
-
-	/* Cost estimation to setup initial values */
-	gpu_cpu_ratio = pgstrom_gpu_operator_cost / cpu_operator_cost;
-	startup_cost += (qual_cost.startup +
-					 qual_cost.per_tuple * input_ntuples) * gpu_cpu_ratio;
+	/* Cost estimation for the initial projection */
+	cost_qual_eval(&qual_cost, target_device->exprs, root);
+	startup_cost += (target_device->cost.per_tuple * input_path->rows +
+					 target_device->cost.startup) * gpu_cpu_ratio;
 	/* Cost estimation for grouping */
-	startup_cost += pgstrom_gpu_operator_cost * num_group_keys * input_ntuples;
+	startup_cost += (pgstrom_gpu_operator_cost *
+					 num_group_keys *
+					 input_path->rows);
 	/* Cost estimation for aggregate function */
-	startup_cost += (target_partial->cost.startup +
-					 target_partial->cost.per_tuple *
-					 gpu_cpu_ratio * input_ntuples);
+	startup_cost += (target_device->cost.per_tuple * input_path->rows +
+					 target_device->cost.startup) * gpu_cpu_ratio;
 	/* Cost estimation for host side functions */
-	foreach (lc, target_partial->exprs)
-	{
-		Expr   *expr = lfirst(lc);
+	startup_cost += target_partial->cost.startup;
+	run_cost += target_partial->cost.per_tuple * ntuples_out;
 
-		cost_qual_eval_node(&qual_cost, (Node *)expr, root);
-		startup_cost += qual_cost.startup;
-		run_cost += qual_cost.per_tuple * output_ntuples;
-	}
 	/* Cost estimation to fetch results */
-	run_cost += cpu_tuple_cost * output_ntuples;
+	run_cost += cpu_tuple_cost * ntuples_out;
 
-	cpath->path.rows			= output_ntuples;
+	cpath->path.rows			= ntuples_out;
 	cpath->path.startup_cost	= startup_cost;
 	cpath->path.total_cost		= startup_cost + run_cost;
 
@@ -902,10 +925,6 @@ cost_gpupreagg(PlannerInfo *root,
 	gpa_info->plan_ngroups		= num_groups;
 	gpa_info->plan_nchunks		= estimate_num_chunks(input_path);
 	gpa_info->plan_extra_sz		= extra_sz;
-	gpa_info->outer_startup_cost= input_path->startup_cost;
-	gpa_info->outer_total_cost	= input_path->total_cost;;
-	gpa_info->outer_nrows		= input_ntuples;
-	gpa_info->outer_width		= input_path->pathtarget->width;
 
 	return true;
 }
@@ -955,6 +974,13 @@ make_gpupreagg_path(PlannerInfo *root,
 	if (num_groups < 1.0 || num_groups > (double)INT_MAX)
 		return NULL;
 
+	/* Try to pull up input_path if simple relation scan */
+	if (!pgstrom_pullup_outer_scan(input_path,
+								   &gpa_info->outer_scanrelid,
+								   &gpa_info->outer_quals,
+								   &parallel_aware))
+		custom_paths = list_make1(input_path);
+
 	/* cost estimation */
 	if (!cost_gpupreagg(root, cpath, gpa_info,
 						target_partial, target_device,
@@ -963,15 +989,6 @@ make_gpupreagg_path(PlannerInfo *root,
 		pfree(cpath);
 		return NULL;
 	}
-
-	/*
-	 * Try to pull up input_path if it is enough simple scan.
-	 */
-	if (!pgstrom_pullup_outer_scan(input_path,
-								   &gpa_info->outer_scanrelid,
-								   &gpa_info->outer_quals,
-								   &parallel_aware))
-		custom_paths = list_make1(input_path);
 
 	/* Setup CustomPath */
 	cpath->path.pathtype = T_CustomScan;
@@ -3516,6 +3533,9 @@ ExplainGpuPreAgg(CustomScanState *node, List *ancestors, ExplainState *es)
 	}
 
 	/* statistics for outer scan, if it was pulled-up */
+	gpas->gts.outer_instrument.tuplecount = gpa_sstate->exec_nrows_in;
+	gpas->gts.outer_instrument.nfiltered1 = gpa_sstate->exec_nrows_filtered;
+
 	pgstromExplainOuterScan(&gpas->gts, dcontext, ancestors, es,
 							gpa_info->outer_quals,
 							gpa_info->outer_startup_cost,
@@ -4292,7 +4312,9 @@ gpupreagg_respond_task(CUstream stream, CUresult status, void *private)
 	if (status == CUDA_SUCCESS)
 	{
 		gpreagg->task.kerror = gpreagg->kern.kerror;
-		if (gpreagg->task.kerror.errcode == StromError_Success)
+		if (gpreagg->task.kerror.errcode != StromError_Success)
+			is_urgent = true;	/* something error happen */
+		else if (gpreagg->kern.reduction_mode != GPUPREAGG_ONLY_TERMINATION)
 		{
 			GpuPreAggSharedState *gpa_sstate = gpreagg->gpa_sstate;
 
@@ -4304,10 +4326,9 @@ gpupreagg_respond_task(CUstream stream, CUresult status, void *private)
 										   gpa_sstate->f_nitems);
 			gpa_sstate->exec_extra_sz = Max(gpa_sstate->exec_extra_sz,
 											gpa_sstate->f_extra_sz);
+			gpa_sstate->exec_nrows_filtered += gpreagg->kern.nitems_filtered;
 			SpinLockRelease(&gpa_sstate->lock);
 		}
-		else
-			is_urgent = true;	/* something error */
 	}
 	else
 	{

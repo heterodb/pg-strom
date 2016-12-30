@@ -36,6 +36,7 @@
  */
 typedef struct {
 	kern_errorbuf	kerror;
+	cl_uint			nitems_filtered;	/* out: # of rows filtered */
 	/* performance profile */
 	struct {
 		cl_float	tv_kern_exec_quals;
@@ -227,7 +228,8 @@ gpuscan_exec_quals_block(kern_parambuf *kparams,
 						 kern_resultbuf *kresults,
 						 kern_data_store *kds_src,
 						 kern_arg_t window_base,
-						 kern_arg_t window_size)
+						 kern_arg_t window_size,
+						 unsigned int *p_nitems_filtered) /* optional */
 {
 	kern_context		kcxt;
 	cl_uint				part_id;	/* partition index */
@@ -329,6 +331,15 @@ gpuscan_exec_quals_block(kern_parambuf *kparams,
 		}
 		__syncthreads();
 
+		/* count number of filtered rows */
+		if (p_nitems_filtered)
+		{
+			pgstromStairlikeSum(htup && !rc ? 1 : 0, &count);
+			if (get_local_id() == 0)
+				atomicAdd(p_nitems_filtered, count);
+			__syncthreads();
+		}
+
 		/*
 		 * Move to the next line item. If no threads in CUDA block wants to
 		 * continue scan any more, we soon exit the loop.
@@ -356,10 +367,11 @@ gpuscan_exec_quals_row(kern_parambuf *kparams,
 					   kern_resultbuf *kresults,
 					   kern_data_store *kds_src,
 					   kern_arg_t window_base,
-					   kern_arg_t window_size)
+					   kern_arg_t window_size,
+					   unsigned int *p_nitems_filtered)	/* optional */
 {
 	kern_context	kcxt;
-	kern_tupitem   *tupitem = NULL;
+	kern_tupitem   *tupitem;
 	cl_bool			rc;
 	cl_uint			offset;
 	cl_uint			count;
@@ -382,6 +394,7 @@ gpuscan_exec_quals_row(kern_parambuf *kparams,
 	}
 	else
 	{
+		tupitem = NULL;
 		rc = false;
 	}
 
@@ -406,6 +419,15 @@ gpuscan_exec_quals_row(kern_parambuf *kparams,
 		}
 	}
 	__syncthreads();
+
+	if (p_nitems_filtered)
+	{
+		/* count number of filtered rows */
+		pgstromStairlikeSum(tupitem && !rc ? 1 : 0, &count);
+		if (get_local_id() == 0)
+			atomicAdd(p_nitems_filtered, count);
+		__syncthreads();
+	}
 out:
 	/* write back error status if any */
 	kern_writeback_error_status(&kresults->kerror, kcxt.e);
@@ -738,6 +760,7 @@ gpuscan_main(kern_gpuscan *kgpuscan,
 		kernel_args[2] = kds_src;
 		kernel_args[3] = (void *)(0);				/* window_base */
 		kernel_args[4] = (void *)(kds_src->nitems);	/* window_size */
+		kernel_args[5] = &kgpuscan->nitems_filtered;
 
 		status = cudaLaunchDevice(kernel_func,
 								  kernel_args,

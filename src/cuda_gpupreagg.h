@@ -55,7 +55,8 @@ typedef struct
 	cl_bool			final_reduction_in_progress;
 
 	/* -- runtime statistics -- */
-	cl_uint			nitems_real;		/* out: # of outer nrows */
+	cl_uint			nitems_real;		/* out: # of outer input rows */
+	cl_uint			nitems_filtered;	/* out: # of removed rows by quals */
 	cl_uint			num_conflicts;		/* only used in kernel space */
 	cl_uint			num_groups;			/* out: # of new groups */
 	cl_uint			varlena_usage;		/* out: size of varlena usage */
@@ -1651,21 +1652,24 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 		kern_function = (void *)gpuscan_exec_quals_block;
 		num_threads = kds_src->nitems * kds_src->nrows_per_block;
 	}
-	status = pgstromLaunchDynamicKernel5(kern_function,
-										 (kern_arg_t)(kparams),
-										 (kern_arg_t)(kresults_src),
-										 (kern_arg_t)(kds_src),
-										 (kern_arg_t)(0),
-										 (kern_arg_t)(kds_src->nitems),
-										 num_threads,
-										 0,
-										 sizeof(cl_uint));
+	status = pgstromLaunchDynamicKernel6(
+				kern_function,	/* gpuscan_exec_quals_XXX */
+				(kern_arg_t)(kparams),
+				(kern_arg_t)(kresults_src),
+				(kern_arg_t)(kds_src),
+				(kern_arg_t)(0),
+				(kern_arg_t)(kds_src->nitems),
+				(kern_arg_t)(&kgpreagg->nitems_filtered),
+				num_threads,
+				0,
+		sizeof(cl_uint));
 	if (status != cudaSuccess)
 	{
 		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
 		goto out;
 	}
 	num_threads = kresults_src->nitems;
+	kgpreagg->nitems_real = kresults_src->nitems;
 #else
 	/*
 	 * Elsewhere, we can assume KDS_FORMAT_ROW, and all the input rows are
@@ -1674,6 +1678,9 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 	assert(kds_src->format == KDS_FORMAT_ROW);
 	kresults_src->all_visible = true;
 	num_threads = kds_src->nitems;
+
+	kgpreagg->nitems_real = kds_src->nitems;
+	kgpreagg->nitems_filtered = 0;
 #endif
 
 	/* Launch:

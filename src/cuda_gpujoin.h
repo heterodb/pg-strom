@@ -84,6 +84,7 @@ typedef struct
 	/* number of inner relations */
 	cl_uint			num_rels;
 	/* error status to be backed (OUT) */
+	cl_uint			nitems_filtered;
 	kern_errorbuf	kerror;
 	/* performance profiler */
 	struct {
@@ -1510,7 +1511,7 @@ retry_major:
 				/* call the gpuscan_exec_quals_XXXX */
 				kern_args = (void **)
 					cudaGetParameterBuffer(sizeof(void *),
-										   sizeof(void *) * 5);
+										   sizeof(void *) * 6);
 				if (!kern_args)
 				{
 					STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelArgs);
@@ -1521,6 +1522,7 @@ retry_major:
 				kern_args[2] = kds_src;
 				kern_args[3] = (void *)(window_base);
 				kern_args[4] = (void *)(window_size);
+				kern_args[5] = &kgjoin->nitems_filtered;
 
 				status = cudaLaunchDevice((void *)kernel_func, kern_args,
 										  grid_sz, block_sz,

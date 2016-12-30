@@ -280,35 +280,37 @@ cost_discount_gpu_projection(PlannerInfo *root, RelOptInfo *rel,
 }
 
 /*
- * cost_gpuscan_path - calculation of the GpuScan path cost
+ * cost_gpuscan_common - common part of cost estimation for GpuScan
+ * 
+ * Once a simple scan path is pulled up to upper node, this node takes over
+ * the jobs of relation scan and execution of outer qualifiers instead of
+ * execution of GpuScan node. So, its cost needs to be added to the upper
+ * node.
  */
-static void
-cost_gpuscan_path(PlannerInfo *root, CustomPath *cpath,
-				  List *dev_quals, List *host_quals,
-				  Cost discount_per_tuple)
+void
+cost_gpuscan_common(PlannerInfo *root,
+					Path *scan_path,
+					List *scan_quals,
+					double *p_scan_ntuples,
+					double *p_scan_nchunks,
+					Cost *p_startup_cost,
+					Cost *p_run_cost)
 {
-	RelOptInfo	   *baserel = cpath->path.parent;
-	ParamPathInfo  *param_info = cpath->path.param_info;
-	List		   *ppi_quals = param_info ? param_info->ppi_clauses : NIL;
+	RelOptInfo	   *baserel = scan_path->parent;
 	Cost			startup_cost = pgstrom_gpu_setup_cost;
 	Cost			run_cost = 0.0;
-	Cost			startup_delay = 0.0;
-	Cost			cpu_per_tuple = 0.0;
-	double			selectivity;
-	double			heap_size;
-	Size			htup_size;
-	Size			num_chunks;
-	QualCost		qcost;
-	double			spc_seq_page_cost;
-	double			ntuples = baserel->tuples;
 	double			gpu_ratio = pgstrom_gpu_operator_cost / cpu_operator_cost;
+	double			ntuples = baserel->tuples;
+	double			nchunks;
+	double			selectivity;
+	double			spc_seq_page_cost;
+	Size			heap_size;
+	Size			htup_size;
+	QualCost		qcost;
 
-	cpath->path.rows = (param_info
-						? param_info->ppi_rows
-						: baserel->rows);
-	/* estimate selectivity */
+	/* selectivity of device executable qualifiers */
 	selectivity = clauselist_selectivity(root,
-										 dev_quals,
+										 scan_quals,
 										 baserel->relid,
 										 JOIN_INNER,
 										 NULL);
@@ -316,26 +318,29 @@ cost_gpuscan_path(PlannerInfo *root, CustomPath *cpath,
 	/* fetch estimated page cost for tablespace containing the table */
 	get_tablespace_page_costs(baserel->reltablespace,
 							  NULL, &spc_seq_page_cost);
-	/* Disk costs */
+	/*
+	 * Disk i/o cost; we may add special treatment for NVMe-Strom.
+	 * On the other hands, planner usually choose PG-Strom's path
+	 * for large scale of data.
+	 */
 	run_cost += spc_seq_page_cost * (double)baserel->pages;
 
 	/*
-	 * Adjust costing for parallelism, if used.
+	 * Cost adjustment by CPU parallelism, if used.
 	 * (overall logic is equivalent to cost_seqscan())
 	 */
-	if (cpath->path.parallel_workers > 0)
+	if (scan_path->parallel_workers > 0)
 	{
-		double		parallel_divisor = cpath->path.parallel_workers;
+		double		parallel_divisor = scan_path->parallel_workers;
 		double		leader_contribution;
 
 		/* How much leader process can contribute query execution? */
-		leader_contribution = 1.0 - (0.3 * cpath->path.parallel_workers);
+		leader_contribution = 1.0 - (0.3 * scan_path->parallel_workers);
 		if (leader_contribution > 0)
 			parallel_divisor += leader_contribution;
 
-		/* number of tuples to be processed by this GpuScan */
-		cpath->path.rows = clamp_row_est(cpath->path.rows / parallel_divisor);
-		ntuples /= parallel_divisor;
+		/* number of tuples to be actually processed */
+		ntuples  = clamp_row_est(ntuples / parallel_divisor);
 	}
 
 	/* estimation for number of chunks (assume KDS_FORMAT_ROW) */
@@ -344,42 +349,25 @@ cost_gpuscan_path(PlannerInfo *root, CustomPath *cpath,
 								   t_bits[BITMAPLEN(baserel->max_attr)])) +
 				 MAXALIGN(heap_size / Max(baserel->tuples, 1.0) -
 						  sizeof(ItemIdData) - SizeofHeapTupleHeader));
-	num_chunks = (Size)
-		(((double)(offsetof(kern_tupitem, htup) + htup_size +
-				   sizeof(cl_uint)) * Max(ntuples, 1.0)) /
-		 ((double)(pgstrom_chunk_size() -
-				   KDS_CALCULATE_HEAD_LENGTH(baserel->max_attr))));
-	num_chunks = Max(num_chunks, 1);
+	nchunks =  (((double)(offsetof(kern_tupitem, htup) + htup_size +
+						  sizeof(cl_uint)) * Max(ntuples, 1.0)) /
+				((double)(pgstrom_chunk_size() -
+						  KDS_CALCULATE_HEAD_LENGTH(baserel->max_attr))));
+	nchunks = Max(nchunks, 1);
 
 	/* Cost for GPU qualifiers */
-	cost_qual_eval(&qcost, dev_quals, root);
+	cost_qual_eval(&qcost, scan_quals, root);
 	startup_cost += qcost.startup;
 	run_cost += qcost.per_tuple * gpu_ratio * ntuples;
 	ntuples *= selectivity;
 
-	/* Cost for CPU qualifiers */
-	cost_qual_eval(&qcost, host_quals, root);
-	startup_cost += qcost.startup;
-	cpu_per_tuple += qcost.per_tuple;
-
-	/* PPI costs (as a part of host quals, if any) */
-	cost_qual_eval(&qcost, ppi_quals, root);
-	startup_cost += qcost.startup;
-	cpu_per_tuple += qcost.per_tuple;
-
-	run_cost += (cpu_per_tuple + cpu_tuple_cost) * cpath->path.rows;
-
 	/* Cost for DMA transfer */
-	run_cost += pgstrom_gpu_dma_cost * (double) num_chunks;
+	run_cost += pgstrom_gpu_dma_cost * nchunks;
 
-	/* Cost discount by GPU Projection */
-	run_cost = Max(run_cost - discount_per_tuple * ntuples, 0.0);
-
-	/* Latency to get the first chunk */
-	startup_delay = run_cost * (1.0 / (double) num_chunks);
-
-	cpath->path.startup_cost = startup_cost + startup_delay;
-	cpath->path.total_cost = startup_cost + run_cost;
+	*p_scan_ntuples = ntuples;
+	*p_scan_nchunks = nchunks;
+	*p_startup_cost = startup_cost;
+	*p_run_cost = run_cost;
 }
 
 /*
@@ -394,13 +382,22 @@ create_gpuscan_path(PlannerInfo *root,
 					int parallel_nworkers)
 {
 	CustomPath	   *cpath = makeNode(CustomPath);
+	ParamPathInfo  *param_info;
+	List		   *ppi_quals;
+	Cost			startup_cost;
+	Cost			run_cost;
+	Cost			startup_delay;
+	QualCost		qcost;
+	double			ntuples;
+	double			nchunks;
+	double			cpu_per_tuple = 0.0;
 
+	param_info = get_baserel_parampathinfo(root, baserel,
+										   baserel->lateral_relids);
 	cpath->path.pathtype = T_CustomScan;
 	cpath->path.parent = baserel;
 	cpath->path.pathtarget = baserel->reltarget;
-	cpath->path.param_info
-		= get_baserel_parampathinfo(root, baserel,
-									baserel->lateral_relids);
+	cpath->path.param_info = param_info;
 	cpath->path.parallel_aware = parallel_nworkers > 0 ? true : false;
 	cpath->path.parallel_safe = baserel->consider_parallel;
 	cpath->path.parallel_workers = parallel_nworkers;
@@ -411,9 +408,32 @@ create_gpuscan_path(PlannerInfo *root,
 	cpath->custom_private = NIL;
 	cpath->methods = &gpuscan_path_methods;
 
-	cost_gpuscan_path(root, cpath,
-					  dev_quals, host_quals,
-					  discount_per_tuple);
+	/* cost for disk i/o + GPU qualifiers */
+	cost_gpuscan_common(root, &cpath->path, dev_quals,
+						&ntuples, &nchunks,
+						&startup_cost, &run_cost);
+	/* cost for CPU qualifiers */
+	cost_qual_eval(&qcost, host_quals, root);
+	startup_cost += qcost.startup;
+	cpu_per_tuple += qcost.per_tuple;
+
+	/* PPI costs (as a part of host quals, if any) */
+	ppi_quals = (param_info ? param_info->ppi_clauses : NIL);
+	cost_qual_eval(&qcost, ppi_quals, root);
+	startup_cost += qcost.startup;
+	cpu_per_tuple += qcost.per_tuple;
+	run_cost += (cpu_per_tuple + cpu_tuple_cost) * cpath->path.rows;
+
+	/* Cost discount by GPU projection */
+	run_cost = Max(run_cost - discount_per_tuple * ntuples, 0.0);
+
+	/* Latency to get the first chunk */
+	startup_delay = run_cost * (1.0 / nchunks);
+
+	cpath->path.rows = (param_info ? param_info->ppi_rows : baserel->rows);
+	cpath->path.startup_cost = startup_cost + startup_delay;
+	cpath->path.total_cost = startup_cost + run_cost;
+
 	return &cpath->path;
 }
 
@@ -466,7 +486,8 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	/*
 	 * Check whether the GPU Projection may be available
 	 */
-	if (!cost_discount_gpu_projection(root, baserel, &discount_per_tuple))
+	if (!cost_discount_gpu_projection(root, baserel,
+									  &discount_per_tuple))
 	{
 		/*
 		 * GpuScan does not make sense if neither qualifier nor target-
@@ -1984,6 +2005,11 @@ ExplainGpuScan(CustomScanState *node, List *ancestors, ExplainState *es)
 		exprstr = deparse_expression(dev_quals_unified, dcontext,
 									 es->verbose, false);
 		ExplainPropertyText("GPU Filter", exprstr, es);
+
+		if (gss->gts.outer_instrument.nfiltered1 > 0.0)
+			ExplainPropertyFloat("Rows Removed by GPU Filter",
+								 gss->gts.outer_instrument.nfiltered1,
+								 0, es);
 	}
 	/* common portion of EXPLAIN */
 	pgstromExplainGpuTaskState(&gss->gts, es);
@@ -2376,6 +2402,9 @@ gpuscan_switch_task(GpuTaskState_v2 *gts, GpuTask_v2 *gtask)
 		PDS_fillup_blocks(pds_src, gscan->task.file_desc);
 	}
 
+	if (!gscan->task.cpu_fallback)
+		gts->outer_instrument.nfiltered1 += gscan->kern.nitems_filtered;
+
 	/* move the server side perfmon counter to local pfm */
 	if (gscan->task.perfmon)
 	{
@@ -2437,7 +2466,10 @@ retry_next:
 	if (gss->dev_quals != NIL)
 	{
 		if (!ExecQual(gss->dev_quals, econtext, false))
+		{
+			gss->gts.outer_instrument.nfiltered1 += 1.0;
 			goto retry_next;
+		}
 	}
 
 	/*

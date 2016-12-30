@@ -1103,128 +1103,6 @@ pgstromExplainOuterScan(GpuTaskState_v2 *gts,
 			ExplainPropertyFloat("Outer Actual Loops", 0.0, 0, es);
 		}
 	}
-
-	/*
-	 * Logic copied from show_buffer_usage()
-	 */
-	if (es->buffers)
-	{
-		BufferUsage *usage = &instrument->bufusage;
-
-		if (es->format == EXPLAIN_FORMAT_TEXT)
-		{
-			bool	has_shared = (usage->shared_blks_hit > 0 ||
-								  usage->shared_blks_read > 0 ||
-								  usage->shared_blks_dirtied > 0 ||
-								  usage->shared_blks_written > 0);
-			bool	has_local = (usage->local_blks_hit > 0 ||
-								 usage->local_blks_read > 0 ||
-								 usage->local_blks_dirtied > 0 ||
-							   	 usage->local_blks_written > 0);
-			bool	has_temp = (usage->temp_blks_read > 0 ||
-								usage->temp_blks_written > 0);
-			bool	has_timing = (!INSTR_TIME_IS_ZERO(usage->blk_read_time) ||
-								  !INSTR_TIME_IS_ZERO(usage->blk_write_time));
-
-			/* Show only positive counter values. */
-			if (has_shared || has_local || has_temp)
-			{
-				appendStringInfoChar(&str, '\n');
-				appendStringInfoSpaces(&str, es->indent * 2 + 12);
-				appendStringInfoString(&str, "buffers:");
-
-				if (has_shared)
-				{
-					appendStringInfoString(&str, " shared");
-					if (usage->shared_blks_hit > 0)
-						appendStringInfo(&str, " hit=%ld",
-										 usage->shared_blks_hit);
-					if (usage->shared_blks_read > 0)
-						appendStringInfo(&str, " read=%ld",
-										 usage->shared_blks_read);
-					if (usage->shared_blks_dirtied > 0)
-						appendStringInfo(&str, " dirtied=%ld",
-										 usage->shared_blks_dirtied);
-					if (usage->shared_blks_written > 0)
-						appendStringInfo(&str, " written=%ld",
-										 usage->shared_blks_written);
-					if (has_local || has_temp)
-						appendStringInfoChar(&str, ',');
-				}
-				if (has_local)
-				{
-					appendStringInfoString(&str, " local");
-					if (usage->local_blks_hit > 0)
-						appendStringInfo(&str, " hit=%ld",
-										 usage->local_blks_hit);
-					if (usage->local_blks_read > 0)
-						appendStringInfo(&str, " read=%ld",
-										 usage->local_blks_read);
-					if (usage->local_blks_dirtied > 0)
-						appendStringInfo(&str, " dirtied=%ld",
-										 usage->local_blks_dirtied);
-					if (usage->local_blks_written > 0)
-						appendStringInfo(&str, " written=%ld",
-										 usage->local_blks_written);
-					if (has_temp)
-						appendStringInfoChar(&str, ',');
-				}
-				if (has_temp)
-				{
-					appendStringInfoString(&str, " temp");
-					if (usage->temp_blks_read > 0)
-						appendStringInfo(&str, " read=%ld",
-										 usage->temp_blks_read);
-					if (usage->temp_blks_written > 0)
-						appendStringInfo(&str, " written=%ld",
-										 usage->temp_blks_written);
-				}
-			}
-
-			/* As above, show only positive counter values. */
-			if (has_timing)
-			{
-				if (has_shared || has_local || has_temp)
-					appendStringInfo(&str, ", ");
-				appendStringInfoString(&str, "I/O Timings:");
-				if (!INSTR_TIME_IS_ZERO(usage->blk_read_time))
-					appendStringInfo(&str, " read=%0.3f",
-							INSTR_TIME_GET_MILLISEC(usage->blk_read_time));
-				if (!INSTR_TIME_IS_ZERO(usage->blk_write_time))
-					appendStringInfo(&str, " write=%0.3f",
-							INSTR_TIME_GET_MILLISEC(usage->blk_write_time));
-			}
-		}
-		else
-		{
-			double		time_value;
-			ExplainPropertyLong("Outer Shared Hit Blocks",
-								usage->shared_blks_hit, es);
-			ExplainPropertyLong("Outer Shared Read Blocks",
-								usage->shared_blks_read, es);
-			ExplainPropertyLong("Outer Shared Dirtied Blocks",
-								usage->shared_blks_dirtied, es);
-			ExplainPropertyLong("Outer Shared Written Blocks",
-								usage->shared_blks_written, es);
-			ExplainPropertyLong("Outer Local Hit Blocks",
-								usage->local_blks_hit, es);
-			ExplainPropertyLong("Outer Local Read Blocks",
-								usage->local_blks_read, es);
-			ExplainPropertyLong("Outer Local Dirtied Blocks",
-								usage->local_blks_dirtied, es);
-			ExplainPropertyLong("Outer Local Written Blocks",
-								usage->local_blks_written, es);
-			ExplainPropertyLong("Outer Temp Read Blocks",
-								usage->temp_blks_read, es);
-			ExplainPropertyLong("Outer Temp Written Blocks",
-								usage->temp_blks_written, es);
-			time_value = INSTR_TIME_GET_MILLISEC(usage->blk_read_time);
-			ExplainPropertyFloat("Outer I/O Read Time", time_value, 3, es);
-			time_value = INSTR_TIME_GET_MILLISEC(usage->blk_write_time);
-			ExplainPropertyFloat("Outer I/O Write Time", time_value, 3, es);
-		}
-	}
-
 	if (es->format == EXPLAIN_FORMAT_TEXT)
 		ExplainPropertyText("Outer Scan", str.data, es);
 
@@ -1237,6 +1115,12 @@ pgstromExplainOuterScan(GpuTaskState_v2 *gts,
 											 deparse_context,
 											 es->verbose, false);
 		ExplainPropertyText("Outer Scan Filter", outer_quals_str, es);
+
+		if (gts->outer_instrument.nfiltered1 > 0.0)
+			ExplainPropertyFloat("Rows Removed by Outer Scan Filter",
+								 gts->outer_instrument.nfiltered1 /
+								 gts->outer_instrument.nloops,
+								 0, es);
 	}
 }
 

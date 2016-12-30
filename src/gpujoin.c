@@ -4191,6 +4191,7 @@ gpujoin_create_task(GpuJoinState *gjs,
 	pgjoin->kern.kresults_1_offset = 0xe7e7e7e7;	/* to be set later */
 	pgjoin->kern.kresults_2_offset = 0x7e7e7e7e;	/* to be set later */
 	pgjoin->kern.num_rels = gjs->num_rels;
+	pgjoin->kern.nitems_filtered = 0;
 
 	/* setup of kern_parambuf */
 	/* NOTE: KERN_GPUJOIN_PARAMBUF() depends on pgjoin->kern.num_rels */
