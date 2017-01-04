@@ -401,6 +401,7 @@ create_gpuscan_path(PlannerInfo *root,
 	cpath->path.parallel_aware = parallel_nworkers > 0 ? true : false;
 	cpath->path.parallel_safe = baserel->consider_parallel;
 	cpath->path.parallel_workers = parallel_nworkers;
+	cpath->path.rows = (param_info ? param_info->ppi_rows : baserel->rows);
 
 	cpath->path.pathkeys = NIL;	/* unsorted results */
 	cpath->flags = 0;
@@ -425,12 +426,12 @@ create_gpuscan_path(PlannerInfo *root,
 	run_cost += (cpu_per_tuple + cpu_tuple_cost) * cpath->path.rows;
 
 	/* Cost discount by GPU projection */
-	run_cost = Max(run_cost - discount_per_tuple * ntuples, 0.0);
+	run_cost = Max(run_cost - discount_per_tuple * cpath->path.rows, 0.0);
 
 	/* Latency to get the first chunk */
 	startup_delay = run_cost * (1.0 / nchunks);
 
-	cpath->path.rows = (param_info ? param_info->ppi_rows : baserel->rows);
+
 	cpath->path.startup_cost = startup_cost + startup_delay;
 	cpath->path.total_cost = startup_cost + run_cost;
 
