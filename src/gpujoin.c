@@ -1924,7 +1924,6 @@ create_gpujoin_plan(PlannerInfo *root,
 	 * construct kernel code
 	 */
 	pgstrom_init_codegen_context(&context);
-	context.pseudo_tlist = cscan->custom_scan_tlist;
 	kern_source = gpujoin_codegen(root, cscan, &gj_info, tlist, &context);
 	if (context.func_defs || context.expr_defs)
 	{
@@ -3673,7 +3672,6 @@ gpujoin_codegen(PlannerInfo *root,
 {
 	StringInfoData source;
 	int			depth;
-	List	   *pseudo_tlist_saved;
 	ListCell   *cell;
 
 	initStringInfo(&source);
@@ -3681,16 +3679,14 @@ gpujoin_codegen(PlannerInfo *root,
 	/*
 	 * gpuscan_quals_eval
 	 */
-	pseudo_tlist_saved = context->pseudo_tlist;
 	codegen_gpuscan_quals(&source,
 						  context,
 						  cscan->scan.scanrelid,
 						  (List *)gj_info->outer_quals);
-	context->pseudo_tlist = pseudo_tlist_saved;
-
 	/*
 	 * gpujoin_join_quals
 	 */
+	context->pseudo_tlist = cscan->custom_scan_tlist;
 	for (depth=1; depth <= gj_info->num_rels; depth++)
 		gpujoin_codegen_join_quals(&source, gj_info, depth, context);
 	appendStringInfo(
