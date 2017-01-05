@@ -1937,6 +1937,15 @@ ExecGpuScanInitDSM(CustomScanState *node,
 	GpuScanState   *gss = (GpuScanState *) node;
 	EState		   *estate = node->ss.ps.state;
 	GpuScanParallelDSM *gpdsm = coordinate;
+	int				instr_options = 0;
+
+	if (node->ss.ps.instrument)
+	{
+		if (node->ss.ps.instrument->need_timer)
+			instr_options |= INSTRUMENT_TIMER;
+		if (node->ss.ps.instrument->need_bufusage)
+			instr_options |= INSTRUMENT_BUFFERS;
+	}
 
 	/*
 	 * setup of shared performance counter
@@ -1952,7 +1961,7 @@ ExecGpuScanInitDSM(CustomScanState *node,
 	memcpy(gss->gts.pfm_master, &gss->gts.pfm,
 		   offsetof(pgstrom_perfmon, lock));
 	SpinLockInit(&gss->gts.pfm_master->lock);
-	InstrInit(&gss->gts.pfm_master->outer_instrument, INSTRUMENT_BUFFERS);
+	InstrInit(&gss->gts.pfm_master->outer_instrument, instr_options);
 	gpdsm->pfm_master = gss->gts.pfm_master;
 
 	/* setup of parallel scan descriptor */
