@@ -185,6 +185,7 @@ struct GpuTaskState_v2
 	Cost			outer_total_cost;	/* copy from the outer path node */
 	double			outer_plan_rows;	/* copy from the outer path node */
 	int				outer_plan_width;	/* copy from the outer path node */
+	cl_uint			outer_nrows_per_block;
 	Instrumentation	outer_instrument; /* runtime statistics, if any */
 	TupleTableSlot *scan_overflow;	/* temporary buffer, if no space on PDS */
 	struct NVMEScanState *nvme_sstate;/* A state object for NVMe-Strom.
@@ -221,7 +222,9 @@ struct GpuTaskState_v2
 
 	/* performance monitor */
 	pgstrom_perfmon	pfm;			/* local counter */
-	pgstrom_perfmon *pfm_master;	/* shared state, if under Gather */
+	pgstromWorkerStatistics *worker_stat;
+
+//	pgstrom_perfmon *pfm_master;	/* shared state, if under Gather */
 };
 #define GTS_GET_SCAN_TUPDESC(gts)				\
 	(((GpuTaskState_v2 *)(gts))->css.ss.ss_ScanTupleSlot->tts_tupleDescriptor)
@@ -492,6 +495,7 @@ extern void pgstromRescanGpuTaskState(GpuTaskState_v2 *gts);
 extern void pgstromReleaseGpuTaskState(GpuTaskState_v2 *gts);
 extern void pgstromExplainGpuTaskState(GpuTaskState_v2 *gts,
 									   ExplainState *es);
+extern void pgstrom_merge_worker_statistics(GpuTaskState_v2 *gts);
 extern void pgstromExplainOuterScan(GpuTaskState_v2 *gts,
 									List *deparse_context,
 									List *ancestors,
@@ -744,6 +748,8 @@ extern int	gpujoin_complete_task(GpuTask_v2 *gtask);
 extern void	gpujoin_release_task(GpuTask_v2 *gtask);
 extern void assign_gpujoin_session_info(StringInfo buf,
 										GpuTaskState_v2 *gts);
+extern void gpujoin_merge_worker_statistics(GpuTaskState_v2 *gts);
+extern void gpujoin_accum_worker_statistics(GpuTaskState_v2 *gts);
 extern void	pgstrom_init_gpujoin(void);
 
 /*

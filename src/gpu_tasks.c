@@ -27,8 +27,7 @@
 /*
  * static functions
  */
-static void pgstrom_collect_perfmon_master(GpuTaskState_v2 *gts);
-static void pgstrom_collect_perfmon_worker(GpuTaskState_v2 *gts);
+static void pgstrom_accum_worker_statistics(GpuTaskState_v2 *gts);
 static void pgstrom_explain_perfmon(GpuTaskState_v2 *gts, ExplainState *es);
 
 
@@ -238,10 +237,7 @@ pgstromInitGpuTaskState(GpuTaskState_v2 *gts,
 	gts->pfm.enabled = pgstrom_perfmon_enabled;
 	gts->pfm.prime_in_gpucontext = (gcontext->refcnt == 1);
 	gts->pfm.task_kind = task_kind;
-	SpinLockInit(&gts->pfm.lock);
-	InstrInit(&gts->pfm.outer_instrument, (INSTRUMENT_BUFFERS |
-										   INSTRUMENT_TIMER));
-	gts->pfm_master = NULL;		/* setup by DSM init handler */
+	gts->worker_stat = NULL;	/* setup by DSM init handler */
 }
 
 /*
@@ -548,19 +544,19 @@ pgstromReleaseGpuTaskState(GpuTaskState_v2 *gts)
 	 * collect perfmon statistics if parallel worker
 	 *
 	 * NOTE: ExplainCustomScan() shall be called prior to EndCustomScan() of
-	 * the leader process. Thus, collection of perfmon count makes sense only
-	 * when it is parallel worker context.
+	 * the leader process. Thus, collection of the worker's statistics keeps
+	 * ones by the workers, but no statistics come from the master backend.
 	 * In addition, ExecEndGather() releases parallel context and DSM segment
-	 * prior to EndCustomScan(), so any reference to @pfm_master on the leader
-	 * process context will make SEGV.
+	 * prior to EndCustomScan(), so any reference to @worker_state on the
+	 * leader process will raise SEGV.
 	 */
 	if (ParallelMasterBackendId != InvalidBackendId)
-		pgstrom_collect_perfmon_worker(gts);
-	else if (gts->pfm_master)
+		pgstrom_accum_worker_statistics(gts);
+	else if (gts->worker_stat)
 	{
-		/* shared performance counter is no longer needed */
-		dmaBufferFree(gts->pfm_master);
-		gts->pfm_master = NULL;
+		/* worker's statistics are no longer needed */
+		dmaBufferFree(gts->worker_stat);
+		gts->worker_stat = NULL;
 	}
 	/* cleanup per-query PDS-scan state, if any */
 	PDS_end_heapscan_state(gts);
@@ -581,6 +577,11 @@ pgstromReleaseGpuTaskState(GpuTaskState_v2 *gts)
 void
 pgstromExplainGpuTaskState(GpuTaskState_v2 *gts, ExplainState *es)
 {
+	/*
+	 * Merge worker's statistics if any
+	 */
+	pgstrom_merge_worker_statistics(gts);
+
 	/*
 	 * Extra features if any
 	 */
@@ -995,15 +996,6 @@ pgstromExplainOuterScan(GpuTaskState_v2 *gts,
 	if (scanrelid == 0)
 		return;
 
-	/* Pick up shared outer_instrument if under Gather node */
-	if (gts->pfm_master)
-	{
-		SpinLockAcquire(&gts->pfm_master->lock);
-		InstrAggNode(&gts->outer_instrument,
-					 &gts->pfm_master->outer_instrument);
-		SpinLockRelease(&gts->pfm_master->lock);
-	}
-
 	/*
 	 * See the logic in ExplainTargetRel()
 	 */
@@ -1362,34 +1354,42 @@ pgstrom_collect_perfmon_shared_gcontext(GpuTaskState_v2 *gts)
 #undef PFM_MOVE
 }
 
-static void
-pgstrom_collect_perfmon_master(GpuTaskState_v2 *gts)
+void
+pgstrom_merge_worker_statistics(GpuTaskState_v2 *gts)
 {
 	Assert(ParallelMasterBackendId == InvalidBackendId);
-	if (!gts->pfm.enabled)
-		return;
 	pgstrom_collect_perfmon_shared_gcontext(gts);
-	if (gts->pfm_master)
+	if (gts->worker_stat)
 	{
-		SpinLockAcquire(&gts->pfm_master->lock);
-		/* outer_instrument was merged at pgstromExplainOuterScan already */
-		__pgstrom_collect_perfmon(&gts->pfm, gts->pfm_master);
-		SpinLockRelease(&gts->pfm_master->lock);
+		pgstromWorkerStatistics *worker_stat = gts->worker_stat;
+
+		SpinLockAcquire(&worker_stat->lock);
+		InstrAggNode(&gts->outer_instrument,
+					 &worker_stat->worker_instrument);
+		__pgstrom_collect_perfmon(&gts->pfm,
+								  &worker_stat->worker_pfm);
+		gpujoin_merge_worker_statistics(gts);
+		SpinLockRelease(&worker_stat->lock);
 	}
 }
 
 static void
-pgstrom_collect_perfmon_worker(GpuTaskState_v2 *gts)
+pgstrom_accum_worker_statistics(GpuTaskState_v2 *gts)
 {
 	Assert(ParallelMasterBackendId != InvalidBackendId);
 	pgstrom_collect_perfmon_shared_gcontext(gts);
-	if (gts->pfm_master)
+	if (gts->worker_stat)
 	{
-		SpinLockAcquire(&gts->pfm_master->lock);
-		InstrAggNode(&gts->pfm_master->outer_instrument,
+		pgstromWorkerStatistics *worker_stat = gts->worker_stat;
+
+		SpinLockAcquire(&worker_stat->lock);
+		InstrAggNode(&worker_stat->worker_instrument,
 					 &gts->outer_instrument);
-		__pgstrom_collect_perfmon(gts->pfm_master, &gts->pfm);
-		SpinLockRelease(&gts->pfm_master->lock);
+		__pgstrom_collect_perfmon(&worker_stat->worker_pfm,
+								  &gts->pfm);
+		/* GpuJoin */
+		gpujoin_accum_worker_statistics(gts);
+		SpinLockRelease(&worker_stat->lock);
 	}
 }
 
@@ -1402,7 +1402,6 @@ pgstrom_explain_perfmon(GpuTaskState_v2 *gts, ExplainState *es)
 	pgstrom_perfmon	   *pfm = &gts->pfm;
 	char				buf[1024];
 
-	pgstrom_collect_perfmon_master(gts);
 	if (!pfm->enabled)
 		return;
 

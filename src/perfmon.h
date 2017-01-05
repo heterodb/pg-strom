@@ -25,10 +25,6 @@ typedef struct {
 	cl_bool			enabled;
 	cl_bool			prime_in_gpucontext;
 	GpuTaskKind		task_kind;
-	/*-- lock of the performance counter below --*/
-	slock_t			lock;
-	/*-- parallel outer scan if pull-up --*/
-	Instrumentation	outer_instrument;
 	/*-- memory allocation counter --*/
 	cl_uint			num_dmabuf_alloc;
 	cl_uint			num_dmabuf_free;
@@ -129,6 +125,27 @@ typedef struct {
 		cl_double	tv_cpu_sort;
 	} gsort;
 } pgstrom_perfmon;
+
+/*
+ * pgstromWorkerStatistics
+ *
+ * PostgreSQL v9.6 does not allow to assign run-time statistics counter
+ * on the DSM area because of oversight during the development cycle.
+ * So, we need to allocate independent shared memory are to write back
+ * performance counter to the master backend.
+ * Likely, this restriction shall be removed at PostgreSQL v10.
+ */
+typedef struct
+{
+	slock_t			lock;
+	Instrumentation	worker_instrument;
+	pgstrom_perfmon	worker_pfm;
+	/* for GpuJoin */
+	struct {
+		size_t		inner_nitems;
+		size_t		right_nitems;
+	} gpujoin[FLEXIBLE_ARRAY_MEMBER];
+} pgstromWorkerStatistics;
 
 /*
  * macro definitions for performance counter

@@ -65,6 +65,7 @@ typedef struct
 	Cost			outer_total_cost; /* copy of @total_cost in outer path */
 	double			outer_nrows;	/* number of estimated outer nrows */
 	int				outer_width;	/* copy of @plan_width in outer path */
+	cl_uint			outer_nrows_per_block;
 	Index			outer_scanrelid;/* RTI, if outer path pulled up */
 	List		   *outer_quals;	/* device executable quals of outer-scan */
 	char		   *kern_source;
@@ -88,6 +89,7 @@ form_gpupreagg_info(CustomScan *cscan, GpuPreAggInfo *gpa_info)
 					makeFloat(psprintf("%f", gpa_info->outer_total_cost)));
 	privs = lappend(privs, makeFloat(psprintf("%f", gpa_info->outer_nrows)));
 	privs = lappend(privs, makeInteger(gpa_info->outer_width));
+	privs = lappend(privs, makeInteger(gpa_info->outer_nrows_per_block));
 	privs = lappend(privs, makeInteger(gpa_info->outer_scanrelid));
 	exprs = lappend(exprs, gpa_info->outer_quals);
 	privs = lappend(privs, makeString(gpa_info->kern_source));
@@ -115,6 +117,7 @@ deform_gpupreagg_info(CustomScan *cscan)
 	gpa_info->outer_total_cost = floatVal(list_nth(privs, pindex++));
 	gpa_info->outer_nrows = floatVal(list_nth(privs, pindex++));
 	gpa_info->outer_width = intVal(list_nth(privs, pindex++));
+	gpa_info->outer_nrows_per_block = intVal(list_nth(privs, pindex++));
 	gpa_info->outer_scanrelid = intVal(list_nth(privs, pindex++));
 	gpa_info->outer_quals = list_nth(exprs, eindex++);
 	gpa_info->kern_source = strVal(list_nth(privs, pindex++));
@@ -834,7 +837,7 @@ cost_gpupreagg(PlannerInfo *root,
 							gpa_info->outer_quals,
 							&ntuples,
 							&nchunks,
-							NULL, // to be fixed later
+							&gpa_info->outer_nrows_per_block,
 							&startup_cost,
 							&run_cost);
 		gpa_info->outer_startup_cost = startup_cost;
@@ -3268,6 +3271,7 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 	gpas->gts.cb_ready_task  = gpupreagg_ready_task;
 	gpas->gts.cb_switch_task = gpupreagg_switch_task;
 	gpas->gts.cb_next_tuple  = gpupreagg_next_tuple;
+	gpas->gts.outer_nrows_per_block = gpa_info->outer_nrows_per_block;
 
 	gpas->num_group_keys     = gpa_info->num_group_keys;
 	gpas->num_fallback_rows  = 0;
@@ -3432,8 +3436,13 @@ ExecGpuPreAggInitDSM(CustomScanState *node,
 					 ParallelContext *pcxt,
 					 void *coordinate)
 {
-	if (node->ss.ss_currentRelation)
-		ExecGpuScanInitDSM(node, pcxt, coordinate);
+	GpuPreAggState *gpas = (GpuPreAggState *) node;
+	Size			len = offsetof(pgstromWorkerStatistics, gpujoin[0]);
+
+	gpas->gts.worker_stat = dmaBufferAlloc(gpas->gts.gcontext, len);
+	memset(gpas->gts.worker_stat, 0, len);
+
+	ExecGpuScanInitDSM(node, pcxt, coordinate);
 }
 
 /*
@@ -3464,6 +3473,14 @@ ExplainGpuPreAgg(CustomScanState *node, List *ancestors, ExplainState *es)
 	const char			   *policy;
 	char				   *exprstr;
 	cl_uint					n_tasks;
+
+	/* merge worker's statistics if any */
+	gpas->gts.outer_instrument.tuplecount = 0;
+	gpas->gts.outer_instrument.ntuples = gpa_sstate->exec_nrows_in;
+	gpas->gts.outer_instrument.nfiltered1 = gpa_sstate->exec_nrows_filtered;
+	gpas->gts.outer_instrument.nfiltered2 = 0;
+	gpas->gts.outer_instrument.nloops = 1;
+	pgstrom_merge_worker_statistics(&gpas->gts);
 
 	SpinLockAcquire(&gpa_sstate->lock);
 	n_tasks = (gpa_sstate->n_tasks_nogrp +
@@ -3550,11 +3567,6 @@ ExplainGpuPreAgg(CustomScanState *node, List *ancestors, ExplainState *es)
 									 es->verbose, false);
 		ExplainPropertyText("GPU Projection", exprstr, es);
 	}
-
-	/* statistics for outer scan, if it was pulled-up */
-	gpas->gts.outer_instrument.tuplecount = gpa_sstate->exec_nrows_in;
-	gpas->gts.outer_instrument.nfiltered1 = gpa_sstate->exec_nrows_filtered;
-
 	pgstromExplainOuterScan(&gpas->gts, dcontext, ancestors, es,
 							gpa_info->outer_quals,
 							gpa_info->outer_startup_cost,

@@ -147,7 +147,7 @@ typedef struct {
 	bool			dev_projection;	/* true, if device projection is valid */
 	cl_uint			proj_row_extra;
 	cl_uint			proj_slot_extra;
-	cl_uint			nrows_per_block;
+//	cl_uint			nrows_per_block;
 	/* resource for CPU fallback */
 	TupleTableSlot *base_slot;
 	ProjectionInfo *base_proj;
@@ -156,7 +156,7 @@ typedef struct {
 /* shared state of GpuScan for CPU parallel */
 typedef struct
 {
-	pgstrom_perfmon	   *pfm_master;
+	pgstromWorkerStatistics *worker_stat;
 	ParallelHeapScanDescData pscan;	/* flexible length */
 } GpuScanParallelDSM;
 
@@ -1785,6 +1785,8 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 		gss->gts.cb_bulk_exec = pgstromBulkExecGpuTaskState;
 	else
 		gss->gts.cb_bulk_exec = NULL;	/* BulkExec not supported */
+	/* estimated number of rows per block */
+	gss->gts.outer_nrows_per_block = gs_info->nrows_per_block;
 
 	/* initialize device tlist for CPU fallback */
 	gss->dev_tlist = (List *)
@@ -1797,8 +1799,6 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	/* device projection related resource consumption */
 	gss->proj_row_extra = gs_info->proj_row_extra;
 	gss->proj_slot_extra = gs_info->proj_slot_extra;
-	/* estimated number of rows per block */
-	gss->nrows_per_block = gs_info->nrows_per_block;
 	/* 'tableoid' should not change during relation scan */
 	gss->scan_tuple.t_tableOid = RelationGetRelid(scan_rel);
 	/* initialize resource for CPU fallback */
@@ -1920,10 +1920,13 @@ Size
 ExecGpuScanEstimateDSM(CustomScanState *node,
 					   ParallelContext *pcxt)
 {
-	EState		   *estate = node->ss.ps.state;
+	EState	   *estate = node->ss.ps.state;
+	Size		length = offsetof(GpuScanParallelDSM, pscan);
 
-	return (offsetof(GpuScanParallelDSM, pscan) +
-			heap_parallelscan_estimate(estate->es_snapshot));
+	if (node->ss.ss_currentRelation)
+		length += heap_parallelscan_estimate(estate->es_snapshot);
+
+	return length;
 }
 
 /*
@@ -1934,10 +1937,11 @@ ExecGpuScanInitDSM(CustomScanState *node,
 				   ParallelContext *pcxt,
 				   void *coordinate)
 {
-	GpuScanState   *gss = (GpuScanState *) node;
-	EState		   *estate = node->ss.ps.state;
+	GpuTaskState_v2	   *gts = (GpuTaskState_v2 *) node;
+	EState			   *estate = node->ss.ps.state;
 	GpuScanParallelDSM *gpdsm = coordinate;
-	int				instr_options = 0;
+	pgstrom_perfmon	   *worker_pfm;
+	int					instr_options = 0;
 
 	if (node->ss.ps.instrument)
 	{
@@ -1953,26 +1957,36 @@ ExecGpuScanInitDSM(CustomScanState *node,
 	 * NOTE: DSM segment shall be released prior to the ExecEnd callback,
 	 * so we have to allocate another shared memory segment at v9.6.
 	 */
-	gss->gts.pfm_master = dmaBufferAlloc(gss->gts.gcontext,
-										 sizeof(pgstrom_perfmon));
-	if (!gss->gts.pfm_master)
-		elog(ERROR, "out of shared memory");
-	memset(gss->gts.pfm_master, 0, sizeof(pgstrom_perfmon));
-	memcpy(gss->gts.pfm_master, &gss->gts.pfm,
-		   offsetof(pgstrom_perfmon, lock));
-	SpinLockInit(&gss->gts.pfm_master->lock);
-	InstrInit(&gss->gts.pfm_master->outer_instrument, instr_options);
-	gpdsm->pfm_master = gss->gts.pfm_master;
+	if (!gts->worker_stat)
+	{
+		Size		len = offsetof(pgstromWorkerStatistics, gpujoin[0]);
 
-	/* setup of parallel scan descriptor */
-	heap_parallelscan_initialize(&gpdsm->pscan,
-								 gss->gts.css.ss.ss_currentRelation,
-								 estate->es_snapshot);
-	node->ss.ss_currentScanDesc =
-		heap_beginscan_parallel(gss->gts.css.ss.ss_currentRelation,
-								&gpdsm->pscan);
-	/* Try to choose NVMe-Strom, if available */
-	PDS_init_heapscan_state(&gss->gts, gss->nrows_per_block);
+		gts->worker_stat = dmaBufferAlloc(gts->gcontext, len);
+		if (!gts->worker_stat)
+			elog(ERROR, "out of shared memory");
+		memset(gts->worker_stat, 0, len);
+	}
+	SpinLockInit(&gts->worker_stat->lock);
+	InstrInit(&gts->worker_stat->worker_instrument, instr_options);
+	worker_pfm = &gts->worker_stat->worker_pfm;
+	worker_pfm->enabled = gts->pfm.enabled;
+	worker_pfm->prime_in_gpucontext = gts->pfm.prime_in_gpucontext;
+	worker_pfm->task_kind = gts->pfm.task_kind;
+
+	gpdsm->worker_stat = gts->worker_stat;
+
+	if (gts->css.ss.ss_currentRelation)
+	{
+		/* setup of parallel scan descriptor */
+		heap_parallelscan_initialize(&gpdsm->pscan,
+									 gts->css.ss.ss_currentRelation,
+									 estate->es_snapshot);
+		node->ss.ss_currentScanDesc =
+			heap_beginscan_parallel(gts->css.ss.ss_currentRelation,
+									&gpdsm->pscan);
+		/* Try to choose NVMe-Strom, if available */
+		PDS_init_heapscan_state(gts, gts->outer_nrows_per_block);
+	}
 }
 
 /*
@@ -1983,15 +1997,19 @@ ExecGpuScanInitWorker(CustomScanState *node,
 					  shm_toc *toc,
 					  void *coordinate)
 {
-	GpuScanState   *gss = (GpuScanState *) node;
+	GpuTaskState_v2	   *gts = (GpuTaskState_v2 *) node;
 	GpuScanParallelDSM *gpdsm = coordinate;
 
-	gss->gts.pfm_master = gpdsm->pfm_master;
-	node->ss.ss_currentScanDesc =
-		heap_beginscan_parallel(gss->gts.css.ss.ss_currentRelation,
-								&gpdsm->pscan);
-	/* Try to choose NVMe-Strom, if available */
-	PDS_init_heapscan_state(&gss->gts, gss->nrows_per_block);
+	gts->worker_stat = gpdsm->worker_stat;
+	if (gts->css.ss.ss_currentRelation)
+	{
+		/* begin parallel sequential scan */
+		node->ss.ss_currentScanDesc =
+			heap_beginscan_parallel(gts->css.ss.ss_currentRelation,
+									&gpdsm->pscan);
+		/* Try to choose NVMe-Strom, if available */
+		PDS_init_heapscan_state(gts, gts->outer_nrows_per_block);
+	}
 }
 
 /*
@@ -2036,15 +2054,6 @@ ExplainGpuScan(CustomScanState *node, List *ancestors, ExplainState *es)
 		exprstr = deparse_expression(dev_quals, dcontext,
 									 es->verbose, false);
 		ExplainPropertyText("GPU Filter", exprstr, es);
-
-		/* pick up number of filtered rows */
-		if (gss->gts.pfm_master)
-		{
-			SpinLockAcquire(&gss->gts.pfm_master->lock);
-			InstrAggNode(&gss->gts.outer_instrument,
-						 &gss->gts.pfm_master->outer_instrument);
-			SpinLockRelease(&gss->gts.pfm_master->lock);
-		}
 		if (gss->gts.outer_instrument.nfiltered1 > 0.0)
 			ExplainPropertyFloat("Rows Removed by GPU Filter",
 								 gss->gts.outer_instrument.nfiltered1 /
@@ -2280,7 +2289,7 @@ gpuscanExecScanChunk(GpuTaskState_v2 *gts, int *p_filedesc)
 		 * tablespace and expected total i/o size is enough large than cache-
 		 * only scan.
 		 */
-		PDS_init_heapscan_state(gts, ((GpuScanState *)gts)->nrows_per_block);
+		PDS_init_heapscan_state(gts, gts->outer_nrows_per_block);
 	}
 	scan = gts->css.ss.ss_currentScanDesc;
 

@@ -58,6 +58,7 @@ typedef struct
 	int				num_rels;
 	Index			outer_relid;	/* valid, if outer scan pull-up */
 	List		   *outer_quals;	/* qualifier of outer scan */
+	cl_uint			outer_nrows_per_block;
 	struct {
 		JoinType	join_type;		/* one of JOIN_* */
 		double		join_nrows;		/* intermediate nrows in this depth */
@@ -85,6 +86,7 @@ typedef struct
 	int			outer_width;		/* copy of @plan_width in outer path */
 	Cost		outer_startup_cost;	/* copy of @startup_cost in outer path */
 	Cost		outer_total_cost;	/* copy of @total_cost in outer path */
+	cl_uint		outer_nrows_per_block;
 	/* for each depth */
 	List	   *plan_nrows_in;	/* list of floatVal for planned nrows_in */
 	List	   *plan_nrows_out;	/* list of floatVal for planned nrows_out */
@@ -120,6 +122,7 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 											  gj_info->outer_startup_cost)));
 	privs = lappend(privs, makeFloat(psprintf("%.2f",
 											  gj_info->outer_total_cost)));
+	privs = lappend(privs, makeInteger(gj_info->outer_nrows_per_block));
 	/* for each depth */
 	privs = lappend(privs, gj_info->plan_nrows_in);
 	privs = lappend(privs, gj_info->plan_nrows_out);
@@ -159,6 +162,7 @@ deform_gpujoin_info(CustomScan *cscan)
 	gj_info->outer_width = intVal(list_nth(privs, pindex++));
 	gj_info->outer_startup_cost = floatVal(list_nth(privs, pindex++));
 	gj_info->outer_total_cost = floatVal(list_nth(privs, pindex++));
+	gj_info->outer_nrows_per_block = intVal(list_nth(privs, pindex++));
 	/* for each depth */
 	gj_info->plan_nrows_in = list_nth(privs, pindex++);
 	gj_info->plan_nrows_out = list_nth(privs, pindex++);
@@ -765,7 +769,7 @@ cost_gpujoin(PlannerInfo *root,
 							gpath->outer_quals,
 							&scan_ntuples,
 							&num_chunks,
-							NULL, // to be fixed later
+							&gpath->outer_nrows_per_block,
 							&startup_cost,
 							&run_cost);
 	}
@@ -2029,6 +2033,7 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 		gjs->gts.css.ss.ps.qual == NIL &&
 		gjs->gts.css.ss.ps.ps_ProjInfo == NULL)
 		gjs->gts.cb_bulk_exec = pgstromBulkExecGpuTaskState;
+	gjs->gts.outer_nrows_per_block = gj_info->outer_nrows_per_block;
 
 	/*
 	 * NOTE: outer_quals, hash_outer_keys and join_quals are intended
@@ -2810,6 +2815,48 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 }
 
 /*
+ * gpujoin_merge_worker_statistics
+ */
+void
+gpujoin_merge_worker_statistics(GpuTaskState_v2 *gts)
+{
+	if (gts->css.methods == &gpujoin_exec_methods)
+	{
+		pgstromWorkerStatistics *worker_stat = gts->worker_stat;
+		GpuJoinState   *gjs = (GpuJoinState *) gts;
+		runtimeStat	   *rt_stat = gjs->rt_stat;
+		int				i;
+
+		for (i=0; i < gjs->num_rels; i++)
+		{
+			rt_stat->inner_nitems[i] += worker_stat->gpujoin[i].inner_nitems;
+			rt_stat->right_nitems[i] += worker_stat->gpujoin[i].right_nitems;
+		}
+	}
+}
+
+/*
+ * gpujpin_accum_worker_statistics
+ */
+void
+gpujoin_accum_worker_statistics(GpuTaskState_v2 *gts)
+{
+	if (gts->css.methods == &gpujoin_exec_methods)
+	{
+		pgstromWorkerStatistics *worker_stat = gts->worker_stat;
+		GpuJoinState   *gjs = (GpuJoinState *) gts;
+		runtimeStat	   *rt_stat = gjs->rt_stat;
+		int				i;
+
+		for (i=0; i < gjs->num_rels; i++)
+		{
+			worker_stat->gpujoin[i].inner_nitems += rt_stat->inner_nitems[i];
+			worker_stat->gpujoin[i].right_nitems += rt_stat->right_nitems[i];
+		}
+	}
+}
+
+/*
  * ExecGpuJoinEstimateDSM
  */
 static Size
@@ -2829,8 +2876,14 @@ ExecGpuJoinInitDSM(CustomScanState *node,
 				   ParallelContext *pcxt,
 				   void *coordinate)
 {
-	if (node->ss.ss_currentRelation)
-		ExecGpuScanInitDSM(node, pcxt, coordinate);
+	GpuJoinState   *gjs = (GpuJoinState *) node;
+	Size			len = offsetof(pgstromWorkerStatistics,
+								   gpujoin[gjs->num_rels + 1]);
+
+	gjs->gts.worker_stat = dmaBufferAlloc(gjs->gts.gcontext, len);
+	memset(gjs->gts.worker_stat, 0, len);
+
+	ExecGpuScanInitDSM(node, pcxt, coordinate);
 }
 
 /*
