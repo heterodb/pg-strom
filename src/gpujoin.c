@@ -79,11 +79,15 @@ typedef struct
 	char	   *kern_source;
 	int			extra_flags;
 	List	   *used_params;
-	Expr	   *outer_quals;
+	List	   *outer_quals;
 	double		outer_ratio;
-	double		outer_nrows;
+	double		outer_nrows;		/* number of estimated outer nrows*/
+	int			outer_width;		/* copy of @plan_width in outer path */
+	Cost		outer_startup_cost;	/* copy of @startup_cost in outer path */
+	Cost		outer_total_cost;	/* copy of @total_cost in outer path */
 	/* for each depth */
-	List	   *nrows_ratio;
+	List	   *plan_nrows_in;	/* list of floatVal for planned nrows_in */
+	List	   *plan_nrows_out;	/* list of floatVal for planned nrows_out */
 	List	   *ichunk_size;
 	List	   *join_types;
 	List	   *join_quals;
@@ -109,10 +113,16 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 	privs = lappend(privs, makeInteger(gj_info->extra_flags));
 	exprs = lappend(exprs, gj_info->used_params);
 	exprs = lappend(exprs, gj_info->outer_quals);
-	privs = lappend(privs, makeInteger(double_as_long(gj_info->outer_ratio)));
-	privs = lappend(privs, makeInteger(double_as_long(gj_info->outer_nrows)));
+	privs = lappend(privs, makeFloat(psprintf("%.8f", gj_info->outer_ratio)));
+	privs = lappend(privs, makeFloat(psprintf("%.8f", gj_info->outer_nrows)));
+	privs = lappend(privs, makeInteger(gj_info->outer_width));
+	privs = lappend(privs, makeFloat(psprintf("%.2f",
+											  gj_info->outer_startup_cost)));
+	privs = lappend(privs, makeFloat(psprintf("%.2f",
+											  gj_info->outer_total_cost)));
 	/* for each depth */
-	privs = lappend(privs, gj_info->nrows_ratio);
+	privs = lappend(privs, gj_info->plan_nrows_in);
+	privs = lappend(privs, gj_info->plan_nrows_out);
 	privs = lappend(privs, gj_info->ichunk_size);
 	privs = lappend(privs, gj_info->join_types);
 	exprs = lappend(exprs, gj_info->join_quals);
@@ -144,10 +154,14 @@ deform_gpujoin_info(CustomScan *cscan)
 	gj_info->extra_flags = intVal(list_nth(privs, pindex++));
 	gj_info->used_params = list_nth(exprs, eindex++);
 	gj_info->outer_quals = list_nth(exprs, eindex++);
-	gj_info->outer_ratio = long_as_double(intVal(list_nth(privs, pindex++)));
-	gj_info->outer_nrows = long_as_double(intVal(list_nth(privs, pindex++)));
+	gj_info->outer_ratio = floatVal(list_nth(privs, pindex++));
+	gj_info->outer_nrows = floatVal(list_nth(privs, pindex++));
+	gj_info->outer_width = intVal(list_nth(privs, pindex++));
+	gj_info->outer_startup_cost = floatVal(list_nth(privs, pindex++));
+	gj_info->outer_total_cost = floatVal(list_nth(privs, pindex++));
 	/* for each depth */
-	gj_info->nrows_ratio = list_nth(privs, pindex++);
+	gj_info->plan_nrows_in = list_nth(privs, pindex++);
+	gj_info->plan_nrows_out = list_nth(privs, pindex++);
 	gj_info->ichunk_size = list_nth(privs, pindex++);
 	gj_info->join_types = list_nth(privs, pindex++);
     gj_info->join_quals = list_nth(exprs, eindex++);
@@ -247,7 +261,7 @@ typedef struct
 	GpuTaskState_v2	gts;
 	/* expressions to be used in fallback path */
 	List		   *join_types;
-	List		   *outer_quals;	/* single element list of ExprState */
+	List		   *outer_quals;	/* list of ExprState */
 	double			outer_ratio;
 	double			outer_nrows;
 	List		   *hash_outer_keys;
@@ -1699,19 +1713,17 @@ build_device_targetlist(GpuJoinPath *gpath,
 }
 
 /*
- * create_gpujoin_plan
+ * PlanGpuJoinPath
  *
- *
- *
- *
+ * Entrypoint to create CustomScan(GpuJoin) node
  */
 static Plan *
-create_gpujoin_plan(PlannerInfo *root,
-					RelOptInfo *rel,
-					CustomPath *best_path,
-					List *tlist,
-					List *clauses,
-					List *custom_plans)
+PlanGpuJoinPath(PlannerInfo *root,
+				RelOptInfo *rel,
+				CustomPath *best_path,
+				List *tlist,
+				List *clauses,
+				List *custom_plans)
 {
 	GpuJoinPath	   *gjpath = (GpuJoinPath *) best_path;
 	GpuJoinInfo		gj_info;
@@ -1736,6 +1748,9 @@ create_gpujoin_plan(PlannerInfo *root,
 	memset(&gj_info, 0, sizeof(GpuJoinInfo));
 	gj_info.outer_ratio = 1.0;
 	gj_info.outer_nrows = outer_plan->plan_rows;
+	gj_info.outer_width = outer_plan->plan_width;
+	gj_info.outer_startup_cost = outer_plan->startup_cost;
+	gj_info.outer_total_cost = outer_plan->total_cost;
 	gj_info.num_rels = gjpath->num_rels;
 
 	outer_nrows = outer_plan->plan_rows;
@@ -1745,7 +1760,6 @@ create_gpujoin_plan(PlannerInfo *root,
 		List	   *hash_outer_keys = NIL;
 		List	   *join_quals = NIL;
 		List	   *other_quals = NIL;
-		float		nrows_ratio;
 
 		foreach (lc, gjpath->inners[i].hash_quals)
 		{
@@ -1782,9 +1796,10 @@ create_gpujoin_plan(PlannerInfo *root,
 		/*
 		 * Add properties of GpuJoinInfo
 		 */
-		nrows_ratio = gjpath->inners[i].join_nrows / outer_nrows;
-		gj_info.nrows_ratio = lappend_int(gj_info.nrows_ratio,
-										  float_as_int(nrows_ratio));
+		gj_info.plan_nrows_in = lappend(gj_info.plan_nrows_in,
+					makeFloat(psprintf("%.0f", outer_nrows)));
+		gj_info.plan_nrows_out = lappend(gj_info.plan_nrows_out,
+					makeFloat(psprintf("%.0f", gjpath->inners[i].join_nrows)));
 		gj_info.ichunk_size = lappend_int(gj_info.ichunk_size,
 										  gjpath->inners[i].ichunk_size);
 		gj_info.join_types = lappend_int(gj_info.join_types,
@@ -1825,7 +1840,7 @@ create_gpujoin_plan(PlannerInfo *root,
 	if (gjpath->outer_relid)
 	{
 		cscan->scan.scanrelid = gjpath->outer_relid;
-		gj_info.outer_quals = build_flatten_qualifier(gjpath->outer_quals);
+		gj_info.outer_quals = gjpath->outer_quals;
 	}
 	else
 	{
@@ -2028,12 +2043,11 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	 */
 	gjs->num_rels = gj_info->num_rels;
 	gjs->join_types = gj_info->join_types;
-	if (!gj_info->outer_quals)
-		gjs->outer_quals = NIL;
-	else
+	gjs->outer_quals = NIL;
+	foreach (lc1, gj_info->outer_quals)
 	{
-		ExprState  *expr_state = ExecInitExpr(gj_info->outer_quals, &ss->ps);
-		gjs->outer_quals = list_make1(expr_state);
+		ExprState  *expr_state = ExecInitExpr(lfirst(lc1), &ss->ps);
+		gjs->outer_quals = lappend(gjs->outer_quals, expr_state);
 	}
 	gjs->outer_ratio = gj_info->outer_ratio;
 	gjs->outer_nrows = gj_info->outer_nrows;
@@ -2159,6 +2173,8 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 		List	   *hash_inner_keys;
 		List	   *hash_outer_keys;
 		TupleTableSlot *inner_slot;
+		double		plan_nrows_in;
+		double		plan_nrows_out;
 
 		istate->state = ExecInitNode(inner_plan, estate, eflags);
 		istate->econtext = CreateExprContext(estate);
@@ -2167,8 +2183,9 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 			long_as_double(intVal(list_nth(gj_info->nloops_major, i)));
 		istate->nbatches_exec =
 			((eflags & EXEC_FLAG_EXPLAIN_ONLY) != 0 ? -1 : 0);
-		istate->nrows_ratio =
-			int_as_float(list_nth_int(gj_info->nrows_ratio, i));
+		plan_nrows_in = floatVal(list_nth(gj_info->plan_nrows_in, i));
+		plan_nrows_out = floatVal(list_nth(gj_info->plan_nrows_out, i));
+		istate->nrows_ratio = plan_nrows_out / Max(plan_nrows_in, 1.0);
 		istate->ichunk_size = list_nth_int(gj_info->ichunk_size, i);
 		istate->join_type = (JoinType)list_nth_int(gj_info->join_types, i);
 
@@ -2488,7 +2505,7 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 	CustomScan	   *cscan = (CustomScan *) node->ss.ps.plan;
 	GpuJoinInfo	   *gj_info = deform_gpujoin_info(cscan);
 	runtimeStat	   *rt_stat = gjs->rt_stat;
-	List		   *context;
+	List		   *dcontext;
 	ListCell	   *lc1;
 	ListCell	   *lc2;
 	ListCell	   *lc3;
@@ -2499,10 +2516,10 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 	StringInfoData	str;
 
 	initStringInfo(&str);
-	/* name lookup context */
-	context =  set_deparse_context_planstate(es->deparse_cxt,
-											 (Node *) node,
-											 ancestors);
+	/* deparse context */
+	dcontext =  set_deparse_context_planstate(es->deparse_cxt,
+											  (Node *) node,
+											  ancestors);
 	/* Device projection */
 	resetStringInfo(&str);
 	foreach (lc1, cscan->custom_scan_tlist)
@@ -2518,7 +2535,7 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 			appendStringInfo(&str, ", ");
 		if (tle->resjunk)
 			appendStringInfoChar(&str, '[');
-		temp = deparse_expression((Node *)tle->expr, context, true, false);
+		temp = deparse_expression((Node *)tle->expr, dcontext, true, false);
 		appendStringInfo(&str, "%s", temp);
 		if (es->verbose)
 		{
@@ -2532,27 +2549,20 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 	ExplainPropertyText("GPU Projection", str.data, es);
 
 	/* statistics for outer scan, if it was pulled-up */
-	//pgstrom_explain_outer_bulkexec(&gjs->gts, context, ancestors, es);
-
-	/* outer qualifier if any */
-	if (gj_info->outer_quals)
+	if (es->analyze)
 	{
-		temp = deparse_expression((Node *)gj_info->outer_quals,
-								  context, es->verbose, false);
-		if (es->analyze)
-			temp = psprintf("%s (%.2f%%, expected %.2f%%)",
-							temp,
-							100.0 * ((double)(rt_stat->inner_nitems[0] +
-											  rt_stat->right_nitems[0]) /
-									 (double) rt_stat->source_nitems),
-							100.0 * gj_info->outer_ratio);
-		else
-			temp = psprintf("%s (%.2f%%)",
-							temp,
-							100.0 * gj_info->outer_ratio);
-		ExplainPropertyText("GPU Filter", temp, es);
+		gjs->gts.outer_instrument.tuplecount = (rt_stat->inner_nitems[0] +
+												rt_stat->right_nitems[0]);
+		gjs->gts.outer_instrument.nfiltered1 = (rt_stat->source_nitems -
+												rt_stat->inner_nitems[0] -
+												rt_stat->right_nitems[0]);
 	}
-
+	pgstromExplainOuterScan(&gjs->gts, dcontext, ancestors, es,
+							gj_info->outer_quals,
+                            gj_info->outer_startup_cost,
+                            gj_info->outer_total_cost,
+                            gj_info->outer_nrows,
+                            gj_info->outer_width);
 	/* join-qualifiers */
 	depth = 1;
 	forfour (lc1, gj_info->join_types,
@@ -2584,7 +2594,7 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 		if (hash_outer_key)
 		{
 			temp = deparse_expression((Node *)hash_outer_key,
-                                      context, true, false);
+                                      dcontext, true, false);
 			appendStringInfo(&str, ", HashKeys: (%s)", temp);
 		}
 		snprintf(qlabel, sizeof(qlabel), "Depth% 2d", depth);
@@ -2592,7 +2602,7 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 		resetStringInfo(&str);
 
 		/* join_quals */
-		temp = deparse_expression((Node *)join_quals, context,
+		temp = deparse_expression((Node *)join_quals, dcontext,
 								  true, false);
 		if (es->format == EXPLAIN_FORMAT_TEXT)
 		{
@@ -2608,7 +2618,7 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 		/* other_quals if any */
 		if (other_quals)
 		{
-			temp = deparse_expression((Node *)other_quals, context,
+			temp = deparse_expression((Node *)other_quals, dcontext,
 									  es->verbose, false);
 			if (es->format == EXPLAIN_FORMAT_TEXT)
 			{
@@ -2629,8 +2639,7 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 									rt_stat->right_nitems[depth - 1]);
 			size_t		nrows_out1 = rt_stat->inner_nitems[depth];
 			size_t		nrows_out2 = rt_stat->right_nitems[depth];
-			cl_float	nrows_ratio
-				= int_as_float(list_nth_int(gj_info->nrows_ratio, depth - 1));
+			cl_float	nrows_ratio = istate->nrows_ratio;
 
 			if (nrows_out2 > 0)
 			{
@@ -2676,8 +2685,7 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 		else
 		{
 			innerState *istate = &gjs->inners[depth-1];
-			cl_float	nrows_ratio
-				= int_as_float(list_nth_int(gj_info->nrows_ratio, depth - 1));
+			cl_float	nrows_ratio = istate->nrows_ratio;
 
 			appendStringInfo(&str,
 							 "Nrows (in/out: %.2f%%), "
@@ -3638,7 +3646,7 @@ gpujoin_codegen(PlannerInfo *root,
 	codegen_gpuscan_quals(&source,
 						  context,
 						  cscan->scan.scanrelid,
-						  (List *)gj_info->outer_quals);
+						  gj_info->outer_quals);
 	/*
 	 * gpujoin_join_quals
 	 */
@@ -6823,7 +6831,7 @@ pgstrom_init_gpujoin(void)
 							 NULL, NULL, NULL);
 	/* setup path methods */
 	gpujoin_path_methods.CustomName				= "GpuJoin";
-	gpujoin_path_methods.PlanCustomPath			= create_gpujoin_plan;
+	gpujoin_path_methods.PlanCustomPath			= PlanGpuJoinPath;
 
 	/* setup plan methods */
 	gpujoin_plan_methods.CustomName				= "GpuJoin";
