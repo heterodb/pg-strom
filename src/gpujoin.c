@@ -765,6 +765,7 @@ cost_gpujoin(PlannerInfo *root,
 							gpath->outer_quals,
 							&scan_ntuples,
 							&num_chunks,
+							NULL, // to be fixed later
 							&startup_cost,
 							&run_cost);
 	}

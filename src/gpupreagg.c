@@ -834,6 +834,7 @@ cost_gpupreagg(PlannerInfo *root,
 							gpa_info->outer_quals,
 							&ntuples,
 							&nchunks,
+							NULL, // to be fixed later
 							&startup_cost,
 							&run_cost);
 		gpa_info->outer_startup_cost = startup_cost;

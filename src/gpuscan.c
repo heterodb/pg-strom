@@ -48,7 +48,6 @@
 #include "cuda_gpuscan.h"
 
 static set_rel_pathlist_hook_type	set_rel_pathlist_next;
-static ExtensibleNodeMethods gpuscan_info_methods;
 static CustomPathMethods	gpuscan_path_methods;
 static CustomScanMethods	gpuscan_plan_methods;
 static CustomExecMethods	gpuscan_exec_methods;
@@ -65,29 +64,46 @@ typedef struct {
 	cl_uint		proj_row_extra;	/* extra requirements if row format */
 	cl_uint		proj_slot_extra;/* extra requirements if slot format */
 	cl_uint		nrows_per_block;/* estimated tuple density per block */
+	List	   *used_params;
+	List	   *dev_quals;
 } GpuScanInfo;
 
-#define GPUSCANINFO_EXNODE_NAME		"GpuScanInfo"
-
 static inline void
-form_gpuscan_custom_exprs(CustomScan *cscan,
-						  List *used_params,
-						  List *dev_quals)
+form_gpuscan_info(CustomScan *cscan, GpuScanInfo *gs_info)
 {
-	cscan->custom_exprs = list_make2(used_params, dev_quals);
+	List	   *privs = NIL;
+	List	   *exprs = NIL;
+
+	privs = lappend(privs, makeString(gs_info->kern_source));
+	privs = lappend(privs, makeInteger(gs_info->extra_flags));
+	privs = lappend(privs, makeInteger(gs_info->proj_row_extra));
+	privs = lappend(privs, makeInteger(gs_info->proj_slot_extra));
+	privs = lappend(privs, makeInteger(gs_info->nrows_per_block));
+	exprs = lappend(exprs, gs_info->used_params);
+	exprs = lappend(exprs, gs_info->dev_quals);
+
+	cscan->custom_private = privs;
+	cscan->custom_exprs = exprs;
 }
 
-static inline void
-deform_gpuscan_custom_exprs(CustomScan *cscan,
-							List **p_used_params,
-							List **p_dev_quals)
+static inline GpuScanInfo *
+deform_gpuscan_info(CustomScan *cscan)
 {
-	ListCell   *cell = list_head(cscan->custom_exprs);
+	GpuScanInfo *gs_info = palloc0(sizeof(GpuScanInfo));
+	List	   *privs = cscan->custom_private;
+	List	   *exprs = cscan->custom_exprs;
+	int			pindex = 0;
+	int			eindex = 0;
 
-	Assert(list_length(cscan->custom_exprs) == 2);
-	*p_used_params = lfirst(cell);
-	cell = lnext(cell);
-	*p_dev_quals = lfirst(cell);
+	gs_info->kern_source = strVal(list_nth(privs, pindex++));
+	gs_info->extra_flags = intVal(list_nth(privs, pindex++));
+	gs_info->proj_row_extra = intVal(list_nth(privs, pindex++));
+	gs_info->proj_slot_extra = intVal(list_nth(privs, pindex++));
+	gs_info->nrows_per_block = intVal(list_nth(privs, pindex++));
+	gs_info->used_params = list_nth(exprs, eindex++);
+	gs_info->dev_quals = list_nth(exprs, eindex++);
+
+	return gs_info;
 }
 
 typedef struct
@@ -293,6 +309,7 @@ cost_gpuscan_common(PlannerInfo *root,
 					List *scan_quals,
 					double *p_scan_ntuples,
 					double *p_scan_nchunks,
+					cl_uint *p_nrows_per_block,
 					Cost *p_startup_cost,
 					Cost *p_run_cost)
 {
@@ -304,9 +321,14 @@ cost_gpuscan_common(PlannerInfo *root,
 	double			nchunks;
 	double			selectivity;
 	double			spc_seq_page_cost;
+	cl_uint			nrows_per_block;
 	Size			heap_size;
 	Size			htup_size;
 	QualCost		qcost;
+
+	Assert(baserel->reloptkind == RELOPT_BASEREL &&
+		   baserel->relid > 0 &&
+		   baserel->relid < root->simple_rel_array_size);
 
 	/* selectivity of device executable qualifiers */
 	selectivity = clauselist_selectivity(root,
@@ -355,6 +377,23 @@ cost_gpuscan_common(PlannerInfo *root,
 						  KDS_CALCULATE_HEAD_LENGTH(baserel->max_attr))));
 	nchunks = Max(nchunks, 1);
 
+	/*
+	 * estimation of the tuple density per block - this logic follows
+	 * the manner in estimate_rel_size()
+	 */
+	if (baserel->pages > 0)
+		nrows_per_block = ceil(baserel->tuples / (double) baserel->pages);
+	else
+	{
+		RangeTblEntry *rte = root->simple_rte_array[baserel->relid];
+		size_t		tuple_width = get_relation_data_width(rte->relid, NULL);
+
+		tuple_width += MAXALIGN(SizeofHeapTupleHeader);
+		tuple_width += sizeof(ItemIdData);
+		/* note: integer division is intentional here */
+		nrows_per_block = (BLCKSZ - SizeOfPageHeaderData) / tuple_width;
+	}
+
 	/* Cost for GPU qualifiers */
 	cost_qual_eval(&qcost, scan_quals, root);
 	startup_cost += qcost.startup;
@@ -366,6 +405,7 @@ cost_gpuscan_common(PlannerInfo *root,
 
 	*p_scan_ntuples = ntuples;
 	*p_scan_nchunks = nchunks;
+	*p_nrows_per_block = nrows_per_block;
 	*p_startup_cost = startup_cost;
 	*p_run_cost = run_cost;
 }
@@ -382,6 +422,7 @@ create_gpuscan_path(PlannerInfo *root,
 					int parallel_nworkers)
 {
 	CustomPath	   *cpath = makeNode(CustomPath);
+	GpuScanInfo	   *gs_info = palloc0(sizeof(GpuScanInfo));
 	ParamPathInfo  *param_info;
 	List		   *ppi_quals;
 	Cost			startup_cost;
@@ -403,15 +444,10 @@ create_gpuscan_path(PlannerInfo *root,
 	cpath->path.parallel_workers = parallel_nworkers;
 	cpath->path.rows = (param_info ? param_info->ppi_rows : baserel->rows);
 
-	cpath->path.pathkeys = NIL;	/* unsorted results */
-	cpath->flags = 0;
-	cpath->custom_paths = NIL;
-	cpath->custom_private = NIL;
-	cpath->methods = &gpuscan_path_methods;
-
 	/* cost for disk i/o + GPU qualifiers */
 	cost_gpuscan_common(root, &cpath->path, dev_quals,
 						&ntuples, &nchunks,
+						&gs_info->nrows_per_block,
 						&startup_cost, &run_cost);
 	/* cost for CPU qualifiers */
 	cost_qual_eval(&qcost, host_quals, root);
@@ -434,6 +470,11 @@ create_gpuscan_path(PlannerInfo *root,
 
 	cpath->path.startup_cost = startup_cost + startup_delay;
 	cpath->path.total_cost = startup_cost + run_cost;
+	cpath->path.pathkeys = NIL;	/* unsorted results */
+	cpath->flags = 0;
+	cpath->custom_paths = NIL;
+	cpath->custom_private = list_make1(gs_info);
+	cpath->methods = &gpuscan_path_methods;
 
 	return &cpath->path;
 }
@@ -1459,27 +1500,26 @@ bufsz_estimate_gpuscan_projection(RelOptInfo *baserel, Relation relation,
 }
 
 /*
- * create_gpuscan_plan - construction of a new GpuScan plan node
+ * PlanGpuScanPath - construction of a new GpuScan plan node
  */
 static Plan *
-create_gpuscan_plan(PlannerInfo *root,
-					RelOptInfo *baserel,
-					CustomPath *best_path,
-					List *tlist,
-					List *clauses,
-					List *custom_children)
+PlanGpuScanPath(PlannerInfo *root,
+				RelOptInfo *baserel,
+				CustomPath *best_path,
+				List *tlist,
+				List *clauses,
+				List *custom_children)
 {
+	GpuScanInfo	   *gs_info = linitial(best_path->custom_private);
 	CustomScan	   *cscan;
 	RangeTblEntry  *rte;
 	Relation		relation;
-	GpuScanInfo	   *gs_info;
 	List		   *host_quals = NIL;
 	List		   *dev_quals = NIL;
 	List		   *tlist_dev = NIL;
 	ListCell	   *cell;
 	cl_int			proj_row_extra = 0;
 	cl_int			proj_slot_extra = 0;
-	cl_uint			nrows_per_block;
 	StringInfoData	kern;
 	StringInfoData	source;
 	codegen_context	context;
@@ -1539,22 +1579,6 @@ create_gpuscan_plan(PlannerInfo *root,
 	pfree(kern.data);
 
 	/*
-	 * estimation of the tuple density per block - this logic follows
-	 * the manner in estimate_rel_size()
-	 */
-	if (baserel->pages > 0)
-		nrows_per_block = ceil(baserel->tuples / (double) baserel->pages);
-	else
-	{
-		int32		tuple_width = get_relation_data_width(rte->relid, NULL);
-
-		tuple_width += MAXALIGN(SizeofHeapTupleHeader);
-		tuple_width += sizeof(ItemIdData);
-		/* note: integer division is intentional here */
-		nrows_per_block = (BLCKSZ - SizeOfPageHeaderData) / tuple_width;
-	}
-
-	/*
 	 * Construction of GpuScanPlan node; on top of CustomPlan node
 	 */
 	cscan = makeNode(CustomScan);
@@ -1566,19 +1590,16 @@ create_gpuscan_plan(PlannerInfo *root,
 	cscan->flags = best_path->flags;
 	cscan->methods = &gpuscan_plan_methods;
 	cscan->custom_plans = NIL;
+	cscan->custom_scan_tlist = tlist_dev;
 
-	gs_info = (GpuScanInfo *)newNode(sizeof(GpuScanInfo),
-									 T_ExtensibleNode);
-	gs_info->ex.extnodename = GPUSCANINFO_EXNODE_NAME;
 	gs_info->kern_source = source.data;
 	gs_info->extra_flags = context.extra_flags |
 		DEVKERNEL_NEEDS_DYNPARA | DEVKERNEL_NEEDS_GPUSCAN;
 	gs_info->proj_row_extra = proj_row_extra;
 	gs_info->proj_slot_extra = proj_slot_extra;
-	gs_info->nrows_per_block = nrows_per_block;
-	cscan->custom_private = list_make1(gs_info);
-	form_gpuscan_custom_exprs(cscan, context.used_params, dev_quals);
-	cscan->custom_scan_tlist = tlist_dev;
+	gs_info->used_params = context.used_params;
+	gs_info->dev_quals = dev_quals;
+	form_gpuscan_info(cscan, gs_info);
 
 	return &cscan->scan.plan;
 }
@@ -1737,14 +1758,10 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	GpuContext_v2  *gcontext = NULL;
 	GpuScanState   *gss = (GpuScanState *) node;
 	CustomScan	   *cscan = (CustomScan *)node->ss.ps.plan;
-	GpuScanInfo	   *gs_info = linitial(cscan->custom_private);
-	List		   *used_params;
-	List		   *dev_quals;
+	GpuScanInfo	   *gs_info = deform_gpuscan_info(cscan);
 	char		   *kern_define;
 	ProgramId		program_id;
 	bool			with_connection = ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0);
-
-	deform_gpuscan_custom_exprs(cscan, &used_params, &dev_quals);
 
 	/* gpuscan should not have inner/outer plan right now */
 	Assert(outerPlan(node) == NULL);
@@ -1757,7 +1774,7 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	pgstromInitGpuTaskState(&gss->gts,
 							gcontext,
 							GpuTaskKind_GpuScan,
-							used_params,
+							gs_info->used_params,
 							estate);
 	gss->gts.cb_next_task   = gpuscan_next_task;
 	gss->gts.cb_next_tuple  = gpuscan_next_tuple;
@@ -1774,7 +1791,7 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 		ExecInitExpr((Expr *) cscan->custom_scan_tlist, &gss->gts.css.ss.ps);
 	/* initialize device qualifiers also, for CPU fallback */
 	gss->dev_quals = (List *)
-		ExecInitExpr((Expr *) dev_quals, &gss->gts.css.ss.ps);
+		ExecInitExpr((Expr *) gs_info->dev_quals, &gss->gts.css.ss.ps);
 	/* true, if device projection is needed */
 	gss->dev_projection = (cscan->custom_scan_tlist != NIL);
 	/* device projection related resource consumption */
@@ -1976,14 +1993,11 @@ ExplainGpuScan(CustomScanState *node, List *ancestors, ExplainState *es)
 {
 	GpuScanState   *gss = (GpuScanState *) node;
 	CustomScan	   *cscan = (CustomScan *) gss->gts.css.ss.ps.plan;
-	List		   *used_params;
-	List		   *dev_quals;
+	GpuScanInfo	   *gs_info = deform_gpuscan_info(cscan);
 	List		   *dcontext;
 	List		   *dev_proj = NIL;
 	char		   *exprstr;
 	ListCell	   *lc;
-
-	deform_gpuscan_custom_exprs(cscan, &used_params, &dev_quals);
 
 	/* Set up deparsing context */
 	dcontext = set_deparse_context_planstate(es->deparse_cxt,
@@ -2006,11 +2020,11 @@ ExplainGpuScan(CustomScanState *node, List *ancestors, ExplainState *es)
 	}
 
 	/* Show device filters */
-	if (dev_quals != NIL)
+	if (gs_info->dev_quals != NIL)
 	{
-		Node   *dev_quals_unified = (Node *)make_ands_explicit(dev_quals);
+		Node   *dev_quals = (Node *)make_ands_explicit(gs_info->dev_quals);
 
-		exprstr = deparse_expression(dev_quals_unified, dcontext,
+		exprstr = deparse_expression(dev_quals, dcontext,
 									 es->verbose, false);
 		ExplainPropertyText("GPU Filter", exprstr, es);
 
@@ -2582,62 +2596,6 @@ gpuscanRewindScanChunk(GpuTaskState_v2 *gts)
 }
 
 /*
- * Extensible node support for GpuScanInfo
- */
-static void
-gpuscan_info_copy(ExtensibleNode *__newnode, const ExtensibleNode *__oldnode)
-{
-	GpuScanInfo		   *newnode = (GpuScanInfo *)__newnode;
-	const GpuScanInfo  *oldnode = (const GpuScanInfo *)__oldnode;
-
-	COPY_STRING_FIELD(kern_source);
-	COPY_SCALAR_FIELD(extra_flags);
-	COPY_SCALAR_FIELD(proj_row_extra);
-	COPY_SCALAR_FIELD(proj_slot_extra);
-	COPY_SCALAR_FIELD(nrows_per_block);
-}
-
-static bool
-gpuscan_info_equal(const ExtensibleNode *__a, const ExtensibleNode *__b)
-{
-	GpuScanInfo		   *a = (GpuScanInfo *)__a;
-	const GpuScanInfo  *b = (GpuScanInfo *)__b;
-
-	COMPARE_STRING_FIELD(kern_source);
-	COMPARE_SCALAR_FIELD(extra_flags);
-	COMPARE_SCALAR_FIELD(proj_row_extra);
-	COMPARE_SCALAR_FIELD(proj_slot_extra);
-	COMPARE_SCALAR_FIELD(nrows_per_block);
-
-	return true;
-}
-
-static void
-gpuscan_info_out(StringInfo str, const ExtensibleNode *__node)
-{
-	const GpuScanInfo  *node = (const GpuScanInfo *)__node;
-
-	WRITE_STRING_FIELD(kern_source);
-	WRITE_UINT_FIELD(extra_flags);
-	WRITE_INT_FIELD(proj_row_extra);
-	WRITE_INT_FIELD(proj_slot_extra);
-	WRITE_UINT_FIELD(nrows_per_block);
-}
-
-static void
-gpuscan_info_read(ExtensibleNode *node)
-{
-	READ_LOCALS(GpuScanInfo);
-
-	READ_STRING_FIELD(kern_source);
-	READ_UINT_FIELD(extra_flags);
-	READ_INT_FIELD(proj_row_extra);
-	READ_INT_FIELD(proj_slot_extra);
-	READ_UINT_FIELD(nrows_per_block);
-}
-
-
-/*
  * gpuscan_cleanup_cuda_resources
  */
 static void
@@ -3020,20 +2978,11 @@ pgstrom_init_gpuscan(void)
 							 PGC_USERSET,
                              GUC_NOT_IN_SAMPLE,
                              NULL, NULL, NULL);
-	/* setup GpuScanInfo serialization */
-	memset(&gpuscan_info_methods, 0, sizeof(gpuscan_info_methods));
-	gpuscan_info_methods.extnodename	= GPUSCANINFO_EXNODE_NAME;
-	gpuscan_info_methods.node_size		= sizeof(GpuScanInfo);
-	gpuscan_info_methods.nodeCopy		= gpuscan_info_copy;
-	gpuscan_info_methods.nodeEqual		= gpuscan_info_equal;
-	gpuscan_info_methods.nodeOut		= gpuscan_info_out;
-	gpuscan_info_methods.nodeRead		= gpuscan_info_read;
-	RegisterExtensibleNodeMethods(&gpuscan_info_methods);
 
 	/* setup path methods */
 	memset(&gpuscan_path_methods, 0, sizeof(gpuscan_path_methods));
 	gpuscan_path_methods.CustomName			= "GpuScan";
-	gpuscan_path_methods.PlanCustomPath		= create_gpuscan_plan;
+	gpuscan_path_methods.PlanCustomPath		= PlanGpuScanPath;
 
 	/* setup plan methods */
 	memset(&gpuscan_plan_methods, 0, sizeof(gpuscan_plan_methods));
