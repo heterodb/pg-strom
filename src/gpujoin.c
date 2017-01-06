@@ -747,7 +747,7 @@ cost_gpujoin(PlannerInfo *root,
 	PathTarget *join_reltarget = joinrel->reltarget;
 	Cost		startup_cost = 0.0;
 	Cost		run_cost = 0.0;
-	Cost		run_cost_per_chunk;
+	Cost		run_cost_per_chunk = 0.0;
 	Cost		startup_delay;
 	QualCost   *join_cost;
 	Size		inner_total_sz = 0;
@@ -838,13 +838,13 @@ cost_gpujoin(PlannerInfo *root,
 			startup_cost += (cpu_operator_cost * num_hashkeys *
 							 scan_path->rows);
 			/* cost to compute hash value by GPU */
-			run_cost_per_chunk = (pgstrom_gpu_operator_cost *
-								  num_hashkeys *
-								  chunk_ntuples);
+			run_cost_per_chunk += (pgstrom_gpu_operator_cost *
+								   num_hashkeys *
+								   chunk_ntuples);
 			/* cost to evaluate join qualifiers */
-			run_cost_per_chunk = (join_cost[i].per_tuple *
-								  chunk_ntuples *
-								  Max(hash_nsteps, 1.0));
+			run_cost_per_chunk += (join_cost[i].per_tuple *
+								   chunk_ntuples *
+								   Max(hash_nsteps, 1.0));
 		}
 		else
 		{
