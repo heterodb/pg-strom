@@ -35,6 +35,7 @@
 #include <cuda.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <float.h>
 #include <limits.h>
 #include <sys/time.h>
 #include "cuda_common.h"
@@ -943,6 +944,15 @@ float_as_int(cl_float fval)
 	} datum;
 	datum.fval = fval;
 	return datum.ival;
+}
+
+/*
+ * pmakeFloat - for convenient; makeFloat + psprintf
+ */
+static inline Value *
+pmakeFloat(cl_double float_value)
+{
+	return makeFloat(psprintf("%.*e", DBL_DIG+3, float_value));
 }
 
 /*

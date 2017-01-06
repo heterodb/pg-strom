@@ -115,15 +115,11 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 	privs = lappend(privs, makeInteger(gj_info->extra_flags));
 	exprs = lappend(exprs, gj_info->used_params);
 	exprs = lappend(exprs, gj_info->outer_quals);
-	privs = lappend(privs, makeFloat(psprintf("%.08f",
-											  gj_info->outer_ratio)));
-	privs = lappend(privs, makeFloat(psprintf("%.08f",
-											  gj_info->outer_nrows)));
+	privs = lappend(privs, pmakeFloat(gj_info->outer_ratio));
+	privs = lappend(privs, pmakeFloat(gj_info->outer_nrows));
 	privs = lappend(privs, makeInteger(gj_info->outer_width));
-	privs = lappend(privs, makeFloat(psprintf("%.02f",
-											  gj_info->outer_startup_cost)));
-	privs = lappend(privs, makeFloat(psprintf("%.02f",
-											  gj_info->outer_total_cost)));
+	privs = lappend(privs, pmakeFloat(gj_info->outer_startup_cost));
+	privs = lappend(privs, pmakeFloat(gj_info->outer_total_cost));
 	privs = lappend(privs, makeInteger(gj_info->outer_nrows_per_block));
 	/* for each depth */
 	privs = lappend(privs, gj_info->plan_nrows_in);
@@ -1807,9 +1803,9 @@ PlanGpuJoinPath(PlannerInfo *root,
 		 * Add properties of GpuJoinInfo
 		 */
 		gj_info.plan_nrows_in = lappend(gj_info.plan_nrows_in,
-				makeFloat(psprintf("%.01f", outer_nrows)));
+										pmakeFloat(outer_nrows));
 		gj_info.plan_nrows_out = lappend(gj_info.plan_nrows_out,
-				makeFloat(psprintf("%.01f", gjpath->inners[i].join_nrows)));
+									pmakeFloat(gjpath->inners[i].join_nrows));
 		gj_info.ichunk_size = lappend_int(gj_info.ichunk_size,
 										  gjpath->inners[i].ichunk_size);
 		gj_info.join_types = lappend_int(gj_info.join_types,
