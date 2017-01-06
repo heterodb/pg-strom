@@ -80,14 +80,16 @@ form_gpupreagg_info(CustomScan *cscan, GpuPreAggInfo *gpa_info)
 	List	   *exprs = NIL;
 
 	privs = lappend(privs, makeInteger(gpa_info->num_group_keys));
-	privs = lappend(privs, makeFloat(psprintf("%f", gpa_info->plan_ngroups)));
+	privs = lappend(privs, makeFloat(psprintf("%.01f",
+											  gpa_info->plan_ngroups)));
 	privs = lappend(privs, makeInteger(gpa_info->plan_nchunks));
 	privs = lappend(privs, makeInteger(gpa_info->plan_extra_sz));
-	privs = lappend(privs,
-					makeFloat(psprintf("%f", gpa_info->outer_startup_cost)));
-	privs = lappend(privs,
-					makeFloat(psprintf("%f", gpa_info->outer_total_cost)));
-	privs = lappend(privs, makeFloat(psprintf("%f", gpa_info->outer_nrows)));
+	privs = lappend(privs, makeFloat(psprintf("%.04f",
+											  gpa_info->outer_startup_cost)));
+	privs = lappend(privs, makeFloat(psprintf("%.04f",
+											  gpa_info->outer_total_cost)));
+	privs = lappend(privs, makeFloat(psprintf("%.01f",
+											  gpa_info->outer_nrows)));
 	privs = lappend(privs, makeInteger(gpa_info->outer_width));
 	privs = lappend(privs, makeInteger(gpa_info->outer_nrows_per_block));
 	privs = lappend(privs, makeInteger(gpa_info->outer_scanrelid));

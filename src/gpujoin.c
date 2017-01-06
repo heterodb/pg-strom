@@ -115,12 +115,14 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 	privs = lappend(privs, makeInteger(gj_info->extra_flags));
 	exprs = lappend(exprs, gj_info->used_params);
 	exprs = lappend(exprs, gj_info->outer_quals);
-	privs = lappend(privs, makeFloat(psprintf("%.8f", gj_info->outer_ratio)));
-	privs = lappend(privs, makeFloat(psprintf("%.8f", gj_info->outer_nrows)));
+	privs = lappend(privs, makeFloat(psprintf("%.08f",
+											  gj_info->outer_ratio)));
+	privs = lappend(privs, makeFloat(psprintf("%.08f",
+											  gj_info->outer_nrows)));
 	privs = lappend(privs, makeInteger(gj_info->outer_width));
-	privs = lappend(privs, makeFloat(psprintf("%.2f",
+	privs = lappend(privs, makeFloat(psprintf("%.02f",
 											  gj_info->outer_startup_cost)));
-	privs = lappend(privs, makeFloat(psprintf("%.2f",
+	privs = lappend(privs, makeFloat(psprintf("%.02f",
 											  gj_info->outer_total_cost)));
 	privs = lappend(privs, makeInteger(gj_info->outer_nrows_per_block));
 	/* for each depth */
@@ -180,6 +182,9 @@ deform_gpujoin_info(CustomScan *cscan)
 	gj_info->extra_maxlen = intVal(list_nth(privs, pindex++));
 	Assert(pindex == list_length(privs));
 	Assert(eindex == list_length(exprs));
+
+	elog(INFO, "plan_nrows_in => %s", nodeToString(gj_info->plan_nrows_in));
+	elog(INFO, "plan_nrows_out => %s", nodeToString(gj_info->plan_nrows_out));
 
 	return gj_info;
 }
@@ -1802,9 +1807,9 @@ PlanGpuJoinPath(PlannerInfo *root,
 		 * Add properties of GpuJoinInfo
 		 */
 		gj_info.plan_nrows_in = lappend(gj_info.plan_nrows_in,
-					makeFloat(psprintf("%.0f", outer_nrows)));
+				makeFloat(psprintf("%.01f", outer_nrows)));
 		gj_info.plan_nrows_out = lappend(gj_info.plan_nrows_out,
-					makeFloat(psprintf("%.0f", gjpath->inners[i].join_nrows)));
+				makeFloat(psprintf("%.01f", gjpath->inners[i].join_nrows)));
 		gj_info.ichunk_size = lappend_int(gj_info.ichunk_size,
 										  gjpath->inners[i].ichunk_size);
 		gj_info.join_types = lappend_int(gj_info.join_types,
