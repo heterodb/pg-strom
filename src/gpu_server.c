@@ -443,6 +443,14 @@ gpuservProcessPendingTasks(void)
 		dlist_push_tail(&session_running_tasks, &gtask->chain);
 		SpinLockRelease(&session_tasks_lock);
 
+		/* check signals */
+		CHECK_FOR_INTERRUPTS();
+		if (gpuserv_got_sigterm)
+			elog(FATAL, "GPU/CUDA Server [%d] (GPU-%d %s) was terminated",
+				 gpuserv_id,
+				 devAttrs[gpuserv_cuda_dindex].DEV_ID,
+				 devAttrs[gpuserv_cuda_dindex].DEV_NAME);
+
 		gcontext = gtask->gcontext;
 		PG_TRY();
 		{
@@ -534,6 +542,14 @@ gpuservFlushOutCompletedTasks(void)
 		memset(&gtask->chain, 0, sizeof(dlist_node));
 		SpinLockRelease(&session_tasks_lock);
 
+		/* check signals */
+		CHECK_FOR_INTERRUPTS();
+		if (gpuserv_got_sigterm)
+			elog(FATAL, "GPU/CUDA Server [%d] (GPU-%d %s) was terminated",
+				 gpuserv_id,
+				 devAttrs[gpuserv_cuda_dindex].DEV_ID,
+				 devAttrs[gpuserv_cuda_dindex].DEV_NAME);
+
 		gcontext = gtask->gcontext;
 		peer_fdesc = gtask->peer_fdesc;
 		PG_TRY();
@@ -566,11 +582,12 @@ gpuservFlushOutCompletedTasks(void)
 					close(peer_fdesc);
 				gpuservPutGpuContext(gcontext);
 			}
-			else if (retval > 0)
+			else if (retval > 0 && GpuContextIsEstablished(gcontext))
 			{
 				/*
-				 * GpuTask wants to execute GPU kernel again, so attach it
-				 * on the pending list again.
+				 * GpuTask wants to execute GPU kernel again, so attach
+				 * this task on the pending list again, as long as the
+				 * backend is still valid.
 				 */
 				SpinLockAcquire(&session_tasks_lock);
 				dlist_push_head(&session_pending_tasks, &gtask->chain);
@@ -590,14 +607,17 @@ gpuservFlushOutCompletedTasks(void)
 				 * code complicated...
 				 */
 				SharedGpuContext   *shgcon = gcontext->shgcon;
+				PGPROC			   *backend;
 
 				pgstromReleaseGpuTask(gtask);
 
 				SpinLockAcquire(&shgcon->lock);
 				shgcon->num_async_tasks--;
+				backend = shgcon->backend;
 				SpinLockRelease(&shgcon->lock);
 
-				SetLatch(&shgcon->backend->procLatch);
+				if (backend)
+					SetLatch(&backend->procLatch);
 
 				if (peer_fdesc >= 0)
 					close(peer_fdesc);
@@ -1431,16 +1451,7 @@ gpuserv_session_main(void)
 
 		ResetLatch(MyLatch);
 
-		CHECK_FOR_INTERRUPTS();
-
-		if (gpuserv_got_sigterm)
-			elog(FATAL, "GPU/CUDA Server [%d] (GPU-%d %s) was terminated",
-				 gpuserv_id,
-				 devAttrs[gpuserv_cuda_dindex].DEV_ID,
-				 devAttrs[gpuserv_cuda_dindex].DEV_NAME);
-
 		do {
-			CHECK_FOR_INTERRUPTS();
 			/*
 			 * Flush out completed tasks (it also releases GPU resource),
 			 * then process pending tasks. If any tasks get completed

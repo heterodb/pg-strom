@@ -433,6 +433,7 @@ extern GpuContext_v2 *AttachGpuContext(pgsocket sockfd,
 extern GpuContext_v2 *GetGpuContext(GpuContext_v2 *gcontext);
 extern bool PutGpuContext(GpuContext_v2 *gcontext);
 extern bool ForcePutGpuContext(GpuContext_v2 *gcontext);
+extern bool GpuContextIsEstablished(GpuContext_v2 *gcontext);
 
 extern Size gpuMemMaxAllocSize(void);
 extern CUresult	gpuMemAlloc_v2(GpuContext_v2 *gcontext,

@@ -496,16 +496,6 @@ ReleaseLocalResources(GpuContext_v2 *gcontext, bool normal_exit)
 	}
 }
 
-
-
-
-
-
-
-
-
-
-
 /*
  * MasterGpuContext - acquire the persistent GpuContext; to allocate shared
  * memory segment valid until Postmaster die. No need to put.
@@ -783,6 +773,25 @@ ForcePutGpuContext(GpuContext_v2 *gcontext)
 	dlist_push_head(&inactiveGpuContextList, &gcontext->chain);
 
 	return is_last_one;
+}
+
+/*
+ * GpuContextIsEstablished
+ *
+ * It checks whether GpuContext is established; it means both client and
+ * server are still connected via local socket, and both of them look at.
+ */
+bool
+GpuContextIsEstablished(GpuContext_v2 *gcontext)
+{
+	SharedGpuContext   *shgcon = gcontext->shgcon;
+	bool				retval;
+
+	SpinLockAcquire(&shgcon->lock);
+	retval = (shgcon->server && shgcon->backend);
+	SpinLockRelease(&shgcon->lock);
+
+	return retval;
 }
 
 /*

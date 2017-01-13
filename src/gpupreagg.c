@@ -4222,14 +4222,41 @@ gpupreagg_get_final_buffer(GpuPreAggTask *gpreagg,
 /*
  * gpupreagg_put_final_buffer
  *
- * It returns true if @gpreagg is the last task which references the attached
- * @pds_final. If @release_if_last_task is true, it releases the PDS and
- * relevant CUDA resources. Elsewhere, the caller is responsible to handle
- * final buffer termination correctly.
+ * MEMO:
+ * The last @gpreagg which references the attached @pds_final must perform
+ * as terminator of the buffer. The terminator is responsible to write-back
+ * contents of the final reduction buffer on the kernel space, and release
+ * any relevant CUDA resources.
+ * This routine returns TRUE, if caller must perform as a terminator of the
+ * attached @pds_final.
+ *
+ * @release_if_last_task indicates whether the relevant CUDA resource shall
+ * be released or not. Usually, if no unrecoverable errors, caller tries to
+ * retrieve the contents of the device-side final reduction buffer. So, only
+ * emergency case will set @release_if_last_task = TRUE.
+ * As long as the device-side final reduction buffer is valid, caller should
+ * terminate it by GPUPREAGG_ONLY_TERMINATION or equivalent.
+ *
+ * @task_will_retry indicates whether the supplied @gpreagg is enqueued then
+ * retried, or not. Due to critical section of the @gpa_sstate->lock, we
+ * adjust @gpa_sstate->ntasks_in_progress here. It means how many tasks are
+ * launched by the backend process, and don't complete the reduction steps.
+ * If @gpreagg wants to retry, it should not decrement the @ntasks_in_progress.
+ * Elsewhere, if @gpreagg will never run the reduction steps, set FALSE on
+ * this variable.
+ *
+ * @force_detach_buffer indicates whether the attached @pds_final shall be
+ * attached to any further tasks, or not. Once we got DataStoreNoSpace error,
+ * it makes sense not to attach this @pds_final to further tasks, because it
+ * is obvious its reduction steps makes error. If @force_detach_buffer=TRUE,
+ * we put NULL on the gpa_sstate->pds_final. It makes upcoming/next task to
+ * allocate a new empty final reduction buffer, and the previous @pds_final
+ * buffer shall not be acquired any more (unreferenced only).
  */
 static bool
 gpupreagg_put_final_buffer(GpuPreAggTask *gpreagg,
 						   bool release_if_last_task,
+						   bool task_will_retry,
 						   bool force_detach_buffer)
 {
 	GpuPreAggSharedState   *gpa_sstate = gpreagg->gpa_sstate;
@@ -4254,8 +4281,11 @@ gpupreagg_put_final_buffer(GpuPreAggTask *gpreagg,
 	 * detached.
 	 */
 	Assert(gpa_sstate->ntasks_in_progress > 0);
-	if (--gpa_sstate->ntasks_in_progress == 0 && gpa_sstate->scan_done)
-		is_terminator = true;
+	if (!task_will_retry)
+	{
+		if (--gpa_sstate->ntasks_in_progress == 0 && gpa_sstate->scan_done)
+			is_terminator = true;
+	}
 
 	Assert(pds_final->ntasks_running > 0);
 	if (--pds_final->ntasks_running == 0 && gpa_sstate->pds_final != pds_final)
@@ -4629,7 +4659,7 @@ out_of_resource:
 	 * this task cannot execute as is.
 	 */
 	gpupreagg_cleanup_cuda_resources(gpreagg);
-	if (gpupreagg_put_final_buffer(gpreagg, false, false))
+	if (gpupreagg_put_final_buffer(gpreagg, false, true, false))
 		gpupreagg_push_terminator_task(gpreagg);
 	/* retry task will never move to the out_of_resource */
 	Assert(!gpreagg->retry_by_nospace);
@@ -4804,7 +4834,7 @@ gpupreagg_process_task(GpuTask_v2 *gtask,
 	PG_CATCH();
 	{
 		gpupreagg_cleanup_cuda_resources(gpreagg);
-		gpupreagg_put_final_buffer(gpreagg, true, false);
+		gpupreagg_put_final_buffer(gpreagg, true, false, false);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
@@ -4923,7 +4953,7 @@ gpupreagg_complete_task(GpuTask_v2 *gtask)
 	if (gpreagg->task.kerror.errcode == StromError_Success)
 	{
 		gpupreagg_cleanup_cuda_resources(gpreagg);
-		if (!gpupreagg_put_final_buffer(gpreagg, false, false))
+		if (!gpupreagg_put_final_buffer(gpreagg, false, false, false))
 			retval = -1;	/* drop this task, no need to return */
 		else
 		{
@@ -4940,10 +4970,10 @@ gpupreagg_complete_task(GpuTask_v2 *gtask)
 		 */
 		gpupreagg_cleanup_cuda_resources(gpreagg);
 		if (gpreagg->kern.final_reduction_in_progress)
-			gpupreagg_put_final_buffer(gpreagg, true, false);
+			gpupreagg_put_final_buffer(gpreagg, true, false, false);
 		else
 		{
-			if (gpupreagg_put_final_buffer(gpreagg, false, false))
+			if (gpupreagg_put_final_buffer(gpreagg, false, false, false))
 				gpupreagg_push_terminator_task(gpreagg);
 			memset(&gpreagg->task.kerror, 0, sizeof(kern_errorbuf));
 			gpreagg->task.cpu_fallback = true;
@@ -4961,7 +4991,7 @@ gpupreagg_complete_task(GpuTask_v2 *gtask)
 			 * We can release @kds_src here because it is no longer
 			 * referenced. It is much valuable if it is i/o mapped memory.
 			 */
-			if (gpupreagg_put_final_buffer(gpreagg, false, true))
+			if (gpupreagg_put_final_buffer(gpreagg, false, true, true))
 				gpupreagg_push_terminator_task(gpreagg);
 
 			PFMON_EVENT_DESTROY(gpreagg, ev_dma_send_start);
@@ -4993,7 +5023,7 @@ gpupreagg_complete_task(GpuTask_v2 *gtask)
 
 			//don't need to release @kds_src
 			gpupreagg_cleanup_cuda_resources(gpreagg);
-			if (gpupreagg_put_final_buffer(gpreagg, false, false))
+			if (gpupreagg_put_final_buffer(gpreagg, false, true, false))
 				gpupreagg_push_terminator_task(gpreagg);
 
 			/* adjust buffer size */
@@ -5022,7 +5052,7 @@ gpupreagg_complete_task(GpuTask_v2 *gtask)
 		 * buffer regardless of the number of concurrent tasks.
 		 */
 		gpupreagg_cleanup_cuda_resources(gpreagg);
-		gpupreagg_put_final_buffer(gpreagg, true, false);
+		gpupreagg_put_final_buffer(gpreagg, true, false, false);
 		retval = 0;
 	}
 	return retval;
