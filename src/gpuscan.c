@@ -459,14 +459,13 @@ create_gpuscan_path(PlannerInfo *root,
 	cost_qual_eval(&qcost, ppi_quals, root);
 	startup_cost += qcost.startup;
 	cpu_per_tuple += qcost.per_tuple;
-	run_cost += (cpu_per_tuple + cpu_tuple_cost) * cpath->path.rows;
+	run_cost += (cpu_per_tuple + cpu_tuple_cost) * ntuples;
 
 	/* Cost discount by GPU projection */
-	run_cost = Max(run_cost - discount_per_tuple * cpath->path.rows, 0.0);
+	run_cost = Max(run_cost - discount_per_tuple * ntuples, 0.0);
 
 	/* Latency to get the first chunk */
 	startup_delay = run_cost * (1.0 / nchunks);
-
 
 	cpath->path.startup_cost = startup_cost + startup_delay;
 	cpath->path.total_cost = startup_cost + run_cost;
