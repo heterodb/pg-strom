@@ -366,11 +366,10 @@ gpuMemCopyFromSSDAsync(GpuTask_v2 *gtask,
 					   pgstrom_data_store *pds,
 					   CUstream cuda_stream)
 {
-	StromCmd__MemCpySsdToGpuWriteBack *cmd;
+	StromCmd__MemCpySsdToGpuWriteBack cmd;
 	IOMapBufferSegment *iomap_seg;
 	BlockNumber	   *block_nums;
 	void		   *block_data;
-	loff_t		   *file_pos;
 	size_t			offset;
 	size_t			length;
 	cl_uint			nr_loaded;
@@ -421,27 +420,22 @@ gpuMemCopyFromSSDAsync(GpuTask_v2 *gtask,
 	/* userspace pointers */
 	block_nums = (BlockNumber *)KERN_DATA_STORE_BODY(&pds->kds) + nr_loaded;
 	block_data = KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds, nr_loaded);
-	file_pos = ((loff_t *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds,
-													   pds->kds.nrooms) -
-				pds->nblocks_uncached);
 
 	/* setup ioctl(2) command */
-	cmd = palloc(offsetof(StromCmd__MemCpySsdToGpuWriteBack,
-						  file_pos[pds->nblocks_uncached]));
-	memset(cmd, 0, offsetof(StromCmd__MemCpySsdToGpuWriteBack, handle));
-	cmd->handle		= iomap_seg->iomap_handle;
-	cmd->offset		= offset;
-	cmd->block_size	= BLCKSZ;
-	cmd->block_nums	= block_nums;	/* array of BlockNumber */
-	cmd->block_data	= block_data;	/* buffer of uncached area */
-	cmd->file_desc	= gtask->peer_fdesc;
-	cmd->nchunks	= pds->nblocks_uncached;
-	memcpy(cmd->file_pos, file_pos, sizeof(loff_t) * pds->nblocks_uncached);
+	memset(&cmd, 0, sizeof(StromCmd__MemCpySsdToGpuWriteBack));
+	cmd.handle		= iomap_seg->iomap_handle;
+	cmd.offset		= offset;
+	cmd.file_desc	= gtask->peer_fdesc;
+	cmd.nr_chunks	= pds->nblocks_uncached;
+	cmd.chunk_sz	= BLCKSZ;
+	cmd.relseg_sz	= RELSEG_SIZE;
+	cmd.chunk_ids	= block_nums;
+	cmd.wb_buffer	= block_data;
 
 	/* (1) kick SSD2GPU P2P DMA */
-	if (nvme_strom_ioctl(STROM_IOCTL__MEMCPY_SSD2GPU_WRITEBACK, cmd) != 0)
+	if (nvme_strom_ioctl(STROM_IOCTL__MEMCPY_SSD2GPU_WRITEBACK, &cmd) != 0)
 		elog(ERROR, "failed on STROM_IOCTL__MEMCPY_SSD2GPU_WRITEBACK: %m");
-	gtask->dma_task_id  = cmd->dma_task_id;
+	gtask->dma_task_id  = cmd.dma_task_id;
 
 	// TODO: update perfmon
 
@@ -454,9 +448,9 @@ gpuMemCopyFromSSDAsync(GpuTask_v2 *gtask,
 		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
 
 	/* (3) kick RAM2GPU DMA (later half; if any) */
-	if (cmd->nr_ram2gpu > 0)
+	if (cmd.nr_ram2gpu > 0)
 	{
-		length = BLCKSZ * cmd->nr_ram2gpu;
+		length = BLCKSZ * cmd.nr_ram2gpu;
 		offset = ((char *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds,
 													   pds->kds.nitems) -
 				  (char *)&pds->kds) - length;
@@ -467,7 +461,6 @@ gpuMemCopyFromSSDAsync(GpuTask_v2 *gtask,
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
 	}
-	pfree(cmd);
 }
 
 /*
