@@ -827,14 +827,17 @@ cost_gpupreagg(PlannerInfo *root,
 	}
 	else
 	{
+		double		parallel_divisor;
 		double		ntuples;
 		double		nchunks;
 
 		cost_gpuscan_common(root,
-							input_path,
+							input_path->parent,
 							gpa_info->outer_quals,
+							input_path->parallel_workers,
 							&ntuples,
 							&nchunks,
+							&parallel_divisor,
 							&gpa_info->outer_nrows_per_block,
 							&startup_cost,
 							&run_cost);

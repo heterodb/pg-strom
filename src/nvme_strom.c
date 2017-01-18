@@ -536,7 +536,6 @@ __RelationCanUseNvmeStrom(Relation relation)
 
 	pathname = GetDatabasePath(MyDatabaseId, tablespace_oid);
 	fdesc = open(pathname, O_RDONLY | O_DIRECTORY);
-	elog(INFO, "pathname = %s fdesc = %d", pathname, fdesc);
 	if (fdesc < 0)
 	{
 		elog(WARNING, "failed to open \"%s\" of tablespace \"%s\": %m",

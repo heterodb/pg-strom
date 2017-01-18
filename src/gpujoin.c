@@ -752,6 +752,7 @@ cost_gpujoin(PlannerInfo *root,
 	QualCost   *join_cost;
 	Size		inner_total_sz = 0;
 	double		gpu_ratio = pgstrom_gpu_operator_cost / cpu_operator_cost;
+	double		parallel_divisor = 1.0;
 	double		num_chunks;
 	double		chunk_ntuples;
 	double		total_nloops_minor = 1.0;	/* loops by kds_dst overflow */
@@ -763,12 +764,14 @@ cost_gpujoin(PlannerInfo *root,
 	 */
 	if (gpath->outer_relid > 0)
 	{
-		double		scan_ntuples;
+		double		dummy;
 
 		cost_gpuscan_common(root,
-							outer_path,
+							outer_path->parent,
 							gpath->outer_quals,
-							&scan_ntuples,
+							outer_path->parallel_workers,
+							&parallel_divisor,
+							&dummy,		/* equivalent to outer_path->rows */
 							&num_chunks,
 							&gpath->outer_nrows_per_block,
 							&startup_cost,

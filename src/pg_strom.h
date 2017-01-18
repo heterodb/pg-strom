@@ -696,8 +696,10 @@ extern bool RelationCanUseNvmeStrom(Relation relation);
 extern bool cost_discount_gpu_projection(PlannerInfo *root, RelOptInfo *rel,
 										 Cost *p_discount_per_tuple);
 extern void cost_gpuscan_common(PlannerInfo *root,
-								Path *scan_path,
+								RelOptInfo *scan_rel,
 								List *scan_quals,
+								int parallel_workers,
+								double *p_parallel_divisor,
 								double *p_scan_ntuples,
 								double *p_scan_nchunks,
 								cl_uint *p_nrows_per_block,
