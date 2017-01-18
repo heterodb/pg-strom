@@ -131,6 +131,20 @@ gpuservGotSigterm(SIGNAL_ARGS)
 	errno = save_errno;
 }
 
+/* signal checks for GpuServer */
+#define GPUSERV_CHECK_FOR_INTERRUPTS()									\
+	do {																\
+		CHECK_FOR_INTERRUPTS();											\
+		if (gpuserv_got_sigterm)										\
+		{																\
+			Assert(IsGpuServerProcess());								\
+			elog(FATAL, "GPU/CUDA Server [%d] (GPU-%d %s) was terminated", \
+				 gpuserv_id,											\
+				 devAttrs[gpuserv_cuda_dindex].DEV_ID,					\
+				 devAttrs[gpuserv_cuda_dindex].DEV_NAME);				\
+		}																\
+	} while(0)
+
 /*
  * gpuservOnExitCleanup - remove UNIX domain socket on shutdown of
  * the postmaster process.
@@ -255,7 +269,7 @@ ReportErrorForBackend(GpuContext_v2 *gcontext, MemoryContext memcxt)
 	gettimeofday(&tv1, NULL);
 	for (;;)
 	{
-		CHECK_FOR_INTERRUPTS();
+		GPUSERV_CHECK_FOR_INTERRUPTS();
 		ResetLatch(MyLatch);
 
 		if (gpuservSendCommand(gcontext, cmd, timeout))
@@ -443,13 +457,7 @@ gpuservProcessPendingTasks(void)
 		dlist_push_tail(&session_running_tasks, &gtask->chain);
 		SpinLockRelease(&session_tasks_lock);
 
-		/* check signals */
-		CHECK_FOR_INTERRUPTS();
-		if (gpuserv_got_sigterm)
-			elog(FATAL, "GPU/CUDA Server [%d] (GPU-%d %s) was terminated",
-				 gpuserv_id,
-				 devAttrs[gpuserv_cuda_dindex].DEV_ID,
-				 devAttrs[gpuserv_cuda_dindex].DEV_NAME);
+		GPUSERV_CHECK_FOR_INTERRUPTS();
 
 		gcontext = gtask->gcontext;
 		PG_TRY();
@@ -542,13 +550,7 @@ gpuservFlushOutCompletedTasks(void)
 		memset(&gtask->chain, 0, sizeof(dlist_node));
 		SpinLockRelease(&session_tasks_lock);
 
-		/* check signals */
-		CHECK_FOR_INTERRUPTS();
-		if (gpuserv_got_sigterm)
-			elog(FATAL, "GPU/CUDA Server [%d] (GPU-%d %s) was terminated",
-				 gpuserv_id,
-				 devAttrs[gpuserv_cuda_dindex].DEV_ID,
-				 devAttrs[gpuserv_cuda_dindex].DEV_NAME);
+		GPUSERV_CHECK_FOR_INTERRUPTS();
 
 		gcontext = gtask->gcontext;
 		peer_fdesc = gtask->peer_fdesc;
@@ -743,7 +745,7 @@ gpuservSendCommand(GpuContext_v2 *gcontext, GpuServCommand *cmd, long timeout)
 	gettimeofday(&tv1, NULL);
 	for (;;)
 	{
-		CHECK_FOR_INTERRUPTS();
+		GPUSERV_CHECK_FOR_INTERRUPTS();
 		ResetLatch(MyLatch);
 
 		ev = WaitLatchOrSocket(MyLatch,
@@ -995,7 +997,7 @@ gpuservAcceptConnection(void)
 			break;
 		if (errno != EINTR)
 			elog(ERROR, "failed on accept(2): %m");
-		CHECK_FOR_INTERRUPTS();
+		GPUSERV_CHECK_FOR_INTERRUPTS();
 	}
 
 	/*
