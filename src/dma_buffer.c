@@ -1225,7 +1225,8 @@ pgstrom_init_dma_buffer(void)
 {
 	struct sigaction sigact;
 	struct sigaction oldact;
-	Size		totalGpuMemSz;
+	Size		totalGpuMemSz = 0;
+	Size		reservedBufSz = 0;
 	int			i, num_segs;
 
 	/*
@@ -1265,12 +1266,18 @@ pgstrom_init_dma_buffer(void)
 	 * Amount of persistent DMA buffer segment
 	 *
 	 * The default configuration is auto-adjustment.
-	 * (2 * total GPU size) shall be reserved for DMA buffer segment
 	 */
-	totalGpuMemSz = 0;
 	for (i=0; i < numDevAttrs; i++)
 		totalGpuMemSz += devAttrs[i].DEV_TOTAL_MEMSZ;
-	num_segs = Max((2 * totalGpuMemSz) / dma_segment_size, 2);
+	if (totalGpuMemSz >= (16UL << 30))		/* 1/3 of > 16GB part */
+		reservedBufSz = (totalGpuMemSz - (16UL<<30)) / 3 + (11UL << 30);
+	else if (totalGpuMemSz >= (10UL) << 30)	/* 1/2 of > 10G part */
+		reservedBufSz = (totalGpuMemSz - (10UL<<30)) / 2 + (8UL << 30);
+	else if (totalGpuMemSz >= (4UL << 30))	/* 2/3 of > 4GB part */
+		reservedBufSz = (totalGpuMemSz - (4UL<<30)) * 2 / 3 + (4UL<<30);
+	else
+		reservedBufSz = totalGpuMemSz;
+	num_segs = Max(reservedBufSz / dma_segment_size, 2);
 
 	DefineCustomIntVariable("pg_strom.min_dma_segment_nums",
 							"number of reserved DMA buffer segment",
