@@ -60,6 +60,12 @@ pg_bpchar_comp_crc32(const cl_uint *crc32_table,
 	}
 	return hash;
 }
+
+STATIC_INLINE(Datum)
+pg_bpchar_to_datum(varlena *value)
+{
+	return PointerGetDatum(value);
+}
 #endif
 
 STATIC_FUNCTION(cl_int)
