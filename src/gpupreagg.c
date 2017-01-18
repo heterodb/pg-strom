@@ -186,6 +186,7 @@ typedef struct
 	TupleTableSlot *outer_slot;
 	ProjectionInfo *outer_proj;		/* outer tlist -> custom_scan_tlist */
 	pgstrom_data_store *outer_pds;
+	int				outer_filedesc;	/* fdesc related to the outer_pds */
 } GpuPreAggState;
 
 /*
@@ -3322,6 +3323,7 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 											   gpas->gpreagg_slot,
 											   outer_tupdesc);
 	gpas->outer_pds = NULL;
+	gpas->outer_filedesc = -1;
 
 	/* Create a shared state object */
 	gpas->gpa_sstate = create_gpupreagg_shared_state(gpas, gpa_info,
@@ -3684,6 +3686,7 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 	memset(gpreagg, 0, offsetof(GpuPreAggTask, kern.kparams));
 
 	pgstromInitGpuTask(&gpas->gts, &gpreagg->task);
+	gpreagg->task.file_desc = file_desc;
 	gpreagg->gpa_sstate = get_gpupreagg_shared_state(gpas->gpa_sstate);
 	gpreagg->with_nvme_strom = with_nvme_strom;
 	gpreagg->retry_by_nospace = false;
@@ -3746,12 +3749,20 @@ gpupreagg_next_task(GpuTaskState_v2 *gts)
 	if (gpas->gts.css.ss.ss_currentRelation)
 	{
 		if (!gpas->outer_pds)
-			gpas->outer_pds = gpuscanExecScanChunk(&gpas->gts, &filedesc);
+			gpas->outer_pds = gpuscanExecScanChunk(&gpas->gts,
+												   &gpas->outer_filedesc);
 		pds = gpas->outer_pds;
+		filedesc = gpas->outer_filedesc;
 		if (pds)
-			gpas->outer_pds = gpuscanExecScanChunk(&gpas->gts, &filedesc);
+		{
+			gpas->outer_pds = gpuscanExecScanChunk(&gpas->gts,
+												   &gpas->outer_filedesc);
+		}
 		else
+		{
 			gpas->outer_pds = NULL;
+			gpas->outer_filedesc = -1;
+		}
 		/* any more chunks expected? */
 		if (!gpas->outer_pds)
 			is_last_task = true;

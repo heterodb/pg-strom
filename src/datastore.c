@@ -893,9 +893,6 @@ PDS_exec_heapscan_block(pgstrom_data_store *pds,
 	cl_uint			nr_loaded;
 	bool			all_visible;
 
-	/* file-desc must be initialized to -1 */
-	Assert(pds->kds.nitems > 0 || *p_filedesc < 0);
-
 	/* PDS cannot eat any blocks more, obviously */
 	if (pds->kds.nitems >= pds->kds.nrooms)
 		return false;

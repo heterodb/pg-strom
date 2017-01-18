@@ -2305,6 +2305,7 @@ gpuscanExecScanChunk(GpuTaskState_v2 *gts, int *p_filedesc)
 	Relation		base_rel = gts->css.ss.ss_currentRelation;
 	HeapScanDesc	scan;
 	pgstrom_data_store *pds = NULL;
+	int				filedesc = -1;
 	struct timeval	tv1, tv2;
 
 	/*
@@ -2362,7 +2363,7 @@ gpuscanExecScanChunk(GpuTaskState_v2 *gts, int *p_filedesc)
 		/* Scan nblocks */
 		while (nblocks_atonce-- > 0)
 		{
-			if (!PDS_exec_heapscan(gts, pds, p_filedesc))
+			if (!PDS_exec_heapscan(gts, pds, &filedesc))
 				elog(ERROR, "Bug? failed to read block-%u", scan->rs_cblock);
 			/* move to the next block */
 			scan->rs_cblock++;
@@ -2416,7 +2417,7 @@ gpuscanExecScanChunk(GpuTaskState_v2 *gts, int *p_filedesc)
 		{
 			/* try to load scan->rs_cblock */
 			Assert(scan->rs_cblock < scan->rs_nblocks);
-			if (!PDS_exec_heapscan(gts, pds, p_filedesc))
+			if (!PDS_exec_heapscan(gts, pds, &filedesc))
 				break;
 
 			/* move to the next block */
@@ -2467,6 +2468,7 @@ gpuscanExecScanChunk(GpuTaskState_v2 *gts, int *p_filedesc)
 				sizeof(BlockNumber) * pds->nblocks_uncached);
 	}
 out:
+	*p_filedesc = filedesc;
 	PFMON_END(&gts->pfm, time_outer_load, &tv1, &tv2);
 	InstrStopNode(&gts->outer_instrument,
 				  !pds ? 0.0 : (double)pds->kds.nitems);
@@ -2514,7 +2516,7 @@ gpuscan_next_task(GpuTaskState_v2 *gts)
 	GpuScanState	   *gss = (GpuScanState *) gts;
 	GpuScanTask		   *gscan;
 	pgstrom_data_store *pds;
-	int					filedesc = -1;
+	int					filedesc;
 
 	pds = gpuscanExecScanChunk(gts, &filedesc);
 	if (!pds)

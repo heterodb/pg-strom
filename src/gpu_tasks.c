@@ -358,6 +358,7 @@ retry_fetch:
 	while (dlist_is_empty(&gts->ready_tasks))
 	{
 		Assert(gts->num_ready_tasks == 0);
+		CHECK_FOR_INTERRUPTS();
 
 		SpinLockAcquire(&shgcon->lock);
 		if (shgcon->num_async_tasks == 0)
