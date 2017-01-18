@@ -1451,6 +1451,7 @@ gpuserv_session_main(void)
 	{
 		bool	try_build_cuda_program = false;
 
+		GPUSERV_CHECK_FOR_INTERRUPTS();
 		ResetLatch(MyLatch);
 
 		do {
