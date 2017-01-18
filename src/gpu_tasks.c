@@ -577,6 +577,8 @@ pgstromReleaseGpuTaskState(GpuTaskState_v2 *gts)
 void
 pgstromExplainGpuTaskState(GpuTaskState_v2 *gts, ExplainState *es)
 {
+	StringInfoData	buf;
+
 	/*
 	 * Merge worker's statistics if any
 	 */
@@ -585,32 +587,48 @@ pgstromExplainGpuTaskState(GpuTaskState_v2 *gts, ExplainState *es)
 	/*
 	 * Extra features if any
 	 */
-	if (es->verbose)
-	{
-		char	temp[256];
-		int		ofs = 0;
+	initStringInfo(&buf);
 
-		/* run per-chunk-execution? */
-		if (gts->outer_bulk_exec)
-			ofs += snprintf(temp+ofs, sizeof(temp) - ofs,
-							"%souter-bulk-exec",
-							ofs > 0 ? ", " : "");
-		/* per-chunk-execution support? */
-		if (gts->cb_bulk_exec != NULL)
-			ofs += snprintf(temp+ofs, sizeof(temp) - ofs,
-							"%sbulk-exec-support",
-							ofs > 0 ? ", " : "");
-		/* preferable result format */
-		ofs += snprintf(temp+ofs, sizeof(temp) - ofs, "%s%s-format",
-						ofs > 0 ? ", " : "",
-						gts->row_format ? "row" : "slot");
-		/* availability of NVMe-Strom */
-		if (gts->nvme_sstate)
-			ofs += snprintf(temp+ofs, sizeof(temp) - ofs, "%snvme-strom",
-							ofs > 0 ? ", " : "");
-		if (ofs > 0)
-			ExplainPropertyText("Extra", temp, es);
+	/* outer-bulk-exec? */
+	if (gts->outer_bulk_exec)
+	{
+		if (es->format == EXPLAIN_FORMAT_TEXT)
+			appendStringInfo(&buf, "%souter-bulk-exec",
+							 buf.len > 0 ? ", " : "");
+		else
+			ExplainPropertyText("Outer Bulk Exec", "enabled", es);
 	}
+	else if (es->format != EXPLAIN_FORMAT_TEXT)
+		ExplainPropertyText("Outer Bulk Exec", "disabled", es);
+
+	/* output-(row|slot)-format */
+	if (es->format == EXPLAIN_FORMAT_TEXT)
+		appendStringInfo(&buf, "%soutput-%s-format",
+						 buf.len > 0 ? ", " : "",
+						 gts->row_format ? "row" : "slot");
+	else
+		ExplainPropertyText("Output Format",
+							gts->row_format ? "Row" : "Slot", es);
+
+	/* NVMe-Strom support */
+	if (gts->nvme_sstate ||
+		(!es->analyze &&
+		 gts->css.ss.ss_currentRelation &&
+		 RelationCanUseNvmeStrom(gts->css.ss.ss_currentRelation)))
+	{
+		if (es->format == EXPLAIN_FORMAT_TEXT)
+			appendStringInfo(&buf, "%snvme-strom",
+                             buf.len > 0 ? ", " : "");
+		else
+			ExplainPropertyText("NVMe-Strom", "enabled", es);
+	}
+	else if (es->format != EXPLAIN_FORMAT_TEXT)
+		ExplainPropertyText("NVMe-Strom", "disabled", es);
+
+	/* Dump extra features */
+	if (es->format == EXPLAIN_FORMAT_TEXT && buf.len > 0)
+		ExplainPropertyText("Features", buf.data, es);
+	pfree(buf.data);
 
 	/*
 	 * Show source path of the GPU kernel
