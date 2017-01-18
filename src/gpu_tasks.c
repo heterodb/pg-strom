@@ -1058,7 +1058,7 @@ pgstromExplainOuterScan(GpuTaskState_v2 *gts,
 	 */
 	InstrEndLoop(instrument);
 
-	if (instrument->nloops > 0)
+	if (es->analyze && instrument->nloops > 0)
 	{
 		double	nloops = instrument->nloops;
 		double	startup_sec = 1000.0 * instrument->startup / nloops;
