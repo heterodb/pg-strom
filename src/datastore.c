@@ -931,7 +931,6 @@ PDS_exec_heapscan_block(pgstrom_data_store *pds,
 		{
 			BlockNumber	segno = blknum / RELSEG_SIZE;
 			int			filedesc;
-			loff_t	   *file_pos;
 
 			Assert(segno < nvme_sstate->nr_segs);
 			filedesc = FileGetRawDesc(nvme_sstate->mdfd[segno].vfd);
@@ -947,15 +946,9 @@ PDS_exec_heapscan_block(pgstrom_data_store *pds,
 			{
 				if (*p_filedesc < 0)
 					*p_filedesc = filedesc;
-				/* increment the index */
+				/* add uncached block for direct load */
 				pds->nblocks_uncached++;
 				pds->kds.nitems++;
-
-				/* put file_pos on the tail of PDS */
-				file_pos = (loff_t *)
-					KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds, pds->kds.nrooms);
-				file_pos[-((long)pds->nblocks_uncached)]
-					= (blknum % (BlockNumber)RELSEG_SIZE) * BLCKSZ;
 				block_nums[pds->kds.nrooms - pds->nblocks_uncached] = blknum;
 
 				retval = true;
