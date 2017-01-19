@@ -179,9 +179,6 @@ deform_gpujoin_info(CustomScan *cscan)
 	Assert(pindex == list_length(privs));
 	Assert(eindex == list_length(exprs));
 
-	elog(INFO, "plan_nrows_in => %s", nodeToString(gj_info->plan_nrows_in));
-	elog(INFO, "plan_nrows_out => %s", nodeToString(gj_info->plan_nrows_out));
-
 	return gj_info;
 }
 
@@ -357,7 +354,8 @@ typedef struct
 	CUevent			ev_dma_send_stop;
 	CUevent			ev_dma_recv_start;
 	CUevent			ev_dma_recv_stop;
-	bool			is_inner_loader;
+	cl_bool			is_inner_loader;
+	cl_bool			with_nvme_strom;
 	runtimeStat	   *rt_stat;
 
 	/* Performance counters */
@@ -1019,10 +1017,11 @@ create_gpujoin_path(PlannerInfo *root,
 					ParamPathInfo *param_info,
 					Relids required_outer)
 {
-	GpuJoinPath	   *gjpath;
-	cl_int			num_rels = list_length(inner_paths_list);
-	ListCell	   *lc;
-	int				i;
+	GpuJoinPath *gjpath;
+	cl_int		num_rels = list_length(inner_paths_list);
+	ListCell   *lc;
+	bool		parallel_aware;
+	int			i;
 
 	gjpath = palloc0(offsetof(GpuJoinPath, inners[num_rels + 1]));
 	NodeSetTag(gjpath, T_CustomPath);
@@ -1067,6 +1066,12 @@ create_gpujoin_path(PlannerInfo *root,
 	}
 	Assert(i == num_rels);
 
+	/* Try to pull up outer scan if enough simple */
+	pgstrom_pullup_outer_scan(outer_path,
+							  &gjpath->outer_relid,
+							  &gjpath->outer_quals,
+							  &parallel_aware);
+
 	/*
 	 * cost calculation of GpuJoin, then, add this path to the joinrel,
 	 * unless its cost is not obviously huge.
@@ -1076,13 +1081,7 @@ create_gpujoin_path(PlannerInfo *root,
 					 final_tlist, required_outer))
 	{
 		List   *custom_paths = list_make1(outer_path);
-		bool	parallel_aware;
 
-		/* a valid @outer_relid shall be set, if outer scan pull-up */
-		pgstrom_pullup_outer_scan(outer_path,
-								  &gjpath->outer_relid,
-								  &gjpath->outer_quals,
-								  &parallel_aware);
 		/* informs planner a list of child pathnodes */
 		for (i=0; i < num_rels; i++)
 			custom_paths = lappend(custom_paths,
@@ -1855,6 +1854,7 @@ PlanGpuJoinPath(PlannerInfo *root,
 	{
 		outerPlan(cscan) = outer_plan;
 	}
+	gj_info.outer_nrows_per_block = gjpath->outer_nrows_per_block;
 
 	/*
 	 * Build a tentative pseudo-scan targetlist. At this point, we cannot
@@ -3918,41 +3918,65 @@ gpujoin_exec_estimate_nitems(GpuJoinState *gjs,
 		 */
 		if (jscale_old != NULL)
 		{
-			return (double)jscale[0].window_size *
-				((double)(jscale_old[1].inner_nitems) /
-				 (double)(jscale_old[0].window_base +
-						  jscale_old[0].window_size -
-						  jscale_old[0].window_orig));
+			ntuples_next = ((double)jscale[0].window_size *
+							(double)(jscale_old[1].inner_nitems) /
+							(double)(jscale_old[0].window_base +
+									 jscale_old[0].window_size -
+									 jscale_old[0].window_orig));
+			if (pds_src->kds.format == KDS_FORMAT_BLOCK)
+				ntuples_next *= 1.1 * (double)pds_src->kds.nrows_per_block;
+			return ntuples_next;
 		}
 
-		/* nobody will reduce outer input rows if no outer quelas */
 		if (!gjs->outer_quals)
-			return (double) jscale[0].window_size;
+		{
+			/* nobody will filter out input rows if no outer quals */
+			ntuples_next = (double) jscale[0].window_size;
+		}
+		else
+		{
+			/*
+			 * We try to estimate amount of outer rows which are not elimiated
+			 * by the qualifier, based on plan/exec time statistics
+			 */
+			SpinLockAcquire(&rt_stat->lock);
+			inner_nitems = rt_stat->inner_nitems[0];
+			right_nitems = rt_stat->right_nitems[0];
+			source_nitems = rt_stat->source_nitems;
+			SpinLockRelease(&rt_stat->lock);
 
-		SpinLockAcquire(&rt_stat->lock);
-		inner_nitems = rt_stat->inner_nitems[0];
-		right_nitems = rt_stat->right_nitems[0];
-		source_nitems = rt_stat->source_nitems;
-		SpinLockRelease(&rt_stat->lock);
+			/*
+			 * If there are no run-time statistics, we have no options except
+			 * for relying on the plan estimation
+			 */
+			if (source_nitems == 0)
+				ntuples_next = jscale[0].window_size * gjs->outer_ratio;
+			else
+			{
+				/*
+				 * Elsewhere, we mix the plan estimation and run-time
+				 * statistics according to the outer scan progress.
+				 * Once merge_ratio gets 100%, plan estimation shall be
+				 * entirely ignored.
+				 */
+				plan_ratio = gjs->outer_ratio;
+				exec_ratio = ((double)(inner_nitems + right_nitems) /
+							  (double)(source_nitems));
+				ntuples_next =  ((exec_ratio * merge_ratio +
+								  plan_ratio * (1.0 - merge_ratio)) *
+								 (double) jscale[0].window_size);
+			}
+		}
 
 		/*
-		 * If no run-time statistics, we entirely have to rely on the
-		 * plan estimation
+		 * In case of KDS_FORMAT_BLOCK, kds->nitems means number of blocks,
+		 * not tuples. So, we need to adjust ntuples_next for size estimation
+		 * purpose
 		 */
-		if (source_nitems == 0)
-			return (double) jscale[0].window_size * gjs->outer_ratio;
+		if (pds_src->kds.format == KDS_FORMAT_BLOCK)
+			ntuples_next *= 1.1 * (double)gjs->gts.outer_nrows_per_block;
 
-		/*
-		 * Elsewhere, we mix the plan estimation and run-time statistics
-		 * according to the outer scan progress. Once merge_ratio gets
-		 * to 100%, plan estimation shall be entirely ignored.
-		 */
-		plan_ratio = gjs->outer_ratio;
-		exec_ratio = ((double)(inner_nitems + right_nitems) /
-					  (double)(source_nitems));
-		return ((exec_ratio * merge_ratio +
-				 plan_ratio * (1.0 - merge_ratio)) *
-				(double) jscale[0].window_size);
+		return ntuples_next;
 	}
 
 	/*
@@ -4250,9 +4274,7 @@ gpujoin_create_task(GpuJoinState *gjs,
 	cl_bool				jscale_rewind = false;
 	kern_parambuf	   *kparams __attribute__((unused));
 
-	/*
-	 * Allocation of pgstrom_gpujoin task object
-	 */
+	/* allocation of GpuJoinTask */
 	length = offsetof(pgstrom_gpujoin, kern) +
 		STROMALIGN(offsetof(kern_gpujoin, jscale[gjs->num_rels + 1]));
 	required = length + STROMALIGN(gjs->gts.kern_params->length);
@@ -4260,10 +4282,18 @@ gpujoin_create_task(GpuJoinState *gjs,
 	memset(pgjoin, 0, length);
 
 	pgstromInitGpuTask(&gjs->gts, &pgjoin->task);
+	pgjoin->task.file_desc = file_desc;
 	pgjoin->pmrels = multirels_attach_buffer(pmrels);
 	pgjoin->pds_src = pds_src;
 	pgjoin->pds_dst = NULL;		/* to be set later */
 	pgjoin->rt_stat = gjs->rt_stat;
+
+	/* Is NVMe-Strom available to run this GpuJoin? */
+	if (pds_src && pds_src->kds.format == KDS_FORMAT_BLOCK)
+	{
+		Assert(gjs->gts.nvme_sstate != NULL);
+		pgjoin->with_nvme_strom = (pds_src->nblocks_uncached > 0);
+	}
 
 	pgjoin->kern.kresults_1_offset = 0xe7e7e7e7;	/* to be set later */
 	pgjoin->kern.kresults_2_offset = 0x7e7e7e7e;	/* to be set later */
@@ -5355,6 +5385,8 @@ gpujoin_cleanup_cuda_resources(pgstrom_gpujoin *pgjoin)
 	PFMON_EVENT_DESTROY(pgjoin, ev_dma_recv_start);
 	PFMON_EVENT_DESTROY(pgjoin, ev_dma_recv_stop);
 
+	if (pgjoin->with_nvme_strom && pgjoin->m_kds_src)
+		gpuMemFreeIOMap(pgjoin->task.gcontext, pgjoin->m_kds_src);
 	if (pgjoin->m_kgjoin)
 		gpuMemFree_v2(pgjoin->task.gcontext, pgjoin->m_kgjoin);
 	if (pgjoin->m_kmrels)
@@ -5536,15 +5568,18 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 	GpuContext_v2	   *gcontext = pgjoin->task.gcontext;
 	pgstrom_data_store *pds_src = pgjoin->pds_src;
 	pgstrom_data_store *pds_dst = pgjoin->pds_dst;
+	Size			offset;
 	Size			length;
-	Size			total_length;
+	Size			pos;
 	CUresult		rc;
 	void		   *kern_args[10];
 
 	/*
 	 * sanity checks
 	 */
-	Assert(pds_src == NULL || pds_src->kds.format == KDS_FORMAT_ROW);
+	Assert(pds_src == NULL ||
+		   pds_src->kds.format == KDS_FORMAT_ROW ||
+		   pds_src->kds.format == KDS_FORMAT_BLOCK);
 	Assert(pds_dst->kds.format == KDS_FORMAT_ROW ||
 		   pds_dst->kds.format == KDS_FORMAT_SLOT);
 
@@ -5560,33 +5595,44 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 	/*
 	 * Allocation of device memory for each chunks
 	 */
-	length = (pgjoin->kern.kresults_2_offset +
-			  pgjoin->kern.kresults_2_offset - pgjoin->kern.kresults_1_offset);
-	total_length = GPUMEMALIGN(length);
-	if (pds_src)
-		total_length += GPUMEMALIGN(pds_src->kds.length);
-	total_length += GPUMEMALIGN(pds_dst->kds.length);
+	length = pos = GPUMEMALIGN(pgjoin->kern.kresults_2_offset +
+							   pgjoin->kern.kresults_2_offset -
+							   pgjoin->kern.kresults_1_offset);
+	if (pgjoin->with_nvme_strom)
+	{
+		Assert(pds_src->kds.format == KDS_FORMAT_BLOCK);
+		rc = gpuMemAllocIOMap(pgjoin->task.gcontext,
+							  &pgjoin->m_kds_src,
+							  GPUMEMALIGN(pds_src->kds.length));
+		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
+		{
+			fprintf(stderr, "PDS_fillup_blocks on pds=%p\n", pds_src);
+			PDS_fillup_blocks(pds_src, pgjoin->task.peer_fdesc);
+			pgjoin->m_kds_src = 0UL;
+			pgjoin->with_nvme_strom = false;
+			length += GPUMEMALIGN(pds_src->kds.length);
+		}
+		else if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on gpuMemAllocIOMap: %s",
+				 errorText(rc));
+	}
+	else if (pds_src)
+		length += GPUMEMALIGN(pds_src->kds.length);
 
-	rc = gpuMemAlloc_v2(gcontext, &pgjoin->m_kgjoin, total_length);
+	length += GPUMEMALIGN(pds_dst->kds.length);
+
+	rc = gpuMemAlloc_v2(gcontext, &pgjoin->m_kgjoin, length);
 	if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		goto out_of_resource;
 	else if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on gpuMemAlloc: %s", errorText(rc));
 
-	/*
-	 * m_kds_src may be NULL, if OUTER JOIN
-	 */
-	if (pds_src)
+	if (pds_src && pgjoin->m_kds_src == 0UL)
 	{
-		pgjoin->m_kds_src = pgjoin->m_kgjoin + GPUMEMALIGN(length);
-		pgjoin->m_kds_dst = pgjoin->m_kds_src +
-			GPUMEMALIGN(pds_src->kds.length);
+		pgjoin->m_kds_src = pgjoin->m_kgjoin + pos;
+		pos += GPUMEMALIGN(pds_src->kds.length);
 	}
-	else
-	{
-		pgjoin->m_kds_src = 0UL;
-		pgjoin->m_kds_dst = pgjoin->m_kgjoin + GPUMEMALIGN(length);
-	}
+	pgjoin->m_kds_dst = pgjoin->m_kgjoin + pos;
 
 	/*
 	 * Creation of event objects, if needed
@@ -5620,14 +5666,27 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 	if (pds_src)
 	{
 		/* source outer relation */
-		rc = cuMemcpyHtoDAsync(pgjoin->m_kds_src,
-							   &pds_src->kds,
-							   pds_src->kds.length,
-							   cuda_stream);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-		pgjoin->bytes_dma_send += pds_src->kds.length;
-		pgjoin->num_dma_send++;
+		if (!pgjoin->with_nvme_strom)
+		{
+			rc = cuMemcpyHtoDAsync(pgjoin->m_kds_src,
+								   &pds_src->kds,
+								   pds_src->kds.length,
+								   cuda_stream);
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+			pgjoin->bytes_dma_send += pds_src->kds.length;
+			pgjoin->num_dma_send++;
+		}
+		else
+		{
+			Assert(pds_src->kds.format == KDS_FORMAT_BLOCK);
+			gpuMemCopyFromSSDAsync(&pgjoin->task,
+								   pgjoin->m_kds_src,
+                                   pds_src,
+                                   cuda_stream);
+            gpuMemCopyFromSSDWait(&pgjoin->task,
+                                  cuda_stream);
+		}
 	}
 	else
 	{
@@ -5697,6 +5756,37 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 		elog(ERROR, "cuMemcpyDtoHAsync: %s", errorText(rc));
 	pgjoin->bytes_dma_recv += pds_dst->kds.length;
 	pgjoin->num_dma_recv++;
+
+	/*
+	 * DMA Recv: kern_data_store *kds_src, if NVMe-Strom is used and join
+	 * results contains varlena/indirect datum
+	 */
+	if (pds_src &&
+		pds_src->kds.format == KDS_FORMAT_BLOCK &&
+		pds_src->nblocks_uncached > 0 &&
+		pds_dst->kds.has_notbyval)
+	{
+		cl_uint	nr_loaded = pds_src->kds.nitems - pds_src->nblocks_uncached;
+
+		offset = ((char *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds_src->kds,
+                                                       nr_loaded) -
+				  (char *)&pds_src->kds);
+		length = pds_src->nblocks_uncached * BLCKSZ;
+		rc = cuMemcpyDtoHAsync((char *)&pds_src->kds + offset,
+							   pgjoin->m_kds_src + offset,
+							   length,
+							   cuda_stream);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+		pgjoin->bytes_dma_recv += length;
+		pgjoin->num_dma_recv++;
+		/*
+		 * NOTE: Once GPU-to-RAM DMA gets completed, "uncached" blocks are
+		 * filled up with valid blocks, so we can clear @nblocks_uncached
+		 * not to write back GPU RAM twice even if CPU fallback.
+		 */
+		pds_src->nblocks_uncached = 0;
+	}
 
 	PFMON_EVENT_RECORD(pgjoin, ev_dma_recv_stop, cuda_stream);
 

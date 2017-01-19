@@ -377,7 +377,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 	if (get_global_id() < kresults_src->nitems)
 	{
 		x_buffer = KERN_GET_RESULT(kresults_src, get_global_id());
-		assert(((size_t)x_buffer[0] & (sizeof(cl_ulong) - 1)) == 0);
+		assert(((size_t)x_buffer[0] & (sizeof(cl_uint) - 1)) == 0);
 		hash_value = gpujoin_hash_value(&kcxt,
 										pg_crc32_table,
 										kds,
@@ -724,7 +724,9 @@ gpujoin_projection_row(kern_gpujoin *kgjoin,
 
 	/* sanity checks */
 	assert(kresults->nrels == kgjoin->num_rels + 1);
-	assert(kds_src == NULL || kds_src->format == KDS_FORMAT_ROW);
+	assert(kds_src == NULL ||
+		   kds_src->format == KDS_FORMAT_ROW ||
+		   kds_src->format == KDS_FORMAT_BLOCK);
 	assert(kds_dst->format == KDS_FORMAT_ROW && kds_dst->nslots == 0);
 
 	INIT_KERNEL_CONTEXT(&kcxt, gpujoin_projection_row, kparams);
@@ -847,7 +849,9 @@ gpujoin_projection_slot(kern_gpujoin *kgjoin,
 
 	/* sanity checks */
 	assert(kresults->nrels == kgjoin->num_rels + 1);
-	assert(kds_src == NULL || kds_src->format == KDS_FORMAT_ROW);
+	assert(kds_src == NULL ||
+		   kds_src->format == KDS_FORMAT_ROW ||
+		   kds_src->format == KDS_FORMAT_BLOCK);
 	assert(kds_dst->format == KDS_FORMAT_SLOT);
 
 	INIT_KERNEL_CONTEXT(&kcxt, gpujoin_projection_slot, kparams);
@@ -1413,7 +1417,9 @@ gpujoin_main(kern_gpujoin *kgjoin,		/* in/out: misc stuffs */
 	/* Init kernel context */
 	INIT_KERNEL_CONTEXT(&kcxt, gpujoin_main, kparams);
 	assert(get_global_size() == 1);		/* only single thread */
-	assert(!kds_src || kds_src->format == KDS_FORMAT_ROW);
+	assert(!kds_src ||
+		   kds_src->format == KDS_FORMAT_ROW ||
+		   kds_src->format == KDS_FORMAT_BLOCK);
 	assert(kds_dst->format == KDS_FORMAT_ROW ||
 		   kds_dst->format == KDS_FORMAT_SLOT);
 
