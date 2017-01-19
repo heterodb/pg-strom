@@ -1613,7 +1613,7 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 	kern_resultbuf	   *kresults_src = KERN_GPUPREAGG_1ST_RESULTBUF(kgpreagg);
 	kern_resultbuf	   *kresults_dst = KERN_GPUPREAGG_2ND_RESULTBUF(kgpreagg);
 	kern_resultbuf	   *kresults_tmp;
-	cl_uint				kresults_nrooms = kds_src->nitems;
+	cl_uint				kresults_nrooms = kgpreagg->nitems_real;
 	kern_context		kcxt;
 	void			   *kern_function	__attribute__((unused));
 	size_t				num_threads;
@@ -1662,14 +1662,18 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 				(kern_arg_t)(&kgpreagg->nitems_filtered),
 				num_threads,
 				0,
-		sizeof(cl_uint));
+				sizeof(cl_uint));
 	if (status != cudaSuccess)
 	{
 		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
 		goto out;
 	}
-	num_threads = kresults_src->nitems;
-	kgpreagg->nitems_real = kresults_src->nitems;
+	else if (kresults_src->kerror.errcode != StromError_Success)
+	{
+		kcxt.e = kresults_src->kerror;
+		goto out;
+	}
+	kgpreagg->nitems_real = num_threads = kresults_src->nitems;
 #else
 	/*
 	 * Elsewhere, we can assume KDS_FORMAT_ROW, and all the input rows are

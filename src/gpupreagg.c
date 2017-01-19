@@ -3663,7 +3663,7 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 	TupleDesc		tupdesc;
 	bool			with_nvme_strom = false;
 	cl_uint			nrows_per_block = 0;
-	cl_uint			nitems_real = pds_src->kds.nitems;
+	size_t			nitems_real = pds_src->kds.nitems;
 	Size			head_sz;
 	Size			kds_len;
 
@@ -3673,7 +3673,7 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 		Assert(gpas->gts.nvme_sstate != NULL);
 		with_nvme_strom = (pds_src->nblocks_uncached > 0);
 		nrows_per_block = gpas->gts.nvme_sstate->nrows_per_block;
-		nitems_real = pds_src->kds.nitems * nrows_per_block;
+		nitems_real = 1.1 * (double)(pds_src->kds.nitems * nrows_per_block);
 	}
 
 	/* allocation of GpuPreAggTask */
