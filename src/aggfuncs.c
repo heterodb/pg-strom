@@ -53,6 +53,13 @@ Datum pgstrom_partial_cov_xy(PG_FUNCTION_ARGS);
 Datum pgstrom_partial_variance_float8(PG_FUNCTION_ARGS);
 Datum pgstrom_partial_covariance_float8(PG_FUNCTION_ARGS);
 
+/* utility to reference numeric[] */
+static inline Datum
+numeric_array_ref(ArrayType *array, int index, bool *p_isnull)
+{
+	return array_ref(array, 1, &index, -1, -1, false, 'i', p_isnull);
+}
+
 Datum
 pgstrom_partial_nrows(PG_FUNCTION_ARGS)
 {
@@ -214,7 +221,6 @@ pgstrom_final_avg_numeric_accum(PG_FUNCTION_ARGS)
 	Datum			y0, y1;
 	Datum			items[2];
 	bool			isnull[4];
-	int				index;
 
 	if (!AggCheckCallContext(fcinfo, &aggcxt))
 		elog(ERROR, "aggregate function called in non-aggregate context");
@@ -232,12 +238,10 @@ pgstrom_final_avg_numeric_accum(PG_FUNCTION_ARGS)
 		xarray = PG_GETARG_ARRAYTYPE_P(0);
 		yarray = PG_GETARG_ARRAYTYPE_P(1);
 
-		index = 0;
-		x0 = array_ref(xarray, 1, &index, -1, -1, false, 'i', &isnull[0]);
-		y0 = array_ref(yarray, 1, &index, -1, -1, false, 'i', &isnull[1]);
-		index = 1;
-		x1 = array_ref(xarray, 1, &index, -1, -1, false, 'i', &isnull[2]);
-		y1 = array_ref(yarray, 1, &index, -1, -1, false, 'i', &isnull[3]);
+		x0 = numeric_array_ref(xarray, 1, &isnull[0]);
+		x1 = numeric_array_ref(xarray, 2, &isnull[1]);
+		y0 = numeric_array_ref(yarray, 1, &isnull[2]);
+		y1 = numeric_array_ref(yarray, 2, &isnull[3]);
 
 		if (isnull[0] || isnull[1] || isnull[2] || isnull[3])
 			elog(ERROR, "unexpected internal state");
@@ -260,12 +264,10 @@ pgstrom_final_avg_numeric_final(PG_FUNCTION_ARGS)
 	ArrayType  *xarray = PG_GETARG_ARRAYTYPE_P(0);
 	Datum		nrows;
 	Datum		sum;
-	int			index = 0;
 	bool		isnull[2];
 
-	nrows = array_ref(xarray, 1, &index, -1, -1, false, 'i', &isnull[0]);
-	index++;
-	sum = array_ref(xarray, 1, &index, -1, -1, false, 'i', &isnull[1]);
+	nrows = numeric_array_ref(xarray, 1, &isnull[0]);
+	sum = numeric_array_ref(xarray, 2, &isnull[1]);
 
 	if (isnull[0] || isnull[1])
 		elog(ERROR, "unexpected internal state");
