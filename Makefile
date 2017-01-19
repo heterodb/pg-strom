@@ -1,8 +1,8 @@
 #
 # Common definitions for PG-Strom Makefile
 #
-PG_CONFIG := $(shell which pg_config)
-PYTHON_CMD := $(shell which python)
+PG_CONFIG := pg_config
+PYTHON_CMD := python
 HAS_RPM_CMD := $(shell if which rpm > /dev/null; then echo 1; else echo 0; fi)
 
 ifndef STROM_BUILD_ROOT
