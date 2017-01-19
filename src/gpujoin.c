@@ -736,10 +736,10 @@ retry_major:
  */
 static bool
 cost_gpujoin(PlannerInfo *root,
-			 RelOptInfo *joinrel,
-			 Path *outer_path,
 			 GpuJoinPath *gpath,
+			 RelOptInfo *joinrel,
 			 List *final_tlist,
+			 Path *outer_path,
 			 Relids required_outer)
 {
 	PathTarget *join_reltarget = joinrel->reltarget;
@@ -1030,7 +1030,7 @@ create_gpujoin_path(PlannerInfo *root,
 	gjpath->cpath.path.pathtarget = joinrel->reltarget;
 	gjpath->cpath.path.param_info = param_info;	// XXXXXX
 	gjpath->cpath.path.pathkeys = NIL;
-	gjpath->cpath.path.rows = joinrel->rows;	// XXXXXX
+	gjpath->cpath.path.rows = joinrel->rows;
 	gjpath->cpath.flags = 0;
 	gjpath->cpath.methods = &gpujoin_path_methods;
 	gjpath->outer_relid = 0;
@@ -1076,9 +1076,12 @@ create_gpujoin_path(PlannerInfo *root,
 	 * cost calculation of GpuJoin, then, add this path to the joinrel,
 	 * unless its cost is not obviously huge.
 	 */
-	if (cost_gpujoin(root, joinrel,
-					 outer_path, gjpath,
-					 final_tlist, required_outer))
+	if (cost_gpujoin(root,
+					 gjpath,
+					 joinrel,
+					 final_tlist,
+					 outer_path,
+					 required_outer))
 	{
 		List   *custom_paths = list_make1(outer_path);
 
