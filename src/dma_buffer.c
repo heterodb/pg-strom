@@ -379,9 +379,15 @@ dmaBufferAttachSegmentOnDemand(int signum, siginfo_t *siginfo, void *unused)
 					goto normal_crash;
 				}
 
-				/* unregister host pinned memory */
-				if (IsGpuServerProcess())
+				/*
+				 * unregister host pinned memory, if any
+				 *
+				 * If gpuserv_cuda_context==NULL, it means this process is not
+				 * GPU server process or GPU server process is going to die.
+				 */
+				if (gpuserv_cuda_context)
 				{
+					Assert(IsGpuServerProcess());
 					rc = cuMemHostUnregister(seg->mmap_ptr);
 					if (rc != CUDA_SUCCESS)
 					{
@@ -431,9 +437,14 @@ dmaBufferAttachSegmentOnDemand(int signum, siginfo_t *siginfo, void *unused)
 			}
 			close(fdesc);
 
-			/* host registered pinned memory, if GPU server */
-			if (IsGpuServerProcess())
+			/*
+			 * Registers the segment as a host pinned memory, if GPU server
+			 * process with healthy status. If CUDA context is not valid,
+			 * it means GPU server is going to die.
+			 */
+			if (gpuserv_cuda_context)
 			{
+				Assert(IsGpuServerProcess());
 				rc = cuMemHostRegister(seg->mmap_ptr, dma_segment_size, 0);
 				if (rc != CUDA_SUCCESS)
 				{
