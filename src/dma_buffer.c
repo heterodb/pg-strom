@@ -156,10 +156,11 @@ dmaBufferCreateSegment(dmaBufferSegment *seg)
 	 */
 	if (l_map->is_attached)
 	{
-		if (IsGpuServerProcess())
+		if (gpuserv_cuda_context)
 		{
 			CUresult	rc;
 
+			Assert(IsGpuServerProcess());
 			rc = cuMemHostUnregister(seg->mmap_ptr);
 			if (rc != CUDA_SUCCESS)
 				elog(FATAL, "failed on cuMemHostUnregister: %s",
@@ -202,10 +203,11 @@ dmaBufferCreateSegment(dmaBufferSegment *seg)
 	}
 	close(fdesc);
 
-	if (IsGpuServerProcess())
+	if (gpuserv_cuda_context)
 	{
 		CUresult	rc;
 
+		Assert(IsGpuServerProcess());
 		rc = cuMemHostRegister(seg->mmap_ptr, dma_segment_size, 0);
 		if (rc != CUDA_SUCCESS)
 		{
@@ -248,6 +250,8 @@ dmaBufferCreateSegment(dmaBufferSegment *seg)
 	/* Also, update local mapping */
 	l_map->is_attached = true;
 	l_map->revision = pg_atomic_add_fetch_u32(&seg->revision, 1);
+
+	fprintf(stderr, "PID=%u dmaBufferCreateSegment seg_id=%u rev=%u\n", getpid(), seg->segment_id, l_map->revision);
 }
 
 /*
@@ -268,6 +272,9 @@ dmaBufferDetachSegment(dmaBufferSegment *seg)
 
 	Assert(SHMSEG_EXISTS(revision));
 
+	fprintf(stderr, "PID=%u dmaBufferDetachSegment seg_id=%u revision=%u\n",
+			getpid(), seg->segment_id, revision);
+
 	/*
 	 * If caller process already attach this segment, we unmap this region
 	 * altogether.
@@ -275,8 +282,9 @@ dmaBufferDetachSegment(dmaBufferSegment *seg)
 	if (l_map->is_attached)
 	{
 		/* unregister host pinned memory, if server process */
-		if (IsGpuServerProcess())
+		if (gpuserv_cuda_context)
 		{
+			Assert(IsGpuServerProcess());
 			rc = cuMemHostUnregister(seg->mmap_ptr);
 			if (rc != CUDA_SUCCESS)
 				elog(FATAL, "failed on cuMemHostUnregister: %s",
