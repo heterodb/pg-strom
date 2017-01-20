@@ -67,20 +67,17 @@ typedef struct GpuServCommand
 {
 	cl_uint		command;	/* one of the GPUSERV_CMD_* */
 	cl_uint		length;		/* length of the command */
-	union {
-		struct {
-			GpuTask_v2 *gtask;	/* to be located on the DMA buffer */
-		} task;
-		struct {
-			cl_int		elevel;
-			cl_int		sqlerrcode;
-			cl_uint		filename_offset;
-			cl_int		lineno;
-			cl_uint		funcname_offset;
-			cl_uint		message_offset;
-			char		buffer[FLEXIBLE_ARRAY_MEMBER];
-		} error;
-	} u;
+	GpuTask_v2 *gtask;		/* reference to DMA buffer */
+	/* above fields are common to any message type */
+	struct {
+		cl_int	elevel;
+		cl_int	sqlerrcode;
+		cl_uint	filename_offset;
+		cl_int	lineno;
+		cl_uint	funcname_offset;
+		cl_uint	message_offset;
+		char	buffer[FLEXIBLE_ARRAY_MEMBER];
+	} error;
 } GpuServCommand;
 
 /*
@@ -229,7 +226,6 @@ ReportErrorForBackend(GpuContext_v2 *gcontext, MemoryContext memcxt)
 	Size			required;
 	cl_uint			offset = 0;
 	long			timeout = 5000;		/* 5.0sec */
-	struct timeval	tv1, tv2;
 
 	/*
 	 * Prior to the ereport() to exit the server once, we deliver
@@ -239,53 +235,33 @@ ReportErrorForBackend(GpuContext_v2 *gcontext, MemoryContext memcxt)
 	oldcxt = MemoryContextSwitchTo(memcxt);
 	errdata = CopyErrorData();
 
-	required = (offsetof(GpuServCommand, u.error.buffer) +
+	required = (offsetof(GpuServCommand, error.buffer) +
 				MAXALIGN(strlen(errdata->filename) + 1) +
 				MAXALIGN(strlen(errdata->funcname) + 1) +
 				MAXALIGN(strlen(errdata->message) + 1));
 	cmd = palloc(required);
 	cmd->command            = GPUSERV_CMD_ERROR;
 	cmd->length             = required;
-	cmd->u.error.elevel     = errdata->elevel;
-	cmd->u.error.sqlerrcode = errdata->sqlerrcode;
+	cmd->gtask				= NULL;
+	cmd->error.elevel		= errdata->elevel;
+	cmd->error.sqlerrcode	= errdata->sqlerrcode;
 
-	cmd->u.error.filename_offset = offset;
-	strcpy(cmd->u.error.buffer + offset, errdata->filename);
+	cmd->error.filename_offset = offset;
+	strcpy(cmd->error.buffer + offset, errdata->filename);
 	offset += MAXALIGN(strlen(errdata->filename) + 1);
 
-	cmd->u.error.lineno     = errdata->lineno;
+	cmd->error.lineno		= errdata->lineno;
 
-	cmd->u.error.funcname_offset = offset;
-	strcpy(cmd->u.error.buffer + offset, errdata->funcname);
+	cmd->error.funcname_offset = offset;
+	strcpy(cmd->error.buffer + offset, errdata->funcname);
 	offset += MAXALIGN(strlen(errdata->funcname) + 1);
 
-	cmd->u.error.message_offset = offset;
-	strcpy(cmd->u.error.buffer + offset, errdata->message);
+	cmd->error.message_offset = offset;
+	strcpy(cmd->error.buffer + offset, errdata->message);
 	offset += MAXALIGN(strlen(errdata->message) + 1);
 
-	/*
-	 * Urgent return to the backend
-	 */
-	gettimeofday(&tv1, NULL);
-	for (;;)
-	{
-		GPUSERV_CHECK_FOR_INTERRUPTS();
-		ResetLatch(MyLatch);
-
-		if (gpuservSendCommand(gcontext, cmd, timeout))
-			break;
-
-		/* adjust timeout */
-		gettimeofday(&tv2, NULL);
-		if (timeout >= 0)
-		{
-			timeout -= ((tv2.tv_sec * 1000 + tv2.tv_usec / 1000) -
-						(tv1.tv_sec * 1000 + tv1.tv_usec / 1000));
-			if (timeout <= 0)
-				break;	/* give up to ereport, but logged on server side */
-		}
-		tv1 = tv2;
-	}
+	/* Urgent return to the backend */
+	gpuservSendCommand(gcontext, cmd, timeout);
 	MemoryContextSwitchTo(oldcxt);
 }
 
@@ -728,7 +704,7 @@ gpuservSendCommand(GpuContext_v2 *gcontext, GpuServCommand *cmd, long timeout)
 	/* Is a file-descriptor of the backend delivered to the server? */
 	if (!IsGpuServerProcess() &&
 		cmd->command == GPUSERV_CMD_TASK &&
-		cmd->u.task.gtask->file_desc >= 0)
+		cmd->gtask->file_desc >= 0)
 	{
 		struct cmsghdr *cmsg;
 
@@ -739,7 +715,7 @@ gpuservSendCommand(GpuContext_v2 *gcontext, GpuServCommand *cmd, long timeout)
 		cmsg->cmsg_level = SOL_SOCKET;
 		cmsg->cmsg_type = SCM_RIGHTS;
 		cmsg->cmsg_len = CMSG_LEN(sizeof(int));
-		((int *)CMSG_DATA(cmsg))[0] = cmd->u.task.gtask->file_desc;
+		((int *)CMSG_DATA(cmsg))[0] = cmd->gtask->file_desc;
 	}
 
 	gettimeofday(&tv1, NULL);
@@ -1090,15 +1066,12 @@ gpuservRecvCommands(GpuContext_v2 *gcontext, bool *p_peer_sock_closed)
 	struct msghdr	msg;
 	struct iovec	iov;
 	struct cmsghdr *cmsg;
-	char			msgbuf[2048];
 	char			cmsgbuf[CMSG_SPACE(sizeof(int))];
-	char		   *pos;
+	char			__cmd[offsetof(GpuServCommand, error)];
 	GpuServCommand *cmd;
 	int				num_received = 0;
 	int				recvmsg_flags = MSG_DONTWAIT;
 	int				peer_fdesc = -1;
-	size_t			unitsz;
-	ssize_t			remain;
 	ssize_t			retval;
 
 	/* socket already closed? */
@@ -1110,93 +1083,66 @@ gpuservRecvCommands(GpuContext_v2 *gcontext, bool *p_peer_sock_closed)
 
 	PG_TRY();
 	{
-		unitsz = offsetof(GpuServCommand, u);
-		remain = 0;
-		pos = msgbuf;
+		for (;;)
+		{
+			peer_fdesc = -1;
 
-		do {
-			if (remain < unitsz)
+			memset(&msg, 0, sizeof(msg));
+			memset(&iov, 0, sizeof(iov));
+			iov.iov_base = __cmd;
+			iov.iov_len  = offsetof(GpuServCommand, error);
+			msg.msg_iov = &iov;
+			msg.msg_iovlen = 1;
+			msg.msg_control = cmsgbuf;
+			msg.msg_controllen = sizeof(cmsgbuf);
+
+			retval = recvmsg(gcontext->sockfd, &msg, recvmsg_flags);
+			if (retval < 0)
 			{
-				if (remain > 0)
-					memmove(msgbuf, pos, remain);
-				pos = msgbuf;
-				/* try to read messages from the socket */
-				memset(&msg, 0, sizeof(msg));
-				memset(&iov, 0, sizeof(iov));
-				iov.iov_base = msgbuf + remain;
-				iov.iov_len  = sizeof(msgbuf) - remain;
-				msg.msg_iov = &iov;
-				msg.msg_iovlen = 1;
-				if (remain == 0)
+				if (errno == EAGAIN || errno == EWOULDBLOCK)
 				{
-					/* recvmsg() never picks up two or more messages
-					 * when peer fdesc is delivered using SCM_RIGHTS */
-					msg.msg_control = cmsgbuf;
-					msg.msg_controllen = sizeof(cmsgbuf);
+					/* no messages arrived yes */
+					break;
 				}
-
-				retval = recvmsg(gcontext->sockfd, &msg, recvmsg_flags);
-				if (retval < 0)
+				if (errno == ECONNRESET)
 				{
-					if (errno == EAGAIN || errno == EWOULDBLOCK)
-					{
-						if (remain > 0)
-							elog(ERROR, "GpuServCommand message corruption");
-						Assert(remain == 0);
-						break;		/* no message arrived yet */
-					}
-					if (errno == ECONNRESET)
-					{
-						/* The peer socket was closed */
-						*p_peer_sock_closed = true;
-						break;
-					}
-					elog(ERROR, "failed on recvmsg(2) %d: %m", errno);
-				}
-				if (retval == 0)
-				{
-					if (remain > 0)
-						elog(ERROR, "Bug? GpuServCommand message corruption");
-					/* Likely, the peer socket was closed */
+					/* peer socket was closed */
 					*p_peer_sock_closed = true;
 					break;
 				}
-				remain += retval;
-
-				/* pick up peer FD, if delivered */
-				if ((cmsg = CMSG_FIRSTHDR(&msg)) != NULL)
-				{
-					if (!IsGpuServerProcess())
-						elog(FATAL, "Bug? Only GPU server can receive FD");
-					if (cmsg->cmsg_level != SOL_SOCKET ||
-						cmsg->cmsg_type != SCM_RIGHTS)
-						elog(FATAL, "Bug? unexpected cmsghdr");
-					if ((cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int) > 1)
-						elog(FATAL, "Bug? two or more FDs delivered at once");
-					if (CMSG_NXTHDR(&msg, cmsg) != NULL)
-						elog(FATAL, "Bug? two or more cmsghdr at once");
-
-					peer_fdesc = ((int *)CMSG_DATA(cmsg))[0];
-				}
-				/*
-				 * Use none-blocking mode for the message fractions because
-				 * these message portions should already arrived at.
-				 */
-				recvmsg_flags = MSG_DONTWAIT;
-				continue;
+				elog(ERROR, "failed on recvmsg(2) %d: %m", errno);
+			}
+			else if (retval == 0)
+			{
+				/* likely, peer socket was closed */
+				*p_peer_sock_closed = true;
+				break;
 			}
 
-			cmd = (GpuServCommand *) pos;
+			/* pick up peer file-desc, if delivered */
+			if ((cmsg = CMSG_FIRSTHDR(&msg)) != NULL)
+			{
+				if (!IsGpuServerProcess())
+					elog(FATAL, "Bug? Only GPU server can receive FD");
+				if (cmsg->cmsg_level != SOL_SOCKET ||
+					cmsg->cmsg_type != SCM_RIGHTS)
+					elog(FATAL, "Bug? unexpected cmsghdr");
+				if ((cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int) > 1)
+					elog(FATAL, "Bug? two or more FDs delivered at once");
+				if (CMSG_NXTHDR(&msg, cmsg) != NULL)
+					elog(FATAL, "Bug? two or more cmsghdr at once");
+
+				peer_fdesc = ((int *)CMSG_DATA(cmsg))[0];
+			}
+
+			cmd = (GpuServCommand *) __cmd;
 			if (cmd->command == GPUSERV_CMD_TASK)
 			{
 				GpuTask_v2 *gtask;
 
-				unitsz = offsetof(GpuServCommand, u) + sizeof(cmd->u.task);
-				Assert(unitsz == cmd->length);
-				if (unitsz > remain)
-					continue;
+				Assert(cmd->length == offsetof(GpuServCommand, error));
 
-				gtask = cmd->u.task.gtask;
+				gtask = cmd->gtask;
 				Assert(dmaBufferValidatePtr(gtask));
 				Assert(!gtask->chain.prev && !gtask->chain.next);
 				Assert(!gtask->gcontext);
@@ -1205,6 +1151,8 @@ gpuservRecvCommands(GpuContext_v2 *gcontext, bool *p_peer_sock_closed)
 
 				if (IsGpuServerProcess())
 				{
+					/* local file_desc must be delivered */
+					Assert(gtask->file_desc < 0 || peer_fdesc >= 0);
 					/* increment refcnt by GpuTask */
 					gtask->gcontext = GetGpuContext(gcontext);
 					/* attach peer file-descriptor, if any */
@@ -1230,58 +1178,42 @@ gpuservRecvCommands(GpuContext_v2 *gcontext, bool *p_peer_sock_closed)
 			}
 			else if (cmd->command == GPUSERV_CMD_ERROR)
 			{
+				char	   *temp = palloc(cmd->length);
 				const char *filename;
 				const char *funcname;
 				const char *message;
 
 				if (IsGpuServerProcess())
 					elog(FATAL, "Bug? Only GPU server can deliver ERROR");
-				unitsz = offsetof(GpuServCommand, u.error.buffer);
-				if (unitsz > remain)
-					continue;
-				/*
-				 * Read extra data with none-blocking mode if error message
-				 * length is larger than local buffer.
-				 */
-				if (cmd->length > remain)
-				{
-					char   *temp = palloc(cmd->length);
 
-					memcpy(temp, cmd, remain);
-					retval = recv(gcontext->sockfd, temp + remain,
-								  cmd->length - remain,
-								  MSG_DONTWAIT);
-					if (retval < 0)
-						elog(ERROR, "failed on recv(2): %m");
-					if (remain + retval != cmd->length)
-						elog(ERROR, "Bug? error message corruption");
- 
-					cmd = (GpuServCommand *) temp;
-					unitsz = remain;
-				}
-				else
-					unitsz = cmd->length;
+				/* retrive the error message body */
+				memcpy(temp, cmd, offsetof(GpuServCommand, error));
+				retval = recv(gcontext->sockfd,
+							  temp + offsetof(GpuServCommand, error),
+							  cmd->length - offsetof(GpuServCommand, error),
+							  MSG_DONTWAIT);
+				if (retval < 0)
+					elog(ERROR, "failed on recv(2): %m");
+				if (retval != cmd->length - offsetof(GpuServCommand, error))
+					elog(ERROR, "Bug? error message corruption");
+				cmd = (GpuServCommand *) temp;
 
-				filename = cmd->u.error.buffer + cmd->u.error.filename_offset;
-				funcname = cmd->u.error.buffer + cmd->u.error.funcname_offset;
-				message = cmd->u.error.buffer + cmd->u.error.message_offset;
+				filename = cmd->error.buffer + cmd->error.filename_offset;
+				funcname = cmd->error.buffer + cmd->error.funcname_offset;
+				message  = cmd->error.buffer + cmd->error.message_offset;
 
-				if (errstart(Max(cmd->u.error.elevel, ERROR),
+				if (errstart(Max(cmd->error.elevel, ERROR),
 							 filename,
-							 cmd->u.error.lineno,
+							 cmd->error.lineno,
 							 funcname,
 							 TEXTDOMAIN))
-					errfinish(errcode(cmd->u.error.sqlerrcode),
+					errfinish(errcode(cmd->error.sqlerrcode),
 							  errmsg("%s", message));
 			}
 			else
 				elog(ERROR, "Bug? unknown GPUSERV_CMD_* tag: %d",
 					 cmd->command);
-			/* make forward the pointer */
-			pos += unitsz;
-			remain -= unitsz;
-			unitsz = offsetof(GpuServCommand, u);
-		} while (remain > 0);
+		}
 	}
 	PG_CATCH();
 	{
@@ -1314,8 +1246,8 @@ gpuservSendGpuTask(GpuContext_v2 *gcontext, GpuTask_v2 *gtask)
 	SpinLockRelease(&shgcon->lock);
 
 	cmd.command = GPUSERV_CMD_TASK;
-	cmd.length = offsetof(GpuServCommand, u.task) + sizeof(cmd.u.task);
-	cmd.u.task.gtask = gtask;
+	cmd.length = offsetof(GpuServCommand, error);
+	cmd.gtask = gtask;
 	result = gpuservSendCommand(gcontext, &cmd, timeout);
 
 	return result;
