@@ -848,7 +848,6 @@ PDS_init_heapscan_state(GpuTaskState_v2 *gts,
 			elog(ERROR, "Bug? Here is a hole segment which was not open");
 	}
 	gts->nvme_sstate = nvme_sstate;
-	elog(LOG, "nvme_sstate = %p", nvme_sstate);
 }
 
 /*
