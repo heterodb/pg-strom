@@ -94,6 +94,7 @@ static GpuServState	   *gpuServState = NULL;	/* shmem */
 static GpuServProc	   *gpuServProc = NULL;		/* shmem */
 static int				numGpuServers;			/* GUC */
 static int				GpuServerCommTimeout;	/* GUC */
+static int				pgstrom_max_async_tasks_per_device;	/* GUC */
 static bool				gpuserv_got_sigterm = false;
 static int				gpuserv_id = -1;
 static pgsocket			gpuserv_server_sockfd = PGINVALID_SOCKET;
@@ -1646,7 +1647,11 @@ pgstrom_startup_gpu_server(void)
 void
 pgstrom_init_gpu_server(void)
 {
-	cl_uint			i;
+	Size		refGpuMemSz = SIZE_MAX;
+	Size		refCpuMemSz = SIZE_MAX;
+	long		sysconf_pagesize;	/* _SC_PAGESIZE */
+	long		sysconf_phys_pages;	/* _SC_PHYS_PAGES */
+	cl_uint		i, nr_async;
 
 	/*
 	 * Maximum number of GPU servers we can use concurrently.
@@ -1672,6 +1677,46 @@ pgstrom_init_gpu_server(void)
 							&GpuServerCommTimeout,
 							-1,		/* no timeout */
 							-1,
+							INT_MAX,
+							PGC_POSTMASTER,
+							GUC_NOT_IN_SAMPLE,
+							NULL, NULL, NULL);
+	/*
+	 * pg_strom.max_async_tasks_per_device
+	 *
+	 * Number of maximum asynchronous tasks per GPU device.
+	 * Its default value is adjusted based on:
+	 * - amount of GPU device memory
+	 * - amount of CPU host memory
+	 * - number of GPU servers
+	 */
+	for (i=0; i < numDevAttrs; i++)
+		refGpuMemSz = Min(refGpuMemSz, devAttrs[i].DEV_TOTAL_MEMSZ);
+	if (refGpuMemSz >= (16UL<<30))		/* 1/3 of > 16GB portion */
+		refGpuMemSz = (refGpuMemSz - (16UL<<30)) / 3 + (11UL<<30);
+	else if (refGpuMemSz >= (10UL<<30))	/* 1/2 of > 10GB portion */
+		refGpuMemSz = (refGpuMemSz - (10UL<<30)) / 2 + (8UL<<30);
+	else if (refGpuMemSz >= (4UL<<30))	/* 2/3 of > 4GB portion */
+		refGpuMemSz = (refGpuMemSz - (4UL<<30)) * 2 / 3 + (4UL<<30);
+
+	sysconf_pagesize = sysconf(_SC_PAGESIZE);
+	if (sysconf_pagesize < 0)
+		elog(ERROR, "failed on sysconf(_SC_PAGESIZE): %m");
+	sysconf_phys_pages = sysconf(_SC_PHYS_PAGES);
+	if (sysconf_phys_pages < 0)
+		elog(ERROR, "failed on sysconf(_SC_PHYS_PAGES): %m");
+	refCpuMemSz = (sysconf_pagesize * sysconf_phys_pages -
+				   (Size)NBuffers * (Size)BLCKSZ) / 3;
+	nr_async = (Min(refGpuMemSz / (2 * pgstrom_chunk_size()),
+					refCpuMemSz / (4 * pgstrom_chunk_size())) +
+				4 * numGpuServers);
+
+	DefineCustomIntVariable("pg_strom.max_async_tasks_per_device",
+					"Soft limit for number of concurrent tasks per GPU device",
+							NULL,
+							&pgstrom_max_async_tasks_per_device,
+							nr_async,
+							1,
 							INT_MAX,
 							PGC_POSTMASTER,
 							GUC_NOT_IN_SAMPLE,
