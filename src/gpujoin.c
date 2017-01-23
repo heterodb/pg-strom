@@ -6308,9 +6308,10 @@ retry:
 
 	if (!PDS_insert_hashitem(pds_hash, scan_slot, hash))
 	{
-		PDS_expand_size(gjs->gts.gcontext,
-						pds_hash,
-						2 * pds_hash->kds.length);
+		pds_hash = PDS_expand_size(gjs->gts.gcontext,
+								   pds_hash,
+								   2 * pds_hash->kds.length);
+		llast(istate->pds_list) = pds_hash;
 		goto retry;
 	}
 	*p_total_usage += KDS_HASH_USAGE_GROWTH(istate->ntuples,
