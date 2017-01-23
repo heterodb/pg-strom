@@ -47,6 +47,7 @@ bool		pgstrom_debug_kernel_source;
 bool		pgstrom_bulkexec_enabled;
 bool		pgstrom_cpu_fallback_enabled;
 int			pgstrom_max_async_tasks;
+int			pgstrom_min_async_tasks;
 double		pgstrom_num_threads_margin;
 double		pgstrom_chunk_size_margin;
 
@@ -54,7 +55,6 @@ double		pgstrom_chunk_size_margin;
 double		pgstrom_gpu_setup_cost;
 double		pgstrom_gpu_dma_cost;
 double		pgstrom_gpu_operator_cost;
-double		pgstrom_gpu_tuple_cost;
 
 /* misc static variables */
 static planner_hook_type	planner_hook_next;
@@ -109,9 +109,9 @@ pgstrom_init_misc_guc(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
-	/* maximum number of GpuTask can concurrently executed */
+	/* soft limit for number of concurrent GpuTask per GPU device */
 	DefineCustomIntVariable("pg_strom.max_async_tasks",
-							"max number of GPU tasks to be run asynchronously",
+						"soft limit for number of concurrent tasks per GPU",
 							NULL,
 							&pgstrom_max_async_tasks,
 							32,
@@ -120,18 +120,18 @@ pgstrom_init_misc_guc(void)
 							PGC_USERSET,
 							GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
-	/* margin of number of CUDA threads */
-	DefineCustomRealVariable("pg_strom.num_threads_margin",
-							 "margin of number of CUDA threads if not predictable exactly",
-							 NULL,
-							 &pgstrom_num_threads_margin,
-							 1.10,
-							 1.00,	/* 0% margin - strict estimation */
-							 DBL_MAX,
-							 PGC_USERSET,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
-	/**/
+	/* maximum number of GpuTask can concurrently executed */
+	DefineCustomIntVariable("pg_strom.min_async_tasks",
+			"minimum guarantee for number of concurrent tasks per plan node",
+							NULL,
+							&pgstrom_min_async_tasks,
+							4,
+							1,
+							INT_MAX,
+							PGC_USERSET,
+							GUC_NOT_IN_SAMPLE,
+							NULL, NULL, NULL);
+	/* factor for margin of buffer size */
 	DefineCustomRealVariable("pg_strom.chunk_size_margin",
 							 "margin of chunk size if not predictable exactly",
 							 NULL,
@@ -170,17 +170,6 @@ pgstrom_init_misc_guc(void)
 							 NULL,
 							 &pgstrom_gpu_operator_cost,
 							 DEFAULT_CPU_OPERATOR_COST / 16.0,
-							 0,
-							 DBL_MAX,
-							 PGC_USERSET,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
-	/* cost factor to process tuples in Gpu */
-	DefineCustomRealVariable("pg_strom.gpu_tuple_cost",
-							 "Cost of processing each tuple for GPU",
-							 NULL,
-							 &pgstrom_gpu_tuple_cost,
-							 DEFAULT_CPU_TUPLE_COST / 16.0,
 							 0,
 							 DBL_MAX,
 							 PGC_USERSET,
