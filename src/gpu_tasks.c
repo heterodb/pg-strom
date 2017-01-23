@@ -615,7 +615,7 @@ pgstromExplainGpuTaskState(GpuTaskState_v2 *gts, ExplainState *es)
 	if (gts->nvme_sstate ||
 		(!es->analyze &&
 		 gts->css.ss.ss_currentRelation &&
-		 RelationCanUseNvmeStrom(gts->css.ss.ss_currentRelation)))
+		 RelationWillUseNvmeStrom(gts->css.ss.ss_currentRelation, NULL)))
 	{
 		if (es->format == EXPLAIN_FORMAT_TEXT)
 			appendStringInfo(&buf, "%snvme-strom",

@@ -20,6 +20,7 @@
 #include "commands/tablespace.h"
 #include "funcapi.h"
 #include "storage/ipc.h"
+#include "storage/bufmgr.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/inval.h"
@@ -64,6 +65,10 @@ static Size				iomap_buffer_size;			/* GUC */
 static HTAB			   *vfs_nvme_htable = NULL;
 static Oid				nvme_last_tablespace_oid = InvalidOid;
 static bool				nvme_last_tablespace_supported;
+static bool				debug_force_nvme_strom = false;	/* GUC */
+static long				sysconf_pagesize;		/* _SC_PAGESIZE */
+static long				sysconf_phys_pages;		/* _SC_PHYS_PAGES */
+static long				nvme_strom_threshold;
 
 #define SizeOfIOMapBufferSegment								\
 	MAXALIGN(offsetof(IOMapBufferSegment,						\
@@ -582,6 +587,39 @@ RelationCanUseNvmeStrom(Relation relation)
 }
 
 /*
+ * RelationWillUseNvmeStrom
+ */
+bool
+RelationWillUseNvmeStrom(Relation relation, BlockNumber *p_nr_blocks)
+{
+	BlockNumber		nr_blocks;
+
+	/* at least, storage must support NVMe-Strom */
+	if (!RelationCanUseNvmeStrom(relation))
+		return false;
+
+	/*
+	 * NOTE: RelationGetNumberOfBlocks() has a significant but helpful
+	 * side-effect. It opens all the underlying files of MAIN_FORKNUM,
+	 * then set @rd_smgr of the relation.
+	 * It allows extension to touch file descriptors without invocation of
+	 * ReadBuffer().
+	 */
+	nr_blocks = RelationGetNumberOfBlocks(relation);
+	if (!debug_force_nvme_strom &&
+		nr_blocks < nvme_strom_threshold)
+		return false;
+
+	/*
+	 * ok, it looks to me NVMe-Strom is supported, and relation size is
+	 * reasonably large to run with SSD-to-GPU Direct mode.
+	 */
+	if (p_nr_blocks)
+		*p_nr_blocks = nr_blocks;
+	return true;
+}
+
+/*
  * pgstrom_iomap_buffer_info
  */
 typedef struct
@@ -900,6 +938,7 @@ void
 pgstrom_init_nvme_strom(void)
 {
 	static int	__iomap_buffer_size;
+	Size		shared_buffer_size = (Size)NBuffers * (Size)BLCKSZ;
 	Size		max_nchunks;
 	Size		required;
 	BackgroundWorker worker;
@@ -918,6 +957,36 @@ pgstrom_init_nvme_strom(void)
 	iomap_buffer_size = (Size)__iomap_buffer_size << 10;
 	if (iomap_buffer_size % IOMAPBUF_CHUNKSZ_MIN != 0)
 		elog(ERROR, "pg_strom.iomap_buffer_size is not aligned to 4KB");
+
+	/* pg_strom.debug_force_nvme_strom */
+	DefineCustomBoolVariable("pg_strom.debug_force_nvme_strom",
+							 "(DEBUG) force to use raw block scan mode",
+							 NULL,
+							 &debug_force_nvme_strom,
+							 false,
+							 PGC_SUSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+
+	/*
+	 * MEMO: Threshold of table's physical size to use NVMe-Strom:
+	 *   ((System RAM size) -
+	 *    (shared_buffer size)) * 0.67 + (shared_buffer size)
+	 *
+	 * If table size is enough large to issue real i/o, NVMe-Strom will
+	 * make advantage by higher i/o performance.
+	 */
+	sysconf_pagesize = sysconf(_SC_PAGESIZE);
+	if (sysconf_pagesize < 0)
+		elog(ERROR, "failed on sysconf(_SC_PAGESIZE): %m");
+	sysconf_phys_pages = sysconf(_SC_PHYS_PAGES);
+	if (sysconf_phys_pages < 0)
+		elog(ERROR, "failed on sysconf(_SC_PHYS_PAGES): %m");
+	if (sysconf_pagesize * sysconf_phys_pages < shared_buffer_size)
+		elog(ERROR, "Bug? shared_buffer is larger than system RAM");
+	nvme_strom_threshold = ((sysconf_pagesize * sysconf_phys_pages -
+							 shared_buffer_size) * 2 / 3 +
+							shared_buffer_size) / BLCKSZ;
 
 	/*
 	 * i/o mapped device memory shall be set up

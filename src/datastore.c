@@ -47,10 +47,6 @@
  */
 static int		pgstrom_chunk_size_kb;
 static int		pgstrom_chunk_limit_kb = INT_MAX;
-static bool		debug_force_nvme_strom = false;
-static long		sysconf_pagesize;		/* _SC_PAGESIZE */
-static long		sysconf_phys_pages;		/* _SC_PHYS_PAGES */
-static long		nvme_strom_threshold;
 
 /*
  * pgstrom_chunk_size - configured chunk size
@@ -774,24 +770,8 @@ PDS_init_heapscan_state(GpuTaskState_v2 *gts,
 	cl_uint			nblocks_per_chunk;
 	cl_uint			i;
 
-	/*
-	 * Raw-block scan is valuable only when NVMe-Strom is configured,
-	 * except for debugging.
-	 */
-	if (!debug_force_nvme_strom &&
-		!RelationCanUseNvmeStrom(relation))
-		return;
-
-	/*
-	 * NOTE: RelationGetNumberOfBlocks() has a significant side-effect.
-	 * It opens all the underlying files of MAIN_FORKNUM, then set @rd_smgr
-	 * of the relation.
-	 * It allows extension to touch file descriptors without invocation of
-	 * ReadBuffer().
-	 */
-	nr_blocks = RelationGetNumberOfBlocks(relation);
-	if (!debug_force_nvme_strom &&
-		nr_blocks < nvme_strom_threshold)
+	/* check storage capability and relation's size */
+	if (!RelationWillUseNvmeStrom(relation, &nr_blocks))
 		return;
 
 	/*
@@ -1356,30 +1336,6 @@ PDS_build_hashtable(pgstrom_data_store *pds)
 void
 pgstrom_init_datastore(void)
 {
-	Size	shared_buffer_size = (Size)NBuffers * (Size)BLCKSZ;
-
-	/* get system configuration */
-	sysconf_pagesize = sysconf(_SC_PAGESIZE);
-	if (sysconf_pagesize < 0)
-		elog(ERROR, "failed on sysconf(_SC_PAGESIZE): %m");
-	sysconf_phys_pages = sysconf(_SC_PHYS_PAGES);
-	if (sysconf_phys_pages < 0)
-		elog(ERROR, "failed on sysconf(_SC_PHYS_PAGES): %m");
-	if (sysconf_pagesize * sysconf_phys_pages < shared_buffer_size)
-		elog(ERROR, "Bug? shared_buffer is larger than system RAM");
-
-	/*
-	 * MEMO: Threshold of table's physical size to use NVMe-Strom:
-	 *   ((System RAM size) -
-	 *    (shared_buffer size)) * 0.67 + (shared_buffer size)
-	 *
-	 * If table size is enough large to issue real i/o, NVMe-Strom will
-	 * make advantage by higher i/o performance.
-	 */
-	nvme_strom_threshold = ((sysconf_pagesize * sysconf_phys_pages -
-							 shared_buffer_size) * 2 / 3 +
-							shared_buffer_size) / BLCKSZ;
-
 	/* init GUC variables */
 	DefineCustomIntVariable("pg_strom.chunk_size",
 							"default size of pgstrom_data_store",
@@ -1401,14 +1357,4 @@ pgstrom_init_datastore(void)
 							PGC_INTERNAL,
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
 							check_guc_chunk_limit, NULL, NULL);
-#if 1
-	DefineCustomBoolVariable("pg_strom.debug_force_nvme_strom",
-							 "(DEBUG) force to use raw block scan mode",
-							 NULL,
-							 &debug_force_nvme_strom,
-							 false,
-							 PGC_SUSET,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
-#endif
 }
