@@ -50,6 +50,8 @@ int			pgstrom_max_async_tasks;
 int			pgstrom_min_async_tasks;
 double		pgstrom_num_threads_margin;
 double		pgstrom_chunk_size_margin;
+static int	pgstrom_chunk_size_kb;
+static int	pgstrom_chunk_limit_kb;
 
 /* cost factors */
 double		pgstrom_gpu_setup_cost;
@@ -60,6 +62,20 @@ double		pgstrom_gpu_operator_cost;
 static planner_hook_type	planner_hook_next;
 static CustomPathMethods	pgstrom_dummy_path_methods;
 static CustomScanMethods	pgstrom_dummy_plan_methods;
+
+/* pg_strom.chunk_size */
+Size
+pgstrom_chunk_size(void)
+{
+	return ((Size)pgstrom_chunk_size_kb) << 10;
+}
+
+/* pg_strom.chunk_size_limit */
+Size
+pgstrom_chunk_size_limit(void)
+{
+	return ((Size)pgstrom_chunk_limit_kb) << 10;
+}
 
 static void
 pgstrom_init_misc_guc(void)
@@ -110,8 +126,8 @@ pgstrom_init_misc_guc(void)
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 	/* soft limit for number of concurrent GpuTask per GPU device */
-	DefineCustomIntVariable("pg_strom.max_async_tasks",
-						"soft limit for number of concurrent tasks per GPU",
+	DefineCustomIntVariable("pg_strom.max_async_tasks_per_process",
+					"Soft limit for number of concurrent tasks per process",
 							NULL,
 							&pgstrom_max_async_tasks,
 							32,
@@ -121,8 +137,8 @@ pgstrom_init_misc_guc(void)
 							GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
 	/* maximum number of GpuTask can concurrently executed */
-	DefineCustomIntVariable("pg_strom.min_async_tasks",
-			"minimum guarantee for number of concurrent tasks per plan node",
+	DefineCustomIntVariable("pg_strom.min_async_tasks_per_process",
+				"Minimum guarantee for number of concurrent tasks per process",
 							NULL,
 							&pgstrom_min_async_tasks,
 							4,
@@ -130,6 +146,28 @@ pgstrom_init_misc_guc(void)
 							INT_MAX,
 							PGC_USERSET,
 							GUC_NOT_IN_SAMPLE,
+							NULL, NULL, NULL);
+	/* default length of pgstrom_data_store */
+	DefineCustomIntVariable("pg_strom.chunk_size",
+							"default size of pgstrom_data_store",
+							NULL,
+							&pgstrom_chunk_size_kb,
+							32768 - (2 * BLCKSZ / 1024),	/* almost 32MB */
+							4096,
+							MAX_KILOBYTES,
+							PGC_INTERNAL,
+							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
+							NULL, NULL, NULL);
+	/* maximum length of pgstrom_data_store */
+	DefineCustomIntVariable("pg_strom.chunk_limit",
+							"limit size of pgstrom_data_store",
+							NULL,
+							&pgstrom_chunk_limit_kb,
+							5 * pgstrom_chunk_size_kb,
+							4096,
+							MAX_KILOBYTES,
+							PGC_INTERNAL,
+							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
 							NULL, NULL, NULL);
 	/* factor for margin of buffer size */
 	DefineCustomRealVariable("pg_strom.chunk_size_margin",
@@ -431,8 +469,6 @@ _PG_init(void)
 
 	/* init NVRTC (run-time compiler) stuff */
 	pgstrom_init_cuda_program();
-	/* init data-store stuff */
-	pgstrom_init_datastore();
 
 	/* registration of custom-scan providers */
 	pgstrom_init_gputasks();

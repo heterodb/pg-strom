@@ -43,55 +43,6 @@
 #include <sys/types.h>
 
 /*
- * static variables
- */
-static int		pgstrom_chunk_size_kb;
-static int		pgstrom_chunk_limit_kb = INT_MAX;
-
-/*
- * pgstrom_chunk_size - configured chunk size
- */
-Size
-pgstrom_chunk_size(void)
-{
-	return ((Size)pgstrom_chunk_size_kb) << 10;
-}
-
-static bool
-check_guc_chunk_size(int *newval, void **extra, GucSource source)
-{
-	if (*newval > pgstrom_chunk_limit_kb)
-	{
-		GUC_check_errdetail("pg_strom.chunk_size = %d, is larger than "
-							"pg_strom.chunk_limit = %d",
-							*newval, pgstrom_chunk_limit_kb);
-		return false;
-	}
-	return true;
-}
-
-/*
- * pgstrom_chunk_size_limit
- */
-Size
-pgstrom_chunk_size_limit(void)
-{
-	return ((Size)pgstrom_chunk_limit_kb) << 10;
-}
-
-static bool
-check_guc_chunk_limit(int *newval, void **extra, GucSource source)
-{
-	if (*newval < pgstrom_chunk_size_kb)
-	{
-		GUC_check_errdetail("pg_strom.chunk_limit = %d, is less than "
-							"pg_strom.chunk_size = %d",
-							*newval, pgstrom_chunk_size_kb);
-	}
-	return true;
-}
-
-/*
  * pgstrom_bulk_exec_supported - returns true, if supplied planstate
  * supports bulk execution mode.
  */
@@ -1331,30 +1282,4 @@ PDS_build_hashtable(pgstrom_data_store *pds)
 		hash_slot[j] = (uintptr_t)khitem - (uintptr_t)kds;
 	}
 	kds->nslots = nslots;
-}
-
-void
-pgstrom_init_datastore(void)
-{
-	/* init GUC variables */
-	DefineCustomIntVariable("pg_strom.chunk_size",
-							"default size of pgstrom_data_store",
-							NULL,
-							&pgstrom_chunk_size_kb,
-							32768 - (2 * BLCKSZ / 1024),	/* almost 32MB */
-							4096,
-							MAX_KILOBYTES,
-							PGC_INTERNAL,
-							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
-							check_guc_chunk_size, NULL, NULL);
-	DefineCustomIntVariable("pg_strom.chunk_limit",
-							"limit size of pgstrom_data_store",
-							NULL,
-							&pgstrom_chunk_limit_kb,
-							5 * pgstrom_chunk_size_kb,
-							4096,
-							MAX_KILOBYTES,
-							PGC_INTERNAL,
-							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
-							check_guc_chunk_limit, NULL, NULL);
 }

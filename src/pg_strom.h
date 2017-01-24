@@ -597,8 +597,6 @@ extern void pgstrom_init_codegen(void);
 /*
  * datastore.c
  */
-extern Size pgstrom_chunk_size(void);
-extern Size pgstrom_chunk_size_limit(void);
 extern bool pgstrom_bulk_exec_supported(const PlanState *planstate);
 extern cl_uint estimate_num_chunks(Path *pathnode);
 extern bool pgstrom_fetch_data_store(TupleTableSlot *slot,
@@ -853,6 +851,8 @@ extern double	pgstrom_gpu_operator_cost;
 extern double	pgstrom_nrows_growth_ratio_limit;
 extern double	pgstrom_nrows_growth_margin;
 extern double	pgstrom_chunk_size_margin;
+extern Size		pgstrom_chunk_size(void);
+extern Size		pgstrom_chunk_size_limit(void);
 
 extern Path *pgstrom_create_dummy_path(PlannerInfo *root,
 									   Path *subpath,

@@ -28,8 +28,8 @@
 typedef struct GpuScoreBoard
 {
 	uint64				mem_total;	/* copy of DEV_TOTAL_MEMSZ */
-	uint64				mem_least;	/* initial value of @mem_usage */
 	pg_atomic_uint64	mem_usage;	/* current usage of device memory */
+	pg_atomic_uint64	num_async_tasks; /* current # of async tasks */
 } GpuScoreBoard;
 
 /* variable declarations */
@@ -73,8 +73,8 @@ gpu_scoreboard_mem_free(size_t nbytes)
 	Assert(IsGpuServerProcess());
 	Assert(gpuserv_cuda_dindex < numDevAttrs);
 	new_value = pg_atomic_sub_fetch_u64(&gscore->mem_usage, nbytes);
-	Assert(new_value >= gscore->mem_least ||	/* free more than alloc? */
-		   new_value <  (size_t)(1UL << 60));	/* underflow? */
+	/* ensure not to free more than allocation */
+	Assert(new_value >= 0 && new_value <  (size_t)(1UL << 60));
 }
 
 /*
@@ -89,14 +89,14 @@ gpu_scoreboard_dump(void)
 	{
 		GpuScoreBoard  *gscore = &gpuScoreBoard[i];
 
-		elog(INFO, "GPU[%d] mem_usage=%zu mem_least=%zu mem_total=%zu",
-			 i, (size_t)pg_atomic_read_u64(&gscore->mem_usage),
-			 (size_t)gscore->mem_least,
-			 (size_t)gscore->mem_total);
+		elog(INFO, "GPU[%d] num_async_tasks=%ld mem_usage=%zu of %zu (i/o mapped %zu)",
+			 i,
+			 (long)pg_atomic_read_u64(&gscore->num_async_tasks),
+			 (size_t)pg_atomic_read_u64(&gscore->mem_usage),
+			 (size_t)gscore->mem_total,
+			 (size_t)gpuMemSizeIOMap());
 	}
 }
-
-
 
 /* catalog of device attributes */
 typedef enum {
@@ -350,9 +350,8 @@ pgstrom_startup_gpu_device(void)
 		GpuScoreBoard  *gscore = &gpuScoreBoard[i];
 
 		gscore->mem_total = devAttrs[i].DEV_TOTAL_MEMSZ;
-		gscore->mem_least = (((size_t)minGpuMemoryPreserved << 10) +
-							 gpuMemSizeIOMap());
-		pg_atomic_init_u64(&gscore->mem_usage, gscore->mem_least);
+		pg_atomic_init_u64(&gscore->mem_usage, gpuMemSizeIOMap());
+		pg_atomic_init_u64(&gscore->num_async_tasks, 0);
 	}
 }
 
