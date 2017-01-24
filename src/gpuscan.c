@@ -631,10 +631,6 @@ gpuscan_add_scan_path(PlannerInfo *root,
 		foreach (lc, baserel->pathlist)
 		{
 			pathnode = lfirst(lc);
-			elog(INFO, "Path=%d cost=%.2f %.2f",
-				 pathnode->pathtype,
-				 pathnode->startup_cost,
-				 pathnode->total_cost);
 		}
 	}
 }
@@ -2241,38 +2237,39 @@ retry:
 	page = parallel_scan->phs_cblock;
 	if (page != InvalidBlockNumber)
 	{
-		if (!p_nblocks_atonce)
-			parallel_scan->phs_cblock++;
-		else
-		{
-			BlockNumber	phs_cblock = parallel_scan->phs_cblock;
-			cl_int		nblocks_atonce = *p_nblocks_atonce;
+		BlockNumber	phs_cblock = parallel_scan->phs_cblock;
+		cl_uint		nr_blocks = (!p_nblocks_atonce ? 1 : *p_nblocks_atonce);
 
-			if ((phs_cblock / RELSEG_SIZE) !=
-				(phs_cblock + nblocks_atonce) / RELSEG_SIZE)
-			{
-				BlockNumber	next_bounds =
-					((phs_cblock +
-					  nblocks_atonce) / RELSEG_SIZE) * RELSEG_SIZE;
-				Assert(next_bounds > phs_cblock);
-				nblocks_atonce = next_bounds - phs_cblock;
-			}
-			if (phs_cblock + nblocks_atonce > scan->rs_nblocks)
-			{
-				Assert(scan->rs_nblocks > phs_cblock);
-				nblocks_atonce = scan->rs_nblocks - phs_cblock;
-			}
-			parallel_scan->phs_cblock += nblocks_atonce;
-
-			*p_nblocks_atonce = nblocks_atonce;
-		}
-		if (parallel_scan->phs_cblock >= scan->rs_nblocks)
-			parallel_scan->phs_cblock = 0;
-		if (parallel_scan->phs_cblock == parallel_scan->phs_startblock)
+		Assert(phs_cblock < scan->rs_nblocks);
+		Assert(nr_blocks > 0 && nr_blocks < RELSEG_SIZE);
+		/* multiple blocks read never goes across segment boundary */
+		if ((phs_cblock / RELSEG_SIZE) !=
+			(phs_cblock + nr_blocks - 1) / RELSEG_SIZE)
+			nr_blocks = RELSEG_SIZE - (phs_cblock % RELSEG_SIZE);
+		/* stop multiple blocks reads if end of the relation */
+		if (phs_cblock + nr_blocks > scan->rs_nblocks)
+			nr_blocks = scan->rs_nblocks - phs_cblock;
+		/* check end of the relation scan */
+		if (phs_cblock + nr_blocks == scan->rs_nblocks &&
+			parallel_scan->phs_startblock == 0)
 		{
 			parallel_scan->phs_cblock = InvalidBlockNumber;
 			report_page = parallel_scan->phs_startblock;
 		}
+		else if (phs_cblock < parallel_scan->phs_startblock &&
+				 phs_cblock + nr_blocks >= parallel_scan->phs_startblock)
+		{
+			nr_blocks = parallel_scan->phs_startblock - phs_cblock;
+			parallel_scan->phs_cblock = InvalidBlockNumber;
+			report_page = parallel_scan->phs_startblock;
+		}
+		else
+		{
+			parallel_scan->phs_cblock =
+				(parallel_scan->phs_cblock + nr_blocks) % scan->rs_nblocks;
+		}
+		if (p_nblocks_atonce)
+			*p_nblocks_atonce = nr_blocks;
 	}
 
 	/* Release the lock. */
