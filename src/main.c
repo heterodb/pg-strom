@@ -461,6 +461,7 @@ _PG_init(void)
 		 PGSTROM_VERSION, PG_MAJORVERSION);
 
 	/* init GPU/CUDA infrastracture */
+	pgstrom_init_misc_guc();
 	pgstrom_init_gpu_device();
 	pgstrom_init_dma_buffer();
 	pgstrom_init_gpu_context();
@@ -478,7 +479,6 @@ _PG_init(void)
 //	pgstrom_init_gpusort();
 
 	/* miscellaneous initializations */
-	pgstrom_init_misc_guc();
 	pgstrom_init_codegen();
 //	pgstrom_init_plcuda();
 
