@@ -801,6 +801,7 @@ cost_gpupreagg(PlannerInfo *root,
 			   PathTarget *target_partial,
 			   PathTarget *target_device,
 			   Path *input_path,
+			   int parallel_nworkers,
 			   double num_groups)
 {
 	double		gpu_cpu_ratio = pgstrom_gpu_operator_cost / cpu_operator_cost;
@@ -835,7 +836,7 @@ cost_gpupreagg(PlannerInfo *root,
 		cost_gpuscan_common(root,
 							input_path->parent,
 							gpa_info->outer_quals,
-							input_path->parallel_workers,
+							parallel_nworkers,
 							&ntuples,
 							&nchunks,
 							&parallel_divisor,
@@ -974,6 +975,7 @@ make_gpupreagg_path(PlannerInfo *root,
 	CustomPath	   *cpath = makeNode(CustomPath);
 	GpuPreAggInfo  *gpa_info = palloc0(sizeof(GpuPreAggInfo));
 	List		   *custom_paths = NIL;
+	int				parallel_nworkers = 0;
 	bool			parallel_aware = false;
 
 	/* obviously, not suitable for GpuPreAgg */
@@ -987,10 +989,16 @@ make_gpupreagg_path(PlannerInfo *root,
 								   &parallel_aware))
 		custom_paths = list_make1(input_path);
 
+	/* Number of workers if parallel */
+	if (group_rel->consider_parallel &&
+		input_path->parallel_safe)
+		parallel_nworkers = Min(numGpuServerProcesses() - 1,
+								input_path->parallel_workers);
+
 	/* cost estimation */
 	if (!cost_gpupreagg(root, cpath, gpa_info,
 						target_partial, target_device,
-						input_path, num_groups))
+						input_path, parallel_nworkers, num_groups))
 	{
 		pfree(cpath);
 		return NULL;
@@ -1004,8 +1012,7 @@ make_gpupreagg_path(PlannerInfo *root,
 	cpath->path.parallel_aware = parallel_aware;
 	cpath->path.parallel_safe = (group_rel->consider_parallel &&
 								 input_path->parallel_safe);
-	cpath->path.parallel_workers = Min(numGpuServerProcesses() - 1,
-									   input_path->parallel_workers);
+	cpath->path.parallel_workers = parallel_nworkers;
 	cpath->path.pathkeys = NIL;
 	cpath->custom_paths = custom_paths;
 	cpath->custom_private = list_make2(gpa_info,

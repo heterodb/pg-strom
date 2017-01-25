@@ -688,6 +688,7 @@ extern void dump_iomap_buffer_info(void);
 extern Datum pgstrom_iomap_buffer_info(PG_FUNCTION_ARGS);
 extern void pgstrom_init_nvme_strom(void);
 
+extern bool ScanPathWillUseNvmeStrom(PlannerInfo *root, RelOptInfo *baserel);
 extern bool RelationCanUseNvmeStrom(Relation relation);
 extern bool RelationWillUseNvmeStrom(Relation relation,
 									 BlockNumber *p_nr_blocks);

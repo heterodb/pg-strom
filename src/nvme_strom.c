@@ -66,6 +66,7 @@ static HTAB			   *vfs_nvme_htable = NULL;
 static Oid				nvme_last_tablespace_oid = InvalidOid;
 static bool				nvme_last_tablespace_supported;
 static bool				debug_force_nvme_strom = false;	/* GUC */
+static bool				nvme_strom_enabled = true;		/* GUC */
 static long				sysconf_pagesize;		/* _SC_PAGESIZE */
 static long				sysconf_phys_pages;		/* _SC_PHYS_PAGES */
 static long				nvme_strom_threshold;
@@ -469,7 +470,7 @@ gpuMemCopyFromSSDAsync(GpuTask_v2 *gtask,
 }
 
 /*
- * RelationCanUseNvmeStrom
+ * TablespaceCanUseNvmeStrom
  */
 typedef struct
 {
@@ -490,24 +491,20 @@ vfs_nvme_cache_callback(Datum arg, int cacheid, uint32 hashvalue)
 }
 
 static bool
-__RelationCanUseNvmeStrom(Relation relation)
+TablespaceCanUseNvmeStrom(Oid tablespace_oid)
 {
 	vfs_nvme_status *entry;
-	const char	   *pathname;
-	Oid				tablespace_oid;
-	int				fdesc;
-	bool			found;
+	const char *pathname;
+	int			fdesc;
+	bool		found;
 
-	if (iomap_buffer_size == 0)
-		return false;	/* NVMe-Strom is not configured */
+	if (iomap_buffer_size == 0 || !nvme_strom_enabled)
+		return false;	/* NVMe-Strom is not configured or enabled */
 
-	if (RelationUsesLocalBuffers(relation))
-		return false;	/* SSD2GPU on temp relation is not supported */
-
-	tablespace_oid = RelationGetForm(relation)->reltablespace;
 	if (!OidIsValid(tablespace_oid))
 		tablespace_oid = MyDatabaseTableSpace;
 
+	/* quick lookup but sufficient for more than 99.99% cases */
 	if (OidIsValid(nvme_last_tablespace_oid) &&
 		nvme_last_tablespace_oid == tablespace_oid)
 		return nvme_last_tablespace_supported;
@@ -569,21 +566,11 @@ __RelationCanUseNvmeStrom(Relation relation)
 bool
 RelationCanUseNvmeStrom(Relation relation)
 {
-	bool	retval;
-
-	PG_TRY();
-	{
-		retval = __RelationCanUseNvmeStrom(relation);
-	}
-	PG_CATCH();
-	{
-		/* clean up the cache if any error */
-		vfs_nvme_cache_callback(0, 0, 0);
-        PG_RE_THROW();
-	}
-	PG_END_TRY();
-
-	return retval;
+	Oid		tablespace_oid = RelationGetForm(relation)->reltablespace;
+	/* SSD2GPU on temp relation is not supported */
+	if (RelationUsesLocalBuffers(relation))
+		return false;
+	return TablespaceCanUseNvmeStrom(tablespace_oid);
 }
 
 /*
@@ -616,6 +603,39 @@ RelationWillUseNvmeStrom(Relation relation, BlockNumber *p_nr_blocks)
 	 */
 	if (p_nr_blocks)
 		*p_nr_blocks = nr_blocks;
+	return true;
+}
+
+/*
+ * ScanPathWillUseNvmeStrom - Optimizer Hint
+ */
+bool
+ScanPathWillUseNvmeStrom(PlannerInfo *root, RelOptInfo *baserel)
+{
+	RangeTblEntry *rte;
+	HeapTuple	tuple;
+	bool		relpersistence;
+
+	if (!TablespaceCanUseNvmeStrom(baserel->reltablespace))
+		return false;
+
+	/* unable to apply NVMe-Strom on temporay tables */
+	rte = root->simple_rte_array[baserel->relid];
+	tuple = SearchSysCache1(RELOID, ObjectIdGetDatum(rte->relid));
+	if (!HeapTupleIsValid(tuple))
+		elog(ERROR, "cache lookup failed for relation %u", rte->relid);
+	relpersistence = ((Form_pg_class) GETSTRUCT(tuple))->relpersistence;
+	ReleaseSysCache(tuple);
+
+	if (relpersistence != RELPERSISTENCE_PERMANENT &&
+		relpersistence != RELPERSISTENCE_UNLOGGED)
+		return false;
+
+	/* Is number of blocks sufficient to NVMe-Strom? */
+	if (!debug_force_nvme_strom && baserel->pages < nvme_strom_threshold)
+		return false;
+
+	/* ok, this table scan can use nvme-strom */
 	return true;
 }
 
@@ -945,7 +965,7 @@ pgstrom_init_nvme_strom(void)
 
 	/* pg_strom.iomap_buffer_size */
 	DefineCustomIntVariable("pg_strom.iomap_buffer_size",
-							"I/O mapped buffer size for SSD-to-GPU Direct DMA",
+							"I/O mapped buffer size for SSD-to-GPU P2P DMA",
 							NULL,
 							&__iomap_buffer_size,
 							0,
@@ -957,6 +977,16 @@ pgstrom_init_nvme_strom(void)
 	iomap_buffer_size = (Size)__iomap_buffer_size << 10;
 	if (iomap_buffer_size % IOMAPBUF_CHUNKSZ_MIN != 0)
 		elog(ERROR, "pg_strom.iomap_buffer_size is not aligned to 4KB");
+
+	/* pg_strom.nvme_strom_enabled */
+	DefineCustomBoolVariable("pg_strom.nvme_strom_enabled",
+							 "Turn on/off SSD-to-GPU P2P DMA",
+							 NULL,
+							 &nvme_strom_enabled,
+							 true,
+							 PGC_SUSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
 
 	/* pg_strom.debug_force_nvme_strom */
 	DefineCustomBoolVariable("pg_strom.debug_force_nvme_strom",

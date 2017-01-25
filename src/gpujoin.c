@@ -741,7 +741,8 @@ cost_gpujoin(PlannerInfo *root,
 			 RelOptInfo *joinrel,
 			 List *final_tlist,
 			 Path *outer_path,
-			 Relids required_outer)
+			 Relids required_outer,
+			 int parallel_nworkers)
 {
 	PathTarget *join_reltarget = joinrel->reltarget;
 	Cost		startup_cost = 0.0;
@@ -768,7 +769,7 @@ cost_gpujoin(PlannerInfo *root,
 		cost_gpuscan_common(root,
 							outer_path->parent,
 							gpath->outer_quals,
-							outer_path->parallel_workers,
+							parallel_nworkers,
 							&parallel_divisor,
 							&dummy,		/* equivalent to outer_path->rows */
 							&num_chunks,
@@ -1022,6 +1023,7 @@ create_gpujoin_path(PlannerInfo *root,
 	GpuJoinPath *gjpath;
 	cl_int		num_rels = list_length(inner_path_items_list);
 	ListCell   *lc;
+	int			parallel_nworkers = 0;
 	bool		inner_parallel_safe = true;
 	bool		parallel_aware = false;
 	int			i;
@@ -1038,6 +1040,9 @@ create_gpujoin_path(PlannerInfo *root,
 			if (!ip_item->inner_path->parallel_safe)
 				return NULL;
 		}
+		/* makes less sense even if we have more workers than GPU servers */
+		parallel_nworkers = Min(numGpuServerProcesses() - 1,
+								outer_path->parallel_workers);
 	}
 
 	gjpath = palloc0(offsetof(GpuJoinPath, inners[num_rels + 1]));
@@ -1100,7 +1105,8 @@ create_gpujoin_path(PlannerInfo *root,
 					 joinrel,
 					 final_tlist,
 					 outer_path,
-					 required_outer))
+					 required_outer,
+					 parallel_nworkers))
 	{
 		List   *custom_paths = list_make1(outer_path);
 
@@ -1112,14 +1118,10 @@ create_gpujoin_path(PlannerInfo *root,
 		gjpath->cpath.path.parallel_safe = (joinrel->consider_parallel &&
 											outer_path->parallel_safe &&
 											inner_parallel_safe);
-		if (!try_parallel_path)
+		if (!gjpath->cpath.path.parallel_safe)
 			gjpath->cpath.path.parallel_workers = 0;
 		else
-		{
-			gjpath->cpath.path.parallel_workers
-				= Min(numGpuServerProcesses() - 1,
-					  outer_path->parallel_workers);
-		}
+			gjpath->cpath.path.parallel_workers = parallel_nworkers;
 		return gjpath;
 	}
 	pfree(gjpath);
@@ -1395,7 +1397,7 @@ gpujoin_add_join_path(PlannerInfo *root,
 	Path	   *outer_path;
 	Path	   *inner_path;
 	List	   *final_tlist = NIL;
-	ListCell   *lc;
+	ListCell   *lc1, *lc2;
 
 	/* calls secondary module if exists */
 	if (set_join_pathlist_next)
@@ -1418,9 +1420,9 @@ gpujoin_add_join_path(PlannerInfo *root,
 	 */
 	if (bms_equal(root->all_baserels, joinrel->relids))
 	{
-		foreach (lc, root->processed_tlist)
+		foreach (lc1, root->processed_tlist)
 		{
-			TargetEntry	   *tle = lfirst(lc);
+			TargetEntry	   *tle = lfirst(lc1);
 
 			if (!IsA(tle->expr, Var) &&
 				!IsA(tle->expr, Const) &&
@@ -1428,7 +1430,7 @@ gpujoin_add_join_path(PlannerInfo *root,
 				pgstrom_device_expression(tle->expr))
 				break;
 		}
-		if (!lc)
+		if (!lc1)
 			final_tlist = root->processed_tlist;
 	}
 
@@ -1441,7 +1443,6 @@ gpujoin_add_join_path(PlannerInfo *root,
 	outer_path = gpujoin_find_cheapest_path(root, joinrel, outerrel, false);
 	if (!outer_path)
 		return;
-	//non-parallel, so outer should not be partial, and inner can contain !parallel_safe
 	try_add_gpujoin_paths(root, joinrel, final_tlist,
 						  outer_path, inner_path,
 						  jointype, extra, false);
@@ -1453,23 +1454,26 @@ gpujoin_add_join_path(PlannerInfo *root,
 	{
 		Relids	other_relids = bms_difference(joinrel->relids,
 											  outerrel->relids);
-		/* inner path must be parallel-safe */
-		inner_path = gpujoin_find_cheapest_path(root, joinrel, innerrel, true);
-		if (!inner_path)
-			return;
-		Assert(inner_path->parallel_safe);
-
-		foreach (lc, outerrel->partial_pathlist)
+		foreach (lc1, innerrel->pathlist)
 		{
-			outer_path = lfirst(lc);
-			/* skip parameterlized paths */
-			if (bms_overlap(PATH_REQ_OUTER(outer_path), other_relids))
+			inner_path = lfirst(lc1);
+
+			if (!inner_path->parallel_safe ||
+				bms_overlap(PATH_REQ_OUTER(inner_path), other_relids))
 				continue;
-			Assert(outer_path->parallel_safe &&
-				   outer_path->parallel_workers > 0);
-			try_add_gpujoin_paths(root, joinrel, final_tlist,
-								  outer_path, inner_path,
-								  jointype, extra, true);
+
+			foreach (lc2, outerrel->partial_pathlist)
+			{
+				outer_path = lfirst(lc2);
+
+				if (bms_overlap(PATH_REQ_OUTER(outer_path), other_relids))
+					continue;
+				Assert(outer_path->parallel_safe &&
+					   outer_path->parallel_workers > 0);
+				try_add_gpujoin_paths(root, joinrel, final_tlist,
+									  outer_path, inner_path,
+									  jointype, extra, true);
+			}
 		}
 	}
 }

@@ -345,6 +345,27 @@ cost_gpuscan_common(PlannerInfo *root,
 	 */
 	get_tablespace_page_costs(scan_rel->reltablespace,
 							  NULL, &spc_seq_page_cost);
+
+	/*
+	 * Discount page scan cost if NVMe-Strom is capable
+	 *
+	 * XXX - acceleration ratio depends on number of SSDs configured
+	 * as MD0-RAID volume, number of parallel workers and so on.
+	 * Once NVMe-Strom driver supports hardware configuration info,
+	 * we follow it.
+	 */
+	if (ScanPathWillUseNvmeStrom(root, scan_rel))
+	{
+		/* FIXME: discount 50% if NVMe-Strom is ready */
+		spc_seq_page_cost /= 1.5;
+		/*
+		 * FIXME: i/o concurrency will effective throughput according
+		 * to the number of parallel workers
+		 */
+		if (parallel_workers > 0)
+			spc_seq_page_cost /= (Cost)(1 + Min(parallel_workers, 4));
+	}
+
 	/*
 	 * Disk i/o cost; we may add special treatment for NVMe-Strom.
 	 * On the other hands, planner usually choose PG-Strom's path
@@ -611,9 +632,10 @@ gpuscan_add_scan_path(PlannerInfo *root,
 		 */
 
 		/* max_parallel_workers_per_gather is the upper limit  */
-		parallel_nworkers = Min3(parallel_nworkers,
-								4 * numDevAttrs,
-								max_parallel_workers_per_gather);
+		parallel_nworkers = Min4(parallel_nworkers,
+								 4 * numDevAttrs,
+								 max_parallel_workers_per_gather,
+								 numGpuServerProcesses() - 1);
 		if (parallel_nworkers <= 0)
 			return;
 
