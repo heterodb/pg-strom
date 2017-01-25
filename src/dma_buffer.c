@@ -605,7 +605,7 @@ __dmaBufferAlloc(SharedGpuContext *shgcon, Size required)
 	chunk_size = Max(chunk_size, DMABUF_CHUNKSZ_MIN);
 	mclass = get_next_log2(chunk_size);
 	if ((1UL << mclass) > dma_segment_size)
-		elog(ERROR, "DMA buffer request %zu bytes too large", required);
+		elog(ERROR, "DMA buffer request %zu MB too large", required >> 20);
 
 	/* find out an available segment */
 	LWLockAcquire(&dmaBufSegHead->mutex, LW_SHARED);

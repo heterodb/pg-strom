@@ -1004,7 +1004,8 @@ make_gpupreagg_path(PlannerInfo *root,
 	cpath->path.parallel_aware = parallel_aware;
 	cpath->path.parallel_safe = (group_rel->consider_parallel &&
 								 input_path->parallel_safe);
-	cpath->path.parallel_workers = input_path->parallel_workers;
+	cpath->path.parallel_workers = Min(numGpuServerProcesses() - 1,
+									   input_path->parallel_workers);
 	cpath->path.pathkeys = NIL;
 	cpath->custom_paths = custom_paths;
 	cpath->custom_private = list_make2(gpa_info,
@@ -1088,7 +1089,8 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 	 * If GpuPreAgg pathnode is parallel-safe, inject Gather node prior to
 	 * the final aggregation step.
 	 */
-	if (cpath->path.parallel_safe)
+	if (cpath->path.parallel_safe &&
+		cpath->path.parallel_workers > 0)
 	{
 		double		total_groups = (cpath->path.rows *
 									cpath->path.parallel_workers);
@@ -4159,12 +4161,11 @@ gpupreagg_get_final_buffer(GpuPreAggTask *gpreagg,
 						   CUstream cuda_stream)
 {
 	GpuPreAggSharedState   *gpa_sstate = gpreagg->gpa_sstate;
-	pgstrom_data_store	   *pds_src = gpreagg->pds_src;
 	bool					retval = true;
 	CUresult				rc;
 
-	Assert(pds_src->kds.format == KDS_FORMAT_ROW ||
-		   pds_src->kds.format == KDS_FORMAT_BLOCK);
+	Assert(gpreagg->pds_src->kds.format == KDS_FORMAT_ROW ||
+		   gpreagg->pds_src->kds.format == KDS_FORMAT_BLOCK);
 
 	SpinLockAcquire(&gpa_sstate->lock);
 	PG_TRY();
@@ -4930,14 +4931,12 @@ gpupreagg_complete_task(GpuTask_v2 *gtask)
 	 */
 	if (gpreagg->kern.reduction_mode == GPUPREAGG_ONLY_TERMINATION)
 	{
-		pgstrom_data_store *pds_final = gpreagg->pds_final;
-
 		/*
 		 * Task with GPUPREAGG_ONLY_TERMINATION should be kicked on the
 		 * pds_final buffer which is already dereferenced.
 		 */
 		SpinLockAcquire(&gpa_sstate->lock);
-		Assert(pds_final->ntasks_running == 0);
+		Assert(gpreagg->pds_final->ntasks_running == 0);
 		SpinLockRelease(&gpa_sstate->lock);
 
 		/* cleanup device memory of the final buffer */

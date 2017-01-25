@@ -457,6 +457,7 @@ extern CUdevice			gpuserv_cuda_device;
 extern CUcontext		gpuserv_cuda_context;
 
 extern bool IsGpuServerProcess(void);
+extern int	numGpuServerProcesses(void);
 extern void gpuservTryToWakeUp(void);
 extern void gpuservOpenConnection(GpuContext_v2 *gcontext);
 extern bool gpuservSendGpuTask(GpuContext_v2 *gcontext, GpuTask_v2 *gtask);

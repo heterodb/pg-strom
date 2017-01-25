@@ -169,6 +169,15 @@ IsGpuServerProcess(void)
 }
 
 /*
+ * numGpuServerProcesses - returns number of GPU server processes
+ */
+int
+numGpuServerProcesses(void)
+{
+	return numGpuServers;
+}
+
+/*
  * lookupCudaModuleCache - find a CUDA module loaded in the current context
  */
 
