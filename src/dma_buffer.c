@@ -120,10 +120,6 @@ static shmem_startup_hook_type shmem_startup_hook_next = NULL;
 static void	  (*sighandler_sigsegv_orig)(int,siginfo_t *,void *) = NULL;
 static void	  (*sighandler_sigbus_orig)(int,siginfo_t *,void *) = NULL;
 
-
-
-
-
 /*
  * dmaBufferCreateSegment - create a new DMA buffer segment
  *
@@ -996,6 +992,19 @@ dmaBufferFreeAll(SharedGpuContext *shgcon)
 		Assert(chunk->shgcon == shgcon);
 		dmaBufferFree(chunk->data);
 	}
+}
+
+/*
+ * dmaBufferMaxAllocSize
+ */
+Size
+dmaBufferMaxAllocSize(void)
+{
+	int		mclass = get_prev_log2(dma_segment_size);
+
+	return (Size)(1UL << mclass)
+		- (MAXALIGN(offsetof(dmaBufferChunk, data)) +
+		   MAXALIGN(sizeof(cl_uint)));
 }
 
 /*

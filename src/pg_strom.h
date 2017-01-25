@@ -416,6 +416,7 @@ extern Size dmaBufferSize(void *pointer);
 extern Size dmaBufferChunkSize(void *pointer);
 extern void dmaBufferFree(void *pointer);
 extern void dmaBufferFreeAll(SharedGpuContext *shgcon);
+extern Size dmaBufferMaxAllocSize(void);
 extern Datum pgstrom_dma_buffer_alloc(PG_FUNCTION_ARGS);
 extern Datum pgstrom_dma_buffer_free(PG_FUNCTION_ARGS);
 extern Datum pgstrom_dma_buffer_info(PG_FUNCTION_ARGS);
@@ -958,6 +959,61 @@ static inline Value *
 pmakeFloat(cl_double float_value)
 {
 	return makeFloat(psprintf("%.*e", DBL_DIG+3, float_value));
+}
+
+/*
+ * get_prev_log2
+ *
+ * It returns N of the largest 2^N value that is smaller than or equal to
+ * the supplied value.
+ */
+static inline int
+get_prev_log2(Size size)
+{
+	int		shift = 0;
+
+	if (size == 0 || size == 1)
+		return 0;
+	size >>= 1;
+#if __GNUC__
+	shift = sizeof(Size) * BITS_PER_BYTE - __builtin_clzl(size);
+#else
+#if SIZEOF_VOID_P == 8
+	if ((size & 0xffffffff00000000UL) != 0)
+	{
+		size >>= 32;
+		shift += 32;
+	}
+#endif
+	if ((size & 0xffff0000UL) != 0)
+	{
+		size >>= 16;
+		shift += 16;
+	}
+	if ((size & 0x0000ff00UL) != 0)
+	{
+		size >>= 8;
+		shift += 8;
+	}
+	if ((size & 0x000000f0UL) != 0)
+	{
+		size >>= 4;
+		shift += 4;
+	}
+	if ((size & 0x0000000cUL) != 0)
+	{
+		size >>= 2;
+		shift += 2;
+	}
+	if ((size & 0x00000002UL) != 0)
+	{
+		size >>= 1;
+		shift += 1;
+	}
+	if ((size & 0x00000001UL) != 0)
+		shift += 1;
+#endif	/* !__GNUC__ */
+	return shift;
 }
 
 /*

@@ -707,7 +707,8 @@ retry_major:
 	 * large, so it often leads 32bit integer overflow. Please be
 	 * careful.
 	 */
-	inner_limit_sz = gpuMemMaxAllocSize() / 2 - BLCKSZ * num_rels;
+	inner_limit_sz = Min(gpuMemMaxAllocSize() / 2,
+						 dmaBufferMaxAllocSize()) - BLCKSZ * num_rels;
 	if (inner_total_sz > inner_limit_sz)
 	{
 		double	nloops_major_next;
@@ -6573,7 +6574,8 @@ gpujoin_inner_preload(GpuJoinState *gjs)
 	 * Half of the max allocatable GPU memory (and minus some margin) is
 	 * the current hard limit of the inner relations buffer.
 	 */
-	total_limit = gpuMemMaxAllocSize() / 2 - BLCKSZ * gjs->num_rels;
+	total_limit = Min(gpuMemMaxAllocSize() / 2,
+					  dmaBufferMaxAllocSize()) - BLCKSZ * gjs->num_rels;
 	total_usage = STROMALIGN(offsetof(kern_multirels,
 									  chunks[gjs->num_rels]));
 	istate_buf = palloc0(sizeof(innerState *) * gjs->num_rels);
