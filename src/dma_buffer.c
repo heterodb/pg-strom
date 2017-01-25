@@ -246,8 +246,8 @@ dmaBufferCreateSegment(dmaBufferSegment *seg)
 	/* Also, update local mapping */
 	l_map->is_attached = true;
 	l_map->revision = pg_atomic_add_fetch_u32(&seg->revision, 1);
-
-	fprintf(stderr, "PID=%u dmaBufferCreateSegment seg_id=%u rev=%u\n", getpid(), seg->segment_id, l_map->revision);
+	elog(DEBUG2,"PID=%u dmaBufferCreateSegment seg_id=%u rev=%u\n",
+		 getpid(), seg->segment_id, l_map->revision);
 }
 
 /*
@@ -267,9 +267,8 @@ dmaBufferDetachSegment(dmaBufferSegment *seg)
 	CUresult	rc;
 
 	Assert(SHMSEG_EXISTS(revision));
-
-	fprintf(stderr, "PID=%u dmaBufferDetachSegment seg_id=%u revision=%u\n",
-			getpid(), seg->segment_id, revision);
+	elog(DEBUG2, "PID=%u dmaBufferDetachSegment seg_id=%u revision=%u\n",
+		 getpid(), seg->segment_id, revision);
 
 	/*
 	 * If caller process already attach this segment, we unmap this region
@@ -395,7 +394,8 @@ dmaBufferAttachSegmentOnDemand(int signum, siginfo_t *siginfo, void *unused)
 					rc = cuMemHostUnregister(seg->mmap_ptr);
 					if (rc != CUDA_SUCCESS)
 					{
-						fprintf(stderr, "%s: failed on cuMemHostUnregister(id=%u at %p): %s\n",
+						fprintf(stderr,
+						"%s: failed on cuMemHostUnregister(id=%u at %p): %s\n",
 								__FUNCTION__, seg->segment_id, seg->mmap_ptr,
 								errorText(rc));
 						goto normal_crash;
@@ -452,7 +452,8 @@ dmaBufferAttachSegmentOnDemand(int signum, siginfo_t *siginfo, void *unused)
 				rc = cuMemHostRegister(seg->mmap_ptr, dma_segment_size, 0);
 				if (rc != CUDA_SUCCESS)
 				{
-					fprintf(stderr, "%s: failed on cuMemHostRegister(id=%u at %p): %s\n",
+					fprintf(stderr,
+						  "%s: failed on cuMemHostRegister(id=%u at %p): %s\n",
 							__FUNCTION__, seg->segment_id, seg->mmap_ptr,
 							errorText(rc));
 					abort();
