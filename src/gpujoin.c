@@ -6902,8 +6902,6 @@ multirels_put_buffer(pgstrom_gpujoin *pgjoin)
 		if (rc != CUDA_SUCCESS)
 			elog(WARNING, "failed on cuEventDestroy: %s", errorText(rc));
 		pmrels->ev_loaded = NULL;
-
-		fprintf(stderr, "pid=%u pmrels=%p was put\n", getpid(), pmrels);
 	}
 	pgjoin->m_kmrels = 0UL;
 	pgjoin->m_ojmaps = 0UL;
@@ -6948,7 +6946,6 @@ colocate_outer_join_maps_to_device(pgstrom_gpujoin *pgjoin,
 	pgstrom_multirels *pmrels = pgjoin->pmrels;
 	cl_uint			ojmap_length = pmrels->kern.ojmap_length;
 	CUdeviceptr		dst_ojmaps;
-//	CUdeviceptr		src_ojmaps;
 	CUfunction		kern_colocate;
 	void		   *kern_args[2];
 	size_t			grid_size;
