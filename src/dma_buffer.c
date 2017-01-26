@@ -120,6 +120,14 @@ static shmem_startup_hook_type shmem_startup_hook_next = NULL;
 static void	  (*sighandler_sigsegv_orig)(int,siginfo_t *,void *) = NULL;
 static void	  (*sighandler_sigbus_orig)(int,siginfo_t *,void *) = NULL;
 
+/* for debug */
+#ifdef PGSTROM_DEBUG
+static const char  *last_caller_alloc_filename = NULL;
+static int			last_caller_alloc_lineno = -1;
+static const char  *last_caller_free_filename = NULL;
+static int			last_caller_free_lineno = -1;
+#endif
+
 /*
  * dmaBufferCreateSegment - create a new DMA buffer segment
  *
@@ -246,8 +254,18 @@ dmaBufferCreateSegment(dmaBufferSegment *seg)
 	/* Also, update local mapping */
 	l_map->is_attached = true;
 	l_map->revision = pg_atomic_add_fetch_u32(&seg->revision, 1);
-	elog(DEBUG2, "PID=%u dmaBufferCreateSegment seg_id=%u rev=%u\n",
-		 getpid(), seg->segment_id, l_map->revision);
+	elog(DEBUG2, "PID=%u dmaBufferCreateSegment seg_id=%u rev=%u\n"
+#ifdef PGSTROM_DEBUG
+		 " called by %s:%d"
+#endif
+		 ,getpid()
+		 ,seg->segment_id
+		 ,l_map->revision
+#ifdef PGSTROM_DEBUG
+		 ,last_caller_alloc_filename
+		 ,last_caller_alloc_lineno
+#endif
+		);
 }
 
 /*
@@ -267,9 +285,16 @@ dmaBufferDetachSegment(dmaBufferSegment *seg)
 	CUresult	rc;
 
 	Assert(SHMSEG_EXISTS(revision));
-	elog(DEBUG2, "PID=%u dmaBufferDetachSegment seg_id=%u revision=%u\n",
-		 getpid(), seg->segment_id, revision);
-
+	elog(DEBUG2, "PID=%u dmaBufferDetachSegment seg_id=%u rev=%u"
+#ifdef PGSTROM_DEBUG
+		 " called by %s:%d"
+#endif
+		 , getpid(), seg->segment_id, revision
+#ifdef PGSTROM_DEBUG
+		 ,last_caller_free_filename
+		 ,last_caller_free_lineno
+#endif
+		);
 	/*
 	 * If caller process already attach this segment, we unmap this region
 	 * altogether.
@@ -581,7 +606,7 @@ out:
  * dmaBufferAlloc
  */
 static void *
-__dmaBufferAlloc(SharedGpuContext *shgcon, Size required)
+dmaBufferAllocInternal(SharedGpuContext *shgcon, Size required)
 {
 	dmaBufferSegment   *seg;
 	dmaBufferChunk	   *chunk;
@@ -676,9 +701,14 @@ found:
 }
 
 void *
-dmaBufferAlloc(GpuContext_v2 *gcontext, Size required)
+__dmaBufferAlloc(GpuContext_v2 *gcontext, Size required,
+				 const char *filename, int lineno)
 {
-	return __dmaBufferAlloc(gcontext->shgcon, required);
+#ifdef PGSTROM_DEBUG
+	last_caller_alloc_filename = filename;
+	last_caller_alloc_lineno   = lineno;
+#endif
+	return dmaBufferAllocInternal(gcontext->shgcon, required);
 }
 
 /*
@@ -723,7 +753,8 @@ pointer_validation(void *pointer, dmaBufferSegment **p_seg)
  * dmaBufferRealloc
  */
 void *
-dmaBufferRealloc(void *pointer, Size required)
+__dmaBufferRealloc(void *pointer, Size required,
+				   const char *filename, int lineno)
 {
 	dmaBufferSegment   *seg;
 	dmaBufferChunk	   *chunk;
@@ -731,6 +762,10 @@ dmaBufferRealloc(void *pointer, Size required)
 	int					mclass;
 	void			   *result;
 
+#ifdef PGSTROM_DEBUG
+	last_caller_alloc_filename = filename;
+	last_caller_alloc_lineno   = lineno;
+#endif
 	/* sanity checks */
 	chunk = pointer_validation(pointer, &seg);
 
@@ -790,9 +825,9 @@ dmaBufferRealloc(void *pointer, Size required)
 		return chunk->data;
 	}
 	/* allocate a larger new chunk, then copy the contents */
-	result = __dmaBufferAlloc(chunk->shgcon, required);
+	result = dmaBufferAllocInternal(chunk->shgcon, required);
 	memcpy(result, chunk->data, chunk->required);
-	dmaBufferFree(pointer);
+	__dmaBufferFree(pointer, filename, lineno);
 
 	return result;
 }
@@ -851,7 +886,8 @@ dmaBufferChunkSize(void *pointer)
  * dmaBufferFree
  */
 void
-dmaBufferFree(void *pointer)
+__dmaBufferFree(void *pointer,
+				const char *filename, int lineno)
 {
 	dmaBufferSegment   *seg;
 	dmaBufferChunk	   *chunk;
@@ -860,6 +896,10 @@ dmaBufferFree(void *pointer)
 	struct timeval		tv1, tv2;
 	bool				has_exclusive_mutex = false;
 
+#ifdef PGSTROM_DEBUG
+	last_caller_free_filename = filename;
+	last_caller_free_lineno = lineno;
+#endif
 	/* sanity checks */
 	chunk = pointer_validation(pointer, &seg);
 	memset(chunk->data, 0xf5, chunk->required);
@@ -981,11 +1021,16 @@ retry:
  * shared gpu context
  */
 void
-dmaBufferFreeAll(SharedGpuContext *shgcon)
+__dmaBufferFreeAll(SharedGpuContext *shgcon,
+				   const char *filename, int lineno)
 {
 	dmaBufferChunk *chunk;
 	dlist_node	   *dnode;
 
+#ifdef PGSTROM_DEBUG
+	last_caller_free_filename = filename;
+	last_caller_free_lineno = lineno;
+#endif
 	while (!dlist_is_empty(&shgcon->dma_buffer_list))
 	{
 		dnode = dlist_pop_head_node(&shgcon->dma_buffer_list);

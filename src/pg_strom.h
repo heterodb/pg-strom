@@ -409,18 +409,31 @@ extern Datum pgstrom_device_info(PG_FUNCTION_ARGS);
 /*
  * dma_buffer.c
  */
-extern void *dmaBufferAlloc(GpuContext_v2 *gcontext, Size required);
-extern void *dmaBufferRealloc(void *pointer, Size required);
+extern void *__dmaBufferAlloc(GpuContext_v2 *gcontext, Size required,
+							  const char *filename, int lineno);
+extern void *__dmaBufferRealloc(void *pointer, Size required,
+								const char *filename, int lineno);
 extern bool dmaBufferValidatePtr(void *pointer);
 extern Size dmaBufferSize(void *pointer);
 extern Size dmaBufferChunkSize(void *pointer);
-extern void dmaBufferFree(void *pointer);
-extern void dmaBufferFreeAll(SharedGpuContext *shgcon);
+extern void __dmaBufferFree(void *pointer,
+							const char *filename, int lineno);
+extern void __dmaBufferFreeAll(SharedGpuContext *shgcon,
+							   const char *filename, int lineno);
 extern Size dmaBufferMaxAllocSize(void);
 extern Datum pgstrom_dma_buffer_alloc(PG_FUNCTION_ARGS);
 extern Datum pgstrom_dma_buffer_free(PG_FUNCTION_ARGS);
 extern Datum pgstrom_dma_buffer_info(PG_FUNCTION_ARGS);
 extern void pgstrom_init_dma_buffer(void);
+
+#define dmaBufferAlloc(gcontext,required)		\
+	__dmaBufferAlloc((gcontext),(required),__FILE__,__LINE__)
+#define dmaBufferRealloc(pointer,required)		\
+	__dmaBufferRealloc((pointer),(required),__FILE__,__LINE__)
+#define dmaBufferFree(pointer)					\
+	__dmaBufferFree((pointer),__FILE__,__LINE__)
+#define dmaBufferFreeAll(shgcon)				\
+	__dmaBufferFreeAll((shgcon),__FILE__,__LINE__)
 
 /*
  * gpu_context.c
