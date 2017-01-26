@@ -32,6 +32,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/vfs.h>
 #include <unistd.h>
 
 /*
@@ -1325,17 +1326,43 @@ pgstrom_init_dma_buffer(void)
 
 	/*
 	 * Number of DMA buffer segment
+	 *
+	 * Default configuration is auto-adjustment (60% of /dev/shm volume)
 	 */
 	DefineCustomIntVariable("pg_strom.max_dma_segment_nums",
 							"Max number of DMA segments",
 							NULL,
 							&max_dma_segment_nums,
-							1024,		/* 2TB, if default */
-							32,			/* 64GB, if default */
-							32768,		/* 64TB, if default */
+							-1,			/* auto */
+							-1,			/* auto */
+							32768,		/* 64TB, if default segment-size */
 							PGC_POSTMASTER,
 							GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
+	if (max_dma_segment_nums < 0)
+	{
+		const char	   *shm_path = "/dev/shm";
+		struct statfs	stat;
+		size_t			total_sz;
+		size_t			avail_sz;
+
+		if (statfs(shm_path, &stat) != 0)
+			elog(ERROR, "failed on statfs('%s'): %m", shm_path);
+		total_sz = (size_t)stat.f_bsize * (size_t)stat.f_blocks;
+		avail_sz = (size_t)stat.f_bsize * (size_t)stat.f_bavail;
+
+		max_dma_segment_nums = (total_sz * 6 / 10 +		/* 60% of volume */
+								dma_segment_size - 1) / dma_segment_size;
+		if (avail_sz < max_dma_segment_nums * dma_segment_size)
+			elog(WARNING, "Available size of %s volume (%s) is less than maximum possible DMA buffer size (%s). It may lead unexpected crash, so reconsider the pg_strom.max_dma_segment_nums configuration",
+				 shm_path,
+				 format_bytesz(avail_sz),
+				 format_bytesz(max_dma_segment_nums * dma_segment_size));
+	}
+	if (max_dma_segment_nums < 4)
+		elog(ERROR, "pg_strom.max_dma_segment_nums=%d looks too small",
+			 max_dma_segment_nums);
+
 	/*
 	 * Amount of persistent DMA buffer segment
 	 *
