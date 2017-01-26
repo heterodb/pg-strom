@@ -431,8 +431,7 @@ static void colocate_outer_join_maps_to_device(pgstrom_gpujoin *pgjoin,
 											   CUstream cuda_stream);
 static void multirels_detach_buffer(GpuJoinState *gjs,
 									pgstrom_multirels *pmrels,
-									bool may_kick_outer_join,
-									const char *caller);
+									bool may_kick_outer_join);
 /*
  * misc declarations
  */
@@ -2479,7 +2478,7 @@ ExecEndGpuJoin(CustomScanState *node)
 	 */
 	if (gjs->curr_pmrels)
 	{
-		multirels_detach_buffer(gjs, gjs->curr_pmrels, false, __FUNCTION__);
+		multirels_detach_buffer(gjs, gjs->curr_pmrels, false);
 		gjs->curr_pmrels = NULL;
 	}
 	gpujoin_inner_unload(gjs, false);
@@ -2534,8 +2533,7 @@ ExecReScanGpuJoin(CustomScanState *node)
 	 */
 	if (gjs->curr_pmrels)
 	{
-		multirels_detach_buffer(gjs, gjs->curr_pmrels, false,
-								__FUNCTION__);
+		multirels_detach_buffer(gjs, gjs->curr_pmrels, false);
 		gjs->curr_pmrels = NULL;
 	}
 
@@ -4573,8 +4571,7 @@ gpujoin_next_task(GpuTaskState_v2 *gts)
 			if (gjs->curr_pmrels)
 			{
 				Assert(gjs->outer_scan_done);
-				multirels_detach_buffer(gjs, gjs->curr_pmrels, true,
-										__FUNCTION__);
+				multirels_detach_buffer(gjs, gjs->curr_pmrels, true);
 				gjs->curr_pmrels = NULL;
 			}
 
@@ -4782,8 +4779,7 @@ gpujoin_switch_task(GpuTaskState_v2 *gts, GpuTask_v2 *gtask)
 		 * We don't need to have the inner pmrels buffer no longer, if GPU
 		 * task gets successfully done.
 		 */
-		multirels_detach_buffer(gjs, pgjoin->pmrels, true,
-								__FUNCTION__);
+		multirels_detach_buffer(gjs, pgjoin->pmrels, true);
 		pgjoin->pmrels = NULL;
 	}
 }
@@ -5345,8 +5341,7 @@ gpujoin_next_tuple_fallback(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 					 * to the point of CPU fallback end, if needed. So, we
 					 * have to detach here.
 					 */
-					multirels_detach_buffer(gjs, pgjoin->pmrels, true,
-											__FUNCTION__);
+					multirels_detach_buffer(gjs, pgjoin->pmrels, true);
 					pgjoin->pmrels = NULL;
 					return NULL;
 				}
@@ -5461,8 +5456,7 @@ gpujoin_release_task(GpuTask_v2 *gtask)
 	/* detach multi-relations buffer, if any */
 	if (pgjoin->pmrels)
 		multirels_detach_buffer((GpuJoinState *)gtask->gts,
-								pgjoin->pmrels, false,
-								__FUNCTION__);
+								pgjoin->pmrels, false);
 	/* unlink source data store */
 	if (pgjoin->pds_src)
 		PDS_release(pgjoin->pds_src);
@@ -6837,10 +6831,13 @@ multirels_get_buffer(pgstrom_gpujoin *pgjoin, CUstream cuda_stream)
 		Assert(pmrels->refcnt >= 0);
 		if (pmrels->refcnt++ == 0)
 		{
-			if (!__multirels_get_buffer(pgjoin, pmrels, cuda_stream))
+			if (__multirels_get_buffer(pgjoin, pmrels, cuda_stream))
+				pgjoin->is_inner_loader = true;
+			else
+			{
+				pmrels->refcnt--;
 				status = false;
-			/* this task is inner loader */
-            pgjoin->is_inner_loader = true;
+			}
 		}
 		else
 		{
@@ -6905,6 +6902,8 @@ multirels_put_buffer(pgstrom_gpujoin *pgjoin)
 		if (rc != CUDA_SUCCESS)
 			elog(WARNING, "failed on cuEventDestroy: %s", errorText(rc));
 		pmrels->ev_loaded = NULL;
+
+		fprintf(stderr, "pid=%u pmrels=%p was put\n", getpid(), pmrels);
 	}
 	pgjoin->m_kmrels = 0UL;
 	pgjoin->m_ojmaps = 0UL;
@@ -7005,8 +7004,7 @@ colocate_outer_join_maps_to_device(pgstrom_gpujoin *pgjoin,
 static void
 multirels_detach_buffer(GpuJoinState *gjs,
 						pgstrom_multirels *pmrels,
-						bool may_kick_outer_join,
-						const char *caller)
+						bool may_kick_outer_join)
 {
 	pgstrom_gpujoin *pgjoin_new;
 	int		i;
@@ -7042,7 +7040,9 @@ retry:
 	/*
 	 * Last GpuJoin task dettached @pmrels, so release relevant resources
 	 */
-	if (--pmrels->n_attached == 0)
+	if (--pmrels->n_attached > 0)
+		SpinLockRelease(&pmrels->lock);
+	else
 	{
 		/*
 		 * Nobody should reference the device memory no longer.
@@ -7054,9 +7054,12 @@ retry:
 
 		for (i=0; i < pmrels->kern.nrels; i++)
 			PDS_release(pmrels->inner_chunks[i]);
+		SpinLockRelease(&pmrels->lock);
+
+		fprintf(stderr, "%s: pid=%u pmrels=%p is detached\n", __FUNCTION__, getpid(), pmrels);
 		dmaBufferFree(pmrels);
+		fprintf(stderr, "%s: ppid=%u mrels=%p detach done\n", __FUNCTION__, getpid(), pmrels);
 	}
-	SpinLockRelease(&pmrels->lock);
 }
 
 /*

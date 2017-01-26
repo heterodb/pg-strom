@@ -246,7 +246,7 @@ dmaBufferCreateSegment(dmaBufferSegment *seg)
 	/* Also, update local mapping */
 	l_map->is_attached = true;
 	l_map->revision = pg_atomic_add_fetch_u32(&seg->revision, 1);
-	elog(DEBUG2,"PID=%u dmaBufferCreateSegment seg_id=%u rev=%u\n",
+	elog(DEBUG2, "PID=%u dmaBufferCreateSegment seg_id=%u rev=%u\n",
 		 getpid(), seg->segment_id, l_map->revision);
 }
 
