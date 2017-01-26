@@ -419,15 +419,14 @@ gpuservPutGpuContext(GpuContext_v2 *gcontext)
 /*
  * gpuservProcessPendingTasks
  */
-static bool
-gpuservProcessPendingTasks(void)
+static void
+gpuservProcessPendingTasks(bool *p_has_pending, bool *p_has_completed)
 {
 	MemoryContext	memcxt = CurrentMemoryContext;
 	dlist_node	   *dnode;
 	GpuTask_v2	   *gtask;
 	GpuContext_v2  *gcontext;
 	bool			process_continue = true;
-	bool			has_completed;
 
 	SpinLockAcquire(&session_tasks_lock);
 	while (process_continue &&
@@ -507,11 +506,9 @@ gpuservProcessPendingTasks(void)
 		}
 		PG_END_TRY();
 	}
-	has_completed = !dlist_is_empty(&session_completed_tasks);
-
+	*p_has_pending = !dlist_is_empty(&session_pending_tasks);
+	*p_has_completed = !dlist_is_empty(&session_completed_tasks);
 	SpinLockRelease(&session_tasks_lock);
-
-	return has_completed;
 }
 
 /*
@@ -1050,6 +1047,9 @@ gpuservAcceptConnection(void)
 		/* wake up the backend */
 		backend = gcontext->shgcon->backend;
 		SetLatch(&backend->procLatch);
+		elog(DEBUG2, "GPU server[%d] (pid=%u) accept connection from pid=%u",
+			 gpuserv_id, MyProcPid, backend->pid);
+
 	}
 	PG_CATCH();
 	{
@@ -1386,12 +1386,13 @@ gpuservCompleteGpuTask(GpuTask_v2 *gtask, bool is_urgent)
 static void
 gpuserv_session_main(void)
 {
-	WaitEvent	event;
-	cl_int		retval;
-
 	for (;;)
 	{
-		bool	try_build_cuda_program = false;
+		bool		try_build_cuda_program = false;
+		bool		has_pending;
+		bool		has_completed;
+		int			nr_events = 0;
+		WaitEvent	event;
 
 		GPUSERV_CHECK_FOR_INTERRUPTS();
 		ResetLatch(MyLatch);
@@ -1403,21 +1404,68 @@ gpuserv_session_main(void)
 			 * during task processing, retry this process again.
 			 */
 			gpuservFlushOutCompletedTasks();
-		} while (gpuservProcessPendingTasks());
 
-		/* picks up pending code compile, if no running tasks */
-		SpinLockAcquire(&session_tasks_lock);
-		if (dlist_is_empty(&session_pending_tasks) &&
-			dlist_is_empty(&session_running_tasks))
-			try_build_cuda_program = true;
-		SpinLockRelease(&session_tasks_lock);
-		if (try_build_cuda_program)
-			pgstrom_try_build_cuda_program();
+			/*
+			 * Process pending tasks if any. Task may want to retry its
+			 * processing callback due to out of the resources. Usually,
+			 * device resources shall not be releases unless completion
+			 * callback.
+			 * So, if we have any completed tasks, these tasks shall be
+			 * called first. Elsewhere, we move to the synchronous event
+			 * wait.
+			 *
+			 * Even if we have completed tasks, we have to process socket
+			 * event with higher priority; to avoid timeout at connect(2)
+			 * or sendmsg(2). So, if we found any events without context
+			 * blocking, move to the event processing then completed tasks
+			 * shall be processed on the next loop.
+			 *
+			 * We also need to pay attention for the out-of-resource case
+			 * by the concurrent GPU server's job. Synchronization of latch
+			 * event does not help anything in this case, because we have
+			 * no running tasks at this moment, thus, all we can do is
+			 * just polling the moment of device resource gets available.
+			 * So, we will have blocking event wait with very small timeout
+			 * if session_pending_tasks list is not empty.
+			 * After the short sleep, other concurrent GPU server may release
+			 * relevant GPU resources.
+			 */
+			gpuservProcessPendingTasks(&has_pending, &has_completed);
+			if (has_completed)
+			{
+				nr_events = WaitEventSetWait(session_event_set,
+											 0,
+											 &event, 1);
+			}
+		} while (has_completed && nr_events == 0);
 
-		retval = WaitEventSetWait(session_event_set,
-								  (long)GpuServerCommTimeout,
-								  &event, 1);
-		if (retval > 0)
+		/*
+		 * NOTE: We may get event notification during task processing and
+		 * completion callback. In this case, we should not take a side-job
+		 * (run-time compile of GPU code), and no need to wait for another
+		 * events.
+		 */
+		if (nr_events == 0)
+		{
+			/* sleep 10ms if any pending tasks here */
+			long	timeout = (has_pending ? 10 : GpuServerCommTimeout);
+
+			/* picks up pending code compile, if no running tasks exist */
+			SpinLockAcquire(&session_tasks_lock);
+			if (dlist_is_empty(&session_pending_tasks) &&
+				dlist_is_empty(&session_running_tasks))
+				try_build_cuda_program = true;
+			SpinLockRelease(&session_tasks_lock);
+			if (try_build_cuda_program)
+				pgstrom_try_build_cuda_program();
+
+			/* try to wait for the next event */
+			nr_events = WaitEventSetWait(session_event_set,
+										 timeout,
+										 &event, 1);
+		}
+
+		if (nr_events > 0)
 		{
 			if (event.events & WL_POSTMASTER_DEATH)
 				ereport(FATAL,
