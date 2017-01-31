@@ -766,7 +766,8 @@ gpuservSendCommand(GpuContext_v2 *gcontext, GpuServCommand *cmd, long timeout)
 		}
 		tv1 = tv2;
 	}
-	elog(ERROR, "failed on sendmsg(2) by timeout");
+	elog(ERROR, "failed on sendmsg(2) by timeout on %s side",
+		 IsGpuServerProcess() ? "server" : "backend");
 }
 
 /*
@@ -1244,7 +1245,7 @@ gpuservSendGpuTask(GpuContext_v2 *gcontext, GpuTask_v2 *gtask)
 {
 	SharedGpuContext *shgcon = gcontext->shgcon;
 	GpuServCommand	cmd;
-	long			timeout = 5000;		/* 5.0sec; usually enough */
+	long			timeout = 10000;		/* 5.0sec; usually enough */
 	bool			result;
 
 	/* update num_async_tasks */

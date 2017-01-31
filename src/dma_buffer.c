@@ -20,6 +20,7 @@
 #include "funcapi.h"
 #include "lib/ilist.h"
 #include "libpq/pqsignal.h"
+#include "postmaster/autovacuum.h"
 #include "postmaster/postmaster.h"
 #include "storage/ipc.h"
 #include "storage/lwlock.h"
@@ -107,10 +108,26 @@ typedef struct dmaBufferLocalMap
 } dmaBufferLocalMap;
 
 /*
+ * dmaBufferWaitList - tracker of backend processes that gets out of memory
+ */
+typedef struct dmaBufferWaitList
+{
+	slock_t			lock;
+	dlist_head		wait_proc_list;
+	/*
+	 * NOTE: wait_proc_chain[MyProc->pgprocno] is associated for each backend
+	 * or worker processes. If it is already in the wait_proc_list, its @prev
+	 * and @next field should not be NULL.
+	 */
+	dlist_node		wait_proc_chain[FLEXIBLE_ARRAY_MEMBER];
+} dmaBufferWaitList;
+
+/*
  * static variables
  */
 static dmaBufferSegmentHead *dmaBufSegHead = NULL;	/* shared memory */
 static dmaBufferLocalMap *dmaBufLocalMaps = NULL;
+static dmaBufferWaitList *dmaBufWaitList = NULL;	/* shared memory */
 static void	   *dma_segment_vaddr_head = NULL;
 static void	   *dma_segment_vaddr_tail = NULL;
 static size_t	dma_segment_size;
@@ -190,7 +207,7 @@ dmaBufferCreateSegment(dmaBufferSegment *seg)
 	if (fdesc < 0)
 		elog(ERROR, "failed on shm_open('%s'): %m", namebuf);
 
-	if (ftruncate(fdesc, dma_segment_size) != 0)
+	if (fallocate(fdesc, 0, 0, dma_segment_size) != 0)
 	{
 		close(fdesc);
 		shm_unlink(namebuf);
@@ -1230,6 +1247,15 @@ pgstrom_dma_buffer_info(PG_FUNCTION_ARGS)
 PG_FUNCTION_INFO_V1(pgstrom_dma_buffer_info);
 
 /*
+ * maxBackends - alternative of MaxBackends on system initialization
+ */
+static int
+maxBackends(void)
+{
+	return MaxConnections + autovacuum_max_workers + 1 + max_worker_processes;
+}
+
+/*
  * pgstrom_startup_dma_buffer
  */
 static void
@@ -1290,6 +1316,16 @@ pgstrom_startup_dma_buffer(void)
 		l_map->revision = pg_atomic_read_u32(&segment->revision);
 		l_map->is_attached = false;
 	}
+
+	/*
+	 * init dmaBufferWaitList
+	 */
+	length = offsetof(dmaBufferWaitList, wait_proc_chain[maxBackends()]);
+	dmaBufWaitList = ShmemInitStruct("dmaBufferWaitList", length, &found);
+	Assert(!found);
+	memset(dmaBufWaitList, 0, length);
+	SpinLockInit(&dmaBufWaitList->lock);
+	dlist_init(&dmaBufWaitList->wait_proc_list);
 }
 
 /*
@@ -1410,6 +1446,8 @@ pgstrom_init_dma_buffer(void)
 	/* request for the static shared memory */
 	RequestAddinShmemSpace(offsetof(dmaBufferSegmentHead,
 									segments[max_dma_segment_nums]));
+	RequestAddinShmemSpace(offsetof(dmaBufferWaitList,
+									wait_proc_chain[maxBackends()]));
 	shmem_startup_hook_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_dma_buffer;
 
