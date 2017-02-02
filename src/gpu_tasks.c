@@ -252,9 +252,7 @@ fetch_next_gputask(GpuTaskState_v2 *gts)
 	SharedGpuContext   *shgcon = gcontext->shgcon;
 	GpuTask_v2		   *gtask;
 	dlist_node		   *dnode;
-	cl_uint				num_ready_tasks;
-	cl_uint				num_recv_tasks = 0;
-	cl_uint				num_sent_tasks = 0;
+	uint64				curr_task_count;
 
 	/*
 	 * If no server connection is established, GpuTask cannot be processed
@@ -272,88 +270,55 @@ fetch_next_gputask(GpuTaskState_v2 *gts)
 retry_scan:
 	CHECK_FOR_INTERRUPTS();
 
-	/*
-	 * Fetch all the tasks already processed by the server side, if any.
-	 * It is non-blocking operations, so we never wait for tasks currently
-	 * running.
-	 */
-	num_ready_tasks = gts->num_ready_tasks;
 	while (gpuservRecvGpuTasks(gcontext, 0));
-	num_recv_tasks = gts->num_ready_tasks - num_ready_tasks;
 
 	/*
-	 * Fetch and send GpuTasks - We already fetched several tasks that were
-	 * processed on the GPU server side. Unless GTS does not have many ready
-	 * tasks, we try to push similar amount of tasks not to starvate GPU
-	 * server, but one task at least.
-	 * In addition to the above fixed-number of norm, we try to make advance
-	 * the underlying scan until new asynchronous task is arrived, but as
-	 * long as the number of asynchronous tasks does not touch the threshold.
+	 * Fetch next task and send it, if current resource consumption allows.
+	 *
+	 * 1. Sum of number of the running and ready tasks is less than
+	 *    pg_strom.min_async_tasks, we don't prevent to send tasks to
+	 *    GPU server, regardless of the gpu_task_count.
+	 * 2. Number of the running task is less than pg_strom.max_async_tasks,
+	 *    but there is no ready tasks, we can send the next task.
+	 * 3. If this backend has neither running nor ready tasks, we can send
+	 *    a next task regardless of the resource limitation.
 	 */
 	while (!gts->scan_done)
 	{
-		/* Do we already have enough processed GpuTask? */
-		if (gts->num_ready_tasks > pgstrom_max_async_tasks / 2)
-			break;
-
-		/* Fixed number of norm to scan */
-		if (num_sent_tasks <= num_recv_tasks)
+		curr_task_count = pg_atomic_add_fetch_u64(shgcon->gpu_task_count, 1);
+		SpinLockAcquire(&shgcon->lock);
+		if ((gts->num_ready_tasks +
+			 shgcon->num_async_tasks) <= pgstrom_min_async_tasks ||
+			(gts->num_ready_tasks == 0 &&
+			 curr_task_count < pgstrom_max_async_tasks) ||
+			(gts->num_ready_tasks == 0 && shgcon->num_async_tasks == 0))
 		{
+			SpinLockRelease(&shgcon->lock);
+
 			gtask = gts->cb_next_task(gts);
-			if (!gtask)
-			{
+		  	if (!gtask)
+		  	{
 				gts->scan_done = true;
 				elog(DEBUG2, "scan done (%s)",
 					 gts->css.methods->CustomName);
 				break;
 			}
-
 			if (!gpuservSendGpuTask(gcontext, gtask))
 				elog(ERROR, "failed to send GpuTask to GPU server");
-			num_sent_tasks++;
 		}
 		else
 		{
-			/*
-			 * Make advance the underlying scan until arrive of the next
-			 * asynchronous task
-			 */
-			SpinLockAcquire(&shgcon->lock);
-			if (shgcon->num_async_tasks < pgstrom_max_async_tasks)
-			{
-				SpinLockRelease(&shgcon->lock);
-
-				num_ready_tasks = gts->num_ready_tasks;
-				if (gpuservRecvGpuTasks(gcontext, 0))
-				{
-					if (gts->num_ready_tasks > num_ready_tasks)
-						break;
-				}
-
-				gtask = gts->cb_next_task(gts);
-				if (!gtask)
-				{
-					gts->scan_done = true;
-					elog(DEBUG2, "scan done (%s)",
-						 gts->css.methods->CustomName);
-					break;
-				}
-
-				if (!gpuservSendGpuTask(gcontext, gtask))
-					elog(ERROR, "failed to send GpuTask to GPU server");
-			}
-			else
-			{
-				SpinLockRelease(&shgcon->lock);
-				break;
-			}
+			SpinLockRelease(&shgcon->lock);
+			pg_atomic_sub_fetch_u64(shgcon->gpu_task_count, 1);
+			break;
 		}
+		/* check completed tasks if any (non-blocking) */
+		while (gpuservRecvGpuTasks(gcontext, 0));
 	}
 
-retry_fetch:
 	/*
-	 * In case when GTS has no ready tasks yet, we try to wait the response
-	 * synchronously.
+	 * If we have no ready task yet but unable to scan any more, we have to
+	 * wait for the response synchronously.
 	 */
 	while (dlist_is_empty(&gts->ready_tasks))
 	{
@@ -364,22 +329,12 @@ retry_fetch:
 		if (shgcon->num_async_tasks == 0)
 		{
 			SpinLockRelease(&shgcon->lock);
-			/*
-			 * If we have no ready tasks, no asynchronous tasks and no further
-			 * chunks to scan, it means this GTS gets end of the scan.
-			 * If GTS may read further blocks, it needs to retry scan. (We
-			 * might give up scan because of larger number of async tasks)
-			 */
-			if (gts->scan_done)
-				return NULL;
-			goto retry_scan;
+			if (!gts->scan_done)
+				elog(FATAL, "Bug? no async task is running but scan is still in-progress");
+			return NULL;
 		}
 		SpinLockRelease(&shgcon->lock);
-
-		/*
-		 * If we have any asynchronous tasks, try synchronous receive to
-		 * get next task.
-		 */
+		/* wait for ready tasks synchronously */
 		gpuservRecvGpuTasks(gcontext, -1);
 	}
 
@@ -400,7 +355,7 @@ retry_fetch:
 	if (gtask->revision != gts->revision)
 	{
 		pgstromReleaseGpuTask(gtask);
-		goto retry_fetch;
+		goto retry_scan;
 	}
 	return gtask;
 }

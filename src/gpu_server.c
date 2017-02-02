@@ -596,6 +596,7 @@ gpuservFlushOutCompletedTasks(void)
 
 				SpinLockAcquire(&shgcon->lock);
 				shgcon->num_async_tasks--;
+				pg_atomic_sub_fetch_u64(shgcon->gpu_task_count, 1);
 				backend = shgcon->backend;
 				SpinLockRelease(&shgcon->lock);
 
@@ -1251,7 +1252,10 @@ gpuservSendGpuTask(GpuContext_v2 *gcontext, GpuTask_v2 *gtask)
 	/* update num_async_tasks */
 	SpinLockAcquire(&shgcon->lock);
 	if (IsGpuServerProcess())
+	{
 		shgcon->num_async_tasks--;
+		pg_atomic_sub_fetch_u64(shgcon->gpu_task_count, 1);
+	}
 	else
 		shgcon->num_async_tasks++;
 	SpinLockRelease(&shgcon->lock);

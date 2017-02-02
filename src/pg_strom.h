@@ -227,8 +227,6 @@ struct GpuTaskState_v2
 	/* performance monitor */
 	pgstrom_perfmon	pfm;			/* local counter */
 	pgstromWorkerStatistics *worker_stat;
-
-//	pgstrom_perfmon *pfm_master;	/* shared state, if under Gather */
 };
 #define GTS_GET_SCAN_TUPDESC(gts)				\
 	(((GpuTaskState_v2 *)(gts))->css.ss.ss_ScanTupleSlot->tts_tupleDescriptor)
