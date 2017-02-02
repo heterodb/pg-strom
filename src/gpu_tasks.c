@@ -285,6 +285,8 @@ retry_scan:
 	 */
 	while (!gts->scan_done)
 	{
+		CHECK_FOR_INTERRUPTS();
+
 		curr_task_count = pg_atomic_add_fetch_u64(shgcon->gpu_task_count, 1);
 		SpinLockAcquire(&shgcon->lock);
 		if ((gts->num_ready_tasks +
@@ -308,36 +310,36 @@ retry_scan:
 		}
 		else
 		{
+			/* shouldn't send tasks any more at this moment */
 			SpinLockRelease(&shgcon->lock);
 			pg_atomic_sub_fetch_u64(shgcon->gpu_task_count, 1);
-			break;
+			/* ok, we got at least one completed tasks */
+			if (!dlist_is_empty(&gts->ready_tasks))
+				break;
+			/* wait for a completed task, or task vanish on server side */
+			gpuservRecvGpuTasks(gcontext, -1);
 		}
 		/* check completed tasks if any (non-blocking) */
 		while (gpuservRecvGpuTasks(gcontext, 0));
 	}
 
 	/*
-	 * If we have no ready task yet but unable to scan any more, we have to
-	 * wait for the response synchronously.
+	 * Once we exit the above loop, either a completed task was returned,
+	 * or relation scan has already done thus wait for synchronously.
 	 */
 	while (dlist_is_empty(&gts->ready_tasks))
 	{
-		Assert(gts->num_ready_tasks == 0);
+		Assert(!gts->scan_done);
 		CHECK_FOR_INTERRUPTS();
-
 		SpinLockAcquire(&shgcon->lock);
 		if (shgcon->num_async_tasks == 0)
 		{
 			SpinLockRelease(&shgcon->lock);
-			if (!gts->scan_done)
-				elog(FATAL, "Bug? no async task is running but scan is still in-progress");
 			return NULL;
 		}
 		SpinLockRelease(&shgcon->lock);
-		/* wait for ready tasks synchronously */
 		gpuservRecvGpuTasks(gcontext, -1);
 	}
-
 	/* OK, pick up GpuTask from the head */
 	Assert(gts->num_ready_tasks > 0);
 	dnode = dlist_pop_head_node(&gts->ready_tasks);
