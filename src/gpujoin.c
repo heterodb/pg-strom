@@ -5647,7 +5647,6 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 							  GPUMEMALIGN(pds_src->kds.length));
 		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		{
-			fprintf(stderr, "PDS_fillup_blocks on pds=%p\n", pds_src);
 			PDS_fillup_blocks(pds_src, pgjoin->task.peer_fdesc);
 			pgjoin->m_kds_src = 0UL;
 			pgjoin->with_nvme_strom = false;
@@ -7053,9 +7052,7 @@ retry:
 			PDS_release(pmrels->inner_chunks[i]);
 		SpinLockRelease(&pmrels->lock);
 
-		fprintf(stderr, "%s: pid=%u pmrels=%p is detached\n", __FUNCTION__, getpid(), pmrels);
 		dmaBufferFree(pmrels);
-		fprintf(stderr, "%s: ppid=%u mrels=%p detach done\n", __FUNCTION__, getpid(), pmrels);
 	}
 }
 

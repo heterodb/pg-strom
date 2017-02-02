@@ -126,8 +126,8 @@ pgstrom_init_misc_guc(void)
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 	/* soft limit for number of concurrent GpuTask per GPU device */
-	DefineCustomIntVariable("pg_strom.max_async_tasks_per_process",
-					"Soft limit for number of concurrent tasks per process",
+	DefineCustomIntVariable("pg_strom.max_async_tasks",
+				"Soft limit for number of concurrent tasks per GPU server",
 							NULL,
 							&pgstrom_max_async_tasks,
 							32,
@@ -137,13 +137,13 @@ pgstrom_init_misc_guc(void)
 							GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
 	/* maximum number of GpuTask can concurrently executed */
-	DefineCustomIntVariable("pg_strom.min_async_tasks_per_process",
+	DefineCustomIntVariable("pg_strom.min_async_tasks",
 				"Minimum guarantee for number of concurrent tasks per process",
 							NULL,
 							&pgstrom_min_async_tasks,
 							4,
 							1,
-							INT_MAX,
+							Max(pgstrom_max_async_tasks/4, 4),
 							PGC_USERSET,
 							GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
