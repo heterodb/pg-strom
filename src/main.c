@@ -476,7 +476,6 @@ _PG_init(void)
 	pgstrom_init_gpuscan();
 	pgstrom_init_gpujoin();
 	pgstrom_init_gpupreagg();
-//	pgstrom_init_gpusort();
 
 	/* miscellaneous initializations */
 	pgstrom_init_codegen();
@@ -708,7 +707,7 @@ pgstrom_explain_perfmon(GpuTaskState *gts, ExplainState *es)
 							   gpreagg.num_kern_fixvar,
 							   gpreagg.tv_kern_fixvar);
 	}
-
+#ifdef NOT_USED
 	/* GpuSort: kernel execution */
 	if ((pfm->extra_flags & DEVKERNEL_NEEDS_GPUSORT) != 0)
 	{
@@ -734,7 +733,7 @@ pgstrom_explain_perfmon(GpuTaskState *gts, ExplainState *es)
 				 format_millisec(pfm->gsort.tv_cpu_sort));
 		ExplainPropertyText("CPU merge sort", buf, es);
 	}
-
+#endif	/* NOT_USED */
 #undef EXPLAIN_KERNEL_PERFMON
 	/* Time of I/O stuff */
 	if ((pfm->extra_flags & DEVKERNEL_NEEDS_GPUJOIN) != 0)

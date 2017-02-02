@@ -325,9 +325,11 @@ construct_flat_cuda_source(uint32 extra_flags,
 	/* GpuPreAgg */
 	if (extra_flags & DEVKERNEL_NEEDS_GPUPREAGG)
 		appendStringInfoString(&source, pgstrom_cuda_gpupreagg_code);
+#ifdef NOT_USED
 	/* GpuSort */
 	if (extra_flags & DEVKERNEL_NEEDS_GPUSORT)
 		appendStringInfoString(&source, pgstrom_cuda_gpusort_code);
+#endif
 	/* PL/CUDA functions */
 	if (extra_flags & DEVKERNEL_NEEDS_PLCUDA)
 		appendStringInfoString(&source, pgstrom_cuda_plcuda_code);
@@ -1133,11 +1135,11 @@ pgstrom_build_session_info(cl_uint extra_flags,
 	/* enables outer-quals evaluation? */
 	if ((extra_flags & DEVKERNEL_NEEDS_GPUPREAGG) != 0)
 		assign_gpupreagg_session_info(&buf, gts);
-
+#ifdef NOT_USED
 	/* enables device projection? */
-//	if ((extra_flags & DEVKERNEL_NEEDS_GPUSORT) != 0)
-//		assign_gpusort_session_info(&buf, gts);
-
+	if ((extra_flags & DEVKERNEL_NEEDS_GPUSORT) != 0)
+		assign_gpusort_session_info(&buf, gts);
+#endif
 	return buf.data;
 }
 

@@ -790,14 +790,6 @@ extern void assign_gpupreagg_session_info(StringInfo buf,
 extern void pgstrom_init_gpupreagg(void);
 
 /*
- * gpusort.c
- */
-extern void pgstrom_try_insert_gpusort(PlannedStmt *pstmt, Plan **p_plan);
-extern bool pgstrom_plan_is_gpusort(const Plan *plan);
-extern void assign_gpusort_session_info(StringInfo buf, GpuTaskState_v2 *gts);
-extern void pgstrom_init_gpusort(void);
-
-/*
  * pl_cuda.c
  */
 extern Datum plcuda_function_validator(PG_FUNCTION_ARGS);
@@ -900,7 +892,6 @@ extern const char *pgstrom_cuda_matrix_code;
 extern const char *pgstrom_cuda_gpuscan_code;
 extern const char *pgstrom_cuda_gpujoin_code;
 extern const char *pgstrom_cuda_gpupreagg_code;
-extern const char *pgstrom_cuda_gpusort_code;
 extern const char *pgstrom_cuda_mathlib_code;
 extern const char *pgstrom_cuda_textlib_code;
 extern const char *pgstrom_cuda_timelib_code;
