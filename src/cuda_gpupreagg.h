@@ -1673,6 +1673,8 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 		kcxt.e = kresults_src->kerror;
 		goto out;
 	}
+	else if (kresults_src->nitems == 0)
+		goto out;	/* no rows to be reduced */
 	kgpreagg->nitems_real = num_threads = kresults_src->nitems;
 #else
 	/*
@@ -1681,10 +1683,9 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 	 */
 	assert(kds_src->format == KDS_FORMAT_ROW);
 	kresults_src->all_visible = true;
-	num_threads = kds_src->nitems;
-
-	kgpreagg->nitems_real = kds_src->nitems;
+	kgpreagg->nitems_real = num_threads = kds_src->nitems;
 	kgpreagg->nitems_filtered = 0;
+	assert(num_threads > 0);
 #endif
 
 	/* Launch:
