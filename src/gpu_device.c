@@ -24,6 +24,11 @@
 #include "utils/memutils.h"
 #include "pg_strom.h"
 
+/*
+ * NOTE: scoreboard shall be deprecated in the near future
+ * we will assign per gpu-server soft limit instead.
+ */
+
 /* scoreboard for resource management */
 typedef struct GpuScoreBoard
 {

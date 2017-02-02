@@ -617,7 +617,9 @@ GpuContext_v2 *
 AttachGpuContext(pgsocket sockfd,
 				 cl_int context_id,
 				 BackendId backend_id,
-				 cl_int device_id)
+				 cl_int device_id,
+				 pg_atomic_uint64 *p_gpu_mem_usage,
+				 pg_atomic_uint64 *p_gpu_task_count)
 {
 	GpuContext_v2	   *gcontext;
 	SharedGpuContext   *shgcon;
@@ -658,6 +660,8 @@ AttachGpuContext(pgsocket sockfd,
 	shgcon->device_id = device_id;
 	shgcon->server = MyProc;
 	shgcon->num_async_tasks = 0;
+	shgcon->gpu_mem_usage = p_gpu_mem_usage;
+	shgcon->gpu_task_count = p_gpu_task_count;
 	SetLatch(&shgcon->backend->procLatch);
 	SpinLockRelease(&shgcon->lock);
 

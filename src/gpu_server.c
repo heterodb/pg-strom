@@ -41,6 +41,9 @@ typedef struct GpuServProc
 	PGPROC		   *pgproc;		/* reference to the server's PGPROC */
 	BackendId		backend_id;	/* backend which is going to connect to */
 	cl_uint			gcontext_id;/* gcontext which is going to be assigned to */
+	/* per gpu-server state counter */
+	pg_atomic_uint64	gpu_mem_usage;	/* amount of GPU RAM by the server */
+	pg_atomic_uint64	gpu_task_count;	/* count of GPU tasks in this server */
 } GpuServProc;
 
 #define GPUSERV_IS_ACTIVE(gsproc)								\
@@ -79,11 +82,6 @@ typedef struct GpuServCommand
 		char	buffer[FLEXIBLE_ARRAY_MEMBER];
 	} error;
 } GpuServCommand;
-
-/*
- * public variables
- */
-SharedGpuContext	   *currentSharedGpuContext = NULL;
 
 /*
  * static/public variables
@@ -1031,7 +1029,9 @@ gpuservAcceptConnection(void)
 		gcontext = AttachGpuContext(sockfd,
 									gcontext_id,
 									backend_id,
-									devAttrs[gpuserv_cuda_dindex].DEV_ID);
+									devAttrs[gpuserv_cuda_dindex].DEV_ID,
+									&gpuServProc->gpu_mem_usage,
+									&gpuServProc->gpu_task_count);
 		/* expand session's WaitEventSet */
 		Assert(i < MaxBackends);
 		session_events[i].pos = session_num_clients;
@@ -1587,6 +1587,8 @@ gpuserv_bgworker_main(Datum __server_id)
 	gpuServProc->pgproc = MyProc;
 	gpuServProc->backend_id = InvalidBackendId;
 	gpuServProc->gcontext_id = INVALID_GPU_CONTEXT_ID;
+	pg_atomic_init_u64(&gpuServProc->gpu_mem_usage, 0);
+	pg_atomic_init_u64(&gpuServProc->gpu_task_count, 0);
 	dlist_push_head(&gpuServState->serv_procs_list[gpuserv_cuda_dindex],
 					&gpuServProc->chain);
 	SpinLockRelease(&gpuServState->lock);

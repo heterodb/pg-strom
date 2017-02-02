@@ -108,6 +108,9 @@ typedef struct SharedGpuContext
 	/* state of asynchronous tasks */
 	dlist_head	dma_buffer_list;/* tracker of DMA buffers */
 	cl_int		num_async_tasks;/* num of tasks passed to GPU server */
+	/* resource consumption monitor per server */
+	pg_atomic_uint64   *gpu_mem_usage;
+	pg_atomic_uint64   *gpu_task_count;
 	/* performance monitor */
 	struct {
 		bool		enabled;
@@ -443,7 +446,9 @@ extern GpuContext_v2 *AllocGpuContext(bool with_connection);
 extern GpuContext_v2 *AttachGpuContext(pgsocket sockfd,
 									   cl_int context_id,
 									   BackendId backend_id,
-									   cl_int device_id);
+									   cl_int device_id,
+									   pg_atomic_uint64 *p_gpu_mem_usage,
+									   pg_atomic_uint64 *p_gpu_task_count);
 extern GpuContext_v2 *GetGpuContext(GpuContext_v2 *gcontext);
 extern bool PutGpuContext(GpuContext_v2 *gcontext);
 extern bool ForcePutGpuContext(GpuContext_v2 *gcontext);
