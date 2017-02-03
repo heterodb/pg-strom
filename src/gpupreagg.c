@@ -2449,7 +2449,7 @@ gpupreagg_codegen_projection(StringInfo kern,
 		"  pg_anytype_t temp    __attribute__((unused));\n");
 
 	/* open relation if GpuPreAgg looks at physical relation */
-	if (outer_tlist == NIL)
+	if (outer_scanrelid > 0)
 	{
 		RangeTblEntry  *rte;
 
