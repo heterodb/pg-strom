@@ -213,7 +213,6 @@ typedef struct
 	CUevent				ev_kds_final;
 	CUevent				ev_dma_send_start;
 	CUevent				ev_dma_send_stop;
-	CUevent				ev_kern_fixvar;
 	CUevent				ev_dma_recv_start;
 	CUevent				ev_dma_recv_stop;
 
@@ -4791,7 +4790,6 @@ gpupreagg_process_termination_task(GpuPreAggTask *gpreagg,
 	}
 	else
 	{
-		PFMON_EVENT_RECORD(gpreagg, ev_kern_fixvar, cuda_stream);
 		PFMON_EVENT_RECORD(gpreagg, ev_dma_recv_start, cuda_stream);
 	}
 

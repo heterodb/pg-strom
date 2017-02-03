@@ -41,6 +41,9 @@ typedef struct {
 	size_t			size_dmabuf_total;
 	size_t			size_gpumem_total;
 	size_t			size_iomapped_total;
+	/*-- message send/recv counter --*/
+	cl_double		tv_sendmsg;
+	cl_double		tv_recvmsg;
 	/*-- build cuda program --*/
 	struct timeval	tv_build_start;
 	struct timeval	tv_build_end;

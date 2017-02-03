@@ -129,6 +129,8 @@ typedef struct SharedGpuContext
 		size_t		size_dmabuf_total;
 		size_t		size_gpumem_total;
 		size_t		size_iomapped_total;
+		pg_atomic_uint64 tv_sendmsg;	/* usec */
+		pg_atomic_uint64 tv_recvmsg;	/* usec */
 	} pfm;
 } SharedGpuContext;
 

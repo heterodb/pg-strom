@@ -689,12 +689,13 @@ gpuservTryToWakeUp(void)
 static bool
 gpuservSendCommand(GpuContext_v2 *gcontext, GpuServCommand *cmd, long timeout)
 {
+	SharedGpuContext *shgcon = gcontext->shgcon;
 	struct msghdr	msg;
 	struct iovec    iov;
 	unsigned char	cmsgbuf[CMSG_SPACE(sizeof(int))];
 	ssize_t			retval;
 	int				ev;
-	struct timeval	tv1, tv2;
+	struct timeval	tv0, tv1, tv2;
 
 	Assert(cmd->command == GPUSERV_CMD_TASK ||
 		   cmd->command == GPUSERV_CMD_ERROR);
@@ -725,6 +726,8 @@ gpuservSendCommand(GpuContext_v2 *gcontext, GpuServCommand *cmd, long timeout)
 	}
 
 	gettimeofday(&tv1, NULL);
+	if (shgcon->pfm.enabled)
+		tv0 = tv1;
 	for (;;)
 	{
 		GPUSERV_CHECK_FOR_INTERRUPTS();
@@ -752,6 +755,13 @@ gpuservSendCommand(GpuContext_v2 *gcontext, GpuServCommand *cmd, long timeout)
 			else if (retval != cmd->length)
 				elog(ERROR, "incomplete size of message sent: %zu of %zu",
 					 retval, (size_t)cmd->length);
+			if (shgcon->pfm.enabled)
+			{
+				gettimeofday(&tv2, NULL);
+				pg_atomic_fetch_add_u64(&shgcon->pfm.tv_sendmsg,
+										(tv2.tv_sec * 1000000 + tv2.tv_usec) -
+										(tv0.tv_sec * 1000000 + tv0.tv_usec));
+			}
 			return true;		/* success to send */
 		}
 		/* check timeout? */
@@ -1277,7 +1287,9 @@ gpuservSendGpuTask(GpuContext_v2 *gcontext, GpuTask_v2 *gtask)
 bool
 gpuservRecvGpuTasks(GpuContext_v2 *gcontext, long timeout)
 {
-	struct timeval	tv1, tv2;
+	SharedGpuContext *shgcon = gcontext->shgcon;
+	struct timeval	tv0, tv1, tv2;
+	bool			retval = false;
 
 	if (gcontext->sockfd == PGINVALID_SOCKET)
 		return false;
@@ -1289,6 +1301,8 @@ gpuservRecvGpuTasks(GpuContext_v2 *gcontext, long timeout)
 		timeout = GpuServerCommTimeout;
 
 	gettimeofday(&tv1, NULL);
+	if (shgcon->pfm.enabled)
+		tv0 = tv1;
 	do {
 		bool	peer_sock_closed = false;
 		int		ev;
@@ -1297,7 +1311,11 @@ gpuservRecvGpuTasks(GpuContext_v2 *gcontext, long timeout)
 		ResetLatch(MyLatch);
 
 		if (gpuservRecvCommands(gcontext, &peer_sock_closed) > 0)
-			return true;
+		{
+			retval = true;
+			break;
+		}
+
 		if (peer_sock_closed)
 		{
 			Assert(gcontext->sockfd != PGINVALID_SOCKET);
@@ -1307,10 +1325,11 @@ gpuservRecvGpuTasks(GpuContext_v2 *gcontext, long timeout)
 			else
 				elog(NOTICE, "sockfd=%d closed", gcontext->sockfd);
 			gcontext->sockfd = PGINVALID_SOCKET;
-			return false;
+			break;
 		}
+
 		if (timeout == 0)
-			return false;
+			break;
 
 		ev = WaitLatchOrSocket(MyLatch,
 							   WL_LATCH_SET |
@@ -1340,7 +1359,14 @@ gpuservRecvGpuTasks(GpuContext_v2 *gcontext, long timeout)
 		}
 	} while (timeout != 0);
 
-	return false;
+	if (shgcon->pfm.enabled)
+	{
+		gettimeofday(&tv2, NULL);
+		pg_atomic_fetch_add_u64(&shgcon->pfm.tv_recvmsg,
+								(tv2.tv_sec * 1000000 + tv2.tv_usec) -
+								(tv0.tv_sec * 1000000 + tv0.tv_usec));
+	}
+	return retval;
 }
 
 /*

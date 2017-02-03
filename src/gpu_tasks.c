@@ -1206,6 +1206,7 @@ __pgstrom_collect_perfmon(pgstrom_perfmon *pfm_dst, pgstrom_perfmon *pfm_src)
 	if (!pfm_dst->enabled || !pfm_src->enabled)
 		return;
 #define PFM_ADD(FIELD)			pfm_dst->FIELD += pfm_src->FIELD
+	/* memory allocation */
 	PFM_ADD(num_dmabuf_alloc);
 	PFM_ADD(num_dmabuf_free);
 	PFM_ADD(num_gpumem_alloc);
@@ -1221,6 +1222,9 @@ __pgstrom_collect_perfmon(pgstrom_perfmon *pfm_dst, pgstrom_perfmon *pfm_src)
 	PFM_ADD(size_dmabuf_total);
 	PFM_ADD(size_gpumem_total);
 	PFM_ADD(size_iomapped_total);
+	/* time for message exchange */
+	PFM_ADD(tv_sendmsg);
+	PFM_ADD(tv_recvmsg);
 
 	/* build cuda program */
 	// no idea how to track...
@@ -1328,6 +1332,10 @@ pgstrom_collect_perfmon_shared_gcontext(GpuTaskState_v2 *gts)
 	PFM_MOVE(size_gpumem_total);
 	PFM_MOVE(size_iomapped_total);
 #undef PFM_MOVE
+	gts->pfm.tv_sendmsg =
+		(double)pg_atomic_read_u64(&shgcon->pfm.tv_sendmsg) / 1000.0;
+	gts->pfm.tv_recvmsg =
+		(double)pg_atomic_read_u64(&shgcon->pfm.tv_recvmsg) / 1000.0;
 }
 
 void
@@ -1643,6 +1651,23 @@ pgstrom_explain_perfmon(GpuTaskState_v2 *gts, ExplainState *es)
 						 format_millisec(pfm->tv_iomapped_free));
 			}
 			ExplainPropertyText("I/O Mapped Memory", buf, es);
+		}
+
+		if (pfm->tv_sendmsg > 0.0 || pfm->tv_recvmsg > 0.0)
+		{
+			if (es->format == EXPLAIN_FORMAT_TEXT)
+			{
+				snprintf(buf, sizeof(buf),
+						 "send: %s, recv: %s",
+						 format_millisec(pfm->tv_sendmsg),
+						 format_millisec(pfm->tv_recvmsg));
+				ExplainPropertyText("GPU Tasks", buf, es);
+			}
+			else
+			{
+				ExplainPropertyFloat("Send GPU Tasks", pfm->tv_sendmsg, 2, es);
+				ExplainPropertyFloat("Recv GPU Tasks", pfm->tv_recvmsg, 2, es);
+			}
 		}
 	}
 }
