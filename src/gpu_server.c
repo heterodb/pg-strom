@@ -726,8 +726,7 @@ gpuservSendCommand(GpuContext_v2 *gcontext, GpuServCommand *cmd, long timeout)
 	}
 
 	gettimeofday(&tv1, NULL);
-	if (shgcon->pfm.enabled)
-		tv0 = tv1;
+	tv0 = tv1;
 	for (;;)
 	{
 		GPUSERV_CHECK_FOR_INTERRUPTS();
@@ -1301,8 +1300,7 @@ gpuservRecvGpuTasks(GpuContext_v2 *gcontext, long timeout)
 		timeout = GpuServerCommTimeout;
 
 	gettimeofday(&tv1, NULL);
-	if (shgcon->pfm.enabled)
-		tv0 = tv1;
+	tv0 = tv1;
 	do {
 		bool	peer_sock_closed = false;
 		int		ev;

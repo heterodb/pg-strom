@@ -797,6 +797,11 @@ extern void pgstrom_init_gpupreagg(void);
 extern Datum plcuda_function_validator(PG_FUNCTION_ARGS);
 extern Datum plcuda_function_handler(PG_FUNCTION_ARGS);
 extern Datum plcuda_function_source(PG_FUNCTION_ARGS);
+extern int	plcuda_process_task(GpuTask_v2 *gtask,
+								CUmodule cuda_module,
+								CUstream cuda_stream);
+extern int  plcuda_complete_task(GpuTask_v2 *gtask);
+extern void plcuda_release_task(GpuTask_v2 *gtask);
 extern void pgstrom_init_plcuda(void);
 
 /*

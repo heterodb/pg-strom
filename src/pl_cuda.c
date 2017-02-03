@@ -31,6 +31,7 @@
 #include "pg_strom.h"
 #include "cuda_plcuda.h"
 
+#if 0
 #define PLCUDAINFO_EXNODE_NAME	"plcudaInfo"
 
 typedef struct plcudaInfo
@@ -85,8 +86,7 @@ typedef struct plcudaInfo
 	Oid		fn_sanity_check;
 	Oid		fn_cpu_fallback;
 } plcudaInfo;
-
-static ExtensibleNodeMethods plcudaInfoMethods;
+#endif
 
 /*
  * plcudaState - runtime state of pl/cuda functions
@@ -106,12 +106,96 @@ typedef struct plcudaState
 	CUmodule	   *cuda_modules;
 } plcudaState;
 
+
+
+/*
+ * plcudaTaskState
+ */
+typedef struct plcudaTaskState
+{
+	GpuTaskState_v2	gts;		/* dummy */
+	/* kernel requirement */
+	cl_uint	extra_flags;
+	List   *extra_includes;		/* OID of extra include functions */
+	/* kernel declarations */
+	char   *kern_decl;
+	/* kernel prep function */
+	char   *kern_prep;
+	Oid		fn_prep_kern_blocksz;
+	long	val_prep_kern_blocksz;
+	Oid		fn_prep_num_threads;
+	Size	val_prep_num_threads;
+	Oid		fn_prep_shmem_unitsz;
+	Size	val_prep_shmem_unitsz;
+	Oid		fn_prep_shmem_blocksz;
+	Size	val_prep_shmem_blocksz;
+
+	/* kernel function */
+	char   *kern_main;
+	Oid		fn_main_kern_blocksz;
+	long	val_main_kern_blocksz;
+	Oid		fn_main_num_threads;
+	Size	val_main_num_threads;
+	Oid		fn_main_shmem_unitsz;
+	Size	val_main_shmem_unitsz;
+	Oid		fn_main_shmem_blocksz;
+	Size	val_main_shmem_blocksz;
+
+	/* kernel post function */
+    char   *kern_post;
+	Oid		fn_post_kern_blocksz;
+	long	val_post_kern_blocksz;
+	Oid		fn_post_num_threads;
+	Size	val_post_num_threads;
+	Oid		fn_post_shmem_unitsz;
+	Size	val_post_shmem_unitsz;
+	Oid		fn_post_shmem_blocksz;
+	Size	val_post_shmem_blocksz;
+
+	/* device memory size for working buffer */
+	Oid		fn_working_bufsz;
+	long	val_working_bufsz;
+
+	/* device memory size for result buffer */
+	Oid		fn_results_bufsz;
+	long	val_results_bufsz;
+
+	/* comprehensive functions */
+	Oid		fn_sanity_check;
+	Oid		fn_cpu_fallback;
+} plcudaTaskState;
+
+/*
+ *  plcudaTask
+ */
+typedef struct plcudaTask
+{
+	GpuTask_v2		task;
+	bool			exec_prep_kernel;
+	bool			exec_post_kernel;
+	bool			has_cpu_fallback;
+	void		   *h_results_buf;	/* results buffer in host-side */
+	CUfunction		kern_plcuda_prep;
+	CUfunction		kern_plcuda_main;
+	CUfunction		kern_plcuda_post;
+	CUdeviceptr		m_kern_plcuda;
+	CUdeviceptr		m_results_buf;
+	CUdeviceptr		m_working_buf;
+	CUevent			ev_dma_send_start;
+	CUevent			ev_dma_send_stop;
+	CUevent			ev_dma_recv_start;
+	CUevent			ev_dma_recv_stop;
+	/* TODO: performance counter here */
+	kern_plcuda		kern;
+} plcudaTask;
+
 /*
  * static functions
  */
-static plcudaState *plcuda_exec_begin(Form_pg_proc proc_form,
-									  plcudaInfo *cf_info);
-static void plcuda_exec_end(plcudaState *state);
+static plcudaTaskState *plcuda_exec_begin(Form_pg_proc proc_form,
+										  FunctionCallInfo fcinfo);
+
+static void plcuda_exec_end(plcudaTaskState *plts);
 
 /* tracker of plcudaState */
 static dlist_head	plcuda_state_list;
@@ -307,8 +391,10 @@ ident_to_cstring(List *ident)
  * #plcuda_cpu_fallback {<function>}             (default: no fallback)
  */
 static void
-plcuda_code_validation(plcudaInfo *cf_info,
-					   Form_pg_proc proc_form, char *source)
+plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
+					   Oid proowner,
+					   oidvector *proargtypes,
+					   Oid prorettype)
 {
 	StringInfoData	decl_src;
 	StringInfoData	prep_src;
@@ -316,7 +402,6 @@ plcuda_code_validation(plcudaInfo *cf_info,
 	StringInfoData	post_src;
 	StringInfoData	emsg;
 	StringInfo		curr = NULL;
-	oidvector	   *argtypes = &proc_form->proargtypes;
 	char		   *line;
 	int				lineno;
 	bool			has_decl_block = false;
@@ -333,8 +418,14 @@ plcuda_code_validation(plcudaInfo *cf_info,
 	initStringInfo(&main_src);
 	initStringInfo(&post_src);
 	initStringInfo(&emsg);
+
 #define EMSG(fmt,...)		appendStringInfo(&emsg, "\n%u: " fmt,	\
 											 lineno, __VA_ARGS__)
+#define HELPER_PRIV_CHECK(fn_oid, ownership)						\
+	(!OidIsValid(fn_oid) ||											\
+	 (OidIsValid(ownership)											\
+	  ? (pg_proc_ownercheck((fn_oid),(ownership)))					\
+	  : (pg_proc_aclcheck((fn_oid),GetUserId(),ACL_EXECUTE) == ACLCHECK_OK)))
 
 	for (line = strtok(source, "\n"), lineno = 1;
 		 line != NULL;
@@ -440,24 +531,29 @@ plcuda_code_validation(plcudaInfo *cf_info,
 				if (!curr)
 					EMSG("%s appeared outside of code block", cmd);
 				else if (plcuda_lookup_helper(options,
-											  argtypes, INT8OID,
+											  proargtypes, INT8OID,
 											  &fn_num_threads,
 											  &val_num_threads))
 				{
-					if (curr == &prep_src)
+					if (!HELPER_PRIV_CHECK(fn_num_threads, proowner))
 					{
-						cf_info->fn_prep_num_threads = fn_num_threads;
-						cf_info->val_prep_num_threads = val_num_threads;
+						EMSG("permission denied on helper function %s",
+							 NameListToString(options));
+					}
+					else if (curr == &prep_src)
+					{
+						plts->fn_prep_num_threads = fn_num_threads;
+						plts->val_prep_num_threads = val_num_threads;
 					}
 					else if (curr == &main_src)
 					{
-						cf_info->fn_main_num_threads = fn_num_threads;
-						cf_info->val_main_num_threads = val_num_threads;
+						plts->fn_main_num_threads = fn_num_threads;
+						plts->val_main_num_threads = val_num_threads;
 					}
 					else if (curr == &post_src)
 					{
-						cf_info->fn_post_num_threads = fn_num_threads;
-						cf_info->val_post_num_threads = val_num_threads;
+						plts->fn_post_num_threads = fn_num_threads;
+						plts->val_post_num_threads = val_num_threads;
 					}
 					else
 						EMSG("cannot use \"%s\" in this code block", cmd);
@@ -474,24 +570,29 @@ plcuda_code_validation(plcudaInfo *cf_info,
 				if (!curr)
 					EMSG("%s appeared outside of code block", cmd);
 				else if (plcuda_lookup_helper(options,
-											  argtypes, INT8OID,
+											  proargtypes, INT8OID,
 											  &fn_shmem_unitsz,
 											  &val_shmem_unitsz))
 				{
-					if (curr == &prep_src)
+					if (!HELPER_PRIV_CHECK(fn_shmem_unitsz, proowner))
 					{
-						cf_info->fn_prep_shmem_unitsz = fn_shmem_unitsz;
-						cf_info->val_prep_shmem_unitsz = val_shmem_unitsz;
+						EMSG("permission denied on helper function %s",
+							 NameListToString(options));
+					}
+					else if (curr == &prep_src)
+					{
+						plts->fn_prep_shmem_unitsz = fn_shmem_unitsz;
+						plts->val_prep_shmem_unitsz = val_shmem_unitsz;
 					}
 					else if (curr == &main_src)
 					{
-						cf_info->fn_main_shmem_unitsz = fn_shmem_unitsz;
-						cf_info->val_main_shmem_unitsz = val_shmem_unitsz;
+						plts->fn_main_shmem_unitsz = fn_shmem_unitsz;
+						plts->val_main_shmem_unitsz = val_shmem_unitsz;
 					}
 					else if (curr == &post_src)
 					{
-						cf_info->fn_post_shmem_unitsz = fn_shmem_unitsz;
-						cf_info->val_post_shmem_unitsz = val_shmem_unitsz;
+						plts->fn_post_shmem_unitsz = fn_shmem_unitsz;
+						plts->val_post_shmem_unitsz = val_shmem_unitsz;
 					}
 					else
 						EMSG("cannot use \"%s\" in this code block", cmd);
@@ -508,24 +609,29 @@ plcuda_code_validation(plcudaInfo *cf_info,
 				if (!curr)
 					EMSG("%s appeared outside of code block", cmd);
 				else if (plcuda_lookup_helper(options,
-											  argtypes, INT8OID,
+											  proargtypes, INT8OID,
 											  &fn_shmem_blocksz,
 											  &val_shmem_blocksz))
 				{
-					if (curr == &prep_src)
+					if (!HELPER_PRIV_CHECK(fn_shmem_blocksz, proowner))
 					{
-						cf_info->fn_prep_shmem_blocksz = fn_shmem_blocksz;
-						cf_info->val_prep_shmem_blocksz = val_shmem_blocksz;
+						EMSG("permission denied on helper function %s",
+							 NameListToString(options));
+					}
+					else if (curr == &prep_src)
+					{
+						plts->fn_prep_shmem_blocksz = fn_shmem_blocksz;
+						plts->val_prep_shmem_blocksz = val_shmem_blocksz;
 					}
 					else if (curr == &main_src)
 					{
-						cf_info->fn_main_shmem_blocksz = fn_shmem_blocksz;
-						cf_info->val_main_shmem_blocksz = val_shmem_blocksz;
+						plts->fn_main_shmem_blocksz = fn_shmem_blocksz;
+						plts->val_main_shmem_blocksz = val_shmem_blocksz;
 					}
 					else if (curr == &post_src)
 					{
-						cf_info->fn_post_shmem_blocksz = fn_shmem_blocksz;
-						cf_info->val_post_shmem_blocksz = val_shmem_blocksz;
+						plts->fn_post_shmem_blocksz = fn_shmem_blocksz;
+						plts->val_post_shmem_blocksz = val_shmem_blocksz;
 					}
 					else
 						EMSG("cannot use \"%s\" in this code block", cmd);
@@ -542,24 +648,29 @@ plcuda_code_validation(plcudaInfo *cf_info,
 				if (!curr)
 					EMSG("%s appeared outside of code block", cmd);
 				else if (plcuda_lookup_helper(options,
-											  argtypes, INT8OID,
+											  proargtypes, INT8OID,
 											  &fn_kern_blocksz,
 											  &val_kern_blocksz))
 				{
-					if (curr == &prep_src)
+					if (!HELPER_PRIV_CHECK(fn_kern_blocksz, proowner))
 					{
-						cf_info->fn_prep_kern_blocksz = fn_kern_blocksz;
-						cf_info->val_prep_kern_blocksz = val_kern_blocksz;
+						EMSG("permission denied on helper function %s",
+							 NameListToString(options));
+					}
+					else if (curr == &prep_src)
+					{
+						plts->fn_prep_kern_blocksz = fn_kern_blocksz;
+						plts->val_prep_kern_blocksz = val_kern_blocksz;
 					}
 					else if (curr == &main_src)
 					{
-						cf_info->fn_main_kern_blocksz = fn_kern_blocksz;
-						cf_info->val_main_kern_blocksz = val_kern_blocksz;
+						plts->fn_main_kern_blocksz = fn_kern_blocksz;
+						plts->val_main_kern_blocksz = val_kern_blocksz;
 					}
 					else if (curr == &post_src)
 					{
-						cf_info->fn_post_kern_blocksz = fn_kern_blocksz;
-						cf_info->val_post_kern_blocksz = val_kern_blocksz;
+						plts->fn_post_kern_blocksz = fn_kern_blocksz;
+						plts->val_post_kern_blocksz = val_kern_blocksz;
 					}
 					else
 						EMSG("cannot use \"%s\" in this code block", cmd);
@@ -573,10 +684,16 @@ plcuda_code_validation(plcudaInfo *cf_info,
 				if (has_working_bufsz)
 					EMSG("%s appeared twice", cmd);
 				else if (plcuda_lookup_helper(options,
-											  argtypes, INT8OID,
-											  &cf_info->fn_working_bufsz,
-											  &cf_info->val_working_bufsz))
-					has_working_bufsz = true;
+											  proargtypes, INT8OID,
+											  &plts->fn_working_bufsz,
+											  &plts->val_working_bufsz))
+				{
+					if (HELPER_PRIV_CHECK(plts->fn_working_bufsz, proowner))
+						has_working_bufsz = true;
+					else
+						EMSG("permission denied on helper function %s",
+							 NameListToString(options));
+				}
 				else
 					EMSG("\"%s\" was not a valid value or function",
                          ident_to_cstring(options));
@@ -586,47 +703,100 @@ plcuda_code_validation(plcudaInfo *cf_info,
 				if (has_results_bufsz)
 					EMSG("%s appeared twice", cmd);
 				else if (plcuda_lookup_helper(options,
-											  argtypes, INT8OID,
-											  &cf_info->fn_results_bufsz,
-											  &cf_info->val_results_bufsz))
-					has_results_bufsz = true;
+											  proargtypes, INT8OID,
+											  &plts->fn_results_bufsz,
+											  &plts->val_results_bufsz))
+				{
+					if (HELPER_PRIV_CHECK(plts->fn_results_bufsz, proowner))
+						has_results_bufsz = true;
+					else
+						EMSG("permission denied on helper function %s",
+							 NameListToString(options));
+				}
 				else
 					EMSG("\"%s\" was not a valid value or function",
 						 ident_to_cstring(options));
 			}
 			else if (strcmp(cmd, "#plcuda_include") == 0)
 			{
-				const char *target;
-
-				if (list_length(options) != 1)
-					EMSG("syntax error:\n%s", line);
-				target = linitial(options);
-				if (strcmp(target, "cuda_dynpara.h") == 0)
-					cf_info->extra_flags |= DEVKERNEL_NEEDS_DYNPARA;
-				else if (strcmp(target, "cuda_matrix.h") == 0)
-					cf_info->extra_flags |= DEVKERNEL_NEEDS_MATRIX;
-				else if (strcmp(target, "cuda_timelib.h") == 0)
-					cf_info->extra_flags |= DEVKERNEL_NEEDS_TIMELIB;
-				else if (strcmp(target, "cuda_textlib.h") == 0)
-					cf_info->extra_flags |= DEVKERNEL_NEEDS_TEXTLIB;
-				else if (strcmp(target, "cuda_numeric.h") == 0)
-					cf_info->extra_flags |= DEVKERNEL_NEEDS_NUMERIC;
-				else if (strcmp(target, "cuda_mathlib.h") == 0)
-					cf_info->extra_flags |= DEVKERNEL_NEEDS_MATHLIB;
-				else if (strcmp(target, "cuda_money.h") == 0)
-					cf_info->extra_flags |= DEVKERNEL_NEEDS_MONEY;
+				if (has_decl_block ||
+					has_prep_block ||
+					has_main_block ||
+					has_post_block)
+				{
+					EMSG("%s must appear prior to the code block:\n%s",
+						 cmd, line);
+				}
 				else
-					EMSG("unknown include target: %s", target);
+				{
+					cl_uint		extra_flags = 0;
+
+					if (list_length(options) == 1)
+					{
+						const char *target = linitial(options);
+
+						if (strcmp(target, "cuda_dynpara.h") == 0)
+							extra_flags |= DEVKERNEL_NEEDS_DYNPARA;
+						else if (strcmp(target, "cuda_matrix.h") == 0)
+							extra_flags |= DEVKERNEL_NEEDS_MATRIX;
+						else if (strcmp(target, "cuda_timelib.h") == 0)
+							extra_flags |= DEVKERNEL_NEEDS_TIMELIB;
+						else if (strcmp(target, "cuda_textlib.h") == 0)
+							extra_flags |= DEVKERNEL_NEEDS_TEXTLIB;
+						else if (strcmp(target, "cuda_numeric.h") == 0)
+							extra_flags |= DEVKERNEL_NEEDS_NUMERIC;
+						else if (strcmp(target, "cuda_mathlib.h") == 0)
+							extra_flags |= DEVKERNEL_NEEDS_MATHLIB;
+						else if (strcmp(target, "cuda_money.h") == 0)
+							extra_flags |= DEVKERNEL_NEEDS_MONEY;
+					}
+
+					if (extra_flags != 0)
+						plts->extra_flags |= extra_flags;
+					else
+					{
+						Oid		fn_extra_include = InvalidOid;
+
+						/* function that returns text */
+						if (plcuda_lookup_helper(options,
+												 buildoidvector(NULL, 0),
+												 TEXTOID,
+												 &fn_extra_include,
+												 NULL))
+						{
+							if (HELPER_PRIV_CHECK(fn_extra_include, proowner))
+							{
+								plts->extra_includes =
+									lappend_oid(plts->extra_includes,
+												fn_extra_include);
+							}
+							else
+								EMSG("permission denied on helper function %s",
+									 NameListToString(options));
+						}
+						else
+						{
+							EMSG("\"%s\" was not a valid function name",
+								 ident_to_cstring(options));
+						}
+					}
+				}
 			}
 			else if (strcmp(cmd, "#plcuda_sanity_check") == 0)
 			{
 				if (has_sanity_check)
 					EMSG("%s appeared twice", cmd);
 				else if (plcuda_lookup_helper(options,
-											  argtypes, BOOLOID,
-											  &cf_info->fn_sanity_check,
+											  proargtypes, BOOLOID,
+											  &plts->fn_sanity_check,
 											  NULL))
-					has_sanity_check = true;
+				{
+					if (HELPER_PRIV_CHECK(plts->fn_sanity_check, proowner))
+						has_sanity_check = true;
+					else
+						EMSG("permission denied on helper function %s",
+							 NameListToString(options));
+				}
 				else
 					EMSG("\"%s\" was not a valid function name",
 						 ident_to_cstring(options));
@@ -636,10 +806,16 @@ plcuda_code_validation(plcudaInfo *cf_info,
 				if (has_cpu_fallback)
 					EMSG("%s appeared twice", cmd);
 				else if (plcuda_lookup_helper(options,
-											  argtypes, proc_form->prorettype,
-											  &cf_info->fn_cpu_fallback,
+											  proargtypes, prorettype,
+											  &plts->fn_cpu_fallback,
 											  NULL))
-					has_cpu_fallback = true;
+				{
+					if (HELPER_PRIV_CHECK(plts->fn_cpu_fallback, proowner))
+						has_cpu_fallback = true;
+					else
+						EMSG("permission denied on helper function %s",
+							 NameListToString(options));
+				}
 				else
 					EMSG("\"%s\" was not a valid function name",
 						 ident_to_cstring(options));
@@ -657,11 +833,12 @@ plcuda_code_validation(plcudaInfo *cf_info,
 				(errcode(ERRCODE_SYNTAX_ERROR),
 				 errmsg("pl/cuda function syntax error\n%s", emsg.data)));
 
-	cf_info->kern_decl = decl_src.data;
-	cf_info->kern_prep = prep_src.data;
-	cf_info->kern_main = main_src.data;
-	cf_info->kern_post = post_src.data;
+	plts->kern_decl = decl_src.data;
+	plts->kern_prep = prep_src.data;
+	plts->kern_main = main_src.data;
+	plts->kern_post = post_src.data;
 #undef EMSG
+#undef HELPER_PRIV_CHECK
 	pfree(emsg.data);
 }
 
@@ -912,10 +1089,11 @@ __setup_kern_colmeta(Oid type_oid, int arg_index)
 	return result;
 }
 
-static plcudaState *
-plcuda_exec_begin(Form_pg_proc procForm, plcudaInfo *cf_info)
+static plcudaTaskState *
+plcuda_exec_begin(Form_pg_proc procForm, FunctionCallInfo fcinfo)
 {
 	GpuContext	   *gcontext = pgstrom_get_gpucontext();
+	plcudaTaskState *plts;
 	char		   *kern_source;
 	CUmodule	   *cuda_modules;
 	plcudaState	   *state;
@@ -925,8 +1103,39 @@ plcuda_exec_begin(Form_pg_proc procForm, plcudaInfo *cf_info)
 	Size			length;
 	int				i;
 
-	/* construct a flat kernel source then load cuda module */
-	kern_source = plcuda_codegen(procForm, cf_info);
+	/* setup a dummy GTS for PL/CUDA */
+	plts = palloc0(sizeof(plcudaTaskState));
+	pgstromInitGpuTaskState(&plts->gts,
+							gcontext,
+							GpuTaskKind_PL_CUDA,
+							NIL,	/* no constants */
+							NULL);	/* no EState */
+
+	/* validate PL/CUDA source code */
+	prosrc = SysCacheGetAttr(PROCOID, tuple, Anum_pg_proc_prosrc, &isnull);
+	if (isnull)
+		elog(ERROR, "Bug? no program source was supplied");
+	plcuda_code_validation(plts,
+						   !fcinfo ? procForm->proowner : InvalidOid,
+						   &procForm->proargtypes
+						   procForm->prorettype,
+						   TextDatumGetCString(prosrc));
+	/* construct a flat kernel source to be built */
+	kern_source = plcuda_codegen(procForm, plts);
+	program_id = pgstrom_create_cuda_program(gcontext,
+											 plts->extra_flags,
+											 plts->kern_source,
+											 kern_define,
+											 with_connection);
+	plts->gts.program_id = program_id;
+
+	wait_for_cuda_program_build(program_id);
+
+
+
+
+
+
 	cuda_modules = plcuda_load_cuda_program_legacy(gcontext,
 												   kern_source,
 												   cf_info->extra_flags);
@@ -962,6 +1171,7 @@ plcuda_exec_begin(Form_pg_proc procForm, plcudaInfo *cf_info)
 	/* track state */
 	dlist_push_head(&plcuda_state_list, &state->chain);
 
+#if 0
 	/* resolve kernel functions */
 	i = (gcontext->next_context++ % gcontext->num_context);
 	state->cuda_index = i;
@@ -1008,6 +1218,8 @@ plcuda_exec_begin(Form_pg_proc procForm, plcudaInfo *cf_info)
 		elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
 
 	return state;
+#endif
+	return plts;
 }
 
 static void
@@ -1025,9 +1237,9 @@ plcuda_function_validator(PG_FUNCTION_ARGS)
 	HeapTuple		tuple;
 	HeapTuple		newtup;
 	Form_pg_proc	procForm;
-	bool			isnull[Natts_pg_proc];
-	Datum			values[Natts_pg_proc];
-	plcudaInfo cf_info;
+	Datum			prosrc;
+	bool			isnull;
+	plcudaTaskState	plts;
 	devtype_info   *dtype;
 	char		   *source;
 	cl_uint			extra_flags = DEVKERNEL_NEEDS_PLCUDA;
@@ -1039,7 +1251,6 @@ plcuda_function_validator(PG_FUNCTION_ARGS)
 	if (!CheckFunctionValidatorAccess(fcinfo->flinfo->fn_oid, func_oid))
 		PG_RETURN_VOID();
 
-	rel = heap_open(ProcedureRelationId, RowExclusiveLock);
 	tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(func_oid));
 	if (!HeapTupleIsValid(tuple))
 		elog(ERROR, "cache lookup failed for function %u", func_oid);
@@ -1061,210 +1272,57 @@ plcuda_function_validator(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("Righ now, PL/CUDA function does not support set returning function")));
 
-	dtype = pgstrom_devtype_lookup(procForm->prorettype);
-	if (!dtype)
+	if (!pgstrom_devtype_lookup(procForm->prorettype))
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("Result type \"%s\" is not device executable",
 						format_type_be(procForm->prorettype))));
-	extra_flags |= dtype->type_flags;
 
 	Assert(procForm->pronargs == procForm->proargtypes.dim1);
 	for (i=0; i < procForm->pronargs; i++)
 	{
 		Oid		argtype_oid = procForm->proargtypes.values[i];
 
-		dtype = pgstrom_devtype_lookup(argtype_oid);
-		if (!dtype)
+		if (!pgstrom_devtype_lookup(argtype_oid))
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("Argument type \"%s\" is not device executable",
 							format_type_be(argtype_oid))));
-		extra_flags |= dtype->type_flags;
 	}
+	/* only validation of the CUDA code */
+	plts = plcuda_exec_begin(procForm, NULL);
+	plcuda_exec_end(plts);
 
-	heap_deform_tuple(tuple, RelationGetDescr(rel), values, isnull);
-	if (isnull[Anum_pg_proc_prosrc - 1])
-		elog(ERROR, "Bug? no program source was supplied");
-	if (!isnull[Anum_pg_proc_probin - 1])
-		elog(ERROR, "Bug? pg_proc.probin has non-NULL preset value");
+
+
+
 
 	/*
 	 * Do syntax checks and construction of plcudaInfo
 	 */
-	memset(&cf_info, 0, sizeof(plcudaInfo));
-	cf_info.ex.type = T_ExtensibleNode;
-	cf_info.ex.extnodename = PLCUDAINFO_EXNODE_NAME;
-	cf_info.extra_flags = extra_flags;
-	cf_info.val_prep_kern_blocksz = 0;	/* default; performance optimal */
-	cf_info.val_main_kern_blocksz = 0;	/* default; performance optimal */
-	cf_info.val_post_kern_blocksz = 0;	/* default; performance optimal */
-	cf_info.val_prep_num_threads = 1;	/* default */
-	cf_info.val_main_num_threads = 1;	/* default */
-	cf_info.val_post_num_threads = 1;	/* default */
+	memset(&plts, 0, sizeof(plcudaTaskState));
+	plts.extra_flags = extra_flags;
+	plts.val_prep_kern_blocksz = 0;	/* default; performance optimal */
+	plts.val_main_kern_blocksz = 0;	/* default; performance optimal */
+	plts.val_post_kern_blocksz = 0;	/* default; performance optimal */
+	plts.val_prep_num_threads = 1;	/* default */
+	plts.val_main_num_threads = 1;	/* default */
+	plts.val_post_num_threads = 1;	/* default */
 
-	source = TextDatumGetCString(values[Anum_pg_proc_prosrc - 1]);
-	plcuda_code_validation(&cf_info, procForm, source);
+	plcuda_code_validation(&plts,
+						   procForm->proowner,
+						   &procForm->proargtypes
+						   procForm->prorettype,
+						   TextDatumGetCString(prosrc));
 
-	state = plcuda_exec_begin(procForm, &cf_info);
+
+
+	state = plcuda_exec_begin(procForm, NULL);	/* validation only */
 	plcuda_exec_end(state);
 
-	/*
-	 * OK, supplied function is compilable. Update the catalog.
-	 */
-	isnull[Anum_pg_proc_probin - 1] = false;
-	values[Anum_pg_proc_probin - 1] =
-		PointerGetDatum(nodeToString(&cf_info));
 
-	newtup = heap_form_tuple(RelationGetDescr(rel), values, isnull);
-	simple_heap_update(rel, &tuple->t_self, newtup);
-
-	CatalogUpdateIndexes(rel, newtup);
-
-	/*
-	 * Add dependency for hint routines
-	 */
-	myself.classId = ProcedureRelationId;
-	myself.objectId = func_oid;
-	myself.objectSubId = 0;
-
-	/* dependency to kernel function for prep */
-	if (OidIsValid(cf_info.fn_prep_kern_blocksz))
-	{
-		referenced.classId = ProcedureRelationId;
-		referenced.objectId = cf_info.fn_prep_kern_blocksz;
-		referenced.objectSubId = 0;
-		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
-	}
-
-	if (OidIsValid(cf_info.fn_prep_num_threads))
-	{
-		referenced.classId = ProcedureRelationId;
-		referenced.objectId = cf_info.fn_prep_num_threads;
-		referenced.objectSubId = 0;
-		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
-	}
-
-	if (OidIsValid(cf_info.fn_prep_shmem_unitsz))
-	{
-		referenced.classId = ProcedureRelationId;
-		referenced.objectId = cf_info.fn_prep_shmem_unitsz;
-		referenced.objectSubId = 0;
-		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
-	}
-
-	if (OidIsValid(cf_info.fn_prep_shmem_blocksz))
-	{
-		referenced.classId = ProcedureRelationId;
-		referenced.objectId = cf_info.fn_prep_shmem_blocksz;
-		referenced.objectSubId = 0;
-		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
-	}
-
-	/* dependency to kernel function for main */
-	if (OidIsValid(cf_info.fn_main_kern_blocksz))
-	{
-		referenced.classId = ProcedureRelationId;
-		referenced.objectId = cf_info.fn_main_kern_blocksz;
-		referenced.objectSubId = 0;
-		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
-	}
-
-	if (OidIsValid(cf_info.fn_main_num_threads))
-	{
-		referenced.classId = ProcedureRelationId;
-		referenced.objectId = cf_info.fn_main_num_threads;
-		referenced.objectSubId = 0;
-		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
-	}
-
-	if (OidIsValid(cf_info.fn_main_shmem_unitsz))
-	{
-		referenced.classId = ProcedureRelationId;
-		referenced.objectId = cf_info.fn_main_shmem_unitsz;
-		referenced.objectSubId = 0;
-		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
-	}
-
-	if (OidIsValid(cf_info.fn_main_shmem_blocksz))
-	{
-		referenced.classId = ProcedureRelationId;
-		referenced.objectId = cf_info.fn_main_shmem_blocksz;
-		referenced.objectSubId = 0;
-		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
-	}
-
-	/* dependency to kernel function for post */
-	if (OidIsValid(cf_info.fn_post_kern_blocksz))
-	{
-		referenced.classId = ProcedureRelationId;
-		referenced.objectId = cf_info.fn_post_kern_blocksz;
-		referenced.objectSubId = 0;
-		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
-	}
-
-	if (OidIsValid(cf_info.fn_post_num_threads))
-	{
-		referenced.classId = ProcedureRelationId;
-		referenced.objectId = cf_info.fn_post_num_threads;
-		referenced.objectSubId = 0;
-		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
-	}
-
-	if (OidIsValid(cf_info.fn_post_shmem_unitsz))
-	{
-		referenced.classId = ProcedureRelationId;
-		referenced.objectId = cf_info.fn_post_shmem_unitsz;
-		referenced.objectSubId = 0;
-		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
-	}
-
-	if (OidIsValid(cf_info.fn_post_shmem_blocksz))
-	{
-		referenced.classId = ProcedureRelationId;
-		referenced.objectId = cf_info.fn_post_shmem_blocksz;
-		referenced.objectSubId = 0;
-		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
-	}
-
-	/* dependency to working buffer */
-	if (OidIsValid(cf_info.fn_working_bufsz))
-	{
-		referenced.classId = ProcedureRelationId;
-		referenced.objectId = cf_info.fn_working_bufsz;
-		referenced.objectSubId = 0;
-		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
-	}
-
-	/* dependency to results buffer */
-	if (OidIsValid(cf_info.fn_results_bufsz))
-	{
-		referenced.classId = ProcedureRelationId;
-		referenced.objectId = cf_info.fn_results_bufsz;
-		referenced.objectSubId = 0;
-		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
-	}
-
-	/* dependency to sanitycheck function */
-	if (OidIsValid(cf_info.fn_sanity_check))
-	{
-		referenced.classId = ProcedureRelationId;
-		referenced.objectId = cf_info.fn_sanity_check;
-		referenced.objectSubId = 0;
-		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
-	}
-
-	/* dependency to fallback function */
-	if (OidIsValid(cf_info.fn_cpu_fallback))
-	{
-		referenced.classId = ProcedureRelationId;
-		referenced.objectId = cf_info.fn_cpu_fallback;
-		referenced.objectSubId = 0;
-		recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
-	}
 
 	ReleaseSysCache(tuple);
-	heap_close(rel, RowExclusiveLock);
 
 	PG_RETURN_VOID();
 }
@@ -1691,22 +1749,17 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 		state = (plcudaState *) flinfo->fn_extra;
 	else
 	{
-		HeapTuple	tuple;
-		Datum		probin;
+		MemoryContext	oldcxt;
+		HeapTuple		tuple;
 
 		tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(flinfo->fn_oid));
 		if (!HeapTupleIsValid(tuple))
 			elog(ERROR, "cache lookup failed for function %u",
 				 flinfo->fn_oid);
 
-		probin = SysCacheGetAttr(PROCOID, tuple,
-								 Anum_pg_proc_probin,
-								 &isnull);
-		if (isnull)
-			elog(ERROR, "Bug? plcudaInfo was not built yet");
-		cf_info = stringToNode(TextDatumGetCString(probin));
-
-		state = plcuda_exec_begin((Form_pg_proc) GETSTRUCT(tuple), cf_info);
+		oldcxt = MemoryContextSwitchTo(flinfo->fn_mcxt);
+		plts = plcuda_exec_begin((Form_pg_proc) GETSTRUCT(tuple), fcinfo);
+		MemoryContextSwitchTo(oldcxt);
 
 		ReleaseSysCache(tuple);
 		flinfo->fn_extra = state;
@@ -2097,194 +2150,380 @@ plcuda_function_source(PG_FUNCTION_ARGS)
 PG_FUNCTION_INFO_V1(plcuda_function_source);
 
 /*
- * Extensible node callbacks for plcudaInfo
+ * plcuda_cleanup_cuda_resources
  */
 static void
-plcudaInfoCopy(ExtensibleNode *__newnode, const ExtensibleNode *__oldnode)
+plcuda_cleanup_cuda_resources(plcudaTask *ptask)
 {
-	plcudaInfo	   *newnode = (plcudaInfo *)__newnode;
-	plcudaInfo	   *oldnode = (plcudaInfo *)__oldnode;
+	CUresult	rc;
 
-	COPY_SCALAR_FIELD(extra_flags);
-	COPY_STRING_FIELD(kern_decl);
+	PFMON_EVENT_DESTROY(ptask, ev_dma_send_start);
+	PFMON_EVENT_DESTROY(ptask, ev_dma_send_stop);
+	PFMON_EVENT_DESTROY(ptask, ev_dma_recv_start);
+	PFMON_EVENT_DESTROY(ptask, ev_dma_recv_stop);
 
-	COPY_STRING_FIELD(kern_prep);
-	COPY_SCALAR_FIELD(fn_prep_kern_blocksz);
-	COPY_SCALAR_FIELD(val_prep_kern_blocksz);
-	COPY_SCALAR_FIELD(fn_prep_num_threads);
-	COPY_SCALAR_FIELD(val_prep_num_threads);
-	COPY_SCALAR_FIELD(fn_prep_shmem_unitsz);
-	COPY_SCALAR_FIELD(val_prep_shmem_unitsz);
-	COPY_SCALAR_FIELD(fn_prep_shmem_blocksz);
-	COPY_SCALAR_FIELD(val_prep_shmem_blocksz);
+	if (ptask->m_kern_plcuda)
+	{
+		rc = gpuMemFree_v2(ptask->task.gcontext, ptask->m_kern_plcuda);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on gpuMemFree: %s", errorText(rc));
+	}
 
-	COPY_STRING_FIELD(kern_main);
-	COPY_SCALAR_FIELD(fn_main_kern_blocksz);
-	COPY_SCALAR_FIELD(val_main_kern_blocksz);
-	COPY_SCALAR_FIELD(fn_main_num_threads);
-	COPY_SCALAR_FIELD(val_main_num_threads);
-	COPY_SCALAR_FIELD(fn_main_shmem_unitsz);
-	COPY_SCALAR_FIELD(val_main_shmem_unitsz);
-	COPY_SCALAR_FIELD(fn_main_shmem_blocksz);
-	COPY_SCALAR_FIELD(val_main_shmem_blocksz);
+	if (ptask->m_results_buf)
+	{
+		rc = gpuMemFree_v2(ptask->task.gcontext, ptask->m_results_buf);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on gpuMemFree: %s", errorText(rc));
+	}
 
-	COPY_STRING_FIELD(kern_post);
-	COPY_SCALAR_FIELD(fn_post_kern_blocksz);
-	COPY_SCALAR_FIELD(val_post_kern_blocksz);
-	COPY_SCALAR_FIELD(fn_post_num_threads);
-	COPY_SCALAR_FIELD(val_post_num_threads);
-	COPY_SCALAR_FIELD(fn_post_shmem_unitsz);
-	COPY_SCALAR_FIELD(val_post_shmem_unitsz);
-	COPY_SCALAR_FIELD(fn_post_shmem_blocksz);
-	COPY_SCALAR_FIELD(val_post_shmem_blocksz);
-
-	COPY_SCALAR_FIELD(fn_working_bufsz);
-	COPY_SCALAR_FIELD(val_working_bufsz);
-	COPY_SCALAR_FIELD(fn_results_bufsz);
-	COPY_SCALAR_FIELD(val_results_bufsz);
-	COPY_SCALAR_FIELD(fn_sanity_check);
-	COPY_SCALAR_FIELD(fn_cpu_fallback);
+	if (ptask->m_working_buf)
+	{
+		rc = gpuMemFree_v2(ptask->task.gcontext, ptask->m_working_buf);
+		if (rc != CUDA_SUCCESS)
+			elog(WARNING, "failed on gpuMemFree: %s", errorText(rc));
+	}
+	ptask->kern_plcuda_prep = NULL;
+	ptask->kern_plcuda_main = NULL;
+	ptask->kern_plcuda_post = NULL;
+	ptask->m_kern_plcuda = 0UL;
+	ptask->m_results_buf = 0UL;
+	ptask->m_working_buf = 0UL;
 }
 
-static bool
-plcudaInfoEqual(const ExtensibleNode *__a, const ExtensibleNode *__b)
-{
-	const plcudaInfo   *a = (const plcudaInfo *)__a;
-	const plcudaInfo   *b = (const plcudaInfo *)__b;
-
-	COMPARE_SCALAR_FIELD(extra_flags);
-	COMPARE_STRING_FIELD(kern_decl);
-
-	COMPARE_STRING_FIELD(kern_prep);
-	COMPARE_SCALAR_FIELD(fn_prep_kern_blocksz);
-	COMPARE_SCALAR_FIELD(val_prep_kern_blocksz);
-	COMPARE_SCALAR_FIELD(fn_prep_num_threads);
-	COMPARE_SCALAR_FIELD(val_prep_num_threads);
-	COMPARE_SCALAR_FIELD(fn_prep_shmem_unitsz);
-	COMPARE_SCALAR_FIELD(val_prep_shmem_unitsz);
-	COMPARE_SCALAR_FIELD(fn_prep_shmem_blocksz);
-	COMPARE_SCALAR_FIELD(val_prep_shmem_blocksz);
-
-	COMPARE_STRING_FIELD(kern_main);
-	COMPARE_SCALAR_FIELD(fn_main_kern_blocksz);
-	COMPARE_SCALAR_FIELD(val_main_kern_blocksz);
-	COMPARE_SCALAR_FIELD(fn_main_num_threads);
-	COMPARE_SCALAR_FIELD(val_main_num_threads);
-	COMPARE_SCALAR_FIELD(fn_main_shmem_unitsz);
-	COMPARE_SCALAR_FIELD(val_main_shmem_unitsz);
-	COMPARE_SCALAR_FIELD(fn_main_shmem_blocksz);
-	COMPARE_SCALAR_FIELD(val_main_shmem_blocksz);
-
-	COMPARE_STRING_FIELD(kern_post);
-	COMPARE_SCALAR_FIELD(fn_post_kern_blocksz);
-	COMPARE_SCALAR_FIELD(val_post_kern_blocksz);
-	COMPARE_SCALAR_FIELD(fn_post_num_threads);
-	COMPARE_SCALAR_FIELD(val_post_num_threads);
-	COMPARE_SCALAR_FIELD(fn_post_shmem_unitsz);
-	COMPARE_SCALAR_FIELD(val_post_shmem_unitsz);
-	COMPARE_SCALAR_FIELD(fn_post_shmem_blocksz);
-	COMPARE_SCALAR_FIELD(val_post_shmem_blocksz);
-
-	COMPARE_SCALAR_FIELD(fn_working_bufsz);
-	COMPARE_SCALAR_FIELD(val_working_bufsz);
-	COMPARE_SCALAR_FIELD(fn_results_bufsz);
-	COMPARE_SCALAR_FIELD(val_results_bufsz);
-	COMPARE_SCALAR_FIELD(fn_sanity_check);
-	COMPARE_SCALAR_FIELD(fn_cpu_fallback);
-
-	return true;
-}
-
+/*
+ * plcuda_respond_task
+ */
 static void
-plcudaInfoOut(StringInfo str, const ExtensibleNode *__node)
+plcuda_respond_task(CUstream stream, CUresult status, void *private))
 {
-	const plcudaInfo *node = (const plcudaInfo *)__node;
+	plcudaTask *ptask = private;
+	bool		is_urgent = false;
 
-	WRITE_UINT_FIELD(extra_flags);
-	WRITE_STRING_FIELD(kern_decl);
-
-	WRITE_STRING_FIELD(kern_prep);
-	WRITE_OID_FIELD(fn_prep_kern_blocksz);
-	WRITE_LONG_FIELD(val_prep_kern_blocksz);
-	WRITE_OID_FIELD(fn_prep_num_threads);
-	WRITE_LONG_FIELD(val_prep_num_threads);
-	WRITE_OID_FIELD(fn_prep_shmem_unitsz);
-	WRITE_LONG_FIELD(val_prep_shmem_unitsz);
-	WRITE_OID_FIELD(fn_prep_shmem_blocksz);
-	WRITE_LONG_FIELD(val_prep_shmem_blocksz);
-
-	WRITE_STRING_FIELD(kern_main);
-	WRITE_OID_FIELD(fn_main_kern_blocksz);
-	WRITE_LONG_FIELD(val_main_kern_blocksz);
-	WRITE_OID_FIELD(fn_main_num_threads);
-	WRITE_LONG_FIELD(val_main_num_threads);
-	WRITE_OID_FIELD(fn_main_shmem_unitsz);
-	WRITE_LONG_FIELD(val_main_shmem_unitsz);
-	WRITE_OID_FIELD(fn_main_shmem_blocksz);
-	WRITE_LONG_FIELD(val_main_shmem_blocksz);
-
-	WRITE_STRING_FIELD(kern_post);
-	WRITE_OID_FIELD(fn_post_kern_blocksz);
-	WRITE_LONG_FIELD(val_post_kern_blocksz);
-	WRITE_OID_FIELD(fn_post_num_threads);
-	WRITE_LONG_FIELD(val_post_num_threads);
-	WRITE_OID_FIELD(fn_post_shmem_unitsz);
-	WRITE_LONG_FIELD(val_post_shmem_unitsz);
-	WRITE_OID_FIELD(fn_post_shmem_blocksz);
-	WRITE_LONG_FIELD(val_post_shmem_blocksz);
-
-	WRITE_OID_FIELD(fn_working_bufsz);
-	WRITE_LONG_FIELD(val_working_bufsz);
-	WRITE_OID_FIELD(fn_results_bufsz);
-	WRITE_LONG_FIELD(val_results_bufsz);
-	WRITE_OID_FIELD(fn_sanity_check);
-	WRITE_OID_FIELD(fn_cpu_fallback);
+	if (status == CUDA_SUCCESS)
+	{
+		if (ptask->exec_prep_kernel &&
+			ptask->kern.kerror_prep.errcode != StromError_Success)
+			ptask->task.kerror = ptask->kern.kerror_prep;
+		else if (ptask->kern.kerror_main.errcode != StromError_Success)
+			ptask->task.kerror = ptask->kern.kerror_main;
+		else if (ptask->exec_post_kernel &&
+				 ptask->kern.kerror_post.errcode != StromError_Success)
+			ptask->task.kerror = ptask->kern.kerror_post;
+	}
+	else
+	{
+		/* CUDA run-time error - not recoverable */
+		ptask->task.kerror.errcode = status;
+		ptask->task.kerror.kernel  = StromKernel_CudaRuntime;
+		ptask->task.kerror.lineno  = 0;
+		is_urgent = true;
+	}
+	gpuservCompleteGpuTask(&ptask->task, is_urgent);
 }
 
-static void
-plcudaInfoRead(ExtensibleNode *node)
+/*
+ * plcuda_process_task
+ */
+static int
+__plcuda_process_task(plcudaTask *ptask,
+					  CUmodule cuda_module,
+					  CUstream cuda_stream)
 {
-	READ_LOCALS(plcudaInfo);
+	GpuContext	   *gcontext = ptask->task.gcontext;
+	CUresult		rc;
 
-	READ_UINT_FIELD(extra_flags);
-	READ_STRING_FIELD(kern_decl);
 
-	READ_STRING_FIELD(kern_prep);
-	READ_OID_FIELD(fn_prep_kern_blocksz);
-	READ_LONG_FIELD(val_prep_kern_blocksz);
-	READ_OID_FIELD(fn_prep_num_threads);
-	READ_LONG_FIELD(val_prep_num_threads);
-	READ_OID_FIELD(fn_prep_shmem_unitsz);
-	READ_LONG_FIELD(val_prep_shmem_unitsz);
-	READ_OID_FIELD(fn_prep_shmem_blocksz);
-	READ_LONG_FIELD(val_prep_shmem_blocksz);
+	/* plcuda_prep_kernel_entrypoint, if any */
+	if (ptask->exec_prep_kernel)
+	{
+		rc = cuModuleGetFunction(&ptask->kern_plcuda_prep,
+								 cuda_module,
+								 "plcuda_prep_kernel_entrypoint");
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
+	}
+	/* plcuda_main_kernel_entrypoint */
+	rc = cuModuleGetFunction(&ptask->kern_plcuda_main,
+							 cuda_module,
+							 "plcuda_main_kernel_entrypoint");
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
+	/* plcuda_post_kernel_entrypoint */
+	if (ptask->exec_post_kernel)
+	{
+		rc = cuModuleGetFunction(&ptask->kern_plcuda_post,
+								 cuda_module,
+								 "plcuda_post_kernel_entrypoint");
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
+	}
 
-	READ_STRING_FIELD(kern_main);
-	READ_OID_FIELD(fn_main_kern_blocksz);
-	READ_LONG_FIELD(val_main_kern_blocksz);
-	READ_OID_FIELD(fn_main_num_threads);
-	READ_LONG_FIELD(val_main_num_threads);
-	READ_OID_FIELD(fn_main_shmem_unitsz);
-	READ_LONG_FIELD(val_main_shmem_unitsz);
-	READ_OID_FIELD(fn_main_shmem_blocksz);
-	READ_LONG_FIELD(val_main_shmem_blocksz);
+	/* kern_plcuda structure on the device side */
+	rc = gpuMemAlloc_v2(gcontext,
+						&ptask->m_kern_plcuda,
+						ptask->kern.total_length);
+	if (rc == CUDA_ERROR_OUT_OF_MEMORY)
+		goto out_of_resource;
+	else if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on gpuMemAlloc: %s", errorText(rc));
 
-	READ_STRING_FIELD(kern_post);
-	READ_OID_FIELD(fn_post_kern_blocksz);
-	READ_LONG_FIELD(val_post_kern_blocksz);
-	READ_OID_FIELD(fn_post_num_threads);
-	READ_LONG_FIELD(val_post_num_threads);
-	READ_OID_FIELD(fn_post_shmem_unitsz);
-	READ_LONG_FIELD(val_post_shmem_unitsz);
-	READ_OID_FIELD(fn_post_shmem_blocksz);
-	READ_LONG_FIELD(val_post_shmem_blocksz);
+	/* working buffer if required */
+	if (ptask->kern.working_bufsz > 0)
+	{
+		rc = gpuMemAlloc_v2(gcontext,
+							&ptask->m_working_buf,
+							ptask->kern.working_bufsz);
+		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
+			goto out_of_resource;
+		else if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on gpuMemAlloc: %s", errorText(rc));
+	}
+	else
+	{
+		ptask->m_working_buf = 0UL;
+	}
 
-	READ_OID_FIELD(fn_working_bufsz);
-	READ_LONG_FIELD(val_working_bufsz);
-	READ_OID_FIELD(fn_results_bufsz);
-	READ_LONG_FIELD(val_results_bufsz);
-	READ_OID_FIELD(fn_sanity_check);
-	READ_OID_FIELD(fn_cpu_fallback);
+
+	/* results buffer if required  */
+	if (ptask->kern.results_bufsz > 0)
+	{
+		rc = gpuMemAlloc_v2(gcontext,
+							&ptask->m_results_buf,
+							ptask->kern.results_bufsz);
+		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
+			goto out_of_resource;
+		else if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on gpuMemAlloc: %s", errorText(rc));
+	}
+	else
+	{
+		ptask->m_results_buf = 0UL;
+	}
+
+	/* move the control block + argument buffer */
+	rc = cuMemcpyHtoDAsync(ptask->m_kern_plcuda,
+						   &ptask->kern,
+						   KERN_PLCUDA_DMASEND_LENGTH(&ptask->kern),
+						   cuda_stream);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+
+	/* kernel arguments (common for all thress kernels) */
+	kern_args[0] = &ptask->m_kern_plcuda;
+	kern_args[1] = &ptask->m_working_buf;
+	kern_args[2] = &ptask->m_results_buf;
+
+	/* launch plcuda_prep_kernel_entrypoint */
+	if (ptask->exec_prep_kernel)
+    {
+		if (ptask->kern.prep_kern_blocksz > 0)
+		{
+			block_size = (ptask->kern.prep_kern_blocksz +
+						  warp_size - 1) & ~(warp_size - 1);
+			grid_size = (ptask->kern.prep_num_threads +
+						 block_size - 1) / block_size;
+		}
+		else
+		{
+			optimal_workgroup_size(&grid_size,
+								   &block_size,
+								   ptask->kern_plcuda_prep,
+								   gpuserv_cuda_device,
+								   ptask->kern.prep_num_threads,
+								   ptask->kern.prep_shmem_blocksz,
+								   ptask->kern.prep_shmem_unitsz);
+		}
+
+		rc = cuLaunchKernel(ptask->kern_plcuda_prep,
+							grid_size, 1, 1,
+							block_size, 1, 1,
+							ptask->kern.prep_shmem_blocksz +
+							ptask->kern.prep_shmem_unitsz * block_size,
+							cuda_stream,
+							kern_args,
+							NULL);
+		if (rc != CUDA_SUCCESS)
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("failed on cuLaunchKernel: %s", errorText(rc)),
+					 errhint("prep-kernel: grid=%u block=%u shmem=%zu",
+							 (cl_uint)grid_size, (cl_uint)block_size,
+							 ptask->kern.prep_shmem_blocksz +
+							 ptask->kern.prep_shmem_unitsz * block_size)));
+		elog(DEBUG2, "PL/CUDA prep-kernel: grid=%u block=%u shmem=%zu",
+			 (cl_uint)grid_size, (cl_uint)block_size,
+			 ptask->kern.prep_shmem_blocksz +
+			 ptask->kern.prep_shmem_unitsz * block_size);
+	}
+
+	/* launch plcuda_main_kernel_entrypoint */
+	if (ptask->kern.main_kern_blocksz > 0)
+	{
+		block_size = (ptask->kern.main_kern_blocksz +
+					  warp_size - 1) & ~(warp_size - 1);
+		grid_size = (ptask->kern.main_num_threads +
+					 block_size - 1) / block_size;
+	}
+	else
+	{
+		optimal_workgroup_size(&grid_size,
+							   &block_size,
+							   ptask->kern_plcuda_main,
+							   gpuserv_cuda_device,
+							   ptask->kern.main_num_threads,
+							   ptask->kern.main_shmem_blocksz,
+							   ptask->kern.main_shmem_unitsz);
+	}
+
+	rc = cuLaunchKernel(ptask->kern_plcuda_main,
+						grid_size, 1, 1,
+						block_size, 1, 1,
+						ptask->kern.main_num_threads +
+						ptask->kern.main_shmem_blocksz * block_size,
+						cuda_stream,
+						kern_args,
+						NULL);
+	if (rc != CUDA_SUCCESS)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("failed on cuLaunchKernel: %s", errorText(rc)),
+				 errhint("main-kernel: grid=%u block=%u shmem=%zu",
+						 (cl_uint)grid_size, (cl_uint)block_size,
+						 ptask->kern.main_shmem_blocksz +
+						 ptask->kern.main_shmem_unitsz * block_size)));
+	elog(DEBUG2, "PL/CUDA main-kernel: grid=%u block=%u shmem=%zu",
+		 (cl_uint)grid_size, (cl_uint)block_size,
+		 ptask->kern.main_shmem_blocksz +
+		 ptask->kern.main_shmem_unitsz * block_size);
+
+	/* launch plcuda_post_kernel_entrypoint */
+	if (ptask->exec_post_kernel)
+    {
+		if (ptask->kern.post_kern_blocksz > 0)
+		{
+			block_size = (ptask->kern.post_kern_blocksz +
+						  warp_size - 1) & ~(warp_size - 1);
+			grid_size = (ptask->kern.post_num_threads +
+						 block_size - 1) / block_size;
+		}
+		else
+		{
+			optimal_workgroup_size(&grid_size,
+								   &block_size,
+								   ptask->kern_plcuda_post,
+								   gpuserv_cuda_device,
+								   ptask->kern.post_num_threads,
+								   ptask->kern.post_shmem_blocksz,
+								   ptask->kern.post_shmem_unitsz);
+		}
+
+		rc = cuLaunchKernel(ptask->kern_plcuda_post,
+							grid_size, 1, 1,
+							block_size, 1, 1,
+							ptask->kern.post_shmem_blocksz +
+							ptask->kern.post_shmem_unitsz * block_size,
+							cuda_stream,
+							kern_args,
+							NULL);
+		if (rc != CUDA_SUCCESS)
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("failed on cuLaunchKernel: %s", errorText(rc)),
+					 errhint("post-kernel: grid=%u block=%u shmem=%zu",
+							 (cl_uint)grid_size, (cl_uint)block_size,
+							 ptask->kern.post_shmem_blocksz +
+							 ptask->kern.post_shmem_unitsz * block_size)));
+		elog(DEBUG2, "PL/CUDA post-kernel: grid=%u block=%u shmem=%zu",
+			 (cl_uint)grid_size, (cl_uint)block_size,
+			 ptask->kern.post_shmem_blocksz +
+			 ptask->kern.post_shmem_unitsz * block_size);
+	}
+
+	/* write back the control block */
+	rc = cuMemcpyDtoHAsync(&ptask->kern,
+						   ptask->m_kern_plcuda,
+						   KERN_PLCUDA_DMARECV_LENGTH(&ptask->kern),
+						   cuda_stream);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuMemcpyDtoHAsync: %s", errorText(rc));
+
+	/* write back the result buffer, if any */
+	if (ptask->m_results_buf != 0UL)
+	{
+		Assert(ptask->h_results_buf != NULL);
+		rc = cuMemcpyDtoHAsync(ptask->h_results_buf,
+							   ptask->m_results_buf,
+							   ptask->kern.results_bufsz,
+							   cuda_stream);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuMemcpyDtoHAsync: %s", errorText(rc));
+	}
+
+	/* callback registration */
+	rc = cuStreamAddCallback(cuda_stream,
+							 plcuda_respond_task,
+							 ptask, 0);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "cuStreamAddCallback: %s", errorText(rc));
+	return 0;
+
+out_of_resource:
+	plcuda_cleanup_cuda_resources(ptask);
+	return 1;	/* retry later */
+}
+
+int
+plcuda_process_task(GpuTask_v2 *gtask,
+					CUmodule cuda_module,
+					CUstream cuda_stream)
+{
+	plcudaTask *ptask = (plcudaTask *) gtask;
+	int			retval;
+
+	PG_TRY();
+	{
+		retval = __plcuda_process_task(ptask, cuda_module, cuda_stream);
+	}
+	PG_CATCH();
+	{
+		plcuda_cleanup_cuda_resources((plcudaTask *) gtask);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	return retval;
+}
+
+/*
+ * plcuda_complete_task
+ */
+int
+plcuda_complete_task(GpuTask_v2 *gtask)
+{
+	plcudaTask	   *ptask = (plcudaTask *) gtask;
+
+	if (ptask->task.kerror.errcode == StromError_CpuReCheck &&
+		ptask->has_cpu_fallback)
+	{
+		ptask->task.cpu_fallback = true;
+		memset(&ptask->task.kerror, 0, sizeof(kern_errorbuf));
+	}
+	plcuda_cleanup_cuda_resources(ptask);
+
+	return 0;
+}
+
+/*
+ * plcuda_release_task
+ */
+void
+plcuda_release_task(GpuTask_v2 *gtask)
+{
+	plcudaTask	   *ptask = (plcudaTask *) gtask;
+
+	if (ptask->h_results_buf)
+		dmaBufferFree(ptask->h_results_buf);
+	dmaBufferFree(ptask);
 }
 
 /*
@@ -2294,15 +2533,5 @@ void
 pgstrom_init_plcuda(void)
 {
 	dlist_init(&plcuda_state_list);
-
 	RegisterResourceReleaseCallback(plcuda_cleanup_resources, NULL);
-
-	/* serialization of plcudaInfo */
-	plcudaInfoMethods.extnodename	= PLCUDAINFO_EXNODE_NAME;
-	plcudaInfoMethods.node_size		= sizeof(plcudaInfo);
-	plcudaInfoMethods.nodeCopy		= plcudaInfoCopy;
-	plcudaInfoMethods.nodeEqual		= plcudaInfoEqual;
-	plcudaInfoMethods.nodeOut		= plcudaInfoOut;
-	plcudaInfoMethods.nodeRead		= plcudaInfoRead;
-	RegisterExtensibleNodeMethods(&plcudaInfoMethods);
 }
