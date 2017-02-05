@@ -517,6 +517,7 @@ extern void pgstromRescanGpuTaskState(GpuTaskState_v2 *gts);
 extern void pgstromReleaseGpuTaskState(GpuTaskState_v2 *gts);
 extern void pgstromExplainGpuTaskState(GpuTaskState_v2 *gts,
 									   ExplainState *es);
+extern GpuTask_v2 *fetch_next_gputask(GpuTaskState_v2 *gts);
 extern void pgstrom_merge_worker_statistics(GpuTaskState_v2 *gts);
 extern void pgstromExplainOuterScan(GpuTaskState_v2 *gts,
 									List *deparse_context,
@@ -551,7 +552,7 @@ extern ProgramId pgstrom_create_cuda_program(GpuContext_v2 *gcontext,
 											 cl_uint extra_flags,
 											 const char *kern_source,
 											 const char *kern_define,
-											 bool try_async_build);
+											 bool wait_for_build);
 extern char *pgstrom_build_session_info(cl_uint extra_flags,
 										GpuTaskState_v2 *gts);
 extern CUmodule pgstrom_load_cuda_program(ProgramId program_id, long timeout);

@@ -3343,7 +3343,7 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 											 gpa_info->extra_flags,
 											 gpa_info->kern_source,
 											 kern_define,
-											 with_connection);
+											 false);
 	gpas->gts.program_id = program_id;
 }
 

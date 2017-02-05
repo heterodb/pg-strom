@@ -69,7 +69,6 @@ typedef struct
 	cl_ulong		working_usage;
 	cl_ulong		results_bufsz;
 	cl_ulong		results_usage;
-	cl_uint			total_length;	/* total lenght including kparams */
 	cl_uint			nargs;
 	kern_colmeta	retmeta;
 	kern_colmeta	argmeta[FLEXIBLE_ARRAY_MEMBER];	/* metadata of arguments */
@@ -82,7 +81,9 @@ typedef struct
 #define KERN_PLCUDA_PARAMBUF_LENGTH(kplcuda)	\
 	(KERN_PLCUDA_PARAMBUF(kplcuda)->length)
 #define KERN_PLCUDA_DMASEND_LENGTH(kplcuda)		\
-	((kplcuda)->total_length)
+	(STROMALIGN(offsetof(kern_plcuda,			\
+						 argmeta[(kplcuda)->nargs])) +	\
+	 KERN_PLCUDA_PARAMBUF_LENGTH(kplcuda))
 #define KERN_PLCUDA_DMARECV_LENGTH(kplcuda)		\
 	(offsetof(kern_plcuda, retmeta))
 #define PLCUDA_ERROR_RETURN(errcode)			\

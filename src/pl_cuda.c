@@ -31,138 +31,60 @@
 #include "pg_strom.h"
 #include "cuda_plcuda.h"
 
-#if 0
-#define PLCUDAINFO_EXNODE_NAME	"plcudaInfo"
-
-typedef struct plcudaInfo
-{
-	ExtensibleNode	ex;
-	/* kernel requirement */
-	cl_uint	extra_flags;
-	/* kernel declarations */
-	char   *kern_decl;
-	/* kernel prep function */
-	char   *kern_prep;
-	Oid		fn_prep_kern_blocksz;
-	long	val_prep_kern_blocksz;
-	Oid		fn_prep_num_threads;
-	Size	val_prep_num_threads;
-	Oid		fn_prep_shmem_unitsz;
-	Size	val_prep_shmem_unitsz;
-	Oid		fn_prep_shmem_blocksz;
-	Size	val_prep_shmem_blocksz;
-
-	/* kernel function */
-	char   *kern_main;
-	Oid		fn_main_kern_blocksz;
-	long	val_main_kern_blocksz;
-	Oid		fn_main_num_threads;
-	Size	val_main_num_threads;
-	Oid		fn_main_shmem_unitsz;
-	Size	val_main_shmem_unitsz;
-	Oid		fn_main_shmem_blocksz;
-	Size	val_main_shmem_blocksz;
-
-	/* kernel post function */
-    char   *kern_post;
-	Oid		fn_post_kern_blocksz;
-	long	val_post_kern_blocksz;
-	Oid		fn_post_num_threads;
-	Size	val_post_num_threads;
-	Oid		fn_post_shmem_unitsz;
-	Size	val_post_shmem_unitsz;
-	Oid		fn_post_shmem_blocksz;
-	Size	val_post_shmem_blocksz;
-
-	/* device memory size for working buffer */
-	Oid		fn_working_bufsz;
-	long	val_working_bufsz;
-
-	/* device memory size for result buffer */
-	Oid		fn_results_bufsz;
-	long	val_results_bufsz;
-
-	/* comprehensive functions */
-	Oid		fn_sanity_check;
-	Oid		fn_cpu_fallback;
-} plcudaInfo;
-#endif
-
-/*
- * plcudaState - runtime state of pl/cuda functions
- */
-typedef struct plcudaState
-{
-	dlist_node		chain;
-	ResourceOwner	owner;
-	GpuContext	   *gcontext;
-	plcudaInfo		cf_info;
-	kern_plcuda	   *kplcuda_head;	/* template */
-	/* GPU resources */
-	cl_int			cuda_index;
-	CUfunction		kern_prep;
-	CUfunction		kern_main;
-	CUfunction		kern_post;
-	CUmodule	   *cuda_modules;
-} plcudaState;
-
-
-
 /*
  * plcudaTaskState
  */
 typedef struct plcudaTaskState
 {
 	GpuTaskState_v2	gts;		/* dummy */
+	ResourceOwner	owner;
+	dlist_node		chain;
+	kern_plcuda	   *kplcuda_head;
+	void		   *last_results_buf;	/* results buffer last used */
 	/* kernel requirement */
-	cl_uint	extra_flags;
-	List   *extra_includes;		/* OID of extra include functions */
+	cl_uint		extra_flags;		/* flags to standard includes */
+	List	   *extra_includes;		/* OID of extra include functions */
 	/* kernel declarations */
-	char   *kern_decl;
+	char	   *kern_decl;
 	/* kernel prep function */
-	char   *kern_prep;
-	Oid		fn_prep_kern_blocksz;
-	long	val_prep_kern_blocksz;
-	Oid		fn_prep_num_threads;
-	Size	val_prep_num_threads;
-	Oid		fn_prep_shmem_unitsz;
-	Size	val_prep_shmem_unitsz;
-	Oid		fn_prep_shmem_blocksz;
-	Size	val_prep_shmem_blocksz;
-
+	char	   *kern_prep;
+	Oid			fn_prep_kern_blocksz;
+	long		val_prep_kern_blocksz;
+	Oid			fn_prep_num_threads;
+	Size		val_prep_num_threads;
+	Oid			fn_prep_shmem_unitsz;
+	Size		val_prep_shmem_unitsz;
+	Oid			fn_prep_shmem_blocksz;
+	Size		val_prep_shmem_blocksz;
 	/* kernel function */
-	char   *kern_main;
-	Oid		fn_main_kern_blocksz;
-	long	val_main_kern_blocksz;
-	Oid		fn_main_num_threads;
-	Size	val_main_num_threads;
-	Oid		fn_main_shmem_unitsz;
-	Size	val_main_shmem_unitsz;
-	Oid		fn_main_shmem_blocksz;
-	Size	val_main_shmem_blocksz;
-
+	char	   *kern_main;
+	Oid			fn_main_kern_blocksz;
+	long		val_main_kern_blocksz;
+	Oid			fn_main_num_threads;
+	Size		val_main_num_threads;
+	Oid			fn_main_shmem_unitsz;
+	Size		val_main_shmem_unitsz;
+	Oid			fn_main_shmem_blocksz;
+	Size		val_main_shmem_blocksz;
 	/* kernel post function */
-    char   *kern_post;
-	Oid		fn_post_kern_blocksz;
-	long	val_post_kern_blocksz;
-	Oid		fn_post_num_threads;
-	Size	val_post_num_threads;
-	Oid		fn_post_shmem_unitsz;
-	Size	val_post_shmem_unitsz;
-	Oid		fn_post_shmem_blocksz;
-	Size	val_post_shmem_blocksz;
-
+	char	   *kern_post;
+	Oid			fn_post_kern_blocksz;
+	long		val_post_kern_blocksz;
+	Oid			fn_post_num_threads;
+	Size		val_post_num_threads;
+	Oid			fn_post_shmem_unitsz;
+	Size		val_post_shmem_unitsz;
+	Oid			fn_post_shmem_blocksz;
+	Size		val_post_shmem_blocksz;
 	/* device memory size for working buffer */
-	Oid		fn_working_bufsz;
-	long	val_working_bufsz;
-
+	Oid			fn_working_bufsz;
+	long		val_working_bufsz;
 	/* device memory size for result buffer */
-	Oid		fn_results_bufsz;
-	long	val_results_bufsz;
-
+	Oid			fn_results_bufsz;
+	long		val_results_bufsz;
 	/* comprehensive functions */
-	Oid		fn_sanity_check;
-	Oid		fn_cpu_fallback;
+	Oid			fn_sanity_check;
+	Oid			fn_cpu_fallback;
 } plcudaTaskState;
 
 /*
@@ -192,7 +114,7 @@ typedef struct plcudaTask
 /*
  * static functions
  */
-static plcudaTaskState *plcuda_exec_begin(Form_pg_proc proc_form,
+static plcudaTaskState *plcuda_exec_begin(HeapTuple protup,
 										  FunctionCallInfo fcinfo);
 
 static void plcuda_exec_end(plcudaTaskState *plts);
@@ -394,7 +316,8 @@ static void
 plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
 					   Oid proowner,
 					   oidvector *proargtypes,
-					   Oid prorettype)
+					   Oid prorettype,
+					   char *source)
 {
 	StringInfoData	decl_src;
 	StringInfoData	prep_src;
@@ -833,10 +756,10 @@ plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
 				(errcode(ERRCODE_SYNTAX_ERROR),
 				 errmsg("pl/cuda function syntax error\n%s", emsg.data)));
 
-	plts->kern_decl = decl_src.data;
-	plts->kern_prep = prep_src.data;
+	plts->kern_decl = (has_decl_block ? decl_src.data : NULL);
+	plts->kern_prep = (has_prep_block ? prep_src.data : NULL);
 	plts->kern_main = main_src.data;
-	plts->kern_post = post_src.data;
+	plts->kern_post = (has_post_block ? post_src.data : NULL);
 #undef EMSG
 #undef HELPER_PRIV_CHECK
 	pfree(emsg.data);
@@ -849,12 +772,12 @@ plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
  *
  */
 static void
-__plcuda_codegen(StringInfo kern,
-				 const char *suffix,
-				 const char *users_code,
-				 bool kernel_maxthreads,
-				 Form_pg_proc procForm,
-				 const char *last_suffix)
+plcuda_codegen_part(StringInfo kern,
+					const char *suffix,
+					const char *users_code,
+					bool kernel_maxthreads,
+					Form_pg_proc procForm,
+					const char *last_suffix)
 {
 	devtype_info   *dtype_r;
 	devtype_info   *dtype_a;
@@ -863,12 +786,12 @@ __plcuda_codegen(StringInfo kern,
 	appendStringInfo(
 		kern,
 		"STATIC_INLINE(void)\n"
-		"__plcuda_%s%s(kern_plcuda *kplcuda,\n"
-		"              void *workbuf,\n"
-		"              void *results,\n"
-		"              kern_context *kcxt)\n"
+		"__plcuda_%s_kernel(kern_plcuda *kplcuda,\n"
+		"                   void *workbuf,\n"
+		"                   void *results,\n"
+		"                   kern_context *kcxt)\n"
 		"{\n",
-		NameStr(procForm->proname), suffix);
+		suffix);
 
 	/* declaration of 'retval' variable */
 	dtype_r = pgstrom_devtype_lookup(procForm->prorettype);
@@ -930,7 +853,7 @@ __plcuda_codegen(StringInfo kern,
 	appendStringInfo(
 		kern,
 		"KERNEL_FUNCTION%s(void)\n"
-		"plcuda_%s%s(kern_plcuda *kplcuda,\n"
+		"plcuda_%s_kernel_entrypoint(kern_plcuda *kplcuda,\n"
 		"            void *workbuf,\n"
 		"            void *results)\n"
 		"{\n"
@@ -939,7 +862,7 @@ __plcuda_codegen(StringInfo kern,
 		"\n"
 		"  assert(kplcuda->nargs == kparams->nparams);\n",
 		kernel_maxthreads ? "_MAXTHREADS" : "",
-		NameStr(procForm->proname), suffix);
+		suffix);
 
 	if (last_suffix)
 		appendStringInfo(
@@ -949,19 +872,19 @@ __plcuda_codegen(StringInfo kern,
 			"  else\n"
 			"  {\n"
 			"    INIT_KERNEL_CONTEXT(&kcxt,plcuda%s_kernel,kparams);\n"
-			"    __plcuda_%s%s(kplcuda, workbuf, results, &kcxt);\n"
+			"    __plcuda_%s_kernel(kplcuda, workbuf, results, &kcxt);\n"
 			"  }\n",
 			last_suffix,
 			last_suffix,
 			suffix,
-			NameStr(procForm->proname), suffix);
+			suffix);
 	else
 		appendStringInfo(
 			kern,
 			"  INIT_KERNEL_CONTEXT(&kcxt,plcuda%s_kernel,kparams);\n"
-			"  __plcuda_%s%s(kplcuda, workbuf, results, &kcxt);\n",
+			"  __plcuda_%s_kernel(kplcuda, workbuf, results, &kcxt);\n",
 			suffix,
-			NameStr(procForm->proname), suffix);
+			suffix);
 
 	appendStringInfo(
 		kern,
@@ -971,72 +894,48 @@ __plcuda_codegen(StringInfo kern,
 }
 
 static char *
-plcuda_codegen(Form_pg_proc procForm,
-			   plcudaInfo *cf_info)
+plcuda_codegen(Form_pg_proc procForm, plcudaTaskState *plts)
 {
 	StringInfoData	kern;
 	const char	   *last_stage = NULL;
 
 	initStringInfo(&kern);
 
-	if (cf_info->kern_decl)
-		appendStringInfo(&kern, "%s\n", cf_info->kern_decl);
-	if (cf_info->kern_prep)
+	if (plts->kern_decl)
+		appendStringInfo(&kern, "%s\n", plts->kern_decl);
+	if (plts->kern_prep)
 	{
-		__plcuda_codegen(&kern, "_prep",
-						 cf_info->kern_prep,
-						 (OidIsValid(cf_info->fn_prep_kern_blocksz) ||
-						  cf_info->val_prep_kern_blocksz > 0),
-						 procForm,
-						 last_stage);
+		plcuda_codegen_part(&kern, "_prep",
+							plts->kern_prep,
+							(OidIsValid(plts->fn_prep_kern_blocksz) ||
+							 plts->val_prep_kern_blocksz > 0),
+							procForm,
+							last_stage);
 		last_stage = "_prep";
 	}
-	if (cf_info->kern_main)
+	if (plts->kern_main)
 	{
-		__plcuda_codegen(&kern, "_main",
-						 cf_info->kern_main,
-						 (OidIsValid(cf_info->fn_main_kern_blocksz) ||
-						  cf_info->val_main_kern_blocksz > 0),
-						 procForm,
-						 last_stage);
+		plcuda_codegen_part(&kern, "_main",
+							plts->kern_main,
+							(OidIsValid(plts->fn_main_kern_blocksz) ||
+							 plts->val_main_kern_blocksz > 0),
+							procForm,
+							last_stage);
 		last_stage = "_main";
 	}
-	if (cf_info->kern_post)
+	if (plts->kern_post)
 	{
-		__plcuda_codegen(&kern, "_post",
-						 cf_info->kern_post,
-						 (OidIsValid(cf_info->fn_post_kern_blocksz) ||
-						  cf_info->val_post_kern_blocksz > 0),
-						 procForm,
-						 last_stage);
+		plcuda_codegen_part(&kern, "_post",
+							plts->kern_post,
+							(OidIsValid(plts->fn_post_kern_blocksz) ||
+							 plts->val_post_kern_blocksz > 0),
+							procForm,
+							last_stage);
 		last_stage = "_post";
 	}
 	return kern.data;
 }
 
-static void
-__plcuda_cleanup_resources(plcudaState *state)
-{
-	GpuContext	   *gcontext = state->gcontext;
-	cl_uint			i, ndevs = gcontext->num_context;
-
-	for (i=0; i < ndevs; i++)
-	{
-		CUresult	rc;
-
-		if (!state->cuda_modules[i])
-			continue;
-
-		rc = cuModuleUnload(state->cuda_modules[i]);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuModuleUnload: %s", errorText(rc));
-	}
-	pfree(state->cuda_modules);
-	pfree(state->kplcuda_head);
-	pfree(state);
-
-	pgstrom_put_gpucontext(gcontext);
-}
 
 static void
 plcuda_cleanup_resources(ResourceReleasePhase phase,
@@ -1051,15 +950,11 @@ plcuda_cleanup_resources(ResourceReleasePhase phase,
 
 	dlist_foreach_modify(iter, &plcuda_state_list)
 	{
-		plcudaState	   *state = (plcudaState *)
-			dlist_container(plcudaState, chain, iter.cur);
+		plcudaTaskState *plts = (plcudaTaskState *)
+			dlist_container(plcudaTaskState, chain, iter.cur);
 
-		if (state->owner == CurrentResourceOwner)
-		{
-			/* detach state */
-			dlist_delete(&state->chain);
-			__plcuda_cleanup_resources(state);
-		}
+		if (plts->owner == CurrentResourceOwner)
+			plcuda_exec_end(plts);
 	}
 }
 
@@ -1090,17 +985,17 @@ __setup_kern_colmeta(Oid type_oid, int arg_index)
 }
 
 static plcudaTaskState *
-plcuda_exec_begin(Form_pg_proc procForm, FunctionCallInfo fcinfo)
+plcuda_exec_begin(HeapTuple protup, FunctionCallInfo fcinfo)
 {
-	GpuContext	   *gcontext = pgstrom_get_gpucontext();
+	GpuContext_v2   *gcontext = AllocGpuContext(fcinfo != NULL);
 	plcudaTaskState *plts;
-	char		   *kern_source;
-	CUmodule	   *cuda_modules;
-	plcudaState	   *state;
 	kern_plcuda	   *kplcuda;
-	char			namebuf[NAMEDATALEN + 40];
-	CUresult		rc;
-	Size			length;
+	Form_pg_proc	procForm = (Form_pg_proc) GETSTRUCT(protup);
+	Datum			prosrc;
+	bool			isnull;
+	char		   *kern_source;
+	char		   *kern_define;
+	ProgramId		program_id;
 	int				i;
 
 	/* setup a dummy GTS for PL/CUDA */
@@ -1110,51 +1005,30 @@ plcuda_exec_begin(Form_pg_proc procForm, FunctionCallInfo fcinfo)
 							GpuTaskKind_PL_CUDA,
 							NIL,	/* no constants */
 							NULL);	/* no EState */
+	plts->extra_flags = DEVKERNEL_NEEDS_PLCUDA;
 
 	/* validate PL/CUDA source code */
-	prosrc = SysCacheGetAttr(PROCOID, tuple, Anum_pg_proc_prosrc, &isnull);
+	prosrc = SysCacheGetAttr(PROCOID, protup, Anum_pg_proc_prosrc, &isnull);
 	if (isnull)
 		elog(ERROR, "Bug? no program source was supplied");
 	plcuda_code_validation(plts,
 						   !fcinfo ? procForm->proowner : InvalidOid,
-						   &procForm->proargtypes
+						   &procForm->proargtypes,
 						   procForm->prorettype,
 						   TextDatumGetCString(prosrc));
 	/* construct a flat kernel source to be built */
 	kern_source = plcuda_codegen(procForm, plts);
+	kern_define = pgstrom_build_session_info(plts->extra_flags, &plts->gts);
 	program_id = pgstrom_create_cuda_program(gcontext,
 											 plts->extra_flags,
-											 plts->kern_source,
+											 kern_source,
 											 kern_define,
-											 with_connection);
+											 true);
 	plts->gts.program_id = program_id;
 
-	wait_for_cuda_program_build(program_id);
-
-
-
-
-
-
-	cuda_modules = plcuda_load_cuda_program_legacy(gcontext,
-												   kern_source,
-												   cf_info->extra_flags);
-	/* construct plcudaState */
-	state = MemoryContextAllocZero(gcontext->memcxt,
-								   sizeof(plcudaState));
-	state->owner = CurrentResourceOwner;
-	state->gcontext = gcontext;
-	memcpy(&state->cf_info, cf_info, sizeof(plcudaInfo));
-	state->cf_info.kern_decl = NULL;
-	state->cf_info.kern_prep = NULL;
-	state->cf_info.kern_main = NULL;
-	state->cf_info.kern_post = NULL;
-	state->cuda_modules = cuda_modules;
-
-	/* build template of kern_plcuda */
-	length = offsetof(kern_plcuda, argmeta[procForm->pronargs]);
-	kplcuda = MemoryContextAllocZero(gcontext->memcxt, length);
-
+	/* build template of the kern_plcuda */
+	kplcuda = palloc0(offsetof(kern_plcuda,
+							   argmeta[procForm->pronargs]));
 	kplcuda->nargs = procForm->pronargs;
 	kplcuda->retmeta = __setup_kern_colmeta(procForm->prorettype, -1);
 	for (i=0; i < procForm->pronargs; i++)
@@ -1166,87 +1040,32 @@ plcuda_exec_begin(Form_pg_proc procForm, FunctionCallInfo fcinfo)
 	/* MEMO: if result type is varlena, initialized to NULL as a default */
 	if (kplcuda->retmeta.attlen < 0)
 		kplcuda->__retval[sizeof(CUdeviceptr)] = true;
-	state->kplcuda_head = kplcuda;
+	plts->kplcuda_head = kplcuda;
+	/* track plcudaTaskState by local tracker */
+	plts->owner = CurrentResourceOwner;
+	dlist_push_head(&plcuda_state_list, &plts->chain);
 
-	/* track state */
-	dlist_push_head(&plcuda_state_list, &state->chain);
-
-#if 0
-	/* resolve kernel functions */
-	i = (gcontext->next_context++ % gcontext->num_context);
-	state->cuda_index = i;
-
-	rc = cuCtxPushCurrent(gcontext->gpu[i].cuda_context);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
-
-	if (cf_info->kern_prep)
-	{
-		snprintf(namebuf, sizeof(namebuf), "plcuda_%s_prep",
-				 NameStr(procForm->proname));
-		rc = cuModuleGetFunction(&state->kern_prep,
-								 state->cuda_modules[i],
-								 namebuf);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
-	}
-
-	if (cf_info->kern_main)
-	{
-		snprintf(namebuf, sizeof(namebuf), "plcuda_%s_main",
-				 NameStr(procForm->proname));
-		rc = cuModuleGetFunction(&state->kern_main,
-								 state->cuda_modules[i],
-								 namebuf);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
-	}
-
-	if (cf_info->kern_post)
-	{
-		snprintf(namebuf, sizeof(namebuf), "plcuda_%s_post",
-				 NameStr(procForm->proname));
-		rc = cuModuleGetFunction(&state->kern_post,
-								 state->cuda_modules[i],
-								 namebuf);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
-	}
-
-	rc = cuCtxPopCurrent(NULL);
-	if (rc != CUDA_SUCCESS)
-		elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
-
-	return state;
-#endif
 	return plts;
 }
 
 static void
-plcuda_exec_end(plcudaState *state)
+plcuda_exec_end(plcudaTaskState *plts)
 {
-	dlist_delete(&state->chain);
-	__plcuda_cleanup_resources(state);
+	dlist_delete(&plts->chain);
+
+	if (plts->last_results_buf)
+		dmaBufferFree(plts->last_results_buf);
+	pgstromReleaseGpuTaskState(&plts->gts);
 }
 
 Datum
 plcuda_function_validator(PG_FUNCTION_ARGS)
 {
 	Oid				func_oid = PG_GETARG_OID(0);
-	Relation		rel;
 	HeapTuple		tuple;
-	HeapTuple		newtup;
 	Form_pg_proc	procForm;
-	Datum			prosrc;
-	bool			isnull;
-	plcudaTaskState	plts;
-	devtype_info   *dtype;
-	char		   *source;
-	cl_uint			extra_flags = DEVKERNEL_NEEDS_PLCUDA;
+	plcudaTaskState	*plts;
 	cl_uint			i;
-	plcudaState	   *state;
-	ObjectAddress	myself;
-	ObjectAddress	referenced;
 
 	if (!CheckFunctionValidatorAccess(fcinfo->flinfo->fn_oid, func_oid))
 		PG_RETURN_VOID();
@@ -1289,45 +1108,18 @@ plcuda_function_validator(PG_FUNCTION_ARGS)
 					 errmsg("Argument type \"%s\" is not device executable",
 							format_type_be(argtype_oid))));
 	}
-	/* only validation of the CUDA code */
-	plts = plcuda_exec_begin(procForm, NULL);
-	plcuda_exec_end(plts);
-
-
-
-
-
 	/*
-	 * Do syntax checks and construction of plcudaInfo
+	 * Only validation of the CUDA code. Run synchronous code build, then
+	 * raise an error if code block has any error.
 	 */
-	memset(&plts, 0, sizeof(plcudaTaskState));
-	plts.extra_flags = extra_flags;
-	plts.val_prep_kern_blocksz = 0;	/* default; performance optimal */
-	plts.val_main_kern_blocksz = 0;	/* default; performance optimal */
-	plts.val_post_kern_blocksz = 0;	/* default; performance optimal */
-	plts.val_prep_num_threads = 1;	/* default */
-	plts.val_main_num_threads = 1;	/* default */
-	plts.val_post_num_threads = 1;	/* default */
-
-	plcuda_code_validation(&plts,
-						   procForm->proowner,
-						   &procForm->proargtypes
-						   procForm->prorettype,
-						   TextDatumGetCString(prosrc));
-
-
-
-	state = plcuda_exec_begin(procForm, NULL);	/* validation only */
-	plcuda_exec_end(state);
-
-
+	plts = plcuda_exec_begin(tuple, NULL);
+	plcuda_exec_end(plts);
 
 	ReleaseSysCache(tuple);
 
 	PG_RETURN_VOID();
 }
 PG_FUNCTION_INFO_V1(plcuda_function_validator);
-
 
 static inline Datum
 kernel_launch_helper(FunctionCallInfo __fcinfo,	/* PL/CUDA's fcinfo */
@@ -1364,15 +1156,15 @@ kernel_launch_helper(FunctionCallInfo __fcinfo,	/* PL/CUDA's fcinfo */
 	return result;
 }
 
-static kern_plcuda *
-__build_kern_plcuda(FunctionCallInfo fcinfo,
-					plcudaState *state,
-					Size working_bufsz,
-					Size results_bufsz)
+/*
+ * create_plcuda_task
+ */
+static plcudaTask *
+create_plcuda_task(plcudaTaskState *plts, FunctionCallInfo fcinfo,
+				   Size working_bufsz, Size results_bufsz)
 {
-	GpuContext	   *gcontext = state->gcontext;
-	kern_plcuda	   *kplcuda_head = state->kplcuda_head;
-	kern_plcuda	   *kplcuda;
+	GpuContext_v2  *gcontext = plts->gts.gcontext;
+	plcudaTask	   *ptask;
 	kern_parambuf  *kparams;
 	Size			head_length;
 	Size			total_length;
@@ -1380,14 +1172,16 @@ __build_kern_plcuda(FunctionCallInfo fcinfo,
 	int				i;
 
 	/* calculation of the length */
-	Assert(fcinfo->nargs == kplcuda_head->nargs);
-	head_length = offsetof(kern_plcuda, argmeta[fcinfo->nargs]);
-	total_length = STROMALIGN(head_length) +
-		STROMALIGN(offsetof(kern_parambuf, poffset[fcinfo->nargs]));
+	Assert(fcinfo->nargs == plts->kplcuda_head->nargs);
+	head_length = offsetof(plcudaTask,
+						   kern.argmeta[fcinfo->nargs]);
+	total_length = STROMALIGN(head_length);
 
+	total_length += STROMALIGN(offsetof(kern_parambuf,
+										poffset[fcinfo->nargs]));
 	for (i=0; i < fcinfo->nargs; i++)
 	{
-		kern_colmeta	cmeta = kplcuda_head->argmeta[i];
+		kern_colmeta	cmeta = plts->kplcuda_head->argmeta[i];
 
 		if (fcinfo->argnull[i])
 			continue;
@@ -1398,17 +1192,22 @@ __build_kern_plcuda(FunctionCallInfo fcinfo,
 	}
 	total_length = STROMALIGN(total_length);
 
-	/* setup kern_plcuda to be launched */
-	kplcuda = MemoryContextAlloc(gcontext->memcxt, total_length);
-	memcpy(kplcuda, kplcuda_head, head_length);
-	kplcuda->working_bufsz = working_bufsz;
-	kplcuda->working_usage = 0UL;
-	kplcuda->results_bufsz = results_bufsz;
-	kplcuda->results_usage = 0UL;
-	kplcuda->total_length = total_length;
+	/* setup plcudaTask */
+	ptask = dmaBufferAlloc(gcontext, total_length);
+	memset(ptask, 0, offsetof(plcudaTask, kern));
+	pgstromInitGpuTask(&plts->gts, &ptask->task);
+	if (results_bufsz > 0)
+		ptask->h_results_buf = dmaBufferAlloc(gcontext, results_bufsz);
+	/* setup kern_plcuda */
+	memcpy(&ptask->kern, plts->kplcuda_head,
+		   offsetof(kern_plcuda, argmeta[fcinfo->nargs]));
+	ptask->kern.working_bufsz = working_bufsz;
+	ptask->kern.working_usage = 0UL;
+	ptask->kern.results_bufsz = results_bufsz;
+	ptask->kern.results_usage = 0UL;
 
-	/* copy function argument to DMA buffer */
-	kparams = KERN_PLCUDA_PARAMBUF(kplcuda);
+	/* copy function arguments onto DMA buffer */
+	kparams = KERN_PLCUDA_PARAMBUF(&ptask->kern);
 	kparams->hostptr = (hostptr_t) kparams;
 	kparams->xactStartTimestamp = GetCurrentTransactionStartTimestamp();
 
@@ -1416,7 +1215,7 @@ __build_kern_plcuda(FunctionCallInfo fcinfo,
 								 poffset[fcinfo->nargs]));
 	for (i=0; i < fcinfo->nargs; i++)
 	{
-		kern_colmeta	cmeta = kplcuda_head->argmeta[i];
+		kern_colmeta	cmeta = plts->kplcuda_head->argmeta[i];
 
 		if (fcinfo->argnull[i])
 			kparams->poffset[i] = 0;	/* null */
@@ -1443,310 +1242,30 @@ __build_kern_plcuda(FunctionCallInfo fcinfo,
 	}
 	kparams->nparams = fcinfo->nargs;
 	kparams->length = STROMALIGN(offset);
+	Assert(STROMALIGN(offsetof(plcudaTask,
+							   kern.argmeta[fcinfo->nargs])) +
+		   kparams->length == total_length);
+	Assert(!plts->last_results_buf);
+	plts->last_results_buf = ptask->h_results_buf;
 
-	Assert(STROMALIGN(offsetof(kern_plcuda,
-							   argmeta[fcinfo->nargs])) +
-		   kparams->length == kplcuda->total_length);
-	return kplcuda;
-}
-
-static Datum
-__launch_plcuda_kernels(plcudaState *state,
-						kern_plcuda *kplcuda,
-						CUdeviceptr m_kern_plcuda,
-						CUdeviceptr m_working_buf,
-						CUdeviceptr m_results_buf,
-						char *h_results_buf,
-						kern_errorbuf *p_kerror,
-						bool *p_isnull)
-{
-	GpuContext *gcontext = state->gcontext;
-	CUstream	stream = NULL;
-	void	   *kern_args[5];
-	size_t		grid_size;
-	size_t		block_size;
-	int			warp_size;
-	CUdevice	cuda_device;
-	CUresult	rc;
-	Datum		retval;
-
-	/* device to be used */
-	cuda_device = gcontext->gpu[state->cuda_index].cuda_device;
-
-	rc = cuStreamCreate(&stream, CU_STREAM_DEFAULT);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuStreamCreate: %s", errorText(rc));
-
-	rc = cuDeviceGetAttribute(&warp_size, CU_DEVICE_ATTRIBUTE_WARP_SIZE,
-							  cuda_device);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
-	Assert((warp_size & (warp_size - 1)) == 0);
-
-	PG_TRY();
-	{
-		/* control block + argument buffer */
-		rc = cuMemcpyHtoDAsync(m_kern_plcuda,
-							   kplcuda,
-							   KERN_PLCUDA_DMASEND_LENGTH(kplcuda),
-							   stream);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-
-		/* kernel arguments (common for all three kernels) */
-		kern_args[0] = &m_kern_plcuda;
-		kern_args[1] = &m_working_buf;
-		kern_args[2] = &m_results_buf;
-
-		/* kernel launch of the prep function */
-		if (state->kern_prep)
-		{
-			if (kplcuda->prep_kern_blocksz > 0)
-			{
-				block_size = (kplcuda->prep_kern_blocksz +
-							  warp_size - 1) & ~(warp_size - 1);
-				grid_size = (kplcuda->prep_num_threads +
-							 block_size - 1) / block_size;
-			}
-			else
-			{
-				optimal_workgroup_size(&grid_size,
-									   &block_size,
-									   state->kern_prep,
-									   cuda_device,
-									   kplcuda->prep_num_threads,
-									   kplcuda->prep_shmem_blocksz,
-									   kplcuda->prep_shmem_unitsz);
-			}
-
-			rc = cuLaunchKernel(state->kern_prep,
-								grid_size, 1, 1,
-								block_size, 1, 1,
-								kplcuda->prep_shmem_blocksz +
-								kplcuda->prep_shmem_unitsz * block_size,
-								stream,
-								kern_args,
-								NULL);
-			if (rc != CUDA_SUCCESS)
-				ereport(ERROR,
-						(errcode(ERRCODE_INTERNAL_ERROR),
-						 errmsg("failed on cuLaunchKernel: %s", errorText(rc)),
-						 errhint("prep-kernel: grid=%u block=%u shmem=%zu",
-								 (cl_uint)grid_size, (cl_uint)block_size,
-								 kplcuda->prep_shmem_blocksz +
-								 kplcuda->prep_shmem_unitsz * block_size)));
-
-			elog(DEBUG2, "PL/CUDA prep-kernel: grid=%u block=%u shmem=%zu",
-				 (cl_uint)grid_size, (cl_uint)block_size,
-				 kplcuda->prep_shmem_blocksz +
-				 kplcuda->prep_shmem_unitsz * block_size);
-		}
-
-		/* kernel launch of the main function */
-		if (kplcuda->main_kern_blocksz > 0)
-		{
-			block_size = (kplcuda->main_kern_blocksz +
-						  warp_size - 1) & ~(warp_size - 1);
-			grid_size = (kplcuda->main_num_threads +
-						 block_size - 1) / block_size;
-		}
-		else
-		{
-			optimal_workgroup_size(&grid_size,
-								   &block_size,
-								   state->kern_main,
-								   cuda_device,
-								   kplcuda->main_num_threads,
-								   kplcuda->main_shmem_blocksz,
-								   kplcuda->main_shmem_unitsz);
-		}
-
-		rc = cuLaunchKernel(state->kern_main,
-							grid_size, 1, 1,
-							block_size, 1, 1,
-							kplcuda->main_shmem_blocksz +
-							kplcuda->main_shmem_unitsz * block_size,
-							stream,
-							kern_args,
-							NULL);
-		if (rc != CUDA_SUCCESS)
-			ereport(ERROR,
-					(errcode(ERRCODE_INTERNAL_ERROR),
-					 errmsg("failed on cuLaunchKernel: %s", errorText(rc)),
-					 errhint("main-kernel: grid=%u block=%u shmem=%zu",
-							 (cl_uint)grid_size, (cl_uint)block_size,
-							 kplcuda->main_shmem_blocksz +
-							 kplcuda->main_shmem_unitsz * block_size)));
-
-		elog(DEBUG2, "PL/CUDA main-kernel: grid=%u block=%u shmem=%zu",
-			 (cl_uint)grid_size, (cl_uint)block_size,
-		   	 kplcuda->main_shmem_blocksz +
-		   	 kplcuda->main_shmem_unitsz * block_size);
-
-		/* kernel launch of the post function */
-		if (state->kern_post)
-		{
-			if (kplcuda->post_kern_blocksz > 0)
-			{
-				block_size = (kplcuda->post_kern_blocksz +
-							  warp_size - 1) & ~(warp_size - 1);
-				grid_size = (kplcuda->post_num_threads +
-							 block_size - 1) / block_size;
-			}
-			else
-			{
-				optimal_workgroup_size(&grid_size,
-									   &block_size,
-									   state->kern_post,
-									   cuda_device,
-									   kplcuda->post_num_threads,
-									   kplcuda->post_shmem_blocksz,
-									   kplcuda->post_shmem_unitsz);
-			}
-			rc = cuLaunchKernel(state->kern_post,
-								grid_size, 1, 1,
-								block_size, 1, 1,
-								kplcuda->post_shmem_blocksz +
-								kplcuda->post_shmem_unitsz * block_size,
-								stream,
-								kern_args,
-								NULL);
-			if (rc != CUDA_SUCCESS)
-				ereport(ERROR,
-						(errcode(ERRCODE_INTERNAL_ERROR),
-						 errmsg("failed on cuLaunchKernel: %s", errorText(rc)),
-						 errhint("post-kernel: grid=%u block=%u shmem=%zu",
-								 (cl_uint)grid_size, (cl_uint)block_size,
-								 kplcuda->post_shmem_blocksz +
-								 kplcuda->post_shmem_unitsz * block_size)));
-
-			elog(DEBUG2, "PL/CUDA post-kernel: grid=%u block=%u shmem=%zu",
-				 (cl_uint)grid_size, (cl_uint)block_size,
-				 kplcuda->post_shmem_blocksz +
-				 kplcuda->post_shmem_unitsz * block_size);
-		}
-
-		/* write back the control block */
-		rc = cuMemcpyDtoHAsync (kplcuda,
-								m_kern_plcuda,
-								KERN_PLCUDA_DMARECV_LENGTH(kplcuda),
-								stream);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
-
-		/*
-		 * write back the result buffer, if any
-		 * (note that h_results_buf is not pinned, thus sync DMA is used)
-		 */
-		if (h_results_buf)
-		{
-			rc = cuMemcpyDtoH(h_results_buf,
-							  m_results_buf,
-							  kplcuda->results_bufsz);
-			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on cuMemcpyDtoH: %s", errorText(rc));
-			elog(DEBUG2, "PL/CUDA results DMA %zu bytes",
-				 kplcuda->results_bufsz);
-		}
-	}
-	PG_CATCH();
-	{
-		/* ensure concurrent jobs are done */
-		rc = cuStreamSynchronize(stream);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuStreamSynchronize: %s", errorText(rc));
-
-		rc = cuStreamDestroy(stream);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuStreamDestroy: %s", errorText(rc));
-
-		rc = cuCtxPopCurrent(NULL);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
-
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-
-	/* wait for completion of the jobs */
-	rc = cuStreamSynchronize(stream);
-	if (rc != CUDA_SUCCESS)
-		elog(WARNING, "failed on cuStreamSynchronize: %s", errorText(rc));
-
-	rc = cuStreamDestroy(stream);
-	if (rc != CUDA_SUCCESS)
-		elog(WARNING, "failed on cuStreamDestroy: %s", errorText(rc));
-
-	/* construction of the result value */
-	if (state->kern_post != NULL &&
-		kplcuda->kerror_post.errcode != StromError_Success)
-	{
-		*p_kerror = kplcuda->kerror_post;
-	}
-	else if (kplcuda->kerror_main.errcode != StromError_Success)
-	{
-		*p_kerror = kplcuda->kerror_main;
-	}
-	else if (kplcuda->retmeta.attlen > 0)
-	{
-		if (kplcuda->__retval[kplcuda->retmeta.attlen])
-			*p_isnull = true;
-		else if (kplcuda->retmeta.attbyval)
-		{
-			/* inline fixed-length variable */
-			*p_isnull = false;
-			memcpy(&retval, kplcuda->__retval, kplcuda->retmeta.attlen);
-		}
-		else
-		{
-			/* indirect fixed-length variable */
-			*p_isnull = false;
-			retval = PointerGetDatum(pnstrdup(kplcuda->__retval,
-											  kplcuda->retmeta.attlen));
-		}
-	}
-	else
-	{
-		Assert(!kplcuda->retmeta.attbyval);
-		if (kplcuda->__retval[sizeof(CUdeviceptr)])
-			*p_isnull = true;
-		else if (m_results_buf == 0UL)
-			elog(ERROR, "non-NULL result in spite of no results buffer");
-		else
-		{
-			/* varlena datum that referenced h_resultbuf */
-			CUdeviceptr	p = *((CUdeviceptr *)kplcuda->__retval);
-
-			if (p != m_results_buf)
-				elog(ERROR, "kernel 'retval' didn't point result buffer");
-			*p_isnull = false;
-			retval = PointerGetDatum(h_results_buf);
-		}
-	}
-	return retval;
+	return ptask;
 }
 
 Datum
 plcuda_function_handler(PG_FUNCTION_ARGS)
 {
 	FmgrInfo	   *flinfo = fcinfo->flinfo;
-	plcudaState	   *state;
-	plcudaInfo	   *cf_info;
+	plcudaTaskState *plts;
+	plcudaTask	   *ptask;
+	plcudaTask	   *precv;
 	Size			working_bufsz;
 	Size			results_bufsz;
-	kern_plcuda	   *kplcuda;
 	kern_errorbuf	kerror;
-	CUcontext		cuda_context;
-	CUdeviceptr		m_kern_plcuda = 0UL;
-	CUdeviceptr		m_working_buf = 0UL;
-	CUdeviceptr		m_results_buf = 0UL;
-	char		   *h_results_buf = NULL;
-	Datum			retval;
-	bool			isnull;
-	CUresult		rc;
+	Datum			retval = 0;
+	bool			isnull = false;
 
 	if (flinfo->fn_extra)
-		state = (plcudaState *) flinfo->fn_extra;
+		plts = (plcudaTaskState *) flinfo->fn_extra;
 	else
 	{
 		MemoryContext	oldcxt;
@@ -1758,301 +1277,257 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 				 flinfo->fn_oid);
 
 		oldcxt = MemoryContextSwitchTo(flinfo->fn_mcxt);
-		plts = plcuda_exec_begin((Form_pg_proc) GETSTRUCT(tuple), fcinfo);
+		plts = plcuda_exec_begin(tuple, fcinfo);
 		MemoryContextSwitchTo(oldcxt);
 
 		ReleaseSysCache(tuple);
-		flinfo->fn_extra = state;
+		flinfo->fn_extra = plts;
 	}
-	cf_info = &state->cf_info;
+
+	/* results buffer of last invocation will not be used no longer */
+	if (plts->last_results_buf)
+	{
+		dmaBufferFree(plts->last_results_buf);
+		plts->last_results_buf = NULL;
+	}
 
 	/* sanitycheck of the supplied arguments, prior to GPU launch */
 	if (!DatumGetBool(kernel_launch_helper(fcinfo,
-										   cf_info->fn_sanity_check,
+										   plts->fn_sanity_check,
 										   BoolGetDatum(true),
 										   NULL)))
 		elog(ERROR, "function '%s' argument sanity check failed",
-			 format_procedure(cf_info->fn_sanity_check));
+			 format_procedure(plts->fn_sanity_check));
 
 	/* determine the kernel launch parameters */
 	working_bufsz =
 		DatumGetInt64(kernel_launch_helper(fcinfo,
-										   cf_info->fn_working_bufsz,
-										   cf_info->val_working_bufsz,
+										   plts->fn_working_bufsz,
+										   plts->val_working_bufsz,
 										   NULL));
 	results_bufsz =
 		DatumGetInt64(kernel_launch_helper(fcinfo,
-										   cf_info->fn_results_bufsz,
-										   cf_info->val_results_bufsz,
+										   plts->fn_results_bufsz,
+										   plts->val_results_bufsz,
 										   NULL));
 	elog(DEBUG2, "working_bufsz = %zu, results_bufsz = %zu",
 		 working_bufsz, results_bufsz);
 
-	/* make kern_plcuda structure */
-	kplcuda = __build_kern_plcuda(fcinfo, state,
-								  working_bufsz,
-								  results_bufsz);
-
-	if (state->kern_prep)
+	/* construction of plcudaTask structure */
+	ptask = create_plcuda_task(plts, fcinfo,
+							   working_bufsz,
+							   results_bufsz);
+	if (plts->kern_prep)
 	{
 		int64		v;
 
 		v = DatumGetInt64(kernel_launch_helper(fcinfo,
-											   cf_info->fn_prep_num_threads,
-											   cf_info->val_prep_num_threads,
+											   plts->fn_prep_num_threads,
+											   plts->val_prep_num_threads,
 											   NULL));
 		if (v <= 0)
 			elog(ERROR, "kern_prep: invalid number of threads: %ld", v);
-		kplcuda->prep_num_threads = (cl_ulong)v;
+		ptask->kern.prep_num_threads = (cl_ulong)v;
 
 		v = DatumGetInt64(kernel_launch_helper(fcinfo,
-											   cf_info->fn_prep_kern_blocksz,
-											   cf_info->val_prep_kern_blocksz,
+											   plts->fn_prep_kern_blocksz,
+											   plts->val_prep_kern_blocksz,
 											   NULL));
 		if (v < 0 || v > INT_MAX)
 			elog(ERROR, "kern_prep: invalid kernel block size: %ld", v);
-		kplcuda->prep_kern_blocksz = (cl_uint)v;
+		ptask->kern.prep_kern_blocksz = (cl_uint)v;
 
 		v = DatumGetInt64(kernel_launch_helper(fcinfo,
-											   cf_info->fn_prep_shmem_unitsz,
-											   cf_info->val_prep_shmem_unitsz,
+											   plts->fn_prep_shmem_unitsz,
+											   plts->val_prep_shmem_unitsz,
 											   NULL));
 		if (v < 0 || v > INT_MAX)
 			elog(ERROR, "kern_prep: invalid shared memory required: %ld", v);
-		kplcuda->prep_shmem_unitsz = (cl_uint)v;
+		ptask->kern.prep_shmem_unitsz = (cl_uint)v;
 
 		v = DatumGetInt64(kernel_launch_helper(fcinfo,
-											   cf_info->fn_prep_shmem_blocksz,
-											   cf_info->val_prep_shmem_blocksz,
+											   plts->fn_prep_shmem_blocksz,
+											   plts->val_prep_shmem_blocksz,
 											   NULL));
 		if (v < 0 || v > INT_MAX)
 			elog(ERROR, "kern_prep: invalid shared memory required: %ld", v);
-		kplcuda->prep_shmem_blocksz = v;
+		ptask->kern.prep_shmem_blocksz = v;
 
 		elog(DEBUG2, "kern_prep {blocksz=%u, nitems=%lu, shmem=%u,%u}",
-			 kplcuda->prep_kern_blocksz,
-			 kplcuda->prep_num_threads,
-			 kplcuda->prep_shmem_unitsz,
-			 kplcuda->prep_shmem_blocksz);
+			 ptask->kern.prep_kern_blocksz,
+			 ptask->kern.prep_num_threads,
+			 ptask->kern.prep_shmem_unitsz,
+			 ptask->kern.prep_shmem_blocksz);
+		ptask->exec_prep_kernel = true;
 	}
 
-	if (state->kern_main)
+	if (plts->kern_main)
 	{
 		int64		v;
 
 		v = DatumGetInt64(kernel_launch_helper(fcinfo,
-											   cf_info->fn_main_num_threads,
-											   cf_info->val_main_num_threads,
+											   plts->fn_main_num_threads,
+											   plts->val_main_num_threads,
 											   NULL));
 		if (v <= 0)
 			elog(ERROR, "kern_main: invalid number of threads: %ld", v);
-		kplcuda->main_num_threads = (cl_ulong)v;
+		ptask->kern.main_num_threads = (cl_ulong)v;
 
 		v = DatumGetInt64(kernel_launch_helper(fcinfo,
-											   cf_info->fn_main_kern_blocksz,
-											   cf_info->val_main_kern_blocksz,
+											   plts->fn_main_kern_blocksz,
+											   plts->val_main_kern_blocksz,
 											   NULL));
 		if (v < 0 || v > INT_MAX)
 			elog(ERROR, "kern_main: invalid kernel block size: %ld", v);
-		kplcuda->main_kern_blocksz = (cl_uint)v;
+		ptask->kern.main_kern_blocksz = (cl_uint)v;
 
 		v = DatumGetInt64(kernel_launch_helper(fcinfo,
-											   cf_info->fn_main_shmem_unitsz,
-											   cf_info->val_main_shmem_unitsz,
+											   plts->fn_main_shmem_unitsz,
+											   plts->val_main_shmem_unitsz,
 											   NULL));
 		if (v < 0 || v > INT_MAX)
 			elog(ERROR, "kern_main: invalid shared memory required: %ld", v);
-		kplcuda->main_shmem_unitsz = (cl_uint)v;
+		ptask->kern.main_shmem_unitsz = (cl_uint)v;
 
 		v = DatumGetInt64(kernel_launch_helper(fcinfo,
-											   cf_info->fn_main_shmem_blocksz,
-											   cf_info->val_main_shmem_blocksz,
+											   plts->fn_main_shmem_blocksz,
+											   plts->val_main_shmem_blocksz,
 											   NULL));
 		if (v < 0 || v > INT_MAX)
 			elog(ERROR, "kern_main: invalid shared memory required: %ld", v);
-		kplcuda->main_shmem_blocksz = v;
+		ptask->kern.main_shmem_blocksz = v;
 
 		elog(DEBUG2, "kern_main {blocksz=%u, nitems=%lu, shmem=%u,%u}",
-			 kplcuda->main_kern_blocksz,
-			 kplcuda->main_num_threads,
-			 kplcuda->main_shmem_unitsz,
-			 kplcuda->main_shmem_blocksz);
+			 ptask->kern.main_kern_blocksz,
+			 ptask->kern.main_num_threads,
+			 ptask->kern.main_shmem_unitsz,
+			 ptask->kern.main_shmem_blocksz);
 	}
 
-	if (state->kern_post)
+	if (plts->kern_post)
 	{
 		int64		v;
 
 		v = DatumGetInt64(kernel_launch_helper(fcinfo,
-											   cf_info->fn_post_num_threads,
-											   cf_info->val_post_num_threads,
+											   plts->fn_post_num_threads,
+											   plts->val_post_num_threads,
 											   NULL));
 		if (v <= 0)
 			elog(ERROR, "kern_post: invalid number of threads: %ld", v);
-		kplcuda->post_num_threads = (cl_ulong)v;
+		ptask->kern.post_num_threads = (cl_ulong)v;
 
 		v = DatumGetInt64(kernel_launch_helper(fcinfo,
-											   cf_info->fn_post_kern_blocksz,
-											   cf_info->val_post_kern_blocksz,
+											   plts->fn_post_kern_blocksz,
+											   plts->val_post_kern_blocksz,
 											   NULL));
 		if (v < 0 || v > INT_MAX)
 			elog(ERROR, "kern_post: invalid kernel block size: %ld", v);
-		kplcuda->post_kern_blocksz = (cl_uint)v;
+		ptask->kern.post_kern_blocksz = (cl_uint)v;
 
 		v = DatumGetInt64(kernel_launch_helper(fcinfo,
-											   cf_info->fn_post_shmem_unitsz,
-											   cf_info->val_post_shmem_unitsz,
+											   plts->fn_post_shmem_unitsz,
+											   plts->val_post_shmem_unitsz,
 											   NULL));
 		if (v < 0 || v > INT_MAX)
 			elog(ERROR, "kern_post: invalid shared memory required: %ld", v);
-		kplcuda->post_shmem_unitsz = (cl_uint)v;
+		ptask->kern.post_shmem_unitsz = (cl_uint)v;
 
 		v = DatumGetInt64(kernel_launch_helper(fcinfo,
-											   cf_info->fn_post_shmem_blocksz,
-											   cf_info->val_post_shmem_blocksz,
+											   plts->fn_post_shmem_blocksz,
+											   plts->val_post_shmem_blocksz,
 											   NULL));
 		if (v < 0 || v > INT_MAX)
 			elog(ERROR, "kern_post: invalid shared memory required: %ld", v);
-		kplcuda->post_shmem_blocksz = v;
+		ptask->kern.post_shmem_blocksz = v;
 
 		elog(DEBUG2, "kern_post {blocksz=%u, nitems=%lu, shmem=%u,%u}",
-			 kplcuda->post_kern_blocksz,
-			 kplcuda->post_num_threads,
-			 kplcuda->post_shmem_unitsz,
-			 kplcuda->post_shmem_blocksz);
+			 ptask->kern.post_kern_blocksz,
+			 ptask->kern.post_num_threads,
+			 ptask->kern.post_shmem_unitsz,
+			 ptask->kern.post_shmem_blocksz);
+		ptask->exec_post_kernel = true;
 	}
 
-	/* set context */
-	cuda_context = state->gcontext->gpu[state->cuda_index].cuda_context;
-	rc = cuCtxPushCurrent(cuda_context);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
-
-	PG_TRY();
-	{
-		/* kern_plcuda structure on the device side */
-		m_kern_plcuda = __gpuMemAlloc(state->gcontext,
-									  state->cuda_index,
-									  kplcuda->total_length);
-		if (m_kern_plcuda == 0UL)
-			elog(ERROR, "out of device memory; %u bytes required",
-				 kplcuda->total_length);
-
-		/* working buffer on the device side */
-		if (working_bufsz > 0)
-		{
-			m_working_buf = __gpuMemAlloc(state->gcontext,
-										  state->cuda_index,
-										  working_bufsz);
-			if (m_working_buf == 0UL)
-				elog(ERROR, "out of device memory; %zu bytes required",
-					 working_bufsz);
-		}
-
-		/* results buffer on the device side */
-		if (results_bufsz > 0)
-		{
-			m_results_buf = __gpuMemAlloc(state->gcontext,
-										  state->cuda_index,
-										  results_bufsz);
-			if (m_results_buf == 0UL)
-				elog(ERROR, "out of device memory; %zu bytes required",
-					 results_bufsz);
-
-			/*
-			 * NOTE: We allocate host-side result buffer on the current
-			 * memory context (usually, per tuple), because we have no
-			 * way to release host pinned buffer until end of the query
-			 * execution.
-			 * The current version of PL/CUDA does not support asynchronous
-			 * data transfer, thus, its performance penalty is not so much.
-			 */
-			h_results_buf = palloc(results_bufsz);
-		}
-
-		/*
-		 * OK, launch a series of CUDA kernels (synchronous invocation)
-		 */
-		memset(&kerror, 0, sizeof(kern_errorbuf));
-		retval = __launch_plcuda_kernels(state, kplcuda,
-										 m_kern_plcuda,
-										 m_working_buf,
-										 m_results_buf,
-										 h_results_buf,
-										 &kerror,
-										 &isnull);
-	}
-	PG_CATCH();
-	{
-		__gpuMemFree(state->gcontext,
-					 state->cuda_index,
-					 m_kern_plcuda);
-		if (m_working_buf != 0UL)
-			__gpuMemFree(state->gcontext,
-						 state->cuda_index,
-						 m_working_buf);
-		if (m_results_buf != 0UL)
-			__gpuMemFree(state->gcontext,
-						 state->cuda_index,
-						 m_results_buf);
-
-		rc = cuCtxPopCurrent(NULL);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
-
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-
-	/* release GPU resources */
-	__gpuMemFree(state->gcontext, state->cuda_index, m_kern_plcuda);
-	if (m_working_buf != 0UL)
-		__gpuMemFree(state->gcontext, state->cuda_index, m_working_buf);
-	if (m_results_buf != 0UL)
-		__gpuMemFree(state->gcontext, state->cuda_index, m_results_buf);
-
-	/* restore context */
-	rc = cuCtxPopCurrent(NULL);
-	if (rc != CUDA_SUCCESS)
-		elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
+	if (!gpuservSendGpuTask(plts->gts.gcontext, &ptask->task))
+		elog(ERROR, "failed to send GpuTask to GPU server");
+	precv = (plcudaTask *) fetch_next_gputask(&plts->gts);
+	if (!precv)
+		elog(ERROR, "failed to recv GpuTask from GPU server");
+	Assert(precv == ptask);
 
 	/*
 	 * Dump the debug counter if valid values are set by kernel function
 	 */
-	if (kplcuda->plcuda_debug_count0)
+	if (precv->kern.plcuda_debug_count0)
 		elog(NOTICE, "PL/CUDA debug count0 => %lu",
-			 kplcuda->plcuda_debug_count0);
-	if (kplcuda->plcuda_debug_count1)
+			 precv->kern.plcuda_debug_count0);
+	if (precv->kern.plcuda_debug_count1)
 		elog(NOTICE, "PL/CUDA debug count1 => %lu",
-			 kplcuda->plcuda_debug_count1);
-	if (kplcuda->plcuda_debug_count2)
+			 precv->kern.plcuda_debug_count1);
+	if (precv->kern.plcuda_debug_count2)
 		elog(NOTICE, "PL/CUDA debug count2 => %lu",
-			 kplcuda->plcuda_debug_count2);
-	if (kplcuda->plcuda_debug_count3)
+			 precv->kern.plcuda_debug_count2);
+	if (precv->kern.plcuda_debug_count3)
 		elog(NOTICE, "PL/CUDA debug count3 => %lu",
-			 kplcuda->plcuda_debug_count3);
-	if (kplcuda->plcuda_debug_count4)
+			 precv->kern.plcuda_debug_count3);
+	if (precv->kern.plcuda_debug_count4)
 		elog(NOTICE, "PL/CUDA debug count4 => %lu",
-			 kplcuda->plcuda_debug_count4);
-	if (kplcuda->plcuda_debug_count5)
+			 precv->kern.plcuda_debug_count4);
+	if (precv->kern.plcuda_debug_count5)
 		elog(NOTICE, "PL/CUDA debug count5 => %lu",
-			 kplcuda->plcuda_debug_count5);
-	if (kplcuda->plcuda_debug_count6)
+			 precv->kern.plcuda_debug_count5);
+	if (precv->kern.plcuda_debug_count6)
 		elog(NOTICE, "PL/CUDA debug count6 => %lu",
-			 kplcuda->plcuda_debug_count6);
-	if (kplcuda->plcuda_debug_count7)
+			 precv->kern.plcuda_debug_count6);
+	if (precv->kern.plcuda_debug_count7)
 		elog(NOTICE, "PL/CUDA debug count7 => %lu",
-			 kplcuda->plcuda_debug_count7);
-	pfree(kplcuda);
+			 precv->kern.plcuda_debug_count7);
 
-	if (kerror.errcode != StromError_Success)
+	if (precv->task.kerror.errcode == StromError_Success)
 	{
+		if (precv->kern.retmeta.attlen > 0)
+		{
+			if (precv->kern.__retval[precv->kern.retmeta.attlen])
+				isnull = true;
+			else if (precv->kern.retmeta.attbyval)
+			{
+				/* inline fixed-length variable */
+				memcpy(&retval, precv->kern.__retval,
+					   precv->kern.retmeta.attbyval);
+			}
+			else
+			{
+				/* indirect fixed-length variable */
+				retval = PointerGetDatum(pnstrdup(precv->kern.__retval,
+												  precv->kern.retmeta.attlen));
+			}
+		}
+		else
+		{
+			Assert(!precv->kern.retmeta.attbyval);
+			if (precv->kern.__retval[sizeof(CUdeviceptr)])
+				isnull = true;
+			else if (!precv->h_results_buf)
+				elog(ERROR, "non-NULL result in spite of no results buffer");
+			else
+				retval = PointerGetDatum(precv->h_results_buf);
+		}
+	}
+	else
+	{
+		if (precv->h_results_buf)
+		{
+			dmaBufferFree(precv->h_results_buf);
+			precv->h_results_buf = NULL;
+			plts->last_results_buf = NULL;
+		}
+
 		if (kerror.errcode == StromError_CpuReCheck &&
-			OidIsValid(cf_info->fn_cpu_fallback))
+			OidIsValid(plts->fn_cpu_fallback))
 		{
 			/* CPU fallback, if any */
 			retval = kernel_launch_helper(fcinfo,
-										  cf_info->fn_cpu_fallback,
+										  plts->fn_cpu_fallback,
 										  (Datum)0,
 										  &isnull);
 		}
@@ -2064,6 +1539,7 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 							errorTextKernel(&kerror))));
 		}
 	}
+	dmaBufferFree(ptask);
 
 	if (isnull)
 		PG_RETURN_NULL();
@@ -2077,6 +1553,7 @@ PG_FUNCTION_INFO_V1(plcuda_function_handler);
 Datum
 plcuda_function_source(PG_FUNCTION_ARGS)
 {
+#if 0
 	Oid				func_oid = PG_GETARG_OID(0);
 	Oid				lang_oid;
 	const char	   *lang_name = "plcuda";
@@ -2146,6 +1623,8 @@ plcuda_function_source(PG_FUNCTION_ARGS)
 	ReleaseSysCache(tuple);
 
 	PG_RETURN_TEXT_P(str.data);
+#endif
+	return 0;
 }
 PG_FUNCTION_INFO_V1(plcuda_function_source);
 
@@ -2194,7 +1673,7 @@ plcuda_cleanup_cuda_resources(plcudaTask *ptask)
  * plcuda_respond_task
  */
 static void
-plcuda_respond_task(CUstream stream, CUresult status, void *private))
+plcuda_respond_task(CUstream stream, CUresult status, void *private)
 {
 	plcudaTask *ptask = private;
 	bool		is_urgent = false;
@@ -2229,9 +1708,15 @@ __plcuda_process_task(plcudaTask *ptask,
 					  CUmodule cuda_module,
 					  CUstream cuda_stream)
 {
-	GpuContext	   *gcontext = ptask->task.gcontext;
+	GpuContext_v2  *gcontext = ptask->task.gcontext;
+	void		   *kern_args[3];
+	size_t			warp_size;
+	size_t			block_size;
+	size_t			grid_size;
 	CUresult		rc;
 
+	/* property of the device */
+	warp_size = devAttrs[gpuserv_cuda_dindex].WARP_SIZE;
 
 	/* plcuda_prep_kernel_entrypoint, if any */
 	if (ptask->exec_prep_kernel)
@@ -2261,7 +1746,7 @@ __plcuda_process_task(plcudaTask *ptask,
 	/* kern_plcuda structure on the device side */
 	rc = gpuMemAlloc_v2(gcontext,
 						&ptask->m_kern_plcuda,
-						ptask->kern.total_length);
+						KERN_PLCUDA_DMASEND_LENGTH(&ptask->kern));
 	if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		goto out_of_resource;
 	else if (rc != CUDA_SUCCESS)
@@ -2282,7 +1767,6 @@ __plcuda_process_task(plcudaTask *ptask,
 	{
 		ptask->m_working_buf = 0UL;
 	}
-
 
 	/* results buffer if required  */
 	if (ptask->kern.results_bufsz > 0)
@@ -2502,12 +1986,6 @@ plcuda_complete_task(GpuTask_v2 *gtask)
 {
 	plcudaTask	   *ptask = (plcudaTask *) gtask;
 
-	if (ptask->task.kerror.errcode == StromError_CpuReCheck &&
-		ptask->has_cpu_fallback)
-	{
-		ptask->task.cpu_fallback = true;
-		memset(&ptask->task.kerror, 0, sizeof(kern_errorbuf));
-	}
 	plcuda_cleanup_cuda_resources(ptask);
 
 	return 0;

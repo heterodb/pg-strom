@@ -1874,7 +1874,7 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 											 gs_info->extra_flags,
 											 gs_info->kern_source,
 											 kern_define,
-											 with_connection);
+											 false);
 	gss->gts.program_id = program_id;
 }
 

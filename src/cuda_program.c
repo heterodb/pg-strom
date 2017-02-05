@@ -816,6 +816,52 @@ pgstrom_try_build_cuda_program(void)
 }
 
 /*
+ * wait_for_build_cuda_program
+ */
+static void
+wait_for_build_cuda_program(ProgramId program_id)
+{
+	for (;;)
+	{
+		program_cache_entry *entry;
+		int		events;
+
+		CHECK_FOR_INTERRUPTS();
+		ResetLatch(MyLatch);
+		SpinLockAcquire(&pgcache_head->lock);
+		entry = lookup_cuda_program_entry_nolock(program_id);
+		if (!entry)
+		{
+			SpinLockRelease(&pgcache_head->lock);
+			elog(ERROR, "ProgramId=%lu is missing", program_id);
+		}
+		else if (entry->bin_image == CUDA_PROGRAM_BUILD_FAILURE)
+		{
+			SpinLockRelease(&pgcache_head->lock);
+			ereport(ERROR,
+					(errcode(entry->error_code),
+					 errmsg("%s", entry->error_msg)));
+		}
+		else if (entry->bin_image != NULL)
+		{
+			SpinLockRelease(&pgcache_head->lock);
+			break;		/* ok, it is successfully built */
+		}
+		SpinLockRelease(&pgcache_head->lock);
+
+		events = WaitLatch(MyLatch,
+						   WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
+						   300 * 1000);	/* 5min */
+		if (events & WL_POSTMASTER_DEATH)
+			ereport(FATAL,
+					(errcode(ERRCODE_ADMIN_SHUTDOWN),
+					 errmsg("Urgent termination by postmaster dead")));
+		if (events & WL_TIMEOUT)
+			elog(ERROR, "CUDA code build timeout");
+	}
+}
+
+/*
  * pgstrom_create_cuda_program
  *
  * It makes a new GPU program cache entry, or acquires an existing entry if
@@ -826,7 +872,7 @@ pgstrom_create_cuda_program(GpuContext_v2 *gcontext,
 							cl_uint extra_flags,
 							const char *kern_source,
 							const char *kern_define,
-							bool try_async_build)
+							bool wait_for_build)
 {
 	program_cache_entry	*entry;
 	ProgramId	program_id;
@@ -898,9 +944,7 @@ pgstrom_create_cuda_program(GpuContext_v2 *gcontext,
 			 */
 			PG_TRY();
 			{
-				// FIXME: It shall be always tracked in the future version
-				if (gcontext)
-					trackCudaProgram(gcontext, program_id);
+				trackCudaProgram(gcontext, program_id);
 			}
 			PG_CATCH();
 			{
@@ -909,6 +953,9 @@ pgstrom_create_cuda_program(GpuContext_v2 *gcontext,
 			}
 			PG_END_TRY();
 
+			/* Wait for completion of the GPU code build by NVRTC. */
+			if (wait_for_build)
+				wait_for_build_cuda_program(program_id);
 			return program_id;
 		}
 	}
@@ -1008,9 +1055,7 @@ pgstrom_create_cuda_program(GpuContext_v2 *gcontext,
 	 */
 	PG_TRY();
 	{
-		// FIXME: It shall be always tracked in the future version
-		if (gcontext)
-			trackCudaProgram(gcontext, program_id);
+		trackCudaProgram(gcontext, program_id);
 	}
 	PG_CATCH();
 	{
@@ -1018,6 +1063,9 @@ pgstrom_create_cuda_program(GpuContext_v2 *gcontext,
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
+
+	if (wait_for_build)
+		wait_for_build_cuda_program(program_id);
 
 	return program_id;
 }

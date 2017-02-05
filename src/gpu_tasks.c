@@ -242,10 +242,8 @@ pgstromInitGpuTaskState(GpuTaskState_v2 *gts,
 
 /*
  * fetch_next_gputask
- *
- *
  */
-static GpuTask_v2 *
+GpuTask_v2 *
 fetch_next_gputask(GpuTaskState_v2 *gts)
 {
 	GpuContext_v2	   *gcontext = gts->gcontext;

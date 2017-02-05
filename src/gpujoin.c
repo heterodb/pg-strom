@@ -2382,7 +2382,7 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 											 gj_info->extra_flags,
 											 gj_info->kern_source,
 											 kern_define,
-											 with_connection);
+											 false);
 	gjs->gts.program_id = program_id;
 
 	/* expected kresults buffer expand rate */
