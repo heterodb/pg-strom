@@ -891,11 +891,11 @@ plcuda_codegen_part(StringInfo kern,
 	if (last_suffix)
 		appendStringInfo(
 			kern,
-			"  if (kplcuda->kerror%s.errcode != StromError_Success)\n"
-			"    kcxt.e = kplcuda->kerror%s;\n"
+			"  if (kplcuda->kerror_%s.errcode != StromError_Success)\n"
+			"    kcxt.e = kplcuda->kerror_%s;\n"
 			"  else\n"
 			"  {\n"
-			"    INIT_KERNEL_CONTEXT(&kcxt,plcuda%s_kernel,kparams);\n"
+			"    INIT_KERNEL_CONTEXT(&kcxt,plcuda_%s_kernel,kparams);\n"
 			"    __plcuda_%s_kernel(kplcuda, workbuf, results, &kcxt);\n"
 			"  }\n",
 			last_suffix,
@@ -905,14 +905,14 @@ plcuda_codegen_part(StringInfo kern,
 	else
 		appendStringInfo(
 			kern,
-			"  INIT_KERNEL_CONTEXT(&kcxt,plcuda%s_kernel,kparams);\n"
+			"  INIT_KERNEL_CONTEXT(&kcxt,plcuda_%s_kernel,kparams);\n"
 			"  __plcuda_%s_kernel(kplcuda, workbuf, results, &kcxt);\n",
 			suffix,
 			suffix);
 
 	appendStringInfo(
 		kern,
-		"  kern_writeback_error_status(&kplcuda->kerror%s, kcxt.e);\n"
+		"  kern_writeback_error_status(&kplcuda->kerror_%s, kcxt.e);\n"
 		"}\n\n",
 		suffix);
 }
@@ -942,33 +942,33 @@ plcuda_codegen(Form_pg_proc procForm, plcudaTaskState *plts)
 		appendStringInfo(&kern, "%s\n", plts->kern_decl);
 	if (plts->kern_prep)
 	{
-		plcuda_codegen_part(&kern, "_prep",
+		plcuda_codegen_part(&kern, "prep",
 							plts->kern_prep,
 							(OidIsValid(plts->fn_prep_kern_blocksz) ||
 							 plts->val_prep_kern_blocksz > 0),
 							procForm,
 							last_stage);
-		last_stage = "_prep";
+		last_stage = "prep";
 	}
 	if (plts->kern_main)
 	{
-		plcuda_codegen_part(&kern, "_main",
+		plcuda_codegen_part(&kern, "main",
 							plts->kern_main,
 							(OidIsValid(plts->fn_main_kern_blocksz) ||
 							 plts->val_main_kern_blocksz > 0),
 							procForm,
 							last_stage);
-		last_stage = "_main";
+		last_stage = "main";
 	}
 	if (plts->kern_post)
 	{
-		plcuda_codegen_part(&kern, "_post",
+		plcuda_codegen_part(&kern, "post",
 							plts->kern_post,
 							(OidIsValid(plts->fn_post_kern_blocksz) ||
 							 plts->val_post_kern_blocksz > 0),
 							procForm,
 							last_stage);
-		last_stage = "_post";
+		last_stage = "post";
 	}
 	return kern.data;
 }
@@ -1021,6 +1021,12 @@ __setup_kern_colmeta(Oid type_oid, int arg_index)
 	return result;
 }
 
+static GpuTask_v2 *
+plcuda_next_task(GpuTaskState_v2 *gts)
+{
+	return NULL;
+}
+
 static plcudaTaskState *
 plcuda_exec_begin(HeapTuple protup, FunctionCallInfo fcinfo)
 {
@@ -1038,10 +1044,16 @@ plcuda_exec_begin(HeapTuple protup, FunctionCallInfo fcinfo)
 	/* setup a dummy GTS for PL/CUDA (see pgstromInitGpuTaskState) */
 	plts = palloc0(sizeof(plcudaTaskState));
 	plts->gts.gcontext = gcontext;
+	plts->gts.task_kind = GpuTaskKind_PL_CUDA;
 	plts->gts.revision = 1;
 	plts->gts.kern_params = NULL;
 	dlist_init(&plts->gts.ready_tasks);
 	//FIXME: nobody may be responsible to 'prime_in_gpucontext'
+	plts->gts.cb_next_task = plcuda_next_task;
+
+	plts->val_prep_num_threads = 1;
+	plts->val_main_num_threads = 1;
+	plts->val_post_num_threads = 1;
 
 	/* validate PL/CUDA source code */
 	prosrc = SysCacheGetAttr(PROCOID, protup, Anum_pg_proc_prosrc, &isnull);
@@ -1886,8 +1898,8 @@ __plcuda_process_task(plcudaTask *ptask,
 	rc = cuLaunchKernel(ptask->kern_plcuda_main,
 						grid_size, 1, 1,
 						block_size, 1, 1,
-						ptask->kern.main_num_threads +
-						ptask->kern.main_shmem_blocksz * block_size,
+						ptask->kern.main_shmem_blocksz +
+						ptask->kern.main_shmem_unitsz * block_size,
 						cuda_stream,
 						kern_args,
 						NULL);

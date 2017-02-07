@@ -299,8 +299,6 @@ retry_scan:
 		  	if (!gtask)
 		  	{
 				gts->scan_done = true;
-				elog(DEBUG2, "scan done (%s)",
-					 gts->css.methods->CustomName);
 				break;
 			}
 			if (!gpuservSendGpuTask(gcontext, gtask))
