@@ -573,6 +573,7 @@ __build_cuda_program(program_cache_entry *entry)
 	options[opt_index++] = "--generate-line-info";
 #endif
 	options[opt_index++] = "--use_fast_math";
+//	options[opt_index++] = "--device-as-default-execution-space";
 	/* library linkage needs relocatable PTX */
 	if (entry->extra_flags & DEVKERNEL_NEEDS_DYNPARA)
 		options[opt_index++] = "--relocatable-device-code=true";

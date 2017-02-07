@@ -307,6 +307,7 @@ ident_to_cstring(List *ident)
  *
  * (additional options)
  * #plcuda_include "cuda_xxx.h"
+ * #plcuda_include <function>
  * #plcuda_results_bufsz {<value>|<function>}     (default: 0)
  * #plcuda_working_bufsz {<value>|<function>}      (default: 0)
  * #plcuda_sanity_check {<function>}             (default: no fallback)
@@ -325,8 +326,9 @@ plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
 	StringInfoData	post_src;
 	StringInfoData	emsg;
 	StringInfo		curr = NULL;
+	devtype_info   *dtype;
 	char		   *line;
-	int				lineno;
+	int				i, lineno;
 	bool			has_decl_block = false;
 	bool			has_prep_block = false;
 	bool			has_main_block = false;
@@ -344,11 +346,33 @@ plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
 
 #define EMSG(fmt,...)		appendStringInfo(&emsg, "\n%u: " fmt,	\
 											 lineno, __VA_ARGS__)
-#define HELPER_PRIV_CHECK(fn_oid, ownership)						\
-	(!OidIsValid(fn_oid) ||											\
-	 (OidIsValid(ownership)											\
-	  ? (pg_proc_ownercheck((fn_oid),(ownership)))					\
-	  : (pg_proc_aclcheck((fn_oid),GetUserId(),ACL_EXECUTE) == ACLCHECK_OK)))
+#define HELPER_PRIV_CHECK(func_oid, ownership)		\
+	(!OidIsValid(func_oid) ||						\
+	 !OidIsValid(ownership) ||						\
+	 pg_proc_ownercheck((func_oid),(ownership)))
+
+	plts->extra_flags = DEVKERNEL_NEEDS_PLCUDA;
+	/* check result type */
+	dtype = pgstrom_devtype_lookup(prorettype);
+	if (!dtype)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("Result type \"%s\" is not device executable",
+						format_type_be(prorettype))));
+	plts->extra_flags |= dtype->type_flags;
+	/* check argument types */
+	for (i=0; i < proargtypes->dim1; i++)
+	{
+		Oid		argtype_oid = proargtypes->values[i];
+
+		dtype = pgstrom_devtype_lookup(argtype_oid);
+		if (!dtype)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("Result type \"%s\" is not device executable",
+							format_type_be(argtype_oid))));
+		plts->extra_flags |= dtype->type_flags;
+	}
 
 	for (line = strtok(source, "\n"), lineno = 1;
 		 line != NULL;
@@ -897,10 +921,23 @@ static char *
 plcuda_codegen(Form_pg_proc procForm, plcudaTaskState *plts)
 {
 	StringInfoData	kern;
+	ListCell	   *lc;
 	const char	   *last_stage = NULL;
 
 	initStringInfo(&kern);
 
+	foreach (lc, plts->extra_includes)
+	{
+		Oid			fn_oid = lfirst_oid(lc);
+		AclResult	aclresult;
+		Datum		value;
+
+		aclresult = pg_proc_aclcheck(fn_oid, GetUserId(), ACL_EXECUTE);
+		if (aclresult != ACLCHECK_OK)
+			aclcheck_error(aclresult, ACL_KIND_PROC, get_func_name(fn_oid));
+		value = OidFunctionCall0(fn_oid);
+		appendStringInfo(&kern, "%s\n", text_to_cstring(DatumGetTextP(value)));
+	}
 	if (plts->kern_decl)
 		appendStringInfo(&kern, "%s\n", plts->kern_decl);
 	if (plts->kern_prep)
@@ -998,14 +1035,13 @@ plcuda_exec_begin(HeapTuple protup, FunctionCallInfo fcinfo)
 	ProgramId		program_id;
 	int				i;
 
-	/* setup a dummy GTS for PL/CUDA */
+	/* setup a dummy GTS for PL/CUDA (see pgstromInitGpuTaskState) */
 	plts = palloc0(sizeof(plcudaTaskState));
-	pgstromInitGpuTaskState(&plts->gts,
-							gcontext,
-							GpuTaskKind_PL_CUDA,
-							NIL,	/* no constants */
-							NULL);	/* no EState */
-	plts->extra_flags = DEVKERNEL_NEEDS_PLCUDA;
+	plts->gts.gcontext = gcontext;
+	plts->gts.revision = 1;
+	plts->gts.kern_params = NULL;
+	dlist_init(&plts->gts.ready_tasks);
+	//FIXME: nobody may be responsible to 'prime_in_gpucontext'
 
 	/* validate PL/CUDA source code */
 	prosrc = SysCacheGetAttr(PROCOID, protup, Anum_pg_proc_prosrc, &isnull);
@@ -1065,7 +1101,6 @@ plcuda_function_validator(PG_FUNCTION_ARGS)
 	HeapTuple		tuple;
 	Form_pg_proc	procForm;
 	plcudaTaskState	*plts;
-	cl_uint			i;
 
 	if (!CheckFunctionValidatorAccess(fcinfo->flinfo->fn_oid, func_oid))
 		PG_RETURN_VOID();
@@ -1091,23 +1126,6 @@ plcuda_function_validator(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("Righ now, PL/CUDA function does not support set returning function")));
 
-	if (!pgstrom_devtype_lookup(procForm->prorettype))
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("Result type \"%s\" is not device executable",
-						format_type_be(procForm->prorettype))));
-
-	Assert(procForm->pronargs == procForm->proargtypes.dim1);
-	for (i=0; i < procForm->pronargs; i++)
-	{
-		Oid		argtype_oid = procForm->proargtypes.values[i];
-
-		if (!pgstrom_devtype_lookup(argtype_oid))
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("Argument type \"%s\" is not device executable",
-							format_type_be(argtype_oid))));
-	}
 	/*
 	 * Only validation of the CUDA code. Run synchronous code build, then
 	 * raise an error if code block has any error.
@@ -1129,10 +1147,16 @@ kernel_launch_helper(FunctionCallInfo __fcinfo,	/* PL/CUDA's fcinfo */
 {
     FunctionCallInfoData fcinfo;
 	FmgrInfo	flinfo;
+	AclResult	aclresult;
 	Datum		result;
 
 	if (!OidIsValid(helper_func_oid))
 		return static_config;
+
+	aclresult = pg_proc_aclcheck(helper_func_oid, GetUserId(), ACL_EXECUTE);
+	if (aclresult != ACLCHECK_OK)
+		aclcheck_error(aclresult, ACL_KIND_PROC,
+					   get_func_name(helper_func_oid));
 
 	fmgr_info(helper_func_oid, &flinfo);
 	InitFunctionCallInfoData(fcinfo, &flinfo,
