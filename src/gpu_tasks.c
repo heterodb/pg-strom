@@ -325,7 +325,7 @@ retry_scan:
 	 */
 	while (dlist_is_empty(&gts->ready_tasks))
 	{
-		Assert(!gts->scan_done);
+		Assert(gts->scan_done);
 		CHECK_FOR_INTERRUPTS();
 		SpinLockAcquire(&shgcon->lock);
 		if (shgcon->num_async_tasks == 0)

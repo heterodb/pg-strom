@@ -1021,12 +1021,6 @@ __setup_kern_colmeta(Oid type_oid, int arg_index)
 	return result;
 }
 
-static GpuTask_v2 *
-plcuda_next_task(GpuTaskState_v2 *gts)
-{
-	return NULL;
-}
-
 static plcudaTaskState *
 plcuda_exec_begin(HeapTuple protup, FunctionCallInfo fcinfo)
 {
@@ -1049,7 +1043,6 @@ plcuda_exec_begin(HeapTuple protup, FunctionCallInfo fcinfo)
 	plts->gts.kern_params = NULL;
 	dlist_init(&plts->gts.ready_tasks);
 	//FIXME: nobody may be responsible to 'prime_in_gpucontext'
-	plts->gts.cb_next_task = plcuda_next_task;
 
 	plts->val_prep_num_threads = 1;
 	plts->val_main_num_threads = 1;
@@ -1300,9 +1293,7 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 	Datum			retval = 0;
 	bool			isnull = false;
 
-	if (flinfo->fn_extra)
-		plts = (plcudaTaskState *) flinfo->fn_extra;
-	else
+	if (!flinfo->fn_extra)
 	{
 		MemoryContext	oldcxt;
 		HeapTuple		tuple;
@@ -1318,6 +1309,11 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 
 		ReleaseSysCache(tuple);
 		flinfo->fn_extra = plts;
+	}
+	else
+	{
+		plts = (plcudaTaskState *) flinfo->fn_extra;
+		pgstromRescanGpuTaskState(&plts->gts);
 	}
 
 	/* results buffer of last invocation will not be used no longer */
@@ -1486,6 +1482,8 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 
 	if (!gpuservSendGpuTask(plts->gts.gcontext, &ptask->task))
 		elog(ERROR, "failed to send GpuTask to GPU server");
+	plts->gts.scan_done = true;
+
 	precv = (plcudaTask *) fetch_next_gputask(&plts->gts);
 	if (!precv)
 		elog(ERROR, "failed to recv GpuTask from GPU server");
