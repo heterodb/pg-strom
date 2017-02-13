@@ -142,12 +142,10 @@ typedef struct {
 	GpuTaskState_v2	gts;
 
 	HeapTupleData	scan_tuple;		/* buffer to fetch tuple */
-	List		   *dev_tlist;		/* tlist to be returned from the device */
 	List		   *dev_quals;		/* quals to be run on the device */
 	bool			dev_projection;	/* true, if device projection is valid */
 	cl_uint			proj_row_extra;
 	cl_uint			proj_slot_extra;
-//	cl_uint			nrows_per_block;
 	/* resource for CPU fallback */
 	TupleTableSlot *base_slot;
 	ProjectionInfo *base_proj;
@@ -1725,7 +1723,6 @@ pgstrom_pullup_outer_scan(const Path *outer_path,
 	return true;
 }
 
-#if 1
 /*
  * pgstrom_path_is_gpuscan
  *
@@ -1755,7 +1752,34 @@ pgstrom_plan_is_gpuscan(const Plan *plan)
 		return true;
 	return false;
 }
-#endif
+
+/*
+ * fixup_varnode_to_origin
+ */
+static Node *
+fixup_varnode_to_origin(Node *node, List *custom_scan_tlist)
+{
+	if (!node)
+		return NULL;
+	if (IsA(node, Var))
+	{
+		Var	   *varnode = (Var *)node;
+		Node   *altnode;
+
+		if (custom_scan_tlist != NIL)
+		{
+			Assert(varnode->varno == INDEX_VAR);
+			Assert(varnode->varattno > 1 &&
+				   varnode->varattno <= list_length(custom_scan_tlist));
+			altnode = list_nth(custom_scan_tlist, varnode->varattno - 1);
+
+			return copyObject(altnode);
+		}
+		Assert(!IS_SPECIAL_VARNO(varnode->varno));
+	}
+	return expression_tree_mutator(node, fixup_varnode_to_origin,
+								   (void *)custom_scan_tlist);
+}
 
 /*
  * assign_gpuscan_session_info
@@ -1814,11 +1838,15 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	GpuScanState   *gss = (GpuScanState *) node;
 	CustomScan	   *cscan = (CustomScan *)node->ss.ps.plan;
 	GpuScanInfo	   *gs_info = deform_gpuscan_info(cscan);
+	List		   *dev_tlist = NIL;
+	List		   *dev_quals_raw;
+	ListCell	   *lc;
 	char		   *kern_define;
 	ProgramId		program_id;
 	bool			with_connection = ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0);
 
 	/* gpuscan should not have inner/outer plan right now */
+	Assert(scan_rel != NULL);
 	Assert(outerPlan(node) == NULL);
 	Assert(innerPlan(node) == NULL);
 
@@ -1839,8 +1867,9 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 		scan_tupdesc = ExecCleanTypeFromTL(cscan->custom_scan_tlist, false);
 		ExecAssignScanType(&gss->gts.css.ss, scan_tupdesc);
 		ExecAssignScanProjectionInfoWithVarno(&gss->gts.css.ss, INDEX_VAR);
+		/* valid @custom_scan_tlist means device projection is required */
+		gss->dev_projection = true;
 	}
-
 	/* setup common GpuTaskState fields */
 	pgstromInitGpuTaskState(&gss->gts,
 							gcontext,
@@ -1859,17 +1888,26 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	/* estimated number of rows per block */
 	gss->gts.outer_nrows_per_block = gs_info->nrows_per_block;
 
-	/* initialize device tlist for CPU fallback */
-	//FIXME: dev_tlist should not contain junk attribute
-	gss->dev_tlist = (List *)
-		ExecInitExpr((Expr *) cscan->custom_scan_tlist, &gss->gts.css.ss.ps);
-	/* initialize device qualifiers also, for CPU fallback */
-	elog(INFO, "dev_quals => %s", nodeToString(gs_info->dev_quals));
-	//FIXME: dev_quals MUST reference raw tuple!
+	/*
+	 * initialize device qualifiers/projection stuff, for CPU fallback
+	 *
+	 * @dev_quals for CPU fallback references raw tuples regardless of device
+	 * projection. So, it must be initialized to reference the raw tuples.
+	 */
+	dev_quals_raw = (List *)fixup_varnode_to_origin((Node *)gs_info->dev_quals,
+													cscan->custom_scan_tlist);
 	gss->dev_quals = (List *)
-		ExecInitExpr((Expr *) gs_info->dev_quals, &gss->gts.css.ss.ps);
-	/* true, if device projection is needed */
-	gss->dev_projection = (cscan->custom_scan_tlist != NIL);
+		ExecInitExpr((Expr *) dev_quals_raw, &gss->gts.css.ss.ps);
+	foreach (lc, cscan->custom_scan_tlist)
+	{
+		TargetEntry	   *tle = lfirst(lc);
+
+		if (tle->resjunk)
+			break;
+		dev_tlist = lappend(dev_tlist, ExecInitExpr((Expr *) tle,
+													&gss->gts.css.ss.ps));
+	}
+
 	/* device projection related resource consumption */
 	gss->proj_row_extra = gs_info->proj_row_extra;
 	gss->proj_slot_extra = gs_info->proj_slot_extra;
@@ -1882,7 +1920,7 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 		ExprContext	   *econtext = gss->gts.css.ss.ps.ps_ExprContext;
 		TupleTableSlot *scan_slot = gss->gts.css.ss.ss_ScanTupleSlot;
 
-		gss->base_proj = ExecBuildProjectionInfo(gss->dev_tlist,
+		gss->base_proj = ExecBuildProjectionInfo(dev_tlist,
 												 econtext,
 												 scan_slot,
 												 RelationGetDescr(scan_rel));
