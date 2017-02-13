@@ -1773,11 +1773,14 @@ assign_gpuscan_session_info(StringInfo buf, GpuTaskState_v2 *gts)
 
 	if (cscan->custom_scan_tlist != NIL)
 	{
+		TupleTableSlot *slot = gts->css.ss.ss_ScanTupleSlot;
+		TupleDesc       tupdesc = slot->tts_tupleDescriptor;
+
 		appendStringInfo(
 			buf,
 			"#define GPUSCAN_DEVICE_PROJECTION          1\n"
 			"#define GPUSCAN_DEVICE_PROJECTION_NFIELDS  %d\n\n",
-			list_length(cscan->custom_scan_tlist));
+			tupdesc->natts);
 	}
 }
 
@@ -1822,6 +1825,22 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	/* activate a GpuContext for CUDA kernel execution */
 	gcontext = AllocGpuContext(with_connection);
 
+	/*
+	 * Re-initialization of scan tuple-descriptor and projection-info,
+	 * because commit 1a8a4e5cde2b7755e11bde2ea7897bd650622d3e of
+	 * PostgreSQL makes to assign result of ExecTypeFromTL() instead
+	 * of ExecCleanTypeFromTL; that leads incorrect projection.
+	 * So, we try to remove junk attributes from the scan-descriptor.
+	 */
+	if (cscan->custom_scan_tlist != NIL)
+	{
+		TupleDesc		scan_tupdesc;
+
+		scan_tupdesc = ExecCleanTypeFromTL(cscan->custom_scan_tlist, false);
+		ExecAssignScanType(&gss->gts.css.ss, scan_tupdesc);
+		ExecAssignScanProjectionInfoWithVarno(&gss->gts.css.ss, INDEX_VAR);
+	}
+
 	/* setup common GpuTaskState fields */
 	pgstromInitGpuTaskState(&gss->gts,
 							gcontext,
@@ -1841,9 +1860,12 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	gss->gts.outer_nrows_per_block = gs_info->nrows_per_block;
 
 	/* initialize device tlist for CPU fallback */
+	//FIXME: dev_tlist should not contain junk attribute
 	gss->dev_tlist = (List *)
 		ExecInitExpr((Expr *) cscan->custom_scan_tlist, &gss->gts.css.ss.ps);
 	/* initialize device qualifiers also, for CPU fallback */
+	elog(INFO, "dev_quals => %s", nodeToString(gs_info->dev_quals));
+	//FIXME: dev_quals MUST reference raw tuple!
 	gss->dev_quals = (List *)
 		ExecInitExpr((Expr *) gs_info->dev_quals, &gss->gts.css.ss.ps);
 	/* true, if device projection is needed */
@@ -2793,7 +2815,6 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 		length += GPUMEMALIGN(pds_src->kds.length);
 	if (pds_dst)
 		length += GPUMEMALIGN(pds_dst->kds.length);
-
 	rc = gpuMemAlloc_v2(gtask->gcontext, &gscan->m_gpuscan, length);
 	if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		goto out_of_resource;
@@ -2908,7 +2929,7 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 	rc = cuMemcpyDtoHAsync((char *)&gscan->kern + offset,
 						   gscan->m_gpuscan + offset,
 						   length,
-                           cuda_stream);
+						   cuda_stream);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "cuMemcpyDtoHAsync: %s", errorText(rc));
     gscan->bytes_dma_recv += length;

@@ -477,6 +477,7 @@ gpuscan_projection_row(kern_gpuscan *kgpuscan,
 	assert(kds_src->format == KDS_FORMAT_ROW ||
 		   (kds_src->format == KDS_FORMAT_BLOCK && !kresults->all_visible));
 	assert(kds_dst->format == KDS_FORMAT_ROW && kds_dst->nslots == 0);
+	assert(kds_dst->ncols == GPUSCAN_DEVICE_PROJECTION_NFIELDS);
 	/* update number of visible items */
 	dst_nitems = (kresults->all_visible ? kds_src->nitems : kresults->nitems);
 	if (get_global_id() == 0)

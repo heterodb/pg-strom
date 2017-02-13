@@ -2231,8 +2231,15 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 		TupleTableSlot *inner_slot;
 		double		plan_nrows_in;
 		double		plan_nrows_out;
+		bool		be_row_format = false;
 
+		/* row-format is preferable if plan is self-managed one */
+		if (pgstrom_plan_is_gpuscan(inner_plan) ||
+			pgstrom_plan_is_gpujoin(inner_plan))
+			be_row_format = true;
 		istate->state = ExecInitNode(inner_plan, estate, eflags);
+		if (be_row_format)
+			((GpuTaskState_v2 *)istate->state)->row_format = true;
 		istate->econtext = CreateExprContext(estate);
 		istate->depth = i + 1;
 		istate->nbatches_plan =
@@ -2357,7 +2364,6 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 			}
 			j++;
 		}
-
 		/* add inner state as children of this custom-scan */
 		gjs->gts.css.custom_ps = lappend(gjs->gts.css.custom_ps,
 										 istate->state);

@@ -429,6 +429,26 @@ STATIC_INLINE(cl_uint) WarpId(void)
 }
 
 /*
+ * TotalShmemSize() - reference to the %total_smem_size
+ */
+STATIC_INLINE(cl_uint) TotalShmemSize(void)
+{
+	cl_uint		ret;
+	asm volatile("mov.u32 %0, %total_smem_size;" : "=r"(ret) );
+	return ret;
+}
+
+/*
+ * DynamicShmemSize() - reference to the %dynamic_smem_size
+ */
+STATIC_INLINE(cl_uint) DynamicShmemSize(void)
+{
+	cl_uint		ret;
+	asm volatile("mov.u32 %0, %dynamic_smem_size;" : "=r"(ret) );
+	return ret;
+}
+
+/*
  * GlobalTimer - A pre-defined, 64bit global nanosecond timer.
  *
  * NOTE: clock64() is not consistent across different SMX, thus, should not
