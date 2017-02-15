@@ -26,6 +26,7 @@
 #include "parser/parse_func.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
+#include "utils/memutils.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
 #include "pg_strom.h"
@@ -989,7 +990,6 @@ plcuda_cleanup_resources(ResourceReleasePhase phase,
 	{
 		plcudaTaskState *plts = (plcudaTaskState *)
 			dlist_container(plcudaTaskState, chain, iter.cur);
-
 		if (plts->owner == CurrentResourceOwner)
 			plcuda_exec_end(plts);
 	}
@@ -1036,7 +1036,8 @@ plcuda_exec_begin(HeapTuple protup, FunctionCallInfo fcinfo)
 	int				i;
 
 	/* setup a dummy GTS for PL/CUDA (see pgstromInitGpuTaskState) */
-	plts = palloc0(sizeof(plcudaTaskState));
+	plts = MemoryContextAllocZero(CacheMemoryContext,
+								  sizeof(plcudaTaskState));
 	plts->gts.gcontext = gcontext;
 	plts->gts.task_kind = GpuTaskKind_PL_CUDA;
 	plts->gts.revision = 1;
