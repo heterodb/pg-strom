@@ -1588,17 +1588,14 @@ PG_FUNCTION_INFO_V1(plcuda_function_handler);
 Datum
 plcuda_function_source(PG_FUNCTION_ARGS)
 {
-#if 0
 	Oid				func_oid = PG_GETARG_OID(0);
 	Oid				lang_oid;
 	const char	   *lang_name = "plcuda";
 	HeapTuple		tuple;
 	Form_pg_proc	procForm;
-	Datum			probin;
+	Datum			prosrc;
 	bool			isnull;
-	char			vl_head[VARHDRSZ];
-	plcudaInfo	   *cf_info;
-	StringInfoData	str;
+	text		   *plcuda_source;
 
 	lang_oid = GetSysCacheOid1(LANGNAME, CStringGetDatum(lang_name));
 	if (!OidIsValid(lang_oid))
@@ -1617,49 +1614,15 @@ plcuda_function_source(PG_FUNCTION_ARGS)
 				 errmsg("procedure \"%s\" is not implemented by \"%s\"",
 						format_procedure(func_oid), lang_name)));
 
-	probin = SysCacheGetAttr(PROCOID, tuple,
-							 Anum_pg_proc_probin,
+	prosrc = SysCacheGetAttr(PROCOID, tuple,
+							 Anum_pg_proc_prosrc,
 							 &isnull);
 	if (isnull)
-		elog(ERROR, "Bug? plcudaInfo was not built yet");
-	cf_info = stringToNode(TextDatumGetCString(probin));
-
-	/* construct source text */
-	initStringInfo(&str);
-	appendBinaryStringInfo(&str, vl_head, VARHDRSZ);	/* varlena head */
-
-	appendStringInfo(&str, "#include \"cuda_common.h\"\n");
-	if (cf_info->extra_flags & DEVKERNEL_NEEDS_DYNPARA)
-		appendStringInfo(&str, "#include \"cuda_dynpara.h\"\n");
-	if (cf_info->extra_flags & DEVKERNEL_NEEDS_MATRIX)
-		appendStringInfo(&str, "#include \"cuda_matrix.h\"\n");
-	if (cf_info->extra_flags & DEVKERNEL_NEEDS_TIMELIB)
-		appendStringInfo(&str, "#include \"cuda_timelib.h\"\n");
-	if (cf_info->extra_flags & DEVKERNEL_NEEDS_TEXTLIB)
-		appendStringInfo(&str, "#include \"cuda_textlib.h\"\n");
-	if (cf_info->extra_flags & DEVKERNEL_NEEDS_NUMERIC)
-		appendStringInfo(&str, "#include \"cuda_numeric.h\"\n");
-	if (cf_info->extra_flags & DEVKERNEL_NEEDS_MATHLIB)
-		appendStringInfo(&str, "#include \"cuda_mathlib.h\"\n");
-	if (cf_info->extra_flags & DEVKERNEL_NEEDS_MONEY)
-		appendStringInfo(&str, "#include \"cuda_money.h\"\n");
-	if (cf_info->extra_flags & (DEVKERNEL_NEEDS_GPUSCAN |
-								DEVKERNEL_NEEDS_GPUJOIN |
-								DEVKERNEL_NEEDS_GPUPREAGG |
-								DEVKERNEL_NEEDS_GPUSORT))
-		elog(WARNING, "Bug? PL/CUDA function needs logic routines");
-	if (cf_info->extra_flags & DEVKERNEL_NEEDS_PLCUDA)
-		appendStringInfo(&str, "#include \"cuda_plcuda.h\"\n");
-	appendStringInfoChar(&str, '\n');
-
-	appendStringInfoString(&str, plcuda_codegen(procForm, cf_info));
-	SET_VARSIZE(str.data, str.len);
-
+		elog(ERROR, "Bug? source code of PL/CUDA function has gone");
+	plcuda_source = DatumGetTextPCopy(prosrc);
 	ReleaseSysCache(tuple);
 
-	PG_RETURN_TEXT_P(str.data);
-#endif
-	return 0;
+	PG_RETURN_TEXT_P(plcuda_source);
 }
 PG_FUNCTION_INFO_V1(plcuda_function_source);
 
