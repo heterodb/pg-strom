@@ -2796,25 +2796,25 @@ gpupreagg_codegen_projection(GpuPreAggInfo *gpa_info,
 						&temp,
 						"  temp.numeric_v = pg_numeric_datum_ref(kcxt,addr,\n"
 						"                                        false);\n"
-						"  base_isnull[%d] = temp_numeric.isnull;\n"
-						"  base_values[%d] = (Datum)temp_numeric.value;\n",
+						"  dst_isnull[%d] = temp_numeric.isnull;\n"
+						"  dst_values[%d] = (Datum)temp_numeric.value;\n",
 						j, j);
 				}
 				else if (!attr->attbyval)
 				{
 					appendStringInfo(
 						&temp,
-						"  base_isnull[%d] = (addr != NULL ? false : true);\n"
-						"  base_values[%d] = PointerGetDatum(addr);\n",
+						"  dst_isnull[%d] = (addr != NULL ? false : true);\n"
+						"  dst_values[%d] = PointerGetDatum(addr);\n",
 						j, j);
 				}
 				else
 				{
 					appendStringInfo(
 						&temp,
-						"  base_isnull[%d] = (addr != NULL ? false : true);\n"
+						"  dst_isnull[%d] = (addr != NULL ? false : true);\n"
 						"  if (addr)\n"
-						"    base_values[%d] = *((%s *) addr);\n",
+						"    dst_values[%d] = *((%s *) addr);\n",
 						j, j,
 						(attr->attlen == sizeof(cl_long)  ? "cl_long" :
 						 attr->attlen == sizeof(cl_int)   ? "cl_int" :
@@ -2872,7 +2872,7 @@ gpupreagg_codegen_projection(GpuPreAggInfo *gpa_info,
 			TargetEntry *tle = lfirst(lc);
 
 			k = tle->resno - FirstLowInvalidHeapAttributeNumber;
-			if (bms_is_member(k, varattnos))
+			if (bms_is_member(k, varattnos) && varremaps[tle->resno - 1] == 0)
 			{
 				devtype_info   *dtype;
 
