@@ -330,6 +330,7 @@ plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
 	devtype_info   *dtype;
 	char		   *line;
 	int				i, lineno;
+	bool			not_exec_now = !OidIsValid(proowner);
 	bool			has_decl_block = false;
 	bool			has_prep_block = false;
 	bool			has_main_block = false;
@@ -347,6 +348,7 @@ plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
 
 #define EMSG(fmt,...)		appendStringInfo(&emsg, "\n%u: " fmt,	\
 											 lineno, __VA_ARGS__)
+#define NOTE(fmt,...)		elog(NOTICE, "%u: " fmt, lineno, __VA_ARGS__)
 #define HELPER_PRIV_CHECK(func_oid, ownership)		\
 	(!OidIsValid(func_oid) ||						\
 	 !OidIsValid(ownership) ||						\
@@ -506,6 +508,9 @@ plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
 					else
 						EMSG("cannot use \"%s\" in this code block", cmd);
 				}
+				else if (not_exec_now)
+					NOTE("\"%s\" may be a function but not declared yet",
+						 ident_to_cstring(options));
 				else
 					EMSG("\"%s\" was not a valid value or function",
 						 ident_to_cstring(options));
@@ -545,6 +550,9 @@ plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
 					else
 						EMSG("cannot use \"%s\" in this code block", cmd);
 				}
+				else if (not_exec_now)
+					NOTE("\"%s\" may be a function but not declared yet",
+						 ident_to_cstring(options));
 				else
 					EMSG("\"%s\" was not a valid value or function",
 						 ident_to_cstring(options));
@@ -584,6 +592,9 @@ plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
 					else
 						EMSG("cannot use \"%s\" in this code block", cmd);
 				}
+				else if (not_exec_now)
+					NOTE("\"%s\" may be a function but not declared yet",
+						 ident_to_cstring(options));
 				else
 					EMSG("\"%s\" was not a valid value or function",
 						 ident_to_cstring(options));
@@ -623,6 +634,9 @@ plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
 					else
 						EMSG("cannot use \"%s\" in this code block", cmd);
 				}
+				else if (not_exec_now)
+					NOTE("\"%s\" may be a function but not declared yet",
+						 ident_to_cstring(options));
 				else
 					EMSG("\"%s\" was not a valid value or function",
 						 ident_to_cstring(options));
@@ -642,6 +656,9 @@ plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
 						EMSG("permission denied on helper function %s",
 							 NameListToString(options));
 				}
+				else if (not_exec_now)
+					NOTE("\"%s\" may be a function but not declared yet",
+						 ident_to_cstring(options));
 				else
 					EMSG("\"%s\" was not a valid value or function",
                          ident_to_cstring(options));
@@ -661,6 +678,9 @@ plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
 						EMSG("permission denied on helper function %s",
 							 NameListToString(options));
 				}
+				else if (not_exec_now)
+					NOTE("\"%s\" may be a function but not declared yet",
+						 ident_to_cstring(options));
 				else
 					EMSG("\"%s\" was not a valid value or function",
 						 ident_to_cstring(options));
@@ -722,11 +742,13 @@ plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
 								EMSG("permission denied on helper function %s",
 									 NameListToString(options));
 						}
+						else if (not_exec_now)
+							NOTE("\"%s\" may be a function but not declared yet",
+								 ident_to_cstring(options));
+
 						else
-						{
 							EMSG("\"%s\" was not a valid function name",
 								 ident_to_cstring(options));
-						}
 					}
 				}
 			}
@@ -745,6 +767,9 @@ plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
 						EMSG("permission denied on helper function %s",
 							 NameListToString(options));
 				}
+				else if (not_exec_now)
+					NOTE("\"%s\" may be a function but not declared yet",
+						 ident_to_cstring(options));
 				else
 					EMSG("\"%s\" was not a valid function name",
 						 ident_to_cstring(options));
@@ -764,6 +789,9 @@ plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
 						EMSG("permission denied on helper function %s",
 							 NameListToString(options));
 				}
+				else if (not_exec_now)
+					NOTE("\"%s\" may be a function but not declared yet",
+						 ident_to_cstring(options));
 				else
 					EMSG("\"%s\" was not a valid function name",
 						 ident_to_cstring(options));
@@ -785,6 +813,7 @@ plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
 	plts->kern_prep = (has_prep_block ? prep_src.data : NULL);
 	plts->kern_main = main_src.data;
 	plts->kern_post = (has_post_block ? post_src.data : NULL);
+#undef NMSG
 #undef EMSG
 #undef HELPER_PRIV_CHECK
 	pfree(emsg.data);
