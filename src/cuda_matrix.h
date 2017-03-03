@@ -156,13 +156,15 @@ VALIDATE_ARRAY_MATRIX(MatrixType *matrix)
 		return false;
 	if (matrix->dataoffset == 0 &&
 #ifdef __CUDACC__
-		(matrix->elemtype == PG_INT2OID ||
+		(matrix->elemtype == PG_BOOLOID ||
+		 matrix->elemtype == PG_INT2OID ||
 		 matrix->elemtype == PG_INT4OID ||
 		 matrix->elemtype == PG_INT8OID ||
 		 matrix->elemtype == PG_FLOAT4OID ||
 		 matrix->elemtype == PG_FLOAT8OID)
 #else	/* __CUDACC__ */
-		(matrix->elemtype == INT2OID ||
+		(matrix->elemtype == BOOLOID ||
+		 matrix->elemtype == INT2OID ||
 		 matrix->elemtype == INT4OID ||
 		 matrix->elemtype == INT8OID ||
 		 matrix->elemtype == FLOAT4OID ||
