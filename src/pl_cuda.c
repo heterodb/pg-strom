@@ -44,7 +44,6 @@ typedef struct plcudaTaskState
 	void		   *last_results_buf;	/* results buffer last used */
 	/* kernel requirement */
 	cl_uint		extra_flags;		/* flags to standard includes */
-	List	   *extra_includes;		/* OID of extra include functions */
 	/* kernel declarations */
 	char	   *kern_decl;
 	/* kernel prep function */
@@ -687,69 +686,70 @@ plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
 			}
 			else if (strcmp(cmd, "#plcuda_include") == 0)
 			{
-				if (has_decl_block ||
-					has_prep_block ||
-					has_main_block ||
-					has_post_block)
+				cl_uint		extra_flags = 0;
+
+				/* built-in include? */
+				if (list_length(options) == 1)
 				{
-					EMSG("%s must appear prior to the code block:\n%s",
-						 cmd, line);
+					const char *target = linitial(options);
+
+					if (strcmp(target, "cuda_dynpara.h") == 0)
+						extra_flags |= DEVKERNEL_NEEDS_DYNPARA;
+					else if (strcmp(target, "cuda_matrix.h") == 0)
+						extra_flags |= DEVKERNEL_NEEDS_MATRIX;
+					else if (strcmp(target, "cuda_timelib.h") == 0)
+						extra_flags |= DEVKERNEL_NEEDS_TIMELIB;
+					else if (strcmp(target, "cuda_textlib.h") == 0)
+						extra_flags |= DEVKERNEL_NEEDS_TEXTLIB;
+					else if (strcmp(target, "cuda_numeric.h") == 0)
+						extra_flags |= DEVKERNEL_NEEDS_NUMERIC;
+					else if (strcmp(target, "cuda_mathlib.h") == 0)
+						extra_flags |= DEVKERNEL_NEEDS_MATHLIB;
+					else if (strcmp(target, "cuda_money.h") == 0)
+						extra_flags |= DEVKERNEL_NEEDS_MONEY;
+
+					if (extra_flags != 0 && (has_decl_block ||
+											 has_prep_block ||
+											 has_main_block ||
+											 has_post_block))
+					{
+						EMSG("built-in \"%s\" must appear prior to the code block:\n%s",
+							 target, line);
+					}
 				}
+				if (extra_flags != 0)
+					plts->extra_flags |= extra_flags;
+				else if (!curr)
+					EMSG("#plcuda_include must appear in code block:\n%s",
+						 line);
 				else
 				{
-					cl_uint		extra_flags = 0;
+					Oid		fn_extra_include = InvalidOid;
 
-					if (list_length(options) == 1)
+					/* function that returns text */
+					if (plcuda_lookup_helper(options,
+											 buildoidvector(NULL, 0),
+											 TEXTOID,
+											 &fn_extra_include,
+											 NULL))
 					{
-						const char *target = linitial(options);
-
-						if (strcmp(target, "cuda_dynpara.h") == 0)
-							extra_flags |= DEVKERNEL_NEEDS_DYNPARA;
-						else if (strcmp(target, "cuda_matrix.h") == 0)
-							extra_flags |= DEVKERNEL_NEEDS_MATRIX;
-						else if (strcmp(target, "cuda_timelib.h") == 0)
-							extra_flags |= DEVKERNEL_NEEDS_TIMELIB;
-						else if (strcmp(target, "cuda_textlib.h") == 0)
-							extra_flags |= DEVKERNEL_NEEDS_TEXTLIB;
-						else if (strcmp(target, "cuda_numeric.h") == 0)
-							extra_flags |= DEVKERNEL_NEEDS_NUMERIC;
-						else if (strcmp(target, "cuda_mathlib.h") == 0)
-							extra_flags |= DEVKERNEL_NEEDS_MATHLIB;
-						else if (strcmp(target, "cuda_money.h") == 0)
-							extra_flags |= DEVKERNEL_NEEDS_MONEY;
-					}
-
-					if (extra_flags != 0)
-						plts->extra_flags |= extra_flags;
-					else
-					{
-						Oid		fn_extra_include = InvalidOid;
-
-						/* function that returns text */
-						if (plcuda_lookup_helper(options,
-												 buildoidvector(NULL, 0),
-												 TEXTOID,
-												 &fn_extra_include,
-												 NULL))
+						if (HELPER_PRIV_CHECK(fn_extra_include, proowner))
 						{
-							if (HELPER_PRIV_CHECK(fn_extra_include, proowner))
-							{
-								plts->extra_includes =
-									lappend_oid(plts->extra_includes,
-												fn_extra_include);
-							}
-							else
-								EMSG("permission denied on helper function %s",
-									 NameListToString(options));
-						}
-						else if (not_exec_now)
-							NOTE("\"%s\" may be a function but not declared yet",
-								 ident_to_cstring(options));
+							Datum	txt = OidFunctionCall0(fn_extra_include);
+							char   *str = text_to_cstring(DatumGetTextP(txt));
 
+							appendStringInfoString(curr, str);
+						}
 						else
-							EMSG("\"%s\" was not a valid function name",
-								 ident_to_cstring(options));
+							EMSG("permission denied on helper function %s",
+								 NameListToString(options));
 					}
+					else if (not_exec_now)
+						NOTE("\"%s\" may be a function but not declared yet",
+							 ident_to_cstring(options));
+					else
+						EMSG("\"%s\" was not a valid function name",
+							 ident_to_cstring(options));
 				}
 			}
 			else if (strcmp(cmd, "#plcuda_sanity_check") == 0)
@@ -951,23 +951,10 @@ static char *
 plcuda_codegen(Form_pg_proc procForm, plcudaTaskState *plts)
 {
 	StringInfoData	kern;
-	ListCell	   *lc;
 	const char	   *last_stage = NULL;
 
 	initStringInfo(&kern);
 
-	foreach (lc, plts->extra_includes)
-	{
-		Oid			fn_oid = lfirst_oid(lc);
-		AclResult	aclresult;
-		Datum		value;
-
-		aclresult = pg_proc_aclcheck(fn_oid, GetUserId(), ACL_EXECUTE);
-		if (aclresult != ACLCHECK_OK)
-			aclcheck_error(aclresult, ACL_KIND_PROC, get_func_name(fn_oid));
-		value = OidFunctionCall0(fn_oid);
-		appendStringInfo(&kern, "%s\n", text_to_cstring(DatumGetTextP(value)));
-	}
 	if (plts->kern_decl)
 		appendStringInfo(&kern, "%s\n", plts->kern_decl);
 	if (plts->kern_prep)
