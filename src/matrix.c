@@ -73,7 +73,8 @@ array_matrix_accum(PG_FUNCTION_ARGS)
 	/* sanity check */
 	if (ARR_NDIM(array) != 1)
 		elog(ERROR, "input array was not 1-dimension array");
-	if (ARR_ELEMTYPE(array) != INT2OID &&
+	if (ARR_ELEMTYPE(array) != BOOLOID &&
+		ARR_ELEMTYPE(array) != INT2OID &&
 		ARR_ELEMTYPE(array) != INT4OID &&
 		ARR_ELEMTYPE(array) != INT8OID &&
 		ARR_ELEMTYPE(array) != FLOAT4OID &&
@@ -261,6 +262,21 @@ PG_FUNCTION_INFO_V1(array_matrix_accum_varbit);
 			row_index++;												\
 		}																\
 	} while(0)
+
+Datum
+array_matrix_final_bool(PG_FUNCTION_ARGS)
+{
+	array_matrix_state *amstate;
+	MatrixType *R;
+
+	if (PG_ARGISNULL(0))
+		PG_RETURN_NULL();
+	amstate = (array_matrix_state *)PG_GETARG_POINTER(0);
+	Assert(amstate->elemtype == BOOLOID);
+	ARRAY_MATRIX_FINAL_TEMPLATE(R,amstate,cl_uchar);
+	PG_RETURN_POINTER(R);
+}
+PG_FUNCTION_INFO_V1(array_matrix_final_bool);
 
 Datum
 array_matrix_final_int2(PG_FUNCTION_ARGS)
@@ -563,6 +579,15 @@ array_martix_rbind(Oid elemtype, MatrixType *X, MatrixType *Y)
 }
 
 Datum
+array_matrix_rbind_bool(PG_FUNCTION_ARGS)
+{
+	MatrixType	   *X = PG_GETARG_MATRIXTYPE_P(0);
+	MatrixType	   *Y = PG_GETARG_MATRIXTYPE_P(1);
+	PG_RETURN_MATRIXTYPE_P(array_martix_rbind(BOOLOID, X, Y));
+}
+PG_FUNCTION_INFO_V1(array_matrix_rbind_bool);
+
+Datum
 array_matrix_rbind_int2(PG_FUNCTION_ARGS)
 {
 	MatrixType	   *X = PG_GETARG_MATRIXTYPE_P(0);
@@ -664,6 +689,15 @@ array_martix_cbind(Oid elemtype, MatrixType *X, MatrixType *Y)
 	}
 	return R;
 }
+
+Datum
+array_matrix_cbind_bool(PG_FUNCTION_ARGS)
+{
+	MatrixType	   *X = PG_GETARG_MATRIXTYPE_P(0);
+	MatrixType	   *Y = PG_GETARG_MATRIXTYPE_P(1);
+	PG_RETURN_MATRIXTYPE_P(array_martix_cbind(BOOLOID, X, Y));
+}
+PG_FUNCTION_INFO_V1(array_matrix_cbind_bool);
 
 Datum
 array_matrix_cbind_int2(PG_FUNCTION_ARGS)
@@ -778,6 +812,9 @@ array_matrix_rbind_final(matrix_rbind_state *mrstate)
 
 	switch (mrstate->elemtype)
 	{
+		case BOOLOID:
+			typlen = sizeof(cl_char);
+			break;
 		case INT2OID:
 			typlen = sizeof(cl_short);
 			break;
@@ -823,6 +860,19 @@ array_matrix_rbind_final(matrix_rbind_state *mrstate)
 	}
 	return R;
 }
+
+Datum
+array_matrix_rbind_final_bool(PG_FUNCTION_ARGS)
+{
+	matrix_rbind_state *mrstate;
+
+	if (PG_ARGISNULL(0))
+		PG_RETURN_NULL();
+	mrstate = (matrix_rbind_state *)PG_GETARG_POINTER(0);
+	Assert(mrstate->elemtype == BOOLOID);
+	PG_RETURN_POINTER(array_matrix_rbind_final(mrstate));
+}
+PG_FUNCTION_INFO_V1(array_matrix_rbind_final_bool);
 
 Datum
 array_matrix_rbind_final_int2(PG_FUNCTION_ARGS)
@@ -955,6 +1005,9 @@ array_matrix_cbind_final(matrix_cbind_state *mcstate)
 
 	switch (mcstate->elemtype)
 	{
+		case BOOLOID:
+			typlen = sizeof(cl_char);
+			break;
 		case INT2OID:
 			typlen = sizeof(cl_short);
 			break;
@@ -998,6 +1051,19 @@ array_matrix_cbind_final(matrix_cbind_state *mcstate)
 	}
 	return R;
 }
+
+Datum
+array_matrix_cbind_final_bool(PG_FUNCTION_ARGS)
+{
+	matrix_cbind_state *mcstate;
+
+	if (PG_ARGISNULL(0))
+		PG_RETURN_NULL();
+	mcstate = (matrix_cbind_state *)PG_GETARG_POINTER(0);
+	Assert(mcstate->elemtype == BOOLOID);
+	PG_RETURN_POINTER(array_matrix_cbind_final(mcstate));
+}
+PG_FUNCTION_INFO_V1(array_matrix_cbind_final_bool);
 
 Datum
 array_matrix_cbind_final_int2(PG_FUNCTION_ARGS)
@@ -1090,6 +1156,21 @@ PG_FUNCTION_INFO_V1(array_matrix_cbind_final_float8);
 				*((BASETYPE *)(M_values + sizeof(BASETYPE) * i));		\
 		}																\
 	} while(0)
+
+Datum
+array_matrix_transpose_bool(PG_FUNCTION_ARGS)
+{
+	MatrixType *matrix = PG_GETARG_MATRIXTYPE_P(0);
+	MatrixType *result;
+
+	if (VARATT_IS_EXPANDED_HEADER(matrix) ||
+		!VALIDATE_ARRAY_MATRIX(matrix))
+		elog(ERROR, "Array is not like Matrix");
+	Assert(matrix->elemtype == BOOLOID);
+	ARRAY_MATRIX_TRANSPOSE_TEMPLATE(result,matrix,cl_uchar);
+	PG_RETURN_POINTER(result);
+}
+PG_FUNCTION_INFO_V1(array_matrix_transpose_bool);
 
 Datum
 array_matrix_transpose_int2(PG_FUNCTION_ARGS)

@@ -529,6 +529,11 @@ COMMENT ON LANGUAGE plcuda IS 'PL/CUDA procedural language';
 --
 -- Matrix like 2D-Array type support
 --
+CREATE FUNCTION pgstrom.array_matrix_accum(internal, variadic bool[])
+  RETURNS internal
+  AS 'MODULE_PATHNAME','array_matrix_accum'
+  LANGUAGE C CALLED ON NULL INPUT;
+
 CREATE FUNCTION pgstrom.array_matrix_accum(internal, variadic int2[])
   RETURNS internal
   AS 'MODULE_PATHNAME','array_matrix_accum'
@@ -579,6 +584,12 @@ CREATE CAST (int4[] AS bit)
   WITH FUNCTION pgstrom.int4_array_to_varbit(int4[])
   AS ASSIGNMENT;
 
+-- final functions of array_matrix
+CREATE FUNCTION pgstrom.array_matrix_final_bool(internal)
+  RETURNS bool[]
+  AS 'MODULE_PATHNAME','array_matrix_final_bool'
+  LANGUAGE C CALLED ON NULL INPUT;
+
 CREATE FUNCTION pgstrom.array_matrix_final_int2(internal)
   RETURNS int2[]
   AS 'MODULE_PATHNAME','array_matrix_final_int2'
@@ -603,6 +614,13 @@ CREATE FUNCTION pgstrom.array_matrix_final_float8(internal)
   RETURNS float8[]
   AS 'MODULE_PATHNAME','array_matrix_final_float8'
   LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE AGGREGATE pg_catalog.array_matrix(variadic bool[])
+(
+  sfunc = pgstrom.array_matrix_accum,
+  stype = internal,
+  finalfunc = pgstrom.array_matrix_final_bool
+);
 
 CREATE AGGREGATE pg_catalog.array_matrix(variadic int2[])
 (
@@ -671,6 +689,11 @@ CREATE FUNCTION pg_catalog.matrix_unnest(anyarray)
   AS 'MODULE_PATHNAME','array_matrix_unnest'
   LANGUAGE C STRICT;
 
+CREATE FUNCTION pg_catalog.rbind(bool[], bool[])
+  RETURNS bool[]
+  AS 'MODULE_PATHNAME','array_matrix_rbind_bool'
+  LANGUAGE C STRICT;
+
 CREATE FUNCTION pg_catalog.rbind(int2[], int2[])
   RETURNS int2[]
   AS 'MODULE_PATHNAME','array_matrix_rbind_int2'
@@ -694,6 +717,11 @@ CREATE FUNCTION pg_catalog.rbind(float4[], float4[])
 CREATE FUNCTION pg_catalog.rbind(float8[], float8[])
   RETURNS float8[]
   AS 'MODULE_PATHNAME','array_matrix_rbind_float8'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.cbind(bool[], bool[])
+  RETURNS bool[]
+  AS 'MODULE_PATHNAME','array_matrix_cbind_bool'
   LANGUAGE C STRICT;
 
 CREATE FUNCTION pg_catalog.cbind(int2[], int2[])
@@ -727,6 +755,11 @@ CREATE FUNCTION pgstrom.array_matrix_rbind_accum(internal, anyarray)
   AS 'MODULE_PATHNAME','array_matrix_rbind_accum'
   LANGUAGE C CALLED ON NULL INPUT;;
 
+CREATE FUNCTION pgstrom.array_matrix_rbind_final_bool(internal)
+  RETURNS bool[]
+  AS 'MODULE_PATHNAME','array_matrix_rbind_final_bool'
+  LANGUAGE C CALLED ON NULL INPUT;
+
 CREATE FUNCTION pgstrom.array_matrix_rbind_final_int2(internal)
   RETURNS int2[]
   AS 'MODULE_PATHNAME','array_matrix_rbind_final_int2'
@@ -751,6 +784,13 @@ CREATE FUNCTION pgstrom.array_matrix_rbind_final_float8(internal)
   RETURNS float8[]
   AS 'MODULE_PATHNAME','array_matrix_rbind_final_float8'
   LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE AGGREGATE pg_catalog.rbind(bool[])
+(
+  sfunc = pgstrom.array_matrix_rbind_accum,
+  stype = internal,
+  finalfunc = pgstrom.array_matrix_rbind_final_bool
+);
 
 CREATE AGGREGATE pg_catalog.rbind(int2[])
 (
@@ -793,6 +833,11 @@ CREATE FUNCTION pgstrom.array_matrix_cbind_accum(internal, anyarray)
   AS 'MODULE_PATHNAME','array_matrix_cbind_accum'
   LANGUAGE C CALLED ON NULL INPUT;;
 
+CREATE FUNCTION pgstrom.array_matrix_cbind_final_bool(internal)
+  RETURNS bool[]
+  AS 'MODULE_PATHNAME','array_matrix_cbind_final_bool'
+  LANGUAGE C CALLED ON NULL INPUT;
+
 CREATE FUNCTION pgstrom.array_matrix_cbind_final_int2(internal)
   RETURNS int2[]
   AS 'MODULE_PATHNAME','array_matrix_cbind_final_int2'
@@ -817,6 +862,13 @@ CREATE FUNCTION pgstrom.array_matrix_cbind_final_float8(internal)
   RETURNS float8[]
   AS 'MODULE_PATHNAME','array_matrix_cbind_final_float8'
   LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE AGGREGATE pg_catalog.cbind(bool[])
+(
+  sfunc = pgstrom.array_matrix_cbind_accum,
+  stype = internal,
+  finalfunc = pgstrom.array_matrix_cbind_final_bool
+);
 
 CREATE AGGREGATE pg_catalog.cbind(int2[])
 (
@@ -852,6 +904,11 @@ CREATE AGGREGATE pg_catalog.cbind(float8[])
   stype = internal,
   finalfunc = pgstrom.array_matrix_cbind_final_float8
 );
+
+CREATE FUNCTION pg_catalog.transpose(bool[])
+  RETURNS bool[]
+  AS 'MODULE_PATHNAME','array_matrix_transpose_bool'
+  LANGUAGE C STRICT;
 
 CREATE FUNCTION pg_catalog.transpose(int2[])
   RETURNS int2[]
