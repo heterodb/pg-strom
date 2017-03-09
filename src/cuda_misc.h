@@ -1,7 +1,7 @@
 /*
- * cuda_money.h
+ * cuda_misc.h
  *
- * Collection of currency functions for CUDA devices
+ * Collection of various data type support on CUDA devices
  * --
  * Copyright 2011-2017 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
  * Copyright 2014-2017 (C) The PG-Strom Development Team
@@ -15,8 +15,8 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
-#ifndef CUDA_MONEY_H
-#define CUDA_MONEY_H
+#ifndef CUDA_MISC_H
+#define CUDA_MISC_H
 #ifdef __CUDACC__
 
 /* pg_money_t */
@@ -320,7 +320,7 @@ pgfn_cash_ge(kern_context *kcxt, pg_money_t arg1, pg_money_t arg2)
 #include "utils/pg_locale.h"
 
 STATIC_INLINE(void)
-assign_moneylib_session_info(StringInfo buf)
+assign_misclib_session_info(StringInfo buf)
 {
 	struct lconv *lconvert = PGLC_localeconv();
 	cl_int		fpoint;
@@ -341,7 +341,7 @@ assign_moneylib_session_info(StringInfo buf)
 		buf,
 		"#ifdef __CUDACC__\n"
 		"/* ================================================\n"
-		" * session information for cuda_money.h\n"
+		" * session information for cuda_misc.h\n"
 		" * ================================================ */\n"
 		"\n"
 		"#define PGLC_CURRENCY_SCALE_LOG10  %d\n"
@@ -352,4 +352,4 @@ assign_moneylib_session_info(StringInfo buf)
 		scale);
 }
 #endif	/* __CUDACC__ */
-#endif	/* CUDA_MONEY_H */
+#endif	/* CUDA_MISC_H */

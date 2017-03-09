@@ -35,7 +35,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include "pg_strom.h"
-#include "cuda_money.h"
+#include "cuda_misc.h"
 #include "cuda_timelib.h"
 #include "cuda_textlib.h"
 
@@ -272,8 +272,8 @@ construct_flat_cuda_source(uint32 extra_flags,
 	if (extra_flags & DEVKERNEL_NEEDS_NUMERIC)
 		appendStringInfoString(&source, pgstrom_cuda_numeric_code);
 	/* cuda money.h */
-	if (extra_flags & DEVKERNEL_NEEDS_MONEY)
-		appendStringInfoString(&source, pgstrom_cuda_money_code);
+	if (extra_flags & DEVKERNEL_NEEDS_MISC)
+		appendStringInfoString(&source, pgstrom_cuda_misc_code);
 	/* cuda matrix.h */
 	if (extra_flags & DEVKERNEL_NEEDS_MATRIX)
 		appendStringInfoString(&source, pgstrom_cuda_matrix_code);
@@ -291,7 +291,7 @@ construct_flat_cuda_source(uint32 extra_flags,
 		"#ifdef CUDA_NUMERIC_H\n"
 		"    pg_numeric_t     numeric_v;\n"
 		"#endif\n"
-		"#ifdef CUDA_MONEY_H\n"
+		"#ifdef CUDA_MISC_H\n"
 		"    pg_money_t       money_v;\n"
 		"#endif\n"
 		"#ifdef CUDA_TIMELIB_H\n"
@@ -1183,8 +1183,8 @@ pgstrom_build_session_info(cl_uint extra_flags,
 	if ((extra_flags & DEVKERNEL_NEEDS_TIMELIB) != 0)
 		assign_timelib_session_info(&buf);
 	/* put currency info */
-	if ((extra_flags & DEVKERNEL_NEEDS_MONEY) != 0)
-		assign_moneylib_session_info(&buf);
+	if ((extra_flags & DEVKERNEL_NEEDS_MISC) != 0)
+		assign_misclib_session_info(&buf);
 	/* put text/string info */
 	if ((extra_flags & DEVKERNEL_NEEDS_TEXTLIB) != 0)
 		assign_textlib_session_info(&buf);

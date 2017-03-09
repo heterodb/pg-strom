@@ -62,7 +62,7 @@ __CUDA_OBJS = cuda_common.o \
 	cuda_textlib.o \
 	cuda_timelib.o \
 	cuda_numeric.o \
-	cuda_money.o   \
+	cuda_misc.o    \
 	cuda_plcuda.o  \
 	cuda_curand.o  \
 	cuda_cublas.o  \

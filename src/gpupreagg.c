@@ -412,7 +412,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	{ "max",    1, {CASHOID},
 	  "c:max",      CASHOID,
 	  "varref", 1, {CASHOID},
-	  {ALTFUNC_EXPR_PMAX}, DEVKERNEL_NEEDS_MONEY, INT_MAX
+	  {ALTFUNC_EXPR_PMAX}, DEVKERNEL_NEEDS_MISC, INT_MAX
 	},
 	{ "max",    1, {DATEOID},
 	  "c:max",      DATEOID,
@@ -471,7 +471,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	{ "min",    1, {CASHOID},
 	  "c:min",      CASHOID,
 	  "varref", 1, {CASHOID},
-	  {ALTFUNC_EXPR_PMAX}, DEVKERNEL_NEEDS_MONEY, INT_MAX
+	  {ALTFUNC_EXPR_PMAX}, DEVKERNEL_NEEDS_MISC, INT_MAX
 	},
 	{ "min",    1, {DATEOID},
 	  "c:min",      DATEOID,
@@ -530,7 +530,7 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	{ "sum",    1, {CASHOID},
 	  "c:sum",      CASHOID,
 	  "varref", 1, {CASHOID},
-	  {ALTFUNC_EXPR_PSUM}, DEVKERNEL_NEEDS_MONEY, INT_MAX
+	  {ALTFUNC_EXPR_PSUM}, DEVKERNEL_NEEDS_MISC, INT_MAX
 	},
 	/* STDDEV(X) = EX_STDDEV(NROWS(),PSUM(X),PSUM(X*X)) */
 	{ "stddev",      1, {FLOAT4OID},

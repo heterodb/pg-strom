@@ -85,7 +85,7 @@ static struct {
 				 0),
 	DEVTYPE_DECL("money",  CASHOID,   "cl_long",
 				 "LONG_MAX", "LONG_MIN", "0",
-				 DEVKERNEL_NEEDS_MONEY),
+				 DEVKERNEL_NEEDS_MISC),
 	/*
 	 * Date and time datatypes
 	 */
@@ -345,7 +345,7 @@ pgstrom_codegen_typeoid_declarations(StringInfo source)
  * 'n' : this function needs cuda_numeric.h
  * 's' : this function needs cuda_textlib.h
  * 't' : this function needs cuda_timelib.h
- * 'y' : this function needs cuda_money.h
+ * 'y' : this function needs cuda_misc.h
  *
  * class character:
  * 'c' : this function is type cast that takes an argument
@@ -1242,7 +1242,7 @@ pgstrom_devfunc_construct(Oid func_oid,
 							flags |= DEVKERNEL_NEEDS_TIMELIB;
 							break;
 						case 'y':
-							flags |= DEVKERNEL_NEEDS_MONEY;
+							flags |= DEVKERNEL_NEEDS_MISC;
 							break;
 						default:
 							elog(NOTICE,
