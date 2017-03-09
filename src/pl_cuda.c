@@ -707,6 +707,10 @@ plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
 						extra_flags |= DEVKERNEL_NEEDS_MATHLIB;
 					else if (strcmp(target, "cuda_money.h") == 0)
 						extra_flags |= DEVKERNEL_NEEDS_MONEY;
+					else if (strcmp(target, "cuda_curand.h") == 0)
+						extra_flags |= DEVKERNEL_NEEDS_CURAND;
+					else if (strcmp(target, "cuda_cublas.h") == 0)
+						extra_flags |= DEVKERNEL_NEEDS_CUBLAS;
 
 					if (extra_flags != 0 && (has_decl_block ||
 											 has_prep_block ||

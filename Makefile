@@ -64,6 +64,8 @@ __CUDA_OBJS = cuda_common.o \
 	cuda_numeric.o \
 	cuda_money.o   \
 	cuda_plcuda.o  \
+	cuda_curand.o  \
+	cuda_cublas.o  \
 	cuda_terminal.o
 CUDA_OBJS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__CUDA_OBJS))
 __CUDA_SOURCES = $(__CUDA_OBJS:.o=.c)

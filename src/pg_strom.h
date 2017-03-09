@@ -278,6 +278,12 @@ typedef struct GpuTask_v2 GpuTask_v2;
 #define DEVKERNEL_NEEDS_MATHLIB			0x00002000
 #define DEVKERNEL_NEEDS_MONEY			0x00004000
 
+#define DEVKERNEL_NEEDS_CURAND		   (0x00100000 | DEVKERNEL_NEEDS_DYNPARA)
+#define DEVKERNEL_NEEDS_CUBLAS		   (0x00200000 | DEVKERNEL_NEEDS_DYNPARA)
+//TODO: DYNPARA needs to be renamed?
+#define DEVKERNEL_NEEDS_LINKAGE		   (DEVKERNEL_NEEDS_DYNPARA	|	\
+										DEVKERNEL_NEEDS_CURAND	|	\
+										DEVKERNEL_NEEDS_CUBLAS)
 struct devtype_info;
 struct devfunc_info;
 
@@ -912,6 +918,8 @@ extern const char *pgstrom_cuda_timelib_code;
 extern const char *pgstrom_cuda_numeric_code;
 extern const char *pgstrom_cuda_money_code;
 extern const char *pgstrom_cuda_plcuda_code;
+extern const char *pgstrom_cuda_curand_code;	/* cuRand library */
+extern const char *pgstrom_cuda_cublas_code;	/* cuBLAS library */
 extern const char *pgstrom_cuda_terminal_code;
 
 /* ----------------------------------------------------------------

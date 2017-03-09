@@ -250,6 +250,12 @@ construct_flat_cuda_source(uint32 extra_flags,
 
 	/* PG-Strom CUDA device code libraries */
 
+	/* cuRand library */
+	if (extra_flags & DEVKERNEL_NEEDS_CURAND)
+		appendStringInfoString(&source, pgstrom_cuda_curand_code);
+	/* cuBlas library */
+	if (extra_flags & DEVKERNEL_NEEDS_CUBLAS)
+		appendStringInfoString(&source, pgstrom_cuda_cublas_code);
 	/* cuda dynpara.h */
 	if (extra_flags & DEVKERNEL_NEEDS_DYNPARA)
 		appendStringInfoString(&source, pgstrom_cuda_dynpara_code);
@@ -352,7 +358,7 @@ link_cuda_libraries(char *ptx_image, size_t ptx_length, cl_uint extra_flags,
 	char			pathname[MAXPGPATH];
 
 	/* at least one library has to be specified */
-	Assert((extra_flags & DEVKERNEL_NEEDS_DYNPARA) != 0);
+	Assert((extra_flags & DEVKERNEL_NEEDS_LINKAGE) != 0);
 
 	/*
 	 * NOTE: cuLinkXXXX() APIs works under a particular CUDA context,
@@ -410,7 +416,28 @@ link_cuda_libraries(char *ptx_image, size_t ptx_length, cl_uint extra_flags,
 			elog(ERROR, "failed on cuLinkAddFile(\"%s\"): %s",
 				 pathname, errorText(rc));
 	}
-
+	/* libcurand_static.a, if any */
+	if (extra_flags & DEVKERNEL_NEEDS_CURAND)
+	{
+		snprintf(pathname, sizeof(pathname), "%s/libcurand_static.a",
+				 CUDA_LIBRARY_PATH);
+		rc = cuLinkAddFile(lstate, CU_JIT_INPUT_LIBRARY, pathname,
+						   0, NULL, NULL);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuLinkAddFile(\"%s\"): %s",
+				 pathname, errorText(rc));
+	}
+	/* libcublas_device.a, if any */
+	if (extra_flags & DEVKERNEL_NEEDS_CUBLAS)
+	{
+		snprintf(pathname, sizeof(pathname), "%s/libcublas_device.a",
+				 CUDA_LIBRARY_PATH);
+		rc = cuLinkAddFile(lstate, CU_JIT_INPUT_LIBRARY, pathname,
+						   0, NULL, NULL);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuLinkAddFile(\"%s\"): %s",
+				 pathname, errorText(rc));
+	}
 	/* do the linkage */
 	rc = cuLinkComplete(lstate, &bin_image, &bin_length);
 	if (rc != CUDA_SUCCESS)
@@ -575,7 +602,7 @@ __build_cuda_program(program_cache_entry *entry)
 	options[opt_index++] = "--use_fast_math";
 //	options[opt_index++] = "--device-as-default-execution-space";
 	/* library linkage needs relocatable PTX */
-	if (entry->extra_flags & DEVKERNEL_NEEDS_DYNPARA)
+	if (entry->extra_flags & DEVKERNEL_NEEDS_LINKAGE)
 		options[opt_index++] = "--relocatable-device-code=true";
 
 	/*
@@ -620,7 +647,7 @@ __build_cuda_program(program_cache_entry *entry)
 		/*
 		 * Link the required run-time libraries, if any
 		 */
-		if (entry->extra_flags & DEVKERNEL_NEEDS_DYNPARA)
+		if (entry->extra_flags & DEVKERNEL_NEEDS_LINKAGE)
 		{
 			link_cuda_libraries(ptx_image, ptx_length,
 								entry->extra_flags,
