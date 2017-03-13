@@ -73,6 +73,7 @@ typedef struct {
 	List	   *used_params;	/* list of Const/Param in use */
 	List	   *used_vars;		/* list of Var in use */
 	List	   *dev_quals;		/* qualifiers to be run on device */
+	cl_bool		force_row_format; /* true, if row format is required */
 	cl_int      base_fixed_width; /* width of fixed fields on base rel */
     cl_int      proj_fixed_width; /* width of fixed fields on projection */
     cl_int      proj_extra_width; /* width of extra buffer on projection */
@@ -93,6 +94,7 @@ form_gpuscan_info(CustomScan *cscan, GpuScanInfo *gs_info)
 	exprs = lappend(exprs, gs_info->used_params);
 	exprs = lappend(exprs, gs_info->used_vars);
 	exprs = lappend(exprs, gs_info->dev_quals);
+	privs = lappend(privs, makeInteger(gs_info->force_row_format));
 	privs = lappend(privs, makeInteger(gs_info->base_fixed_width));
 	privs = lappend(privs, makeInteger(gs_info->proj_fixed_width));
 	privs = lappend(privs, makeInteger(gs_info->proj_extra_width));
@@ -118,6 +120,7 @@ deform_gpuscan_info(CustomScan *cscan)
 	gs_info->used_params = list_nth(exprs, eindex++);
 	gs_info->used_vars = list_nth(exprs, eindex++);
 	gs_info->dev_quals = list_nth(exprs, eindex++);
+	gs_info->force_row_format = intVal(list_nth(privs, pindex++));
 	gs_info->base_fixed_width = intVal(list_nth(privs, pindex++));
 	gs_info->proj_fixed_width = intVal(list_nth(privs, pindex++));
 	gs_info->proj_extra_width = intVal(list_nth(privs, pindex++));
@@ -989,7 +992,9 @@ codegen_device_projection(StringInfo source,
 		TargetEntry	   *tle = lfirst(lc);
 		Oid				type_oid;
 
-		if (IsA(tle->expr, Var))
+		if (IsA(tle->expr, Var) ||
+			IsA(tle->expr, Const) ||
+			IsA(tle->expr, Param))
 			continue;
 
 		type_oid = exprType((Node *)tle->expr);
@@ -1110,9 +1115,8 @@ codegen_device_projection(StringInfo source,
 				dtype->type_name,
 				tle->resno);
 		}
-		else
+		else if (dtype->type_length > 0)
 		{
-			Assert(dtype->type_length > 0);
 			appendStringInfo(
 				&body,
 				"      if (!temp_%u_v.isnull)\n"
@@ -1127,6 +1131,19 @@ codegen_device_projection(StringInfo source,
 				tle->resno - 1,
 				tle->resno, dtype->type_length,
 				dtype->type_length);
+		}
+		else
+		{
+			Assert(IsA(tle->expr, Const) || IsA(tle->expr, Param));
+			appendStringInfo(
+				&body,
+				"      if (!temp_%u_v.isnull)\n"
+				"      {\n"
+				"        tup_values[%d] = devptr_to_host(kcxt->kparams,\n"
+				"                                        temp_%u_v.value);\n"
+				"      }\n",
+				tle->resno,
+				tle->resno - 1, tle->resno);
 		}
 	}
 	appendStringInfo(
@@ -1183,9 +1200,8 @@ codegen_device_projection(StringInfo source,
 				tle->resno,
 				tle->resno - 1, tle->resno);
 		}
-		else
+		else if (dtype->type_length > 0)
 		{
-			Assert(dtype->type_length > 0);
 			appendStringInfo(
 				&body,
 				"      if (!temp_%u_v.isnull)\n"
@@ -1200,6 +1216,19 @@ codegen_device_projection(StringInfo source,
 				tle->resno - 1,
 				tle->resno, dtype->type_length,
 				dtype->type_length);
+		}
+		else
+		{
+			Assert(IsA(tle->expr, Const) || IsA(tle->expr, Param));
+			appendStringInfo(
+				&body,
+				"      if (!temp_%u_v.isnull)\n"
+				"      {\n"
+				"        tup_values[%d] = devptr_to_host(kcxt->kparams,\n"
+				"                                        temp_%u_v.value);\n"
+				"      }\n",
+				tle->resno,
+				tle->resno - 1, tle->resno);
 		}
 	}
 	appendStringInfo(
@@ -1322,13 +1351,15 @@ build_device_projection(Index scanrelid,
 						bool allow_hostonly,
 						List **p_tlist_new,
 						List **p_tlist_dev,
-						bool *p_tlist_compatible)
+						bool *p_tlist_compatible,
+						bool *p_tlist_has_syscols)
 {
 	AttrNumber	attnum;
 	ListCell   *lc;
 	List	   *tlist_new = NIL;
 	List	   *tlist_dev = NIL;
 	bool		tlist_compatible = true;
+	bool		tlist_has_syscols = false;
 
 	attnum = 1;
 	foreach (lc, tlist_old)
@@ -1348,6 +1379,8 @@ build_device_projection(Index scanrelid,
 			/* GPU projection cannot contain whole-row reference */
 			if (var->varattno == InvalidAttrNumber)
 				return false;
+			else if (var->varattno < 0)
+				tlist_has_syscols = true;
 
 			/*
 			 * check whether the original tlist matches the physical layout
@@ -1435,8 +1468,10 @@ build_device_projection(Index scanrelid,
 				if (anum > 0)
 					attr = tupdesc->attrs[anum - 1];
 				else
+				{
 					attr = SystemAttributeDefinition(anum, true);
-
+					tlist_has_syscols = true;
+				}
 				add_unique_expression((Expr *) makeVar(scanrelid,
 													   attr->attnum,
 													   attr->atttypid,
@@ -1480,6 +1515,7 @@ build_device_projection(Index scanrelid,
 	*p_tlist_new = tlist_new;
 	*p_tlist_dev = tlist_dev;
 	*p_tlist_compatible = tlist_compatible;
+	*p_tlist_has_syscols = tlist_has_syscols;
 
 	return true;
 }
@@ -1502,6 +1538,8 @@ pgstrom_post_planner_gpuscan(PlannedStmt *pstmt, Plan **p_curr_plan)
 	List		   *tlist_new = NIL;
 	List		   *tlist_dev = NIL;
 	bool			tlist_compatible;
+	bool			tlist_has_syscols;
+	bool			force_row_format = false;
 	ListCell	   *lc;
 	QualCost		qcost;
 	Cost			actual_old_cost = 0.0;
@@ -1544,7 +1582,8 @@ pgstrom_post_planner_gpuscan(PlannedStmt *pstmt, Plan **p_curr_plan)
 								true,	/* allow host-only */
 								&tlist_new,
 								&tlist_dev,
-								&tlist_compatible) &&
+								&tlist_compatible,
+								&tlist_has_syscols) &&
 		!tlist_compatible)		/* device projection does not make much
 								 * sense on the compatible base relation */
 	{
@@ -1626,7 +1665,11 @@ pgstrom_post_planner_gpuscan(PlannedStmt *pstmt, Plan **p_curr_plan)
 			if (*p_curr_plan != &cscan->scan.plan)
 				*p_curr_plan = &cscan->scan.plan;
 		}
+		else if (tlist_has_syscols)
+			force_row_format = true;
 	}
+	else
+		force_row_format = true;
 
 	/*
 	 * Declaration of functions/special expressions
@@ -1646,6 +1689,7 @@ pgstrom_post_planner_gpuscan(PlannedStmt *pstmt, Plan **p_curr_plan)
 	gs_info->expr_defs = context.expr_defs;
 	gs_info->used_params = context.used_params;
 	gs_info->used_vars = context.used_vars;
+	gs_info->force_row_format = force_row_format;
 	form_gpuscan_info(cscan, gs_info);
 
 	heap_close(baserel, NoLock);
@@ -1723,6 +1767,10 @@ gpuscan_begin(CustomScanState *node, EState *estate, int eflags)
 		gss->gts.css.ss.ps.qual == NIL &&
 		gss->gts.css.ss.ps.ps_ProjInfo == NULL)
 		gss->gts.cb_bulk_exec = pgstrom_exec_chunk_gputask;
+
+	/* Is 'row' format required? */
+	if (gs_info->force_row_format)
+		gss->gts.be_row_format = true;
 
 	/* initialize device tlist for CPU fallback */
 	gss->dev_tlist = (List *)
