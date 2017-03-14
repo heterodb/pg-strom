@@ -695,8 +695,8 @@ codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
 		if (var->varno != scanrelid)
 			elog(ERROR, "unexpected var-node reference: %s expected %u",
 				 nodeToString(var), scanrelid);
-		if (var->varattno <= InvalidAttrNumber)
-			elog(ERROR, "cannot reference system column or whole-row on GPU");
+		if (var->varattno == InvalidAttrNumber)
+			elog(ERROR, "cannot have whole-row reference on GPU");
 		dtype = pgstrom_devtype_lookup(var->vartype);
 		if (!dtype)
 			elog(ERROR, "failed to lookup device type: %s",
@@ -708,54 +708,115 @@ codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
 	 * the pg_xxxx_vref() service routine is more efficient because it may
 	 * use attcacheoff to skip walking on tuple attributes.
 	 */
-	if (list_length(context->used_vars) < 2)
+	if (list_length(context->used_vars) <= 1)
 	{
 		foreach (lc, context->used_vars)
 		{
 			var = lfirst(lc);
 
-			/* we don't support system columns in expression now */
-			Assert(var->varattno > 0);
-
 			dtype = pgstrom_devtype_lookup(var->vartype);
-			appendStringInfo(
-				kern,
-				"  void *addr = kern_get_datum_tuple(kds->colmeta,htup,%u);\n"
-				"  pg_%s_t %s_%u = pg_%s_datum_ref(kcxt,addr,false);\n",
-				var->varattno - 1,
-				dtype->type_name,
-				context->var_label,
-				var->varattno,
-				dtype->type_name);
+			if (var->varattno < 0)
+			{
+				Form_pg_attribute	sysatt
+					= SystemAttributeDefinition(var->varattno, true);
+				appendStringInfo(
+					kern,
+					"  Datum datum = kern_getsysatt_%s(kds,htup,t_self);\n"
+					"  pg_%s_t %s_S%u = pg_%s_datum_ref(kcxt,&datum,false);\n",
+					NameStr(sysatt->attname),
+					dtype->type_name,
+					context->var_label,
+					-var->varattno,
+					dtype->type_name);
+			}
+			else
+			{
+				appendStringInfo(
+					kern,
+					"  void *addr = kern_get_datum_tuple(kds->colmeta,htup,%u);\n"
+					"  pg_%s_t %s_%u = pg_%s_datum_ref(kcxt,addr,false);\n",
+					var->varattno - 1,
+					dtype->type_name,
+					context->var_label,
+					var->varattno,
+					dtype->type_name);
+			}
 		}
 	}
 	else
 	{
 		AttrNumber		anum, varattno_max = 0;
+		Bitmapset	   *sysattrs = NULL;
 
 		/* declarations */
 		foreach (lc, context->used_vars)
 		{
 			var = lfirst(lc);
 			dtype = pgstrom_devtype_lookup(var->vartype);
-
-			appendStringInfo(
-				kern,
-				"  pg_%s_t %s_%u;\n",
-				dtype->type_name,
-                context->var_label,
-				var->varattno);
+			if (var->varattno < 0)
+			{
+				appendStringInfo(
+					kern,
+					"  pg_%s_t %s_S%u;\n",
+					dtype->type_name,
+					context->var_label,
+					-var->varattno);
+				sysattrs = bms_add_member(sysattrs, var->varattno -
+										  FirstLowInvalidHeapAttributeNumber);
+			}
+			else
+			{
+				appendStringInfo(
+					kern,
+					"  pg_%s_t %s_%u;\n",
+					dtype->type_name,
+					context->var_label,
+					var->varattno);
+			}
 			varattno_max = Max(varattno_max, var->varattno);
 		}
 
 		/* walking on the HeapTuple */
+		appendStringInfoString(kern, "  char *addr;\n");
+		if (!bms_is_empty(sysattrs))
+		{
+			appendStringInfoString(
+				kern,
+				"  Datum datum;\n"
+				"\n"
+				"  assert(htup != NULL);\n");
+
+			for (anum = FirstLowInvalidHeapAttributeNumber + 1;
+				 anum < 0;
+				 anum++)
+			{
+				Form_pg_attribute sysatt;
+				int		x = anum - FirstLowInvalidHeapAttributeNumber;
+
+				if (!bms_is_member(x, sysattrs))
+					continue;
+
+				sysatt = SystemAttributeDefinition(anum, true);
+				dtype = pgstrom_devtype_lookup(sysatt->atttypid);
+				appendStringInfo(
+					kern,
+					"  datum = kern_getsysatt_%s(kds,htup,t_self);\n"
+					"  %s_S%u = pg_%s_datum_ref(kcxt,&datum,false);\n",
+					NameStr(sysatt->attname),
+					context->var_label,
+					-anum,
+					dtype->type_name);
+			}
+		}
+		else
+			appendStringInfoString(
+				kern,
+				"\n"
+				"  assert(htup != NULL);\n");
+
 		appendStringInfoString(
 			kern,
-			"  char *addr;\n"
-			"\n"
-			"  assert(htup != NULL);\n"
 			"  EXTRACT_HEAP_TUPLE_BEGIN(addr, kds, htup);\n");
-
 		for (anum=1; anum <= varattno_max; anum++)
 		{
 			foreach (lc, context->used_vars)
@@ -935,7 +996,7 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 				"  {\n"
 				"    void *__ptr = kern_getsysatt_%s(kds_src,htup,t_self);\n"
 				"    if (is_slot_format)\n"
-				"      __ptr = devptr_to_host(kds_src, __ptr);\n"
+				"      __ptr = (void *)devptr_to_host(kds_src, __ptr);\n"
 				"    tup_values[%d] = PointerGetDatum(__ptr);\n"
 				"  }\n",
 				NameStr(attr->attname),
@@ -3085,6 +3146,50 @@ gpuscan_release_task(GpuTask_v2 *gtask)
 		PDS_release(gscan->pds_dst);
 	dmaBufferFree(gscan);
 }
+
+/*
+ * SQL functions to support reference ctid system column.
+ *
+ * MEMO: TID type is declared as !typbyval type, although it has 6-bytes
+ * length, thus, it needs to be a pointer to reference 6-byte datum.
+ * It is a bit painful for GpuScan because any of data types does not
+ * require extra area of indirect/varlena datum (because they already exist
+ * on the KDS). However, we don't have ctid on KDS_FORMAT_BLOCK case, thus,
+ * needs to allocate extra area or return ctid as bigint then transform to
+ * indirect datum on the host space. We choose the later option.
+ */
+Datum pgstrom_cast_tid_to_int8(PG_FUNCTION_ARGS);
+Datum pgstrom_cast_int8_to_tid(PG_FUNCTION_ARGS);
+
+#define DatumGetItemPointer(X)		((ItemPointer) DatumGetPointer(X))
+#define ItemPointerGetDatum(X)		PointerGetDatum(X)
+#define PG_GETARG_ITEMPOINTER(n)	DatumGetItemPointer(PG_GETARG_DATUM(n))
+#define PG_RETURN_ITEMPOINTER(x)	return ItemPointerGetDatum(x)
+
+Datum
+pgstrom_cast_tid_to_int8(PG_FUNCTION_ARGS)
+{
+	ItemPointer	ctid = PG_GETARG_ITEMPOINTER(0);
+
+	PG_RETURN_INT64(((int64)ctid->ip_blkid.bi_hi << 32) |
+					((int64)ctid->ip_blkid.bi_lo << 16) |
+					((int64)ctid->ip_posid));
+}
+PG_FUNCTION_INFO_V1(pgstrom_cast_tid_to_int8);
+
+Datum
+pgstrom_cast_int8_to_tid(PG_FUNCTION_ARGS)
+{
+	int64		value = PG_GETARG_INT64(0);
+	ItemPointer	ctid = palloc(sizeof(ItemPointerData));
+
+	ctid->ip_blkid.bi_hi = ((value >> 32) & 0xffff);
+	ctid->ip_blkid.bi_lo = ((value >> 16) & 0xffff);
+	ctid->ip_posid = (value & 0x0000ffffUL);
+
+	PG_RETURN_ITEMPOINTER(ctid);
+}
+PG_FUNCTION_INFO_V1(pgstrom_cast_int8_to_tid);
 
 /*
  * pgstrom_init_gpuscan

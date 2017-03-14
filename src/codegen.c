@@ -83,6 +83,9 @@ static struct {
 	DEVTYPE_DECL("float8", FLOAT8OID, "cl_double",
 				 "DBL_MAX", "(-DBL_MAX)", "0.0",
 				 0),
+	DEVTYPE_DECL("tid", TIDOID, "ItemPointerData",
+				 NULL, NULL, NULL,
+				 0),
 	DEVTYPE_DECL("money",  CASHOID,   "cl_long",
 				 "LONG_MAX", "LONG_MIN", "0",
 				 DEVKERNEL_NEEDS_MISC),
@@ -957,15 +960,32 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "bpcharicnlike", 2, {BPCHAROID, TEXTOID}, "sc/F:texticnlike" },	
 };
 
+/*
+ * device function catalog for extra SQL functions
+ */
+typedef struct devfunc_extra_catalog_t {
+	const char *func_signature;
+	const char *func_rettype;
+	const char *func_template;
+} devfunc_extra_catalog_t;
+
+static devfunc_extra_catalog_t devfunc_extra_catalog[] = {
+	/* type cast tid <--> bigint */
+	{"pgstrom.cast_tid_to_int8(pg_catalog.tid)",
+	 "bigint",
+	 "F:cast_tid_to_int8"},
+	{"pgstrom.cast_int8_to_tid(bigint)",
+	 "pg_catalog.tid",
+	 "F:cast_int8_to_tid"},
+};
+
 static void
 devfunc_setup_cast(devfunc_info *entry,
-				   devfunc_catalog_t *procat,
 				   const char *extra, bool has_alias)
 {
 	devtype_info   *dtype = linitial(entry->func_args);
 
-	Assert(procat->func_nargs == 1);
-	entry->func_sqlname = pstrdup(procat->func_name);
+	Assert(list_length(entry->func_args) == 1);
 	entry->func_devname = (!has_alias
 						   ? entry->func_sqlname
 						   : psprintf("%s_%s",
@@ -989,14 +1009,12 @@ devfunc_setup_cast(devfunc_info *entry,
 
 static void
 devfunc_setup_oper_both(devfunc_info *entry,
-						devfunc_catalog_t *procat,
 						const char *extra, bool has_alias)
 {
 	devtype_info   *dtype1 = linitial(entry->func_args);
 	devtype_info   *dtype2 = lsecond(entry->func_args);
 
-	Assert(procat->func_nargs == 2);
-	entry->func_sqlname = pstrdup(procat->func_name);
+	Assert(list_length(entry->func_args) == 2);
 	entry->func_devname = (!has_alias
 						   ? entry->func_sqlname
 						   : psprintf("%s_%s_%s",
@@ -1023,15 +1041,13 @@ devfunc_setup_oper_both(devfunc_info *entry,
 
 static void
 devfunc_setup_oper_either(devfunc_info *entry,
-						  devfunc_catalog_t *procat,
 						  const char *left_extra,
 						  const char *right_extra,
 						  bool has_alias)
 {
 	devtype_info   *dtype = linitial(entry->func_args);
 
-	Assert(procat->func_nargs == 1);
-	entry->func_sqlname = pstrdup(procat->func_name);
+	Assert(list_length(entry->func_args) == 1);
 	entry->func_devname = (!has_alias
 						   ? entry->func_sqlname
 						   : psprintf("%s_%s",
@@ -1057,23 +1073,20 @@ devfunc_setup_oper_either(devfunc_info *entry,
 
 static void
 devfunc_setup_oper_left(devfunc_info *entry,
-						devfunc_catalog_t *procat,
 						const char *extra, bool has_alias)
 {
-	devfunc_setup_oper_either(entry, procat, extra, NULL, has_alias);
+	devfunc_setup_oper_either(entry, extra, NULL, has_alias);
 }
 
 static void
 devfunc_setup_oper_right(devfunc_info *entry,
-						 devfunc_catalog_t *procat,
 						 const char *extra, bool has_alias)
 {
-	devfunc_setup_oper_either(entry, procat, NULL, extra, has_alias);
+	devfunc_setup_oper_either(entry, NULL, extra, has_alias);
 }
 
 static void
 devfunc_setup_func_decl(devfunc_info *entry,
-						devfunc_catalog_t *procat,
 						const char *extra, bool has_alias)
 {
 	StringInfoData	str;
@@ -1081,8 +1094,6 @@ devfunc_setup_func_decl(devfunc_info *entry,
 	int				index;
 
 	initStringInfo(&str);
-
-	entry->func_sqlname = pstrdup(procat->func_name);
 	if (!has_alias)
 		entry->func_devname = entry->func_sqlname;
 	else
@@ -1150,151 +1161,178 @@ devfunc_setup_func_decl(devfunc_info *entry,
 
 static void
 devfunc_setup_func_impl(devfunc_info *entry,
-						devfunc_catalog_t *procat,
 						const char *extra, bool has_alias)
 {
-	entry->func_sqlname = pstrdup(procat->func_name);
 	if (has_alias)
 		elog(ERROR, "Bug? implimented device function should not have alias");
 	entry->func_devname = extra;
 }
 
-static devfunc_info *
-pgstrom_devfunc_construct(Oid func_oid,
-						  Oid func_collid,
-						  const char *func_name,
-						  Oid func_namespace,
-						  int func_nargs,
-						  Oid func_argtypes[],
-						  Oid func_rettype,
-						  bool func_is_strict)
+static void
+__construct_devfunc_info(devfunc_info *entry,
+						 const char *template,
+						 int func_nargs,
+						 Oid func_argtypes[],
+						 Oid func_rettype)
 {
-	devfunc_info   *entry;
-	int				i, j;
+	devtype_info *dtype;
+	const char *extra;
+	const char *pos;
+	const char *end;
+	int32		flags = 0;
+	bool		has_alias = false;
+	bool		has_collation = false;
+	int			i;
 
-	entry = palloc0(sizeof(devfunc_info));
-	entry->func_oid = func_oid;
-	entry->func_sqlname = pstrdup(func_name);
-	entry->func_is_strict = func_is_strict;
+	entry->func_rettype = pgstrom_devtype_lookup(func_rettype);
+	if (!entry->func_rettype)
+		elog(ERROR, "Bug? unsupported device function result type");
+
+	for (i=0; i < func_nargs; i++)
+	{
+		dtype = pgstrom_devtype_lookup(func_argtypes[i]);
+		if (!dtype)
+			elog(ERROR, "Bug? unsupported device function arguments");
+		entry->func_args = lappend(entry->func_args, dtype);
+	}
+
+	/* fetch attribute */
+	end = strchr(template, '/');
+	if (end)
+	{
+		for (pos = template; pos < end; pos++)
+		{
+			switch (*pos)
+			{
+				case 'a':
+					has_alias = true;
+					break;
+				case 'c':
+					has_collation = true;
+					break;
+				case 'n':
+					flags |= DEVKERNEL_NEEDS_NUMERIC;
+					break;
+				case 'm':
+					flags |= DEVKERNEL_NEEDS_MATHLIB;
+					break;
+				case 's':
+					flags |= DEVKERNEL_NEEDS_TEXTLIB;
+					break;
+				case 't':
+					flags |= DEVKERNEL_NEEDS_TIMELIB;
+					break;
+				case 'y':
+					flags |= DEVKERNEL_NEEDS_MISC;
+					break;
+				default:
+					elog(NOTICE,
+						 "Bug? unkwnon devfunc property: %c",
+						 *pos);
+					break;
+			}
+		}
+		template = end + 1;
+	}
+	entry->func_flags = flags;
 
 	/*
-	 * At this moment, only (part-of) built-in functions are supported
-	 * to run on GPU devices.
+	 * If function is collation aware but not supported to run on GPU device,
+	 * we have to give up to generate device code.
 	 */
-	if (func_namespace != PG_CATALOG_NAMESPACE)
+	if (!has_collation)
+		entry->func_collid = InvalidOid;	/* clear default if any */
+	else
 	{
-		entry->func_is_negative = true;
-		return entry;
+		if (OidIsValid(entry->func_collid) &&
+			!lc_collate_is_c(entry->func_collid))
+		{
+			entry->func_is_negative = true;
+			return;
+		}
 	}
+	extra = template + 2;
+	if (strncmp(template, "c:", 2) == 0)
+		devfunc_setup_cast(entry, extra, has_alias);
+	else if (strncmp(template, "b:", 2) == 0)
+		devfunc_setup_oper_both(entry, extra, has_alias);
+	else if (strncmp(template, "l:", 2) == 0)
+		devfunc_setup_oper_left(entry, extra, has_alias);
+	else if (strncmp(template, "r:", 2) == 0)
+		devfunc_setup_oper_right(entry, extra, has_alias);
+	else if (strncmp(template, "f:", 2) == 0)
+		devfunc_setup_func_decl(entry, extra, has_alias);
+	else if (strncmp(template, "F:", 2) == 0)
+		devfunc_setup_func_impl(entry, extra, has_alias);
+	else
+	{
+		elog(NOTICE, "Bug? unknown device function template: '%s'",
+			 template);
+		entry->func_is_negative = true;
+	}
+}
+
+static void
+pgstrom_devfunc_construct_common(devfunc_info *entry,
+								 int func_nargs,
+								 Oid func_argtypes[],
+								 Oid func_rettype)
+{
+	int		i;
 
 	for (i=0; i < lengthof(devfunc_common_catalog); i++)
 	{
 		devfunc_catalog_t  *procat = devfunc_common_catalog + i;
 
-		if (strcmp(procat->func_name, func_name) == 0 &&
+		if (strcmp(procat->func_name, entry->func_sqlname) == 0 &&
 			procat->func_nargs == func_nargs &&
 			memcmp(procat->func_argtypes, func_argtypes,
 				   sizeof(Oid) * func_nargs) == 0)
 		{
-			const char *template = procat->func_template;
-			const char *extra;
-			const char *pos;
-			const char *end;
-			int32		flags = 0;
-			bool		has_alias = false;
-			bool		has_collation = false;
-
-			entry->func_rettype = pgstrom_devtype_lookup(func_rettype);
-			if (!entry->func_rettype)
-				elog(ERROR, "Bug? unsupported device function result type");
-			for (j=0; j < func_nargs; j++)
-			{
-				devtype_info   *dtype
-					= pgstrom_devtype_lookup(func_argtypes[j]);
-				if (!dtype)
-					elog(ERROR, "Bug? unsupported device function arguments");
-				entry->func_args = lappend(entry->func_args, dtype);
-			}
-			/* fetch attribute */
-			end = strchr(template, '/');
-			if (end)
-			{
-				for (pos = template; pos < end; pos++)
-				{
-					switch (*pos)
-					{
-						case 'a':
-							has_alias = true;
-							break;
-						case 'c':
-							has_collation = true;
-							break;
-						case 'n':
-							flags |= DEVKERNEL_NEEDS_NUMERIC;
-							break;
-						case 'm':
-							flags |= DEVKERNEL_NEEDS_MATHLIB;
-							break;
-						case 's':
-							flags |= DEVKERNEL_NEEDS_TEXTLIB;
-							break;
-						case 't':
-							flags |= DEVKERNEL_NEEDS_TIMELIB;
-							break;
-						case 'y':
-							flags |= DEVKERNEL_NEEDS_MISC;
-							break;
-						default:
-							elog(NOTICE,
-								 "Bug? unkwnon devfunc property: %c",
-								 *pos);
-							break;
-					}
-				}
-				template = end + 1;
-			}
-			entry->func_flags = flags;
-
-			/* In case when function is collation aware but not supported
-			 * to run on GPU device, we have to give up.
-			 */
-			if (!has_collation)
-				entry->func_collid = InvalidOid;
-			else
-			{
-				entry->func_collid = func_collid;
-				if (OidIsValid(func_collid) && !lc_collate_is_c(func_collid))
-				{
-					entry->func_is_negative = true;
-					return entry;
-				}
-			}
-
-			extra = template + 2;
-			if (strncmp(template, "c:", 2) == 0)
-				devfunc_setup_cast(entry, procat, extra, has_alias);
-			else if (strncmp(template, "b:", 2) == 0)
-				devfunc_setup_oper_both(entry, procat, extra, has_alias);
-			else if (strncmp(template, "l:", 2) == 0)
-				devfunc_setup_oper_left(entry, procat, extra, has_alias);
-			else if (strncmp(template, "r:", 2) == 0)
-				devfunc_setup_oper_right(entry, procat, extra, has_alias);
-			else if (strncmp(template, "f:", 2) == 0)
-				devfunc_setup_func_decl(entry, procat, extra, has_alias);
-			else if (strncmp(template, "F:", 2) == 0)
-				devfunc_setup_func_impl(entry, procat, extra, has_alias);
-			else
-			{
-				elog(NOTICE, "Bug? unknown device function template: '%s'",
-					 template);
-				entry->func_is_negative = true;
-			}
-			return entry;
+			__construct_devfunc_info(entry,
+									 procat->func_template,
+									 func_nargs,
+									 func_argtypes,
+									 func_rettype);
+			return;
 		}
 	}
 	/* no entries on the device function catalog */
 	entry->func_is_negative = true;
-	return entry;
+}
+
+static void
+pgstrom_devfunc_construct_extra(devfunc_info *entry,
+								Oid func_namespace,
+								int func_nargs,
+								Oid func_argtypes[],
+								Oid func_rettype_oid)
+{
+	char   *func_signature = format_procedure_qualified(entry->func_oid);
+	char   *func_rettype = format_type_be_qualified(func_rettype_oid);
+	int		i;
+
+	elog(INFO, "sig=[%s] ret=[%s]", func_signature, func_rettype);
+
+	for (i=0; i < lengthof(devfunc_extra_catalog); i++)
+	{
+		devfunc_extra_catalog_t  *procat = devfunc_extra_catalog + i;
+
+		elog(INFO, "Sig=[%s] Ret=[%s]", procat->func_signature, procat->func_rettype);
+
+		if (strcmp(procat->func_signature, func_signature) == 0 &&
+			strcmp(procat->func_rettype, func_rettype) == 0)
+		{
+			__construct_devfunc_info(entry,
+									 procat->func_template,
+									 func_nargs,
+									 func_argtypes,
+									 func_rettype_oid);
+			return;
+		}
+	}
+	/* no entries on the device function catalog */
+	entry->func_is_negative = true;
 }
 
 devfunc_info *
@@ -1332,14 +1370,30 @@ pgstrom_devfunc_lookup(Oid func_oid, Oid func_collid)
 	proc = (Form_pg_proc) GETSTRUCT(tuple);
 
 	oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
-	entry = pgstrom_devfunc_construct(func_oid,
-									  func_collid,
-									  NameStr(proc->proname),
-									  proc->pronamespace,
-									  proc->pronargs,
-									  proc->proargtypes.values,
-									  proc->prorettype,
-									  proc->proisstrict);
+	entry = palloc0(sizeof(devfunc_info));
+	entry->func_oid = func_oid;
+	entry->func_collid = func_collid;
+	entry->func_sqlname = pstrdup(NameStr(proc->proname));
+	entry->func_is_strict = proc->proisstrict;
+
+	if (proc->pronamespace == PG_CATALOG_NAMESPACE)
+	{
+		/* for system default functions (pg_catalog) */
+		pgstrom_devfunc_construct_common(entry,
+										 proc->pronargs,
+										 proc->proargtypes.values,
+										 proc->prorettype);
+	}
+	else
+	{
+		/* for extra functions */
+		pgstrom_devfunc_construct_extra(entry,
+										proc->pronamespace,
+										proc->pronargs,
+										proc->proargtypes.values,
+										proc->prorettype);
+
+	}
 	devfunc_info_slot[index] = lappend(devfunc_info_slot[index], entry);
 	MemoryContextSwitchTo(oldcxt);
 
@@ -1511,9 +1565,15 @@ codegen_expression_walker(Node *node, codegen_context *context)
 				elog(ERROR, "codegen: failed to map Var (%s)on ps_tlist: %s",
 					 nodeToString(var), nodeToString(context->pseudo_tlist));
 		}
-		appendStringInfo(&context->str, "%s_%u",
-						 context->var_label,
-						 varattno);
+
+		if (varattno < 0)
+			appendStringInfo(&context->str, "%s_S%u",
+							 context->var_label,
+							 -varattno);
+		else
+			appendStringInfo(&context->str, "%s_%u",
+							 context->var_label,
+							 varattno);
 		context->used_vars = list_append_unique(context->used_vars,
 												copyObject(node));
 	}
@@ -2427,35 +2487,6 @@ pgstrom_codegen_param_declarations(StringInfo buf, codegen_context *context)
 			elog(ERROR, "unexpected node: %s", nodeToString(lfirst(cell)));
 	lnext:
 		index++;
-	}
-}
-
-/*
- * pgstrom_codegen_var_declarations
- */
-void
-pgstrom_codegen_var_declarations(StringInfo buf, codegen_context *context)
-{
-	ListCell	   *cell;
-
-	foreach (cell, context->used_vars)
-	{
-		Var			   *var = lfirst(cell);
-		devtype_info   *dtype = pgstrom_devtype_lookup(var->vartype);
-
-		if (!dtype)
-			elog(ERROR, "failed to lookup device type: %u", var->vartype);
-
-		appendStringInfo(
-			buf,
-			"  pg_%s_t %s_%u = pg_%s_vref(%s,kcxt,%u,%s);\n",
-			dtype->type_name,
-			context->var_label,
-			var->varattno,
-			dtype->type_name,
-			context->kds_label,
-			var->varattno - 1,
-			context->kds_index_label);
 	}
 }
 

@@ -614,8 +614,6 @@ extern void pgstrom_codegen_expr_declarations(StringInfo buf,
 											  codegen_context *context);
 extern void pgstrom_codegen_param_declarations(StringInfo buf,
 											   codegen_context *context);
-extern void pgstrom_codegen_var_declarations(StringInfo buf,
-											 codegen_context *context);
 extern bool pgstrom_device_expression(Expr *expr);
 extern void pgstrom_init_codegen_context(codegen_context *context);
 extern void pgstrom_init_codegen(void);

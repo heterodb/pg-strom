@@ -1212,6 +1212,12 @@ pg_float8_to_datum(cl_double value)
 }
 #endif
 
+/* pg_tid_t */
+#ifndef PG_TID_TYPE_DEFINED
+#define PG_TID_TYPE_DEFINED
+STROMCL_INDIRECT_TYPE_TEMPLATE(tid, ItemPointerData)
+#endif
+
 /*
  * Template of variable classes: variable-length variables
  * ---------------------------------------------------------------
@@ -1817,7 +1823,15 @@ kern_getsysatt_ctid(kern_data_store *kds,
 					HeapTupleHeaderData *htup,
 					ItemPointerData *t_self)
 {
-	return PointerGetDatum(t_self);
+	union {
+		Datum			datum;
+		ItemPointerData	ip;
+	} u;
+
+	u.datum = 0;
+	u.ip = *t_self;
+
+	return u.datum;
 }
 
 STATIC_INLINE(Datum)
@@ -2340,6 +2354,43 @@ pgfn_bool_is_not_unknown(kern_context *kcxt, pg_bool_t result)
 {
 	result.value = !result.isnull;
 	result.isnull = false;
+	return result;
+}
+
+/*
+ * Type cast on behalf of tid<-->bigint
+ */
+STATIC_INLINE(pg_int8_t)
+pgfn_cast_tid_to_int8(kern_context *kcxt, pg_tid_t arg)
+{
+	pg_int8_t	result;
+
+	if (arg.isnull)
+		result.isnull = true;
+	else
+	{
+		result.isnull = false;
+		result.value = (((cl_long)arg.value.ip_blkid.bi_hi << 32) |
+						((cl_long)arg.value.ip_blkid.bi_lo << 16) |
+						((cl_long)arg.value.ip_posid));
+	}
+	return result;
+}
+
+STATIC_INLINE(pg_tid_t)
+pgfn_cast_int8_to_tid(kern_context *kcxt, pg_int8_t arg)
+{
+	pg_tid_t	result;
+
+	if (arg.isnull)
+		result.isnull = true;
+	else
+	{
+		result.isnull = false;
+		result.value.ip_blkid.bi_hi = ((arg.value >> 32) & 0xffff);
+		result.value.ip_blkid.bi_lo = ((arg.value >> 16) & 0xffff);
+		result.value.ip_posid = (arg.value & 0xffff);
+	}
 	return result;
 }
 

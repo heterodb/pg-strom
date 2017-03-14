@@ -4,6 +4,27 @@
 CREATE SCHEMA IF NOT EXISTS pgstrom;
 
 --
+-- Support routines for ctid reference with gpu projection
+--
+CREATE FUNCTION pgstrom.cast_tid_to_int8(tid)
+  RETURNS bigint
+  AS 'MODULE_PATHNAME', 'pgstrom_cast_tid_to_int8'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pgstrom.cast_int8_to_tid(bigint)
+  RETURNS tid
+  AS 'MODULE_PATHNAME', 'pgstrom_cast_int8_to_tid'
+  LANGUAGE C STRICT;
+
+CREATE CAST (tid AS bigint)
+  WITH FUNCTION pgstrom.cast_tid_to_int8(tid)
+  AS IMPLICIT;
+
+CREATE CAST (bigint AS tid)
+  WITH FUNCTION pgstrom.cast_int8_to_tid(bigint)
+  AS IMPLICIT;
+
+--
 -- pg_strom installation queries
 --
 CREATE TYPE pgstrom.__pgstrom_dma_buffer_info AS (
