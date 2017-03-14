@@ -41,13 +41,8 @@ typedef unsigned long		cl_ulong;
 typedef float				cl_float;
 typedef double				cl_double;
 
-/*
- * OpenCL intermediator always adds -DOPENCL_DEVICE_CODE on kernel build,
- * but not for the host code, so this #if ... #endif block is available
- * only OpenCL device code.
- */
+/* CUDA NVRTC always adds -D__CUDACC__ on device code. */
 #ifdef __CUDACC__
-
 /* Misc definitions */
 #ifdef offsetof
 #undef offsetof
@@ -178,7 +173,7 @@ extern __shared__ cl_ulong __pgstrom_dynamic_shared_workmem[];
 #define __shared__		/* address space qualifier is noise on host */
 typedef uintptr_t		hostptr_t;
 #define __ldg(x)		(*(x))	/* cache access hint is just a noise on host */
-#endif
+#endif	/* __CUDACC__ */
 
 /*
  * Template of static function declarations

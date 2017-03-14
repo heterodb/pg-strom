@@ -18,5 +18,19 @@
 #ifndef CUDA_CURAND_H
 #define CUDA_CURAND_H
 #ifdef __CUDACC__
-#include <curand.h>
+/*
+ * NOTE: Because of several troubles of cuRAND library when we try to use it
+ * on NVRTC environment, right now, we give up to link full set of this
+ * library.
+ * It tries to include files out of the default include paths, then raise
+ * errors no qualifiers of functions, but __device__ as default configuration
+ * makes conflicts.
+ */
+#define __x86_64__
+#error "cuRAND on NVRTC still has several problems"
+#include <curand_kernel.h>
+#endif	/* __CUDACC__ */
+#ifdef __cplusplus
+	extern "C" {
+#endif
 #endif	/* CUDA_CURAND_H */

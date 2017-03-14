@@ -251,31 +251,31 @@ construct_flat_cuda_source(uint32 extra_flags,
 	/* PG-Strom CUDA device code libraries */
 
 	/* cuRand library */
-	if (extra_flags & DEVKERNEL_NEEDS_CURAND)
+	if ((extra_flags & DEVKERNEL_NEEDS_CURAND) == DEVKERNEL_NEEDS_CURAND)
 		appendStringInfoString(&source, pgstrom_cuda_curand_code);
 	/* cuBlas library */
-	if (extra_flags & DEVKERNEL_NEEDS_CUBLAS)
+	if ((extra_flags & DEVKERNEL_NEEDS_CUBLAS) == DEVKERNEL_NEEDS_CUBLAS)
 		appendStringInfoString(&source, pgstrom_cuda_cublas_code);
 	/* cuda dynpara.h */
-	if (extra_flags & DEVKERNEL_NEEDS_DYNPARA)
+	if ((extra_flags & DEVKERNEL_NEEDS_DYNPARA) == DEVKERNEL_NEEDS_DYNPARA)
 		appendStringInfoString(&source, pgstrom_cuda_dynpara_code);
 	/* cuda mathlib.h */
-	if (extra_flags & DEVKERNEL_NEEDS_MATHLIB)
+	if ((extra_flags & DEVKERNEL_NEEDS_MATHLIB) == DEVKERNEL_NEEDS_MATHLIB)
 		appendStringInfoString(&source, pgstrom_cuda_mathlib_code);
 	/* cuda timelib.h */
-	if (extra_flags & DEVKERNEL_NEEDS_TIMELIB)
+	if ((extra_flags & DEVKERNEL_NEEDS_TIMELIB) == DEVKERNEL_NEEDS_TIMELIB)
 		appendStringInfoString(&source, pgstrom_cuda_timelib_code);
 	/* cuda textlib.h */
-	if (extra_flags & DEVKERNEL_NEEDS_TEXTLIB)
+	if ((extra_flags & DEVKERNEL_NEEDS_TEXTLIB) == DEVKERNEL_NEEDS_TEXTLIB)
 		appendStringInfoString(&source, pgstrom_cuda_textlib_code);
 	/* cuda numeric.h */
-	if (extra_flags & DEVKERNEL_NEEDS_NUMERIC)
+	if ((extra_flags & DEVKERNEL_NEEDS_NUMERIC) == DEVKERNEL_NEEDS_NUMERIC)
 		appendStringInfoString(&source, pgstrom_cuda_numeric_code);
 	/* cuda money.h */
-	if (extra_flags & DEVKERNEL_NEEDS_MISC)
+	if ((extra_flags & DEVKERNEL_NEEDS_MISC) == DEVKERNEL_NEEDS_MISC)
 		appendStringInfoString(&source, pgstrom_cuda_misc_code);
 	/* cuda matrix.h */
-	if (extra_flags & DEVKERNEL_NEEDS_MATRIX)
+	if ((extra_flags & DEVKERNEL_NEEDS_MATRIX) == DEVKERNEL_NEEDS_MATRIX)
 		appendStringInfoString(&source, pgstrom_cuda_matrix_code);
 	/* pg_anytype_t declaration */
 	appendStringInfoString(
@@ -416,17 +416,8 @@ link_cuda_libraries(char *ptx_image, size_t ptx_length, cl_uint extra_flags,
 			elog(ERROR, "failed on cuLinkAddFile(\"%s\"): %s",
 				 pathname, errorText(rc));
 	}
-	/* libcurand_static.a, if any */
-	if (extra_flags & DEVKERNEL_NEEDS_CURAND)
-	{
-		snprintf(pathname, sizeof(pathname), "%s/libcurand_static.a",
-				 CUDA_LIBRARY_PATH);
-		rc = cuLinkAddFile(lstate, CU_JIT_INPUT_LIBRARY, pathname,
-						   0, NULL, NULL);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuLinkAddFile(\"%s\"): %s",
-				 pathname, errorText(rc));
-	}
+	/* cuRAND is a header-only library on device side */
+
 	/* libcublas_device.a, if any */
 	if (extra_flags & DEVKERNEL_NEEDS_CUBLAS)
 	{
@@ -592,6 +583,9 @@ __build_cuda_program(program_cache_entry *entry)
 	 * Put command line options
 	 */
 	options[opt_index++] = "-I " CUDA_INCLUDE_PATH;
+//  NOTE: we may need to add GCC default include path when we link
+//        actual cuRAND library....
+//	options[opt_index++] = "-I /usr/lib/gcc/x86_64-redhat-linux/4.8.5/include";
 	options[opt_index++] =
 		psprintf("--gpu-architecture=compute_%lu",
 				 devComputeCapability);

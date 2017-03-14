@@ -19,4 +19,5 @@
 #define CUDA_CUBLAS_H
 #ifdef __CUDACC__
 #include <cublas.h>
+#endif	/* __CUDACC__ */
 #endif	/* CUDA_CUBLAS_H */
