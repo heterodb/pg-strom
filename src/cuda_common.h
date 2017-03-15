@@ -2358,7 +2358,7 @@ pgfn_bool_is_not_unknown(kern_context *kcxt, pg_bool_t result)
 }
 
 /*
- * Type cast on behalf of tid<-->bigint
+ * Type cast for tid-->bigint, but no reverse direction in kernel space
  */
 STATIC_INLINE(pg_int8_t)
 pgfn_cast_tid_to_int8(kern_context *kcxt, pg_tid_t arg)
@@ -2373,23 +2373,6 @@ pgfn_cast_tid_to_int8(kern_context *kcxt, pg_tid_t arg)
 		result.value = (((cl_long)arg.value.ip_blkid.bi_hi << 32) |
 						((cl_long)arg.value.ip_blkid.bi_lo << 16) |
 						((cl_long)arg.value.ip_posid));
-	}
-	return result;
-}
-
-STATIC_INLINE(pg_tid_t)
-pgfn_cast_int8_to_tid(kern_context *kcxt, pg_int8_t arg)
-{
-	pg_tid_t	result;
-
-	if (arg.isnull)
-		result.isnull = true;
-	else
-	{
-		result.isnull = false;
-		result.value.ip_blkid.bi_hi = ((arg.value >> 32) & 0xffff);
-		result.value.ip_blkid.bi_lo = ((arg.value >> 16) & 0xffff);
-		result.value.ip_posid = (arg.value & 0xffff);
 	}
 	return result;
 }

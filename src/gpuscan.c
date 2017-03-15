@@ -20,7 +20,9 @@
 #include "access/sysattr.h"
 #include "access/xact.h"
 #include "catalog/heap.h"
+#include "catalog/namespace.h"
 #include "catalog/pg_namespace.h"
+#include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
 #include "executor/nodeCustom.h"
 #include "miscadmin.h"
@@ -43,6 +45,7 @@
 #include "utils/rel.h"
 #include "utils/ruleutils.h"
 #include "utils/spccache.h"
+#include "utils/syscache.h"
 #include "pg_strom.h"
 #include "cuda_numeric.h"
 #include "cuda_gpuscan.h"
@@ -906,7 +909,8 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 		"                   cl_bool *tup_internal)\n"
 		"{\n"
 		"  cl_bool is_slot_format __attribute__((unused));\n"
-		"  char *curr;\n");
+		"  char *curr;\n"
+		"  Datum datum __attribute__((unused));\n");
 
 	varremaps = palloc0(sizeof(AttrNumber) * tupdesc->natts);
 	varattnos = NULL;
@@ -945,17 +949,22 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 		Form_pg_attribute attr;
 		AttrNumber		anum = prev + FirstLowInvalidHeapAttributeNumber;
 
-		/* system column should not appear within device expression */
-		Assert(anum > 0);
-		attr = tupdesc->attrs[anum - 1];
+		Assert(anum != InvalidAttrNumber);
+		if (anum < 0)
+			attr = SystemAttributeDefinition(anum, true);
+		else
+			attr = tupdesc->attrs[anum - 1];
 
 		dtype = pgstrom_devtype_lookup(attr->atttypid);
 		if (!dtype)
 			elog(ERROR, "Bug? failed to lookup device supported type: %s",
 				 format_type_be(attr->atttypid));
-		appendStringInfo(&decl,
-						 "  pg_%s_t KVAR_%u;\n",
-						 dtype->type_name, anum);
+		if (anum < 0)
+			appendStringInfo(&decl, "  pg_%s_t KVAR_S%u;\n",
+							 dtype->type_name, -anum);
+		else
+			appendStringInfo(&decl, "  pg_%s_t KVAR_%u;\n",
+							 dtype->type_name, anum);
 	}
 
 	/*
@@ -969,15 +978,38 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 	/*
 	 * System columns reference if any
 	 */
-	for (j=0; j < list_length(tlist_dev); j++)
+	for (i=-1; i > FirstLowInvalidHeapAttributeNumber; i--)
 	{
-		Form_pg_attribute	attr;
+		Form_pg_attribute attr = SystemAttributeDefinition(i, true);
 
-		if (varremaps[j] >= 0)
-			continue;
+		k = i - FirstLowInvalidHeapAttributeNumber;
+		if (bms_is_member(k, varattnos))
+		{
+			dtype = pgstrom_devtype_lookup(attr->atttypid);
+			if (!dtype)
+				elog(ERROR, "device type lookup failed: %s",
+					 format_type_be(attr->atttypid));
+			appendStringInfo(
+				&body,
+				"  datum = kern_getsysatt_%s(kds_src,htup,t_self);\n"
+				"  KVAR_S%u = pg_%s_datum_ref(kcxt,&datum,false);\n",
+				NameStr(attr->attname),
+				-attr->attnum, dtype->type_name);
+		}
+	}
 
-		attr = SystemAttributeDefinition(varremaps[j], true);
-		if (attr->attbyval)
+	for (i=0; i < list_length(tlist_dev); i++)
+	{
+		if (varremaps[i] < 0)
+		{
+			Form_pg_attribute	attr
+				= SystemAttributeDefinition(varremaps[i], true);
+			/*
+			 * Only inline/fixed-length system column can be stored directly.
+			 * ctid has a pointer reference, thus, it shall be casted to bigint
+			 * not to consume extra buffer.
+			 */
+			Assert(attr->attbyval);
 			appendStringInfo(
 				&body,
 				"  /* %s system column */\n"
@@ -985,24 +1017,9 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 				"  if (htup)\n"
 				"    tup_values[%d] = kern_getsysatt_%s(kds_src,htup,t_self);\n",
 				NameStr(attr->attname),
-				j,
-				j, NameStr(attr->attname));
-		else
-			appendStringInfo(
-				&body,
-				"  /* %s system column */\n"
-				"  tup_isnull[%d] = !htup;\n"
-				"  if (htup)\n"
-				"  {\n"
-				"    void *__ptr = kern_getsysatt_%s(kds_src,htup,t_self);\n"
-				"    if (is_slot_format)\n"
-				"      __ptr = (void *)devptr_to_host(kds_src, __ptr);\n"
-				"    tup_values[%d] = PointerGetDatum(__ptr);\n"
-				"  }\n",
-				NameStr(attr->attname),
-				j,
-				NameStr(attr->attname),
-				j);
+				i,
+				i, NameStr(attr->attname));
+		}
 	}
 
 	/*
@@ -1371,12 +1388,178 @@ add_unique_expression(Expr *expr, List **p_targetlist, bool resjunk)
 }
 
 /*
+ * replace_ctid_by_double_cast - replace Var-node that referenced ctid system
+ * column by (ctid::bigint)::tid. The earlier half is an executable expression
+ * on the device side, then it can be written back as inline fixed-length
+ * variable. It enables not to use extra buffer.
+ */
+static Node *
+__replace_ctid_by_double_cast(Node *node, void *__context)
+{
+	if (!node)
+		return NULL;
+
+	if (IsA(node, Var))
+	{
+		Var	   *varnode = (Var *) node;
+
+		/*
+		 * NOTE: Special case handling if @ctid system column is referenced.
+		 * We cast @ctid to fixed-length inline datum (bigint) on device side,
+		 * then it shall be backed to tid type on host side again.
+		 */
+		if (varnode->varattno == SelfItemPointerAttributeNumber)
+		{
+			Oid				pgstrom_namespace;
+			Oid				tid_oid = TIDOID;
+			Oid				int8_oid = INT8OID;
+			oidvector	   *arg_oidvec;
+			HeapTuple		tuple;
+			Form_pg_proc	proc_form;
+			FuncExpr	   *f;
+
+			/* pgstrom schema */
+			pgstrom_namespace = get_namespace_oid("pgstrom", false);
+
+			/* pgstrom.cast_tid_to_int8 */
+			arg_oidvec = buildoidvector(&tid_oid, 1);
+			tuple = SearchSysCache3(PROCNAMEARGSNSP,
+									PointerGetDatum("cast_tid_to_int8"),
+									PointerGetDatum(arg_oidvec),
+									ObjectIdGetDatum(pgstrom_namespace));
+			if (!HeapTupleIsValid(tuple))
+				elog(ERROR, "cache lookup failed for cast_tid_to_int8");
+			proc_form = (Form_pg_proc) GETSTRUCT(tuple);
+
+			f = makeFuncExpr(HeapTupleGetOid(tuple),
+							 proc_form->prorettype,
+							 list_make1(copyObject(varnode)),
+							 InvalidOid,
+							 InvalidOid,
+							 COERCE_EXPLICIT_CAST);
+			ReleaseSysCache(tuple);
+
+			/* pgstrom.cast_int8_to_tid */
+			arg_oidvec = buildoidvector(&int8_oid, 1);
+			tuple = SearchSysCache3(PROCNAMEARGSNSP,
+									PointerGetDatum("cast_int8_to_tid"),
+									PointerGetDatum(arg_oidvec),
+									ObjectIdGetDatum(pgstrom_namespace));
+			if (!HeapTupleIsValid(tuple))
+				elog(ERROR, "cache lookup failed for cast_int8_to_tid");
+			proc_form = (Form_pg_proc) GETSTRUCT(tuple);
+
+			f = makeFuncExpr(HeapTupleGetOid(tuple),
+                             proc_form->prorettype,
+                             list_make1(f),
+                             InvalidOid,
+                             InvalidOid,
+                             COERCE_EXPLICIT_CAST);
+			ReleaseSysCache(tuple);
+
+			return (Node *) f;
+		}
+		return copyObject(varnode);
+	}
+	return expression_tree_mutator(node,
+								   __replace_ctid_by_double_cast,
+								   NULL);
+}
+
+static List *
+replace_ctid_by_double_cast(List *tlist)
+{
+	return (List *)__replace_ctid_by_double_cast((Node *)tlist, NULL);
+}
+
+/*
  * build_gpuscan_projection
  *
  * It checks whether the GpuProjection of GpuScan makes sense.
  * If executor may require the physically compatible tuple as result,
  * we don't need to have a projection in GPU side.
  */
+typedef struct
+{
+	Index		scanrelid;
+	TupleDesc	tupdesc;
+	int			attnum;
+	int			depth;
+	bool		compatible_tlist;
+	List	   *tlist_dev;
+} build_gpuscan_projection_context;
+
+static bool
+build_gpuscan_projection_walker(Node *node, void *__context)
+{
+	build_gpuscan_projection_context *context = __context;
+	TupleDesc	tupdesc = context->tupdesc;
+	int			attnum = context->attnum;
+	int			depth_saved;
+	bool		retval;
+
+	if (IsA(node, Var))
+	{
+		Var	   *varnode = (Var *) node;
+
+		/* if these Asserts fail, planner messed up */
+		Assert(varnode->varno == context->scanrelid);
+		Assert(varnode->varlevelsup == 0);
+
+		/* GPU projection cannot contain whole-row var */
+		if (varnode->varattno == InvalidAttrNumber)
+			return true;
+
+		/*
+		 * check whether the original tlist matches the physical layout
+		 * of the base relation. GPU can reorder the var reference
+		 * regardless of the data-type support.
+		 */
+		if (varnode->varattno != context->attnum || attnum > tupdesc->natts)
+			context->compatible_tlist = false;
+		else
+		{
+			Form_pg_attribute	attr = tupdesc->attrs[attnum-1];
+
+			/* should not be a reference to dropped columns */
+			Assert(!attr->attisdropped);
+			/* See the logic in tlist_matches_tupdesc */
+			if (varnode->vartype != attr->atttypid ||
+				(varnode->vartypmod != attr->atttypmod &&
+				 varnode->vartypmod != -1))
+				context->compatible_tlist = false;
+		}
+		/* add a primitive var-node on the tlist_dev */
+		if (!add_unique_expression((Expr *) varnode,
+								   &context->tlist_dev, false))
+			context->compatible_tlist = false;
+		return false;
+	}
+	else if (context->depth == 0 && (IsA(node, Const) || IsA(node, Param)))
+	{
+		/* no need to have top-level constant values on the device side */
+		context->compatible_tlist = false;
+		return false;
+	}
+	else if (pgstrom_device_expression((Expr *) node))
+	{
+		/* add device executable expression onto the tlist_dev */
+		add_unique_expression((Expr *) node, &context->tlist_dev, false);
+		/* of course, it is not a physically compatible tlist */
+		context->compatible_tlist = false;
+		return false;
+	}
+	/*
+	 * walks down if expression is host-only.
+	 */
+	depth_saved = context->depth++;
+	retval = expression_tree_walker(node, build_gpuscan_projection_walker,
+									context);
+	context->depth = depth_saved;
+	context->compatible_tlist = false;
+	return retval;
+}
+
 static List *
 build_gpuscan_projection(Index scanrelid,
 						 Relation relation,
@@ -1384,88 +1567,30 @@ build_gpuscan_projection(Index scanrelid,
 						 List *host_quals,
 						 List *dev_quals)
 {
-	TupleDesc	tupdesc = RelationGetDescr(relation);
-	List	   *tlist_dev = NIL;
-	AttrNumber	attnum = 1;
-	bool		compatible_tlist = true;
+	build_gpuscan_projection_context context;
 	ListCell   *lc;
+
+	memset(&context, 0, sizeof(context));
+	context.scanrelid = scanrelid;
+	context.tupdesc = RelationGetDescr(relation);
+	context.attnum = 0;
+	context.depth = 0;
+	context.tlist_dev = NIL;
+	context.compatible_tlist = true;
 
 	foreach (lc, tlist)
 	{
 		TargetEntry	   *tle = lfirst(lc);
 
-		if (IsA(tle->expr, Var))
-		{
-			Var	   *var = (Var *) tle->expr;
-
-			/* if these Asserts fail, planner messed up */
-			Assert(var->varno == scanrelid);
-			Assert(var->varlevelsup == 0);
-
-			/* GPU projection cannot contain whole-row var */
-			if (var->varattno == InvalidAttrNumber)
-				return NIL;
-
-			/*
-			 * check whether the original tlist matches the physical layout
-			 * of the base relation. GPU can reorder the var reference
-			 * regardless of the data-type support.
-			 */
-			if (var->varattno != attnum || attnum > tupdesc->natts)
-				compatible_tlist = false;
-			else
-			{
-				Form_pg_attribute	attr = tupdesc->attrs[attnum-1];
-
-				/* should not be a reference to dropped columns */
-				Assert(!attr->attisdropped);
-				/* See the logic in tlist_matches_tupdesc */
-				if (var->vartype != attr->atttypid ||
-					(var->vartypmod != attr->atttypmod &&
-					 var->vartypmod != -1))
-					compatible_tlist = false;
-			}
-			/* add a primitive var-node on the tlist_dev */
-			if (!add_unique_expression((Expr *) var, &tlist_dev, false))
-				compatible_tlist = false;
-		}
-		else if (pgstrom_device_expression(tle->expr))
-		{
-			/* add device executable expression onto the tlist_dev */
-			add_unique_expression(tle->expr, &tlist_dev, false);
-			/* of course, it is not a physically compatible tlist */
-			compatible_tlist = false;
-		}
-		else
-		{
-			/*
-			 * Elsewhere, expression is not device executable
-			 *
-			 * MEMO: We may be able to process Const/Param but no data-type
-			 * support on the device side, as long as its length is small
-			 * enought. However, we don't think it has frequent use cases
-			 * right now.
-			 */
-			List	   *vars_list = pull_vars_of_level((Node *)tle->expr, 0);
-			ListCell   *cell;
-
-			foreach (cell, vars_list)
-			{
-				Var	   *var = lfirst(cell);
-				if (var->varattno == InvalidAttrNumber)
-					return NIL;		/* no whole-row support */
-				add_unique_expression((Expr *)var, &tlist_dev, false);
-			}
-			list_free(vars_list);
-			/* of course, it is not a physically compatible tlist */
-			compatible_tlist = false;
-		}
-		attnum++;
+		context.attnum++;
+		if (build_gpuscan_projection_walker((Node *)tle->expr, &context))
+			return NIL;
+		Assert(context.depth == 0);
 	}
 
 	/* Is the tlist shorter than relation's definition? */
-	if (RelationGetNumberOfAttributes(relation) != attnum)
-		compatible_tlist = false;
+	if (RelationGetNumberOfAttributes(relation) != context.attnum)
+		context.compatible_tlist = false;
 
 	/*
 	 * Host quals needs 
@@ -1473,14 +1598,13 @@ build_gpuscan_projection(Index scanrelid,
 	if (host_quals)
 	{
 		List	   *vars_list = pull_vars_of_level((Node *)host_quals, 0);
-		ListCell   *cell;
 
-		foreach (cell, vars_list)
+		foreach (lc, vars_list)
 		{
-			Var	   *var = lfirst(cell);
+			Var	   *var = lfirst(lc);
 			if (var->varattno == InvalidAttrNumber)
 				return NIL;		/* no whole-row support */
-			add_unique_expression((Expr *)var, &tlist_dev, false);
+			add_unique_expression((Expr *)var, &context.tlist_dev, false);
 		}
 		list_free(vars_list);
 	}
@@ -1491,14 +1615,13 @@ build_gpuscan_projection(Index scanrelid,
 	if (dev_quals)
 	{
 		List	   *vars_list = pull_vars_of_level((Node *)dev_quals, 0);
-		ListCell   *cell;
 
-		foreach (cell, vars_list)
+		foreach (lc, vars_list)
 		{
-			Var	   *var = lfirst(cell);
+			Var	   *var = lfirst(lc);
 			if (var->varattno == InvalidAttrNumber)
 				return NIL;		/* no whole-row support */
-			add_unique_expression((Expr *)var, &tlist_dev, true);
+			add_unique_expression((Expr *)var, &context.tlist_dev, true);
 		}
 		list_free(vars_list);
 	}
@@ -1509,9 +1632,9 @@ build_gpuscan_projection(Index scanrelid,
 	 * expects physically compatible tuple, thus, it is uncertain whether
 	 * we should run GpuProjection for this GpuScan.
 	 */
-	if (compatible_tlist)
+	if (context.compatible_tlist)
 		return NIL;
-	return tlist_dev;
+	return context.tlist_dev;
 }
 
 /*
@@ -1671,8 +1794,11 @@ PlanGpuScanPath(PlannerInfo *root,
 	pgstrom_init_codegen_context(&context);
 	codegen_gpuscan_quals(&kern, &context, baserel->relid, dev_quals);
 
+	tlist = replace_ctid_by_double_cast(tlist);
 	tlist_dev = build_gpuscan_projection(baserel->relid, relation,
-										 tlist, host_quals, dev_quals);
+										 tlist,
+										 host_quals,
+										 dev_quals);
 	if (tlist_dev != NIL)
 	{
 		bufsz_estimate_gpuscan_projection(baserel, relation, tlist_dev,

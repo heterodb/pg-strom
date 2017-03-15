@@ -974,9 +974,6 @@ static devfunc_extra_catalog_t devfunc_extra_catalog[] = {
 	{"pgstrom.cast_tid_to_int8(pg_catalog.tid)",
 	 "bigint",
 	 "F:cast_tid_to_int8"},
-	{"pgstrom.cast_int8_to_tid(bigint)",
-	 "pg_catalog.tid",
-	 "F:cast_int8_to_tid"},
 };
 
 static void
@@ -1312,13 +1309,9 @@ pgstrom_devfunc_construct_extra(devfunc_info *entry,
 	char   *func_rettype = format_type_be_qualified(func_rettype_oid);
 	int		i;
 
-	elog(INFO, "sig=[%s] ret=[%s]", func_signature, func_rettype);
-
 	for (i=0; i < lengthof(devfunc_extra_catalog); i++)
 	{
 		devfunc_extra_catalog_t  *procat = devfunc_extra_catalog + i;
-
-		elog(INFO, "Sig=[%s] Ret=[%s]", procat->func_signature, procat->func_rettype);
 
 		if (strcmp(procat->func_signature, func_signature) == 0 &&
 			strcmp(procat->func_rettype, func_rettype) == 0)
