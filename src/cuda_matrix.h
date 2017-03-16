@@ -481,6 +481,14 @@ VALIDATE_ARRAY_MATRIX(MatrixType *matrix)
 		__syncthreads();												\
 	}
 
+KERNEL_FUNCTION(void)
+matrix_sort_init_row_index(cl_uint *row_index,
+						   kern_arg_t nitems)
+{
+	if (get_global_id() < nitems)
+		row_index[get_global_id()] = get_global_id();
+}
+
 #define PGSTROM_MATRIX_SORT_TEMPLATE(SUFFIX,BASETYPE,PG_TYPEOID)		\
 	PGSTROM_MATRIX_SORT_KEYCOMP_TEMPLATE(SUFFIX,BASETYPE)				\
 	PGSTROM_MATRIX_SORT_LOCAL_TEMPLATE(SUFFIX,BASETYPE)					\
@@ -666,6 +674,17 @@ VALIDATE_ARRAY_MATRIX(MatrixType *matrix)
 							  cl_uint		num_keys,					\
 							  cl_bool		is_descending)				\
 	{																	\
+		cudaError_t	status = cudaSuccess;								\
+																		\
+		status = pgstromLaunchDynamicKernel2((void *)					\
+											 matrix_sort_init_row_index, \
+											 (kern_arg_t)(row_index),	\
+											 ARRAY_MATRIX_HEIGHT(matrix), \
+											 ARRAY_MATRIX_HEIGHT(matrix), \
+											 0, 0);						\
+		if (status != cudaSuccess)										\
+			return status;												\
+																		\
 		return pgstromMatrixPartialSort##SUFFIX(row_index,				\
 											matrix,						\
 											ARRAY_MATRIX_HEIGHT(matrix), \
