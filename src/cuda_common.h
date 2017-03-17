@@ -1817,6 +1817,53 @@ pgstromStairlikeSum(cl_uint my_value, cl_uint *total_sum)
 }
 
 /*
+ * pgstromTotalSum
+ *
+ * A utility routine to calculate total sum of the supplied array which are
+ * consists of primitive types.
+ * Unlike pgstromStairLikeSum, it accepts larger length of the array than
+ * size of thread block, and unused threads shall be relaxed earlier.
+ *
+ * Restrictions:
+ * - array must be a primitive types, like int, double.
+ * - array must be on the shared memory.
+ * - all the threads must call the function simultaneously.
+ *   (Unacceptable to call the function in if-block)
+ */
+template <typename T>
+STATIC_FUNCTION(T)
+pgstromTotalSum(T *values, cl_uint nitems)
+{
+	cl_uint		nsteps = get_next_log2(nitems);
+	cl_uint		nthreads;
+	cl_uint		step;
+	cl_uint		loop;
+	T			retval;
+
+	if (nitems == 0)
+		return (T)(0);
+	__syncthreads();
+	for (step=1; step <= nsteps; step++)
+	{
+		nthreads = ((nitems - 1) >> step) + 1;
+
+		for (loop=get_local_id(); loop < nthreads; loop += get_local_size())
+		{
+			cl_uint		dst = (loop << step);
+			cl_uint		src = dst + (1U << (step - 1));
+
+			if (src < nitems)
+				values[dst] += values[src];
+		}
+		__syncthreads();
+	}
+	retval = values[0];
+	__syncthreads();
+
+	return retval;
+}
+
+/*
  * Utility functions to reference system columns
  */
 STATIC_INLINE(Datum)
