@@ -203,13 +203,15 @@ VALIDATE_ARRAY_MATRIX(MatrixType *matrix)
 #define ARRAY_MATRIX_DATAPTR(X)											\
 	(((MatrixType *)(X))->ndim == 2 ? ((MatrixType *)(X))->u.d2.values : \
 	 ((MatrixType *)(X))->ndim == 1 ? ((MatrixType *)(X))->u.d1.values : NULL)
-#define ARRAY_MATRIX_RAWSIZE(typlen,height,width)		\
-	offsetof(MatrixType, u.d2.values[(size_t)(typlen) *	\
-									 (size_t)(height) *	\
-									 (size_t)(width)])
-#define ARRAY_VECTOR_RAWSIZE(typlen,nitems)				\
-	offsetof(MatrixType, u.d1.values[(size_t)(typlen) *	\
-									 (size_t)(nitems)])
+#define ARRAY_MATRIX_RAWSIZE(typlen,height,width)				\
+	STROMALIGN(offsetof(MatrixType,								\
+						u.d2.values[(size_t)(typlen) *			\
+									(size_t)(height) *			\
+									(size_t)(width)]))
+#define ARRAY_VECTOR_RAWSIZE(typlen,nitems)						\
+	STROMALIGN(offsetof(MatrixType,								\
+						u.d1.values[(size_t)(typlen) *			\
+									(size_t)(nitems)]))
 
 #define INIT_ARRAY_VECTOR(X,_elemtype,_typlen,_nitems)			\
 	do {														\
