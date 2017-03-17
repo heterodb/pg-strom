@@ -184,17 +184,18 @@ typedef uintptr_t		hostptr_t;
  * assigned on host/device functions
  */
 #ifdef __CUDACC__
-#define STATIC_INLINE(RET_TYPE)						\
+#define STATIC_INLINE(RET_TYPE)					\
 	__device__ __forceinline__ static RET_TYPE __attribute__ ((unused))
-#define STATIC_FUNCTION(RET_TYPE)					\
+#define STATIC_FUNCTION(RET_TYPE)				\
 	__device__ static RET_TYPE __attribute__ ((unused))
-#define KERNEL_FUNCTION(RET_TYPE)	__global__ RET_TYPE
+#define KERNEL_FUNCTION(RET_TYPE)				\
+	extern "C" __global__ RET_TYPE
 #if __CUDA_ARCH__ < 200
 #define KERNEL_FUNCTION_MAXTHREADS(RET_TYPE)	\
-	__global__ RET_TYPE __launch_bounds__(512)
+	extern "C" __global__ RET_TYPE __launch_bounds__(512)
 #else
 #define KERNEL_FUNCTION_MAXTHREADS(RET_TYPE)	\
-	__global__ RET_TYPE __launch_bounds__(1024)
+	extern "C" __global__ RET_TYPE __launch_bounds__(1024)
 #endif
 #else
 #define STATIC_INLINE(RET_TYPE)		static inline RET_TYPE

@@ -235,13 +235,6 @@ construct_flat_cuda_source(uint32 extra_flags,
 	appendStringInfo(&source,
 					 "#define PGSTROM_DEBUG %d\n", PGSTROM_DEBUG);
 #endif
-
-	/* disable C++ feature */
-	appendStringInfo(&source,
-					 "#ifdef __cplusplus\n"
-					 "extern \"C\" {\n"
-					 "#endif	/* __cplusplus */\n");
-
 	/* Common PG-Strom device routine */
 	appendStringInfoString(&source, pgstrom_cuda_common_code);
 
@@ -333,11 +326,6 @@ construct_flat_cuda_source(uint32 extra_flags,
 	/* Source code to fix up undefined type/functions */
 	appendStringInfoString(&source, pgstrom_cuda_terminal_code);
 
-	/* disable C++ feature */
-	appendStringInfo(&source,
-					 "#ifdef __cplusplus\n"
-					 "}\n"
-					 "#endif /* __cplusplus */\n");
 	return source.data;
 }
 
@@ -406,7 +394,7 @@ link_cuda_libraries(char *ptx_image, size_t ptx_length, cl_uint extra_flags,
 		elog(ERROR, "failed on cuLinkAddData: %s", errorText(rc));
 
 	/* libcudart.a, if any */
-	if (extra_flags & DEVKERNEL_NEEDS_DYNPARA)
+	if ((extra_flags & DEVKERNEL_NEEDS_DYNPARA) == DEVKERNEL_NEEDS_DYNPARA)
 	{
 		snprintf(pathname, sizeof(pathname), "%s/libcudadevrt.a",
 				 CUDA_LIBRARY_PATH);
@@ -419,7 +407,7 @@ link_cuda_libraries(char *ptx_image, size_t ptx_length, cl_uint extra_flags,
 	/* cuRAND is a header-only library on device side */
 
 	/* libcublas_device.a, if any */
-	if (extra_flags & DEVKERNEL_NEEDS_CUBLAS)
+	if ((extra_flags & DEVKERNEL_NEEDS_CUBLAS) == DEVKERNEL_NEEDS_CUBLAS)
 	{
 		snprintf(pathname, sizeof(pathname), "%s/libcublas_device.a",
 				 CUDA_LIBRARY_PATH);
@@ -717,10 +705,16 @@ __build_cuda_program(program_cache_entry *entry)
 	/* wake up backends which wait for build */
 	pgstrom_wakeup_backends(entry->waiting_backends);
 #endif
-	/* reclaim the older buffer if overconsumption */
-	dlist_move_head(&pgcache_head->lru_list, &entry->lru_chain);
-	if (pgcache_head->program_cache_usage > program_cache_size)
-		reclaim_cuda_program_entry();
+	/*
+	 * Reclaim the older buffer if overconsumption. Also note that this
+	 * entry might be already reclaimed by others.
+	 */
+	if (entry->lru_chain.prev && entry->lru_chain.next)
+	{
+		dlist_move_head(&pgcache_head->lru_list, &entry->lru_chain);
+		if (pgcache_head->program_cache_usage > program_cache_size)
+			reclaim_cuda_program_entry();
+	}
 	SpinLockRelease(&pgcache_head->lock);
 
 	/* release nvrtcProgram object */
