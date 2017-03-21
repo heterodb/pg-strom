@@ -626,55 +626,6 @@ extern Datum plcuda_function_source(PG_FUNCTION_ARGS);
 extern void pgstrom_init_plcuda(void);
 
 /*
- * matrix.c
- */
-extern Datum array_matrix_accum(PG_FUNCTION_ARGS);
-extern Datum array_matrix_accum_varbit(PG_FUNCTION_ARGS);
-extern Datum varbit_to_int4_array(PG_FUNCTION_ARGS);
-extern Datum int4_array_to_varbit(PG_FUNCTION_ARGS);
-extern Datum array_matrix_final_int2(PG_FUNCTION_ARGS);
-extern Datum array_matrix_final_int4(PG_FUNCTION_ARGS);
-extern Datum array_matrix_final_int8(PG_FUNCTION_ARGS);
-extern Datum array_matrix_final_float4(PG_FUNCTION_ARGS);
-extern Datum array_matrix_final_float8(PG_FUNCTION_ARGS);
-extern Datum array_matrix_unnest(PG_FUNCTION_ARGS);
-extern Datum array_matrix_rbind_int2(PG_FUNCTION_ARGS);
-extern Datum array_matrix_rbind_int4(PG_FUNCTION_ARGS);
-extern Datum array_matrix_rbind_int8(PG_FUNCTION_ARGS);
-extern Datum array_matrix_rbind_float4(PG_FUNCTION_ARGS);
-extern Datum array_matrix_rbind_float8(PG_FUNCTION_ARGS);
-extern Datum array_matrix_cbind_int2(PG_FUNCTION_ARGS);
-extern Datum array_matrix_cbind_int4(PG_FUNCTION_ARGS);
-extern Datum array_matrix_cbind_int8(PG_FUNCTION_ARGS);
-extern Datum array_matrix_cbind_float4(PG_FUNCTION_ARGS);
-extern Datum array_matrix_cbind_float8(PG_FUNCTION_ARGS);
-extern Datum array_matrix_rbind_accum(PG_FUNCTION_ARGS);
-extern Datum array_matrix_rbind_final_int2(PG_FUNCTION_ARGS);
-extern Datum array_matrix_rbind_final_int4(PG_FUNCTION_ARGS);
-extern Datum array_matrix_rbind_final_int8(PG_FUNCTION_ARGS);
-extern Datum array_matrix_rbind_final_float4(PG_FUNCTION_ARGS);
-extern Datum array_matrix_rbind_final_float8(PG_FUNCTION_ARGS);
-extern Datum array_matrix_cbind_accum(PG_FUNCTION_ARGS);
-extern Datum array_matrix_cbind_final_int2(PG_FUNCTION_ARGS);
-extern Datum array_matrix_cbind_final_int4(PG_FUNCTION_ARGS);
-extern Datum array_matrix_cbind_final_int8(PG_FUNCTION_ARGS);
-extern Datum array_matrix_cbind_final_float4(PG_FUNCTION_ARGS);
-extern Datum array_matrix_cbind_final_float8(PG_FUNCTION_ARGS);
-extern Datum array_matrix_transpose_int2(PG_FUNCTION_ARGS);
-extern Datum array_matrix_transpose_int4(PG_FUNCTION_ARGS);
-extern Datum array_matrix_transpose_int8(PG_FUNCTION_ARGS);
-extern Datum array_matrix_transpose_float4(PG_FUNCTION_ARGS);
-extern Datum array_matrix_transpose_float8(PG_FUNCTION_ARGS);
-extern Datum float4_as_int4(PG_FUNCTION_ARGS);
-extern Datum int4_as_float4(PG_FUNCTION_ARGS);
-extern Datum float8_as_int8(PG_FUNCTION_ARGS);
-extern Datum int8_as_float8(PG_FUNCTION_ARGS);
-extern Datum array_matrix_validation(PG_FUNCTION_ARGS);
-extern Datum array_matrix_height(PG_FUNCTION_ARGS);
-extern Datum array_matrix_width(PG_FUNCTION_ARGS);
-extern Datum array_matrix_rawsize(PG_FUNCTION_ARGS);
-
-/*
  * main.c
  */
 extern bool		pgstrom_enabled;

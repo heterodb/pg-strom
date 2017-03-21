@@ -31,6 +31,73 @@
 #include "cuda_matrix.h"
 #include <math.h>
 
+/* function declarations */
+extern Datum array_matrix_accum(PG_FUNCTION_ARGS);
+extern Datum array_matrix_accum_varbit(PG_FUNCTION_ARGS);
+extern Datum varbit_to_int4_array(PG_FUNCTION_ARGS);
+extern Datum int4_array_to_varbit(PG_FUNCTION_ARGS);
+extern Datum array_matrix_final_int2(PG_FUNCTION_ARGS);
+extern Datum array_matrix_final_int4(PG_FUNCTION_ARGS);
+extern Datum array_matrix_final_int8(PG_FUNCTION_ARGS);
+extern Datum array_matrix_final_float4(PG_FUNCTION_ARGS);
+extern Datum array_matrix_final_float8(PG_FUNCTION_ARGS);
+extern Datum array_matrix_unnest(PG_FUNCTION_ARGS);
+extern Datum array_matrix_rbind_int2(PG_FUNCTION_ARGS);
+extern Datum array_matrix_rbind_int4(PG_FUNCTION_ARGS);
+extern Datum array_matrix_rbind_int8(PG_FUNCTION_ARGS);
+extern Datum array_matrix_rbind_float4(PG_FUNCTION_ARGS);
+extern Datum array_matrix_rbind_float8(PG_FUNCTION_ARGS);
+extern Datum array_matrix_rbind_scalar_int2t(PG_FUNCTION_ARGS);
+extern Datum array_matrix_rbind_scalar_int2b(PG_FUNCTION_ARGS);
+extern Datum array_matrix_rbind_scalar_int4t(PG_FUNCTION_ARGS);
+extern Datum array_matrix_rbind_scalar_int4b(PG_FUNCTION_ARGS);
+extern Datum array_matrix_rbind_scalar_int8t(PG_FUNCTION_ARGS);
+extern Datum array_matrix_rbind_scalar_int8b(PG_FUNCTION_ARGS);
+extern Datum array_matrix_rbind_scalar_float4t(PG_FUNCTION_ARGS);
+extern Datum array_matrix_rbind_scalar_float4b(PG_FUNCTION_ARGS);
+extern Datum array_matrix_rbind_scalar_float8t(PG_FUNCTION_ARGS);
+extern Datum array_matrix_rbind_scalar_float8b(PG_FUNCTION_ARGS);
+extern Datum array_matrix_cbind_int2(PG_FUNCTION_ARGS);
+extern Datum array_matrix_cbind_int4(PG_FUNCTION_ARGS);
+extern Datum array_matrix_cbind_int8(PG_FUNCTION_ARGS);
+extern Datum array_matrix_cbind_float4(PG_FUNCTION_ARGS);
+extern Datum array_matrix_cbind_float8(PG_FUNCTION_ARGS);
+extern Datum array_matrix_cbind_scalar_int2l(PG_FUNCTION_ARGS);
+extern Datum array_matrix_cbind_scalar_int2r(PG_FUNCTION_ARGS);
+extern Datum array_matrix_cbind_scalar_int4l(PG_FUNCTION_ARGS);
+extern Datum array_matrix_cbind_scalar_int4r(PG_FUNCTION_ARGS);
+extern Datum array_matrix_cbind_scalar_int8l(PG_FUNCTION_ARGS);
+extern Datum array_matrix_cbind_scalar_int8r(PG_FUNCTION_ARGS);
+extern Datum array_matrix_cbind_scalar_float4l(PG_FUNCTION_ARGS);
+extern Datum array_matrix_cbind_scalar_float4r(PG_FUNCTION_ARGS);
+extern Datum array_matrix_cbind_scalar_float8l(PG_FUNCTION_ARGS);
+extern Datum array_matrix_cbind_scalar_float8r(PG_FUNCTION_ARGS);
+extern Datum array_matrix_rbind_accum(PG_FUNCTION_ARGS);
+extern Datum array_matrix_rbind_final_int2(PG_FUNCTION_ARGS);
+extern Datum array_matrix_rbind_final_int4(PG_FUNCTION_ARGS);
+extern Datum array_matrix_rbind_final_int8(PG_FUNCTION_ARGS);
+extern Datum array_matrix_rbind_final_float4(PG_FUNCTION_ARGS);
+extern Datum array_matrix_rbind_final_float8(PG_FUNCTION_ARGS);
+extern Datum array_matrix_cbind_accum(PG_FUNCTION_ARGS);
+extern Datum array_matrix_cbind_final_int2(PG_FUNCTION_ARGS);
+extern Datum array_matrix_cbind_final_int4(PG_FUNCTION_ARGS);
+extern Datum array_matrix_cbind_final_int8(PG_FUNCTION_ARGS);
+extern Datum array_matrix_cbind_final_float4(PG_FUNCTION_ARGS);
+extern Datum array_matrix_cbind_final_float8(PG_FUNCTION_ARGS);
+extern Datum array_matrix_transpose_int2(PG_FUNCTION_ARGS);
+extern Datum array_matrix_transpose_int4(PG_FUNCTION_ARGS);
+extern Datum array_matrix_transpose_int8(PG_FUNCTION_ARGS);
+extern Datum array_matrix_transpose_float4(PG_FUNCTION_ARGS);
+extern Datum array_matrix_transpose_float8(PG_FUNCTION_ARGS);
+extern Datum float4_as_int4(PG_FUNCTION_ARGS);
+extern Datum int4_as_float4(PG_FUNCTION_ARGS);
+extern Datum float8_as_int8(PG_FUNCTION_ARGS);
+extern Datum int8_as_float8(PG_FUNCTION_ARGS);
+extern Datum array_matrix_validation(PG_FUNCTION_ARGS);
+extern Datum array_matrix_height(PG_FUNCTION_ARGS);
+extern Datum array_matrix_width(PG_FUNCTION_ARGS);
+extern Datum array_matrix_rawsize(PG_FUNCTION_ARGS);
+
 /* fmgr macros for regular varlena matrix  objects */
 #define DatumGetMatrixTypeP(X)					\
 	((MatrixType *) PG_DETOAST_DATUM(X))
@@ -41,6 +108,35 @@
 #define PG_GETARG_MATRIXTYPE_P_COPY(n)			\
 	DatumGetMatrixTypePCopy(PG_GETARG_DATUM(n))
 #define PG_RETURN_MATRIXTYPE_P(x)		PG_RETURN_POINTER(x)
+
+/*
+ * create_empty_matrix
+ */
+static MatrixType *
+create_empty_matrix(Oid type_oid, cl_uint width, cl_uint height)
+{
+	Size		type_len;
+	MatrixType *M;
+
+	Assert(width > 0);
+	switch (type_oid)
+	{
+		case INT2OID:	type_len = sizeof(int16);	break;
+		case INT4OID:	type_len = sizeof(int32);	break;
+		case INT8OID:	type_len = sizeof(int64);	break;
+		case FLOAT4OID:	type_len = sizeof(float);	break;
+		case FLOAT8OID:	type_len = sizeof(double);	break;
+		default:
+			elog(ERROR, "array-matrix does not support: %s",
+				 format_type_be(type_oid));
+	}
+	M = palloc(ARRAY_MATRIX_RAWSIZE(type_len,height,width));
+	if (width == 1)
+		INIT_ARRAY_VECTOR(M,type_oid,type_len,height);
+	else
+		INIT_ARRAY_MATRIX(M,type_oid,type_len,height,width);
+	return M;
+}
 
 /*
  * Constructor of Matrix-like Array
@@ -548,8 +644,8 @@ array_martix_rbind(Oid elemtype, MatrixType *X, MatrixType *Y)
 	}
 
 	/* copy from the bottom-matrix */
-	src = ARRAY_MATRIX_DATAPTR(R) + typlen * x_height;
-	dst = ARRAY_MATRIX_DATAPTR(Y);
+	src = ARRAY_MATRIX_DATAPTR(Y);
+	dst = ARRAY_MATRIX_DATAPTR(R) + typlen * x_height;
 	for (i=0; i < r_width; i++)
 	{
 		if (i < y_width)
@@ -606,6 +702,166 @@ array_matrix_rbind_float8(PG_FUNCTION_ARGS)
 	PG_RETURN_MATRIXTYPE_P(array_martix_rbind(FLOAT8OID, X, Y));
 }
 PG_FUNCTION_INFO_V1(array_matrix_rbind_float8);
+
+Datum
+array_matrix_rbind_scalar_int2t(PG_FUNCTION_ARGS)
+{
+	MatrixType *M = PG_GETARG_MATRIXTYPE_P(1);
+	MatrixType *S;
+	int16	   *v, scalar = PG_GETARG_INT16(0);
+	int			i, width = ARRAY_MATRIX_WIDTH(M);
+
+	S = create_empty_matrix(INT2OID, width, 1);
+	v = (int16 *)ARRAY_MATRIX_DATAPTR(S);
+	for (i=0; i < width; i++)
+		v[i] = scalar;
+	PG_RETURN_MATRIXTYPE_P(array_martix_rbind(INT2OID,S,M));
+}
+PG_FUNCTION_INFO_V1(array_matrix_rbind_scalar_int2t);
+
+Datum
+array_matrix_rbind_scalar_int2b(PG_FUNCTION_ARGS)
+{
+	MatrixType *M = PG_GETARG_MATRIXTYPE_P(0);
+	MatrixType *S;
+	int16	   *v, scalar = PG_GETARG_INT16(1);
+	int			i, width = ARRAY_MATRIX_WIDTH(M);
+
+	S = create_empty_matrix(INT2OID, width, 1);
+	v = (int16 *)ARRAY_MATRIX_DATAPTR(S);
+	for (i=0; i < width; i++)
+		v[i] = scalar;
+	PG_RETURN_MATRIXTYPE_P(array_martix_rbind(INT2OID,M,S));
+}
+PG_FUNCTION_INFO_V1(array_matrix_rbind_scalar_int2b);
+
+Datum
+array_matrix_rbind_scalar_int4t(PG_FUNCTION_ARGS)
+{
+	MatrixType *M = PG_GETARG_MATRIXTYPE_P(1);
+	MatrixType *S;
+	int32	   *v, scalar = PG_GETARG_INT32(0);
+	int			i, width = ARRAY_MATRIX_WIDTH(M);
+
+	S = create_empty_matrix(INT4OID, width, 1);
+	v = (int32 *)ARRAY_MATRIX_DATAPTR(S);
+	for (i=0; i < width; i++)
+		v[i] = scalar;
+	PG_RETURN_MATRIXTYPE_P(array_martix_rbind(INT4OID,S,M));
+}
+PG_FUNCTION_INFO_V1(array_matrix_rbind_scalar_int4t);
+
+Datum
+array_matrix_rbind_scalar_int4b(PG_FUNCTION_ARGS)
+{
+	MatrixType *M = PG_GETARG_MATRIXTYPE_P(0);
+	MatrixType *S;
+	int32	   *v, scalar = PG_GETARG_INT32(1);
+	int			i, width = ARRAY_MATRIX_WIDTH(M);
+
+	S = create_empty_matrix(INT4OID, width, 1);
+	v = (int32 *)ARRAY_MATRIX_DATAPTR(S);
+	for (i=0; i < width; i++)
+		v[i] = scalar;
+	PG_RETURN_MATRIXTYPE_P(array_martix_rbind(INT4OID,M,S));
+}
+PG_FUNCTION_INFO_V1(array_matrix_rbind_scalar_int4b);
+
+Datum
+array_matrix_rbind_scalar_int8t(PG_FUNCTION_ARGS)
+{
+	MatrixType *M = PG_GETARG_MATRIXTYPE_P(1);
+	MatrixType *S;
+	int64	   *v, scalar = PG_GETARG_INT64(0);
+	int			i, width = ARRAY_MATRIX_WIDTH(M);
+
+	S = create_empty_matrix(INT8OID, width, 1);
+	v = (int64 *)ARRAY_MATRIX_DATAPTR(S);
+	for (i=0; i < width; i++)
+		v[i] = scalar;
+	PG_RETURN_MATRIXTYPE_P(array_martix_rbind(INT8OID,S,M));
+}
+PG_FUNCTION_INFO_V1(array_matrix_rbind_scalar_int8t);
+
+Datum
+array_matrix_rbind_scalar_int8b(PG_FUNCTION_ARGS)
+{
+	MatrixType *M = PG_GETARG_MATRIXTYPE_P(0);
+	MatrixType *S;
+	int64	   *v, scalar = PG_GETARG_INT64(1);
+	int			i, width = ARRAY_MATRIX_WIDTH(M);
+
+	S = create_empty_matrix(INT8OID, width, 1);
+	v = (int64 *)ARRAY_MATRIX_DATAPTR(S);
+	for (i=0; i < width; i++)
+		v[i] = scalar;
+	PG_RETURN_MATRIXTYPE_P(array_martix_rbind(INT8OID,M,S));
+}
+PG_FUNCTION_INFO_V1(array_matrix_rbind_scalar_int8b);
+
+Datum
+array_matrix_rbind_scalar_float4t(PG_FUNCTION_ARGS)
+{
+	MatrixType *M = PG_GETARG_MATRIXTYPE_P(1);
+	MatrixType *S;
+	float4	   *v, scalar = PG_GETARG_FLOAT4(0);
+	int			i, width = ARRAY_MATRIX_WIDTH(M);
+
+	S = create_empty_matrix(FLOAT4OID, width, 1);
+	v = (float4 *)ARRAY_MATRIX_DATAPTR(S);
+	for (i=0; i < width; i++)
+		v[i] = scalar;
+	PG_RETURN_MATRIXTYPE_P(array_martix_rbind(FLOAT4OID,S,M));
+}
+PG_FUNCTION_INFO_V1(array_matrix_rbind_scalar_float4t);
+
+Datum
+array_matrix_rbind_scalar_float4b(PG_FUNCTION_ARGS)
+{
+	MatrixType *M = PG_GETARG_MATRIXTYPE_P(0);
+	MatrixType *S;
+	float4	   *v, scalar = PG_GETARG_FLOAT4(1);
+	int			i, width = ARRAY_MATRIX_WIDTH(M);
+
+	S = create_empty_matrix(FLOAT4OID, width, 1);
+	v = (float4 *)ARRAY_MATRIX_DATAPTR(S);
+	for (i=0; i < width; i++)
+		v[i] = scalar;
+	PG_RETURN_MATRIXTYPE_P(array_martix_rbind(FLOAT4OID,M,S));
+}
+PG_FUNCTION_INFO_V1(array_matrix_rbind_scalar_float4b);
+
+Datum
+array_matrix_rbind_scalar_float8t(PG_FUNCTION_ARGS)
+{
+	MatrixType *M = PG_GETARG_MATRIXTYPE_P(1);
+	MatrixType *S;
+	float8	   *v, scalar = PG_GETARG_FLOAT8(0);
+	int			i, width = ARRAY_MATRIX_WIDTH(M);
+
+	S = create_empty_matrix(FLOAT8OID, width, 1);
+	v = (float8 *)ARRAY_MATRIX_DATAPTR(S);
+	for (i=0; i < width; i++)
+		v[i] = scalar;
+	PG_RETURN_MATRIXTYPE_P(array_martix_rbind(FLOAT8OID,S,M));
+}
+PG_FUNCTION_INFO_V1(array_matrix_rbind_scalar_float8t);
+
+Datum
+array_matrix_rbind_scalar_float8b(PG_FUNCTION_ARGS)
+{
+	MatrixType *M = PG_GETARG_MATRIXTYPE_P(0);
+	MatrixType *S;
+	float8	   *v, scalar = PG_GETARG_FLOAT8(1);
+	int			i, width = ARRAY_MATRIX_WIDTH(M);
+
+	S = create_empty_matrix(FLOAT8OID, width, 1);
+	v = (float8 *)ARRAY_MATRIX_DATAPTR(S);
+	for (i=0; i < width; i++)
+		v[i] = scalar;
+	PG_RETURN_MATRIXTYPE_P(array_martix_rbind(FLOAT8OID,M,S));
+}
+PG_FUNCTION_INFO_V1(array_matrix_rbind_scalar_float8b);
 
 /*
  * cbind that takes two arrays
@@ -709,6 +965,166 @@ array_matrix_cbind_float8(PG_FUNCTION_ARGS)
 	PG_RETURN_MATRIXTYPE_P(array_martix_cbind(FLOAT8OID, X, Y));
 }
 PG_FUNCTION_INFO_V1(array_matrix_cbind_float8);
+
+Datum
+array_matrix_cbind_scalar_int2l(PG_FUNCTION_ARGS)
+{
+	MatrixType *M = PG_GETARG_MATRIXTYPE_P(1);
+	MatrixType *S;
+	int16	   *v, scalar = PG_GETARG_INT16(0);
+	int			i, height = ARRAY_MATRIX_HEIGHT(M);
+
+	S = create_empty_matrix(INT2OID, 1, height);
+	v = (int16 *)ARRAY_MATRIX_DATAPTR(S);
+	for (i=0; i < height; i++)
+		v[i] = scalar;
+	PG_RETURN_MATRIXTYPE_P(array_martix_cbind(INT2OID,S,M));
+}
+PG_FUNCTION_INFO_V1(array_matrix_cbind_scalar_int2l);
+
+Datum
+array_matrix_cbind_scalar_int2r(PG_FUNCTION_ARGS)
+{
+	MatrixType *M = PG_GETARG_MATRIXTYPE_P(0);
+	MatrixType *S;
+	int16	   *v, scalar = PG_GETARG_INT16(1);
+	int			i, height = ARRAY_MATRIX_HEIGHT(M);
+
+	S = create_empty_matrix(INT2OID, 1, height);
+	v = (int16 *)ARRAY_MATRIX_DATAPTR(S);
+	for (i=0; i < height; i++)
+		v[i] = scalar;
+	PG_RETURN_MATRIXTYPE_P(array_martix_cbind(INT2OID,M,S));
+}
+PG_FUNCTION_INFO_V1(array_matrix_cbind_scalar_int2r);
+
+Datum
+array_matrix_cbind_scalar_int4l(PG_FUNCTION_ARGS)
+{
+	MatrixType *M = PG_GETARG_MATRIXTYPE_P(1);
+	MatrixType *S;
+	int32	   *v, scalar = PG_GETARG_INT32(0);
+	int			i, height = ARRAY_MATRIX_HEIGHT(M);
+
+	S = create_empty_matrix(INT4OID, 1, height);
+	v = (int32 *)ARRAY_MATRIX_DATAPTR(S);
+	for (i=0; i < height; i++)
+		v[i] = scalar;
+	PG_RETURN_MATRIXTYPE_P(array_martix_cbind(INT4OID,S,M));
+}
+PG_FUNCTION_INFO_V1(array_matrix_cbind_scalar_int4l);
+
+Datum
+array_matrix_cbind_scalar_int4r(PG_FUNCTION_ARGS)
+{
+	MatrixType *M = PG_GETARG_MATRIXTYPE_P(0);
+	MatrixType *S;
+	int32	   *v, scalar = PG_GETARG_INT32(1);
+	int			i, height = ARRAY_MATRIX_HEIGHT(M);
+
+	S = create_empty_matrix(INT4OID, 1, height);
+	v = (int32 *)ARRAY_MATRIX_DATAPTR(S);
+	for (i=0; i < height; i++)
+		v[i] = scalar;
+	PG_RETURN_MATRIXTYPE_P(array_martix_cbind(INT4OID,M,S));
+}
+PG_FUNCTION_INFO_V1(array_matrix_cbind_scalar_int4r);
+
+Datum
+array_matrix_cbind_scalar_int8l(PG_FUNCTION_ARGS)
+{
+	MatrixType *M = PG_GETARG_MATRIXTYPE_P(1);
+	MatrixType *S;
+	int64	   *v, scalar = PG_GETARG_INT64(0);
+	int			i, height = ARRAY_MATRIX_HEIGHT(M);
+
+	S = create_empty_matrix(INT8OID, 1, height);
+	v = (int64 *)ARRAY_MATRIX_DATAPTR(S);
+	for (i=0; i < height; i++)
+		v[i] = scalar;
+	PG_RETURN_MATRIXTYPE_P(array_martix_cbind(INT8OID,S,M));
+}
+PG_FUNCTION_INFO_V1(array_matrix_cbind_scalar_int8l);
+
+Datum
+array_matrix_cbind_scalar_int8r(PG_FUNCTION_ARGS)
+{
+	MatrixType *M = PG_GETARG_MATRIXTYPE_P(0);
+	MatrixType *S;
+	int64	   *v, scalar = PG_GETARG_INT64(1);
+	int			i, height = ARRAY_MATRIX_HEIGHT(M);
+
+	S = create_empty_matrix(INT8OID, 1, height);
+	v = (int64 *)ARRAY_MATRIX_DATAPTR(S);
+	for (i=0; i < height; i++)
+		v[i] = scalar;
+	PG_RETURN_MATRIXTYPE_P(array_martix_cbind(INT8OID,M,S));
+}
+PG_FUNCTION_INFO_V1(array_matrix_cbind_scalar_int8r);
+
+Datum
+array_matrix_cbind_scalar_float4l(PG_FUNCTION_ARGS)
+{
+	MatrixType *M = PG_GETARG_MATRIXTYPE_P(1);
+	MatrixType *S;
+	float4	   *v, scalar = PG_GETARG_FLOAT4(0);
+	int			i, height = ARRAY_MATRIX_HEIGHT(M);
+
+	S = create_empty_matrix(FLOAT4OID, 1, height);
+	v = (float4 *)ARRAY_MATRIX_DATAPTR(S);
+	for (i=0; i < height; i++)
+		v[i] = scalar;
+	PG_RETURN_MATRIXTYPE_P(array_martix_cbind(FLOAT4OID,S,M));
+}
+PG_FUNCTION_INFO_V1(array_matrix_cbind_scalar_float4l);
+
+Datum
+array_matrix_cbind_scalar_float4r(PG_FUNCTION_ARGS)
+{
+	MatrixType *M = PG_GETARG_MATRIXTYPE_P(0);
+	MatrixType *S;
+	float4	   *v, scalar = PG_GETARG_FLOAT4(1);
+	int			i, height = ARRAY_MATRIX_HEIGHT(M);
+
+	S = create_empty_matrix(FLOAT4OID, 1, height);
+	v = (float4 *)ARRAY_MATRIX_DATAPTR(S);
+	for (i=0; i < height; i++)
+		v[i] = scalar;
+	PG_RETURN_MATRIXTYPE_P(array_martix_cbind(FLOAT4OID,M,S));
+}
+PG_FUNCTION_INFO_V1(array_matrix_cbind_scalar_float4r);
+
+Datum
+array_matrix_cbind_scalar_float8l(PG_FUNCTION_ARGS)
+{
+	MatrixType *M = PG_GETARG_MATRIXTYPE_P(1);
+	MatrixType *S;
+	float8	   *v, scalar = PG_GETARG_FLOAT8(0);
+	int			i, height = ARRAY_MATRIX_WIDTH(M);
+
+	S = create_empty_matrix(FLOAT8OID, 1, height);
+	v = (float8 *)ARRAY_MATRIX_DATAPTR(S);
+	for (i=0; i < height; i++)
+		v[i] = scalar;
+	PG_RETURN_MATRIXTYPE_P(array_martix_cbind(FLOAT8OID,S,M));
+}
+PG_FUNCTION_INFO_V1(array_matrix_cbind_scalar_float8l);
+
+Datum
+array_matrix_cbind_scalar_float8r(PG_FUNCTION_ARGS)
+{
+	MatrixType *M = PG_GETARG_MATRIXTYPE_P(0);
+	MatrixType *S;
+	float8	   *v, scalar = PG_GETARG_FLOAT8(1);
+	int			i, height = ARRAY_MATRIX_HEIGHT(M);
+
+	S = create_empty_matrix(INT8OID, 1, height);
+	v = (float8 *)ARRAY_MATRIX_DATAPTR(S);
+	for (i=0; i < height; i++)
+		v[i] = scalar;
+	PG_RETURN_MATRIXTYPE_P(array_martix_cbind(INT8OID,M,S));
+}
+PG_FUNCTION_INFO_V1(array_matrix_cbind_scalar_float8r);
 
 /*
  * rbind as aggregate function
