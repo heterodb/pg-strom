@@ -2143,8 +2143,14 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 			 * execution.
 			 * The current version of PL/CUDA does not support asynchronous
 			 * data transfer, thus, its performance penalty is not so much.
+			 *
+			 * Also note that we allocate the result buffer using "huge"
+			 * allocation interface, even though current varlena mechanism
+			 * does not allow more than 1GB. We may not be able to know
+			 * exact amount of the results on invocation time....
 			 */
-			h_results_buf = palloc(results_bufsz);
+			h_results_buf =
+				MemoryContextAllocHuge(CurrentMemoryContext, results_bufsz);
 		}
 
 		/*

@@ -300,11 +300,6 @@ __gpuMemAlloc(GpuContext *gcontext, int cuda_index, size_t bytesize)
 	/* round up to 1KB align */
 	bytesize = TYPEALIGN(1024, bytesize);
 
-	/* is it reasonable size to allocate? */
-	if (bytesize > cuda_max_malloc_size)
-		elog(ERROR, "too large device memory request %zu bytes, max %zu",
-			 bytesize, cuda_max_malloc_size);
-
 	/* try to find out preliminary allocated block */
 	Assert(cuda_index < gcontext->num_context);
 	gm_head = &gcontext->gpu[cuda_index].cuda_memory;
@@ -518,6 +513,11 @@ found:
 CUdeviceptr
 gpuMemAlloc(GpuTask *gtask, size_t bytesize)
 {
+	/* Is it reasonable size for allocation? */
+	if (TYPEALIGN(1024, bytesize) > cuda_max_malloc_size)
+		elog(ERROR, "too large device memory request %zu bytes, max %zu",
+			 bytesize, cuda_max_malloc_size);
+
 	return __gpuMemAlloc(gtask->gts->gcontext, gtask->cuda_index, bytesize);
 }
 
