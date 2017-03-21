@@ -740,6 +740,66 @@ CREATE FUNCTION pg_catalog.rbind(float8[], float8[])
   AS 'MODULE_PATHNAME','array_matrix_rbind_float8'
   LANGUAGE C STRICT;
 
+CREATE FUNCTION pg_catalog.rbind(bool, bool[])
+  RETURNS bool[]
+  AS 'MODULE_PATHNAME','array_matrix_rbind_scalar_boolt'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.rbind(bool[], bool)
+  RETURNS bool[]
+  AS 'MODULE_PATHNAME','array_matrix_rbind_scalar_boolb'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.rbind(int2, int2[])
+  RETURNS int2[]
+  AS 'MODULE_PATHNAME','array_matrix_rbind_scalar_int2t'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.rbind(int2[], int2)
+  RETURNS int2[]
+  AS 'MODULE_PATHNAME','array_matrix_rbind_scalar_int2b'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.rbind(int4, int4[])
+  RETURNS int4[]
+  AS 'MODULE_PATHNAME','array_matrix_rbind_scalar_int4t'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.rbind(int4[], int4)
+  RETURNS int4[]
+  AS 'MODULE_PATHNAME','array_matrix_rbind_scalar_int4b'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.rbind(int8, int8[])
+  RETURNS int8[]
+  AS 'MODULE_PATHNAME','array_matrix_rbind_scalar_int8t'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.rbind(int8[], int8)
+  RETURNS int8[]
+  AS 'MODULE_PATHNAME','array_matrix_rbind_scalar_int8b'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.rbind(float4, float4[])
+  RETURNS float4[]
+  AS 'MODULE_PATHNAME','array_matrix_rbind_scalar_float4t'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.rbind(float4[], float4)
+  RETURNS float4[]
+  AS 'MODULE_PATHNAME','array_matrix_rbind_scalar_float4b'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.rbind(float8, float8[])
+  RETURNS float8[]
+  AS 'MODULE_PATHNAME','array_matrix_rbind_scalar_float8t'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.rbind(float8[], float8)
+  RETURNS float8[]
+  AS 'MODULE_PATHNAME','array_matrix_rbind_scalar_float8b'
+  LANGUAGE C STRICT;
+
 CREATE FUNCTION pg_catalog.cbind(bool[], bool[])
   RETURNS bool[]
   AS 'MODULE_PATHNAME','array_matrix_cbind_bool'
@@ -770,6 +830,65 @@ CREATE FUNCTION pg_catalog.cbind(float8[], float8[])
   AS 'MODULE_PATHNAME','array_matrix_cbind_float8'
   LANGUAGE C STRICT;
 
+CREATE FUNCTION pg_catalog.cbind(bool, bool[])
+  RETURNS bool[]
+  AS 'MODULE_PATHNAME','array_matrix_cbind_scalar_booll'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.cbind(bool[], bool)
+  RETURNS bool[]
+  AS 'MODULE_PATHNAME','array_matrix_cbind_scalar_boolr'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.cbind(int2, int2[])
+  RETURNS int2[]
+  AS 'MODULE_PATHNAME','array_matrix_cbind_scalar_int2l'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.cbind(int2[], int2)
+  RETURNS int2[]
+  AS 'MODULE_PATHNAME','array_matrix_cbind_scalar_int2r'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.cbind(int4, int4[])
+  RETURNS int4[]
+  AS 'MODULE_PATHNAME','array_matrix_cbind_scalar_int4l'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.cbind(int4[], int4)
+  RETURNS int4[]
+  AS 'MODULE_PATHNAME','array_matrix_cbind_scalar_int4r'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.cbind(int8, int8[])
+  RETURNS int8[]
+  AS 'MODULE_PATHNAME','array_matrix_cbind_scalar_int8l'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.cbind(int8[], int8)
+  RETURNS int8[]
+  AS 'MODULE_PATHNAME','array_matrix_cbind_scalar_int8r'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.cbind(float4, float4[])
+  RETURNS float4[]
+  AS 'MODULE_PATHNAME','array_matrix_cbind_scalar_float4l'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.cbind(float4[], float4)
+  RETURNS float4[]
+  AS 'MODULE_PATHNAME','array_matrix_cbind_scalar_float4r'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.cbind(float8, float8[])
+  RETURNS float8[]
+  AS 'MODULE_PATHNAME','array_matrix_cbind_scalar_float8l'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.cbind(float8[], float8)
+  RETURNS float8[]
+  AS 'MODULE_PATHNAME','array_matrix_cbind_scalar_float8r'
+  LANGUAGE C STRICT;
 
 CREATE FUNCTION pgstrom.array_matrix_rbind_accum(internal, anyarray)
   RETURNS internal
