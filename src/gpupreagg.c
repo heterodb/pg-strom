@@ -4308,6 +4308,18 @@ gpupreagg_put_final_buffer(GpuPreAggTask *gpreagg,
 			is_terminator = true;
 	}
 
+	/*
+	 * NOTE: GpuPreAggTask may be called without valid pds_final buffer,
+	 * if ereport() would be raised prior to attach of the pds_final.
+	 * In this case, gpreagg should not have any relevant CUDA resource
+	 * to be released even if it is marked as terminator.
+	 */
+	if (!pds_final)
+	{
+		Assert(gpreagg->ev_kds_final == NULL);
+		Assert(gpreagg->m_kds_final == NULL);
+		goto out_unlock;
+	}
 	Assert(pds_final->ntasks_running > 0);
 	if (--pds_final->ntasks_running == 0 && gpa_sstate->pds_final != pds_final)
 		is_terminator = true;
@@ -4333,9 +4345,10 @@ gpupreagg_put_final_buffer(GpuPreAggTask *gpreagg,
 		}
 		return true;
 	}
+out_unlock:
 	SpinLockRelease(&gpa_sstate->lock);
-
-	PDS_release(pds_final);
+	if (pds_final)
+		PDS_release(pds_final);
 	gpreagg->pds_final = NULL;
 	gpreagg->ev_kds_final = NULL;
 	gpreagg->m_kds_final = 0UL;
