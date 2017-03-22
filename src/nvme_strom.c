@@ -316,15 +316,15 @@ static void
 __MemCopyFromSSDWaitCallback(CUstream cuda_stream,
 							 CUresult status, void *private)
 {
-	StromCmd__MemCpySsdToGpuWait cmd;
+	StromCmd__MemCopyWait cmd;
 	GpuTask_v2	   *gtask = (GpuTask_v2 *) private;
 
-	memset(&cmd, 0, sizeof(StromCmd__MemCpySsdToGpuWait));
+	memset(&cmd, 0, sizeof(StromCmd__MemCopyWait));
 	cmd.dma_task_id = gtask->dma_task_id;
 
-	if (nvme_strom_ioctl(STROM_IOCTL__MEMCPY_SSD2GPU_WAIT, &cmd) != 0)
+	if (nvme_strom_ioctl(STROM_IOCTL__MEMCPY_WAIT, &cmd) != 0)
 	{
-		fprintf(stderr, "failed on STROM_IOCTL__MEMCPY_SSD2GPU_WAIT: %m");
+		fprintf(stderr, "failed on STROM_IOCTL__MEMCPY_WAIT: %m");
 		if (gtask->kerror.errcode == 0)
 		{
 			gtask->kerror.errcode = StromError_Ssd2GpuDirectDma;
@@ -372,7 +372,7 @@ gpuMemCopyFromSSDAsync(GpuTask_v2 *gtask,
 					   pgstrom_data_store *pds,
 					   CUstream cuda_stream)
 {
-	StromCmd__MemCpySsdToGpuWriteBack cmd;
+	StromCmd__MemCopySsdToGpu cmd;
 	IOMapBufferSegment *iomap_seg;
 	BlockNumber	   *block_nums;
 	void		   *block_data;
@@ -428,7 +428,7 @@ gpuMemCopyFromSSDAsync(GpuTask_v2 *gtask,
 	block_data = KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds, nr_loaded);
 
 	/* setup ioctl(2) command */
-	memset(&cmd, 0, sizeof(StromCmd__MemCpySsdToGpuWriteBack));
+	memset(&cmd, 0, sizeof(StromCmd__MemCopySsdToGpu));
 	cmd.handle		= iomap_seg->iomap_handle;
 	cmd.offset		= offset;
 	cmd.file_desc	= gtask->peer_fdesc;
@@ -439,8 +439,8 @@ gpuMemCopyFromSSDAsync(GpuTask_v2 *gtask,
 	cmd.wb_buffer	= block_data;
 
 	/* (1) kick SSD2GPU P2P DMA */
-	if (nvme_strom_ioctl(STROM_IOCTL__MEMCPY_SSD2GPU_WRITEBACK, &cmd) != 0)
-		elog(ERROR, "failed on STROM_IOCTL__MEMCPY_SSD2GPU_WRITEBACK: %m");
+	if (nvme_strom_ioctl(STROM_IOCTL__MEMCPY_SSD2GPU, &cmd) != 0)
+		elog(ERROR, "failed on STROM_IOCTL__MEMCPY_SSD2GPU: %m");
 	gtask->dma_task_id  = cmd.dma_task_id;
 
 	// TODO: update perfmon
