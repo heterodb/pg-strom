@@ -4317,7 +4317,7 @@ gpupreagg_put_final_buffer(GpuPreAggTask *gpreagg,
 	if (!pds_final)
 	{
 		Assert(gpreagg->ev_kds_final == NULL);
-		Assert(gpreagg->m_kds_final == NULL);
+		Assert(gpreagg->m_kds_final == 0UL);
 		goto out_unlock;
 	}
 	Assert(pds_final->ntasks_running > 0);
