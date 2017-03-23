@@ -706,11 +706,16 @@ CREATE FUNCTION pg_catalog.array_matrix_rawsize(regtype,int,int)
   LANGUAGE C STRICT;
 
 CREATE FUNCTION pg_catalog.type_len(regtype)
-  RETURNS int
+  RETURNS bigint
   AS 'MODULE_PATHNAME','postgresql_type_rawsize'
   LANGUAGE C STRICT;
 
 CREATE FUNCTION pg_catalog.composite_type_rawsize(VARIADIC int[])
+  RETURNS bigint
+  AS 'MODULE_PATHNAME','composite_type_rawsize'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.composite_type_rawsize(VARIADIC bigint[])
   RETURNS bigint
   AS 'MODULE_PATHNAME','composite_type_rawsize'
   LANGUAGE C STRICT;

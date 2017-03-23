@@ -1749,7 +1749,7 @@ postgresql_type_rawsize(PG_FUNCTION_ARGS)
 {
 	Oid			type_oid = PG_GETARG_OID(0);
 	HeapTuple	tup;
-	int			type_len;
+	int64		type_len;
 
 	tup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(type_oid));
 	if (!HeapTupleIsValid(tup))
@@ -1757,7 +1757,7 @@ postgresql_type_rawsize(PG_FUNCTION_ARGS)
 	type_len = ((Form_pg_type) GETSTRUCT(tup))->typlen;
 	ReleaseSysCache(tup);
 
-	PG_RETURN_INT32(type_len);
+	PG_RETURN_INT64(type_len);
 }
 PG_FUNCTION_INFO_V1(postgresql_type_rawsize);
 
@@ -1773,12 +1773,12 @@ composite_type_rawsize(PG_FUNCTION_ARGS)
 	ArrayType	   *a = PG_GETARG_ARRAYTYPE_P(0);
 	ArrayIterator	aiter;
 	Size			t_hoff;
-	cl_int			attlen;
+	ssize_t			attlen;
 	cl_int			attalign;
 	Datum			datum;
 	bool			isnull;
 
-	if (ARR_ELEMTYPE(a) != INT4OID ||
+	if ((ARR_ELEMTYPE(a) != INT4OID && ARR_ELEMTYPE(a) != INT8OID) ||
 		ARR_NDIM(a) != 1 ||
 		ARR_LBOUND(a)[0] != 1)
 		elog(ERROR, "array of sub-attributes size is not valid");
@@ -1794,8 +1794,9 @@ composite_type_rawsize(PG_FUNCTION_ARGS)
     {
 		if (isnull)
 			continue;
-
-		attlen = DatumGetInt32(datum);
+		attlen = (Size)(ARR_ELEMTYPE(a) == INT4OID
+						? DatumGetInt32(datum)
+						: DatumGetInt64(datum));
 		if (attlen < 0)
 			elog(ERROR, "negative type length is not valid - actual size should be supplied for varlena");
 		if (attlen <= sizeof(cl_char))
