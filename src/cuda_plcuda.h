@@ -23,6 +23,7 @@
 
 typedef struct
 {
+	size_t			length;
 	kern_errorbuf	kerror_prep;
 	kern_errorbuf	kerror_main;
 	kern_errorbuf	kerror_post;
@@ -69,21 +70,18 @@ typedef struct
 	cl_ulong		working_usage;
 	cl_ulong		results_bufsz;
 	cl_ulong		results_usage;
-	cl_uint			nargs;
-	kern_colmeta	retmeta;
+	cl_int			nargs;
+	cl_int			retnatts;	/* # of sub-attributes if result type is */
+	kern_colmeta	retmeta;	/* composite data type. Elsewhere, -1. */
 	kern_colmeta	argmeta[FLEXIBLE_ARRAY_MEMBER];	/* metadata of arguments */
 } kern_plcuda;
 
 #define KERN_PLCUDA_PARAMBUF(kplcuda)			\
-	((kern_parambuf *)((char *)(kplcuda) +		\
-					   STROMALIGN(offsetof(kern_plcuda,		\
-										   argmeta[(kplcuda)->nargs]))))
+	((kern_parambuf *)((char *)(kplcuda) + (kplcuda)->length))
 #define KERN_PLCUDA_PARAMBUF_LENGTH(kplcuda)	\
 	(KERN_PLCUDA_PARAMBUF(kplcuda)->length)
 #define KERN_PLCUDA_DMASEND_LENGTH(kplcuda)		\
-	(STROMALIGN(offsetof(kern_plcuda,			\
-						 argmeta[(kplcuda)->nargs])) +	\
-	 KERN_PLCUDA_PARAMBUF_LENGTH(kplcuda))
+	((kplcuda)->length + KERN_PLCUDA_PARAMBUF_LENGTH(kplcuda))
 #define KERN_PLCUDA_DMARECV_LENGTH(kplcuda)		\
 	(offsetof(kern_plcuda, retmeta))
 #define PLCUDA_ERROR_RETURN(errcode)			\
@@ -95,6 +93,17 @@ typedef struct
 	do {										\
 		STROM_SET_RUNTIME_ERROR(&kcxt->e, (errcode));	\
 		return;									\
+	} while(0)
+
+#define PLCUDA_SETUP_COMPOSITE_RESULT(kplcuda,buffer,tup_datum,tup_isnull) \
+	do {																\
+		assert((kplcuda)->retnatts >= 0);								\
+		setup_kern_heaptuple((buffer),									\
+							 &(kplcuda)->retmeta,						\
+							 (kplcuda)->argmeta + (kplcuda)->nargs,		\
+							 (kplcuda)->retnatts,						\
+							 (tup_datum),								\
+							 (tup_isnull));								\
 	} while(0)
 
 #endif	/* CUDA_PLCUDA.H */

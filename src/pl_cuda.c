@@ -356,12 +356,20 @@ plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
 	plts->extra_flags = DEVKERNEL_NEEDS_PLCUDA;
 	/* check result type */
 	dtype = pgstrom_devtype_lookup(prorettype);
-	if (!dtype)
+	if (dtype)
+		plts->extra_flags |= dtype->type_flags;
+	else if (get_typlen(prorettype) == -1)
+	{
+		Assert(!get_typbyval(prorettype));
+		if (not_exec_now)
+			elog(NOTICE, "Unknown varlena result - PL/CUDA must be responsible to the data format to return");
+	}
+	else
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("Result type \"%s\" is not device executable",
 						format_type_be(prorettype))));
-	plts->extra_flags |= dtype->type_flags;
+
 	/* check argument types */
 	for (i=0; i < proargtypes->dim1; i++)
 	{
@@ -837,8 +845,9 @@ plcuda_codegen_part(StringInfo kern,
 					Form_pg_proc procForm,
 					const char *last_suffix)
 {
-	devtype_info   *dtype_r;
-	devtype_info   *dtype_a;
+	devtype_info   *dtype;
+	const char	   *retval_typname;
+	int				retval_typlen;
 	int		i;
 
 	appendStringInfo(
@@ -852,35 +861,52 @@ plcuda_codegen_part(StringInfo kern,
 		suffix);
 
 	/* declaration of 'retval' variable */
-	dtype_r = pgstrom_devtype_lookup(procForm->prorettype);
-	if (!dtype_r)
+	dtype = pgstrom_devtype_lookup(procForm->prorettype);
+	if (dtype)
+	{
+		retval_typname = dtype->type_name;
+		retval_typlen  = dtype->type_length;
+	}
+	else if (get_typlen(procForm->prorettype) == -1)
+	{
+		/* NOTE: As long as PL/CUDA function is responsible to the data
+		 * format of varlena result type, we can allow non-device executable
+		 * data type as function result.
+		 * Its primary target is composite data type, but not limited to.
+		 */
+		retval_typname = "varlena";
+		retval_typlen  = -1;
+	}
+	else
+	{
 		elog(ERROR, "cache lookup failed for type '%s'",
 			 format_type_be(procForm->prorettype));
+	}
 	appendStringInfo(
 		kern,
 		"  pg_%s_t *retval __attribute__ ((unused));\n",
-		dtype_r->type_name);
+		retval_typname);
 
 	/* declaration of argument variables */
 	for (i=0; i < procForm->pronargs; i++)
 	{
 		Oid		type_oid = procForm->proargtypes.values[i];
 
-		dtype_a = pgstrom_devtype_lookup(type_oid);
-		if (!dtype_a)
+		dtype = pgstrom_devtype_lookup(type_oid);
+		if (!dtype)
 			elog(ERROR, "cache lookup failed for type '%s'",
 				 format_type_be(type_oid));
 		appendStringInfo(
 			kern,
 			"  pg_%s_t arg%u __attribute__((unused));\n",
-			dtype_a->type_name, i+1);
+			dtype->type_name, i+1);
 	}
 
 	appendStringInfo(
 		kern,
 		"  assert(sizeof(*retval) <= sizeof(kplcuda->__retval));\n"
-		"  retval = (pg_%s_t *)kplcuda->__retval;\n", dtype_r->type_name);
-	if (dtype_r->type_length < 0)
+		"  retval = (pg_%s_t *)kplcuda->__retval;\n", retval_typname);
+	if (retval_typlen < 0)
 		appendStringInfo(
 			kern,
 			"  assert(retval->isnull || (void *)retval->value == results);\n");
@@ -889,14 +915,14 @@ plcuda_codegen_part(StringInfo kern,
 	{
 		Oid		type_oid = procForm->proargtypes.values[i];
 
-		dtype_a = pgstrom_devtype_lookup(type_oid);
-		if (!dtype_a)
+		dtype = pgstrom_devtype_lookup(type_oid);
+		if (!dtype)
 			elog(ERROR, "cache lookup failed for type '%s'",
 				 format_type_be(type_oid));
 		appendStringInfo(
 			kern,
 			"  arg%u = pg_%s_param(kcxt,%d);\n",
-			i+1, dtype_a->type_name, i);
+			i+1, dtype->type_name, i);
 	}
 
 	appendStringInfo(
@@ -1049,11 +1075,15 @@ plcuda_exec_begin(HeapTuple protup, FunctionCallInfo fcinfo)
 	kern_plcuda	   *kplcuda;
 	Form_pg_proc	procForm = (Form_pg_proc) GETSTRUCT(protup);
 	Datum			prosrc;
+	HeapTuple		tup;
 	bool			isnull;
+	Oid				ret_reloid = InvalidOid; /* valid if composite type */
+	cl_int			ret_nattrs = -1;
+	size_t			kplcuda_length;
 	char		   *kern_source;
 	char		   *kern_define;
 	ProgramId		program_id;
-	int				i;
+	int				i, n_meta;
 
 	/* setup a dummy GTS for PL/CUDA (see pgstromInitGpuTaskState) */
 	plts = MemoryContextAllocZero(CacheMemoryContext,
@@ -1089,8 +1119,23 @@ plcuda_exec_begin(HeapTuple protup, FunctionCallInfo fcinfo)
 	plts->gts.program_id = program_id;
 
 	/* build template of the kern_plcuda */
-	kplcuda = palloc0(offsetof(kern_plcuda,
-							   argmeta[procForm->pronargs]));
+	n_meta = procForm->pronargs;
+	if (get_typtype(procForm->prorettype) == TYPTYPE_COMPOSITE)
+	{
+		ret_reloid = get_typ_typrelid(procForm->prorettype);
+
+		tup = SearchSysCache1(RELOID, ObjectIdGetDatum(ret_reloid));
+		if (!HeapTupleIsValid(tup))
+			elog(ERROR, "cache lookup failed for relation %u", ret_reloid);
+		ret_nattrs = ((Form_pg_class) GETSTRUCT(tup))->relnatts;
+		ReleaseSysCache(tup);
+
+		n_meta += ret_nattrs;
+	}
+	kplcuda_length = STROMALIGN(offsetof(kern_plcuda, argmeta[n_meta]));
+	kplcuda = palloc0(kplcuda_length);
+	kplcuda->length = kplcuda_length;
+	kplcuda->retnatts = ret_nattrs;
 	kplcuda->nargs = procForm->pronargs;
 	kplcuda->retmeta = __setup_kern_colmeta(procForm->prorettype, -1);
 	for (i=0; i < procForm->pronargs; i++)
@@ -1099,6 +1144,27 @@ plcuda_exec_begin(HeapTuple protup, FunctionCallInfo fcinfo)
 
 		kplcuda->argmeta[i] = __setup_kern_colmeta(argtype_oid, i);
 	}
+
+	/* also carry attributes of sub-fields if result is composite type */
+	if (ret_nattrs > 0)
+	{
+		for (i=0; i < ret_nattrs; i++)
+		{
+			Form_pg_attribute attr;
+
+			tup = SearchSysCache2(ATTNUM,
+								  ObjectIdGetDatum(ret_reloid),
+								  Int16GetDatum(i+1));
+			if (!HeapTupleIsValid(tup))
+				elog(ERROR, "cache lookup failed for attr %d of relation %u",
+					 i+1, ret_reloid);
+			attr = (Form_pg_attribute)GETSTRUCT(tup);
+			kplcuda->argmeta[procForm->pronargs + i]
+				= __setup_kern_colmeta(attr->atttypid, i);
+			ReleaseSysCache(tup);
+		}
+	}
+
 	/* MEMO: if result type is varlena, initialized to NULL as a default */
 	if (kplcuda->retmeta.attlen < 0)
 		kplcuda->__retval[sizeof(CUdeviceptr)] = true;
@@ -1216,17 +1282,20 @@ create_plcuda_task(plcudaTaskState *plts, FunctionCallInfo fcinfo,
 	GpuContext_v2  *gcontext = plts->gts.gcontext;
 	plcudaTask	   *ptask;
 	kern_parambuf  *kparams;
-	Size			head_length;
+	kern_plcuda	   *kplcuda_head = plts->kplcuda_head;
 	Size			total_length;
 	Size			offset;
 	int				i;
 
 	/* calculation of the length */
-	Assert(fcinfo->nargs == plts->kplcuda_head->nargs);
-	head_length = offsetof(plcudaTask,
-						   kern.argmeta[fcinfo->nargs]);
-	total_length = STROMALIGN(head_length);
-
+	Assert(fcinfo->nargs == kplcuda_head->nargs);
+	Assert(kplcuda_head->length
+		   == STROMALIGN(offsetof(kern_plcuda,
+								  argmeta[kplcuda_head->nargs +
+										  (kplcuda_head->retnatts > 0 ?
+										   kplcuda_head->retnatts : 0)])));
+	total_length = STROMALIGN(offsetof(plcudaTask, kern)
+							  + kplcuda_head->length);
 	total_length += STROMALIGN(offsetof(kern_parambuf,
 										poffset[fcinfo->nargs]));
 	for (i=0; i < fcinfo->nargs; i++)
@@ -1249,8 +1318,7 @@ create_plcuda_task(plcudaTaskState *plts, FunctionCallInfo fcinfo,
 	if (results_bufsz > 0)
 		ptask->h_results_buf = dmaBufferAlloc(gcontext, results_bufsz);
 	/* setup kern_plcuda */
-	memcpy(&ptask->kern, plts->kplcuda_head,
-		   offsetof(kern_plcuda, argmeta[fcinfo->nargs]));
+	memcpy(&ptask->kern, kplcuda_head, kplcuda_head->length);
 	ptask->kern.working_bufsz = working_bufsz;
 	ptask->kern.working_usage = 0UL;
 	ptask->kern.results_bufsz = results_bufsz;
@@ -1292,9 +1360,9 @@ create_plcuda_task(plcudaTaskState *plts, FunctionCallInfo fcinfo,
 	}
 	kparams->nparams = fcinfo->nargs;
 	kparams->length = STROMALIGN(offset);
-	Assert(STROMALIGN(offsetof(plcudaTask,
-							   kern.argmeta[fcinfo->nargs])) +
-		   kparams->length == total_length);
+	Assert(offsetof(plcudaTask, kern)
+		   + kplcuda_head->length
+		   + kparams->length == total_length);
 	Assert(!plts->last_results_buf);
 	plts->last_results_buf = ptask->h_results_buf;
 

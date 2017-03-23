@@ -2263,10 +2263,117 @@ form_kern_heaptuple(kern_context *kcxt,
 			}
 		}
 	}
+	//BUG? curr already shift by t_hoff
 	curr += t_hoff;		/* add header length */
 	tupitem->t_len = curr;
 	SET_VARSIZE(&htup->t_choice.t_datum, MAXALIGN(curr));
 	htup->t_infomask = t_infomask;
+
+	return curr;
+}
+
+/*
+ * setup_kern_heaptuple
+ *
+ * A utility routine to set up a composite type data structure
+ * on the supplied pre-allocated region. It in
+ *
+ * @buffer     ... pointer to global memory where caller wants to construct
+ *                 a composite datum. It must have enough length and also
+ *                 must be aligned to DWORD.
+ * @comp_type  ... reference to kern_colmeta of the composite type itself
+ * @sub_types  ... reference to an array of kern_colmeta of the sub-fields of
+ *                 the destination composite type.
+ * @nfields    ... number of sub-fields of the composite type.
+ * @tup_datum  ... in: it gives length of individual sub-fields.
+ *                 out: it returns pointer of the individual sub-fields.
+ * @tup_isnull ... flag to indicate which fields are NULL. If @tup_isnull is
+ *                 NULL, it means the composite type contains no NULL items.
+ */
+STATIC_FUNCTION(cl_uint)
+setup_kern_heaptuple(void *buffer,
+					 kern_colmeta *comp_type,	/* in: composite type attrs */
+					 kern_colmeta *sub_types,	/* in: sub-types attrs */
+					 cl_uint nfields,		/* in: # of sub-fields */
+					 Datum *tup_datum,		/* in: individual sub-fields length
+											 * out: pointer of the fields */
+					 cl_bool *tup_isnull)		/* in; can be NULL */
+					 
+{
+	HeapTupleHeaderData *htup = (HeapTupleHeaderData *)buffer;
+	cl_bool		tup_hasnull = (!tup_isnull ? true : false);
+	cl_ushort	t_infomask;
+	cl_uint		t_hoff;
+	cl_uint		i, curr;
+
+	/* must be aligned to DWORD */
+	assert(htup == (HeapTupleHeaderData *)MAXALIGN(htup));
+
+	/* has any NULL attribute? */
+	for (i=0; !tup_hasnull && i < nfields; i++)
+	{
+		if (tup_isnull[i])
+			tup_hasnull = true;
+	}
+	t_infomask = (tup_hasnull ? HEAP_HASNULL : 0);
+
+	/* computer header size */
+	t_hoff = offsetof(HeapTupleHeaderData, t_bits);
+	if (tup_hasnull)
+		t_hoff += bitmaplen(nfields);
+	/* NOTE: composite type should never have OID */
+	t_hoff = MAXALIGN(t_hoff);
+
+	/* setup HeapTupleHeaderData */
+	htup->t_choice.t_datum.datum_typmod = comp_type->atttypmod;
+	htup->t_choice.t_datum.datum_typeid = comp_type->atttypid;
+	htup->t_ctid.ip_blkid.bi_hi = 0xffff;	/* InvalidBlockNumber */
+	htup->t_ctid.ip_blkid.bi_lo = 0xffff;
+	htup->t_ctid.ip_posid = 0;				/* InvalidOffsetNumber */
+	htup->t_infomask2 = (nfields & HEAP_NATTS_MASK);
+	/* t_infomask shall be set up later */
+	htup->t_hoff = t_hoff;
+	curr = t_hoff;
+
+	/* calculate position of the fields */
+	for (i=0; i < nfields; i++)
+	{
+		kern_colmeta	cmeta = sub_types[i];
+		Datum			datum = tup_datum[i];
+		cl_bool			isnull = (!tup_isnull ? false : tup_isnull[i]);
+
+		if (isnull)
+		{
+			htup->t_bits[i >> 3] &= ~(1 << (i & 0x07));
+			datum = 0;
+		}
+		else
+		{
+			if (tup_hasnull)
+				htup->t_bits[i >> 3] |= (1 << (i & 0x07));
+
+			while (TYPEALIGN(cmeta.attalign, curr) != curr)
+				((char *)htup)[curr++] = '\0';
+			if (cmeta.attbyval || cmeta.attlen > 0)
+			{
+				assert(datum == cmeta.attlen);
+				datum = PointerGetDatum((char *)htup + curr);
+				curr += cmeta.attlen;
+			}
+			else
+			{
+				Datum	shift = datum;
+
+				t_infomask |= HEAP_HASVARWIDTH;
+				datum = PointerGetDatum((char *)htup + curr);
+				curr += shift;
+			}
+			tup_datum[i] = datum;
+		}
+	}
+	htup->t_infomask = t_infomask;
+	curr = MAXALIGN(curr);
+	SET_VARSIZE(&htup->t_choice.t_datum, curr);
 
 	return curr;
 }
