@@ -329,7 +329,7 @@ plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
 	devtype_info   *dtype;
 	char		   *line;
 	int				i, lineno;
-	bool			not_exec_now = !OidIsValid(proowner);
+	bool			not_exec_now = OidIsValid(proowner);
 	bool			has_decl_block = false;
 	bool			has_prep_block = false;
 	bool			has_main_block = false;
