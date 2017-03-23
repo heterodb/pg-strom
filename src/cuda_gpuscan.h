@@ -433,7 +433,6 @@ out:
 	kern_writeback_error_status(&kresults->kerror, kcxt.e);
 }
 
-#ifdef GPUSCAN_DEVICE_PROJECTION
 /*
  * gpuscan_projection_row
  *
@@ -450,6 +449,7 @@ gpuscan_projection_row(kern_gpuscan *kgpuscan,
 	kern_parambuf  *kparams = KERN_GPUSCAN_PARAMBUF(kgpuscan);
 	kern_resultbuf *kresults = KERN_GPUSCAN_RESULTBUF(kgpuscan);
 	kern_context	kcxt;
+#ifdef GPUSCAN_DEVICE_PROJECTION
 	cl_uint			dst_nitems;
 	cl_uint			kds_offset;
 	cl_uint			offset;
@@ -567,10 +567,18 @@ gpuscan_projection_row(kern_gpuscan *kgpuscan,
 	}
 	__syncthreads();
 out:
+#else	/* GPUSCAN_DEVICE_PROJECTION */
+	/*
+	 * NOTE: If GPU device code needs no projection, GpuScan logic will never
+	 * call any projection call, and returns row-index instead for better
+	 * performance. However, NVRTC requires function body to build binary.
+	 */
+	INIT_KERNEL_CONTEXT(&kcxt, gpuscan_projection_row, kparams);
+	STROM_SET_ERROR(&kcxt.e, StromError_WrongCodeGeneration);
+#endif	/* GPUSCAN_DEVICE_PROJECTION */
 	/* write back error status if any */
 	kern_writeback_error_status(&kgpuscan->kerror, kcxt.e);
 }
-#endif
 
 KERNEL_FUNCTION(void)
 gpuscan_projection_slot(kern_gpuscan *kgpuscan,
