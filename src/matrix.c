@@ -108,6 +108,9 @@ extern Datum array_matrix_height(PG_FUNCTION_ARGS);
 extern Datum array_matrix_width(PG_FUNCTION_ARGS);
 extern Datum array_matrix_rawsize(PG_FUNCTION_ARGS);
 
+extern Datum postgresql_type_rawsize(PG_FUNCTION_ARGS);
+extern Datum composite_type_rawsize(PG_FUNCTION_ARGS);
+
 /* fmgr macros for regular varlena matrix  objects */
 #define DatumGetMatrixTypeP(X)					\
 	((MatrixType *) PG_DETOAST_DATUM(X))
@@ -1737,6 +1740,81 @@ array_matrix_transpose_float8(PG_FUNCTION_ARGS)
 	PG_RETURN_POINTER(result);
 }
 PG_FUNCTION_INFO_V1(array_matrix_transpose_float8);
+
+/*
+ * postgresql_type_rawsize on behalf of type_len(regtype)
+ */
+Datum
+postgresql_type_rawsize(PG_FUNCTION_ARGS)
+{
+	Oid			type_oid = PG_GETARG_OID(0);
+	HeapTuple	tup;
+	int			type_len;
+
+	tup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(type_oid));
+	if (!HeapTupleIsValid(tup))
+		elog(ERROR, "cache lookup failed for type %u", type_oid);
+	type_len = ((Form_pg_type) GETSTRUCT(tup))->typlen;
+	ReleaseSysCache(tup);
+
+	PG_RETURN_INT32(type_len);
+}
+PG_FUNCTION_INFO_V1(postgresql_type_rawsize);
+
+/*
+ * composite_type_rawsize - estimator of composite data type
+ *
+ * note: it returns raw-size with safety margin due to lack of alignment
+ * information, so actual composite record may be smaller than estimation.
+ */
+Datum
+composite_type_rawsize(PG_FUNCTION_ARGS)
+{
+	ArrayType	   *a = PG_GETARG_ARRAYTYPE_P(0);
+	ArrayIterator	aiter;
+	Size			t_hoff;
+	cl_int			attlen;
+	cl_int			attalign;
+	Datum			datum;
+	bool			isnull;
+
+	if (ARR_ELEMTYPE(a) != INT4OID ||
+		ARR_NDIM(a) != 1 ||
+		ARR_LBOUND(a)[0] != 1)
+		elog(ERROR, "array of sub-attributes size is not valid");
+
+	t_hoff = offsetof(HeapTupleHeaderData, t_bits);
+	if (ARR_HASNULL(a))
+		t_hoff += BITMAPLEN(ARR_DIMS(a)[0]);
+	/* NOTE: composite type should never have OID */
+	t_hoff = MAXALIGN(t_hoff);
+
+	aiter = array_create_iterator(a, 0, NULL);
+	while (array_iterate(aiter, &datum, &isnull))
+    {
+		if (isnull)
+			continue;
+
+		attlen = DatumGetInt32(datum);
+		if (attlen < 0)
+			elog(ERROR, "negative type length is not valid - actual size should be supplied for varlena");
+		if (attlen <= sizeof(cl_char))
+			attalign = sizeof(cl_char);
+		else if (attlen <= sizeof(cl_short))
+			attalign = sizeof(cl_short);
+		else if (attlen <= sizeof(cl_int))
+			attalign = sizeof(cl_int);
+		else
+			attalign = sizeof(cl_long);
+
+		t_hoff = TYPEALIGN(attalign, t_hoff);
+		t_hoff += attlen;
+	}
+	array_free_iterator(aiter);
+
+	PG_RETURN_INT64(MAXALIGN(t_hoff));
+}
+PG_FUNCTION_INFO_V1(composite_type_rawsize);
 
 /*
  * float4_as_int4, int4_as_float4
