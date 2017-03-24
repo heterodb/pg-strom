@@ -1162,6 +1162,239 @@ curand_uniform_double(curandStateXORWOW_t *state)
     return _curand_uniform_double_hq(x, y);
 }
 #endif // !defined(CURAND_UNIFORM_H_)
+#if !defined(CURAND_NORMAL_H_)
+#define CURAND_NORMAL_H_
+
+/**
+ * \defgroup DEVICE Device API
+ *
+ * @{
+ */
+STATIC_INLINE(float2)
+_curand_box_muller(unsigned int x, unsigned int y)
+{
+    float2 result;
+    float u = x * CURAND_2POW32_INV + (CURAND_2POW32_INV/2);
+    float v = y * CURAND_2POW32_INV_2PI + (CURAND_2POW32_INV_2PI/2);
+#if __CUDA_ARCH__ > 0
+    float s = sqrtf(-2.0f * logf(u));
+    __sincosf(v, &result.x, &result.y);
+#else
+    float s = sqrtf(-2.0f * logf(u));
+    result.x = sinf(v);
+    result.y = cosf(v);
+#endif
+    result.x *= s;
+    result.y *= s; 
+    return result;
+}
+
+STATIC_INLINE(double2)
+_curand_box_muller_double(unsigned int x0, unsigned int x1, 
+                          unsigned int y0, unsigned int y1)
+{
+    double2 result;
+    unsigned long long zx = (unsigned long long)x0 ^ 
+        ((unsigned long long)x1 << (53 - 32));
+    double u = zx * CURAND_2POW53_INV_DOUBLE + (CURAND_2POW53_INV_DOUBLE/2.0);
+    unsigned long long zy = (unsigned long long)y0 ^ 
+        ((unsigned long long)y1 << (53 - 32));
+    double v = zy * (CURAND_2POW53_INV_DOUBLE*2.0) + CURAND_2POW53_INV_DOUBLE;
+    double s = sqrt(-2.0 * log(u));
+    
+#if __CUDA_ARCH__ > 0
+    sincospi(v, &result.x, &result.y);
+#else 
+    result.x = sin(v*CURAND_PI_DOUBLE);
+    result.y = cos(v*CURAND_PI_DOUBLE);
+#endif    
+    result.x *= s;
+    result.y *= s;
+
+    return result;
+}
+
+template <typename R>
+STATIC_INLINE(float2)
+curand_box_muller(R *state)
+{
+    float2 result;
+    unsigned int x = curand(state);
+    unsigned int y = curand(state);
+    result = _curand_box_muller(x, y);
+    return result;
+}
+
+template <typename R>
+STATIC_INLINE(float4)
+curand_box_muller4(R *state)
+{
+    float4 result;
+    float2 _result;
+    uint4 x = curand4(state);
+    //unsigned int y = curand(state);
+    _result = _curand_box_muller(x.x, x.y);
+    result.x = _result.x;
+    result.y = _result.y;
+    _result = _curand_box_muller(x.z, x.w);
+    result.z = _result.x;
+    result.w = _result.y;
+    return result;
+}
+
+template <typename R>
+STATIC_INLINE(double2)
+curand_box_muller_double(R *state)
+{
+    double2 result;
+    unsigned int x0 = curand(state);
+    unsigned int x1 = curand(state);
+    unsigned int y0 = curand(state);
+    unsigned int y1 = curand(state);
+    result = _curand_box_muller_double(x0, x1, y0, y1);
+    return result;
+}
+
+template <typename R>
+STATIC_INLINE(double2)
+curand_box_muller2_double(R *state)
+{
+    double2 result;
+    uint4 _x;
+    _x = curand4(state);
+    result = _curand_box_muller_double(_x.x, _x.y, _x.z, _x.w);
+    return result;
+}
+
+
+template <typename R>
+STATIC_INLINE(double4)
+curand_box_muller4_double(R *state)
+{
+    double4 result;
+    double2 _res1;
+    double2 _res2;
+    uint4 _x;
+    uint4 _y;
+    _x = curand4(state);
+    _y = curand4(state);
+    _res1 = _curand_box_muller_double(_x.x, _x.y, _x.z, _x.w);
+    _res2 = _curand_box_muller_double(_y.x, _y.y, _y.z, _y.w);
+    result.x = _res1.x;
+    result.y = _res1.y;
+    result.z = _res2.x;
+    result.w = _res2.y;
+    return result;
+}
+
+/**
+ * \brief Return a normally distributed float from an XORWOW generator.
+ *
+ * Return a single normally distributed float with mean \p 0.0f and
+ * standard deviation \p 1.0f from the XORWOW generator in \p state,
+ * increment position of generator by one.
+ *
+ * The implementation uses a Box-Muller transform to generate two
+ * normally distributed results, then returns them one at a time.
+ * See ::curand_normal2() for a more efficient version that returns
+ * both results at once.
+ *
+ * \param state - Pointer to state to update
+ *
+ * \return Normally distributed float with mean \p 0.0f and standard deviation \p 1.0f
+ */
+STATIC_INLINE(float)
+curand_normal(curandStateXORWOW_t *state)
+{
+    if(state->boxmuller_flag != EXTRA_FLAG_NORMAL) {
+        unsigned int x, y;
+        x = curand(state);
+        y = curand(state);
+        float2 v = _curand_box_muller(x, y);
+        state->boxmuller_extra = v.y;
+        state->boxmuller_flag = EXTRA_FLAG_NORMAL;
+        return v.x;
+    }
+    state->boxmuller_flag = 0;
+    return state->boxmuller_extra;
+}
+
+/**
+ * \brief Return two normally distributed floats from an XORWOW generator.
+ *
+ * Return two normally distributed floats with mean \p 0.0f and
+ * standard deviation \p 1.0f from the XORWOW generator in \p state,
+ * increment position of generator by two.
+ *
+ * The implementation uses a Box-Muller transform to generate two
+ * normally distributed results.
+ *
+ * \param state - Pointer to state to update
+ *
+ * \return Normally distributed float2 where each element is from a
+ * distribution with mean \p 0.0f and standard deviation \p 1.0f
+ */
+STATIC_INLINE(float2)
+curand_normal2(curandStateXORWOW_t *state)
+{
+    return curand_box_muller(state);
+}
+
+/**
+ * \brief Return a normally distributed double from an XORWOW generator.
+ *
+ * Return a single normally distributed double with mean \p 0.0 and
+ * standard deviation \p 1.0 from the XORWOW generator in \p state,
+ * increment position of generator.
+ *
+ * The implementation uses a Box-Muller transform to generate two
+ * normally distributed results, then returns them one at a time.
+ * See ::curand_normal2_double() for a more efficient version that returns
+ * both results at once.
+ *
+ * \param state - Pointer to state to update
+ *
+ * \return Normally distributed double with mean \p 0.0 and standard deviation \p 1.0
+ */
+STATIC_INLINE(double)
+curand_normal_double(curandStateXORWOW_t *state)
+{
+    if(state->boxmuller_flag_double != EXTRA_FLAG_NORMAL) {
+        unsigned int x0, x1, y0, y1;
+        x0 = curand(state);
+        x1 = curand(state);
+        y0 = curand(state);
+        y1 = curand(state);
+        double2 v = _curand_box_muller_double(x0, x1, y0, y1);
+        state->boxmuller_extra_double = v.y;
+        state->boxmuller_flag_double = EXTRA_FLAG_NORMAL;
+        return v.x;
+    }
+    state->boxmuller_flag_double = 0;
+    return state->boxmuller_extra_double;
+}
+
+/**
+ * \brief Return two normally distributed doubles from an XORWOW generator.
+ *
+ * Return two normally distributed doubles with mean \p 0.0 and
+ * standard deviation \p 1.0 from the XORWOW generator in \p state,
+ * increment position of generator by 2.
+ *
+ * The implementation uses a Box-Muller transform to generate two
+ * normally distributed results.
+ *
+ * \param state - Pointer to state to update
+ *
+ * \return Normally distributed double2 where each element is from a
+ * distribution with mean \p 0.0 and standard deviation \p 1.0
+ */
+STATIC_INLINE(double2)
+curand_normal2_double(curandStateXORWOW_t *state)
+{
+    return curand_box_muller_double(state);
+}
+#endif // !defined(CURAND_NORMAL_H_)
 #endif	/* 0 */
 #endif	/* __CUDACC__ */
 #endif	/* CUDA_CURAND_H */
