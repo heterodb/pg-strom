@@ -207,11 +207,13 @@ dmaBufferCreateSegment(dmaBufferSegment *seg)
 	if (fdesc < 0)
 		elog(ERROR, "failed on shm_open('%s'): %m", namebuf);
 
-	if (fallocate(fdesc, 0, 0, dma_segment_size) != 0)
+	while (fallocate(fdesc, 0, 0, dma_segment_size) != 0)
 	{
+		if (errno == EINTR)
+			continue;
 		close(fdesc);
 		shm_unlink(namebuf);
-		elog(ERROR, "failed on ftruncate(2): %m");
+		elog(ERROR, "failed on fallocate(2): %m");
 	}
 
 	if (mmap(seg->mmap_ptr, dma_segment_size,
