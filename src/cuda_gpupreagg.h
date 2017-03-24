@@ -1617,8 +1617,6 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 	kern_context		kcxt;
 	void			   *kern_function	__attribute__((unused));
 	size_t				num_threads;
-	dim3				grid_sz;
-	dim3				block_sz;
 	cl_ulong			tv_start;
 	cudaError_t			status = cudaSuccess;
 
@@ -1642,35 +1640,11 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 	 * In this case, we have to run outer-quals to filter out invidible
 	 * rows, prior to the reduction steps.
 	 */
-	if (kds_src->format == KDS_FORMAT_ROW)
+	if (!gpuscan_exec_quals_any(&kcxt, kresults_src, kds_src,
+								&kgpreagg->nitems_filtered))
 	{
-		kern_function = (void *)gpuscan_exec_quals_row;
-		num_threads = kds_src->nitems;
-	}
-	else
-	{
-		kern_function = (void *)gpuscan_exec_quals_block;
-		num_threads = kds_src->nitems * kds_src->nrows_per_block;
-	}
-	status = pgstromLaunchDynamicKernel6(
-				kern_function,	/* gpuscan_exec_quals_XXX */
-				(kern_arg_t)(kparams),
-				(kern_arg_t)(kresults_src),
-				(kern_arg_t)(kds_src),
-				(kern_arg_t)(0),
-				(kern_arg_t)(kds_src->nitems),
-				(kern_arg_t)(&kgpreagg->nitems_filtered),
-				num_threads,
-				0,
-				sizeof(cl_uint));
-	if (status != cudaSuccess)
-	{
-		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
-		goto out;
-	}
-	else if (kresults_src->kerror.errcode != StromError_Success)
-	{
-		kcxt.e = kresults_src->kerror;
+		printf("nitems=%u nrooms=%u, errcode = %u (k=%d l=%u)\n", kresults_src->nitems, kresults_src->nrooms, kcxt.e.errcode, (cl_uint)kcxt.e.kernel, (cl_uint)kcxt.e.lineno);
+		assert(kcxt.e.errcode != StromError_Success);
 		goto out;
 	}
 	else if (kresults_src->nitems == 0)

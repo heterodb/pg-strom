@@ -3681,7 +3681,13 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 		Assert(gpas->gts.nvme_sstate != NULL);
 		with_nvme_strom = (pds_src->nblocks_uncached > 0);
 		nrows_per_block = gpas->gts.nvme_sstate->nrows_per_block;
-		nitems_real = 1.1 * (double)(pds_src->kds.nitems * nrows_per_block);
+		// FIXME: we have to pay attention whether 150% of nrows_per_block is
+		// exactly adeque estimation or not. Small nrows_per_block (often
+		// less than 32) has higher volatility but total amount of actual
+		// memory consumption is not so big.
+		// Large nrows_per_block has less volatility but length of
+		// kern_resultbuf is not so short.
+		nitems_real = 1.5 * (double)(pds_src->kds.nitems * nrows_per_block);
 	}
 
 	/* allocation of GpuPreAggTask */

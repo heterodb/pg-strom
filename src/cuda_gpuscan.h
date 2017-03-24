@@ -683,6 +683,105 @@ out:
 }
 
 /*
+ * gpuscan_exec_quals_any - common entrypoint for exec_quals_(row|block)
+ */
+STATIC_FUNCTION(bool)
+gpuscan_exec_quals_any(kern_context *kcxt,
+					   kern_resultbuf *kresults,
+					   kern_data_store *kds_src,
+					   cl_uint *p_nitems_filtered)
+{
+	void	   *kernel_func;
+	void	  **kernel_args;
+	dim3		grid_sz;
+	dim3		block_sz;
+	cl_uint		part_sz;
+	size_t		nthreads;
+	cudaError_t	status;
+
+	assert(!kresults->all_visible);
+	assert(kds_src->format == KDS_FORMAT_ROW ||
+		   kds_src->format == KDS_FORMAT_BLOCK);
+	if (kds_src->format == KDS_FORMAT_ROW)
+	{
+		kernel_func = (void *)gpuscan_exec_quals_row;
+		part_sz = 0;
+		nthreads = kds_src->nitems;
+	}
+	else
+	{
+		kernel_func = (void *)gpuscan_exec_quals_block;
+		part_sz = (kds_src->nrows_per_block +
+				   warpSize - 1) & ~(warpSize - 1);
+		nthreads = part_sz * kds_src->nitems;
+	}
+	status = optimal_workgroup_size(&grid_sz,
+									&block_sz,
+									kernel_func,
+									nthreads,
+									0,
+									sizeof(cl_uint));
+	if (status != cudaSuccess)
+	{
+		STROM_SET_RUNTIME_ERROR(&kcxt->e, status);
+		return false;
+	}
+
+	/*
+	 * Adjust block-size if KDS_FORMAT_BLOCK and partition size is
+	 * less than the block-size.
+	 */
+	if (kds_src->format == KDS_FORMAT_BLOCK && part_sz < block_sz.x)
+	{
+		cl_uint		nparts_per_block = block_sz.x / part_sz;
+
+		block_sz.x = nparts_per_block * part_sz;
+		grid_sz.x = (kds_src->nitems +
+					 nparts_per_block - 1) / nparts_per_block;
+	}
+	kernel_args = (void **)
+		cudaGetParameterBuffer(sizeof(void *),
+							   sizeof(void *) * 6);
+	if (!kernel_args)
+	{
+		STROM_SET_ERROR(&kcxt->e, StromError_OutOfKernelArgs);
+		return false;
+	}
+	kernel_args[0] = kcxt->kparams;
+	kernel_args[1] = kresults;
+	kernel_args[2] = kds_src;
+	kernel_args[3] = (void *)(0);				/* window_base */
+	kernel_args[4] = (void *)(kds_src->nitems);	/* window_size */
+	kernel_args[5] = (void *)(p_nitems_filtered);
+
+	status = cudaLaunchDevice(kernel_func,
+							  kernel_args,
+							  grid_sz,
+							  block_sz,
+							  sizeof(cl_uint) * block_sz.x,
+							  NULL);
+	if (status != cudaSuccess)
+	{
+		STROM_SET_RUNTIME_ERROR(&kcxt->e, status);
+		return false;
+	}
+
+	status = cudaDeviceSynchronize();
+	if (status != cudaSuccess)
+	{
+		STROM_SET_RUNTIME_ERROR(&kcxt->e, status);
+		return false;
+	}
+
+	if (kresults->kerror.errcode != StromError_Success)
+	{
+		kcxt->e = kresults->kerror;
+		return false;
+	}
+	return true;
+}
+
+/*
  * gpuscan_main - controller function of GpuScan logic
  */
 KERNEL_FUNCTION(void)
@@ -697,7 +796,6 @@ gpuscan_main(kern_gpuscan *kgpuscan,
 	void		  **kernel_args;
 	dim3			grid_sz;
 	dim3			block_sz;
-	cl_uint			part_sz;
 	cl_uint			ntuples;
 	cl_ulong		tv1, tv2;
 	cudaError_t		status = cudaSuccess;
@@ -716,87 +814,13 @@ gpuscan_main(kern_gpuscan *kgpuscan,
 	if (!kresults->all_visible)
 	{
 		tv1 = GlobalTimer();
-
-		if (kds_src->format == KDS_FORMAT_ROW)
+		if (!gpuscan_exec_quals_any(&kcxt, kresults, kds_src,
+									&kgpuscan->nitems_filtered))
 		{
-			kernel_func = (void *)gpuscan_exec_quals_row;
-			part_sz = 0;
-			ntuples = kds_src->nitems;
-		}
-		else
-		{
-			kernel_func = (void *)gpuscan_exec_quals_block;
-			part_sz = (kds_src->nrows_per_block +
-					   warpSize - 1) & ~(warpSize - 1);
-			ntuples = part_sz * kds_src->nitems;
-		}
-		status = optimal_workgroup_size(&grid_sz,
-										&block_sz,
-										kernel_func,
-										ntuples,
-										0,
-										sizeof(cl_uint));
-		if (status != cudaSuccess)
-		{
-			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
-			goto out;
-		}
-
-		/*
-		 * adjust block-size if KDS_FORMAT_BLOCK and partition size is
-		 * less than the block-size.
-		 */
-		if (kds_src->format == KDS_FORMAT_BLOCK &&
-			part_sz < block_sz.x)
-		{
-			cl_uint		nparts_per_block = block_sz.x / part_sz;
-
-			block_sz.x = nparts_per_block * part_sz;
-			grid_sz.x = (kds_src->nitems +
-						 nparts_per_block - 1) / nparts_per_block;
-		}
-
-		kernel_args = (void **)
-			cudaGetParameterBuffer(sizeof(void *),
-								   sizeof(void *) * 5);
-		if (!kernel_args)
-		{
-			STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelArgs);
-			goto out;
-		}
-		kernel_args[0] = KERN_GPUSCAN_PARAMBUF(kgpuscan);
-		kernel_args[1] = KERN_GPUSCAN_RESULTBUF(kgpuscan);
-		kernel_args[2] = kds_src;
-		kernel_args[3] = (void *)(0);				/* window_base */
-		kernel_args[4] = (void *)(kds_src->nitems);	/* window_size */
-		kernel_args[5] = &kgpuscan->nitems_filtered;
-
-		status = cudaLaunchDevice(kernel_func,
-								  kernel_args,
-								  grid_sz,
-								  block_sz,
-								  sizeof(cl_uint) * block_sz.x,
-								  NULL);
-		if (status != cudaSuccess)
-		{
-			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
-			goto out;
-		}
-
-		status = cudaDeviceSynchronize();
-		if (status != cudaSuccess)
-		{
-			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
-			goto out;
-		}
-
-		if (kresults->kerror.errcode != StromError_Success)
-		{
-			kcxt.e = kresults->kerror;
+			assert(kcxt.e.errcode != StromError_Success);
 			goto out;
 		}
 		ntuples = kresults->nitems;
-
 		tv2 = GlobalTimer();
 	}
 	else
