@@ -163,6 +163,7 @@ CUDA_PATH_LIST := /usr/local/cuda /usr/local/cuda-*
 CUDA_PATH := $(shell for x in $(CUDA_PATH_LIST);    \
            do test -e "$$x/include/cuda.h" && echo $$x; done | head -1)
 IPATH := $(CUDA_PATH)/include
+BPATH := $(CUDA_PATH)/bin
 LPATH := $(CUDA_PATH)/lib64
 
 #
@@ -185,6 +186,7 @@ PGSTROM_FLAGS += $(shell	\
             echo "-DPG_MAX_VERSION_NUM=$(PG_MAX_VERSION_NUM)"; \
         fi)
 PGSTROM_FLAGS += -DCUDA_INCLUDE_PATH=\"$(IPATH)\"
+PGSTROM_FLAGS += -DCUDA_BINARY_PATH=\"$(BPATH)\"
 PGSTROM_FLAGS += -DCUDA_LIBRARY_PATH=\"$(LPATH)\"
 PGSTROM_FLAGS += -DCMD_GPUINFO_PATH=\"$(shell $(PG_CONFIG) --bindir)/gpuinfo\"
 PG_CPPFLAGS := $(PGSTROM_FLAGS) -I $(IPATH)

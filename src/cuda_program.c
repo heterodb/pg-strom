@@ -93,6 +93,9 @@ static Size		program_cache_size;
 static shmem_startup_hook_type shmem_startup_next;
 static program_cache_head *pgcache_head = NULL;
 
+static void	   *curand_wrapper_lib = NULL;
+static size_t	curand_wrapper_libsz;
+
 #if 1
 /*
  * pgstrom_wakeup_backends
@@ -404,7 +407,17 @@ link_cuda_libraries(char *ptx_image, size_t ptx_length, cl_uint extra_flags,
 			elog(ERROR, "failed on cuLinkAddFile(\"%s\"): %s",
 				 pathname, errorText(rc));
 	}
-	/* cuRAND is a header-only library on device side */
+	/* curand is accessed via wrapper library */
+	if ((extra_flags & DEVKERNEL_NEEDS_CURAND) == DEVKERNEL_NEEDS_CURAND)
+	{
+		rc = cuLinkAddData(lstate, CU_JIT_INPUT_OBJECT,
+						   curand_wrapper_lib,
+						   curand_wrapper_libsz,
+						   "curand",
+						   0, NULL, NULL);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuLinkAddData: %s", errorText(rc));
+	}
 
 	/* libcublas_device.a, if any */
 	if ((extra_flags & DEVKERNEL_NEEDS_CUBLAS) == DEVKERNEL_NEEDS_CUBLAS)
@@ -1335,6 +1348,92 @@ pgstrom_load_cuda_program(ProgramId program_id, long timeout)
 }
 
 static void
+build_wrapper_libraries(const void *wrapper_source,
+						void **p_wrapper_lib,
+						size_t *p_wrapper_libsz)
+{
+	char   *src_fname = NULL;
+	char   *lib_fname = NULL;
+	int		fdesc = -1;
+	int		status;
+	char	spath[128];
+	char	lpath[128];
+	char	cmd[MAXPGPATH];
+	void   *wrapper_lib = NULL;
+	ssize_t	rv, source_len = strlen(wrapper_source);
+	struct stat st_buf;
+
+	PG_TRY();
+	{
+		/* Write source */
+		strcpy(spath, P_tmpdir "/XXXXXX.cu");
+		fdesc = mkstemps(spath, 3);
+		if (fdesc < 0)
+			elog(ERROR, "failed on mkstemps('%s') : %m", src_fname);
+		src_fname = spath;
+
+		rv = write(fdesc, wrapper_source, source_len);
+		if (rv != source_len)
+			elog(ERROR, "failed on write(2) on '%s': %m", src_fname);
+		close(fdesc);
+		fdesc = -1;
+
+		/* Run NVCC */
+		snprintf(lpath, sizeof(lpath),
+				 "%s.sm_%lu.o",
+				 spath, devComputeCapability);
+		lib_fname = lpath;
+		snprintf(cmd, sizeof(cmd),
+				 CUDA_BINARY_PATH "/nvcc "
+				 " --relocatable-device-code=true"
+				 " --gpu-architecture=sm_%lu"
+				 " -DPGSTROM_BUILD_WRAPPER"
+				 " --device-c %s -o %s",
+				 devComputeCapability,
+				 src_fname,
+				 lib_fname);
+		status = system(cmd);
+		if (status < 0 || WEXITSTATUS(status) != 0)
+			elog(ERROR, "failed on nvcc (%s)", cmd);
+
+		/* Read library */
+		fdesc = open(lib_fname, O_RDONLY);
+		if (fdesc < 0)
+			elog(ERROR, "failed to open \"%s\": %m", lib_fname);
+		if (fstat(fdesc, &st_buf) != 0)
+			elog(ERROR, "failed on fstat(\"%s\") : %m", lib_fname);
+
+		wrapper_lib = malloc(st_buf.st_size);
+		if (!wrapper_lib)
+			elog(ERROR, "out of memory");
+		rv = read(fdesc, wrapper_lib, st_buf.st_size);
+		if (rv != st_buf.st_size)
+			elog(ERROR, "failed on read(\"%s\") : %m", lib_fname);
+		close(fdesc);
+		fdesc = -1;
+	}
+	PG_CATCH();
+	{
+		if (wrapper_lib)
+			free(wrapper_lib);
+		if (fdesc >= 0)
+			close(fdesc);
+		if (src_fname)
+			unlink(src_fname);
+		if (lib_fname)
+			unlink(lib_fname);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	unlink(src_fname);
+	unlink(lib_fname);
+
+	*p_wrapper_lib = wrapper_lib;
+	*p_wrapper_libsz = st_buf.st_size;
+}
+
+static void
 pgstrom_startup_cuda_program(void)
 {
 	bool		found;
@@ -1397,4 +1496,9 @@ pgstrom_init_cuda_program(void)
 	RequestAddinShmemSpace(sizeof(program_cache_head));
 	shmem_startup_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_cuda_program;
+
+	/* build wrapper library objects */
+	build_wrapper_libraries(pgstrom_cuda_curand_code,
+							&curand_wrapper_lib,
+							&curand_wrapper_libsz);
 }

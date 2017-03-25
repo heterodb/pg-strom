@@ -1360,8 +1360,8 @@ create_plcuda_task(plcudaTaskState *plts, FunctionCallInfo fcinfo,
 	}
 	kparams->nparams = fcinfo->nargs;
 	kparams->length = STROMALIGN(offset);
-	Assert(offsetof(plcudaTask, kern)
-		   + kplcuda_head->length
+	Assert(STROMALIGN(offsetof(plcudaTask, kern)
+					  + kplcuda_head->length)
 		   + kparams->length == total_length);
 	Assert(!plts->last_results_buf);
 	plts->last_results_buf = ptask->h_results_buf;

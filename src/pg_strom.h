@@ -282,6 +282,7 @@ typedef struct GpuTask_v2 GpuTask_v2;
 #define DEVKERNEL_NEEDS_CUBLAS		   (0x00200000 | DEVKERNEL_NEEDS_DYNPARA)
 //TODO: DYNPARA needs to be renamed?
 #define DEVKERNEL_NEEDS_LINKAGE		   (DEVKERNEL_NEEDS_DYNPARA	|	\
+										DEVKERNEL_NEEDS_CURAND |	\
 										DEVKERNEL_NEEDS_CUBLAS)
 struct devtype_info;
 struct devfunc_info;
