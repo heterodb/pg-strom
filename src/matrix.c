@@ -481,13 +481,15 @@ PG_FUNCTION_INFO_V1(array_matrix_validation);
 Datum
 array_matrix_rawsize(PG_FUNCTION_ARGS)
 {
-	Oid			elemtype = PG_GETARG_OID(0);
-	int32		height = PG_GETARG_INT32(1);
-	int32		width = PG_GETARG_INT32(2);
-	int16		typlen;
+	Oid		elemtype = PG_GETARG_OID(0);
+	int32	height = (PG_NARGS() > 1 ? PG_GETARG_INT32(1) : 1);
+	int32	width = (PG_NARGS() > 2 ? PG_GETARG_INT32(2) : 1);
+	int32	depth = (PG_NARGS() > 3 ? PG_GETARG_INT32(3) : 1);
+	int16	typlen;
 
 	switch (elemtype)
 	{
+		case BOOLOID:
 		case INT2OID:
 		case INT4OID:
 		case INT8OID:
@@ -499,7 +501,7 @@ array_matrix_rawsize(PG_FUNCTION_ARGS)
 			elog(ERROR, "unable to make array-matrix with '%s' type",
 				 format_type_be(elemtype));
 	}
-	PG_RETURN_INT64(MAXALIGN(ARRAY_MATRIX_RAWSIZE(typlen, height, width)));
+	PG_RETURN_INT64(ARRAY_CUBE_RAWSIZE(typlen, depth, height, width));
 }
 PG_FUNCTION_INFO_V1(array_matrix_rawsize);
 

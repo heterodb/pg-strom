@@ -700,7 +700,17 @@ CREATE FUNCTION pg_catalog.array_matrix_width(anyarray)
   AS 'MODULE_PATHNAME','array_matrix_width'
   LANGUAGE C STRICT;
 
+CREATE FUNCTION pg_catalog.array_vector_rawsize(regtype,int)
+  RETURNS bigint
+  AS 'MODULE_PATHNAME','array_matrix_rawsize'
+  LANGUAGE C STRICT;
+
 CREATE FUNCTION pg_catalog.array_matrix_rawsize(regtype,int,int)
+  RETURNS bigint
+  AS 'MODULE_PATHNAME','array_matrix_rawsize'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_catalog.array_cube_rawsize(regtype,int,int,int)
   RETURNS bigint
   AS 'MODULE_PATHNAME','array_matrix_rawsize'
   LANGUAGE C STRICT;

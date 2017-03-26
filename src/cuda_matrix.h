@@ -135,6 +135,15 @@ typedef struct
 	cl_uint		elemtype;	/* always FLOAT4OID for matrix */
 	union {
 		struct {
+			cl_int	depth;		/* depth of the cube (=dim1) */
+			cl_int	width;		/* width of the cube (=dim2) */
+			cl_int	height;		/* height of the cube (=dim3) */
+			cl_int	lbound1;	/* always 1 for cube */
+			cl_int	lbound2;	/* always 1 for cube */
+			cl_int	lbound3;	/* always 1 for cube */
+			char	values[1];	/* to be variable length */
+		} d3;
+		struct {
 			cl_int	width;		/* height of the matrix (=dim1) */
 			cl_int	height;		/* width of the matrix (=dim2) */
 			cl_int	lbound1;	/* always 1 for matrix */
@@ -172,7 +181,13 @@ VALIDATE_ARRAY_MATRIX(MatrixType *matrix)
 #endif	/* __CUDACC__ */
 		)
 	{
-		if (matrix->ndim == 2)
+		if (matrix->ndim == 1)
+		{
+			if (matrix->u.d1.height > 0 &&
+				matrix->u.d1.lbound1 == 1)
+				return true;
+		}
+		else if (matrix->ndim == 2)
 		{
 			if (matrix->u.d2.width > 0 &&
 				matrix->u.d2.height > 0 &&
@@ -180,10 +195,14 @@ VALIDATE_ARRAY_MATRIX(MatrixType *matrix)
 				matrix->u.d2.lbound2 == 1)
 				return true;
 		}
-		else if (matrix->ndim == 1)
+		else if (matrix->ndim == 3)
 		{
-			if (matrix->u.d1.height > 0 &&
-				matrix->u.d1.lbound1 == 1)
+			if (matrix->u.d3.depth > 0 &&
+				matrix->u.d3.width > 0 &&
+				matrix->u.d3.height > 0 &&
+				matrix->u.d3.lbound1 == 1 &&
+				matrix->u.d3.lbound2 == 1 &&
+				matrix->u.d3.lbound3 == 1)
 				return true;
 		}
 		else
@@ -194,24 +213,37 @@ VALIDATE_ARRAY_MATRIX(MatrixType *matrix)
 
 #define ARRAY_MATRIX_ELEMTYPE(X)			\
 	(((MatrixType *)(X))->elemtype)
+#define ARRAY_MATRIX_DEPTH(X)					\
+	(((MatrixType *)(X))->ndim == 3 ? ((MatrixType *)(X))->u.d3.depth : \
+	 (((MatrixType *)(X))->ndim == 2 ||									\
+	  ((MatrixType *)(X))->ndim == 1) ? 1 : -1)
 #define ARRAY_MATRIX_HEIGHT(X)											\
-	(((MatrixType *)(X))->ndim == 2 ? ((MatrixType *)(X))->u.d2.height : \
+	(((MatrixType *)(X))->ndim == 3 ? ((MatrixType *)(X))->u.d3.height : \
+	 ((MatrixType *)(X))->ndim == 2 ? ((MatrixType *)(X))->u.d2.height : \
 	 ((MatrixType *)(X))->ndim == 1 ? ((MatrixType *)(X))->u.d1.height : -1)
 #define ARRAY_MATRIX_WIDTH(X)											\
-	(((MatrixType *)(X))->ndim == 2 ? ((MatrixType *)(X))->u.d2.width :	\
+	(((MatrixType *)(X))->ndim == 3 ? ((MatrixType *)(X))->u.d3.width :	\
+	 ((MatrixType *)(X))->ndim == 2 ? ((MatrixType *)(X))->u.d2.width :	\
 	 ((MatrixType *)(X))->ndim == 1 ? 1 : -1)
 #define ARRAY_MATRIX_DATAPTR(X)											\
-	(((MatrixType *)(X))->ndim == 2 ? ((MatrixType *)(X))->u.d2.values : \
+	(((MatrixType *)(X))->ndim == 3 ? ((MatrixType *)(X))->u.d3.values : \
+	 ((MatrixType *)(X))->ndim == 2 ? ((MatrixType *)(X))->u.d2.values : \
 	 ((MatrixType *)(X))->ndim == 1 ? ((MatrixType *)(X))->u.d1.values : NULL)
+#define ARRAY_CUBE_RAWSIZE(typlen,height,width,depth)			\
+	MAXALIGN(offsetof(MatrixType,								\
+					  u.d3.values[(size_t)(typlen) *			\
+								  (size_t)(height) *			\
+								  (size_t)(width)  *			\
+								  (size_t)(depth)]))
 #define ARRAY_MATRIX_RAWSIZE(typlen,height,width)				\
-	STROMALIGN(offsetof(MatrixType,								\
-						u.d2.values[(size_t)(typlen) *			\
-									(size_t)(height) *			\
-									(size_t)(width)]))
-#define ARRAY_VECTOR_RAWSIZE(typlen,nitems)						\
-	STROMALIGN(offsetof(MatrixType,								\
-						u.d1.values[(size_t)(typlen) *			\
-									(size_t)(nitems)]))
+	MAXALIGN(offsetof(MatrixType,								\
+					  u.d2.values[(size_t)(typlen) *			\
+								  (size_t)(height) *			\
+								  (size_t)(width)]))
+#define ARRAY_VECTOR_RAWSIZE(typlen,height)						\
+	MAXALIGN(offsetof(MatrixType,								\
+					  u.d1.values[(size_t)(typlen) *			\
+								  (size_t)(height)]))
 
 #define INIT_ARRAY_VECTOR(X,_elemtype,_typlen,_nitems)			\
 	do {														\
@@ -238,6 +270,24 @@ VALIDATE_ARRAY_MATRIX(MatrixType *matrix)
 		((MatrixType *)(X))->u.d2.width = (_width);				\
 		((MatrixType *)(X))->u.d2.lbound1 = 1;					\
 		((MatrixType *)(X))->u.d2.lbound2 = 1;					\
+	} while(0)
+
+#define INIT_ARRAY_CUBE(X,_elemtype,_typlen,_height,_width,_depth)	\
+	do {														\
+		size_t	__len = ARRAY_CUBE_RAWSIZE((_typlen),			\
+										   (_height),			\
+										   (_width),			\
+										   (_depth));			\
+		SET_VARSIZE(X, __len);									\
+		((MatrixType *)(X))->ndim = 3;							\
+		((MatrixType *)(X))->dataoffset = 0;					\
+		((MatrixType *)(X))->elemtype = (_elemtype);			\
+		((MatrixType *)(X))->u.d3.height = (_height);			\
+		((MatrixType *)(X))->u.d3.width = (_width);				\
+		((MatrixType *)(X))->u.d3.depth = (_depth);				\
+		((MatrixType *)(X))->u.d3.lbound1 = 1;					\
+		((MatrixType *)(X))->u.d3.lbound2 = 1;					\
+		((MatrixType *)(X))->u.d3.lbound3 = 1;					\
 	} while(0)
 
 #ifdef __CUDACC__
