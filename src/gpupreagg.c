@@ -1685,9 +1685,15 @@ make_alternative_aggref(Aggref *aggref,
 	Form_pg_proc proc_form;
 	Form_pg_aggregate agg_form;
 
-	if (aggref->aggdirectargs)
+	if (aggref->aggorder || aggref->aggdistinct)
 	{
 		elog(DEBUG2, "Aggregate with DISTINCT/ORDER BY is not supported: %s",
+			 nodeToString(aggref));
+		return NULL;
+	}
+	if (AGGKIND_IS_ORDERED_SET(aggref->aggkind))
+	{
+		elog(DEBUG2, "ORDERED SET Aggregation is not supported: %s",
 			 nodeToString(aggref));
 		return NULL;
 	}
