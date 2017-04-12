@@ -311,6 +311,12 @@ __gpuMemAlloc(GpuContext *gcontext, int cuda_index, size_t bytesize)
 			goto found;
 	}
 
+#ifdef NOT_USED
+	/*
+	 * MEMO: Device memory reuse seems doubtful; that may cause unexpected
+	 * allocation on a different context, then it will lead memory access
+	 * violation. So, we tentatively disable the feature.
+	 */
 	if (gm_head->empty_block)
 	{
 		gm_block = gm_head->empty_block;
@@ -322,6 +328,7 @@ __gpuMemAlloc(GpuContext *gcontext, int cuda_index, size_t bytesize)
 			goto found;
 		}
 	}
+#endif
 	/*
 	 * no space available on the preliminary allocated block,
 	 * so we try to allocate device memory in advance.
@@ -642,10 +649,12 @@ found:
 		dlist_delete(&gm_block->chain);
 		memset(&gm_block->chain, 0, sizeof(dlist_node));
 
+#ifdef NOT_USED
 		/* One empty block shall be kept, but no more */
 		if (!gm_head->empty_block)
 			gm_head->empty_block = gm_block;
 		else
+#endif
 		{
 			gettimeofday(&tv1, NULL);
 
@@ -710,7 +719,7 @@ gpuMemFreeAll(GpuContext *gcontext)
 			elog(WARNING, "failed on cuCtxPushCurrent: %s", errorText(rc));
 
 		gm_head = &gcontext->gpu[index].cuda_memory;
-
+#ifdef NOT_USED
 		if (gm_head->empty_block)
 		{
 			gm_block = gm_head->empty_block;
@@ -720,7 +729,7 @@ gpuMemFreeAll(GpuContext *gcontext)
 			GpuScoreDeclMemUsage(gcontext, index, gm_block->block_size);
 			gm_head->empty_block = NULL;
 		}
-
+#endif
 		while (!dlist_is_empty(&gm_head->active_blocks))
 		{
 			dnode = dlist_pop_head_node(&gm_head->active_blocks);
