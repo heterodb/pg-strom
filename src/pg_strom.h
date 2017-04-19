@@ -799,6 +799,8 @@ extern void pgstrom_init_gpupreagg(void);
 /*
  * pl_cuda.c
  */
+extern Datum pltext_function_validator(PG_FUNCTION_ARGS);
+extern Datum pltext_function_handler(PG_FUNCTION_ARGS);
 extern Datum plcuda_function_validator(PG_FUNCTION_ARGS);
 extern Datum plcuda_function_handler(PG_FUNCTION_ARGS);
 extern Datum plcuda_function_source(PG_FUNCTION_ARGS);

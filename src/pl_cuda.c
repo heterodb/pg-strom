@@ -122,6 +122,83 @@ static void plcuda_exec_end(plcudaTaskState *plts);
 /* tracker of plcudaState */
 static dlist_head	plcuda_state_list;
 
+
+/*
+ * pltext_function_validator - contents holder
+ */
+Datum
+pltext_function_validator(PG_FUNCTION_ARGS)
+{
+	Oid			func_oid = PG_GETARG_OID(0);
+	HeapTuple	tuple;
+	Form_pg_proc proc;
+
+	if (!CheckFunctionValidatorAccess(fcinfo->flinfo->fn_oid, func_oid))
+		PG_RETURN_VOID();
+
+	tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(func_oid));
+	if (!HeapTupleIsValid(tuple))
+		elog(ERROR, "cache lookup failed for function %u", func_oid);
+	proc = (Form_pg_proc) GETSTRUCT(tuple);
+
+	if (proc->proisagg)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("Unable to use PL/TEXT for aggregate functions")));
+	if (proc->proiswindow)
+		ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("Unable to use PL/TEXT for window functions")));
+	if (proc->proretset)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("Unable to use PL/TEXT for set returning function")));
+	if (proc->pronargs)
+		ereport(ERROR,
+                (errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
+				 errmsg("PL/TEXT function cannot have arguments")));
+	if (proc->prorettype != TEXTOID)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
+				 errmsg("PL/TEXT function must return text type")));
+
+	ReleaseSysCache(tuple);
+
+	PG_RETURN_VOID();
+}
+PG_FUNCTION_INFO_V1(pltext_function_validator);
+
+/*
+ * pltext_function_handler - contents holder
+ */
+Datum
+pltext_function_handler(PG_FUNCTION_ARGS)
+{
+	FmgrInfo   *flinfo = fcinfo->flinfo;
+	HeapTuple	tuple;
+	text	   *retval = NULL;
+	Datum		datum;
+	bool		isnull;
+
+	tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(flinfo->fn_oid));
+	if (!HeapTupleIsValid(tuple))
+		elog(ERROR, "cache lookup failed for function %u",
+			 flinfo->fn_oid);
+
+	datum = SysCacheGetAttr(PROCOID, tuple,
+							Anum_pg_proc_prosrc,
+							&isnull);
+	if (!isnull)
+		retval = PG_DETOAST_DATUM_COPY(datum);
+
+	ReleaseSysCache(tuple);
+
+	if (isnull)
+		PG_RETURN_NULL();
+	PG_RETURN_TEXT_P(retval);
+}
+PG_FUNCTION_INFO_V1(pltext_function_handler);
+
 /*
  * plcuda_parse_cmdline
  *
