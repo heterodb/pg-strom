@@ -36,6 +36,13 @@ PG_MIN_VERSION_NUM=$(shell echo $(PG_MIN_VERSION) | awk '{print $$NF}'	\
 PG_MAX_VERSION_NUM=$(shell echo $(PG_MAX_VERSION) | awk '{print $$NF}'	\
 	| sed -e 's/\./ /g' -e 's/[A-Za-z].*$$//g'	\
 	| awk '{printf "%d%02d%02d", $$1, $$2, (NF >=3) ? $$3 : 0}')
+#
+# Installation related
+#
+#PGSTROM_CONTROL := pg_strom.control
+#PGSTROM_CONTROL_SRC = $(STROM_BUILD_ROOT)/pg_strom.control
+PGSTROM_SQL := $(STROM_BUILD_ROOT)/pg_strom--1.0.sql
+PGSTROM_SQL_SRC = basis.sql aggfuncs.sql matrix.sql
 
 #
 # Source file of CPU portion
@@ -79,8 +86,9 @@ STROM_UTILS = $(addprefix $(STROM_BUILD_ROOT)/utils/, $(__STROM_UTILS))
 #
 __RPM_SPECFILE = pg_strom.spec
 RPM_SPECFILE = $(addprefix $(STROM_BUILD_ROOT)/, $(__RPM_SPECFILE))
-__MISC_FILES = LICENSE README.md pg_strom.control Makefile \
-	src/Makefile src/pg_strom.h src/pg_strom--1.0.sql
+__MISC_FILES = LICENSE README.md Makefile \
+	pg_strom.control $(PGSTROM_SQL) \
+	src/Makefile src/pg_strom.h
 
 PACKAGE_FILES = $(__MISC_FILES)					\
 	$(addprefix src/,$(__STROM_SOURCES))		\
@@ -214,17 +222,14 @@ endif
 MODULE_big = pg_strom
 OBJS =  $(STROM_OBJS) $(CUDA_OBJS)
 EXTENSION = pg_strom
-ifeq ($(shell test $(PG_VERSION_NUM) -ge 90600; echo $??),0)
-DATA = $(addprefix $(STROM_BUILD_ROOT)/src/, pg_strom--1.0.sql)
-else
-DATA = $(addprefix $(STROM_BUILD_ROOT)/src/, pg_strom--1.0.sql)
-endif
+DATA_built = $(PGSTROM_SQL)
 
 # Support utilities
 SCRIPTS_built = $(STROM_UTILS)
 # Extra files to be cleaned
 EXTRA_CLEAN = $(CUDA_SOURCES) $(HTML_FILES) $(STROM_UTILS) \
 	$(shell test pg_strom.control -ef $(addprefix $(STROM_BUILD_ROOT)/src/, pg_strom.control) || echo pg_strom.control) \
+	$(PGSTROM_SQL) \
 	$(STROM_BUILD_ROOT)/__tarball $(STROM_TGZ)
 
 #
@@ -237,6 +242,9 @@ include $(PGXS)
 
 pg_strom.control: $(addprefix $(STROM_BUILD_ROOT)/src/, pg_strom.control)
 	test $< -ef $@ || cp -f $< $@
+
+$(PGSTROM_SQL): $(addprefix $(STROM_BUILD_ROOT)/sql/, $(PGSTROM_SQL_SRC))
+	cat $^ > $@
 
 $(CUDA_SOURCES): $(CUDA_SOURCES:.c=.h)
 	@(echo "const char *pgstrom_$(shell basename $(@:%.c=%))_code =";		\
