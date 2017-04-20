@@ -130,18 +130,18 @@ MENUGEN_PY = $(addprefix $(STROM_BUILD_ROOT)/doc/, $(__MENUGEN_PY))
 ifeq ($(HAS_RPM_CMD), 1)
 __PGSQL_PKGS = $(shell rpm -q -g 'Applications/Databases' | grep -E '^postgresql[0-9]+-')
 PGSQL_PKG_VERSION := $(shell \
-        if [ -n "$(__PGSQL_PKGS)" ];								\
-        then														\
-            rpm -q $(__PGSQL_PKGS) --queryformat '%{version}\n';	\
-        else														\
-            $(PG_CONFIG) --version | awk '{print $$NF}';			\
-        fi | uniq | sort -V | tail -1 |								\
-        sed -e 's/\./ /g' -e 's/[A-Za-z].*$$//g' |					\
+        if [ -n "$(__PGSQL_PKGS)" ];			\
+        then						\
+            rpm -q $(__PGSQL_PKGS) --queryformat '%{version}\n'; \
+        else						\
+            $(PG_CONFIG) --version | awk '{print $$NF}'; \
+        fi | uniq | sort -V | tail -1 |			\
+        sed -e 's/\./ /g' -e 's/[A-Za-z].*$$//g' |	\
         awk '{printf "%d%d", $$1, $$2}')
-CUDA_PKG_VERSION := $(shell \
-        rpm -q cuda --queryformat '%{version}\n' |	 	\
-        sort -V | tail -1 |								\
-        sed -e 's/\./ /g' -e 's/[A-Za-z].*$$//g' |		\
+CUDA_PKG_VERSION := $(shell				\
+        rpm -q cuda --queryformat '%{version}\n' |	\
+        sort -V | tail -1 |				\
+        sed -e 's/\./ /g' -e 's/[A-Za-z].*$$//g' |	\
         awk '{printf "%d-%d", $$1, $$2}')
 
 RPMBUILD_PARAMS := $(shell				\
@@ -246,7 +246,7 @@ $(PGSTROM_SQL): $(addprefix $(STROM_BUILD_ROOT)/sql/, $(PGSTROM_SQL_SRC))
 	cat $^ > $@
 
 $(CUDA_SOURCES): $(CUDA_SOURCES:.c=.h)
-	@(echo "const char *pgstrom_$(shell basename $(@:%.c=%))_code =";		\
+	@(echo "const char *pgstrom_$(shell basename $(@:%.c=%))_code ="; \
 	  sed -e 's/\\/\\\\/g' -e 's/\t/\\t/g' -e 's/"/\\"/g'	\
 	      -e 's/^/  "/g' -e 's/$$/\\n"/g' < $*.h;		\
 	  echo ";") > $@
