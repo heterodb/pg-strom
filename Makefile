@@ -39,8 +39,6 @@ PG_MAX_VERSION_NUM=$(shell echo $(PG_MAX_VERSION) | awk '{print $$NF}'	\
 #
 # Installation related
 #
-#PGSTROM_CONTROL := pg_strom.control
-#PGSTROM_CONTROL_SRC = $(STROM_BUILD_ROOT)/pg_strom.control
 PGSTROM_SQL := $(STROM_BUILD_ROOT)/pg_strom--1.0.sql
 PGSTROM_SQL_SRC = basis.sql aggfuncs.sql matrix.sql
 
@@ -228,8 +226,7 @@ DATA_built = $(PGSTROM_SQL)
 SCRIPTS_built = $(STROM_UTILS)
 # Extra files to be cleaned
 EXTRA_CLEAN = $(CUDA_SOURCES) $(HTML_FILES) $(STROM_UTILS) \
-	$(shell test pg_strom.control -ef $(addprefix $(STROM_BUILD_ROOT)/src/, pg_strom.control) || echo pg_strom.control) \
-	$(PGSTROM_SQL) \
+	$(shell ls */Makefile | sed 's/Makefile/pg_strom.control/g') \
 	$(STROM_BUILD_ROOT)/__tarball $(STROM_TGZ)
 
 #
@@ -240,8 +237,10 @@ ifndef PGSTROM_MAKEFILE_ONLY_PARAMDEF
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 
-pg_strom.control: $(addprefix $(STROM_BUILD_ROOT)/src/, pg_strom.control)
-	test $< -ef $@ || cp -f $< $@
+ifneq ($(STROM_BUILD_ROOT), .)
+pg_strom.control: $(addprefix $(STROM_BUILD_ROOT)/, pg_strom.control)
+	cp -f $< $@
+endif
 
 $(PGSTROM_SQL): $(addprefix $(STROM_BUILD_ROOT)/sql/, $(PGSTROM_SQL_SRC))
 	cat $^ > $@
