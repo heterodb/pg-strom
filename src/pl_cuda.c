@@ -390,80 +390,57 @@ ident_to_cstring(List *ident)
  * #plcuda_sanity_check {<function>}             (default: no fallback)
  * #plcuda_cpu_fallback {<function>}             (default: no fallback)
  */
+typedef struct {
+	Oid					proowner;
+	oidvector		   *proargtypes;
+	Oid					prorettype;
+	StringInfo			curr;
+	StringInfoData		decl_src;
+	StringInfoData		prep_src;
+	StringInfoData		main_src;
+	StringInfoData		post_src;
+	StringInfoData		emsg;
+	bool				not_exec_now;
+	bool				has_decl_block;
+	bool				has_prep_block;
+	bool				has_main_block;
+	bool				has_post_block;
+	bool				has_working_bufsz;
+	bool				has_results_bufsz;
+	bool				has_sanity_check;
+	bool				has_cpu_fallback;
+	List			   *include_func_oids;
+} plcuda_code_context;
+
 static void
-plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
-					   Oid proowner,
-					   oidvector *proargtypes,
-					   Oid prorettype,
-					   char *source)
+__plcuda_code_validation(plcudaTaskState *plts,		/* dummy GTS */
+						 plcuda_code_context *con,
+						 char *source_name,
+						 char *source)
 {
-	StringInfoData	decl_src;
-	StringInfoData	prep_src;
-	StringInfoData	main_src;
-	StringInfoData	post_src;
-	StringInfoData	emsg;
-	StringInfo		curr = NULL;
-	devtype_info   *dtype;
-	char		   *line;
-	int				i, lineno;
-	bool			not_exec_now = OidIsValid(proowner);
-	bool			has_decl_block = false;
-	bool			has_prep_block = false;
-	bool			has_main_block = false;
-	bool			has_post_block = false;
-	bool			has_working_bufsz = false;
-	bool			has_results_bufsz = false;
-	bool			has_sanity_check = false;
-	bool			has_cpu_fallback = false;
+	int			lineno;
+	char	   *line;
+	char	   *saveptr = NULL;
 
-	initStringInfo(&decl_src);
-	initStringInfo(&prep_src);
-	initStringInfo(&main_src);
-	initStringInfo(&post_src);
-	initStringInfo(&emsg);
+#define EMSG(fmt,...)													\
+	appendStringInfo(&con->emsg, "\n%s%s%u: " fmt,						\
+					 !source_name ? "" : source_name,					\
+					 !source_name ? "" : ":",							\
+					 lineno, ##__VA_ARGS__)
+#define NOTE(fmt,...)							\
+	elog(NOTICE, "%s%s%u: " fmt,				\
+		 !source_name ? "" : source_name,		\
+		 !source_name ? "" : ":",				\
+		 lineno, ##__VA_ARGS__)
 
-#define EMSG(fmt,...)		appendStringInfo(&emsg, "\n%u: " fmt,	\
-											 lineno, __VA_ARGS__)
-#define NOTE(fmt,...)		elog(NOTICE, "%u: " fmt, lineno, __VA_ARGS__)
-#define HELPER_PRIV_CHECK(func_oid, ownership)		\
-	(!OidIsValid(func_oid) ||						\
-	 !OidIsValid(ownership) ||						\
-	 pg_proc_ownercheck((func_oid),(ownership)))
+#define HELPER_PRIV_CHECK(func_oid)				\
+	(!OidIsValid(func_oid) ||					\
+	 con->not_exec_now ||						\
+	 pg_proc_ownercheck((func_oid), con->proowner))
 
-	plts->extra_flags = DEVKERNEL_NEEDS_PLCUDA;
-	/* check result type */
-	dtype = pgstrom_devtype_lookup(prorettype);
-	if (dtype)
-		plts->extra_flags |= dtype->type_flags;
-	else if (get_typlen(prorettype) == -1)
-	{
-		Assert(!get_typbyval(prorettype));
-		if (not_exec_now)
-			elog(NOTICE, "Unknown varlena result - PL/CUDA must be responsible to the data format to return");
-	}
-	else
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("Result type \"%s\" is not device executable",
-						format_type_be(prorettype))));
-
-	/* check argument types */
-	for (i=0; i < proargtypes->dim1; i++)
-	{
-		Oid		argtype_oid = proargtypes->values[i];
-
-		dtype = pgstrom_devtype_lookup(argtype_oid);
-		if (!dtype)
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("Result type \"%s\" is not device executable",
-							format_type_be(argtype_oid))));
-		plts->extra_flags |= dtype->type_flags;
-	}
-
-	for (line = strtok(source, "\n"), lineno = 1;
+	for (line = strtok_r(source, "\n", &saveptr), lineno = 1;
 		 line != NULL;
-		 line = strtok(NULL, "\n"), lineno++)
+		 line = strtok_r(NULL, "\n", &saveptr), lineno++)
 	{
 		const char *cmd;
 		const char *pos;
@@ -479,8 +456,8 @@ plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
 		/* put a non pl/cuda command line*/
 		if (strncmp(line, "#plcuda_", 8) != 0)
 		{
-			if (curr != NULL)
-				appendStringInfo(curr, "%s\n", line);
+			if (con->curr != NULL)
+				appendStringInfo(con->curr, "%s\n", line);
 			else
 			{
 				/* ignore if empty line */
@@ -504,87 +481,87 @@ plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
 
 			if (strcmp(cmd, "#plcuda_decl") == 0)
 			{
-				if (has_decl_block)
+				if (con->has_decl_block)
 					EMSG("%s appeared twice", cmd);
 				else if (list_length(options) > 0)
 					EMSG("syntax error:\n  %s", line);
 				else
 				{
-					curr = &decl_src;
-					has_decl_block = true;
+					con->curr = &con->decl_src;
+					con->has_decl_block = true;
 				}
 			}
 			else if (strcmp(cmd, "#plcuda_prep") == 0)
 			{
-				if (has_prep_block)
+				if (con->has_prep_block)
 					EMSG("%s appeared twice", cmd);
 				else if (list_length(options) > 0)
 					EMSG("syntax error:\n  %s", line);
 				else
 				{
-					curr = &prep_src;
-					has_prep_block = true;
+					con->curr = &con->prep_src;
+					con->has_prep_block = true;
 				}
 			}
 			else if (strcmp(cmd, "#plcuda_begin") == 0)
 			{
-				if (has_main_block)
+				if (con->has_main_block)
 					EMSG("%s appeared twice", cmd);
 				else if (list_length(options) > 0)
 					EMSG("syntax error:\n  %s", line);
 				else
 				{
-					curr = &main_src;
-					has_main_block = true;
+					con->curr = &con->main_src;
+					con->has_main_block = true;
 				}
 			}
 			else if (strcmp(cmd, "#plcuda_post") == 0)
 			{
-				if (has_post_block)
+				if (con->has_post_block)
 					EMSG("%s appeared twice", cmd);
 				else if (list_length(options) > 0)
 					EMSG("syntax error:\n  %s\n", line);
 				else
 				{
-					curr = &post_src;
-					has_post_block = true;
+					con->curr = &con->post_src;
+					con->has_post_block = true;
 				}
 			}
 			else if (strcmp(cmd, "#plcuda_end") == 0)
 			{
-				if (!curr)
+				if (!con->curr)
 					EMSG("%s was used out of code block", cmd);
 				else
-					curr = NULL;
+					con->curr = NULL;
 			}
 			else if (strcmp(cmd, "#plcuda_num_threads") == 0)
 			{
 				Oid		fn_num_threads;
 				long	val_num_threads;
 
-				if (!curr)
+				if (!con->curr)
 					EMSG("%s appeared outside of code block", cmd);
 				else if (plcuda_lookup_helper(options,
-											  proargtypes, INT8OID,
+											  con->proargtypes, INT8OID,
 											  &fn_num_threads,
 											  &val_num_threads))
 				{
-					if (!HELPER_PRIV_CHECK(fn_num_threads, proowner))
+					if (!HELPER_PRIV_CHECK(fn_num_threads))
 					{
 						EMSG("permission denied on helper function %s",
 							 NameListToString(options));
 					}
-					else if (curr == &prep_src)
+					else if (con->curr == &con->prep_src)
 					{
 						plts->fn_prep_num_threads = fn_num_threads;
 						plts->val_prep_num_threads = val_num_threads;
 					}
-					else if (curr == &main_src)
+					else if (con->curr == &con->main_src)
 					{
 						plts->fn_main_num_threads = fn_num_threads;
 						plts->val_main_num_threads = val_num_threads;
 					}
-					else if (curr == &post_src)
+					else if (con->curr == &con->post_src)
 					{
 						plts->fn_post_num_threads = fn_num_threads;
 						plts->val_post_num_threads = val_num_threads;
@@ -592,7 +569,7 @@ plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
 					else
 						EMSG("cannot use \"%s\" in this code block", cmd);
 				}
-				else if (not_exec_now)
+				else if (con->not_exec_now)
 					NOTE("\"%s\" may be a function but not declared yet",
 						 ident_to_cstring(options));
 				else
@@ -604,29 +581,29 @@ plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
 				Oid		fn_shmem_unitsz;
 				long	val_shmem_unitsz;
 
-				if (!curr)
+				if (!con->curr)
 					EMSG("%s appeared outside of code block", cmd);
 				else if (plcuda_lookup_helper(options,
-											  proargtypes, INT8OID,
+											  con->proargtypes, INT8OID,
 											  &fn_shmem_unitsz,
 											  &val_shmem_unitsz))
 				{
-					if (!HELPER_PRIV_CHECK(fn_shmem_unitsz, proowner))
+					if (!HELPER_PRIV_CHECK(fn_shmem_unitsz))
 					{
 						EMSG("permission denied on helper function %s",
 							 NameListToString(options));
 					}
-					else if (curr == &prep_src)
+					else if (con->curr == &con->prep_src)
 					{
 						plts->fn_prep_shmem_unitsz = fn_shmem_unitsz;
 						plts->val_prep_shmem_unitsz = val_shmem_unitsz;
 					}
-					else if (curr == &main_src)
+					else if (con->curr == &con->main_src)
 					{
 						plts->fn_main_shmem_unitsz = fn_shmem_unitsz;
 						plts->val_main_shmem_unitsz = val_shmem_unitsz;
 					}
-					else if (curr == &post_src)
+					else if (con->curr == &con->post_src)
 					{
 						plts->fn_post_shmem_unitsz = fn_shmem_unitsz;
 						plts->val_post_shmem_unitsz = val_shmem_unitsz;
@@ -634,7 +611,7 @@ plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
 					else
 						EMSG("cannot use \"%s\" in this code block", cmd);
 				}
-				else if (not_exec_now)
+				else if (con->not_exec_now)
 					NOTE("\"%s\" may be a function but not declared yet",
 						 ident_to_cstring(options));
 				else
@@ -646,29 +623,29 @@ plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
 				Oid		fn_shmem_blocksz;
 				long	val_shmem_blocksz;
 
-				if (!curr)
+				if (!con->curr)
 					EMSG("%s appeared outside of code block", cmd);
 				else if (plcuda_lookup_helper(options,
-											  proargtypes, INT8OID,
+											  con->proargtypes, INT8OID,
 											  &fn_shmem_blocksz,
 											  &val_shmem_blocksz))
 				{
-					if (!HELPER_PRIV_CHECK(fn_shmem_blocksz, proowner))
+					if (!HELPER_PRIV_CHECK(fn_shmem_blocksz))
 					{
 						EMSG("permission denied on helper function %s",
 							 NameListToString(options));
 					}
-					else if (curr == &prep_src)
+					else if (con->curr == &con->prep_src)
 					{
 						plts->fn_prep_shmem_blocksz = fn_shmem_blocksz;
 						plts->val_prep_shmem_blocksz = val_shmem_blocksz;
 					}
-					else if (curr == &main_src)
+					else if (con->curr == &con->main_src)
 					{
 						plts->fn_main_shmem_blocksz = fn_shmem_blocksz;
 						plts->val_main_shmem_blocksz = val_shmem_blocksz;
 					}
-					else if (curr == &post_src)
+					else if (con->curr == &con->post_src)
 					{
 						plts->fn_post_shmem_blocksz = fn_shmem_blocksz;
 						plts->val_post_shmem_blocksz = val_shmem_blocksz;
@@ -676,7 +653,7 @@ plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
 					else
 						EMSG("cannot use \"%s\" in this code block", cmd);
 				}
-				else if (not_exec_now)
+				else if (con->not_exec_now)
 					NOTE("\"%s\" may be a function but not declared yet",
 						 ident_to_cstring(options));
 				else
@@ -688,29 +665,29 @@ plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
 				Oid		fn_kern_blocksz;
 				long	val_kern_blocksz;
 
-				if (!curr)
+				if (!con->curr)
 					EMSG("%s appeared outside of code block", cmd);
 				else if (plcuda_lookup_helper(options,
-											  proargtypes, INT8OID,
+											  con->proargtypes, INT8OID,
 											  &fn_kern_blocksz,
 											  &val_kern_blocksz))
 				{
-					if (!HELPER_PRIV_CHECK(fn_kern_blocksz, proowner))
+					if (!HELPER_PRIV_CHECK(fn_kern_blocksz))
 					{
 						EMSG("permission denied on helper function %s",
 							 NameListToString(options));
 					}
-					else if (curr == &prep_src)
+					else if (con->curr == &con->prep_src)
 					{
 						plts->fn_prep_kern_blocksz = fn_kern_blocksz;
 						plts->val_prep_kern_blocksz = val_kern_blocksz;
 					}
-					else if (curr == &main_src)
+					else if (con->curr == &con->main_src)
 					{
 						plts->fn_main_kern_blocksz = fn_kern_blocksz;
 						plts->val_main_kern_blocksz = val_kern_blocksz;
 					}
-					else if (curr == &post_src)
+					else if (con->curr == &con->post_src)
 					{
 						plts->fn_post_kern_blocksz = fn_kern_blocksz;
 						plts->val_post_kern_blocksz = val_kern_blocksz;
@@ -718,7 +695,7 @@ plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
 					else
 						EMSG("cannot use \"%s\" in this code block", cmd);
 				}
-				else if (not_exec_now)
+				else if (con->not_exec_now)
 					NOTE("\"%s\" may be a function but not declared yet",
 						 ident_to_cstring(options));
 				else
@@ -727,20 +704,20 @@ plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
 			}
 			else if (strcmp(cmd, "#plcuda_working_bufsz") == 0)
 			{
-				if (has_working_bufsz)
+				if (con->has_working_bufsz)
 					EMSG("%s appeared twice", cmd);
 				else if (plcuda_lookup_helper(options,
-											  proargtypes, INT8OID,
+											  con->proargtypes, INT8OID,
 											  &plts->fn_working_bufsz,
 											  &plts->val_working_bufsz))
 				{
-					if (HELPER_PRIV_CHECK(plts->fn_working_bufsz, proowner))
-						has_working_bufsz = true;
+					if (HELPER_PRIV_CHECK(plts->fn_working_bufsz))
+						con->has_working_bufsz = true;
 					else
 						EMSG("permission denied on helper function %s",
 							 NameListToString(options));
 				}
-				else if (not_exec_now)
+				else if (con->not_exec_now)
 					NOTE("\"%s\" may be a function but not declared yet",
 						 ident_to_cstring(options));
 				else
@@ -749,20 +726,20 @@ plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
 			}
 			else if (strcmp(cmd, "#plcuda_results_bufsz") == 0)
 			{
-				if (has_results_bufsz)
+				if (con->has_results_bufsz)
 					EMSG("%s appeared twice", cmd);
 				else if (plcuda_lookup_helper(options,
-											  proargtypes, INT8OID,
+											  con->proargtypes, INT8OID,
 											  &plts->fn_results_bufsz,
 											  &plts->val_results_bufsz))
 				{
-					if (HELPER_PRIV_CHECK(plts->fn_results_bufsz, proowner))
-						has_results_bufsz = true;
+					if (HELPER_PRIV_CHECK(plts->fn_results_bufsz))
+						con->has_results_bufsz = true;
 					else
 						EMSG("permission denied on helper function %s",
 							 NameListToString(options));
 				}
-				else if (not_exec_now)
+				else if (con->not_exec_now)
 					NOTE("\"%s\" may be a function but not declared yet",
 						 ident_to_cstring(options));
 				else
@@ -796,19 +773,10 @@ plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
 						extra_flags |= DEVKERNEL_NEEDS_CURAND;
 					else if (strcmp(target, "cuda_cublas.h") == 0)
 						extra_flags |= DEVKERNEL_NEEDS_CUBLAS;
-
-					if (extra_flags != 0 && (has_decl_block ||
-											 has_prep_block ||
-											 has_main_block ||
-											 has_post_block))
-					{
-						EMSG("built-in \"%s\" must appear prior to the code block:\n%s",
-							 target, line);
-					}
 				}
 				if (extra_flags != 0)
 					plts->extra_flags |= extra_flags;
-				else if (!curr)
+				else if (!con->curr)
 					EMSG("#plcuda_include must appear in code block:\n%s",
 						 line);
 				else
@@ -822,18 +790,47 @@ plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
 											 &fn_extra_include,
 											 NULL))
 					{
-						if (HELPER_PRIV_CHECK(fn_extra_include, proowner))
+						if (HELPER_PRIV_CHECK(fn_extra_include))
 						{
-							Datum	txt = OidFunctionCall0(fn_extra_include);
-							char   *str = text_to_cstring(DatumGetTextP(txt));
+							ListCell   *lc;
+							Datum		src;
 
-							appendStringInfoString(curr, str);
+							/* prevent infinite inclusion */
+							foreach (lc, con->include_func_oids)
+							{
+								if (lfirst_oid(lc) == fn_extra_include)
+								{
+									EMSG("\"%s\" leads infinite inclusion",
+										 ident_to_cstring(options));
+									break;
+								}
+							}
+							if (!lc)
+							{
+								appendStringInfo(con->curr,
+												 "/* BEGIN %s */\n", line);
+								con->include_func_oids =
+									lappend_oid(con->include_func_oids,
+												fn_extra_include);
+
+								src = OidFunctionCall0(fn_extra_include);
+								__plcuda_code_validation(
+									plts, con,
+									ident_to_cstring(options),
+									text_to_cstring(DatumGetTextP(src)));
+
+								con->include_func_oids =
+									list_delete_oid(con->include_func_oids,
+													fn_extra_include);
+								appendStringInfo(con->curr,
+												 "/* END %s */\n", line);
+							}
 						}
 						else
 							EMSG("permission denied on helper function %s",
 								 NameListToString(options));
 					}
-					else if (not_exec_now)
+					else if (con->not_exec_now)
 						NOTE("\"%s\" may be a function but not declared yet",
 							 ident_to_cstring(options));
 					else
@@ -843,20 +840,20 @@ plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
 			}
 			else if (strcmp(cmd, "#plcuda_sanity_check") == 0)
 			{
-				if (has_sanity_check)
+				if (con->has_sanity_check)
 					EMSG("%s appeared twice", cmd);
 				else if (plcuda_lookup_helper(options,
-											  proargtypes, BOOLOID,
+											  con->proargtypes, BOOLOID,
 											  &plts->fn_sanity_check,
 											  NULL))
 				{
-					if (HELPER_PRIV_CHECK(plts->fn_sanity_check, proowner))
-						has_sanity_check = true;
+					if (HELPER_PRIV_CHECK(plts->fn_sanity_check))
+						con->has_sanity_check = true;
 					else
 						EMSG("permission denied on helper function %s",
 							 NameListToString(options));
 				}
-				else if (not_exec_now)
+				else if (con->not_exec_now)
 					NOTE("\"%s\" may be a function but not declared yet",
 						 ident_to_cstring(options));
 				else
@@ -865,20 +862,21 @@ plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
 			}
 			else if (strcmp(cmd, "#plcuda_cpu_fallback") == 0)
 			{
-				if (has_cpu_fallback)
+				if (con->has_cpu_fallback)
 					EMSG("%s appeared twice", cmd);
 				else if (plcuda_lookup_helper(options,
-											  proargtypes, prorettype,
+											  con->proargtypes,
+											  con->prorettype,
 											  &plts->fn_cpu_fallback,
 											  NULL))
 				{
-					if (HELPER_PRIV_CHECK(plts->fn_cpu_fallback, proowner))
-						has_cpu_fallback = true;
+					if (HELPER_PRIV_CHECK(plts->fn_cpu_fallback))
+						con->has_cpu_fallback = true;
 					else
 						EMSG("permission denied on helper function %s",
 							 NameListToString(options));
 				}
-				else if (not_exec_now)
+				else if (con->not_exec_now)
 					NOTE("\"%s\" may be a function but not declared yet",
 						 ident_to_cstring(options));
 				else
@@ -889,23 +887,85 @@ plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
 				EMSG("unknown command: %s", line);
 		}
 	}
-	if (curr)
-		appendStringInfo(&emsg, "\n%u: code block was not closed", lineno);
-	if (!has_main_block)
-		appendStringInfo(&emsg, "\n%u: no main code block", lineno);
-	if (emsg.len > 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_SYNTAX_ERROR),
-				 errmsg("pl/cuda function syntax error\n%s", emsg.data)));
-
-	plts->kern_decl = (has_decl_block ? decl_src.data : NULL);
-	plts->kern_prep = (has_prep_block ? prep_src.data : NULL);
-	plts->kern_main = main_src.data;
-	plts->kern_post = (has_post_block ? post_src.data : NULL);
 #undef NMSG
 #undef EMSG
 #undef HELPER_PRIV_CHECK
-	pfree(emsg.data);
+}
+
+static void
+plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
+					   bool not_exec_now,
+					   Oid proowner,
+					   oidvector *proargtypes,
+					   Oid prorettype,
+					   char *prosrc)
+{
+	plcuda_code_context	context;
+	devtype_info   *dtype;
+	int				i;
+
+	/* check result type */
+	dtype = pgstrom_devtype_lookup(prorettype);
+	if (dtype)
+		plts->extra_flags |= dtype->type_flags;
+	else if (get_typlen(prorettype) == -1)
+	{
+		Assert(!get_typbyval(prorettype));
+		if (context.not_exec_now)
+			elog(NOTICE, "Unknown varlena result - PL/CUDA must be responsible to the data format to return");
+	}
+	else
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("Result type \"%s\" is not device executable",
+						format_type_be(prorettype))));
+
+	/* check argument types */
+	for (i=0; i < proargtypes->dim1; i++)
+	{
+		Oid		argtype_oid = proargtypes->values[i];
+
+		dtype = pgstrom_devtype_lookup(argtype_oid);
+		if (!dtype)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("Result type \"%s\" is not device executable",
+							format_type_be(argtype_oid))));
+		plts->extra_flags |= dtype->type_flags;
+	}
+
+	/* parse procedure source */
+	plts->extra_flags = DEVKERNEL_NEEDS_PLCUDA;
+
+	memset(&context, 0, sizeof(plcuda_code_context));
+	initStringInfo(&context.decl_src);
+    initStringInfo(&context.prep_src);
+    initStringInfo(&context.main_src);
+    initStringInfo(&context.post_src);
+    initStringInfo(&context.emsg);
+	context.not_exec_now = not_exec_now;
+	context.proowner = proowner;
+	context.proargtypes = proargtypes;
+	context.prorettype = prorettype;
+	/* walk on the pl/cuda source */
+	__plcuda_code_validation(plts, &context, NULL, prosrc);
+	/* raise syntax error if any */
+	if (context.curr != NULL)
+		appendStringInfo(&context.emsg, "\n???: Code block was not closed");
+	if (!context.has_main_block)
+		appendStringInfo(&context.emsg, "\n???: No main code block");
+	if (context.emsg.len > 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_SYNTAX_ERROR),
+				 errmsg("pl/cuda function syntax error\n%s",
+						context.emsg.data)));
+
+	plts->kern_decl = (context.has_decl_block ? context.decl_src.data : NULL);
+	plts->kern_prep = (context.has_prep_block ? context.prep_src.data : NULL);
+	plts->kern_main = (context.main_src.data);
+	plts->kern_post = (context.has_post_block ? context.post_src.data : NULL);
+
+	pfree(context.emsg.data);
 }
 
 /*
@@ -1180,8 +1240,9 @@ plcuda_exec_begin(HeapTuple protup, FunctionCallInfo fcinfo)
 	prosrc = SysCacheGetAttr(PROCOID, protup, Anum_pg_proc_prosrc, &isnull);
 	if (isnull)
 		elog(ERROR, "Bug? no program source was supplied");
-	plcuda_code_validation(plts,
-						   !fcinfo ? procForm->proowner : InvalidOid,
+	procForm = (Form_pg_proc) GETSTRUCT(protup);
+	plcuda_code_validation(plts, !fcinfo,
+						   procForm->proowner,
 						   &procForm->proargtypes,
 						   procForm->prorettype,
 						   TextDatumGetCString(prosrc));
