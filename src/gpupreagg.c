@@ -211,32 +211,6 @@ typedef struct
 	CUdeviceptr			m_kds_final;	/* final slot buffer (shared) */
 	CUdeviceptr			m_fhash;		/* final hash slot (shared) */
 	CUevent				ev_kds_final;
-	CUevent				ev_dma_send_start;
-	CUevent				ev_dma_send_stop;
-	CUevent				ev_dma_recv_start;
-	CUevent				ev_dma_recv_stop;
-
-	/* performance counters */
-	cl_uint				num_dma_send;
-	cl_uint				num_dma_recv;
-	Size				bytes_dma_send;
-	Size				bytes_dma_recv;
-	cl_float			tv_dma_send;
-	cl_float			tv_dma_recv;
-	cl_uint				num_kern_main;
-	cl_uint				num_kern_prep;
-	cl_uint				num_kern_nogrp;
-	cl_uint				num_kern_lagg;
-	cl_uint				num_kern_gagg;
-	cl_uint				num_kern_fagg;
-	cl_uint				num_kern_fixvar;
-	cl_float			tv_kern_main;
-	cl_float			tv_kern_prep;
-	cl_float			tv_kern_nogrp;
-	cl_float			tv_kern_lagg;
-	cl_float			tv_kern_gagg;
-	cl_float			tv_kern_fagg;
-	cl_float			tv_kern_fixvar;
 
 	/* DMA buffers */
 	pgstrom_data_store *pds_src;	/* source row/block buffer */
@@ -3763,9 +3737,7 @@ gpupreagg_next_task(GpuTaskState_v2 *gts)
 	pgstrom_data_store	   *pds = NULL;
 	int						filedesc = -1;
 	bool					is_last_task = false;
-	struct timeval			tv1, tv2;
 
-	PFMON_BEGIN(&gts->pfm, &tv1);
 	if (gpas->gts.css.ss.ss_currentRelation)
 	{
 		if (!gpas->outer_pds)
@@ -3827,7 +3799,6 @@ gpupreagg_next_task(GpuTaskState_v2 *gts)
 		if (!gpas->gts.scan_overflow)
 			is_last_task = true;
 	}
-	PFMON_END(&gpas->gts.pfm, time_outer_load, &tv1, &tv2);
 
 	if (pds)
 	{
@@ -3899,9 +3870,7 @@ gpupreagg_next_tuple(GpuTaskState_v2 *gts)
 	GpuPreAggTask	   *gpreagg = (GpuPreAggTask *) gpas->gts.curr_task;
 	pgstrom_data_store *pds_final = gpreagg->pds_final;
 	TupleTableSlot	   *slot = NULL;
-	struct timeval		tv1, tv2;
 
-	PFMON_BEGIN(&gts->pfm, &tv1);
 	if (gpreagg->task.cpu_fallback)
 		slot = gpupreagg_next_tuple_fallback(gpas, gpreagg);
 	else if (gpas->gts.curr_index < pds_final->kds.nitems)
@@ -3910,8 +3879,6 @@ gpupreagg_next_tuple(GpuTaskState_v2 *gts)
 		ExecClearTuple(slot);
 		PDS_fetch_tuple(slot, pds_final, &gpas->gts);
 	}
-	PFMON_END(&gts->pfm, time_materialize, &tv1, &tv2);
-
 	return slot;
 }
 
@@ -4379,11 +4346,6 @@ gpupreagg_cleanup_cuda_resources(GpuPreAggTask *gpreagg)
 {
 	CUresult	rc;
 
-	PFMON_EVENT_DESTROY(gpreagg, ev_dma_send_start);
-	PFMON_EVENT_DESTROY(gpreagg, ev_dma_send_stop);
-	PFMON_EVENT_DESTROY(gpreagg, ev_dma_recv_start);
-	PFMON_EVENT_DESTROY(gpreagg, ev_dma_recv_stop);
-
 	if (gpreagg->m_gpreagg != 0UL)
 	{
 		rc = gpuMemFree_v2(gpreagg->task.gcontext, gpreagg->m_gpreagg);
@@ -4541,14 +4503,6 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 	}
 
 	/*
-	 * Creation of event objects, if any
-	 */
-	PFMON_EVENT_CREATE(gpreagg, ev_dma_send_start);
-	PFMON_EVENT_CREATE(gpreagg, ev_dma_send_stop);
-	PFMON_EVENT_CREATE(gpreagg, ev_dma_recv_start);
-	PFMON_EVENT_CREATE(gpreagg, ev_dma_recv_stop);
-
-	/*
 	 * Count number of reduction kernel for each
 	 */
 	SpinLockAcquire(&gpa_sstate->lock);
@@ -4571,7 +4525,6 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 	/*
 	 * OK, kick gpupreagg_main kernel function
 	 */
-	PFMON_EVENT_RECORD(gpreagg, ev_dma_send_start, cuda_stream);
 
 	/*
 	 * In case of retry, we already load the source relation onto the
@@ -4588,8 +4541,6 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 							   cuda_stream);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-		gpreagg->bytes_dma_send += length;
-		gpreagg->num_dma_send++;
 
 		/* source data to be reduced */
 		if (!gpreagg->with_nvme_strom)
@@ -4602,8 +4553,6 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 			if (rc != CUDA_SUCCESS)
 				elog(ERROR, "failed on cuMemcpyHtoDAsync: %s",
 					 errorText(rc));
-			gpreagg->bytes_dma_send += length;
-			gpreagg->num_dma_send++;
 		}
 		else
 		{
@@ -4626,8 +4575,6 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 							   cuda_stream);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-		gpreagg->bytes_dma_send += length;
-		gpreagg->num_dma_send++;
 	}
 	/* header of the internal kds-slot buffer */
 	length = KERN_DATA_STORE_HEAD_LENGTH(gpreagg->kds_head);
@@ -4637,10 +4584,6 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 						   cuda_stream);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-	gpreagg->bytes_dma_send += length;
-	gpreagg->num_dma_send++;
-
-	PFMON_EVENT_RECORD(gpreagg, ev_dma_send_stop, cuda_stream);
 
 	/* Launch:
 	 * KERNEL_FUNCTION(void)
@@ -4667,15 +4610,12 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 						NULL);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
-	gpreagg->num_kern_main++;
 
 	/*
 	 * DMA Recv of individual kern_gpupreagg
 	 *
 	 * NOTE: DMA recv of the final buffer is job of the terminator task.
 	 */
-	PFMON_EVENT_RECORD(gpreagg, ev_dma_recv_start, cuda_stream);
-
 	length = KERN_GPUPREAGG_DMARECV_LENGTH(&gpreagg->kern);
 	rc = cuMemcpyDtoHAsync(&gpreagg->kern,
 						   gpreagg->m_gpreagg,
@@ -4683,10 +4623,6 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 						   cuda_stream);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuMemcpyDtoHAsync: %s", errorText(rc));
-	gpreagg->bytes_dma_recv += length;
-	gpreagg->num_dma_recv++;
-
-	PFMON_EVENT_RECORD(gpreagg, ev_dma_recv_stop, cuda_stream);
 
 	/*
 	 * Callback registration
@@ -4726,11 +4662,6 @@ gpupreagg_process_termination_task(GpuPreAggTask *gpreagg,
 	CUresult		rc;
 	Size			length;
 
-	PFMON_EVENT_CREATE(gpreagg, ev_dma_send_start);
-	PFMON_EVENT_CREATE(gpreagg, ev_dma_send_stop);
-	PFMON_EVENT_CREATE(gpreagg, ev_dma_recv_start);
-	PFMON_EVENT_CREATE(gpreagg, ev_dma_recv_stop);
-
 	/*
 	 * Fixup varlena and numeric variables, if needed.
 	 */
@@ -4758,17 +4689,12 @@ gpupreagg_process_termination_task(GpuPreAggTask *gpreagg,
 		else if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on gpuMemAlloc: %s", errorText(rc));
 
-		PFMON_EVENT_RECORD(gpreagg, ev_dma_send_start, cuda_stream);
 		rc = cuMemcpyHtoDAsync(gpreagg->m_gpreagg,
 							   &gpreagg->kern,
 							   length,
 							   cuda_stream);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-		gpreagg->bytes_dma_send += length;
-		gpreagg->num_dma_send++;
-
-		PFMON_EVENT_RECORD(gpreagg, ev_dma_send_stop, cuda_stream);
 
 		/* Launch:
 		 * KERNEL_FUNCTION(void)
@@ -4796,13 +4722,10 @@ gpupreagg_process_termination_task(GpuPreAggTask *gpreagg,
 							NULL);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
-		gpreagg->num_kern_fixvar++;
 
 		/*
 		 * DMA Recv of individual kern_gpupreagg
 		 */
-		PFMON_EVENT_RECORD(gpreagg, ev_dma_recv_start, cuda_stream);
-
 		length = KERN_GPUPREAGG_DMARECV_LENGTH(&gpreagg->kern);
 		rc = cuMemcpyDtoHAsync(&gpreagg->kern,
 							   gpreagg->m_gpreagg,
@@ -4810,12 +4733,6 @@ gpupreagg_process_termination_task(GpuPreAggTask *gpreagg,
 							   cuda_stream);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuMemcpyDtoHAsync: %s", errorText(rc));
-		gpreagg->bytes_dma_recv += length;
-		gpreagg->num_dma_recv++;
-	}
-	else
-	{
-		PFMON_EVENT_RECORD(gpreagg, ev_dma_recv_start, cuda_stream);
 	}
 
 	/*
@@ -4828,10 +4745,6 @@ gpupreagg_process_termination_task(GpuPreAggTask *gpreagg,
 						   cuda_stream);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-	gpreagg->bytes_dma_recv += length;
-	gpreagg->num_dma_recv++;
-
-	PFMON_EVENT_RECORD(gpreagg, ev_dma_recv_stop, cuda_stream);
 
 	/*
 	 * Register the callback
@@ -4912,7 +4825,6 @@ gpupreagg_push_terminator_task(GpuPreAggTask *gpreagg_old)
 	gpreagg_new->task.program_id  = gpreagg_old->task.program_id;
 	gpreagg_new->task.gts         = gpreagg_old->task.gts;
 	gpreagg_new->task.revision    = gpreagg_old->task.revision;
-	gpreagg_new->task.perfmon     = gpreagg_old->task.perfmon;
 	gpreagg_new->task.file_desc   = -1;
 	gpreagg_new->task.gcontext    = NULL;	/* to be set later */
 	gpreagg_new->task.cuda_stream = NULL;	/* to be set later */
@@ -5037,10 +4949,6 @@ gpupreagg_complete_task(GpuTask_v2 *gtask)
 			if (gpupreagg_put_final_buffer(gpreagg, false, true, true))
 				gpupreagg_push_terminator_task(gpreagg);
 
-			PFMON_EVENT_DESTROY(gpreagg, ev_dma_send_start);
-			PFMON_EVENT_DESTROY(gpreagg, ev_dma_send_stop);
-			PFMON_EVENT_DESTROY(gpreagg, ev_dma_recv_start);
-			PFMON_EVENT_DESTROY(gpreagg, ev_dma_recv_stop);
 			if (gpreagg->with_nvme_strom)
 			{
 				rc = gpuMemFreeIOMap(gpreagg->task.gcontext,

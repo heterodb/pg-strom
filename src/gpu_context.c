@@ -120,12 +120,10 @@ gpuMemMaxAllocSize(void)
 CUresult
 gpuMemAlloc_v2(GpuContext_v2 *gcontext, CUdeviceptr *p_devptr, size_t bytesize)
 {
-	SharedGpuContext *shgcon = gcontext->shgcon;
 	ResourceTracker *tracker;
 	CUdeviceptr		devptr = 0UL;
     CUresult		rc;
 	pg_crc32		crc;
-	struct timeval	tv1, tv2;
 
 	Assert(IsGpuServerProcess());
 	if (bytesize > gpuMemMaxAllocSize())
@@ -133,9 +131,6 @@ gpuMemAlloc_v2(GpuContext_v2 *gcontext, CUdeviceptr *p_devptr, size_t bytesize)
 
 	if (!gpu_scoreboard_mem_alloc(bytesize))
 		return CUDA_ERROR_OUT_OF_MEMORY;
-
-	if (shgcon->pfm.enabled)
-		gettimeofday(&tv1, NULL);
 
 	rc = cuMemAlloc(&devptr, bytesize);
 	if (rc != CUDA_SUCCESS)
@@ -154,17 +149,6 @@ gpuMemAlloc_v2(GpuContext_v2 *gcontext, CUdeviceptr *p_devptr, size_t bytesize)
 			dlist_push_tail(&gcontext->restrack[crc % RESTRACK_HASHSIZE],
 							&tracker->chain);
 			*p_devptr = devptr;
-
-			if (shgcon->pfm.enabled)
-			{
-				gettimeofday(&tv2, NULL);
-
-				SpinLockAcquire(&shgcon->lock);
-				shgcon->pfm.num_gpumem_alloc++;
-				shgcon->pfm.tv_gpumem_alloc += PERFMON_TIMEVAL_DIFF(tv1,tv2);
-				shgcon->pfm.size_gpumem_total += bytesize;
-				SpinLockRelease(&shgcon->lock);
-			}
 		}
 		PG_CATCH();
 		{
@@ -185,16 +169,11 @@ gpuMemAlloc_v2(GpuContext_v2 *gcontext, CUdeviceptr *p_devptr, size_t bytesize)
 CUresult
 gpuMemFree_v2(GpuContext_v2 *gcontext, CUdeviceptr devptr)
 {
-	SharedGpuContext *shgcon = gcontext->shgcon;
 	dlist_head	   *restrack_list;
 	dlist_iter		iter;
 	pg_crc32		crc;
 	CUresult		rc;
 	size_t			nbytes = 0;
-	struct timeval	tv1, tv2;
-
-	if (shgcon->pfm.enabled)
-		gettimeofday(&tv1, NULL);
 
 	crc = resource_tracker_hashval(RESTRACK_CLASS__GPUMEMORY,
 								   &devptr, sizeof(CUdeviceptr));
@@ -226,15 +205,6 @@ found:
 	else
 		gpu_scoreboard_mem_free(nbytes);
 
-	if (shgcon->pfm.enabled)
-	{
-		gettimeofday(&tv2, NULL);
-
-		SpinLockAcquire(&shgcon->lock);
-		shgcon->pfm.num_gpumem_free++;
-		shgcon->pfm.tv_gpumem_free += PERFMON_TIMEVAL_DIFF(tv1,tv2);
-		SpinLockRelease(&shgcon->lock);
-	}
 	return rc;
 }
 
@@ -576,9 +546,6 @@ AllocGpuContext(bool with_connection)
 	shgcon->backend = MyProc;
 	dlist_init(&shgcon->dma_buffer_list);
 	shgcon->num_async_tasks = 0;
-	/* perfmon fields */
-	memset(&shgcon->pfm, 0, sizeof(shgcon->pfm));
-	shgcon->pfm.enabled = pgstrom_perfmon_enabled;
 
 	/* init local GpuContext */
 	gcontext->refcnt = 1;

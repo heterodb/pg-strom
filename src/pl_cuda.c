@@ -103,10 +103,6 @@ typedef struct plcudaTask
 	CUdeviceptr		m_kern_plcuda;
 	CUdeviceptr		m_results_buf;
 	CUdeviceptr		m_working_buf;
-	CUevent			ev_dma_send_start;
-	CUevent			ev_dma_send_stop;
-	CUevent			ev_dma_recv_start;
-	CUevent			ev_dma_recv_stop;
 	/* TODO: performance counter here */
 	kern_plcuda		kern;
 } plcudaTask;
@@ -1859,11 +1855,6 @@ static void
 plcuda_cleanup_cuda_resources(plcudaTask *ptask)
 {
 	CUresult	rc;
-
-	PFMON_EVENT_DESTROY(ptask, ev_dma_send_start);
-	PFMON_EVENT_DESTROY(ptask, ev_dma_send_stop);
-	PFMON_EVENT_DESTROY(ptask, ev_dma_recv_start);
-	PFMON_EVENT_DESTROY(ptask, ev_dma_recv_stop);
 
 	if (ptask->m_kern_plcuda)
 	{

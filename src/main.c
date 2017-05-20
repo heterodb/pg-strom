@@ -42,7 +42,6 @@ PG_MODULE_MAGIC;
  * miscellaneous GUC parameters
  */
 bool		pgstrom_enabled;
-bool		pgstrom_perfmon_enabled;
 bool		pgstrom_debug_kernel_source;
 bool		pgstrom_bulkexec_enabled;
 bool		pgstrom_cpu_fallback_enabled;
@@ -86,15 +85,6 @@ pgstrom_init_misc_guc(void)
 							 NULL,
 							 &pgstrom_enabled,
 							 true,
-							 PGC_USERSET,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
-	/* turn on/off performance monitor on EXPLAIN ANALYZE */
-	DefineCustomBoolVariable("pg_strom.perfmon",
-							 "Enables the performance monitor of PG-Strom",
-							 NULL,
-							 &pgstrom_perfmon_enabled,
-							 false,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);

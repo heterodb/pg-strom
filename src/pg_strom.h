@@ -111,6 +111,7 @@ typedef struct SharedGpuContext
 	/* resource consumption monitor per server */
 	pg_atomic_uint64   *gpu_mem_usage;
 	pg_atomic_uint64   *gpu_task_count;
+#if 0
 	/* performance monitor */
 	struct {
 		bool		enabled;
@@ -132,6 +133,7 @@ typedef struct SharedGpuContext
 		pg_atomic_uint64 tv_sendmsg;	/* usec */
 		pg_atomic_uint64 tv_recvmsg;	/* usec */
 	} pfm;
+#endif
 } SharedGpuContext;
 
 #define INVALID_GPU_CONTEXT_ID		(-1)
@@ -161,11 +163,28 @@ typedef enum {
 	GpuTaskKind_PL_CUDA,
 } GpuTaskKind;
 
-/* definition of performance-monitor structure */
-#include "perfmon.h"
-
 typedef struct GpuTask_v2		GpuTask_v2;
 typedef struct GpuTaskState_v2	GpuTaskState_v2;
+
+/*
+ * pgstromWorkerStatistics
+ *
+ * PostgreSQL v9.6 does not allow to assign run-time statistics counter
+ * on the DSM area because of oversight during the development cycle.
+ * So, we need to allocate independent shared memory are to write back
+ * performance counter to the master backend.
+ * Likely, this restriction shall be removed at PostgreSQL v10.
+ */
+typedef struct
+{
+	slock_t			lock;
+	Instrumentation	worker_instrument;
+	/* for GpuJoin */
+	struct {
+		size_t		inner_nitems;
+		size_t		right_nitems;
+	} gpujoin[FLEXIBLE_ARRAY_MEMBER];
+} pgstromWorkerStatistics;
 
 /*
  * GpuTaskState
@@ -227,7 +246,6 @@ struct GpuTaskState_v2
 	cl_uint			num_ready_tasks;/* length of the list above */
 
 	/* performance monitor */
-	pgstrom_perfmon	pfm;			/* local counter */
 	pgstromWorkerStatistics *worker_stat;
 };
 #define GTS_GET_SCAN_TUPDESC(gts)				\
@@ -251,7 +269,6 @@ struct GpuTask_v2
 	cl_uint			revision;		/* same with GTS's one when kicked */
 	bool			row_format;		/* true, if row-format is preferred */
 	bool			cpu_fallback;	/* true, if task needs CPU fallback */
-	bool			perfmon;		/* true, if perfmon is required */
 	int				file_desc;		/* file-descriptor on backend side */
 	/* fields below are valid only server */
 	GpuContext_v2  *gcontext;		/* session info of GPU server */
@@ -814,7 +831,6 @@ extern void pgstrom_init_plcuda(void);
  * main.c
  */
 extern bool		pgstrom_enabled;
-extern bool		pgstrom_perfmon_enabled;
 extern bool		pgstrom_debug_kernel_source;
 extern bool		pgstrom_bulkexec_enabled;
 extern bool		pgstrom_cpu_fallback_enabled;

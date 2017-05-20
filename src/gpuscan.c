@@ -119,21 +119,6 @@ typedef struct
 	CUdeviceptr			m_gpuscan;
 	CUdeviceptr			m_kds_src;
 	CUdeviceptr			m_kds_dst;
-	CUevent				ev_dma_send_start;
-	CUevent				ev_dma_send_stop;
-	CUevent				ev_dma_recv_start;
-	CUevent				ev_dma_recv_stop;
-	/* Performance counters */
-	cl_uint				num_kern_main;
-	cl_double			tv_kern_main;
-	cl_double			tv_kern_exec_quals;
-	cl_double			tv_kern_projection;
-	cl_uint				num_dma_send;
-	cl_uint				num_dma_recv;
-	Size				bytes_dma_send;
-	Size				bytes_dma_recv;
-	cl_double			time_dma_send;
-	cl_double			time_dma_recv;
 	/* DMA buffers */
 	pgstrom_data_store *pds_src;
 	pgstrom_data_store *pds_dst;
@@ -2239,7 +2224,6 @@ ExecGpuScanInitDSM(CustomScanState *node,
 	GpuTaskState_v2	   *gts = (GpuTaskState_v2 *) node;
 	EState			   *estate = node->ss.ps.state;
 	GpuScanParallelDSM *gpdsm = coordinate;
-	pgstrom_perfmon	   *worker_pfm;
 	int					instr_options = 0;
 
 	if (node->ss.ps.instrument)
@@ -2267,10 +2251,6 @@ ExecGpuScanInitDSM(CustomScanState *node,
 	}
 	SpinLockInit(&gts->worker_stat->lock);
 	InstrInit(&gts->worker_stat->worker_instrument, instr_options);
-	worker_pfm = &gts->worker_stat->worker_pfm;
-	worker_pfm->enabled = gts->pfm.enabled;
-	worker_pfm->prime_in_gpucontext = gts->pfm.prime_in_gpucontext;
-	worker_pfm->task_kind = gts->pfm.task_kind;
 
 	gpdsm->worker_stat = gts->worker_stat;
 
@@ -2572,7 +2552,6 @@ gpuscanExecScanChunk(GpuTaskState_v2 *gts, int *p_filedesc)
 	HeapScanDesc	scan;
 	pgstrom_data_store *pds = NULL;
 	int				filedesc = -1;
-	struct timeval	tv1, tv2;
 
 	/*
 	 * Setup scan-descriptor, if the scan is not parallel, of if we're
@@ -2595,7 +2574,6 @@ gpuscanExecScanChunk(GpuTaskState_v2 *gts, int *p_filedesc)
 	scan = gts->css.ss.ss_currentScanDesc;
 
 	InstrStartNode(&gts->outer_instrument);
-	PFMON_BEGIN(&gts->pfm, &tv1);
 
 	/* return NULL immediately if relation is empty */
 	if (!scan->rs_inited &&
@@ -2735,7 +2713,6 @@ gpuscanExecScanChunk(GpuTaskState_v2 *gts, int *p_filedesc)
 	}
 out:
 	*p_filedesc = filedesc;
-	PFMON_END(&gts->pfm, time_outer_load, &tv1, &tv2);
 	InstrStopNode(&gts->outer_instrument,
 				  !pds ? 0.0 : (double)pds->kds.nitems);
 	return pds;
@@ -2755,22 +2732,6 @@ gpuscan_switch_task(GpuTaskState_v2 *gts, GpuTask_v2 *gtask)
 
 	if (!gscan->task.cpu_fallback)
 		gts->outer_instrument.nfiltered1 += gscan->kern.nitems_filtered;
-
-	/* move the server side perfmon counter to local pfm */
-	if (gscan->task.perfmon)
-	{
-		gts->pfm.num_dma_send	+= gscan->num_dma_send;
-		gts->pfm.num_dma_recv	+= gscan->num_dma_recv;
-		gts->pfm.bytes_dma_send	+= gscan->bytes_dma_send;
-		gts->pfm.bytes_dma_recv	+= gscan->bytes_dma_recv;
-		gts->pfm.time_dma_send	+= gscan->time_dma_send;
-		gts->pfm.time_dma_recv	+= gscan->time_dma_recv;
-
-		gts->pfm.gscan.num_kern_main	+= gscan->num_kern_main;
-		gts->pfm.gscan.tv_kern_main		+= gscan->tv_kern_main;
-		gts->pfm.gscan.tv_kern_exec_quals += gscan->tv_kern_exec_quals;
-		gts->pfm.gscan.tv_kern_projection += gscan->tv_kern_projection;
-	}
 }
 
 /*
@@ -2848,9 +2809,7 @@ gpuscan_next_tuple(GpuTaskState_v2 *gts)
 	GpuScanState	   *gss = (GpuScanState *) gts;
 	GpuScanTask		   *gscan = (GpuScanTask *) gts->curr_task;
 	TupleTableSlot	   *slot = NULL;
-	struct timeval		tv1, tv2;
 
-	PFMON_BEGIN(&gss->gts.pfm, &tv1);
 	if (gscan->task.cpu_fallback)
 		slot = gpuscan_next_tuple_fallback(gss, gscan);
 	else if (gscan->pds_dst)
@@ -2898,8 +2857,6 @@ gpuscan_next_tuple(GpuTaskState_v2 *gts)
 			ExecStoreTuple(tuple, slot, InvalidBuffer, false);
 		}
 	}
-	PFMON_END(&gss->gts.pfm, time_materialize, &tv1, &tv2);
-
 	return slot;
 }
 
@@ -2922,11 +2879,6 @@ static void
 gpuscan_cleanup_cuda_resources(GpuScanTask *gscan)
 {
 	CUresult	rc;
-
-	PFMON_EVENT_DESTROY(gscan, ev_dma_send_start);
-	PFMON_EVENT_DESTROY(gscan, ev_dma_send_stop);
-	PFMON_EVENT_DESTROY(gscan, ev_dma_recv_start);
-	PFMON_EVENT_DESTROY(gscan, ev_dma_recv_stop);
 
 	if (gscan->m_gpuscan)
 	{
@@ -3059,18 +3011,8 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 		gscan->m_kds_dst = 0UL;
 
 	/*
-	 * Creation of event objects, if needed
-	 */
-	PFMON_EVENT_CREATE(gscan, ev_dma_send_start);
-	PFMON_EVENT_CREATE(gscan, ev_dma_send_stop);
-	PFMON_EVENT_CREATE(gscan, ev_dma_recv_start);
-	PFMON_EVENT_CREATE(gscan, ev_dma_recv_stop);
-
-	/*
 	 * OK, enqueue a series of requests
 	 */
-	PFMON_EVENT_RECORD(gscan, ev_dma_send_start, cuda_stream);
-
 	offset = KERN_GPUSCAN_DMASEND_OFFSET(&gscan->kern);
 	length = KERN_GPUSCAN_DMASEND_LENGTH(&gscan->kern);
 	rc = cuMemcpyHtoDAsync(gscan->m_gpuscan,
@@ -3079,8 +3021,6 @@ gpuscan_process_task(GpuTask_v2 *gtask,
                            cuda_stream);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-	gscan->bytes_dma_send += length;
-    gscan->num_dma_send++;
 
 	/*  kern_data_store *kds_src */
 	if (pds_src->kds.format == KDS_FORMAT_ROW || !gscan->with_nvme_strom)
@@ -3092,8 +3032,6 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 							   cuda_stream);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-		gscan->bytes_dma_send += length;
-		gscan->num_dma_send++;
 	}
 	else
 	{
@@ -3115,10 +3053,7 @@ gpuscan_process_task(GpuTask_v2 *gtask,
                                cuda_stream);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-		gscan->bytes_dma_send += length;
-		gscan->num_dma_send++;
 	}
-	PFMON_EVENT_RECORD(gscan, ev_dma_send_stop, cuda_stream);
 
 	/*
 	 * KERNEL_FUNCTION(void)
@@ -3139,12 +3074,10 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 						NULL);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
-	gscan->num_kern_main++;
 
 	/*
 	 * Recv DMA call
 	 */
-	PFMON_EVENT_RECORD(gscan, ev_dma_recv_start, cuda_stream);
 	if (pds_src->kds.format != KDS_FORMAT_BLOCK)
 		ntuples = pds_src->kds.nitems;
 	else
@@ -3157,8 +3090,6 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 						   cuda_stream);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "cuMemcpyDtoHAsync: %s", errorText(rc));
-    gscan->bytes_dma_recv += length;
-    gscan->num_dma_recv++;
 
 	/*
 	 * NOTE: varlena variables in the result references pds_src as buffer
@@ -3185,8 +3116,6 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 							   cuda_stream);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-		gscan->bytes_dma_recv += length;
-		gscan->num_dma_recv++;
 		/*
 		 * NOTE: Once GPU-to-GPU DMA gets completed, "uncached" blocks are
 		 * no longer uncached, so we clear the @nblocks_uncached not to
@@ -3205,10 +3134,7 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 							   cuda_stream);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "cuMemcpyDtoHAsync: %s", errorText(rc));
-		gscan->bytes_dma_recv += pds_dst->kds.length;
-		gscan->num_dma_recv++;
 	}
-	PFMON_EVENT_RECORD(gscan, ev_dma_recv_stop, cuda_stream);
 
 	/*
 	 * register the callback
@@ -3240,19 +3166,10 @@ gpuscan_complete_task(GpuTask_v2 *gtask)
 	if (gtask->kerror.errcode != StromError_Success)
 		elog(ERROR, "GpuScan kernel internal error: %s",
 			 errorTextKernel(&gtask->kerror));
-
-	PFMON_EVENT_ELAPSED(gscan, time_dma_send,
-						gscan->ev_dma_send_start,
-						gscan->ev_dma_send_stop);
-	PFMON_EVENT_ELAPSED(gscan, tv_kern_main,
-						gscan->ev_dma_send_stop,
-						gscan->ev_dma_recv_start);
-	PFMON_EVENT_ELAPSED(gscan, time_dma_recv,
-						gscan->ev_dma_recv_start,
-						gscan->ev_dma_recv_stop);
+#ifdef NOT_USED
 	gscan->tv_kern_exec_quals = gscan->kern.pfm.tv_kern_exec_quals;
 	gscan->tv_kern_projection = gscan->kern.pfm.tv_kern_projection;
-skip_perfmon:
+#endif
 	gpuscan_cleanup_cuda_resources(gscan);
 
 	return 0;
