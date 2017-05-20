@@ -18,6 +18,7 @@
 #include "postgres.h"
 #include "access/hash.h"
 #include "access/twophase.h"
+#include "port.h"
 #include "postmaster/bgworker.h"
 #include "storage/ipc.h"
 #include "storage/lwlock.h"
@@ -31,7 +32,7 @@
 #include <sys/types.h>
 #include <sys/un.h>
 #include <unistd.h>
-
+#include <cudaProfiler.h>
 
 typedef struct GpuServProc
 {
@@ -52,6 +53,7 @@ typedef struct GpuServProc
 typedef struct GpuServState
 {
 	pg_atomic_uint32 rr_count;	/* seed for round-robin distribution */
+	pg_atomic_uint32 cuda_profiler; /* GUC: pg_strom.cuda_profiler */
 	slock_t			lock;
 	dlist_head	   *serv_procs_list;	/* for each device */
 	GpuServProc		serv_procs[FLEXIBLE_ARRAY_MEMBER];
@@ -99,6 +101,9 @@ static pgsocket			gpuserv_server_sockfd = PGINVALID_SOCKET;
 int						gpuserv_cuda_dindex = -1;
 CUdevice				gpuserv_cuda_device = NULL;
 CUcontext				gpuserv_cuda_context = NULL;
+static int32			gpuserv_cuda_profiler = 0;
+static char			   *gpuserv_cuda_profiler_config_file = NULL;
+static char			   *gpuserv_cuda_profiler_log_file = NULL;
 /* GPU server session info */
 static slock_t			session_tasks_lock;
 static dlist_head		session_pending_tasks;
@@ -113,6 +118,8 @@ static WaitEventSet	   *session_event_set = NULL;
  */
 static bool gpuservSendCommand(GpuContext_v2 *gcontext,
 							   GpuServCommand *cmd, long timeout);
+static void	pgstrom_cuda_profiler_init(void);
+static void	pgstrom_cuda_profiler_update(void);
 
 /* SIGTERM handler */
 static void
@@ -1526,6 +1533,7 @@ gpuserv_session_main(void)
 					}
 				}
 			}
+			pgstrom_cuda_profiler_update();
 		}
 	}
 }
@@ -1591,6 +1599,8 @@ gpuserv_bgworker_main(Datum __server_id)
 
 	for (i=0; i < CUDA_MODULES_SLOTSIZE; i++)
 		dlist_init(&cuda_modules_slot[i]);
+
+	pgstrom_cuda_profiler_init();
 
 	/* memory context per session duration */
 	CurrentResourceOwner = ResourceOwnerCreate(NULL, "GPU Server");
@@ -1685,6 +1695,144 @@ gpuserv_bgworker_main(Datum __server_id)
 }
 
 /*
+ * pgstrom_cuda_profiler_init (per GPU server)
+ */
+static void
+pgstrom_cuda_profiler_init(void)
+{
+	char		output_path[MAXPGPATH];
+	int			c, i, j;
+	CUresult	rc;
+
+	Assert(IsGpuServerProcess());
+	for (i=0, j=0; (c = gpuserv_cuda_profiler_log_file[i]) != '\0'; i++)
+	{
+		if (c != '%')
+			output_path[j++] = c;
+		else
+			j += snprintf(output_path + j, MAXPGPATH - j,
+						  "%d", gpuserv_cuda_dindex);
+	}
+	output_path[i] = 0;
+
+	rc = cuProfilerInitialize(gpuserv_cuda_profiler_config_file,
+							  output_path,
+							  CU_OUT_CSV);
+	if (rc != CUDA_SUCCESS)
+	{
+		if (rc != CUDA_ERROR_PROFILER_DISABLED)
+			elog(FATAL, "failed on cuProfilerInitialize: %s", errorText(rc));
+		else
+		{
+			gpuserv_cuda_profiler = -1;
+			elog(LOG, "CUDA Profiler is disabled");
+		}
+	}
+}
+
+/*
+ * Update CUDA Profiler support to the latest state
+ */
+static void
+pgstrom_cuda_profiler_update(void)
+{
+	CUresult	rc;
+
+	Assert(IsGpuServerProcess());
+
+	if (gpuserv_cuda_profiler < 0)
+		return;
+	else if (gpuserv_cuda_profiler == 0)
+	{
+		if (pg_atomic_read_u32(&gpuServState->cuda_profiler) != 0)
+		{
+			rc = cuProfilerStart();
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on cuProfilerStart: %s", errorText(rc));
+			gpuserv_cuda_profiler = 1;
+		}
+	}
+	else
+	{
+		if (pg_atomic_read_u32(&gpuServState->cuda_profiler) == 0)
+		{
+			rc = cuProfilerStop();
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on cuProfilerStop: %s", errorText(rc));
+			gpuserv_cuda_profiler = 1;
+		}
+	}
+}
+
+/*
+ * pgstrom_cuda_profiler_guc_check
+ */
+static bool
+pgstrom_cuda_profiler_guc_check(bool *newval, void **extra, GucSource source)
+{
+	int		cuda_profiler;
+
+	if (gpuServState)
+	{
+		cuda_profiler = (int)pg_atomic_read_u32(&gpuServState->cuda_profiler);
+
+		if (cuda_profiler >= 0)
+			return true;
+	}
+	elog(ERROR, "CUDA Profiler is not initialized");
+}
+
+/*
+ * pgstrom_cuda_profiler_guc_assign
+ */
+static void
+pgstrom_cuda_profiler_guc_assign(bool new_config, void *extra)
+{
+	dlist_iter	iter;
+	uint32		oldval = (new_config ? 0 : 1);
+	uint32		newval = (new_config ? 1 : 0);
+	int			i;
+
+	Assert(gpuServState);
+	if (pg_atomic_compare_exchange_u32(&gpuServState->cuda_profiler,
+									   &oldval, newval))
+	{
+		/* wakeup all the active servers */
+		SpinLockAcquire(&gpuServState->lock);
+		for (i=0; i < numDevAttrs; i++)
+		{
+			dlist_foreach(iter, &gpuServState->serv_procs_list[i])
+			{
+				GpuServProc	   *serv = dlist_container(GpuServProc,
+													   chain, iter.cur);
+				SetLatch(&serv->pgproc->procLatch);
+			}
+		}
+		SpinLockRelease(&gpuServState->lock);
+	}
+}
+
+/*
+ * pgstrom_cuda_profiler_guc_show
+ */
+static const char *
+pgstrom_cuda_profiler_guc_show(void)
+{
+	int		cuda_profiler;
+
+	if (gpuServState)
+	{
+		cuda_profiler = (int)pg_atomic_read_u32(&gpuServState->cuda_profiler);
+
+		if (cuda_profiler > 0)
+			return "on";
+		else if (cuda_profiler == 0)
+			return "off";
+	}
+	return "disabled";
+}
+
+/*
  * gpuservShmemRequired - required size of static shared memory
  */
 static inline Size
@@ -1708,6 +1856,7 @@ pgstrom_startup_gpu_server(void)
 	int			i;
 	char	   *pos;
 	bool		found;
+	static bool	__pgstrom_cuda_profiler;	/* dummy */
 
 	if (shmem_startup_hook_next)
 		(*shmem_startup_hook_next)();
@@ -1727,6 +1876,20 @@ pgstrom_startup_gpu_server(void)
 		dlist_init(&gpuServState->serv_procs_list[i]);
 
 	Assert((char *)gpuServState + required == pos);
+
+	/*
+	 * Support for CUDA visual profiler
+	 */
+	DefineCustomBoolVariable("pg_strom.cuda_profiler",
+							 "start/stop CUDA visual profiler",
+							 NULL,
+							 &__pgstrom_cuda_profiler,
+							 false,
+							 PGC_SUSET,
+							 GUC_NOT_IN_SAMPLE,
+							 pgstrom_cuda_profiler_guc_check,
+							 pgstrom_cuda_profiler_guc_assign,
+							 pgstrom_cuda_profiler_guc_show);
 }
 
 /*
@@ -1740,6 +1903,8 @@ pgstrom_init_gpu_server(void)
 	long		sysconf_pagesize;	/* _SC_PAGESIZE */
 	long		sysconf_phys_pages;	/* _SC_PHYS_PAGES */
 	cl_uint		i, nr_async;
+	char		path[MAXPGPATH];
+	char		config_file[MAXPGPATH];
 
 	/*
 	 * Maximum number of GPU servers we can use concurrently.
@@ -1769,6 +1934,30 @@ pgstrom_init_gpu_server(void)
 							PGC_POSTMASTER,
 							GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
+
+	get_share_path(my_exec_path, path);
+	snprintf(config_file, MAXPGPATH,
+			 "%s/extension/cuda_profiler.ini", path);
+	DefineCustomStringVariable("pg_strom.cuda_profiler_config_file",
+							   "filename of CUDA profiler config file",
+							   NULL,
+							   &gpuserv_cuda_profiler_config_file,
+							   config_file,
+							   PGC_POSTMASTER,
+							   GUC_NOT_IN_SAMPLE |
+							   GUC_SUPERUSER_ONLY,
+							   NULL, NULL, NULL);
+	
+	DefineCustomStringVariable("pg_strom.cuda_profiler_log_file",
+							   "filename of CUDA profiler log file",
+							   NULL,
+							   &gpuserv_cuda_profiler_log_file,
+							   "cuda_profile.%.log",
+							   PGC_POSTMASTER,
+							   GUC_NOT_IN_SAMPLE |
+							   GUC_SUPERUSER_ONLY,
+							   NULL, NULL, NULL);
+
 	/*
 	 * pg_strom.max_async_tasks_per_device
 	 *

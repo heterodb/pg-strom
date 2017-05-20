@@ -221,6 +221,7 @@ MODULE_big = pg_strom
 OBJS =  $(STROM_OBJS) $(CUDA_OBJS)
 EXTENSION = pg_strom
 DATA_built = $(PGSTROM_SQL)
+DATA = $(STROM_BUILD_ROOT)/src/cuda_profiler.ini
 
 # Support utilities
 SCRIPTS_built = $(STROM_UTILS)
