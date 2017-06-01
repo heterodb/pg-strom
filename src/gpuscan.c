@@ -618,10 +618,9 @@ gpuscan_add_scan_path(PlannerInfo *root,
 		 */
 
 		/* max_parallel_workers_per_gather is the upper limit  */
-		parallel_nworkers = Min4(parallel_nworkers,
+		parallel_nworkers = Min3(parallel_nworkers,
 								 4 * numDevAttrs,
-								 max_parallel_workers_per_gather,
-								 numGpuServerProcesses() - 1);
+								 max_parallel_workers_per_gather);
 		if (parallel_nworkers <= 0)
 			return;
 

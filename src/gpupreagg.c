@@ -965,8 +965,7 @@ make_gpupreagg_path(PlannerInfo *root,
 	/* Number of workers if parallel */
 	if (group_rel->consider_parallel &&
 		input_path->parallel_safe)
-		parallel_nworkers = Min(numGpuServerProcesses() - 1,
-								input_path->parallel_workers);
+		parallel_nworkers = input_path->parallel_workers;
 
 	/* cost estimation */
 	if (!cost_gpupreagg(root, cpath, gpa_info,

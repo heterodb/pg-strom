@@ -1007,9 +1007,7 @@ create_gpujoin_path(PlannerInfo *root,
 			if (!ip_item->inner_path->parallel_safe)
 				return NULL;
 		}
-		/* makes less sense even if we have more workers than GPU servers */
-		parallel_nworkers = Min(numGpuServerProcesses() - 1,
-								outer_path->parallel_workers);
+		parallel_nworkers = outer_path->parallel_workers;
 	}
 
 	gjpath = palloc0(offsetof(GpuJoinPath, inners[num_rels + 1]));
@@ -1433,10 +1431,10 @@ gpujoin_add_join_path(PlannerInfo *root,
 			{
 				outer_path = lfirst(lc2);
 
-				if (bms_overlap(PATH_REQ_OUTER(outer_path), other_relids))
+				if (!outer_path->parallel_safe ||
+					outer_path->parallel_workers == 0 ||
+					bms_overlap(PATH_REQ_OUTER(outer_path), other_relids))
 					continue;
-				Assert(outer_path->parallel_safe &&
-					   outer_path->parallel_workers > 0);
 				try_add_gpujoin_paths(root, joinrel, final_tlist,
 									  outer_path, inner_path,
 									  jointype, extra, true);
