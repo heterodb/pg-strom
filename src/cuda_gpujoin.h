@@ -297,7 +297,7 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 		__syncthreads();
 
 		/* still have space to store? */
-		if (base + count >= kresults_dst->nrooms)
+		if (base + count > kresults_dst->nrooms)
 			STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
 		else if (is_matched)
 		{
@@ -435,7 +435,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 			__syncthreads();
 
 			/* kresults_dst still have enough space? */
-			if (base + count >= kresults_dst->nrooms)
+			if (base + count > kresults_dst->nrooms)
 				STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
 			else if (is_matched)
 			{
@@ -483,7 +483,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 			__syncthreads();
 
 			/* kresults_dst still have enough space? */
-			if (base + count >= kresults_dst->nrooms)
+			if (base + count > kresults_dst->nrooms)
 				STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
 			else if (is_matched)
 			{
@@ -589,7 +589,7 @@ gpujoin_outer_nestloop(kern_gpujoin *kgjoin,
 		__syncthreads();
 
 		/* Does kresults_dst still have rooms to store? */
-		if (base + count >= kresults_dst->nrooms)
+		if (base + count > kresults_dst->nrooms)
 			STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
 		else if (needs_outer_row)
 		{
@@ -678,7 +678,7 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 			base = atomicAdd(&kresults_dst->nitems, count);
 		__syncthreads();
 
-		if (base + offset >= kresults_dst->nrooms)
+		if (base + offset > kresults_dst->nrooms)
 			STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
 		else if (needs_outer_row)
 		{
