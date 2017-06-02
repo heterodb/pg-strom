@@ -166,7 +166,7 @@ static void gpuscan_switch_task(GpuTaskState_v2 *gts, GpuTask_v2 *gtask);
  * expression on the rel->reltarget. Right now, PostgreSQL does not
  * expect such an intelligence.
  */
-bool
+static bool
 cost_discount_gpu_projection(PlannerInfo *root, RelOptInfo *rel,
 							 Cost *p_discount_per_tuple)
 {
@@ -276,8 +276,9 @@ cost_discount_gpu_projection(PlannerInfo *root, RelOptInfo *rel,
 	list_free(proj_var_list);
 	list_free(proj_phv_list);
 
-	*p_discount_per_tuple = (may_gpu_projection ? discount_per_tuple : 0.0);
-
+	*p_discount_per_tuple = (may_gpu_projection
+							 ? Max(discount_per_tuple, 0.0)
+							 : 0.0);
 	return may_gpu_projection;
 }
 

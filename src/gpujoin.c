@@ -857,7 +857,6 @@ cost_gpujoin(PlannerInfo *root,
 	run_cost += ((double)inner_total_sz / (double)pgstrom_chunk_size() *
 				 (double)num_chunks * pgstrom_gpu_dma_cost *
 				 total_nloops_minor * 0.20);
-
 	/*
 	 * Major inner split makes iteration of entire process multiple times
 	 */
@@ -901,7 +900,7 @@ cost_gpujoin(PlannerInfo *root,
 		if (num_vars > list_length(join_reltarget->exprs))
 			discount_per_tuple -= cpu_tuple_cost *
 				(double)(num_vars - list_length(join_reltarget->exprs));
-		discount_total = discount_per_tuple * joinrel->rows;
+		discount_total = Max(discount_per_tuple, 0.0) * joinrel->rows;
 
 		run_cost = Max(run_cost - discount_total, 0.0);
 	}

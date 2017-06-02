@@ -735,8 +735,6 @@ extern bool RelationWillUseNvmeStrom(Relation relation,
 /*
  * gpuscan.c
  */
-extern bool cost_discount_gpu_projection(PlannerInfo *root, RelOptInfo *rel,
-										 Cost *p_discount_per_tuple);
 extern void cost_gpuscan_common(PlannerInfo *root,
 								RelOptInfo *scan_rel,
 								List *scan_quals,
