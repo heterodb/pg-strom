@@ -1940,7 +1940,7 @@ fixup_varnode_to_origin(Node *node, List *custom_scan_tlist)
 		if (custom_scan_tlist != NIL)
 		{
 			Assert(varnode->varno == INDEX_VAR);
-			Assert(varnode->varattno > 1 &&
+			Assert(varnode->varattno >= 1 &&
 				   varnode->varattno <= list_length(custom_scan_tlist));
 			altnode = list_nth(custom_scan_tlist, varnode->varattno - 1);
 
