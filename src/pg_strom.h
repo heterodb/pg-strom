@@ -111,29 +111,6 @@ typedef struct SharedGpuContext
 	/* resource consumption monitor per server */
 	pg_atomic_uint64   *gpu_mem_usage;
 	pg_atomic_uint64   *gpu_task_count;
-#if 0
-	/* performance monitor */
-	struct {
-		bool		enabled;
-		cl_uint		num_dmabuf_alloc;
-		cl_uint		num_dmabuf_free;
-		cl_uint		num_gpumem_alloc;
-		cl_uint		num_gpumem_free;
-		cl_uint		num_iomapped_alloc;
-		cl_uint		num_iomapped_free;
-		cl_float	tv_dmabuf_alloc;
-		cl_float	tv_dmabuf_free;
-		cl_float	tv_gpumem_alloc;
-		cl_float	tv_gpumem_free;
-		cl_float	tv_iomapped_alloc;
-		cl_float	tv_iomapped_free;
-		size_t		size_dmabuf_total;
-		size_t		size_gpumem_total;
-		size_t		size_iomapped_total;
-		pg_atomic_uint64 tv_sendmsg;	/* usec */
-		pg_atomic_uint64 tv_recvmsg;	/* usec */
-	} pfm;
-#endif
 } SharedGpuContext;
 
 #define INVALID_GPU_CONTEXT_ID		(-1)
