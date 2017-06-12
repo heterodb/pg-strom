@@ -1100,39 +1100,6 @@ pgstrom_create_cuda_program(GpuContext_v2 *gcontext,
 }
 
 /*
- * pgstrom_get_cuda_program
- *
- * acquire an existing GPU program entry
- */
-void
-pgstrom_get_cuda_program(GpuContext_v2 *gcontext, ProgramId program_id)
-{
-	program_cache_entry *entry;
-
-	SpinLockAcquire(&pgcache_head->lock);
-	entry = lookup_cuda_program_entry_nolock(program_id);
-	if (!entry)
-	{
-		SpinLockRelease(&pgcache_head->lock);
-		elog(ERROR, "ProgramId=%lu not found", program_id);
-	}
-	Assert(entry->refcnt > 0);
-	entry->refcnt++;
-	SpinLockRelease(&pgcache_head->lock);
-
-	PG_TRY();
-	{
-		trackCudaProgram(gcontext, program_id);
-	}
-	PG_CATCH();
-	{
-		pgstrom_put_cuda_program(NULL, program_id);
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-}
-
-/*
  * pgstrom_put_cuda_program
  *
  * release an existing GPU program entry

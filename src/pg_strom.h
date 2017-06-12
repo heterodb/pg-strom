@@ -543,36 +543,22 @@ extern void pgstrom_init_gputasks(void);
 /*
  * cuda_program.c
  */
-extern void pgstrom_get_cuda_program(GpuContext_v2 *gcontext,
-									 ProgramId program_id);
-extern void pgstrom_put_cuda_program(GpuContext_v2 *gcontext,
-									 ProgramId program_id);
 extern ProgramId pgstrom_create_cuda_program(GpuContext_v2 *gcontext,
 											 cl_uint extra_flags,
 											 const char *kern_source,
 											 const char *kern_define,
 											 bool wait_for_build);
+extern CUmodule pgstrom_load_cuda_program(ProgramId program_id, long timeout);
+extern void pgstrom_put_cuda_program(GpuContext_v2 *gcontext,
+									 ProgramId program_id);
 extern char *pgstrom_build_session_info(cl_uint extra_flags,
 										GpuTaskState_v2 *gts);
-extern CUmodule pgstrom_load_cuda_program(ProgramId program_id, long timeout);
 extern bool pgstrom_wait_cuda_program(ProgramId program_id, long timeout);
 
 extern ProgramId pgstrom_try_build_cuda_program(void);
 
 extern const char *pgstrom_cuda_source_file(ProgramId program_id);
-#if 0
-extern bool pgstrom_load_cuda_program_legacy(GpuTaskState *gts,
-											 bool is_preload);
-extern CUmodule *plcuda_load_cuda_program_legacy(GpuContext *gcontext,
-												 const char *kern_source,
-												 cl_uint extra_flags);
-extern void pgstrom_assign_cuda_program(GpuTaskState *gts,
-										List *used_params,
-										const char *kern_source,
-										int extra_flags);
-#endif
 extern void pgstrom_init_cuda_program(void);
-//extern Datum pgstrom_program_info(PG_FUNCTION_ARGS);
 
 /*
  * codegen.c
