@@ -144,12 +144,12 @@ CREATE FUNCTION pg_catalog.array_matrix_validation(anyarray)
 CREATE FUNCTION pg_catalog.array_matrix_height(anyarray)
   RETURNS int
   AS 'MODULE_PATHNAME','array_matrix_height'
-  LANGUAGE C STRICT;
+  LANGUAGE C CALLED ON NULL INPUT;
 
 CREATE FUNCTION pg_catalog.array_matrix_width(anyarray)
   RETURNS int
   AS 'MODULE_PATHNAME','array_matrix_width'
-  LANGUAGE C STRICT;
+  LANGUAGE C CALLED ON NULL INPUT;
 
 CREATE FUNCTION pg_catalog.array_vector_rawsize(regtype,int)
   RETURNS bigint
@@ -189,32 +189,32 @@ CREATE FUNCTION pg_catalog.matrix_unnest(anyarray)
 CREATE FUNCTION pg_catalog.rbind(bool[], bool[])
   RETURNS bool[]
   AS 'MODULE_PATHNAME','array_matrix_rbind_bool'
-  LANGUAGE C STRICT;
+  LANGUAGE C CALLED ON NULL INPUT;
 
 CREATE FUNCTION pg_catalog.rbind(int2[], int2[])
   RETURNS int2[]
   AS 'MODULE_PATHNAME','array_matrix_rbind_int2'
-  LANGUAGE C STRICT;
+  LANGUAGE C CALLED ON NULL INPUT;
 
 CREATE FUNCTION pg_catalog.rbind(int4[], int4[])
   RETURNS int4[]
   AS 'MODULE_PATHNAME','array_matrix_rbind_int4'
-  LANGUAGE C STRICT;
+  LANGUAGE C CALLED ON NULL INPUT;
 
 CREATE FUNCTION pg_catalog.rbind(int8[], int8[])
   RETURNS int8[]
   AS 'MODULE_PATHNAME','array_matrix_rbind_int8'
-  LANGUAGE C STRICT;
+  LANGUAGE C CALLED ON NULL INPUT;
 
 CREATE FUNCTION pg_catalog.rbind(float4[], float4[])
   RETURNS float4[]
   AS 'MODULE_PATHNAME','array_matrix_rbind_float4'
-  LANGUAGE C STRICT;
+  LANGUAGE C CALLED ON NULL INPUT;
 
 CREATE FUNCTION pg_catalog.rbind(float8[], float8[])
   RETURNS float8[]
   AS 'MODULE_PATHNAME','array_matrix_rbind_float8'
-  LANGUAGE C STRICT;
+  LANGUAGE C CALLED ON NULL INPUT;
 
 CREATE FUNCTION pg_catalog.rbind(bool, bool[])
   RETURNS bool[]
@@ -279,32 +279,32 @@ CREATE FUNCTION pg_catalog.rbind(float8[], float8)
 CREATE FUNCTION pg_catalog.cbind(bool[], bool[])
   RETURNS bool[]
   AS 'MODULE_PATHNAME','array_matrix_cbind_bool'
-  LANGUAGE C STRICT;
+  LANGUAGE C CALLED ON NULL INPUT;
 
 CREATE FUNCTION pg_catalog.cbind(int2[], int2[])
   RETURNS int2[]
   AS 'MODULE_PATHNAME','array_matrix_cbind_int2'
-  LANGUAGE C STRICT;
+  LANGUAGE C CALLED ON NULL INPUT;
 
 CREATE FUNCTION pg_catalog.cbind(int4[], int4[])
   RETURNS int4[]
   AS 'MODULE_PATHNAME','array_matrix_cbind_int4'
-  LANGUAGE C STRICT;
+  LANGUAGE C CALLED ON NULL INPUT;
 
 CREATE FUNCTION pg_catalog.cbind(int8[], int8[])
   RETURNS int8[]
   AS 'MODULE_PATHNAME','array_matrix_cbind_int8'
-  LANGUAGE C STRICT;
+  LANGUAGE C CALLED ON NULL INPUT;
 
 CREATE FUNCTION pg_catalog.cbind(float4[], float4[])
   RETURNS float4[]
   AS 'MODULE_PATHNAME','array_matrix_cbind_float4'
-  LANGUAGE C STRICT;
+  LANGUAGE C CALLED ON NULL INPUT;
 
 CREATE FUNCTION pg_catalog.cbind(float8[], float8[])
   RETURNS float8[]
   AS 'MODULE_PATHNAME','array_matrix_cbind_float8'
-  LANGUAGE C STRICT;
+  LANGUAGE C CALLED ON NULL INPUT;
 
 CREATE FUNCTION pg_catalog.cbind(bool, bool[])
   RETURNS bool[]
