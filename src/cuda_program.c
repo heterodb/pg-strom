@@ -810,7 +810,7 @@ build_cuda_program(program_cache_entry *entry)
  * Because linker process needs a valid CUDA context, only GPU server
  * can call this function.
  */
-ProgramId
+bool
 pgstrom_try_build_cuda_program(void)
 {
 	dlist_node	   *dnode;
@@ -822,7 +822,7 @@ pgstrom_try_build_cuda_program(void)
 	if (dlist_is_empty(&pgcache_head->build_list))
 	{
 		SpinLockRelease(&pgcache_head->lock);
-		return INVALID_PROGRAM_ID;		/* nothing to do */
+		return false;		/* no programs were built */
 	}
 	dnode = dlist_pop_head_node(&pgcache_head->build_list);
 	entry = dlist_container(program_cache_entry, build_chain, dnode);
@@ -841,7 +841,7 @@ pgstrom_try_build_cuda_program(void)
 
 	put_cuda_program_entry(entry);
 
-	return program_id;
+	return true;
 }
 
 /*

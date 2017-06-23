@@ -582,47 +582,42 @@ AllocGpuContext(bool with_connection)
  */
 GpuContext_v2 *
 AttachGpuContext(pgsocket sockfd,
+				 SharedGpuContext *shgcon
+
 				 cl_int context_id,
 				 BackendId backend_id,
 				 cl_int device_id,
 				 pg_atomic_uint64 *p_gpu_mem_usage,
 				 pg_atomic_uint64 *p_gpu_task_count)
 {
-	GpuContext_v2	   *gcontext;
-	SharedGpuContext   *shgcon;
+	GpuContext_v2  *gcontext;
+	size_t			len;
+
 	int					i;
 
 	/* to be called by the GPU server process */
-	Assert(IsGpuServerProcess());
+	if (!IsGpuServerProcess())
+		elog(FATAL, "Bug? backend tried to attach GPU context");
 
-	if (context_id >= numGpuContexts)
-		elog(ERROR, "context_id (%d) is out of range", context_id);
+	gcontext = malloc(offsetof(GpuContext_v2, restrack[RESTRACK_HASHSIZE]));
+	if (!gcontext)
+		werror("out of memory");
 
-	if (dlist_is_empty(&inactiveGpuContextList))
-	{
-		Size	len = offsetof(GpuContext_v2, restrack[RESTRACK_HASHSIZE]);
-		gcontext = MemoryContextAllocZero(TopMemoryContext, len);
-	}
-	else
-	{
-		dlist_node *dnode = dlist_pop_head_node(&inactiveGpuContextList);
-		gcontext = (GpuContext_v2 *)
-			dlist_container(GpuContext_v2, chain, dnode);
-	}
-
-	shgcon = &sharedGpuContextHead->context_array[context_id];
 	SpinLockAcquire(&shgcon->lock);
-	/* sanity check */
+	/* sanity checks */
 	if (shgcon->refcnt == 0 ||		/* nobody own the GpuContext */
 		shgcon->backend == NULL ||	/* no backend assigned yet */
-		shgcon->server != NULL ||	/* a server is already assigned */
-		shgcon->backend->backendId != backend_id)	/* wrong backend */
+		shgcon->server != NULL)		/* a server is already assigned */
 	{
 		SpinLockRelease(&shgcon->lock);
-		dlist_push_head(&inactiveGpuContextList, &gcontext->chain);
-		elog(FATAL, "Bug? GpuContext (context_id=%d) has wrong state",
-			 context_id);
+		free(gcontext);
+		wfatal("Bug? GpuContext (shared %p) has wrong state", shgcon);
 	}
+	shgcon->refcnt++;
+	shgcon->server = MyProc;
+	shgcon->num_async_tasks = 0;
+
+
 	shgcon->refcnt++;
 	shgcon->device_id = device_id;
 	shgcon->server = MyProc;
@@ -649,7 +644,7 @@ AttachGpuContext(pgsocket sockfd,
 GpuContext_v2 *
 GetGpuContext(GpuContext_v2 *gcontext)
 {
-	Assert(gcontext > 0);
+	Assert(gcontext->refcnt > 0);
 	gcontext->refcnt++;
 	return gcontext;
 }

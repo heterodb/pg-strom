@@ -476,7 +476,6 @@ extern CUdevice			gpuserv_cuda_device;
 extern CUcontext		gpuserv_cuda_context;
 
 extern bool IsGpuServerProcess(void);
-extern int	numGpuServerProcesses(void);
 extern void gpuservTryToWakeUp(void);
 extern void gpuservOpenConnection(GpuContext_v2 *gcontext);
 extern bool gpuservSendGpuTask(GpuContext_v2 *gcontext, GpuTask_v2 *gtask);
@@ -486,6 +485,15 @@ extern void gpuservCompleteGpuTask(GpuTask_v2 *gtask, bool is_urgent);
 extern void pgstrom_init_gpu_server(void);
 
 /* service routines */
+#define wlog(fmt,...)							\
+	fprintf(stderr, "LOG: %s:%d " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__) 
+#define werror(fmt,...)							\
+	worker_error(__FUNCTION__,__FILE__,__LINE__, ##__VA_ARGS)
+
+extern void worker_error(const char *funcname,
+						 const char *filename,
+						 int lineno,
+						 const char *fmt, ...) pg_attribute_printf(4,5);
 extern void optimal_workgroup_size(size_t *p_grid_size,
 								   size_t *p_block_size,
 								   CUfunction function,
@@ -555,7 +563,7 @@ extern char *pgstrom_build_session_info(cl_uint extra_flags,
 										GpuTaskState_v2 *gts);
 extern bool pgstrom_wait_cuda_program(ProgramId program_id, long timeout);
 
-extern ProgramId pgstrom_try_build_cuda_program(void);
+extern bool pgstrom_try_build_cuda_program(void);
 
 extern const char *pgstrom_cuda_source_file(ProgramId program_id);
 extern void pgstrom_init_cuda_program(void);
