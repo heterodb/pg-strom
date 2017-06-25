@@ -1857,21 +1857,21 @@ plcuda_cleanup_cuda_resources(plcudaTask *ptask)
 
 	if (ptask->m_kern_plcuda)
 	{
-		rc = gpuMemFree_v2(ptask->task.gcontext, ptask->m_kern_plcuda);
+		rc = gpuMemFree(ptask->task.gcontext, ptask->m_kern_plcuda);
 		if (rc != CUDA_SUCCESS)
 			elog(WARNING, "failed on gpuMemFree: %s", errorText(rc));
 	}
 
 	if (ptask->m_results_buf)
 	{
-		rc = gpuMemFree_v2(ptask->task.gcontext, ptask->m_results_buf);
+		rc = gpuMemFree(ptask->task.gcontext, ptask->m_results_buf);
 		if (rc != CUDA_SUCCESS)
 			elog(WARNING, "failed on gpuMemFree: %s", errorText(rc));
 	}
 
 	if (ptask->m_working_buf)
 	{
-		rc = gpuMemFree_v2(ptask->task.gcontext, ptask->m_working_buf);
+		rc = gpuMemFree(ptask->task.gcontext, ptask->m_working_buf);
 		if (rc != CUDA_SUCCESS)
 			elog(WARNING, "failed on gpuMemFree: %s", errorText(rc));
 	}
@@ -1958,9 +1958,9 @@ __plcuda_process_task(plcudaTask *ptask,
 	}
 
 	/* kern_plcuda structure on the device side */
-	rc = gpuMemAlloc_v2(gcontext,
-						&ptask->m_kern_plcuda,
-						KERN_PLCUDA_DMASEND_LENGTH(&ptask->kern));
+	rc = gpuMemAlloc(gcontext,
+					 &ptask->m_kern_plcuda,
+					 KERN_PLCUDA_DMASEND_LENGTH(&ptask->kern));
 	if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		goto out_of_resource;
 	else if (rc != CUDA_SUCCESS)
@@ -1969,9 +1969,9 @@ __plcuda_process_task(plcudaTask *ptask,
 	/* working buffer if required */
 	if (ptask->kern.working_bufsz > 0)
 	{
-		rc = gpuMemAlloc_v2(gcontext,
-							&ptask->m_working_buf,
-							ptask->kern.working_bufsz);
+		rc = gpuMemAlloc(gcontext,
+						 &ptask->m_working_buf,
+						 ptask->kern.working_bufsz);
 		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 			goto out_of_resource;
 		else if (rc != CUDA_SUCCESS)
@@ -1985,9 +1985,9 @@ __plcuda_process_task(plcudaTask *ptask,
 	/* results buffer if required  */
 	if (ptask->kern.results_bufsz > 0)
 	{
-		rc = gpuMemAlloc_v2(gcontext,
-							&ptask->m_results_buf,
-							ptask->kern.results_bufsz);
+		rc = gpuMemAlloc(gcontext,
+						 &ptask->m_results_buf,
+						 ptask->kern.results_bufsz);
 		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 			goto out_of_resource;
 		else if (rc != CUDA_SUCCESS)

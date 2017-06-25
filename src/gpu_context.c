@@ -116,7 +116,7 @@ gpuMemMaxAllocSize(void)
  * resource tracker for device memory
  */
 CUresult
-gpuMemAlloc_v2(GpuContext_v2 *gcontext, CUdeviceptr *p_devptr, size_t bytesize)
+gpuMemAlloc(GpuContext_v2 *gcontext, CUdeviceptr *p_devptr, size_t bytesize)
 {
 	ResourceTracker *tracker;
 	CUdeviceptr		devptr = 0UL;
@@ -155,7 +155,47 @@ gpuMemAlloc_v2(GpuContext_v2 *gcontext, CUdeviceptr *p_devptr, size_t bytesize)
 }
 
 CUresult
-gpuMemFree_v2(GpuContext_v2 *gcontext, CUdeviceptr devptr)
+gpuMemAllocManaged(GpuContext_v2 *gcontext,
+				   CUdeviceptr *p_devptr, size_t bytesize, int flags)
+{
+	ResourceTracker *tracker;
+	CUdeviceptr		devptr = 0UL;
+    CUresult		rc;
+	pg_crc32		crc;
+
+	Assert(IsGpuServerProcess());
+	if (bytesize > gpuMemMaxAllocSize())
+		return CUDA_ERROR_INVALID_VALUE;
+
+	rc = cuMemAllocManaged(&devptr, bytesize, flags);
+	if (rc == CUDA_SUCCESS)
+	{
+		tracker = resource_tracker_alloc();
+		if (!tracker)
+		{
+			rc = cuMemFree(devptr);
+			if (rc != CUDA_SUCCESS)
+				wnotice("failed on cuMemFree(%p): %s",
+						(void *)devptr, errorText(rc));
+			werror("out of memory");
+		}
+		crc = resource_tracker_hashval(RESTRACK_CLASS__GPUMEMORY,
+									   &devptr, sizeof(CUdeviceptr));
+		tracker->crc = crc;
+		tracker->resclass = RESTRACK_CLASS__GPUMEMORY;
+		tracker->u.devmem.ptr = devptr;
+		tracker->u.devmem.size = bytesize;
+		SpinLockAcquire(&gcontext->lock);
+		dlist_push_tail(&gcontext->restrack[crc % RESTRACK_HASHSIZE],
+						&tracker->chain);
+		SpinLockRelease(&gcontext->lock);
+		*p_devptr = devptr;
+	}
+	return rc;
+}
+
+CUresult
+gpuMemFree(GpuContext_v2 *gcontext, CUdeviceptr devptr)
 {
 	dlist_head	   *restrack_list;
 	dlist_iter		iter;

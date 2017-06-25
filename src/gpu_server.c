@@ -1347,7 +1347,7 @@ gpuserv_terminate_workers(int nworkers)
 		if (errcode != 0 && errcode != ESRCH)
 			elog(LOG, "failed on pthread_join(worker: %d): %s",
 				 i, strerror(errcode));
-		wnotice("pthread_join %d", i);
+		wnotice("worker-%d pthread_join() done", i);
 	}
 	worker_exception_stack = NULL;
 }

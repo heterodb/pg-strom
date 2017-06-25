@@ -2882,7 +2882,7 @@ gpuscan_cleanup_cuda_resources(GpuScanTask *gscan)
 
 	if (gscan->m_gpuscan)
 	{
-		rc = gpuMemFree_v2(gscan->task.gcontext, gscan->m_gpuscan);
+		rc = gpuMemFree(gscan->task.gcontext, gscan->m_gpuscan);
 		if (rc != CUDA_SUCCESS)
 			elog(WARNING, "failed on gpuMemFree: %s", errorText(rc));
 	}
@@ -2992,7 +2992,7 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 		length += GPUMEMALIGN(pds_src->kds.length);
 	if (pds_dst)
 		length += GPUMEMALIGN(pds_dst->kds.length);
-	rc = gpuMemAlloc_v2(gtask->gcontext, &gscan->m_gpuscan, length);
+	rc = gpuMemAlloc(gtask->gcontext, &gscan->m_gpuscan, length);
 	if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		goto out_of_resource;
 	else if (rc != CUDA_SUCCESS)

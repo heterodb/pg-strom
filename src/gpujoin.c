@@ -5372,7 +5372,7 @@ gpujoin_cleanup_cuda_resources(pgstrom_gpujoin *pgjoin)
 	if (pgjoin->with_nvme_strom && pgjoin->m_kds_src)
 		gpuMemFreeIOMap(pgjoin->task.gcontext, pgjoin->m_kds_src);
 	if (pgjoin->m_kgjoin)
-		gpuMemFree_v2(pgjoin->task.gcontext, pgjoin->m_kgjoin);
+		gpuMemFree(pgjoin->task.gcontext, pgjoin->m_kgjoin);
 	if (pgjoin->m_kmrels)
 		multirels_put_buffer(pgjoin);
 
@@ -5554,7 +5554,7 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 
 	length += GPUMEMALIGN(pds_dst->kds.length);
 
-	rc = gpuMemAlloc_v2(gcontext, &pgjoin->m_kgjoin, length);
+	rc = gpuMemAlloc(gcontext, &pgjoin->m_kgjoin, length);
 	if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		goto out_of_resource;
 	else if (rc != CUDA_SUCCESS)
@@ -6616,24 +6616,24 @@ __multirels_get_buffer(pgstrom_gpujoin *pgjoin,
 	CUresult		rc;
 
 	/* buffer allocation for the inner multi-relations */
-	rc = gpuMemAlloc_v2(gcontext, &m_kmrels, pmrels->usage_length);
+	rc = gpuMemAlloc(gcontext, &m_kmrels, pmrels->usage_length);
 	if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		return false;
 	else if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on gpuMemAlloc_v2: %s", errorText(rc));
+		elog(ERROR, "failed on gpuMemAlloc: %s", errorText(rc));
 
 	/* buffer allocation for the OUTER JOIN maps, if needed */
 	if (pmrels->kern.ojmap_length > 0 && !pmrels->m_ojmaps)
 	{
 		length = 2 * sizeof(cl_bool) * STROMALIGN(pmrels->kern.ojmap_length);
-		rc = gpuMemAlloc_v2(gcontext, &m_ojmaps, length);
+		rc = gpuMemAlloc(gcontext, &m_ojmaps, length);
 		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		{
-			gpuMemFree_v2(gcontext, m_kmrels);
+			gpuMemFree(gcontext, m_kmrels);
 			return false;
 		}
 		else if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on gpuMemAlloc_v2: %s", errorText(rc));
+			elog(ERROR, "failed on gpuMemAlloc: %s", errorText(rc));
 
 		/* Zero clear of the LEFT OUTER map */
 		rc = cuMemsetD32Async(m_ojmaps, 0, length / sizeof(int),
@@ -6743,9 +6743,9 @@ multirels_put_buffer(pgstrom_gpujoin *pgjoin)
 		 * set NULL on the pointer.
 		 */
 		Assert(pmrels->m_kmrels != 0UL);
-		rc = gpuMemFree_v2(pgjoin->task.gcontext, pmrels->m_kmrels);
+		rc = gpuMemFree(pgjoin->task.gcontext, pmrels->m_kmrels);
 		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on gpuMemFree_v2: %s", errorText(rc));
+			elog(WARNING, "failed on gpuMemFree: %s", errorText(rc));
 		pmrels->m_kmrels = 0UL;
 
 		/*

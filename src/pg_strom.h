@@ -444,9 +444,12 @@ extern void ForcePutAllGpuContext(void);
 extern bool GpuContextIsEstablished(GpuContext_v2 *gcontext);
 
 extern Size gpuMemMaxAllocSize(void);
-extern CUresult	gpuMemAlloc_v2(GpuContext_v2 *gcontext,
-							   CUdeviceptr *p_devptr, size_t bytesize);
-extern CUresult	gpuMemFree_v2(GpuContext_v2 *gcontext, CUdeviceptr devptr);
+extern CUresult	gpuMemAlloc(GpuContext_v2 *gcontext,
+							CUdeviceptr *p_devptr, size_t bytesize);
+extern CUresult gpuMemAllocManaged(GpuContext_v2 *gcontext,
+								   CUdeviceptr *p_devptr, size_t bytesize,
+								   int flags);
+extern CUresult	gpuMemFree(GpuContext_v2 *gcontext, CUdeviceptr devptr);
 extern bool trackCudaProgram(GpuContext_v2 *gcontext, ProgramId program_id);
 extern void untrackCudaProgram(GpuContext_v2 *gcontext, ProgramId program_id);
 extern bool trackIOMapMem(GpuContext_v2 *gcontext, CUdeviceptr devptr);

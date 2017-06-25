@@ -4025,9 +4025,9 @@ gpupreagg_alloc_final_buffer(GpuPreAggTask *gpreagg,
 		required = (GPUMEMALIGN(pds_final->kds.length) +
 					GPUMEMALIGN(offsetof(kern_global_hashslot,
 										 hash_slot[f_hashsize])));
-		rc = gpuMemAlloc_v2(gpreagg->task.gcontext,
-							&m_kds_final,
-							required);
+		rc = gpuMemAlloc(gpreagg->task.gcontext,
+						 &m_kds_final,
+						 required);
 		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		{
 			/* cleanup pds_final, and quick bailout */
@@ -4111,7 +4111,7 @@ gpupreagg_alloc_final_buffer(GpuPreAggTask *gpreagg,
 
 		if (m_kds_final != 0UL)
 		{
-			rc = gpuMemFree_v2(gpreagg->task.gcontext, m_kds_final);
+			rc = gpuMemFree(gpreagg->task.gcontext, m_kds_final);
 			if (rc != CUDA_SUCCESS)
 				elog(FATAL, "failed on gpuMemFree: %s", errorText(rc));
 		}
@@ -4310,7 +4310,7 @@ gpupreagg_put_final_buffer(GpuPreAggTask *gpreagg,
 			rc = cuEventDestroy(gpreagg->ev_kds_final);
 			if (rc != CUDA_SUCCESS)
 				elog(FATAL, "failed on cuEventDestroy: %s", errorText(rc));
-			rc = gpuMemFree_v2(gpreagg->task.gcontext, gpreagg->m_kds_final);
+			rc = gpuMemFree(gpreagg->task.gcontext, gpreagg->m_kds_final);
 			if (rc != CUDA_SUCCESS)
 				elog(FATAL, "failed on gpuMemFree: %s", errorText(rc));
 
@@ -4347,7 +4347,7 @@ gpupreagg_cleanup_cuda_resources(GpuPreAggTask *gpreagg)
 
 	if (gpreagg->m_gpreagg != 0UL)
 	{
-		rc = gpuMemFree_v2(gpreagg->task.gcontext, gpreagg->m_gpreagg);
+		rc = gpuMemFree(gpreagg->task.gcontext, gpreagg->m_gpreagg);
 		if (rc != CUDA_SUCCESS)
 			elog(FATAL, "failed on gpuMemFree: %s", errorText(rc));
 	}
@@ -4473,7 +4473,7 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 		else
 			length += GPUMEMALIGN(pds_src->kds.length);
 
-		rc = gpuMemAlloc_v2(gpreagg->task.gcontext, &devptr, length);
+		rc = gpuMemAlloc(gpreagg->task.gcontext, &devptr, length);
 		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 			goto out_of_resource;
 		else if (rc != CUDA_SUCCESS)
@@ -4680,9 +4680,9 @@ gpupreagg_process_termination_task(GpuPreAggTask *gpreagg,
 		/* allocation of the kern_gpupreagg */
 		length = GPUMEMALIGN(offsetof(kern_gpupreagg, kparams) +
 							 KERN_GPUPREAGG_PARAMBUF_LENGTH(&gpreagg->kern));
-		rc = gpuMemAlloc_v2(gpreagg->task.gcontext,
-							&gpreagg->m_gpreagg,
-							length);
+		rc = gpuMemAlloc(gpreagg->task.gcontext,
+						 &gpreagg->m_gpreagg,
+						 length);
 		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 			goto out_of_resource;
 		else if (rc != CUDA_SUCCESS)
@@ -4885,7 +4885,7 @@ gpupreagg_complete_task(GpuTask_v2 *gtask)
 		if (rc != CUDA_SUCCESS)
 			elog(FATAL, "failed on cuEventDestroy: %s", errorText(rc));
 
-		rc = gpuMemFree_v2(gpreagg->task.gcontext, gpreagg->m_kds_final);
+		rc = gpuMemFree(gpreagg->task.gcontext, gpreagg->m_kds_final);
 		if (rc != CUDA_SUCCESS)
 			elog(FATAL, "failed on gpuMemFree: %s", errorText(rc));
 
