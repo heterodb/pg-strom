@@ -98,31 +98,24 @@
 typedef struct SharedGpuContext
 {
 	dlist_node	chain;
-	cl_uint		context_id;		/* a unique ID of the GpuContext */
-
+	PGPROC	   *server;			/* PGPROC of CUDA/GPU Server */
+	PGPROC	   *backend;		/* PGPROC of Backend Process */
 	slock_t		lock;			/* lock of the field below */
 	cl_int		refcnt;			/* refcount by backend/gpu-server */
-	cl_int		device_id;		/* a unique index of the GPU device */
-	PGPROC	   *server;			/* PGPROC of GPU/CUDA Server */
-	PGPROC	   *backend;		/* PGPROC of Backend Process */
-	/* state of asynchronous tasks */
 	dlist_head	dma_buffer_list;/* tracker of DMA buffers */
 	cl_int		num_async_tasks;/* num of tasks passed to GPU server */
-	/* resource consumption monitor per server */
-	pg_atomic_uint64   *gpu_mem_usage;
-	pg_atomic_uint64   *gpu_task_count;
 } SharedGpuContext;
 
-#define INVALID_GPU_CONTEXT_ID		(-1)
-
+#define RESTRACK_HASHSIZE		53
 typedef struct GpuContext_v2
 {
 	dlist_node		chain;
-	cl_int			refcnt;		/* refcount by local GpuTaskState */
 	pgsocket		sockfd;		/* connection between backend <-> server */
 	ResourceOwner	resowner;
 	SharedGpuContext *shgcon;
-	dlist_head		restrack[FLEXIBLE_ARRAY_MEMBER];
+	pg_atomic_uint32 refcnt;
+	slock_t			lock;		/* lock for resource tracker */
+	dlist_head		restrack[RESTRACK_HASHSIZE];
 } GpuContext_v2;
 
 /* Identifier of the Gpu Programs */
@@ -236,6 +229,7 @@ struct GpuTaskState_v2
  * It is a unit of task to be sent GPU server. Thus, this object must be
  * allocated on the DMA buffer area.
  */
+struct GpuModuleCache;
 struct GpuTask_v2
 {
 	kern_errorbuf	kerror;			/* error status of the task */
@@ -249,6 +243,8 @@ struct GpuTask_v2
 	int				file_desc;		/* file-descriptor on backend side */
 	/* fields below are valid only server */
 	GpuContext_v2  *gcontext;		/* session info of GPU server */
+	struct GpuModuleCache *gmod_cache; /* cache of cuda_module */
+	struct timeval	tv_wakeup;		/* sleep until, if non-zero */
 	CUstream		cuda_stream;	/* stream object assigned on the task */
 	int				peer_fdesc;		/* FD moved via SCM_RIGHTS */
 	unsigned long	dma_task_id;	/* Task-ID of Async SSD2GPU DMA */
@@ -402,10 +398,6 @@ extern cl_ulong			devComputeCapability;
 extern cl_ulong			devBaselineMemorySize;
 extern cl_uint			devBaselineMaxThreadsPerBlock;
 
-extern bool	gpu_scoreboard_mem_alloc(size_t nbytes);
-extern void	gpu_scoreboard_mem_free(size_t nbytes);
-extern void gpu_scoreboard_dump(void);
-
 extern void pgstrom_init_gpu_device(void);
 extern Datum pgstrom_device_info(PG_FUNCTION_ARGS);
 
@@ -444,25 +436,22 @@ extern void pgstrom_init_dma_buffer(void);
 extern GpuContext_v2 *MasterGpuContext(void);
 extern GpuContext_v2 *AllocGpuContext(bool with_connection);
 extern GpuContext_v2 *AttachGpuContext(pgsocket sockfd,
-									   cl_int context_id,
-									   BackendId backend_id,
-									   cl_int device_id,
-									   pg_atomic_uint64 *p_gpu_mem_usage,
-									   pg_atomic_uint64 *p_gpu_task_count);
+									   SharedGpuContext *shgcon,
+									   int epoll_fd);
 extern GpuContext_v2 *GetGpuContext(GpuContext_v2 *gcontext);
 extern bool PutGpuContext(GpuContext_v2 *gcontext);
-extern bool ForcePutGpuContext(GpuContext_v2 *gcontext);
+extern void ForcePutAllGpuContext(void);
 extern bool GpuContextIsEstablished(GpuContext_v2 *gcontext);
 
 extern Size gpuMemMaxAllocSize(void);
 extern CUresult	gpuMemAlloc_v2(GpuContext_v2 *gcontext,
 							   CUdeviceptr *p_devptr, size_t bytesize);
 extern CUresult	gpuMemFree_v2(GpuContext_v2 *gcontext, CUdeviceptr devptr);
-extern void trackCudaProgram(GpuContext_v2 *gcontext, ProgramId program_id);
+extern bool trackCudaProgram(GpuContext_v2 *gcontext, ProgramId program_id);
 extern void untrackCudaProgram(GpuContext_v2 *gcontext, ProgramId program_id);
-extern void trackIOMapMem(GpuContext_v2 *gcontext, CUdeviceptr devptr);
+extern bool trackIOMapMem(GpuContext_v2 *gcontext, CUdeviceptr devptr);
 extern void untrackIOMapMem(GpuContext_v2 *gcontext, CUdeviceptr devptr);
-extern void trackSSD2GPUDMA(GpuContext_v2 *gcontext,
+extern bool trackSSD2GPUDMA(GpuContext_v2 *gcontext,
 							unsigned long dma_task_id);
 extern void untrackSSD2GPUDMA(GpuContext_v2 *gcontext,
 							  unsigned long dma_task_id);
@@ -475,20 +464,51 @@ extern int				gpuserv_cuda_dindex;
 extern CUdevice			gpuserv_cuda_device;
 extern CUcontext		gpuserv_cuda_context;
 
-extern bool IsGpuServerProcess(void);
+extern int	IsGpuServerProcess(void);
 extern void gpuservTryToWakeUp(void);
 extern void gpuservOpenConnection(GpuContext_v2 *gcontext);
-extern bool gpuservSendGpuTask(GpuContext_v2 *gcontext, GpuTask_v2 *gtask);
+extern void gpuservSendGpuTask(GpuContext_v2 *gcontext, GpuTask_v2 *gtask);
 extern bool gpuservRecvGpuTasks(GpuContext_v2 *gcontext, long timeout);
 extern void gpuservPushGpuTask(GpuContext_v2 *gcontext, GpuTask_v2 *gtask);
 extern void gpuservCompleteGpuTask(GpuTask_v2 *gtask, bool is_urgent);
 extern void pgstrom_init_gpu_server(void);
 
 /* service routines */
-#define wlog(fmt,...)							\
-	fprintf(stderr, "LOG: %s:%d " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__) 
-#define werror(fmt,...)							\
-	worker_error(__FUNCTION__,__FILE__,__LINE__, ##__VA_ARGS)
+#define wlog(fmt,...)										\
+	do {													\
+		if (IsGpuServerProcess() < 0)						\
+			fprintf(stderr, "LOG: %s:%d " fmt "\n",			\
+					__FILE__, __LINE__, ##__VA_ARGS__);		\
+		else												\
+			elog(LOG, fmt, ##__VA_ARGS__);					\
+	} while(0)
+#define wnotice(fmt,...)									\
+	do {													\
+		if (IsGpuServerProcess() < 0)						\
+			fprintf(stderr, "NOTICE: %s:%d " fmt "\n",		\
+					__FILE__, __LINE__, ##__VA_ARGS__);		\
+		else												\
+			elog(NOTICE, fmt, ##__VA_ARGS__);				\
+	} while(0)
+#define werror(fmt,...)										\
+	do {													\
+		if (IsGpuServerProcess() < 0)						\
+			worker_error(__FUNCTION__,__FILE__,__LINE__,	\
+						 fmt, ##__VA_ARGS__);				\
+		else												\
+			elog(ERROR, fmt, ##__VA_ARGS__);				\
+	} while(0)
+#define wfatal(fmt,...)										\
+	do {													\
+		if (IsGpuServerProcess() < 0)						\
+		{													\
+			fprintf(stderr, "FATAL: %s:%d " fmt "\n",		\
+					__FILE__, __LINE__, ##__VA_ARGS__);		\
+			proc_exit(1);									\
+		}													\
+		else												\
+			elog(FATAL, fmt, ##__VA_ARGS__);				\
+	} while(0)
 
 extern void worker_error(const char *funcname,
 						 const char *filename,
@@ -693,6 +713,7 @@ extern void gpuMemCopyFromSSDAsync(GpuTask_v2 *gtask,
 								   CUstream cuda_stream);
 extern void gpuMemCopyFromSSDWait(GpuTask_v2 *gtask,
 								  CUstream cuda_stream);
+extern bool gpuMemCopyFromSSDWaitRaw(unsigned long dma_task_id);
 
 extern void dump_iomap_buffer_info(void);
 extern Datum pgstrom_iomap_buffer_info(PG_FUNCTION_ARGS);

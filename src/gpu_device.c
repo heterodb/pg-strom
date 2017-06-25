@@ -24,84 +24,12 @@
 #include "utils/memutils.h"
 #include "pg_strom.h"
 
-/*
- * NOTE: scoreboard shall be deprecated in the near future
- * we will assign per gpu-server soft limit instead.
- */
-
-/* scoreboard for resource management */
-typedef struct GpuScoreBoard
-{
-	uint64				mem_total;	/* copy of DEV_TOTAL_MEMSZ */
-	pg_atomic_uint64	mem_usage;	/* current usage of device memory */
-	pg_atomic_uint64	num_async_tasks; /* current # of async tasks */
-} GpuScoreBoard;
-
 /* variable declarations */
-static shmem_startup_hook_type	shmem_startup_hook_next = NULL;
-static GpuScoreBoard		   *gpuScoreBoard = NULL;
-static int						minGpuMemoryPreserved;
 DevAttributes				   *devAttrs = NULL;
 cl_int							numDevAttrs = 0;
 cl_ulong						devComputeCapability = UINT_MAX;
 cl_ulong						devBaselineMemorySize = ULONG_MAX;
 cl_uint							devBaselineMaxThreadsPerBlock = UINT_MAX;
-
-/*
- * gpu_scoreboard_mem_alloc
- */
-bool
-gpu_scoreboard_mem_alloc(size_t nbytes)
-{
-	GpuScoreBoard  *gscore = &gpuScoreBoard[gpuserv_cuda_dindex];
-	size_t			new_value;
-
-	Assert(IsGpuServerProcess());
-	Assert(gpuserv_cuda_dindex < numDevAttrs);
-	new_value = pg_atomic_add_fetch_u64(&gscore->mem_usage, nbytes);
-	if (new_value <= gscore->mem_total)
-		return true;
-	/* revert it */
-	pg_atomic_sub_fetch_u64(&gscore->mem_usage, nbytes);
-	return false;
-}
-
-/*
- * gpu_scoreboard_mem_free
- */
-void
-gpu_scoreboard_mem_free(size_t nbytes)
-{
-	GpuScoreBoard  *gscore = &gpuScoreBoard[gpuserv_cuda_dindex];
-	size_t			new_value __attribute__((unused));
-
-	Assert(IsGpuServerProcess());
-	Assert(gpuserv_cuda_dindex < numDevAttrs);
-	new_value = pg_atomic_sub_fetch_u64(&gscore->mem_usage, nbytes);
-	/* ensure not to free more than allocation */
-	Assert(new_value >= 0 && new_value <  (size_t)(1UL << 60));
-}
-
-/*
- * gpu_scoreboard_dump
- */
-void
-gpu_scoreboard_dump(void)
-{
-	int		i;
-
-	for (i=0; i < numDevAttrs; i++)
-	{
-		GpuScoreBoard  *gscore = &gpuScoreBoard[i];
-
-		elog(INFO, "GPU[%d] num_async_tasks=%ld mem_usage=%zu of %zu (i/o mapped %zu)",
-			 i,
-			 (long)pg_atomic_read_u64(&gscore->num_async_tasks),
-			 (size_t)pg_atomic_read_u64(&gscore->mem_usage),
-			 (size_t)gscore->mem_total,
-			 (size_t)gpuMemSizeIOMap());
-	}
-}
 
 /* catalog of device attributes */
 typedef enum {
@@ -334,33 +262,6 @@ pgstrom_collect_gpu_device(void)
 }
 
 /*
- * pgstrom_startup_gpu_device
- */
-static void
-pgstrom_startup_gpu_device(void)
-{
-	int		i;
-	bool	found;
-
-	if (shmem_startup_hook_next)
-		(*shmem_startup_hook_next)();
-
-	gpuScoreBoard = ShmemInitStruct("gpuScoreBoard",
-									sizeof(GpuScoreBoard) * numDevAttrs,
-									&found);
-	Assert(!found);
-
-	for (i=0; i < numDevAttrs; i++)
-	{
-		GpuScoreBoard  *gscore = &gpuScoreBoard[i];
-
-		gscore->mem_total = devAttrs[i].DEV_TOTAL_MEMSZ;
-		pg_atomic_init_u64(&gscore->mem_usage, gpuMemSizeIOMap());
-		pg_atomic_init_u64(&gscore->num_async_tasks, 0);
-	}
-}
-
-/*
  * pgstrom_init_gpu_device
  */
 void
@@ -385,33 +286,8 @@ pgstrom_init_gpu_device(void)
 		if (setenv("CUDA_VISIBLE_DEVICES", cuda_visible_devices, 1) != 0)
 			elog(ERROR, "failed to set CUDA_VISIBLE_DEVICES");
 	}
-
-	/*
-	 * Minimum amount of GPU device memory to be preserved for CUDA platform
-	 * usage. In case of device memory starvation, CUDA APIs may randomly
-	 * fail with OUT_OF_MEMORY error.
-	 * If and when most of device memory is consumed, it is likely stuck of
-	 * GPU task which is submited but not executed, so short wait is a good
-	 * idea to cool down.
-	 */
-	DefineCustomIntVariable("pg_strom.min_gpu_memory_preserved",
-							"minimum amount of GPU device memory preserved",
-							NULL,
-							&minGpuMemoryPreserved,
-							81920,	/* 80MB */
-							0,
-							INT_MAX,
-							PGC_POSTMASTER,
-							GUC_NOT_IN_SAMPLE,
-							NULL, NULL, NULL);
-
 	/* collect device properties by gpuinfo command */
 	pgstrom_collect_gpu_device();
-
-	/* require shared memory for score-board */
-	RequestAddinShmemSpace(MAXALIGN(sizeof(gpuScoreBoard) * numDevAttrs));
-	shmem_startup_hook_next = shmem_startup_hook;
-	shmem_startup_hook = pgstrom_startup_gpu_device;
 }
 
 Datum

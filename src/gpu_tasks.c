@@ -246,7 +246,6 @@ fetch_next_gputask(GpuTaskState_v2 *gts)
 	SharedGpuContext   *shgcon = gcontext->shgcon;
 	GpuTask_v2		   *gtask;
 	dlist_node		   *dnode;
-	uint64				curr_task_count;
 
 	/*
 	 * If no server connection is established, GpuTask cannot be processed
@@ -269,25 +268,18 @@ retry_scan:
 	/*
 	 * Fetch next task and send it, if current resource consumption allows.
 	 *
-	 * 1. Sum of number of the running and ready tasks is less than
-	 *    pg_strom.min_async_tasks, we don't prevent to send tasks to
-	 *    GPU server, regardless of the gpu_task_count.
-	 * 2. Number of the running task is less than pg_strom.max_async_tasks,
-	 *    but there is no ready tasks, we can send the next task.
-	 * 3. If this backend has neither running nor ready tasks, we can send
-	 *    a next task regardless of the resource limitation.
+	 * 1. Number of the running tasks is less than pg_strom.min_async_tasks.
+	 * 2. Sum of number of the running and ready tasks is less than
+	 *    pg_strom.max_async_tasks.
 	 */
 	while (!gts->scan_done)
 	{
 		CHECK_FOR_INTERRUPTS();
 
-		curr_task_count = pg_atomic_add_fetch_u64(shgcon->gpu_task_count, 1);
 		SpinLockAcquire(&shgcon->lock);
-		if ((gts->num_ready_tasks +
-			 shgcon->num_async_tasks) <= pgstrom_min_async_tasks ||
-			(gts->num_ready_tasks == 0 &&
-			 curr_task_count < pgstrom_max_async_tasks) ||
-			(gts->num_ready_tasks == 0 && shgcon->num_async_tasks == 0))
+		if (shgcon->num_async_tasks <= pgstrom_min_async_tasks ||
+			(gts->num_ready_tasks +
+			 shgcon->num_async_tasks) <= pgstrom_max_async_tasks)
 		{
 			SpinLockRelease(&shgcon->lock);
 
@@ -297,14 +289,12 @@ retry_scan:
 				gts->scan_done = true;
 				break;
 			}
-			if (!gpuservSendGpuTask(gcontext, gtask))
-				elog(ERROR, "failed to send GpuTask to GPU server");
+			gpuservSendGpuTask(gcontext, gtask);
 		}
 		else
 		{
 			/* shouldn't send tasks any more at this moment */
 			SpinLockRelease(&shgcon->lock);
-			pg_atomic_sub_fetch_u64(shgcon->gpu_task_count, 1);
 			/* ok, we got at least one completed tasks */
 			if (!dlist_is_empty(&gts->ready_tasks))
 				break;

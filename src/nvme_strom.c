@@ -310,6 +310,24 @@ gpuMemFreeIOMap(GpuContext_v2 *gcontext, CUdeviceptr devptr)
 }
 
 /*
+ * gpuMemCopyFromSSDWaitRaw
+ */
+bool
+gpuMemCopyFromSSDWaitRaw(unsigned long dma_task_id)
+{
+	StromCmd__MemCopyWait cmd;
+
+	memset(&cmd, 0, sizeof(StromCmd__MemCopyWait));
+	cmd.dma_task_id = dma_task_id;
+
+	if (nvme_strom_ioctl(STROM_IOCTL__MEMCPY_WAIT, &cmd) != 0 ||
+		cmd.status != 0)
+		return false;
+
+	return true;
+}
+
+/*
  * gpuMemCopyFromSSDWait - callback to wait for SSD-to-GPU Direct DMA done
  */
 static void

@@ -1703,8 +1703,7 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 		ptask->exec_post_kernel = true;
 	}
 
-	if (!gpuservSendGpuTask(plts->gts.gcontext, &ptask->task))
-		elog(ERROR, "failed to send GpuTask to GPU server");
+	gpuservSendGpuTask(plts->gts.gcontext, &ptask->task);
 	plts->gts.scan_done = true;
 
 	precv = (plcudaTask *) fetch_next_gputask(&plts->gts);

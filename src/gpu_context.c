@@ -23,6 +23,7 @@
 #include "utils/pg_crc.h"
 #include "utils/resowner.h"
 #include "pg_strom.h"
+#include <sys/epoll.h>
 
 typedef struct SharedGpuContextHead
 {
@@ -38,10 +39,9 @@ static shmem_startup_hook_type shmem_startup_hook_next = NULL;
 static SharedGpuContextHead *sharedGpuContextHead = NULL;
 static GpuContext_v2	masterGpuContext;
 static int				numGpuContexts;		/* GUC */
-
-static dlist_head		activeGpuContextList;
-static dlist_head		inactiveGpuContextList;
-static dlist_head		inactiveResourceTracker;
+static slock_t			activeGpuContextLock;	/* only used by GpuServer */
+static dlist_head		activeGpuContextList;	/* with multi-threading */
+static __thread dlist_head inactiveResourceTracker;
 
 /*
  * Resource tracker of GpuContext
@@ -49,8 +49,6 @@ static dlist_head		inactiveResourceTracker;
  * It enables to track various resources with GpuContext, to detect resource
  * leaks.
  */
-#define RESTRACK_HASHSIZE				53
-
 #define RESTRACK_CLASS__GPUMEMORY		2
 #define RESTRACK_CLASS__GPUPROGRAM		3
 #define RESTRACK_CLASS__IOMAPMEMORY		4
@@ -77,13 +75,13 @@ resource_tracker_alloc(void)
 	ResourceTracker	   *restrack;
 
 	if (dlist_is_empty(&inactiveResourceTracker))
-		return MemoryContextAllocZero(TopMemoryContext,
-									  sizeof(ResourceTracker));
-
-	restrack = dlist_container(ResourceTracker, chain,
-							   dlist_pop_head_node(&inactiveResourceTracker));
-	memset(restrack, 0, sizeof(ResourceTracker));
-
+		restrack = calloc(1, sizeof(ResourceTracker));
+	else
+	{
+		dlist_node *dnode = dlist_pop_head_node(&inactiveResourceTracker);
+		restrack = dlist_container(ResourceTracker, chain, dnode);
+		memset(restrack, 0, sizeof(ResourceTracker));
+	}
 	return restrack;
 }
 
@@ -129,39 +127,29 @@ gpuMemAlloc_v2(GpuContext_v2 *gcontext, CUdeviceptr *p_devptr, size_t bytesize)
 	if (bytesize > gpuMemMaxAllocSize())
 		return CUDA_ERROR_INVALID_VALUE;
 
-	if (!gpu_scoreboard_mem_alloc(bytesize))
-		return CUDA_ERROR_OUT_OF_MEMORY;
-
 	rc = cuMemAlloc(&devptr, bytesize);
-	if (rc != CUDA_SUCCESS)
-		gpu_scoreboard_mem_free(bytesize);
-	else
+	if (rc == CUDA_SUCCESS)
 	{
-		PG_TRY();
-		{
-			tracker = resource_tracker_alloc();
-			crc = resource_tracker_hashval(RESTRACK_CLASS__GPUMEMORY,
-										   &devptr, sizeof(CUdeviceptr));
-			tracker->crc = crc;
-			tracker->resclass = RESTRACK_CLASS__GPUMEMORY;
-			tracker->u.devmem.ptr = devptr;
-			tracker->u.devmem.size = bytesize;
-			dlist_push_tail(&gcontext->restrack[crc % RESTRACK_HASHSIZE],
-							&tracker->chain);
-			*p_devptr = devptr;
-		}
-		PG_CATCH();
+		tracker = resource_tracker_alloc();
+		if (!tracker)
 		{
 			rc = cuMemFree(devptr);
 			if (rc != CUDA_SUCCESS)
-				elog(WARNING, "failed on cuMemFree(%p): %s",
-					 (void *)devptr, errorText(rc));
-			else
-				gpu_scoreboard_mem_free(bytesize);
-
-			PG_RE_THROW();
+				wnotice("failed on cuMemFree(%p): %s",
+						(void *)devptr, errorText(rc));
+			werror("out of memory");
 		}
-		PG_END_TRY();
+		crc = resource_tracker_hashval(RESTRACK_CLASS__GPUMEMORY,
+									   &devptr, sizeof(CUdeviceptr));
+		tracker->crc = crc;
+		tracker->resclass = RESTRACK_CLASS__GPUMEMORY;
+		tracker->u.devmem.ptr = devptr;
+		tracker->u.devmem.size = bytesize;
+		SpinLockAcquire(&gcontext->lock);
+		dlist_push_tail(&gcontext->restrack[crc % RESTRACK_HASHSIZE],
+						&tracker->chain);
+		SpinLockRelease(&gcontext->lock);
+		*p_devptr = devptr;
 	}
 	return rc;
 }
@@ -173,12 +161,12 @@ gpuMemFree_v2(GpuContext_v2 *gcontext, CUdeviceptr devptr)
 	dlist_iter		iter;
 	pg_crc32		crc;
 	CUresult		rc;
-	size_t			nbytes = 0;
 
 	crc = resource_tracker_hashval(RESTRACK_CLASS__GPUMEMORY,
 								   &devptr, sizeof(CUdeviceptr));
-	restrack_list = &gcontext->restrack[crc % RESTRACK_HASHSIZE];
 
+	restrack_list = &gcontext->restrack[crc % RESTRACK_HASHSIZE];
+	SpinLockAcquire(&gcontext->lock);
 	dlist_foreach(iter, restrack_list)
 	{
 		ResourceTracker *tracker
@@ -189,56 +177,59 @@ gpuMemFree_v2(GpuContext_v2 *gcontext, CUdeviceptr devptr)
 			tracker->u.devmem.ptr == devptr)
 		{
 			dlist_delete(&tracker->chain);
-			nbytes = tracker->u.devmem.size;
+			SpinLockRelease(&gcontext->lock);
+
 			memset(tracker, 0, sizeof(ResourceTracker));
 			dlist_push_head(&inactiveResourceTracker,
 							&tracker->chain);
 			goto found;
 		}
     }
-    elog(WARNING, "Bug? device pointer %p was not tracked", (void *)devptr);
+	SpinLockRelease(&gcontext->lock);
+	wnotice("Bug? device pointer %p was not tracked", (void *)devptr);
 found:
 	rc = cuMemFree(devptr);
 	if (rc != CUDA_SUCCESS)
-		elog(WARNING, "failed on cuMemFree(%p): %s",
-			 (void *)devptr, errorText(rc));
-	else
-		gpu_scoreboard_mem_free(nbytes);
-
+		wnotice("failed on cuMemFree(%p): %s", (void *)devptr, errorText(rc));
 	return rc;
 }
 
 /*
  * resource tracker for GPU program
  */
-void
+bool
 trackCudaProgram(GpuContext_v2 *gcontext, ProgramId program_id)
 {
 	ResourceTracker *tracker = resource_tracker_alloc();
 	pg_crc32	crc;
+
+	if (!tracker)
+		return false;	/* out of memory */
 
 	crc = resource_tracker_hashval(RESTRACK_CLASS__GPUPROGRAM,
 								   &program_id, sizeof(ProgramId));
 	tracker->crc = crc;
 	tracker->resclass = RESTRACK_CLASS__GPUPROGRAM;
 	tracker->u.program_id = program_id;
-
+	SpinLockAcquire(&gcontext->lock);
 	dlist_push_tail(&gcontext->restrack[crc % RESTRACK_HASHSIZE],
 					&tracker->chain);
+	SpinLockRelease(&gcontext->lock);
+	return true;
 }
 
 void
 untrackCudaProgram(GpuContext_v2 *gcontext, ProgramId program_id)
 {
-	pg_crc32	crc;
-	cl_int		index;
-	dlist_iter	iter;
+	dlist_head *restrack_list;
+    dlist_iter	iter;
+    pg_crc32	crc;
 
 	crc = resource_tracker_hashval(RESTRACK_CLASS__GPUPROGRAM,
 								   &program_id, sizeof(ProgramId));
-	index = crc % RESTRACK_HASHSIZE;
-
-	dlist_foreach(iter, &gcontext->restrack[index])
+	SpinLockAcquire(&gcontext->lock);
+	restrack_list = &gcontext->restrack[crc % RESTRACK_HASHSIZE];
+	dlist_foreach(iter, restrack_list)
 	{
 		ResourceTracker *tracker
 			= dlist_container(ResourceTracker, chain, iter.cur);
@@ -248,23 +239,28 @@ untrackCudaProgram(GpuContext_v2 *gcontext, ProgramId program_id)
 			tracker->u.program_id == program_id)
 		{
 			dlist_delete(&tracker->chain);
+			SpinLockRelease(&gcontext->lock);
 			memset(tracker, 0, sizeof(ResourceTracker));
 			dlist_push_head(&inactiveResourceTracker,
 							&tracker->chain);
 			return;
 		}
 	}
-	elog(WARNING, "Bug? CUDA Program %lu was not tracked", program_id);
+	SpinLockRelease(&gcontext->lock);
+	wnotice("Bug? CUDA Program %lu was not tracked", program_id);
 }
 
 /*
  * resource tracker for i/o mapped memory
  */
-void
+bool
 trackIOMapMem(GpuContext_v2 *gcontext, CUdeviceptr devptr)
 {
 	ResourceTracker *tracker = resource_tracker_alloc();
 	pg_crc32	crc;
+
+	if (!tracker)
+		return false;	/* out of memory */
 
 	crc = resource_tracker_hashval(RESTRACK_CLASS__IOMAPMEMORY,
 								   &devptr, sizeof(CUdeviceptr));
@@ -272,27 +268,26 @@ trackIOMapMem(GpuContext_v2 *gcontext, CUdeviceptr devptr)
 	tracker->resclass = RESTRACK_CLASS__IOMAPMEMORY;
 	tracker->u.devmem.ptr = devptr;
 	tracker->u.devmem.size = 0;
-	/*
-	 * NOTE: length of the i/o mapped memory is already counted
-	 * on the GPU-scoreboard on the initialization time, so we
-	 * don't need to count up/down device memory usage any more.
-	 */
+
+	SpinLockAcquire(&gcontext->lock);
 	dlist_push_tail(&gcontext->restrack[crc % RESTRACK_HASHSIZE],
 					&tracker->chain);
+	SpinLockRelease(&gcontext->lock);
+	return true;
 }
 
 void
 untrackIOMapMem(GpuContext_v2 *gcontext, CUdeviceptr devptr)
 {
-	pg_crc32	crc;
-	cl_int		index;
-	dlist_iter	iter;
+	dlist_head *restrack_list;
+    dlist_iter	iter;
+    pg_crc32	crc;
 
 	crc = resource_tracker_hashval(RESTRACK_CLASS__IOMAPMEMORY,
 								   &devptr, sizeof(CUdeviceptr));
-	index = crc % RESTRACK_HASHSIZE;
-
-	dlist_foreach (iter, &gcontext->restrack[index])
+	restrack_list = &gcontext->restrack[crc % RESTRACK_HASHSIZE];
+	SpinLockAcquire(&gcontext->lock);
+	dlist_foreach (iter, restrack_list)
 	{
 		ResourceTracker *tracker
 			= dlist_container(ResourceTracker, chain, iter.cur);
@@ -302,23 +297,28 @@ untrackIOMapMem(GpuContext_v2 *gcontext, CUdeviceptr devptr)
 			tracker->u.devmem.ptr == devptr)
 		{
 			dlist_delete(&tracker->chain);
+			SpinLockRelease(&gcontext->lock);
 			memset(tracker, 0, sizeof(ResourceTracker));
 			dlist_push_head(&inactiveResourceTracker,
 							&tracker->chain);
 			return;
 		}
 	}
-	elog(WARNING, "Bug? I/O Mapped Memory %p was not tracked", (void *)devptr);
+	SpinLockRelease(&gcontext->lock);
+	wnotice("Bug? I/O Mapped Memory %p was not tracked", (void *)devptr);
 }
 
 /*
  * resource tracker for SSD-to-GPU Direct DMA task
  */
-void
+bool
 trackSSD2GPUDMA(GpuContext_v2 *gcontext, unsigned long dma_task_id)
 {
 	ResourceTracker *tracker = resource_tracker_alloc();
 	pg_crc32	crc;
+
+	if (!tracker)
+		return false;	/* out of memory */
 
 	crc = resource_tracker_hashval(RESTRACK_CLASS__SSD2GPUDMA,
 								   &dma_task_id, sizeof(unsigned long));
@@ -326,22 +326,25 @@ trackSSD2GPUDMA(GpuContext_v2 *gcontext, unsigned long dma_task_id)
 	tracker->resclass = RESTRACK_CLASS__SSD2GPUDMA;
 	tracker->u.dma_task_id = dma_task_id;
 
+	SpinLockAcquire(&gcontext->lock);
 	dlist_push_tail(&gcontext->restrack[crc % RESTRACK_HASHSIZE],
 					&tracker->chain);
+	SpinLockRelease(&gcontext->lock);
+	return true;
 }
 
 void
 untrackSSD2GPUDMA(GpuContext_v2 *gcontext, unsigned long dma_task_id)
 {
-	pg_crc32	crc;
-	cl_int		index;
-	dlist_iter	iter;
+	dlist_head *restrack_list;
+    dlist_iter	iter;
+    pg_crc32	crc;
 
 	crc = resource_tracker_hashval(RESTRACK_CLASS__SSD2GPUDMA,
 								   &dma_task_id, sizeof(unsigned long));
-	index = crc % RESTRACK_HASHSIZE;
-
-	dlist_foreach (iter, &gcontext->restrack[index])
+	restrack_list = &gcontext->restrack[crc % RESTRACK_HASHSIZE];
+	SpinLockAcquire(&gcontext->lock);
+	dlist_foreach (iter, restrack_list)
 	{
 		ResourceTracker *tracker
 			= dlist_container(ResourceTracker, chain, iter.cur);
@@ -351,14 +354,16 @@ untrackSSD2GPUDMA(GpuContext_v2 *gcontext, unsigned long dma_task_id)
 			tracker->u.dma_task_id == dma_task_id)
 		{
 			dlist_delete(&tracker->chain);
+			SpinLockRelease(&gcontext->lock);
 			memset(tracker, 0, sizeof(ResourceTracker));
 			dlist_push_head(&inactiveResourceTracker,
 							&tracker->chain);
 			return;
 		}
 	}
-	elog(WARNING, "Bug? SSD-to-GPU Direct DMA (%p) was not tracked",
-		 (void *)dma_task_id);
+	SpinLockRelease(&gcontext->lock);
+	wnotice("Bug? SSD-to-GPU Direct DMA (%p) was not tracked",
+			(void *)dma_task_id);
 }
 
 /*
@@ -373,14 +378,15 @@ ReleaseLocalResources(GpuContext_v2 *gcontext, bool normal_exit)
 	CUresult		rc;
 	int				i;
 
+	if (IsGpuServerProcess() < 0)
+		elog(FATAL, "Bug? %s called under multi-thread process",
+			 __FUNCTION__);
+
 	/* close the socket if any */
 	if (gcontext->sockfd != PGINVALID_SOCKET)
 	{
 		if (close(gcontext->sockfd) != 0)
-			elog(WARNING, "failed on close(%d) socket: %m",
-				 gcontext->sockfd);
-		else
-			elog(DEBUG2, "socket %d was closed", gcontext->sockfd);
+			wnotice("failed on close(%d) socket: %m", gcontext->sockfd);
 		gcontext->sockfd = PGINVALID_SOCKET;
 	}
 
@@ -402,10 +408,7 @@ ReleaseLocalResources(GpuContext_v2 *gcontext, bool normal_exit)
 				continue;
 
 			dlist_delete(&tracker->chain);
-			// wait for completion of DMA
-			elog(NOTICE, "SSD2GPU DMA %p is not completed",
-				 (void *)tracker->u.dma_task_id);
-
+			gpuMemCopyFromSSDWaitRaw(tracker->u.dma_task_id);
 			memset(tracker, 0, sizeof(ResourceTracker));
 			dlist_push_head(&inactiveResourceTracker, &tracker->chain);
 		}
@@ -425,8 +428,8 @@ ReleaseLocalResources(GpuContext_v2 *gcontext, bool normal_exit)
 			{
 				case RESTRACK_CLASS__GPUMEMORY:
 					if (normal_exit)
-						elog(WARNING, "GPU memory %p likely leaked",
-							 (void *)tracker->u.devmem.ptr);
+						wnotice("GPU memory %p likely leaked",
+								(void *)tracker->u.devmem.ptr);
 					/*
 					 * normal device memory should be already released
 					 * once CUDA context is destroyed
@@ -435,29 +438,29 @@ ReleaseLocalResources(GpuContext_v2 *gcontext, bool normal_exit)
 						break;
 					rc = cuMemFree(tracker->u.devmem.ptr);
 					if (rc != CUDA_SUCCESS)
-						elog(WARNING, "failed on cuMemFree(%p): %s",
-							 (void *)tracker->u.devmem.ptr, errorText(rc));
-					else
-						gpu_scoreboard_mem_free(tracker->u.devmem.size);
+						wnotice("failed on cuMemFree(%p): %s",
+								(void *)tracker->u.devmem.ptr,
+								errorText(rc));
 					break;
 				case RESTRACK_CLASS__GPUPROGRAM:
 					if (normal_exit)
-						elog(WARNING, "CUDA Program ID=%lu is likely leaked",
-							 tracker->u.program_id);
+						wnotice("CUDA Program ID=%lu is likely leaked",
+								tracker->u.program_id);
 					pgstrom_put_cuda_program(NULL, tracker->u.program_id);
 					break;
 				case RESTRACK_CLASS__IOMAPMEMORY:
 					if (normal_exit)
-						elog(WARNING, "I/O Mapped Memory %p likely leaked",
-							 (void *)tracker->u.devmem.ptr);
+						wnotice("I/O Mapped Memory %p likely leaked",
+								(void *)tracker->u.devmem.ptr);
 					rc = gpuMemFreeIOMap(NULL, tracker->u.devmem.ptr);
 					if (rc != CUDA_SUCCESS)
-						elog(WARNING, "failed on gpuMemFreeIOMap(%p): %s",
-							 (void *)tracker->u.devmem.ptr, errorText(rc));
+						wnotice("failed on gpuMemFreeIOMap(%p): %s",
+								(void *)tracker->u.devmem.ptr,
+								errorText(rc));
 					break;
 				default:
-					elog(WARNING, "Bug? unknown resource tracker class: %d",
-						 (int)tracker->resclass);
+					wnotice("Bug? unknown resource tracker class: %d",
+							(int)tracker->resclass);
 					break;
 			}
 			memset(tracker, 0, sizeof(ResourceTracker));
@@ -488,13 +491,13 @@ AllocGpuContext(bool with_connection)
 	dlist_node	   *dnode;
 	int				i;
 
-	Assert(!IsGpuServerProcess());
 	if (IsGpuServerProcess())
 		elog(FATAL, "Bug? Only backend process can get a new GpuContext");
 
 	/*
 	 * Lookup an existing active GpuContext
 	 */
+	SpinLockAcquire(&activeGpuContextLock);
 	dlist_foreach(iter, &activeGpuContextList)
 	{
 		gcontext = dlist_container(GpuContext_v2, chain, iter.cur);
@@ -504,57 +507,53 @@ AllocGpuContext(bool with_connection)
 			 ? gcontext->sockfd != PGINVALID_SOCKET
 			 : gcontext->sockfd == PGINVALID_SOCKET))
 		{
-			gcontext->refcnt++;
+			SpinLockRelease(&activeGpuContextLock);
+			pg_atomic_fetch_add_u32(&gcontext->refcnt, 1);
 			return gcontext;
 		}
 	}
+	SpinLockRelease(&activeGpuContextLock);
 
 	/*
 	 * Not found, let's create a new GpuContext
 	 */
-	if (dlist_is_empty(&inactiveGpuContextList))
-	{
-		Size	len = offsetof(GpuContext_v2, restrack[RESTRACK_HASHSIZE]);
-		gcontext = MemoryContextAllocZero(TopMemoryContext, len);
-	}
-	else
-	{
-		dnode = dlist_pop_head_node(&inactiveGpuContextList);
-		gcontext = (GpuContext_v2 *)
-			dlist_container(GpuContext_v2, chain, dnode);
-	}
+	gcontext = malloc(offsetof(GpuContext_v2,
+							   restrack[RESTRACK_HASHSIZE]));
+	if (!gcontext)
+		elog(ERROR, "out of memory");
 
 	SpinLockAcquire(&sharedGpuContextHead->lock);
 	if (dlist_is_empty(&sharedGpuContextHead->free_list))
 	{
 		SpinLockRelease(&sharedGpuContextHead->lock);
-		dlist_push_head(&inactiveGpuContextList,
-						&gcontext->chain);
+		free(gcontext);
 		elog(ERROR, "No available SharedGpuContext item.");
 	}
 	dnode = dlist_pop_head_node(&sharedGpuContextHead->free_list);
 	shgcon = (SharedGpuContext *)
 		dlist_container(SharedGpuContext, chain, dnode);
 	memset(&shgcon->chain, 0, sizeof(dlist_node));
-
 	SpinLockRelease(&sharedGpuContextHead->lock);
 
-	Assert(shgcon == &sharedGpuContextHead->context_array[shgcon->context_id]);
-	shgcon->refcnt = 1;
-	shgcon->device_id = -1;		/* set on GPU server attachment */
 	shgcon->server = NULL;
 	shgcon->backend = MyProc;
+	SpinLockInit(&shgcon->lock);
+	shgcon->refcnt = 1;
 	dlist_init(&shgcon->dma_buffer_list);
 	shgcon->num_async_tasks = 0;
 
 	/* init local GpuContext */
-	gcontext->refcnt = 1;
 	gcontext->sockfd = PGINVALID_SOCKET;
 	gcontext->resowner = CurrentResourceOwner;
 	gcontext->shgcon = shgcon;
+	pg_atomic_init_u32(&gcontext->refcnt, 1);
+	SpinLockInit(&gcontext->lock);
 	for (i=0; i < RESTRACK_HASHSIZE; i++)
 		dlist_init(&gcontext->restrack[i]);
+
+	SpinLockAcquire(&activeGpuContextLock);
 	dlist_push_head(&activeGpuContextList, &gcontext->chain);
+	SpinLockRelease(&activeGpuContextLock);
 
 	/*
 	 * ------------------------------------------------------------------
@@ -562,16 +561,8 @@ AllocGpuContext(bool with_connection)
 	 * it is now already tracked by resource owner.
 	 * ------------------------------------------------------------------
 	 */
-
-	/*
-	 * Open the connection on demand, however, connection may often fails
-	 * because of GPU server resources. In these cases, 'unconnected GPU
-	 * context' shall be returned.
-	 */
 	if (with_connection)
 		gpuservOpenConnection(gcontext);
-	else
-		gcontext->sockfd = PGINVALID_SOCKET;
 
 	return gcontext;
 }
@@ -581,59 +572,50 @@ AllocGpuContext(bool with_connection)
  * which is already acquired by a certain backend.
  */
 GpuContext_v2 *
-AttachGpuContext(pgsocket sockfd,
-				 SharedGpuContext *shgcon
-
-				 cl_int context_id,
-				 BackendId backend_id,
-				 cl_int device_id,
-				 pg_atomic_uint64 *p_gpu_mem_usage,
-				 pg_atomic_uint64 *p_gpu_task_count)
+AttachGpuContext(pgsocket sockfd, SharedGpuContext *shgcon, int epoll_fd)
 {
 	GpuContext_v2  *gcontext;
-	size_t			len;
-
-	int					i;
+	struct epoll_event ep_event;
+	int				i;
 
 	/* to be called by the GPU server process */
 	if (!IsGpuServerProcess())
-		elog(FATAL, "Bug? backend tried to attach GPU context");
+		wfatal("Bug? backend tried to attach GPU context");
 
+	/* allocation of a local GpuContext */
 	gcontext = malloc(offsetof(GpuContext_v2, restrack[RESTRACK_HASHSIZE]));
 	if (!gcontext)
 		werror("out of memory");
 
-	SpinLockAcquire(&shgcon->lock);
-	/* sanity checks */
-	if (shgcon->refcnt == 0 ||		/* nobody own the GpuContext */
-		shgcon->backend == NULL ||	/* no backend assigned yet */
-		shgcon->server != NULL)		/* a server is already assigned */
-	{
-		SpinLockRelease(&shgcon->lock);
-		free(gcontext);
-		wfatal("Bug? GpuContext (shared %p) has wrong state", shgcon);
-	}
-	shgcon->refcnt++;
-	shgcon->server = MyProc;
-	shgcon->num_async_tasks = 0;
-
-
-	shgcon->refcnt++;
-	shgcon->device_id = device_id;
-	shgcon->server = MyProc;
-	shgcon->num_async_tasks = 0;
-	shgcon->gpu_mem_usage = p_gpu_mem_usage;
-	shgcon->gpu_task_count = p_gpu_task_count;
-	SetLatch(&shgcon->backend->procLatch);
-	SpinLockRelease(&shgcon->lock);
-
-	gcontext->refcnt = 1;
 	gcontext->sockfd = sockfd;
 	gcontext->resowner = CurrentResourceOwner;
+	pg_atomic_init_u32(&gcontext->refcnt, 1);
+	SpinLockInit(&gcontext->lock);
 	gcontext->shgcon = shgcon;
 	for (i=0; i < RESTRACK_HASHSIZE; i++)
 		dlist_init(&gcontext->restrack[i]);
+
+	/* add gcontext to epoll fd */
+	ep_event.events = EPOLLIN;
+	ep_event.data.ptr = gcontext;
+	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sockfd, &ep_event) < 0)
+	{
+		free(gcontext);
+		werror("failed on epoll_ctl(EPOLL_CTL_ADD): %m");
+	}
+
+	SpinLockAcquire(&shgcon->lock);
+	Assert(shgcon->refcnt > 0 &&		/* someone must own the GpuContext */
+		   shgcon->backend != NULL &&	/* backend must be assigned on */
+		   shgcon->server == NULL);		/* no server should be assigned yet */
+	shgcon->refcnt++;
+	shgcon->server = MyProc;
+	shgcon->num_async_tasks = 0;
+	SpinLockRelease(&shgcon->lock);
+
+	SpinLockAcquire(&activeGpuContextLock);
 	dlist_push_head(&activeGpuContextList, &gcontext->chain);
+	SpinLockRelease(&activeGpuContextLock);
 
 	return gcontext;
 }
@@ -644,8 +626,11 @@ AttachGpuContext(pgsocket sockfd,
 GpuContext_v2 *
 GetGpuContext(GpuContext_v2 *gcontext)
 {
-	Assert(gcontext->refcnt > 0);
-	gcontext->refcnt++;
+	uint32		oldcnt __attribute__((unused));
+
+	oldcnt = pg_atomic_fetch_add_u32(&gcontext->refcnt, 1);
+	Assert(oldcnt > 0);
+
 	return gcontext;
 }
 
@@ -686,32 +671,32 @@ PutSharedGpuContext(SharedGpuContext *shgcon)
 bool
 PutGpuContext(GpuContext_v2 *gcontext)
 {
-	bool	is_last_one = false;
+	uint32		newcnt __attribute__((unused));
+	bool		is_last_one = false;
 
-	Assert(gcontext->refcnt > 0);
-	if (--gcontext->refcnt == 0)
+	newcnt = pg_atomic_sub_fetch_u32(&gcontext->refcnt, 1);
+	if (newcnt == 0)
 	{
-		is_last_one = true;
-
+		SpinLockAcquire(&activeGpuContextLock);
 		dlist_delete(&gcontext->chain);
+		SpinLockRelease(&activeGpuContextLock);
+
 		ReleaseLocalResources(gcontext, true);
 		PutSharedGpuContext(gcontext->shgcon);
 		if (gcontext->sockfd != PGINVALID_SOCKET)
 		{
 			if (close(gcontext->sockfd) != 0)
-				elog(WARNING, "failed on close socket(%d): %m",
-					 gcontext->sockfd);
-			else
-				elog(DEBUG2, "socket %d was closed", gcontext->sockfd);
+				wnotice("failed on close socket(%d): %m", gcontext->sockfd);
 		}
-		memset(gcontext, 0, sizeof(GpuContext_v2));
-		dlist_push_head(&inactiveGpuContextList, &gcontext->chain);
+		free(gcontext);
+
+        is_last_one = true;
 	}
 	return is_last_one;
 }
 
 /*
- * ForcePutGpuContext
+ * ForcePutAllGpuContext
  *
  * It detach GpuContext and release relevant resources regardless of
  * the reference count. Although it is fundamentally a danger operation,
@@ -719,26 +704,31 @@ PutGpuContext(GpuContext_v2 *gcontext)
  * We intend this routine is called only when the final error cleanup
  * just before the process exit.
  */
-bool
-ForcePutGpuContext(GpuContext_v2 *gcontext)
+void
+ForcePutAllGpuContext(void)
 {
-	bool	is_last_one = (gcontext->refcnt < 2 ? true : false);
+	GpuContext_v2  *gcontext;
+	dlist_node	   *dnode;
 
-	dlist_delete(&gcontext->chain);
-	ReleaseLocalResources(gcontext, false);
-	PutSharedGpuContext(gcontext->shgcon);
-	if (gcontext->sockfd != PGINVALID_SOCKET)
-	{
-		if (close(gcontext->sockfd) != 0)
-			elog(WARNING, "failed on close socket(%d): %m",
-				 gcontext->sockfd);
-		else
-			elog(DEBUG2, "socket %d was closed", gcontext->sockfd);
+	if (IsGpuServerProcess() < 0)
+		elog(FATAL, "Bug? ForcePutAllGpuContext is called under multi-thread process");
+
+    while (!dlist_is_empty(&activeGpuContextList))
+    {
+        dnode = dlist_pop_head_node(&activeGpuContextList);
+        gcontext = dlist_container(GpuContext_v2, chain, dnode);
+        SpinLockRelease(&activeGpuContextLock);
+
+		ReleaseLocalResources(gcontext, false);
+		PutSharedGpuContext(gcontext->shgcon);
+		if (gcontext->sockfd != PGINVALID_SOCKET)
+		{
+			if (close(gcontext->sockfd) != 0)
+				wnotice("failed on close socket(%d): %m", gcontext->sockfd);
+		}
+		wnotice("GpuContext remained at pid=%u, cleanup\n", MyProcPid);
+		free(gcontext);
 	}
-	memset(gcontext, 0, sizeof(GpuContext_v2));
-	dlist_push_head(&inactiveGpuContextList, &gcontext->chain);
-
-	return is_last_one;
 }
 
 /*
@@ -773,6 +763,7 @@ gpucontext_cleanup_callback(ResourceReleasePhase phase,
 
 	if (phase == RESOURCE_RELEASE_BEFORE_LOCKS)
 	{
+		SpinLockAcquire(&activeGpuContextLock);
 		dlist_foreach_modify(iter, &activeGpuContextList)
 		{
 			GpuContext_v2  *gcontext = (GpuContext_v2 *)
@@ -781,17 +772,16 @@ gpucontext_cleanup_callback(ResourceReleasePhase phase,
 			if (gcontext->resowner == CurrentResourceOwner)
 			{
 				if (isCommit)
-					elog(WARNING, "GpuContext reference leak (refcnt=%d)",
-						gcontext->refcnt);
+					wnotice("GpuContext reference leak (refcnt=%d)",
+							pg_atomic_read_u32(&gcontext->refcnt));
 
 				dlist_delete(&gcontext->chain);
 				ReleaseLocalResources(gcontext, isCommit);
 				PutSharedGpuContext(gcontext->shgcon);
-				memset(gcontext, 0, sizeof(GpuContext_v2));
-				dlist_push_head(&inactiveGpuContextList,
-								&gcontext->chain);
+				pfree(gcontext);
 			}
 		}
+		SpinLockRelease(&activeGpuContextLock);
 	}
 }
 
@@ -801,20 +791,9 @@ gpucontext_cleanup_callback(ResourceReleasePhase phase,
 static void
 gpucontext_proc_exit_cleanup(int code, Datum arg)
 {
-	GpuContext_v2  *gcontext;
-	dlist_iter		iter;
-
 	if (!IsUnderPostmaster)
 		return;
-
-	dlist_foreach(iter, &activeGpuContextList)
-	{
-		gcontext = dlist_container(GpuContext_v2, chain, iter.cur);
-
-		elog(WARNING, "GpuContext (ID=%u) remained at pid=%u, cleanup",
-			 gcontext->shgcon->context_id, MyProcPid);
-		ForcePutGpuContext(gcontext);
-	}
+	ForcePutAllGpuContext();
 }
 
 /*
@@ -846,7 +825,6 @@ pgstrom_startup_gpu_context(void)
 	for (i=0; i < numGpuContexts; i++)
 	{
 		shgcon = &sharedGpuContextHead->context_array[i];
-		shgcon->context_id = i;
 		SpinLockInit(&shgcon->lock);
 		shgcon->refcnt = 0;
 		shgcon->backend = NULL;
@@ -859,16 +837,18 @@ pgstrom_startup_gpu_context(void)
 	 * construction of MasterGpuContext
 	 */
 	shgcon = &sharedGpuContextHead->master_context;
-	shgcon->context_id = -1;
 	SpinLockInit(&shgcon->lock);
 	shgcon->refcnt = 1;
 	dlist_init(&shgcon->dma_buffer_list);
 
 	memset(&masterGpuContext, 0, sizeof(GpuContext_v2));
-	masterGpuContext.refcnt = 1;
 	masterGpuContext.sockfd = PGINVALID_SOCKET;
 	masterGpuContext.resowner = NULL;
 	masterGpuContext.shgcon = shgcon;
+	pg_atomic_init_u32(&masterGpuContext.refcnt, 1);
+	SpinLockInit(&masterGpuContext.lock);
+	for (i=0; i < RESTRACK_HASHSIZE; i++)
+		dlist_init(&masterGpuContext.restrack[i]);
 
 	/*
 	 * pre-fault of the first segment of DMA buffer
@@ -904,8 +884,8 @@ pgstrom_init_gpu_context(void)
 							NULL, NULL, NULL);
 
 	/* initialization of GpuContext/ResTracker List */
+	SpinLockInit(&activeGpuContextLock);
 	dlist_init(&activeGpuContextList);
-	dlist_init(&inactiveGpuContextList);
 	dlist_init(&inactiveResourceTracker);
 
 	/* require the static shared memory */

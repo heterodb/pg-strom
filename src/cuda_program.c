@@ -815,7 +815,6 @@ pgstrom_try_build_cuda_program(void)
 {
 	dlist_node	   *dnode;
 	program_cache_entry *entry;
-	ProgramId		program_id;
 
 	/* Is there any pending CUDA program? */
 	SpinLockAcquire(&pgcache_head->lock);
@@ -831,7 +830,6 @@ pgstrom_try_build_cuda_program(void)
 	 * !bin_image && build_chain==0 means build is in-progress,
 	 * so it can block concurrent program build any more
 	 */
-	program_id = entry->program_id;
 	memset(&entry->build_chain, 0, sizeof(dlist_node));
 	Assert(!entry->bin_image);	/* must be build in-progress */
 	get_cuda_program_entry_nolock(entry);
