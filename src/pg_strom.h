@@ -245,7 +245,6 @@ struct GpuTask_v2
 	GpuContext_v2  *gcontext;		/* session info of GPU server */
 	struct GpuModuleCache *gmod_cache; /* cache of cuda_module */
 	struct timeval	tv_wakeup;		/* sleep until, if non-zero */
-	CUstream		cuda_stream;	/* stream object assigned on the task */
 	int				peer_fdesc;		/* FD moved via SCM_RIGHTS */
 	unsigned long	dma_task_id;	/* Task-ID of Async SSD2GPU DMA */
 };
@@ -439,7 +438,7 @@ extern GpuContext_v2 *AttachGpuContext(pgsocket sockfd,
 									   SharedGpuContext *shgcon,
 									   int epoll_fd);
 extern GpuContext_v2 *GetGpuContext(GpuContext_v2 *gcontext);
-extern bool PutGpuContext(GpuContext_v2 *gcontext);
+extern void PutGpuContext(GpuContext_v2 *gcontext);
 extern void ForcePutAllGpuContext(void);
 extern bool GpuContextIsEstablished(GpuContext_v2 *gcontext);
 
@@ -468,6 +467,7 @@ extern CUdevice			gpuserv_cuda_device;
 extern CUcontext		gpuserv_cuda_context;
 
 extern int	IsGpuServerProcess(void);
+extern void gpuservClenupGpuContext(GpuContext_v2 *gcontext);
 extern void gpuservTryToWakeUp(void);
 extern void gpuservOpenConnection(GpuContext_v2 *gcontext);
 extern void gpuservSendGpuTask(GpuContext_v2 *gcontext, GpuTask_v2 *gtask);

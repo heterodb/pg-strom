@@ -417,32 +417,21 @@ ReportErrorForBackend(GpuTask_v2 *gtask)
 }
 
 /*
- * gpuservPutGpuContext
+ * gpuservClenupGpuContext
  *
- * Put a GpuContext for a particular backend, and takes some extra stuff
- * to update the session info.
+ * Extra cleanup stuff if refcnt of GpuContext reached zero.
  */
-static void
-gpuservPutGpuContext(GpuContext_v2 *gcontext)
+void
+gpuservClenupGpuContext(GpuContext_v2 *gcontext)
 {
-	pgsocket	sockfd = gcontext->sockfd;
-
-	if (PutGpuContext(gcontext))
-	{
-		/* remove data socket from the epoll_fd */
-		if (epoll_ctl(gpuserv_epoll_fd,
-					  EPOLL_CTL_DEL,
-					  sockfd, NULL) < 0)
-			wnotice("failed on epoll_ctl(EPOLL_CTL_DEL): %m");
-
-		/* close the data socket */
-		if (close(sockfd) < 0)
-			wnotice("failed on close(sockfd): %m");
-
-		/* unload CUDA modules if no concurrent sessions */
-		if (pg_atomic_sub_fetch_u32(&session_num_clients, 1) == 0)
-			cleanupGpuModuleCache();
-	}
+	/* remove data socket from the epoll_fd */
+	if (epoll_ctl(gpuserv_epoll_fd,
+				  EPOLL_CTL_DEL,
+				  gcontext->sockfd, NULL) < 0)
+		wnotice("failed on epoll_ctl(EPOLL_CTL_DEL): %m");
+	/* unload CUDA modules if no concurrent sessions */
+	if (pg_atomic_sub_fetch_u32(&session_num_clients, 1) == 0)
+		cleanupGpuModuleCache();
 }
 
 /*
@@ -506,7 +495,7 @@ gpuservSendCommand(GpuContext_v2 *gcontext, GpuServCommand *cmd)
 	}
 	retval = sendmsg(gcontext->sockfd, &msg, MSG_DONTWAIT);
 	if (retval < 0)
-		werror("failed on sendmsg(2): %m");
+		werror("failed on sendmsg(2): (sockfd=%d) %m", gcontext->sockfd);
 	else if (retval == 0)
 		werror("no bytes sent using sengmsg(2): %m");
 	else if (retval != cmd->length)
@@ -623,7 +612,7 @@ gpuservOpenConnection(GpuContext_v2 *gcontext)
 						(tv1.tv_sec * 1000 + tv2.tv_usec / 1000));
 			tv1 = tv2;
 			if (timeout < 0)
-				elog(ERROR, "timeout on connection establish");
+				elog(ERROR, "timeout on connection establishment");
 		}
 		elog(DEBUG2, "connect socket %d to GPU server %d", sockfd, gpuserv_id);
 		gcontext->sockfd = sockfd;
@@ -631,7 +620,8 @@ gpuservOpenConnection(GpuContext_v2 *gcontext)
 	PG_CATCH();
 	{
 		SpinLockAcquire(&gpuServState->lock);
-		dlist_delete(&gs_conn->chain);
+		if (gs_conn->chain.prev || gs_conn->chain.next)
+			dlist_delete(&gs_conn->chain);
 		SpinLockRelease(&gpuServState->lock);
 		memset(gs_conn, 0, sizeof(GpuServConn));
 		/* also close the socket */
@@ -661,7 +651,10 @@ gpuservAcceptConnection(void)
 	if (sockfd < 0)
 	{
 		if (errno == EAGAIN || errno == EWOULDBLOCK)
+		{
+			wnotice("accept(2) = %s", strerror(errno));
 			return;		/* already accept(2) by someone? */
+		}
 		werror("failed on accept(2): %m");
 	}
 
@@ -706,6 +699,7 @@ gpuservAcceptConnection(void)
 		wnotice("pending connection (pid: %u) not found", peer_cred.pid);
 		return;
 	}
+	wnotice("accept connection (pid: %u)", peer_cred.pid);
 
 	WORKER_TRY();
 	{
@@ -744,8 +738,9 @@ gpuservRecvCommands(GpuContext_v2 *gcontext, bool *p_peer_sock_closed)
 	/* socket already closed? */
 	if (gcontext->sockfd == PGINVALID_SOCKET)
 	{
+		wnotice("peer_sock_closed by invalid socket");
 		*p_peer_sock_closed = true;
-		return false;
+		return 0;
 	}
 
 	for (;;)
@@ -773,12 +768,14 @@ gpuservRecvCommands(GpuContext_v2 *gcontext, bool *p_peer_sock_closed)
 			{
 				/* peer socket was closed */
 				*p_peer_sock_closed = true;
+				wnotice("peer_sock_closed by ECONNRESET");
 				break;
 			}
 			werror("failed on recvmsg(2): %m");
 		}
 		else if (retval == 0)
 		{
+			wnotice("peer_sock_closed by recvmsg(2) == 0");
 			/* likely, peer socket was closed */
 			*p_peer_sock_closed = true;
 			break;
@@ -810,8 +807,10 @@ gpuservRecvCommands(GpuContext_v2 *gcontext, bool *p_peer_sock_closed)
 			Assert(dmaBufferValidatePtr(gtask));
 			Assert(!gtask->chain.prev && !gtask->chain.next);
 			Assert(!gtask->gcontext);
-			Assert(!gtask->cuda_stream);
+			Assert(!gtask->gmod_cache);
+			Assert(!gtask->tv_wakeup.tv_sec && !gtask->tv_wakeup.tv_usec);
 			Assert(gtask->peer_fdesc = -1);
+			Assert(gtask->dma_task_id == 0UL);
 
 			if (IsGpuServerProcess())
 			{
@@ -1113,7 +1112,7 @@ gpuserv_try_run_completed_task(void)
 			gpuservSendGpuTask(gcontext, gtask);
 			if (peer_fdesc >= 0)
 				close(peer_fdesc);
-			gpuservPutGpuContext(gcontext);
+			PutGpuContext(gcontext);
 		}
 		else if (retval > 0 && GpuContextIsEstablished(gcontext))
 		{
@@ -1154,7 +1153,7 @@ gpuserv_try_run_completed_task(void)
 
 			if (peer_fdesc >= 0)
 				close(peer_fdesc);
-			gpuservPutGpuContext(gcontext);
+			PutGpuContext(gcontext);
 		}
 	}
 	WORKER_CATCH();
@@ -1215,12 +1214,16 @@ gpuservCompleteGpuTask(GpuTask_v2 *gtask, bool is_urgent)
 static void *
 gpuservWorkerMain(void *__private)
 {
-	Datum	worker_id __attribute__((unused)) = PointerGetDatum(__private);
-
-	wnotice("GPU worker %ld began working", worker_id);
+	Datum		worker_id __attribute__((unused)) = PointerGetDatum(__private);
 
 	WORKER_TRY();
 	{
+		CUresult	rc;
+
+		rc = cuCtxSetCurrent(gpuserv_cuda_context);
+		if (rc != CUDA_SUCCESS)
+			werror("failed on cuCtxSetCurrent: %s", errorText(rc));
+
 		for (;;)
 		{
 			struct epoll_event	ep_event;
@@ -1265,26 +1268,21 @@ gpuservWorkerMain(void *__private)
 				{
 					/* event around client socket */
 					GpuContext_v2  *gcontext = ep_event.data.ptr;
-					bool			peer_sock_closed;
+					pgsocket		sockfd = gcontext->sockfd;
+					bool			peer_sock_closed = false;
 
-					lock_per_data_socket(gcontext->sockfd);
+					lock_per_data_socket(sockfd);
 					if (ep_event.events & EPOLLIN)
 						gpuservRecvCommands(gcontext, &peer_sock_closed);
 					else
+					{
+						wnotice("peer_sock_closed by event %08x", ep_event.events);
 						peer_sock_closed = true;
+					}
 
 					if (peer_sock_closed)
-					{
 						PutGpuContext(gcontext);
-						if (epoll_ctl(gpuserv_epoll_fd,
-									  EPOLL_CTL_DEL,
-									  gcontext->sockfd, NULL) < 0)
-						{
-							unlock_per_data_socket(gcontext->sockfd);
-							werror("failed on epoll_ctl(EPOLL_CTL_DEL): %m");
-						}
-					}
-					unlock_per_data_socket(gcontext->sockfd);
+					unlock_per_data_socket(sockfd);
 				}
 			}
 			else if (nevents < 0 && errno != EINTR)

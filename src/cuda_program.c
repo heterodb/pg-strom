@@ -816,6 +816,8 @@ pgstrom_try_build_cuda_program(void)
 	dlist_node	   *dnode;
 	program_cache_entry *entry;
 
+	Assert(IsGpuServerProcess());
+
 	/* Is there any pending CUDA program? */
 	SpinLockAcquire(&pgcache_head->lock);
 	if (dlist_is_empty(&pgcache_head->build_list))

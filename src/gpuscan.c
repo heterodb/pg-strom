@@ -2962,7 +2962,7 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 							 cuda_module,
 							 "gpuscan_main");
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
+		werror("failed on cuModuleGetFunction: %s", errorText(rc));
 
 	/*
 	 * Allocation of device memory
@@ -2984,7 +2984,7 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 			gscan->with_nvme_strom = false;
 		}
 		else if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on gpuMemAllocIOMap: %s", errorText(rc));
+			werror("failed on gpuMemAllocIOMap: %s", errorText(rc));
 	}
 
 	length = offset = GPUMEMALIGN(KERN_GPUSCAN_LENGTH(&gscan->kern));
@@ -2996,7 +2996,7 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 	if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		goto out_of_resource;
 	else if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on gpuMemAlloc: %s", errorText(rc));
+		werror("failed on gpuMemAlloc: %s", errorText(rc));
 
 	if (!gscan->with_nvme_strom)
 	{
@@ -3020,7 +3020,7 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 						   length,
                            cuda_stream);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+		werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
 
 	/*  kern_data_store *kds_src */
 	if (pds_src->kds.format == KDS_FORMAT_ROW || !gscan->with_nvme_strom)
@@ -3031,7 +3031,7 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 							   length,
 							   cuda_stream);
 		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+			werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
 	}
 	else
 	{
@@ -3052,7 +3052,7 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 							   length,
                                cuda_stream);
 		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+			werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
 	}
 
 	/*
@@ -3073,7 +3073,7 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 						kern_args,
 						NULL);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
+		werror("failed on cuLaunchKernel: %s", errorText(rc));
 
 	/*
 	 * Recv DMA call
@@ -3089,7 +3089,7 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 						   length,
 						   cuda_stream);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "cuMemcpyDtoHAsync: %s", errorText(rc));
+		werror("cuMemcpyDtoHAsync: %s", errorText(rc));
 
 	/*
 	 * NOTE: varlena variables in the result references pds_src as buffer
@@ -3115,7 +3115,7 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 							   length,
 							   cuda_stream);
 		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+			werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
 		/*
 		 * NOTE: Once GPU-to-GPU DMA gets completed, "uncached" blocks are
 		 * no longer uncached, so we clear the @nblocks_uncached not to
@@ -3133,7 +3133,7 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 							   pds_dst->kds.length,
 							   cuda_stream);
 		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "cuMemcpyDtoHAsync: %s", errorText(rc));
+			werror("cuMemcpyDtoHAsync: %s", errorText(rc));
 	}
 
 	/*
@@ -3147,7 +3147,7 @@ gpuscan_process_task(GpuTask_v2 *gtask,
 	return 0;
 
 out_of_resource:
-	fprintf(stderr, "out of resource\n");
+	wnotice("GpuScan: out of resource");
 	gpuscan_cleanup_cuda_resources(gscan);
 	return 1;
 }
@@ -3164,8 +3164,8 @@ gpuscan_complete_task(GpuTask_v2 *gtask)
 	Assert(gtask->kerror.errcode == StromError_Success ||
 		   gtask->kerror.errcode == StromError_CpuReCheck);
 	if (gtask->kerror.errcode != StromError_Success)
-		elog(ERROR, "GpuScan kernel internal error: %s",
-			 errorTextKernel(&gtask->kerror));
+		werror("GpuScan kernel internal error: %s",
+			   errorTextKernel(&gtask->kerror));
 #ifdef NOT_USED
 	gscan->tv_kern_exec_quals = gscan->kern.pfm.tv_kern_exec_quals;
 	gscan->tv_kern_projection = gscan->kern.pfm.tv_kern_projection;

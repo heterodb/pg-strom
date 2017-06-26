@@ -5581,7 +5581,7 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 	rc = cuMemcpyHtoDAsync(pgjoin->m_kgjoin,
 						   &pgjoin->kern,
 						   length,
-						   pgjoin->task.cuda_stream);
+						   cuda_stream);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
 

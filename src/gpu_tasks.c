@@ -593,11 +593,15 @@ pgstromInitGpuTask(GpuTaskState_v2 *gts, GpuTask_v2 *gtask)
 	gtask->program_id   = gts->program_id;
 	gtask->gts          = gts;
 	gtask->revision     = gts->revision;
-	gtask->file_desc    = -1;
 	gtask->row_format   = gts->row_format;
 	gtask->cpu_fallback = false;
+	gtask->file_desc    = -1;
+	/* fields used in server */
+	gtask->gcontext		= NULL;
+	gtask->gmod_cache	= NULL;
+	memset(&gtask->tv_wakeup, 0, sizeof(struct timeval));
 	gtask->peer_fdesc   = -1;
-	gtask->cuda_stream  = NULL;
+	gtask->dma_task_id	= 0UL;
 }
 
 /*
@@ -610,7 +614,8 @@ pgstromProcessGpuTask(GpuTask_v2 *gtask,
 {
 	int		retval;
 
-	Assert(IsGpuServerProcess());
+	/* should be called under multi-threading mode */
+	Assert(IsGpuServerProcess() < 0);
 
 	switch (gtask->task_kind)
 	{
@@ -641,7 +646,8 @@ pgstromCompleteGpuTask(GpuTask_v2 *gtask)
 {
 	int		retval;
 
-	Assert(IsGpuServerProcess());
+	/* should be called under multi-threading mode */
+	Assert(IsGpuServerProcess() < 0);
 
 	switch (gtask->task_kind)
 	{

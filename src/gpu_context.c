@@ -418,10 +418,6 @@ ReleaseLocalResources(GpuContext_v2 *gcontext, bool normal_exit)
 	CUresult		rc;
 	int				i;
 
-	if (IsGpuServerProcess() < 0)
-		elog(FATAL, "Bug? %s called under multi-thread process",
-			 __FUNCTION__);
-
 	/* close the socket if any */
 	if (gcontext->sockfd != PGINVALID_SOCKET)
 	{
@@ -636,7 +632,7 @@ AttachGpuContext(pgsocket sockfd, SharedGpuContext *shgcon, int epoll_fd)
 		dlist_init(&gcontext->restrack[i]);
 
 	/* add gcontext to epoll fd */
-	ep_event.events = EPOLLIN;
+	ep_event.events = EPOLLIN | EPOLLET;
 	ep_event.data.ptr = gcontext;
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sockfd, &ep_event) < 0)
 	{
@@ -708,11 +704,10 @@ PutSharedGpuContext(SharedGpuContext *shgcon)
 /*
  * PutGpuContext - detach GpuContext; to be called by only backend
  */
-bool
+void
 PutGpuContext(GpuContext_v2 *gcontext)
 {
 	uint32		newcnt __attribute__((unused));
-	bool		is_last_one = false;
 
 	newcnt = pg_atomic_sub_fetch_u32(&gcontext->refcnt, 1);
 	if (newcnt == 0)
@@ -721,18 +716,18 @@ PutGpuContext(GpuContext_v2 *gcontext)
 		dlist_delete(&gcontext->chain);
 		SpinLockRelease(&activeGpuContextLock);
 
+		if (IsGpuServerProcess())
+			gpuservClenupGpuContext(gcontext);
 		ReleaseLocalResources(gcontext, true);
 		PutSharedGpuContext(gcontext->shgcon);
 		if (gcontext->sockfd != PGINVALID_SOCKET)
 		{
 			if (close(gcontext->sockfd) != 0)
 				wnotice("failed on close socket(%d): %m", gcontext->sockfd);
+			gcontext->sockfd = PGINVALID_SOCKET;
 		}
 		free(gcontext);
-
-        is_last_one = true;
 	}
-	return is_last_one;
 }
 
 /*
@@ -818,7 +813,7 @@ gpucontext_cleanup_callback(ResourceReleasePhase phase,
 				dlist_delete(&gcontext->chain);
 				ReleaseLocalResources(gcontext, isCommit);
 				PutSharedGpuContext(gcontext->shgcon);
-				pfree(gcontext);
+				free(gcontext);
 			}
 		}
 		SpinLockRelease(&activeGpuContextLock);
