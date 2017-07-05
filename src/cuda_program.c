@@ -54,7 +54,6 @@ typedef struct
 	char		   *kern_source;
 	/* fields above are never updated once entry is constructed */
 	cl_int			refcnt;
-	Bitmapset	   *waiting_backends;	/* DEPRECATED */
 	char		   *bin_image;		/* may be CUDA_PROGRAM_BUILD_FAILURE */
 	size_t			bin_length;
 	char		   *error_msg;
@@ -92,33 +91,12 @@ static Size		program_cache_size;
 /* ---- static variables ---- */
 static shmem_startup_hook_type shmem_startup_next;
 static program_cache_head *pgcache_head = NULL;
-
+#define PGSTROM_CUDA(x)	\
+	static const char *pgstrom_cuda_##x##_pathname = NULL;
+#include "cuda_filelist"
+#undef PGSTROM_CUDA
 static void	   *curand_wrapper_lib = NULL;
 static size_t	curand_wrapper_libsz;
-
-#if 1
-/*
- * pgstrom_wakeup_backends
- *
- * wake up the backends that may be blocked for kernel build.
- * we expects caller already hold pgcache_head->lock
- */
-static void
-pgstrom_wakeup_backends(Bitmapset *waiting_backends)
-{
-	struct PGPROC  *proc;
-	int				idx = -1;
-
-	while ((idx = bms_next_member(waiting_backends, idx)) >= 0)
-	{
-		Assert(idx < ProcGlobal->allProcCount);
-		proc = &ProcGlobal->allProcs[idx];
-		SetLatch(&proc->procLatch);
-	}
-	memset(waiting_backends->words, 0,
-		   sizeof(bitmapword) * waiting_backends->nwords);
-}
-#endif
 
 /*
  * lookup_cuda_program_entry_nolock - lookup a program_cache_entry by the
@@ -211,71 +189,84 @@ reclaim_cuda_program_entry(void)
 
 /*
  * construct_flat_cuda_source
- *
- * It makes a flat cstring kernel source.
  */
 static char *
 construct_flat_cuda_source(uint32 extra_flags,
 						   const char *kern_define,
 						   const char *kern_source)
 {
-	StringInfoData		source;
+	size_t		ofs = 0;
+	size_t		len = strlen(kern_define) + strlen(kern_source) + 20000;
+	char	   *source;
+	const char *pg_anytype;
 
-	initStringInfo(&source);
-	appendStringInfo(&source,
-					 "#include <cuda_device_runtime_api.h>\n"
-					 "\n"
-					 "#define HOSTPTRLEN %u\n"
-					 "#define DEVICEPTRLEN %lu\n"
-					 "#define BLCKSZ %u\n"
-					 "#define MAXIMUM_ALIGNOF %u\n"
-					 "\n",
-					 SIZEOF_VOID_P,
-					 sizeof(CUdeviceptr),
-					 BLCKSZ,
-					 MAXIMUM_ALIGNOF);
+	source = malloc(len);
+	if (!source)
+		return NULL;
+
+	ofs += snprintf(source + ofs, len - ofs,
+					"#include <cuda_device_runtime_api.h>\n"
+					"\n"
+					"#define HOSTPTRLEN %u\n"
+					"#define DEVICEPTRLEN %lu\n"
+					"#define BLCKSZ %u\n"
+					"#define MAXIMUM_ALIGNOF %u\n"
 #ifdef PGSTROM_DEBUG
-	appendStringInfo(&source,
-					 "#define PGSTROM_DEBUG %d\n", PGSTROM_DEBUG);
+					"#define PGSTROM_DEBUG 1\n"
 #endif
+					"\n",
+					SIZEOF_VOID_P,
+					sizeof(CUdeviceptr),
+					BLCKSZ,
+					MAXIMUM_ALIGNOF);
 	/* Common PG-Strom device routine */
-	appendStringInfoString(&source, pgstrom_cuda_common_code);
-
+	ofs += snprintf(source + ofs, len - ofs,
+					"#include \"cuda_common.h\"\n");
 	/* Per session definition if any */
-	appendStringInfoString(&source, kern_define);
+	ofs += snprintf(source + ofs, len - ofs,
+					"%s\n", kern_define);
 
-	/* PG-Strom CUDA device code libraries */
-
+	/*
+	 * PG-Strom CUDA device code libraries
+	 */
 	/* cuRand library */
 	if ((extra_flags & DEVKERNEL_NEEDS_CURAND) == DEVKERNEL_NEEDS_CURAND)
-		appendStringInfoString(&source, pgstrom_cuda_curand_code);
+		ofs += snprintf(source + ofs, len - ofs,
+						"#include \"cuda_curand.h\"\n");
 	/* cuBlas library */
 	if ((extra_flags & DEVKERNEL_NEEDS_CUBLAS) == DEVKERNEL_NEEDS_CUBLAS)
-		appendStringInfoString(&source, pgstrom_cuda_cublas_code);
+		ofs += snprintf(source + ofs, len - ofs,
+						"#include \"cuda_cublas.h\"\n");
 	/* cuda dynpara.h */
 	if ((extra_flags & DEVKERNEL_NEEDS_DYNPARA) == DEVKERNEL_NEEDS_DYNPARA)
-		appendStringInfoString(&source, pgstrom_cuda_dynpara_code);
+		ofs += snprintf(source + ofs, len - ofs,
+						"#include \"cuda_dynpara.h\"\n");
 	/* cuda mathlib.h */
 	if ((extra_flags & DEVKERNEL_NEEDS_MATHLIB) == DEVKERNEL_NEEDS_MATHLIB)
-		appendStringInfoString(&source, pgstrom_cuda_mathlib_code);
+		ofs += snprintf(source + ofs, len - ofs,
+						"#include \"cuda_mathlib.h\"\n");
 	/* cuda timelib.h */
 	if ((extra_flags & DEVKERNEL_NEEDS_TIMELIB) == DEVKERNEL_NEEDS_TIMELIB)
-		appendStringInfoString(&source, pgstrom_cuda_timelib_code);
+		ofs += snprintf(source + ofs, len - ofs,
+						"#include \"cuda_timelib.h\"\n");
 	/* cuda textlib.h */
 	if ((extra_flags & DEVKERNEL_NEEDS_TEXTLIB) == DEVKERNEL_NEEDS_TEXTLIB)
-		appendStringInfoString(&source, pgstrom_cuda_textlib_code);
+		ofs += snprintf(source + ofs, len - ofs,
+						"#include \"cuda_textlib.h\"\n");
 	/* cuda numeric.h */
 	if ((extra_flags & DEVKERNEL_NEEDS_NUMERIC) == DEVKERNEL_NEEDS_NUMERIC)
-		appendStringInfoString(&source, pgstrom_cuda_numeric_code);
+		ofs += snprintf(source + ofs, len - ofs,
+						"#include \"cuda_numeric.h\"\n");
 	/* cuda money.h */
 	if ((extra_flags & DEVKERNEL_NEEDS_MISC) == DEVKERNEL_NEEDS_MISC)
-		appendStringInfoString(&source, pgstrom_cuda_misc_code);
+		ofs += snprintf(source + ofs, len - ofs,
+						"#include \"cuda_misc.h\"\n");
 	/* cuda matrix.h */
 	if ((extra_flags & DEVKERNEL_NEEDS_MATRIX) == DEVKERNEL_NEEDS_MATRIX)
-		appendStringInfoString(&source, pgstrom_cuda_matrix_code);
+		ofs += snprintf(source + ofs, len - ofs,
+						"#include \"cuda_matrix.h\"\n");
 	/* pg_anytype_t declaration */
-	appendStringInfoString(
-		&source,
+	pg_anytype =
 		"typedef union {\n"
 		"    pg_varlena_t     varlena_v;\n"
 		"    pg_bool_t        bool_v;\n"
@@ -301,42 +292,41 @@ construct_flat_cuda_source(uint32 extra_flags,
 		"    pg_text_t        text_v;\n"
 		"    pg_varchar_t     varchar_v;\n"
 		"#endif\n"
-		"  } pg_anytype_t;\n\n");
+		"  } pg_anytype_t;\n\n";
+	ofs += snprintf(source + ofs, len - ofs, "%s\n", pg_anytype);
 
 	/* Main logic of each GPU tasks */
 
 	/* GpuScan */
 	if (extra_flags & DEVKERNEL_NEEDS_GPUSCAN)
-		appendStringInfoString(&source, pgstrom_cuda_gpuscan_code);
+		ofs += snprintf(source + ofs, len - ofs,
+						"#include \"cuda_gpuscan.h\"\n");
 	/* GpuHashJoin */
 	if (extra_flags & DEVKERNEL_NEEDS_GPUJOIN)
-		appendStringInfoString(&source, pgstrom_cuda_gpujoin_code);
+		ofs += snprintf(source + ofs, len - ofs,
+						"#include \"cuda_gpujoin.h\"\n");
 	/* GpuPreAgg */
 	if (extra_flags & DEVKERNEL_NEEDS_GPUPREAGG)
-		appendStringInfoString(&source, pgstrom_cuda_gpupreagg_code);
-#ifdef NOT_USED
-	/* GpuSort */
-	if (extra_flags & DEVKERNEL_NEEDS_GPUSORT)
-		appendStringInfoString(&source, pgstrom_cuda_gpusort_code);
-#endif
+		ofs += snprintf(source + ofs, len - ofs,
+						"#include \"cuda_gpupreagg.h\"\n");
 	/* PL/CUDA functions */
 	if (extra_flags & DEVKERNEL_NEEDS_PLCUDA)
-		appendStringInfoString(&source, pgstrom_cuda_plcuda_code);
-
-	/* Source code generated on the fly */
-	appendStringInfoString(&source, kern_source);
-
-	/* Source code to fix up undefined type/functions */
-	appendStringInfoString(&source, pgstrom_cuda_terminal_code);
-
-	return source.data;
+		ofs += snprintf(source + ofs, len - ofs,
+						"#include \"cuda_plcuda.h\"\n");
+	/* automatically generated portion */
+	ofs += snprintf(source + ofs, len - ofs, "%s\n", kern_source);
+	/* code to be included at the last */
+	ofs += snprintf(source + ofs, len - ofs,
+					"#include \"cuda_terminal.h\"\n");
+	return source;
 }
 
 /*
  * link_cuda_libraries - links CUDA libraries with the supplied PTX binary
  */
 static void
-link_cuda_libraries(char *ptx_image, size_t ptx_length, cl_uint extra_flags,
+link_cuda_libraries(char *ptx_image, size_t ptx_length,
+					cl_uint extra_flags,
 					void **p_bin_image, size_t *p_bin_length)
 {
 	CUlinkState		lstate;
@@ -344,6 +334,7 @@ link_cuda_libraries(char *ptx_image, size_t ptx_length, cl_uint extra_flags,
 	CUjit_option	jit_options[10];
 	void		   *jit_option_values[10];
 	int				jit_index = 0;
+	void		   *temp;
 	void		   *bin_image;
 	size_t			bin_length;
 	char			pathname[MAXPGPATH];
@@ -388,55 +379,80 @@ link_cuda_libraries(char *ptx_image, size_t ptx_length, cl_uint extra_flags,
 	/* makes a linkage object */
 	rc = cuLinkCreate(jit_index, jit_options, jit_option_values, &lstate);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuLinkCreate: %s", errorText(rc));
+		werror("failed on cuLinkCreate: %s", errorText(rc));
 
-	/* add the base PTX image */
-	rc = cuLinkAddData(lstate, CU_JIT_INPUT_PTX, ptx_image, ptx_length,
-					   "pg-strom", 0, NULL, NULL);
+	WORKER_TRY();
+	{
+		/* add the base PTX image */
+		rc = cuLinkAddData(lstate, CU_JIT_INPUT_PTX,
+						   ptx_image, ptx_length,
+						   "pg-strom", 0, NULL, NULL);
+		if (rc != CUDA_SUCCESS)
+			werror("failed on cuLinkAddData: %s", errorText(rc));
+
+		/* libcudart.a, if any */
+		if ((extra_flags & DEVKERNEL_NEEDS_DYNPARA) == DEVKERNEL_NEEDS_DYNPARA)
+		{
+			snprintf(pathname, sizeof(pathname), "%s/libcudadevrt.a",
+					 CUDA_LIBRARY_PATH);
+			rc = cuLinkAddFile(lstate, CU_JIT_INPUT_LIBRARY, pathname,
+							   0, NULL, NULL);
+			if (rc != CUDA_SUCCESS)
+				werror("failed on cuLinkAddFile(\"%s\"): %s",
+					   pathname, errorText(rc));
+		}
+		/* curand is accessed via wrapper library */
+		if ((extra_flags & DEVKERNEL_NEEDS_CURAND) == DEVKERNEL_NEEDS_CURAND)
+		{
+			rc = cuLinkAddData(lstate, CU_JIT_INPUT_OBJECT,
+							   curand_wrapper_lib,
+							   curand_wrapper_libsz,
+							   "curand",
+							   0, NULL, NULL);
+			if (rc != CUDA_SUCCESS)
+				werror("failed on cuLinkAddData: %s", errorText(rc));
+		}
+
+		/* libcublas_device.a, if any */
+		if ((extra_flags & DEVKERNEL_NEEDS_CUBLAS) == DEVKERNEL_NEEDS_CUBLAS)
+		{
+			snprintf(pathname, sizeof(pathname), "%s/libcublas_device.a",
+					 CUDA_LIBRARY_PATH);
+			rc = cuLinkAddFile(lstate, CU_JIT_INPUT_LIBRARY, pathname,
+							   0, NULL, NULL);
+			if (rc != CUDA_SUCCESS)
+				werror("failed on cuLinkAddFile(\"%s\"): %s",
+					   pathname, errorText(rc));
+		}
+		/* do the linkage */
+		rc = cuLinkComplete(lstate, &temp, &bin_length);
+		if (rc != CUDA_SUCCESS)
+			werror("failed on cuLinkComplete: %s", errorText(rc));
+
+		/*
+		 * copy onto the result buffer; because bin_image is owned by
+		 * CUlinkState, so cuLinkDestroy also releases the bin_image.
+		 */
+		bin_image = malloc(bin_length);
+		if (!bin_image)
+			werror("out of memory");
+		memcpy(bin_image, temp, bin_length);
+
+		*p_bin_image = bin_image;
+		*p_bin_length = bin_length;
+	}
+	WORKER_CATCH();
+	{
+		rc = cuLinkDestroy(lstate);
+		if (rc != CUDA_SUCCESS)
+			wnotice("failed on cuLinkDestroy: %s", errorText(rc));
+		WORKER_RE_THROW();
+	}
+	WORKER_END_TRY();
+
+	rc = cuLinkDestroy(lstate);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuLinkAddData: %s", errorText(rc));
-
-	/* libcudart.a, if any */
-	if ((extra_flags & DEVKERNEL_NEEDS_DYNPARA) == DEVKERNEL_NEEDS_DYNPARA)
-	{
-		snprintf(pathname, sizeof(pathname), "%s/libcudadevrt.a",
-				 CUDA_LIBRARY_PATH);
-		rc = cuLinkAddFile(lstate, CU_JIT_INPUT_LIBRARY, pathname,
-						   0, NULL, NULL);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuLinkAddFile(\"%s\"): %s",
-				 pathname, errorText(rc));
-	}
-	/* curand is accessed via wrapper library */
-	if ((extra_flags & DEVKERNEL_NEEDS_CURAND) == DEVKERNEL_NEEDS_CURAND)
-	{
-		rc = cuLinkAddData(lstate, CU_JIT_INPUT_OBJECT,
-						   curand_wrapper_lib,
-						   curand_wrapper_libsz,
-						   "curand",
-						   0, NULL, NULL);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuLinkAddData: %s", errorText(rc));
-	}
-
-	/* libcublas_device.a, if any */
-	if ((extra_flags & DEVKERNEL_NEEDS_CUBLAS) == DEVKERNEL_NEEDS_CUBLAS)
-	{
-		snprintf(pathname, sizeof(pathname), "%s/libcublas_device.a",
-				 CUDA_LIBRARY_PATH);
-		rc = cuLinkAddFile(lstate, CU_JIT_INPUT_LIBRARY, pathname,
-						   0, NULL, NULL);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuLinkAddFile(\"%s\"): %s",
-				 pathname, errorText(rc));
-	}
-	/* do the linkage */
-	rc = cuLinkComplete(lstate, &bin_image, &bin_length);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuLinkComplete: %s", errorText(rc));
-
-	*p_bin_image = bin_image;
-	*p_bin_length = bin_length;
+		werror("failed on cuLinkDestroy: %s", errorText(rc));
 }
 
 /*
@@ -444,74 +460,38 @@ link_cuda_libraries(char *ptx_image, size_t ptx_length, cl_uint extra_flags,
  *
  * It makes a temporary file to write-out cuda source.
  */
-static const char *
-writeout_cuda_source_file(char *cuda_source)
+static void
+writeout_cuda_source_file(char *tempfile, const char *source)
 {
-	static long	sourceFileCounter = 0;
-	static char	tempfilepath[MAXPGPATH];
-	char		tempdirpath[MAXPGPATH];
-	Oid			tablespace_oid;
-	File		filp;
-
-	tablespace_oid = (OidIsValid(MyDatabaseTableSpace)
-					  ? MyDatabaseTableSpace
-					  : DEFAULTTABLESPACE_OID);
-	if (tablespace_oid == DEFAULTTABLESPACE_OID ||
-		tablespace_oid == GLOBALTABLESPACE_OID)
-	{
-		/* The default tablespace is {datadir}/base */
-		snprintf(tempdirpath, sizeof(tempdirpath), "base/%s",
-				 PG_TEMP_FILES_DIR);
-	}
-	else
-	{
-		/* All other tablespaces are accessed via symlinks */
-		snprintf(tempdirpath, sizeof(tempdirpath), "pg_tblspc/%u/%s/%s",
-				 tablespace_oid,
-				 TABLESPACE_VERSION_DIRECTORY,
-				 PG_TEMP_FILES_DIR);
-	}
+	static __thread long sourceFileCounter = 0;
+	FILE	   *filp;
 
 	/*
 	 * Generate a tempfile name that should be unique within the current
 	 * database instance.
 	 */
-	snprintf(tempfilepath, sizeof(tempfilepath), "%s/%s/%s_strom_%d.%ld.gpu",
-			 DataDir, tempdirpath, PG_TEMP_FILE_PREFIX, MyProcPid,
-			 sourceFileCounter++);
-
+	if (IsGpuServerProcess())
+		snprintf(tempfile, MAXPGPATH,
+				 "%s/base/%s/%s_strom_%d_%d.%ld.gpu",
+				 DataDir, PG_TEMP_FILES_DIR,
+				 PG_TEMP_FILE_PREFIX,
+				 MyProcPid,
+				 gpuserv_worker_index,
+				 sourceFileCounter++);
+	else
+		snprintf(tempfile, MAXPGPATH,
+				 "%s/base/%s/%s_strom_%d.%ld.gpu",
+				 DataDir, PG_TEMP_FILES_DIR,
+				 PG_TEMP_FILE_PREFIX,
+				 MyProcPid,
+				 sourceFileCounter++);
 	/*
-	 * Open the file.  Note: we don't use O_EXCL, in case there is an orphaned
-	 * temp file that can be reused.
+	 * Open the file.  Note: we don't use O_EXCL, in case there is
+	 * an orphaned temp file that can be reused.
 	 */
-	filp = PathNameOpenFile(tempfilepath,
-							O_RDWR | O_CREAT | O_TRUNC | PG_BINARY,
-							0600);
-	if (filp <= 0)
-	{
-		/*
-		 * We might need to create the tablespace's tempfile directory, if no
-		 * one has yet done so.
-		 *
-		 * Don't check for error from mkdir; it could fail if someone else
-		 * just did the same thing.  If it doesn't work then we'll bomb out on
-		 * the second create attempt, instead.
-		 */
-		mkdir(tempdirpath, S_IRWXU);
-
-		filp = PathNameOpenFile(tempfilepath,
-								O_RDWR | O_CREAT | O_TRUNC | PG_BINARY,
-								0600);
-		if (filp <= 0)
-			elog(ERROR, "could not create temporary file \"%s\": %m",
-				 tempfilepath);
-	}
-
-	FileWrite(filp, cuda_source, strlen(cuda_source));
-
-	FileClose(filp);
-
-	return tempfilepath;
+	filp = fopen(tempfile, "w+b");
+	fputs(source, filp);
+	fclose(filp);
 }
 
 /*
@@ -522,6 +502,7 @@ pgstrom_cuda_source_file(ProgramId program_id)
 {
 	program_cache_entry *entry;
 	char	   *source;
+	char		tempfilepath[MAXPGPATH];
 
 	SpinLockAcquire(&pgcache_head->lock);
 	entry = lookup_cuda_program_entry_nolock(program_id);
@@ -536,25 +517,26 @@ pgstrom_cuda_source_file(ProgramId program_id)
 	source = construct_flat_cuda_source(entry->extra_flags,
 										entry->kern_define,
 										entry->kern_source);
+	writeout_cuda_source_file(tempfilepath, source);
 
 	put_cuda_program_entry(entry);
 
-	return writeout_cuda_source_file(source);
+	return pstrdup(tempfilepath);
 }
 
 /*
  * build_cuda_program - an interface to run synchronous build process
  */
 static void
-__build_cuda_program(program_cache_entry *entry)
+build_cuda_program(program_cache_entry *entry)
 {
-	char		   *source;
-	const char	   *source_pathname = NULL;
-	nvrtcProgram	program;
+	nvrtcProgram	program = NULL;
 	nvrtcResult		rc;
+	char		   *source = NULL;
+	char			tempfile[MAXPGPATH];
 	const char	   *options[10];
 	int				opt_index = 0;
-	void		   *bin_image;
+	void		   *bin_image = NULL;
 	size_t			bin_length;
 	char		   *build_log;
 	size_t			length;
@@ -563,6 +545,7 @@ __build_cuda_program(program_cache_entry *entry)
 	char		   *bin_image_new;
 	char		   *error_msg_new;
 	bool			build_success = true;
+	char			tempfilepath[MAXPGPATH];
 
 	/*
 	 * Make a nvrtcProgram object
@@ -570,142 +553,168 @@ __build_cuda_program(program_cache_entry *entry)
 	source = construct_flat_cuda_source(entry->extra_flags,
 										entry->kern_define,
 										entry->kern_source);
-	rc = nvrtcCreateProgram(&program,
-							source,
-							"pg_strom",
-							0,
-							NULL,
-							NULL);
-	if (rc != NVRTC_SUCCESS)
-		elog(ERROR, "failed on nvrtcCreateProgram: %s",
-			 nvrtcGetErrorString(rc));
+	if (!source)
+		werror("out of memory");
 
-	/*
-	 * Put command line options
-	 */
-	options[opt_index++] = "-I " CUDA_INCLUDE_PATH;
-//  NOTE: we may need to add GCC default include path when we link
-//        actual cuRAND library....
-//	options[opt_index++] = "-I /usr/lib/gcc/x86_64-redhat-linux/4.8.5/include";
-	options[opt_index++] =
-		psprintf("--gpu-architecture=compute_%lu",
-				 devComputeCapability);
+	WORKER_TRY();
+	{
+		rc = nvrtcCreateProgram(&program,
+								source,
+								"pg-strom",
+								0,
+								NULL,
+								NULL);
+		if (rc != NVRTC_SUCCESS)
+			werror("failed on nvrtcCreateProgram: %s",
+				   nvrtcGetErrorString(rc));
+		/*
+		 * Put command line options
+		 */
+		options[opt_index++] = "-I " CUDA_INCLUDE_PATH;
+		options[opt_index++] = "-I " PGSHAREDIR "/extension";
+		options[opt_index++] =
+			psprintf("--gpu-architecture=compute_%lu",
+					 devComputeCapability);
 #ifdef PGSTROM_DEBUG
-	options[opt_index++] = "--device-debug";
-	options[opt_index++] = "--generate-line-info";
+		options[opt_index++] = "--device-debug";
+		options[opt_index++] = "--generate-line-info";
 #endif
-	options[opt_index++] = "--use_fast_math";
-//	options[opt_index++] = "--device-as-default-execution-space";
-	/* library linkage needs relocatable PTX */
-	if (entry->extra_flags & DEVKERNEL_NEEDS_LINKAGE)
-		options[opt_index++] = "--relocatable-device-code=true";
-
-	/*
-	 * Kick runtime compiler
-	 */
-	rc = nvrtcCompileProgram(program, opt_index, options);
-	if (rc != NVRTC_SUCCESS)
-	{
-		if (rc == NVRTC_ERROR_COMPILATION)
-			build_success = false;
-		else
-			elog(ERROR, "failed on nvrtcCompileProgram: %s",
-				 nvrtcGetErrorString(rc));
-	}
-
-	/*
-	 * Save the source file, if required or build failure
-	 */
-	if (!build_success)
-		source_pathname = writeout_cuda_source_file(source);
-
-	/*
-	 * Read PTX Binary
-	 */
-	if (build_success)
-	{
-		char	   *ptx_image;
-		size_t		ptx_length;
-
-		rc = nvrtcGetPTXSize(program, &ptx_length);
-		if (rc != NVRTC_SUCCESS)
-			elog(ERROR, "failed on nvrtcGetPTXSize: %s",
-				 nvrtcGetErrorString(rc));
-		ptx_image = palloc(ptx_length + 1);
-
-		rc = nvrtcGetPTX(program, ptx_image);
-		if (rc != NVRTC_SUCCESS)
-			elog(ERROR, "failed on nvrtcGetPTX: %s",
-				 nvrtcGetErrorString(rc));
-		ptx_image[ptx_length++] = '\0';	/* may not be necessary */
+		options[opt_index++] = "--use_fast_math";
+//		options[opt_index++] = "--device-as-default-execution-space";
+		/* library linkage needs relocatable PTX */
+		if (entry->extra_flags & DEVKERNEL_NEEDS_LINKAGE)
+			options[opt_index++] = "--relocatable-device-code=true";
 
 		/*
-		 * Link the required run-time libraries, if any
+		 * Kick runtime compiler
 		 */
-		if (entry->extra_flags & DEVKERNEL_NEEDS_LINKAGE)
+		rc = nvrtcCompileProgram(program, opt_index, options);
+		if (rc != NVRTC_SUCCESS)
 		{
-			link_cuda_libraries(ptx_image, ptx_length,
-								entry->extra_flags,
-								&bin_image, &bin_length);
-			pfree(ptx_image);
+			if (rc == NVRTC_ERROR_COMPILATION)
+			{
+				build_success = false;
+				writeout_cuda_source_file(tempfile, source);
+			}
+			else
+				werror("failed on nvrtcCompileProgram: %s",
+					   nvrtcGetErrorString(rc));
+		}
+
+		/*
+		 * Read PTX Binary
+		 */
+		if (build_success)
+		{
+			char	   *ptx_image;
+			size_t		ptx_length;
+
+			rc = nvrtcGetPTXSize(program, &ptx_length);
+			if (rc != NVRTC_SUCCESS)
+				werror("failed on nvrtcGetPTXSize: %s",
+					   nvrtcGetErrorString(rc));
+			ptx_image = malloc(ptx_length + 1);
+			if (!ptx_image)
+				werror("out of memory");
+
+			WORKER_TRY();
+			{
+				rc = nvrtcGetPTX(program, ptx_image);
+				if (rc != NVRTC_SUCCESS)
+					werror("failed on nvrtcGetPTX: %s",
+						   nvrtcGetErrorString(rc));
+				ptx_image[ptx_length++] = '\0';
+
+				/*
+				 * Link the required run-time libraries, if any
+				 */
+				if (entry->extra_flags & DEVKERNEL_NEEDS_LINKAGE)
+				{
+					link_cuda_libraries(ptx_image, ptx_length,
+										entry->extra_flags,
+										&bin_image, &bin_length);
+					free(ptx_image);
+				}
+				else
+				{
+					bin_image = ptx_image;
+					bin_length = ptx_length;
+				}
+			}
+			WORKER_CATCH();
+			{
+				free(ptx_image);
+				WORKER_RE_THROW();
+			}
+			WORKER_END_TRY();
 		}
 		else
 		{
-			bin_image = ptx_image;
-			bin_length = ptx_length;
+			bin_image = NULL;
+			bin_length = 0;
 		}
+
+		/*
+		 * Read Log Output
+		 */
+		rc = nvrtcGetProgramLogSize(program, &length);
+		if (rc != NVRTC_SUCCESS)
+			werror("failed on nvrtcGetProgramLogSize: %s",
+				   nvrtcGetErrorString(rc));
+		build_log = palloc(length + 1);
+
+		rc = nvrtcGetProgramLog(program, build_log);
+		if (rc != NVRTC_SUCCESS)
+			werror("failed on nvrtcGetProgramLog: %s",
+				   nvrtcGetErrorString(rc));
+		build_log[length] = '\0';	/* may not be necessary? */
+
+		/*
+		 * Attach bin_image/build_log to the existing entry
+		 */
+		required = (bin_image ? MAXALIGN(bin_length) : 0) +
+			MAXALIGN(strlen(build_log)) +
+			PGCACHE_MIN_ERRORMSG_BUFSIZE;	/* margin for error message */
+		extra_buf = dmaBufferAlloc(MasterGpuContext(), required);
+
+		if (bin_image)
+		{
+			bin_image_new = extra_buf;
+			error_msg_new = extra_buf + MAXALIGN(bin_length);
+			memcpy(bin_image_new, bin_image, bin_length);
+		}
+		else
+		{
+			bin_image_new = CUDA_PROGRAM_BUILD_FAILURE;
+			error_msg_new = extra_buf;
+		}
+
+		if (!build_success)
+			snprintf(error_msg_new, required - MAXALIGN(bin_length),
+					 "build %s:\n%s\nsource: %s",
+					 bin_image ? "success" : "failure",
+					 build_log, tempfilepath);
+		else
+			snprintf(error_msg_new, required - MAXALIGN(bin_length),
+					 "build %s:\n%s",
+					 bin_image ? "success" : "failure",
+					 build_log);
 	}
-	else
+	WORKER_CATCH();
 	{
-		bin_image = NULL;
-		bin_length = 0;
+		if (program)
+		{
+			rc = nvrtcDestroyProgram(&program);
+			if (rc != NVRTC_SUCCESS)
+				wnotice("failed on nvrtcDestroyProgram: %s",
+						nvrtcGetErrorString(rc));
+		}
+
+		if (source)
+			free(source);
+		WORKER_RE_THROW();
 	}
-
-	/*
-	 * Read Log Output
-	 */
-	rc = nvrtcGetProgramLogSize(program, &length);
-	if (rc != NVRTC_SUCCESS)
-		elog(ERROR, "failed on nvrtcGetProgramLogSize: %s",
-			 nvrtcGetErrorString(rc));
-	build_log = palloc(length + 1);
-
-	rc = nvrtcGetProgramLog(program, build_log);
-	if (rc != NVRTC_SUCCESS)
-		elog(ERROR, "failed on nvrtcGetProgramLog: %s",
-			 nvrtcGetErrorString(rc));
-	build_log[length] = '\0';	/* may not be necessary? */
-
-	/*
-	 * Attach bin_image/build_log to the existing entry
-	 */
-	required = (bin_image ? MAXALIGN(bin_length) : 0) +
-		MAXALIGN(strlen(build_log)) +
-		PGCACHE_MIN_ERRORMSG_BUFSIZE;	/* margin for error message */
-	extra_buf = dmaBufferAlloc(MasterGpuContext(), required);
-
-	if (bin_image)
-	{
-		bin_image_new = extra_buf;
-		error_msg_new = extra_buf + MAXALIGN(bin_length);
-		memcpy(bin_image_new, bin_image, bin_length);
-	}
-	else
-	{
-		bin_image_new = CUDA_PROGRAM_BUILD_FAILURE;
-		error_msg_new = extra_buf;
-	}
-
-	if (source_pathname)
-		snprintf(error_msg_new, required - MAXALIGN(bin_length),
-				 "build %s:\n%s\nsource: %s",
-				 bin_image ? "success" : "failure",
-				 build_log, source_pathname);
-	else
-		snprintf(error_msg_new, required - MAXALIGN(bin_length),
-				 "build %s:\n%s",
-                 bin_image ? "success" : "failure",
-				 build_log);
+	WORKER_END_TRY();
 
 	/* update the program entry */
 	SpinLockAcquire(&pgcache_head->lock);
@@ -714,10 +723,7 @@ __build_cuda_program(program_cache_entry *entry)
 	entry->error_msg = error_msg_new;
 	entry->extra_buf = extra_buf;		/* to be released later */
 	pgcache_head->program_cache_usage += dmaBufferChunkSize(extra_buf);
-#if 1
-	/* wake up backends which wait for build */
-	pgstrom_wakeup_backends(entry->waiting_backends);
-#endif
+
 	/*
 	 * Reclaim the older buffer if overconsumption. Also note that this
 	 * entry might be already reclaimed by others.
@@ -733,73 +739,8 @@ __build_cuda_program(program_cache_entry *entry)
 	/* release nvrtcProgram object */
 	rc = nvrtcDestroyProgram(&program);
 	if (rc != NVRTC_SUCCESS)
-   		elog(WARNING, "failed on nvrtcDestroyProgram: %s",
-			 nvrtcGetErrorString(rc));
-}	
-
-static void
-build_cuda_program(program_cache_entry *entry)
-{
-	static MemoryContext memcxt = NULL;
-	MemoryContext	oldcxt;
-	bool			wakeup_done = false;
-
-	/* memory context during the code build (to be reused) */
-	if (!memcxt)
-	{
-		memcxt = AllocSetContextCreate(CurrentMemoryContext,
-									   "CUDA program build context",
-									   ALLOCSET_DEFAULT_MINSIZE,
-									   ALLOCSET_DEFAULT_INITSIZE,
-									   ALLOCSET_DEFAULT_MAXSIZE);
-	}
-
-	oldcxt = MemoryContextSwitchTo(memcxt);
-	PG_TRY();
-	{
-		__build_cuda_program(entry);
-	}
-	PG_CATCH();
-	{
-		ErrorData  *errdata;
-
-		MemoryContextSwitchTo(memcxt);
-		errdata = CopyErrorData();
-
-		/* put build error log and wakeup other processes */
-		SpinLockAcquire(&pgcache_head->lock);
-		if (!entry->bin_image)
-		{
-			entry->error_code = errdata->sqlerrcode;
-			snprintf(entry->error_msg, PGCACHE_ERRORMSG_LEN(entry),
-					 "(%s:%d, %s) %s",
-					 errdata->filename,
-					 errdata->lineno,
-					 errdata->funcname,
-					 errdata->message);
-			entry->bin_image = CUDA_PROGRAM_BUILD_FAILURE;
-		}
-		/* wake up processes which wait for this program */
-		pgstrom_wakeup_backends(entry->waiting_backends);
-		wakeup_done = true;
-		SpinLockRelease(&pgcache_head->lock);
-		/* revert the error status */
-		FreeErrorData(errdata);
-		FlushErrorState();
-	}
-	PG_END_TRY();
-
-	/* reset memory context */
-	MemoryContextSwitchTo(oldcxt);
-	MemoryContextReset(memcxt);
-
-	/* wake up processes which wait for this program */
-	if (!wakeup_done)
-	{
-		SpinLockAcquire(&pgcache_head->lock);
-		pgstrom_wakeup_backends(entry->waiting_backends);
-		SpinLockRelease(&pgcache_head->lock);
-	}
+		wnotice("failed on nvrtcDestroyProgram: %s",
+				nvrtcGetErrorString(rc));
 }
 
 /*
@@ -837,57 +778,33 @@ pgstrom_try_build_cuda_program(void)
 	get_cuda_program_entry_nolock(entry);
 	SpinLockRelease(&pgcache_head->lock);
 
-	build_cuda_program(entry);
+	WORKER_TRY();
+	{
+		build_cuda_program(entry);
+	}
+	WORKER_CATCH();
+	{
+		/*
+		 * Unlike CUDA_PROGRAM_BUILD_FAILURE case, exceptions are usually
+		 * raised by resource starvation, thus, restart of GPU server may
+		 * be able to build the GPU program on the next trial.
+		 * So, CUDA program entry is backed to the build pending list.
+		 */
+
+		SpinLockAcquire(&pgcache_head->lock);
+		/* no code path raise error once 'bin_image' gets assigned */
+		Assert(!entry->bin_image);
+		dlist_push_tail(&pgcache_head->build_list, &entry->build_chain);
+		put_cuda_program_entry_nolock(entry);
+		SpinLockRelease(&pgcache_head->lock);
+
+		WORKER_RE_THROW();
+	}
+	WORKER_END_TRY();
 
 	put_cuda_program_entry(entry);
 
 	return true;
-}
-
-/*
- * wait_for_build_cuda_program
- */
-static void
-wait_for_build_cuda_program(ProgramId program_id)
-{
-	for (;;)
-	{
-		program_cache_entry *entry;
-		int		events;
-
-		CHECK_FOR_INTERRUPTS();
-		ResetLatch(MyLatch);
-		SpinLockAcquire(&pgcache_head->lock);
-		entry = lookup_cuda_program_entry_nolock(program_id);
-		if (!entry)
-		{
-			SpinLockRelease(&pgcache_head->lock);
-			elog(ERROR, "ProgramId=%lu is missing", program_id);
-		}
-		else if (entry->bin_image == CUDA_PROGRAM_BUILD_FAILURE)
-		{
-			SpinLockRelease(&pgcache_head->lock);
-			ereport(ERROR,
-					(errcode(entry->error_code),
-					 errmsg("%s", entry->error_msg)));
-		}
-		else if (entry->bin_image != NULL)
-		{
-			SpinLockRelease(&pgcache_head->lock);
-			break;		/* ok, it is successfully built */
-		}
-		SpinLockRelease(&pgcache_head->lock);
-
-		events = WaitLatch(MyLatch,
-						   WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
-						   300 * 1000);	/* 5min */
-		if (events & WL_POSTMASTER_DEATH)
-			ereport(FATAL,
-					(errcode(ERRCODE_ADMIN_SHUTDOWN),
-					 errmsg("Urgent termination by postmaster dead")));
-		if (events & WL_TIMEOUT)
-			elog(ERROR, "CUDA code build timeout");
-	}
 }
 
 /*
@@ -909,7 +826,6 @@ pgstrom_create_cuda_program(GpuContext_v2 *gcontext,
 	Size		kern_define_len = strlen(kern_define);
 	Size		required;
 	Size		usage;
-	int			nwords;
 	int			pindex;
 	int			hindex;
 	dlist_iter	iter;
@@ -936,12 +852,15 @@ pgstrom_create_cuda_program(GpuContext_v2 *gcontext,
 			strcmp(entry->kern_source, kern_source) == 0 &&
 			strcmp(entry->kern_define, kern_define) == 0)
 		{
+			get_cuda_program_entry_nolock(entry);
+
 			/* Move this entry to the head of LRU list */
 			dlist_move_head(&pgcache_head->lru_list, &entry->lru_chain);
-
+		retry_checks:
 			/* Raise an syntax error if already failed on build */
 			if (entry->bin_image == CUDA_PROGRAM_BUILD_FAILURE)
 			{
+				put_cuda_program_entry_nolock(entry);
 				SpinLockRelease(&pgcache_head->lock);
 				ereport(ERROR,
 						(errcode(entry->error_code),
@@ -949,42 +868,35 @@ pgstrom_create_cuda_program(GpuContext_v2 *gcontext,
 			}
 
 			/*
-			 * Kernel build is still in-progress, so register myself
-			 * of wakeup backend processes.
+			 * NVRTC on this GPU kernel is still in-progress.
+			 * If caller wants to synchronize completion of the run-time
+			 * build, we try to wait for.
 			 */
-			if (!entry->bin_image)
+			if (!entry->bin_image && wait_for_build)
 			{
-				Bitmapset  *waiting_backends = entry->waiting_backends;
-				waiting_backends->words[WORDNUM(MyProc->pgprocno)]
-					|= (1 << BITNUM(MyProc->pgprocno));
-			}
+				SpinLockRelease(&pgcache_head->lock);
+				/* short sleep (50ms) */
+				pg_usleep(50000);
 
+				CHECK_FOR_INTERRUPTS();
+
+				/* check again */
+				SpinLockAcquire(&pgcache_head->lock);
+				goto retry_checks;
+			}
 			/*
 			 * OK, this CUDA program already exist (even though it may be
 			 * under the asynchronous build in-progress)
 			 */
 			program_id = entry->program_id;
-			get_cuda_program_entry_nolock(entry);
 			SpinLockRelease(&pgcache_head->lock);
 
-			/*
-			 * Also, we have to track this program entry locally, to release
-			 * it normally when transaction is closed abnormally.
-			 */
-			PG_TRY();
-			{
-				trackCudaProgram(gcontext, program_id);
-			}
-			PG_CATCH();
+			/* track this program entry by GpuContext */
+			if (!trackCudaProgram(gcontext, program_id))
 			{
 				pgstrom_put_cuda_program(NULL, program_id);
-				PG_RE_THROW();
+				elog(ERROR, "out of memory");
 			}
-			PG_END_TRY();
-
-			/* Wait for completion of the GPU code build by NVRTC. */
-			if (wait_for_build)
-				wait_for_build_cuda_program(program_id);
 			return program_id;
 		}
 	}
@@ -995,81 +907,13 @@ pgstrom_create_cuda_program(GpuContext_v2 *gcontext,
 	 */
 	PG_TRY();
 	{
-		uint32		totalProcs;		/* see InitProcGlobal() */
-
-		totalProcs = MaxBackends + NUM_AUXILIARY_PROCS + max_prepared_xacts;
 		required = offsetof(program_cache_entry, data[0]);
-		nwords = (totalProcs + BITS_PER_BITMAPWORD - 1) / BITS_PER_BITMAPWORD;
-		required += MAXALIGN(offsetof(Bitmapset, words[nwords]));
 		required += MAXALIGN(kern_source_len + 1);
 		required += MAXALIGN(kern_define_len + 1);
 		required += PGCACHE_MIN_ERRORMSG_BUFSIZE;
 		usage = 0;
 
 		entry = dmaBufferAlloc(MasterGpuContext(), required);
-
-		/* find out a unique program_id */
-	retry_program_id:
-		program_id = ++pgcache_head->last_program_id;
-		pindex = program_id % PGCACHE_HASH_SIZE;
-		dlist_foreach (iter, &pgcache_head->pgid_slots[pindex])
-		{
-			program_cache_entry	   *temp
-				= dlist_container(program_cache_entry, pgid_chain, iter.cur);
-			if (temp->program_id == program_id)
-				goto retry_program_id;
-		}
-		entry->program_id = program_id;
-
-		/* device kernel source */
-		entry->crc = crc;
-		entry->extra_flags = extra_flags;
-
-		entry->kern_define = (char *)(entry->data + usage);
-		memcpy(entry->kern_define, kern_define, kern_define_len + 1);
-		usage += MAXALIGN(kern_define_len + 1);
-
-		entry->kern_source = (char *)(entry->data + usage);
-		memcpy(entry->kern_source, kern_source, kern_source_len + 1);
-		usage += MAXALIGN(kern_source_len + 1);
-
-		/* reference count */
-		entry->refcnt = 2;
-
-		/* bitmap for waiting backends */
-		entry->waiting_backends = (Bitmapset *)(entry->data + usage);
-		entry->waiting_backends->nwords = nwords;
-		memset(entry->waiting_backends->words, 0, sizeof(bitmapword) * nwords);
-		usage += MAXALIGN(offsetof(Bitmapset, words[nwords]));;
-
-		/* no cuda binary at this moment */
-		entry->bin_image = NULL;
-		entry->bin_length = 0;
-		/* remaining are for error message */
-		entry->error_msg = (char *)(entry->data + usage);
-		/* no extra buffer at this moment */
-		entry->extra_buf = NULL;
-
-		/* at least, caller is waiting for build */
-		entry->waiting_backends = entry->waiting_backends;
-		entry->waiting_backends->words[WORDNUM(MyProc->pgprocno)]
-			|= (1 << BITNUM(MyProc->pgprocno));
-
-		/* add an entry for program build in-progress */
-		dlist_push_head(&pgcache_head->pgid_slots[pindex],
-						&entry->pgid_chain);
-		dlist_push_head(&pgcache_head->hash_slots[hindex],
-						&entry->hash_chain);
-		dlist_push_head(&pgcache_head->lru_list,
-						&entry->lru_chain);
-		dlist_push_head(&pgcache_head->build_list,
-						&entry->build_chain);
-		pgcache_head->program_cache_usage += dmaBufferChunkSize(entry);
-		if (pgcache_head->program_cache_usage > program_cache_size)
-			reclaim_cuda_program_entry();
-
-		/* try to wake up a GPU server process (likely inactive) */
-		gpuservTryToWakeUp();
 	}
 	PG_CATCH();
 	{
@@ -1077,25 +921,88 @@ pgstrom_create_cuda_program(GpuContext_v2 *gcontext,
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
+
+	/* find out a unique program_id */
+retry_program_id:
+	program_id = ++pgcache_head->last_program_id;
+	pindex = program_id % PGCACHE_HASH_SIZE;
+	dlist_foreach (iter, &pgcache_head->pgid_slots[pindex])
+	{
+		program_cache_entry	   *temp
+			= dlist_container(program_cache_entry, pgid_chain, iter.cur);
+		if (temp->program_id == program_id)
+			goto retry_program_id;
+	}
+	entry->program_id = program_id;
+
+	/* device kernel source */
+	entry->crc = crc;
+	entry->extra_flags = extra_flags;
+
+	entry->kern_define = (char *)(entry->data + usage);
+	memcpy(entry->kern_define, kern_define, kern_define_len + 1);
+	usage += MAXALIGN(kern_define_len + 1);
+
+	entry->kern_source = (char *)(entry->data + usage);
+	memcpy(entry->kern_source, kern_source, kern_source_len + 1);
+	usage += MAXALIGN(kern_source_len + 1);
+
+	/* reference count */
+	entry->refcnt = 2;
+
+	/* no cuda binary at this moment */
+	entry->bin_image = NULL;
+	entry->bin_length = 0;
+	/* remaining are for error message */
+	entry->error_msg = (char *)(entry->data + usage);
+	/* no extra buffer at this moment */
+	entry->extra_buf = NULL;
+
+	/* add an entry for program build in-progress */
+	dlist_push_head(&pgcache_head->pgid_slots[pindex],
+					&entry->pgid_chain);
+	dlist_push_head(&pgcache_head->hash_slots[hindex],
+					&entry->hash_chain);
+	dlist_push_head(&pgcache_head->lru_list,
+					&entry->lru_chain);
+	dlist_push_head(&pgcache_head->build_list,
+					&entry->build_chain);
+	pgcache_head->program_cache_usage += dmaBufferChunkSize(entry);
+	if (pgcache_head->program_cache_usage > program_cache_size)
+		reclaim_cuda_program_entry();
+	/* try to wake up GPU server workers */
+	gpuservTryToWakeUp();
+	/* wait for completion of build, if needed */
+	while (wait_for_build)
+	{
+		if (entry->bin_image == CUDA_PROGRAM_BUILD_FAILURE)
+		{
+			put_cuda_program_entry_nolock(entry);
+			SpinLockRelease(&pgcache_head->lock);
+			ereport(ERROR,
+					(errcode(entry->error_code),
+					 errmsg("%s", entry->error_msg)));
+		}
+		else if (entry->bin_image)
+			break;
+
+		/* NVRTC on this GPU kernel is still in-progress */
+		SpinLockRelease(&pgcache_head->lock);
+
+		pg_usleep(50000);	/* short sleep */
+
+		CHECK_FOR_INTERRUPTS();
+
+		SpinLockAcquire(&pgcache_head->lock);
+	}
 	SpinLockRelease(&pgcache_head->lock);
 
-	/*
-	 * Also, track this new entry locally
-	 */
-	PG_TRY();
-	{
-		trackCudaProgram(gcontext, program_id);
-	}
-	PG_CATCH();
+	/* track this program entry by GpuContext */
+	if (!trackCudaProgram(gcontext, program_id))
 	{
 		pgstrom_put_cuda_program(NULL, program_id);
-		PG_RE_THROW();
+		elog(ERROR, "out of memory");
 	}
-	PG_END_TRY();
-
-	if (wait_for_build)
-		wait_for_build_cuda_program(program_id);
-
 	return program_id;
 }
 
@@ -1183,9 +1090,11 @@ CUmodule
 pgstrom_load_cuda_program(ProgramId program_id, long timeout)
 {
 	program_cache_entry *entry;
-	CUmodule	cuda_module;
-	CUresult	rc;
-	char	   *bin_image;
+	CUmodule		cuda_module;
+	CUresult		rc;
+	struct timeval	tv1, tv2;
+	char		   *bin_image;
+	char			error_msg[WORKER_ERROR_MESSAGE_MAXLEN];
 
 	Assert(IsGpuServerProcess());
 
@@ -1194,20 +1103,28 @@ pgstrom_load_cuda_program(ProgramId program_id, long timeout)
 	if (!entry)
 	{
 		SpinLockRelease(&pgcache_head->lock);
-		elog(ERROR, "CUDA Program ID=%lu was not found", program_id);
-	}
-
-	if (entry->bin_image == CUDA_PROGRAM_BUILD_FAILURE)
-	{
-		const char *error_msg = entry->error_msg;
-
-		SpinLockRelease(&pgcache_head->lock);
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
-				 errmsg("CUDA Program ID=%lu build failed:\n%s",
-						program_id, error_msg)));
+		werror("CUDA Program ID=%lu was not found", program_id);
 	}
 	get_cuda_program_entry_nolock(entry);
+
+	gettimeofday(&tv1, NULL);
+	if (timeout > 0)
+	{
+		tv1.tv_usec += timeout;
+		tv1.tv_sec += (time_t)(tv1.tv_usec / 1000000);
+		tv1.tv_usec = (tv1.tv_usec % 1000000);
+	}
+
+retry_checks:
+	if (entry->bin_image == CUDA_PROGRAM_BUILD_FAILURE)
+	{
+		strncpy(error_msg, entry->error_msg,
+				WORKER_ERROR_MESSAGE_MAXLEN);
+		put_cuda_program_entry_nolock(entry);
+		SpinLockRelease(&pgcache_head->lock);
+		werror("CUDA program build failure (id=%lu):\n%s",
+			   (long)program_id, error_msg);
+	}
 
 	if (!entry->bin_image)
 	{
@@ -1217,89 +1134,38 @@ pgstrom_load_cuda_program(ProgramId program_id, long timeout)
 			 * It looks to me nobody picked up this CUDA program for build,
 			 * so we try to build by ourself, synchronously.
 			 */
+			dlist_delete(&entry->build_chain);
+			memset(&entry->build_chain, 0, sizeof(dlist_node));
 			SpinLockRelease(&pgcache_head->lock);
 
 			build_cuda_program(entry);
 
 			SpinLockAcquire(&pgcache_head->lock);
 			Assert(entry->bin_image != NULL);
-			if (entry->bin_image == CUDA_PROGRAM_BUILD_FAILURE)
-			{
-				const char *error_msg = entry->error_msg;
-
-				put_cuda_program_entry_nolock(entry);
-				SpinLockRelease(&pgcache_head->lock);
-				ereport(ERROR,
-						(errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
-						 errmsg("CUDA Program (id=%lu) build failed:\n%s",
-								program_id, error_msg)));
-			}
+			goto retry_checks;
 		}
 		else
 		{
-			struct timeval	tv1, tv2;
-			int				ev;
-
-			/*
-			 * It looks to me somebody else already picks up this CUDA
-			 * program, and then kicked build process but not finished.
-			 */
-			gettimeofday(&tv1, NULL);
-			for (;;)
+			gettimeofday(&tv2, NULL);
+			if (timeout == 0 ||
+				(timeout > 0 && (tv1.tv_sec < tv2.tv_sec ||
+								 (tv1.tv_sec == tv2.tv_sec &&
+								  tv1.tv_usec < tv2.tv_usec))))
 			{
-				/* register myself on the waiter list */
-				ResetLatch(MyLatch);
-				entry->waiting_backends->words[WORDNUM(MyProc->pgprocno)]
-					|= (1 << BITNUM(MyProc->pgprocno));
-
-				if (timeout == 0)
-				{
-					put_cuda_program_entry_nolock(entry);
-					SpinLockRelease(&pgcache_head->lock);
-					return NULL;
-				}
+				/*
+				 * NVRTC is still in progress, but caller wants to return
+				 * immediately, or reached to the timeout.
+				 */
+				put_cuda_program_entry_nolock(entry);
 				SpinLockRelease(&pgcache_head->lock);
-
-				ev = WaitLatch(MyLatch,
-							   WL_LATCH_SET |
-							   WL_POSTMASTER_DEATH |
-							   (timeout < 0 ? 0 : WL_TIMEOUT),
-							   timeout);
-				/* emergency bailout if postmaster is dead */
-				if (ev & WL_POSTMASTER_DEATH)
-					ereport(FATAL,
-							(errcode(ERRCODE_ADMIN_SHUTDOWN),
-							 errmsg("Urgent termination by postmaster dead")));
-				if (ev & WL_TIMEOUT)
-					timeout = 0;	/* no wait any more */
-				else
-				{
-					gettimeofday(&tv2, NULL);
-					if (timeout >= 0)
-					{
-						timeout -= ((tv2.tv_sec * 1000 + tv2.tv_usec / 1000) -
-									(tv1.tv_sec * 1000 + tv1.tv_usec / 1000));
-						timeout = Max(timeout, 0);
-						tv1 = tv2;
-					}
-				}
-
-				/* check status of the entry->bin_image */
-				SpinLockAcquire(&pgcache_head->lock);
-				if (entry->bin_image == CUDA_PROGRAM_BUILD_FAILURE)
-				{
-					const char *error_msg = entry->error_msg;
-
-					put_cuda_program_entry_nolock(entry);
-					SpinLockRelease(&pgcache_head->lock);
-					ereport(ERROR,
-							(errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
-							 errmsg("CUDA Program (id=%lu) build failed:\n%s",
-									program_id, error_msg)));
-				}
-				else if (entry->bin_image)
-					break;
+				return NULL;
 			}
+			SpinLockRelease(&pgcache_head->lock);
+			/* short sleep for 50ms */
+			pg_usleep(50000L);
+
+			SpinLockAcquire(&pgcache_head->lock);
+			goto retry_checks;
 		}
 	}
 	bin_image = entry->bin_image;
@@ -1309,8 +1175,9 @@ pgstrom_load_cuda_program(ProgramId program_id, long timeout)
 	if (rc != CUDA_SUCCESS)
 	{
 		put_cuda_program_entry(entry);
-		elog(ERROR, "failed on cuModuleLoadData: %s", errorText(rc));
+		werror("failed on cuModuleLoadData: %s", errorText(rc));
 	}
+	put_cuda_program_entry(entry);
 	return cuda_module;
 }
 
@@ -1459,6 +1326,17 @@ pgstrom_init_cuda_program(void)
 	elog(LOG, "NVRTC - CUDA Runtime Compilation vertion %d.%d",
 		 major, minor);
 
+	/* setup cuda_xxxx.h file pathname */
+#define PGSTROM_CUDA(x) \
+	pgstrom_cuda_##x##_pathname = PGSHAREDIR "/extension/cuda_" #x ".h";
+#include "cuda_filelist"
+#undef PGSTROM_CUDA
+
+	/* length of the static GPU code */
+#define PGSTROM_CUDA(x)	\
+	pgstrom_cuda_##x##_code_length = strlen(pgstrom_cuda_##x##_code) + 1;
+#include "cuda_filelist"
+#undef	PGSTROM_CUDA
 	/* allocation of static shared memory */
 	RequestAddinShmemSpace(sizeof(program_cache_head));
 	shmem_startup_next = shmem_startup_hook;

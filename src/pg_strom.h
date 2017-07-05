@@ -465,8 +465,10 @@ extern void pgstrom_init_gpu_context(void);
 extern int				gpuserv_cuda_dindex;
 extern CUdevice			gpuserv_cuda_device;
 extern CUcontext		gpuserv_cuda_context;
+extern int				gpuserv_worker_index;
 
 extern int	IsGpuServerProcess(void);
+extern bool gpuservGotSigterm(void);
 extern void gpuservClenupGpuContext(GpuContext_v2 *gcontext);
 extern void gpuservTryToWakeUp(void);
 extern void gpuservOpenConnection(GpuContext_v2 *gcontext);
@@ -477,6 +479,35 @@ extern void gpuservCompleteGpuTask(GpuTask_v2 *gtask, bool is_urgent);
 extern void pgstrom_init_gpu_server(void);
 
 /* service routines */
+#define WORKER_ERROR_MESSAGE_MAXLEN			(256*1024)
+extern __thread sigjmp_buf *worker_exception_stack;
+#define WORKER_TRY() \
+	do { \
+		sigjmp_buf *save_exception_stack = worker_exception_stack; \
+		sigjmp_buf	local_sigjmp_buf; \
+		if (sigsetjmp(local_sigjmp_buf, 0) == 0) \
+		{ \
+			worker_exception_stack = &local_sigjmp_buf
+
+#define WORKER_CATCH() \
+		} \
+		else \
+		{ \
+			worker_exception_stack = save_exception_stack
+
+#define WORKER_END_TRY() \
+		} \
+		worker_exception_stack = save_exception_stack; \
+	} while(0)
+
+#define WORKER_RE_THROW()	siglongjmp(*worker_exception_stack, 1)
+
+#define WORKER_CHECK_FOR_INTERRUPTS()	\
+	do {								\
+		if (gpuservGotSigterm())		\
+			werror("Got SIGTERM");		\
+	} while(0)
+
 #define wlog(fmt,...)										\
 	do {													\
 		if (IsGpuServerProcess() < 0)						\
@@ -859,21 +890,12 @@ extern void show_instrumentation_count(const char *qlabel, int which,
 /*
  * Device Code generated from cuda_*.h
  */
-extern const char *pgstrom_cuda_common_code;
-extern const char *pgstrom_cuda_dynpara_code;
-extern const char *pgstrom_cuda_matrix_code;
-extern const char *pgstrom_cuda_gpuscan_code;
-extern const char *pgstrom_cuda_gpujoin_code;
-extern const char *pgstrom_cuda_gpupreagg_code;
-extern const char *pgstrom_cuda_mathlib_code;
-extern const char *pgstrom_cuda_textlib_code;
-extern const char *pgstrom_cuda_timelib_code;
-extern const char *pgstrom_cuda_numeric_code;
-extern const char *pgstrom_cuda_misc_code;
-extern const char *pgstrom_cuda_plcuda_code;
-extern const char *pgstrom_cuda_curand_code;	/* cuRand library */
-extern const char *pgstrom_cuda_cublas_code;	/* cuBLAS library */
-extern const char *pgstrom_cuda_terminal_code;
+#define PGSTROM_CUDA(x)		extern const char *pgstrom_cuda_##x##_code;
+#include "cuda_filelist"
+#undef	PGSTROM_CUDA
+#define PGSTROM_CUDA(x)		extern size_t pgstrom_cuda_##x##_code_length;
+#include "cuda_filelist"
+#undef	PGSTROM_CUDA
 
 /* ----------------------------------------------------------------
  *

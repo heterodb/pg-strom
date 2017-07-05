@@ -96,6 +96,7 @@ static pthread_t	   *gpuworker_threads = NULL;
 int						gpuserv_cuda_dindex = -1;
 CUdevice				gpuserv_cuda_device = NULL;
 CUcontext				gpuserv_cuda_context = NULL;
+int						gpuserv_worker_index = -1;
 static pg_atomic_uint32	gpuserv_rr_cuda_stream;
 static int				gpuserv_num_cuda_stream;
 static CUstream		   *gpuserv_cuda_stream;
@@ -111,6 +112,8 @@ static dlist_head		session_pending_tasks;
 static dlist_head		session_running_tasks;
 static dlist_head		session_completed_tasks;
 static pg_atomic_uint32	session_num_clients;
+__thread sigjmp_buf	   *worker_exception_stack = NULL;
+
 
 //HOGE
 
@@ -124,7 +127,7 @@ static void	pgstrom_cuda_profiler_update(void);
 
 /* SIGTERM handler */
 static void
-gpuservGotSigterm(SIGNAL_ARGS)
+gpuservSigtermHandler(SIGNAL_ARGS)
 {
 	int		save_errno = errno;
 
@@ -135,6 +138,14 @@ gpuservGotSigterm(SIGNAL_ARGS)
 	SetLatch(MyLatch);
 
 	errno = save_errno;
+}
+
+bool
+gpuservGotSigterm(void)
+{
+	Assert(IsGpuServerProcess());
+	pg_memory_barrier();
+	return gpuserv_got_sigterm;
 }
 
 /*
@@ -164,36 +175,8 @@ static struct
 	const char *filename;
 	int			lineno;
 	const char *funcname;
-	char		message[256 * 1024];	/* up to 256KB */
+	char		message[WORKER_ERROR_MESSAGE_MAXLEN];
 } worker_exception_data;
-static __thread sigjmp_buf *worker_exception_stack = NULL;
-
-#define WORKER_TRY() \
-	do { \
-		sigjmp_buf *save_exception_stack = worker_exception_stack; \
-		sigjmp_buf	local_sigjmp_buf; \
-		if (sigsetjmp(local_sigjmp_buf, 0) == 0) \
-		{ \
-			worker_exception_stack = &local_sigjmp_buf
-
-#define WORKER_CATCH() \
-		} \
-		else \
-		{ \
-			worker_exception_stack = save_exception_stack
-
-#define WORKER_END_TRY() \
-		} \
-		worker_exception_stack = save_exception_stack; \
-	} while(0)
-
-#define WORKER_RE_THROW()	siglongjmp(*worker_exception_stack, 1)
-
-#define WORKER_CHECK_FOR_INTERRUPTS()			\
-	do {										\
-		if (gpuserv_got_sigterm)				\
-			wlog(ERROR, "Got SIGTERM");			\
-	} while(0)
 
 void
 worker_error(const char *funcname,
@@ -1214,7 +1197,7 @@ gpuservCompleteGpuTask(GpuTask_v2 *gtask, bool is_urgent)
 static void *
 gpuservWorkerMain(void *__private)
 {
-	Datum		worker_id __attribute__((unused)) = PointerGetDatum(__private);
+	gpuserv_worker_index = PointerGetDatum(__private);
 
 	WORKER_TRY();
 	{
@@ -1296,11 +1279,11 @@ gpuservWorkerMain(void *__private)
 		 * Suggest primary thread of the background worker to wake up
 		 * any other worker threads and terminate them.
 		 */
-		gpuservGotSigterm(0);
+		gpuservSigtermHandler(0);
 	}
 	WORKER_END_TRY();
 
-	wnotice("GPU worker %ld is terminating", worker_id);
+	wnotice("GPU worker %d is terminating", gpuserv_worker_index);
 
 	return NULL;
 }
@@ -1454,7 +1437,7 @@ gpuservBgWorkerMain(Datum __server_id)
 	gpuserv_id = DatumGetInt32(__server_id);
 	Assert(gpuserv_id >= 0 && gpuserv_id < numDevAttrs);
 	gpuServState->serv_procs[gpuserv_id] = MyProc;
-	pqsignal(SIGTERM, gpuservGotSigterm);
+	pqsignal(SIGTERM, gpuservSigtermHandler);
 	BackgroundWorkerUnblockSignals();
 
 	/* cleanup of UNIX domain socket */

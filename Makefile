@@ -57,21 +57,7 @@ STROM_SOURCES = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__STROM_SOURCES))
 #
 # Source file of GPU portion
 #
-__CUDA_OBJS = cuda_common.o \
-	cuda_dynpara.o \
-	cuda_matrix.o  \
-	cuda_gpuscan.o \
-	cuda_gpujoin.o \
-	cuda_gpupreagg.o \
-	cuda_mathlib.o \
-	cuda_textlib.o \
-	cuda_timelib.o \
-	cuda_numeric.o \
-	cuda_misc.o    \
-	cuda_plcuda.o  \
-	cuda_curand.o  \
-	cuda_cublas.o  \
-	cuda_terminal.o
+__CUDA_OBJS = $(shell cpp -D 'PGSTROM_CUDA(x)=cuda_\#\#x.o' $(STROM_BUILD_ROOT)/src/cuda_filelist | grep -v ^\#)
 CUDA_OBJS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__CUDA_OBJS))
 __CUDA_SOURCES = $(__CUDA_OBJS:.o=.c)
 CUDA_SOURCES = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__CUDA_SOURCES))
@@ -191,6 +177,7 @@ PGSTROM_FLAGS += $(shell	\
         if [ -n "$(PG_MAX_VERSION)" ]; then \
             echo "-DPG_MAX_VERSION_NUM=$(PG_MAX_VERSION_NUM)"; \
         fi)
+PGSTROM_FLAGS += -DPGSHAREDIR=\"$(shell $(PG_CONFIG) --sharedir)\"
 PGSTROM_FLAGS += -DCUDA_INCLUDE_PATH=\"$(IPATH)\"
 PGSTROM_FLAGS += -DCUDA_BINARY_PATH=\"$(BPATH)\"
 PGSTROM_FLAGS += -DCUDA_LIBRARY_PATH=\"$(LPATH)\"
@@ -221,7 +208,9 @@ MODULE_big = pg_strom
 OBJS =  $(STROM_OBJS) $(CUDA_OBJS)
 EXTENSION = pg_strom
 DATA_built = $(PGSTROM_SQL)
-DATA = $(STROM_BUILD_ROOT)/src/cuda_profiler.ini
+DATA = $(STROM_BUILD_ROOT)/src/cuda_profiler.ini \
+       $(shell cpp -D 'PGSTROM_CUDA(x)=cuda_\#\#x.h' \
+                      $(STROM_BUILD_ROOT)/src/cuda_filelist | grep -v ^\#)
 
 # Support utilities
 SCRIPTS_built = $(STROM_UTILS)
@@ -247,10 +236,12 @@ $(PGSTROM_SQL): $(addprefix $(STROM_BUILD_ROOT)/sql/, $(PGSTROM_SQL_SRC))
 	cat $^ > $@
 
 $(CUDA_SOURCES): $(CUDA_SOURCES:.c=.h)
-	@(echo "const char *pgstrom_$(shell basename $(@:%.c=%))_code ="; \
+	@(echo "#include <stdio.h>";							\
+	  echo "const char *pgstrom_$(shell basename $(@:%.c=%))_code ="; \
 	  sed -e 's/\\/\\\\/g' -e 's/\t/\\t/g' -e 's/"/\\"/g'	\
-	      -e 's/^/  "/g' -e 's/$$/\\n"/g' < $*.h;		\
-	  echo ";") > $@
+	      -e 's/^/  "/g' -e 's/$$/\\n"/g' < $*.h;			\
+	  echo ";";												\
+	  echo "size_t pgstrom_$(shell basename $(@:%.c=%))_code_length;"	) > $@
 
 $(STROM_UTILS): $(addsuffix .c,$(STROM_UTILS))
 	$(CC) $(CFLAGS) $(addsuffix .c,$@) $(PGSTROM_FLAGS) -I $(IPATH) -L $(LPATH) -lcuda -lnvrtc -o $@$(X)
