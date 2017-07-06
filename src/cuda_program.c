@@ -1182,7 +1182,7 @@ retry_checks:
 }
 
 static void
-build_wrapper_libraries(const void *wrapper_source,
+build_wrapper_libraries(const char *wrapper_filename,
 						void **p_wrapper_lib,
 						size_t *p_wrapper_libsz)
 {
@@ -1190,24 +1190,28 @@ build_wrapper_libraries(const void *wrapper_source,
 	char   *lib_fname = NULL;
 	int		fdesc = -1;
 	int		status;
+	char	buffer[1024];
 	char	spath[128];
 	char	lpath[128];
 	char	cmd[MAXPGPATH];
 	void   *wrapper_lib = NULL;
-	ssize_t	rv, source_len = strlen(wrapper_source);
+	ssize_t	rv, buffer_len;
 	struct stat st_buf;
 
 	PG_TRY();
 	{
-		/* Write source */
+		/* write out source */
 		strcpy(spath, P_tmpdir "/XXXXXX.cu");
 		fdesc = mkstemps(spath, 3);
 		if (fdesc < 0)
 			elog(ERROR, "failed on mkstemps('%s') : %m", src_fname);
 		src_fname = spath;
 
-		rv = write(fdesc, wrapper_source, source_len);
-		if (rv != source_len)
+		buffer_len = snprintf(buffer, sizeof(buffer),
+							  "#include <%s>\n",
+							  wrapper_filename);
+		rv = write(fdesc, buffer, buffer_len);
+		if (rv != buffer_len)
 			elog(ERROR, "failed on write(2) on '%s': %m", src_fname);
 		close(fdesc);
 		fdesc = -1;
@@ -1222,6 +1226,7 @@ build_wrapper_libraries(const void *wrapper_source,
 				 " --relocatable-device-code=true"
 				 " --gpu-architecture=sm_%lu"
 				 " -DPGSTROM_BUILD_WRAPPER"
+				 " -I " PGSHAREDIR "/extension"
 				 " --device-c %s -o %s",
 				 devComputeCapability,
 				 src_fname,
@@ -1332,18 +1337,13 @@ pgstrom_init_cuda_program(void)
 #include "cuda_filelist"
 #undef PGSTROM_CUDA
 
-	/* length of the static GPU code */
-#define PGSTROM_CUDA(x)	\
-	pgstrom_cuda_##x##_code_length = strlen(pgstrom_cuda_##x##_code) + 1;
-#include "cuda_filelist"
-#undef	PGSTROM_CUDA
 	/* allocation of static shared memory */
 	RequestAddinShmemSpace(sizeof(program_cache_head));
 	shmem_startup_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_cuda_program;
 
 	/* build wrapper library objects */
-	build_wrapper_libraries(pgstrom_cuda_curand_code,
+	build_wrapper_libraries("cuda_curand.h",
 							&curand_wrapper_lib,
 							&curand_wrapper_libsz);
 }

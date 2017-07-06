@@ -887,16 +887,6 @@ extern void show_scan_qual(List *qual, const char *qlabel,
 extern void show_instrumentation_count(const char *qlabel, int which,
 									   PlanState *planstate, ExplainState *es);
 
-/*
- * Device Code generated from cuda_*.h
- */
-#define PGSTROM_CUDA(x)		extern const char *pgstrom_cuda_##x##_code;
-#include "cuda_filelist"
-#undef	PGSTROM_CUDA
-#define PGSTROM_CUDA(x)		extern size_t pgstrom_cuda_##x##_code_length;
-#include "cuda_filelist"
-#undef	PGSTROM_CUDA
-
 /* ----------------------------------------------------------------
  *
  * Miscellaneous static inline functions

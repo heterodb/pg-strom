@@ -634,10 +634,7 @@ gpuservAcceptConnection(void)
 	if (sockfd < 0)
 	{
 		if (errno == EAGAIN || errno == EWOULDBLOCK)
-		{
-			wnotice("accept(2) = %s", strerror(errno));
-			return;		/* already accept(2) by someone? */
-		}
+			return;		/* no more pending connections */
 		werror("failed on accept(2): %m");
 	}
 
@@ -682,7 +679,6 @@ gpuservAcceptConnection(void)
 		wnotice("pending connection (pid: %u) not found", peer_cred.pid);
 		return;
 	}
-	wnotice("accept connection (pid: %u)", peer_cred.pid);
 
 	WORKER_TRY();
 	{
@@ -758,8 +754,8 @@ gpuservRecvCommands(GpuContext_v2 *gcontext, bool *p_peer_sock_closed)
 		}
 		else if (retval == 0)
 		{
-			wnotice("peer_sock_closed by recvmsg(2) == 0");
 			/* likely, peer socket was closed */
+			//wnotice("peer_sock_closed by recvmsg(2) == 0");
 			*p_peer_sock_closed = true;
 			break;
 		}
@@ -1490,7 +1486,7 @@ gpuservBgWorkerMain(Datum __server_id)
 	if (listen(gpuserv_server_sockfd, 16) != 0)
 		elog(ERROR, "failed on listen(2): %m");
 
-	ep_event.events = EPOLLIN | EPOLLET;
+	ep_event.events = EPOLLIN;
 	ep_event.data.ptr = (void *)(~0UL);		/* identifier of server socket */
 	if (epoll_ctl(gpuserv_epoll_fd,
 				  EPOLL_CTL_ADD,

@@ -49,7 +49,6 @@ __STROM_OBJS = main.o codegen.o datastore.o aggfuncs.o cuda_program.o \
 		dma_buffer.o gpu_device.o gpu_context.o gpu_server.o \
 		matrix.o nvme_strom.o \
 		gpu_tasks.o gpuscan.o gpujoin.o gpupreagg.o pl_cuda.o
-
 STROM_OBJS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__STROM_OBJS))
 __STROM_SOURCES = $(__STROM_OBJS:.o=.c)
 STROM_SOURCES = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__STROM_SOURCES))
@@ -57,11 +56,9 @@ STROM_SOURCES = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__STROM_SOURCES))
 #
 # Source file of GPU portion
 #
-__CUDA_OBJS = $(shell cpp -D 'PGSTROM_CUDA(x)=cuda_\#\#x.o' $(STROM_BUILD_ROOT)/src/cuda_filelist | grep -v ^\#)
-CUDA_OBJS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__CUDA_OBJS))
-__CUDA_SOURCES = $(__CUDA_OBJS:.o=.c)
+__CUDA_SOURCES = $(shell cpp -D 'PGSTROM_CUDA(x)=cuda_\#\#x.h' \
+                 $(STROM_BUILD_ROOT)/src/cuda_filelist | grep -v ^\#)
 CUDA_SOURCES = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__CUDA_SOURCES))
-
 __STROM_UTILS = gpuinfo kfunc_info
 STROM_UTILS = $(addprefix $(STROM_BUILD_ROOT)/utils/, $(__STROM_UTILS))
 
@@ -76,7 +73,7 @@ __MISC_FILES = LICENSE README.md Makefile \
 
 PACKAGE_FILES = $(__MISC_FILES)					\
 	$(addprefix src/,$(__STROM_SOURCES))		\
-	$(addprefix src/,$(__CUDA_SOURCES:.c=.h))	\
+	$(addprefix src/,$(__CUDA_SOURCES))			\
 	$(addprefix utils/,$(addsuffix .c,$(__STROM_UTILS)))
 __STROM_TGZ = pg_strom-$(PGSTROM_VERSION).tar.gz
 STROM_TGZ = $(addprefix $(STROM_BUILD_ROOT)/, $(__STROM_TGZ))
@@ -205,17 +202,17 @@ endif
 # Definition of PG-Strom Extension
 #
 MODULE_big = pg_strom
-OBJS =  $(STROM_OBJS) $(CUDA_OBJS)
+OBJS =  $(STROM_OBJS)
 EXTENSION = pg_strom
 DATA_built = $(PGSTROM_SQL)
 DATA = $(STROM_BUILD_ROOT)/src/cuda_profiler.ini \
-       $(shell cpp -D 'PGSTROM_CUDA(x)=cuda_\#\#x.h' \
+       $(shell cpp -D 'PGSTROM_CUDA(x)=$(STROM_BUILD_ROOT)/src/cuda_\#\#x.h' \
                       $(STROM_BUILD_ROOT)/src/cuda_filelist | grep -v ^\#)
 
 # Support utilities
 SCRIPTS_built = $(STROM_UTILS)
 # Extra files to be cleaned
-EXTRA_CLEAN = $(CUDA_SOURCES) $(HTML_FILES) $(STROM_UTILS) \
+EXTRA_CLEAN = $(HTML_FILES) $(STROM_UTILS) \
 	$(shell ls */Makefile | sed 's/Makefile/pg_strom.control/g') \
 	$(STROM_BUILD_ROOT)/__tarball $(STROM_TGZ)
 
@@ -234,14 +231,6 @@ endif
 
 $(PGSTROM_SQL): $(addprefix $(STROM_BUILD_ROOT)/sql/, $(PGSTROM_SQL_SRC))
 	cat $^ > $@
-
-$(CUDA_SOURCES): $(CUDA_SOURCES:.c=.h)
-	@(echo "#include <stdio.h>";							\
-	  echo "const char *pgstrom_$(shell basename $(@:%.c=%))_code ="; \
-	  sed -e 's/\\/\\\\/g' -e 's/\t/\\t/g' -e 's/"/\\"/g'	\
-	      -e 's/^/  "/g' -e 's/$$/\\n"/g' < $*.h;			\
-	  echo ";";												\
-	  echo "size_t pgstrom_$(shell basename $(@:%.c=%))_code_length;"	) > $@
 
 $(STROM_UTILS): $(addsuffix .c,$(STROM_UTILS))
 	$(CC) $(CFLAGS) $(addsuffix .c,$@) $(PGSTROM_FLAGS) -I $(IPATH) -L $(LPATH) -lcuda -lnvrtc -o $@$(X)
