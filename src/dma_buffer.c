@@ -179,154 +179,135 @@ dmaBufferCreateSegment(dmaBufferSegment *seg)
 		wfatal("failed on pthread_mutex_lock(3)");
 	}
 
-	/*
-	 * NOTE: A ghost mapping may happen, if this process mapped the previous
-	 * version on its private address space then some other process dropped
-	 * the shared memory segment but this process had no chance to unmap.
-	 * So, if we found a ghost mapping, unmap this area first.
-	 */
-	if (l_map->is_attached)
+	STROM_TRY();
 	{
+		/*
+		 * NOTE: A ghost mapping may happen, if this process mapped
+		 * the previous version on its private address space then some other
+		 * process dropped the shared memory segment but this process had no
+		 * chance to unmap.
+		 * So, if we found a ghost mapping, unmap this area first.
+		 */
+		if (l_map->is_attached)
+		{
+			if (gpuserv_cuda_context)
+			{
+				CUresult	rc;
+
+				Assert(IsGpuServerProcess());
+				rc = cuMemHostUnregister(seg->mmap_ptr);
+				if (rc != CUDA_SUCCESS)
+					wfatal("failed on cuMemHostUnregister: %s", errorText(rc));
+			}
+			/* unmap the older/invalid segment first */
+			if (munmap(seg->mmap_ptr, dma_segment_size) != 0)
+				wfatal("failed on munmap('%s'): %m", namebuf);
+			if (mmap(seg->mmap_ptr, dma_segment_size,
+					 PROT_NONE,
+					 MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
+					 -1, 0) != seg->mmap_ptr)
+				wfatal("failed on mmap(PROT_NONE) for seg=%u at %p: %m",
+					   seg->segment_id, seg->mmap_ptr);
+			l_map->is_attached = false;
+		}
+
+		/*
+		 * Open, expand and mmap the shared memory segment
+		 */
+		fdesc = shm_open(namebuf, O_RDWR | O_CREAT | O_TRUNC, 0600);
+		if (fdesc < 0)
+			werror("failed on shm_open('%s'): %m", namebuf);
+
+		while (fallocate(fdesc, 0, 0, dma_segment_size) != 0)
+		{
+			if (errno == EINTR)
+				continue;
+			close(fdesc);
+			shm_unlink(namebuf);
+			werror("failed on fallocate(2): %m");
+		}
+
+		if (mmap(seg->mmap_ptr, dma_segment_size,
+				 PROT_READ | PROT_WRITE,
+				 MAP_SHARED | MAP_FIXED,
+				 fdesc, 0) != seg->mmap_ptr)
+		{
+			close(fdesc);
+			shm_unlink(namebuf);
+			werror("failed on mmap: %m");
+		}
+		close(fdesc);
+
 		if (gpuserv_cuda_context)
 		{
 			CUresult	rc;
 
 			Assert(IsGpuServerProcess());
-			rc = cuMemHostUnregister(seg->mmap_ptr);
+			rc = cuMemHostRegister(seg->mmap_ptr, dma_segment_size, 0);
 			if (rc != CUDA_SUCCESS)
 			{
-				pthread_mutex_unlock(&l_map->lock);
-				currentBufLocalMap = NULL;
-				wfatal("failed on cuMemHostUnregister: %s", errorText(rc));
+				if (munmap(seg->mmap_ptr, dma_segment_size) != 0)
+					wfatal("failed on munmap('%s'): %m", namebuf);
+				if (mmap(seg->mmap_ptr, dma_segment_size,
+						 PROT_NONE,
+						 MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
+						 -1, 0) != seg->mmap_ptr)
+					wfatal("failed on mmap(PROT_NONE) for seg=%u at %p: %m",
+						   seg->segment_id, seg->mmap_ptr);
+				werror("failed on cuMemHostRegister: %s", errorText(rc));
 			}
 		}
-		/* unmap the older/invalid segment first */
-		if (munmap(seg->mmap_ptr, dma_segment_size) != 0)
+
+		/* successfully mapped, init this segment */
+		for (mclass=0; mclass <= DMABUF_CHUNKSZ_MAX_BIT; mclass++)
+			dlist_init(&seg->free_chunks[mclass]);
+		head_ptr = (char *)seg->mmap_ptr;
+		tail_ptr = (char *)seg->mmap_ptr + dma_segment_size;
+		mclass = DMABUF_CHUNKSZ_MAX_BIT;
+		while (mclass >= DMABUF_CHUNKSZ_MIN_BIT)
 		{
-			pthread_mutex_unlock(&l_map->lock);
-			currentBufLocalMap = NULL;
-			wfatal("failed on munmap('%s'): %m", namebuf);
-		}
-		if (mmap(seg->mmap_ptr, dma_segment_size,
-				 PROT_NONE,
-				 MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
-				 -1, 0) != seg->mmap_ptr)
-		{
-			pthread_mutex_unlock(&l_map->lock);
-			currentBufLocalMap = NULL;
-			wfatal("failed on mmap(PROT_NONE) for seg=%u at %p: %m",
-				   seg->segment_id, seg->mmap_ptr);
-		}
-		l_map->is_attached = false;
-	}
-
-	/*
-	 * Open, expand and mmap the shared memory segment
-	 */
-	fdesc = shm_open(namebuf, O_RDWR | O_CREAT | O_TRUNC, 0600);
-	if (fdesc < 0)
-	{
-		pthread_mutex_unlock(&l_map->lock);
-		currentBufLocalMap = NULL;
-		werror("failed on shm_open('%s'): %m", namebuf);
-	}
-
-	while (fallocate(fdesc, 0, 0, dma_segment_size) != 0)
-	{
-		if (errno == EINTR)
-			continue;
-		close(fdesc);
-		shm_unlink(namebuf);
-		pthread_mutex_unlock(&l_map->lock);
-		currentBufLocalMap = NULL;
-		werror("failed on fallocate(2): %m");
-	}
-
-	if (mmap(seg->mmap_ptr, dma_segment_size,
-			 PROT_READ | PROT_WRITE,
-			 MAP_SHARED | MAP_FIXED,
-			 fdesc, 0) != seg->mmap_ptr)
-	{
-		close(fdesc);
-		shm_unlink(namebuf);
-		pthread_mutex_unlock(&l_map->lock);
-		currentBufLocalMap = NULL;
-		werror("failed on mmap: %m");
-	}
-	close(fdesc);
-
-	if (gpuserv_cuda_context)
-	{
-		CUresult	rc;
-
-		Assert(IsGpuServerProcess());
-		rc = cuMemHostRegister(seg->mmap_ptr, dma_segment_size, 0);
-		if (rc != CUDA_SUCCESS)
-		{
-			if (munmap(seg->mmap_ptr, dma_segment_size) != 0)
+			if (head_ptr + (1UL << mclass) > tail_ptr)
 			{
-				pthread_mutex_unlock(&l_map->lock);
-				currentBufLocalMap = NULL;
-				wfatal("failed on munmap('%s'): %m", namebuf);
+				mclass--;
+				continue;
 			}
-			if (mmap(seg->mmap_ptr, dma_segment_size,
-					 PROT_NONE,
-					 MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
-					 -1, 0) != seg->mmap_ptr)
-			{
-				pthread_mutex_unlock(&l_map->lock);
-				currentBufLocalMap = NULL;
-				wfatal("failed on mmap(PROT_NONE) for seg=%u at %p: %m",
-					   seg->segment_id, seg->mmap_ptr);
-			}
-			pthread_mutex_unlock(&l_map->lock);
-			currentBufLocalMap = NULL;
-			werror("failed on cuMemHostRegister: %s", errorText(rc));
-		}
-	}
+			chunk = (dmaBufferChunk *)head_ptr;
+			memset(chunk, 0, offsetof(dmaBufferChunk, data));
+			chunk->mclass = mclass;
+			DMABUF_CHUNK_MAGIC_HEAD(chunk) = DMABUF_CHUNK_MAGIC_CODE;
 
-	/* successfully mapped, init this segment */
-	for (mclass=0; mclass <= DMABUF_CHUNKSZ_MAX_BIT; mclass++)
-		dlist_init(&seg->free_chunks[mclass]);
-	head_ptr = (char *)seg->mmap_ptr;
-	tail_ptr = (char *)seg->mmap_ptr + dma_segment_size;
-	mclass = DMABUF_CHUNKSZ_MAX_BIT;
-	while (mclass >= DMABUF_CHUNKSZ_MIN_BIT)
+			dlist_push_head(&seg->free_chunks[mclass], &chunk->free_chain);
+
+			head_ptr += (1UL << mclass);
+		}
+		seg->num_chunks = 0;
+
+		/* Also, update local mapping */
+		l_map->is_attached = true;
+		l_map->revision = pg_atomic_add_fetch_u32(&seg->revision, 1);
+	}
+	STROM_CATCH();
 	{
-		if (head_ptr + (1UL << mclass) > tail_ptr)
-		{
-			mclass--;
-			continue;
-		}
-		chunk = (dmaBufferChunk *)head_ptr;
-		memset(chunk, 0, offsetof(dmaBufferChunk, data));
-		chunk->mclass = mclass;
-		DMABUF_CHUNK_MAGIC_HEAD(chunk) = DMABUF_CHUNK_MAGIC_CODE;
-
-		dlist_push_head(&seg->free_chunks[mclass], &chunk->free_chain);
-
-		head_ptr += (1UL << mclass);
+		/* unlock */
+		pthread_mutex_unlock(&l_map->lock);
+		currentBufLocalMap = NULL;
+		STROM_RE_THROW();
 	}
-	seg->num_chunks = 0;
-
-	/* Also, update local mapping */
-	l_map->is_attached = true;
-	l_map->revision = pg_atomic_add_fetch_u32(&seg->revision, 1);
-
+	STROM_END_TRY();
 	/* end of the critical section */
 	pthread_mutex_unlock(&l_map->lock);
 	currentBufLocalMap = NULL;
 
-	elog(DEBUG2, "PID=%u dmaBufferCreateSegment seg_id=%u rev=%u\n"
+	wdebug("PID=%u dmaBufferCreateSegment seg_id=%u rev=%u\n"
 #ifdef PGSTROM_DEBUG
-		 " called by %s:%d"
+		   " called by %s:%d"
 #endif
-		 ,getpid()
-		 ,seg->segment_id
-		 ,l_map->revision
+		   ,getpid()
+		   ,seg->segment_id
+		   ,l_map->revision
 #ifdef PGSTROM_DEBUG
-		 ,last_caller_alloc_filename
-		 ,last_caller_alloc_lineno
+		   ,last_caller_alloc_filename
+		   ,last_caller_alloc_lineno
 #endif
 		);
 }
@@ -348,14 +329,14 @@ dmaBufferDetachSegment(dmaBufferSegment *seg)
 	CUresult	rc;
 
 	Assert(SHMSEG_EXISTS(revision));
-	elog(DEBUG2, "PID=%u dmaBufferDetachSegment seg_id=%u rev=%u"
+	wdebug("PID=%u dmaBufferDetachSegment seg_id=%u rev=%u"
 #ifdef PGSTROM_DEBUG
-		 " called by %s:%d"
+		   " called by %s:%d"
 #endif
-		 , getpid(), seg->segment_id, revision
+		   , getpid(), seg->segment_id, revision
 #ifdef PGSTROM_DEBUG
-		 ,last_caller_free_filename
-		 ,last_caller_free_lineno
+		   ,last_caller_free_filename
+		   ,last_caller_free_lineno
 #endif
 		);
 
@@ -367,71 +348,61 @@ dmaBufferDetachSegment(dmaBufferSegment *seg)
 		wfatal("failed on pthread_mutex_lock(3)");
 	}
 
-	/*
-	 * If caller process already attach this segment, we unmap this region
-	 * altogether.
-	 */
-	if (l_map->is_attached)
+	STROM_TRY();
 	{
-		/* unregister host pinned memory, if server process */
-		if (gpuserv_cuda_context)
+		/*
+		 * If caller process already attach this segment, we unmap
+		 * this region altogether.
+		 */
+		if (l_map->is_attached)
 		{
-			Assert(IsGpuServerProcess());
-			rc = cuMemHostUnregister(seg->mmap_ptr);
-			if (rc != CUDA_SUCCESS)
+			/* unregister host pinned memory, if server process */
+			if (gpuserv_cuda_context)
 			{
-				pthread_mutex_unlock(&l_map->lock);
-				currentBufLocalMap = NULL;
-				wfatal("failed on cuMemHostUnregister: %s", errorText(rc));
+				Assert(IsGpuServerProcess());
+				rc = cuMemHostUnregister(seg->mmap_ptr);
+				if (rc != CUDA_SUCCESS)
+					wfatal("failed on cuMemHostUnregister: %s", errorText(rc));
 			}
+			/* unmap segment from private virtula address space */
+			if (munmap(seg->mmap_ptr, dma_segment_size) != 0)
+				wfatal("failed on munmap(seg=%u:%u at %p): %m",
+					   seg->segment_id, l_map->revision/2, seg->mmap_ptr);
+			/* and map invalid area instead */
+			if (mmap(seg->mmap_ptr, dma_segment_size,
+					 PROT_NONE,
+					 MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
+					 -1, 0) != seg->mmap_ptr)
+				wfatal("failed on mmap(PROT_NONE) for seg=%u at %p: %m",
+					   seg->segment_id, seg->mmap_ptr);
+			l_map->is_attached = false;
 		}
 
-		/* unmap segment from private virtula address space */
-		if (munmap(seg->mmap_ptr, dma_segment_size) != 0)
-		{
-			pthread_mutex_unlock(&l_map->lock);
-			currentBufLocalMap = NULL;
-			wfatal("failed on munmap(seg=%u:%u at %p): %m",
-				   seg->segment_id, l_map->revision/2, seg->mmap_ptr);
-		}
-		/* and map invalid area instead */
-		if (mmap(seg->mmap_ptr, dma_segment_size,
-				 PROT_NONE,
-				 MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
-				 -1, 0) != seg->mmap_ptr)
-		{
-			pthread_mutex_unlock(&l_map->lock);
-			currentBufLocalMap = NULL;
-			wfatal("failed on mmap(PROT_NONE) for seg=%u at %p: %m",
-				   seg->segment_id, seg->mmap_ptr);
-		}
-		l_map->is_attached = false;
+		/*
+		 * NOTE: dmaBufferDetachSegment() can never unmap this segment from
+		 * the virtual address space of other processes, of course.
+		 * On the other hands, this shared memory segment is already truncated
+		 * to zero, thus, any access on the ghost mapping area will cause
+		 * SIGBUS exception. It shall be processed by the signal handler, and
+		 * then, this routine will unmap the old ghost segment.
+		 */
+		SHMSEGMENT_NAME(namebuf, seg->segment_id, revision);
+		fdesc = shm_open(namebuf, O_RDWR | O_TRUNC, 0600);
+		if (fdesc < 0)
+			wfatal("failed on shm_open('%s', O_TRUNC): %m", namebuf);
+		close(fdesc);
+
+		if (shm_unlink(namebuf) < 0)
+			wfatal("failed on shm_unlink('%s'): %m", namebuf);
 	}
-
-	/*
-	 * NOTE: dmaBufferDetachSegment() can never unmap this segment from
-	 * the virtual address space of other processes, of course.
-	 * On the other hands, this shared memory segment is already truncated
-	 * to zero, thus, any access on the ghost mapping area will cause
-	 * SIGBUS exception. It shall be processed by the signal handler, and
-	 * then, this routine will unmap the old ghost segment.
-	 */
-	SHMSEGMENT_NAME(namebuf, seg->segment_id, revision);
-	fdesc = shm_open(namebuf, O_RDWR | O_TRUNC, 0600);
-	if (fdesc < 0)
+	STROM_CATCH();
 	{
+		/* unlock */
 		pthread_mutex_unlock(&l_map->lock);
 		currentBufLocalMap = NULL;
-		wfatal("failed on shm_open('%s', O_TRUNC): %m", namebuf);
+		STROM_RE_THROW();
 	}
-	close(fdesc);
-
-	if (shm_unlink(namebuf) < 0)
-	{
-		pthread_mutex_unlock(&l_map->lock);
-		currentBufLocalMap = NULL;
-		elog(FATAL, "failed on shm_unlink('%s'): %m", namebuf);
-	}
+	STROM_END_TRY();
 
 	/* END Critical Section */
 	pthread_mutex_unlock(&l_map->lock);

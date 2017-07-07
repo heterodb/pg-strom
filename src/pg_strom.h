@@ -467,7 +467,7 @@ extern void pgstrom_init_gpu_context(void);
 extern int				gpuserv_cuda_dindex;
 extern CUdevice			gpuserv_cuda_device;
 extern CUcontext		gpuserv_cuda_context;
-extern int				gpuserv_worker_index;
+extern __thread int		gpuserv_worker_index;
 
 extern int	IsGpuServerProcess(void);
 extern bool gpuservGotSigterm(void);
@@ -482,27 +482,51 @@ extern void pgstrom_init_gpu_server(void);
 
 /* service routines */
 #define WORKER_ERROR_MESSAGE_MAXLEN			(256*1024)
-extern __thread sigjmp_buf *worker_exception_stack;
-#define WORKER_TRY() \
+extern __thread sigjmp_buf *gpuserv_worker_exception_stack;
+#define STROM_TRY() \
 	do { \
-		sigjmp_buf *save_exception_stack = worker_exception_stack; \
+		ErrorContextCallback *saved_context_stack = error_context_stack; \
+		sigjmp_buf *saved_exception_stack = (IsGpuServerProcess() < 0 \
+											 ? gpuserv_worker_exception_stack \
+											 : PG_exception_stack); \
 		sigjmp_buf	local_sigjmp_buf; \
 		if (sigsetjmp(local_sigjmp_buf, 0) == 0) \
 		{ \
-			worker_exception_stack = &local_sigjmp_buf
+			if (IsGpuServerProcess() < 0) \
+				gpuserv_worker_exception_stack = &local_sigjmp_buf; \
+			else \
+				PG_exception_stack = &local_sigjmp_buf
 
-#define WORKER_CATCH() \
+#define STROM_CATCH() \
 		} \
 		else \
 		{ \
-			worker_exception_stack = save_exception_stack
+			if (IsGpuServerProcess() < 0) \
+				gpuserv_worker_exception_stack = saved_exception_stack; \
+			else \
+			{ \
+				PG_exception_stack = saved_exception_stack; \
+				error_context_stack = saved_context_stack;	\
+			}
 
-#define WORKER_END_TRY() \
+#define STROM_END_TRY()\
 		} \
-		worker_exception_stack = save_exception_stack; \
+		if (IsGpuServerProcess() < 0) \
+			gpuserv_worker_exception_stack = saved_exception_stack; \
+		else \
+		{ \
+			PG_exception_stack = saved_exception_stack; \
+			error_context_stack = saved_context_stack;	\
+		} \
 	} while(0)
 
-#define WORKER_RE_THROW()	siglongjmp(*worker_exception_stack, 1)
+#define STROM_RE_THROW()									\
+	do {													\
+		if (IsGpuServerProcess() < 0)						\
+			siglongjmp(*gpuserv_worker_exception_stack, 1);	\
+		else												\
+			PG_RE_THROW();									\
+	} while(0)
 
 #define WORKER_CHECK_FOR_INTERRUPTS()	\
 	do {								\
@@ -510,6 +534,11 @@ extern __thread sigjmp_buf *worker_exception_stack;
 			werror("Got SIGTERM");		\
 	} while(0)
 
+#define wdebug(fmt,...)										\
+	do {													\
+		if (IsGpuServerProcess() >= 0)						\
+			elog(DEBUG2, fmt, ##__VA_ARGS__);				\
+	} while(0)
 #define wlog(fmt,...)										\
 	do {													\
 		if (IsGpuServerProcess() < 0)						\

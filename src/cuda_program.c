@@ -381,7 +381,7 @@ link_cuda_libraries(char *ptx_image, size_t ptx_length,
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuLinkCreate: %s", errorText(rc));
 
-	WORKER_TRY();
+	STROM_TRY();
 	{
 		/* add the base PTX image */
 		rc = cuLinkAddData(lstate, CU_JIT_INPUT_PTX,
@@ -441,14 +441,14 @@ link_cuda_libraries(char *ptx_image, size_t ptx_length,
 		*p_bin_image = bin_image;
 		*p_bin_length = bin_length;
 	}
-	WORKER_CATCH();
+	STROM_CATCH();
 	{
 		rc = cuLinkDestroy(lstate);
 		if (rc != CUDA_SUCCESS)
 			wnotice("failed on cuLinkDestroy: %s", errorText(rc));
-		WORKER_RE_THROW();
+		STROM_RE_THROW();
 	}
-	WORKER_END_TRY();
+	STROM_END_TRY();
 
 	rc = cuLinkDestroy(lstate);
 	if (rc != CUDA_SUCCESS)
@@ -556,7 +556,7 @@ build_cuda_program(program_cache_entry *entry)
 	if (!source)
 		werror("out of memory");
 
-	WORKER_TRY();
+	STROM_TRY();
 	{
 		rc = nvrtcCreateProgram(&program,
 								source,
@@ -617,7 +617,7 @@ build_cuda_program(program_cache_entry *entry)
 			if (!ptx_image)
 				werror("out of memory");
 
-			WORKER_TRY();
+			STROM_TRY();
 			{
 				rc = nvrtcGetPTX(program, ptx_image);
 				if (rc != NVRTC_SUCCESS)
@@ -641,12 +641,12 @@ build_cuda_program(program_cache_entry *entry)
 					bin_length = ptx_length;
 				}
 			}
-			WORKER_CATCH();
+			STROM_CATCH();
 			{
 				free(ptx_image);
-				WORKER_RE_THROW();
+				STROM_RE_THROW();
 			}
-			WORKER_END_TRY();
+			STROM_END_TRY();
 		}
 		else
 		{
@@ -700,7 +700,7 @@ build_cuda_program(program_cache_entry *entry)
 					 bin_image ? "success" : "failure",
 					 build_log);
 	}
-	WORKER_CATCH();
+	STROM_CATCH();
 	{
 		if (program)
 		{
@@ -712,9 +712,9 @@ build_cuda_program(program_cache_entry *entry)
 
 		if (source)
 			free(source);
-		WORKER_RE_THROW();
+		STROM_RE_THROW();
 	}
-	WORKER_END_TRY();
+	STROM_END_TRY();
 
 	/* update the program entry */
 	SpinLockAcquire(&pgcache_head->lock);
@@ -778,11 +778,11 @@ pgstrom_try_build_cuda_program(void)
 	get_cuda_program_entry_nolock(entry);
 	SpinLockRelease(&pgcache_head->lock);
 
-	WORKER_TRY();
+	STROM_TRY();
 	{
 		build_cuda_program(entry);
 	}
-	WORKER_CATCH();
+	STROM_CATCH();
 	{
 		/*
 		 * Unlike CUDA_PROGRAM_BUILD_FAILURE case, exceptions are usually
@@ -798,9 +798,9 @@ pgstrom_try_build_cuda_program(void)
 		put_cuda_program_entry_nolock(entry);
 		SpinLockRelease(&pgcache_head->lock);
 
-		WORKER_RE_THROW();
+		STROM_RE_THROW();
 	}
-	WORKER_END_TRY();
+	STROM_END_TRY();
 
 	put_cuda_program_entry(entry);
 

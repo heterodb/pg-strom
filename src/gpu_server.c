@@ -96,7 +96,6 @@ static pthread_t	   *gpuworker_threads = NULL;
 int						gpuserv_cuda_dindex = -1;
 CUdevice				gpuserv_cuda_device = NULL;
 CUcontext				gpuserv_cuda_context = NULL;
-int						gpuserv_worker_index = -1;
 static pg_atomic_uint32	gpuserv_rr_cuda_stream;
 static int				gpuserv_num_cuda_stream;
 static CUstream		   *gpuserv_cuda_stream;
@@ -112,7 +111,8 @@ static dlist_head		session_pending_tasks;
 static dlist_head		session_running_tasks;
 static dlist_head		session_completed_tasks;
 static pg_atomic_uint32	session_num_clients;
-__thread sigjmp_buf	   *worker_exception_stack = NULL;
+__thread int			gpuserv_worker_index = -1;
+__thread sigjmp_buf	   *gpuserv_worker_exception_stack = NULL;
 
 
 //HOGE
@@ -207,8 +207,8 @@ worker_error(const char *funcname,
 	SpinLockRelease(&worker_exception_data.lock);
 	va_end(va_args);
 
-	Assert(worker_exception_stack != NULL);
-	siglongjmp(*worker_exception_stack, 1);
+	Assert(gpuserv_worker_exception_stack != NULL);
+	siglongjmp(*gpuserv_worker_exception_stack, 1);
 }
 
 /*
@@ -223,10 +223,10 @@ IsGpuServerProcess(void)
 {
 	if (gpuserv_id < 0)
 		return 0;
-	else if (worker_exception_stack != 0)
-		return -1;
-	else
+	else if (gpuserv_worker_index < 0)
 		return 1;
+	else
+		return -1;
 }
 
 /*
@@ -686,21 +686,21 @@ gpuservAcceptConnection(void)
 		return;
 	}
 
-	WORKER_TRY();
+	STROM_TRY();
 	{
 		/* attach GPU context */
 		AttachGpuContext(sockfd, shgcon, gpuserv_epoll_fd);
 	}
-	WORKER_CATCH();
+	STROM_CATCH();
 	{
 		SpinLockAcquire(&shgcon->lock);
 		shgcon->server = (void *)(~0UL);
 		SpinLockRelease(&shgcon->lock);
 
 		SetLatch(&client->procLatch);
-		WORKER_RE_THROW();
+		STROM_RE_THROW();
 	}
-	WORKER_END_TRY();
+	STROM_END_TRY();
 	/* wake up the backend process */
 	SetLatch(&client->procLatch);
 }
@@ -961,7 +961,7 @@ gpuserv_try_run_pending_task(void)
 	dlist_push_tail(&session_running_tasks, &gtask->chain);
 	SpinLockRelease(&session_tasks_lock);
 
-	WORKER_TRY();
+	STROM_TRY();
 	{
 		GpuModuleCache *gmod_cache;
 		CUstream		cuda_stream;
@@ -1037,12 +1037,12 @@ gpuserv_try_run_pending_task(void)
 			}
 		}
 	}
-	WORKER_CATCH();
+	STROM_CATCH();
 	{
 		ReportErrorForBackend(gtask);
-		WORKER_RE_THROW();
+		STROM_RE_THROW();
 	}
-	WORKER_END_TRY();
+	STROM_END_TRY();
 
 	return true;
 }
@@ -1068,7 +1068,7 @@ gpuserv_try_run_completed_task(void)
 	memset(&gtask->chain, 0, sizeof(dlist_node));
 	SpinLockRelease(&session_tasks_lock);
 
-	WORKER_TRY();
+	STROM_TRY();
 	{
 		GpuContext_v2  *gcontext = gtask->gcontext;
 		GpuModuleCache *gmod_cache = gtask->gmod_cache;
@@ -1141,12 +1141,12 @@ gpuserv_try_run_completed_task(void)
 			PutGpuContext(gcontext);
 		}
 	}
-	WORKER_CATCH();
+	STROM_CATCH();
 	{
 		ReportErrorForBackend(gtask);
-		WORKER_RE_THROW();
+		STROM_RE_THROW();
 	}
-	WORKER_END_TRY();
+	STROM_END_TRY();
 
 	return true;
 }
@@ -1200,8 +1200,7 @@ static void *
 gpuservWorkerMain(void *__private)
 {
 	gpuserv_worker_index = PointerGetDatum(__private);
-
-	WORKER_TRY();
+	STROM_TRY();
 	{
 		CUresult	rc;
 
@@ -1300,7 +1299,7 @@ gpuservWorkerMain(void *__private)
 		}
 			
 	}
-	WORKER_CATCH();
+	STROM_CATCH();
 	{
 		/*
 		 * Suggest primary thread of the background worker to wake up
@@ -1308,7 +1307,7 @@ gpuservWorkerMain(void *__private)
 		 */
 		gpuservSigtermHandler(0);
 	}
-	WORKER_END_TRY();
+	STROM_END_TRY();
 
 	wnotice("GPU worker %d is terminating", gpuserv_worker_index);
 
@@ -1339,7 +1338,7 @@ gpuserv_terminate_workers(int nworkers)
 	int			i, errcode;
 
 	Assert(nworkers >= 0 && nworkers <= GpuServerNumWorkers);
-	Assert(worker_exception_stack == (void *)(~0UL));
+	Assert(gpuserv_worker_exception_stack == (void *)(~0UL));
 	/* ensure termination of the worker threads */
 	gpuserv_got_sigterm = true;
 	pg_memory_barrier();
@@ -1357,7 +1356,7 @@ gpuserv_terminate_workers(int nworkers)
 				 i, strerror(errcode));
 		wnotice("worker-%d pthread_join() done", i);
 	}
-	worker_exception_stack = NULL;
+	gpuserv_worker_exception_stack = NULL;
 }
 
 /*
@@ -1391,7 +1390,7 @@ gpuservEventLoop(void)
 	if (!gpuworker_threads)
 		elog(ERROR, "out of memory");
 
-	worker_exception_stack = (void *)(~0UL);
+	gpuserv_worker_exception_stack = (void *)(~0UL);
 	for (i=0; i < GpuServerNumWorkers; i++)
 	{
 		int		code = pthread_create(gpuworker_threads + i, NULL,
