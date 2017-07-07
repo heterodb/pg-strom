@@ -407,11 +407,17 @@ ReportErrorForBackend(GpuTask_v2 *gtask)
 void
 gpuservClenupGpuContext(GpuContext_v2 *gcontext)
 {
+	uint32		expected = 0;
+
 	/* remove data socket from the epoll_fd */
-	if (epoll_ctl(gpuserv_epoll_fd,
-				  EPOLL_CTL_DEL,
-				  gcontext->sockfd, NULL) < 0)
-		wnotice("failed on epoll_ctl(EPOLL_CTL_DEL): %m");
+	if (pg_atomic_compare_exchange_u32(&gcontext->is_unlinked,
+									   &expected, 1))
+	{
+		if (epoll_ctl(gpuserv_epoll_fd,
+					  EPOLL_CTL_DEL,
+					  gcontext->sockfd, NULL) < 0)
+			wnotice("failed on epoll_ctl(EPOLL_CTL_DEL): %m");
+	}
 	/* unload CUDA modules if no concurrent sessions */
 	if (pg_atomic_sub_fetch_u32(&session_num_clients, 1) == 0)
 		cleanupGpuModuleCache();
@@ -849,7 +855,7 @@ gpuservRecvCommands(GpuContext_v2 *gcontext, bool *p_peer_sock_closed)
 						  errmsg("%s", message));
 		}
 		else
-			elog(ERROR, "Bug? unknown GPUSERV_CMD_* tag: %d", cmd->command);
+			wfatal("Bug? unknown GPUSERV_CMD_* tag: %d", cmd->command);
 	}
 	return num_received;
 }
@@ -1228,14 +1234,17 @@ gpuservWorkerMain(void *__private)
 								 timeout);	/* may be non-blocking poll */
 			if (nevents > 0)
 			{
+				pgsocket		sockfd = ep_event.data.fd;
+				GpuContext_v2  *gcontext;
+
 				Assert(nevents == 1);
-				if (ep_event.data.ptr == NULL)
+				if (sockfd == PGINVALID_SOCKET)
 				{
 					/* event around event fd, just wake up */
 					if (ep_event.events & ~EPOLLIN)
 						werror("eventfd reported %08x", ep_event.events);
 				}
-				else if (ep_event.data.ptr == (void *)(~0UL))
+				else if (sockfd == gpuserv_server_sockfd)
 				{
 					/* event around server socket */
 					if (ep_event.events & EPOLLIN)
@@ -1243,25 +1252,47 @@ gpuservWorkerMain(void *__private)
 					else
 						werror("server socket reported %08x", ep_event.events);
 				}
-				else
+				else if ((gcontext = GetGpuContextBySockfd(sockfd)) != NULL)
 				{
-					/* event around client socket */
-					GpuContext_v2  *gcontext = ep_event.data.ptr;
-					pgsocket		sockfd = gcontext->sockfd;
-					bool			peer_sock_closed = false;
+					bool		peer_sock_closed = false;
+					uint32		expected = 0;
 
-					lock_per_data_socket(sockfd);
 					if (ep_event.events & EPOLLIN)
 						gpuservRecvCommands(gcontext, &peer_sock_closed);
 					else
 					{
-						wnotice("peer_sock_closed by event %08x", ep_event.events);
+						peer_sock_closed = true;
+						wnotice("peer socket was closed by event %08x",
+								ep_event.events);
 						peer_sock_closed = true;
 					}
 
-					if (peer_sock_closed)
+					if (peer_sock_closed &&
+						pg_atomic_compare_exchange_u32(&gcontext->is_unlinked,
+													   &expected, 1))
+					{
+						Assert(expected == 0);
+						/*
+						 * Concurrent threads may get 'peer_sock_closed' state
+						 * simultitaneously. GpuContext must be unlinked
+						 * exactly once per connection, so we use atomic
+						 * compare-exchange operation to control the link
+						 * status.
+						 */
 						PutGpuContext(gcontext);
-					unlock_per_data_socket(sockfd);
+
+						/* remove data socket from epoll_fd */
+						if (epoll_ctl(gpuserv_epoll_fd,
+									  EPOLL_CTL_DEL,
+									  gcontext->sockfd, NULL) < 0)
+							wnotice("failed on epoll_ctl(EPOLL_CTL_DEL): %m");
+					}
+					PutGpuContext(gcontext);
+				}
+				else
+				{
+					werror("epoll reported event on unknown socket: %08x %d",
+						   ep_event.events, sockfd);
 				}
 			}
 			else if (nevents < 0 && errno != EINTR)
@@ -1463,7 +1494,7 @@ gpuservBgWorkerMain(Datum __server_id)
 	if (gpuserv_event_fd < 0)
 		elog(ERROR, "failed on eventfd(2): %m");
 	ep_event.events = EPOLLIN;
-	ep_event.data.ptr = NULL;		/* identifier of event fd */
+	ep_event.data.fd = PGINVALID_SOCKET;	/* identifier of event fd */
 	if (epoll_ctl(gpuserv_epoll_fd,
 				  EPOLL_CTL_ADD,
 				  gpuserv_event_fd,
@@ -1487,7 +1518,7 @@ gpuservBgWorkerMain(Datum __server_id)
 		elog(ERROR, "failed on listen(2): %m");
 
 	ep_event.events = EPOLLIN;
-	ep_event.data.ptr = (void *)(~0UL);		/* identifier of server socket */
+	ep_event.data.fd = gpuserv_server_sockfd;
 	if (epoll_ctl(gpuserv_epoll_fd,
 				  EPOLL_CTL_ADD,
 				  gpuserv_server_sockfd,

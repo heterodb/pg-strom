@@ -39,8 +39,9 @@ static shmem_startup_hook_type shmem_startup_hook_next = NULL;
 static SharedGpuContextHead *sharedGpuContextHead = NULL;
 static GpuContext_v2	masterGpuContext;
 static int				numGpuContexts;		/* GUC */
-static slock_t			activeGpuContextLock;	/* only used by GpuServer */
-static dlist_head		activeGpuContextList;	/* with multi-threading */
+#define ACTIVE_GPU_CONTEXT_NSLOTS			768
+static slock_t			activeGpuContextLock;
+static dlist_head		activeGpuContextSlot[ACTIVE_GPU_CONTEXT_NSLOTS];
 static __thread dlist_head inactiveResourceTracker;
 
 /*
@@ -534,7 +535,7 @@ AllocGpuContext(bool with_connection)
 	 * Lookup an existing active GpuContext
 	 */
 	SpinLockAcquire(&activeGpuContextLock);
-	dlist_foreach(iter, &activeGpuContextList)
+	dlist_foreach(iter, &activeGpuContextSlot[0])
 	{
 		gcontext = dlist_container(GpuContext_v2, chain, iter.cur);
 
@@ -583,12 +584,13 @@ AllocGpuContext(bool with_connection)
 	gcontext->resowner = CurrentResourceOwner;
 	gcontext->shgcon = shgcon;
 	pg_atomic_init_u32(&gcontext->refcnt, 1);
+	pg_atomic_init_u32(&gcontext->is_unlinked, 0);
 	SpinLockInit(&gcontext->lock);
 	for (i=0; i < RESTRACK_HASHSIZE; i++)
 		dlist_init(&gcontext->restrack[i]);
 
 	SpinLockAcquire(&activeGpuContextLock);
-	dlist_push_head(&activeGpuContextList, &gcontext->chain);
+	dlist_push_head(&activeGpuContextSlot[0], &gcontext->chain);
 	SpinLockRelease(&activeGpuContextLock);
 
 	/*
@@ -626,6 +628,7 @@ AttachGpuContext(pgsocket sockfd, SharedGpuContext *shgcon, int epoll_fd)
 	gcontext->sockfd = sockfd;
 	gcontext->resowner = CurrentResourceOwner;
 	pg_atomic_init_u32(&gcontext->refcnt, 1);
+	pg_atomic_init_u32(&gcontext->is_unlinked, 0);
 	SpinLockInit(&gcontext->lock);
 	gcontext->shgcon = shgcon;
 	for (i=0; i < RESTRACK_HASHSIZE; i++)
@@ -633,7 +636,7 @@ AttachGpuContext(pgsocket sockfd, SharedGpuContext *shgcon, int epoll_fd)
 
 	/* add gcontext to epoll fd */
 	ep_event.events = EPOLLIN | EPOLLET;
-	ep_event.data.ptr = gcontext;
+	ep_event.data.fd = sockfd;
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sockfd, &ep_event) < 0)
 	{
 		free(gcontext);
@@ -650,7 +653,8 @@ AttachGpuContext(pgsocket sockfd, SharedGpuContext *shgcon, int epoll_fd)
 	SpinLockRelease(&shgcon->lock);
 
 	SpinLockAcquire(&activeGpuContextLock);
-	dlist_push_head(&activeGpuContextList, &gcontext->chain);
+	dlist_push_head(&activeGpuContextSlot[sockfd % ACTIVE_GPU_CONTEXT_NSLOTS],
+					&gcontext->chain);
 	SpinLockRelease(&activeGpuContextLock);
 
 	return gcontext;
@@ -668,6 +672,37 @@ GetGpuContext(GpuContext_v2 *gcontext)
 	Assert(oldcnt > 0);
 
 	return gcontext;
+}
+
+/*
+ * GetGpuContextBySockfd - Get a GpuContext which hold the supplied sockfd
+ */
+GpuContext_v2 *
+GetGpuContextBySockfd(pgsocket sockfd)
+{
+	dlist_head	   *dhead;
+	dlist_iter		iter;
+	GpuContext_v2  *gcontext;
+
+	if (!IsGpuServerProcess())
+		elog(FATAL, "Bug? GetGpuContextBySockfd called on backend");
+
+	SpinLockAcquire(&activeGpuContextLock);
+	dhead = &activeGpuContextSlot[sockfd % ACTIVE_GPU_CONTEXT_NSLOTS];
+	dlist_foreach(iter, dhead)
+	{
+		gcontext = dlist_container(GpuContext_v2, chain, iter.cur);
+		if (gcontext->sockfd == sockfd)
+		{
+			GetGpuContext(gcontext);
+			SpinLockRelease(&activeGpuContextLock);
+
+			return gcontext;
+		}
+	}
+	SpinLockRelease(&activeGpuContextLock);
+
+	return NULL;
 }
 
 /*
@@ -720,12 +755,6 @@ PutGpuContext(GpuContext_v2 *gcontext)
 			gpuservClenupGpuContext(gcontext);
 		ReleaseLocalResources(gcontext, true);
 		PutSharedGpuContext(gcontext->shgcon);
-		if (gcontext->sockfd != PGINVALID_SOCKET)
-		{
-			if (close(gcontext->sockfd) != 0)
-				wnotice("failed on close socket(%d): %m", gcontext->sockfd);
-			gcontext->sockfd = PGINVALID_SOCKET;
-		}
 		free(gcontext);
 	}
 }
@@ -742,27 +771,32 @@ PutGpuContext(GpuContext_v2 *gcontext)
 void
 ForcePutAllGpuContext(void)
 {
-	GpuContext_v2  *gcontext;
-	dlist_node	   *dnode;
+	int			i;
 
 	if (IsGpuServerProcess() < 0)
 		elog(FATAL, "Bug? ForcePutAllGpuContext is called under multi-thread process");
 
-    while (!dlist_is_empty(&activeGpuContextList))
-    {
-        dnode = dlist_pop_head_node(&activeGpuContextList);
-        gcontext = dlist_container(GpuContext_v2, chain, dnode);
-        SpinLockRelease(&activeGpuContextLock);
+	for (i=0; i < ACTIVE_GPU_CONTEXT_NSLOTS; i++)
+	{
+		dlist_head	   *dhead = &activeGpuContextSlot[i];
+		dlist_node	   *dnode;
+		GpuContext_v2  *gcontext;
 
-		ReleaseLocalResources(gcontext, false);
-		PutSharedGpuContext(gcontext->shgcon);
-		if (gcontext->sockfd != PGINVALID_SOCKET)
+		SpinLockAcquire(&activeGpuContextLock);
+		while (!dlist_is_empty(dhead))
 		{
-			if (close(gcontext->sockfd) != 0)
-				wnotice("failed on close socket(%d): %m", gcontext->sockfd);
+			dnode = dlist_pop_head_node(dhead);
+			gcontext = dlist_container(GpuContext_v2, chain, dnode);
+			SpinLockRelease(&activeGpuContextLock);
+
+			ReleaseLocalResources(gcontext, false);
+			PutSharedGpuContext(gcontext->shgcon);
+			wnotice("GpuContext remained at pid=%u, cleanup\n", MyProcPid);
+			free(gcontext);
+
+			SpinLockAcquire(&activeGpuContextLock);
 		}
-		wnotice("GpuContext remained at pid=%u, cleanup\n", MyProcPid);
-		free(gcontext);
+		SpinLockRelease(&activeGpuContextLock);
 	}
 }
 
@@ -794,12 +828,18 @@ gpucontext_cleanup_callback(ResourceReleasePhase phase,
 							bool isTopLevel,
 							void *arg)
 {
-	dlist_mutable_iter	iter;
+	int		i, n = (!IsGpuServerProcess() ? 1 : ACTIVE_GPU_CONTEXT_NSLOTS);
 
-	if (phase == RESOURCE_RELEASE_BEFORE_LOCKS)
+	if (phase != RESOURCE_RELEASE_BEFORE_LOCKS)
+		return;
+
+	for (i=0; i < n; i++)
 	{
+		dlist_head	   *dhead = &activeGpuContextSlot[i];
+		dlist_mutable_iter iter;
+
 		SpinLockAcquire(&activeGpuContextLock);
-		dlist_foreach_modify(iter, &activeGpuContextList)
+		dlist_foreach_modify(iter, dhead)
 		{
 			GpuContext_v2  *gcontext = (GpuContext_v2 *)
 				dlist_container(GpuContext_v2, chain, iter.cur);
@@ -901,6 +941,7 @@ void
 pgstrom_init_gpu_context(void)
 {
 	uint32		numBackends;	/* # of normal backends + background worker */
+	int			i;
 
 	/*
 	 * Maximum number of GPU context - it is preferable to preserve
@@ -920,7 +961,8 @@ pgstrom_init_gpu_context(void)
 
 	/* initialization of GpuContext/ResTracker List */
 	SpinLockInit(&activeGpuContextLock);
-	dlist_init(&activeGpuContextList);
+	for (i=0; i < ACTIVE_GPU_CONTEXT_NSLOTS; i++)
+		dlist_init(&activeGpuContextSlot[i]);
 	dlist_init(&inactiveResourceTracker);
 
 	/* require the static shared memory */

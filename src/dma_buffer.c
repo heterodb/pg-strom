@@ -103,8 +103,10 @@ typedef struct dmaBufferSegmentHead
 typedef struct dmaBufferLocalMap
 {
 	dmaBufferSegment *segment;	/* (const) reference to the segment */
-	uint32		revision;		/* revision number when mapped */
-	bool		is_attached;	/* true, if segment is already attached */
+	pthread_mutex_t lock;			/* lock to manage local memory map */
+	pthread_t		lock_holder;	/* thread-id who takes above lock */
+	uint32			revision;		/* revision number when mapped */
+	bool			is_attached;	/* true, if segment is already attached */
 } dmaBufferLocalMap;
 
 /*
@@ -501,7 +503,6 @@ dmaBufferAttachSegmentOnDemand(int signum, siginfo_t *siginfo, void *unused)
 						  "%s: failed on cuMemHostRegister(id=%u at %p): %s\n",
 							__FUNCTION__, seg->segment_id, seg->mmap_ptr,
 							errorText(rc));
-					abort();
 					goto normal_crash;
 				}
 			}
@@ -1289,6 +1290,8 @@ pgstrom_startup_dma_buffer(void)
 						&segment->chain);
 		/* dmaBufferLocalMap */
 		l_map->segment = segment;
+		pthread_mutex_init(&l_map->lock, NULL);
+		l_map->lock_holder = 0;
 		l_map->revision = pg_atomic_read_u32(&segment->revision);
 		l_map->is_attached = false;
 	}

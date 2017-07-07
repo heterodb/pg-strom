@@ -114,6 +114,7 @@ typedef struct GpuContext_v2
 	ResourceOwner	resowner;
 	SharedGpuContext *shgcon;
 	pg_atomic_uint32 refcnt;
+	pg_atomic_uint32 is_unlinked;
 	slock_t			lock;		/* lock for resource tracker */
 	dlist_head		restrack[RESTRACK_HASHSIZE];
 } GpuContext_v2;
@@ -438,6 +439,7 @@ extern GpuContext_v2 *AttachGpuContext(pgsocket sockfd,
 									   SharedGpuContext *shgcon,
 									   int epoll_fd);
 extern GpuContext_v2 *GetGpuContext(GpuContext_v2 *gcontext);
+extern GpuContext_v2 *GetGpuContextBySockfd(pgsocket sockfd);
 extern void PutGpuContext(GpuContext_v2 *gcontext);
 extern void ForcePutAllGpuContext(void);
 extern bool GpuContextIsEstablished(GpuContext_v2 *gcontext);
