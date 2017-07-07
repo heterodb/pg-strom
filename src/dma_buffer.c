@@ -378,7 +378,7 @@ dmaBufferDetachSegment(dmaBufferSegment *seg)
 static void
 dmaBufferAttachSegmentOnDemand(int signum, siginfo_t *siginfo, void *unused)
 {
-	static bool	internal_error = false;
+	static __thread bool internal_error = false;
 	int			save_errno;
 
 	if (!internal_error)
