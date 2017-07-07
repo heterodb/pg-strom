@@ -508,24 +508,32 @@ PG_FUNCTION_INFO_V1(array_matrix_rawsize);
 Datum
 array_matrix_height(PG_FUNCTION_ARGS)
 {
-	MatrixType *M = PG_GETARG_MATRIXTYPE_P(0);
+	if (!PG_ARGISNULL(0))
+	{
+		MatrixType *M = PG_GETARG_MATRIXTYPE_P(0);
 
-	if (VARATT_IS_EXPANDED_HEADER(M) ||
-		!VALIDATE_ARRAY_MATRIX(M))
-		elog(ERROR, "not a matrix-like array");
-	PG_RETURN_INT32(ARRAY_MATRIX_HEIGHT(M));
+		if (VARATT_IS_EXPANDED_HEADER(M) ||
+			!VALIDATE_ARRAY_MATRIX(M))
+			elog(ERROR, "not a matrix-like array");
+		PG_RETURN_INT32(ARRAY_MATRIX_HEIGHT(M));
+	}
+	PG_RETURN_INT32(0);
 }
 PG_FUNCTION_INFO_V1(array_matrix_height);
 
 Datum
 array_matrix_width(PG_FUNCTION_ARGS)
 {
-	MatrixType *M = PG_GETARG_MATRIXTYPE_P(0);
+	if (!PG_ARGISNULL(0))
+	{
+		MatrixType *M = PG_GETARG_MATRIXTYPE_P(0);
 
-	if (VARATT_IS_EXPANDED_HEADER(M) ||
-		!VALIDATE_ARRAY_MATRIX(M))
-		elog(ERROR, "not a matrix-like array");
-	PG_RETURN_INT32(ARRAY_MATRIX_WIDTH(M));
+		if (VARATT_IS_EXPANDED_HEADER(M) ||
+			!VALIDATE_ARRAY_MATRIX(M))
+			elog(ERROR, "not a matrix-like array");
+		PG_RETURN_INT32(ARRAY_MATRIX_WIDTH(M));
+	}
+	PG_RETURN_INT32(0);
 }
 PG_FUNCTION_INFO_V1(array_matrix_width);
 
@@ -693,54 +701,96 @@ array_martix_rbind(Oid elemtype, MatrixType *X, MatrixType *Y)
 Datum
 array_matrix_rbind_bool(PG_FUNCTION_ARGS)
 {
-	MatrixType	   *X = PG_GETARG_MATRIXTYPE_P(0);
-	MatrixType	   *Y = PG_GETARG_MATRIXTYPE_P(1);
-	PG_RETURN_MATRIXTYPE_P(array_martix_rbind(BOOLOID, X, Y));
+	if (PG_ARGISNULL(0))
+		PG_RETURN_DATUM(PG_GETARG_DATUM(1));
+	else if (PG_ARGISNULL(1))
+		PG_RETURN_DATUM(PG_GETARG_DATUM(0));
+	else
+	{
+		MatrixType	   *X = PG_GETARG_MATRIXTYPE_P(0);
+		MatrixType	   *Y = PG_GETARG_MATRIXTYPE_P(1);
+		PG_RETURN_MATRIXTYPE_P(array_martix_rbind(BOOLOID, X, Y));
+	}
 }
 PG_FUNCTION_INFO_V1(array_matrix_rbind_bool);
 
 Datum
 array_matrix_rbind_int2(PG_FUNCTION_ARGS)
 {
-	MatrixType	   *X = PG_GETARG_MATRIXTYPE_P(0);
-	MatrixType	   *Y = PG_GETARG_MATRIXTYPE_P(1);
-	PG_RETURN_MATRIXTYPE_P(array_martix_rbind(INT2OID, X, Y));
+	if (PG_ARGISNULL(0))
+		PG_RETURN_DATUM(PG_GETARG_DATUM(1));
+	else if (PG_ARGISNULL(1))
+		PG_RETURN_DATUM(PG_GETARG_DATUM(0));
+	else
+	{
+		MatrixType	   *X = PG_GETARG_MATRIXTYPE_P(0);
+		MatrixType	   *Y = PG_GETARG_MATRIXTYPE_P(1);
+		PG_RETURN_MATRIXTYPE_P(array_martix_rbind(INT2OID, X, Y));
+	}
 }
 PG_FUNCTION_INFO_V1(array_matrix_rbind_int2);
 
 Datum
 array_matrix_rbind_int4(PG_FUNCTION_ARGS)
 {
-	MatrixType	   *X = PG_GETARG_MATRIXTYPE_P(0);
-	MatrixType	   *Y = PG_GETARG_MATRIXTYPE_P(1);
-	PG_RETURN_MATRIXTYPE_P(array_martix_rbind(INT4OID, X, Y));
+	if (PG_ARGISNULL(0))
+		PG_RETURN_DATUM(PG_GETARG_DATUM(1));
+	else if (PG_ARGISNULL(1))
+		PG_RETURN_DATUM(PG_GETARG_DATUM(0));
+	else
+	{
+		MatrixType	   *X = PG_GETARG_MATRIXTYPE_P(0);
+		MatrixType	   *Y = PG_GETARG_MATRIXTYPE_P(1);
+		PG_RETURN_MATRIXTYPE_P(array_martix_rbind(INT4OID, X, Y));
+	}
 }
 PG_FUNCTION_INFO_V1(array_matrix_rbind_int4);
 
 Datum
 array_matrix_rbind_int8(PG_FUNCTION_ARGS)
 {
-	MatrixType	   *X = PG_GETARG_MATRIXTYPE_P(0);
-	MatrixType	   *Y = PG_GETARG_MATRIXTYPE_P(1);
-	PG_RETURN_MATRIXTYPE_P(array_martix_rbind(INT8OID, X, Y));
+	if (PG_ARGISNULL(0))
+		PG_RETURN_DATUM(PG_GETARG_DATUM(1));
+	else if (PG_ARGISNULL(1))
+		PG_RETURN_DATUM(PG_GETARG_DATUM(0));
+	else
+	{
+		MatrixType	   *X = PG_GETARG_MATRIXTYPE_P(0);
+		MatrixType	   *Y = PG_GETARG_MATRIXTYPE_P(1);
+		PG_RETURN_MATRIXTYPE_P(array_martix_rbind(INT8OID, X, Y));
+	}
 }
 PG_FUNCTION_INFO_V1(array_matrix_rbind_int8);
 
 Datum
 array_matrix_rbind_float4(PG_FUNCTION_ARGS)
 {
-	MatrixType	   *X = PG_GETARG_MATRIXTYPE_P(0);
-	MatrixType	   *Y = PG_GETARG_MATRIXTYPE_P(1);
-	PG_RETURN_MATRIXTYPE_P(array_martix_rbind(FLOAT4OID, X, Y));
+	if (PG_ARGISNULL(0))
+		PG_RETURN_DATUM(PG_GETARG_DATUM(1));
+	else if (PG_ARGISNULL(1))
+		PG_RETURN_DATUM(PG_GETARG_DATUM(0));
+	else
+	{
+		MatrixType	   *X = PG_GETARG_MATRIXTYPE_P(0);
+		MatrixType	   *Y = PG_GETARG_MATRIXTYPE_P(1);
+		PG_RETURN_MATRIXTYPE_P(array_martix_rbind(FLOAT4OID, X, Y));
+	}
 }
 PG_FUNCTION_INFO_V1(array_matrix_rbind_float4);
 
 Datum
 array_matrix_rbind_float8(PG_FUNCTION_ARGS)
 {
-	MatrixType	   *X = PG_GETARG_MATRIXTYPE_P(0);
-	MatrixType	   *Y = PG_GETARG_MATRIXTYPE_P(1);
-	PG_RETURN_MATRIXTYPE_P(array_martix_rbind(FLOAT8OID, X, Y));
+	if (PG_ARGISNULL(0))
+		PG_RETURN_DATUM(PG_GETARG_DATUM(1));
+	else if (PG_ARGISNULL(1))
+		PG_RETURN_DATUM(PG_GETARG_DATUM(0));
+	else
+	{
+		MatrixType	   *X = PG_GETARG_MATRIXTYPE_P(0);
+		MatrixType	   *Y = PG_GETARG_MATRIXTYPE_P(1);
+		PG_RETURN_MATRIXTYPE_P(array_martix_rbind(FLOAT8OID, X, Y));
+	}
 }
 PG_FUNCTION_INFO_V1(array_matrix_rbind_float8);
 
@@ -997,54 +1047,96 @@ array_martix_cbind(Oid elemtype, MatrixType *X, MatrixType *Y)
 Datum
 array_matrix_cbind_bool(PG_FUNCTION_ARGS)
 {
-	MatrixType	   *X = PG_GETARG_MATRIXTYPE_P(0);
-	MatrixType	   *Y = PG_GETARG_MATRIXTYPE_P(1);
-	PG_RETURN_MATRIXTYPE_P(array_martix_cbind(BOOLOID, X, Y));
+	if (PG_ARGISNULL(0))
+		PG_RETURN_DATUM(PG_GETARG_DATUM(1));
+	else if (PG_ARGISNULL(1))
+		PG_RETURN_DATUM(PG_GETARG_DATUM(0));
+	else
+	{
+		MatrixType	   *X = PG_GETARG_MATRIXTYPE_P(0);
+		MatrixType	   *Y = PG_GETARG_MATRIXTYPE_P(1);
+		PG_RETURN_MATRIXTYPE_P(array_martix_cbind(BOOLOID, X, Y));
+	}
 }
 PG_FUNCTION_INFO_V1(array_matrix_cbind_bool);
 
 Datum
 array_matrix_cbind_int2(PG_FUNCTION_ARGS)
 {
-	MatrixType	   *X = PG_GETARG_MATRIXTYPE_P(0);
-	MatrixType	   *Y = PG_GETARG_MATRIXTYPE_P(1);
-	PG_RETURN_MATRIXTYPE_P(array_martix_cbind(INT2OID, X, Y));
+	if (PG_ARGISNULL(0))
+		PG_RETURN_DATUM(PG_GETARG_DATUM(1));
+	else if (PG_ARGISNULL(1))
+		PG_RETURN_DATUM(PG_GETARG_DATUM(0));
+	else
+	{
+		MatrixType	   *X = PG_GETARG_MATRIXTYPE_P(0);
+		MatrixType	   *Y = PG_GETARG_MATRIXTYPE_P(1);
+		PG_RETURN_MATRIXTYPE_P(array_martix_cbind(INT2OID, X, Y));
+	}
 }
 PG_FUNCTION_INFO_V1(array_matrix_cbind_int2);
 
 Datum
 array_matrix_cbind_int4(PG_FUNCTION_ARGS)
 {
-	MatrixType	   *X = PG_GETARG_MATRIXTYPE_P(0);
-	MatrixType	   *Y = PG_GETARG_MATRIXTYPE_P(1);
-	PG_RETURN_MATRIXTYPE_P(array_martix_cbind(INT4OID, X, Y));
+	if (PG_ARGISNULL(0))
+		PG_RETURN_DATUM(PG_GETARG_DATUM(1));
+	else if (PG_ARGISNULL(1))
+		PG_RETURN_DATUM(PG_GETARG_DATUM(0));
+	else
+	{
+		MatrixType	   *X = PG_GETARG_MATRIXTYPE_P(0);
+		MatrixType	   *Y = PG_GETARG_MATRIXTYPE_P(1);
+		PG_RETURN_MATRIXTYPE_P(array_martix_cbind(INT4OID, X, Y));
+	}
 }
 PG_FUNCTION_INFO_V1(array_matrix_cbind_int4);
 
 Datum
 array_matrix_cbind_int8(PG_FUNCTION_ARGS)
 {
-	MatrixType	   *X = PG_GETARG_MATRIXTYPE_P(0);
-	MatrixType	   *Y = PG_GETARG_MATRIXTYPE_P(1);
-	PG_RETURN_MATRIXTYPE_P(array_martix_cbind(INT8OID, X, Y));
+	if (PG_ARGISNULL(0))
+		PG_RETURN_DATUM(PG_GETARG_DATUM(1));
+	else if (PG_ARGISNULL(1))
+		PG_RETURN_DATUM(PG_GETARG_DATUM(0));
+	else
+	{
+		MatrixType	   *X = PG_GETARG_MATRIXTYPE_P(0);
+		MatrixType	   *Y = PG_GETARG_MATRIXTYPE_P(1);
+		PG_RETURN_MATRIXTYPE_P(array_martix_cbind(INT8OID, X, Y));
+	}
 }
 PG_FUNCTION_INFO_V1(array_matrix_cbind_int8);
 
 Datum
 array_matrix_cbind_float4(PG_FUNCTION_ARGS)
 {
-	MatrixType	   *X = PG_GETARG_MATRIXTYPE_P(0);
-	MatrixType	   *Y = PG_GETARG_MATRIXTYPE_P(1);
-	PG_RETURN_MATRIXTYPE_P(array_martix_cbind(FLOAT4OID, X, Y));
+	if (PG_ARGISNULL(0))
+		PG_RETURN_DATUM(PG_GETARG_DATUM(1));
+	else if (PG_ARGISNULL(1))
+		PG_RETURN_DATUM(PG_GETARG_DATUM(0));
+	else
+	{
+		MatrixType	   *X = PG_GETARG_MATRIXTYPE_P(0);
+		MatrixType	   *Y = PG_GETARG_MATRIXTYPE_P(1);
+		PG_RETURN_MATRIXTYPE_P(array_martix_cbind(FLOAT4OID, X, Y));
+	}
 }
 PG_FUNCTION_INFO_V1(array_matrix_cbind_float4);
 
 Datum
 array_matrix_cbind_float8(PG_FUNCTION_ARGS)
 {
-	MatrixType	   *X = PG_GETARG_MATRIXTYPE_P(0);
-	MatrixType	   *Y = PG_GETARG_MATRIXTYPE_P(1);
-	PG_RETURN_MATRIXTYPE_P(array_martix_cbind(FLOAT8OID, X, Y));
+	if (PG_ARGISNULL(0))
+		PG_RETURN_DATUM(PG_GETARG_DATUM(1));
+	else if (PG_ARGISNULL(1))
+		PG_RETURN_DATUM(PG_GETARG_DATUM(0));
+	else
+	{
+		MatrixType	   *X = PG_GETARG_MATRIXTYPE_P(0);
+		MatrixType	   *Y = PG_GETARG_MATRIXTYPE_P(1);
+		PG_RETURN_MATRIXTYPE_P(array_martix_cbind(FLOAT8OID, X, Y));
+	}
 }
 PG_FUNCTION_INFO_V1(array_matrix_cbind_float8);
 
