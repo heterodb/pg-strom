@@ -160,9 +160,9 @@ pgstrom_final_avg_int8_final(PG_FUNCTION_ARGS)
 
 	return DirectFunctionCall2(numeric_div,
 							   DirectFunctionCall1(int8_numeric,
-												   Int64GetDatum(x[0])),
+												   Int64GetDatum(x[1])),
 							   DirectFunctionCall1(int8_numeric,
-												   Int64GetDatum(x[1])));
+												   Int64GetDatum(x[0])));
 }
 PG_FUNCTION_INFO_V1(pgstrom_final_avg_int8_final);
 
