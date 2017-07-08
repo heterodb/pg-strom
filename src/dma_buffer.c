@@ -91,7 +91,7 @@ typedef struct dmaBufferSegment
 
 typedef struct dmaBufferSegmentHead
 {
-	LWLock		mutex;
+	pthread_rwlock_t rwlock;
 	dlist_head	active_segment_list;
 	dlist_head	inactive_segment_list;
 	dmaBufferSegment segments[FLEXIBLE_ARRAY_MEMBER];
@@ -151,7 +151,7 @@ static __thread int			last_caller_free_lineno = -1;
 /*
  * dmaBufferCreateSegment - create a new DMA buffer segment
  *
- * NOTE: caller must have LW_EXCLUSIVE on &dmaBufSegHead->mutex
+ * NOTE: caller must have exclusive-lock on &dmaBufSegHead->rwlock
  */
 static void
 dmaBufferCreateSegment(dmaBufferSegment *seg)
@@ -317,7 +317,7 @@ dmaBufferCreateSegment(dmaBufferSegment *seg)
  * segment. If somebody still mapped this segment, further reference will
  * cause SIGBUS then signal handler will detach this segment.
  *
- * NOTE: caller must have &dmaBufSegHead->mutex with LW_EXCLUSIVE
+ * NOTE: caller must have exclusive-lock on &dmaBufSegHead->rwlock
  */
 static void
 dmaBufferDetachSegment(dmaBufferSegment *seg)
@@ -661,7 +661,7 @@ dmaBufferSplitChunk(dmaBufferSegment *segment, int mclass)
 /*
  * dmaBufferAllocChunk
  *
- * NOTE: caller must have LW_SHARED on &dmaBufSegHead->mutex
+ * NOTE: caller must have shared-lock on &dmaBufSegHead->rwlock
  */
 static void *
 dmaBufferAllocChunk(dmaBufferSegment *seg, int mclass, Size required)
@@ -722,64 +722,84 @@ dmaBufferAllocInternal(SharedGpuContext *shgcon, Size required)
 		elog(ERROR, "DMA buffer request %zu MB too large", required >> 20);
 
 	/* find out an available segment */
-	LWLockAcquire(&dmaBufSegHead->mutex, LW_SHARED);
-retry:
-	dlist_foreach(iter, &dmaBufSegHead->active_segment_list)
+	if ((errno = pthread_rwlock_rdlock(&dmaBufSegHead->rwlock)) != 0)
+		wfatal("failed on pthread_rwlock_rdlock: %m");
+	STROM_TRY();
 	{
-		seg = dlist_container(dmaBufferSegment, chain, iter.cur);
-		Assert(SHMSEG_EXISTS(pg_atomic_read_u32(&seg->revision)));
+	retry:
+		dlist_foreach(iter, &dmaBufSegHead->active_segment_list)
+		{
+			seg = dlist_container(dmaBufferSegment, chain, iter.cur);
+			Assert(SHMSEG_EXISTS(pg_atomic_read_u32(&seg->revision)));
 
+			chunk = dmaBufferAllocChunk(seg, mclass, required);
+			if (chunk)
+				goto found;
+		}
+
+		/* Oops, no available free chunks in the active list */
+		if (!has_exclusive_lock)
+		{
+			if ((errno = pthread_rwlock_unlock(&dmaBufSegHead->rwlock)) != 0)
+				wfatal("failed on pthread_rwlock_unlock: %m");
+			if ((errno = pthread_rwlock_wrlock(&dmaBufSegHead->rwlock)) != 0)
+				wfatal("failed on pthread_rwlock_wrlock: %m");
+			has_exclusive_lock = true;
+			goto retry;
+		}
+		if (dlist_is_empty(&dmaBufSegHead->inactive_segment_list))
+			werror("Out of DMA buffer segment");
+
+		/*
+		 * Create a new DMA buffer segment
+		 */
+		dnode = dlist_pop_head_node(&dmaBufSegHead->inactive_segment_list);
+		seg = dlist_container(dmaBufferSegment, chain, dnode);
+		Assert(!SHMSEG_EXISTS(pg_atomic_read_u32(&seg->revision)));
+		STROM_TRY();
+		{
+			dmaBufferCreateSegment(seg);
+		}
+		STROM_CATCH();
+		{
+			dlist_push_head(&dmaBufSegHead->inactive_segment_list,
+							&seg->chain);
+			STROM_RE_THROW();
+		}
+		STROM_END_TRY();
+		dlist_push_head(&dmaBufSegHead->active_segment_list, &seg->chain);
+
+		/*
+		 * allocation of a new chunk from the new chunk to ensure num_chunks
+		 * is larger than zero.
+		 */
 		chunk = dmaBufferAllocChunk(seg, mclass, required);
-		if (chunk)
-			goto found;
+		Assert(chunk != NULL);
+	found:
+		;
 	}
-
-	/* Oops, no available free chunks in the active list */
-	if (!has_exclusive_lock)
+	STROM_CATCH();
 	{
-		LWLockRelease(&dmaBufSegHead->mutex);
-		LWLockAcquire(&dmaBufSegHead->mutex, LW_EXCLUSIVE);
-		has_exclusive_lock = true;
-		goto retry;
+		if ((errno = pthread_rwlock_unlock(&dmaBufSegHead->rwlock)) != 0)
+			wfatal("failed on pthread_rwlock_unlock: %m");
+		STROM_RE_THROW();
 	}
-	if (dlist_is_empty(&dmaBufSegHead->inactive_segment_list))
-		elog(ERROR, "Out of DMA buffer segment");
-
-	/*
-	 * Create a new DMA buffer segment
-	 */
-	dnode = dlist_pop_head_node(&dmaBufSegHead->inactive_segment_list);
-	seg = dlist_container(dmaBufferSegment, chain, dnode);
-	Assert(!SHMSEG_EXISTS(pg_atomic_read_u32(&seg->revision)));
-	PG_TRY();
-	{
-		dmaBufferCreateSegment(seg);
-	}
-	PG_CATCH();
-	{
-		dlist_push_head(&dmaBufSegHead->inactive_segment_list, &seg->chain);
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-	dlist_push_head(&dmaBufSegHead->active_segment_list, &seg->chain);
-
-	/*
-	 * allocation of a new chunk from the new chunk to ensure num_chunks
-	 * is larger than zero.
-	 */
-	chunk = dmaBufferAllocChunk(seg, mclass, required);
-	Assert(chunk != NULL);
-found:
-	LWLockRelease(&dmaBufSegHead->mutex);
+	STROM_END_TRY();
+	if ((errno = pthread_rwlock_unlock(&dmaBufSegHead->rwlock)) != 0)
+		wfatal("failed on pthread_rwlock_unlock: %m");
 
 	/* track this chunk with GpuContext */
 	SpinLockAcquire(&shgcon->lock);
 	chunk->shgcon = shgcon;
 	dlist_push_tail(&shgcon->dma_buffer_list, &chunk->gcxt_chain);
 	SpinLockRelease(&shgcon->lock);
-
+#ifdef NOT_USED
+	/*
+	 * NOTE: It may make sense for debugging, however, caller exactly knows
+	 * which area needs to be cleared and initialized. Not a job of allocator.
+	 */
 	memset(chunk->data, 0xAE, chunk->required);
-
+#endif
 	return chunk->data;
 }
 
@@ -923,16 +943,17 @@ dmaBufferValidatePtr(void *pointer)
 {
 	bool	result = true;
 
-	PG_TRY();
+	STROM_TRY();
 	{
 		(void) pointer_validation(pointer, NULL);
 	}
-	PG_CATCH();
+	STROM_CATCH();
 	{
-		FlushErrorState();
+		if (IsGpuServerProcess() >= 0)
+			FlushErrorState();	/* only if single-thread mode */
 		result = false;
 	}
-	PG_END_TRY();
+	STROM_END_TRY();
 
 	return result;
 }
@@ -1017,8 +1038,8 @@ retry:
 		if (!has_exclusive_mutex)
 		{
 			SpinLockRelease(&seg->lock);
-
-			LWLockAcquire(&dmaBufSegHead->mutex, LW_EXCLUSIVE);
+			if ((errno = pthread_rwlock_wrlock(&dmaBufSegHead->rwlock)) != 0)
+				wfatal("failed on pthread_rwlock_wrlock: %m");
 			has_exclusive_mutex = true;
 			goto retry;
 		}
@@ -1090,7 +1111,10 @@ retry:
 	}
 
 	if (has_exclusive_mutex)
-		LWLockRelease(&dmaBufSegHead->mutex);
+	{
+		if ((errno = pthread_rwlock_unlock(&dmaBufSegHead->rwlock)) != 0)
+			wfatal("failed on pthread_rwlock_unlock: %m");
+	}
 }
 
 /*
@@ -1235,7 +1259,8 @@ pgstrom_dma_buffer_info(PG_FUNCTION_ARGS)
 
 		fncxt->tuple_desc = BlessTupleDesc(tupdesc);
 
-		LWLockAcquire(&dmaBufSegHead->mutex, LW_SHARED);
+		if ((errno = pthread_rwlock_rdlock(&dmaBufSegHead->rwlock)) != 0)
+			elog(FATAL, "failed on pthread_rwlock_rdlock: %m");
 		dlist_foreach(iter, &dmaBufSegHead->active_segment_list)
 		{
 			dmaBufferSegment   *seg = dlist_container(dmaBufferSegment,
@@ -1275,12 +1300,15 @@ pgstrom_dma_buffer_info(PG_FUNCTION_ARGS)
 			PG_CATCH();
 			{
 				SpinLockRelease(&seg->lock);
+				if ((errno = pthread_rwlock_unlock(&dmaBufSegHead->rwlock)) != 0)
+					elog(FATAL, "failed on pthread_rwlock_unlock: %m");
 				PG_RE_THROW();
 			}
 			PG_END_TRY();
 			SpinLockRelease(&seg->lock);
 		}
-		LWLockRelease(&dmaBufSegHead->mutex);
+		if ((errno = pthread_rwlock_unlock(&dmaBufSegHead->rwlock)) != 0)
+			elog(FATAL, "failed on pthread_rwlock_unlock: %m");
 
 		fncxt->user_fctx = results;
 		MemoryContextSwitchTo(oldcxt);
@@ -1320,6 +1348,7 @@ maxBackends(void)
 static void
 pgstrom_startup_dma_buffer(void)
 {
+	pthread_rwlockattr_t rwlock_attr;
 	Size		length;
 	bool		found;
 	int			i, j;
@@ -1337,7 +1366,14 @@ pgstrom_startup_dma_buffer(void)
 	length = sizeof(dmaBufferLocalMap) * max_dma_segment_nums;
 	dmaBufLocalMaps = MemoryContextAllocZero(TopMemoryContext, length);
 
-	LWLockInitialize(&dmaBufSegHead->mutex, 0);
+	/* init pthread_rwlock_t */
+	if ((errno = pthread_rwlockattr_init(&rwlock_attr)) != 0)
+		elog(ERROR, "failed on pthread_rwlockattr_init: %m");
+	if ((errno = pthread_rwlockattr_setpshared(&rwlock_attr, 1)) != 0)
+		elog(ERROR, "failed on pthread_rwlockattr_setpshared: %m");
+	if ((errno = pthread_rwlock_init(&dmaBufSegHead->rwlock,
+									 &rwlock_attr)) != 0)
+		elog(ERROR, "failed on pthread_rwlock_init: %m");
 	dlist_init(&dmaBufSegHead->active_segment_list);
 	dlist_init(&dmaBufSegHead->inactive_segment_list);
 
