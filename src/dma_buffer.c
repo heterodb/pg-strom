@@ -984,8 +984,15 @@ __dmaBufferFree(void *pointer,
 #endif
 	/* sanity checks */
 	chunk = pointer_validation(pointer, &seg);
+#ifdef NOT_USED
+	/*
+	 * NOTE: the memset() below usually works to detect incorrect memory
+	 * usage, however, additional CPU cycles are not ignorable. So, it
+	 * shall be commented out unless developer does not need it for
+	 * investigation.
+	 */
 	memset(chunk->data, 0xf5, chunk->required);
-
+#endif
 	/* detach chunk from the GpuContext */
 	shgcon = chunk->shgcon;
 	SpinLockAcquire(&shgcon->lock);
