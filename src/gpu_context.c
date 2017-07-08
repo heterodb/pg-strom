@@ -759,13 +759,13 @@ PutGpuContext(GpuContext_v2 *gcontext)
 			wnotice("%u: debug1=%.2f", MyProcPid,
 					((double)gcontext->debug_tv1) / 1000000.0);
 		if (gcontext->debug_tv2 > 0)
-			wnotice("%u: debug1=%.2f", MyProcPid,
+			wnotice("%u: debug2=%.2f", MyProcPid,
 					((double)gcontext->debug_tv2) / 1000000.0);
 		if (gcontext->debug_tv3 > 0)
-			wnotice("%u: debug1=%.2f", MyProcPid,
+			wnotice("%u: debug3=%.2f", MyProcPid,
 					((double)gcontext->debug_tv3) / 1000000.0);
 		if (gcontext->debug_tv4 > 0)
-			wnotice("%u: debug1=%.2f", MyProcPid,
+			wnotice("%u: debug4=%.2f", MyProcPid,
 					((double)gcontext->debug_tv4) / 1000000.0);
 #endif
 		free(gcontext);
