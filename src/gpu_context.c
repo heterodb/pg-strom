@@ -554,8 +554,7 @@ AllocGpuContext(bool with_connection)
 	/*
 	 * Not found, let's create a new GpuContext
 	 */
-	gcontext = malloc(offsetof(GpuContext_v2,
-							   restrack[RESTRACK_HASHSIZE]));
+	gcontext = calloc(1, sizeof(GpuContext_v2));
 	if (!gcontext)
 		elog(ERROR, "out of memory");
 
@@ -621,7 +620,7 @@ AttachGpuContext(pgsocket sockfd, SharedGpuContext *shgcon, int epoll_fd)
 		wfatal("Bug? backend tried to attach GPU context");
 
 	/* allocation of a local GpuContext */
-	gcontext = malloc(offsetof(GpuContext_v2, restrack[RESTRACK_HASHSIZE]));
+	gcontext = calloc(1, sizeof(GpuContext_v2));
 	if (!gcontext)
 		werror("out of memory");
 
@@ -755,6 +754,20 @@ PutGpuContext(GpuContext_v2 *gcontext)
 			gpuservClenupGpuContext(gcontext);
 		ReleaseLocalResources(gcontext, true);
 		PutSharedGpuContext(gcontext->shgcon);
+#ifdef PGSTROM_DEBUG
+		if (gcontext->debug_tv1 > 0)
+			wnotice("%u: debug1=%.2f", MyProcPid,
+					((double)gcontext->debug_tv1) / 1000000.0);
+		if (gcontext->debug_tv2 > 0)
+			wnotice("%u: debug1=%.2f", MyProcPid,
+					((double)gcontext->debug_tv2) / 1000000.0);
+		if (gcontext->debug_tv3 > 0)
+			wnotice("%u: debug1=%.2f", MyProcPid,
+					((double)gcontext->debug_tv3) / 1000000.0);
+		if (gcontext->debug_tv4 > 0)
+			wnotice("%u: debug1=%.2f", MyProcPid,
+					((double)gcontext->debug_tv4) / 1000000.0);
+#endif
 		free(gcontext);
 	}
 }

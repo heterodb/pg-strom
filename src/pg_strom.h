@@ -89,11 +89,7 @@
 #define PGSTROM_SCHEMA_NAME		"pgstrom"
 
 /*
- * GpuContext_v2
- *
- * 
- *
- *
+ * GpuContext / SharedGpuContext
  */
 typedef struct SharedGpuContext
 {
@@ -115,6 +111,12 @@ typedef struct GpuContext_v2
 	SharedGpuContext *shgcon;
 	pg_atomic_uint32 refcnt;
 	pg_atomic_uint32 is_unlinked;
+#ifdef PGSTROM_DEBUG
+	unsigned long	debug_tv1;	/* usec for debug / analysis */
+	unsigned long	debug_tv2;	/* usec for debug / analysis */
+	unsigned long	debug_tv3;	/* usec for debug / analysis */
+	unsigned long	debug_tv4;	/* usec for debug / analysis */
+#endif
 	slock_t			lock;		/* lock for resource tracker */
 	dlist_head		restrack[RESTRACK_HASHSIZE];
 } GpuContext_v2;

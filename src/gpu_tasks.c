@@ -28,8 +28,6 @@
  * static functions
  */
 static void pgstrom_accum_worker_statistics(GpuTaskState_v2 *gts);
-//static void pgstrom_explain_perfmon(GpuTaskState_v2 *gts, ExplainState *es);
-
 
 /*
  * construct_kern_parambuf
