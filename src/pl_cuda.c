@@ -1859,21 +1859,21 @@ plcuda_cleanup_cuda_resources(plcudaTask *ptask)
 	{
 		rc = gpuMemFree(ptask->task.gcontext, ptask->m_kern_plcuda);
 		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on gpuMemFree: %s", errorText(rc));
+			wnotice("failed on gpuMemFree: %s", errorText(rc));
 	}
 
 	if (ptask->m_results_buf)
 	{
 		rc = gpuMemFree(ptask->task.gcontext, ptask->m_results_buf);
 		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on gpuMemFree: %s", errorText(rc));
+			wnotice("failed on gpuMemFree: %s", errorText(rc));
 	}
 
 	if (ptask->m_working_buf)
 	{
 		rc = gpuMemFree(ptask->task.gcontext, ptask->m_working_buf);
 		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on gpuMemFree: %s", errorText(rc));
+			wnotice("failed on gpuMemFree: %s", errorText(rc));
 	}
 	ptask->kern_plcuda_prep = NULL;
 	ptask->kern_plcuda_main = NULL;
@@ -1939,14 +1939,14 @@ __plcuda_process_task(plcudaTask *ptask,
 								 cuda_module,
 								 "plcuda_prep_kernel_entrypoint");
 		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
+			werror("failed on cuModuleGetFunction: %s", errorText(rc));
 	}
 	/* plcuda_main_kernel_entrypoint */
 	rc = cuModuleGetFunction(&ptask->kern_plcuda_main,
 							 cuda_module,
 							 "plcuda_main_kernel_entrypoint");
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
+		werror("failed on cuModuleGetFunction: %s", errorText(rc));
 	/* plcuda_post_kernel_entrypoint */
 	if (ptask->exec_post_kernel)
 	{
@@ -1954,7 +1954,7 @@ __plcuda_process_task(plcudaTask *ptask,
 								 cuda_module,
 								 "plcuda_post_kernel_entrypoint");
 		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
+			werror("failed on cuModuleGetFunction: %s", errorText(rc));
 	}
 
 	/* kern_plcuda structure on the device side */
@@ -1964,7 +1964,7 @@ __plcuda_process_task(plcudaTask *ptask,
 	if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		goto out_of_resource;
 	else if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on gpuMemAlloc: %s", errorText(rc));
+		werror("failed on gpuMemAlloc: %s", errorText(rc));
 
 	/* working buffer if required */
 	if (ptask->kern.working_bufsz > 0)
@@ -1975,7 +1975,7 @@ __plcuda_process_task(plcudaTask *ptask,
 		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 			goto out_of_resource;
 		else if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on gpuMemAlloc: %s", errorText(rc));
+			werror("failed on gpuMemAlloc: %s", errorText(rc));
 	}
 	else
 	{
@@ -1991,7 +1991,7 @@ __plcuda_process_task(plcudaTask *ptask,
 		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 			goto out_of_resource;
 		else if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on gpuMemAlloc: %s", errorText(rc));
+			werror("failed on gpuMemAlloc: %s", errorText(rc));
 	}
 	else
 	{
@@ -2004,7 +2004,7 @@ __plcuda_process_task(plcudaTask *ptask,
 						   KERN_PLCUDA_DMASEND_LENGTH(&ptask->kern),
 						   cuda_stream);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+		werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
 
 	/* kernel arguments (common for all thress kernels) */
 	kern_args[0] = &ptask->m_kern_plcuda;
@@ -2041,17 +2041,16 @@ __plcuda_process_task(plcudaTask *ptask,
 							kern_args,
 							NULL);
 		if (rc != CUDA_SUCCESS)
-			ereport(ERROR,
-					(errcode(ERRCODE_INTERNAL_ERROR),
-					 errmsg("failed on cuLaunchKernel: %s", errorText(rc)),
-					 errhint("prep-kernel: grid=%u block=%u shmem=%zu",
-							 (cl_uint)grid_size, (cl_uint)block_size,
-							 ptask->kern.prep_shmem_blocksz +
-							 ptask->kern.prep_shmem_unitsz * block_size)));
-		elog(DEBUG2, "PL/CUDA prep-kernel: grid=%u block=%u shmem=%zu",
-			 (cl_uint)grid_size, (cl_uint)block_size,
-			 ptask->kern.prep_shmem_blocksz +
-			 ptask->kern.prep_shmem_unitsz * block_size);
+			werror("failed on cuLaunchKernel: %s "
+				   "(prep-kernel: grid=%u block=%u shmem=%zu)",
+				   errorText(rc),
+				   (cl_uint)grid_size, (cl_uint)block_size,
+				   ptask->kern.prep_shmem_blocksz +
+				   ptask->kern.prep_shmem_unitsz * block_size);
+		wdebug("PL/CUDA prep-kernel: grid=%u block=%u shmem=%zu",
+			   (cl_uint)grid_size, (cl_uint)block_size,
+			   ptask->kern.prep_shmem_blocksz +
+			   ptask->kern.prep_shmem_unitsz * block_size);
 	}
 
 	/* launch plcuda_main_kernel_entrypoint */
@@ -2082,17 +2081,16 @@ __plcuda_process_task(plcudaTask *ptask,
 						kern_args,
 						NULL);
 	if (rc != CUDA_SUCCESS)
-		ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("failed on cuLaunchKernel: %s", errorText(rc)),
-				 errhint("main-kernel: grid=%u block=%u shmem=%zu",
-						 (cl_uint)grid_size, (cl_uint)block_size,
-						 ptask->kern.main_shmem_blocksz +
-						 ptask->kern.main_shmem_unitsz * block_size)));
-	elog(DEBUG2, "PL/CUDA main-kernel: grid=%u block=%u shmem=%zu",
-		 (cl_uint)grid_size, (cl_uint)block_size,
-		 ptask->kern.main_shmem_blocksz +
-		 ptask->kern.main_shmem_unitsz * block_size);
+		werror("failed on cuLaunchKernel: %s "
+			   "(main-kernel: grid=%u block=%u shmem=%zu)",
+			   errorText(rc),
+			   (cl_uint)grid_size, (cl_uint)block_size,
+			   ptask->kern.main_shmem_blocksz +
+			   ptask->kern.main_shmem_unitsz * block_size);
+	wdebug("PL/CUDA main-kernel: grid=%u block=%u shmem=%zu",
+		   (cl_uint)grid_size, (cl_uint)block_size,
+		   ptask->kern.main_shmem_blocksz +
+		   ptask->kern.main_shmem_unitsz * block_size);
 
 	/* launch plcuda_post_kernel_entrypoint */
 	if (ptask->exec_post_kernel)
@@ -2124,17 +2122,16 @@ __plcuda_process_task(plcudaTask *ptask,
 							kern_args,
 							NULL);
 		if (rc != CUDA_SUCCESS)
-			ereport(ERROR,
-					(errcode(ERRCODE_INTERNAL_ERROR),
-					 errmsg("failed on cuLaunchKernel: %s", errorText(rc)),
-					 errhint("post-kernel: grid=%u block=%u shmem=%zu",
-							 (cl_uint)grid_size, (cl_uint)block_size,
-							 ptask->kern.post_shmem_blocksz +
-							 ptask->kern.post_shmem_unitsz * block_size)));
-		elog(DEBUG2, "PL/CUDA post-kernel: grid=%u block=%u shmem=%zu",
-			 (cl_uint)grid_size, (cl_uint)block_size,
-			 ptask->kern.post_shmem_blocksz +
-			 ptask->kern.post_shmem_unitsz * block_size);
+			werror("failed on cuLaunchKernel: %s "
+				   "(post-kernel: grid=%u block=%u shmem=%zu)",
+				   errorText(rc),
+				   (cl_uint)grid_size, (cl_uint)block_size,
+				   ptask->kern.post_shmem_blocksz +
+				   ptask->kern.post_shmem_unitsz * block_size);
+		wdebug("PL/CUDA post-kernel: grid=%u block=%u shmem=%zu",
+			   (cl_uint)grid_size, (cl_uint)block_size,
+			   ptask->kern.post_shmem_blocksz +
+			   ptask->kern.post_shmem_unitsz * block_size);
 	}
 
 	/* write back the control block */
@@ -2143,7 +2140,7 @@ __plcuda_process_task(plcudaTask *ptask,
 						   KERN_PLCUDA_DMARECV_LENGTH(&ptask->kern),
 						   cuda_stream);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuMemcpyDtoHAsync: %s", errorText(rc));
+		werror("failed on cuMemcpyDtoHAsync: %s", errorText(rc));
 
 	/* write back the result buffer, if any */
 	if (ptask->m_results_buf != 0UL)
@@ -2154,7 +2151,7 @@ __plcuda_process_task(plcudaTask *ptask,
 							   ptask->kern.results_bufsz,
 							   cuda_stream);
 		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuMemcpyDtoHAsync: %s", errorText(rc));
+			werror("failed on cuMemcpyDtoHAsync: %s", errorText(rc));
 	}
 
 	/* callback registration */
@@ -2162,7 +2159,7 @@ __plcuda_process_task(plcudaTask *ptask,
 							 plcuda_respond_task,
 							 ptask, 0);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "cuStreamAddCallback: %s", errorText(rc));
+		werror("cuStreamAddCallback: %s", errorText(rc));
 	return 0;
 
 out_of_resource:
@@ -2178,16 +2175,16 @@ plcuda_process_task(GpuTask_v2 *gtask,
 	plcudaTask *ptask = (plcudaTask *) gtask;
 	int			retval;
 
-	PG_TRY();
+	STROM_TRY();
 	{
 		retval = __plcuda_process_task(ptask, cuda_module, cuda_stream);
 	}
-	PG_CATCH();
+	STROM_CATCH();
 	{
 		plcuda_cleanup_cuda_resources((plcudaTask *) gtask);
-		PG_RE_THROW();
+		STROM_RE_THROW();
 	}
-	PG_END_TRY();
+	STROM_END_TRY();
 
 	return retval;
 }
