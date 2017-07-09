@@ -706,6 +706,51 @@ gpuservAcceptConnection(void)
 }
 
 /*
+ * gputask_pushto_pending_list - push a GpuTask to the pending list with
+ * delay (if any).
+ */
+static inline void
+gputask_pushto_pending_list(GpuTask_v2 *gtask, unsigned long delay)
+{
+	dlist_iter		iter;
+	struct timeval	tv;
+
+	if (delay == 0)
+		memset(&gtask->tv_wakeup, 0, sizeof(struct timeval));
+	else
+	{
+		gettimeofday(&tv, NULL);
+
+		tv.tv_usec += delay;
+		if (tv.tv_usec >= 1000000)
+		{
+			tv.tv_sec += tv.tv_usec / 1000000;
+			tv.tv_usec = tv.tv_usec % 1000000;
+		}
+		gtask->tv_wakeup = tv;
+	}
+
+	SpinLockAcquire(&session_tasks_lock);
+	if (gtask->chain.prev != NULL || gtask->chain.next != NULL)
+		dlist_delete(&gtask->chain);
+	dlist_reverse_foreach(iter, &session_pending_tasks)
+	{
+		GpuTask_v2 *curr = dlist_container(GpuTask_v2, chain, iter.cur);
+
+		if (curr->tv_wakeup.tv_sec < gtask->tv_wakeup.tv_sec ||
+			(curr->tv_wakeup.tv_sec == gtask->tv_wakeup.tv_sec &&
+			 curr->tv_wakeup.tv_usec <= gtask->tv_wakeup.tv_usec))
+		{
+			dlist_insert_after(&curr->chain, &gtask->chain);
+			goto found;
+		}
+	}
+	dlist_push_head(&session_pending_tasks, &gtask->chain);
+found:
+	SpinLockRelease(&session_tasks_lock);
+}
+
+/*
  * gpuservRecvCommands - returns number of the commands received
  */
 static int
@@ -806,9 +851,7 @@ gpuservRecvCommands(GpuContext_v2 *gcontext, bool *p_peer_sock_closed)
 				/* attach peer file-descriptor, if any */
 				if (peer_fdesc >= 0)
 					gtask->peer_fdesc = peer_fdesc;
-				SpinLockAcquire(&session_tasks_lock);
-				dlist_push_tail(&session_pending_tasks, &gtask->chain);
-				SpinLockRelease(&session_tasks_lock);
+				gputask_pushto_pending_list(gtask, 0);
 			}
 			else
 			{
@@ -944,20 +987,41 @@ gpuservRecvGpuTasks(GpuContext_v2 *gcontext, long timeout)
 /*
  * gpuserv_try_run_pending_task
  */
-static bool
-gpuserv_try_run_pending_task(void)
+static void
+gpuserv_try_run_pending_task(long *p_timeout)
 {
 	dlist_node	   *dnode;
 	GpuTask_v2	   *gtask;
+	struct timeval	tv;
+	long			delay;
 
 	SpinLockAcquire(&session_tasks_lock);
 	if (dlist_is_empty(&session_pending_tasks))
 	{
 		SpinLockRelease(&session_tasks_lock);
-		return false;
+		return;
 	}
 	dnode = dlist_pop_head_node(&session_pending_tasks);
 	gtask = dlist_container(GpuTask_v2, chain, dnode);
+	/* check task's delay, if any */
+	if (gtask->tv_wakeup.tv_sec != 0 || gtask->tv_wakeup.tv_usec != 0)
+	{
+		gettimeofday(&tv, NULL);
+		if (tv.tv_sec < gtask->tv_wakeup.tv_sec ||
+			(tv.tv_sec == gtask->tv_wakeup.tv_sec &&
+			 tv.tv_usec < gtask->tv_wakeup.tv_usec))
+		{
+			delay = ((gtask->tv_wakeup.tv_sec - tv.tv_sec) * 1000 +
+					 (gtask->tv_wakeup.tv_usec - tv.tv_usec) / 1000);
+			/* it is not a time to run yet! */
+			dlist_push_head(&session_pending_tasks, &gtask->chain);
+			SpinLockRelease(&session_tasks_lock);
+
+			*p_timeout = Min(*p_timeout, delay);
+			return;
+		}
+		memset(&gtask->tv_wakeup, 0, sizeof(struct timeval));
+	}
 	dlist_push_tail(&session_running_tasks, &gtask->chain);
 	SpinLockRelease(&session_tasks_lock);
 
@@ -965,32 +1029,19 @@ gpuserv_try_run_pending_task(void)
 	{
 		GpuModuleCache *gmod_cache;
 		CUstream		cuda_stream;
-		struct timeval	tv;
 		cl_int			i, retval;
 
 		gmod_cache = lookupGpuModuleCache(gtask->program_id);
 		if (!gmod_cache)
 		{
-			/* add 250ms wait until next launch */
-			gettimeofday(&tv, NULL);
-			tv.tv_usec += 250000;
-			if (tv.tv_usec >= 1000000)
-			{
-				tv.tv_usec -= tv.tv_usec;
-				tv.tv_sec++;
-			}
-
 			/*
-			 * When pgstrom_load_cuda_program() returns NULL (it means
-			 * build of the supplied program is in-progress), caller
-			 * is registered to the waiting processes list.
-			 * So, we can expect MyLatch will be set when CUDA program
-			 * build gets completed.
+			 * When lookupGpuModuleCache() -> pgstrom_load_cuda_program()
+			 * returns NULL, it means the required progrem is still under 
+			 * run-time build process, so GpuTask has to wait until its
+			 * completion for launch.
+			 * 150ms delay shall be added for the 
 			 */
-			SpinLockAcquire(&session_tasks_lock);
-			dlist_delete(&gtask->chain);
-			dlist_push_tail(&session_pending_tasks, &gtask->chain);
-			SpinLockRelease(&session_tasks_lock);
+			gputask_pushto_pending_list(gtask, 150000);
 		}
 		else
 		{
@@ -1021,19 +1072,8 @@ gpuserv_try_run_pending_task(void)
 				putGpuModuleCache(gmod_cache);
 				gtask->gmod_cache = NULL;
 
-				/* add 400ms wait until next launch */
-				gettimeofday(&tv, NULL);
-				tv.tv_usec += 400000;
-				if (tv.tv_usec >= 1000000)
-				{
-					tv.tv_usec -= tv.tv_usec;
-					tv.tv_sec++;
-				}
-
-				SpinLockAcquire(&session_tasks_lock);
-				dlist_delete(&gtask->chain);
-				dlist_push_tail(&session_pending_tasks, &gtask->chain);
-				SpinLockRelease(&session_tasks_lock);
+				/* add 100ms delay until next launch */
+				gputask_pushto_pending_list(gtask, 100000);
 			}
 		}
 	}
@@ -1044,15 +1084,14 @@ gpuserv_try_run_pending_task(void)
 	}
 	STROM_END_TRY();
 
-	return true;
+	*p_timeout = 0;
 }
-
 
 /*
  * gpuserv_try_run_completed_task
  */
-static bool
-gpuserv_try_run_completed_task(void)
+static void
+gpuserv_try_run_completed_task(long *p_timeout)
 {
 	dlist_node	   *dnode;
 	GpuTask_v2	   *gtask;
@@ -1061,7 +1100,7 @@ gpuserv_try_run_completed_task(void)
 	if (dlist_is_empty(&session_completed_tasks))
 	{
 		SpinLockRelease(&session_tasks_lock);
-		return false;
+		return;
 	}
 	dnode = dlist_pop_head_node(&session_completed_tasks);
 	gtask = dlist_container(GpuTask_v2, chain, dnode);
@@ -1148,7 +1187,7 @@ gpuserv_try_run_completed_task(void)
 	}
 	STROM_END_TRY();
 
-	return true;
+	*p_timeout = 0;
 }
 
 /*
@@ -1223,10 +1262,8 @@ gpuservWorkerMain(void *__private)
 				wlog("failed on read(gpuserv_event_fd): %m");
 			if (pgstrom_try_build_cuda_program())
 				timeout = 0;
-			if (gpuserv_try_run_completed_task())
-				timeout = 0;
-			if (gpuserv_try_run_pending_task())
-				timeout = 0;
+			gpuserv_try_run_completed_task(&timeout);
+			gpuserv_try_run_pending_task(&timeout);
 
 			nevents = epoll_wait(gpuserv_epoll_fd,
 								 &ep_event, 1,
