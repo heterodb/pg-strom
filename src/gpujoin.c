@@ -5524,7 +5524,7 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 							 cuda_module,
 							 "gpujoin_main");
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
+		werror("failed on cuModuleGetFunction: %s", errorText(rc));
 
 	/*
 	 * Allocation of device memory for each chunks
@@ -5546,8 +5546,7 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 			length += GPUMEMALIGN(pds_src->kds.length);
 		}
 		else if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on gpuMemAllocIOMap: %s",
-				 errorText(rc));
+			werror("failed on gpuMemAllocIOMap: %s", errorText(rc));
 	}
 	else if (pds_src)
 		length += GPUMEMALIGN(pds_src->kds.length);
@@ -5558,7 +5557,7 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 	if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		goto out_of_resource;
 	else if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on gpuMemAlloc: %s", errorText(rc));
+		werror("failed on gpuMemAlloc: %s", errorText(rc));
 
 	if (pds_src && pgjoin->m_kds_src == 0UL)
 	{
@@ -5583,7 +5582,7 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 						   length,
 						   cuda_stream);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+		werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
 
 	if (pds_src)
 	{
@@ -5595,7 +5594,7 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 								   pds_src->kds.length,
 								   cuda_stream);
 			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+				werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
 		}
 		else
 		{
@@ -5621,7 +5620,7 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 						   pds_dst->kds.length,
 						   cuda_stream);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+		werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
 
 	/* Lunch:
 	 * KERNEL_FUNCTION(void)
@@ -5647,7 +5646,7 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 						kern_args,
 						NULL);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
+		werror("failed on cuLaunchKernel: %s", errorText(rc));
 
 	/* DMA Recv: kern_gpujoin *kgjoin */
 	length = offsetof(kern_gpujoin, jscale[pgjoin->kern.num_rels + 1]);
@@ -5656,7 +5655,7 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 						   length,
 						   cuda_stream);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "cuMemcpyDtoHAsync: %s", errorText(rc));
+		werror("cuMemcpyDtoHAsync: %s", errorText(rc));
 
 	/* DMA Recv: kern_data_store *kds_dst */
 	rc = cuMemcpyDtoHAsync(&pds_dst->kds,
@@ -5664,7 +5663,7 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 						   pds_dst->kds.length,
 						   cuda_stream);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "cuMemcpyDtoHAsync: %s", errorText(rc));
+		werror("cuMemcpyDtoHAsync: %s", errorText(rc));
 
 	/*
 	 * DMA Recv: kern_data_store *kds_src, if NVMe-Strom is used and join
@@ -5686,7 +5685,7 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 							   length,
 							   cuda_stream);
 		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+			werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
 
 		/*
 		 * NOTE: Once GPU-to-RAM DMA gets completed, "uncached" blocks are
@@ -5703,7 +5702,7 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 							 gpujoin_task_respond,
 							 pgjoin, 0);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "cuStreamAddCallback: %s", errorText(rc));
+		werror("cuStreamAddCallback: %s", errorText(rc));
 
 	return 0;
 
@@ -5720,16 +5719,16 @@ gpujoin_process_task(GpuTask_v2 *gtask,
 	pgstrom_gpujoin *pgjoin = (pgstrom_gpujoin *) gtask;
 	int			status;
 
-	PG_TRY();
+	STROM_TRY();
 	{
 		status = __gpujoin_process_task(pgjoin, cuda_module, cuda_stream);
 	}
-	PG_CATCH();
+	STROM_CATCH();
 	{
 		gpujoin_cleanup_cuda_resources(pgjoin);
-		PG_RE_THROW();
+		STROM_RE_THROW();
 	}
-	PG_END_TRY();
+	STROM_END_TRY();
 
 	return status;
 }

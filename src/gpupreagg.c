@@ -3996,7 +3996,7 @@ gpupreagg_alloc_final_buffer(GpuPreAggTask *gpreagg,
 	bool					retval = true;
 	CUresult				rc;
 
-	PG_TRY();
+	STROM_TRY();
 	{
 		size_t		f_key_dist_salt;
 		size_t		f_nrooms;
@@ -4010,7 +4010,7 @@ gpupreagg_alloc_final_buffer(GpuPreAggTask *gpreagg,
 								 cuda_module,
 								 "gpupreagg_init_final_hash");
 		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
+			werror("failed on cuModuleGetFunction: %s", errorText(rc));
 
 		adjust_final_buffer_size(gpa_sstate,
 								 &f_key_dist_salt,
@@ -4036,20 +4036,20 @@ gpupreagg_alloc_final_buffer(GpuPreAggTask *gpreagg,
 			goto bailout;
 		}
 		else if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on gpuMemAlloc: %s", errorText(rc));
+			werror("failed on gpuMemAlloc: %s", errorText(rc));
 		m_fhash = m_kds_final + GPUMEMALIGN(pds_final->kds.length);
 
 		/* creation of event object to synchronize kds_final load */
 		rc = cuEventCreate(&ev_kds_final, CU_EVENT_DISABLE_TIMING);
 		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
+			werror("failed on cuEventCreate: %s", errorText(rc));
 
 		/* DMA send of kds_final head */
 		rc = cuMemcpyHtoDAsync(m_kds_final, &pds_final->kds,
 							   KERN_DATA_STORE_HEAD_LENGTH(&pds_final->kds),
 							   cuda_stream);
 		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+			werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
 
 		sync_cuda_stream = true;
 
@@ -4074,12 +4074,12 @@ gpupreagg_alloc_final_buffer(GpuPreAggTask *gpreagg,
 							kern_args,
 							NULL);
 		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
+			werror("failed on cuLaunchKernel: %s", errorText(rc));
 
 		/* Synchronization for setup of pds_final buffer */
 		rc = cuEventRecord(ev_kds_final, cuda_stream);
 		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuStreamWaitEvent: %s", errorText(rc));
+			werror("failed on cuStreamWaitEvent: %s", errorText(rc));
 
 		gpa_sstate->pds_final = pds_final;
 		gpa_sstate->m_kds_final = m_kds_final;
@@ -4092,35 +4092,34 @@ gpupreagg_alloc_final_buffer(GpuPreAggTask *gpreagg,
 	bailout:
 		;
 	}
-	PG_CATCH();
+	STROM_CATCH();
 	{
 		if (sync_cuda_stream)
 		{
 			rc = cuStreamSynchronize(cuda_stream);
 			if (rc != CUDA_SUCCESS)
-				elog(FATAL, "failed on cuStreamSynchronize: %s",
-					 errorText(rc));
+				wfatal("failed on cuStreamSynchronize: %s", errorText(rc));
 		}
 
 		if (ev_kds_final != NULL)
 		{
 			rc = cuEventDestroy(ev_kds_final);
 			if (rc != CUDA_SUCCESS)
-				elog(FATAL, "failed on cuEventDestroy: %s", errorText(rc));
+				wfatal("failed on cuEventDestroy: %s", errorText(rc));
 		}
 
 		if (m_kds_final != 0UL)
 		{
 			rc = gpuMemFree(gpreagg->task.gcontext, m_kds_final);
 			if (rc != CUDA_SUCCESS)
-				elog(FATAL, "failed on gpuMemFree: %s", errorText(rc));
+				wfatal("failed on gpuMemFree: %s", errorText(rc));
 		}
 
 		if (pds_final != NULL)
 			PDS_release(pds_final);
-		PG_RE_THROW();
+		STROM_RE_THROW();
 	}
-	PG_END_TRY();
+	STROM_END_TRY();
 
 	return retval;
 }
@@ -4152,7 +4151,7 @@ gpupreagg_get_final_buffer(GpuPreAggTask *gpreagg,
 		   gpreagg->pds_src->kds.format == KDS_FORMAT_BLOCK);
 
 	SpinLockAcquire(&gpa_sstate->lock);
-	PG_TRY();
+	STROM_TRY();
 	{
 		/* decision for the reduction mode */
 		if (gpreagg->kern.reduction_mode == GPUPREAGG_INVALID_REDUCTION)
@@ -4196,7 +4195,7 @@ gpupreagg_get_final_buffer(GpuPreAggTask *gpreagg,
 			Assert(gpa_sstate->ev_kds_final != NULL);
 			rc = cuStreamWaitEvent(cuda_stream, gpa_sstate->ev_kds_final, 0);
 			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on cuStreamWaitEvent: %s", errorText(rc));
+				werror("failed on cuStreamWaitEvent: %s", errorText(rc));
 		}
 		gpa_sstate->pds_final->ntasks_running++;
 		gpreagg->pds_final    = PDS_retain(gpa_sstate->pds_final);
@@ -4207,12 +4206,12 @@ gpupreagg_get_final_buffer(GpuPreAggTask *gpreagg,
 	bailout:
 		;
 	}
-	PG_CATCH();
+	STROM_CATCH();
 	{
 		SpinLockRelease(&gpa_sstate->lock);
-		PG_RE_THROW();
+		STROM_RE_THROW();
 	}
-	PG_END_TRY();
+	STROM_END_TRY();
 	SpinLockRelease(&gpa_sstate->lock);
 
 	return retval;
@@ -4309,10 +4308,10 @@ gpupreagg_put_final_buffer(GpuPreAggTask *gpreagg,
 		{
 			rc = cuEventDestroy(gpreagg->ev_kds_final);
 			if (rc != CUDA_SUCCESS)
-				elog(FATAL, "failed on cuEventDestroy: %s", errorText(rc));
+				wfatal("failed on cuEventDestroy: %s", errorText(rc));
 			rc = gpuMemFree(gpreagg->task.gcontext, gpreagg->m_kds_final);
 			if (rc != CUDA_SUCCESS)
-				elog(FATAL, "failed on gpuMemFree: %s", errorText(rc));
+				wfatal("failed on gpuMemFree: %s", errorText(rc));
 
 			PDS_release(pds_final);
 			gpreagg->pds_final = NULL;
@@ -4349,7 +4348,7 @@ gpupreagg_cleanup_cuda_resources(GpuPreAggTask *gpreagg)
 	{
 		rc = gpuMemFree(gpreagg->task.gcontext, gpreagg->m_gpreagg);
 		if (rc != CUDA_SUCCESS)
-			elog(FATAL, "failed on gpuMemFree: %s", errorText(rc));
+			wfatal("failed on gpuMemFree: %s", errorText(rc));
 	}
 
 	if (gpreagg->with_nvme_strom &&
@@ -4357,7 +4356,7 @@ gpupreagg_cleanup_cuda_resources(GpuPreAggTask *gpreagg)
 	{
 		rc = gpuMemFreeIOMap(gpreagg->task.gcontext, gpreagg->m_kds_src);
 		if (rc != CUDA_SUCCESS)
-			elog(FATAL, "failed on gpuMemFreeIOMap: %s", errorText(rc));
+			wfatal("failed on gpuMemFreeIOMap: %s", errorText(rc));
 	}
 	/* ensure pointers are NULL */
 	gpreagg->m_gpreagg = 0UL;
@@ -4440,7 +4439,7 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 							 cuda_module,
 							 "gpupreagg_main");
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
+		werror("failed on cuModuleGetFunction: %s", errorText(rc));
 
 	/*
 	 * Allocation of own device memory
@@ -4467,8 +4466,7 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 				length += GPUMEMALIGN(pds_src->kds.length);
 			}
 			else if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on gpuMemAllocIOMap: %s",
-					 errorText(rc));
+				werror("failed on gpuMemAllocIOMap: %s", errorText(rc));
 		}
 		else
 			length += GPUMEMALIGN(pds_src->kds.length);
@@ -4477,7 +4475,7 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 			goto out_of_resource;
 		else if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on gpuMemAlloc: %s", errorText(rc));
+			werror("failed on gpuMemAlloc: %s", errorText(rc));
 
 		gpreagg->m_gpreagg = devptr;
 		devptr += GPUMEMALIGN(KERN_GPUPREAGG_LENGTH(&gpreagg->kern));
@@ -4516,8 +4514,8 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 	else
 	{
 		SpinLockRelease(&gpa_sstate->lock);
-		elog(ERROR, "Bug? unexpected reduction mode: %d",
-			 gpreagg->kern.reduction_mode);
+		werror("Bug? unexpected reduction mode: %d",
+			   gpreagg->kern.reduction_mode);
 	}
 	SpinLockRelease(&gpa_sstate->lock);
 
@@ -4539,7 +4537,7 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 							   length,
 							   cuda_stream);
 		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+			werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
 
 		/* source data to be reduced */
 		if (!gpreagg->with_nvme_strom)
@@ -4550,8 +4548,7 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 								   length,
 								   cuda_stream);
 			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on cuMemcpyHtoDAsync: %s",
-					 errorText(rc));
+				werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
 		}
 		else
 		{
@@ -4573,7 +4570,7 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 							   length,
 							   cuda_stream);
 		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+			werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
 	}
 	/* header of the internal kds-slot buffer */
 	length = KERN_DATA_STORE_HEAD_LENGTH(gpreagg->kds_head);
@@ -4582,7 +4579,7 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 						   length,
 						   cuda_stream);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+		werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
 
 	/* Launch:
 	 * KERNEL_FUNCTION(void)
@@ -4608,7 +4605,7 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 						kern_args,
 						NULL);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
+		werror("failed on cuLaunchKernel: %s", errorText(rc));
 
 	/*
 	 * DMA Recv of individual kern_gpupreagg
@@ -4621,7 +4618,7 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 						   length,
 						   cuda_stream);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuMemcpyDtoHAsync: %s", errorText(rc));
+		werror("failed on cuMemcpyDtoHAsync: %s", errorText(rc));
 
 	/*
 	 * Callback registration
@@ -4630,7 +4627,7 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 							 gpupreagg_respond_task,
 							 gpreagg, 0);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "cuStreamAddCallback: %s", errorText(rc));
+		werror("cuStreamAddCallback: %s", errorText(rc));
 	return 0;
 
 out_of_resource:
@@ -4675,7 +4672,7 @@ gpupreagg_process_termination_task(GpuPreAggTask *gpreagg,
 								 cuda_module,
 								 "gpupreagg_fixup_varlena");
 		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
+			werror("failed on cuModuleGetFunction: %s", errorText(rc));
 
 		/* allocation of the kern_gpupreagg */
 		length = GPUMEMALIGN(offsetof(kern_gpupreagg, kparams) +
@@ -4686,14 +4683,14 @@ gpupreagg_process_termination_task(GpuPreAggTask *gpreagg,
 		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 			goto out_of_resource;
 		else if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on gpuMemAlloc: %s", errorText(rc));
+			werror("failed on gpuMemAlloc: %s", errorText(rc));
 
 		rc = cuMemcpyHtoDAsync(gpreagg->m_gpreagg,
 							   &gpreagg->kern,
 							   length,
 							   cuda_stream);
 		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+			werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
 
 		/* Launch:
 		 * KERNEL_FUNCTION(void)
@@ -4720,7 +4717,7 @@ gpupreagg_process_termination_task(GpuPreAggTask *gpreagg,
 							kern_args,
 							NULL);
 		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
+			werror("failed on cuLaunchKernel: %s", errorText(rc));
 
 		/*
 		 * DMA Recv of individual kern_gpupreagg
@@ -4731,7 +4728,7 @@ gpupreagg_process_termination_task(GpuPreAggTask *gpreagg,
 							   length,
 							   cuda_stream);
 		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuMemcpyDtoHAsync: %s", errorText(rc));
+			werror("failed on cuMemcpyDtoHAsync: %s", errorText(rc));
 	}
 
 	/*
@@ -4743,7 +4740,7 @@ gpupreagg_process_termination_task(GpuPreAggTask *gpreagg,
 						   length,
 						   cuda_stream);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+		werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
 
 	/*
 	 * Register the callback
@@ -4752,7 +4749,7 @@ gpupreagg_process_termination_task(GpuPreAggTask *gpreagg,
 							 gpupreagg_respond_task,
 							 gpreagg, 0);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "cuStreamAddCallback: %s", errorText(rc));
+		werror("cuStreamAddCallback: %s", errorText(rc));
 
 	return 0;
 
@@ -4773,7 +4770,7 @@ gpupreagg_process_task(GpuTask_v2 *gtask,
 	GpuPreAggTask  *gpreagg = (GpuPreAggTask *) gtask;
 	int				retval;
 
-	PG_TRY();
+	STROM_TRY();
 	{
 		if (gpreagg->kern.reduction_mode != GPUPREAGG_ONLY_TERMINATION)
 		{
@@ -4788,13 +4785,13 @@ gpupreagg_process_task(GpuTask_v2 *gtask,
 														cuda_stream);
 		}
 	}
-	PG_CATCH();
+	STROM_CATCH();
 	{
 		gpupreagg_cleanup_cuda_resources(gpreagg);
 		gpupreagg_put_final_buffer(gpreagg, true, false, false);
-		PG_RE_THROW();
+		STROM_RE_THROW();
 	}
-	PG_END_TRY();
+	STROM_END_TRY();
 
 	return retval;
 }
@@ -4884,11 +4881,11 @@ gpupreagg_complete_task(GpuTask_v2 *gtask)
 		/* cleanup device memory of the final buffer */
 		rc = cuEventDestroy(gpreagg->ev_kds_final);
 		if (rc != CUDA_SUCCESS)
-			elog(FATAL, "failed on cuEventDestroy: %s", errorText(rc));
+			wfatal("failed on cuEventDestroy: %s", errorText(rc));
 
 		rc = gpuMemFree(gpreagg->task.gcontext, gpreagg->m_kds_final);
 		if (rc != CUDA_SUCCESS)
-			elog(FATAL, "failed on gpuMemFree: %s", errorText(rc));
+			wfatal("failed on gpuMemFree: %s", errorText(rc));
 
 		gpreagg->ev_kds_final = NULL;
 		gpreagg->m_kds_final = 0UL;
@@ -5023,14 +5020,6 @@ gpupreagg_release_task(GpuTask_v2 *gtask)
 		PDS_release(gpreagg->pds_final);
 	dmaBufferFree(gpreagg);
 }
-
-
-
-
-
-
-
-
 
 /*
  * entrypoint of GpuPreAgg

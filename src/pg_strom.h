@@ -26,6 +26,7 @@
 #include "nodes/relation.h"
 #include "port/atomics.h"
 #include "storage/buf.h"
+#include "storage/ipc.h"
 #include "storage/fd.h"
 #include "storage/latch.h"
 #include "storage/lock.h"
@@ -482,7 +483,9 @@ extern void gpuservPushGpuTask(GpuContext_v2 *gcontext, GpuTask_v2 *gtask);
 extern void gpuservCompleteGpuTask(GpuTask_v2 *gtask, bool is_urgent);
 extern void pgstrom_init_gpu_server(void);
 
-/* service routines */
+/*
+ * service routines for worker thread handling
+ */
 #define WORKER_ERROR_MESSAGE_MAXLEN			(256*1024)
 extern __thread sigjmp_buf *gpuserv_worker_exception_stack;
 #define STROM_TRY() \
