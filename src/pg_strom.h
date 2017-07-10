@@ -472,6 +472,7 @@ extern CUcontext		gpuserv_cuda_context;
 extern __thread int		gpuserv_worker_index;
 
 extern int	IsGpuServerProcess(void);
+extern uint32 GetNumberOfGpuServerTasks(int server_id);
 extern bool gpuservGotSigterm(void);
 extern void gpuservClenupGpuContext(GpuContext *gcontext);
 extern void gpuservTryToWakeUp(void);

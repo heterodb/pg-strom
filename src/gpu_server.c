@@ -37,21 +37,37 @@
 #include <unistd.h>
 #include <cudaProfiler.h>
 
-typedef struct GpuServConn
+/*
+ * GpuServProcState - per process state of GPU server
+ */
+typedef struct GpuServProcState
 {
-	dlist_node		chain;
-	PGPROC		   *client;
-	SharedGpuContext *shgcon;
-} GpuServConn;
+	PGPROC		   *server_pgproc;			/* reference to PGPROC */
+	pg_atomic_uint32 num_server_gpu_tasks;	/* sum of pending + running +
+											 * completed tasks */
+} GpuServProcState;
 
+/*
+ * GpuServState - global state of GPU server
+ */
 typedef struct GpuServState
 {
 	pg_atomic_uint32 rr_count;			/* seed for round-robin distribution */
 	pg_atomic_uint32 cuda_profiler; 	/* GUC: pg_strom.cuda_profiler */
 	slock_t			lock;				/* lock of conn_pending */
 	dlist_head		conn_pending_list;	/* list of GpuServConn */
-	PGPROC		   *serv_procs[FLEXIBLE_ARRAY_MEMBER];
+	GpuServProcState sv_procs[FLEXIBLE_ARRAY_MEMBER];
 } GpuServState;
+
+/*
+ * GpuServConn - credential information when backend opens a new connection
+ */
+typedef struct GpuServConn
+{
+	dlist_node		chain;
+	PGPROC		   *client;
+	SharedGpuContext *shgcon;
+} GpuServConn;
 
 /*
  * GpuServCommand - Token of request for GPU server
@@ -227,6 +243,43 @@ IsGpuServerProcess(void)
 		return 1;
 	else
 		return -1;
+}
+
+/*
+ * (Inc|Dec|Get)NumberOfGpuServerTasks
+ */
+static inline void
+IncNumberOfGpuServerTasks(void)
+{
+	pg_atomic_uint32   *p_count;
+	uint32				oldval __attribute__((unused));
+
+	Assert(gpuserv_id >= 0 && gpuserv_id < numDevAttrs);
+	p_count = &gpuServState->sv_procs[gpuserv_id].num_server_gpu_tasks;
+	oldval = pg_atomic_fetch_add_u32(p_count, 1);
+	Assert(oldval >= 0);
+}
+
+static inline void
+DecNumberOfGpuServerTasks(void)
+{
+	pg_atomic_uint32   *p_count;
+	uint32				oldval __attribute__((unused));
+
+	Assert(gpuserv_id >= 0 && gpuserv_id < numDevAttrs);
+	p_count = &gpuServState->sv_procs[gpuserv_id].num_server_gpu_tasks;
+	oldval = pg_atomic_fetch_sub_u32(p_count, 1);
+	Assert(oldval > 0);
+}
+
+uint32
+GetNumberOfGpuServerTasks(int server_id)
+{
+	pg_atomic_uint32   *p_count;
+
+	Assert(server_id >= 0 && server_id < numDevAttrs);
+	p_count = &gpuServState->sv_procs[server_id].num_server_gpu_tasks;
+	return pg_atomic_read_u32(p_count);
 }
 
 /*
@@ -429,15 +482,15 @@ gpuservClenupGpuContext(GpuContext *gcontext)
 void
 gpuservTryToWakeUp(void)
 {
-	PGPROC	   *serv_proc;
+	PGPROC	   *server_pgproc;
 	uint32		k, i;
 
 	k = i = pg_atomic_fetch_add_u32(&gpuServState->rr_count, 1);
 	do {
-		serv_proc = gpuServState->serv_procs[k % numDevAttrs];
-		if (serv_proc)
+		server_pgproc = gpuServState->sv_procs[k % numDevAttrs].server_pgproc;
+		if (server_pgproc)
 		{
-			SetLatch(&serv_proc->procLatch);
+			SetLatch(&server_pgproc->procLatch);
 			break;
 		}
 		k = pg_atomic_fetch_add_u32(&gpuServState->rr_count, 1);
@@ -806,7 +859,6 @@ gpuservRecvCommands(GpuContext *gcontext, bool *p_peer_sock_closed)
 		else if (retval == 0)
 		{
 			/* likely, peer socket was closed */
-			//wnotice("peer_sock_closed by recvmsg(2) == 0");
 			*p_peer_sock_closed = true;
 			break;
 		}
@@ -852,6 +904,7 @@ gpuservRecvCommands(GpuContext *gcontext, bool *p_peer_sock_closed)
 				if (peer_fdesc >= 0)
 					gtask->peer_fdesc = peer_fdesc;
 				gputask_pushto_pending_list(gtask, 0);
+				IncNumberOfGpuServerTasks();
 			}
 			else
 			{
@@ -1134,6 +1187,7 @@ gpuserv_try_run_completed_task(long *p_timeout)
 			gtask->gcontext = NULL;
 			gtask->peer_fdesc = -1;
 			gpuservSendGpuTask(gcontext, gtask);
+			DecNumberOfGpuServerTasks();
 			if (peer_fdesc >= 0)
 				close(peer_fdesc);
 			PutGpuContext(gcontext);
@@ -1171,10 +1225,9 @@ gpuserv_try_run_completed_task(long *p_timeout)
 			shgcon->num_async_tasks--;
 			backend = shgcon->backend;
 			SpinLockRelease(&shgcon->lock);
-
+			DecNumberOfGpuServerTasks();
 			if (backend)
 				SetLatch(&backend->procLatch);
-
 			if (peer_fdesc >= 0)
 				close(peer_fdesc);
 			PutGpuContext(gcontext);
@@ -1204,6 +1257,7 @@ gpuservPushGpuTask(GpuContext *gcontext, GpuTask *gtask)
 	SpinLockAcquire(&shgcon->lock);
 	shgcon->num_async_tasks++;
 	SpinLockRelease(&shgcon->lock);
+	IncNumberOfGpuServerTasks();
 	/* increment refcnt by GpuTask */
 	gtask->gcontext = GetGpuContext(gcontext);
 	/* TODO: How to handle peer_fdesc if any? */
@@ -1492,6 +1546,7 @@ gpuservEventLoop(void)
 static void
 gpuservBgWorkerMain(Datum __server_id)
 {
+	GpuServProcState *sv_proc;
 	CUresult		rc;
 	cl_int			i;
 	struct epoll_event ep_event;
@@ -1499,7 +1554,9 @@ gpuservBgWorkerMain(Datum __server_id)
 	/* I am a GPU server process */
 	gpuserv_id = DatumGetInt32(__server_id);
 	Assert(gpuserv_id >= 0 && gpuserv_id < numDevAttrs);
-	gpuServState->serv_procs[gpuserv_id] = MyProc;
+	sv_proc = &gpuServState->sv_procs[gpuserv_id];
+	sv_proc->server_pgproc = MyProc;
+	pg_atomic_init_u32(&sv_proc->num_server_gpu_tasks, 0);
 	pqsignal(SIGTERM, gpuservSigtermHandler);
 	BackgroundWorkerUnblockSignals();
 
@@ -1610,7 +1667,8 @@ gpuservBgWorkerMain(Datum __server_id)
 		Assert(IsGpuServerProcess() > 0);
 
 		/* GPU server is terminating... */
-		gpuServState->serv_procs[gpuserv_id] = NULL;
+		gpuServState->sv_procs[gpuserv_id].server_pgproc = NULL;
+		pg_memory_barrier();
 
 		/*
 		 * Destroy the CUDA context not to wake up the callback functions
@@ -1758,9 +1816,9 @@ pgstrom_cuda_profiler_guc_assign(bool new_config, void *extra)
 		SpinLockAcquire(&gpuServState->lock);
 		for (i=0; i < numDevAttrs; i++)
 		{
-			PGPROC *serv = gpuServState->serv_procs[i];
+			PGPROC *server_pgproc = gpuServState->sv_procs[i].server_pgproc;
 
-			SetLatch(&serv->procLatch);
+			SetLatch(&server_pgproc->procLatch);
 		}
 		SpinLockRelease(&gpuServState->lock);
 	}
@@ -1801,7 +1859,7 @@ pgstrom_startup_gpu_server(void)
 		(*shmem_startup_hook_next)();
 
 	/* request for the static shared memory */
-	required = offsetof(GpuServState, serv_procs[numDevAttrs]);
+	required = offsetof(GpuServState, sv_procs[numDevAttrs]);
 	gpuServState = ShmemInitStruct("gpuServState", required, &found);
 	Assert(!found);
 	memset(gpuServState, 0, required);
@@ -1944,7 +2002,7 @@ pgstrom_init_gpu_server(void)
 	/* request for the static shared memory */
 	numBackends = MaxConnections + max_worker_processes + 100;
 	RequestAddinShmemSpace(STROMALIGN(offsetof(GpuServState,
-											   serv_procs[numDevAttrs])) +
+											   sv_procs[numDevAttrs])) +
 						   STROMALIGN(sizeof(GpuServConn) * numBackends));
 	shmem_startup_hook_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_gpu_server;
