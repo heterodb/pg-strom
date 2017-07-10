@@ -814,7 +814,7 @@ pgstrom_try_build_cuda_program(void)
  * equivalent one is already exists.
  */
 ProgramId
-pgstrom_create_cuda_program(GpuContext_v2 *gcontext,
+pgstrom_create_cuda_program(GpuContext *gcontext,
 							cl_uint extra_flags,
 							const char *kern_source,
 							const char *kern_define,
@@ -1012,7 +1012,7 @@ retry_program_id:
  * release an existing GPU program entry
  */
 void
-pgstrom_put_cuda_program(GpuContext_v2 *gcontext, ProgramId program_id)
+pgstrom_put_cuda_program(GpuContext *gcontext, ProgramId program_id)
 {
 	program_cache_entry *entry;
 
@@ -1046,7 +1046,7 @@ pgstrom_put_cuda_program(GpuContext_v2 *gcontext, ProgramId program_id)
  */
 char *
 pgstrom_build_session_info(cl_uint extra_flags,
-						   GpuTaskState_v2 *gts)
+						   GpuTaskState *gts)
 {
 	StringInfoData	buf;
 

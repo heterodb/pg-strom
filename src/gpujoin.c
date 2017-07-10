@@ -260,7 +260,7 @@ typedef struct
 
 typedef struct
 {
-	GpuTaskState_v2	gts;
+	GpuTaskState	gts;
 	/* expressions to be used in fallback path */
 	List		   *join_types;
 	List		   *outer_quals;	/* list of ExprState */
@@ -343,7 +343,7 @@ typedef struct pgstrom_multirels
  */
 typedef struct
 {
-	GpuTask_v2		task;
+	GpuTask			task;
 	CUfunction		kern_main;
 	CUdeviceptr		m_kgjoin;
 	CUdeviceptr		m_kmrels;
@@ -369,10 +369,10 @@ static bool					enable_gpunestloop;
 static bool					enable_gpuhashjoin;
 
 /* static functions */
-static GpuTask_v2 *gpujoin_next_task(GpuTaskState_v2 *gts);
-static void gpujoin_ready_task(GpuTaskState_v2 *gts, GpuTask_v2 *gtask);
-static void gpujoin_switch_task(GpuTaskState_v2 *gts, GpuTask_v2 *gtask);
-static TupleTableSlot *gpujoin_next_tuple(GpuTaskState_v2 *gts);
+static GpuTask *gpujoin_next_task(GpuTaskState *gts);
+static void gpujoin_ready_task(GpuTaskState *gts, GpuTask *gtask);
+static void gpujoin_switch_task(GpuTaskState *gts, GpuTask *gtask);
+static TupleTableSlot *gpujoin_next_tuple(GpuTaskState *gts);
 static TupleTableSlot *gpujoin_next_tuple_fallback(GpuJoinState *gjs,
 												   pgstrom_gpujoin *pgjoin);
 static pg_crc32 get_tuple_hashvalue(innerState *istate,
@@ -1962,7 +1962,7 @@ fixup_varnode_to_origin(int depth, List *ps_src_depth, List *ps_src_resno,
  * Gives some definitions to the static portion of GpuJoin implementation
  */
 void
-assign_gpujoin_session_info(StringInfo buf, GpuTaskState_v2 *gts)
+assign_gpujoin_session_info(StringInfo buf, GpuTaskState *gts)
 {
 	TupleTableSlot *slot = gts->css.ss.ss_ScanTupleSlot;
 	TupleDesc		tupdesc = slot->tts_tupleDescriptor;
@@ -1996,7 +1996,7 @@ gpujoin_create_scan_state(CustomScan *node)
 static void
 ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 {
-	GpuContext_v2  *gcontext = NULL;
+	GpuContext	   *gcontext = NULL;
 	GpuJoinState   *gjs = (GpuJoinState *) node;
 	ScanState	   *ss = &gjs->gts.css.ss;
 	CustomScan	   *cscan = (CustomScan *) node->ss.ps.plan;
@@ -2204,7 +2204,7 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 			be_row_format = true;
 		istate->state = ExecInitNode(inner_plan, estate, eflags);
 		if (be_row_format)
-			((GpuTaskState_v2 *)istate->state)->row_format = true;
+			((GpuTaskState *)istate->state)->row_format = true;
 		istate->econtext = CreateExprContext(estate);
 		istate->depth = i + 1;
 		istate->nbatches_plan =
@@ -2820,7 +2820,7 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
  * gpujoin_merge_worker_statistics
  */
 void
-gpujoin_merge_worker_statistics(GpuTaskState_v2 *gts)
+gpujoin_merge_worker_statistics(GpuTaskState *gts)
 {
 	if (gts->css.methods == &gpujoin_exec_methods)
 	{
@@ -2841,7 +2841,7 @@ gpujoin_merge_worker_statistics(GpuTaskState_v2 *gts)
  * gpujpin_accum_worker_statistics
  */
 void
-gpujoin_accum_worker_statistics(GpuTaskState_v2 *gts)
+gpujoin_accum_worker_statistics(GpuTaskState *gts)
 {
 	if (gts->css.methods == &gpujoin_exec_methods)
 	{
@@ -4095,7 +4095,7 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs,
 							 pgstrom_gpujoin *pgjoin,
 							 double ntuples, cl_int target_depth)
 {
-	GpuContext_v2  *gcontext = gjs->gts.gcontext;
+	GpuContext	   *gcontext = gjs->gts.gcontext;
 	TupleTableSlot *tupslot = gjs->gts.css.ss.ss_ScanTupleSlot;
 	TupleDesc		tupdesc = tupslot->tts_tupleDescriptor;
 	cl_int			ncols = tupdesc->natts;
@@ -4250,14 +4250,14 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs,
  *
  *
  */
-static GpuTask_v2 *
+static GpuTask *
 gpujoin_create_task(GpuJoinState *gjs,
 					pgstrom_multirels *pmrels,
 					pgstrom_data_store *pds_src,
 					int file_desc,
 					kern_join_scale *jscale_old)
 {
-	GpuContext_v2	   *gcontext = gjs->gts.gcontext;
+	GpuContext		   *gcontext = gjs->gts.gcontext;
 	runtimeStat		   *rt_stat = gjs->rt_stat;
 	pgstrom_gpujoin	   *pgjoin;
 	double				ntuples;
@@ -4494,8 +4494,8 @@ major_retry:
 }
 
 
-static GpuTask_v2 *
-gpujoin_next_task(GpuTaskState_v2 *gts)
+static GpuTask *
+gpujoin_next_task(GpuTaskState *gts)
 {
 	GpuJoinState   *gjs = (GpuJoinState *) gts;
 	pgstrom_data_store *pds = NULL;
@@ -4614,7 +4614,7 @@ gpujoin_next_task(GpuTaskState_v2 *gts)
  * on the GPU server process then returned to the backend process again.
  */
 static void
-gpujoin_ready_task(GpuTaskState_v2 *gts, GpuTask_v2 *gtask)
+gpujoin_ready_task(GpuTaskState *gts, GpuTask *gtask)
 {
 	GpuJoinState	   *gjs = (GpuJoinState *)gts;
 	pgstrom_gpujoin	   *pgjoin = (pgstrom_gpujoin *)gtask;
@@ -4706,7 +4706,7 @@ gpujoin_ready_task(GpuTaskState_v2 *gts, GpuTask_v2 *gtask)
  * and assigned on the gts->curr_task.
  */
 static void
-gpujoin_switch_task(GpuTaskState_v2 *gts, GpuTask_v2 *gtask)
+gpujoin_switch_task(GpuTaskState *gts, GpuTask *gtask)
 {
 	GpuJoinState	   *gjs = (GpuJoinState *) gts;
 	pgstrom_gpujoin	   *pgjoin = (pgstrom_gpujoin *) gtask;
@@ -4735,7 +4735,7 @@ gpujoin_switch_task(GpuTaskState_v2 *gts, GpuTask_v2 *gtask)
 }
 
 static TupleTableSlot *
-gpujoin_next_tuple(GpuTaskState_v2 *gts)
+gpujoin_next_tuple(GpuTaskState *gts)
 {
 	GpuJoinState	   *gjs = (GpuJoinState *) gts;
 	TupleTableSlot	   *slot = gjs->gts.css.ss.ss_ScanTupleSlot;
@@ -5385,7 +5385,7 @@ gpujoin_cleanup_cuda_resources(pgstrom_gpujoin *pgjoin)
 }
 
 void
-gpujoin_release_task(GpuTask_v2 *gtask)
+gpujoin_release_task(GpuTask *gtask)
 {
 	pgstrom_gpujoin	   *pgjoin = (pgstrom_gpujoin *) gtask;
 
@@ -5406,7 +5406,7 @@ gpujoin_release_task(GpuTask_v2 *gtask)
 }
 
 int
-gpujoin_complete_task(GpuTask_v2 *gtask)
+gpujoin_complete_task(GpuTask *gtask)
 {
 	pgstrom_gpujoin	   *pgjoin = (pgstrom_gpujoin *) gtask;
 	pgstrom_multirels  *pmrels = pgjoin->pmrels;
@@ -5499,7 +5499,7 @@ static int
 __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 					   CUmodule cuda_module, CUstream cuda_stream)
 {
-	GpuContext_v2	   *gcontext = pgjoin->task.gcontext;
+	GpuContext		   *gcontext = pgjoin->task.gcontext;
 	pgstrom_data_store *pds_src = pgjoin->pds_src;
 	pgstrom_data_store *pds_dst = pgjoin->pds_dst;
 	Size			offset;
@@ -5712,7 +5712,7 @@ out_of_resource:
 }
 
 int
-gpujoin_process_task(GpuTask_v2 *gtask,
+gpujoin_process_task(GpuTask *gtask,
 					 CUmodule cuda_module,
 					 CUstream cuda_stream)
 {
@@ -6328,8 +6328,8 @@ retry:
 static pgstrom_multirels *
 gpujoin_create_multirels(GpuJoinState *gjs)
 {
-	GpuContext_v2  *gcontext = gjs->gts.gcontext;
-	pgstrom_multirels  *pmrels;
+	GpuContext	   *gcontext = gjs->gts.gcontext;
+	pgstrom_multirels *pmrels;
 	Size			ojmap_length = 0;
 	Size			head_length;
 	Size			required;
@@ -6604,7 +6604,7 @@ __multirels_get_buffer(pgstrom_gpujoin *pgjoin,
 					   pgstrom_multirels *pmrels,
 					   CUstream cuda_stream)
 {
-	GpuContext_v2  *gcontext = pgjoin->task.gcontext;
+	GpuContext	   *gcontext = pgjoin->task.gcontext;
 	CUdeviceptr		m_kmrels = 0UL;
 	CUdeviceptr		m_ojmaps = 0UL;
 	CUevent			ev_loaded;

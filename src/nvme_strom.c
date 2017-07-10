@@ -149,7 +149,7 @@ gpuMemSplitIOMap(IOMapBufferSegment *iomap_seg, int mclass)
  * Allocation of device memory which is mapped to I/O address space
  */
 CUresult
-gpuMemAllocIOMap(GpuContext_v2 *gcontext,
+gpuMemAllocIOMap(GpuContext *gcontext,
 				 CUdeviceptr *p_devptr, size_t bytesize)
 {
 	IOMapBufferSegment *iomap_seg;
@@ -225,7 +225,7 @@ gpuMemAllocIOMap(GpuContext_v2 *gcontext,
  * Release of device memory which is mapped to I/O address space
  */
 CUresult
-gpuMemFreeIOMap(GpuContext_v2 *gcontext, CUdeviceptr devptr)
+gpuMemFreeIOMap(GpuContext *gcontext, CUdeviceptr devptr)
 {
 	IOMapBufferSegment *iomap_seg;
 	IOMapBufferChunk   *iomap_chunk;
@@ -335,7 +335,7 @@ __MemCopyFromSSDWaitCallback(CUstream cuda_stream,
 							 CUresult status, void *private)
 {
 	StromCmd__MemCopyWait cmd;
-	GpuTask_v2	   *gtask = (GpuTask_v2 *) private;
+	GpuTask		   *gtask = (GpuTask *) private;
 
 	memset(&cmd, 0, sizeof(StromCmd__MemCopyWait));
 	cmd.dma_task_id = gtask->dma_task_id;
@@ -368,7 +368,7 @@ __MemCopyFromSSDWaitCallback(CUstream cuda_stream,
 }
 
 void
-gpuMemCopyFromSSDWait(GpuTask_v2 *gtask, CUstream cuda_stream)
+gpuMemCopyFromSSDWait(GpuTask *gtask, CUstream cuda_stream)
 {
 	CUresult	rc;
 
@@ -385,7 +385,7 @@ gpuMemCopyFromSSDWait(GpuTask_v2 *gtask, CUstream cuda_stream)
  * gpuMemCopyFromSSDAsync - kick SSD-to-GPU Direct DMA in asynchronous mode
  */
 void
-gpuMemCopyFromSSDAsync(GpuTask_v2 *gtask,
+gpuMemCopyFromSSDAsync(GpuTask *gtask,
 					   CUdeviceptr m_kds,
 					   pgstrom_data_store *pds,
 					   CUstream cuda_stream)

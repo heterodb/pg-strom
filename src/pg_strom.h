@@ -104,7 +104,7 @@ typedef struct SharedGpuContext
 } SharedGpuContext;
 
 #define RESTRACK_HASHSIZE		53
-typedef struct GpuContext_v2
+typedef struct GpuContext
 {
 	dlist_node		chain;
 	pgsocket		sockfd;		/* connection between backend <-> server */
@@ -120,7 +120,7 @@ typedef struct GpuContext_v2
 #endif
 	slock_t			lock;		/* lock for resource tracker */
 	dlist_head		restrack[RESTRACK_HASHSIZE];
-} GpuContext_v2;
+} GpuContext;
 
 /* Identifier of the Gpu Programs */
 typedef cl_long					ProgramId;
@@ -137,8 +137,8 @@ typedef enum {
 	GpuTaskKind_PL_CUDA,
 } GpuTaskKind;
 
-typedef struct GpuTask_v2		GpuTask_v2;
-typedef struct GpuTaskState_v2	GpuTaskState_v2;
+typedef struct GpuTask			GpuTask;
+typedef struct GpuTaskState		GpuTaskState;
 
 /*
  * pgstromWorkerStatistics
@@ -167,10 +167,10 @@ typedef struct
  */
 struct NVMEScanState;
 
-struct GpuTaskState_v2
+struct GpuTaskState
 {
 	CustomScanState	css;
-	GpuContext_v2  *gcontext;
+	GpuContext	   *gcontext;
 	GpuTaskKind		task_kind;		/* one of GpuTaskKind_* */
 	ProgramId		program_id;		/* CUDA Program (to be acquired) */
 	cl_uint			revision;		/* incremented for each ExecRescan */
@@ -206,14 +206,14 @@ struct GpuTaskState_v2
 	cl_long			curr_index;		/* current position on the curr_task */
 	cl_long			curr_lp_index;	/* index of LinePointer in a block */
 	HeapTupleData	curr_tuple;		/* internal use of PDS_fetch() */
-	struct GpuTask_v2 *curr_task;	/* a GpuTask currently processed */
+	struct GpuTask *curr_task;	/* a GpuTask currently processed */
 
 	/* callbacks used by gputasks.c */
-	GpuTask_v2	 *(*cb_next_task)(GpuTaskState_v2 *gts);
-	void		  (*cb_ready_task)(GpuTaskState_v2 *gts, GpuTask_v2 *gtask);
-	void		  (*cb_switch_task)(GpuTaskState_v2 *gts, GpuTask_v2 *gtask);
-	TupleTableSlot *(*cb_next_tuple)(GpuTaskState_v2 *gts);
-	struct pgstrom_data_store *(*cb_bulk_exec)(GpuTaskState_v2 *gts,
+	GpuTask		 *(*cb_next_task)(GpuTaskState *gts);
+	void		  (*cb_ready_task)(GpuTaskState *gts, GpuTask *gtask);
+	void		  (*cb_switch_task)(GpuTaskState *gts, GpuTask *gtask);
+	TupleTableSlot *(*cb_next_tuple)(GpuTaskState *gts);
+	struct pgstrom_data_store *(*cb_bulk_exec)(GpuTaskState *gts,
 											   size_t chunk_size);
 	/* list to manage GpuTasks */
 	dlist_head		ready_tasks;	/* list of tasks already processed */
@@ -223,9 +223,9 @@ struct GpuTaskState_v2
 	pgstromWorkerStatistics *worker_stat;
 };
 #define GTS_GET_SCAN_TUPDESC(gts)				\
-	(((GpuTaskState_v2 *)(gts))->css.ss.ss_ScanTupleSlot->tts_tupleDescriptor)
+	(((GpuTaskState *)(gts))->css.ss.ss_ScanTupleSlot->tts_tupleDescriptor)
 #define GTS_GET_RESULT_TUPDESC(gts)				\
-	(((GpuTaskState_v2 *)(gts))->css.ss.ps.ps_ResultTupleSlot->tts_tupleDescriptor)
+	(((GpuTaskState *)(gts))->css.ss.ps.ps_ResultTupleSlot->tts_tupleDescriptor)
 
 /*
  * GpuTask
@@ -234,25 +234,24 @@ struct GpuTaskState_v2
  * allocated on the DMA buffer area.
  */
 struct GpuModuleCache;
-struct GpuTask_v2
+struct GpuTask
 {
 	kern_errorbuf	kerror;			/* error status of the task */
 	dlist_node		chain;			/* link to the task state list */
 	GpuTaskKind		task_kind;		/* same with GTS's one */
 	ProgramId		program_id;		/* same with GTS's one */
-	GpuTaskState_v2 *gts;			/* GTS reference in the backend */
+	GpuTaskState   *gts;			/* GTS reference in the backend */
 	cl_uint			revision;		/* same with GTS's one when kicked */
 	bool			row_format;		/* true, if row-format is preferred */
 	bool			cpu_fallback;	/* true, if task needs CPU fallback */
 	int				file_desc;		/* file-descriptor on backend side */
 	/* fields below are valid only server */
-	GpuContext_v2  *gcontext;		/* session info of GPU server */
+	GpuContext	   *gcontext;		/* session info of GPU server */
 	struct GpuModuleCache *gmod_cache; /* cache of cuda_module */
 	struct timeval	tv_wakeup;		/* sleep until, if non-zero */
 	int				peer_fdesc;		/* FD moved via SCM_RIGHTS */
 	unsigned long	dma_task_id;	/* Task-ID of Async SSD2GPU DMA */
 };
-typedef struct GpuTask_v2 GpuTask_v2;
 
 /*
  * Type declarations for code generator
@@ -407,7 +406,7 @@ extern Datum pgstrom_device_info(PG_FUNCTION_ARGS);
 /*
  * dma_buffer.c
  */
-extern void *__dmaBufferAlloc(GpuContext_v2 *gcontext, Size required,
+extern void *__dmaBufferAlloc(GpuContext *gcontext, Size required,
 							  const char *filename, int lineno);
 extern void *__dmaBufferRealloc(void *pointer, Size required,
 								const char *filename, int lineno);
@@ -436,31 +435,31 @@ extern void pgstrom_init_dma_buffer(void);
 /*
  * gpu_context.c
  */
-extern GpuContext_v2 *MasterGpuContext(void);
-extern GpuContext_v2 *AllocGpuContext(bool with_connection);
-extern GpuContext_v2 *AttachGpuContext(pgsocket sockfd,
-									   SharedGpuContext *shgcon,
-									   int epoll_fd);
-extern GpuContext_v2 *GetGpuContext(GpuContext_v2 *gcontext);
-extern GpuContext_v2 *GetGpuContextBySockfd(pgsocket sockfd);
-extern void PutGpuContext(GpuContext_v2 *gcontext);
+extern GpuContext *MasterGpuContext(void);
+extern GpuContext *AllocGpuContext(bool with_connection);
+extern GpuContext *AttachGpuContext(pgsocket sockfd,
+									SharedGpuContext *shgcon,
+									int epoll_fd);
+extern GpuContext *GetGpuContext(GpuContext *gcontext);
+extern GpuContext *GetGpuContextBySockfd(pgsocket sockfd);
+extern void PutGpuContext(GpuContext *gcontext);
 extern void ForcePutAllGpuContext(void);
-extern bool GpuContextIsEstablished(GpuContext_v2 *gcontext);
+extern bool GpuContextIsEstablished(GpuContext *gcontext);
 
 extern Size gpuMemMaxAllocSize(void);
-extern CUresult	gpuMemAlloc(GpuContext_v2 *gcontext,
+extern CUresult	gpuMemAlloc(GpuContext *gcontext,
 							CUdeviceptr *p_devptr, size_t bytesize);
-extern CUresult gpuMemAllocManaged(GpuContext_v2 *gcontext,
+extern CUresult gpuMemAllocManaged(GpuContext *gcontext,
 								   CUdeviceptr *p_devptr, size_t bytesize,
 								   int flags);
-extern CUresult	gpuMemFree(GpuContext_v2 *gcontext, CUdeviceptr devptr);
-extern bool trackCudaProgram(GpuContext_v2 *gcontext, ProgramId program_id);
-extern void untrackCudaProgram(GpuContext_v2 *gcontext, ProgramId program_id);
-extern bool trackIOMapMem(GpuContext_v2 *gcontext, CUdeviceptr devptr);
-extern void untrackIOMapMem(GpuContext_v2 *gcontext, CUdeviceptr devptr);
-extern bool trackSSD2GPUDMA(GpuContext_v2 *gcontext,
+extern CUresult	gpuMemFree(GpuContext *gcontext, CUdeviceptr devptr);
+extern bool trackCudaProgram(GpuContext *gcontext, ProgramId program_id);
+extern void untrackCudaProgram(GpuContext *gcontext, ProgramId program_id);
+extern bool trackIOMapMem(GpuContext *gcontext, CUdeviceptr devptr);
+extern void untrackIOMapMem(GpuContext *gcontext, CUdeviceptr devptr);
+extern bool trackSSD2GPUDMA(GpuContext *gcontext,
 							unsigned long dma_task_id);
-extern void untrackSSD2GPUDMA(GpuContext_v2 *gcontext,
+extern void untrackSSD2GPUDMA(GpuContext *gcontext,
 							  unsigned long dma_task_id);
 extern void pgstrom_init_gpu_context(void);
 
@@ -474,13 +473,13 @@ extern __thread int		gpuserv_worker_index;
 
 extern int	IsGpuServerProcess(void);
 extern bool gpuservGotSigterm(void);
-extern void gpuservClenupGpuContext(GpuContext_v2 *gcontext);
+extern void gpuservClenupGpuContext(GpuContext *gcontext);
 extern void gpuservTryToWakeUp(void);
-extern void gpuservOpenConnection(GpuContext_v2 *gcontext);
-extern void gpuservSendGpuTask(GpuContext_v2 *gcontext, GpuTask_v2 *gtask);
-extern bool gpuservRecvGpuTasks(GpuContext_v2 *gcontext, long timeout);
-extern void gpuservPushGpuTask(GpuContext_v2 *gcontext, GpuTask_v2 *gtask);
-extern void gpuservCompleteGpuTask(GpuTask_v2 *gtask, bool is_urgent);
+extern void gpuservOpenConnection(GpuContext *gcontext);
+extern void gpuservSendGpuTask(GpuContext *gcontext, GpuTask *gtask);
+extern bool gpuservRecvGpuTasks(GpuContext *gcontext, long timeout);
+extern void gpuservPushGpuTask(GpuContext *gcontext, GpuTask *gtask);
+extern void gpuservCompleteGpuTask(GpuTask *gtask, bool is_urgent);
 extern void pgstrom_init_gpu_server(void);
 
 /*
@@ -602,21 +601,21 @@ extern void largest_workgroup_size(size_t *p_grid_size,
 /*
  * gpu_tasks.c
  */
-extern void pgstromInitGpuTaskState(GpuTaskState_v2 *gts,
-									GpuContext_v2 *gcontext,
+extern void pgstromInitGpuTaskState(GpuTaskState *gts,
+									GpuContext *gcontext,
 									GpuTaskKind task_kind,
 									List *used_params,
 									EState *estate);
-extern TupleTableSlot *pgstromExecGpuTaskState(GpuTaskState_v2 *gts);
-extern pgstrom_data_store *pgstromBulkExecGpuTaskState(GpuTaskState_v2 *gts,
+extern TupleTableSlot *pgstromExecGpuTaskState(GpuTaskState *gts);
+extern pgstrom_data_store *pgstromBulkExecGpuTaskState(GpuTaskState *gts,
 													   size_t chunk_size);
-extern void pgstromRescanGpuTaskState(GpuTaskState_v2 *gts);
-extern void pgstromReleaseGpuTaskState(GpuTaskState_v2 *gts);
-extern void pgstromExplainGpuTaskState(GpuTaskState_v2 *gts,
+extern void pgstromRescanGpuTaskState(GpuTaskState *gts);
+extern void pgstromReleaseGpuTaskState(GpuTaskState *gts);
+extern void pgstromExplainGpuTaskState(GpuTaskState *gts,
 									   ExplainState *es);
-extern GpuTask_v2 *fetch_next_gputask(GpuTaskState_v2 *gts);
-extern void pgstrom_merge_worker_statistics(GpuTaskState_v2 *gts);
-extern void pgstromExplainOuterScan(GpuTaskState_v2 *gts,
+extern GpuTask *fetch_next_gputask(GpuTaskState *gts);
+extern void pgstrom_merge_worker_statistics(GpuTaskState *gts);
+extern void pgstromExplainOuterScan(GpuTaskState *gts,
 									List *deparse_context,
 									List *ancestors,
 									ExplainState *es,
@@ -626,12 +625,12 @@ extern void pgstromExplainOuterScan(GpuTaskState_v2 *gts,
 									double outer_plan_rows,
 									int outer_plan_width);
 
-extern void pgstromInitGpuTask(GpuTaskState_v2 *gts, GpuTask_v2 *gtask);
-extern int	pgstromProcessGpuTask(GpuTask_v2 *gtask,
+extern void pgstromInitGpuTask(GpuTaskState *gts, GpuTask *gtask);
+extern int	pgstromProcessGpuTask(GpuTask *gtask,
 								  CUmodule cuda_module,
 								  CUstream cuda_stream);
-extern int	pgstromCompleteGpuTask(GpuTask_v2 *gtask);
-extern void pgstromReleaseGpuTask(GpuTask_v2 *gtask);
+extern int	pgstromCompleteGpuTask(GpuTask *gtask);
+extern void pgstromReleaseGpuTask(GpuTask *gtask);
 
 extern const char *__errorText(int errcode, const char *filename, int lineno);
 #define errorText(errcode)		__errorText((errcode),__FILE__,__LINE__)
@@ -641,16 +640,16 @@ extern void pgstrom_init_gputasks(void);
 /*
  * cuda_program.c
  */
-extern ProgramId pgstrom_create_cuda_program(GpuContext_v2 *gcontext,
+extern ProgramId pgstrom_create_cuda_program(GpuContext *gcontext,
 											 cl_uint extra_flags,
 											 const char *kern_source,
 											 const char *kern_define,
 											 bool wait_for_build);
 extern CUmodule pgstrom_load_cuda_program(ProgramId program_id, long timeout);
-extern void pgstrom_put_cuda_program(GpuContext_v2 *gcontext,
+extern void pgstrom_put_cuda_program(GpuContext *gcontext,
 									 ProgramId program_id);
 extern char *pgstrom_build_session_info(cl_uint extra_flags,
-										GpuTaskState_v2 *gts);
+										GpuTaskState *gts);
 extern bool pgstrom_wait_cuda_program(ProgramId program_id, long timeout);
 
 extern bool pgstrom_try_build_cuda_program(void);
@@ -713,10 +712,10 @@ extern bool kern_fetch_data_store(TupleTableSlot *slot,
 */
 extern bool PDS_fetch_tuple(TupleTableSlot *slot,
 							pgstrom_data_store *pds,
-							GpuTaskState_v2 *gts);
+							GpuTaskState *gts);
 extern pgstrom_data_store *PDS_retain(pgstrom_data_store *pds);
 extern void PDS_release(pgstrom_data_store *pds);
-extern pgstrom_data_store *PDS_expand_size(GpuContext_v2 *gcontext,
+extern pgstrom_data_store *PDS_expand_size(GpuContext *gcontext,
 										   pgstrom_data_store *pds,
 										   Size kds_length_new);
 extern void PDS_shrink_size(pgstrom_data_store *pds);
@@ -727,28 +726,28 @@ extern void init_kernel_data_store(kern_data_store *kds,
 								   uint nrooms,
 								   bool use_internal);
 
-extern pgstrom_data_store *PDS_create_row(GpuContext_v2 *gcontext,
+extern pgstrom_data_store *PDS_create_row(GpuContext *gcontext,
 										  TupleDesc tupdesc,
 										  Size length);
-extern pgstrom_data_store *PDS_create_slot(GpuContext_v2 *gcontext,
+extern pgstrom_data_store *PDS_create_slot(GpuContext *gcontext,
 										   TupleDesc tupdesc,
 										   cl_uint nrooms,
 										   Size extra_length,
 										   bool use_internal);
-extern pgstrom_data_store *PDS_duplicate_slot(GpuContext_v2 *gcontext,
+extern pgstrom_data_store *PDS_duplicate_slot(GpuContext *gcontext,
 											  kern_data_store *kds_head,
 											  cl_uint nrooms,
 											  cl_uint extra_unitsz);
-extern pgstrom_data_store *PDS_create_hash(GpuContext_v2 *gcontext,
+extern pgstrom_data_store *PDS_create_hash(GpuContext *gcontext,
 										   TupleDesc tupdesc,
 										   Size length);
-extern pgstrom_data_store *PDS_create_block(GpuContext_v2 *gcontext,
+extern pgstrom_data_store *PDS_create_block(GpuContext *gcontext,
 											TupleDesc tupdesc,
 											struct NVMEScanState *nvme_sstate);
-extern void PDS_init_heapscan_state(GpuTaskState_v2 *gts,
+extern void PDS_init_heapscan_state(GpuTaskState *gts,
 									cl_uint nrows_per_block);
-extern void PDS_end_heapscan_state(GpuTaskState_v2 *gts);
-extern bool PDS_exec_heapscan(GpuTaskState_v2 *gts,
+extern void PDS_end_heapscan_state(GpuTaskState *gts);
+extern bool PDS_exec_heapscan(GpuTaskState *gts,
 							  pgstrom_data_store *pds,
 							  int *p_filedesc);
 extern cl_uint NVMESS_NBlocksPerChunk(struct NVMEScanState *nvme_sstate);
@@ -773,15 +772,15 @@ extern void pgstrom_init_datastore(void);
 #include "nvme_strom.h"
 
 extern Size gpuMemSizeIOMap(void);
-extern CUresult	gpuMemAllocIOMap(GpuContext_v2 *gcontext,
+extern CUresult	gpuMemAllocIOMap(GpuContext *gcontext,
 								 CUdeviceptr *p_devptr, size_t bytesize);
-extern CUresult	gpuMemFreeIOMap(GpuContext_v2 *gcontext,
+extern CUresult	gpuMemFreeIOMap(GpuContext *gcontext,
 								CUdeviceptr devptr);
-extern void gpuMemCopyFromSSDAsync(GpuTask_v2 *gtask,
+extern void gpuMemCopyFromSSDAsync(GpuTask *gtask,
 								   CUdeviceptr m_kds,
 								   pgstrom_data_store *pds,
 								   CUstream cuda_stream);
-extern void gpuMemCopyFromSSDWait(GpuTask_v2 *gtask,
+extern void gpuMemCopyFromSSDWait(GpuTask *gtask,
 								  CUstream cuda_stream);
 extern bool gpuMemCopyFromSSDWaitRaw(unsigned long dma_task_id);
 
@@ -819,11 +818,11 @@ extern bool pgstrom_pullup_outer_scan(const Path *outer_path,
 extern bool pgstrom_path_is_gpuscan(const Path *path);
 extern bool pgstrom_plan_is_gpuscan(const Plan *plan);
 
-extern void gpuscan_rewind_position(GpuTaskState_v2 *gts);
+extern void gpuscan_rewind_position(GpuTaskState *gts);
 
-extern pgstrom_data_store *gpuscanExecScanChunk(GpuTaskState_v2 *gts,
+extern pgstrom_data_store *gpuscanExecScanChunk(GpuTaskState *gts,
 												int *p_filedesc);
-extern void gpuscanRewindScanChunk(GpuTaskState_v2 *gts);
+extern void gpuscanRewindScanChunk(GpuTaskState *gts);
 
 extern Size ExecGpuScanEstimateDSM(CustomScanState *node,
 								   ParallelContext *pcxt);
@@ -833,13 +832,13 @@ extern void ExecGpuScanInitDSM(CustomScanState *node,
 extern void ExecGpuScanInitWorker(CustomScanState *node,
 								  shm_toc *toc,
 								  void *coordinate);
-extern int	gpuscan_process_task(GpuTask_v2 *gtask,
+extern int	gpuscan_process_task(GpuTask *gtask,
 								 CUmodule cuda_module,
 								 CUstream cuda_stream);
-extern int	gpuscan_complete_task(GpuTask_v2 *gtask);
-extern void gpuscan_release_task(GpuTask_v2 *gtask);
+extern int	gpuscan_complete_task(GpuTask *gtask);
+extern void gpuscan_release_task(GpuTask *gtask);
 extern void assign_gpuscan_session_info(StringInfo buf,
-										GpuTaskState_v2 *gts);
+										GpuTaskState *gts);
 extern void pgstrom_init_gpuscan(void);
 
 /*
@@ -847,15 +846,15 @@ extern void pgstrom_init_gpuscan(void);
  */
 extern bool pgstrom_path_is_gpujoin(Path *pathnode);
 extern bool pgstrom_plan_is_gpujoin(const Plan *plannode);
-extern int	gpujoin_process_task(GpuTask_v2 *gtask,
+extern int	gpujoin_process_task(GpuTask *gtask,
 								 CUmodule cuda_module,
 								 CUstream cuda_stream);
-extern int	gpujoin_complete_task(GpuTask_v2 *gtask);
-extern void	gpujoin_release_task(GpuTask_v2 *gtask);
+extern int	gpujoin_complete_task(GpuTask *gtask);
+extern void	gpujoin_release_task(GpuTask *gtask);
 extern void assign_gpujoin_session_info(StringInfo buf,
-										GpuTaskState_v2 *gts);
-extern void gpujoin_merge_worker_statistics(GpuTaskState_v2 *gts);
-extern void gpujoin_accum_worker_statistics(GpuTaskState_v2 *gts);
+										GpuTaskState *gts);
+extern void gpujoin_merge_worker_statistics(GpuTaskState *gts);
+extern void gpujoin_accum_worker_statistics(GpuTaskState *gts);
 extern void	pgstrom_init_gpujoin(void);
 
 /*
@@ -863,13 +862,13 @@ extern void	pgstrom_init_gpujoin(void);
  */
 extern bool pgstrom_plan_is_gpupreagg(const Plan *plan);
 extern void gpupreagg_post_planner(PlannedStmt *pstmt, CustomScan *cscan);
-extern int	gpupreagg_process_task(GpuTask_v2 *gtask,
+extern int	gpupreagg_process_task(GpuTask *gtask,
 								   CUmodule cuda_module,
 								   CUstream cuda_stream);
-extern int	gpupreagg_complete_task(GpuTask_v2 *gtask);
-extern void	gpupreagg_release_task(GpuTask_v2 *gtask);
+extern int	gpupreagg_complete_task(GpuTask *gtask);
+extern void	gpupreagg_release_task(GpuTask *gtask);
 extern void assign_gpupreagg_session_info(StringInfo buf,
-										  GpuTaskState_v2 *gts);
+										  GpuTaskState *gts);
 extern void pgstrom_init_gpupreagg(void);
 
 /*
@@ -880,11 +879,11 @@ extern Datum pltext_function_handler(PG_FUNCTION_ARGS);
 extern Datum plcuda_function_validator(PG_FUNCTION_ARGS);
 extern Datum plcuda_function_handler(PG_FUNCTION_ARGS);
 extern Datum plcuda_function_source(PG_FUNCTION_ARGS);
-extern int	plcuda_process_task(GpuTask_v2 *gtask,
+extern int	plcuda_process_task(GpuTask *gtask,
 								CUmodule cuda_module,
 								CUstream cuda_stream);
-extern int  plcuda_complete_task(GpuTask_v2 *gtask);
-extern void plcuda_release_task(GpuTask_v2 *gtask);
+extern int  plcuda_complete_task(GpuTask *gtask);
+extern void plcuda_release_task(GpuTask *gtask);
 extern void pgstrom_init_plcuda(void);
 
 /*

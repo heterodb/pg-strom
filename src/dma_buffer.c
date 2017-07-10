@@ -804,7 +804,7 @@ dmaBufferAllocInternal(SharedGpuContext *shgcon, Size required)
 }
 
 void *
-__dmaBufferAlloc(GpuContext_v2 *gcontext, Size required,
+__dmaBufferAlloc(GpuContext *gcontext, Size required,
 				 const char *filename, int lineno)
 {
 #ifdef PGSTROM_DEBUG

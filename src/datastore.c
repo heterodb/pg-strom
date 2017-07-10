@@ -54,7 +54,7 @@ pgstrom_bulk_exec_supported(const PlanState *planstate)
 		pgstrom_plan_is_gpupreagg(planstate->plan))
 //        pgstrom_plan_is_gpusort(planstate->plan))
 	{
-		GpuTaskState_v2	   *gts = (GpuTaskState_v2 *) planstate;
+		GpuTaskState	   *gts = (GpuTaskState *) planstate;
 
 		if (gts->cb_bulk_exec != NULL)
 			return true;
@@ -172,7 +172,7 @@ pgstrom_fetch_data_store(TupleTableSlot *slot,
 static inline bool
 KDS_fetch_tuple_row(TupleTableSlot *slot,
 					kern_data_store *kds,
-					GpuTaskState_v2 *gts)
+					GpuTaskState *gts)
 {
 	if (gts->curr_index < kds->nitems)
 	{
@@ -198,7 +198,7 @@ KDS_fetch_tuple_row(TupleTableSlot *slot,
 static inline bool
 KDS_fetch_tuple_slot(TupleTableSlot *slot,
 					 kern_data_store *kds,
-					 GpuTaskState_v2 *gts)
+					 GpuTaskState *gts)
 {
 	if (gts->curr_index < kds->nitems)
 	{
@@ -228,7 +228,7 @@ KDS_fetch_tuple_slot(TupleTableSlot *slot,
 static inline bool
 KDS_fetch_tuple_block(TupleTableSlot *slot,
 					  kern_data_store *kds,
-					  GpuTaskState_v2 *gts)
+					  GpuTaskState *gts)
 {
 	Relation	rel = gts->css.ss.ss_currentRelation;
 	HeapTuple	tuple = &gts->curr_tuple;
@@ -270,7 +270,7 @@ KDS_fetch_tuple_block(TupleTableSlot *slot,
 bool
 PDS_fetch_tuple(TupleTableSlot *slot,
 				pgstrom_data_store *pds,
-				GpuTaskState_v2 *gts)
+				GpuTaskState *gts)
 {
 	switch (pds->kds.format)
 	{
@@ -391,7 +391,7 @@ init_kernel_data_store(kern_data_store *kds,
 }
 
 pgstrom_data_store *
-PDS_expand_size(GpuContext_v2 *gcontext,
+PDS_expand_size(GpuContext *gcontext,
 				pgstrom_data_store *pds_old,
 				Size kds_length_new)
 {
@@ -549,7 +549,7 @@ PDS_shrink_size(pgstrom_data_store *pds)
 }
 
 pgstrom_data_store *
-PDS_create_row(GpuContext_v2 *gcontext, TupleDesc tupdesc, Size length)
+PDS_create_row(GpuContext *gcontext, TupleDesc tupdesc, Size length)
 {
 	pgstrom_data_store *pds;
 	Size		kds_length = STROMALIGN_DOWN(length);
@@ -572,7 +572,7 @@ PDS_create_row(GpuContext_v2 *gcontext, TupleDesc tupdesc, Size length)
 }
 
 pgstrom_data_store *
-PDS_create_slot(GpuContext_v2 *gcontext,
+PDS_create_slot(GpuContext *gcontext,
 				TupleDesc tupdesc,
 				cl_uint nrooms,
 				Size extra_length,
@@ -600,7 +600,7 @@ PDS_create_slot(GpuContext_v2 *gcontext,
 }
 
 pgstrom_data_store *
-PDS_duplicate_slot(GpuContext_v2 *gcontext,
+PDS_duplicate_slot(GpuContext *gcontext,
 				   kern_data_store *kds_head,
 				   cl_uint nrooms,
 				   cl_uint extra_unitsz)
@@ -634,7 +634,7 @@ PDS_duplicate_slot(GpuContext_v2 *gcontext,
 }
 
 pgstrom_data_store *
-PDS_create_hash(GpuContext_v2 *gcontext,
+PDS_create_hash(GpuContext *gcontext,
 				TupleDesc tupdesc,
 				Size length)
 {
@@ -658,7 +658,7 @@ PDS_create_hash(GpuContext_v2 *gcontext,
 }
 
 pgstrom_data_store *
-PDS_create_block(GpuContext_v2 *gcontext,
+PDS_create_block(GpuContext *gcontext,
 				 TupleDesc tupdesc,
 				 NVMEScanState *nvme_sstate)
 {
@@ -706,7 +706,7 @@ typedef struct _MdfdVec
  * with KDS_FORMAT_BLOCK / NVMe-Strom.
  */
 void
-PDS_init_heapscan_state(GpuTaskState_v2 *gts,
+PDS_init_heapscan_state(GpuTaskState *gts,
 						cl_uint nrows_per_block)
 {
 	Relation		relation = gts->css.ss.ss_currentRelation;
@@ -785,7 +785,7 @@ PDS_init_heapscan_state(GpuTaskState_v2 *gts,
  * PDS_end_heapscan_state
  */
 void
-PDS_end_heapscan_state(GpuTaskState_v2 *gts)
+PDS_end_heapscan_state(GpuTaskState *gts)
 {
 	NVMEScanState   *nvme_sstate = gts->nvme_sstate;
 
@@ -1061,7 +1061,7 @@ PDS_exec_heapscan_row(pgstrom_data_store *pds,
  * PDS_exec_heapscan - PDS scan entrypoint
  */
 bool
-PDS_exec_heapscan(GpuTaskState_v2 *gts,
+PDS_exec_heapscan(GpuTaskState *gts,
 				  pgstrom_data_store *pds, int *p_filedesc)
 {
 	Relation		relation = gts->css.ss.ss_currentRelation;

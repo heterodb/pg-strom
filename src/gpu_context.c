@@ -37,7 +37,7 @@ typedef struct SharedGpuContextHead
 /* static variables */
 static shmem_startup_hook_type shmem_startup_hook_next = NULL;
 static SharedGpuContextHead *sharedGpuContextHead = NULL;
-static GpuContext_v2	masterGpuContext;
+static GpuContext		masterGpuContext;
 static int				numGpuContexts;		/* GUC */
 #define ACTIVE_GPU_CONTEXT_NSLOTS			768
 static slock_t			activeGpuContextLock;
@@ -117,7 +117,7 @@ gpuMemMaxAllocSize(void)
  * resource tracker for device memory
  */
 CUresult
-gpuMemAlloc(GpuContext_v2 *gcontext, CUdeviceptr *p_devptr, size_t bytesize)
+gpuMemAlloc(GpuContext *gcontext, CUdeviceptr *p_devptr, size_t bytesize)
 {
 	ResourceTracker *tracker;
 	CUdeviceptr		devptr = 0UL;
@@ -156,7 +156,7 @@ gpuMemAlloc(GpuContext_v2 *gcontext, CUdeviceptr *p_devptr, size_t bytesize)
 }
 
 CUresult
-gpuMemAllocManaged(GpuContext_v2 *gcontext,
+gpuMemAllocManaged(GpuContext *gcontext,
 				   CUdeviceptr *p_devptr, size_t bytesize, int flags)
 {
 	ResourceTracker *tracker;
@@ -196,7 +196,7 @@ gpuMemAllocManaged(GpuContext_v2 *gcontext,
 }
 
 CUresult
-gpuMemFree(GpuContext_v2 *gcontext, CUdeviceptr devptr)
+gpuMemFree(GpuContext *gcontext, CUdeviceptr devptr)
 {
 	dlist_head	   *restrack_list;
 	dlist_iter		iter;
@@ -239,7 +239,7 @@ found:
  * resource tracker for GPU program
  */
 bool
-trackCudaProgram(GpuContext_v2 *gcontext, ProgramId program_id)
+trackCudaProgram(GpuContext *gcontext, ProgramId program_id)
 {
 	ResourceTracker *tracker = resource_tracker_alloc();
 	pg_crc32	crc;
@@ -260,7 +260,7 @@ trackCudaProgram(GpuContext_v2 *gcontext, ProgramId program_id)
 }
 
 void
-untrackCudaProgram(GpuContext_v2 *gcontext, ProgramId program_id)
+untrackCudaProgram(GpuContext *gcontext, ProgramId program_id)
 {
 	dlist_head *restrack_list;
     dlist_iter	iter;
@@ -295,7 +295,7 @@ untrackCudaProgram(GpuContext_v2 *gcontext, ProgramId program_id)
  * resource tracker for i/o mapped memory
  */
 bool
-trackIOMapMem(GpuContext_v2 *gcontext, CUdeviceptr devptr)
+trackIOMapMem(GpuContext *gcontext, CUdeviceptr devptr)
 {
 	ResourceTracker *tracker = resource_tracker_alloc();
 	pg_crc32	crc;
@@ -318,7 +318,7 @@ trackIOMapMem(GpuContext_v2 *gcontext, CUdeviceptr devptr)
 }
 
 void
-untrackIOMapMem(GpuContext_v2 *gcontext, CUdeviceptr devptr)
+untrackIOMapMem(GpuContext *gcontext, CUdeviceptr devptr)
 {
 	dlist_head *restrack_list;
     dlist_iter	iter;
@@ -353,7 +353,7 @@ untrackIOMapMem(GpuContext_v2 *gcontext, CUdeviceptr devptr)
  * resource tracker for SSD-to-GPU Direct DMA task
  */
 bool
-trackSSD2GPUDMA(GpuContext_v2 *gcontext, unsigned long dma_task_id)
+trackSSD2GPUDMA(GpuContext *gcontext, unsigned long dma_task_id)
 {
 	ResourceTracker *tracker = resource_tracker_alloc();
 	pg_crc32	crc;
@@ -375,7 +375,7 @@ trackSSD2GPUDMA(GpuContext_v2 *gcontext, unsigned long dma_task_id)
 }
 
 void
-untrackSSD2GPUDMA(GpuContext_v2 *gcontext, unsigned long dma_task_id)
+untrackSSD2GPUDMA(GpuContext *gcontext, unsigned long dma_task_id)
 {
 	dlist_head *restrack_list;
     dlist_iter	iter;
@@ -412,7 +412,7 @@ untrackSSD2GPUDMA(GpuContext_v2 *gcontext, unsigned long dma_task_id)
  * the resource tracker of GpuContext
  */
 static void
-ReleaseLocalResources(GpuContext_v2 *gcontext, bool normal_exit)
+ReleaseLocalResources(GpuContext *gcontext, bool normal_exit)
 {
 	ResourceTracker *tracker;
 	dlist_node		*dnode;
@@ -510,7 +510,7 @@ ReleaseLocalResources(GpuContext_v2 *gcontext, bool normal_exit)
  * MasterGpuContext - acquire the persistent GpuContext; to allocate shared
  * memory segment valid until Postmaster die. No need to put.
  */
-GpuContext_v2 *
+GpuContext *
 MasterGpuContext(void)
 {
 	return &masterGpuContext;
@@ -519,10 +519,10 @@ MasterGpuContext(void)
 /*
  * GetGpuContext - acquire a free GpuContext
  */
-GpuContext_v2 *
+GpuContext *
 AllocGpuContext(bool with_connection)
 {
-	GpuContext_v2  *gcontext = NULL;
+	GpuContext		 *gcontext = NULL;
 	SharedGpuContext *shgcon;
 	dlist_iter		iter;
 	dlist_node	   *dnode;
@@ -537,7 +537,7 @@ AllocGpuContext(bool with_connection)
 	SpinLockAcquire(&activeGpuContextLock);
 	dlist_foreach(iter, &activeGpuContextSlot[0])
 	{
-		gcontext = dlist_container(GpuContext_v2, chain, iter.cur);
+		gcontext = dlist_container(GpuContext, chain, iter.cur);
 
 		if (gcontext->resowner == CurrentResourceOwner &&
 			(with_connection
@@ -554,7 +554,7 @@ AllocGpuContext(bool with_connection)
 	/*
 	 * Not found, let's create a new GpuContext
 	 */
-	gcontext = calloc(1, sizeof(GpuContext_v2));
+	gcontext = calloc(1, sizeof(GpuContext));
 	if (!gcontext)
 		elog(ERROR, "out of memory");
 
@@ -608,10 +608,10 @@ AllocGpuContext(bool with_connection)
  * AttachGpuContext - attach a GPU server session on the supplied GpuContext
  * which is already acquired by a certain backend.
  */
-GpuContext_v2 *
+GpuContext *
 AttachGpuContext(pgsocket sockfd, SharedGpuContext *shgcon, int epoll_fd)
 {
-	GpuContext_v2  *gcontext;
+	GpuContext  *gcontext;
 	struct epoll_event ep_event;
 	int				i;
 
@@ -620,7 +620,7 @@ AttachGpuContext(pgsocket sockfd, SharedGpuContext *shgcon, int epoll_fd)
 		wfatal("Bug? backend tried to attach GPU context");
 
 	/* allocation of a local GpuContext */
-	gcontext = calloc(1, sizeof(GpuContext_v2));
+	gcontext = calloc(1, sizeof(GpuContext));
 	if (!gcontext)
 		werror("out of memory");
 
@@ -662,8 +662,8 @@ AttachGpuContext(pgsocket sockfd, SharedGpuContext *shgcon, int epoll_fd)
 /*
  * GetGpuContext - increment reference counter
  */
-GpuContext_v2 *
-GetGpuContext(GpuContext_v2 *gcontext)
+GpuContext *
+GetGpuContext(GpuContext *gcontext)
 {
 	uint32		oldcnt __attribute__((unused));
 
@@ -676,12 +676,12 @@ GetGpuContext(GpuContext_v2 *gcontext)
 /*
  * GetGpuContextBySockfd - Get a GpuContext which hold the supplied sockfd
  */
-GpuContext_v2 *
+GpuContext *
 GetGpuContextBySockfd(pgsocket sockfd)
 {
 	dlist_head	   *dhead;
 	dlist_iter		iter;
-	GpuContext_v2  *gcontext;
+	GpuContext	   *gcontext;
 
 	if (!IsGpuServerProcess())
 		elog(FATAL, "Bug? GetGpuContextBySockfd called on backend");
@@ -690,7 +690,7 @@ GetGpuContextBySockfd(pgsocket sockfd)
 	dhead = &activeGpuContextSlot[sockfd % ACTIVE_GPU_CONTEXT_NSLOTS];
 	dlist_foreach(iter, dhead)
 	{
-		gcontext = dlist_container(GpuContext_v2, chain, iter.cur);
+		gcontext = dlist_container(GpuContext, chain, iter.cur);
 		if (gcontext->sockfd == sockfd)
 		{
 			GetGpuContext(gcontext);
@@ -739,7 +739,7 @@ PutSharedGpuContext(SharedGpuContext *shgcon)
  * PutGpuContext - detach GpuContext; to be called by only backend
  */
 void
-PutGpuContext(GpuContext_v2 *gcontext)
+PutGpuContext(GpuContext *gcontext)
 {
 	uint32		newcnt __attribute__((unused));
 
@@ -793,13 +793,13 @@ ForcePutAllGpuContext(void)
 	{
 		dlist_head	   *dhead = &activeGpuContextSlot[i];
 		dlist_node	   *dnode;
-		GpuContext_v2  *gcontext;
+		GpuContext	   *gcontext;
 
 		SpinLockAcquire(&activeGpuContextLock);
 		while (!dlist_is_empty(dhead))
 		{
 			dnode = dlist_pop_head_node(dhead);
-			gcontext = dlist_container(GpuContext_v2, chain, dnode);
+			gcontext = dlist_container(GpuContext, chain, dnode);
 			SpinLockRelease(&activeGpuContextLock);
 
 			ReleaseLocalResources(gcontext, false);
@@ -820,7 +820,7 @@ ForcePutAllGpuContext(void)
  * server are still connected via local socket, and both of them look at.
  */
 bool
-GpuContextIsEstablished(GpuContext_v2 *gcontext)
+GpuContextIsEstablished(GpuContext *gcontext)
 {
 	SharedGpuContext   *shgcon = gcontext->shgcon;
 	bool				retval;
@@ -854,8 +854,8 @@ gpucontext_cleanup_callback(ResourceReleasePhase phase,
 		SpinLockAcquire(&activeGpuContextLock);
 		dlist_foreach_modify(iter, dhead)
 		{
-			GpuContext_v2  *gcontext = (GpuContext_v2 *)
-				dlist_container(GpuContext_v2, chain, iter.cur);
+			GpuContext  *gcontext = (GpuContext *)
+				dlist_container(GpuContext, chain, iter.cur);
 
 			if (gcontext->resowner == CurrentResourceOwner)
 			{
@@ -929,7 +929,7 @@ pgstrom_startup_gpu_context(void)
 	shgcon->refcnt = 1;
 	dlist_init(&shgcon->dma_buffer_list);
 
-	memset(&masterGpuContext, 0, sizeof(GpuContext_v2));
+	memset(&masterGpuContext, 0, sizeof(GpuContext));
 	masterGpuContext.sockfd = PGINVALID_SOCKET;
 	masterGpuContext.resowner = NULL;
 	masterGpuContext.shgcon = shgcon;

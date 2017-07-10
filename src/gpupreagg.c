@@ -176,7 +176,7 @@ typedef struct
 
 typedef struct
 {
-	GpuTaskState_v2	gts;
+	GpuTaskState	gts;
 	GpuPreAggSharedState *gpa_sstate;
 
 	cl_int			num_group_keys;
@@ -198,7 +198,7 @@ typedef struct
  */
 typedef struct
 {
-	GpuTask_v2			task;
+	GpuTask				task;
 	GpuPreAggSharedState *gpa_sstate;
 	bool				with_nvme_strom;/* true, if NVMe-Strom */
 	bool				retry_by_nospace;/* true, if task is retried by
@@ -242,10 +242,10 @@ get_gpupreagg_shared_state(GpuPreAggSharedState *gpa_sstate);
 static void
 put_gpupreagg_shared_state(GpuPreAggSharedState *gpa_sstate);
 
-static GpuTask_v2 *gpupreagg_next_task(GpuTaskState_v2 *gts);
-static void gpupreagg_ready_task(GpuTaskState_v2 *gts, GpuTask_v2 *gtask);
-static void gpupreagg_switch_task(GpuTaskState_v2 *gts, GpuTask_v2 *gtask);
-static TupleTableSlot *gpupreagg_next_tuple(GpuTaskState_v2 *gts);
+static GpuTask *gpupreagg_next_task(GpuTaskState *gts);
+static void gpupreagg_ready_task(GpuTaskState *gts, GpuTask *gtask);
+static void gpupreagg_switch_task(GpuTaskState *gts, GpuTask *gtask);
+static TupleTableSlot *gpupreagg_next_tuple(GpuTaskState *gts);
 
 static void gpupreagg_push_terminator_task(GpuPreAggTask *gpreagg_old);
 
@@ -3195,7 +3195,7 @@ gpupreagg_post_planner(PlannedStmt *pstmt, CustomScan *cscan)
  * assign_gpupreagg_session_info
  */
 void
-assign_gpupreagg_session_info(StringInfo buf, GpuTaskState_v2 *gts)
+assign_gpupreagg_session_info(StringInfo buf, GpuTaskState *gts)
 {
 	CustomScan	   *cscan = (CustomScan *)gts->css.ss.ps.plan;
 
@@ -3233,7 +3233,7 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 {
 	Relation		scan_rel = node->ss.ss_currentRelation;
 	ExprContext	   *econtext = node->ss.ps.ps_ExprContext;
-	GpuContext_v2  *gcontext = NULL;
+	GpuContext	   *gcontext = NULL;
 	GpuPreAggState *gpas = (GpuPreAggState *) node;
 	CustomScan	   *cscan = (CustomScan *) node->ss.ps.plan;
 	GpuPreAggInfo  *gpa_info = deform_gpupreagg_info(cscan);
@@ -3275,7 +3275,7 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 		outer_ps = ExecInitNode(outerPlan(cscan), estate, eflags);
 		if (pgstrom_bulk_exec_supported(outer_ps))
 		{
-			((GpuTaskState_v2 *) outer_ps)->row_format = true;
+			((GpuTaskState *) outer_ps)->row_format = true;
 			gpas->gts.outer_bulk_exec = true;
 		}
 		outerPlanState(gpas) = outer_ps;
@@ -3574,8 +3574,8 @@ static GpuPreAggSharedState *
 create_gpupreagg_shared_state(GpuPreAggState *gpas, GpuPreAggInfo *gpa_info,
 							  TupleDesc gpreagg_tupdesc)
 {
-	GpuContext_v2  *gcontext = gpas->gts.gcontext;
-	GpuPreAggSharedState   *gpa_sstate;
+	GpuContext	   *gcontext = gpas->gts.gcontext;
+	GpuPreAggSharedState *gpa_sstate;
 
 	Assert(gpreagg_tupdesc->natts > 0);
 	gpa_sstate = dmaBufferAlloc(gcontext, sizeof(GpuPreAggSharedState));
@@ -3640,12 +3640,12 @@ put_gpupreagg_shared_state(GpuPreAggSharedState *gpa_sstate)
 /*
  * gpupreagg_create_task - constructor of GpuPreAggTask
  */
-static GpuTask_v2 *
+static GpuTask *
 gpupreagg_create_task(GpuPreAggState *gpas,
 					  pgstrom_data_store *pds_src,
 					  int file_desc)
 {
-	GpuContext_v2  *gcontext = gpas->gts.gcontext;
+	GpuContext	   *gcontext = gpas->gts.gcontext;
 	GpuPreAggTask  *gpreagg;
 	TupleDesc		tupdesc;
 	bool			with_nvme_strom = false;
@@ -3727,12 +3727,12 @@ gpupreagg_create_task(GpuPreAggState *gpas,
  * callback to construct a new GpuPreAggTask task object based on
  * the input data stream that is scanned.
  */
-static GpuTask_v2 *
-gpupreagg_next_task(GpuTaskState_v2 *gts)
+static GpuTask *
+gpupreagg_next_task(GpuTaskState *gts)
 {
 	GpuPreAggState		   *gpas = (GpuPreAggState *) gts;
 	GpuPreAggSharedState   *gpa_sstate = gpas->gpa_sstate;
-	GpuTask_v2			   *gtask = NULL;
+	GpuTask				   *gtask = NULL;
 	pgstrom_data_store	   *pds = NULL;
 	int						filedesc = -1;
 	bool					is_last_task = false;
@@ -3817,11 +3817,11 @@ gpupreagg_next_task(GpuTaskState_v2 *gts)
 
 
 static void
-gpupreagg_ready_task(GpuTaskState_v2 *gts, GpuTask_v2 *gtask)
+gpupreagg_ready_task(GpuTaskState *gts, GpuTask *gtask)
 {}
 
 static void
-gpupreagg_switch_task(GpuTaskState_v2 *gts, GpuTask_v2 *gtask)
+gpupreagg_switch_task(GpuTaskState *gts, GpuTask *gtask)
 {
 	if (gtask->kerror.errcode != StromError_Success)
 		elog(ERROR, "GPU kernel error: %s", errorTextKernel(&gtask->kerror));
@@ -3863,7 +3863,7 @@ gpupreagg_next_tuple_fallback(GpuPreAggState *gpas, GpuPreAggTask *gpreagg)
  * gpupreagg_next_tuple
  */
 static TupleTableSlot *
-gpupreagg_next_tuple(GpuTaskState_v2 *gts)
+gpupreagg_next_tuple(GpuTaskState *gts)
 {
 	GpuPreAggState	   *gpas = (GpuPreAggState *) gts;
 	GpuPreAggTask	   *gpreagg = (GpuPreAggTask *) gpas->gts.curr_task;
@@ -4763,7 +4763,7 @@ out_of_resource:
  * gpupreagg_process_task
  */
 int
-gpupreagg_process_task(GpuTask_v2 *gtask,
+gpupreagg_process_task(GpuTask *gtask,
 					   CUmodule cuda_module,
 					   CUstream cuda_stream)
 {
@@ -4807,7 +4807,7 @@ gpupreagg_process_task(GpuTask_v2 *gtask,
 static void
 gpupreagg_push_terminator_task(GpuPreAggTask *gpreagg_old)
 {
-	GpuContext_v2  *gcontext = gpreagg_old->task.gcontext;
+	GpuContext	   *gcontext = gpreagg_old->task.gcontext;
 	GpuPreAggTask  *gpreagg_new;
 	Size			required;
 
@@ -4856,7 +4856,7 @@ gpupreagg_push_terminator_task(GpuPreAggTask *gpreagg_old)
  * gpupreagg_complete_task
  */
 int
-gpupreagg_complete_task(GpuTask_v2 *gtask)
+gpupreagg_complete_task(GpuTask *gtask)
 {
 	GpuPreAggTask		   *gpreagg = (GpuPreAggTask *) gtask;
 	GpuPreAggSharedState   *gpa_sstate = gpreagg->gpa_sstate;
@@ -5010,7 +5010,7 @@ gpupreagg_complete_task(GpuTask_v2 *gtask)
  * gpupreagg_release_task
  */
 void
-gpupreagg_release_task(GpuTask_v2 *gtask)
+gpupreagg_release_task(GpuTask *gtask)
 {
 	GpuPreAggTask  *gpreagg = (GpuPreAggTask *)gtask;
 

@@ -27,7 +27,7 @@
 /*
  * static functions
  */
-static void pgstrom_accum_worker_statistics(GpuTaskState_v2 *gts);
+static void pgstrom_accum_worker_statistics(GpuTaskState *gts);
 
 /*
  * construct_kern_parambuf
@@ -198,8 +198,8 @@ construct_kern_parambuf(List *used_params, ExprContext *econtext,
  * pgstromInitGpuTaskState
  */
 void
-pgstromInitGpuTaskState(GpuTaskState_v2 *gts,
-						GpuContext_v2 *gcontext,
+pgstromInitGpuTaskState(GpuTaskState *gts,
+						GpuContext *gcontext,
 						GpuTaskKind task_kind,
 						List *used_params,
 						EState *estate)
@@ -237,12 +237,12 @@ pgstromInitGpuTaskState(GpuTaskState_v2 *gts,
 /*
  * fetch_next_gputask
  */
-GpuTask_v2 *
-fetch_next_gputask(GpuTaskState_v2 *gts)
+GpuTask *
+fetch_next_gputask(GpuTaskState *gts)
 {
-	GpuContext_v2	   *gcontext = gts->gcontext;
+	GpuContext		   *gcontext = gts->gcontext;
 	SharedGpuContext   *shgcon = gcontext->shgcon;
-	GpuTask_v2		   *gtask;
+	GpuTask			   *gtask;
 	dlist_node		   *dnode;
 
 	/*
@@ -323,7 +323,7 @@ retry_scan:
 	/* OK, pick up GpuTask from the head */
 	Assert(gts->num_ready_tasks > 0);
 	dnode = dlist_pop_head_node(&gts->ready_tasks);
-	gtask = dlist_container(GpuTask_v2, chain, dnode);
+	gtask = dlist_container(GpuTask, chain, dnode);
 	gts->num_ready_tasks--;
 
 	/*
@@ -346,13 +346,13 @@ retry_scan:
  * pgstromExecGpuTaskState
  */
 TupleTableSlot *
-pgstromExecGpuTaskState(GpuTaskState_v2 *gts)
+pgstromExecGpuTaskState(GpuTaskState *gts)
 {
 	TupleTableSlot *slot = gts->css.ss.ss_ScanTupleSlot;
 
 	while (!gts->curr_task || !(slot = gts->cb_next_tuple(gts)))
 	{
-		GpuTask_v2	   *gtask = gts->curr_task;
+		GpuTask	   *gtask = gts->curr_task;
 
 		/* release the current GpuTask object that was already scanned */
 		if (gtask)
@@ -380,7 +380,7 @@ pgstromExecGpuTaskState(GpuTaskState_v2 *gts)
  * pgstromBulkExecGpuTaskState
  */
 pgstrom_data_store *
-pgstromBulkExecGpuTaskState(GpuTaskState_v2 *gts, size_t chunk_size)
+pgstromBulkExecGpuTaskState(GpuTaskState *gts, size_t chunk_size)
 {
 	pgstrom_data_store *pds_dst = NULL;
 	TupleTableSlot	   *slot;
@@ -390,7 +390,7 @@ pgstromBulkExecGpuTaskState(GpuTaskState_v2 *gts, size_t chunk_size)
 	Assert(gts->css.ss.ps.ps_ProjInfo == NULL);
 
 	do {
-		GpuTask_v2	   *gtask = gts->curr_task;
+		GpuTask	   *gtask = gts->curr_task;
 
 		/* Reload next GpuTask to be scanned, if needed */
 		if (!gtask)
@@ -462,7 +462,7 @@ pgstromBulkExecGpuTaskState(GpuTaskState_v2 *gts, size_t chunk_size)
  * pgstromRescanGpuTaskState
  */
 void
-pgstromRescanGpuTaskState(GpuTaskState_v2 *gts)
+pgstromRescanGpuTaskState(GpuTaskState *gts)
 {
 	/*
 	 * Once revision number of GTS is changed, any asynchronous GpuTasks
@@ -476,7 +476,7 @@ pgstromRescanGpuTaskState(GpuTaskState_v2 *gts)
  * pgstromReleaseGpuTaskState
  */
 void
-pgstromReleaseGpuTaskState(GpuTaskState_v2 *gts)
+pgstromReleaseGpuTaskState(GpuTaskState *gts)
 {
 	/*
 	 * collect perfmon statistics if parallel worker
@@ -513,7 +513,7 @@ pgstromReleaseGpuTaskState(GpuTaskState_v2 *gts)
  * pgstromExplainGpuTaskState
  */
 void
-pgstromExplainGpuTaskState(GpuTaskState_v2 *gts, ExplainState *es)
+pgstromExplainGpuTaskState(GpuTaskState *gts, ExplainState *es)
 {
 	StringInfoData	buf;
 
@@ -585,7 +585,7 @@ pgstromExplainGpuTaskState(GpuTaskState_v2 *gts, ExplainState *es)
  * pgstromInitGpuTask
  */
 void
-pgstromInitGpuTask(GpuTaskState_v2 *gts, GpuTask_v2 *gtask)
+pgstromInitGpuTask(GpuTaskState *gts, GpuTask *gtask)
 {
 	gtask->task_kind    = gts->task_kind;
 	gtask->program_id   = gts->program_id;
@@ -606,7 +606,7 @@ pgstromInitGpuTask(GpuTaskState_v2 *gts, GpuTask_v2 *gtask)
  * pgstromProcessGpuTask - processing handler of GpuTask
  */
 int
-pgstromProcessGpuTask(GpuTask_v2 *gtask,
+pgstromProcessGpuTask(GpuTask *gtask,
 					  CUmodule cuda_module,
 					  CUstream cuda_stream)
 {
@@ -640,7 +640,7 @@ pgstromProcessGpuTask(GpuTask_v2 *gtask,
  * pgstromCompleteGpuTask - completion handler of GpuTask
  */
 int
-pgstromCompleteGpuTask(GpuTask_v2 *gtask)
+pgstromCompleteGpuTask(GpuTask *gtask)
 {
 	int		retval;
 
@@ -672,7 +672,7 @@ pgstromCompleteGpuTask(GpuTask_v2 *gtask)
  * pgstromReleaseGpuTask - release of GpuTask
  */
 void
-pgstromReleaseGpuTask(GpuTask_v2 *gtask)
+pgstromReleaseGpuTask(GpuTask *gtask)
 {
 	switch (gtask->task_kind)
 	{
@@ -937,7 +937,7 @@ errorTextKernel(kern_errorbuf *kerror)
  * pgstromExplainOuterScan
  */
 void
-pgstromExplainOuterScan(GpuTaskState_v2 *gts,
+pgstromExplainOuterScan(GpuTaskState *gts,
 						List *deparse_context,
 						List *ancestors,
 						ExplainState *es,
@@ -1184,7 +1184,7 @@ show_instrumentation_count(const char *qlabel, int which,
 #endif
 
 void
-pgstrom_merge_worker_statistics(GpuTaskState_v2 *gts)
+pgstrom_merge_worker_statistics(GpuTaskState *gts)
 {
 	Assert(ParallelMasterBackendId == InvalidBackendId);
 
@@ -1202,7 +1202,7 @@ pgstrom_merge_worker_statistics(GpuTaskState_v2 *gts)
 }
 
 static void
-pgstrom_accum_worker_statistics(GpuTaskState_v2 *gts)
+pgstrom_accum_worker_statistics(GpuTaskState *gts)
 {
 	Assert(ParallelMasterBackendId != InvalidBackendId);
 	if (gts->worker_stat)

@@ -111,7 +111,7 @@ deform_gpuscan_info(CustomScan *cscan)
 
 typedef struct
 {
-	GpuTask_v2			task;
+	GpuTask				task;
 	bool				dev_projection;		/* true, if device projection */
 	bool				with_nvme_strom;
 	/* CUDA resources (only server side) */
@@ -127,7 +127,7 @@ typedef struct
 } GpuScanTask;
 
 typedef struct {
-	GpuTaskState_v2	gts;
+	GpuTaskState	gts;
 
 	HeapTupleData	scan_tuple;		/* buffer to fetch tuple */
 	List		   *dev_quals;		/* quals to be run on the device */
@@ -149,9 +149,9 @@ typedef struct
 /*
  * static functions
  */
-static GpuTask_v2  *gpuscan_next_task(GpuTaskState_v2 *gts);
-static TupleTableSlot *gpuscan_next_tuple(GpuTaskState_v2 *gts);
-static void gpuscan_switch_task(GpuTaskState_v2 *gts, GpuTask_v2 *gtask);
+static GpuTask  *gpuscan_next_task(GpuTaskState *gts);
+static TupleTableSlot *gpuscan_next_tuple(GpuTaskState *gts);
+static void gpuscan_switch_task(GpuTaskState *gts, GpuTask *gtask);
 
 /*
  * cost_discount_gpu_projection
@@ -1959,7 +1959,7 @@ fixup_varnode_to_origin(Node *node, List *custom_scan_tlist)
  * Gives some definitions to the static portion of GpuScan implementation
  */
 void
-assign_gpuscan_session_info(StringInfo buf, GpuTaskState_v2 *gts)
+assign_gpuscan_session_info(StringInfo buf, GpuTaskState *gts)
 {
 	CustomScan *cscan = (CustomScan *)gts->css.ss.ps.plan;
 
@@ -2006,7 +2006,7 @@ static void
 ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 {
 	Relation		scan_rel = node->ss.ss_currentRelation;
-	GpuContext_v2  *gcontext = NULL;
+	GpuContext	   *gcontext = NULL;
 	GpuScanState   *gss = (GpuScanState *) node;
 	CustomScan	   *cscan = (CustomScan *)node->ss.ps.plan;
 	GpuScanInfo	   *gs_info = deform_gpuscan_info(cscan);
@@ -2221,7 +2221,7 @@ ExecGpuScanInitDSM(CustomScanState *node,
 				   ParallelContext *pcxt,
 				   void *coordinate)
 {
-	GpuTaskState_v2	   *gts = (GpuTaskState_v2 *) node;
+	GpuTaskState	   *gts = (GpuTaskState *) node;
 	EState			   *estate = node->ss.ps.state;
 	GpuScanParallelDSM *gpdsm = coordinate;
 	int					instr_options = 0;
@@ -2276,7 +2276,7 @@ ExecGpuScanInitWorker(CustomScanState *node,
 					  shm_toc *toc,
 					  void *coordinate)
 {
-	GpuTaskState_v2	   *gts = (GpuTaskState_v2 *) node;
+	GpuTaskState	   *gts = (GpuTaskState *) node;
 	GpuScanParallelDSM *gpdsm = coordinate;
 
 	gts->worker_stat = gpdsm->worker_stat;
@@ -2351,7 +2351,7 @@ gpuscan_create_task(GpuScanState *gss,
 					pgstrom_data_store *pds_src, int file_desc)
 {
 	TupleDesc			scan_tupdesc = GTS_GET_SCAN_TUPDESC(gss);
-	GpuContext_v2	   *gcontext = gss->gts.gcontext;
+	GpuContext		   *gcontext = gss->gts.gcontext;
 	kern_resultbuf	   *kresults;
 	pgstrom_data_store *pds_dst;
 	GpuScanTask		   *gscan;
@@ -2546,7 +2546,7 @@ retry:
  * gpuscanExecScanChunk - read the relation by one chunk
  */
 pgstrom_data_store *
-gpuscanExecScanChunk(GpuTaskState_v2 *gts, int *p_filedesc)
+gpuscanExecScanChunk(GpuTaskState *gts, int *p_filedesc)
 {
 	Relation		base_rel = gts->css.ss.ss_currentRelation;
 	HeapScanDesc	scan;
@@ -2719,7 +2719,7 @@ out:
 }
 
 static void
-gpuscan_switch_task(GpuTaskState_v2 *gts, GpuTask_v2 *gtask)
+gpuscan_switch_task(GpuTaskState *gts, GpuTask *gtask)
 {
 	GpuScanTask		   *gscan = (GpuScanTask *) gtask;
 	pgstrom_data_store *pds_src = gscan->pds_src;
@@ -2737,8 +2737,8 @@ gpuscan_switch_task(GpuTaskState_v2 *gts, GpuTask_v2 *gtask)
 /*
  * gpuscan_next_task
  */
-static GpuTask_v2 *
-gpuscan_next_task(GpuTaskState_v2 *gts)
+static GpuTask *
+gpuscan_next_task(GpuTaskState *gts)
 {
 	GpuScanState	   *gss = (GpuScanState *) gts;
 	GpuScanTask		   *gscan;
@@ -2804,7 +2804,7 @@ retry_next:
  * gpuscan_next_tuple
  */
 static TupleTableSlot *
-gpuscan_next_tuple(GpuTaskState_v2 *gts)
+gpuscan_next_tuple(GpuTaskState *gts)
 {
 	GpuScanState	   *gss = (GpuScanState *) gts;
 	GpuScanTask		   *gscan = (GpuScanTask *) gts->curr_task;
@@ -2864,7 +2864,7 @@ gpuscan_next_tuple(GpuTaskState_v2 *gts)
  * gpuscanRewindScanChunk
  */
 void
-gpuscanRewindScanChunk(GpuTaskState_v2 *gts)
+gpuscanRewindScanChunk(GpuTaskState *gts)
 {
 	InstrEndLoop(&gts->outer_instrument);
 	Assert(gts->css.ss.ss_currentRelation != NULL);
@@ -2941,7 +2941,7 @@ gpuscan_respond_task(CUstream stream, CUresult status, void *private)
  * gpuscan_process_task
  */
 int
-gpuscan_process_task(GpuTask_v2 *gtask,
+gpuscan_process_task(GpuTask *gtask,
 					 CUmodule cuda_module,
 					 CUstream cuda_stream)
 {
@@ -3156,7 +3156,7 @@ out_of_resource:
  * gpuscan_complete_task
  */
 int
-gpuscan_complete_task(GpuTask_v2 *gtask)
+gpuscan_complete_task(GpuTask *gtask)
 {
 	GpuScanTask	   *gscan = (GpuScanTask *) gtask;
 
@@ -3179,7 +3179,7 @@ gpuscan_complete_task(GpuTask_v2 *gtask)
  * gpuscan_release_task
  */
 void
-gpuscan_release_task(GpuTask_v2 *gtask)
+gpuscan_release_task(GpuTask *gtask)
 {
 	GpuScanTask	   *gscan = (GpuScanTask *) gtask;
 

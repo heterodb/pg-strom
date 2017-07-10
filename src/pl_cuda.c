@@ -37,7 +37,7 @@
  */
 typedef struct plcudaTaskState
 {
-	GpuTaskState_v2	gts;		/* dummy */
+	GpuTaskState	gts;		/* dummy */
 	ResourceOwner	owner;
 	dlist_node		chain;
 	kern_plcuda	   *kplcuda_head;
@@ -92,7 +92,7 @@ typedef struct plcudaTaskState
  */
 typedef struct plcudaTask
 {
-	GpuTask_v2		task;
+	GpuTask			task;
 	bool			exec_prep_kernel;
 	bool			exec_post_kernel;
 	bool			has_cpu_fallback;
@@ -1203,7 +1203,7 @@ __setup_kern_colmeta(Oid type_oid, int arg_index)
 static plcudaTaskState *
 plcuda_exec_begin(HeapTuple protup, FunctionCallInfo fcinfo)
 {
-	GpuContext_v2   *gcontext = AllocGpuContext(fcinfo != NULL);
+	GpuContext	   *gcontext = AllocGpuContext(fcinfo != NULL);
 	plcudaTaskState *plts;
 	kern_plcuda	   *kplcuda;
 	Form_pg_proc	procForm = (Form_pg_proc) GETSTRUCT(protup);
@@ -1413,7 +1413,7 @@ static plcudaTask *
 create_plcuda_task(plcudaTaskState *plts, FunctionCallInfo fcinfo,
 				   Size working_bufsz, Size results_bufsz)
 {
-	GpuContext_v2  *gcontext = plts->gts.gcontext;
+	GpuContext	   *gcontext = plts->gts.gcontext;
 	plcudaTask	   *ptask;
 	kern_parambuf  *kparams;
 	kern_plcuda	   *kplcuda_head = plts->kplcuda_head;
@@ -1922,7 +1922,7 @@ __plcuda_process_task(plcudaTask *ptask,
 					  CUmodule cuda_module,
 					  CUstream cuda_stream)
 {
-	GpuContext_v2  *gcontext = ptask->task.gcontext;
+	GpuContext	   *gcontext = ptask->task.gcontext;
 	void		   *kern_args[3];
 	size_t			warp_size;
 	size_t			block_size;
@@ -2168,7 +2168,7 @@ out_of_resource:
 }
 
 int
-plcuda_process_task(GpuTask_v2 *gtask,
+plcuda_process_task(GpuTask *gtask,
 					CUmodule cuda_module,
 					CUstream cuda_stream)
 {
@@ -2193,7 +2193,7 @@ plcuda_process_task(GpuTask_v2 *gtask,
  * plcuda_complete_task
  */
 int
-plcuda_complete_task(GpuTask_v2 *gtask)
+plcuda_complete_task(GpuTask *gtask)
 {
 	plcudaTask	   *ptask = (plcudaTask *) gtask;
 
@@ -2206,7 +2206,7 @@ plcuda_complete_task(GpuTask_v2 *gtask)
  * plcuda_release_task
  */
 void
-plcuda_release_task(GpuTask_v2 *gtask)
+plcuda_release_task(GpuTask *gtask)
 {
 	plcudaTask	   *ptask = (plcudaTask *) gtask;
 

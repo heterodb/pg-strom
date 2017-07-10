@@ -63,7 +63,7 @@ typedef struct GpuServCommand
 {
 	cl_uint		command;	/* one of the GPUSERV_CMD_* */
 	cl_uint		length;		/* length of the command */
-	GpuTask_v2 *gtask;		/* reference to DMA buffer */
+	GpuTask	   *gtask;		/* reference to DMA buffer */
 	/* above fields are common to any message type */
 	struct {
 		cl_int	elevel;
@@ -121,7 +121,7 @@ __thread sigjmp_buf	   *gpuserv_worker_exception_stack = NULL;
 /*
  * static functions
  */
-static void gpuservSendCommand(GpuContext_v2 *gcontext, GpuServCommand *cmd);
+static void gpuservSendCommand(GpuContext *gcontext, GpuServCommand *cmd);
 static void	pgstrom_cuda_profiler_init(void);
 static void	pgstrom_cuda_profiler_update(void);
 
@@ -358,7 +358,7 @@ cleanupGpuModuleCache(void)
  * It send back a error command to the backend immediately.
  */
 static void
-ReportErrorForBackend(GpuTask_v2 *gtask)
+ReportErrorForBackend(GpuTask *gtask)
 {
 	GpuServCommand *cmd;
 	size_t			required;
@@ -405,7 +405,7 @@ ReportErrorForBackend(GpuTask_v2 *gtask)
  * Extra cleanup stuff if refcnt of GpuContext reached zero.
  */
 void
-gpuservClenupGpuContext(GpuContext_v2 *gcontext)
+gpuservClenupGpuContext(GpuContext *gcontext)
 {
 	uint32		expected = 0;
 
@@ -448,7 +448,7 @@ gpuservTryToWakeUp(void)
  * gpuservSendCommand - an internal low-level interface
  */
 static void
-gpuservSendCommand(GpuContext_v2 *gcontext, GpuServCommand *cmd)
+gpuservSendCommand(GpuContext *gcontext, GpuServCommand *cmd)
 {
 	struct msghdr	msg;
 	struct iovec    iov;
@@ -496,7 +496,7 @@ gpuservSendCommand(GpuContext_v2 *gcontext, GpuServCommand *cmd)
  * gpuservSendGpuTask - enqueue a GpuTask to the socket
  */
 void
-gpuservSendGpuTask(GpuContext_v2 *gcontext, GpuTask_v2 *gtask)
+gpuservSendGpuTask(GpuContext *gcontext, GpuTask *gtask)
 {
 	SharedGpuContext *shgcon = gcontext->shgcon;
 	GpuServCommand	cmd;
@@ -520,7 +520,7 @@ gpuservSendGpuTask(GpuContext_v2 *gcontext, GpuTask_v2 *gtask)
  * (it may fail if no available GPU server)
  */
 void
-gpuservOpenConnection(GpuContext_v2 *gcontext)
+gpuservOpenConnection(GpuContext *gcontext)
 {
 	SharedGpuContext *shgcon = gcontext->shgcon;
 	GpuServConn	   *gs_conn;
@@ -710,7 +710,7 @@ gpuservAcceptConnection(void)
  * delay (if any).
  */
 static inline void
-gputask_pushto_pending_list(GpuTask_v2 *gtask, unsigned long delay)
+gputask_pushto_pending_list(GpuTask *gtask, unsigned long delay)
 {
 	dlist_iter		iter;
 	struct timeval	tv;
@@ -735,7 +735,7 @@ gputask_pushto_pending_list(GpuTask_v2 *gtask, unsigned long delay)
 		dlist_delete(&gtask->chain);
 	dlist_reverse_foreach(iter, &session_pending_tasks)
 	{
-		GpuTask_v2 *curr = dlist_container(GpuTask_v2, chain, iter.cur);
+		GpuTask *curr = dlist_container(GpuTask, chain, iter.cur);
 
 		if (curr->tv_wakeup.tv_sec < gtask->tv_wakeup.tv_sec ||
 			(curr->tv_wakeup.tv_sec == gtask->tv_wakeup.tv_sec &&
@@ -754,7 +754,7 @@ found:
  * gpuservRecvCommands - returns number of the commands received
  */
 static int
-gpuservRecvCommands(GpuContext_v2 *gcontext, bool *p_peer_sock_closed)
+gpuservRecvCommands(GpuContext *gcontext, bool *p_peer_sock_closed)
 {
 	struct msghdr	msg;
 	struct iovec	iov;
@@ -829,7 +829,7 @@ gpuservRecvCommands(GpuContext_v2 *gcontext, bool *p_peer_sock_closed)
 		cmd = (GpuServCommand *) __cmd;
 		if (cmd->command == GPUSERV_CMD_TASK)
 		{
-			GpuTask_v2 *gtask;
+			GpuTask	   *gtask;
 
 			Assert(cmd->length == offsetof(GpuServCommand, error));
 
@@ -855,7 +855,7 @@ gpuservRecvCommands(GpuContext_v2 *gcontext, bool *p_peer_sock_closed)
 			}
 			else
 			{
-				GpuTaskState_v2	   *gts = gtask->gts;
+				GpuTaskState	   *gts = gtask->gts;
 
 				if (gts->cb_ready_task)
 					gts->cb_ready_task(gts, gtask);
@@ -910,7 +910,7 @@ gpuservRecvCommands(GpuContext_v2 *gcontext, bool *p_peer_sock_closed)
  * don't takes individual timeout.
  */
 bool
-gpuservRecvGpuTasks(GpuContext_v2 *gcontext, long timeout)
+gpuservRecvGpuTasks(GpuContext *gcontext, long timeout)
 {
 	struct timeval	tv1, tv2;
 	bool			retval = false;
@@ -991,7 +991,7 @@ static void
 gpuserv_try_run_pending_task(long *p_timeout)
 {
 	dlist_node	   *dnode;
-	GpuTask_v2	   *gtask;
+	GpuTask		   *gtask;
 	struct timeval	tv;
 	long			delay;
 
@@ -1002,7 +1002,7 @@ gpuserv_try_run_pending_task(long *p_timeout)
 		return;
 	}
 	dnode = dlist_pop_head_node(&session_pending_tasks);
-	gtask = dlist_container(GpuTask_v2, chain, dnode);
+	gtask = dlist_container(GpuTask, chain, dnode);
 	/* check task's delay, if any */
 	if (gtask->tv_wakeup.tv_sec != 0 || gtask->tv_wakeup.tv_usec != 0)
 	{
@@ -1094,7 +1094,7 @@ static void
 gpuserv_try_run_completed_task(long *p_timeout)
 {
 	dlist_node	   *dnode;
-	GpuTask_v2	   *gtask;
+	GpuTask		   *gtask;
 
 	SpinLockAcquire(&session_tasks_lock);
 	if (dlist_is_empty(&session_completed_tasks))
@@ -1103,13 +1103,13 @@ gpuserv_try_run_completed_task(long *p_timeout)
 		return;
 	}
 	dnode = dlist_pop_head_node(&session_completed_tasks);
-	gtask = dlist_container(GpuTask_v2, chain, dnode);
+	gtask = dlist_container(GpuTask, chain, dnode);
 	memset(&gtask->chain, 0, sizeof(dlist_node));
 	SpinLockRelease(&session_tasks_lock);
 
 	STROM_TRY();
 	{
-		GpuContext_v2  *gcontext = gtask->gcontext;
+		GpuContext	   *gcontext = gtask->gcontext;
 		GpuModuleCache *gmod_cache = gtask->gmod_cache;
 		int				peer_fdesc = gtask->peer_fdesc;
 		int				retval;
@@ -1194,7 +1194,7 @@ gpuserv_try_run_completed_task(long *p_timeout)
  * gpuservPushGpuTask - attach a GpuTask to the queue by GPU server itself
  */
 void
-gpuservPushGpuTask(GpuContext_v2 *gcontext, GpuTask_v2 *gtask)
+gpuservPushGpuTask(GpuContext *gcontext, GpuTask *gtask)
 {
 	SharedGpuContext *shgcon = gcontext->shgcon;
 
@@ -1219,7 +1219,7 @@ gpuservPushGpuTask(GpuContext_v2 *gcontext, GpuTask_v2 *gtask)
  * on the completed list.
  */
 void
-gpuservCompleteGpuTask(GpuTask_v2 *gtask, bool is_urgent)
+gpuservCompleteGpuTask(GpuTask *gtask, bool is_urgent)
 {
 	SpinLockAcquire(&session_tasks_lock);
 	dlist_delete(&gtask->chain);
@@ -1271,7 +1271,7 @@ gpuservWorkerMain(void *__private)
 			if (nevents > 0)
 			{
 				pgsocket		sockfd = ep_event.data.fd;
-				GpuContext_v2  *gcontext;
+				GpuContext	   *gcontext;
 
 				Assert(nevents == 1);
 				if (sockfd == PGINVALID_SOCKET)
