@@ -132,9 +132,11 @@ static dmaBufferWaitList *dmaBufWaitList = NULL;	/* shared memory */
 static void	   *dma_segment_vaddr_head = NULL;
 static void	   *dma_segment_vaddr_tail = NULL;
 static size_t	dma_segment_size;
-static int		dma_segment_size_kb;	/* GUC */
-static int		max_dma_segment_nums;	/* GUC */
-static int		min_dma_segment_nums;	/* GUC */
+static int		dma_segment_size_kb;		/* GUC */
+static int		num_logical_dma_segments;	/* GUC */
+static int		num_segments_hardlimit;
+static int		num_segments_softlimit;
+static int		num_segments_guarantee;
 static shmem_startup_hook_type shmem_startup_hook_next = NULL;
 static void	  (*sighandler_sigsegv_orig)(int,siginfo_t *,void *) = NULL;
 static void	  (*sighandler_sigbus_orig)(int,siginfo_t *,void *) = NULL;
@@ -165,7 +167,7 @@ dmaBufferCreateSegment(dmaBufferSegment *seg)
 	char			   *head_ptr;
 	char			   *tail_ptr;
 
-	Assert(seg->segment_id < max_dma_segment_nums);
+	Assert(seg->segment_id < num_logical_dma_segments);
 	revision = pg_atomic_read_u32(&seg->revision);
 	Assert(!SHMSEG_EXISTS(revision));	/* even number now */
 
@@ -447,7 +449,7 @@ dmaBufferAttachSegmentOnDemand(int signum, siginfo_t *siginfo, void *unused)
 
 			seg_id = ((uintptr_t)siginfo->si_addr -
 					  (uintptr_t)dma_segment_vaddr_head) / dma_segment_size;
-			Assert(seg_id < max_dma_segment_nums);
+			Assert(seg_id < num_logical_dma_segments);
 			seg = &dmaBufSegHead->segments[seg_id];
 
 			revision = pg_atomic_read_u32(&seg->revision);
@@ -833,7 +835,7 @@ pointer_validation(void *pointer, dmaBufferSegment **p_seg)
 
 	seg_id = ((uintptr_t)chunk -
 			  (uintptr_t)dma_segment_vaddr_head) / dma_segment_size;
-	Assert(seg_id < max_dma_segment_nums);
+	Assert(seg_id < num_logical_dma_segments);
 	seg = &dmaBufSegHead->segments[seg_id];
 	Assert(SHMSEG_EXISTS(pg_atomic_read_u32(&seg->revision)));
 
@@ -1358,12 +1360,13 @@ pgstrom_startup_dma_buffer(void)
 		(*shmem_startup_hook_next)();
 
 	/* dmaBufferEntryHead */
-	length = offsetof(dmaBufferSegmentHead, segments[max_dma_segment_nums]);
+	length = offsetof(dmaBufferSegmentHead,
+					  segments[num_logical_dma_segments]);
 	dmaBufSegHead = ShmemInitStruct("dmaBufferSegmentHead", length, &found);
 	Assert(!found);
 	memset(dmaBufSegHead, 0, length);
 
-	length = sizeof(dmaBufferLocalMap) * max_dma_segment_nums;
+	length = sizeof(dmaBufferLocalMap) * num_logical_dma_segments;
 	dmaBufLocalMaps = MemoryContextAllocZero(TopMemoryContext, length);
 
 	/* init pthread_rwlock_t */
@@ -1378,7 +1381,7 @@ pgstrom_startup_dma_buffer(void)
 	dlist_init(&dmaBufSegHead->inactive_segment_list);
 
 	/* preserve private address space but no physical memory */
-	length = (Size)max_dma_segment_nums * dma_segment_size;
+	length = (Size)num_logical_dma_segments * dma_segment_size;
 	dma_segment_vaddr_head = mmap(NULL, length,
 								  PROT_NONE,
 								  MAP_PRIVATE | MAP_ANONYMOUS,
@@ -1388,7 +1391,7 @@ pgstrom_startup_dma_buffer(void)
 	dma_segment_vaddr_tail = (char *)dma_segment_vaddr_head + length;
 
 	for (i=0, mmap_ptr = dma_segment_vaddr_head;
-		 i < max_dma_segment_nums;
+		 i < num_logical_dma_segments;
 		 i++, mmap_ptr += dma_segment_size)
 	{
 		dmaBufferSegment   *segment = &dmaBufSegHead->segments[i];
@@ -1397,7 +1400,7 @@ pgstrom_startup_dma_buffer(void)
 		/* dmaBufferSegment */
 		memset(segment, 0, sizeof(dmaBufferSegment));
 		segment->segment_id = i;
-		segment->persistent = (i < min_dma_segment_nums);
+		segment->persistent = (i < num_segments_guarantee);
 		segment->mmap_ptr = mmap_ptr;
 		pg_atomic_init_u32(&segment->revision, 0);
 		SpinLockInit(&segment->lock);
@@ -1432,9 +1435,10 @@ pgstrom_init_dma_buffer(void)
 {
 	struct sigaction sigact;
 	struct sigaction oldact;
-	Size		totalGpuMemSz = 0;
-	Size		reservedBufSz = 0;
-	int			i, num_segs;
+	const char	   *shm_path = "/dev/shm";
+	struct statfs	stat;
+	size_t			total_sz;
+	size_t			avail_sz;
 
 	/*
 	 * Unit size of DMA buffer segment
@@ -1457,71 +1461,68 @@ pgstrom_init_dma_buffer(void)
 		elog(ERROR, "pg_strom.dma_segment_size must be aligned to page size");
 
 	/*
-	 * Number of DMA buffer segment
-	 *
-	 * Default configuration is auto-adjustment (60% of /dev/shm volume)
+	 * Number of logical DMA buffer segments to be reserved with PROT_NONE
+	 * pages on server startup.
 	 */
-	DefineCustomIntVariable("pg_strom.max_dma_segment_nums",
-							"Max number of DMA segments",
+	DefineCustomIntVariable("pg_strom.num_logical_dma_segments",
+							"Num of logical DMA segments to be reserved",
 							NULL,
-							&max_dma_segment_nums,
-							-1,			/* auto */
-							-1,			/* auto */
-							32768,		/* 64TB, if default segment-size */
+							&num_logical_dma_segments,
+							16384,	/* 32TB, if 2GB segment-size */
+							64,		/* 128GB */
+							65536,	/* 128TB */
 							PGC_POSTMASTER,
 							GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
-	if (max_dma_segment_nums < 0)
-	{
-		const char	   *shm_path = "/dev/shm";
-		struct statfs	stat;
-		size_t			total_sz;
-		size_t			avail_sz;
-
-		if (statfs(shm_path, &stat) != 0)
-			elog(ERROR, "failed on statfs('%s'): %m", shm_path);
-		total_sz = (size_t)stat.f_bsize * (size_t)stat.f_blocks;
-		avail_sz = (size_t)stat.f_bsize * (size_t)stat.f_bavail;
-
-		max_dma_segment_nums = (total_sz * 6 / 10 +		/* 60% of volume */
-								dma_segment_size - 1) / dma_segment_size;
-		if (avail_sz < max_dma_segment_nums * dma_segment_size)
-			elog(WARNING, "Available size of %s volume (%s) is less than maximum possible DMA buffer size (%s). It may lead unexpected crash, so reconsider the pg_strom.max_dma_segment_nums configuration",
-				 shm_path,
-				 format_bytesz(avail_sz),
-				 format_bytesz(max_dma_segment_nums * dma_segment_size));
-	}
-	if (max_dma_segment_nums < 4)
-		elog(ERROR, "pg_strom.max_dma_segment_nums=%d looks too small",
-			 max_dma_segment_nums);
 
 	/*
-	 * Amount of persistent DMA buffer segment
-	 *
-	 * The default configuration is auto-adjustment.
+	 * Calculation of hard/soft limit number of DMA segments and minimum
+	 * guarantee of physical segments.
+	 * - Backend cannot allocate DMA buffer more than soft limit (66.7%)
+	 * - GPU server cannot allocate DMA buffer more than hard limit (80%)
+	 * - DMA segments less than minimum guarantee shall be pinned on the
+	 *   physical memory (20%).
 	 */
-	for (i=0; i < numDevAttrs; i++)
-		totalGpuMemSz += devAttrs[i].DEV_TOTAL_MEMSZ;
-	if (totalGpuMemSz >= (16UL << 30))		/* 1/3 of > 16GB part */
-		reservedBufSz = (totalGpuMemSz - (16UL<<30)) / 3 + (11UL << 30);
-	else if (totalGpuMemSz >= (10UL) << 30)	/* 1/2 of > 10G part */
-		reservedBufSz = (totalGpuMemSz - (10UL<<30)) / 2 + (8UL << 30);
-	else if (totalGpuMemSz >= (4UL << 30))	/* 2/3 of > 4GB part */
-		reservedBufSz = (totalGpuMemSz - (4UL<<30)) * 2 / 3 + (4UL<<30);
-	else
-		reservedBufSz = totalGpuMemSz;
-	num_segs = Max(reservedBufSz / dma_segment_size, 2);
+	if (statfs("/dev/shm", &stat) != 0)
+		elog(ERROR, "failed on statfs('/dev/shm'): %m");
+	total_sz = (size_t)stat.f_bsize * (size_t)stat.f_blocks;
+	avail_sz = (size_t)stat.f_bsize * (size_t)stat.f_bavail;
 
-	DefineCustomIntVariable("pg_strom.min_dma_segment_nums",
-							"number of reserved DMA buffer segment",
-							NULL,
-							&min_dma_segment_nums,
-							num_segs,
-							0,
-							max_dma_segment_nums,
-							PGC_POSTMASTER,
-							GUC_NOT_IN_SAMPLE,
-							NULL, NULL, NULL);
+	num_segments_hardlimit = (4 * total_sz) / (5 * dma_segment_size);
+	num_segments_softlimit = (2 * total_sz) / (3 * dma_segment_size);
+	num_segments_guarantee = (2 * total_sz) / (5 * dma_segment_size);
+
+	if (avail_sz < (size_t)num_segments_hardlimit * dma_segment_size)
+	{
+		const char *label;
+		const char *threshold;
+		int			elevel = WARNING;
+
+		if (avail_sz < (size_t)num_segments_guarantee * dma_segment_size)
+		{
+			elevel = ERROR;
+			label = "minimum guarantee";
+			threshold = format_bytesz((size_t)num_segments_guarantee *
+									  dma_segment_size);
+		}
+		else if (avail_sz < (size_t)num_segments_softlimit * dma_segment_size)
+		{
+			label = "soft limit";
+			threshold = format_bytesz((size_t)num_segments_softlimit *
+									  dma_segment_size);
+		}
+		else
+		{
+			label = "hard limit";
+			threshold = format_bytesz((size_t)num_segments_hardlimit *
+									  dma_segment_size);
+		}
+		elog(elevel, "Available size of %s volume (%s) is less than %s of DMA buffer size (%s). It will lead unexpected crash on run-time. Please cleanup unnecessary files or expand the size of volume.",
+			 shm_path,
+			 format_bytesz(avail_sz),
+			 label,
+			 threshold);
+	}
 
 	/*
 	 * registration of signal handles for DMA buffers
@@ -1541,7 +1542,7 @@ pgstrom_init_dma_buffer(void)
 
 	/* request for the static shared memory */
 	RequestAddinShmemSpace(offsetof(dmaBufferSegmentHead,
-									segments[max_dma_segment_nums]));
+									segments[num_logical_dma_segments]));
 	RequestAddinShmemSpace(offsetof(dmaBufferWaitList,
 									wait_proc_chain[maxBackends()]));
 	shmem_startup_hook_next = shmem_startup_hook;

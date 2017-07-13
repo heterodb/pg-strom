@@ -579,6 +579,7 @@ AllocGpuContext(bool with_connection)
 	shgcon->num_async_tasks = 0;
 
 	/* init local GpuContext */
+	gcontext->gpuserv_id = -1;
 	gcontext->sockfd = PGINVALID_SOCKET;
 	gcontext->resowner = CurrentResourceOwner;
 	gcontext->shgcon = shgcon;
@@ -624,6 +625,7 @@ AttachGpuContext(pgsocket sockfd, SharedGpuContext *shgcon, int epoll_fd)
 	if (!gcontext)
 		werror("out of memory");
 
+	gcontext->gpuserv_id = gpuserv_cuda_dindex;
 	gcontext->sockfd = sockfd;
 	gcontext->resowner = CurrentResourceOwner;
 	pg_atomic_init_u32(&gcontext->refcnt, 1);
@@ -756,17 +758,52 @@ PutGpuContext(GpuContext *gcontext)
 		PutSharedGpuContext(gcontext->shgcon);
 #ifdef PGSTROM_DEBUG
 		if (gcontext->debug_tv1 > 0)
-			wnotice("%u: debug1=%.2f", MyProcPid,
-					((double)gcontext->debug_tv1) / 1000000.0);
+		{
+			if (gcontext->count_tv1 == 0)
+				wnotice("%u: debug1=%.2f", MyProcPid,
+						((double)gcontext->debug_tv1) / 1000000.0);
+			else
+				wnotice("%u: debug1=%.2f n=%u", MyProcPid,
+						((double)gcontext->debug_tv1) /
+						((double)(1000000 * gcontext->count_tv1)),
+						gcontext->count_tv1);
+		}
+
 		if (gcontext->debug_tv2 > 0)
-			wnotice("%u: debug2=%.2f", MyProcPid,
-					((double)gcontext->debug_tv2) / 1000000.0);
+		{
+			if (gcontext->count_tv2 == 0)
+				wnotice("%u: debug2=%.2f", MyProcPid,
+						((double)gcontext->debug_tv2) / 1000000.0);
+			else
+				wnotice("%u: debug2=%.2f n=%u", MyProcPid,
+						((double)gcontext->debug_tv2) /
+						((double)(1000000 * gcontext->count_tv2)),
+						gcontext->count_tv2);
+		}
+
 		if (gcontext->debug_tv3 > 0)
-			wnotice("%u: debug3=%.2f", MyProcPid,
-					((double)gcontext->debug_tv3) / 1000000.0);
+		{
+			if (gcontext->count_tv3 == 0)
+				wnotice("%u: debug3=%.2f", MyProcPid,
+						((double)gcontext->debug_tv3) / 1000000.0);
+			else
+				wnotice("%u: debug3=%.2f n=%u", MyProcPid,
+						((double)gcontext->debug_tv3) /
+						((double)(1000000 * gcontext->count_tv3)),
+						gcontext->count_tv3);
+		}
+
 		if (gcontext->debug_tv4 > 0)
-			wnotice("%u: debug4=%.2f", MyProcPid,
-					((double)gcontext->debug_tv4) / 1000000.0);
+		{
+			if (gcontext->count_tv4 == 0)
+				wnotice("%u: debug4=%.2f", MyProcPid,
+						((double)gcontext->debug_tv4) / 1000000.0);
+			else
+				wnotice("%u: debug4=%.2f n=%u", MyProcPid,
+						((double)gcontext->debug_tv4) /
+						((double)(1000000 * gcontext->count_tv4)),
+						gcontext->count_tv4);
+		}
 #endif
 		free(gcontext);
 	}

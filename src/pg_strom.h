@@ -107,6 +107,7 @@ typedef struct SharedGpuContext
 typedef struct GpuContext
 {
 	dlist_node		chain;
+	cl_int			gpuserv_id;	/* GPU server Id, or -1 if unconnected */
 	pgsocket		sockfd;		/* connection between backend <-> server */
 	ResourceOwner	resowner;
 	SharedGpuContext *shgcon;
@@ -117,6 +118,10 @@ typedef struct GpuContext
 	unsigned long	debug_tv2;	/* usec for debug / analysis */
 	unsigned long	debug_tv3;	/* usec for debug / analysis */
 	unsigned long	debug_tv4;	/* usec for debug / analysis */
+	unsigned int	count_tv1;	/* # of samples for debug_tv1 */
+	unsigned int	count_tv2;	/* # of samples for debug_tv2 */
+	unsigned int	count_tv3;	/* # of samples for debug_tv3 */
+	unsigned int	count_tv4;	/* # of samples for debug_tv4 */
 #endif
 	slock_t			lock;		/* lock for resource tracker */
 	dlist_head		restrack[RESTRACK_HASHSIZE];
@@ -251,6 +256,14 @@ struct GpuTask
 	struct timeval	tv_wakeup;		/* sleep until, if non-zero */
 	int				peer_fdesc;		/* FD moved via SCM_RIGHTS */
 	unsigned long	dma_task_id;	/* Task-ID of Async SSD2GPU DMA */
+#ifdef PGSTROM_DEBUG
+	struct timeval	tv_timestamp;	/* timestamp when GpuTask sent */
+	unsigned int	send_delay;		/* delay by enqueue to pending-list */
+	unsigned int	kstart_delay;	/* delay by GPU kernel launch */
+	unsigned int	kfinish_delay;	/* delay by GPU kernel complete */
+	unsigned int	resp_delay;		/* delay by GpuTask was backed */
+	unsigned int	debug_delay;	/* delay for debug/analysis */
+#endif
 };
 
 /*
@@ -895,7 +908,6 @@ extern bool		pgstrom_debug_kernel_source;
 extern bool		pgstrom_bulkexec_enabled;
 extern bool		pgstrom_cpu_fallback_enabled;
 extern int		pgstrom_max_async_tasks;
-extern int		pgstrom_min_async_tasks;
 extern double	pgstrom_gpu_setup_cost;
 extern double	pgstrom_gpu_dma_cost;
 extern double	pgstrom_gpu_operator_cost;

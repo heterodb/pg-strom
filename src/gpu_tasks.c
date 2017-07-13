@@ -244,6 +244,7 @@ fetch_next_gputask(GpuTaskState *gts)
 	SharedGpuContext   *shgcon = gcontext->shgcon;
 	GpuTask			   *gtask;
 	dlist_node		   *dnode;
+	struct timeval		tv1, tv2;
 
 	/*
 	 * If no server connection is established, GpuTask cannot be processed
@@ -260,7 +261,6 @@ fetch_next_gputask(GpuTaskState *gts)
 
 retry_scan:
 	CHECK_FOR_INTERRUPTS();
-
 	while (gpuservRecvGpuTasks(gcontext, 0));
 
 	/*
@@ -272,32 +272,52 @@ retry_scan:
 	 */
 	while (!gts->scan_done)
 	{
-		CHECK_FOR_INTERRUPTS();
+		volatile uint32	num_server_gpu_tasks
+			= GetNumberOfGpuServerTasks(gcontext->gpuserv_id);
 
+		CHECK_FOR_INTERRUPTS();
+		/*
+		 * FIXME: We need to revise the GpuTask scheduler to utilize CPUs.
+		 * Right now, it looks to me small fraction of CPU are utilized.
+		 */
 		SpinLockAcquire(&shgcon->lock);
-		if (shgcon->num_async_tasks <= pgstrom_min_async_tasks ||
-			(gts->num_ready_tasks +
-			 shgcon->num_async_tasks) <= pgstrom_max_async_tasks)
+		if (shgcon->num_async_tasks == 0 ||
+			(num_server_gpu_tasks < pgstrom_max_async_tasks &&
+			 gts->num_ready_tasks < 3))
 		{
 			SpinLockRelease(&shgcon->lock);
 
+			/*
+			 * TODO: If cb_next_task() couldn't set up GpuTask because of
+			 * DMA buffer allocation, we may need to skip immediate load
+			 * unless GTS has no running tasks.
+			 */
 			gtask = gts->cb_next_task(gts);
 		  	if (!gtask)
 		  	{
 				gts->scan_done = true;
 				break;
 			}
+#ifdef PGSTROM_DEBUG
+			gettimeofday(&gtask->tv_timestamp, NULL);
+#endif
 			gpuservSendGpuTask(gcontext, gtask);
 		}
 		else
 		{
 			/* shouldn't send tasks any more at this moment */
 			SpinLockRelease(&shgcon->lock);
+
 			/* ok, we got at least one completed tasks */
 			if (!dlist_is_empty(&gts->ready_tasks))
 				break;
 			/* wait for a completed task, or task vanish on server side */
+			gettimeofday(&tv1, NULL);
 			gpuservRecvGpuTasks(gcontext, -1);
+			gettimeofday(&tv2, NULL);
+			if (gts->task_kind == GpuTaskKind_GpuJoin)
+				gcontext->debug_tv1 += ((1000000 * tv2.tv_sec + tv2.tv_usec) -
+										(1000000 * tv1.tv_sec + tv1.tv_usec));
 		}
 		/* check completed tasks if any (non-blocking) */
 		while (gpuservRecvGpuTasks(gcontext, 0));
@@ -318,7 +338,12 @@ retry_scan:
 			return NULL;
 		}
 		SpinLockRelease(&shgcon->lock);
+//		gettimeofday(&tv1, NULL);
 		gpuservRecvGpuTasks(gcontext, -1);
+//		gettimeofday(&tv2, NULL);
+//		if (gts->task_kind == GpuTaskKind_GpuJoin)
+//			gcontext->debug_tv2 += ((1000000 * tv2.tv_sec + tv2.tv_usec) -
+//									(1000000 * tv1.tv_sec + tv1.tv_usec));
 	}
 	/* OK, pick up GpuTask from the head */
 	Assert(gts->num_ready_tasks > 0);
@@ -339,6 +364,14 @@ retry_scan:
 		pgstromReleaseGpuTask(gtask);
 		goto retry_scan;
 	}
+
+	gcontext->debug_tv2 += gtask->debug_delay;
+	gcontext->count_tv2++;
+	gcontext->debug_tv3 += gtask->send_delay;
+	gcontext->count_tv3++;
+	gcontext->debug_tv4 += gtask->kstart_delay;
+	gcontext->count_tv4++;
+
 	return gtask;
 }
 

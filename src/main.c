@@ -46,7 +46,6 @@ bool		pgstrom_debug_kernel_source;
 bool		pgstrom_bulkexec_enabled;
 bool		pgstrom_cpu_fallback_enabled;
 int			pgstrom_max_async_tasks;
-int			pgstrom_min_async_tasks;
 double		pgstrom_num_threads_margin;
 double		pgstrom_chunk_size_margin;
 static int	pgstrom_chunk_size_kb;
@@ -115,17 +114,18 @@ pgstrom_init_misc_guc(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
-	/* soft limit for number of concurrent GpuTask per GPU device */
+	/* soft limit for number of concurrent GpuTasks per GPU device */
 	DefineCustomIntVariable("pg_strom.max_async_tasks",
-				"Soft limit for number of concurrent tasks per GPU server",
+				"Soft limit for number of concurrent GpuTasks per GPU device",
 							NULL,
 							&pgstrom_max_async_tasks,
+							256,
 							32,
-							4,
 							INT_MAX,
 							PGC_USERSET,
 							GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
+#ifdef NOT_USED
 	/* maximum number of GpuTask can concurrently executed */
 	DefineCustomIntVariable("pg_strom.min_async_tasks",
 				"Minimum guarantee for number of concurrent tasks per process",
@@ -137,6 +137,7 @@ pgstrom_init_misc_guc(void)
 							PGC_USERSET,
 							GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
+#endif
 	/* default length of pgstrom_data_store */
 	DefineCustomIntVariable("pg_strom.chunk_size",
 							"default size of pgstrom_data_store",
