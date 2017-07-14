@@ -496,6 +496,10 @@ extern void gpuservPushGpuTask(GpuContext *gcontext, GpuTask *gtask);
 extern void gpuservCompleteGpuTask(GpuTask *gtask, bool is_urgent);
 extern void pgstrom_init_gpu_server(void);
 
+extern pg_atomic_uint64	tv_process_task3;
+extern pg_atomic_uint64	tv_process_task4;
+
+
 /*
  * service routines for worker thread handling
  */

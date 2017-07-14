@@ -130,9 +130,6 @@ static pg_atomic_uint32	session_num_clients;
 __thread int			gpuserv_worker_index = -1;
 __thread sigjmp_buf	   *gpuserv_worker_exception_stack = NULL;
 
-static pg_atomic_uint64	tv_process_task;
-
-
 /*
  * static functions
  */
@@ -319,6 +316,8 @@ lookupGpuModuleCache(ProgramId program_id)
 {
 	dlist_iter	iter;
 	int			index;
+	CUmodule	cuda_module;
+	CUresult	rc;
 	GpuModuleCache *gmod_cache;
 
 	/* Is the cuda module already loaded? */
@@ -335,7 +334,41 @@ lookupGpuModuleCache(ProgramId program_id)
 			return gmod_cache;
 		}
 	}
-	/* Program was not loaded to the current CUDA context yet */
+	SpinLockRelease(&gpuserv_cuda_module_lock);
+
+	/*
+	 * NOTE: Pay attention pgstrom_load_cuda_program() can block until
+	 * completion of the GPU program build, if nobody picked up the program
+	 * entry yet, even if timeout == 0.
+	 * In this case, second or later threads return immediately with NULL;
+	 * which means NVRTC works in progress on the program entry, thus,
+	 * worker needs to release this task then handle another tasks.
+	 *
+	 * Only the first victim thread contributes to build the program entry,
+	 * and construct GpuModuleCache here.
+	 */
+	cuda_module = pgstrom_load_cuda_program(program_id, 0);
+	if (!cuda_module)
+		return NULL;
+	
+	SpinLockAcquire(&gpuserv_cuda_module_lock);
+	dlist_foreach (iter, &gpuserv_cuda_module_cache[index])
+	{
+		gmod_cache = dlist_container(GpuModuleCache, chain, iter.cur);
+		/*
+		 * Even if this thread builds the program entry, concurrent worker
+		 * might already build a GpuModuleCache here.
+		 */
+		if (gmod_cache->program_id == program_id)
+		{
+			gmod_cache->refcnt++;
+			SpinLockRelease(&gpuserv_cuda_module_lock);
+			rc = cuModuleUnload(cuda_module);
+			if (rc != CUDA_SUCCESS)
+				wnotice("failed on cuModuleUnload: %s", errorText(rc));
+			return gmod_cache;
+		}
+	}
 	gmod_cache = malloc(sizeof(GpuModuleCache));
 	if (!gmod_cache)
 	{
@@ -344,13 +377,8 @@ lookupGpuModuleCache(ProgramId program_id)
 	}
 	gmod_cache->refcnt = 2;
 	gmod_cache->program_id = program_id;
-	gmod_cache->cuda_module = pgstrom_load_cuda_program(program_id, 0);
-	if (!gmod_cache->cuda_module)
-	{
-		SpinLockRelease(&gpuserv_cuda_module_lock);
-		free(gmod_cache);
-		return NULL;
-	}
+	gmod_cache->cuda_module = cuda_module;
+
 	dlist_push_head(&gpuserv_cuda_module_cache[index], &gmod_cache->chain);
 	SpinLockRelease(&gpuserv_cuda_module_lock);
 
@@ -1132,8 +1160,6 @@ gpuserv_try_run_pending_task(long *p_timeout)
 			i = pg_atomic_fetch_add_u32(&gpuserv_rr_cuda_stream, 1);
 			cuda_stream = gpuserv_cuda_stream[i % gpuserv_num_cuda_stream];
 
-			cuStreamCreate(&cuda_stream, CU_STREAM_DEFAULT);
-
 			/*
 			 * pgstromProcessGpuTask() returns the following status:
 			 *
@@ -1154,8 +1180,7 @@ gpuserv_try_run_pending_task(long *p_timeout)
 				/* release GPU module once */
 				putGpuModuleCache(gmod_cache);
 				gtask->gmod_cache = NULL;
-
-				/* add 100ms delay until next launch */
+				/* 100ms delay until next launch */
 				gputask_pushto_pending_list(gtask, 100000);
 			}
 		}
@@ -1181,98 +1206,97 @@ gpuserv_try_run_completed_task(long *p_timeout)
 	GpuContext	   *gcontext;
 
 	SpinLockAcquire(&session_tasks_lock);
-	while (!dlist_is_empty(&session_completed_tasks))
+	if (dlist_is_empty(&session_completed_tasks))
 	{
-		dnode = dlist_pop_head_node(&session_completed_tasks);
-		gtask = dlist_container(GpuTask, chain, dnode);
-		memset(&gtask->chain, 0, sizeof(dlist_node));
 		SpinLockRelease(&session_tasks_lock);
-
-		gcontext = gtask->gcontext;
-		STROM_TRY();
-		{
-			GpuModuleCache *gmod_cache = gtask->gmod_cache;
-			int		peer_fdesc = gtask->peer_fdesc;
-			int		retval;
-
-			/* release CUDA module */
-			putGpuModuleCache(gmod_cache);
-			gtask->gmod_cache = NULL;
-
-			/*
-			 * pgstromCompleteGpuTask returns the following status:
-			 *
-			 *  0: GpuTask is successfully completed. So, let's return to
-			 *     the backend process over the socket.
-			 *  1: GpuTask needs to retry GPU kernel execution. So, let's
-			 *     attach pending list again.
-			 * -1: GpuTask wants to be released here. So, task shall be
-			 *     removed and num_async_tasks shall be decremented.
-			 */
-			retval = pgstromCompleteGpuTask(gtask);
-			if (retval == 0)
-			{
-				gtask->gcontext = NULL;
-				gtask->peer_fdesc = -1;
-				gpuservSendGpuTask(gcontext, gtask);
-				DecNumberOfGpuServerTasks();
-				if (peer_fdesc >= 0)
-					close(peer_fdesc);
-				PutGpuContext(gcontext);
-			}
-			else if (retval > 0 && GpuContextIsEstablished(gcontext))
-			{
-				/*
-				 * GpuTask wants to execute GPU kernel again, so attach
-				 * this task on the pending list again, as long as the
-				 * backend is still valid.
-				 */
-				SpinLockAcquire(&session_tasks_lock);
-				dlist_push_head(&session_pending_tasks, &gtask->chain);
-				SpinLockRelease(&session_tasks_lock);
-			}
-			else
-			{
-				/*
-				 * GpuTask wants to release this task without message-back.
-				 * So, we have to decrement num_async_tasks and set latch
-				 * of the backend process (it may wait for the last task).
-				 *
-				 * NOTE: We may not have this option because performance
-				 * counter data needs to be written back to the backend
-				 * process. Omit of message-back will give us small
-				 * optimization benefit, but it makes performance counter
-				 * code complicated...
-				 */
-				SharedGpuContext *shgcon = gcontext->shgcon;
-				PGPROC	   *backend;
-
-				pgstromReleaseGpuTask(gtask);
-
-				SpinLockAcquire(&shgcon->lock);
-				shgcon->num_async_tasks--;
-				backend = shgcon->backend;
-				SpinLockRelease(&shgcon->lock);
-				DecNumberOfGpuServerTasks();
-				if (backend)
-					SetLatch(&backend->procLatch);
-				if (peer_fdesc >= 0)
-					close(peer_fdesc);
-				PutGpuContext(gcontext);
-			}
-		}
-		STROM_CATCH();
-		{
-			ReportErrorForBackend(gcontext);
-			STROM_RE_THROW();
-		}
-		STROM_END_TRY();
-
-		*p_timeout = 0;
-
-		SpinLockAcquire(&session_tasks_lock);
+		return;
 	}
+	dnode = dlist_pop_head_node(&session_completed_tasks);
+	gtask = dlist_container(GpuTask, chain, dnode);
+	memset(&gtask->chain, 0, sizeof(dlist_node));
 	SpinLockRelease(&session_tasks_lock);
+
+	gcontext = gtask->gcontext;
+	STROM_TRY();
+	{
+		GpuModuleCache *gmod_cache = gtask->gmod_cache;
+		int		peer_fdesc = gtask->peer_fdesc;
+		int		retval;
+
+		/* release CUDA module */
+		putGpuModuleCache(gmod_cache);
+		gtask->gmod_cache = NULL;
+
+		/*
+		 * pgstromCompleteGpuTask returns the following status:
+		 *
+		 *  0: GpuTask is successfully completed. So, let's return to
+		 *     the backend process over the socket.
+		 *  1: GpuTask needs to retry GPU kernel execution. So, let's
+		 *     attach pending list again.
+		 * -1: GpuTask wants to be released here. So, task shall be
+		 *     removed and num_async_tasks shall be decremented.
+		 */
+		retval = pgstromCompleteGpuTask(gtask);
+		if (retval == 0)
+		{
+			gtask->gcontext = NULL;
+			gtask->peer_fdesc = -1;
+			gpuservSendGpuTask(gcontext, gtask);
+			DecNumberOfGpuServerTasks();
+			if (peer_fdesc >= 0)
+				close(peer_fdesc);
+			PutGpuContext(gcontext);
+		}
+		else if (retval > 0 && GpuContextIsEstablished(gcontext))
+		{
+			/*
+			 * GpuTask wants to execute GPU kernel again, so attach
+			 * this task on the pending list again, as long as the
+			 * backend is still valid.
+			 */
+			SpinLockAcquire(&session_tasks_lock);
+			dlist_push_head(&session_pending_tasks, &gtask->chain);
+			SpinLockRelease(&session_tasks_lock);
+		}
+		else
+		{
+			/*
+			 * GpuTask wants to release this task without message-back.
+			 * So, we have to decrement num_async_tasks and set latch
+			 * of the backend process (it may wait for the last task).
+			 *
+			 * NOTE: We may not have this option because performance
+			 * counter data needs to be written back to the backend
+			 * process. Omit of message-back will give us small
+			 * optimization benefit, but it makes performance counter
+			 * code complicated...
+			 */
+			SharedGpuContext *shgcon = gcontext->shgcon;
+			PGPROC	   *backend;
+
+			pgstromReleaseGpuTask(gtask);
+
+			SpinLockAcquire(&shgcon->lock);
+			shgcon->num_async_tasks--;
+			backend = shgcon->backend;
+			SpinLockRelease(&shgcon->lock);
+			DecNumberOfGpuServerTasks();
+			if (backend)
+				SetLatch(&backend->procLatch);
+			if (peer_fdesc >= 0)
+				close(peer_fdesc);
+			PutGpuContext(gcontext);
+		}
+	}
+	STROM_CATCH();
+	{
+		ReportErrorForBackend(gcontext);
+		STROM_RE_THROW();
+	}
+	STROM_END_TRY();
+
+	*p_timeout = 0;
 }
 
 /*
@@ -1323,15 +1347,120 @@ gpuservCompleteGpuTask(GpuTask *gtask, bool is_urgent)
 							(1000000 * gtask->tv_timestamp.tv_sec +
 									   gtask->tv_timestamp.tv_usec));
 #endif
-	//SetLatch(MyLatch);
 	write(gpuserv_event_fd, &count, sizeof(uint64));
 }
 
 /*
  * gpuservWorkerMain
  */
+static void
+gpuservWorkerMain(void)
+{
+	bool		read_event_fd = false;
+
+	for (;;)
+	{
+		struct epoll_event ep_event;
+		int			nevents;
+		long		timeout;
+
+		if (gpuserv_got_sigterm)
+			return;
+		/* reset event fd */
+		if (read_event_fd)
+		{
+			uint64	temp;
+
+			if (read(gpuserv_event_fd, &temp, sizeof(temp)) < 0 &&
+				errno != EAGAIN)
+				wlog("failed on read(gpuserv_event_fd): %m");
+			read_event_fd = false;
+		}
+
+		do {
+			timeout = 5000;		/* 5.0s interval */
+			if (pgstrom_try_build_cuda_program())
+				timeout = 0;
+			gpuserv_try_run_completed_task(&timeout);
+			gpuserv_try_run_pending_task(&timeout);
+			if (gpuserv_got_sigterm)
+				return;
+		} while (timeout == 0);
+
+		nevents = epoll_wait(gpuserv_epoll_fd,
+							 &ep_event, 1,
+							 timeout);	/* may be non-blocking poll */
+		if (nevents > 0)
+		{
+			pgsocket		sockfd = ep_event.data.fd;
+			uint32_t		events = ep_event.events;
+			GpuContext	   *gcontext;
+
+			Assert(nevents == 1);
+			if (sockfd == PGINVALID_SOCKET)
+			{
+				/* event around event fd, just wake up */
+				if (events & ~EPOLLIN)
+					werror("eventfd reported %08x", events);
+				read_event_fd = true;
+			}
+			else if (sockfd == gpuserv_server_sockfd)
+			{
+				/* event around server socket */
+				if (events & EPOLLIN)
+					gpuservAcceptConnection();
+				else
+					werror("server socket reported %08x", events);
+			}
+			else if ((gcontext = GetGpuContextBySockfd(sockfd)) != NULL)
+			{
+				bool		peer_sock_closed = false;
+				uint32		expected = 0;
+
+				if (events & EPOLLIN)
+					gpuservRecvCommands(gcontext, &peer_sock_closed);
+				else
+				{
+					peer_sock_closed = true;
+					wnotice("peer socket was closed by event %08x", events);
+					peer_sock_closed = true;
+				}
+
+				if (peer_sock_closed &&
+					pg_atomic_compare_exchange_u32(&gcontext->is_unlinked,
+												   &expected, 1))
+				{
+					Assert(expected == 0);
+					/*
+					 * Concurrent threads may get 'peer_sock_closed' state
+					 * simultitaneously. GpuContext must be unlinked
+					 * exactly once per connection, so we use atomic
+					 * compare-exchange operation to control the link
+					 * status.
+					 */
+					PutGpuContext(gcontext);
+
+					/* remove data socket from epoll_fd */
+					if (epoll_ctl(gpuserv_epoll_fd,
+								  EPOLL_CTL_DEL,
+								  gcontext->sockfd, NULL) < 0)
+						wnotice("failed on epoll_ctl(EPOLL_CTL_DEL): %m");
+				}
+				PutGpuContext(gcontext);
+			}
+			else
+			{
+				werror("epoll reported event on unknown socket: %08x %d",
+					   events, sockfd);
+			}
+		}
+		else if (nevents < 0 && errno != EINTR)
+			werror("failed on epoll_wait(2): %m");
+	}
+}
+
 static void *
-gpuservWorkerMain(void *__private)
+gpuservWorkerEntryPoint(void *__private)
 {
 	gpuserv_worker_index = PointerGetDatum(__private);
 	STROM_TRY();
@@ -1342,104 +1471,7 @@ gpuservWorkerMain(void *__private)
 		if (rc != CUDA_SUCCESS)
 			werror("failed on cuCtxSetCurrent: %s", errorText(rc));
 
-		for (;;)
-		{
-			struct epoll_event ep_event;
-			int			nevents;
-			uint64		ev_count;
-			long		timeout = 5000;	/* 5.0s interval */
-			struct timeval tv1, tv2;
-
-			if (gpuserv_got_sigterm)
-				break;
-
-			if (pgstrom_try_build_cuda_program())
-				timeout = 0;
-			gpuserv_try_run_completed_task(&timeout);
-			gpuserv_try_run_pending_task(&timeout);
-
-			/* reset event fd if no pending tasks */
-			if (timeout > 0)
-			{
-				if (read(gpuserv_event_fd, &ev_count, sizeof(ev_count)) < 0 &&
-					errno != EAGAIN)
-					wlog("failed on read(gpuserv_event_fd): %m");
-			}
-			gettimeofday(&tv1, NULL);
-			nevents = epoll_wait(gpuserv_epoll_fd,
-								 &ep_event, 1,
-								 timeout);	/* may be non-blocking poll */
-			gettimeofday(&tv2, NULL);
-			pg_atomic_fetch_add_u64(&tv_process_task,
-									(1000000 * tv2.tv_sec + tv2.tv_usec) -
-									(1000000 * tv1.tv_sec + tv1.tv_usec));
-			if (nevents > 0)
-			{
-				pgsocket		sockfd = ep_event.data.fd;
-				GpuContext	   *gcontext;
-
-				Assert(nevents == 1);
-				if (sockfd == PGINVALID_SOCKET)
-				{
-					/* event around event fd, just wake up */
-					if (ep_event.events & ~EPOLLIN)
-						werror("eventfd reported %08x", ep_event.events);
-				}
-				else if (sockfd == gpuserv_server_sockfd)
-				{
-					/* event around server socket */
-					if (ep_event.events & EPOLLIN)
-						gpuservAcceptConnection();
-					else
-						werror("server socket reported %08x", ep_event.events);
-				}
-				else if ((gcontext = GetGpuContextBySockfd(sockfd)) != NULL)
-				{
-					bool		peer_sock_closed = false;
-					uint32		expected = 0;
-
-					if (ep_event.events & EPOLLIN)
-						gpuservRecvCommands(gcontext, &peer_sock_closed);
-					else
-					{
-						peer_sock_closed = true;
-						wnotice("peer socket was closed by event %08x",
-								ep_event.events);
-						peer_sock_closed = true;
-					}
-
-					if (peer_sock_closed &&
-						pg_atomic_compare_exchange_u32(&gcontext->is_unlinked,
-													   &expected, 1))
-					{
-						Assert(expected == 0);
-						/*
-						 * Concurrent threads may get 'peer_sock_closed' state
-						 * simultitaneously. GpuContext must be unlinked
-						 * exactly once per connection, so we use atomic
-						 * compare-exchange operation to control the link
-						 * status.
-						 */
-						PutGpuContext(gcontext);
-
-						/* remove data socket from epoll_fd */
-						if (epoll_ctl(gpuserv_epoll_fd,
-									  EPOLL_CTL_DEL,
-									  gcontext->sockfd, NULL) < 0)
-							wnotice("failed on epoll_ctl(EPOLL_CTL_DEL): %m");
-					}
-					PutGpuContext(gcontext);
-				}
-				else
-				{
-					werror("epoll reported event on unknown socket: %08x %d",
-						   ep_event.events, sockfd);
-				}
-			}
-			else if (nevents < 0 && errno != EINTR)
-				werror("failed on epoll_wait(2): %m");
-		}
-			
+		gpuservWorkerMain();
 	}
 	STROM_CATCH();
 	{
@@ -1536,7 +1568,7 @@ gpuservEventLoop(void)
 	for (i=0; i < GpuServerNumWorkers; i++)
 	{
 		int		code = pthread_create(gpuworker_threads + i, NULL,
-									  gpuservWorkerMain,
+									  gpuservWorkerEntryPoint,
 									  DatumGetPointer(i));
 		if (code != 0)
 		{
@@ -1553,8 +1585,7 @@ gpuservEventLoop(void)
 		 devAttrs[gpuserv_cuda_dindex].DEV_NAME);
 	PG_TRY();
 	{
-		timeout = 2000;
-		pg_atomic_init_u64(&tv_process_task, 0);
+		timeout = 10000;	/* wake up per 10s */
 
 		for (;;)
 		{
@@ -1579,9 +1610,6 @@ gpuservEventLoop(void)
 			}
 			/* refresh profiler's status */
 			pgstrom_cuda_profiler_update();
-
-//			fprintf(stderr, "tv_process_task = %.3f\n",
-//					(double)pg_atomic_read_u64(&tv_process_task) / 1000000.0);
 		}
 	}
 	PG_CATCH();
@@ -1695,7 +1723,7 @@ gpuservBgWorkerMain(Datum __server_id)
 		elog(FATAL, "failed on cuCtxCreate: %s", errorText(rc));
 
 	pg_atomic_init_u32(&gpuserv_rr_cuda_stream, 0);
-	gpuserv_num_cuda_stream = 5 * GpuServerNumWorkers;
+	gpuserv_num_cuda_stream = 3 * GpuServerNumWorkers;
 	gpuserv_cuda_stream = malloc(sizeof(CUstream) * gpuserv_num_cuda_stream);
 	if (!gpuserv_cuda_stream)
 		elog(FATAL, "out of memory");
