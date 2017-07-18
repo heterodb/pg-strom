@@ -63,7 +63,7 @@ typedef struct ResourceTracker
 	union {
 		struct {
 			CUdeviceptr	ptr;	/* RESTRACK_CLASS__GPUMEMORY */
-			size_t		size;	/* RESTRACK_CLASS__IOMAPMEMORY */
+			void   *extra;		/* RESTRACK_CLASS__IOMAPMEMORY */
 		} devmem;
 		ProgramId	program_id;	/* RESTRACK_CLASS__GPUPROGRAM */
 		unsigned long dma_task_id; /* RESTRACK_CLASS__SSD2GPUDMA */
@@ -99,6 +99,7 @@ resource_tracker_hashval(cl_int resclass, void *data, size_t len)
 	return crc;
 }
 
+#ifdef NOT_USED
 /*
  * gpuMemMaxAllocSize - hard limit for device memory allocation
  */
@@ -234,6 +235,7 @@ found:
 		wnotice("failed on cuMemFree(%p): %s", (void *)devptr, errorText(rc));
 	return rc;
 }
+#endif
 
 /*
  * resource tracker for GPU program
@@ -292,6 +294,67 @@ untrackCudaProgram(GpuContext *gcontext, ProgramId program_id)
 }
 
 /*
+ * resource tracker for normal device memory
+ */
+bool
+trackGpuMem(GpuContext *gcontext, CUdeviceptr devptr, void *extra)
+{
+	ResourceTracker *tracker = resource_tracker_alloc();
+	pg_crc32	crc;
+
+	if (!tracker)
+		return false;	/* out of memory */
+
+	crc = resource_tracker_hashval(RESTRACK_CLASS__GPUMEMORY,
+								   &devptr, sizeof(CUdeviceptr));
+	tracker->crc = crc;
+	tracker->resclass = RESTRACK_CLASS__GPUMEMORY;
+	tracker->u.devmem.ptr = devptr;
+	tracker->u.devmem.extra = extra;
+
+	SpinLockAcquire(&gcontext->lock);
+	dlist_push_tail(&gcontext->restrack[crc % RESTRACK_HASHSIZE],
+					&tracker->chain);
+	SpinLockRelease(&gcontext->lock);
+	return true;
+}
+
+void *
+untrackGpuMem(GpuContext *gcontext, CUdeviceptr devptr)
+{
+	dlist_head *restrack_list;
+	dlist_iter	iter;
+	pg_crc32	crc;
+	void	   *extra;
+
+	crc = resource_tracker_hashval(RESTRACK_CLASS__GPUMEMORY,
+								   &devptr, sizeof(CUdeviceptr));
+	restrack_list = &gcontext->restrack[crc % RESTRACK_HASHSIZE];
+	SpinLockAcquire(&gcontext->lock);
+	dlist_foreach (iter, restrack_list)
+	{
+		ResourceTracker *tracker
+			= dlist_container(ResourceTracker, chain, iter.cur);
+
+		if (tracker->crc == crc &&
+			tracker->resclass == RESTRACK_CLASS__GPUMEMORY &&
+			tracker->u.devmem.ptr == devptr)
+		{
+			dlist_delete(&tracker->chain);
+			extra = tracker->u.devmem.extra;
+			SpinLockRelease(&gcontext->lock);
+			memset(tracker, 0, sizeof(ResourceTracker));
+			dlist_push_head(&inactiveResourceTracker,
+							&tracker->chain);
+			return extra;
+		}
+	}
+	SpinLockRelease(&gcontext->lock);
+	wnotice("Bug? GPU Device Memory %p was not tracked", (void *)devptr);
+	return NULL;
+}
+
+/*
  * resource tracker for i/o mapped memory
  */
 bool
@@ -308,7 +371,7 @@ trackIOMapMem(GpuContext *gcontext, CUdeviceptr devptr)
 	tracker->crc = crc;
 	tracker->resclass = RESTRACK_CLASS__IOMAPMEMORY;
 	tracker->u.devmem.ptr = devptr;
-	tracker->u.devmem.size = 0;
+	tracker->u.devmem.extra = NULL;
 
 	SpinLockAcquire(&gcontext->lock);
 	dlist_push_tail(&gcontext->restrack[crc % RESTRACK_HASHSIZE],

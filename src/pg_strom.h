@@ -459,15 +459,11 @@ extern void PutGpuContext(GpuContext *gcontext);
 extern void ForcePutAllGpuContext(void);
 extern bool GpuContextIsEstablished(GpuContext *gcontext);
 
-extern Size gpuMemMaxAllocSize(void);
-extern CUresult	gpuMemAlloc(GpuContext *gcontext,
-							CUdeviceptr *p_devptr, size_t bytesize);
-extern CUresult gpuMemAllocManaged(GpuContext *gcontext,
-								   CUdeviceptr *p_devptr, size_t bytesize,
-								   int flags);
-extern CUresult	gpuMemFree(GpuContext *gcontext, CUdeviceptr devptr);
+
 extern bool trackCudaProgram(GpuContext *gcontext, ProgramId program_id);
 extern void untrackCudaProgram(GpuContext *gcontext, ProgramId program_id);
+extern bool trackGpuMem(GpuContext *gcontext, CUdeviceptr devptr, void *extra);
+extern void *untrackGpuMem(GpuContext *gcontext, CUdeviceptr devptr);
 extern bool trackIOMapMem(GpuContext *gcontext, CUdeviceptr devptr);
 extern void untrackIOMapMem(GpuContext *gcontext, CUdeviceptr devptr);
 extern bool trackSSD2GPUDMA(GpuContext *gcontext,
@@ -475,6 +471,20 @@ extern bool trackSSD2GPUDMA(GpuContext *gcontext,
 extern void untrackSSD2GPUDMA(GpuContext *gcontext,
 							  unsigned long dma_task_id);
 extern void pgstrom_init_gpu_context(void);
+
+/*
+ * gpu_memory.c
+ */
+extern Size gpuMemMaxAllocSize(void);
+extern CUresult	gpuMemAlloc(GpuContext *gcontext,
+							CUdeviceptr *p_devptr, size_t bytesize);
+extern CUresult gpuMemAllocManaged(GpuContext *gcontext,
+								   CUdeviceptr *p_devptr, size_t bytesize,
+								   int flags);
+extern CUresult	gpuMemFree(GpuContext *gcontext, CUdeviceptr devptr);
+extern void gpuMemReclaim(void);
+
+extern void pgstrom_init_gpu_memory(void);
 
 /*
  * gpu_server.c
@@ -496,9 +506,10 @@ extern void gpuservPushGpuTask(GpuContext *gcontext, GpuTask *gtask);
 extern void gpuservCompleteGpuTask(GpuTask *gtask, bool is_urgent);
 extern void pgstrom_init_gpu_server(void);
 
-extern pg_atomic_uint64	tv_process_task3;
-extern pg_atomic_uint64	tv_process_task4;
-
+extern pg_atomic_uint64 tv_gpuserv_debug1;
+extern pg_atomic_uint64 tv_gpuserv_debug2;
+extern pg_atomic_uint64 tv_gpuserv_debug3;
+extern pg_atomic_uint64 tv_gpuserv_debug4;
 
 /*
  * service routines for worker thread handling

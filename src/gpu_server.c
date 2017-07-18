@@ -130,6 +130,12 @@ static pg_atomic_uint32	session_num_clients;
 __thread int			gpuserv_worker_index = -1;
 __thread sigjmp_buf	   *gpuserv_worker_exception_stack = NULL;
 
+/* for debug */
+pg_atomic_uint64 tv_gpuserv_debug1;
+pg_atomic_uint64 tv_gpuserv_debug2;
+pg_atomic_uint64 tv_gpuserv_debug3;
+pg_atomic_uint64 tv_gpuserv_debug4;
+
 /*
  * static functions
  */
@@ -1540,7 +1546,6 @@ static void
 gpuservEventLoop(void)
 {
 	WaitEventSet *wait_events;
-	long		timeout = -1;
 	Datum		i;
 
 	memset(&worker_exception_data, 0, sizeof(worker_exception_data));
@@ -1585,7 +1590,16 @@ gpuservEventLoop(void)
 		 devAttrs[gpuserv_cuda_dindex].DEV_NAME);
 	PG_TRY();
 	{
-		timeout = 10000;	/* wake up per 10s */
+		long		timeout = 5000;	/* wake up per 5s */
+		uint64		tv_debug1	__attribute__((unused));
+		uint64		tv_debug2	__attribute__((unused));
+		uint64		tv_debug3	__attribute__((unused));
+		uint64		tv_debug4	__attribute__((unused));
+
+		pg_atomic_init_u64(&tv_gpuserv_debug1, 0);
+		pg_atomic_init_u64(&tv_gpuserv_debug2, 0);
+		pg_atomic_init_u64(&tv_gpuserv_debug3, 0);
+		pg_atomic_init_u64(&tv_gpuserv_debug4, 0);
 
 		for (;;)
 		{
@@ -1610,6 +1624,19 @@ gpuservEventLoop(void)
 			}
 			/* refresh profiler's status */
 			pgstrom_cuda_profiler_update();
+
+			tv_debug1 = pg_atomic_read_u64(&tv_gpuserv_debug1);
+			tv_debug2 = pg_atomic_read_u64(&tv_gpuserv_debug2);
+			tv_debug3 = pg_atomic_read_u64(&tv_gpuserv_debug3);
+			tv_debug4 = pg_atomic_read_u64(&tv_gpuserv_debug4);
+			if (tv_debug1 || tv_debug2 || tv_debug3 || tv_debug4)
+			{
+				fprintf(stderr, "tv_debug: %.3f %.3f %.3f %.3f\n",
+						(double)tv_debug1 / 1000000.0,
+						(double)tv_debug2 / 1000000.0,
+						(double)tv_debug3 / 1000000.0,
+						(double)tv_debug4 / 1000000.0);
+			}
 		}
 	}
 	PG_CATCH();
@@ -1785,15 +1812,6 @@ gpuservBgWorkerMain(Datum __server_id)
 	PG_END_TRY();
 	elog(FATAL, "Bug? GpuServer has no path to exit normally");
 }
-
-
-
-
-
-
-
-
-
 
 /*
  * pgstrom_cuda_profiler_init (per GPU server)
