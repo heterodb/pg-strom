@@ -62,8 +62,8 @@ typedef struct
 } GpuMemSegment;
 
 static pthread_rwlock_t gpumem_segment_rwlock;
-static dlist_head	gpumem_active_segment_list;
-static dlist_head	gpumem_inactive_segment_list;
+static dlist_head		gpumem_segment_list;
+static cl_int			gpumem_segment_count = 0;
 
 /*
  * gpuMemMaxAllocSize
@@ -160,12 +160,11 @@ gpuMemAlloc(GpuContext *gcontext, CUdeviceptr *p_devptr, size_t bytesize)
 	GpuMemSegment  *gm_seg;
 	GpuMemChunk	   *gm_chunk;
 	dlist_iter		iter;
-	dlist_node	   *dnode;
 	int				i, mclass;
 	int				nchunks;
 	CUdeviceptr		m_segment;
 	CUdeviceptr		m_result;
-	CUresult		rc;
+	CUresult		rc, __rc;
 
 	Assert(IsGpuServerProcess());
 	mclass = get_next_log2(bytesize);
@@ -195,7 +194,7 @@ gpuMemAlloc(GpuContext *gcontext, CUdeviceptr *p_devptr, size_t bytesize)
 		wfatal("failed on pthread_rwlock_rdlock: %m");
 retry:
 	/* lookup an active segment with free space */
-	dlist_foreach(iter, &gpumem_active_segment_list)
+	dlist_foreach(iter, &gpumem_segment_list)
 	{
 		gm_seg = dlist_container(GpuMemSegment, segment_chain, iter.cur);
 
@@ -233,34 +232,32 @@ retry:
 		goto retry;
 	}
 
-	/* try to pick up an inactive segment, if any */
-	if (!dlist_is_empty(&gpumem_inactive_segment_list))
-	{
-		dnode = dlist_pop_head_node(&gpumem_inactive_segment_list);
-		dlist_push_head(&gpumem_active_segment_list, dnode);
-		goto retry;
-	}
-
 	/* here is no available segment, so create a new one */
 	nchunks = GPUMEM_SEGMENTSZ / GPUMEM_CHUNKSZ_MIN;
 	gm_seg = calloc(1, offsetof(GpuMemSegment, gpumem_chunks[nchunks]));
 	if (!gm_seg)
 	{
-		if ((errno = pthread_rwlock_unlock(&gpumem_segment_rwlock)) < 0)
-			wfatal("failed on pthread_rwlock_unlock: %m");
-		return CUDA_ERROR_OUT_OF_MEMORY;
+		rc = CUDA_ERROR_OUT_OF_MEMORY;
+		goto error0;
 	}
 
-	rc = cuMemAllocManaged(&m_segment,
-						   GPUMEM_SEGMENTSZ,
-						   CU_MEM_ATTACH_GLOBAL);
+	rc = cuMemAllocManaged(&m_segment, GPUMEM_SEGMENTSZ, CU_MEM_ATTACH_GLOBAL);
 	if (rc != CUDA_SUCCESS)
-	{
-		if ((errno = pthread_rwlock_unlock(&gpumem_segment_rwlock)) < 0)
-			wfatal("failed on pthread_rwlock_unlock: %m");
-		free(gm_seg);
-		return rc;
-	}
+		goto error1;
+
+	rc = cuMemAdvise(m_segment, GPUMEM_SEGMENTSZ,
+					 CU_MEM_ADVISE_SET_PREFERRED_LOCATION,
+					 gpuserv_cuda_device);
+	if (rc != CUDA_SUCCESS)
+		goto error2;
+	rc = cuMemAdvise(m_segment, GPUMEM_SEGMENTSZ,
+					 CU_MEM_ADVISE_SET_ACCESSED_BY,
+					 gpuserv_cuda_device);
+	if (rc != CUDA_SUCCESS)
+		goto error2;
+	/*
+	 * OK, create a new device memory segment
+	 */
 	gm_seg->m_segment			= m_segment;
 	gm_seg->num_total_chunks	= nchunks;
 	SpinLockInit(&gm_seg->lock);
@@ -271,9 +268,20 @@ retry:
 	gm_chunk->mclass = GPUMEM_SEGMENTSZ_BIT;
 	dlist_push_head(&gm_seg->free_chunks[GPUMEM_SEGMENTSZ_BIT],
 					&gm_chunk->chain);
-	dlist_push_head(&gpumem_active_segment_list,
+	dlist_push_head(&gpumem_segment_list,
 					&gm_seg->segment_chain);
+	gpumem_segment_count++;
 	goto retry;
+
+error2:
+	if ((__rc = cuMemFree(m_segment)) != CUDA_SUCCESS)
+		wfatal("failed on cuMemFree: %s", errorText(__rc));
+error1:
+	free(gm_seg);
+error0:
+	if ((errno = pthread_rwlock_unlock(&gpumem_segment_rwlock)) < 0)
+		wfatal("failed on pthread_rwlock_unlock: %m");
+	return rc;
 }
 
 /*
@@ -381,8 +389,39 @@ gpuMemFree(GpuContext *gcontext, CUdeviceptr devptr)
 void
 gpuMemReclaim(void)
 {
+	dlist_iter		iter;
+	CUresult		rc;
+
 	Assert(IsGpuServerProcess());
 
+	if ((errno = pthread_rwlock_wrlock(&gpumem_segment_rwlock)) < 0)
+		wfatal("failed on pthread_rwlock_wrlock: %m");
+	if (gpumem_segment_count > 1)
+	{
+		dlist_reverse_foreach(iter, &gpumem_segment_list)
+		{
+			GpuMemSegment  *gm_seg = dlist_container(GpuMemSegment,
+													 segment_chain,
+													 iter.cur);
+			/*
+			 * NOTE: No concurrent task shall appear under the exclusive
+			 * lock on the gpumem_segment_rwlock. So, no need to acquire
+			 * gm_seg->lock here.
+			 */
+			if (gm_seg->num_active_chunks == 0)
+			{
+				dlist_delete(&gm_seg->segment_chain);
+				rc = cuMemFree(gm_seg->m_segment);
+				if (rc != CUDA_SUCCESS)
+					wfatal("failed on cuMemFree: %s", errorText(rc));
+				free(gm_seg);
+				gpumem_segment_count--;
+				break;
+			}
+		}
+	}
+	if ((errno = pthread_rwlock_unlock(&gpumem_segment_rwlock)) < 0)
+		wfatal("failed on pthread_rwlock_unlock: %m");
 }
 
 /*
@@ -402,6 +441,5 @@ pgstrom_init_gpu_memory(void)
 {
 	if ((errno = pthread_rwlock_init(&gpumem_segment_rwlock, NULL)) < 0)
 		elog(ERROR, "failed on pthread_rwlock_init: %m");
-	dlist_init(&gpumem_active_segment_list);
-	dlist_init(&gpumem_inactive_segment_list);
+	dlist_init(&gpumem_segment_list);
 }
