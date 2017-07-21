@@ -463,28 +463,19 @@ link_cuda_libraries(char *ptx_image, size_t ptx_length,
 static void
 writeout_cuda_source_file(char *tempfile, const char *source)
 {
-	static __thread long sourceFileCounter = 0;
+	static pg_atomic_uint64 sourceFileCounter = {0};
 	FILE	   *filp;
 
 	/*
 	 * Generate a tempfile name that should be unique within the current
 	 * database instance.
 	 */
-	if (IsGpuServerProcess())
-		snprintf(tempfile, MAXPGPATH,
-				 "%s/base/%s/%s_strom_%d_%d.%ld.gpu",
-				 DataDir, PG_TEMP_FILES_DIR,
-				 PG_TEMP_FILE_PREFIX,
-				 MyProcPid,
-				 gpuserv_worker_index,
-				 sourceFileCounter++);
-	else
-		snprintf(tempfile, MAXPGPATH,
-				 "%s/base/%s/%s_strom_%d.%ld.gpu",
-				 DataDir, PG_TEMP_FILES_DIR,
-				 PG_TEMP_FILE_PREFIX,
-				 MyProcPid,
-				 sourceFileCounter++);
+	snprintf(tempfile, MAXPGPATH,
+			 "%s/base/%s/%s_strom_%d.%ld.gpu",
+			 DataDir, PG_TEMP_FILES_DIR,
+			 PG_TEMP_FILE_PREFIX,
+			 MyProcPid,
+			 pg_atomic_fetch_add_u64(&sourceFileCounter, 1));
 	/*
 	 * Open the file.  Note: we don't use O_EXCL, in case there is
 	 * an orphaned temp file that can be reused.

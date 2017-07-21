@@ -33,6 +33,7 @@
 #include "storage/proc.h"
 #include "storage/spin.h"
 #include "utils/resowner.h"
+#define CUDA_API_PER_THREAD_DEFAULT_STREAM		1
 #include <cuda.h>
 #include <pthread.h>
 #include <unistd.h>
@@ -238,7 +239,6 @@ struct GpuTaskState
  * It is a unit of task to be sent GPU server. Thus, this object must be
  * allocated on the DMA buffer area.
  */
-struct GpuModuleCache;
 struct GpuTask
 {
 	kern_errorbuf	kerror;			/* error status of the task */
@@ -252,7 +252,6 @@ struct GpuTask
 	int				file_desc;		/* file-descriptor on backend side */
 	/* fields below are valid only server */
 	GpuContext	   *gcontext;		/* session info of GPU server */
-	struct GpuModuleCache *gmod_cache; /* cache of cuda_module */
 	struct timeval	tv_wakeup;		/* sleep until, if non-zero */
 	int				peer_fdesc;		/* FD moved via SCM_RIGHTS */
 	unsigned long	dma_task_id;	/* Task-ID of Async SSD2GPU DMA */

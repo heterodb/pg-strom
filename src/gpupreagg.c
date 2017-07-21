@@ -4823,7 +4823,6 @@ gpupreagg_push_terminator_task(GpuPreAggTask *gpreagg_old)
 	gpreagg_new->task.revision    = gpreagg_old->task.revision;
 	gpreagg_new->task.file_desc   = -1;
 	gpreagg_new->task.gcontext    = NULL;	/* to be set later */
-	gpreagg_new->task.gmod_cache  = NULL;
 	memset(&gpreagg_new->task.tv_wakeup, 0, sizeof(struct timeval));
 	gpreagg_new->task.peer_fdesc  = -1;
 	gpreagg_new->task.dma_task_id = 0UL;

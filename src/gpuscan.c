@@ -2900,6 +2900,7 @@ gpuscan_cleanup_cuda_resources(GpuScanTask *gscan)
 	gscan->m_kds_dst = 0UL;
 }
 
+#if 0
 static void
 gpuscan_respond_task(CUstream stream, CUresult status, void *private)
 {
@@ -2936,6 +2937,7 @@ gpuscan_respond_task(CUstream stream, CUresult status, void *private)
 	}
 	gpuservCompleteGpuTask(&gscan->task, is_urgent);
 }
+#endif
 
 /*
  * gpuscan_process_task
@@ -3015,26 +3017,25 @@ gpuscan_process_task(GpuTask *gtask,
 	 */
 	offset = KERN_GPUSCAN_DMASEND_OFFSET(&gscan->kern);
 	length = KERN_GPUSCAN_DMASEND_LENGTH(&gscan->kern);
-	rc = cuMemcpyHtoDAsync(gscan->m_gpuscan,
-						   (char *)&gscan->kern + offset,
-						   length,
-                           cuda_stream);
+	rc = cuMemcpyHtoD(gscan->m_gpuscan,
+					  (char *)&gscan->kern + offset,
+					  length);
 	if (rc != CUDA_SUCCESS)
-		werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+		werror("failed on cuMemcpyHtoD: %s", errorText(rc));
 
 	/*  kern_data_store *kds_src */
 	if (pds_src->kds.format == KDS_FORMAT_ROW || !gscan->with_nvme_strom)
 	{
 		length = pds_src->kds.length;
-		rc = cuMemcpyHtoDAsync(gscan->m_kds_src,
-							   &pds_src->kds,
-							   length,
-							   cuda_stream);
+		rc = cuMemcpyHtoD(gscan->m_kds_src,
+						  &pds_src->kds,
+						  length);
 		if (rc != CUDA_SUCCESS)
-			werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+			werror("failed on cuMemcpyHtoD: %s", errorText(rc));
 	}
 	else
 	{
+		//FIXME: to be changed later
 		gpuMemCopyFromSSDAsync(&gscan->task,
 							   gscan->m_kds_src,
 							   pds_src,
@@ -3047,12 +3048,11 @@ gpuscan_process_task(GpuTask *gtask,
 	if (pds_dst)
 	{
 		length = KERN_DATA_STORE_HEAD_LENGTH(&pds_dst->kds);
-		rc = cuMemcpyHtoDAsync(gscan->m_kds_dst,
-							   &pds_dst->kds,
-							   length,
-                               cuda_stream);
+		rc = cuMemcpyHtoD(gscan->m_kds_dst,
+						  &pds_dst->kds,
+						  length);
 		if (rc != CUDA_SUCCESS)
-			werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+			werror("failed on cuMemcpyHtoD: %s", errorText(rc));
 	}
 
 	/*
@@ -3069,7 +3069,7 @@ gpuscan_process_task(GpuTask *gtask,
 						1, 1, 1,
 						1, 1, 1,
 						0,
-						cuda_stream,
+						NULL,
 						kern_args,
 						NULL);
 	if (rc != CUDA_SUCCESS)
@@ -3084,12 +3084,11 @@ gpuscan_process_task(GpuTask *gtask,
 		ntuples = kresults->nrooms;
 	offset = KERN_GPUSCAN_DMARECV_OFFSET(&gscan->kern);
 	length = KERN_GPUSCAN_DMARECV_LENGTH(&gscan->kern, pds_dst ? 0 : ntuples);
-	rc = cuMemcpyDtoHAsync((char *)&gscan->kern + offset,
-						   gscan->m_gpuscan + offset,
-						   length,
-						   cuda_stream);
+	rc = cuMemcpyDtoH((char *)&gscan->kern + offset,
+					  gscan->m_gpuscan + offset,
+					  length);
 	if (rc != CUDA_SUCCESS)
-		werror("cuMemcpyDtoHAsync: %s", errorText(rc));
+		werror("cuMemcpyDtoH: %s", errorText(rc));
 
 	/*
 	 * NOTE: varlena variables in the result references pds_src as buffer
@@ -3110,12 +3109,11 @@ gpuscan_process_task(GpuTask *gtask,
 													   nr_loaded) -
 				  (char *)&pds_src->kds);
 		length = pds_src->nblocks_uncached * BLCKSZ;
-		rc = cuMemcpyDtoHAsync((char *)&pds_src->kds + offset,
-							   gscan->m_kds_src + offset,
-							   length,
-							   cuda_stream);
+		rc = cuMemcpyDtoH((char *)&pds_src->kds + offset,
+						  gscan->m_kds_src + offset,
+						  length);
 		if (rc != CUDA_SUCCESS)
-			werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+			werror("failed on cuMemcpyHtoD: %s", errorText(rc));
 		/*
 		 * NOTE: Once GPU-to-GPU DMA gets completed, "uncached" blocks are
 		 * no longer uncached, so we clear the @nblocks_uncached not to
@@ -3128,14 +3126,14 @@ gpuscan_process_task(GpuTask *gtask,
 	{
 		Assert(pds_dst->kds.format == KDS_FORMAT_ROW ||
 			   pds_dst->kds.format == KDS_FORMAT_SLOT);
-		rc = cuMemcpyDtoHAsync(&pds_dst->kds,
-							   gscan->m_kds_dst,
-							   pds_dst->kds.length,
-							   cuda_stream);
+		rc = cuMemcpyDtoH(&pds_dst->kds,
+						  gscan->m_kds_dst,
+						  pds_dst->kds.length);
 		if (rc != CUDA_SUCCESS)
-			werror("cuMemcpyDtoHAsync: %s", errorText(rc));
+			werror("cuMemcpyDtoH: %s", errorText(rc));
 	}
 
+#ifdef NOT_USED
 	/*
 	 * register the callback
 	 */
@@ -3144,6 +3142,21 @@ gpuscan_process_task(GpuTask *gtask,
 							 gscan, 0);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "cuStreamAddCallback: %s", errorText(rc));
+#endif
+	/* responding part */
+	if (gscan->kern.kerror.errcode != StromError_Success)
+	{
+		//FIXME: 'pgstrom_cpu_fallback_enabled' is not valid on server side
+		if (pgstrom_cpu_fallback_enabled &&
+			(gscan->kern.kerror.errcode == StromError_CpuReCheck ||
+			 gscan->kern.kerror.errcode == StromError_DataStoreNoSpace))
+			gscan->task.cpu_fallback = true;
+		else if (!gscan->task.kerror.errcode)
+			gscan->task.kerror = gscan->kern.kerror;
+	}
+	/* completion part */
+	gpuscan_complete_task(gtask);
+
 	return 0;
 
 out_of_resource:

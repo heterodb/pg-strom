@@ -605,9 +605,19 @@ dmaBufferAttachSegmentOnDemand(int signum, siginfo_t *siginfo, void *unused)
 	}
 
 	if (signum == SIGSEGV)
-		(*sighandler_sigsegv_orig)(signum, siginfo, unused);
+	{
+		if (sighandler_sigsegv_orig)
+			(*sighandler_sigsegv_orig)(signum, siginfo, unused);
+		else
+			abort();
+	}
 	else if (signum == SIGBUS)
-		(*sighandler_sigbus_orig)(signum, siginfo, unused);
+	{
+		if (sighandler_sigbus_orig)
+			(*sighandler_sigbus_orig)(signum, siginfo, unused);
+		else
+			abort();
+	}
 	else
 	{
 		fprintf(stderr, "%s received %s, panic\n",
