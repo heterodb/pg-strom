@@ -312,7 +312,7 @@ gpuMemFreeIOMap(GpuContext *gcontext, CUdeviceptr devptr)
 /*
  * gpuMemCopyFromSSDWaitRaw
  */
-bool
+static void
 gpuMemCopyFromSSDWaitRaw(unsigned long dma_task_id)
 {
 	StromCmd__MemCopyWait cmd;
@@ -320,75 +320,17 @@ gpuMemCopyFromSSDWaitRaw(unsigned long dma_task_id)
 	memset(&cmd, 0, sizeof(StromCmd__MemCopyWait));
 	cmd.dma_task_id = dma_task_id;
 
-	if (nvme_strom_ioctl(STROM_IOCTL__MEMCPY_WAIT, &cmd) != 0 ||
-		cmd.status != 0)
-		return false;
-
-	return true;
-}
-
-/*
- * gpuMemCopyFromSSDWait - callback to wait for SSD-to-GPU Direct DMA done
- */
-static void
-__MemCopyFromSSDWaitCallback(CUstream cuda_stream,
-							 CUresult status, void *private)
-{
-	StromCmd__MemCopyWait cmd;
-	GpuTask		   *gtask = (GpuTask *) private;
-
-	memset(&cmd, 0, sizeof(StromCmd__MemCopyWait));
-	cmd.dma_task_id = gtask->dma_task_id;
-
 	if (nvme_strom_ioctl(STROM_IOCTL__MEMCPY_WAIT, &cmd) != 0)
-	{
-		fprintf(stderr, "failed on STROM_IOCTL__MEMCPY_WAIT: %m");
-		if (gtask->kerror.errcode == 0)
-		{
-			gtask->kerror.errcode = StromError_Ssd2GpuDirectDma;
-			gtask->kerror.kernel = StromKernel_NVMeStrom;
-			gtask->kerror.lineno = 0;
-		}
-	}
-	else if (cmd.status != 0)
-	{
-		fprintf(stderr, "NVMe-Strom: Direct DMA Status=0x%lx", cmd.status);
-		if (gtask->kerror.errcode == 0)
-		{
-			gtask->kerror.errcode = StromError_Ssd2GpuDirectDma;
-			gtask->kerror.kernel = StromKernel_NVMeStrom;
-			gtask->kerror.lineno = 0;
-		}
-	}
-	// TODO: we may need to handle signal interrupt
-	//       however, it is worker thread context. How to do?
-
-	/* no concurrent SSD2GPU P2P DMA */
-	gtask->dma_task_id = 0;
-}
-
-void
-gpuMemCopyFromSSDWait(GpuTask *gtask, CUstream cuda_stream)
-{
-	CUresult	rc;
-
-	Assert(gtask->dma_task_id != 0UL);
-	rc = cuStreamAddCallback(cuda_stream,
-							 __MemCopyFromSSDWaitCallback,
-							 gtask,
-							 0);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuStreamAddCallback: %s", errorText(rc));
+		werror("failed on nvme_strom_ioctl(STROM_IOCTL__MEMCPY_WAIT): %m");
 }
 
 /*
- * gpuMemCopyFromSSDAsync - kick SSD-to-GPU Direct DMA in asynchronous mode
+ * gpuMemCopyFromSSD - kick SSD-to-GPU Direct DMA, then wait for completion
  */
 void
-gpuMemCopyFromSSDAsync(GpuTask *gtask,
-					   CUdeviceptr m_kds,
-					   pgstrom_data_store *pds,
-					   CUstream cuda_stream)
+gpuMemCopyFromSSD(GpuTask *gtask,
+				  CUdeviceptr m_kds,
+				  pgstrom_data_store *pds)
 {
 	StromCmd__MemCopySsdToGpu cmd;
 	IOMapBufferSegment *iomap_seg;
@@ -401,38 +343,31 @@ gpuMemCopyFromSSDAsync(GpuTask *gtask,
 
 	Assert(IsGpuServerProcess());
 	if (!iomap_buffer_segments)
-		elog(ERROR, "NVMe-Strom is not configured");
+		werror("NVMe-Strom is not configured");
 	/* ensure the i/o mapped buffer is already available */
 	iomap_seg = GetIOMapBufferSegment(gpuserv_cuda_dindex);
 	pg_memory_barrier();
 	if (!iomap_seg->iomap_handle)
-		elog(ERROR, "NVMe-Strom is not initialized yet");
+		werror("NVMe-Strom is not initialized yet");
 
 	/* Device memory should be already imported on allocation time */
 	Assert(iomap_buffer_base != 0UL);
-	/* Right now, multiple NVMe-Strom submit per task is not supported */
-	Assert(gtask->dma_task_id == 0UL);
 	/* PDS/KDS format check */
 	Assert(pds->kds.format == KDS_FORMAT_BLOCK);
 
 	if (m_kds < iomap_buffer_base ||
 		m_kds + pds->kds.length > iomap_buffer_base + iomap_buffer_size)
-		elog(ERROR, "NVMe-Strom: P2P DMA destination out of range");
+		werror("NVMe-Strom: P2P DMA destination out of range");
 	offset = m_kds - iomap_buffer_base;
 
 	/* nothing special if all the blocks are already loaded */
 	if (pds->nblocks_uncached == 0)
 	{
-		rc = cuMemcpyHtoDAsync(m_kds,
-							   &pds->kds,
-							   pds->kds.length,
-							   cuda_stream);
+		rc = cuMemcpyHtoD(m_kds,
+						  &pds->kds,
+						  pds->kds.length);
 		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-		// TODO: update perfmon
-		// gscan->bytes_dma_send += pds->kds.length;
-		// gscan->num_dma_send++;
-
+			werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
 		return;
 	}
 	Assert(pds->nblocks_uncached <= pds->kds.nitems);
@@ -458,18 +393,17 @@ gpuMemCopyFromSSDAsync(GpuTask *gtask,
 
 	/* (1) kick SSD2GPU P2P DMA */
 	if (nvme_strom_ioctl(STROM_IOCTL__MEMCPY_SSD2GPU, &cmd) != 0)
-		elog(ERROR, "failed on STROM_IOCTL__MEMCPY_SSD2GPU: %m");
-	gtask->dma_task_id  = cmd.dma_task_id;
-
-	// TODO: update perfmon
+		werror("failed on STROM_IOCTL__MEMCPY_SSD2GPU: %m");
 
 	/* (2) kick RAM2GPU DMA (earlier half) */
-	rc = cuMemcpyHtoDAsync(m_kds,
-						   &pds->kds,
-						   length,
-						   cuda_stream);
+	rc = cuMemcpyHtoD(m_kds,
+					  &pds->kds,
+					  length);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+	{
+		gpuMemCopyFromSSDWaitRaw(cmd.dma_task_id);
+		werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+	}
 
 	/* (3) kick RAM2GPU DMA (later half; if any) */
 	if (cmd.nr_ram2gpu > 0)
@@ -478,13 +412,17 @@ gpuMemCopyFromSSDAsync(GpuTask *gtask,
 		offset = ((char *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds,
 													   pds->kds.nitems) -
 				  (char *)&pds->kds) - length;
-		rc = cuMemcpyHtoDAsync(m_kds + offset,
-							   (char *)&pds->kds + offset,
-							   length,
-							   cuda_stream);
+		rc = cuMemcpyHtoD(m_kds + offset,
+						  (char *)&pds->kds + offset,
+						  length);
 		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+		{
+			gpuMemCopyFromSSDWaitRaw(cmd.dma_task_id);
+			werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+		}
 	}
+	/* (4) wait for completion of SSD2GPU P2P DMA */
+	gpuMemCopyFromSSDWaitRaw(cmd.dma_task_id);
 }
 
 /*

@@ -53,7 +53,6 @@ static __thread dlist_head inactiveResourceTracker;
 #define RESTRACK_CLASS__GPUMEMORY		2
 #define RESTRACK_CLASS__GPUPROGRAM		3
 #define RESTRACK_CLASS__IOMAPMEMORY		4
-#define RESTRACK_CLASS__SSD2GPUDMA		5
 
 typedef struct ResourceTracker
 {
@@ -66,7 +65,6 @@ typedef struct ResourceTracker
 			void   *extra;		/* RESTRACK_CLASS__IOMAPMEMORY */
 		} devmem;
 		ProgramId	program_id;	/* RESTRACK_CLASS__GPUPROGRAM */
-		unsigned long dma_task_id; /* RESTRACK_CLASS__SSD2GPUDMA */
 	} u;
 } ResourceTracker;
 
@@ -413,64 +411,6 @@ untrackIOMapMem(GpuContext *gcontext, CUdeviceptr devptr)
 }
 
 /*
- * resource tracker for SSD-to-GPU Direct DMA task
- */
-bool
-trackSSD2GPUDMA(GpuContext *gcontext, unsigned long dma_task_id)
-{
-	ResourceTracker *tracker = resource_tracker_alloc();
-	pg_crc32	crc;
-
-	if (!tracker)
-		return false;	/* out of memory */
-
-	crc = resource_tracker_hashval(RESTRACK_CLASS__SSD2GPUDMA,
-								   &dma_task_id, sizeof(unsigned long));
-	tracker->crc = crc;
-	tracker->resclass = RESTRACK_CLASS__SSD2GPUDMA;
-	tracker->u.dma_task_id = dma_task_id;
-
-	SpinLockAcquire(&gcontext->lock);
-	dlist_push_tail(&gcontext->restrack[crc % RESTRACK_HASHSIZE],
-					&tracker->chain);
-	SpinLockRelease(&gcontext->lock);
-	return true;
-}
-
-void
-untrackSSD2GPUDMA(GpuContext *gcontext, unsigned long dma_task_id)
-{
-	dlist_head *restrack_list;
-    dlist_iter	iter;
-    pg_crc32	crc;
-
-	crc = resource_tracker_hashval(RESTRACK_CLASS__SSD2GPUDMA,
-								   &dma_task_id, sizeof(unsigned long));
-	restrack_list = &gcontext->restrack[crc % RESTRACK_HASHSIZE];
-	SpinLockAcquire(&gcontext->lock);
-	dlist_foreach (iter, restrack_list)
-	{
-		ResourceTracker *tracker
-			= dlist_container(ResourceTracker, chain, iter.cur);
-
-		if (tracker->crc == crc &&
-			tracker->resclass == RESTRACK_CLASS__SSD2GPUDMA &&
-			tracker->u.dma_task_id == dma_task_id)
-		{
-			dlist_delete(&tracker->chain);
-			SpinLockRelease(&gcontext->lock);
-			memset(tracker, 0, sizeof(ResourceTracker));
-			dlist_push_head(&inactiveResourceTracker,
-							&tracker->chain);
-			return;
-		}
-	}
-	SpinLockRelease(&gcontext->lock);
-	wnotice("Bug? SSD-to-GPU Direct DMA (%p) was not tracked",
-			(void *)dma_task_id);
-}
-
-/*
  * ReleaseLocalResources - release all the private resources tracked by
  * the resource tracker of GpuContext
  */
@@ -488,30 +428,6 @@ ReleaseLocalResources(GpuContext *gcontext, bool normal_exit)
 		if (close(gcontext->sockfd) != 0)
 			wnotice("failed on close(%d) socket: %m", gcontext->sockfd);
 		gcontext->sockfd = PGINVALID_SOCKET;
-	}
-
-	/*
-	 * NOTE: RESTRACK_CLASS__SSD2GPUDMA (only available if NVMe-Strom is
-	 * installed) must be released prior to any i/o mapped memory, because
-	 * we have no way to cancel asynchronous DMA request once submitted,
-	 * thus, release of i/o mapped memory prior to Async DMA will cause
-	 * unexpected device memory corruption.
-	 */
-	for (i=0; i < RESTRACK_HASHSIZE; i++)
-	{
-		dlist_mutable_iter	iter;
-
-		dlist_foreach_modify(iter, &gcontext->restrack[i])
-		{
-			tracker = dlist_container(ResourceTracker, chain, iter.cur);
-			if (tracker->resclass != RESTRACK_CLASS__SSD2GPUDMA)
-				continue;
-
-			dlist_delete(&tracker->chain);
-			gpuMemCopyFromSSDWaitRaw(tracker->u.dma_task_id);
-			memset(tracker, 0, sizeof(ResourceTracker));
-			dlist_push_head(&inactiveResourceTracker, &tracker->chain);
-		}
 	}
 
 	/*

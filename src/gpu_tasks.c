@@ -631,7 +631,6 @@ pgstromInitGpuTask(GpuTaskState *gts, GpuTask *gtask)
 	gtask->gcontext		= NULL;
 	memset(&gtask->tv_wakeup, 0, sizeof(struct timeval));
 	gtask->peer_fdesc   = -1;
-	gtask->dma_task_id	= 0UL;
 }
 
 /*

@@ -389,8 +389,7 @@ static char *gpujoin_codegen(PlannerInfo *root,
 static void gpujoin_inner_unload(GpuJoinState *gjs, bool needs_rescan);
 static pgstrom_multirels *gpujoin_inner_getnext(GpuJoinState *gjs);
 static pgstrom_multirels *multirels_attach_buffer(pgstrom_multirels *pmrels);
-static bool multirels_get_buffer(pgstrom_gpujoin *pgjoin,
-								 CUstream cuda_stream);
+static bool multirels_get_buffer(pgstrom_gpujoin *pgjoin);
 static void multirels_put_buffer(pgstrom_gpujoin *pgjoin);
 
 static void colocate_outer_join_maps_to_host(pgstrom_multirels *pmrels);
@@ -5462,39 +5461,6 @@ gpujoin_complete_task(GpuTask *gtask)
 	return 0;
 }
 
-static void
-gpujoin_task_respond(CUstream stream, CUresult status, void *private)
-{
-	pgstrom_gpujoin	   *pgjoin = private;
-	bool				is_urgent;
-
-	/* OK, routine is called back in the usual context */
-	if (status == CUDA_SUCCESS)
-	{
-		pgjoin->task.kerror = pgjoin->kern.kerror;
-
-		/* Takes CPU fallback instead of the CpuReCheck error */
-		if (pgstrom_cpu_fallback_enabled &&
-			pgjoin->task.kerror.errcode == StromError_CpuReCheck)
-		{
-			pgjoin->task.kerror.errcode = StromError_Success;
-			pgjoin->task.cpu_fallback = true;
-		}
-		is_urgent = (pgjoin->task.kerror.errcode != StromError_Success);
-	}
-	else
-	{
-		if (!pgjoin->task.kerror.errcode)
-		{
-			pgjoin->task.kerror.errcode = status;
-			pgjoin->task.kerror.kernel = StromKernel_CudaRuntime;
-			pgjoin->task.kerror.lineno = 0;
-		}
-		is_urgent = true;
-	}
-	gpuservCompleteGpuTask(&pgjoin->task, is_urgent);
-}
-
 static int
 __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 					   CUmodule cuda_module, CUstream cuda_stream)
@@ -5572,39 +5538,34 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 	 */
 
 	/* inner multi relations */
-	if (!multirels_get_buffer(pgjoin, cuda_stream))
+	if (!multirels_get_buffer(pgjoin))
 		goto out_of_resource;
 
 	/* kern_gpujoin + static portion of kern_resultbuf */
 	length = KERN_GPUJOIN_HEAD_LENGTH(&pgjoin->kern);
-	rc = cuMemcpyHtoDAsync(pgjoin->m_kgjoin,
-						   &pgjoin->kern,
-						   length,
-						   cuda_stream);
+	rc = cuMemcpyHtoD(pgjoin->m_kgjoin,
+					  &pgjoin->kern,
+					  length);
 	if (rc != CUDA_SUCCESS)
-		werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+		werror("failed on cuMemcpyHtoD: %s", errorText(rc));
 
 	if (pds_src)
 	{
 		/* source outer relation */
 		if (!pgjoin->with_nvme_strom)
 		{
-			rc = cuMemcpyHtoDAsync(pgjoin->m_kds_src,
-								   &pds_src->kds,
-								   pds_src->kds.length,
-								   cuda_stream);
+			rc = cuMemcpyHtoD(pgjoin->m_kds_src,
+							  &pds_src->kds,
+							  pds_src->kds.length);
 			if (rc != CUDA_SUCCESS)
-				werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+				werror("failed on cuMemcpyHtoD: %s", errorText(rc));
 		}
 		else
 		{
 			Assert(pds_src->kds.format == KDS_FORMAT_BLOCK);
-			gpuMemCopyFromSSDAsync(&pgjoin->task,
-								   pgjoin->m_kds_src,
-                                   pds_src,
-                                   cuda_stream);
-            gpuMemCopyFromSSDWait(&pgjoin->task,
-                                  cuda_stream);
+			gpuMemCopyFromSSD(&pgjoin->task,
+							  pgjoin->m_kds_src,
+							  pds_src);
 		}
 	}
 	else
@@ -5615,12 +5576,11 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 	}
 
 	/* kern_data_store (dst of head) */
-	rc = cuMemcpyHtoDAsync(pgjoin->m_kds_dst,
-						   &pds_dst->kds,
-						   pds_dst->kds.length,
-						   cuda_stream);
+	rc = cuMemcpyHtoD(pgjoin->m_kds_dst,
+					  &pds_dst->kds,
+					  pds_dst->kds.length);
 	if (rc != CUDA_SUCCESS)
-		werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+		werror("failed on cuMemcpyHtoD: %s", errorText(rc));
 
 	/* Lunch:
 	 * KERNEL_FUNCTION(void)
@@ -5642,7 +5602,7 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 						1, 1, 1,
 						1, 1, 1,
 						sizeof(kern_errorbuf),
-						cuda_stream,
+						NULL,
 						kern_args,
 						NULL);
 	if (rc != CUDA_SUCCESS)
@@ -5650,20 +5610,18 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 
 	/* DMA Recv: kern_gpujoin *kgjoin */
 	length = offsetof(kern_gpujoin, jscale[pgjoin->kern.num_rels + 1]);
-	rc = cuMemcpyDtoHAsync(&pgjoin->kern,
-						   pgjoin->m_kgjoin,
-						   length,
-						   cuda_stream);
+	rc = cuMemcpyDtoH(&pgjoin->kern,
+					  pgjoin->m_kgjoin,
+					  length);
 	if (rc != CUDA_SUCCESS)
-		werror("cuMemcpyDtoHAsync: %s", errorText(rc));
+		werror("cuMemcpyDtoH: %s", errorText(rc));
 
 	/* DMA Recv: kern_data_store *kds_dst */
-	rc = cuMemcpyDtoHAsync(&pds_dst->kds,
-						   pgjoin->m_kds_dst,
-						   pds_dst->kds.length,
-						   cuda_stream);
+	rc = cuMemcpyDtoH(&pds_dst->kds,
+					  pgjoin->m_kds_dst,
+					  pds_dst->kds.length);
 	if (rc != CUDA_SUCCESS)
-		werror("cuMemcpyDtoHAsync: %s", errorText(rc));
+		werror("cuMemcpyDtoH: %s", errorText(rc));
 
 	/*
 	 * DMA Recv: kern_data_store *kds_src, if NVMe-Strom is used and join
@@ -5680,12 +5638,11 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
                                                        nr_loaded) -
 				  (char *)&pds_src->kds);
 		length = pds_src->nblocks_uncached * BLCKSZ;
-		rc = cuMemcpyDtoHAsync((char *)&pds_src->kds + offset,
-							   pgjoin->m_kds_src + offset,
-							   length,
-							   cuda_stream);
+		rc = cuMemcpyDtoH((char *)&pds_src->kds + offset,
+						  pgjoin->m_kds_src + offset,
+						  length);
 		if (rc != CUDA_SUCCESS)
-			werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+			werror("failed on cuMemcpyHtoD: %s", errorText(rc));
 
 		/*
 		 * NOTE: Once GPU-to-RAM DMA gets completed, "uncached" blocks are
@@ -5694,16 +5651,6 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 		 */
 		pds_src->nblocks_uncached = 0;
 	}
-
-	/*
-	 * Register the callback
-	 */
-	rc = cuStreamAddCallback(cuda_stream,
-							 gpujoin_task_respond,
-							 pgjoin, 0);
-	if (rc != CUDA_SUCCESS)
-		werror("cuStreamAddCallback: %s", errorText(rc));
-
 	return 0;
 
 out_of_resource:
@@ -5722,6 +5669,20 @@ gpujoin_process_task(GpuTask *gtask,
 	STROM_TRY();
 	{
 		status = __gpujoin_process_task(pgjoin, cuda_module, cuda_stream);
+		if (status == 0)
+		{
+			/* save the error code */
+			pgjoin->task.kerror = pgjoin->kern.kerror;
+			/* takes CPU fallback, instead of the CpuReCheck error */
+			if (pgstrom_cpu_fallback_enabled &&
+				pgjoin->task.kerror.errcode == StromError_CpuReCheck)
+			{
+				pgjoin->task.kerror.errcode = StromError_Success;
+				pgjoin->task.cpu_fallback = true;
+			}
+			/* GpuJoin completion */
+			gpujoin_complete_task(gtask);
+		}
 	}
 	STROM_CATCH();
 	{
@@ -6601,8 +6562,7 @@ multirels_attach_buffer(pgstrom_multirels *pmrels)
  */
 static inline bool
 __multirels_get_buffer(pgstrom_gpujoin *pgjoin,
-					   pgstrom_multirels *pmrels,
-					   CUstream cuda_stream)
+					   pgstrom_multirels *pmrels)
 {
 	GpuContext	   *gcontext = pgjoin->task.gcontext;
 	CUdeviceptr		m_kmrels = 0UL;
@@ -6635,10 +6595,9 @@ __multirels_get_buffer(pgstrom_gpujoin *pgjoin,
 			elog(ERROR, "failed on gpuMemAlloc: %s", errorText(rc));
 
 		/* Zero clear of the LEFT OUTER map */
-		rc = cuMemsetD32Async(m_ojmaps, 0, length / sizeof(int),
-							  cuda_stream);
+		rc = cuMemsetD32(m_ojmaps, 0, length / sizeof(int));
 		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuMemsetD32Async: %s", errorText(rc));
+			elog(ERROR, "failed on cuMemsetD32: %s", errorText(rc));
 	}
 	/* Synchronization Event for other concurrent tasks */
 	rc = cuEventCreate(&ev_loaded, CU_EVENT_DEFAULT);
@@ -6647,9 +6606,9 @@ __multirels_get_buffer(pgstrom_gpujoin *pgjoin,
 
 	/* DMA send to the kern_multirels buffer */
 	length = offsetof(kern_multirels, chunks[pmrels->kern.nrels]);
-	rc = cuMemcpyHtoDAsync(m_kmrels, &pmrels->kern, length, cuda_stream);
+	rc = cuMemcpyHtoD(m_kmrels, &pmrels->kern, length);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+		elog(ERROR, "failed on cuMemcpyHtoD: %s", errorText(rc));
 	total_length += length;
 
 	for (i=0; i < pmrels->kern.nrels; i++)
@@ -6657,17 +6616,11 @@ __multirels_get_buffer(pgstrom_gpujoin *pgjoin,
 		pgstrom_data_store *pds = pmrels->inner_chunks[i];
 
 		offset = pmrels->kern.chunks[i].chunk_offset;
-		rc = cuMemcpyHtoDAsync(m_kmrels + offset, &pds->kds, pds->kds.length,
-							   cuda_stream);
+		rc = cuMemcpyHtoD(m_kmrels + offset, &pds->kds, pds->kds.length);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
 		total_length += pds->kds.length;
 	}
-
-	/* DMA send synchronization */
-	rc = cuEventRecord(ev_loaded, cuda_stream);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuEventRecord: %s", errorText(rc));
 	/* Save the event object and device memory */
 	pmrels->ev_loaded = ev_loaded;
 	pmrels->m_kmrels = m_kmrels;
@@ -6679,8 +6632,9 @@ __multirels_get_buffer(pgstrom_gpujoin *pgjoin,
 }
 
 static bool
-multirels_get_buffer(pgstrom_gpujoin *pgjoin, CUstream cuda_stream)
+multirels_get_buffer(pgstrom_gpujoin *pgjoin)
 {
+	//FIXME: Use managed memory for simplification
 	pgstrom_multirels *pmrels = pgjoin->pmrels;
 	bool		status = true;
 
@@ -6691,29 +6645,31 @@ multirels_get_buffer(pgstrom_gpujoin *pgjoin, CUstream cuda_stream)
 		Assert(pmrels->refcnt >= 0);
 		if (pmrels->refcnt++ == 0)
 		{
-			if (__multirels_get_buffer(pgjoin, pmrels, cuda_stream))
+			if (__multirels_get_buffer(pgjoin, pmrels))
 				pgjoin->is_inner_loader = true;
 			else
 			{
 				pmrels->refcnt--;
 				status = false;
 			}
+			SpinLockRelease(&pmrels->lock);
 		}
 		else
 		{
 			CUevent		ev_loaded = pmrels->ev_loaded;
 			CUresult	rc;
 
+			SpinLockRelease(&pmrels->lock);
+
 			Assert(ev_loaded != NULL);
-			rc = cuStreamWaitEvent(cuda_stream, ev_loaded, 0);
+			rc = cuEventSynchronize(ev_loaded);
 			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on cuStreamWaitEvent: %s", errorText(rc));
+				elog(ERROR, "failed on cuEventSynchronize: %s", errorText(rc));
 			/* this task is not inner loader */
 			pgjoin->m_kmrels = pmrels->m_kmrels;
 			pgjoin->m_ojmaps = pmrels->m_ojmaps;
 			pgjoin->is_inner_loader = false;
 		}
-		SpinLockRelease(&pmrels->lock);
 	}
 	PG_CATCH();
 	{

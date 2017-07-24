@@ -3035,13 +3035,9 @@ gpuscan_process_task(GpuTask *gtask,
 	}
 	else
 	{
-		//FIXME: to be changed later
-		gpuMemCopyFromSSDAsync(&gscan->task,
-							   gscan->m_kds_src,
-							   pds_src,
-							   cuda_stream);
-		gpuMemCopyFromSSDWait(&gscan->task,
-							  cuda_stream);
+		gpuMemCopyFromSSD(&gscan->task,
+						  gscan->m_kds_src,
+						  pds_src);
 	}
 
 	/* kern_data_store *kds_dst, if any */

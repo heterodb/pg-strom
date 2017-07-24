@@ -929,7 +929,6 @@ gpuservRecvCommands(GpuContext *gcontext, bool *p_peer_sock_closed)
 			Assert(!gtask->gcontext);
 			Assert(!gtask->tv_wakeup.tv_sec && !gtask->tv_wakeup.tv_usec);
 			Assert(gtask->peer_fdesc = -1);
-			Assert(gtask->dma_task_id == 0UL);
 
 			if (IsGpuServerProcess())
 			{

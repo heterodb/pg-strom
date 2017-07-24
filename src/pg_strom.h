@@ -143,8 +143,8 @@ typedef enum {
 	GpuTaskKind_PL_CUDA,
 } GpuTaskKind;
 
-typedef struct GpuTask			GpuTask;
-typedef struct GpuTaskState		GpuTaskState;
+typedef struct GpuTask				GpuTask;
+typedef struct GpuTaskState			GpuTaskState;
 
 /*
  * pgstromWorkerStatistics
@@ -225,7 +225,7 @@ struct GpuTaskState
 	dlist_head		ready_tasks;	/* list of tasks already processed */
 	cl_uint			num_ready_tasks;/* length of the list above */
 
-	/* performance monitor */
+	/* executor statistics */
 	pgstromWorkerStatistics *worker_stat;
 };
 #define GTS_GET_SCAN_TUPDESC(gts)				\
@@ -254,7 +254,6 @@ struct GpuTask
 	GpuContext	   *gcontext;		/* session info of GPU server */
 	struct timeval	tv_wakeup;		/* sleep until, if non-zero */
 	int				peer_fdesc;		/* FD moved via SCM_RIGHTS */
-	unsigned long	dma_task_id;	/* Task-ID of Async SSD2GPU DMA */
 #ifdef PGSTROM_DEBUG
 	struct timeval	tv_timestamp;	/* timestamp when GpuTask sent */
 	unsigned int	send_delay;		/* delay by enqueue to pending-list */
@@ -465,10 +464,6 @@ extern bool trackGpuMem(GpuContext *gcontext, CUdeviceptr devptr, void *extra);
 extern void *untrackGpuMem(GpuContext *gcontext, CUdeviceptr devptr);
 extern bool trackIOMapMem(GpuContext *gcontext, CUdeviceptr devptr);
 extern void untrackIOMapMem(GpuContext *gcontext, CUdeviceptr devptr);
-extern bool trackSSD2GPUDMA(GpuContext *gcontext,
-							unsigned long dma_task_id);
-extern void untrackSSD2GPUDMA(GpuContext *gcontext,
-							  unsigned long dma_task_id);
 extern void pgstrom_init_gpu_context(void);
 
 /*
@@ -808,14 +803,9 @@ extern CUresult	gpuMemAllocIOMap(GpuContext *gcontext,
 								 CUdeviceptr *p_devptr, size_t bytesize);
 extern CUresult	gpuMemFreeIOMap(GpuContext *gcontext,
 								CUdeviceptr devptr);
-extern void gpuMemCopyFromSSDAsync(GpuTask *gtask,
-								   CUdeviceptr m_kds,
-								   pgstrom_data_store *pds,
-								   CUstream cuda_stream);
-extern void gpuMemCopyFromSSDWait(GpuTask *gtask,
-								  CUstream cuda_stream);
-extern bool gpuMemCopyFromSSDWaitRaw(unsigned long dma_task_id);
-
+extern void gpuMemCopyFromSSD(GpuTask *gtask,
+							  CUdeviceptr m_kds,
+							  pgstrom_data_store *pds);
 extern void dump_iomap_buffer_info(void);
 extern Datum pgstrom_iomap_buffer_info(PG_FUNCTION_ARGS);
 extern void pgstrom_init_nvme_strom(void);
