@@ -17,6 +17,7 @@
  */
 #include "postgres.h"
 #include "lib/ilist.h"
+#include "utils/pg_crc.h"
 #include "pg_strom.h"
 #include <pthread.h>
 
@@ -33,16 +34,19 @@ typedef struct
 	dlist_node		chain;		/* link to free_chunks[],
 								 * or zero if active chunk */
 	cl_int			mclass;		/* class of memory chunk */
+	cl_int			refcnt;		/* can be referenced by multiple-gcontext */
 } GpuMemChunk;
 
 #define GPUMEMCHUNK_IS_FREE(chunk)								   \
 	((chunk)->chain.prev != NULL && (chunk)->chain.next != NULL && \
 	 (chunk)->mclass >= GPUMEM_CHUNKSZ_MIN_BIT &&				   \
-	 (chunk)->mclass <= GPUMEM_CHUNKSZ_MAX_BIT)
+	 (chunk)->mclass <= GPUMEM_CHUNKSZ_MAX_BIT &&				   \
+	 (chunk)->refcnt == 0)
 #define GPUMEMCHUNK_IS_ACTIVE(chunk)							   \
 	((chunk)->chain.prev == NULL && (chunk)->chain.next == NULL && \
 	 (chunk)->mclass >= GPUMEM_CHUNKSZ_MIN_BIT &&				   \
-	 (chunk)->mclass <= GPUMEM_CHUNKSZ_MAX_BIT)
+	 (chunk)->mclass <= GPUMEM_CHUNKSZ_MAX_BIT &&				   \
+	 (chunk)->refcnt > 0)
 
 typedef struct
 {
@@ -64,6 +68,17 @@ typedef struct
 static pthread_rwlock_t gpumem_segment_rwlock;
 static dlist_head		gpumem_segment_list;
 static cl_int			gpumem_segment_count = 0;
+
+typedef struct
+{
+	dlist_node		chain;
+	CUdeviceptr		m_deviceptr;
+	cl_int			refcnt;
+} GpuMemLargeChunk;
+
+#define GPUMEM_LARGECHUNK_NSLOTS		73
+static slock_t			gpumem_largechunk_lock;
+static dlist_head		gpumem_largechunk_slot[GPUMEM_LARGECHUNK_NSLOTS];
 
 /*
  * gpuMemMaxAllocSize
@@ -146,190 +161,41 @@ GpuMemSegmentAlloc(GpuContext *gcontext,
 	}
 	memset(&gm_chunk->chain, 0, sizeof(dlist_node));
 	Assert(gm_chunk->mclass == mclass);
+	gm_chunk->refcnt = 1;
 
 	return result;
 }
 
 /*
- * gpuMemAlloc
+ * GpuMemSegmentFree
  */
-CUresult
-gpuMemAlloc(GpuContext *gcontext, CUdeviceptr *p_devptr, size_t bytesize)
+static CUresult
+GpuMemSegmentFree(GpuMemSegment *gm_seg, CUdeviceptr deviceptr)
 {
-	bool			has_exclusive_lock = false;
-	GpuMemSegment  *gm_seg;
-	GpuMemChunk	   *gm_chunk;
-	dlist_iter		iter;
-	int				i, mclass;
-	int				nchunks;
-	CUdeviceptr		m_segment;
-	CUdeviceptr		m_result;
-	CUresult		rc, __rc;
-
-	Assert(IsGpuServerProcess());
-	mclass = get_next_log2(bytesize);
-	if (mclass < GPUMEM_CHUNKSZ_MIN_BIT)
-		mclass = GPUMEM_CHUNKSZ_MIN_BIT;
-	else if (mclass > GPUMEM_SEGMENTSZ_BIT)
-	{
-		/*
-		 * memory block larger than segment shall be acquired / released
-		 * individually.
-		 */
-		rc = cuMemAllocManaged(&m_result, bytesize, CU_MEM_ATTACH_GLOBAL);
-		if (rc != CUDA_SUCCESS)
-			return rc;
-		if (!trackGpuMem(gcontext, m_result, NULL))
-		{
-			rc = cuMemFree(m_result);
-			if (rc != CUDA_SUCCESS)
-				wnotice("failed on cuMemFree: %s", errorText(rc));
-			return CUDA_ERROR_OUT_OF_MEMORY;
-		}
-		*p_devptr = m_result;
-		return CUDA_SUCCESS;
-	}
-
-	if ((errno = pthread_rwlock_rdlock(&gpumem_segment_rwlock)) < 0)
-		wfatal("failed on pthread_rwlock_rdlock: %m");
-retry:
-	/* lookup an active segment with free space */
-	dlist_foreach(iter, &gpumem_segment_list)
-	{
-		gm_seg = dlist_container(GpuMemSegment, segment_chain, iter.cur);
-
-		SpinLockAcquire(&gm_seg->lock);
-		for (i=mclass; i <= GPUMEM_SEGMENTSZ_BIT; i++)
-		{
-			if (dlist_is_empty(&gm_seg->free_chunks[i]))
-				continue;
-
-			m_result = GpuMemSegmentAlloc(gcontext, gm_seg, mclass);
-			if (m_result)
-				gm_seg->num_active_chunks++;
-			SpinLockRelease(&gm_seg->lock);
-			if ((errno = pthread_rwlock_unlock(&gpumem_segment_rwlock)) < 0)
-				wfatal("failed on pthread_rwlock_unlock: %m");
-			if (m_result == 0UL)
-				return CUDA_ERROR_OUT_OF_MEMORY;
-			*p_devptr = m_result;
-			return CUDA_SUCCESS;
-		}
-		SpinLockRelease(&gm_seg->lock);
-	}
-
-	/*
-	 * No space left on the active segment. Try inactive segment or
-	 * create a new segment on demand.
-	 */
-	if (!has_exclusive_lock)
-	{
-		if ((errno = pthread_rwlock_unlock(&gpumem_segment_rwlock)) < 0)
-			wfatal("failed on pthread_rwlock_unlock: %m");
-		if ((errno = pthread_rwlock_wrlock(&gpumem_segment_rwlock)) < 0)
-			wfatal("failed on pthread_rwlock_wrlock: %m");
-		has_exclusive_lock = true;
-		goto retry;
-	}
-
-	/* here is no available segment, so create a new one */
-	nchunks = GPUMEM_SEGMENTSZ / GPUMEM_CHUNKSZ_MIN;
-	gm_seg = calloc(1, offsetof(GpuMemSegment, gpumem_chunks[nchunks]));
-	if (!gm_seg)
-	{
-		rc = CUDA_ERROR_OUT_OF_MEMORY;
-		goto error0;
-	}
-
-	rc = cuMemAllocManaged(&m_segment, GPUMEM_SEGMENTSZ, CU_MEM_ATTACH_GLOBAL);
-	if (rc != CUDA_SUCCESS)
-		goto error1;
-
-	rc = cuMemAdvise(m_segment, GPUMEM_SEGMENTSZ,
-					 CU_MEM_ADVISE_SET_PREFERRED_LOCATION,
-					 gpuserv_cuda_device);
-	if (rc != CUDA_SUCCESS)
-		goto error2;
-	rc = cuMemAdvise(m_segment, GPUMEM_SEGMENTSZ,
-					 CU_MEM_ADVISE_SET_ACCESSED_BY,
-					 gpuserv_cuda_device);
-	if (rc != CUDA_SUCCESS)
-		goto error2;
-	/*
-	 * OK, create a new device memory segment
-	 */
-	gm_seg->m_segment			= m_segment;
-	gm_seg->num_total_chunks	= nchunks;
-	SpinLockInit(&gm_seg->lock);
-	gm_seg->num_active_chunks = 0;
-	for (i=0; i <= GPUMEM_CHUNKSZ_MAX_BIT; i++)
-		dlist_init(&gm_seg->free_chunks[i]);
-	gm_chunk = &gm_seg->gpumem_chunks[0];
-	gm_chunk->mclass = GPUMEM_SEGMENTSZ_BIT;
-	dlist_push_head(&gm_seg->free_chunks[GPUMEM_SEGMENTSZ_BIT],
-					&gm_chunk->chain);
-	dlist_push_head(&gpumem_segment_list,
-					&gm_seg->segment_chain);
-	gpumem_segment_count++;
-	goto retry;
-
-error2:
-	if ((__rc = cuMemFree(m_segment)) != CUDA_SUCCESS)
-		wfatal("failed on cuMemFree: %s", errorText(__rc));
-error1:
-	free(gm_seg);
-error0:
-	if ((errno = pthread_rwlock_unlock(&gpumem_segment_rwlock)) < 0)
-		wfatal("failed on pthread_rwlock_unlock: %m");
-	return rc;
-}
-
-/*
- * gpuMemAllocManaged
- */
-CUresult
-gpuMemAllocManaged(GpuContext *gcontext,
-				   CUdeviceptr *p_devptr, size_t bytesize, int flags)
-{
-	CUdeviceptr	m_result;
-	CUresult	rc;
-
-	rc = cuMemAllocManaged(&m_result, bytesize, flags);
-	if (rc != CUDA_SUCCESS)
-		return rc;
-	if (!trackGpuMem(gcontext, m_result, NULL))
-	{
-		rc = cuMemFree(m_result);
-		if (rc != CUDA_SUCCESS)
-			wnotice("failed on cuMemFree: %s", errorText(rc));
-		return CUDA_ERROR_OUT_OF_MEMORY;
-	}
-	*p_devptr = m_result;
-	return CUDA_SUCCESS;
-}
-
-/*
- * gpuMemFree
- */
-CUresult
-gpuMemFree(GpuContext *gcontext, CUdeviceptr devptr)
-{
-	GpuMemSegment  *gm_seg;
 	GpuMemChunk	   *gm_chunk;
 	GpuMemChunk	   *gm_buddy;
 	int				index, shift;
 
-	/* pull GpuMemSegment from resource tracker */
-	gm_seg = untrackGpuMem(gcontext, devptr);
-	if (!gm_seg)
-		return cuMemFree(devptr);
-
-	Assert((devptr & (GPUMEM_CHUNKSZ_MIN - 1)) == 0);
-	index = (devptr - gm_seg->m_segment) >> GPUMEM_CHUNKSZ_MIN_BIT;
+	if ((deviceptr & (GPUMEM_CHUNKSZ_MIN - 1)) != 0 ||
+		(deviceptr < gm_seg->m_segment) ||
+		(deviceptr >= (gm_seg->m_segment +
+					   GPUMEM_CHUNKSZ_MIN * gm_seg->num_total_chunks)))
+		return CUDA_ERROR_INVALID_VALUE;
 
 	SpinLockAcquire(&gm_seg->lock);
+	index = (deviceptr - gm_seg->m_segment) >> GPUMEM_CHUNKSZ_MIN_BIT;
 	gm_chunk = &gm_seg->gpumem_chunks[index];
 	Assert(GPUMEMCHUNK_IS_ACTIVE(gm_chunk));
+	/*
+	 * In case when GPU memory chunk is shared by multiple GpuContext,
+	 * it is too early to release this chunk.
+	 */
+	if (--gm_chunk->refcnt > 0)
+	{
+		SpinLockRelease(&gm_seg->lock);
+		return CUDA_SUCCESS;
+	}
+
 	/*
 	 * Try to merge with the neighbor chunks
 	 */
@@ -381,6 +247,310 @@ gpuMemFree(GpuContext *gcontext, CUdeviceptr devptr)
 	Assert(gm_seg->num_active_chunks >= 0);
 	SpinLockRelease(&gm_seg->lock);
 	return CUDA_SUCCESS;
+}
+
+/*
+ * gpuMemAlloc
+ */
+CUresult
+gpuMemAlloc(GpuContext *gcontext, CUdeviceptr *p_deviceptr, size_t bytesize)
+{
+	bool			has_exclusive_lock = false;
+	GpuMemSegment  *gm_seg;
+	GpuMemChunk	   *gm_chunk;
+	dlist_iter		iter;
+	int				i, mclass;
+	int				nchunks;
+	CUdeviceptr		m_segment;
+	CUdeviceptr		m_deviceptr;
+	CUresult		rc, __rc;
+
+	Assert(IsGpuServerProcess());
+	mclass = get_next_log2(bytesize);
+	if (mclass < GPUMEM_CHUNKSZ_MIN_BIT)
+		mclass = GPUMEM_CHUNKSZ_MIN_BIT;
+	else if (mclass > GPUMEM_SEGMENTSZ_BIT)
+		return gpuMemAllocManaged(gcontext, p_deviceptr, bytesize,
+								  CU_MEM_ATTACH_GLOBAL);
+
+	if ((errno = pthread_rwlock_rdlock(&gpumem_segment_rwlock)) < 0)
+		wfatal("failed on pthread_rwlock_rdlock: %m");
+retry:
+	/* lookup an active segment with free space */
+	dlist_foreach(iter, &gpumem_segment_list)
+	{
+		gm_seg = dlist_container(GpuMemSegment, segment_chain, iter.cur);
+
+		SpinLockAcquire(&gm_seg->lock);
+		for (i=mclass; i <= GPUMEM_SEGMENTSZ_BIT; i++)
+		{
+			if (dlist_is_empty(&gm_seg->free_chunks[i]))
+				continue;
+
+			m_deviceptr = GpuMemSegmentAlloc(gcontext, gm_seg, mclass);
+			if (m_deviceptr)
+				gm_seg->num_active_chunks++;
+			SpinLockRelease(&gm_seg->lock);
+			if ((errno = pthread_rwlock_unlock(&gpumem_segment_rwlock)) < 0)
+				wfatal("failed on pthread_rwlock_unlock: %m");
+			if (m_deviceptr == 0UL)
+				return CUDA_ERROR_OUT_OF_MEMORY;
+			*p_deviceptr = m_deviceptr;
+			return CUDA_SUCCESS;
+		}
+		SpinLockRelease(&gm_seg->lock);
+	}
+
+	/*
+	 * No space left on the active segment. Try inactive segment or
+	 * create a new segment on demand.
+	 */
+	if (!has_exclusive_lock)
+	{
+		if ((errno = pthread_rwlock_unlock(&gpumem_segment_rwlock)) < 0)
+			wfatal("failed on pthread_rwlock_unlock: %m");
+		if ((errno = pthread_rwlock_wrlock(&gpumem_segment_rwlock)) < 0)
+			wfatal("failed on pthread_rwlock_wrlock: %m");
+		has_exclusive_lock = true;
+		goto retry;
+	}
+
+	/* here is no available segment, so create a new one */
+	nchunks = GPUMEM_SEGMENTSZ / GPUMEM_CHUNKSZ_MIN;
+	gm_seg = calloc(1, offsetof(GpuMemSegment, gpumem_chunks[nchunks]));
+	if (!gm_seg)
+	{
+		rc = CUDA_ERROR_OUT_OF_MEMORY;
+		goto error0;
+	}
+
+	rc = cuMemAllocManaged(&m_segment, GPUMEM_SEGMENTSZ,
+						   CU_MEM_ATTACH_GLOBAL);
+	if (rc != CUDA_SUCCESS)
+		goto error1;
+
+	rc = cuMemAdvise(m_segment, GPUMEM_SEGMENTSZ,
+					 CU_MEM_ADVISE_SET_PREFERRED_LOCATION,
+					 gpuserv_cuda_device);
+	if (rc != CUDA_SUCCESS)
+		goto error2;
+	rc = cuMemAdvise(m_segment, GPUMEM_SEGMENTSZ,
+					 CU_MEM_ADVISE_SET_ACCESSED_BY,
+					 gpuserv_cuda_device);
+	if (rc != CUDA_SUCCESS)
+		goto error2;
+	/*
+	 * OK, create a new device memory segment
+	 */
+	gm_seg->m_segment			= m_segment;
+	gm_seg->num_total_chunks	= nchunks;
+	SpinLockInit(&gm_seg->lock);
+	gm_seg->num_active_chunks = 0;
+	for (i=0; i <= GPUMEM_CHUNKSZ_MAX_BIT; i++)
+		dlist_init(&gm_seg->free_chunks[i]);
+	gm_chunk = &gm_seg->gpumem_chunks[0];
+	gm_chunk->mclass = GPUMEM_SEGMENTSZ_BIT;
+	dlist_push_head(&gm_seg->free_chunks[GPUMEM_SEGMENTSZ_BIT],
+					&gm_chunk->chain);
+	dlist_push_head(&gpumem_segment_list,
+					&gm_seg->segment_chain);
+	gpumem_segment_count++;
+	goto retry;
+
+error2:
+	if ((__rc = cuMemFree(m_segment)) != CUDA_SUCCESS)
+		wfatal("failed on cuMemFree: %s", errorText(__rc));
+error1:
+	free(gm_seg);
+error0:
+	if ((errno = pthread_rwlock_unlock(&gpumem_segment_rwlock)) < 0)
+		wfatal("failed on pthread_rwlock_unlock: %m");
+	return rc;
+}
+
+/*
+ * gpuMemAllocManaged - device memory allocation for individual chunks
+ */
+CUresult
+gpuMemAllocManaged(GpuContext *gcontext,
+				   CUdeviceptr *p_deviceptr, size_t bytesize, int flags)
+{
+	GpuMemLargeChunk *lchunk;
+	CUdeviceptr		m_deviceptr;
+	CUresult		rc, __rc;
+	char		   *extra;
+	pg_crc32		crc;
+	int				index;
+
+	lchunk = calloc(1, sizeof(GpuMemLargeChunk));
+	if (!lchunk)
+		return CUDA_ERROR_OUT_OF_MEMORY;
+	Assert(PointerIsAligned(lchunk, int));
+
+	/* allocation of a managed device memory chunk */
+	rc = cuMemAllocManaged(&m_deviceptr, bytesize, flags);
+	if (rc != CUDA_SUCCESS)
+		goto error_1;
+	lchunk->m_deviceptr = m_deviceptr;
+	lchunk->refcnt = 1;
+
+	rc = cuMemAdvise(m_deviceptr, bytesize,
+					 CU_MEM_ADVISE_SET_PREFERRED_LOCATION,
+					 gpuserv_cuda_device);
+	if (rc != CUDA_SUCCESS)
+		goto error_2;
+	rc = cuMemAdvise(m_deviceptr, bytesize,
+					 CU_MEM_ADVISE_SET_ACCESSED_BY,
+					 gpuserv_cuda_device);
+	if (rc != CUDA_SUCCESS)
+		goto error_2;
+
+	/* least 1bit is a flag to indicate GpuMemLargeChunk */
+	extra = (char *)(((uintptr_t)lchunk) | 1UL);
+	if (!trackGpuMem(gcontext, m_deviceptr, extra))
+	{
+		rc = CUDA_ERROR_OUT_OF_MEMORY;
+		goto error_2;
+	}
+	/* track this large chunk */
+	INIT_LEGACY_CRC32(crc);
+	COMP_LEGACY_CRC32(crc, &m_deviceptr, sizeof(CUdeviceptr));
+	FIN_LEGACY_CRC32(crc);
+	index = crc % GPUMEM_LARGECHUNK_NSLOTS;
+
+	SpinLockAcquire(&gpumem_largechunk_lock);
+	dlist_push_head(&gpumem_largechunk_slot[index], &lchunk->chain);
+	SpinLockRelease(&gpumem_largechunk_lock);
+
+	*p_deviceptr = m_deviceptr;
+
+	return CUDA_SUCCESS;
+
+error_2:
+	__rc = cuMemFree(m_deviceptr);
+	if (__rc != CUDA_SUCCESS)
+		wnotice("failed on cuMemFree: %s", errorText(rc));
+error_1:
+	free(lchunk);
+	return rc;
+}
+
+/*
+ * gpuMemFree
+ */
+CUresult
+gpuMemFree(GpuContext *gcontext, CUdeviceptr deviceptr)
+{
+	GpuMemLargeChunk *lchunk;
+	char	   *extra;
+	CUresult	rc = CUDA_SUCCESS;
+
+	Assert(IsGpuServerProcess());
+	
+	/*
+	 * Pulls either GpuMemSegment or GpuMemLargeChunk from resource tracker.
+	 */
+	extra = untrackGpuMem(gcontext, deviceptr);
+	if ((((uintptr_t)extra) & 1UL) == 0)
+		return GpuMemSegmentFree((GpuMemSegment *)extra, deviceptr);
+
+	lchunk = (GpuMemLargeChunk *)(((uintptr_t)extra) & ~1UL);
+	SpinLockAcquire(&gpumem_largechunk_lock);
+	Assert(lchunk->m_deviceptr == deviceptr);
+	Assert(lchunk->refcnt > 0);
+	if (--lchunk->refcnt == 0)
+	{
+		dlist_delete(&lchunk->chain);
+		SpinLockRelease(&gpumem_largechunk_lock);
+		free(lchunk);
+
+		rc = cuMemFree(deviceptr);
+	}
+	else
+		SpinLockRelease(&gpumem_largechunk_lock);
+
+	return rc;
+}
+
+/*
+ * gpuMemRetain - get reference to device memory chunk acquired by different
+ *                context
+ */
+CUresult
+gpuMemRetain(GpuContext *gcontext, CUdeviceptr deviceptr)
+{
+	GpuMemSegment  *gm_seg;
+	GpuMemChunk	   *gm_chunk;
+	dlist_iter		iter;
+	pg_crc32		crc;
+	int				index;
+	char		   *extra;
+
+	/*
+	 * Lookup small chunks in segment first
+	 */
+	if ((errno = pthread_rwlock_rdlock(&gpumem_segment_rwlock)) < 0)
+		wfatal("failed on pthread_rwlock_rdlock: %m");
+	dlist_foreach(iter, &gpumem_segment_list)
+	{
+		gm_seg = dlist_container(GpuMemSegment, segment_chain, iter.cur);
+		if (deviceptr < gm_seg->m_segment ||
+			deviceptr >= (gm_seg->m_segment +
+						  GPUMEM_CHUNKSZ_MIN * gm_seg->num_total_chunks))
+			continue;
+
+		/* OK, found */
+		if (!trackGpuMem(gcontext, deviceptr, gm_seg))
+		{
+			if ((errno = pthread_rwlock_unlock(&gpumem_segment_rwlock)) < 0)
+				wfatal("failed on pthread_rwlock_unlock: %m");
+			return CUDA_ERROR_OUT_OF_MEMORY;
+		}
+
+		SpinLockAcquire(&gm_seg->lock);
+		index = (deviceptr - gm_seg->m_segment) >> GPUMEM_CHUNKSZ_MIN_BIT;
+		gm_chunk = &gm_seg->gpumem_chunks[index];
+		Assert(GPUMEMCHUNK_IS_ACTIVE(gm_chunk));
+		gm_chunk->refcnt++;
+		SpinLockRelease(&gm_seg->lock);
+
+		return CUDA_SUCCESS;
+	}
+	if ((errno = pthread_rwlock_unlock(&gpumem_segment_rwlock)) < 0)
+		wfatal("failed on pthread_rwlock_unlock: %m");
+
+	/*
+	 * Elsewhere, deviceptr might be a large chunk
+	 */
+	INIT_LEGACY_CRC32(crc);
+	COMP_LEGACY_CRC32(crc, &deviceptr, sizeof(CUdeviceptr));
+	FIN_LEGACY_CRC32(crc);
+	index = crc % GPUMEM_LARGECHUNK_NSLOTS;
+
+	SpinLockAcquire(&gpumem_largechunk_lock);
+	dlist_foreach(iter, &gpumem_largechunk_slot[index])
+	{
+		GpuMemLargeChunk *lchunk
+			= dlist_container(GpuMemLargeChunk, chain, iter.cur);
+
+		/* OK, found */
+		if (lchunk->m_deviceptr == deviceptr)
+		{
+			extra = (char *)(((uintptr_t)(lchunk)) | 1UL);
+			if (!trackGpuMem(gcontext, deviceptr, extra))
+			{
+				SpinLockRelease(&gpumem_largechunk_lock);
+				return CUDA_ERROR_OUT_OF_MEMORY;
+			}
+			lchunk->refcnt++;
+			SpinLockRelease(&gpumem_largechunk_lock);
+
+			return CUDA_SUCCESS;
+		}
+	}
+	SpinLockRelease(&gpumem_largechunk_lock);
+
+	return CUDA_ERROR_INVALID_VALUE;
 }
 
 /*

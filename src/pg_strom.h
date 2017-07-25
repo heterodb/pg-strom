@@ -475,6 +475,7 @@ extern CUresult	gpuMemAlloc(GpuContext *gcontext,
 extern CUresult gpuMemAllocManaged(GpuContext *gcontext,
 								   CUdeviceptr *p_devptr, size_t bytesize,
 								   int flags);
+extern CUresult gpuMemRetain(GpuContext *gcontext, CUdeviceptr devptr);
 extern CUresult	gpuMemFree(GpuContext *gcontext, CUdeviceptr devptr);
 extern void gpuMemReclaim(void);
 
@@ -850,7 +851,8 @@ extern Size ExecGpuScanEstimateDSM(CustomScanState *node,
 								   ParallelContext *pcxt);
 extern void ExecGpuScanInitDSM(CustomScanState *node,
 							   ParallelContext *pcxt,
-							   void *coordinate);
+							   void *coordinate,
+							   int num_rels);
 extern void ExecGpuScanInitWorker(CustomScanState *node,
 								  shm_toc *toc,
 								  void *coordinate);

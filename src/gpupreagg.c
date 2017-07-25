@@ -3413,9 +3413,11 @@ ExecReScanGpuPreAgg(CustomScanState *node)
 static Size
 ExecGpuPreAggEstimateDSM(CustomScanState *node, ParallelContext *pcxt)
 {
+	Size	required = 0;
+
 	if (node->ss.ss_currentRelation)
-		return ExecGpuScanEstimateDSM(node, pcxt);
-	return 0;
+		required += ExecGpuScanEstimateDSM(node, pcxt);
+	return required;
 }
 
 /*
@@ -3426,13 +3428,10 @@ ExecGpuPreAggInitDSM(CustomScanState *node,
 					 ParallelContext *pcxt,
 					 void *coordinate)
 {
-	GpuPreAggState *gpas = (GpuPreAggState *) node;
-	Size			len = offsetof(pgstromWorkerStatistics, gpujoin[0]);
+	//GpuPreAggState *gpas = (GpuPreAggState *) node;
+	//construct header portion of final buffer here...
 
-	gpas->gts.worker_stat = dmaBufferAlloc(gpas->gts.gcontext, len);
-	memset(gpas->gts.worker_stat, 0, len);
-
-	ExecGpuScanInitDSM(node, pcxt, coordinate);
+	ExecGpuScanInitDSM(node, pcxt, coordinate, 0);
 }
 
 /*
@@ -3443,6 +3442,7 @@ ExecGpuPreAggInitWorker(CustomScanState *node,
 						shm_toc *toc,
 						void *coordinate)
 {
+	//GpuPreAggState *gpas = (GpuPreAggState *) node;
 	if (node->ss.ss_currentRelation)
 		ExecGpuScanInitWorker(node, toc, coordinate);
 }

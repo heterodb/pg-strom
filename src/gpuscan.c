@@ -2219,12 +2219,14 @@ ExecGpuScanEstimateDSM(CustomScanState *node,
 void
 ExecGpuScanInitDSM(CustomScanState *node,
 				   ParallelContext *pcxt,
-				   void *coordinate)
+				   void *coordinate,
+				   int num_rels)	/* valid only if GpuJoin */
 {
 	GpuTaskState	   *gts = (GpuTaskState *) node;
 	EState			   *estate = node->ss.ps.state;
-	GpuScanParallelDSM *gpdsm = coordinate;
+	GpuScanParallelDSM *gspdsm = coordinate;
 	int					instr_options = 0;
+	Size				len;
 
 	if (node->ss.ps.instrument)
 	{
@@ -2240,32 +2242,36 @@ ExecGpuScanInitDSM(CustomScanState *node,
 	 * NOTE: DSM segment shall be released prior to the ExecEnd callback,
 	 * so we have to allocate another shared memory segment at v9.6.
 	 */
+	len = offsetof(pgstromWorkerStatistics, gpujoin[num_rels]);
+	gts->worker_stat = dmaBufferAlloc(gts->gcontext, len);
 	if (!gts->worker_stat)
-	{
-		Size		len = offsetof(pgstromWorkerStatistics, gpujoin[0]);
-
-		gts->worker_stat = dmaBufferAlloc(gts->gcontext, len);
-		if (!gts->worker_stat)
-			elog(ERROR, "out of shared memory");
-		memset(gts->worker_stat, 0, len);
-	}
+		elog(ERROR, "out of shared memory");
+	memset(gts->worker_stat, 0, len);
 	SpinLockInit(&gts->worker_stat->lock);
 	InstrInit(&gts->worker_stat->worker_instrument, instr_options);
 
-	gpdsm->worker_stat = gts->worker_stat;
+	gspdsm->worker_stat = gts->worker_stat;
 
 	if (gts->css.ss.ss_currentRelation)
 	{
 		/* setup of parallel scan descriptor */
-		heap_parallelscan_initialize(&gpdsm->pscan,
+		heap_parallelscan_initialize(&gspdsm->pscan,
 									 gts->css.ss.ss_currentRelation,
 									 estate->es_snapshot);
 		node->ss.ss_currentScanDesc =
 			heap_beginscan_parallel(gts->css.ss.ss_currentRelation,
-									&gpdsm->pscan);
+									&gspdsm->pscan);
 		/* Try to choose NVMe-Strom, if available */
 		PDS_init_heapscan_state(gts, gts->outer_nrows_per_block);
 	}
+}
+
+static void
+ExecGpuScanInitDSM_NoJoin(CustomScanState *node,
+						  ParallelContext *pcxt,
+						  void *coordinate)
+{
+	ExecGpuScanInitDSM(node, pcxt, coordinate, 0);
 }
 
 /*
@@ -2277,15 +2283,15 @@ ExecGpuScanInitWorker(CustomScanState *node,
 					  void *coordinate)
 {
 	GpuTaskState	   *gts = (GpuTaskState *) node;
-	GpuScanParallelDSM *gpdsm = coordinate;
+	GpuScanParallelDSM *gspdsm = coordinate;
 
-	gts->worker_stat = gpdsm->worker_stat;
+	gts->worker_stat = gspdsm->worker_stat;
 	if (gts->css.ss.ss_currentRelation)
 	{
 		/* begin parallel sequential scan */
 		node->ss.ss_currentScanDesc =
 			heap_beginscan_parallel(gts->css.ss.ss_currentRelation,
-									&gpdsm->pscan);
+									&gspdsm->pscan);
 		/* Try to choose NVMe-Strom, if available */
 		PDS_init_heapscan_state(gts, gts->outer_nrows_per_block);
 	}
@@ -3287,7 +3293,7 @@ pgstrom_init_gpuscan(void)
 	gpuscan_exec_methods.EndCustomScan      = ExecEndGpuScan;
 	gpuscan_exec_methods.ReScanCustomScan   = ExecReScanGpuScan;
 	gpuscan_exec_methods.EstimateDSMCustomScan = ExecGpuScanEstimateDSM;
-	gpuscan_exec_methods.InitializeDSMCustomScan = ExecGpuScanInitDSM;
+	gpuscan_exec_methods.InitializeDSMCustomScan = ExecGpuScanInitDSM_NoJoin;
 	gpuscan_exec_methods.InitializeWorkerCustomScan = ExecGpuScanInitWorker;
 	gpuscan_exec_methods.ExplainCustomScan  = ExplainGpuScan;
 
