@@ -98,6 +98,7 @@ typedef struct SharedGpuContext
 	dlist_node	chain;
 	PGPROC	   *server;			/* PGPROC of CUDA/GPU Server */
 	PGPROC	   *backend;		/* PGPROC of Backend Process */
+	int			ParallelWorkerNumber; /* copy of backend's local variable */
 	slock_t		lock;			/* lock of the field below */
 	cl_int		refcnt;			/* refcount by backend/gpu-server */
 	dlist_head	dma_buffer_list;/* tracker of DMA buffers */
@@ -225,7 +226,8 @@ struct GpuTaskState
 	dlist_head		ready_tasks;	/* list of tasks already processed */
 	cl_uint			num_ready_tasks;/* length of the list above */
 
-	/* executor statistics */
+	/* co-operation with CPU parallel */
+	ParallelContext	*pcxt;
 	pgstromWorkerStatistics *worker_stat;
 };
 #define GTS_GET_SCAN_TUPDESC(gts)				\

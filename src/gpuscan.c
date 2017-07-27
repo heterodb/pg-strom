@@ -2235,6 +2235,7 @@ ExecGpuScanInitDSM(CustomScanState *node,
 		if (node->ss.ps.instrument->need_bufusage)
 			instr_options |= INSTRUMENT_BUFFERS;
 	}
+	gts->pcxt = pcxt;
 
 	/*
 	 * setup of shared performance counter

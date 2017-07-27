@@ -230,8 +230,9 @@ pgstromInitGpuTaskState(GpuTaskState *gts,
 	dlist_init(&gts->ready_tasks);
 	gts->num_ready_tasks = 0;
 
-	//XXX - might be obsolete
-	gts->worker_stat = NULL;	/* setup by DSM init handler */
+	/* co-operation with CPU parallel (setup by DSM init handler) */
+	gts->pcxt = NULL;
+	gts->worker_stat = NULL;
 }
 
 /*
