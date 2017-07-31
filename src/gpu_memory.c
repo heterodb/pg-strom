@@ -517,7 +517,8 @@ gpuMemRetain(GpuContext *gcontext, CUdeviceptr deviceptr)
 		Assert(GPUMEMCHUNK_IS_ACTIVE(gm_chunk));
 		gm_chunk->refcnt++;
 		SpinLockRelease(&gm_seg->lock);
-
+		if ((errno = pthread_rwlock_unlock(&gpumem_segment_rwlock)) < 0)
+			wfatal("failed on pthread_rwlock_unlock: %m");
 		return CUDA_SUCCESS;
 	}
 	if ((errno = pthread_rwlock_unlock(&gpumem_segment_rwlock)) < 0)
