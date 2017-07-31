@@ -501,6 +501,8 @@ extern void gpuservSendGpuTask(GpuContext *gcontext, GpuTask *gtask);
 extern bool gpuservRecvGpuTasks(GpuContext *gcontext, long timeout);
 extern void gpuservPushGpuTask(GpuContext *gcontext, GpuTask *gtask);
 extern void gpuservCompleteGpuTask(GpuTask *gtask, bool is_urgent);
+extern void gpuservSendGpuMemFree(GpuContext *gcontext, CUdeviceptr devptr);
+extern void gpuservSendIOMapMemFree(GpuContext *gcontext, CUdeviceptr devptr);
 extern void pgstrom_init_gpu_server(void);
 
 extern pg_atomic_uint64 tv_gpuserv_debug1;
@@ -1155,6 +1157,21 @@ typealign_get_width(char type_align)
 #endif
 
 static inline char *
+format_numeric(cl_long value)
+{
+	if (value > 8000000000000L   || value < -8000000000000L)
+		return psprintf("%.2fT", (double)value / 1000000000000.0);
+	else if (value > 8000000000L || value < -8000000000L)
+		return psprintf("%.2fG", (double)value / 1000000000.0);
+	else if (value > 8000000L    || value < -8000000L)
+		return psprintf("%.2fM", (double)value / 1000000.0);
+	else if (value > 8000L       || value < -8000L)
+		return psprintf("%.2fK", (double)value / 1000.0);
+	else
+		return psprintf("%ld", value);
+}
+
+static inline char *
 format_bytesz(Size nbytes)
 {
 	if (nbytes > (Size)(1UL << 43))
@@ -1176,12 +1193,5 @@ format_millisec(double milliseconds)
 	else if (milliseconds > 8000.0) /* more than 8sec */
 		return psprintf("%.2fsec", milliseconds / 1000.0);
 	return psprintf("%.2fms", milliseconds);
-}
-
-/* old style */
-static inline char *
-milliseconds_unitary_format(double milliseconds)
-{
-	return format_millisec(milliseconds);
 }
 #endif	/* PG_STROM_H */

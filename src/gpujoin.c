@@ -48,9 +48,6 @@
 
 /*
  * GpuJoinPath
- *
- *
- *
  */
 typedef struct
 {
@@ -95,7 +92,7 @@ typedef struct
 	List	   *join_quals;
 	List	   *other_quals;
 	List	   *nloops_minor;
-	List	   *nloops_major;
+	List	   *nloops_major;		/* to be deprecated */
 	List	   *hash_inner_keys;	/* if hash-join */
 	List	   *hash_outer_keys;	/* if hash-join */
 	/* supplemental information of ps_tlist */
@@ -195,21 +192,19 @@ typedef struct
 	PlanState		   *state;
 	ExprContext		   *econtext;
 
-	List			   *pds_list;
-	cl_int				pds_index;
-	Size				pds_limit;
-	Size				consumed;
+	pgstrom_data_store *pds_in;
+
+//	List			   *pds_list;
+//	cl_int				pds_index;
+//	Size				pds_limit;
+//	Size				consumed;
 	Size				ntuples;
-	/* temp store, if KDS-hash overflow */
-	Tuplestorestate	   *tupstore;
 
 	/*
 	 * Join properties; both nest-loop and hash-join
 	 */
 	int					depth;
 	JoinType			join_type;
-	int					nbatches_plan;
-	int					nbatches_exec;
 	double				nrows_ratio;
 	cl_uint				ichunk_size;
 	List			   *join_quals;		/* single element list of ExprState */
@@ -218,11 +213,6 @@ typedef struct
 	/*
 	 * Join properties; only hash-join
 	 */
-	cl_uint				hgram_shift;
-	cl_uint				hgram_curr;
-	cl_uint				hgram_width;
-	Size			   *hgram_size;
-	Size			   *hgram_nitems;
 	List			   *hash_outer_keys;
 	List			   *hash_inner_keys;
 	List			   *hash_keylen;
@@ -268,8 +258,8 @@ typedef struct
 	double			outer_nrows;
 	List		   *hash_outer_keys;
 	List		   *join_quals;
-	/* current window of inner relations */
-	struct pgstrom_multirels *curr_pmrels;
+	/* inner hash/heap buffer */
+	struct pgstrom_multirels *inner_pmrels;
 	/* result width per tuple for buffer length calculation */
 	int				result_width;
 	/* expected extra length per result tuple  */
@@ -284,15 +274,6 @@ typedef struct
 	 * no input tuples are supplied.
 	 */
 	cl_int			first_right_outer_depth;
-
-	/*
-	 * flag to set if outer plan reached to end of the relation
-	 *
-	 * NOTE: Don't use gts->scan_done for this purpose, because it means
-	 * end of the scan on this node itself. It indicates wrong state to
-	 * the cuda_control.c
-	 */
-	bool			outer_scan_done;
 
 	/*
 	 * CPU Fallback
@@ -310,31 +291,59 @@ typedef struct
 	runtimeStat	   *rt_stat;
 
 	/*
+	 * Template for pds_dst
+	 */
+	kern_data_store	*kds_dst_head;
+
+	/*
 	 * Properties of underlying inner relations
 	 */
 	int				num_rels;
-	bool			inner_preloaded;
 	innerState		inners[FLEXIBLE_ARRAY_MEMBER];
 } GpuJoinState;
+
+/* DSM object of GpuJoin for CPU parallel */
+typedef struct
+{
+	struct pgstrom_multirels *inner_pmrels;
+	char		data[FLEXIBLE_ARRAY_MEMBER];	/* GpuScanParallelDSM if any */
+} GpuJoinParallelDSM;
 
 /*
  * pgstrom_multirels - inner buffer of multiple PDS/KDSs
  */
 typedef struct pgstrom_multirels
 {
-	GpuJoinState   *gjs;		/* GpuJoinState of this buffer */
+	pg_atomic_uint32 preload_done;	/* non-zero, if preloaded */
 	Size			head_length;	/* length of the header portion */
-	Size			usage_length;	/* length actually in use */
+	Size			total_length;	/* total length of the inner buffer */
 	pgstrom_data_store **inner_chunks;	/* array of inner PDS */
-	cl_bool			needs_outer_join;	/* true, if OJ is needed */
-	/* fields below can be updated by both of backend / GPU server */
-	slock_t			lock;
-	cl_int			n_attached;	/* Number of attached tasks */
-	cl_int			refcnt;		/* Refcount of device memory resource */
-	CUdeviceptr		m_kmrels;	/* GPU memory for inner relations */
-	CUevent			ev_loaded;	/* Sync object for load of pmrels */
-	CUdeviceptr		m_ojmaps;	/* GPU memory for outer join map */
-	cl_bool		   *h_ojmaps;	/* Host memory for outer join map */
+
+	/*
+	 * MEMO: The coordinator process is responsible to allocate / free
+	 * the inner hash/heap buffer on DMA buffer. Even if CPU parallel
+	 * execution, PostgreSQL ensures the background workers are terminated
+	 * prior to ExecEnd or ExecReScan handler (or callback of resource owner
+	 * in case of ereport), it can be released safely.
+	 * @nr_tasks means per-device (including CPU) reference counter.
+	 * Once per-device counter gets zero when @outer_scan_done is set,
+	 * it means outer-join map will not be updated any more, thus, good
+	 * chance to write back to the @h_ojmaps.
+	 * Once total sum of @nr_tasks gets zero, it means all the INNER or
+	 * LEFT OUTER JOIN stuff gets completed and ready for RIGHT/FULL OUTER
+	 * JOIN based on the latest outer join map.
+	 */
+	pthread_mutex_t	mutex;
+	cl_bool			outer_scan_done; /* true, if outer-scan was done */
+	cl_bool			outer_join_done; /* true, if outer-join was done */
+	cl_bool			had_cpu_fallback;/* true, if CPU fallback happen */
+	cl_int			refcnt;		/* reference counter */
+	cl_int		   *nr_tasks;	/* # of concurrent tasks (per device) */
+	cl_bool		   *is_attached;/* True, if already setup (per worker) */
+	CUdeviceptr	   *m_kmrels;	/* GPU buffer for kmrels (per device) */
+	CUdeviceptr	   *m_ojmaps;	/* GPU buffer for outer join (per device) */
+	cl_bool		   *h_ojmaps;	/* Host memory for outer join map
+								 * valid only if RIGHT/FULL OUTER JOIN */
 	kern_multirels	kern;
 } pgstrom_multirels;
 
@@ -343,21 +352,16 @@ typedef struct pgstrom_multirels
  */
 typedef struct
 {
-	GpuTask			task;
-	CUfunction		kern_main;
-	CUdeviceptr		m_kgjoin;
-	CUdeviceptr		m_kmrels;
-	CUdeviceptr		m_kds_src;
-	CUdeviceptr		m_kds_dst;
-	CUdeviceptr		m_ojmaps;
-	cl_bool			is_inner_loader;
-	cl_bool			with_nvme_strom;
-	runtimeStat	   *rt_stat;
+	GpuTask				task;
+	cl_bool				with_nvme_strom;/* true, if NVMe-Strom */
+	cl_bool				is_terminator;	/* true, if dummay terminator */
+	runtimeStat		   *rt_stat;		/* run-time statistics */
+	kern_data_store	   *kds_dst_head;	/* template for pds_dst */
 	/* DMA buffers */
 	pgstrom_multirels  *pmrels;		/* inner multi relations (heap or hash) */
 	pgstrom_data_store *pds_src;	/* data store of outer relation */
 	pgstrom_data_store *pds_dst;	/* data store of result buffer */
-	kern_gpujoin	kern;			/* kern_gpujoin of this request */
+	kern_gpujoin		kern;		/* kern_gpujoin of this request */
 } pgstrom_gpujoin;
 
 /* static variables */
@@ -386,19 +390,16 @@ static char *gpujoin_codegen(PlannerInfo *root,
 							 List *tlist,
 							 codegen_context *context);
 
-static void gpujoin_inner_unload(GpuJoinState *gjs, bool needs_rescan);
-static pgstrom_multirels *gpujoin_inner_getnext(GpuJoinState *gjs);
-static pgstrom_multirels *multirels_attach_buffer(pgstrom_multirels *pmrels);
-static bool multirels_get_buffer(pgstrom_gpujoin *pgjoin);
+static pgstrom_multirels *multirels_create_buffer(GpuJoinState *gjs,
+												  int num_pg_workers);
+static pgstrom_multirels *multirels_get_buffer(GpuContext *gcontext,
+											   pgstrom_multirels *pmrels);
 static void multirels_put_buffer(pgstrom_gpujoin *pgjoin);
+static bool multirels_load_buffer(GpuContext *gcontext,
+								  pgstrom_multirels *pmrels);
+static void multirels_finalize_buffer(GpuJoinState *gjs, bool is_rescan);
+static bool gpujoin_inner_preload(GpuJoinState *gjs);
 
-static void colocate_outer_join_maps_to_host(pgstrom_multirels *pmrels);
-static void colocate_outer_join_maps_to_device(pgstrom_gpujoin *pgjoin,
-											   CUmodule cuda_module,
-											   CUstream cuda_stream);
-static void multirels_detach_buffer(GpuJoinState *gjs,
-									pgstrom_multirels *pmrels,
-									bool may_kick_outer_join);
 /*
  * misc declarations
  */
@@ -2206,10 +2207,6 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 			((GpuTaskState *)istate->state)->row_format = true;
 		istate->econtext = CreateExprContext(estate);
 		istate->depth = i + 1;
-		istate->nbatches_plan =
-			long_as_double(intVal(list_nth(gj_info->nloops_major, i)));
-		istate->nbatches_exec =
-			((eflags & EXEC_FLAG_EXPLAIN_ONLY) != 0 ? -1 : 0);
 		plan_nrows_in = floatVal(list_nth(gj_info->plan_nrows_in, i));
 		plan_nrows_out = floatVal(list_nth(gj_info->plan_nrows_out, i));
 		istate->nrows_ratio = plan_nrows_out / Max(plan_nrows_in, 1.0);
@@ -2254,8 +2251,6 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 		hash_inner_keys = list_nth(gj_info->hash_inner_keys, i);
 		if (hash_inner_keys != NIL)
 		{
-			cl_uint		shift;
-
 			hash_inner_keys = fixup_varnode_to_origin(i+1,
 													  gj_info->ps_src_depth,
 													  gj_info->ps_src_resno,
@@ -2288,15 +2283,6 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 			Assert(IsA(istate->hash_outer_keys, List) &&
 				   list_length(istate->hash_inner_keys) ==
 				   list_length(istate->hash_outer_keys));
-
-			/* usage histgram */
-			shift = get_next_log2(gjs->inners[i].nbatches_plan) + 8;
-			Assert(shift < sizeof(cl_uint) * BITS_PER_BYTE);
-			istate->hgram_width = (1U << shift);
-			istate->hgram_size = palloc0(sizeof(Size) * istate->hgram_width);
-			istate->hgram_nitems = palloc0(sizeof(Size) * istate->hgram_width);
-			istate->hgram_shift = sizeof(cl_uint) * BITS_PER_BYTE - shift;
-			istate->hgram_curr = 0;
 		}
 
 		/*
@@ -2363,13 +2349,21 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 		MAXALIGN(cscan->scan.plan.plan_width);	/* average width */
 
 	/*
+	 * Template of kds_dst_head to be copied to GpuJoin tasks
+	 */
+	gjs->kds_dst_head = palloc(offsetof(kern_data_store,
+										colmeta[scan_tupdesc->natts]));
+	init_kernel_data_store(gjs->kds_dst_head,
+						   scan_tupdesc,
+						   pgstrom_chunk_size(),
+						   KDS_FORMAT_ROW,
+						   INT_MAX,
+						   false);
+	/*
 	 * run-time statistics shall be initialized on the first call of
 	 * executor or DSM initialization if parallel query
 	 */
 	gjs->rt_stat = NULL;
-
-	/* init perfmon */
-	//pgstrom_init_perfmon(&gjs->gts);
 }
 
 /*
@@ -2430,6 +2424,8 @@ ExecGpuJoin(CustomScanState *node)
 {
 	GpuJoinState   *gjs = (GpuJoinState *) node;
 
+	if (!gjs->inner_pmrels)
+		gjs->inner_pmrels = multirels_create_buffer(gjs, 1);
 	if (!gjs->rt_stat)
 		setup_runtime_statistics(gjs);
 	return ExecScan(&node->ss,
@@ -2446,19 +2442,18 @@ ExecEndGpuJoin(CustomScanState *node)
 	/*
 	 * clean up GpuJoin specific resources
 	 */
-	if (gjs->curr_pmrels)
-	{
-		multirels_detach_buffer(gjs, gjs->curr_pmrels, false);
-		gjs->curr_pmrels = NULL;
-	}
-	gpujoin_inner_unload(gjs, false);
-
+	if (gjs->inner_pmrels)
+		multirels_finalize_buffer(gjs, false);
 	/*
 	 * Clean up subtree (if any)
 	 */
 	ExecEndNode(outerPlanState(node));
 	for (i=0; i < gjs->num_rels; i++)
+	{
 		ExecEndNode(gjs->inners[i].state);
+		if (gjs->inners[i].pds_in)
+			PDS_release(gjs->inners[i].pds_in);
+	}
 	/* then other generic resources */
 	pgstromReleaseGpuTaskState(&gjs->gts);
 }
@@ -2467,7 +2462,6 @@ static void
 ExecReScanGpuJoin(CustomScanState *node)
 {
 	GpuJoinState   *gjs = (GpuJoinState *) node;
-	bool			keep_inners = true;
 	cl_int			i;
 
 	/* common rescan handling */
@@ -2481,10 +2475,17 @@ ExecReScanGpuJoin(CustomScanState *node)
 	{
 		for (i=0; i < gjs->num_rels; i++)
 		{
+			innerState *istate = &gjs->inners[i];
+
 			UpdateChangedParamSet(gjs->inners[i].state,
 								  gjs->gts.css.ss.ps.chgParam);
-			if (gjs->inners[i].state->chgParam != NULL)
-				keep_inners = false;
+			if (istate->state->chgParam != NULL)
+			{
+				if (istate->pds_in)
+					PDS_release(istate->pds_in);
+				istate->pds_in = NULL;
+				ExecReScan(istate->state);
+			}
 		}
 	}
 
@@ -2496,31 +2497,12 @@ ExecReScanGpuJoin(CustomScanState *node)
 	else
 		ExecReScan(outerPlanState(gjs));
 	gjs->gts.scan_overflow = NULL;
-	gjs->outer_scan_done = false;
 
 	/*
-	 * Detach previous inner relations buffer
+	 * Rewind the inner hash/heap buffer
 	 */
-	if (gjs->curr_pmrels)
-	{
-		multirels_detach_buffer(gjs, gjs->curr_pmrels, false);
-		gjs->curr_pmrels = NULL;
-	}
-
-	if (!keep_inners)
-		gpujoin_inner_unload(gjs, true);
-	else
-	{
-		/*
-		 * Just rewind the inner pointer.
-		 *
-		 * NOTE: It is a tricky hack. gpujoin_inner_getnext() increments
-		 * the pds_index prior to construction of pmrels, so all pds_index
-		 * shall be reverted to 1, as expected beginning point.
-		 */
-        for (i=0; i < gjs->num_rels; i++)
-            gjs->inners[i].pds_index = 0;
-	}
+	if (gjs->inner_pmrels)
+		multirels_finalize_buffer(gjs, true);
 }
 
 static void
@@ -2752,64 +2734,41 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 		if (es->format == EXPLAIN_FORMAT_TEXT)
 		{
 			appendStringInfoSpaces(es->str, indent_width);
-			appendStringInfo(es->str, "KDS-%s (size: %s, nbatched: %u)",
-							 hash_outer_key ? "Hash" : "Heap",
-							 format_bytesz(istate->pds_limit),
-							 istate->nbatches_plan);
-			if (es->analyze)
-				appendStringInfo(es->str, " (actual size: %s, nbatched: %u)\n",
-								 format_bytesz(istate->ichunk_size),
-								 istate->nbatches_exec);
+			if (!es->analyze)
+			{
+				appendStringInfo(es->str, "KDS-%s (size: %s)",
+								 hash_outer_key ? "Hash" : "Heap",
+								 format_bytesz(istate->ichunk_size));
+			}
 			else
-				appendStringInfoChar(es->str, '\n');
+			{
+				appendStringInfo(es->str, "KDS-%s (size plan: %s, exec: %s)",
+								 hash_outer_key ? "Hash" : "Heap",
+								 format_bytesz(istate->ichunk_size),
+								 format_bytesz(istate->pds_in->kds.length));
+			}
+			appendStringInfoChar(es->str, '\n');
 		}
 		else
 		{
+			Size		len;
+
 			snprintf(qlabel, sizeof(qlabel), "Depth %02d KDS Type", depth);
 			ExplainPropertyText(qlabel, hash_outer_key ? "Hash" : "Heap", es);
 
 			snprintf(qlabel, sizeof(qlabel),
 					 "Depth % 2d KDS Plan Size", depth);
-			ExplainPropertyText(qlabel, format_bytesz(istate->pds_limit), es);
-
-			snprintf(qlabel, sizeof(qlabel),
-                     "Depth % 2d KDS Plan nBatches", depth);
-			ExplainPropertyInteger(qlabel, istate->nbatches_plan, es);
-
+			len = istate->ichunk_size;
+			ExplainPropertyText(qlabel, format_bytesz(len), es);
 			if (es->analyze)
 			{
 				snprintf(qlabel, sizeof(qlabel),
-						 "Depth % 2d KDS Actual Size", depth);
-				ExplainPropertyText(qlabel,
-									format_bytesz(istate->ichunk_size), es);
-
-				snprintf(qlabel, sizeof(qlabel),
-						 "Depth % 2d KDS Actual nBatches", depth);
-				ExplainPropertyInteger(qlabel, istate->nbatches_exec, es);
+						 "Depth % 2d KDS Exec Size", depth);
+				len = istate->pds_in->kds.length;
+				ExplainPropertyText(qlabel, format_bytesz(len), es);
 			}
 		}
 		depth++;
-	}
-	/* inner multirels buffer statistics */
-	if (es->analyze)
-	{
-		resetStringInfo(&str);
-		for (depth=1; depth <= gjs->num_rels; depth++)
-		{
-			innerState *istate = &gjs->inners[depth-1];
-
-			appendStringInfo(&str, "%s(", depth > 1 ? "x" : "");
-			foreach (lc1, istate->pds_list)
-			{
-				pgstrom_data_store *pds = lfirst(lc1);
-
-				if (lc1 != list_head(istate->pds_list))
-					appendStringInfo(&str, ", ");
-				appendStringInfo(&str, "%s",
-								 format_bytesz(pds->kds.length));
-			}
-			appendStringInfo(&str, ")");
-		}
 	}
 	/* other common field */
 	pgstromExplainGpuTaskState(&gjs->gts, es);
@@ -2864,9 +2823,8 @@ static Size
 ExecGpuJoinEstimateDSM(CustomScanState *node,
 					   ParallelContext *pcxt)
 {
-	if (node->ss.ss_currentRelation)
-		return ExecGpuScanEstimateDSM(node, pcxt);
-	return 0;
+	return offsetof(GpuJoinParallelDSM, data[0])
+		+ ExecGpuScanEstimateDSM(node, pcxt);
 }
 
 /*
@@ -2878,13 +2836,14 @@ ExecGpuJoinInitDSM(CustomScanState *node,
 				   void *coordinate)
 {
 	GpuJoinState   *gjs = (GpuJoinState *) node;
-	Size			len = offsetof(pgstromWorkerStatistics,
-								   gpujoin[gjs->num_rels + 1]);
+	GpuJoinParallelDSM *gjpdsm = (GpuJoinParallelDSM *) coordinate;
 
-	gjs->gts.worker_stat = dmaBufferAlloc(gjs->gts.gcontext, len);
-	memset(gjs->gts.worker_stat, 0, len);
+	/* allocation of an empty multirel buffer */
+	gjs->inner_pmrels = multirels_create_buffer(gjs, pcxt->nworkers + 1);
+	gjpdsm->inner_pmrels = gjs->inner_pmrels;
 
-	ExecGpuScanInitDSM(node, pcxt, coordinate);
+	ExecGpuScanInitDSM(node, pcxt, gjpdsm->data,
+					   gjs->num_rels + 1);
 }
 
 /*
@@ -2895,8 +2854,11 @@ ExecGpuJoinInitWorker(CustomScanState *node,
 					  shm_toc *toc,
 					  void *coordinate)
 {
-	if (node->ss.ss_currentRelation)
-		ExecGpuScanInitWorker(node, toc, coordinate);
+	GpuJoinState	   *gjs = (GpuJoinState *) node;
+	GpuJoinParallelDSM *gjpdsm = (GpuJoinParallelDSM *) coordinate;
+
+	gjs->inner_pmrels = gjpdsm->inner_pmrels;
+	ExecGpuScanInitWorker(node, toc, gjpdsm->data);
 }
 
 /*
@@ -4111,8 +4073,12 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs,
 	 * we adopts the larger one.
 	 */
 
-
-	if (!gjs->gts.row_format)
+	/*
+	 * XXX - No longer we use KDS_FORMAT_SLOT format as result of GpuJoin.
+	 * It always needs pds_src to reference variable length fields, thus,
+	 * eventually consumes larger PCIe band than row-format.
+	 */
+	if (false /* !gjs->gts.row_format */)
 	{
 		/* KDS_FORMAT_SLOT */
 		Size	length = (STROMALIGN(offsetof(kern_data_store,
@@ -4245,18 +4211,15 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs,
 
 /*
  * gpujoin_create_task
- *
- *
- *
  */
 static GpuTask *
 gpujoin_create_task(GpuJoinState *gjs,
 					pgstrom_multirels *pmrels,
 					pgstrom_data_store *pds_src,
-					int file_desc,
-					kern_join_scale *jscale_old)
+					int file_desc)
 {
 	GpuContext		   *gcontext = gjs->gts.gcontext;
+	kern_data_store	   *kds_dst_head = gjs->kds_dst_head;
 	runtimeStat		   *rt_stat = gjs->rt_stat;
 	pgstrom_gpujoin	   *pgjoin;
 	double				ntuples;
@@ -4265,24 +4228,29 @@ gpujoin_create_task(GpuJoinState *gjs,
 	Size				length;
 	Size				required;
 	Size				max_items;
-	cl_int				i, j, depth;
+	cl_int				i, depth;
 	cl_int				target_depth;
 	cl_double			target_row_dist_score;
-	cl_bool				jscale_rewind = false;
-	kern_parambuf	   *kparams __attribute__((unused));
+	kern_parambuf	   *kparams;
 
 	/* allocation of GpuJoinTask */
-	length = offsetof(pgstrom_gpujoin, kern) +
-		STROMALIGN(offsetof(kern_gpujoin, jscale[gjs->num_rels + 1]));
-	required = length + STROMALIGN(gjs->gts.kern_params->length);
+	required = offsetof(pgstrom_gpujoin, kern)
+		+ STROMALIGN(offsetof(kern_gpujoin,
+							  jscale[gjs->num_rels + 1]))	/* kgjoin */
+		+ STROMALIGN(gjs->gts.kern_params->length)			/* kparams */
+		+ STROMALIGN(offsetof(kern_data_store,
+							  colmeta[kds_dst_head->ncols]));/* kds_dst_head */
 	pgjoin = dmaBufferAlloc(gcontext, required);
-	memset(pgjoin, 0, length);
+	if (!pgjoin)
+		werror("out of DMA buffer");
+	memset(pgjoin, 0, required);
 
 	pgstromInitGpuTask(&gjs->gts, &pgjoin->task);
 	pgjoin->task.file_desc = file_desc;
-	pgjoin->pmrels = multirels_attach_buffer(pmrels);
+	pgjoin->pmrels = multirels_get_buffer(gcontext, pmrels);
 	pgjoin->pds_src = pds_src;
 	pgjoin->pds_dst = NULL;		/* to be set later */
+	pgjoin->is_terminator = (pds_src == NULL);
 	pgjoin->rt_stat = gjs->rt_stat;
 
 	/* Is NVMe-Strom available to run this GpuJoin? */
@@ -4302,16 +4270,17 @@ gpujoin_create_task(GpuJoinState *gjs,
 	pgjoin->kern.kparams_offset
 		= STROMALIGN(offsetof(kern_gpujoin, jscale[gjs->num_rels + 1]));
 	kparams = KERN_GPUJOIN_PARAMBUF(&pgjoin->kern);
-	memcpy(KERN_GPUJOIN_PARAMBUF(&pgjoin->kern),
+	memcpy(kparams,
 		   gjs->gts.kern_params,
 		   gjs->gts.kern_params->length);
 
-	/*
-	 * Assignment of the virtual partition window size to control the number
-	 * of joined results, to avoid overflow of destination buffer.
-	 * If a valid jscale_old is supplied, it means this task shall be
-	 * re-enqueued because of smaller buffer than actual necessity.
-	 */
+	/* setup of kds_dst_head */
+	pgjoin->kds_dst_head = (kern_data_store *)
+		((char *)kparams + kparams->length);
+	memcpy(pgjoin->kds_dst_head, kds_dst_head,
+		   offsetof(kern_data_store, colmeta[kds_dst_head->ncols]));
+
+	/* setup initial jscale */
 	for (i = gjs->num_rels; i >= 0; i--)
 	{
 		kern_join_scale	   *jscale = pgjoin->kern.jscale;
@@ -4322,46 +4291,15 @@ gpujoin_create_task(GpuJoinState *gjs,
 		else
 			nitems = pmrels->inner_chunks[i-1]->kds.nitems;
 
-		if (!jscale_old)
-		{
-			jscale[i].window_base = 0;
-			jscale[i].window_size = nitems;
-			jscale[i].window_orig = jscale[i].window_base;
-		}
-		else if (!jscale_rewind &&
-				 jscale_old[i].window_base +
-				 jscale_old[i].window_size < nitems)
-		{
-			jscale[i].window_base = (jscale_old[i].window_base +
-									 jscale_old[i].window_size);
-			jscale[i].window_size = (jscale_old[i].window_base +
-									 jscale_old[i].window_size -
-									 jscale_old[i].window_orig);
-			jscale[i].window_orig = jscale[i].window_base;
-
-			if (jscale[i].window_base +
-				jscale[i].window_size > nitems)
-				jscale[i].window_size = nitems - jscale[i].window_base;
-
-			for (j = i + 1; j <= gjs->num_rels; j++)
-			{
-				jscale[j].window_base = 0;
-				jscale[j].window_orig = jscale[j].window_base;
-			}
-			jscale_rewind = true;
-		}
-		else
-		{
-			/* keeps the previous partition size */
-			jscale[i].window_base = jscale_old[i].window_base;
-			jscale[i].window_size = jscale_old[i].window_size;
-			jscale[i].window_orig = jscale[i].window_base;
-		}
+		jscale[i].window_base = 0;
+		jscale[i].window_size = nitems;
+		jscale[i].window_orig = jscale[i].window_base;
 	}
-	Assert(!jscale_old || jscale_rewind);
 
 	/*
 	 * Estimation of the number of join result items for each depth
+	 *
+	 * XXX - Is it really needed? GpuJoin's in-kernel logic prevent overflow
 	 */
 major_retry:
 	target_depth = 0;
@@ -4406,7 +4344,7 @@ major_retry:
 	minor_retry:
 		ntuples_next = gpujoin_exec_estimate_nitems(gjs,
 													pgjoin,
-													jscale_old,
+													NULL, //jscale_old,
 													ntuples,
 													depth);
 
@@ -4492,120 +4430,119 @@ major_retry:
 	return &pgjoin->task;
 }
 
+/*
+ * gpujoin_clone_task
+ */
+static pgstrom_gpujoin *
+gpujoin_clone_task(pgstrom_gpujoin *pgjoin_old)
+{
+	pgstrom_gpujoin	   *pgjoin_new;
+	GpuContext		   *gcontext;
+	Size				required;
 
+	gcontext = (IsGpuServerProcess()
+				? pgjoin_old->task.gcontext
+				: pgjoin_old->task.gts->gcontext);
+
+	required = offsetof(pgstrom_gpujoin, kern)
+		+ STROMALIGN(offsetof(kern_gpujoin,
+							  jscale[pgjoin_old->kern.num_rels + 1]))
+		+ KERN_GPUJOIN_PARAMBUF_LENGTH(&pgjoin_old->kern);
+	pgjoin_new = dmaBufferAlloc(gcontext, required);
+	if (!pgjoin_new)
+		werror("out of DMA buffer");
+	memcpy(pgjoin_new, pgjoin_old, required);
+
+	memset(&pgjoin_new->task.kerror, 0, sizeof(kern_errorbuf));
+	memset(&pgjoin_new->task.chain, 0, sizeof(dlist_node));
+	pgjoin_new->task.cpu_fallback = false;
+	memset(&pgjoin_new->task.tv_wakeup, 0, sizeof(struct timeval));
+	pgjoin_new->task.peer_fdesc = -1;
+	pgjoin_new->is_terminator = false;
+	pgjoin_new->pmrels = NULL;	/* caller should set */
+	pgjoin_new->pds_src = NULL;	/* caller should set */
+	pgjoin_new->pds_dst = NULL;	/* caller should set */
+
+	return pgjoin_new;
+}
+
+/*
+ * gpujoin_next_task
+ */
 static GpuTask *
 gpujoin_next_task(GpuTaskState *gts)
 {
 	GpuJoinState   *gjs = (GpuJoinState *) gts;
+	GpuTask		   *gtask;
 	pgstrom_data_store *pds = NULL;
 	int				filedesc = -1;
 
 	/*
-	 * Logic to fetch inner multi-relations looks like nested-loop.
-	 * If all the underlying inner scan already scaned its outer
-	 * relation, current depth makes advance its scan pointer with
-	 * reset of underlying scan pointer, or returns NULL if it is
-	 * already reached end of scan.
+	 * Preload inner buffer if not yet. Unlike older version, we never split
+	 * inner hash/heap buffer no longer, because GPU's unified memory allows
+	 * over commit of device memory and demand paging even if required size
+	 * is larger than physical memory.
 	 */
-	do {
-		if (gjs->outer_scan_done || !gjs->curr_pmrels)
-		{
-			pgstrom_multirels *pmrels_new;
+	if (!gpujoin_inner_preload(gjs))
+		return NULL;	/* GpuJoin obviously produces an empty result */
 
-			/*
-			 * NOTE: gpujoin_inner_getnext() has to be called prior to
-			 * multirels_detach_buffer() because some inner chunk (PDS)
-			 * may be reused on the next loop, thus, refcnt of the PDS
-			 * should not be touched to zero.
-			 */
-			pmrels_new = gpujoin_inner_getnext(gjs);
-			if (gjs->curr_pmrels)
+	if (gjs->gts.css.ss.ss_currentRelation)
+		pds = gpuscanExecScanChunk(gts, &filedesc);
+	else
+	{
+		PlanState	   *outer_node = outerPlanState(gjs);
+		TupleTableSlot *slot;
+
+		for (;;)
+		{
+			if (gjs->gts.scan_overflow)
 			{
-				Assert(gjs->outer_scan_done);
-				multirels_detach_buffer(gjs, gjs->curr_pmrels, true);
-				gjs->curr_pmrels = NULL;
+				slot = gjs->gts.scan_overflow;
+				gjs->gts.scan_overflow = NULL;
 			}
-
-			/*
-			 * NOTE: Neither inner nor outer relation has rows to be
-			 * read any more, so we break the GpuJoin.
-			 */
-			if (!pmrels_new)
-				return NULL;
-
-			gjs->curr_pmrels = pmrels_new;
-
-			/*
-			 * Rewind the outer scan pointer,
-			 * if it is not the first time
-			 */
-			if (gjs->outer_scan_done)
+			else
 			{
-				if (gjs->gts.css.ss.ss_currentRelation)
-					gpuscanRewindScanChunk(&gjs->gts);
-				else
-					ExecReScan(outerPlanState(gjs));
-				gjs->outer_scan_done = false;
-			}
-		}
-
-		if (gjs->gts.css.ss.ss_currentRelation)
-		{
-			/* Scan and load the outer relation by itself */
-			pds = gpuscanExecScanChunk(gts, &filedesc);
-			if (!pds)
-				gjs->outer_scan_done = true;
-		}
-		else
-		{
-			PlanState  *outer_node = outerPlanState(gjs);
-			TupleDesc	tupdesc = ExecGetResultType(outer_node);
-
-			while (true)
-			{
-				TupleTableSlot *slot;
-
-				if (gjs->gts.scan_overflow)
-				{
-					slot = gjs->gts.scan_overflow;
-					gjs->gts.scan_overflow = NULL;
-				}
-				else
-				{
-					slot = ExecProcNode(outer_node);
-					if (TupIsNull(slot))
-					{
-						gjs->outer_scan_done = true;
-						break;
-					}
-				}
-
-				/* create a new data-store if not constructed yet */
-				if (!pds)
-				{
-					pds = PDS_create_row(gjs->gts.gcontext,
-										 tupdesc,
-										 pgstrom_chunk_size());
-				}
-
-				/* insert the tuple on the data-store */
-				if (!PDS_insert_tuple(pds, slot))
-				{
-					gjs->gts.scan_overflow = slot;
+				slot = ExecProcNode(outer_node);
+				if (TupIsNull(slot))
 					break;
-				}
+			}
+
+			/* creation of a new data-store on demand */
+			if (!pds)
+			{
+				pds = PDS_create_row(gjs->gts.gcontext,
+									 ExecGetResultType(outer_node),
+									 pgstrom_chunk_size());
+			}
+			/* insert the tuple on the data-store */
+			if (!PDS_insert_tuple(pds, slot))
+			{
+				gjs->gts.scan_overflow = slot;
+				break;
 			}
 		}
+	}
+	gtask = gpujoin_create_task(gjs, gjs->inner_pmrels, pds, filedesc);
+	if (!pds)
+	{
+		pgstrom_multirels *pmrels = gjs->inner_pmrels;
 
 		/*
-		 * We also need to check existence of next inner hash-chunks,
-		 * even if here is no more outer records, In case of multi-relations
-		 * splited-out, we have to rewind the outer relation scan, then
-		 * makes relations join with the next inner hash chunks.
+		 * Set @outer_scan_done to mark no more GpuTask will not be produced
+		 * on the inner hash/heap buffer. Once reference counter gets reached
+		 * to zero next, it means the last task on the GpuJoin, thus we can
+		 * kick RIGHT/FULL OUTER JOIN on this timing.
 		 */
-	} while (!pds);
+		if ((errno = pthread_mutex_lock(&pmrels->mutex)) < 0)
+			wfatal("failed on pthread_mutex_lock: %m");
+		pmrels->outer_scan_done = true;
+		if ((errno = pthread_mutex_unlock(&pmrels->mutex)) < 0)
+			wfatal("failed on pthread_mutex_unlock: %m");
 
-	return gpujoin_create_task(gjs, gjs->curr_pmrels, pds, filedesc, NULL);
+		/* and, gpu_tasks.c will produce no tasks any more */
+		gjs->gts.scan_done = true;
+	}
+	return gtask;
 }
 
 /*
@@ -4615,89 +4552,15 @@ gpujoin_next_task(GpuTaskState *gts)
 static void
 gpujoin_ready_task(GpuTaskState *gts, GpuTask *gtask)
 {
-	GpuJoinState	   *gjs = (GpuJoinState *)gts;
-	pgstrom_gpujoin	   *pgjoin = (pgstrom_gpujoin *)gtask;
-	pgstrom_gpujoin	   *pgjoin_new;
-	pgstrom_multirels  *pmrels = pgjoin->pmrels;
-	int					i, num_rels = gjs->num_rels;
+	pgstrom_gpujoin *pgjoin = (pgstrom_gpujoin *) gtask;
 
-	if (pgjoin->task.kerror.errcode != StromError_Success)
+	if (gtask->kerror.errcode != StromError_Success)
 		elog(ERROR, "GpuJoin kernel internal error: %s",
 			 errorTextKernel(&gtask->kerror));
-
-	/*
-	 * Enqueue another GpuJoin taks if completed one run on a part of
-	 * inner window, and we still have another window to be executed.
-	 * gpujoin_create_task() expects inner_base[] points the base offset
-	 * of next task, and inner_size[] shall be adjusted according to the
-	 * size of result buffer and chunk size limitation.
-	 * (The new inner_size[] shall become baseline of the next inner scale)
-	 */
-	for (i = num_rels; i >= 0; i--)
-	{
-		kern_join_scale	   *jscale = pgjoin->kern.jscale;
-		cl_uint				nitems;
-
-		if (i == 0)
-			nitems = (!pgjoin->pds_src ? 0 : pgjoin->pds_src->kds.nitems);
-		else
-		{
-			pgstrom_data_store *pds = pmrels->inner_chunks[i-1];
-			nitems = pds->kds.nitems;
-		}
-
-		if (jscale[i].window_base + jscale[i].window_size < nitems)
-		{
-			/*
-			 * NOTE: consideration to a corner case - If CpuReCheck
-			 * error was returned on JOIN_RIGHT/FULL processing, we
-			 * cannot continue asynchronous task execution no longer,
-			 * because outer-join-map may be updated during execution
-			 * of the last task (with no valid outer PDS/KDS).
-			 * For example, if depth=2 and depth=4 is RIGHT JOIN,
-			 * depth=2 will produce half-NULL'ed tuples according to
-			 * the outer-join-map. Thie tuple shall be processed in
-			 * the depth=3 and later, according to INNER JOIN manner.
-			 * It may add new match on the depth=4, then it updates
-			 * the outer-join-map.
-			 * If a particular portion of RIGHT JOIN are executed on
-			 * both of CPU and GPU concurrently, we cannot guarantee
-			 * the outer-join-map is consistent.
-			 * Thus, once a pgstrom_gpujoin task got CpuReCheck error,
-			 * we will process remaining RIGHT JOIN stuff on CPU
-			 * entirely.
-			 */
-			if (!pgjoin->pds_src && pgjoin->task.cpu_fallback)
-			{
-				for (i=0; i < num_rels; i++)
-				{
-					pgstrom_data_store *pds = pmrels->inner_chunks[i];
-
-					jscale[i+1].window_size = (pds->kds.nitems -
-											   jscale[i+1].window_base);
-				}
-				break;
-			}
-
-			/*
-			 * Instead of retain and release of PDS, we simply copy its
-			 * pointer to reduce waste of spinlocks.
-			 * Also note that the inner buffer (pmrels) shall be retained
-			 * in the gpujoin_create_task(), so no need to do something
-			 * special.
-			 */
-			pgjoin_new = (pgstrom_gpujoin *)
-				gpujoin_create_task(gjs,
-									pgjoin->pmrels,
-									pgjoin->pds_src,
-									-1,
-									jscale);
-			pgjoin->pds_src = NULL;
-			gpuservSendGpuTask(gjs->gts.gcontext, &pgjoin_new->task);
-			break;
-		}
-		Assert(jscale[i].window_base + jscale[i].window_size == nitems);
-	}
+	if (pgjoin->task.cpu_fallback
+		? pgjoin->pmrels == NULL
+		: pgjoin->pmrels != NULL)
+		elog(FATAL, "Bug? incorrect status of inner hash/heap buffer");
 }
 
 /*
@@ -4714,6 +4577,7 @@ gpujoin_switch_task(GpuTaskState *gts, GpuTask *gtask)
 	/* rewind the CPU fallback position */
 	if (pgjoin->task.cpu_fallback)
 	{
+		Assert(pgjoin->pmrels != NULL);
 		gjs->fallback_outer_index = -1;
 		for (i=0; i < gjs->num_rels; i++)
 		{
@@ -4721,15 +4585,6 @@ gpujoin_switch_task(GpuTaskState *gts, GpuTask *gtask)
 			gjs->inners[i].fallback_right_outer = false;
 		}
 		ExecStoreAllNullTuple(gjs->slot_fallback);
-	}
-	else
-	{
-		/*
-		 * We don't need to have the inner pmrels buffer no longer, if GPU
-		 * task gets successfully done.
-		 */
-		multirels_detach_buffer(gjs, pgjoin->pmrels, true);
-		pgjoin->pmrels = NULL;
 	}
 }
 
@@ -5282,12 +5137,7 @@ gpujoin_next_tuple_fallback(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 							  jscale->window_base + jscale->window_size);
 				if (kds_index >= nvalids)
 				{
-					/*
-					 * NOTE: detach of the inner pmrels buffer was postponed
-					 * to the point of CPU fallback end, if needed. So, we
-					 * have to detach here.
-					 */
-					multirels_detach_buffer(gjs, pgjoin->pmrels, true);
+					multirels_put_buffer(pgjoin);
 					pgjoin->pmrels = NULL;
 					return NULL;
 				}
@@ -5349,7 +5199,11 @@ gpujoin_next_tuple_fallback(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 		/* walk down into the deeper depth */
 		if (!gpujoin_fallback_inner_recurse(gjs, gjs->slot_fallback,
 											pgjoin, 1, true))
+		{
+			multirels_put_buffer(pgjoin);
+			pgjoin->pmrels = NULL;
 			return NULL;
+		}
 	}
 
 	Assert(!TupIsNull(gjs->slot_fallback));
@@ -5365,35 +5219,14 @@ gpujoin_next_tuple_fallback(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
  *
  * ----------------------------------------------------------------
  */
-static void
-gpujoin_cleanup_cuda_resources(pgstrom_gpujoin *pgjoin)
-{
-	if (pgjoin->with_nvme_strom && pgjoin->m_kds_src)
-		gpuMemFreeIOMap(pgjoin->task.gcontext, pgjoin->m_kds_src);
-	if (pgjoin->m_kgjoin)
-		gpuMemFree(pgjoin->task.gcontext, pgjoin->m_kgjoin);
-	if (pgjoin->m_kmrels)
-		multirels_put_buffer(pgjoin);
-
-	/* clear the pointers */
-	pgjoin->kern_main = NULL;
-	pgjoin->m_kgjoin = 0UL;
-	pgjoin->m_kds_src = 0UL;
-	pgjoin->m_kds_dst = 0UL;
-	pgjoin->m_kmrels = 0UL;
-}
-
 void
 gpujoin_release_task(GpuTask *gtask)
 {
 	pgstrom_gpujoin	   *pgjoin = (pgstrom_gpujoin *) gtask;
 
-	/* release all the cuda resources, if any */
-	gpujoin_cleanup_cuda_resources(pgjoin);
 	/* detach multi-relations buffer, if any */
 	if (pgjoin->pmrels)
-		multirels_detach_buffer((GpuJoinState *)gtask->gts,
-								pgjoin->pmrels, false);
+		multirels_put_buffer(pgjoin);
 	/* unlink source data store */
 	if (pgjoin->pds_src)
 		PDS_release(pgjoin->pds_src);
@@ -5407,6 +5240,7 @@ gpujoin_release_task(GpuTask *gtask)
 int
 gpujoin_complete_task(GpuTask *gtask)
 {
+#if 0
 	pgstrom_gpujoin	   *pgjoin = (pgstrom_gpujoin *) gtask;
 	pgstrom_multirels  *pmrels = pgjoin->pmrels;
 
@@ -5450,50 +5284,74 @@ gpujoin_complete_task(GpuTask *gtask)
 		if (!pgjoin->pds_src && pgjoin->task.cpu_fallback)
 			colocate_outer_join_maps_to_host(pgjoin->pmrels);
 	}
-
-	/*
-	 * Release device memory and event objects acquired by the task.
-	 * For the better reuse of the inner multirels buffer, it has to
-	 * be after the above re-enqueue in case of retry.
-	 */
-	gpujoin_cleanup_cuda_resources(pgjoin);
-
+#endif
 	return 0;
 }
 
-static int
-__gpujoin_process_task(pgstrom_gpujoin *pgjoin,
-					   CUmodule cuda_module, CUstream cuda_stream)
+static void
+update_runtime_statistics(pgstrom_gpujoin *pgjoin)
+{
+	pgstrom_data_store *pds_dst = pgjoin->pds_dst;
+	pgstrom_multirels  *pmrels = pgjoin->pmrels;
+	runtimeStat		   *rt_stat = pgjoin->rt_stat;
+	kern_join_scale	   *jscale = pgjoin->kern.jscale;
+	cl_int				i, num_rels = pmrels->kern.nrels;
+
+	if (pgjoin->task.kerror.errcode != StromError_Success)
+		return;
+
+	SpinLockAcquire(&rt_stat->lock);
+	rt_stat->source_ntasks++;
+   	rt_stat->source_nitems += (jscale[0].window_base +
+							   jscale[0].window_size -
+							   jscale[0].window_orig);
+	for (i=0; i <= num_rels; i++)
+	{
+		rt_stat->inner_nitems[i] += jscale[i].inner_nitems;
+		rt_stat->right_nitems[i] += jscale[i].right_nitems;
+		if (jscale[i].row_dist_score > 0.0)
+		{
+			rt_stat->row_dist_score_valid = true;
+			rt_stat->row_dist_score[i] += jscale[i].row_dist_score;
+		}
+	}
+	rt_stat->results_nitems += pds_dst->kds.nitems;
+	rt_stat->results_usage += pds_dst->kds.usage;
+	SpinLockRelease(&rt_stat->lock);
+}
+
+static bool
+gpujoin_process_kernel(pgstrom_gpujoin *pgjoin, CUmodule cuda_module)
 {
 	GpuContext		   *gcontext = pgjoin->task.gcontext;
 	pgstrom_data_store *pds_src = pgjoin->pds_src;
 	pgstrom_data_store *pds_dst = pgjoin->pds_dst;
+	pgstrom_multirels  *pmrels = pgjoin->pmrels;
+	CUfunction		kern_main;
+	CUdeviceptr		m_kgjoin = 0UL;
+	CUdeviceptr		m_kmrels = 0UL;
+	CUdeviceptr		m_ojmaps = 0UL;
+	CUdeviceptr		m_kds_src = 0UL;
+	CUdeviceptr		m_kds_dst = 0UL;
 	Size			offset;
 	Size			length;
 	Size			pos;
 	CUresult		rc;
 	void		   *kern_args[10];
 
-	/*
-	 * sanity checks
-	 */
-	Assert(pds_src == NULL ||
-		   pds_src->kds.format == KDS_FORMAT_ROW ||
-		   pds_src->kds.format == KDS_FORMAT_BLOCK);
+	/* sanity checks */
+	Assert(!pds_src || (pds_src->kds.format == KDS_FORMAT_ROW ||
+						pds_src->kds.format == KDS_FORMAT_BLOCK));
 	Assert(pds_dst->kds.format == KDS_FORMAT_ROW ||
 		   pds_dst->kds.format == KDS_FORMAT_SLOT);
 
-	/*
-	 * GPU kernel function lookup
-	 */
-	rc = cuModuleGetFunction(&pgjoin->kern_main,
-							 cuda_module,
-							 "gpujoin_main");
+	/* Lookup GPU kernel function */
+	rc = cuModuleGetFunction(&kern_main, cuda_module, "gpujoin_main");
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuModuleGetFunction: %s", errorText(rc));
 
-	/*
-	 * Allocation of device memory for each chunks
+	/* 
+	 * Device memory allocation
 	 */
 	length = pos = GPUMEMALIGN(pgjoin->kern.kresults_2_offset +
 							   pgjoin->kern.kresults_2_offset -
@@ -5502,12 +5360,11 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 	{
 		Assert(pds_src->kds.format == KDS_FORMAT_BLOCK);
 		rc = gpuMemAllocIOMap(pgjoin->task.gcontext,
-							  &pgjoin->m_kds_src,
+							  &m_kds_src,
 							  GPUMEMALIGN(pds_src->kds.length));
 		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		{
 			PDS_fillup_blocks(pds_src, pgjoin->task.peer_fdesc);
-			pgjoin->m_kds_src = 0UL;
 			pgjoin->with_nvme_strom = false;
 			length += GPUMEMALIGN(pds_src->kds.length);
 		}
@@ -5519,31 +5376,31 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 
 	length += GPUMEMALIGN(pds_dst->kds.length);
 
-	rc = gpuMemAlloc(gcontext, &pgjoin->m_kgjoin, length);
+	rc = gpuMemAlloc(gcontext, &m_kgjoin, length);
 	if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		goto out_of_resource;
 	else if (rc != CUDA_SUCCESS)
 		werror("failed on gpuMemAlloc: %s", errorText(rc));
 
-	if (pds_src && pgjoin->m_kds_src == 0UL)
+	if (pds_src && m_kds_src == 0UL)
 	{
-		pgjoin->m_kds_src = pgjoin->m_kgjoin + pos;
+		m_kds_src = m_kgjoin + pos;
 		pos += GPUMEMALIGN(pds_src->kds.length);
 	}
-	pgjoin->m_kds_dst = pgjoin->m_kgjoin + pos;
+	m_kds_dst = m_kgjoin + pos;
+
+	/* inner hash/heap buffer should exist */
+	m_kmrels = pmrels->m_kmrels[gcontext->gpuserv_id];
+	m_ojmaps = pmrels->m_ojmaps[gcontext->gpuserv_id];
 
 	/*
 	 * OK, all the device memory and kernel objects are successfully
 	 * constructed. Let's enqueue DMA send/recv and kernel invocations.
 	 */
 
-	/* inner multi relations */
-	if (!multirels_get_buffer(pgjoin))
-		goto out_of_resource;
-
 	/* kern_gpujoin + static portion of kern_resultbuf */
 	length = KERN_GPUJOIN_HEAD_LENGTH(&pgjoin->kern);
-	rc = cuMemcpyHtoD(pgjoin->m_kgjoin,
+	rc = cuMemcpyHtoD(m_kgjoin,
 					  &pgjoin->kern,
 					  length);
 	if (rc != CUDA_SUCCESS)
@@ -5554,7 +5411,7 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 		/* source outer relation */
 		if (!pgjoin->with_nvme_strom)
 		{
-			rc = cuMemcpyHtoD(pgjoin->m_kds_src,
+			rc = cuMemcpyHtoD(m_kds_src,
 							  &pds_src->kds,
 							  pds_src->kds.length);
 			if (rc != CUDA_SUCCESS)
@@ -5564,19 +5421,13 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 		{
 			Assert(pds_src->kds.format == KDS_FORMAT_BLOCK);
 			gpuMemCopyFromSSD(&pgjoin->task,
-							  pgjoin->m_kds_src,
+							  m_kds_src,
 							  pds_src);
 		}
 	}
-	else
-	{
-		/* colocation of the outer join map */
-		//HOGE: we can skip colocation if no CPU fallback happen
-		colocate_outer_join_maps_to_device(pgjoin, cuda_module, cuda_stream);
-	}
 
 	/* kern_data_store (dst of head) */
-	rc = cuMemcpyHtoD(pgjoin->m_kds_dst,
+	rc = cuMemcpyHtoD(m_kds_dst,
 					  &pds_dst->kds,
 					  pds_dst->kds.length);
 	if (rc != CUDA_SUCCESS)
@@ -5591,14 +5442,14 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 	 *              kern_data_store *kds_dst,
 	 *              cl_int cuda_index)
 	 */
-	kern_args[0] = &pgjoin->m_kgjoin;
-	kern_args[1] = &pgjoin->m_kmrels;
-	kern_args[2] = &pgjoin->m_ojmaps;
-	kern_args[3] = &pgjoin->m_kds_src;
-	kern_args[4] = &pgjoin->m_kds_dst;
+	kern_args[0] = &m_kgjoin;
+	kern_args[1] = &m_kmrels;
+	kern_args[2] = &m_ojmaps;
+	kern_args[3] = &m_kds_src;
+	kern_args[4] = &m_kds_dst;
 	kern_args[5] = &gpuserv_cuda_dindex;
 
-	rc = cuLaunchKernel(pgjoin->kern_main,
+	rc = cuLaunchKernel(kern_main,
 						1, 1, 1,
 						1, 1, 1,
 						sizeof(kern_errorbuf),
@@ -5611,21 +5462,23 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 	/* DMA Recv: kern_gpujoin *kgjoin */
 	length = offsetof(kern_gpujoin, jscale[pgjoin->kern.num_rels + 1]);
 	rc = cuMemcpyDtoH(&pgjoin->kern,
-					  pgjoin->m_kgjoin,
+					  m_kgjoin,
 					  length);
 	if (rc != CUDA_SUCCESS)
 		werror("cuMemcpyDtoH: %s", errorText(rc));
 
 	/* DMA Recv: kern_data_store *kds_dst */
 	rc = cuMemcpyDtoH(&pds_dst->kds,
-					  pgjoin->m_kds_dst,
+					  m_kds_dst,
 					  pds_dst->kds.length);
 	if (rc != CUDA_SUCCESS)
 		werror("cuMemcpyDtoH: %s", errorText(rc));
 
+#if 1
 	/*
 	 * DMA Recv: kern_data_store *kds_src, if NVMe-Strom is used and join
 	 * results contains varlena/indirect datum
+	 * XXX - only if KDS_FORMAT_SLOT?
 	 */
 	if (pds_src &&
 		pds_src->kds.format == KDS_FORMAT_BLOCK &&
@@ -5639,7 +5492,7 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 				  (char *)&pds_src->kds);
 		length = pds_src->nblocks_uncached * BLCKSZ;
 		rc = cuMemcpyDtoH((char *)&pds_src->kds + offset,
-						  pgjoin->m_kds_src + offset,
+						  m_kds_src + offset,
 						  length);
 		if (rc != CUDA_SUCCESS)
 			werror("failed on cuMemcpyHtoD: %s", errorText(rc));
@@ -5651,11 +5504,132 @@ __gpujoin_process_task(pgstrom_gpujoin *pgjoin,
 		 */
 		pds_src->nblocks_uncached = 0;
 	}
-	return 0;
+#endif
+	/* release CUDA resources */
+	if (pgjoin->with_nvme_strom && m_kds_src)
+		gpuMemFreeIOMap(gcontext, m_kds_src);
+	if (m_kgjoin)
+		gpuMemFree(gcontext, m_kgjoin);
+
+	/*
+	 * Clear the error code if CPU fallback case.
+	 * Elsewhere, update run-time statistics.
+	 */
+	pgjoin->task.kerror = pgjoin->kern.kerror;
+	if (pgstrom_cpu_fallback_enabled &&
+		pgjoin->task.kerror.errcode == StromError_CpuReCheck)
+	{
+		pgjoin->task.kerror.errcode = StromError_Success;
+		pgjoin->task.cpu_fallback = true;
+		pmrels->had_cpu_fallback = true;
+	}
+	else
+	{
+		update_runtime_statistics(pgjoin);
+	}
+	return true;
 
 out_of_resource:
-	gpujoin_cleanup_cuda_resources(pgjoin);
-	return 1;
+	if (pgjoin->with_nvme_strom && m_kds_src)
+		gpuMemFreeIOMap(gcontext, m_kds_src);
+	if (m_kgjoin)
+		gpuMemFree(gcontext, m_kgjoin);
+	return false;
+}
+
+/*
+ * gpujoin_try_rerun_kernel
+ *
+ * It checks window frame of the last GpuJoin kernel. If entire window was
+ * not processed, we need to kick next kernel.
+ */
+static bool
+gpujoin_try_rerun_kernel(pgstrom_gpujoin *pgjoin, CUmodule cuda_module)
+{
+	GpuContext		   *gcontext = pgjoin->task.gcontext;
+	SharedGpuContext   *shgcon = gcontext->shgcon;
+	pgstrom_multirels  *pmrels = pgjoin->pmrels;
+	kern_join_scale	   *jscale = pgjoin->kern.jscale;
+	pgstrom_data_store *pds;
+	cl_uint				nitems;
+	int					i, j, num_rels = pgjoin->kern.num_rels;
+
+	for (i=num_rels; i >=0; i--)
+	{
+		if (i == 0)
+			pds = pgjoin->pds_src;
+		else
+			pds = pmrels->inner_chunks[i-1];
+		nitems = (!pds ? 0 : pds->kds.nitems);
+
+	   	if (jscale[i].window_base + jscale[i].window_size < nitems)
+		{
+			cl_uint		window_base = jscale[i].window_base;
+			cl_uint		window_size = jscale[i].window_size;
+			cl_uint		window_orig = jscale[i].window_orig;
+			pgstrom_gpujoin	*resp;
+
+			/*
+			 * NOTE: Pay attention on a corner case - if CpuReCheck happen
+			 * on RIGHT/FULL OUTER JOIN, we cannot continue asynchronous
+			 * task execution no longer.
+			 * Because outer-join-map can be updated during the execution
+			 * of GpuJoin kernel with no valid PDS/KDS.
+			 * For example, when depth=2 and depth=4 are RIGHT JOIN, depth=2
+			 * will produce half-NULL tuples according to the outer-join-map.
+			 * Then, these tuples shall be processed in the depth=3 and can
+			 * also update the outer-join-map in the depth=4.
+			 * Once a part of GpuJoin is processed on CPU or other GPU device,
+			 * we have to synchronize its completion and co-location of the
+			 * outer-join-map again. It usually makes less sense, so we move
+			 * entire process to CPU fallback.
+			 */
+			if (!pgjoin->pds_src && pgjoin->task.cpu_fallback)
+			{
+				for (j=0; j < num_rels; j++)
+				{
+					pds = pmrels->inner_chunks[j];
+					jscale[i+1].window_size = (pds->kds.nitems -
+											   jscale[i+1].window_base);
+				}
+				break;
+			}
+
+			/*
+			 * setup a responder to deliver the partial result of GpuJoin
+			 */
+			resp = gpujoin_clone_task(pgjoin);
+			resp->pds_dst = pgjoin->pds_dst;
+			pgjoin->pds_dst = NULL;
+
+			/*
+			 * Send back the responder
+			 */
+			SpinLockAcquire(&shgcon->lock);
+			shgcon->num_async_tasks++;
+			SpinLockRelease(&shgcon->lock);
+			gpuservSendGpuTask(gcontext, &resp->task);
+
+			/*
+			 * Move to the next window frame
+			 */
+			jscale[i].window_base = (window_base + window_size);
+			jscale[i].window_size = (window_base + window_size - window_orig);
+			jscale[i].window_orig = jscale[i].window_base;
+			if (jscale[i].window_base + jscale[i].window_size > nitems)
+				jscale[i].window_size = nitems - jscale[i].window_base;
+			for (j=i+1; j <= num_rels; j++)
+			{
+				pds = pmrels->inner_chunks[j-1];
+				jscale[j].window_base = 0;
+				jscale[j].window_size = pds->kds.nitems;
+				jscale[j].window_orig = 0;
+			}
+			return true;	/* run next */
+		}
+		Assert(jscale[i].window_base + jscale[i].window_size == nitems);
+	}
+	return false;
 }
 
 int
@@ -5664,34 +5638,48 @@ gpujoin_process_task(GpuTask *gtask,
 					 CUstream cuda_stream)
 {
 	pgstrom_gpujoin *pgjoin = (pgstrom_gpujoin *) gtask;
-	int			status;
 
-	STROM_TRY();
-	{
-		status = __gpujoin_process_task(pgjoin, cuda_module, cuda_stream);
-		if (status == 0)
-		{
-			/* save the error code */
-			pgjoin->task.kerror = pgjoin->kern.kerror;
-			/* takes CPU fallback, instead of the CpuReCheck error */
-			if (pgstrom_cpu_fallback_enabled &&
-				pgjoin->task.kerror.errcode == StromError_CpuReCheck)
-			{
-				pgjoin->task.kerror.errcode = StromError_Success;
-				pgjoin->task.cpu_fallback = true;
-			}
-			/* GpuJoin completion */
-			gpujoin_complete_task(gtask);
-		}
-	}
-	STROM_CATCH();
-	{
-		gpujoin_cleanup_cuda_resources(pgjoin);
-		STROM_RE_THROW();
-	}
-	STROM_END_TRY();
+	/* Ensure inner hash/heap buffe is loaded */
+	multirels_load_buffer(pgjoin->task.gcontext,
+						  pgjoin->pmrels);
+	/* Terminator task skips jobs */
+	if (pgjoin->is_terminator)
+		goto out;
 
-	return status;
+	/* Attach destination buffer on demand. */
+	if (!pgjoin->pds_dst)
+	{
+		pgstrom_data_store *pds;
+		kern_data_store	   *kds_head = pgjoin->kds_dst_head;
+
+		Assert(kds_head->format == KDS_FORMAT_ROW);
+		pds = dmaBufferAlloc(gtask->gcontext, kds_head->length);
+		if (!pds)
+			return 1;	/* out of resource */
+
+		pg_atomic_init_u32(&pds->refcnt, 1);
+		pds->nblocks_uncached = 0;
+		pds->ntasks_running = 0;
+		memcpy(&pds->kds, kds_head, offsetof(kern_data_store,
+											 colmeta[kds_head->ncols]));
+		pgjoin->pds_dst = pds;
+	}
+
+	do {
+		if (!gpujoin_process_kernel(pgjoin, cuda_module))
+			return 1;		/* out of resource */
+		if (pgjoin->task.kerror.errcode != StromError_Success)
+			break;			/* deliver the error status */
+	} while (gpujoin_try_rerun_kernel(pgjoin, cuda_module));
+
+	/*
+	 * Note that inner hash/heap buffer shall be detached on backend side
+	 * if CPU fallback is required.
+	 */
+out:
+	if (!pgjoin->task.cpu_fallback)
+		multirels_put_buffer(pgjoin);
+	return 0;
 }
 
 /* ================================================================
@@ -5760,40 +5748,6 @@ add_extra_randomness(pgstrom_data_store *pds)
 	}
 	else
 		elog(ERROR, "Unexpected data chunk format: %u", kds->format);
-}
-
-/*
- * gpujoin_inner_unload - it release inner relations and its data stores.
- *
- * TODO: We like to retain a part of inner relations if it is not
- * parametalized.
- */
-static void
-gpujoin_inner_unload(GpuJoinState *gjs, bool needs_rescan)
-{
-	ListCell   *lc;
-	cl_int		i;
-
-	for (i=0; i < gjs->num_rels; i++)
-	{
-		innerState *istate = &gjs->inners[i];
-
-		/*
-		 * If chgParam of subnode is not null then plan will be
-		 * re-scanned by next ExecProcNode.
-		 */
-		if (needs_rescan && istate->state->chgParam == NULL)
-			ExecReScan(istate->state);
-		foreach (lc, istate->pds_list)
-			PDS_release((pgstrom_data_store *) lfirst(lc));
-		istate->pds_list = NIL;
-		istate->pds_index = 0;
-		istate->pds_limit = 0;
-		istate->consumed = 0;
-		istate->ntuples = 0;
-		istate->tupstore = NULL;
-	}
-	gjs->inner_preloaded = false;
 }
 
 /*
@@ -5888,301 +5842,74 @@ get_tuple_hashvalue(innerState *istate,
 }
 
 /*
- * gpujoin_inner_hash_preload_TC
- *
- * It preloads a part of inner relation, within a particular range of
- * hash-values, to the data store with hash-format, for hash-join
- * execution. Its source is preliminary materialized within tuple-store
- * of PostgreSQL.
- */
-static void
-gpujoin_inner_hash_preload_TS(GpuJoinState *gjs,
-							  innerState *istate)
-{
-	PlanState		   *scan_ps = istate->state;
-	TupleTableSlot	   *scan_slot = scan_ps->ps_ResultTupleSlot;
-	TupleDesc			scan_desc = scan_slot->tts_tupleDescriptor;
-	Tuplestorestate	   *tupstore = istate->tupstore;
-	pgstrom_data_store *pds_hash;
-	List			   *pds_list = NIL;
-	List			   *hash_max_list = NIL;
-	Size				curr_size = 0;
-	Size				curr_nitems = 0;
-	Size				kds_length;
-	pg_crc32			hash_min;
-	pg_crc32			hash_max;
-	ListCell		   *lc1;
-	ListCell		   *lc2;
-	cl_uint				i;
-
-	/* tuplestore must be built */
-	Assert(tupstore != NULL);
-
-	hash_min = 0;
-	for (i=0; i < istate->hgram_width; i++)
-	{
-		Size	next_size = istate->hgram_size[i];
-		Size	next_nitems = istate->hgram_nitems[i];
-		Size	next_length;
-
-		next_length = KDS_CALCULATE_HASH_LENGTH(scan_desc->natts,
-												curr_nitems + next_nitems,
-												curr_size + next_size);
-		if (next_length > istate->pds_limit)
-		{
-			if (curr_size == 0)
-				elog(ERROR, "Too extreme hash-key distribution");
-
-			kds_length = KDS_CALCULATE_HASH_LENGTH(scan_desc->natts,
-												   curr_nitems,
-												   curr_size);
-			hash_max = i * (1U << istate->hgram_shift) - 1;
-			pds_hash = PDS_create_hash(gjs->gts.gcontext,
-									   scan_desc,
-									   kds_length);
-			pds_hash->kds.hash_min = hash_min;
-			pds_hash->kds.hash_max = hash_max;
-
-			pds_list = lappend(pds_list, pds_hash);
-			hash_max_list = lappend_int(hash_max_list, (int) hash_max);
-			/* reset counter */
-			hash_min = hash_max + 1;
-			curr_size = 0;
-			curr_nitems = 0;
-		}
-		curr_size += next_size;
-		curr_nitems += next_nitems;
-	}
-	/*
-	 * The last partitioned chunk
-	 */
-	kds_length = KDS_CALCULATE_HASH_LENGTH(scan_desc->natts,
-										   curr_nitems,
-										   curr_size + BLCKSZ);
-	pds_hash = PDS_create_hash(gjs->gts.gcontext,
-							   scan_desc,
-							   kds_length);
-	pds_hash->kds.hash_min = hash_min;
-	pds_hash->kds.hash_max = UINT_MAX;
-	pds_list = lappend(pds_list, pds_hash);
-	hash_max_list = lappend_int(hash_max_list, (int) UINT_MAX);
-
-	/*
-	 * Load from the tuplestore
-	 */
-	while (tuplestore_gettupleslot(tupstore, true, false, scan_slot))
-	{
-		pg_crc32	hash;
-		bool		is_null_keys;
-
-		hash = get_tuple_hashvalue(istate, true, scan_slot, &is_null_keys);
-
-		/*
-		 * It is obvious all-NULLs keys shall not match any outer tuples.
-		 * In case INNER or RIGHT join, this tuple shall be never referenced,
-		 * so we drop these tuples from the inner buffer.
-		 */
-		if (is_null_keys && (istate->join_type == JOIN_INNER ||
-							 istate->join_type == JOIN_LEFT))
-			continue;
-
-		forboth (lc1, pds_list,
-				 lc2, hash_max_list)
-		{
-			pgstrom_data_store *pds = lfirst(lc1);
-			pg_crc32			hash_max = (pg_crc32)lfirst_int(lc2);
-
-			if (hash <= hash_max)
-			{
-				if (PDS_insert_hashitem(pds, scan_slot, hash))
-					break;
-				elog(ERROR, "Bug? GpuHashJoin Histgram was not correct");
-			}
-		}
-	}
-
-	foreach (lc1, pds_list)
-	{
-		pgstrom_data_store *pds_in = lfirst(lc1);
-		PDS_shrink_size(pds_in);
-	}
-	Assert(istate->pds_list == NIL);
-	istate->pds_list = pds_list;
-
-	/* no longer tuple-store is needed */
-	tuplestore_end(istate->tupstore);
-	istate->tupstore = NULL;
-}
-
-/*
  * gpujoin_inner_hash_preload
  *
  * Preload inner relation to the data store with hash-format, for hash-
  * join execution.
  */
-static bool
-gpujoin_inner_hash_preload(GpuJoinState *gjs,
-						   innerState *istate,
-						   Size *p_total_usage)
+static pgstrom_data_store *
+gpujoin_inner_hash_preload(GpuJoinState *gjs, innerState *istate)
 {
 	PlanState		   *scan_ps = istate->state;
 	TupleTableSlot	   *scan_slot;
 	TupleDesc			scan_desc;
-	HeapTuple			tuple;
-	Size				consumption;
 	pgstrom_data_store *pds_hash = NULL;
 	pg_crc32			hash;
 	bool				is_null_keys;
-	cl_int				index;
-	ListCell		   *lc;
+	Size				length;
 
-next:
-	scan_slot = ExecProcNode(istate->state);
-	if (TupIsNull(scan_slot))
+	for (;;)
 	{
-		if (istate->tupstore)
-			gpujoin_inner_hash_preload_TS(gjs, istate);
-		/* put an empty hash table if no rows read */
-		if (istate->pds_list == NIL)
-		{
-			Size	empty_len;
+		scan_slot = ExecProcNode(istate->state);
+		if (TupIsNull(scan_slot))
+			break;
 
-			scan_slot = scan_ps->ps_ResultTupleSlot;
-			scan_desc = scan_slot->tts_tupleDescriptor;
-			empty_len = KDS_CALCULATE_HASH_LENGTH(scan_desc->natts, 0, 0);
+		(void)ExecFetchSlotTuple(scan_slot);
+		hash = get_tuple_hashvalue(istate, true, scan_slot,
+								   &is_null_keys);
+		/*
+		 * If join keys are NULLs, it is obvious that inner tuple shall not
+		 * match with outer tuples. Unless it is not referenced in outer join,
+		 * we don't need to keep this tuple in the 
+		 */
+		if (is_null_keys && (istate->join_type == JOIN_INNER ||
+							 istate->join_type == JOIN_LEFT))
+			continue;
+
+		scan_desc = scan_slot->tts_tupleDescriptor;
+		if (!pds_hash)
+		{
 			pds_hash = PDS_create_hash(gjs->gts.gcontext,
 									   scan_desc,
-									   empty_len);
-			istate->pds_list = list_make1(pds_hash);
+									   Max(istate->ichunk_size,
+										   pgstrom_chunk_size() / 4));
+
+			istate->ntuples = 0;
 		}
-		/* add extra randomness for better key distribution */
-		foreach (lc, istate->pds_list)
+
+		while (!PDS_insert_hashitem(pds_hash, scan_slot, hash))
 		{
-			pgstrom_data_store *pds = lfirst(lc);
-			add_extra_randomness(pds);
-			PDS_build_hashtable(pds);
+			pds_hash = PDS_expand_size(gjs->gts.gcontext,
+									   pds_hash,
+									   pds_hash->kds.length * 2);
 		}
-		return false;
+		istate->ntuples++;
 	}
-
-	tuple = ExecFetchSlotTuple(scan_slot);
-	hash = get_tuple_hashvalue(istate, true, scan_slot, &is_null_keys);
-
-	/*
-	 * If join keys are NULLs, it is obvious that inner tuple shall not
-	 * match with outer tuples. Unless it is not referenced in outer join,
-	 * we don't need to keep this tuple in the 
-	 */
-	if (is_null_keys && (istate->join_type == JOIN_INNER ||
-						 istate->join_type == JOIN_LEFT))
-		goto next;
-
-	scan_desc = scan_slot->tts_tupleDescriptor;
-	if (istate->pds_list != NIL)
-		pds_hash = (pgstrom_data_store *) llast(istate->pds_list);
-	else if (!istate->tupstore)
+	/* a dummy empty hash table if no rows read */
+	if (!pds_hash)
 	{
-		Size	ichunk_size = Max(istate->ichunk_size,
-								  pgstrom_chunk_size() / 4);
+		scan_slot = scan_ps->ps_ResultTupleSlot;
+		scan_desc = scan_slot->tts_tupleDescriptor;
+		length = KDS_CALCULATE_HASH_LENGTH(scan_desc->natts, 0, 0);
 		pds_hash = PDS_create_hash(gjs->gts.gcontext,
 								   scan_desc,
-								   ichunk_size);
-		istate->pds_list = list_make1(pds_hash);
-		istate->ntuples = 0;
-		istate->consumed = KDS_CALCULATE_HEAD_LENGTH(scan_desc->natts);
+								   length);
 	}
+	/* add extra randomness for better key distribution */
+	add_extra_randomness(pds_hash);
+	PDS_build_hashtable(pds_hash);
 
-	/*
-	 * Update Histgram
-	 */
-	consumption = MAXALIGN(offsetof(kern_hashitem, t.htup) + tuple->t_len);
-	index = (hash >> istate->hgram_shift);
-	istate->hgram_size[index] += consumption;
-	istate->hgram_nitems[index]++;
-
-	/*
-	 * XXX - If join type is LEFT or FULL OUTER, each PDS has to be
-	 * strictly partitioned by the hash-value, thus, we saves entire
-	 * relation on the tuple-store, then reconstruct PDS later.
-	 */
-retry:
-	if (istate->tupstore)
-	{
-		tuplestore_puttuple(istate->tupstore, tuple);
-		*p_total_usage += KDS_HASH_USAGE_GROWTH(istate->ntuples,
-												consumption);
-		istate->ntuples++;
-		istate->consumed += consumption;
-
-		return true;
-	}
-
-	if (istate->pds_limit > 0 &&
-		istate->pds_limit <= KDS_CALCULATE_HASH_LENGTH(scan_desc->natts,
-													   istate->ntuples + 1,
-													   istate->consumed +
-													   consumption))
-	{
-		if (istate->join_type == JOIN_INNER ||
-			istate->join_type == JOIN_LEFT)
-		{
-			PDS_shrink_size(pds_hash);
-
-			pds_hash = PDS_create_hash(gjs->gts.gcontext,
-									   scan_desc,
-									   istate->pds_limit);
-			istate->pds_list = lappend(istate->pds_list, pds_hash);
-			istate->ntuples = 0;
-			istate->consumed = KDS_CALCULATE_HEAD_LENGTH(scan_desc->natts);
-		}
-		else
-		{
-			/*
-			 * NOTE: If join type requires inner-side is well partitioned
-			 * by hash-value, we once needs to move all the entries to
-			 * the tuple-store, then reconstruct them as PDS.
-			 */
-			kern_data_store	   *kds_hash = &pds_hash->kds;
-			kern_hashitem	   *khitem;
-			HeapTupleData		tupData;
-
-			istate->tupstore = tuplestore_begin_heap(false, false, work_mem);
-			for (index = 0; index < kds_hash->nslots; index++)
-			{
-				for (khitem = KERN_HASH_FIRST_ITEM(kds_hash, index);
-					 khitem != NULL;
-					 khitem = KERN_HASH_NEXT_ITEM(kds_hash, khitem))
-				{
-					tupData.t_len = khitem->t.t_len;
-					tupData.t_data = &khitem->t.htup;
-					tuplestore_puttuple(istate->tupstore, &tupData);
-				}
-			}
-			Assert(list_length(istate->pds_list) == 1);
-			PDS_release(pds_hash);
-			istate->pds_list = NULL;
-			/*
-			 * NOTE: istate->ntuples and istate->consumed shall be updated on
-			 * the if-block just after the retry: label.
-			 */
-			goto retry;
-		}
-	}
-
-	if (!PDS_insert_hashitem(pds_hash, scan_slot, hash))
-	{
-		pds_hash = PDS_expand_size(gjs->gts.gcontext,
-								   pds_hash,
-								   2 * pds_hash->kds.length);
-		llast(istate->pds_list) = pds_hash;
-		goto retry;
-	}
-	*p_total_usage += KDS_HASH_USAGE_GROWTH(istate->ntuples,
-											consumption);
-	istate->ntuples++;
-	istate->consumed += consumption;
-
-	return true;
+	return pds_hash;
 }
 
 /*
@@ -6191,186 +5918,58 @@ retry:
  * Preload inner relation to the data store with row-format, for nested-
  * loop execution.
  */
-static bool
-gpujoin_inner_heap_preload(GpuJoinState *gjs,
-						   innerState *istate,
-						   Size *p_total_usage)
+static pgstrom_data_store *
+gpujoin_inner_heap_preload(GpuJoinState *gjs, innerState *istate)
 {
 	PlanState	   *scan_ps = istate->state;
 	TupleTableSlot *scan_slot;
 	TupleDesc		scan_desc;
-	HeapTuple		tuple;
-	Size			consumption;
-	pgstrom_data_store *pds_heap;
+	Size			length;
+	pgstrom_data_store *pds_heap = NULL;
 
-	/* fetch next tuple from inner relation */
-	scan_slot = ExecProcNode(scan_ps);
-	if (TupIsNull(scan_slot))
+	for (;;)
 	{
-		ListCell   *lc;
+		scan_slot = ExecProcNode(scan_ps);
+		if (TupIsNull(scan_slot))
+			break;
 
-		/* put an empty heap table if no rows read */
-		if (istate->pds_list == NIL)
+		scan_desc = scan_slot->tts_tupleDescriptor;
+		if (!pds_heap)
 		{
-			Size	empty_len;
-
-			scan_slot = scan_ps->ps_ResultTupleSlot;
-			scan_desc = scan_slot->tts_tupleDescriptor;
-			empty_len = STROMALIGN(offsetof(kern_data_store,
-											colmeta[scan_desc->natts]));
+			length = Max(istate->ichunk_size,
+						 pgstrom_chunk_size() / 4);
 			pds_heap = PDS_create_row(gjs->gts.gcontext,
 									  scan_desc,
-									  empty_len);
-			istate->pds_list = list_make1(pds_heap);
+									  Max(istate->ichunk_size,
+										  pgstrom_chunk_size() / 4));
+			istate->ntuples = 0;
 		}
-		/* add extra randomness for better key distribution */
-		foreach (lc, istate->pds_list)
-			add_extra_randomness((pgstrom_data_store *) lfirst(lc));
-		return false;
+		(void)ExecFetchSlotTuple(scan_slot);
+		while (!PDS_insert_tuple(istate->pds_in, scan_slot))
+		{
+			pds_heap = PDS_expand_size(gjs->gts.gcontext,
+									   pds_heap,
+									   pds_heap->kds.length * 2);
+		}
+		istate->ntuples++;
 	}
-	scan_desc = scan_slot->tts_tupleDescriptor;
-
-	if (istate->pds_list != NIL)
-		pds_heap = (pgstrom_data_store *) llast(istate->pds_list);
-	else
+	/* if no rows were read, create a small empty PDS */
+	if (!pds_heap)
 	{
-		Size	ichunk_size = Max(istate->ichunk_size,
-								  pgstrom_chunk_size() / 4);
+		scan_slot = scan_ps->ps_ResultTupleSlot;
+		scan_desc = scan_slot->tts_tupleDescriptor;
+		length = STROMALIGN(offsetof(kern_data_store,
+									 colmeta[scan_desc->natts]));
 		pds_heap = PDS_create_row(gjs->gts.gcontext,
 								  scan_desc,
-								  ichunk_size);
-		istate->pds_list = list_make1(pds_heap);
-		istate->consumed = KDS_CALCULATE_HEAD_LENGTH(scan_desc->natts);
-		istate->ntuples = 0;
+								  length);
 	}
+	/* add extra randomness for better key distribution */
+	add_extra_randomness(istate->pds_in);
+	/* shrink unnecessary hole */
+	PDS_shrink_size(istate->pds_in);
 
-	tuple = ExecFetchSlotTuple(scan_slot);
-	consumption = sizeof(cl_uint) +		/* for offset table */
-		LONGALIGN(offsetof(kern_tupitem, htup) + tuple->t_len);
-
-	/*
-	 * Switch to the new chunk, if current one exceeds the limitation
-	 */
-	if (istate->pds_limit > 0 &&
-		istate->pds_limit <= KDS_CALCULATE_ROW_LENGTH(scan_desc->natts,
-													  istate->ntuples + 1,
-													  istate->consumed +
-													  consumption))
-	{
-		pds_heap = PDS_create_row(gjs->gts.gcontext,
-								  scan_desc,
-								  pds_heap->kds.length);
-		istate->pds_list = lappend(istate->pds_list, pds_heap);
-		istate->consumed = KDS_CALCULATE_HEAD_LENGTH(scan_desc->natts);
-		istate->ntuples = 0;
-	}
-
-retry:
-	if (!PDS_insert_tuple(pds_heap, scan_slot))
-	{
-		PDS_expand_size(gjs->gts.gcontext,
-						pds_heap,
-						2 * pds_heap->kds.length);
-		goto retry;
-	}
-	*p_total_usage += KDS_ROW_USAGE_GROWTH(istate->ntuples,
-										   consumption);
-	istate->ntuples++;
-	istate->consumed += consumption;
-
-	return true;
-}
-
-/*
- * gpujoin_create_multirels
- *
- * It construct an empty pgstrom_multirels
- */
-static pgstrom_multirels *
-gpujoin_create_multirels(GpuJoinState *gjs)
-{
-	GpuContext	   *gcontext = gjs->gts.gcontext;
-	pgstrom_multirels *pmrels;
-	Size			ojmap_length = 0;
-	Size			head_length;
-	Size			required;
-	int				i;
-	char		   *pos;
-
-	/* calculation of outer-join map length */
-	for (i=0; i < gjs->num_rels; i++)
-	{
-		innerState	   *istate = &gjs->inners[i];
-
-		if (istate->join_type == JOIN_RIGHT ||
-			istate->join_type == JOIN_FULL)
-		{
-			pgstrom_data_store *pds = list_nth(istate->pds_list,
-											   istate->pds_index - 1);
-			ojmap_length += STROMALIGN(pds->kds.nitems);
-		}
-	}
-
-	/* calculate total length and allocate */
-	head_length = STROMALIGN(offsetof(pgstrom_multirels,
-									  kern.chunks[gjs->num_rels]));
-	required = head_length +
-		STROMALIGN(sizeof(pgstrom_data_store *) * gjs->num_rels) +
-		2 * sizeof(cl_bool) * STROMALIGN(ojmap_length);
-	pmrels = dmaBufferAlloc(gcontext, required);
-	memset(pmrels, 0, required);
-	pos = (char *)pmrels + head_length;
-
-	pmrels->gjs = gjs;	// deprecated
-	pmrels->head_length = head_length;
-	pmrels->usage_length = head_length;
-	pmrels->inner_chunks = (pgstrom_data_store **) pos;
-	pos += STROMALIGN(sizeof(pgstrom_data_store *) * gjs->num_rels);
-	SpinLockInit(&pmrels->lock);
-	pmrels->n_attached = 1;
-	pmrels->refcnt = 0;
-	pmrels->m_kmrels = 0UL;
-	pmrels->ev_loaded = NULL;
-	pmrels->m_ojmaps = 0UL;
-	pmrels->h_ojmaps = (cl_bool *)(ojmap_length > 0 ? pos : NULL);
-
-	memcpy(pmrels->kern.pg_crc32_table,
-		   pg_crc32_table,
-		   sizeof(cl_uint) * 256);
-	pmrels->kern.nrels = gjs->num_rels;
-	pmrels->kern.ojmap_length = 0;
-	memset(pmrels->kern.chunks,
-		   0,
-		   offsetof(pgstrom_multirels, kern.chunks[gjs->num_rels]) -
-		   offsetof(pgstrom_multirels, kern.chunks[0]));
-
-	for (i=0; i < gjs->num_rels; i++)
-	{
-		innerState			   *istate = &gjs->inners[i];
-		pgstrom_data_store	   *pds = list_nth(istate->pds_list,
-											   istate->pds_index - 1);
-
-		pmrels->inner_chunks[i] = PDS_retain(pds);
-		pmrels->kern.chunks[i].chunk_offset = pmrels->usage_length;
-		pmrels->usage_length += STROMALIGN(pds->kds.length);
-
-		if (!istate->hash_outer_keys)
-			pmrels->kern.chunks[i].is_nestloop = true;
-
-		if (istate->join_type == JOIN_RIGHT ||
-			istate->join_type == JOIN_FULL)
-		{
-			pmrels->kern.chunks[i].right_outer = true;
-			pmrels->kern.chunks[i].ojmap_offset = pmrels->kern.ojmap_length;
-			pmrels->kern.ojmap_length += STROMALIGN(pds->kds.nitems);
-			pmrels->needs_outer_join = true;
-		}
-		if (istate->join_type == JOIN_LEFT ||
-			istate->join_type == JOIN_FULL)
-			pmrels->kern.chunks[i].left_outer = true;
-	}
-	Assert(pmrels->kern.ojmap_length == ojmap_length);
-	return pmrels;
+	return pds_heap;
 }
 
 /*
@@ -6381,81 +5980,47 @@ gpujoin_create_multirels(GpuJoinState *gjs)
  * splitted into multiple portions.
  */
 static bool
-gpujoin_inner_preload(GpuJoinState *gjs)
+__gpujoin_inner_preload(GpuJoinState *gjs)
 {
-	innerState	  **istate_buf;
-	cl_int			istate_nums = gjs->num_rels;
-	Size			total_limit;
-	Size			total_usage;
-	bool			kmrels_size_fixed = false;
-	int				i;
+	pgstrom_multirels *pmrels = gjs->inner_pmrels;
+	int			i, num_rels = gjs->num_rels;
+	Size		inner_usage = pmrels->total_length;
+	Size		ojmap_usage = 0;
+
+	Assert(!IsParallelWorker());
 
 	/*
-	 * Half of the max allocatable GPU memory (and minus some margin) is
-	 * the current hard limit of the inner relations buffer.
+	 * Load inner relations
 	 */
-	total_limit = Min(gpuMemMaxAllocSize() / 2,
-					  dmaBufferMaxAllocSize()) - BLCKSZ * gjs->num_rels;
-	total_usage = STROMALIGN(offsetof(kern_multirels,
-									  chunks[gjs->num_rels]));
-	istate_buf = palloc0(sizeof(innerState *) * gjs->num_rels);
-	for (i=0; i < istate_nums; i++)
-		istate_buf[i] = &gjs->inners[i];
-
-	/* load tuples from the inner relations with round-robin policy */
-	while (istate_nums > 0)
+	for (i=0; i < num_rels; i++)
 	{
-		for (i=0; i < istate_nums; i++)
-		{
-			innerState *istate = istate_buf[i];
+		innerState *istate = &gjs->inners[i];
 
-			if (!(istate->hash_inner_keys != NIL
-				  ? gpujoin_inner_hash_preload(gjs, istate, &total_usage)
-				  : gpujoin_inner_heap_preload(gjs, istate, &total_usage)))
-			{
-				memmove(istate_buf + i,
-						istate_buf + i + 1,
-						sizeof(innerState *) * (istate_nums - (i+1)));
-				istate_nums--;
-				i--;
-			}
+		if (!istate->pds_in)
+			istate->pds_in = (istate->hash_inner_keys != NIL
+							  ? gpujoin_inner_hash_preload(gjs, istate)
+							  : gpujoin_inner_heap_preload(gjs, istate));
+		pmrels->kern.chunks[i].chunk_offset = inner_usage;
+		inner_usage += STROMALIGN(istate->pds_in->kds.length);
+
+		if (!istate->hash_outer_keys)
+			pmrels->kern.chunks[i].is_nestloop = true;
+
+		if (istate->join_type == JOIN_RIGHT ||
+			istate->join_type == JOIN_FULL)
+		{
+			pmrels->kern.chunks[i].right_outer = true;
+			pmrels->kern.chunks[i].ojmap_offset = ojmap_usage;
+			ojmap_usage += STROMALIGN(istate->pds_in->kds.nitems);
 		}
 
-		if (!kmrels_size_fixed && total_usage >= total_limit)
+		if (istate->join_type == JOIN_LEFT ||
+			istate->join_type == JOIN_FULL)
 		{
-			/*
-			 * NOTE: current usage becomes limitation, so next call of
-			 * gpujoin_inner_XXXX_preload will make its second chunk.
-			 */
-			for (i=0; i < gjs->num_rels; i++)
-			{
-				innerState	   *istate = istate_buf[i];
-				TupleTableSlot *scan_slot = istate->state->ps_ResultTupleSlot;
-				TupleDesc	 	scan_desc = scan_slot->tts_tupleDescriptor;
-
-				gjs->inners[i].pds_limit =
-					(istate->hash_inner_keys != NIL
-					 ? KDS_CALCULATE_HASH_LENGTH(scan_desc->natts,
-												 istate->ntuples,
-												 istate->consumed)
-					 : KDS_CALCULATE_ROW_LENGTH(scan_desc->natts,
-												istate->ntuples,
-												istate->consumed));
-			}
-			kmrels_size_fixed = true;
+			pmrels->kern.chunks[i].left_outer = true;
 		}
 	}
-
-	/*
-	 * XXX - It is ideal case; all the inner chunk can be loaded to
-	 * a single multi-relations buffer.
-	 */
-	if (!kmrels_size_fixed)
-	{
-		for (i=0; i < gjs->num_rels; i++)
-			gjs->inners[i].pds_limit = gjs->inners[i].consumed;
-	}
-	pfree(istate_buf);
+	pmrels->total_length = inner_usage;
 
 	/*
 	 * NOTE: Special optimization case. In case when any chunk has no items,
@@ -6463,413 +6028,399 @@ gpujoin_inner_preload(GpuJoinState *gjs)
 	 * produced in this GpuJoin. We can omit outer relation load that shall
 	 * be eventually dropped.
 	 */
-	for (i=gjs->num_rels; i > 0; i--)
+	for (i=num_rels; i > 0; i--)
 	{
 		innerState	   *istate = &gjs->inners[i-1];
 
 		/* outer join can produce something from empty */
 		if (istate->join_type != JOIN_INNER)
 			break;
-
-		if (list_length(istate->pds_list) == 1)
-		{
-			pgstrom_data_store *pds_in = linitial(istate->pds_list);
-
-			if (pds_in->kds.nitems == 0)
-				return false;
-		}
+		if (istate->pds_in->kds.nitems == 0)
+			return false;
 	}
 
-	/* How much chunks actually needed? */
-	for (i=0; i < gjs->num_rels; i++)
+	/* allocation of outer-join map if any */
+	if (ojmap_usage > 0)
 	{
-		int		nbatches_exec = list_length(gjs->inners[i].pds_list);
-
-		Assert(nbatches_exec > 0);
-		gjs->inners[i].nbatches_exec = nbatches_exec;
+		pmrels->kern.ojmap_length = ojmap_usage;
+		pmrels->h_ojmaps = dmaBufferAlloc(gjs->gts.gcontext,
+										  (numDevAttrs + 1) * ojmap_usage);
+		if (!pmrels->h_ojmaps)
+			elog(ERROR, "out of dma buffer");
 	}
+	/* PDS gets referenced by pgstrom_multirels also */
+	for (i=0; i < num_rels; i++)
+		pmrels->inner_chunks[i] = PDS_retain(gjs->inners[i].pds_in);
+
 	return true;
 }
 
-/*
- * gpujoin_inner_getnext
- *
- * It constructs the next inner buffer based on current index of inner
- * relations.
- */
-static pgstrom_multirels *
-gpujoin_inner_getnext(GpuJoinState *gjs)
+static bool
+gpujoin_inner_preload(GpuJoinState *gjs)
 {
-	int		i, j;
+	pgstrom_multirels *pmrels = gjs->inner_pmrels;
+	uint32		preload_done;
 
-	if (!gjs->inner_preloaded)
+	preload_done = pg_atomic_read_u32(&pmrels->preload_done);
+	if (preload_done == 0)
 	{
-		if (!gpujoin_inner_preload(gjs))
-			return NULL;	/* no join result is expected */
-		gjs->inner_preloaded = true;
-		/* setup initial inner index position */
-		for (i=0; i < gjs->num_rels; i++)
-			gjs->inners[i].pds_index = 1;
-	}
-	else
-	{
-		/*
-		 * Make advance the index of inner chunks
-		 */
-		for (i=gjs->num_rels; i > 0; i--)
+		if (!IsParallelWorker())
 		{
-			innerState	   *istate = &gjs->inners[i-1];
+			/* master process is responsible for inner preloading */
+			if (__gpujoin_inner_preload(gjs))
+				preload_done = 1;	/* valid inner buffer was loaded */
+			else
+				preload_done = 2;	/* no need to run GpuJoin actually */
+			pg_atomic_write_u32(&pmrels->preload_done, preload_done);
 
-			if (istate->pds_index < list_length(istate->pds_list))
+			/* wake up parallel workers, if any */
+			if (gjs->gts.pcxt)
 			{
-				istate->pds_index++;
-				for (j=i; j < gjs->num_rels; j++)
-					gjs->inners[j].pds_index = 1;
-				break;
+				ParallelContext *pcxt = gjs->gts.pcxt;
+				pid_t		pid;
+				int			i;
+
+				for (i=0; i < pcxt->nworkers_launched; i++)
+				{
+					if (GetBackgroundWorkerPid(pcxt->worker[i].bgwhandle,
+											   &pid) == BGWH_STARTED)
+						ProcSendSignal(pid);
+				}
 			}
 		}
-		if (i == 0)
-			return NULL;	/* end of inner chunks */
-	}
+		else
+		{
+			/* wait for the completion of inner preload by master */
+			for (;;)
+			{
+				CHECK_FOR_INTERRUPTS();
 
-	/*
-	 * OK, makes next pgstrom_multirels buffer
-	 */
-	return gpujoin_create_multirels(gjs);
+				preload_done = pg_atomic_read_u32(&pmrels->preload_done);
+				if (preload_done != 0)
+					break;
+
+				WaitLatch(&MyProc->procLatch, WL_LATCH_SET, -1);
+				ResetLatch(&MyProc->procLatch);
+			}
+		}
+	}
+	Assert(preload_done > 0);
+	return (preload_done == 1 ? true : false);
 }
 
 /*
- * multirels_attach_buffer
+ * multirels_create_buffer
  *
- * It attache multirels buffer on a particular gpujoin task.
+ * It construct an empty inner multi-relations buffer. It can be shared with
+ * multiple backends, and referenced by CPU/GPU.
  */
 static pgstrom_multirels *
-multirels_attach_buffer(pgstrom_multirels *pmrels)
+multirels_create_buffer(GpuJoinState *gjs, int num_pg_workers)
 {
-	SpinLockAcquire(&pmrels->lock);
-	/* attach this pmrels */
-	Assert(pmrels->n_attached > 0);
-	pmrels->n_attached++;
-	SpinLockRelease(&pmrels->lock);
+	GpuContext	   *gcontext = gjs->gts.gcontext;
+	pgstrom_multirels *pmrels;
+	Size			head_length;
+	Size			required;
+	char		   *pos;
+	pthread_mutexattr_t mattr;
+
+	/* calculate total length and allocate */
+	head_length = STROMALIGN(offsetof(pgstrom_multirels,
+									  kern.chunks[gjs->num_rels]));
+	required = head_length
+		+ STROMALIGN(sizeof(pgstrom_data_store *) * gjs->num_rels)
+		+ STROMALIGN(sizeof(cl_int) * (numDevAttrs + 1))/* nr_tasks */
+		+ STROMALIGN(sizeof(cl_bool) * num_pg_workers)	/* is_attached */
+		+ STROMALIGN(sizeof(CUdeviceptr) * numDevAttrs)	/* m_kmrels */
+		+ STROMALIGN(sizeof(CUdeviceptr) * numDevAttrs);/* m_ojmaps */
+
+	pmrels = dmaBufferAlloc(gcontext, required);
+	memset(pmrels, 0, required);
+	pos = (char *)pmrels + head_length;
+
+	pg_atomic_init_u32(&pmrels->preload_done, 0);
+	pmrels->head_length = head_length;
+	pmrels->total_length = head_length;
+	pmrels->inner_chunks = (pgstrom_data_store **) pos;
+	pos += STROMALIGN(sizeof(pgstrom_data_store *) * gjs->num_rels);
+
+	if ((errno = pthread_mutexattr_init(&mattr)) < 0)
+		elog(ERROR, "failed on pthread_mutexattr_init: %m");
+	if ((errno = pthread_mutexattr_setpshared(&mattr,
+											  PTHREAD_PROCESS_SHARED)) < 0)
+		elog(ERROR, "failed on pthread_mutexattr_setpshared: %m");
+	if ((errno = pthread_mutex_init(&pmrels->mutex, &mattr)) < 0)
+		elog(ERROR, "failed on pthread_mutex_init: %m");
+
+	pmrels->nr_tasks = (cl_int *) pos;
+	pos += STROMALIGN(sizeof(int) * (numDevAttrs + 1));
+	pmrels->is_attached = (cl_bool *) pos;
+	pos += STROMALIGN(sizeof(cl_bool) * num_pg_workers);
+	pmrels->m_kmrels = (CUdeviceptr *) pos;
+	pos += STROMALIGN(sizeof(CUdeviceptr) * numDevAttrs);
+	pmrels->m_ojmaps = (CUdeviceptr *) pos;
+	pos += STROMALIGN(sizeof(CUdeviceptr) * numDevAttrs);
+	pmrels->h_ojmaps = NULL;	/* to be set on preload */
+
+	/* kern_multirels */
+	memcpy(pmrels->kern.pg_crc32_table,
+		   pg_crc32_table,
+		   sizeof(cl_uint) * 256);
+	pmrels->kern.nrels = gjs->num_rels;
+	pmrels->kern.ojmap_length = 0;
 
 	return pmrels;
 }
 
 /*
  * multirels_get_buffer
- *
- *
  */
-static inline bool
-__multirels_get_buffer(pgstrom_gpujoin *pgjoin,
-					   pgstrom_multirels *pmrels)
+static pgstrom_multirels *
+multirels_get_buffer(GpuContext *gcontext, pgstrom_multirels *pmrels)
 {
-	GpuContext	   *gcontext = pgjoin->task.gcontext;
-	CUdeviceptr		m_kmrels = 0UL;
-	CUdeviceptr		m_ojmaps = 0UL;
-	CUevent			ev_loaded;
-	Size			length;
-	Size			offset;
-	Size			total_length = 0;
-	int				i;
-	CUresult		rc;
+	int		dindex = gcontext->gpuserv_id;
 
-	/* buffer allocation for the inner multi-relations */
-	rc = gpuMemAlloc(gcontext, &m_kmrels, pmrels->usage_length);
-	if (rc == CUDA_ERROR_OUT_OF_MEMORY)
-		return false;
-	else if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on gpuMemAlloc: %s", errorText(rc));
+	if ((errno = pthread_mutex_lock(&pmrels->mutex)) < 0)
+		wfatal("failed on pthread_mutex_lock: %m");
+	Assert(pmrels->nr_tasks[dindex] >= 0);
+	pmrels->nr_tasks[dindex]++;
+	if ((errno = pthread_mutex_unlock(&pmrels->mutex)) < 0)
+		wfatal("failed on pthread_mutex_unlock: %m");
+	return pmrels;
+}
 
-	/* buffer allocation for the OUTER JOIN maps, if needed */
-	if (pmrels->kern.ojmap_length > 0 && !pmrels->m_ojmaps)
+/*
+ * multirels_put_buffer
+ */
+static void
+multirels_put_buffer(pgstrom_gpujoin *pgjoin_old)
+{
+	pgstrom_multirels *pmrels = pgjoin_old->pmrels;
+	bool	launch_outer_join = false;
+	int		i, dindex;
+
+	dindex = (gpuserv_cuda_dindex < 0 ? numDevAttrs : gpuserv_cuda_dindex);
+	Assert(dindex >= 0 && dindex <= numDevAttrs);
+	if ((errno = pthread_mutex_lock(&pmrels->mutex)) < 0)
+		wfatal("failed on pthread_mutex_lock: %m");
+	Assert(pmrels->nr_tasks[dindex] > 0);
+	if (--pmrels->nr_tasks[dindex] == 0 && pmrels->outer_scan_done)
 	{
-		length = 2 * sizeof(cl_bool) * STROMALIGN(pmrels->kern.ojmap_length);
-		rc = gpuMemAlloc(gcontext, &m_ojmaps, length);
-		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
+		if (pmrels->h_ojmaps != NULL && !pmrels->outer_join_done)
 		{
-			gpuMemFree(gcontext, m_kmrels);
-			return false;
+			for (i=0; i <= numDevAttrs; i++)
+			{
+				if (pmrels->nr_tasks[i] > 0)
+					goto no_outer_join;
+			}
+			launch_outer_join = true;
+			pmrels->outer_join_done = true;
 		}
-		else if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on gpuMemAlloc: %s", errorText(rc));
+	no_outer_join:
+		/*
+		 * In case when GpuJoin task is correctly processed on GPU server,
+		 * and it was the last task on the current GPU device, OUTER JOIN
+		 * map must be written back for colocation, if needed.
+		 * If only single GPU device is installed, and no CPU fallback has
+		 * not happen yet, we can omit this step.
+		 */
+		if (pmrels->h_ojmaps && (numDevAttrs > 1 || pmrels->h_ojmaps != NULL))
+		{
+			CUresult	rc;
+			CUdeviceptr	m_ojmaps = pmrels->m_ojmaps[dindex];
+			cl_bool	   *h_ojmaps = (pmrels->h_ojmaps +
+									pmrels->kern.ojmap_length * dindex);
 
-		/* Zero clear of the LEFT OUTER map */
-		rc = cuMemsetD32(m_ojmaps, 0, length / sizeof(int));
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuMemsetD32: %s", errorText(rc));
+			rc = cuMemcpyDtoH(h_ojmaps,
+							  m_ojmaps,
+							  pmrels->kern.ojmap_length);
+			if (rc != CUDA_SUCCESS)
+			{
+				if ((errno = pthread_mutex_unlock(&pmrels->mutex)) < 0)
+					wfatal("failed on pthread_mutex_unlock: %m");
+				werror("failed on cuMemcpyDtoH: %s", errorText(rc));
+			}
+		}
 	}
-	/* Synchronization Event for other concurrent tasks */
-	rc = cuEventCreate(&ev_loaded, CU_EVENT_DEFAULT);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
+	if ((errno = pthread_mutex_unlock(&pmrels->mutex)) < 0)
+		wfatal("failed on pthread_mutex_unlock: %m");
 
-	/* DMA send to the kern_multirels buffer */
-	length = offsetof(kern_multirels, chunks[pmrels->kern.nrels]);
-	rc = cuMemcpyHtoD(m_kmrels, &pmrels->kern, length);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuMemcpyHtoD: %s", errorText(rc));
-	total_length += length;
-
-	for (i=0; i < pmrels->kern.nrels; i++)
+	/*
+	 * Clone GpuJoin task, then launch OUTER JOIN
+	 */
+	if (launch_outer_join)
 	{
-		pgstrom_data_store *pds = pmrels->inner_chunks[i];
-
-		offset = pmrels->kern.chunks[i].chunk_offset;
-		rc = cuMemcpyHtoD(m_kmrels + offset, &pds->kds, pds->kds.length);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-		total_length += pds->kds.length;
+		pgstrom_gpujoin *pgjoin_new = gpujoin_clone_task(pgjoin_old);
+		GpuContext		*gcontext = (IsGpuServerProcess()
+									 ? pgjoin_old->task.gcontext
+									 : pgjoin_old->task.gts->gcontext);
+		pgjoin_new->pmrels = multirels_get_buffer(gcontext,
+												  pgjoin_old->pmrels);
+		if (IsGpuServerProcess())
+			gpuservPushGpuTask(gcontext, &pgjoin_new->task);
+		else
+			gpuservSendGpuTask(gcontext, &pgjoin_new->task);
 	}
-	/* Save the event object and device memory */
-	pmrels->ev_loaded = ev_loaded;
-	pmrels->m_kmrels = m_kmrels;
-	pmrels->m_ojmaps = m_ojmaps;
-	pgjoin->m_kmrels = m_kmrels;
-	pgjoin->m_ojmaps = m_ojmaps;
+	pgjoin_old->pmrels = NULL;
+}
 
+/*
+ * multirels_load_buffer - load inner heap/hash buffer to device
+ */
+static bool
+multirels_load_buffer(GpuContext *gcontext, pgstrom_multirels *pmrels)
+{
+	int		pw_number = gcontext->shgcon->ParallelWorkerNumber;
+	int		pg_worker = (pw_number < 0 ? 0 : pw_number + 1);
+	int		dindex = gcontext->gpuserv_id;
+
+	Assert(dindex == gpuserv_cuda_dindex);
+	if ((errno = pthread_mutex_lock(&pmrels->mutex)) < 0)
+		wfatal("failed on pthread_mutex_lock: %m");
+	if (!pmrels->is_attached[pg_worker])
+	{
+		CUdeviceptr	m_kmrels = 0UL;
+		CUdeviceptr	m_ojmaps = 0UL;
+		CUresult	rc;
+		int			i;
+		Size		offset;
+		Size		length;
+
+		/* no need to attach device memory twice */
+		pmrels->is_attached[pg_worker] = true;
+
+		/*
+		 * Other concurrent session which shares same GPU might already
+		 * set up device memory. Just retain them.
+		 */
+		if (pmrels->m_kmrels[dindex] != 0UL)
+		{
+			rc = gpuMemRetain(gcontext, pmrels->m_kmrels[dindex]);
+			if (rc != CUDA_SUCCESS)
+			{
+				if ((errno = pthread_mutex_unlock(&pmrels->mutex)) < 0)
+					wfatal("failed on pthread_mutex_unlock: %m");
+				werror("failed on gpuMemRetain: %s", errorText(rc));
+			}
+			goto out_unlock;
+		}
+
+		/* buffer allocation */
+		length = pmrels->total_length + pmrels->kern.ojmap_length;
+		rc = gpuMemAlloc(gcontext, &m_kmrels, length);
+		if (rc != CUDA_SUCCESS)
+		{
+			if ((errno = pthread_mutex_unlock(&pmrels->mutex)) < 0)
+				wfatal("failed on pthread_mutex_unlock: %m");
+			if (rc == CUDA_ERROR_OUT_OF_MEMORY)
+				return false;
+			werror("failed on gpuMemAlloc: %s", errorText(rc));
+		}
+		if (pmrels->kern.ojmap_length > 0)
+			m_ojmaps = m_kmrels + pmrels->kern.ojmap_length;
+
+		/* DMA Send: kernel inner hash/heap buffer */
+		rc = cuMemcpyHtoD(m_kmrels, &pmrels->kern, pmrels->head_length);
+		if (rc != CUDA_SUCCESS)
+		{
+			if ((errno = pthread_mutex_unlock(&pmrels->mutex)) < 0)
+				wfatal("failed on pthread_mutex_unlock: %m");
+			werror("failed on cuMemcpyHtoD: %s", errorText(rc));
+		}
+
+		for (i=0; i < pmrels->kern.nrels; i++)
+		{
+			pgstrom_data_store *pds = pmrels->inner_chunks[i];
+
+			offset = pmrels->kern.chunks[i].chunk_offset;
+			rc = cuMemcpyHtoD(m_kmrels + offset, &pds->kds,
+							  pds->kds.length);
+			if (rc != CUDA_SUCCESS)
+			{
+				if ((errno = pthread_mutex_unlock(&pmrels->mutex)) < 0)
+					wfatal("failed on pthread_mutex_unlock: %m");
+				werror("failed on cuMemcpyHtoD: %s", errorText(rc));
+			}
+		}
+
+		/* Zero clear outer-join map, if any */
+		if (m_ojmaps != 0UL)
+		{
+			rc = cuMemsetD32(m_ojmaps, 0, pmrels->kern.ojmap_length / 4);
+			if (rc != CUDA_SUCCESS)
+			{
+				if ((errno = pthread_mutex_unlock(&pmrels->mutex)) < 0)
+					wfatal("failed on pthread_mutex_unlock: %m");
+				werror("failed on cuMemcpyHtoD: %s", errorText(rc));
+			}
+		}
+		pmrels->m_kmrels[dindex]	= m_kmrels;
+		pmrels->m_ojmaps[dindex]	= m_ojmaps;
+	}
+out_unlock:
+	if ((errno = pthread_mutex_unlock(&pmrels->mutex)) < 0)
+		wfatal("failed on pthread_mutex_unlock: %m");
 	return true;
 }
 
-static bool
-multirels_get_buffer(pgstrom_gpujoin *pgjoin)
-{
-	//FIXME: Use managed memory for simplification
-	pgstrom_multirels *pmrels = pgjoin->pmrels;
-	bool		status = true;
-
-	PG_TRY();
-	{
-		SpinLockAcquire(&pmrels->lock);
-		Assert(pmrels->n_attached > 0);
-		Assert(pmrels->refcnt >= 0);
-		if (pmrels->refcnt++ == 0)
-		{
-			if (__multirels_get_buffer(pgjoin, pmrels))
-				pgjoin->is_inner_loader = true;
-			else
-			{
-				pmrels->refcnt--;
-				status = false;
-			}
-			SpinLockRelease(&pmrels->lock);
-		}
-		else
-		{
-			CUevent		ev_loaded = pmrels->ev_loaded;
-			CUresult	rc;
-
-			SpinLockRelease(&pmrels->lock);
-
-			Assert(ev_loaded != NULL);
-			rc = cuEventSynchronize(ev_loaded);
-			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on cuEventSynchronize: %s", errorText(rc));
-			/* this task is not inner loader */
-			pgjoin->m_kmrels = pmrels->m_kmrels;
-			pgjoin->m_ojmaps = pmrels->m_ojmaps;
-			pgjoin->is_inner_loader = false;
-		}
-	}
-	PG_CATCH();
-	{
-		SpinLockRelease(&pmrels->lock);
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-
-	return status;
-}
-
+/*
+ * multirels_finalize_buffer
+ */
 static void
-multirels_put_buffer(pgstrom_gpujoin *pgjoin)
+multirels_finalize_buffer(GpuJoinState *gjs, bool is_rescan)
 {
-	pgstrom_multirels *pmrels = pgjoin->pmrels;
+	GpuContext *gcontext = gjs->gts.gcontext;
+	pgstrom_multirels *pmrels = gjs->inner_pmrels;
+	CUdeviceptr	deviceptr = 0UL;
 	CUresult	rc;
+	int			i, pg_worker;
 
-	SpinLockAcquire(&pmrels->lock);
-	Assert(pmrels->n_attached > 0);
-	Assert(pmrels->refcnt > 0);
-	if (--pmrels->refcnt == 0)
+	pg_worker = (ParallelWorkerNumber < 0 ? 0 : ParallelWorkerNumber + 1);
+	if ((errno = pthread_mutex_lock(&pmrels->mutex)) < 0)
+		wfatal("failed on pthread_mutex_lock: %m");
+	if (pmrels->is_attached[pg_worker])
+		deviceptr = pmrels->m_kmrels[gcontext->gpuserv_id];
+	if ((errno = pthread_mutex_unlock(&pmrels->mutex)) < 0)
+		wfatal("failed on pthread_mutex_unlock: %m");
+
+	if (deviceptr != 0UL)
 	{
-		/*
-		 * OK, it looks no concurrent tasks didn't reference the inner-
-		 * relations buffer any more, so release the device memory and
-		 * set NULL on the pointer.
-		 */
-		Assert(pmrels->m_kmrels != 0UL);
-		rc = gpuMemFree(pgjoin->task.gcontext, pmrels->m_kmrels);
+		rc = gpuMemFree(gcontext, deviceptr);
 		if (rc != CUDA_SUCCESS)
 			elog(WARNING, "failed on gpuMemFree: %s", errorText(rc));
-		pmrels->m_kmrels = 0UL;
-
-		/*
-		 * TODO: We have to care about outer-join map, if no concurrent
-		 * task does not exist.
-		 * colocation is not a lightweight task and oj-map is small chunk,
-		 * so it is an option to keep it on the device side.
-		 * In this case, who should own the region?
-		 */
-
-		/*
-		 * Also destroy the event object
-		 */
-		rc = cuEventDestroy(pmrels->ev_loaded);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuEventDestroy: %s", errorText(rc));
-		pmrels->ev_loaded = NULL;
-	}
-	pgjoin->m_kmrels = 0UL;
-	pgjoin->m_ojmaps = 0UL;
-	SpinLockRelease(&pmrels->lock);
-}
-
-static void
-colocate_outer_join_maps_to_host(pgstrom_multirels *pmrels)
-{
-//	GpuContext *gcontext = pmrels->gjs->gts.gcontext;
-	Size		ojmap_length = pmrels->kern.ojmap_length;
-	cl_bool	   *host_ojmaps = pmrels->h_ojmaps;
-	cl_bool	   *recv_ojmaps = pmrels->h_ojmaps + ojmap_length;
-	cl_int		i, n;
-	CUresult	rc;
-
-	Assert(ojmap_length % sizeof(cl_ulong) == 0);
-	if (ojmap_length > 0)
-	{
-		rc = cuMemcpyDtoH(recv_ojmaps,
-						  pmrels->m_ojmaps,
-						  sizeof(cl_bool) * ojmap_length);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuMemcpyDtoH: %s", errorText(rc));
-
-		n = ojmap_length / sizeof(cl_ulong);
-		for (i=0; i < n; i++)
-		{
-			cl_ulong   *dest = (cl_ulong *)host_ojmaps + i;
-			cl_ulong   *recv = (cl_ulong *)recv_ojmaps + i;
-
-			*dest |= *recv;
-		}
-	}
-}
-
-static void
-colocate_outer_join_maps_to_device(pgstrom_gpujoin *pgjoin,
-								   CUmodule cuda_module,
-								   CUstream cuda_stream)
-{
-	pgstrom_multirels *pmrels = pgjoin->pmrels;
-	cl_uint			ojmap_length = pmrels->kern.ojmap_length;
-	CUdeviceptr		dst_ojmaps;
-	CUfunction		kern_colocate;
-	void		   *kern_args[2];
-	size_t			grid_size;
-	size_t			block_size;
-	CUresult		rc;
-
-	Assert(pmrels->m_ojmaps != 0UL);
-
-	/* Lookup GPU kernel function */
-	rc = cuModuleGetFunction(&kern_colocate, cuda_module,
-							 "gpujoin_colocate_outer_join_map");
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
-
-	/* calculation of the optimal number of threads */
-	optimal_workgroup_size(&grid_size,
-						   &block_size,
-						   kern_colocate,
-						   gpuserv_cuda_device,
-						   ojmap_length / sizeof(cl_uint),
-						   0, 0);	/* no shared memory usage */
-
-	/* destination address on the device side */
-	dst_ojmaps = pmrels->m_ojmaps + sizeof(cl_bool) * ojmap_length;
-
-	/* host-to-device colocation */
-	rc = cuMemcpyHtoDAsync(dst_ojmaps,
-						   pmrels->h_ojmaps,
-						   sizeof(cl_bool) * ojmap_length,
-						   cuda_stream);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuMemcpyHtoDAsync: %s", errorText(rc));
-
-	/*
-	 * KERNEL_FUNCTION(void)
-	 * gpujoin_colocate_outer_join_map(kern_multirels *kmrels,
-	 *                                 cl_bool *outer_join_map)
-	 */
-	kern_args[0] = &pgjoin->m_kmrels;
-	kern_args[1] = &pgjoin->m_ojmaps;
-
-	rc = cuLaunchKernel(kern_colocate,
-						grid_size, 1, 1,
-						block_size, 1, 1,
-						0,	/* no shmem usage */
-						cuda_stream,
-						kern_args,
-						NULL);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuLaunchKernel: %s", errorText(rc));
-}
-
-static void
-multirels_detach_buffer(GpuJoinState *gjs,
-						pgstrom_multirels *pmrels,
-						bool may_kick_outer_join)
-{
-	pgstrom_gpujoin *pgjoin_new;
-	int		i;
-
-	Assert(!IsGpuServerProcess());
-retry:
-	SpinLockAcquire(&pmrels->lock);
-	Assert(pmrels->n_attached > 0);
-	/*
-	 * NOTE: Invocation of multirels_detach_buffer with n_attached==1 means
-	 * release of pgstrom_multirels buffer. If GpuJoin contains RIGHT or
-	 * FULL OUTER JOIN, we need to kick OUTER JOIN task prior on the last.
-	 * pgstrom_gpujoin task with pds_src==NULL means OUTER JOIN launch.
-	 */
-	if (may_kick_outer_join &&
-		pmrels->n_attached == 1 &&
-		pmrels->needs_outer_join)
-	{
-		/* no need to kick OUTER JOIN task twice */
-		pmrels->needs_outer_join = false;
-		SpinLockRelease(&pmrels->lock);
-
-		/* construct a GpuJoin task for OUTER JOIN, then send a request */
-
-		//HOGE: do we need to give GJS here?
-		pgjoin_new = (pgstrom_gpujoin *)
-			gpujoin_create_task(gjs, pmrels, NULL, -1, NULL);
-		gpuservSendGpuTask(gjs->gts.gcontext, &pgjoin_new->task);
-
-		goto retry;
 	}
 
-	/*
-	 * Last GpuJoin task dettached @pmrels, so release relevant resources
-	 */
-	if (--pmrels->n_attached > 0)
-		SpinLockRelease(&pmrels->lock);
-	else
+	if (!IsParallelWorker())
 	{
 		/*
-		 * Nobody should reference the device memory no longer.
+		 * At this point, all the backend workers (if any) already run
+		 * ExecEnd method. So, we can reset/releae buffer safely.
 		 */
-		Assert(pmrels->refcnt == 0);
-		Assert(pmrels->m_kmrels == 0UL);
-		Assert(pmrels->ev_loaded == NULL);
-		Assert(pmrels->m_ojmaps == 0UL);
-
 		for (i=0; i < pmrels->kern.nrels; i++)
-			PDS_release(pmrels->inner_chunks[i]);
-		SpinLockRelease(&pmrels->lock);
+		{
+			if (pmrels->inner_chunks[i])
+				PDS_release(pmrels->inner_chunks[i]);
+			pmrels->inner_chunks[i] = NULL;
+		}
 
-		dmaBufferFree(pmrels);
+		if (pmrels->h_ojmaps)
+			dmaBufferFree(pmrels->h_ojmaps);
+
+		if (!is_rescan)
+			dmaBufferFree(pmrels);
+		else
+		{
+			ParallelContext *pcxt = gjs->gts.pcxt;
+			int		num_pg_workers = (pcxt ? pcxt->nworkers + 1 : 1);
+
+			pg_atomic_init_u32(&pmrels->preload_done, 0);
+			pmrels->total_length = pmrels->head_length;
+			memset(pmrels->nr_tasks, 0, sizeof(int) * (numDevAttrs + 1));
+			memset(pmrels->is_attached, 0, sizeof(bool) * num_pg_workers);
+			memset(pmrels->m_kmrels, 0, sizeof(CUdeviceptr) * numDevAttrs);
+			memset(pmrels->m_ojmaps, 0, sizeof(CUdeviceptr) * numDevAttrs);
+			pmrels->h_ojmaps = NULL;
+		}
 	}
 }
 

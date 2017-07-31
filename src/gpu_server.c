@@ -72,14 +72,19 @@ typedef struct GpuServConn
 /*
  * GpuServCommand - Token of request for GPU server
  */
-#define GPUSERV_CMD_TASK		0x102
-#define GPUSERV_CMD_ERROR		0x103
+#define GPUSERV_CMD_TASK			0x102
+#define GPUSERV_CMD_ERROR			0x103
+#define GPUSERV_CMD_GPU_MEMFREE		0x110
+#define GPUSERV_CMD_IOMAP_MEMFREE	0x111
 
 typedef struct GpuServCommand
 {
 	cl_uint		command;	/* one of the GPUSERV_CMD_* */
 	cl_uint		length;		/* length of the command */
-	GpuTask	   *gtask;		/* reference to DMA buffer */
+	union {
+		GpuTask	   *gtask;	/* TASK or ERROR */
+		CUdeviceptr	devptr;	/* (GPU|IOMAP)_MEMFREE */
+	};
 	/* above fields are common to any message type */
 	struct {
 		cl_int	elevel;
@@ -545,7 +550,9 @@ gpuservSendCommand(GpuContext *gcontext, GpuServCommand *cmd)
 	ssize_t			retval;
 
 	Assert(cmd->command == GPUSERV_CMD_TASK ||
-		   cmd->command == GPUSERV_CMD_ERROR);
+		   cmd->command == GPUSERV_CMD_ERROR ||
+		   cmd->command == GPUSERV_CMD_GPU_MEMFREE ||
+		   cmd->command == GPUSERV_CMD_IOMAP_MEMFREE);
 
 	memset(&msg, 0, sizeof(struct msghdr));
 	memset(&iov, 0, sizeof(iov));
@@ -601,6 +608,34 @@ gpuservSendGpuTask(GpuContext *gcontext, GpuTask *gtask)
 	cmd.command = GPUSERV_CMD_TASK;
     cmd.length = offsetof(GpuServCommand, error);
 	cmd.gtask = gtask;
+	gpuservSendCommand(gcontext, &cmd);
+}
+
+/*
+ * gpuservSendGpuMemFree
+ */
+void
+gpuservSendGpuMemFree(GpuContext *gcontext, CUdeviceptr devptr)
+{
+	GpuServCommand	cmd;
+
+	cmd.command = GPUSERV_CMD_GPU_MEMFREE;
+	cmd.length = offsetof(GpuServCommand, error);
+	cmd.devptr = devptr;
+	gpuservSendCommand(gcontext, &cmd);
+}
+
+/*
+ * gpuservSendIOMapMemFree
+ */
+void
+gpuservSendIOMapMemFree(GpuContext *gcontext, CUdeviceptr devptr)
+{
+	GpuServCommand	cmd;
+
+	cmd.command = GPUSERV_CMD_IOMAP_MEMFREE;
+	cmd.length = offsetof(GpuServCommand, error);
+	cmd.devptr = devptr;
 	gpuservSendCommand(gcontext, &cmd);
 }
 
@@ -999,6 +1034,30 @@ gpuservRecvCommands(GpuContext *gcontext, bool *p_peer_sock_closed)
 						 TEXTDOMAIN))
 				errfinish(errcode(cmd->error.sqlerrcode),
 						  errmsg("%s", message));
+		}
+		else if (cmd->command == GPUSERV_CMD_GPU_MEMFREE)
+		{
+			CUresult	rc;
+
+			if (!IsGpuServerProcess())
+				wfatal("Bug? Only GPU server can handle GPU_MEMFREE");
+			rc = gpuMemFree(gcontext, cmd->devptr);
+			if (rc != CUDA_SUCCESS)
+				wnotice("failed on gpuMemFree with GPU_MEMFREE: %s",
+						errorText(rc));
+			num_received++;
+		}
+		else if (cmd->command == GPUSERV_CMD_IOMAP_MEMFREE)
+		{
+			CUresult	rc;
+
+			if (!IsGpuServerProcess())
+				wfatal("Bug? Only GPU server can handle IOMAP_MEMFREE");
+			rc = gpuMemFreeIOMap(gcontext, cmd->devptr);
+			if (rc != CUDA_SUCCESS)
+				wnotice("failed on gpuMemFreeIOMap with IOMAP_MEMFREE: %s",
+						errorText(rc));
+			num_received++;
 		}
 		else
 			wfatal("Bug? unknown GPUSERV_CMD_* tag: %d", cmd->command);

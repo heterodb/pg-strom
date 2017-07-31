@@ -233,10 +233,16 @@ gpuMemFreeIOMap(GpuContext *gcontext, CUdeviceptr devptr)
 	int					index;
 	int					shift;
 
+	/* If called on PostgreSQL backend, send a request to release */
+	if (!IsGpuServerProcess())
+	{
+		gpuservSendIOMapMemFree(gcontext, devptr);
+		return CUDA_SUCCESS;
+	}
+
 	if (gcontext)
 		untrackIOMapMem(gcontext, devptr);
 
-	Assert(IsGpuServerProcess());
 	if (!iomap_buffer_base)
 		return CUDA_ERROR_NOT_INITIALIZED;
 	/* ensure the i/o mapped buffer is already available */

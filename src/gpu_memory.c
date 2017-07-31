@@ -240,7 +240,6 @@ GpuMemSegmentFree(GpuMemSegment *gm_seg, CUdeviceptr deviceptr)
 		}
 	}
 	/* back to the free list again */
-	Assert(GPUMEMCHUNK_IS_ACTIVE(gm_chunk));
 	dlist_push_head(&gm_seg->free_chunks[gm_chunk->mclass],
 					&gm_chunk->chain);
 	gm_seg->num_active_chunks--;
@@ -445,7 +444,12 @@ gpuMemFree(GpuContext *gcontext, CUdeviceptr deviceptr)
 	char	   *extra;
 	CUresult	rc = CUDA_SUCCESS;
 
-	Assert(IsGpuServerProcess());
+	/* If called on PostgreSQL backend, send a request to release */
+	if (!IsGpuServerProcess())
+	{
+		gpuservSendGpuMemFree(gcontext, deviceptr);
+		return CUDA_SUCCESS;
+	}
 	
 	/*
 	 * Pulls either GpuMemSegment or GpuMemLargeChunk from resource tracker.
