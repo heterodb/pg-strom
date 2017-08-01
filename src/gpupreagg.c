@@ -228,7 +228,8 @@ static bool		gpupreagg_build_path_target(PlannerInfo *root,
 											PathTarget *target_partial,
 											PathTarget *target_device,
 											PathTarget *target_input,
-											Node **p_havingQual);
+											Node **p_havingQual,
+											bool *p_can_pullup_outerscan);
 static char	   *gpupreagg_codegen(codegen_context *context,
 								  PlannerInfo *root,
 								  CustomScan *cscan,
@@ -1123,7 +1124,8 @@ make_gpupreagg_path(PlannerInfo *root,
 					PathTarget *target_partial,
 					PathTarget *target_device,
 					Path *input_path,
-					double num_groups)
+					double num_groups,
+					bool can_pullup_outerscan)
 {
 	CustomPath	   *cpath = makeNode(CustomPath);
 	GpuPreAggInfo  *gpa_info = palloc0(sizeof(GpuPreAggInfo));
@@ -1136,7 +1138,8 @@ make_gpupreagg_path(PlannerInfo *root,
 		return NULL;
 
 	/* Try to pull up input_path if simple relation scan */
-	if (!pgstrom_pullup_outer_scan(input_path,
+	if (!can_pullup_outerscan ||
+		!pgstrom_pullup_outer_scan(input_path,
 								   &gpa_info->outer_scanrelid,
 								   &gpa_info->outer_quals,
 								   &parallel_aware))
@@ -1197,6 +1200,7 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 	double			num_groups;
 	bool			can_sort;
 	bool			can_hash;
+	bool			can_pullup_outerscan = true;
 	AggClauseCosts	agg_final_costs;
 
 	/* construction of the target-list for each level */
@@ -1206,7 +1210,8 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 									 target_partial,
 									 target_device,
 									 input_path->pathtarget,
-									 &havingQual))
+									 &havingQual,
+									 &can_pullup_outerscan))
 		return;
 
 	/* Get cost of aggregations */
@@ -1240,7 +1245,8 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 								target_partial,
 								target_device,
 								input_path,
-								num_groups);
+								num_groups,
+								can_pullup_outerscan);
 	if (!cpath)
 		return;
 
@@ -2103,7 +2109,8 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 							PathTarget *target_partial,	/* out */
 							PathTarget *target_device,	/* out */
 							PathTarget *target_input,	/* in */
-							Node **p_havingQual)		/* out */
+							Node **p_havingQual,		/* out */
+							bool *p_can_pullup_outerscan) /* out */
 {
 	gpupreagg_build_path_target_context con;
 	Query	   *parse = root->parse;
@@ -2123,14 +2130,31 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 	{
 		Expr   *expr = lfirst(lc);
 		Index	sortgroupref = get_pathtarget_sortgroupref(target_upper, i);
+		Node   *temp;
 	
 		if (sortgroupref && parse->groupClause &&
 			get_sortgroupref_clause_noerr(sortgroupref,
 										  parse->groupClause) != NULL)
 		{
-			Node   *temp = replace_expression_by_outerref((Node *)expr,
-														  target_input);
+			/*
+			 * NOTE: In case when grouping-key is an expression that is not
+			 * inline data type (right now, we expect NUMERIC expression),
+			 * outer-scan pullup should be prohibited, because we have no
+			 * varlena buffer to store the expression.
+			 * Once outer-scan node is separated, expression with varlena
+			 * or indirect data shall be built on the underlying node, thus,
+			 * GpuPreAgg can treat these variables as a simple var-reference.
+			 */
+			if (!IsA(expr, Var) &&
+				!IsA(expr, Param) &&
+				!IsA(expr, Const) &&
+				!get_typbyval(exprType((Node *) expr)))
+			{
+				*p_can_pullup_outerscan = false;
+			}
 
+			temp = replace_expression_by_outerref((Node *)expr,
+												  target_input);
 			if (!pgstrom_device_expression((Expr *)temp))
 			{
 				elog(DEBUG2, "Expression is not device executable: %s",
