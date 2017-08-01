@@ -54,6 +54,7 @@ static CustomPathMethods		gpupreagg_path_methods;
 static CustomScanMethods		gpupreagg_scan_methods;
 static CustomExecMethods		gpupreagg_exec_methods;
 static bool						enable_gpupreagg;
+static bool						enable_gpupreagg_with_numeric;
 
 typedef struct
 {
@@ -334,8 +335,8 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "avg",	1, {NUMERICOID},
-	  "s:favg",     NUMERICARRAYOID,
-	  "s:pavg", 2, {INT8OID, NUMERICOID},
+	  "s:favg_numeric", FLOAT8ARRAYOID,
+	  "s:pavg", 2, {INT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS, ALTFUNC_EXPR_PSUM}, DEVKERNEL_NEEDS_NUMERIC, 100
 	},
 #endif
@@ -378,8 +379,8 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "max",    1, {NUMERICOID},
-	  "c:max",      NUMERICOID,
-	  "varref", 1, {NUMERICOID},
+	  "s:fmax_numeric", FLOAT8OID,
+	  "varref", 1, {FLOAT8OID},
 	  {ALTFUNC_EXPR_PMAX}, DEVKERNEL_NEEDS_NUMERIC, INT_MAX
 	},
 #endif
@@ -437,8 +438,8 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "min",    1, {NUMERICOID},
-	  "c:min",      NUMERICOID,
-	  "varref", 1, {NUMERICOID},
+	  "s:fmin_numeric", FLOAT8OID,
+	  "varref", 1, {FLOAT8OID},
 	  {ALTFUNC_EXPR_PMIN}, DEVKERNEL_NEEDS_NUMERIC, INT_MAX
 	},
 #endif
@@ -496,8 +497,8 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	},
 #ifdef GPUPREAGG_SUPPORT_NUMERIC
 	{ "sum",    1, {NUMERICOID},
-	  "c:sum",      NUMERICOID,
-	  "varref", 1, {NUMERICOID},
+	  "s:fsum_numeric", FLOAT8OID,
+	  "varref", 1, {FLOAT8OID},
 	  {ALTFUNC_EXPR_PSUM}, DEVKERNEL_NEEDS_NUMERIC, 100
 	},
 #endif
@@ -507,6 +508,27 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	  {ALTFUNC_EXPR_PSUM}, DEVKERNEL_NEEDS_MISC, INT_MAX
 	},
 	/* STDDEV(X) = EX_STDDEV(NROWS(),PSUM(X),PSUM(X*X)) */
+	{ "stddev",      1, {INT2OID},
+	  "s:stddev_numeric", FLOAT8ARRAYOID,
+	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
+	  {ALTFUNC_EXPR_NROWS,
+	   ALTFUNC_EXPR_PSUM,
+	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
+	},
+	{ "stddev",      1, {INT4OID},
+	  "s:stddev_numeric", FLOAT8ARRAYOID,
+	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
+	  {ALTFUNC_EXPR_NROWS,
+	   ALTFUNC_EXPR_PSUM,
+	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
+	},
+	{ "stddev",      1, {INT8OID},
+	  "s:stddev_numeric", FLOAT8ARRAYOID,
+	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
+	  {ALTFUNC_EXPR_NROWS,
+	   ALTFUNC_EXPR_PSUM,
+	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
+	},
 	{ "stddev",      1, {FLOAT4OID},
 	  "s:stddev",        FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
@@ -516,6 +538,35 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	},
 	{ "stddev",      1, {FLOAT8OID},
 	  "s:stddev",        FLOAT8ARRAYOID,
+	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
+	  {ALTFUNC_EXPR_NROWS,
+	   ALTFUNC_EXPR_PSUM,
+	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
+	},
+	{ "stddev",      1, {NUMERICOID},
+	  "s:stddev_numeric", FLOAT8ARRAYOID,
+	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
+	  {ALTFUNC_EXPR_NROWS,
+	   ALTFUNC_EXPR_PSUM,
+	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
+	},
+	/* STDDEV_POP(X) = EX_STDDEV(NROWS(),PSUM(X),PSUM(X*X)) */
+	{ "stddev_pop",  1, {INT2OID},
+	  "s:stddev_numeric", FLOAT8ARRAYOID,
+	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
+	  {ALTFUNC_EXPR_NROWS,
+	   ALTFUNC_EXPR_PSUM,
+	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
+	},
+	{ "stddev_pop",  1, {INT4OID},
+	  "s:stddev_numeric", FLOAT8ARRAYOID,
+	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
+	  {ALTFUNC_EXPR_NROWS,
+	   ALTFUNC_EXPR_PSUM,
+	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
+	},
+	{ "stddev_pop",  1, {INT8OID},
+	  "s:stddev_numeric", FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
@@ -535,6 +586,35 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
 	},
+	{ "stddev_pop",  1, {NUMERICOID},
+	  "s:stddev_numeric", FLOAT8ARRAYOID,
+	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
+	  {ALTFUNC_EXPR_NROWS,
+	   ALTFUNC_EXPR_PSUM,
+	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
+	},
+	/* STDDEV_POP(X) = EX_STDDEV(NROWS(),PSUM(X),PSUM(X*X)) */
+	{ "stddev_samp", 1, {INT2OID},
+	  "s:stddev_numeric", FLOAT8ARRAYOID,
+	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
+	  {ALTFUNC_EXPR_NROWS,
+	   ALTFUNC_EXPR_PSUM,
+	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
+	},
+	{ "stddev_samp", 1, {INT4OID},
+	  "s:stddev_numeric", FLOAT8ARRAYOID,
+	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
+	  {ALTFUNC_EXPR_NROWS,
+	   ALTFUNC_EXPR_PSUM,
+	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
+	},
+	{ "stddev_samp", 1, {INT8OID},
+	  "s:stddev_numeric", FLOAT8ARRAYOID,
+	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
+	  {ALTFUNC_EXPR_NROWS,
+	   ALTFUNC_EXPR_PSUM,
+	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
+	},
 	{ "stddev_samp", 1, {FLOAT4OID},
 	  "s:stddev_samp",   FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
@@ -549,7 +629,35 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
 	},
+	{ "stddev_samp", 1, {NUMERICOID},
+	  "s:stddev_numeric", FLOAT8ARRAYOID,
+	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
+	  {ALTFUNC_EXPR_NROWS,
+	   ALTFUNC_EXPR_PSUM,
+	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
+	},
 	/* VARIANCE(X) = PGSTROM.VARIANCE(NROWS(), PSUM(X),PSUM(X^2)) */
+	{ "variance",    1, {INT2OID},
+	  "s:variance_numeric", FLOAT8ARRAYOID,
+	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
+	  {ALTFUNC_EXPR_NROWS,
+	   ALTFUNC_EXPR_PSUM,
+	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
+	},
+	{ "variance",    1, {INT4OID},
+	  "s:variance_numeric", FLOAT8ARRAYOID,
+	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
+	  {ALTFUNC_EXPR_NROWS,
+	   ALTFUNC_EXPR_PSUM,
+	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
+	},
+	{ "variance",    1, {INT8OID},
+	  "s:variance_numeric", FLOAT8ARRAYOID,
+	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
+	  {ALTFUNC_EXPR_NROWS,
+	   ALTFUNC_EXPR_PSUM,
+	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
+	},
 	{ "variance",    1, {FLOAT4OID},
 	  "s:variance",      FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
@@ -559,6 +667,35 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	},
 	{ "variance",    1, {FLOAT8OID},
 	  "s:variance",      FLOAT8ARRAYOID,
+	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
+	  {ALTFUNC_EXPR_NROWS,
+	   ALTFUNC_EXPR_PSUM,
+	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
+	},
+	{ "variance",    1, {NUMERICOID},
+	  "s:variance_numeric", FLOAT8ARRAYOID,
+	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
+	  {ALTFUNC_EXPR_NROWS,
+	   ALTFUNC_EXPR_PSUM,
+	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
+	},
+	/* VAR_POP(X) = PGSTROM.VAR_POP(NROWS(), PSUM(X),PSUM(X^2)) */
+	{ "var_pop",     1, {INT2OID},
+	  "s:var_pop_numeric", FLOAT8ARRAYOID,
+	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
+	  {ALTFUNC_EXPR_NROWS,
+	   ALTFUNC_EXPR_PSUM,
+	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
+	},
+	{ "var_pop",     1, {INT4OID},
+	  "s:var_pop_numeric", FLOAT8ARRAYOID,
+	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
+	  {ALTFUNC_EXPR_NROWS,
+	   ALTFUNC_EXPR_PSUM,
+	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
+	},
+	{ "var_pop",     1, {INT8OID},
+	  "s:var_pop_numeric", FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
@@ -578,6 +715,35 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	   ALTFUNC_EXPR_PSUM,
 	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
 	},
+	{ "var_pop",     1, {NUMERICOID},
+	  "s:var_pop_numeric", FLOAT8ARRAYOID,
+	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
+	  {ALTFUNC_EXPR_NROWS,
+	   ALTFUNC_EXPR_PSUM,
+	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
+	},
+	/* VAR_SAMP(X) = PGSTROM.VAR_SAMP(NROWS(), PSUM(X),PSUM(X^2)) */
+	{ "var_samp",    1, {INT2OID},
+	  "s:var_samp_numeric", FLOAT8ARRAYOID,
+	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
+	  {ALTFUNC_EXPR_NROWS,
+	   ALTFUNC_EXPR_PSUM,
+	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
+	},
+	{ "var_samp",    1, {INT4OID},
+	  "s:var_samp_numeric", FLOAT8ARRAYOID,
+	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
+	  {ALTFUNC_EXPR_NROWS,
+	   ALTFUNC_EXPR_PSUM,
+	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
+	},
+	{ "var_samp",    1, {INT8OID},
+	  "s:var_samp_numeric", FLOAT8ARRAYOID,
+	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
+	  {ALTFUNC_EXPR_NROWS,
+	   ALTFUNC_EXPR_PSUM,
+	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
+	},
 	{ "var_samp",    1, {FLOAT4OID},
 	  "s:var_samp",      FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
@@ -587,6 +753,13 @@ static aggfunc_catalog_t  aggfunc_catalog[] = {
 	},
 	{ "var_samp",    1, {FLOAT8OID},
 	  "s:var_samp",      FLOAT8ARRAYOID,
+	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
+	  {ALTFUNC_EXPR_NROWS,
+	   ALTFUNC_EXPR_PSUM,
+	   ALTFUNC_EXPR_PSUM_X2}, 0, SHRT_MAX
+	},
+	{ "var_samp",    1, {NUMERICOID},
+	  "s:var_samp_numeric", FLOAT8ARRAYOID,
 	  "s:pvariance", 3, {INT8OID, FLOAT8OID, FLOAT8OID},
 	  {ALTFUNC_EXPR_NROWS,
 	   ALTFUNC_EXPR_PSUM,
@@ -754,6 +927,13 @@ aggfunc_lookup_by_oid(Oid aggfnoid)
 				   proform->proargtypes.values,
 				   sizeof(Oid) * catalog->aggfn_nargs) == 0)
 		{
+			/*
+			 * Check status of NUMERIC type support
+			 */
+			if (!enable_gpupreagg_with_numeric &&
+				(catalog->extra_flags & DEVKERNEL_NEEDS_NUMERIC) != 0)
+				catalog = NULL;
+
 			ReleaseSysCache(htup);
 			return catalog;
 		}
@@ -1476,8 +1656,6 @@ make_altfunc_simple_expr(const char *func_name, Expr *func_arg)
 	{
 		argtype_oid = exprType((Node *)func_arg);
 		func_argtypes = buildoidvector(&argtype_oid, 1);
-		/* cast to psum_typeoid, if mismatch */
-		func_arg = make_expr_typecast(func_arg, argtype_oid);
 	}
 	else
 		func_argtypes = buildoidvector(NULL, 0);
@@ -1548,7 +1726,8 @@ make_altfunc_nrows_expr(Aggref *aggref)
  * make_altfunc_minmax_expr
  */
 static FuncExpr *
-make_altfunc_minmax_expr(Aggref *aggref, const char *func_name)
+make_altfunc_minmax_expr(Aggref *aggref, const char *func_name,
+						 Oid pminmax_typeoid)
 {
 	TargetEntry	   *tle;
 	Expr		   *expr;
@@ -1556,8 +1735,10 @@ make_altfunc_minmax_expr(Aggref *aggref, const char *func_name)
 	Assert(list_length(aggref->args) == 1);
     tle = linitial(aggref->args);
     Assert(IsA(tle, TargetEntry));
+	/* cast to pminmax_typeoid, if mismatch */
+	expr = make_expr_typecast(tle->expr, pminmax_typeoid);
 	/* make conditional if aggref has any filter */
-	expr = make_expr_conditional(tle->expr, aggref->aggfilter, false);
+	expr = make_expr_conditional(expr, aggref->aggfilter, false);
 
 	return make_altfunc_simple_expr(func_name, expr);
 }
@@ -1701,10 +1882,10 @@ make_alternative_aggref(Aggref *aggref,
 				pfunc = make_altfunc_nrows_expr(aggref);
 				break;
 			case ALTFUNC_EXPR_PMIN:     /* PMIN(X) */
-				pfunc = make_altfunc_minmax_expr(aggref, "pmin");
+				pfunc = make_altfunc_minmax_expr(aggref, "pmin", argtype);
 				break;
 			case ALTFUNC_EXPR_PMAX:     /* PMAX(X) */
-				pfunc = make_altfunc_minmax_expr(aggref, "pmax");
+				pfunc = make_altfunc_minmax_expr(aggref, "pmax", argtype);
 				break;
 			case ALTFUNC_EXPR_PSUM:     /* PSUM(X) */
 				pfunc = make_altfunc_psum_expr(aggref, "psum", argtype);
@@ -1967,10 +2148,14 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 		}
 		else
 		{
+			Oid		orig_type = exprType((Node *)expr);
+
 			expr = (Expr *)replace_expression_by_altfunc((Node *)expr, &con);
 			if (!con.device_executable)
 				return false;
-
+			if (orig_type != exprType((Node *)expr))
+				elog(ERROR, "Bug? GpuPreAgg catalog is not consistent: %s",
+					 nodeToString(expr));
 			add_column_to_pathtarget(target_final, expr, sortgroupref);
 		}
 		i++;
@@ -5027,6 +5212,15 @@ pgstrom_init_gpupreagg(void)
 							 "Enables the use of GPU preprocessed aggregate",
 							 NULL,
 							 &enable_gpupreagg,
+							 true,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	/* pg_strom.enable_gpupreagg_with_numeric */
+	DefineCustomBoolVariable("pg_strom.enable_gpupreagg_with_numeric",
+							 "Enables NUMERIC type in GpuPreAgg",
+							 NULL,
+							 &enable_gpupreagg_with_numeric,
 							 true,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
