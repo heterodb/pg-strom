@@ -210,7 +210,6 @@ pgstromInitGpuTaskState(GpuTaskState *gts,
 	gts->gcontext = gcontext;
 	gts->task_kind = task_kind;
 	gts->program_id = INVALID_PROGRAM_ID;	/* to be set later */
-	gts->revision = 1;
 	gts->kern_params = construct_kern_parambuf(used_params, econtext,
 											   cscan->custom_scan_tlist);
 	gts->scan_done = false;
@@ -341,19 +340,6 @@ retry_scan:
 	gtask = dlist_container(GpuTask, chain, dnode);
 	gts->num_ready_tasks--;
 
-	/*
-	 * Discard GpuTask if revision number mismatch. ExecRescan() rewind the
-	 * scan status then restart scan with new parameters. It means all the
-	 * results of asynchronous tasks shall be discarded.
-	 * To avoid synchronization here, all the GpuTask has a revision number
-	 * copied from the GTS when it is constructed. It matched, the GpuTask
-	 * is launched under the current GTS state.
-	 */
-	if (gtask->revision != gts->revision)
-	{
-		pgstromReleaseGpuTask(gtask);
-		goto retry_scan;
-	}
 	return gtask;
 }
 
@@ -490,12 +476,6 @@ pgstromRescanGpuTaskState(GpuTaskState *gts)
 		Assert(gts->num_ready_tasks >= 0);
 		pgstromReleaseGpuTask(gtask);
 	}
-
-	/*
-	 * Once revision number of GTS is changed, any asynchronous GpuTasks
-	 * are discarded when backend received them from GPU server.
-	 */
-	gts->revision++;
 }
 
 /*
@@ -628,7 +608,6 @@ pgstromInitGpuTask(GpuTaskState *gts, GpuTask *gtask)
 	gtask->task_kind    = gts->task_kind;
 	gtask->program_id   = gts->program_id;
 	gtask->gts          = gts;
-	gtask->revision     = gts->revision;
 	gtask->row_format   = gts->row_format;
 	gtask->cpu_fallback = false;
 	gtask->file_desc    = -1;

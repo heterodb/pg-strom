@@ -1223,10 +1223,8 @@ plcuda_exec_begin(HeapTuple protup, FunctionCallInfo fcinfo)
 								  sizeof(plcudaTaskState));
 	plts->gts.gcontext = gcontext;
 	plts->gts.task_kind = GpuTaskKind_PL_CUDA;
-	plts->gts.revision = 1;
 	plts->gts.kern_params = NULL;
 	dlist_init(&plts->gts.ready_tasks);
-	//FIXME: nobody may be responsible to 'prime_in_gpucontext'
 
 	plts->val_prep_num_threads = 1;
 	plts->val_main_num_threads = 1;

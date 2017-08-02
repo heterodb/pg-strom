@@ -5033,7 +5033,6 @@ gpupreagg_push_terminator_task(GpuPreAggTask *gpreagg_old)
 	gpreagg_new->task.task_kind   = gpreagg_old->task.task_kind;
 	gpreagg_new->task.program_id  = gpreagg_old->task.program_id;
 	gpreagg_new->task.gts         = gpreagg_old->task.gts;
-	gpreagg_new->task.revision    = gpreagg_old->task.revision;
 	gpreagg_new->task.file_desc   = -1;
 	gpreagg_new->task.gcontext    = NULL;	/* to be set later */
 	memset(&gpreagg_new->task.tv_wakeup, 0, sizeof(struct timeval));

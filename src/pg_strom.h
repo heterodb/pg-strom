@@ -171,7 +171,6 @@ struct GpuTaskState
 	GpuContext	   *gcontext;
 	GpuTaskKind		task_kind;		/* one of GpuTaskKind_* */
 	ProgramId		program_id;		/* CUDA Program (to be acquired) */
-	cl_uint			revision;		/* incremented for each ExecRescan */
 	kern_parambuf  *kern_params;	/* Const/Param buffer */
 	bool			scan_done;		/* True, if no more rows to read */
 	bool			row_format;		/* True, if KDS_FORMAT_ROW is required */
@@ -239,7 +238,6 @@ struct GpuTask
 	GpuTaskKind		task_kind;		/* same with GTS's one */
 	ProgramId		program_id;		/* same with GTS's one */
 	GpuTaskState   *gts;			/* GTS reference in the backend */
-	cl_uint			revision;		/* same with GTS's one when kicked */
 	bool			row_format;		/* true, if row-format is preferred */
 	bool			cpu_fallback;	/* true, if task needs CPU fallback */
 	int				file_desc;		/* file-descriptor on backend side */
