@@ -597,18 +597,23 @@ gpuservSendGpuTask(GpuContext *gcontext, GpuTask *gtask)
 	SharedGpuContext *shgcon = gcontext->shgcon;
 	GpuServCommand	cmd;
 
-	/* update num_async_tasks */
-	SpinLockAcquire(&shgcon->lock);
 	if (IsGpuServerProcess())
+	{
+		SpinLockAcquire(&shgcon->lock);
 		shgcon->num_async_tasks--;
-	else
-		shgcon->num_async_tasks++;
-	SpinLockRelease(&shgcon->lock);
-
+		SpinLockRelease(&shgcon->lock);
+	}
 	cmd.command = GPUSERV_CMD_TASK;
     cmd.length = offsetof(GpuServCommand, error);
 	cmd.gtask = gtask;
 	gpuservSendCommand(gcontext, &cmd);
+
+	if (!IsGpuServerProcess())
+	{
+		SpinLockAcquire(&shgcon->lock);
+		shgcon->num_async_tasks++;
+		SpinLockRelease(&shgcon->lock);
+	}
 }
 
 /*
@@ -976,14 +981,6 @@ gpuservRecvCommands(GpuContext *gcontext, bool *p_peer_sock_closed)
 					gtask->peer_fdesc = peer_fdesc;
 				gputask_pushto_pending_list(gtask, 0);
 				IncNumberOfGpuServerTasks();
-#ifdef PGSTROM_DEBUG
-				gettimeofday(&tv, NULL);
-				gtask->debug_delay = (1000000 * tv.tv_sec + tv.tv_usec) -
-					(1000000 * gtask->tv_timestamp.tv_sec +
-							   gtask->tv_timestamp.tv_usec);
-				if (gtask->debug_delay > 1000000)
-					fprintf(stderr, "debug_delay = %u\n", gtask->debug_delay);
-#endif
 			}
 			else
 			{
@@ -993,12 +990,6 @@ gpuservRecvCommands(GpuContext *gcontext, bool *p_peer_sock_closed)
 					gts->cb_ready_task(gts, gtask);
 				dlist_push_tail(&gts->ready_tasks, &gtask->chain);
 				gts->num_ready_tasks++;
-#ifdef PGSTROM_DEBUG
-				gettimeofday(&tv, NULL);
-				gtask->resp_delay = (1000000 * tv.tv_sec + tv.tv_usec) -
-					(1000000 * gtask->tv_timestamp.tv_sec +
-							   gtask->tv_timestamp.tv_usec);
-#endif
 			}
 			num_received++;
 		}
@@ -1195,8 +1186,13 @@ gpuserv_try_run_pending_task(long *p_timeout)
 	gcontext = gtask->gcontext;
 	STROM_TRY();
 	{
+		SharedGpuContext *shgcon = gcontext->shgcon;
 		GpuModuleCache *gmod_cache = NULL;
-		cl_int			retval;
+		cl_int			retval = -1;
+
+		/* Skip GpuTask execution if GpuContext is under termination */
+		if (pg_atomic_read_u32(&shgcon->in_termination) != 0)
+			goto skip_process_task;
 
 		gmod_cache = lookupGpuModuleCache(gtask->program_id);
 		if (!gmod_cache)
@@ -1236,6 +1232,9 @@ gpuserv_try_run_pending_task(long *p_timeout)
 										   gmod_cache->cuda_module,
 										   NULL);
 			putGpuModuleCache(gmod_cache);
+			if (pg_atomic_read_u32(&shgcon->in_termination) != 0)
+				retval = -1;
+		skip_process_task:
 			if (retval == 0)
 			{
 				/* send the GpuTask to the backend */
@@ -1266,7 +1265,6 @@ gpuserv_try_run_pending_task(long *p_timeout)
 				 * So, we have to decrement num_async_tasks and set latch
 				 * of the backend process (it may wait for the last task).
 				 */
-				SharedGpuContext *shgcon = gcontext->shgcon;
 				int			peer_fdesc = gtask->peer_fdesc;
 				PGPROC	   *backend;
 
@@ -1424,7 +1422,6 @@ gpuservWorkerMain(void)
 					gpuservRecvCommands(gcontext, &peer_sock_closed);
 				else
 				{
-					peer_sock_closed = true;
 					wnotice("peer socket was closed by event %08x", events);
 					peer_sock_closed = true;
 				}

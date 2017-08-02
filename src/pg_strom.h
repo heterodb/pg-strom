@@ -99,6 +99,7 @@ typedef struct SharedGpuContext
 	PGPROC	   *server;			/* PGPROC of CUDA/GPU Server */
 	PGPROC	   *backend;		/* PGPROC of Backend Process */
 	int			ParallelWorkerNumber; /* copy of backend's local variable */
+	pg_atomic_uint32 in_termination; /* true, if under termination state */
 	slock_t		lock;			/* lock of the field below */
 	cl_int		refcnt;			/* refcount by backend/gpu-server */
 	dlist_head	dma_buffer_list;/* tracker of DMA buffers */
@@ -115,16 +116,6 @@ typedef struct GpuContext
 	SharedGpuContext *shgcon;
 	pg_atomic_uint32 refcnt;
 	pg_atomic_uint32 is_unlinked;
-#ifdef PGSTROM_DEBUG
-	unsigned long	debug_tv1;	/* usec for debug / analysis */
-	unsigned long	debug_tv2;	/* usec for debug / analysis */
-	unsigned long	debug_tv3;	/* usec for debug / analysis */
-	unsigned long	debug_tv4;	/* usec for debug / analysis */
-	unsigned int	count_tv1;	/* # of samples for debug_tv1 */
-	unsigned int	count_tv2;	/* # of samples for debug_tv2 */
-	unsigned int	count_tv3;	/* # of samples for debug_tv3 */
-	unsigned int	count_tv4;	/* # of samples for debug_tv4 */
-#endif
 	slock_t			lock;		/* lock for resource tracker */
 	dlist_head		restrack[RESTRACK_HASHSIZE];
 } GpuContext;
@@ -456,9 +447,8 @@ extern GpuContext *AttachGpuContext(pgsocket sockfd,
 extern GpuContext *GetGpuContext(GpuContext *gcontext);
 extern GpuContext *GetGpuContextBySockfd(pgsocket sockfd);
 extern void PutGpuContext(GpuContext *gcontext);
+extern void SynchronizeGpuContext(GpuContext *gcontext);
 extern void ForcePutAllGpuContext(void);
-extern bool GpuContextIsEstablished(GpuContext *gcontext);
-
 
 extern bool trackCudaProgram(GpuContext *gcontext, ProgramId program_id);
 extern void untrackCudaProgram(GpuContext *gcontext, ProgramId program_id);
@@ -479,6 +469,7 @@ extern CUresult gpuMemAllocManaged(GpuContext *gcontext,
 								   int flags);
 extern CUresult gpuMemRetain(GpuContext *gcontext, CUdeviceptr devptr);
 extern CUresult	gpuMemFree(GpuContext *gcontext, CUdeviceptr devptr);
+extern CUresult gpuMemFreeExtra(void *extra, CUdeviceptr devptr);
 extern void gpuMemReclaim(void);
 
 extern void pgstrom_init_gpu_memory(void);

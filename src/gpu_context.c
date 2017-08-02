@@ -314,7 +314,8 @@ ReleaseLocalResources(GpuContext *gcontext, bool normal_exit)
 					 */
 					if (!gpuserv_cuda_context)
 						break;
-					rc = cuMemFree(tracker->u.devmem.ptr);
+					rc = gpuMemFreeExtra(tracker->u.devmem.extra,
+										 tracker->u.devmem.ptr);
 					if (rc != CUDA_SUCCESS)
 						wnotice("failed on cuMemFree(%p): %s",
 								(void *)tracker->u.devmem.ptr,
@@ -415,6 +416,7 @@ AllocGpuContext(bool with_connection)
 	shgcon->server = NULL;
 	shgcon->backend = MyProc;
 	shgcon->ParallelWorkerNumber = ParallelWorkerNumber;
+	pg_atomic_init_u32(&shgcon->in_termination, 0);
 	SpinLockInit(&shgcon->lock);
 	shgcon->refcnt = 1;
 	dlist_init(&shgcon->dma_buffer_list);
@@ -489,10 +491,10 @@ AttachGpuContext(pgsocket sockfd, SharedGpuContext *shgcon, int epoll_fd)
 	SpinLockAcquire(&shgcon->lock);
 	Assert(shgcon->refcnt > 0 &&		/* someone must own the GpuContext */
 		   shgcon->backend != NULL &&	/* backend must be assigned on */
-		   shgcon->server == NULL);		/* no server should be assigned yet */
+		   shgcon->server == NULL &&	/* no server should be assigned yet */
+		   shgcon->num_async_tasks == 0); /* no async tasks should exist */
 	shgcon->refcnt++;
 	shgcon->server = MyProc;
-	shgcon->num_async_tasks = 0;
 	SpinLockRelease(&shgcon->lock);
 
 	SpinLockAcquire(&activeGpuContextLock);
@@ -593,62 +595,36 @@ PutGpuContext(GpuContext *gcontext)
 		SpinLockAcquire(&activeGpuContextLock);
 		dlist_delete(&gcontext->chain);
 		SpinLockRelease(&activeGpuContextLock);
-
 		if (IsGpuServerProcess())
 			gpuservClenupGpuContext(gcontext);
 		ReleaseLocalResources(gcontext, true);
 		PutSharedGpuContext(gcontext->shgcon);
-#ifdef PGSTROM_DEBUG
-		if (gcontext->debug_tv1 > 0)
-		{
-			if (gcontext->count_tv1 == 0)
-				wnotice("%u: debug1=%.2f", MyProcPid,
-						((double)gcontext->debug_tv1) / 1000000.0);
-			else
-				wnotice("%u: debug1=%.2f n=%u", MyProcPid,
-						((double)gcontext->debug_tv1) /
-						((double)(1000000 * gcontext->count_tv1)),
-						gcontext->count_tv1);
-		}
-
-		if (gcontext->debug_tv2 > 0)
-		{
-			if (gcontext->count_tv2 == 0)
-				wnotice("%u: debug2=%.2f", MyProcPid,
-						((double)gcontext->debug_tv2) / 1000000.0);
-			else
-				wnotice("%u: debug2=%.2f n=%u", MyProcPid,
-						((double)gcontext->debug_tv2) /
-						((double)(1000000 * gcontext->count_tv2)),
-						gcontext->count_tv2);
-		}
-
-		if (gcontext->debug_tv3 > 0)
-		{
-			if (gcontext->count_tv3 == 0)
-				wnotice("%u: debug3=%.2f", MyProcPid,
-						((double)gcontext->debug_tv3) / 1000000.0);
-			else
-				wnotice("%u: debug3=%.2f n=%u", MyProcPid,
-						((double)gcontext->debug_tv3) /
-						((double)(1000000 * gcontext->count_tv3)),
-						gcontext->count_tv3);
-		}
-
-		if (gcontext->debug_tv4 > 0)
-		{
-			if (gcontext->count_tv4 == 0)
-				wnotice("%u: debug4=%.2f", MyProcPid,
-						((double)gcontext->debug_tv4) / 1000000.0);
-			else
-				wnotice("%u: debug4=%.2f n=%u", MyProcPid,
-						((double)gcontext->debug_tv4) /
-						((double)(1000000 * gcontext->count_tv4)),
-						gcontext->count_tv4);
-		}
-#endif
 		free(gcontext);
 	}
+}
+
+/*
+ * SynchronizeGpuContext - wait for completion of any running GpuTasks
+ */
+void
+SynchronizeGpuContext(GpuContext *gcontext)
+{
+	SharedGpuContext   *shgcon = gcontext->shgcon;
+
+	Assert(!IsGpuServerProcess());
+	SpinLockAcquire(&shgcon->lock);
+	if (shgcon->num_async_tasks > 0)
+	{
+		pg_atomic_write_u32(&shgcon->in_termination, 1);
+		while (shgcon->num_async_tasks > 0)
+		{
+			SpinLockRelease(&shgcon->lock);
+			(void)gpuservRecvGpuTasks(gcontext, -1);
+			SpinLockAcquire(&shgcon->lock);
+		}
+		pg_atomic_write_u32(&shgcon->in_termination, 0);
+	}
+	SpinLockRelease(&shgcon->lock);
 }
 
 /*
@@ -693,25 +669,6 @@ ForcePutAllGpuContext(void)
 }
 
 /*
- * GpuContextIsEstablished
- *
- * It checks whether GpuContext is established; it means both client and
- * server are still connected via local socket, and both of them look at.
- */
-bool
-GpuContextIsEstablished(GpuContext *gcontext)
-{
-	SharedGpuContext   *shgcon = gcontext->shgcon;
-	bool				retval;
-
-	SpinLockAcquire(&shgcon->lock);
-	retval = (shgcon->server && shgcon->backend);
-	SpinLockRelease(&shgcon->lock);
-
-	return retval;
-}
-
-/*
  * gpucontext_cleanup_callback - cleanup callback when drop of ResourceOwner
  */
 static void
@@ -738,11 +695,14 @@ gpucontext_cleanup_callback(ResourceReleasePhase phase,
 
 			if (gcontext->resowner == CurrentResourceOwner)
 			{
+				SharedGpuContext *shgcon = gcontext->shgcon;
+
 				if (isCommit)
 					wnotice("GpuContext reference leak (refcnt=%d)",
 							pg_atomic_read_u32(&gcontext->refcnt));
-
 				dlist_delete(&gcontext->chain);
+				/* discard any asynchronous GpuTasks */
+				pg_atomic_write_u32(&shgcon->in_termination, 2);
 				ReleaseLocalResources(gcontext, isCommit);
 				PutSharedGpuContext(gcontext->shgcon);
 				free(gcontext);

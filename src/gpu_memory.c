@@ -435,26 +435,14 @@ error_1:
 }
 
 /*
- * gpuMemFree
+ * gpuMemFreeExtra - to be called by only resource cleanup handler
  */
 CUresult
-gpuMemFree(GpuContext *gcontext, CUdeviceptr deviceptr)
+gpuMemFreeExtra(void *extra, CUdeviceptr deviceptr)
 {
 	GpuMemLargeChunk *lchunk;
-	char	   *extra;
 	CUresult	rc = CUDA_SUCCESS;
 
-	/* If called on PostgreSQL backend, send a request to release */
-	if (!IsGpuServerProcess())
-	{
-		gpuservSendGpuMemFree(gcontext, deviceptr);
-		return CUDA_SUCCESS;
-	}
-	
-	/*
-	 * Pulls either GpuMemSegment or GpuMemLargeChunk from resource tracker.
-	 */
-	extra = untrackGpuMem(gcontext, deviceptr);
 	if ((((uintptr_t)extra) & 1UL) == 0)
 		return GpuMemSegmentFree((GpuMemSegment *)extra, deviceptr);
 
@@ -472,8 +460,28 @@ gpuMemFree(GpuContext *gcontext, CUdeviceptr deviceptr)
 	}
 	else
 		SpinLockRelease(&gpumem_largechunk_lock);
-
 	return rc;
+
+}
+
+/*
+ * gpuMemFree
+ */
+CUresult
+gpuMemFree(GpuContext *gcontext, CUdeviceptr deviceptr)
+{
+	/* If called on PostgreSQL backend, send a request to release */
+	if (!IsGpuServerProcess())
+	{
+		gpuservSendGpuMemFree(gcontext, deviceptr);
+		return CUDA_SUCCESS;
+	}
+	
+	/*
+	 * Pulls either GpuMemSegment or GpuMemLargeChunk using resource tracker.
+	 */
+	return gpuMemFreeExtra(untrackGpuMem(gcontext, deviceptr),
+						   deviceptr);
 }
 
 /*
@@ -599,6 +607,7 @@ gpuMemReclaim(void)
 		wfatal("failed on pthread_rwlock_unlock: %m");
 }
 
+#if 0
 /*
  * pgstrom_startup_gpu_memory
  */
@@ -607,6 +616,7 @@ pgstrom_startup_gpu_memory(void)
 {
 
 }
+#endif
 
 /*
  * pgstrom_init_gpu_memory

@@ -2439,14 +2439,14 @@ ExecEndGpuJoin(CustomScanState *node)
 	GpuJoinState   *gjs = (GpuJoinState *) node;
 	int				i;
 
-	/*
-	 * clean up GpuJoin specific resources
-	 */
+	/* wait for completion of any asynchronous GpuTask */
+	SynchronizeGpuContext(gjs->gts.gcontext);
+
+	/* clean up inner hash/heap buffer */
 	if (gjs->inner_pmrels)
 		multirels_finalize_buffer(gjs, false);
-	/*
-	 * Clean up subtree (if any)
-	 */
+
+	/* shutdown inner/outer subtree */
 	ExecEndNode(outerPlanState(node));
 	for (i=0; i < gjs->num_rels; i++)
 	{
@@ -2464,8 +2464,14 @@ ExecReScanGpuJoin(CustomScanState *node)
 	GpuJoinState   *gjs = (GpuJoinState *) node;
 	cl_int			i;
 
-	/* common rescan handling */
-	pgstromRescanGpuTaskState(&gjs->gts);
+	/* wait for completion of any asynchronous GpuTask */
+	SynchronizeGpuContext(gjs->gts.gcontext);
+	/* rewind the outer relation */
+	if (gjs->gts.css.ss.ss_currentRelation)
+		gpuscanRewindScanChunk(&gjs->gts);
+	else
+		ExecReScan(outerPlanState(gjs));
+	gjs->gts.scan_overflow = NULL;
 
 	/*
 	 * NOTE: ExecReScan() does not pay attention on the PlanState within
@@ -2488,19 +2494,9 @@ ExecReScanGpuJoin(CustomScanState *node)
 			}
 		}
 	}
-
-	/*
-	 * Rewind the outer relation
-	 */
-	if (gjs->gts.css.ss.ss_currentRelation)
-		gpuscanRewindScanChunk(&gjs->gts);
-	else
-		ExecReScan(outerPlanState(gjs));
-	gjs->gts.scan_overflow = NULL;
-
-	/*
-	 * Rewind the inner hash/heap buffer
-	 */
+	/* common rescan handling */
+	pgstromRescanGpuTaskState(&gjs->gts);
+	/* rewind the inner hash/heap buffer */
 	if (gjs->inner_pmrels)
 		multirels_finalize_buffer(gjs, true);
 }

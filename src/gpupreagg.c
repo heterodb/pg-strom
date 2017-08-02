@@ -3573,6 +3573,8 @@ ExecEndGpuPreAgg(CustomScanState *node)
 		elog(WARNING, "GpuPreAgg processed %lu rows by CPU fallback",
 			gpas->num_fallback_rows);
 
+	/* wait for completion of any asynchronous GpuTask */
+    SynchronizeGpuContext(gpas->gts.gcontext);
 	/* clean up subtree, if any */
 	if (outerPlanState(node))
 		ExecEndNode(outerPlanState(node));
@@ -3610,6 +3612,11 @@ ExecReScanGpuPreAgg(CustomScanState *node)
 {
 	GpuPreAggState	   *gpas = (GpuPreAggState *) node;
 
+	/* wait for completion of any asynchronous GpuTask */
+	SynchronizeGpuContext(gpas->gts.gcontext);
+	/* also rescan subtree, if any */
+	if (outerPlanState(node))
+		ExecEndNode(outerPlanState(node));
 	/* common rescan handling */
 	pgstromRescanGpuTaskState(&gpas->gts);
 	/* rewind the position to read */

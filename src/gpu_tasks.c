@@ -245,7 +245,6 @@ fetch_next_gputask(GpuTaskState *gts)
 	SharedGpuContext   *shgcon = gcontext->shgcon;
 	GpuTask			   *gtask;
 	dlist_node		   *dnode;
-	struct timeval		tv1, tv2;
 
 	/*
 	 * If no server connection is established, GpuTask cannot be processed
@@ -313,12 +312,7 @@ retry_scan:
 			if (!dlist_is_empty(&gts->ready_tasks))
 				break;
 			/* wait for a completed task, or task vanish on server side */
-			gettimeofday(&tv1, NULL);
 			gpuservRecvGpuTasks(gcontext, -1);
-			gettimeofday(&tv2, NULL);
-			if (gts->task_kind == GpuTaskKind_GpuJoin)
-				gcontext->debug_tv1 += ((1000000 * tv2.tv_sec + tv2.tv_usec) -
-										(1000000 * tv1.tv_sec + tv1.tv_usec));
 		}
 		/* check completed tasks if any (non-blocking) */
 		while (gpuservRecvGpuTasks(gcontext, 0));
@@ -339,12 +333,7 @@ retry_scan:
 			return NULL;
 		}
 		SpinLockRelease(&shgcon->lock);
-//		gettimeofday(&tv1, NULL);
 		gpuservRecvGpuTasks(gcontext, -1);
-//		gettimeofday(&tv2, NULL);
-//		if (gts->task_kind == GpuTaskKind_GpuJoin)
-//			gcontext->debug_tv2 += ((1000000 * tv2.tv_sec + tv2.tv_usec) -
-//									(1000000 * tv1.tv_sec + tv1.tv_usec));
 	}
 	/* OK, pick up GpuTask from the head */
 	Assert(gts->num_ready_tasks > 0);
@@ -365,14 +354,6 @@ retry_scan:
 		pgstromReleaseGpuTask(gtask);
 		goto retry_scan;
 	}
-
-	gcontext->debug_tv2 += gtask->debug_delay;
-	gcontext->count_tv2++;
-	gcontext->debug_tv3 += gtask->send_delay;
-	gcontext->count_tv3++;
-	gcontext->debug_tv4 += gtask->kstart_delay;
-	gcontext->count_tv4++;
-
 	return gtask;
 }
 
@@ -499,9 +480,20 @@ void
 pgstromRescanGpuTaskState(GpuTaskState *gts)
 {
 	/*
+	 * release all the unprocessed tasks
+	 */
+	while (!dlist_is_empty(&gts->ready_tasks))
+	{
+		dlist_node *dnode = dlist_pop_head_node(&gts->ready_tasks);
+		GpuTask	   *gtask = dlist_container(GpuTask, chain, dnode);
+		gts->num_ready_tasks--;
+		Assert(gts->num_ready_tasks >= 0);
+		pgstromReleaseGpuTask(gtask);
+	}
+
+	/*
 	 * Once revision number of GTS is changed, any asynchronous GpuTasks
-	 * are discarded when 
-	 *
+	 * are discarded when backend received them from GPU server.
 	 */
 	gts->revision++;
 }
@@ -512,6 +504,18 @@ pgstromRescanGpuTaskState(GpuTaskState *gts)
 void
 pgstromReleaseGpuTaskState(GpuTaskState *gts)
 {
+	/*
+	 * release any unprocessed tasks
+	 */
+	while (!dlist_is_empty(&gts->ready_tasks))
+	{
+		dlist_node *dnode = dlist_pop_head_node(&gts->ready_tasks);
+		GpuTask	   *gtask = dlist_container(GpuTask, chain, dnode);
+		gts->num_ready_tasks--;
+		Assert(gts->num_ready_tasks >= 0);
+		pgstromReleaseGpuTask(gtask);
+	}
+
 	/*
 	 * collect perfmon statistics if parallel worker
 	 *

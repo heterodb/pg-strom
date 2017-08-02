@@ -2174,9 +2174,10 @@ ExecEndGpuScan(CustomScanState *node)
 {
 	GpuScanState	   *gss = (GpuScanState *)node;
 
+	/* wait for completion of asynchronous GpuTaks */
+	SynchronizeGpuContext(gss->gts.gcontext);
 	/* inform status of GpuScan to the master backend */
     gss->gts.outer_instrument.nloops = 1;
-
 	/* reset fallback resources */
 	if (gss->base_slot)
 		ExecDropSingleTupleTableSlot(gss->base_slot);
@@ -2191,6 +2192,8 @@ ExecReScanGpuScan(CustomScanState *node)
 {
 	GpuScanState	   *gss = (GpuScanState *) node;
 
+	/* wait for completion of asynchronous GpuTaks */
+	SynchronizeGpuContext(gss->gts.gcontext);
 	/* common rescan handling */
 	pgstromRescanGpuTaskState(&gss->gts);
 	/* rewind the position to read */
