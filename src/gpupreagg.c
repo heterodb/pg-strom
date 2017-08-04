@@ -1134,7 +1134,6 @@ make_gpupreagg_path(PlannerInfo *root,
 	GpuPreAggInfo  *gpa_info = palloc0(sizeof(GpuPreAggInfo));
 	List		   *custom_paths = NIL;
 	int				parallel_nworkers = 0;
-	bool			parallel_aware = false;
 
 	/* obviously, not suitable for GpuPreAgg */
 	if (num_groups < 1.0 || num_groups > (double)INT_MAX)
@@ -1144,8 +1143,7 @@ make_gpupreagg_path(PlannerInfo *root,
 	if (!can_pullup_outerscan ||
 		!pgstrom_pullup_outer_scan(input_path,
 								   &gpa_info->outer_scanrelid,
-								   &gpa_info->outer_quals,
-								   &parallel_aware))
+								   &gpa_info->outer_quals))
 		custom_paths = list_make1(input_path);
 
 	/* Number of workers if parallel */
@@ -1167,7 +1165,6 @@ make_gpupreagg_path(PlannerInfo *root,
 	cpath->path.parent = group_rel;
 	cpath->path.pathtarget = target_partial;
 	cpath->path.param_info = NULL;
-	cpath->path.parallel_aware = parallel_aware;
 	cpath->path.parallel_safe = (group_rel->consider_parallel &&
 								 input_path->parallel_safe);
 	cpath->path.parallel_workers = parallel_nworkers;
@@ -1266,6 +1263,8 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 		if (!agg_final_costs.hasNonPartial &&
 			!agg_final_costs.hasNonSerial)
 			return;
+
+		cpath->path.parallel_aware = true;
 
 		partial_path = (Path *)create_gather_path(root,
 												  group_rel,
@@ -3662,8 +3661,9 @@ ExecGpuPreAggInitDSM(CustomScanState *node,
 	GpuPreAggParallelDSM *gpapdsm = (GpuPreAggParallelDSM *) coordinate;
 
 	/* allocation of GpuPreAggSharedState */
-	gpapdsm->gpa_sstate = createGpuPreAggSharedState(gpas);
-	ExecGpuScanInitDSM(node, pcxt, coordinate, 0);
+	gpas->gpa_sstate = createGpuPreAggSharedState(gpas);
+	gpapdsm->gpa_sstate = gpas->gpa_sstate;
+	ExecGpuScanInitDSM(node, pcxt, gpapdsm->data, 0);
 }
 
 /*
@@ -3678,7 +3678,7 @@ ExecGpuPreAggInitWorker(CustomScanState *node,
 	GpuPreAggParallelDSM *gpapdsm = (GpuPreAggParallelDSM *) coordinate;
 
 	gpas->gpa_sstate = gpapdsm->gpa_sstate;
-	ExecGpuScanInitWorker(node, toc, coordinate);
+	ExecGpuScanInitWorker(node, toc, gpapdsm->data);
 }
 
 /*

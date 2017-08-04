@@ -827,8 +827,7 @@ extern void codegen_gpuscan_quals(StringInfo kern,
 extern bool add_unique_expression(Expr *expr, List **p_tlist, bool resjunk);
 extern bool pgstrom_pullup_outer_scan(const Path *outer_path,
 									  Index *p_outer_relid,
-									  List **p_outer_quals,
-									  bool *parallel_aware);
+									  List **p_outer_quals);
 extern bool pgstrom_path_is_gpuscan(const Path *path);
 extern bool pgstrom_plan_is_gpuscan(const Plan *plan);
 

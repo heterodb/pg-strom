@@ -991,7 +991,6 @@ create_gpujoin_path(PlannerInfo *root,
 	ListCell   *lc;
 	int			parallel_nworkers = 0;
 	bool		inner_parallel_safe = true;
-	bool		parallel_aware = false;
 	int			i;
 
 	/* parallel path must have parallel_safe sub-paths */
@@ -1057,8 +1056,7 @@ create_gpujoin_path(PlannerInfo *root,
 	/* Try to pull up outer scan if enough simple */
 	pgstrom_pullup_outer_scan(outer_path,
 							  &gjpath->outer_relid,
-							  &gjpath->outer_quals,
-							  &parallel_aware);
+							  &gjpath->outer_quals);
 
 	/*
 	 * cost calculation of GpuJoin, then, add this path to the joinrel,
@@ -1078,7 +1076,6 @@ create_gpujoin_path(PlannerInfo *root,
 		for (i=0; i < num_rels; i++)
 			custom_paths = lappend(custom_paths, gjpath->inners[i].scan_path);
 		gjpath->cpath.custom_paths = custom_paths;
-		gjpath->cpath.path.parallel_aware = parallel_aware;
 		gjpath->cpath.path.parallel_safe = (joinrel->consider_parallel &&
 											outer_path->parallel_safe &&
 											inner_parallel_safe);
@@ -1283,6 +1280,7 @@ try_add_gpujoin_paths(PlannerInfo *root,
 		if (!gjpath)
 			break;
 
+		gjpath->cpath.path.parallel_aware = try_parallel_path;
 		if (try_parallel_path)
 			add_partial_path(joinrel, (Path *)gjpath);
 		else
