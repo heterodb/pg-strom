@@ -1828,8 +1828,7 @@ PlanGpuScanPath(PlannerInfo *root,
 bool
 pgstrom_pullup_outer_scan(const Path *outer_path,
 						  Index *p_outer_relid,
-						  List **p_outer_quals,
-						  bool *p_parallel_aware)
+						  List **p_outer_quals)
 {
 	RelOptInfo *baserel = outer_path->parent;
 	PathTarget *outer_target = outer_path->pathtarget;
@@ -1886,7 +1885,6 @@ pgstrom_pullup_outer_scan(const Path *outer_path,
 	}
 	*p_outer_relid = baserel->relid;
 	*p_outer_quals = outer_quals;
-	*p_parallel_aware = outer_path->parallel_aware;
 	return true;
 }
 
