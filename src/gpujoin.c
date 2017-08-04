@@ -4529,11 +4529,9 @@ gpujoin_next_task(GpuTaskState *gts)
 		 * to zero next, it means the last task on the GpuJoin, thus we can
 		 * kick RIGHT/FULL OUTER JOIN on this timing.
 		 */
-		if ((errno = pthread_mutex_lock(&pmrels->mutex)) < 0)
-			wfatal("failed on pthread_mutex_lock: %m");
+		pthreadMutexLock(&pmrels->mutex);
 		pmrels->outer_scan_done = true;
-		if ((errno = pthread_mutex_unlock(&pmrels->mutex)) < 0)
-			wfatal("failed on pthread_mutex_unlock: %m");
+		pthreadMutexUnlock(&pmrels->mutex);
 
 		/* and, gpu_tasks.c will produce no tasks any more */
 		gjs->gts.scan_done = true;
@@ -6065,7 +6063,6 @@ multirels_create_buffer(GpuJoinState *gjs, int num_pg_workers)
 	Size			head_length;
 	Size			required;
 	char		   *pos;
-	pthread_mutexattr_t mattr;
 
 	/* calculate total length and allocate */
 	head_length = STROMALIGN(offsetof(pgstrom_multirels,
@@ -6087,14 +6084,7 @@ multirels_create_buffer(GpuJoinState *gjs, int num_pg_workers)
 	pmrels->inner_chunks = (pgstrom_data_store **) pos;
 	pos += STROMALIGN(sizeof(pgstrom_data_store *) * gjs->num_rels);
 
-	if ((errno = pthread_mutexattr_init(&mattr)) < 0)
-		elog(ERROR, "failed on pthread_mutexattr_init: %m");
-	if ((errno = pthread_mutexattr_setpshared(&mattr,
-											  PTHREAD_PROCESS_SHARED)) < 0)
-		elog(ERROR, "failed on pthread_mutexattr_setpshared: %m");
-	if ((errno = pthread_mutex_init(&pmrels->mutex, &mattr)) < 0)
-		elog(ERROR, "failed on pthread_mutex_init: %m");
-
+	pthreadMutexInit(&pmrels->mutex);
 	pmrels->nr_tasks = (cl_int *) pos;
 	pos += STROMALIGN(sizeof(int) * (numDevAttrs + 1));
 	pmrels->is_attached = (cl_bool *) pos;
@@ -6123,12 +6113,11 @@ multirels_get_buffer(GpuContext *gcontext, pgstrom_multirels *pmrels)
 {
 	int		dindex = gcontext->gpuserv_id;
 
-	if ((errno = pthread_mutex_lock(&pmrels->mutex)) < 0)
-		wfatal("failed on pthread_mutex_lock: %m");
+	pthreadMutexLock(&pmrels->mutex);
 	Assert(pmrels->nr_tasks[dindex] >= 0);
 	pmrels->nr_tasks[dindex]++;
-	if ((errno = pthread_mutex_unlock(&pmrels->mutex)) < 0)
-		wfatal("failed on pthread_mutex_unlock: %m");
+	pthreadMutexUnlock(&pmrels->mutex);
+
 	return pmrels;
 }
 
@@ -6144,8 +6133,7 @@ multirels_put_buffer(pgstrom_gpujoin *pgjoin_old)
 
 	dindex = (gpuserv_cuda_dindex < 0 ? numDevAttrs : gpuserv_cuda_dindex);
 	Assert(dindex >= 0 && dindex <= numDevAttrs);
-	if ((errno = pthread_mutex_lock(&pmrels->mutex)) < 0)
-		wfatal("failed on pthread_mutex_lock: %m");
+	pthreadMutexLock(&pmrels->mutex);
 	Assert(pmrels->nr_tasks[dindex] > 0);
 	if (--pmrels->nr_tasks[dindex] == 0 && pmrels->outer_scan_done)
 	{
@@ -6179,14 +6167,12 @@ multirels_put_buffer(pgstrom_gpujoin *pgjoin_old)
 							  pmrels->kern.ojmap_length);
 			if (rc != CUDA_SUCCESS)
 			{
-				if ((errno = pthread_mutex_unlock(&pmrels->mutex)) < 0)
-					wfatal("failed on pthread_mutex_unlock: %m");
+				pthreadMutexUnlock(&pmrels->mutex);
 				werror("failed on cuMemcpyDtoH: %s", errorText(rc));
 			}
 		}
 	}
-	if ((errno = pthread_mutex_unlock(&pmrels->mutex)) < 0)
-		wfatal("failed on pthread_mutex_unlock: %m");
+	pthreadMutexUnlock(&pmrels->mutex);
 
 	/*
 	 * Clone GpuJoin task, then launch OUTER JOIN
@@ -6217,8 +6203,7 @@ multirels_load_buffer(GpuContext *gcontext, pgstrom_multirels *pmrels)
 	int		dindex = gcontext->gpuserv_id;
 
 	Assert(dindex == gpuserv_cuda_dindex);
-	if ((errno = pthread_mutex_lock(&pmrels->mutex)) < 0)
-		wfatal("failed on pthread_mutex_lock: %m");
+	pthreadMutexLock(&pmrels->mutex);
 	if (!pmrels->is_attached[pg_worker])
 	{
 		CUdeviceptr	m_kmrels = 0UL;
@@ -6240,8 +6225,7 @@ multirels_load_buffer(GpuContext *gcontext, pgstrom_multirels *pmrels)
 			rc = gpuMemRetain(gcontext, pmrels->m_kmrels[dindex]);
 			if (rc != CUDA_SUCCESS)
 			{
-				if ((errno = pthread_mutex_unlock(&pmrels->mutex)) < 0)
-					wfatal("failed on pthread_mutex_unlock: %m");
+				pthreadMutexUnlock(&pmrels->mutex);
 				werror("failed on gpuMemRetain: %s", errorText(rc));
 			}
 			goto out_unlock;
@@ -6252,8 +6236,7 @@ multirels_load_buffer(GpuContext *gcontext, pgstrom_multirels *pmrels)
 		rc = gpuMemAlloc(gcontext, &m_kmrels, length);
 		if (rc != CUDA_SUCCESS)
 		{
-			if ((errno = pthread_mutex_unlock(&pmrels->mutex)) < 0)
-				wfatal("failed on pthread_mutex_unlock: %m");
+			pthreadMutexUnlock(&pmrels->mutex);
 			if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 				return false;
 			werror("failed on gpuMemAlloc: %s", errorText(rc));
@@ -6265,8 +6248,7 @@ multirels_load_buffer(GpuContext *gcontext, pgstrom_multirels *pmrels)
 		rc = cuMemcpyHtoD(m_kmrels, &pmrels->kern, pmrels->head_length);
 		if (rc != CUDA_SUCCESS)
 		{
-			if ((errno = pthread_mutex_unlock(&pmrels->mutex)) < 0)
-				wfatal("failed on pthread_mutex_unlock: %m");
+			pthreadMutexUnlock(&pmrels->mutex);
 			werror("failed on cuMemcpyHtoD: %s", errorText(rc));
 		}
 
@@ -6279,8 +6261,7 @@ multirels_load_buffer(GpuContext *gcontext, pgstrom_multirels *pmrels)
 							  pds->kds.length);
 			if (rc != CUDA_SUCCESS)
 			{
-				if ((errno = pthread_mutex_unlock(&pmrels->mutex)) < 0)
-					wfatal("failed on pthread_mutex_unlock: %m");
+				pthreadMutexUnlock(&pmrels->mutex);
 				werror("failed on cuMemcpyHtoD: %s", errorText(rc));
 			}
 		}
@@ -6291,8 +6272,7 @@ multirels_load_buffer(GpuContext *gcontext, pgstrom_multirels *pmrels)
 			rc = cuMemsetD32(m_ojmaps, 0, pmrels->kern.ojmap_length / 4);
 			if (rc != CUDA_SUCCESS)
 			{
-				if ((errno = pthread_mutex_unlock(&pmrels->mutex)) < 0)
-					wfatal("failed on pthread_mutex_unlock: %m");
+				pthreadMutexUnlock(&pmrels->mutex);
 				werror("failed on cuMemcpyHtoD: %s", errorText(rc));
 			}
 		}
@@ -6300,8 +6280,7 @@ multirels_load_buffer(GpuContext *gcontext, pgstrom_multirels *pmrels)
 		pmrels->m_ojmaps[dindex]	= m_ojmaps;
 	}
 out_unlock:
-	if ((errno = pthread_mutex_unlock(&pmrels->mutex)) < 0)
-		wfatal("failed on pthread_mutex_unlock: %m");
+	pthreadMutexUnlock(&pmrels->mutex);
 	return true;
 }
 
