@@ -651,38 +651,6 @@ pgstromProcessGpuTask(GpuTask *gtask,
 }
 
 /*
- * pgstromCompleteGpuTask - completion handler of GpuTask
- */
-int
-pgstromCompleteGpuTask(GpuTask *gtask)
-{
-	int		retval;
-
-	/* should be called under multi-threading mode */
-	Assert(IsGpuServerProcess() < 0);
-
-	switch (gtask->task_kind)
-	{
-		case GpuTaskKind_GpuScan:
-			retval = gpuscan_complete_task(gtask);
-			break;
-		case GpuTaskKind_GpuJoin:
-			retval = gpujoin_complete_task(gtask);
-			break;
-		case GpuTaskKind_GpuPreAgg:
-			retval = gpupreagg_complete_task(gtask);
-			break;
-		case GpuTaskKind_PL_CUDA:
-			retval = plcuda_complete_task(gtask);
-			break;
-		default:
-			elog(ERROR, "Unknown GpuTask kind: %d", (int)gtask->task_kind);
-			break;
-	}
-	return retval;
-}
-
-/*
  * pgstromReleaseGpuTask - release of GpuTask
  */
 void

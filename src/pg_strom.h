@@ -651,7 +651,6 @@ extern void pgstromInitGpuTask(GpuTaskState *gts, GpuTask *gtask);
 extern int	pgstromProcessGpuTask(GpuTask *gtask,
 								  CUmodule cuda_module,
 								  CUstream cuda_stream);
-extern int	pgstromCompleteGpuTask(GpuTask *gtask);
 extern void pgstromReleaseGpuTask(GpuTask *gtask);
 
 extern const char *__errorText(int errcode, const char *filename, int lineno);
@@ -853,7 +852,6 @@ extern void ExecGpuScanInitWorker(CustomScanState *node,
 extern int	gpuscan_process_task(GpuTask *gtask,
 								 CUmodule cuda_module,
 								 CUstream cuda_stream);
-extern int	gpuscan_complete_task(GpuTask *gtask);
 extern void gpuscan_release_task(GpuTask *gtask);
 extern void assign_gpuscan_session_info(StringInfo buf,
 										GpuTaskState *gts);
@@ -867,7 +865,6 @@ extern bool pgstrom_plan_is_gpujoin(const Plan *plannode);
 extern int	gpujoin_process_task(GpuTask *gtask,
 								 CUmodule cuda_module,
 								 CUstream cuda_stream);
-extern int	gpujoin_complete_task(GpuTask *gtask);
 extern void	gpujoin_release_task(GpuTask *gtask);
 extern void assign_gpujoin_session_info(StringInfo buf,
 										GpuTaskState *gts);
@@ -883,7 +880,6 @@ extern void gpupreagg_post_planner(PlannedStmt *pstmt, CustomScan *cscan);
 extern int	gpupreagg_process_task(GpuTask *gtask,
 								   CUmodule cuda_module,
 								   CUstream cuda_stream);
-extern int	gpupreagg_complete_task(GpuTask *gtask);
 extern void	gpupreagg_release_task(GpuTask *gtask);
 extern void assign_gpupreagg_session_info(StringInfo buf,
 										  GpuTaskState *gts);

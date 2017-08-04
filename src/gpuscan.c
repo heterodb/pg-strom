@@ -114,11 +114,6 @@ typedef struct
 	GpuTask				task;
 	bool				dev_projection;		/* true, if device projection */
 	bool				with_nvme_strom;
-	/* CUDA resources (only server side) */
-	CUfunction			kern_gpuscan_main;
-	CUdeviceptr			m_gpuscan;
-	CUdeviceptr			m_kds_src;
-	CUdeviceptr			m_kds_dst;
 	/* DMA buffers */
 	pgstrom_data_store *pds_src;
 	pgstrom_data_store *pds_dst;
@@ -2883,73 +2878,6 @@ gpuscanRewindScanChunk(GpuTaskState *gts)
 }
 
 /*
- * gpuscan_cleanup_cuda_resources
- */
-static void
-gpuscan_cleanup_cuda_resources(GpuScanTask *gscan)
-{
-	CUresult	rc;
-
-	if (gscan->m_gpuscan)
-	{
-		rc = gpuMemFree(gscan->task.gcontext, gscan->m_gpuscan);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on gpuMemFree: %s", errorText(rc));
-	}
-
-	if (gscan->with_nvme_strom && gscan->m_kds_src)
-	{
-		rc = gpuMemFreeIOMap(gscan->task.gcontext, gscan->m_kds_src);
-		if (rc != CUDA_SUCCESS)
-			elog(WARNING, "failed on gpuMemFreeIOMap: %s", errorText(rc));
-	}
-	/* ensure pointers are NULL */
-	gscan->kern_gpuscan_main = NULL;
-	gscan->m_gpuscan = 0UL;
-	gscan->m_kds_src = 0UL;
-	gscan->m_kds_dst = 0UL;
-}
-
-#if 0
-static void
-gpuscan_respond_task(CUstream stream, CUresult status, void *private)
-{
-	GpuScanTask	   *gscan = private;
-	bool			is_urgent = false;
-
-	/* OK, routine is called back in the usual context */
-	if (status == CUDA_SUCCESS)
-	{
-		if (gscan->kern.kerror.errcode != StromError_Success)
-		{
-			if (pgstrom_cpu_fallback_enabled &&
-				(gscan->kern.kerror.errcode == StromError_CpuReCheck ||
-				 gscan->kern.kerror.errcode == StromError_DataStoreNoSpace))
-			{
-				gscan->task.cpu_fallback = true;
-			}
-			else if (!gscan->task.kerror.errcode)
-			{
-				gscan->task.kerror = gscan->kern.kerror;
-			}
-			is_urgent = true;
-		}
-	}
-	else
-	{
-		if (!gscan->task.kerror.errcode)
-		{
-			gscan->task.kerror.errcode = status;
-			gscan->task.kerror.kernel = StromKernel_CudaRuntime;
-			gscan->task.kerror.lineno = 0;
-		}
-		is_urgent = true;
-	}
-	gpuservCompleteGpuTask(&gscan->task, is_urgent);
-}
-#endif
-
-/*
  * gpuscan_process_task
  */
 int
@@ -2961,16 +2889,21 @@ gpuscan_process_task(GpuTask *gtask,
 	pgstrom_data_store *pds_src = gscan->pds_src;
 	pgstrom_data_store *pds_dst = gscan->pds_dst;
 	kern_resultbuf *kresults = KERN_GPUSCAN_RESULTBUF(&gscan->kern);
+	CUfunction		kern_gpuscan_main;
+	CUdeviceptr		m_gpuscan = 0UL;
+	CUdeviceptr		m_kds_src = 0UL;
+	CUdeviceptr		m_kds_dst = 0UL;
 	cl_uint			ntuples;
 	void		   *kern_args[5];
 	size_t			offset;
 	size_t			length;
 	CUresult		rc;
+	int				retval = 100001;
 
 	/*
 	 * Lookup GPU kernel functions
 	 */
-	rc = cuModuleGetFunction(&gscan->kern_gpuscan_main,
+	rc = cuModuleGetFunction(&kern_gpuscan_main,
 							 cuda_module,
 							 "gpuscan_main");
 	if (rc != CUDA_SUCCESS)
@@ -2987,13 +2920,13 @@ gpuscan_process_task(GpuTask *gtask,
 	if (gscan->with_nvme_strom)
 	{
 		rc = gpuMemAllocIOMap(gtask->gcontext,
-							  &gscan->m_kds_src,
+							  &m_kds_src,
 							  pds_src->kds.length);
 		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		{
 			PDS_fillup_blocks(pds_src, gtask->peer_fdesc);
-			gscan->m_kds_src = 0UL;
 			gscan->with_nvme_strom = false;
+			m_kds_src = 0UL;
 		}
 		else if (rc != CUDA_SUCCESS)
 			werror("failed on gpuMemAllocIOMap: %s", errorText(rc));
@@ -3004,7 +2937,7 @@ gpuscan_process_task(GpuTask *gtask,
 		length += GPUMEMALIGN(pds_src->kds.length);
 	if (pds_dst)
 		length += GPUMEMALIGN(pds_dst->kds.length);
-	rc = gpuMemAlloc(gtask->gcontext, &gscan->m_gpuscan, length);
+	rc = gpuMemAlloc(gtask->gcontext, &m_gpuscan, length);
 	if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		goto out_of_resource;
 	else if (rc != CUDA_SUCCESS)
@@ -3012,22 +2945,18 @@ gpuscan_process_task(GpuTask *gtask,
 
 	if (!gscan->with_nvme_strom)
 	{
-		Assert(!gscan->m_kds_src);
-		gscan->m_kds_src = gscan->m_gpuscan + offset;
+		Assert(!m_kds_src);
+		m_kds_src = m_gpuscan + offset;
 		offset += GPUMEMALIGN(pds_src->kds.length);
 	}
-
-	if (pds_dst)
-		gscan->m_kds_dst = gscan->m_gpuscan + offset;
-	else
-		gscan->m_kds_dst = 0UL;
+	m_kds_dst = (pds_dst ? m_gpuscan + offset : 0UL);
 
 	/*
 	 * OK, enqueue a series of requests
 	 */
 	offset = KERN_GPUSCAN_DMASEND_OFFSET(&gscan->kern);
 	length = KERN_GPUSCAN_DMASEND_LENGTH(&gscan->kern);
-	rc = cuMemcpyHtoD(gscan->m_gpuscan,
+	rc = cuMemcpyHtoD(m_gpuscan,
 					  (char *)&gscan->kern + offset,
 					  length);
 	if (rc != CUDA_SUCCESS)
@@ -3037,7 +2966,7 @@ gpuscan_process_task(GpuTask *gtask,
 	if (pds_src->kds.format == KDS_FORMAT_ROW || !gscan->with_nvme_strom)
 	{
 		length = pds_src->kds.length;
-		rc = cuMemcpyHtoD(gscan->m_kds_src,
+		rc = cuMemcpyHtoD(m_kds_src,
 						  &pds_src->kds,
 						  length);
 		if (rc != CUDA_SUCCESS)
@@ -3046,7 +2975,7 @@ gpuscan_process_task(GpuTask *gtask,
 	else
 	{
 		gpuMemCopyFromSSD(&gscan->task,
-						  gscan->m_kds_src,
+						  m_kds_src,
 						  pds_src);
 	}
 
@@ -3054,7 +2983,7 @@ gpuscan_process_task(GpuTask *gtask,
 	if (pds_dst)
 	{
 		length = KERN_DATA_STORE_HEAD_LENGTH(&pds_dst->kds);
-		rc = cuMemcpyHtoD(gscan->m_kds_dst,
+		rc = cuMemcpyHtoD(m_kds_dst,
 						  &pds_dst->kds,
 						  length);
 		if (rc != CUDA_SUCCESS)
@@ -3067,11 +2996,11 @@ gpuscan_process_task(GpuTask *gtask,
 	 *              kern_data_store *kds_src,
 	 *              kern_data_store *kds_dst)
 	 */
-	kern_args[0] = &gscan->m_gpuscan;
-	kern_args[1] = &gscan->m_kds_src;
-	kern_args[2] = &gscan->m_kds_dst;
+	kern_args[0] = &m_gpuscan;
+	kern_args[1] = &m_kds_src;
+	kern_args[2] = &m_kds_dst;
 
-	rc = cuLaunchKernel(gscan->kern_gpuscan_main,
+	rc = cuLaunchKernel(kern_gpuscan_main,
 						1, 1, 1,
 						1, 1, 1,
 						0,
@@ -3091,10 +3020,13 @@ gpuscan_process_task(GpuTask *gtask,
 	offset = KERN_GPUSCAN_DMARECV_OFFSET(&gscan->kern);
 	length = KERN_GPUSCAN_DMARECV_LENGTH(&gscan->kern, pds_dst ? 0 : ntuples);
 	rc = cuMemcpyDtoH((char *)&gscan->kern + offset,
-					  gscan->m_gpuscan + offset,
+					  m_gpuscan + offset,
 					  length);
 	if (rc != CUDA_SUCCESS)
 		werror("cuMemcpyDtoH: %s", errorText(rc));
+
+#if 1
+	//TO BE DEPRECATED ... GpuScan should always return row format
 
 	/*
 	 * NOTE: varlena variables in the result references pds_src as buffer
@@ -3116,7 +3048,7 @@ gpuscan_process_task(GpuTask *gtask,
 				  (char *)&pds_src->kds);
 		length = pds_src->nblocks_uncached * BLCKSZ;
 		rc = cuMemcpyDtoH((char *)&pds_src->kds + offset,
-						  gscan->m_kds_src + offset,
+						  m_kds_src + offset,
 						  length);
 		if (rc != CUDA_SUCCESS)
 			werror("failed on cuMemcpyHtoD: %s", errorText(rc));
@@ -3127,61 +3059,52 @@ gpuscan_process_task(GpuTask *gtask,
 		 */
 		pds_src->nblocks_uncached = 0;
 	}
+#endif
 
 	if (pds_dst)
 	{
 		Assert(pds_dst->kds.format == KDS_FORMAT_ROW ||
 			   pds_dst->kds.format == KDS_FORMAT_SLOT);
 		rc = cuMemcpyDtoH(&pds_dst->kds,
-						  gscan->m_kds_dst,
+						  m_kds_dst,
 						  pds_dst->kds.length);
 		if (rc != CUDA_SUCCESS)
 			werror("cuMemcpyDtoH: %s", errorText(rc));
 	}
 
-	/* responding part */
-	if (gscan->kern.kerror.errcode != StromError_Success)
+	/*
+	 * check GPU kernel status
+	 */
+	gscan->task.kerror = gscan->kern.kerror;
+	if (gscan->task.kerror.errcode != StromError_Success)
 	{
 		//FIXME: 'pgstrom_cpu_fallback_enabled' is not valid on server side
 		if (pgstrom_cpu_fallback_enabled &&
-			(gscan->kern.kerror.errcode == StromError_CpuReCheck ||
+			(gscan->task.kerror.errcode == StromError_CpuReCheck ||
 			 gscan->kern.kerror.errcode == StromError_DataStoreNoSpace))
+		{
+			memset(&gscan->task.kerror, 0, sizeof(kern_errorbuf));
 			gscan->task.cpu_fallback = true;
-		else if (!gscan->task.kerror.errcode)
-			gscan->task.kerror = gscan->kern.kerror;
+		}
 	}
-	/* completion part */
-	gpuscan_complete_task(gtask);
-
-	return 0;
+	retval = 0;
 
 out_of_resource:
-	wnotice("GpuScan: out of resource");
-	gpuscan_cleanup_cuda_resources(gscan);
-	return 100001;	/* 100ms delay until next launch */
-}
-
-/*
- * gpuscan_complete_task
- */
-int
-gpuscan_complete_task(GpuTask *gtask)
-{
-	GpuScanTask	   *gscan = (GpuScanTask *) gtask;
-
-	/* raise any kernel internal error */
-	Assert(gtask->kerror.errcode == StromError_Success ||
-		   gtask->kerror.errcode == StromError_CpuReCheck);
-	if (gtask->kerror.errcode != StromError_Success)
-		werror("GpuScan kernel internal error: %s",
-			   errorTextKernel(&gtask->kerror));
-#ifdef NOT_USED
-	gscan->tv_kern_exec_quals = gscan->kern.pfm.tv_kern_exec_quals;
-	gscan->tv_kern_projection = gscan->kern.pfm.tv_kern_projection;
-#endif
-	gpuscan_cleanup_cuda_resources(gscan);
-
-	return 0;
+	if (retval > 0)
+		wnotice("GpuScan: out of resource");
+	if (m_gpuscan)
+	{
+		rc = gpuMemFree(gscan->task.gcontext, m_gpuscan);
+		if (rc != CUDA_SUCCESS)
+			werror("failed on gpuMemFree: %s", errorText(rc));
+	}
+	if (gscan->with_nvme_strom && m_kds_src)
+	{
+		rc = gpuMemFreeIOMap(gscan->task.gcontext, m_kds_src);
+		if (rc != CUDA_SUCCESS)
+			werror("failed on gpuMemFree: %s", errorText(rc));
+	}
+	return retval;
 }
 
 /*

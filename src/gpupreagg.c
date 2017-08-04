@@ -4647,10 +4647,6 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuLaunchKernel: %s", errorText(rc));
 
-	rc = cuStreamSynchronize(NULL);
-	if (rc != CUDA_SUCCESS)
-		werror("failed on cuStreamSynchronize: %s", errorText(rc));
-
 	/* DMA Recv of individual kern_gpreagg */
 	length = KERN_GPUPREAGG_DMARECV_LENGTH(&gpreagg->kern);
 	rc = cuMemcpyDtoH(&gpreagg->kern,
@@ -4661,6 +4657,18 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 		Assert(false);
 		werror("failed on cuMemcpyDtoH: %s", errorText(rc));
 	}
+
+	/*
+	 * XXX - Even though we speculatively allocate large virtual device
+	 * memory, GPU kernel may raise NoDataSpace error.
+	 * In this case, we need working device memory.
+	 * For pds_final, all we need to do is pre-allocation of very large
+	 * virtual device memory with 64bit offset support.
+	 * In case of final hash table, we have to re-organize hash table
+	 * again, because hash table must be initialized to (0,-1), thus, it
+	 * leads page-fault and physical memory allocation. We cannot pre-allocate
+	 * too large memory.
+	 */
 
 	/* Release short term device resource */
 	if (gpreagg->with_nvme_strom && m_kds_src != 0UL)
@@ -4846,163 +4854,6 @@ gpupreagg_process_task(GpuTask *gtask,
 }
 
 /*
- * gpupreagg_complete_task
- */
-int
-gpupreagg_complete_task(GpuTask *gtask)
-{
-#if 0
-	GpuPreAggTask		   *gpreagg = (GpuPreAggTask *) gtask;
-	GpuPreAggSharedState   *gpa_sstate = gpreagg->gpa_sstate;
-	CUresult				rc;
-	int						retval;
-
-	/*
-	 * If this task is responsible to termination, pds_final should be
-	 * already dereferenced, and this task is responsible to release
-	 * any CUDA resources.
-	 */
-	if (gpreagg->kern.reduction_mode == GPUPREAGG_ONLY_TERMINATION)
-	{
-		/*
-		 * Task with GPUPREAGG_ONLY_TERMINATION should be kicked on the
-		 * pds_final buffer which is already dereferenced.
-		 */
-		SpinLockAcquire(&gpa_sstate->lock);
-		Assert(gpreagg->pds_final->ntasks_running == 0);
-		SpinLockRelease(&gpa_sstate->lock);
-
-		/* cleanup device memory of the final buffer */
-		rc = cuEventDestroy(gpreagg->ev_kds_final);
-		if (rc != CUDA_SUCCESS)
-			wfatal("failed on cuEventDestroy: %s", errorText(rc));
-
-		rc = gpuMemFree(gpreagg->task.gcontext, gpreagg->m_kds_final);
-		if (rc != CUDA_SUCCESS)
-			wfatal("failed on gpuMemFree: %s", errorText(rc));
-
-		gpreagg->ev_kds_final = NULL;
-		gpreagg->m_kds_final = 0UL;
-		gpreagg->m_fhash = 0UL;
-		gpreagg->kern.key_dist_salt = 0;
-
-		gpupreagg_cleanup_cuda_resources(gpreagg);
-
-		/*
-		 * NOTE: We have no way to recover NUMERIC allocation on fixvar.
-		 * It may be preferable to do in the CPU side on demand.
-		 * kds->has_numeric gives a hint...
-		 */
-		return 0;
-	}
-
-	if (gpreagg->task.kerror.errcode == StromError_Success)
-	{
-		gpupreagg_cleanup_cuda_resources(gpreagg);
-		if (!gpupreagg_put_final_buffer(gpreagg, false, false, false))
-			retval = -1;	/* drop this task, no need to return */
-		else
-		{
-			gpreagg->kern.reduction_mode = GPUPREAGG_ONLY_TERMINATION;
-			retval = 1;		/* retry the task as terminator */
-		}
-	}
-	else if (gpreagg->task.kerror.errcode == StromError_CpuReCheck)
-	{
-		/*
-		 * Unless the task didn't touch the final buffer, CpuReCheck error
-		 * is recoverable by CPU fallback. Once it gets poluted, we have no
-		 * way to recover...
-		 */
-		gpupreagg_cleanup_cuda_resources(gpreagg);
-		if (gpreagg->kern.final_reduction_in_progress)
-			gpupreagg_put_final_buffer(gpreagg, true, false, false);
-		else
-		{
-			if (gpupreagg_put_final_buffer(gpreagg, false, false, false))
-				gpupreagg_push_terminator_task(gpreagg);
-			memset(&gpreagg->task.kerror, 0, sizeof(kern_errorbuf));
-			gpreagg->task.cpu_fallback = true;
-		}
-		retval = 0;
-	}
-	else if (gpreagg->task.kerror.errcode == StromError_DataStoreNoSpace)
-	{
-		if (gpreagg->kern.final_reduction_in_progress)
-		{
-			/*
-			 * NOTE: DataStoreNoSpace happen during the final reduction
-			 * steps. We need to switch the final reduction buffer, then
-			 * retry final reduction with remaining tuples only.
-			 * We can release @kds_src here because it is no longer
-			 * referenced. It is much valuable if it is i/o mapped memory.
-			 */
-			if (gpupreagg_put_final_buffer(gpreagg, false, true, true))
-				gpupreagg_push_terminator_task(gpreagg);
-
-			if (gpreagg->with_nvme_strom)
-			{
-				rc = gpuMemFreeIOMap(gpreagg->task.gcontext,
-									 gpreagg->m_kds_src);
-				if (rc != CUDA_SUCCESS)
-					elog(FATAL, "failed on gpuMemFreeIOMap: %s",
-						 errorText(rc));
-				gpreagg->m_kds_src = 0UL;
-			}
-			gpreagg->retry_by_nospace = true;
-		}
-		else
-		{
-			/*
-			 * NOTE: DataStoreNoSpace happen prior to the final reduction
-			 * steps. Likely, it is lack of @nrooms of the kds_slot/ghash
-			 * because we cannot determine exact number of tuples in the
-			 * @pds_src buffer if KDS_FORMAT_BLOCK.
-			 */
-			kern_data_store *kds_head = gpreagg->kds_head;
-			cl_uint		nitems_real = gpreagg->kern.nitems_real;
-			Size		kds_length;
-
-			//don't need to release @kds_src
-			gpupreagg_cleanup_cuda_resources(gpreagg);
-			if (gpupreagg_put_final_buffer(gpreagg, false, true, false))
-				gpupreagg_push_terminator_task(gpreagg);
-
-			/* adjust buffer size */
-			gpreagg->kern.hash_size
-				= Max(gpreagg->kern.hash_size, nitems_real);
-			gpreagg->kern.kresults_2_offset
-				= STROMALIGN(gpreagg->kern.kresults_1_offset +
-							 offsetof(kern_resultbuf, results[nitems_real]));
-			kds_length = (STROMALIGN(offsetof(kern_data_store,
-											  colmeta[kds_head->ncols])) +
-						  STROMALIGN(LONGALIGN(sizeof(Datum) + sizeof(char)) *
-									 kds_head->ncols) * nitems_real);
-			kds_head->length = kds_length;
-			kds_head->nrooms = nitems_real;
-
-			/* Reset reduction strategy, if not NOGROUP_REDUCTION */
-			if (gpreagg->kern.reduction_mode != GPUPREAGG_NOGROUP_REDUCTION)
-				gpreagg->kern.reduction_mode = GPUPREAGG_INVALID_REDUCTION;
-		}
-		retval = 1;
-	}
-	else
-	{
-		/*
-		 * raise an error on the backend side. no need to terminate final
-		 * buffer regardless of the number of concurrent tasks.
-		 */
-		gpupreagg_cleanup_cuda_resources(gpreagg);
-		gpupreagg_put_final_buffer(gpreagg, true, false, false);
-		retval = 0;
-	}
-	return retval;
-#endif
-	return 0;
-}
-
-/*
  * gpupreagg_release_task
  */
 void
@@ -5069,4 +4920,3 @@ pgstrom_init_gpupreagg(void)
 	create_upper_paths_next = create_upper_paths_hook;
 	create_upper_paths_hook = gpupreagg_add_grouping_paths;
 }
-

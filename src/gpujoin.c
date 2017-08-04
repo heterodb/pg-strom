@@ -5233,57 +5233,6 @@ gpujoin_release_task(GpuTask *gtask)
 	dmaBufferFree(pgjoin);
 }
 
-int
-gpujoin_complete_task(GpuTask *gtask)
-{
-#if 0
-	pgstrom_gpujoin	   *pgjoin = (pgstrom_gpujoin *) gtask;
-	pgstrom_multirels  *pmrels = pgjoin->pmrels;
-
-	if (pgjoin->task.kerror.errcode == StromError_Success)
-	{
-		pgstrom_data_store *pds_dst = pgjoin->pds_dst;
-		runtimeStat		   *rt_stat = pgjoin->rt_stat;
-		kern_join_scale	   *jscale = pgjoin->kern.jscale;
-		cl_int				i, num_rels = pmrels->kern.nrels;
-
-		/*
-		 * Update run-time statistics information according to the number
-		 * of rows actually processed by this GpuJoin task.
-		 * In case of OUTER JOIN task, we don't count source items because
-		 * it is generated as result of unmatched tuples.
-		 */
-		SpinLockAcquire(&rt_stat->lock);
-		rt_stat->source_ntasks++;
-		rt_stat->source_nitems += (jscale[0].window_base +
-								   jscale[0].window_size -
-								   jscale[0].window_orig);
-
-		for (i=0; i <= num_rels; i++)
-		{
-			rt_stat->inner_nitems[i] += jscale[i].inner_nitems;
-			rt_stat->right_nitems[i] += jscale[i].right_nitems;
-			if (jscale[i].row_dist_score > 0.0)
-			{
-				rt_stat->row_dist_score_valid = true;
-				rt_stat->row_dist_score[i] += jscale[i].row_dist_score;
-			}
-		}
-		rt_stat->results_nitems += pds_dst->kds.nitems;
-		rt_stat->results_usage += pds_dst->kds.usage;
-		SpinLockRelease(&rt_stat->lock);
-
-		/*
-		 * In case of CPU fallback, we have to move the entire outer-
-		 * join map into the host side, prior to fallback execution.
-		 */
-		if (!pgjoin->pds_src && pgjoin->task.cpu_fallback)
-			colocate_outer_join_maps_to_host(pgjoin->pmrels);
-	}
-#endif
-	return 0;
-}
-
 static void
 update_runtime_statistics(pgstrom_gpujoin *pgjoin)
 {
