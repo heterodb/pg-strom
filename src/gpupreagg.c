@@ -4838,9 +4838,7 @@ gpupreagg_process_termination_task(GpuPreAggTask *gpreagg,
  * gpupreagg_process_task
  */
 int
-gpupreagg_process_task(GpuTask *gtask,
-					   CUmodule cuda_module,
-					   CUstream cuda_stream)
+gpupreagg_process_task(GpuTask *gtask, CUmodule cuda_module)
 {
 	GpuPreAggTask  *gpreagg = (GpuPreAggTask *) gtask;
 	int		retval;

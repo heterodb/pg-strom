@@ -5578,9 +5578,7 @@ gpujoin_try_rerun_kernel(pgstrom_gpujoin *pgjoin, CUmodule cuda_module)
 }
 
 int
-gpujoin_process_task(GpuTask *gtask,
-					 CUmodule cuda_module,
-					 CUstream cuda_stream)
+gpujoin_process_task(GpuTask *gtask, CUmodule cuda_module)
 {
 	pgstrom_gpujoin *pgjoin = (pgstrom_gpujoin *) gtask;
 
