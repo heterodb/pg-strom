@@ -4124,10 +4124,7 @@ gpupreagg_next_task(GpuTaskState *gts)
 			{
 				slot = ExecProcNode(outer_ps);
 				if (TupIsNull(slot))
-				{
-					gpas->gts.scan_done = true;
 					break;
-				}
 			}
 
 			/* create a new data-store on demand */
@@ -4711,7 +4708,9 @@ check_terminator:
 		retval = 1;		/* re-execution as terminator on this device */
 	}
 	else
+	{
 		retval = -1;	/* GpuTask will be released soon */
+	}
 	pthreadMutexUnlock(&gpa_sstate->mutex);
 
 	return retval;
