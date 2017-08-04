@@ -415,7 +415,9 @@ AllocGpuContext(bool with_connection)
 
 	shgcon->server = NULL;
 	shgcon->backend = MyProc;
-	shgcon->ParallelWorkerNumber = ParallelWorkerNumber;
+	shgcon->pg_worker_index = (ParallelWorkerNumber < 0
+							   ? 0
+							   : ParallelWorkerNumber + 1);
 	pg_atomic_init_u32(&shgcon->in_termination, 0);
 	SpinLockInit(&shgcon->lock);
 	shgcon->refcnt = 1;

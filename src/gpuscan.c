@@ -3139,16 +3139,6 @@ gpuscan_process_task(GpuTask *gtask,
 			werror("cuMemcpyDtoH: %s", errorText(rc));
 	}
 
-#ifdef NOT_USED
-	/*
-	 * register the callback
-	 */
-	rc = cuStreamAddCallback(cuda_stream,
-							 gpuscan_respond_task,
-							 gscan, 0);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "cuStreamAddCallback: %s", errorText(rc));
-#endif
 	/* responding part */
 	if (gscan->kern.kerror.errcode != StromError_Success)
 	{
@@ -3168,7 +3158,7 @@ gpuscan_process_task(GpuTask *gtask,
 out_of_resource:
 	wnotice("GpuScan: out of resource");
 	gpuscan_cleanup_cuda_resources(gscan);
-	return 1;
+	return 100001;	/* 100ms delay until next launch */
 }
 
 /*

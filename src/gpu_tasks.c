@@ -258,7 +258,6 @@ fetch_next_gputask(GpuTaskState *gts)
 		return gtask;
 	}
 
-retry_scan:
 	CHECK_FOR_INTERRUPTS();
 	while (gpuservRecvGpuTasks(gcontext, 0));
 
@@ -506,7 +505,7 @@ pgstromReleaseGpuTaskState(GpuTaskState *gts)
 	 * prior to EndCustomScan(), so any reference to @worker_state on the
 	 * leader process will raise SEGV.
 	 */
-	if (ParallelMasterBackendId != InvalidBackendId)
+	if (IsParallelWorker())
 		pgstrom_accum_worker_statistics(gts);
 	else if (gts->worker_stat)
 	{

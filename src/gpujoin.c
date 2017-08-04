@@ -5663,7 +5663,7 @@ gpujoin_process_task(GpuTask *gtask,
 
 	do {
 		if (!gpujoin_process_kernel(pgjoin, cuda_module))
-			return 1;		/* out of resource */
+			return 100001;	/* out of resource; 100ms delay */
 		if (pgjoin->task.kerror.errcode != StromError_Success)
 			break;			/* deliver the error status */
 	} while (gpujoin_try_rerun_kernel(pgjoin, cuda_module));
@@ -6266,8 +6266,7 @@ multirels_put_buffer(pgstrom_gpujoin *pgjoin_old)
 static bool
 multirels_load_buffer(GpuContext *gcontext, pgstrom_multirels *pmrels)
 {
-	int		pw_number = gcontext->shgcon->ParallelWorkerNumber;
-	int		pg_worker = (pw_number < 0 ? 0 : pw_number + 1);
+	int		pg_worker = gcontext->shgcon->pg_worker_index;
 	int		dindex = gcontext->gpuserv_id;
 
 	Assert(dindex == gpuserv_cuda_dindex);
@@ -6369,15 +6368,12 @@ multirels_finalize_buffer(GpuJoinState *gjs, bool is_rescan)
 	pgstrom_multirels *pmrels = gjs->inner_pmrels;
 	CUdeviceptr	deviceptr = 0UL;
 	CUresult	rc;
-	int			i, pg_worker;
+	int			i, pg_worker = gcontext->shgcon->pg_worker_index;
 
-	pg_worker = (ParallelWorkerNumber < 0 ? 0 : ParallelWorkerNumber + 1);
-	if ((errno = pthread_mutex_lock(&pmrels->mutex)) < 0)
-		wfatal("failed on pthread_mutex_lock: %m");
+	pthreadMutexLock(&pmrels->mutex);
 	if (pmrels->is_attached[pg_worker])
 		deviceptr = pmrels->m_kmrels[gcontext->gpuserv_id];
-	if ((errno = pthread_mutex_unlock(&pmrels->mutex)) < 0)
-		wfatal("failed on pthread_mutex_unlock: %m");
+	pthreadMutexUnlock(&pmrels->mutex);
 
 	if (deviceptr != 0UL)
 	{

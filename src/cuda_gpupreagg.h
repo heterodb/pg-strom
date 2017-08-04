@@ -59,7 +59,7 @@ typedef struct
 	cl_uint			nitems_filtered;	/* out: # of removed rows by quals */
 	cl_uint			num_conflicts;		/* only used in kernel space */
 	cl_uint			num_groups;			/* out: # of new groups */
-	cl_uint			varlena_usage;		/* out: size of varlena usage */
+	cl_uint			extra_usage;		/* out: size of new allocation */
 	cl_uint			ghash_conflicts;	/* out: # of ghash conflicts */
 	cl_uint			fhash_conflicts;	/* out: # of fhash conflicts */
 	/* -- performance monitor -- */
@@ -289,8 +289,7 @@ gpupreagg_data_load(pagg_datum *pdatum,		/* __shared__ */
 		pdatum->isnull = isnull[colidx];
 		pdatum->int_val = (cl_int)(values[colidx] & 0xffffffffUL);
 	}
-	else if (cmeta.attlen == sizeof(cl_long) ||	/* also, cl_double */
-			 cmeta.atttypid == PG_NUMERICOID)	/* internal of numeric */
+	else if (cmeta.attlen == sizeof(cl_long))	/* also, cl_double */
 	{
 		pdatum->isnull = isnull[colidx];
 		pdatum->long_val = (cl_long)values[colidx];
@@ -335,8 +334,7 @@ gpupreagg_data_store(pagg_datum *pdatum,	/* __shared__ */
 		isnull[colidx] = pdatum->isnull;
 		values[colidx] = pdatum->int_val;
 	}
-	else if (cmeta.attlen == sizeof(cl_long) ||	/* also, cl_double */
-			 cmeta.atttypid == PG_NUMERICOID)	/* internal of numeric */
+	else if (cmeta.attlen == sizeof(cl_long))	/* also, cl_double */
 	{
 		isnull[colidx] = pdatum->isnull;
 		values[colidx] = pdatum->long_val;
@@ -420,8 +418,6 @@ gpupreagg_final_data_move(kern_context *kcxt,
 
 		if (src_isnull[i])
 			continue;	/* no buffer needed */
-		if (cmeta.atttypid == PG_NUMERICOID)
-			continue;	/* special internal data format */
 		if (!cmeta.attbyval)
 		{
 			if (cmeta.attlen > 0)
@@ -438,9 +434,9 @@ gpupreagg_final_data_move(kern_context *kcxt,
 	if (alloc_size > 0)
 	{
 		cl_uint		usage_prev = atomicAdd(&kds_dst->usage, alloc_size);
-
-		if (KERN_DATA_STORE_SLOT_LENGTH(kds_dst, kds_dst->nrooms) +
-			usage_prev + alloc_size >= kds_dst->length)
+		size_t		usage_slot = KERN_DATA_STORE_SLOT_LENGTH(kds_dst,
+															 rowidx_dst + 1);
+		if (usage_slot + usage_prev + alloc_size >= (size_t)kds_dst->length)
 		{
 			STROM_SET_ERROR(&kcxt->e, StromError_DataStoreNoSpace);
 			/*
@@ -469,8 +465,7 @@ gpupreagg_final_data_move(kern_context *kcxt,
 			dst_isnull[i] = true;
 			dst_values[i] = src_values[i];
 		}
-		else if (cmeta.atttypid == PG_NUMERICOID ||
-				 cmeta.attbyval)
+		else if (cmeta.attbyval)
 		{
 			dst_isnull[i] = false;
 			dst_values[i] = src_values[i];
@@ -516,16 +511,6 @@ gpupreagg_init_global_hash(size_t g_hashsize,
 		g_hash->hash_slot[hash_index].s.index = (cl_uint)(0xffffffff);
 	}
 }
-
-
-
-
-
-
-
-
-
-
 
 /*
  * gpupreagg_initial_projection
@@ -1468,7 +1453,7 @@ out:
 
 	pgstromStairlikeSum(allocated, &count);
 	if (count > 0 && get_local_id() == 0)
-		atomicAdd(&kgpreagg->varlena_usage, count);
+		atomicAdd(&kgpreagg->extra_usage, count);
 	__syncthreads();
 
 	pgstromStairlikeSum(nconflicts, &count);
@@ -1488,80 +1473,29 @@ out:
  * So, we need to fix up its value to adjust offset by hostptr.
  */
 KERNEL_FUNCTION(void)
-gpupreagg_fixup_varlena(kern_gpupreagg *kgpreagg,
-						kern_data_store *kds_final)
+gpupreagg_fixup_varlena(kern_data_store *kds_final,
+						hostptr_t kds_baseptr)
 {
-	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
-	kern_context	kcxt;
-	varlena		   *kparam_0 = (varlena *) kparam_get_value(kparams, 0);
 	cl_uint			i, ncols = kds_final->ncols;
 	kern_colmeta	cmeta;
-	size_t			kds_index = get_global_id();
-	Datum		   *dst_values = KERN_DATA_STORE_VALUES(kds_final, kds_index);
-	cl_bool		   *dst_isnull = KERN_DATA_STORE_ISNULL(kds_final, kds_index);
-	cl_char		   *numeric_ptr = NULL;
-	cl_uint			numeric_len = 0;
+	devptr_t		dev_base;
+	size_t			kds_index;
 
 	/* Sanity checks */
 	assert(kds_final->format == KDS_FORMAT_SLOT);
 	assert(kds_final->has_notbyval);
 
-	INIT_KERNEL_CONTEXT(&kcxt,gpupreagg_fixup_varlena,kparams);
+	dev_base = ((devptr_t)kds_final +
+				(size_t)kds_final->length -
+				(size_t)kds_final->usage);
 
-	/*
-	 * Expand extra field to fixup numeric data type; varlena or indirect
-	 * data types are already copied to the extra field, so all we have to
-	 * fixup here is numeric data type.
-	 */
-	if (kds_final->has_numeric)
+	for (kds_index = get_global_id();
+		 kds_index < kds_final->nitems;
+		 kds_index += get_global_size())
 	{
-		cl_uint		offset;
-		cl_uint		count;
-		__shared__ cl_uint base;
+		Datum   *dst_values = KERN_DATA_STORE_VALUES(kds_final, kds_index);
+		cl_bool *dst_isnull = KERN_DATA_STORE_ISNULL(kds_final, kds_index);
 
-		if (kds_index < kds_final->nitems)
-		{
-			for (i=0; i < ncols; i++)
-			{
-				cmeta = kds_final->colmeta[i];
-
-				if (cmeta.atttypid != PG_NUMERICOID)
-					continue;
-				if (dst_isnull[i])
-					continue;
-				numeric_len += MAXALIGN(pg_numeric_to_varlena(&kcxt, NULL,
-															  dst_values[i],
-															  dst_isnull[i]));
-			}
-		}
-		/* allocation of the extra buffer on demand */
-		offset = pgstromStairlikeSum(numeric_len, &count);
-		if (get_local_id() == 0)
-		{
-			if (count > 0)
-				base = atomicAdd(&kds_final->usage, count);
-			else
-				base = 0;
-		}
-		__syncthreads();
-
-		/*
-		 * At this point, number of items will be never increased any more,
-		 * so extra area is limited by nitems, not nrooms. It is actually
-		 * 'extra' area than final_reduction phase. :-)
-		 */
-		if (KERN_DATA_STORE_SLOT_LENGTH(kds_final, kds_final->nitems) +
-			base + count >= kds_final->length)
-		{
-			STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
-			goto out;
-		}
-		numeric_ptr = ((char *)kds_final + kds_final->length -
-					   (base + offset + numeric_len));
-	}
-
-	if (kds_index < kds_final->nitems)
-	{
 		for (i=0; i < ncols; i++)
 		{
 			/* No need to fixup NULL value anyway */
@@ -1569,30 +1503,17 @@ gpupreagg_fixup_varlena(kern_gpupreagg *kgpreagg,
 				continue;
 
 			cmeta = kds_final->colmeta[i];
-			if (cmeta.atttypid == PG_NUMERICOID)
+			if (!cmeta.attbyval)
 			{
-				assert(numeric_ptr != NULL);
-				numeric_len = pg_numeric_to_varlena(&kcxt, numeric_ptr,
-													dst_values[i],
-													dst_isnull[i]);
-				dst_values[i] = devptr_to_host(kds_final, numeric_ptr);
-				numeric_ptr += MAXALIGN(numeric_len);
-			}
-			else if (!cmeta.attbyval)
-			{
-				/* validation of the device pointer */
-				assert(dst_values[i] >= ((size_t)kds_final +
-										 kds_final->length -
-										 kds_final->usage) &&
-					   dst_values[i] <  ((size_t)kds_final +
-										 kds_final->length));
-				dst_values[i] = devptr_to_host(kds_final, dst_values[i]);
+				devptr_t	devptr = (devptr_t) dst_values[i];
+
+				assert(devptr >= dev_base &&
+					   devptr <= dev_base + (size_t)kds_final->usage);
+				dst_values[i] = (Datum)(kds_baseptr +
+										(devptr - dev_base));
 			}
 		}
 	}
-out:
-	/* write-back execution status into host-side */
-	kern_writeback_error_status(&kgpreagg->kerror, kcxt.e);
 }
 
 /*
@@ -1643,7 +1564,6 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 	if (!gpuscan_exec_quals_any(&kcxt, kresults_src, kds_src,
 								&kgpreagg->nitems_filtered))
 	{
-		printf("nitems=%u nrooms=%u, errcode = %u (k=%d l=%u)\n", kresults_src->nitems, kresults_src->nrooms, kcxt.e.errcode, (cl_uint)kcxt.e.kernel, (cl_uint)kcxt.e.lineno);
 		assert(kcxt.e.errcode != StromError_Success);
 		goto out;
 	}

@@ -1250,13 +1250,14 @@ gpuserv_try_run_pending_task(long *p_timeout)
 			}
 			else if (retval > 0)
 			{
-				/*
-				 * unable to run GpuTask due to lack of resources.
-				 * It shall try to process again after a short delay.
-				 */
+				long	delay = Max(retval - 1, 0);
 
-				/* 100ms delay until next launch */
-                gputask_pushto_pending_list(gtask, 100000);
+				/*
+				 * Request for re-execution of GpuTask by out-of-memory
+				 * in usual. If retval is larger than 1, it means GpuTask
+				 * needs some delay until next launch.
+				 */
+				gputask_pushto_pending_list(gtask, delay);
 			}
 			else
 			{

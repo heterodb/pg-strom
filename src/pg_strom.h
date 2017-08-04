@@ -98,7 +98,8 @@ typedef struct SharedGpuContext
 	dlist_node	chain;
 	PGPROC	   *server;			/* PGPROC of CUDA/GPU Server */
 	PGPROC	   *backend;		/* PGPROC of Backend Process */
-	int			ParallelWorkerNumber; /* copy of backend's local variable */
+	int			pg_worker_index;/* 0 if coordinator process. elsewhere,
+								 * ParallelWorkerNumber + 1 shall be set. */
 	pg_atomic_uint32 in_termination; /* true, if under termination state */
 	slock_t		lock;			/* lock of the field below */
 	cl_int		refcnt;			/* refcount by backend/gpu-server */
@@ -1183,4 +1184,37 @@ format_millisec(double milliseconds)
 		return psprintf("%.2fsec", milliseconds / 1000.0);
 	return psprintf("%.2fms", milliseconds);
 }
+
+/*
+ * simple wrapper for pthread_mutex_lock
+ */
+static inline void
+pthreadMutexInit(pthread_mutex_t *mutex)
+{
+	pthread_mutexattr_t mattr;
+
+	if ((errno = pthread_mutexattr_init(&mattr)) != 0)
+		wfatal("failed on pthread_mutexattr_init: %m");
+    if ((errno = pthread_mutexattr_setpshared(&mattr, 1)) != 0)
+        wfatal("failed on pthread_mutexattr_setpshared: %m");
+    if ((errno = pthread_mutex_init(mutex, &mattr)) != 0)
+        wfatal("failed on pthread_mutex_init: %m");
+	if ((errno = pthread_mutexattr_destroy(&mattr)) != 0)
+		wfatal("failed on pthread_mutexattr_destroy: %m");
+}
+
+static inline void
+pthreadMutexLock(pthread_mutex_t *mutex)
+{
+	if ((errno = pthread_mutex_lock(mutex)) != 0)
+		wfatal("failed on pthread_mutex_lock: %m");
+}
+
+static inline void
+pthreadMutexUnlock(pthread_mutex_t *mutex)
+{
+	if ((errno = pthread_mutex_unlock(mutex)) != 0)
+		wfatal("failed on pthread_mutex_unlock: %m");
+}
+
 #endif	/* PG_STROM_H */
