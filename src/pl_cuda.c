@@ -97,13 +97,6 @@ typedef struct plcudaTask
 	bool			exec_post_kernel;
 	bool			has_cpu_fallback;
 	void		   *h_results_buf;	/* results buffer in host-side */
-	CUfunction		kern_plcuda_prep;
-	CUfunction		kern_plcuda_main;
-	CUfunction		kern_plcuda_post;
-	CUdeviceptr		m_kern_plcuda;
-	CUdeviceptr		m_results_buf;
-	CUdeviceptr		m_working_buf;
-	/* TODO: performance counter here */
 	kern_plcuda		kern;
 } plcudaTask;
 
@@ -1846,86 +1839,25 @@ plcuda_function_source(PG_FUNCTION_ARGS)
 PG_FUNCTION_INFO_V1(plcuda_function_source);
 
 /*
- * plcuda_cleanup_cuda_resources
- */
-static void
-plcuda_cleanup_cuda_resources(plcudaTask *ptask)
-{
-	CUresult	rc;
-
-	if (ptask->m_kern_plcuda)
-	{
-		rc = gpuMemFree(ptask->task.gcontext, ptask->m_kern_plcuda);
-		if (rc != CUDA_SUCCESS)
-			wnotice("failed on gpuMemFree: %s", errorText(rc));
-	}
-
-	if (ptask->m_results_buf)
-	{
-		rc = gpuMemFree(ptask->task.gcontext, ptask->m_results_buf);
-		if (rc != CUDA_SUCCESS)
-			wnotice("failed on gpuMemFree: %s", errorText(rc));
-	}
-
-	if (ptask->m_working_buf)
-	{
-		rc = gpuMemFree(ptask->task.gcontext, ptask->m_working_buf);
-		if (rc != CUDA_SUCCESS)
-			wnotice("failed on gpuMemFree: %s", errorText(rc));
-	}
-	ptask->kern_plcuda_prep = NULL;
-	ptask->kern_plcuda_main = NULL;
-	ptask->kern_plcuda_post = NULL;
-	ptask->m_kern_plcuda = 0UL;
-	ptask->m_results_buf = 0UL;
-	ptask->m_working_buf = 0UL;
-}
-
-/*
- * plcuda_respond_task
- */
-static void
-plcuda_respond_task(CUstream stream, CUresult status, void *private)
-{
-	plcudaTask *ptask = private;
-	bool		is_urgent = false;
-
-	if (status == CUDA_SUCCESS)
-	{
-		if (ptask->exec_prep_kernel &&
-			ptask->kern.kerror_prep.errcode != StromError_Success)
-			ptask->task.kerror = ptask->kern.kerror_prep;
-		else if (ptask->kern.kerror_main.errcode != StromError_Success)
-			ptask->task.kerror = ptask->kern.kerror_main;
-		else if (ptask->exec_post_kernel &&
-				 ptask->kern.kerror_post.errcode != StromError_Success)
-			ptask->task.kerror = ptask->kern.kerror_post;
-	}
-	else
-	{
-		/* CUDA run-time error - not recoverable */
-		ptask->task.kerror.errcode = status;
-		ptask->task.kerror.kernel  = StromKernel_CudaRuntime;
-		ptask->task.kerror.lineno  = 0;
-		is_urgent = true;
-	}
-	gpuservCompleteGpuTask(&ptask->task, is_urgent);
-}
-
-/*
  * plcuda_process_task
  */
-static int
-__plcuda_process_task(plcudaTask *ptask,
-					  CUmodule cuda_module,
-					  CUstream cuda_stream)
+int
+plcuda_process_task(GpuTask *gtask, CUmodule cuda_module)
 {
+	plcudaTask	   *ptask = (plcudaTask *) gtask;
 	GpuContext	   *gcontext = ptask->task.gcontext;
 	void		   *kern_args[3];
 	size_t			warp_size;
 	size_t			block_size;
 	size_t			grid_size;
+	CUfunction		kern_plcuda_prep;
+	CUfunction		kern_plcuda_main;
+	CUfunction		kern_plcuda_post;
+	CUdeviceptr		m_kern_plcuda = 0UL;
+	CUdeviceptr		m_results_buf = 0UL;
+	CUdeviceptr		m_working_buf = 0UL;
 	CUresult		rc;
+	int				retval = 100001;
 
 	/* property of the device */
 	warp_size = devAttrs[gpuserv_cuda_dindex].WARP_SIZE;
@@ -1933,14 +1865,14 @@ __plcuda_process_task(plcudaTask *ptask,
 	/* plcuda_prep_kernel_entrypoint, if any */
 	if (ptask->exec_prep_kernel)
 	{
-		rc = cuModuleGetFunction(&ptask->kern_plcuda_prep,
+		rc = cuModuleGetFunction(&kern_plcuda_prep,
 								 cuda_module,
 								 "plcuda_prep_kernel_entrypoint");
 		if (rc != CUDA_SUCCESS)
 			werror("failed on cuModuleGetFunction: %s", errorText(rc));
 	}
 	/* plcuda_main_kernel_entrypoint */
-	rc = cuModuleGetFunction(&ptask->kern_plcuda_main,
+	rc = cuModuleGetFunction(&kern_plcuda_main,
 							 cuda_module,
 							 "plcuda_main_kernel_entrypoint");
 	if (rc != CUDA_SUCCESS)
@@ -1948,7 +1880,7 @@ __plcuda_process_task(plcudaTask *ptask,
 	/* plcuda_post_kernel_entrypoint */
 	if (ptask->exec_post_kernel)
 	{
-		rc = cuModuleGetFunction(&ptask->kern_plcuda_post,
+		rc = cuModuleGetFunction(&kern_plcuda_post,
 								 cuda_module,
 								 "plcuda_post_kernel_entrypoint");
 		if (rc != CUDA_SUCCESS)
@@ -1957,7 +1889,7 @@ __plcuda_process_task(plcudaTask *ptask,
 
 	/* kern_plcuda structure on the device side */
 	rc = gpuMemAlloc(gcontext,
-					 &ptask->m_kern_plcuda,
+					 &m_kern_plcuda,
 					 KERN_PLCUDA_DMASEND_LENGTH(&ptask->kern));
 	if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		goto out_of_resource;
@@ -1968,46 +1900,37 @@ __plcuda_process_task(plcudaTask *ptask,
 	if (ptask->kern.working_bufsz > 0)
 	{
 		rc = gpuMemAlloc(gcontext,
-						 &ptask->m_working_buf,
+						 &m_working_buf,
 						 ptask->kern.working_bufsz);
 		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 			goto out_of_resource;
 		else if (rc != CUDA_SUCCESS)
 			werror("failed on gpuMemAlloc: %s", errorText(rc));
 	}
-	else
-	{
-		ptask->m_working_buf = 0UL;
-	}
 
 	/* results buffer if required  */
 	if (ptask->kern.results_bufsz > 0)
 	{
 		rc = gpuMemAlloc(gcontext,
-						 &ptask->m_results_buf,
+						 &m_results_buf,
 						 ptask->kern.results_bufsz);
 		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 			goto out_of_resource;
 		else if (rc != CUDA_SUCCESS)
 			werror("failed on gpuMemAlloc: %s", errorText(rc));
 	}
-	else
-	{
-		ptask->m_results_buf = 0UL;
-	}
 
 	/* move the control block + argument buffer */
-	rc = cuMemcpyHtoDAsync(ptask->m_kern_plcuda,
-						   &ptask->kern,
-						   KERN_PLCUDA_DMASEND_LENGTH(&ptask->kern),
-						   cuda_stream);
+	rc = cuMemcpyHtoD(m_kern_plcuda,
+					  &ptask->kern,
+					  KERN_PLCUDA_DMASEND_LENGTH(&ptask->kern));
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
 
 	/* kernel arguments (common for all thress kernels) */
-	kern_args[0] = &ptask->m_kern_plcuda;
-	kern_args[1] = &ptask->m_working_buf;
-	kern_args[2] = &ptask->m_results_buf;
+	kern_args[0] = &m_kern_plcuda;
+	kern_args[1] = &m_working_buf;
+	kern_args[2] = &m_results_buf;
 
 	/* launch plcuda_prep_kernel_entrypoint */
 	if (ptask->exec_prep_kernel)
@@ -2023,19 +1946,19 @@ __plcuda_process_task(plcudaTask *ptask,
 		{
 			optimal_workgroup_size(&grid_size,
 								   &block_size,
-								   ptask->kern_plcuda_prep,
+								   kern_plcuda_prep,
 								   gpuserv_cuda_device,
 								   ptask->kern.prep_num_threads,
 								   ptask->kern.prep_shmem_blocksz,
 								   ptask->kern.prep_shmem_unitsz);
 		}
 
-		rc = cuLaunchKernel(ptask->kern_plcuda_prep,
+		rc = cuLaunchKernel(kern_plcuda_prep,
 							grid_size, 1, 1,
 							block_size, 1, 1,
 							ptask->kern.prep_shmem_blocksz +
 							ptask->kern.prep_shmem_unitsz * block_size,
-							cuda_stream,
+							NULL,
 							kern_args,
 							NULL);
 		if (rc != CUDA_SUCCESS)
@@ -2063,19 +1986,19 @@ __plcuda_process_task(plcudaTask *ptask,
 	{
 		optimal_workgroup_size(&grid_size,
 							   &block_size,
-							   ptask->kern_plcuda_main,
+							   kern_plcuda_main,
 							   gpuserv_cuda_device,
 							   ptask->kern.main_num_threads,
 							   ptask->kern.main_shmem_blocksz,
 							   ptask->kern.main_shmem_unitsz);
 	}
 
-	rc = cuLaunchKernel(ptask->kern_plcuda_main,
+	rc = cuLaunchKernel(kern_plcuda_main,
 						grid_size, 1, 1,
 						block_size, 1, 1,
 						ptask->kern.main_shmem_blocksz +
 						ptask->kern.main_shmem_unitsz * block_size,
-						cuda_stream,
+						NULL,
 						kern_args,
 						NULL);
 	if (rc != CUDA_SUCCESS)
@@ -2104,19 +2027,19 @@ __plcuda_process_task(plcudaTask *ptask,
 		{
 			optimal_workgroup_size(&grid_size,
 								   &block_size,
-								   ptask->kern_plcuda_post,
+								   kern_plcuda_post,
 								   gpuserv_cuda_device,
 								   ptask->kern.post_num_threads,
 								   ptask->kern.post_shmem_blocksz,
 								   ptask->kern.post_shmem_unitsz);
 		}
 
-		rc = cuLaunchKernel(ptask->kern_plcuda_post,
+		rc = cuLaunchKernel(kern_plcuda_post,
 							grid_size, 1, 1,
 							block_size, 1, 1,
 							ptask->kern.post_shmem_blocksz +
 							ptask->kern.post_shmem_unitsz * block_size,
-							cuda_stream,
+							NULL,
 							kern_args,
 							NULL);
 		if (rc != CUDA_SUCCESS)
@@ -2133,71 +2056,58 @@ __plcuda_process_task(plcudaTask *ptask,
 	}
 
 	/* write back the control block */
-	rc = cuMemcpyDtoHAsync(&ptask->kern,
-						   ptask->m_kern_plcuda,
-						   KERN_PLCUDA_DMARECV_LENGTH(&ptask->kern),
-						   cuda_stream);
+	rc = cuMemcpyDtoH(&ptask->kern,
+					  m_kern_plcuda,
+					  KERN_PLCUDA_DMARECV_LENGTH(&ptask->kern));
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuMemcpyDtoHAsync: %s", errorText(rc));
 
 	/* write back the result buffer, if any */
-	if (ptask->m_results_buf != 0UL)
+	if (m_results_buf != 0UL)
 	{
 		Assert(ptask->h_results_buf != NULL);
-		rc = cuMemcpyDtoHAsync(ptask->h_results_buf,
-							   ptask->m_results_buf,
-							   ptask->kern.results_bufsz,
-							   cuda_stream);
+		rc = cuMemcpyDtoH(ptask->h_results_buf,
+						  m_results_buf,
+						  ptask->kern.results_bufsz);
 		if (rc != CUDA_SUCCESS)
 			werror("failed on cuMemcpyDtoHAsync: %s", errorText(rc));
 	}
 
-	/* callback registration */
-	rc = cuStreamAddCallback(cuda_stream,
-							 plcuda_respond_task,
-							 ptask, 0);
-	if (rc != CUDA_SUCCESS)
-		werror("cuStreamAddCallback: %s", errorText(rc));
-	return 0;
+	/* check kernel execution status */
+	memset(&ptask->task.kerror, 0, sizeof(kern_errorbuf));
+	if (ptask->exec_prep_kernel &&
+		ptask->kern.kerror_prep.errcode != StromError_Success)
+		ptask->task.kerror = ptask->kern.kerror_prep;
+	else if (ptask->kern.kerror_main.errcode != StromError_Success)
+		ptask->task.kerror = ptask->kern.kerror_main;
+	else if (ptask->exec_post_kernel &&
+			 ptask->kern.kerror_post.errcode != StromError_Success)
+		ptask->task.kerror = ptask->kern.kerror_post;
+
+	retval = 0;
 
 out_of_resource:
-	plcuda_cleanup_cuda_resources(ptask);
-	return 1;	/* retry later */
-}
-
-int
-plcuda_process_task(GpuTask *gtask,
-					CUmodule cuda_module,
-					CUstream cuda_stream)
-{
-	plcudaTask *ptask = (plcudaTask *) gtask;
-	int			retval;
-
-	STROM_TRY();
+	if (m_kern_plcuda != 0UL)
 	{
-		retval = __plcuda_process_task(ptask, cuda_module, cuda_stream);
+		rc = gpuMemFree(ptask->task.gcontext, m_kern_plcuda);
+		if (rc != CUDA_SUCCESS)
+			werror("failed on gpuMemFree: %s", errorText(rc));
 	}
-	STROM_CATCH();
-	{
-		plcuda_cleanup_cuda_resources((plcudaTask *) gtask);
-		STROM_RE_THROW();
-	}
-	STROM_END_TRY();
 
+	if (m_results_buf != 0UL)
+	{
+		rc = gpuMemFree(ptask->task.gcontext, m_results_buf);
+		if (rc != CUDA_SUCCESS)
+			werror("failed on gpuMemFree: %s", errorText(rc));
+	}
+
+	if (m_working_buf != 0UL)
+	{
+		rc = gpuMemFree(ptask->task.gcontext, m_working_buf);
+		if (rc != CUDA_SUCCESS)
+			werror("failed on gpuMemFree: %s", errorText(rc));
+	}
 	return retval;
-}
-
-/*
- * plcuda_complete_task
- */
-int
-plcuda_complete_task(GpuTask *gtask)
-{
-	plcudaTask	   *ptask = (plcudaTask *) gtask;
-
-	plcuda_cleanup_cuda_resources(ptask);
-
-	return 0;
 }
 
 /*

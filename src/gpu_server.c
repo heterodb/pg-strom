@@ -1228,9 +1228,7 @@ gpuserv_try_run_pending_task(long *p_timeout)
 			 *      without message back. So, it shall be released and
 			 *      noticed to the backend which may wait for response.
 			 */
-			retval = pgstromProcessGpuTask(gtask,
-										   gmod_cache->cuda_module,
-										   NULL);
+			retval = pgstromProcessGpuTask(gtask, gmod_cache->cuda_module);
 			putGpuModuleCache(gmod_cache);
 			if (pg_atomic_read_u32(&shgcon->in_termination) != 0)
 				retval = -1;

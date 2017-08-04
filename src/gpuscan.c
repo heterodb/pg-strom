@@ -2881,9 +2881,7 @@ gpuscanRewindScanChunk(GpuTaskState *gts)
  * gpuscan_process_task
  */
 int
-gpuscan_process_task(GpuTask *gtask,
-					 CUmodule cuda_module,
-					 CUstream cuda_stream)
+gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 {
 	GpuScanTask	   *gscan = (GpuScanTask *) gtask;
 	pgstrom_data_store *pds_src = gscan->pds_src;

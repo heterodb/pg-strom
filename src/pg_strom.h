@@ -648,9 +648,7 @@ extern void pgstromExplainOuterScan(GpuTaskState *gts,
 									int outer_plan_width);
 
 extern void pgstromInitGpuTask(GpuTaskState *gts, GpuTask *gtask);
-extern int	pgstromProcessGpuTask(GpuTask *gtask,
-								  CUmodule cuda_module,
-								  CUstream cuda_stream);
+extern int	pgstromProcessGpuTask(GpuTask *gtask, CUmodule cuda_module);
 extern void pgstromReleaseGpuTask(GpuTask *gtask);
 
 extern const char *__errorText(int errcode, const char *filename, int lineno);
@@ -849,9 +847,7 @@ extern void ExecGpuScanInitDSM(CustomScanState *node,
 extern void ExecGpuScanInitWorker(CustomScanState *node,
 								  shm_toc *toc,
 								  void *coordinate);
-extern int	gpuscan_process_task(GpuTask *gtask,
-								 CUmodule cuda_module,
-								 CUstream cuda_stream);
+extern int	gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module);
 extern void gpuscan_release_task(GpuTask *gtask);
 extern void assign_gpuscan_session_info(StringInfo buf,
 										GpuTaskState *gts);
@@ -862,9 +858,7 @@ extern void pgstrom_init_gpuscan(void);
  */
 extern bool pgstrom_path_is_gpujoin(Path *pathnode);
 extern bool pgstrom_plan_is_gpujoin(const Plan *plannode);
-extern int	gpujoin_process_task(GpuTask *gtask,
-								 CUmodule cuda_module,
-								 CUstream cuda_stream);
+extern int	gpujoin_process_task(GpuTask *gtask, CUmodule cuda_module);
 extern void	gpujoin_release_task(GpuTask *gtask);
 extern void assign_gpujoin_session_info(StringInfo buf,
 										GpuTaskState *gts);
@@ -877,9 +871,7 @@ extern void	pgstrom_init_gpujoin(void);
  */
 extern bool pgstrom_plan_is_gpupreagg(const Plan *plan);
 extern void gpupreagg_post_planner(PlannedStmt *pstmt, CustomScan *cscan);
-extern int	gpupreagg_process_task(GpuTask *gtask,
-								   CUmodule cuda_module,
-								   CUstream cuda_stream);
+extern int	gpupreagg_process_task(GpuTask *gtask, CUmodule cuda_module);
 extern void	gpupreagg_release_task(GpuTask *gtask);
 extern void assign_gpupreagg_session_info(StringInfo buf,
 										  GpuTaskState *gts);
@@ -893,10 +885,7 @@ extern Datum pltext_function_handler(PG_FUNCTION_ARGS);
 extern Datum plcuda_function_validator(PG_FUNCTION_ARGS);
 extern Datum plcuda_function_handler(PG_FUNCTION_ARGS);
 extern Datum plcuda_function_source(PG_FUNCTION_ARGS);
-extern int	plcuda_process_task(GpuTask *gtask,
-								CUmodule cuda_module,
-								CUstream cuda_stream);
-extern int  plcuda_complete_task(GpuTask *gtask);
+extern int	plcuda_process_task(GpuTask *gtask, CUmodule cuda_module);
 extern void plcuda_release_task(GpuTask *gtask);
 extern void pgstrom_init_plcuda(void);
 
