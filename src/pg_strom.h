@@ -742,8 +742,7 @@ extern void init_kernel_data_store(kern_data_store *kds,
 								   TupleDesc tupdesc,
 								   Size length,
 								   int format,
-								   uint nrooms,
-								   bool use_internal);
+								   uint nrooms);
 
 extern pgstrom_data_store *PDS_create_row(GpuContext *gcontext,
 										  TupleDesc tupdesc,
@@ -751,8 +750,7 @@ extern pgstrom_data_store *PDS_create_row(GpuContext *gcontext,
 extern pgstrom_data_store *PDS_create_slot(GpuContext *gcontext,
 										   TupleDesc tupdesc,
 										   cl_uint nrooms,
-										   Size extra_length,
-										   bool use_internal);
+										   Size extra_length);
 extern pgstrom_data_store *PDS_duplicate_slot(GpuContext *gcontext,
 											  kern_data_store *kds_head,
 											  cl_uint nrooms,

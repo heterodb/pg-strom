@@ -468,22 +468,16 @@ pg_numeric_to_varlena(kern_context *kcxt, char *vl_buffer,
  * to reference varlena variable. Otherwise, in case when attlen > 0, it
  * tries to fetch fixed-length variable.
  */
-STATIC_FUNCTION(pg_numeric_t)
+STATIC_INLINE(pg_numeric_t)
 pg_numeric_datum_ref(kern_context *kcxt,
-					 void *datum,
-					 cl_bool internal_format)
+					 void *datum)
 {
 	pg_numeric_t	result;
 
 	if (!datum)
 		result.isnull = true;
-	else if (!internal_format)
-		result = pg_numeric_from_varlena(kcxt, (varlena *) datum);
 	else
-	{
-		result.isnull = false;
-		result.value = *((cl_ulong *) datum);
-	}
+		result = pg_numeric_from_varlena(kcxt, (varlena *) datum);
 	return result;
 }
 
@@ -494,13 +488,12 @@ pg_numeric_vref(kern_data_store *kds,
 				cl_uint rowidx)
 {
 	void	   *datum = kern_get_datum(kds,colidx,rowidx);
-	cl_bool		internal_format = (kds->colmeta[colidx].attlen > 0);
 
-	return pg_numeric_datum_ref(kcxt,datum,internal_format);
+	return pg_numeric_datum_ref(kcxt,datum);
 }
 
 /* pg_numeric_vstore() is same as template */
-STROMCL_SIMPLE_VARSTORE_TEMPLATE(numeric, cl_ulong)
+STROMCL_VARLENA_VARSTORE_TEMPLATE(numeric)
 
 STATIC_FUNCTION(pg_numeric_t)
 pg_numeric_param(kern_context *kcxt,

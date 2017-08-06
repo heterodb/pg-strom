@@ -2355,8 +2355,7 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 						   scan_tupdesc,
 						   pgstrom_chunk_size(),
 						   KDS_FORMAT_ROW,
-						   INT_MAX,
-						   false);
+						   INT_MAX);
 	/*
 	 * run-time statistics shall be initialized on the first call of
 	 * executor or DSM initialization if parallel query
@@ -3039,7 +3038,7 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 		appendStringInfo(
 			source,
 			"  datum = GPUJOIN_REF_DATUM(colmeta,htup,%u);\n"
-			"  KVAR_%u = pg_%s_datum_ref(kcxt,datum,false);\n",
+			"  KVAR_%u = pg_%s_datum_ref(kcxt,datum);\n",
 			keynode->varattno - 1,
 			keynode->varoattno,
 			dtype->type_name);
@@ -3486,7 +3485,7 @@ gpujoin_codegen_projection(StringInfo source,
 					dst_num);
 				appendStringInfo(
 					&temp,
-					"  KVAR_%u = pg_%s_datum_ref(kcxt, addr, false);\n",
+					"  KVAR_%u = pg_%s_datum_ref(kcxt,addr);\n",
 					dst_num,
 					dtype->type_name);
 
@@ -4123,8 +4122,7 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs,
 		pds_dst = PDS_create_slot(gjs->gts.gcontext,
 								  tupdesc,
 								  nrooms,
-								  gjs->extra_maxlen * nrooms,
-								  false);
+								  gjs->extra_maxlen * nrooms);
 	}
 	else
 	{

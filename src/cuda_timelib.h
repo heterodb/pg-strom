@@ -195,6 +195,13 @@ STATIC_INLINE(Datum)
 pg_date_to_datum(DateADT value)
 {
 	return pg_int4_to_datum(value);
+}			
+STATIC_INLINE(void)
+pg_date_vstore(cl_bool *isnull, Datum *value, void *addr)
+{
+	*isnull = !addr;
+	if (addr)
+		*value = (Datum)SET_4_BYTES(*((DateADT *)addr));
 }
 #endif
 
@@ -205,6 +212,13 @@ STATIC_INLINE(Datum)
 pg_time_to_datum(TimeADT value)
 {
 	return pg_int8_to_datum(value);
+}
+STATIC_INLINE(void)
+pg_time_vstore(cl_bool *isnull, Datum *value, void *addr)
+{
+	*isnull = !addr;
+	if (addr)
+		*value = (Datum)SET_8_BYTES(*((TimeADT *)addr));
 }
 #endif
 
@@ -221,6 +235,13 @@ pg_timestamp_to_datum(Timestamp value)
 {
 	return pg_int8_to_datum(value);
 }
+STATIC_INLINE(void)
+pg_timestamp_vstore(cl_bool *isnull, Datum *value, void *addr)
+{
+	*isnull = !addr;
+	if (addr)
+		*value = (Datum)SET_8_BYTES(*((Timestamp *)addr));
+}
 #endif
 
 #ifndef PG_TIMESTAMPTZ_TYPE_DEFINED
@@ -230,6 +251,13 @@ STATIC_INLINE(Datum)
 pg_timestamptz_to_datum(TimestampTz value)
 {
 	return pg_int8_to_datum(value);
+}
+STATIC_INLINE(void)
+pg_timestamptz_vstore(cl_bool *isnull, Datum *value, void *addr)
+{
+	*isnull = !addr;
+	if (addr)
+		*value = (Datum)SET_8_BYTES(*((TimestampTz *)addr));
 }
 #endif
 

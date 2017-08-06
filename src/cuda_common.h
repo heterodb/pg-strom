@@ -71,8 +71,14 @@ typedef double				cl_double;
 typedef cl_ulong	hostptr_t;
 typedef size_t		devptr_t;
 typedef cl_ulong	Datum;
-#define PointerGetDatum(X)		((Datum) (X))
-#define DatumGetPointer(X)		((char *) (X))
+
+#define PointerGetDatum(X)	((Datum) (X))
+#define DatumGetPointer(X)	((char *) (X))
+
+#define SET_1_BYTE(value)	(((Datum) (value)) & 0x000000ff)
+#define SET_2_BYTES(value)	(((Datum) (value)) & 0x0000ffff)
+#define SET_4_BYTES(value)	(((Datum) (value)) & 0xffffffff)
+#define SET_8_BYTES(value)	((Datum) (value))
 
 #define INT64CONST(x)	((cl_long) x##L)
 #define UINT64CONST(x)	((cl_ulong) x##UL)
@@ -644,7 +650,6 @@ typedef struct {
 	cl_uint			nrooms;		/* number of available rows in this store */
 	cl_char			format;		/* one of KDS_FORMAT_* above */
 	cl_char			has_notbyval; /* true, if any of column is !attbyval */
-	cl_char			has_numeric;/* true, if any of column is numeric */
 	cl_char			tdhasoid;	/* copy of TupleDesc.tdhasoid */
 	cl_uint			tdtypeid;	/* copy of TupleDesc.tdtypeid */
 	cl_int			tdtypmod;	/* copy of TupleDesc.tdtypmod */
@@ -892,30 +897,6 @@ typedef struct {
 STATIC_INLINE(void *)
 kern_get_datum(kern_data_store *kds,
 			   cl_uint colidx, cl_uint rowidx);
-
-/*
- * common function to store a value on tuple-slot format
- */
-STATIC_FUNCTION(void)
-pg_common_vstore(kern_data_store *kds,
-				 kern_context *kcxt,
-				 cl_uint colidx, cl_uint rowidx,
-				 Datum pg_value, cl_bool pg_isnull)
-{
-	if (kds->format != KDS_FORMAT_SLOT)
-		STROM_SET_ERROR(&kcxt->e, StromError_SanityCheckViolation);
-	else if (colidx >= kds->ncols || rowidx >= kds->nitems)
-		STROM_SET_ERROR(&kcxt->e, StromError_DataStoreOutOfRange);
-	else
-	{
-		Datum	   *ts_values = KERN_DATA_STORE_VALUES(kds, rowidx);
-		cl_bool	   *ts_isnull = KERN_DATA_STORE_ISNULL(kds, rowidx);
-
-		ts_isnull[colidx] = pg_isnull;
-		ts_values[colidx] = pg_value;
-	}
-}
-
 /*
  * Template of variable classes: fixed-length referenced by value
  * ---------------------------------------------------------------
@@ -927,10 +908,9 @@ pg_common_vstore(kern_data_store *kds,
 	} pg_##NAME##_t;
 
 #define STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE)			\
-	STATIC_FUNCTION(pg_##NAME##_t)							\
+	STATIC_INLINE(pg_##NAME##_t)							\
 	pg_##NAME##_datum_ref(kern_context *kcxt,				\
-						  void *datum,						\
-						  cl_bool internal_format)			\
+						  void *datum)						\
 	{														\
 		pg_##NAME##_t	result;								\
 															\
@@ -951,26 +931,7 @@ pg_common_vstore(kern_data_store *kds,
 					 cl_uint rowidx)						\
 	{														\
 		void  *datum = kern_get_datum(kds,colidx,rowidx);	\
-		return pg_##NAME##_datum_ref(kcxt,datum,false);		\
-	}
-
-#define STROMCL_SIMPLE_VARSTORE_TEMPLATE(NAME,BASE)			\
-	STATIC_FUNCTION(void)									\
-	pg_##NAME##_vstore(kern_data_store *kds,				\
-					   kern_context *kcxt,					\
-					   cl_uint colidx,						\
-					   cl_uint rowidx,						\
-					   pg_##NAME##_t pg_datum)				\
-	{														\
-		union {												\
-			BASE		v_base;								\
-			Datum		v_datum;							\
-		} temp;												\
-															\
-		temp.v_datum = 0UL;									\
-		temp.v_base = pg_datum.value;						\
-		pg_common_vstore(kds, kcxt, colidx, rowidx,			\
-						 temp.v_datum, pg_datum.isnull);	\
+		return pg_##NAME##_datum_ref(kcxt,datum);			\
 	}
 
 #define STROMCL_SIMPLE_PARAMREF_TEMPLATE(NAME,BASE)			\
@@ -1021,10 +982,9 @@ pg_common_vstore(kern_data_store *kds,
  * ----------------------------------------------------------------
  */
 #define STROMCL_INDIRECT_VARREF_TEMPLATE(NAME,BASE)			\
-	STATIC_FUNCTION(pg_##NAME##_t)							\
+	STATIC_INLINE(pg_##NAME##_t)							\
 	pg_##NAME##_datum_ref(kern_context *kcxt,				\
-						  void *datum,						\
-						  cl_bool internal_format)			\
+						  void *datum)						\
 	{														\
 		pg_##NAME##_t	result;								\
 															\
@@ -1046,19 +1006,17 @@ pg_common_vstore(kern_data_store *kds,
 					 cl_uint rowidx)						\
 	{														\
 		void  *datum = kern_get_datum(kds,colidx,rowidx);	\
-		return pg_##NAME##_datum_ref(kcxt,datum,false);		\
+		return pg_##NAME##_datum_ref(kcxt,datum);			\
 	}
 
 #define STROMCL_INDIRECT_VARSTORE_TEMPLATE(NAME,BASE)		\
-	STATIC_FUNCTION(void)									\
-	pg_##NAME##_vstore(kern_data_store *kds,				\
-					   kern_context *kcxt,					\
-					   cl_uint colidx,						\
-					   cl_uint rowidx,						\
-					   pg_##NAME##_t pg_datum)				\
+	STATIC_INLINE(void)										\
+	pg_##NAME##_vstore(cl_bool *isnull,						\
+					   Datum *value,						\
+					   void *addr)							\
 	{														\
-		/* should not be used at this moment */				\
-		assert(0);											\
+		*isnull = !addr;									\
+		*value = PointerGetDatum(addr);						\
 	}
 
 #define STROMCL_INDIRECT_PARAMREF_TEMPLATE(NAME,BASE)		\
@@ -1129,7 +1087,6 @@ pg_common_comp_crc32(const cl_uint *crc32_table,
 #define STROMCL_SIMPLE_TYPE_TEMPLATE(NAME,BASE)		\
 	STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME,BASE)		\
 	STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE)		\
-	STROMCL_SIMPLE_VARSTORE_TEMPLATE(NAME,BASE)		\
 	STROMCL_SIMPLE_PARAMREF_TEMPLATE(NAME,BASE)		\
 	STROMCL_SIMPLE_NULLTEST_TEMPLATE(NAME)			\
 	STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(NAME,BASE)
@@ -1156,6 +1113,13 @@ pg_bool_to_datum(cl_bool value)
 {
 	return (Datum)(value ? true : false);
 }
+STATIC_INLINE(void)
+pg_bool_vstore(cl_bool *isnull, Datum *value, void *addr)
+{
+	*isnull = !addr;
+	if (addr)
+		*value = (Datum)(*((cl_bool *)addr) ? 1 : 0);
+}
 #endif
 
 /* pg_int2_t */
@@ -1166,6 +1130,13 @@ STATIC_INLINE(Datum)
 pg_int2_to_datum(cl_short value)
 {
 	return (Datum)(((Datum) value) & 0x0000ffffUL);
+}
+STATIC_INLINE(void)
+pg_int2_vstore(cl_bool *isnull, Datum *value, void *addr)
+{
+	*isnull = !addr;
+	if (addr)
+		*value = (Datum) SET_2_BYTES(*((cl_short *)addr));
 }
 #endif
 
@@ -1178,6 +1149,13 @@ pg_int4_to_datum(cl_int value)
 {
 	return (Datum)(((Datum) value) & 0xffffffffUL);
 }
+STATIC_INLINE(void)
+pg_int4_vstore(cl_bool *isnull, Datum *value, void *addr)
+{
+	*isnull = !addr;
+	if (addr)
+		*value = (Datum) SET_4_BYTES(*((cl_int *)addr));
+}
 #endif
 
 /* pg_int8_t */
@@ -1188,6 +1166,13 @@ STATIC_INLINE(Datum)
 pg_int8_to_datum(cl_long value)
 {
 	return (Datum)(value);
+}
+STATIC_INLINE(void)
+pg_int8_vstore(cl_bool *isnull, Datum *value, void *addr)
+{
+	*isnull = !addr;
+	if (addr)
+		*value = (Datum)SET_8_BYTES(*((cl_long *)addr));
 }
 #endif
 
@@ -1200,6 +1185,13 @@ pg_float4_to_datum(cl_float value)
 {
 	return (Datum)((Datum)__float_as_int(value) & 0xffffffffUL);
 }
+STATIC_INLINE(void)
+pg_float4_vstore(cl_bool *isnull, Datum *value, void *addr)
+{
+	*isnull = !addr;
+	if (addr)
+		*value = (Datum)SET_4_BYTES(__float_as_int(*((cl_float *)addr)));
+}
 #endif
 
 /* pg_float8_t */
@@ -1210,6 +1202,13 @@ STATIC_INLINE(Datum)
 pg_float8_to_datum(cl_double value)
 {
 	return (Datum)__double_as_longlong(value);
+}
+STATIC_INLINE(void)
+pg_float8_vstore(cl_bool *isnull, Datum *value, void *addr)
+{
+	*isnull = !addr;
+	if (addr)
+		*value = (Datum)SET_8_BYTES(__double_as_longlong(*((cl_double *)addr)));
 }
 #endif
 
@@ -1589,8 +1588,7 @@ STROMCL_SIMPLE_DATATYPE_TEMPLATE(varlena, varlena *)
 
 STATIC_FUNCTION(pg_varlena_t)
 pg_varlena_datum_ref(kern_context *kcxt,
-					 void *datum,
-					 cl_bool internal_format)
+					 void *datum)
 {
 	varlena		   *vl_val = (varlena *) datum;
 	pg_varlena_t	result;
@@ -1621,7 +1619,7 @@ pg_varlena_vref(kern_data_store *kds,
 {
 	void   *datum = kern_get_datum(kds,colidx,rowidx);
 
-	return pg_varlena_datum_ref(kcxt,datum,false);
+	return pg_varlena_datum_ref(kcxt,datum);
 }
 
 STATIC_FUNCTION(pg_varlena_t)
@@ -1674,10 +1672,9 @@ pg_varlena_comp_crc32(const cl_uint *crc32_table,
 #define STROMCL_VARLENA_VARREF_TEMPLATE(NAME)				\
 	STATIC_INLINE(pg_##NAME##_t)							\
 	pg_##NAME##_datum_ref(kern_context *kcxt,				\
-						  void *datum,						\
-						  cl_bool internal_format)			\
+						  void *datum)						\
 	{														\
-		return pg_varlena_datum_ref(kcxt,datum,internal_format);	\
+		return pg_varlena_datum_ref(kcxt,datum);			\
 	}														\
 															\
 	STATIC_INLINE(pg_##NAME##_t)							\
@@ -1687,11 +1684,11 @@ pg_varlena_comp_crc32(const cl_uint *crc32_table,
 					 cl_uint rowidx)						\
 	{														\
 		void  *datum = kern_get_datum(kds,colidx,rowidx);	\
-		return pg_varlena_datum_ref(kcxt,datum,false);		\
+		return pg_varlena_datum_ref(kcxt,datum);			\
 	}
 
 #define STROMCL_VARLENA_VARSTORE_TEMPLATE(NAME)				\
-	STROMCL_SIMPLE_VARSTORE_TEMPLATE(NAME,varlena *)
+	STROMCL_INDIRECT_VARSTORE_TEMPLATE(NAME,varlena *)
 
 #define STROMCL_VARLENA_PARAMREF_TEMPLATE(NAME)						\
 	STATIC_INLINE(pg_##NAME##_t)									\

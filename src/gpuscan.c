@@ -705,7 +705,7 @@ codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
 				appendStringInfo(
 					kern,
 					"  Datum datum = kern_getsysatt_%s(kds,htup,t_self);\n"
-					"  pg_%s_t %s_S%u = pg_%s_datum_ref(kcxt,&datum,false);\n",
+					"  pg_%s_t %s_S%u = pg_%s_datum_ref(kcxt,&datum);\n",
 					NameStr(sysatt->attname),
 					dtype->type_name,
 					context->var_label,
@@ -717,7 +717,7 @@ codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
 				appendStringInfo(
 					kern,
 					"  void *addr = kern_get_datum_tuple(kds->colmeta,htup,%u);\n"
-					"  pg_%s_t %s_%u = pg_%s_datum_ref(kcxt,addr,false);\n",
+					"  pg_%s_t %s_%u = pg_%s_datum_ref(kcxt,addr);\n",
 					var->varattno - 1,
 					dtype->type_name,
 					context->var_label,
@@ -784,7 +784,7 @@ codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
 				appendStringInfo(
 					kern,
 					"  datum = kern_getsysatt_%s(kds,htup,t_self);\n"
-					"  %s_S%u = pg_%s_datum_ref(kcxt,&datum,false);\n",
+					"  %s_S%u = pg_%s_datum_ref(kcxt,&datum);\n",
 					NameStr(sysatt->attname),
 					context->var_label,
 					-anum,
@@ -812,7 +812,7 @@ codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
 
 					appendStringInfo(
 						kern,
-						"  %s_%u = pg_%s_datum_ref(kcxt, addr, false);\n",
+						"  %s_%u = pg_%s_datum_ref(kcxt,addr);\n",
 						context->var_label,
 						var->varattno,
 						dtype->type_name);
@@ -972,7 +972,7 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 			appendStringInfo(
 				&body,
 				"  datum = kern_getsysatt_%s(kds_src,htup,t_self);\n"
-				"  KVAR_S%u = pg_%s_datum_ref(kcxt,&datum,false);\n",
+				"  KVAR_S%u = pg_%s_datum_ref(kcxt,&datum);\n",
 				NameStr(attr->attname),
 				-attr->attnum, dtype->type_name);
 		}
@@ -1061,7 +1061,7 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 		{
 			appendStringInfo(
 				&temp,
-				"  KVAR_%u = pg_%s_datum_ref(kcxt, curr, false);\n",
+				"  KVAR_%u = pg_%s_datum_ref(kcxt,curr);\n",
 				attr->attnum,
 				dtype->type_name);
 			referenced = true;
@@ -2397,8 +2397,7 @@ gpuscan_create_task(GpuScanState *gss,
 		pds_dst = PDS_create_slot(gcontext,
 								  scan_tupdesc,
 								  ntuples,
-								  gss->proj_slot_extra * ntuples,
-								  false);
+								  gss->proj_slot_extra * ntuples);
 	}
 
 	/*

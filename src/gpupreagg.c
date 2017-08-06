@@ -2690,7 +2690,6 @@ gpupreagg_codegen_projection(StringInfo kern,
 			if (bms_is_member(k, outer_refs_any))
 			{
 				devtype_info   *dtype;
-				char		   *kvarname;
 
 				/* data type of the outer relation input stream */
 				if (outer_tlist == NIL)
@@ -2716,10 +2715,8 @@ gpupreagg_codegen_projection(StringInfo kern,
 				}
 
 				/*
-				 * MEMO: kds_src is either ROW or BLOCK format, so these KDS
-				 * shall never has 'internal' format of NUMERIC data types.
-				 * We don't need to pay attention to read internal-numeric
-				 * here.
+				 * KVAR_x must be set up if variables are referenced by
+				 * expressions.
 				 */
 				if (bms_is_member(k, outer_refs_expr))
 				{
@@ -2729,17 +2726,8 @@ gpupreagg_codegen_projection(StringInfo kern,
 						dtype->type_name, i);
 					appendStringInfo(
 						&temp,
-						"  KVAR_%u = pg_%s_datum_ref(kcxt,addr,false);\n",
+						"  KVAR_%u = pg_%s_datum_ref(kcxt,addr);\n",
 						i, dtype->type_name);
-					kvarname = psprintf("KVAR_%u", i);
-				}
-				else
-				{
-					appendStringInfo(
-                        &temp,
-						"  temp.%s_v = pg_%s_datum_ref(kcxt,addr,false);\n",
-						dtype->type_name, dtype->type_name);
-					kvarname = psprintf("temp.%s_v", dtype->type_name);
 				}
 
 				foreach (lc, tlist_dev_alt)
@@ -2763,15 +2751,9 @@ gpupreagg_codegen_projection(StringInfo kern,
 
 					appendStringInfo(
 						&temp,
-						"  dst_isnull[%d] = %s.isnull;\n"
-						"  if (!%s.isnull)\n"
-						"    dst_values[%d] = pg_%s_to_datum(%s.value);\n",
-						tle->resno - 1, kvarname,
-						kvarname,
-						tle->resno - 1, dtype->type_name, kvarname);
+						"  pg_%s_vstore(dst_isnull+%d,dst_values+%d,addr);\n",
+						dtype->type_name, tle->resno - 1, tle->resno - 1);
 				}
-				pfree(kvarname);
-
 				appendStringInfoString(&body, temp.data);
                 resetStringInfo(&temp);
 			}
@@ -3877,8 +3859,7 @@ createGpuPreAggSharedState(GpuPreAggState *gpas)
 						   gpa_tupdesc,
 						   length,
 						   KDS_FORMAT_SLOT,
-						   nrooms,
-						   false);
+						   nrooms);
 	pos += MAXALIGN(offsetof(kern_data_store,
 							 colmeta[gpa_tupdesc->natts]));
 	gpa_sstate->f_nitems = (cl_uint *) pos;
@@ -4070,8 +4051,7 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 						   gpa_tupdesc,
 						   kds_len,
 						   KDS_FORMAT_SLOT,
-						   nitems_real,
-						   false);
+						   nitems_real);
 	pthreadMutexLock(&gpa_sstate->mutex);
 	gpa_sstate->nr_tasks[gcontext->gpuserv_id]++;
 	pthreadMutexUnlock(&gpa_sstate->mutex);
@@ -4644,6 +4624,10 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuLaunchKernel: %s", errorText(rc));
 
+	rc = cuStreamSynchronize(NULL);
+	if (rc != CUDA_SUCCESS)
+		werror("failed on cuStreamSynchronize: %s", errorText(rc));
+
 	/* DMA Recv of individual kern_gpreagg */
 	length = KERN_GPUPREAGG_DMARECV_LENGTH(&gpreagg->kern);
 	rc = cuMemcpyDtoH(&gpreagg->kern,
@@ -4651,7 +4635,6 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 					  length);
 	if (rc != CUDA_SUCCESS)
 	{
-		Assert(false);
 		werror("failed on cuMemcpyDtoH: %s", errorText(rc));
 	}
 

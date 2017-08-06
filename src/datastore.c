@@ -321,8 +321,7 @@ init_kernel_data_store(kern_data_store *kds,
 					   TupleDesc tupdesc,
 					   Size length,
 					   int format,
-					   uint nrooms,
-					   bool use_internal)
+					   uint nrooms)
 {
 	int		i, attcacheoff;
 
@@ -357,16 +356,6 @@ init_kernel_data_store(kern_data_store *kds,
 
 		if (!attr->attbyval)
 			kds->has_notbyval = true;
-		if (attr->atttypid == NUMERICOID)
-		{
-			kds->has_numeric = true;
-			if (use_internal)
-			{
-				attbyval = true;
-				attlen = sizeof(cl_long);
-			}
-		}
-
 		if (attcacheoff > 0)
 		{
 			if (attlen > 0)
@@ -564,7 +553,7 @@ PDS_create_row(GpuContext *gcontext, TupleDesc tupdesc, Size length)
 	 * determine 'nrooms' preliminary, so INT_MAX instead.
 	 */
 	init_kernel_data_store(&pds->kds, tupdesc, kds_length,
-						   KDS_FORMAT_ROW, INT_MAX, false);
+						   KDS_FORMAT_ROW, INT_MAX);
 	pds->nblocks_uncached = 0;
 	pds->ntasks_running = 0;
 
@@ -575,8 +564,7 @@ pgstrom_data_store *
 PDS_create_slot(GpuContext *gcontext,
 				TupleDesc tupdesc,
 				cl_uint nrooms,
-				Size extra_length,
-				bool use_internal)
+				Size extra_length)
 {
 	pgstrom_data_store *pds;
 	size_t			kds_length;
@@ -592,7 +580,7 @@ PDS_create_slot(GpuContext *gcontext,
 	pg_atomic_init_u32(&pds->refcnt, 1);
 
 	init_kernel_data_store(&pds->kds, tupdesc, kds_length,
-						   KDS_FORMAT_SLOT, nrooms, use_internal);
+						   KDS_FORMAT_SLOT, nrooms);
 	pds->nblocks_uncached = 0;
 	pds->ntasks_running = 0;
 
@@ -650,7 +638,7 @@ PDS_create_hash(GpuContext *gcontext,
 	pg_atomic_init_u32(&pds->refcnt, 1);
 
 	init_kernel_data_store(&pds->kds, tupdesc, kds_length,
-						   KDS_FORMAT_HASH, INT_MAX, false);
+						   KDS_FORMAT_HASH, INT_MAX);
 	pds->nblocks_uncached = 0;
 	pds->ntasks_running = 0;
 
@@ -682,7 +670,7 @@ PDS_create_block(GpuContext *gcontext,
 	pg_atomic_init_u32(&pds->refcnt, 1);
 
 	init_kernel_data_store(&pds->kds, tupdesc, kds_length,
-						   KDS_FORMAT_BLOCK, nrooms, false);
+						   KDS_FORMAT_BLOCK, nrooms);
 	pds->kds.nrows_per_block = nvme_sstate->nrows_per_block;
 	pds->nblocks_uncached = 0;
 	pds->ntasks_running = 0;
