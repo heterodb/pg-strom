@@ -165,9 +165,10 @@ typedef struct
 	cl_uint				n_tasks_local;	/* num of local reduction tasks */
 	cl_uint				n_tasks_global;	/* num of global reduction tasks */
 	cl_uint				n_tasks_final;	/* num of final reduction tasks */
+	size_t				exec_pg_nworkers;/* num of parallel workers */
 	size_t				exec_nrows_in;	/* num of outer rows actually */
-	size_t				exec_nrows_filtered; /* num of outer rows filtered by
-											  * outer quals if any */
+	size_t				exec_nfiltered;	/* num of outer rows filtered by
+										 * outer quals if any */
 	size_t				plan_ngroups;	/* num of groups planned */
 } GpuPreAggSharedState;
 
@@ -3560,7 +3561,6 @@ ExecEndGpuPreAgg(CustomScanState *node)
 {
 	GpuPreAggState *gpas = (GpuPreAggState *) node;
 	GpuPreAggSharedState *gpa_sstate = gpas->gpa_sstate;
-	Instrumentation	   *outer_instrument = &gpas->gts.outer_instrument;
 
 	if (gpas->num_fallback_rows > 0)
 		elog(WARNING, "GpuPreAgg processed %lu rows by CPU fallback",
@@ -3571,23 +3571,12 @@ ExecEndGpuPreAgg(CustomScanState *node)
 	/* clean up subtree, if any */
 	if (outerPlanState(node))
 		ExecEndNode(outerPlanState(node));
-
-	/*
-	 * contents of outer_instrument shall be written back to the master
-	 * backend using shared profile structure later.
-	 * However, number of valid rows (which means rows used for reduction
-	 * steps) and filtered rows are not correctly tracked because we cannot
-	 * know exact number of rows on the scan time if BLOCK format.
-	 * So, we need to update the outer_instrument based on GpuPreAgg specific
-	 * knowledge.
-	 */
+	/* update statistics */
 	if (gpa_sstate)
 	{
-		outer_instrument->tuplecount = 0;
-		outer_instrument->ntuples = gpa_sstate->exec_nrows_in;
-		outer_instrument->nfiltered1 = gpa_sstate->exec_nrows_filtered;
-		outer_instrument->nfiltered2 = 0;
-		outer_instrument->nloops = 1;
+		pthreadMutexLock(&gpa_sstate->mutex);
+		gpa_sstate->exec_pg_nworkers++;
+		pthreadMutexUnlock(&gpa_sstate->mutex);
 	}
 
 	/* release any other resources */
@@ -3645,7 +3634,7 @@ ExecGpuPreAggInitDSM(CustomScanState *node,
 	/* allocation of GpuPreAggSharedState */
 	gpas->gpa_sstate = createGpuPreAggSharedState(gpas);
 	gpapdsm->gpa_sstate = gpas->gpa_sstate;
-	ExecGpuScanInitDSM(node, pcxt, gpapdsm->data, 0);
+	ExecGpuScanInitDSM(node, pcxt, gpapdsm->data);
 }
 
 /*
@@ -3687,10 +3676,9 @@ ExplainGpuPreAgg(CustomScanState *node, List *ancestors, ExplainState *es)
 	{
 		gpas->gts.outer_instrument.tuplecount = 0;
 		gpas->gts.outer_instrument.ntuples = gpa_sstate->exec_nrows_in;
-		gpas->gts.outer_instrument.nfiltered1=gpa_sstate->exec_nrows_filtered;
+		gpas->gts.outer_instrument.nfiltered1 = gpa_sstate->exec_nfiltered;
 		gpas->gts.outer_instrument.nfiltered2 = 0;
-		gpas->gts.outer_instrument.nloops = 1;
-		pgstrom_merge_worker_statistics(&gpas->gts);
+		gpas->gts.outer_instrument.nloops = gpa_sstate->exec_pg_nworkers;
 	}
 
 	/* shows reduction policy */
@@ -4670,7 +4658,7 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 		gpa_sstate->n_tasks_final++;
 	}
 	gpa_sstate->exec_nrows_in	+= gpreagg->kern.nitems_real;
-	gpa_sstate->exec_nrows_filtered += gpreagg->kern.nitems_filtered;
+	gpa_sstate->exec_nfiltered += gpreagg->kern.nitems_filtered;
 	gpa_sstate->f_nitems[gpuserv_cuda_dindex] += gpreagg->kern.num_groups;
 	gpa_sstate->f_extra_sz[gpuserv_cuda_dindex] += gpreagg->kern.extra_usage;
 

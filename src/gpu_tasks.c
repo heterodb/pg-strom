@@ -25,11 +25,6 @@
 #include "pg_strom.h"
 
 /*
- * static functions
- */
-static void pgstrom_accum_worker_statistics(GpuTaskState *gts);
-
-/*
  * construct_kern_parambuf
  *
  * It construct a kernel parameter buffer to deliver Const/Param nodes.
@@ -231,7 +226,6 @@ pgstromInitGpuTaskState(GpuTaskState *gts,
 
 	/* co-operation with CPU parallel (setup by DSM init handler) */
 	gts->pcxt = NULL;
-	gts->worker_stat = NULL;
 }
 
 /*
@@ -494,25 +488,6 @@ pgstromReleaseGpuTaskState(GpuTaskState *gts)
 		Assert(gts->num_ready_tasks >= 0);
 		pgstromReleaseGpuTask(gtask);
 	}
-
-	/*
-	 * collect perfmon statistics if parallel worker
-	 *
-	 * NOTE: ExplainCustomScan() shall be called prior to EndCustomScan() of
-	 * the leader process. Thus, collection of the worker's statistics keeps
-	 * ones by the workers, but no statistics come from the master backend.
-	 * In addition, ExecEndGather() releases parallel context and DSM segment
-	 * prior to EndCustomScan(), so any reference to @worker_state on the
-	 * leader process will raise SEGV.
-	 */
-	if (IsParallelWorker())
-		pgstrom_accum_worker_statistics(gts);
-	else if (gts->worker_stat)
-	{
-		/* worker's statistics are no longer needed */
-		dmaBufferFree(gts->worker_stat);
-		gts->worker_stat = NULL;
-	}
 	/* cleanup per-query PDS-scan state, if any */
 	PDS_end_heapscan_state(gts);
 	/* release scan-desc if any */
@@ -533,11 +508,6 @@ void
 pgstromExplainGpuTaskState(GpuTaskState *gts, ExplainState *es)
 {
 	StringInfoData	buf;
-
-	/*
-	 * Merge worker's statistics if any
-	 */
-	pgstrom_merge_worker_statistics(gts);
 
 	/*
 	 * Extra features if any
@@ -1068,133 +1038,6 @@ pgstromExplainOuterScan(GpuTaskState *gts,
 								 gts->outer_instrument.nfiltered1 /
 								 gts->outer_instrument.nloops,
 								 0, es);
-	}
-}
-
-
-#if 0
-void
-pgstrom_explain_expression(List *expr_list, const char *qlabel,
-						   PlanState *planstate, List *deparse_context,
-						   List *ancestors, ExplainState *es,
-						   bool force_prefix, bool convert_to_and)
-{
-	bool        useprefix = (force_prefix | es->verbose);
-	char       *exprstr;
-
-	/* No work if empty expression list */
-	if (expr_list == NIL)
-		return;
-
-	/* Deparse the expression */
-	/* List shall be replaced by explicit AND, if needed */
-	exprstr = deparse_expression(convert_to_and
-								 ? (Node *) make_ands_explicit(expr_list)
-								 : (Node *) expr_list,
-								 deparse_context,
-								 useprefix,
-								 false);
-	/* And add to es->str */
-	ExplainPropertyText(qlabel, exprstr, es);
-}
-#endif
-
-#if 0
-void
-show_scan_qual(List *qual, const char *qlabel,
-               PlanState *planstate, List *ancestors,
-               ExplainState *es)
-{
-	bool        useprefix;
-	Node	   *node;
-	List       *context;
-	char       *exprstr;
-
-	useprefix = (IsA(planstate->plan, SubqueryScan) || es->verbose);
-
-	/* No work if empty qual */
-	if (qual == NIL)
-		return;
-
-	/* Convert AND list to explicit AND */
-	node = (Node *) make_ands_explicit(qual);
-
-	/* Set up deparsing context */
-	context = set_deparse_context_planstate(es->deparse_cxt,
-											(Node *) planstate,
-											ancestors);
-	/* Deparse the expression */
-	exprstr = deparse_expression(node, context, useprefix, false);
-
-	/* And add to es->str */
-	ExplainPropertyText(qlabel, exprstr, es);
-}
-#endif
-#if 0
-/*
- * If it's EXPLAIN ANALYZE, show instrumentation information for a plan node
- *
- * "which" identifies which instrumentation counter to print
- */
-void
-show_instrumentation_count(const char *qlabel, int which,
-						   PlanState *planstate, ExplainState *es)
-{
-	double		nfiltered;
-	double		nloops;
-
-	if (!es->analyze || !planstate->instrument)
-		return;
-
-	if (which == 2)
-		nfiltered = planstate->instrument->nfiltered2;
-	else
-		nfiltered = planstate->instrument->nfiltered1;
-	nloops = planstate->instrument->nloops;
-
-	/* In text mode, suppress zero counts; they're not interesting enough */
-	if (nfiltered > 0 || es->format != EXPLAIN_FORMAT_TEXT)
-	{
-		if (nloops > 0)
-			ExplainPropertyFloat(qlabel, nfiltered / nloops, 0, es);
-		else
-			ExplainPropertyFloat(qlabel, 0.0, 0, es);
-	}
-}
-#endif
-
-void
-pgstrom_merge_worker_statistics(GpuTaskState *gts)
-{
-	Assert(ParallelMasterBackendId == InvalidBackendId);
-
-	if (gts->worker_stat)
-	{
-		pgstromWorkerStatistics *worker_stat = gts->worker_stat;
-
-		SpinLockAcquire(&worker_stat->lock);
-		InstrAggNode(&gts->outer_instrument,
-					 &worker_stat->worker_instrument);
-		/* GpuJoin */
-		gpujoin_merge_worker_statistics(gts);
-		SpinLockRelease(&worker_stat->lock);
-	}
-}
-
-static void
-pgstrom_accum_worker_statistics(GpuTaskState *gts)
-{
-	Assert(ParallelMasterBackendId != InvalidBackendId);
-	if (gts->worker_stat)
-	{
-		pgstromWorkerStatistics *worker_stat = gts->worker_stat;
-
-		SpinLockAcquire(&worker_stat->lock);
-		InstrAggNode(&worker_stat->worker_instrument,
-					 &gts->outer_instrument);
-		/* GpuJoin */
-		gpujoin_accum_worker_statistics(gts);
-		SpinLockRelease(&worker_stat->lock);
 	}
 }
 

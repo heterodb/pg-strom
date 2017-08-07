@@ -140,26 +140,6 @@ typedef struct GpuTask				GpuTask;
 typedef struct GpuTaskState			GpuTaskState;
 
 /*
- * pgstromWorkerStatistics
- *
- * PostgreSQL v9.6 does not allow to assign run-time statistics counter
- * on the DSM area because of oversight during the development cycle.
- * So, we need to allocate independent shared memory are to write back
- * performance counter to the master backend.
- * Likely, this restriction shall be removed at PostgreSQL v10.
- */
-typedef struct
-{
-	slock_t			lock;
-	Instrumentation	worker_instrument;
-	/* for GpuJoin */
-	struct {
-		size_t		inner_nitems;
-		size_t		right_nitems;
-	} gpujoin[FLEXIBLE_ARRAY_MEMBER];
-} pgstromWorkerStatistics;
-
-/*
  * GpuTaskState
  *
  * A common structure of the state machine of GPU related tasks.
@@ -219,7 +199,6 @@ struct GpuTaskState
 
 	/* co-operation with CPU parallel */
 	ParallelContext	*pcxt;
-	pgstromWorkerStatistics *worker_stat;
 };
 #define GTS_GET_SCAN_TUPDESC(gts)				\
 	(((GpuTaskState *)(gts))->css.ss.ss_ScanTupleSlot->tts_tupleDescriptor)
@@ -636,7 +615,6 @@ extern void pgstromReleaseGpuTaskState(GpuTaskState *gts);
 extern void pgstromExplainGpuTaskState(GpuTaskState *gts,
 									   ExplainState *es);
 extern GpuTask *fetch_next_gputask(GpuTaskState *gts);
-extern void pgstrom_merge_worker_statistics(GpuTaskState *gts);
 extern void pgstromExplainOuterScan(GpuTaskState *gts,
 									List *deparse_context,
 									List *ancestors,
@@ -839,8 +817,7 @@ extern Size ExecGpuScanEstimateDSM(CustomScanState *node,
 								   ParallelContext *pcxt);
 extern void ExecGpuScanInitDSM(CustomScanState *node,
 							   ParallelContext *pcxt,
-							   void *coordinate,
-							   int num_rels);
+							   void *coordinate);
 extern void ExecGpuScanInitWorker(CustomScanState *node,
 								  shm_toc *toc,
 								  void *coordinate);
@@ -859,8 +836,6 @@ extern int	gpujoin_process_task(GpuTask *gtask, CUmodule cuda_module);
 extern void	gpujoin_release_task(GpuTask *gtask);
 extern void assign_gpujoin_session_info(StringInfo buf,
 										GpuTaskState *gts);
-extern void gpujoin_merge_worker_statistics(GpuTaskState *gts);
-extern void gpujoin_accum_worker_statistics(GpuTaskState *gts);
 extern void	pgstrom_init_gpujoin(void);
 
 /*

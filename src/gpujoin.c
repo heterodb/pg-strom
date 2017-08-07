@@ -191,14 +191,7 @@ typedef struct
 	 */
 	PlanState		   *state;
 	ExprContext		   *econtext;
-
 	pgstrom_data_store *pds_in;
-
-//	List			   *pds_list;
-//	cl_int				pds_index;
-//	Size				pds_limit;
-//	Size				consumed;
-	Size				ntuples;
 
 	/*
 	 * Join properties; both nest-loop and hash-join
@@ -229,6 +222,7 @@ typedef struct
 	cl_bool				fallback_right_outer;
 } innerState;
 
+#if 0
 /*
  * run-time statistics; to be allocated on the shared memory
  */
@@ -247,6 +241,7 @@ typedef struct
 	size_t			inner_dma_nums;	/* number of inner DMA calls */
 	size_t			inner_dma_size;	/* total length of inner DMA calls */
 } runtimeStat;
+#endif
 
 typedef struct
 {
@@ -286,11 +281,6 @@ typedef struct
 	cl_long			fallback_outer_index;
 
 	/*
-	 * Runtime statistics
-	 */
-	runtimeStat	   *rt_stat;
-
-	/*
 	 * Template for pds_dst
 	 */
 	kern_data_store	*kds_dst_head;
@@ -318,6 +308,19 @@ typedef struct pgstrom_multirels
 	Size			head_length;	/* length of the header portion */
 	Size			total_length;	/* total length of the inner buffer */
 	pgstrom_data_store **inner_chunks;	/* array of inner PDS */
+
+	/*
+	 * Run-time statistics
+	 */
+	slock_t			lock;			/* protection for statistics */
+	size_t			source_ntasks;	/* number of sampled tasks */
+	size_t			source_nitems;	/* number of sampled source items */
+	size_t			results_nitems;	/* number of joined result items */
+	size_t			results_usage;	/* sum of kds_dst->usage */
+	size_t		   *inner_nitems;	/* number of inner join results items */
+	size_t		   *right_nitems;	/* number of right join results items */
+	cl_double	   *row_dist_score;	/* degree of result row distribution */
+	bool			row_dist_score_valid; /* true, if RDS is valid */
 
 	/*
 	 * MEMO: The coordinator process is responsible to allocate / free
@@ -355,7 +358,6 @@ typedef struct
 	GpuTask				task;
 	cl_bool				with_nvme_strom;/* true, if NVMe-Strom */
 	cl_bool				is_terminator;	/* true, if dummay terminator */
-	runtimeStat		   *rt_stat;		/* run-time statistics */
 	kern_data_store	   *kds_dst_head;	/* template for pds_dst */
 	/* DMA buffers */
 	pgstrom_multirels  *pmrels;		/* inner multi relations (heap or hash) */
@@ -2356,11 +2358,6 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 						   pgstrom_chunk_size(),
 						   KDS_FORMAT_ROW,
 						   INT_MAX);
-	/*
-	 * run-time statistics shall be initialized on the first call of
-	 * executor or DSM initialization if parallel query
-	 */
-	gjs->rt_stat = NULL;
 }
 
 /*
@@ -2380,40 +2377,6 @@ ExecReCheckGpuJoin(CustomScanState *node, TupleTableSlot *slot)
 }
 
 /*
- * InitRuntimeStatistics
- */
-static inline void
-setup_runtime_statistics(GpuJoinState *gjs)
-{
-	if (!gjs->rt_stat)
-	{
-		runtimeStat	   *rt_stat;
-		Size			required;
-
-		required = (STROMALIGN(sizeof(runtimeStat)) +
-					STROMALIGN(sizeof(size_t) * (gjs->num_rels + 1)) +
-					STROMALIGN(sizeof(size_t) * (gjs->num_rels + 1)) +
-					STROMALIGN(sizeof(cl_double) * (gjs->num_rels + 1)));
-
-		rt_stat = dmaBufferAlloc(gjs->gts.gcontext, required);
-		if (!rt_stat)
-			elog(ERROR, "out of DMA buffer");
-		memset(rt_stat, 0, required);
-		rt_stat->num_rels = gjs->num_rels;
-		SpinLockInit(&rt_stat->lock);
-		rt_stat->inner_nitems = (size_t *)
-			((char *)rt_stat + STROMALIGN(sizeof(runtimeStat)));
-		rt_stat->right_nitems = (size_t *)
-			((char *)rt_stat->inner_nitems + STROMALIGN(sizeof(size_t) *
-														(gjs->num_rels + 1)));
-		rt_stat->row_dist_score = (cl_double *)
-			((char *)rt_stat->right_nitems + STROMALIGN(sizeof(size_t) *
-														(gjs->num_rels + 1)));
-		gjs->rt_stat = rt_stat;
-	}
-}
-
-/*
  * ExecGpuJoin
  */
 static TupleTableSlot *
@@ -2423,8 +2386,6 @@ ExecGpuJoin(CustomScanState *node)
 
 	if (!gjs->inner_pmrels)
 		gjs->inner_pmrels = multirels_create_buffer(gjs, 1);
-	if (!gjs->rt_stat)
-		setup_runtime_statistics(gjs);
 	return ExecScan(&node->ss,
 					(ExecScanAccessMtd) pgstromExecGpuTaskState,
 					(ExecScanRecheckMtd) ExecReCheckGpuJoin);
@@ -2504,7 +2465,7 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 	GpuJoinState   *gjs = (GpuJoinState *) node;
 	CustomScan	   *cscan = (CustomScan *) node->ss.ps.plan;
 	GpuJoinInfo	   *gj_info = deform_gpujoin_info(cscan);
-	runtimeStat	   *rt_stat = gjs->rt_stat;
+	pgstrom_multirels *pmrels = gjs->inner_pmrels;
 	List		   *dcontext;
 	ListCell	   *lc1;
 	ListCell	   *lc2;
@@ -2551,11 +2512,11 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 	/* statistics for outer scan, if it was pulled-up */
 	if (es->analyze)
 	{
-		gjs->gts.outer_instrument.tuplecount = (rt_stat->inner_nitems[0] +
-												rt_stat->right_nitems[0]);
-		gjs->gts.outer_instrument.nfiltered1 = (rt_stat->source_nitems -
-												rt_stat->inner_nitems[0] -
-												rt_stat->right_nitems[0]);
+		gjs->gts.outer_instrument.tuplecount = (pmrels->inner_nitems[0] +
+												pmrels->right_nitems[0]);
+		gjs->gts.outer_instrument.nfiltered1 = (pmrels->source_nitems -
+												pmrels->inner_nitems[0] -
+												pmrels->right_nitems[0]);
 	}
 	pgstromExplainOuterScan(&gjs->gts, dcontext, ancestors, es,
 							gj_info->outer_quals,
@@ -2587,10 +2548,10 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 		plan_nrows_out = floatVal(list_nth(gj_info->plan_nrows_out, depth-1));
 		if (es->analyze)
 		{
-			exec_nrows_in = (rt_stat->inner_nitems[depth - 1] +
-							 rt_stat->right_nitems[depth - 1]);
-			exec_nrows_out1 = rt_stat->inner_nitems[depth];
-			exec_nrows_out2 = rt_stat->right_nitems[depth];
+			exec_nrows_in = (pmrels->inner_nitems[depth - 1] +
+							 pmrels->right_nitems[depth - 1]);
+			exec_nrows_out1 = pmrels->inner_nitems[depth];
+			exec_nrows_out2 = pmrels->right_nitems[depth];
 		}
 
 		resetStringInfo(&str);
@@ -2768,48 +2729,6 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 }
 
 /*
- * gpujoin_merge_worker_statistics
- */
-void
-gpujoin_merge_worker_statistics(GpuTaskState *gts)
-{
-	if (gts->css.methods == &gpujoin_exec_methods)
-	{
-		pgstromWorkerStatistics *worker_stat = gts->worker_stat;
-		GpuJoinState   *gjs = (GpuJoinState *) gts;
-		runtimeStat	   *rt_stat = gjs->rt_stat;
-		int				i;
-
-		for (i=0; i < gjs->num_rels; i++)
-		{
-			rt_stat->inner_nitems[i] += worker_stat->gpujoin[i].inner_nitems;
-			rt_stat->right_nitems[i] += worker_stat->gpujoin[i].right_nitems;
-		}
-	}
-}
-
-/*
- * gpujpin_accum_worker_statistics
- */
-void
-gpujoin_accum_worker_statistics(GpuTaskState *gts)
-{
-	if (gts->css.methods == &gpujoin_exec_methods)
-	{
-		pgstromWorkerStatistics *worker_stat = gts->worker_stat;
-		GpuJoinState   *gjs = (GpuJoinState *) gts;
-		runtimeStat	   *rt_stat = gjs->rt_stat;
-		int				i;
-
-		for (i=0; i < gjs->num_rels; i++)
-		{
-			worker_stat->gpujoin[i].inner_nitems += rt_stat->inner_nitems[i];
-			worker_stat->gpujoin[i].right_nitems += rt_stat->right_nitems[i];
-		}
-	}
-}
-
-/*
  * ExecGpuJoinEstimateDSM
  */
 static Size
@@ -2835,8 +2754,7 @@ ExecGpuJoinInitDSM(CustomScanState *node,
 	gjs->inner_pmrels = multirels_create_buffer(gjs, pcxt->nworkers + 1);
 	gjpdsm->inner_pmrels = gjs->inner_pmrels;
 
-	ExecGpuScanInitDSM(node, pcxt, gjpdsm->data,
-					   gjs->num_rels + 1);
+	ExecGpuScanInitDSM(node, pcxt, gjpdsm->data);
 }
 
 /*
@@ -3827,7 +3745,6 @@ gpujoin_exec_estimate_nitems(GpuJoinState *gjs,
 {
 	pgstrom_multirels  *pmrels = pgjoin->pmrels;
 	innerState		   *istate = (depth > 0 ? gjs->inners + depth - 1 : NULL);
-	runtimeStat		   *rt_stat = gjs->rt_stat;
 	kern_join_scale	   *jscale = pgjoin->kern.jscale;
 	size_t				source_ntasks;
 	size_t				source_nitems;
@@ -3842,10 +3759,10 @@ gpujoin_exec_estimate_nitems(GpuJoinState *gjs,
 	 * Nrows estimation based on plan estimation and exec statistics.
 	 * It shall be merged according to the task progress.
 	 */
-	SpinLockAcquire(&rt_stat->lock);
-	source_ntasks = rt_stat->source_ntasks;
-	source_nitems = rt_stat->source_nitems;
-	SpinLockRelease(&rt_stat->lock);
+	SpinLockAcquire(&pmrels->lock);
+	source_ntasks = pmrels->source_ntasks;
+	source_nitems = pmrels->source_nitems;
+	SpinLockRelease(&pmrels->lock);
 	merge_ratio = Max((double) source_ntasks / 20.0,
 					  gjs->outer_nrows > 0.0
 					  ? ((double)(source_nitems) /
@@ -3891,11 +3808,11 @@ gpujoin_exec_estimate_nitems(GpuJoinState *gjs,
 			 * We try to estimate amount of outer rows which are not elimiated
 			 * by the qualifier, based on plan/exec time statistics
 			 */
-			SpinLockAcquire(&rt_stat->lock);
-			inner_nitems = rt_stat->inner_nitems[0];
-			right_nitems = rt_stat->right_nitems[0];
-			source_nitems = rt_stat->source_nitems;
-			SpinLockRelease(&rt_stat->lock);
+			SpinLockAcquire(&pmrels->lock);
+			inner_nitems = pmrels->inner_nitems[0];
+			right_nitems = pmrels->right_nitems[0];
+			source_nitems = pmrels->source_nitems;
+			SpinLockRelease(&pmrels->lock);
 
 			/*
 			 * If there are no run-time statistics, we have no options except
@@ -3962,11 +3879,11 @@ gpujoin_exec_estimate_nitems(GpuJoinState *gjs,
 			cl_uint			nitems_in = pds_in->kds.nitems;
 			size_t			next_nitems;
 
-			SpinLockAcquire(&rt_stat->lock);
-			inner_nitems = rt_stat->inner_nitems[depth - 1];
-			right_nitems = rt_stat->right_nitems[depth - 1];
-			next_nitems = rt_stat->inner_nitems[depth];
-			SpinLockRelease(&rt_stat->lock);
+			SpinLockAcquire(&pmrels->lock);
+			inner_nitems = pmrels->inner_nitems[depth - 1];
+			right_nitems = pmrels->right_nitems[depth - 1];
+			next_nitems = pmrels->inner_nitems[depth];
+			SpinLockRelease(&pmrels->lock);
 
 			plan_ratio = istate->nrows_ratio;
 			if (inner_nitems + right_nitems > 0)
@@ -4022,10 +3939,10 @@ gpujoin_exec_estimate_nitems(GpuJoinState *gjs,
 					match_ratio = 1.0;	/* an obvious case */
 				else
 				{
-					SpinLockAcquire(&rt_stat->lock);
-					inner_nitems = rt_stat->inner_nitems[depth];
-					right_nitems = rt_stat->right_nitems[depth];
-					SpinLockRelease(&rt_stat->lock);
+					SpinLockAcquire(&pmrels->lock);
+					inner_nitems = pmrels->inner_nitems[depth];
+					right_nitems = pmrels->right_nitems[depth];
+					SpinLockRelease(&pmrels->lock);
 					match_ratio = sqrt((double)(inner_nitems + right_nitems) /
 									   (double)(nitems_in));
 					match_ratio = 1.0 - Min(1.0, match_ratio);
@@ -4054,7 +3971,7 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs,
 	TupleDesc		tupdesc = tupslot->tts_tupleDescriptor;
 	cl_int			ncols = tupdesc->natts;
 	Size			nrooms = (Size)(ntuples * pgstrom_chunk_size_margin);
-	runtimeStat	   *rt_stat = pgjoin->rt_stat;
+	pgstrom_multirels *pmrels = pgjoin->pmrels;
 	pgstrom_data_store *pds_dst;
 
 	/*
@@ -4139,12 +4056,12 @@ gpujoin_attach_result_buffer(GpuJoinState *gjs,
 		 * Tuple width estimation also follow the logic when we estimate
 		 * number of rows.
 		 */
-		SpinLockAcquire(&rt_stat->lock);
-		source_ntasks = rt_stat->source_ntasks;
-		source_nitems = rt_stat->source_nitems;
-		results_nitems = rt_stat->results_nitems;
-		results_usage = rt_stat->results_usage;
-		SpinLockRelease(&rt_stat->lock);
+		SpinLockAcquire(&pmrels->lock);
+		source_ntasks = pmrels->source_ntasks;
+		source_nitems = pmrels->source_nitems;
+		results_nitems = pmrels->results_nitems;
+		results_usage = pmrels->results_usage;
+		SpinLockRelease(&pmrels->lock);
 
 		merge_ratio = Max((double) source_ntasks / 20.0,
 						  (double) source_nitems /
@@ -4212,7 +4129,6 @@ gpujoin_create_task(GpuJoinState *gjs,
 {
 	GpuContext		   *gcontext = gjs->gts.gcontext;
 	kern_data_store	   *kds_dst_head = gjs->kds_dst_head;
-	runtimeStat		   *rt_stat = gjs->rt_stat;
 	pgstrom_gpujoin	   *pgjoin;
 	double				ntuples;
 	double				ntuples_next;
@@ -4243,7 +4159,6 @@ gpujoin_create_task(GpuJoinState *gjs,
 	pgjoin->pds_src = pds_src;
 	pgjoin->pds_dst = NULL;		/* to be set later */
 	pgjoin->is_terminator = (pds_src == NULL);
-	pgjoin->rt_stat = gjs->rt_stat;
 
 	/* Is NVMe-Strom available to run this GpuJoin? */
 	if (pds_src && pds_src->kds.format == KDS_FORMAT_BLOCK)
@@ -4307,15 +4222,15 @@ major_retry:
 	 * It might be a bit paranoia, however, all the score needs to be
 	 * compared atomically.
 	 */
-	SpinLockAcquire(&rt_stat->lock);
-	if (rt_stat->row_dist_score_valid)
+	SpinLockAcquire(&pmrels->lock);
+	if (pmrels->row_dist_score_valid)
 	{
-		target_row_dist_score = rt_stat->row_dist_score[0];
+		target_row_dist_score = pmrels->row_dist_score[0];
 		for (depth=1; depth < gjs->num_rels; depth++)
 		{
-			if (target_row_dist_score < rt_stat->row_dist_score[depth])
+			if (target_row_dist_score < pmrels->row_dist_score[depth])
 			{
-				target_row_dist_score = rt_stat->row_dist_score[depth];
+				target_row_dist_score = pmrels->row_dist_score[depth];
 				target_depth = depth;
 			}
 		}
@@ -4325,7 +4240,7 @@ major_retry:
 		/* cannot determine by the runtime-stat, so use delta of ntuples */
 		target_row_dist_score = -1.0;
 	}
-	SpinLockRelease(&rt_stat->lock);
+	SpinLockRelease(&pmrels->lock);
 
 	for (depth = 0;
 		 depth <= gjs->num_rels;
@@ -5232,31 +5147,30 @@ update_runtime_statistics(pgstrom_gpujoin *pgjoin)
 {
 	pgstrom_data_store *pds_dst = pgjoin->pds_dst;
 	pgstrom_multirels  *pmrels = pgjoin->pmrels;
-	runtimeStat		   *rt_stat = pgjoin->rt_stat;
 	kern_join_scale	   *jscale = pgjoin->kern.jscale;
 	cl_int				i, num_rels = pmrels->kern.nrels;
 
 	if (pgjoin->task.kerror.errcode != StromError_Success)
 		return;
 
-	SpinLockAcquire(&rt_stat->lock);
-	rt_stat->source_ntasks++;
-   	rt_stat->source_nitems += (jscale[0].window_base +
-							   jscale[0].window_size -
-							   jscale[0].window_orig);
+	SpinLockAcquire(&pmrels->lock);
+	pmrels->source_ntasks++;
+	pmrels->source_nitems += (jscale[0].window_base +
+							  jscale[0].window_size -
+							  jscale[0].window_orig);
 	for (i=0; i <= num_rels; i++)
 	{
-		rt_stat->inner_nitems[i] += jscale[i].inner_nitems;
-		rt_stat->right_nitems[i] += jscale[i].right_nitems;
+		pmrels->inner_nitems[i] += jscale[i].inner_nitems;
+		pmrels->right_nitems[i] += jscale[i].right_nitems;
 		if (jscale[i].row_dist_score > 0.0)
 		{
-			rt_stat->row_dist_score_valid = true;
-			rt_stat->row_dist_score[i] += jscale[i].row_dist_score;
+			pmrels->row_dist_score_valid = true;
+			pmrels->row_dist_score[i] += jscale[i].row_dist_score;
 		}
 	}
-	rt_stat->results_nitems += pds_dst->kds.nitems;
-	rt_stat->results_usage += pds_dst->kds.usage;
-	SpinLockRelease(&rt_stat->lock);
+	pmrels->results_nitems += pds_dst->kds.nitems;
+	pmrels->results_usage += pds_dst->kds.usage;
+	SpinLockRelease(&pmrels->lock);
 }
 
 static bool
@@ -5821,7 +5735,6 @@ gpujoin_inner_hash_preload(GpuJoinState *gjs, innerState *istate)
 									   Max(istate->ichunk_size,
 										   pgstrom_chunk_size() / 4));
 
-			istate->ntuples = 0;
 		}
 
 		while (!PDS_insert_hashitem(pds_hash, scan_slot, hash))
@@ -5830,7 +5743,6 @@ gpujoin_inner_hash_preload(GpuJoinState *gjs, innerState *istate)
 									   pds_hash,
 									   pds_hash->kds.length * 2);
 		}
-		istate->ntuples++;
 	}
 	/* a dummy empty hash table if no rows read */
 	if (!pds_hash)
@@ -5879,7 +5791,6 @@ gpujoin_inner_heap_preload(GpuJoinState *gjs, innerState *istate)
 									  scan_desc,
 									  Max(istate->ichunk_size,
 										  pgstrom_chunk_size() / 4));
-			istate->ntuples = 0;
 		}
 		(void)ExecFetchSlotTuple(scan_slot);
 		while (!PDS_insert_tuple(istate->pds_in, scan_slot))
@@ -5888,7 +5799,6 @@ gpujoin_inner_heap_preload(GpuJoinState *gjs, innerState *istate)
 									   pds_heap,
 									   pds_heap->kds.length * 2);
 		}
-		istate->ntuples++;
 	}
 	/* if no rows were read, create a small empty PDS */
 	if (!pds_heap)
@@ -6056,19 +5966,23 @@ multirels_create_buffer(GpuJoinState *gjs, int num_pg_workers)
 {
 	GpuContext	   *gcontext = gjs->gts.gcontext;
 	pgstrom_multirels *pmrels;
+	cl_int			num_rels = gjs->num_rels;
 	Size			head_length;
 	Size			required;
 	char		   *pos;
 
 	/* calculate total length and allocate */
 	head_length = STROMALIGN(offsetof(pgstrom_multirels,
-									  kern.chunks[gjs->num_rels]));
+									  kern.chunks[num_rels]));
 	required = head_length
-		+ STROMALIGN(sizeof(pgstrom_data_store *) * gjs->num_rels)
-		+ STROMALIGN(sizeof(cl_int) * (numDevAttrs + 1))/* nr_tasks */
-		+ STROMALIGN(sizeof(cl_bool) * num_pg_workers)	/* is_attached */
-		+ STROMALIGN(sizeof(CUdeviceptr) * numDevAttrs)	/* m_kmrels */
-		+ STROMALIGN(sizeof(CUdeviceptr) * numDevAttrs);/* m_ojmaps */
+		+ MAXALIGN(sizeof(pgstrom_data_store *) * num_rels)/* inner_chunks */
+		+ MAXALIGN(sizeof(size_t) * (num_rels+1))		/* inner_nitems */
+		+ MAXALIGN(sizeof(size_t) * (num_rels+1))		/* right_nitems */
+		+ MAXALIGN(sizeof(cl_double) * (num_rels+1))	/* row_dist_score */
+		+ MAXALIGN(sizeof(cl_int) * (numDevAttrs+1))	/* nr_tasks */
+		+ MAXALIGN(sizeof(cl_bool) * num_pg_workers)	/* is_attached */
+		+ MAXALIGN(sizeof(CUdeviceptr) * numDevAttrs)	/* m_kmrels */
+		+ MAXALIGN(sizeof(CUdeviceptr) * numDevAttrs);	/* m_ojmaps */
 
 	pmrels = dmaBufferAlloc(gcontext, required);
 	memset(pmrels, 0, required);
@@ -6078,17 +5992,27 @@ multirels_create_buffer(GpuJoinState *gjs, int num_pg_workers)
 	pmrels->head_length = head_length;
 	pmrels->total_length = head_length;
 	pmrels->inner_chunks = (pgstrom_data_store **) pos;
-	pos += STROMALIGN(sizeof(pgstrom_data_store *) * gjs->num_rels);
+	pos += MAXALIGN(sizeof(pgstrom_data_store *) * gjs->num_rels);
 
+	/* run-time statistics */
+	SpinLockInit(&pmrels->lock);
+	pmrels->inner_nitems = (size_t *) pos;
+	pos += MAXALIGN(sizeof(size_t) * (num_rels+1));
+	pmrels->right_nitems = (size_t *) pos;
+	pos += MAXALIGN(sizeof(size_t) * (num_rels+1));
+	pmrels->row_dist_score = (cl_double *) pos;
+	pos += MAXALIGN(sizeof(cl_double) * (num_rels+1));
+
+	/* multi-processes coordination */
 	pthreadMutexInit(&pmrels->mutex);
 	pmrels->nr_tasks = (cl_int *) pos;
-	pos += STROMALIGN(sizeof(int) * (numDevAttrs + 1));
+	pos += MAXALIGN(sizeof(int) * (numDevAttrs + 1));
 	pmrels->is_attached = (cl_bool *) pos;
-	pos += STROMALIGN(sizeof(cl_bool) * num_pg_workers);
+	pos += MAXALIGN(sizeof(cl_bool) * num_pg_workers);
 	pmrels->m_kmrels = (CUdeviceptr *) pos;
-	pos += STROMALIGN(sizeof(CUdeviceptr) * numDevAttrs);
+	pos += MAXALIGN(sizeof(CUdeviceptr) * numDevAttrs);
 	pmrels->m_ojmaps = (CUdeviceptr *) pos;
-	pos += STROMALIGN(sizeof(CUdeviceptr) * numDevAttrs);
+	pos += MAXALIGN(sizeof(CUdeviceptr) * numDevAttrs);
 	pmrels->h_ojmaps = NULL;	/* to be set on preload */
 
 	/* kern_multirels */
