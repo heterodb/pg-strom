@@ -55,6 +55,7 @@ static CustomScanMethods		gpupreagg_scan_methods;
 static CustomExecMethods		gpupreagg_exec_methods;
 static bool						enable_gpupreagg;
 static bool						enable_gpupreagg_with_numeric;
+static bool						enable_pullup_outer_join;
 
 typedef struct
 {
@@ -176,8 +177,9 @@ typedef struct
 {
 	GpuTaskState	gts;
 	GpuPreAggSharedState *gpa_sstate;
-
+	GpuJoinSharedState *gj_sstate;	/* valid if unified GpuPreAgg + GpuJoin */
 	cl_bool			scan_begin;
+	cl_bool			unified_gpujoin;
 	cl_int			num_group_keys;
 	cl_ulong		num_fallback_rows; /* # of rows processed by fallback */
 	TupleTableSlot *gpreagg_slot;	/* Slot reflects tlist_dev (w/o junks) */
@@ -195,6 +197,7 @@ typedef struct
 typedef struct
 {
 	GpuPreAggSharedState *gpa_sstate;
+	GpuJoinSharedState *gj_sstate;
 	char		data[FLEXIBLE_ARRAY_MEMBER]; /* GpuScanParallelDSM if any */
 } GpuPreAggParallelDSM;
 
@@ -210,16 +213,6 @@ typedef struct
 	GpuTask				task;
 	GpuPreAggSharedState *gpa_sstate;
 	bool				with_nvme_strom;/* true, if NVMe-Strom */
-#if 0
-	/* CUDA resources */
-	CUdeviceptr			m_gpreagg;		/* kern_gpupreagg */
-	CUdeviceptr			m_kds_src;		/* source row/block buffer */
-	CUdeviceptr			m_kds_slot;		/* working (global) slot buffer */
-	CUdeviceptr			m_ghash;		/* global hash slot */
-	CUdeviceptr			m_kds_final;	/* final slot buffer (shared) */
-	CUdeviceptr			m_fhash;		/* final hash slot (shared) */
-	CUevent				ev_kds_final;
-#endif
 	/* DMA buffers */
 	pgstrom_data_store *pds_src;	/* source row/block buffer */
 	pgstrom_data_store *pds_final;	/* final data store, if any. It shall be
@@ -2322,13 +2315,38 @@ PlanGpuPreAggPath(PlannerInfo *root,
 }
 
 /*
- * pgstrom_plan_is_gpupreagg - returns true if GpuPreAgg
+ * pgstrom_path_is_gpupreagg
+ */
+bool
+pgstrom_path_is_gpupreagg(const Path *pathnode)
+{
+	if (IsA(pathnode, CustomPath) &&
+		pathnode->pathtype == T_CustomScan &&
+		((CustomPath *) pathnode)->methods == &gpupreagg_path_methods)
+		return true;
+	return false;
+}
+
+/*
+ * pgstrom_plan_is_gpupreagg
  */
 bool
 pgstrom_plan_is_gpupreagg(const Plan *plan)
 {
 	if (IsA(plan, CustomScan) &&
 		((CustomScan *) plan)->methods == &gpupreagg_scan_methods)
+		return true;
+	return false;
+}
+
+/*
+ * pgstrom_planstate_is_gpupreagg
+ */
+bool
+pgstrom_planstate_is_gpupreagg(const PlanState *ps)
+{
+	if (IsA(ps, CustomScanState) &&
+		((CustomScanState *) ps)->methods == &gpupreagg_exec_methods)
 		return true;
 	return false;
 }
@@ -3469,7 +3487,12 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 		Assert(scan_rel == NULL);
 		Assert(gpa_info->outer_quals == NIL);
 		outer_ps = ExecInitNode(outerPlan(cscan), estate, eflags);
-		if (pgstrom_bulk_exec_supported(outer_ps))
+		if (enable_pullup_outer_join &&
+			pgstrom_planstate_is_gpujoin(outer_ps))
+		{
+			gpas->unified_gpujoin = true;
+		}
+		else if (pgstrom_bulk_exec_supported(outer_ps))
 		{
 			((GpuTaskState *) outer_ps)->row_format = true;
 			gpas->gts.outer_bulk_exec = true;
@@ -3546,8 +3569,11 @@ ExecGpuPreAgg(CustomScanState *node)
 	GpuPreAggState *gpas = (GpuPreAggState *) node;
 
 	if (!gpas->gpa_sstate)
+	{
 		gpas->gpa_sstate = createGpuPreAggSharedState(gpas);
-
+		if (gpas->unified_gpujoin)
+			gpas->gj_sstate = NULL;	/* load gj_sstate */
+	}
 	return ExecScan(&node->ss,
 					(ExecScanAccessMtd) pgstromExecGpuTaskState,
 					(ExecScanRecheckMtd) ExecReCheckGpuPreAgg);
@@ -3631,9 +3657,12 @@ ExecGpuPreAggInitDSM(CustomScanState *node,
 	GpuPreAggState *gpas = (GpuPreAggState *) node;
 	GpuPreAggParallelDSM *gpapdsm = (GpuPreAggParallelDSM *) coordinate;
 
-	/* allocation of GpuPreAggSharedState */
+	/* allocation of shared state */
 	gpas->gpa_sstate = createGpuPreAggSharedState(gpas);
+	if (gpas->unified_gpujoin)
+		gpas->gj_sstate = NULL;
 	gpapdsm->gpa_sstate = gpas->gpa_sstate;
+	gpapdsm->gj_sstate = gpas->gj_sstate;
 	ExecGpuScanInitDSM(node, pcxt, gpapdsm->data);
 }
 
@@ -3649,6 +3678,7 @@ ExecGpuPreAggInitWorker(CustomScanState *node,
 	GpuPreAggParallelDSM *gpapdsm = (GpuPreAggParallelDSM *) coordinate;
 
 	gpas->gpa_sstate = gpapdsm->gpa_sstate;
+	gpas->gj_sstate = gpapdsm->gj_sstate;
 	ExecGpuScanInitWorker(node, toc, gpapdsm->data);
 }
 
@@ -4860,7 +4890,15 @@ pgstrom_init_gpupreagg(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
-
+	/* pg_strom.pullup_outer_join */
+	DefineCustomBoolVariable("pg_strom.pullup_outer_join",
+							 "Enables to pull up GpuJoin under GpuPreAgg",
+							 NULL,
+							 &enable_pullup_outer_join,
+							 true,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
 	/* initialization of path method table */
 	memset(&gpupreagg_path_methods, 0, sizeof(CustomPathMethods));
 	gpupreagg_path_methods.CustomName          = "GpuPreAgg";

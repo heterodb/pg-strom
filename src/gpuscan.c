@@ -1920,9 +1920,22 @@ pgstrom_path_is_gpuscan(const Path *path)
 bool
 pgstrom_plan_is_gpuscan(const Plan *plan)
 {
-	CustomScan	   *cscan = (CustomScan *) plan;
+	if (IsA(plan, CustomScan) &&
+		((CustomScan *) plan)->methods == &gpuscan_plan_methods)
+		return true;
+	return false;
+}
 
-	if (IsA(cscan, CustomScan) && cscan->methods == &gpuscan_plan_methods)
+/*
+ * pgstrom_planstate_is_gpuscan
+ *
+ * It returns true, if supplied planstate node is gpuscan
+ */
+bool
+pgstrom_planstate_is_gpuscan(const PlanState *ps)
+{
+	if (IsA(ps, CustomScanState) &&
+		((CustomScanState *) ps)->methods == &gpuscan_exec_methods)
 		return true;
 	return false;
 }

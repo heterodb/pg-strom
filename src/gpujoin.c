@@ -222,27 +222,6 @@ typedef struct
 	cl_bool				fallback_right_outer;
 } innerState;
 
-#if 0
-/*
- * run-time statistics; to be allocated on the shared memory
- */
-typedef struct
-{
-	int				num_rels;		/* number of inner relations */
-	slock_t			lock;
-	size_t			source_ntasks;	/* number of sampled tasks */
-	size_t			source_nitems;	/* number of sampled source items */
-	size_t			results_nitems;	/* number of joined result items */
-	size_t			results_usage;	/* sum of kds_dst->usage */
-	size_t		   *inner_nitems;	/* number of inner join results items */
-	size_t		   *right_nitems;	/* number of right join results items */
-	cl_double	   *row_dist_score;	/* degree of result row distribution */
-	bool			row_dist_score_valid; /* true, if RDS is valid */
-	size_t			inner_dma_nums;	/* number of inner DMA calls */
-	size_t			inner_dma_size;	/* total length of inner DMA calls */
-} runtimeStat;
-#endif
-
 typedef struct
 {
 	GpuTaskState	gts;
@@ -430,10 +409,20 @@ pgstrom_path_is_gpujoin(Path *pathnode)
 bool
 pgstrom_plan_is_gpujoin(const Plan *plannode)
 {
-	CustomScan *cscan = (CustomScan *) plannode;
+	if (IsA(plannode, CustomScan) &&
+		((CustomScan *) plannode)->methods == &gpujoin_plan_methods)
+		return true;
+	return false;
+}
 
-	if (IsA(cscan, CustomScan) &&
-		cscan->methods == &gpujoin_plan_methods)
+/*
+ * returns true, if planstate node is GpuJoin
+ */
+bool
+pgstrom_planstate_is_gpujoin(const PlanState *ps)
+{
+	if (IsA(ps, CustomScanState) &&
+		((CustomScanState *) ps)->methods == &gpujoin_exec_methods)
 		return true;
 	return false;
 }

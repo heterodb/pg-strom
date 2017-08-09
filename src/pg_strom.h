@@ -806,6 +806,7 @@ extern bool pgstrom_pullup_outer_scan(const Path *outer_path,
 									  List **p_outer_quals);
 extern bool pgstrom_path_is_gpuscan(const Path *path);
 extern bool pgstrom_plan_is_gpuscan(const Plan *plan);
+extern bool pgstrom_planstate_is_gpuscan(const PlanState *ps);
 
 extern void gpuscan_rewind_position(GpuTaskState *gts);
 
@@ -830,8 +831,12 @@ extern void pgstrom_init_gpuscan(void);
 /*
  * gpujoin.c
  */
+struct GpuJoinSharedState;
+typedef struct GpuJoinSharedState	GpuJoinSharedState;
+
 extern bool pgstrom_path_is_gpujoin(Path *pathnode);
 extern bool pgstrom_plan_is_gpujoin(const Plan *plannode);
+extern bool pgstrom_planstate_is_gpujoin(const PlanState *ps);
 extern int	gpujoin_process_task(GpuTask *gtask, CUmodule cuda_module);
 extern void	gpujoin_release_task(GpuTask *gtask);
 extern void assign_gpujoin_session_info(StringInfo buf,
@@ -841,7 +846,9 @@ extern void	pgstrom_init_gpujoin(void);
 /*
  * gpupreagg.c
  */
+extern bool pgstrom_path_is_gpupreagg(const Path *pathnode);
 extern bool pgstrom_plan_is_gpupreagg(const Plan *plan);
+extern bool pgstrom_planstate_is_gpupreagg(const PlanState *ps);
 extern void gpupreagg_post_planner(PlannedStmt *pstmt, CustomScan *cscan);
 extern int	gpupreagg_process_task(GpuTask *gtask, CUmodule cuda_module);
 extern void	gpupreagg_release_task(GpuTask *gtask);
