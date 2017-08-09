@@ -3657,6 +3657,9 @@ ExecGpuPreAggInitDSM(CustomScanState *node,
 	GpuPreAggState *gpas = (GpuPreAggState *) node;
 	GpuPreAggParallelDSM *gpapdsm = (GpuPreAggParallelDSM *) coordinate;
 
+	/* save ParallelContext */
+	gpas->gts.pcxt = pcxt;
+
 	/* allocation of shared state */
 	gpas->gpa_sstate = createGpuPreAggSharedState(gpas);
 	if (gpas->unified_gpujoin)

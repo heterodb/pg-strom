@@ -2247,13 +2247,16 @@ ExecGpuScanInitDSM(CustomScanState *node,
 				   void *coordinate)
 {
 	GpuScanState	   *gss = (GpuScanState *) node;
+	GpuScanSharedState *gs_sstate = NULL;
 	Relation			relation = node->ss.ss_currentRelation;
 	EState			   *estate = gss->gts.css.ss.ps.state;
 	GpuScanParallelDSM *gspdsm = coordinate;
 
 	gss->gts.pcxt = pcxt;
-	gss->gs_sstate = gspdsm->gs_sstate = createGpuScanSharedState(gss);
-
+	/* NOTE: GpuJoin or GpuPreAgg may also call this function */
+	if (pgstrom_planstate_is_gpuscan(&gss->gts.css.ss.ps))
+		gss->gs_sstate = gs_sstate = createGpuScanSharedState(gss);
+	gspdsm->gs_sstate = gs_sstate;
 	if (relation)
 	{
 		/* setup of parallel scan descriptor */
