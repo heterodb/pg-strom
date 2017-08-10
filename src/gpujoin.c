@@ -330,7 +330,7 @@ struct GpuJoinSharedState
 };
 
 /*
- * pgstrom_gpujoin - task object of GpuJoin
+ * GpuJoinTask - task object of GpuJoin
  */
 typedef struct
 {
@@ -343,7 +343,7 @@ typedef struct
 	pgstrom_data_store *pds_src;	/* data store of outer relation */
 	pgstrom_data_store *pds_dst;	/* data store of result buffer */
 	kern_gpujoin		kern;		/* kern_gpujoin of this request */
-} pgstrom_gpujoin;
+} GpuJoinTask;
 
 /* static variables */
 static set_join_pathlist_hook_type set_join_pathlist_next;
@@ -359,7 +359,7 @@ static void gpujoin_ready_task(GpuTaskState *gts, GpuTask *gtask);
 static void gpujoin_switch_task(GpuTaskState *gts, GpuTask *gtask);
 static TupleTableSlot *gpujoin_next_tuple(GpuTaskState *gts);
 static TupleTableSlot *gpujoin_next_tuple_fallback(GpuJoinState *gjs,
-												   pgstrom_gpujoin *pgjoin);
+												   GpuJoinTask *pgjoin);
 static pg_crc32 get_tuple_hashvalue(innerState *istate,
 									bool is_inner_hashkeys,
 									TupleTableSlot *slot,
@@ -3735,7 +3735,7 @@ gpujoin_codegen(PlannerInfo *root,
  */
 static double
 gpujoin_exec_estimate_nitems(GpuJoinState *gjs,
-							 pgstrom_gpujoin *pgjoin,
+							 GpuJoinTask *pgjoin,
 							 kern_join_scale *jscale_old,
 							 double ntuples_in,
 							 int depth)
@@ -3958,7 +3958,7 @@ gpujoin_exec_estimate_nitems(GpuJoinState *gjs,
  */
 static pgstrom_data_store *
 gpujoin_attach_result_buffer(GpuJoinState *gjs,
-							 pgstrom_gpujoin *pgjoin,
+							 GpuJoinTask *pgjoin,
 							 double ntuples, cl_int target_depth)
 {
 	GpuContext	   *gcontext = gjs->gts.gcontext;
@@ -4124,7 +4124,7 @@ gpujoin_create_task(GpuJoinState *gjs,
 {
 	GpuContext		   *gcontext = gjs->gts.gcontext;
 	kern_data_store	   *kds_dst_head = gjs->kds_dst_head;
-	pgstrom_gpujoin	   *pgjoin;
+	GpuJoinTask		   *pgjoin;
 	double				ntuples;
 	double				ntuples_next;
 	double				ntuples_delta;
@@ -4137,7 +4137,7 @@ gpujoin_create_task(GpuJoinState *gjs,
 	kern_parambuf	   *kparams;
 
 	/* allocation of GpuJoinTask */
-	required = offsetof(pgstrom_gpujoin, kern)
+	required = offsetof(GpuJoinTask, kern)
 		+ STROMALIGN(offsetof(kern_gpujoin,
 							  jscale[gjs->num_rels + 1]))	/* kgjoin */
 		+ STROMALIGN(gjs->gts.kern_params->length)			/* kparams */
@@ -4335,18 +4335,18 @@ major_retry:
 /*
  * gpujoin_clone_task
  */
-static pgstrom_gpujoin *
-gpujoin_clone_task(pgstrom_gpujoin *pgjoin_old)
+static GpuJoinTask *
+gpujoin_clone_task(GpuJoinTask *pgjoin_old)
 {
-	pgstrom_gpujoin	   *pgjoin_new;
-	GpuContext		   *gcontext;
-	Size				required;
+	GpuJoinTask	   *pgjoin_new;
+	GpuContext	   *gcontext;
+	Size			required;
 
 	gcontext = (IsGpuServerProcess()
 				? pgjoin_old->task.gcontext
 				: pgjoin_old->task.gts->gcontext);
 
-	required = offsetof(pgstrom_gpujoin, kern)
+	required = offsetof(GpuJoinTask, kern)
 		+ STROMALIGN(offsetof(kern_gpujoin,
 							  jscale[pgjoin_old->kern.num_rels + 1]))
 		+ KERN_GPUJOIN_PARAMBUF_LENGTH(&pgjoin_old->kern);
@@ -4374,8 +4374,8 @@ gpujoin_clone_task(pgstrom_gpujoin *pgjoin_old)
 static void
 gpujoin_outerjoin_kicker(GpuJoinSharedState *gj_sstate, void *private)
 {
-	pgstrom_gpujoin *pgjoin_old = (pgstrom_gpujoin *) private;
-	pgstrom_gpujoin *pgjoin_new = gpujoin_clone_task(pgjoin_old);
+	GpuJoinTask		*pgjoin_old = (GpuJoinTask *) private;
+	GpuJoinTask		*pgjoin_new = gpujoin_clone_task(pgjoin_old);
 	GpuContext		*gcontext = (IsGpuServerProcess()
 								 ? pgjoin_old->task.gcontext
 								 : pgjoin_old->task.gts->gcontext);
@@ -4464,13 +4464,13 @@ gpujoin_next_task(GpuTaskState *gts)
 }
 
 /*
- * gpujoin_ready_task - callback when a pgstrom_gpujoin task gets processed
+ * gpujoin_ready_task - callback when a GpuJoinTask task gets processed
  * on the GPU server process then returned to the backend process again.
  */
 static void
 gpujoin_ready_task(GpuTaskState *gts, GpuTask *gtask)
 {
-	pgstrom_gpujoin *pgjoin = (pgstrom_gpujoin *) gtask;
+	GpuJoinTask *pgjoin = (GpuJoinTask *) gtask;
 
 	if (gtask->kerror.errcode != StromError_Success)
 		elog(ERROR, "GpuJoin kernel internal error: %s",
@@ -4482,15 +4482,15 @@ gpujoin_ready_task(GpuTaskState *gts, GpuTask *gtask)
 }
 
 /*
- * gpujoin_switch_task - callback when a pgstrom_gpujoin task gets completed
+ * gpujoin_switch_task - callback when a GpuJoinTask task gets completed
  * and assigned on the gts->curr_task.
  */
 static void
 gpujoin_switch_task(GpuTaskState *gts, GpuTask *gtask)
 {
-	GpuJoinState	   *gjs = (GpuJoinState *) gts;
-	pgstrom_gpujoin	   *pgjoin = (pgstrom_gpujoin *) gtask;
-	int					i;
+	GpuJoinState   *gjs = (GpuJoinState *) gts;
+	GpuJoinTask	   *pgjoin = (GpuJoinTask *) gtask;
+	int				i;
 
 	/* rewind the CPU fallback position */
 	if (pgjoin->task.cpu_fallback)
@@ -4509,9 +4509,9 @@ gpujoin_switch_task(GpuTaskState *gts, GpuTask *gtask)
 static TupleTableSlot *
 gpujoin_next_tuple(GpuTaskState *gts)
 {
-	GpuJoinState	   *gjs = (GpuJoinState *) gts;
-	TupleTableSlot	   *slot = gjs->gts.css.ss.ss_ScanTupleSlot;
-	pgstrom_gpujoin	   *pgjoin = (pgstrom_gpujoin *)gjs->gts.curr_task;
+	GpuJoinState   *gjs = (GpuJoinState *) gts;
+	TupleTableSlot *slot = gjs->gts.css.ss.ss_ScanTupleSlot;
+	GpuJoinTask	   *pgjoin = (GpuJoinTask *)gjs->gts.curr_task;
 	pgstrom_data_store *pds_dst = pgjoin->pds_dst;
 
 	if (pgjoin->task.cpu_fallback)
@@ -4740,7 +4740,7 @@ gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
 static bool
 gpujoin_fallback_inner_recurse(GpuJoinState *gjs,
 							   TupleTableSlot *slot_fallback,
-							   pgstrom_gpujoin *pgjoin,
+							   GpuJoinTask *pgjoin,
 							   int depth,
 							   cl_bool do_right_outer_join)
 {
@@ -5003,7 +5003,7 @@ gpujoin_fallback_inner_recurse(GpuJoinState *gjs,
 }
 
 static TupleTableSlot *
-gpujoin_next_tuple_fallback(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
+gpujoin_next_tuple_fallback(GpuJoinState *gjs, GpuJoinTask *pgjoin)
 {
 	ExprContext		   *econtext = gjs->gts.css.ss.ps.ps_ExprContext;
 	TupleDesc			tupdesc;
@@ -5142,7 +5142,7 @@ gpujoin_next_tuple_fallback(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 void
 gpujoin_release_task(GpuTask *gtask)
 {
-	pgstrom_gpujoin	   *pgjoin = (pgstrom_gpujoin *) gtask;
+	GpuJoinTask	   *pgjoin = (GpuJoinTask *) gtask;
 
 	/* detach multi-relations buffer, if any */
 	if (pgjoin->gj_sstate)
@@ -5159,7 +5159,7 @@ gpujoin_release_task(GpuTask *gtask)
 }
 
 static void
-update_runtime_statistics(pgstrom_gpujoin *pgjoin)
+update_runtime_statistics(GpuJoinTask *pgjoin)
 {
 	pgstrom_data_store *pds_dst = pgjoin->pds_dst;
 	GpuJoinSharedState *gj_sstate = pgjoin->gj_sstate;
@@ -5190,7 +5190,7 @@ update_runtime_statistics(pgstrom_gpujoin *pgjoin)
 }
 
 static bool
-gpujoin_process_kernel(pgstrom_gpujoin *pgjoin, CUmodule cuda_module)
+gpujoin_process_kernel(GpuJoinTask *pgjoin, CUmodule cuda_module)
 {
 	GpuContext		   *gcontext = pgjoin->task.gcontext;
 	GpuJoinSharedState *gj_sstate = pgjoin->gj_sstate;
@@ -5413,7 +5413,7 @@ out_of_resource:
  * not processed, we need to kick next kernel.
  */
 static bool
-gpujoin_try_rerun_kernel(pgstrom_gpujoin *pgjoin, CUmodule cuda_module)
+gpujoin_try_rerun_kernel(GpuJoinTask *pgjoin, CUmodule cuda_module)
 {
 	GpuContext		   *gcontext = pgjoin->task.gcontext;
 	SharedGpuContext   *shgcon = gcontext->shgcon;
@@ -5436,7 +5436,7 @@ gpujoin_try_rerun_kernel(pgstrom_gpujoin *pgjoin, CUmodule cuda_module)
 			cl_uint		window_base = jscale[i].window_base;
 			cl_uint		window_size = jscale[i].window_size;
 			cl_uint		window_orig = jscale[i].window_orig;
-			pgstrom_gpujoin	*resp;
+		  	GpuJoinTask *resp;
 
 			/*
 			 * NOTE: Pay attention on a corner case - if CpuReCheck happen
@@ -5504,7 +5504,7 @@ gpujoin_try_rerun_kernel(pgstrom_gpujoin *pgjoin, CUmodule cuda_module)
 int
 gpujoin_process_task(GpuTask *gtask, CUmodule cuda_module)
 {
-	pgstrom_gpujoin *pgjoin = (pgstrom_gpujoin *) gtask;
+	GpuJoinTask	   *pgjoin = (GpuJoinTask *) gtask;
 
 	/* Ensure inner hash/heap buffe is loaded */
 	gpujoinLoadInnerBuffer(pgjoin->task.gcontext,
