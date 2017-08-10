@@ -319,7 +319,8 @@ struct GpuJoinSharedState
 	cl_bool			had_cpu_fallback;/* true, if CPU fallback happen */
 	cl_int			refcnt;		/* reference counter */
 	cl_int		   *nr_tasks;	/* # of concurrent tasks (per device) */
-	cl_bool		   *is_attached;/* True, if already setup (per worker) */
+	cl_bool		   *is_loaded;	/* True, if inner hash/heap buffer is already
+								 * loaded to device memory (per PGworker) */
 	CUdeviceptr	   *m_kmrels;	/* GPU buffer for kmrels (per device) */
 	CUdeviceptr	   *m_ojmaps;	/* GPU buffer for outer join (per device) */
 	cl_bool		   *h_ojmaps;	/* Host memory for outer join map
@@ -371,12 +372,13 @@ static char *gpujoin_codegen(PlannerInfo *root,
 static bool gpujoin_inner_preload(GpuJoinState *gjs);
 
 static GpuJoinSharedState *createGpuJoinSharedState(GpuJoinState *gjs);
-static GpuJoinSharedState *multirels_get_buffer(GpuContext *gcontext,
-												GpuJoinSharedState *gj_sstate);
-static void multirels_put_buffer(pgstrom_gpujoin *pgjoin);
-static bool loadGpuJoinSharedState(GpuContext *gcontext,
-								   GpuJoinSharedState *gj_sstate);
 static void releaseGpuJoinSharedState(GpuJoinState *gjs, bool is_rescan);
+
+static GpuJoinSharedState *
+gpujoinGetInnerBuffer(GpuContext *gcontext, GpuJoinSharedState *gj_sstate);
+static bool gpujoinLoadInnerBuffer(GpuContext *gcontext,
+								   GpuJoinSharedState *gj_sstate);
+static void gpujoinPutInnerBuffer(pgstrom_gpujoin *pgjoin);
 
 /*
  * misc declarations
@@ -4144,7 +4146,7 @@ gpujoin_create_task(GpuJoinState *gjs,
 
 	pgstromInitGpuTask(&gjs->gts, &pgjoin->task);
 	pgjoin->task.file_desc = file_desc;
-	pgjoin->gj_sstate = multirels_get_buffer(gcontext, gj_sstate);
+	pgjoin->gj_sstate = gpujoinGetInnerBuffer(gcontext, gj_sstate);
 	pgjoin->pds_src = pds_src;
 	pgjoin->pds_dst = NULL;		/* to be set later */
 	pgjoin->is_terminator = (pds_src == NULL);
@@ -5031,7 +5033,7 @@ gpujoin_next_tuple_fallback(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 							  jscale->window_base + jscale->window_size);
 				if (kds_index >= nvalids)
 				{
-					multirels_put_buffer(pgjoin);
+					gpujoinPutInnerBuffer(pgjoin);
 					pgjoin->gj_sstate = NULL;
 					return NULL;
 				}
@@ -5094,7 +5096,7 @@ gpujoin_next_tuple_fallback(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 		if (!gpujoin_fallback_inner_recurse(gjs, gjs->slot_fallback,
 											pgjoin, 1, true))
 		{
-			multirels_put_buffer(pgjoin);
+			gpujoinPutInnerBuffer(pgjoin);
 			pgjoin->gj_sstate = NULL;
 			return NULL;
 		}
@@ -5120,7 +5122,7 @@ gpujoin_release_task(GpuTask *gtask)
 
 	/* detach multi-relations buffer, if any */
 	if (pgjoin->gj_sstate)
-		multirels_put_buffer(pgjoin);
+		gpujoinPutInnerBuffer(pgjoin);
 	/* unlink source data store */
 	if (pgjoin->pds_src)
 		PDS_release(pgjoin->pds_src);
@@ -5480,7 +5482,7 @@ gpujoin_process_task(GpuTask *gtask, CUmodule cuda_module)
 	pgstrom_gpujoin *pgjoin = (pgstrom_gpujoin *) gtask;
 
 	/* Ensure inner hash/heap buffe is loaded */
-	loadGpuJoinSharedState(pgjoin->task.gcontext,
+	gpujoinLoadInnerBuffer(pgjoin->task.gcontext,
 						   pgjoin->gj_sstate);
 	/* Terminator task skips jobs */
 	if (pgjoin->is_terminator)
@@ -5518,7 +5520,7 @@ gpujoin_process_task(GpuTask *gtask, CUmodule cuda_module)
 	 */
 out:
 	if (!pgjoin->task.cpu_fallback)
-		multirels_put_buffer(pgjoin);
+		gpujoinPutInnerBuffer(pgjoin);
 	return 0;
 }
 
@@ -5971,7 +5973,7 @@ createGpuJoinSharedState(GpuJoinState *gjs)
 		+ MAXALIGN(sizeof(size_t) * (num_rels+1))		/* right_nitems */
 		+ MAXALIGN(sizeof(cl_double) * (num_rels+1))	/* row_dist_score */
 		+ MAXALIGN(sizeof(cl_int) * (numDevAttrs+1))	/* nr_tasks */
-		+ MAXALIGN(sizeof(cl_bool) * pg_nworkers)		/* is_attached */
+		+ MAXALIGN(sizeof(cl_bool) * pg_nworkers)		/* is_loaded */
 		+ MAXALIGN(sizeof(CUdeviceptr) * numDevAttrs)	/* m_kmrels */
 		+ MAXALIGN(sizeof(CUdeviceptr) * numDevAttrs);	/* m_ojmaps */
 
@@ -5998,7 +6000,7 @@ createGpuJoinSharedState(GpuJoinState *gjs)
 	pthreadMutexInit(&gj_sstate->mutex);
 	gj_sstate->nr_tasks = (cl_int *) pos;
 	pos += MAXALIGN(sizeof(int) * (numDevAttrs + 1));
-	gj_sstate->is_attached = (cl_bool *) pos;
+	gj_sstate->is_loaded = (cl_bool *) pos;
 	pos += MAXALIGN(sizeof(cl_bool) * pg_nworkers);
 	gj_sstate->m_kmrels = (CUdeviceptr *) pos;
 	pos += MAXALIGN(sizeof(CUdeviceptr) * numDevAttrs);
@@ -6017,10 +6019,10 @@ createGpuJoinSharedState(GpuJoinState *gjs)
 }
 
 /*
- * multirels_get_buffer
+ * gpujoinGetInnerBuffer
  */
 static GpuJoinSharedState *
-multirels_get_buffer(GpuContext *gcontext, GpuJoinSharedState *gj_sstate)
+gpujoinGetInnerBuffer(GpuContext *gcontext, GpuJoinSharedState *gj_sstate)
 {
 	int		dindex = gcontext->gpuserv_id;
 
@@ -6033,10 +6035,10 @@ multirels_get_buffer(GpuContext *gcontext, GpuJoinSharedState *gj_sstate)
 }
 
 /*
- * multirels_put_buffer
+ * gpujoinPutInnerBuffer
  */
 static void
-multirels_put_buffer(pgstrom_gpujoin *pgjoin_old)
+gpujoinPutInnerBuffer(pgstrom_gpujoin *pgjoin_old)
 {
 	GpuJoinSharedState *gj_sstate = pgjoin_old->gj_sstate;
 	bool	launch_outer_join = false;
@@ -6095,8 +6097,8 @@ multirels_put_buffer(pgstrom_gpujoin *pgjoin_old)
 		GpuContext		*gcontext = (IsGpuServerProcess()
 									 ? pgjoin_old->task.gcontext
 									 : pgjoin_old->task.gts->gcontext);
-		pgjoin_new->gj_sstate = multirels_get_buffer(gcontext,
-													 pgjoin_old->gj_sstate);
+		pgjoin_new->gj_sstate = gpujoinGetInnerBuffer(gcontext,
+													  pgjoin_old->gj_sstate);
 		if (IsGpuServerProcess())
 			gpuservPushGpuTask(gcontext, &pgjoin_new->task);
 		else
@@ -6106,10 +6108,10 @@ multirels_put_buffer(pgstrom_gpujoin *pgjoin_old)
 }
 
 /*
- * loadGpuJoinSharedState - load inner heap/hash buffer onto the device
+ * gpujoinLoadInnerBuffer
  */
 static bool
-__loadGpuJoinSharedState(GpuContext *gcontext, GpuJoinSharedState *gj_sstate)
+__gpujoinLoadInnerBuffer(GpuContext *gcontext, GpuJoinSharedState *gj_sstate)
 {
 	CUdeviceptr	m_kmrels = 0UL;
 	CUdeviceptr	m_ojmaps = 0UL;
@@ -6160,7 +6162,7 @@ __loadGpuJoinSharedState(GpuContext *gcontext, GpuJoinSharedState *gj_sstate)
 }
 
 static bool
-loadGpuJoinSharedState(GpuContext *gcontext, GpuJoinSharedState *gj_sstate)
+gpujoinLoadInnerBuffer(GpuContext *gcontext, GpuJoinSharedState *gj_sstate)
 {
 	int			pg_worker = gcontext->shgcon->pg_worker_index;
 	int			dindex = gcontext->gpuserv_id;
@@ -6169,15 +6171,15 @@ loadGpuJoinSharedState(GpuContext *gcontext, GpuJoinSharedState *gj_sstate)
 
 	Assert(dindex == gpuserv_cuda_dindex);
 	pthreadMutexLock(&gj_sstate->mutex);
-	if (!gj_sstate->is_attached[pg_worker])
+	if (!gj_sstate->is_loaded[pg_worker])
 	{
 		/* no need to attach device memory twice */
-		gj_sstate->is_attached[pg_worker] = true;
+		gj_sstate->is_loaded[pg_worker] = true;
 
 		STROM_TRY();
 		{
 			if (gj_sstate->m_kmrels[dindex] == 0UL)
-				retval = __loadGpuJoinSharedState(gcontext, gj_sstate);
+				retval = __gpujoinLoadInnerBuffer(gcontext, gj_sstate);
 			else
 			{
 				/*
@@ -6214,7 +6216,7 @@ releaseGpuJoinSharedState(GpuJoinState *gjs, bool is_rescan)
 	int				i, pg_worker = shgcon->pg_worker_index;
 
 	pthreadMutexLock(&gj_sstate->mutex);
-	if (gj_sstate->is_attached[pg_worker])
+	if (gj_sstate->is_loaded[pg_worker])
 		deviceptr = gj_sstate->m_kmrels[gcontext->gpuserv_id];
 	pthreadMutexUnlock(&gj_sstate->mutex);
 
@@ -6252,7 +6254,7 @@ releaseGpuJoinSharedState(GpuJoinState *gjs, bool is_rescan)
 		pg_atomic_init_u32(&gj_sstate->preload_done, 0);
 		gj_sstate->total_length = gj_sstate->head_length;
 		memset(gj_sstate->nr_tasks, 0, sizeof(int) * (numDevAttrs + 1));
-		memset(gj_sstate->is_attached, 0, sizeof(bool) * pg_nworkers);
+		memset(gj_sstate->is_loaded, 0, sizeof(bool) * pg_nworkers);
 		memset(gj_sstate->m_kmrels, 0, sizeof(CUdeviceptr) * numDevAttrs);
 		memset(gj_sstate->m_ojmaps, 0, sizeof(CUdeviceptr) * numDevAttrs);
 		gj_sstate->h_ojmaps = NULL;
