@@ -314,10 +314,11 @@ struct GpuJoinSharedState
 	 * JOIN based on the latest outer join map.
 	 */
 	pthread_mutex_t	mutex;
-	cl_bool			outer_scan_done; /* true, if outer-scan was done */
-	cl_bool			outer_join_done; /* true, if outer-join was done */
+	cl_bool			outer_scan_done; /* True, if outer scan reached end of
+									  * the relation, thus, no more tasks
+									  * will be produced. */
+	cl_bool			outer_join_kicked; /* true, if outer-join was kicked */
 	cl_bool			had_cpu_fallback;/* true, if CPU fallback happen */
-	cl_int			refcnt;		/* reference counter */
 	cl_int		   *nr_tasks;	/* # of concurrent tasks (per device) */
 	cl_bool		   *is_loaded;	/* True, if inner hash/heap buffer is already
 								 * loaded to device memory (per PGworker) */
@@ -378,7 +379,10 @@ static GpuJoinSharedState *
 gpujoinGetInnerBuffer(GpuContext *gcontext, GpuJoinSharedState *gj_sstate);
 static bool gpujoinLoadInnerBuffer(GpuContext *gcontext,
 								   GpuJoinSharedState *gj_sstate);
-static void gpujoinPutInnerBuffer(pgstrom_gpujoin *pgjoin);
+static void gpujoinPutInnerBuffer(
+	GpuJoinSharedState *gj_sstate,
+	void (*outerjoin_kicker)(GpuJoinSharedState *gj_sstate, void *private),
+	void *private);
 
 /*
  * misc declarations
@@ -4365,6 +4369,24 @@ gpujoin_clone_task(pgstrom_gpujoin *pgjoin_old)
 }
 
 /*
+ * gpujoin_outerjoin_kicker
+ */
+static void
+gpujoin_outerjoin_kicker(GpuJoinSharedState *gj_sstate, void *private)
+{
+	pgstrom_gpujoin *pgjoin_old = (pgstrom_gpujoin *) private;
+	pgstrom_gpujoin *pgjoin_new = gpujoin_clone_task(pgjoin_old);
+	GpuContext		*gcontext = (IsGpuServerProcess()
+								 ? pgjoin_old->task.gcontext
+								 : pgjoin_old->task.gts->gcontext);
+	pgjoin_new->gj_sstate = gpujoinGetInnerBuffer(gcontext, gj_sstate);
+	if (IsGpuServerProcess())
+		gpuservPushGpuTask(gcontext, &pgjoin_new->task);
+	else
+		gpuservSendGpuTask(gcontext, &pgjoin_new->task);
+}
+
+/*
  * gpujoin_next_task
  */
 static GpuTask *
@@ -5033,7 +5055,8 @@ gpujoin_next_tuple_fallback(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 							  jscale->window_base + jscale->window_size);
 				if (kds_index >= nvalids)
 				{
-					gpujoinPutInnerBuffer(pgjoin);
+					gpujoinPutInnerBuffer(pgjoin->gj_sstate,
+										  gpujoin_outerjoin_kicker, pgjoin);
 					pgjoin->gj_sstate = NULL;
 					return NULL;
 				}
@@ -5096,7 +5119,8 @@ gpujoin_next_tuple_fallback(GpuJoinState *gjs, pgstrom_gpujoin *pgjoin)
 		if (!gpujoin_fallback_inner_recurse(gjs, gjs->slot_fallback,
 											pgjoin, 1, true))
 		{
-			gpujoinPutInnerBuffer(pgjoin);
+			gpujoinPutInnerBuffer(pgjoin->gj_sstate,
+								  gpujoin_outerjoin_kicker, pgjoin);
 			pgjoin->gj_sstate = NULL;
 			return NULL;
 		}
@@ -5122,7 +5146,8 @@ gpujoin_release_task(GpuTask *gtask)
 
 	/* detach multi-relations buffer, if any */
 	if (pgjoin->gj_sstate)
-		gpujoinPutInnerBuffer(pgjoin);
+		gpujoinPutInnerBuffer(pgjoin->gj_sstate,
+							  gpujoin_outerjoin_kicker, pgjoin);
 	/* unlink source data store */
 	if (pgjoin->pds_src)
 		PDS_release(pgjoin->pds_src);
@@ -5520,7 +5545,11 @@ gpujoin_process_task(GpuTask *gtask, CUmodule cuda_module)
 	 */
 out:
 	if (!pgjoin->task.cpu_fallback)
-		gpujoinPutInnerBuffer(pgjoin);
+	{
+		gpujoinPutInnerBuffer(pgjoin->gj_sstate,
+							  gpujoin_outerjoin_kicker, pgjoin);
+		pgjoin->gj_sstate = NULL;
+	}
 	return 0;
 }
 
@@ -6038,38 +6067,43 @@ gpujoinGetInnerBuffer(GpuContext *gcontext, GpuJoinSharedState *gj_sstate)
  * gpujoinPutInnerBuffer
  */
 static void
-gpujoinPutInnerBuffer(pgstrom_gpujoin *pgjoin_old)
+gpujoinPutInnerBuffer(GpuJoinSharedState *gj_sstate,
+					  void (*outerjoin_kicker)(GpuJoinSharedState *gj_sstate,
+											   void *private),
+					  void *private)
 {
-	GpuJoinSharedState *gj_sstate = pgjoin_old->gj_sstate;
-	bool	launch_outer_join = false;
+	bool	kick_outer_join = false;
 	int		i, dindex;
 
 	dindex = (gpuserv_cuda_dindex < 0 ? numDevAttrs : gpuserv_cuda_dindex);
 	Assert(dindex >= 0 && dindex <= numDevAttrs);
 	pthreadMutexLock(&gj_sstate->mutex);
 	Assert(gj_sstate->nr_tasks[dindex] > 0);
-	if (--gj_sstate->nr_tasks[dindex] == 0 && gj_sstate->outer_scan_done)
+	if (--gj_sstate->nr_tasks[dindex] == 0 &&	/* last task on the device? */
+		gj_sstate->outer_scan_done &&	/* no more task will be produced? */
+		gj_sstate->h_ojmaps != NULL)	/* outer join may happen? */
 	{
-		if (gj_sstate->h_ojmaps != NULL && !gj_sstate->outer_join_done)
+		if (!gj_sstate->outer_join_kicked)
 		{
 			for (i=0; i <= numDevAttrs; i++)
 			{
 				if (gj_sstate->nr_tasks[i] > 0)
 					goto no_outer_join;
 			}
-			launch_outer_join = true;
-			gj_sstate->outer_join_done = true;
+			kick_outer_join = true;
+			gj_sstate->outer_join_kicked = true;
 		}
 	no_outer_join:
 		/*
-		 * In case when GpuJoin task is correctly processed on GPU server,
-		 * and it was the last task on the current GPU device, OUTER JOIN
-		 * map must be written back for colocation, if needed.
-		 * If only single GPU device is installed, and no CPU fallback has
-		 * not happen yet, we can omit this step.
+		 * In case when GpuJoin task is the last task on the current GPU
+		 * device (so CPU fallback case is an exception), OUTER JOIN map
+		 * must be written back for the colocation.
+		 * If and when only single GPU device is installed, and no CPU
+		 * fallback has happen yet, we can omit this step, because we
+		 * already have OUTER JOIN map on the device with no other source.
 		 */
-		if (gj_sstate->h_ojmaps &&
-			(numDevAttrs > 1 || gj_sstate->h_ojmaps != NULL))
+		if (IsGpuServerProcess() &&
+			(numDevAttrs > 1 || gj_sstate->had_cpu_fallback))
 		{
 			CUresult	rc;
 			CUdeviceptr	m_ojmaps = gj_sstate->m_ojmaps[dindex];
@@ -6091,20 +6125,8 @@ gpujoinPutInnerBuffer(pgstrom_gpujoin *pgjoin_old)
 	/*
 	 * Clone GpuJoin task, then launch OUTER JOIN
 	 */
-	if (launch_outer_join)
-	{
-		pgstrom_gpujoin *pgjoin_new = gpujoin_clone_task(pgjoin_old);
-		GpuContext		*gcontext = (IsGpuServerProcess()
-									 ? pgjoin_old->task.gcontext
-									 : pgjoin_old->task.gts->gcontext);
-		pgjoin_new->gj_sstate = gpujoinGetInnerBuffer(gcontext,
-													  pgjoin_old->gj_sstate);
-		if (IsGpuServerProcess())
-			gpuservPushGpuTask(gcontext, &pgjoin_new->task);
-		else
-			gpuservSendGpuTask(gcontext, &pgjoin_new->task);
-	}
-	pgjoin_old->gj_sstate = NULL;
+	if (kick_outer_join)
+		outerjoin_kicker(gj_sstate, private);
 }
 
 /*
