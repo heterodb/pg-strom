@@ -2282,7 +2282,9 @@ ExecGpuScanInitWorker(CustomScanState *node,
 	Relation			relation = node->ss.ss_currentRelation;
 	GpuScanParallelDSM *gspdsm = coordinate;
 
-	gss->gs_sstate = gspdsm->gs_sstate;
+	/* NOTE: GpuJoin or GpuPreAgg may also call this function */
+	if (pgstrom_planstate_is_gpuscan(&gss->gts.css.ss.ps))
+		gss->gs_sstate = gspdsm->gs_sstate;
 	if (relation)
 	{
 		/* begin parallel sequential scan */
