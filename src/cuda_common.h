@@ -687,18 +687,6 @@ typedef struct {
 	(KDS_CALCULATE_HEAD_LENGTH(ncols) +			\
 	 LONGALIGN((sizeof(Datum) +					\
 				sizeof(char)) * (ncols)) * (nitems))
-/* gsage growth by the next tuple (row) */
-#define KDS_ROW_USAGE_GROWTH(nitems, consumption)			\
-	(STROMALIGN(sizeof(cl_uint) * ((nitems) + 1)) -			\
-	 STROMALIGN(sizeof(cl_uint) * (nitems)) +				\
-	 MAXALIGN(consumption))
-/* usage growth by the next one tuple (hash) */
-#define KDS_HASH_USAGE_GROWTH(nitems, consumption)			\
-	(STROMALIGN(sizeof(cl_uint) * ((nitems) + 1)) -			\
-	 STROMALIGN(sizeof(cl_uint) * (nitems)) +				\
-	 STROMALIGN(sizeof(cl_uint) * __KDS_NSLOTS((nitems) + 1)) -	\
-	 STROMALIGN(sizeof(cl_uint) * __KDS_NSLOTS(nitems)) +	\
-	 MAXALIGN(consumption))
 
 /* length of the header portion of kern_data_store */
 #define KERN_DATA_STORE_HEAD_LENGTH(kds)			\

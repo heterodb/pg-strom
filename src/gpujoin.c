@@ -63,8 +63,6 @@ typedef struct
 		List	   *hash_quals;		/* valid quals, if hash-join */
 		List	   *join_quals;		/* all the device quals, incl hash_quals */
 		Size		ichunk_size;	/* expected inner chunk size */
-		double		nloops_minor;	/* # of virtual segment of inner buffer */
-		double		nloops_major;	/* # of physical split of inner buffer */
 	} inners[FLEXIBLE_ARRAY_MEMBER];
 } GpuJoinPath;
 
@@ -91,8 +89,6 @@ typedef struct
 	List	   *join_types;
 	List	   *join_quals;
 	List	   *other_quals;
-	List	   *nloops_minor;
-	List	   *nloops_major;		/* to be deprecated */
 	List	   *hash_inner_keys;	/* if hash-join */
 	List	   *hash_outer_keys;	/* if hash-join */
 	/* supplemental information of ps_tlist */
@@ -125,8 +121,6 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 	privs = lappend(privs, gj_info->join_types);
 	exprs = lappend(exprs, gj_info->join_quals);
 	exprs = lappend(exprs, gj_info->other_quals);
-	privs = lappend(privs, gj_info->nloops_minor);
-	privs = lappend(privs, gj_info->nloops_major);
 	exprs = lappend(exprs, gj_info->hash_inner_keys);
 	exprs = lappend(exprs, gj_info->hash_outer_keys);
 
@@ -165,8 +159,6 @@ deform_gpujoin_info(CustomScan *cscan)
 	gj_info->join_types = list_nth(privs, pindex++);
     gj_info->join_quals = list_nth(exprs, eindex++);
 	gj_info->other_quals = list_nth(exprs, eindex++);
-	gj_info->nloops_minor = list_nth(privs, pindex++);
-	gj_info->nloops_major = list_nth(privs, pindex++);
 	gj_info->hash_inner_keys = list_nth(exprs, eindex++);
     gj_info->hash_outer_keys = list_nth(exprs, eindex++);
 
@@ -464,77 +456,37 @@ __dump_gpujoin_path(StringInfo buf, PlannerInfo *root, Path *pathnode)
 }
 
 /*
- * estimate_buffersize_gpujoin 
- *
- * XXX - assumption gets deprecated; inner buffer shall not be split no longer.
- *
- * Top half of cost_gpujoin - we determine expected buffer consumption.
- * If inner relations buffer is too large, we must split pmrels on
- * preloading. If result is too large, we must split range of inner
- * chunks logically.
+ * estimate_inner_buffersize
  */
-static bool
-estimate_buffersize_gpujoin(PlannerInfo *root,
-							RelOptInfo *joinrel,
-							Path *outer_path,
-							GpuJoinPath *gpath,
-							double num_chunks)
+static Size
+estimate_inner_buffersize(PlannerInfo *root,
+						  RelOptInfo *joinrel,
+						  Path *outer_path,
+						  GpuJoinPath *gpath,
+						  double num_chunks,
+						  double *p_kern_nloops)
 {
-	PathTarget *join_reltarget = joinrel->reltarget;
-	Size		inner_limit_sz;
 	Size		inner_total_sz;
-	double		prev_nloops_minor;
-	double		curr_nloops_minor;
-	Size		largest_chunk_size = 0;
-	cl_int		largest_chunk_index = -1;
-	Size		largest_growth_ntuples = 0.0;
-	cl_int		largest_growth_index = -1;
 	Size		buffer_size;
-	double		inner_ntuples;
+	double		kern_nloops = 1.0;
 	double		join_ntuples;
-	double		prev_ntuples;
 	cl_int		ncols;
 	cl_int		i, num_rels = gpath->num_rels;
 
-	/* init number of loops */
-	for (i=0; i < num_rels; i++)
-	{
-		gpath->inners[i].nloops_minor = 1.0;
-		gpath->inners[i].nloops_major = 1.0;
-	}
-
 	/*
-	 * Estimation: size of multi relational inner buffer
+	 * Estimation: size of inner hash/heap buffer
 	 */
-retry_major:
-	prev_nloops_minor = 1;
-	largest_chunk_size = 0;
-	largest_chunk_index = -1;
-	largest_growth_ntuples = 0.0;
-	largest_growth_index = -1;
-
 	inner_total_sz = STROMALIGN(offsetof(kern_multirels,
 										 chunks[num_rels]));
-	prev_ntuples = outer_path->rows / num_chunks;
 	for (i=0; i < num_rels; i++)
 	{
 		Path	   *inner_path = gpath->inners[i].scan_path;
 		RelOptInfo *inner_rel = inner_path->parent;
 		PathTarget *inner_reltarget = inner_rel->reltarget;
+		Size		inner_ntuples = (Size)inner_path->rows;
 		Size		chunk_size;
 		Size		entry_size;
 		Size		num_items;
-
-	retry_minor:
-		/* total number of inner nloops until this depth */
-		curr_nloops_minor = (prev_nloops_minor *
-							 gpath->inners[i].nloops_minor);
-
-		/* force a plausible relation size if no information. */
-		inner_ntuples = Max(inner_path->rows *
-							pgstrom_chunk_size_margin /
-							gpath->inners[i].nloops_major,
-							100.0);
 
 		/*
 		 * NOTE: PathTarget->width is not reliable for base relations 
@@ -550,7 +502,7 @@ retry_major:
 			entry_size = offsetof(kern_tupitem, htup);
 
 		entry_size += MAXALIGN(offsetof(HeapTupleHeaderData,
-									   t_bits[BITMAPLEN(ncols)]));
+										t_bits[BITMAPLEN(ncols)]));
 		if (inner_rel->reloptkind != RELOPT_BASEREL)
 			entry_size += MAXALIGN(inner_reltarget->width);
 		else
@@ -564,133 +516,41 @@ retry_major:
 		}
 
 		/*
-		 * inner chunk size estimation
+		 * estimation of the inner chunk in this depth
 		 */
-		chunk_size = KDS_CALCULATE_HASH_LENGTH(ncols,
-											   (Size)inner_ntuples,
-											   entry_size *
-											   (Size)inner_ntuples);
+		if (gpath->inners[i].hash_quals != NIL)
+			chunk_size = KDS_CALCULATE_HASH_LENGTH(ncols,
+												   inner_ntuples,
+												   inner_ntuples * entry_size);
+		else
+			chunk_size = KDS_CALCULATE_ROW_LENGTH(ncols,
+												  inner_ntuples,
+												  inner_ntuples * entry_size);
 		gpath->inners[i].ichunk_size = chunk_size;
-
-		if (largest_chunk_index < 0 || largest_chunk_size < chunk_size)
-		{
-			largest_chunk_size = chunk_size;
-			largest_chunk_index = i;
-		}
 		inner_total_sz += chunk_size;
 
 		/*
-		 * NOTE: The number of intermediation result of GpuJoin has to
-		 * fit pgstrom_chunk_size(). If too large number of rows are
-		 * expected, we try to run same chunk multiple times with
-		 * smaller inner_size[].
+		 * NOTE: amount of the intermediation result buffer is preferable
+		 * to fit pgstrom_chunk_size(). If too large number of rows are
+		 * expected, in-kernel GpuJoin logic internally repeat a series of
+		 * JOIN steps.
 		 */
-		join_ntuples = (gpath->inners[i].join_nrows /
-						(double)(num_chunks * curr_nloops_minor));
-		num_items = (Size)((double)(i+2) * join_ntuples *
-						   pgstrom_chunk_size_margin);
+		join_ntuples = gpath->inners[i].join_nrows / (double)num_chunks;
+		num_items = (Size)((double)(i+2) * join_ntuples);
 		buffer_size = offsetof(kern_gpujoin, jscale[num_rels + 1])
 			+ BLCKSZ	/* alternative of kern_parambuf */
 			+ STROMALIGN(offsetof(kern_resultbuf, results[num_items]))
 			+ STROMALIGN(offsetof(kern_resultbuf, results[num_items]));
 		if (buffer_size > pgstrom_chunk_size())
 		{
-			Size	nsplit_minor = (buffer_size / pgstrom_chunk_size()) + 1;
+			Size	nsplits = (buffer_size / pgstrom_chunk_size()) + 1;
 
-			if (nsplit_minor > INT_MAX)
-			{
-				elog(DEBUG1, "Too large kgjoin {nitems=%zu size=%zu}",
-					 num_items, buffer_size);
-				/*
-				 * NOTE: Heuristically, it is not a reasonable plan to
-				 * expect massive amount of intermediation result items.
-				 * It will lead very large ammount of minor iteration
-				 * for GpuJoin kernel invocations. So, we bail out this
-				 * plan immediately.
-				 */
-				return false;
-			}
-			gpath->inners[i].nloops_minor *= nsplit_minor;
-			goto retry_minor;
+			kern_nloops *= nsplits;
 		}
-
-		if (largest_growth_index < 0 ||
-			join_ntuples - prev_ntuples > largest_growth_ntuples)
-		{
-			largest_growth_index = i;
-			largest_growth_ntuples = join_ntuples - prev_ntuples;
-		}
-		prev_nloops_minor = curr_nloops_minor;
-		prev_ntuples = join_ntuples;
 	}
+	*p_kern_nloops = kern_nloops;
 
-	/*
-	 * NOTE:If expected consumption of destination buffer exceeds the
-	 * limitation, we logically divide an inner chunk (with largest
-	 * growth ratio) and run GpuJoin task multiple times towards same
-	 * data set.
-	 * At this moment, we cannot determine which result format shall
-	 * be used (KDS_FORMAT_ROW or KDS_FORMAT_SLOT), so we adopt the
-	 * larger one, for safety.
-	 */
-	Assert(gpath->inners[num_rels-1].join_nrows == gpath->cpath.path.rows);
-	join_ntuples = gpath->cpath.path.rows / (double)(num_chunks *
-													 prev_nloops_minor);
-	ncols = list_length(join_reltarget->exprs);
-	buffer_size = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
-	buffer_size += (Max(LONGALIGN((sizeof(Datum) + sizeof(char)) * ncols),
-						MAXALIGN(offsetof(kern_tupitem, htup) +
-								 join_reltarget->width) + sizeof(cl_uint))
-					* (Size) join_ntuples);
-	if (buffer_size > pgstrom_chunk_size_limit())
-	{
-		double	nloops_minor_next;
-
-		Assert(largest_growth_index >= 0 &&
-			   largest_growth_index < num_rels);
-
-		nloops_minor_next = gpath->inners[largest_growth_index].nloops_minor
-			* (double)((buffer_size / pgstrom_chunk_size_limit()) + 1);
-		if (nloops_minor_next > (double) INT_MAX)
-		{
-			elog(DEBUG1, "Too large KDS-Dest {nrooms=%zu size=%zu}",
-				 (Size) join_ntuples, (Size) buffer_size);
-			return false;
-		}
-		gpath->inners[largest_growth_index].nloops_minor *= nloops_minor_next;
-		goto retry_major;
-	}
-
-	/*
-	 * NOTE: If total size of inner multi-relations buffer is out of
-	 * range, we have to split inner buffer multiple portions to fit
-	 * GPU RAMs. It is a restriction come from H/W capability.
-	 *
-	 * Also note that the estimated inner_total_sz can be extremely
-	 * large, so it often leads 32bit integer overflow. Please be
-	 * careful.
-	 */
-	inner_limit_sz = Min(gpuMemMaxAllocSize() / 2,
-						 dmaBufferMaxAllocSize()) - BLCKSZ * num_rels;
-	if (inner_total_sz > inner_limit_sz)
-	{
-		double	nloops_major_next;
-
-		Assert(largest_chunk_index >= 0 &&
-			   largest_chunk_index < num_rels);
-
-		nloops_major_next = gpath->inners[largest_chunk_index].nloops_major
-			* (double)(inner_total_sz / inner_limit_sz + 1);
-		if (nloops_major_next > (double) INT_MAX)
-		{
-			elog(DEBUG1, "Too large Inner multirel buffer {size=%zu}",
-				 (Size) inner_total_sz);
-			return false;
-		}
-		gpath->inners[largest_chunk_index].nloops_major = nloops_major_next;
-		goto retry_major;
-	}
-	return true;	/* probably, reasonable plan for buffer usage */
+	return inner_total_sz;
 }
 
 /*
@@ -712,14 +572,13 @@ cost_gpujoin(PlannerInfo *root,
 	Cost		run_cost = 0.0;
 	Cost		run_cost_per_chunk = 0.0;
 	Cost		startup_delay;
-	QualCost   *join_cost;
-	Size		inner_total_sz = 0;
+	Size		inner_buffer_sz = 0;
 	double		gpu_ratio = pgstrom_gpu_operator_cost / cpu_operator_cost;
 	double		parallel_divisor = 1.0;
 	double		num_chunks;
 	double		chunk_ntuples;
-	double		total_nloops_minor = 1.0;	/* loops by kds_dst overflow */
-	double		total_nloops_major = 1.0;	/* loops by pmrels overflow */
+	double		page_fault_factor = 1.0;
+	double		kern_nloops = 1.0;
 	int			i, num_rels = gpath->num_rels;
 
 	/*
@@ -748,26 +607,22 @@ cost_gpujoin(PlannerInfo *root,
 	}
 
 	/*
-	 * Estimation of inner / destination buffer consumption
+	 * Estimation of inner hash/heap buffer, and number of internal loop
+	 * to process in-kernel Join logic
 	 */
-	if (!estimate_buffersize_gpujoin(root, joinrel,
-									 outer_path, gpath, num_chunks))
-		return false;
-
-	for (i=0; i < num_rels; i++)
+	inner_buffer_sz = estimate_inner_buffersize(root,
+												joinrel,
+												outer_path,
+												gpath,
+												num_chunks,
+												&kern_nloops);
+	if (inner_buffer_sz > gpuMemMaxAllocSize())
 	{
-		total_nloops_major *= gpath->inners[i].nloops_major;
-		total_nloops_minor *= gpath->inners[i].nloops_minor;
-	}
-
-	/*
-	 * Cost of per-tuple evaluation
-	 */
-	join_cost = palloc0(sizeof(QualCost) * num_rels);
-	for (i=0; i < num_rels; i++)
-	{
-		cost_qual_eval(&join_cost[i], gpath->inners[i].join_quals, root);
-		join_cost[i].per_tuple *= gpu_ratio;
+		double	ratio = ((double)(gpuMemMaxAllocSize() - inner_buffer_sz) /
+						 (double)(gpuMemMaxAllocSize()));
+		page_fault_factor += ratio * ratio;
+		if (inner_buffer_sz > 5 * gpuMemMaxAllocSize())
+			startup_cost += disable_cost;
 	}
 
 	/*
@@ -777,25 +632,30 @@ cost_gpujoin(PlannerInfo *root,
 	for (i=0; i < num_rels; i++)
 	{
 		Path	   *scan_path = gpath->inners[i].scan_path;
+		List	   *hash_quals = gpath->inners[i].hash_quals;
+		List	   *join_quals = gpath->inners[i].join_quals;
+		double		join_nrows = gpath->inners[i].join_nrows;
+		QualCost	join_quals_cost;
 
 		/* cost to load all the tuples from inner-path */
 		startup_cost += scan_path->total_cost;
 
 		/* cost for join_qual startup */
-		startup_cost += join_cost[i].startup;
+		cost_qual_eval(&join_quals_cost, join_quals, root);
+		join_quals_cost.per_tuple *= gpu_ratio;
+		startup_cost += join_quals_cost.startup;
 
 		/*
 		 * cost to evaluate join qualifiers according to
 		 * the GpuJoin logic
 		 */
-		if (gpath->inners[i].hash_quals != NIL)
+		if (hash_quals != NIL)
 		{
 			/*
 			 * GpuHashJoin - It computes hash-value of inner tuples by CPU,
 			 * but outer tuples by GPU, then it evaluates join-qualifiers
 			 * for each items on inner hash table by GPU.
 			 */
-			List	   *hash_quals = gpath->inners[i].hash_quals;
 			cl_uint		num_hashkeys = list_length(hash_quals);
 			double		hash_nsteps = scan_path->rows /
 				(double)__KDS_NSLOTS((Size)scan_path->rows);
@@ -808,8 +668,7 @@ cost_gpujoin(PlannerInfo *root,
 								   num_hashkeys *
 								   chunk_ntuples);
 			/* cost to evaluate join qualifiers */
-			run_cost_per_chunk += (join_cost[i].per_tuple *
-								   chunk_ntuples *
+			run_cost_per_chunk += (join_quals_cost.per_tuple *
 								   Max(hash_nsteps, 1.0));
 		}
 		else
@@ -819,44 +678,29 @@ cost_gpujoin(PlannerInfo *root,
 			 * and inner tuples. So, its run_cost is usually higher than
 			 * GpuHashJoin.
 			 */
-			double		inner_ntuples = scan_path->rows
-				/ (gpath->inners[i].nloops_major *
-				   gpath->inners[i].nloops_minor);
+			double		inner_ntuples = scan_path->rows;
 
-			/* cost to load inner heap tuples by CPU */
-			startup_cost += cpu_tuple_cost * scan_path->rows;
+			/* cost to preload inner heap tuples by CPU */
+			startup_cost += cpu_tuple_cost * inner_ntuples;
 
 			/* cost to evaluate join qualifiers */
-			run_cost_per_chunk += (join_cost[i].per_tuple *
+			run_cost_per_chunk += (join_quals_cost.per_tuple *
 								   chunk_ntuples *
-								   clamp_row_est(inner_ntuples));
+								   inner_ntuples);
 		}
 		/* number of outer items on the next depth */
-		chunk_ntuples = (gpath->inners[i].join_nrows /
-						 ((double) num_chunks *
-						  gpath->inners[i].nloops_minor));
-
-		/* consider inner chunk size to be sent over DMA */
-		inner_total_sz += gpath->inners[i].ichunk_size;
+		chunk_ntuples = join_nrows / num_chunks;
 	}
 	/* total GPU execution cost */
 	run_cost += (run_cost_per_chunk *
-				 (double) num_chunks *
-				 (double) total_nloops_minor);
-	/*
-	 * cost to sent inner/outer chunks; we assume 20% of kernel task call
-	 * also involve DMA of inner multi-relations buffer
-	 */
-	/* outer DMA cost */
+				 num_chunks *
+				 kern_nloops *
+				 page_fault_factor);
+	/* outer DMA send cost */
 	run_cost += (double)num_chunks * pgstrom_gpu_dma_cost;
-	/* inner DMA cost */
-	run_cost += ((double)inner_total_sz / (double)pgstrom_chunk_size() *
-				 (double)num_chunks * pgstrom_gpu_dma_cost *
-				 total_nloops_minor * 0.20);
-	/*
-	 * Major inner split makes iteration of entire process multiple times
-	 */
-	run_cost *= total_nloops_major;
+	/* inner DMA send cost */
+	run_cost += ((double)inner_buffer_sz /
+				 (double)pgstrom_chunk_size()) * pgstrom_gpu_dma_cost;
 
 	/*
 	 * cost discount by GPU projection, if this join is the last level
@@ -904,12 +748,12 @@ cost_gpujoin(PlannerInfo *root,
 	/*
 	 * delay to fetch the first tuple
 	 */
-	startup_delay = run_cost * (1.0 / (double)(num_chunks));
+	startup_delay = run_cost * (1.0 / num_chunks);
 
 	/*
 	 * cost of final materialization, but GPU does projection
 	 */
-	run_cost += cpu_tuple_cost * gpath->cpath.path.rows;
+//	run_cost += cpu_tuple_cost * gpath->cpath.path.rows;
 
 	/*
 	 * Put cost value on the gpath.
@@ -1043,8 +887,6 @@ create_gpujoin_path(PlannerInfo *root,
 		gjpath->inners[i].hash_quals = hash_quals;
 		gjpath->inners[i].join_quals = ip_item->join_quals;
 		gjpath->inners[i].ichunk_size = 0;		/* to be set later */
-		gjpath->inners[i].nloops_minor = 1.0;	/* to be set later */
-		gjpath->inners[i].nloops_major = 1.0;	/* to be set later */
 		i++;
 	}
 	Assert(i == num_rels);
@@ -1833,11 +1675,6 @@ PlanGpuJoinPath(PlannerInfo *root,
 									 build_flatten_qualifier(join_quals));
 		gj_info.other_quals = lappend(gj_info.other_quals,
 									  build_flatten_qualifier(other_quals));
-
-		gj_info.nloops_minor = lappend(gj_info.nloops_minor,
-				makeInteger(double_as_long(gjpath->inners[i].nloops_minor)));
-		gj_info.nloops_major = lappend(gj_info.nloops_major,
-				makeInteger(double_as_long(gjpath->inners[i].nloops_major)));
 		gj_info.hash_inner_keys = lappend(gj_info.hash_inner_keys,
 										  hash_inner_keys);
 		gj_info.hash_outer_keys = lappend(gj_info.hash_outer_keys,
