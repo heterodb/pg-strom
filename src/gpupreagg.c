@@ -3455,7 +3455,7 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 	List		   *pseudo_tlist;
 	TupleDesc		gpreagg_tupdesc;
 	TupleDesc		outer_tupdesc;
-	char		   *kern_define;
+	StringInfoData	kern_define;
 	ProgramId		program_id;
 	bool			has_oid;
 	bool			with_connection = ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0);
@@ -3537,13 +3537,26 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 	gpas->plan_extra_sz		= gpa_info->plan_extra_sz;
 
 	/* Get CUDA program and async build if any */
-	kern_define = pgstrom_build_session_info(gpa_info->extra_flags,
-											 &gpas->gts);
-	program_id = pgstrom_create_cuda_program(gcontext,
-											 gpa_info->extra_flags,
-											 gpa_info->kern_source,
-											 kern_define,
-											 false);
+	if (gpas->unified_gpujoin)
+	{
+		program_id = GpuJoinCreateUnifiedProgram(outerPlanState(gpas),
+												 &gpas->gts,
+												 gpa_info->extra_flags,
+												 gpa_info->kern_source);
+	}
+	else
+	{
+		initStringInfo(&kern_define);
+		pgstrom_build_session_info(&kern_define,
+								   &gpas->gts,
+								   gpa_info->extra_flags);
+		program_id = pgstrom_create_cuda_program(gcontext,
+												 gpa_info->extra_flags,
+												 gpa_info->kern_source,
+												 kern_define.data,
+												 false);
+		pfree(kern_define.data);
+	}
 	gpas->gts.program_id = program_id;
 }
 
@@ -3569,10 +3582,12 @@ ExecGpuPreAgg(CustomScanState *node)
 	GpuPreAggState *gpas = (GpuPreAggState *) node;
 
 	if (!gpas->gpa_sstate)
-	{
 		gpas->gpa_sstate = createGpuPreAggSharedState(gpas);
-		if (gpas->unified_gpujoin)
-			gpas->gj_sstate = NULL;	/* load gj_sstate */
+	if (!gpas->gj_sstate && gpas->unified_gpujoin)
+	{
+		gpas->gj_sstate = GpuJoinInnerPreload(outerPlanState(gpas));
+		if (!gpas->gj_sstate)
+			return NULL;	/* case of empty result */
 	}
 	return ExecScan(&node->ss,
 					(ExecScanAccessMtd) pgstromExecGpuTaskState,
@@ -3662,8 +3677,7 @@ ExecGpuPreAggInitDSM(CustomScanState *node,
 
 	/* allocation of shared state */
 	gpas->gpa_sstate = createGpuPreAggSharedState(gpas);
-	if (gpas->unified_gpujoin)
-		gpas->gj_sstate = NULL;
+	gpas->gj_sstate = NULL;		/* to be set later on demand */
 	gpapdsm->gpa_sstate = gpas->gpa_sstate;
 	gpapdsm->gj_sstate = gpas->gj_sstate;
 	ExecGpuScanInitDSM(node, pcxt, gpapdsm->data);
@@ -3681,7 +3695,7 @@ ExecGpuPreAggInitWorker(CustomScanState *node,
 	GpuPreAggParallelDSM *gpapdsm = (GpuPreAggParallelDSM *) coordinate;
 
 	gpas->gpa_sstate = gpapdsm->gpa_sstate;
-	gpas->gj_sstate = gpapdsm->gj_sstate;
+	gpas->gj_sstate = NULL;		/* to be set later on demand */
 	ExecGpuScanInitWorker(node, toc, gpapdsm->data);
 }
 

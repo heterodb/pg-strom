@@ -1035,41 +1035,32 @@ pgstrom_put_cuda_program(GpuContext *gcontext, ProgramId program_id)
  * it build a session specific code. if extra_flags contains a particular
  * custom_scan node related GPU routine, GpuTaskState must be provided.
  */
-char *
-pgstrom_build_session_info(cl_uint extra_flags,
-						   GpuTaskState *gts)
+void
+pgstrom_build_session_info(StringInfo buf,
+						   GpuTaskState *gts,
+						   cl_uint extra_flags)
 {
-	StringInfoData	buf;
-
-	initStringInfo(&buf);
-
 	/* OID declaration of types */
-	pgstrom_codegen_typeoid_declarations(&buf);
+	pgstrom_codegen_typeoid_declarations(buf);
 	/* put timezone info */
 	if ((extra_flags & DEVKERNEL_NEEDS_TIMELIB) != 0)
-		assign_timelib_session_info(&buf);
+		assign_timelib_session_info(buf);
 	/* put currency info */
 	if ((extra_flags & DEVKERNEL_NEEDS_MISC) != 0)
-		assign_misclib_session_info(&buf);
+		assign_misclib_session_info(buf);
 	/* put text/string info */
 	if ((extra_flags & DEVKERNEL_NEEDS_TEXTLIB) != 0)
-		assign_textlib_session_info(&buf);
+		assign_textlib_session_info(buf);
 
 	/* enables device projection? */
 	if ((extra_flags & DEVKERNEL_NEEDS_GPUSCAN) != 0)
-		assign_gpuscan_session_info(&buf, gts);
+		assign_gpuscan_session_info(buf, gts);
 	/* enables device projection? */
 	if ((extra_flags & DEVKERNEL_NEEDS_GPUJOIN) != 0)
-		assign_gpujoin_session_info(&buf, gts);
+		assign_gpujoin_session_info(buf, gts);
 	/* enables outer-quals evaluation? */
 	if ((extra_flags & DEVKERNEL_NEEDS_GPUPREAGG) != 0)
-		assign_gpupreagg_session_info(&buf, gts);
-#ifdef NOT_USED
-	/* enables device projection? */
-	if ((extra_flags & DEVKERNEL_NEEDS_GPUSORT) != 0)
-		assign_gpusort_session_info(&buf, gts);
-#endif
-	return buf.data;
+		assign_gpupreagg_session_info(buf, gts);
 }
 
 /*

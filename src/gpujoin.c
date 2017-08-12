@@ -1842,7 +1842,7 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	ListCell	   *lc2;
 	cl_int			i, j, nattrs;
 	cl_int			first_right_outer_depth = -1;
-	char		   *kern_define;
+	StringInfoData	kern_define;
 	ProgramId		program_id;
 	bool			with_connection = ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0);
 
@@ -2164,13 +2164,17 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	 */
 	gjs->extra_maxlen = gj_info->extra_maxlen;
 
-	kern_define = pgstrom_build_session_info(gj_info->extra_flags, &gjs->gts);
+	initStringInfo(&kern_define);
+	pgstrom_build_session_info(&kern_define,
+							   &gjs->gts,
+							   gj_info->extra_flags);
 	program_id = pgstrom_create_cuda_program(gcontext,
 											 gj_info->extra_flags,
 											 gj_info->kern_source,
-											 kern_define,
+											 kern_define.data,
 											 false);
 	gjs->gts.program_id = program_id;
+	pfree(kern_define.data);
 
 	/* expected kresults buffer expand rate */
 	gjs->result_width =
@@ -4968,6 +4972,66 @@ gpujoin_next_tuple_fallback(GpuJoinState *gjs, GpuJoinTask *pgjoin)
 		return ExecProject(gjs->proj_fallback, &is_done);
 
 	return gjs->slot_fallback;	/* no projection is needed? */
+}
+
+/* ----------------------------------------------------------------
+ *
+ * Routines to support unified GpuPreAgg + GpuJoin
+ *
+ * ----------------------------------------------------------------
+ */
+ProgramId
+GpuJoinCreateUnifiedProgram(PlanState *node,
+							GpuTaskState *gpa_gts,
+							cl_uint gpa_extra_flags,
+							const char *gpa_kern_source)
+{
+	GpuJoinState   *gjs = (GpuJoinState *) node;
+	GpuJoinInfo	   *gj_info;
+	StringInfoData	kern_define;
+	StringInfoData	kern_source;
+	cl_uint			extra_flags;
+	ProgramId		program_id;
+
+	initStringInfo(&kern_define);
+	initStringInfo(&kern_source);
+
+	gj_info = deform_gpujoin_info((CustomScan *) gjs->gts.css.ss.ps.plan);
+	extra_flags = (gpa_extra_flags | gj_info->extra_flags);
+	pgstrom_build_session_info(&kern_define,
+							   gpa_gts,
+							   extra_flags & ~DEVKERNEL_NEEDS_GPUJOIN);
+	assign_gpujoin_session_info(&kern_define, &gjs->gts);
+
+	appendStringInfoString(&kern_source,
+						   "/* ======== BEGIN GpuJoin Portion ======== */");
+	appendStringInfoString(&kern_source, gj_info->kern_source);
+	appendStringInfoString(&kern_source,
+						   "/* ======== BEGIN GpuPreAgg Portion ======== */");
+	appendStringInfoString(&kern_source, gpa_kern_source);
+
+	program_id = pgstrom_create_cuda_program(gpa_gts->gcontext,
+											 extra_flags,
+											 kern_source.data,
+											 kern_define.data,
+											 false);
+	pfree(kern_source.data);
+	pfree(kern_define.data);
+
+	return program_id;
+}
+
+GpuJoinSharedState *
+GpuJoinInnerPreload(PlanState *node)
+{
+	GpuJoinState   *gjs = (GpuJoinState *) node;
+
+	Assert(pgstrom_planstate_is_gpujoin(node));
+	if (!gjs->gj_sstate)
+		gjs->gj_sstate = createGpuJoinSharedState(gjs);
+	if (!gpujoin_inner_preload(gjs))
+		return NULL;	/* obviously GpuJoin produces an empty result */
+	return gjs->gj_sstate;
 }
 
 /* ----------------------------------------------------------------

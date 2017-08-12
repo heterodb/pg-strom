@@ -1207,7 +1207,7 @@ plcuda_exec_begin(HeapTuple protup, FunctionCallInfo fcinfo)
 	cl_int			ret_nattrs = -1;
 	size_t			kplcuda_length;
 	char		   *kern_source;
-	char		   *kern_define;
+	StringInfoData	kern_define;
 	ProgramId		program_id;
 	int				i, n_meta;
 
@@ -1234,14 +1234,18 @@ plcuda_exec_begin(HeapTuple protup, FunctionCallInfo fcinfo)
 						   procForm->prorettype,
 						   TextDatumGetCString(prosrc));
 	/* construct a flat kernel source to be built */
+	initStringInfo(&kern_define);
 	kern_source = plcuda_codegen(procForm, plts);
-	kern_define = pgstrom_build_session_info(plts->extra_flags, &plts->gts);
+	pgstrom_build_session_info(&kern_define,
+							   &plts->gts,
+							   plts->extra_flags);
 	program_id = pgstrom_create_cuda_program(gcontext,
 											 plts->extra_flags,
 											 kern_source,
-											 kern_define,
+											 kern_define.data,
 											 true);
 	plts->gts.program_id = program_id;
+	pfree(kern_define.data);
 
 	/* build template of the kern_plcuda */
 	n_meta = procForm->pronargs;

@@ -645,8 +645,9 @@ extern ProgramId pgstrom_create_cuda_program(GpuContext *gcontext,
 extern CUmodule pgstrom_load_cuda_program(ProgramId program_id, long timeout);
 extern void pgstrom_put_cuda_program(GpuContext *gcontext,
 									 ProgramId program_id);
-extern char *pgstrom_build_session_info(cl_uint extra_flags,
-										GpuTaskState *gts);
+extern void pgstrom_build_session_info(StringInfo str,
+									   GpuTaskState *gts,
+									   cl_uint extra_flags);
 extern bool pgstrom_wait_cuda_program(ProgramId program_id, long timeout);
 
 extern bool pgstrom_try_build_cuda_program(void);
@@ -841,6 +842,11 @@ extern int	gpujoin_process_task(GpuTask *gtask, CUmodule cuda_module);
 extern void	gpujoin_release_task(GpuTask *gtask);
 extern void assign_gpujoin_session_info(StringInfo buf,
 										GpuTaskState *gts);
+extern ProgramId GpuJoinCreateUnifiedProgram(PlanState *node,
+											 GpuTaskState *gpa_gts,
+											 cl_uint gpa_extra_flags,
+											 const char *gpa_kern_source);
+extern GpuJoinSharedState *GpuJoinInnerPreload(PlanState *node);
 extern void	pgstrom_init_gpujoin(void);
 
 /*

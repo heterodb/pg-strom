@@ -1863,7 +1863,7 @@ gpupreagg_join_main(kern_gpupreagg *kgpreagg,	/* in/out: misc stuffs */
 					kern_global_hashslot *f_hash)/* For final reduction */
 {
 	kern_join_scale *jscale = kgjoin->jscale;
-	cl_int		i, nrels = kgjoin->num_rels;
+	cl_int		i, j, num_rels = kgjoin->num_rels;
 	cl_uint		nitems;
 
 gpujoin_retry:

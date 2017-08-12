@@ -2028,7 +2028,7 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	List		   *dev_tlist = NIL;
 	List		   *dev_quals_raw;
 	ListCell	   *lc;
-	char		   *kern_define;
+	StringInfoData	kern_define;
 	ProgramId		program_id;
 	bool			with_connection = ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0);
 
@@ -2116,14 +2116,18 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 		gss->base_proj = NULL;
 
 	/* Get CUDA program and async build if any */
-	kern_define = pgstrom_build_session_info(gs_info->extra_flags, &gss->gts);
+	initStringInfo(&kern_define);
+	pgstrom_build_session_info(&kern_define,
+							   &gss->gts,
+							   gs_info->extra_flags);
 	program_id = pgstrom_create_cuda_program(gcontext,
 											 gs_info->extra_flags,
 											 gs_info->kern_source,
-											 kern_define,
+											 kern_define.data,
 											 false);
 	gss->gts.program_id = program_id;
 	gss->gs_sstate = NULL;		/* to be set later */
+	pfree(kern_define.data);
 }
 
 /*
