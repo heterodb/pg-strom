@@ -846,7 +846,9 @@ extern ProgramId GpuJoinCreateUnifiedProgram(PlanState *node,
 											 GpuTaskState *gpa_gts,
 											 cl_uint gpa_extra_flags,
 											 const char *gpa_kern_source);
-extern GpuJoinSharedState *GpuJoinInnerPreload(PlanState *node);
+extern GpuJoinSharedState *GpuJoinInnerPreload(GpuTaskState *gts);
+extern pgstrom_data_store *GpuJoinExecOuterScanChunk(GpuTaskState *gts,
+													 int *p_filedesc);
 extern void	pgstrom_init_gpujoin(void);
 
 /*

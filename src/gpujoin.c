@@ -362,7 +362,6 @@ static char *gpujoin_codegen(PlannerInfo *root,
 							 GpuJoinInfo *gj_info,
 							 List *tlist,
 							 codegen_context *context);
-static bool gpujoin_inner_preload(GpuJoinState *gjs);
 
 static GpuJoinSharedState *createGpuJoinSharedState(GpuJoinState *gjs);
 static void releaseGpuJoinSharedState(GpuJoinState *gjs, bool is_rescan);
@@ -2217,10 +2216,6 @@ ExecReCheckGpuJoin(CustomScanState *node, TupleTableSlot *slot)
 static TupleTableSlot *
 ExecGpuJoin(CustomScanState *node)
 {
-	GpuJoinState   *gjs = (GpuJoinState *) node;
-
-	if (!gjs->gj_sstate)
-		gjs->gj_sstate = createGpuJoinSharedState(gjs);
 	return ExecScan(&node->ss,
 					(ExecScanAccessMtd) pgstromExecGpuTaskState,
 					(ExecScanRecheckMtd) ExecReCheckGpuJoin);
@@ -4228,27 +4223,16 @@ gpujoin_outerjoin_kicker(GpuJoinSharedState *gj_sstate, void *private)
 }
 
 /*
- * gpujoin_next_task
+ * gpujoinExecOuterScanChunk
  */
-static GpuTask *
-gpujoin_next_task(GpuTaskState *gts)
+pgstrom_data_store *
+GpuJoinExecOuterScanChunk(GpuTaskState *gts, int *p_filedesc)
 {
 	GpuJoinState   *gjs = (GpuJoinState *) gts;
-	GpuTask		   *gtask;
 	pgstrom_data_store *pds = NULL;
-	int				filedesc = -1;
-
-	/*
-	 * Preload inner buffer if not yet. Unlike older version, we never split
-	 * inner hash/heap buffer no longer, because GPU's unified memory allows
-	 * over commit of device memory and demand paging even if required size
-	 * is larger than physical memory.
-	 */
-	if (!gpujoin_inner_preload(gjs))
-		return NULL;	/* GpuJoin obviously produces an empty result */
 
 	if (gjs->gts.css.ss.ss_currentRelation)
-		pds = gpuscanExecScanChunk(gts, &filedesc);
+		pds = gpuscanExecScanChunk(gts, p_filedesc);
 	else
 	{
 		PlanState	   *outer_node = outerPlanState(gjs);
@@ -4283,6 +4267,32 @@ gpujoin_next_task(GpuTaskState *gts)
 			}
 		}
 	}
+	return pds;
+}
+
+/*
+ * gpujoin_next_task
+ */
+static GpuTask *
+gpujoin_next_task(GpuTaskState *gts)
+{
+	GpuJoinState   *gjs = (GpuJoinState *) gts;
+	GpuJoinSharedState *gj_sstate;
+	GpuTask		   *gtask;
+	pgstrom_data_store *pds = NULL;
+	int				filedesc = -1;
+
+	/*
+	 * Preload inner buffer if not yet. Unlike older version, we never split
+	 * inner hash/heap buffer any more, because GPU's unified memory allows
+	 * over commit of device memory and demand paging even if required size
+	 * is larger than physical memory.
+	 */
+	gj_sstate = GpuJoinInnerPreload(&gjs->gts);
+	if (!gj_sstate)
+		return NULL;	/* GpuJoin obviously produces an empty result */
+
+	pds = GpuJoinExecOuterScanChunk(gts, &filedesc);
 	gtask = gpujoin_create_task(gjs, gjs->gj_sstate, pds, filedesc);
 	if (!pds)
 	{
@@ -5019,19 +5029,6 @@ GpuJoinCreateUnifiedProgram(PlanState *node,
 	pfree(kern_define.data);
 
 	return program_id;
-}
-
-GpuJoinSharedState *
-GpuJoinInnerPreload(PlanState *node)
-{
-	GpuJoinState   *gjs = (GpuJoinState *) node;
-
-	Assert(pgstrom_planstate_is_gpujoin(node));
-	if (!gjs->gj_sstate)
-		gjs->gj_sstate = createGpuJoinSharedState(gjs);
-	if (!gpujoin_inner_preload(gjs))
-		return NULL;	/* obviously GpuJoin produces an empty result */
-	return gjs->gj_sstate;
 }
 
 /* ----------------------------------------------------------------
@@ -5823,11 +5820,20 @@ __gpujoin_inner_preload(GpuJoinState *gjs)
 	return true;
 }
 
-static bool
-gpujoin_inner_preload(GpuJoinState *gjs)
+GpuJoinSharedState *
+GpuJoinInnerPreload(GpuTaskState *gts)
 {
-	GpuJoinSharedState *gj_sstate = gjs->gj_sstate;
-	uint32		preload_done;
+	GpuJoinState   *gjs = (GpuJoinState *) gts;
+	GpuJoinSharedState *gj_sstate;
+	uint32			preload_done;
+
+	Assert(pgstrom_planstate_is_gpujoin(&gts->css.ss.ps));
+	if (!gjs->gj_sstate)
+	{
+		Assert(!IsParallelWorker());
+		gjs->gj_sstate = createGpuJoinSharedState(gjs);
+	}
+	gj_sstate = gjs->gj_sstate;
 
 	preload_done = pg_atomic_read_u32(&gj_sstate->preload_done);
 	if (preload_done == 0)
@@ -5873,7 +5879,7 @@ gpujoin_inner_preload(GpuJoinState *gjs)
 		}
 	}
 	Assert(preload_done > 0);
-	return (preload_done == 1 ? true : false);
+	return (preload_done == 1 ? gj_sstate : NULL);
 }
 
 /*

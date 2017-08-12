@@ -177,7 +177,6 @@ typedef struct
 {
 	GpuTaskState	gts;
 	GpuPreAggSharedState *gpa_sstate;
-	GpuJoinSharedState *gj_sstate;	/* valid if unified GpuPreAgg + GpuJoin */
 	cl_bool			scan_begin;
 	cl_bool			unified_gpujoin;
 	cl_int			num_group_keys;
@@ -197,7 +196,6 @@ typedef struct
 typedef struct
 {
 	GpuPreAggSharedState *gpa_sstate;
-	GpuJoinSharedState *gj_sstate;
 	char		data[FLEXIBLE_ARRAY_MEMBER]; /* GpuScanParallelDSM if any */
 } GpuPreAggParallelDSM;
 
@@ -3583,12 +3581,6 @@ ExecGpuPreAgg(CustomScanState *node)
 
 	if (!gpas->gpa_sstate)
 		gpas->gpa_sstate = createGpuPreAggSharedState(gpas);
-	if (!gpas->gj_sstate && gpas->unified_gpujoin)
-	{
-		gpas->gj_sstate = GpuJoinInnerPreload(outerPlanState(gpas));
-		if (!gpas->gj_sstate)
-			return NULL;	/* case of empty result */
-	}
 	return ExecScan(&node->ss,
 					(ExecScanAccessMtd) pgstromExecGpuTaskState,
 					(ExecScanRecheckMtd) ExecReCheckGpuPreAgg);
@@ -3677,9 +3669,7 @@ ExecGpuPreAggInitDSM(CustomScanState *node,
 
 	/* allocation of shared state */
 	gpas->gpa_sstate = createGpuPreAggSharedState(gpas);
-	gpas->gj_sstate = NULL;		/* to be set later on demand */
 	gpapdsm->gpa_sstate = gpas->gpa_sstate;
-	gpapdsm->gj_sstate = gpas->gj_sstate;
 	ExecGpuScanInitDSM(node, pcxt, gpapdsm->data);
 }
 
@@ -3695,7 +3685,6 @@ ExecGpuPreAggInitWorker(CustomScanState *node,
 	GpuPreAggParallelDSM *gpapdsm = (GpuPreAggParallelDSM *) coordinate;
 
 	gpas->gpa_sstate = gpapdsm->gpa_sstate;
-	gpas->gj_sstate = NULL;		/* to be set later on demand */
 	ExecGpuScanInitWorker(node, toc, gpapdsm->data);
 }
 
@@ -4105,6 +4094,7 @@ gpupreagg_next_task(GpuTaskState *gts)
 {
 	GpuPreAggState		   *gpas = (GpuPreAggState *) gts;
 	GpuPreAggSharedState   *gpa_sstate = gpas->gpa_sstate;
+	GpuJoinSharedState	   *gj_sstate = NULL;
 	GpuContext			   *gcontext = gpas->gts.gcontext;
 	GpuTask				   *gtask = NULL;
 	pgstrom_data_store	   *pds = NULL;
@@ -4117,7 +4107,17 @@ gpupreagg_next_task(GpuTaskState *gts)
 		pthreadMutexUnlock(&gpa_sstate->mutex);
 		gpas->scan_begin = true;
 	}
+#if 0
+	if (gpas->unified_gpujoin)
+	{
+		GpuTaskState   *outer_gts = (GpuTaskState *) outerPlanState(gpas);
 
+		gj_sstate = GpuJoinInnerPreload(outer_gts);
+		if (!gj_sstate)
+			return NULL;	/* case of empty results */
+		pds = GpuJoinExecOuterScanChunk(outer_gts);
+	}
+#endif
 	if (gpas->gts.css.ss.ss_currentRelation)
 	{
 		pds = gpuscanExecScanChunk(&gpas->gts, &filedesc);
