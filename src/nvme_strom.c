@@ -874,7 +874,7 @@ iomap_buffer_owner_main(Datum __arg)
 					   WL_LATCH_SET |
 					   WL_TIMEOUT |
 					   WL_POSTMASTER_DEATH,
-					   60 * 1000 * 1000);	/* wake up per minutes */
+					   60 * 1000);		/* wake up per minutes */
 
 		/* Emergency bailout if postmaster has died. */
 		if (ev & WL_POSTMASTER_DEATH)

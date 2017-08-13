@@ -735,8 +735,7 @@ dmaBufferAllocInternal(SharedGpuContext *shgcon, Size required)
 		elog(ERROR, "DMA buffer request %zu MB too large", required >> 20);
 
 	/* find out an available segment */
-	if ((errno = pthread_rwlock_rdlock(&dmaBufSegHead->rwlock)) != 0)
-		wfatal("failed on pthread_rwlock_rdlock: %m");
+	pthreadRWLockReadLock(&dmaBufSegHead->rwlock);
 	STROM_TRY();
 	{
 	retry:
@@ -753,10 +752,8 @@ dmaBufferAllocInternal(SharedGpuContext *shgcon, Size required)
 		/* Oops, no available free chunks in the active list */
 		if (!has_exclusive_lock)
 		{
-			if ((errno = pthread_rwlock_unlock(&dmaBufSegHead->rwlock)) != 0)
-				wfatal("failed on pthread_rwlock_unlock: %m");
-			if ((errno = pthread_rwlock_wrlock(&dmaBufSegHead->rwlock)) != 0)
-				wfatal("failed on pthread_rwlock_wrlock: %m");
+			pthreadRWLockUnlock(&dmaBufSegHead->rwlock);
+			pthreadRWLockWriteLock(&dmaBufSegHead->rwlock);
 			has_exclusive_lock = true;
 			goto retry;
 		}
@@ -810,13 +807,11 @@ dmaBufferAllocInternal(SharedGpuContext *shgcon, Size required)
 	}
 	STROM_CATCH();
 	{
-		if ((errno = pthread_rwlock_unlock(&dmaBufSegHead->rwlock)) != 0)
-			wfatal("failed on pthread_rwlock_unlock: %m");
+		pthreadRWLockUnlock(&dmaBufSegHead->rwlock);
 		STROM_RE_THROW();
 	}
 	STROM_END_TRY();
-	if ((errno = pthread_rwlock_unlock(&dmaBufSegHead->rwlock)) != 0)
-		wfatal("failed on pthread_rwlock_unlock: %m");
+	pthreadRWLockUnlock(&dmaBufSegHead->rwlock);
 
 	if (chunk != NULL)
 	{
@@ -1033,7 +1028,7 @@ __dmaBufferFree(void *pointer,
 	dmaBufferChunk	   *chunk;
 	dmaBufferChunk	   *buddy;
 	SharedGpuContext   *shgcon;
-	bool				has_exclusive_mutex = false;
+	bool				has_shared_lock = false;
 
 #ifdef PGSTROM_DEBUG
 	last_caller_free_filename = filename;
@@ -1063,20 +1058,19 @@ retry:
 	SpinLockAcquire(&seg->lock);
 
 	/*
-	 * NOTE: If num_chunks == 1, this thread may need to detach shared memory
-	 * segment. It also moves this segment from the active list to inactive
-	 * list; to be operated under the dmaBufferSegmentHead->mutex.
-	 * So, we preliminary acquires the mutext, prior to chunk release.
+	 * NOTE: If and when @num_chunks gets zero, segment may be detached and
+	 * released by the background worker. It shall be protected with exclusive
+	 * lock on the dmaBufferSegmentHead->rwlock, so we preliminary acquire
+	 * the shared lock to avoid concurrent access to the segment.
 	 */
 	Assert(seg->num_chunks > 0);
 	if (seg->num_chunks == 1)
 	{
-		if (!has_exclusive_mutex)
+		if (!has_shared_lock)
 		{
 			SpinLockRelease(&seg->lock);
-			if ((errno = pthread_rwlock_wrlock(&dmaBufSegHead->rwlock)) != 0)
-				wfatal("failed on pthread_rwlock_wrlock: %m");
-			has_exclusive_mutex = true;
+			pthreadRWLockReadLock(&dmaBufSegHead->rwlock);
+			has_shared_lock = true;
 			goto retry;
 		}
 	}
@@ -1133,26 +1127,18 @@ retry:
 	dlist_push_head(&seg->free_chunks[chunk->mclass], &chunk->free_chain);
 	seg->num_chunks--;
 
-	/* move the segment to inactive list, and remove shm segment */
-	if (seg->num_chunks > 0 || seg->persistent)
-		SpinLockRelease(&seg->lock);
-	else
-	{
-		Assert(has_exclusive_mutex);
-		dmaBufferDetachSegment(seg);
-		SpinLockRelease(&seg->lock);
+	/*
+	 * NOTE: Segment shall not be moved to inactive segment list even if
+	 * its number of active chunks gets zero, because background worker
+	 * detach and release these segments after some delay.
+	 * Creation of shared segment and registration to CUDA runtime are
+	 * not lightweight operation. Even if no active chunks exist on
+	 * a segment, it shall be reused near future.
+	 */
+	SpinLockRelease(&seg->lock);
 
-		dlist_delete(&seg->chain);
-		dlist_push_head(&dmaBufSegHead->inactive_segment_list,
-						&seg->chain);
-		dmaBufSegHead->num_active_segments--;
-	}
-
-	if (has_exclusive_mutex)
-	{
-		if ((errno = pthread_rwlock_unlock(&dmaBufSegHead->rwlock)) != 0)
-			wfatal("failed on pthread_rwlock_unlock: %m");
-	}
+	if (has_shared_lock)
+		pthreadRWLockUnlock(&dmaBufSegHead->rwlock);
 }
 
 /*
@@ -1297,8 +1283,7 @@ pgstrom_dma_buffer_info(PG_FUNCTION_ARGS)
 
 		fncxt->tuple_desc = BlessTupleDesc(tupdesc);
 
-		if ((errno = pthread_rwlock_rdlock(&dmaBufSegHead->rwlock)) != 0)
-			elog(FATAL, "failed on pthread_rwlock_rdlock: %m");
+		pthreadRWLockReadLock(&dmaBufSegHead->rwlock);
 		dlist_foreach(iter, &dmaBufSegHead->active_segment_list)
 		{
 			dmaBufferSegment   *seg = dlist_container(dmaBufferSegment,
@@ -1338,15 +1323,13 @@ pgstrom_dma_buffer_info(PG_FUNCTION_ARGS)
 			PG_CATCH();
 			{
 				SpinLockRelease(&seg->lock);
-				if ((errno = pthread_rwlock_unlock(&dmaBufSegHead->rwlock)) != 0)
-					elog(FATAL, "failed on pthread_rwlock_unlock: %m");
+				pthreadRWLockUnlock(&dmaBufSegHead->rwlock);
 				PG_RE_THROW();
 			}
 			PG_END_TRY();
 			SpinLockRelease(&seg->lock);
 		}
-		if ((errno = pthread_rwlock_unlock(&dmaBufSegHead->rwlock)) != 0)
-			elog(FATAL, "failed on pthread_rwlock_unlock: %m");
+		pthreadRWLockUnlock(&dmaBufSegHead->rwlock);
 
 		fncxt->user_fctx = results;
 		MemoryContextSwitchTo(oldcxt);
@@ -1372,6 +1355,63 @@ pgstrom_dma_buffer_info(PG_FUNCTION_ARGS)
 PG_FUNCTION_INFO_V1(pgstrom_dma_buffer_info);
 
 /*
+ * bgworker_reclaim_dma_buffer
+ */
+static void
+bgworker_reclaim_dma_buffer(Datum arg)
+{
+	dlist_iter iter;
+	int		ev;
+
+	/* no special handling is needed on SIGTERM/SIGQUIT; just die */
+	BackgroundWorkerUnblockSignals();
+
+	/*
+	 * Loop forever
+	 */
+	for (;;)
+	{
+		ResetLatch(MyLatch);
+
+		CHECK_FOR_INTERRUPTS();
+
+		if (pthreadRWLockWriteTryLock(&dmaBufSegHead->rwlock))
+		{
+			dlist_foreach(iter, &dmaBufSegHead->active_segment_list)
+			{
+				dmaBufferSegment *seg
+					= dlist_container(dmaBufferSegment, chain, iter.cur);
+				Assert(SHMSEG_EXISTS(pg_atomic_read_u32(&seg->revision)));
+
+				SpinLockAcquire(&seg->lock);
+				if (seg->num_chunks > 0 || seg->persistent)
+					SpinLockRelease(&seg->lock);
+				else
+				{
+					dmaBufferDetachSegment(seg);
+					SpinLockRelease(&seg->lock);
+
+					dlist_delete(&seg->chain);
+					dlist_push_head(&dmaBufSegHead->inactive_segment_list,
+									&seg->chain);
+					dmaBufSegHead->num_active_segments--;
+					break;
+				}
+			}
+			pthreadRWLockUnlock(&dmaBufSegHead->rwlock);
+		}
+		ev = WaitLatch(MyLatch,
+					   WL_LATCH_SET |
+					   WL_TIMEOUT |
+					   WL_POSTMASTER_DEATH,
+					   15 * 1000);	/* wake up per 20 sec */
+		/* Emergency bailout if postmaster has died. */
+		if (ev & WL_POSTMASTER_DEATH)
+			exit(1);
+	}
+}
+
+/*
  * maxBackends - alternative of MaxBackends on system initialization
  */
 static int
@@ -1386,7 +1426,6 @@ maxBackends(void)
 static void
 pgstrom_startup_dma_buffer(void)
 {
-	pthread_rwlockattr_t rwlock_attr;
 	Size		length;
 	bool		found;
 	int			i, j;
@@ -1405,14 +1444,7 @@ pgstrom_startup_dma_buffer(void)
 	length = sizeof(dmaBufferLocalMap) * num_logical_dma_segments;
 	dmaBufLocalMaps = MemoryContextAllocZero(TopMemoryContext, length);
 
-	/* init pthread_rwlock_t */
-	if ((errno = pthread_rwlockattr_init(&rwlock_attr)) != 0)
-		elog(ERROR, "failed on pthread_rwlockattr_init: %m");
-	if ((errno = pthread_rwlockattr_setpshared(&rwlock_attr, 1)) != 0)
-		elog(ERROR, "failed on pthread_rwlockattr_setpshared: %m");
-	if ((errno = pthread_rwlock_init(&dmaBufSegHead->rwlock,
-									 &rwlock_attr)) != 0)
-		elog(ERROR, "failed on pthread_rwlock_init: %m");
+	pthreadRWLockInit(&dmaBufSegHead->rwlock);
 	dlist_init(&dmaBufSegHead->active_segment_list);
 	dlist_init(&dmaBufSegHead->inactive_segment_list);
 
@@ -1475,6 +1507,7 @@ pgstrom_init_dma_buffer(void)
 	struct statfs	stat;
 	size_t			total_sz;
 	size_t			avail_sz;
+	BackgroundWorker worker;
 
 	/*
 	 * Unit size of DMA buffer segment
@@ -1583,6 +1616,16 @@ pgstrom_init_dma_buffer(void)
 									wait_proc_chain[maxBackends()]));
 	shmem_startup_hook_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_dma_buffer;
+
+	/* launch a background worker for delayed DMA buffer reclaim */
+	memset(&worker, 0, sizeof(BackgroundWorker));
+	snprintf(worker.bgw_name, sizeof(worker.bgw_name),
+			 "Delayed DMA Buffer Reclaim Worker");
+	worker.bgw_flags = BGWORKER_SHMEM_ACCESS;
+	worker.bgw_start_time = BgWorkerStart_PostmasterStart;
+	worker.bgw_restart_time = BGW_NEVER_RESTART;
+	worker.bgw_main = bgworker_reclaim_dma_buffer;
+	RegisterBackgroundWorker(&worker);
 
 	/* discard remained segment on exit of postmaster */
 	before_shmem_exit(dmaBufferCleanupOnPostmasterExit, 0);

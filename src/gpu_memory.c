@@ -272,8 +272,7 @@ gpuMemAlloc(GpuContext *gcontext, CUdeviceptr *p_deviceptr, size_t bytesize)
 		return gpuMemAllocManaged(gcontext, p_deviceptr, bytesize,
 								  CU_MEM_ATTACH_GLOBAL);
 
-	if ((errno = pthread_rwlock_rdlock(&gpumem_segment_rwlock)) < 0)
-		wfatal("failed on pthread_rwlock_rdlock: %m");
+	pthreadRWLockReadLock(&gpumem_segment_rwlock);
 retry:
 	/* lookup an active segment with free space */
 	dlist_foreach(iter, &gpumem_segment_list)
@@ -290,8 +289,7 @@ retry:
 			if (m_deviceptr)
 				gm_seg->num_active_chunks++;
 			SpinLockRelease(&gm_seg->lock);
-			if ((errno = pthread_rwlock_unlock(&gpumem_segment_rwlock)) < 0)
-				wfatal("failed on pthread_rwlock_unlock: %m");
+			pthreadRWLockUnlock(&gpumem_segment_rwlock);
 			if (m_deviceptr == 0UL)
 				return CUDA_ERROR_OUT_OF_MEMORY;
 			*p_deviceptr = m_deviceptr;
@@ -306,10 +304,8 @@ retry:
 	 */
 	if (!has_exclusive_lock)
 	{
-		if ((errno = pthread_rwlock_unlock(&gpumem_segment_rwlock)) < 0)
-			wfatal("failed on pthread_rwlock_unlock: %m");
-		if ((errno = pthread_rwlock_wrlock(&gpumem_segment_rwlock)) < 0)
-			wfatal("failed on pthread_rwlock_wrlock: %m");
+		pthreadRWLockUnlock(&gpumem_segment_rwlock);
+		pthreadRWLockWriteLock(&gpumem_segment_rwlock);
 		has_exclusive_lock = true;
 		goto retry;
 	}
@@ -362,8 +358,7 @@ error2:
 error1:
 	free(gm_seg);
 error0:
-	if ((errno = pthread_rwlock_unlock(&gpumem_segment_rwlock)) < 0)
-		wfatal("failed on pthread_rwlock_unlock: %m");
+	pthreadRWLockUnlock(&gpumem_segment_rwlock);
 	return rc;
 }
 
@@ -501,8 +496,7 @@ gpuMemRetain(GpuContext *gcontext, CUdeviceptr deviceptr)
 	/*
 	 * Lookup small chunks in segment first
 	 */
-	if ((errno = pthread_rwlock_rdlock(&gpumem_segment_rwlock)) < 0)
-		wfatal("failed on pthread_rwlock_rdlock: %m");
+	pthreadRWLockReadLock(&gpumem_segment_rwlock);
 	dlist_foreach(iter, &gpumem_segment_list)
 	{
 		gm_seg = dlist_container(GpuMemSegment, segment_chain, iter.cur);
@@ -514,8 +508,7 @@ gpuMemRetain(GpuContext *gcontext, CUdeviceptr deviceptr)
 		/* OK, found */
 		if (!trackGpuMem(gcontext, deviceptr, gm_seg))
 		{
-			if ((errno = pthread_rwlock_unlock(&gpumem_segment_rwlock)) < 0)
-				wfatal("failed on pthread_rwlock_unlock: %m");
+			pthreadRWLockUnlock(&gpumem_segment_rwlock);
 			return CUDA_ERROR_OUT_OF_MEMORY;
 		}
 
@@ -525,12 +518,11 @@ gpuMemRetain(GpuContext *gcontext, CUdeviceptr deviceptr)
 		Assert(GPUMEMCHUNK_IS_ACTIVE(gm_chunk));
 		gm_chunk->refcnt++;
 		SpinLockRelease(&gm_seg->lock);
-		if ((errno = pthread_rwlock_unlock(&gpumem_segment_rwlock)) < 0)
-			wfatal("failed on pthread_rwlock_unlock: %m");
+		pthreadRWLockUnlock(&gpumem_segment_rwlock);
+
 		return CUDA_SUCCESS;
 	}
-	if ((errno = pthread_rwlock_unlock(&gpumem_segment_rwlock)) < 0)
-		wfatal("failed on pthread_rwlock_unlock: %m");
+	pthreadRWLockUnlock(&gpumem_segment_rwlock);
 
 	/*
 	 * Elsewhere, deviceptr might be a large chunk
@@ -577,8 +569,8 @@ gpuMemReclaim(void)
 
 	Assert(IsGpuServerProcess());
 
-	if ((errno = pthread_rwlock_wrlock(&gpumem_segment_rwlock)) < 0)
-		wfatal("failed on pthread_rwlock_wrlock: %m");
+	if (!pthreadRWLockWriteTryLock(&gpumem_segment_rwlock))
+		return;		/* someone actively works, no need to reclaim now */
 	if (gpumem_segment_count > 1)
 	{
 		dlist_reverse_foreach(iter, &gpumem_segment_list)
@@ -603,8 +595,7 @@ gpuMemReclaim(void)
 			}
 		}
 	}
-	if ((errno = pthread_rwlock_unlock(&gpumem_segment_rwlock)) < 0)
-		wfatal("failed on pthread_rwlock_unlock: %m");
+	pthreadRWLockUnlock(&gpumem_segment_rwlock);
 }
 
 #if 0
@@ -624,7 +615,6 @@ pgstrom_startup_gpu_memory(void)
 void
 pgstrom_init_gpu_memory(void)
 {
-	if ((errno = pthread_rwlock_init(&gpumem_segment_rwlock, NULL)) < 0)
-		elog(ERROR, "failed on pthread_rwlock_init: %m");
+	pthreadRWLockInit(&gpumem_segment_rwlock);
 	dlist_init(&gpumem_segment_list);
 }

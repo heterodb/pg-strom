@@ -1191,4 +1191,49 @@ pthreadMutexUnlock(pthread_mutex_t *mutex)
 		wfatal("failed on pthread_mutex_unlock: %m");
 }
 
+static inline void
+pthreadRWLockInit(pthread_rwlock_t *rwlock)
+{
+	pthread_rwlockattr_t rwattr;
+
+	if ((errno = pthread_rwlockattr_init(&rwattr)) != 0)
+		wfatal("failed on pthread_rwlockattr_init: %m");
+	if ((errno = pthread_rwlockattr_setpshared(&rwattr, 1)) != 0)
+		wfatal("failed on pthread_rwlockattr_setpshared: %m");
+    if ((errno = pthread_rwlock_init(rwlock, &rwattr)) != 0)
+		wfatal("failed on pthread_rwlock_init: %m");
+}
+
+static inline void
+pthreadRWLockReadLock(pthread_rwlock_t *rwlock)
+{
+	if ((errno = pthread_rwlock_rdlock(rwlock)) != 0)
+		wfatal("failed on pthread_rwlock_rdlock: %m");
+}
+
+static inline void
+pthreadRWLockWriteLock(pthread_rwlock_t *rwlock)
+{
+	if ((errno = pthread_rwlock_wrlock(rwlock)) != 0)
+		wfatal("failed on pthread_rwlock_wrlock: %m");
+}
+
+static inline bool
+pthreadRWLockWriteTryLock(pthread_rwlock_t *rwlock)
+{
+	errno = pthread_rwlock_trywrlock(rwlock);
+	if (errno == 0)
+		return true;
+	if (errno == EBUSY)
+		return false;
+	wfatal("failed on pthread_rwlock_trywrlock: %m");
+}
+
+static inline void
+pthreadRWLockUnlock(pthread_rwlock_t *rwlock)
+{
+	if ((errno = pthread_rwlock_unlock(rwlock)) != 0)
+		wfatal("failed on pthread_rwlock_unlock: %m");
+}
+
 #endif	/* PG_STROM_H */
