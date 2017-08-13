@@ -833,7 +833,7 @@ extern void pgstrom_init_gpuscan(void);
  * gpujoin.c
  */
 struct GpuJoinSharedState;
-typedef struct GpuJoinSharedState	GpuJoinSharedState;
+struct kern_gpujoin;
 
 extern bool pgstrom_path_is_gpujoin(Path *pathnode);
 extern bool pgstrom_plan_is_gpujoin(const Plan *plannode);
@@ -842,11 +842,13 @@ extern int	gpujoin_process_task(GpuTask *gtask, CUmodule cuda_module);
 extern void	gpujoin_release_task(GpuTask *gtask);
 extern void assign_gpujoin_session_info(StringInfo buf,
 										GpuTaskState *gts);
+extern Size init_kern_gpujoin_structure(struct kern_gpujoin *kgjoin,
+										GpuTaskState *gpa_gts);
 extern ProgramId GpuJoinCreateUnifiedProgram(PlanState *node,
 											 GpuTaskState *gpa_gts,
 											 cl_uint gpa_extra_flags,
 											 const char *gpa_kern_source);
-extern GpuJoinSharedState *GpuJoinInnerPreload(GpuTaskState *gts);
+extern struct GpuJoinSharedState *GpuJoinInnerPreload(GpuTaskState *gts);
 extern pgstrom_data_store *GpuJoinExecOuterScanChunk(GpuTaskState *gts,
 													 int *p_filedesc);
 extern void	pgstrom_init_gpujoin(void);

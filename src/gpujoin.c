@@ -216,7 +216,7 @@ typedef struct
 {
 	GpuTaskState	gts;
 	/* shared state (inner hash/heap buffer) */
-	GpuJoinSharedState *gj_sstate;
+	struct GpuJoinSharedState *gj_sstate;
 	/* expressions to be used in fallback path */
 	List		   *join_types;
 	List		   *outer_quals;	/* list of ExprState */
@@ -264,7 +264,7 @@ typedef struct
 /* DSM object of GpuJoin for CPU parallel */
 typedef struct
 {
-	GpuJoinSharedState *gj_sstate;
+	struct GpuJoinSharedState *gj_sstate;
 	char		data[FLEXIBLE_ARRAY_MEMBER];	/* GpuScanParallelDSM if any */
 } GpuJoinParallelDSM;
 
@@ -320,6 +320,7 @@ struct GpuJoinSharedState
 								 * valid only if RIGHT/FULL OUTER JOIN */
 	kern_multirels	kern;
 };
+typedef struct GpuJoinSharedState	GpuJoinSharedState;
 
 /*
  * GpuJoinTask - task object of GpuJoin

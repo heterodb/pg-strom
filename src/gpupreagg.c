@@ -206,10 +206,13 @@ typedef struct
  * object of PG-Strom, has key of OpenCL device program, a source row/column
  * store and a destination kern_data_store.
  */
+typedef struct GpuJoinSharedState	GpuJoinSharedState;
+
 typedef struct
 {
 	GpuTask				task;
 	GpuPreAggSharedState *gpa_sstate;
+	GpuJoinSharedState *gj_sstate;
 	bool				with_nvme_strom;/* true, if NVMe-Strom */
 	/* DMA buffers */
 	pgstrom_data_store *pds_src;	/* source row/block buffer */
@@ -243,8 +246,6 @@ static GpuTask *gpupreagg_next_task(GpuTaskState *gts);
 static void gpupreagg_ready_task(GpuTaskState *gts, GpuTask *gtask);
 static void gpupreagg_switch_task(GpuTaskState *gts, GpuTask *gtask);
 static TupleTableSlot *gpupreagg_next_tuple(GpuTaskState *gts);
-
-//static void gpupreagg_push_terminator_task(GpuPreAggTask *gpreagg_old);
 
 /*
  * Arguments of alternative functions.
@@ -4003,6 +4004,7 @@ resetGpuPreAggSharedState(GpuPreAggState *gpas)
  */
 static GpuTask *
 gpupreagg_create_task(GpuPreAggState *gpas,
+					  GpuJoinSharedState *gj_sstate,
 					  pgstrom_data_store *pds_src,
 					  int file_desc)
 {
@@ -4043,6 +4045,7 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 	pgstromInitGpuTask(&gpas->gts, &gpreagg->task);
 	gpreagg->task.file_desc = file_desc;
 	gpreagg->gpa_sstate = gpas->gpa_sstate;
+	gpreagg->gj_sstate = gj_sstate;
 	gpreagg->with_nvme_strom = with_nvme_strom;
 	gpreagg->pds_src = pds_src;
 	gpreagg->pds_final = NULL;	/* attached on demand */
@@ -4115,8 +4118,9 @@ gpupreagg_next_task(GpuTaskState *gts)
 		gj_sstate = GpuJoinInnerPreload(outer_gts);
 		if (!gj_sstate)
 			return NULL;	/* case of empty results */
-		pds = GpuJoinExecOuterScanChunk(outer_gts);
+		pds = GpuJoinExecOuterScanChunk(outer_gts, &filedesc);
 	}
+	else
 #endif
 	if (gpas->gts.css.ss.ss_currentRelation)
 	{
@@ -4157,8 +4161,7 @@ gpupreagg_next_task(GpuTaskState *gts)
 			}
 		}
 	}
-	gtask = gpupreagg_create_task(gpas, pds, filedesc);
-
+	gtask = gpupreagg_create_task(gpas, gj_sstate, pds, filedesc);
 	if (!pds)
 	{
 		pthreadMutexLock(&gpa_sstate->mutex);
@@ -4852,6 +4855,37 @@ gpupreagg_process_termination_task(GpuPreAggTask *gpreagg,
 }
 
 /*
+ * gpupreagg_process_unified_task
+ *
+ * It runs unified GpuJoin+GpuPreAgg task.
+ */
+static int
+gpupreagg_process_unified_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
+{
+	CUfunction		kern_unified;
+	CUresult		rc;
+	int				retval = 100001;
+
+
+	/* Ensure inner heap/hash buffer is loaded */
+
+
+
+	/* Lookup GPU kernel function */
+	rc = cuModuleGetFunction(&kern_unified, cuda_module,
+							 "gpupreagg_join_main");
+	if (rc != CUDA_SUCCESS)
+		werror("failed on cuModuleGetFunction: %s", errorText(rc));
+
+
+
+out_of_resource:
+	//release device memory
+
+	return retval;
+}
+
+/*
  * gpupreagg_process_task
  */
 int
@@ -4859,6 +4893,9 @@ gpupreagg_process_task(GpuTask *gtask, CUmodule cuda_module)
 {
 	GpuPreAggTask  *gpreagg = (GpuPreAggTask *) gtask;
 	int		retval;
+
+	// TODO: if gj_sstate != NULL, gtask needs to kick GpuJoin+PreAgg
+	// unified kernel.
 
 	if (gpreagg->kern.reduction_mode == GPUPREAGG_ONLY_TERMINATION)
 		retval = gpupreagg_process_termination_task(gpreagg, cuda_module);

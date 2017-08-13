@@ -75,7 +75,7 @@ typedef struct
 	cl_uint		right_nitems_stage;	/* internal: # of right join results */
 } kern_join_scale;
 
-typedef struct
+struct kern_gpujoin
 {
 	cl_uint			kparams_offset;		/* offset to the kparams */
 	cl_uint			kresults_1_offset;	/* offset to the 1st kresults buffer */
@@ -110,7 +110,8 @@ typedef struct
 	 * (note that jscale has (num_rels + 1) elements
 	 */
 	kern_join_scale	jscale[FLEXIBLE_ARRAY_MEMBER];
-} kern_gpujoin;
+};
+typedef struct kern_gpujoin		kern_gpujoin;
 
 #define KERN_GPUJOIN_PARAMBUF(kgjoin)			\
 	((kern_parambuf *)((char *)(kgjoin) + (kgjoin)->kparams_offset))

@@ -34,7 +34,7 @@
  * | |     :         |
  * +-+---------------+
  */
-typedef struct {
+struct kern_gpuscan {
 	kern_errorbuf	kerror;
 	cl_uint			nitems_filtered;	/* out: # of rows filtered */
 	/* performance profile */
@@ -43,7 +43,9 @@ typedef struct {
 		cl_float	tv_kern_projection;
 	} pfm;
 	kern_parambuf	kparams;
-} kern_gpuscan;
+};
+
+typedef struct kern_gpuscan		kern_gpuscan;
 
 #define KERN_GPUSCAN_PARAMBUF(kgpuscan)			\
 	((kern_parambuf *)(&(kgpuscan)->kparams))

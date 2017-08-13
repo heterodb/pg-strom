@@ -48,7 +48,7 @@
  * |      :             |
  * +--------------------+
  */
-typedef struct
+struct kern_gpupreagg
 {
 	kern_errorbuf	kerror;				/* kernel error information */
 	cl_ushort		reduction_mode;		/* one of GPUPREAGG_* above */
@@ -85,7 +85,9 @@ typedef struct
 	/*
 	 * kern_resultbuf with nrels==1 shall be located next to kern_parambuf
 	 */
-} kern_gpupreagg;
+};
+
+typedef struct kern_gpupreagg	kern_gpupreagg;
 
 /* macro definitions to reference packed values */
 #define KERN_GPUPREAGG_PARAMBUF(kgpreagg)				\
