@@ -92,6 +92,7 @@ typedef struct dmaBufferSegment
 typedef struct dmaBufferSegmentHead
 {
 	pthread_rwlock_t rwlock;
+	cl_uint		num_active_segments;
 	dlist_head	active_segment_list;
 	dlist_head	inactive_segment_list;
 	dmaBufferSegment segments[FLEXIBLE_ARRAY_MEMBER];
@@ -759,6 +760,22 @@ dmaBufferAllocInternal(SharedGpuContext *shgcon, Size required)
 			has_exclusive_lock = true;
 			goto retry;
 		}
+
+		/*
+		 * check for resource limitation
+		 *
+		 * XXX - Does it make sense to limit creation of a new segment?
+		 * Once a segment is constucted, it can be used by both of backend
+		 * and GPU server process.
+		 */
+		if (dmaBufSegHead->num_active_segments >= (IsGpuServerProcess()
+												   ? num_segments_hardlimit
+												   : num_segments_softlimit))
+		{
+			chunk = NULL;
+			goto found;
+		}
+
 		if (dlist_is_empty(&dmaBufSegHead->inactive_segment_list))
 			werror("Out of DMA buffer segment");
 
@@ -780,6 +797,7 @@ dmaBufferAllocInternal(SharedGpuContext *shgcon, Size required)
 		}
 		STROM_END_TRY();
 		dlist_push_head(&dmaBufSegHead->active_segment_list, &seg->chain);
+		dmaBufSegHead->num_active_segments++;
 
 		/*
 		 * allocation of a new chunk from the new chunk to ensure num_chunks
@@ -800,19 +818,25 @@ dmaBufferAllocInternal(SharedGpuContext *shgcon, Size required)
 	if ((errno = pthread_rwlock_unlock(&dmaBufSegHead->rwlock)) != 0)
 		wfatal("failed on pthread_rwlock_unlock: %m");
 
-	/* track this chunk with GpuContext */
-	SpinLockAcquire(&shgcon->lock);
-	chunk->shgcon = shgcon;
-	dlist_push_tail(&shgcon->dma_buffer_list, &chunk->gcxt_chain);
-	SpinLockRelease(&shgcon->lock);
+	if (chunk != NULL)
+	{
+		/* track this chunk with GpuContext */
+		SpinLockAcquire(&shgcon->lock);
+		chunk->shgcon = shgcon;
+		dlist_push_tail(&shgcon->dma_buffer_list,
+						&chunk->gcxt_chain);
+		SpinLockRelease(&shgcon->lock);
 #ifdef NOT_USED
-	/*
-	 * NOTE: It may make sense for debugging, however, caller exactly knows
-	 * which area needs to be cleared and initialized. Not a job of allocator.
-	 */
-	memset(chunk->data, 0xAE, chunk->required);
+		/*
+		 * NOTE: It may make sense for debugging, however, caller
+		 * exactly knows which area needs to be cleared and initialized.
+		 Not a job of allocator.
+		*/
+		memset(chunk->data, 0xAE, chunk->required);
 #endif
-	return chunk->data;
+		return chunk->data;
+	}
+	return NULL;
 }
 
 void *
@@ -1119,7 +1143,9 @@ retry:
 		SpinLockRelease(&seg->lock);
 
 		dlist_delete(&seg->chain);
-		dlist_push_head(&dmaBufSegHead->inactive_segment_list, &seg->chain);
+		dlist_push_head(&dmaBufSegHead->inactive_segment_list,
+						&seg->chain);
+		dmaBufSegHead->num_active_segments--;
 	}
 
 	if (has_exclusive_mutex)
