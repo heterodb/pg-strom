@@ -85,6 +85,8 @@ struct kern_gpujoin
 	cl_uint			num_rels;
 	/* error status to be backed (OUT) */
 	cl_uint			nitems_filtered;
+	cl_uint			result_nitems;		/* copy of kds_dst->nitems */
+	cl_uint			result_usage;		/* copy of kds_dst->usage */
 	kern_errorbuf	kerror;
 	/* performance profiler */
 	struct {
@@ -967,6 +969,27 @@ out:
 }
 
 /*
+ * gpujoin_results_compaction
+ *
+ * Usually, GpuJoin does not fill up kds_dst entirely, thus, middle of the
+ * buffer is a hole. This functions adjusts index values of KDS_ROW.
+ */
+KERNEL_FUNCTION(void)
+gpujoin_results_compaction(kern_data_store *kds_dst)
+{
+	cl_uint	   *row_index = KERN_DATA_STORE_ROWINDEX(kds_dst);
+	size_t		head_sz = (KERN_DATA_STORE_HEAD_LENGTH(kds_dst) +
+						   STROMALIGN(sizeof(cl_uint) * kds_dst->nitems));
+	size_t		shift = STROMALIGN(kds_dst->length - kds_dst->usage) - head_sz;
+
+	if (get_global_id() < kds_dst->nitems)
+	{
+		assert(row_index[get_global_id()] >= head_sz + shift);
+		row_index[get_global_id()] -= shift;
+	}
+}
+
+/*
  * gpujoin_count_rows_dist
  *
  * It counts a rough rows distribution degreee on buffer overflow.
@@ -1421,8 +1444,7 @@ gpujoin_main(kern_gpujoin *kgjoin,		/* in/out: misc stuffs */
 	assert(!kds_src ||
 		   kds_src->format == KDS_FORMAT_ROW ||
 		   kds_src->format == KDS_FORMAT_BLOCK);
-	assert(kds_dst->format == KDS_FORMAT_ROW ||
-		   kds_dst->format == KDS_FORMAT_SLOT);
+	assert(kds_dst->format == KDS_FORMAT_ROW);
 
 	/* Get device clock for performance monitor */
 	status = cudaGetDevice(&device);
@@ -2149,13 +2171,9 @@ retry_major:
 	 */
 	if (kgjoin->kerror.errcode == StromError_Success)
 	{
-		dest_consumed = (kds_dst->format == KDS_FORMAT_ROW
-						 ? (KERN_DATA_STORE_HEAD_LENGTH(kds_dst) +
-							STROMALIGN(sizeof(cl_uint) * kds_dst->nitems) +
-							STROMALIGN(kds_dst->usage))
-						 : (KERN_DATA_STORE_SLOT_LENGTH(kds_dst,
-														kds_dst->nitems) +
-							STROMALIGN(kds_dst->usage)));
+		dest_consumed = (KERN_DATA_STORE_HEAD_LENGTH(kds_dst) +
+						 STROMALIGN(sizeof(cl_uint) * kds_dst->nitems) +
+						 STROMALIGN(kds_dst->usage));
 		if (gpujoin_try_next_window(kgjoin,
 									kmrels,
 									kds_src,
@@ -2168,6 +2186,23 @@ retry_major:
 			goto retry_major;
 		}
 	}
+
+	/*
+	 * NOTE: Usually, virtual address space of KDS_dst shall not be filled
+	 * up entirely, however, we cannot know exact length of the buffer 
+	 * preliminary. So, we allocate KDS_dst speculatively, then, allocate
+	 * host buffer according to the result.
+	 * Likely, it has a big hole in the middle of buffer. KDS_ROW_FORMAT
+	 * has an array head of index which points kern_tupitem stored from
+	 * the tail. So, compaction needs to adjust the index, prior to write
+	 * back to the CPU side.
+	 */
+	kgjoin->result_nitems	= kds_dst->nitems;
+	kgjoin->result_usage	= kds_dst->usage;
+	pgstromLaunchDynamicKernel1((void *)gpujoin_results_compaction,
+								(kern_arg_t)(kds_dst),
+								(size_t)kds_dst->nitems, 0, 0);
+
 out:
 	kern_writeback_error_status(&kgjoin->kerror, kcxt.e);
 }
