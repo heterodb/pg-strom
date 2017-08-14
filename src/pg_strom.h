@@ -842,8 +842,9 @@ extern int	gpujoin_process_task(GpuTask *gtask, CUmodule cuda_module);
 extern void	gpujoin_release_task(GpuTask *gtask);
 extern void assign_gpujoin_session_info(StringInfo buf,
 										GpuTaskState *gts);
-extern Size init_kern_gpujoin_structure(struct kern_gpujoin *kgjoin,
-										GpuTaskState *gpa_gts);
+extern Size setup_kernel_gpujoin(struct kern_gpujoin *kgjoin,
+								 GpuTaskState *gts,
+								 pgstrom_data_store *pds_src);
 extern ProgramId GpuJoinCreateUnifiedProgram(PlanState *node,
 											 GpuTaskState *gpa_gts,
 											 cl_uint gpa_extra_flags,
