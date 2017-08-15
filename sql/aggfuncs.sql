@@ -292,7 +292,7 @@ CREATE AGGREGATE pgstrom.stddev_numeric(float8[])
 (
   sfunc = pg_catalog.float8_combine,
   stype = float8[],
-  finalfunc = pg_strom.float8_stddev_samp_numeric,
+  finalfunc = pgstrom.float8_stddev_samp_numeric,
   parallel = safe
 );
 
@@ -310,7 +310,7 @@ CREATE AGGREGATE pgstrom.stddev_pop_numeric(float8[])
   sfunc = pg_catalog.float8_combine,
   stype = float8[],
   initcond = "{0,0,0}",
-  finalfunc = pg_strom.float8_stddev_pop_numeric,
+  finalfunc = pgstrom.float8_stddev_pop_numeric,
   parallel = safe
 );
 
@@ -328,7 +328,7 @@ CREATE AGGREGATE pgstrom.stddev_samp_numeric(float8[])
   sfunc = pg_catalog.float8_combine,
   stype = float8[],
   initcond = "{0,0,0}",
-  finalfunc = pg_strom.float8_stddev_samp_numeric,
+  finalfunc = pgstrom.float8_stddev_samp_numeric,
   parallel = safe
 );
 
@@ -346,7 +346,7 @@ CREATE AGGREGATE pgstrom.variance_numeric(float8[])
   sfunc = pg_catalog.float8_combine,
   stype = float8[],
   initcond = "{0,0,0}",
-  finalfunc = pg_strom.float8_var_samp_numeric,
+  finalfunc = pgstrom.float8_var_samp_numeric,
   parallel = safe
 );
 
@@ -364,7 +364,7 @@ CREATE AGGREGATE pgstrom.var_pop_numeric(float8[])
   sfunc = pg_catalog.float8_combine,
   stype = float8[],
   initcond = "{0,0,0}",
-  finalfunc = pg_strom.float8_var_pop_numeric,
+  finalfunc = pgstrom.float8_var_pop_numeric,
   parallel = safe
 );
 
@@ -382,7 +382,7 @@ CREATE AGGREGATE pgstrom.var_samp_numeric(float8[])
   sfunc = pg_catalog.float8_combine,
   stype = float8[],
   initcond = "{0,0,0}",
-  finalfunc = pg_strom.float8_var_samp_numeric,
+  finalfunc = pgstrom.float8_var_samp_numeric,
   parallel = safe
 );
 
