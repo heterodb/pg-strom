@@ -507,57 +507,22 @@ pgstromReleaseGpuTaskState(GpuTaskState *gts)
 void
 pgstromExplainGpuTaskState(GpuTaskState *gts, ExplainState *es)
 {
-	StringInfoData	buf;
-
-	/*
-	 * Extra features if any
-	 */
-	initStringInfo(&buf);
-
 	/* outer-bulk-exec? */
 	if (gts->outer_bulk_exec)
-	{
-		if (es->format == EXPLAIN_FORMAT_TEXT)
-			appendStringInfo(&buf, "%souter-bulk-exec",
-							 buf.len > 0 ? ", " : "");
-		else
-			ExplainPropertyText("Outer Bulk Exec", "enabled", es);
-	}
+		ExplainPropertyText("Outer Bulk Exec", "enabled", es);
 	else if (es->format != EXPLAIN_FORMAT_TEXT)
 		ExplainPropertyText("Outer Bulk Exec", "disabled", es);
-
-	/* output-(row|slot)-format */
-	if (es->format == EXPLAIN_FORMAT_TEXT)
-		appendStringInfo(&buf, "%soutput-%s-format",
-						 buf.len > 0 ? ", " : "",
-						 gts->row_format ? "row" : "slot");
-	else
-		ExplainPropertyText("Output Format",
-							gts->row_format ? "Row" : "Slot", es);
 
 	/* NVMe-Strom support */
 	if (gts->nvme_sstate ||
 		(!es->analyze &&
 		 gts->css.ss.ss_currentRelation &&
 		 RelationWillUseNvmeStrom(gts->css.ss.ss_currentRelation, NULL)))
-	{
-		if (es->format == EXPLAIN_FORMAT_TEXT)
-			appendStringInfo(&buf, "%snvme-strom",
-                             buf.len > 0 ? ", " : "");
-		else
-			ExplainPropertyText("NVMe-Strom", "enabled", es);
-	}
+		ExplainPropertyText("NVMe-Strom", "enabled", es);
 	else if (es->format != EXPLAIN_FORMAT_TEXT)
 		ExplainPropertyText("NVMe-Strom", "disabled", es);
 
-	/* Dump extra features */
-	if (es->format == EXPLAIN_FORMAT_TEXT && buf.len > 0)
-		ExplainPropertyText("Features", buf.data, es);
-	pfree(buf.data);
-
-	/*
-	 * Show source path of the GPU kernel
-	 */
+	/* Source path of the GPU kernel */
 	if (es->verbose &&
 		gts->program_id != INVALID_PROGRAM_ID &&
 		pgstrom_debug_kernel_source)

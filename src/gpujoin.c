@@ -280,8 +280,6 @@ struct GpuJoinSharedState
 	slock_t			lock;			/* protection for statistics */
 	size_t			source_ntasks;	/* number of sampled tasks */
 	size_t			source_nitems;	/* number of sampled source items */
-	size_t			results_nitems;	/* number of joined result items */
-	size_t			results_usage;	/* sum of kds_dst->usage */
 	size_t		   *inner_nitems;	/* number of inner join results items */
 	size_t		   *right_nitems;	/* number of right join results items */
 	cl_double	   *row_dist_score;	/* degree of result row distribution */
@@ -364,8 +362,6 @@ static void releaseGpuJoinSharedState(GpuJoinState *gjs, bool is_rescan);
 
 static GpuJoinSharedState *
 gpujoinGetInnerBuffer(GpuContext *gcontext, GpuJoinSharedState *gj_sstate);
-static bool gpujoinLoadInnerBuffer(GpuContext *gcontext,
-								   GpuJoinSharedState *gj_sstate);
 static void gpujoinPutInnerBuffer(
 	GpuJoinSharedState *gj_sstate,
 	void (*outerjoin_kicker)(GpuJoinSharedState *gj_sstate, void *private),
@@ -4568,16 +4564,12 @@ gpujoin_release_task(GpuTask *gtask)
 	dmaBufferFree(pgjoin);
 }
 
-static void
-update_runtime_statistics(GpuJoinTask *pgjoin)
+void
+gpujoinUpdateRunTimeStat(GpuJoinSharedState *gj_sstate,
+						 kern_gpujoin *kgjoin)
 {
-	pgstrom_data_store *pds_dst = pgjoin->pds_dst;
-	GpuJoinSharedState *gj_sstate = pgjoin->gj_sstate;
-	kern_join_scale	   *jscale = pgjoin->kern.jscale;
-	cl_int				i, num_rels = gj_sstate->kern.nrels;
-
-	if (pgjoin->task.kerror.errcode != StromError_Success)
-		return;
+	kern_join_scale	   *jscale = kgjoin->jscale;
+	cl_int				i, num_rels = kgjoin->num_rels;
 
 	SpinLockAcquire(&gj_sstate->lock);
 	gj_sstate->source_ntasks++;
@@ -4594,22 +4586,20 @@ update_runtime_statistics(GpuJoinTask *pgjoin)
 			gj_sstate->row_dist_score[i] += jscale[i].row_dist_score;
 		}
 	}
-	gj_sstate->results_nitems += pds_dst->kds.nitems;
-	gj_sstate->results_usage += pds_dst->kds.usage;
 	SpinLockRelease(&gj_sstate->lock);
 }
 
 static bool
-gpujoin_process_kernel(GpuJoinTask *pgjoin, CUmodule cuda_module)
+gpujoin_process_kernel(GpuJoinTask *pgjoin, CUmodule cuda_module,
+					   CUdeviceptr m_kmrels,
+					   CUdeviceptr m_ojmaps,
+					   kern_data_store *kds_dst_head)
 {
 	GpuContext		   *gcontext = pgjoin->task.gcontext;
 	GpuJoinSharedState *gj_sstate = pgjoin->gj_sstate;
 	pgstrom_data_store *pds_src = pgjoin->pds_src;
-	kern_data_store	   *kds_dst_head = gj_sstate->kds_dst_head;
 	CUfunction			kern_main;
 	CUdeviceptr			m_kgjoin = 0UL;
-	CUdeviceptr			m_kmrels = 0UL;
-	CUdeviceptr			m_ojmaps = 0UL;
 	CUdeviceptr			m_kds_src = 0UL;
 	CUdeviceptr			m_kds_dst = 0UL;
 	Size				length;
@@ -4665,10 +4655,6 @@ gpujoin_process_kernel(GpuJoinTask *pgjoin, CUmodule cuda_module)
 		pos += GPUMEMALIGN(pds_src->kds.length);
 	}
 	m_kds_dst = m_kgjoin + pos;
-
-	/* inner hash/heap buffer should exist */
-	m_kmrels = gj_sstate->m_kmrels[gcontext->gpuserv_id];
-	m_ojmaps = gj_sstate->m_ojmaps[gcontext->gpuserv_id];
 
 	/*
 	 * OK, all the device memory and kernel objects are successfully
@@ -4835,10 +4821,9 @@ gpujoin_process_kernel(GpuJoinTask *pgjoin, CUmodule cuda_module)
 		pgjoin->task.cpu_fallback = true;
 		gj_sstate->had_cpu_fallback = true;
 	}
-	else
-	{
-		update_runtime_statistics(pgjoin);
-	}
+	else if (pgjoin->task.kerror.errcode == StromError_Success)
+		gpujoinUpdateRunTimeStat(pgjoin->gj_sstate, &pgjoin->kern);
+
 	return true;
 
 out_of_resource:
@@ -4948,19 +4933,27 @@ int
 gpujoin_process_task(GpuTask *gtask, CUmodule cuda_module)
 {
 	GpuJoinTask	   *pgjoin = (GpuJoinTask *) gtask;
-	int				retval;
+	CUdeviceptr		m_kmrels;
+	CUdeviceptr		m_ojmaps;
+	kern_data_store *kds_dst_head;
+	int				retval = 100001;	/* out of resource; 100ms delay */
 
 	/* Ensure inner hash/heap buffe is loaded */
-	gpujoinLoadInnerBuffer(pgjoin->task.gcontext,
-						   pgjoin->gj_sstate);
+	if (!gpujoinLoadInnerBuffer(pgjoin->task.gcontext,
+								pgjoin->gj_sstate,
+								&m_kmrels,
+								&m_ojmaps,
+								&kds_dst_head))
+		return retval;
 	/* Terminator skips inner join */
 	if (pgjoin->is_terminator)
 		retval = -1;
 	else
 	{
 		do {
-			if (!gpujoin_process_kernel(pgjoin, cuda_module))
-				return 100001;	/* out of resource; 100ms delay */
+			if (!gpujoin_process_kernel(pgjoin, cuda_module,
+										m_kmrels, m_ojmaps, kds_dst_head))
+				return retval;
 			if (pgjoin->task.kerror.errcode != StromError_Success)
 				break;			/* deliver the error status */
 		} while (gpujoin_try_rerun_kernel(pgjoin, cuda_module));
@@ -5634,10 +5627,15 @@ __gpujoinLoadInnerBuffer(GpuContext *gcontext, GpuJoinSharedState *gj_sstate)
 	return true;
 }
 
-static bool
-gpujoinLoadInnerBuffer(GpuContext *gcontext, GpuJoinSharedState *gj_sstate)
+bool
+gpujoinLoadInnerBuffer(GpuContext *gcontext,
+					   GpuJoinSharedState *gj_sstate,
+					   CUdeviceptr *p_m_kmrels,
+					   CUdeviceptr *p_m_ojmaps,
+					   kern_data_store **p_kds_dst_head)
 {
-	int			pg_worker = gcontext->shgcon->pg_worker_index;
+	SharedGpuContext *shgcon = gcontext->shgcon;
+	int			pg_worker = shgcon->pg_worker_index;
 	int			dindex = gcontext->gpuserv_id;
 	bool		retval = true;
 	CUresult	rc;
@@ -5670,6 +5668,14 @@ gpujoinLoadInnerBuffer(GpuContext *gcontext, GpuJoinSharedState *gj_sstate)
 			STROM_RE_THROW();
 		}
 		STROM_END_TRY();
+	}
+
+	/* tells caller references to device resources */
+	if (retval)
+	{
+		*p_m_kmrels		= gj_sstate->m_kmrels[dindex];
+		*p_m_ojmaps		= gj_sstate->m_ojmaps[dindex];
+		*p_kds_dst_head	= gj_sstate->kds_dst_head;
 	}
 	pthreadMutexUnlock(&gj_sstate->mutex);
 	return retval;
