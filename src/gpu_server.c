@@ -1178,11 +1178,11 @@ gpuserv_try_run_pending_task(long *p_timeout)
 	}
 	memset(&gtask->chain, 0, sizeof(dlist_node));
 	SpinLockRelease(&session_tasks_lock);
-
+#ifdef PGSTROM_DEBUG
 	gettimeofday(&tv, NULL);
 	gtask->send_delay = (1000000 * tv.tv_sec + tv.tv_usec) -
 		(1000000 * gtask->tv_timestamp.tv_sec + gtask->tv_timestamp.tv_usec);
-
+#endif
 	gcontext = gtask->gcontext;
 	STROM_TRY();
 	{

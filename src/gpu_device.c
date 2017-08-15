@@ -72,6 +72,7 @@ pgstrom_collect_gpu_device(void)
 	char	   *pos;
 	char	   *cuda_runtime_version = NULL;
 	char	   *nvidia_driver_version = NULL;
+	bool		warn_on_kepler_maxwell = false;
 	int			num_devices = -1;	/* total num of GPUs; incl legacy models */
 	int			i, j;
 
@@ -177,6 +178,21 @@ pgstrom_collect_gpu_device(void)
 				 dattrs->COMPUTE_CAPABILITY_MAJOR,
 				 dattrs->COMPUTE_CAPABILITY_MINOR);
 			continue;
+		}
+
+		/* Recommend to use Pascal or later */
+		if (dattrs->COMPUTE_CAPABILITY_MAJOR < 6)
+		{
+			elog(LOG, "PG-Strom: GPU%d %s - CC %d.%d is not recommended",
+				 dattrs->DEV_ID,
+				 dattrs->DEV_NAME,
+				 dattrs->COMPUTE_CAPABILITY_MAJOR,
+				 dattrs->COMPUTE_CAPABILITY_MINOR);
+			if (!warn_on_kepler_maxwell)
+			{
+				elog(WARNING, "Hint: Kepler/Maxwell architecture does not support demand paging on device's virtual address space, thus, memory allocation overcommit tends to consume very large physical memory immediately. We strongly recommend to upgrade your GPU to Pascal or later.");
+				warn_on_kepler_maxwell = true;
+			}
 		}
 
 		/* Update the baseline device capability */
