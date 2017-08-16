@@ -490,6 +490,7 @@ pgstromReleaseGpuTaskState(GpuTaskState *gts)
 	}
 	/* cleanup per-query PDS-scan state, if any */
 	PDS_end_heapscan_state(gts);
+	InstrEndLoop(&gts->outer_instrument);
 	/* release scan-desc if any */
 	if (gts->css.ss.ss_currentScanDesc)
 		heap_endscan(gts->css.ss.ss_currentScanDesc);

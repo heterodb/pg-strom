@@ -211,6 +211,7 @@ untrackGpuMem(GpuContext *gcontext, CUdeviceptr devptr)
 	}
 	SpinLockRelease(&gcontext->lock);
 	wnotice("Bug? GPU Device Memory %p was not tracked", (void *)devptr);
+	abort();
 	return NULL;
 }
 

@@ -323,7 +323,7 @@ typedef struct
 {
 	GpuTask				task;
 	cl_bool				with_nvme_strom;/* true, if NVMe-Strom */
-	cl_bool				is_terminator;	/* true, if dummay terminator */
+	cl_bool				is_dummy_task;	/* true, if dummay task */
 	/* DMA buffers */
 	GpuJoinSharedState *gj_sstate;	/* inner heap/hash buffer */
 	pgstrom_data_store *pds_src;	/* data store of outer relation */
@@ -3640,7 +3640,7 @@ gpujoin_create_task(GpuJoinState *gjs,
 	pgjoin->gj_sstate = gpujoinGetInnerBuffer(gcontext, gj_sstate);
 	pgjoin->pds_src = pds_src;
 	pgjoin->pds_dst = NULL;		/* to be set later */
-	pgjoin->is_terminator = (pds_src == NULL);
+	pgjoin->is_dummy_task = (pds_src == NULL);
 
 	/* Is NVMe-Strom available to run this GpuJoin? */
 	if (pds_src && pds_src->kds.format == KDS_FORMAT_BLOCK)
@@ -3704,7 +3704,7 @@ gpujoin_clone_task(GpuJoinTask *pgjoin_old)
 	pgjoin_new->task.cpu_fallback = false;
 	memset(&pgjoin_new->task.tv_wakeup, 0, sizeof(struct timeval));
 	pgjoin_new->task.peer_fdesc = -1;
-	pgjoin_new->is_terminator = false;
+	pgjoin_new->is_dummy_task = false;
 	pgjoin_new->gj_sstate = NULL;	/* caller should set */
 	pgjoin_new->pds_src = NULL;		/* caller should set */
 	pgjoin_new->pds_dst = NULL;		/* caller should set */
@@ -4521,11 +4521,15 @@ GpuJoinCreateUnifiedProgram(PlanState *node,
 							   extra_flags & ~DEVKERNEL_NEEDS_GPUJOIN);
 	assign_gpujoin_session_info(&kern_define, &gjs->gts);
 
-	appendStringInfoString(&kern_source,
-						   "/* ======== BEGIN GpuJoin Portion ======== */");
-	appendStringInfoString(&kern_source, gj_info->kern_source);
-	appendStringInfoString(&kern_source,
-						   "/* ======== BEGIN GpuPreAgg Portion ======== */");
+	appendStringInfoString(
+		&kern_source,
+		"\n/* ====== BEGIN GpuJoin Portion ====== */\n\n");
+	appendStringInfoString(
+		&kern_source,
+		gj_info->kern_source);
+	appendStringInfoString(
+		&kern_source,
+		"\n/* ====== BEGIN GpuPreAgg Portion ====== */\n\n");
 	appendStringInfoString(&kern_source, gpa_kern_source);
 
 	program_id = pgstrom_create_cuda_program(gpa_gts->gcontext,
@@ -4598,6 +4602,7 @@ gpujoin_process_kernel(GpuJoinTask *pgjoin, CUmodule cuda_module,
 	GpuContext		   *gcontext = pgjoin->task.gcontext;
 	GpuJoinSharedState *gj_sstate = pgjoin->gj_sstate;
 	pgstrom_data_store *pds_src = pgjoin->pds_src;
+	cl_int				needs_compaction = 1;
 	CUfunction			kern_main;
 	CUdeviceptr			m_kgjoin = 0UL;
 	CUdeviceptr			m_kds_src = 0UL;
@@ -4703,14 +4708,14 @@ gpujoin_process_kernel(GpuJoinTask *pgjoin, CUmodule cuda_module,
 	 *              cl_bool *outer_join_map,
 	 *              kern_data_store *kds_src,
 	 *              kern_data_store *kds_dst,
-	 *              cl_int cuda_index)
+	 *              cl_int needs_compaction)
 	 */
 	kern_args[0] = &m_kgjoin;
 	kern_args[1] = &m_kmrels;
 	kern_args[2] = &m_ojmaps;
 	kern_args[3] = &m_kds_src;
 	kern_args[4] = &m_kds_dst;
-	kern_args[5] = &gpuserv_cuda_dindex;
+	kern_args[5] = &needs_compaction;
 
 	rc = cuLaunchKernel(kern_main,
 						1, 1, 1,
@@ -4946,7 +4951,7 @@ gpujoin_process_task(GpuTask *gtask, CUmodule cuda_module)
 								&kds_dst_head))
 		return retval;
 	/* Terminator skips inner join */
-	if (pgjoin->is_terminator)
+	if (pgjoin->is_dummy_task)
 		retval = -1;
 	else
 	{
@@ -5525,7 +5530,7 @@ gpujoinPutInnerBuffer(GpuJoinSharedState *gj_sstate,
 	Assert(gj_sstate->nr_tasks[dindex] > 0);
 	if (--gj_sstate->nr_tasks[dindex] == 0 &&	/* last task on the device? */
 		gj_sstate->outer_scan_done &&	/* no more task will be produced? */
-		gj_sstate->h_ojmaps != NULL)	/* outer join may happen? */
+		gpujoinHasRightOuterJoin(gj_sstate))	/* outer join shall happen? */
 	{
 		if (!gj_sstate->outer_join_kicked)
 		{
@@ -5738,6 +5743,15 @@ releaseGpuJoinSharedState(GpuJoinState *gjs, bool is_rescan)
 		memset(gj_sstate->m_ojmaps, 0, sizeof(CUdeviceptr) * numDevAttrs);
 		gj_sstate->h_ojmaps = NULL;
 	}
+}
+
+/*
+ * gpujoinHasRightOuterJoin
+ */
+bool
+gpujoinHasRightOuterJoin(GpuJoinSharedState *gj_sstate)
+{
+	return (gj_sstate->h_ojmaps != NULL);
 }
 
 /*

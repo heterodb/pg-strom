@@ -134,22 +134,26 @@ deform_gpupreagg_info(CustomScan *cscan)
 typedef struct
 {
 	cl_int				pg_nworkers;/* copy from parallel context */
-	pthread_mutex_t		mutex;
+
 	/*
-	 * NOTE: A pair of nr_scans[] + nr_tasks[] determines the terminator
-	 * task per device.
-	 * GpuPreAgg increments nr_scans[] prior to fetch of the first tuple,
-	 * then decrements it when it reached to the tail of the relation.
-	 * nr_tasks[] shows # of GpuTask per device. GpuPreAgg will create
-	 * a dummy task with pds_src==NULL when it reached to tail of the
-	 * relation, but prior to decrement nr_scans[].
-	 * Once a GpuTask is done, it decrements nr_tasks[] on GPU server.
-	 * If both of nr_scans[] and nr_tasks[] are zero, it means the GpuTask
-	 * should perform as a terminator task; it allocates pds_final buffer,
-	 * then bring back to the PG backend process.
+	 * NOTE: A pair of @outer_scan_done + @nr_tasks[] determines the terminator
+	 * task per device exactly.
+	 * @nr_tasks[] shall be incremented prior to the fetch of first tuple,
+	 * but should not touch if @outer_scan_done is already set. (Please
+	 * assume a worker begins relation scan after the relation scan end by
+	 * other concurrent PG workers.)
+	 * Once @outer_scan_done is set, GpuPreAgg should not create new GpuTask
+	 * any more, then @nr_tasks[] will be monotonically decreasing.
+	 * If (@outer_scan_done && @nr_tasks[] == 0) means no GpuTask shall be
+	 * executed on the device any more, thus, it is a time for termination.
+	 * If CPU fallback happen, @nr_tasks[] must be decremented on the
+	 * backend side just before the release, because unified GpuJoin +
+	 * GpuPreAgg may update its outer-join-map.
 	 */
-	cl_int			   *nr_scans;	/* # of PG workers that is scanning 
-									 * outer relation (per device) */
+	pthread_mutex_t		mutex;
+	cl_bool				had_cpu_fallback;/* True, if CPU fallback happen */
+	cl_bool				outer_scan_done; /* True, if outer scan reached to
+										  * end of the relation. */
 	cl_int			   *nr_tasks;	/* # of concurrent tasks (per device) */
 	cl_bool			   *is_loaded;	/* True, if final buffer is already
 									 * setup (per PG worker) */
@@ -178,7 +182,6 @@ typedef struct
 {
 	GpuTaskState	gts;
 	GpuPreAggSharedState *gpa_sstate;
-	cl_bool			scan_begin;
 	cl_bool			unified_gpujoin;
 	cl_int			num_group_keys;
 	cl_ulong		num_fallback_rows; /* # of rows processed by fallback */
@@ -209,11 +212,19 @@ typedef struct
  */
 typedef struct GpuJoinSharedState	GpuJoinSharedState;
 
+typedef enum {
+	GpuPreAggTaskRole__Normal,
+	GpuPreAggTaskRole__Dummy,
+	GpuPreAggTaskRole__LocalTerminator,
+	GpuPreAggTaskRole__GlobalTerminator,
+} GpuPreAggTaskRole;
+
 typedef struct
 {
 	GpuTask				task;
 	GpuPreAggSharedState *gpa_sstate;
 	GpuJoinSharedState *gj_sstate;
+	GpuPreAggTaskRole	task_role;		/* one of GpuPreAggTaskRole__* */
 	bool				with_nvme_strom;/* true, if NVMe-Strom */
 	/* DMA buffers */
 	pgstrom_data_store *pds_src;	/* source row/block buffer */
@@ -3489,15 +3500,12 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 		Assert(scan_rel == NULL);
 		Assert(gpa_info->outer_quals == NIL);
 		outer_ps = ExecInitNode(outerPlan(cscan), estate, eflags);
-#if 0
 		if (enable_pullup_outer_join &&
 			pgstrom_planstate_is_gpujoin(outer_ps))
 		{
 			gpas->unified_gpujoin = true;
 		}
-		else
-#endif
-		if (pgstrom_bulk_exec_supported(outer_ps))
+		else if (pgstrom_bulk_exec_supported(outer_ps))
 		{
 			((GpuTaskState *) outer_ps)->row_format = true;
 			gpas->gts.outer_bulk_exec = true;
@@ -3853,7 +3861,6 @@ createGpuPreAggSharedState(GpuPreAggState *gpas)
 
 	Assert(!IsParallelWorker());
 	required = MAXALIGN(sizeof(GpuPreAggSharedState))
-		+ MAXALIGN(sizeof(cl_int) * numDevAttrs)		/* nr_scans */
 		+ MAXALIGN(sizeof(cl_int) * numDevAttrs)		/* nr_tasks */
 		+ MAXALIGN(sizeof(cl_bool) * pg_nworkers)		/* is_loaded */
 		+ MAXALIGN(sizeof(CUdeviceptr) * numDevAttrs)	/* m_kds_final */
@@ -3871,8 +3878,6 @@ createGpuPreAggSharedState(GpuPreAggState *gpas)
 
 	gpa_sstate->pg_nworkers = pg_nworkers;
 	pthreadMutexInit(&gpa_sstate->mutex);
-	gpa_sstate->nr_scans = (cl_int *) pos;
-	pos += MAXALIGN(sizeof(cl_int) * numDevAttrs);
 	gpa_sstate->nr_tasks = (cl_int *) pos;
 	pos += MAXALIGN(sizeof(cl_int) * numDevAttrs);
 	gpa_sstate->is_loaded = (cl_bool *) pos;
@@ -3988,13 +3993,10 @@ resetGpuPreAggSharedState(GpuPreAggState *gpas)
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on gpuMemFree: %s", errorText(rc));
 	}
-
 	/* reset attributes */
-	gpas->scan_begin = false;
 	if (!IsParallelWorker())
 	{
-		memset(gpa_sstate->nr_scans, 0,
-			   sizeof(cl_int) * numDevAttrs);
+		gpa_sstate->outer_scan_done = false;
 		memset(gpa_sstate->nr_tasks, 0,
 			   sizeof(cl_int) * numDevAttrs);
 		memset(gpa_sstate->is_loaded, 0,
@@ -4062,8 +4064,11 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 
 	pgstromInitGpuTask(&gpas->gts, &gpreagg->task);
 	gpreagg->task.file_desc = file_desc;
-	gpreagg->gpa_sstate = gpas->gpa_sstate;
+	gpreagg->gpa_sstate = gpa_sstate;
 	gpreagg->gj_sstate = gj_sstate;
+	gpreagg->task_role = (pds_src != NULL
+						  ? GpuPreAggTaskRole__Normal
+						  : GpuPreAggTaskRole__Dummy);
 	gpreagg->with_nvme_strom = with_nvme_strom;
 	gpreagg->pds_src = pds_src;
 	gpreagg->pds_final = NULL;	/* attached on demand */
@@ -4104,10 +4109,6 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 						   kds_len,
 						   KDS_FORMAT_SLOT,
 						   nitems_real);
-	pthreadMutexLock(&gpa_sstate->mutex);
-	gpa_sstate->nr_tasks[gcontext->gpuserv_id]++;
-	pthreadMutexUnlock(&gpa_sstate->mutex);
-
 	return &gpreagg->task;
 }
 
@@ -4128,26 +4129,30 @@ gpupreagg_next_task(GpuTaskState *gts)
 	pgstrom_data_store	   *pds = NULL;
 	int						filedesc = -1;
 
-	if (!gpas->scan_begin)
+	if (gpas->unified_gpujoin)
 	{
-		pthreadMutexLock(&gpa_sstate->mutex);
-		gpa_sstate->nr_scans[gcontext->gpuserv_id]++;
-		pthreadMutexUnlock(&gpa_sstate->mutex);
-		gpas->scan_begin = true;
+		gj_sstate = GpuJoinInnerPreload((GpuTaskState *) outerPlanState(gpas));
+		if (!gj_sstate)
+			return NULL;	/* obviously, an empty results */
 	}
-#if 0
+
+	/* terminator checks */
+	pthreadMutexLock(&gpa_sstate->mutex);
+	gpa_sstate->nr_tasks[gcontext->gpuserv_id]++;
+	if (gpa_sstate->outer_scan_done)
+	{
+		pthreadMutexUnlock(&gpa_sstate->mutex);
+		goto skip;
+	}
+	pthreadMutexUnlock(&gpa_sstate->mutex);
+
 	if (gpas->unified_gpujoin)
 	{
 		GpuTaskState   *outer_gts = (GpuTaskState *) outerPlanState(gpas);
-
-		gj_sstate = GpuJoinInnerPreload(outer_gts);
-		if (!gj_sstate)
-			return NULL;	/* case of empty results */
+		Assert(gj_sstate != NULL);
 		pds = GpuJoinExecOuterScanChunk(outer_gts, &filedesc);
 	}
-	else
-#endif
-	if (gpas->gts.css.ss.ss_currentRelation)
+	else if (gpas->gts.css.ss.ss_currentRelation)
 	{
 		pds = gpuscanExecScanChunk(&gpas->gts, &filedesc);
 	}
@@ -4186,14 +4191,13 @@ gpupreagg_next_task(GpuTaskState *gts)
 			}
 		}
 	}
+skip:
 	gtask = gpupreagg_create_task(gpas, gj_sstate, pds, filedesc);
 	if (!pds)
 	{
 		pthreadMutexLock(&gpa_sstate->mutex);
-		Assert(gpa_sstate->nr_scans[gcontext->gpuserv_id] > 0);
-		gpa_sstate->nr_scans[gcontext->gpuserv_id]--;
+		gpa_sstate->outer_scan_done = true;
 		pthreadMutexUnlock(&gpa_sstate->mutex);
-
 		gpas->gts.scan_done = true;
 	}
 	return gtask;
@@ -4227,7 +4231,32 @@ gpupreagg_next_tuple_fallback(GpuPreAggState *gpas, GpuPreAggTask *gpreagg)
 		/* fetch a tuple from the data-store */
 		ExecClearTuple(gpas->outer_slot);
 		if (!PDS_fetch_tuple(gpas->outer_slot, pds_src, &gpas->gts))
+		{
+			GpuPreAggSharedState *gpa_sstate = gpas->gpa_sstate;
+			int			i, dindex = gpas->gts.gcontext->gpuserv_id;
+
+			/* pds_src is no longer needed */
+			PDS_release(gpreagg->pds_src);
+			gpreagg->pds_src = NULL;
+
+			pthreadMutexLock(&gpa_sstate->mutex);
+			Assert(gpa_sstate->nr_tasks[dindex] > 0);
+			if (--gpa_sstate->nr_tasks[dindex] == 0 &&
+				gpa_sstate->outer_scan_done)
+			{
+				gpreagg->task_role = GpuPreAggTaskRole__GlobalTerminator;
+				for (i=0; i < numDevAttrs; i++)
+				{
+					gpreagg->task_role = GpuPreAggTaskRole__LocalTerminator;
+					break;
+				}
+				//FIXME: we have to kick terminator task
+				elog(NOTICE, "FIXME: terminator task must be kicked");
+			}
+			pthreadMutexUnlock(&gpa_sstate->mutex);
+
 			return NULL;
+		}
 		econtext->ecxt_scantuple = gpas->outer_slot;
 
 		/* filter out the tuple, if any outer quals */
@@ -4575,20 +4604,21 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 	Size		length;
 	void	   *kern_args[6];
 	CUresult	rc;
-	int			retval;
+	int			i, retval = 100001;	/* retry after 100ms delay */
 
 	/*
 	 * Get GpuPreAgg execution strategy
 	 */
 	if (!gpupreagg_load_final_buffer(gpreagg, cuda_module,
 									 &m_kds_final, &m_fhash))
-		return 100001;	/* retry later */
+		return retval;
 
 	/*
 	 * Is it a dummay GpuTask?
 	 */
-	if (!pds_src)
+	if (gpreagg->task_role == GpuPreAggTaskRole__Dummy)
 		goto check_terminator;
+	Assert(pds_src != NULL);
 
 	/*
 	 * Lookup kernel functions
@@ -4737,155 +4767,66 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 	 * too large memory.
 	 */
 
-	/* Release short term device resource */
-	if (gpreagg->with_nvme_strom && m_kds_src != 0UL)
-		gpuMemFreeIOMap(gcontext, m_kds_src);
-	if (m_gpreagg != 0UL)
-		gpuMemFree(gcontext, m_gpreagg);
-
-	/* Update run-time statistics */
-	gpupreaggUpdateRunTimeStat(gpa_sstate, &gpreagg->kern);
+	/*
+     * Clear the error code if CPU fallback case.
+     * Elsewhere, update run-time statistics.
+     */
+	gpreagg->task.kerror = gpreagg->kern.kerror;
+	if (pgstrom_cpu_fallback_enabled &&
+		gpreagg->task.kerror.errcode == StromError_CpuReCheck)
+	{
+		gpreagg->task.kerror.errcode = StromError_Success;
+		gpreagg->task.cpu_fallback = true;
+		pthreadMutexLock(&gpa_sstate->mutex);
+		gpa_sstate->had_cpu_fallback = true;
+		pthreadMutexUnlock(&gpa_sstate->mutex);
+	}
+	else if (gpreagg->task.kerror.errcode == StromError_Success)
+		gpupreaggUpdateRunTimeStat(gpa_sstate, &gpreagg->kern);
 
 	/*
 	 * Does this GpuTask need to perform as a terminator on this device?
 	 */
 check_terminator:
-	pthreadMutexLock(&gpa_sstate->mutex);
-	Assert(gpa_sstate->nr_tasks[gpuserv_cuda_dindex] > 0);
-	gpa_sstate->nr_tasks[gpuserv_cuda_dindex]--;
-	if (gpa_sstate->nr_scans[gpuserv_cuda_dindex] == 0 &&
-		gpa_sstate->nr_tasks[gpuserv_cuda_dindex] == 0)
-	{
-		Assert(gpreagg->pds_final == NULL);
-		gpreagg->kern.reduction_mode = GPUPREAGG_ONLY_TERMINATION;
-		retval = 1;		/* re-execution as terminator on this device */
-	}
+	if (gpreagg->task.cpu_fallback)
+		retval = 0;			/* GpuTask will be sent back to the backend */
 	else
 	{
-		retval = -1;	/* GpuTask will be released soon */
-	}
-	pthreadMutexUnlock(&gpa_sstate->mutex);
+		pthreadMutexLock(&gpa_sstate->mutex);
+		Assert(gpa_sstate->nr_tasks[gpuserv_cuda_dindex] > 0);
+		if (--gpa_sstate->nr_tasks[gpuserv_cuda_dindex] == 0 &&
+			gpa_sstate->outer_scan_done)
+		{
+			Assert(gpreagg->pds_final == NULL);
+			gpreagg->task_role = GpuPreAggTaskRole__GlobalTerminator;
+			for (i=0; i < numDevAttrs; i++)
+			{
+				if (gpa_sstate->nr_tasks[i] > 0)
+				{
+					gpreagg->task_role = GpuPreAggTaskRole__LocalTerminator;
+					break;
+				}
+			}
+			retval = 1;		/* Re-execution as terminator on this device */
 
-	return retval;
+			/* terminator needs no pds_src */
+			if (gpreagg->pds_src)
+				PDS_release(gpreagg->pds_src);
+			gpreagg->pds_src = NULL;
+		}
+		else
+		{
+			retval = -1;	/* GpuTask will be released soon */
+		}
+		pthreadMutexUnlock(&gpa_sstate->mutex);
+	}
 
 out_of_resource:
 	if (gpreagg->with_nvme_strom && m_kds_src != 0UL)
 		gpuMemFreeIOMap(gcontext, m_kds_src);
 	if (m_gpreagg != 0UL)
 		gpuMemFree(gcontext, m_gpreagg);
-	return 100001;	/* out of resource; 100ms delay */
-}
-
-/*
- * gpupreagg_process_termination_task
- */
-static int
-gpupreagg_process_termination_task(GpuPreAggTask *gpreagg,
-								   CUmodule cuda_module)
-{
-	GpuContext	   *gcontext = gpreagg->task.gcontext;
-	GpuPreAggSharedState *gpa_sstate = gpreagg->gpa_sstate;
-	pgstrom_data_store *pds_final;
-	kern_data_store *kds_final_head = gpa_sstate->kds_final_head;
-	CUdeviceptr		m_kds_final;
-	CUdeviceptr		m_kds_extra;
-	CUresult		rc;
-	cl_int			ncols = kds_final_head->ncols;
-	size_t			f_nitems;
-	size_t			f_extra_sz;
-	size_t			kds_length;
-
-	/*
-	 * allocation of the final buffer on host side
-	 */
-	pthreadMutexLock(&gpa_sstate->mutex);
-	f_nitems = gpa_sstate->f_nitems[gpuserv_cuda_dindex];
-	f_extra_sz = gpa_sstate->f_extra_sz[gpuserv_cuda_dindex];
-	m_kds_final = gpa_sstate->m_kds_final[gpuserv_cuda_dindex];
-	m_kds_extra = m_kds_final + ((size_t)kds_final_head->length -
-								 (size_t)f_extra_sz);
-	pthreadMutexUnlock(&gpa_sstate->mutex);
-
-	kds_length = KERN_DATA_STORE_SLOT_LENGTH(kds_final_head, f_nitems);
-	pds_final = dmaBufferAlloc(gcontext, (GPUMEMALIGN(kds_length) +
-										  GPUMEMALIGN(f_extra_sz)));
-	if (!pds_final)
-		return 100001;	/* out of memory; try it later */
-
-	pg_atomic_init_u32(&pds_final->refcnt, 1);
-	pds_final->nblocks_uncached = 0;
-	pds_final->ntasks_running = 0;
-	memcpy(&pds_final->kds, gpa_sstate->kds_final_head,
-		   offsetof(kern_data_store, colmeta[ncols]));
-	/*
-	 * fixup varlena datum on demand
-	 */
-	if (kds_final_head->has_notbyval)
-	{
-		hostptr_t	kds_baseptr = (hostptr_t)(&pds_final->kds) + kds_length;
-		CUfunction	kern_fixvar;
-		size_t		grid_size;
-		size_t		block_size;
-		void	   *kern_args[2];
-
-		/* Launch:
-		 * KERNEL_FUNCTION(void)
-		 * gpupreagg_fixup_varlena(kern_data_store *kds_final,
-		 *                         hostptr_t kds_baseptr)
-		 */
-		rc = cuModuleGetFunction(&kern_fixvar,
-								 cuda_module,
-								 "gpupreagg_fixup_varlena");
-		if (rc != CUDA_SUCCESS)
-			werror("failed on cuModuleGetFunction: %s", errorText(rc));
-
-		optimal_workgroup_size(&grid_size,
-							   &block_size,
-							   kern_fixvar,
-							   gpuserv_cuda_device,
-							   f_nitems,
-							   0, 0);
-		kern_args[0] = &m_kds_final;
-		kern_args[1] = &kds_baseptr;
-
-		rc = cuLaunchKernel(kern_fixvar,
-							grid_size, 1, 1,
-							block_size, 1, 1,
-							0,
-							NULL,
-							kern_args,
-							NULL);
-		if (rc != CUDA_SUCCESS)
-			werror("failed on cuLaunchKernel: %s", errorText(rc));
-	}
-	else
-	{
-		Assert(f_extra_sz == 0UL);
-	}
-
-	/* DMA Recv of the final buffer (earlier half) */
-	rc = cuMemcpyDtoH(&pds_final->kds,
-					  m_kds_final,
-					  kds_length);
-	if (rc != CUDA_SUCCESS)
-		werror("failed on cuMemcpyHtoD: %s", errorText(rc));
-
-	/* DMA Recv of the final buffer (extra part of SLOT format) */
-	if (f_extra_sz > 0)
-	{
-		rc = cuMemcpyDtoH((char *)(&pds_final->kds) + kds_length,
-						  m_kds_extra,
-						  f_extra_sz);
-		if (rc != CUDA_SUCCESS)
-			werror("failed on cuMemcpyHtoD: %s", errorText(rc));
-	}
-
-	/* final fixup of the final buffer */
-	pds_final->kds.hostptr = (hostptr_t)(&pds_final->kds.hostptr);
-	pds_final->kds.length = kds_length + f_extra_sz;
-	gpreagg->pds_final = pds_final;
-
-	return 0;
+	return retval;
 }
 
 /*
@@ -4897,18 +4838,19 @@ static int
 gpupreagg_process_unified_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 {
 	GpuContext	   *gcontext = gpreagg->task.gcontext;
+	GpuPreAggSharedState *gpa_sstate = gpreagg->gpa_sstate;
 	GpuJoinSharedState *gj_sstate = gpreagg->gj_sstate;
 	kern_gpujoin   *kgjoin = gpreagg->kgjoin;
 	pgstrom_data_store *pds_src = gpreagg->pds_src;
 	kern_data_store *kds_dst_head;
 	kern_data_store *kds_slot_head = gpreagg->kds_slot_head;
 	CUfunction		kern_unified_main;
-	CUdeviceptr		devptr;
-	CUdeviceptr		m_gpreagg;
+	CUdeviceptr		devptr = 0UL;
+	CUdeviceptr		m_gpreagg = 0UL;
 	CUdeviceptr		m_kgjoin;
 	CUdeviceptr		m_kmrels;
 	CUdeviceptr		m_ojmaps;
-	CUdeviceptr		m_kds_src;
+	CUdeviceptr		m_kds_src = 0UL;
 	CUdeviceptr		m_kds_dst;
 	CUdeviceptr		m_kds_slot;
 	CUdeviceptr		m_ghash;
@@ -4917,7 +4859,7 @@ gpupreagg_process_unified_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 	CUresult		rc;
 	void		   *kern_args[10];
 	Size			length;
-	int				retval = 100001;
+	int				i, retval = 100001;
 
 	/* Load inner hash/heap buffer for GpuJoin */
 	Assert(gj_sstate != NULL && kgjoin != NULL);
@@ -4929,6 +4871,12 @@ gpupreagg_process_unified_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 	if (!gpupreagg_load_final_buffer(gpreagg, cuda_module,
 									 &m_kds_final, &m_fhash))
 		return retval;		/* retry later */
+
+	/*
+	 * Is it a dummy GpuTask?
+	 */
+	if (gpreagg->task_role == GpuPreAggTaskRole__Dummy)
+		goto check_terminator;
 
 	/* Lookup GPU kernel function */
 	rc = cuModuleGetFunction(&kern_unified_main, cuda_module,
@@ -4943,24 +4891,26 @@ gpupreagg_process_unified_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 			  GPUMEMALIGN(kds_slot_head->length) +			/* kds_slot */
 			  GPUMEMALIGN(offsetof(kern_global_hashslot,	/* ghash */
 									 hash_slot[gpreagg->kern.hash_size])));
-	if (gpreagg->with_nvme_strom)
+	if (pds_src)
 	{
-		rc = gpuMemAllocIOMap(gcontext,
-							  &m_kds_src,
-							  GPUMEMALIGN(pds_src->kds.length));
-		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
+		if (gpreagg->with_nvme_strom)
 		{
-			PDS_fillup_blocks(pds_src, gpreagg->task.peer_fdesc);
-			m_kds_src = 0UL;
-			gpreagg->with_nvme_strom = false;
-			length += GPUMEMALIGN(pds_src->kds.length);
+			rc = gpuMemAllocIOMap(gcontext,
+								  &m_kds_src,
+								  GPUMEMALIGN(pds_src->kds.length));
+			if (rc == CUDA_ERROR_OUT_OF_MEMORY)
+			{
+				PDS_fillup_blocks(pds_src, gpreagg->task.peer_fdesc);
+				m_kds_src = 0UL;
+				gpreagg->with_nvme_strom = false;
+				length += GPUMEMALIGN(pds_src->kds.length);
+			}
+			else if (rc != CUDA_SUCCESS)
+				werror("failed on gpuMemAllocIOMap: %s", errorText(rc));
 		}
-		else if (rc != CUDA_SUCCESS)
-			werror("failed on gpuMemAllocIOMap: %s", errorText(rc));
+		else
+			length += GPUMEMALIGN(pds_src->kds.length);
 	}
-	else
-		length += GPUMEMALIGN(pds_src->kds.length);
-
 	/* for unified GpuJoin */
 	length += GPUMEMALIGN(kgjoin->kresults_2_offset +
 						  kgjoin->kresults_2_offset -
@@ -4968,7 +4918,7 @@ gpupreagg_process_unified_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 	length += GPUMEMALIGN(kds_dst_head->length);
 
 	/* allocation of short term device memory */
-	rc = gpuMemAlloc(gcontext, &devptr, length);
+	rc = gpuMemAllocManaged(gcontext, &devptr, length, CU_MEM_ATTACH_GLOBAL);
 	if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		goto out_of_resource;
 	else if (rc != CUDA_SUCCESS)
@@ -4979,8 +4929,10 @@ gpupreagg_process_unified_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 	 */
 	m_gpreagg = devptr;
 	devptr += GPUMEMALIGN(KERN_GPUPREAGG_LENGTH(&gpreagg->kern));
-	if (gpreagg->with_nvme_strom)
-        Assert(m_kds_src != 0UL);
+	if (!pds_src)
+		m_kds_src = 0UL;
+	else if (gpreagg->with_nvme_strom)
+		Assert(m_kds_src != 0UL);
 	else
 	{
 		m_kds_src = devptr;
@@ -5106,25 +5058,183 @@ gpupreagg_process_unified_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuMemcpyDtoH: %s", errorText(rc));
 
-	if (gpreagg->kern.kerror.errcode != StromError_Success)
-		retval = 0;		/* carry the error status */
-	else
+	/*
+	 * Clear the error code if CPU fallback case.
+	 * Elsewhere, update run-time statistics.
+	 */
+	gpreagg->task.kerror = gpreagg->kern.kerror;
+	if (pgstrom_cpu_fallback_enabled &&
+		gpreagg->task.kerror.errcode == StromError_CpuReCheck)
 	{
-		/* Update run-time statistics (GpuJoin) */
-		gpujoinUpdateRunTimeStat(gj_sstate, gpreagg->kgjoin);
-		/* Update run-time statistics (GpuPreAgg) */
+		gpreagg->task.kerror.errcode = StromError_Success;
+		gpreagg->task.cpu_fallback = true;
+		pthreadMutexLock(&gpa_sstate->mutex);
+		gpa_sstate->had_cpu_fallback = true;
+		pthreadMutexUnlock(&gpa_sstate->mutex);
+	}
+	else if (gpreagg->task.kerror.errcode == StromError_Success)
+	{
+		gpujoinUpdateRunTimeStat(gpreagg->gj_sstate,
+								 gpreagg->kgjoin);
 		gpupreaggUpdateRunTimeStat(gpreagg->gpa_sstate,
 								   &gpreagg->kern);
-		retval = -1;	/* GpuTask will be released soon */
 	}
-	//TODO: Terminator checks
+
+	/*
+	 * Does this GpuTask need to perform as a terminator on this device?
+	 */
+check_terminator:
+	if (gpreagg->task.cpu_fallback)
+		retval = 0;		/* GpuTask will be sent back to the backend */
+	else
+	{
+		pthreadMutexLock(&gpa_sstate->mutex);
+		Assert(gpa_sstate->nr_tasks[gpuserv_cuda_dindex] > 0);
+		if (--gpa_sstate->nr_tasks[gpuserv_cuda_dindex] == 0 &&
+			gpa_sstate->outer_scan_done)
+		{
+			Assert(gpreagg->pds_final == NULL);
+			gpreagg->task_role = GpuPreAggTaskRole__GlobalTerminator;
+			for (i=0; i < numDevAttrs; i++)
+			{
+				if (gpa_sstate->nr_tasks[i] > 0)
+				{
+					gpreagg->task_role = GpuPreAggTaskRole__LocalTerminator;
+					break;
+				}
+			}
+			retval = 1;		/* re-execution as terminator on this device */
+
+			/* terminator needs no pds_src */
+			if (gpreagg->pds_src)
+				PDS_release(gpreagg->pds_src);
+			gpreagg->pds_src = NULL;
+		}
+		else
+		{
+			retval = -1;	/* GpuTask will be released soon */
+		}
+		pthreadMutexUnlock(&gpa_sstate->mutex);
+	}
 
 out_of_resource:
 	if (gpreagg->with_nvme_strom && m_kds_src != 0UL)
 		gpuMemFreeIOMap(gcontext, m_kds_src);
 	if (m_gpreagg != 0UL)
-        gpuMemFree(gcontext, m_gpreagg);
+		gpuMemFree(gcontext, m_gpreagg);
 	return retval;
+}
+
+/*
+ * gpupreagg_process_termination_task
+ */
+static int
+gpupreagg_process_termination_task(GpuPreAggTask *gpreagg,
+								   CUmodule cuda_module)
+{
+	GpuContext	   *gcontext = gpreagg->task.gcontext;
+	GpuPreAggSharedState *gpa_sstate = gpreagg->gpa_sstate;
+	pgstrom_data_store *pds_final;
+	kern_data_store *kds_final_head = gpa_sstate->kds_final_head;
+	CUdeviceptr		m_kds_final;
+	CUdeviceptr		m_kds_extra;
+	CUresult		rc;
+	cl_int			ncols = kds_final_head->ncols;
+	size_t			f_nitems;
+	size_t			f_extra_sz;
+	size_t			kds_length;
+
+	/*
+	 * allocation of the final buffer on host side
+	 */
+	pthreadMutexLock(&gpa_sstate->mutex);
+	f_nitems = gpa_sstate->f_nitems[gpuserv_cuda_dindex];
+	f_extra_sz = gpa_sstate->f_extra_sz[gpuserv_cuda_dindex];
+	m_kds_final = gpa_sstate->m_kds_final[gpuserv_cuda_dindex];
+	m_kds_extra = m_kds_final + ((size_t)kds_final_head->length -
+								 (size_t)f_extra_sz);
+	pthreadMutexUnlock(&gpa_sstate->mutex);
+
+	kds_length = KERN_DATA_STORE_SLOT_LENGTH(kds_final_head, f_nitems);
+	pds_final = dmaBufferAlloc(gcontext, (GPUMEMALIGN(kds_length) +
+										  GPUMEMALIGN(f_extra_sz)));
+	if (!pds_final)
+		return 100001;	/* out of memory; try it later */
+
+	pg_atomic_init_u32(&pds_final->refcnt, 1);
+	pds_final->nblocks_uncached = 0;
+	pds_final->ntasks_running = 0;
+	memcpy(&pds_final->kds, gpa_sstate->kds_final_head,
+		   offsetof(kern_data_store, colmeta[ncols]));
+	/*
+	 * fixup varlena datum on demand
+	 */
+	if (kds_final_head->has_notbyval)
+	{
+		hostptr_t	kds_baseptr = (hostptr_t)(&pds_final->kds) + kds_length;
+		CUfunction	kern_fixvar;
+		size_t		grid_size;
+		size_t		block_size;
+		void	   *kern_args[2];
+
+		/* Launch:
+		 * KERNEL_FUNCTION(void)
+		 * gpupreagg_fixup_varlena(kern_data_store *kds_final,
+		 *                         hostptr_t kds_baseptr)
+		 */
+		rc = cuModuleGetFunction(&kern_fixvar,
+								 cuda_module,
+								 "gpupreagg_fixup_varlena");
+		if (rc != CUDA_SUCCESS)
+			werror("failed on cuModuleGetFunction: %s", errorText(rc));
+
+		optimal_workgroup_size(&grid_size,
+							   &block_size,
+							   kern_fixvar,
+							   gpuserv_cuda_device,
+							   f_nitems,
+							   0, 0);
+		kern_args[0] = &m_kds_final;
+		kern_args[1] = &kds_baseptr;
+
+		rc = cuLaunchKernel(kern_fixvar,
+							grid_size, 1, 1,
+							block_size, 1, 1,
+							0,
+							NULL,
+							kern_args,
+							NULL);
+		if (rc != CUDA_SUCCESS)
+			werror("failed on cuLaunchKernel: %s", errorText(rc));
+	}
+	else
+	{
+		Assert(f_extra_sz == 0UL);
+	}
+
+	/* DMA Recv of the final buffer (earlier half) */
+	rc = cuMemcpyDtoH(&pds_final->kds,
+					  m_kds_final,
+					  kds_length);
+	if (rc != CUDA_SUCCESS)
+		werror("failed on cuMemcpyHtoD: %s", errorText(rc));
+
+	/* DMA Recv of the final buffer (extra part of SLOT format) */
+	if (f_extra_sz > 0)
+	{
+		rc = cuMemcpyDtoH((char *)(&pds_final->kds) + kds_length,
+						  m_kds_extra,
+						  f_extra_sz);
+		if (rc != CUDA_SUCCESS)
+			werror("failed on cuMemcpyHtoD: %s", errorText(rc));
+	}
+
+	/* final fixup of the final buffer */
+	pds_final->kds.hostptr = (hostptr_t)(&pds_final->kds.hostptr);
+	pds_final->kds.length = kds_length + f_extra_sz;
+	gpreagg->pds_final = pds_final;
+
+	return 0;
 }
 
 /*
@@ -5136,16 +5246,32 @@ gpupreagg_process_task(GpuTask *gtask, CUmodule cuda_module)
 	GpuPreAggTask  *gpreagg = (GpuPreAggTask *) gtask;
 	int		retval;
 
-	// TODO: if gj_sstate != NULL, gtask needs to kick GpuJoin+PreAgg
-	// unified kernel.
-
-	if (gpreagg->kern.reduction_mode == GPUPREAGG_ONLY_TERMINATION)
-		retval = gpupreagg_process_termination_task(gpreagg, cuda_module);
-	else if (!gpreagg->kgjoin)
-		retval = gpupreagg_process_reduction_task(gpreagg, cuda_module);
+	if (gpreagg->task_role == GpuPreAggTaskRole__Normal ||
+		gpreagg->task_role == GpuPreAggTaskRole__Dummy)
+	{
+		if (!gpreagg->kgjoin)
+			retval = gpupreagg_process_reduction_task(gpreagg, cuda_module);
+		else
+			retval = gpupreagg_process_unified_task(gpreagg, cuda_module);
+	}
 	else
-		retval = gpupreagg_process_unified_task(gpreagg, cuda_module);
-
+	{
+		Assert(gpreagg->task_role == GpuPreAggTaskRole__LocalTerminator ||
+			   gpreagg->task_role == GpuPreAggTaskRole__GlobalTerminator);
+		Assert(!gpreagg->pds_src);
+		if (gpreagg->kgjoin &&
+			gpujoinHasRightOuterJoin(gpreagg->gj_sstate) &&
+			gpreagg->task_role == GpuPreAggTaskRole__GlobalTerminator)
+		{
+			/* Run OUTER JOIN if needed */
+			retval = gpupreagg_process_unified_task(gpreagg, cuda_module);
+			if (retval > 0)
+				return retval;	/* retry */
+			/* no need to repeat OUTER JOIN again */
+			gpreagg->task_role = GpuPreAggTaskRole__LocalTerminator;
+		}
+		retval = gpupreagg_process_termination_task(gpreagg, cuda_module);
+	}
 	return retval;
 }
 

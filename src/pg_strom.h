@@ -857,6 +857,7 @@ extern bool gpujoinLoadInnerBuffer(GpuContext *gcontext,
 								   CUdeviceptr *p_m_kmrels,
 								   CUdeviceptr *p_m_ojmaps,
 								   kern_data_store **p_kds_dst_head);
+extern bool gpujoinHasRightOuterJoin(struct GpuJoinSharedState *gj_sstate);
 extern void gpujoinUpdateRunTimeStat(struct GpuJoinSharedState *gj_sstate,
 									 struct kern_gpujoin *kgjoin);
 extern void	pgstrom_init_gpujoin(void);

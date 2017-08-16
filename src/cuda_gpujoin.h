@@ -204,7 +204,6 @@ typedef struct
 	kern_resultbuf	   *kresults_dst;
 	cl_bool			   *outer_join_map;
 	cl_int				depth;
-	cl_int				cuda_index;
 	cl_uint				window_base;
 	cl_uint				window_size;
 } kern_join_args_t;
@@ -217,7 +216,6 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 					  kern_resultbuf *kresults_dst,
 					  cl_bool *outer_join_map,
 					  cl_int depth,
-					  cl_int cuda_index,
 					  cl_uint window_base,
 					  cl_uint window_size)
 {
@@ -328,7 +326,6 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 					  kern_resultbuf *kresults_dst,
 					  cl_bool *outer_join_map,
 					  cl_int depth,
-					  cl_int cuda_index,
 					  cl_uint window_base,
 					  cl_uint window_size)
 {
@@ -530,7 +527,6 @@ gpujoin_outer_nestloop(kern_gpujoin *kgjoin,
 					   kern_resultbuf *kresults_dst,
 					   cl_bool *outer_join_map,
 					   cl_int depth,
-					   cl_int cuda_index,
 					   cl_uint window_base,
 					   cl_uint window_size)
 {
@@ -625,7 +621,6 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 					   kern_resultbuf *kresults_dst,
 					   cl_bool *outer_join_map,
 					   cl_int depth,
-					   cl_int cuda_index,
 					   cl_uint window_base,
 					   cl_uint window_size)
 {
@@ -1399,7 +1394,6 @@ gpujoin_try_next_window(kern_gpujoin *kgjoin,
 	(argbuf)->kresults_dst = kresults_dst;		\
 	(argbuf)->outer_join_map = outer_join_map;	\
 	(argbuf)->depth = depth;					\
-	(argbuf)->cuda_index = cuda_index;			\
 	(argbuf)->window_base = window_base;		\
 	(argbuf)->window_size = window_size
 
@@ -1412,7 +1406,7 @@ gpujoin_main(kern_gpujoin *kgjoin,		/* in/out: misc stuffs */
 			 cl_bool *outer_join_map,	/* internal buffer */
 			 kern_data_store *kds_src,	/* in: outer source (may be NULL) */
 			 kern_data_store *kds_dst,	/* out: join results */
-			 cl_int cuda_index)			/* device index on the host side */
+			 cl_int needs_compaction)	/* in: true, if runs compaction */
 {
 	kern_parambuf	   *kparams = KERN_GPUJOIN_PARAMBUF(kgjoin);
 	kern_resultbuf	   *kresults_src = KERN_GPUJOIN_1ST_RESULTBUF(kgjoin);
@@ -1613,7 +1607,6 @@ retry_major:
 		 *                       kern_resultbuf *kresults_dst,
 		 *                       cl_bool *outer_join_map,
 		 *                       cl_int depth,
-		 *                       cl_int cuda_index,
 		 *                       cl_uint window_base,
 		 *                       cl_uint window_size)
 		 */
@@ -1711,7 +1704,6 @@ retry_major:
 			 *                        kern_resultbuf *kresults_dst,
 			 *                        cl_bool *outer_join_map,
 			 *                        cl_int depth,
-			 *                        cl_int cuda_index,
 			 *                        cl_uint window_base,
 			 *                        cl_uint window_size)
 			 *
@@ -1805,7 +1797,6 @@ retry_major:
 			 *                       kern_resultbuf *kresults_dst,
 			 *                       cl_bool *outer_join_map,
 			 *                       cl_int depth,
-			 *                       cl_int cuda_index,
 			 *                       cl_uint window_base,
 			 *                       cl_uint window_size);
 			 */
@@ -1897,9 +1888,12 @@ retry_major:
 			 * gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 			 *                        kern_data_store *kds,
 			 *                        kern_multirels *kmrels,
+			 *                        kern_resultbuf *kresults_src,
+			 *                        kern_resultbuf *kresults_dst,
 			 *                        cl_bool *outer_join_map,
 			 *                        cl_int depth,
-			 *                        cl_int cuda_index);
+			 *                        cl_uint window_base,
+			 *                        cl_uint window_size)
 			 */
 			if (exec_right_outer)
 			{
@@ -2196,13 +2190,18 @@ retry_major:
 	 * has an array head of index which points kern_tupitem stored from
 	 * the tail. So, compaction needs to adjust the index, prior to write
 	 * back to the CPU side.
+	 *
+	 * Also note that compaction is not necessary, if KDS_dst is directly
+	 * used as an input of another GPU based logic.
 	 */
-	kgjoin->result_nitems	= kds_dst->nitems;
-	kgjoin->result_usage	= kds_dst->usage;
-	pgstromLaunchDynamicKernel1((void *)gpujoin_results_compaction,
-								(kern_arg_t)(kds_dst),
-								(size_t)kds_dst->nitems, 0, 0);
-
+	if (needs_compaction)
+	{
+		kgjoin->result_nitems	= kds_dst->nitems;
+		kgjoin->result_usage	= kds_dst->usage;
+		pgstromLaunchDynamicKernel1((void *)gpujoin_results_compaction,
+									(kern_arg_t)(kds_dst),
+									(size_t)kds_dst->nitems, 0, 0);
+	}
 out:
 	kern_writeback_error_status(&kgjoin->kerror, kcxt.e);
 }

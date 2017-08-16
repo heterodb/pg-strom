@@ -26,7 +26,6 @@
 #define GPUPREAGG_LOCAL_REDUCTION		2
 #define GPUPREAGG_GLOBAL_REDUCTION		3
 #define GPUPREAGG_FINAL_REDUCTION		4
-#define GPUPREAGG_ONLY_TERMINATION	   99	/* used to urgent termination */
 #define GPUPREAGG_INVALID_REDUCTION  9999	/* reduction mode TBD */
 
 /*
@@ -1546,7 +1545,10 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 	/* Init kernel context */
 	INIT_KERNEL_CONTEXT(&kcxt, gpupreagg_main, kparams);
 	assert(get_global_size() == 1);	/* !!single thread!! */
-	assert(kgpreagg->reduction_mode != GPUPREAGG_ONLY_TERMINATION);
+	assert(kgpreagg->reduction_mode == GPUPREAGG_NOGROUP_REDUCTION	||
+		   kgpreagg->reduction_mode == GPUPREAGG_LOCAL_REDUCTION	||
+		   kgpreagg->reduction_mode == GPUPREAGG_GLOBAL_REDUCTION	||
+		   kgpreagg->reduction_mode == GPUPREAGG_FINAL_REDUCTION);
 
 	if (kgpreagg->final_reduction_in_progress)
 	{
