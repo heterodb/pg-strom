@@ -3682,8 +3682,10 @@ gpujoin_create_task(GpuJoinState *gjs,
 static GpuJoinTask *
 gpujoin_clone_task(GpuContext *gcontext, GpuJoinTask *pgjoin_old)
 {
+	GpuJoinSharedState *gj_sstate = pgjoin_old->gj_sstate;
 	GpuJoinTask	   *pgjoin_new;
 	Size			required;
+	int				i, nrels = gj_sstate->kern.nrels;
 
 	required = offsetof(GpuJoinTask, kern)
 		+ STROMALIGN(offsetof(kern_gpujoin,
@@ -3705,6 +3707,17 @@ gpujoin_clone_task(GpuContext *gcontext, GpuJoinTask *pgjoin_old)
 	pgjoin_new->pds_src = NULL;		/* caller should set */
 	pgjoin_new->pds_dst = NULL;		/* caller should set */
 
+	/* also reset jscale */
+	for (i=0; i <= nrels; i++)
+	{
+		kern_join_scale	   *jscale = pgjoin_new->kern.jscale;
+		cl_uint				nitems;
+
+		nitems = (i == 0 ? 0 : gj_sstate->inner_chunks[i-1]->kds.nitems);
+		jscale[i].window_base = 0;
+		jscale[i].window_size = nitems;
+		jscale[i].window_orig = 0;
+	}
 	return pgjoin_new;
 }
 

@@ -985,12 +985,16 @@ gpujoin_results_compaction(kern_data_store *kds_dst)
 	cl_uint	   *row_index = KERN_DATA_STORE_ROWINDEX(kds_dst);
 	size_t		head_sz = (KERN_DATA_STORE_HEAD_LENGTH(kds_dst) +
 						   STROMALIGN(sizeof(cl_uint) * kds_dst->nitems));
-	size_t		shift = STROMALIGN(kds_dst->length - kds_dst->usage) - head_sz;
+	size_t		shift;
 
+	shift = STROMALIGN_DOWN(kds_dst->length - kds_dst->usage) - head_sz;
 	if (get_global_id() < kds_dst->nitems)
 	{
-		assert(row_index[get_global_id()] >= head_sz + shift);
-		row_index[get_global_id()] -= shift;
+		//assert(row_index[get_global_id()] >= head_sz + shift);
+		if (row_index[get_global_id()] >= head_sz + shift)
+			row_index[get_global_id()] -= shift;
+		else
+			printf("gid=%u row_index[]=%u head_sz=%lu shift=%lu (length=%u usage=%u)\n", get_global_id(), row_index[get_global_id()], head_sz, shift, kds_dst->length, kds_dst->usage);
 	}
 }
 
