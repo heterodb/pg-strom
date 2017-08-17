@@ -4225,6 +4225,15 @@ gpupreagg_next_tuple_fallback(GpuPreAggState *gpas, GpuPreAggTask *gpreagg)
 	ExprDoneCond		is_done;
 	TupleTableSlot	   *slot;
 
+	/*
+	 * TODO: CPU fallback with unified GpuJoin + GpuPreAgg
+	 * - write back source PDS (if NVMe Strom)
+	 * - utilize GpuJoin code
+	 * - projection on GpuPreAgg side
+	 */
+	if (gpas->unified_gpujoin)
+		elog(ERROR, "CPU fallback with unified GpuJoin + GpuPreAgg is not implemented right now");
+
 	for (;;)
 	{
 		/* fetch a tuple from the data-store */

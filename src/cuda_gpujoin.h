@@ -990,11 +990,8 @@ gpujoin_results_compaction(kern_data_store *kds_dst)
 	shift = STROMALIGN_DOWN(kds_dst->length - kds_dst->usage) - head_sz;
 	if (get_global_id() < kds_dst->nitems)
 	{
-		//assert(row_index[get_global_id()] >= head_sz + shift);
-		if (row_index[get_global_id()] >= head_sz + shift)
-			row_index[get_global_id()] -= shift;
-		else
-			printf("gid=%u row_index[]=%u head_sz=%lu shift=%lu (length=%u usage=%u)\n", get_global_id(), row_index[get_global_id()], head_sz, shift, kds_dst->length, kds_dst->usage);
+		assert(row_index[get_global_id()] >= head_sz + shift);
+		row_index[get_global_id()] -= shift;
 	}
 }
 
