@@ -503,15 +503,25 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
  * it merges the result of other GPU devices and CPU fallback
  */
 KERNEL_FUNCTION(void)
-gpujoin_colocate_outer_join_map(kern_multirels *kmrels,
-								cl_bool *outer_join_map)
+gpujoin_colocate_outer_join_map(cl_uint *outer_join_map,
+								cl_uint  ojmap_length,
+								cl_int   cuda_dindex,
+								cl_int   cuda_ndevices)
 {
-	cl_uint		nitems = kmrels->ojmap_length / sizeof(cl_uint);
-	cl_uint	   *self_map = (cl_uint *)outer_join_map;
-	cl_uint	   *recv_map = (cl_uint *)((char *)outer_join_map +
-									   kmrels->ojmap_length);
-	if (get_global_id() < nitems)
-		self_map[get_global_id()] |= recv_map[get_global_id()];
+	size_t		nrooms = ojmap_length / sizeof(cl_uint);
+	cl_uint	   *dest_map = outer_join_map + cuda_dindex * nrooms;
+
+	assert(STROMALIGN(ojmap_length) == ojmap_length);
+	if (get_global_id() < nrooms)
+	{
+		cl_uint	i, map = 0;
+		for (i=0; i <= cuda_ndevices; i++)
+		{
+			map |= outer_join_map[get_global_id()];
+			outer_join_map += nrooms;
+		}
+		dest_map[get_global_id()] = map;
+	}
 }
 
 /*

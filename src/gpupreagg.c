@@ -4221,40 +4221,43 @@ gpupreagg_switch_task(GpuTaskState *gts, GpuTask *gtask)
 static TupleTableSlot *
 gpupreagg_next_tuple_fallback(GpuPreAggState *gpas, GpuPreAggTask *gpreagg)
 {
-	TupleTableSlot	   *slot;
 	ExprContext		   *econtext = gpas->gts.css.ss.ps.ps_ExprContext;
-	pgstrom_data_store *pds_src = gpreagg->pds_src;
 	ExprDoneCond		is_done;
+	TupleTableSlot	   *slot;
 
 	for (;;)
 	{
 		/* fetch a tuple from the data-store */
 		ExecClearTuple(gpas->outer_slot);
-		if (!PDS_fetch_tuple(gpas->outer_slot, pds_src, &gpas->gts))
+		if (!gpreagg->pds_src ||
+			!PDS_fetch_tuple(gpas->outer_slot,
+							 gpreagg->pds_src,
+							 &gpas->gts))
 		{
 			GpuPreAggSharedState *gpa_sstate = gpas->gpa_sstate;
-			int			i, dindex = gpas->gts.gcontext->gpuserv_id;
-
-			/* pds_src is no longer needed */
-			PDS_release(gpreagg->pds_src);
-			gpreagg->pds_src = NULL;
+			int			dindex = gpas->gts.gcontext->gpuserv_id;
+			bool		kick_dummy_task = false;
 
 			pthreadMutexLock(&gpa_sstate->mutex);
 			Assert(gpa_sstate->nr_tasks[dindex] > 0);
 			if (--gpa_sstate->nr_tasks[dindex] == 0 &&
 				gpa_sstate->outer_scan_done)
 			{
-				gpreagg->task_role = GpuPreAggTaskRole__GlobalTerminator;
-				for (i=0; i < numDevAttrs; i++)
+				if (gpreagg->pds_src)
 				{
-					gpreagg->task_role = GpuPreAggTaskRole__LocalTerminator;
-					break;
+					gpa_sstate->nr_tasks[dindex]++;
+					kick_dummy_task = true;
 				}
-				//FIXME: we have to kick terminator task
-				elog(NOTICE, "FIXME: terminator task must be kicked");
 			}
 			pthreadMutexUnlock(&gpa_sstate->mutex);
 
+			if (kick_dummy_task)
+			{
+				GpuTask *dummy = gpupreagg_create_task(gpas,
+													   gpreagg->gj_sstate,
+													   NULL, -1);
+				gpuservSendGpuTask(gpas->gts.gcontext, dummy);
+			}
 			return NULL;
 		}
 		econtext->ecxt_scantuple = gpas->outer_slot;
@@ -4918,7 +4921,7 @@ gpupreagg_process_unified_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 	length += GPUMEMALIGN(kds_dst_head->length);
 
 	/* allocation of short term device memory */
-	rc = gpuMemAllocManaged(gcontext, &devptr, length, CU_MEM_ATTACH_GLOBAL);
+	rc = gpuMemAlloc(gcontext, &devptr, length);
 	if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		goto out_of_resource;
 	else if (rc != CUDA_SUCCESS)

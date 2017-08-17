@@ -27,7 +27,7 @@ PG_VERSION_NUM=$(shell $(PG_CONFIG) --version | awk '{print $$NF}'	\
 # available platform versions
 PG_MIN_VERSION=9.6.0
 PG_MAX_VERSION=
-CUDA_MIN_VERSION=7.0
+CUDA_MIN_VERSION=8.0
 CUDA_MAX_VERSION=
 
 PG_MIN_VERSION_NUM=$(shell echo $(PG_MIN_VERSION) | awk '{print $$NF}'	\
