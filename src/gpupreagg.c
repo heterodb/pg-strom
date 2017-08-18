@@ -4306,99 +4306,6 @@ gpupreagg_next_tuple(GpuTaskState *gts)
 	return slot;
 }
 
-#ifdef NOT_USED
-/*
- * adjust_final_buffer_size
- *
- * It calculates @nrooms/@extra_sz of the pds_final buffer to be allocated,
- * according to the run-time statistics or plan estimation if no statistics.
- *
- * NOTE: This function shall be called under the @gpa_sstate->lock
- */
-static void
-adjust_final_buffer_size(GpuPreAggSharedState *gpa_sstate,
-						 size_t *p_key_dist_salt,
-						 size_t *p_nrooms,
-						 size_t *p_extra_sz,
-						 size_t *p_hashsize)
-{
-	size_t		curr_ngroups;
-	size_t		curr_nrows_in;
-	size_t		head_sz;
-	size_t		unit_sz;
-	size_t		length;
-	size_t		f_key_dist_salt;
-	size_t		f_nrooms;
-	size_t		f_extra_sz;
-	double		alpha;
-
-	/*
-	 * If we have no run-time statistics, all we can do is relying on
-	 * the plan time estimation.
-	 * Elsewhere, we assume number of groups grows up according to:
-	 *   (ngroups) = A * ln(nrows_in)
-	 * We can determine "A" by the statistics, 
-	 */
-	if (gpa_sstate->exec_nrows_in < 1000)
-		curr_ngroups = gpa_sstate->plan_ngroups;
-	else
-	{
-		alpha = ((double)gpa_sstate->exec_ngroups
-		   / log((double)gpa_sstate->exec_nrows_in));
-
-		if (gpa_sstate->exec_nrows_in < gpa_sstate->plan_nrows_in / 2)
-			curr_nrows_in = gpa_sstate->plan_nrows_in;
-		else
-			curr_nrows_in = 2 * gpa_sstate->exec_nrows_in;
-
-		curr_ngroups = (size_t)(alpha * log((double)curr_nrows_in));
-	}
-
-	/* determine the unit size of extra buffer */
-	if (gpa_sstate->exec_ngroups < 100)
-		f_extra_sz = gpa_sstate->plan_extra_sz;
-	else
-	{
-		f_extra_sz = (gpa_sstate->exec_extra_sz +
-					  gpa_sstate->exec_ngroups - 1) / gpa_sstate->exec_ngroups;
-		f_extra_sz = Max(f_extra_sz, gpa_sstate->plan_extra_sz);
-	}
-
-	/* update key_dist_salt */
-	if (curr_ngroups < (devBaselineMaxThreadsPerBlock / 5))
-	{
-		f_key_dist_salt = devBaselineMaxThreadsPerBlock / (5 * curr_ngroups);
-		f_key_dist_salt = Max(f_key_dist_salt, 1);
-	}
-	else
-		f_key_dist_salt = 1;
-
-	/* f_nrooms will have 250% of the nrooms for the estimated ngroups */
-	f_nrooms = (double)(curr_ngroups * f_key_dist_salt) * 2.5 + 200.0;
-	head_sz = KDS_CALCULATE_HEAD_LENGTH(gpa_sstate->f_ncols);
-	unit_sz = (STROMALIGN((sizeof(Datum) +
-						   sizeof(char)) * gpa_sstate->f_ncols) +
-			   STROMALIGN(f_extra_sz));
-	length = head_sz + unit_sz * f_nrooms;
-
-	/*
-	 * Expand nrooms if estimated length of the kds_final is small,
-	 * because planner may estimate the number groups smaller than actual.
-	 */
-	if (length < pgstrom_chunk_size() / 2)
-		f_nrooms = (pgstrom_chunk_size() - head_sz) / unit_sz;
-	else if (length < pgstrom_chunk_size())
-		f_nrooms = (2 * pgstrom_chunk_size() - head_sz) / unit_sz;
-	else if (length < 3 * pgstrom_chunk_size())
-		f_nrooms = (3 * pgstrom_chunk_size() - head_sz) / unit_sz;
-
-	*p_key_dist_salt = f_key_dist_salt;
-	*p_nrooms = f_nrooms;
-	*p_extra_sz = f_extra_sz;
-	*p_hashsize = 2 * f_nrooms;
-}
-#endif	//NOT_USED
-
 /*
  * gpupreagg_alloc_final_buffer
  */
@@ -4533,7 +4440,7 @@ gpupreagg_load_final_buffer(GpuPreAggTask *gpreagg,
 		/*
 		 * Also determine the reduction policy
 		 */
-		if (gpreagg->kern.reduction_mode == GPUPREAGG_INVALID_REDUCTION)
+		if (gpreagg->kern.reduction_mode != GPUPREAGG_INVALID_REDUCTION)
 		{
 			cl_double	plan_ngroups = (double)gpa_sstate->plan_ngroups;
 			cl_double	exec_ngroups = (double)gpa_sstate->f_nitems[gpuserv_cuda_dindex];
@@ -4554,10 +4461,6 @@ gpupreagg_load_final_buffer(GpuPreAggTask *gpreagg,
 				gpreagg->kern.reduction_mode = GPUPREAGG_GLOBAL_REDUCTION;
 			else
 				gpreagg->kern.reduction_mode = GPUPREAGG_FINAL_REDUCTION;
-		}
-		else
-		{
-			Assert(gpreagg->kern.reduction_mode==GPUPREAGG_NOGROUP_REDUCTION);
 		}
 	}
 	pthreadMutexUnlock(&gpa_sstate->mutex);

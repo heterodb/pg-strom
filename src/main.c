@@ -46,10 +46,7 @@ bool		pgstrom_debug_kernel_source;
 bool		pgstrom_bulkexec_enabled;
 bool		pgstrom_cpu_fallback_enabled;
 int			pgstrom_max_async_tasks;
-double		pgstrom_num_threads_margin;
-double		pgstrom_chunk_size_margin;
 static int	pgstrom_chunk_size_kb;
-static int	pgstrom_chunk_limit_kb;
 
 /* cost factors */
 double		pgstrom_gpu_setup_cost;
@@ -66,13 +63,6 @@ Size
 pgstrom_chunk_size(void)
 {
 	return ((Size)pgstrom_chunk_size_kb) << 10;
-}
-
-/* pg_strom.chunk_size_limit */
-Size
-pgstrom_chunk_size_limit(void)
-{
-	return ((Size)pgstrom_chunk_limit_kb) << 10;
 }
 
 static void
@@ -125,52 +115,17 @@ pgstrom_init_misc_guc(void)
 							PGC_USERSET,
 							GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
-#ifdef NOT_USED
-	/* maximum number of GpuTask can concurrently executed */
-	DefineCustomIntVariable("pg_strom.min_async_tasks",
-				"Minimum guarantee for number of concurrent tasks per process",
-							NULL,
-							&pgstrom_min_async_tasks,
-							4,
-							1,
-							Max(pgstrom_max_async_tasks/4, 4),
-							PGC_USERSET,
-							GUC_NOT_IN_SAMPLE,
-							NULL, NULL, NULL);
-#endif
 	/* default length of pgstrom_data_store */
 	DefineCustomIntVariable("pg_strom.chunk_size",
 							"default size of pgstrom_data_store",
 							NULL,
 							&pgstrom_chunk_size_kb,
-							32768 - (2 * BLCKSZ / 1024),	/* almost 32MB */
+							65536 - (2 * BLCKSZ / 1024),	/* almost 64MB */
 							4096,
 							MAX_KILOBYTES,
 							PGC_INTERNAL,
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
 							NULL, NULL, NULL);
-	/* maximum length of pgstrom_data_store */
-	DefineCustomIntVariable("pg_strom.chunk_limit",
-							"limit size of pgstrom_data_store",
-							NULL,
-							&pgstrom_chunk_limit_kb,
-							5 * pgstrom_chunk_size_kb,
-							4096,
-							MAX_KILOBYTES,
-							PGC_INTERNAL,
-							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
-							NULL, NULL, NULL);
-	/* factor for margin of buffer size */
-	DefineCustomRealVariable("pg_strom.chunk_size_margin",
-							 "margin of chunk size if not predictable exactly",
-							 NULL,
-							 &pgstrom_chunk_size_margin,
-							 1.25,
-							 1.00,
-							 DBL_MAX,
-							 PGC_USERSET,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
 	/* cost factor for Gpu setup */
 	DefineCustomRealVariable("pg_strom.gpu_setup_cost",
 							 "Cost to setup GPU device to run",
@@ -321,9 +276,6 @@ pgstrom_dummy_create_scan_state(CustomScan *cscan)
  * pgstrom_post_planner
  *
  * remove 'dummy' custom scan node.
- *
- *
- *
  */
 static void
 pgstrom_post_planner_recurse(PlannedStmt *pstmt, Plan **p_plan)
