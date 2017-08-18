@@ -474,15 +474,6 @@ extern void gpuservSendGpuMemFree(GpuContext *gcontext, CUdeviceptr devptr);
 extern void gpuservSendIOMapMemFree(GpuContext *gcontext, CUdeviceptr devptr);
 extern void pgstrom_init_gpu_server(void);
 
-extern pg_atomic_uint64 tv_gpuserv_debug1;
-extern pg_atomic_uint64 tv_gpuserv_debug2;
-extern pg_atomic_uint64 tv_gpuserv_debug3;
-extern pg_atomic_uint64 tv_gpuserv_debug4;
-extern pg_atomic_uint64 tv_gpuserv_debug5;
-extern pg_atomic_uint64 tv_gpuserv_debug6;
-extern pg_atomic_uint64 tv_gpuserv_debug7;
-extern pg_atomic_uint64 tv_gpuserv_debug8;
-
 /*
  * service routines for worker thread handling
  */

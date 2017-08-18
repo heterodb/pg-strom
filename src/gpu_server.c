@@ -134,19 +134,10 @@ static pg_atomic_uint32	gpuserv_worker_nthreads;
 __thread bool			gpuserv_is_worker_context = false;
 __thread sigjmp_buf	   *gpuserv_worker_exception_stack = NULL;
 
-/* for debug */
-pg_atomic_uint64 tv_gpuserv_debug1;
-pg_atomic_uint64 tv_gpuserv_debug2;
-pg_atomic_uint64 tv_gpuserv_debug3;
-pg_atomic_uint64 tv_gpuserv_debug4;
-pg_atomic_uint64 tv_gpuserv_debug5;
-pg_atomic_uint64 tv_gpuserv_debug6;
-pg_atomic_uint64 tv_gpuserv_debug7;
-pg_atomic_uint64 tv_gpuserv_debug8;
-
 /*
  * static functions
  */
+static void gpuserv_wakeup_workers(void);
 static void gpuservSendCommand(GpuContext *gcontext, GpuServCommand *cmd);
 static void	pgstrom_cuda_profiler_init(void);
 static void	pgstrom_cuda_profiler_update(void);
@@ -1178,6 +1169,10 @@ gpuserv_try_run_pending_task(long *p_timeout)
 	}
 	memset(&gtask->chain, 0, sizeof(dlist_node));
 	SpinLockRelease(&session_tasks_lock);
+	/*
+	 * XXX
+	 */
+	gpuserv_wakeup_workers();
 #ifdef PGSTROM_DEBUG
 	gettimeofday(&tv, NULL);
 	gtask->send_delay = (1000000 * tv.tv_sec + tv.tv_usec) -
@@ -1526,14 +1521,6 @@ gpuservEventLoop(void)
 {
 	WaitEventSet   *wait_events;
 	long			timeout = 5000;		/* wake up per 5 seconds */
-	uint64			tv_debug1	__attribute__((unused));
-	uint64			tv_debug2	__attribute__((unused));
-	uint64			tv_debug3	__attribute__((unused));
-	uint64			tv_debug4	__attribute__((unused));
-	uint64			tv_debug5	__attribute__((unused));
-	uint64			tv_debug6	__attribute__((unused));
-	uint64			tv_debug7	__attribute__((unused));
-	uint64			tv_debug8	__attribute__((unused));
 
 	memset(&worker_exception_data, 0, sizeof(worker_exception_data));
 	SpinLockInit(&worker_exception_data.lock);
@@ -1555,16 +1542,6 @@ gpuservEventLoop(void)
 	elog(LOG, "PG-Strom GPU Server is now ready on GPU-%d %s",
 		 devAttrs[gpuserv_cuda_dindex].DEV_ID,
 		 devAttrs[gpuserv_cuda_dindex].DEV_NAME);
-
-	/* init debug counter */
-	pg_atomic_init_u64(&tv_gpuserv_debug1, 0);
-	pg_atomic_init_u64(&tv_gpuserv_debug2, 0);
-	pg_atomic_init_u64(&tv_gpuserv_debug3, 0);
-	pg_atomic_init_u64(&tv_gpuserv_debug4, 0);
-	pg_atomic_init_u64(&tv_gpuserv_debug5, 0);
-	pg_atomic_init_u64(&tv_gpuserv_debug6, 0);
-	pg_atomic_init_u64(&tv_gpuserv_debug7, 0);
-	pg_atomic_init_u64(&tv_gpuserv_debug8, 0);
 
 	for (;;)
 	{
@@ -1612,30 +1589,18 @@ gpuservEventLoop(void)
 			npolls++;
 		}
 		pg_atomic_fetch_sub_u32(&gpuserv_worker_npolls, 1);
+#if 0
+		do {
+			uint32_t	num_epolls;
+			uint32_t	num_threads;
 
-		tv_debug1 = pg_atomic_read_u64(&tv_gpuserv_debug1);
-		tv_debug2 = pg_atomic_read_u64(&tv_gpuserv_debug2);
-		tv_debug3 = pg_atomic_read_u64(&tv_gpuserv_debug3);
-		tv_debug4 = pg_atomic_read_u64(&tv_gpuserv_debug4);
-		tv_debug5 = pg_atomic_read_u64(&tv_gpuserv_debug5);
-		tv_debug6 = pg_atomic_read_u64(&tv_gpuserv_debug6);
-		tv_debug7 = pg_atomic_read_u64(&tv_gpuserv_debug7);
-		tv_debug8 = pg_atomic_read_u64(&tv_gpuserv_debug8);
-		if (tv_debug1 || tv_debug2 || tv_debug3 || tv_debug4 ||
-			tv_debug5 || tv_debug6 || tv_debug7 || tv_debug8)
-		{
-			fprintf(stderr,
-					"tv_debug: %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f\n",
-					(double)tv_debug1 / 1000000.0,
-					(double)tv_debug2 / 1000000.0,
-					(double)tv_debug3 / 1000000.0,
-					(double)tv_debug4 / 1000000.0,
-					(double)tv_debug5 / 1000000.0,
-					(double)tv_debug6 / 1000000.0,
-					(double)tv_debug7 / 1000000.0,
-					(double)tv_debug8 / 1000000.0);
-		}
+			num_epolls = pg_atomic_read_u32(&gpuserv_worker_npolls);
+			num_threads = pg_atomic_read_u32(&gpuserv_worker_nthreads);
 
+			fprintf(stderr, "active: %u, wait: %u\n",
+					num_threads - num_epolls, num_epolls);
+		} while(0);
+#endif
 		/*
 		 * Try to release free device memory if GPU server is relaxed.
 		 */
