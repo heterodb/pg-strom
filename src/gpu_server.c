@@ -1419,9 +1419,10 @@ gpuservWorkerMain(void)
 
 				if (events & EPOLLIN)
 					gpuservRecvCommands(gcontext, &peer_sock_closed);
-				else
+				if (events & ~EPOLLIN)
 				{
-					wnotice("peer socket was closed by event %08x", events);
+					wnotice("client socket %d was closed by event %08x",
+							sockfd, events);
 					peer_sock_closed = true;
 				}
 
@@ -1449,8 +1450,8 @@ gpuservWorkerMain(void)
 			}
 			else
 			{
-				werror("epoll reported event on unknown socket: %08x %d",
-					   events, sockfd);
+				wnotice("epoll_wait(2) reported event %08x on socket %d but might be closed already",
+						events, sockfd);
 			}
 		}
 		else if (nevents == 0 && timeout > 0)

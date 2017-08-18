@@ -5652,7 +5652,6 @@ __gpujoinLoadInnerBuffer(GpuContext *gcontext, GpuJoinSharedState *gj_sstate)
 			return false;
 		werror("failed on gpuMemAlloc: %s", errorText(rc));
 	}
-	wnotice("ojmap_length = %zu", (size_t)gj_sstate->kern.ojmap_length);
 	if (gj_sstate->kern.ojmap_length > 0)
 		m_ojmaps = m_kmrels + gj_sstate->total_length;
 
