@@ -4440,7 +4440,7 @@ gpupreagg_load_final_buffer(GpuPreAggTask *gpreagg,
 		/*
 		 * Also determine the reduction policy
 		 */
-		if (gpreagg->kern.reduction_mode != GPUPREAGG_INVALID_REDUCTION)
+		if (gpreagg->kern.reduction_mode != GPUPREAGG_NOGROUP_REDUCTION)
 		{
 			cl_double	plan_ngroups = (double)gpa_sstate->plan_ngroups;
 			cl_double	exec_ngroups = (double)gpa_sstate->f_nitems[gpuserv_cuda_dindex];

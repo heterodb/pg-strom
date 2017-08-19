@@ -1835,7 +1835,7 @@ pgstrom_cuda_profiler_update(void)
 			rc = cuProfilerStop();
 			if (rc != CUDA_SUCCESS)
 				elog(ERROR, "failed on cuProfilerStop: %s", errorText(rc));
-			gpuserv_cuda_profiler = 1;
+			gpuserv_cuda_profiler = 0;
 		}
 	}
 }

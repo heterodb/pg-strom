@@ -2421,9 +2421,10 @@ gpuscan_create_task(GpuScanState *gss,
 	else
 	{
 		/* we cannot know exact number of tuples unless scans block actually */
-		ntuples = (pgstrom_chunk_size_margin *
-				   (double)pds_src->kds.nrooms *
-				   (double)pds_src->kds.nrows_per_block);
+		/* so, add 50% of extra margin */
+		/* XXX - it shall be replaced with on-demand allocation logic */
+		ntuples = ((double)pds_src->kds.nrooms *
+				   (double)pds_src->kds.nrows_per_block) * 1.50;
 	}
 
 	/*
