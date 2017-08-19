@@ -4332,8 +4332,7 @@ gpupreagg_alloc_final_buffer(GpuPreAggTask *gpreagg,
 							 hash_slot[f_hashlimit]));
 	rc = gpuMemAllocManagedRaw(gcontext,
 							   &m_kds_final,
-							   length,
-							   CU_MEM_ATTACH_GLOBAL);
+							   length);
 	if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		return false;
 	else if (rc != CUDA_SUCCESS)
