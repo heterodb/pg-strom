@@ -441,10 +441,17 @@ extern void pgstrom_init_gpu_context(void);
  */
 extern Size gpuMemMaxAllocSize(void);
 extern CUresult	gpuMemAlloc(GpuContext *gcontext,
-							CUdeviceptr *p_devptr, size_t bytesize);
-extern CUresult gpuMemAllocManaged(GpuContext *gcontext,
-								   CUdeviceptr *p_devptr, size_t bytesize,
-								   int flags);
+							CUdeviceptr *p_devptr,
+							size_t bytesize);
+extern CUresult	gpuMemAllocManaged(GpuContext *gcontext,
+								   CUdeviceptr *p_devptr,
+								   size_t bytesize);
+extern CUresult gpuMemAllocRaw(GpuContext *gcontext,
+							   CUdeviceptr *p_devptr,
+							   size_t bytesize);
+extern CUresult gpuMemAllocManagedRaw(GpuContext *gcontext,
+									  CUdeviceptr *p_devptr,
+									  size_t bytesize);
 extern CUresult gpuMemRetain(GpuContext *gcontext, CUdeviceptr devptr);
 extern CUresult	gpuMemFree(GpuContext *gcontext, CUdeviceptr devptr);
 extern CUresult gpuMemFreeExtra(void *extra, CUdeviceptr devptr);

@@ -2988,11 +2988,11 @@ gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 		length += GPUMEMALIGN(pds_src->kds.length);
 	if (pds_dst)
 		length += GPUMEMALIGN(pds_dst->kds.length);
-	rc = gpuMemAlloc(gtask->gcontext, &m_gpuscan, length);
+	rc = gpuMemAllocManaged(gtask->gcontext, &m_gpuscan, length);
 	if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		goto out_of_resource;
 	else if (rc != CUDA_SUCCESS)
-		werror("failed on gpuMemAlloc: %s", errorText(rc));
+		werror("failed on gpuMemAllocManaged: %s", errorText(rc));
 
 	if (!gscan->with_nvme_strom)
 	{

@@ -4330,14 +4330,14 @@ gpupreagg_alloc_final_buffer(GpuPreAggTask *gpreagg,
 	length = GPUMEMALIGN(kds_final_head->length) +
 		GPUMEMALIGN(offsetof(kern_global_hashslot,
 							 hash_slot[f_hashlimit]));
-	rc = gpuMemAllocManaged(gcontext,
-							&m_kds_final,
-							length,
-							CU_MEM_ATTACH_GLOBAL);
+	rc = gpuMemAllocManagedRaw(gcontext,
+							   &m_kds_final,
+							   length,
+							   CU_MEM_ATTACH_GLOBAL);
 	if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		return false;
 	else if (rc != CUDA_SUCCESS)
-		werror("failed on gpuMemAllocManaged: %s", errorText(rc));
+		werror("failed on gpuMemAllocManagedRaw: %s", errorText(rc));
 	m_fhash = m_kds_final + GPUMEMALIGN(kds_final_head->length);
 
 	STROM_TRY();
@@ -4569,11 +4569,11 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 	else
 		length += GPUMEMALIGN(pds_src->kds.length);
 
-	rc = gpuMemAlloc(gcontext, &devptr, length);
+	rc = gpuMemAllocManaged(gcontext, &devptr, length);
 	if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		goto out_of_resource;
 	else if (rc != CUDA_SUCCESS)
-		werror("failed on gpuMemAlloc: %s", errorText(rc));
+		werror("failed on gpuMemAllocManaged: %s", errorText(rc));
 
 	m_gpreagg = devptr;
 	devptr += GPUMEMALIGN(KERN_GPUPREAGG_LENGTH(&gpreagg->kern));
@@ -4833,11 +4833,11 @@ gpupreagg_process_unified_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 	length += GPUMEMALIGN(kds_dst_head->length);
 
 	/* allocation of short term device memory */
-	rc = gpuMemAlloc(gcontext, &devptr, length);
+	rc = gpuMemAllocManaged(gcontext, &devptr, length);
 	if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		goto out_of_resource;
 	else if (rc != CUDA_SUCCESS)
-		werror("failed on gpuMemAlloc: %s", errorText(rc));
+		werror("failed on gpuMemAllocManaged: %s", errorText(rc));
 
 	/*
 	 * OK, kick GpuJoin + GpuPreAgg unified kernel

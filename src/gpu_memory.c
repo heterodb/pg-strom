@@ -53,6 +53,7 @@ typedef struct
 	dlist_node		segment_chain;		/* link to active/inactive list */
 	CUdeviceptr		m_segment;
 	cl_int			num_total_chunks;	/* length of gpumem_chunks[] */
+	cl_bool			is_managed_memory;	/* true, if managed memory segment */
 	/* extra attributes for i/o mapped memory */
 	CUipcMemHandle	cuda_mhandle;
 	unsigned long	iomap_handle;
@@ -248,11 +249,115 @@ GpuMemSegmentFree(GpuMemSegment *gm_seg, CUdeviceptr deviceptr)
 	return CUDA_SUCCESS;
 }
 
+
 /*
- * gpuMemAlloc
+ * gpuMemAllocCommonRaw
+ */
+static inline CUresult
+gpuMemAllocCommonRaw(bool is_managed_memory,
+					 GpuContext *gcontext,
+					 CUdeviceptr *p_deviceptr,
+					 size_t bytesize)
+{
+	GpuMemLargeChunk *lchunk;
+	CUdeviceptr		m_deviceptr;
+	CUresult		rc, __rc;
+	char		   *extra;
+	pg_crc32		crc;
+	int				index;
+
+	lchunk = calloc(1, sizeof(GpuMemLargeChunk));
+	if (!lchunk)
+		return CUDA_ERROR_OUT_OF_MEMORY;
+	Assert(PointerIsAligned(lchunk, int));
+
+	/* device memory allocation */
+	if (!is_managed_memory)
+	{
+		rc = cuMemAlloc(&m_deviceptr, bytesize);
+		if (rc != CUDA_SUCCESS)
+			goto error_1;
+	}
+	else
+	{
+		rc = cuMemAllocManaged(&m_deviceptr, bytesize, CU_MEM_ATTACH_GLOBAL);
+		if (rc != CUDA_SUCCESS)
+			goto error_1;
+
+		rc = cuMemAdvise(m_deviceptr, bytesize,
+						 CU_MEM_ADVISE_SET_PREFERRED_LOCATION,
+						 gpuserv_cuda_device);
+		if (rc != CUDA_SUCCESS)
+			goto error_2;
+		rc = cuMemAdvise(m_deviceptr, bytesize,
+						 CU_MEM_ADVISE_SET_ACCESSED_BY,
+						 gpuserv_cuda_device);
+		if (rc != CUDA_SUCCESS)
+			goto error_2;
+	}
+	lchunk->m_deviceptr = m_deviceptr;
+	lchunk->refcnt = 1;
+
+	/* least 1bit is a flag to indicate GpuMemLargeChunk */
+	extra = (char *)(((uintptr_t)lchunk) | 1UL);
+	if (!trackGpuMem(gcontext, m_deviceptr, extra))
+	{
+		rc = CUDA_ERROR_OUT_OF_MEMORY;
+		goto error_2;
+	}
+	/* track this large chunk */
+	INIT_LEGACY_CRC32(crc);
+	COMP_LEGACY_CRC32(crc, &m_deviceptr, sizeof(CUdeviceptr));
+	FIN_LEGACY_CRC32(crc);
+	index = crc % GPUMEM_LARGECHUNK_NSLOTS;
+
+	SpinLockAcquire(&gpumem_largechunk_lock);
+	dlist_push_head(&gpumem_largechunk_slot[index], &lchunk->chain);
+	SpinLockRelease(&gpumem_largechunk_lock);
+
+	*p_deviceptr = m_deviceptr;
+
+	return CUDA_SUCCESS;
+
+error_2:
+	__rc = cuMemFree(m_deviceptr);
+	if (__rc != CUDA_SUCCESS)
+		wnotice("failed on cuMemFree: %s", errorText(rc));
+error_1:
+	free(lchunk);
+	return rc;
+}
+
+/*
+ * gpuMemAllocRaw - simple wrapper for cuMemAlloc
  */
 CUresult
-gpuMemAlloc(GpuContext *gcontext, CUdeviceptr *p_deviceptr, size_t bytesize)
+gpuMemAllocRaw(GpuContext *gcontext,
+			   CUdeviceptr *p_deviceptr,
+			   size_t bytesize)
+{
+	return gpuMemAllocCommonRaw(false, gcontext, p_deviceptr, bytesize);
+}
+
+/*
+ * gpuMemAllocManagedRaw - simple wrapper for cuMemAllocManaged
+ */
+CUresult
+gpuMemAllocManagedRaw(GpuContext *gcontext,
+					  CUdeviceptr *p_deviceptr,
+					  size_t bytesize)
+{
+	return gpuMemAllocCommonRaw(true, gcontext, p_deviceptr, bytesize);
+}
+
+/*
+ * gpuMemAllocCommon
+ */
+static inline CUresult
+gpuMemAllocCommon(cl_bool is_managed_memory,
+				  GpuContext *gcontext,
+				  CUdeviceptr *p_deviceptr,
+				  size_t bytesize)
 {
 	bool			has_exclusive_lock = false;
 	GpuMemSegment  *gm_seg;
@@ -269,8 +374,10 @@ gpuMemAlloc(GpuContext *gcontext, CUdeviceptr *p_deviceptr, size_t bytesize)
 	if (mclass < GPUMEM_CHUNKSZ_MIN_BIT)
 		mclass = GPUMEM_CHUNKSZ_MIN_BIT;
 	else if (mclass > GPUMEM_SEGMENTSZ_BIT)
-		return gpuMemAllocManaged(gcontext, p_deviceptr, bytesize,
-								  CU_MEM_ATTACH_GLOBAL);
+		return gpuMemAllocCommonRaw(is_managed_memory,
+									gcontext,
+									p_deviceptr,
+									bytesize);
 
 	pthreadRWLockReadLock(&gpumem_segment_rwlock);
 retry:
@@ -278,6 +385,9 @@ retry:
 	dlist_foreach(iter, &gpumem_segment_list)
 	{
 		gm_seg = dlist_container(GpuMemSegment, segment_chain, iter.cur);
+
+		if (is_managed_memory != gm_seg->is_managed_memory)
+			continue;
 
 		SpinLockAcquire(&gm_seg->lock);
 		for (i=mclass; i <= GPUMEM_SEGMENTSZ_BIT; i++)
@@ -319,26 +429,37 @@ retry:
 		goto error0;
 	}
 
-	rc = cuMemAllocManaged(&m_segment, GPUMEM_SEGMENTSZ,
-						   CU_MEM_ATTACH_GLOBAL);
-	if (rc != CUDA_SUCCESS)
-		goto error1;
+	/* device memory allocation */
+	if (!is_managed_memory)
+	{
+		rc = cuMemAlloc(&m_segment, GPUMEM_SEGMENTSZ);
+		if (rc != CUDA_SUCCESS)
+			goto error1;
+	}
+	else
+	{
+		rc = cuMemAllocManaged(&m_segment, GPUMEM_SEGMENTSZ,
+							   CU_MEM_ATTACH_GLOBAL);
+		if (rc != CUDA_SUCCESS)
+			goto error1;
 
-	rc = cuMemAdvise(m_segment, GPUMEM_SEGMENTSZ,
-					 CU_MEM_ADVISE_SET_PREFERRED_LOCATION,
-					 gpuserv_cuda_device);
-	if (rc != CUDA_SUCCESS)
-		goto error2;
-	rc = cuMemAdvise(m_segment, GPUMEM_SEGMENTSZ,
-					 CU_MEM_ADVISE_SET_ACCESSED_BY,
-					 gpuserv_cuda_device);
-	if (rc != CUDA_SUCCESS)
-		goto error2;
+		rc = cuMemAdvise(m_segment, GPUMEM_SEGMENTSZ,
+						 CU_MEM_ADVISE_SET_PREFERRED_LOCATION,
+						 gpuserv_cuda_device);
+		if (rc != CUDA_SUCCESS)
+			goto error2;
+		rc = cuMemAdvise(m_segment, GPUMEM_SEGMENTSZ,
+						 CU_MEM_ADVISE_SET_ACCESSED_BY,
+						 gpuserv_cuda_device);
+		if (rc != CUDA_SUCCESS)
+			goto error2;
+	}
 	/*
 	 * OK, create a new device memory segment
 	 */
 	gm_seg->m_segment			= m_segment;
 	gm_seg->num_total_chunks	= nchunks;
+	gm_seg->is_managed_memory	= is_managed_memory;
 	SpinLockInit(&gm_seg->lock);
 	gm_seg->num_active_chunks = 0;
 	for (i=0; i <= GPUMEM_CHUNKSZ_MAX_BIT; i++)
@@ -363,70 +484,25 @@ error0:
 }
 
 /*
- * gpuMemAllocManaged - device memory allocation for individual chunks
+ * gpuMemAlloc
+ */
+CUresult
+gpuMemAlloc(GpuContext *gcontext,
+			CUdeviceptr *p_deviceptr,
+			size_t bytesize)
+{
+	return gpuMemAllocCommon(false, gcontext, p_deviceptr, bytesize);
+}
+
+/*
+ * gpuMemAllocManaged
  */
 CUresult
 gpuMemAllocManaged(GpuContext *gcontext,
-				   CUdeviceptr *p_deviceptr, size_t bytesize, int flags)
+				   CUdeviceptr *p_deviceptr,
+				   size_t bytesize)
 {
-	GpuMemLargeChunk *lchunk;
-	CUdeviceptr		m_deviceptr;
-	CUresult		rc, __rc;
-	char		   *extra;
-	pg_crc32		crc;
-	int				index;
-
-	lchunk = calloc(1, sizeof(GpuMemLargeChunk));
-	if (!lchunk)
-		return CUDA_ERROR_OUT_OF_MEMORY;
-	Assert(PointerIsAligned(lchunk, int));
-
-	/* allocation of a managed device memory chunk */
-	rc = cuMemAllocManaged(&m_deviceptr, bytesize, flags);
-	if (rc != CUDA_SUCCESS)
-		goto error_1;
-	lchunk->m_deviceptr = m_deviceptr;
-	lchunk->refcnt = 1;
-
-	rc = cuMemAdvise(m_deviceptr, bytesize,
-					 CU_MEM_ADVISE_SET_PREFERRED_LOCATION,
-					 gpuserv_cuda_device);
-	if (rc != CUDA_SUCCESS)
-		goto error_2;
-	rc = cuMemAdvise(m_deviceptr, bytesize,
-					 CU_MEM_ADVISE_SET_ACCESSED_BY,
-					 gpuserv_cuda_device);
-	if (rc != CUDA_SUCCESS)
-		goto error_2;
-
-	/* least 1bit is a flag to indicate GpuMemLargeChunk */
-	extra = (char *)(((uintptr_t)lchunk) | 1UL);
-	if (!trackGpuMem(gcontext, m_deviceptr, extra))
-	{
-		rc = CUDA_ERROR_OUT_OF_MEMORY;
-		goto error_2;
-	}
-	/* track this large chunk */
-	INIT_LEGACY_CRC32(crc);
-	COMP_LEGACY_CRC32(crc, &m_deviceptr, sizeof(CUdeviceptr));
-	FIN_LEGACY_CRC32(crc);
-	index = crc % GPUMEM_LARGECHUNK_NSLOTS;
-
-	SpinLockAcquire(&gpumem_largechunk_lock);
-	dlist_push_head(&gpumem_largechunk_slot[index], &lchunk->chain);
-	SpinLockRelease(&gpumem_largechunk_lock);
-
-	*p_deviceptr = m_deviceptr;
-
-	return CUDA_SUCCESS;
-
-error_2:
-	__rc = cuMemFree(m_deviceptr);
-	if (__rc != CUDA_SUCCESS)
-		wnotice("failed on cuMemFree: %s", errorText(rc));
-error_1:
-	free(lchunk);
-	return rc;
+	return gpuMemAllocCommon(true, gcontext, p_deviceptr, bytesize);
 }
 
 /*

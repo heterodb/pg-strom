@@ -4741,11 +4741,11 @@ gpujoin_process_kernel(GpuJoinTask *pgjoin, CUmodule cuda_module,
 
 	length += GPUMEMALIGN(kds_dst_head->length);
 
-	rc = gpuMemAlloc(gcontext, &m_kgjoin, length);
+	rc = gpuMemAllocManaged(gcontext, &m_kgjoin, length);
 	if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		goto out_of_resource;
 	else if (rc != CUDA_SUCCESS)
-		werror("failed on gpuMemAlloc: %s", errorText(rc));
+		werror("failed on gpuMemAllocManaged: %s", errorText(rc));
 
 	if (pds_src && m_kds_src == 0UL)
 	{
@@ -5645,12 +5645,12 @@ __gpujoinLoadInnerBuffer(GpuContext *gcontext, GpuJoinSharedState *gj_sstate)
 
 	/* device memory allocation */
 	length = gj_sstate->total_length + maplen;
-	rc = gpuMemAlloc(gcontext, &m_kmrels, length);
+	rc = gpuMemAllocManaged(gcontext, &m_kmrels, length);
 	if (rc != CUDA_SUCCESS)
 	{
 		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 			return false;
-		werror("failed on gpuMemAlloc: %s", errorText(rc));
+		werror("failed on gpuMemAllocManaged: %s", errorText(rc));
 	}
 	if (gj_sstate->kern.ojmap_length > 0)
 		m_ojmaps = m_kmrels + gj_sstate->total_length;

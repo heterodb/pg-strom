@@ -1892,36 +1892,36 @@ plcuda_process_task(GpuTask *gtask, CUmodule cuda_module)
 	}
 
 	/* kern_plcuda structure on the device side */
-	rc = gpuMemAlloc(gcontext,
-					 &m_kern_plcuda,
-					 KERN_PLCUDA_DMASEND_LENGTH(&ptask->kern));
+	rc = gpuMemAllocManaged(gcontext,
+							&m_kern_plcuda,
+							KERN_PLCUDA_DMASEND_LENGTH(&ptask->kern));
 	if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		goto out_of_resource;
 	else if (rc != CUDA_SUCCESS)
-		werror("failed on gpuMemAlloc: %s", errorText(rc));
+		werror("failed on gpuMemAllocManaged: %s", errorText(rc));
 
 	/* working buffer if required */
 	if (ptask->kern.working_bufsz > 0)
 	{
-		rc = gpuMemAlloc(gcontext,
-						 &m_working_buf,
-						 ptask->kern.working_bufsz);
+		rc = gpuMemAllocManaged(gcontext,
+								&m_working_buf,
+								ptask->kern.working_bufsz);
 		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 			goto out_of_resource;
 		else if (rc != CUDA_SUCCESS)
-			werror("failed on gpuMemAlloc: %s", errorText(rc));
+			werror("failed on gpuMemAllocManaged: %s", errorText(rc));
 	}
 
 	/* results buffer if required  */
 	if (ptask->kern.results_bufsz > 0)
 	{
-		rc = gpuMemAlloc(gcontext,
-						 &m_results_buf,
-						 ptask->kern.results_bufsz);
+		rc = gpuMemAllocManaged(gcontext,
+								&m_results_buf,
+								ptask->kern.results_bufsz);
 		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 			goto out_of_resource;
 		else if (rc != CUDA_SUCCESS)
-			werror("failed on gpuMemAlloc: %s", errorText(rc));
+			werror("failed on gpuMemAllocManaged: %s", errorText(rc));
 	}
 
 	/* move the control block + argument buffer */
