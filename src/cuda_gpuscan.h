@@ -62,10 +62,12 @@ typedef struct kern_gpuscan		kern_gpuscan;
 	(offsetof(kern_gpuscan, kparams) +			\
 	 KERN_GPUSCAN_PARAMBUF_LENGTH(kgpuscan) +	\
 	 KERN_GPUSCAN_RESULTBUF_LENGTH(kgpuscan))
+#define KERN_GPUSCAN_DMASEND_OFFSET(kgpuscan)	0
 #define KERN_GPUSCAN_DMASEND_LENGTH(kgpuscan)	\
 	(offsetof(kern_gpuscan, kparams) +			\
 	 KERN_GPUSCAN_PARAMBUF_LENGTH(kgpuscan) +	\
 	 offsetof(kern_resultbuf, results[0]))
+#define KERN_GPUSCAN_DMARECV_OFFSET(kgpuscan)	0
 #define KERN_GPUSCAN_DMARECV_LENGTH(kgpuscan, nitems)	\
 	(offsetof(kern_gpuscan, kparams) +					\
 	 KERN_GPUSCAN_PARAMBUF_LENGTH(kgpuscan) +			\
@@ -689,8 +691,7 @@ STATIC_FUNCTION(bool)
 gpuscan_exec_quals_any(kern_context *kcxt,
 					   kern_resultbuf *kresults,
 					   kern_data_store *kds_src,
-					   cl_uint *p_nitems_filtered,
-					   cudaEvent_t ev_sync)
+					   cl_uint *p_nitems_filtered)
 {
 	void	   *kernel_func;
 	void	  **kernel_args;
@@ -760,39 +761,18 @@ gpuscan_exec_quals_any(kern_context *kcxt,
 							  grid_sz,
 							  block_sz,
 							  sizeof(cl_uint) * block_sz.x,
-							  cudaStreamPerThread);
+							  NULL);
 	if (status != cudaSuccess)
 	{
 		STROM_SET_RUNTIME_ERROR(&kcxt->e, status);
 		return false;
 	}
 
-	/* Point of synchronization */
-	if (ev_sync != NULL)
+	status = cudaDeviceSynchronize();
+	if (status != cudaSuccess)
 	{
-		status = cudaEventRecord(ev_sync, cudaStreamPerThread);
-		if (status != cudaSuccess)
-		{
-			STROM_SET_RUNTIME_ERROR(&kcxt->e, status);
-			return false;
-		}
-
-		/* Point of synchronization */
-		status = cudaStreamWaitEvent(cudaStreamPerThread, ev_sync, 0);
-		if (status != cudaSuccess)
-		{
-			STROM_SET_RUNTIME_ERROR(&kcxt->e, status);
-			return false;
-		}
-	}
-	else
-	{
-		status = cudaDeviceSynchronize();
-		if (status != cudaSuccess)
-		{
-			STROM_SET_RUNTIME_ERROR(&kcxt->e, status);
-			return false;
-		}
+		STROM_SET_RUNTIME_ERROR(&kcxt->e, status);
+		return false;
 	}
 
 	if (kresults->kerror.errcode != StromError_Success)
@@ -820,7 +800,6 @@ gpuscan_main(kern_gpuscan *kgpuscan,
 	dim3			block_sz;
 	cl_uint			ntuples;
 	cl_ulong		tv1, tv2;
-	cudaEvent_t		ev_sync;
 	cudaError_t		status = cudaSuccess;
 
 	INIT_KERNEL_CONTEXT(&kcxt, gpuscan_main, kparams);
@@ -831,14 +810,6 @@ gpuscan_main(kern_gpuscan *kgpuscan,
 	assert(!kds_dst ||
 		   kds_dst->format == KDS_FORMAT_ROW ||
 		   kds_dst->format == KDS_FORMAT_SLOT);
-
-	status = cudaEventCreateWithFlags(&ev_sync, cudaEventDisableTiming);
-	if (status != cudaSuccess)
-	{
-		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
-		goto out;
-	}
-
 	/*
 	 * (1) Evaluation of Scan qualifiers
 	 */
@@ -846,8 +817,7 @@ gpuscan_main(kern_gpuscan *kgpuscan,
 	{
 		tv1 = GlobalTimer();
 		if (!gpuscan_exec_quals_any(&kcxt, kresults, kds_src,
-									&kgpuscan->nitems_filtered,
-									ev_sync))
+									&kgpuscan->nitems_filtered))
 		{
 			assert(kcxt.e.errcode != StromError_Success);
 			goto out;
@@ -904,36 +874,19 @@ gpuscan_main(kern_gpuscan *kgpuscan,
 								  grid_sz,
 								  block_sz,
 								  sizeof(cl_uint) * block_sz.x,
-								  cudaStreamPerThread);
+								  NULL);
 		if (status != cudaSuccess)
 		{
 			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
 			goto out;
 		}
 
-		status = cudaEventRecord(ev_sync, cudaStreamPerThread);
-		if (status != cudaSuccess)
-		{
-			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
-			goto out;
-		}
-
-		/* Point of synchronization */
-		status = cudaStreamWaitEvent(cudaStreamPerThread, ev_sync, 0);
-		if (status != cudaSuccess)
-		{
-			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
-			goto out;
-		}
-
-#if 0
 		status = cudaDeviceSynchronize();
 		if (status != cudaSuccess)
 		{
 			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
 			goto out;
 		}
-#endif
 
 		if (kresults->kerror.errcode != StromError_Success)
 		{
@@ -948,13 +901,6 @@ gpuscan_main(kern_gpuscan *kgpuscan,
 		tv1 = tv2 = 0;
 	}
 	kgpuscan->pfm.tv_kern_projection = (cl_float)(tv2 - tv1) / 1000000.0;
-
-	status = cudaEventDestroy(ev_sync);
-	if (status != cudaSuccess)
-	{
-		STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
-		goto out;
-	}
 out:
 	kern_writeback_error_status(&kgpuscan->kerror, kcxt.e);
 }
