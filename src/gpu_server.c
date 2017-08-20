@@ -117,6 +117,7 @@ static int				gpuserv_event_fd = -1;
 int						gpuserv_cuda_dindex = -1;
 CUdevice				gpuserv_cuda_device = NULL;
 CUcontext				gpuserv_cuda_context = NULL;
+__thread CUevent		gpuserv_cuda_event = NULL;
 
 #define CUDA_MODULE_CACHE_NSLOTS	200
 static dlist_head		gpuserv_cuda_module_cache[CUDA_MODULE_CACHE_NSLOTS];
@@ -1480,6 +1481,11 @@ gpuservWorkerEntryPoint(void *__private)
 		if (rc != CUDA_SUCCESS)
 			werror("failed on cuCtxSetCurrent: %s", errorText(rc));
 
+		rc = cuEventCreate(&gpuserv_cuda_event, (CU_EVENT_BLOCKING_SYNC |
+												 CU_EVENT_DISABLE_TIMING));
+		if (rc != CUDA_SUCCESS)
+			werror("failed on cuEventCreate: %s", errorText(rc));
+
 		gpuservWorkerMain();
 	}
 	STROM_CATCH();
@@ -1706,6 +1712,7 @@ gpuservBgWorkerMain(Datum __server_id)
 
 	rc = cuCtxCreate(&gpuserv_cuda_context,
 					 CU_CTX_SCHED_AUTO,
+					 //CU_CTX_SCHED_BLOCKING_SYNC,
 					 gpuserv_cuda_device);
 	if (rc != CUDA_SUCCESS)
 		elog(FATAL, "failed on cuCtxCreate: %s", errorText(rc));

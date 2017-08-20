@@ -465,6 +465,7 @@ extern void pgstrom_init_gpu_memory(void);
 extern int				gpuserv_cuda_dindex;
 extern CUdevice			gpuserv_cuda_device;
 extern CUcontext		gpuserv_cuda_context;
+extern __thread CUevent	gpuserv_cuda_event;
 extern __thread int		gpuserv_worker_index;
 
 extern int	IsGpuServerProcess(void);

@@ -4558,15 +4558,22 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		{
 			PDS_fillup_blocks(pds_src, gpreagg->task.peer_fdesc);
-			m_kds_src = 0UL;
 			gpreagg->with_nvme_strom = false;
-			length += GPUMEMALIGN(pds_src->kds.length);
 		}
 		else if (rc != CUDA_SUCCESS)
 			werror("failed on gpuMemAllocIOMap: %s", errorText(rc));
 	}
-	else
-		length += GPUMEMALIGN(pds_src->kds.length);
+	if (m_kds_src == 0UL)
+	{
+		Assert(!gpreagg->with_nvme_strom);
+		rc = gpuMemAlloc(gcontext,
+						 &m_kds_src,
+						 GPUMEMALIGN(pds_src->kds.length));
+		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
+			goto out_of_resource;
+		else if (rc != CUDA_SUCCESS)
+			werror("failed on gpuMemAlloc: %s", errorText(rc));
+	}
 
 	rc = gpuMemAllocManaged(gcontext, &devptr, length);
 	if (rc == CUDA_ERROR_OUT_OF_MEMORY)
@@ -4576,13 +4583,7 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 
 	m_gpreagg = devptr;
 	devptr += GPUMEMALIGN(KERN_GPUPREAGG_LENGTH(&gpreagg->kern));
-	if (gpreagg->with_nvme_strom)
-		Assert(m_kds_src != 0UL);
-	else
-	{
-		m_kds_src = devptr;
-		devptr += GPUMEMALIGN(pds_src->kds.length);
-	}
+	Assert(m_kds_src != 0UL);
 	m_kds_slot = devptr;
 	devptr += GPUMEMALIGN(kds_slot_head->length);
 	m_ghash = devptr;
@@ -4601,19 +4602,28 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 
 	/* kern_gpupreagg */
 	length = KERN_GPUPREAGG_DMASEND_LENGTH(&gpreagg->kern);
+#if 0
 	rc = cuMemcpyHtoD(m_gpreagg,
 					  &gpreagg->kern,
 					  length);
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuMemcpyHtoD: %s", errorText(rc));
+#endif
+	memcpy((void *)m_gpreagg, &gpreagg->kern, length);
+	rc = cuMemPrefetchAsync(m_gpreagg, length,
+							gpuserv_cuda_device,
+							CU_STREAM_PER_THREAD);
+	if (rc != CUDA_SUCCESS)
+		werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
 
 	/* source data to be reduced */
 	if (!gpreagg->with_nvme_strom)
 	{
 		length = pds_src->kds.length;
-		rc = cuMemcpyHtoD(m_kds_src,
-						  &pds_src->kds,
-						  length);
+		rc = cuMemcpyHtoDAsync(m_kds_src,
+							   &pds_src->kds,
+							   length,
+							   CU_STREAM_PER_THREAD);
 		if (rc != CUDA_SUCCESS)
 			werror("failed on cuMemcpyHtoD: %s", errorText(rc));
 	}
@@ -4627,11 +4637,19 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 
 	/* header of the internal kds-slot buffer */
 	length = KERN_DATA_STORE_HEAD_LENGTH(kds_slot_head);
+#if 0
 	rc = cuMemcpyHtoD(m_kds_slot,
 					  kds_slot_head,
 					  length);
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuMemcpyHtoD: %s", errorText(rc));
+#endif
+	memcpy((void *)m_kds_slot, kds_slot_head, length);
+	rc = cuMemPrefetchAsync(m_kds_slot, length,
+							gpuserv_cuda_device,
+							CU_STREAM_PER_THREAD);
+	if (rc != CUDA_SUCCESS)
+		werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
 
 	/* Launch:
 	 * KERNEL_FUNCTION(void)
@@ -4653,14 +4671,24 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 						1, 1, 1,
 						1, 1, 1,
 						sizeof(kern_errorbuf),
-						NULL,
+						CU_STREAM_PER_THREAD,
 						kern_args,
 						NULL);
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuLaunchKernel: %s", errorText(rc));
 
+	rc = cuEventRecord(gpuserv_cuda_event, CU_STREAM_PER_THREAD);
+	if (rc != CUDA_SUCCESS)
+		werror("failed on cuEventRecord: %s", errorText(rc));
+
+	/* Point of synchronization */
+	rc = cuEventSynchronize(gpuserv_cuda_event);
+	if (rc != CUDA_SUCCESS)
+		werror("failed on cuEventSynchronize: %s", errorText(rc));
+
 	/* DMA Recv of individual kern_gpreagg */
 	length = KERN_GPUPREAGG_DMARECV_LENGTH(&gpreagg->kern);
+#if 0
 	rc = cuMemcpyDtoH(&gpreagg->kern,
 					  m_gpreagg,
 					  length);
@@ -4668,6 +4696,8 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 	{
 		werror("failed on cuMemcpyDtoH: %s", errorText(rc));
 	}
+#endif
+	memcpy(&gpreagg->kern, (void *)m_gpreagg, length);
 
 	/*
 	 * XXX - Even though we speculatively allocate large virtual device
@@ -4736,8 +4766,13 @@ check_terminator:
 	}
 
 out_of_resource:
-	if (gpreagg->with_nvme_strom && m_kds_src != 0UL)
-		gpuMemFreeIOMap(gcontext, m_kds_src);
+	if (m_kds_src != 0UL)
+	{
+		if (gpreagg->with_nvme_strom)
+			gpuMemFreeIOMap(gcontext, m_kds_src);
+		else
+			gpuMemFree(gcontext, m_kds_src);
+	}
 	if (m_gpreagg != 0UL)
 		gpuMemFree(gcontext, m_gpreagg);
 	return retval;
@@ -4815,15 +4850,21 @@ gpupreagg_process_unified_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 			if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 			{
 				PDS_fillup_blocks(pds_src, gpreagg->task.peer_fdesc);
-				m_kds_src = 0UL;
 				gpreagg->with_nvme_strom = false;
-				length += GPUMEMALIGN(pds_src->kds.length);
 			}
 			else if (rc != CUDA_SUCCESS)
 				werror("failed on gpuMemAllocIOMap: %s", errorText(rc));
 		}
-		else
-			length += GPUMEMALIGN(pds_src->kds.length);
+		if (m_kds_src == 0UL)
+		{
+			rc = gpuMemAlloc(gcontext,
+							 &m_kds_src,
+							 GPUMEMALIGN(pds_src->kds.length));
+			if (rc == CUDA_ERROR_OUT_OF_MEMORY)
+				goto out_of_resource;
+			else if (rc != CUDA_SUCCESS)
+				werror("failed on gpuMemAlloc: %s", errorText(rc));
+		}
 	}
 	/* for unified GpuJoin */
 	length += GPUMEMALIGN(kgjoin->kresults_2_offset +
@@ -4843,15 +4884,7 @@ gpupreagg_process_unified_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 	 */
 	m_gpreagg = devptr;
 	devptr += GPUMEMALIGN(KERN_GPUPREAGG_LENGTH(&gpreagg->kern));
-	if (!pds_src)
-		m_kds_src = 0UL;
-	else if (gpreagg->with_nvme_strom)
-		Assert(m_kds_src != 0UL);
-	else
-	{
-		m_kds_src = devptr;
-		devptr += GPUMEMALIGN(pds_src->kds.length);
-	}
+	Assert(m_kds_src != 0UL);
 	m_kds_slot = devptr;
 	devptr += GPUMEMALIGN(kds_slot_head->length);
 	m_ghash = devptr;
@@ -4872,30 +4905,45 @@ gpupreagg_process_unified_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 
 	/* kgpreagg */
 	length = KERN_GPUPREAGG_DMASEND_LENGTH(&gpreagg->kern);
+#if 0
 	rc = cuMemcpyHtoD(m_gpreagg,
 					  &gpreagg->kern,
 					  length);
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuMemcpyHtoD: %s", errorText(rc));
+#endif
+	memcpy((void *)m_gpreagg, &gpreagg->kern, length);
+	rc = cuMemPrefetchAsync(m_gpreagg, length, gpuserv_cuda_device, NULL);
+	if (rc != CUDA_SUCCESS)
+		werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
 
 	/* kgjoin */
 	length = KERN_GPUJOIN_HEAD_LENGTH(kgjoin);
+#if 0
 	rc = cuMemcpyHtoD(m_kgjoin,
 					  kgjoin,
 					  length);
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuMemcpyHtoD: %s", errorText(rc));
+#endif
+	memcpy((void *)m_kgjoin, kgjoin, length);
+	rc = cuMemPrefetchAsync(m_kgjoin, length,
+							gpuserv_cuda_device,
+							CU_STREAM_PER_THREAD);
+	if (rc != CUDA_SUCCESS)
+		werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
 
 	/* kds_src */
 	if (pds_src)
 	{
 		if (!gpreagg->with_nvme_strom)
 		{
-			rc = cuMemcpyHtoD(m_kds_src,
-							  &pds_src->kds,
-							  pds_src->kds.length);
+			rc = cuMemcpyHtoDAsync(m_kds_src,
+								   &pds_src->kds,
+								   pds_src->kds.length,
+								   CU_STREAM_PER_THREAD);
 			if (rc != CUDA_SUCCESS)
-				werror("failed on cuMemcpyHtoD: %s", errorText(rc));
+				werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
 		}
 		else
 		{
@@ -4908,19 +4956,35 @@ gpupreagg_process_unified_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 
 	/* kds_dst (head) */
 	length = KERN_DATA_STORE_HEAD_LENGTH(kds_dst_head);
+#if 0
 	rc = cuMemcpyHtoD(m_kds_dst,
 					  kds_dst_head,
 					  length);
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuMemcpyHtoD: %s", errorText(rc));
+#endif
+	memcpy((void *)m_kds_dst, kds_dst_head, length);
+	rc = cuMemPrefetchAsync(m_kds_dst, length,
+							gpuserv_cuda_device,
+							CU_STREAM_PER_THREAD );
+	if (rc != CUDA_SUCCESS)
+		werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
 
 	/* kds_slot (head) */
 	length = KERN_DATA_STORE_HEAD_LENGTH(kds_slot_head);
+#if 0
 	rc = cuMemcpyHtoD(m_kds_slot,
 					  kds_slot_head,
 					  length);
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuMemcpyHtoD: %s", errorText(rc));
+#endif
+	memcpy((void *)m_kds_slot, kds_slot_head, length);
+	rc = cuMemPrefetchAsync(m_kds_slot, length,
+							gpuserv_cuda_device,
+							CU_STREAM_PER_THREAD);
+	if (rc != CUDA_SUCCESS)
+		werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
 
 	/* Launch:
 	 * KERNEL_FUNCTION(void)
@@ -4950,27 +5014,42 @@ gpupreagg_process_unified_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 						1, 1, 1,
 						1, 1, 1,
 						0,
-						NULL,
+						CU_STREAM_PER_THREAD,
 						kern_args,
 						NULL);
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuLaunchKernel: %s", errorText(rc));
 
+	rc = cuEventRecord(gpuserv_cuda_event, CU_STREAM_PER_THREAD);
+	if (rc != CUDA_SUCCESS)
+		werror("failed on cuEventRecord: %s", errorText(rc));
+
+	/* Point of synchronization */
+	rc = cuEventSynchronize(gpuserv_cuda_event);
+	if (rc != CUDA_SUCCESS)
+		werror("failed on cuEventSynchronize: %s", errorText(rc));
+
 	/* DMA Recv: kern_gpreagg */
 	length = KERN_GPUPREAGG_DMARECV_LENGTH(&gpreagg->kern);
+#if 0
 	rc = cuMemcpyDtoH(&gpreagg->kern,
 					  m_gpreagg,
 					  length);
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuMemcpyDtoH: %s", errorText(rc));
+#endif
+	memcpy(&gpreagg->kern, (void *)m_gpreagg, length);
 
 	/* DMA Recv: statistics of kern_gpujoin */
 	length = offsetof(kern_gpujoin, jscale[gpreagg->kgjoin->num_rels]);
+#if 0
 	rc = cuMemcpyDtoH(gpreagg->kgjoin,
 					  m_kgjoin,
 					  length);
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuMemcpyDtoH: %s", errorText(rc));
+#endif
+	memcpy(kgjoin, (void *)m_kgjoin, length);
 
 	/*
 	 * Clear the error code if CPU fallback case.
@@ -5032,8 +5111,13 @@ check_terminator:
 	}
 
 out_of_resource:
-	if (gpreagg->with_nvme_strom && m_kds_src != 0UL)
-		gpuMemFreeIOMap(gcontext, m_kds_src);
+	if (m_kds_src != 0UL)
+	{
+		if (gpreagg->with_nvme_strom)
+			gpuMemFreeIOMap(gcontext, m_kds_src);
+		else
+			gpuMemFree(gcontext, m_kds_src);
+	}
 	if (m_gpreagg != 0UL)
 		gpuMemFree(gcontext, m_gpreagg);
 	return retval;
