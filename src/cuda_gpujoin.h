@@ -1192,7 +1192,7 @@ gpujoin_resize_window(kern_context *kcxt,
 	status = cudaLaunchDevice((void *)gpujoin_count_rows_dist,
 							  kern_args, grid_sz, block_sz,
 							  0,
-							  NULL);
+							  cudaStreamPerThread);
 	if (status != cudaSuccess)
 	{
 		STROM_SET_RUNTIME_ERROR(&kcxt->e, status);
@@ -1561,7 +1561,7 @@ retry_major:
 				status = cudaLaunchDevice((void *)kernel_func, kern_args,
 										  grid_sz, block_sz,
 										  sizeof(kern_errorbuf) * block_sz.x,
-										  NULL);
+										  cudaStreamPerThread);
 				if (status != cudaSuccess)
 				{
 					STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
@@ -1652,7 +1652,7 @@ retry_major:
 										  kern_join_args,
 										  grid_sz, block_sz,
 										  sizeof(cl_uint) * block_sz.x,
-										  NULL);
+										  cudaStreamPerThread);
 				if (status != cudaSuccess)
 				{
 					STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
@@ -1750,7 +1750,7 @@ retry_major:
 										  kern_join_args,
 										  grid_sz, block_sz,
 										  sizeof(kern_errorbuf) * block_sz.x,
-										  NULL);
+										  cudaStreamPerThread);
 				if (status != cudaSuccess)
 				{
 					STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
@@ -1840,7 +1840,7 @@ retry_major:
 										  kern_join_args,
 										  grid_sz, block_sz,
 										  sizeof(kern_errorbuf) * block_sz.x,
-										  NULL);
+										  cudaStreamPerThread);
 				if (status != cudaSuccess)
 				{
 					STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
@@ -1935,7 +1935,7 @@ retry_major:
 										  kern_join_args,
 										  grid_sz, block_sz,
 										  sizeof(kern_errorbuf) * block_sz.x,
-										  NULL);
+										  cudaStreamPerThread);
 				if (status != cudaSuccess)
 				{
 					STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
@@ -2075,7 +2075,7 @@ retry_major:
 		status = cudaLaunchDevice((void *)kernel_projection,
 								  kern_args, grid_sz, block_sz,
 								  sizeof(kern_errorbuf) * block_sz.x,
-								  NULL);
+								  cudaStreamPerThread);
 		if (status != cudaSuccess)
 		{
 			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);

@@ -343,7 +343,7 @@ __pgstromLaunchDynamicKernel(void		   *kern_function,
 							  grid_sz, block_sz,
 							  shmem_per_block +
 							  shmem_per_thread * block_sz.x,
-							  NULL);
+							  cudaStreamPerThread);
 	if (status != cudaSuccess)
 		return status;
 
@@ -672,7 +672,7 @@ __pgstromLaunchDynamicKernelMaxThreads(void		   *kern_function,
 							  grid_sz, block_sz,
 							  shmem_per_block +
 							  shmem_per_thread * block_sz.x,
-							  NULL);
+							  cudaStreamPerThread);
 	if (status != cudaSuccess)
 		return status;
 
