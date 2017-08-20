@@ -1566,7 +1566,8 @@ gpupreagg_main(kern_gpupreagg *kgpreagg,
 	 * rows, prior to the reduction steps.
 	 */
 	if (!gpuscan_exec_quals_any(&kcxt, kresults_src, kds_src,
-								&kgpreagg->nitems_filtered))
+								&kgpreagg->nitems_filtered,
+								NULL))
 	{
 		assert(kcxt.e.errcode != StromError_Success);
 		goto out;
