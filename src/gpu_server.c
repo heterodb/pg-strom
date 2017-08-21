@@ -1579,6 +1579,9 @@ gpuservEventLoop(void)
 		{
 			pthread_t	thread;
 
+			if (pg_atomic_read_u32(&gpuserv_worker_nthreads) > 16)
+				break;
+
 			/* launch a worker thread */
 			if ((errno = pthread_create(&thread,
 										NULL,
@@ -1595,18 +1598,7 @@ gpuservEventLoop(void)
 			npolls++;
 		}
 		pg_atomic_fetch_sub_u32(&gpuserv_worker_npolls, 1);
-#if 0
-		do {
-			uint32_t	num_epolls;
-			uint32_t	num_threads;
 
-			num_epolls = pg_atomic_read_u32(&gpuserv_worker_npolls);
-			num_threads = pg_atomic_read_u32(&gpuserv_worker_nthreads);
-
-			fprintf(stderr, "active: %u, wait: %u\n",
-					num_threads - num_epolls, num_epolls);
-		} while(0);
-#endif
 		/*
 		 * Try to release free device memory if GPU server is relaxed.
 		 */
