@@ -4037,9 +4037,14 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 	/* adjust parameters if block format */
 	if (pds_src && pds_src->kds.format == KDS_FORMAT_BLOCK)
 	{
-		Assert(gpas->gts.nvme_sstate != NULL);
+		struct NVMEScanState *nvme_sstate
+			= (gpas->unified_gpujoin
+			   ? ((GpuTaskState *)outerPlanState(gpas))->nvme_sstate
+			   : gpas->gts.nvme_sstate);
+
+		Assert(nvme_sstate != NULL);
 		with_nvme_strom = (pds_src->nblocks_uncached > 0);
-		nrows_per_block = gpas->gts.nvme_sstate->nrows_per_block;
+		nrows_per_block = nvme_sstate->nrows_per_block;
 		// FIXME: we have to pay attention whether 150% of nrows_per_block is
 		// exactly adeque estimation or not. Small nrows_per_block (often
 		// less than 32) has higher volatility but total amount of actual
@@ -4905,13 +4910,6 @@ gpupreagg_process_unified_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 
 	/* kgpreagg */
 	length = KERN_GPUPREAGG_DMASEND_LENGTH(&gpreagg->kern);
-#if 0
-	rc = cuMemcpyHtoD(m_gpreagg,
-					  &gpreagg->kern,
-					  length);
-	if (rc != CUDA_SUCCESS)
-		werror("failed on cuMemcpyHtoD: %s", errorText(rc));
-#endif
 	memcpy((void *)m_gpreagg, &gpreagg->kern, length);
 	rc = cuMemPrefetchAsync(m_gpreagg, length, gpuserv_cuda_device, NULL);
 	if (rc != CUDA_SUCCESS)
@@ -4919,13 +4917,6 @@ gpupreagg_process_unified_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 
 	/* kgjoin */
 	length = KERN_GPUJOIN_HEAD_LENGTH(kgjoin);
-#if 0
-	rc = cuMemcpyHtoD(m_kgjoin,
-					  kgjoin,
-					  length);
-	if (rc != CUDA_SUCCESS)
-		werror("failed on cuMemcpyHtoD: %s", errorText(rc));
-#endif
 	memcpy((void *)m_kgjoin, kgjoin, length);
 	rc = cuMemPrefetchAsync(m_kgjoin, length,
 							gpuserv_cuda_device,
@@ -4956,13 +4947,6 @@ gpupreagg_process_unified_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 
 	/* kds_dst (head) */
 	length = KERN_DATA_STORE_HEAD_LENGTH(kds_dst_head);
-#if 0
-	rc = cuMemcpyHtoD(m_kds_dst,
-					  kds_dst_head,
-					  length);
-	if (rc != CUDA_SUCCESS)
-		werror("failed on cuMemcpyHtoD: %s", errorText(rc));
-#endif
 	memcpy((void *)m_kds_dst, kds_dst_head, length);
 	rc = cuMemPrefetchAsync(m_kds_dst, length,
 							gpuserv_cuda_device,
@@ -4972,13 +4956,6 @@ gpupreagg_process_unified_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 
 	/* kds_slot (head) */
 	length = KERN_DATA_STORE_HEAD_LENGTH(kds_slot_head);
-#if 0
-	rc = cuMemcpyHtoD(m_kds_slot,
-					  kds_slot_head,
-					  length);
-	if (rc != CUDA_SUCCESS)
-		werror("failed on cuMemcpyHtoD: %s", errorText(rc));
-#endif
 	memcpy((void *)m_kds_slot, kds_slot_head, length);
 	rc = cuMemPrefetchAsync(m_kds_slot, length,
 							gpuserv_cuda_device,
@@ -5031,24 +5008,10 @@ gpupreagg_process_unified_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 
 	/* DMA Recv: kern_gpreagg */
 	length = KERN_GPUPREAGG_DMARECV_LENGTH(&gpreagg->kern);
-#if 0
-	rc = cuMemcpyDtoH(&gpreagg->kern,
-					  m_gpreagg,
-					  length);
-	if (rc != CUDA_SUCCESS)
-		werror("failed on cuMemcpyDtoH: %s", errorText(rc));
-#endif
 	memcpy(&gpreagg->kern, (void *)m_gpreagg, length);
 
 	/* DMA Recv: statistics of kern_gpujoin */
 	length = offsetof(kern_gpujoin, jscale[gpreagg->kgjoin->num_rels]);
-#if 0
-	rc = cuMemcpyDtoH(gpreagg->kgjoin,
-					  m_kgjoin,
-					  length);
-	if (rc != CUDA_SUCCESS)
-		werror("failed on cuMemcpyDtoH: %s", errorText(rc));
-#endif
 	memcpy(kgjoin, (void *)m_kgjoin, length);
 
 	/*

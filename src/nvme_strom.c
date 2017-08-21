@@ -159,6 +159,7 @@ gpuMemAllocIOMap(GpuContext *gcontext,
 	dlist_node		   *dnode;
 	CUdeviceptr			devptr;
 	CUresult			rc;
+	static pthread_mutex_t iomap_buffer_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 	Assert(IsGpuServerProcess());
 
@@ -170,14 +171,19 @@ gpuMemAllocIOMap(GpuContext *gcontext,
 	if (!iomap_seg->iomap_handle)
 		return CUDA_ERROR_OUT_OF_MEMORY;
 
+	pthreadMutexLock(&iomap_buffer_mutex);
 	if (!iomap_buffer_base)
 	{
 		rc = cuIpcOpenMemHandle(&iomap_buffer_base,
 								iomap_seg->cuda_mhandle,
 								CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS);
 		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuIpcOpenMemHandle: %s", errorText(rc));
+		{
+			pthreadMutexUnlock(&iomap_buffer_mutex);
+			werror("failed on cuIpcOpenMemHandle: %s", errorText(rc));
+		}
 	}
+	pthreadMutexUnlock(&iomap_buffer_mutex);
 
 	/*
 	 * Do allocation
@@ -213,6 +219,9 @@ gpuMemAllocIOMap(GpuContext *gcontext,
 
 	devptr = iomap_buffer_base + ((Size)index << IOMAPBUF_CHUNKSZ_MIN_BIT);
 	trackIOMapMem(gcontext, devptr);
+
+	Assert(devptr >= iomap_buffer_base &&
+		   devptr + bytesize <=  iomap_buffer_base + iomap_buffer_size);
 
 	*p_devptr = devptr;
 
@@ -369,9 +378,10 @@ gpuMemCopyFromSSD(GpuTask *gtask,
 	/* nothing special if all the blocks are already loaded */
 	if (pds->nblocks_uncached == 0)
 	{
-		rc = cuMemcpyHtoD(m_kds,
-						  &pds->kds,
-						  pds->kds.length);
+		rc = cuMemcpyHtoDAsync(m_kds,
+							   &pds->kds,
+							   pds->kds.length,
+							   CU_STREAM_PER_THREAD);
 		if (rc != CUDA_SUCCESS)
 			werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
 		return;
@@ -402,9 +412,10 @@ gpuMemCopyFromSSD(GpuTask *gtask,
 		werror("failed on STROM_IOCTL__MEMCPY_SSD2GPU: %m");
 
 	/* (2) kick RAM2GPU DMA (earlier half) */
-	rc = cuMemcpyHtoD(m_kds,
-					  &pds->kds,
-					  length);
+	rc = cuMemcpyHtoDAsync(m_kds,
+						   &pds->kds,
+						   length,
+						   CU_STREAM_PER_THREAD);
 	if (rc != CUDA_SUCCESS)
 	{
 		gpuMemCopyFromSSDWaitRaw(cmd.dma_task_id);
@@ -418,9 +429,10 @@ gpuMemCopyFromSSD(GpuTask *gtask,
 		offset = ((char *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds,
 													   pds->kds.nitems) -
 				  (char *)&pds->kds) - length;
-		rc = cuMemcpyHtoD(m_kds + offset,
-						  (char *)&pds->kds + offset,
-						  length);
+		rc = cuMemcpyHtoDAsync(m_kds + offset,
+							   (char *)&pds->kds + offset,
+							   length,
+							   CU_STREAM_PER_THREAD);
 		if (rc != CUDA_SUCCESS)
 		{
 			gpuMemCopyFromSSDWaitRaw(cmd.dma_task_id);

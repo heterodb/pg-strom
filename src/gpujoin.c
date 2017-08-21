@@ -932,6 +932,7 @@ gpujoin_find_cheapest_path(PlannerInfo *root,
 {
 	Path	   *input_path = inputrel->cheapest_total_path;
 	Relids		other_relids;
+
 	ListCell   *lc;
 
 	other_relids = bms_difference(joinrel->relids, inputrel->relids);
@@ -1243,14 +1244,12 @@ gpujoin_add_join_path(PlannerInfo *root,
 	 */
 	if (joinrel->consider_parallel)
 	{
-		Relids	other_relids = bms_difference(joinrel->relids,
-											  outerrel->relids);
 		foreach (lc1, innerrel->pathlist)
 		{
 			inner_path = lfirst(lc1);
 
 			if (!inner_path->parallel_safe ||
-				bms_overlap(PATH_REQ_OUTER(inner_path), other_relids))
+				bms_overlap(PATH_REQ_OUTER(inner_path), outerrel->relids))
 				continue;
 
 			foreach (lc2, outerrel->partial_pathlist)
@@ -1259,7 +1258,7 @@ gpujoin_add_join_path(PlannerInfo *root,
 
 				if (!outer_path->parallel_safe ||
 					outer_path->parallel_workers == 0 ||
-					bms_overlap(PATH_REQ_OUTER(outer_path), other_relids))
+					bms_overlap(PATH_REQ_OUTER(outer_path), innerrel->relids))
 					continue;
 				try_add_gpujoin_paths(root, joinrel, final_tlist,
 									  outer_path, inner_path,
