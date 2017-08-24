@@ -44,19 +44,11 @@ struct kern_gpupreagg
 	cl_uint			extra_usage;		/* out: size of new allocation */
 	cl_uint			ghash_conflicts;	/* out: # of ghash conflicts */
 	cl_uint			fhash_conflicts;	/* out: # of fhash conflicts */
-	/* -- performance monitor -- */
-	struct {
-		cl_uint		num_kern_prep;		/* # of kern_preparation calls */
-		cl_uint		num_kern_nogrp;		/* # of kern_nogroup calls */
-		cl_uint		num_kern_lagg;		/* # of kern_local_reduction calls */
-		cl_uint		num_kern_gagg;		/* # of kern_global_reducation calls */
-		cl_uint		num_kern_fagg;		/* # of kern_final_reduction calls */
-		cl_float	tv_kern_prep;		/* msec of kern_preparation */
-		cl_float	tv_kern_nogrp;		/* msec of kern_nogroup */
-		cl_float	tv_kern_lagg;		/* msec of kern_local_reduction */
-		cl_float	tv_kern_gagg;		/* msec of kern_global_reducation */
-		cl_float	tv_kern_fagg;		/* msec of kern_final_reduction */
-	} pfm;
+	/* -- debug counter -- */
+	cl_ulong		tv_stat_debug1;		/* out: debug counter 1 */
+	cl_ulong		tv_stat_debug2;		/* out: debug counter 2 */
+	cl_ulong		tv_stat_debug3;		/* out: debug counter 3 */
+	cl_ulong		tv_stat_debug4;		/* out: debug counter 4 */
 	/* -- other hashing parameters -- */
 	cl_uint			key_dist_salt;			/* hashkey distribution salt */
 	cl_uint			hash_size;				/* size of global hash-slots */
@@ -426,7 +418,9 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 	__shared__ cl_uint	base;
 	__shared__ cl_int	status;
 	__shared__ cl_int	gang_sync;
+	cl_ulong		tv1, tv2;
 
+	tv1 = GlobalTimer();
 	INIT_KERNEL_CONTEXT(&kcxt, gpupreagg_setup_block, kparams);
 	if (get_local_id() == 0)
 		status = StromError_Success;
@@ -498,6 +492,7 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 			if (status != StromError_Success)
 				goto out;
 			/* allocation of the kds_slot buffer */
+			tv2 = GlobalTimer();
 			offset = pgstromStairlikeSum(htup && rc ? 1 : 0, &nvalids);
 			if (nvalids > 0)
 			{
@@ -530,6 +525,8 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 				if (status != StromError_Success)
 					goto out;
 			}
+			if (get_local_id() == 0)
+				atomicAdd(&kgpreagg->tv_stat_debug2, GlobalTimer() - tv2);
 			/* update statistics */
 			pgstromStairlikeSum(htup ? 1 : 0, &count);
 			if (get_local_id() == 0)
@@ -553,6 +550,8 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 	} while(try_next_window);
 out:
 	/* write back error status if any */
+	if (get_local_id() == 0)
+		atomicAdd(&kgpreagg->tv_stat_debug1, GlobalTimer() - tv1);
 	kern_writeback_error_status(&kgpreagg->kerror, kcxt.e);
 }
 #endif	/* GPUPREAGG_PULLUP_OUTER_SCAN */

@@ -167,15 +167,17 @@ typedef struct
 	size_t				f_hashlimit;/* logical limitation of final-hash size */
 
 	/* overall statistics */
-	cl_uint				n_tasks_nogrp;	/* num of nogroup reduction tasks */
-	cl_uint				n_tasks_local;	/* num of local reduction tasks */
-	cl_uint				n_tasks_global;	/* num of global reduction tasks */
-	cl_uint				n_tasks_final;	/* num of final reduction tasks */
 	size_t				exec_pg_nworkers;/* num of parallel workers */
 	size_t				exec_nrows_in;	/* num of outer rows actually */
 	size_t				exec_nfiltered;	/* num of outer rows filtered by
 										 * outer quals if any */
 	size_t				plan_ngroups;	/* num of groups planned */
+#ifdef PGSTROM_DEBUG
+	cl_ulong			tv_stat_debug1;	/* debug counter */
+	cl_ulong			tv_stat_debug2;	/* debug counter */
+	cl_ulong			tv_stat_debug3;	/* debug counter */
+	cl_ulong			tv_stat_debug4;	/* debug counter */
+#endif
 } GpuPreAggSharedState;
 
 typedef struct
@@ -3708,9 +3710,6 @@ ExplainGpuPreAgg(CustomScanState *node, List *ancestors, ExplainState *es)
 	ListCell			   *lc;
 	const char			   *policy;
 	char				   *exprstr;
-	cl_uint					n_tasks;
-	char					temp[2048];
-	int						ofs = 0;
 
 	/* merge worker's statistics if any */
 	if (gpa_sstate)
@@ -3723,83 +3722,10 @@ ExplainGpuPreAgg(CustomScanState *node, List *ancestors, ExplainState *es)
 	}
 
 	/* shows reduction policy */
-	if (!gpa_sstate)
-	{
-		cl_uint		local_threshold = devBaselineMaxThreadsPerBlock / 4;
-		cl_uint		global_threshold = gpas->plan_nrows_per_chunk / 4;
-
-		if (gpas->num_group_keys == 0)
-			policy = "NoGroup";
-		else if (gpas->plan_ngroups < local_threshold)
-			policy = "Local";
-		else if (gpas->plan_ngroups < global_threshold)
-			policy = "Global";
-		else
-			policy = "Final";
-	}
+	if (gpas->num_group_keys == 0)
+		policy = "NoGroup";
 	else
-	{
-		bool	with_percentage = false;
-
-		pthreadMutexLock(&gpa_sstate->mutex);
-		n_tasks = (gpa_sstate->n_tasks_nogrp +
-				   gpa_sstate->n_tasks_local +
-				   gpa_sstate->n_tasks_global +
-				   gpa_sstate->n_tasks_final);
-		if (n_tasks == 0)
-			policy = "Unknown";
-		else
-		{
-			if ((gpa_sstate->n_tasks_nogrp > 0 ? 1 : 0) +
-				(gpa_sstate->n_tasks_local > 0 ? 1 : 0) +
-				(gpa_sstate->n_tasks_global > 0 ? 1 : 0) +
-				(gpa_sstate->n_tasks_final > 0 ? 1 : 0) > 1)
-				with_percentage = true;
-
-			if (gpa_sstate->n_tasks_nogrp > 0)
-			{
-				ofs += snprintf(temp + ofs, sizeof(temp) - ofs,
-								"%sNoGroup", ofs > 0 ? ", " : "");
-				if (with_percentage)
-					ofs += snprintf(temp + ofs, sizeof(temp) - ofs,
-									" (%.1f%%)",
-									(double)(100 * gpa_sstate->n_tasks_nogrp)/
-									(double)(n_tasks));
-			}
-			if (gpa_sstate->n_tasks_local > 0)
-			{
-				ofs += snprintf(temp + ofs, sizeof(temp) - ofs,
-								"%sLocal", ofs > 0 ? ", " : "");
-				if (with_percentage)
-					ofs += snprintf(temp + ofs, sizeof(temp) - ofs,
-									" (%.1f%%)",
-									(double)(100 * gpa_sstate->n_tasks_local)/
-									(double)(n_tasks));
-			}
-			if (gpa_sstate->n_tasks_global > 0)
-			{
-				ofs += snprintf(temp + ofs, sizeof(temp) - ofs,
-								"%sGlobal", ofs > 0 ? ", " : "");
-				if (with_percentage)
-					ofs += snprintf(temp + ofs, sizeof(temp) - ofs,
-									" (%.1f%%)",
-									(double)(100 * gpa_sstate->n_tasks_global)/
-									(double)(n_tasks));
-			}
-			if (gpa_sstate->n_tasks_final > 0)
-			{
-				ofs += snprintf(temp + ofs, sizeof(temp) - ofs,
-								"%sFinal", ofs > 0 ? ", " : "");
-				if (with_percentage)
-					ofs += snprintf(temp + ofs, sizeof(temp) - ofs,
-									" (%.1f%%)",
-									(double)(100 * gpa_sstate->n_tasks_final)/
-									(double)(n_tasks));
-			}
-			policy = temp;
-		}
-		pthreadMutexUnlock(&gpa_sstate->mutex);
-	}
+		policy = "Local";
 	ExplainPropertyText("Reduction", policy, es);
 
 	/* Set up deparsing context */
@@ -3826,6 +3752,21 @@ ExplainGpuPreAgg(CustomScanState *node, List *ancestors, ExplainState *es)
 		ExplainPropertyText("Unified GpuJoin", "enabled", es);
 	else if (es->format != EXPLAIN_FORMAT_TEXT)
 		ExplainPropertyText("Unified GpuJoin", "disabled", es);
+
+#ifdef PGSTROM_DEBUG
+	/* debugging stuff, if any */
+	if (gpa_sstate)
+	{
+		if (gpa_sstate->tv_stat_debug1 > 0)
+			ExplainPropertyLong("debug1", gpa_sstate->tv_stat_debug1, es);
+		if (gpa_sstate->tv_stat_debug2 > 0)
+			ExplainPropertyLong("debug2", gpa_sstate->tv_stat_debug2, es);
+		if (gpa_sstate->tv_stat_debug3 > 0)
+			ExplainPropertyLong("debug3", gpa_sstate->tv_stat_debug3, es);
+		if (gpa_sstate->tv_stat_debug4 > 0)
+			ExplainPropertyLong("debug4", gpa_sstate->tv_stat_debug4, es);
+	}
+#endif
 
 	/* other common fields */
 	pgstromExplainGpuTaskState(&gpas->gts, es);
@@ -4438,24 +4379,16 @@ gpupreaggUpdateRunTimeStat(GpuPreAggSharedState *gpa_sstate,
 						   kern_gpupreagg *kgpreagg)
 {
 	pthreadMutexLock(&gpa_sstate->mutex);
-#if 0
-	if (kgpreagg->reduction_mode == GPUPREAGG_NOGROUP_REDUCTION)
-		gpa_sstate->n_tasks_nogrp++;
-	else if (kgpreagg->reduction_mode == GPUPREAGG_LOCAL_REDUCTION)
-		gpa_sstate->n_tasks_local++;
-	else if (kgpreagg->reduction_mode == GPUPREAGG_GLOBAL_REDUCTION)
-		gpa_sstate->n_tasks_global++;
-	else
-	{
-		Assert(kgpreagg->reduction_mode == GPUPREAGG_FINAL_REDUCTION);
-		gpa_sstate->n_tasks_final++;
-	}
-#endif
 	gpa_sstate->exec_nrows_in	+= kgpreagg->nitems_real;
 	gpa_sstate->exec_nfiltered	+= kgpreagg->nitems_filtered;
 	gpa_sstate->f_nitems[gpuserv_cuda_dindex] += kgpreagg->num_groups;
 	gpa_sstate->f_extra_sz[gpuserv_cuda_dindex] += kgpreagg->extra_usage;
-
+#ifdef PGSTROM_DEBUG
+	gpa_sstate->tv_stat_debug1	+= kgpreagg->tv_stat_debug1;
+	gpa_sstate->tv_stat_debug2	+= kgpreagg->tv_stat_debug2;
+	gpa_sstate->tv_stat_debug3	+= kgpreagg->tv_stat_debug3;
+	gpa_sstate->tv_stat_debug4	+= kgpreagg->tv_stat_debug4;
+#endif
 	pthreadMutexUnlock(&gpa_sstate->mutex);
 }
 
