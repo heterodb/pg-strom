@@ -1392,8 +1392,9 @@ toast_raw_datum_size(kern_context *kcxt, varlena *attr)
  */
 #define EXTRACT_HEAP_TUPLE_BEGIN(ADDR, kds, htup)						\
 	do {																\
-		HeapTupleHeaderData *__htup = (htup);							\
-		kern_data_store	*__kds = (kds);									\
+		const HeapTupleHeaderData * __restrict__ __htup = (htup);		\
+		kern_data_store	*__hogekds = (kds);									\
+		const kern_colmeta * __restrict__ __kds_colmeta = __kds->colmeta; \
 		kern_colmeta	__cmeta;										\
 		cl_uint			__colidx = 0;									\
 		cl_uint			__ncols;										\
@@ -1405,9 +1406,9 @@ toast_raw_datum_size(kern_context *kcxt, varlena *attr)
 		else															\
 		{																\
 			__heap_hasnull = ((__htup->t_infomask & HEAP_HASNULL) != 0); \
-			__ncols = min((kds)->ncols,									\
+			__ncols = min(__ldg((kds)->ncols),							\
 						  __htup->t_infomask2 & HEAP_NATTS_MASK);		\
-			__cmeta = __kds->colmeta[__colidx];							\
+			__cmeta = __kds_colmeta[__colidx];							\
 			__pos = (char *)(__htup) + __htup->t_hoff;					\
 			assert(__pos == (char *)MAXALIGN(__pos));					\
 		}																\
@@ -1427,7 +1428,7 @@ toast_raw_datum_size(kern_context *kcxt, varlena *attr)
 		if (__colidx < __ncols &&										\
 			(!__heap_hasnull || !att_isnull(__colidx, __htup->t_bits)))	\
 		{																\
-			__cmeta = __kds->colmeta[__colidx];							\
+			__cmeta = __kds_colmeta[__colidx];							\
 																		\
 			if (__cmeta.attlen > 0)										\
 				__pos = (char *)TYPEALIGN(__cmeta.attalign, __pos);		\
