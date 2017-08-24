@@ -3416,6 +3416,7 @@ gpupreagg_post_planner(PlannedStmt *pstmt, CustomScan *cscan)
 void
 assign_gpupreagg_session_info(StringInfo buf, GpuTaskState *gts)
 {
+	GpuPreAggState *gpas = (GpuPreAggState *) gts;
 	CustomScan	   *cscan = (CustomScan *)gts->css.ss.ps.plan;
 
 	Assert(pgstrom_plan_is_gpupreagg(&cscan->scan.plan));
@@ -3426,6 +3427,8 @@ assign_gpupreagg_session_info(StringInfo buf, GpuTaskState *gts)
 	 */
 	if (cscan->scan.scanrelid > 0)
 		appendStringInfo(buf, "#define GPUPREAGG_PULLUP_OUTER_SCAN 1\n");
+	if (gpas->outer_quals != NIL)
+		appendStringInfo(buf, "#define GPUPREAGG_HAS_OUTER_QUALS 1\n");
 }
 
 /*

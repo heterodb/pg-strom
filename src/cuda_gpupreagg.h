@@ -483,6 +483,7 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 			}
 
 			/* evaluation of the qualifier */
+#ifdef GPUPREAGG_HAS_OUTER_QUALS
 			if (htup)
 				rc = gpuscan_quals_eval(&kcxt, kds_src, &t_self, htup);
 			/* bailout if any errors */
@@ -491,6 +492,9 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 			__syncthreads();
 			if (status != StromError_Success)
 				goto out;
+#else
+			rc = true;
+#endif
 			/* allocation of the kds_slot buffer */
 			tv2 = GlobalTimer();
 			offset = pgstromStairlikeSum(htup && rc ? 1 : 0, &nvalids);
@@ -544,7 +548,7 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 				gang_sync = 0;
 			__syncthreads();
 			if (get_local_id() % part_sz == 0 && line_no < n_lines)
-				atomicAdd(&gang_sync, 1);
+				gang_sync = 1;
 			__syncthreads();
 		} while (gang_sync > 0);
 	} while(try_next_window);
