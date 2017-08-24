@@ -1579,7 +1579,7 @@ gpuservEventLoop(void)
 		{
 			pthread_t	thread;
 
-			if (pg_atomic_read_u32(&gpuserv_worker_nthreads) > 16)
+			if (pg_atomic_read_u32(&gpuserv_worker_nthreads) > 32)
 				break;
 
 			/* launch a worker thread */

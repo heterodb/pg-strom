@@ -818,14 +818,11 @@ errorTextKernel(kern_errorbuf *kerror)
 		KERN_ENTRY(gpujoin_projection_slot);
 		KERN_ENTRY(gpujoin_count_rows_dist);
 		KERN_ENTRY(gpujoin_main);
-		KERN_ENTRY(gpupreagg_preparation);
-		KERN_ENTRY(gpupreagg_local_reduction);
-		KERN_ENTRY(gpupreagg_global_reduction);
+		KERN_ENTRY(gpupreagg_setup_row);
+		KERN_ENTRY(gpupreagg_setup_block);
 		KERN_ENTRY(gpupreagg_nogroup_reduction);
-		KERN_ENTRY(gpupreagg_final_preparation);
-		KERN_ENTRY(gpupreagg_final_reduction);
+		KERN_ENTRY(gpupreagg_groupby_reduction);
 		KERN_ENTRY(gpupreagg_fixup_varlena);
-		KERN_ENTRY(gpupreagg_main);
 		KERN_ENTRY(gpusort_projection);
 		KERN_ENTRY(gpusort_bitonic_local);
 		KERN_ENTRY(gpusort_bitonic_step);

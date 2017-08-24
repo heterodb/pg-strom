@@ -2890,8 +2890,8 @@ gpupreagg_codegen_projection(StringInfo kern,
  * gpupreagg_hashvalue(kern_context *kcxt,
  *                     cl_uint *crc32_table,
  *                     cl_uint hash_value,
- *                     kern_data_store *kds,
- *                     size_t kds_index);
+ *                     cl_bool *slot_isnull,
+ *                     Datum *slot_values);
  */
 static void
 gpupreagg_codegen_hashvalue(StringInfo kern,
@@ -2899,10 +2899,12 @@ gpupreagg_codegen_hashvalue(StringInfo kern,
 							List *tlist_dev)
 {
 	StringInfoData	decl;
+	StringInfoData	load;
 	StringInfoData	body;
 	ListCell	   *lc;
 
 	initStringInfo(&decl);
+    initStringInfo(&load);
     initStringInfo(&body);
 	context->param_refs = NULL;
 
@@ -2912,8 +2914,8 @@ gpupreagg_codegen_hashvalue(StringInfo kern,
 		"gpupreagg_hashvalue(kern_context *kcxt,\n"
 		"                    cl_uint *crc32_table,\n"
 		"                    cl_uint hash_value,\n"
-		"                    kern_data_store *kds,\n"
-		"                    size_t kds_index)\n"
+		"                    cl_bool *slot_isnull,\n"
+		"                    Datum *slot_values)\n"
 		"{\n");
 
 	foreach (lc, tlist_dev)
@@ -2933,26 +2935,47 @@ gpupreagg_codegen_hashvalue(StringInfo kern,
 		/* variable declarations */
 		appendStringInfo(
 			&decl,
-			"  pg_%s_t keyval_%u = pg_%s_vref(kds,kcxt,%u,kds_index);\n",
-			dtype->type_name, tle->resno,
-			dtype->type_name, tle->resno - 1);
+			"  pg_%s_t keyval_%u;\n",
+			dtype->type_name, tle->resno);
+		/* load variables */
+		if (dtype->type_byval)
+			appendStringInfo(
+				&load,
+				"  addr = slot_isnull[%d] ? NULL : slot_values + %u;\n"
+				"  keyval_%u = pg_%s_datum_ref(kcxt, addr);\n",
+				tle->resno - 1, tle->resno - 1,
+				tle->resno, dtype->type_name);
+		else
+			appendStringInfo(
+				&load,
+				"  addr = slot_isnull[%d] ? NULL : (void *)slot_values[%u];\n"
+				"  keyval_%u = pg_%s_datum_ref(kcxt, addr);\n",
+				tle->resno - 1, tle->resno - 1,
+				tle->resno, dtype->type_name);
 		/* compute crc32 value */
 		appendStringInfo(
 			&body,
 			"  hash_value = pg_%s_comp_crc32(crc32_table, hash_value, keyval_%u);\n",
 			dtype->type_name, tle->resno);
 	}
+	appendStringInfoString(
+		&decl,
+		"  void *addr __attribute__((unused));\n");
+
 	/* no constants should appear */
 	Assert(bms_is_empty(context->param_refs));
 
 	appendStringInfo(kern,
 					 "%s\n"
 					 "%s\n"
+					 "%s\n"
 					 "  return hash_value;\n"
 					 "}\n\n",
 					 decl.data,
+					 load.data,
 					 body.data);
 	pfree(decl.data);
+	pfree(load.data);
 	pfree(body.data);
 }
 
@@ -3053,7 +3076,7 @@ gpupreagg_codegen_keymatch(StringInfo kern,
 static const char *
 gpupreagg_codegen_common_calc(TargetEntry *tle,
 							  codegen_context *context,
-							  const char *aggcalc_class)
+							  bool is_atomic_ops)
 {
 	FuncExpr	   *f = (FuncExpr *)tle->expr;
 	char		   *func_name;
@@ -3068,9 +3091,9 @@ gpupreagg_codegen_common_calc(TargetEntry *tle,
 			 nodeToString(f));
 	func_name = get_func_name(f->funcid);
 	if (strcmp(func_name, "pmin") == 0)
-		aggcalc_ops = "PMIN";
+		aggcalc_ops = "min";
 	else if (strcmp(func_name, "pmax") == 0)
-		aggcalc_ops = "PMAX";
+		aggcalc_ops = "max";
 	else if (strcmp(func_name, "nrows") == 0 ||
 			 strcmp(func_name, "psum") == 0 ||
 			 strcmp(func_name, "psum_x2") == 0 ||
@@ -3079,7 +3102,7 @@ gpupreagg_codegen_common_calc(TargetEntry *tle,
 			 strcmp(func_name, "pcov_x2") == 0 ||
 			 strcmp(func_name, "pcov_y2") == 0 ||
 			 strcmp(func_name, "pcov_xy") == 0)
-		aggcalc_ops = "PADD";
+		aggcalc_ops = "add";
 	else
 		elog(ERROR, "Bug? unexpected partial function expression: %s",
 			 nodeToString(f));
@@ -3093,50 +3116,39 @@ gpupreagg_codegen_common_calc(TargetEntry *tle,
 	switch (dtype->type_oid)
 	{
 		case INT2OID:
-			aggcalc_type = "SHORT";
+			aggcalc_type = "short";
 			break;
 		case INT4OID:
 		case DATEOID:
-			aggcalc_type = "INT";
+			aggcalc_type = "int";
 			break;
 		case INT8OID:
 		case CASHOID:
 		case TIMEOID:
 		case TIMESTAMPOID:
 		case TIMESTAMPTZOID:
-			aggcalc_type = "LONG";
+			aggcalc_type = "long";
 			break;
 		case FLOAT4OID:
-			aggcalc_type = "FLOAT";
+			aggcalc_type = "float";
 			break;
 		case FLOAT8OID:
-			aggcalc_type = "DOUBLE";
+			aggcalc_type = "double";
 			break;
-#ifdef NOT_USED
-		case NUMERICOID:
-			aggcalc_type = "NUMERIC";
-			break;
-#endif
 		default:
 			elog(ERROR, "Bug? %s is not expected to use for GpuPreAgg",
 				 format_type_be(dtype->type_oid));
 	}
 	snprintf(sbuffer, sizeof(sbuffer),
-			 "AGGCALC_%s_%s_%s",
-			 aggcalc_class,
+			 "aggcalc_%s_%s_%s",
+			 is_atomic_ops ? "atomic" : "normal",
 			 aggcalc_ops,
 			 aggcalc_type);
 	return sbuffer;
 }
 
 /*
- * gpupreagg_codegen_local_calc - code generator for
- *
- * STATIC_FUNCTION(void)
- * gpupreagg_local_calc(kern_context *kcxt,
- *                      cl_int attnum,
- *                      pagg_datum *accum,
- *                      pagg_datum *newval);
+ * gpupreagg_codegen_local_calc - code generator for local calculation
  */
 static void
 gpupreagg_codegen_local_calc(StringInfo kern,
@@ -3148,10 +3160,11 @@ gpupreagg_codegen_local_calc(StringInfo kern,
 	appendStringInfoString(
 		kern,
 		"STATIC_FUNCTION(void)\n"
-		"gpupreagg_local_calc(kern_context *kcxt,\n"
-		"                     cl_int attnum,\n"
-		"                     pagg_datum *accum,\n"
-		"                     pagg_datum *newval)\n"
+		"gpupreagg_local_calc(cl_int attnum,\n"
+		"                     cl_bool *p_acm_isnull,\n"
+		"                     Datum   *p_acm_datum,\n"
+		"                     cl_bool  new_isnull,\n"
+		"                     Datum    new_datum)\n"
 		"{\n"
 		"  switch (attnum)\n"
 		"  {\n");
@@ -3164,11 +3177,11 @@ gpupreagg_codegen_local_calc(StringInfo kern,
 		if (tle->resjunk || !is_altfunc_expression((Node *)tle->expr))
 			continue;
 
-		label = gpupreagg_codegen_common_calc(tle, context, "LOCAL");
+		label = gpupreagg_codegen_common_calc(tle, context, true);
 		appendStringInfo(
 			kern,
 			"  case %d:\n"
-			"    %s(kcxt,accum,newval);\n"
+			"    %s(p_acm_isnull,p_acm_datum,new_isnull,new_datum);\n"
 			"    break;\n",
 			tle->resno - 1,
 			label);
@@ -3182,12 +3195,7 @@ gpupreagg_codegen_local_calc(StringInfo kern,
 }
 
 /*
- * gpupreagg_codegen_global_calc - code generator for
- *
- * STATIC_FUNCTION(void)
- * gpupreagg_global_calc(kern_context *kcxt,
- *                       kern_data_store *accum_kds,  size_t accum_index,
- *                       kern_data_store *newval_kds, size_t newval_index);
+ * gpupreagg_codegen_global_calc - code generator for global calculation
  */
 static void
 gpupreagg_codegen_global_calc(StringInfo kern,
@@ -3199,24 +3207,11 @@ gpupreagg_codegen_global_calc(StringInfo kern,
 	appendStringInfoString(
 		kern,
 		"STATIC_FUNCTION(void)\n"
-		"gpupreagg_global_calc(kern_context *kcxt,\n"
-		"                      kern_data_store *accum_kds,\n"
-		"                      size_t accum_index,\n"
-		"                      kern_data_store *newval_kds,\n"
-		"                      size_t newval_index)\n"
-		"{\n"
-		"  char    *disnull     __attribute__((unused))\n"
-		"    = KERN_DATA_STORE_ISNULL(accum_kds,accum_index);\n"
-		"  Datum   *dvalues     __attribute__((unused))\n"
-		"    = KERN_DATA_STORE_VALUES(accum_kds,accum_index);\n"
-		"  char    *sisnull     __attribute__((unused))\n"
-		"    = KERN_DATA_STORE_ISNULL(newval_kds,newval_index);\n"
-		"  Datum   *svalues     __attribute__((unused))\n"
-		"    = KERN_DATA_STORE_VALUES(newval_kds,newval_index);\n"
-		"\n"
-		"  assert(accum_kds->format == KDS_FORMAT_SLOT);\n"
-		"  assert(newval_kds->format == KDS_FORMAT_SLOT);\n"
-		"\n");
+		"gpupreagg_global_calc(cl_bool *dst_isnull,\n"
+		"                      Datum *dst_values,\n"
+		"                      cl_bool *src_isnull,\n"
+		"                      Datum *src_values)\n"
+		"{\n");
 	foreach (lc, tlist_dev)
 	{
 		TargetEntry	   *tle = lfirst(lc);
@@ -3226,10 +3221,10 @@ gpupreagg_codegen_global_calc(StringInfo kern,
 		if (tle->resjunk || !is_altfunc_expression((Node *)tle->expr))
 			continue;
 
-		label = gpupreagg_codegen_common_calc(tle, context, "GLOBAL");
+		label = gpupreagg_codegen_common_calc(tle, context, true);
 		appendStringInfo(
 			kern,
-			"  %s(kcxt, disnull+%d, dvalues+%d, sisnull[%d], svalues[%d]);\n",
+			"  %s(dst_isnull+%d, dst_values+%d, src_isnull[%d], src_values[%d]);\n",
 			label,
 			tle->resno - 1,
 			tle->resno - 1,
@@ -3242,13 +3237,7 @@ gpupreagg_codegen_global_calc(StringInfo kern,
 }
 
 /*
- * gpupreagg_codegen_nogroup_calc - code generator for
- *
- * STATIC_FUNCTION(void)
- * gpupreagg_nogroup_calc(kern_context *kcxt,
- *                        cl_int attnum,
- *                        pagg_datum *accum,
- *                        pagg_datum *newval);
+ * gpupreagg_codegen_nogroup_calc - code generator for nogroup calculation
  */
 static void
 gpupreagg_codegen_nogroup_calc(StringInfo kern,
@@ -3260,10 +3249,11 @@ gpupreagg_codegen_nogroup_calc(StringInfo kern,
 	appendStringInfoString(
         kern,
 		"STATIC_FUNCTION(void)\n"
-		"gpupreagg_nogroup_calc(kern_context *kcxt,\n"
-		"                       cl_int attnum,\n"
-		"                       pagg_datum *accum,\n"
-		"                       pagg_datum *newval)\n"
+		"gpupreagg_nogroup_calc(cl_int attnum,\n"
+		"                       cl_bool *p_acm_isnull,"
+		"                       Datum   *p_acm_datum,"
+		"                       cl_bool  new_isnull,"
+		"                       Datum    new_datum)"
 		"{\n"
 		"  switch (attnum)\n"
 		"  {\n");
@@ -3275,11 +3265,11 @@ gpupreagg_codegen_nogroup_calc(StringInfo kern,
 		/* only partial aggregate function's arguments */
 		if (tle->resjunk || !is_altfunc_expression((Node *)tle->expr))
 			continue;
-		label = gpupreagg_codegen_common_calc(tle, context, "NOGROUP");
+		label = gpupreagg_codegen_common_calc(tle, context, false);
 		appendStringInfo(
 			kern,
 			"  case %d:\n"
-			"    %s(kcxt,accum,newval);\n"
+			"    %s(p_acm_isnull, p_acm_datum, new_isnull, new_datum);\n"
 			"    break;\n",
 			tle->resno - 1,
 			label);
@@ -4029,7 +4019,7 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 	GpuPreAggTask  *gpreagg;
 	bool			with_nvme_strom = false;
 	cl_uint			nrows_per_block = 0;
-	size_t			nitems_real = (pds_src ? pds_src->kds.nitems : 0);
+	size_t			slot_nrooms = (pds_src ? pds_src->kds.nitems : 0);
 	Size			head_sz;
 	Size			kds_len;
 	Size			kgjoin_len = 0;
@@ -4051,7 +4041,7 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 		// memory consumption is not so big.
 		// Large nrows_per_block has less volatility but length of
 		// kern_resultbuf is not so short.
-		nitems_real = 1.5 * (double)(pds_src->kds.nitems * nrows_per_block);
+		slot_nrooms = 1.5 * (double)(slot_nrooms * nrows_per_block);
 	}
 
 	/* allocation of GpuPreAggTask */
@@ -4086,11 +4076,8 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 		setup_kernel_gpujoin(gpreagg->kgjoin, outer_gts, pds_src);
 	}
 	/* if any grouping keys, determine the reduction policy later */
-	gpreagg->kern.reduction_mode = (gpas->num_group_keys == 0
-									? GPUPREAGG_NOGROUP_REDUCTION
-									: GPUPREAGG_INVALID_REDUCTION);
-	gpreagg->kern.nitems_real = nitems_real;
-	gpreagg->kern.hash_size = nitems_real;
+	gpreagg->kern.num_group_keys = gpas->num_group_keys;
+	gpreagg->kern.hash_size = slot_nrooms;
 	memcpy(gpreagg->kern.pg_crc32_table,
 		   pg_crc32_table,
 		   sizeof(uint32) * 256);
@@ -4098,22 +4085,14 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 	memcpy(KERN_GPUPREAGG_PARAMBUF(&gpreagg->kern),
 		   gpas->gts.kern_params,
 		   gpas->gts.kern_params->length);
-	/* offset of kern_resultbuf-1 */
-	gpreagg->kern.kresults_1_offset
-		= STROMALIGN(offsetof(kern_gpupreagg, kparams) +
-					 gpas->gts.kern_params->length);
-	/* offset of kern_resultbuf-2 */
-	gpreagg->kern.kresults_2_offset
-		= STROMALIGN(gpreagg->kern.kresults_1_offset +
-					 offsetof(kern_resultbuf, results[nitems_real]));
 	/* kds_head for the working global buffer */
 	kds_len += STROMALIGN(LONGALIGN((sizeof(Datum) + sizeof(char)) *
-									gpa_tupdesc->natts) * nitems_real);
+									gpa_tupdesc->natts) * slot_nrooms);
 	init_kernel_data_store(gpreagg->kds_slot_head,
 						   gpa_tupdesc,
 						   kds_len,
 						   KDS_FORMAT_SLOT,
-						   nitems_real);
+						   slot_nrooms);
 	return &gpreagg->task;
 }
 
@@ -4171,6 +4150,8 @@ gpupreagg_next_task(GpuTaskState *gts)
 		{
 			if (gpas->gts.scan_overflow)
 			{
+				if (gpas->gts.scan_overflow == (void *)(~0UL))
+					break;
 				slot = gpas->gts.scan_overflow;
 				gpas->gts.scan_overflow = NULL;
 			}
@@ -4178,7 +4159,10 @@ gpupreagg_next_task(GpuTaskState *gts)
 			{
 				slot = ExecProcNode(outer_ps);
 				if (TupIsNull(slot))
+				{
+					gpas->gts.scan_overflow = (void *)(~0UL);
 					break;
+				}
 			}
 
 			/* create a new data-store on demand */
@@ -4440,32 +4424,6 @@ gpupreagg_load_final_buffer(GpuPreAggTask *gpreagg,
 	{
 		*p_kds_final = gpa_sstate->m_kds_final[gpuserv_cuda_dindex];
 		*p_fhash     = gpa_sstate->m_fhash[gpuserv_cuda_dindex];
-
-		/*
-		 * Also determine the reduction policy
-		 */
-		if (gpreagg->kern.reduction_mode != GPUPREAGG_NOGROUP_REDUCTION)
-		{
-			cl_double	plan_ngroups = (double)gpa_sstate->plan_ngroups;
-			cl_double	exec_ngroups = (double)gpa_sstate->f_nitems[gpuserv_cuda_dindex];
-			cl_double	real_ngroups;
-			cl_double	exec_ratio;
-			cl_double	num_tasks;
-
-			num_tasks = (cl_double)(gpa_sstate->n_tasks_nogrp +
-									gpa_sstate->n_tasks_local +
-									gpa_sstate->n_tasks_global +
-									gpa_sstate->n_tasks_final);
-			exec_ratio = Min(num_tasks, 30.0) / 30.0;
-			real_ngroups = (plan_ngroups * (1.0 - exec_ratio) +
-							exec_ngroups * exec_ratio);
-			if (real_ngroups < devBaselineMaxThreadsPerBlock / 4)
-				gpreagg->kern.reduction_mode = GPUPREAGG_LOCAL_REDUCTION;
-			else if (real_ngroups < gpreagg->kern.nitems_real / 4)
-				gpreagg->kern.reduction_mode = GPUPREAGG_GLOBAL_REDUCTION;
-			else
-				gpreagg->kern.reduction_mode = GPUPREAGG_FINAL_REDUCTION;
-		}
 	}
 	pthreadMutexUnlock(&gpa_sstate->mutex);
 
@@ -4480,6 +4438,7 @@ gpupreaggUpdateRunTimeStat(GpuPreAggSharedState *gpa_sstate,
 						   kern_gpupreagg *kgpreagg)
 {
 	pthreadMutexLock(&gpa_sstate->mutex);
+#if 0
 	if (kgpreagg->reduction_mode == GPUPREAGG_NOGROUP_REDUCTION)
 		gpa_sstate->n_tasks_nogrp++;
 	else if (kgpreagg->reduction_mode == GPUPREAGG_LOCAL_REDUCTION)
@@ -4491,6 +4450,7 @@ gpupreaggUpdateRunTimeStat(GpuPreAggSharedState *gpa_sstate,
 		Assert(kgpreagg->reduction_mode == GPUPREAGG_FINAL_REDUCTION);
 		gpa_sstate->n_tasks_final++;
 	}
+#endif
 	gpa_sstate->exec_nrows_in	+= kgpreagg->nitems_real;
 	gpa_sstate->exec_nfiltered	+= kgpreagg->nitems_filtered;
 	gpa_sstate->f_nitems[gpuserv_cuda_dindex] += kgpreagg->num_groups;
@@ -4512,15 +4472,17 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 	GpuPreAggSharedState *gpa_sstate = gpreagg->gpa_sstate;
 	pgstrom_data_store *pds_src = gpreagg->pds_src;
 	kern_data_store *kds_slot_head = gpreagg->kds_slot_head;
-	CUfunction	kern_main;
+	CUfunction	kern_setup;
+	CUfunction	kern_reduction;
 	CUdeviceptr	devptr;
 	CUdeviceptr	m_gpreagg = 0UL;
 	CUdeviceptr	m_kds_src = 0UL;
 	CUdeviceptr	m_kds_slot = 0UL;
-	CUdeviceptr	m_ghash = 0UL;
 	CUdeviceptr	m_kds_final = 0UL;
 	CUdeviceptr	m_fhash = 0UL;
 	Size		length;
+	size_t		grid_sz;
+	size_t		block_sz;
 	void	   *kern_args[6];
 	CUresult	rc;
 	int			i, retval = 100001;	/* retry after 100ms delay */
@@ -4542,9 +4504,19 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 	/*
 	 * Lookup kernel functions
 	 */
-	rc = cuModuleGetFunction(&kern_main,
+	rc = cuModuleGetFunction(&kern_setup,
 							 cuda_module,
-							 "gpupreagg_main");
+							 pds_src->kds.format == KDS_FORMAT_ROW
+							 ? "gpupreagg_setup_row"
+							 : "gpupreagg_setup_block");
+	if (rc != CUDA_SUCCESS)
+		werror("failed on cuModuleGetFunction: %s", errorText(rc));
+
+	rc = cuModuleGetFunction(&kern_reduction,
+							 cuda_module,
+							 gpreagg->kern.num_group_keys == 0
+							 ? "gpupreagg_nogroup_reduction"
+							 : "gpupreagg_groupby_reduction");
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuModuleGetFunction: %s", errorText(rc));
 
@@ -4552,9 +4524,7 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 	 * Device memory allocation for short term
 	 */
 	length = (GPUMEMALIGN(KERN_GPUPREAGG_LENGTH(&gpreagg->kern)) +
-			  GPUMEMALIGN(kds_slot_head->length) +
-			  GPUMEMALIGN(offsetof(kern_global_hashslot,
-								   hash_slot[gpreagg->kern.hash_size])));
+			  GPUMEMALIGN(kds_slot_head->length));
 	if (gpreagg->with_nvme_strom)
 	{
 		rc = gpuMemAllocIOMap(gcontext,
@@ -4591,29 +4561,14 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 	Assert(m_kds_src != 0UL);
 	m_kds_slot = devptr;
 	devptr += GPUMEMALIGN(kds_slot_head->length);
-	m_ghash = devptr;
-	devptr += GPUMEMALIGN(offsetof(kern_global_hashslot,
-								   hash_slot[gpreagg->kern.hash_size]));
 	Assert(devptr == m_gpreagg + length);
 	Assert(m_kds_final != 0UL && m_fhash != 0UL);
-	Assert(gpreagg->kern.reduction_mode == GPUPREAGG_NOGROUP_REDUCTION	||
-		   gpreagg->kern.reduction_mode == GPUPREAGG_LOCAL_REDUCTION	||
-		   gpreagg->kern.reduction_mode == GPUPREAGG_GLOBAL_REDUCTION	||
-		   gpreagg->kern.reduction_mode == GPUPREAGG_FINAL_REDUCTION);
-
 	/*
-	 * OK, kick gpupreagg_main kernel function
+	 * OK, kick a series of GpuPreAgg invocations
 	 */
 
 	/* kern_gpupreagg */
 	length = KERN_GPUPREAGG_DMASEND_LENGTH(&gpreagg->kern);
-#if 0
-	rc = cuMemcpyHtoD(m_gpreagg,
-					  &gpreagg->kern,
-					  length);
-	if (rc != CUDA_SUCCESS)
-		werror("failed on cuMemcpyHtoD: %s", errorText(rc));
-#endif
 	memcpy((void *)m_gpreagg, &gpreagg->kern, length);
 	rc = cuMemPrefetchAsync(m_gpreagg, length,
 							gpuserv_cuda_device,
@@ -4642,13 +4597,6 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 
 	/* header of the internal kds-slot buffer */
 	length = KERN_DATA_STORE_HEAD_LENGTH(kds_slot_head);
-#if 0
-	rc = cuMemcpyHtoD(m_kds_slot,
-					  kds_slot_head,
-					  length);
-	if (rc != CUDA_SUCCESS)
-		werror("failed on cuMemcpyHtoD: %s", errorText(rc));
-#endif
 	memcpy((void *)m_kds_slot, kds_slot_head, length);
 	rc = cuMemPrefetchAsync(m_kds_slot, length,
 							gpuserv_cuda_device,
@@ -4656,26 +4604,59 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
 
-	/* Launch:
-	 * KERNEL_FUNCTION(void)
-	 * gpupreagg_main(kern_gpupreagg *kgpreagg,
-	 *                kern_data_store *kds_src,
-	 *                kern_data_store *kds_slot,
-	 *                kern_global_hashslot *g_hash,
-	 *                kern_data_store *kds_final,
-	 *                kern_global_hashslot *f_hash)
+	/*
+	 * Launch:
+	 * gpupreagg_setup_XXXX(kern_gpupreagg *kgpreagg,
+	 *                      kern_data_store *kds_src,
+	 *                      kern_data_store *kds_slot)
 	 */
+	largest_workgroup_size(&grid_sz,
+						   &block_sz,
+						   kern_setup,
+						   gpuserv_cuda_device,
+						   kds_slot_head->nrooms,
+						   sizeof(cl_int) * 1024,
+						   0);
+	grid_sz = Min(grid_sz,
+				  devAttrs[gpuserv_cuda_dindex].MULTIPROCESSOR_COUNT);
 	kern_args[0] = &m_gpreagg;
 	kern_args[1] = &m_kds_src;
 	kern_args[2] = &m_kds_slot;
-	kern_args[3] = &m_ghash;
-	kern_args[4] = &m_kds_final;
-	kern_args[5] = &m_fhash;
+	rc = cuLaunchKernel(kern_setup,
+						grid_sz, 1, 1,
+						block_sz, 1, 1,
+						sizeof(cl_int) * 1024,	/* for StairlikeSum */
+						CU_STREAM_PER_THREAD,
+						kern_args,
+						NULL);
+	if (rc != CUDA_SUCCESS)
+		werror("failed on cuLaunchKernel: %s", errorText(rc));
 
-	rc = cuLaunchKernel(kern_main,
-						1, 1, 1,
-						1, 1, 1,
-						sizeof(kern_errorbuf),
+	/*
+	 * Launch:
+	 * KERNEL_FUNCTION_MAXTHREADS(void)
+	 * gpupreagg_XXXX_reduction(kern_gpupreagg *kgpreagg,
+	 *                          kern_data_store *kds_slot,
+	 *                          kern_data_store *kds_final,
+	 *                          kern_global_hashslot *f_hash)
+	 */
+	largest_workgroup_size(&grid_sz,
+						   &block_sz,
+						   kern_reduction,
+						   gpuserv_cuda_device,
+						   kds_slot_head->nrooms,
+						   sizeof(cl_int) * 1024,
+						   0);
+	grid_sz = Min(grid_sz,
+				  devAttrs[gpuserv_cuda_dindex].MULTIPROCESSOR_COUNT);
+	kern_args[0] = &m_gpreagg;
+	kern_args[1] = &m_kds_slot;
+	kern_args[2] = &m_kds_final;
+	kern_args[3] = &m_fhash;
+	rc = cuLaunchKernel(kern_reduction,
+						grid_sz, 1, 1,
+						block_sz, 1, 1,
+						sizeof(cl_int) * 1024,	/* for StairlikeSum */
 						CU_STREAM_PER_THREAD,
 						kern_args,
 						NULL);
@@ -4693,15 +4674,6 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 
 	/* DMA Recv of individual kern_gpreagg */
 	length = KERN_GPUPREAGG_DMARECV_LENGTH(&gpreagg->kern);
-#if 0
-	rc = cuMemcpyDtoH(&gpreagg->kern,
-					  m_gpreagg,
-					  length);
-	if (rc != CUDA_SUCCESS)
-	{
-		werror("failed on cuMemcpyDtoH: %s", errorText(rc));
-	}
-#endif
 	memcpy(&gpreagg->kern, (void *)m_gpreagg, length);
 
 	/*
@@ -4903,10 +4875,6 @@ gpupreagg_process_unified_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 	devptr += GPUMEMALIGN(kds_dst_head->length);
 	Assert(devptr == m_gpreagg + length);
 	Assert(m_kds_final != 0UL && m_fhash != 0UL);
-	Assert(gpreagg->kern.reduction_mode == GPUPREAGG_NOGROUP_REDUCTION	||
-		   gpreagg->kern.reduction_mode == GPUPREAGG_LOCAL_REDUCTION	||
-		   gpreagg->kern.reduction_mode == GPUPREAGG_GLOBAL_REDUCTION	||
-		   gpreagg->kern.reduction_mode == GPUPREAGG_FINAL_REDUCTION);
 
 	/* kgpreagg */
 	length = KERN_GPUPREAGG_DMASEND_LENGTH(&gpreagg->kern);
@@ -5130,7 +5098,7 @@ gpupreagg_process_termination_task(GpuPreAggTask *gpreagg,
 	/*
 	 * fixup varlena datum on demand
 	 */
-	if (kds_final_head->has_notbyval)
+	if (kds_final_head->has_notbyval && f_nitems > 0)
 	{
 		hostptr_t	kds_baseptr = (hostptr_t)(&pds_final->kds) + kds_length;
 		CUfunction	kern_fixvar;

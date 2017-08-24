@@ -190,20 +190,20 @@ typedef uintptr_t		hostptr_t;
  * assigned on host/device functions
  */
 #ifdef __CUDACC__
+#if __CUDA_ARCH__ < 200
+#define MAXTHREADS_PER_BLOCK		512
+#else
+#define MAXTHREADS_PER_BLOCK		1024
+#endif
 #define STATIC_INLINE(RET_TYPE)					\
 	__device__ __forceinline__ static RET_TYPE __attribute__ ((unused))
 #define STATIC_FUNCTION(RET_TYPE)				\
 	__device__ static RET_TYPE __attribute__ ((unused))
 #define KERNEL_FUNCTION(RET_TYPE)				\
 	extern "C" __global__ RET_TYPE
-#if __CUDA_ARCH__ < 200
 #define KERNEL_FUNCTION_MAXTHREADS(RET_TYPE)	\
-	extern "C" __global__ RET_TYPE __launch_bounds__(512)
-#else
-#define KERNEL_FUNCTION_MAXTHREADS(RET_TYPE)	\
-	extern "C" __global__ RET_TYPE __launch_bounds__(1024)
-#endif
-#else
+	extern "C" __global__ RET_TYPE __launch_bounds__(MAXTHREADS_PER_BLOCK)
+#else	/* __CUDACC__ */
 #define STATIC_INLINE(RET_TYPE)		static inline RET_TYPE
 #define STATIC_FUNCTION(RET_TYPE)	static inline RET_TYPE
 #define KERNEL_FUNCTION(RET_TYPE)	RET_TYPE
@@ -255,14 +255,11 @@ typedef uintptr_t		hostptr_t;
 #define StromKernel_gpujoin_projection_slot			0x0207
 #define StromKernel_gpujoin_count_rows_dist			0x0208
 #define StromKernel_gpujoin_main					0x0299
-#define StromKernel_gpupreagg_preparation			0x0301
-#define StromKernel_gpupreagg_local_reduction		0x0302
-#define StromKernel_gpupreagg_global_reduction		0x0303
+#define StromKernel_gpupreagg_setup_row				0x0301
+#define StromKernel_gpupreagg_setup_block			0x0302
 #define StromKernel_gpupreagg_nogroup_reduction		0x0304
-#define StromKernel_gpupreagg_final_preparation		0x0305
-#define StromKernel_gpupreagg_final_reduction		0x0306
-#define StromKernel_gpupreagg_fixup_varlena			0x0307
-#define StromKernel_gpupreagg_main					0x0399
+#define StromKernel_gpupreagg_groupby_reduction		0x0305
+#define StromKernel_gpupreagg_fixup_varlena			0x0306
 #define StromKernel_gpusort_projection				0x0401
 #define StromKernel_gpusort_bitonic_local			0x0402
 #define StromKernel_gpusort_bitonic_step			0x0403
