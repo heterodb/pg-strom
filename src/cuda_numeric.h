@@ -210,16 +210,7 @@ pg_numeric_from_varlena(kern_context *kcxt, struct varlena *vl_val)
 	}
 
 	// Once data copy to private memory for alignment.
-    // memcpy(&numData, pSrc, len);
-	{
-		// OpenCL memcpy does not support private memory.
-		cl_char *dst = (cl_char *) &numData;
-		cl_char *src = (cl_char *) pSrc;
-		int i;
-		for(i=0; i<len; i++) {
-			dst[i] = src[i];
-		}
-	}
+	memcpy(&numData, pSrc, len);
 
 	// Convert PG-Strom numeric type from PostgreSQL numeric type.
 	{
@@ -227,14 +218,11 @@ pg_numeric_from_varlena(kern_context *kcxt, struct varlena *vl_val)
 		int		     expo;
 		cl_ulong     mant;
 		int 	     weight  = NUMERIC_WEIGHT(&numData);
-//		int		     dscale  = NUMERIC_DSCALE(&numData);
 		NumericDigit *digits = NUMERIC_DIGITS(&numData);
 		int			 offset  = (unsigned long)digits - (unsigned long)&numData;
 		int 	     ndigits = (len - offset) / sizeof(NumericDigit);
-
 		int			 i, base;
 		cl_ulong	 mantLast;
-
 
 		// Numeric value is 0, if ndigits is 0. 
 		if (ndigits == 0) {
@@ -244,19 +232,19 @@ pg_numeric_from_varlena(kern_context *kcxt, struct varlena *vl_val)
 		}
 
 		// Generate exponent.
-		expo = (weight - (ndigits - 1)) * PG_DEC_DIGITS;
+		expo = (weight - (ndigits-1)) * PG_DEC_DIGITS;
 
 		// Generate mantissa.
 		mant = 0;
-		for (i=0; i<ndigits-1; i++) {
-			mant = mant * PG_NBASE + digits[i];
+		for (i=0; i < ndigits-1; i++) {
+			mant = mant * PG_NBASE + __ldg(&digits[i]);
 		}
 
 		base     = PG_NBASE;
-		mantLast = digits[i];
-		for (i=0; i<PG_DEC_DIGITS; i++) {
+		mantLast = __ldg(&digits[i]);
+		for (i=0; i < PG_DEC_DIGITS; i++) {
 			if (mantLast % 10 == 0) {
-				expo ++;
+				expo++;
 				base     /= 10;
 				mantLast /= 10;
 			} else {
@@ -317,7 +305,8 @@ pg_numeric_from_varlena(kern_context *kcxt, struct varlena *vl_val)
 		}
 
 		// Error check
-		if (expo < PG_NUMERIC_EXPONENT_MIN || PG_NUMERIC_EXPONENT_MAX < expo ||
+		if (expo < PG_NUMERIC_EXPONENT_MIN ||
+			PG_NUMERIC_EXPONENT_MAX < expo ||
 			(mant & ~PG_NUMERIC_MANTISSA_MASK)) {
 			result.isnull = true;
 			result.value  = 0;
@@ -329,7 +318,6 @@ pg_numeric_from_varlena(kern_context *kcxt, struct varlena *vl_val)
 		result.isnull = false;
 		result.value  = PG_NUMERIC_SET(expo, sign, mant);
 	}
-
 	return result;
 }
 
@@ -616,7 +604,6 @@ numeric_to_float(kern_context *kcxt, pg_numeric_t arg)
 	cl_ulong	mant;
 	double		fvalue;
 
-
 	if (arg.isnull == true) {
 		v.isnull = true;
 		v.value  = 0;
@@ -629,16 +616,15 @@ numeric_to_float(kern_context *kcxt, pg_numeric_t arg)
 
 	if (mant == 0) {
 		v.isnull = false;
-		v.value  = PG_NUMERIC_SET(0, 0, 0);
+		v.value  = 0.0;
 		return v;
 	}
-
 
 	fvalue = (double)mant * exp10((double)expo);
 
 	if (isinf(fvalue) || isnan(fvalue)) {
 		v.isnull = true;
-		v.value  = 0;
+		v.value  = 0.0;
 		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 		return v;
 	}
