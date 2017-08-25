@@ -237,11 +237,11 @@ pg_numeric_from_varlena(kern_context *kcxt, struct varlena *vl_val)
 		// Generate mantissa.
 		mant = 0;
 		for (i=0; i < ndigits-1; i++) {
-			mant = mant * PG_NBASE + __ldg(&digits[i]);
+			mant = mant * PG_NBASE + digits[i];
 		}
 
 		base     = PG_NBASE;
-		mantLast = __ldg(&digits[i]);
+		mantLast = digits[i];
 		for (i=0; i < PG_DEC_DIGITS; i++) {
 			if (mantLast % 10 == 0) {
 				expo++;
