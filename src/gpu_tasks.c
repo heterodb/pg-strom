@@ -208,7 +208,6 @@ pgstromInitGpuTaskState(GpuTaskState *gts,
 	gts->kern_params = construct_kern_parambuf(used_params, econtext,
 											   cscan->custom_scan_tlist);
 	gts->scan_done = false;
-	gts->row_format = false;
 
 	gts->outer_bulk_exec = false;
 	InstrInit(&gts->outer_instrument, estate->es_instrument);
@@ -543,7 +542,6 @@ pgstromInitGpuTask(GpuTaskState *gts, GpuTask *gtask)
 	gtask->task_kind    = gts->task_kind;
 	gtask->program_id   = gts->program_id;
 	gtask->gts          = gts;
-	gtask->row_format   = gts->row_format;
 	gtask->cpu_fallback = false;
 	gtask->file_desc    = -1;
 	/* fields used in server */

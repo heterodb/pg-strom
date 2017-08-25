@@ -582,6 +582,7 @@ out:
 	kern_writeback_error_status(&kgpuscan->kerror, kcxt.e);
 }
 
+#if 0
 KERNEL_FUNCTION(void)
 gpuscan_projection_slot(kern_gpuscan *kgpuscan,
 						kern_data_store *kds_src,
@@ -683,6 +684,7 @@ out:
 	/* write back error status if any */
 	kern_writeback_error_status(&kgpuscan->kerror, kcxt.e);
 }
+#endif
 
 /*
  * gpuscan_exec_quals_any - common entrypoint for exec_quals_(row|block)
@@ -807,9 +809,8 @@ gpuscan_main(kern_gpuscan *kgpuscan,
 	assert(get_global_size() == 1);		/* only single thread */
 	assert(kds_src->format == KDS_FORMAT_ROW ||
 		   (kds_src->format == KDS_FORMAT_BLOCK && !kresults->all_visible));
-	assert(!kds_dst ||
-		   kds_dst->format == KDS_FORMAT_ROW ||
-		   kds_dst->format == KDS_FORMAT_SLOT);
+	assert(!kds_dst || kds_dst->format == KDS_FORMAT_ROW);
+
 	/*
 	 * (1) Evaluation of Scan qualifiers
 	 */
@@ -841,10 +842,9 @@ gpuscan_main(kern_gpuscan *kgpuscan,
 	{
 		tv1 = GlobalTimer();
 
-		if (kds_dst->format == KDS_FORMAT_ROW)
-			kernel_func = (void *)gpuscan_projection_row;
-		else
-			kernel_func = (void *)gpuscan_projection_slot;
+		/* KDS_FORMAT_SLOT as destination buffer is deprecated */
+		assert(kds_dst->format == KDS_FORMAT_ROW);
+		kernel_func = (void *)gpuscan_projection_row;
 
 		status = optimal_workgroup_size(&grid_sz,
                                         &block_sz,

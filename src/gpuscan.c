@@ -2428,32 +2428,19 @@ gpuscan_create_task(GpuScanState *gss,
 	}
 
 	/*
-	 * allocation of the destination buffer
+	 * NOTE: When we have no device projection and row-format
+	 * is required, we don't need to have destination buffer.
+	 * kern_resultbuf will have offset of the visible rows,
+	 * so we can reference pds_src as original PG-Strom did.
 	 */
-	if (gss->gts.row_format)
-	{
-		/*
-		 * NOTE: When we have no device projection and row-format
-		 * is required, we don't need to have destination buffer.
-		 * kern_resultbuf will have offset of the visible rows,
-		 * so we can reference pds_src as original PG-Strom did.
-		 */
-		if (!gss->dev_projection)
-			pds_dst = NULL;
-		else
-		{
-			pds_dst = PDS_create_row(gcontext,
-									 scan_tupdesc,
-									 pds_src->kds.length +
-									 gss->proj_row_extra * ntuples);
-		}
-	}
+	if (!gss->dev_projection)
+		pds_dst = NULL;
 	else
 	{
-		pds_dst = PDS_create_slot(gcontext,
-								  scan_tupdesc,
-								  ntuples,
-								  gss->proj_slot_extra * ntuples);
+		pds_dst = PDS_create_row(gcontext,
+								 scan_tupdesc,
+								 pds_src->kds.length +
+								 gss->proj_row_extra * ntuples);
 	}
 
 	/*

@@ -3502,7 +3502,6 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 		}
 		else if (pgstrom_bulk_exec_supported(outer_ps))
 		{
-			((GpuTaskState *) outer_ps)->row_format = true;
 			gpas->gts.outer_bulk_exec = true;
 		}
 		outerPlanState(gpas) = outer_ps;

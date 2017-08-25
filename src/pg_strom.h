@@ -154,7 +154,6 @@ struct GpuTaskState
 	ProgramId		program_id;		/* CUDA Program (to be acquired) */
 	kern_parambuf  *kern_params;	/* Const/Param buffer */
 	bool			scan_done;		/* True, if no more rows to read */
-	bool			row_format;		/* True, if KDS_FORMAT_ROW is required */
 
 	/* fields for outer scan */
 	bool			outer_bulk_exec;/* True, if bulk-exec mode is supported */
@@ -218,7 +217,6 @@ struct GpuTask
 	GpuTaskKind		task_kind;		/* same with GTS's one */
 	ProgramId		program_id;		/* same with GTS's one */
 	GpuTaskState   *gts;			/* GTS reference in the backend */
-	bool			row_format;		/* true, if row-format is preferred */
 	bool			cpu_fallback;	/* true, if task needs CPU fallback */
 	int				file_desc;		/* file-descriptor on backend side */
 	/* fields below are valid only server */
