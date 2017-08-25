@@ -357,7 +357,7 @@ gpupreagg_setup_row(kern_gpupreagg *kgpreagg,
 #endif
 
 		/* allocation of kds_slot buffer, if any */
-		offset = pgstromStairlikeSum(tupitem && rc ? 1 : 0, &nvalids);
+		offset = pgstromStairlikeBinaryCount(tupitem && rc, &nvalids);
 		if (nvalids > 0)
 		{
 			if (get_local_id() == 0)

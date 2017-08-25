@@ -417,6 +417,19 @@ STATIC_INLINE(cl_uint) SmxId(void)
 	return ret;
 }
 
+#if 0
+//XXX - Does it really return correct value?
+
+/*
+ * NwarpId() - reference to the %nwarpid register
+ */
+STATIC_INLINE(cl_uint) NwarpId(void)
+{
+	cl_uint		ret;
+	asm volatile("mov.u32 %0, %nwarpid;" : "=r"(ret) );
+	return ret;
+}
+
 /*
  * WarpId() - reference to the %warpid register
  */
@@ -424,6 +437,16 @@ STATIC_INLINE(cl_uint) WarpId(void)
 {
 	cl_uint		ret;
 	asm volatile("mov.u32 %0, %warpid;" : "=r"(ret) );
+	return ret;
+}
+#endif
+/*
+ * LaneId() - reference to the %laneid register
+ */
+STATIC_INLINE(cl_uint) LaneId(void)
+{
+	cl_uint		ret;
+	asm volatile("mov.u32 %0, %laneid;" : "=r"(ret) );
 	return ret;
 }
 
@@ -1393,8 +1416,7 @@ toast_raw_datum_size(kern_context *kcxt, varlena *attr)
 #define EXTRACT_HEAP_TUPLE_BEGIN(ADDR, kds, htup)						\
 	do {																\
 		const HeapTupleHeaderData * __restrict__ __htup = (htup);		\
-		kern_data_store	*__hogekds = (kds);									\
-		const kern_colmeta * __restrict__ __kds_colmeta = __kds->colmeta; \
+		const kern_colmeta * __restrict__ __kds_colmeta = (kds)->colmeta; \
 		kern_colmeta	__cmeta;										\
 		cl_uint			__colidx = 0;									\
 		cl_uint			__ncols;										\
@@ -1406,7 +1428,7 @@ toast_raw_datum_size(kern_context *kcxt, varlena *attr)
 		else															\
 		{																\
 			__heap_hasnull = ((__htup->t_infomask & HEAP_HASNULL) != 0); \
-			__ncols = min(__ldg((kds)->ncols),							\
+			__ncols = min(__ldg(&(kds)->ncols),							\
 						  __htup->t_infomask2 & HEAP_NATTS_MASK);		\
 			__cmeta = __kds_colmeta[__colidx];							\
 			__pos = (char *)(__htup) + __htup->t_hoff;					\
@@ -1797,6 +1819,48 @@ pgstromStairlikeSum(cl_uint my_value, cl_uint *total_sum)
 	stair_sum = local_id == 0 ? 0 : items[local_id - 1];
 	__syncthreads();
 	return stair_sum;
+}
+
+/*
+ * pgstromStairlikeBinaryCount
+ *
+ * A special optimized version of pgstromStairlikeSum, for binary count.
+ * It has smaller number of __syncthreads().
+ */
+STATIC_FUNCTION(cl_uint)
+pgstromStairlikeBinaryCount(int predicate, cl_uint *total_count)
+{
+	cl_uint	   *items = SHARED_WORKMEM(cl_uint);
+	cl_uint		nwarps = get_local_size() / warpSize;
+	cl_uint		warp_id = get_local_id() / warpSize;
+	cl_uint		w_bitmap;
+	cl_uint		stair_count;
+	cl_int		unit_sz;
+	cl_int		i, j;
+
+	w_bitmap = __ballot(predicate);
+	if ((get_local_id() & (warpSize-1)) == 0)
+		items[warp_id] = __popc(w_bitmap);
+	__syncthreads();
+
+	for (i=1, unit_sz = nwarps; unit_sz > 0; i++, unit_sz >>= 1)
+	{
+		/* index of last item in the earlier half of each 2^i unit */
+		j = (get_local_id() & ~((1<<i)-1)) | ((1<<(i-1))-1);
+
+		/* add item[j] if it is later half in the 2^i unit */
+		if (get_local_id() < nwarps &&
+			(get_local_id() & (1 << (i-1))) != 0)
+			items[get_local_id()] += items[j];
+		__syncthreads();
+	}
+	if (total_count)
+		*total_count = items[nwarps - 1];
+	w_bitmap &= (1U << (get_local_id() & (warpSize-1))) - 1;
+	stair_count = (warp_id == 0 ? 0 : items[warp_id - 1]) + __popc(w_bitmap);
+	__syncthreads();
+
+	return stair_count;
 }
 
 /*
