@@ -390,7 +390,7 @@ gpupreagg_setup_row(kern_gpupreagg *kgpreagg,
         if (status != StromError_Success)
             break;
 		/* update statistics */
-		pgstromStairlikeSum(tupitem ? 1 : 0, &count);
+		pgstromStairlikeBinaryCount(tupitem ? 1 : 0, &count);
 		if (get_local_id() == 0)
 		{
 			atomicAdd(&kgpreagg->nitems_real, count);
@@ -497,7 +497,7 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 #endif
 			/* allocation of the kds_slot buffer */
 			tv2 = GlobalTimer();
-			offset = pgstromStairlikeSum(htup && rc ? 1 : 0, &nvalids);
+			offset = pgstromStairlikeBinaryCount(htup && rc, &nvalids);
 			if (nvalids > 0)
 			{
 				if (get_local_id() == 0)
@@ -532,7 +532,7 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 			if (get_local_id() == 0)
 				atomicAdd(&kgpreagg->tv_stat_debug2, GlobalTimer() - tv2);
 			/* update statistics */
-			pgstromStairlikeSum(htup ? 1 : 0, &count);
+			pgstromStairlikeBinaryCount(htup, &count);
 			if (get_local_id() == 0)
 			{
 				atomicAdd(&kgpreagg->nitems_real, count);
@@ -906,7 +906,7 @@ clean_restart:
 	slot_values = NULL;
 	do {
 		/* fetch next items from the kds_slot */
-		index = pgstromStairlikeSum(!is_owner ? 1 : 0, &count);
+		index = pgstromStairlikeBinaryCount(!is_owner, &count);
 		assert(count > 0);
 		if (get_local_id() == 0)
 			base = atomicAdd(&kgpreagg->read_slot_pos, count);
@@ -1024,7 +1024,7 @@ clean_restart:
 		}
 	skip_local_reduction:
 		/* final reduction steps on demand */
-		pgstromStairlikeSum(is_owner ? 1 : 0, &count);
+		pgstromStairlikeBinaryCount(is_owner, &count);
 		if (is_last_reduction || count > get_local_size() / 8)
 		{
 			__shared__ int	num_locked;
