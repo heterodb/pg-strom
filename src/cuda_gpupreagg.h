@@ -418,9 +418,7 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 	__shared__ cl_uint	base;
 	__shared__ cl_int	status;
 	__shared__ cl_int	gang_sync;
-	cl_ulong		tv1, tv2;
 
-	tv1 = GlobalTimer();
 	INIT_KERNEL_CONTEXT(&kcxt, gpupreagg_setup_block, kparams);
 	if (get_local_id() == 0)
 		status = StromError_Success;
@@ -496,7 +494,6 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 			rc = true;
 #endif
 			/* allocation of the kds_slot buffer */
-			tv2 = GlobalTimer();
 			offset = pgstromStairlikeBinaryCount(htup && rc, &nvalids);
 			if (nvalids > 0)
 			{
@@ -529,10 +526,12 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 				if (status != StromError_Success)
 					goto out;
 			}
-			if (get_local_id() == 0)
-				atomicAdd(&kgpreagg->tv_stat_debug2, GlobalTimer() - tv2);
 			/* update statistics */
+#ifdef GPUPREAGG_HAS_OUTER_QUALS
 			pgstromStairlikeBinaryCount(htup, &count);
+#else
+			count = nvalids;
+#endif
 			if (get_local_id() == 0)
 			{
 				atomicAdd(&kgpreagg->nitems_real, count);
@@ -554,8 +553,6 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 	} while(try_next_window);
 out:
 	/* write back error status if any */
-	if (get_local_id() == 0)
-		atomicAdd(&kgpreagg->tv_stat_debug1, GlobalTimer() - tv1);
 	kern_writeback_error_status(&kgpreagg->kerror, kcxt.e);
 }
 #endif	/* GPUPREAGG_PULLUP_OUTER_SCAN */
