@@ -861,7 +861,6 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 	ListCell	   *lc;
 	int				prev;
 	int				i, j, k;
-	bool			needs_vlbuf;
 	devtype_info   *dtype;
 	StringInfoData	decl;
 	StringInfoData	body;
@@ -897,7 +896,6 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 		"                   cl_bool *tup_isnull,\n"
 		"                   cl_bool *tup_internal)\n"
 		"{\n"
-		"  cl_bool is_slot_format __attribute__((unused));\n"
 		"  char *curr;\n"
 		"  Datum datum __attribute__((unused));\n");
 
@@ -955,14 +953,6 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 			appendStringInfo(&decl, "  pg_%s_t KVAR_%u;\n",
 							 dtype->type_name, anum);
 	}
-
-	/*
-	 * step.2 - extract tuples and load values to KVAR or values/isnull
-	 * array (only if tupitem_src is valid, of course)
-	 */
-	appendStringInfoString(
-		&body,
-		"  is_slot_format = (kds_dst->format == KDS_FORMAT_SLOT);\n");
 
 	/*
 	 * System columns reference if any
@@ -1035,8 +1025,7 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 			appendStringInfo(
 				&temp,
 				"  tup_isnull[%d] = !curr;\n"
-				"  if (curr)\n"
-				"  {\n",
+				"  if (curr)\n",
 				j);
 			if (attr->attbyval)
 			{
@@ -1051,17 +1040,11 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 			}
 			else
 			{
-				/* KDS_FORMAT_SLOT needs host pointer */
 				appendStringInfo(
 					&temp,
-					"    tup_values[%d] = (is_slot_format\n"
-					"                      ? devptr_to_host(kds_src, curr)\n"
-					"                      : PointerGetDatum(curr));\n",
+					"    tup_values[%d] = PointerGetDatum(curr);\n",
 					j);
 			}
-			appendStringInfo(
-				&temp,
-				"  }\n");
 			referenced = true;
 		}
 		/* Load values to KVAR_xx */
@@ -1070,7 +1053,10 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 		{
 			appendStringInfo(
 				&temp,
-				"  KVAR_%u = pg_%s_datum_ref(kcxt,curr);\n",
+				"  {\n"
+				"  assert(curr >= (char *)kds_src && curr < (char *)kds_src + kds_src->length);\n"
+				"  KVAR_%u = pg_%s_datum_ref(kcxt,curr);\n"
+				"  }\n",
 				attr->attnum,
 				dtype->type_name);
 			referenced = true;
@@ -1121,106 +1107,7 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 	appendStringInfoChar(&body, '\n');
 
 	/*
-	 * step.4 (only KDS_FORMAT_SLOT)
-	 *
-	 * We have to allocate extra buffer for indirect or numeric data type.
-	 * Also, any pointer values have to be fixed up to the host pointer.
-	 */
-	resetStringInfo(&temp);
-	appendStringInfo(
-		&temp,
-		"  if (kds_dst->format == KDS_FORMAT_SLOT)\n"
-        "  {\n"
-		"    cl_uint vl_len = 0;\n"
-		"    cl_uint offset;\n"
-		"    cl_uint count;\n"
-		"    cl_uint __shared__ base;\n"
-		"\n"
-		"    if (htup)\n"
-		"    {\n");
-
-	needs_vlbuf = false;
-	foreach (lc, tlist_dev)
-	{
-		TargetEntry	   *tle = lfirst(lc);
-		Oid				type_oid;
-
-		if (IsA(tle->expr, Var) ||		/* just reference to kds_src */
-			IsA(tle->expr, Const) ||	/* just reference to kparams */
-			IsA(tle->expr, Param))		/* just reference to kparams */
-			continue;
-
-		type_oid = exprType((Node *)tle->expr);
-		dtype = pgstrom_devtype_lookup(type_oid);
-		if (!dtype)
-			elog(ERROR, "Bug? device supported type is missing: %s",
-				 format_type_be(type_oid));
-
-		if (type_oid == NUMERICOID)
-		{
-			appendStringInfo(
-				&temp,
-				"      if (!expr_%u_v.isnull)\n"
-				"        vl_len = TYPEALIGN(sizeof(cl_uint), vl_len)\n"
-				"               + pg_numeric_to_varlena(kcxt,NULL,\n"
-				"                                       expr_%u_v.value,\n"
-				"                                       expr_%u_v.isnull);\n",
-				tle->resno,
-				tle->resno,
-				tle->resno);
-			needs_vlbuf = true;
-		}
-		else if (!dtype->type_byval)
-		{
-			/* varlena is not supported yet */
-			Assert(dtype->type_length > 0);
-
-			appendStringInfo(
-				&temp,
-				"      if (!expr_%u_v.isnull)\n"
-				"        vl_len = TYPEALIGN(%u, vl_len) + %u;\n",
-				tle->resno,
-				dtype->type_align,
-				dtype->type_length);
-			needs_vlbuf = true;
-		}
-	}
-
-	if (needs_vlbuf)
-	{
-		appendStringInfo(
-			&temp,
-			"    }\n"
-			"\n"
-			"    /* allocation of variable length buffer */\n"
-			"    vl_len = MAXALIGN(vl_len);\n"
-			"    offset = pgstromStairlikeSum(vl_len, &count);\n"
-			"    if (get_local_id() == 0)\n"
-			"    {\n"
-			"      if (count > 0)\n"
-			"        base = atomicAdd(&kds_dst->usage, count);\n"
-			"      else\n"
-			"        base = 0;\n"
-			"    }\n"
-			"    __syncthreads();\n"
-			"\n"
-			"    if (KERN_DATA_STORE_SLOT_LENGTH(kds_dst, dst_nitems) +\n"
-			"        base + count > kds_dst->length)\n"
-			"    {\n"
-			"      STROM_SET_ERROR(&kcxt->e, StromError_DataStoreNoSpace);\n"
-			"      return;\n"
-			"    }\n"
-			"    vl_buf = (char *)kds_dst + kds_dst->length\n"
-			"           - (base + offset + vl_len);\n"
-			"  }\n\n");
-		appendStringInfoString(&decl, "  char *vl_buf = NULL;\n");
-		appendStringInfoString(&body, temp.data);
-	}
-
-	/*
 	 * step.5 - Store the expressions on the slot.
-	 * If FDW_FORMAT_SLOT, any pointer type must be adjusted to the host-
-	 * pointer. Elsewhere, the caller expects device pointer.
 	 */
 	resetStringInfo(&temp);
 	foreach (lc, tlist_dev)
@@ -1251,25 +1138,12 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 				&temp,
 				"    if (!expr_%u_v.isnull)\n"
 				"    {\n"
-				"      if (is_slot_format)\n"
-				"      {\n"
-				"        vl_buf = (char *)TYPEALIGN(sizeof(cl_int), vl_buf);\n"
-				"        tup_values[%d] = devptr_to_host(kds_dst, vl_buf);\n"
-				"        vl_buf += pg_numeric_to_varlena(kcxt, vl_buf,\n"
-				"                                        expr_%u_v.value,\n"
-				"                                        expr_%u_v.isnull);\n"
-				"      }\n"
-				"      else\n"
-				"      {\n"
-				"        tup_values[%d] = expr_%u_v.value;\n"
-				"      }\n"
+				"      tup_values[%d] = expr_%u_v.value;\n"
+				"      tup_internal[%d] = true;\n"
 				"    }\n",
 				tle->resno,
-                tle->resno - 1,
-				tle->resno,
-				tle->resno,
-				tle->resno - 1,
-				tle->resno);
+				tle->resno - 1, tle->resno,
+				tle->resno - 1);
 		}
 		else if (dtype->type_byval)
 		{
@@ -1282,49 +1156,15 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 				dtype->type_name,
 				tle->resno);
 		}
-		else if (IsA(tle->expr, Const) || IsA(tle->expr, Param))
+		else
 		{
-			/*
-             * Const/Param shall be stored in kparams, thus, we don't need
-             * to allocate extra buffer again. Just referemce it.
-             */
             appendStringInfo(
                 &temp,
                 "    if (!expr_%u_v.isnull)\n"
-                "      tup_values[%d] = (is_slot_format"
-				"                 ? devptr_to_host(kcxt->kparams,\n"
-				"                                  expr_%u_v.value)\n"
-				"                 : PointerGetDatum(expr_%u_v.value));\n",
-                tle->resno,
-                tle->resno - 1,
-                tle->resno,
-				tle->resno);
-		}
-		else
-		{
-			Assert(dtype->type_length > 0);
-			appendStringInfo(
-				&temp,
-				"    if (!expr_%u_v.isnull)\n"
-				"    {\n"
-				"      if (is_slot_format)\n"
-				"      {\n"
-				"        vl_buf = (char *)TYPEALIGN(%u, vl_buf);\n"
-				"        tup_values[%d] = devptr_to_host(kds_dst, vl_buf);\n"
-				"        memcpy(vl_buf, &expr_%u_v.value, %d);\n"
-				"        vl_buf += %d;\n"
-				"      }\n"
-				"      else\n"
-				"      {\n"
-				"        tup_values[%d] = PointerGetDatum(expr_%u_v.value);\n"
-				"      }\n"
-				"    }\n",
+                "      tup_values[%d] = PointerGetDatum(expr_%u_v.value);\n",
 				tle->resno,
-				dtype->type_align,
-				tle->resno - 1,
-				tle->resno, dtype->type_length,
-				dtype->type_length,
-				tle->resno - 1, tle->resno);
+                tle->resno - 1,
+				tle->resno);
 		}
 	}
 
@@ -1335,6 +1175,7 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 			"  {\n"
 			"%s"
 			"  }\n", temp.data);
+
 	appendStringInfo(
 		&body,
 		"}\n");

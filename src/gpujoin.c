@@ -3642,7 +3642,6 @@ gpujoin_create_task(GpuJoinState *gjs,
 	}
 	setup_kernel_gpujoin(&pgjoin->kern, &gjs->gts, pds_src);
 
-
 	/* setup initial jscale */
 	for (i = gjs->num_rels; i >= 0; i--)
 	{
