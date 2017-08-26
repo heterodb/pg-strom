@@ -27,16 +27,14 @@
  * | | kern_parembuf |  ^
  * | |     :         |  | parameter buffer length
  * | |     :         |  v
- * | +---------------+ ---
- * | | kern_results  |
- * | |  @nrels = 1   |
- * | |     :         |
- * | |     :         |
- * +-+---------------+
+ * +-+---------------+ ---
  */
 struct kern_gpuscan {
 	kern_errorbuf	kerror;
-	cl_uint			nitems_filtered;	/* out: # of rows filtered */
+	cl_uint			read_src_pos;
+	cl_uint			nitems_in;
+	cl_uint			nitems_out;
+	cl_uint			extra_size;
 	/* performance profile */
 	struct {
 		cl_float	tv_kern_exec_quals;
@@ -62,12 +60,10 @@ typedef struct kern_gpuscan		kern_gpuscan;
 	(offsetof(kern_gpuscan, kparams) +			\
 	 KERN_GPUSCAN_PARAMBUF_LENGTH(kgpuscan) +	\
 	 KERN_GPUSCAN_RESULTBUF_LENGTH(kgpuscan))
-#define KERN_GPUSCAN_DMASEND_OFFSET(kgpuscan)	0
 #define KERN_GPUSCAN_DMASEND_LENGTH(kgpuscan)	\
 	(offsetof(kern_gpuscan, kparams) +			\
 	 KERN_GPUSCAN_PARAMBUF_LENGTH(kgpuscan) +	\
 	 offsetof(kern_resultbuf, results[0]))
-#define KERN_GPUSCAN_DMARECV_OFFSET(kgpuscan)	0
 #define KERN_GPUSCAN_DMARECV_LENGTH(kgpuscan, nitems)	\
 	(offsetof(kern_gpuscan, kparams) +					\
 	 KERN_GPUSCAN_PARAMBUF_LENGTH(kgpuscan) +			\
@@ -214,696 +210,411 @@ gpuscan_projection(kern_context *kcxt,
 				   kern_data_store *kds_src,
 				   HeapTupleHeaderData *htup,
 				   ItemPointerData *t_self,
-				   kern_data_store *kds_dst,
-				   cl_uint dst_nitems,
 				   Datum *tup_values,
 				   cl_bool *tup_isnull,
 				   cl_bool *tup_internal);
 
 /*
- * gpuscan_exec_quals_block
- *
- * kernel entrypoint of GpuScan for KDS_FORMAT_BLOCK
+ * gpuscan_exec_quals_row - GpuScan logic for KDS_FORMAT_ROW
  */
 KERNEL_FUNCTION(void)
-gpuscan_exec_quals_block(kern_parambuf *kparams,
-						 kern_resultbuf *kresults,
-						 kern_data_store *kds_src,
-						 kern_arg_t window_base,
-						 kern_arg_t window_size,
-						 unsigned int *p_nitems_filtered) /* optional */
-{
-	kern_context		kcxt;
-	cl_uint				part_id;	/* partition index */
-	cl_uint				part_sz;	/* partition size */
-	cl_uint				curr_id;	/* index within partition */
-	cl_uint				n_lines;
-	cl_bool				rc;
-	__shared__ cl_uint	gang_flag;
-	__shared__ cl_uint	base;
-	cl_uint				offset;
-	cl_uint				count;
-	PageHeaderData	   *pg_page;
-	ItemPointerData		t_self;
-	HeapTupleHeaderData *htup;
-
-	INIT_KERNEL_CONTEXT(&kcxt, gpuscan_exec_quals_block, kparams);
-
-	/* sanity checks */
-	assert(__ldg(&kds_src->format) == KDS_FORMAT_BLOCK);
-	assert(!__ldg(&kresults->all_visible));
-	assert(__ldg(&kds_src->nrows_per_block) > 1);
-	assert(window_base + window_size <= kds_src->nitems);
-	part_sz = (__ldg(&kds_src->nrows_per_block) +
-			   warpSize - 1) & ~(warpSize - 1);
-	part_sz = Min(part_sz, get_local_size());
-	assert(get_local_size() % part_sz == 0);
-	part_id = (get_global_index() * (get_local_size() / part_sz) +
-			   get_local_id() / part_sz) + window_base;
-
-	/* get a PostgreSQL block on which this thread will perform on */
-	if (part_id < window_base + window_size)
-	{
-		BlockNumber	block_nr;
-
-		pg_page = KERN_DATA_STORE_BLOCK_PGPAGE(kds_src, part_id);
-		n_lines = PageGetMaxOffsetNumber(pg_page);
-		block_nr = KERN_DATA_STORE_BLOCK_BLCKNR(kds_src, part_id);
-		t_self.ip_blkid.bi_hi = block_nr >> 16;
-		t_self.ip_blkid.bi_lo = block_nr & 0xffff;
-		t_self.ip_posid = InvalidOffsetNumber;
-	}
-	else
-	{
-		pg_page = NULL;
-		n_lines = 0;
-	}
-
-	/*
-	 * Walks on pd_linep[] array on the assigned PostgreSQL block.
-	 * If a CUDA block is assigned to multiple PostgreSQL blocks, CUDA
-	 * block should not exit until all the PostgreSQL blocks are processed
-	 * due to restriction of thread synchronization.
-	 */
-	curr_id = get_local_id() % part_sz;
-	do {
-		ItemIdData	   *lpp;
-
-		/* fetch a heap_tuple if valid */
-		if (curr_id < n_lines)
-		{
-			lpp = PageGetItemId(pg_page, curr_id + 1);
-			if (ItemIdIsNormal(lpp))
-			{
-				htup = PageGetItem(pg_page, lpp);
-				t_self.ip_posid = curr_id + 1;
-			}
-			else
-				htup = NULL;
-		}
-		else
-			htup = NULL;
-
-		/* evaluation of the qualifier */
-		if (htup)
-			rc = gpuscan_quals_eval(&kcxt, kds_src, &t_self, htup);
-		else
-			rc = false;
-		__syncthreads();
-
-		/* expand kresults to store the row offset */
-		offset = pgstromStairlikeSum(rc ? 1 : 0, &count);
-		if (count > 0)
-		{
-			if (get_local_id() == 0)
-				base = atomicAdd(&kresults->nitems, count);
-			__syncthreads();
-
-			if (base + count > __ldg(&kresults->nrooms))
-			{
-				STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
-				goto out;
-			}
-			else if (rc)
-			{
-				/* OK, store the result */
-				kresults->results[base + offset] = (cl_uint)((char *)lpp -
-															 (char *)kds_src);
-			}
-		}
-		__syncthreads();
-
-		/* count number of filtered rows */
-		if (p_nitems_filtered)
-		{
-			pgstromStairlikeSum(htup && !rc ? 1 : 0, &count);
-			if (get_local_id() == 0)
-				atomicAdd(p_nitems_filtered, count);
-			__syncthreads();
-		}
-
-		/*
-		 * Move to the next line item. If no threads in CUDA block wants to
-		 * continue scan any more, we soon exit the loop.
-		 */
-		curr_id += part_sz;
-		if (get_local_id() == 0)
-			gang_flag = 0;
-		__syncthreads();
-		if (get_local_id() % part_sz == 0 && curr_id < n_lines)
-			atomicExch(&gang_flag, 1);
-		__syncthreads();
-	} while (gang_flag);
-out:		
-	/* write back error status if any */
-	kern_writeback_error_status(&kresults->kerror, kcxt.e);
-}
-
-/*
- * gpuscan_exec_quals_row
- *
- * kernel entrypoint of GpuScan for KDS_FORMAT_ROW
- */
-KERNEL_FUNCTION(void)
-gpuscan_exec_quals_row(kern_parambuf *kparams,
-					   kern_resultbuf *kresults,
-					   kern_data_store *kds_src,
-					   kern_arg_t window_base,
-					   kern_arg_t window_size,
-					   unsigned int *p_nitems_filtered)	/* optional */
-{
-	kern_context	kcxt;
-	kern_tupitem   *tupitem;
-	cl_bool			rc;
-	cl_uint			offset;
-	cl_uint			count;
-	__shared__ cl_uint base;
-
-	/* sanity checks */
-	assert(kds_src->format == KDS_FORMAT_ROW);
-	assert(!kresults->all_visible);
-	assert(window_base + window_size <= kds_src->nitems);
-
-	INIT_KERNEL_CONTEXT(&kcxt,gpuscan_exec_quals_row,kparams);
-
-	if (get_global_id() < window_size)
-	{
-		tupitem = KERN_DATA_STORE_TUPITEM(kds_src, (window_base +
-													get_global_id()));
-		rc = gpuscan_quals_eval(&kcxt, kds_src,
-								&tupitem->t_self,
-								&tupitem->htup);
-	}
-	else
-	{
-		tupitem = NULL;
-		rc = false;
-	}
-
-	/* expand kresults buffer */
-	offset = pgstromStairlikeSum(rc ? 1 : 0, &count);
-	if (count > 0)
-	{
-		if (get_local_id() == 0)
-			base = atomicAdd(&kresults->nitems, count);
-		__syncthreads();
-
-		if (base + count > kresults->nrooms)
-		{
-			STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
-			goto out;
-		}
-		else if (rc)
-		{
-			/* OK, store the result */
-			kresults->results[base + offset] = (cl_uint)
-				((char *)(&tupitem->htup) - (char *)(kds_src));
-		}
-	}
-	__syncthreads();
-
-	if (p_nitems_filtered)
-	{
-		/* count number of filtered rows */
-		pgstromStairlikeSum(tupitem && !rc ? 1 : 0, &count);
-		if (get_local_id() == 0)
-			atomicAdd(p_nitems_filtered, count);
-		__syncthreads();
-	}
-out:
-	/* write back error status if any */
-	kern_writeback_error_status(&kresults->kerror, kcxt.e);
-}
-
-/*
- * gpuscan_projection_row
- *
- * It constructs a result tuple of GpuScan according to the required layout
- * of the result tuple. In case when row-format is required, host code never
- * call the device projection kernel unless result layout is not compatible.
- * So, entire kernel function is within #ifdef ... #endif block
- */
-KERNEL_FUNCTION(void)
-gpuscan_projection_row(kern_gpuscan *kgpuscan,
+gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
 					   kern_data_store *kds_src,
 					   kern_data_store *kds_dst)
 {
 	kern_parambuf  *kparams = KERN_GPUSCAN_PARAMBUF(kgpuscan);
-	kern_resultbuf *kresults = KERN_GPUSCAN_RESULTBUF(kgpuscan);
+	kern_resultbuf *kresults		__attribute__((unused))
+		= KERN_GPUSCAN_RESULTBUF(kgpuscan);
 	kern_context	kcxt;
+	cl_uint			src_index;
+	cl_uint			src_nitems = kds_src->nitems;
+	cl_bool			try_next_window = true;
+	cl_uint			nitems_offset;
+	cl_uint			usage_offset	__attribute__((unused));
+	cl_uint			nitems_real;
+	cl_uint			total_nitems_out = 0;	/* stat */
+	cl_uint			total_extra_size = 0;	/* stat */
 #ifdef GPUSCAN_DEVICE_PROJECTION
-	cl_uint			dst_nitems;
-	cl_uint			kds_offset;
-	cl_uint			offset;
-	cl_uint			count;
-	__shared__ cl_uint base;
-	cl_uint			required;
-	kern_tupitem   *tupitem;
 	Datum			tup_values[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
 	cl_bool			tup_isnull[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
 	cl_bool			tup_internal[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
-	cl_uint		   *tup_index = KERN_DATA_STORE_ROWINDEX(kds_dst);
-	HeapTupleHeaderData *htup;
-	ItemPointerData t_self;
+#endif
+	__shared__ cl_int	src_base;
+	__shared__ cl_int	nitems_base;
+	__shared__ cl_int	usage_base	__attribute__((unused));
+	__shared__ cl_int	status;
 
-	/*
-	 * immediate bailout if previous stage already have error status
-	 */
-	kcxt.e = kgpuscan->kerror;
-	if (kcxt.e.errcode != StromError_Success)
-		goto out;
-	INIT_KERNEL_CONTEXT(&kcxt, gpuscan_projection_row, kparams);
+	assert(kds_src->format == KDS_FORMAT_ROW);
+	assert(!kds_dst || kds_dst->format == KDS_FORMAT_ROW);
+	INIT_KERNEL_CONTEXT(&kcxt, gpuscan_exec_quals_row, kparams);
+	if (get_local_id() == 0)
+		status = StromError_Success;
+	__syncthreads();
 
-	/* sanity checks */
-	assert(kresults->nrels == 1);
-	assert(kds_src->format == KDS_FORMAT_ROW ||
-		   (kds_src->format == KDS_FORMAT_BLOCK && !kresults->all_visible));
-	assert(kds_dst->format == KDS_FORMAT_ROW && kds_dst->nslots == 0);
-	assert(kds_dst->ncols == GPUSCAN_DEVICE_PROJECTION_NFIELDS);
-	/* update number of visible items */
-	dst_nitems = (kresults->all_visible ? kds_src->nitems : kresults->nitems);
-	if (get_global_id() == 0)
-		kds_dst->nitems = dst_nitems;
-	if (dst_nitems > kds_dst->nrooms)
-	{
-		STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
-		goto out;
-	}
+	do {
+		kern_tupitem   *tupitem;
+		cl_bool			rc;
+		cl_uint			nvalids;
+		cl_uint			required	__attribute__((unused));
+		cl_uint			extra_sz = 0;
 
-	/*
-	 * step.1 - compute length of the result tuple to be written
-	 */
-	memset(tup_internal, 0, sizeof(tup_internal));
+		if (get_local_id() == 0)
+			src_base = atomicAdd(&kgpuscan->read_src_pos, get_local_size());
+		__syncthreads();
 
-	if (get_global_id() < dst_nitems)
-	{
-		if (kds_src->format == KDS_FORMAT_ROW)
+		if (src_base + get_local_size() >= src_nitems)
+			try_next_window = false;
+		if (src_base >= src_nitems)
+			break;
+
+		/* Evalidation of the rows by WHERE-clause */
+		src_index = src_base + get_local_id();
+		if (src_index < src_nitems)
 		{
-			if (kresults->all_visible)
-			{
-				tupitem = KERN_DATA_STORE_TUPITEM(kds_src, get_global_id());
-				t_self = tupitem->t_self;
-				htup = &tupitem->htup;
-			}
-			else
-			{
-				kds_offset = kresults->results[get_global_id()];
-				htup = KDS_ROW_REF_HTUP(kds_src, kds_offset, &t_self, NULL);
-			}
+			tupitem = KERN_DATA_STORE_TUPITEM(kds_src, src_index);
+			rc = gpuscan_quals_eval(&kcxt, kds_src,
+									&tupitem->t_self,
+									&tupitem->htup);
 		}
 		else
 		{
-			assert(!kresults->all_visible);
-			kds_offset = kresults->results[get_global_id()];
-			htup = KDS_BLOCK_REF_HTUP(kds_src, kds_offset, &t_self, NULL);
+			tupitem = NULL;
+			rc = false;
 		}
-		/* extract to the private buffer */
-		gpuscan_projection(&kcxt,
-						   kds_src,
-						   htup,
-						   &t_self,
-						   kds_dst,
-						   dst_nitems,
-						   tup_values,
-						   tup_isnull,
-						   tup_internal);
-		required = MAXALIGN(offsetof(kern_tupitem, htup) +
-							compute_heaptuple_size(&kcxt,
-												   kds_dst,
-												   tup_values,
-												   tup_isnull,
-												   tup_internal));
-	}
-	else
-		required = 0;		/* out of range; never write anything */
+#ifdef GPUSCAN_HASH_WHERE_QUALS
+		/* bailout if any error */
+		if (kcxt.e.errcode != StromError_Success)
+			atomicCAS(&status, StromError_Success, kcxt.e.errcode);
+		__syncthreads();
+		if (status != StromError_Success)
+			break;
+#endif
+		/* how many rows servived WHERE-clause evaluation? */
+		nitems_offset = pgstromStairlikeBinaryCount(tupitem && rc, &nvalids);
+		if (nvalids == 0)
+			goto skip;
 
-	/*
-	 * step.2 - increment the buffer usage of kds_dst
-	 */
-	offset = pgstromStairlikeSum(required, &count);
-	if (count > 0)
-	{
+#ifdef GPUSCAN_DEVICE_PROJECTION
 		if (get_local_id() == 0)
-			base = atomicAdd(&kds_dst->usage, count);
+			nitems_base = atomicAdd(&kds_dst->nitems, nvalids);
+		__syncthreads();
+
+		/* extract the source tuple to the private slot, if any */
+		if (tupitem && rc)
+		{
+			gpuscan_projection(&kcxt,
+							   kds_src,
+							   &tupitem->htup,
+							   &tupitem->t_self,
+							   tup_values,
+							   tup_isnull,
+							   tup_internal);
+			required = MAXALIGN(offsetof(kern_tupitem, htup) +
+								compute_heaptuple_size(&kcxt,
+													   kds_dst,
+													   tup_values,
+													   tup_isnull,
+													   tup_internal));
+		}
+		else
+			required = 0;
+
+		usage_offset = pgstromStairlikeSum(required, &extra_sz);
+		if (get_local_id() == 0)
+			usage_base = atomicAdd(&kds_dst->usage, extra_sz);
 		__syncthreads();
 
 		if (KERN_DATA_STORE_HEAD_LENGTH(kds_dst) +
-			STROMALIGN(sizeof(cl_uint) * kresults->nitems) +
-			base + count > kds_dst->length)
+			STROMALIGN(sizeof(cl_uint) * (nitems_base + nvalids)) +
+			usage_base + extra_sz > kds_dst->length)
 		{
 			STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
-			goto out;
+			break;
 		}
-		else if (required > 0)
-		{
-			/*
-			 * step.3 - extract the result heap-tuple
-			 */
-			cl_uint			pos = kds_dst->length - (base + offset + required);
 
-			tup_index[get_global_id()] = pos;
-			tupitem = (kern_tupitem *)((char *)kds_dst + pos);
-			form_kern_heaptuple(&kcxt, kds_dst, tupitem,
-								&t_self, tup_values, tup_isnull, tup_internal);
+		/* store the result heap-tuple on destination buffer */
+		if (tupitem && rc)
+		{
+			cl_uint	   *tup_index = KERN_DATA_STORE_ROWINDEX(kds_dst);
+			cl_uint		pos;
+
+			pos = kds_dst->length - (usage_base + usage_offset + required);
+			tup_index[nitems_base + nitems_offset] = pos;
+			form_kern_heaptuple(&kcxt, kds_dst,
+								(kern_tupitem *)((char *)kds_dst + pos),
+								&tupitem->t_self,
+								tup_values,
+								tup_isnull,
+								tup_internal);
 		}
+
+		/* bailout if any error */
+		if (kcxt.e.errcode != StromError_Success)
+			atomicCAS(&status, StromError_Success, kcxt.e.errcode);
+		__syncthreads();
+		if (status != StromError_Success)
+			break;
+#else
+		if (get_local_id() == 0)
+			nitems_base = atomicAdd(&kresults->nitems, nvalids);
+		__syncthreads();
+
+		if (nitems_base + nvalids >= kresults->nrooms)
+		{
+			STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
+			break;
+		}
+
+		/* OK, store the result index */
+		if (tupitem && rc)
+		{
+			kresults->results[nitems_base + nitems_offset] = (cl_uint)
+				((char *)(&tupitem->htup) - (char *)(kds_src));
+		}
+#endif
+	skip:
+		/* update statistics */
+		if (get_local_id() == 0)
+		{
+			total_nitems_out += nvalids;
+			total_extra_size += extra_sz;
+		}
+	} while (try_next_window);
+
+	/* write back error code and statistics to the host */
+	if (get_local_id() == 0)
+	{
+		atomicAdd(&kgpuscan->nitems_in,  kds_src->nitems);
+		atomicAdd(&kgpuscan->nitems_out, total_nitems_out);
+		atomicAdd(&kgpuscan->extra_size, total_extra_size);
 	}
-	__syncthreads();
-out:
-#else	/* GPUSCAN_DEVICE_PROJECTION */
-	/*
-	 * NOTE: If GPU device code needs no projection, GpuScan logic will never
-	 * call any projection call, and returns row-index instead for better
-	 * performance. However, NVRTC requires function body to build binary.
-	 */
-	INIT_KERNEL_CONTEXT(&kcxt, gpuscan_projection_row, kparams);
-	STROM_SET_ERROR(&kcxt.e, StromError_WrongCodeGeneration);
-#endif	/* GPUSCAN_DEVICE_PROJECTION */
-	/* write back error status if any */
 	kern_writeback_error_status(&kgpuscan->kerror, kcxt.e);
 }
 
-#if 0
+/*
+ * gpuscan_exec_quals_block - GpuScan logic for KDS_FORMAT_BLOCK
+ */
 KERNEL_FUNCTION(void)
-gpuscan_projection_slot(kern_gpuscan *kgpuscan,
-						kern_data_store *kds_src,
-						kern_data_store *kds_dst)
+gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
+						 kern_data_store *kds_src,
+						 kern_data_store *kds_dst)
 {
 	kern_parambuf  *kparams = KERN_GPUSCAN_PARAMBUF(kgpuscan);
-	kern_resultbuf *kresults = KERN_GPUSCAN_RESULTBUF(kgpuscan);
 	kern_context	kcxt;
-	cl_uint			dst_nitems;
-	cl_uint			kds_offset;
-	Datum		   *tup_values;
-	cl_bool		   *tup_isnull;
-#ifdef GPUSCAN_DEVICE_PROJECTION
-	cl_bool			tup_internal[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
-#endif
-	HeapTupleHeaderData *htup;
-	ItemPointerData	t_self;
+	cl_uint			src_nitems = kds_src->nitems;
+	cl_uint			part_sz;
+	cl_uint			n_parts;
+	cl_uint			nitems_offset;
+	cl_uint			usage_offset;
+	cl_uint			total_nitems_in = 0;	/* stat */
+	cl_uint			total_nitems_out = 0;	/* stat */
+	cl_uint			total_extra_size = 0;	/* stat */
+	cl_bool			try_next_window = true;
+	__shared__ cl_uint	base;
+	__shared__ cl_uint	nitems_base;
+	__shared__ cl_uint	usage_base;
+	__shared__ cl_int	status;
+	__shared__ cl_int	gang_sync;
 
-	/*
-	 * immediate bailout if previous stage already have error status
-	 */
-	kcxt.e = kgpuscan->kerror;
-	if (kcxt.e.errcode != StromError_Success)
-		goto out;
-	INIT_KERNEL_CONTEXT(&kcxt, gpuscan_projection_slot, kparams);
+	assert(kds_src->format == KDS_FORMAT_BLOCK);
+	assert(kds_dst->format == KDS_FORMAT_ROW);
+	INIT_KERNEL_CONTEXT(&kcxt, gpuscan_exec_quals_block, kparams);
+	if (get_local_id() == 0)
+		status = StromError_Success;
+	__syncthreads();
 
-	/* sanity checks */
-	assert(kresults->nrels == 1);
-	assert(kds_src->format == KDS_FORMAT_ROW ||
-		   (kds_src->format == KDS_FORMAT_BLOCK && !kresults->all_visible));
-	assert(kds_dst->format == KDS_FORMAT_SLOT);
+	part_sz = Min((kds_src->nrows_per_block +
+				   warpSize-1) & ~(warpSize-1), get_local_size());
+	n_parts = get_local_size() / part_sz;
+	do {
+		cl_uint		part_id;
+		cl_uint		line_no;
+		cl_uint		n_lines;
+		cl_uint		nvalids;
+		cl_uint		nitems_real;
 
-	/* update number of visible items */
-	dst_nitems = (kresults->all_visible ? kds_src->nitems : kresults->nitems);
-	if (dst_nitems > kds_dst->nrooms)
-	{
-		STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
-		goto out;
-	}
-	if (get_global_id() == 0)
-		kds_dst->nitems = dst_nitems;
-	assert(get_global_size() >= dst_nitems);
+		if (get_local_id() == 0)
+			base =  atomicAdd(&kgpuscan->read_src_pos, n_parts);
+		__syncthreads();
 
-	/*
-	 * Fetch a HeapTuple / ItemPointer from KDS
-	 */
-	if (get_global_id() < dst_nitems)
-	{
-		if (kds_src->format == KDS_FORMAT_ROW)
-		{
-			if (kresults->all_visible)
+		if (base + n_parts >= __ldg(&kds_src->nitems))
+			try_next_window = false;
+		if (base >= __ldg(&kds_src->nitems))
+			break;
+
+		part_id = base + get_local_id() / part_sz;
+		line_no = get_local_id() % part_sz;
+
+		do {
+			HeapTupleHeaderData *htup = NULL;
+			ItemPointerData t_self;
+			PageHeaderData *pg_page;
+			BlockNumber	block_nr;
+			cl_ushort	t_len;
+			cl_uint		required;
+			cl_uint		extra_sz = 0;
+			cl_bool		rc;
+
+			/* identify the block */
+			if (part_id < src_nitems)
 			{
-				kern_tupitem   *tupitem
-					= KERN_DATA_STORE_TUPITEM(kds_src, get_global_id());
-				t_self = tupitem->t_self;
-				htup = &tupitem->htup;
+				pg_page = KERN_DATA_STORE_BLOCK_PGPAGE(kds_src, part_id);
+				n_lines = PageGetMaxOffsetNumber(pg_page);
+				block_nr = KERN_DATA_STORE_BLOCK_BLCKNR(kds_src, part_id);
+				t_self.ip_blkid.bi_hi = block_nr >> 16;
+				t_self.ip_blkid.bi_lo = block_nr & 0xffff;
+				t_self.ip_posid = line_no + 1;
+
+				if (line_no < n_lines)
+				{
+					ItemIdData *lpp = PageGetItemId(pg_page, line_no+1);
+					if (ItemIdIsNormal(lpp))
+						htup = PageGetItem(pg_page, lpp);
+					t_len = ItemIdGetLength(lpp);
+				}
+			}
+
+			/* evaluation of the qualifiers */
+#ifdef GPUSCAN_HASH_WHERE_QUALS
+			if (htup)
+				rc = gpuscan_quals_eval(&kcxt, kds_src,
+										&t_self,
+										htup);
+			else
+				rc = false;
+			/* bailout if any error */
+			if (kcxt.e.errcode != StromError_Success)
+				atomicCAS(&status, StromError_Success, kcxt.e.errcode);
+			__syncthreads();
+			if (status != StromError_Success)
+				break;
+#else
+			rc = true;
+#endif
+			/* how many rows servived WHERE-clause evaluations? */
+			nitems_offset = pgstromStairlikeBinaryCount(htup && rc, &nvalids);
+			if (nvalids == 0)
+				goto skip;
+
+			/* store the result heap-tuple to destination buffer */
+#ifdef GPUSCAN_DEVICE_PROJECTION_COMMON
+			if (htup && rc)
+			{
+				gpuscan_projection(&kcxt,
+								   kds_src,
+								   htup,
+								   &t_self,
+								   tup_values,
+								   tup_isnull,
+								   tup_internal);
+				required = MAXALIGN(offsetof(kern_tupitem, htup) +
+									compute_heaptuple_size(&kcxt,
+														   kds_dst,
+														   tup_values,
+														   tup_isnull,
+														   tup_internal));
 			}
 			else
+				required = 0;
+
+			usage_offset = pgstromStairlikeSum(required, &extra_sz);
+			if (get_local_id() == 0)
+				usage_base = atomicAdd(&kds_dst->usage, extra_sz);
+			__syncthreads();
+
+			if (KERN_DATA_STORE_HEAD_LENGTH(kds_dst) +
+				STROMALIGN(sizeof(cl_uint) * (nitems_base + nvalids)) +
+				usage_base + extra_sz > kds_dst->length)
 			{
-				kds_offset = kresults->results[get_global_id()];
-				htup = KDS_ROW_REF_HTUP(kds_src, kds_offset, &t_self, NULL);
+				STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
+				break;
 			}
-		}
-		else
-		{
-			assert(!kresults->all_visible);
-			kds_offset = kresults->results[get_global_id()];
-			htup = KDS_BLOCK_REF_HTUP(kds_src, kds_offset, &t_self, NULL);
-		}
-	}
-	else
-		htup = NULL;	/* out of range */
 
-	/* destination buffer */
-	tup_values = KERN_DATA_STORE_VALUES(kds_dst, get_global_id());
-	tup_isnull = KERN_DATA_STORE_ISNULL(kds_dst, get_global_id());
+			/* store the result heap tuple */
+			if (tupitem && rc)
+			{
+				cl_uint	   *tup_index = KERN_DATA_STORE_ROWINDEX(kds_dst);
+				cl_uint		pos;
 
-#ifdef GPUSCAN_DEVICE_PROJECTION
-	assert(kds_dst->ncols == GPUSCAN_DEVICE_PROJECTION_NFIELDS);
-	gpuscan_projection(&kcxt,
-					   kds_src,
-					   htup,
-					   &t_self,
-					   kds_dst,
-					   dst_nitems,
-					   tup_values,
-					   tup_isnull,
-					   tup_internal);
+				pos = kds_dst->length - (usage_base + usage_offset + required);
+				tup_index[nitems_base + nitems_offset] = pos;
+				form_kern_heaptuple(&kcxt, kds_dst,
+									(kern_tupitem *)((char *)kds_dst + pos),
+									&t_self,
+									tup_values,
+									tup_isnull,
+									tup_internal);
+			}
 #else
-	deform_kern_heaptuple(&kcxt,
-						  kds_src,
-						  htup,
-						  kds_dst->ncols,
-						  true,
-						  tup_values,
-						  tup_isnull);
+			/* no projection - write back souce tuple as is */
+			if (get_local_id() == 0)
+				nitems_base = atomicAdd(&kds_dst->nitems, nvalids);
+			__syncthreads();
+
+			if (htup && rc)
+				required = MAXALIGN(offsetof(kern_tupitem, htup) + t_len);
+			else
+				required = 0;
+			
+			usage_offset = pgstromStairlikeSum(required, &extra_sz);
+			if (get_local_id() == 0)
+				usage_base = atomicAdd(&kds_dst->usage, extra_sz);
+			__syncthreads();
+
+			if (KERN_DATA_STORE_HEAD_LENGTH(kds_dst) +
+				STROMALIGN(sizeof(cl_uint) * (nitems_base + nvalids)) +
+				usage_base + extra_sz > kds_dst->length)
+			{
+				STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
+				break;
+			}
+
+			if (htup && rc)
+			{
+				kern_tupitem *tupitem;
+				cl_uint	   *tup_index = KERN_DATA_STORE_ROWINDEX(kds_dst);
+				cl_uint		pos = kds_dst->length - (usage_base +
+													 usage_offset + required);
+				tupitem = (kern_tupitem *)((char *)kds_dst + pos);
+				tupitem->t_len = t_len;
+				tupitem->t_self = t_self;
+				memcpy(&tupitem->htup, htup, t_len);
+				tup_index[nitems_base + nitems_offset] = pos;
+			}
 #endif
-out:
-	/* write back error status if any */
+		skip:
+			/* update statistics */
+			pgstromStairlikeBinaryCount(htup != NULL, &nitems_real);
+			if (get_local_id() == 0)
+			{
+				total_nitems_in		+= nitems_real;
+				total_nitems_out	+= nvalids;
+				total_extra_size	+= extra_sz;
+			}
+
+			/*
+			 * Move to the next window of the line items, if any.
+			 * If no threads in CUDA block wants to continue, exit the loop.
+			 */
+			line_no += part_sz;
+			if (get_local_id() == 0)
+				gang_sync = 0;
+			__syncthreads();
+			if (get_local_id() % part_sz == 0 && line_no < n_lines)
+				gang_sync = 1;
+			__syncthreads();
+		} while (gang_sync > 0);
+	} while (try_next_window);
+
+	/* update statistics */
+	if (get_local_id() == 0)
+	{
+		atomicAdd(&kgpuscan->nitems_in,  total_nitems_in);
+		atomicAdd(&kgpuscan->nitems_out, total_nitems_out);
+		atomicAdd(&kgpuscan->extra_size, total_extra_size);
+	}
+	/* write back error code to the host */
 	kern_writeback_error_status(&kgpuscan->kerror, kcxt.e);
 }
-#endif
-
-/*
- * gpuscan_exec_quals_any - common entrypoint for exec_quals_(row|block)
- */
-STATIC_FUNCTION(bool)
-gpuscan_exec_quals_any(kern_context *kcxt,
-					   kern_resultbuf *kresults,
-					   kern_data_store *kds_src,
-					   cl_uint *p_nitems_filtered)
-{
-	void	   *kernel_func;
-	void	  **kernel_args;
-	dim3		grid_sz;
-	dim3		block_sz;
-	cl_uint		part_sz;
-	size_t		nthreads;
-	cudaError_t	status;
-
-	assert(!kresults->all_visible);
-	assert(kds_src->format == KDS_FORMAT_ROW ||
-		   kds_src->format == KDS_FORMAT_BLOCK);
-	if (kds_src->format == KDS_FORMAT_ROW)
-	{
-		kernel_func = (void *)gpuscan_exec_quals_row;
-		part_sz = 0;
-		nthreads = kds_src->nitems;
-	}
-	else
-	{
-		kernel_func = (void *)gpuscan_exec_quals_block;
-		part_sz = (kds_src->nrows_per_block +
-				   warpSize - 1) & ~(warpSize - 1);
-		nthreads = part_sz * kds_src->nitems;
-	}
-	status = optimal_workgroup_size(&grid_sz,
-									&block_sz,
-									kernel_func,
-									nthreads,
-									0,
-									sizeof(cl_uint));
-	if (status != cudaSuccess)
-	{
-		STROM_SET_RUNTIME_ERROR(&kcxt->e, status);
-		return false;
-	}
-
-	/*
-	 * Adjust block-size if KDS_FORMAT_BLOCK and partition size is
-	 * less than the block-size.
-	 */
-	if (kds_src->format == KDS_FORMAT_BLOCK && part_sz < block_sz.x)
-	{
-		cl_uint		nparts_per_block = block_sz.x / part_sz;
-
-		block_sz.x = nparts_per_block * part_sz;
-		grid_sz.x = (kds_src->nitems +
-					 nparts_per_block - 1) / nparts_per_block;
-	}
-	kernel_args = (void **)
-		cudaGetParameterBuffer(sizeof(void *),
-							   sizeof(void *) * 6);
-	if (!kernel_args)
-	{
-		STROM_SET_ERROR(&kcxt->e, StromError_OutOfKernelArgs);
-		return false;
-	}
-	kernel_args[0] = kcxt->kparams;
-	kernel_args[1] = kresults;
-	kernel_args[2] = kds_src;
-	kernel_args[3] = (void *)(0);				/* window_base */
-	kernel_args[4] = (void *)(kds_src->nitems);	/* window_size */
-	kernel_args[5] = (void *)(p_nitems_filtered);
-
-	status = cudaLaunchDevice(kernel_func,
-							  kernel_args,
-							  grid_sz,
-							  block_sz,
-							  sizeof(cl_uint) * block_sz.x,
-							  NULL);
-	if (status != cudaSuccess)
-	{
-		STROM_SET_RUNTIME_ERROR(&kcxt->e, status);
-		return false;
-	}
-
-	status = cudaDeviceSynchronize();
-	if (status != cudaSuccess)
-	{
-		STROM_SET_RUNTIME_ERROR(&kcxt->e, status);
-		return false;
-	}
-
-	if (kresults->kerror.errcode != StromError_Success)
-	{
-		kcxt->e = kresults->kerror;
-		return false;
-	}
-	return true;
-}
-
-/*
- * gpuscan_main - controller function of GpuScan logic
- */
-KERNEL_FUNCTION(void)
-gpuscan_main(kern_gpuscan *kgpuscan,
-			 kern_data_store *kds_src,
-			 kern_data_store *kds_dst)
-{
-	kern_parambuf  *kparams = KERN_GPUSCAN_PARAMBUF(kgpuscan);
-	kern_resultbuf *kresults = KERN_GPUSCAN_RESULTBUF(kgpuscan);
-	kern_context	kcxt;
-	void		   *kernel_func;
-	void		  **kernel_args;
-	dim3			grid_sz;
-	dim3			block_sz;
-	cl_uint			ntuples;
-	cl_ulong		tv1, tv2;
-	cudaError_t		status = cudaSuccess;
-
-	INIT_KERNEL_CONTEXT(&kcxt, gpuscan_main, kparams);
-	/* sanity checks */
-	assert(get_global_size() == 1);		/* only single thread */
-	assert(kds_src->format == KDS_FORMAT_ROW ||
-		   (kds_src->format == KDS_FORMAT_BLOCK && !kresults->all_visible));
-	assert(!kds_dst || kds_dst->format == KDS_FORMAT_ROW);
-
-	/*
-	 * (1) Evaluation of Scan qualifiers
-	 */
-	if (!kresults->all_visible)
-	{
-		tv1 = GlobalTimer();
-		if (!gpuscan_exec_quals_any(&kcxt, kresults, kds_src,
-									&kgpuscan->nitems_filtered))
-		{
-			assert(kcxt.e.errcode != StromError_Success);
-			goto out;
-		}
-		ntuples = kresults->nitems;
-		tv2 = GlobalTimer();
-	}
-	else
-	{
-		/* all-visible, thus all the source tuples are valid input */
-		ntuples = kds_src->nitems;
-		/* gpuscan_exec_quals_* was not executed  */
-		tv1 = tv2 = 0;
-	}
-	kgpuscan->pfm.tv_kern_exec_quals = (cl_float)(tv2 - tv1) / 1000000.0;
-
-	/*
-     * (2) Projection of the results
-     */
-	if (kds_dst && ntuples > 0)
-	{
-		tv1 = GlobalTimer();
-
-		/* KDS_FORMAT_SLOT as destination buffer is deprecated */
-		assert(kds_dst->format == KDS_FORMAT_ROW);
-		kernel_func = (void *)gpuscan_projection_row;
-
-		status = optimal_workgroup_size(&grid_sz,
-                                        &block_sz,
-										kernel_func,
-										ntuples,
-										0, sizeof(cl_uint));
-		if (status != cudaSuccess)
-		{
-			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
-			goto out;
-		}
-
-		kernel_args = (void **)
-			cudaGetParameterBuffer(sizeof(void *),
-								   sizeof(void *) * 3);
-		if (!kernel_args)
-		{
-			STROM_SET_ERROR(&kcxt.e, StromError_OutOfKernelArgs);
-			goto out;
-		}
-		kernel_args[0] = kgpuscan;
-		kernel_args[1] = kds_src;
-		kernel_args[2] = kds_dst;
-
-		status = cudaLaunchDevice(kernel_func,
-								  kernel_args,
-								  grid_sz,
-								  block_sz,
-								  sizeof(cl_uint) * block_sz.x,
-								  NULL);
-		if (status != cudaSuccess)
-		{
-			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
-			goto out;
-		}
-
-		status = cudaDeviceSynchronize();
-		if (status != cudaSuccess)
-		{
-			STROM_SET_RUNTIME_ERROR(&kcxt.e, status);
-			goto out;
-		}
-
-		if (kresults->kerror.errcode != StromError_Success)
-		{
-			kcxt.e = kresults->kerror;
-			goto out;
-		}
-		tv2 = GlobalTimer();
-	}
-	else
-	{
-		/* gpuscan_projection_* was not launched */
-		tv1 = tv2 = 0;
-	}
-	kgpuscan->pfm.tv_kern_projection = (cl_float)(tv2 - tv1) / 1000000.0;
-out:
-	kern_writeback_error_status(&kgpuscan->kerror, kcxt.e);
-}
-
 #endif	/* __CUDACC__ */
 #endif	/* CUDA_GPUSCAN_H */

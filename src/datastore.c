@@ -665,6 +665,8 @@ PDS_create_block(GpuContext *gcontext,
 	/* allocation */
 	pds = dmaBufferAlloc(gcontext, offsetof(pgstrom_data_store,
 											kds) + kds_length);
+	if (!pds)
+		elog(ERROR, "out of DMA buffer");
 	/* owned by the caller at least */
 	pg_atomic_init_u32(&pds->refcnt, 1);
 

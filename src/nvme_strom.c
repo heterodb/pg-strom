@@ -409,7 +409,7 @@ gpuMemCopyFromSSD(GpuTask *gtask,
 
 	/* (1) kick SSD2GPU P2P DMA */
 	if (nvme_strom_ioctl(STROM_IOCTL__MEMCPY_SSD2GPU, &cmd) != 0)
-		werror("failed on STROM_IOCTL__MEMCPY_SSD2GPU: %m");
+		abort(); //werror("failed on STROM_IOCTL__MEMCPY_SSD2GPU: %m");
 
 	/* (2) kick RAM2GPU DMA (earlier half) */
 	rc = cuMemcpyHtoDAsync(m_kds,

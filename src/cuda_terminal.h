@@ -29,8 +29,6 @@ gpuscan_projection(kern_context *kcxt,
                    kern_data_store *kds_src,
                    HeapTupleHeaderData *htup,
                    ItemPointerData *t_self,
-                   kern_data_store *kds_dst,
-                   cl_uint dst_nitems,
                    Datum *tup_values,
                    cl_bool *tup_isnull,
                    cl_bool *tup_internal)

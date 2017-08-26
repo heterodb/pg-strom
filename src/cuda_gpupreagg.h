@@ -363,14 +363,12 @@ gpupreagg_setup_row(kern_gpupreagg *kgpreagg,
 			if (get_local_id() == 0)
 				base = atomicAdd(&kds_slot->nitems, nvalids);
 			__syncthreads();
-
-			slot_index = base + offset;
-			if (slot_index > kds_slot->nrooms)
+			if (base + nvalids > kds_slot->nrooms)
 			{
 				STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
 				break;
 			}
-
+			slot_index = base + offset;
 			if (tupitem && rc)
 			{
 				slot_values = KERN_DATA_STORE_VALUES(kds_slot, slot_index);
