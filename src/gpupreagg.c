@@ -5183,7 +5183,7 @@ pgstrom_init_gpupreagg(void)
 							 "Enables to pull up GpuJoin under GpuPreAgg",
 							 NULL,
 							 &enable_pullup_outer_join,
-							 true,
+							 false, //true, -- XXX to be reworked
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
