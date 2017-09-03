@@ -205,8 +205,7 @@ MODULE_big = pg_strom
 OBJS =  $(STROM_OBJS)
 EXTENSION = pg_strom
 DATA_built = $(PGSTROM_SQL)
-DATA = $(STROM_BUILD_ROOT)/src/cuda_profiler.ini \
-       $(shell cpp -D 'PGSTROM_CUDA(x)=$(STROM_BUILD_ROOT)/src/cuda_\#\#x.h' \
+DATA = $(shell cpp -D 'PGSTROM_CUDA(x)=$(STROM_BUILD_ROOT)/src/cuda_\#\#x.h' \
                       $(STROM_BUILD_ROOT)/src/cuda_filelist | grep -v ^\#)
 
 # Support utilities
