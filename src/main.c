@@ -380,6 +380,84 @@ pgstrom_post_planner(Query *parse,
 	return pstmt;
 }
 
+/*
+ * check_nvidia_mps
+ *
+ * it checks whether MPS (multi process service) is available for PostgreSQL.
+ */
+static void
+check_nvidia_mps(void)
+{
+	const char *command = "echo get_server_list | nvidia-cuda-mps-control";
+	FILE	   *pipe_filp;
+	char		buf[2048];
+	int			status;
+	int			mps_server_count = 0;
+	bool		mps_is_available = false;
+
+	pipe_filp = OpenPipeStream(command, PG_BINARY_R);
+	if (!pipe_filp)
+	{
+		ereport(WARNING,
+				(errcode_for_file_access(),
+				 errmsg("could not execute command \"%s\": %m", command)));
+		return;
+	}
+
+	while (!mps_is_available && fgets(buf, sizeof(buf), pipe_filp) != NULL)
+	{
+		unsigned int serv_pid = atoi(buf);
+		char	proc_path[MAXPGPATH];
+		FILE   *proc_filp;
+		char	linebuf[2048];
+
+		mps_server_count++;
+
+		snprintf(proc_path, sizeof(proc_path),
+				 "/proc/%u/status", serv_pid);
+		proc_filp = fopen(proc_path, "r");
+		if (!proc_filp)
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("file \"%s\" is not accessible: %m", proc_path)));
+
+		while (fgets(linebuf, sizeof(linebuf), proc_filp) != NULL)
+		{
+			if (strncmp(linebuf, "Uid:\t", 5) == 0)
+			{
+				unsigned int	uid, euid, suid, fuid;
+
+				sscanf(linebuf + 5, "%u %u %u %u",
+					   &uid, &euid, &suid, &fuid);
+
+				if ((uid_t)euid == geteuid())
+					mps_is_available = true;
+				break;
+			}
+		}
+		fclose(proc_filp);
+	}
+	status = ClosePipeStream(pipe_filp);
+	if (status != 0)
+	{
+		ereport(WARNING,
+				(errcode_for_file_access(),
+				 errmsg("NVIDIA MPS control daemon is not running. PG-Strom is workable, but not optimal performance: %m"),
+				 errhint("Run 'nvidia-cuda-mps-control -d', then start server process. Check 'man nvidia-cuda-mps-control' for more details.")));
+	}
+	else if (mps_server_count == 0)
+	{
+		ereport(WARNING,
+				(errmsg("No NVIDIA MPS server is running. PG-Strom is workable, but not optimal performance."),
+				 errhint("Run 'echo start_server -uid %u | nvidia-cuda-mps-control'. Check 'man nvidia-cuda-mps-control' for more details.", getuid())));
+	}
+	else if (!mps_is_available)
+	{
+		ereport(WARNING,
+				(errmsg("NVIDIA MPS server is running, but for the different user. PG-Strom is workable, but not optimal performance."),
+				 errhint("Restart MPS server for uid=%u. Check 'man nvidia-cuda-mps-control' for more details.", getuid())));
+	}
+}
 
 /*
  * _PG_init
@@ -402,6 +480,9 @@ _PG_init(void)
 	/* dump version number */
 	elog(LOG, "PG-Strom version %s built for PostgreSQL %s",
 		 PGSTROM_VERSION, PG_MAJORVERSION);
+
+	/* check status of the NVIDIA MPS */
+	check_nvidia_mps();
 
 	/* init GPU/CUDA infrastracture */
 	pgstrom_init_misc_guc();
