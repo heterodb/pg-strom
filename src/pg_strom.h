@@ -384,6 +384,14 @@ extern void pgstrom_init_gpu_device(void);
 extern Datum pgstrom_device_info(PG_FUNCTION_ARGS);
 
 /*
+ * gpu_mmgr.c
+ */
+
+extern void pgstrom_init_gpu_mmgr(void);
+extern Datum pgstrom_device_meminfo(PG_FUNCTION_ARGS);
+
+
+/*
  * dma_buffer.c
  */
 extern void *__dmaBufferAlloc(GpuContext *gcontext, Size required,
