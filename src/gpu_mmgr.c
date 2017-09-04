@@ -21,6 +21,7 @@
 #include "storage/latch.h"
 #include "utils/guc.h"
 #include "utils/memutils.h"
+#include "utils/pg_crc.h"
 #include "pg_strom.h"
 #include <sys/ioctl.h>
 
@@ -55,6 +56,17 @@ typedef struct
 	 (chunk)->mclass >= GPUMEM_CHUNKSZ_MIN_BIT &&	 \
 	 (chunk)->mclass <= GPUMEM_CHUNKSZ_MAX_BIT &&	 \
 	 (chunk)->refcnt > 0)
+
+typedef struct
+{
+	dlist_node		chain;
+	CUdeviceptr		m_devptr;
+	cl_int			refcnt;
+} GpuMemLargeChunk;
+
+#define GPUMEM_LARGECHUNK_NSLOTS		73
+static slock_t		gm_largechunk_lock;
+static dlist_head	gm_largechunk_slot[GPUMEM_LARGECHUNK_NSLOTS];
 
 struct GpuMemSegMap;
 
@@ -156,6 +168,167 @@ nvme_strom_ioctl(int cmd, void *arg)
 }
 
 /*
+ * gpuMemFreeChunk
+ */
+static CUresult
+gpuMemFreeChunk(GpuMemSegment *gm_seg, CUdeviceptr m_devptr)
+{
+	GpuMemSegMap   *gm_smap = gm_seg->gm_smap;
+	GpuMemChunk	   *gm_chunk;
+	GpuMemChunk	   *gm_buddy;
+	cl_int			index, shift;
+
+	if (m_devptr < gm_smap->m_segment ||
+		m_devptr >= gm_smap->m_segment + gm_seg->segment_sz)
+		return CUDA_ERROR_INVALID_VALUE;
+
+	SpinLockAcquire(&gm_seg->lock);
+	index = (m_devptr - gm_smap->m_segment) >> GPUMEM_CHUNKSZ_MIN_BIT;
+	gm_chunk = &gm_seg->gm_chunks[index];
+	Assert(GPUMEMCHUNK_IS_ACTIVE(gm_chunk));
+	if (--gm_chunk->refcnt > 0)
+	{
+		SpinLockRelease(&gm_seg->lock);
+		return CUDA_SUCCESS;
+	}
+
+	/* Try to merge with the neighbor chunks */
+	while (gm_chunk->mclass < GPUMEM_CHUNKSZ_MAX_BIT)
+	{
+		index = (gm_chunk - gm_seg->gm_chunks);
+		shift = 1 << (gm_chunk->mclass - GPUMEM_CHUNKSZ_MIN_BIT);
+		Assert((index & (shift - 1)) == 0);
+		if ((index & shift) == 0)
+		{
+			/* try to merge with next */
+			gm_buddy = &gm_seg->gm_chunks[index + shift];
+			if (gm_buddy->chain.prev != NULL &&
+				gm_buddy->chain.next != NULL &&
+				gm_buddy->mclass == gm_chunk->mclass)
+			{
+				/* OK, let's merge */
+				dlist_delete(&gm_buddy->chain);
+				memset(gm_buddy, 0, sizeof(GpuMemChunk));
+				gm_chunk->mclass++;
+			}
+			else
+				break;	/* give up to merge chunks any more */
+		}
+		else
+		{
+			/* try to merge with prev */
+			gm_buddy = &gm_seg->gm_chunks[index - shift];
+			if (gm_buddy->chain.prev != NULL &&
+				gm_buddy->chain.next != NULL &&
+				gm_buddy->mclass == gm_chunk->mclass)
+			{
+				/* OK, let's merge */
+				dlist_delete(&gm_buddy->chain);
+				memset(gm_buddy, 0, sizeof(GpuMemChunk));
+				gm_buddy->mclass = gm_chunk->mclass + 1;
+				memset(gm_chunk, 0, sizeof(GpuMemChunk));
+				gm_chunk = gm_buddy;
+			}
+			else
+				break;	/* give up to merge chunks any more */
+		}
+	}
+	/* back to the free list again */
+	dlist_push_head(&gm_seg->free_chunks[gm_chunk->mclass],
+					&gm_chunk->chain);
+	SpinLockRelease(&gm_seg->lock);
+	return CUDA_SUCCESS;
+}
+
+/*
+ * gpuMemFreeExtra_v2
+ */
+CUresult
+gpuMemFreeExtra_v2(void *extra, CUdeviceptr m_devptr)
+{
+	GpuMemLargeChunk *lchunk;
+	CUresult	rc = CUDA_ERROR_INVALID_VALUE;
+
+	if ((((uintptr_t)extra) & 1UL) == 0)
+		return gpuMemFreeChunk((GpuMemSegment *)extra, m_devptr);
+
+	/* release of large chunk */
+	lchunk = (GpuMemLargeChunk *)(((uintptr_t)extra) & ~1UL);
+	SpinLockAcquire(&gm_largechunk_lock);
+	Assert(lchunk->m_devptr == m_devptr);
+	Assert(lchunk->refcnt > 0);
+	if (--lchunk->refcnt == 0)
+	{
+		dlist_delete(&lchunk->chain);
+		SpinLockRelease(&gm_largechunk_lock);
+		free(lchunk);
+
+		rc = cuMemFree(m_devptr);
+	}
+	else
+		SpinLockRelease(&gm_largechunk_lock);
+
+	return rc;
+}
+
+/*
+ * gpuMemFree_v2
+ */
+CUresult
+gpuMemFree_v2(GpuContext *gcontext, CUdeviceptr m_devptr)
+{
+	return gpuMemFreeExtra_v2(untrackGpuMem(gcontext, m_devptr), m_devptr);
+}
+
+/*
+ *
+ */
+static CUresult
+gpuMemAllocRawCommon(GpuContext *gcontext,
+					 CUdeviceptr *p_devptr,
+					 CUdeviceptr m_devptr,
+					 const char *filename, int lineno)
+{
+	GpuMemLargeChunk *lchunk;
+	char	   *extra;
+	pg_crc32	crc;
+	int			index;
+
+	lchunk = calloc(1, sizeof(GpuMemLargeChunk));
+	if (!lchunk)
+	{
+		cuMemFree(m_devptr);
+		return CUDA_ERROR_OUT_OF_MEMORY;
+	}
+	Assert(PointerIsAligned(lchunk, int));
+
+	lchunk->m_devptr = m_devptr;
+	lchunk->refcnt = 1;
+
+	/* least 1bit is a flag to indicate GpuMemLargeChunk */
+	extra = (char *)(((uintptr_t)lchunk) | 1UL);
+	if (!trackGpuMem(gcontext, m_devptr, extra))
+    {
+		cuMemFree(m_devptr);
+		free(lchunk);
+		return CUDA_ERROR_OUT_OF_MEMORY;
+	}
+
+	/* track this large chunk */
+	INIT_LEGACY_CRC32(crc);
+	COMP_LEGACY_CRC32(crc, &m_devptr, sizeof(CUdeviceptr));
+	FIN_LEGACY_CRC32(crc);
+	index = crc % GPUMEM_LARGECHUNK_NSLOTS;
+
+	SpinLockAcquire(&gm_largechunk_lock);
+	dlist_push_head(&gm_largechunk_slot[index], &lchunk->chain);
+	SpinLockRelease(&gm_largechunk_lock);
+
+	*p_devptr = m_devptr;
+	return CUDA_SUCCESS;
+}
+
+/*
  * gpuMemAllocRaw
  */
 CUresult
@@ -164,7 +337,14 @@ __gpuMemAllocRaw(GpuContext *gcontext,
 				 size_t bytesize,
 				 const char *filename, int lineno)
 {
-	return CUDA_SUCCESS;
+	CUdeviceptr	m_devptr;
+	CUresult	rc;
+
+	rc = cuMemAlloc(&m_devptr, bytesize);
+	if (rc != CUDA_SUCCESS)
+		return rc;
+	return gpuMemAllocRawCommon(gcontext, p_devptr, m_devptr,
+								filename, lineno);
 }
 
 /*
@@ -177,7 +357,14 @@ __gpuMemAllocManagedRaw(GpuContext *gcontext,
 						int flags,
 						const char *filename, int lineno)
 {
-	return CUDA_SUCCESS;
+	CUdeviceptr	m_devptr;
+	CUresult	rc;
+
+	rc = cuMemAllocManaged(&m_devptr, bytesize, flags);
+	if (rc != CUDA_SUCCESS)
+		return rc;
+	return gpuMemAllocRawCommon(gcontext, p_devptr, m_devptr,
+								filename, lineno);
 }
 
 /*
@@ -306,6 +493,7 @@ retry:
 		gm_chunk = gpuMemTryAllocChunk(gm_seg, mclass);
 		if (gm_chunk)
 		{
+			CUdeviceptr	devptr;
 			cl_long		i, nchunks __attribute__((unused));
 
 			pthreadRWLockUnlock(&local_segment_map_rwlock);
@@ -313,10 +501,15 @@ retry:
 			Assert(gm_chunk >= gm_seg->gm_chunks &&
 				   gm_chunk < (gm_seg->gm_chunks + nchunks));
 			i = gm_chunk - gm_seg->gm_chunks;
-			*p_devptr = gm_smap->m_segment + (i << GPUMEM_CHUNKSZ_MIN_BIT);
+			devptr = gm_smap->m_segment + (i << GPUMEM_CHUNKSZ_MIN_BIT);
 
-			//TODO: track gm_chunk with GpuContext
-
+			/* track this device memory by GpuContext */
+			if (!trackGpuMem(gcontext, devptr, gm_seg))
+			{
+				gpuMemFreeChunk(gm_seg, devptr);
+				return CUDA_ERROR_OUT_OF_MEMORY;
+			}
+			*p_devptr = devptr;
 			return CUDA_SUCCESS;
 		}
 	}
@@ -447,20 +640,6 @@ __gpuMemAllocManaged(GpuContext *gcontext,
 	return gpuMemAllocCommon(GpuMemKind__ManagedMemory,
 							 gcontext, p_devptr, mclass, true,
 							 filename, lineno);
-}
-
-/*
- * gpuMemFree_v2
- */
-CUresult
-gpuMemFree_v2(GpuContext *gcontext, CUdeviceptr devptr)
-{
-	//lookup tracker
-	//put gm_chunk
-	//if refcnt==0, back to the free_chunks
-	//merge chunks, if available
-
-	return CUDA_SUCCESS;
 }
 
 /*
@@ -1084,4 +1263,8 @@ pgstrom_init_gpu_mmgr(void)
 		dlist_init(&local_managed_segment_lists[i]);
 		dlist_init(&local_iomap_segment_lists[i]);
 	}
+
+	SpinLockInit(&gm_largechunk_lock);
+	for (i=0; i < GPUMEM_LARGECHUNK_NSLOTS; i++)
+		dlist_init(&gm_largechunk_slot[i]);
 }

@@ -404,6 +404,7 @@ extern CUresult __gpuMemAllocManaged(GpuContext *gcontext,
 									 size_t bytesize,
 									 int flags,
 									 const char *filename, int lineno);
+extern CUresult gpuMemFreeExtra_v2(void *extra, CUdeviceptr devptr);
 extern CUresult gpuMemFree_v2(GpuContext *gcontext,
 							  CUdeviceptr devptr);
 
