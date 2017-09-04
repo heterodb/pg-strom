@@ -386,6 +386,35 @@ extern Datum pgstrom_device_info(PG_FUNCTION_ARGS);
 /*
  * gpu_mmgr.c
  */
+extern CUresult __gpuMemAllocRaw(GpuContext *gcontext,
+								 CUdeviceptr *p_devptr,
+								 size_t bytesize,
+								 const char *filename, int lineno);
+extern CUresult __gpuMemAllocManagedRaw(GpuContext *gcontext,
+										CUdeviceptr *p_devptr,
+										size_t bytesize,
+										int flags,
+										const char *filename, int lineno);
+extern CUresult __gpuMemAlloc(GpuContext *gcontext,
+							  CUdeviceptr *p_devptr,
+							  size_t bytesize,
+							  const char *filename, int lineno);
+extern CUresult __gpuMemAllocManaged(GpuContext *gcontext,
+									 CUdeviceptr *p_devptr,
+									 size_t bytesize,
+									 int flags,
+									 const char *filename, int lineno);
+extern CUresult gpuMemFree_v2(GpuContext *gcontext,
+							  CUdeviceptr devptr);
+
+#define gpuMemAllocRaw_v2(a,b,c)				\
+	__gpuMemAllocRaw((a),(b),(c),__FILE__,__LINE__)
+#define gpuMemAllocManagedRaw_v2(a,b,c,d)		\
+	__gpuMemAllocManagedRaw((a),(b),(c),(d),__FILE__,__LINE__)
+#define gpuMemAlloc_v2(a,b,c)					\
+	__gpuMemAlloc((a),(b),(c),__FILE__,__LINE__)
+#define gpuMemAllocManaged_v2(a,b,c,d)			\
+	__gpuMemAllocManaged((a),(b),(c),(d),__FILE__,__LINE__)
 
 extern void pgstrom_init_gpu_mmgr(void);
 extern Datum pgstrom_device_meminfo(PG_FUNCTION_ARGS);
@@ -1247,6 +1276,42 @@ pthreadRWLockUnlock(pthread_rwlock_t *rwlock)
 {
 	if ((errno = pthread_rwlock_unlock(rwlock)) != 0)
 		wfatal("failed on pthread_rwlock_unlock: %m");
+}
+
+static inline void
+pthreadCondInit(pthread_cond_t *cond)
+{
+	pthread_condattr_t condattr;
+
+	if ((errno = pthread_condattr_init(&condattr)) != 0)
+		elog(FATAL, "failed on pthread_condattr_init: %m");
+	if ((errno = pthread_condattr_setpshared(&condattr, 1)) != 0)
+		elog(FATAL, "failed on pthread_condattr_setpshared: %m");
+	if ((errno = pthread_cond_init(cond, &condattr)) != 0)
+		elog(FATAL, "failed on pthread_cond_init: %m");
+	if ((errno = pthread_condattr_destroy(&condattr)) != 0)
+		elog(FATAL, "failed on pthread_condattr_destroy: %m");
+}
+
+static inline void
+pthreadCondWait(pthread_cond_t *cond, pthread_mutex_t *mutex)
+{
+	if ((errno = pthread_cond_wait(cond, mutex)) != 0)
+		elog(FATAL, "failed on pthread_cond_wait: %m");
+}
+
+static inline void
+pthreadCondBroadcast(pthread_cond_t *cond)
+{
+	if ((errno = pthread_cond_broadcast(cond)) != 0)
+		elog(FATAL, "failed on pthread_cond_broadcast: %m");
+}
+
+static inline void
+pthreadCondSignal(pthread_cond_t *cond)
+{
+	if ((errno = pthread_cond_signal(cond)) != 0)
+		elog(FATAL, "failed on pthread_cond_signal: %m");
 }
 
 #endif	/* PG_STROM_H */
