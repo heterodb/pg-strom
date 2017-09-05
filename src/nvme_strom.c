@@ -78,6 +78,7 @@ static long				nvme_strom_threshold;
 #define GetIOMapBufferSegment(dindex)							\
 	((IOMapBufferSegment *)((char *)iomap_buffer_segments +		\
 							SizeOfIOMapBufferSegment * (dindex)))
+#if 0
 /*
  * gpuMemSizeIOMap - returns configured size of the i/o mapped device memory;
  * never guaranteed it is actually allocated and mapped.
@@ -87,6 +88,7 @@ gpuMemSizeIOMap(void)
 {
 	return iomap_buffer_size;
 }
+#endif
 
 /*
  * nvme_strom_ioctl
@@ -105,6 +107,7 @@ nvme_strom_ioctl(int cmd, const void *arg)
 	return ioctl(fdesc_nvme_strom, cmd, arg);
 }
 
+#if 0
 /*
  * gpuMemSplitIOMap
  */
@@ -323,6 +326,7 @@ gpuMemFreeIOMap(GpuContext *gcontext, CUdeviceptr devptr)
 
 	return CUDA_SUCCESS;
 }
+#endif
 
 /*
  * gpuMemCopyFromSSDWaitRaw

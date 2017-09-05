@@ -3001,12 +3001,7 @@ out_of_resource:
 	if (m_gpuscan)
 		gpuMemFree(gscan->task.gcontext, m_gpuscan);
 	if (m_kds_src)
-	{
-		if (gscan->with_nvme_strom)
-			gpuMemFreeIOMap(gscan->task.gcontext, m_kds_src);
-		else
-			gpuMemFree(gscan->task.gcontext, m_kds_src);
-	}
+		gpuMemFree(gscan->task.gcontext, m_kds_src);
 	return retval;
 }
 

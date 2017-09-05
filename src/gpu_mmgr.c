@@ -122,14 +122,13 @@ struct GpuMemSegMap
 typedef struct GpuMemSegMap		GpuMemSegMap;
 
 /* static variables */
-static shmem_startup_hook_type shmem_startup_hook_next = NULL;
+static shmem_startup_hook_type shmem_startup_next = NULL;
 static GpuMemSystemHead *gm_shead = NULL;
 static int			gpu_memory_segment_size_kb;	/* GUC */
 static int			num_gpu_memory_segments;	/* GUC */
 static int			iomap_gpu_memory_size_kb;	/* GUC */
 
 /* process local structure */
-static GpuMemSegMap *gm_smap_array = NULL;
 static pthread_rwlock_t	local_segment_map_rwlock;
 static dlist_head	   *local_normal_segment_lists;
 static dlist_head	   *local_managed_segment_lists;
@@ -641,6 +640,27 @@ __gpuMemAllocManaged(GpuContext *gcontext,
 }
 
 /*
+ * gpuMemAllocIOMap
+ */
+CUresult
+__gpuMemAllocIOMap(GpuContext *gcontext,
+				   CUdeviceptr *p_devptr,
+				   size_t bytesize,
+				   const char *filename, int lineno)
+{
+	cl_int		mclass;
+
+	if (bytesize > ((size_t)iomap_gpu_memory_size_kb << 9))
+		return CUDA_ERROR_OUT_OF_MEMORY;
+	mclass = get_next_log2(bytesize);
+	if (mclass < GPUMEM_CHUNKSZ_MIN_BIT)
+		mclass = GPUMEM_CHUNKSZ_MIN_BIT;
+	return gpuMemAllocCommon(GpuMemKind__IOMapMemory,
+							 gcontext, p_devptr, mclass, false,
+							 filename, lineno);
+}
+
+/*
  * gpu_mmgr_alloc_normal_segment - segment allocator for NormalMemory
  */
 static CUresult
@@ -1015,7 +1035,7 @@ gpu_mmgr_bgworker_main(Datum bgworker_arg)
 	{
 		dlist_node *dnode = dlist_pop_head_node(&gm_dev->iomap_segment_list);
 		GpuMemSegment *gm_seg = dlist_container(GpuMemSegment,
-													  chain, dnode);
+												chain, dnode);
 		Assert(dlist_is_empty(&gm_dev->iomap_segment_list));
 		rc = __gpu_mmgr_alloc_segment(gm_dev,
 									  gm_seg,
@@ -1023,6 +1043,16 @@ gpu_mmgr_bgworker_main(Datum bgworker_arg)
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on allocation of I/O map memory: %s",
 				 errorText(rc));
+		else
+		{
+			GpuMemSegMap   *gm_smap = gm_seg->gm_smap;
+
+			elog(LOG, "I/O mapped memory %p-%p at GPU%u [%s]",
+				 (void *)(gm_smap->m_segment),
+				 (void *)(gm_smap->m_segment - gm_seg->segment_sz - 1),
+				 gpu_mmgr_cuda_dindex,
+				 devAttrs[gpu_mmgr_cuda_dindex].DEV_NAME);
+		}
 	}
 
 	/* enables to accept device memory allocation request */
@@ -1061,9 +1091,9 @@ gpu_mmgr_bgworker_main(Datum bgworker_arg)
 static void
 pgstrom_startup_gpu_mmgr(void)
 {
-	GpuMemSystemHead *gm_shead;
 	GpuMemSegment *gm_seg;
 	GpuMemSegMap  *gm_smap;
+	GpuMemSegMap  *gm_smap_array;
 	Size	nchunks1;
 	Size	nchunks2;
 	Size	head_sz;
@@ -1073,8 +1103,8 @@ pgstrom_startup_gpu_mmgr(void)
 	bool	found;
 	int		i, j = 0;
 
-	if (shmem_startup_hook_next)
-		(*shmem_startup_hook_next)();
+	if (shmem_startup_next)
+		(*shmem_startup_next)();
 
 	/*
 	 * GpuMemSegMap (local structure)
@@ -1222,7 +1252,7 @@ pgstrom_init_gpu_mmgr(void)
 							gm_chunks[nchunks_iomap]));
 
 	RequestAddinShmemSpace(required);
-	shmem_startup_hook_next = shmem_startup_hook;
+	shmem_startup_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_gpu_mmgr;
 
 	/*

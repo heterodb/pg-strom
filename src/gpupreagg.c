@@ -1069,8 +1069,12 @@ cost_gpupreagg(PlannerInfo *root,
 				  STROMALIGN((sizeof(Datum) +
 							  sizeof(bool)) * ncols) * nrooms +
 				  STROMALIGN(extra_sz) * nrooms);
+#if 0
+	// unified memory eliminates limitation of the device memory
+	// however, some penalty is needed for large buffer
 	if (kds_length > gpuMemMaxAllocSize())
 		return false;	/* expected buffer size is too large */
+#endif
 
 	/* Cost estimation for the initial projection */
 	cost_qual_eval(&qual_cost, target_device->exprs, root);
@@ -4681,12 +4685,7 @@ check_terminator:
 
 out_of_resource:
 	if (m_kds_src != 0UL)
-	{
-		if (gpreagg->with_nvme_strom)
-			gpuMemFreeIOMap(gcontext, m_kds_src);
-		else
-			gpuMemFree(gcontext, m_kds_src);
-	}
+		gpuMemFree(gcontext, m_kds_src);
 	if (m_gpreagg != 0UL)
 		gpuMemFree(gcontext, m_gpreagg);
 	return retval;
@@ -4981,12 +4980,7 @@ check_terminator:
 
 out_of_resource:
 	if (m_kds_src != 0UL)
-	{
-		if (gpreagg->with_nvme_strom)
-			gpuMemFreeIOMap(gcontext, m_kds_src);
-		else
-			gpuMemFree(gcontext, m_kds_src);
-	}
+		gpuMemFree(gcontext, m_kds_src);
 	if (m_gpreagg != 0UL)
 		gpuMemFree(gcontext, m_gpreagg);
 	return retval;

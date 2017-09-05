@@ -4872,7 +4872,7 @@ gpujoin_process_kernel(GpuJoinTask *pgjoin, CUmodule cuda_module,
 	}
 	/* release CUDA resources */
 	if (pgjoin->with_nvme_strom && m_kds_src)
-		gpuMemFreeIOMap(gcontext, m_kds_src);
+		gpuMemFree(gcontext, m_kds_src);
 	if (m_kgjoin)
 		gpuMemFree(gcontext, m_kgjoin);
 
@@ -4895,7 +4895,7 @@ gpujoin_process_kernel(GpuJoinTask *pgjoin, CUmodule cuda_module,
 
 out_of_resource:
 	if (pgjoin->with_nvme_strom && m_kds_src)
-		gpuMemFreeIOMap(gcontext, m_kds_src);
+		gpuMemFree(gcontext, m_kds_src);
 	if (m_kgjoin)
 		gpuMemFree(gcontext, m_kgjoin);
 	return false;

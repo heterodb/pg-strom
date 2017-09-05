@@ -1028,9 +1028,9 @@ gpuservRecvCommands(GpuContext *gcontext, bool *p_peer_sock_closed)
 
 			if (!IsGpuServerProcess())
 				wfatal("Bug? Only GPU server can handle IOMAP_MEMFREE");
-			rc = gpuMemFreeIOMap(gcontext, cmd->devptr);
+			rc = gpuMemFree(gcontext, cmd->devptr);
 			if (rc != CUDA_SUCCESS)
-				wnotice("failed on gpuMemFreeIOMap with IOMAP_MEMFREE: %s",
+				wnotice("failed on gpuMemFree with IOMAP_MEMFREE: %s",
 						errorText(rc));
 			num_received++;
 		}

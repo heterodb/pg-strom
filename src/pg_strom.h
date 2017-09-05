@@ -404,10 +404,13 @@ extern CUresult __gpuMemAllocManaged(GpuContext *gcontext,
 									 size_t bytesize,
 									 int flags,
 									 const char *filename, int lineno);
+extern CUresult __gpuMemAllocIOMap(GpuContext *gcontext,
+								   CUdeviceptr *p_devptr,
+								   size_t bytesize,
+								   const char *filename, int lineno);
 extern CUresult gpuMemFreeExtra(void *extra, CUdeviceptr devptr);
 extern CUresult gpuMemFree(GpuContext *gcontext,
 						   CUdeviceptr devptr);
-
 #define gpuMemAllocRaw(a,b,c)				\
 	__gpuMemAllocRaw((a),(b),(c),__FILE__,__LINE__)
 #define gpuMemAllocManagedRaw(a,b,c,d)		\
@@ -416,6 +419,8 @@ extern CUresult gpuMemFree(GpuContext *gcontext,
 	__gpuMemAlloc((a),(b),(c),__FILE__,__LINE__)
 #define gpuMemAllocManaged(a,b,c,d)			\
 	__gpuMemAllocManaged((a),(b),(c),(d),__FILE__,__LINE__)
+#define gpuMemAllocIOMap(a,b,c)				\
+	__gpuMemAllocIOMap((a),(b),(c),__FILE__,__LINE__)
 
 extern void pgstrom_init_gpu_mmgr(void);
 extern Datum pgstrom_device_meminfo(PG_FUNCTION_ARGS);
@@ -787,10 +792,6 @@ extern void pgstrom_init_datastore(void);
 #include "nvme_strom.h"
 
 extern Size gpuMemSizeIOMap(void);
-extern CUresult	gpuMemAllocIOMap(GpuContext *gcontext,
-								 CUdeviceptr *p_devptr, size_t bytesize);
-extern CUresult	gpuMemFreeIOMap(GpuContext *gcontext,
-								CUdeviceptr devptr);
 extern void gpuMemCopyFromSSD(GpuTask *gtask,
 							  CUdeviceptr m_kds,
 							  pgstrom_data_store *pds);

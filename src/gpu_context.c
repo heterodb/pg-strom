@@ -332,9 +332,9 @@ ReleaseLocalResources(GpuContext *gcontext, bool normal_exit)
 					if (normal_exit)
 						wnotice("I/O Mapped Memory %p likely leaked",
 								(void *)tracker->u.devmem.ptr);
-					rc = gpuMemFreeIOMap(NULL, tracker->u.devmem.ptr);
+					rc = gpuMemFree(NULL, tracker->u.devmem.ptr);
 					if (rc != CUDA_SUCCESS)
-						wnotice("failed on gpuMemFreeIOMap(%p): %s",
+						wnotice("failed on gpuMemFree(%p): %s",
 								(void *)tracker->u.devmem.ptr,
 								errorText(rc));
 					break;
