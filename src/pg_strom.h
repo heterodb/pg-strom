@@ -450,6 +450,13 @@ extern void pgstrom_init_dma_buffer(void);
 #define dmaBufferFreeAll(shgcon)				\
 	__dmaBufferFreeAll((shgcon),__FILE__,__LINE__)
 
+/* stub */
+static inline CUresult
+gpuMemRetain(GpuContext *gcontext, CUdeviceptr devptr)
+{
+	return CUDA_SUCCESS;
+}
+
 /*
  * gpu_context.c
  */
@@ -471,31 +478,6 @@ extern void *untrackGpuMem(GpuContext *gcontext, CUdeviceptr devptr);
 extern bool trackIOMapMem(GpuContext *gcontext, CUdeviceptr devptr);
 extern void untrackIOMapMem(GpuContext *gcontext, CUdeviceptr devptr);
 extern void pgstrom_init_gpu_context(void);
-
-#if 0
-/*
- * gpu_memory.c
- */
-extern Size gpuMemMaxAllocSize(void);
-extern CUresult	gpuMemAlloc(GpuContext *gcontext,
-							CUdeviceptr *p_devptr,
-							size_t bytesize);
-extern CUresult	gpuMemAllocManaged(GpuContext *gcontext,
-								   CUdeviceptr *p_devptr,
-								   size_t bytesize);
-extern CUresult gpuMemAllocRaw(GpuContext *gcontext,
-							   CUdeviceptr *p_devptr,
-							   size_t bytesize);
-extern CUresult gpuMemAllocManagedRaw(GpuContext *gcontext,
-									  CUdeviceptr *p_devptr,
-									  size_t bytesize);
-extern CUresult gpuMemRetain(GpuContext *gcontext, CUdeviceptr devptr);
-extern CUresult	gpuMemFree(GpuContext *gcontext, CUdeviceptr devptr);
-extern CUresult gpuMemFreeExtra(void *extra, CUdeviceptr devptr);
-extern void gpuMemReclaim(void);
-
-extern void pgstrom_init_gpu_memory(void);
-#endif
 
 /*
  * gpu_server.c

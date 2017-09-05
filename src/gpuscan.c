@@ -2831,7 +2831,8 @@ gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 	length = GPUMEMALIGN(KERN_GPUSCAN_LENGTH(&gscan->kern))
 		+ (pds_dst ? GPUMEMALIGN(pds_dst->kds.length) : 0);
 
-	rc = gpuMemAllocManaged(gtask->gcontext, &m_gpuscan, length);
+	rc = gpuMemAllocManaged(gtask->gcontext, &m_gpuscan, length,
+							CU_MEM_ATTACH_GLOBAL);
 	if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		goto out_of_resource;
 	else if (rc != CUDA_SUCCESS)

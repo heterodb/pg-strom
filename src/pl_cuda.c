@@ -1894,7 +1894,8 @@ plcuda_process_task(GpuTask *gtask, CUmodule cuda_module)
 	/* kern_plcuda structure on the device side */
 	rc = gpuMemAllocManaged(gcontext,
 							&m_kern_plcuda,
-							KERN_PLCUDA_DMASEND_LENGTH(&ptask->kern));
+							KERN_PLCUDA_DMASEND_LENGTH(&ptask->kern),
+							CU_MEM_ATTACH_GLOBAL);
 	if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		goto out_of_resource;
 	else if (rc != CUDA_SUCCESS)
@@ -1905,7 +1906,8 @@ plcuda_process_task(GpuTask *gtask, CUmodule cuda_module)
 	{
 		rc = gpuMemAllocManaged(gcontext,
 								&m_working_buf,
-								ptask->kern.working_bufsz);
+								ptask->kern.working_bufsz,
+								CU_MEM_ATTACH_GLOBAL);
 		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 			goto out_of_resource;
 		else if (rc != CUDA_SUCCESS)
@@ -1917,7 +1919,8 @@ plcuda_process_task(GpuTask *gtask, CUmodule cuda_module)
 	{
 		rc = gpuMemAllocManaged(gcontext,
 								&m_results_buf,
-								ptask->kern.results_bufsz);
+								ptask->kern.results_bufsz,
+								CU_MEM_ATTACH_GLOBAL);
 		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 			goto out_of_resource;
 		else if (rc != CUDA_SUCCESS)

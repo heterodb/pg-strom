@@ -621,10 +621,8 @@ __gpuMemAllocManaged(GpuContext *gcontext,
 {
 	cl_int		mclass;
 
-	/* only CU_MEM_ATTACH_GLOBAL is supported */
-	if (flags != CU_MEM_ATTACH_GLOBAL)
-		return CUDA_ERROR_NOT_SUPPORTED;
-	if (bytesize > ((size_t)gpu_memory_segment_size_kb << 9))
+	if (flags != CU_MEM_ATTACH_GLOBAL ||
+		bytesize > ((size_t)gpu_memory_segment_size_kb << 9))
 		__gpuMemAllocManagedRaw(gcontext,
 								p_devptr,
 								bytesize,

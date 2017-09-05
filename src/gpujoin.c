@@ -607,6 +607,10 @@ cost_gpujoin(PlannerInfo *root,
 												gpath,
 												num_chunks,
 												&kern_nloops);
+#if 0
+	// unified memory kills a hard restriction of device memory,
+	// but some penalty is needed for large device memory allocation
+	//
 	if (inner_buffer_sz > gpuMemMaxAllocSize())
 	{
 		double	ratio = ((double)(gpuMemMaxAllocSize() - inner_buffer_sz) /
@@ -615,6 +619,7 @@ cost_gpujoin(PlannerInfo *root,
 		if (inner_buffer_sz > 5 * gpuMemMaxAllocSize())
 			startup_cost += disable_cost;
 	}
+#endif
 
 	/*
 	 * Cost for each depth
@@ -4732,7 +4737,8 @@ gpujoin_process_kernel(GpuJoinTask *pgjoin, CUmodule cuda_module,
 
 	length += GPUMEMALIGN(kds_dst_head->length);
 
-	rc = gpuMemAllocManaged(gcontext, &m_kgjoin, length);
+	rc = gpuMemAllocManaged(gcontext, &m_kgjoin, length,
+							CU_MEM_ATTACH_GLOBAL);
 	if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		goto out_of_resource;
 	else if (rc != CUDA_SUCCESS)
@@ -5636,7 +5642,8 @@ __gpujoinLoadInnerBuffer(GpuContext *gcontext, GpuJoinSharedState *gj_sstate)
 
 	/* device memory allocation */
 	length = gj_sstate->total_length + maplen;
-	rc = gpuMemAllocManaged(gcontext, &m_kmrels, length);
+	rc = gpuMemAllocManaged(gcontext, &m_kmrels, length,
+							CU_MEM_ATTACH_GLOBAL);
 	if (rc != CUDA_SUCCESS)
 	{
 		if (rc == CUDA_ERROR_OUT_OF_MEMORY)

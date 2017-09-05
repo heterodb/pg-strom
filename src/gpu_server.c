@@ -1589,11 +1589,13 @@ gpuservEventLoop(void)
 		}
 		pg_atomic_fetch_sub_u32(&gpuserv_worker_npolls, 1);
 
+#if 0
 		/*
 		 * Try to release free device memory if GPU server is relaxed.
 		 */
 		if (GetNumberOfGpuServerTasks(gpuserv_id) == 0)
 			gpuMemReclaim();
+#endif
 	}
 	elog(LOG, "PG-Strom GPU Server on GPU-%d %s is terminated",
 		 devAttrs[gpuserv_cuda_dindex].DEV_ID,

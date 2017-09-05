@@ -4264,7 +4264,8 @@ gpupreagg_alloc_final_buffer(GpuPreAggTask *gpreagg,
 							 hash_slot[f_hashlimit]));
 	rc = gpuMemAllocManagedRaw(gcontext,
 							   &m_kds_final,
-							   length);
+							   length,
+							   CU_MEM_ATTACH_GLOBAL);
 	if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		return false;
 	else if (rc != CUDA_SUCCESS)
@@ -4485,7 +4486,8 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 			werror("failed on gpuMemAlloc: %s", errorText(rc));
 	}
 
-	rc = gpuMemAllocManaged(gcontext, &devptr, length);
+	rc = gpuMemAllocManaged(gcontext, &devptr, length,
+							CU_MEM_ATTACH_GLOBAL);
 	if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		goto out_of_resource;
 	else if (rc != CUDA_SUCCESS)
@@ -4785,7 +4787,8 @@ gpupreagg_process_unified_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 	length += GPUMEMALIGN(kds_dst_head->length);
 
 	/* allocation of short term device memory */
-	rc = gpuMemAllocManaged(gcontext, &devptr, length);
+	rc = gpuMemAllocManaged(gcontext, &devptr, length,
+							CU_MEM_ATTACH_GLOBAL);
 	if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		goto out_of_resource;
 	else if (rc != CUDA_SUCCESS)
