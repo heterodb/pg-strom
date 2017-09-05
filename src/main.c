@@ -490,7 +490,7 @@ _PG_init(void)
 	pgstrom_init_gpu_mmgr();
 	pgstrom_init_dma_buffer();
 	pgstrom_init_gpu_context();
-	pgstrom_init_gpu_memory();
+
 	pgstrom_init_gpu_server();
 	pgstrom_init_nvme_strom();
 

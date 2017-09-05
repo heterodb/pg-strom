@@ -47,7 +47,7 @@ PGSTROM_SQL_SRC = basis.sql aggfuncs.sql matrix.sql
 #
 __STROM_OBJS = main.o codegen.o datastore.o aggfuncs.o cuda_program.o \
 		gpu_device.o gpu_mmgr.o \
-		dma_buffer.o gpu_memory.o gpu_context.o gpu_server.o \
+		dma_buffer.o gpu_context.o gpu_server.o \
 		matrix.o nvme_strom.o \
 		gpu_tasks.o gpuscan.o gpujoin.o gpupreagg.o pl_cuda.o
 STROM_OBJS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__STROM_OBJS))

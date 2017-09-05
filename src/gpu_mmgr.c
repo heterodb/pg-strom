@@ -241,10 +241,10 @@ gpuMemFreeChunk(GpuMemSegment *gm_seg, CUdeviceptr m_devptr)
 }
 
 /*
- * gpuMemFreeExtra_v2
+ * gpuMemFreeExtra
  */
 CUresult
-gpuMemFreeExtra_v2(void *extra, CUdeviceptr m_devptr)
+gpuMemFreeExtra(void *extra, CUdeviceptr m_devptr)
 {
 	GpuMemLargeChunk *lchunk;
 	CUresult	rc = CUDA_ERROR_INVALID_VALUE;
@@ -272,12 +272,12 @@ gpuMemFreeExtra_v2(void *extra, CUdeviceptr m_devptr)
 }
 
 /*
- * gpuMemFree_v2
+ * gpuMemFree
  */
 CUresult
-gpuMemFree_v2(GpuContext *gcontext, CUdeviceptr m_devptr)
+gpuMemFree(GpuContext *gcontext, CUdeviceptr m_devptr)
 {
-	return gpuMemFreeExtra_v2(untrackGpuMem(gcontext, m_devptr), m_devptr);
+	return gpuMemFreeExtra(untrackGpuMem(gcontext, m_devptr), m_devptr);
 }
 
 /*

@@ -404,17 +404,17 @@ extern CUresult __gpuMemAllocManaged(GpuContext *gcontext,
 									 size_t bytesize,
 									 int flags,
 									 const char *filename, int lineno);
-extern CUresult gpuMemFreeExtra_v2(void *extra, CUdeviceptr devptr);
-extern CUresult gpuMemFree_v2(GpuContext *gcontext,
-							  CUdeviceptr devptr);
+extern CUresult gpuMemFreeExtra(void *extra, CUdeviceptr devptr);
+extern CUresult gpuMemFree(GpuContext *gcontext,
+						   CUdeviceptr devptr);
 
-#define gpuMemAllocRaw_v2(a,b,c)				\
+#define gpuMemAllocRaw(a,b,c)				\
 	__gpuMemAllocRaw((a),(b),(c),__FILE__,__LINE__)
-#define gpuMemAllocManagedRaw_v2(a,b,c,d)		\
+#define gpuMemAllocManagedRaw(a,b,c,d)		\
 	__gpuMemAllocManagedRaw((a),(b),(c),(d),__FILE__,__LINE__)
-#define gpuMemAlloc_v2(a,b,c)					\
+#define gpuMemAlloc(a,b,c)					\
 	__gpuMemAlloc((a),(b),(c),__FILE__,__LINE__)
-#define gpuMemAllocManaged_v2(a,b,c,d)			\
+#define gpuMemAllocManaged(a,b,c,d)			\
 	__gpuMemAllocManaged((a),(b),(c),(d),__FILE__,__LINE__)
 
 extern void pgstrom_init_gpu_mmgr(void);
@@ -472,6 +472,7 @@ extern bool trackIOMapMem(GpuContext *gcontext, CUdeviceptr devptr);
 extern void untrackIOMapMem(GpuContext *gcontext, CUdeviceptr devptr);
 extern void pgstrom_init_gpu_context(void);
 
+#if 0
 /*
  * gpu_memory.c
  */
@@ -494,6 +495,7 @@ extern CUresult gpuMemFreeExtra(void *extra, CUdeviceptr devptr);
 extern void gpuMemReclaim(void);
 
 extern void pgstrom_init_gpu_memory(void);
+#endif
 
 /*
  * gpu_server.c
