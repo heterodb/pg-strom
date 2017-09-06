@@ -41,52 +41,59 @@
 
 typedef struct
 {
+	cl_int			magic;
+	cl_int			mclass;
+	dlist_node		free_chain;		/* zero clear, if active chunk */
+	/* -- fields below are valid only if active chunks -- */
 	dlist_node		pgid_chain;
 	dlist_node		hash_chain;
 	dlist_node		lru_chain;
 	dlist_node		build_chain;
-	char		   *extra_buf;		/* extra memory for build/link */
+	cl_int			refcnt;
 	/* fields below are never updated once entry is constructed */
 	ProgramId		program_id;
 	pg_crc32		crc;			/* hash value by extra_flags */
 	int				extra_flags;	/*             + kern_define */
 	char		   *kern_define;	/*             + kern_source */
+	size_t			kern_deflen;
 	char		   *kern_source;
-	/* fields above are never updated once entry is constructed */
-	cl_int			refcnt;
+	size_t			kern_srclen;
 	char		   *bin_image;		/* may be CUDA_PROGRAM_BUILD_FAILURE */
 	size_t			bin_length;
 	char		   *error_msg;
 	int				error_code;
-	struct timeval	tv_build_end;	/* timestamp when build end */
 	char			data[FLEXIBLE_ARRAY_MEMBER];
 } program_cache_entry;
 
 #define PGCACHE_MIN_ERRORMSG_BUFSIZE	256
-#define PGCACHE_ERRORMSG_LEN(entry)		\
-	(dmaBufferSize(entry) -				\
-	 ((uintptr_t)(entry)->error_msg -	\
-	  (uintptr_t)(entry)))
+
+#define PGCACHE_CHUNKSZ_MAX_BIT		34		/* 16GB */
+#define PGCACHE_CHUNKSZ_MIN_BIT		9		/* 512B */
+#define PGCACHE_CHUNKSZ_MAX			(1UL << PGCACHE_CHUNKSZ_MAX_BIT)
+#define PGCACHE_CHUNKSZ_MIN			(1UL << PGCACHE_CHUNKSZ_MIN_BIT)
+#define PGCACHE_CHUNK_MAGIC			0xdeadbeaf
 
 #define CUDA_PROGRAM_BUILD_FAILURE			((void *)(~0UL))
 
-#define PGCACHE_HASH_SIZE	2048
+#define PGCACHE_HASH_SIZE	960
 #define WORDNUM(x)			((x) / BITS_PER_BITMAPWORD)
 #define BITNUM(x)			((x) % BITS_PER_BITMAPWORD)
 
 typedef struct
 {
 	volatile slock_t lock;
-	Size		program_cache_usage;
 	ProgramId	last_program_id;
 	dlist_head	pgid_slots[PGCACHE_HASH_SIZE];
 	dlist_head	hash_slots[PGCACHE_HASH_SIZE];
 	dlist_head	lru_list;
 	dlist_head	build_list;		/* build pending list */
+	dlist_head	addr_list;
+	dlist_head	free_list[PGCACHE_CHUNKSZ_MAX_BIT + 1];
+	char		base[FLEXIBLE_ARRAY_MEMBER];
 } program_cache_head;
 
 /* ---- GUC variables ---- */
-static Size		program_cache_size;
+static int		program_cache_size_kb;
 
 /* ---- static variables ---- */
 static shmem_startup_hook_type shmem_startup_next;
@@ -97,6 +104,10 @@ static program_cache_head *pgcache_head = NULL;
 #undef PGSTROM_CUDA
 static void	   *curand_wrapper_lib = NULL;
 static size_t	curand_wrapper_libsz;
+
+/* ---- forward declarations ---- */
+static void put_cuda_program_entry_nolock(program_cache_entry *entry);
+
 
 /*
  * lookup_cuda_program_entry_nolock - lookup a program_cache_entry by the
@@ -119,6 +130,109 @@ lookup_cuda_program_entry_nolock(ProgramId program_id)
 }
 
 /*
+ * split_cuda_program_entry_nolock
+ */
+static bool
+split_cuda_program_entry_nolock(int mclass)
+{
+	program_cache_entry *entry1;
+	program_cache_entry *entry2;
+	dlist_node	   *dnode;
+
+	if (mclass > PGCACHE_CHUNKSZ_MAX_BIT)
+		return false;
+	Assert(mclass > PGCACHE_CHUNKSZ_MIN_BIT);
+	if (dlist_is_empty(&pgcache_head->free_list[mclass]))
+	{
+		if (!split_cuda_program_entry_nolock(mclass + 1))
+			return false;
+	}
+	Assert(!dlist_is_empty(&pgcache_head->free_list[mclass]));
+	dnode = dlist_pop_head_node(&pgcache_head->free_list[mclass]);
+	entry1 = dlist_container(program_cache_entry, free_chain, dnode);
+	Assert(entry1->magic == PGCACHE_CHUNK_MAGIC &&
+		   entry1->mclass == mclass);
+	entry2 = (program_cache_entry *)((char *)entry1 + (1UL << (mclass - 1)));
+	memset(entry2, 0, offsetof(program_cache_entry, data));
+
+	mclass--;
+	entry1->magic = PGCACHE_CHUNK_MAGIC;
+	entry1->mclass = mclass;
+	entry2->magic = PGCACHE_CHUNK_MAGIC;
+	entry2->mclass = mclass;
+	dlist_push_head(&pgcache_head->free_list[mclass], &entry1->free_chain);
+	dlist_push_head(&pgcache_head->free_list[mclass], &entry2->free_chain);
+
+	return true;
+}
+
+/*
+ * reclaim_cuda_program_entry_nolock(int mclass)
+ */
+static bool
+reclaim_cuda_program_entry_nolock(int mclass)
+{
+	program_cache_entry *entry;
+	dlist_node	   *dnode;
+
+	while (dlist_is_empty(&pgcache_head->free_list[mclass]) &&
+		   split_cuda_program_entry_nolock(mclass + 1))
+	{
+		if (dlist_is_empty(&pgcache_head->lru_list))
+			return false;	/* no more entry to detach */
+
+		dnode = dlist_tail_node(&pgcache_head->lru_list);
+		entry = dlist_container(program_cache_entry, lru_chain, dnode);
+		dlist_delete(&entry->pgid_chain);
+		dlist_delete(&entry->hash_chain);
+		dlist_delete(&entry->lru_chain);
+		memset(&entry->pgid_chain, 0, sizeof(dlist_node));
+		memset(&entry->hash_chain, 0, sizeof(dlist_node));
+		memset(&entry->lru_chain, 0, sizeof(dlist_node));
+
+		put_cuda_program_entry_nolock(entry);
+	}
+	return true;
+}
+
+/*
+ * create_cuda_program_entry_nolock
+ */
+static program_cache_entry *
+create_cuda_program_entry_nolock(size_t variable_length)
+{
+	program_cache_entry *entry;
+	dlist_node *dnode;
+	size_t		required;
+	cl_int		mclass;
+
+	required = offsetof(program_cache_entry, data) + variable_length;
+	mclass = get_next_log2(required);
+	if (mclass < PGCACHE_CHUNKSZ_MIN_BIT)
+		mclass = PGCACHE_CHUNKSZ_MIN_BIT;
+	if (mclass > PGCACHE_CHUNKSZ_MAX_BIT)
+		return NULL;	/* invalid length */
+
+	if (dlist_is_empty(&pgcache_head->free_list[mclass]))
+	{
+		if (!split_cuda_program_entry_nolock(mclass + 1))
+		{
+			/* out of memory!, reclaim recently unused ones */
+			if (!reclaim_cuda_program_entry_nolock(mclass))
+				return NULL;	/* Oops! */
+		}
+	}
+	Assert(!dlist_is_empty(&pgcache_head->free_list[mclass]));
+	dnode = dlist_pop_head_node(&pgcache_head->free_list[mclass]);
+	entry = dlist_container(program_cache_entry, free_chain, dnode);
+	Assert(entry->magic == PGCACHE_CHUNK_MAGIC &&
+		   entry->mclass == mclass);
+	memset(&entry->free_chain, 0, sizeof(dlist_node));
+
+	return entry;
+}
+
+/*
  * get_cuda_program_entry_nolock
  */
 static void
@@ -126,6 +240,9 @@ get_cuda_program_entry_nolock(program_cache_entry *entry)
 {
 	Assert(entry->refcnt > 0);
 	entry->refcnt++;
+	if (entry->lru_chain.prev && entry->lru_chain.next)
+		dlist_move_head(&pgcache_head->lru_list,
+						&entry->lru_chain);
 }
 
 /*
@@ -134,22 +251,64 @@ get_cuda_program_entry_nolock(program_cache_entry *entry)
 static void
 put_cuda_program_entry_nolock(program_cache_entry *entry)
 {
-	if (--entry->refcnt == 0)
+	program_cache_entry *buddy;
+	size_t		limit = (size_t)program_cache_size_kb << 10;
+	size_t		offset;
+
+	if (--entry->refcnt > 0)
+		return;
+
+	/*
+	 * NOTE: unless program_cache_entry was not detached, refcnt shall
+	 * never be zero, so we confirm the entry is already detached.
+	 */
+	Assert(!entry->pgid_chain.next && !entry->pgid_chain.prev);
+	Assert(!entry->hash_chain.next && !entry->hash_chain.prev);
+	Assert(!entry->lru_chain.next && !entry->lru_chain.prev);
+
+	while (entry->mclass < PGCACHE_CHUNKSZ_MAX_BIT)
 	{
-		/*
-		 * NOTE: unless either reclaim_cuda_program_entry() or
-		 * build_cuda_program() don't detach entry from active
-		 * entries hash, it never goes to refcnt == 0.
-		 */
-		Assert(!entry->pgid_chain.next && !entry->pgid_chain.prev);
-		Assert(!entry->hash_chain.next && !entry->hash_chain.prev);
-		Assert(!entry->lru_chain.next && !entry->lru_chain.prev);
-		pgcache_head->program_cache_usage -= dmaBufferChunkSize(entry);
-		if (entry->bin_image != NULL &&
-			entry->bin_image != CUDA_PROGRAM_BUILD_FAILURE)
-			dmaBufferFree(entry->bin_image);
-		dmaBufferFree(entry);
+		offset = ((uintptr_t)entry - (uintptr_t)pgcache_head->base);
+		if ((offset & (1UL << entry->mclass)) == 0)
+		{
+			buddy = (program_cache_entry *)
+				((char *)entry + (1UL << entry->mclass));
+			if ((uintptr_t)buddy >= (uintptr_t)pgcache_head->base + limit)
+				break;		/* out of the range */
+			Assert(buddy->magic == PGCACHE_CHUNK_MAGIC);
+			if (!buddy->free_chain.prev ||		/* active? */
+				!buddy->free_chain.next ||		/* active? */
+				buddy->mclass != entry->mclass)	/* same size? */
+				break;
+			Assert(!buddy->pgid_chain.next && !buddy->pgid_chain.prev);
+			Assert(!buddy->hash_chain.next && !buddy->hash_chain.prev);
+			Assert(!buddy->lru_chain.next  && !buddy->lru_chain.prev);
+
+			dlist_delete(&buddy->free_chain);
+			entry->mclass++;
+		}
+		else
+		{
+			buddy = (program_cache_entry *)
+				((char *)entry - (1UL << entry->mclass));
+			if ((uintptr_t)buddy < (uintptr_t)pgcache_head->base)
+				break;		/* out of the range */
+			Assert(buddy->magic == PGCACHE_CHUNK_MAGIC);
+			if (!buddy->free_chain.prev ||		/* active? */
+				!buddy->free_chain.next ||		/* active? */
+				buddy->mclass != entry->mclass)	/* same size? */
+				break;
+			Assert(!buddy->pgid_chain.next && !buddy->pgid_chain.prev);
+			Assert(!buddy->hash_chain.next && !buddy->hash_chain.prev);
+			Assert(!buddy->lru_chain.next  && !buddy->lru_chain.prev);
+			dlist_delete(&buddy->free_chain);
+			entry = buddy;
+			entry->mclass++;
+		}
 	}
+	/* back to the free list */
+	dlist_push_head(&pgcache_head->free_list[entry->mclass],
+					&entry->free_chain);
 }
 
 /*
@@ -161,30 +320,6 @@ put_cuda_program_entry(program_cache_entry *entry)
 	SpinLockAcquire(&pgcache_head->lock);
 	put_cuda_program_entry_nolock(entry);
 	SpinLockRelease(&pgcache_head->lock);
-}
-
-/*
- * reclaim_cuda_program_entry
- *
- * it tries to reclaim the shared memory if highly memory presure.
- */
-static void
-reclaim_cuda_program_entry(void)
-{
-	program_cache_entry *entry;
-
-	while (pgcache_head->program_cache_usage > program_cache_size &&
-		   !dlist_is_empty(&pgcache_head->lru_list))
-	{
-		entry = dlist_container(program_cache_entry, lru_chain,
-								dlist_tail_node(&pgcache_head->lru_list));
-		/* remove from the list not to be reclaimed again */
-		dlist_delete(&entry->hash_chain);
-		dlist_delete(&entry->lru_chain);
-		memset(&entry->hash_chain, 0, sizeof(dlist_node));
-		memset(&entry->lru_chain, 0, sizeof(dlist_node));
-		put_cuda_program_entry_nolock(entry);
-	}
 }
 
 /*
@@ -508,9 +643,12 @@ pgstrom_cuda_source_file(ProgramId program_id)
 	source = construct_flat_cuda_source(entry->extra_flags,
 										entry->kern_define,
 										entry->kern_source);
+	put_cuda_program_entry(entry);
+	if (!source)
+		elog(ERROR, "out of memory");
 	writeout_cuda_source_file(tempfilepath, source);
 
-	put_cuda_program_entry(entry);
+	free(source);
 
 	return pstrdup(tempfilepath);
 }
@@ -519,31 +657,33 @@ pgstrom_cuda_source_file(ProgramId program_id)
  * build_cuda_program - an interface to run synchronous build process
  */
 static void
-build_cuda_program(program_cache_entry *entry)
+build_cuda_program(program_cache_entry *src_entry)
 {
+	program_cache_entry *bin_entry = NULL;
 	nvrtcProgram	program = NULL;
 	nvrtcResult		rc;
 	char		   *source = NULL;
 	char			tempfile[MAXPGPATH];
 	const char	   *options[10];
 	int				opt_index = 0;
+	void		   *ptx_image = NULL;
+	size_t			ptx_length = 0;
 	void		   *bin_image = NULL;
-	size_t			bin_length;
-	char		   *build_log;
+	size_t			bin_length = 0;
+	char		   *build_log = NULL;
+	size_t			log_length;
+	int				pindex;
+	int				hindex;
+	size_t			offset;
 	size_t			length;
-	Size			required;
-	char		   *extra_buf;
-	char		   *bin_image_new;
-	char		   *error_msg_new;
-	bool			build_success = true;
 	char			tempfilepath[MAXPGPATH];
 
 	/*
 	 * Make a nvrtcProgram object
 	 */
-	source = construct_flat_cuda_source(entry->extra_flags,
-										entry->kern_define,
-										entry->kern_source);
+	source = construct_flat_cuda_source(src_entry->extra_flags,
+										src_entry->kern_define,
+										src_entry->kern_source);
 	if (!source)
 		werror("out of memory");
 
@@ -573,33 +713,27 @@ build_cuda_program(program_cache_entry *entry)
 		options[opt_index++] = "--use_fast_math";
 //		options[opt_index++] = "--device-as-default-execution-space";
 		/* library linkage needs relocatable PTX */
-		if (entry->extra_flags & DEVKERNEL_NEEDS_LINKAGE)
+		if (src_entry->extra_flags & DEVKERNEL_NEEDS_LINKAGE)
 			options[opt_index++] = "--relocatable-device-code=true";
 
 		/*
 		 * Kick runtime compiler
 		 */
 		rc = nvrtcCompileProgram(program, opt_index, options);
-		if (rc != NVRTC_SUCCESS)
+		if (rc == NVRTC_ERROR_COMPILATION)
 		{
-			if (rc == NVRTC_ERROR_COMPILATION)
-			{
-				build_success = false;
-				writeout_cuda_source_file(tempfile, source);
-			}
-			else
-				werror("failed on nvrtcCompileProgram: %s",
-					   nvrtcGetErrorString(rc));
+			writeout_cuda_source_file(tempfile, source);
 		}
-
-		/*
-		 * Read PTX Binary
-		 */
-		if (build_success)
+		else if (rc != NVRTC_SUCCESS)
 		{
-			char	   *ptx_image;
-			size_t		ptx_length;
-
+			werror("failed on nvrtcCompileProgram: %s",
+				   nvrtcGetErrorString(rc));
+		}
+		else
+		{
+			/*
+			 * Read PTX Binary
+			 */
 			rc = nvrtcGetPTXSize(program, &ptx_length);
 			if (rc != NVRTC_SUCCESS)
 				werror("failed on nvrtcGetPTXSize: %s",
@@ -608,91 +742,132 @@ build_cuda_program(program_cache_entry *entry)
 			if (!ptx_image)
 				werror("out of memory");
 
-			STROM_TRY();
-			{
-				rc = nvrtcGetPTX(program, ptx_image);
-				if (rc != NVRTC_SUCCESS)
-					werror("failed on nvrtcGetPTX: %s",
-						   nvrtcGetErrorString(rc));
-				ptx_image[ptx_length++] = '\0';
+			rc = nvrtcGetPTX(program, ptx_image);
+			if (rc != NVRTC_SUCCESS)
+				werror("failed on nvrtcGetPTX: %s",
+					   nvrtcGetErrorString(rc));
+			//ptx_image[ptx_length++] = '\0';
 
-				/*
-				 * Link the required run-time libraries, if any
-				 */
-				if (entry->extra_flags & DEVKERNEL_NEEDS_LINKAGE)
-				{
-					link_cuda_libraries(ptx_image, ptx_length,
-										entry->extra_flags,
-										&bin_image, &bin_length);
-					free(ptx_image);
-				}
-				else
-				{
-					bin_image = ptx_image;
-					bin_length = ptx_length;
-				}
-			}
-			STROM_CATCH();
+			/*
+			 * Link with run-time libraries, if any
+			 */
+			if (src_entry->extra_flags & DEVKERNEL_NEEDS_LINKAGE)
 			{
+				link_cuda_libraries(ptx_image, ptx_length,
+									src_entry->extra_flags,
+									&bin_image, &bin_length);
 				free(ptx_image);
-				STROM_RE_THROW();
 			}
-			STROM_END_TRY();
-		}
-		else
-		{
-			bin_image = NULL;
-			bin_length = 0;
+			else
+			{
+				bin_image = ptx_image;
+				bin_length = ptx_length;
+			}
+			ptx_image = NULL;
 		}
 
 		/*
 		 * Read Log Output
 		 */
-		rc = nvrtcGetProgramLogSize(program, &length);
+		rc = nvrtcGetProgramLogSize(program, &log_length);
 		if (rc != NVRTC_SUCCESS)
 			werror("failed on nvrtcGetProgramLogSize: %s",
 				   nvrtcGetErrorString(rc));
-		build_log = palloc(length + 1);
+		build_log = malloc(log_length + 1);
+		if (!build_log)
+			werror("out of memory");
 
 		rc = nvrtcGetProgramLog(program, build_log);
 		if (rc != NVRTC_SUCCESS)
 			werror("failed on nvrtcGetProgramLog: %s",
 				   nvrtcGetErrorString(rc));
-		build_log[length] = '\0';	/* may not be necessary? */
+		build_log[log_length] = '\0';	/* may not be necessary? */
+
+		/* release nvrtcProgram object */
+		rc = nvrtcDestroyProgram(&program);
+		if (rc != NVRTC_SUCCESS)
+			werror("failed on nvrtcDestroyProgram: %s",
+				   nvrtcGetErrorString(rc));
 
 		/*
-		 * Attach bin_image/build_log to the existing entry
+		 * Allocation of a new entry, to keep bin_image/build_log
 		 */
-		required = (bin_image ? MAXALIGN(bin_length) : 0) +
-			MAXALIGN(strlen(build_log)) +
-			PGCACHE_MIN_ERRORMSG_BUFSIZE;	/* margin for error message */
-		extra_buf = dmaBufferAlloc(MasterGpuContext(), required);
-
-		if (bin_image)
+		length = (MAXALIGN(src_entry->kern_deflen + 1) +
+				  MAXALIGN(src_entry->kern_srclen + 1) +
+				  MAXALIGN(bin_length + 1) +
+				  MAXALIGN(log_length + 1) +
+				  PGCACHE_MIN_ERRORMSG_BUFSIZE);
+		SpinLockAcquire(&pgcache_head->lock);
+		bin_entry = create_cuda_program_entry_nolock(length);
+		if (!bin_entry)
 		{
-			bin_image_new = extra_buf;
-			error_msg_new = extra_buf + MAXALIGN(bin_length);
-			memcpy(bin_image_new, bin_image, bin_length);
+			SpinLockRelease(&pgcache_head->lock);
+			werror("out of CUDA program cache");
 		}
+		/*
+		 * OK, replace the src_entry by the bin_entry
+		 */
+		dlist_delete(&src_entry->pgid_chain);
+		dlist_delete(&src_entry->hash_chain);
+		dlist_delete(&src_entry->lru_chain);
+		memset(&src_entry->pgid_chain, 0, sizeof(dlist_node));
+		memset(&src_entry->hash_chain, 0, sizeof(dlist_node));
+		memset(&src_entry->lru_chain, 0, sizeof(dlist_node));
+		Assert(!src_entry->build_chain.prev &&
+			   !src_entry->build_chain.next);
+
+		offset = 0;
+		bin_entry->program_id		= src_entry->program_id;
+		bin_entry->crc				= src_entry->crc;
+		bin_entry->extra_flags		= src_entry->extra_flags;
+		bin_entry->kern_deflen		= src_entry->kern_deflen;
+		bin_entry->kern_define		= bin_entry->data + offset;
+		strcpy(bin_entry->kern_define, src_entry->kern_define);
+		offset += MAXALIGN(bin_entry->kern_deflen + 1);
+
+		bin_entry->kern_srclen		= src_entry->kern_srclen;
+		bin_entry->kern_source		= bin_entry->data + offset;
+		strcpy(bin_entry->kern_source, src_entry->kern_source);
+		offset += MAXALIGN(bin_entry->kern_srclen + 1);
+
+		if (!bin_image)
+			bin_entry->bin_image	= CUDA_PROGRAM_BUILD_FAILURE;
 		else
 		{
-			bin_image_new = CUDA_PROGRAM_BUILD_FAILURE;
-			error_msg_new = extra_buf;
+			bin_entry->bin_image	= bin_entry->data + offset;
+			memcpy(bin_entry->bin_image, bin_image, bin_length);
+			offset += MAXALIGN(bin_length + 1);
 		}
 
-		if (!build_success)
-			snprintf(error_msg_new, required - MAXALIGN(bin_length),
-					 "build %s:\n%s\nsource: %s",
-					 bin_image ? "success" : "failure",
+		bin_entry->error_msg		= bin_entry->data + offset;
+		if (!bin_image)
+			snprintf(bin_entry->error_msg, length - offset,
+					 "build failure:\n%s\nsource: %s",
 					 build_log, tempfilepath);
 		else
-			snprintf(error_msg_new, required - MAXALIGN(bin_length),
-					 "build %s:\n%s",
-					 bin_image ? "success" : "failure",
+			snprintf(bin_entry->error_msg, length - offset,
+					 "build success:\n%s\n",
 					 build_log);
+		/* OK, bin_entry was built */
+		pindex = bin_entry->program_id % PGCACHE_HASH_SIZE;
+		hindex = bin_entry->crc % PGCACHE_HASH_SIZE;
+		dlist_push_head(&pgcache_head->pgid_slots[pindex],
+						&bin_entry->pgid_chain);
+		dlist_push_head(&pgcache_head->hash_slots[hindex],
+						&bin_entry->hash_chain);
+		dlist_push_head(&pgcache_head->lru_list,
+						&bin_entry->lru_chain);
+		dlist_push_head(&pgcache_head->build_list,
+						&bin_entry->build_chain);
 	}
 	STROM_CATCH();
 	{
+		if (build_log)
+			free(build_log);
+		if (bin_image)
+			free(bin_image);
+		if (ptx_image)
+			free(ptx_image);
 		if (program)
 		{
 			rc = nvrtcDestroyProgram(&program);
@@ -700,38 +875,11 @@ build_cuda_program(program_cache_entry *entry)
 				wnotice("failed on nvrtcDestroyProgram: %s",
 						nvrtcGetErrorString(rc));
 		}
-
 		if (source)
 			free(source);
 		STROM_RE_THROW();
 	}
 	STROM_END_TRY();
-
-	/* update the program entry */
-	SpinLockAcquire(&pgcache_head->lock);
-	Assert(entry->bin_image == NULL);
-	entry->bin_image = bin_image_new;
-	entry->error_msg = error_msg_new;
-	entry->extra_buf = extra_buf;		/* to be released later */
-	pgcache_head->program_cache_usage += dmaBufferChunkSize(extra_buf);
-
-	/*
-	 * Reclaim the older buffer if overconsumption. Also note that this
-	 * entry might be already reclaimed by others.
-	 */
-	if (entry->lru_chain.prev && entry->lru_chain.next)
-	{
-		dlist_move_head(&pgcache_head->lru_list, &entry->lru_chain);
-		if (pgcache_head->program_cache_usage > program_cache_size)
-			reclaim_cuda_program_entry();
-	}
-	SpinLockRelease(&pgcache_head->lock);
-
-	/* release nvrtcProgram object */
-	rc = nvrtcDestroyProgram(&program);
-	if (rc != NVRTC_SUCCESS)
-		wnotice("failed on nvrtcDestroyProgram: %s",
-				nvrtcGetErrorString(rc));
 }
 
 /*
@@ -783,8 +931,6 @@ pgstrom_try_build_cuda_program(void)
 		 */
 
 		SpinLockAcquire(&pgcache_head->lock);
-		/* no code path raise error once 'bin_image' gets assigned */
-		Assert(!entry->bin_image);
 		dlist_push_tail(&pgcache_head->build_list, &entry->build_chain);
 		put_cuda_program_entry_nolock(entry);
 		SpinLockRelease(&pgcache_head->lock);
@@ -813,10 +959,10 @@ pgstrom_create_cuda_program(GpuContext *gcontext,
 {
 	program_cache_entry	*entry;
 	ProgramId	program_id;
-	Size		kern_source_len = strlen(kern_source);
-	Size		kern_define_len = strlen(kern_define);
-	Size		required;
-	Size		usage;
+	Size		kern_srclen = strlen(kern_source);
+	Size		kern_deflen = strlen(kern_define);
+	Size		length;
+	Size		usage = 0;
 	int			pindex;
 	int			hindex;
 	dlist_iter	iter;
@@ -828,8 +974,8 @@ pgstrom_create_cuda_program(GpuContext *gcontext,
 	/* makes a hash value */
 	INIT_LEGACY_CRC32(crc);
 	COMP_LEGACY_CRC32(crc, &extra_flags, sizeof(int32));
-	COMP_LEGACY_CRC32(crc, kern_source, kern_source_len);
-	COMP_LEGACY_CRC32(crc, kern_define, kern_define_len);
+	COMP_LEGACY_CRC32(crc, kern_source, kern_srclen);
+	COMP_LEGACY_CRC32(crc, kern_define, kern_deflen);
 	FIN_LEGACY_CRC32(crc);
 
 	hindex = crc % PGCACHE_HASH_SIZE;
@@ -896,22 +1042,15 @@ pgstrom_create_cuda_program(GpuContext *gcontext,
 	 * Not found on the existing program cache.
 	 * So, create a new entry then kick NVRTC
 	 */
-	PG_TRY();
-	{
-		required = offsetof(program_cache_entry, data[0]);
-		required += MAXALIGN(kern_source_len + 1);
-		required += MAXALIGN(kern_define_len + 1);
-		required += PGCACHE_MIN_ERRORMSG_BUFSIZE;
-		usage = 0;
-
-		entry = dmaBufferAlloc(MasterGpuContext(), required);
-	}
-	PG_CATCH();
+	length = (MAXALIGN(kern_srclen + 1) +
+			  MAXALIGN(kern_deflen + 1) +
+			  PGCACHE_MIN_ERRORMSG_BUFSIZE);
+	entry = create_cuda_program_entry_nolock(length);
+	if (!entry)
 	{
 		SpinLockRelease(&pgcache_head->lock);
-		PG_RE_THROW();
+		werror("out of shared memory");
 	}
-	PG_END_TRY();
 
 	/* find out a unique program_id */
 retry_program_id:
@@ -931,12 +1070,14 @@ retry_program_id:
 	entry->extra_flags = extra_flags;
 
 	entry->kern_define = (char *)(entry->data + usage);
-	memcpy(entry->kern_define, kern_define, kern_define_len + 1);
-	usage += MAXALIGN(kern_define_len + 1);
+	entry->kern_deflen = kern_deflen;
+	memcpy(entry->kern_define, kern_define, kern_deflen + 1);
+	usage += MAXALIGN(kern_deflen + 1);
 
 	entry->kern_source = (char *)(entry->data + usage);
-	memcpy(entry->kern_source, kern_source, kern_source_len + 1);
-	usage += MAXALIGN(kern_source_len + 1);
+	entry->kern_srclen = kern_srclen;
+	memcpy(entry->kern_source, kern_source, kern_srclen + 1);
+	usage += MAXALIGN(kern_srclen + 1);
 
 	/* reference count */
 	entry->refcnt = 2;
@@ -946,8 +1087,6 @@ retry_program_id:
 	entry->bin_length = 0;
 	/* remaining are for error message */
 	entry->error_msg = (char *)(entry->data + usage);
-	/* no extra buffer at this moment */
-	entry->extra_buf = NULL;
 
 	/* add an entry for program build in-progress */
 	dlist_push_head(&pgcache_head->pgid_slots[pindex],
@@ -958,10 +1097,8 @@ retry_program_id:
 					&entry->lru_chain);
 	dlist_push_head(&pgcache_head->build_list,
 					&entry->build_chain);
-	pgcache_head->program_cache_usage += dmaBufferChunkSize(entry);
-	if (pgcache_head->program_cache_usage > program_cache_size)
-		reclaim_cuda_program_entry();
 	/* try to wake up GPU server workers */
+	// XXX - to be replaced taskq
 	gpuservTryToWakeUp();
 	/* wait for completion of build, if needed */
 	while (wait_for_build)
@@ -1065,8 +1202,6 @@ pgstrom_build_session_info(StringInfo buf,
 
 /*
  * pgstrom_load_cuda_program
- *
- *
  */
 CUmodule
 pgstrom_load_cuda_program(ProgramId program_id, long timeout)
@@ -1081,6 +1216,7 @@ pgstrom_load_cuda_program(ProgramId program_id, long timeout)
 	Assert(IsGpuServerProcess());
 
 	SpinLockAcquire(&pgcache_head->lock);
+retry_checks:
 	entry = lookup_cuda_program_entry_nolock(program_id);
 	if (!entry)
 	{
@@ -1097,7 +1233,6 @@ pgstrom_load_cuda_program(ProgramId program_id, long timeout)
 		tv1.tv_usec = (tv1.tv_usec % 1000000);
 	}
 
-retry_checks:
 	if (entry->bin_image == CUDA_PROGRAM_BUILD_FAILURE)
 	{
 		strncpy(error_msg, entry->error_msg,
@@ -1113,8 +1248,8 @@ retry_checks:
 		if (entry->build_chain.prev || entry->build_chain.next)
 		{
 			/*
-			 * It looks to me nobody picked up this CUDA program for build,
-			 * so we try to build by ourself, synchronously.
+			 * Nobody picked up this CUDA program for build yet, so we try to
+			 * build it by ourself, but synchronously.
 			 */
 			dlist_delete(&entry->build_chain);
 			memset(&entry->build_chain, 0, sizeof(dlist_node));
@@ -1123,7 +1258,7 @@ retry_checks:
 			build_cuda_program(entry);
 
 			SpinLockAcquire(&pgcache_head->lock);
-			Assert(entry->bin_image != NULL);
+			put_cuda_program_entry_nolock(entry);
 			goto retry_checks;
 		}
 		else
@@ -1147,6 +1282,7 @@ retry_checks:
 			pg_usleep(50000L);
 
 			SpinLockAcquire(&pgcache_head->lock);
+			put_cuda_program_entry_nolock(entry);
 			goto retry_checks;
 		}
 	}
@@ -1258,13 +1394,16 @@ static void
 pgstrom_startup_cuda_program(void)
 {
 	bool		found;
-	int			i;
+	int			i, mclass;
+	size_t		offset;
+	size_t		length;
 
 	if (shmem_startup_next)
 		(*shmem_startup_next)();
 
 	pgcache_head = ShmemInitStruct("PG-Strom Program Cache",
-								   sizeof(program_cache_head),
+								   offsetof(program_cache_head, base) +
+								   ((size_t)program_cache_size_kb << 10),
 								   &found);
 	if (found)
 		elog(ERROR, "Bug? shared memory for program cache already exists");
@@ -1279,12 +1418,35 @@ pgstrom_startup_cuda_program(void)
 	}
 	dlist_init(&pgcache_head->lru_list);
 	dlist_init(&pgcache_head->build_list);
+	dlist_init(&pgcache_head->addr_list);
+	for (i=0; i <= PGCACHE_CHUNKSZ_MAX_BIT; i++)
+		dlist_init(&pgcache_head->free_list[i]);
+
+	length = ((size_t)program_cache_size_kb << 10);
+	offset = 0;
+	mclass = PGCACHE_CHUNKSZ_MAX_BIT;
+	while (mclass >= PGCACHE_CHUNKSZ_MIN_BIT)
+	{
+		program_cache_entry *entry;
+
+		if (offset + (1UL << mclass) >= length)
+		{
+			mclass--;
+			continue;
+		}
+		entry = (program_cache_entry *)(pgcache_head->base + offset);
+		memset(entry, 0, offsetof(program_cache_entry, data));
+		entry->magic = PGCACHE_CHUNK_MAGIC;
+		entry->mclass = mclass;
+		dlist_push_tail(&pgcache_head->free_list[mclass],
+						&entry->free_chain);
+		offset += (1UL << mclass);
+	}
 }
 
 void
 pgstrom_init_cuda_program(void)
 {
-	static int	__program_cache_size;
 	int			major;
 	int			minor;
 	nvrtcResult	rc;
@@ -1295,14 +1457,13 @@ pgstrom_init_cuda_program(void)
 	DefineCustomIntVariable("pg_strom.program_cache_size",
 							"size of shared program cache",
 							NULL,
-							&__program_cache_size,
-							48 * 1024,		/* 48MB */
+							&program_cache_size_kb,
+							512 * 1024,		/* 512MB */
 							16 * 1024,		/* 16MB */
 							INT_MAX,
 							PGC_POSTMASTER,
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
 							NULL, NULL, NULL);
-	program_cache_size = (Size)__program_cache_size * 1024L;
 
 	/*
 	 * Init CUDA run-time compiler library
@@ -1320,7 +1481,8 @@ pgstrom_init_cuda_program(void)
 #undef PGSTROM_CUDA
 
 	/* allocation of static shared memory */
-	RequestAddinShmemSpace(sizeof(program_cache_head));
+	RequestAddinShmemSpace(offsetof(program_cache_head, base) +
+						   ((size_t)program_cache_size_kb << 10));
 	shmem_startup_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_cuda_program;
 
