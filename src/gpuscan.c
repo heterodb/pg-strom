@@ -110,7 +110,9 @@ deform_gpuscan_info(CustomScan *cscan)
 }
 
 typedef struct {
-	pg_atomic_uint64	nitems_filtered;
+	cl_uint			ss_length;
+	cl_int			pg_nworkers;
+	pg_atomic_uint64 nitems_filtered;
 } GpuScanSharedState;
 
 typedef struct {
@@ -139,13 +141,6 @@ typedef struct
 	kern_gpuscan		kern;
 } GpuScanTask;
 
-/* shared state of GpuScan for CPU parallel */
-typedef struct
-{
-	GpuScanSharedState *gs_sstate;		/* shared state */
-	ParallelHeapScanDescData pscan;		/* flexible length */
-} GpuScanParallelDSM;
-
 /*
  * static functions
  */
@@ -153,8 +148,9 @@ static GpuTask  *gpuscan_next_task(GpuTaskState *gts);
 static TupleTableSlot *gpuscan_next_tuple(GpuTaskState *gts);
 static void gpuscan_switch_task(GpuTaskState *gts, GpuTask *gtask);
 
-static GpuScanSharedState *createGpuScanSharedState(GpuScanState *gss);
-static void releaseGpuScanSharedState(GpuScanState *gss);
+static GpuScanSharedState *createGpuScanSharedState(GpuScanState *gss,
+													int pg_nworkers,
+													void *dsm_addr);
 static void resetGpuScanSharedState(GpuScanState *gss);
 
 /*
@@ -2041,7 +2037,7 @@ ExecGpuScan(CustomScanState *node)
 	GpuScanState   *gss = (GpuScanState *) node;
 
 	if (!gss->gs_sstate)
-		gss->gs_sstate = createGpuScanSharedState(gss);
+		gss->gs_sstate = createGpuScanSharedState(gss, 1, NULL);
 	return ExecScan(&node->ss,
 					(ExecScanAccessMtd) pgstromExecGpuTaskState,
 					(ExecScanRecheckMtd) ExecReCheckGpuScan);
@@ -2057,8 +2053,6 @@ ExecEndGpuScan(CustomScanState *node)
 
 	/* wait for completion of asynchronous GpuTaks */
 	SynchronizeGpuContext(gss->gts.gcontext);
-	/* release shared state */
-	releaseGpuScanSharedState(gss);
 	/* reset fallback resources */
 	if (gss->base_slot)
 		ExecDropSingleTupleTableSlot(gss->base_slot);
@@ -2091,12 +2085,12 @@ ExecGpuScanEstimateDSM(CustomScanState *node,
 					   ParallelContext *pcxt)
 {
 	EState	   *estate = node->ss.ps.state;
-	Size		length = offsetof(GpuScanParallelDSM, pscan);
+	Size		required;
 
+	required = MAXALIGN(sizeof(GpuScanSharedState));
 	if (node->ss.ss_currentRelation)
-		length += heap_parallelscan_estimate(estate->es_snapshot);
-
-	return length;
+		required += heap_parallelscan_estimate(estate->es_snapshot);
+	return required;
 }
 
 /*
@@ -2107,25 +2101,29 @@ ExecGpuScanInitDSM(CustomScanState *node,
 				   ParallelContext *pcxt,
 				   void *coordinate)
 {
-	GpuScanState	   *gss = (GpuScanState *) node;
-	GpuScanSharedState *gs_sstate = NULL;
-	Relation			relation = node->ss.ss_currentRelation;
-	EState			   *estate = gss->gts.css.ss.ps.state;
-	GpuScanParallelDSM *gspdsm = coordinate;
+	GpuScanState   *gss = (GpuScanState *) node;
+	Relation		relation = node->ss.ss_currentRelation;
+	EState		   *estate = gss->gts.css.ss.ps.state;
 
 	gss->gts.pcxt = pcxt;
 	/* NOTE: GpuJoin or GpuPreAgg may also call this function */
 	if (pgstrom_planstate_is_gpuscan(&gss->gts.css.ss.ps))
-		gss->gs_sstate = gs_sstate = createGpuScanSharedState(gss);
-	gspdsm->gs_sstate = gs_sstate;
+	{
+		gss->gs_sstate = createGpuScanSharedState(gss, pcxt->nworkers + 1,
+												  coordinate);
+		coordinate = ((char *)coordinate + 
+					  MAXALIGN(sizeof(GpuScanSharedState)));
+	}
+
 	if (relation)
 	{
+		ParallelHeapScanDescData *pscan = coordinate;
 		/* setup of parallel scan descriptor */
-		heap_parallelscan_initialize(&gspdsm->pscan,
+		heap_parallelscan_initialize(pscan,
 									 relation,
 									 estate->es_snapshot);
 		node->ss.ss_currentScanDesc =
-			heap_beginscan_parallel(relation, &gspdsm->pscan);
+			heap_beginscan_parallel(relation, pscan);
 		/* Try to choose NVMe-Strom, if available */
 		PDS_init_heapscan_state(&gss->gts, gss->gts.outer_nrows_per_block);
 	}
@@ -2141,20 +2139,38 @@ ExecGpuScanInitWorker(CustomScanState *node,
 {
 	GpuScanState	   *gss = (GpuScanState *) node;
 	Relation			relation = node->ss.ss_currentRelation;
-	GpuScanParallelDSM *gspdsm = coordinate;
 
 	/* NOTE: GpuJoin or GpuPreAgg may also call this function */
 	if (pgstrom_planstate_is_gpuscan(&gss->gts.css.ss.ps))
-		gss->gs_sstate = gspdsm->gs_sstate;
+	{
+		gss->gs_sstate = (GpuScanSharedState *)coordinate;
+		coordinate = ((char *)coordinate +
+					  MAXALIGN(sizeof(GpuScanSharedState)));
+	}
+
 	if (relation)
 	{
+		ParallelHeapScanDescData *pscan = coordinate;
 		/* begin parallel sequential scan */
 		gss->gts.css.ss.ss_currentScanDesc =
-			heap_beginscan_parallel(relation, &gspdsm->pscan);
+			heap_beginscan_parallel(relation, pscan);
 		/* Try to choose NVMe-Strom, if available */
 		PDS_init_heapscan_state(&gss->gts, gss->gts.outer_nrows_per_block);
 	}
 }
+
+#if PG_VERSION_NUM >= 100000
+static void
+ExecShutdownGpuScan(CustomScanState *node)
+{
+	GpuScanState   *gss = (GpuScanState *) node;
+	GpuScanSharedState *gs_sstate = gss->gs_sstate;
+
+	/* move the statistics from DSM */
+	gss->css.ss.ps.instrument->nfiltered1
+		+= pg_atomic_read_u64(&gs_sstate->nitems_filtered);
+}
+#endif
 
 /*
  * ExplainGpuScan - EXPLAIN callback
@@ -2202,6 +2218,7 @@ ExplainGpuScan(CustomScanState *node, List *ancestors, ExplainState *es)
 		ExplainPropertyText("GPU Filter", exprstr, es);
 		if (gs_sstate && gss->gts.css.ss.ps.instrument)
 		{
+			//statistics ... PostgreSQL 10 feature
 			Instrumentation *instrument = gss->gts.css.ss.ps.instrument;
 
 			nitems_filtered = pg_atomic_read_u64(&gs_sstate->nitems_filtered);
@@ -2219,34 +2236,21 @@ ExplainGpuScan(CustomScanState *node, List *ancestors, ExplainState *es)
  * createGpuScanSharedState
  */
 static GpuScanSharedState *
-createGpuScanSharedState(GpuScanState *gss)
+createGpuScanSharedState(GpuScanState *gss, int pg_nworkers, void *dsm_addr)
 {
-	GpuContext *gcontext = gss->gts.gcontext;
 	GpuScanSharedState *gs_sstate;
 	EState	   *estate = gss->gts.css.ss.ps.state;
-	Size		length = offsetof(GpuScanParallelDSM, pscan);
 
-	if (gss->gts.css.ss.ss_currentRelation)
-		length += heap_parallelscan_estimate(estate->es_snapshot);
-
-	gs_sstate = dmaBufferAlloc(gcontext, length);
-	if (!gs_sstate)
-		elog(ERROR, "out of DMA buffer");
-	memset(gs_sstate, 0, length);
+	if (dsm_addr)
+		gs_sstate = dsm_addr;
+	else
+		gs_sstate = MemoryContextAlloc(estate->es_query_cxt,
+									   sizeof(GpuScanSharedState));
+	memset(gs_sstate, 0, sizeof(GpuScanSharedState));
+	gs_sstate->ss_length = sizeof(GpuScanSharedState);
+	gs_sstate->pg_nworkers = pg_nworkers;
 
 	return gs_sstate;
-}
-
-/*
- * releaseGpuScanSharedState
- */
-static void
-releaseGpuScanSharedState(GpuScanState *gss)
-{
-	GpuScanSharedState *gs_sstate = gss->gs_sstate;
-
-	if (gs_sstate && !IsParallelWorker())
-		dmaBufferFree(gs_sstate);
 }
 
 /*
@@ -2266,13 +2270,15 @@ gpuscan_create_task(GpuScanState *gss,
 					pgstrom_data_store *pds_src,
 					int file_desc)
 {
-	TupleDesc			scan_tupdesc = GTS_GET_SCAN_TUPDESC(gss);
-	GpuContext		   *gcontext = gss->gts.gcontext;
+	TupleDesc		scan_tupdesc = GTS_GET_SCAN_TUPDESC(gss);
+	GpuContext	   *gcontext = gss->gts.gcontext;
 	pgstrom_data_store *pds_dst = NULL;
-	kern_resultbuf	   *kresults = NULL;
-	GpuScanTask		   *gscan;
-	cl_uint				nresults = 0;
-	Size				length;
+	kern_resultbuf *kresults = NULL;
+	GpuScanTask	   *gscan;
+	cl_uint			nresults = 0;
+	size_t			length;
+	CUdeviceptr		m_deviceptr;
+	CUresult		rc;
 
 	/*
 	 * allocation of destination buffer
@@ -2297,8 +2303,13 @@ gpuscan_create_task(GpuScanState *gss,
 	length = (STROMALIGN(offsetof(GpuScanTask, kern.kparams)) +
 			  STROMALIGN(gss->gts.kern_params->length) +
 			  STROMALIGN(offsetof(kern_resultbuf, results[nresults])));
-
-	gscan = dmaBufferAlloc(gcontext, length);
+	rc = gpuMemAllocManaged(gcontext,
+							&m_deviceptr,
+							length,
+							CU_MEM_ATTACH_GLOBAL);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on gpuMemAllocManaged: %s", errorText(rc));
+	gscan = (GpuScanTask *) m_deviceptr;
 	memset(gscan, 0, (offsetof(GpuScanTask, kern) +
 					  offsetof(kern_gpuscan, kparams)));
 	pgstromInitGpuTask(&gss->gts, &gscan->task);
@@ -3013,12 +3024,13 @@ void
 gpuscan_release_task(GpuTask *gtask)
 {
 	GpuScanTask	   *gscan = (GpuScanTask *) gtask;
+	GpuTaskState   *gts = gscan->task.gts;
 
 	if (gscan->pds_src)
 		PDS_release(gscan->pds_src);
 	if (gscan->pds_dst)
 		PDS_release(gscan->pds_dst);
-	dmaBufferFree(gscan);
+	gpuMemFree(gts->gcontext, (CUdeviceptr) gscan);
 }
 
 /*
@@ -3111,6 +3123,9 @@ pgstrom_init_gpuscan(void)
 	gpuscan_exec_methods.EstimateDSMCustomScan = ExecGpuScanEstimateDSM;
 	gpuscan_exec_methods.InitializeDSMCustomScan = ExecGpuScanInitDSM;
 	gpuscan_exec_methods.InitializeWorkerCustomScan = ExecGpuScanInitWorker;
+#if PG_VERSION_NUM >= 100000
+	gpuscan_exec_methods.ShutdownCustomScan	= ExecShutdownGpuScan;
+#endif
 	gpuscan_exec_methods.ExplainCustomScan  = ExplainGpuScan;
 
 	/* hook registration */

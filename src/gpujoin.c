@@ -256,18 +256,13 @@ typedef struct
 	innerState		inners[FLEXIBLE_ARRAY_MEMBER];
 } GpuJoinState;
 
-/* DSM object of GpuJoin for CPU parallel */
-typedef struct
-{
-	struct GpuJoinSharedState *gj_sstate;
-	char		data[FLEXIBLE_ARRAY_MEMBER];	/* GpuScanParallelDSM if any */
-} GpuJoinParallelDSM;
-
 /*
  * GpuJoinSharedState - shared inner hash/heap buffer
  */
 struct GpuJoinSharedState
 {
+	cl_uint			ss_length;		/* length of the SharedState */
+	cl_int			pg_nworkers;	/* num of working backends */
 	pg_atomic_uint32 preload_done;	/* non-zero, if preloaded */
 	Size			head_length;	/* length of the header portion */
 	Size			total_length;	/* total length of the inner buffer */
@@ -357,7 +352,10 @@ static char *gpujoin_codegen(PlannerInfo *root,
 							 List *tlist,
 							 codegen_context *context);
 
-static GpuJoinSharedState *createGpuJoinSharedState(GpuJoinState *gjs);
+static Size estimateGpuJoinSharedState(GpuJoinState *gjs, int pg_nworkers);
+static GpuJoinSharedState *createGpuJoinSharedState(GpuJoinState *gjs,
+													int pg_nworkers,
+													void *coordinate);
 static void releaseGpuJoinSharedState(GpuJoinState *gjs, bool is_rescan);
 
 /*
@@ -2544,7 +2542,9 @@ static Size
 ExecGpuJoinEstimateDSM(CustomScanState *node,
 					   ParallelContext *pcxt)
 {
-	return offsetof(GpuJoinParallelDSM, data[0])
+	GpuJoinState   *gjs = (GpuJoinState *) node;
+
+	return estimateGpuJoinSharedState(gjs, pcxt->nworkers+1)
 		+ ExecGpuScanEstimateDSM(node, pcxt);
 }
 
@@ -2557,16 +2557,17 @@ ExecGpuJoinInitDSM(CustomScanState *node,
 				   void *coordinate)
 {
 	GpuJoinState   *gjs = (GpuJoinState *) node;
-	GpuJoinParallelDSM *gjpdsm = (GpuJoinParallelDSM *) coordinate;
+	Size			ss_len;
 
 	/* save ParallelContext */
 	gjs->gts.pcxt = pcxt;
 
 	/* allocation of an empty multirel buffer */
-	gjs->gj_sstate = createGpuJoinSharedState(gjs);
-	gjpdsm->gj_sstate = gjs->gj_sstate;
+	gjs->gj_sstate = createGpuJoinSharedState(gjs, pcxt->nworkers+1,
+											  coordinate);
+	ss_len = estimateGpuJoinSharedState(gjs, pcxt->nworkers+1);
 
-	ExecGpuScanInitDSM(node, pcxt, gjpdsm->data);
+	ExecGpuScanInitDSM(node, pcxt, (char *)coordinate + ss_len);
 }
 
 /*
@@ -2578,11 +2579,25 @@ ExecGpuJoinInitWorker(CustomScanState *node,
 					  void *coordinate)
 {
 	GpuJoinState	   *gjs = (GpuJoinState *) node;
-	GpuJoinParallelDSM *gjpdsm = (GpuJoinParallelDSM *) coordinate;
+	GpuJoinSharedState *gj_sstate = (GpuJoinSharedState *) coordinate;
+	Size				ss_len;
 
-	gjs->gj_sstate = gjpdsm->gj_sstate;
-	ExecGpuScanInitWorker(node, toc, gjpdsm->data);
+	gjs->gj_sstate = gj_sstate;
+	ss_len = estimateGpuJoinSharedState(gjs, gj_sstate->pg_nworkers);
+
+	ExecGpuScanInitWorker(node, toc, (char *)coordinate + ss_len);
 }
+
+#if PG_VERSION_NUM >= 100000
+/*
+ * ExecShutdownGpuJoin
+ */
+static void
+ExecShutdownGpuJoin(CustomScanState *node)
+{
+	GpuJoinState   *gjs = (GpuJoinState *) node;
+}
+#endif
 
 /*
  * gpujoin_codegen_var_decl
@@ -5490,7 +5505,7 @@ GpuJoinInnerPreload(GpuTaskState *gts)
 	if (!gjs->gj_sstate)
 	{
 		Assert(!IsParallelWorker());
-		gjs->gj_sstate = createGpuJoinSharedState(gjs);
+		gjs->gj_sstate = createGpuJoinSharedState(gjs, 1, NULL);
 	}
 	gj_sstate = gjs->gj_sstate;
 
@@ -5542,32 +5557,20 @@ GpuJoinInnerPreload(GpuTaskState *gts)
 }
 
 /*
- * createGpuJoinSharedState
- *
- * It construct an empty inner multi-relations buffer. It can be shared with
- * multiple backends, and referenced by CPU/GPU.
+ * estimateGpuJoinSharedState
  */
-static GpuJoinSharedState *
-createGpuJoinSharedState(GpuJoinState *gjs)
+static Size
+estimateGpuJoinSharedState(GpuJoinState *gjs, int pg_nworkers)
 {
-	GpuContext	   *gcontext = gjs->gts.gcontext;
-	ParallelContext *pcxt = gjs->gts.pcxt;
 	TupleTableSlot *scan_slot = gjs->gts.css.ss.ss_ScanTupleSlot;
-	TupleDesc		scan_tupdesc = scan_slot->tts_tupleDescriptor;
-	GpuJoinSharedState *gj_sstate;
-	cl_int			num_rels = gjs->num_rels;
-	cl_int			pg_nworkers = (!pcxt ? 1 : pcxt->nworkers + 1);
-	Size			head_length;
-	Size			required;
-	char		   *pos;
+	TupleDesc	scan_tupdesc = scan_slot->tts_tupleDescriptor;
+	cl_int		num_rels = gjs->num_rels;
 
-	/* calculate total length and allocate */
-	head_length = STROMALIGN(offsetof(GpuJoinSharedState,
-									  kern.chunks[num_rels]));
-	required = head_length
+	return STROMALIGN(offsetof(GpuJoinSharedState,
+							   kern.chunks[num_rels]))
 		+ MAXALIGN(sizeof(pgstrom_data_store *) * num_rels)/* inner_chunks */
 		+ MAXALIGN(offsetof(kern_data_store,
-							colmeta[scan_tupdesc->natts])) /* kds_dst_head */
+							colmeta[scan_tupdesc->natts]))	/* kds_dst_head */
 		+ MAXALIGN(sizeof(size_t) * (num_rels+1))		/* inner_nitems */
 		+ MAXALIGN(sizeof(size_t) * (num_rels+1))		/* right_nitems */
 		+ MAXALIGN(sizeof(cl_double) * (num_rels+1))	/* row_dist_score */
@@ -5575,11 +5578,39 @@ createGpuJoinSharedState(GpuJoinState *gjs)
 		+ MAXALIGN(sizeof(cl_bool) * pg_nworkers)		/* is_loaded */
 		+ MAXALIGN(sizeof(CUdeviceptr) * numDevAttrs)	/* m_kmrels */
 		+ MAXALIGN(sizeof(CUdeviceptr) * numDevAttrs);	/* m_ojmaps */
+}
 
-	gj_sstate= dmaBufferAlloc(gcontext, required);
-	memset(gj_sstate, 0, required);
+/*
+ * createGpuJoinSharedState
+ *
+ * It construct an empty inner multi-relations buffer. It can be shared with
+ * multiple backends, and referenced by CPU/GPU.
+ */
+static GpuJoinSharedState *
+createGpuJoinSharedState(GpuJoinState *gjs, int pg_nworkers, void *dsm_addr)
+{
+	TupleTableSlot *scan_slot = gjs->gts.css.ss.ss_ScanTupleSlot;
+	TupleDesc		scan_tupdesc = scan_slot->tts_tupleDescriptor;
+	EState		   *estate = gjs->gts.css.ss.ps.state;
+	GpuJoinSharedState *gj_sstate;
+	cl_int			num_rels = gjs->num_rels;
+	Size			ss_length;
+	Size			head_length;
+	char		   *pos;
+
+	/* calculate total length and allocate */
+	head_length = STROMALIGN(offsetof(GpuJoinSharedState,
+									  kern.chunks[num_rels]));
+	ss_length = estimateGpuJoinSharedState(gjs, pg_nworkers);
+	if (dsm_addr)
+		gj_sstate = dsm_addr;
+	else
+		gj_sstate = MemoryContextAlloc(estate->es_query_cxt, ss_length);
+	memset(gj_sstate, 0, ss_length);
 	pos = (char *)gj_sstate + head_length;
 
+	gj_sstate->ss_length = ss_length;
+	gj_sstate->pg_nworkers = pg_nworkers;
 	pg_atomic_init_u32(&gj_sstate->preload_done, 0);
 	gj_sstate->head_length = head_length;
 	gj_sstate->total_length = head_length;
@@ -5851,6 +5882,9 @@ pgstrom_init_gpujoin(void)
 	gpujoin_exec_methods.EstimateDSMCustomScan  = ExecGpuJoinEstimateDSM;
 	gpujoin_exec_methods.InitializeDSMCustomScan = ExecGpuJoinInitDSM;
 	gpujoin_exec_methods.InitializeWorkerCustomScan = ExecGpuJoinInitWorker;
+#if PG_VERSION_NUM >= 100000
+	gpujoin_exec_methods.ShutdownCustomScan		= ExecShutdownGpuJoin;
+#endif
 	gpujoin_exec_methods.ExplainCustomScan		= ExplainGpuJoin;
 
 	/* hook registration */

@@ -133,7 +133,8 @@ deform_gpupreagg_info(CustomScan *cscan)
  */
 typedef struct
 {
-	cl_int				pg_nworkers;/* copy from parallel context */
+	cl_uint				ss_length;	/* length of the shared state */
+	cl_int				pg_nworkers;/* num of working backends (>=1) */
 
 	/*
 	 * NOTE: A pair of @outer_scan_done + @nr_tasks[] determines the terminator
@@ -253,8 +254,11 @@ static char	   *gpupreagg_codegen(codegen_context *context,
 								  List *tlist_dev,
 								  List *outer_tlist,
 								  List *outer_quals);
-static GpuPreAggSharedState *
-createGpuPreAggSharedState(GpuPreAggState *gpas);
+static Size estimateGpuPreAggSharedState(GpuPreAggState *gpas,
+										 int pg_nworkers);
+static GpuPreAggSharedState *createGpuPreAggSharedState(GpuPreAggState *gpas,
+														int pg_nworkers,
+														void *dsm_addr);
 static void releaseGpuPreAggSharedState(GpuPreAggState *gpas);
 static void resetGpuPreAggSharedState(GpuPreAggState *gpas);
 
@@ -3594,7 +3598,7 @@ ExecGpuPreAgg(CustomScanState *node)
 	GpuPreAggState *gpas = (GpuPreAggState *) node;
 
 	if (!gpas->gpa_sstate)
-		gpas->gpa_sstate = createGpuPreAggSharedState(gpas);
+		gpas->gpa_sstate = createGpuPreAggSharedState(gpas, 1, NULL);
 	return ExecScan(&node->ss,
 					(ExecScanAccessMtd) pgstromExecGpuTaskState,
 					(ExecScanRecheckMtd) ExecReCheckGpuPreAgg);
@@ -3676,15 +3680,16 @@ ExecGpuPreAggInitDSM(CustomScanState *node,
 					 void *coordinate)
 {
 	GpuPreAggState *gpas = (GpuPreAggState *) node;
-	GpuPreAggParallelDSM *gpapdsm = (GpuPreAggParallelDSM *) coordinate;
+	Size			ss_length;
 
 	/* save ParallelContext */
 	gpas->gts.pcxt = pcxt;
 
 	/* allocation of shared state */
-	gpas->gpa_sstate = createGpuPreAggSharedState(gpas);
-	gpapdsm->gpa_sstate = gpas->gpa_sstate;
-	ExecGpuScanInitDSM(node, pcxt, gpapdsm->data);
+	ss_length = estimateGpuPreAggSharedState(gpas, pcxt->nworkers + 1);
+	gpas->gpa_sstate = createGpuPreAggSharedState(gpas, pcxt->nworkers + 1,
+												  coordinate);
+	ExecGpuScanInitDSM(node, pcxt, (char *)coordinate + ss_length);
 }
 
 /*
@@ -3695,11 +3700,9 @@ ExecGpuPreAggInitWorker(CustomScanState *node,
 						shm_toc *toc,
 						void *coordinate)
 {
-	GpuPreAggState *gpas = (GpuPreAggState *) node;
-	GpuPreAggParallelDSM *gpapdsm = (GpuPreAggParallelDSM *) coordinate;
-
-	gpas->gpa_sstate = gpapdsm->gpa_sstate;
-	ExecGpuScanInitWorker(node, toc, gpapdsm->data);
+	GpuPreAggSharedState *gpa_sstate = coordinate;
+	ExecGpuScanInitWorker(node, toc, ((char *)coordinate +
+									  gpa_sstate->ss_length));
 }
 
 /*
@@ -3780,25 +3783,15 @@ ExplainGpuPreAgg(CustomScanState *node, List *ancestors, ExplainState *es)
 }
 
 /*
- * createGpuPreAggSharedState
+ * estimateGpuPreAggSharedState
  */
-static GpuPreAggSharedState *
-createGpuPreAggSharedState(GpuPreAggState *gpas)
+static Size
+estimateGpuPreAggSharedState(GpuPreAggState *gpas, int pg_nworkers)
 {
-	GpuContext	   *gcontext = gpas->gts.gcontext;
 	TupleTableSlot *gpa_slot = gpas->gpreagg_slot;
 	TupleDesc		gpa_tupdesc = gpa_slot->tts_tupleDescriptor;
-	GpuPreAggSharedState *gpa_sstate;
-	Size			required;
-	Size			length;
-	cl_uint			nrooms;
-	size_t			f_hashsize;
-	char		   *pos;
-	ParallelContext *pcxt = gpas->gts.pcxt;
-	cl_int			pg_nworkers = (!pcxt ? 1 : pcxt->nworkers + 1);
 
-	Assert(!IsParallelWorker());
-	required = MAXALIGN(sizeof(GpuPreAggSharedState))
+	return MAXALIGN(sizeof(GpuPreAggSharedState))
 		+ MAXALIGN(sizeof(cl_int) * numDevAttrs)		/* nr_tasks */
 		+ MAXALIGN(sizeof(cl_bool) * pg_nworkers)		/* is_loaded */
 		+ MAXALIGN(sizeof(CUdeviceptr) * numDevAttrs)	/* m_kds_final */
@@ -3807,13 +3800,35 @@ createGpuPreAggSharedState(GpuPreAggState *gpas)
 							colmeta[gpa_tupdesc->natts])) /* kds_head */
 		+ MAXALIGN(sizeof(cl_uint) * numDevAttrs)		/* f_nitems  */
 		+ MAXALIGN(sizeof(cl_uint) * numDevAttrs);		/* f_extra_sz */
+}
 
-	gpa_sstate = dmaBufferAlloc(gcontext, required);
-	if (!gpa_sstate)
-		elog(ERROR, "out of DMA buffer");
-	memset(gpa_sstate, 0, required);
+/*
+ * createGpuPreAggSharedState
+ */
+static GpuPreAggSharedState *
+createGpuPreAggSharedState(GpuPreAggState *gpas,
+						   int pg_nworkers, void *dsm_addr)
+{
+	EState		   *estate = gpas->gts.css.ss.ps.state;
+	TupleTableSlot *gpa_slot = gpas->gpreagg_slot;
+	TupleDesc		gpa_tupdesc = gpa_slot->tts_tupleDescriptor;
+	GpuPreAggSharedState *gpa_sstate;
+	Size			ss_length;
+	Size			length;
+	cl_uint			nrooms;
+	size_t			f_hashsize;
+	char		   *pos;
+
+	Assert(!IsParallelWorker());
+	ss_length = estimateGpuPreAggSharedState(gpas, pg_nworkers);
+	if (dsm_addr)
+		gpa_sstate = dsm_addr;
+	else
+		gpa_sstate = MemoryContextAlloc(estate->es_query_cxt, ss_length);
+	memset(gpa_sstate, 0, ss_length);
 	pos = (char *)gpa_sstate + MAXALIGN(sizeof(GpuPreAggSharedState));
 
+	gpa_sstate->ss_length = ss_length;
 	gpa_sstate->pg_nworkers = pg_nworkers;
 	pthreadMutexInit(&gpa_sstate->mutex);
 	gpa_sstate->nr_tasks = (cl_int *) pos;
