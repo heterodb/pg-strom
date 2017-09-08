@@ -1272,3 +1272,12 @@ PDS_build_hashtable(pgstrom_data_store *pds)
 	}
 	kds->nslots = nslots;
 }
+
+/*
+ * pgstrom_cleanup_datastore
+ */
+void
+pgstrom_cleanup_datastore(void)
+{
+	//release PDS_block locally held
+}

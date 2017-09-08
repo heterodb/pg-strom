@@ -1086,6 +1086,15 @@ gpu_mmgr_bgworker_main(Datum bgworker_arg)
 }
 
 /*
+ * pgstrom_cleanup_gpu_mmgr - to be called on cleanup of GpuContext
+ */
+void
+pgstrom_cleanup_gpu_mmgr(void)
+{
+
+}
+
+/*
  * pgstrom_startup_gpu_mmgr
  */
 static void

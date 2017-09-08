@@ -3470,11 +3470,12 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 	StringInfoData	kern_define;
 	ProgramId		program_id;
 	bool			has_oid;
-	bool			with_connection = ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0);
+	bool			with_activation;
 
 	Assert(scan_rel ? outerPlan(node) == NULL : outerPlan(cscan) != NULL);
 	/* activate a GpuContext for CUDA kernel execution */
-	gcontext = AllocGpuContext(with_connection);
+	with_activation = ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0);
+	gcontext = AllocGpuContext(-1, false, with_activation);
 
 	/* setup common GpuTaskState fields */
 	pgstromInitGpuTaskState(&gpas->gts,

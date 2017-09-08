@@ -1886,7 +1886,7 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	ListCell	   *lc;
 	StringInfoData	kern_define;
 	ProgramId		program_id;
-	bool			with_connection = ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0);
+	bool			with_activation;
 
 	/* gpuscan should not have inner/outer plan right now */
 	Assert(scan_rel != NULL);
@@ -1894,7 +1894,8 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	Assert(innerPlan(node) == NULL);
 
 	/* activate a GpuContext for CUDA kernel execution */
-	gcontext = AllocGpuContext(with_connection);
+	with_activation = ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0);
+	gcontext = AllocGpuContext(-1, false, with_activation);
 
 	/*
 	 * Re-initialization of scan tuple-descriptor and projection-info,

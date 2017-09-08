@@ -1204,98 +1204,70 @@ pgstrom_build_session_info(StringInfo buf,
  * pgstrom_load_cuda_program
  */
 CUmodule
-pgstrom_load_cuda_program(ProgramId program_id, long timeout)
+pgstrom_load_cuda_program(ProgramId program_id)
 {
-	program_cache_entry *entry;
+	program_cache_entry *entry = NULL;
 	CUmodule		cuda_module;
 	CUresult		rc;
-	struct timeval	tv1, tv2;
 	char		   *bin_image;
-	char			error_msg[WORKER_ERROR_MESSAGE_MAXLEN];
 
-	Assert(IsGpuServerProcess());
-
-	SpinLockAcquire(&pgcache_head->lock);
-retry_checks:
-	entry = lookup_cuda_program_entry_nolock(program_id);
-	if (!entry)
+	STROM_TRY();
 	{
-		SpinLockRelease(&pgcache_head->lock);
-		werror("CUDA Program ID=%lu was not found", program_id);
-	}
-	get_cuda_program_entry_nolock(entry);
+		SpinLockAcquire(&pgcache_head->lock);
+	retry_checks:
+		entry = lookup_cuda_program_entry_nolock(program_id);
+		if (!entry)
+			werror("CUDA Program ID=%lu was not found", program_id);
+		get_cuda_program_entry_nolock(entry);
 
-	gettimeofday(&tv1, NULL);
-	if (timeout > 0)
-	{
-		tv1.tv_usec += timeout;
-		tv1.tv_sec += (time_t)(tv1.tv_usec / 1000000);
-		tv1.tv_usec = (tv1.tv_usec % 1000000);
-	}
-
-	if (entry->bin_image == CUDA_PROGRAM_BUILD_FAILURE)
-	{
-		strncpy(error_msg, entry->error_msg,
-				WORKER_ERROR_MESSAGE_MAXLEN);
-		put_cuda_program_entry_nolock(entry);
-		SpinLockRelease(&pgcache_head->lock);
-		werror("CUDA program build failure (id=%lu):\n%s",
-			   (long)program_id, error_msg);
-	}
-
-	if (!entry->bin_image)
-	{
-		if (entry->build_chain.prev || entry->build_chain.next)
+		if (entry->bin_image == CUDA_PROGRAM_BUILD_FAILURE)
 		{
-			/*
-			 * Nobody picked up this CUDA program for build yet, so we try to
-			 * build it by ourself, but synchronously.
-			 */
-			dlist_delete(&entry->build_chain);
-			memset(&entry->build_chain, 0, sizeof(dlist_node));
-			SpinLockRelease(&pgcache_head->lock);
+			werror("CUDA program build failure (id=%lu):\n%s",
+				   (long)program_id, entry->error_msg);
+		}
+		else if (!entry->bin_image)
+		{
+			if (entry->build_chain.prev || entry->build_chain.next)
+			{
+				/*
+				 * Nobody picked up this CUDA program for build yet,
+				 * so we try to build it by ourself, but synchronously.
+				 */
+				dlist_delete(&entry->build_chain);
+				memset(&entry->build_chain, 0, sizeof(dlist_node));
+				SpinLockRelease(&pgcache_head->lock);
 
-			build_cuda_program(entry);
-
+				build_cuda_program(entry);
+			}
+			else
+			{
+				SpinLockRelease(&pgcache_head->lock);
+				/* short sleep for 50ms */
+				pg_usleep(50000L);
+			}
 			SpinLockAcquire(&pgcache_head->lock);
 			put_cuda_program_entry_nolock(entry);
 			goto retry_checks;
 		}
 		else
 		{
-			gettimeofday(&tv2, NULL);
-			if (timeout == 0 ||
-				(timeout > 0 && (tv1.tv_sec < tv2.tv_sec ||
-								 (tv1.tv_sec == tv2.tv_sec &&
-								  tv1.tv_usec < tv2.tv_usec))))
-			{
-				/*
-				 * NVRTC is still in progress, but caller wants to return
-				 * immediately, or reached to the timeout.
-				 */
-				put_cuda_program_entry_nolock(entry);
-				SpinLockRelease(&pgcache_head->lock);
-				return NULL;
-			}
+			bin_image = entry->bin_image;
 			SpinLockRelease(&pgcache_head->lock);
-			/* short sleep for 50ms */
-			pg_usleep(50000L);
-
-			SpinLockAcquire(&pgcache_head->lock);
-			put_cuda_program_entry_nolock(entry);
-			goto retry_checks;
 		}
 	}
-	bin_image = entry->bin_image;
-	SpinLockRelease(&pgcache_head->lock);
+	STROM_CATCH();
+	{
+		if (entry)
+			put_cuda_program_entry_nolock(entry);
+		SpinLockRelease(&pgcache_head->lock);
+		STROM_RE_THROW();
+	}
+	STROM_END_TRY();
 
 	rc = cuModuleLoadData(&cuda_module, bin_image);
-	if (rc != CUDA_SUCCESS)
-	{
-		put_cuda_program_entry(entry);
-		werror("failed on cuModuleLoadData: %s", errorText(rc));
-	}
 	put_cuda_program_entry(entry);
+	if (rc != CUDA_SUCCESS)
+		werror("failed on cuModuleLoadData: %s", errorText(rc));
 	return cuda_module;
 }
 

@@ -1196,10 +1196,10 @@ __setup_kern_colmeta(Oid type_oid, int arg_index)
 static plcudaTaskState *
 plcuda_exec_begin(HeapTuple protup, FunctionCallInfo fcinfo)
 {
-	GpuContext	   *gcontext = AllocGpuContext(fcinfo != NULL);
+	GpuContext	   *gcontext = AllocGpuContext(-1, true, fcinfo != NULL);
+	Form_pg_proc	procForm = (Form_pg_proc) GETSTRUCT(protup);
 	plcudaTaskState *plts;
 	kern_plcuda	   *kplcuda;
-	Form_pg_proc	procForm = (Form_pg_proc) GETSTRUCT(protup);
 	Datum			prosrc;
 	HeapTuple		tup;
 	bool			isnull;

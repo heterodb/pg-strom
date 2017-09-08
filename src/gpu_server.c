@@ -345,7 +345,7 @@ lookupGpuModuleCache(ProgramId program_id)
 	 * Only the first victim thread contributes to build the program entry,
 	 * and construct GpuModuleCache here.
 	 */
-	cuda_module = pgstrom_load_cuda_program(program_id, 0);
+	cuda_module = pgstrom_load_cuda_program(program_id);
 	if (!cuda_module)
 		return NULL;
 	

@@ -1839,10 +1839,11 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	cl_int			first_right_outer_depth = -1;
 	StringInfoData	kern_define;
 	ProgramId		program_id;
-	bool			with_connection = ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0);
+	bool			with_activation;
 
 	/* activate a GpuContext for CUDA kernel execution */
-	gcontext = AllocGpuContext(with_connection);
+	with_activation = ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0);
+	gcontext = AllocGpuContext(-1, false, with_activation);
 
 	/*
 	 * Re-initialization of scan tuple-descriptor and projection-info,

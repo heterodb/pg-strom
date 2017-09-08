@@ -90,6 +90,8 @@
 
 #define PGSTROM_SCHEMA_NAME		"pgstrom"
 
+#if 1
+//deprecated
 /*
  * GpuContext / SharedGpuContext
  */
@@ -106,19 +108,43 @@ typedef struct SharedGpuContext
 	dlist_head	dma_buffer_list;/* tracker of DMA buffers */
 	cl_int		num_async_tasks;/* num of tasks passed to GPU server */
 } SharedGpuContext;
+#endif
 
 #define RESTRACK_HASHSIZE		53
+#define CUDA_MODULES_HASHSIZE	25
 typedef struct GpuContext
 {
 	dlist_node		chain;
-	cl_int			gpuserv_id;	/* GPU server Id, or -1 if unconnected */
-	pgsocket		sockfd;		/* connection between backend <-> server */
-	ResourceOwner	resowner;
-	SharedGpuContext *shgcon;
 	pg_atomic_uint32 refcnt;
+#if 1
+	//deprecated fields
+	cl_int			gpuserv_id;	//deprecated
+	pgsocket		sockfd;		//deprecated
+	SharedGpuContext *shgcon;
 	pg_atomic_uint32 is_unlinked;
-	slock_t			lock;		/* lock for resource tracker */
+#endif
+	ResourceOwner	resowner;
+	cl_bool			never_use_mps;
+	cl_int			cuda_dindex;
+	CUdevice		cuda_device;
+	CUcontext		cuda_context;
+	slock_t			cuda_modules_lock;
+	dlist_head		cuda_modules_slot[CUDA_MODULES_HASHSIZE];
+	/* error context */
+	pg_atomic_uint32 error_level;
+	const char	   *error_filename;
+	int				error_lineno;
+	char		   *error_message;
+	/* management of the work-queue */
+	pthread_mutex_t	mutex;
+	pthread_cond_t	cond;
+	cl_int			num_running_tasks;
+	dlist_head		pending_tasks;		/* list of GpuTask */
+	dlist_head		completed_tasks;	/* list of GpuTask */
 	dlist_head		restrack[RESTRACK_HASHSIZE];
+	cl_int			num_workers;
+	cl_bool			terminate_workers;
+	pthread_t		worker_threads[FLEXIBLE_ARRAY_MEMBER];
 } GpuContext;
 
 /* Identifier of the Gpu Programs */
@@ -422,6 +448,7 @@ extern CUresult gpuMemFree(GpuContext *gcontext,
 #define gpuMemAllocIOMap(a,b,c)				\
 	__gpuMemAllocIOMap((a),(b),(c),__FILE__,__LINE__)
 
+extern void pgstrom_cleanup_gpu_mmgr(void);
 extern void pgstrom_init_gpu_mmgr(void);
 extern Datum pgstrom_device_meminfo(PG_FUNCTION_ARGS);
 
@@ -465,23 +492,31 @@ gpuMemRetain(GpuContext *gcontext, CUdeviceptr devptr)
 /*
  * gpu_context.c
  */
-extern GpuContext *MasterGpuContext(void);
-extern GpuContext *AllocGpuContext(bool with_connection);
-extern GpuContext *AttachGpuContext(pgsocket sockfd,
-									SharedGpuContext *shgcon,
-									int epoll_fd);
+extern __thread GpuContext	   *GpuWorkerCurrentContext;
+extern __thread sigjmp_buf	   *GpuWorkerExceptionStack;
+extern void GpuContextWorkerReportError(int elevel,
+										const char *filename, int lineno,
+										const char *fmt, ...)
+	pg_attribute_printf(4,5);
+extern GpuContext *AllocGpuContext(int cuda_dindex,
+								   bool never_use_mps,
+								   bool with_activation);
 extern GpuContext *GetGpuContext(GpuContext *gcontext);
-extern GpuContext *GetGpuContextBySockfd(pgsocket sockfd);
 extern void PutGpuContext(GpuContext *gcontext);
 extern void SynchronizeGpuContext(GpuContext *gcontext);
-extern void ForcePutAllGpuContext(void);
+
+extern GpuContext *MasterGpuContext(void);		//deprecated
+extern GpuContext *AttachGpuContext(pgsocket sockfd,
+									SharedGpuContext *shgcon,
+									int epoll_fd); //deprecated
+extern GpuContext *GetGpuContextBySockfd(pgsocket sockfd); //deprecated
+extern void ForcePutAllGpuContext(void); //deprecated
 
 extern bool trackCudaProgram(GpuContext *gcontext, ProgramId program_id);
 extern void untrackCudaProgram(GpuContext *gcontext, ProgramId program_id);
 extern bool trackGpuMem(GpuContext *gcontext, CUdeviceptr devptr, void *extra);
+extern void *lookupGpuMem(GpuContext *gcontext, CUdeviceptr devptr);
 extern void *untrackGpuMem(GpuContext *gcontext, CUdeviceptr devptr);
-extern bool trackIOMapMem(GpuContext *gcontext, CUdeviceptr devptr);
-extern void untrackIOMapMem(GpuContext *gcontext, CUdeviceptr devptr);
 extern void pgstrom_init_gpu_context(void);
 
 /*
@@ -515,94 +550,85 @@ extern __thread sigjmp_buf *gpuserv_worker_exception_stack;
 #define STROM_TRY() \
 	do { \
 		ErrorContextCallback *saved_context_stack = error_context_stack; \
-		sigjmp_buf *saved_exception_stack = (IsGpuServerProcess() < 0 \
-											 ? gpuserv_worker_exception_stack \
-											 : PG_exception_stack); \
+		sigjmp_buf *saved_exception_stack = (!GpuWorkerCurrentContext \
+											 ? PG_exception_stack \
+											 : GpuWorkerExceptionStack); \
 		sigjmp_buf	local_sigjmp_buf; \
 		if (sigsetjmp(local_sigjmp_buf, 0) == 0) \
 		{ \
-			if (IsGpuServerProcess() < 0) \
-				gpuserv_worker_exception_stack = &local_sigjmp_buf; \
+			if (!GpuWorkerCurrentContext)\
+				PG_exception_stack = &local_sigjmp_buf; \
 			else \
-				PG_exception_stack = &local_sigjmp_buf
+				GpuWorkerExceptionStack = &local_sigjmp_buf;
 
 #define STROM_CATCH() \
 		} \
 		else \
 		{ \
-			if (IsGpuServerProcess() < 0) \
-				gpuserv_worker_exception_stack = saved_exception_stack; \
-			else \
+			if (!GpuWorkerCurrentContext) \
 			{ \
-				PG_exception_stack = saved_exception_stack; \
+				PG_exception_stack = saved_exception_stack;	\
 				error_context_stack = saved_context_stack;	\
-			}
+			} \
+			else \
+				GpuWorkerExceptionStack = saved_exception_stack
 
 #define STROM_END_TRY()\
 		} \
-		if (IsGpuServerProcess() < 0) \
-			gpuserv_worker_exception_stack = saved_exception_stack; \
-		else \
+		if (!GpuWorkerCurrentContext) \
 		{ \
 			PG_exception_stack = saved_exception_stack; \
-			error_context_stack = saved_context_stack;	\
+			error_context_stack = saved_context_stack; \
+		} \
+		else \
+		{ \
+			 GpuWorkerExceptionStack = saved_exception_stack; \
 		} \
 	} while(0)
 
-#define STROM_RE_THROW()									\
-	do {													\
-		if (IsGpuServerProcess() < 0)						\
-			siglongjmp(*gpuserv_worker_exception_stack, 1);	\
-		else												\
-			PG_RE_THROW();									\
+#define STROM_RE_THROW() \
+	do { \
+		if (!GpuWorkerCurrentContext) \
+			PG_RE_THROW(); \
+		else \
+			siglongjmp(*GpuWorkerExceptionStack, 1); \
 	} while(0)
 
+//deprecated
 #define WORKER_CHECK_FOR_INTERRUPTS()	\
 	do {								\
 		if (gpuservGotSigterm())		\
 			werror("Got SIGTERM");		\
 	} while(0)
 
-#define wdebug(fmt,...)										\
-	do {													\
-		if (IsGpuServerProcess() >= 0)						\
-			elog(DEBUG2, fmt, ##__VA_ARGS__);				\
+#define STROM_REPORT_ERROR(elevel,elabel,fmt,...)						\
+	do {																\
+		if (!GpuWorkerCurrentContext)									\
+			elog((elevel), fmt, ##__VA_ARGS__);							\
+		else															\
+		{																\
+			const char *__fname = strrchr(__FILE__,'/');				\
+			__fname = (__fname ? __fname + 1 : __FILE__);				\
+			GpuContextWorkerReportError((elevel),						\
+										__fname, __LINE__,				\
+										"%s: (%s:%d) " fmt,				\
+										(elabel), __fname, __LINE__,	\
+										##__VA_ARGS__);					\
+		}																\
 	} while(0)
-#define wlog(fmt,...)										\
-	do {													\
-		if (IsGpuServerProcess() < 0)						\
-			fprintf(stderr, "LOG: %s:%d " fmt "\n",			\
-					__FILE__, __LINE__, ##__VA_ARGS__);		\
-		else												\
-			elog(LOG, fmt, ##__VA_ARGS__);					\
-	} while(0)
-#define wnotice(fmt,...)									\
-	do {													\
-		if (IsGpuServerProcess() < 0)						\
-			fprintf(stderr, "NOTICE: %s:%d " fmt "\n",		\
-					__FILE__, __LINE__, ##__VA_ARGS__);		\
-		else												\
-			elog(NOTICE, fmt, ##__VA_ARGS__);				\
-	} while(0)
-#define werror(fmt,...)										\
-	do {													\
-		if (IsGpuServerProcess() < 0)						\
-			worker_error(__FUNCTION__,__FILE__,__LINE__,	\
-						 fmt, ##__VA_ARGS__);				\
-		else												\
-			elog(ERROR, fmt, ##__VA_ARGS__);				\
-	} while(0)
-#define wfatal(fmt,...)										\
-	do {													\
-		if (IsGpuServerProcess() < 0)						\
-		{													\
-			fprintf(stderr, "FATAL: %s:%d " fmt "\n",		\
-					__FILE__, __LINE__, ##__VA_ARGS__);		\
-			proc_exit(1);									\
-		}													\
-		else												\
-			elog(FATAL, fmt, ##__VA_ARGS__);				\
-	} while(0)
+
+#define wdebug(fmt,...)							\
+	STROM_REPORT_ERROR(DEBUG2,"Debug",fmt,##__VA_ARGS__)
+#define wlog(fmt,...)							\
+	STROM_REPORT_ERROR(LOG,"Log",fmt,##__VA_ARGS__)
+#define wnotice(fmt,...)						\
+	STROM_REPORT_ERROR(NOTICE,"Notice",fmt,##__VA_ARGS__)
+#define werror(fmt,...)							\
+	STROM_REPORT_ERROR(ERROR,"Error",fmt,##__VA_ARGS__)
+#define wfatal(fmt,...)							\
+	STROM_REPORT_ERROR(FATAL,"Fatal",fmt,##__VA_ARGS__)
+#define wpanic(fmt,...)							\
+	STROM_REPORT_ERROR(PANIC,"Panic",fmt,##__VA_ARGS__)
 
 extern void worker_error(const char *funcname,
 						 const char *filename,
@@ -666,14 +692,12 @@ extern ProgramId pgstrom_create_cuda_program(GpuContext *gcontext,
 											 const char *kern_source,
 											 const char *kern_define,
 											 bool wait_for_build);
-extern CUmodule pgstrom_load_cuda_program(ProgramId program_id, long timeout);
+extern CUmodule pgstrom_load_cuda_program(ProgramId program_id);
 extern void pgstrom_put_cuda_program(GpuContext *gcontext,
 									 ProgramId program_id);
 extern void pgstrom_build_session_info(StringInfo str,
 									   GpuTaskState *gts,
 									   cl_uint extra_flags);
-extern bool pgstrom_wait_cuda_program(ProgramId program_id, long timeout);
-
 extern bool pgstrom_try_build_cuda_program(void);
 
 extern const char *pgstrom_cuda_source_file(ProgramId program_id);
@@ -784,6 +808,7 @@ extern bool PDS_insert_hashitem(pgstrom_data_store *pds,
 								TupleTableSlot *slot,
 								cl_uint hash_value);
 extern void PDS_build_hashtable(pgstrom_data_store *pds);
+extern void pgstrom_cleanup_datastore(void);
 extern void pgstrom_init_datastore(void);
 
 /*
