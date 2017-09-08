@@ -110,6 +110,8 @@ typedef struct SharedGpuContext
 } SharedGpuContext;
 #endif
 
+struct GpuMemSegMap;
+
 #define RESTRACK_HASHSIZE		53
 #define CUDA_MODULES_HASHSIZE	25
 typedef struct GpuContext
@@ -130,7 +132,16 @@ typedef struct GpuContext
 	CUcontext		cuda_context;
 	slock_t			cuda_modules_lock;
 	dlist_head		cuda_modules_slot[CUDA_MODULES_HASHSIZE];
-	/* error context */
+	/* resource management */
+	slock_t			restrack_lock;
+	dlist_head		restrack[RESTRACK_HASHSIZE];
+	/* GPU device memory management */
+	pthread_rwlock_t gm_smap_rwlock;
+	dlist_head		gm_smap_normal_list;
+	dlist_head		gm_smap_managed_list;
+	dlist_head		gm_smap_iomap_list;
+	struct GpuMemSegMap *gm_smap_array;
+	/* error information buffer */
 	pg_atomic_uint32 error_level;
 	const char	   *error_filename;
 	int				error_lineno;
@@ -138,12 +149,11 @@ typedef struct GpuContext
 	/* management of the work-queue */
 	pthread_mutex_t	mutex;
 	pthread_cond_t	cond;
+	cl_bool			terminate_workers;
 	cl_int			num_running_tasks;
 	dlist_head		pending_tasks;		/* list of GpuTask */
 	dlist_head		completed_tasks;	/* list of GpuTask */
-	dlist_head		restrack[RESTRACK_HASHSIZE];
 	cl_int			num_workers;
-	cl_bool			terminate_workers;
 	pthread_t		worker_threads[FLEXIBLE_ARRAY_MEMBER];
 } GpuContext;
 
@@ -434,7 +444,9 @@ extern CUresult __gpuMemAllocIOMap(GpuContext *gcontext,
 								   CUdeviceptr *p_devptr,
 								   size_t bytesize,
 								   const char *filename, int lineno);
-extern CUresult gpuMemFreeExtra(void *extra, CUdeviceptr devptr);
+extern CUresult gpuMemFreeExtra(GpuContext *gcontext,
+								CUdeviceptr m_deviceptr,
+								void *extra);
 extern CUresult gpuMemFree(GpuContext *gcontext,
 						   CUdeviceptr devptr);
 #define gpuMemAllocRaw(a,b,c)				\
@@ -448,7 +460,8 @@ extern CUresult gpuMemFree(GpuContext *gcontext,
 #define gpuMemAllocIOMap(a,b,c)				\
 	__gpuMemAllocIOMap((a),(b),(c),__FILE__,__LINE__)
 
-extern void pgstrom_cleanup_gpu_mmgr(void);
+extern bool pgstrom_gpu_mmgr_init_gpucontext(GpuContext *gcontext);
+extern void pgstrom_gpu_mmgr_cleanup_gpucontext(GpuContext *gcontext);
 extern void pgstrom_init_gpu_mmgr(void);
 extern Datum pgstrom_device_meminfo(PG_FUNCTION_ARGS);
 
@@ -1274,12 +1287,11 @@ pthreadRWLockWriteLock(pthread_rwlock_t *rwlock)
 static inline bool
 pthreadRWLockWriteTryLock(pthread_rwlock_t *rwlock)
 {
-	errno = pthread_rwlock_trywrlock(rwlock);
-	if (errno == 0)
+	if ((errno = pthread_rwlock_trywrlock(rwlock)) == 0)
 		return true;
-	if (errno == EBUSY)
-		return false;
-	wfatal("failed on pthread_rwlock_trywrlock: %m");
+	if (errno != EBUSY)
+		wfatal("failed on pthread_rwlock_trywrlock: %m");
+	return false;
 }
 
 static inline void

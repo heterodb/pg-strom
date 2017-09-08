@@ -91,10 +91,10 @@ trackCudaProgram(GpuContext *gcontext, ProgramId program_id)
 	tracker->crc = crc;
 	tracker->resclass = RESTRACK_CLASS__GPUPROGRAM;
 	tracker->u.program_id = program_id;
-	pthreadMutexLock(&gcontext->mutex);
+	SpinLockAcquire(&gcontext->restrack_lock);
 	dlist_push_tail(&gcontext->restrack[crc % RESTRACK_HASHSIZE],
 					&tracker->chain);
-	pthreadMutexUnlock(&gcontext->mutex);
+	SpinLockRelease(&gcontext->restrack_lock);
 	return true;
 }
 
@@ -107,7 +107,7 @@ untrackCudaProgram(GpuContext *gcontext, ProgramId program_id)
 
 	crc = resource_tracker_hashval(RESTRACK_CLASS__GPUPROGRAM,
 								   &program_id, sizeof(ProgramId));
-	pthreadMutexLock(&gcontext->mutex);
+	SpinLockAcquire(&gcontext->restrack_lock);
 	restrack_list = &gcontext->restrack[crc % RESTRACK_HASHSIZE];
 	dlist_foreach(iter, restrack_list)
 	{
@@ -119,12 +119,12 @@ untrackCudaProgram(GpuContext *gcontext, ProgramId program_id)
 			tracker->u.program_id == program_id)
 		{
 			dlist_delete(&tracker->chain);
-			pthreadMutexUnlock(&gcontext->mutex);
+			SpinLockRelease(&gcontext->restrack_lock);
 			free(tracker);
 			return;
 		}
 	}
-	pthreadMutexUnlock(&gcontext->mutex);
+	SpinLockRelease(&gcontext->restrack_lock);
 	wnotice("Bug? CUDA Program %lu was not tracked", program_id);
 }
 
@@ -147,10 +147,10 @@ trackGpuMem(GpuContext *gcontext, CUdeviceptr devptr, void *extra)
 	tracker->u.devmem.ptr = devptr;
 	tracker->u.devmem.extra = extra;
 
-	pthreadMutexLock(&gcontext->mutex);
+	SpinLockAcquire(&gcontext->restrack_lock);
 	dlist_push_tail(&gcontext->restrack[crc % RESTRACK_HASHSIZE],
 					&tracker->chain);
-	pthreadMutexUnlock(&gcontext->mutex);
+	SpinLockRelease(&gcontext->restrack_lock);
 	return true;
 }
 
@@ -165,7 +165,7 @@ lookupGpuMem(GpuContext *gcontext, CUdeviceptr devptr)
 	crc = resource_tracker_hashval(RESTRACK_CLASS__GPUMEMORY,
 								   &devptr, sizeof(CUdeviceptr));
 	restrack_list = &gcontext->restrack[crc % RESTRACK_HASHSIZE];
-	pthreadMutexLock(&gcontext->mutex);
+	SpinLockAcquire(&gcontext->restrack_lock);
 	dlist_foreach (iter, restrack_list)
 	{
 		ResourceTracker *tracker
@@ -179,7 +179,7 @@ lookupGpuMem(GpuContext *gcontext, CUdeviceptr devptr)
 			break;
 		}
 	}
-	pthreadMutexUnlock(&gcontext->mutex);
+	SpinLockRelease(&gcontext->restrack_lock);
 	return extra;
 }
 
@@ -194,7 +194,7 @@ untrackGpuMem(GpuContext *gcontext, CUdeviceptr devptr)
 	crc = resource_tracker_hashval(RESTRACK_CLASS__GPUMEMORY,
 								   &devptr, sizeof(CUdeviceptr));
 	restrack_list = &gcontext->restrack[crc % RESTRACK_HASHSIZE];
-	pthreadMutexLock(&gcontext->mutex);
+	SpinLockAcquire(&gcontext->restrack_lock);
 	dlist_foreach (iter, restrack_list)
 	{
 		ResourceTracker *tracker
@@ -206,12 +206,12 @@ untrackGpuMem(GpuContext *gcontext, CUdeviceptr devptr)
 		{
 			dlist_delete(&tracker->chain);
 			extra = tracker->u.devmem.extra;
-			pthreadMutexUnlock(&gcontext->mutex);
+			SpinLockRelease(&gcontext->restrack_lock);
 			free(tracker);
 			return extra;
 		}
 	}
-	pthreadMutexUnlock(&gcontext->mutex);
+	SpinLockRelease(&gcontext->restrack_lock);
 	wnotice("Bug? GPU Device Memory %p was not tracked", (void *)devptr);
 	abort();
 	return NULL;
@@ -299,8 +299,9 @@ ReleaseLocalResources(GpuContext *gcontext, bool normal_exit)
 					 */
 					if (!gpuserv_cuda_context)
 						break;
-					rc = gpuMemFreeExtra(tracker->u.devmem.extra,
-										 tracker->u.devmem.ptr);
+					rc = gpuMemFreeExtra(gcontext,
+										 tracker->u.devmem.ptr,
+										 tracker->u.devmem.extra);
 					if (rc != CUDA_SUCCESS)
 						wnotice("failed on cuMemFree(%p): %s",
 								(void *)tracker->u.devmem.ptr,
@@ -320,6 +321,8 @@ ReleaseLocalResources(GpuContext *gcontext, bool normal_exit)
 			free(tracker);
 		}
 	}
+	/* unmap GPU device memory segment */
+	pgstrom_gpu_mmgr_cleanup_gpucontext(gcontext);
 
 	/* NOTE: cuda_module is already released by cuCtxDestroy() */
 	for (i=0; i < CUDA_MODULES_HASHSIZE; i++)
@@ -629,23 +632,30 @@ AllocGpuContext(int cuda_dindex,
 	gcontext->resowner		= CurrentResourceOwner;
 	gcontext->never_use_mps	= never_use_mps;
 	gcontext->cuda_dindex	= cuda_dindex;
-	gcontext->cuda_device	= 0;
-	gcontext->cuda_context	= NULL;
 	SpinLockInit(&gcontext->cuda_modules_lock);
 	for (i=0; i < CUDA_MODULES_HASHSIZE; i++)
 		dlist_init(&gcontext->cuda_modules_slot[i]);
+	/* resource management */
+	SpinLockInit(&gcontext->restrack_lock);
+	for (i=0; i < RESTRACK_HASHSIZE; i++)
+		dlist_init(&gcontext->restrack[i]);
+	/* GPU device memory management */
+	if (!pgstrom_gpu_mmgr_init_gpucontext(gcontext))
+	{
+		free(gcontext);
+		elog(ERROR, "out of memory");
+	}
+	/* error information buffer */
 	pg_atomic_init_u32(&gcontext->error_level, 0);
 	gcontext->error_filename = NULL;
 	gcontext->error_lineno	= 0;
 	gcontext->error_message	= NULL;
+	/* management of work-queue */
 	pthreadMutexInit(&gcontext->mutex);
 	pthreadCondInit(&gcontext->cond);
 	gcontext->num_running_tasks = 0;
 	dlist_init(&gcontext->pending_tasks);
 	dlist_init(&gcontext->completed_tasks);
-	for (i=0; i < RESTRACK_HASHSIZE; i++)
-		dlist_init(&gcontext->restrack[i]);
-
 	if (with_activation)
 		ActivateGpuContext(gcontext);
 
@@ -701,12 +711,9 @@ PutGpuContext(GpuContext *gcontext)
 		SynchronizeGpuContext(gcontext);
 		/* cleanup local resources */
 		ReleaseLocalResources(gcontext, true);
-		/* special cleanup if it is the last GpuContext */
+		/* special cleanup if no GpuContext remains */
 		if (is_last_gcontext)
-		{
 			pgstrom_cleanup_datastore();
-			pgstrom_cleanup_gpu_mmgr();
-		}
 	}
 }
 
@@ -784,10 +791,7 @@ gpucontext_cleanup_callback(ResourceReleasePhase phase,
 		SynchronizeGpuContext(gcontext);
 		ReleaseLocalResources(gcontext, isCommit);
 		if (dlist_is_empty(&activeGpuContextList))
-		{
 			pgstrom_cleanup_datastore();
-			pgstrom_cleanup_gpu_mmgr();
-		}
 	}
 	SpinLockRelease(&activeGpuContextLock);
 }
