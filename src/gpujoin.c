@@ -4851,9 +4851,9 @@ gpujoin_process_kernel(GpuJoinTask *pgjoin, CUmodule cuda_module,
 		if (!pds_dst)
 			werror("out of DMA buffer (XXX - to be retry)");
 
+		memset(&pds_dst->chain, 0, sizeof(dlist_node));
 		pg_atomic_init_u32(&pds_dst->refcnt, 1);
 		pds_dst->nblocks_uncached = 0;
-		pds_dst->ntasks_running = 0;
 
 		/* DMA Recv: kern_data_store *kds_dst (head+tail) */
 		rc = cuMemcpyDtoH(&pds_dst->kds,

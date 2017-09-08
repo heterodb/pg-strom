@@ -141,6 +141,9 @@ typedef struct GpuContext
 	dlist_head		gm_smap_managed_list;
 	dlist_head		gm_smap_iomap_list;
 	struct GpuMemSegMap *gm_smap_array;
+	slock_t			pds_blocks_lock;
+	dlist_head		pds_blocks_active_list;
+	dlist_head		pds_blocks_free_list;
 	/* error information buffer */
 	pg_atomic_uint32 error_level;
 	const char	   *error_filename;
@@ -344,7 +347,16 @@ typedef struct devexpr_info {
  */
 typedef struct pgstrom_data_store
 {
-	pg_atomic_uint32	refcnt;		/* reference counter */
+	/*
+	 * NOTE: For the traditional asynchronous DMA, PDS with KDS_FORMAT_BLOCK
+	 * shall be allocated using cuMemAllocHost(). PDSs are tentatively kept
+	 * by GpuContext for reuse, and chain is used for tracking.
+	 */
+	dlist_node			chain;
+	/* GpuContext which tracks this PDS */
+	GpuContext		   *gcontext;
+	/* Reference counter */
+	pg_atomic_uint32	refcnt;
 
 	/*
 	 * NOTE: Extra information for KDS_FORMAT_BLOCK.
@@ -353,19 +365,6 @@ typedef struct pgstrom_data_store
 	 * filled up by an array of strom_dma_chunk.
 	 */
 	cl_uint				nblocks_uncached;
-
-	/*
-	 * NOTE: @ntasks_running is an independent counter regardless of the
-	 * @refcnt. It represents number of concurrent tasks which reference
-	 * the PDS. So, once @ntasks_running gets back to zero when no new
-	 * tasks will be never attached any more, we can determine it is the
-	 * last task that references this PDS.
-	 * GpuPreAgg uses this mechanism to terminate its final reduction
-	 * buffer.
-	 * datastore.c does not care about this counter, so individual logics
-	 * have to manage the counter with proper locking mechanism by itself.
-	 */
-	cl_uint				ntasks_running;
 
 	/* data chunk in kernel portion */
 	kern_data_store kds	__attribute__ ((aligned (sizeof(cl_ulong))));
@@ -763,12 +762,6 @@ extern bool pgstrom_fetch_data_store(TupleTableSlot *slot,
 									 pgstrom_data_store *pds,
 									 size_t row_index,
 									 HeapTuple tuple);
-/*
-extern bool kern_fetch_data_store(TupleTableSlot *slot,
-								  kern_data_store *kds,
-								  size_t row_index,
-								  HeapTuple tuple);
-*/
 extern bool PDS_fetch_tuple(TupleTableSlot *slot,
 							pgstrom_data_store *pds,
 							GpuTaskState *gts);
@@ -787,20 +780,13 @@ extern void init_kernel_data_store(kern_data_store *kds,
 extern pgstrom_data_store *PDS_create_row(GpuContext *gcontext,
 										  TupleDesc tupdesc,
 										  Size length);
-extern pgstrom_data_store *PDS_create_slot(GpuContext *gcontext,
-										   TupleDesc tupdesc,
-										   cl_uint nrooms,
-										   Size extra_length);
-extern pgstrom_data_store *PDS_duplicate_slot(GpuContext *gcontext,
-											  kern_data_store *kds_head,
-											  cl_uint nrooms,
-											  cl_uint extra_unitsz);
 extern pgstrom_data_store *PDS_create_hash(GpuContext *gcontext,
 										   TupleDesc tupdesc,
 										   Size length);
 extern pgstrom_data_store *PDS_create_block(GpuContext *gcontext,
 											TupleDesc tupdesc,
 											struct NVMEScanState *nvme_sstate);
+//to be gpu_task.c?
 extern void PDS_init_heapscan_state(GpuTaskState *gts,
 									cl_uint nrows_per_block);
 extern void PDS_end_heapscan_state(GpuTaskState *gts);
@@ -821,7 +807,7 @@ extern bool PDS_insert_hashitem(pgstrom_data_store *pds,
 								TupleTableSlot *slot,
 								cl_uint hash_value);
 extern void PDS_build_hashtable(pgstrom_data_store *pds);
-extern void pgstrom_cleanup_datastore(void);
+extern void pgstrom_datastore_cleanup_gpucontext(GpuContext *gcontext);
 extern void pgstrom_init_datastore(void);
 
 /*

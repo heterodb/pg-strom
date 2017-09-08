@@ -323,6 +323,8 @@ ReleaseLocalResources(GpuContext *gcontext, bool normal_exit)
 	}
 	/* unmap GPU device memory segment */
 	pgstrom_gpu_mmgr_cleanup_gpucontext(gcontext);
+	/* release Host pinned memory, if kept */
+	pgstrom_datastore_cleanup_gpucontext(gcontext);
 
 	/* NOTE: cuda_module is already released by cuCtxDestroy() */
 	for (i=0; i < CUDA_MODULES_HASHSIZE; i++)
@@ -645,6 +647,10 @@ AllocGpuContext(int cuda_dindex,
 		free(gcontext);
 		elog(ERROR, "out of memory");
 	}
+	/* PDS keeper for KDS_FORMAT_BLOCK */
+	SpinLockInit(&gcontext->pds_blocks_lock);
+	dlist_init(&gcontext->pds_blocks_active_list);
+	dlist_init(&gcontext->pds_blocks_free_list);
 	/* error information buffer */
 	pg_atomic_init_u32(&gcontext->error_level, 0);
 	gcontext->error_filename = NULL;
@@ -698,22 +704,17 @@ void
 PutGpuContext(GpuContext *gcontext)
 {
 	uint32		newcnt __attribute__((unused));
-	bool		is_last_gcontext;
 
 	newcnt = pg_atomic_sub_fetch_u32(&gcontext->refcnt, 1);
 	if (newcnt == 0)
 	{
 		SpinLockAcquire(&activeGpuContextLock);
 		dlist_delete(&gcontext->chain);
-		is_last_gcontext = dlist_is_empty(&activeGpuContextList);
 		SpinLockRelease(&activeGpuContextLock);
 		/* wait for completion of worker threads */
 		SynchronizeGpuContext(gcontext);
 		/* cleanup local resources */
 		ReleaseLocalResources(gcontext, true);
-		/* special cleanup if no GpuContext remains */
-		if (is_last_gcontext)
-			pgstrom_cleanup_datastore();
 	}
 }
 
@@ -790,8 +791,6 @@ gpucontext_cleanup_callback(ResourceReleasePhase phase,
 		dlist_delete(&gcontext->chain);
 		SynchronizeGpuContext(gcontext);
 		ReleaseLocalResources(gcontext, isCommit);
-		if (dlist_is_empty(&activeGpuContextList))
-			pgstrom_cleanup_datastore();
 	}
 	SpinLockRelease(&activeGpuContextLock);
 }

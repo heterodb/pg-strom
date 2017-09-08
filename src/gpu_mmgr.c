@@ -260,16 +260,24 @@ __gpuMemAllocRaw(GpuContext *gcontext,
 	CUdeviceptr	m_deviceptr;
 	CUresult	rc;
 
-	rc = cuMemAlloc(&m_deviceptr, bytesize);
+	rc = cuCtxPushCurrent(gcontext->cuda_context);
 	if (rc != CUDA_SUCCESS)
 		return rc;
+
+	rc = cuMemAlloc(&m_deviceptr, bytesize);
+	if (rc != CUDA_SUCCESS)
+	{
+		cuCtxPopCurrent(NULL);
+		return rc;
+	}
 	if (!trackGpuMem(gcontext, m_deviceptr, NULL))
 	{
-		rc = cuMemFree(m_deviceptr);
-		if (rc != CUDA_SUCCESS)
-			wnotice("failed on cuMemFree: %s", errorText(rc));
+		cuMemFree(m_deviceptr);
+		cuCtxPopCurrent(NULL);
 		return CUDA_ERROR_OUT_OF_MEMORY;
 	}
+	cuCtxPopCurrent(NULL);
+
 	return CUDA_SUCCESS;
 }
 
@@ -286,17 +294,25 @@ __gpuMemAllocManagedRaw(GpuContext *gcontext,
 	CUdeviceptr	m_deviceptr;
 	CUresult	rc;
 
+	rc = cuCtxPushCurrent(gcontext->cuda_context);
+    if (rc != CUDA_SUCCESS)
+        return rc;
+
 	rc = cuMemAllocManaged(&m_deviceptr, bytesize, flags);
 	if (rc != CUDA_SUCCESS)
+	{
+		cuCtxPopCurrent(NULL);
 		return rc;
+	}
 	if (!trackGpuMem(gcontext, m_deviceptr, NULL))
 	{
-		rc = cuMemFree(m_deviceptr);
-		if (rc != CUDA_SUCCESS)
-			wnotice("failed on cuMemFree: %s", errorText(rc));
+		cuMemFree(m_deviceptr);
+		cuCtxPopCurrent(NULL);
 		return CUDA_ERROR_OUT_OF_MEMORY;
 	}
+	cuCtxPopCurrent(NULL);
 	*p_deviceptr = m_deviceptr;
+
 	return CUDA_SUCCESS;
 }
 
@@ -456,7 +472,7 @@ retry:
 	}
 
 	/*
-	 * try to lookup segments already allocated, but not mapped locally.
+	 * Try to lookup segments already allocated, but not mapped locally.
 	 */
 	pthreadRWLockReadLock(&gm_dev->rwlock);
 	dlist_foreach(iter, global_segment_list)
@@ -470,6 +486,14 @@ retry:
 		Assert(!gm_smap->gm_seg &&
 			   !gm_smap->chain.prev &&
 			   !gm_smap->chain.next);
+		rc = cuCtxPushCurrent(gcontext->cuda_context);
+		if (rc != CUDA_SUCCESS)
+		{
+			pthreadRWLockUnlock(&gm_dev->rwlock);
+			pthreadRWLockUnlock(&gcontext->gm_smap_rwlock);
+			return rc;
+		}
+
 		rc = cuIpcOpenMemHandle(&gm_smap->m_segment,
 								gm_seg->m_handle,
 								0);
@@ -479,6 +503,7 @@ retry:
 			pthreadRWLockUnlock(&gcontext->gm_smap_rwlock);
 			return rc;
 		}
+		cuCtxPopCurrent(NULL);
 		pg_atomic_fetch_add_u32(&gm_seg->mapcount, 1);
 
 		gm_smap->gm_seg = gm_seg;
@@ -945,7 +970,7 @@ gpu_mmgr_bgworker_main(Datum bgworker_arg)
 
 		elog(LOG, "I/O mapped memory %p-%p at GPU%u [%s]",
 			 (void *)(gm_seg->m_segment),
-			 (void *)(gm_seg->m_segment - gm_seg->segment_sz - 1),
+			 (void *)(gm_seg->m_segment + gm_seg->segment_sz - 1),
 			 gpu_mmgr_cuda_dindex,
 			 devAttrs[gpu_mmgr_cuda_dindex].DEV_NAME);
 	}

@@ -5025,7 +5025,6 @@ gpupreagg_process_termination_task(GpuPreAggTask *gpreagg,
 
 	pg_atomic_init_u32(&pds_final->refcnt, 1);
 	pds_final->nblocks_uncached = 0;
-	pds_final->ntasks_running = 0;
 	memcpy(&pds_final->kds, gpa_sstate->kds_final_head,
 		   offsetof(kern_data_store, colmeta[ncols]));
 	/*

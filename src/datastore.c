@@ -95,76 +95,6 @@ estimate_num_chunks(Path *pathnode)
 	return num_chunks;
 }
 
-#ifdef NOT_USED
-bool
-kern_fetch_data_store(TupleTableSlot *slot,
-					  kern_data_store *kds,
-					  size_t row_index,
-					  HeapTuple tuple)
-{
-	if (row_index >= kds->nitems)
-		return false;	/* out of range */
-
-	/* in case of KDS_FORMAT_ROW */
-	if (kds->format == KDS_FORMAT_ROW)
-	{
-		kern_tupitem   *tup_item = KERN_DATA_STORE_TUPITEM(kds, row_index);
-
-		ExecClearTuple(slot);
-		tuple->t_len = tup_item->t_len;
-		tuple->t_self = tup_item->t_self;
-		//tuple->t_tableOid = InvalidOid;
-		tuple->t_data = &tup_item->htup;
-
-		ExecStoreTuple(tuple, slot, InvalidBuffer, false);
-
-		return true;
-	}
-	/* in case of KDS_FORMAT_SLOT */
-	if (kds->format == KDS_FORMAT_SLOT)
-	{
-		Datum  *tts_values = (Datum *)KERN_DATA_STORE_VALUES(kds, row_index);
-		bool   *tts_isnull = (bool *)KERN_DATA_STORE_ISNULL(kds, row_index);
-		int		natts = slot->tts_tupleDescriptor->natts;
-
-		memcpy(slot->tts_values, tts_values, sizeof(Datum) * natts);
-		memcpy(slot->tts_isnull, tts_isnull, sizeof(bool) * natts);
-#ifdef NOT_USED
-		/*
-		 * XXX - pointer reference is better than memcpy from performance
-		 * perspectives, however, we need to ensure tts_values/tts_isnull
-		 * shall be restored when pgstrom-data-store is released.
-		 * It will be cause of complicated / invisible bugs.
-		 */
-		slot->tts_values = tts_values;
-		slot->tts_isnull = tts_isnull;
-#endif
-		ExecStoreVirtualTuple(slot);
-		return true;
-	}
-	/* in case of KDS_FORMAT_BLOCK */
-	if (kds->format == KDS_FORMAT_BLOCK)
-	{
-		/* upper 16bits are block index */
-		/* lower 16bits are lineitem */
-
-
-
-	}
-	elog(ERROR, "Bug? unexpected data-store format: %d", kds->format);
-	return false;
-}
-
-bool
-pgstrom_fetch_data_store(TupleTableSlot *slot,
-						 pgstrom_data_store *pds,
-						 size_t row_index,
-						 HeapTuple tuple)
-{
-	return kern_fetch_data_store(slot, &pds->kds, row_index, tuple);
-}
-#endif
-
 /*
  * PDS_fetch_tuple - fetch a tuple from the PDS
  */
@@ -307,12 +237,29 @@ PDS_retain(pgstrom_data_store *pds)
 void
 PDS_release(pgstrom_data_store *pds)
 {
-	int32		refcnt_new;
+	GpuContext *gcontext = pds->gcontext;
+	CUresult	rc;
+	int32		refcnt;
 
-	refcnt_new = (int32)pg_atomic_sub_fetch_u32(&pds->refcnt, 1);
-	Assert(refcnt_new >= 0);
-	if (refcnt_new == 0)
-		dmaBufferFree(pds);
+	refcnt = (int32)pg_atomic_sub_fetch_u32(&pds->refcnt, 1);
+	Assert(refcnt >= 0);
+	if (refcnt == 0)
+	{
+		if (pds->kds.format != KDS_FORMAT_BLOCK)
+		{
+			SpinLockAcquire(&gcontext->pds_blocks_lock);
+			dlist_delete(&pds->chain);
+			dlist_push_head(&gcontext->pds_blocks_free_list,
+							&pds->chain);
+			SpinLockRelease(&gcontext->pds_blocks_lock);
+		}
+		else
+		{
+			rc = gpuMemFree(gcontext, (CUdeviceptr) pds);
+			if (rc != CUDA_SUCCESS)
+				werror("failed on gpuMemFree: %s", errorText(rc));
+		}
+	}
 }
 
 void
@@ -387,6 +334,8 @@ PDS_expand_size(GpuContext *gcontext,
 	Size		kds_length_old = pds_old->kds.length;
 	Size		kds_usage = pds_old->kds.usage;
 	cl_uint		i, nitems = pds_old->kds.nitems;
+	CUdeviceptr	m_deviceptr;
+	CUresult	rc;
 
 	/* sanity checks */
 	Assert(pds_old->kds.format == KDS_FORMAT_ROW ||
@@ -398,8 +347,14 @@ PDS_expand_size(GpuContext *gcontext,
 	if (pds_old->kds.length >= kds_length_new)
 		return pds_old;
 
-	pds_new = dmaBufferAlloc(gcontext, offsetof(pgstrom_data_store,
-												kds) + kds_length_new);
+	rc = gpuMemAllocManaged(gcontext,
+							&m_deviceptr,
+							offsetof(pgstrom_data_store,
+									 kds) + kds_length_new,
+							CU_MEM_ATTACH_GLOBAL);
+	if (rc != CUDA_SUCCESS)
+		werror("out of managed memory");
+	pds_new = (pgstrom_data_store *)m_deviceptr;
 	memcpy(pds_new, pds_old, (offsetof(pgstrom_data_store, kds) +
 							  KERN_DATA_STORE_HEAD_LENGTH(&pds_old->kds)));
 	pds_new->kds.hostptr = (hostptr_t)&pds_new->kds.hostptr;
@@ -427,7 +382,7 @@ PDS_expand_size(GpuContext *gcontext,
 			 : KDS_CALCULATE_ROW_LENGTH(pds_new->kds.ncols,
 										pds_new->kds.nitems,
 										pds_new->kds.usage)) >= kds_length_new)
-			elog(ERROR, "New nslots consumed larger than expanded");
+			werror("New nslots consumed larger than expanded");
 
 		memcpy((char *)&pds_new->kds + offset + shift,
 			   (char *)&pds_old->kds + offset,
@@ -450,10 +405,12 @@ PDS_expand_size(GpuContext *gcontext,
 										   pds_old->kds.nitems));
 	}
 	else
-		elog(ERROR, "unexpected KDS format: %d", pds_new->kds.format);
+		werror("unexpected KDS format: %d", pds_new->kds.format);
 
 	/* release the old PDS, and return the new one */
-	dmaBufferFree(pds_old);
+	rc = gpuMemFree(pds_old->gcontext, (CUdeviceptr) pds_old);
+	if (rc != CUDA_SUCCESS)
+		werror("failed on gpuMemFree: %s", errorText(rc));
 	return pds_new;
 }
 
@@ -537,85 +494,31 @@ PDS_shrink_size(pgstrom_data_store *pds)
 }
 
 pgstrom_data_store *
-PDS_create_row(GpuContext *gcontext, TupleDesc tupdesc, Size length)
+PDS_create_row(GpuContext *gcontext,
+			   TupleDesc tupdesc,
+			   size_t bytesize)
 {
 	pgstrom_data_store *pds;
-	Size		kds_length = STROMALIGN_DOWN(length);
+	CUdeviceptr	m_deviceptr;
+	CUresult	rc;
 
-	pds = dmaBufferAlloc(gcontext, offsetof(pgstrom_data_store,
-											kds) + kds_length);
-	/* owned by the caller at least */
+	bytesize = STROMALIGN_DOWN(bytesize);
+	rc = gpuMemAllocManaged(gcontext,
+							&m_deviceptr,
+							offsetof(pgstrom_data_store,
+									 kds) + bytesize,
+							CU_MEM_ATTACH_GLOBAL);
+	if (rc != CUDA_SUCCESS)
+		werror("out of managed memory");
+	pds = (pgstrom_data_store *) m_deviceptr;
+
+	/* setup */
+	memset(&pds->chain, 0, sizeof(dlist_node));
+	pds->gcontext = gcontext;
 	pg_atomic_init_u32(&pds->refcnt, 1);
-
-	/*
-	 * initialize common part of KDS. Note that row-format cannot
-	 * determine 'nrooms' preliminary, so INT_MAX instead.
-	 */
-	init_kernel_data_store(&pds->kds, tupdesc, kds_length,
+	init_kernel_data_store(&pds->kds, tupdesc, bytesize,
 						   KDS_FORMAT_ROW, INT_MAX);
 	pds->nblocks_uncached = 0;
-	pds->ntasks_running = 0;
-
-	return pds;
-}
-
-pgstrom_data_store *
-PDS_create_slot(GpuContext *gcontext,
-				TupleDesc tupdesc,
-				cl_uint nrooms,
-				Size extra_length)
-{
-	pgstrom_data_store *pds;
-	size_t			kds_length;
-
-	kds_length = (STROMALIGN(offsetof(kern_data_store,
-									  colmeta[tupdesc->natts])) +
-				  STROMALIGN(LONGALIGN((sizeof(Datum) + sizeof(char)) *
-									   tupdesc->natts) * nrooms) +
-				  STROMALIGN(extra_length));
-	pds = dmaBufferAlloc(gcontext, offsetof(pgstrom_data_store,
-											kds) + kds_length);
-	/* owned by the caller at least */
-	pg_atomic_init_u32(&pds->refcnt, 1);
-
-	init_kernel_data_store(&pds->kds, tupdesc, kds_length,
-						   KDS_FORMAT_SLOT, nrooms);
-	pds->nblocks_uncached = 0;
-	pds->ntasks_running = 0;
-
-	return pds;
-}
-
-pgstrom_data_store *
-PDS_duplicate_slot(GpuContext *gcontext,
-				   kern_data_store *kds_head,
-				   cl_uint nrooms,
-				   cl_uint extra_unitsz)
-{
-	pgstrom_data_store *pds;
-	size_t			required;
-
-	required = (STROMALIGN(offsetof(kern_data_store,
-									colmeta[kds_head->ncols])) +
-				STROMALIGN((sizeof(Datum) + sizeof(char)) *
-						   kds_head->ncols) * nrooms +
-				STROMALIGN(extra_unitsz) * nrooms);
-
-	pds = dmaBufferAlloc(gcontext, offsetof(pgstrom_data_store,
-											kds) + required);
-	/* owned by the caller at least */
-	pg_atomic_init_u32(&pds->refcnt, 1);
-	pds->ntasks_running = 0;
-
-	/* setup KDS using the template */
-	memcpy(&pds->kds, kds_head,
-		   offsetof(kern_data_store,
-					colmeta[kds_head->ncols]));
-	pds->kds.hostptr = (hostptr_t)&pds->kds.hostptr;
-	pds->kds.length  = required;
-	pds->kds.usage   = 0;
-	pds->kds.nrooms  = nrooms;
-	pds->kds.nitems  = 0;
 
 	return pds;
 }
@@ -623,23 +526,32 @@ PDS_duplicate_slot(GpuContext *gcontext,
 pgstrom_data_store *
 PDS_create_hash(GpuContext *gcontext,
 				TupleDesc tupdesc,
-				Size length)
+				size_t bytesize)
 {
 	pgstrom_data_store *pds;
-	Size		kds_length = STROMALIGN_DOWN(length);
+	CUdeviceptr	m_deviceptr;
+	CUresult	rc;
 
-	if (KDS_CALCULATE_HEAD_LENGTH(tupdesc->natts) > kds_length)
+	bytesize = STROMALIGN_DOWN(bytesize);
+	if (KDS_CALCULATE_HEAD_LENGTH(tupdesc->natts) > bytesize)
 		elog(ERROR, "Required length for KDS-Hash is too short");
 
-	pds = dmaBufferAlloc(gcontext, offsetof(pgstrom_data_store,
-											kds) + kds_length);
-	/* owned by the caller at least */
-	pg_atomic_init_u32(&pds->refcnt, 1);
+	rc = gpuMemAllocManaged(gcontext,
+							&m_deviceptr,
+							offsetof(pgstrom_data_store,
+									 kds) + bytesize,
+							CU_MEM_ATTACH_GLOBAL);
+	if (rc != CUDA_SUCCESS)
+		werror("out of managed memory");
+	pds = (pgstrom_data_store *) m_deviceptr;
 
-	init_kernel_data_store(&pds->kds, tupdesc, kds_length,
+	/* setup */
+	memset(&pds->chain, 0, sizeof(dlist_node));
+	pds->gcontext = gcontext;
+	pg_atomic_init_u32(&pds->refcnt, 1);
+	init_kernel_data_store(&pds->kds, tupdesc, bytesize,
 						   KDS_FORMAT_HASH, INT_MAX);
 	pds->nblocks_uncached = 0;
-	pds->ntasks_running = 0;
 
 	return pds;
 }
@@ -649,32 +561,57 @@ PDS_create_block(GpuContext *gcontext,
 				 TupleDesc tupdesc,
 				 NVMEScanState *nvme_sstate)
 {
-	pgstrom_data_store *pds;
+	pgstrom_data_store *pds = NULL;
 	cl_uint		nrooms = nvme_sstate->nblocks_per_chunk;
-	Size		kds_length;
+	size_t		bytesize;
+	dlist_node *dnode;
+	CUresult	rc;
 
-	kds_length = KDS_CALCULATE_HEAD_LENGTH(tupdesc->natts)
+	bytesize = KDS_CALCULATE_HEAD_LENGTH(tupdesc->natts)
 		+ STROMALIGN(sizeof(BlockNumber) * nrooms)
 		+ BLCKSZ * nrooms;
-	if (offsetof(pgstrom_data_store, kds) + kds_length > pgstrom_chunk_size())
-		elog(WARNING,
+	if (offsetof(pgstrom_data_store, kds) + bytesize > pgstrom_chunk_size())
+		elog(ERROR,
 			 "Bug? PDS length (%zu) is larger than pg_strom.chunk_size(%zu)",
-			 offsetof(pgstrom_data_store, kds) + kds_length,
+			 offsetof(pgstrom_data_store, kds) + bytesize,
 			 pgstrom_chunk_size());
 
-	/* allocation */
-	pds = dmaBufferAlloc(gcontext, offsetof(pgstrom_data_store,
-											kds) + kds_length);
-	if (!pds)
-		elog(ERROR, "out of DMA buffer");
-	/* owned by the caller at least */
-	pg_atomic_init_u32(&pds->refcnt, 1);
+	/* allocation, if no unused buffer is kept */
+	SpinLockAcquire(&gcontext->pds_blocks_lock);
+	if (!dlist_is_empty(&gcontext->pds_blocks_free_list))
+	{
+		dnode = dlist_pop_head_node(&gcontext->pds_blocks_free_list);
+		pds = dlist_container(pgstrom_data_store, chain, dnode);
+	}
+	else
+	{
+		SpinLockRelease(&gcontext->pds_blocks_lock);
 
-	init_kernel_data_store(&pds->kds, tupdesc, kds_length,
-						   KDS_FORMAT_BLOCK, nrooms);
-	pds->kds.nrows_per_block = nvme_sstate->nrows_per_block;
-	pds->nblocks_uncached = 0;
-	pds->ntasks_running = 0;
+		rc = cuCtxPushCurrent(gcontext->cuda_context);
+		if (rc != CUDA_SUCCESS)
+			werror("failed on cuCtxPushCurrent: %s", errorText(rc));
+
+		rc = cuMemHostAlloc((void **)&pds, pgstrom_chunk_size(), 0);
+		if (rc != CUDA_SUCCESS)
+			werror("failed on cuMemHostAlloc: %s", errorText(rc));
+
+		rc = cuCtxPopCurrent(NULL);
+		if (rc != CUDA_SUCCESS)
+		{
+			cuMemFreeHost(pds);
+			werror("failed on cuCtxPpoCurrent: %s", errorText(rc));
+		}
+		SpinLockAcquire(&gcontext->pds_blocks_lock);
+	}
+	dlist_push_tail(&gcontext->pds_blocks_active_list, &pds->chain);
+	SpinLockRelease(&gcontext->pds_blocks_lock);
+	/* setup */
+	pds->gcontext = gcontext;
+	pg_atomic_init_u32(&pds->refcnt, 1);
+	init_kernel_data_store(&pds->kds, tupdesc, bytesize,
+                           KDS_FORMAT_BLOCK, nrooms);
+    pds->kds.nrows_per_block = nvme_sstate->nrows_per_block;
+    pds->nblocks_uncached = 0;
 
 	return pds;
 }
@@ -1274,10 +1211,30 @@ PDS_build_hashtable(pgstrom_data_store *pds)
 }
 
 /*
- * pgstrom_cleanup_datastore
+ * cleanup handler for KDS_FORMAT_BLOCK
  */
 void
-pgstrom_cleanup_datastore(void)
+pgstrom_datastore_cleanup_gpucontext(GpuContext *gcontext)
 {
-	//release PDS_block locally held
+	pgstrom_data_store *pds;
+	dlist_node		   *dnode;
+	CUresult			rc;
+
+	while (!dlist_is_empty(&gcontext->pds_blocks_active_list))
+	{
+		dnode = dlist_pop_head_node(&gcontext->pds_blocks_active_list);
+		pds = dlist_container(pgstrom_data_store, chain, dnode);
+		rc = cuMemFreeHost(pds);
+		if (rc != CUDA_SUCCESS)
+			elog(NOTICE, "failed on cuMemFreeHost: %s", errorText(rc));
+	}
+
+	while (!dlist_is_empty(&gcontext->pds_blocks_free_list))
+	{
+		dnode = dlist_pop_head_node(&gcontext->pds_blocks_free_list);
+		pds = dlist_container(pgstrom_data_store, chain, dnode);
+		rc = cuMemFreeHost(pds);
+		if (rc != CUDA_SUCCESS)
+			elog(NOTICE, "failed on cuMemFreeHost: %s", errorText(rc));
+	}
 }
