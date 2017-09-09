@@ -24,17 +24,11 @@
 #include "utils/resowner.h"
 #include "pg_strom.h"
 
-typedef struct SharedGpuContextHead
-{
-	slock_t			lock;
-	dlist_head		active_list;
-	dlist_head		free_list;
-	SharedGpuContext master_context;
-	SharedGpuContext context_array[FLEXIBLE_ARRAY_MEMBER];
-} SharedGpuContextHead;
-
-/* static variables */
-static int			local_max_async_tasks;	/* GUC */
+/* variables */
+static shmem_startup_hook_type shmem_startup_next = NULL;
+static pg_atomic_uint32 *global_num_running_tasks;	/* per device */
+int				global_max_async_tasks;		/* GUC */
+int				local_max_async_tasks;		/* GUC */
 static slock_t		activeGpuContextLock;
 static dlist_head	activeGpuContextList;
 
@@ -418,7 +412,7 @@ GpuContextWorkerMain(void *arg)
 	while (!gcontext->terminate_workers)
 	{
 		if (dlist_is_empty(&gcontext->pending_tasks))
-			pthreadCondWait(&gcontext->cond, &gcontext->mutex);
+			pthreadCondWait(&gcontext->cond_workers, &gcontext->mutex);
 		else
 		{
 			dnode = dlist_pop_head_node(&gcontext->pending_tasks);
@@ -477,7 +471,8 @@ GpuContextWorkerMain(void *arg)
 				/* Wake up and terminate other workers also */
 				pthreadMutexLock(&gcontext->mutex);
 				gcontext->terminate_workers = true;
-				pthreadCondBroadcast(&gcontext->cond);
+				pthreadCondBroadcast(&gcontext->cond_backend);
+				pthreadCondBroadcast(&gcontext->cond_workers);
 				pthreadMutexUnlock(&gcontext->mutex);
 			}
 			STROM_END_TRY();
@@ -549,7 +544,7 @@ ActivateGpuContext(GpuContext *gcontext)
 
 			pthreadMutexLock(&gcontext->mutex);
 			gcontext->terminate_workers = true;
-			pthreadCondBroadcast(&gcontext->cond);
+			pthreadCondBroadcast(&gcontext->cond_workers);
 			pthreadMutexUnlock(&gcontext->mutex);
 
 			while (i > 0)
@@ -657,8 +652,11 @@ AllocGpuContext(int cuda_dindex,
 	gcontext->error_lineno	= 0;
 	gcontext->error_message	= NULL;
 	/* management of work-queue */
+	gcontext->global_num_running_tasks
+		= &global_num_running_tasks[cuda_dindex];
 	pthreadMutexInit(&gcontext->mutex);
-	pthreadCondInit(&gcontext->cond);
+	pthreadCondInit(&gcontext->cond_backend);
+	pthreadCondInit(&gcontext->cond_workers);
 	gcontext->num_running_tasks = 0;
 	dlist_init(&gcontext->pending_tasks);
 	dlist_init(&gcontext->completed_tasks);
@@ -733,7 +731,7 @@ SynchronizeGpuContext(GpuContext *gcontext)
 	/* signal to terminate workers */
 	pthreadMutexLock(&gcontext->mutex);
 	gcontext->terminate_workers = true;
-	pthreadCondBroadcast(&gcontext->cond);
+	pthreadCondBroadcast(&gcontext->cond_workers);
 	pthreadMutexUnlock(&gcontext->mutex);
 
 	/* Drop CUDA context to interrupt long-running GPU kernels, if any */
@@ -806,13 +804,42 @@ gpucontext_proc_exit_cleanup(int code, Datum arg)
 }
 
 /*
+ * pgstrom_startup_gpu_context
+ */
+static void
+pgstrom_startup_gpu_context(void)
+{
+	bool	found;
+	int		i;
+
+	global_num_running_tasks =
+		ShmemInitStruct("Global number of running tasks counter",
+						sizeof(pg_atomic_uint32) * numDevAttrs,
+						&found);
+	if (found)
+		elog(ERROR, "Bug? Global number of running tasks counter exists");
+	for (i=0; i < numDevAttrs; i++)
+		pg_atomic_init_u32(&global_num_running_tasks[i], 0);
+}
+
+/*
  * pgstrom_init_gpu_context
  */
 void
 pgstrom_init_gpu_context(void)
 {
+	DefineCustomIntVariable("pg_strom.global_max_async_tasks",
+			"Soft limit for the number of concurrent GpuTasks in system-wide",
+							NULL,
+							&global_max_async_tasks,
+							160,
+							8,
+							INT_MAX,
+							PGC_SUSET,
+							GUC_NOT_IN_SAMPLE,
+                            NULL, NULL, NULL);
 	DefineCustomIntVariable("pg_strom.local_max_async_tasks",
-							"List for # of concurrent local GpuTasks",
+			"Soft limit for the number of concurrent GpuTasks per backend",
 							NULL,
 							&local_max_async_tasks,
 							8,
@@ -820,10 +847,15 @@ pgstrom_init_gpu_context(void)
 							64,
 							PGC_SUSET,
 							GUC_NOT_IN_SAMPLE,
-                            NULL, NULL, NULL);
+							NULL, NULL, NULL);
 	/* initialization of GpuContext List */
 	SpinLockInit(&activeGpuContextLock);
 	dlist_init(&activeGpuContextList);
+
+	/* shared memory */
+	RequestAddinShmemSpace(MAXALIGN(sizeof(pg_atomic_uint32) * numDevAttrs));
+	shmem_startup_next = shmem_startup_hook;
+    shmem_startup_hook = pgstrom_startup_gpu_context;
 
 	/* register the callback to clean up resources */
 	RegisterResourceReleaseCallback(gpucontext_cleanup_callback, NULL);

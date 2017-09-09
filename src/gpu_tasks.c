@@ -20,6 +20,7 @@
 #include "optimizer/clauses.h"
 #include "parser/parsetree.h"
 #include "utils/builtins.h"
+#include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/ruleutils.h"
 #include "pg_strom.h"
@@ -228,104 +229,134 @@ pgstromInitGpuTaskState(GpuTaskState *gts,
 }
 
 /*
+ * fetch_completed_gputasks
+ *
+ * NOTE: caller must hold gcontext->mutex
+ */
+static void
+fetch_completed_gputasks(GpuContext *gcontext)
+{
+	dlist_node	   *dnode;
+	GpuTask		   *gtask;
+	GpuTaskState   *gts;
+
+	while (!dlist_is_empty(&gcontext->completed_tasks))
+	{
+		dnode = dlist_pop_head_node(&gcontext->completed_tasks);
+		gtask = dlist_container(GpuTask, chain, dnode);
+		gcontext->num_running_tasks--;
+		pg_atomic_sub_fetch_u32(gcontext->global_num_running_tasks, 1);
+		gts = gtask->gts;
+		Assert(gts->gcontext == gcontext);
+		/* callback on GpuTask getting ready */
+		if (gts->cb_ready_task)
+		{
+			pthreadMutexUnlock(&gcontext->mutex);
+			gts->cb_ready_task(gts, gtask);
+			pthreadMutexLock(&gcontext->mutex);
+		}
+		dlist_push_tail(&gts->ready_tasks, &gtask->chain);
+		gts->num_ready_tasks++;
+	}
+}
+
+/*
  * fetch_next_gputask
  */
 GpuTask *
 fetch_next_gputask(GpuTaskState *gts)
 {
-	GpuContext		   *gcontext = gts->gcontext;
-	SharedGpuContext   *shgcon = gcontext->shgcon;
-	GpuTask			   *gtask;
-	dlist_node		   *dnode;
-
-	/*
-	 * If no server connection is established, GpuTask cannot be processed
-	 * by GPU devices. All we can do is CPU fallback instead of the GPU
-	 * processing.
-	 */
-	if (gcontext->sockfd == PGINVALID_SOCKET)
-	{
-		gtask = gts->cb_next_task(gts);
-		if (gtask)
-			gtask->cpu_fallback = true;
-		return gtask;
-	}
+	GpuContext	   *gcontext = gts->gcontext;
+	GpuTask		   *gtask;
+	dlist_node	   *dnode;
 
 	CHECK_FOR_INTERRUPTS();
-	while (gpuservRecvGpuTasks(gcontext, 0));
 
-	/*
-	 * Fetch next task and send it, if current resource consumption allows.
-	 *
-	 * 1. Number of the running tasks is less than pg_strom.min_async_tasks.
-	 * 2. Sum of number of the running and ready tasks is less than
-	 *    pg_strom.max_async_tasks.
-	 */
-	while (!gts->scan_done)
+	if (!gts->scan_done)
 	{
-		volatile uint32	num_server_gpu_tasks
-			= GetNumberOfGpuServerTasks(gcontext->gpuserv_id);
+		cl_int		local_num_running_tasks;
+		cl_int		global_num_running_tasks;
 
-		CHECK_FOR_INTERRUPTS();
-		/*
-		 * FIXME: We need to revise the GpuTask scheduler to utilize CPUs.
-		 * Right now, it looks to me small fraction of CPU are utilized.
-		 */
-		SpinLockAcquire(&shgcon->lock);
-		if (shgcon->num_async_tasks == 0 ||
-			(num_server_gpu_tasks < pgstrom_max_async_tasks &&
-			 gts->num_ready_tasks < 3))
+		pthreadMutexLock(&gcontext->mutex);
+		for (;;)
 		{
-			SpinLockRelease(&shgcon->lock);
-
-			/*
-			 * TODO: If cb_next_task() couldn't set up GpuTask because of
-			 * DMA buffer allocation, we may need to skip immediate load
-			 * unless GTS has no running tasks.
-			 */
-			gtask = gts->cb_next_task(gts);
-		  	if (!gtask)
-		  	{
-				gts->scan_done = true;
+			fetch_completed_gputasks(gcontext);
+			local_num_running_tasks = (gts->num_ready_tasks +
+									   gcontext->num_running_tasks);
+			global_num_running_tasks =
+				pg_atomic_read_u32(gcontext->global_num_running_tasks);
+			if ((local_num_running_tasks < local_max_async_tasks &&
+				 global_num_running_tasks < global_max_async_tasks) ||
+				(dlist_is_empty(&gts->ready_tasks) &&
+				 gcontext->num_running_tasks == 0))
+			{
+				pthreadMutexUnlock(&gcontext->mutex);
+				gtask = gts->cb_next_task(gts);
+				pthreadMutexLock(&gcontext->mutex);
+				if (!gtask)
+				{
+					gts->scan_done = true;
+					break;
+				}
+				dlist_push_tail(&gcontext->pending_tasks, &gtask->chain);
+				gcontext->num_running_tasks++;
+				pg_atomic_add_fetch_u32(gcontext->global_num_running_tasks, 1);
+				pthreadCondSignal(&gcontext->cond_workers);
+			}
+			else if (!dlist_is_empty(&gts->ready_tasks))
+			{
+				/*
+				 * Even though we touched either local or global limitation of
+				 * the number of concurrent tasks, GTS already has ready tasks,
+				 * so pick them up instead of wait.
+				 */
 				break;
 			}
-#ifdef PGSTROM_DEBUG
-			gettimeofday(&gtask->tv_timestamp, NULL);
-#endif
-			gpuservSendGpuTask(gcontext, gtask);
-		}
-		else
-		{
-			/* shouldn't send tasks any more at this moment */
-			SpinLockRelease(&shgcon->lock);
+			else if (gcontext->num_running_tasks > 0)
+			{
+				/*
+				 * Even though a few GpuTasks are running, but nobody gets
+				 * completed yet. Try to wait for completion to 
+				 */
+				pthreadCondWait(&gcontext->cond_backend,
+								&gcontext->mutex);
+			}
+			else
+			{
+				pthreadMutexUnlock(&gcontext->mutex);
+				/*
+				 * Sadly, we touched a threshold. Taks a short break.
+				 */
+				pg_usleep(20000L);	/* wait for 20msec */
 
-			/* ok, we got at least one completed tasks */
-			if (!dlist_is_empty(&gts->ready_tasks))
-				break;
-			/* wait for a completed task, or task vanish on server side */
-			gpuservRecvGpuTasks(gcontext, -1);
+				CHECK_FOR_INTERRUPTS();
+
+				pthreadMutexLock(&gcontext->mutex);
+			}
 		}
-		/* check completed tasks if any (non-blocking) */
-		while (gpuservRecvGpuTasks(gcontext, 0));
+		pthreadMutexUnlock(&gcontext->mutex);
 	}
 
 	/*
 	 * Once we exit the above loop, either a completed task was returned,
 	 * or relation scan has already done thus wait for synchronously.
 	 */
+	Assert(gts->scan_done);
+	pthreadMutexLock(&gcontext->mutex);
+	fetch_completed_gputasks(gcontext);
 	while (dlist_is_empty(&gts->ready_tasks))
 	{
-		Assert(gts->scan_done);
-		CHECK_FOR_INTERRUPTS();
-		SpinLockAcquire(&shgcon->lock);
-		if (shgcon->num_async_tasks == 0)
+		if (gcontext->num_running_tasks == 0)
 		{
-			SpinLockRelease(&shgcon->lock);
+			pthreadMutexUnlock(&gcontext->mutex);
 			return NULL;
 		}
-		SpinLockRelease(&shgcon->lock);
-		gpuservRecvGpuTasks(gcontext, -1);
+		pthreadCondWait(&gcontext->cond_backend,
+						&gcontext->mutex);
+		fetch_completed_gputasks(gcontext);
 	}
+	pthreadMutexUnlock(&gcontext->mutex);
+
 	/* OK, pick up GpuTask from the head */
 	Assert(gts->num_ready_tasks > 0);
 	dnode = dlist_pop_head_node(&gts->ready_tasks);
@@ -544,10 +575,6 @@ pgstromInitGpuTask(GpuTaskState *gts, GpuTask *gtask)
 	gtask->gts          = gts;
 	gtask->cpu_fallback = false;
 	gtask->file_desc    = -1;
-	/* fields used in server */
-	gtask->gcontext		= NULL;
-	memset(&gtask->tv_wakeup, 0, sizeof(struct timeval));
-	gtask->peer_fdesc   = -1;
 }
 
 /*
@@ -1010,9 +1037,3 @@ pgstrom_init_gputasks(void)
 {
 	/* nothing to do */
 }
-
-
-
-
-
-

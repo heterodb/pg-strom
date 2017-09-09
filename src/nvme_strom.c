@@ -404,7 +404,7 @@ gpuMemCopyFromSSD(GpuTask *gtask,
 	memset(&cmd, 0, sizeof(StromCmd__MemCopySsdToGpu));
 	cmd.handle		= iomap_seg->iomap_handle;
 	cmd.offset		= offset;
-	cmd.file_desc	= gtask->peer_fdesc;
+	cmd.file_desc	= gtask->file_desc;
 	cmd.nr_chunks	= pds->nblocks_uncached;
 	cmd.chunk_sz	= BLCKSZ;
 	cmd.relseg_sz	= RELSEG_SIZE;

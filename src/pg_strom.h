@@ -150,8 +150,10 @@ typedef struct GpuContext
 	int				error_lineno;
 	char		   *error_message;
 	/* management of the work-queue */
+	pg_atomic_uint32 *global_num_running_tasks;
 	pthread_mutex_t	mutex;
-	pthread_cond_t	cond;
+	pthread_cond_t	cond_backend;	/* notification of task completion */
+	pthread_cond_t	cond_workers;	/* notification of task enqueue */
 	cl_bool			terminate_workers;
 	cl_int			num_running_tasks;
 	dlist_head		pending_tasks;		/* list of GpuTask */
@@ -258,18 +260,6 @@ struct GpuTask
 	GpuTaskState   *gts;			/* GTS reference in the backend */
 	bool			cpu_fallback;	/* true, if task needs CPU fallback */
 	int				file_desc;		/* file-descriptor on backend side */
-	/* fields below are valid only server */
-	GpuContext	   *gcontext;		/* session info of GPU server */
-	struct timeval	tv_wakeup;		/* sleep until, if non-zero */
-	int				peer_fdesc;		/* FD moved via SCM_RIGHTS */
-#ifdef PGSTROM_DEBUG
-	struct timeval	tv_timestamp;	/* timestamp when GpuTask sent */
-	unsigned int	send_delay;		/* delay by enqueue to pending-list */
-	unsigned int	kstart_delay;	/* delay by GPU kernel launch */
-	unsigned int	kfinish_delay;	/* delay by GPU kernel complete */
-	unsigned int	resp_delay;		/* delay by GpuTask was backed */
-	unsigned int	debug_delay;	/* delay for debug/analysis */
-#endif
 };
 
 /*
@@ -504,6 +494,8 @@ gpuMemRetain(GpuContext *gcontext, CUdeviceptr devptr)
 /*
  * gpu_context.c
  */
+extern int		global_max_async_tasks;		/* GUC */
+extern int		local_max_async_tasks;		/* GUC */
 extern __thread GpuContext	   *GpuWorkerCurrentContext;
 extern __thread sigjmp_buf	   *GpuWorkerExceptionStack;
 extern void GpuContextWorkerReportError(int elevel,
