@@ -45,14 +45,14 @@ typedef struct
 } GpuMemChunk;
 
 #define GPUMEMCHUNK_IS_FREE(chunk)					\
-	((chunk)->chain.prev != UINT_MAX &&				\
-	 (chunk)->chain.next != UINT_MAX &&				\
+	((chunk)->chain.prev != NULL &&					\
+	 (chunk)->chain.next != NULL &&					\
 	 (chunk)->mclass >= GPUMEM_CHUNKSZ_MIN_BIT &&	\
 	 (chunk)->mclass <= GPUMEM_CHUNKSZ_MAX_BIT &&	\
 	 (chunk)->refcnt == 0)
 #define GPUMEMCHUNK_IS_ACTIVE(chunk)				 \
-	((chunk)->chain.prev == UINT_MAX &&				 \
-	 (chunk)->chain.next == UINT_MAX &&				 \
+	((chunk)->chain.prev == NULL &&					 \
+	 (chunk)->chain.next == NULL &&					 \
 	 (chunk)->mclass >= GPUMEM_CHUNKSZ_MIN_BIT &&	 \
 	 (chunk)->mclass <= GPUMEM_CHUNKSZ_MAX_BIT &&	 \
 	 (chunk)->refcnt > 0)
@@ -370,7 +370,7 @@ gpuMemTryAllocChunk(GpuMemSegment *gm_seg, int mclass)
 		if (!gpuMemSplitChunk(gm_seg, mclass+1))
 			return NULL;
 	}
-	Assert(!dsm_list_is_empty(&gm_seg->free_chunks[mclass]));
+	Assert(!dlist_is_empty(&gm_seg->free_chunks[mclass]));
 
 	dnode = dlist_pop_head_node(&gm_seg->free_chunks[mclass]);
 	gm_chunk = dlist_container(GpuMemChunk, chain, dnode);
@@ -812,7 +812,6 @@ gpu_mmgr_reclaim_segment(GpuMemDevice *gm_dev)
 				pthreadRWLockUnlock(&gm_dev->rwlock);
 
 				/* release resources */
-				Assert(gm_smap->iomap_handle == 0UL);
 				rc = cuMemFree(gm_seg->m_segment);
 				if (rc != CUDA_SUCCESS)
 					elog(FATAL, "GPU Mmgr: failed on cuMemFree: %s",

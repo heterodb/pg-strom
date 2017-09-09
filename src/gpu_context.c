@@ -287,12 +287,6 @@ ReleaseLocalResources(GpuContext *gcontext, bool normal_exit)
 					if (normal_exit)
 						wnotice("GPU memory %p likely leaked",
 								(void *)tracker->u.devmem.ptr);
-					/*
-					 * normal device memory should be already released
-					 * once CUDA context is destroyed
-					 */
-					if (!gpuserv_cuda_context)
-						break;
 					rc = gpuMemFreeExtra(gcontext,
 										 tracker->u.devmem.ptr,
 										 tracker->u.devmem.extra);
@@ -350,6 +344,10 @@ MasterGpuContext(void)
  */
 __thread GpuContext	   *GpuWorkerCurrentContext = NULL;
 __thread sigjmp_buf	   *GpuWorkerExceptionStack = NULL;
+__thread CUevent		CU_EVENT0_PER_THREAD = NULL;
+__thread CUevent		CU_EVENT1_PER_THREAD = NULL;
+__thread CUevent		CU_EVENT2_PER_THREAD = NULL;
+__thread CUevent		CU_EVENT3_PER_THREAD = NULL;
 
 void
 GpuContextWorkerReportError(int elevel,
@@ -404,6 +402,20 @@ GpuContextWorkerMain(void *arg)
 		/* NOTE: GpuWorkerExceptionStack is not set, so werror() will not
 		 * make a long-jump at this timing. */
 		werror("failed on cuCtxSetCurrent: %s", errorText(rc));
+		return NULL;
+	}
+
+	/* general purpose events objects */
+	if ((rc = cuEventCreate(&CU_EVENT0_PER_THREAD,
+							CU_EVENT_DISABLE_TIMING)) != CUDA_SUCCESS ||
+		(rc = cuEventCreate(&CU_EVENT1_PER_THREAD,
+							CU_EVENT_DISABLE_TIMING)) != CUDA_SUCCESS ||
+		(rc = cuEventCreate(&CU_EVENT2_PER_THREAD,
+							CU_EVENT_DISABLE_TIMING)) != CUDA_SUCCESS ||
+		(rc = cuEventCreate(&CU_EVENT3_PER_THREAD,
+							CU_EVENT_DISABLE_TIMING)) != CUDA_SUCCESS)
+	{
+		werror("failed on cuEventCreate: %s", errorText(rc));
 		return NULL;
 	}
 	GpuWorkerCurrentContext = gcontext;

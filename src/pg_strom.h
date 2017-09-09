@@ -406,6 +406,20 @@ extern cl_ulong			devBaselineMemorySize;
 extern cl_uint			devBaselineMaxThreadsPerBlock;
 
 extern void pgstrom_init_gpu_device(void);
+extern void optimal_workgroup_size(size_t *p_grid_size,
+								   size_t *p_block_size,
+								   CUfunction function,
+								   CUdevice device,
+								   size_t nitems,
+								   size_t dynamic_shmem_per_block,
+								   size_t dynamic_shmem_per_thread);
+extern void largest_workgroup_size(size_t *p_grid_size,
+								   size_t *p_block_size,
+								   CUfunction function,
+								   CUdevice device,
+								   size_t nitems,
+								   size_t dynamic_shmem_per_block,
+								   size_t dynamic_shmem_per_thread);
 extern Datum pgstrom_device_info(PG_FUNCTION_ARGS);
 
 /*
@@ -498,6 +512,17 @@ extern int		global_max_async_tasks;		/* GUC */
 extern int		local_max_async_tasks;		/* GUC */
 extern __thread GpuContext	   *GpuWorkerCurrentContext;
 extern __thread sigjmp_buf	   *GpuWorkerExceptionStack;
+#define CU_CONTEXT_PER_THREAD					\
+	(GpuWorkerCurrentContext->cuda_context)
+#define CU_DEVICE_PER_THREAD					\
+	(GpuWorkerCurrentContext->cuda_device)
+#define CU_DINDEX_PER_THREAD					\
+	(GpuWorkerCurrentContext->cuda_dindex)
+extern __thread CUevent			CU_EVENT0_PER_THREAD;
+extern __thread CUevent			CU_EVENT1_PER_THREAD;
+extern __thread CUevent			CU_EVENT2_PER_THREAD;
+extern __thread CUevent			CU_EVENT3_PER_THREAD;
+
 extern void GpuContextWorkerReportError(int elevel,
 										const char *filename, int lineno,
 										const char *fmt, ...)
@@ -524,33 +549,8 @@ extern void *untrackGpuMem(GpuContext *gcontext, CUdeviceptr devptr);
 extern void pgstrom_init_gpu_context(void);
 
 /*
- * gpu_server.c
+ * Exception handling for work-queue of GpuContext
  */
-extern int				gpuserv_cuda_dindex;
-extern CUdevice			gpuserv_cuda_device;
-extern CUcontext		gpuserv_cuda_context;
-extern __thread CUevent	gpuserv_cuda_event;
-extern __thread int		gpuserv_worker_index;
-
-extern int	IsGpuServerProcess(void);
-extern uint32 GetNumberOfGpuServerTasks(int server_id);
-extern bool gpuservGotSigterm(void);
-extern void gpuservClenupGpuContext(GpuContext *gcontext);
-extern void gpuservTryToWakeUp(void);
-extern void gpuservOpenConnection(GpuContext *gcontext);
-extern void gpuservSendGpuTask(GpuContext *gcontext, GpuTask *gtask);
-extern bool gpuservRecvGpuTasks(GpuContext *gcontext, long timeout);
-extern void gpuservPushGpuTask(GpuContext *gcontext, GpuTask *gtask);
-extern void gpuservCompleteGpuTask(GpuTask *gtask, bool is_urgent);
-extern void gpuservSendGpuMemFree(GpuContext *gcontext, CUdeviceptr devptr);
-extern void gpuservSendIOMapMemFree(GpuContext *gcontext, CUdeviceptr devptr);
-extern void pgstrom_init_gpu_server(void);
-
-/*
- * service routines for worker thread handling
- */
-#define WORKER_ERROR_MESSAGE_MAXLEN			(256*1024)
-extern __thread sigjmp_buf *gpuserv_worker_exception_stack;
 #define STROM_TRY() \
 	do { \
 		ErrorContextCallback *saved_context_stack = error_context_stack; \
@@ -598,13 +598,6 @@ extern __thread sigjmp_buf *gpuserv_worker_exception_stack;
 			siglongjmp(*GpuWorkerExceptionStack, 1); \
 	} while(0)
 
-//deprecated
-#define WORKER_CHECK_FOR_INTERRUPTS()	\
-	do {								\
-		if (gpuservGotSigterm())		\
-			werror("Got SIGTERM");		\
-	} while(0)
-
 #define STROM_REPORT_ERROR(elevel,elabel,fmt,...)						\
 	do {																\
 		if (!GpuWorkerCurrentContext)									\
@@ -633,25 +626,6 @@ extern __thread sigjmp_buf *gpuserv_worker_exception_stack;
 	STROM_REPORT_ERROR(FATAL,"Fatal",fmt,##__VA_ARGS__)
 #define wpanic(fmt,...)							\
 	STROM_REPORT_ERROR(PANIC,"Panic",fmt,##__VA_ARGS__)
-
-extern void worker_error(const char *funcname,
-						 const char *filename,
-						 int lineno,
-						 const char *fmt, ...) pg_attribute_printf(4,5);
-extern void optimal_workgroup_size(size_t *p_grid_size,
-								   size_t *p_block_size,
-								   CUfunction function,
-								   CUdevice device,
-								   size_t nitems,
-								   size_t dynamic_shmem_per_block,
-								   size_t dynamic_shmem_per_thread);
-extern void largest_workgroup_size(size_t *p_grid_size,
-								   size_t *p_block_size,
-								   CUfunction function,
-								   CUdevice device,
-								   size_t nitems,
-								   size_t dynamic_shmem_per_block,
-								   size_t dynamic_shmem_per_thread);
 
 /*
  * gpu_tasks.c

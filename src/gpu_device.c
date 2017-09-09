@@ -25,11 +25,11 @@
 #include "pg_strom.h"
 
 /* variable declarations */
-DevAttributes				   *devAttrs = NULL;
-cl_int							numDevAttrs = 0;
-cl_ulong						devComputeCapability = UINT_MAX;
-cl_ulong						devBaselineMemorySize = ULONG_MAX;
-cl_uint							devBaselineMaxThreadsPerBlock = UINT_MAX;
+DevAttributes	   *devAttrs = NULL;
+cl_int				numDevAttrs = 0;
+cl_ulong			devComputeCapability = UINT_MAX;
+cl_ulong			devBaselineMemorySize = ULONG_MAX;
+cl_uint				devBaselineMaxThreadsPerBlock = UINT_MAX;
 
 /* catalog of device attributes */
 typedef enum {
@@ -306,6 +306,144 @@ pgstrom_init_gpu_device(void)
 	pgstrom_collect_gpu_device();
 }
 
+/*
+ * optimal_workgroup_size - calculates the optimal block size
+ * according to the function and device attributes
+ */
+static __thread size_t __dynamic_shmem_per_block;
+static __thread size_t __dynamic_shmem_per_thread;
+
+static size_t
+blocksize_to_shmemsize_helper(int blocksize)
+{
+	return (__dynamic_shmem_per_block +
+			__dynamic_shmem_per_thread * (size_t)blocksize);
+}
+
+void
+optimal_workgroup_size(size_t *p_grid_size,
+					   size_t *p_block_size,
+					   CUfunction function,
+					   CUdevice device,
+					   size_t nitems,
+					   size_t dynamic_shmem_per_block,
+					   size_t dynamic_shmem_per_thread)
+{
+	cl_int		min_grid_sz;
+	cl_int		max_block_sz;
+	cl_int		warpSize;
+	CUresult	rc;
+
+	rc = cuDeviceGetAttribute(&warpSize,
+							  CU_DEVICE_ATTRIBUTE_WARP_SIZE,
+							  device);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
+
+	__dynamic_shmem_per_block = dynamic_shmem_per_block;
+	__dynamic_shmem_per_thread = dynamic_shmem_per_thread;
+	rc = cuOccupancyMaxPotentialBlockSize(&min_grid_sz,
+										  &max_block_sz,
+										  function,
+										  blocksize_to_shmemsize_helper,
+										  0,
+										  Min((size_t)nitems,
+											  (size_t)INT_MAX));
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuOccupancyMaxPotentialBlockSize: %s",
+			 errorText(rc));
+
+	if ((size_t)max_block_sz * (size_t)INT_MAX < nitems)
+		elog(ERROR, "to large nitems (%zu) to launch kernel (blockSz=%d)",
+			 nitems, max_block_sz);
+
+	*p_block_size = (size_t)max_block_sz;
+	*p_grid_size  = (nitems + (size_t)max_block_sz - 1) / (size_t)max_block_sz;
+}
+
+/*
+ * largest_workgroup_size - calculate the block size maximum available
+ */
+void
+largest_workgroup_size(size_t *p_grid_size,
+					   size_t *p_block_size,
+					   CUfunction function,
+					   CUdevice device,
+					   size_t nitems,
+					   size_t dynamic_shmem_per_block,
+					   size_t dynamic_shmem_per_thread)
+{
+	cl_int		warpSize;
+	cl_int		maxBlockSize;
+	cl_int		staticShmemSize;
+	cl_int		maxShmemSize;
+	cl_int		shmemSizeTotal;
+	CUresult	rc;
+
+	/* get max number of thread per block on this kernel function */
+	rc = cuFuncGetAttribute(&maxBlockSize,
+							CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK,
+							function);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
+
+	/* get statically allocated shared memory */
+	rc = cuFuncGetAttribute(&staticShmemSize,
+							CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES,
+							function);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
+
+	/* get device warp size */
+	rc = cuDeviceGetAttribute(&warpSize,
+							  CU_DEVICE_ATTRIBUTE_WARP_SIZE,
+							  device);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
+
+	/* get device limit of thread/block ratio */
+	rc = cuDeviceGetAttribute(&maxShmemSize,
+							  CU_DEVICE_ATTRIBUTE_SHARED_MEMORY_PER_BLOCK,
+							  device);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
+
+	/* only shared memory consumption is what we have to control */
+	shmemSizeTotal = (staticShmemSize +
+					  dynamic_shmem_per_block +
+					  dynamic_shmem_per_thread * maxBlockSize);
+	if (shmemSizeTotal > maxShmemSize)
+	{
+		if (dynamic_shmem_per_thread > 0 &&
+			staticShmemSize +
+			dynamic_shmem_per_block +
+			dynamic_shmem_per_thread * warpSize <= maxShmemSize)
+		{
+			maxBlockSize = (maxShmemSize -
+							staticShmemSize -
+							dynamic_shmem_per_block)/dynamic_shmem_per_thread;
+			maxBlockSize = (maxBlockSize / warpSize) * warpSize;
+		}
+		else
+			elog(ERROR,
+				 "too large fixed amount of shared memory consumption: "
+				 "static: %d, dynamic-per-block: %zu, dynamic-per-thread: %zu",
+				 staticShmemSize,
+				 dynamic_shmem_per_block,
+				 dynamic_shmem_per_thread);
+	}
+
+	if ((size_t)maxBlockSize * (size_t)INT_MAX < nitems)
+		elog(ERROR, "to large nitems (%zu) to launch kernel (blockSz=%d)",
+			 nitems, maxBlockSize);
+
+	*p_block_size = (size_t)maxBlockSize;
+	*p_grid_size = (nitems + maxBlockSize - 1) / maxBlockSize;
+}
+
+/*
+ * pgstrom_device_info - SQL function to dump device info
+ */
 Datum
 pgstrom_device_info(PG_FUNCTION_ARGS)
 {

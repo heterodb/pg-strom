@@ -478,22 +478,18 @@ _PG_init(void)
 	pgstrom_init_gpu_mmgr();
 	pgstrom_init_dma_buffer();
 	pgstrom_init_gpu_context();
-
-	pgstrom_init_gpu_server();
-	pgstrom_init_nvme_strom();
-
-	/* init NVRTC (run-time compiler) stuff */
 	pgstrom_init_cuda_program();
+	pgstrom_init_nvme_strom();
 
 	/* registration of custom-scan providers */
 	pgstrom_init_gputasks();
 	pgstrom_init_gpuscan();
-	pgstrom_init_gpujoin();
-	pgstrom_init_gpupreagg();
+//	pgstrom_init_gpujoin();
+//	pgstrom_init_gpupreagg();
 
 	/* miscellaneous initializations */
 	pgstrom_init_codegen();
-	pgstrom_init_plcuda();
+//	pgstrom_init_plcuda();
 
 	/* dummy custom-scan node */
 	memset(&pgstrom_dummy_path_methods, 0, sizeof(CustomPathMethods));

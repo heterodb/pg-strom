@@ -585,22 +585,26 @@ pgstromProcessGpuTask(GpuTask *gtask, CUmodule cuda_module)
 {
 	int		retval;
 
-	/* should be called under multi-threading mode */
-	Assert(IsGpuServerProcess() < 0);
+	Assert(GpuWorkerCurrentContext != NULL &&
+		   GpuWorkerCurrentContext == gtask->gts->gcontext);
 
 	switch (gtask->task_kind)
 	{
 		case GpuTaskKind_GpuScan:
-			retval = gpuscan_process_task(gtask, cuda_module);
+			retval = gpuscan_process_task(GpuWorkerCurrentContext,
+										  gtask, cuda_module);
 			break;
 		case GpuTaskKind_GpuJoin:
-			retval = gpujoin_process_task(gtask, cuda_module);
+			retval = gpujoin_process_task(GpuWorkerCurrentContext,
+										  gtask, cuda_module);
 			break;
 		case GpuTaskKind_GpuPreAgg:
-			retval = gpupreagg_process_task(gtask, cuda_module);
+			retval = gpupreagg_process_task(GpuWorkerCurrentContext,
+											gtask, cuda_module);
 			break;
 		case GpuTaskKind_PL_CUDA:
-			retval = plcuda_process_task(gtask, cuda_module);
+			retval = plcuda_process_task(GpuWorkerCurrentContext,
+										 gtask, cuda_module);
 			break;
 		default:
 			elog(ERROR, "Unknown GpuTask kind: %d", gtask->task_kind);
