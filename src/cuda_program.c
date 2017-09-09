@@ -896,7 +896,7 @@ pgstrom_try_build_cuda_program(void)
 	dlist_node	   *dnode;
 	program_cache_entry *entry;
 
-	Assert(IsGpuServerProcess());
+	Assert(GpuWorkerCurrentContext != NULL);
 
 	/* Is there any pending CUDA program? */
 	SpinLockAcquire(&pgcache_head->lock);
@@ -967,9 +967,6 @@ pgstrom_create_cuda_program(GpuContext *gcontext,
 	int			hindex;
 	dlist_iter	iter;
 	pg_crc32	crc;
-
-	/* Only backend server can create CUDA program entry */
-	Assert(!IsGpuServerProcess());
 
 	/* makes a hash value */
 	INIT_LEGACY_CRC32(crc);

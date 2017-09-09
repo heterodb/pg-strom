@@ -476,7 +476,6 @@ _PG_init(void)
 	pgstrom_init_misc_guc();
 	pgstrom_init_gpu_device();
 	pgstrom_init_gpu_mmgr();
-	pgstrom_init_dma_buffer();
 	pgstrom_init_gpu_context();
 	pgstrom_init_cuda_program();
 	pgstrom_init_nvme_strom();

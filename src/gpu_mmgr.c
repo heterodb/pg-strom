@@ -16,12 +16,17 @@
  * GNU General Public License for more details.
  */
 #include "postgres.h"
+#include "commands/tablespace.h"
 #include "postmaster/bgworker.h"
+#include "storage/bufmgr.h"
 #include "storage/ipc.h"
 #include "storage/latch.h"
 #include "utils/guc.h"
+#include "utils/inval.h"
 #include "utils/memutils.h"
 #include "utils/pg_crc.h"
+#include "utils/rel.h"
+#include "utils/syscache.h"
 #include "pg_strom.h"
 #include <sys/ioctl.h>
 
@@ -1057,6 +1062,308 @@ pgstrom_gpu_mmgr_cleanup_gpucontext(GpuContext *gcontext)
 	}
 }
 
+/* ----------------------------------------------------------------
+ *
+ * APIs for SSD-to-GPU Direct DMA
+ *
+ * ---------------------------------------------------------------- */
+
+/*
+ * gpuMemCopyFromSSDWaitRaw
+ */
+static void
+gpuMemCopyFromSSDWaitRaw(unsigned long dma_task_id)
+{
+	StromCmd__MemCopyWait cmd;
+
+	memset(&cmd, 0, sizeof(StromCmd__MemCopyWait));
+	cmd.dma_task_id = dma_task_id;
+
+	if (nvme_strom_ioctl(STROM_IOCTL__MEMCPY_WAIT, &cmd) != 0)
+		werror("failed on nvme_strom_ioctl(STROM_IOCTL__MEMCPY_WAIT): %m");
+}
+
+/*
+ * gpuMemCopyFromSSD - kick SSD-to-GPU Direct DMA, then wait for completion
+ */
+void
+gpuMemCopyFromSSD(GpuTask *gtask,
+				  CUdeviceptr m_kds,
+				  pgstrom_data_store *pds)
+{
+	GpuContext	   *gcontext = GpuWorkerCurrentContext;
+	StromCmd__MemCopySsdToGpu cmd;
+	GpuMemSegment  *gm_seg;
+	GpuMemSegMap   *gm_smap;
+	BlockNumber	   *block_nums;
+	void		   *block_data;
+	size_t			offset;
+	size_t			length;
+	cl_uint			nr_loaded;
+	CUresult		rc;
+
+	if (iomap_gpu_memory_size_kb == 0)
+		werror("NVMe-Strom is not configured");
+	/* ensure the @m_kds is exactly i/o mapped buffer */
+	Assert(gcontext != NULL);
+	gm_seg = lookupGpuMem(gcontext, m_kds);
+	if (!gm_seg || gm_seg->iomap_handle == 0UL)
+		werror("nvme-strom: invalid device pointer");
+	Assert(pds->kds.format == KDS_FORMAT_BLOCK);
+
+	gm_smap = &gcontext->gm_smap_array[gm_seg->segment_id];
+	if (m_kds < gm_smap->m_segment ||
+		m_kds + pds->kds.length >= gm_smap->m_segment + gm_seg->segment_sz)
+		werror("nvme-strom: P2P DMA destination out of range");
+	offset = m_kds - gm_smap->m_segment;
+
+	/* nothing special if all the blocks are already loaded */
+	if (pds->nblocks_uncached == 0)
+	{
+		rc = cuMemcpyHtoDAsync(m_kds,
+							   &pds->kds,
+							   pds->kds.length,
+							   CU_STREAM_PER_THREAD);
+		if (rc != CUDA_SUCCESS)
+			werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+		return;
+	}
+	Assert(pds->nblocks_uncached <= pds->kds.nitems);
+	nr_loaded = pds->kds.nitems - pds->nblocks_uncached;
+	length = ((char *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds, nr_loaded) -
+			  (char *)(&pds->kds));
+	offset += length;
+
+	/* userspace pointers */
+	block_nums = (BlockNumber *)KERN_DATA_STORE_BODY(&pds->kds) + nr_loaded;
+	block_data = KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds, nr_loaded);
+
+	/* setup ioctl(2) command */
+	memset(&cmd, 0, sizeof(StromCmd__MemCopySsdToGpu));
+	cmd.handle		= gm_seg->iomap_handle;
+	cmd.offset		= offset;
+	cmd.file_desc	= gtask->file_desc;
+	cmd.nr_chunks	= pds->nblocks_uncached;
+	cmd.chunk_sz	= BLCKSZ;
+	cmd.relseg_sz	= RELSEG_SIZE;
+	cmd.chunk_ids	= block_nums;
+	cmd.wb_buffer	= block_data;
+
+	/* (1) kick SSD2GPU P2P DMA */
+	if (nvme_strom_ioctl(STROM_IOCTL__MEMCPY_SSD2GPU, &cmd) != 0)
+		werror("failed on STROM_IOCTL__MEMCPY_SSD2GPU: %m");
+
+	/* (2) kick RAM2GPU DMA (earlier half) */
+	rc = cuMemcpyHtoDAsync(m_kds,
+						   &pds->kds,
+						   length,
+						   CU_STREAM_PER_THREAD);
+	if (rc != CUDA_SUCCESS)
+	{
+		gpuMemCopyFromSSDWaitRaw(cmd.dma_task_id);
+		werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+	}
+
+	/* (3) kick RAM2GPU DMA (later half; if any) */
+	if (cmd.nr_ram2gpu > 0)
+	{
+		length = BLCKSZ * cmd.nr_ram2gpu;
+		offset = ((char *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds,
+													   pds->kds.nitems) -
+				  (char *)&pds->kds) - length;
+		rc = cuMemcpyHtoDAsync(m_kds + offset,
+							   (char *)&pds->kds + offset,
+							   length,
+							   CU_STREAM_PER_THREAD);
+		if (rc != CUDA_SUCCESS)
+		{
+			gpuMemCopyFromSSDWaitRaw(cmd.dma_task_id);
+			werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+		}
+	}
+	/* (4) wait for completion of SSD2GPU P2P DMA */
+	gpuMemCopyFromSSDWaitRaw(cmd.dma_task_id);
+}
+
+/*
+ * TablespaceCanUseNvmeStrom
+ */
+typedef struct
+{
+	Oid		tablespace_oid;
+	bool	nvme_strom_supported;
+} vfs_nvme_status;
+
+static bool		debug_force_nvme_strom;	/* GUC */
+static bool		nvme_strom_enabled;		/* GUC */
+static HTAB	   *vfs_nvme_htable = NULL;
+static Oid		nvme_last_tablespace_oid = InvalidOid;
+static bool		nvme_last_tablespace_supported;
+static long		nvme_strom_threshold;
+static long		sysconf_pagesize;		/* _SC_PAGESIZE */
+static long		sysconf_phys_pages;		/* _SC_PHYS_PAGES */
+
+static void
+vfs_nvme_cache_callback(Datum arg, int cacheid, uint32 hashvalue)
+{
+	/* invalidate all the cached status */
+	if (vfs_nvme_htable)
+	{
+		hash_destroy(vfs_nvme_htable);
+		vfs_nvme_htable = NULL;
+		nvme_last_tablespace_oid = InvalidOid;
+	}
+}
+
+static bool
+TablespaceCanUseNvmeStrom(Oid tablespace_oid)
+{
+	vfs_nvme_status *entry;
+	const char *pathname;
+	int			fdesc;
+	bool		found;
+
+	if (iomap_gpu_memory_size_kb == 0 || !nvme_strom_enabled)
+		return false;	/* NVMe-Strom is not configured or enabled */
+
+	if (!OidIsValid(tablespace_oid))
+		tablespace_oid = MyDatabaseTableSpace;
+
+	/* quick lookup but sufficient for more than 99.99% cases */
+	if (OidIsValid(nvme_last_tablespace_oid) &&
+		nvme_last_tablespace_oid == tablespace_oid)
+		return nvme_last_tablespace_supported;
+
+	if (!vfs_nvme_htable)
+	{
+		HASHCTL		ctl;
+
+		memset(&ctl, 0, sizeof(HASHCTL));
+		ctl.keysize = sizeof(Oid);
+		ctl.entrysize = sizeof(vfs_nvme_status);
+		vfs_nvme_htable = hash_create("VFS:NVMe-Strom status", 64,
+									  &ctl, HASH_ELEM | HASH_BLOBS);
+		CacheRegisterSyscacheCallback(TABLESPACEOID,
+									  vfs_nvme_cache_callback, (Datum) 0);
+	}
+	entry = (vfs_nvme_status *) hash_search(vfs_nvme_htable,
+											&tablespace_oid,
+											HASH_ENTER,
+											&found);
+	if (found)
+	{
+		nvme_last_tablespace_oid = tablespace_oid;
+		nvme_last_tablespace_supported = entry->nvme_strom_supported;
+		return entry->nvme_strom_supported;
+	}
+
+	/* check whether the tablespace is supported */
+	entry->tablespace_oid = tablespace_oid;
+	entry->nvme_strom_supported = false;
+
+	pathname = GetDatabasePath(MyDatabaseId, tablespace_oid);
+	fdesc = open(pathname, O_RDONLY | O_DIRECTORY);
+	if (fdesc < 0)
+	{
+		elog(WARNING, "failed to open \"%s\" of tablespace \"%s\": %m",
+			 pathname, get_tablespace_name(tablespace_oid));
+	}
+	else
+	{
+		StromCmd__CheckFile cmd;
+
+		cmd.fdesc = fdesc;
+		if (nvme_strom_ioctl(STROM_IOCTL__CHECK_FILE, &cmd) == 0)
+			entry->nvme_strom_supported = true;
+		else
+		{
+			ereport(NOTICE,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("nvme_strom does not support tablespace \"%s\"",
+							get_tablespace_name(tablespace_oid))));
+		}
+	}
+	nvme_last_tablespace_oid = tablespace_oid;
+	nvme_last_tablespace_supported = entry->nvme_strom_supported;
+	return entry->nvme_strom_supported;
+}
+
+bool
+RelationCanUseNvmeStrom(Relation relation)
+{
+	Oid		tablespace_oid = RelationGetForm(relation)->reltablespace;
+	/* SSD2GPU on temp relation is not supported */
+	if (RelationUsesLocalBuffers(relation))
+		return false;
+	return TablespaceCanUseNvmeStrom(tablespace_oid);
+}
+
+/*
+ * RelationWillUseNvmeStrom
+ */
+bool
+RelationWillUseNvmeStrom(Relation relation, BlockNumber *p_nr_blocks)
+{
+	BlockNumber		nr_blocks;
+
+	/* at least, storage must support NVMe-Strom */
+	if (!RelationCanUseNvmeStrom(relation))
+		return false;
+
+	/*
+	 * NOTE: RelationGetNumberOfBlocks() has a significant but helpful
+	 * side-effect. It opens all the underlying files of MAIN_FORKNUM,
+	 * then set @rd_smgr of the relation.
+	 * It allows extension to touch file descriptors without invocation of
+	 * ReadBuffer().
+	 */
+	nr_blocks = RelationGetNumberOfBlocks(relation);
+	if (!debug_force_nvme_strom &&
+		nr_blocks < nvme_strom_threshold)
+		return false;
+
+	/*
+	 * ok, it looks to me NVMe-Strom is supported, and relation size is
+	 * reasonably large to run with SSD-to-GPU Direct mode.
+	 */
+	if (p_nr_blocks)
+		*p_nr_blocks = nr_blocks;
+	return true;
+}
+
+/*
+ * ScanPathWillUseNvmeStrom - Optimizer Hint
+ */
+bool
+ScanPathWillUseNvmeStrom(PlannerInfo *root, RelOptInfo *baserel)
+{
+	RangeTblEntry *rte;
+	HeapTuple	tuple;
+	bool		relpersistence;
+
+	if (!TablespaceCanUseNvmeStrom(baserel->reltablespace))
+		return false;
+
+	/* unable to apply NVMe-Strom on temporay tables */
+	rte = root->simple_rte_array[baserel->relid];
+	tuple = SearchSysCache1(RELOID, ObjectIdGetDatum(rte->relid));
+	if (!HeapTupleIsValid(tuple))
+		elog(ERROR, "cache lookup failed for relation %u", rte->relid);
+	relpersistence = ((Form_pg_class) GETSTRUCT(tuple))->relpersistence;
+	ReleaseSysCache(tuple);
+
+	if (relpersistence != RELPERSISTENCE_PERMANENT &&
+		relpersistence != RELPERSISTENCE_UNLOGGED)
+		return false;
+
+	/* Is number of blocks sufficient to NVMe-Strom? */
+	if (!debug_force_nvme_strom && baserel->pages < nvme_strom_threshold)
+		return false;
+
+	/* ok, this table scan can use nvme-strom */
+	return true;
+}
+
 /*
  * pgstrom_startup_gpu_mmgr
  */
@@ -1142,6 +1449,7 @@ void
 pgstrom_init_gpu_mmgr(void)
 {
 	BackgroundWorker worker;
+	Size		shared_buffer_size = (Size)NBuffers * (Size)BLCKSZ;
 	Size		length;
 	Size		required;
 	size_t		nchunks;
@@ -1196,6 +1504,45 @@ pgstrom_init_gpu_mmgr(void)
 	if ((length & (GPUMEM_CHUNKSZ_MIN - 1)) != 0)
 		elog(ERROR, "pg_strom.gpu_memory_iomap_size must be multiple number of %zukB", (size_t)(GPUMEM_CHUNKSZ_MIN >> 10));
 	nchunks_iomap = length >> GPUMEM_CHUNKSZ_MIN_BIT;
+
+	/* pg_strom.nvme_strom_enabled */
+	DefineCustomBoolVariable("pg_strom.nvme_strom_enabled",
+							 "Turn on/off SSD-to-GPU P2P DMA",
+							 NULL,
+							 &nvme_strom_enabled,
+							 true,
+							 PGC_SUSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+
+	/* pg_strom.debug_force_nvme_strom */
+	DefineCustomBoolVariable("pg_strom.debug_force_nvme_strom",
+							 "(DEBUG) force to use raw block scan mode",
+							 NULL,
+							 &debug_force_nvme_strom,
+							 false,
+							 PGC_SUSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	/*
+	 * MEMO: Threshold of table's physical size to use NVMe-Strom:
+	 *   ((System RAM size) -
+	 *    (shared_buffer size)) * 0.67 + (shared_buffer size)
+	 *
+	 * If table size is enough large to issue real i/o, NVMe-Strom will
+	 * make advantage by higher i/o performance.
+	 */
+	sysconf_pagesize = sysconf(_SC_PAGESIZE);
+	if (sysconf_pagesize < 0)
+		elog(ERROR, "failed on sysconf(_SC_PAGESIZE): %m");
+	sysconf_phys_pages = sysconf(_SC_PHYS_PAGES);
+	if (sysconf_phys_pages < 0)
+		elog(ERROR, "failed on sysconf(_SC_PHYS_PAGES): %m");
+	if (sysconf_pagesize * sysconf_phys_pages < shared_buffer_size)
+		elog(ERROR, "Bug? shared_buffer is larger than system RAM");
+	nvme_strom_threshold = ((sysconf_pagesize * sysconf_phys_pages -
+							 shared_buffer_size) * 2 / 3 +
+							shared_buffer_size) / BLCKSZ;
 
 	/*
 	 * request for the static shared memory

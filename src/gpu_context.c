@@ -332,13 +332,6 @@ ReleaseLocalResources(GpuContext *gcontext, bool normal_exit)
 	free(gcontext);
 }
 
-//deprecated
-GpuContext *
-MasterGpuContext(void)
-{
-	return NULL;
-}
-
 /*
  * GpuContextWorkerReportError
  */
@@ -678,13 +671,6 @@ AllocGpuContext(int cuda_dindex,
 	return gcontext;
 }
 
-//deprecated
-GpuContext *
-AttachGpuContext(pgsocket sockfd, SharedGpuContext *shgcon, int epoll_fd)
-{
-	return NULL;
-}
-
 /*
  * GetGpuContext - increment reference counter
  */
@@ -697,14 +683,6 @@ GetGpuContext(GpuContext *gcontext)
 	Assert(oldcnt > 0);
 
 	return gcontext;
-}
-
-
-//deprecated
-GpuContext *
-GetGpuContextBySockfd(pgsocket sockfd)
-{
-	return NULL;
 }
 
 /*
@@ -764,14 +742,6 @@ SynchronizeGpuContext(GpuContext *gcontext)
 	memset(gcontext->worker_threads, 0,
 		   sizeof(pthread_t) * gcontext->num_workers);
 }
-
-
-
-
-//deprecated
-void
-ForcePutAllGpuContext(void)
-{}
 
 /*
  * gpucontext_cleanup_callback - cleanup callback when drop of ResourceOwner

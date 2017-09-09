@@ -90,26 +90,6 @@
 
 #define PGSTROM_SCHEMA_NAME		"pgstrom"
 
-#if 1
-//deprecated
-/*
- * GpuContext / SharedGpuContext
- */
-typedef struct SharedGpuContext
-{
-	dlist_node	chain;
-	PGPROC	   *server;			/* PGPROC of CUDA/GPU Server */
-	PGPROC	   *backend;		/* PGPROC of Backend Process */
-	int			pg_worker_index;/* 0 if coordinator process. elsewhere,
-								 * ParallelWorkerNumber + 1 shall be set. */
-	pg_atomic_uint32 in_termination; /* true, if under termination state */
-	slock_t		lock;			/* lock of the field below */
-	cl_int		refcnt;			/* refcount by backend/gpu-server */
-	dlist_head	dma_buffer_list;/* tracker of DMA buffers */
-	cl_int		num_async_tasks;/* num of tasks passed to GPU server */
-} SharedGpuContext;
-#endif
-
 struct GpuMemSegMap;
 
 #define RESTRACK_HASHSIZE		53
@@ -118,15 +98,9 @@ typedef struct GpuContext
 {
 	dlist_node		chain;
 	pg_atomic_uint32 refcnt;
-#if 1
-	//deprecated fields
-	cl_int			gpuserv_id;	//deprecated
-	pgsocket		sockfd;		//deprecated
-	SharedGpuContext *shgcon;
-	pg_atomic_uint32 is_unlinked;
-#endif
 	ResourceOwner	resowner;
 	cl_bool			never_use_mps;
+	/* cuda resources per GpuContext */
 	cl_int			cuda_dindex;
 	CUdevice		cuda_device;
 	CUcontext		cuda_context;
@@ -463,47 +437,14 @@ extern CUresult gpuMemFree(GpuContext *gcontext,
 #define gpuMemAllocIOMap(a,b,c)				\
 	__gpuMemAllocIOMap((a),(b),(c),__FILE__,__LINE__)
 
+extern void gpuMemCopyFromSSD(GpuTask *gtask,
+							  CUdeviceptr m_kds,
+							  pgstrom_data_store *pds);
+
 extern bool pgstrom_gpu_mmgr_init_gpucontext(GpuContext *gcontext);
 extern void pgstrom_gpu_mmgr_cleanup_gpucontext(GpuContext *gcontext);
 extern void pgstrom_init_gpu_mmgr(void);
 extern Datum pgstrom_device_meminfo(PG_FUNCTION_ARGS);
-
-
-/*
- * dma_buffer.c
- */
-extern void *__dmaBufferAlloc(GpuContext *gcontext, Size required,
-							  const char *filename, int lineno);
-extern void *__dmaBufferRealloc(void *pointer, Size required,
-								const char *filename, int lineno);
-extern bool dmaBufferValidatePtr(void *pointer);
-extern Size dmaBufferSize(void *pointer);
-extern Size dmaBufferChunkSize(void *pointer);
-extern void __dmaBufferFree(void *pointer,
-							const char *filename, int lineno);
-extern void __dmaBufferFreeAll(SharedGpuContext *shgcon,
-							   const char *filename, int lineno);
-extern Size dmaBufferMaxAllocSize(void);
-extern Datum pgstrom_dma_buffer_alloc(PG_FUNCTION_ARGS);
-extern Datum pgstrom_dma_buffer_free(PG_FUNCTION_ARGS);
-extern Datum pgstrom_dma_buffer_info(PG_FUNCTION_ARGS);
-extern void pgstrom_init_dma_buffer(void);
-
-#define dmaBufferAlloc(gcontext,required)		\
-	__dmaBufferAlloc((gcontext),(required),__FILE__,__LINE__)
-#define dmaBufferRealloc(pointer,required)		\
-	__dmaBufferRealloc((pointer),(required),__FILE__,__LINE__)
-#define dmaBufferFree(pointer)					\
-	__dmaBufferFree((pointer),__FILE__,__LINE__)
-#define dmaBufferFreeAll(shgcon)				\
-	__dmaBufferFreeAll((shgcon),__FILE__,__LINE__)
-
-/* stub */
-static inline CUresult
-gpuMemRetain(GpuContext *gcontext, CUdeviceptr devptr)
-{
-	return CUDA_SUCCESS;
-}
 
 /*
  * gpu_context.c
@@ -533,13 +474,6 @@ extern GpuContext *AllocGpuContext(int cuda_dindex,
 extern GpuContext *GetGpuContext(GpuContext *gcontext);
 extern void PutGpuContext(GpuContext *gcontext);
 extern void SynchronizeGpuContext(GpuContext *gcontext);
-
-extern GpuContext *MasterGpuContext(void);		//deprecated
-extern GpuContext *AttachGpuContext(pgsocket sockfd,
-									SharedGpuContext *shgcon,
-									int epoll_fd); //deprecated
-extern GpuContext *GetGpuContextBySockfd(pgsocket sockfd); //deprecated
-extern void ForcePutAllGpuContext(void); //deprecated
 
 extern bool trackCudaProgram(GpuContext *gcontext, ProgramId program_id);
 extern void untrackCudaProgram(GpuContext *gcontext, ProgramId program_id);
@@ -773,6 +707,12 @@ extern bool PDS_insert_hashitem(pgstrom_data_store *pds,
 								TupleTableSlot *slot,
 								cl_uint hash_value);
 extern void PDS_build_hashtable(pgstrom_data_store *pds);
+
+extern bool ScanPathWillUseNvmeStrom(PlannerInfo *root, RelOptInfo *baserel);
+extern bool RelationCanUseNvmeStrom(Relation relation);
+extern bool RelationWillUseNvmeStrom(Relation relation,
+									 BlockNumber *p_nr_blocks);
+
 extern void pgstrom_datastore_cleanup_gpucontext(GpuContext *gcontext);
 extern void pgstrom_init_datastore(void);
 
@@ -782,17 +722,9 @@ extern void pgstrom_init_datastore(void);
 #include "nvme_strom.h"
 
 extern Size gpuMemSizeIOMap(void);
-extern void gpuMemCopyFromSSD(GpuTask *gtask,
-							  CUdeviceptr m_kds,
-							  pgstrom_data_store *pds);
 extern void dump_iomap_buffer_info(void);
 extern Datum pgstrom_iomap_buffer_info(PG_FUNCTION_ARGS);
 extern void pgstrom_init_nvme_strom(void);
-
-extern bool ScanPathWillUseNvmeStrom(PlannerInfo *root, RelOptInfo *baserel);
-extern bool RelationCanUseNvmeStrom(Relation relation);
-extern bool RelationWillUseNvmeStrom(Relation relation,
-									 BlockNumber *p_nr_blocks);
 
 /*
  * gpuscan.c
