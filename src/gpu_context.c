@@ -665,6 +665,11 @@ AllocGpuContext(int cuda_dindex,
 	gcontext->num_running_tasks = 0;
 	dlist_init(&gcontext->pending_tasks);
 	dlist_init(&gcontext->completed_tasks);
+
+	SpinLockAcquire(&activeGpuContextLock);
+	dlist_push_head(&activeGpuContextList, &gcontext->chain);
+	SpinLockRelease(&activeGpuContextLock);
+
 	if (with_activation)
 		ActivateGpuContext(gcontext);
 
