@@ -120,6 +120,9 @@ static GpuMemSystemHead *gm_shead = NULL;
 static int			gpu_memory_segment_size_kb;	/* GUC */
 static int			num_gpu_memory_segments;	/* GUC */
 static int			iomap_gpu_memory_size_kb;	/* GUC */
+static bool			debug_force_nvme_strom;		/* GUC */
+static bool			nvme_strom_enabled;			/* GUC */
+static long			nvme_strom_threshold;
 
 static bool			gpu_mmgr_got_sigterm = false;
 static int			gpu_mmgr_cuda_dindex = -1;
@@ -972,7 +975,7 @@ gpu_mmgr_bgworker_main(Datum bgworker_arg)
 			elog(ERROR, "failed on allocation of I/O map memory: %s",
 				 errorText(rc));
 
-		elog(LOG, "I/O mapped memory %p-%p at GPU%u [%s]",
+		elog(LOG, "I/O mapped memory %p-%p for GPU%u [%s]",
 			 (void *)(gm_seg->m_segment),
 			 (void *)(gm_seg->m_segment + gm_seg->segment_sz - 1),
 			 gpu_mmgr_cuda_dindex,
@@ -1059,6 +1062,220 @@ pgstrom_gpu_mmgr_cleanup_gpucontext(GpuContext *gcontext)
 		if (rc != CUDA_SUCCESS)
 			elog(NOTICE, "failed on cuIpcCloseMemHandle: %s", errorText(rc));
 		pg_atomic_sub_fetch_u32(&gm_smap->gm_seg->mapcount, 1);
+	}
+}
+
+/*
+ * pgstrom_startup_gpu_mmgr
+ */
+static void
+pgstrom_startup_gpu_mmgr(void)
+{
+	GpuMemSegment *gm_seg;
+	Size	nchunks1;
+	Size	nchunks2;
+	Size	head_sz;
+	Size	unitsz1;
+	Size	unitsz2;
+	Size	required;
+	bool	found;
+	int		i, j = 0;
+
+	if (shmem_startup_next)
+		(*shmem_startup_next)();
+
+	/*
+	 * GpuMemSegment (shared structure)
+	 */
+	nchunks1 = ((size_t)gpu_memory_segment_size_kb << 10) / GPUMEM_CHUNKSZ_MIN;
+	nchunks2 = ((size_t)iomap_gpu_memory_size_kb << 10) / GPUMEM_CHUNKSZ_MIN;
+	head_sz = STROMALIGN(offsetof(GpuMemSystemHead,
+								  gm_dev_array[numDevAttrs]));
+	unitsz1 = STROMALIGN(offsetof(GpuMemSegment,
+								  gm_chunks[nchunks1]));
+	unitsz2 = STROMALIGN(offsetof(GpuMemSegment,
+                                  gm_chunks[nchunks2]));
+	required = (head_sz + 
+				unitsz1 * num_gpu_memory_segments +
+				unitsz2 * numDevAttrs);
+	gm_shead = ShmemInitStruct("GPU Device Memory Management Structure",
+							   required, &found);
+	if (found)
+		elog(ERROR, "Bug? GPU Device Memory Management Structure exists");
+	memset(gm_shead, 0, required);
+
+	SpinLockInit(&gm_shead->lock);
+	dlist_init(&gm_shead->free_segment_list);
+	for (i=0; i < numDevAttrs; i++)
+	{
+		GpuMemDevice *gm_dev = &gm_shead->gm_dev_array[i];
+
+		pthreadMutexInit(&gm_dev->mutex);
+		pthreadCondInit(&gm_dev->cond);
+		pthreadRWLockInit(&gm_dev->rwlock);
+		dlist_init(&gm_dev->normal_segment_list);
+		dlist_init(&gm_dev->managed_segment_list);
+		dlist_init(&gm_dev->iomap_segment_list);
+	}
+
+	gm_seg = (GpuMemSegment *)((char *)gm_shead + head_sz);
+	for (i=0; i < num_gpu_memory_segments; i++)
+	{
+		gm_seg->segment_id	= j++;
+		gm_seg->segment_sz	= (size_t)nchunks1 << GPUMEM_CHUNKSZ_MIN_BIT;
+		dlist_push_tail(&gm_shead->free_segment_list,
+						&gm_seg->chain);
+		gm_seg = (GpuMemSegment *)((char *)gm_seg + unitsz1);
+	}
+
+	if (iomap_gpu_memory_size_kb > 0)
+	{
+		for (i=0; i < numDevAttrs; i++)
+		{
+			GpuMemDevice *gm_dev = &gm_shead->gm_dev_array[i];
+
+			gm_seg->segment_id	= j++;
+			gm_seg->segment_sz	= (size_t)nchunks2 << GPUMEM_CHUNKSZ_MIN_BIT;
+			dlist_push_tail(&gm_dev->iomap_segment_list,
+							&gm_seg->chain);
+			gm_seg = (GpuMemSegment *)((char *)gm_seg + unitsz2);
+		}
+	}
+}
+
+/*
+ * pgstrom_init_gpu_mmgr
+ */
+void
+pgstrom_init_gpu_mmgr(void)
+{
+	BackgroundWorker worker;
+	long		sysconf_pagesize;		/* _SC_PAGESIZE */
+	long		sysconf_phys_pages;		/* _SC_PHYS_PAGES */
+	Size		shared_buffer_size = (Size)NBuffers * (Size)BLCKSZ;
+	Size		length;
+	Size		required;
+	size_t		nchunks;
+	size_t		nchunks_iomap;
+	int			i;
+
+	/*
+	 * segment size of the device memory in kB
+	 */
+	DefineCustomIntVariable("pg_strom.gpu_memory_segment_size",
+							"default size of the GPU device memory segment",
+							NULL,
+							&gpu_memory_segment_size_kb,
+							(1UL << 20),	/* 1GB */
+							(1UL << 17),	/* 128MB */
+							GPUMEM_CHUNKSZ_MAX >> 10,
+							PGC_POSTMASTER,
+							GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
+							NULL, NULL, NULL);
+	length = (size_t)gpu_memory_segment_size_kb << 10;
+	if ((length & (GPUMEM_CHUNKSZ_MIN - 1)) != 0)
+		elog(ERROR, "pg_strom.gpu_memory_segment_size must be multiple number of %zukB", (size_t)(GPUMEM_CHUNKSZ_MIN >> 10));
+	nchunks = length >> GPUMEM_CHUNKSZ_MIN_BIT;
+
+	/*
+	 * total number of device memory segments
+	 */
+	DefineCustomIntVariable("pg_strom.gpu_memory_num_segments",
+							"number of the GPU device memory segments",
+							NULL,
+							&num_gpu_memory_segments,
+							512 * Max(numDevAttrs, 1),
+							32,
+							INT_MAX,
+							PGC_POSTMASTER,
+							GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
+							NULL, NULL, NULL);
+	/*
+	 * size of the i/o mapped device memory (for NVMe-Strom)
+	 */
+	DefineCustomIntVariable("pg_strom.gpu_memory_iomap_size",
+							"size of I/O mapped GPU device memory",
+							NULL,
+							&iomap_gpu_memory_size_kb,
+							0,
+							0,
+							GPUMEM_CHUNKSZ_MAX >> 10,
+							PGC_POSTMASTER,
+							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
+							NULL, NULL, NULL);
+	length = (size_t)iomap_gpu_memory_size_kb << 10;
+	if ((length & (GPUMEM_CHUNKSZ_MIN - 1)) != 0)
+		elog(ERROR, "pg_strom.gpu_memory_iomap_size must be multiple number of %zukB", (size_t)(GPUMEM_CHUNKSZ_MIN >> 10));
+	nchunks_iomap = length >> GPUMEM_CHUNKSZ_MIN_BIT;
+
+	/* pg_strom.nvme_strom_enabled */
+	DefineCustomBoolVariable("pg_strom.nvme_strom_enabled",
+							 "Turn on/off SSD-to-GPU P2P DMA",
+							 NULL,
+							 &nvme_strom_enabled,
+							 true,
+							 PGC_SUSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+
+	/* pg_strom.debug_force_nvme_strom */
+	DefineCustomBoolVariable("pg_strom.debug_force_nvme_strom",
+							 "(DEBUG) force to use raw block scan mode",
+							 NULL,
+							 &debug_force_nvme_strom,
+							 false,
+							 PGC_SUSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	/*
+	 * MEMO: Threshold of table's physical size to use NVMe-Strom:
+	 *   ((System RAM size) -
+	 *    (shared_buffer size)) * 0.67 + (shared_buffer size)
+	 *
+	 * If table size is enough large to issue real i/o, NVMe-Strom will
+	 * make advantage by higher i/o performance.
+	 */
+	sysconf_pagesize = sysconf(_SC_PAGESIZE);
+	if (sysconf_pagesize < 0)
+		elog(ERROR, "failed on sysconf(_SC_PAGESIZE): %m");
+	sysconf_phys_pages = sysconf(_SC_PHYS_PAGES);
+	if (sysconf_phys_pages < 0)
+		elog(ERROR, "failed on sysconf(_SC_PHYS_PAGES): %m");
+	if (sysconf_pagesize * sysconf_phys_pages < shared_buffer_size)
+		elog(ERROR, "Bug? shared_buffer is larger than system RAM");
+	nvme_strom_threshold = ((sysconf_pagesize * sysconf_phys_pages -
+							 shared_buffer_size) * 2 / 3 +
+							shared_buffer_size) / BLCKSZ;
+
+	/*
+	 * request for the static shared memory
+	 */
+	required = STROMALIGN(offsetof(GpuMemSystemHead,
+								   gm_dev_array[numDevAttrs])) +
+		STROMALIGN(offsetof(GpuMemSegment,
+							gm_chunks[nchunks])) * num_gpu_memory_segments +
+		STROMALIGN(offsetof(GpuMemSegment,
+							gm_chunks[nchunks_iomap]));
+
+	RequestAddinShmemSpace(required);
+	shmem_startup_next = shmem_startup_hook;
+	shmem_startup_hook = pgstrom_startup_gpu_mmgr;
+
+	/*
+	 * setup a background server process for memory management
+	 */
+	for (i=0; i < numDevAttrs; i++)
+	{
+		memset(&worker, 0, sizeof(BackgroundWorker));
+		snprintf(worker.bgw_name, sizeof(worker.bgw_name),
+				 "GPU Mmgr%d [%s]", i, devAttrs[i].DEV_NAME);
+
+		worker.bgw_flags = BGWORKER_SHMEM_ACCESS;
+		worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
+		worker.bgw_restart_time = 1;
+		worker.bgw_main = gpu_mmgr_bgworker_main;
+		worker.bgw_main_arg = Int32GetDatum(i);
+		RegisterBackgroundWorker(&worker);
 	}
 }
 
@@ -1194,14 +1411,9 @@ typedef struct
 	bool	nvme_strom_supported;
 } vfs_nvme_status;
 
-static bool		debug_force_nvme_strom;	/* GUC */
-static bool		nvme_strom_enabled;		/* GUC */
 static HTAB	   *vfs_nvme_htable = NULL;
 static Oid		nvme_last_tablespace_oid = InvalidOid;
 static bool		nvme_last_tablespace_supported;
-static long		nvme_strom_threshold;
-static long		sysconf_pagesize;		/* _SC_PAGESIZE */
-static long		sysconf_phys_pages;		/* _SC_PHYS_PAGES */
 
 static void
 vfs_nvme_cache_callback(Datum arg, int cacheid, uint32 hashvalue)
@@ -1362,216 +1574,4 @@ ScanPathWillUseNvmeStrom(PlannerInfo *root, RelOptInfo *baserel)
 
 	/* ok, this table scan can use nvme-strom */
 	return true;
-}
-
-/*
- * pgstrom_startup_gpu_mmgr
- */
-static void
-pgstrom_startup_gpu_mmgr(void)
-{
-	GpuMemSegment *gm_seg;
-	Size	nchunks1;
-	Size	nchunks2;
-	Size	head_sz;
-	Size	unitsz1;
-	Size	unitsz2;
-	Size	required;
-	bool	found;
-	int		i, j = 0;
-
-	if (shmem_startup_next)
-		(*shmem_startup_next)();
-
-	/*
-	 * GpuMemSegment (shared structure)
-	 */
-	nchunks1 = ((size_t)gpu_memory_segment_size_kb << 10) / GPUMEM_CHUNKSZ_MIN;
-	nchunks2 = ((size_t)iomap_gpu_memory_size_kb << 10) / GPUMEM_CHUNKSZ_MIN;
-	head_sz = STROMALIGN(offsetof(GpuMemSystemHead,
-								  gm_dev_array[numDevAttrs]));
-	unitsz1 = STROMALIGN(offsetof(GpuMemSegment,
-								  gm_chunks[nchunks1]));
-	unitsz2 = STROMALIGN(offsetof(GpuMemSegment,
-                                  gm_chunks[nchunks2]));
-	required = (head_sz + 
-				unitsz1 * num_gpu_memory_segments +
-				unitsz2 * numDevAttrs);
-	gm_shead = ShmemInitStruct("GPU Device Memory Management Structure",
-							   required, &found);
-	if (found)
-		elog(ERROR, "Bug? GPU Device Memory Management Structure exists");
-	memset(gm_shead, 0, required);
-
-	SpinLockInit(&gm_shead->lock);
-	dlist_init(&gm_shead->free_segment_list);
-	for (i=0; i < numDevAttrs; i++)
-	{
-		GpuMemDevice *gm_dev = &gm_shead->gm_dev_array[i];
-
-		pthreadMutexInit(&gm_dev->mutex);
-		pthreadCondInit(&gm_dev->cond);
-		pthreadRWLockInit(&gm_dev->rwlock);
-		dlist_init(&gm_dev->normal_segment_list);
-		dlist_init(&gm_dev->managed_segment_list);
-		dlist_init(&gm_dev->iomap_segment_list);
-	}
-
-	gm_seg = (GpuMemSegment *)((char *)gm_shead + head_sz);
-	for (i=0; i < num_gpu_memory_segments; i++)
-	{
-		gm_seg->segment_id	= j++;
-		gm_seg->segment_sz	= (size_t)nchunks1 << GPUMEM_CHUNKSZ_MIN_BIT;
-		dlist_push_tail(&gm_shead->free_segment_list,
-						&gm_seg->chain);
-		gm_seg = (GpuMemSegment *)((char *)gm_seg + unitsz1);
-	}
-
-	if (iomap_gpu_memory_size_kb > 0)
-	{
-		for (i=0; i < numDevAttrs; i++)
-		{
-			GpuMemDevice *gm_dev = &gm_shead->gm_dev_array[i];
-
-			gm_seg->segment_id	= j++;
-			gm_seg->segment_sz	= (size_t)nchunks2 << GPUMEM_CHUNKSZ_MIN_BIT;
-			dlist_push_tail(&gm_dev->iomap_segment_list,
-							&gm_seg->chain);
-			gm_seg = (GpuMemSegment *)((char *)gm_seg + unitsz2);
-		}
-	}
-}
-
-/*
- * pgstrom_init_gpu_mmgr
- */
-void
-pgstrom_init_gpu_mmgr(void)
-{
-	BackgroundWorker worker;
-	Size		shared_buffer_size = (Size)NBuffers * (Size)BLCKSZ;
-	Size		length;
-	Size		required;
-	size_t		nchunks;
-	size_t		nchunks_iomap;
-	int			i;
-
-	/*
-	 * segment size of the device memory in kB
-	 */
-	DefineCustomIntVariable("pg_strom.gpu_memory_segment_size",
-							"default size of the GPU device memory segment",
-							NULL,
-							&gpu_memory_segment_size_kb,
-							(1UL << 20),	/* 1GB */
-							(1UL << 17),	/* 128MB */
-							GPUMEM_CHUNKSZ_MAX >> 10,
-							PGC_POSTMASTER,
-							GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
-							NULL, NULL, NULL);
-	length = (size_t)gpu_memory_segment_size_kb << 10;
-	if ((length & (GPUMEM_CHUNKSZ_MIN - 1)) != 0)
-		elog(ERROR, "pg_strom.gpu_memory_segment_size must be multiple number of %zukB", (size_t)(GPUMEM_CHUNKSZ_MIN >> 10));
-	nchunks = length >> GPUMEM_CHUNKSZ_MIN_BIT;
-
-	/*
-	 * total number of device memory segments
-	 */
-	DefineCustomIntVariable("pg_strom.gpu_memory_num_segments",
-							"number of the GPU device memory segments",
-							NULL,
-							&num_gpu_memory_segments,
-							512 * Max(numDevAttrs, 1),
-							32,
-							INT_MAX,
-							PGC_POSTMASTER,
-							GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
-							NULL, NULL, NULL);
-	/*
-	 * size of the i/o mapped device memory (for NVMe-Strom)
-	 */
-	DefineCustomIntVariable("pg_strom.gpu_memory_iomap_size",
-							"size of I/O mapped GPU device memory",
-							NULL,
-							&iomap_gpu_memory_size_kb,
-							0,
-							0,
-							GPUMEM_CHUNKSZ_MAX >> 10,
-							PGC_POSTMASTER,
-							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
-							NULL, NULL, NULL);
-	length = (size_t)iomap_gpu_memory_size_kb << 10;
-	if ((length & (GPUMEM_CHUNKSZ_MIN - 1)) != 0)
-		elog(ERROR, "pg_strom.gpu_memory_iomap_size must be multiple number of %zukB", (size_t)(GPUMEM_CHUNKSZ_MIN >> 10));
-	nchunks_iomap = length >> GPUMEM_CHUNKSZ_MIN_BIT;
-
-	/* pg_strom.nvme_strom_enabled */
-	DefineCustomBoolVariable("pg_strom.nvme_strom_enabled",
-							 "Turn on/off SSD-to-GPU P2P DMA",
-							 NULL,
-							 &nvme_strom_enabled,
-							 true,
-							 PGC_SUSET,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
-
-	/* pg_strom.debug_force_nvme_strom */
-	DefineCustomBoolVariable("pg_strom.debug_force_nvme_strom",
-							 "(DEBUG) force to use raw block scan mode",
-							 NULL,
-							 &debug_force_nvme_strom,
-							 false,
-							 PGC_SUSET,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
-	/*
-	 * MEMO: Threshold of table's physical size to use NVMe-Strom:
-	 *   ((System RAM size) -
-	 *    (shared_buffer size)) * 0.67 + (shared_buffer size)
-	 *
-	 * If table size is enough large to issue real i/o, NVMe-Strom will
-	 * make advantage by higher i/o performance.
-	 */
-	sysconf_pagesize = sysconf(_SC_PAGESIZE);
-	if (sysconf_pagesize < 0)
-		elog(ERROR, "failed on sysconf(_SC_PAGESIZE): %m");
-	sysconf_phys_pages = sysconf(_SC_PHYS_PAGES);
-	if (sysconf_phys_pages < 0)
-		elog(ERROR, "failed on sysconf(_SC_PHYS_PAGES): %m");
-	if (sysconf_pagesize * sysconf_phys_pages < shared_buffer_size)
-		elog(ERROR, "Bug? shared_buffer is larger than system RAM");
-	nvme_strom_threshold = ((sysconf_pagesize * sysconf_phys_pages -
-							 shared_buffer_size) * 2 / 3 +
-							shared_buffer_size) / BLCKSZ;
-
-	/*
-	 * request for the static shared memory
-	 */
-	required = STROMALIGN(offsetof(GpuMemSystemHead,
-								   gm_dev_array[numDevAttrs])) +
-		STROMALIGN(offsetof(GpuMemSegment,
-							gm_chunks[nchunks])) * num_gpu_memory_segments +
-		STROMALIGN(offsetof(GpuMemSegment,
-							gm_chunks[nchunks_iomap]));
-
-	RequestAddinShmemSpace(required);
-	shmem_startup_next = shmem_startup_hook;
-	shmem_startup_hook = pgstrom_startup_gpu_mmgr;
-
-	/*
-	 * setup a background server process for memory management
-	 */
-	for (i=0; i < numDevAttrs; i++)
-	{
-		memset(&worker, 0, sizeof(BackgroundWorker));
-		snprintf(worker.bgw_name, sizeof(worker.bgw_name),
-				 "GPU Mmgr%d [%s]", i, devAttrs[i].DEV_NAME);
-
-		worker.bgw_flags = BGWORKER_SHMEM_ACCESS;
-		worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
-		worker.bgw_restart_time = 1;
-		worker.bgw_main = gpu_mmgr_bgworker_main;
-		worker.bgw_main_arg = Int32GetDatum(i);
-		RegisterBackgroundWorker(&worker);
-	}
 }

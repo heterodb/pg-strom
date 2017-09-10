@@ -794,6 +794,9 @@ pgstrom_startup_gpu_context(void)
 	bool	found;
 	int		i;
 
+	if (shmem_startup_next)
+		(*shmem_startup_next)();
+
 	global_num_running_tasks =
 		ShmemInitStruct("Global number of running tasks counter",
 						sizeof(pg_atomic_uint32) * numDevAttrs,

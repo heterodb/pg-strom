@@ -593,7 +593,6 @@ pgstromProcessGpuTask(GpuTask *gtask, CUmodule cuda_module)
 		case GpuTaskKind_GpuScan:
 			retval = gpuscan_process_task(gtask, cuda_module);
 			break;
-#if 0
 		case GpuTaskKind_GpuJoin:
 			retval = gpujoin_process_task(gtask, cuda_module);
 			break;
@@ -603,7 +602,6 @@ pgstromProcessGpuTask(GpuTask *gtask, CUmodule cuda_module)
 		case GpuTaskKind_PL_CUDA:
 			retval = plcuda_process_task(gtask, cuda_module);
 			break;
-#endif
 		default:
 			elog(ERROR, "Unknown GpuTask kind: %d", gtask->task_kind);
 			break;
@@ -622,7 +620,6 @@ pgstromReleaseGpuTask(GpuTask *gtask)
 		case GpuTaskKind_GpuScan:
 			gpuscan_release_task(gtask);
 			break;
-#if 0
 		case GpuTaskKind_GpuJoin:
 			gpujoin_release_task(gtask);
 			break;
@@ -632,7 +629,6 @@ pgstromReleaseGpuTask(GpuTask *gtask)
 		case GpuTaskKind_PL_CUDA:
 			plcuda_release_task(gtask);
 			break;
-#endif
 		default:
 			elog(ERROR, "Unknown GpuTask kind: %d", (int)gtask->task_kind);
 			break;

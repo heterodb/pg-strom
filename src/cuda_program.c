@@ -968,6 +968,14 @@ pgstrom_create_cuda_program(GpuContext *gcontext,
 	dlist_iter	iter;
 	pg_crc32	crc;
 
+	/*
+	 * sanity check - even though concurrent and unrelated worker may pick up
+	 * the CUDA program for build, here is no guarantee. For synchronous code
+	 * build, the callers' context should be capable to run NVRTC.
+	 */
+	if (wait_for_build && !gcontext->cuda_context)
+		elog(ERROR, "Bug? unable to kick synchronous code build with inactive GpuContext");
+
 	/* makes a hash value */
 	INIT_LEGACY_CRC32(crc);
 	COMP_LEGACY_CRC32(crc, &extra_flags, sizeof(int32));
@@ -1094,39 +1102,49 @@ retry_program_id:
 					&entry->lru_chain);
 	dlist_push_head(&pgcache_head->build_list,
 					&entry->build_chain);
-	/* try to wake up GPU server workers */
-	// XXX - to be replaced taskq
-	gpuservTryToWakeUp();
+
+	/* track this program entry by GpuContext */
+	if (!trackCudaProgram(gcontext, program_id))
+	{
+		put_cuda_program_entry_nolock(entry);
+		SpinLockRelease(&pgcache_head->lock);
+		elog(ERROR, "out of memory");
+	}
+	SpinLockRelease(&pgcache_head->lock);
+
+	/*
+	 * Start asynchronous code build with NVRTC
+	 */
+	pthreadCondSignal(&gcontext->cond_workers);
+
 	/* wait for completion of build, if needed */
 	while (wait_for_build)
 	{
-		if (entry->bin_image == CUDA_PROGRAM_BUILD_FAILURE)
+		SpinLockAcquire(&pgcache_head->lock);
+		entry = lookup_cuda_program_entry_nolock(program_id);
+		if (!entry)
 		{
-			put_cuda_program_entry_nolock(entry);
+			SpinLockRelease(&pgcache_head->lock);
+			elog(ERROR, "Bug? ProgramId=%lu got vanished", program_id);
+		}
+		else if (entry->bin_image == CUDA_PROGRAM_BUILD_FAILURE)
+		{
 			SpinLockRelease(&pgcache_head->lock);
 			ereport(ERROR,
 					(errcode(entry->error_code),
 					 errmsg("%s", entry->error_msg)));
 		}
 		else if (entry->bin_image)
+		{
+			SpinLockRelease(&pgcache_head->lock);
 			break;
-
-		/* NVRTC on this GPU kernel is still in-progress */
+		}
+		/* NVRTC on this GPU program is still in-progress */
 		SpinLockRelease(&pgcache_head->lock);
-
-		pg_usleep(50000);	/* short sleep */
 
 		CHECK_FOR_INTERRUPTS();
 
-		SpinLockAcquire(&pgcache_head->lock);
-	}
-	SpinLockRelease(&pgcache_head->lock);
-
-	/* track this program entry by GpuContext */
-	if (!trackCudaProgram(gcontext, program_id))
-	{
-		pgstrom_put_cuda_program(NULL, program_id);
-		elog(ERROR, "out of memory");
+		pg_usleep(50000L);		/* short sleep */
 	}
 	return program_id;
 }

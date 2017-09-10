@@ -777,6 +777,7 @@ extern void pgstrom_init_gpuscan(void);
 struct GpuJoinSharedState;
 struct kern_gpujoin;
 
+#if 0
 extern bool pgstrom_path_is_gpujoin(Path *pathnode);
 extern bool pgstrom_plan_is_gpujoin(const Plan *plannode);
 extern bool pgstrom_planstate_is_gpujoin(const PlanState *ps);
@@ -784,6 +785,17 @@ extern int	gpujoin_process_task(GpuTask *gtask, CUmodule cuda_module);
 extern void	gpujoin_release_task(GpuTask *gtask);
 extern void assign_gpujoin_session_info(StringInfo buf,
 										GpuTaskState *gts);
+extern void	pgstrom_init_gpujoin(void);
+#else
+/* stub when gpujoin.c is disabled */
+#define pgstrom_path_is_gpujoin(a)			false
+#define pgstrom_plan_is_gpujoin(a)			false
+#define pgstrom_planstate_is_gpujoin(a)		false
+#define gpujoin_process_task(a,b)			0
+#define gpujoin_release_task(a)				do {} while(0)
+#define assign_gpujoin_session_info(a,b)	do {} while(0)
+#define pgstrom_init_gpujoin(a)				do {} while(0)
+#endif
 extern Size setup_kernel_gpujoin(struct kern_gpujoin *kgjoin,
 								 GpuTaskState *gts,
 								 pgstrom_data_store *pds_src);
@@ -802,11 +814,11 @@ extern bool gpujoinLoadInnerBuffer(GpuContext *gcontext,
 extern bool gpujoinHasRightOuterJoin(struct GpuJoinSharedState *gj_sstate);
 extern void gpujoinUpdateRunTimeStat(struct GpuJoinSharedState *gj_sstate,
 									 struct kern_gpujoin *kgjoin);
-extern void	pgstrom_init_gpujoin(void);
 
 /*
  * gpupreagg.c
  */
+#if 0
 extern bool pgstrom_path_is_gpupreagg(const Path *pathnode);
 extern bool pgstrom_plan_is_gpupreagg(const Plan *plan);
 extern bool pgstrom_planstate_is_gpupreagg(const PlanState *ps);
@@ -816,6 +828,16 @@ extern void	gpupreagg_release_task(GpuTask *gtask);
 extern void assign_gpupreagg_session_info(StringInfo buf,
 										  GpuTaskState *gts);
 extern void pgstrom_init_gpupreagg(void);
+#else
+#define pgstrom_path_is_gpupreagg(a)		false
+#define pgstrom_plan_is_gpupreagg(a)		false
+#define pgstrom_planstate_is_gpupreagg(a)	false
+#define gpupreagg_post_planner(a,b)			do {} while(0)
+#define gpupreagg_process_task(a,b)			0
+#define gpupreagg_release_task(a)			do {} while(0)
+#define assign_gpupreagg_session_info(a,b)	do {} while(0)
+#define pgstrom_init_gpupreagg(a)			do {} while(0)
+#endif
 
 /*
  * pl_cuda.c
@@ -825,9 +847,15 @@ extern Datum pltext_function_handler(PG_FUNCTION_ARGS);
 extern Datum plcuda_function_validator(PG_FUNCTION_ARGS);
 extern Datum plcuda_function_handler(PG_FUNCTION_ARGS);
 extern Datum plcuda_function_source(PG_FUNCTION_ARGS);
+#if 0
 extern int	plcuda_process_task(GpuTask *gtask, CUmodule cuda_module);
 extern void plcuda_release_task(GpuTask *gtask);
 extern void pgstrom_init_plcuda(void);
+#else
+#define plcuda_process_task(a,b)			0
+#define plcuda_release_task(a)				do {} while(0)
+#define pgstrom_init_plcuda(a)				do {} while(0)
+#endif
 
 /*
  * main.c
