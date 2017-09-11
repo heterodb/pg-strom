@@ -30,8 +30,8 @@
 #include "pg_strom.h"
 #include <sys/ioctl.h>
 
-#define GPUMEM_CHUNKSZ_MAX_BIT		34		/* 16GB */
-#define GPUMEM_CHUNKSZ_MIN_BIT		16		/* 64KB */
+#define GPUMEM_CHUNKSZ_MAX_BIT		30		/* 1GB */
+#define GPUMEM_CHUNKSZ_MIN_BIT		14		/* 16KB */
 #define GPUMEM_CHUNKSZ_MAX			(1UL << GPUMEM_CHUNKSZ_MAX_BIT)
 #define GPUMEM_CHUNKSZ_MIN			(1UL << GPUMEM_CHUNKSZ_MIN_BIT)
 
@@ -63,72 +63,39 @@ typedef struct
 	 (chunk)->mclass <= GPUMEM_CHUNKSZ_MAX_BIT &&	 \
 	 (chunk)->refcnt > 0)
 
-/* shared structure */
 typedef struct
 {
-	cl_uint			segment_id;	/* index of the segment (never changed) */
-	dlist_node		chain;		/* link to segment list */
-	GpuMemKind		gm_kind;
-	pg_atomic_uint32 mapcount;	/* # of GpuContext that maps this segment */
-	CUdeviceptr		m_segment;	/* Device pointer for GPU Mmgr */
-	CUipcMemHandle	m_handle;	/* IPC handler of the device memory */
+	dlist_node		chain;
+	GpuMemKind		gm_kind;	/* one of GpuMemKind__* */
+	CUdeviceptr		m_segment;	/* device pointer of the segment */
 	unsigned long	iomap_handle; /* only if GpuMemKind__IOMapMemory */
-	slock_t			lock;		/* protection of free_chunks[] */
+	slock_t			lock;		/* protection of chunks */
 	dlist_head		free_chunks[GPUMEM_CHUNKSZ_MAX_BIT + 1];
 	GpuMemChunk		gm_chunks[FLEXIBLE_ARRAY_MEMBER];
 } GpuMemSegment;
 
-/* shared structure (per device) */
-typedef struct GpuMemDevice
+/* statistics of GPU memory usage (shared; per device) */
+//to be used for memory release request mechanism
+typedef struct
 {
-	/* interaction backend <-> mmgr */
-	pthread_mutex_t	mutex;
-	pthread_cond_t	cond;
-	cl_uint			alloc_request;			/* in: bitmap of GpuMemKind */
-	cl_uint			revision;				/* out: revision of the retcode */
-	CUresult		status_alloc_normal;	/* out: mmgr -> backend */
-	CUresult		status_alloc_iomap;		/* out: mmgr -> backend */
-	Latch		   *serverLatch;
-	/* management of device memory segment */
-	pthread_rwlock_t rwlock;
-	dlist_head		normal_segment_list;
-	dlist_head		iomap_segment_list;
-} GpuMemDevice;
-
-/* shared structure (system global) */
-typedef struct GpuMemSystemHead
-{
-	slock_t			lock;		/* protection of free_segment_list */
-	dlist_head		free_segment_list;
-	GpuMemDevice	gm_dev_array[FLEXIBLE_ARRAY_MEMBER];
-} GpuMemSystemHead;
-
-/* per-context structure */
-struct GpuMemSegMap
-{
-	GpuMemSegment  *gm_seg;		/* reference to the shared portion */
-	dlist_node		chain;		/* link to local_xxx_segment_list */
-	CUdeviceptr		m_segment;	/* device pointer */
-};
-typedef struct GpuMemSegMap		GpuMemSegMap;
+	size_t				total_size;
+	pg_atomic_uint64	normal_usage;
+	pg_atomic_uint64	managed_usage;
+	pg_atomic_uint64	iomap_usage;
+} GpuMemStatistics;
 
 /* static variables */
 static shmem_startup_hook_type shmem_startup_next = NULL;
-static GpuMemSystemHead *gm_shead = NULL;
+static GpuMemStatistics *gm_stat_array = NULL;
 static int			gpu_memory_segment_size_kb;	/* GUC */
-static int			num_gpu_memory_segments;	/* GUC */
-static int			num_gpu_iomap_segments;
-static int			iomap_gpu_memory_size_kb;	/* GUC */
+static size_t		gm_segment_sz;	/* bytesize */
+
 static bool			debug_force_nvme_strom;		/* GUC */
 static bool			nvme_strom_enabled;			/* GUC */
 static long			nvme_strom_threshold;
 
-static bool			gpu_mmgr_got_sigterm = false;
-static int			gpu_mmgr_cuda_dindex = -1;
-static CUdevice		gpu_mmgr_cuda_device;
-static CUcontext	gpu_mmgr_cuda_context;
-
-#define GPUMEM_TRACKER_RAW_EXTRA		((void *)(~0L))
+#define GPUMEM_DEVICE_RAW_EXTRA		((void *)(~0L))
+#define GPUMEM_HOST_RAW_EXTRA		((void *)(~1L))
 
 /*
  * nvme_strom_ioctl
@@ -162,120 +129,78 @@ gpuMemFreeChunk(GpuContext *gcontext,
 				CUdeviceptr m_deviceptr,
 				GpuMemSegment *gm_seg)
 {
-	size_t			segment_sz = (size_t)gpu_memory_segment_size_kb << 10;
-	GpuMemSegMap   *gm_smap = &gcontext->gm_smap_array[gm_seg->segment_id];
-	GpuMemChunk	   *gm_chunk;
-	size_t			offset;
-	cl_int			index;
-
-	/* sanity checks */
-	if ((gm_seg->gm_kind != GpuMemKind__NormalMemory &&
-		 gm_seg->gm_kind != GpuMemKind__IOMapMemory) ||
-		gm_seg->segment_id >= num_gpu_memory_segments ||
-		m_deviceptr <  gm_smap->m_segment ||
-		m_deviceptr >= gm_smap->m_segment + segment_sz)
-		return CUDA_ERROR_INVALID_VALUE;
-
-	SpinLockAcquire(&gm_seg->lock);
-	offset = (m_deviceptr - gm_smap->m_segment);
-	Assert(offset % pgstrom_chunk_size() == 0);
-	index = offset / pgstrom_chunk_size();
-	gm_chunk = &gm_seg->gm_chunks[index];
-	Assert(!gm_chunk->chain.prev && !gm_chunk->chain.next);
-	if (--gm_chunk->refcnt > 0)
-	{
-		SpinLockRelease(&gm_seg->lock);
-		return CUDA_SUCCESS;
-	}
-	dlist_push_head(&gm_seg->free_chunks[0], &gm_chunk->chain);
-	SpinLockRelease(&gm_seg->lock);
-	return CUDA_SUCCESS;
-}
-
-/*
- * gpuMemFreeManagedChunk
- */
-static CUresult
-gpuMemFreeManagedChunkNoLock(GpuContext *gcontext,
-							 CUdeviceptr m_deviceptr,
-							 GpuMemSegment *gm_seg)
-{
 	GpuMemChunk	   *gm_chunk;
 	GpuMemChunk	   *gm_buddy;
-	cl_long			index, shift;
+	cl_long			index;
+	cl_long			shift;
+	cl_long			nchunks;
 
-	index = (m_deviceptr - gm_seg->m_segment) >> GPUMEM_CHUNKSZ_MIN_BIT;
+	Assert(m_deviceptr >= gm_seg->m_segment &&
+		   m_deviceptr <  gm_seg->m_segment + gm_segment_sz);
+	if (gm_seg->gm_kind == GpuMemKind__ManagedMemory)
+		index = (m_deviceptr - gm_seg->m_segment) >> GPUMEM_CHUNKSZ_MIN_BIT;
+	else
+		index = (m_deviceptr - gm_seg->m_segment) / pgstrom_chunk_size();
 	gm_chunk = &gm_seg->gm_chunks[index];
 	Assert(GPUMEMCHUNK_IS_ACTIVE(gm_chunk));
+	SpinLockAcquire(&gm_seg->lock);
 	if (--gm_chunk->refcnt > 0)
 		return CUDA_SUCCESS;
 
-	/* Try to merge with the neighbor chunks */
-	while (gm_chunk->mclass < GPUMEM_CHUNKSZ_MAX_BIT)
+	/* GpuMemKind__ManagedMemory tries to merge with prev/next chunks */
+	if (gm_seg->gm_kind == GpuMemKind__ManagedMemory)
 	{
-		index = (gm_chunk - gm_seg->gm_chunks);
-		shift = 1 << (gm_chunk->mclass - GPUMEM_CHUNKSZ_MIN_BIT);
-		Assert((index & (shift - 1)) == 0);
-		if ((index & shift) == 0)
+		nchunks = gm_segment_sz >> GPUMEM_CHUNKSZ_MIN_BIT;
+
+		while (gm_chunk->mclass < GPUMEM_CHUNKSZ_MAX_BIT)
 		{
-			/* try to merge with next */
-			gm_buddy = &gm_seg->gm_chunks[index + shift];
-			if (gm_buddy->chain.prev != NULL &&
-				gm_buddy->chain.next != NULL &&
-				gm_buddy->mclass == gm_chunk->mclass)
+			index = (gm_chunk - gm_seg->gm_chunks);
+			shift = 1 << (gm_chunk->mclass - GPUMEM_CHUNKSZ_MIN_BIT);
+			Assert((index & (shift - 1)) == 0);
+			if ((index & shift) == 0)
 			{
-				/* ok, let's merge */
-				dlist_delete(&gm_buddy->chain);
-				memset(gm_buddy, 0, sizeof(GpuMemChunk));
-				gm_chunk->mclass++;
+				/* try to merge with next */
+				if (index + shift >= nchunks)
+					break;	/* out of range, give up */
+
+				gm_buddy = &gm_seg->gm_chunks[index + shift];
+				if (GPUMEMCHUNK_IS_FREE(gm_buddy) &&
+					gm_chunk->mclass == gm_buddy->mclass)
+				{
+					/* ok, let's merge */
+					dlist_delete(&gm_buddy->chain);
+					memset(gm_buddy, 0, sizeof(GpuMemChunk));
+					gm_chunk->mclass++;
+				}
+				else
+					break;	/* give up */
 			}
 			else
-				break;	/* give up */
-		}
-		else
-		{
-			/* try to merge with prev */
-			gm_buddy = &gm_seg->gm_chunks[index - shift];
-			if (gm_buddy->chain.prev != NULL &&
-				gm_buddy->chain.next != NULL &&
-				gm_buddy->mclass == gm_chunk->mclass)
 			{
-				/* OK, let's merge */
-				dlist_delete(&gm_buddy->chain);
-				memset(gm_buddy, 0, sizeof(GpuMemChunk));
-				gm_buddy->mclass = gm_chunk->mclass + 1;
-				memset(gm_chunk, 0, sizeof(GpuMemChunk));
-				gm_chunk = gm_buddy;
+				/* try to merge with prev */
+				if (index < shift)
+					break;	/* out of range, give up */
+				gm_buddy = &gm_seg->gm_chunks[index - shift];
+				if (GPUMEMCHUNK_IS_FREE(gm_buddy) &&
+					gm_chunk->mclass == gm_buddy->mclass)
+				{
+					/* ok, let's merge */
+					dlist_delete(&gm_buddy->chain);
+					memset(gm_chunk, 0, sizeof(GpuMemChunk));
+					gm_buddy->mclass++;
+					gm_chunk = gm_buddy;
+				}
+				else
+					break;	/* give up */
 			}
-			else
-				break;	/* give up */
 		}
 	}
 	/* back to the free list again */
 	dlist_push_head(&gm_seg->free_chunks[gm_chunk->mclass],
 					&gm_chunk->chain);
-	return CUDA_SUCCESS;
-}
-
-static CUresult
-gpuMemFreeManagedChunk(GpuContext *gcontext,
-					   CUdeviceptr m_deviceptr,
-					   GpuMemSegment *gm_seg)
-{
-	size_t		segment_sz = (size_t)gpu_memory_segment_size_kb << 10;
-	CUresult	rc;
-
-	/* sanity checks */
-	if (gm_seg->gm_kind != GpuMemKind__ManagedMemory ||
-		m_deviceptr < gm_seg->m_segment ||
-		m_deviceptr >= gm_seg->m_segment + segment_sz)
-		return CUDA_ERROR_INVALID_VALUE;
-
-	SpinLockAcquire(&gm_seg->lock);
-	rc = gpuMemFreeManagedChunkNoLock(gcontext, m_deviceptr, gm_seg);
 	SpinLockRelease(&gm_seg->lock);
 
-	return rc;
+    return CUDA_SUCCESS;
 }
 
 /*
@@ -286,15 +211,13 @@ gpuMemFreeExtra(GpuContext *gcontext,
 				CUdeviceptr m_deviceptr,
 				void *extra)
 {
-	GpuMemSegment  *gm_seg = extra;
-
 	if (!extra)
 		return CUDA_ERROR_INVALID_VALUE;
-	if (extra == GPUMEM_TRACKER_RAW_EXTRA)
+	else if (extra == GPUMEM_DEVICE_RAW_EXTRA)
 		return cuMemFree(m_deviceptr);
-	if (gm_seg->gm_kind == GpuMemKind__ManagedMemory)
-		return gpuMemFreeManagedChunk(gcontext, m_deviceptr, gm_seg);
-	return gpuMemFreeChunk(gcontext, m_deviceptr, gm_seg);
+	else if (extra == GPUMEM_HOST_RAW_EXTRA)
+		return cuMemFreeHost((void *)m_deviceptr);
+	return gpuMemFreeChunk(gcontext, m_deviceptr, (GpuMemSegment *)extra);
 }
 
 /*
@@ -336,7 +259,7 @@ __gpuMemAllocRaw(GpuContext *gcontext,
 		return rc;
 	}
 	if (!trackGpuMem(gcontext, m_deviceptr,
-					 GPUMEM_TRACKER_RAW_EXTRA))
+					 GPUMEM_DEVICE_RAW_EXTRA))
 	{
 		cuMemFree(m_deviceptr);
 		cuCtxPopCurrent(NULL);
@@ -348,7 +271,7 @@ __gpuMemAllocRaw(GpuContext *gcontext,
 }
 
 /*
- * gpuMemAllocManagedRaw
+ * __gpuMemAllocManagedRaw
  */
 CUresult
 __gpuMemAllocManagedRaw(GpuContext *gcontext,
@@ -371,7 +294,7 @@ __gpuMemAllocManagedRaw(GpuContext *gcontext,
 		return rc;
 	}
 	if (!trackGpuMem(gcontext, m_deviceptr,
-					 GPUMEM_TRACKER_RAW_EXTRA))
+					 GPUMEM_DEVICE_RAW_EXTRA))
 	{
 		cuMemFree(m_deviceptr);
 		cuCtxPopCurrent(NULL);
@@ -384,249 +307,64 @@ __gpuMemAllocManagedRaw(GpuContext *gcontext,
 }
 
 /*
- * gpuMemAllocChunk
+ * __gpuMemAllocHostRaw
  */
-static CUresult
-gpuMemAllocChunk(GpuMemKind gm_kind,
-				 GpuContext *gcontext,
-				 CUdeviceptr *p_deviceptr,
-				 bool may_expand_segment,
-				 const char *filename, int lineno)
+CUresult
+__gpuMemAllocHostRaw(GpuContext *gcontext,
+					 void **p_hostptr,
+					 size_t bytesize,
+					 const char *filename, int lineno)
 {
-	size_t			segment_sz = (size_t)gpu_memory_segment_size_kb << 10;
-	cl_int			dindex = gcontext->cuda_dindex;
-	GpuMemDevice   *gm_dev = &gm_shead->gm_dev_array[dindex];
-	GpuMemSegment  *gm_seg;
-	GpuMemSegMap   *gm_smap;
-	GpuMemChunk	   *gm_chunk;
-	CUdeviceptr		m_deviceptr;
-	dlist_iter		iter;
-	dlist_node	   *dnode;
-	dlist_head	   *local_segment_list;
-	dlist_head	   *global_segment_list;
-	CUresult		rc;
-	cl_int			i, nchunks;
-	cl_uint			revision;
-	bool			has_exclusive_lock = false;
+	void	   *hostptr;
+	CUresult	rc;
 
-	/* only backend can call */
-	Assert(gpu_mmgr_cuda_dindex < 0);
-	Assert(gm_kind == GpuMemKind__NormalMemory ||
-		   gm_kind == GpuMemKind__IOMapMemory);
-	nchunks = segment_sz / pgstrom_chunk_size();
-	switch (gm_kind)
-	{
-		case GpuMemKind__NormalMemory:
-			local_segment_list = &gcontext->gm_normal_list;
-			global_segment_list = &gm_dev->normal_segment_list;
-			break;
-		case GpuMemKind__IOMapMemory:
-			local_segment_list = &gcontext->gm_iomap_list;
-			global_segment_list = &gm_dev->iomap_segment_list;
-			break;
-		default:
-			elog(FATAL, "Bug? unknown GpuMemKind: %d", (int)gm_kind);
-	}
-
-
-	/*
-	 * Try to lookup locally mapped segments
-	 */
-	pthreadRWLockReadLock(&gcontext->gm_rwlock);
-retry:
-	dlist_foreach(iter, local_segment_list)
-	{
-		gm_smap = dlist_container(GpuMemSegMap, chain, iter.cur);
-		gm_seg = gm_smap->gm_seg;
-		SpinLockAcquire(&gm_seg->lock);
-		if (!dlist_is_empty(&gm_seg->free_chunks[0]))
-		{
-			dnode = dlist_pop_head_node(&gm_seg->free_chunks[0]);
-			gm_chunk = dlist_container(GpuMemChunk, chain, dnode);
-			memset(&gm_chunk->chain, 0, sizeof(dlist_node));
-			gm_chunk->refcnt++;
-			SpinLockRelease(&gm_seg->lock);
-
-			Assert(gm_chunk >= gm_seg->gm_chunks &&
-				   gm_chunk <  gm_seg->gm_chunks + nchunks);
-			i = gm_chunk - gm_seg->gm_chunks;
-			m_deviceptr = gm_smap->m_segment + i * pgstrom_chunk_size();
-
-			/* track this device memory with GpuContext */
-			if (!trackGpuMem(gcontext, m_deviceptr, gm_seg))
-			{
-				SpinLockAcquire(&gm_seg->lock);
-				gm_chunk->refcnt--;
-				dlist_push_head(&gm_seg->free_chunks[0],
-								&gm_chunk->chain);
-				SpinLockRelease(&gm_seg->lock);
-				pthreadRWLockUnlock(&gcontext->gm_rwlock);
-				return CUDA_ERROR_OUT_OF_MEMORY;
-			}
-			pthreadRWLockUnlock(&gcontext->gm_rwlock);
-			*p_deviceptr = m_deviceptr;
-			return CUDA_SUCCESS;
-		}
-		SpinLockRelease(&gm_seg->lock);
-	}
-
-	if (!has_exclusive_lock)
-	{
-		pthreadRWLockUnlock(&gcontext->gm_rwlock);
-		has_exclusive_lock = true;
-		pthreadRWLockWriteLock(&gcontext->gm_rwlock);
-		goto retry;
-	}
-
-	/*
-	 * Try to lookup a segment already allocated, but not mapped locally.
-	 */
-	pthreadRWLockReadLock(&gm_dev->rwlock);
-	dlist_foreach(iter, global_segment_list)
-	{
-		gm_seg = dlist_container(GpuMemSegment, chain, iter.cur);
-		Assert(gm_seg->segment_id < num_gpu_memory_segments);
-		gm_smap = &gcontext->gm_smap_array[gm_seg->segment_id];
-		if (gm_smap->m_segment != 0UL)
-			continue;
-		Assert(gm_seg->gm_kind == gm_kind);
-		Assert(!gm_smap->gm_seg &&
-			   !gm_smap->chain.prev &&
-			   !gm_smap->chain.next);
-		rc = cuCtxPushCurrent(gcontext->cuda_context);
-		if (rc != CUDA_SUCCESS)
-		{
-			pthreadRWLockUnlock(&gm_dev->rwlock);
-			pthreadRWLockUnlock(&gcontext->gm_rwlock);
-			return rc;
-		}
-		rc = cuIpcOpenMemHandle(&gm_smap->m_segment,
-								gm_seg->m_handle,
-								CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS);
-		if (rc != CUDA_SUCCESS)
-		{
-			pthreadRWLockUnlock(&gm_dev->rwlock);
-            pthreadRWLockUnlock(&gcontext->gm_rwlock);
-            return rc;
-		}
-		cuCtxPopCurrent(NULL);
-		pg_atomic_fetch_add_u32(&gm_seg->mapcount, 1);
-
-		gm_smap->gm_seg = gm_seg;
-		dlist_push_tail(local_segment_list, &gm_smap->chain);
-		pthreadRWLockUnlock(&gm_dev->rwlock);
-		goto retry;
-	}
-	pthreadRWLockUnlock(&gm_dev->rwlock);
-	pthreadRWLockUnlock(&gcontext->gm_rwlock);
-	has_exclusive_lock = false;
-
-	/* Give up, if no additional segments */
-	if (!may_expand_segment)
-		return CUDA_ERROR_OUT_OF_MEMORY;
-
-	/*
-	 * Here is no space left on the existing device memory segment.
-	 * So, raise a request to allocate a new one.
-	 */
-	pthreadMutexLock(&gm_dev->mutex);
-	if (!gm_dev->serverLatch)
-	{
-		pthreadMutexUnlock(&gm_dev->mutex);
-		return CUDA_ERROR_OUT_OF_MEMORY;
-	}
-	revision = gm_dev->revision;
-	gm_dev->alloc_request |= gm_kind;
-	SetLatch(gm_dev->serverLatch);
-	pthreadCondWait(&gm_dev->cond, &gm_dev->mutex);
-	if (gm_dev->revision == revision)
-		rc = CUDA_SUCCESS;	/* retry anyway */
-	else
-	{
-		switch (gm_kind)
-		{
-			case GpuMemKind__NormalMemory:
-				rc = gm_dev->status_alloc_normal;
-				break;
-			case GpuMemKind__IOMapMemory:
-				/* XXX - should not happen at this moment */
-				rc = gm_dev->status_alloc_iomap;
-				break;
-			default:
-				elog(FATAL, "Bug? unexpected gm_kind: %d", (int)gm_kind);
-				break;
-		}
-	}
-	pthreadMutexUnlock(&gm_dev->mutex);
+	rc = cuCtxPushCurrent(gcontext->cuda_context);
 	if (rc != CUDA_SUCCESS)
 		return rc;
 
-	pthreadRWLockReadLock(&gcontext->gm_rwlock);
-	goto retry;
+	rc = cuMemAllocHost(&hostptr, bytesize);
+	if (rc != CUDA_SUCCESS)
+	{
+		cuCtxPopCurrent(NULL);
+		return rc;
+	}
+
+	if (!trackHostMem(gcontext, hostptr,
+					  GPUMEM_HOST_RAW_EXTRA))
+	{
+		cuMemFreeHost(hostptr);
+		cuCtxPopCurrent(NULL);
+		return CUDA_ERROR_OUT_OF_MEMORY;
+	}
+	cuCtxPopCurrent(NULL);
+	*p_hostptr = hostptr;
+
+	return CUDA_SUCCESS;
 }
 
 /*
- * gpuMemAlloc
- */
-CUresult
-__gpuMemAlloc(GpuContext *gcontext,
-			  CUdeviceptr *p_deviceptr,
-			  size_t bytesize,
-			  const char *filename, int lineno)
-{
-	if (bytesize != pgstrom_chunk_size())
-		return __gpuMemAllocRaw(gcontext,
-								p_deviceptr,
-								bytesize,
-								filename, lineno);
-	return gpuMemAllocChunk(GpuMemKind__NormalMemory,
-							gcontext, p_deviceptr, true,
-							filename, lineno);
-}
-
-/*
- * gpuMemAllocIOMap
- */
-CUresult
-__gpuMemAllocIOMap(GpuContext *gcontext,
-				   CUdeviceptr *p_deviceptr,
-				   size_t bytesize,
-				   const char *filename, int lineno)
-{
-	/*
-	 * NOTE: At this moment, only source PDS for NVMe-Strom will need
-	 * I/O mapped device memory. So, @bytesize shall be always chunk-size.
-	 */
-	if (bytesize != pgstrom_chunk_size())
-		return CUDA_ERROR_INVALID_VALUE;
-
-	return gpuMemAllocChunk(GpuMemKind__IOMapMemory,
-							gcontext, p_deviceptr, false,
-							filename, lineno);
-}
-
-/*
- * gpuMemSplitManagedChunk
+ * gpuMemSplitChunk
  */
 static bool
-gpuMemSplitManagedChunk(GpuMemSegment *gm_seg, int mclass)
+gpuMemSplitChunk(GpuMemSegment *gm_seg, cl_int mclass)
 {
 	GpuMemChunk	   *gm_chunk1;
 	GpuMemChunk	   *gm_chunk2;
 	dlist_node	   *dnode;
 	long			offset;
 
+	Assert(gm_seg->gm_kind == GpuMemKind__ManagedMemory);
 	if (mclass > GPUMEM_CHUNKSZ_MAX_BIT)
 		return false;
 	Assert(mclass > GPUMEM_CHUNKSZ_MIN_BIT);
 	if (dlist_is_empty(&gm_seg->free_chunks[mclass]))
 	{
-		if (!gpuMemSplitManagedChunk(gm_seg, mclass + 1))
+		if (!gpuMemSplitChunk(gm_seg, mclass + 1))
 			return false;
 	}
 	Assert(!dlist_is_empty(&gm_seg->free_chunks[mclass]));
-	offset = 1UL << (mclass - 1 - GPUMEM_CHUNKSZ_MIN_BIT);
 	dnode = dlist_pop_head_node(&gm_seg->free_chunks[mclass]);
+	offset = 1UL << (mclass - 1 - GPUMEM_CHUNKSZ_MIN_BIT);
 	gm_chunk1 = dlist_container(GpuMemChunk, chain, dnode);
 	gm_chunk2 = gm_chunk1 + offset;
 	Assert(GPUMEMCHUNK_IS_FREE(gm_chunk1));
@@ -643,91 +381,79 @@ gpuMemSplitManagedChunk(GpuMemSegment *gm_seg, int mclass)
 }
 
 /*
- * gpuMemTryAllocManagedChunk - pick up a chunk from the supplied segment
- *
- * NOTE: caller must hold gm_seg->lock
+ * gpuMemAllocChunk
  */
-static inline GpuMemChunk *
-gpuMemTryAllocManagedChunk(GpuMemSegment *gm_seg, int mclass)
+static CUresult
+gpuMemAllocChunk(GpuMemKind gm_kind,
+				 GpuContext *gcontext,
+				 CUdeviceptr *p_deviceptr,
+				 cl_int mclass,
+				 const char *filename, int lineno)
 {
-	GpuMemChunk	   *gm_chunk;
-	dlist_node	   *dnode;
-
-	if (dlist_is_empty(&gm_seg->free_chunks[mclass]))
-	{
-		/* split larger chunk */
-		if (!gpuMemSplitManagedChunk(gm_seg, mclass + 1))
-			return NULL;
-	}
-	Assert(!dlist_is_empty(&gm_seg->free_chunks[mclass]));
-
-	dnode = dlist_pop_head_node(&gm_seg->free_chunks[mclass]);
-	gm_chunk = dlist_container(GpuMemChunk, chain, dnode);
-	Assert(GPUMEMCHUNK_IS_FREE(gm_chunk) &&
-		   gm_chunk->mclass == mclass);
-	memset(&gm_chunk->chain, 0, sizeof(dlist_node));
-	gm_chunk->refcnt++;
-
-	return gm_chunk;
-}
-
-/*
- * gpuMemAllocManaged
- */
-CUresult
-__gpuMemAllocManaged(GpuContext *gcontext,
-					 CUdeviceptr *p_deviceptr,
-					 size_t bytesize,
-					 int flags,
-					 const char *filename, int lineno)
-{
-	size_t			segment_sz = (size_t)gpu_memory_segment_size_kb << 10;
-	size_t			segment_usage;
-	dlist_iter		iter;
 	GpuMemSegment  *gm_seg;
 	GpuMemChunk	   *gm_chunk;
-	CUdeviceptr		m_deviceptr;
+	CUdeviceptr		m_segment;
+	dlist_iter		iter;
+	dlist_node	   *dnode;
+	dlist_head	   *gm_segment_list;
 	CUresult		rc;
-	cl_long			i, mclass;
-	cl_long			nchunks = segment_sz >> GPUMEM_CHUNKSZ_MIN_BIT;
+	cl_int			i, nchunks;
 	bool			has_exclusive_lock = false;
 
-	if (flags != CU_MEM_ATTACH_GLOBAL || bytesize > segment_sz / 2)
-		__gpuMemAllocManagedRaw(gcontext,
-								p_deviceptr,
-								bytesize,
-								flags,
-								filename, lineno);
+	switch (gm_kind)
+	{
+		case GpuMemKind__NormalMemory:
+			gm_segment_list = &gcontext->gm_normal_list;
+			nchunks = gm_segment_sz / pgstrom_chunk_size();
+			break;
+		case GpuMemKind__IOMapMemory:
+			gm_segment_list = &gcontext->gm_iomap_list;
+			nchunks = gm_segment_sz >> GPUMEM_CHUNKSZ_MIN_BIT;
+			break;
+		case GpuMemKind__ManagedMemory:
+			gm_segment_list = &gcontext->gm_managed_list;
+			nchunks = gm_segment_sz / pgstrom_chunk_size();
+			break;
+		case GpuMemKind__HostMemory:
+			gm_segment_list = &gcontext->gm_hostmem_list;
+			nchunks = gm_segment_sz / pgstrom_chunk_size();
+			break;
+		default:
+			return CUDA_ERROR_INVALID_VALUE;
+	}
 
-	mclass = get_next_log2(bytesize);
-	if (mclass < GPUMEM_CHUNKSZ_MIN_BIT)
-		mclass = GPUMEM_CHUNKSZ_MIN_BIT;
-	else if (mclass > GPUMEM_CHUNKSZ_MAX_BIT)
-		return CUDA_ERROR_OUT_OF_MEMORY;
-
+	/*
+	 * Try to lookup already allocated segment first
+	 */
 	pthreadRWLockReadLock(&gcontext->gm_rwlock);
 retry:
-	dlist_foreach(iter, &gcontext->gm_managed_list)
+	dlist_foreach(iter, gm_segment_list)
 	{
 		gm_seg = dlist_container(GpuMemSegment, chain, iter.cur);
 		SpinLockAcquire(&gm_seg->lock);
-		gm_chunk = gpuMemTryAllocManagedChunk(gm_seg, mclass);
-		if (gm_chunk)
+		/* try to split larger chunks if managed-memory */
+		if (gm_kind == GpuMemKind__ManagedMemory &&
+			dlist_is_empty(&gm_seg->free_chunks[mclass]))
 		{
-			i = gm_chunk - gm_seg->gm_chunks;
-			m_deviceptr = gm_seg->m_segment + (i << GPUMEM_CHUNKSZ_MIN_BIT);
-			if (trackGpuMem(gcontext, m_deviceptr, gm_seg))
-			{
-				SpinLockRelease(&gm_seg->lock);
-				pthreadRWLockUnlock(&gcontext->gm_rwlock);
-				*p_deviceptr = m_deviceptr;
-				wnotice("get managed chunk %zu", bytesize);
-				return CUDA_SUCCESS;
-			}
-			/* Oops, failed on tracker allocation */
-			gpuMemFreeManagedChunkNoLock(gcontext, m_deviceptr, gm_seg);
+			gpuMemSplitChunk(gm_seg, mclass + 1);
 		}
-		SpinLockRelease(&gm_seg->lock);
+
+		if (!dlist_is_empty(&gm_seg->free_chunks[mclass]))
+		{
+			dnode = dlist_pop_head_node(&gm_seg->free_chunks[mclass]);
+			gm_chunk = dlist_container(GpuMemChunk, chain, dnode);
+			Assert(GPUMEMCHUNK_IS_FREE(gm_chunk) &&
+				   gm_chunk->mclass == mclass);
+			memset(&gm_chunk->chain, 0, sizeof(dlist_node));
+			gm_chunk->refcnt++;
+			SpinLockRelease(&gm_seg->lock);
+			pthreadRWLockUnlock(&gcontext->gm_rwlock);
+			/* ok, found */
+			
+			
+			
+			return CUDA_SUCCESS;
+		}
 	}
 
 	if (!has_exclusive_lock)
@@ -739,454 +465,213 @@ retry:
 	}
 
 	/*
-	 * allocation of a new managed memory segment
+	 * allocation of a new segment
 	 */
-	rc = CUDA_ERROR_OUT_OF_MEMORY;
 	gm_seg = calloc(1, offsetof(GpuMemSegment, gm_chunks[nchunks]));
 	if (!gm_seg)
-		goto error_1;
-	memset(gm_seg, 0, offsetof(GpuMemSegment, gm_chunks[nchunks]));
-
-	wnotice("begin cuMemAllocManaged");
-   	rc = cuCtxPushCurrent(gcontext->cuda_context);
-	if (rc != CUDA_SUCCESS)
-		goto error_2;
-
-	rc = cuMemAllocManaged(&m_deviceptr,
-						   segment_sz,
-						   CU_MEM_ATTACH_GLOBAL);
-	if (rc != CUDA_SUCCESS)
-		goto error_3;
-	cuCtxPopCurrent(NULL);
-	wnotice("end cuMemAllocManaged");
-
-	gm_seg->segment_id	= -1;
-	gm_seg->gm_kind		= GpuMemKind__ManagedMemory;
-	gm_seg->m_segment	= m_deviceptr;
-	SpinLockInit(&gm_seg->lock);
-	for (i=0; i <= GPUMEM_CHUNKSZ_MAX_BIT; i++)
-		dlist_init(&gm_seg->free_chunks[i]);
-	mclass = GPUMEM_CHUNKSZ_MAX_BIT;
-	segment_usage = 0;
-	while (segment_usage < segment_sz &&
-		   mclass >= GPUMEM_CHUNKSZ_MIN_BIT)
 	{
-		if (segment_usage + (1UL << mclass) > segment_sz)
-			mclass--;
-		else
-		{
-			i = (segment_usage >> GPUMEM_CHUNKSZ_MIN_BIT);
-			gm_chunk = &gm_seg->gm_chunks[i];
-			gm_chunk->mclass = mclass;
-			dlist_push_tail(&gm_seg->free_chunks[mclass],
-							&gm_chunk->chain);
-			segment_usage += (1UL << mclass);
-		}
+		pthreadRWLockUnlock(&gcontext->gm_rwlock);
+		return CUDA_ERROR_OUT_OF_MEMORY;
 	}
-	Assert(segment_usage == segment_sz);
-	dlist_push_head(&gcontext->gm_managed_list, &gm_seg->chain);
-	goto retry;
 
-error_3:
-	cuCtxPopCurrent(NULL);
-error_2:
-	free(gm_seg);
-error_1:
-	pthreadRWLockUnlock(&gcontext->gm_rwlock);
-	return rc;
-}
+	rc = cuCtxPushCurrent(gcontext->cuda_context);
+	if (rc != CUDA_SUCCESS)
+	{
+		free(gm_seg);
+		pthreadRWLockUnlock(&gcontext->gm_rwlock);
+		return rc;
+	}
 
-/*
- * gpu_mmgr_alloc_segment - physical segment allocator
- */
-static CUresult
-__gpu_mmgr_alloc_segment(GpuMemDevice *gm_dev,
-						 GpuMemSegment *gm_seg,
-						 GpuMemKind gm_kind)
-{
-	size_t			segment_sz = (size_t)gpu_memory_segment_size_kb << 10;
-	GpuMemChunk	   *gm_chunk;
-	CUdeviceptr		m_segment = 0UL;
-	CUresult		rc;
-	cl_uint			i, nchunks;
-
-	wlog("Enter __gpu_mmgr_alloc_segment");
-
-	/* init fields */
-	gm_seg->gm_kind = gm_kind;
-	pg_atomic_init_u32(&gm_seg->mapcount, 0);
-	SpinLockInit(&gm_seg->lock);
-	memset(&gm_seg->m_handle, 0, sizeof(CUipcMemHandle));
-	gm_seg->iomap_handle = 0;
-	dlist_init(&gm_seg->free_chunks[0]);
-
-	/* allocation device memory */
 	switch (gm_kind)
 	{
 		case GpuMemKind__NormalMemory:
+			rc = cuMemAlloc(&m_segment, gm_segment_sz);
+			break;
+
+		case GpuMemKind__ManagedMemory:
+			rc = cuMemAllocManaged(&m_segment, gm_segment_sz,
+								   CU_MEM_ATTACH_GLOBAL);
+			break;
+
 		case GpuMemKind__IOMapMemory:
-			rc = cuMemAlloc(&m_segment, segment_sz);
-			if (rc != CUDA_SUCCESS)
-			{
-				elog(LOG, "GPU Mmgr: failed on cuMemAlloc: %s",
-					 errorText(rc));
-				return rc;
-			}
-			if (gm_kind == GpuMemKind__IOMapMemory)
+			rc = cuMemAlloc(&m_segment, gm_segment_sz);
+			if (rc == CUDA_SUCCESS)
 			{
 				StromCmd__MapGpuMemory cmd;
 
 				memset(&cmd, 0, sizeof(StromCmd__MapGpuMemory));
 				cmd.vaddress = m_segment;
-				cmd.length = segment_sz;
-				if (nvme_strom_ioctl(STROM_IOCTL__MAP_GPU_MEMORY, &cmd) != 0)
+				cmd.length = gm_segment_sz;
+				if (nvme_strom_ioctl(STROM_IOCTL__MAP_GPU_MEMORY, &cmd) == 0)
+					gm_seg->iomap_handle = cmd.handle;
+				else
 				{
-					elog(LOG, "STROM_IOCTL__MAP_GPU_MEMORY failed: %m");
+					wnotice("failed on STROM_IOCTL__MAP_GPU_MEMORY: %m");
 					cuMemFree(m_segment);
-					return CUDA_ERROR_MAP_FAILED;
+					rc = CUDA_ERROR_MAP_FAILED;
 				}
-                gm_seg->iomap_handle = cmd.handle;
 			}
 			break;
+
+		case GpuMemKind__HostMemory:
+			rc = cuMemHostAlloc((void **)&m_segment, gm_segment_sz,
+								CU_MEMHOSTALLOC_PORTABLE);
+			break;
+
 		default:
-			elog(FATAL, "Bug? unexpected GpuMemKind: %d", (int)gm_kind);
+			rc = CUDA_ERROR_INVALID_VALUE;
 			break;
 	}
-	/* IPC handler */
-	rc = cuIpcGetMemHandle(&gm_seg->m_handle, m_segment);
+	cuCtxPopCurrent(NULL);
+
 	if (rc != CUDA_SUCCESS)
 	{
-		elog(LOG, "GPU Mmgr: failed on cuIpcGetMemHandle: %s",
-			 errorText(rc));
-		cuMemFree(m_segment);
+		free(gm_seg);
+		pthreadRWLockUnlock(&gcontext->gm_rwlock);
 		return rc;
 	}
-
-	{
-		elog(LOG, "handle %08x %08x %08x %08x  %08x %08x %08x %08x",
-			 ((int *)gm_seg->m_handle.reserved)[0],
-			 ((int *)gm_seg->m_handle.reserved)[1],
-			 ((int *)gm_seg->m_handle.reserved)[2],
-			 ((int *)gm_seg->m_handle.reserved)[3],
-			 ((int *)gm_seg->m_handle.reserved)[4],
-			 ((int *)gm_seg->m_handle.reserved)[5],
-			 ((int *)gm_seg->m_handle.reserved)[6],
-			 ((int *)gm_seg->m_handle.reserved)[7]);
-		elog(LOG, "------ %08x %08x %08x %08x  %08x %08x %08x %08x",
-			 ((int *)gm_seg->m_handle.reserved)[8],
-			 ((int *)gm_seg->m_handle.reserved)[9],
-			 ((int *)gm_seg->m_handle.reserved)[10],
-			 ((int *)gm_seg->m_handle.reserved)[11],
-			 ((int *)gm_seg->m_handle.reserved)[12],
-			 ((int *)gm_seg->m_handle.reserved)[13],
-			 ((int *)gm_seg->m_handle.reserved)[14],
-			 ((int *)gm_seg->m_handle.reserved)[15]);
-	}
-
-	/* Setup free chunks */
-	nchunks = segment_sz / pgstrom_chunk_size();
-	for (i=0; i < nchunks; i++)
-	{
-		gm_chunk = &gm_seg->gm_chunks[i];
-		gm_chunk->refcnt = 0;
-		dlist_push_tail(&gm_seg->free_chunks[0],
-						&gm_chunk->chain);
-	}
+	/* setup of GpuMemSegment */
+	gm_seg->gm_kind		= gm_kind;
 	gm_seg->m_segment	= m_segment;
+	SpinLockInit(&gm_seg->lock);
+	for (i=0; i <= GPUMEM_CHUNKSZ_MAX_BIT; i++)
+		dlist_init(&gm_seg->free_chunks[i]);
 
-	/* segment becomes ready to use for backend processes */
-	pthreadRWLockWriteLock(&gm_dev->rwlock);
-	switch (gm_kind)
+	if (gm_kind == GpuMemKind__ManagedMemory)
 	{
-		case GpuMemKind__NormalMemory:
-			wlog("push to normal segment list %p", gm_seg);
-			dlist_push_tail(&gm_dev->normal_segment_list,
-							&gm_seg->chain);
-			break;
-		case GpuMemKind__IOMapMemory:
-			dlist_push_tail(&gm_dev->iomap_segment_list,
-							&gm_seg->chain);
-			break;
-		default:
-			elog(FATAL, "Bug? unexpected GpuMemKind: %d", (int)gm_kind);
-	}
-	pthreadRWLockUnlock(&gm_dev->rwlock);
+		cl_int	i, __mclass = GPUMEM_CHUNKSZ_MAX_BIT;
+		size_t	segment_usage = 0;
 
-	return CUDA_SUCCESS;
+		while (segment_usage < gm_segment_sz &&
+			   __mclass >= GPUMEM_CHUNKSZ_MIN_BIT)
+		{
+			if (segment_usage + (1UL << __mclass) > gm_segment_sz)
+				__mclass--;
+			else
+			{
+				i = (segment_usage >> GPUMEM_CHUNKSZ_MIN_BIT);
+				Assert(i < nchunks);
+				gm_chunk = &gm_seg->gm_chunks[i];
+				gm_chunk->mclass = __mclass;
+				dlist_push_tail(&gm_seg->free_chunks[__mclass],
+								&gm_chunk->chain);
+				segment_usage += (1UL << __mclass);
+			}
+		}
+		Assert(segment_usage == gm_segment_sz);
+	}
+	else
+	{
+		for (i=0; i < nchunks; i++)
+		{
+			gm_chunk = &gm_seg->gm_chunks[i];
+			dlist_push_tail(&gm_seg->free_chunks[mclass],
+							&gm_chunk->chain);
+		}
+	}
+	dlist_push_head(gm_segment_list, &gm_seg->chain);
+	goto retry;
 }
 
-static CUresult
-gpu_mmgr_alloc_segment(GpuMemDevice *gm_dev,
-					   GpuMemKind gm_kind)
+/*
+ * gpuMemAlloc
+ */
+CUresult
+__gpuMemAlloc(GpuContext *gcontext,
+			  CUdeviceptr *p_deviceptr,
+			  size_t bytesize,
+			  const char *filename, int lineno)
 {
-	GpuMemSegment  *gm_seg = NULL;
+	cl_int		mclass = get_next_log2(pgstrom_chunk_size());
+
+	if (bytesize != pgstrom_chunk_size())
+		return __gpuMemAllocRaw(gcontext,
+								p_deviceptr,
+								bytesize,
+								filename, lineno);
+	return gpuMemAllocChunk(GpuMemKind__NormalMemory,
+							gcontext, p_deviceptr, mclass,
+							filename, lineno);
+}
+
+/*
+ * gpuMemAllocIOMap
+ */
+CUresult
+__gpuMemAllocIOMap(GpuContext *gcontext,
+				   CUdeviceptr *p_deviceptr,
+				   size_t bytesize,
+				   const char *filename, int lineno)
+{
+	cl_int		mclass = get_next_log2(pgstrom_chunk_size());
+
+	/* not supported at this moment */
+	if (bytesize != pgstrom_chunk_size())
+		return CUDA_ERROR_INVALID_VALUE;
+	return gpuMemAllocChunk(GpuMemKind__IOMapMemory,
+                            gcontext, p_deviceptr, mclass,
+							filename, lineno);
+}
+
+/*
+ * __gpuMemAllocManaged
+ */
+CUresult
+__gpuMemAllocManaged(GpuContext *gcontext,
+					 CUdeviceptr *p_deviceptr,
+					 size_t bytesize,
+					 int flags,
+					 const char *filename, int lineno)
+{
+	cl_int		mclass = get_next_log2(bytesize);
+
+	if (flags != CU_MEM_ATTACH_GLOBAL ||
+		bytesize > gm_segment_sz / 2)
+		return __gpuMemAllocManagedRaw(gcontext,
+									   p_deviceptr,
+									   bytesize,
+									   flags,
+									   filename, lineno);
+	return gpuMemAllocChunk(GpuMemKind__NormalMemory,
+							gcontext, p_deviceptr, mclass,
+							filename, lineno);
+}
+
+/*
+ * __gpuMemAllocHost
+ */
+CUresult
+__gpuMemAllocHost(GpuContext *gcontext,
+				  void **p_hostptr,
+				  size_t bytesize,
+				  const char *filename, int lineno)
+{
+	cl_int		mclass = get_next_log2(pgstrom_chunk_size());
+	CUdeviceptr	tempptr;
 	CUresult	rc;
 
-	SpinLockAcquire(&gm_shead->lock);
-	if (!dlist_is_empty(&gm_shead->free_segment_list))
-	{
-		dlist_node *dnode = dlist_pop_head_node(&gm_shead->free_segment_list);
-		gm_seg = dlist_container(GpuMemSegment, chain, dnode);
-	}
-	SpinLockRelease(&gm_shead->lock);
+	if (bytesize != pgstrom_chunk_size())
+		return CUDA_ERROR_INVALID_VALUE;
 
-	if (!gm_seg)
-		return CUDA_ERROR_OUT_OF_MEMORY;
-	rc = __gpu_mmgr_alloc_segment(gm_dev, gm_seg, gm_kind);
-	if (rc != CUDA_SUCCESS)
-	{
-		SpinLockAcquire(&gm_shead->lock);
-		dlist_push_head(&gm_shead->free_segment_list,
-						&gm_seg->chain);
-		SpinLockRelease(&gm_shead->lock);
-	}
+	rc = gpuMemAllocChunk(GpuMemKind__HostMemory,
+						  gcontext, &tempptr, mclass,
+						  filename, lineno);
+	if (rc == CUDA_SUCCESS)
+		*p_hostptr = (void *)tempptr;
 	return rc;
-}
-
-/*
- * gpu_mmgr_reclaim_segment
- */
-static void
-gpu_mmgr_reclaim_segment(GpuMemDevice *gm_dev)
-{
-	GpuMemSegment  *gm_seg;
-	dlist_iter		iter;
-	CUresult		rc;
-
-	return; //tentative
-
-	pthreadRWLockWriteLock(&gm_dev->rwlock);
-	dlist_foreach(iter, &gm_dev->normal_segment_list)
-	{
-		gm_seg = dlist_container(GpuMemSegment,
-								 chain, iter.cur);
-		Assert(gm_seg->gm_kind == GpuMemKind__NormalMemory);
-		if (pg_atomic_read_u32(&gm_seg->mapcount) == 0)
-		{
-			dlist_delete(&gm_seg->chain);
-			pthreadRWLockUnlock(&gm_dev->rwlock);
-
-			/* release resources */
-			rc = cuMemFree(gm_seg->m_segment);
-			if (rc != CUDA_SUCCESS)
-				elog(FATAL, "GPU Mmgr: failed on cuMemFree: %s",
-					 errorText(rc));
-			gm_seg->m_segment = 0UL;
-			memset(&gm_seg->m_handle, 0, sizeof(CUipcMemHandle));
-			gm_seg->iomap_handle = 0;
-
-			/* segment can be reused */
-			SpinLockAcquire(&gm_shead->lock);
-			dlist_push_head(&gm_shead->free_segment_list,
-							&gm_seg->chain);
-			SpinLockRelease(&gm_shead->lock);
-			return;
-		}
-	}
-	pthreadRWLockUnlock(&gm_dev->rwlock);
-}
-
-/*
- * Buddy allocator of Unified Memory
- */
-
-
-
-
-
-
-
-
-
-
-/*
- * gpu_mmgr_sigterm_handler - SIGTERM handler
- */
-static void
-gpu_mmgr_sigterm_handler(SIGNAL_ARGS)
-{
-	int		save_errno = errno;
-
-	gpu_mmgr_got_sigterm = true;
-
-	SetLatch(MyLatch);
-
-	errno = save_errno;
-}
-
-/*
- * gpu_mmgr_event_loop
- */
-static void
-gpu_mmgr_event_loop(GpuMemDevice *gm_dev)
-{
-	int		ev = 0;
-
-	while (!gpu_mmgr_got_sigterm)
-	{
-		cl_uint	alloc_request;
-		int		nstatus = 0;
-		int		istatus = 0;
-
-		ResetLatch(MyLatch);
-
-		CHECK_FOR_INTERRUPTS();
-
-		if (ev & WL_TIMEOUT)
-			gpu_mmgr_reclaim_segment(gm_dev);
-
-		pthreadMutexLock(&gm_dev->mutex);
-		alloc_request = gm_dev->alloc_request;
-		gm_dev->alloc_request = 0;
-		gm_dev->revision++;
-		pthreadMutexUnlock(&gm_dev->mutex);
-
-		if ((alloc_request & GpuMemKind__NormalMemory) != 0)
-			nstatus = gpu_mmgr_alloc_segment(gm_dev,
-											 GpuMemKind__NormalMemory);
-		if ((alloc_request & GpuMemKind__IOMapMemory) != 0)
-			istatus = gpu_mmgr_alloc_segment(gm_dev,
-											 GpuMemKind__IOMapMemory);
-		pthreadMutexLock(&gm_dev->mutex);
-		/* write back error status, if any */
-		if ((alloc_request & GpuMemKind__NormalMemory) != 0)
-			gm_dev->status_alloc_normal	= nstatus;
-		if ((alloc_request & GpuMemKind__IOMapMemory) != 0)
-			gm_dev->status_alloc_iomap	= istatus;
-		/* clear the requests already allocated */
-		gm_dev->alloc_request &= ~alloc_request;
-		/* wake up any of the waiting backends  */
-		pthreadCondBroadcast(&gm_dev->cond);
-		pthreadMutexUnlock(&gm_dev->mutex);
-
-		ev = WaitLatch(MyLatch,
-					   WL_LATCH_SET |
-					   WL_TIMEOUT |
-					   WL_POSTMASTER_DEATH,
-					   5 * 1000);		/* wake up per 5sec */
-
-		/* emergency bailout if postmaster gets dead */
-		if (ev & WL_POSTMASTER_DEATH)
-			elog(FATAL, "emergency bailout due to unexpected postmaster dead");
-	}
-}
-
-/*
- * gpu_mmgr_bgworker_main
- */
-static void
-gpu_mmgr_bgworker_main(Datum bgworker_arg)
-{
-	size_t			segment_sz = (size_t)gpu_memory_segment_size_kb << 10;
-	GpuMemDevice   *gm_dev;
-	GpuMemSegment  *gm_seg;
-	dlist_node	   *dnode;
-	cl_long			i, nsegments;
-	CUresult		rc;
-
-	/* allows to accept signals */
-	pqsignal(SIGTERM, gpu_mmgr_sigterm_handler);
-	BackgroundWorkerUnblockSignals();
-
-	/* init resource management stuff */
-	CurrentResourceOwner = ResourceOwnerCreate(NULL, "GPU Mmgr");
-	CurrentMemoryContext = AllocSetContextCreate(TopMemoryContext,
-												 "GPU Mmgr",
-												 ALLOCSET_DEFAULT_MINSIZE,
-												 ALLOCSET_DEFAULT_INITSIZE,
-												 ALLOCSET_DEFAULT_MAXSIZE);
-	/*
-	 * init CUDA driver APIs stuff
-	 */
-	gpu_mmgr_cuda_dindex = DatumGetInt32(bgworker_arg);
-	Assert(gpu_mmgr_cuda_dindex >= 0 &&
-		   gpu_mmgr_cuda_dindex < numDevAttrs);
-	gm_dev = &gm_shead->gm_dev_array[gpu_mmgr_cuda_dindex];
-
-	/* ensure not to use MPS daemon */
-	setenv("CUDA_MPS_PIPE_DIRECTORY", "/dev/null", 1);
-
-	rc = cuInit(0);
-	if (rc != CUDA_SUCCESS)
-		elog(FATAL, "failed on cuInit(0): %s", errorText(rc));
-
-	rc = cuDeviceGet(&gpu_mmgr_cuda_device,
-					 devAttrs[gpu_mmgr_cuda_dindex].DEV_ID);
-	if (rc != CUDA_SUCCESS)
-		elog(FATAL, "failed on cuDeviceGet: %s", errorText(rc));
-
-	rc = cuCtxCreate(&gpu_mmgr_cuda_context,
-					 CU_CTX_SCHED_AUTO,
-					 gpu_mmgr_cuda_device);
-	if (rc != CUDA_SUCCESS)
-		elog(FATAL, "failed on cuCtxCreate: %s", errorText(rc));
-
-	/* allocation of I/O mapped memory */
-	nsegments = iomap_gpu_memory_size_kb / gpu_memory_segment_size_kb;
-	for (i=0; i < nsegments; i++)
-	{
-		if (dlist_is_empty(&gm_shead->free_segment_list))
-		{
-			elog(LOG, "Bug? All the I/O map segments were not configured");
-			break;
-		}
-		dnode = dlist_pop_head_node(&gm_shead->free_segment_list);
-		gm_seg = dlist_container(GpuMemSegment, chain, dnode);
-		rc = __gpu_mmgr_alloc_segment(gm_dev,
-									  gm_seg,
-									  GpuMemKind__IOMapMemory);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on allocation of I/O map memory: %s",
-				 errorText(rc));
-		elog(LOG, "I/O mapped memory %p-%p for GPU%u [%s]",
-			 (void *)(gm_seg->m_segment),
-			 (void *)(gm_seg->m_segment + segment_sz - 1),
-             gpu_mmgr_cuda_dindex,
-             devAttrs[gpu_mmgr_cuda_dindex].DEV_NAME);
-	}
-
-	/* enables to accept device memory allocation request */
-	pthreadMutexLock(&gm_dev->mutex);
-	gm_dev->serverLatch = MyLatch;
-	pthreadMutexUnlock(&gm_dev->mutex);
-
-	/* event loop of GPU Mmgr */
-	PG_TRY();
-	{
-		gpu_mmgr_event_loop(gm_dev);
-	}
-	PG_CATCH();
-	{
-		pthreadMutexLock(&gm_dev->mutex);
-		gm_dev->serverLatch = NULL;
-		pthreadCondBroadcast(&gm_dev->cond);
-		pthreadMutexUnlock(&gm_dev->mutex);
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-
-	pthreadMutexLock(&gm_dev->mutex);
-	gm_dev->serverLatch = NULL;
-	pthreadCondBroadcast(&gm_dev->cond);
-	pthreadMutexUnlock(&gm_dev->mutex);
-
-	elog(ERROR, "GPU Mmgr%d [%s] normally terminated",
-		 gpu_mmgr_cuda_dindex,
-		 devAttrs[gpu_mmgr_cuda_dindex].DEV_NAME);
 }
 
 /*
  * pgstrom_gpu_mmgr_init_gpucontext - Per GpuContext initialization
  */
-bool
+void
 pgstrom_gpu_mmgr_init_gpucontext(GpuContext *gcontext)
 {
 	pthreadRWLockInit(&gcontext->gm_rwlock);
 	dlist_init(&gcontext->gm_normal_list);
 	dlist_init(&gcontext->gm_iomap_list);
-	gcontext->gm_smap_array = calloc(num_gpu_memory_segments,
-									 sizeof(GpuMemSegMap));
-	return (gcontext->gm_smap_array != NULL);
+	dlist_init(&gcontext->gm_managed_list);
+	dlist_init(&gcontext->gm_hostmem_list);
 }
 
 /*
@@ -1195,26 +680,39 @@ pgstrom_gpu_mmgr_init_gpucontext(GpuContext *gcontext)
 void
 pgstrom_gpu_mmgr_cleanup_gpucontext(GpuContext *gcontext)
 {
-	GpuMemSegMap   *gm_smap;
-	dlist_iter		iter;
-	CUresult		rc;
+	GpuMemStatistics *gm_stat = &gm_stat_array[gcontext->cuda_dindex];
+	GpuMemSegment  *gm_seg;
+	dlist_node	   *dnode;
 
-	dlist_foreach(iter, &gcontext->gm_normal_list)
+	while (!dlist_is_empty(&gcontext->gm_normal_list))
 	{
-		gm_smap = dlist_container(GpuMemSegMap, chain, iter.cur);
-		rc = cuIpcCloseMemHandle(gm_smap->m_segment);
-		if (rc != CUDA_SUCCESS)
-			elog(NOTICE, "failed on cuIpcCloseMemHandle: %s", errorText(rc));
-		pg_atomic_sub_fetch_u32(&gm_smap->gm_seg->mapcount, 1);
+		dnode = dlist_pop_head_node(&gcontext->gm_normal_list);
+		gm_seg = dlist_container(GpuMemSegment, chain, dnode);
+		pg_atomic_sub_fetch_u64(&gm_stat->normal_usage, gm_segment_sz);
+		free(gm_seg);
 	}
 
-	dlist_foreach(iter, &gcontext->gm_iomap_list)
+	while (!dlist_is_empty(&gcontext->gm_managed_list))
 	{
-		gm_smap = dlist_container(GpuMemSegMap, chain, iter.cur);
-		rc = cuIpcCloseMemHandle(gm_smap->m_segment);
-		if (rc != CUDA_SUCCESS)
-			elog(NOTICE, "failed on cuIpcCloseMemHandle: %s", errorText(rc));
-		pg_atomic_sub_fetch_u32(&gm_smap->gm_seg->mapcount, 1);
+		dnode = dlist_pop_head_node(&gcontext->gm_managed_list);
+		gm_seg = dlist_container(GpuMemSegment, chain, dnode);
+		pg_atomic_sub_fetch_u64(&gm_stat->managed_usage, gm_segment_sz);
+		free(gm_seg);
+	}
+
+	while (!dlist_is_empty(&gcontext->gm_iomap_list))
+	{
+		dnode = dlist_pop_head_node(&gcontext->gm_iomap_list);
+		gm_seg = dlist_container(GpuMemSegment, chain, dnode);
+		pg_atomic_sub_fetch_u64(&gm_stat->iomap_usage, gm_segment_sz);
+		free(gm_seg);
+	}
+
+	while (!dlist_is_empty(&gcontext->gm_hostmem_list))
+	{
+		dnode = dlist_pop_head_node(&gcontext->gm_hostmem_list);
+		gm_seg = dlist_container(GpuMemSegment, chain, dnode);
+		free(gm_seg);
 	}
 }
 
@@ -1224,54 +722,24 @@ pgstrom_gpu_mmgr_cleanup_gpucontext(GpuContext *gcontext)
 static void
 pgstrom_startup_gpu_mmgr(void)
 {
-	GpuMemSegment *gm_seg;
-	size_t	segment_sz = (size_t)gpu_memory_segment_size_kb << 10;
-	Size	nchunks;
-	Size	unitsz;
-	Size	head_sz;
-	Size	required;
-	bool	found;
-	int		i;
+	size_t		required;
+	bool		found;
+	int			i;
 
 	if (shmem_startup_next)
 		(*shmem_startup_next)();
 
 	/*
-	 * GpuMemSegment (shared structure)
+	 * GpuMemStatistics
 	 */
-	nchunks = segment_sz / pgstrom_chunk_size();
-	head_sz = STROMALIGN(offsetof(GpuMemSystemHead,
-								  gm_dev_array[numDevAttrs]));
-	unitsz = STROMALIGN(offsetof(GpuMemSegment,
-								 gm_chunks[nchunks]));
-	required = (head_sz + unitsz * num_gpu_memory_segments);
-	gm_shead = ShmemInitStruct("GPU Device Memory Management Structure",
-							   required, &found);
+	required = STROMALIGN(sizeof(GpuMemStatistics) * numDevAttrs);
+	gm_stat_array = ShmemInitStruct("GPU Device Memory Statistics",
+									required, &found);
 	if (found)
-		elog(ERROR, "Bug? GPU Device Memory Management Structure exists");
-	memset(gm_shead, 0, required);
-
-	SpinLockInit(&gm_shead->lock);
-	dlist_init(&gm_shead->free_segment_list);
+		elog(ERROR, "Bug? GPU Device Memory Statistics already exist");
+	memset(gm_stat_array, 0, required);
 	for (i=0; i < numDevAttrs; i++)
-	{
-		GpuMemDevice *gm_dev = &gm_shead->gm_dev_array[i];
-
-		pthreadMutexInit(&gm_dev->mutex);
-		pthreadCondInit(&gm_dev->cond);
-		pthreadRWLockInit(&gm_dev->rwlock);
-		dlist_init(&gm_dev->normal_segment_list);
-		dlist_init(&gm_dev->iomap_segment_list);
-	}
-
-	gm_seg = (GpuMemSegment *)((char *)gm_shead + head_sz);
-	for (i=0; i < num_gpu_memory_segments; i++)
-	{
-		gm_seg->segment_id	= i;
-		dlist_push_tail(&gm_shead->free_segment_list,
-						&gm_seg->chain);
-		gm_seg = (GpuMemSegment *)((char *)gm_seg + unitsz);
-	}
+		gm_stat_array[i].total_size = devAttrs[i].DEV_TOTAL_MEMSZ;
 }
 
 /*
@@ -1280,14 +748,11 @@ pgstrom_startup_gpu_mmgr(void)
 void
 pgstrom_init_gpu_mmgr(void)
 {
-	BackgroundWorker worker;
 	long		sysconf_pagesize;		/* _SC_PAGESIZE */
 	long		sysconf_phys_pages;		/* _SC_PHYS_PAGES */
 	Size		shared_buffer_size = (Size)NBuffers * (Size)BLCKSZ;
 	Size		segment_sz;
 	Size		required;
-	size_t		nchunks;
-	int			i;
 
 	/*
 	 * segment size of the device memory in kB
@@ -1307,40 +772,6 @@ pgstrom_init_gpu_mmgr(void)
 		elog(ERROR, "pg_strom.gpu_memory_segment_size(%dkB) must be multiple number of pg_strom.chunk_size(%dkB)",
 			 gpu_memory_segment_size_kb,
 			 (int)(pgstrom_chunk_size() >> 10));
-
-	/*
-	 * count total number of device memory segments
-	 */
-	num_gpu_memory_segments = 0;
-	for (i=0; i < numDevAttrs; i++)
-	{
-		num_gpu_memory_segments += (devAttrs[i].DEV_TOTAL_MEMSZ +
-									segment_sz - 1) / segment_sz;
-	}
-
-	/*
-	 * size of the i/o mapped device memory (for NVMe-Strom)
-	 */
-	DefineCustomIntVariable("pg_strom.gpu_memory_iomap_size",
-							"size of I/O mapped GPU device memory",
-							NULL,
-							&iomap_gpu_memory_size_kb,
-							0,
-							0,
-							gpu_memory_segment_size_kb *
-							num_gpu_memory_segments,
-							PGC_POSTMASTER,
-							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
-							NULL, NULL, NULL);
-	if (gpu_memory_segment_size_kb % gpu_memory_segment_size_kb != 0)
-		elog(ERROR, "pg_strom.gpu_memory_iomap_size (%dkB) must be multiple number of pg_strom.gpu_memory_segment_size(%dkB)",
-			 iomap_gpu_memory_size_kb,
-			 gpu_memory_segment_size_kb);
-	num_gpu_iomap_segments = (iomap_gpu_memory_size_kb /
-							  gpu_memory_segment_size_kb) * numDevAttrs;
-	if (num_gpu_iomap_segments >= num_gpu_memory_segments)
-		elog(ERROR, "pg_strom.gpu_memory_iomap_size (%dkB) is too large",
-			 iomap_gpu_memory_size_kb);
 
 	/* pg_strom.nvme_strom_enabled */
 	DefineCustomBoolVariable("pg_strom.nvme_strom_enabled",
@@ -1380,36 +811,13 @@ pgstrom_init_gpu_mmgr(void)
 	nvme_strom_threshold = ((sysconf_pagesize * sysconf_phys_pages -
 							 shared_buffer_size) * 2 / 3 +
 							shared_buffer_size) / BLCKSZ;
-
 	/*
 	 * request for the static shared memory
 	 */
-	nchunks = segment_sz / pgstrom_chunk_size();
-	required = STROMALIGN(offsetof(GpuMemSystemHead,
-								   gm_dev_array[numDevAttrs])) +
-		STROMALIGN(offsetof(GpuMemSegment,
-							gm_chunks[nchunks])) * num_gpu_memory_segments;
-
+	required = STROMALIGN(sizeof(GpuMemStatistics) * numDevAttrs);
 	RequestAddinShmemSpace(required);
 	shmem_startup_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_gpu_mmgr;
-
-	/*
-	 * setup a background server process for memory management
-	 */
-	for (i=0; i < numDevAttrs; i++)
-	{
-		memset(&worker, 0, sizeof(BackgroundWorker));
-		snprintf(worker.bgw_name, sizeof(worker.bgw_name),
-				 "GPU Mmgr%d [%s]", i, devAttrs[i].DEV_NAME);
-
-		worker.bgw_flags = BGWORKER_SHMEM_ACCESS;
-		worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
-		worker.bgw_restart_time = 1;
-		worker.bgw_main = gpu_mmgr_bgworker_main;
-		worker.bgw_main_arg = Int32GetDatum(i);
-		RegisterBackgroundWorker(&worker);
-	}
 }
 
 /* ----------------------------------------------------------------
@@ -1442,10 +850,8 @@ gpuMemCopyFromSSD(GpuTask *gtask,
 				  pgstrom_data_store *pds)
 {
 	GpuContext	   *gcontext = GpuWorkerCurrentContext;
-	size_t			segment_sz = (size_t)gpu_memory_segment_size_kb << 10;
 	StromCmd__MemCopySsdToGpu cmd;
 	GpuMemSegment  *gm_seg;
-	GpuMemSegMap   *gm_smap;
 	BlockNumber	   *block_nums;
 	void		   *block_data;
 	size_t			offset;
@@ -1453,20 +859,17 @@ gpuMemCopyFromSSD(GpuTask *gtask,
 	cl_uint			nr_loaded;
 	CUresult		rc;
 
-	if (iomap_gpu_memory_size_kb == 0)
-		werror("NVMe-Strom is not configured");
 	/* ensure the @m_kds is exactly i/o mapped buffer */
 	Assert(gcontext != NULL);
 	gm_seg = lookupGpuMem(gcontext, m_kds);
-	if (!gm_seg || gm_seg->iomap_handle == 0UL)
+	if (!gm_seg ||
+		gm_seg->gm_kind != GpuMemKind__IOMapMemory ||
+		gm_seg->iomap_handle == 0UL)
 		werror("nvme-strom: invalid device pointer");
 	Assert(pds->kds.format == KDS_FORMAT_BLOCK);
-
-	gm_smap = &gcontext->gm_smap_array[gm_seg->segment_id];
-	if (m_kds < gm_smap->m_segment ||
-		m_kds + pds->kds.length >= gm_smap->m_segment + segment_sz)
-		werror("nvme-strom: P2P DMA destination out of range");
-	offset = m_kds - gm_smap->m_segment;
+	Assert(m_kds >= gm_seg->m_segment &&
+		   m_kds + pds->kds.length <= gm_seg->m_segment + gm_segment_sz);
+	offset = m_kds - gm_seg->m_segment;
 
 	/* nothing special if all the blocks are already loaded */
 	if (pds->nblocks_uncached == 0)
@@ -1569,7 +972,8 @@ TablespaceCanUseNvmeStrom(Oid tablespace_oid)
 	int			fdesc;
 	bool		found;
 
-	if (iomap_gpu_memory_size_kb == 0 || !nvme_strom_enabled)
+//	if (iomap_gpu_memory_size_kb == 0 || !nvme_strom_enabled)
+	if (!nvme_strom_enabled)
 		return false;	/* NVMe-Strom is not configured or enabled */
 
 	if (!OidIsValid(tablespace_oid))

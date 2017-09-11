@@ -111,14 +111,10 @@ typedef struct GpuContext
 	dlist_head		restrack[RESTRACK_HASHSIZE];
 	/* GPU device memory management */
 	pthread_rwlock_t gm_rwlock;
-	dlist_head		gm_normal_list;		/* list of GpuMemSegMap */
-	dlist_head		gm_iomap_list;		/* list of GpuMemSegMap */
-	dlist_head		gm_managed_list;	/* list of GpuMemSegment */
-	struct GpuMemSegMap *gm_smap_array;
-
-	slock_t			pds_blocks_lock;
-	dlist_head		pds_blocks_active_list;
-	dlist_head		pds_blocks_free_list;
+	dlist_head		gm_normal_list;		/* list of device memory segments */
+	dlist_head		gm_iomap_list;		/* list of I/O map memory segments */
+	dlist_head		gm_managed_list;	/* list of managed memory segments */
+	dlist_head		gm_hostmem_list;	/* list of Host memory segments */
 	/* error information buffer */
 	pg_atomic_uint32 error_level;
 	const char	   *error_filename;
@@ -408,6 +404,10 @@ extern CUresult __gpuMemAllocManagedRaw(GpuContext *gcontext,
 										size_t bytesize,
 										int flags,
 										const char *filename, int lineno);
+extern CUresult __gpuMemAllocHostRaw(GpuContext *gcontext,
+									 void **p_hostptr,
+									 size_t bytesize,
+									 const char *filename, int lineno);
 extern CUresult __gpuMemAlloc(GpuContext *gcontext,
 							  CUdeviceptr *p_devptr,
 							  size_t bytesize,
@@ -421,11 +421,17 @@ extern CUresult __gpuMemAllocIOMap(GpuContext *gcontext,
 								   CUdeviceptr *p_devptr,
 								   size_t bytesize,
 								   const char *filename, int lineno);
+extern CUresult __gpuMemAllocHost(GpuContext *gcontext,
+								  void **p_hostptr,
+								  size_t bytesize,
+								  const char *filename, int lineno);
 extern CUresult gpuMemFreeExtra(GpuContext *gcontext,
 								CUdeviceptr m_deviceptr,
 								void *extra);
 extern CUresult gpuMemFree(GpuContext *gcontext,
 						   CUdeviceptr devptr);
+extern CUresult gpuMemFreeHost(GpuContext *gcontext,
+							   void *hostptr);
 #define gpuMemAllocRaw(a,b,c)				\
 	__gpuMemAllocRaw((a),(b),(c),__FILE__,__LINE__)
 #define gpuMemAllocManagedRaw(a,b,c,d)		\
@@ -436,12 +442,14 @@ extern CUresult gpuMemFree(GpuContext *gcontext,
 	__gpuMemAllocManaged((a),(b),(c),(d),__FILE__,__LINE__)
 #define gpuMemAllocIOMap(a,b,c)				\
 	__gpuMemAllocIOMap((a),(b),(c),__FILE__,__LINE__)
+#define gpuMemAllocHost(a,b,c,d)				\
+	__gpuMemAllocHost((a),(b),(c),(d),__FILE__,__LINE__)
 
 extern void gpuMemCopyFromSSD(GpuTask *gtask,
 							  CUdeviceptr m_kds,
 							  pgstrom_data_store *pds);
 
-extern bool pgstrom_gpu_mmgr_init_gpucontext(GpuContext *gcontext);
+extern void pgstrom_gpu_mmgr_init_gpucontext(GpuContext *gcontext);
 extern void pgstrom_gpu_mmgr_cleanup_gpucontext(GpuContext *gcontext);
 extern void pgstrom_init_gpu_mmgr(void);
 extern Datum pgstrom_device_meminfo(PG_FUNCTION_ARGS);
@@ -480,6 +488,9 @@ extern void untrackCudaProgram(GpuContext *gcontext, ProgramId program_id);
 extern bool trackGpuMem(GpuContext *gcontext, CUdeviceptr devptr, void *extra);
 extern void *lookupGpuMem(GpuContext *gcontext, CUdeviceptr devptr);
 extern void *untrackGpuMem(GpuContext *gcontext, CUdeviceptr devptr);
+extern bool trackHostMem(GpuContext *gcontext, void *hostptr, void *extra);
+extern void *lookupHostMem(GpuContext *gcontext, void *hostptr);
+extern void *untrackHostMem(GpuContext *gcontext, void *hostptr);
 extern void pgstrom_init_gpu_context(void);
 
 /*

@@ -39,7 +39,8 @@ static dlist_head	activeGpuContextList;
  * leaks.
  */
 #define RESTRACK_CLASS__GPUMEMORY		2
-#define RESTRACK_CLASS__GPUPROGRAM		3
+#define RESTRACK_CLASS__HOSTMEMORY		3
+#define RESTRACK_CLASS__GPUPROGRAM		4
 
 typedef struct ResourceTracker
 {
@@ -51,6 +52,10 @@ typedef struct ResourceTracker
 			CUdeviceptr	ptr;	/* RESTRACK_CLASS__GPUMEMORY */
 			void   *extra;
 		} devmem;
+		struct {
+			void   *ptr;		/* RESTRACK_CLASS__HOSTMEMORY */
+			void   *extra;
+		} hostmem;
 		ProgramId	program_id;	/* RESTRACK_CLASS__GPUPROGRAM */
 	} u;
 } ResourceTracker;
@@ -123,7 +128,7 @@ untrackCudaProgram(GpuContext *gcontext, ProgramId program_id)
 }
 
 /*
- * resource tracker for normal device memory
+ * resource tracker for device memory
  */
 bool
 trackGpuMem(GpuContext *gcontext, CUdeviceptr devptr, void *extra)
@@ -208,6 +213,94 @@ untrackGpuMem(GpuContext *gcontext, CUdeviceptr devptr)
 	SpinLockRelease(&gcontext->restrack_lock);
 	wnotice("Bug? GPU Device Memory %p was not tracked", (void *)devptr);
 	abort();
+	return NULL;
+}
+
+/*
+ * resource tracker for host memory
+ */
+bool
+trackHostMem(GpuContext *gcontext, void *hostptr, void *extra)
+{
+	ResourceTracker *tracker = calloc(1, sizeof(ResourceTracker));
+	pg_crc32	crc;
+
+	if (!tracker)
+		return false;	/* out of memory */
+
+	crc = resource_tracker_hashval(RESTRACK_CLASS__HOSTMEMORY,
+								   &hostptr, sizeof(void *));
+	tracker->crc = crc;
+	tracker->resclass = RESTRACK_CLASS__HOSTMEMORY;
+	tracker->u.hostmem.ptr = hostptr;
+	tracker->u.hostmem.extra = extra;
+
+	SpinLockAcquire(&gcontext->restrack_lock);
+	dlist_push_tail(&gcontext->restrack[crc % RESTRACK_HASHSIZE],
+					&tracker->chain);
+	SpinLockRelease(&gcontext->restrack_lock);
+	return true;
+}
+
+void *
+lookupHostMem(GpuContext *gcontext, void *hostptr)
+{
+	dlist_head *restrack_list;
+	dlist_iter	iter;
+	pg_crc32	crc;
+	void	   *extra = NULL;
+
+	crc = resource_tracker_hashval(RESTRACK_CLASS__HOSTMEMORY,
+								   &hostptr, sizeof(void *));
+	restrack_list = &gcontext->restrack[crc % RESTRACK_HASHSIZE];
+	SpinLockAcquire(&gcontext->restrack_lock);
+	dlist_foreach (iter, restrack_list)
+	{
+		ResourceTracker *tracker
+			= dlist_container(ResourceTracker, chain, iter.cur);
+
+		if (tracker->crc == crc &&
+			tracker->resclass == RESTRACK_CLASS__HOSTMEMORY &&
+			tracker->u.hostmem.ptr == hostptr)
+		{
+			extra = tracker->u.hostmem.extra;
+			break;
+		}
+	}
+	SpinLockRelease(&gcontext->restrack_lock);
+	return extra;
+}
+
+void *
+untrackHostMem(GpuContext *gcontext, void *hostptr)
+{
+	dlist_head *restrack_list;
+	dlist_iter	iter;
+	pg_crc32	crc;
+	void	   *extra;
+
+	crc = resource_tracker_hashval(RESTRACK_CLASS__GPUMEMORY,
+								   &hostptr, sizeof(void *));
+	restrack_list = &gcontext->restrack[crc % RESTRACK_HASHSIZE];
+	SpinLockAcquire(&gcontext->restrack_lock);
+	dlist_foreach (iter, restrack_list)
+	{
+		ResourceTracker *tracker
+			= dlist_container(ResourceTracker, chain, iter.cur);
+
+		if (tracker->crc == crc &&
+			tracker->resclass == RESTRACK_CLASS__HOSTMEMORY &&
+			tracker->u.hostmem.ptr == hostptr)
+		{
+			dlist_delete(&tracker->chain);
+			extra = tracker->u.hostmem.extra;
+			SpinLockRelease(&gcontext->restrack_lock);
+			free(tracker);
+			return extra;
+		}
+	}
+	SpinLockRelease(&gcontext->restrack_lock);
+	wnotice("Bug? GPU Device Memory %p was not tracked", hostptr);
 	return NULL;
 }
 
@@ -653,15 +746,7 @@ AllocGpuContext(int cuda_dindex,
 	for (i=0; i < RESTRACK_HASHSIZE; i++)
 		dlist_init(&gcontext->restrack[i]);
 	/* GPU device memory management */
-	if (!pgstrom_gpu_mmgr_init_gpucontext(gcontext))
-	{
-		free(gcontext);
-		elog(ERROR, "out of memory");
-	}
-	/* PDS keeper for KDS_FORMAT_BLOCK */
-	SpinLockInit(&gcontext->pds_blocks_lock);
-	dlist_init(&gcontext->pds_blocks_active_list);
-	dlist_init(&gcontext->pds_blocks_free_list);
+	pgstrom_gpu_mmgr_init_gpucontext(gcontext);
 	/* error information buffer */
 	pg_atomic_init_u32(&gcontext->error_level, 0);
 	gcontext->error_filename = NULL;
