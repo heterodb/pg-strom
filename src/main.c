@@ -108,7 +108,7 @@ pgstrom_init_misc_guc(void)
 							"default size of pgstrom_data_store",
 							NULL,
 							&pgstrom_chunk_size_kb,
-							65536 - (2 * BLCKSZ / 1024),	/* almost 64MB */
+							65536,	/* 64MB */
 							4096,
 							MAX_KILOBYTES,
 							PGC_INTERNAL,

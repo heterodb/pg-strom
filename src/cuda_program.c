@@ -859,6 +859,8 @@ build_cuda_program(program_cache_entry *src_entry)
 						&bin_entry->lru_chain);
 		dlist_push_head(&pgcache_head->build_list,
 						&bin_entry->build_chain);
+		bin_entry->refcnt = 1;
+		SpinLockRelease(&pgcache_head->lock);
 	}
 	STROM_CATCH();
 	{
@@ -1115,7 +1117,7 @@ retry_program_id:
 	/*
 	 * Start asynchronous code build with NVRTC
 	 */
-	pthreadCondSignal(&gcontext->cond_workers);
+	pthreadCondSignal(&gcontext->cond);
 
 	/* wait for completion of build, if needed */
 	while (wait_for_build)

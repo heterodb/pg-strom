@@ -413,16 +413,22 @@ GpuContextWorkerMain(void *arg)
 	}
 	GpuWorkerCurrentContext = gcontext;
 
+	wnotice("worker is now running");
 	pthreadMutexLock(&gcontext->mutex);
 	while (!gcontext->terminate_workers)
 	{
+		//try asyncronous program build if any
+		//don't forget to signal cond
+
 		if (dlist_is_empty(&gcontext->pending_tasks))
-			pthreadCondWait(&gcontext->cond_workers, &gcontext->mutex);
+			pthreadCondWait(&gcontext->cond, &gcontext->mutex);
 		else
 		{
 			dnode = dlist_pop_head_node(&gcontext->pending_tasks);
 			gtask = dlist_container(GpuTask, chain, dnode);
 			pthreadMutexUnlock(&gcontext->mutex);
+
+			wnotice("fetch a GpuTask %p", gtask);
 
 			/* Execution of the GpuTask */
 			STROM_TRY();
@@ -473,18 +479,21 @@ GpuContextWorkerMain(void *arg)
 			}
 			STROM_CATCH();
 			{
+				wnotice("Got exception, thus, exit workers");
 				/* Wake up and terminate other workers also */
 				pthreadMutexLock(&gcontext->mutex);
 				gcontext->terminate_workers = true;
-				pthreadCondBroadcast(&gcontext->cond_backend);
-				pthreadCondBroadcast(&gcontext->cond_workers);
+				pthreadCondBroadcast(&gcontext->cond);
 				pthreadMutexUnlock(&gcontext->mutex);
+				SetLatch(MyLatch);
 			}
 			STROM_END_TRY();
+
+			pthreadMutexLock(&gcontext->mutex);
 		}
-		pthreadMutexLock(&gcontext->mutex);
 	}
 	pthreadMutexUnlock(&gcontext->mutex);
+	wnotice("worker now exit...");
 
 	return NULL;
 }
@@ -549,7 +558,7 @@ ActivateGpuContext(GpuContext *gcontext)
 
 			pthreadMutexLock(&gcontext->mutex);
 			gcontext->terminate_workers = true;
-			pthreadCondBroadcast(&gcontext->cond_workers);
+			pthreadCondBroadcast(&gcontext->cond);
 			pthreadMutexUnlock(&gcontext->mutex);
 
 			while (i > 0)
@@ -570,6 +579,7 @@ ActivateGpuContext(GpuContext *gcontext)
 		}
 		gcontext->worker_threads[i] = thread;
 	}
+	elog(NOTICE, "GpuContext is activated (%p)", gcontext->cuda_context);
 }
 
 /*
@@ -593,6 +603,7 @@ AllocGpuContext(int cuda_dindex,
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuInit: %s", errorText(rc));
 		cuda_driver_initialized = true;
+		elog(NOTICE, "CUDA Driver Initialized");
 	}
 
 	/*
@@ -660,11 +671,11 @@ AllocGpuContext(int cuda_dindex,
 	gcontext->global_num_running_tasks
 		= &global_num_running_tasks[cuda_dindex];
 	pthreadMutexInit(&gcontext->mutex);
-	pthreadCondInit(&gcontext->cond_backend);
-	pthreadCondInit(&gcontext->cond_workers);
+	pthreadCondInit(&gcontext->cond);
 	gcontext->num_running_tasks = 0;
 	dlist_init(&gcontext->pending_tasks);
 	dlist_init(&gcontext->completed_tasks);
+	gcontext->num_workers = local_max_async_tasks;
 
 	SpinLockAcquire(&activeGpuContextLock);
 	dlist_push_head(&activeGpuContextList, &gcontext->chain);
@@ -726,7 +737,7 @@ SynchronizeGpuContext(GpuContext *gcontext)
 	/* signal to terminate workers */
 	pthreadMutexLock(&gcontext->mutex);
 	gcontext->terminate_workers = true;
-	pthreadCondBroadcast(&gcontext->cond_workers);
+	pthreadCondBroadcast(&gcontext->cond);
 	pthreadMutexUnlock(&gcontext->mutex);
 
 	/* Drop CUDA context to interrupt long-running GPU kernels, if any */

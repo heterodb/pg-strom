@@ -110,11 +110,12 @@ typedef struct GpuContext
 	slock_t			restrack_lock;
 	dlist_head		restrack[RESTRACK_HASHSIZE];
 	/* GPU device memory management */
-	pthread_rwlock_t gm_smap_rwlock;
-	dlist_head		gm_smap_normal_list;
-	dlist_head		gm_smap_managed_list;
-	dlist_head		gm_smap_iomap_list;
+	pthread_rwlock_t gm_rwlock;
+	dlist_head		gm_normal_list;		/* list of GpuMemSegMap */
+	dlist_head		gm_iomap_list;		/* list of GpuMemSegMap */
+	dlist_head		gm_managed_list;	/* list of GpuMemSegment */
 	struct GpuMemSegMap *gm_smap_array;
+
 	slock_t			pds_blocks_lock;
 	dlist_head		pds_blocks_active_list;
 	dlist_head		pds_blocks_free_list;
@@ -126,8 +127,7 @@ typedef struct GpuContext
 	/* management of the work-queue */
 	pg_atomic_uint32 *global_num_running_tasks;
 	pthread_mutex_t	mutex;
-	pthread_cond_t	cond_backend;	/* notification of task completion */
-	pthread_cond_t	cond_workers;	/* notification of task enqueue */
+	pthread_cond_t	cond;
 	cl_bool			terminate_workers;
 	cl_int			num_running_tasks;
 	dlist_head		pending_tasks;		/* list of GpuTask */
@@ -542,7 +542,7 @@ extern void pgstrom_init_gpu_context(void);
 			__fname = (__fname ? __fname + 1 : __FILE__);				\
 			GpuContextWorkerReportError((elevel),						\
 										__fname, __LINE__,				\
-										"%s: (%s:%d) " fmt,				\
+										"%s: (%s:%d) " fmt "\n",		\
 										(elabel), __fname, __LINE__,	\
 										##__VA_ARGS__);					\
 		}																\

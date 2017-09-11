@@ -269,6 +269,7 @@ fetch_next_gputask(GpuTaskState *gts)
 	GpuContext	   *gcontext = gts->gcontext;
 	GpuTask		   *gtask;
 	dlist_node	   *dnode;
+	cl_int			ev;
 
 	CHECK_FOR_INTERRUPTS();
 
@@ -280,6 +281,7 @@ fetch_next_gputask(GpuTaskState *gts)
 		pthreadMutexLock(&gcontext->mutex);
 		for (;;)
 		{
+			ResetLatch(MyLatch);
 			fetch_completed_gputasks(gcontext);
 			local_num_running_tasks = (gts->num_ready_tasks +
 									   gcontext->num_running_tasks);
@@ -301,7 +303,8 @@ fetch_next_gputask(GpuTaskState *gts)
 				dlist_push_tail(&gcontext->pending_tasks, &gtask->chain);
 				gcontext->num_running_tasks++;
 				pg_atomic_add_fetch_u32(gcontext->global_num_running_tasks, 1);
-				pthreadCondSignal(&gcontext->cond_workers);
+				pthreadCondSignal(&gcontext->cond);
+				wnotice("cond signal done");
 			}
 			else if (!dlist_is_empty(&gts->ready_tasks))
 			{
@@ -318,8 +321,19 @@ fetch_next_gputask(GpuTaskState *gts)
 				 * Even though a few GpuTasks are running, but nobody gets
 				 * completed yet. Try to wait for completion to 
 				 */
-				pthreadCondWait(&gcontext->cond_backend,
-								&gcontext->mutex);
+				pthreadMutexUnlock(&gcontext->mutex);
+
+				ev = WaitLatch(MyLatch,
+							   WL_LATCH_SET |
+							   WL_TIMEOUT |
+							   WL_POSTMASTER_DEATH,
+							   500L);
+				if (ev & WL_POSTMASTER_DEATH)
+					ereport(FATAL,
+							(errcode(ERRCODE_ADMIN_SHUTDOWN),
+							 errmsg("Unexpected Postmaster dead")));
+
+				pthreadMutexLock(&gcontext->mutex);
 			}
 			else
 			{
@@ -351,8 +365,17 @@ fetch_next_gputask(GpuTaskState *gts)
 			pthreadMutexUnlock(&gcontext->mutex);
 			return NULL;
 		}
-		pthreadCondWait(&gcontext->cond_backend,
-						&gcontext->mutex);
+
+		ev = WaitLatch(MyLatch,
+					   WL_LATCH_SET |
+					   WL_TIMEOUT |
+					   WL_POSTMASTER_DEATH,
+					   500L);
+		if (ev & WL_POSTMASTER_DEATH)
+			ereport(FATAL,
+					(errcode(ERRCODE_ADMIN_SHUTDOWN),
+					 errmsg("Unexpected Postmaster dead")));
+
 		fetch_completed_gputasks(gcontext);
 	}
 	pthreadMutexUnlock(&gcontext->mutex);
