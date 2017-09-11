@@ -601,8 +601,7 @@ extern void pgstromInitGpuTask(GpuTaskState *gts, GpuTask *gtask);
 extern int	pgstromProcessGpuTask(GpuTask *gtask, CUmodule cuda_module);
 extern void pgstromReleaseGpuTask(GpuTask *gtask);
 
-extern const char *__errorText(int errcode, const char *filename, int lineno);
-#define errorText(errcode)		__errorText((errcode),__FILE__,__LINE__)
+extern const char *errorText(int errcode);
 extern const char *errorTextKernel(kern_errorbuf *kerror);
 extern void pgstrom_init_gputasks(void);
 

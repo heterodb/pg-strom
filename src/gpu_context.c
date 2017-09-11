@@ -367,11 +367,9 @@ GpuContextWorkerReportError(int elevel,
 
 	va_start(va_args, fmt);
 	length = vfprintf(stderr, fmt, va_args);
+	va_end(va_args);
 	if (elevel < ERROR)
-	{
-		va_end(va_args);
 		return;
-	}
 
 	if (pg_atomic_compare_exchange_u32(&gcontext->error_level,
 									   &expected, (uint32)elevel))
@@ -380,9 +378,12 @@ GpuContextWorkerReportError(int elevel,
 		gcontext->error_lineno		= lineno;
 		gcontext->error_message		= malloc(length + 1);
 		if (gcontext->error_message)
-			vsnprintf(gcontext->error_message, length+1, fmt, va_args);
+		{
+			va_start(va_args, fmt);
+			vsnprintf(gcontext->error_message, length, fmt, va_args);
+			va_end(va_args);
+		}
 	}
-	va_end(va_args);
 
 	if (GpuWorkerExceptionStack)
 		siglongjmp(*GpuWorkerExceptionStack, 1);

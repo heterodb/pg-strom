@@ -233,6 +233,18 @@ gpuMemFree(GpuContext *gcontext,
 }
 
 /*
+ * gpuMemFreeHost
+ */
+CUresult
+gpuMemFreeHost(GpuContext *gcontext,
+			   void *hostptr)
+{
+	return gpuMemFreeExtra(gcontext,
+						   (CUdeviceptr)hostptr,
+						   untrackGpuMem(gcontext, (CUdeviceptr)hostptr));
+}
+
+/*
  * gpuMemAllocRaw
  */
 CUresult

@@ -662,15 +662,10 @@ pgstromReleaseGpuTask(GpuTask *gtask)
  * errorText - string form of the error code
  */
 const char *
-__errorText(int errcode, const char *__filename, int lineno)
+errorText(int errcode)
 {
 	static __thread char buffer[800];
-	const char	   *filename;
 	const char	   *label;
-
-	/* pick up the last component of the relative pathname */
-	filename = strrchr(__filename, '/');
-	filename = (!filename ? __filename : filename + 1);
 
 	switch (errcode)
 	{
@@ -805,34 +800,29 @@ __errorText(int errcode, const char *__filename, int lineno)
 				/* Likely CUDA driver error */
 				if (cuGetErrorName(errcode, &error_val) == CUDA_SUCCESS &&
 					cuGetErrorString(errcode, &error_str) == CUDA_SUCCESS)
-					snprintf(buffer, sizeof(buffer), "%s - %s (%s:%d)",
-							 error_val, error_str,
-							 filename, lineno);
+					snprintf(buffer, sizeof(buffer), "%s - %s",
+							 error_val, error_str);
 				else
-					snprintf(buffer, sizeof(buffer), "%d - unknown (%s:%d)",
-							 errcode,
-							 filename, lineno);
+					snprintf(buffer, sizeof(buffer), "%d - unknown",
+							 errcode);
 			}
 			else if (errcode >= StromError_CudaDevRunTimeBase)
 			{
 				/* Or, unknown CUDA runtime error */
 				snprintf(buffer, sizeof(buffer),
-						 "CUDA Runtime Error %d - unknown (%s:%d)",
-						 errcode - StromError_CudaDevRunTimeBase,
-						 filename, lineno);
+						 "CUDA Runtime Error %d - unknown",
+						 errcode - StromError_CudaDevRunTimeBase);
 			}
 			else
 			{
 				/* ??? Unknown PG-Strom error??? */
 				snprintf(buffer, sizeof(buffer),
-						 "Unexpected Error: %d (%s:%d)",
-						 errcode,
-						 filename, lineno);
+						 "Unexpected Error: %d",
+						 errcode);
 			}
 			return buffer;
 	}
-	snprintf(buffer, sizeof(buffer), "%s (%s:%d)", label, filename, lineno);
-	return buffer;
+	return label;
 }
 
 /*
