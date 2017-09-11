@@ -442,8 +442,8 @@ extern CUresult gpuMemFreeHost(GpuContext *gcontext,
 	__gpuMemAllocManaged((a),(b),(c),(d),__FILE__,__LINE__)
 #define gpuMemAllocIOMap(a,b,c)				\
 	__gpuMemAllocIOMap((a),(b),(c),__FILE__,__LINE__)
-#define gpuMemAllocHost(a,b,c,d)				\
-	__gpuMemAllocHost((a),(b),(c),(d),__FILE__,__LINE__)
+#define gpuMemAllocHost(a,b,c)				\
+	__gpuMemAllocHost((a),(b),(c),__FILE__,__LINE__)
 
 extern void gpuMemCopyFromSSD(GpuTask *gtask,
 							  CUdeviceptr m_kds,
@@ -483,14 +483,13 @@ extern GpuContext *GetGpuContext(GpuContext *gcontext);
 extern void PutGpuContext(GpuContext *gcontext);
 extern void SynchronizeGpuContext(GpuContext *gcontext);
 
-extern bool trackCudaProgram(GpuContext *gcontext, ProgramId program_id);
+extern bool trackCudaProgram(GpuContext *gcontext, ProgramId program_id,
+							 const char *filename, int lineno);
 extern void untrackCudaProgram(GpuContext *gcontext, ProgramId program_id);
-extern bool trackGpuMem(GpuContext *gcontext, CUdeviceptr devptr, void *extra);
+extern bool trackGpuMem(GpuContext *gcontext, CUdeviceptr devptr, void *extra,
+						const char *filename, int lineno);
 extern void *lookupGpuMem(GpuContext *gcontext, CUdeviceptr devptr);
 extern void *untrackGpuMem(GpuContext *gcontext, CUdeviceptr devptr);
-extern bool trackHostMem(GpuContext *gcontext, void *hostptr, void *extra);
-extern void *lookupHostMem(GpuContext *gcontext, void *hostptr);
-extern void *untrackHostMem(GpuContext *gcontext, void *hostptr);
 extern void pgstrom_init_gpu_context(void);
 
 /*
@@ -610,11 +609,15 @@ extern void pgstrom_init_gputasks(void);
 /*
  * cuda_program.c
  */
-extern ProgramId pgstrom_create_cuda_program(GpuContext *gcontext,
-											 cl_uint extra_flags,
-											 const char *kern_source,
-											 const char *kern_define,
-											 bool wait_for_build);
+extern ProgramId __pgstrom_create_cuda_program(GpuContext *gcontext,
+											   cl_uint extra_flags,
+											   const char *kern_source,
+											   const char *kern_define,
+											   bool wait_for_build,
+											   const char *filename,
+											   int lineno);
+#define pgstrom_create_cuda_program(a,b,c,d,e)	\
+	__pgstrom_create_cuda_program((a),(b),(c),(d),(e),__FILE__,__LINE__)
 extern CUmodule pgstrom_load_cuda_program(ProgramId program_id);
 extern void pgstrom_put_cuda_program(GpuContext *gcontext,
 									 ProgramId program_id);
@@ -723,8 +726,6 @@ extern bool ScanPathWillUseNvmeStrom(PlannerInfo *root, RelOptInfo *baserel);
 extern bool RelationCanUseNvmeStrom(Relation relation);
 extern bool RelationWillUseNvmeStrom(Relation relation,
 									 BlockNumber *p_nr_blocks);
-
-extern void pgstrom_datastore_cleanup_gpucontext(GpuContext *gcontext);
 extern void pgstrom_init_datastore(void);
 
 /*
@@ -1146,6 +1147,14 @@ format_millisec(double milliseconds)
 	else if (milliseconds > 8000.0) /* more than 8sec */
 		return psprintf("%.2fsec", milliseconds / 1000.0);
 	return psprintf("%.2fms", milliseconds);
+}
+
+static inline const char *
+__basename(const char *filename)
+{
+	const char *pos = strrchr(filename, '/');
+
+	return pos ? pos + 1 : filename;
 }
 
 /*

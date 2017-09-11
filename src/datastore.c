@@ -250,17 +250,15 @@ PDS_release(pgstrom_data_store *pds)
 	{
 		if (pds->kds.format != KDS_FORMAT_BLOCK)
 		{
-			SpinLockAcquire(&gcontext->pds_blocks_lock);
-			dlist_delete(&pds->chain);
-			dlist_push_head(&gcontext->pds_blocks_free_list,
-							&pds->chain);
-			SpinLockRelease(&gcontext->pds_blocks_lock);
-		}
-		else
-		{
 			rc = gpuMemFree(gcontext, (CUdeviceptr) pds);
 			if (rc != CUDA_SUCCESS)
 				werror("failed on gpuMemFree: %s", errorText(rc));
+		}
+		else
+		{
+			rc = gpuMemFreeHost(gcontext, pds);
+			if (rc != CUDA_SUCCESS)
+				werror("failed on gpuMemFreeHost: %s", errorText(rc));
 		}
 	}
 }
@@ -567,7 +565,6 @@ PDS_create_block(GpuContext *gcontext,
 	pgstrom_data_store *pds = NULL;
 	cl_uint		nrooms = nvme_sstate->nblocks_per_chunk;
 	size_t		bytesize;
-	dlist_node *dnode;
 	CUresult	rc;
 
 	bytesize = KDS_CALCULATE_HEAD_LENGTH(tupdesc->natts)
@@ -579,37 +576,12 @@ PDS_create_block(GpuContext *gcontext,
 			 offsetof(pgstrom_data_store, kds) + bytesize,
 			 pgstrom_chunk_size());
 
-	/* allocation, if no unused buffer is kept */
-	SpinLockAcquire(&gcontext->pds_blocks_lock);
-	if (!dlist_is_empty(&gcontext->pds_blocks_free_list))
-	{
-		dnode = dlist_pop_head_node(&gcontext->pds_blocks_free_list);
-		pds = dlist_container(pgstrom_data_store, chain, dnode);
-	}
-	else
-	{
-		SpinLockRelease(&gcontext->pds_blocks_lock);
-
-		rc = cuCtxPushCurrent(gcontext->cuda_context);
-		if (rc != CUDA_SUCCESS)
-			werror("failed on cuCtxPushCurrent: %s", errorText(rc));
-
-		rc = cuMemHostAlloc((void **)&pds, pgstrom_chunk_size(), 0);
-		if (rc != CUDA_SUCCESS)
-			werror("failed on cuMemHostAlloc: %s", errorText(rc));
-
-		rc = cuCtxPopCurrent(NULL);
-		if (rc != CUDA_SUCCESS)
-		{
-			cuMemFreeHost(pds);
-			werror("failed on cuCtxPpoCurrent: %s", errorText(rc));
-		}
-		SpinLockAcquire(&gcontext->pds_blocks_lock);
-	}
-	dlist_push_tail(&gcontext->pds_blocks_active_list, &pds->chain);
-	SpinLockRelease(&gcontext->pds_blocks_lock);
+	rc = gpuMemAllocHost(gcontext,
+						 (void **)&pds,
+						 pgstrom_chunk_size());
+	if (rc != CUDA_SUCCESS)
+		werror("failed on gpuMemAllocHost: %s", errorText(rc));
 	/* setup */
-	pds->gcontext = gcontext;
 	pg_atomic_init_u32(&pds->refcnt, 1);
 	init_kernel_data_store(&pds->kds, tupdesc, bytesize,
                            KDS_FORMAT_BLOCK, nrooms);
@@ -1211,33 +1183,4 @@ PDS_build_hashtable(pgstrom_data_store *pds)
 		hash_slot[j] = (uintptr_t)khitem - (uintptr_t)kds;
 	}
 	kds->nslots = nslots;
-}
-
-/*
- * cleanup handler for KDS_FORMAT_BLOCK
- */
-void
-pgstrom_datastore_cleanup_gpucontext(GpuContext *gcontext)
-{
-	pgstrom_data_store *pds;
-	dlist_node		   *dnode;
-	CUresult			rc;
-
-	while (!dlist_is_empty(&gcontext->pds_blocks_active_list))
-	{
-		dnode = dlist_pop_head_node(&gcontext->pds_blocks_active_list);
-		pds = dlist_container(pgstrom_data_store, chain, dnode);
-		rc = cuMemFreeHost(pds);
-		if (rc != CUDA_SUCCESS)
-			elog(NOTICE, "failed on cuMemFreeHost: %s", errorText(rc));
-	}
-
-	while (!dlist_is_empty(&gcontext->pds_blocks_free_list))
-	{
-		dnode = dlist_pop_head_node(&gcontext->pds_blocks_free_list);
-		pds = dlist_container(pgstrom_data_store, chain, dnode);
-		rc = cuMemFreeHost(pds);
-		if (rc != CUDA_SUCCESS)
-			elog(NOTICE, "failed on cuMemFreeHost: %s", errorText(rc));
-	}
 }

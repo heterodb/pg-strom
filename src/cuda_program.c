@@ -953,11 +953,12 @@ pgstrom_try_build_cuda_program(void)
  * equivalent one is already exists.
  */
 ProgramId
-pgstrom_create_cuda_program(GpuContext *gcontext,
-							cl_uint extra_flags,
-							const char *kern_source,
-							const char *kern_define,
-							bool wait_for_build)
+__pgstrom_create_cuda_program(GpuContext *gcontext,
+							  cl_uint extra_flags,
+							  const char *kern_source,
+							  const char *kern_define,
+							  bool wait_for_build,
+							  const char *filename, int lineno)
 {
 	program_cache_entry	*entry;
 	ProgramId	program_id;
@@ -1036,7 +1037,8 @@ pgstrom_create_cuda_program(GpuContext *gcontext,
 			SpinLockRelease(&pgcache_head->lock);
 
 			/* track this program entry by GpuContext */
-			if (!trackCudaProgram(gcontext, program_id))
+			if (!trackCudaProgram(gcontext, program_id,
+								  filename, lineno))
 			{
 				pgstrom_put_cuda_program(NULL, program_id);
 				elog(ERROR, "out of memory");
@@ -1106,7 +1108,8 @@ retry_program_id:
 					&entry->build_chain);
 
 	/* track this program entry by GpuContext */
-	if (!trackCudaProgram(gcontext, program_id))
+	if (!trackCudaProgram(gcontext, program_id,
+						  filename, lineno))
 	{
 		put_cuda_program_entry_nolock(entry);
 		SpinLockRelease(&pgcache_head->lock);

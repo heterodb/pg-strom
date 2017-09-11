@@ -259,7 +259,8 @@ __gpuMemAllocRaw(GpuContext *gcontext,
 		return rc;
 	}
 	if (!trackGpuMem(gcontext, m_deviceptr,
-					 GPUMEM_DEVICE_RAW_EXTRA))
+					 GPUMEM_DEVICE_RAW_EXTRA,
+					 filename, lineno))
 	{
 		cuMemFree(m_deviceptr);
 		cuCtxPopCurrent(NULL);
@@ -294,7 +295,8 @@ __gpuMemAllocManagedRaw(GpuContext *gcontext,
 		return rc;
 	}
 	if (!trackGpuMem(gcontext, m_deviceptr,
-					 GPUMEM_DEVICE_RAW_EXTRA))
+					 GPUMEM_DEVICE_RAW_EXTRA,
+					 filename, lineno))
 	{
 		cuMemFree(m_deviceptr);
 		cuCtxPopCurrent(NULL);
@@ -329,8 +331,9 @@ __gpuMemAllocHostRaw(GpuContext *gcontext,
 		return rc;
 	}
 
-	if (!trackHostMem(gcontext, hostptr,
-					  GPUMEM_HOST_RAW_EXTRA))
+	if (!trackGpuMem(gcontext, (CUdeviceptr)hostptr,
+					 GPUMEM_HOST_RAW_EXTRA,
+					 filename, lineno))
 	{
 		cuMemFreeHost(hostptr);
 		cuCtxPopCurrent(NULL);
@@ -390,6 +393,7 @@ gpuMemAllocChunk(GpuMemKind gm_kind,
 				 cl_int mclass,
 				 const char *filename, int lineno)
 {
+	GpuMemStatistics *gm_stat;
 	GpuMemSegment  *gm_seg;
 	GpuMemChunk	   *gm_chunk;
 	CUdeviceptr		m_segment;
@@ -569,7 +573,37 @@ retry:
 							&gm_chunk->chain);
 		}
 	}
+
+	/* track by GpuContext */
+	if (!trackGpuMem(gcontext, m_segment, gm_seg,
+					 filename, lineno))
+	{
+		if (gm_kind != GpuMemKind__HostMemory)
+			cuMemFree(m_segment);
+		else
+			cuMemFreeHost((void *)m_segment);
+		free(gm_seg);
+		pthreadRWLockUnlock(&gcontext->gm_rwlock);
+		return CUDA_ERROR_OUT_OF_MEMORY;
+	}
 	dlist_push_head(gm_segment_list, &gm_seg->chain);
+
+	/* update statistics */
+	gm_stat = &gm_stat_array[gcontext->cuda_dindex];
+	switch (gm_kind)
+	{
+		case GpuMemKind__NormalMemory:
+			pg_atomic_add_fetch_u64(&gm_stat->normal_usage, gm_segment_sz);
+			break;
+		case GpuMemKind__ManagedMemory:
+			pg_atomic_add_fetch_u64(&gm_stat->managed_usage, gm_segment_sz);
+			break;
+		case GpuMemKind__IOMapMemory:
+			pg_atomic_add_fetch_u64(&gm_stat->iomap_usage, gm_segment_sz);
+			break;
+		default:
+			break;
+	}
 	goto retry;
 }
 

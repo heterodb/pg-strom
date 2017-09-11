@@ -27,8 +27,8 @@
 /* variables */
 static shmem_startup_hook_type shmem_startup_next = NULL;
 static pg_atomic_uint32 *global_num_running_tasks;	/* per device */
-int				global_max_async_tasks;		/* GUC */
-int				local_max_async_tasks;		/* GUC */
+int					global_max_async_tasks;		/* GUC */
+int					local_max_async_tasks;		/* GUC */
 static slock_t		activeGpuContextLock;
 static dlist_head	activeGpuContextList;
 
@@ -39,23 +39,20 @@ static dlist_head	activeGpuContextList;
  * leaks.
  */
 #define RESTRACK_CLASS__GPUMEMORY		2
-#define RESTRACK_CLASS__HOSTMEMORY		3
-#define RESTRACK_CLASS__GPUPROGRAM		4
+#define RESTRACK_CLASS__GPUPROGRAM		3
 
 typedef struct ResourceTracker
 {
 	dlist_node	chain;
 	pg_crc32	crc;
 	cl_int		resclass;
+	const char *filename;
+	cl_int		lineno;
 	union {
 		struct {
 			CUdeviceptr	ptr;	/* RESTRACK_CLASS__GPUMEMORY */
 			void   *extra;
 		} devmem;
-		struct {
-			void   *ptr;		/* RESTRACK_CLASS__HOSTMEMORY */
-			void   *extra;
-		} hostmem;
 		ProgramId	program_id;	/* RESTRACK_CLASS__GPUPROGRAM */
 	} u;
 } ResourceTracker;
@@ -77,7 +74,8 @@ resource_tracker_hashval(cl_int resclass, void *data, size_t len)
  * resource tracker for GPU program
  */
 bool
-trackCudaProgram(GpuContext *gcontext, ProgramId program_id)
+trackCudaProgram(GpuContext *gcontext, ProgramId program_id,
+				 const char *filename, int lineno)
 {
 	ResourceTracker *tracker = calloc(1, sizeof(ResourceTracker));
 	pg_crc32	crc;
@@ -89,6 +87,8 @@ trackCudaProgram(GpuContext *gcontext, ProgramId program_id)
 								   &program_id, sizeof(ProgramId));
 	tracker->crc = crc;
 	tracker->resclass = RESTRACK_CLASS__GPUPROGRAM;
+	tracker->filename = filename;
+	tracker->lineno = lineno;
 	tracker->u.program_id = program_id;
 	SpinLockAcquire(&gcontext->restrack_lock);
 	dlist_push_tail(&gcontext->restrack[crc % RESTRACK_HASHSIZE],
@@ -131,7 +131,8 @@ untrackCudaProgram(GpuContext *gcontext, ProgramId program_id)
  * resource tracker for device memory
  */
 bool
-trackGpuMem(GpuContext *gcontext, CUdeviceptr devptr, void *extra)
+trackGpuMem(GpuContext *gcontext, CUdeviceptr devptr, void *extra,
+			const char *filename, int lineno)
 {
 	ResourceTracker *tracker = calloc(1, sizeof(ResourceTracker));
 	pg_crc32	crc;
@@ -143,6 +144,8 @@ trackGpuMem(GpuContext *gcontext, CUdeviceptr devptr, void *extra)
 								   &devptr, sizeof(CUdeviceptr));
 	tracker->crc = crc;
 	tracker->resclass = RESTRACK_CLASS__GPUMEMORY;
+	tracker->filename = filename;
+	tracker->lineno = lineno;
 	tracker->u.devmem.ptr = devptr;
 	tracker->u.devmem.extra = extra;
 
@@ -213,94 +216,6 @@ untrackGpuMem(GpuContext *gcontext, CUdeviceptr devptr)
 	SpinLockRelease(&gcontext->restrack_lock);
 	wnotice("Bug? GPU Device Memory %p was not tracked", (void *)devptr);
 	abort();
-	return NULL;
-}
-
-/*
- * resource tracker for host memory
- */
-bool
-trackHostMem(GpuContext *gcontext, void *hostptr, void *extra)
-{
-	ResourceTracker *tracker = calloc(1, sizeof(ResourceTracker));
-	pg_crc32	crc;
-
-	if (!tracker)
-		return false;	/* out of memory */
-
-	crc = resource_tracker_hashval(RESTRACK_CLASS__HOSTMEMORY,
-								   &hostptr, sizeof(void *));
-	tracker->crc = crc;
-	tracker->resclass = RESTRACK_CLASS__HOSTMEMORY;
-	tracker->u.hostmem.ptr = hostptr;
-	tracker->u.hostmem.extra = extra;
-
-	SpinLockAcquire(&gcontext->restrack_lock);
-	dlist_push_tail(&gcontext->restrack[crc % RESTRACK_HASHSIZE],
-					&tracker->chain);
-	SpinLockRelease(&gcontext->restrack_lock);
-	return true;
-}
-
-void *
-lookupHostMem(GpuContext *gcontext, void *hostptr)
-{
-	dlist_head *restrack_list;
-	dlist_iter	iter;
-	pg_crc32	crc;
-	void	   *extra = NULL;
-
-	crc = resource_tracker_hashval(RESTRACK_CLASS__HOSTMEMORY,
-								   &hostptr, sizeof(void *));
-	restrack_list = &gcontext->restrack[crc % RESTRACK_HASHSIZE];
-	SpinLockAcquire(&gcontext->restrack_lock);
-	dlist_foreach (iter, restrack_list)
-	{
-		ResourceTracker *tracker
-			= dlist_container(ResourceTracker, chain, iter.cur);
-
-		if (tracker->crc == crc &&
-			tracker->resclass == RESTRACK_CLASS__HOSTMEMORY &&
-			tracker->u.hostmem.ptr == hostptr)
-		{
-			extra = tracker->u.hostmem.extra;
-			break;
-		}
-	}
-	SpinLockRelease(&gcontext->restrack_lock);
-	return extra;
-}
-
-void *
-untrackHostMem(GpuContext *gcontext, void *hostptr)
-{
-	dlist_head *restrack_list;
-	dlist_iter	iter;
-	pg_crc32	crc;
-	void	   *extra;
-
-	crc = resource_tracker_hashval(RESTRACK_CLASS__GPUMEMORY,
-								   &hostptr, sizeof(void *));
-	restrack_list = &gcontext->restrack[crc % RESTRACK_HASHSIZE];
-	SpinLockAcquire(&gcontext->restrack_lock);
-	dlist_foreach (iter, restrack_list)
-	{
-		ResourceTracker *tracker
-			= dlist_container(ResourceTracker, chain, iter.cur);
-
-		if (tracker->crc == crc &&
-			tracker->resclass == RESTRACK_CLASS__HOSTMEMORY &&
-			tracker->u.hostmem.ptr == hostptr)
-		{
-			dlist_delete(&tracker->chain);
-			extra = tracker->u.hostmem.extra;
-			SpinLockRelease(&gcontext->restrack_lock);
-			free(tracker);
-			return extra;
-		}
-	}
-	SpinLockRelease(&gcontext->restrack_lock);
-	wnotice("Bug? GPU Device Memory %p was not tracked", hostptr);
 	return NULL;
 }
 
@@ -378,8 +293,10 @@ ReleaseLocalResources(GpuContext *gcontext, bool normal_exit)
 			{
 				case RESTRACK_CLASS__GPUMEMORY:
 					if (normal_exit)
-						wnotice("GPU memory %p likely leaked",
-								(void *)tracker->u.devmem.ptr);
+						wnotice("GPU memory %p by (%s:%d) likely leaked",
+								(void *)tracker->u.devmem.ptr,
+								__basename(tracker->filename),
+								tracker->lineno);
 					rc = gpuMemFreeExtra(gcontext,
 										 tracker->u.devmem.ptr,
 										 tracker->u.devmem.extra);
@@ -390,8 +307,10 @@ ReleaseLocalResources(GpuContext *gcontext, bool normal_exit)
 					break;
 				case RESTRACK_CLASS__GPUPROGRAM:
 					if (normal_exit)
-						wnotice("CUDA Program ID=%lu is likely leaked",
-								tracker->u.program_id);
+						wnotice("CUDA Program ID=%lu by (%s:%d) is likely leaked",
+								tracker->u.program_id,
+								__basename(tracker->filename),
+								tracker->lineno);
 					pgstrom_put_cuda_program(NULL, tracker->u.program_id);
 					break;
 				default:
@@ -404,8 +323,6 @@ ReleaseLocalResources(GpuContext *gcontext, bool normal_exit)
 	}
 	/* unmap GPU device memory segment */
 	pgstrom_gpu_mmgr_cleanup_gpucontext(gcontext);
-	/* release Host pinned memory, if kept */
-	pgstrom_datastore_cleanup_gpucontext(gcontext);
 
 	/* NOTE: cuda_module is already released by cuCtxDestroy() */
 	for (i=0; i < CUDA_MODULES_HASHSIZE; i++)
