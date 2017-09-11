@@ -347,14 +347,12 @@ ReleaseLocalResources(GpuContext *gcontext, bool normal_exit)
  */
 __thread GpuContext	   *GpuWorkerCurrentContext = NULL;
 __thread sigjmp_buf	   *GpuWorkerExceptionStack = NULL;
-__thread CUevent		CU_EVENT0_PER_THREAD = NULL;
-__thread CUevent		CU_EVENT1_PER_THREAD = NULL;
-__thread CUevent		CU_EVENT2_PER_THREAD = NULL;
-__thread CUevent		CU_EVENT3_PER_THREAD = NULL;
+__thread cl_int			GpuWorkerIndex = -1;
 
 void
 GpuContextWorkerReportError(int elevel,
 							const char *filename, int lineno,
+							const char *funcname,
 							const char *fmt, ...)
 {
 	GpuContext *gcontext = GpuWorkerCurrentContext;
@@ -376,6 +374,7 @@ GpuContextWorkerReportError(int elevel,
 	{
 		gcontext->error_filename	= filename;
 		gcontext->error_lineno		= lineno;
+		gcontext->error_funcname	= funcname;
 		gcontext->error_message		= malloc(length + 1);
 		if (gcontext->error_message)
 		{
@@ -400,6 +399,10 @@ GpuContextWorkerMain(void *arg)
 	GpuTask		   *gtask;
 	CUresult		rc;
 
+	/* setup worker index */
+	GpuWorkerIndex = pg_atomic_fetch_add_u32(&gcontext->worker_index, 1);
+	Assert(GpuWorkerIndex < gcontext->num_workers);
+
 	rc = cuCtxSetCurrent(gcontext->cuda_context);
 	if (rc != CUDA_SUCCESS)
 	{
@@ -408,31 +411,21 @@ GpuContextWorkerMain(void *arg)
 		werror("failed on cuCtxSetCurrent: %s", errorText(rc));
 		return NULL;
 	}
-
-	/* general purpose events objects */
-	if ((rc = cuEventCreate(&CU_EVENT0_PER_THREAD,
-							CU_EVENT_DISABLE_TIMING)) != CUDA_SUCCESS ||
-		(rc = cuEventCreate(&CU_EVENT1_PER_THREAD,
-							CU_EVENT_DISABLE_TIMING)) != CUDA_SUCCESS ||
-		(rc = cuEventCreate(&CU_EVENT2_PER_THREAD,
-							CU_EVENT_DISABLE_TIMING)) != CUDA_SUCCESS ||
-		(rc = cuEventCreate(&CU_EVENT3_PER_THREAD,
-							CU_EVENT_DISABLE_TIMING)) != CUDA_SUCCESS)
-	{
-		werror("failed on cuEventCreate: %s", errorText(rc));
-		return NULL;
-	}
 	GpuWorkerCurrentContext = gcontext;
 
 	wnotice("worker is now running");
 	pthreadMutexLock(&gcontext->mutex);
 	while (!gcontext->terminate_workers)
 	{
-		//try asyncronous program build if any
-		//don't forget to signal cond
+		/* try asyncronous program build if any */
+		if (pgstrom_try_build_cuda_program())
+			continue;
 
 		if (dlist_is_empty(&gcontext->pending_tasks))
+		{
 			pthreadCondWait(&gcontext->cond, &gcontext->mutex);
+			wnotice("wake up a worker");
+		}
 		else
 		{
 			dnode = dlist_pop_head_node(&gcontext->pending_tasks);
@@ -553,8 +546,21 @@ ActivateGpuContext(GpuContext *gcontext)
 		else
 			setenv("CUDA_MPS_PIPE_DIRECTORY", env_saved, 1);
 	}
-	gcontext->cuda_device	= cuda_device;
-	gcontext->cuda_context	= cuda_context;
+	gcontext->cuda_device   = cuda_device;
+	gcontext->cuda_context  = cuda_context;
+
+	for (i=0; i < gcontext->num_workers; i++)
+	{
+		rc = cuEventCreate(&gcontext->cuda_events0[i],
+						   CU_EVENT_BLOCKING_SYNC);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
+
+		rc = cuEventCreate(&gcontext->cuda_events1[i],
+						   CU_EVENT_BLOCKING_SYNC);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
+	}
 
 	/* creation of worker threads */
 	for (i=0; i < gcontext->num_workers; i++)
@@ -564,30 +570,8 @@ ActivateGpuContext(GpuContext *gcontext)
 		if ((errno = pthread_create(&thread, NULL,
 									GpuContextWorkerMain,
 									gcontext)) != 0)
-		{
-			int		errno_saved = errno;
-
-			pthreadMutexLock(&gcontext->mutex);
-			gcontext->terminate_workers = true;
-			pthreadCondBroadcast(&gcontext->cond);
-			pthreadMutexUnlock(&gcontext->mutex);
-
-			while (i > 0)
-			{
-				thread = gcontext->worker_threads[--i];
-
-				if ((errno = pthread_join(thread, NULL)) != 0)
-					elog(WARNING, "failed on pthread_join: %m");
-			}
-			rc = cuCtxDestroy(gcontext->cuda_context);
-			if (rc != CUDA_SUCCESS)
-				elog(WARNING, "failed on cuCtxDestroy: %s", errorText(rc));
-			gcontext->cuda_context	= NULL;
-			gcontext->cuda_device	= 0;
-
-			errno = errno_saved;
 			elog(ERROR, "failed on pthread_create: %m");
-		}
+
 		gcontext->worker_threads[i] = thread;
 	}
 	elog(NOTICE, "GpuContext is activated (%p)", gcontext->cuda_context);
@@ -605,7 +589,8 @@ AllocGpuContext(int cuda_dindex,
 	GpuContext	   *gcontext = NULL;
 	dlist_iter		iter;
 	CUresult		rc;
-	int				i;
+	Size			length;
+	int				i, num_workers = local_max_async_tasks;
 
 	/* per-process driver initialization */
 	if (!cuda_driver_initialized)
@@ -637,12 +622,14 @@ AllocGpuContext(int cuda_dindex,
 	SpinLockRelease(&activeGpuContextLock);
 
 	/*
-	 * Not found, let's create a new GpuContext
+	 * Not found, let's allocate a new GpuContext
 	 */
-	gcontext = calloc(1, offsetof(GpuContext,
-								  worker_threads[local_max_async_tasks]));
+	length = STROMALIGN(offsetof(GpuContext, worker_threads[num_workers]));
+	gcontext = calloc(1, length + 2 * num_workers * sizeof(CUevent));
 	if (!gcontext)
 		elog(ERROR, "out of memory");
+	gcontext->cuda_events0 = (CUevent *)((char *)gcontext + length);
+	gcontext->cuda_events1 = gcontext->cuda_events0 + num_workers;
 
 	/* choose a device to use, if no preference */
 	if (cuda_dindex < 0)
@@ -678,7 +665,10 @@ AllocGpuContext(int cuda_dindex,
 	gcontext->num_running_tasks = 0;
 	dlist_init(&gcontext->pending_tasks);
 	dlist_init(&gcontext->completed_tasks);
-	gcontext->num_workers = local_max_async_tasks;
+	gcontext->num_workers = num_workers;
+	pg_atomic_init_u32(&gcontext->worker_index, 0);
+	for (i=0; i < num_workers; i++)
+		gcontext->worker_threads[i] = pthread_self();
 
 	SpinLockAcquire(&activeGpuContextLock);
 	dlist_push_head(&activeGpuContextList, &gcontext->chain);
@@ -742,13 +732,17 @@ SynchronizeGpuContext(GpuContext *gcontext)
 	gcontext->terminate_workers = true;
 	pthreadCondBroadcast(&gcontext->cond);
 	pthreadMutexUnlock(&gcontext->mutex);
+	/* interrupt cuEventSynchronize() */
+	for (i=0; i < gcontext->num_workers; i++)
+	{
+		if ((rc = cuEventRecord(gcontext->cuda_events0[i],
+								CU_STREAM_PER_THREAD)) != CUDA_SUCCESS ||
+			(rc = cuEventRecord(gcontext->cuda_events1[i],
+								CU_STREAM_PER_THREAD)) != CUDA_SUCCESS)
+			elog(FATAL, "failed on cuEventRecord: %s", errorText(rc));
+	}
 
-	/* Drop CUDA context to interrupt long-running GPU kernels, if any */
-	rc = cuCtxDestroy(gcontext->cuda_context);
-	if (rc != CUDA_SUCCESS)
-		elog(FATAL, "failed on cuCtxDestroy: %s", errorText(rc));
-
-	/* Wait for completion of the worker threads */
+	/* wait for completion of the worker threads */
 	for (i=0; i < gcontext->num_workers; i++)
 	{
 		pthread_t	thread = gcontext->worker_threads[i];
@@ -756,6 +750,12 @@ SynchronizeGpuContext(GpuContext *gcontext)
 		if ((errno = pthread_join(thread, NULL)) != 0)
 			elog(FATAL, "failed on pthread_join: %m");
 	}
+
+	/* Drop CUDA context to interrupt long-running GPU kernels, if any */
+	rc = cuCtxDestroy(gcontext->cuda_context);
+	if (rc != CUDA_SUCCESS)
+		elog(FATAL, "failed on cuCtxDestroy: %s", errorText(rc));
+
 	gcontext->cuda_device = 0;
 	gcontext->cuda_context = NULL;
 	memset(gcontext->worker_threads, 0,

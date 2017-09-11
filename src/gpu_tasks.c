@@ -271,7 +271,7 @@ fetch_next_gputask(GpuTaskState *gts)
 	dlist_node	   *dnode;
 	cl_int			ev;
 
-	CHECK_FOR_INTERRUPTS();
+	CHECK_FOR_GPUCONTEXT(gcontext);
 
 	if (!gts->scan_done)
 	{
@@ -332,6 +332,7 @@ fetch_next_gputask(GpuTaskState *gts)
 					ereport(FATAL,
 							(errcode(ERRCODE_ADMIN_SHUTDOWN),
 							 errmsg("Unexpected Postmaster dead")));
+				CHECK_FOR_GPUCONTEXT(gcontext);
 
 				pthreadMutexLock(&gcontext->mutex);
 			}
@@ -343,8 +344,7 @@ fetch_next_gputask(GpuTaskState *gts)
 				 */
 				pg_usleep(20000L);	/* wait for 20msec */
 
-				CHECK_FOR_INTERRUPTS();
-
+				CHECK_FOR_GPUCONTEXT(gcontext);
 				pthreadMutexLock(&gcontext->mutex);
 			}
 		}
@@ -608,9 +608,7 @@ pgstromProcessGpuTask(GpuTask *gtask, CUmodule cuda_module)
 {
 	int		retval;
 
-	Assert(GpuWorkerCurrentContext != NULL &&
-		   GpuWorkerCurrentContext == gtask->gts->gcontext);
-
+	Assert(GpuWorkerCurrentContext != NULL);
 	switch (gtask->task_kind)
 	{
 		case GpuTaskKind_GpuScan:

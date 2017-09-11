@@ -104,6 +104,8 @@ typedef struct GpuContext
 	cl_int			cuda_dindex;
 	CUdevice		cuda_device;
 	CUcontext		cuda_context;
+	CUevent		   *cuda_events0; /* per-worker general purpose event */
+	CUevent		   *cuda_events1; /* per-worker general purpose event */
 	slock_t			cuda_modules_lock;
 	dlist_head		cuda_modules_slot[CUDA_MODULES_HASHSIZE];
 	/* resource management */
@@ -119,6 +121,7 @@ typedef struct GpuContext
 	pg_atomic_uint32 error_level;
 	const char	   *error_filename;
 	int				error_lineno;
+	const char	   *error_funcname;
 	char		   *error_message;
 	/* management of the work-queue */
 	pg_atomic_uint32 *global_num_running_tasks;
@@ -129,6 +132,7 @@ typedef struct GpuContext
 	dlist_head		pending_tasks;		/* list of GpuTask */
 	dlist_head		completed_tasks;	/* list of GpuTask */
 	cl_int			num_workers;
+	pg_atomic_uint32 worker_index;
 	pthread_t		worker_threads[FLEXIBLE_ARRAY_MEMBER];
 } GpuContext;
 
@@ -461,21 +465,39 @@ extern int		global_max_async_tasks;		/* GUC */
 extern int		local_max_async_tasks;		/* GUC */
 extern __thread GpuContext	   *GpuWorkerCurrentContext;
 extern __thread sigjmp_buf	   *GpuWorkerExceptionStack;
+extern __thread int				GpuWorkerIndex;
 #define CU_CONTEXT_PER_THREAD					\
 	(GpuWorkerCurrentContext->cuda_context)
 #define CU_DEVICE_PER_THREAD					\
 	(GpuWorkerCurrentContext->cuda_device)
 #define CU_DINDEX_PER_THREAD					\
 	(GpuWorkerCurrentContext->cuda_dindex)
-extern __thread CUevent			CU_EVENT0_PER_THREAD;
-extern __thread CUevent			CU_EVENT1_PER_THREAD;
-extern __thread CUevent			CU_EVENT2_PER_THREAD;
-extern __thread CUevent			CU_EVENT3_PER_THREAD;
+#define CU_EVENT0_PER_THREAD					\
+	(GpuWorkerCurrentContext->cuda_events0[GpuWorkerIndex])
+#define CU_EVENT1_PER_THREAD					\
+	(GpuWorkerCurrentContext->cuda_events1[GpuWorkerIndex])
 
 extern void GpuContextWorkerReportError(int elevel,
 										const char *filename, int lineno,
+										const char *funcname,
 										const char *fmt, ...)
-	pg_attribute_printf(4,5);
+	pg_attribute_printf(5,6);
+
+static inline void
+CHECK_FOR_GPUCONTEXT(GpuContext *gcontext)
+{
+	uint32	error_level = pg_atomic_read_u32(&gcontext->error_level);
+
+	if (error_level >= ERROR)
+	{
+		elog_start(gcontext->error_filename,
+				   gcontext->error_lineno,
+				   gcontext->error_funcname);
+		elog_finish(error_level, "%s", gcontext->error_message);
+	}
+	CHECK_FOR_INTERRUPTS();
+}
+
 extern GpuContext *AllocGpuContext(int cuda_dindex,
 								   bool never_use_mps,
 								   bool with_activation);
@@ -552,6 +574,7 @@ extern void pgstrom_init_gpu_context(void);
 			__fname = (__fname ? __fname + 1 : __FILE__);				\
 			GpuContextWorkerReportError((elevel),						\
 										__fname, __LINE__,				\
+										PG_FUNCNAME_MACRO,				\
 										"%s: (%s:%d) " fmt "\n",		\
 										(elabel), __fname, __LINE__,	\
 										##__VA_ARGS__);					\
@@ -1238,34 +1261,33 @@ pthreadCondInit(pthread_cond_t *cond)
 	pthread_condattr_t condattr;
 
 	if ((errno = pthread_condattr_init(&condattr)) != 0)
-		elog(FATAL, "failed on pthread_condattr_init: %m");
+		wfatal("failed on pthread_condattr_init: %m");
 	if ((errno = pthread_condattr_setpshared(&condattr, 1)) != 0)
-		elog(FATAL, "failed on pthread_condattr_setpshared: %m");
+		wfatal("failed on pthread_condattr_setpshared: %m");
 	if ((errno = pthread_cond_init(cond, &condattr)) != 0)
-		elog(FATAL, "failed on pthread_cond_init: %m");
+		wfatal("failed on pthread_cond_init: %m");
 	if ((errno = pthread_condattr_destroy(&condattr)) != 0)
-		elog(FATAL, "failed on pthread_condattr_destroy: %m");
+		wfatal("failed on pthread_condattr_destroy: %m");
 }
 
 static inline void
 pthreadCondWait(pthread_cond_t *cond, pthread_mutex_t *mutex)
 {
 	if ((errno = pthread_cond_wait(cond, mutex)) != 0)
-		elog(FATAL, "failed on pthread_cond_wait: %m");
+		wfatal("failed on pthread_cond_wait: %m");
 }
 
 static inline void
 pthreadCondBroadcast(pthread_cond_t *cond)
 {
 	if ((errno = pthread_cond_broadcast(cond)) != 0)
-		elog(FATAL, "failed on pthread_cond_broadcast: %m");
+		wfatal("failed on pthread_cond_broadcast: %m");
 }
 
 static inline void
 pthreadCondSignal(pthread_cond_t *cond)
 {
 	if ((errno = pthread_cond_signal(cond)) != 0)
-		elog(FATAL, "failed on pthread_cond_signal: %m");
+		wfatal("failed on pthread_cond_signal: %m");
 }
-
 #endif	/* PG_STROM_H */

@@ -857,8 +857,7 @@ build_cuda_program(program_cache_entry *src_entry)
 						&bin_entry->hash_chain);
 		dlist_push_head(&pgcache_head->lru_list,
 						&bin_entry->lru_chain);
-		dlist_push_head(&pgcache_head->build_list,
-						&bin_entry->build_chain);
+		memset(&bin_entry->build_chain, 0, sizeof(dlist_node));
 		bin_entry->refcnt = 1;
 		SpinLockRelease(&pgcache_head->lock);
 	}
@@ -889,8 +888,9 @@ build_cuda_program(program_cache_entry *src_entry)
  *
  * It picks up a program entry that is not built yet, if any, then runs
  * NVRTC and linker to construct an executable binary.
- * Because linker process needs a valid CUDA context, only GPU server
- * can call this function.
+ * Because linker process needs a valid CUDA context, only GpuContext
+ * worker can call this function. Also note that we assume caller holds
+ * GpuContext->mutex at the time of invocation
  */
 bool
 pgstrom_try_build_cuda_program(void)
@@ -919,6 +919,13 @@ pgstrom_try_build_cuda_program(void)
 	get_cuda_program_entry_nolock(entry);
 	SpinLockRelease(&pgcache_head->lock);
 
+	/*
+	 * This thread will focus on the program build, so some other
+	 * worker needs to process the pending tasks.
+	 */
+	pthreadMutexUnlock(&GpuWorkerCurrentContext->mutex);
+	pthreadCondSignal(&GpuWorkerCurrentContext->cond);
+
 	STROM_TRY();
 	{
 		build_cuda_program(entry);
@@ -942,6 +949,8 @@ pgstrom_try_build_cuda_program(void)
 	STROM_END_TRY();
 
 	put_cuda_program_entry(entry);
+
+	pthreadMutexLock(&GpuWorkerCurrentContext->mutex);
 
 	return true;
 }
