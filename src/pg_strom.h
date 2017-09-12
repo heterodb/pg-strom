@@ -90,8 +90,6 @@
 
 #define PGSTROM_SCHEMA_NAME		"pgstrom"
 
-struct GpuMemSegMap;
-
 #define RESTRACK_HASHSIZE		53
 #define CUDA_MODULES_HASHSIZE	25
 typedef struct GpuContext
@@ -446,6 +444,8 @@ extern CUresult gpuMemFreeHost(GpuContext *gcontext,
 #define gpuMemAllocHost(a,b,c)				\
 	__gpuMemAllocHost((a),(b),(c),__FILE__,__LINE__)
 
+extern void gpuMemReclaimSegment(GpuContext *gcontext);
+
 extern void gpuMemCopyFromSSD(GpuTask *gtask,
 							  CUdeviceptr m_kds,
 							  pgstrom_data_store *pds);
@@ -579,6 +579,8 @@ extern void pgstrom_init_gpu_context(void);
 										"%s: (%s:%d) " fmt "\n",		\
 										(elabel), __fname, __LINE__,	\
 										##__VA_ARGS__);					\
+			if ((elevel) >= ERROR)										\
+				pg_unreachable();										\
 		}																\
 	} while(0)
 
@@ -1286,6 +1288,29 @@ pthreadCondWait(pthread_cond_t *cond, pthread_mutex_t *mutex)
 {
 	if ((errno = pthread_cond_wait(cond, mutex)) != 0)
 		wfatal("failed on pthread_cond_wait: %m");
+}
+
+static inline bool
+pthreadCondWaitTimeout(pthread_cond_t *cond, pthread_mutex_t *mutex,
+					   long timeout_ms)
+{
+	struct timespec tm;
+
+	clock_gettime(CLOCK_REALTIME, &tm);
+	tm.tv_sec += timeout_ms / 1000;
+	tm.tv_nsec += (timeout_ms % 1000) * 1000000;
+	if (tm.tv_nsec > 1000000000)
+	{
+		tm.tv_sec += tm.tv_nsec / 1000000000;
+		tm.tv_nsec = tm.tv_nsec % 1000000000;
+	}
+
+	errno = pthread_cond_timedwait(cond, mutex, &tm);
+	if (errno == 0)
+		return true;
+	else if (errno == ETIMEDOUT)
+		return false;
+	wfatal("failed on pthread_cond_timedwait: %m");
 }
 
 static inline void

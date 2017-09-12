@@ -70,6 +70,7 @@ typedef struct
 	CUdeviceptr		m_segment;	/* device pointer of the segment */
 	unsigned long	iomap_handle; /* only if GpuMemKind__IOMapMemory */
 	slock_t			lock;		/* protection of chunks */
+	pg_atomic_uint32 num_active_chunks; /* # of active chunks */
 	dlist_head		free_chunks[GPUMEM_CHUNKSZ_MAX_BIT + 1];
 	GpuMemChunk		gm_chunks[FLEXIBLE_ARRAY_MEMBER];
 } GpuMemSegment;
@@ -199,6 +200,7 @@ gpuMemFreeChunk(GpuContext *gcontext,
 	/* back to the free list again */
 	dlist_push_head(&gm_seg->free_chunks[gm_chunk->mclass],
 					&gm_chunk->chain);
+	pg_atomic_fetch_sub_u32(&gm_seg->num_active_chunks, 1);
 	SpinLockRelease(&gm_seg->lock);
 
     return CUDA_SUCCESS;
@@ -469,6 +471,7 @@ retry:
 				   gm_chunk->mclass == mclass);
 			memset(&gm_chunk->chain, 0, sizeof(dlist_node));
 			gm_chunk->refcnt++;
+			pg_atomic_fetch_add_u32(&gm_seg->num_active_chunks, 1);
 			SpinLockRelease(&gm_seg->lock);
 			pthreadRWLockUnlock(&gcontext->gm_rwlock);
 			/* ok, found */
@@ -571,6 +574,7 @@ retry:
 	gm_seg->gm_kind		= gm_kind;
 	gm_seg->m_segment	= m_segment;
 	SpinLockInit(&gm_seg->lock);
+	pg_atomic_init_u32(&gm_seg->num_active_chunks, 0);
 	for (i=0; i <= GPUMEM_CHUNKSZ_MAX_BIT; i++)
 		dlist_init(&gm_seg->free_chunks[i]);
 
@@ -606,19 +610,6 @@ retry:
 			dlist_push_tail(&gm_seg->free_chunks[mclass],
 							&gm_chunk->chain);
 		}
-	}
-
-	/* track by GpuContext */
-	if (!trackGpuMem(gcontext, m_segment, gm_seg,
-					 filename, lineno))
-	{
-		if (gm_kind != GpuMemKind__HostMemory)
-			cuMemFree(m_segment);
-		else
-			cuMemFreeHost((void *)m_segment);
-		free(gm_seg);
-		pthreadRWLockUnlock(&gcontext->gm_rwlock);
-		return CUDA_ERROR_OUT_OF_MEMORY;
 	}
 	dlist_push_head(gm_segment_list, &gm_seg->chain);
 
@@ -727,6 +718,115 @@ __gpuMemAllocHost(GpuContext *gcontext,
 	if (rc == CUDA_SUCCESS)
 		*p_hostptr = (void *)tempptr;
 	return rc;
+}
+
+/*
+ * gpuMemReclaimSegment - release a free segment if any
+ */
+void
+gpuMemReclaimSegment(GpuContext *gcontext)
+{
+	dlist_head	   *dhead_n = &gcontext->gm_normal_list;
+	dlist_head	   *dhead_i = &gcontext->gm_iomap_list;
+	dlist_head	   *dhead_m = &gcontext->gm_managed_list;
+	dlist_head	   *dhead_h = &gcontext->gm_hostmem_list;
+	dlist_node	   *dnode_n;
+	dlist_node	   *dnode_i;
+	dlist_node	   *dnode_m;
+	dlist_node	   *dnode_h;
+	GpuMemSegment  *gm_seg;
+	CUresult		rc;
+
+	pthreadRWLockWriteLock(&gcontext->gm_rwlock);
+	for (dnode_n = (!dlist_is_empty(dhead_n)
+					? dlist_tail_node(dhead_n) : NULL),
+		 dnode_i = (!dlist_is_empty(dhead_i)
+					? dlist_tail_node(dhead_i) : NULL),
+		 dnode_m = (!dlist_is_empty(dhead_m)
+					? dlist_tail_node(dhead_m) : NULL),
+		 dnode_h = (!dlist_is_empty(dhead_h)
+					? dlist_tail_node(dhead_h) : NULL);
+		 dnode_n != NULL || dnode_i != NULL;
+		 dnode_n = (dnode_n && dlist_has_prev(dhead_n, dnode_n)
+					? dlist_prev_node(dhead_n, dnode_n) : NULL),
+		 dnode_i = (dnode_i && dlist_has_prev(dhead_i, dnode_i)
+					? dlist_prev_node(dhead_i, dnode_i) : NULL),
+		 dnode_m = (dnode_m && dlist_has_prev(dhead_m, dnode_m)
+					? dlist_prev_node(dhead_m, dnode_m) : NULL),
+		 dnode_h = (dnode_h && dlist_has_prev(dhead_h, dnode_h)
+					? dlist_prev_node(dhead_h, dnode_h) : NULL))
+	{
+		if (dnode_n)
+		{
+			gm_seg = dlist_container(GpuMemSegment, chain, dnode_n);
+			Assert(gm_seg->gm_kind == GpuMemKind__NormalMemory);
+			if (pg_atomic_read_u32(&gm_seg->num_active_chunks) == 0)
+			{
+				rc = cuMemFree(gm_seg->m_segment);
+				if (rc != CUDA_SUCCESS)
+				{
+					pthreadRWLockUnlock(&gcontext->gm_rwlock);
+					werror("failed on cuMemFree: %s", errorText(rc));
+				}
+				dlist_delete(&gm_seg->chain);
+				free(gm_seg);
+				break;
+			}
+		}
+
+		if (dnode_i)
+		{
+			gm_seg = dlist_container(GpuMemSegment, chain, dnode_i);
+			Assert(gm_seg->gm_kind == GpuMemKind__IOMapMemory);
+			if (pg_atomic_read_u32(&gm_seg->num_active_chunks) == 0)
+            {
+				rc = cuMemFree(gm_seg->m_segment);
+				if (rc != CUDA_SUCCESS)
+				{
+					pthreadRWLockUnlock(&gcontext->gm_rwlock);
+					werror("failed on cuMemFree: %s", errorText(rc));
+				}
+				dlist_delete(&gm_seg->chain);
+				free(gm_seg);
+				break;
+			}
+		}
+
+		if (dnode_m)
+		{
+			gm_seg = dlist_container(GpuMemSegment, chain, dnode_m);
+			Assert(gm_seg->gm_kind == GpuMemKind__ManagedMemory);
+			if (pg_atomic_read_u32(&gm_seg->num_active_chunks) == 0)
+			{
+				rc = cuMemFree(gm_seg->m_segment);
+				if (rc != CUDA_SUCCESS)
+				{
+					pthreadRWLockUnlock(&gcontext->gm_rwlock);
+					werror("failed on cuMemFree: %s", errorText(rc));
+				}
+				dlist_delete(&gm_seg->chain);
+				free(gm_seg);
+			}
+		}
+
+		if (dnode_h)
+		{
+			gm_seg = dlist_container(GpuMemSegment, chain, dnode_h);
+			Assert(gm_seg->gm_kind == GpuMemKind__HostMemory);
+			if (pg_atomic_read_u32(&gm_seg->num_active_chunks) == 0)
+			{
+				rc = cuMemFreeHost((void *)gm_seg->m_segment);
+				if (rc != CUDA_SUCCESS)
+				{
+					pthreadRWLockUnlock(&gcontext->gm_rwlock);
+					werror("failed on cuMemFreeHost: %s", errorText(rc));
+				}
+				dlist_delete(&gm_seg->chain);
+				free(gm_seg);
+			}
+		}
+	}
+	pthreadRWLockUnlock(&gcontext->gm_rwlock);
 }
 
 /*

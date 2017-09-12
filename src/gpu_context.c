@@ -395,6 +395,7 @@ GpuContextWorkerMain(void *arg)
 	dlist_node	   *dnode;
 	GpuTask		   *gtask;
 	CUresult		rc;
+	bool			is_timeout;
 
 	/* setup worker index */
 	GpuWorkerIndex = pg_atomic_fetch_add_u32(&gcontext->worker_index, 1);
@@ -419,8 +420,23 @@ GpuContextWorkerMain(void *arg)
 		pthreadMutexLock(&gcontext->mutex);
 		if (dlist_is_empty(&gcontext->pending_tasks))
 		{
-			pthreadCondWait(&gcontext->cond, &gcontext->mutex);
+			is_timeout = pthreadCondWaitTimeout(&gcontext->cond,
+												&gcontext->mutex,
+												4000);
 			pthreadMutexUnlock(&gcontext->mutex);
+			if (is_timeout)
+			{
+				/*
+				 * XXX - Once GPU related tasks get idle, all the worker
+				 * threads may reach the timeout almost same timing.
+				 * We may need more mild memory segment reclaim policy.
+				 * XXX - Other concurrent task may wake up worker for
+				 * memory segment reclaim if memory allocation pressure 
+				 * on normal/iomap segment, especially.
+				 */
+				pthreadCondSignal(&gcontext->cond);
+				gpuMemReclaimSegment(gcontext);
+			}
 		}
 		else
 		{
