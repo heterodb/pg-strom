@@ -2834,7 +2834,7 @@ gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 	{
 		//XXX - to be chunk size
 		wnotice("kds_length = %zu", (size_t)pds_src->kds.length);
-		rc = gpuMemAllocIOMap(gcontext,
+		rc = gpuMemAlloc(gcontext,
 						 &m_kds_src,
 						 pds_src->kds.length);
 		if (rc == CUDA_ERROR_OUT_OF_MEMORY)

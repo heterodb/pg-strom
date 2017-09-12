@@ -275,7 +275,6 @@ ReleaseLocalResources(GpuContext *gcontext, bool normal_exit)
 {
 	ResourceTracker *tracker;
 	dlist_node		*dnode;
-	CUresult		rc;
 	int				i;
 
 	/* should be deactivated already */
@@ -297,13 +296,11 @@ ReleaseLocalResources(GpuContext *gcontext, bool normal_exit)
 								(void *)tracker->u.devmem.ptr,
 								__basename(tracker->filename),
 								tracker->lineno);
-					rc = gpuMemFreeExtra(gcontext,
-										 tracker->u.devmem.ptr,
-										 tracker->u.devmem.extra);
-					if (rc != CUDA_SUCCESS)
-						wnotice("failed on cuMemFree(%p): %s",
-								(void *)tracker->u.devmem.ptr,
-								errorText(rc));
+					/*
+					 * NOTE: All the GPU related memory is already wipied
+					 * out by cuCtxDestroy(), so we don't need to release
+					 * individual memory chunks by ourselves.
+					 */
 					break;
 				case RESTRACK_CLASS__GPUPROGRAM:
 					if (normal_exit)
@@ -413,26 +410,23 @@ GpuContextWorkerMain(void *arg)
 	}
 	GpuWorkerCurrentContext = gcontext;
 
-	wnotice("worker is now running");
-	pthreadMutexLock(&gcontext->mutex);
-	while (!gcontext->terminate_workers)
+	while (pg_atomic_read_u32(&gcontext->terminate_workers) == 0)
 	{
 		/* try asyncronous program build if any */
 		if (pgstrom_try_build_cuda_program())
 			continue;
 
+		pthreadMutexLock(&gcontext->mutex);
 		if (dlist_is_empty(&gcontext->pending_tasks))
 		{
 			pthreadCondWait(&gcontext->cond, &gcontext->mutex);
-			wnotice("wake up a worker");
+			pthreadMutexUnlock(&gcontext->mutex);
 		}
 		else
 		{
 			dnode = dlist_pop_head_node(&gcontext->pending_tasks);
 			gtask = dlist_container(GpuTask, chain, dnode);
 			pthreadMutexUnlock(&gcontext->mutex);
-
-			wnotice("fetch a GpuTask %p", gtask);
 
 			/* Execution of the GpuTask */
 			STROM_TRY();
@@ -483,22 +477,14 @@ GpuContextWorkerMain(void *arg)
 			}
 			STROM_CATCH();
 			{
-				wnotice("Got exception, thus, exit workers");
 				/* Wake up and terminate other workers also */
-				pthreadMutexLock(&gcontext->mutex);
-				gcontext->terminate_workers = true;
+				pg_atomic_write_u32(&gcontext->terminate_workers, 1);
 				pthreadCondBroadcast(&gcontext->cond);
-				pthreadMutexUnlock(&gcontext->mutex);
 				SetLatch(MyLatch);
 			}
 			STROM_END_TRY();
-
-			pthreadMutexLock(&gcontext->mutex);
 		}
 	}
-	pthreadMutexUnlock(&gcontext->mutex);
-	wnotice("worker now exit...");
-
 	return NULL;
 }
 
@@ -663,6 +649,7 @@ AllocGpuContext(int cuda_dindex,
 	pthreadMutexInit(&gcontext->mutex);
 	pthreadCondInit(&gcontext->cond);
 	gcontext->num_running_tasks = 0;
+	pg_atomic_init_u32(&gcontext->terminate_workers, 0);
 	dlist_init(&gcontext->pending_tasks);
 	dlist_init(&gcontext->completed_tasks);
 	gcontext->num_workers = num_workers;
@@ -727,19 +714,18 @@ SynchronizeGpuContext(GpuContext *gcontext)
 	if (!gcontext->cuda_context)
 		return;
 
-	/* signal to terminate workers */
-	pthreadMutexLock(&gcontext->mutex);
-	gcontext->terminate_workers = true;
+	/* signal to terminate all workers */
+	pg_atomic_write_u32(&gcontext->terminate_workers, 1);
 	pthreadCondBroadcast(&gcontext->cond);
-	pthreadMutexUnlock(&gcontext->mutex);
 	/* interrupt cuEventSynchronize() */
 	for (i=0; i < gcontext->num_workers; i++)
 	{
 		if ((rc = cuEventRecord(gcontext->cuda_events0[i],
-								CU_STREAM_PER_THREAD)) != CUDA_SUCCESS ||
-			(rc = cuEventRecord(gcontext->cuda_events1[i],
 								CU_STREAM_PER_THREAD)) != CUDA_SUCCESS)
-			elog(FATAL, "failed on cuEventRecord: %s", errorText(rc));
+			elog(WARNING, "failed on cuEventRecord: %s", errorText(rc));
+		if ((rc = cuEventRecord(gcontext->cuda_events1[i],
+								CU_STREAM_PER_THREAD)) != CUDA_SUCCESS)
+			elog(WARNING, "failed on cuEventRecord: %s", errorText(rc));
 	}
 
 	/* wait for completion of the worker threads */
@@ -748,13 +734,13 @@ SynchronizeGpuContext(GpuContext *gcontext)
 		pthread_t	thread = gcontext->worker_threads[i];
 
 		if ((errno = pthread_join(thread, NULL)) != 0)
-			elog(FATAL, "failed on pthread_join: %m");
+			elog(PANIC, "failed on pthread_join: %m");
 	}
 
 	/* Drop CUDA context to interrupt long-running GPU kernels, if any */
 	rc = cuCtxDestroy(gcontext->cuda_context);
 	if (rc != CUDA_SUCCESS)
-		elog(FATAL, "failed on cuCtxDestroy: %s", errorText(rc));
+		elog(WARNING, "failed on cuCtxDestroy: %s", errorText(rc));
 
 	gcontext->cuda_device = 0;
 	gcontext->cuda_context = NULL;

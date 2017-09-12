@@ -127,7 +127,7 @@ typedef struct GpuContext
 	pg_atomic_uint32 *global_num_running_tasks;
 	pthread_mutex_t	mutex;
 	pthread_cond_t	cond;
-	cl_bool			terminate_workers;
+	pg_atomic_uint32 terminate_workers;
 	cl_int			num_running_tasks;
 	dlist_head		pending_tasks;		/* list of GpuTask */
 	dlist_head		completed_tasks;	/* list of GpuTask */
@@ -429,9 +429,6 @@ extern CUresult __gpuMemAllocHost(GpuContext *gcontext,
 								  void **p_hostptr,
 								  size_t bytesize,
 								  const char *filename, int lineno);
-extern CUresult gpuMemFreeExtra(GpuContext *gcontext,
-								CUdeviceptr m_deviceptr,
-								void *extra);
 extern CUresult gpuMemFree(GpuContext *gcontext,
 						   CUdeviceptr devptr);
 extern CUresult gpuMemFreeHost(GpuContext *gcontext,
@@ -486,14 +483,18 @@ extern void GpuContextWorkerReportError(int elevel,
 static inline void
 CHECK_FOR_GPUCONTEXT(GpuContext *gcontext)
 {
-	uint32	error_level = pg_atomic_read_u32(&gcontext->error_level);
+	uint32		error_level = pg_atomic_read_u32(&gcontext->error_level);
+	const char *error_message;
 
 	if (error_level >= ERROR)
 	{
+		error_message = strchr(gcontext->error_message, '(');
+		if (!error_message)
+			error_message = gcontext->error_message;
 		elog_start(gcontext->error_filename,
 				   gcontext->error_lineno,
 				   gcontext->error_funcname);
-		elog_finish(error_level, "%s", gcontext->error_message);
+		elog_finish(error_level, "%s", error_message);
 	}
 	CHECK_FOR_INTERRUPTS();
 }

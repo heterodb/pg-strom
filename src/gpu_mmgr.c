@@ -131,16 +131,19 @@ gpuMemFreeChunk(GpuContext *gcontext,
 {
 	GpuMemChunk	   *gm_chunk;
 	GpuMemChunk	   *gm_buddy;
+	cl_long			unit_sz;
+	cl_long			nchunks;
 	cl_long			index;
 	cl_long			shift;
-	cl_long			nchunks;
 
 	Assert(m_deviceptr >= gm_seg->m_segment &&
 		   m_deviceptr <  gm_seg->m_segment + gm_segment_sz);
-	if (gm_seg->gm_kind == GpuMemKind__ManagedMemory)
-		index = (m_deviceptr - gm_seg->m_segment) >> GPUMEM_CHUNKSZ_MIN_BIT;
-	else
-		index = (m_deviceptr - gm_seg->m_segment) / pgstrom_chunk_size();
+	unit_sz = (gm_seg->gm_kind == GpuMemKind__ManagedMemory
+			   ? GPUMEM_CHUNKSZ_MIN
+			   : pgstrom_chunk_size());
+	nchunks = gm_segment_sz / unit_sz;
+	index = (m_deviceptr - gm_seg->m_segment) / unit_sz;
+	Assert(index >= 0 && index < nchunks);
 	gm_chunk = &gm_seg->gm_chunks[index];
 	Assert(GPUMEMCHUNK_IS_ACTIVE(gm_chunk));
 	SpinLockAcquire(&gm_seg->lock);
@@ -150,8 +153,6 @@ gpuMemFreeChunk(GpuContext *gcontext,
 	/* GpuMemKind__ManagedMemory tries to merge with prev/next chunks */
 	if (gm_seg->gm_kind == GpuMemKind__ManagedMemory)
 	{
-		nchunks = gm_segment_sz >> GPUMEM_CHUNKSZ_MIN_BIT;
-
 		while (gm_chunk->mclass < GPUMEM_CHUNKSZ_MAX_BIT)
 		{
 			index = (gm_chunk - gm_seg->gm_chunks);
@@ -206,7 +207,7 @@ gpuMemFreeChunk(GpuContext *gcontext,
 /*
  * gpuMemFreeExtra
  */
-CUresult
+static inline CUresult
 gpuMemFreeExtra(GpuContext *gcontext,
 				CUdeviceptr m_deviceptr,
 				void *extra)
@@ -414,25 +415,30 @@ gpuMemAllocChunk(GpuMemKind gm_kind,
 	dlist_head	   *gm_segment_list;
 	CUresult		rc;
 	cl_int			i, nchunks;
+	size_t			unit_sz;
 	bool			has_exclusive_lock = false;
 
 	switch (gm_kind)
 	{
 		case GpuMemKind__NormalMemory:
 			gm_segment_list = &gcontext->gm_normal_list;
-			nchunks = gm_segment_sz / pgstrom_chunk_size();
+			unit_sz = pgstrom_chunk_size();
+			nchunks = gm_segment_sz / unit_sz;
 			break;
 		case GpuMemKind__IOMapMemory:
 			gm_segment_list = &gcontext->gm_iomap_list;
-			nchunks = gm_segment_sz >> GPUMEM_CHUNKSZ_MIN_BIT;
+			unit_sz = pgstrom_chunk_size();
+			nchunks = gm_segment_sz / unit_sz;
 			break;
 		case GpuMemKind__ManagedMemory:
 			gm_segment_list = &gcontext->gm_managed_list;
-			nchunks = gm_segment_sz / pgstrom_chunk_size();
+			unit_sz = GPUMEM_CHUNKSZ_MIN;
+			nchunks = gm_segment_sz / unit_sz;
 			break;
 		case GpuMemKind__HostMemory:
 			gm_segment_list = &gcontext->gm_hostmem_list;
-			nchunks = gm_segment_sz / pgstrom_chunk_size();
+			unit_sz = pgstrom_chunk_size();
+			nchunks = gm_segment_sz / unit_sz;
 			break;
 		default:
 			return CUDA_ERROR_INVALID_VALUE;
@@ -465,11 +471,13 @@ retry:
 			SpinLockRelease(&gm_seg->lock);
 			pthreadRWLockUnlock(&gcontext->gm_rwlock);
 			/* ok, found */
-			
-			
-			
+			Assert(gm_chunk >= gm_seg->gm_chunks &&
+				   (gm_chunk - gm_seg->gm_chunks) < nchunks);
+			i = gm_chunk - gm_seg->gm_chunks;
+			*p_deviceptr = gm_seg->m_segment + i * unit_sz;
 			return CUDA_SUCCESS;
 		}
+		SpinLockRelease(&gm_seg->lock);
 	}
 
 	if (!has_exclusive_lock)
@@ -495,6 +503,7 @@ retry:
 	{
 		free(gm_seg);
 		pthreadRWLockUnlock(&gcontext->gm_rwlock);
+		wnotice("failed on cuCtxPushCurrent: %s", errorText(rc));
 		return rc;
 	}
 
@@ -581,6 +590,7 @@ retry:
 		for (i=0; i < nchunks; i++)
 		{
 			gm_chunk = &gm_seg->gm_chunks[i];
+			gm_chunk->mclass = mclass;
 			dlist_push_tail(&gm_seg->free_chunks[mclass],
 							&gm_chunk->chain);
 		}
@@ -678,7 +688,7 @@ __gpuMemAllocManaged(GpuContext *gcontext,
 									   bytesize,
 									   flags,
 									   filename, lineno);
-	return gpuMemAllocChunk(GpuMemKind__NormalMemory,
+	return gpuMemAllocChunk(GpuMemKind__ManagedMemory,
 							gcontext, p_deviceptr, mclass,
 							filename, lineno);
 }
@@ -722,6 +732,10 @@ pgstrom_gpu_mmgr_init_gpucontext(GpuContext *gcontext)
 
 /*
  * pgstrom_gpu_mmgr_cleanup_gpucontext - Per GpuContext cleanup
+ *
+ * NOTE: CUDA context is already destroyed on the invocation time. 
+ * So, we don't need to release individual segment, but need to release
+ * heap memory.
  */
 void
 pgstrom_gpu_mmgr_cleanup_gpucontext(GpuContext *gcontext)
@@ -729,6 +743,8 @@ pgstrom_gpu_mmgr_cleanup_gpucontext(GpuContext *gcontext)
 	GpuMemStatistics *gm_stat = &gm_stat_array[gcontext->cuda_dindex];
 	GpuMemSegment  *gm_seg;
 	dlist_node	   *dnode;
+
+	Assert(!gcontext->cuda_context);
 
 	while (!dlist_is_empty(&gcontext->gm_normal_list))
 	{
@@ -818,6 +834,7 @@ pgstrom_init_gpu_mmgr(void)
 		elog(ERROR, "pg_strom.gpu_memory_segment_size(%dkB) must be multiple number of pg_strom.chunk_size(%dkB)",
 			 gpu_memory_segment_size_kb,
 			 (int)(pgstrom_chunk_size() >> 10));
+	gm_segment_sz = (size_t)gpu_memory_segment_size_kb << 10;
 
 	/* pg_strom.nvme_strom_enabled */
 	DefineCustomBoolVariable("pg_strom.nvme_strom_enabled",
