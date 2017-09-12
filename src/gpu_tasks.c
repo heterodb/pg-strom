@@ -357,6 +357,7 @@ fetch_next_gputask(GpuTaskState *gts)
 	 */
 	Assert(gts->scan_done);
 	pthreadMutexLock(&gcontext->mutex);
+	ResetLatch(MyLatch);
 	fetch_completed_gputasks(gcontext);
 	while (dlist_is_empty(&gts->ready_tasks))
 	{
@@ -366,6 +367,7 @@ fetch_next_gputask(GpuTaskState *gts)
 			pthreadMutexUnlock(&gcontext->mutex);
 			return NULL;
 		}
+		pthreadMutexUnlock(&gcontext->mutex);
 
 		ev = WaitLatch(MyLatch,
 					   WL_LATCH_SET |
@@ -377,6 +379,8 @@ fetch_next_gputask(GpuTaskState *gts)
 					(errcode(ERRCODE_ADMIN_SHUTDOWN),
 					 errmsg("Unexpected Postmaster dead")));
 
+		pthreadMutexLock(&gcontext->mutex);
+		ResetLatch(MyLatch);
 		fetch_completed_gputasks(gcontext);
 	}
 	pthreadMutexUnlock(&gcontext->mutex);

@@ -714,15 +714,25 @@ extern void init_kernel_data_store(kern_data_store *kds,
 								   int format,
 								   uint nrooms);
 
-extern pgstrom_data_store *PDS_create_row(GpuContext *gcontext,
-										  TupleDesc tupdesc,
-										  Size length);
-extern pgstrom_data_store *PDS_create_hash(GpuContext *gcontext,
-										   TupleDesc tupdesc,
-										   Size length);
-extern pgstrom_data_store *PDS_create_block(GpuContext *gcontext,
+extern pgstrom_data_store *__PDS_create_row(GpuContext *gcontext,
 											TupleDesc tupdesc,
-											struct NVMEScanState *nvme_sstate);
+											Size length,
+											const char *fname, int lineno);
+extern pgstrom_data_store *__PDS_create_hash(GpuContext *gcontext,
+											 TupleDesc tupdesc,
+											 Size length,
+											 const char *fname, int lineno);
+extern pgstrom_data_store *__PDS_create_block(GpuContext *gcontext,
+											  TupleDesc tupdesc,
+											  NVMEScanState *nvme_sstate,
+											  const char *fname, int lineno);
+#define PDS_create_row(a,b,c)					\
+	__PDS_create_row((a),(b),(c),__FILE__,__LINE__)
+#define PDS_create_hash(a,b,c)					\
+	__PDS_create_hash((a),(b),(c),__FILE__,__LINE__)
+#define PDS_create_block(a,b,c)					\
+	__PDS_create_block((a),(b),(c),__FILE__,__LINE__)
+
 //to be gpu_task.c?
 extern void PDS_init_heapscan_state(GpuTaskState *gts,
 									cl_uint nrows_per_block);

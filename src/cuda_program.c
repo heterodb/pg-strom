@@ -1293,6 +1293,7 @@ pgstrom_load_cuda_program(ProgramId program_id)
 	put_cuda_program_entry(entry);
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuModuleLoadData: %s", errorText(rc));
+
 	return cuda_module;
 }
 

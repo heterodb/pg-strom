@@ -495,20 +495,22 @@ PDS_shrink_size(pgstrom_data_store *pds)
 }
 
 pgstrom_data_store *
-PDS_create_row(GpuContext *gcontext,
-			   TupleDesc tupdesc,
-			   size_t bytesize)
+__PDS_create_row(GpuContext *gcontext,
+				 TupleDesc tupdesc,
+				 size_t bytesize,
+				 const char *filename, int lineno)
 {
 	pgstrom_data_store *pds;
 	CUdeviceptr	m_deviceptr;
 	CUresult	rc;
 
 	bytesize = STROMALIGN_DOWN(bytesize);
-	rc = gpuMemAllocManaged(gcontext,
-							&m_deviceptr,
-							offsetof(pgstrom_data_store,
-									 kds) + bytesize,
-							CU_MEM_ATTACH_GLOBAL);
+	rc = __gpuMemAllocManaged(gcontext,
+							  &m_deviceptr,
+							  offsetof(pgstrom_data_store,
+									   kds) + bytesize,
+							  CU_MEM_ATTACH_GLOBAL,
+							  filename, lineno);
 	if (rc != CUDA_SUCCESS)
 		werror("out of managed memory");
 	pds = (pgstrom_data_store *) m_deviceptr;
@@ -525,9 +527,10 @@ PDS_create_row(GpuContext *gcontext,
 }
 
 pgstrom_data_store *
-PDS_create_hash(GpuContext *gcontext,
-				TupleDesc tupdesc,
-				size_t bytesize)
+__PDS_create_hash(GpuContext *gcontext,
+				  TupleDesc tupdesc,
+				  size_t bytesize,
+				  const char *filename, int lineno)
 {
 	pgstrom_data_store *pds;
 	CUdeviceptr	m_deviceptr;
@@ -537,11 +540,12 @@ PDS_create_hash(GpuContext *gcontext,
 	if (KDS_CALCULATE_HEAD_LENGTH(tupdesc->natts) > bytesize)
 		elog(ERROR, "Required length for KDS-Hash is too short");
 
-	rc = gpuMemAllocManaged(gcontext,
-							&m_deviceptr,
-							offsetof(pgstrom_data_store,
-									 kds) + bytesize,
-							CU_MEM_ATTACH_GLOBAL);
+	rc = __gpuMemAllocManaged(gcontext,
+							  &m_deviceptr,
+							  offsetof(pgstrom_data_store,
+									   kds) + bytesize,
+							  CU_MEM_ATTACH_GLOBAL,
+							  filename, lineno);
 	if (rc != CUDA_SUCCESS)
 		werror("out of managed memory");
 	pds = (pgstrom_data_store *) m_deviceptr;
@@ -558,9 +562,10 @@ PDS_create_hash(GpuContext *gcontext,
 }
 
 pgstrom_data_store *
-PDS_create_block(GpuContext *gcontext,
-				 TupleDesc tupdesc,
-				 NVMEScanState *nvme_sstate)
+__PDS_create_block(GpuContext *gcontext,
+				   TupleDesc tupdesc,
+				   NVMEScanState *nvme_sstate,
+				   const char *filename, int lineno)
 {
 	pgstrom_data_store *pds = NULL;
 	cl_uint		nrooms = nvme_sstate->nblocks_per_chunk;
@@ -576,9 +581,10 @@ PDS_create_block(GpuContext *gcontext,
 			 offsetof(pgstrom_data_store, kds) + bytesize,
 			 pgstrom_chunk_size());
 
-	rc = gpuMemAllocHost(gcontext,
-						 (void **)&pds,
-						 pgstrom_chunk_size());
+	rc = __gpuMemAllocHost(gcontext,
+						   (void **)&pds,
+						   pgstrom_chunk_size(),
+						   filename, lineno);
 	if (rc != CUDA_SUCCESS)
 		werror("failed on gpuMemAllocHost: %s", errorText(rc));
 	/* setup */
