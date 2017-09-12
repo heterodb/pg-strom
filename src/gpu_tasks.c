@@ -304,7 +304,6 @@ fetch_next_gputask(GpuTaskState *gts)
 				gcontext->num_running_tasks++;
 				pg_atomic_add_fetch_u32(gcontext->global_num_running_tasks, 1);
 				pthreadCondSignal(&gcontext->cond);
-				wnotice("cond signal done");
 			}
 			else if (!dlist_is_empty(&gts->ready_tasks))
 			{
@@ -313,7 +312,8 @@ fetch_next_gputask(GpuTaskState *gts)
 				 * the number of concurrent tasks, GTS already has ready tasks,
 				 * so pick them up instead of wait.
 				 */
-				break;
+				pthreadMutexUnlock(&gcontext->mutex);
+				goto pickup_gputask;
 			}
 			else if (gcontext->num_running_tasks > 0)
 			{
@@ -360,6 +360,7 @@ fetch_next_gputask(GpuTaskState *gts)
 	fetch_completed_gputasks(gcontext);
 	while (dlist_is_empty(&gts->ready_tasks))
 	{
+		Assert(gcontext->num_running_tasks >= 0);
 		if (gcontext->num_running_tasks == 0)
 		{
 			pthreadMutexUnlock(&gcontext->mutex);
@@ -379,7 +380,7 @@ fetch_next_gputask(GpuTaskState *gts)
 		fetch_completed_gputasks(gcontext);
 	}
 	pthreadMutexUnlock(&gcontext->mutex);
-
+pickup_gputask:
 	/* OK, pick up GpuTask from the head */
 	Assert(gts->num_ready_tasks > 0);
 	dnode = dlist_pop_head_node(&gts->ready_tasks);

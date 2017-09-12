@@ -2817,30 +2817,33 @@ gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 	 * So, if we cannot allocate i/o mapped device memory, we try to read
 	 * the blocks synchronously then kicks usual RAM->GPU DMA.
 	 */
-	if (gscan->with_nvme_strom)
+	if (pds_src->kds.format != KDS_FORMAT_BLOCK)
+		m_kds_src = (CUdeviceptr)&pds_src->kds;
+	else
 	{
-		rc = gpuMemAllocIOMap(gcontext,
-							  &m_kds_src,
-							  pds_src->kds.length);
-		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
+		if (gscan->with_nvme_strom)
 		{
-			PDS_fillup_blocks(pds_src, gtask->file_desc);
-			gscan->with_nvme_strom = false;
+			rc = gpuMemAllocIOMap(gcontext,
+								  &m_kds_src,
+								  pds_src->kds.length);
+			if (rc == CUDA_ERROR_OUT_OF_MEMORY)
+			{
+				PDS_fillup_blocks(pds_src, gtask->file_desc);
+				gscan->with_nvme_strom = false;
+			}
+			else if (rc != CUDA_SUCCESS)
+				werror("failed on gpuMemAllocIOMap: %s", errorText(rc));
 		}
-		else if (rc != CUDA_SUCCESS)
-			werror("failed on gpuMemAllocIOMap: %s", errorText(rc));
-	}
-	if (m_kds_src == 0UL)
-	{
-		//XXX - to be chunk size
-		wnotice("kds_length = %zu", (size_t)pds_src->kds.length);
-		rc = gpuMemAlloc(gcontext,
-						 &m_kds_src,
-						 pds_src->kds.length);
-		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
-			goto out_of_resource;
-		else if (rc != CUDA_SUCCESS)
-			werror("failed on gpuMemAlloc: %s", errorText(rc));
+		if (m_kds_src == 0UL)
+		{
+			rc = gpuMemAlloc(gcontext,
+							 &m_kds_src,
+							 pds_src->kds.length);
+			if (rc == CUDA_ERROR_OUT_OF_MEMORY)
+				goto out_of_resource;
+			else if (rc != CUDA_SUCCESS)
+				werror("failed on gpuMemAlloc: %s", errorText(rc));
+		}
 	}
 
 	/*
@@ -2857,7 +2860,7 @@ gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 	/* kern_data_store *kds_src */
 	if (pds_src->kds.format != KDS_FORMAT_BLOCK)
 	{
-		rc = cuMemPrefetchAsync((CUdeviceptr)&pds_src->kds,
+		rc = cuMemPrefetchAsync(m_kds_src,
 								pds_src->kds.length,
 								CU_DEVICE_PER_THREAD,
 								CU_STREAM_PER_THREAD);
@@ -3021,7 +3024,7 @@ gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 out_of_resource:
 	if (retval > 0)
 		wnotice("GpuScan: out of resource");
-	if (m_kds_src)
+	if (pds_src->kds.format == KDS_FORMAT_BLOCK)
 		gpuMemFree(gcontext, m_kds_src);
 	return retval;
 }

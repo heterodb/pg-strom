@@ -451,7 +451,6 @@ GpuContextWorkerMain(void *arg)
 					if (retval == 0)
 					{
 						pthreadMutexLock(&gcontext->mutex);
-						gcontext->num_running_tasks--;
 						dlist_push_tail(&gcontext->completed_tasks,
 										&gtask->chain);
 						pthreadMutexUnlock(&gcontext->mutex);
@@ -465,11 +464,11 @@ GpuContextWorkerMain(void *arg)
 					}
 					else
 					{
+						pgstromReleaseGpuTask(gtask);
+
 						pthreadMutexLock(&gcontext->mutex);
 						gcontext->num_running_tasks--;
 						pthreadMutexUnlock(&gcontext->mutex);
-
-						pgstromReleaseGpuTask(gtask);
 
 						SetLatch(MyLatch);
 					}

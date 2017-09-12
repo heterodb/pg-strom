@@ -409,6 +409,7 @@ gpuMemAllocChunk(GpuMemKind gm_kind,
 	GpuMemStatistics *gm_stat;
 	GpuMemSegment  *gm_seg;
 	GpuMemChunk	   *gm_chunk;
+	CUdeviceptr		m_deviceptr;
 	CUdeviceptr		m_segment;
 	dlist_iter		iter;
 	dlist_node	   *dnode;
@@ -474,6 +475,13 @@ retry:
 			Assert(gm_chunk >= gm_seg->gm_chunks &&
 				   (gm_chunk - gm_seg->gm_chunks) < nchunks);
 			i = gm_chunk - gm_seg->gm_chunks;
+			m_deviceptr = gm_seg->m_segment + i * unit_sz;
+			if (!trackGpuMem(gcontext, m_deviceptr, gm_seg,
+							 filename, lineno))
+			{
+				gpuMemFreeChunk(gcontext, m_deviceptr, gm_seg);
+				return CUDA_ERROR_OUT_OF_MEMORY;
+			}
 			*p_deviceptr = gm_seg->m_segment + i * unit_sz;
 			return CUDA_SUCCESS;
 		}
@@ -511,11 +519,13 @@ retry:
 	{
 		case GpuMemKind__NormalMemory:
 			rc = cuMemAlloc(&m_segment, gm_segment_sz);
+			//wnotice("normal m_segment = %p - %p by %s:%d", (void *)m_segment, (void *)(m_segment - gm_segment_sz), filename, lineno);
 			break;
 
 		case GpuMemKind__ManagedMemory:
 			rc = cuMemAllocManaged(&m_segment, gm_segment_sz,
 								   CU_MEM_ATTACH_GLOBAL);
+			//wnotice("managed m_segment = %p - %p", (void *)m_segment, (void *)(m_segment + gm_segment_sz));
 			break;
 
 		case GpuMemKind__IOMapMemory:
@@ -536,11 +546,13 @@ retry:
 					rc = CUDA_ERROR_MAP_FAILED;
 				}
 			}
+			//wnotice("iomap m_segment = %p - %p", (void *)m_segment, (void *)(m_segment - gm_segment_sz));
 			break;
 
 		case GpuMemKind__HostMemory:
 			rc = cuMemHostAlloc((void **)&m_segment, gm_segment_sz,
 								CU_MEMHOSTALLOC_PORTABLE);
+			//wnotice("hostmem m_segment = %p - %p", (void *)m_segment, (void *)(m_segment - gm_segment_sz));
 			break;
 
 		default:
