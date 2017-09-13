@@ -898,15 +898,9 @@ extern Datum pltext_function_handler(PG_FUNCTION_ARGS);
 extern Datum plcuda_function_validator(PG_FUNCTION_ARGS);
 extern Datum plcuda_function_handler(PG_FUNCTION_ARGS);
 extern Datum plcuda_function_source(PG_FUNCTION_ARGS);
-#if 0
 extern int	plcuda_process_task(GpuTask *gtask, CUmodule cuda_module);
 extern void plcuda_release_task(GpuTask *gtask);
 extern void pgstrom_init_plcuda(void);
-#else
-#define plcuda_process_task(a,b)			0
-#define plcuda_release_task(a)				do {} while(0)
-#define pgstrom_init_plcuda(a)				do {} while(0)
-#endif
 
 /*
  * main.c

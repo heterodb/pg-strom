@@ -41,7 +41,7 @@ typedef struct plcudaTaskState
 	ResourceOwner	owner;
 	dlist_node		chain;
 	kern_plcuda	   *kplcuda_head;
-	void		   *last_results_buf;	/* results buffer last used */
+	CUdeviceptr		last_results_buf;	/* results buffer last used */
 	/* kernel requirement */
 	cl_uint		extra_flags;		/* flags to standard includes */
 	/* kernel declarations */
@@ -88,7 +88,7 @@ typedef struct plcudaTaskState
 } plcudaTaskState;
 
 /*
- *  plcudaTask
+ * plcudaTask
  */
 typedef struct plcudaTask
 {
@@ -96,7 +96,7 @@ typedef struct plcudaTask
 	bool			exec_prep_kernel;
 	bool			exec_post_kernel;
 	bool			has_cpu_fallback;
-	void		   *h_results_buf;	/* results buffer in host-side */
+	CUdeviceptr		m_results_buf;	/* results buffer as unified memory */
 	kern_plcuda		kern;
 } plcudaTask;
 
@@ -1311,7 +1311,8 @@ plcuda_exec_end(plcudaTaskState *plts)
 	dlist_delete(&plts->chain);
 
 	if (plts->last_results_buf)
-		dmaBufferFree(plts->last_results_buf);
+		gpuMemFree(plts->gts.gcontext,
+				   plts->last_results_buf);
 	pgstromReleaseGpuTaskState(&plts->gts);
 }
 
@@ -1414,6 +1415,8 @@ create_plcuda_task(plcudaTaskState *plts, FunctionCallInfo fcinfo,
 	kern_plcuda	   *kplcuda_head = plts->kplcuda_head;
 	Size			total_length;
 	Size			offset;
+	CUdeviceptr		m_deviceptr;
+	CUresult		rc;
 	int				i;
 
 	/* calculation of the length */
@@ -1441,11 +1444,24 @@ create_plcuda_task(plcudaTaskState *plts, FunctionCallInfo fcinfo,
 	total_length = STROMALIGN(total_length);
 
 	/* setup plcudaTask */
-	ptask = dmaBufferAlloc(gcontext, total_length);
+	rc = gpuMemAllocManaged(gcontext,
+							&m_deviceptr,
+							total_length,
+							CU_MEM_ATTACH_GLOBAL);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on gpuMemAllocManaged: %s", errorText(rc));
+	ptask = (plcudaTask *) m_deviceptr;
 	memset(ptask, 0, offsetof(plcudaTask, kern));
 	pgstromInitGpuTask(&plts->gts, &ptask->task);
 	if (results_bufsz > 0)
-		ptask->h_results_buf = dmaBufferAlloc(gcontext, results_bufsz);
+	{
+		rc = gpuMemAllocManaged(gcontext,
+								&ptask->m_results_buf,
+								results_bufsz,
+								CU_MEM_ATTACH_GLOBAL);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on gpuMemAllocManaged: %s", errorText(rc));
+	}
 	/* setup kern_plcuda */
 	memcpy(&ptask->kern, kplcuda_head, kplcuda_head->length);
 	ptask->kern.working_bufsz = working_bufsz;
@@ -1492,8 +1508,8 @@ create_plcuda_task(plcudaTaskState *plts, FunctionCallInfo fcinfo,
 	Assert(STROMALIGN(offsetof(plcudaTask, kern)
 					  + kplcuda_head->length)
 		   + kparams->length == total_length);
-	Assert(!plts->last_results_buf);
-	plts->last_results_buf = ptask->h_results_buf;
+	Assert(plts->last_results_buf == 0UL);
+	plts->last_results_buf = ptask->m_results_buf;
 
 	return ptask;
 }
@@ -1505,6 +1521,7 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 	plcudaTaskState *plts;
 	plcudaTask	   *ptask;
 	plcudaTask	   *precv;
+	GpuContext	   *gcontext;
 	Size			working_bufsz;
 	Size			results_bufsz;
 	kern_errorbuf	kerror;
@@ -1537,8 +1554,9 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 	/* results buffer of last invocation will not be used no longer */
 	if (plts->last_results_buf)
 	{
-		dmaBufferFree(plts->last_results_buf);
-		plts->last_results_buf = NULL;
+		gpuMemFree(plts->gts.gcontext,
+				   plts->last_results_buf);
+		plts->last_results_buf = 0UL;
 	}
 
 	/* sanitycheck of the supplied arguments, prior to GPU launch */
@@ -1698,12 +1716,20 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 		ptask->exec_post_kernel = true;
 	}
 
-	gpuservSendGpuTask(plts->gts.gcontext, &ptask->task);
-	plts->gts.scan_done = true;
+	/* Exec PL/CUDA function by GPU */
+	gcontext = plts->gts.gcontext;
+	pthreadMutexLock(gcontext->mutex);
+	dlist_push_tail(&gcontext->pending_tasks, &ptask->task.chain);
+	gcontext->num_running_tasks++;
+	pg_atomic_add_fetch_u32(gcontext->global_num_running_tasks, 1);
+	pthreadCondSignal(gcontext->cond);
+	pthreadMutexUnlock(gcontext->mutex);
 
+	/* Wait for the completion */
+	plts->gts.scan_done = true;
 	precv = (plcudaTask *) fetch_next_gputask(&plts->gts);
 	if (!precv)
-		elog(ERROR, "failed to recv GpuTask from GPU server");
+		elog(ERROR, "PL/CUDA GPU Task has gone to somewhere...");
 	Assert(precv == ptask);
 
 	/*
@@ -1758,19 +1784,20 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 			Assert(!precv->kern.retmeta.attbyval);
 			if (precv->kern.__retval[sizeof(CUdeviceptr)])
 				isnull = true;
-			else if (!precv->h_results_buf)
+			else if (precv->m_results_buf == 0UL)
 				elog(ERROR, "non-NULL result in spite of no results buffer");
 			else
-				retval = PointerGetDatum(precv->h_results_buf);
+				retval = PointerGetDatum((void *)precv->m_results_buf);
 		}
 	}
 	else
 	{
-		if (precv->h_results_buf)
+		if (precv->m_results_buf)
 		{
-			dmaBufferFree(precv->h_results_buf);
-			precv->h_results_buf = NULL;
-			plts->last_results_buf = NULL;
+			gpuMemFree(plts->gts.gcontext,
+					   precv->m_results_buf);
+			precv->m_results_buf = 0UL;
+			plts->last_results_buf = 0UL;
 		}
 
 		if (kerror.errcode == StromError_CpuReCheck &&
@@ -1790,7 +1817,7 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 							errorTextKernel(&kerror))));
 		}
 	}
-	dmaBufferFree(ptask);
+	gpuMemFree(plts->gts.gcontext, (CUdeviceptr)ptask);
 
 	if (isnull)
 		PG_RETURN_NULL();
@@ -1849,7 +1876,7 @@ int
 plcuda_process_task(GpuTask *gtask, CUmodule cuda_module)
 {
 	plcudaTask	   *ptask = (plcudaTask *) gtask;
-	GpuContext	   *gcontext = ptask->task.gcontext;
+	GpuContext	   *gcontext = GpuWorkerCurrentContext;
 	void		   *kern_args[3];
 	size_t			warp_size;
 	size_t			block_size;
@@ -1857,14 +1884,14 @@ plcuda_process_task(GpuTask *gtask, CUmodule cuda_module)
 	CUfunction		kern_plcuda_prep;
 	CUfunction		kern_plcuda_main;
 	CUfunction		kern_plcuda_post;
-	CUdeviceptr		m_kern_plcuda = 0UL;
-	CUdeviceptr		m_results_buf = 0UL;
+	CUdeviceptr		m_kern_plcuda = (CUdeviceptr)&ptask->kern;
+	CUdeviceptr		m_results_buf = ptask->m_results_buf;
 	CUdeviceptr		m_working_buf = 0UL;
 	CUresult		rc;
 	int				retval = 100001;
 
 	/* property of the device */
-	warp_size = devAttrs[gpuserv_cuda_dindex].WARP_SIZE;
+	warp_size = devAttrs[CU_DINDEX_PER_THREAD].WARP_SIZE;
 
 	/* plcuda_prep_kernel_entrypoint, if any */
 	if (ptask->exec_prep_kernel)
@@ -1891,16 +1918,6 @@ plcuda_process_task(GpuTask *gtask, CUmodule cuda_module)
 			werror("failed on cuModuleGetFunction: %s", errorText(rc));
 	}
 
-	/* kern_plcuda structure on the device side */
-	rc = gpuMemAllocManaged(gcontext,
-							&m_kern_plcuda,
-							KERN_PLCUDA_DMASEND_LENGTH(&ptask->kern),
-							CU_MEM_ATTACH_GLOBAL);
-	if (rc == CUDA_ERROR_OUT_OF_MEMORY)
-		goto out_of_resource;
-	else if (rc != CUDA_SUCCESS)
-		werror("failed on gpuMemAllocManaged: %s", errorText(rc));
-
 	/* working buffer if required */
 	if (ptask->kern.working_bufsz > 0)
 	{
@@ -1914,25 +1931,13 @@ plcuda_process_task(GpuTask *gtask, CUmodule cuda_module)
 			werror("failed on gpuMemAllocManaged: %s", errorText(rc));
 	}
 
-	/* results buffer if required  */
-	if (ptask->kern.results_bufsz > 0)
-	{
-		rc = gpuMemAllocManaged(gcontext,
-								&m_results_buf,
-								ptask->kern.results_bufsz,
-								CU_MEM_ATTACH_GLOBAL);
-		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
-			goto out_of_resource;
-		else if (rc != CUDA_SUCCESS)
-			werror("failed on gpuMemAllocManaged: %s", errorText(rc));
-	}
-
 	/* move the control block + argument buffer */
-	rc = cuMemcpyHtoD(m_kern_plcuda,
-					  &ptask->kern,
-					  KERN_PLCUDA_DMASEND_LENGTH(&ptask->kern));
+	rc = cuMemPrefetchAsync((CUdeviceptr)&ptask->kern,
+							KERN_PLCUDA_DMASEND_LENGTH(&ptask->kern),
+							CU_DEVICE_PER_THREAD,
+							CU_STREAM_PER_THREAD);
 	if (rc != CUDA_SUCCESS)
-		werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
+		werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
 
 	/* kernel arguments (common for all thress kernels) */
 	kern_args[0] = &m_kern_plcuda;
@@ -1954,7 +1959,7 @@ plcuda_process_task(GpuTask *gtask, CUmodule cuda_module)
 			optimal_workgroup_size(&grid_size,
 								   &block_size,
 								   kern_plcuda_prep,
-								   gpuserv_cuda_device,
+								   CU_DEVICE_PER_THREAD,
 								   ptask->kern.prep_num_threads,
 								   ptask->kern.prep_shmem_blocksz,
 								   ptask->kern.prep_shmem_unitsz);
@@ -1994,7 +1999,7 @@ plcuda_process_task(GpuTask *gtask, CUmodule cuda_module)
 		optimal_workgroup_size(&grid_size,
 							   &block_size,
 							   kern_plcuda_main,
-							   gpuserv_cuda_device,
+							   CU_DEVICE_PER_THREAD,
 							   ptask->kern.main_num_threads,
 							   ptask->kern.main_shmem_blocksz,
 							   ptask->kern.main_shmem_unitsz);
@@ -2035,7 +2040,7 @@ plcuda_process_task(GpuTask *gtask, CUmodule cuda_module)
 			optimal_workgroup_size(&grid_size,
 								   &block_size,
 								   kern_plcuda_post,
-								   gpuserv_cuda_device,
+								   CU_DEVICE_PER_THREAD,
 								   ptask->kern.post_num_threads,
 								   ptask->kern.post_shmem_blocksz,
 								   ptask->kern.post_shmem_unitsz);
@@ -2061,24 +2066,33 @@ plcuda_process_task(GpuTask *gtask, CUmodule cuda_module)
 			   ptask->kern.post_shmem_blocksz +
 			   ptask->kern.post_shmem_unitsz * block_size);
 	}
-
 	/* write back the control block */
-	rc = cuMemcpyDtoH(&ptask->kern,
-					  m_kern_plcuda,
-					  KERN_PLCUDA_DMARECV_LENGTH(&ptask->kern));
+	rc = cuMemPrefetchAsync((CUdeviceptr)&ptask->kern,
+							KERN_PLCUDA_DMARECV_LENGTH(&ptask->kern),
+							CU_DEVICE_CPU,
+							CU_STREAM_PER_THREAD);
 	if (rc != CUDA_SUCCESS)
-		werror("failed on cuMemcpyDtoHAsync: %s", errorText(rc));
+		werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
 
 	/* write back the result buffer, if any */
 	if (m_results_buf != 0UL)
 	{
-		Assert(ptask->h_results_buf != NULL);
-		rc = cuMemcpyDtoH(ptask->h_results_buf,
-						  m_results_buf,
-						  ptask->kern.results_bufsz);
+		rc = cuMemPrefetchAsync(ptask->m_results_buf,
+								ptask->kern.results_bufsz,
+								CU_DEVICE_CPU,
+								CU_STREAM_PER_THREAD);
 		if (rc != CUDA_SUCCESS)
-			werror("failed on cuMemcpyDtoHAsync: %s", errorText(rc));
+			werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
 	}
+
+	rc = cuEventRecord(CU_EVENT0_PER_THREAD, CU_STREAM_PER_THREAD);
+	if (rc != CUDA_SUCCESS)
+		werror("failed on cuEventRecord: %s", errorText(rc));
+
+	/* Point of synchronization */
+	rc = cuEventSynchronize(CU_EVENT0_PER_THREAD);
+	if (rc != CUDA_SUCCESS)
+		werror("failed on cuEventSynchronize: %s", errorText(rc));
 
 	/* check kernel execution status */
 	memset(&ptask->task.kerror, 0, sizeof(kern_errorbuf));
@@ -2094,23 +2108,9 @@ plcuda_process_task(GpuTask *gtask, CUmodule cuda_module)
 	retval = 0;
 
 out_of_resource:
-	if (m_kern_plcuda != 0UL)
-	{
-		rc = gpuMemFree(ptask->task.gcontext, m_kern_plcuda);
-		if (rc != CUDA_SUCCESS)
-			werror("failed on gpuMemFree: %s", errorText(rc));
-	}
-
-	if (m_results_buf != 0UL)
-	{
-		rc = gpuMemFree(ptask->task.gcontext, m_results_buf);
-		if (rc != CUDA_SUCCESS)
-			werror("failed on gpuMemFree: %s", errorText(rc));
-	}
-
 	if (m_working_buf != 0UL)
 	{
-		rc = gpuMemFree(ptask->task.gcontext, m_working_buf);
+		rc = gpuMemFree(gcontext, m_working_buf);
 		if (rc != CUDA_SUCCESS)
 			werror("failed on gpuMemFree: %s", errorText(rc));
 	}
@@ -2124,10 +2124,11 @@ void
 plcuda_release_task(GpuTask *gtask)
 {
 	plcudaTask	   *ptask = (plcudaTask *) gtask;
+	GpuContext	   *gcontext = ptask->task.gts->gcontext;
 
-	if (ptask->h_results_buf)
-		dmaBufferFree(ptask->h_results_buf);
-	dmaBufferFree(ptask);
+	if (ptask->m_results_buf)
+		gpuMemFree(gcontext, ptask->m_results_buf);
+	gpuMemFree(gcontext, (CUdeviceptr)ptask);
 }
 
 /*
