@@ -24,11 +24,30 @@
 #include "utils/resowner.h"
 #include "pg_strom.h"
 
+/* IPC stuff of GpuContext */
+typedef struct
+{
+	dlist_node			chain;
+	pthread_mutex_t		mutex;
+	pthread_cond_t		cond;
+	pg_atomic_uint32	command;
+} GpuContextIPCEntry;
+
+typedef struct
+{
+	slock_t			lock;
+	dlist_head		free_list;	/* list of GpuContextIPCEntry */
+	dlist_head	   *active_list;/* list of GpuContextIPCEntry; per device */
+	GpuContextIPCEntry ipc_entries[FLEXIBLE_ARRAY_MEMBER];
+} GpuContextIPCHead;
+
 /* variables */
 static shmem_startup_hook_type shmem_startup_next = NULL;
-static pg_atomic_uint32 *global_num_running_tasks;	/* per device */
+static pg_atomic_uint32 *global_num_running_tasks;	/* shared */
+static GpuContextIPCHead *gcontext_ipc_head;	/* shared */
 int					global_max_async_tasks;		/* GUC */
 int					local_max_async_tasks;		/* GUC */
+int					max_num_gpucontext;			/* GUC */
 static slock_t		activeGpuContextLock;
 static dlist_head	activeGpuContextList;
 
@@ -395,6 +414,7 @@ GpuContextWorkerMain(void *arg)
 	dlist_node	   *dnode;
 	GpuTask		   *gtask;
 	CUresult		rc;
+	uint32			command;
 	bool			is_timeout;
 
 	/* setup worker index */
@@ -417,24 +437,25 @@ GpuContextWorkerMain(void *arg)
 		if (pgstrom_try_build_cuda_program())
 			continue;
 
-		pthreadMutexLock(&gcontext->mutex);
+		pthreadMutexLock(gcontext->mutex);
 		if (dlist_is_empty(&gcontext->pending_tasks))
 		{
-			is_timeout = pthreadCondWaitTimeout(&gcontext->cond,
-												&gcontext->mutex,
+			is_timeout = pthreadCondWaitTimeout(gcontext->cond,
+												gcontext->mutex,
 												4000);
-			pthreadMutexUnlock(&gcontext->mutex);
+			pthreadMutexUnlock(gcontext->mutex);
 			if (is_timeout)
+				command = GPUCTX_CMD__RECLAIM_MEMORY;
+			else
+				command = pg_atomic_exchange_u32(gcontext->command, 0);
+
+			if ((command & GPUCTX_CMD__RECLAIM_MEMORY) != 0)
 			{
 				/*
 				 * XXX - Once GPU related tasks get idle, all the worker
-				 * threads may reach the timeout almost same timing.
-				 * We may need more mild memory segment reclaim policy.
-				 * XXX - Other concurrent task may wake up worker for
-				 * memory segment reclaim if memory allocation pressure 
-				 * on normal/iomap segment, especially.
+				 * threads may reach the timeout almost simultaneously.
 				 */
-				pthreadCondSignal(&gcontext->cond);
+				pthreadCondSignal(gcontext->cond);
 				gpuMemReclaimSegment(gcontext);
 			}
 		}
@@ -442,7 +463,7 @@ GpuContextWorkerMain(void *arg)
 		{
 			dnode = dlist_pop_head_node(&gcontext->pending_tasks);
 			gtask = dlist_container(GpuTask, chain, dnode);
-			pthreadMutexUnlock(&gcontext->mutex);
+			pthreadMutexUnlock(gcontext->mutex);
 
 			/* Execution of the GpuTask */
 			STROM_TRY();
@@ -466,10 +487,10 @@ GpuContextWorkerMain(void *arg)
 					retval = pgstromProcessGpuTask(gtask, cuda_module);
 					if (retval == 0)
 					{
-						pthreadMutexLock(&gcontext->mutex);
+						pthreadMutexLock(gcontext->mutex);
 						dlist_push_tail(&gcontext->completed_tasks,
 										&gtask->chain);
-						pthreadMutexUnlock(&gcontext->mutex);
+						pthreadMutexUnlock(gcontext->mutex);
 
 						SetLatch(MyLatch);
 					}
@@ -482,9 +503,9 @@ GpuContextWorkerMain(void *arg)
 					{
 						pgstromReleaseGpuTask(gtask);
 
-						pthreadMutexLock(&gcontext->mutex);
+						pthreadMutexLock(gcontext->mutex);
 						gcontext->num_running_tasks--;
-						pthreadMutexUnlock(&gcontext->mutex);
+						pthreadMutexUnlock(gcontext->mutex);
 
 						SetLatch(MyLatch);
 					}
@@ -494,7 +515,7 @@ GpuContextWorkerMain(void *arg)
 			{
 				/* Wake up and terminate other workers also */
 				pg_atomic_write_u32(&gcontext->terminate_workers, 1);
-				pthreadCondBroadcast(&gcontext->cond);
+				pthreadCondBroadcast(gcontext->cond);
 				SetLatch(MyLatch);
 			}
 			STROM_END_TRY();
@@ -587,7 +608,9 @@ AllocGpuContext(int cuda_dindex,
 				bool with_activation)
 {
 	static bool		cuda_driver_initialized = false;
+	GpuContextIPCEntry *ipc_entry;
 	GpuContext	   *gcontext = NULL;
+	dlist_node	   *dnode;
 	dlist_iter		iter;
 	CUresult		rc;
 	Size			length;
@@ -623,7 +646,25 @@ AllocGpuContext(int cuda_dindex,
 	SpinLockRelease(&activeGpuContextLock);
 
 	/*
-	 * Not found, let's allocate a new GpuContext
+	 * Not found existing one, so let's create a new one.
+	 */
+
+	/* IPC stuff */
+	SpinLockAcquire(&gcontext_ipc_head->lock);
+	if (dlist_is_empty(&gcontext_ipc_head->free_list))
+	{
+		SpinLockRelease(&gcontext_ipc_head->lock);
+		elog(ERROR, "out of GpuContext (IPC stuff)");
+	}
+	dnode = dlist_pop_head_node(&gcontext_ipc_head->free_list);
+	ipc_entry = dlist_container(GpuContextIPCEntry, chain, dnode);
+	SpinLockRelease(&gcontext_ipc_head->lock);
+	pthreadMutexInit(&ipc_entry->mutex);
+	pthreadCondInit(&ipc_entry->cond);
+	pg_atomic_init_u32(&ipc_entry->command, 0);
+
+	/*
+	 * Allocation of a new GpuContext
 	 */
 	length = STROMALIGN(offsetof(GpuContext, worker_threads[num_workers]));
 	gcontext = calloc(1, length + 2 * num_workers * sizeof(CUevent));
@@ -640,6 +681,7 @@ AllocGpuContext(int cuda_dindex,
 					   : MyProc->pgprocno) % numDevAttrs;
 	}
 
+	/* setup fields */
 	pg_atomic_init_u32(&gcontext->refcnt, 1);
 	gcontext->resowner		= CurrentResourceOwner;
 	gcontext->never_use_mps	= never_use_mps;
@@ -661,8 +703,9 @@ AllocGpuContext(int cuda_dindex,
 	/* management of work-queue */
 	gcontext->global_num_running_tasks
 		= &global_num_running_tasks[cuda_dindex];
-	pthreadMutexInit(&gcontext->mutex);
-	pthreadCondInit(&gcontext->cond);
+	gcontext->mutex		= &ipc_entry->mutex;
+	gcontext->cond		= &ipc_entry->cond;
+	gcontext->command	= &ipc_entry->command;
 	gcontext->num_running_tasks = 0;
 	pg_atomic_init_u32(&gcontext->terminate_workers, 0);
 	dlist_init(&gcontext->pending_tasks);
@@ -675,6 +718,11 @@ AllocGpuContext(int cuda_dindex,
 	SpinLockAcquire(&activeGpuContextLock);
 	dlist_push_head(&activeGpuContextList, &gcontext->chain);
 	SpinLockRelease(&activeGpuContextLock);
+
+	SpinLockAcquire(&gcontext_ipc_head->lock);
+	dlist_push_tail(&gcontext_ipc_head->active_list[cuda_dindex],
+					&ipc_entry->chain);
+	SpinLockRelease(&gcontext_ipc_head->lock);
 
 	if (with_activation)
 		ActivateGpuContext(gcontext);
@@ -707,6 +755,15 @@ PutGpuContext(GpuContext *gcontext)
 	newcnt = pg_atomic_sub_fetch_u32(&gcontext->refcnt, 1);
 	if (newcnt == 0)
 	{
+		GpuContextIPCEntry *ipc_entry = (GpuContextIPCEntry *)
+			((char *)gcontext->mutex - offsetof(GpuContextIPCEntry, mutex));
+
+		SpinLockAcquire(&gcontext_ipc_head->lock);
+		dlist_delete(&ipc_entry->chain);	/* detach from active list */
+		dlist_push_tail(&gcontext_ipc_head->free_list,
+						&ipc_entry->chain);
+		SpinLockRelease(&gcontext_ipc_head->lock);
+
 		SpinLockAcquire(&activeGpuContextLock);
 		dlist_delete(&gcontext->chain);
 		SpinLockRelease(&activeGpuContextLock);
@@ -731,7 +788,7 @@ SynchronizeGpuContext(GpuContext *gcontext)
 
 	/* signal to terminate all workers */
 	pg_atomic_write_u32(&gcontext->terminate_workers, 1);
-	pthreadCondBroadcast(&gcontext->cond);
+	pthreadCondBroadcast(gcontext->cond);
 	/* interrupt cuEventSynchronize() */
 	for (i=0; i < gcontext->num_workers; i++)
 	{
@@ -825,6 +882,31 @@ pgstrom_startup_gpu_context(void)
 		elog(ERROR, "Bug? Global number of running tasks counter exists");
 	for (i=0; i < numDevAttrs; i++)
 		pg_atomic_init_u32(&global_num_running_tasks[i], 0);
+
+	gcontext_ipc_head =
+		ShmemInitStruct("IPC stuff for GpuContex",
+						MAXALIGN(offsetof(GpuContextIPCHead,
+										  ipc_entries[max_num_gpucontext])) +
+						MAXALIGN(sizeof(dlist_head) * numDevAttrs),
+						&found);
+	if (found)
+		elog(ERROR, "Bug? IPC stuff for GpuContex exists");
+	SpinLockInit(&gcontext_ipc_head->lock);
+	dlist_init(&gcontext_ipc_head->free_list);
+	gcontext_ipc_head->active_list = (dlist_head *)
+		((char *)gcontext_ipc_head +
+		 MAXALIGN(offsetof(GpuContextIPCHead,
+						   ipc_entries[max_num_gpucontext])));
+	for (i=0; i < numDevAttrs; i++)
+		dlist_init(&gcontext_ipc_head->active_list[i]);
+	for (i=0; i < max_num_gpucontext; i++)
+	{
+		GpuContextIPCEntry *entry = &gcontext_ipc_head->ipc_entries[i];
+
+		memset(entry, 0, sizeof(GpuContextIPCEntry));
+		dlist_push_tail(&gcontext_ipc_head->free_list,
+						&entry->chain);
+	}
 }
 
 /*
@@ -833,6 +915,8 @@ pgstrom_startup_gpu_context(void)
 void
 pgstrom_init_gpu_context(void)
 {
+	cl_int		max_nprocs;
+
 	DefineCustomIntVariable("pg_strom.global_max_async_tasks",
 			"Soft limit for the number of concurrent GpuTasks in system-wide",
 							NULL,
@@ -853,12 +937,28 @@ pgstrom_init_gpu_context(void)
 							PGC_SUSET,
 							GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
+
+	max_nprocs = MaxConnections + max_worker_processes;
+	DefineCustomIntVariable("pg_strom.max_number_of_gpucontext",
+							"Max number of GpuContext available at same time",
+							NULL,
+							&max_num_gpucontext,
+							Max(3 * max_nprocs, 256),
+							Max(3 * max_nprocs, 256),
+							INT_MAX,
+							PGC_POSTMASTER,
+							GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL,
+							NULL, NULL, NULL);
+
 	/* initialization of GpuContext List */
 	SpinLockInit(&activeGpuContextLock);
 	dlist_init(&activeGpuContextList);
 
 	/* shared memory */
-	RequestAddinShmemSpace(MAXALIGN(sizeof(pg_atomic_uint32) * numDevAttrs));
+	RequestAddinShmemSpace(MAXALIGN(sizeof(pg_atomic_uint32) * numDevAttrs) +
+						   MAXALIGN(offsetof(GpuContextIPCHead,
+											ipc_entries[max_num_gpucontext])) +
+						   MAXALIGN(sizeof(dlist_head) * numDevAttrs));
 	shmem_startup_next = shmem_startup_hook;
     shmem_startup_hook = pgstrom_startup_gpu_context;
 

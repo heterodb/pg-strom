@@ -251,9 +251,9 @@ fetch_completed_gputasks(GpuContext *gcontext)
 		/* callback on GpuTask getting ready */
 		if (gts->cb_ready_task)
 		{
-			pthreadMutexUnlock(&gcontext->mutex);
+			pthreadMutexUnlock(gcontext->mutex);
 			gts->cb_ready_task(gts, gtask);
-			pthreadMutexLock(&gcontext->mutex);
+			pthreadMutexLock(gcontext->mutex);
 		}
 		dlist_push_tail(&gts->ready_tasks, &gtask->chain);
 		gts->num_ready_tasks++;
@@ -278,7 +278,7 @@ fetch_next_gputask(GpuTaskState *gts)
 		cl_int		local_num_running_tasks;
 		cl_int		global_num_running_tasks;
 
-		pthreadMutexLock(&gcontext->mutex);
+		pthreadMutexLock(gcontext->mutex);
 		for (;;)
 		{
 			ResetLatch(MyLatch);
@@ -292,9 +292,9 @@ fetch_next_gputask(GpuTaskState *gts)
 				(dlist_is_empty(&gts->ready_tasks) &&
 				 gcontext->num_running_tasks == 0))
 			{
-				pthreadMutexUnlock(&gcontext->mutex);
+				pthreadMutexUnlock(gcontext->mutex);
 				gtask = gts->cb_next_task(gts);
-				pthreadMutexLock(&gcontext->mutex);
+				pthreadMutexLock(gcontext->mutex);
 				if (!gtask)
 				{
 					gts->scan_done = true;
@@ -303,7 +303,7 @@ fetch_next_gputask(GpuTaskState *gts)
 				dlist_push_tail(&gcontext->pending_tasks, &gtask->chain);
 				gcontext->num_running_tasks++;
 				pg_atomic_add_fetch_u32(gcontext->global_num_running_tasks, 1);
-				pthreadCondSignal(&gcontext->cond);
+				pthreadCondSignal(gcontext->cond);
 			}
 			else if (!dlist_is_empty(&gts->ready_tasks))
 			{
@@ -312,7 +312,7 @@ fetch_next_gputask(GpuTaskState *gts)
 				 * the number of concurrent tasks, GTS already has ready tasks,
 				 * so pick them up instead of wait.
 				 */
-				pthreadMutexUnlock(&gcontext->mutex);
+				pthreadMutexUnlock(gcontext->mutex);
 				goto pickup_gputask;
 			}
 			else if (gcontext->num_running_tasks > 0)
@@ -321,7 +321,7 @@ fetch_next_gputask(GpuTaskState *gts)
 				 * Even though a few GpuTasks are running, but nobody gets
 				 * completed yet. Try to wait for completion to 
 				 */
-				pthreadMutexUnlock(&gcontext->mutex);
+				pthreadMutexUnlock(gcontext->mutex);
 
 				ev = WaitLatch(MyLatch,
 							   WL_LATCH_SET |
@@ -334,21 +334,21 @@ fetch_next_gputask(GpuTaskState *gts)
 							 errmsg("Unexpected Postmaster dead")));
 				CHECK_FOR_GPUCONTEXT(gcontext);
 
-				pthreadMutexLock(&gcontext->mutex);
+				pthreadMutexLock(gcontext->mutex);
 			}
 			else
 			{
-				pthreadMutexUnlock(&gcontext->mutex);
+				pthreadMutexUnlock(gcontext->mutex);
 				/*
 				 * Sadly, we touched a threshold. Taks a short break.
 				 */
 				pg_usleep(20000L);	/* wait for 20msec */
 
 				CHECK_FOR_GPUCONTEXT(gcontext);
-				pthreadMutexLock(&gcontext->mutex);
+				pthreadMutexLock(gcontext->mutex);
 			}
 		}
-		pthreadMutexUnlock(&gcontext->mutex);
+		pthreadMutexUnlock(gcontext->mutex);
 	}
 
 	/*
@@ -356,7 +356,7 @@ fetch_next_gputask(GpuTaskState *gts)
 	 * or relation scan has already done thus wait for synchronously.
 	 */
 	Assert(gts->scan_done);
-	pthreadMutexLock(&gcontext->mutex);
+	pthreadMutexLock(gcontext->mutex);
 	ResetLatch(MyLatch);
 	fetch_completed_gputasks(gcontext);
 	while (dlist_is_empty(&gts->ready_tasks))
@@ -364,10 +364,10 @@ fetch_next_gputask(GpuTaskState *gts)
 		Assert(gcontext->num_running_tasks >= 0);
 		if (gcontext->num_running_tasks == 0)
 		{
-			pthreadMutexUnlock(&gcontext->mutex);
+			pthreadMutexUnlock(gcontext->mutex);
 			return NULL;
 		}
-		pthreadMutexUnlock(&gcontext->mutex);
+		pthreadMutexUnlock(gcontext->mutex);
 
 		ev = WaitLatch(MyLatch,
 					   WL_LATCH_SET |
@@ -379,11 +379,11 @@ fetch_next_gputask(GpuTaskState *gts)
 					(errcode(ERRCODE_ADMIN_SHUTDOWN),
 					 errmsg("Unexpected Postmaster dead")));
 
-		pthreadMutexLock(&gcontext->mutex);
+		pthreadMutexLock(gcontext->mutex);
 		ResetLatch(MyLatch);
 		fetch_completed_gputasks(gcontext);
 	}
-	pthreadMutexUnlock(&gcontext->mutex);
+	pthreadMutexUnlock(gcontext->mutex);
 pickup_gputask:
 	/* OK, pick up GpuTask from the head */
 	Assert(gts->num_ready_tasks > 0);

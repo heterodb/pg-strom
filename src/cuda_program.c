@@ -922,7 +922,7 @@ pgstrom_try_build_cuda_program(void)
 	 * This thread will focus on the program build, so some other
 	 * worker needs to process the pending tasks.
 	 */
-	pthreadCondSignal(&GpuWorkerCurrentContext->cond);
+	pthreadCondSignal(GpuWorkerCurrentContext->cond);
 
 	STROM_TRY();
 	{
@@ -1125,7 +1125,7 @@ retry_program_id:
 	/*
 	 * Start asynchronous code build with NVRTC
 	 */
-	pthreadCondSignal(&gcontext->cond);
+	pthreadCondSignal(gcontext->cond);
 
 	/* wait for completion of build, if needed */
 	while (wait_for_build)

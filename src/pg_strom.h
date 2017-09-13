@@ -92,6 +92,9 @@
 
 #define RESTRACK_HASHSIZE		53
 #define CUDA_MODULES_HASHSIZE	25
+
+#define GPUCTX_CMD__RECLAIM_MEMORY		0x0001
+
 typedef struct GpuContext
 {
 	dlist_node		chain;
@@ -123,8 +126,9 @@ typedef struct GpuContext
 	char		   *error_message;
 	/* management of the work-queue */
 	pg_atomic_uint32 *global_num_running_tasks;
-	pthread_mutex_t	mutex;
-	pthread_cond_t	cond;
+	pthread_mutex_t	*mutex;				/* IPC stuff */
+	pthread_cond_t	*cond;				/* IPC stuff */
+	pg_atomic_uint32 *command;			/* IPC stuff */
 	pg_atomic_uint32 terminate_workers;
 	cl_int			num_running_tasks;
 	dlist_head		pending_tasks;		/* list of GpuTask */
