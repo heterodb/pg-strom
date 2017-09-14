@@ -355,7 +355,7 @@ ReleaseLocalResources(GpuContext *gcontext, bool normal_exit)
 	}
 	if (gcontext->error_message)
 		free(gcontext->error_message);
-	free(gcontext);
+	MemoryContextDelete(gcontext->memcxt);
 }
 
 /*
@@ -468,6 +468,7 @@ GpuContextWorkerMain(void *arg)
 			/* Execution of the GpuTask */
 			STROM_TRY();
 			{
+				GpuTaskState *gts = gtask->gts;
 				CUmodule	cuda_module;
 				cl_int		retval;
 
@@ -484,7 +485,7 @@ GpuContextWorkerMain(void *arg)
 					 * -1 : GpuTask gets completed successfully, and the
 					 *      handler wants to release GpuTask immediately.
 					 */
-					retval = pgstromProcessGpuTask(gtask, cuda_module);
+					retval = gts->cb_process_task(gtask, cuda_module);
 					if (retval == 0)
 					{
 						pthreadMutexLock(gcontext->mutex);
@@ -501,7 +502,9 @@ GpuContextWorkerMain(void *arg)
 					}
 					else
 					{
-						pgstromReleaseGpuTask(gtask);
+						// -2: release gtask immediate except for it is last
+
+						gts->cb_release_task(gtask);
 
 						pthreadMutexLock(gcontext->mutex);
 						gcontext->num_running_tasks--;
@@ -525,9 +528,136 @@ GpuContextWorkerMain(void *arg)
 }
 
 /*
+ * GetGpuContext - acquire a free GpuContext
+ */
+GpuContext *
+AllocGpuContext(int cuda_dindex, bool never_use_mps)
+{
+	static bool		cuda_driver_initialized = false;
+	GpuContextIPCEntry *ipc_entry;
+	GpuContext	   *gcontext = NULL;
+	MemoryContext	memcxt;
+	MemoryContext	oldcxt;
+	dlist_node	   *dnode;
+	dlist_iter		iter;
+	CUresult		rc;
+	int				i, num_workers = local_max_async_tasks;
+
+	/* per-process driver initialization */
+	if (!cuda_driver_initialized)
+	{
+		rc = cuInit(0);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuInit: %s", errorText(rc));
+		cuda_driver_initialized = true;
+		elog(NOTICE, "CUDA Driver Initialized");
+	}
+
+	/*
+	 * Lookup an existing active GpuContext
+	 */
+	SpinLockAcquire(&activeGpuContextLock);
+	dlist_foreach(iter, &activeGpuContextList)
+	{
+		gcontext = dlist_container(GpuContext, chain, iter.cur);
+
+		if (gcontext->resowner == CurrentResourceOwner &&
+			(!never_use_mps || gcontext->never_use_mps) &&
+			(cuda_dindex < 0 || gcontext->cuda_dindex == cuda_dindex))
+		{
+			pg_atomic_fetch_add_u32(&gcontext->refcnt, 1);
+			SpinLockRelease(&activeGpuContextLock);
+			return gcontext;
+		}
+	}
+	SpinLockRelease(&activeGpuContextLock);
+
+	/*
+	 * Not found existing one, so let's create a new one.
+	 */
+	memcxt = AllocSetContextCreate(TopMemoryContext,
+								   "GpuContext memory context",
+								   ALLOCSET_DEFAULT_SIZES);
+	oldcxt = MemoryContextSwitchTo(memcxt);
+	gcontext = palloc0(offsetof(GpuContext, worker_threads[num_workers]));
+	gcontext->cuda_events0 = palloc0(sizeof(CUevent) * num_workers);
+	gcontext->cuda_events1 = palloc0(sizeof(CUevent) * num_workers);
+	MemoryContextSwitchTo(oldcxt);
+
+	/* choose a device to use, if no preference */
+	if (cuda_dindex < 0)
+	{
+		cuda_dindex = (IsParallelWorker()
+					   ? ParallelWorkerNumber
+					   : MyProc->pgprocno) % numDevAttrs;
+	}
+
+	/* Pick up IPC stuff */
+	SpinLockAcquire(&gcontext_ipc_head->lock);
+	if (dlist_is_empty(&gcontext_ipc_head->free_list))
+	{
+		SpinLockRelease(&gcontext_ipc_head->lock);
+		MemoryContextDelete(memcxt);
+		elog(ERROR, "out of GpuContext (IPC stuff)");
+	}
+	dnode = dlist_pop_head_node(&gcontext_ipc_head->free_list);
+	ipc_entry = dlist_container(GpuContextIPCEntry, chain, dnode);
+	SpinLockRelease(&gcontext_ipc_head->lock);
+	pthreadMutexInit(&ipc_entry->mutex);
+	pthreadCondInit(&ipc_entry->cond);
+	pg_atomic_init_u32(&ipc_entry->command, 0);
+
+	/* setup fields */
+	pg_atomic_init_u32(&gcontext->refcnt, 1);
+	gcontext->resowner		= CurrentResourceOwner;
+	gcontext->memcxt		= memcxt;
+	gcontext->never_use_mps	= never_use_mps;
+	gcontext->cuda_dindex	= cuda_dindex;
+	SpinLockInit(&gcontext->cuda_modules_lock);
+	for (i=0; i < CUDA_MODULES_HASHSIZE; i++)
+		dlist_init(&gcontext->cuda_modules_slot[i]);
+	/* resource management */
+	SpinLockInit(&gcontext->restrack_lock);
+	for (i=0; i < RESTRACK_HASHSIZE; i++)
+		dlist_init(&gcontext->restrack[i]);
+	/* GPU device memory management */
+	pgstrom_gpu_mmgr_init_gpucontext(gcontext);
+	/* error information buffer */
+	pg_atomic_init_u32(&gcontext->error_level, 0);
+	gcontext->error_filename = NULL;
+	gcontext->error_lineno	= 0;
+	gcontext->error_message	= NULL;
+	/* management of work-queue */
+	gcontext->global_num_running_tasks
+		= &global_num_running_tasks[cuda_dindex];
+	gcontext->mutex		= &ipc_entry->mutex;
+	gcontext->cond		= &ipc_entry->cond;
+	gcontext->command	= &ipc_entry->command;
+	gcontext->num_running_tasks = 0;
+	pg_atomic_init_u32(&gcontext->terminate_workers, 0);
+	dlist_init(&gcontext->pending_tasks);
+	dlist_init(&gcontext->completed_tasks);
+	gcontext->num_workers = num_workers;
+	pg_atomic_init_u32(&gcontext->worker_index, 0);
+	for (i=0; i < num_workers; i++)
+		gcontext->worker_threads[i] = pthread_self();
+
+	SpinLockAcquire(&activeGpuContextLock);
+	dlist_push_head(&activeGpuContextList, &gcontext->chain);
+	SpinLockRelease(&activeGpuContextLock);
+
+	SpinLockAcquire(&gcontext_ipc_head->lock);
+	dlist_push_tail(&gcontext_ipc_head->active_list[cuda_dindex],
+					&ipc_entry->chain);
+	SpinLockRelease(&gcontext_ipc_head->lock);
+
+	return gcontext;
+}
+
+/*
  * ActivateGpuContext - kicks worker threads for workq
  */
-static void
+void
 ActivateGpuContext(GpuContext *gcontext)
 {
 	CUdevice	cuda_device;
@@ -597,137 +727,6 @@ ActivateGpuContext(GpuContext *gcontext)
 		gcontext->worker_threads[i] = thread;
 	}
 	elog(NOTICE, "GpuContext is activated (%p)", gcontext->cuda_context);
-}
-
-/*
- * GetGpuContext - acquire a free GpuContext
- */
-GpuContext *
-AllocGpuContext(int cuda_dindex,
-				bool never_use_mps,
-				bool with_activation)
-{
-	static bool		cuda_driver_initialized = false;
-	GpuContextIPCEntry *ipc_entry;
-	GpuContext	   *gcontext = NULL;
-	dlist_node	   *dnode;
-	dlist_iter		iter;
-	CUresult		rc;
-	Size			length;
-	int				i, num_workers = local_max_async_tasks;
-
-	/* per-process driver initialization */
-	if (!cuda_driver_initialized)
-	{
-		rc = cuInit(0);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuInit: %s", errorText(rc));
-		cuda_driver_initialized = true;
-		elog(NOTICE, "CUDA Driver Initialized");
-	}
-
-	/*
-	 * Lookup an existing active GpuContext
-	 */
-	SpinLockAcquire(&activeGpuContextLock);
-	dlist_foreach(iter, &activeGpuContextList)
-	{
-		gcontext = dlist_container(GpuContext, chain, iter.cur);
-
-		if (gcontext->resowner == CurrentResourceOwner &&
-			(!never_use_mps || gcontext->never_use_mps) &&
-			(cuda_dindex < 0 || gcontext->cuda_dindex == cuda_dindex))
-		{
-			pg_atomic_fetch_add_u32(&gcontext->refcnt, 1);
-			SpinLockRelease(&activeGpuContextLock);
-			return gcontext;
-		}
-	}
-	SpinLockRelease(&activeGpuContextLock);
-
-	/*
-	 * Not found existing one, so let's create a new one.
-	 */
-
-	/* IPC stuff */
-	SpinLockAcquire(&gcontext_ipc_head->lock);
-	if (dlist_is_empty(&gcontext_ipc_head->free_list))
-	{
-		SpinLockRelease(&gcontext_ipc_head->lock);
-		elog(ERROR, "out of GpuContext (IPC stuff)");
-	}
-	dnode = dlist_pop_head_node(&gcontext_ipc_head->free_list);
-	ipc_entry = dlist_container(GpuContextIPCEntry, chain, dnode);
-	SpinLockRelease(&gcontext_ipc_head->lock);
-	pthreadMutexInit(&ipc_entry->mutex);
-	pthreadCondInit(&ipc_entry->cond);
-	pg_atomic_init_u32(&ipc_entry->command, 0);
-
-	/*
-	 * Allocation of a new GpuContext
-	 */
-	length = STROMALIGN(offsetof(GpuContext, worker_threads[num_workers]));
-	gcontext = calloc(1, length + 2 * num_workers * sizeof(CUevent));
-	if (!gcontext)
-		elog(ERROR, "out of memory");
-	gcontext->cuda_events0 = (CUevent *)((char *)gcontext + length);
-	gcontext->cuda_events1 = gcontext->cuda_events0 + num_workers;
-
-	/* choose a device to use, if no preference */
-	if (cuda_dindex < 0)
-	{
-		cuda_dindex = (IsParallelWorker()
-					   ? ParallelWorkerNumber
-					   : MyProc->pgprocno) % numDevAttrs;
-	}
-
-	/* setup fields */
-	pg_atomic_init_u32(&gcontext->refcnt, 1);
-	gcontext->resowner		= CurrentResourceOwner;
-	gcontext->never_use_mps	= never_use_mps;
-	gcontext->cuda_dindex	= cuda_dindex;
-	SpinLockInit(&gcontext->cuda_modules_lock);
-	for (i=0; i < CUDA_MODULES_HASHSIZE; i++)
-		dlist_init(&gcontext->cuda_modules_slot[i]);
-	/* resource management */
-	SpinLockInit(&gcontext->restrack_lock);
-	for (i=0; i < RESTRACK_HASHSIZE; i++)
-		dlist_init(&gcontext->restrack[i]);
-	/* GPU device memory management */
-	pgstrom_gpu_mmgr_init_gpucontext(gcontext);
-	/* error information buffer */
-	pg_atomic_init_u32(&gcontext->error_level, 0);
-	gcontext->error_filename = NULL;
-	gcontext->error_lineno	= 0;
-	gcontext->error_message	= NULL;
-	/* management of work-queue */
-	gcontext->global_num_running_tasks
-		= &global_num_running_tasks[cuda_dindex];
-	gcontext->mutex		= &ipc_entry->mutex;
-	gcontext->cond		= &ipc_entry->cond;
-	gcontext->command	= &ipc_entry->command;
-	gcontext->num_running_tasks = 0;
-	pg_atomic_init_u32(&gcontext->terminate_workers, 0);
-	dlist_init(&gcontext->pending_tasks);
-	dlist_init(&gcontext->completed_tasks);
-	gcontext->num_workers = num_workers;
-	pg_atomic_init_u32(&gcontext->worker_index, 0);
-	for (i=0; i < num_workers; i++)
-		gcontext->worker_threads[i] = pthread_self();
-
-	SpinLockAcquire(&activeGpuContextLock);
-	dlist_push_head(&activeGpuContextList, &gcontext->chain);
-	SpinLockRelease(&activeGpuContextLock);
-
-	SpinLockAcquire(&gcontext_ipc_head->lock);
-	dlist_push_tail(&gcontext_ipc_head->active_list[cuda_dindex],
-					&ipc_entry->chain);
-	SpinLockRelease(&gcontext_ipc_head->lock);
-
-	if (with_activation)
-		ActivateGpuContext(gcontext);
-
-	return gcontext;
 }
 
 /*

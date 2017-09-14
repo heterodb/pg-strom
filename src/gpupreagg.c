@@ -135,44 +135,6 @@ typedef struct
 {
 	cl_uint				ss_length;	/* length of the shared state */
 	cl_int				pg_nworkers;/* num of working backends (>=1) */
-
-	/*
-	 * NOTE: A pair of @outer_scan_done + @nr_tasks[] determines the terminator
-	 * task per device exactly.
-	 * @nr_tasks[] shall be incremented prior to the fetch of first tuple,
-	 * but should not touch if @outer_scan_done is already set. (Please
-	 * assume a worker begins relation scan after the relation scan end by
-	 * other concurrent PG workers.)
-	 * Once @outer_scan_done is set, GpuPreAgg should not create new GpuTask
-	 * any more, then @nr_tasks[] will be monotonically decreasing.
-	 * If (@outer_scan_done && @nr_tasks[] == 0) means no GpuTask shall be
-	 * executed on the device any more, thus, it is a time for termination.
-	 * If CPU fallback happen, @nr_tasks[] must be decremented on the
-	 * backend side just before the release, because unified GpuJoin +
-	 * GpuPreAgg may update its outer-join-map.
-	 */
-	pthread_mutex_t		mutex;
-	cl_bool				had_cpu_fallback;/* True, if CPU fallback happen */
-	cl_bool				outer_scan_done; /* True, if outer scan reached to
-										  * end of the relation. */
-	cl_int			   *nr_tasks;	/* # of concurrent tasks (per device) */
-	cl_bool			   *is_loaded;	/* True, if final buffer is already
-									 * setup (per PG worker) */
-	CUdeviceptr		   *m_kds_final;/* final KDS buffer (per device) */
-	CUdeviceptr		   *m_fhash;	/* final global hash slot (per device) */
-	kern_data_store	   *kds_final_head; /* template of the final reduction
-										 * buffer */
-	cl_uint			   *f_nitems;	/* latest @nitems of kds_final (per dev) */
-	cl_uint			   *f_extra_sz;	/* latest usage of kds_final (per dev) */
-	size_t				f_hashsize;	/* initial final-hash size */
-	size_t				f_hashlimit;/* logical limitation of final-hash size */
-
-	/* overall statistics */
-	size_t				exec_pg_nworkers;/* num of parallel workers */
-	size_t				exec_nrows_in;	/* num of outer rows actually */
-	size_t				exec_nfiltered;	/* num of outer rows filtered by
-										 * outer quals if any */
-	size_t				plan_ngroups;	/* num of groups planned */
 #ifdef PGSTROM_DEBUG
 	cl_ulong			tv_stat_debug1;	/* debug counter */
 	cl_ulong			tv_stat_debug2;	/* debug counter */
@@ -192,6 +154,15 @@ typedef struct
 	List		   *outer_quals;	/* List of ExprState */
 	TupleTableSlot *outer_slot;
 	ProjectionInfo *outer_proj;		/* outer tlist -> custom_scan_tlist */
+
+	pgstrom_data_store *pds_final;
+	CUdeviceptr		m_fhash;
+	CUevent			ev_init_fhash;
+	size_t			f_hashsize;
+	size_t			f_hashlimit;
+	pthread_mutex_t	f_mutex;
+
+
 
 	size_t			plan_nrows_per_chunk;	/* planned nrows/chunk */
 	size_t			plan_nrows_in;	/* num of outer rows planned */
@@ -227,15 +198,13 @@ typedef struct
 	GpuTask				task;
 	GpuPreAggSharedState *gpa_sstate;
 	GpuJoinSharedState *gj_sstate;
-	GpuPreAggTaskRole	task_role;		/* one of GpuPreAggTaskRole__* */
 	bool				with_nvme_strom;/* true, if NVMe-Strom */
-	/* DMA buffers */
+
 	pgstrom_data_store *pds_src;	/* source row/block buffer */
-	pgstrom_data_store *pds_final;	/* final data store, if any. It shall be
-									 * attached on the server side. */
-	kern_data_store	   *kds_slot_head; /* template of the global reduction
-										* buffer */
-	kern_gpujoin	   *kgjoin;		/* kern_gpujoin, if unified mode */
+	CUdeviceptr			m_kds_final;/* final buffer */
+	CUdeviceptr			m_fhash;	/* final hash-slot */
+	kern_data_store	   *kds_slot_head; /* template for kds_slot */
+	kern_gpujoin	   *kgjoin;		/* kern_gpujoin, if combined mode */
 	kern_gpupreagg		kern;
 } GpuPreAggTask;
 
@@ -254,8 +223,6 @@ static char	   *gpupreagg_codegen(codegen_context *context,
 								  List *tlist_dev,
 								  List *outer_tlist,
 								  List *outer_quals);
-static Size estimateGpuPreAggSharedState(GpuPreAggState *gpas,
-										 int pg_nworkers);
 static GpuPreAggSharedState *createGpuPreAggSharedState(GpuPreAggState *gpas,
 														int pg_nworkers,
 														void *dsm_addr);
@@ -265,6 +232,8 @@ static void resetGpuPreAggSharedState(GpuPreAggState *gpas);
 static GpuTask *gpupreagg_next_task(GpuTaskState *gts);
 static void gpupreagg_ready_task(GpuTaskState *gts, GpuTask *gtask);
 static void gpupreagg_switch_task(GpuTaskState *gts, GpuTask *gtask);
+static int  gpupreagg_process_task(GpuTask *gtask, CUmodule cuda_module);
+static void gpupreagg_release_task(GpuTask *gtask);
 static TupleTableSlot *gpupreagg_next_tuple(GpuTaskState *gts);
 
 /*
@@ -981,9 +950,8 @@ cost_gpupreagg(PlannerInfo *root,
 	QualCost	qual_cost;
 	int			num_group_keys = 0;
 	Size		extra_sz = 0;
-	Size		kds_length;
-	cl_uint		ncols;
-	cl_uint		nrooms;
+//	cl_uint		ncols;
+//	cl_uint		nrooms;
 	cl_int		key_dist_salt;
 	cl_int		index;
 	ListCell   *lc;
@@ -1066,14 +1034,14 @@ cost_gpupreagg(PlannerInfo *root,
 	else
 		key_dist_salt = 1;
 	ntuples_out = num_groups * (double)key_dist_salt;
-
+#if 0
+	//FIXME
 	ncols = list_length(target_device->exprs);
 	nrooms = (cl_uint)(2.5 * num_groups * (double)key_dist_salt);
 	kds_length = (STROMALIGN(offsetof(kern_data_store, colmeta[ncols])) +
 				  STROMALIGN((sizeof(Datum) +
 							  sizeof(bool)) * ncols) * nrooms +
 				  STROMALIGN(extra_sz) * nrooms);
-#if 0
 	// unified memory eliminates limitation of the device memory
 	// however, some penalty is needed for large buffer
 	if (kds_length > gpuMemMaxAllocSize())
@@ -3445,12 +3413,14 @@ assign_gpupreagg_session_info(StringInfo buf, GpuTaskState *gts)
 static Node *
 CreateGpuPreAggScanState(CustomScan *cscan)
 {
-	GpuPreAggState *gpas = palloc0(sizeof(GpuPreAggState));
-
+	GpuContext	   *gcontext = AllocGpuContext(-1, false);
+	GpuPreAggState *gpas = MemoryContextAllocZero(gcontext->memcxt,
+												  sizeof(GpuPreAggState));
 	/* Set tag and executor callbacks */
 	NodeSetTag(gpas, T_CustomScanState);
 	gpas->gts.css.flags = cscan->flags;
 	gpas->gts.css.methods = &gpupreagg_exec_methods;
+	gpas->gts.gcontext	= gcontext;
 
 	return (Node *) gpas;
 }
@@ -3463,8 +3433,8 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 {
 	Relation		scan_rel = node->ss.ss_currentRelation;
 	ExprContext	   *econtext = node->ss.ps.ps_ExprContext;
-	GpuContext	   *gcontext = NULL;
 	GpuPreAggState *gpas = (GpuPreAggState *) node;
+	GpuContext	   *gcontext = gpas->gts.gcontext;
 	CustomScan	   *cscan = (CustomScan *) node->ss.ps.plan;
 	GpuPreAggInfo  *gpa_info = deform_gpupreagg_info(cscan);
 	List		   *tlist_dev = cscan->custom_scan_tlist;
@@ -3474,12 +3444,11 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 	StringInfoData	kern_define;
 	ProgramId		program_id;
 	bool			has_oid;
-	bool			with_activation;
 
 	Assert(scan_rel ? outerPlan(node) == NULL : outerPlan(cscan) != NULL);
 	/* activate a GpuContext for CUDA kernel execution */
-	with_activation = ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0);
-	gcontext = AllocGpuContext(-1, false, with_activation);
+	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
+		ActivateGpuContext(gcontext);
 
 	/* setup common GpuTaskState fields */
 	pgstromInitGpuTaskState(&gpas->gts,
@@ -3491,6 +3460,8 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 	gpas->gts.cb_ready_task  = gpupreagg_ready_task;
 	gpas->gts.cb_switch_task = gpupreagg_switch_task;
 	gpas->gts.cb_next_tuple  = gpupreagg_next_tuple;
+	gpas->gts.cb_process_task= gpupreagg_process_task;
+	gpas->gts.cb_release_task= gpupreagg_release_task;
 	gpas->gts.outer_nrows_per_block = gpa_info->outer_nrows_per_block;
 
 	gpas->num_group_keys     = gpa_info->num_group_keys;
@@ -3544,6 +3515,7 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 											   econtext,
 											   gpas->gpreagg_slot,
 											   outer_tupdesc);
+	/* Save the plan-time estimations */
 	gpas->plan_nrows_per_chunk =
 		(gpa_info->plan_nchunks > 0
 		 ? gpa_info->outer_nrows / gpa_info->plan_nchunks
@@ -3611,7 +3583,7 @@ static void
 ExecEndGpuPreAgg(CustomScanState *node)
 {
 	GpuPreAggState *gpas = (GpuPreAggState *) node;
-	GpuPreAggSharedState *gpa_sstate = gpas->gpa_sstate;
+	GpuContext	   *gcontext = gpas->gts.gcontext;
 
 	if (gpas->num_fallback_rows > 0)
 		elog(WARNING, "GpuPreAgg processed %lu rows by CPU fallback",
@@ -3622,13 +3594,12 @@ ExecEndGpuPreAgg(CustomScanState *node)
 	/* clean up subtree, if any */
 	if (outerPlanState(node))
 		ExecEndNode(outerPlanState(node));
-	/* update statistics */
-	if (gpa_sstate)
-	{
-		pthreadMutexLock(&gpa_sstate->mutex);
-		gpa_sstate->exec_pg_nworkers++;
-		pthreadMutexUnlock(&gpa_sstate->mutex);
-	}
+
+	/* release final buffer / hashslot */
+	if (gpas->pds_final)
+		PDS_release(gpas->pds_final);
+	if (gpas->m_fhash)
+		gpuMemFree(gcontext, gpas->m_fhash);
 
 	/* release any other resources */
 	if (gpas->gpreagg_slot)
@@ -3667,7 +3638,7 @@ ExecReScanGpuPreAgg(CustomScanState *node)
 static Size
 ExecGpuPreAggEstimateDSM(CustomScanState *node, ParallelContext *pcxt)
 {
-	return offsetof(GpuPreAggParallelDSM, data[0])
+	return MAXALIGN(sizeof(GpuPreAggSharedState))
 		+ ExecGpuScanEstimateDSM(node, pcxt);
 }
 
@@ -3686,7 +3657,7 @@ ExecGpuPreAggInitDSM(CustomScanState *node,
 	gpas->gts.pcxt = pcxt;
 
 	/* allocation of shared state */
-	ss_length = estimateGpuPreAggSharedState(gpas, pcxt->nworkers + 1);
+	ss_length = MAXALIGN(sizeof(GpuPreAggSharedState));
 	gpas->gpa_sstate = createGpuPreAggSharedState(gpas, pcxt->nworkers + 1,
 												  coordinate);
 	ExecGpuScanInitDSM(node, pcxt, (char *)coordinate + ss_length);
@@ -3724,11 +3695,14 @@ ExplainGpuPreAgg(CustomScanState *node, List *ancestors, ExplainState *es)
 	/* merge worker's statistics if any */
 	if (gpa_sstate)
 	{
+#if 0
+		//FIXME
 		gpas->gts.outer_instrument.tuplecount = 0;
 		gpas->gts.outer_instrument.ntuples = gpa_sstate->exec_nrows_in;
 		gpas->gts.outer_instrument.nfiltered1 = gpa_sstate->exec_nfiltered;
 		gpas->gts.outer_instrument.nfiltered2 = 0;
 		gpas->gts.outer_instrument.nloops = gpa_sstate->exec_pg_nworkers;
+#endif
 	}
 
 	/* shows reduction policy */
@@ -3777,29 +3751,8 @@ ExplainGpuPreAgg(CustomScanState *node, List *ancestors, ExplainState *es)
 			ExplainPropertyLong("debug4", gpa_sstate->tv_stat_debug4, es);
 	}
 #endif
-
 	/* other common fields */
 	pgstromExplainGpuTaskState(&gpas->gts, es);
-}
-
-/*
- * estimateGpuPreAggSharedState
- */
-static Size
-estimateGpuPreAggSharedState(GpuPreAggState *gpas, int pg_nworkers)
-{
-	TupleTableSlot *gpa_slot = gpas->gpreagg_slot;
-	TupleDesc		gpa_tupdesc = gpa_slot->tts_tupleDescriptor;
-
-	return MAXALIGN(sizeof(GpuPreAggSharedState))
-		+ MAXALIGN(sizeof(cl_int) * numDevAttrs)		/* nr_tasks */
-		+ MAXALIGN(sizeof(cl_bool) * pg_nworkers)		/* is_loaded */
-		+ MAXALIGN(sizeof(CUdeviceptr) * numDevAttrs)	/* m_kds_final */
-		+ MAXALIGN(sizeof(CUdeviceptr) * numDevAttrs)	/* m_fhash */
-		+ MAXALIGN(offsetof(kern_data_store,
-							colmeta[gpa_tupdesc->natts])) /* kds_head */
-		+ MAXALIGN(sizeof(cl_uint) * numDevAttrs)		/* f_nitems  */
-		+ MAXALIGN(sizeof(cl_uint) * numDevAttrs);		/* f_extra_sz */
 }
 
 /*
@@ -3809,62 +3762,65 @@ static GpuPreAggSharedState *
 createGpuPreAggSharedState(GpuPreAggState *gpas,
 						   int pg_nworkers, void *dsm_addr)
 {
-	EState		   *estate = gpas->gts.css.ss.ps.state;
-	TupleTableSlot *gpa_slot = gpas->gpreagg_slot;
-	TupleDesc		gpa_tupdesc = gpa_slot->tts_tupleDescriptor;
 	GpuPreAggSharedState *gpa_sstate;
-	Size			ss_length;
-	Size			length;
-	cl_uint			nrooms;
-	size_t			f_hashsize;
-	char		   *pos;
+	EState	   *estate = gpas->gts.css.ss.ps.state;
+	size_t		ss_length;
 
 	Assert(!IsParallelWorker());
-	ss_length = estimateGpuPreAggSharedState(gpas, pg_nworkers);
+	ss_length = MAXALIGN(sizeof(GpuPreAggSharedState));
 	if (dsm_addr)
 		gpa_sstate = dsm_addr;
 	else
 		gpa_sstate = MemoryContextAlloc(estate->es_query_cxt, ss_length);
 	memset(gpa_sstate, 0, ss_length);
-	pos = (char *)gpa_sstate + MAXALIGN(sizeof(GpuPreAggSharedState));
-
 	gpa_sstate->ss_length = ss_length;
 	gpa_sstate->pg_nworkers = pg_nworkers;
-	pthreadMutexInit(&gpa_sstate->mutex);
-	gpa_sstate->nr_tasks = (cl_int *) pos;
-	pos += MAXALIGN(sizeof(cl_int) * numDevAttrs);
-	gpa_sstate->is_loaded = (cl_bool *) pos;
-	pos += MAXALIGN(sizeof(cl_bool) * pg_nworkers);
-	gpa_sstate->m_kds_final = (CUdeviceptr *) pos;
-	pos += MAXALIGN(sizeof(CUdeviceptr) * numDevAttrs);
-	gpa_sstate->m_fhash = (CUdeviceptr *) pos;
-	pos += MAXALIGN(sizeof(CUdeviceptr) * numDevAttrs);
-	gpa_sstate->kds_final_head = (kern_data_store *) pos;
-	/*
-	 * XXX - we may need more careful estimation of PDS_final length
-	 * to support Kepler/Maxwell architecture.
-	 */
-	length = 0xffff8000UL;	/* len = (4GB-32KB) */
-	nrooms = (length - offsetof(kern_data_store,
-								colmeta[gpa_tupdesc->natts]))
-		/ LONGALIGN((sizeof(Datum) +
-					 sizeof(char)) * gpa_tupdesc->natts);
 
-	init_kernel_data_store(gpa_sstate->kds_final_head,
-						   gpa_tupdesc,
-						   length,
-						   KDS_FORMAT_SLOT,
-						   nrooms);
-	pos += MAXALIGN(offsetof(kern_data_store,
-							 colmeta[gpa_tupdesc->natts]));
-	gpa_sstate->f_nitems = (cl_uint *) pos;
-	pos += MAXALIGN(sizeof(cl_uint) * numDevAttrs);
-	gpa_sstate->f_extra_sz = (cl_uint *) pos;
-	pos += MAXALIGN(sizeof(cl_uint) * numDevAttrs);
-	Assert(pos == (char *)gpa_sstate + required);
+	return gpa_sstate;
+}
 
-	/* rough estimation of the final-hash buffer size */
-	gpa_sstate->f_hashlimit = (size_t)((double)nrooms * 1.33);
+/*
+ * releaseGpuPreAggSharedState
+ */
+static void
+releaseGpuPreAggSharedState(GpuPreAggState *gpas)
+{
+	/* to be moved to shutdown handler?? */
+}
+
+/*
+ * resetGpuPreAggSharedState
+ */
+static void
+resetGpuPreAggSharedState(GpuPreAggState *gpas)
+{
+	/* nothing to do */
+}
+
+/*
+ * gpupreagg_alloc_final_buffer
+ */
+static void
+gpupreagg_alloc_final_buffer(GpuPreAggState *gpas)
+{
+	GpuContext	   *gcontext = gpas->gts.gcontext;
+	TupleTableSlot *gpa_slot = gpas->gpreagg_slot;
+	TupleDesc		gpa_tupdesc = gpa_slot->tts_tupleDescriptor;
+	pgstrom_data_store *pds_final;
+	size_t			f_hashsize;
+	size_t			f_hashlimit;
+	CUdeviceptr		m_fhash;
+	CUresult		rc;
+
+	if (gpas->pds_final)
+		return;
+
+	/* final buffer allocation */
+	pds_final = PDS_create_slot(gcontext,
+								gpa_tupdesc,
+								0xffff8000UL);	/* 4GB - 32KB */
+	/* final hash-slot allocation */
+	f_hashlimit = (size_t)((double)pds_final->kds.nrooms * 1.33);
 	if (gpas->plan_ngroups < 400000)
 		f_hashsize = 4 * gpas->plan_ngroups;
 	else if (gpas->plan_ngroups < 1200000)
@@ -3877,93 +3833,25 @@ createGpuPreAggSharedState(GpuPreAggState *gpas,
 		f_hashsize = gpas->plan_ngroups;
 	/* 2MB: minimum guarantee */
 	if (offsetof(kern_global_hashslot,
-				 hash_slot[f_hashsize]) < 2097152UL)
+				 hash_slot[f_hashsize]) < (1UL << 21))
 	{
-		f_hashsize = (2097152UL - offsetof(kern_global_hashslot,
-										   hash_slot[0]))
+		f_hashsize = ((1UL << 21) - offsetof(kern_global_hashslot,
+											 hash_slot[0]))
 			/ sizeof(pagg_hashslot);
 	}
-	gpa_sstate->f_hashsize = f_hashsize;
-	gpa_sstate->plan_ngroups = gpas->plan_ngroups;
 
-	return gpa_sstate;
-}
-
-/*
- * releaseGpuPreAggSharedState
- */
-static void
-releaseGpuPreAggSharedState(GpuPreAggState *gpas)
-{
-	GpuContext *gcontext = gpas->gts.gcontext;
-	GpuPreAggSharedState *gpa_sstate = gpas->gpa_sstate;
-	CUdeviceptr	m_kds_final = 0UL;
-	CUresult	rc;
-	int			pg_worker = gcontext->shgcon->pg_worker_index;
-
-	if (!gpa_sstate)
-		return;
-
-	pthreadMutexLock(&gpa_sstate->mutex);
-	if (gpa_sstate->is_loaded[pg_worker])
-		m_kds_final = gpa_sstate->m_kds_final[gcontext->gpuserv_id];
-	pthreadMutexUnlock(&gpa_sstate->mutex);
-
-	if (m_kds_final != 0UL)
-	{
-		rc = gpuMemFree(gcontext, m_kds_final);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on gpuMemFree: %s", errorText(rc));
-	}
-
-	if (!IsParallelWorker())
-		dmaBufferFree(gpa_sstate);
-}
-
-/*
- * resetGpuPreAggSharedState
- */
-static void
-resetGpuPreAggSharedState(GpuPreAggState *gpas)
-{
-	GpuContext *gcontext = gpas->gts.gcontext;
-	GpuPreAggSharedState *gpa_sstate = gpas->gpa_sstate;
-	CUdeviceptr	m_kds_final = 0UL;
-	CUresult	rc;
-	int			pg_worker = gcontext->shgcon->pg_worker_index;
-
-	if (!gpa_sstate)
-		return;
-
-	pthreadMutexLock(&gpa_sstate->mutex);
-	if (gpa_sstate->is_loaded[pg_worker])
-		m_kds_final = gpa_sstate->m_kds_final[gcontext->gpuserv_id];
-	pthreadMutexUnlock(&gpa_sstate->mutex);
-
-	if (m_kds_final != 0UL)
-	{
-		rc = gpuMemFree(gcontext, m_kds_final);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on gpuMemFree: %s", errorText(rc));
-	}
-	/* reset attributes */
-	if (!IsParallelWorker())
-	{
-		gpa_sstate->outer_scan_done = false;
-		memset(gpa_sstate->nr_tasks, 0,
-			   sizeof(cl_int) * numDevAttrs);
-		memset(gpa_sstate->is_loaded, 0,
-			   sizeof(cl_bool) * gpa_sstate->pg_nworkers);
-		memset(gpa_sstate->m_kds_final, 0,
-			   sizeof(CUdeviceptr) * numDevAttrs);
-		memset(gpa_sstate->m_fhash, 0,
-			   sizeof(CUdeviceptr) * numDevAttrs);
-		memset(gpa_sstate->f_nitems, 0,
-			   sizeof(cl_uint) * numDevAttrs);
-		memset(gpa_sstate->f_extra_sz, 0,
-			   sizeof(cl_uint) * numDevAttrs);
-		//XXX - Do we need to reset statistics here?
-	}
+	rc = gpuMemAllocManaged(gcontext,
+							&m_fhash,
+							offsetof(kern_global_hashslot,
+									 hash_slot[f_hashsize]),
+							CU_MEM_ATTACH_GLOBAL);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on gpuMemAllocManaged: %s", errorText(rc));
+	gpas->pds_final		= pds_final;
+	gpas->m_fhash		= m_fhash;
+	gpas->ev_init_fhash	= NULL;
+	gpas->f_hashsize	= f_hashsize;
+	gpas->f_hashlimit	= f_hashlimit;
 }
 
 /*
@@ -3983,9 +3871,15 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 	bool			with_nvme_strom = false;
 	cl_uint			nrows_per_block = 0;
 	size_t			slot_nrooms = (pds_src ? pds_src->kds.nitems : 0);
+	CUdeviceptr		m_deviceptr;
+	CUresult		rc;
 	Size			head_sz;
 	Size			kds_len;
 	Size			kgjoin_len = 0;
+
+	/* allocation of the final-buffer on demand */
+	if (!gpas->pds_final)
+		gpupreagg_alloc_final_buffer(gpas);
 
 	/* adjust parameters if block format */
 	if (pds_src && pds_src->kds.format == KDS_FORMAT_BLOCK)
@@ -4017,19 +3911,22 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 		GpuTaskState   *outer_gts = (GpuTaskState *) outerPlanState(gpas);
 		kgjoin_len = setup_kernel_gpujoin(NULL, outer_gts, pds_src);
 	}
-	gpreagg = dmaBufferAlloc(gcontext, head_sz + kds_len + kgjoin_len);
+
+	rc = gpuMemAllocManaged(gcontext,
+							&m_deviceptr,
+							head_sz + kds_len + kgjoin_len,
+							CU_MEM_ATTACH_GLOBAL);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on gpuMemAllocManaged: %s", errorText(rc));
+	gpreagg = (GpuPreAggTask *)m_deviceptr;
 	memset(gpreagg, 0, offsetof(GpuPreAggTask, kern.kparams));
 
 	pgstromInitGpuTask(&gpas->gts, &gpreagg->task);
 	gpreagg->task.file_desc = file_desc;
 	gpreagg->gpa_sstate = gpa_sstate;
 	gpreagg->gj_sstate = gj_sstate;
-	gpreagg->task_role = (pds_src != NULL
-						  ? GpuPreAggTaskRole__Normal
-						  : GpuPreAggTaskRole__Dummy);
 	gpreagg->with_nvme_strom = with_nvme_strom;
 	gpreagg->pds_src = pds_src;
-	gpreagg->pds_final = NULL;	/* attached on demand */
 	gpreagg->kds_slot_head = (kern_data_store *)((char *)gpreagg + head_sz);
 	if (gpas->unified_gpujoin)
 	{
@@ -4069,34 +3966,18 @@ static GpuTask *
 gpupreagg_next_task(GpuTaskState *gts)
 {
 	GpuPreAggState		   *gpas = (GpuPreAggState *) gts;
-	GpuPreAggSharedState   *gpa_sstate = gpas->gpa_sstate;
 	GpuJoinSharedState	   *gj_sstate = NULL;
 	GpuContext			   *gcontext = gpas->gts.gcontext;
-	GpuTask				   *gtask = NULL;
 	pgstrom_data_store	   *pds = NULL;
 	int						filedesc = -1;
 
 	if (gpas->unified_gpujoin)
 	{
+		GpuTaskState   *outer_gts = (GpuTaskState *) outerPlanState(gpas);
+
 		gj_sstate = GpuJoinInnerPreload((GpuTaskState *) outerPlanState(gpas));
 		if (!gj_sstate)
-			return NULL;	/* obviously, an empty results */
-	}
-
-	/* terminator checks */
-	pthreadMutexLock(&gpa_sstate->mutex);
-	gpa_sstate->nr_tasks[gcontext->gpuserv_id]++;
-	if (gpa_sstate->outer_scan_done)
-	{
-		pthreadMutexUnlock(&gpa_sstate->mutex);
-		goto skip;
-	}
-	pthreadMutexUnlock(&gpa_sstate->mutex);
-
-	if (gpas->unified_gpujoin)
-	{
-		GpuTaskState   *outer_gts = (GpuTaskState *) outerPlanState(gpas);
-		Assert(gj_sstate != NULL);
+			return NULL;		/* an empty results obviously */
 		pds = GpuJoinExecOuterScanChunk(outer_gts, &filedesc);
 	}
 	else if (gpas->gts.css.ss.ss_currentRelation)
@@ -4131,7 +4012,7 @@ gpupreagg_next_task(GpuTaskState *gts)
 			/* create a new data-store on demand */
 			if (!pds)
 			{
-				pds = PDS_create_row(gpas->gts.gcontext,
+				pds = PDS_create_row(gcontext,
 									 tupdesc,
 									 pgstrom_chunk_size());
 			}
@@ -4143,16 +4024,10 @@ gpupreagg_next_task(GpuTaskState *gts)
 			}
 		}
 	}
-skip:
-	gtask = gpupreagg_create_task(gpas, gj_sstate, pds, filedesc);
+
 	if (!pds)
-	{
-		pthreadMutexLock(&gpa_sstate->mutex);
-		gpa_sstate->outer_scan_done = true;
-		pthreadMutexUnlock(&gpa_sstate->mutex);
-		gpas->gts.scan_done = true;
-	}
-	return gtask;
+		return NULL;
+	return gpupreagg_create_task(gpas, gj_sstate, pds, filedesc);
 }
 
 
@@ -4194,38 +4069,16 @@ gpupreagg_next_tuple_fallback(GpuPreAggState *gpas, GpuPreAggTask *gpreagg)
 			!PDS_fetch_tuple(gpas->outer_slot,
 							 gpreagg->pds_src,
 							 &gpas->gts))
-		{
-			GpuPreAggSharedState *gpa_sstate = gpas->gpa_sstate;
-			int			dindex = gpas->gts.gcontext->gpuserv_id;
-			bool		kick_dummy_task = false;
-
-			pthreadMutexLock(&gpa_sstate->mutex);
-			Assert(gpa_sstate->nr_tasks[dindex] > 0);
-			if (--gpa_sstate->nr_tasks[dindex] == 0 &&
-				gpa_sstate->outer_scan_done)
-			{
-				if (gpreagg->pds_src)
-				{
-					gpa_sstate->nr_tasks[dindex]++;
-					kick_dummy_task = true;
-				}
-			}
-			pthreadMutexUnlock(&gpa_sstate->mutex);
-
-			if (kick_dummy_task)
-			{
-				GpuTask *dummy = gpupreagg_create_task(gpas,
-													   gpreagg->gj_sstate,
-													   NULL, -1);
-				gpuservSendGpuTask(gpas->gts.gcontext, dummy);
-			}
 			return NULL;
-		}
+
 		econtext->ecxt_scantuple = gpas->outer_slot;
 
 		/* filter out the tuple, if any outer quals */
 		if (!ExecQual(gpas->outer_quals, econtext, false))
+		{
+			//Inc num filtered
 			continue;
+		}
 
 		/* makes a projection from the outer-scan to the pseudo-tlist */
 		slot = ExecProject(gpas->outer_proj, &is_done);
@@ -4244,7 +4097,7 @@ gpupreagg_next_tuple(GpuTaskState *gts)
 {
 	GpuPreAggState	   *gpas = (GpuPreAggState *) gts;
 	GpuPreAggTask	   *gpreagg = (GpuPreAggTask *) gpas->gts.curr_task;
-	pgstrom_data_store *pds_final = gpreagg->pds_final;
+	pgstrom_data_store *pds_final = gpas->pds_final;
 	TupleTableSlot	   *slot = NULL;
 
 	if (gpreagg->task.cpu_fallback)
@@ -4259,139 +4112,79 @@ gpupreagg_next_tuple(GpuTaskState *gts)
 }
 
 /*
- * gpupreagg_alloc_final_buffer
+ * gpupreagg_init_final_hash
  */
-static bool
-gpupreagg_alloc_final_buffer(GpuPreAggTask *gpreagg,
-							 CUmodule cuda_module)
+static void
+gpupreagg_init_final_hash(GpuPreAggTask *gpreagg,
+						  CUmodule cuda_module)
 {
-	GpuContext	   *gcontext = gpreagg->task.gcontext;
-	GpuPreAggSharedState *gpa_sstate = gpreagg->gpa_sstate;
-	kern_data_store *kds_final_head = gpa_sstate->kds_final_head;
-	CUdeviceptr		m_kds_final = 0UL;
-	CUdeviceptr		m_fhash = 0UL;
-	CUfunction		kern_init_fhash;
-	CUresult		rc;
-	Size			length;
-	size_t			f_hashsize = gpa_sstate->f_hashsize;
-	size_t			f_hashlimit = gpa_sstate->f_hashlimit;
-	size_t			grid_size;
-	size_t			block_size;
-	void		   *kern_args[2];
+	GpuPreAggState *gpas = (GpuPreAggState *)gpreagg->task.gts;
+	CUfunction	kern_init_fhash;
+	CUevent		ev_init_fhash;
+	CUresult	rc;
+	int			sm_count;
+	size_t		grid_size;
+	size_t		block_size;
+	void	   *kern_args[2];
 
-	length = GPUMEMALIGN(kds_final_head->length) +
-		GPUMEMALIGN(offsetof(kern_global_hashslot,
-							 hash_slot[f_hashlimit]));
-	rc = gpuMemAllocManagedRaw(gcontext,
-							   &m_kds_final,
-							   length,
-							   CU_MEM_ATTACH_GLOBAL);
-	if (rc == CUDA_ERROR_OUT_OF_MEMORY)
-		return false;
-	else if (rc != CUDA_SUCCESS)
-		werror("failed on gpuMemAllocManagedRaw: %s", errorText(rc));
-	m_fhash = m_kds_final + GPUMEMALIGN(kds_final_head->length);
-
+	pthreadMutexLock(&gpas->f_mutex);
 	STROM_TRY();
 	{
-		/* DMA Send: head of kds_final */
-		length = KERN_DATA_STORE_HEAD_LENGTH(kds_final_head);
-		rc = cuMemcpyHtoD(m_kds_final,
-						  kds_final_head,
-						  length);
-		if (rc != CUDA_SUCCESS)
-			werror("failed on cuMemcpyHtoD: %s", errorText(rc));
+		if (!gpas->ev_init_fhash)
+		{
+			rc = cuModuleGetFunction(&kern_init_fhash,
+									 cuda_module,
+									 "gpupreagg_init_final_hash");
+			if (rc != CUDA_SUCCESS)
+				werror("failed on cuModuleGetFunction: %s", errorText(rc));
 
-		/* Launch:
-		 * KERNEL_FUNCTION(void)
-		 * gpupreagg_init_final_hash(size_t hash_size,
-		 *                           kern_global_hashslot *f_hashslot)
-		 */
-		rc = cuModuleGetFunction(&kern_init_fhash,
-								 cuda_module,
-								 "gpupreagg_init_final_hash");
-		if (rc != CUDA_SUCCESS)
-			werror("failed on cuModuleGetFunction: %s", errorText(rc));
+			rc = cuEventCreate(&ev_init_fhash,
+							   CU_EVENT_BLOCKING_SYNC);
+			if (rc != CUDA_SUCCESS)
+				werror("failed on cuEventCreate: %s", errorText(rc));
 
-		optimal_workgroup_size(&grid_size,
-							   &block_size,
-							   kern_init_fhash,
-							   gpuserv_cuda_device,
-							   f_hashsize,
-							   0, sizeof(kern_errorbuf));
-		kern_args[0] = &f_hashsize;
-		kern_args[1] = &m_fhash;
-		rc = cuLaunchKernel(kern_init_fhash,
-							grid_size, 1, 1,
-							block_size, 1, 1,
-							sizeof(kern_errorbuf) * block_size,
-							NULL,
-							kern_args,
-							NULL);
-		if (rc != CUDA_SUCCESS)
-			werror("failed on cuLaunchKernel: %s", errorText(rc));
+			optimal_workgroup_size(&grid_size,
+								   &block_size,
+								   kern_init_fhash,
+								   CU_DEVICE_PER_THREAD,
+								   gpas->f_hashsize,
+								   0, 0);
+			sm_count = devAttrs[CU_DINDEX_PER_THREAD].MULTIPROCESSOR_COUNT;
+			if (grid_size > sm_count)
+				grid_size = sm_count;
+			kern_args[0] = &gpas->f_hashsize;
+			kern_args[1] = &gpas->m_fhash;
+			rc = cuLaunchKernel(kern_init_fhash,
+								grid_size, 1, 1,
+								block_size, 1, 1,
+								0,
+								CU_STREAM_PER_THREAD,
+								kern_args,
+								NULL);
+			if (rc != CUDA_SUCCESS)
+				werror("failed on cuLaunchKernel: %s", errorText(rc));
+
+			rc = cuEventRecord(ev_init_fhash,
+							   CU_STREAM_PER_THREAD);
+			if (rc != CUDA_SUCCESS)
+				werror("failed on cuEventRecord: %s", errorText(rc));
+
+			gpas->ev_init_fhash = ev_init_fhash;
+		}
 	}
 	STROM_CATCH();
 	{
-		gpuMemFree(gcontext, m_kds_final);
+		pthreadMutexUnlock(&gpas->f_mutex);
 		STROM_RE_THROW();
 	}
 	STROM_END_TRY();
-
-	gpa_sstate->m_kds_final[gpuserv_cuda_dindex] = m_kds_final;
-	gpa_sstate->m_fhash[gpuserv_cuda_dindex] = m_fhash;
-
-	return true;
-}
-
-static bool
-gpupreagg_load_final_buffer(GpuPreAggTask *gpreagg,
-							CUmodule cuda_module,
-							CUdeviceptr *p_kds_final,
-							CUdeviceptr *p_fhash)
-{
-	GpuContext	   *gcontext = gpreagg->task.gcontext;
-	GpuPreAggSharedState *gpa_sstate = gpreagg->gpa_sstate;
-	cl_int			pg_worker = gcontext->shgcon->pg_worker_index;
-	cl_bool			retval = true;
-
-	pthreadMutexLock(&gpa_sstate->mutex);
-	if (!gpa_sstate->is_loaded[pg_worker])
-	{
-		STROM_TRY();
-		{
-			if (gpa_sstate->m_kds_final[gpuserv_cuda_dindex] == 0UL)
-				retval = gpupreagg_alloc_final_buffer(gpreagg, cuda_module);
-			else
-			{
-				CUdeviceptr		deviceptr;
-				CUresult		rc;
-
-				deviceptr = gpa_sstate->m_kds_final[gpuserv_cuda_dindex];
-				rc = gpuMemRetain(gcontext, deviceptr);
-				if (rc != CUDA_SUCCESS)
-					werror("failed on gpuMemRetain: %s", errorText(rc));
-			}
-
-			if (retval)
-				gpa_sstate->is_loaded[pg_worker] = true;
-		}
-		STROM_CATCH();
-		{
-			pthreadMutexUnlock(&gpa_sstate->mutex);
-			STROM_RE_THROW();
-		}
-		STROM_END_TRY();
-	}
-
-	if (retval)
-	{
-		*p_kds_final = gpa_sstate->m_kds_final[gpuserv_cuda_dindex];
-		*p_fhash     = gpa_sstate->m_fhash[gpuserv_cuda_dindex];
-	}
-	pthreadMutexUnlock(&gpa_sstate->mutex);
-
-	return retval;
+	pthreadMutexUnlock(&gpas->f_mutex);
+	/* Point of synchronization */
+	rc = cuStreamWaitEvent(CU_STREAM_PER_THREAD,
+						   gpas->ev_init_fhash,
+						   0);
+	if (rc != CUDA_SUCCESS)
+		werror("failed on cuStreamWaitEvent: %s", errorText(rc));
 }
 
 /*
@@ -4401,6 +4194,7 @@ static void
 gpupreaggUpdateRunTimeStat(GpuPreAggSharedState *gpa_sstate,
 						   kern_gpupreagg *kgpreagg)
 {
+#if 0
 	pthreadMutexLock(&gpa_sstate->mutex);
 	gpa_sstate->exec_nrows_in	+= kgpreagg->nitems_real;
 	gpa_sstate->exec_nfiltered	+= kgpreagg->nitems_filtered;
@@ -4413,6 +4207,7 @@ gpupreaggUpdateRunTimeStat(GpuPreAggSharedState *gpa_sstate,
 	gpa_sstate->tv_stat_debug4	+= kgpreagg->tv_stat_debug4;
 #endif
 	pthreadMutexUnlock(&gpa_sstate->mutex);
+#endif
 }
 
 /*
@@ -4424,38 +4219,30 @@ static int
 gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 								 CUmodule cuda_module)
 {
-	GpuContext *gcontext = gpreagg->task.gcontext;
+	GpuPreAggState *gpas = (GpuPreAggState *) gpreagg->task.gts;
+	GpuContext	   *gcontext = gpas->gts.gcontext;
 	GpuPreAggSharedState *gpa_sstate = gpreagg->gpa_sstate;
 	pgstrom_data_store *pds_src = gpreagg->pds_src;
 	kern_data_store *kds_slot_head = gpreagg->kds_slot_head;
-	CUfunction	kern_setup;
-	CUfunction	kern_reduction;
-	CUdeviceptr	devptr;
-	CUdeviceptr	m_gpreagg = 0UL;
-	CUdeviceptr	m_kds_src = 0UL;
-	CUdeviceptr	m_kds_slot = 0UL;
-	CUdeviceptr	m_kds_final = 0UL;
-	CUdeviceptr	m_fhash = 0UL;
-	Size		length;
-	size_t		grid_sz;
-	size_t		block_sz;
-	void	   *kern_args[6];
-	CUresult	rc;
-	int			i, retval = 100001;	/* retry after 100ms delay */
+	CUfunction		kern_setup;
+	CUfunction		kern_reduction;
+	CUdeviceptr		m_gpreagg = (CUdeviceptr)&gpreagg->kern;
+	CUdeviceptr		m_kds_src = 0UL;
+	CUdeviceptr		m_kds_slot = 0UL;
+	CUdeviceptr		m_kds_final = gpreagg->m_kds_final;
+	CUdeviceptr		m_fhash = gpreagg->m_fhash;
+	Size			length;
+	int				sm_count;
+	size_t			grid_sz;
+	size_t			block_sz;
+	void		   *kern_args[6];
+	CUresult		rc;
+	int				retval = 100001;	/* retry after 100ms delay */
 
 	/*
-	 * Get GpuPreAgg execution strategy
+	 * Ensure the final buffer & hashslot are ready to use
 	 */
-	if (!gpupreagg_load_final_buffer(gpreagg, cuda_module,
-									 &m_kds_final, &m_fhash))
-		return retval;
-
-	/*
-	 * Is it a dummay GpuTask?
-	 */
-	if (gpreagg->task_role == GpuPreAggTaskRole__Dummy)
-		goto check_terminator;
-	Assert(pds_src != NULL);
+	gpupreagg_init_final_hash(gpreagg, cuda_module);
 
 	/*
 	 * Lookup kernel functions
@@ -4479,67 +4266,86 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 	/*
 	 * Device memory allocation for short term
 	 */
-	length = (GPUMEMALIGN(KERN_GPUPREAGG_LENGTH(&gpreagg->kern)) +
-			  GPUMEMALIGN(kds_slot_head->length));
-	if (gpreagg->with_nvme_strom)
+	/* kds_src */
+	if (pds_src->kds.format != KDS_FORMAT_BLOCK)
+		m_kds_src = (CUdeviceptr)&pds_src->kds;
+	else
 	{
-		rc = gpuMemAllocIOMap(gcontext,
-							  &m_kds_src,
-							  GPUMEMALIGN(pds_src->kds.length));
-		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
+		if (gpreagg->with_nvme_strom)
 		{
-			PDS_fillup_blocks(pds_src, gpreagg->task.peer_fdesc);
-			gpreagg->with_nvme_strom = false;
+			rc = gpuMemAllocIOMap(gcontext,
+								  &m_kds_src,
+								  GPUMEMALIGN(pds_src->kds.length));
+			if (rc == CUDA_ERROR_OUT_OF_MEMORY)
+			{
+				PDS_fillup_blocks(pds_src, gpreagg->task.file_desc);
+				gpreagg->with_nvme_strom = false;
+			}
+			else if (rc != CUDA_SUCCESS)
+				werror("failed on gpuMemAllocIOMap: %s", errorText(rc));
 		}
-		else if (rc != CUDA_SUCCESS)
-			werror("failed on gpuMemAllocIOMap: %s", errorText(rc));
-	}
-	if (m_kds_src == 0UL)
-	{
-		Assert(!gpreagg->with_nvme_strom);
-		rc = gpuMemAlloc(gcontext,
-						 &m_kds_src,
-						 GPUMEMALIGN(pds_src->kds.length));
-		if (rc == CUDA_ERROR_OUT_OF_MEMORY)
-			goto out_of_resource;
-		else if (rc != CUDA_SUCCESS)
-			werror("failed on gpuMemAlloc: %s", errorText(rc));
+		if (m_kds_src == 0UL)
+		{
+			Assert(!gpreagg->with_nvme_strom);
+			rc = gpuMemAlloc(gcontext,
+							 &m_kds_src,
+							 GPUMEMALIGN(pds_src->kds.length));
+			if (rc == CUDA_ERROR_OUT_OF_MEMORY)
+				goto out_of_resource;
+			else if (rc != CUDA_SUCCESS)
+				werror("failed on gpuMemAlloc: %s", errorText(rc));
+		}
 	}
 
-	rc = gpuMemAllocManaged(gcontext, &devptr, length,
+	/* kds_slot */
+	rc = gpuMemAllocManaged(gcontext,
+							&m_kds_slot,
+							kds_slot_head->length,
 							CU_MEM_ATTACH_GLOBAL);
 	if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 		goto out_of_resource;
 	else if (rc != CUDA_SUCCESS)
 		werror("failed on gpuMemAllocManaged: %s", errorText(rc));
 
-	m_gpreagg = devptr;
-	devptr += GPUMEMALIGN(KERN_GPUPREAGG_LENGTH(&gpreagg->kern));
-	Assert(m_kds_src != 0UL);
-	m_kds_slot = devptr;
-	devptr += GPUMEMALIGN(kds_slot_head->length);
-	Assert(devptr == m_gpreagg + length);
-	Assert(m_kds_final != 0UL && m_fhash != 0UL);
+	memcpy((void *)m_kds_slot, kds_slot_head,
+		   KERN_DATA_STORE_HEAD_LENGTH(kds_slot_head));
+
 	/*
 	 * OK, kick a series of GpuPreAgg invocations
 	 */
 
 	/* kern_gpupreagg */
 	length = KERN_GPUPREAGG_DMASEND_LENGTH(&gpreagg->kern);
-	memcpy((void *)m_gpreagg, &gpreagg->kern, length);
-	rc = cuMemPrefetchAsync(m_gpreagg, length,
-							gpuserv_cuda_device,
+	rc = cuMemPrefetchAsync(m_gpreagg,
+							length,
+							CU_DEVICE_PER_THREAD,
+							CU_STREAM_PER_THREAD);
+	if (rc != CUDA_SUCCESS)
+		werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
+
+	/* kds_slot */
+	rc = cuMemPrefetchAsync(m_kds_slot,
+							KERN_DATA_STORE_HEAD_LENGTH(kds_slot_head),
+							CU_DEVICE_PER_THREAD,
 							CU_STREAM_PER_THREAD);
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
 
 	/* source data to be reduced */
-	if (!gpreagg->with_nvme_strom)
+	if (pds_src->kds.format != KDS_FORMAT_BLOCK)
 	{
-		length = pds_src->kds.length;
+		rc = cuMemPrefetchAsync(m_kds_src,
+								pds_src->kds.length,
+								CU_DEVICE_PER_THREAD,
+								CU_STREAM_PER_THREAD);
+		if (rc != CUDA_SUCCESS)
+			werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
+	}
+	else if (!gpreagg->with_nvme_strom)
+	{
 		rc = cuMemcpyHtoDAsync(m_kds_src,
 							   &pds_src->kds,
-							   length,
+							   pds_src->kds.length,
 							   CU_STREAM_PER_THREAD);
 		if (rc != CUDA_SUCCESS)
 			werror("failed on cuMemcpyHtoD: %s", errorText(rc));
@@ -4552,15 +4358,6 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 						  pds_src);
 	}
 
-	/* header of the internal kds-slot buffer */
-	length = KERN_DATA_STORE_HEAD_LENGTH(kds_slot_head);
-	memcpy((void *)m_kds_slot, kds_slot_head, length);
-	rc = cuMemPrefetchAsync(m_kds_slot, length,
-							gpuserv_cuda_device,
-							CU_STREAM_PER_THREAD);
-	if (rc != CUDA_SUCCESS)
-		werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
-
 	/*
 	 * Launch:
 	 * gpupreagg_setup_XXXX(kern_gpupreagg *kgpreagg,
@@ -4570,12 +4367,12 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 	largest_workgroup_size(&grid_sz,
 						   &block_sz,
 						   kern_setup,
-						   gpuserv_cuda_device,
+						   CU_DEVICE_PER_THREAD,
 						   kds_slot_head->nrooms,
 						   sizeof(cl_int) * 1024,
 						   0);
-	grid_sz = Min(grid_sz,
-				  devAttrs[gpuserv_cuda_dindex].MULTIPROCESSOR_COUNT);
+	sm_count = devAttrs[CU_DINDEX_PER_THREAD].MULTIPROCESSOR_COUNT;
+	grid_sz = Min(grid_sz, sm_count);
 	kern_args[0] = &m_gpreagg;
 	kern_args[1] = &m_kds_src;
 	kern_args[2] = &m_kds_slot;
@@ -4600,12 +4397,12 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 	largest_workgroup_size(&grid_sz,
 						   &block_sz,
 						   kern_reduction,
-						   gpuserv_cuda_device,
+						   CU_DEVICE_PER_THREAD,
 						   kds_slot_head->nrooms,
 						   sizeof(cl_int) * 1024,
 						   0);
-	grid_sz = Min(grid_sz,
-				  devAttrs[gpuserv_cuda_dindex].MULTIPROCESSOR_COUNT);
+	sm_count = devAttrs[CU_DINDEX_PER_THREAD].MULTIPROCESSOR_COUNT;
+	grid_sz = Min(grid_sz, sm_count);
 	kern_args[0] = &m_gpreagg;
 	kern_args[1] = &m_kds_slot;
 	kern_args[2] = &m_kds_final;
@@ -4620,18 +4417,14 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuLaunchKernel: %s", errorText(rc));
 
-	rc = cuEventRecord(gpuserv_cuda_event, CU_STREAM_PER_THREAD);
+	rc = cuEventRecord(CU_EVENT0_PER_THREAD, CU_STREAM_PER_THREAD);
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuEventRecord: %s", errorText(rc));
 
 	/* Point of synchronization */
-	rc = cuEventSynchronize(gpuserv_cuda_event);
+	rc = cuEventSynchronize(CU_EVENT0_PER_THREAD);
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuEventSynchronize: %s", errorText(rc));
-
-	/* DMA Recv of individual kern_gpreagg */
-	length = KERN_GPUPREAGG_DMARECV_LENGTH(&gpreagg->kern);
-	memcpy(&gpreagg->kern, (void *)m_gpreagg, length);
 
 	/*
 	 * XXX - Even though we speculatively allocate large virtual device
@@ -4655,50 +4448,13 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 	{
 		gpreagg->task.kerror.errcode = StromError_Success;
 		gpreagg->task.cpu_fallback = true;
-		pthreadMutexLock(&gpa_sstate->mutex);
-		gpa_sstate->had_cpu_fallback = true;
-		pthreadMutexUnlock(&gpa_sstate->mutex);
+		retval = 0;
 	}
 	else if (gpreagg->task.kerror.errcode == StromError_Success)
-		gpupreaggUpdateRunTimeStat(gpa_sstate, &gpreagg->kern);
-
-	/*
-	 * Does this GpuTask need to perform as a terminator on this device?
-	 */
-check_terminator:
-	if (gpreagg->task.cpu_fallback)
-		retval = 0;			/* GpuTask will be sent back to the backend */
-	else
 	{
-		pthreadMutexLock(&gpa_sstate->mutex);
-		Assert(gpa_sstate->nr_tasks[gpuserv_cuda_dindex] > 0);
-		if (--gpa_sstate->nr_tasks[gpuserv_cuda_dindex] == 0 &&
-			gpa_sstate->outer_scan_done)
-		{
-			Assert(gpreagg->pds_final == NULL);
-			gpreagg->task_role = GpuPreAggTaskRole__GlobalTerminator;
-			for (i=0; i < numDevAttrs; i++)
-			{
-				if (gpa_sstate->nr_tasks[i] > 0)
-				{
-					gpreagg->task_role = GpuPreAggTaskRole__LocalTerminator;
-					break;
-				}
-			}
-			retval = 1;		/* Re-execution as terminator on this device */
-
-			/* terminator needs no pds_src */
-			if (gpreagg->pds_src)
-				PDS_release(gpreagg->pds_src);
-			gpreagg->pds_src = NULL;
-		}
-		else
-		{
-			retval = -1;	/* GpuTask will be released soon */
-		}
-		pthreadMutexUnlock(&gpa_sstate->mutex);
+		gpupreaggUpdateRunTimeStat(gpa_sstate, &gpreagg->kern);
+		retval = -1;
 	}
-
 out_of_resource:
 	if (m_kds_src != 0UL)
 		gpuMemFree(gcontext, m_kds_src);
@@ -4708,13 +4464,15 @@ out_of_resource:
 }
 
 /*
- * gpupreagg_process_unified_task
+ * gpupreagg_process_combined_task
  *
- * It runs unified GpuJoin+GpuPreAgg task.
+ * It runs a combined GpuJoin+GpuPreAgg task.
  */
 static int
-gpupreagg_process_unified_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
+gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 {
+	werror("not implemented yet");
+#if 0
 	GpuContext	   *gcontext = gpreagg->task.gcontext;
 	GpuPreAggSharedState *gpa_sstate = gpreagg->gpa_sstate;
 	GpuJoinSharedState *gj_sstate = gpreagg->gj_sstate;
@@ -5000,128 +4758,25 @@ out_of_resource:
 	if (m_gpreagg != 0UL)
 		gpuMemFree(gcontext, m_gpreagg);
 	return retval;
-}
-
-/*
- * gpupreagg_process_termination_task
- */
-static int
-gpupreagg_process_termination_task(GpuPreAggTask *gpreagg,
-								   CUmodule cuda_module)
-{
-	GpuContext	   *gcontext = gpreagg->task.gcontext;
-	GpuPreAggSharedState *gpa_sstate = gpreagg->gpa_sstate;
-	pgstrom_data_store *pds_final;
-	kern_data_store *kds_final_head = gpa_sstate->kds_final_head;
-	CUdeviceptr		m_kds_final;
-	CUdeviceptr		m_kds_extra;
-	CUresult		rc;
-	cl_int			ncols = kds_final_head->ncols;
-	size_t			f_nitems;
-	size_t			f_extra_sz;
-	size_t			kds_length;
-
-	/*
-	 * allocation of the final buffer on host side
-	 */
-	pthreadMutexLock(&gpa_sstate->mutex);
-	f_nitems = gpa_sstate->f_nitems[gpuserv_cuda_dindex];
-	f_extra_sz = gpa_sstate->f_extra_sz[gpuserv_cuda_dindex];
-	m_kds_final = gpa_sstate->m_kds_final[gpuserv_cuda_dindex];
-	m_kds_extra = m_kds_final + ((size_t)kds_final_head->length -
-								 (size_t)f_extra_sz);
-	pthreadMutexUnlock(&gpa_sstate->mutex);
-
-	kds_length = KERN_DATA_STORE_SLOT_LENGTH(kds_final_head, f_nitems);
-	pds_final = dmaBufferAlloc(gcontext, (GPUMEMALIGN(kds_length) +
-										  GPUMEMALIGN(f_extra_sz)));
-	if (!pds_final)
-		return 100001;	/* out of memory; try it later */
-
-	pg_atomic_init_u32(&pds_final->refcnt, 1);
-	pds_final->nblocks_uncached = 0;
-	memcpy(&pds_final->kds, gpa_sstate->kds_final_head,
-		   offsetof(kern_data_store, colmeta[ncols]));
-	/*
-	 * fixup varlena datum on demand
-	 */
-	if (kds_final_head->has_notbyval && f_nitems > 0)
-	{
-		hostptr_t	kds_baseptr = (hostptr_t)(&pds_final->kds) + kds_length;
-		CUfunction	kern_fixvar;
-		size_t		grid_size;
-		size_t		block_size;
-		void	   *kern_args[2];
-
-		/* Launch:
-		 * KERNEL_FUNCTION(void)
-		 * gpupreagg_fixup_varlena(kern_data_store *kds_final,
-		 *                         hostptr_t kds_baseptr)
-		 */
-		rc = cuModuleGetFunction(&kern_fixvar,
-								 cuda_module,
-								 "gpupreagg_fixup_varlena");
-		if (rc != CUDA_SUCCESS)
-			werror("failed on cuModuleGetFunction: %s", errorText(rc));
-
-		optimal_workgroup_size(&grid_size,
-							   &block_size,
-							   kern_fixvar,
-							   gpuserv_cuda_device,
-							   f_nitems,
-							   0, 0);
-		kern_args[0] = &m_kds_final;
-		kern_args[1] = &kds_baseptr;
-
-		rc = cuLaunchKernel(kern_fixvar,
-							grid_size, 1, 1,
-							block_size, 1, 1,
-							0,
-							NULL,
-							kern_args,
-							NULL);
-		if (rc != CUDA_SUCCESS)
-			werror("failed on cuLaunchKernel: %s", errorText(rc));
-	}
-	else
-	{
-		Assert(f_extra_sz == 0UL);
-	}
-
-	/* DMA Recv of the final buffer (earlier half) */
-	rc = cuMemcpyDtoH(&pds_final->kds,
-					  m_kds_final,
-					  kds_length);
-	if (rc != CUDA_SUCCESS)
-		werror("failed on cuMemcpyHtoD: %s", errorText(rc));
-
-	/* DMA Recv of the final buffer (extra part of SLOT format) */
-	if (f_extra_sz > 0)
-	{
-		rc = cuMemcpyDtoH((char *)(&pds_final->kds) + kds_length,
-						  m_kds_extra,
-						  f_extra_sz);
-		if (rc != CUDA_SUCCESS)
-			werror("failed on cuMemcpyHtoD: %s", errorText(rc));
-	}
-
-	/* final fixup of the final buffer */
-	pds_final->kds.hostptr = (hostptr_t)(&pds_final->kds.hostptr);
-	pds_final->kds.length = kds_length + f_extra_sz;
-	gpreagg->pds_final = pds_final;
-
-	return 0;
+#endif
 }
 
 /*
  * gpupreagg_process_task
  */
-int
+static int
 gpupreagg_process_task(GpuTask *gtask, CUmodule cuda_module)
 {
 	GpuPreAggTask  *gpreagg = (GpuPreAggTask *) gtask;
 	int		retval;
 
+	if (!gpreagg->kgjoin)
+		retval = gpupreagg_process_reduction_task(gpreagg, cuda_module);
+	else
+		retval = gpupreagg_process_combined_task(gpreagg, cuda_module);
+
+
+#if 0
 	if (gpreagg->task_role == GpuPreAggTaskRole__Normal ||
 		gpreagg->task_role == GpuPreAggTaskRole__Dummy)
 	{
@@ -5148,22 +4803,22 @@ gpupreagg_process_task(GpuTask *gtask, CUmodule cuda_module)
 		}
 		retval = gpupreagg_process_termination_task(gpreagg, cuda_module);
 	}
+#endif
 	return retval;
 }
 
 /*
  * gpupreagg_release_task
  */
-void
+static void
 gpupreagg_release_task(GpuTask *gtask)
 {
 	GpuPreAggTask  *gpreagg = (GpuPreAggTask *)gtask;
+	GpuContext	   *gcontext = gtask->gts->gcontext;
 
 	if (gpreagg->pds_src)
 		PDS_release(gpreagg->pds_src);
-	if (gpreagg->pds_final)
-		PDS_release(gpreagg->pds_final);
-	dmaBufferFree(gpreagg);
+	gpuMemFree(gcontext, (CUdeviceptr)gpreagg);
 }
 
 /*

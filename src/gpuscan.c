@@ -147,6 +147,8 @@ typedef struct
 static GpuTask  *gpuscan_next_task(GpuTaskState *gts);
 static TupleTableSlot *gpuscan_next_tuple(GpuTaskState *gts);
 static void gpuscan_switch_task(GpuTaskState *gts, GpuTask *gtask);
+static int gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module);
+static void gpuscan_release_task(GpuTask *gtask);
 
 static GpuScanSharedState *createGpuScanSharedState(GpuScanState *gss,
 													int pg_nworkers,
@@ -1853,8 +1855,9 @@ assign_gpuscan_session_info(StringInfo buf, GpuTaskState *gts)
 static Node *
 gpuscan_create_scan_state(CustomScan *cscan)
 {
-	GpuScanState   *gss = palloc0(sizeof(GpuScanState));
-
+	GpuContext	   *gcontext = AllocGpuContext(-1, false);
+	GpuScanState   *gss = MemoryContextAllocZero(gcontext->memcxt,
+												 sizeof(GpuScanState));
 	/* Set tag and executor callbacks */
 	NodeSetTag(gss, T_CustomScanState);
 	gss->gts.css.flags = cscan->flags;
@@ -1862,6 +1865,7 @@ gpuscan_create_scan_state(CustomScan *cscan)
 		gss->gts.css.methods = &gpuscan_exec_methods;
 	else
 		elog(ERROR, "Bug? unexpected CustomPlanMethods");
+	gss->gts.gcontext = gcontext;
 
 	return (Node *) gss;
 }
@@ -1873,8 +1877,8 @@ static void
 ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 {
 	Relation		scan_rel = node->ss.ss_currentRelation;
-	GpuContext	   *gcontext = NULL;
 	GpuScanState   *gss = (GpuScanState *) node;
+	GpuContext	   *gcontext = gss->gts.gcontext;
 	CustomScan	   *cscan = (CustomScan *)node->ss.ps.plan;
 	GpuScanInfo	   *gs_info = deform_gpuscan_info(cscan);
 	List		   *dev_tlist = NIL;
@@ -1882,16 +1886,15 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	ListCell	   *lc;
 	StringInfoData	kern_define;
 	ProgramId		program_id;
-	bool			with_activation;
 
 	/* gpuscan should not have inner/outer plan right now */
 	Assert(scan_rel != NULL);
 	Assert(outerPlan(node) == NULL);
 	Assert(innerPlan(node) == NULL);
 
-	/* activate a GpuContext for CUDA kernel execution */
-	with_activation = ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0);
-	gcontext = AllocGpuContext(-1, false, with_activation);
+	/* activate GpuContext for CUDA kernel execution */
+	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
+		ActivateGpuContext(gcontext);
 
 	/*
 	 * Re-initialization of scan tuple-descriptor and projection-info,
@@ -1925,6 +1928,8 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 		gss->gts.cb_bulk_exec = pgstromBulkExecGpuTaskState;
 	else
 		gss->gts.cb_bulk_exec = NULL;	/* BulkExec not supported */
+	gss->gts.cb_process_task = gpuscan_process_task;
+	gss->gts.cb_release_task = gpuscan_release_task;
 	/* estimated number of rows per block */
 	gss->gts.outer_nrows_per_block = gs_info->nrows_per_block;
 
@@ -2776,7 +2781,7 @@ gpuscanRewindScanChunk(GpuTaskState *gts)
 /*
  * gpuscan_process_task
  */
-int
+static int
 gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 {
 	GpuContext	   *gcontext = GpuWorkerCurrentContext;
@@ -3032,7 +3037,7 @@ out_of_resource:
 /*
  * gpuscan_release_task
  */
-void
+static void
 gpuscan_release_task(GpuTask *gtask)
 {
 	GpuScanTask	   *gscan = (GpuScanTask *) gtask;

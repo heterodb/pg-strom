@@ -105,8 +105,9 @@ typedef struct plcudaTask
  */
 static plcudaTaskState *plcuda_exec_begin(HeapTuple protup,
 										  FunctionCallInfo fcinfo);
-
 static void plcuda_exec_end(plcudaTaskState *plts);
+static int  plcuda_process_task(GpuTask *gtask, CUmodule cuda_module);
+static void plcuda_release_task(GpuTask *gtask);
 
 /* tracker of plcudaState */
 static dlist_head	plcuda_state_list;
@@ -1196,7 +1197,7 @@ __setup_kern_colmeta(Oid type_oid, int arg_index)
 static plcudaTaskState *
 plcuda_exec_begin(HeapTuple protup, FunctionCallInfo fcinfo)
 {
-	GpuContext	   *gcontext = AllocGpuContext(-1, true, fcinfo != NULL);
+	GpuContext	   *gcontext = AllocGpuContext(-1, true);
 	Form_pg_proc	procForm = (Form_pg_proc) GETSTRUCT(protup);
 	plcudaTaskState *plts;
 	kern_plcuda	   *kplcuda;
@@ -1211,12 +1212,16 @@ plcuda_exec_begin(HeapTuple protup, FunctionCallInfo fcinfo)
 	ProgramId		program_id;
 	int				i, n_meta;
 
+	if (fcinfo != NULL)
+		ActivateGpuContext(gcontext);
 	/* setup a dummy GTS for PL/CUDA (see pgstromInitGpuTaskState) */
 	plts = MemoryContextAllocZero(CacheMemoryContext,
 								  sizeof(plcudaTaskState));
 	plts->gts.gcontext = gcontext;
 	plts->gts.task_kind = GpuTaskKind_PL_CUDA;
 	plts->gts.kern_params = NULL;
+	plts->gts.cb_process_task = plcuda_process_task;
+	plts->gts.cb_release_task = plcuda_release_task;
 	dlist_init(&plts->gts.ready_tasks);
 
 	plts->val_prep_num_threads = 1;
@@ -1872,7 +1877,7 @@ PG_FUNCTION_INFO_V1(plcuda_function_source);
 /*
  * plcuda_process_task
  */
-int
+static int
 plcuda_process_task(GpuTask *gtask, CUmodule cuda_module)
 {
 	plcudaTask	   *ptask = (plcudaTask *) gtask;
@@ -2120,7 +2125,7 @@ out_of_resource:
 /*
  * plcuda_release_task
  */
-void
+static void
 plcuda_release_task(GpuTask *gtask)
 {
 	plcudaTask	   *ptask = (plcudaTask *) gtask;

@@ -516,7 +516,6 @@ __PDS_create_row(GpuContext *gcontext,
 	pds = (pgstrom_data_store *) m_deviceptr;
 
 	/* setup */
-	memset(&pds->chain, 0, sizeof(dlist_node));
 	pds->gcontext = gcontext;
 	pg_atomic_init_u32(&pds->refcnt, 1);
 	init_kernel_data_store(&pds->kds, tupdesc, bytesize,
@@ -551,11 +550,49 @@ __PDS_create_hash(GpuContext *gcontext,
 	pds = (pgstrom_data_store *) m_deviceptr;
 
 	/* setup */
-	memset(&pds->chain, 0, sizeof(dlist_node));
 	pds->gcontext = gcontext;
 	pg_atomic_init_u32(&pds->refcnt, 1);
 	init_kernel_data_store(&pds->kds, tupdesc, bytesize,
 						   KDS_FORMAT_HASH, INT_MAX);
+	pds->nblocks_uncached = 0;
+
+	return pds;
+}
+
+pgstrom_data_store *
+__PDS_create_slot(GpuContext *gcontext,
+				  TupleDesc tupdesc,
+				  size_t bytesize,
+				  const char *filename, int lineno)
+{
+	pgstrom_data_store *pds;
+	CUdeviceptr	m_deviceptr;
+	CUresult	rc;
+	size_t		nrooms;
+
+	bytesize = STROMALIGN_DOWN(bytesize);
+	if (KDS_CALCULATE_HEAD_LENGTH(tupdesc->natts) > bytesize)
+		elog(ERROR, "Required length for KDS-Slot is too short");
+
+	nrooms = (bytesize - KDS_CALCULATE_HEAD_LENGTH(tupdesc->natts))
+		/ LONGALIGN((sizeof(Datum) + sizeof(char)) * tupdesc->natts);
+
+	rc = __gpuMemAllocManaged(gcontext,
+							  &m_deviceptr,
+							  offsetof(pgstrom_data_store,
+									   kds) + bytesize,
+							  CU_MEM_ATTACH_GLOBAL,
+							  filename, lineno);
+	if (rc != CUDA_SUCCESS)
+		werror("out of managed memory");
+	pds = (pgstrom_data_store *) m_deviceptr;
+
+	/* setup */
+	pds->gcontext = gcontext;
+	pg_atomic_init_u32(&pds->refcnt, 1);
+	init_kernel_data_store(&pds->kds, tupdesc,
+						   bytesize - offsetof(pgstrom_data_store, kds),
+						   KDS_FORMAT_SLOT, nrooms);
 	pds->nblocks_uncached = 0;
 
 	return pds;
@@ -588,9 +625,10 @@ __PDS_create_block(GpuContext *gcontext,
 	if (rc != CUDA_SUCCESS)
 		werror("failed on gpuMemAllocHost: %s", errorText(rc));
 	/* setup */
+	pds->gcontext = gcontext;
 	pg_atomic_init_u32(&pds->refcnt, 1);
 	init_kernel_data_store(&pds->kds, tupdesc, bytesize,
-                           KDS_FORMAT_BLOCK, nrooms);
+						   KDS_FORMAT_BLOCK, nrooms);
     pds->kds.nrows_per_block = nvme_sstate->nrows_per_block;
     pds->nblocks_uncached = 0;
 

@@ -203,7 +203,7 @@ pgstromInitGpuTaskState(GpuTaskState *gts,
 	ExprContext	   *econtext = gts->css.ss.ps.ps_ExprContext;
 	CustomScan	   *cscan = (CustomScan *)(gts->css.ss.ps.plan);
 
-	gts->gcontext = gcontext;
+	Assert(gts->gcontext == gcontext);
 	gts->task_kind = task_kind;
 	gts->program_id = INVALID_PROGRAM_ID;	/* to be set later */
 	gts->kern_params = construct_kern_parambuf(used_params, econtext,
@@ -605,6 +605,7 @@ pgstromInitGpuTask(GpuTaskState *gts, GpuTask *gtask)
 	gtask->file_desc    = -1;
 }
 
+#if 0
 /*
  * pgstromProcessGpuTask - processing handler of GpuTask
  */
@@ -660,6 +661,7 @@ pgstromReleaseGpuTask(GpuTask *gtask)
 			break;
 	}
 }
+#endif
 
 /*
  * errorText - string form of the error code

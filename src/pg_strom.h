@@ -100,6 +100,7 @@ typedef struct GpuContext
 	dlist_node		chain;
 	pg_atomic_uint32 refcnt;
 	ResourceOwner	resowner;
+	MemoryContext	memcxt;
 	cl_bool			never_use_mps;
 	/* cuda resources per GpuContext */
 	cl_int			cuda_dindex;
@@ -209,6 +210,9 @@ struct GpuTaskState
 	TupleTableSlot *(*cb_next_tuple)(GpuTaskState *gts);
 	struct pgstrom_data_store *(*cb_bulk_exec)(GpuTaskState *gts,
 											   size_t chunk_size);
+	int			  (*cb_process_task)(GpuTask *gtask,
+									 CUmodule cuda_module);
+	void		  (*cb_release_task)(GpuTask *gtask);
 	/* list to manage GpuTasks */
 	dlist_head		ready_tasks;	/* list of tasks already processed */
 	cl_uint			num_ready_tasks;/* length of the list above */
@@ -313,15 +317,10 @@ typedef struct devexpr_info {
  */
 typedef struct pgstrom_data_store
 {
-	/*
-	 * NOTE: For the traditional asynchronous DMA, PDS with KDS_FORMAT_BLOCK
-	 * shall be allocated using cuMemAllocHost(). PDSs are tentatively kept
-	 * by GpuContext for reuse, and chain is used for tracking.
-	 */
-	dlist_node			chain;
-	/* GpuContext which tracks this PDS */
+	/* GpuContext which owns this data store */
 	GpuContext		   *gcontext;
-	/* Reference counter */
+
+	/* reference counter */
 	pg_atomic_uint32	refcnt;
 
 	/*
@@ -504,8 +503,8 @@ CHECK_FOR_GPUCONTEXT(GpuContext *gcontext)
 }
 
 extern GpuContext *AllocGpuContext(int cuda_dindex,
-								   bool never_use_mps,
-								   bool with_activation);
+								   bool never_use_mps);
+extern void ActivateGpuContext(GpuContext *gcontext);
 extern GpuContext *GetGpuContext(GpuContext *gcontext);
 extern void PutGpuContext(GpuContext *gcontext);
 extern void SynchronizeGpuContext(GpuContext *gcontext);
@@ -628,8 +627,8 @@ extern void pgstromExplainOuterScan(GpuTaskState *gts,
 									int outer_plan_width);
 
 extern void pgstromInitGpuTask(GpuTaskState *gts, GpuTask *gtask);
-extern int	pgstromProcessGpuTask(GpuTask *gtask, CUmodule cuda_module);
-extern void pgstromReleaseGpuTask(GpuTask *gtask);
+//extern int	pgstromProcessGpuTask(GpuTask *gtask, CUmodule cuda_module);
+//extern void pgstromReleaseGpuTask(GpuTask *gtask);
 
 extern const char *errorText(int errcode);
 extern const char *errorTextKernel(kern_errorbuf *kerror);
@@ -728,6 +727,10 @@ extern pgstrom_data_store *__PDS_create_hash(GpuContext *gcontext,
 											 TupleDesc tupdesc,
 											 Size length,
 											 const char *fname, int lineno);
+extern pgstrom_data_store *__PDS_create_slot(GpuContext *gcontext,
+											 TupleDesc tupdesc,
+											 size_t bytesize,
+											 const char *filename, int lineno);
 extern pgstrom_data_store *__PDS_create_block(GpuContext *gcontext,
 											  TupleDesc tupdesc,
 											  NVMEScanState *nvme_sstate,
@@ -736,6 +739,8 @@ extern pgstrom_data_store *__PDS_create_block(GpuContext *gcontext,
 	__PDS_create_row((a),(b),(c),__FILE__,__LINE__)
 #define PDS_create_hash(a,b,c)					\
 	__PDS_create_hash((a),(b),(c),__FILE__,__LINE__)
+#define PDS_create_slot(a,b,c)					\
+	__PDS_create_slot((a),(b),(c),__FILE__,__LINE__)
 #define PDS_create_block(a,b,c)					\
 	__PDS_create_block((a),(b),(c),__FILE__,__LINE__)
 
@@ -816,8 +821,6 @@ extern void ExecGpuScanInitDSM(CustomScanState *node,
 extern void ExecGpuScanInitWorker(CustomScanState *node,
 								  shm_toc *toc,
 								  void *coordinate);
-extern int	gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module);
-extern void gpuscan_release_task(GpuTask *gtask);
 extern void assign_gpuscan_session_info(StringInfo buf,
 										GpuTaskState *gts);
 extern void pgstrom_init_gpuscan(void);
@@ -869,26 +872,13 @@ extern void gpujoinUpdateRunTimeStat(struct GpuJoinSharedState *gj_sstate,
 /*
  * gpupreagg.c
  */
-#if 0
 extern bool pgstrom_path_is_gpupreagg(const Path *pathnode);
 extern bool pgstrom_plan_is_gpupreagg(const Plan *plan);
 extern bool pgstrom_planstate_is_gpupreagg(const PlanState *ps);
 extern void gpupreagg_post_planner(PlannedStmt *pstmt, CustomScan *cscan);
-extern int	gpupreagg_process_task(GpuTask *gtask, CUmodule cuda_module);
-extern void	gpupreagg_release_task(GpuTask *gtask);
 extern void assign_gpupreagg_session_info(StringInfo buf,
 										  GpuTaskState *gts);
 extern void pgstrom_init_gpupreagg(void);
-#else
-#define pgstrom_path_is_gpupreagg(a)		false
-#define pgstrom_plan_is_gpupreagg(a)		false
-#define pgstrom_planstate_is_gpupreagg(a)	false
-#define gpupreagg_post_planner(a,b)			do {} while(0)
-#define gpupreagg_process_task(a,b)			0
-#define gpupreagg_release_task(a)			do {} while(0)
-#define assign_gpupreagg_session_info(a,b)	do {} while(0)
-#define pgstrom_init_gpupreagg(a)			do {} while(0)
-#endif
 
 /*
  * pl_cuda.c
@@ -898,8 +888,6 @@ extern Datum pltext_function_handler(PG_FUNCTION_ARGS);
 extern Datum plcuda_function_validator(PG_FUNCTION_ARGS);
 extern Datum plcuda_function_handler(PG_FUNCTION_ARGS);
 extern Datum plcuda_function_source(PG_FUNCTION_ARGS);
-extern int	plcuda_process_task(GpuTask *gtask, CUmodule cuda_module);
-extern void plcuda_release_task(GpuTask *gtask);
 extern void pgstrom_init_plcuda(void);
 
 /*
