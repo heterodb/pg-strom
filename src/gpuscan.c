@@ -144,7 +144,7 @@ typedef struct
 /*
  * static functions
  */
-static GpuTask  *gpuscan_next_task(GpuTaskState *gts);
+static GpuTask  *gpuscan_next_task(GpuTaskState *gts, cl_bool *scan_done);
 static TupleTableSlot *gpuscan_next_tuple(GpuTaskState *gts);
 static void gpuscan_switch_task(GpuTaskState *gts, GpuTask *gtask);
 static int gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module);
@@ -2643,7 +2643,7 @@ gpuscan_switch_task(GpuTaskState *gts, GpuTask *gtask)
  * gpuscan_next_task
  */
 static GpuTask *
-gpuscan_next_task(GpuTaskState *gts)
+gpuscan_next_task(GpuTaskState *gts, cl_bool *scan_done)
 {
 	GpuScanState	   *gss = (GpuScanState *) gts;
 	GpuScanTask		   *gscan;

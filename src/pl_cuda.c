@@ -1726,7 +1726,7 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 	gcontext = plts->gts.gcontext;
 	pthreadMutexLock(gcontext->mutex);
 	dlist_push_tail(&gcontext->pending_tasks, &ptask->task.chain);
-	gcontext->num_running_tasks++;
+	plts->gts.num_running_tasks++;
 	pg_atomic_add_fetch_u32(gcontext->global_num_running_tasks, 1);
 	pthreadCondSignal(gcontext->cond);
 	pthreadMutexUnlock(gcontext->mutex);

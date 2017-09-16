@@ -336,7 +336,6 @@ static bool					enable_gpuhashjoin;
 
 /* static functions */
 static GpuTask *gpujoin_next_task(GpuTaskState *gts);
-static void gpujoin_ready_task(GpuTaskState *gts, GpuTask *gtask);
 static void gpujoin_switch_task(GpuTaskState *gts, GpuTask *gtask);
 static TupleTableSlot *gpujoin_next_tuple(GpuTaskState *gts);
 static TupleTableSlot *gpujoin_next_tuple_fallback(GpuJoinState *gjs,
@@ -1867,7 +1866,6 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 							estate);
 	gjs->gts.cb_next_task	= gpujoin_next_task;
 	gjs->gts.cb_next_tuple	= gpujoin_next_tuple;
-	gjs->gts.cb_ready_task	= gpujoin_ready_task;
 	gjs->gts.cb_switch_task	= gpujoin_switch_task;
 	if (pgstrom_bulkexec_enabled &&
 		gjs->gts.css.ss.ps.qual == NIL &&
@@ -3825,22 +3823,6 @@ skip:
 		gjs->gts.scan_done = true;
 	}
 	return gtask;
-}
-
-/*
- * gpujoin_ready_task - callback when a GpuJoinTask task gets processed
- * on the GPU server process then returned to the backend process again.
- */
-static void
-gpujoin_ready_task(GpuTaskState *gts, GpuTask *gtask)
-{
-	GpuJoinTask *pgjoin = (GpuJoinTask *) gtask;
-
-	if (gtask->kerror.errcode != StromError_Success)
-		elog(ERROR, "GpuJoin kernel internal error: %s",
-			 errorTextKernel(&gtask->kerror));
-	if (pgjoin->task.cpu_fallback)
-		elog(INFO, "CPU fallback happen");
 }
 
 /*

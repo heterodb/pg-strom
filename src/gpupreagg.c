@@ -214,8 +214,7 @@ static GpuPreAggSharedState *createGpuPreAggSharedState(GpuPreAggState *gpas,
 static void releaseGpuPreAggSharedState(GpuPreAggState *gpas);
 static void resetGpuPreAggSharedState(GpuPreAggState *gpas);
 
-static GpuTask *gpupreagg_next_task(GpuTaskState *gts);
-static void gpupreagg_ready_task(GpuTaskState *gts, GpuTask *gtask);
+static GpuTask *gpupreagg_next_task(GpuTaskState *gts, cl_bool *scan_done);
 static void gpupreagg_switch_task(GpuTaskState *gts, GpuTask *gtask);
 static int  gpupreagg_process_task(GpuTask *gtask, CUmodule cuda_module);
 static void gpupreagg_release_task(GpuTask *gtask);
@@ -3450,7 +3449,6 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 							gpa_info->used_params,
 							estate);
 	gpas->gts.cb_next_task   = gpupreagg_next_task;
-	gpas->gts.cb_ready_task  = gpupreagg_ready_task;
 	gpas->gts.cb_switch_task = gpupreagg_switch_task;
 	gpas->gts.cb_next_tuple  = gpupreagg_next_tuple;
 	gpas->gts.cb_process_task= gpupreagg_process_task;
@@ -3954,7 +3952,7 @@ gpupreagg_create_task(GpuPreAggState *gpas,
  * the input data stream that is scanned.
  */
 static GpuTask *
-gpupreagg_next_task(GpuTaskState *gts)
+gpupreagg_next_task(GpuTaskState *gts, cl_bool *scan_done)
 {
 	GpuPreAggState		   *gpas = (GpuPreAggState *) gts;
 	GpuJoinSharedState	   *gj_sstate = NULL;
@@ -4017,30 +4015,14 @@ gpupreagg_next_task(GpuTaskState *gts)
 	}
 
 	if (!pds)
-		return NULL;
+		*scan_done = true;
 	return gpupreagg_create_task(gpas, gj_sstate, pds, filedesc);
-}
-
-
-static void
-gpupreagg_ready_task(GpuTaskState *gts, GpuTask *gtask)
-{
-	GpuPreAggState *gpas = (GpuPreAggState *) gts;
-	pgstrom_data_store *pds_final = gpas->pds_final;
-
-	elog(NOTICE, "R pds_final {nitems=%d nrooms=%d usage=%d}", pds_final->kds.nitems, pds_final->kds.nrooms, pds_final->kds.usage);
 }
 
 static void
 gpupreagg_switch_task(GpuTaskState *gts, GpuTask *gtask)
 {
-	GpuPreAggState *gpas = (GpuPreAggState *) gts;
-	pgstrom_data_store *pds_final = gpas->pds_final;
-
-	elog(NOTICE, "S pds_final {nitems=%d nrooms=%d usage=%d}", pds_final->kds.nitems, pds_final->kds.nrooms, pds_final->kds.usage);
-
-	if (gtask->kerror.errcode != StromError_Success)
-		elog(ERROR, "GPU kernel error: %s", errorTextKernel(&gtask->kerror));
+	/* do nothing */
 }
 
 /*
@@ -4107,7 +4089,6 @@ gpupreagg_next_tuple(GpuTaskState *gts)
 	{
 		slot = gpas->gpreagg_slot;
 		ExecClearTuple(slot);
-		elog(NOTICE, "curr_index = %lu", gpas->gts.curr_index);
 		PDS_fetch_tuple(slot, pds_final, &gpas->gts);
 	}
 	return slot;
@@ -4224,7 +4205,7 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 	GpuPreAggSharedState *gpa_sstate = gpreagg->gpa_sstate;
 	pgstrom_data_store *pds_final = gpas->pds_final;
 	pgstrom_data_store *pds_src = gpreagg->pds_src;
-	cl_char			kds_src_format = pds_src->kds.format;
+	cl_char			kds_src_format;
 	CUfunction		kern_setup;
 	CUfunction		kern_reduction;
 	CUdeviceptr		m_gpreagg = (CUdeviceptr)&gpreagg->kern;
@@ -4238,6 +4219,11 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 	void		   *kern_args[6];
 	CUresult		rc;
 	int				retval = 1;
+
+	/* Do nothing if terminator task */
+	if (!pds_src)
+		return -2;
+	kds_src_format = pds_src->kds.format;
 
 	/*
 	 * Ensure the final buffer & hashslot are ready to use

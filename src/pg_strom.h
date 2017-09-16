@@ -131,9 +131,7 @@ typedef struct GpuContext
 	pthread_cond_t	*cond;				/* IPC stuff */
 	pg_atomic_uint32 *command;			/* IPC stuff */
 	pg_atomic_uint32 terminate_workers;
-	cl_int			num_running_tasks;
 	dlist_head		pending_tasks;		/* list of GpuTask */
-	dlist_head		completed_tasks;	/* list of GpuTask */
 	cl_int			num_workers;
 	pg_atomic_uint32 worker_index;
 	pthread_t		worker_threads[FLEXIBLE_ARRAY_MEMBER];
@@ -204,8 +202,7 @@ struct GpuTaskState
 	struct GpuTask *curr_task;	/* a GpuTask currently processed */
 
 	/* callbacks used by gputasks.c */
-	GpuTask		 *(*cb_next_task)(GpuTaskState *gts);
-	void		  (*cb_ready_task)(GpuTaskState *gts, GpuTask *gtask);
+	GpuTask		 *(*cb_next_task)(GpuTaskState *gts, cl_bool *scan_done);
 	void		  (*cb_switch_task)(GpuTaskState *gts, GpuTask *gtask);
 	TupleTableSlot *(*cb_next_tuple)(GpuTaskState *gts);
 	struct pgstrom_data_store *(*cb_bulk_exec)(GpuTaskState *gts,
@@ -213,9 +210,10 @@ struct GpuTaskState
 	int			  (*cb_process_task)(GpuTask *gtask,
 									 CUmodule cuda_module);
 	void		  (*cb_release_task)(GpuTask *gtask);
-	/* list to manage GpuTasks */
+	/* list of GpuTasks (protexted with GpuContext->mutex) */
 	dlist_head		ready_tasks;	/* list of tasks already processed */
-	cl_uint			num_ready_tasks;/* length of the list above */
+	cl_uint			num_running_tasks;	/* # of running tasks */
+	cl_uint			num_ready_tasks;	/* # of ready tasks */
 
 	/* co-operation with CPU parallel */
 	ParallelContext	*pcxt;

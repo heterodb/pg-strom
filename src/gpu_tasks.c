@@ -229,38 +229,6 @@ pgstromInitGpuTaskState(GpuTaskState *gts,
 }
 
 /*
- * fetch_completed_gputasks
- *
- * NOTE: caller must hold gcontext->mutex
- */
-static void
-fetch_completed_gputasks(GpuContext *gcontext)
-{
-	dlist_node	   *dnode;
-	GpuTask		   *gtask;
-	GpuTaskState   *gts;
-
-	while (!dlist_is_empty(&gcontext->completed_tasks))
-	{
-		dnode = dlist_pop_head_node(&gcontext->completed_tasks);
-		gtask = dlist_container(GpuTask, chain, dnode);
-		gcontext->num_running_tasks--;
-		pg_atomic_sub_fetch_u32(gcontext->global_num_running_tasks, 1);
-		gts = gtask->gts;
-		Assert(gts->gcontext == gcontext);
-		/* callback on GpuTask getting ready */
-		if (gts->cb_ready_task)
-		{
-			pthreadMutexUnlock(gcontext->mutex);
-			gts->cb_ready_task(gts, gtask);
-			pthreadMutexLock(gcontext->mutex);
-		}
-		dlist_push_tail(&gts->ready_tasks, &gtask->chain);
-		gts->num_ready_tasks++;
-	}
-}
-
-/*
  * fetch_next_gputask
  */
 GpuTask *
@@ -282,27 +250,26 @@ fetch_next_gputask(GpuTaskState *gts)
 		for (;;)
 		{
 			ResetLatch(MyLatch);
-			fetch_completed_gputasks(gcontext);
 			local_num_running_tasks = (gts->num_ready_tasks +
-									   gcontext->num_running_tasks);
+									   gts->num_running_tasks);
 			global_num_running_tasks =
 				pg_atomic_read_u32(gcontext->global_num_running_tasks);
 			if ((local_num_running_tasks < local_max_async_tasks &&
 				 global_num_running_tasks < global_max_async_tasks) ||
 				(dlist_is_empty(&gts->ready_tasks) &&
-				 gcontext->num_running_tasks == 0))
+				 gts->num_running_tasks == 0))
 			{
+				cl_bool		scan_done = false;
+
 				pthreadMutexUnlock(gcontext->mutex);
-				gtask = gts->cb_next_task(gts);
+				gtask = gts->cb_next_task(gts, &scan_done);
 				pthreadMutexLock(gcontext->mutex);
-				if (!gtask)
-				{
+				if (!gtask || scan_done)
 					gts->scan_done = true;
-					pg_memory_barrier();
+				if (!gtask)
 					break;
-				}
 				dlist_push_tail(&gcontext->pending_tasks, &gtask->chain);
-				gcontext->num_running_tasks++;
+				gts->num_running_tasks++;
 				pg_atomic_add_fetch_u32(gcontext->global_num_running_tasks, 1);
 				pthreadCondSignal(gcontext->cond);
 			}
@@ -316,7 +283,7 @@ fetch_next_gputask(GpuTaskState *gts)
 				pthreadMutexUnlock(gcontext->mutex);
 				goto pickup_gputask;
 			}
-			else if (gcontext->num_running_tasks > 0)
+			else if (gts->num_running_tasks > 0)
 			{
 				/*
 				 * Even though a few GpuTasks are running, but nobody gets
@@ -359,11 +326,10 @@ fetch_next_gputask(GpuTaskState *gts)
 	Assert(gts->scan_done);
 	pthreadMutexLock(gcontext->mutex);
 	ResetLatch(MyLatch);
-	fetch_completed_gputasks(gcontext);
 	while (dlist_is_empty(&gts->ready_tasks))
 	{
-		Assert(gcontext->num_running_tasks >= 0);
-		if (gcontext->num_running_tasks == 0)
+		Assert(gts->num_running_tasks >= 0);
+		if (gts->num_running_tasks == 0)
 		{
 			pthreadMutexUnlock(gcontext->mutex);
 			return NULL;
@@ -382,7 +348,6 @@ fetch_next_gputask(GpuTaskState *gts)
 
 		pthreadMutexLock(gcontext->mutex);
 		ResetLatch(MyLatch);
-		fetch_completed_gputasks(gcontext);
 	}
 	pthreadMutexUnlock(gcontext->mutex);
 pickup_gputask:

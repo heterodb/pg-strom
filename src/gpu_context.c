@@ -494,19 +494,28 @@ GpuContextWorkerMain(void *arg)
 					 *      handler wants to release GpuTask immediately.
 					 */
 					retval = gts->cb_process_task(gtask, cuda_module);
-					if (retval == 0)
+					if (retval > 0)
 					{
+						/* wait for 40ms */
+						pg_usleep(40000L);
+					}
+					else if (gtask->kerror.errcode != StromError_Success)
+					{
+						/* GPU kernel completed with error status */
+						werror("GPU kernel error - %s",
+							   errorTextKernel(&gtask->kerror));
+					}
+					else if (retval == 0)
+					{
+						/* Back GpuTask to GTS */
 						pthreadMutexLock(gcontext->mutex);
-						dlist_push_tail(&gcontext->completed_tasks,
+						dlist_push_tail(&gts->ready_tasks,
 										&gtask->chain);
+						gts->num_running_tasks--;
+						gts->num_ready_tasks++;
 						pthreadMutexUnlock(gcontext->mutex);
 
 						SetLatch(MyLatch);
-					}
-					else if (retval > 0)
-					{
-						/* Wait for 40ms */
-						pg_usleep(40000L);
 					}
 					else
 					{
@@ -515,19 +524,19 @@ GpuContextWorkerMain(void *arg)
                          * GpuTask when retval==-2.
                          */
 						pthreadMutexLock(gcontext->mutex);
-						wnotice("retval=%d num_running_tasks=%d scan_done=%d", retval, gcontext->num_running_tasks, gts->scan_done);
-						if (retval == -2 &&
-							gcontext->num_running_tasks == 1 &&
+						wnotice("retval=%d num_running_tasks=%d scan_done=%d", retval, gts->num_running_tasks, gts->scan_done);
+						if (--gts->num_running_tasks == 0 &&
+							retval == -2 &&
 							gts->scan_done)
 						{
 							wnotice("last one task");
-							dlist_push_tail(&gcontext->completed_tasks,
+							dlist_push_tail(&gts->ready_tasks,
 											&gtask->chain);
+							gts->num_ready_tasks++;
 							pthreadMutexUnlock(gcontext->mutex);
 						}
 						else
 						{
-							gcontext->num_running_tasks--;
 							pthreadMutexUnlock(gcontext->mutex);
 
 							gts->cb_release_task(gtask);
@@ -650,10 +659,8 @@ AllocGpuContext(int cuda_dindex, bool never_use_mps)
 	gcontext->mutex		= &ipc_entry->mutex;
 	gcontext->cond		= &ipc_entry->cond;
 	gcontext->command	= &ipc_entry->command;
-	gcontext->num_running_tasks = 0;
 	pg_atomic_init_u32(&gcontext->terminate_workers, 0);
 	dlist_init(&gcontext->pending_tasks);
-	dlist_init(&gcontext->completed_tasks);
 	gcontext->num_workers = num_workers;
 	pg_atomic_init_u32(&gcontext->worker_index, 0);
 	for (i=0; i < num_workers; i++)
