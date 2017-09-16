@@ -289,9 +289,6 @@ gpupreagg_final_data_move(kern_context *kcxt,
 
 /*
  * gpupreagg_setup_row
- *
- *
- *
  */
 KERNEL_FUNCTION(void)
 gpupreagg_setup_row(kern_gpupreagg *kgpreagg,
@@ -355,7 +352,6 @@ gpupreagg_setup_row(kern_gpupreagg *kgpreagg,
 		if (status != StromError_Success)
 			break;
 #endif
-
 		/* allocation of kds_slot buffer, if any */
 		offset = pgstromStairlikeBinaryCount(tupitem && rc, &nvalids);
 		if (nvalids > 0)

@@ -298,6 +298,7 @@ fetch_next_gputask(GpuTaskState *gts)
 				if (!gtask)
 				{
 					gts->scan_done = true;
+					pg_memory_barrier();
 					break;
 				}
 				dlist_push_tail(&gcontext->pending_tasks, &gtask->chain);
@@ -409,7 +410,7 @@ pgstromExecGpuTaskState(GpuTaskState *gts)
 		/* release the current GpuTask object that was already scanned */
 		if (gtask)
 		{
-			pgstromReleaseGpuTask(gtask);
+			gts->cb_release_task(gtask);
 			gts->curr_task = NULL;
 			gts->curr_index = 0;
 			gts->curr_lp_index = 0;
@@ -501,7 +502,7 @@ pgstromBulkExecGpuTaskState(GpuTaskState *gts, size_t chunk_size)
 		 * All the rows in pds_src are already fetched,
 		 * so current GpuTask shall be detached.
 		 */
-		pgstromReleaseGpuTask(gtask);
+		gts->cb_release_task(gtask);
 		gts->curr_task = NULL;
 		gts->curr_index = 0;
 		gts->curr_lp_index = 0;
@@ -525,7 +526,7 @@ pgstromRescanGpuTaskState(GpuTaskState *gts)
 		GpuTask	   *gtask = dlist_container(GpuTask, chain, dnode);
 		gts->num_ready_tasks--;
 		Assert(gts->num_ready_tasks >= 0);
-		pgstromReleaseGpuTask(gtask);
+		gts->cb_release_task(gtask);
 	}
 }
 
@@ -544,7 +545,7 @@ pgstromReleaseGpuTaskState(GpuTaskState *gts)
 		GpuTask	   *gtask = dlist_container(GpuTask, chain, dnode);
 		gts->num_ready_tasks--;
 		Assert(gts->num_ready_tasks >= 0);
-		pgstromReleaseGpuTask(gtask);
+		gts->cb_release_task(gtask);
 	}
 	/* cleanup per-query PDS-scan state, if any */
 	PDS_end_heapscan_state(gts);
@@ -604,64 +605,6 @@ pgstromInitGpuTask(GpuTaskState *gts, GpuTask *gtask)
 	gtask->cpu_fallback = false;
 	gtask->file_desc    = -1;
 }
-
-#if 0
-/*
- * pgstromProcessGpuTask - processing handler of GpuTask
- */
-int
-pgstromProcessGpuTask(GpuTask *gtask, CUmodule cuda_module)
-{
-	int		retval;
-
-	Assert(GpuWorkerCurrentContext != NULL);
-	switch (gtask->task_kind)
-	{
-		case GpuTaskKind_GpuScan:
-			retval = gpuscan_process_task(gtask, cuda_module);
-			break;
-		case GpuTaskKind_GpuJoin:
-			retval = gpujoin_process_task(gtask, cuda_module);
-			break;
-		case GpuTaskKind_GpuPreAgg:
-			retval = gpupreagg_process_task(gtask, cuda_module);
-			break;
-		case GpuTaskKind_PL_CUDA:
-			retval = plcuda_process_task(gtask, cuda_module);
-			break;
-		default:
-			elog(ERROR, "Unknown GpuTask kind: %d", gtask->task_kind);
-			break;
-	}
-	return retval;
-}
-
-/*
- * pgstromReleaseGpuTask - release of GpuTask
- */
-void
-pgstromReleaseGpuTask(GpuTask *gtask)
-{
-	switch (gtask->task_kind)
-	{
-		case GpuTaskKind_GpuScan:
-			gpuscan_release_task(gtask);
-			break;
-		case GpuTaskKind_GpuJoin:
-			gpujoin_release_task(gtask);
-			break;
-		case GpuTaskKind_GpuPreAgg:
-			gpupreagg_release_task(gtask);
-			break;
-		case GpuTaskKind_PL_CUDA:
-			plcuda_release_task(gtask);
-			break;
-		default:
-			elog(ERROR, "Unknown GpuTask kind: %d", (int)gtask->task_kind);
-			break;
-	}
-}
-#endif
 
 /*
  * errorText - string form of the error code

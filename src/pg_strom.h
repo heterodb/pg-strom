@@ -100,7 +100,6 @@ typedef struct GpuContext
 	dlist_node		chain;
 	pg_atomic_uint32 refcnt;
 	ResourceOwner	resowner;
-	MemoryContext	memcxt;
 	cl_bool			never_use_mps;
 	/* cuda resources per GpuContext */
 	cl_int			cuda_dindex;
@@ -126,6 +125,7 @@ typedef struct GpuContext
 	const char	   *error_funcname;
 	char		   *error_message;
 	/* management of the work-queue */
+	bool			worker_is_running;
 	pg_atomic_uint32 *global_num_running_tasks;
 	pthread_mutex_t	*mutex;				/* IPC stuff */
 	pthread_cond_t	*cond;				/* IPC stuff */
@@ -840,16 +840,7 @@ extern void	gpujoin_release_task(GpuTask *gtask);
 extern void assign_gpujoin_session_info(StringInfo buf,
 										GpuTaskState *gts);
 extern void	pgstrom_init_gpujoin(void);
-#else
-/* stub when gpujoin.c is disabled */
-#define pgstrom_path_is_gpujoin(a)			false
-#define pgstrom_plan_is_gpujoin(a)			false
-#define pgstrom_planstate_is_gpujoin(a)		false
-#define gpujoin_process_task(a,b)			0
-#define gpujoin_release_task(a)				do {} while(0)
-#define assign_gpujoin_session_info(a,b)	do {} while(0)
-#define pgstrom_init_gpujoin(a)				do {} while(0)
-#endif
+
 extern Size setup_kernel_gpujoin(struct kern_gpujoin *kgjoin,
 								 GpuTaskState *gts,
 								 pgstrom_data_store *pds_src);
@@ -868,6 +859,24 @@ extern bool gpujoinLoadInnerBuffer(GpuContext *gcontext,
 extern bool gpujoinHasRightOuterJoin(struct GpuJoinSharedState *gj_sstate);
 extern void gpujoinUpdateRunTimeStat(struct GpuJoinSharedState *gj_sstate,
 									 struct kern_gpujoin *kgjoin);
+#else
+/* stub when gpujoin.c is disabled */
+#define pgstrom_path_is_gpujoin(a)			false
+#define pgstrom_plan_is_gpujoin(a)			false
+#define pgstrom_planstate_is_gpujoin(a)		false
+#define gpujoin_process_task(a,b)			0
+#define gpujoin_release_task(a)				do {} while(0)
+#define assign_gpujoin_session_info(a,b)	do {} while(0)
+#define pgstrom_init_gpujoin(a)				do {} while(0)
+#define setup_kernel_gpujoin(a,b,c)			0
+#define GpuJoinCreateUnifiedProgram(a,b,c,d) 0
+#define GpuJoinInnerPreload(a)				NULL
+#define GpuJoinExecOuterScanChunk(a,b)		NULL
+#define gpujoinLoadInnerBuffer(a,b,c,d,e)	false
+#define gpujoinHasRightOuterJoin(a)			false
+#define gpujoinUpdateRunTimeStat(a,b)		do {} while(0)
+#endif
+
 
 /*
  * gpupreagg.c

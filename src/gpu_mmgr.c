@@ -528,7 +528,7 @@ retry:
 		case GpuMemKind__ManagedMemory:
 			rc = cuMemAllocManaged(&m_segment, gm_segment_sz,
 								   CU_MEM_ATTACH_GLOBAL);
-			//wnotice("managed m_segment = %p - %p", (void *)m_segment, (void *)(m_segment + gm_segment_sz));
+			wnotice("managed m_segment = %p - %p", (void *)m_segment, (void *)(m_segment + gm_segment_sz));
 			break;
 
 		case GpuMemKind__IOMapMemory:
@@ -682,7 +682,8 @@ __gpuMemAllocManaged(GpuContext *gcontext,
 					 int flags,
 					 const char *filename, int lineno)
 {
-	cl_int		mclass = get_next_log2(bytesize);
+	cl_int		mclass = Max(get_next_log2(bytesize),
+							 GPUMEM_CHUNKSZ_MIN_BIT);
 
 	if (flags != CU_MEM_ATTACH_GLOBAL ||
 		bytesize > gm_segment_sz / 2)
@@ -935,7 +936,7 @@ pgstrom_init_gpu_mmgr(void)
 							"default size of the GPU device memory segment",
 							NULL,
 							&gpu_memory_segment_size_kb,
-							(1UL << 19),	/* 512MB */
+							(pgstrom_chunk_size() * 8) >> 10,
 							pgstrom_chunk_size() >> 10,
 							GPUMEM_CHUNKSZ_MAX >> 10,
 							PGC_POSTMASTER,

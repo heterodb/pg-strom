@@ -1197,8 +1197,8 @@ __setup_kern_colmeta(Oid type_oid, int arg_index)
 static plcudaTaskState *
 plcuda_exec_begin(HeapTuple protup, FunctionCallInfo fcinfo)
 {
-	GpuContext	   *gcontext = AllocGpuContext(-1, true);
 	Form_pg_proc	procForm = (Form_pg_proc) GETSTRUCT(protup);
+	GpuContext	   *gcontext;
 	plcudaTaskState *plts;
 	kern_plcuda	   *kplcuda;
 	Datum			prosrc;
@@ -1212,10 +1212,11 @@ plcuda_exec_begin(HeapTuple protup, FunctionCallInfo fcinfo)
 	ProgramId		program_id;
 	int				i, n_meta;
 
+	gcontext = AllocGpuContext(-1, true);
 	if (fcinfo != NULL)
 		ActivateGpuContext(gcontext);
 	/* setup a dummy GTS for PL/CUDA (see pgstromInitGpuTaskState) */
-	plts = MemoryContextAllocZero(CacheMemoryContext,
+	plts = MemoryContextAllocZero(CurTransactionContext,
 								  sizeof(plcudaTaskState));
 	plts->gts.gcontext = gcontext;
 	plts->gts.task_kind = GpuTaskKind_PL_CUDA;

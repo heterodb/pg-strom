@@ -1855,8 +1855,7 @@ assign_gpuscan_session_info(StringInfo buf, GpuTaskState *gts)
 static Node *
 gpuscan_create_scan_state(CustomScan *cscan)
 {
-	GpuContext	   *gcontext = AllocGpuContext(-1, false);
-	GpuScanState   *gss = MemoryContextAllocZero(gcontext->memcxt,
+	GpuScanState   *gss = MemoryContextAllocZero(CurTransactionContext,
 												 sizeof(GpuScanState));
 	/* Set tag and executor callbacks */
 	NodeSetTag(gss, T_CustomScanState);
@@ -1865,7 +1864,6 @@ gpuscan_create_scan_state(CustomScan *cscan)
 		gss->gts.css.methods = &gpuscan_exec_methods;
 	else
 		elog(ERROR, "Bug? unexpected CustomPlanMethods");
-	gss->gts.gcontext = gcontext;
 
 	return (Node *) gss;
 }
@@ -1878,9 +1876,9 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 {
 	Relation		scan_rel = node->ss.ss_currentRelation;
 	GpuScanState   *gss = (GpuScanState *) node;
-	GpuContext	   *gcontext = gss->gts.gcontext;
 	CustomScan	   *cscan = (CustomScan *)node->ss.ps.plan;
 	GpuScanInfo	   *gs_info = deform_gpuscan_info(cscan);
+	GpuContext	   *gcontext;
 	List		   *dev_tlist = NIL;
 	List		   *dev_quals_raw;
 	ListCell	   *lc;
@@ -1892,9 +1890,11 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	Assert(outerPlan(node) == NULL);
 	Assert(innerPlan(node) == NULL);
 
-	/* activate GpuContext for CUDA kernel execution */
+	/* setup GpuContext for CUDA kernel execution */
+	gcontext = AllocGpuContext(-1, false);
 	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
 		ActivateGpuContext(gcontext);
+	gss->gts.gcontext = gcontext;
 
 	/*
 	 * Re-initialization of scan tuple-descriptor and projection-info,
