@@ -286,6 +286,65 @@ GpuContextLookupModule(GpuContext *gcontext, ProgramId program_id)
 }
 
 /*
+ * GpuContextExtraCleanupCallback
+ */
+typedef struct
+{
+	dlist_node	chain;
+	void	  (*cb_extra_cleanup)(GpuContext *gcontext, void *private);
+	void	   *private;
+} GpuContextExtraCleanupCallback;
+
+void
+GpuContextRegisterExtraCleanup(GpuContext *gcontext,
+							   void (*cb_extra_cleanup)(GpuContext *gcontext,
+														void *private),
+							   void *private)
+{
+	GpuContextExtraCleanupCallback *cb_entry;
+
+	if (GpuWorkerExceptionStack)
+		wfatal("Bug? GpuContext worker tried to register a callback");
+
+	cb_entry = calloc(1, sizeof(GpuContextExtraCleanupCallback));
+	if (!cb_entry)
+		elog(ERROR, "out of memory");
+	cb_entry->cb_extra_cleanup = cb_extra_cleanup;
+	cb_entry->private = private;
+
+	dlist_push_tail(&gcontext->extra_cleanup_callbacks,
+					&cb_entry->chain);
+}
+
+void
+GpuContextUnregisterExtraCleanup(GpuContext *gcontext,
+								 void (*cb_extra_cleanup)(GpuContext *gcontext,
+														  void *private),
+								 void *private)
+{
+	dlist_iter	iter;
+
+	if (GpuWorkerExceptionStack)
+		wfatal("Bug? GpuContext worker tried to unregister a callback");
+
+	dlist_foreach(iter, &gcontext->extra_cleanup_callbacks);
+	{
+		GpuContextExtraCleanupCallback *cb_entry
+			= dlist_container(GpuContextExtraCleanupCallback, chain, iter.cur);
+
+		if (cb_entry->cb_extra_cleanup == cb_extra_cleanup &&
+			cb_entry->private == private)
+		{
+			dlist_delete(&cb_entry->chain);
+
+			(*cb_entry->cb_extra_cleanup)(gcontext, cb_entry->private);
+			free(cb_entry);
+		}
+	}
+	elog(ERROR, "Bug? GpuContext Extra Callback was not found");
+}
+
+/*
  * ReleaseLocalResources - release all the private resources tracked by
  * the resource tracker of GpuContext
  */
@@ -298,6 +357,18 @@ ReleaseLocalResources(GpuContext *gcontext, bool normal_exit)
 	int			i;
 
 	Assert(!gcontext->worker_is_running);
+
+	/* extra cleanups if any */
+	while (!dlist_is_empty(&gcontext->extra_cleanup_callbacks))
+	{
+		GpuContextExtraCleanupCallback *cb_entry;
+
+		dnode = dlist_pop_head_node(&gcontext->extra_cleanup_callbacks);
+		cb_entry = dlist_container(GpuContextExtraCleanupCallback,
+								   chain, dnode);
+		(*cb_entry->cb_extra_cleanup)(gcontext, cb_entry->private);
+		free(cb_entry);
+	}
 
 	if (gcontext->cuda_context)
 	{
@@ -885,13 +956,51 @@ gpucontext_cleanup_callback(ResourceReleasePhase phase,
 }
 
 /*
- * gpucontext_proc_exit_cleanup - cleanup callback when process exit
+ * gpucontext_shmem_exit_cleanup
+ *
+ * Cleanup callback when a process is going to exit horribly, just before
+ * shmem detach. We need to fixup shared resources not to have side-effect
+ * for the concurrent / working processes.
  */
 static void
-gpucontext_proc_exit_cleanup(int code, Datum arg)
+gpucontext_shmem_exit_cleanup(int code, Datum arg)
 {
-	//for each gpucontext
-	//terminate workq
+	while (!dlist_is_empty(&activeGpuContextList))
+	{
+		dlist_node *dnode = dlist_pop_head_node(&activeGpuContextList);
+		GpuContext *gcontext = dlist_container(GpuContext, chain, dnode);
+		dlist_iter	iter;
+		int			i;
+
+		/* extra release callbacks, if any */
+		dlist_foreach(iter, &gcontext->extra_cleanup_callbacks)
+		{
+			GpuContextExtraCleanupCallback *cb_entry
+				= dlist_container(GpuContextExtraCleanupCallback,
+								  chain, iter.cur);
+
+			(*cb_entry->cb_extra_cleanup)(gcontext, cb_entry->private);
+		}
+
+		/*
+		 * GPU device memory shall be released on termination of the local
+		 * process, so only CUDA Program resource shall be detached
+		 * explicitly.
+		 */
+		for (i=0; i < RESTRACK_HASHSIZE; i++)
+		{
+			dlist_foreach(iter, &gcontext->restrack[i])
+			{
+				ResourceTracker *tracker =
+					dlist_container(ResourceTracker, chain, iter.cur);
+
+				if (tracker->resclass != RESTRACK_CLASS__GPUPROGRAM)
+					continue;
+
+				pgstrom_put_cuda_program(NULL, tracker->u.program_id);
+			}
+		}
+	}
 }
 
 /*
@@ -996,5 +1105,5 @@ pgstrom_init_gpu_context(void)
 
 	/* register the callback to clean up resources */
 	RegisterResourceReleaseCallback(gpucontext_cleanup_callback, NULL);
-	before_shmem_exit(gpucontext_proc_exit_cleanup, 0);
+	before_shmem_exit(gpucontext_shmem_exit_cleanup, 0);
 }

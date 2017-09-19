@@ -118,6 +118,8 @@ typedef struct GpuContext
 	dlist_head		gm_iomap_list;		/* list of I/O map memory segments */
 	dlist_head		gm_managed_list;	/* list of managed memory segments */
 	dlist_head		gm_hostmem_list;	/* list of Host memory segments */
+	/* extra resource cleanup callbacks */
+	dlist_head		extra_cleanup_callbacks;
 	/* error information buffer */
 	pg_atomic_uint32 error_level;
 	const char	   *error_filename;
@@ -514,6 +516,16 @@ extern bool trackGpuMem(GpuContext *gcontext, CUdeviceptr devptr, void *extra,
 						const char *filename, int lineno);
 extern void *lookupGpuMem(GpuContext *gcontext, CUdeviceptr devptr);
 extern void *untrackGpuMem(GpuContext *gcontext, CUdeviceptr devptr);
+extern void GpuContextRegisterExtraCleanup(GpuContext *gcontext,
+										   void (*cb_extra_cleanup)(
+											   GpuContext *gcontext,
+											   void *private),
+										   void *private);
+extern void GpuContextUnregisterExtraCleanup(GpuContext *gcontext,
+											 void (*cb_extra_cleanup)(
+												 GpuContext *gcontext,
+												 void *private),
+											 void *private);
 extern void pgstrom_init_gpu_context(void);
 
 /*
@@ -829,7 +841,6 @@ extern void pgstrom_init_gpuscan(void);
 struct GpuJoinSharedState;
 struct kern_gpujoin;
 
-#if 0
 extern bool pgstrom_path_is_gpujoin(Path *pathnode);
 extern bool pgstrom_plan_is_gpujoin(const Plan *plannode);
 extern bool pgstrom_planstate_is_gpujoin(const PlanState *ps);
@@ -857,24 +868,6 @@ extern bool gpujoinLoadInnerBuffer(GpuContext *gcontext,
 extern bool gpujoinHasRightOuterJoin(struct GpuJoinSharedState *gj_sstate);
 extern void gpujoinUpdateRunTimeStat(struct GpuJoinSharedState *gj_sstate,
 									 struct kern_gpujoin *kgjoin);
-#else
-/* stub when gpujoin.c is disabled */
-#define pgstrom_path_is_gpujoin(a)			false
-#define pgstrom_plan_is_gpujoin(a)			false
-#define pgstrom_planstate_is_gpujoin(a)		false
-#define gpujoin_process_task(a,b)			0
-#define gpujoin_release_task(a)				do {} while(0)
-#define assign_gpujoin_session_info(a,b)	do {} while(0)
-#define pgstrom_init_gpujoin(a)				do {} while(0)
-#define setup_kernel_gpujoin(a,b,c)			0
-#define GpuJoinCreateUnifiedProgram(a,b,c,d) 0
-#define GpuJoinInnerPreload(a)				NULL
-#define GpuJoinExecOuterScanChunk(a,b)		NULL
-#define gpujoinLoadInnerBuffer(a,b,c,d,e)	false
-#define gpujoinHasRightOuterJoin(a)			false
-#define gpujoinUpdateRunTimeStat(a,b)		do {} while(0)
-#endif
-
 
 /*
  * gpupreagg.c
