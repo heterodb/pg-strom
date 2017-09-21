@@ -3427,7 +3427,6 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 	GpuPreAggInfo  *gpa_info = deform_gpupreagg_info(cscan);
 	List		   *tlist_dev = cscan->custom_scan_tlist;
 	List		   *pseudo_tlist;
-	GpuContext	   *gcontext;
 	TupleDesc		gpreagg_tupdesc;
 	TupleDesc		outer_tupdesc;
 	StringInfoData	kern_define;
@@ -3437,14 +3436,13 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 
 	Assert(scan_rel ? outerPlan(node) == NULL : outerPlan(cscan) != NULL);
 	/* activate a GpuContext for CUDA kernel execution */
-	gcontext = AllocGpuContext(-1, false);
+	gpas->gts.gcontext = AllocGpuContext(-1, false);
 	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
-		ActivateGpuContext(gcontext);
-	gpas->gts.gcontext = gcontext;
+		ActivateGpuContext(gpas->gts.gcontext);
 
 	/* setup common GpuTaskState fields */
 	pgstromInitGpuTaskState(&gpas->gts,
-							gcontext,
+							gpas->gts.gcontext,
 							GpuTaskKind_GpuPreAgg,
 							gpa_info->used_params,
 							estate);
@@ -3540,7 +3538,7 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 		pgstrom_build_session_info(&kern_define,
 								   &gpas->gts,
 								   gpa_info->extra_flags);
-		program_id = pgstrom_create_cuda_program(gcontext,
+		program_id = pgstrom_create_cuda_program(gpas->gts.gcontext,
 												 gpa_info->extra_flags,
 												 gpa_info->kern_source,
 												 kern_define.data,
@@ -3905,7 +3903,7 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 	if (gpas->unified_gpujoin)
 	{
 		GpuTaskState   *outer_gts = (GpuTaskState *) outerPlanState(gpas);
-		kgjoin_len = setup_kernel_gpujoin(NULL, outer_gts, pds_src);
+		kgjoin_len = GpuJoinSetupTask(NULL, outer_gts, pds_src);
 	}
 
 	rc = gpuMemAllocManaged(gcontext,
@@ -3929,7 +3927,7 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 	{
 		GpuTaskState   *outer_gts = (GpuTaskState *) outerPlanState(gpas);
 		gpreagg->kgjoin = (kern_gpujoin *)((char *)gpreagg + head_sz);
-		setup_kernel_gpujoin(gpreagg->kgjoin, outer_gts, pds_src);
+		GpuJoinSetupTask(gpreagg->kgjoin, outer_gts, pds_src);
 	}
 	/* if any grouping keys, determine the reduction policy later */
 	gpreagg->kern.num_group_keys = gpas->num_group_keys;
@@ -3955,7 +3953,6 @@ static GpuTask *
 gpupreagg_next_task(GpuTaskState *gts, cl_bool *scan_done)
 {
 	GpuPreAggState		   *gpas = (GpuPreAggState *) gts;
-	GpuJoinSharedState	   *gj_sstate = NULL;
 	GpuContext			   *gcontext = gpas->gts.gcontext;
 	pgstrom_data_store	   *pds = NULL;
 	int						filedesc = -1;
@@ -3964,9 +3961,8 @@ gpupreagg_next_task(GpuTaskState *gts, cl_bool *scan_done)
 	{
 		GpuTaskState   *outer_gts = (GpuTaskState *) outerPlanState(gpas);
 
-		gj_sstate = GpuJoinInnerPreload((GpuTaskState *) outerPlanState(gpas));
-		if (!gj_sstate)
-			return NULL;		/* an empty results obviously */
+		if (!GpuJoinInnerPreload((GpuTaskState *) outerPlanState(gpas)))
+			return NULL;	/* an empty results */
 		pds = GpuJoinExecOuterScanChunk(outer_gts, &filedesc);
 	}
 	else if (gpas->gts.css.ss.ss_currentRelation)
@@ -4016,7 +4012,7 @@ gpupreagg_next_task(GpuTaskState *gts, cl_bool *scan_done)
 
 	if (!pds)
 		*scan_done = true;
-	return gpupreagg_create_task(gpas, gj_sstate, pds, filedesc);
+	return gpupreagg_create_task(gpas, NULL, pds, filedesc);
 }
 
 static void

@@ -415,6 +415,7 @@ PDS_expand_size(GpuContext *gcontext,
 	return pds_new;
 }
 
+#if 0
 void
 PDS_shrink_size(pgstrom_data_store *pds)
 {
@@ -493,6 +494,7 @@ PDS_shrink_size(pgstrom_data_store *pds)
 	Assert(new_length <= kds->length);
 	kds->length = new_length;
 }
+#endif
 
 pgstrom_data_store *
 __PDS_create_row(GpuContext *gcontext,
@@ -1036,9 +1038,8 @@ PDS_exec_heapscan(GpuTaskState *gts,
  * use this API only for row-format.
  */
 bool
-PDS_insert_tuple(pgstrom_data_store *pds, TupleTableSlot *slot)
+KDS_insert_tuple(kern_data_store *kds, TupleTableSlot *slot)
 {
-	kern_data_store	   *kds = &pds->kds;
 	size_t				required;
 	HeapTuple			tuple;
 	cl_uint			   *tup_index;
@@ -1082,11 +1083,10 @@ PDS_insert_tuple(pgstrom_data_store *pds, TupleTableSlot *slot)
  * It inserts a tuple to the data store of hash format.
  */
 bool
-PDS_insert_hashitem(pgstrom_data_store *pds,
+KDS_insert_hashitem(kern_data_store *kds,
 					TupleTableSlot *slot,
 					cl_uint hash_value)
 {
-	kern_data_store	   *kds = &pds->kds;
 	cl_uint			   *row_index = KERN_DATA_STORE_ROWINDEX(kds);
 	Size				required;
 	HeapTuple			tuple;
@@ -1108,7 +1108,7 @@ PDS_insert_hashitem(pgstrom_data_store *pds,
 	Assert(kds->usage == MAXALIGN(kds->usage));
 	if (KDS_CALCULATE_HASH_LENGTH(kds->ncols,
 								  kds->nitems + 1,
-								  required + kds->usage) > pds->kds.length)
+								  required + kds->usage) > kds->length)
 		return false;	/* no more space to put */
 
 	/* OK, put a tuple */
@@ -1195,36 +1195,4 @@ PDS_fillup_blocks(pgstrom_data_store *pds, int file_desc)
 	Assert(dest_addr == (char *)KERN_DATA_STORE_BLOCK_PGPAGE(&pds->kds,
 															 pds->kds.nitems));
 	pds->nblocks_uncached = 0;
-}
-
-/*
- * PDS_build_hashtable
- *
- * construct hash table according to the current contents
- */
-void
-PDS_build_hashtable(pgstrom_data_store *pds)
-{
-	kern_data_store *kds = &pds->kds;
-	cl_uint		   *row_index = KERN_DATA_STORE_ROWINDEX(kds);
-	cl_uint		   *hash_slot = KERN_DATA_STORE_HASHSLOT(kds);
-	cl_uint			i, j, nslots = __KDS_NSLOTS(kds->nitems);
-
-	if (kds->format != KDS_FORMAT_HASH)
-		elog(ERROR, "Bug? Only KDS_FORMAT_HASH can build a hash table");
-	if (kds->nslots > 0)
-		elog(ERROR, "Bug? hash table is already built");
-
-	memset(hash_slot, 0, sizeof(cl_uint) * nslots);
-	for (i = 0; i < kds->nitems; i++)
-	{
-		kern_hashitem  *khitem = (kern_hashitem *)
-			((char *)kds + row_index[i] - offsetof(kern_hashitem, t));
-
-		Assert(khitem->rowid == i);
-		j = khitem->hash % nslots;
-		khitem->next = hash_slot[j];
-		hash_slot[j] = (uintptr_t)khitem - (uintptr_t)kds;
-	}
-	kds->nslots = nslots;
 }

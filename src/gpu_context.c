@@ -59,6 +59,7 @@ static dlist_head	activeGpuContextList;
  */
 #define RESTRACK_CLASS__GPUMEMORY		2
 #define RESTRACK_CLASS__GPUPROGRAM		3
+#define RESTRACK_CLASS__GPUMEMORY_IPC	4
 
 typedef struct ResourceTracker
 {
@@ -69,8 +70,8 @@ typedef struct ResourceTracker
 	cl_int		lineno;
 	union {
 		struct {
-			CUdeviceptr	ptr;	/* RESTRACK_CLASS__GPUMEMORY */
-			void   *extra;
+			CUdeviceptr	ptr;	/* RESTRACK_CLASS__GPUMEMORY or */
+			void   *extra;		/* RESTRACK_CLASS__GPUMEMORY_IPC */
 		} devmem;
 		ProgramId	program_id;	/* RESTRACK_CLASS__GPUPROGRAM */
 	} u;
@@ -234,7 +235,69 @@ untrackGpuMem(GpuContext *gcontext, CUdeviceptr devptr)
 	}
 	SpinLockRelease(&gcontext->restrack_lock);
 	wnotice("Bug? GPU Device Memory %p was not tracked", (void *)devptr);
-	abort();
+	return NULL;
+}
+
+/*
+ * resource tracker for device memory imported using IPC
+ */
+bool
+trackGpuMemIPC(GpuContext *gcontext,
+			   CUdeviceptr devptr, void *extra,
+			   const char *filename, int lineno)
+{
+	ResourceTracker *tracker = calloc(1, sizeof(ResourceTracker));
+	pg_crc32	crc;
+
+	if (!tracker)
+		return false;	/* out of memory */
+
+	crc = resource_tracker_hashval(RESTRACK_CLASS__GPUMEMORY_IPC,
+								   &devptr, sizeof(CUdeviceptr));
+	tracker->crc = crc;
+	tracker->resclass = RESTRACK_CLASS__GPUMEMORY_IPC;
+	tracker->filename = filename;
+	tracker->lineno = lineno;
+	tracker->u.devmem.ptr = devptr;
+	tracker->u.devmem.extra = extra;
+
+	SpinLockAcquire(&gcontext->restrack_lock);
+	dlist_push_tail(&gcontext->restrack[crc % RESTRACK_HASHSIZE],
+					&tracker->chain);
+	SpinLockRelease(&gcontext->restrack_lock);
+	return true;
+}
+
+void *
+untrackGpuMemIPC(GpuContext *gcontext, CUdeviceptr devptr)
+{
+	dlist_head *restrack_list;
+	dlist_iter	iter;
+	pg_crc32	crc;
+	void	   *extra;
+
+	crc = resource_tracker_hashval(RESTRACK_CLASS__GPUMEMORY_IPC,
+								   &devptr, sizeof(CUdeviceptr));
+	restrack_list = &gcontext->restrack[crc % RESTRACK_HASHSIZE];
+	SpinLockAcquire(&gcontext->restrack_lock);
+	dlist_foreach (iter, restrack_list)
+	{
+		ResourceTracker *tracker
+			= dlist_container(ResourceTracker, chain, iter.cur);
+
+		if (tracker->crc == crc &&
+			tracker->resclass == RESTRACK_CLASS__GPUMEMORY_IPC &&
+			tracker->u.devmem.ptr == devptr)
+		{
+			dlist_delete(&tracker->chain);
+			extra = tracker->u.devmem.extra;
+			SpinLockRelease(&gcontext->restrack_lock);
+			free(tracker);
+			return extra;
+		}
+	}
+	SpinLockRelease(&gcontext->restrack_lock);
+	wnotice("Bug? GPU Device Memory (IPC) %p was not tracked", (void *)devptr);
 	return NULL;
 }
 
@@ -286,65 +349,6 @@ GpuContextLookupModule(GpuContext *gcontext, ProgramId program_id)
 }
 
 /*
- * GpuContextExtraCleanupCallback
- */
-typedef struct
-{
-	dlist_node	chain;
-	void	  (*cb_extra_cleanup)(GpuContext *gcontext, void *private);
-	void	   *private;
-} GpuContextExtraCleanupCallback;
-
-void
-GpuContextRegisterExtraCleanup(GpuContext *gcontext,
-							   void (*cb_extra_cleanup)(GpuContext *gcontext,
-														void *private),
-							   void *private)
-{
-	GpuContextExtraCleanupCallback *cb_entry;
-
-	if (GpuWorkerExceptionStack)
-		wfatal("Bug? GpuContext worker tried to register a callback");
-
-	cb_entry = calloc(1, sizeof(GpuContextExtraCleanupCallback));
-	if (!cb_entry)
-		elog(ERROR, "out of memory");
-	cb_entry->cb_extra_cleanup = cb_extra_cleanup;
-	cb_entry->private = private;
-
-	dlist_push_tail(&gcontext->extra_cleanup_callbacks,
-					&cb_entry->chain);
-}
-
-void
-GpuContextUnregisterExtraCleanup(GpuContext *gcontext,
-								 void (*cb_extra_cleanup)(GpuContext *gcontext,
-														  void *private),
-								 void *private)
-{
-	dlist_iter	iter;
-
-	if (GpuWorkerExceptionStack)
-		wfatal("Bug? GpuContext worker tried to unregister a callback");
-
-	dlist_foreach(iter, &gcontext->extra_cleanup_callbacks);
-	{
-		GpuContextExtraCleanupCallback *cb_entry
-			= dlist_container(GpuContextExtraCleanupCallback, chain, iter.cur);
-
-		if (cb_entry->cb_extra_cleanup == cb_extra_cleanup &&
-			cb_entry->private == private)
-		{
-			dlist_delete(&cb_entry->chain);
-
-			(*cb_entry->cb_extra_cleanup)(gcontext, cb_entry->private);
-			free(cb_entry);
-		}
-	}
-	elog(ERROR, "Bug? GpuContext Extra Callback was not found");
-}
-
-/*
  * ReleaseLocalResources - release all the private resources tracked by
  * the resource tracker of GpuContext
  */
@@ -358,16 +362,18 @@ ReleaseLocalResources(GpuContext *gcontext, bool normal_exit)
 
 	Assert(!gcontext->worker_is_running);
 
-	/* extra cleanups if any */
-	while (!dlist_is_empty(&gcontext->extra_cleanup_callbacks))
+	if (gcontext->cuda_context_multi)
 	{
-		GpuContextExtraCleanupCallback *cb_entry;
-
-		dnode = dlist_pop_head_node(&gcontext->extra_cleanup_callbacks);
-		cb_entry = dlist_container(GpuContextExtraCleanupCallback,
-								   chain, dnode);
-		(*cb_entry->cb_extra_cleanup)(gcontext, cb_entry->private);
-		free(cb_entry);
+		for (i=0; i < numDevAttrs; i++)
+		{
+			if (!gcontext->cuda_context_multi[i])
+				continue;
+			rc = cuCtxDestroy(gcontext->cuda_context_multi[i]);
+			if (rc != CUDA_SUCCESS)
+				elog(WARNING, "Failed on cuCtxDestroy: %s", errorText(rc));
+		}
+		free(gcontext->cuda_context_multi);
+		gcontext->cuda_context_multi = NULL;
 	}
 
 	if (gcontext->cuda_context)
@@ -391,6 +397,18 @@ ReleaseLocalResources(GpuContext *gcontext, bool normal_exit)
 				case RESTRACK_CLASS__GPUMEMORY:
 					if (normal_exit)
 						wnotice("GPU memory %p by (%s:%d) likely leaked",
+								(void *)tracker->u.devmem.ptr,
+								__basename(tracker->filename),
+								tracker->lineno);
+					/*
+					 * NOTE: All the GPU related memory is already wipied
+					 * out by cuCtxDestroy(), so we don't need to release
+					 * individual memory chunks by ourselves.
+					 */
+					break;
+				case RESTRACK_CLASS__GPUMEMORY_IPC:
+					if (normal_exit)
+						wnotice("GPU memory (IPC) %p by (%s:%d) likely leaked",
 								(void *)tracker->u.devmem.ptr,
 								__basename(tracker->filename),
 								tracker->lineno);
@@ -753,18 +771,20 @@ AllocGpuContext(int cuda_dindex, bool never_use_mps)
  * create_cuda_context - create a CUDA context on a proper device
  */
 static void
-create_cuda_context(GpuContext *gcontext)
+create_cuda_context(GpuContext *gcontext,
+					int cuda_dindex,
+					CUdevice *p_cuda_device,
+					CUcontext *p_cuda_context)
 {
 	CUdevice	cuda_device;
 	CUcontext	cuda_context;
 	CUresult	rc;
 
-	Assert(!gcontext->cuda_context);
+	Assert(cuda_dindex >= 0 && cuda_dindex < numDevAttrs);
 
-	rc = cuDeviceGet(&cuda_device,
-					 gcontext->cuda_dindex);
+	rc = cuDeviceGet(&cuda_device, devAttrs[cuda_dindex].DEV_ID);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuDeviceGet: %s", errorText(rc));
+		werror("failed on cuDeviceGet: %s", errorText(rc));
 
 	if (gcontext->never_use_mps)
 		rc = CUDA_ERROR_OUT_OF_MEMORY;
@@ -778,20 +798,19 @@ create_cuda_context(GpuContext *gcontext)
 
 		env_saved = getenv("CUDA_MPS_PIPE_DIRECTORY");
 		if (setenv("CUDA_MPS_PIPE_DIRECTORY", "/dev/null", 1) != 0)
-			elog(ERROR, "failed on setenv: %m");
+			werror("failed on setenv: %m");
 		rc = cuCtxCreate(&cuda_context,
 						 CU_CTX_SCHED_AUTO,
 						 cuda_device);
 		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuCtxCreate: %s",
-				 errorText(rc));
+			werror("failed on cuCtxCreate: %s", errorText(rc));
 		if (!env_saved)
 			unsetenv("CUDA_MPS_PIPE_DIRECTORY");
 		else
 			setenv("CUDA_MPS_PIPE_DIRECTORY", env_saved, 1);
 	}
-	gcontext->cuda_device   = cuda_device;
-	gcontext->cuda_context  = cuda_context;
+	*p_cuda_device	= cuda_device;
+	*p_cuda_context	= cuda_context;
 }
 
 /*
@@ -802,7 +821,10 @@ ActivateGpuContext(GpuContext *gcontext)
 {
 	/* Also create CUDA context on demand */
 	if (!gcontext->cuda_context)
-		create_cuda_context(gcontext);
+		create_cuda_context(gcontext,
+							gcontext->cuda_dindex,
+							&gcontext->cuda_device,
+							&gcontext->cuda_context);
 
 	if (!gcontext->worker_is_running)
 	{
@@ -881,6 +903,56 @@ PutGpuContext(GpuContext *gcontext)
 		SynchronizeGpuContext(gcontext);
 		/* cleanup local resources */
 		ReleaseLocalResources(gcontext, true);
+	}
+}
+
+/*
+ * SwitchGpuContext - switch to a particular device's context
+ */
+void
+SwitchGpuContext(GpuContext *gcontext, int cuda_dindex)
+{
+	CUresult	rc;
+
+	if (cuda_dindex < 0)
+	{
+		rc = cuCtxPopCurrent(NULL);
+		if (rc != CUDA_SUCCESS)
+			wfatal("failed on cuCtxPopCurrent: %s", errorText(rc));
+	}
+	else if (cuda_dindex == gcontext->cuda_dindex)
+	{
+		rc = cuCtxPushCurrent(gcontext->cuda_context);
+		if (rc != CUDA_SUCCESS)
+			wfatal("failed on cuCtxPushCurrent: %s", errorText(rc));
+	}
+	else
+	{
+		if (cuda_dindex >= numDevAttrs)
+			werror("invalid cuda device index: %d", cuda_dindex);
+
+		if (!gcontext->cuda_context_multi)
+		{
+			gcontext->cuda_context_multi = calloc(numDevAttrs,
+												  sizeof(CUcontext));
+			if (!gcontext->cuda_context_multi)
+				werror("out of memory");
+		}
+		/* allocation on demand */
+		if (!gcontext->cuda_context_multi[cuda_dindex])
+		{
+			CUdevice	cuda_device;
+			CUcontext	cuda_context;
+
+			create_cuda_context(gcontext,
+								cuda_dindex,
+								&cuda_device,
+								&cuda_context);
+			gcontext->cuda_context_multi[cuda_dindex] = cuda_context;
+		}
+		rc = cuCtxPushCurrent(gcontext->cuda_context_multi[cuda_dindex]);
+		if (rc != CUDA_SUCCESS)
+			wfatal("failed on cuCtxPushCurrent: %s", errorText(rc));
 	}
 }
 
@@ -971,16 +1043,6 @@ gpucontext_shmem_exit_cleanup(int code, Datum arg)
 		GpuContext *gcontext = dlist_container(GpuContext, chain, dnode);
 		dlist_iter	iter;
 		int			i;
-
-		/* extra release callbacks, if any */
-		dlist_foreach(iter, &gcontext->extra_cleanup_callbacks)
-		{
-			GpuContextExtraCleanupCallback *cb_entry
-				= dlist_container(GpuContextExtraCleanupCallback,
-								  chain, iter.cur);
-
-			(*cb_entry->cb_extra_cleanup)(gcontext, cb_entry->private);
-		}
 
 		/*
 		 * GPU device memory shall be released on termination of the local

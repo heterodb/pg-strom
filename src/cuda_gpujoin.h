@@ -26,8 +26,10 @@
 typedef struct
 {
 	cl_uint			pg_crc32_table[256];	/* used to hashjoin */
-	cl_uint			nrels;			/* number of relations */
-	cl_uint			ojmap_length;	/* length of outer-join map, if any */
+	cl_uint			kmrels_length;	/* length of kern_multirels */
+	cl_uint			ojmaps_length;	/* length of outer-join map, if any */
+	cl_uint			cuda_dindex;	/* device index of PG-Strom */
+	cl_uint			nrels;			/* number of inner relations */
 	struct
 	{
 		cl_uint		chunk_offset;	/* offset to KDS or Hash */
@@ -43,10 +45,13 @@ typedef struct
 	((kern_data_store *)						\
 	 ((char *)(kmrels) + (kmrels)->chunks[(depth)-1].chunk_offset))
 
-#define KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth, outer_join_map)	\
+#define KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth)					\
 	((cl_bool *)((kmrels)->chunks[(depth)-1].right_outer				\
-				 ? ((char *)(outer_join_map) +							\
-					(kmrels)->chunks[(depth)-1].ojmap_offset)			\
+				 ? ((char *)(kmrels) +									\
+					(size_t)(kmrels)->kmrels_length +					\
+					(size_t)(kmrels)->cuda_dindex *						\
+					(size_t)(kmrels)->ojmaps_length +					\
+					(size_t)(kmrels)->chunks[(depth)-1].ojmap_offset)	\
 				 : NULL))
 
 #define KERN_MULTIRELS_LEFT_OUTER_JOIN(kmrels, depth)	\
@@ -258,7 +263,7 @@ gpujoin_exec_nestloop(kern_gpujoin *kgjoin,
 	y_index = window_base + (lget_global_id() / x_limit);
 
 	/* will be valid, if LEFT OUTER JOIN */
-	oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth, outer_join_map);
+	oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth);
 	/* inside of the range? */
 	if (x_index < x_limit && y_index < y_limit)
 	{
@@ -371,7 +376,7 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
 	__syncthreads();
 
 	/* will be valid, if RIGHT OUTER JOIN */
-	oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth, outer_join_map);
+	oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth);
 
 	/* Calculation of hash-value by the outer join keys */
 	if (get_global_id() < kresults_src->nitems)
@@ -503,24 +508,22 @@ gpujoin_exec_hashjoin(kern_gpujoin *kgjoin,
  * it merges the result of other GPU devices and CPU fallback
  */
 KERNEL_FUNCTION(void)
-gpujoin_colocate_outer_join_map(cl_uint *outer_join_map,
-								cl_uint  ojmap_length,
-								cl_int   cuda_dindex,
-								cl_int   cuda_ndevices)
+gpujoin_colocate_outer_join_map(kern_multirels *kmrels,
+								cl_uint num_devices)
 {
-	size_t		nrooms = ojmap_length / sizeof(cl_uint);
-	cl_uint	   *dest_map = outer_join_map + cuda_dindex * nrooms;
+	size_t		nrooms = kmrels->ojmaps_length / sizeof(cl_uint);
+	cl_uint	   *ojmaps = (cl_uint *)((char *)kmrels + kmrels->kmrels_length);
+	cl_uint	   *destmap = ojmaps + kmrels->cuda_dindex * nrooms;
+	cl_uint		i, map = 0;
 
-	assert(STROMALIGN(ojmap_length) == ojmap_length);
 	if (get_global_id() < nrooms)
 	{
-		cl_uint	i, map = 0;
-		for (i=0; i <= cuda_ndevices; i++)
+		for (i=0; i <= num_devices; i++)
 		{
-			map |= outer_join_map[get_global_id()];
-			outer_join_map += nrooms;
+			map |= ojmaps[get_global_id()];
+			ojmaps += nrooms;
 		}
-		dest_map[get_global_id()] = map;
+		destmap[get_global_id()] = map;
 	}
 }
 
@@ -564,8 +567,7 @@ gpujoin_outer_nestloop(kern_gpujoin *kgjoin,
 	 */
 	if (y_index < y_limit)
 	{
-		cl_bool	   *oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth,
-														   outer_join_map);
+		cl_bool	   *oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth);
 
 		assert(oj_map != NULL);
 		needs_outer_row = (oj_map[y_index] ? false : true);
@@ -657,8 +659,8 @@ gpujoin_outer_hashjoin(kern_gpujoin *kgjoin,
 	if (kds_index < min(window_base + window_size,
 						kds_hash->nitems))
 	{
-		cl_bool	   *oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth,
-														   outer_join_map);
+		cl_bool	   *oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth);
+
 		khitem = KERN_DATA_STORE_HASHITEM(kds_hash, kds_index);
 		assert(khitem->rowid == kds_index);
 		needs_outer_row = (oj_map[kds_index] ? false : true);
@@ -973,6 +975,7 @@ out:
 	kern_writeback_error_status(&kresults->kerror, kcxt.e);
 }
 
+#if 0
 /*
  * gpujoin_results_compaction
  *
@@ -994,6 +997,7 @@ gpujoin_results_compaction(kern_data_store *kds_dst)
 		row_index[get_global_id()] -= shift;
 	}
 }
+#endif
 
 /*
  * gpujoin_count_rows_dist
@@ -2191,7 +2195,7 @@ retry_major:
 			goto retry_major;
 		}
 	}
-
+#if 0
 	/*
 	 * NOTE: Usually, virtual address space of KDS_dst shall not be filled
 	 * up entirely, however, we cannot know exact length of the buffer 
@@ -2213,6 +2217,7 @@ retry_major:
 									(kern_arg_t)(kds_dst),
 									(size_t)kds_dst->nitems, 0, 0);
 	}
+#endif
 out:
 	kern_writeback_error_status(&kgjoin->kerror, kcxt.e);
 }

@@ -105,6 +105,7 @@ typedef struct GpuContext
 	cl_int			cuda_dindex;
 	CUdevice		cuda_device;
 	CUcontext		cuda_context;
+	CUcontext	   *cuda_context_multi;	/* valid only multi-device mode */
 	CUevent		   *cuda_events0; /* per-worker general purpose event */
 	CUevent		   *cuda_events1; /* per-worker general purpose event */
 	slock_t			cuda_modules_lock;
@@ -118,8 +119,6 @@ typedef struct GpuContext
 	dlist_head		gm_iomap_list;		/* list of I/O map memory segments */
 	dlist_head		gm_managed_list;	/* list of managed memory segments */
 	dlist_head		gm_hostmem_list;	/* list of Host memory segments */
-	/* extra resource cleanup callbacks */
-	dlist_head		extra_cleanup_callbacks;
 	/* error information buffer */
 	pg_atomic_uint32 error_level;
 	const char	   *error_filename;
@@ -413,6 +412,11 @@ extern CUresult __gpuMemAllocHostRaw(GpuContext *gcontext,
 									 void **p_hostptr,
 									 size_t bytesize,
 									 const char *filename, int lineno);
+extern CUresult __gpuMemAllocDev(GpuContext *gcontext, int dindex,
+								 CUdeviceptr *p_deviceptr,
+								 size_t bytesize,
+								 CUipcMemHandle *p_mhandle,
+								 const char *filename, int lineno);
 extern CUresult __gpuMemAlloc(GpuContext *gcontext,
 							  CUdeviceptr *p_devptr,
 							  size_t bytesize,
@@ -430,14 +434,26 @@ extern CUresult __gpuMemAllocHost(GpuContext *gcontext,
 								  void **p_hostptr,
 								  size_t bytesize,
 								  const char *filename, int lineno);
+extern CUresult __gpuIpcOpenMemHandle(GpuContext *gcontext,
+									  CUdeviceptr *p_deviceptr,
+									  CUipcMemHandle m_handle,
+									  unsigned int flags,
+									  const char *filename, int lineno);
 extern CUresult gpuMemFree(GpuContext *gcontext,
 						   CUdeviceptr devptr);
 extern CUresult gpuMemFreeHost(GpuContext *gcontext,
 							   void *hostptr);
+extern CUresult gpuIpcCloseMemHandle(GpuContext *gcontext,
+									 CUdeviceptr m_deviceptr);
+
 #define gpuMemAllocRaw(a,b,c)				\
 	__gpuMemAllocRaw((a),(b),(c),__FILE__,__LINE__)
 #define gpuMemAllocManagedRaw(a,b,c,d)		\
 	__gpuMemAllocManagedRaw((a),(b),(c),(d),__FILE__,__LINE__)
+#define gpuMemAllocHostRaw(a,b,c)			\
+	__gpuMemAllocHostRaw((a),(b),(c),__FILE__,__LINE__)
+#define gpuMemAllocDev(a,b,c,d,e)						\
+	__gpuMemAllocDev((a),(b),(c),(d),(e),__FILE__,__LINE__)
 #define gpuMemAlloc(a,b,c)					\
 	__gpuMemAlloc((a),(b),(c),__FILE__,__LINE__)
 #define gpuMemAllocManaged(a,b,c,d)			\
@@ -446,6 +462,8 @@ extern CUresult gpuMemFreeHost(GpuContext *gcontext,
 	__gpuMemAllocIOMap((a),(b),(c),__FILE__,__LINE__)
 #define gpuMemAllocHost(a,b,c)				\
 	__gpuMemAllocHost((a),(b),(c),__FILE__,__LINE__)
+#define gpuIpcOpenMemHandle(a,b,c,d)		\
+	__gpuIpcOpenMemHandle((a),(b),(c),(d),__FILE__,__LINE__)
 
 extern void gpuMemReclaimSegment(GpuContext *gcontext);
 
@@ -507,6 +525,7 @@ extern GpuContext *AllocGpuContext(int cuda_dindex,
 extern void ActivateGpuContext(GpuContext *gcontext);
 extern GpuContext *GetGpuContext(GpuContext *gcontext);
 extern void PutGpuContext(GpuContext *gcontext);
+extern void SwitchGpuContext(GpuContext *gcontext, int cuda_dindex);
 extern void SynchronizeGpuContext(GpuContext *gcontext);
 
 extern bool trackCudaProgram(GpuContext *gcontext, ProgramId program_id,
@@ -516,16 +535,10 @@ extern bool trackGpuMem(GpuContext *gcontext, CUdeviceptr devptr, void *extra,
 						const char *filename, int lineno);
 extern void *lookupGpuMem(GpuContext *gcontext, CUdeviceptr devptr);
 extern void *untrackGpuMem(GpuContext *gcontext, CUdeviceptr devptr);
-extern void GpuContextRegisterExtraCleanup(GpuContext *gcontext,
-										   void (*cb_extra_cleanup)(
-											   GpuContext *gcontext,
-											   void *private),
-										   void *private);
-extern void GpuContextUnregisterExtraCleanup(GpuContext *gcontext,
-											 void (*cb_extra_cleanup)(
-												 GpuContext *gcontext,
-												 void *private),
-											 void *private);
+extern bool trackGpuMemIPC(GpuContext *gcontext,
+						   CUdeviceptr devptr, void *extra,
+						   const char *filename, int lineno);
+extern void *untrackGpuMemIPC(GpuContext *gcontext, CUdeviceptr devptr);
 extern void pgstrom_init_gpu_context(void);
 
 /*
@@ -769,12 +782,13 @@ extern cl_uint NVMESS_NBlocksPerChunk(struct NVMEScanState *nvme_sstate);
 				(sizeof(loff_t) * (pds)->nblocks_uncached)))
 extern void PDS_fillup_blocks(pgstrom_data_store *pds, int file_desc);
 
-extern bool PDS_insert_tuple(pgstrom_data_store *pds,
+extern bool KDS_insert_tuple(kern_data_store *kds,
 							 TupleTableSlot *slot);
-extern bool PDS_insert_hashitem(pgstrom_data_store *pds,
+#define PDS_insert_tuple(pds,slot)	KDS_insert_tuple(&(pds)->kds,slot)
+
+extern bool KDS_insert_hashitem(kern_data_store *kds,
 								TupleTableSlot *slot,
 								cl_uint hash_value);
-extern void PDS_build_hashtable(pgstrom_data_store *pds);
 
 extern bool ScanPathWillUseNvmeStrom(PlannerInfo *root, RelOptInfo *baserel);
 extern bool RelationCanUseNvmeStrom(Relation relation);
@@ -850,14 +864,15 @@ extern void assign_gpujoin_session_info(StringInfo buf,
 										GpuTaskState *gts);
 extern void	pgstrom_init_gpujoin(void);
 
-extern Size setup_kernel_gpujoin(struct kern_gpujoin *kgjoin,
-								 GpuTaskState *gts,
-								 pgstrom_data_store *pds_src);
+extern Size GpuJoinSetupTask(struct kern_gpujoin *kgjoin,
+							 GpuTaskState *gts,
+							 pgstrom_data_store *pds_src);
 extern ProgramId GpuJoinCreateUnifiedProgram(PlanState *node,
 											 GpuTaskState *gpa_gts,
 											 cl_uint gpa_extra_flags,
 											 const char *gpa_kern_source);
-extern struct GpuJoinSharedState *GpuJoinInnerPreload(GpuTaskState *gts);
+extern bool GpuJoinInnerPreload(GpuTaskState *gts);
+extern void GpuJoinInnerUnload(GpuTaskState *gts);
 extern pgstrom_data_store *GpuJoinExecOuterScanChunk(GpuTaskState *gts,
 													 int *p_filedesc);
 extern bool gpujoinLoadInnerBuffer(GpuContext *gcontext,
@@ -865,8 +880,8 @@ extern bool gpujoinLoadInnerBuffer(GpuContext *gcontext,
 								   CUdeviceptr *p_m_kmrels,
 								   CUdeviceptr *p_m_ojmaps,
 								   kern_data_store **p_kds_dst_head);
-extern bool gpujoinHasRightOuterJoin(struct GpuJoinSharedState *gj_sstate);
-extern void gpujoinUpdateRunTimeStat(struct GpuJoinSharedState *gj_sstate,
+extern bool gpujoinHasRightOuterJoin(GpuTaskState *gts);
+extern void gpujoinUpdateRunTimeStat(GpuTaskState *gts,
 									 struct kern_gpujoin *kgjoin);
 
 /*
