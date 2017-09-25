@@ -1740,14 +1740,17 @@ fixup_varnode_to_origin(int depth, List *ps_src_depth, List *ps_src_resno,
 void
 assign_gpujoin_session_info(StringInfo buf, GpuTaskState *gts)
 {
+	GpuJoinState   *gjs = (GpuJoinState *) gts;
 	TupleTableSlot *slot = gts->css.ss.ss_ScanTupleSlot;
 	TupleDesc		tupdesc = slot->tts_tupleDescriptor;
 
 	Assert(gts->css.methods == &gpujoin_exec_methods);
 	appendStringInfo(
 		buf,
+		"#define GPUJOIN_MAX_DEPTH %u\n"
 		"#define GPUJOIN_DEVICE_PROJECTION_NFIELDS %u\n"
 		"#define GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE %u\n",
+		gjs->num_rels,
 		tupdesc->natts,
 		((GpuJoinState *) gts)->extra_maxlen);
 }
@@ -3500,27 +3503,29 @@ GpuJoinSetupTask(struct kern_gpujoin *kgjoin, GpuTaskState *gts,
 				 pgstrom_data_store *pds_src)
 {
 	GpuJoinState *gjs = (GpuJoinState *) gts;
+	GpuContext *gcontext = gjs->gts.gcontext;
 	kern_multirels *h_kmrels = dsm_segment_address(gjs->seg_kmrels);
 	Size		head_sz;
 	Size		param_sz;
+	Size		pstack_sz;
+	Size		pstack_nrooms;
 	Size		max_items;
-	int			i;
+	int			i, mp_count;
 
 	head_sz = STROMALIGN(offsetof(kern_gpujoin,
 								  jscale[gjs->num_rels + 1]));
 	param_sz = STROMALIGN(gjs->gts.kern_params->length);
-
-	max_items = ((pgstrom_chunk_size() - head_sz - param_sz) / 2 -
-				 offsetof(kern_resultbuf, results[0])) / sizeof(cl_uint);
+	pstack_nrooms = 2048;
+	pstack_sz = sizeof(cl_uint) * pstack_nrooms * ((gjs->num_rels + 1) *
+												   (gjs->num_rels + 2)) / 2;
 	if (kgjoin)
 	{
 		memset(kgjoin, 0, head_sz);
 		kgjoin->kparams_offset = head_sz;
-		kgjoin->kresults_1_offset = head_sz + param_sz;
-		kgjoin->kresults_2_offset = kgjoin->kresults_1_offset
-			+ STROMALIGN(offsetof(kern_resultbuf, results[max_items]));
-		kgjoin->kresults_max_items = max_items;
+		kgjoin->pstack_offset = head_sz + param_sz;
+		kgjoin->pstack_nrooms = pstack_nrooms;
 		kgjoin->num_rels = gjs->num_rels;
+		kgjoin->src_read_pos = 0;
 
 		/* kern_parambuf */
 		memcpy(KERN_GPUJOIN_PARAMBUF(kgjoin),
@@ -3546,8 +3551,8 @@ GpuJoinSetupTask(struct kern_gpujoin *kgjoin, GpuTaskState *gts,
 			jscale[i].window_orig = jscale[i].window_base;
 		}
 	}
-	return head_sz + param_sz +
-		2 * STROMALIGN(offsetof(kern_resultbuf, results[max_items]));
+	mp_count = devAttrs[gcontext->cuda_dindex].MULTIPROCESSOR_COUNT;
+	return head_sz + param_sz + mp_count * pstack_sz;
 }
 
 /*
@@ -3631,9 +3636,6 @@ gpujoin_clone_task(GpuContext *gcontext, GpuJoinTask *pgjoin_old)
 	pgjoin_new->gj_sstate = pgjoin_old->gj_sstate;
 	pgjoin_new->pds_src = NULL;		/* caller should set */
 	pgjoin_new->pds_dst = NULL;		/* caller should set */
-	pgjoin_new->kern.kresults_1_offset = required;
-	pgjoin_new->kern.kresults_2_offset = required;
-	pgjoin_new->kern.kresults_max_items = 0;
 	/* XXX jscale is also zero cleared */
 	memset(pgjoin_new->kern.jscale, 0, sizeof(kern_join_scale) * nrels);
 

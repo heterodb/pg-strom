@@ -231,7 +231,6 @@ gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
 	cl_bool			try_next_window = true;
 	cl_uint			nitems_offset;
 	cl_uint			usage_offset	__attribute__((unused));
-	cl_uint			nitems_real;
 	cl_uint			total_nitems_out = 0;	/* stat */
 	cl_uint			total_extra_size = 0;	/* stat */
 #ifdef GPUSCAN_DEVICE_PROJECTION
@@ -242,7 +241,7 @@ gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
 	__shared__ cl_int	src_base;
 	__shared__ cl_int	nitems_base;
 	__shared__ cl_int	usage_base	__attribute__((unused));
-	__shared__ cl_int	status;
+	__shared__ cl_int	status __attribute__((unused));
 
 	assert(kds_src->format == KDS_FORMAT_ROW);
 	assert(!kds_dst || kds_dst->format == KDS_FORMAT_ROW);
@@ -413,7 +412,7 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 	__shared__ cl_uint	base;
 	__shared__ cl_uint	nitems_base;
 	__shared__ cl_uint	usage_base;
-	__shared__ cl_int	status;
+	__shared__ cl_int	status __attribute__((unused));
 	__shared__ cl_int	gang_sync;
 
 	assert(kds_src->format == KDS_FORMAT_BLOCK);
@@ -423,8 +422,7 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 		status = StromError_Success;
 	__syncthreads();
 
-	part_sz = Min((kds_src->nrows_per_block +
-				   warpSize-1) & ~(warpSize-1), get_local_size());
+	part_sz = KERN_DATA_STORE_PARTSZ(kds_src);
 	n_parts = get_local_size() / part_sz;
 	do {
 		cl_uint		part_id;

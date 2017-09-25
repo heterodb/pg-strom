@@ -201,6 +201,8 @@ typedef uintptr_t		hostptr_t;
 	__device__ static RET_TYPE __attribute__ ((unused))
 #define KERNEL_FUNCTION(RET_TYPE)				\
 	extern "C" __global__ RET_TYPE
+#define KERNEL_FUNCTION_NUMTHREADS(RET_TYPE,NUM_THREADS) \
+	extern "C" __global__ RET_TYPE __launch_bounds__(NUM_THREADS)
 #define KERNEL_FUNCTION_MAXTHREADS(RET_TYPE)	\
 	extern "C" __global__ RET_TYPE __launch_bounds__(MAXTHREADS_PER_BLOCK)
 #else	/* __CUDACC__ */
@@ -787,6 +789,10 @@ KERN_HASH_NEXT_ITEM(kern_data_store *kds, kern_hashitem *khitem)
 	((char *)(KERN_DATA_STORE_VALUES((kds),(kds_index)) + (kds)->ncols))
 
 /* access macro for block format */
+#define KERN_DATA_STORE_PARTSZ(kds)							\
+	Min(((kds)->nrows_per_block +							\
+		 warpSize - 1) & ~(warpSize - 1), get_local_size())
+
 #define KERN_DATA_STORE_BLOCK_BLCKNR(kds, kds_index)			\
 	(((BlockNumber *)KERN_DATA_STORE_BODY(kds))[(kds_index)])
 
