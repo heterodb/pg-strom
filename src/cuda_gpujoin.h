@@ -55,10 +55,10 @@ typedef struct
 				 : NULL))
 
 #define KERN_MULTIRELS_LEFT_OUTER_JOIN(kmrels, depth)	\
-	((kmrels)->chunks[(depth)-1].left_outer)
+	__ldg(&((kmrels)->chunks[(depth)-1].left_outer))
 
 #define KERN_MULTIRELS_RIGHT_OUTER_JOIN(kmrels, depth)	\
-	((kmrels)->chunks[(depth)-1].right_outer)
+	__ldg(&((kmrels)->chunks[(depth)-1].right_outer))
 
 /*
  * kern_gpujoin - control object of GpuJoin
@@ -179,12 +179,13 @@ gpujoin_projection(kern_context *kcxt,
 /*
  * static shared variables
  */
-static __shared__ cl_uint src_read_pos;
-static __shared__ cl_uint dst_base_nitems;
-static __shared__ cl_uint dst_base_usage;
-static __shared__ cl_uint read_pos[GPUJOIN_MAX_DEPTH+1];
-static __shared__ cl_uint write_pos[GPUJOIN_MAX_DEPTH+1];
-static __shared__ cl_uint pg_crc32_table[256];
+static __shared__ cl_bool	scan_done;
+static __shared__ cl_uint	src_read_pos;
+static __shared__ cl_uint	dst_base_nitems;
+static __shared__ cl_uint	dst_base_usage;
+static __shared__ cl_uint	read_pos[GPUJOIN_MAX_DEPTH+1];
+static __shared__ cl_uint	write_pos[GPUJOIN_MAX_DEPTH+1];
+static __shared__ cl_uint	pg_crc32_table[256];
 
 /*
  * gpujoin_rewind_stack
@@ -192,23 +193,29 @@ static __shared__ cl_uint pg_crc32_table[256];
 STATIC_INLINE(cl_int)
 gpujoin_rewind_stack(cl_int depth, cl_uint *l_state, cl_bool *matched)
 {
-	assert(depth > 0);
-	do {
-		depth--;
-		__syncthreads();
-		if (read_pos[depth] < write_pos[depth])
-			return depth;
-		__syncthreads();
-		if (get_local_id() == 0)
-		{
-			read_pos[depth] = 0;
-			write_pos[depth] = 0;
-		}
-		l_state[depth] = 0;
-		matched[depth] = false;
-	} while (depth > 0);
+	static __shared__ cl_int	__depth;
 
-	return 0;
+	assert(depth > 0);
+	if (get_local_id() == 0)
+	{
+		__depth = depth;
+		do {
+			if (__depth <= GPUJOIN_MAX_DEPTH)
+			{
+				read_pos[__depth] = 0;
+				write_pos[__depth] = 0;
+			}
+			if (__depth == 0 || read_pos[__depth-1] < write_pos[__depth-1])
+				break;
+		} while (__depth-- > 0);
+	}
+	__syncthreads();
+	depth = __depth;
+	memset(l_state + depth, 0,
+		   sizeof(cl_uint) * (GPUJOIN_MAX_DEPTH + 1 - depth));
+	memset(matched + depth, 0,
+		   sizeof(cl_bool) * (GPUJOIN_MAX_DEPTH + 1 - depth));
+	return depth;
 }
 
 /*
@@ -235,11 +242,17 @@ gpujoin_load_source(kern_context *kcxt,
 		kern_tupitem   *tupitem;
 		cl_uint			row_index;
 
+		/* fetch next window */
+		if (get_local_id() == 0)
+			src_read_pos = atomicAdd(&kgjoin->src_read_pos,
+									 outer_unit_sz);
+		__syncthreads();
 		row_index = src_read_pos + get_local_id();
+
 		if (row_index < kds_src->nitems)
 		{
 			tupitem = KERN_DATA_STORE_TUPITEM(kds_src, row_index);
-			t_offset = (cl_uint)((char *)tupitem - (char *)kds_src);
+			t_offset = (cl_uint)((char *)&tupitem->htup - (char *)kds_src);
 			t_self = tupitem->t_self;
 			htup = &tupitem->htup;
 		}
@@ -251,10 +264,16 @@ gpujoin_load_source(kern_context *kcxt,
 		cl_uint		line_no;
 		cl_uint		n_parts;
 		cl_uint		n_lines;
+		cl_uint		loops = l_state[0]++;
 
+		/* fetch next window, if needed */
+		if (loops == 0 && get_local_id() == 0)
+			src_read_pos = atomicAdd(&kgjoin->src_read_pos,
+									 outer_unit_sz);
+		__syncthreads();
+		part_id = src_read_pos + get_local_id() / part_sz;
 		n_parts = get_local_size() / part_sz;
-		part_id =  src_read_pos + get_local_id() / part_sz;
-		line_no = (get_local_id() % part_sz + l_state[0] * part_sz) + 1;
+		line_no = get_local_id() % part_sz + loops * part_sz + 1;
 
 		if (part_id < kds_src->nitems &&
 			get_local_id() < part_sz * n_parts)
@@ -312,36 +331,35 @@ gpujoin_load_source(kern_context *kcxt,
 		 */
 		if (write_pos[0] + get_local_size() > kgjoin->pstack_nrooms)
 			return 1;
-		/* Elsewhere, still we have rooms for outer tuples */
-		if (get_local_id() == 0)
-		{
-			if (kds_src->format == KDS_FORMAT_ROW)
-				src_read_pos = atomicAdd(&kgjoin->src_read_pos,
-										 outer_unit_sz);
-			else
-				l_state[0]++;
-		}
 		__syncthreads();
 	}
 	else
 	{
 		/* no tuples we could fetch */
 		assert(write_pos[0] + get_local_size() <= kgjoin->pstack_nrooms);
-
 		l_state[0] = 0;
-		if (get_local_id() == 0)
-			src_read_pos = atomicAdd(&kgjoin->src_read_pos,
-									 outer_unit_sz);
 		__syncthreads();
 	}
 
 	/* End of the outer relation? */
 	if (src_read_pos >= kds_src->nitems)
 	{
+		/* don't rewind the stack any more */
+		if (get_local_id() == 0)
+			scan_done = true;
+		__syncthreads();
+
+		/*
+		 * We may have to dive into the deeper depth if we still have pending
+		 * join combinations.
+		 */
 		if (write_pos[0] == 0)
 		{
-			//TODO: we have to dive into deeper depth if we still
-			// have any depth which has pending combinations
+			for (cl_int depth=1; depth <= GPUJOIN_MAX_DEPTH; depth++)
+			{
+				if (read_pos[depth] < write_pos[depth])
+					return depth+1;
+			}
 			return -1;
 		}
 		return 1;
@@ -365,7 +383,7 @@ gpujoin_projection_row(kern_context *kcxt,
 	cl_uint		nrels = kgjoin->num_rels;
 	cl_uint		read_index;
 	cl_uint		dest_index;
-	cl_uint		offset;
+	cl_uint		dest_offset;
 	cl_uint		count;
 	cl_uint		nvalids;
 	cl_uint		required;
@@ -389,12 +407,13 @@ gpujoin_projection_row(kern_context *kcxt,
 	/* sanity checks */
 	assert(rd_stack != NULL);
 
-	/*
-	 * Any more result rows to be written?
-	 * If none, rewind the read_pos/write_pod of the upper depth
-	 */
+	/* Any more result rows to be written? */
 	if (read_pos[nrels] >= write_pos[nrels])
-		return gpujoin_rewind_stack(nrels, l_state, matched);
+	{
+		if (scan_done)
+			return -1;
+		return gpujoin_rewind_stack(nrels+1, l_state, matched);
+	}
 
 	/* pick up combinations from the pseudo-stack */
 	nvalids = Min(write_pos[nrels] - read_pos[nrels],
@@ -407,10 +426,12 @@ gpujoin_projection_row(kern_context *kcxt,
 	/* step.1 - compute length of the result tuple to be written */
 	if (read_index < write_pos[nrels])
 	{
+		rd_stack += read_index * (nrels + 1);
+
 		gpujoin_projection(kcxt,
 						   kds_src,
 						   kmrels,
-						   rd_stack + read_index * (nrels + 1),
+						   rd_stack,
 						   kds_dst,
 						   tup_values,
 						   tup_isnull,
@@ -432,7 +453,7 @@ gpujoin_projection_row(kern_context *kcxt,
 		return -1;		/* bailout */
 
 	/* step.2 - increments nitems/usage of the kds_dst */
-	offset = pgstromStairlikeSum(required, &count);
+	dest_offset = pgstromStairlikeSum(required, &count);
 	assert(count > 0);
 	if (get_local_id() == 0)
 	{
@@ -441,6 +462,7 @@ gpujoin_projection_row(kern_context *kcxt,
 	}
 	__syncthreads();
 	dest_index = dst_base_nitems + get_local_id();
+	dest_offset += dst_base_usage + required;
 
 	if (KERN_DATA_STORE_HEAD_LENGTH(kds_dst) +
 		STROMALIGN(sizeof(cl_uint) * (dst_base_nitems + nvalids)) +
@@ -453,20 +475,17 @@ gpujoin_projection_row(kern_context *kcxt,
 	if (required > 0)
 	{
 		cl_uint	   *row_index = KERN_DATA_STORE_ROWINDEX(kds_dst);
-		cl_uint		tup_pos;
-		kern_tupitem *tupitem;
+		kern_tupitem *tupitem = (kern_tupitem *)
+			((char *)kds_dst + kds_dst->length - dest_offset);
 
-		tup_pos = kds_dst->length - (dst_base_usage + offset + required);
-		tupitem = (kern_tupitem *)((char *)kds_dst + tup_pos);
-		assert((tup_pos & ~(sizeof(Datum) - 1)) == 0);
-		row_index[dest_index] = tup_pos;
+		row_index[dest_index] = kds_dst->length - dest_offset;
 		form_kern_heaptuple(kcxt, kds_dst, tupitem, NULL,
 							tup_values, tup_isnull, NULL);
 	}
 	if (__syncthreads_count(kcxt->e.errcode) > 0)
 		return -1;	/* bailout */
 
-	return nrels;
+	return nrels + 1;
 }
 
 /*
@@ -493,13 +512,15 @@ gpujoin_exec_nestloop(kern_context *kcxt,
 	cl_bool			result;
 
 	assert(kds_in->format == KDS_FORMAT_ROW);
+	assert(depth >= 1 && depth <= GPUJOIN_MAX_DEPTH);
+
 	if (l_state[depth] >= kds_in->nitems)
 	{
 		/*
 		 * If LEFT OUTER JOIN, we need to check whether the outer
 		 * combination had any matched inner tuple, or not.
 		 */
-		if (kmrels->chunks[depth-1].left_outer &&
+		if (KERN_MULTIRELS_LEFT_OUTER_JOIN(kmrels, depth) &&
 			__syncthreads_count(!matched[depth]))
 		{
 			if (read_pos[depth-1] + get_local_id() < write_pos[depth-1])
@@ -521,7 +542,8 @@ gpujoin_exec_nestloop(kern_context *kcxt,
          * when this depth has enough room to store the combinations, upper
          * depth can generate more outer tuples.
          */
-		if (write_pos[depth] + get_local_size() <= kgjoin->pstack_nrooms)
+		if (!scan_done &&
+			write_pos[depth] + get_local_size() <= kgjoin->pstack_nrooms)
 			return gpujoin_rewind_stack(depth, l_state, matched);
 		/* elsewhere, dive into the deeper depth or projection */
 		return depth + 1;
@@ -597,6 +619,7 @@ gpujoin_exec_hashjoin(kern_context *kcxt,
 	cl_bool				result;
 
 	assert(kds_hash->format == KDS_FORMAT_HASH);
+	assert(depth >= 1 && depth <= GPUJOIN_MAX_DEPTH);
 
 	if (__syncthreads_or(l_state[depth] != UINT_MAX) == 0)
 	{
@@ -607,7 +630,7 @@ gpujoin_exec_hashjoin(kern_context *kcxt,
 		if (get_local_id() == 0)
 			read_pos[depth-1] += get_local_size();
 		l_state[depth] = 0;
-		matched[depth] = 0;
+		matched[depth] = false;
 		return depth;
 	}
 	else if (read_pos[depth-1] >= write_pos[depth-1])
@@ -616,12 +639,12 @@ gpujoin_exec_hashjoin(kern_context *kcxt,
 		 * When this depth has enough room to store the combinations, upper
 		 * depth can generate more outer tuples.
 		 */
-		if (write_pos[depth] + get_local_size() <= kgjoin->pstack_nrooms)
+		if (!scan_done &&
+			write_pos[depth] + get_local_size() <= kgjoin->pstack_nrooms)
 			return gpujoin_rewind_stack(depth, l_state, matched);
 		/* Elsewhere, dive into the deeper depth or projection */
 		return depth + 1;
 	}
-
 	rd_index = read_pos[depth-1] + get_local_id();
 	rd_stack += (rd_index * depth);
 
@@ -651,8 +674,9 @@ gpujoin_exec_hashjoin(kern_context *kcxt,
 	else if (l_state[depth] != UINT_MAX)
 	{
 		/* walks on the hash-slot chain */
-		khitem = (kern_hashitem *)
-			((char *)kds_hash + l_state[depth] - offsetof(kern_hashitem, t));
+		khitem = (kern_hashitem *)((char *)kds_hash
+								   + l_state[depth]
+								   - offsetof(kern_hashitem, t.htup));
 		hash_value = khitem->hash;
 
 		/* pick up next one if any */
@@ -685,9 +709,9 @@ gpujoin_exec_hashjoin(kern_context *kcxt,
 				oj_map[khitem->rowid] = true;
 		}
 	}
-	else if (l_state[depth] != UINT_MAX &&
-			 !matched[depth] &&
-			 kmrels->chunks[depth].left_outer)
+	else if (KERN_MULTIRELS_LEFT_OUTER_JOIN(kmrels, depth) &&
+			 l_state[depth] != UINT_MAX &&
+			 !matched[depth])
 	{
 		/* No matched outer rows, but LEFT/FULL OUTER */
 		result = true;
@@ -695,6 +719,9 @@ gpujoin_exec_hashjoin(kern_context *kcxt,
 	else
 		result = false;
 
+	/* save the current hash item */
+	l_state[depth] = (!khitem ? UINT_MAX : (cl_uint)((char *)&khitem->t.htup -
+													 (char *)kds_hash));
 	wr_index = write_pos[depth];
 	wr_index += pgstromStairlikeBinaryCount(result, &count);
 	if (get_local_id() == 0)
@@ -742,7 +769,7 @@ gpujoin_main(kern_gpujoin *kgjoin,
 					 ? get_local_size()
 					 : KERN_DATA_STORE_PARTSZ(kds_src));
 	pstack_nrooms = kgjoin->pstack_nrooms;
-	pstack_base = (cl_uint *)((char *)kds_src + kgjoin->pstack_offset)
+	pstack_base = (cl_uint *)((char *)kgjoin + kgjoin->pstack_offset)
 		+ get_global_index() * pstack_nrooms * ((GPUJOIN_MAX_DEPTH+1) *
 												(GPUJOIN_MAX_DEPTH+2)) / 2;
 #define PSTACK_DEPTH(d)							\
@@ -763,10 +790,10 @@ gpujoin_main(kern_gpujoin *kgjoin,
 	memset(matched, 0, sizeof(matched));
 	if (get_local_id() == 0)
 	{
-		src_read_pos = atomicAdd(&kgjoin->src_read_pos,
-								 outer_unit_sz);
+		src_read_pos = UINT_MAX;
 		memset(read_pos, 0, sizeof(read_pos));
 		memset(write_pos, 0, sizeof(write_pos));
+		scan_done = false;
 	}
 	__syncthreads();
 
@@ -774,8 +801,6 @@ gpujoin_main(kern_gpujoin *kgjoin,
 	depth = 0;
 	while (depth >= 0)
 	{
-		assert(depth <= kmrels->nrels);
-
 		if (depth == 0)
 		{
 			/* LOAD FROM KDS_SRC (ROW/BLOCK) */
@@ -789,6 +814,7 @@ gpujoin_main(kern_gpujoin *kgjoin,
 		else if (depth > kgjoin->num_rels)
 		{
 			/* PROJECTION (ROW) */
+			assert(depth == kmrels->nrels + 1);
 			depth = gpujoin_projection_row(&kcxt,
 										   kgjoin,
 										   kmrels,

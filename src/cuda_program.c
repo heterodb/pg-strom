@@ -689,6 +689,8 @@ build_cuda_program(program_cache_entry *src_entry)
 
 	STROM_TRY();
 	{
+		char	gpu_arch_option[256];
+
 		rc = nvrtcCreateProgram(&program,
 								source,
 								"pg-strom",
@@ -701,11 +703,13 @@ build_cuda_program(program_cache_entry *src_entry)
 		/*
 		 * Put command line options
 		 */
+		snprintf(gpu_arch_option, sizeof(gpu_arch_option),
+				 "--gpu-architecture=compute_%lu", devComputeCapability);
 		options[opt_index++] = "-I " CUDA_INCLUDE_PATH;
 		options[opt_index++] = "-I " PGSHAREDIR "/extension";
-		options[opt_index++] =
-			psprintf("--gpu-architecture=compute_%lu",
-					 devComputeCapability);
+		snprintf(gpu_arch_option, sizeof(gpu_arch_option),
+                 "--gpu-architecture=compute_%lu", devComputeCapability);
+		options[opt_index++] = gpu_arch_option;
 #ifdef PGSTROM_DEBUG
 		options[opt_index++] = "--device-debug";
 		options[opt_index++] = "--generate-line-info";

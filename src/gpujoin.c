@@ -181,7 +181,6 @@ typedef struct
 	 */
 	PlanState		   *state;
 	ExprContext		   *econtext;
-	pgstrom_data_store *pds_in;
 
 	/*
 	 * Join properties; both nest-loop and hash-join
@@ -2157,11 +2156,7 @@ ExecEndGpuJoin(CustomScanState *node)
 	/* shutdown inner/outer subtree */
 	ExecEndNode(outerPlanState(node));
 	for (i=0; i < gjs->num_rels; i++)
-	{
 		ExecEndNode(gjs->inners[i].state);
-		if (gjs->inners[i].pds_in)
-			PDS_release(gjs->inners[i].pds_in);
-	}
 	/* then other private resources */
 	GpuJoinInnerUnload(&gjs->gts);
 	pgstromReleaseGpuTaskState(&gjs->gts);
@@ -2195,12 +2190,7 @@ ExecReScanGpuJoin(CustomScanState *node)
 			UpdateChangedParamSet(gjs->inners[i].state,
 								  gjs->gts.css.ss.ps.chgParam);
 			if (istate->state->chgParam != NULL)
-			{
-				if (istate->pds_in)
-					PDS_release(istate->pds_in);
-				istate->pds_in = NULL;
 				ExecReScan(istate->state);
-			}
 		}
 		/* rewind the inner hash/heap buffer */
 		GpuJoinInnerUnload(&gjs->gts);
@@ -2287,12 +2277,19 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 		Expr	   *other_quals = lfirst(lc3);
 		Expr	   *hash_outer_key = lfirst(lc4);
 		innerState *istate = &gjs->inners[depth-1];
+		kern_data_store *kds_in = NULL;
 		int			indent_width;
 		double		plan_nrows_in;
 		double		plan_nrows_out;
 		double		exec_nrows_in = 0.0;
 		double		exec_nrows_out1 = 0.0;	/* by INNER JOIN */
 		double		exec_nrows_out2 = 0.0;	/* by OUTER JOIN */
+
+		if (gjs->seg_kmrels)
+		{
+			kern_multirels *kmrels = dsm_segment_address(gjs->seg_kmrels);
+			kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
+		}
 
 		/* fetch number of rows */
 		plan_nrows_in = floatVal(list_nth(gj_info->plan_nrows_in, depth-1));
@@ -2451,7 +2448,7 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 				appendStringInfo(es->str, "KDS-%s (size plan: %s, exec: %s)",
 								 hash_outer_key ? "Hash" : "Heap",
 								 format_bytesz(istate->ichunk_size),
-								 format_bytesz(istate->pds_in->kds.length));
+								 format_bytesz(kds_in->length));
 			}
 			appendStringInfoChar(es->str, '\n');
 		}
@@ -2470,8 +2467,7 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 			{
 				snprintf(qlabel, sizeof(qlabel),
 						 "Depth % 2d KDS Exec Size", depth);
-				len = istate->pds_in->kds.length;
-				ExplainPropertyText(qlabel, format_bytesz(len), es);
+				ExplainPropertyText(qlabel, format_bytesz(kds_in->length), es);
 			}
 		}
 		depth++;
@@ -3047,6 +3043,7 @@ gpujoin_codegen_projection(StringInfo source,
 				depth);
 			kds_label = "kds_in";
 		}
+
 		appendStringInfo(
 			&body,
 			"  if (r_buffer[%d] == 0)\n"
@@ -3092,10 +3089,11 @@ gpujoin_codegen_projection(StringInfo source,
 		}
 
 		/* begin to walk on the tuple */
+		appendStringInfo(&body, "assert(((cl_ulong)htup & 7UL) == 0);\n"); //XXX
 		appendStringInfo(
 			&body,
 			"  EXTRACT_HEAP_TUPLE_BEGIN(addr, %s, htup);\n", kds_label);
-
+		appendStringInfo(&body, "assert(((cl_ulong)addr & 7UL) == 0);\n"); //XXX
 		resetStringInfo(&temp);
 		for (i=1; i <= nattrs; i++)
 		{
@@ -3115,6 +3113,8 @@ gpujoin_codegen_projection(StringInfo source,
 								&typelen, &typebyval);
 				if (!typebyval)
 				{
+					appendStringInfo(&temp, "assert(((cl_ulong)addr & 3UL) == 0);\n"); //XXX
+
 					appendStringInfo(
 						&temp,
 						"  tup_isnull[%d] = (addr != NULL ? false : true);\n"
@@ -3126,6 +3126,8 @@ gpujoin_codegen_projection(StringInfo source,
 				}
 				else
 				{
+					appendStringInfo(&temp, "assert(((cl_ulong)addr & %uUL) == 0);\n", typelen - 1); //XXX
+
 					appendStringInfo(
 						&temp,
 						"  tup_isnull[%d] = (addr != NULL ? false : true);\n"
@@ -4594,13 +4596,14 @@ gpujoin_process_kernel(GpuJoinTask *pgjoin, CUmodule cuda_module)
 	GpuJoinState	   *gjs = (GpuJoinState *) pgjoin->task.gts;
 	pgstrom_data_store *pds_src = pgjoin->pds_src;
 	pgstrom_data_store *pds_dst = pgjoin->pds_dst;
-	cl_int				needs_compaction = 0;
-	CUfunction			kern_main;
+	CUfunction			kern_gpujoin_main;
 	CUdeviceptr			m_kgjoin = (CUdeviceptr)&pgjoin->kern;
 	CUdeviceptr			m_kds_src = 0UL;
 	CUdeviceptr			m_kds_dst = (CUdeviceptr)&pds_dst->kds;
-	CUdeviceptr			m_nullptr = 0UL;
 	CUresult			rc;
+	cl_int				mp_count;
+	Size				grid_sz;
+	Size				block_sz;
 	cl_int				retval = 10001;
 	void			   *kern_args[10];
 
@@ -4610,7 +4613,9 @@ gpujoin_process_kernel(GpuJoinTask *pgjoin, CUmodule cuda_module)
 	Assert(pds_dst->kds.format == KDS_FORMAT_ROW);
 
 	/* Lookup GPU kernel function */
-	rc = cuModuleGetFunction(&kern_main, cuda_module, "gpujoin_main");
+	rc = cuModuleGetFunction(&kern_gpujoin_main,
+							 cuda_module,
+							 "gpujoin_main");
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuModuleGetFunction: %s", errorText(rc));
 
@@ -4681,23 +4686,29 @@ gpujoin_process_kernel(GpuJoinTask *pgjoin, CUmodule cuda_module)
 	 * KERNEL_FUNCTION(void)
 	 * gpujoin_main(kern_gpujoin *kgjoin,
 	 *              kern_multirels *kmrels,
-	 *              cl_bool *outer_join_map,
 	 *              kern_data_store *kds_src,
-	 *              kern_data_store *kds_dst,
-	 *              cl_int needs_compaction)
+	 *              kern_data_store *kds_dst)
 	 */
+	optimal_workgroup_size(&grid_sz,
+						   &block_sz,
+						   kern_gpujoin_main,
+						   gcontext->cuda_device,
+						   pds_src->kds.nitems,
+						   0,
+						   sizeof(cl_int));	/* stairLike operations */
+	mp_count = devAttrs[CU_DINDEX_PER_THREAD].MULTIPROCESSOR_COUNT;
+	grid_sz = Min(grid_sz, mp_count);
+
 	kern_args[0] = &m_kgjoin;
 	kern_args[1] = &gjs->m_kmrels;
-	kern_args[2] = &m_nullptr;
-	kern_args[3] = &m_kds_src;
-	kern_args[4] = &m_kds_dst;
-	kern_args[5] = &needs_compaction;
+	kern_args[2] = &m_kds_src;
+	kern_args[3] = &m_kds_dst;
 
-	rc = cuLaunchKernel(kern_main,
-						1, 1, 1,
-						1, 1, 1,
-						sizeof(kern_errorbuf),
-						NULL,
+	rc = cuLaunchKernel(kern_gpujoin_main,
+						grid_sz, 1, 1,
+						block_sz, 1, 1,
+						sizeof(cl_int) * block_sz,
+						CU_STREAM_PER_THREAD,
 						kern_args,
 						NULL);
 	if (rc != CUDA_SUCCESS)

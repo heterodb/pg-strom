@@ -609,11 +609,11 @@ GpuContextWorkerMain(void *arg)
 					else
 					{
 						/*
-                         * Release GpuTask immediately, expect for the last
-                         * GpuTask when retval==-2.
-                         */
+						 * Release GpuTask immediately, expect for the last
+						 * GpuTask when retval==-2.
+						 */
 						pthreadMutexLock(gcontext->mutex);
-						wnotice("retval=%d num_running_tasks=%d scan_done=%d", retval, gts->num_running_tasks, gts->scan_done);
+						wnotice("gtask=%p retval=%d num_running_tasks=%d scan_done=%d", gtask, retval, gts->num_running_tasks, gts->scan_done);
 						if (--gts->num_running_tasks == 0 &&
 							retval == -2 &&
 							gts->scan_done)

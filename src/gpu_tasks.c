@@ -237,87 +237,83 @@ fetch_next_gputask(GpuTaskState *gts)
 	GpuContext	   *gcontext = gts->gcontext;
 	GpuTask		   *gtask;
 	dlist_node	   *dnode;
+	cl_int			local_num_running_tasks;
+	cl_int			global_num_running_tasks;
 	cl_int			ev;
 
 	CHECK_FOR_GPUCONTEXT(gcontext);
 
-	if (!gts->scan_done)
+	pthreadMutexLock(gcontext->mutex);
+	while (!gts->scan_done)
 	{
-		cl_int		local_num_running_tasks;
-		cl_int		global_num_running_tasks;
-
-		pthreadMutexLock(gcontext->mutex);
-		for (;;)
+		ResetLatch(MyLatch);
+		local_num_running_tasks = (gts->num_ready_tasks +
+								   gts->num_running_tasks);
+		global_num_running_tasks =
+			pg_atomic_read_u32(gcontext->global_num_running_tasks);
+		if ((local_num_running_tasks < local_max_async_tasks &&
+			 global_num_running_tasks < global_max_async_tasks) ||
+			(dlist_is_empty(&gts->ready_tasks) &&
+			 gts->num_running_tasks == 0))
 		{
-			ResetLatch(MyLatch);
-			local_num_running_tasks = (gts->num_ready_tasks +
-									   gts->num_running_tasks);
-			global_num_running_tasks =
-				pg_atomic_read_u32(gcontext->global_num_running_tasks);
-			if ((local_num_running_tasks < local_max_async_tasks &&
-				 global_num_running_tasks < global_max_async_tasks) ||
-				(dlist_is_empty(&gts->ready_tasks) &&
-				 gts->num_running_tasks == 0))
-			{
-				cl_bool		scan_done = false;
+			cl_bool		scan_done = false;
 
-				pthreadMutexUnlock(gcontext->mutex);
-				gtask = gts->cb_next_task(gts, &scan_done);
-				pthreadMutexLock(gcontext->mutex);
-				if (!gtask || scan_done)
-					gts->scan_done = true;
-				if (!gtask)
-					break;
-				dlist_push_tail(&gcontext->pending_tasks, &gtask->chain);
-				gts->num_running_tasks++;
-				pg_atomic_add_fetch_u32(gcontext->global_num_running_tasks, 1);
-				pthreadCondSignal(gcontext->cond);
-			}
-			else if (!dlist_is_empty(&gts->ready_tasks))
-			{
-				/*
-				 * Even though we touched either local or global limitation of
-				 * the number of concurrent tasks, GTS already has ready tasks,
-				 * so pick them up instead of wait.
-				 */
-				pthreadMutexUnlock(gcontext->mutex);
-				goto pickup_gputask;
-			}
-			else if (gts->num_running_tasks > 0)
-			{
-				/*
-				 * Even though a few GpuTasks are running, but nobody gets
-				 * completed yet. Try to wait for completion to 
-				 */
-				pthreadMutexUnlock(gcontext->mutex);
-
-				ev = WaitLatch(MyLatch,
-							   WL_LATCH_SET |
-							   WL_TIMEOUT |
-							   WL_POSTMASTER_DEATH,
-							   500L);
-				if (ev & WL_POSTMASTER_DEATH)
-					ereport(FATAL,
-							(errcode(ERRCODE_ADMIN_SHUTDOWN),
-							 errmsg("Unexpected Postmaster dead")));
-				CHECK_FOR_GPUCONTEXT(gcontext);
-
-				pthreadMutexLock(gcontext->mutex);
-			}
-			else
-			{
-				pthreadMutexUnlock(gcontext->mutex);
-				/*
-				 * Sadly, we touched a threshold. Taks a short break.
-				 */
-				pg_usleep(20000L);	/* wait for 20msec */
-
-				CHECK_FOR_GPUCONTEXT(gcontext);
-				pthreadMutexLock(gcontext->mutex);
-			}
+			pthreadMutexUnlock(gcontext->mutex);
+			gtask = gts->cb_next_task(gts, &scan_done);
+			pthreadMutexLock(gcontext->mutex);
+			if (!gtask || scan_done)
+				gts->scan_done = true;
+			if (!gtask)
+				break;
+			dlist_push_tail(&gcontext->pending_tasks, &gtask->chain);
+			gts->num_running_tasks++;
+			pg_atomic_add_fetch_u32(gcontext->global_num_running_tasks, 1);
+			pthreadCondSignal(gcontext->cond);
 		}
-		pthreadMutexUnlock(gcontext->mutex);
+		else if (!dlist_is_empty(&gts->ready_tasks))
+		{
+			/*
+			 * Even though we touched either local or global limitation of
+			 * the number of concurrent tasks, GTS already has ready tasks,
+			 * so pick them up instead of wait.
+			 */
+			pthreadMutexUnlock(gcontext->mutex);
+			goto pickup_gputask;
+		}
+		else if (gts->num_running_tasks > 0)
+		{
+			/*
+			 * Even though a few GpuTasks are running, but nobody gets
+			 * completed yet. Try to wait for completion to 
+			 */
+			pthreadMutexUnlock(gcontext->mutex);
+
+			ev = WaitLatch(MyLatch,
+						   WL_LATCH_SET |
+						   WL_TIMEOUT |
+						   WL_POSTMASTER_DEATH,
+						   500L);
+			if (ev & WL_POSTMASTER_DEATH)
+				ereport(FATAL,
+						(errcode(ERRCODE_ADMIN_SHUTDOWN),
+						 errmsg("Unexpected Postmaster dead")));
+			CHECK_FOR_GPUCONTEXT(gcontext);
+
+			pthreadMutexLock(gcontext->mutex);
+		}
+		else
+		{
+			pthreadMutexUnlock(gcontext->mutex);
+			/*
+			 * Sadly, we touched a threshold. Taks a short break.
+			 */
+			pg_usleep(20000L);	/* wait for 20msec */
+
+			CHECK_FOR_GPUCONTEXT(gcontext);
+			pthreadMutexLock(gcontext->mutex);
+		}
 	}
+	pthreadMutexUnlock(gcontext->mutex);
 
 	/*
 	 * Once we exit the above loop, either a completed task was returned,
@@ -521,7 +517,6 @@ pgstromReleaseGpuTaskState(GpuTaskState *gts)
 	/* unreference CUDA program */
 	if (gts->program_id != INVALID_PROGRAM_ID)
 		pgstrom_put_cuda_program(gts->gcontext, gts->program_id);
-
 	/* unreference GpuContext */
 	PutGpuContext(gts->gcontext);
 }
