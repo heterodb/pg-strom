@@ -613,7 +613,6 @@ GpuContextWorkerMain(void *arg)
 						 * GpuTask when retval==-2.
 						 */
 						pthreadMutexLock(gcontext->mutex);
-						wnotice("gtask=%p retval=%d num_running_tasks=%d scan_done=%d", gtask, retval, gts->num_running_tasks, gts->scan_done);
 						if (--gts->num_running_tasks == 0 &&
 							retval == -2 &&
 							gts->scan_done)
@@ -668,7 +667,7 @@ AllocGpuContext(int cuda_dindex, bool never_use_mps)
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuInit: %s", errorText(rc));
 		cuda_driver_initialized = true;
-		elog(NOTICE, "CUDA Driver Initialized");
+		elog(DEBUG2, "CUDA Driver Initialized");
 	}
 
 	/*
@@ -856,7 +855,7 @@ ActivateGpuContext(GpuContext *gcontext)
 
 			gcontext->worker_threads[i] = thread;
 		}
-		elog(NOTICE, "GpuContext is activated (%p)", gcontext->cuda_context);
+		elog(DEBUG2, "GpuContext is activated (pid: %d)", MyProcPid);
 
 		gcontext->worker_is_running = true;
 	}

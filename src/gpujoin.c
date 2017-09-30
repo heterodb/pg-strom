@@ -217,6 +217,7 @@ typedef struct
 	struct GpuJoinSharedState *gj_sstate;
 	/* Inner Buffers */
 	CUdeviceptr		m_kmrels;
+	CUdeviceptr	   *m_kmrels_array;	/* only master process */
 	dsm_segment	   *seg_kmrels;
 
 	/*
@@ -266,7 +267,7 @@ struct GpuJoinSharedState
 	pg_atomic_uint32 preload_done;	/* non-zero, if preload is done */
 	pg_atomic_uint32 pg_nworkers;	/* # of active PG workers */
 	struct {
-		CUdeviceptr		m_deviceptr;/* valid only master process */
+//		CUdeviceptr		m_deviceptr;/* valid only master process */
 		CUipcMemHandle	m_handle;	/* IPC handle for PG workers */
 	} pergpu[FLEXIBLE_ARRAY_MEMBER];
 };
@@ -1828,6 +1829,7 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 
 	/* DSM & GPU memory of inner buffer */
 	gjs->m_kmrels = 0UL;
+	gjs->m_kmrels_array = NULL;
 	gjs->seg_kmrels = NULL;
 
 	/*
@@ -2158,7 +2160,7 @@ ExecEndGpuJoin(CustomScanState *node)
 	for (i=0; i < gjs->num_rels; i++)
 		ExecEndNode(gjs->inners[i].state);
 	/* then other private resources */
-	GpuJoinInnerUnload(&gjs->gts);
+	GpuJoinInnerUnload(&gjs->gts, false);
 	pgstromReleaseGpuTaskState(&gjs->gts);
 }
 
@@ -2193,7 +2195,7 @@ ExecReScanGpuJoin(CustomScanState *node)
 				ExecReScan(istate->state);
 		}
 		/* rewind the inner hash/heap buffer */
-		GpuJoinInnerUnload(&gjs->gts);
+		GpuJoinInnerUnload(&gjs->gts, true);
 	}
 	/* common rescan handling */
 	pgstromRescanGpuTaskState(&gjs->gts);
@@ -5236,6 +5238,8 @@ __gpujoin_inner_preload(GpuJoinState *gjs, bool with_cpu_parallel)
 	size_t			required;
 
 	Assert(!IsParallelWorker());
+	gjs->m_kmrels_array = MemoryContextAllocZero(CurTransactionContext,
+											numDevAttrs * sizeof(CUdeviceptr));
 	seg = dsm_create(pgstrom_chunk_size(), 0);
 	h_kmrels = dsm_segment_address(seg);
 	kmrels_usage = STROMALIGN(offsetof(kern_multirels, chunks[num_rels]));
@@ -5355,7 +5359,7 @@ __gpujoin_inner_preload(GpuJoinState *gjs, bool with_cpu_parallel)
 			elog(ERROR, "failed on gpuMemAllocDev: %s", errorText(rc));
 		if (i == gcontext->cuda_dindex)
 			gjs->m_kmrels = m_deviceptr;
-		gj_sstate->pergpu[i].m_deviceptr = m_deviceptr;
+		gjs->m_kmrels_array[i] = m_deviceptr;
 
 		rc = cuMemcpyHtoD(m_deviceptr, h_kmrels, required);
 		if (rc != CUDA_SUCCESS)
@@ -5457,7 +5461,7 @@ GpuJoinInnerPreload(GpuTaskState *gts)
  * GpuJoinInnerUnload
  */
 void
-GpuJoinInnerUnload(GpuTaskState *gts)
+GpuJoinInnerUnload(GpuTaskState *gts, bool is_rescan)
 {
 	GpuJoinState   *gjs = (GpuJoinState *) gts;
 	GpuJoinSharedState *gj_sstate = gjs->gj_sstate;
@@ -5470,23 +5474,30 @@ GpuJoinInnerUnload(GpuTaskState *gts)
 
 	if (!IsParallelWorker())
 	{
-		pg_atomic_fetch_sub_u32(&gj_sstate->pg_nworkers, 1);
-
 		/* Release device memory */
-		for (i=0; i < numDevAttrs; i++)
+		if (gjs->m_kmrels_array)
 		{
-			rc = gpuMemFree(gcontext, gj_sstate->pergpu[i].m_deviceptr);
-			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on gpuMemFree: %s", errorText(rc));
+			for (i=0; i < numDevAttrs; i++)
+			{
+				rc = gpuMemFree(gcontext, gjs->m_kmrels_array[i]);
+				if (rc != CUDA_SUCCESS)
+					elog(ERROR, "failed on gpuMemFree: %s", errorText(rc));
+			}
+			pfree(gjs->m_kmrels_array);
+			gjs->m_kmrels_array = NULL;
 		}
-		/* Reset GpuJoinSharedState */
-		gj_sstate->kmrels_handle	= UINT_MAX;
-		pg_atomic_init_u32(&gj_sstate->had_cpu_fallback, 0);
-		pg_atomic_init_u32(&gj_sstate->preload_done, 0);
-		pg_atomic_init_u32(&gj_sstate->pg_nworkers, 0);
-		memset(gj_sstate->pergpu, 0,
-			   offsetof(GpuJoinSharedState, pergpu[numDevAttrs]) -
-			   offsetof(GpuJoinSharedState, pergpu[0]));
+		/* Reset GpuJoinSharedState, if rescan */
+		if (is_rescan)
+		{
+			gj_sstate->kmrels_handle	= UINT_MAX;	/* DSM */
+			pg_atomic_fetch_sub_u32(&gj_sstate->pg_nworkers, 1);
+			pg_atomic_init_u32(&gj_sstate->had_cpu_fallback, 0);
+			pg_atomic_init_u32(&gj_sstate->preload_done, 0);
+			pg_atomic_init_u32(&gj_sstate->pg_nworkers, 0);
+			memset(gj_sstate->pergpu, 0,
+				   offsetof(GpuJoinSharedState, pergpu[numDevAttrs]) -
+				   offsetof(GpuJoinSharedState, pergpu[0]));
+		}
 	}
 	else
 	{
