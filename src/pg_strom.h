@@ -872,7 +872,7 @@ extern ProgramId GpuJoinCreateUnifiedProgram(PlanState *node,
 											 cl_uint gpa_extra_flags,
 											 const char *gpa_kern_source);
 extern bool GpuJoinInnerPreload(GpuTaskState *gts);
-extern void GpuJoinInnerUnload(GpuTaskState *gts);
+extern void GpuJoinInnerUnload(GpuTaskState *gts, bool is_rescan);
 extern pgstrom_data_store *GpuJoinExecOuterScanChunk(GpuTaskState *gts,
 													 int *p_filedesc);
 extern bool gpujoinLoadInnerBuffer(GpuContext *gcontext,
