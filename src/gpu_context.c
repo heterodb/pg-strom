@@ -319,31 +319,36 @@ GpuContextLookupModule(GpuContext *gcontext, ProgramId program_id)
 	cl_int		index = program_id % CUDA_MODULES_HASHSIZE;
 	CUmodule	cuda_module;
 
-	SpinLockAcquire(&gcontext->cuda_modules_lock);
-	dlist_foreach(iter, &gcontext->cuda_modules_slot[index])
+	STROM_TRY();
 	{
-		entry = dlist_container(GpuContextModuleEntry, chain, iter.cur);
-		if (entry->program_id == program_id)
+		SpinLockAcquire(&gcontext->cuda_modules_lock);
+		dlist_foreach(iter, &gcontext->cuda_modules_slot[index])
 		{
-			cuda_module = entry->cuda_module;
-			SpinLockRelease(&gcontext->cuda_modules_lock);
-
-			return cuda_module;
+			entry = dlist_container(GpuContextModuleEntry, chain, iter.cur);
+			if (entry->program_id == program_id)
+			{
+				cuda_module = entry->cuda_module;
+				goto found;
+			}
 		}
+		entry = calloc(1, sizeof(GpuContextModuleEntry));
+		if (!entry)
+			werror("out of memory");
+		cuda_module = pgstrom_load_cuda_program(program_id);
+
+		entry->cuda_module = cuda_module;
+		entry->program_id = program_id;
+		dlist_push_head(&gcontext->cuda_modules_slot[index],
+						&entry->chain);
+	found:
+		SpinLockRelease(&gcontext->cuda_modules_lock);
 	}
-	entry = calloc(1, sizeof(GpuContextModuleEntry));
-	if (!entry)
+	STROM_CATCH();
 	{
 		SpinLockRelease(&gcontext->cuda_modules_lock);
-		werror("out of memory");
+		STROM_RE_THROW();
 	}
-	cuda_module = pgstrom_load_cuda_program(program_id);
-
-	entry->cuda_module = cuda_module;
-	entry->program_id = program_id;
-	dlist_push_head(&gcontext->cuda_modules_slot[index],
-					&entry->chain);
-	SpinLockRelease(&gcontext->cuda_modules_lock);
+	STROM_END_TRY();
 
 	return cuda_module;
 }

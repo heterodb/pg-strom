@@ -68,16 +68,9 @@ typedef struct
 	cl_uint		window_orig;	/* 'window_base' value on kernel invocation */
 	cl_uint		window_base;	/* base of the virtual partition window */
 	cl_uint		window_size;	/* size of the virtual partition window */
-	cl_uint		inner_nitems;	/* out: number of inner join results */
-	cl_uint		right_nitems;	/* out: number of right join results */
-	cl_float	row_dist_score;	/* out: count of non-zero histgram items on
-								 * window resize. larger score means more
-								 * distributed depth, thus to be target of
-								 * the window split */
-	cl_uint		window_base_saved;	/* internal: last value of 'window_base' */
-	cl_uint		window_size_saved;	/* internal: last value of 'window_size' */
-	cl_uint		inner_nitems_stage;	/* internal: # of inner join results */
-	cl_uint		right_nitems_stage;	/* internal: # of right join results */
+	cl_uint		inner_nitems;	/* out: # of inner join results */
+	cl_uint		right_nitems;	/* out: # of right join results */
+	cl_float	row_dist_score;	//deprecated
 } kern_join_scale;
 
 struct kern_gpujoin
@@ -88,9 +81,10 @@ struct kern_gpujoin
 	cl_uint			num_rels;			/* number of inner relations */
 	cl_uint			src_read_pos;		/* position to read from kds_src */
 	/* error status to be backed (OUT) */
-	cl_uint			nitems_filtered;
-	cl_uint			result_nitems;		/* copy of kds_dst->nitems */
-	cl_uint			result_usage;		/* copy of kds_dst->usage */
+	cl_uint			outer_nitems;		/* out: # of outer scan results */
+	cl_uint			nitems_filtered;	//deprecated
+	cl_uint			result_nitems;		//deprecated
+	cl_uint			result_usage;		//deprecated
 	kern_errorbuf	kerror;
 	/*
 	 * Scale of inner virtual window for each depth
@@ -180,11 +174,13 @@ gpujoin_projection(kern_context *kcxt,
  * static shared variables
  */
 static __shared__ cl_bool	scan_done;
+static __shared__ cl_int	base_depth;
 static __shared__ cl_uint	src_read_pos;
 static __shared__ cl_uint	dst_base_nitems;
 static __shared__ cl_uint	dst_base_usage;
 static __shared__ cl_uint	read_pos[GPUJOIN_MAX_DEPTH+1];
 static __shared__ cl_uint	write_pos[GPUJOIN_MAX_DEPTH+1];
+static __shared__ cl_uint	stat_nitems[GPUJOIN_MAX_DEPTH+1];
 static __shared__ cl_uint	pg_crc32_table[256];
 
 /*
@@ -195,7 +191,7 @@ gpujoin_rewind_stack(cl_int depth, cl_uint *l_state, cl_bool *matched)
 {
 	static __shared__ cl_int	__depth;
 
-	assert(depth > 0);
+	assert(depth > base_depth);
 	if (get_local_id() == 0)
 	{
 		__depth = depth;
@@ -205,9 +201,10 @@ gpujoin_rewind_stack(cl_int depth, cl_uint *l_state, cl_bool *matched)
 				read_pos[__depth] = 0;
 				write_pos[__depth] = 0;
 			}
-			if (__depth == 0 || read_pos[__depth-1] < write_pos[__depth-1])
+			if (__depth == base_depth ||
+				read_pos[__depth-1] < write_pos[__depth-1])
 				break;
-		} while (__depth-- > 0);
+		} while (__depth-- > base_depth);
 	}
 	__syncthreads();
 	depth = __depth;
@@ -319,7 +316,10 @@ gpujoin_load_source(kern_context *kcxt,
 		wr_index = write_pos[0];
 		wr_index += pgstromStairlikeBinaryCount(visible, &count);
 		if (get_local_id() == 0)
+		{
 			write_pos[0] += count;
+			stat_nitems[0] += count;
+		}
 		if (visible)
 			wr_stack[wr_index] = t_offset;
 		__syncthreads();
@@ -365,6 +365,86 @@ gpujoin_load_source(kern_context *kcxt,
 		return 1;
 	}
 	return 0;
+}
+
+/*
+ * gpujoin_load_outer
+ */
+STATIC_FUNCTION(cl_int)
+gpujoin_load_outer(kern_context *kcxt,
+				   kern_gpujoin *kgjoin,
+				   kern_multirels *kmrels,
+				   cl_int outer_depth,
+				   cl_uint *wr_stack,
+				   cl_uint *l_state)
+{
+	kern_data_store *kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, outer_depth);
+	cl_bool		   *ojmap = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, outer_depth);
+	HeapTupleHeaderData *htup = NULL;
+	kern_tupitem   *tupitem;
+	cl_uint			t_offset;
+	cl_uint			row_index;
+	cl_uint			wr_index;
+	cl_uint			count;
+
+	assert(ojmap != NULL);
+
+	if (get_local_id() == 0)
+		src_read_pos = atomicAdd(&kgjoin->src_read_pos,
+								 get_local_size());
+	__syncthreads();
+	row_index = src_read_pos + get_local_id();
+
+	/* pickup inner rows, if unreferenced */
+	if (row_index < kds_in->nitems && !ojmap[row_index])
+	{
+		tupitem = KERN_DATA_STORE_TUPITEM(kds_in, row_index);
+		t_offset = (cl_uint)((char *)&tupitem->htup - (char *)kds_in);
+		htup = &tupitem->htup;
+	}
+
+	if (__syncthreads_count(htup != NULL) > 0)
+	{
+		wr_index = write_pos[outer_depth];
+		wr_index += pgstromStairlikeBinaryCount(htup != NULL, &count);
+		if (get_local_id() == 0)
+		{
+			write_pos[outer_depth] += count;
+			stat_nitems[outer_depth] += count;
+		}
+		if (htup)
+		{
+			wr_stack += wr_index * (outer_depth + 1);
+			memset(wr_stack, 0, sizeof(cl_uint) * outer_depth);
+			wr_stack[outer_depth] = t_offset;
+		}
+		__syncthreads();
+	}
+
+	/* end of the inner relation? */
+	if (src_read_pos >= kds_in->nitems)
+	{
+		/* don't rewind the stack any more */
+		if (get_local_id() == 0)
+			scan_done = true;
+		__syncthreads();
+
+		/*
+		 * We may have to dive into the deeper depth if we still have
+		 * pending join combinations.
+		 */
+		if (write_pos[outer_depth] == 0)
+		{
+			for (cl_int dep=outer_depth + 1; dep <= GPUJOIN_MAX_DEPTH; dep++)
+			{
+				if (read_pos[dep] < write_pos[dep])
+					return dep+1;
+			}
+			return -1;
+		}
+		return outer_depth+1;
+	}
+	return outer_depth;
 }
 
 /*
@@ -577,7 +657,10 @@ left_outer:
 	wr_index = write_pos[depth];
 	wr_index += pgstromStairlikeBinaryCount(result, &count);
 	if (get_local_id() == 0)
+	{
 		write_pos[depth] += count;
+		stat_nitems[depth] += count;
+	}
 	wr_stack += wr_index * (depth + 1);
 	if (result)
 	{
@@ -725,7 +808,10 @@ gpujoin_exec_hashjoin(kern_context *kcxt,
 	wr_index = write_pos[depth];
 	wr_index += pgstromStairlikeBinaryCount(result, &count);
 	if (get_local_id() == 0)
+	{
 		write_pos[depth] += count;
+		stat_nitems[depth] += count;
+	}
 	wr_stack += wr_index * (depth + 1);
 	if (result)
 	{
@@ -739,6 +825,10 @@ gpujoin_exec_hashjoin(kern_context *kcxt,
 		return depth;
 	return depth+1;
 }
+
+#define PSTACK_DEPTH(d)							\
+	((d) >= 0 && (d) <= kgjoin->num_rels		\
+	 ? (pstack_base + pstack_nrooms * ((d) * ((d) + 1)) / 2) : NULL)
 
 /*
  * gpujoin_main
@@ -772,9 +862,6 @@ gpujoin_main(kern_gpujoin *kgjoin,
 	pstack_base = (cl_uint *)((char *)kgjoin + kgjoin->pstack_offset)
 		+ get_global_index() * pstack_nrooms * ((GPUJOIN_MAX_DEPTH+1) *
 												(GPUJOIN_MAX_DEPTH+2)) / 2;
-#define PSTACK_DEPTH(d)							\
-	((d) >= 0 && (d) <= kgjoin->num_rels		\
-	 ? (pstack_base + pstack_nrooms * ((d) * ((d) + 1)) / 2) : NULL)
 	memset(l_state, 0, sizeof(l_state));
 	memset(matched, 0, sizeof(matched));
 
@@ -791,9 +878,11 @@ gpujoin_main(kern_gpujoin *kgjoin,
 	if (get_local_id() == 0)
 	{
 		src_read_pos = UINT_MAX;
+		memset(stat_nitems, 0, sizeof(stat_nitems));
 		memset(read_pos, 0, sizeof(read_pos));
 		memset(write_pos, 0, sizeof(write_pos));
 		scan_done = false;
+		base_depth = 0;
 	}
 	__syncthreads();
 
@@ -852,7 +941,17 @@ gpujoin_main(kern_gpujoin *kgjoin,
 		}
 		__syncthreads();
 	}
-out:
+	/* write out statistics */
+	for (index = get_local_id();
+		 index <= GPUJOIN_MAX_DEPTH;
+		 index += get_local_size())
+	{
+		atomicAdd(index == 0
+				  ? &kgjoin->outer_nitems
+				  : &kgjoin->jscale[index-1].inner_nitems,
+				  stat_nitems[index]);
+	}
+	__syncthreads();
 	kern_writeback_error_status(&kgjoin->kerror, kcxt.e);
 }
 
@@ -879,6 +978,124 @@ gpujoin_colocate_outer_join_map(kern_multirels *kmrels,
 		}
 		destmap[get_global_id()] = map;
 	}
+}
+
+/*
+ * gpujoin_right_outer
+ */
+KERNEL_FUNCTION(void)
+gpujoin_right_outer(kern_gpujoin *kgjoin,
+					kern_multirels *kmrels,
+					cl_int outer_depth,
+					kern_data_store *kds_dst)
+{
+	kern_parambuf  *kparams = KERN_GPUJOIN_PARAMBUF(kgjoin);
+	kern_context	kcxt;
+	cl_int			depth;
+	cl_int			index;
+	cl_uint			pstack_nrooms;
+	cl_uint		   *pstack_base;
+	cl_uint			l_state[GPUJOIN_MAX_DEPTH+1];
+	cl_bool			matched[GPUJOIN_MAX_DEPTH+1];
+
+	INIT_KERNEL_CONTEXT(&kcxt, gpujoin_main, kparams);
+	assert(kds_dst->format == KDS_FORMAT_ROW);
+	assert(KERN_MULTIRELS_RIGHT_OUTER_JOIN(kmrels, outer_depth));
+
+	/* setup private variables */
+	pstack_nrooms = kgjoin->pstack_nrooms;
+	pstack_base = (cl_uint *)((char *)kgjoin + kgjoin->pstack_offset)
+		+ get_global_index() * pstack_nrooms * ((GPUJOIN_MAX_DEPTH+1) *
+												(GPUJOIN_MAX_DEPTH+2)) / 2;
+	/* setup crc32 table */
+	for (index = get_local_id();
+		 index < lengthof(pg_crc32_table);
+		 index += get_local_size())
+		pg_crc32_table[index] = kmrels->pg_crc32_table[index];
+	__syncthreads();
+
+	/* setup per-depth context */
+	memset(l_state, 0, sizeof(l_state));
+	memset(matched, 0, sizeof(matched));
+	if (get_local_id() == 0)
+	{
+		src_read_pos = UINT_MAX;
+		memset(stat_nitems, 0, sizeof(stat_nitems));
+		memset(read_pos, 0, sizeof(read_pos));
+		memset(write_pos, 0, sizeof(write_pos));
+		scan_done = false;
+		base_depth = outer_depth;
+	}
+	__syncthreads();
+
+	/* main logic of GpuJoin */
+	depth = outer_depth;
+	while (depth >= outer_depth)
+	{
+		if (depth == outer_depth)
+		{
+			/* makes RIGHT OUTER combinations using OUTER JOIN map */
+			depth = gpujoin_load_outer(&kcxt,
+									   kgjoin,
+									   kmrels,
+									   outer_depth,
+									   PSTACK_DEPTH(outer_depth),
+									   l_state);
+		}
+		else if (depth > kgjoin->num_rels)
+		{
+			/* PROJECTION (ROW) */
+			assert(depth == kmrels->nrels + 1);
+			depth = gpujoin_projection_row(&kcxt,
+										   kgjoin,
+										   kmrels,
+										   NULL,
+										   kds_dst,
+										   PSTACK_DEPTH(kgjoin->num_rels),
+										   l_state,
+										   matched);
+		}
+		else if (kmrels->chunks[depth-1].is_nestloop)
+		{
+			/* NEST-LOOP */
+			depth = gpujoin_exec_nestloop(&kcxt,
+										  kgjoin,
+										  kmrels,
+										  NULL,
+										  depth,
+										  PSTACK_DEPTH(depth-1),
+										  PSTACK_DEPTH(depth),
+										  l_state,
+										  matched);
+		}
+		else
+		{
+			/* HASH-JOIN */
+			depth = gpujoin_exec_hashjoin(&kcxt,
+										  kgjoin,
+										  kmrels,
+										  NULL,
+										  depth,
+										  PSTACK_DEPTH(depth-1),
+										  PSTACK_DEPTH(depth),
+										  l_state,
+										  matched);
+		}
+		__syncthreads();
+	}
+	/* write out statistics */
+	for (index = get_local_id();
+		 index <= GPUJOIN_MAX_DEPTH;
+		 index += get_local_size())
+	{
+		if (index >= outer_depth)
+			atomicAdd(index == outer_depth
+					  ? &kgjoin->jscale[index-1].right_nitems
+					  : &kgjoin->jscale[index-1].inner_nitems,
+					  stat_nitems[index]);
+	}
+	__syncthreads();
+	kern_writeback_error_status(&kgjoin->kerror, kcxt.e);
 }
 
 #endif	/* __CUDACC__ */
