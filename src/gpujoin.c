@@ -214,7 +214,9 @@ typedef struct
 typedef struct
 {
 	GpuTaskState	gts;
-	struct GpuJoinSharedState *gj_sstate;
+	struct GpuJoinSharedState *gj_sstate;	/* may be on DSM */
+	struct GpuJoinRuntimeStat *gj_rtstat;	/* valid only PG10 or later */
+
 	/* Inner Buffers */
 	CUdeviceptr		m_kmrels;
 	CUdeviceptr	   *m_kmrels_array;	/* only master process */
@@ -233,9 +235,6 @@ typedef struct
 	int				result_width;
 	/* expected extra length per result tuple  */
 	cl_uint			extra_maxlen;
-
-	/* buffer for row materialization  */
-	//HeapTupleData	curr_tuple;		//nobody use?
 
 	/*
 	 * CPU Fallback
@@ -261,17 +260,34 @@ struct GpuJoinSharedState
 {
 	dsm_handle		ss_handle;		/* DSM handle of the SharedState */
 	cl_uint			ss_length;		/* Length of the SharedState */
+	size_t			offset_runtime_stat; /* offset to the runtime statistics */
 	Latch		   *masterLatch;	/* Latch of the master process */
 	dsm_handle		kmrels_handle;	/* DSM of kern_multirels */
 	pg_atomic_uint32 had_cpu_fallback; /* non-zero, if any CPU fallback */
 	pg_atomic_uint32 preload_done;	/* non-zero, if preload is done */
 	pg_atomic_uint32 pg_nworkers;	/* # of active PG workers */
 	struct {
-//		CUdeviceptr		m_deviceptr;/* valid only master process */
 		CUipcMemHandle	m_handle;	/* IPC handle for PG workers */
 	} pergpu[FLEXIBLE_ARRAY_MEMBER];
 };
 typedef struct GpuJoinSharedState	GpuJoinSharedState;
+
+/*
+ * GpuJoinRuntimeStat - shared runtime statistics
+ */
+struct GpuJoinRuntimeStat
+{
+	pg_atomic_uint64	source_nitems;
+	struct {
+		pg_atomic_uint64 inner_nitems;
+		pg_atomic_uint64 right_nitems;
+	} jstat[FLEXIBLE_ARRAY_MEMBER];
+};
+typedef struct GpuJoinRuntimeStat	GpuJoinRuntimeStat;
+
+#define GPUJOIN_RUNTIME_STAT(gj_sstate)							\
+	((GpuJoinRuntimeStat *)((char *)(gj_sstate) +				\
+							(gj_sstate)->offset_runtime_stat))
 
 /*
  * GpuJoinTask - task object of GpuJoin
@@ -2207,7 +2223,7 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 	GpuJoinState   *gjs = (GpuJoinState *) node;
 	CustomScan	   *cscan = (CustomScan *) node->ss.ps.plan;
 	GpuJoinInfo	   *gj_info = deform_gpujoin_info(cscan);
-//    GpuJoinSharedState *gj_sstate = gjs->gj_sstate;
+	GpuJoinRuntimeStat *gj_rtstat = gjs->gj_rtstat;
 	List		   *dcontext;
 	ListCell	   *lc1;
 	ListCell	   *lc2;
@@ -2229,11 +2245,9 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 	{
 		TargetEntry	   *tle = lfirst(lc1);
 
-#if 1
-		/* disable this code block, if junk TLE is noisy */
 		if (tle->resjunk)
 			continue;
-#endif
+
 		if (lc1 != list_head(cscan->custom_scan_tlist))
 			appendStringInfo(&str, ", ");
 		if (tle->resjunk)
@@ -2250,17 +2264,16 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 			appendStringInfoChar(&str, ']');
 	}
 	ExplainPropertyText("GPU Projection", str.data, es);
-#if 0
-	/* statistics for outer scan, if it was pulled-up */
-	if (es->analyze)
+
+	/* statistics for outer scan, if any */
+	if (gj_rtstat)
 	{
-		gjs->gts.outer_instrument.tuplecount = (gj_sstate->inner_nitems[0] +
-												gj_sstate->right_nitems[0]);
-		gjs->gts.outer_instrument.nfiltered1 = (gj_sstate->source_nitems -
-												gj_sstate->inner_nitems[0] -
-												gj_sstate->right_nitems[0]);
+		gjs->gts.outer_instrument.tuplecount =
+			pg_atomic_read_u64(&gj_rtstat->source_nitems);
+		gjs->gts.outer_instrument.nfiltered1 =
+			(pg_atomic_read_u64(&gj_rtstat->source_nitems) -
+			 pg_atomic_read_u64(&gj_rtstat->jstat[0].inner_nitems));
 	}
-#endif
 	pgstromExplainOuterScan(&gjs->gts, dcontext, ancestors, es,
 							gj_info->outer_quals,
                             gj_info->outer_startup_cost,
@@ -2296,15 +2309,17 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 		/* fetch number of rows */
 		plan_nrows_in = floatVal(list_nth(gj_info->plan_nrows_in, depth-1));
 		plan_nrows_out = floatVal(list_nth(gj_info->plan_nrows_out, depth-1));
-#if 0
-		if (es->analyze)
+		if (gj_rtstat)
 		{
-			exec_nrows_in = (gj_sstate->inner_nitems[depth - 1] +
-							 gj_sstate->right_nitems[depth - 1]);
-			exec_nrows_out1 = gj_sstate->inner_nitems[depth];
-			exec_nrows_out2 = gj_sstate->right_nitems[depth];
+			exec_nrows_in = (double)
+				(pg_atomic_read_u64(&gj_rtstat->jstat[depth-1].inner_nitems) +
+				 pg_atomic_read_u64(&gj_rtstat->jstat[depth-1].right_nitems));
+			exec_nrows_out1 = (double)
+				pg_atomic_read_u64(&gj_rtstat->jstat[depth].inner_nitems);
+			exec_nrows_out2 = (double)
+				pg_atomic_read_u64(&gj_rtstat->jstat[depth].right_nitems);
 		}
-#endif
+
 		resetStringInfo(&str);
 		if (hash_outer_key != NULL)
 		{
@@ -2325,7 +2340,7 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 
 		if (es->format == EXPLAIN_FORMAT_TEXT)
 		{
-			if (!es->analyze)
+			if (!gj_rtstat)
 				appendStringInfo(&str, "  (nrows %.0f...%.0f)",
 								 plan_nrows_in,
 								 plan_nrows_out);
@@ -2358,7 +2373,7 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 					 "Depth% 2d Plan Rows-out", depth);
 			ExplainPropertyFloat(qlabel, plan_nrows_out, 0, es);
 
-			if (es->analyze)
+			if (gj_rtstat)
 			{
 				snprintf(qlabel, sizeof(qlabel),
 						 "Depth% 2d Actual Rows-in", depth);
@@ -2485,8 +2500,12 @@ static Size
 ExecGpuJoinEstimateDSM(CustomScanState *node,
 					   ParallelContext *pcxt)
 {
+	GpuJoinState   *gjs = (GpuJoinState *) node;
+
 	return MAXALIGN(offsetof(GpuJoinSharedState,
 							 pergpu[numDevAttrs]))
+		+ MAXALIGN(offsetof(GpuJoinRuntimeStat,
+							jstat[gjs->num_rels + 1]))
 		+ ExecGpuScanEstimateDSM(node, pcxt);
 }
 
@@ -2527,11 +2546,22 @@ ExecGpuJoinInitWorker(CustomScanState *node,
 #if PG_VERSION_NUM >= 100000
 /*
  * ExecShutdownGpuJoin
+ *
+ * DSM shall be released prior to Explain callback, so we have to save the
+ * run-time statistics on the shutdown timing.
  */
 static void
 ExecShutdownGpuJoin(CustomScanState *node)
 {
-	GpuJoinState   *gjs = (GpuJoinState *) node;
+	GpuJoinState	   *gjs = (GpuJoinState *) node;
+	GpuJoinRuntimeStat *gj_rtstat = GPUJOIN_RUNTIME_STAT(gjs->gj_sstate);
+	size_t		length;
+
+	Assert(!gjs->gj_rtstat);
+	length = offsetof(GpuJoinRuntimeStat, jstat[gjs->num_rels + 1]);
+	gjs->gj_rtstat = MemoryContextAlloc(CurTransactionContext,
+										MAXALIGN(length));
+	memcpy(gjs->gj_rtstat, gj_rtstat, length);
 }
 #endif
 
@@ -4592,7 +4622,7 @@ gpujoin_colocate_outerjoin_maps(GpuJoinState *gjs, CUmodule cuda_module)
 }
 
 static cl_int
-gpujoin_process_kernel(GpuJoinTask *pgjoin, CUmodule cuda_module)
+gpujoin_process_innerjoin(GpuJoinTask *pgjoin, CUmodule cuda_module)
 {
 	GpuContext		   *gcontext = GpuWorkerCurrentContext;
 	GpuJoinState	   *gjs = (GpuJoinState *) pgjoin->task.gts;
@@ -4730,8 +4760,25 @@ gpujoin_process_kernel(GpuJoinTask *pgjoin, CUmodule cuda_module)
 	 * Elsewhere, update run-time statistics.
 	 */
 	pgjoin->task.kerror = pgjoin->kern.kerror;
-	if (pgstrom_cpu_fallback_enabled &&
-		pgjoin->task.kerror.errcode == StromError_CpuReCheck)
+	if (pgjoin->task.kerror.errcode == StromError_Success)
+	{
+		/* update statistics */
+		GpuJoinSharedState *gj_sstate = gjs->gj_sstate;
+		GpuJoinRuntimeStat *gj_rtstat = GPUJOIN_RUNTIME_STAT(gj_sstate);
+		cl_int		i;
+
+		pg_atomic_fetch_add_u64(&gj_rtstat->source_nitems,
+								pgjoin->kern.source_nitems);
+		pg_atomic_fetch_add_u64(&gj_rtstat->jstat[0].inner_nitems,
+								pgjoin->kern.outer_nitems);
+		for (i=0; i <= gjs->num_rels; i++)
+		{
+			pg_atomic_fetch_add_u64(&gj_rtstat->jstat[i+1].inner_nitems,
+									pgjoin->kern.jscale[i].inner_nitems);
+		}
+	}
+	else if (pgstrom_cpu_fallback_enabled &&
+			 pgjoin->task.kerror.errcode == StromError_CpuReCheck)
 	{
 		pgjoin->task.kerror.errcode = StromError_Success;
 		pgjoin->task.cpu_fallback = true;
@@ -4919,7 +4966,7 @@ gpujoin_process_task(GpuTask *gtask, CUmodule cuda_module)
 	int		retval;
 
 	if (pgjoin->pds_src)
-		retval = gpujoin_process_kernel(pgjoin, cuda_module);
+		retval = gpujoin_process_innerjoin(pgjoin, cuda_module);
 	else
 		retval = -1; //gpujoin_process_right_outer(pgjoin, cuda_module);
 
@@ -5393,6 +5440,7 @@ GpuJoinInnerPreload(GpuTaskState *gts)
 	{
 		Assert(!IsParallelWorker());
 		gjs->gj_sstate = createGpuJoinSharedState(gjs, NULL, NULL);
+		gjs->gj_rtstat = GPUJOIN_RUNTIME_STAT(gjs->gj_sstate);
 		with_cpu_parallel = false;
 	}
 	gj_sstate = gjs->gj_sstate;
@@ -5524,10 +5572,13 @@ createGpuJoinSharedState(GpuJoinState *gjs,
 						 void *dsm_addr)
 {
 	GpuJoinSharedState *gj_sstate;
+	GpuJoinRuntimeStat *gj_rtstat;
 	cl_uint		ss_length;
 
-	ss_length = MAXALIGN(offsetof(GpuJoinSharedState,
-								  pergpu[numDevAttrs]));
+	ss_length = (MAXALIGN(offsetof(GpuJoinSharedState,
+								   pergpu[numDevAttrs])) +
+				 MAXALIGN(offsetof(GpuJoinRuntimeStat,
+								   jstat[gjs->num_rels + 1])));
 	if (dsm_addr)
 		gj_sstate = dsm_addr;
 	else
@@ -5535,12 +5586,17 @@ createGpuJoinSharedState(GpuJoinState *gjs,
 	memset(gj_sstate, 0, ss_length);
 	gj_sstate->ss_handle = (pcxt ? dsm_segment_handle(pcxt->seg) : UINT_MAX);
 	gj_sstate->ss_length = ss_length;
+	gj_sstate->offset_runtime_stat = MAXALIGN(offsetof(GpuJoinSharedState,
+													   pergpu[numDevAttrs]));
 	gj_sstate->masterLatch = MyLatch;
 	gj_sstate->kmrels_handle = UINT_MAX;	/* to be set later */
 	pg_atomic_init_u32(&gj_sstate->had_cpu_fallback, 0);
 	pg_atomic_init_u32(&gj_sstate->preload_done, 0);
 	pg_atomic_init_u32(&gj_sstate->pg_nworkers, 0);
 
+	gj_rtstat = GPUJOIN_RUNTIME_STAT(gj_sstate);
+	memset(gj_rtstat, 0, MAXALIGN(offsetof(GpuJoinRuntimeStat,
+										   jstat[gjs->num_rels + 1])));
 	return gj_sstate;
 }
 
