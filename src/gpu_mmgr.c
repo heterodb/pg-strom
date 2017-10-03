@@ -111,11 +111,13 @@ nvme_strom_ioctl(int cmd, void *arg)
 		fdesc_nvme_strom = open(NVME_STROM_IOCTL_PATHNAME, O_RDONLY);
 		if (fdesc_nvme_strom < 0)
 		{
+#ifdef NOT_USED
 			int		saved_errno = errno;
 
 			fprintf(stderr, "failed on open('%s'): %m\n",
 					NVME_STROM_IOCTL_PATHNAME);
 			errno = saved_errno;
+#endif
 			return -1;
 		}
 	}
@@ -581,7 +583,7 @@ retry:
 		case GpuMemKind__ManagedMemory:
 			rc = cuMemAllocManaged(&m_segment, gm_segment_sz,
 								   CU_MEM_ATTACH_GLOBAL);
-			wnotice("managed m_segment = %p - %p", (void *)m_segment, (void *)(m_segment + gm_segment_sz));
+			//wnotice("managed m_segment = %p - %p", (void *)m_segment, (void *)(m_segment + gm_segment_sz));
 			break;
 
 		case GpuMemKind__IOMapMemory:
