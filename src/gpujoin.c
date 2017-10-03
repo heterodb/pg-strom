@@ -316,8 +316,9 @@ static bool					enable_gpunestloop;
 static bool					enable_gpuhashjoin;
 
 /* static functions */
-static GpuTask *gpujoin_next_task(GpuTaskState *gts, cl_bool *scan_done);
-static GpuTask *gpujoin_terminator_task(GpuTaskState *gts);
+static GpuTask *gpujoin_next_task(GpuTaskState *gts);
+static GpuTask *gpujoin_terminator_task(GpuTaskState *gts,
+										cl_bool *task_is_ready);
 static void gpujoin_switch_task(GpuTaskState *gts, GpuTask *gtask);
 static TupleTableSlot *gpujoin_next_tuple(GpuTaskState *gts);
 static TupleTableSlot *gpujoin_next_tuple_fallback(GpuJoinState *gjs,
@@ -3752,7 +3753,7 @@ GpuJoinExecOuterScanChunk(GpuTaskState *gts, int *p_filedesc)
  * gpujoin_next_task
  */
 static GpuTask *
-gpujoin_next_task(GpuTaskState *gts, cl_bool *scan_done)
+gpujoin_next_task(GpuTaskState *gts)
 {
 	GpuJoinState   *gjs = (GpuJoinState *) gts;
 	GpuTask		   *gtask = NULL;
@@ -3769,7 +3770,7 @@ gpujoin_next_task(GpuTaskState *gts, cl_bool *scan_done)
  * gpujoin_terminator_task
  */
 static GpuTask *
-gpujoin_terminator_task(GpuTaskState *gts)
+gpujoin_terminator_task(GpuTaskState *gts, cl_bool *task_is_ready)
 {
 	GpuJoinState	   *gjs = (GpuJoinState *) gts;
 	GpuJoinSharedState *gj_sstate = gjs->gj_sstate;

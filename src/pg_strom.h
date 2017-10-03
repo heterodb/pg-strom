@@ -203,8 +203,9 @@ struct GpuTaskState
 	struct GpuTask *curr_task;	/* a GpuTask currently processed */
 
 	/* callbacks used by gputasks.c */
-	GpuTask		 *(*cb_next_task)(GpuTaskState *gts, cl_bool *scan_done);
-	GpuTask		 *(*cb_terminator_task)(GpuTaskState *gts);
+	GpuTask		 *(*cb_next_task)(GpuTaskState *gts);
+	GpuTask		 *(*cb_terminator_task)(GpuTaskState *gts,
+										cl_bool *task_is_ready);
 	void		  (*cb_switch_task)(GpuTaskState *gts, GpuTask *gtask);
 	TupleTableSlot *(*cb_next_tuple)(GpuTaskState *gts);
 	struct pgstrom_data_store *(*cb_bulk_exec)(GpuTaskState *gts,

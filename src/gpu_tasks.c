@@ -256,15 +256,14 @@ fetch_next_gputask(GpuTaskState *gts)
 			(dlist_is_empty(&gts->ready_tasks) &&
 			 gts->num_running_tasks == 0))
 		{
-			cl_bool		scan_done = false;
-
 			pthreadMutexUnlock(gcontext->mutex);
-			gtask = gts->cb_next_task(gts, &scan_done);
+			gtask = gts->cb_next_task(gts);
 			pthreadMutexLock(gcontext->mutex);
-			if (!gtask || scan_done)
-				gts->scan_done = true;
 			if (!gtask)
+			{
+				gts->scan_done = true;
 				break;
+			}
 			dlist_push_tail(&gcontext->pending_tasks, &gtask->chain);
 			gts->num_running_tasks++;
 			pg_atomic_add_fetch_u32(gcontext->global_num_running_tasks, 1);
@@ -331,14 +330,26 @@ retry:
 			pthreadMutexUnlock(gcontext->mutex);
 			if (gts->cb_terminator_task)
 			{
-				gtask = gts->cb_terminator_task(gts);
+				cl_bool		is_ready = false;
+
+				gtask = gts->cb_terminator_task(gts, &is_ready);
 				pthreadMutexLock(gcontext->mutex);
 				if (gtask)
 				{
-					dlist_push_tail(&gcontext->pending_tasks, &gtask->chain);
-					gts->num_running_tasks++;
-					pg_atomic_add_fetch_u32(gcontext->global_num_running_tasks, 1);
-					pthreadCondSignal(gcontext->cond);
+					if (is_ready)
+					{
+						dlist_push_tail(&gts->ready_tasks,
+										&gtask->chain);
+						gts->num_ready_tasks++;
+					}
+					else
+					{
+						dlist_push_tail(&gcontext->pending_tasks,
+										&gtask->chain);
+						gts->num_running_tasks++;
+						pg_atomic_add_fetch_u32(gcontext->global_num_running_tasks, 1);
+						pthreadCondSignal(gcontext->cond);
+					}
 					goto retry;
 				}
 				pthreadMutexUnlock(gcontext->mutex);
