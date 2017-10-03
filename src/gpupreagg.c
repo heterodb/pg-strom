@@ -3465,7 +3465,8 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 		Assert(gpa_info->outer_quals == NIL);
 		outer_ps = ExecInitNode(outerPlan(cscan), estate, eflags);
 		if (enable_pullup_outer_join &&
-			pgstrom_planstate_is_gpujoin(outer_ps))
+			pgstrom_planstate_is_gpujoin(outer_ps) &&
+			!outer_ps->ps_ProjInfo)
 		{
 			gpas->unified_gpujoin = true;
 		}
@@ -4825,7 +4826,7 @@ pgstrom_init_gpupreagg(void)
 							 "Enables to pull up GpuJoin under GpuPreAgg",
 							 NULL,
 							 &enable_pullup_outer_join,
-							 false, //true, -- XXX to be reworked
+							 false, //true,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);

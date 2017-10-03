@@ -1003,7 +1003,7 @@ gpujoin_right_outer(kern_gpujoin *kgjoin,
 	cl_uint			l_state[GPUJOIN_MAX_DEPTH+1];
 	cl_bool			matched[GPUJOIN_MAX_DEPTH+1];
 
-	INIT_KERNEL_CONTEXT(&kcxt, gpujoin_main, kparams);
+	INIT_KERNEL_CONTEXT(&kcxt, gpujoin_right_outer, kparams);
 	assert(kds_dst->format == KDS_FORMAT_ROW);
 	assert(KERN_MULTIRELS_RIGHT_OUTER_JOIN(kmrels, outer_depth));
 

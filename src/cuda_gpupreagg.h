@@ -1046,57 +1046,6 @@ clean_restart:
 	kern_writeback_error_status(&kgpreagg->kerror, kcxt.e);
 }
 
-/*
- * gpupreagg_fixup_varlena
- *
- * In case when varlena datum (excludes numeric) is used in grouping-key,
- * datum on kds with tupslot format has not-interpretable for host systems.
- * So, we need to fix up its value to adjust offset by hostptr.
- */
-KERNEL_FUNCTION(void)
-gpupreagg_fixup_varlena(kern_data_store *kds_final,
-						hostptr_t kds_baseptr)
-{
-	cl_uint			i, ncols = kds_final->ncols;
-	kern_colmeta	cmeta;
-	devptr_t		dev_base;
-	size_t			kds_index;
-
-	/* Sanity checks */
-	assert(kds_final->format == KDS_FORMAT_SLOT);
-	assert(kds_final->has_notbyval);
-
-	dev_base = ((devptr_t)kds_final +
-				(size_t)kds_final->length -
-				(size_t)kds_final->usage);
-
-	for (kds_index = get_global_id();
-		 kds_index < kds_final->nitems;
-		 kds_index += get_global_size())
-	{
-		Datum   *dst_values = KERN_DATA_STORE_VALUES(kds_final, kds_index);
-		cl_bool *dst_isnull = KERN_DATA_STORE_ISNULL(kds_final, kds_index);
-
-		for (i=0; i < ncols; i++)
-		{
-			/* No need to fixup NULL value anyway */
-			if (dst_isnull[i])
-				continue;
-
-			cmeta = kds_final->colmeta[i];
-			if (!cmeta.attbyval)
-			{
-				devptr_t	devptr = (devptr_t) dst_values[i];
-
-				assert(devptr >= dev_base &&
-					   devptr <= dev_base + (size_t)kds_final->usage);
-				dst_values[i] = (Datum)(kds_baseptr +
-										(devptr - dev_base));
-			}
-		}
-	}
-}
-
 #ifdef CUDA_GPUJOIN_H
 /*
  * gpupreagg_join_main
