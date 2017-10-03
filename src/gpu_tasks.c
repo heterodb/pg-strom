@@ -321,6 +321,7 @@ fetch_next_gputask(GpuTaskState *gts)
 	 */
 	Assert(gts->scan_done);
 	pthreadMutexLock(gcontext->mutex);
+retry:
 	ResetLatch(MyLatch);
 	while (dlist_is_empty(&gts->ready_tasks))
 	{
@@ -328,6 +329,20 @@ fetch_next_gputask(GpuTaskState *gts)
 		if (gts->num_running_tasks == 0)
 		{
 			pthreadMutexUnlock(gcontext->mutex);
+			if (gts->cb_terminator_task)
+			{
+				gtask = gts->cb_terminator_task(gts);
+				pthreadMutexLock(gcontext->mutex);
+				if (gtask)
+				{
+					dlist_push_tail(&gcontext->pending_tasks, &gtask->chain);
+					gts->num_running_tasks++;
+					pg_atomic_add_fetch_u32(gcontext->global_num_running_tasks, 1);
+					pthreadCondSignal(gcontext->cond);
+					goto retry;
+				}
+				pthreadMutexUnlock(gcontext->mutex);
+			}
 			return NULL;
 		}
 		pthreadMutexUnlock(gcontext->mutex);

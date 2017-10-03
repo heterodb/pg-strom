@@ -68,8 +68,7 @@ typedef struct
 	cl_uint		window_orig;	/* 'window_base' value on kernel invocation */
 	cl_uint		window_base;	/* base of the virtual partition window */
 	cl_uint		window_size;	/* size of the virtual partition window */
-	cl_uint		inner_nitems;	/* out: # of inner join results */
-	cl_uint		right_nitems;	/* out: # of right join results */
+	cl_uint		stat_nitems;	/* out: # of join results in this depth */
 	cl_float	row_dist_score;	//deprecated
 } kern_join_scale;
 
@@ -207,10 +206,13 @@ gpujoin_rewind_stack(cl_int depth, cl_uint *l_state, cl_bool *matched)
 	}
 	__syncthreads();
 	depth = __depth;
-	memset(l_state + depth, 0,
-		   sizeof(cl_uint) * (GPUJOIN_MAX_DEPTH + 1 - depth));
-	memset(matched + depth, 0,
-		   sizeof(cl_bool) * (GPUJOIN_MAX_DEPTH + 1 - depth));
+	if (depth < GPUJOIN_MAX_DEPTH)
+	{
+		memset(l_state + depth + 1, 0,
+			   sizeof(cl_uint) * (GPUJOIN_MAX_DEPTH - depth));
+		memset(matched + depth + 1, 0,
+			   sizeof(cl_bool) * (GPUJOIN_MAX_DEPTH - depth));
+	}
 	return depth;
 }
 
@@ -353,8 +355,8 @@ gpujoin_load_source(kern_context *kcxt,
 		__syncthreads();
 
 		/*
-		 * We may have to dive into the deeper depth if we still have pending
-		 * join combinations.
+		 * We may have to dive into the deeper depth if we still have
+		 * pending join combinations.
 		 */
 		if (write_pos[0] == 0)
 		{
@@ -951,7 +953,7 @@ gpujoin_main(kern_gpujoin *kgjoin,
 		atomicAdd(&kgjoin->source_nitems, stat_source_nitems);
 		atomicAdd(&kgjoin->outer_nitems, stat_nitems[0]);
 		for (index=0; index < GPUJOIN_MAX_DEPTH; index++)
-			atomicAdd(&kgjoin->jscale[index].inner_nitems,
+			atomicAdd(&kgjoin->jscale[index].stat_nitems,
 					  stat_nitems[index+1]);
 	}
 	__syncthreads();
@@ -1090,11 +1092,11 @@ gpujoin_right_outer(kern_gpujoin *kgjoin,
 	/* write out statistics */
 	if (get_local_id() == 0)
 	{
+		assert(stat_source_nitems == 0);
+		assert(stat_nitems[0] == 0);
 		for (index = outer_depth; index <= GPUJOIN_MAX_DEPTH; index++)
 		{
-			atomicAdd(index == outer_depth
-					  ? &kgjoin->jscale[index-1].right_nitems
-					  : &kgjoin->jscale[index-1].inner_nitems,
+			atomicAdd(&kgjoin->jscale[index-1].stat_nitems,
 					  stat_nitems[index]);
 		}
 	}

@@ -204,6 +204,7 @@ struct GpuTaskState
 
 	/* callbacks used by gputasks.c */
 	GpuTask		 *(*cb_next_task)(GpuTaskState *gts, cl_bool *scan_done);
+	GpuTask		 *(*cb_terminator_task)(GpuTaskState *gts);
 	void		  (*cb_switch_task)(GpuTaskState *gts, GpuTask *gtask);
 	TupleTableSlot *(*cb_next_tuple)(GpuTaskState *gts);
 	struct pgstrom_data_store *(*cb_bulk_exec)(GpuTaskState *gts,
