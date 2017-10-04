@@ -382,6 +382,7 @@ extern cl_ulong			devBaselineMemorySize;
 extern cl_uint			devBaselineMaxThreadsPerBlock;
 
 extern void pgstrom_init_gpu_device(void);
+#if 1
 extern void optimal_workgroup_size(size_t *p_grid_size,
 								   size_t *p_block_size,
 								   CUfunction function,
@@ -396,6 +397,13 @@ extern void largest_workgroup_size(size_t *p_grid_size,
 								   size_t nitems,
 								   size_t dynamic_shmem_per_block,
 								   size_t dynamic_shmem_per_thread);
+#endif
+extern CUresult	gpuOptimalBlockSize(size_t *p_min_grid_sz,
+									size_t *p_max_block_sz,
+									CUfunction kern_function,
+									size_t dynamic_shmem_per_block,
+									size_t dynamic_shmem_per_thread);
+
 extern Datum pgstrom_device_info(PG_FUNCTION_ARGS);
 
 /*
@@ -869,19 +877,14 @@ extern void	pgstrom_init_gpujoin(void);
 extern Size GpuJoinSetupTask(struct kern_gpujoin *kgjoin,
 							 GpuTaskState *gts,
 							 pgstrom_data_store *pds_src);
-extern ProgramId GpuJoinCreateUnifiedProgram(PlanState *node,
-											 GpuTaskState *gpa_gts,
-											 cl_uint gpa_extra_flags,
-											 const char *gpa_kern_source);
-extern bool GpuJoinInnerPreload(GpuTaskState *gts);
+extern ProgramId GpuJoinCreateCombinedProgram(PlanState *node,
+											  GpuTaskState *gpa_gts,
+											  cl_uint gpa_extra_flags,
+											  const char *gpa_kern_source);
+extern bool GpuJoinInnerPreload(GpuTaskState *gts, CUdeviceptr *p_m_kmrels);
 extern void GpuJoinInnerUnload(GpuTaskState *gts, bool is_rescan);
 extern pgstrom_data_store *GpuJoinExecOuterScanChunk(GpuTaskState *gts,
 													 int *p_filedesc);
-extern bool gpujoinLoadInnerBuffer(GpuContext *gcontext,
-								   struct GpuJoinSharedState *gj_sstate,
-								   CUdeviceptr *p_m_kmrels,
-								   CUdeviceptr *p_m_ojmaps,
-								   kern_data_store **p_kds_dst_head);
 extern bool gpujoinHasRightOuterJoin(GpuTaskState *gts);
 extern void gpujoinUpdateRunTimeStat(GpuTaskState *gts,
 									 struct kern_gpujoin *kgjoin);

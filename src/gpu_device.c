@@ -442,6 +442,38 @@ largest_workgroup_size(size_t *p_grid_size,
 }
 
 /*
+ * gpuOptimalBlockSize - a simple wrapper of cuOccupancyMaxPotentialBlockSize
+ */
+CUresult
+gpuOptimalBlockSize(size_t *p_min_grid_sz,
+					size_t *p_max_block_sz,
+					CUfunction kern_function,
+					size_t dynamic_shmem_per_block,
+					size_t dynamic_shmem_per_thread)
+{
+	int		min_grid_sz;
+	int		max_block_sz;
+	CUresult rc;
+
+	__dynamic_shmem_per_block = dynamic_shmem_per_block;
+	__dynamic_shmem_per_thread = dynamic_shmem_per_thread;
+	rc = cuOccupancyMaxPotentialBlockSize(&min_grid_sz,
+										  &max_block_sz,
+										  kern_function,
+										  blocksize_to_shmemsize_helper,
+										  0,
+										  0);
+	if (rc == CUDA_SUCCESS)
+	{
+		if (p_min_grid_sz)
+			*p_min_grid_sz = min_grid_sz;
+		if (p_max_block_sz)
+			*p_max_block_sz = max_block_sz;
+	}
+	return rc;
+}
+
+/*
  * pgstrom_device_info - SQL function to dump device info
  */
 Datum

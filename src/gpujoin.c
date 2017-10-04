@@ -2162,7 +2162,7 @@ ExecReCheckGpuJoin(CustomScanState *node, TupleTableSlot *slot)
 static TupleTableSlot *
 ExecGpuJoin(CustomScanState *node)
 {
-	if (!GpuJoinInnerPreload((GpuTaskState *)node))
+	if (!GpuJoinInnerPreload((GpuTaskState *)node, NULL))
 		return NULL;
 	return ExecScan(&node->ss,
 					(ExecScanAccessMtd) pgstromExecGpuTaskState,
@@ -4537,15 +4537,15 @@ gpujoin_next_tuple_fallback(GpuJoinState *gjs, GpuJoinTask *pgjoin)
 
 /* ----------------------------------------------------------------
  *
- * Routines to support unified GpuPreAgg + GpuJoin
+ * Routines to support combined GpuPreAgg + GpuJoin
  *
  * ----------------------------------------------------------------
  */
 ProgramId
-GpuJoinCreateUnifiedProgram(PlanState *node,
-							GpuTaskState *gpa_gts,
-							cl_uint gpa_extra_flags,
-							const char *gpa_kern_source)
+GpuJoinCreateCombinedProgram(PlanState *node,
+							 GpuTaskState *gpa_gts,
+							 cl_uint gpa_extra_flags,
+							 const char *gpa_kern_source)
 {
 	GpuJoinState   *gjs = (GpuJoinState *) node;
 	GpuJoinInfo	   *gj_info;
@@ -4701,7 +4701,7 @@ gpujoin_colocate_outerjoin_maps(GpuJoinState *gjs, CUmodule cuda_module)
 }
 
 static cl_int
-gpujoin_process_innerjoin(GpuJoinTask *pgjoin, CUmodule cuda_module)
+gpujoin_process_inner_join(GpuJoinTask *pgjoin, CUmodule cuda_module)
 {
 	GpuContext		   *gcontext = GpuWorkerCurrentContext;
 	GpuJoinState	   *gjs = (GpuJoinState *) pgjoin->task.gts;
@@ -5156,7 +5156,7 @@ gpujoin_process_task(GpuTask *gtask, CUmodule cuda_module)
 	int		retval;
 
 	if (pgjoin->pds_src)
-		retval = gpujoin_process_innerjoin(pgjoin, cuda_module);
+		retval = gpujoin_process_inner_join(pgjoin, cuda_module);
 	else
 		retval = gpujoin_process_right_outer(pgjoin, cuda_module);
 
@@ -5614,7 +5614,7 @@ __gpujoin_inner_preload(GpuJoinState *gjs, bool with_cpu_parallel)
 }
 
 bool
-GpuJoinInnerPreload(GpuTaskState *gts)
+GpuJoinInnerPreload(GpuTaskState *gts, CUdeviceptr *p_m_kmrels)
 {
 	GpuJoinState   *gjs = (GpuJoinState *) gts;
 	GpuContext	   *gcontext = gjs->gts.gcontext;
@@ -5637,7 +5637,11 @@ GpuJoinInnerPreload(GpuTaskState *gts)
 
 	/* preload already done? */
 	if (gjs->seg_kmrels)
+	{
+		if (p_m_kmrels)
+			*p_m_kmrels = gjs->m_kmrels;
 		return (gjs->seg_kmrels != (void *)(~0UL));
+	}
 
 	pg_atomic_add_fetch_u32(&gj_sstate->pergpu[dindex].pg_nworkers, 1);
 	pg_atomic_add_fetch_u32(&gj_sstate->pg_nworkers, 1);
@@ -5694,7 +5698,8 @@ GpuJoinInnerPreload(GpuTaskState *gts)
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on gpuIpcOpenMemHandle: %s", errorText(rc));
 	gjs->m_kmrels = m_deviceptr;
-
+	if (p_m_kmrels)
+		*p_m_kmrels = m_deviceptr;
 	return true;
 }
 
