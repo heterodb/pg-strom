@@ -223,16 +223,12 @@ typedef uintptr_t		hostptr_t;
  * Error code definition
  */
 #define StromError_Success				0		/* OK */
-/* GPU kernel suspend */
-#define StromError_Suspend				(CUDA_ERROR_UNKNOWN + 1)
-/* To be re-checked by CPU */
-#define StromError_CpuReCheck			(CUDA_ERROR_UNKNOWN + 2)
-/* Something invalid */
-#define StromError_InvalidValue			(CUDA_ERROR_UNKNOWN + 3)
-/* No space left on data store */
-#define StromError_DataStoreNoSpace		(CUDA_ERROR_UNKNOWN + 4)
-/* Wrong GPU code was generated */
-#define StromError_WrongCodeGeneration	(CUDA_ERROR_UNKNOWN + 5)
+#define StromError_Suspend				1001	/* GPU kernel suspend */
+#define StromError_CpuReCheck			1002	/* Re-checked by CPU */
+#define StromError_InvalidValue			1003	/* Invalid values */
+#define StromError_DataStoreNoSpace		1004	/* No space left on KDS */
+#define StromError_WrongCodeGeneration	1005	/* Wrong GPU code generation */
+
 #define StromError_CudaDevRunTimeBase	1000000
 
 /*

@@ -62,6 +62,37 @@ typedef struct
 
 /*
  * kern_gpujoin - control object of GpuJoin
+ *
+ * The control object of GpuJoin has four segments as follows:
+ * +------------------+
+ * | 1. kern_gpujoin  |
+ * +------------------+
+ * | 2. kern_parambuf |
+ * +------------------+
+ * | 3. pseudo stack  |
+ * +------------------+
+ * | 4. saved context |
+ * | for suspend and  |
+ * | resume           |
+ * +------------------+
+ *
+ * The first segment is the control object of GpuJoin itself, and the second
+ * one is buffer of contrant variables.
+ * The third segment is used to save the combination of joined rows as
+ * intermediate results, performs like a pseudo-stack area. Individual SMs
+ * have exclusive pseudo-stack, thus, can be utilized as a large but slow
+ * shared memory. (If depth is low, we may be able to use the actual shared
+ * memory instead.)
+ * The 4th segment is used to save the execution context when GPU kernel
+ * gets suspended. Both of shared memory contents (e.g, read_pos, write_pos)
+ * and thread's private variables (e.g, depth, l_state, matched) are saved,
+ * then, these state variables shall be restored on restart.
+ * GpuJoin kernel will suspend the execution if and when destination buffer
+ * gets filled up. Host code is responsible to detach the current buffer
+ * and allocates a new one, then resume the GPU kernel.
+ * The 4th segment for suspend / resume shall not be in-use unless destination
+ * buffer does not run out, thus, it shall not consume devuce physical pages
+ * because we allocate the control segment using unified managed memory.
  */
 typedef struct
 {
@@ -77,7 +108,9 @@ struct kern_gpujoin
 	cl_uint			kparams_offset;		/* offset to the kparams */
 	cl_uint			pstack_offset;		/* offset to the pseudo-stack */
 	cl_uint			pstack_nrooms;		/* size of pseudo-stack */
+	cl_uint			suspend_offset;		/* offset to the suspend-backup */
 	cl_uint			num_rels;			/* number of inner relations */
+	cl_bool			resume_context;		/* resume context from suspend */
 	cl_uint			src_read_pos;		/* position to read from kds_src */
 	/* error status to be backed (OUT) */
 	cl_uint			source_nitems;		/* out: # of source rows */
@@ -94,16 +127,22 @@ struct kern_gpujoin
 };
 typedef struct kern_gpujoin		kern_gpujoin;
 
-#define KERN_GPUJOIN_PARAMBUF(kgjoin)			\
+#define KERN_GPUJOIN_PARAMBUF(kgjoin)					\
 	((kern_parambuf *)((char *)(kgjoin) + (kgjoin)->kparams_offset))
-#define KERN_GPUJOIN_PARAMBUF_LENGTH(kgjoin)	\
+#define KERN_GPUJOIN_PARAMBUF_LENGTH(kgjoin)			\
 	STROMALIGN(KERN_GPUJOIN_PARAMBUF(kgjoin)->length)
 #define KERN_GPUJOIN_HEAD_LENGTH(kgjoin)				\
 	STROMALIGN((char *)KERN_GPUJOIN_PARAMBUF(kgjoin) +	\
 			   KERN_GPUJOIN_PARAMBUF_LENGTH(kgjoin) -	\
 			   (char *)(kgjoin))
-#define KERN_GPUJOIN_PSEUDO_STACK(kgjoin)		\
+#define KERN_GPUJOIN_PSEUDO_STACK(kgjoin)					\
 	((cl_uint *)((char *)(kgjoin) + (kgjoin)->pstack_offset))
+#define KERN_GPUJOIN_SUSPEND_BLOCK(kgjoin)					\
+	((struct gpujoin_suspend_block *)						\
+	 ((char *)(kgjoin) + (kgjoin)->suspend_offset +			\
+	  get_global_index() *									\
+	  STROMALIGN(offsetof(gpujoin_suspend_block,			\
+						  threads[get_local_size()]))))
 
 #ifdef __CUDACC__
 
@@ -173,13 +212,82 @@ gpujoin_projection(kern_context *kcxt,
 static __shared__ cl_bool	scan_done;
 static __shared__ cl_int	base_depth;
 static __shared__ cl_uint	src_read_pos;
-static __shared__ cl_uint	dst_base_nitems;
+static __shared__ cl_uint	dst_base_index;
 static __shared__ cl_uint	dst_base_usage;
 static __shared__ cl_uint	read_pos[GPUJOIN_MAX_DEPTH+1];
 static __shared__ cl_uint	write_pos[GPUJOIN_MAX_DEPTH+1];
 static __shared__ cl_uint	stat_source_nitems;
 static __shared__ cl_uint	stat_nitems[GPUJOIN_MAX_DEPTH+1];
 static __shared__ cl_uint	pg_crc32_table[256];
+
+/*
+ * per block suspended context
+ */
+struct gpujoin_suspend_block
+{
+	cl_int			depth;
+	cl_bool			scan_done;
+	cl_uint			read_pos[GPUJOIN_MAX_DEPTH+1];
+	cl_uint			write_pos[GPUJOIN_MAX_DEPTH+1];
+	cl_uint			stat_source_nitems;
+	cl_uint			stat_nitems[GPUJOIN_MAX_DEPTH+1];
+	struct {
+		cl_uint		l_state[GPUJOIN_MAX_DEPTH+1];
+		cl_bool		matched[GPUJOIN_MAX_DEPTH+1];
+	} threads[FLEXIBLE_ARRAY_MEMBER];
+};
+typedef struct gpujoin_suspend_block	gpujoin_suspend_block;
+
+/*
+ * gpujoin_suspend_context
+ */
+STATIC_FUNCTION(void)
+gpujoin_suspend_context(kern_gpujoin *kgjoin,
+						cl_int depth, cl_uint *l_state, cl_bool *matched)
+{
+	gpujoin_suspend_block *sb = KERN_GPUJOIN_SUSPEND_BLOCK(kgjoin);
+
+	if (get_local_id() == 0)
+	{
+		sb->depth = depth;
+		sb->scan_done = scan_done;
+		memcpy(sb->read_pos, read_pos, sizeof(read_pos));
+		memcpy(sb->write_pos, write_pos, sizeof(write_pos));
+		sb->stat_source_nitems = stat_source_nitems;
+		memcpy(sb->stat_nitems, stat_nitems, sizeof(stat_nitems));
+	}
+	__syncthreads();
+	memcpy(sb->threads[get_local_id()].l_state, l_state,
+		   sizeof(cl_uint) * (GPUJOIN_MAX_DEPTH + 1));
+	memcpy(sb->threads[get_local_id()].matched, 0,
+		   sizeof(cl_bool) * (GPUJOIN_MAX_DEPTH + 1));
+}
+
+/*
+ * gpujoin_resume_context
+ */
+STATIC_FUNCTION(cl_int)
+gpujoin_resume_context(kern_gpujoin *kgjoin,
+					   cl_uint *l_state, cl_bool *matched)
+{
+	gpujoin_suspend_block *sb = KERN_GPUJOIN_SUSPEND_BLOCK(kgjoin);
+	cl_int		depth = sb->depth;
+
+	if (get_local_id() == 0)
+	{
+		scan_done = sb->scan_done;
+		memcpy(read_pos, sb->read_pos, sizeof(read_pos));
+		memcpy(write_pos, sb->write_pos, sizeof(write_pos));
+		stat_source_nitems = sb->stat_source_nitems;
+		memcpy(stat_nitems, sb->stat_nitems, sizeof(stat_nitems));
+	}
+	__syncthreads();
+	memcpy(l_state, sb->threads[get_local_id()].l_state,
+		   sizeof(cl_uint) * (GPUJOIN_MAX_DEPTH + 1));
+	memcpy(matched, sb->threads[get_local_id()].matched,
+		   sizeof(cl_bool) * (GPUJOIN_MAX_DEPTH + 1));
+	return depth;
+}
 
 /*
  * gpujoin_rewind_stack
@@ -505,8 +613,6 @@ gpujoin_projection_row(kern_context *kcxt,
 				  get_local_size());
 	read_index = read_pos[nrels] + get_local_id();
 	__syncthreads();
-	if (get_local_id() == 0)
-		read_pos[nrels] += get_local_size();
 
 	/* step.1 - compute length of the result tuple to be written */
 	if (read_index < write_pos[nrels])
@@ -542,17 +648,21 @@ gpujoin_projection_row(kern_context *kcxt,
 	assert(count > 0);
 	if (get_local_id() == 0)
 	{
-		dst_base_nitems = atomicAdd(&kds_dst->nitems, nvalids);
-		dst_base_usage  = atomicAdd(&kds_dst->usage, count);
+		dst_base_index = atomicAdd(&kds_dst->nrooms, nvalids);
+		dst_base_usage = atomicAdd(&kds_dst->usage, count);
 	}
 	__syncthreads();
-	dest_index = dst_base_nitems + get_local_id();
+	dest_index = dst_base_index + get_local_id();
 	dest_offset += dst_base_usage + required;
 
 	if (KERN_DATA_STORE_HEAD_LENGTH(kds_dst) +
-		STROMALIGN(sizeof(cl_uint) * (dst_base_nitems + nvalids)) +
+		STROMALIGN(sizeof(cl_uint) * (dst_base_index + nvalids)) +
 		dst_base_usage + count > kds_dst->length)
-		STROM_SET_ERROR(&kcxt->e, StromError_DataStoreNoSpace);
+	{
+		/* once exit the GPU kernel, so save the context */
+		gpujoin_suspend_context(kgjoin, nrels+1, l_state, matched);
+		STROM_SET_ERROR(&kcxt->e, StromError_Suspend);
+	}
 	if (__syncthreads_count(kcxt->e.errcode) > 0)
 		return -1;	/* bailout */
 
@@ -570,6 +680,12 @@ gpujoin_projection_row(kern_context *kcxt,
 	if (__syncthreads_count(kcxt->e.errcode) > 0)
 		return -1;	/* bailout */
 
+	/* step.4 - make advance the read position */
+	if (get_local_id() == 0)
+	{
+		read_pos[nrels] += get_local_size();
+		atomicMax(&kds_dst->nitems, (cl_uint)(dst_base_index + nvalids));
+	}
 	return nrels + 1;
 }
 
@@ -891,6 +1007,8 @@ gpujoin_main(kern_gpujoin *kgjoin,
 		base_depth = 0;
 	}
 	__syncthreads();
+	if (kgjoin->resume_context)
+		depth = gpujoin_resume_context(kgjoin, l_state, matched);
 
 	/* main logic of GpuJoin */
 	depth = 0;
@@ -947,6 +1065,7 @@ gpujoin_main(kern_gpujoin *kgjoin,
 		}
 		__syncthreads();
 	}
+
 	/* write out statistics */
 	if (get_local_id() == 0)
 	{

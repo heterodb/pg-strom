@@ -3546,25 +3546,42 @@ GpuJoinSetupTask(struct kern_gpujoin *kgjoin, GpuTaskState *gts,
 	GpuJoinState *gjs = (GpuJoinState *) gts;
 	GpuContext *gcontext = gjs->gts.gcontext;
 	kern_multirels *h_kmrels = dsm_segment_address(gjs->seg_kmrels);
-	Size		head_sz;
-	Size		param_sz;
-	Size		pstack_sz;
-	Size		pstack_nrooms;
-//	Size		max_items;
+	cl_int		nrels = gjs->num_rels;
+	size_t		head_sz;
+	size_t		param_sz;
+	size_t		pstack_sz;
+	size_t		pstack_nrooms;
+	size_t		suspend_sz;
 	int			i, mp_count;
 
+	mp_count = devAttrs[gcontext->cuda_dindex].MULTIPROCESSOR_COUNT;
 	head_sz = STROMALIGN(offsetof(kern_gpujoin,
 								  jscale[gjs->num_rels + 1]));
 	param_sz = STROMALIGN(gjs->gts.kern_params->length);
 	pstack_nrooms = 2048;
-	pstack_sz = sizeof(cl_uint) * pstack_nrooms * ((gjs->num_rels + 1) *
-												   (gjs->num_rels + 2)) / 2;
+	pstack_sz = MAXALIGN(sizeof(cl_uint) *
+						 pstack_nrooms * ((nrels + 1) * (nrels + 2)) / 2);
+	/*
+	 * MEMO: GPUJOIN_MAX_DEPTH is only available on the device code,
+	 * so we cannot determine the size of gpujoin_suspend_block on
+	 * host code.
+	 */
+	suspend_sz = (sizeof(cl_int) +					/* depth */
+				  sizeof(cl_int) +					/* scan_done */
+				  sizeof(cl_uint) * (nrels + 1) +	/* read_pos */
+				  sizeof(cl_uint) * (nrels + 1) +	/* write_pos */
+				  sizeof(cl_uint) +					/* stat_source_nitems */
+				  sizeof(cl_uint) * (nrels + 1) +	/* stat_nitems */
+				  /* threads[] array */
+				  MAXALIGN(sizeof(cl_uint) * (nrels + 1) +
+						   sizeof(cl_bool) * (nrels + 1)) * 1024);
 	if (kgjoin)
 	{
 		memset(kgjoin, 0, head_sz);
 		kgjoin->kparams_offset = head_sz;
 		kgjoin->pstack_offset = head_sz + param_sz;
 		kgjoin->pstack_nrooms = pstack_nrooms;
+		kgjoin->suspend_offset = head_sz + param_sz + mp_count * pstack_sz;
 		kgjoin->num_rels = gjs->num_rels;
 		kgjoin->src_read_pos = 0;
 
@@ -3592,8 +3609,9 @@ GpuJoinSetupTask(struct kern_gpujoin *kgjoin, GpuTaskState *gts,
 			jscale[i].window_orig = jscale[i].window_base;
 		}
 	}
-	mp_count = devAttrs[gcontext->cuda_dindex].MULTIPROCESSOR_COUNT;
-	return head_sz + param_sz + mp_count * pstack_sz;
+	return (head_sz + param_sz +
+			mp_count * pstack_sz +
+			mp_count * suspend_sz);
 }
 
 /*
@@ -3647,6 +3665,7 @@ gpujoin_create_task(GpuJoinState *gjs,
 	pgjoin->pds_dst = PDS_create_row(gcontext,
 									 scan_tupdesc,
 									 4 * pgstrom_chunk_size());
+	pgjoin->pds_dst->kds.nrooms = 0;
 	pgjoin->outer_depth = outer_depth;
 	pgjoin->is_dummy_task = (pds_src == NULL);
 
