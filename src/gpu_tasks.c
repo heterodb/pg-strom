@@ -606,35 +606,20 @@ errorText(int errcode)
 		case StromError_Success:
 			label = "Suceess";
 			break;
+		case StromError_Suspend:
+			label = "GPU Suspend";
+			break;
 		case StromError_CpuReCheck:
 			label = "CPU ReCheck";
-			break;
-		case StromError_CudaInternal:
-			label = "CUDA Internal Error";
-			break;
-		case StromError_OutOfMemory:
-			label = "Out of memory";
-			break;
-		case StromError_OutOfSharedMemory:
-			label = "Out of shared memory";
-			break;
-		case StromError_OutOfKernelArgs:
-			label = "Out of kernel argument buffer";
 			break;
 		case StromError_InvalidValue:
 			label = "Invalid Value";
 			break;
-		case StromError_DataStoreCorruption:
-			label = "Data store corruption";
-			break;
 		case StromError_DataStoreNoSpace:
 			label = "Data store no space";
 			break;
-		case StromError_DataStoreOutOfRange:
-			label = "Data store out of range";
-			break;
-		case StromError_SanityCheckViolation:
-			label = "Sanity check violation";
+		case StromError_WrongCodeGeneration:
+			label = "Wrong code generation";
 			break;
 
 		/*

@@ -222,20 +222,18 @@ typedef uintptr_t		hostptr_t;
  *
  * Error code definition
  */
-#define StromError_Success					   0 /* OK */
-#define StromError_CpuReCheck				1000 /* To be re-checked by CPU */
-#define StromError_CudaInternal				1001 /* CUDA internal error */
-#define StromError_OutOfMemory				1002 /* Out of memory */
-#define StromError_OutOfSharedMemory		1003 /* Out of shared memory */
-#define StromError_OutOfKernelArgs			1004 /* Out of kernel arguments */
-#define StromError_Ssd2GpuDirectDma			1005 /* SSD2GPU Direct DMA error */
-#define StromError_InvalidValue				1999 /* Something invalid */
-#define StromError_DataStoreCorruption		2000 /* KDS corrupted */
-#define StromError_DataStoreNoSpace			2001 /* KDS has no space */
-#define StromError_DataStoreOutOfRange		2002 /* out of KDS range access */
-#define StromError_SanityCheckViolation		2003 /* sanity check violation */
-#define StromError_WrongCodeGeneration		2004 /* Bugs on code generation */
-#define StromError_CudaDevRunTimeBase	 1000000 /* Base value for runtime */
+#define StromError_Success				0		/* OK */
+/* GPU kernel suspend */
+#define StromError_Suspend				(CUDA_ERROR_UNKNOWN + 1)
+/* To be re-checked by CPU */
+#define StromError_CpuReCheck			(CUDA_ERROR_UNKNOWN + 2)
+/* Something invalid */
+#define StromError_InvalidValue			(CUDA_ERROR_UNKNOWN + 3)
+/* No space left on data store */
+#define StromError_DataStoreNoSpace		(CUDA_ERROR_UNKNOWN + 4)
+/* Wrong GPU code was generated */
+#define StromError_WrongCodeGeneration	(CUDA_ERROR_UNKNOWN + 5)
+#define StromError_CudaDevRunTimeBase	1000000
 
 /*
  * Kernel functions identifier

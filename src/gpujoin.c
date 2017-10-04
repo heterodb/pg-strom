@@ -3471,7 +3471,7 @@ gpujoin_codegen(PlannerInfo *root,
 	appendStringInfo(
 		&source,
 		"  default:\n"
-		"    STROM_SET_ERROR(&kcxt->e, StromError_SanityCheckViolation);\n"
+		"    STROM_SET_ERROR(&kcxt->e, StromError_WrongCodeGeneration);\n"
 		"    break;\n"
 		"  }\n"
 		"  return false;\n"
@@ -3520,7 +3520,7 @@ gpujoin_codegen(PlannerInfo *root,
 	appendStringInfo(
 		&source,
 		"  default:\n"
-		"    STROM_SET_ERROR(&kcxt->e, StromError_SanityCheckViolation);\n"
+		"    STROM_SET_ERROR(&kcxt->e, StromError_WrongCodeGeneration);\n"
 		"    break;\n"
 		"  }\n"
 		"  return (cl_uint)(-1);\n"
