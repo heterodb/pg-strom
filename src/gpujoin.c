@@ -296,15 +296,15 @@ typedef struct GpuJoinRuntimeStat	GpuJoinRuntimeStat;
  */
 typedef struct
 {
-	GpuTask		task;
-	cl_bool		with_nvme_strom;	/* true, if NVMe-Strom */
-	cl_bool		is_dummy_task;//OBSOLETE
-	cl_int		outer_depth;		/* base depth, if RIGHT OUTER */
+	GpuTask			task;
+	cl_bool			with_nvme_strom;	/* true, if NVMe-Strom */
+	cl_bool			is_dummy_task;//OBSOLETE
+	cl_int			outer_depth;		/* base depth, if RIGHT OUTER */
 	/* DMA buffers */
-	GpuJoinSharedState *gj_sstate;	/* inner heap/hash buffer */
 	pgstrom_data_store *pds_src;	/* data store of outer relation */
 	pgstrom_data_store *pds_dst;	/* data store of result buffer */
-	kern_gpujoin		kern;		/* kern_gpujoin of this request */
+	dlist_head		pds_dst_inactives; /* list of inactive result buffers */
+	kern_gpujoin	kern;		/* kern_gpujoin of this request */
 } GpuJoinTask;
 
 /* static variables */
@@ -3619,7 +3619,6 @@ GpuJoinSetupTask(struct kern_gpujoin *kgjoin, GpuTaskState *gts,
  */
 static GpuTask *
 gpujoin_create_task(GpuJoinState *gjs,
-					GpuJoinSharedState *gj_sstate,
 					pgstrom_data_store *pds_src,
 					int file_desc)
 {
@@ -3660,12 +3659,12 @@ gpujoin_create_task(GpuJoinState *gjs,
 	memset(pgjoin, 0, offsetof(GpuJoinTask, kern));
 	pgstromInitGpuTask(&gjs->gts, &pgjoin->task);
 	pgjoin->task.file_desc = file_desc;
-	pgjoin->gj_sstate = gj_sstate;
 	pgjoin->pds_src = pds_src;
 	pgjoin->pds_dst = PDS_create_row(gcontext,
 									 scan_tupdesc,
 									 4 * pgstrom_chunk_size());
-	pgjoin->pds_dst->kds.nrooms = 0;
+	pgjoin->pds_dst->kds.nrooms = 0;	/* expand on demand by kernel */
+	dlist_init(&pgjoin->pds_dst_inactives);
 	pgjoin->outer_depth = outer_depth;
 	pgjoin->is_dummy_task = (pds_src == NULL);
 
@@ -3680,6 +3679,7 @@ gpujoin_create_task(GpuJoinState *gjs,
 	return &pgjoin->task;
 }
 
+#if 0
 /*
  * gpujoin_clone_task
  */
@@ -3711,7 +3711,6 @@ gpujoin_clone_task(GpuContext *gcontext, GpuJoinTask *pgjoin_old)
 	pgjoin_new->task.cpu_fallback = false;
 	pgjoin_new->with_nvme_strom = false;
 	pgjoin_new->is_dummy_task = false;
-	pgjoin_new->gj_sstate = pgjoin_old->gj_sstate;
 	pgjoin_new->pds_src = NULL;		/* caller should set */
 	pgjoin_new->pds_dst = NULL;		/* caller should set */
 	/* XXX jscale is also zero cleared */
@@ -3719,6 +3718,7 @@ gpujoin_clone_task(GpuContext *gcontext, GpuJoinTask *pgjoin_old)
 
 	return pgjoin_new;
 }
+#endif
 
 /*
  * gpujoinExecOuterScanChunk
@@ -3781,7 +3781,7 @@ gpujoin_next_task(GpuTaskState *gts)
 
 	pds = GpuJoinExecOuterScanChunk(gts, &filedesc);
 	if (pds)
-		gtask = gpujoin_create_task(gjs, gjs->gj_sstate, pds, filedesc);
+		gtask = gpujoin_create_task(gjs, pds, filedesc);
 	return gtask;
 }
 
@@ -3822,7 +3822,7 @@ gpujoin_terminator_task(GpuTaskState *gts, cl_bool *task_is_ready)
 			ResetLatch(MyLatch);
 		}
 		/* OK, no PG workers at this point */
-		gtask = gpujoin_create_task(gjs, gj_sstate, NULL, -1);
+		gtask = gpujoin_create_task(gjs, NULL, -1);
 	}
 	else
 	{
@@ -3873,7 +3873,6 @@ gpujoin_switch_task(GpuTaskState *gts, GpuTask *gtask)
 	/* rewind the CPU fallback position */
 	if (pgjoin->task.cpu_fallback)
 	{
-		Assert(pgjoin->gj_sstate != NULL);
 		gjs->fallback_outer_index = -1;
 		for (i=0; i < gjs->num_rels; i++)
 		{
@@ -3890,8 +3889,11 @@ gpujoin_next_tuple(GpuTaskState *gts)
 	GpuJoinState   *gjs = (GpuJoinState *) gts;
 	TupleTableSlot *slot = gjs->gts.css.ss.ss_ScanTupleSlot;
 	GpuJoinTask	   *pgjoin = (GpuJoinTask *)gjs->gts.curr_task;
-	pgstrom_data_store *pds_dst = pgjoin->pds_dst;
+	pgstrom_data_store *pds_dst;
+	dlist_node	   *dnode;
 
+next_chunk:
+	pds_dst = pgjoin->pds_dst;
 	if (pgjoin->task.cpu_fallback)
 	{
 		/*
@@ -3908,7 +3910,18 @@ gpujoin_next_tuple(GpuTaskState *gts)
 		/* fetch a result tuple */
 		ExecClearTuple(slot);
 		if (!PDS_fetch_tuple(slot, pds_dst, &gjs->gts))
+		{
+			PDS_release(pds_dst);
+			if (!dlist_is_empty(&pgjoin->pds_dst_inactives))
+			{
+				dnode = dlist_pop_head_node(&pgjoin->pds_dst_inactives);
+				pgjoin->pds_dst = dlist_container(pgstrom_data_store,
+												  chain, dnode);
+				goto next_chunk;
+			}
+			pgjoin->pds_dst = NULL;
 			slot = NULL;
+		}
 	}
 #if 0
 	/*
@@ -4611,6 +4624,26 @@ GpuJoinCreateCombinedProgram(PlanState *node,
  *
  * ----------------------------------------------------------------
  */
+static inline void
+gpujoin_release_dest_stores(GpuJoinTask *pgjoin)
+{
+	dlist_node	   *dnode;
+	pgstrom_data_store *pds;
+
+	if (pgjoin->pds_dst)
+	{
+		PDS_release(pgjoin->pds_dst);
+		pgjoin->pds_dst = NULL;
+	}
+	while (!dlist_is_empty(&pgjoin->pds_dst_inactives))
+	{
+		dnode = dlist_pop_head_node(&pgjoin->pds_dst_inactives);
+		pds = dlist_container(pgstrom_data_store, chain, dnode);
+		PDS_release(pds);
+	}
+	Assert(dlist_is_empty(&pgjoin->pds_dst_inactives));
+}
+
 void
 gpujoin_release_task(GpuTask *gtask)
 {
@@ -4621,8 +4654,7 @@ gpujoin_release_task(GpuTask *gtask)
 	if (pgjoin->pds_src)
 		PDS_release(pgjoin->pds_src);
 	/* unlink destination data store */
-	if (pgjoin->pds_dst)
-		PDS_release(pgjoin->pds_dst);
+	gpujoin_release_dest_stores(pgjoin);
 	/* release this gpu-task itself */
 	gpuMemFree(gts->gcontext, (CUdeviceptr)pgjoin);
 }
@@ -4630,27 +4662,20 @@ gpujoin_release_task(GpuTask *gtask)
 void
 gpujoinUpdateRunTimeStat(GpuTaskState *gts, kern_gpujoin *kgjoin)
 {
-#if 0
-	kern_join_scale	   *jscale = kgjoin->jscale;
-	cl_int				i, num_rels = kgjoin->num_rels;
+	GpuJoinState	   *gjs = (GpuJoinState *)gts;
+	GpuJoinSharedState *gj_sstate = gjs->gj_sstate;
+	GpuJoinRuntimeStat *gj_rtstat = GPUJOIN_RUNTIME_STAT(gj_sstate);
+	cl_int		i;
 
-	SpinLockAcquire(&gj_sstate->lock);
-	gj_sstate->source_ntasks++;
-	gj_sstate->source_nitems += (jscale[0].window_base +
-								 jscale[0].window_size -
-								 jscale[0].window_orig);
-	for (i=0; i <= num_rels; i++)
+	pg_atomic_fetch_add_u64(&gj_rtstat->source_nitems,
+							kgjoin->source_nitems);
+	pg_atomic_fetch_add_u64(&gj_rtstat->jstat[0].inner_nitems,
+							kgjoin->outer_nitems);
+	for (i=0; i < gjs->num_rels; i++)
 	{
-		gj_sstate->inner_nitems[i] += jscale[i].inner_nitems;
-		gj_sstate->right_nitems[i] += jscale[i].right_nitems;
-		if (jscale[i].row_dist_score > 0.0)
-		{
-			gj_sstate->row_dist_score_valid = true;
-			gj_sstate->row_dist_score[i] += jscale[i].row_dist_score;
-		}
+		pg_atomic_fetch_add_u64(&gj_rtstat->jstat[i+1].inner_nitems,
+								kgjoin->jscale[i].stat_nitems);
 	}
-	SpinLockRelease(&gj_sstate->lock);
-#endif
 }
 
 static void
@@ -4819,6 +4844,7 @@ gpujoin_process_inner_join(GpuJoinTask *pgjoin, CUmodule cuda_module)
 	 *              kern_data_store *kds_src,
 	 *              kern_data_store *kds_dst)
 	 */
+resume_gpujoin:
 	optimal_workgroup_size(&grid_sz,
 						   &block_sz,
 						   kern_gpujoin_main,
@@ -4853,44 +4879,44 @@ gpujoin_process_inner_join(GpuJoinTask *pgjoin, CUmodule cuda_module)
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuEventSynchronize: %s", errorText(rc));
 
-	/*
-	 * Clear the error code if CPU fallback case.
-	 * Elsewhere, update run-time statistics.
-	 */
 	pgjoin->task.kerror = pgjoin->kern.kerror;
-	if (pgjoin->task.kerror.errcode == StromError_Success)
+	if (pgstrom_cpu_fallback_enabled &&
+		pgjoin->task.kerror.errcode == StromError_CpuReCheck)
 	{
-		/* update statistics */
-		GpuJoinSharedState *gj_sstate = gjs->gj_sstate;
-		GpuJoinRuntimeStat *gj_rtstat = GPUJOIN_RUNTIME_STAT(gj_sstate);
-		cl_int		i;
-
-		pg_atomic_fetch_add_u64(&gj_rtstat->source_nitems,
-								pgjoin->kern.source_nitems);
-		pg_atomic_fetch_add_u64(&gj_rtstat->jstat[0].inner_nitems,
-								pgjoin->kern.outer_nitems);
-		for (i=0; i < gjs->num_rels; i++)
-		{
-			pg_atomic_fetch_add_u64(&gj_rtstat->jstat[i+1].inner_nitems,
-									pgjoin->kern.jscale[i].stat_nitems);
-		}
-		if (pgjoin->kern.outer_nitems != pgjoin->kern.jscale[0].stat_nitems)
-		wnotice("nrels=%d src=%u 0:%u 1:%u jstat(%lu %lu)",
-				gjs->num_rels,
-				pgjoin->kern.source_nitems,
-				pgjoin->kern.outer_nitems,
-				pgjoin->kern.jscale[0].stat_nitems,
-				pg_atomic_read_u64(&gj_rtstat->jstat[0].inner_nitems),
-				pg_atomic_read_u64(&gj_rtstat->jstat[1].inner_nitems));
-	}
-	else if (pgstrom_cpu_fallback_enabled &&
-			 pgjoin->task.kerror.errcode == StromError_CpuReCheck)
-	{
+		/*
+		 * Run CPU fallback, and release incomplete destination buffer
+		 * immediately.
+		 */
+		gpujoin_release_dest_stores(pgjoin);
 		pgjoin->task.kerror.errcode = StromError_Success;
 		pgjoin->task.cpu_fallback = true;
+		retval = 0;
 	}
-	//TODO: split window if no space error
-	retval = 0;
+	else if (pgjoin->task.kerror.errcode == StromError_Suspend)
+	{
+		pgjoin->task.kerror.errcode = StromError_Success;
+		pgjoin->kern.resume_context = true;
+
+		dlist_push_tail(&pgjoin->pds_dst_inactives, &pds_dst->chain);
+		pgjoin->pds_dst = pds_dst = PDS_clone(pds_dst);
+		m_kds_dst = (CUdeviceptr)&pds_dst->kds;
+		goto resume_gpujoin;
+	}
+	else if (pgjoin->task.kerror.errcode == StromError_Success)
+	{
+		gpujoinUpdateRunTimeStat(&gjs->gts, &pgjoin->kern);
+
+		if (pds_dst->kds.nitems == 0 &&
+			dlist_is_empty(&pgjoin->pds_dst_inactives))
+			retval = -1;
+		else
+			retval = 0;
+	}
+	else
+	{
+		/* raise an error */
+		retval = 0;
+	}
 out_of_resource:
 	if (pds_src->kds.format == KDS_FORMAT_BLOCK && m_kds_src != 0UL)
 		gpuMemFree(gcontext, m_kds_src);
@@ -4913,6 +4939,7 @@ gpujoin_process_right_outer(GpuJoinTask *pgjoin, CUmodule cuda_module)
 	Size				grid_sz;
 	Size				block_sz;
 	void			   *kern_args[5];
+	cl_int				retval;
 
 	/* sanity checks */
 	Assert(!pgjoin->pds_src);
@@ -4937,6 +4964,7 @@ gpujoin_process_right_outer(GpuJoinTask *pgjoin, CUmodule cuda_module)
 	 *                     cl_int outer_depth,
 	 *                     kern_data_store *kds_dst)
 	 */
+resume_gpujoin:
 	optimal_workgroup_size(&grid_sz,
 						   &block_sz,
 						   kern_gpujoin_main,
@@ -4972,30 +5000,41 @@ gpujoin_process_right_outer(GpuJoinTask *pgjoin, CUmodule cuda_module)
 		werror("failed on cuEventSynchronize: %s", errorText(rc));
 
 	pgjoin->task.kerror = pgjoin->kern.kerror;
-	if (pgjoin->task.kerror.errcode == StromError_Success)
+	if (pgstrom_cpu_fallback_enabled &&
+		pgjoin->task.kerror.errcode == StromError_CpuReCheck)
 	{
-		/* update statistics */
-		GpuJoinSharedState *gj_sstate = gjs->gj_sstate;
-		GpuJoinRuntimeStat *gj_rtstat = GPUJOIN_RUNTIME_STAT(gj_sstate);
-		cl_int		i;
-
-		Assert(pgjoin->kern.source_nitems == 0);
-		Assert(pgjoin->kern.outer_nitems  == 0);
-		for (i = outer_depth; i <= gjs->num_rels; i++)
-		{
-			pg_atomic_fetch_add_u64(i == outer_depth
-									? &gj_rtstat->jstat[i].right_nitems
-									: &gj_rtstat->jstat[i].inner_nitems,
-									pgjoin->kern.jscale[i-1].stat_nitems);
-		}
-	}
-	else if (pgstrom_cpu_fallback_enabled &&
-			 pgjoin->task.kerror.errcode == StromError_CpuReCheck)
-	{
+		/* Run CPU fallback, and release incomplete destination buffers */
+		gpujoin_release_dest_stores(pgjoin);
 		pgjoin->task.kerror.errcode = StromError_Success;
 		pgjoin->task.cpu_fallback = true;
+		retval = 0;
 	}
-	return 0;
+	else if (pgjoin->task.kerror.errcode == StromError_Suspend)
+	{
+		pgjoin->task.kerror.errcode = StromError_Success;
+		pgjoin->kern.resume_context = true;
+
+		dlist_push_tail(&pgjoin->pds_dst_inactives, &pds_dst->chain);
+		pgjoin->pds_dst = pds_dst = PDS_clone(pds_dst);
+		m_kds_dst = (CUdeviceptr)&pds_dst->kds;
+		goto resume_gpujoin;
+	}
+	if (pgjoin->task.kerror.errcode == StromError_Success)
+	{
+		gpujoinUpdateRunTimeStat(&gjs->gts, &pgjoin->kern);
+
+		if (pds_dst->kds.nitems == 0 &&
+			dlist_is_empty(&pgjoin->pds_dst_inactives))
+			retval = -1;
+		else
+			retval = 0;
+	}
+	else
+	{
+		/* raise an error */
+		retval = 0;
+	}
+	return retval;
 }
 
 
@@ -5788,7 +5827,6 @@ createGpuJoinSharedState(GpuJoinState *gjs,
 						 void *dsm_addr)
 {
 	GpuJoinSharedState *gj_sstate;
-	GpuJoinRuntimeStat *gj_rtstat;
 	cl_uint		ss_length;
 
 	ss_length = (MAXALIGN(offsetof(GpuJoinSharedState,

@@ -220,6 +220,42 @@ PDS_fetch_tuple(TupleTableSlot *slot,
 }
 
 /*
+ * PDS_clone - makes an empty data store with same definition
+ */
+pgstrom_data_store *
+__PDS_clone(pgstrom_data_store *pds_old,
+			const char *filename, int lineno)
+{
+	pgstrom_data_store *pds_new;
+	CUdeviceptr	m_deviceptr;
+	CUresult	rc;
+
+	rc = __gpuMemAllocManaged(pds_old->gcontext,
+							  &m_deviceptr,
+							  offsetof(pgstrom_data_store,
+									   kds) + pds_old->kds.length,
+							  CU_MEM_ATTACH_GLOBAL,
+							  filename, lineno);
+	if (rc != CUDA_SUCCESS)
+		werror("out of managed memory");
+	pds_new = (pgstrom_data_store *) m_deviceptr;
+
+	/* setup */
+	memset(&pds_new->chain, 0, sizeof(dlist_node));
+    pds_new->gcontext = pds_old->gcontext;
+    pg_atomic_init_u32(&pds_new->refcnt, 1);
+	pds_new->nblocks_uncached = 0;
+	memcpy(&pds_new->kds,
+		   &pds_old->kds,
+		   KERN_DATA_STORE_HEAD_LENGTH(&pds_old->kds));
+	pds_new->kds.usage = 0;
+	pds_new->kds.nitems = 0;
+	pds_new->kds.nrooms = 0;	/* OK? */
+
+	return pds_new;
+}
+
+/*
  * PDS_retain
  */
 pgstrom_data_store *

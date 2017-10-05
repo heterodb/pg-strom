@@ -743,6 +743,8 @@ extern bool pgstrom_fetch_data_store(TupleTableSlot *slot,
 extern bool PDS_fetch_tuple(TupleTableSlot *slot,
 							pgstrom_data_store *pds,
 							GpuTaskState *gts);
+extern pgstrom_data_store *__PDS_clone(pgstrom_data_store *pds,
+									   const char *filename, int lineno);
 extern pgstrom_data_store *PDS_retain(pgstrom_data_store *pds);
 extern void PDS_release(pgstrom_data_store *pds);
 
@@ -776,6 +778,8 @@ extern pgstrom_data_store *__PDS_create_block(GpuContext *gcontext,
 	__PDS_create_slot((a),(b),(c),__FILE__,__LINE__)
 #define PDS_create_block(a,b,c)					\
 	__PDS_create_block((a),(b),(c),__FILE__,__LINE__)
+#define PDS_clone(a)							\
+	__PDS_clone((a),__FILE__,__LINE__)
 
 //to be gpu_task.c?
 extern void PDS_init_heapscan_state(GpuTaskState *gts,
