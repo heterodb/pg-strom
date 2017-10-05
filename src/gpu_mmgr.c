@@ -1314,7 +1314,7 @@ TablespaceCanUseNvmeStrom(Oid tablespace_oid)
 			entry->nvme_strom_supported = true;
 		else
 		{
-			ereport(NOTICE,
+			ereport(DEBUG1,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("nvme_strom does not support tablespace \"%s\"",
 							get_tablespace_name(tablespace_oid))));

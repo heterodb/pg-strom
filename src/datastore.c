@@ -327,176 +327,6 @@ init_kernel_data_store(kern_data_store *kds,
 }
 
 pgstrom_data_store *
-PDS_expand_size(GpuContext *gcontext,
-				pgstrom_data_store *pds_old,
-				Size kds_length_new)
-{
-	pgstrom_data_store *pds_new;
-	Size		kds_length_old = pds_old->kds.length;
-	Size		kds_usage = pds_old->kds.usage;
-	cl_uint		i, nitems = pds_old->kds.nitems;
-	CUdeviceptr	m_deviceptr;
-	CUresult	rc;
-
-	/* sanity checks */
-	Assert(pds_old->kds.format == KDS_FORMAT_ROW ||
-		   pds_old->kds.format == KDS_FORMAT_HASH);
-	Assert(pds_old->kds.nslots == 0);
-
-	/* no need to expand? */
-	kds_length_new = STROMALIGN_DOWN(kds_length_new);
-	if (pds_old->kds.length >= kds_length_new)
-		return pds_old;
-
-	rc = gpuMemAllocManaged(gcontext,
-							&m_deviceptr,
-							offsetof(pgstrom_data_store,
-									 kds) + kds_length_new,
-							CU_MEM_ATTACH_GLOBAL);
-	if (rc != CUDA_SUCCESS)
-		werror("out of managed memory");
-	pds_new = (pgstrom_data_store *)m_deviceptr;
-	memcpy(pds_new, pds_old, (offsetof(pgstrom_data_store, kds) +
-							  KERN_DATA_STORE_HEAD_LENGTH(&pds_old->kds)));
-	pds_new->kds.hostptr = (hostptr_t)&pds_new->kds.hostptr;
-	pds_new->kds.length  = kds_length_new;
-
-	/*
-	 * Move the contents to new buffer from the old one
-	 */
-	if (pds_new->kds.format == KDS_FORMAT_ROW ||
-		pds_new->kds.format == KDS_FORMAT_HASH)
-	{
-		cl_uint	   *row_index_old = KERN_DATA_STORE_ROWINDEX(&pds_old->kds);
-		cl_uint	   *row_index_new = KERN_DATA_STORE_ROWINDEX(&pds_new->kds);
-		size_t		shift = STROMALIGN_DOWN(kds_length_new - kds_length_old);
-		size_t		offset = kds_length_old - kds_usage;
-
-		/*
-		 * If supplied new nslots is too big, larger than the expanded,
-		 * it does not make sense to expand the buffer.
-		 */
-		if ((pds_new->kds.format == KDS_FORMAT_HASH
-			 ? KDS_CALCULATE_HASH_LENGTH(pds_new->kds.ncols,
-										 pds_new->kds.nitems,
-										 pds_new->kds.usage)
-			 : KDS_CALCULATE_ROW_LENGTH(pds_new->kds.ncols,
-										pds_new->kds.nitems,
-										pds_new->kds.usage)) >= kds_length_new)
-			werror("New nslots consumed larger than expanded");
-
-		memcpy((char *)&pds_new->kds + offset + shift,
-			   (char *)&pds_old->kds + offset,
-			   kds_length_old - offset);
-		for (i = 0; i < nitems; i++)
-			row_index_new[i] = row_index_old[i] + shift;
-	}
-	else if (pds_new->kds.format == KDS_FORMAT_SLOT)
-	{
-		/*
-		 * We cannot expand KDS_FORMAT_SLOT with extra area because we don't
-		 * know the way to fix pointers that reference the extra area.
-		 */
-		if (pds_new->kds.usage > 0)
-			elog(ERROR, "cannot expand KDS_FORMAT_SLOT with extra area");
-		/* copy the values/isnull pair */
-		memcpy(KERN_DATA_STORE_BODY(&pds_new->kds),
-			   KERN_DATA_STORE_BODY(&pds_old->kds),
-			   KERN_DATA_STORE_SLOT_LENGTH(&pds_old->kds,
-										   pds_old->kds.nitems));
-	}
-	else
-		werror("unexpected KDS format: %d", pds_new->kds.format);
-
-	/* release the old PDS, and return the new one */
-	rc = gpuMemFree(pds_old->gcontext, (CUdeviceptr) pds_old);
-	if (rc != CUDA_SUCCESS)
-		werror("failed on gpuMemFree: %s", errorText(rc));
-	return pds_new;
-}
-
-#if 0
-void
-PDS_shrink_size(pgstrom_data_store *pds)
-{
-	kern_data_store	   *kds = &pds->kds;
-	size_t				new_length;
-
-	if (kds->format == KDS_FORMAT_ROW ||
-		kds->format == KDS_FORMAT_HASH)
-	{
-		cl_uint	   *hash_slot = KERN_DATA_STORE_HASHSLOT(kds);
-		cl_uint	   *row_index = KERN_DATA_STORE_ROWINDEX(kds);
-		cl_uint		i, nslots = kds->nslots;
-		size_t		shift;
-		size_t		headsz;
-		char	   *baseptr;
-
-		/* small shift has less advantage than CPU cycle consumption */
-		shift = kds->length - (kds->format == KDS_FORMAT_HASH
-							   ? KDS_CALCULATE_HASH_LENGTH(kds->ncols,
-														   kds->nitems,
-														   kds->usage)
-							   : KDS_CALCULATE_ROW_LENGTH(kds->ncols,
-														  kds->nitems,
-														  kds->usage));
-		shift = STROMALIGN_DOWN(shift);
-
-		if (shift < BLCKSZ || shift < sizeof(Datum) * kds->nitems)
-			return;
-
-		/* move the kern_tupitem / kern_hashitem */
-		headsz = (kds->format == KDS_FORMAT_HASH
-				  ? KDS_CALCULATE_HASH_FRONTLEN(kds->ncols, kds->nitems)
-				  : KDS_CALCULATE_ROW_FRONTLEN(kds->ncols, kds->nitems));
-		baseptr = (char *)kds + headsz;
-		memmove(baseptr, baseptr + shift, kds->length - (headsz + shift));
-
-		/* clear the hash slot once */
-		if (nslots > 0)
-		{
-			Assert(kds->format == KDS_FORMAT_HASH);
-			memset(hash_slot, 0, sizeof(cl_uint) * nslots);
-		}
-
-		/* adjust row_index and hash_slot */
-		for (i=0; i < kds->nitems; i++)
-		{
-			row_index[i] -= shift;
-			if (nslots > 0)
-			{
-				kern_hashitem  *khitem = KERN_DATA_STORE_HASHITEM(kds, i);
-				cl_uint			khindex;
-
-				Assert(khitem->rowid == i);
-				khindex = khitem->hash % nslots;
-                khitem->next = hash_slot[khindex];
-                hash_slot[khindex] = (uintptr_t)khitem - (uintptr_t)kds;
-			}
-		}
-		new_length = kds->length - shift;
-	}
-	else if (kds->format == KDS_FORMAT_SLOT)
-	{
-		new_length = KERN_DATA_STORE_SLOT_LENGTH(kds, kds->nitems);
-
-		/*
-		 * We cannot know which datum references the extra area with
-		 * reasonable cost. So, prohibit it simply. We don't use SLOT
-		 * format for data source, so usually no matter.
-		 */
-		if (kds->usage > 0)
-			elog(ERROR, "cannot shirink KDS_SLOT with extra region");
-	}
-	else
-		elog(ERROR, "Bug? unexpected PDS to be shrinked");
-
-	Assert(new_length <= kds->length);
-	kds->length = new_length;
-}
-#endif
-
-pgstrom_data_store *
 __PDS_create_row(GpuContext *gcontext,
 				 TupleDesc tupdesc,
 				 size_t bytesize,
@@ -518,6 +348,7 @@ __PDS_create_row(GpuContext *gcontext,
 	pds = (pgstrom_data_store *) m_deviceptr;
 
 	/* setup */
+	memset(&pds->chain, 0, sizeof(dlist_node));
 	pds->gcontext = gcontext;
 	pg_atomic_init_u32(&pds->refcnt, 1);
 	init_kernel_data_store(&pds->kds, tupdesc, bytesize,
@@ -552,6 +383,7 @@ __PDS_create_hash(GpuContext *gcontext,
 	pds = (pgstrom_data_store *) m_deviceptr;
 
 	/* setup */
+	memset(&pds->chain, 0, sizeof(dlist_node));
 	pds->gcontext = gcontext;
 	pg_atomic_init_u32(&pds->refcnt, 1);
 	init_kernel_data_store(&pds->kds, tupdesc, bytesize,
@@ -590,6 +422,7 @@ __PDS_create_slot(GpuContext *gcontext,
 	pds = (pgstrom_data_store *) m_deviceptr;
 
 	/* setup */
+	memset(&pds->chain, 0, sizeof(dlist_node));
 	pds->gcontext = gcontext;
 	pg_atomic_init_u32(&pds->refcnt, 1);
 	init_kernel_data_store(&pds->kds, tupdesc,
@@ -627,6 +460,7 @@ __PDS_create_block(GpuContext *gcontext,
 	if (rc != CUDA_SUCCESS)
 		werror("failed on gpuMemAllocHost: %s", errorText(rc));
 	/* setup */
+	memset(&pds->chain, 0, sizeof(dlist_node));
 	pds->gcontext = gcontext;
 	pg_atomic_init_u32(&pds->refcnt, 1);
 	init_kernel_data_store(&pds->kds, tupdesc, bytesize,

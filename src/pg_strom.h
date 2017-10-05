@@ -318,6 +318,9 @@ typedef struct devexpr_info {
  */
 typedef struct pgstrom_data_store
 {
+	/* used to chain multiple PDSs */
+	dlist_node			chain;
+
 	/* GpuContext which owns this data store */
 	GpuContext		   *gcontext;
 
@@ -333,7 +336,7 @@ typedef struct pgstrom_data_store
 	cl_uint				nblocks_uncached;
 
 	/* data chunk in kernel portion */
-	kern_data_store kds	__attribute__ ((aligned (sizeof(cl_ulong))));
+	kern_data_store kds	__attribute__ ((aligned (STROMALIGN_LEN)));
 } pgstrom_data_store;
 
 /*
@@ -742,10 +745,7 @@ extern bool PDS_fetch_tuple(TupleTableSlot *slot,
 							GpuTaskState *gts);
 extern pgstrom_data_store *PDS_retain(pgstrom_data_store *pds);
 extern void PDS_release(pgstrom_data_store *pds);
-extern pgstrom_data_store *PDS_expand_size(GpuContext *gcontext,
-										   pgstrom_data_store *pds,
-										   Size kds_length_new);
-extern void PDS_shrink_size(pgstrom_data_store *pds);
+
 extern void init_kernel_data_store(kern_data_store *kds,
 								   TupleDesc tupdesc,
 								   Size length,
