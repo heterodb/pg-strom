@@ -643,10 +643,14 @@ typedef struct
 typedef struct {
 	hostptr_t		hostptr;	/* address of kds on the host */
 	cl_uint			length;		/* length of this data-store */
+	cl_uint			nrooms;		/* number of available rows in this store */
+	/*
+	 * NOTE: {nitems + usage} must be aligned to 64bit because these pair of
+	 * values can be updated atomically using cmpxchg.
+	 */
+	cl_uint			nitems; 	/* number of rows in this store */
 	cl_uint			usage;		/* usage of this data-store */
 	cl_uint			ncols;		/* number of columns in this store */
-	cl_uint			nitems; 	/* number of rows in this store */
-	cl_uint			nrooms;		/* number of available rows in this store */
 	cl_char			format;		/* one of KDS_FORMAT_* above */
 	cl_char			has_notbyval; /* true, if any of column is !attbyval */
 	cl_char			tdhasoid;	/* copy of TupleDesc.tdhasoid */

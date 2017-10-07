@@ -3560,7 +3560,7 @@ GpuJoinSetupTask(struct kern_gpujoin *kgjoin, GpuTaskState *gts,
 	param_sz = STROMALIGN(gjs->gts.kern_params->length);
 	pstack_nrooms = 2048;
 	pstack_sz = MAXALIGN(sizeof(cl_uint) *
-						 pstack_nrooms * ((nrels + 1) * (nrels + 2)) / 2);
+						 pstack_nrooms * ((nrels+1) * (nrels+2)) / 2);
 	/*
 	 * MEMO: GPUJOIN_MAX_DEPTH is only available on the device code,
 	 * so we cannot determine the size of gpujoin_suspend_block on
@@ -3568,13 +3568,14 @@ GpuJoinSetupTask(struct kern_gpujoin *kgjoin, GpuTaskState *gts,
 	 */
 	suspend_sz = (sizeof(cl_int) +					/* depth */
 				  sizeof(cl_int) +					/* scan_done */
+				  sizeof(cl_uint) +					/* src_read_pos */
 				  sizeof(cl_uint) * (nrels + 1) +	/* read_pos */
 				  sizeof(cl_uint) * (nrels + 1) +	/* write_pos */
 				  sizeof(cl_uint) +					/* stat_source_nitems */
 				  sizeof(cl_uint) * (nrels + 1) +	/* stat_nitems */
 				  /* threads[] array */
-				  MAXALIGN(sizeof(cl_uint) * (nrels + 1) +
-						   sizeof(cl_bool) * (nrels + 1)) * 1024);
+				  (MAXALIGN(sizeof(cl_uint) * (nrels + 1)) +
+				   MAXALIGN(sizeof(cl_bool) * (nrels + 1))) * 1024);
 	if (kgjoin)
 	{
 		memset(kgjoin, 0, head_sz);
@@ -3650,7 +3651,8 @@ gpujoin_create_task(GpuJoinState *gjs,
 	required = GpuJoinSetupTask(NULL, &gjs->gts, pds_src);
 	rc = gpuMemAllocManaged(gcontext,
 							&m_deviceptr,
-							required,
+							offsetof(GpuJoinTask,
+									 kern) + required,
 							CU_MEM_ATTACH_GLOBAL);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on gpuMemAllocManaged: %s", errorText(rc));
@@ -3662,8 +3664,7 @@ gpujoin_create_task(GpuJoinState *gjs,
 	pgjoin->pds_src = pds_src;
 	pgjoin->pds_dst = PDS_create_row(gcontext,
 									 scan_tupdesc,
-									 4 * pgstrom_chunk_size());
-	pgjoin->pds_dst->kds.nrooms = 0;	/* expand on demand by kernel */
+									 pgstrom_chunk_size());
 	dlist_init(&pgjoin->pds_dst_inactives);
 	pgjoin->outer_depth = outer_depth;
 	pgjoin->is_dummy_task = (pds_src == NULL);
@@ -3678,47 +3679,6 @@ gpujoin_create_task(GpuJoinState *gjs,
 
 	return &pgjoin->task;
 }
-
-#if 0
-/*
- * gpujoin_clone_task
- */
-static GpuJoinTask *
-gpujoin_clone_task(GpuContext *gcontext, GpuJoinTask *pgjoin_old)
-{
-	GpuJoinTask	   *pgjoin_new;
-	Size			head_sz;
-	Size			required;
-	CUdeviceptr		m_deviceptr;
-	CUresult		rc;
-	int				nrels = pgjoin_old->kern.num_rels;
-
-	required = offsetof(GpuJoinTask, kern)
-		+ STROMALIGN(offsetof(kern_gpujoin,
-							  jscale[pgjoin_old->kern.num_rels + 1]))
-		+ KERN_GPUJOIN_PARAMBUF_LENGTH(&pgjoin_old->kern);
-	rc = gpuMemAllocManaged(gcontext,
-							&m_deviceptr,
-							required,
-							CU_MEM_ATTACH_GLOBAL);
-	if (rc != CUDA_SUCCESS)
-		werror("failed on gpuMemAllocManaged: %s", errorText(rc));
-	pgjoin_new = (GpuJoinTask *)m_deviceptr;
-	memcpy(pgjoin_new, pgjoin_old, head_sz);
-
-	memset(&pgjoin_new->task.kerror, 0, sizeof(kern_errorbuf));
-	memset(&pgjoin_new->task.chain, 0, sizeof(dlist_node));
-	pgjoin_new->task.cpu_fallback = false;
-	pgjoin_new->with_nvme_strom = false;
-	pgjoin_new->is_dummy_task = false;
-	pgjoin_new->pds_src = NULL;		/* caller should set */
-	pgjoin_new->pds_dst = NULL;		/* caller should set */
-	/* XXX jscale is also zero cleared */
-	memset(pgjoin_new->kern.jscale, 0, sizeof(kern_join_scale) * nrels);
-
-	return pgjoin_new;
-}
-#endif
 
 /*
  * gpujoinExecOuterScanChunk
@@ -3917,6 +3877,7 @@ next_chunk:
 				dnode = dlist_pop_head_node(&pgjoin->pds_dst_inactives);
 				pgjoin->pds_dst = dlist_container(pgstrom_data_store,
 												  chain, dnode);
+				gjs->gts.curr_index = 0;	/* rewind the index */
 				goto next_chunk;
 			}
 			pgjoin->pds_dst = NULL;
@@ -4756,9 +4717,8 @@ gpujoin_process_inner_join(GpuJoinTask *pgjoin, CUmodule cuda_module)
 	CUdeviceptr			m_kds_src = 0UL;
 	CUdeviceptr			m_kds_dst = (CUdeviceptr)&pds_dst->kds;
 	CUresult			rc;
-	cl_int				mp_count;
-	Size				grid_sz;
-	Size				block_sz;
+	size_t				grid_sz;
+	size_t				block_sz;
 	cl_int				retval = 10001;
 	void			   *kern_args[10];
 
@@ -4844,21 +4804,22 @@ gpujoin_process_inner_join(GpuJoinTask *pgjoin, CUmodule cuda_module)
 	 *              kern_data_store *kds_src,
 	 *              kern_data_store *kds_dst)
 	 */
-resume_gpujoin:
-	optimal_workgroup_size(&grid_sz,
-						   &block_sz,
-						   kern_gpujoin_main,
-						   gcontext->cuda_device,
-						   pds_src->kds.nitems,
-						   0,
-						   sizeof(cl_int));	/* stairLike operations */
-	mp_count = devAttrs[CU_DINDEX_PER_THREAD].MULTIPROCESSOR_COUNT;
-	grid_sz = Min(grid_sz, mp_count);
+	grid_sz = devAttrs[CU_DINDEX_PER_THREAD].MULTIPROCESSOR_COUNT;
+	rc = gpuOptimalBlockSize(NULL,
+							 &block_sz,
+							 kern_gpujoin_main,
+							 0,
+							 sizeof(cl_int));
+	if (rc != CUDA_SUCCESS)
+		werror("failed on gpuOptimalBlockSize: %s", errorText(rc));
 
+resume_gpujoin:
 	kern_args[0] = &m_kgjoin;
 	kern_args[1] = &gjs->m_kmrels;
 	kern_args[2] = &m_kds_src;
 	kern_args[3] = &m_kds_dst;
+
+	//wnotice("kgjoin %p (block=%zu, grid=%zu) {resume=%d} kds_src=%p kds_dst=%p", &pgjoin->kern, block_sz, grid_sz, pgjoin->kern.resume_context, &pds_src->kds, &pds_dst->kds);
 
 	rc = cuLaunchKernel(kern_gpujoin_main,
 						grid_sz, 1, 1,
@@ -4879,24 +4840,23 @@ resume_gpujoin:
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuEventSynchronize: %s", errorText(rc));
 
-	pgjoin->task.kerror = pgjoin->kern.kerror;
 	if (pgstrom_cpu_fallback_enabled &&
-		pgjoin->task.kerror.errcode == StromError_CpuReCheck)
+		pgjoin->kern.kerror.errcode == StromError_CpuReCheck)
 	{
 		/*
 		 * Run CPU fallback, and release incomplete destination buffer
 		 * immediately.
 		 */
 		gpujoin_release_dest_stores(pgjoin);
-		pgjoin->task.kerror.errcode = StromError_Success;
+		memset(&pgjoin->task.kerror, 0, sizeof(kern_errorbuf));
 		pgjoin->task.cpu_fallback = true;
 		retval = 0;
 	}
-	else if (pgjoin->task.kerror.errcode == StromError_Suspend)
+	else if (pgjoin->kern.kerror.errcode == StromError_Suspend)
 	{
-		pgjoin->task.kerror.errcode = StromError_Success;
+		memset(&pgjoin->kern.kerror, 0, sizeof(kern_errorbuf));
 		pgjoin->kern.resume_context = true;
-
+		/* resume GpuJoin kernel after the buffer allocation */
 		dlist_push_tail(&pgjoin->pds_dst_inactives, &pds_dst->chain);
 		pgjoin->pds_dst = pds_dst = PDS_clone(pds_dst);
 		m_kds_dst = (CUdeviceptr)&pds_dst->kds;
@@ -4904,6 +4864,7 @@ resume_gpujoin:
 	}
 	else if (pgjoin->task.kerror.errcode == StromError_Success)
 	{
+		pgjoin->task.kerror = pgjoin->kern.kerror;
 		gpujoinUpdateRunTimeStat(&gjs->gts, &pgjoin->kern);
 
 		if (pds_dst->kds.nitems == 0 &&
@@ -4915,6 +4876,7 @@ resume_gpujoin:
 	else
 	{
 		/* raise an error */
+		pgjoin->task.kerror = pgjoin->kern.kerror;
 		retval = 0;
 	}
 out_of_resource:

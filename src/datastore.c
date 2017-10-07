@@ -248,9 +248,9 @@ __PDS_clone(pgstrom_data_store *pds_old,
 	memcpy(&pds_new->kds,
 		   &pds_old->kds,
 		   KERN_DATA_STORE_HEAD_LENGTH(&pds_old->kds));
+	/* make the data store empty */
 	pds_new->kds.usage = 0;
 	pds_new->kds.nitems = 0;
-	pds_new->kds.nrooms = 0;	/* OK? */
 
 	return pds_new;
 }
