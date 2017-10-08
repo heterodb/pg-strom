@@ -203,7 +203,7 @@ gpujoin_projection(kern_context *kcxt,
 				   kern_data_store *kds_dst,
 				   Datum *tup_values,
 				   cl_bool *tup_isnull,
-				   cl_short *tup_depth,
+				   cl_bool *use_extra_buf,
 				   cl_char *extra_buf,
 				   cl_uint *extra_len);
 /*
@@ -586,11 +586,11 @@ gpujoin_projection_row(kern_context *kcxt,
 #if GPUJOIN_DEVICE_PROJECTION_NFIELDS > 0
 	Datum		tup_values[GPUJOIN_DEVICE_PROJECTION_NFIELDS];
 	cl_bool		tup_isnull[GPUJOIN_DEVICE_PROJECTION_NFIELDS];
-	cl_short	tup_depth[GPUJOIN_DEVICE_PROJECTION_NFIELDS];
+	cl_bool		use_extra_buf[GPUJOIN_DEVICE_PROJECTION_NFIELDS];
 #else
 	Datum	   *tup_values = NULL;
 	cl_bool	   *tup_isnull = NULL;
-	cl_short   *tup_depth = NULL;
+	cl_bool	   *use_extra_buf[GPUJOIN_DEVICE_PROJECTION_NFIELDS];
 #endif
 #if GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE > 0
 	cl_char		extra_buf[GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE]
@@ -629,7 +629,7 @@ gpujoin_projection_row(kern_context *kcxt,
 						   kds_dst,
 						   tup_values,
 						   tup_isnull,
-						   tup_depth,
+						   use_extra_buf,
 						   extra_buf,
 						   &extra_len);
 		assert(extra_len <= GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE);
@@ -707,6 +707,149 @@ gpujoin_projection_row(kern_context *kcxt,
 		read_pos[nrels] += get_local_size();
 	return nrels + 1;
 }
+
+#ifdef GPUPREAGG_COMBINED_JOIN
+/* to be defined by gpupreagg.c */
+STATIC_FUNCTION(void)
+gpupreagg_projection_slot(kern_context *kcxt,
+						  Datum *src_values,
+						  cl_char *src_isnull,
+						  Datum *dst_values,
+						  cl_char *dst_isnull);
+
+/*
+ * gpujoin_projection_slot
+ */
+STATIC_FUNCTION(cl_int)
+gpujoin_projection_slot(kern_context *kcxt,
+						kern_gpujoin *kgjoin,
+						kern_multirels *kmrels,
+						kern_data_store *kds_src,
+						kern_data_store *kds_dst,
+						cl_uint *rd_stack,
+						cl_uint *l_state,
+						cl_bool *matched)
+{
+#if GPUJOIN_DEVICE_PROJECTION_NFIELDS > 0
+	Datum		tup_values[GPUJOIN_DEVICE_PROJECTION_NFIELDS];
+	cl_bool		tup_isnull[GPUJOIN_DEVICE_PROJECTION_NFIELDS];
+	cl_bool		use_extra_buf[GPUJOIN_DEVICE_PROJECTION_NFIELDS];
+#else
+	Datum	   *tup_values = NULL;
+	cl_bool	   *tup_isnull = NULL;
+	cl_bool	   *use_extra_buf = NULL;
+#endif
+	cl_bool		tup_is_valid = false;
+#if GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE > 0
+	cl_char		extra_buf[GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE]
+		__attribute__ ((aligned(MAXIMUM_ALIGNOF)));
+#else
+	cl_char	   *extra_buf = NULL;
+#endif
+	cl_uint		extra_len;
+
+	/* sanity checks */
+	assert(rd_stack != NULL);
+
+	/* Any more result rows to be written? */
+	if (read_pos[nrels] >= write_pos[nrels])
+	{
+		if (scan_done)
+			return -1;
+		return gpujoin_rewind_stack(nrels+1, l_state, matched);
+	}
+
+	/* pick up combinations from the pseudo-stack */
+	nvalids = Min(write_pos[nrels] - read_pos[nrels],
+				  get_local_size());
+	read_index = read_pos[nrels] + get_local_id();
+	__syncthreads();
+
+	/* step.1 - projection by GpuJoin */
+	if (read_index < write_pos[nrels])
+	{
+		/*
+		 * NOTE: We don't need to copy varlena datum, but pointer reference
+		 * only, because pds_src / kmrels are still valid during GpuPreAgg.
+		 */
+		rd_stack += read_index * (nrels + 1);
+
+		gpujoin_projection(kcxt,
+						   kds_src,
+						   kmrels,
+						   rd_stack,
+						   kds_dst,
+						   tup_values,
+						   tup_isnull,
+						   use_extra_buf,
+						   extra_buf,
+						   &extra_len);
+		assert(extra_len <= GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE);
+
+		tup_is_valid = true;
+	}
+
+	/* step.2 - increments nitems/usage of the kds_dst */
+	dest_offset = pgstromStairlikeSum(extra_len, &count);
+	if (get_local_id() == 0)
+	{
+		union {
+			struct {
+				cl_uint nitems;
+				cl_uint usage;
+			} i;
+			cl_ulong	v64;
+		} oldval, curval, newval;
+
+		curval.i.nitems = kds_dst->nitems;
+        curval.i.usage  = kds_dst->usage;
+		do {
+			newval = oldval = curval;
+			newval.i.nitems += nvalids;
+			newval.i.usage  += count;
+
+			if (KERN_DATA_STORE_SLOT_LENGTH(kds_dst, newval.i.nitems) +
+				newval.i.usage > kds_dst->length)
+			{
+				STROM_SET_ERROR(&kcxt->e, StromError_Suspend);
+				break;
+			}
+		} while ((curval.v64 = atomicCAS((cl_ulong *)&kds_dst->nitems,
+										 oldval.v64,
+										 newval.v64)) != oldval.v64);
+		dst_base_index = oldval.i.nitems;
+		dst_base_usage = oldval.i.usage;
+	}
+	if (__syncthreads_count(kcxt->e.errcode) > 0)
+	{
+		/* No space left on the kds_dst, suspend the GPU kernel and bailout */
+		gpujoin_suspend_context(kgjoin, nrels+1, l_state, matched);
+		return -2;	/* <-- not to update statistics */
+	}
+	dest_index = dst_base_index + get_local_id();
+	dest_offset += dst_base_usage + extra_len;
+
+	/* step.3 - projection by GpuPreAgg on the destination buffer */
+	if (tup_is_valid)
+	{
+		Datum	   *dst_values = KERN_DATA_STORE_VALUES(kds_dst, dest_index);
+		cl_bool	   *dst_isnull = KERN_DATA_STORE_ISNULL(kds_dst, dest_index);
+
+		//re-assign varlena which reference extra-buf to kds_dst
+		//tup_depth...
+
+		gpupreagg_projection_slot(kcxt,
+								  ....);
+	}
+	if (__syncthreads_count(kcxt->e.errcode) > 0)
+		return -1;	/* bailout */
+
+	/* step.4 - make advance the read position */
+	if (get_local_id() == 0)
+		read_pos[nrels] += get_local_size();
+	return nrels + 1;
+}
+#endif /* GPUPREAGG_COMBINED_JOIN */
 
 /*
  * gpujoin_exec_nestloop
@@ -992,7 +1135,11 @@ gpujoin_main(kern_gpujoin *kgjoin,
 	INIT_KERNEL_CONTEXT(&kcxt, gpujoin_main, kparams);
 	assert(kds_src->format == KDS_FORMAT_ROW ||
 		   kds_src->format == KDS_FORMAT_BLOCK);
+#ifndef GPUPREAGG_COMBINED_JOIN
 	assert(kds_dst->format == KDS_FORMAT_ROW);
+#else
+	assert(kds_dst->format == KDS_FORMAT_SLOT);
+#endif
 
 	/* setup private variables */
 	outer_unit_sz = (kds_src->format == KDS_FORMAT_ROW
@@ -1046,8 +1193,9 @@ gpujoin_main(kern_gpujoin *kgjoin,
 		}
 		else if (depth > kgjoin->num_rels)
 		{
-			/* PROJECTION (ROW) */
 			assert(depth == kmrels->nrels + 1);
+#ifndef GPUPREAGG_COMBINED_JOIN
+			/* PROJECTION (ROW) */
 			depth = gpujoin_projection_row(&kcxt,
 										   kgjoin,
 										   kmrels,
@@ -1056,6 +1204,17 @@ gpujoin_main(kern_gpujoin *kgjoin,
 										   PSTACK_DEPTH(kgjoin->num_rels),
 										   l_state,
 										   matched);
+#else
+			/* PROJECTION (SLOT) */
+			depth = gpujoin_projection_slot(&kcxt,
+											kgjoin,
+											kmrels,
+											kds_src,
+											kds_dst,
+											PSTACK_DEPTH(kgjoin->num_rels),
+											l_state,
+											matched);
+#endif
 		}
 		else if (kmrels->chunks[depth-1].is_nestloop)
 		{
@@ -1192,8 +1351,9 @@ gpujoin_right_outer(kern_gpujoin *kgjoin,
 		}
 		else if (depth > kgjoin->num_rels)
 		{
-			/* PROJECTION (ROW) */
 			assert(depth == kmrels->nrels + 1);
+#ifndef GPUPREAGG_COMBINED_JOIN
+			/* PROJECTION (ROW) */
 			depth = gpujoin_projection_row(&kcxt,
 										   kgjoin,
 										   kmrels,
@@ -1202,6 +1362,17 @@ gpujoin_right_outer(kern_gpujoin *kgjoin,
 										   PSTACK_DEPTH(kgjoin->num_rels),
 										   l_state,
 										   matched);
+#else
+			/* PROJECTION (SLOT) */
+			depth = gpujoin_projection_slot(&kcxt,
+											kgjoin,
+											kmrels,
+											NULL,
+											kds_dst,
+											PSTACK_DEPTH(kgjoin->num_rels),
+											l_state,
+											matched);
+#endif		/* GPUPREAGG_COMBINED_JOIN */
 		}
 		else if (kmrels->chunks[depth-1].is_nestloop)
 		{

@@ -3391,6 +3391,8 @@ assign_gpupreagg_session_info(StringInfo buf, GpuTaskState *gts)
 		appendStringInfo(buf, "#define GPUPREAGG_PULLUP_OUTER_SCAN 1\n");
 	if (gpas->outer_quals != NIL)
 		appendStringInfo(buf, "#define GPUPREAGG_HAS_OUTER_QUALS 1\n");
+	if (gpas->combined_gpujoin)
+		appendStringInfo(buf, "#define GPUPREAGG_COMBINED_JOIN 1\n");
 }
 
 /*

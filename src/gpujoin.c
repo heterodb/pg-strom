@@ -3019,7 +3019,7 @@ gpujoin_codegen_projection(StringInfo source,
 		"                   kern_data_store *kds_dst,\n"
 		"                   Datum *tup_values,\n"
 		"                   cl_bool *tup_isnull,\n"
-		"                   cl_short *tup_depth,\n"
+		"                   cl_bool *use_extra_buf,\n"
 		"                   cl_char *extra_buf,\n"
 		"                   cl_uint *extra_len)\n"
 		"{\n"
@@ -3128,11 +3128,9 @@ gpujoin_codegen_projection(StringInfo source,
 		}
 
 		/* begin to walk on the tuple */
-		appendStringInfo(&body, "assert(((cl_ulong)htup & 7UL) == 0);\n"); //XXX
 		appendStringInfo(
 			&body,
 			"  EXTRACT_HEAP_TUPLE_BEGIN(addr, %s, htup);\n", kds_label);
-		appendStringInfo(&body, "assert(((cl_ulong)addr & 7UL) == 0);\n"); //XXX
 		resetStringInfo(&temp);
 		for (i=1; i <= nattrs; i++)
 		{
@@ -3152,34 +3150,30 @@ gpujoin_codegen_projection(StringInfo source,
 								&typelen, &typebyval);
 				if (!typebyval)
 				{
-					appendStringInfo(&temp, "assert(((cl_ulong)addr & 3UL) == 0);\n"); //XXX
-
 					appendStringInfo(
 						&temp,
 						"  tup_isnull[%d] = (addr != NULL ? false : true);\n"
 						"  tup_values[%d] = PointerGetDatum(addr);\n"
-						"  tup_depth[%d] = %d;\n",
+						"  use_extra_buf[%d] = false;\n",
 						tle->resno - 1,
 						tle->resno - 1,
-						tle->resno - 1, depth);
+						tle->resno - 1);
 				}
 				else
 				{
-					appendStringInfo(&temp, "assert(((cl_ulong)addr & %uUL) == 0);\n", typelen - 1); //XXX
-
 					appendStringInfo(
 						&temp,
 						"  tup_isnull[%d] = (addr != NULL ? false : true);\n"
 						"  if (addr)\n"
 						"    tup_values[%d] = *((%s *) addr);\n"
-						"  tup_depth[%d] = %d;\n",
+						"  use_extra_buf[%d] = false;\n",
 						tle->resno - 1,
                         tle->resno - 1,
 						(typelen == sizeof(cl_long)  ? "cl_long" :
 						 typelen == sizeof(cl_int)   ? "cl_int" :
 						 typelen == sizeof(cl_short) ? "cl_short"
 													 : "cl_char"),
-						tle->resno - 1, depth);
+						tle->resno - 1);
 				}
 				referenced = true;
 			}
@@ -3276,7 +3270,7 @@ gpujoin_codegen_projection(StringInfo source,
 				"    tup_values[%d] = PointerGetDatum(extra_pos);\n"
 				"    extra_pos += MAXALIGN(numeric_len);\n"
 				"  }\n"
-				"  tup_depth[%d] = -1;\n",	/* use of local extra_buf */
+				"  use_extra_buf[%d] = true;\n",
 				dtype->type_name,
 				pgstrom_codegen_expression((Node *)tle->expr, context),
 				tle->resno - 1,
@@ -3296,7 +3290,7 @@ gpujoin_codegen_projection(StringInfo source,
 				"  tup_isnull[%d] = temp.%s_v.isnull;\n"
 				"  if (!temp.%s_v.isnull)\n"
 				"    tup_values[%d] = pg_%s_to_datum(temp.%s_v.value);\n"
-				"  tup_depth[%d] = -255;\n",	/* just a poison */
+				"  use_extra_buf[%d] = false;\n",
 				dtype->type_name,
 				pgstrom_codegen_expression((Node *)tle->expr, context),
 				tle->resno - 1,
@@ -3322,7 +3316,7 @@ gpujoin_codegen_projection(StringInfo source,
 				"    tup_values[%d] = PointerGetDatum(extra_pos);\n"
 				"    extra_pos += MAXALIGN(sizeof(temp.%s_v.value));\n"
 				"  }\n"
-				"  tup_depth[%d] = -1;\n",	/* use of local extra_buf */
+				"  use_extra_buf[%d] = true;\n",
 				dtype->type_name,
 				pgstrom_codegen_expression((Node *)tle->expr, context),
 				tle->resno - 1,
@@ -3353,55 +3347,12 @@ gpujoin_codegen_projection(StringInfo source,
 				&body,
 				"  temp.varlena_v = %s;\n"
 				"  tup_isnull[%d] = temp.varlena_v.isnull;\n"
-				"  tup_values[%d] = PointerGetDatum(temp.varlena_v.value);\n",
+				"  tup_values[%d] = PointerGetDatum(temp.varlena_v.value);\n"
+				"  use_extra_buf[%d] = false;\n",
 				pgstrom_codegen_expression((Node *)tle->expr, context),
 				tle->resno - 1,
+				tle->resno - 1,
 				tle->resno - 1);
-
-			if (IsA(tle->expr, Const) || IsA(tle->expr, Param))
-			{
-				/* always references to the kparams buffer */
-				appendStringInfo(
-					&body,
-					"  tup_depth[%d] = -2;\n",
-					tle->resno - 1);
-			}
-			else
-			{
-				cl_int		i;
-
-				appendStringInfo(
-					&body,
-					"  if (temp.varlena_v.isnull)\n"
-					"    tup_depth[%d] = -9999; /* never referenced */\n"
-					"  else if (pointer_on_kparams(temp.varlena_v.value,\n"
-					"                              kcxt->kparams))\n"
-					"    tup_depth[%d] = -2;\n"
-					"  else if (pointer_on_kds(temp.varlena_v.value,\n"
-					"                          kds_dst))\n"
-					"    tup_depth[%d] = -1;\n"
-					"  else if (pointer_on_kds(temp.varlena_v.value,\n"
-					"                          kds_src))\n"
-					"    tup_depth[%d] = 0;\n",
-					tle->resno - 1,
-					tle->resno - 1,
-					tle->resno - 1,
-					tle->resno - 1);
-				for (i=1; i <= gj_info->num_rels; i++)
-				{
-					appendStringInfo(
-						&body,
-						"  else if (pointer_on_kds(temp.varlena_v.value,\n"
-						"           KERN_MULTIRELS_INNER_KDS(kmrels,%d)))\n"
-						"    tup_depth[%d] = %d;\n",
-						i, tle->resno - 1, i);
-				}
-				appendStringInfo(
-					&body,
-					"  else\n"
-					"    tup_depth[%d] = -9999; /* should never happen */\n",
-					tle->resno - 1);
-			}
 		}
 	}
 	/* how much extra field required? */
