@@ -283,14 +283,14 @@ typedef struct
 	struct kern_parambuf *kparams;
 } kern_context;
 
-#define INIT_KERNEL_CONTEXT(kcxt,kfunction,kparams)			\
+#define INIT_KERNEL_CONTEXT(kcxt,kfunction,__kparams)		\
 	do {													\
 		(kcxt)->e.errcode = StromError_Success;				\
 		(kcxt)->e.kernel = StromKernel_##kfunction;			\
 		(kcxt)->e.lineno = 0;								\
 		KERN_ERRORBUF_SET_EXTRA(&(kcxt)->e,0,0,0);			\
-		(kcxt)->kparams = (kparams);						\
-		assert((cl_ulong)(kparams) == MAXALIGN(kparams));	\
+		(kcxt)->kparams = (__kparams);						\
+		assert((cl_ulong)(__kparams) == MAXALIGN(__kparams));	\
 	} while(0)
 
 /*

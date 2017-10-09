@@ -4667,6 +4667,7 @@ gpujoin_process_inner_join(GpuJoinTask *pgjoin, CUmodule cuda_module)
 	CUdeviceptr			m_kgjoin = (CUdeviceptr)&pgjoin->kern;
 	CUdeviceptr			m_kds_src = 0UL;
 	CUdeviceptr			m_kds_dst = (CUdeviceptr)&pds_dst->kds;
+	CUdeviceptr			m_nullptr = 0UL;
 	CUresult			rc;
 	size_t				grid_sz;
 	size_t				block_sz;
@@ -4753,7 +4754,8 @@ gpujoin_process_inner_join(GpuJoinTask *pgjoin, CUmodule cuda_module)
 	 * gpujoin_main(kern_gpujoin *kgjoin,
 	 *              kern_multirels *kmrels,
 	 *              kern_data_store *kds_src,
-	 *              kern_data_store *kds_dst)
+	 *              kern_data_store *kds_dst,
+	 *              kern_parambuf *kparams_gpreagg)
 	 */
 	grid_sz = devAttrs[CU_DINDEX_PER_THREAD].MULTIPROCESSOR_COUNT;
 	rc = gpuOptimalBlockSize(NULL,
@@ -4769,6 +4771,7 @@ resume_gpujoin:
 	kern_args[1] = &gjs->m_kmrels;
 	kern_args[2] = &m_kds_src;
 	kern_args[3] = &m_kds_dst;
+	kern_args[4] = &m_nullptr;
 
 	//wnotice("kgjoin %p (block=%zu, grid=%zu) {resume=%d} kds_src=%p kds_dst=%p", &pgjoin->kern, block_sz, grid_sz, pgjoin->kern.resume_context, &pds_src->kds, &pds_dst->kds);
 
@@ -4805,6 +4808,7 @@ resume_gpujoin:
 	}
 	else if (pgjoin->kern.kerror.errcode == StromError_Suspend)
 	{
+		CHECK_WORKER_TERMINATION();
 		memset(&pgjoin->kern.kerror, 0, sizeof(kern_errorbuf));
 		pgjoin->kern.resume_context = true;
 		/* resume GpuJoin kernel after the buffer allocation */
@@ -4846,6 +4850,7 @@ gpujoin_process_right_outer(GpuJoinTask *pgjoin, CUmodule cuda_module)
 	CUfunction			kern_gpujoin_main;
 	CUdeviceptr			m_kgjoin = (CUdeviceptr)&pgjoin->kern;
 	CUdeviceptr			m_kds_dst = (CUdeviceptr)&pds_dst->kds;
+	CUdeviceptr			m_nullptr = 0UL;
 	CUresult			rc;
 	cl_int				outer_depth = pgjoin->outer_depth;
 	cl_int				mp_count;
@@ -4875,7 +4880,8 @@ gpujoin_process_right_outer(GpuJoinTask *pgjoin, CUmodule cuda_module)
 	 * gpujoin_right_outer(kern_gpujoin *kgjoin,
 	 *                     kern_multirels *kmrels,
 	 *                     cl_int outer_depth,
-	 *                     kern_data_store *kds_dst)
+	 *                     kern_data_store *kds_dst,
+	 *                     kern_parambuf *kparams_gpreagg)
 	 */
 resume_gpujoin:
 	optimal_workgroup_size(&grid_sz,
@@ -4892,6 +4898,7 @@ resume_gpujoin:
 	kern_args[1] = &gjs->m_kmrels;
 	kern_args[2] = &outer_depth;
 	kern_args[3] = &m_kds_dst;
+	kern_args[4] = &m_nullptr;
 
 	rc = cuLaunchKernel(kern_gpujoin_main,
 						grid_sz, 1, 1,
@@ -4949,176 +4956,6 @@ resume_gpujoin:
 	}
 	return retval;
 }
-
-
-
-#if 0
-/*
- * gpujoin_try_rerun_kernel
- *
- * It checks window frame of the last GpuJoin kernel. If entire window was
- * not processed, we need to kick next kernel.
- */
-static bool
-gpujoin_try_rerun_kernel(GpuJoinTask *pgjoin, CUmodule cuda_module)
-{
-	GpuContext		   *gcontext = pgjoin->task.gcontext;
-	SharedGpuContext   *shgcon = gcontext->shgcon;
-	GpuJoinSharedState *gj_sstate = pgjoin->gj_sstate;
-	kern_join_scale	   *jscale = pgjoin->kern.jscale;
-	pgstrom_data_store *pds;
-	cl_uint				nitems;
-	int					i, j, num_rels = pgjoin->kern.num_rels;
-
-	for (i=num_rels; i >=0; i--)
-	{
-		if (i == 0)
-			pds = pgjoin->pds_src;
-		else
-			pds = gj_sstate->inner_chunks[i-1];
-		nitems = (!pds ? 0 : pds->kds.nitems);
-
-	   	if (jscale[i].window_base + jscale[i].window_size < nitems)
-		{
-			cl_uint		window_base = jscale[i].window_base;
-			cl_uint		window_size = jscale[i].window_size;
-			cl_uint		window_orig = jscale[i].window_orig;
-		  	GpuJoinTask *resp;
-
-			/*
-			 * NOTE: Pay attention on a corner case - if CpuReCheck happen
-			 * on RIGHT/FULL OUTER JOIN, we cannot continue asynchronous
-			 * task execution no longer.
-			 * Because outer-join-map can be updated during the execution
-			 * of GpuJoin kernel with no valid PDS/KDS.
-			 * For example, when depth=2 and depth=4 are RIGHT JOIN, depth=2
-			 * will produce half-NULL tuples according to the outer-join-map.
-			 * Then, these tuples shall be processed in the depth=3 and can
-			 * also update the outer-join-map in the depth=4.
-			 * Once a part of GpuJoin is processed on CPU or other GPU device,
-			 * we have to synchronize its completion and co-location of the
-			 * outer-join-map again. It usually makes less sense, so we move
-			 * entire process to CPU fallback.
-			 */
-			if (!pgjoin->pds_src && pgjoin->task.cpu_fallback)
-			{
-				for (j=0; j < num_rels; j++)
-				{
-					pds = gj_sstate->inner_chunks[j];
-					jscale[i+1].window_size = (pds->kds.nitems -
-											   jscale[i+1].window_base);
-				}
-				break;
-			}
-
-			/*
-			 * setup a responder to deliver the partial result of GpuJoin
-			 */
-			resp = gpujoin_clone_task(gcontext, pgjoin);
-			resp->pds_dst = pgjoin->pds_dst;
-			pgjoin->pds_dst = NULL;
-
-			/*
-			 * Send back the responder
-			 */
-			SpinLockAcquire(&shgcon->lock);
-			shgcon->num_async_tasks++;
-			SpinLockRelease(&shgcon->lock);
-			gpuservSendGpuTask(gcontext, &resp->task);
-
-			/*
-			 * Move to the next window frame
-			 */
-			jscale[i].window_base = (window_base + window_size);
-			jscale[i].window_size = (window_base + window_size - window_orig);
-			jscale[i].window_orig = jscale[i].window_base;
-			if (jscale[i].window_base + jscale[i].window_size > nitems)
-				jscale[i].window_size = nitems - jscale[i].window_base;
-			for (j=i+1; j <= num_rels; j++)
-			{
-				pds = gj_sstate->inner_chunks[j-1];
-				jscale[j].window_base = 0;
-				jscale[j].window_size = pds->kds.nitems;
-				jscale[j].window_orig = 0;
-			}
-			return true;	/* run next */
-		}
-		Assert(jscale[i].window_base + jscale[i].window_size == nitems);
-	}
-	return false;
-}
-#endif
-
-#if 0
-static void
-gpujoin_try_outer_join(GpuJoinTask *pgjoin)
-{
-	GpuJoinSharedState *gj_sstate = pgjoin->gj_sstate;
-	GpuContext	   *gcontext = pgjoin->task.gcontext;
-	int				i, dindex = gcontext->gpuserv_id;
-	bool			kick_outer_join = false;
-
-	Assert(IsGpuServerProcess());
-
-	Assert(dindex >= 0 && dindex < numDevAttrs);
-	pthreadMutexLock(&gj_sstate->mutex);
-	Assert(gj_sstate->nr_tasks[dindex] > 0);
-	if (--gj_sstate->nr_tasks[dindex] == 0 &&
-		gj_sstate->outer_scan_done &&
-		gpujoinHasRightOuterJoin(gj_sstate))
-	{
-		if (!gj_sstate->outer_join_kicked)
-		{
-			kick_outer_join = true;
-			for (i=0; i <= numDevAttrs; i++)
-			{
-				if (gj_sstate->nr_tasks[i] > 0)
-				{
-					kick_outer_join = false;
-					break;
-				}
-			}
-		}
-
-		/*
-		 * write back outer join map, if colocation is needed.
-		 */
-		if (numDevAttrs > 1 ||
-			pg_atomic_read_u32(&gj_sstate->needs_colocation) != 0)
-		{
-			/* write back outer join map to DMA buffer */
-			CUresult	rc;
-			CUdeviceptr	m_ojmaps = gj_sstate->m_ojmaps[dindex];
-			cl_bool	   *h_ojmaps = (gj_sstate->h_ojmaps +
-									gj_sstate->kern.ojmap_length * dindex);
-			rc = cuMemcpyDtoH(h_ojmaps,
-							  m_ojmaps,
-							  gj_sstate->kern.ojmap_length);
-			if (rc != CUDA_SUCCESS)
-			{
-				pthreadMutexUnlock(&gj_sstate->mutex);
-				werror("failed on cuMemcpyDtoH: %s", errorText(rc));
-			}
-		}
-
-		/* nr_tasks[] for OUTER JOIN task */
-		if (kick_outer_join)
-		{
-			gj_sstate->outer_join_kicked = true;
-			gj_sstate->nr_tasks[dindex]++;
-		}
-	}
-	pthreadMutexUnlock(&gj_sstate->mutex);
-
-	if (kick_outer_join)
-	{
-		//no results buf on pgjoin_new, OK?
-		GpuJoinTask *pgjoin_new = gpujoin_clone_task(gcontext, pgjoin);
-
-		gpuservPushGpuTask(gcontext, &pgjoin_new->task);
-	}
-}
-#endif
 
 int
 gpujoin_process_task(GpuTask *gtask, CUmodule cuda_module)
@@ -5643,7 +5480,14 @@ GpuJoinInnerPreload(GpuTaskState *gts, CUdeviceptr *p_m_kmrels)
 						ProcSendSignal(pid);
 				}
 			}
-			return (preload_done == 1);
+
+			if (preload_done == 1)
+			{
+				if (p_m_kmrels)
+					*p_m_kmrels = gjs->m_kmrels;
+				return true;
+			}
+			return false;
 		}
 		else
 		{

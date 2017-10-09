@@ -183,9 +183,7 @@ typedef enum {
 typedef struct
 {
 	GpuTask				task;
-	GpuPreAggSharedState *gpa_sstate;
 	bool				with_nvme_strom;/* true, if NVMe-Strom */
-
 	pgstrom_data_store *pds_src;	/* source row/block buffer */
 	size_t				kds_slot_nrooms; /* for kds_slot */
 	size_t				kds_slot_length; /* for kds_slot */
@@ -2449,14 +2447,23 @@ make_tlist_device_projection(List *tlist_dev,
 }
 
 /*
- * gpupreagg_codegen_projection - code generator for
+ * gpupreagg_codegen_projection_XXXX - code generator for
  *
  * STATIC_FUNCTION(void)
- * gpupreagg_projection(kern_context *kcxt,
- *                      kern_data_store *kds_src,
- *                      HeapTupleHeaderData *htup,
- *                      Datum *dst_values,
- *                      cl_char *dst_isnull);
+ * gpupreagg_projection_row(kern_context *kcxt,
+ *                          kern_data_store *kds_src,
+ *                          HeapTupleHeaderData *htup,
+ *                          Datum *dst_values,
+ *                          cl_char *dst_isnull);
+ *
+ * and
+ *
+ * STATIC_FUNCTION(void)
+ * gpupreagg_projection_slot(kern_context *kcxt,
+ *                           Datum *src_values,
+ *                           cl_bool *src_isnull,
+ *                           Datum *dst_values,
+ *                           cl_bool *dst_values);
  */
 static Expr *
 codegen_projection_partial_funcion(FuncExpr *f,
@@ -2599,12 +2606,12 @@ codegen_projection_partial_funcion(FuncExpr *f,
 }
 
 static void
-gpupreagg_codegen_projection(StringInfo kern,
-							 codegen_context *context,
-							 PlannerInfo *root,
-							 List *tlist_dev,
-							 Index outer_scanrelid,
-							 List *outer_tlist)
+gpupreagg_codegen_projection_row(StringInfo kern,
+								 codegen_context *context,
+								 PlannerInfo *root,
+								 List *tlist_dev,
+								 Index outer_scanrelid,
+								 List *outer_tlist)
 {
 	StringInfoData	decl;
 	StringInfoData	body;
@@ -2625,11 +2632,11 @@ gpupreagg_codegen_projection(StringInfo kern,
 	appendStringInfoString(
 		&decl,
 		"STATIC_FUNCTION(void)\n"
-		"gpupreagg_projection(kern_context *kcxt,\n"
-		"                     kern_data_store *kds_src,\n"
-		"                     HeapTupleHeaderData *htup,\n"
-		"                     Datum *dst_values,\n"
-		"                     cl_char *dst_isnull)\n"
+		"gpupreagg_projection_row(kern_context *kcxt,\n"
+		"                         kern_data_store *kds_src,\n"
+		"                         HeapTupleHeaderData *htup,\n"
+		"                         Datum *dst_values,\n"
+		"                         cl_char *dst_isnull)\n"
 		"{\n"
 		"  void        *addr    __attribute__((unused));\n"
 		"  pg_anytype_t temp    __attribute__((unused));\n");
@@ -2838,6 +2845,223 @@ gpupreagg_codegen_projection(StringInfo kern,
 		&decl,
 		"%s"
 		"}\n\n", body.data);
+
+	if (outer_rel)
+		heap_close(outer_rel, NoLock);
+
+	appendStringInfoString(kern, decl.data);
+	pfree(decl.data);
+	pfree(body.data);
+}
+
+static void
+gpupreagg_codegen_projection_slot(StringInfo kern,
+								  codegen_context *context,
+								  PlannerInfo *root,
+								  List *tlist_dev,
+								  Index outer_scanrelid,
+								  List *outer_tlist)
+{
+	StringInfoData	decl;
+	StringInfoData	body;
+	StringInfoData	temp;
+	Relation		outer_rel = NULL;
+	Bitmapset	   *outer_refs_any = NULL;
+	Bitmapset	   *outer_refs_expr = NULL;
+	List		   *tlist_dev_alt;
+	ListCell	   *lc;
+	int				nattrs = list_length(outer_tlist);
+	int				i, k;
+
+	/*
+	 * combined GpuPreAgg + GpuJoin shall not be activated if outer-scan
+	 * would be pulled up.
+	 */
+	if (outer_scanrelid > 0)
+		return;
+	Assert(outer_scanrelid == 0);
+
+	initStringInfo(&decl);
+	initStringInfo(&body);
+	initStringInfo(&temp);
+	context->param_refs = NULL;
+
+	appendStringInfoString(
+		&decl,
+		"#ifdef GPUPREAGG_COMBINED_JOIN\n"
+		"STATIC_FUNCTION(void)\n"
+		"gpupreagg_projection_slot(kern_context *kcxt,\n"
+		"                          Datum   *src_values,\n"
+		"                          cl_char *src_isnull,\n"
+		"                          Datum   *dst_values,\n"
+		"                          cl_char *dst_isnull)\n"
+		"{\n"
+		"  void        *addr    __attribute__((unused));\n"
+		"  pg_anytype_t temp    __attribute__((unused));\n");
+
+	/*
+	 * pick up columns which are referenced by the initial projection, 
+	 * then returns an alternative tlist that contains Var-node with
+	 * INDEX_VAR + resno, for convenience of the later stages.
+	 */
+	tlist_dev_alt = make_tlist_device_projection(tlist_dev,
+												 outer_scanrelid,
+												 outer_tlist,
+												 &outer_refs_any,
+												 &outer_refs_expr);
+	Assert(list_length(tlist_dev_alt) == list_length(tlist_dev));
+	Assert(bms_is_subset(outer_refs_expr, outer_refs_any));
+
+	/* extract the supplied tuple and load variables */
+	if (!bms_is_empty(outer_refs_any))
+	{
+		for (i=0; i > FirstLowInvalidHeapAttributeNumber; i--)
+		{
+			k = i - FirstLowInvalidHeapAttributeNumber;
+			if (bms_is_member(k, outer_refs_any))
+				elog(ERROR, "Bug? system column or whole-row is referenced");
+		}
+
+		for (i=1; i <= nattrs; i++)
+		{
+			k = i - FirstLowInvalidHeapAttributeNumber;
+			if (bms_is_member(k, outer_refs_any))
+			{
+				TargetEntry	   *tle = list_nth(outer_tlist, i-1);
+				Oid				type_oid = exprType((Node *)tle->expr);
+				devtype_info   *dtype;
+
+				dtype = pgstrom_devtype_lookup_and_track(type_oid, context);
+				if (!dtype)
+					elog(ERROR, "device type lookup failed: %s",
+						 format_type_be(type_oid));
+				/*
+				 * KVAR_x must be set up if variables are referenced by
+				 * expressions.
+				 */
+				if (bms_is_member(k, outer_refs_expr))
+				{
+					appendStringInfo(
+						&decl,
+						"  pg_%s_t KVAR_%u;\n",
+						dtype->type_name, i);
+					appendStringInfo(
+						&temp,
+						"  KVAR_%u = pg_%s_datum_ref(kcxt,src_isnull[%d] ? NULL : &src_values[%d]);\n",
+						i, dtype->type_name, i-1, i-1);
+				}
+
+				foreach (lc, tlist_dev_alt)
+				{
+					TargetEntry *tle = lfirst(lc);
+					Var		   *varnode;
+
+					if (tle->resjunk)
+						continue;
+					if (!IsA(tle->expr, Var))
+						continue;
+
+					varnode = (Var *) tle->expr;
+					if (varnode->varno != INDEX_VAR ||
+						varnode->varattno < 1 ||
+						varnode->varattno > nattrs)
+						elog(ERROR, "Bug? unexpected varnode: %s",
+							 nodeToString(varnode));
+					if (varnode->varattno != i)
+						continue;
+
+					appendStringInfo(
+						&temp,
+						"  dst_isnull[%d] = src_isnull[%d];\n"
+						"  dst_values[%d] = src_values[%d];\n",
+						tle->resno-1, i-1,
+						tle->resno-1, i-1);
+				}
+			}
+			appendStringInfoString(&body, temp.data);
+			resetStringInfo(&temp);
+		}
+	}
+
+	/*
+	 * Execute expression and store the value on dst_values/dst_isnull
+	 */
+	foreach (lc, tlist_dev_alt)
+	{
+		TargetEntry	   *tle = lfirst(lc);
+		Expr		   *expr;
+		devtype_info   *dtype;
+		const char	   *null_const_value = NULL;
+		const char	   *projection_label = NULL;
+
+		if (tle->resjunk)
+			continue;
+		if (IsA(tle->expr, Var))
+			continue;	/* should be already loaded */
+		if (is_altfunc_expression((Node *)tle->expr))
+		{
+			FuncExpr   *f = (FuncExpr *) tle->expr;
+
+			expr = codegen_projection_partial_funcion(f,
+													  context,
+													  &null_const_value);
+			projection_label = "aggfunc-arg";
+		}
+		else if (tle->ressortgroupref)
+		{
+			expr = tle->expr;
+			null_const_value = "0";
+			projection_label = "grouping-key";
+		}
+		else
+			elog(ERROR, "Bug? unexpected expression: %s",
+				 nodeToString(tle->expr));
+
+		dtype = pgstrom_devtype_lookup_and_track(exprType((Node *)expr),
+												 context);
+		if (!dtype)
+			elog(ERROR, "device type lookup failed: %s",
+				 format_type_be(exprType((Node *)expr)));
+		appendStringInfo(
+			&body,
+			"\n"
+			"  /* initial attribute %d (%s) */\n"
+			"  temp.%s_v = %s;\n"
+			"  dst_isnull[%d] = temp.%s_v.isnull;\n",
+			tle->resno, projection_label,
+			dtype->type_name,
+			pgstrom_codegen_expression((Node *)expr, context),
+			tle->resno - 1, dtype->type_name);
+		if (!null_const_value)
+		{
+			appendStringInfo(
+				&body,
+				"  if (!temp.%s_v.isnull)\n"
+				"    dst_values[%d] = pg_%s_to_datum(temp.%s_v.value);\n",
+				dtype->type_name,
+				tle->resno - 1, dtype->type_name, dtype->type_name);
+		}
+		else
+		{
+			appendStringInfo(
+				&body,
+				"  dst_values[%d] = pg_%s_to_datum(!temp.%s_v.isnull\n"
+				"                                  ? temp.%s_v.value\n"
+				"                                  : %s);\n",
+				tle->resno - 1, dtype->type_name, dtype->type_name,
+				dtype->type_name,
+				null_const_value);
+		}
+	}
+	/* const/params */
+	pgstrom_codegen_param_declarations(&decl, context);
+	appendStringInfo(
+		&decl,
+		"\n"
+		"%s"
+		"}\n"
+		"#endif /* GPUPREAGG_COMBINED_JOIN */\n"
+		"\n", body.data);
 
 	if (outer_rel)
 		heap_close(outer_rel, NoLock);
@@ -3297,9 +3521,11 @@ gpupreagg_codegen(codegen_context *context,
 							  outer_quals);
 		context->extra_flags |= DEVKERNEL_NEEDS_GPUSCAN;
 	}
-	/* gpupreagg_projection */
-	gpupreagg_codegen_projection(&body, context, root, tlist_dev,
-								 cscan->scan.scanrelid, outer_tlist);
+	/* gpupreagg_projection_(row|slot) */
+	gpupreagg_codegen_projection_row(&body, context, root, tlist_dev,
+									 cscan->scan.scanrelid, outer_tlist);
+	gpupreagg_codegen_projection_slot(&body, context, root, tlist_dev,
+									  cscan->scan.scanrelid, outer_tlist);	
 	/* gpupreagg_hashvalue */
 	gpupreagg_codegen_hashvalue(&body, context, tlist_dev);
 	/* gpupreagg_keymatch */
@@ -3863,7 +4089,6 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 					  CUdeviceptr m_kmrels)
 {
 	GpuContext	   *gcontext = gpas->gts.gcontext;
-	GpuPreAggSharedState *gpa_sstate = gpas->gpa_sstate;
 	TupleTableSlot *gpa_slot = gpas->gpreagg_slot;
 	TupleDesc		gpa_tupdesc = gpa_slot->tts_tupleDescriptor;
 	GpuPreAggTask  *gpreagg;
@@ -3924,7 +4149,6 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 
 	pgstromInitGpuTask(&gpas->gts, &gpreagg->task);
 	gpreagg->task.file_desc = file_desc;
-	gpreagg->gpa_sstate = gpa_sstate;
 	gpreagg->with_nvme_strom = with_nvme_strom;
 	gpreagg->pds_src = pds_src;
 	gpreagg->kds_slot_nrooms = kds_slot_nrooms;
@@ -3934,7 +4158,6 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 		GpuTaskState   *outer_gts = (GpuTaskState *) outerPlanState(gpas);
 		gpreagg->kgjoin = (kern_gpujoin *)((char *)gpreagg + head_sz);
 		GpuJoinSetupTask(gpreagg->kgjoin, outer_gts, pds_src);
-		Assert(m_kmrels != 0UL);
 		gpreagg->m_kmrels = m_kmrels;
 	}
 	else
@@ -4112,6 +4335,11 @@ gpupreagg_next_tuple(GpuTaskState *gts)
 		slot = gpas->gpreagg_slot;
 		ExecClearTuple(slot);
 		PDS_fetch_tuple(slot, pds_final, &gpas->gts);
+		elog(INFO, "GpuPreAgg slot=%p [%d %lx][%d %lx][%d %lx][%d %lx]", slot,
+			 slot->tts_isnull[0], slot->tts_values[0],
+			 slot->tts_isnull[1], slot->tts_values[1],
+			 slot->tts_isnull[2], slot->tts_values[2],
+			 slot->tts_isnull[3], slot->tts_values[3]);
 	}
 	return slot;
 }
@@ -4200,17 +4428,8 @@ gpupreagg_init_final_hash(GpuPreAggTask *gpreagg,
  * gpupreaggUpdateRunTimeStat
  */
 static void
-gpupreaggUpdateRunTimeStat(GpuPreAggSharedState *gpa_sstate,
-						   kern_gpupreagg *kgpreagg)
+gpupreaggUpdateRunTimeStat(GpuTaskState *gts, kern_gpupreagg *kgpreagg)
 {
-#if 0
-	pthreadMutexLock(&gpa_sstate->mutex);
-	gpa_sstate->exec_nrows_in	+= kgpreagg->nitems_real;
-	gpa_sstate->exec_nfiltered	+= kgpreagg->nitems_filtered;
-	gpa_sstate->f_nitems[gpuserv_cuda_dindex] += kgpreagg->num_groups;
-	gpa_sstate->f_extra_sz[gpuserv_cuda_dindex] += kgpreagg->extra_usage;
-	pthreadMutexUnlock(&gpa_sstate->mutex);
-#endif
 }
 
 /*
@@ -4224,13 +4443,13 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 {
 	GpuPreAggState *gpas = (GpuPreAggState *) gpreagg->task.gts;
 	GpuContext	   *gcontext = gpas->gts.gcontext;
-	GpuPreAggSharedState *gpa_sstate = gpreagg->gpa_sstate;
 	pgstrom_data_store *pds_final = gpas->pds_final;
 	pgstrom_data_store *pds_src = gpreagg->pds_src;
 	cl_char			kds_src_format = pds_src->kds.format;
 	CUfunction		kern_setup;
 	CUfunction		kern_reduction;
 	CUdeviceptr		m_gpreagg = (CUdeviceptr)&gpreagg->kern;
+	CUdeviceptr		m_nullptr = 0UL;
 	CUdeviceptr		m_kds_src = 0UL;
 	CUdeviceptr		m_kds_slot = 0UL;
 	CUdeviceptr		m_kds_final = (CUdeviceptr)&pds_final->kds;
@@ -4377,6 +4596,7 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 	 * Launch:
 	 * KERNEL_FUNCTION_MAXTHREADS(void)
 	 * gpupreagg_XXXX_reduction(kern_gpupreagg *kgpreagg,
+	 *                          kern_errorbuf *kgjoin_errorbuf,
 	 *                          kern_data_store *kds_slot,
 	 *                          kern_data_store *kds_final,
 	 *                          kern_global_hashslot *f_hash)
@@ -4391,9 +4611,10 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 	sm_count = devAttrs[CU_DINDEX_PER_THREAD].MULTIPROCESSOR_COUNT;
 	grid_sz = Min(grid_sz, sm_count);
 	kern_args[0] = &m_gpreagg;
-	kern_args[1] = &m_kds_slot;
-	kern_args[2] = &m_kds_final;
-	kern_args[3] = &m_fhash;
+	kern_args[1] = &m_nullptr;
+	kern_args[2] = &m_kds_slot;
+	kern_args[3] = &m_kds_final;
+	kern_args[4] = &m_fhash;
 	rc = cuLaunchKernel(kern_reduction,
 						grid_sz, 1, 1,
 						block_sz, 1, 1,
@@ -4441,7 +4662,7 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 		retval = 0;		/* raise an error */
 	else
 	{
-		gpupreaggUpdateRunTimeStat(gpa_sstate, &gpreagg->kern);
+		gpupreaggUpdateRunTimeStat(gpreagg->task.gts, &gpreagg->kern);
 		retval = -1;
 	}
 out_of_resource:
@@ -4461,21 +4682,22 @@ static int
 gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 {
 	GpuPreAggState *gpas = (GpuPreAggState *) gpreagg->task.gts;
-	GpuPreAggSharedState *gpa_sstate = gpas->gpa_sstate;
 	GpuContext	   *gcontext = gpas->gts.gcontext;
 	pgstrom_data_store *pds_final = gpas->pds_final;
 	pgstrom_data_store *pds_src = gpreagg->pds_src;
+	kern_gpujoin   *kgjoin = gpreagg->kgjoin;
 	CUfunction		kern_gpujoin_main;
 	CUfunction		kern_gpupreagg_setup;
 	CUfunction		kern_gpupreagg_reduction;
 	CUdeviceptr		m_gpreagg = (CUdeviceptr)&gpreagg->kern;
-	CUdeviceptr		m_kgjoin = (CUdeviceptr)gpreagg->kgjoin;
+	CUdeviceptr		m_kgjoin = (CUdeviceptr)kgjoin;
 	CUdeviceptr		m_kmrels = gpreagg->m_kmrels;
 	CUdeviceptr		m_kds_src = 0UL;
-	CUdeviceptr		m_kds_dst; //to be alloc!!!
 	CUdeviceptr		m_kds_slot = 0UL;
 	CUdeviceptr		m_kds_final = (CUdeviceptr)&pds_final->kds;
 	CUdeviceptr		m_fhash = gpas->m_fhash;
+	CUdeviceptr		m_kparams = ((CUdeviceptr)&gpreagg->kern +
+								 offsetof(kern_gpupreagg, kparams));
 	CUresult		rc;
 	int				mp_count;
 	int				max_threads;
@@ -4559,11 +4781,6 @@ gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 	else if (rc != CUDA_SUCCESS)
 		werror("failed on gpuMemAllocManaged: %s", errorText(rc));
 
-	memcpy((void *)m_kds_slot, gpas->kds_slot_head,
-		   KERN_DATA_STORE_HEAD_LENGTH(gpas->kds_slot_head));
-	((kern_data_store *)m_kds_slot)->length = gpreagg->kds_slot_length;
-	((kern_data_store *)m_kds_slot)->nrooms = gpreagg->kds_slot_nrooms;
-
 	/*
 	 * OK, kick a series of GpuPreAgg invocations
 	 */
@@ -4595,11 +4812,12 @@ gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 		}
 	}
 
-	/*
-	 * TODO: We like to construct the GpuJoin results onto the kds_slot
-	 * directly, then kick GpuPreAgg reduction kernel. Once kds_slot gets
-	 * full, we can suspend GpuJoin, then restart it again...
-	 */
+resume_kernel:
+	/* init or reset kds_slot */
+	memcpy((void *)m_kds_slot, gpas->kds_slot_head,
+		   KERN_DATA_STORE_HEAD_LENGTH(gpas->kds_slot_head));
+	((kern_data_store *)m_kds_slot)->length = gpreagg->kds_slot_length;
+	((kern_data_store *)m_kds_slot)->nrooms = gpreagg->kds_slot_nrooms;
 
 	/*
 	 * Launch:
@@ -4607,7 +4825,8 @@ gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 	 * gpujoin_main(kern_gpujoin *kgjoin,
 	 *              kern_multirels *kmrels,
 	 *              kern_data_store *kds_src,
-	 *              kern_data_store *kds_dst)
+	 *              kern_data_store *kds_slot,
+	 *              kern_parambuf *kparams_gpreagg)
 	 */
 	rc = gpuOptimalBlockSize(&grid_sz,
 							 &block_sz,
@@ -4622,7 +4841,8 @@ gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 	kern_args[0] = &m_kgjoin;
 	kern_args[1] = &m_kmrels;
 	kern_args[2] = &m_kds_src;
-	kern_args[3] = &m_kds_dst;
+	kern_args[3] = &m_kds_slot;
+	kern_args[4] = &m_kparams;
 
 	rc = cuLaunchKernel(kern_gpujoin_main,
 						grid_sz, 1, 1,
@@ -4634,46 +4854,14 @@ gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuLaunchKernel: %s", errorText(rc));
 
-#if 1
-	//TODO: gpujoin_main should set up kds_slot using GpuPreAgg's
-	//      projection function
-
-	/*
-	 * Launch:
-	 * gpupreagg_setup_row(kern_gpupreagg *kgpreagg,
-	 *                     kern_data_store *kds_dst, //result of GpuJoin
-	 *                     kern_data_store *kds_slot)
-	 */
-	rc = cuFuncGetAttribute(&max_threads,
-							CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK,
-							kern_gpupreagg_setup);
-	if (rc != CUDA_SUCCESS)
-		werror("failed on cuFuncGetAttribute: %s", errorText(rc));
-	block_sz = max_threads;
-	grid_sz = devAttrs[CU_DINDEX_PER_THREAD].MULTIPROCESSOR_COUNT;
-
-	kern_args[0] = &m_gpreagg;
-	kern_args[1] = &m_kds_dst;
-	kern_args[2] = &m_kds_slot;
-
-	rc = cuLaunchKernel(kern_gpupreagg_setup,
-						grid_sz, 1, 1,
-						block_sz, 1, 1,
-						sizeof(cl_int) * block_sz,	/* for StairlikeSum */
-						CU_STREAM_PER_THREAD,
-						kern_args,
-						NULL);
-	if (rc != CUDA_SUCCESS)
-		werror("failed on cuLaunchKernel: %s", errorText(rc));
-#endif
-
 	/*
 	 * Launch:
 	 * KERNEL_FUNCTION_MAXTHREADS(void)
 	 * gpupreagg_XXXX_reduction(kern_gpupreagg *kgpreagg,
-     *                          kern_data_store *kds_slot,
-     *                          kern_data_store *kds_final,
-     *                          kern_global_hashslot *f_hash)
+	 *                          kern_errorbuf *kgjoin_errorbuf,
+	 *                          kern_data_store *kds_slot,
+	 *                          kern_data_store *kds_final,
+	 *                          kern_global_hashslot *f_hash)
 	 */
 	rc = cuFuncGetAttribute(&max_threads,
 							CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK,
@@ -4684,9 +4872,10 @@ gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 	grid_sz = devAttrs[CU_DINDEX_PER_THREAD].MULTIPROCESSOR_COUNT;
 
 	kern_args[0] = &m_gpreagg;
-	kern_args[1] = &m_kds_slot;
-	kern_args[2] = &m_kds_final;
-	kern_args[3] = &m_fhash;
+	kern_args[1] = &m_kgjoin;
+	kern_args[2] = &m_kds_slot;
+	kern_args[3] = &m_kds_final;
+	kern_args[4] = &m_fhash;
 	rc = cuLaunchKernel(kern_gpupreagg_reduction,
 						grid_sz, 1, 1,
 						block_sz, 1, 1,
@@ -4706,23 +4895,51 @@ gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuEventSynchronize: %s", errorText(rc));
 
-	//TODO: Resume GpuJoin if it was suspended
-	//TODO: fallback if CpuReCheck or NoDataStore error
-
-	gpreagg->task.kerror = gpreagg->kern.kerror;
 	if (pgstrom_cpu_fallback_enabled &&
-		gpreagg->task.kerror.errcode == StromError_CpuReCheck)
+		kgjoin->kerror.errcode == StromError_CpuReCheck)
 	{
-		gpreagg->task.kerror.errcode = StromError_Success;
+		/* CPU fallback by GpuJoin */
+		memset(&gpreagg->task.kerror, 0, sizeof(kern_errorbuf));
 		gpreagg->task.cpu_fallback = true;
 		retval = 0;
 	}
-	else if (gpreagg->task.kerror.errcode != StromError_Success)
-		retval = 0;		/* raise an error */
+	else if (kgjoin->kerror.errcode != StromError_Success &&
+			 kgjoin->kerror.errcode != StromError_Suspend)
+	{
+		/* Raise an error by GpuJoin */
+		gpreagg->task.kerror = kgjoin->kerror;
+		retval = 0;
+	}
+	else if (pgstrom_cpu_fallback_enabled &&
+			 gpreagg->kern.kerror.errcode == StromError_CpuReCheck)
+	{
+		/* CPU fallback by GpuPreAgg */
+		memset(&gpreagg->task.kerror, 0, sizeof(kern_errorbuf));
+		gpreagg->task.cpu_fallback = true;
+		retval = 0;
+	}
+	else if (gpreagg->kern.kerror.errcode == StromError_Success)
+	{
+		GpuTaskState   *gjs;
+
+		if (kgjoin->kerror.errcode == StromError_Suspend)
+		{
+			CHECK_WORKER_TERMINATION();
+			memset(&kgjoin->kerror, 0, sizeof(kern_errorbuf));
+			kgjoin->resume_context = true;
+			goto resume_kernel;
+		}
+		gjs = (GpuTaskState *)outerPlanState(gpreagg->task.gts);
+		gpujoinUpdateRunTimeStat(gjs, gpreagg->kgjoin);
+		gpupreaggUpdateRunTimeStat(gpreagg->task.gts, &gpreagg->kern);
+		gpreagg->task.kerror = gpreagg->kern.kerror;
+		retval = -1;
+	}
 	else
 	{
-		gpupreaggUpdateRunTimeStat(gpa_sstate, &gpreagg->kern);
-		retval = -1;
+		/* Raise an error by GpuPreAgg */
+		gpreagg->task.kerror = gpreagg->kern.kerror;
+		retval = 0;
 	}
 out_of_resource:
 	if (pds_src &&
@@ -4793,7 +5010,7 @@ pgstrom_init_gpupreagg(void)
 							 "Enables to pull up GpuJoin under GpuPreAgg",
 							 NULL,
 							 &enable_pullup_outer_join,
-							 false, //true,
+							 true,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);

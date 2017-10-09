@@ -636,6 +636,13 @@ extern void pgstrom_init_gpu_context(void);
 #define wpanic(fmt,...)							\
 	STROM_REPORT_ERROR(PANIC,"Panic",fmt,##__VA_ARGS__)
 
+static inline void
+CHECK_WORKER_TERMINATION(void)
+{
+	if (pg_atomic_read_u32(&GpuWorkerCurrentContext->terminate_workers) != 0)
+		werror("GpuContext worker termination");
+}
+
 /*
  * gpu_tasks.c
  */

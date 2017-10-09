@@ -328,6 +328,9 @@ retry:
 		if (gts->num_running_tasks == 0)
 		{
 			pthreadMutexUnlock(gcontext->mutex);
+
+			CHECK_FOR_GPUCONTEXT(gcontext);
+
 			if (gts->cb_terminator_task)
 			{
 				cl_bool		is_ready = false;
@@ -357,6 +360,8 @@ retry:
 			return NULL;
 		}
 		pthreadMutexUnlock(gcontext->mutex);
+
+		CHECK_FOR_GPUCONTEXT(gcontext);
 
 		ev = WaitLatch(MyLatch,
 					   WL_LATCH_SET |

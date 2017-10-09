@@ -179,11 +179,11 @@ gpupreagg_global_calc(cl_bool *accum_isnull,
  * (auto generated function)
  */
 STATIC_FUNCTION(void)
-gpupreagg_projection(kern_context *kcxt,
-					 kern_data_store *kds_src,	/* in */
-					 HeapTupleHeaderData *htup,	/* in */
-					 Datum *dst_values,			/* out */
-					 cl_char *dst_isnull);		/* out */
+gpupreagg_projection_row(kern_context *kcxt,
+						 kern_data_store *kds_src,	/* in */
+						 HeapTupleHeaderData *htup,	/* in */
+						 Datum *dst_values,			/* out */
+						 cl_char *dst_isnull);		/* out */
 
 /*
  * gpupreagg_final_data_move
@@ -370,11 +370,11 @@ gpupreagg_setup_row(kern_gpupreagg *kgpreagg,
 				slot_values = KERN_DATA_STORE_VALUES(kds_slot, slot_index);
 				slot_isnull = KERN_DATA_STORE_ISNULL(kds_slot, slot_index);
 
-				gpupreagg_projection(&kcxt,
-									 kds_src,
-									 &tupitem->htup,
-									 slot_values,
-									 slot_isnull);
+				gpupreagg_projection_row(&kcxt,
+										 kds_src,
+										 &tupitem->htup,
+										 slot_values,
+										 slot_isnull);
 			}
 		}
 		/* bailout if any error */
@@ -507,11 +507,11 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 					slot_values = KERN_DATA_STORE_VALUES(kds_slot, slot_index);
 					slot_isnull = KERN_DATA_STORE_ISNULL(kds_slot, slot_index);
 
-					gpupreagg_projection(&kcxt,
-										 kds_src,
-										 htup,
-										 slot_values,
-										 slot_isnull);
+					gpupreagg_projection_row(&kcxt,
+											 kds_src,
+											 htup,
+											 slot_values,
+											 slot_isnull);
 				}
 				/* bailout if any errors */
 				if (kcxt.e.errcode != StromError_Success)
@@ -556,6 +556,7 @@ out:
  */
 KERNEL_FUNCTION_MAXTHREADS(void)
 gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,		/* in/out */
+							kern_errorbuf *kgjoin_errorbuf,	/* in */
 							kern_data_store *kds_slot,		/* in */
 							kern_data_store *kds_final,		/* shared out */
 							kern_global_hashslot *f_hash)	/* shared out */
@@ -576,6 +577,10 @@ gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,		/* in/out */
 	__shared__ cl_uint	base;
 
 	/* skip if previous stage reported an error */
+	if (kgjoin_errorbuf &&
+		kgjoin_errorbuf->errcode != StromError_Success &&
+		kgjoin_errorbuf->errcode != StromError_Suspend)
+		return;
 	if (kgpreagg->kerror.errcode != StromError_Success)
 		return;
 
@@ -835,6 +840,7 @@ retry_fnext:
 
 KERNEL_FUNCTION_MAXTHREADS(void)
 gpupreagg_groupby_reduction(kern_gpupreagg *kgpreagg,		/* in/out */
+							kern_errorbuf *kgjoin_errorbuf,	/* in */
 							kern_data_store *kds_slot,		/* in */
 							kern_data_store *kds_final,		/* shared out */
 							kern_global_hashslot *f_hash)	/* shared out */
@@ -864,6 +870,10 @@ gpupreagg_groupby_reduction(kern_gpupreagg *kgpreagg,		/* in/out */
 	__shared__ cl_uint	base;
 
 	/* skip if previous stage reported an error */
+	if (kgjoin_errorbuf &&
+		kgjoin_errorbuf->errcode != StromError_Success &&
+		kgjoin_errorbuf->errcode != StromError_Suspend)
+		return;
 	if (kgpreagg->kerror.errcode != StromError_Success)
 		return;
 
@@ -1045,98 +1055,6 @@ clean_restart:
 	/* write-back execution status into host side */
 	kern_writeback_error_status(&kgpreagg->kerror, kcxt.e);
 }
-
-#ifdef CUDA_GPUJOIN_H
-/*
- * gpupreagg_join_main
- *
- * The entrypoint of GpuPreAgg + GpuJoin logic; which calls relevant kernels
- * to handle join + reduction processes.
- */
-KERNEL_FUNCTION(void)
-gpupreagg_join_main(kern_gpupreagg *kgpreagg,	/* in/out: misc stuffs */
-					kern_gpujoin   *kgjoin,		/* in: GpuJoin control head */
-					kern_multirels *kmrels,		/* in: GpuJoin inner buffer */
-					cl_bool *outer_join_map,	/* in/out: outer map */
-					kern_data_store *kds_src,	/* KDS_FORMAT_ROW/BLOCK */
-					kern_data_store *kds_dst,	/* KDS_FORMAT_ROW */
-					kern_data_store *kds_slot,	/* KDS_FORMAT_SLOT */
-					kern_global_hashslot *g_hash,/* For global reduction */
-					kern_data_store *kds_final,	/* KDS_FORMAT_SLOT + Extra */
-					kern_global_hashslot *f_hash)/* For final reduction */
-{
-	kern_join_scale *jscale = kgjoin->jscale;
-	cl_int		i, j, num_rels = kgjoin->num_rels;
-	cl_uint		nitems;
-
-gpujoin_retry:
-	/*
-	 * Run GpuJoin - construct kds_dst data store as KDS_FORMAT_ROW store,
-	 * for input of the following GpuPreAgg logic.
-	 */
-	gpujoin_main(kgjoin,
-				 kmrels,
-				 outer_join_map,
-				 kds_src,
-				 kds_dst,
-				 0);
-	if (kgjoin->kerror.errcode != StromError_Success)
-	{
-		kgpreagg->kerror = kgjoin->kerror;
-		return;
-	}
-
-	/*
-	 * Run GpuPreAgg, if GpuJoin populated any input tuples
-	 */
-	if (kds_dst->nitems > 0)
-	{
-		gpupreagg_main(kgpreagg,
-					   kds_dst,
-					   kds_slot,
-					   g_hash,
-					   kds_final,
-					   f_hash);
-		if (kgpreagg->kerror.errcode != StromError_Success)
-			return;
-	}
-
-	/*
-	 * check whether entire window frame was successfully processed.
-	 * if not completed, we need to move the window frame to the next
-	 * position.
-	 */
-	for (i = num_rels; i >= 0; i--)
-	{
-		if (i == 0)
-			nitems = (kds_src ? kds_src->nitems : 0);
-		else
-			nitems = KERN_MULTIRELS_INNER_KDS(kmrels, i)->nitems;
-
-		if (jscale[i].window_base + jscale[i].window_size < nitems)
-		{
-			cl_uint		window_base = jscale[i].window_base;
-			cl_uint		window_size = jscale[i].window_size;
-			cl_uint		window_orig = jscale[i].window_orig;
-
-			jscale[i].window_base = (window_base + window_size);
-			jscale[i].window_size = (window_base + window_size - window_orig);
-			jscale[i].window_orig = (window_base + window_size);
-			if (jscale[i].window_base + window_size > nitems)
-				window_size = nitems - jscale[i].window_base;
-			for (j=i+1; j <= num_rels; j++)
-			{
-				kern_data_store *kds = KERN_MULTIRELS_INNER_KDS(kmrels, j);
-				jscale[j].window_base = 0;
-				jscale[j].window_size = kds->nitems;
-				jscale[j].window_orig = 0;
-			}
-			goto gpujoin_retry;
-		}
-	}
-	assert(kgpreagg->kerror.errcode == StromError_Success);
-}
-#endif
 
 /* ----------------------------------------------------------------
  *
