@@ -4335,11 +4335,6 @@ gpupreagg_next_tuple(GpuTaskState *gts)
 		slot = gpas->gpreagg_slot;
 		ExecClearTuple(slot);
 		PDS_fetch_tuple(slot, pds_final, &gpas->gts);
-		elog(INFO, "GpuPreAgg slot=%p [%d %lx][%d %lx][%d %lx][%d %lx]", slot,
-			 slot->tts_isnull[0], slot->tts_values[0],
-			 slot->tts_isnull[1], slot->tts_values[1],
-			 slot->tts_isnull[2], slot->tts_values[2],
-			 slot->tts_isnull[3], slot->tts_values[3]);
 	}
 	return slot;
 }
@@ -4699,8 +4694,6 @@ gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 	CUdeviceptr		m_kparams = ((CUdeviceptr)&gpreagg->kern +
 								 offsetof(kern_gpupreagg, kparams));
 	CUresult		rc;
-	int				mp_count;
-	int				max_threads;
 	size_t			grid_sz;
 	size_t			block_sz;
 	void		   *kern_args[10];
@@ -4828,15 +4821,14 @@ resume_kernel:
 	 *              kern_data_store *kds_slot,
 	 *              kern_parambuf *kparams_gpreagg)
 	 */
-	rc = gpuOptimalBlockSize(&grid_sz,
+	grid_sz = devAttrs[CU_DINDEX_PER_THREAD].MULTIPROCESSOR_COUNT;
+	rc = gpuOptimalBlockSize(NULL,
 							 &block_sz,
 							 kern_gpujoin_main,
 							 0,
 							 sizeof(int));
 	if (rc != CUDA_SUCCESS)
 		werror("failed on gpuOptimalBlockSize: %s", errorText(rc));
-	mp_count = devAttrs[CU_DINDEX_PER_THREAD].MULTIPROCESSOR_COUNT;
-	grid_sz = Max(grid_sz, mp_count);
 
 	kern_args[0] = &m_kgjoin;
 	kern_args[1] = &m_kmrels;
@@ -4863,13 +4855,14 @@ resume_kernel:
 	 *                          kern_data_store *kds_final,
 	 *                          kern_global_hashslot *f_hash)
 	 */
-	rc = cuFuncGetAttribute(&max_threads,
-							CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK,
-							kern_gpupreagg_reduction);
-	if (rc != CUDA_SUCCESS)
-		werror("failed on cuFuncGetAttribute: %s", errorText(rc));
-	block_sz = max_threads;
 	grid_sz = devAttrs[CU_DINDEX_PER_THREAD].MULTIPROCESSOR_COUNT;
+	rc = gpuOptimalBlockSize(NULL,
+							 &block_sz,
+							 kern_gpupreagg_reduction,
+							 0,
+							 sizeof(int));
+	if (rc != CUDA_SUCCESS)
+		werror("failed on gpuOptimalBlockSize: %s", errorText(rc));
 
 	kern_args[0] = &m_gpreagg;
 	kern_args[1] = &m_kgjoin;
