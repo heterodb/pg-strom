@@ -3916,7 +3916,10 @@ ExecGpuPreAggInitWorker(CustomScanState *node,
 						shm_toc *toc,
 						void *coordinate)
 {
-	GpuPreAggSharedState *gpa_sstate = coordinate;
+	GpuPreAggState		   *gpas = (GpuPreAggState *) node;
+	GpuPreAggSharedState   *gpa_sstate = coordinate;
+
+	gpas->gpa_sstate = gpa_sstate;
 	ExecGpuScanInitWorker(node, toc, ((char *)coordinate +
 									  gpa_sstate->ss_length));
 }
