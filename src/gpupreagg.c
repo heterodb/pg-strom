@@ -2945,10 +2945,16 @@ gpupreagg_codegen_projection_slot(StringInfo kern,
 						&decl,
 						"  pg_%s_t KVAR_%u;\n",
 						dtype->type_name, i);
-					appendStringInfo(
-						&temp,
-						"  KVAR_%u = pg_%s_datum_ref(kcxt,src_isnull[%d] ? NULL : &src_values[%d]);\n",
-						i, dtype->type_name, i-1, i-1);
+					if (dtype->type_byval)
+						appendStringInfo(
+							&temp,
+							"  KVAR_%u = pg_%s_datum_ref(kcxt,src_isnull[%d] ? NULL : &src_values[%d]);\n",
+							i, dtype->type_name, i-1, i-1);
+					else
+						appendStringInfo(
+							&temp,
+							"  KVAR_%u = pg_%s_datum_ref(kcxt,src_isnull[%d] ? NULL : DatumGetPointer(src_values[%d]));\n",
+							i, dtype->type_name, i-1, i-1);
 				}
 
 				foreach (lc, tlist_dev_alt)
@@ -4750,7 +4756,6 @@ gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 				}
 				else if (rc != CUDA_SUCCESS)
 					werror("failed on gpuMemAllocIOMap: %s", errorText(rc));
-				wnotice("m_kds_src = %p", errorText(rc));
 			}
 			if (m_kds_src == 0UL)
 			{
@@ -4761,7 +4766,6 @@ gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 					goto out_of_resource;
 				else if (rc != CUDA_SUCCESS)
 					werror("failed on gpuMemAlloc: %s", errorText(rc));
-				wnotice("m_kds_src = %p", errorText(rc));
 			}
 		}
 	}
