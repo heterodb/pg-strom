@@ -517,7 +517,7 @@ GpuContextWorkerMain(void *arg)
 	GpuTask		   *gtask;
 	CUresult		rc;
 	uint32			command;
-	bool			is_timeout;
+	bool			is_wakeup;
 
 	/* setup worker index */
 	GpuWorkerIndex = pg_atomic_fetch_add_u32(&gcontext->worker_index, 1);
@@ -542,14 +542,14 @@ GpuContextWorkerMain(void *arg)
 		pthreadMutexLock(gcontext->mutex);
 		if (dlist_is_empty(&gcontext->pending_tasks))
 		{
-			is_timeout = pthreadCondWaitTimeout(gcontext->cond,
-												gcontext->mutex,
-												4000);
+			is_wakeup = pthreadCondWaitTimeout(gcontext->cond,
+											   gcontext->mutex,
+											   4000);
 			pthreadMutexUnlock(gcontext->mutex);
-			if (is_timeout)
-				command = GPUCTX_CMD__RECLAIM_MEMORY;
-			else
+			if (is_wakeup)
 				command = pg_atomic_exchange_u32(gcontext->command, 0);
+			else
+				command = GPUCTX_CMD__RECLAIM_MEMORY;
 
 			if ((command & GPUCTX_CMD__RECLAIM_MEMORY) != 0)
 			{
