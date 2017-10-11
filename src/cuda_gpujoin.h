@@ -337,7 +337,6 @@ STATIC_FUNCTION(cl_int)
 gpujoin_load_source(kern_context *kcxt,
 					kern_gpujoin *kgjoin,
 					kern_data_store *kds_src,
-					cl_uint outer_unit_sz,
 					cl_uint *wr_stack,
 					cl_uint *l_state)
 {
@@ -357,11 +356,11 @@ gpujoin_load_source(kern_context *kcxt,
 		/* fetch next window */
 		if (get_local_id() == 0)
 			src_read_pos = atomicAdd(&kgjoin->src_read_pos,
-									 outer_unit_sz);
+									 get_local_size());
 		__syncthreads();
 		row_index = src_read_pos + get_local_id();
 
-		if (row_index < kds_src->nitems)
+		if (row_index < __ldg(&kds_src->nitems))
 		{
 			tupitem = KERN_DATA_STORE_TUPITEM(kds_src, row_index);
 			t_offset = (cl_uint)((char *)&tupitem->htup - (char *)kds_src);
@@ -372,22 +371,20 @@ gpujoin_load_source(kern_context *kcxt,
 	else
 	{
 		cl_uint		part_sz = KERN_DATA_STORE_PARTSZ(kds_src);
+		cl_uint		n_parts = get_local_size() / part_sz;
 		cl_uint		part_id;
 		cl_uint		line_no;
-		cl_uint		n_parts;
 		cl_uint		n_lines;
 		cl_uint		loops = l_state[0]++;
 
 		/* fetch next window, if needed */
 		if (loops == 0 && get_local_id() == 0)
-			src_read_pos = atomicAdd(&kgjoin->src_read_pos,
-									 outer_unit_sz);
+			src_read_pos = atomicAdd(&kgjoin->src_read_pos, n_parts);
 		__syncthreads();
 		part_id = src_read_pos + get_local_id() / part_sz;
-		n_parts = get_local_size() / part_sz;
 		line_no = get_local_id() % part_sz + loops * part_sz + 1;
 
-		if (part_id < kds_src->nitems &&
+		if (part_id < __ldg(&kds_src->nitems) &&
 			get_local_id() < part_sz * n_parts)
 		{
 			PageHeaderData *pg_page;
@@ -1165,7 +1162,6 @@ gpujoin_main(kern_gpujoin *kgjoin,
 	kern_context	kcxt_gpreagg __attribute__((unused));
 	cl_int			depth;
 	cl_int			index;
-	cl_uint			outer_unit_sz;
 	cl_uint			pstack_nrooms;
 	cl_uint		   *pstack_base;
 	cl_uint			l_state[GPUJOIN_MAX_DEPTH+1];
@@ -1184,9 +1180,6 @@ gpujoin_main(kern_gpujoin *kgjoin,
 #endif
 
 	/* setup private variables */
-	outer_unit_sz = (kds_src->format == KDS_FORMAT_ROW
-					 ? get_local_size()
-					 : KERN_DATA_STORE_PARTSZ(kds_src));
 	pstack_nrooms = kgjoin->pstack_nrooms;
 	pstack_base = (cl_uint *)((char *)kgjoin + kgjoin->pstack_offset)
 		+ get_global_index() * pstack_nrooms * ((GPUJOIN_MAX_DEPTH+1) *
@@ -1229,7 +1222,6 @@ gpujoin_main(kern_gpujoin *kgjoin,
 			depth = gpujoin_load_source(&kcxt,
 										kgjoin,
 										kds_src,
-										outer_unit_sz,
 										PSTACK_DEPTH(depth),
 										l_state);
 		}

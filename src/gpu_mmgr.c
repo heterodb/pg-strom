@@ -284,6 +284,7 @@ __gpuMemAllocRaw(GpuContext *gcontext,
 		return CUDA_ERROR_OUT_OF_MEMORY;
 	}
 	cuCtxPopCurrent(NULL);
+	*p_devptr = m_deviceptr;
 
 	return CUDA_SUCCESS;
 }
@@ -698,7 +699,7 @@ __gpuMemAlloc(GpuContext *gcontext,
 {
 	cl_int		mclass = get_next_log2(pgstrom_chunk_size());
 
-	if (bytesize != pgstrom_chunk_size())
+	if (bytesize > pgstrom_chunk_size())
 		return __gpuMemAllocRaw(gcontext,
 								p_deviceptr,
 								bytesize,

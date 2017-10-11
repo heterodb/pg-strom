@@ -771,7 +771,7 @@ KERN_HASH_NEXT_ITEM(kern_data_store *kds, kern_hashitem *khitem)
 
 /* access macro for block format */
 #define KERN_DATA_STORE_PARTSZ(kds)							\
-	Min(((kds)->nrows_per_block +							\
+	Min((__ldg(&(kds)->nrows_per_block) +					\
 		 warpSize - 1) & ~(warpSize - 1), get_local_size())
 
 #define KERN_DATA_STORE_BLOCK_BLCKNR(kds, kds_index)			\
