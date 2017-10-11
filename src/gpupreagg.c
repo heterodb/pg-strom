@@ -4750,6 +4750,7 @@ gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 				}
 				else if (rc != CUDA_SUCCESS)
 					werror("failed on gpuMemAllocIOMap: %s", errorText(rc));
+				wnotice("m_kds_src = %p", errorText(rc));
 			}
 			if (m_kds_src == 0UL)
 			{
@@ -4760,6 +4761,7 @@ gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 					goto out_of_resource;
 				else if (rc != CUDA_SUCCESS)
 					werror("failed on gpuMemAlloc: %s", errorText(rc));
+				wnotice("m_kds_src = %p", errorText(rc));
 			}
 		}
 	}
@@ -4795,7 +4797,7 @@ gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 								   pds_src->kds.length,
 								   CU_STREAM_PER_THREAD);
 			if (rc != CUDA_SUCCESS)
-				werror("failed on cuMemcpyHtoD: %s", errorText(rc));
+				werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
 		}
 		else
 		{

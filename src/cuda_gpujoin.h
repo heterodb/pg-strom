@@ -301,12 +301,13 @@ gpujoin_rewind_stack(cl_int depth, cl_uint *l_state, cl_bool *matched)
 {
 	static __shared__ cl_int	__depth;
 
-	assert(depth > base_depth);
+	assert(depth >= base_depth && depth <= GPUJOIN_MAX_DEPTH);
 	if (get_local_id() == 0)
 	{
 		__depth = depth;
-		do {
-			if (__depth <= GPUJOIN_MAX_DEPTH)
+		for (;;)
+		{
+			if (read_pos[__depth] >= write_pos[__depth])
 			{
 				read_pos[__depth] = 0;
 				write_pos[__depth] = 0;
@@ -314,7 +315,8 @@ gpujoin_rewind_stack(cl_int depth, cl_uint *l_state, cl_bool *matched)
 			if (__depth == base_depth ||
 				read_pos[__depth-1] < write_pos[__depth-1])
 				break;
-		} while (__depth-- > base_depth);
+			__depth--;
+		}
 	}
 	__syncthreads();
 	depth = __depth;
@@ -609,7 +611,7 @@ gpujoin_projection_row(kern_context *kcxt,
 	{
 		if (scan_done)
 			return -1;
-		return gpujoin_rewind_stack(nrels+1, l_state, matched);
+		return gpujoin_rewind_stack(nrels, l_state, matched);
 	}
 
 	/* pick up combinations from the pseudo-stack */
@@ -764,7 +766,7 @@ gpujoin_projection_slot(kern_context *kcxt,
 	{
 		if (scan_done)
 			return -1;
-		return gpujoin_rewind_stack(nrels+1, l_state, matched);
+		return gpujoin_rewind_stack(nrels, l_state, matched);
 	}
 
 	/* pick up combinations from the pseudo-stack */
@@ -942,7 +944,7 @@ gpujoin_exec_nestloop(kern_context *kcxt,
          */
 		if (!scan_done &&
 			write_pos[depth] + get_local_size() <= kgjoin->pstack_nrooms)
-			return gpujoin_rewind_stack(depth, l_state, matched);
+			return gpujoin_rewind_stack(depth-1, l_state, matched);
 		/* elsewhere, dive into the deeper depth or projection */
 		return depth + 1;
 	}
@@ -1042,7 +1044,7 @@ gpujoin_exec_hashjoin(kern_context *kcxt,
 		 */
 		if (!scan_done &&
 			write_pos[depth] + get_local_size() <= kgjoin->pstack_nrooms)
-			return gpujoin_rewind_stack(depth, l_state, matched);
+			return gpujoin_rewind_stack(depth-1, l_state, matched);
 		/* Elsewhere, dive into the deeper depth or projection */
 		return depth + 1;
 	}

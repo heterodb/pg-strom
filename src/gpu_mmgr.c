@@ -720,7 +720,7 @@ __gpuMemAllocIOMap(GpuContext *gcontext,
 	cl_int		mclass = get_next_log2(pgstrom_chunk_size());
 
 	/* not supported at this moment */
-	if (bytesize != pgstrom_chunk_size())
+	if (bytesize > pgstrom_chunk_size())
 		return CUDA_ERROR_INVALID_VALUE;
 	return gpuMemAllocChunk(GpuMemKind__IOMapMemory,
                             gcontext, p_deviceptr, mclass,
