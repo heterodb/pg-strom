@@ -2528,6 +2528,10 @@ ExecGpuJoinInitDSM(CustomScanState *node,
 
 	/* save the ParallelContext */
 	gjs->gts.pcxt = pcxt;
+	/* ensure to stop workers prior to detach DSM */
+	on_dsm_detach(pcxt->seg,
+				  SynchronizeGpuContextOnDSMDetach,
+				  PointerGetDatum(gjs->gts.gcontext));
 	/* allocation of an empty multirel buffer */
 	gjs->gj_sstate = createGpuJoinSharedState(gjs, pcxt, coordinate);
 	ExecGpuScanInitDSM(node, pcxt, ((char *)coordinate +
@@ -2546,6 +2550,10 @@ ExecGpuJoinInitWorker(CustomScanState *node,
 	GpuJoinSharedState *gj_sstate = (GpuJoinSharedState *) coordinate;
 
 	gjs->gj_sstate = gj_sstate;
+	/* ensure to stop workers prior to detach DSM */
+	on_dsm_detach(dsm_find_mapping(gj_sstate->ss_handle),
+				  SynchronizeGpuContextOnDSMDetach,
+				  PointerGetDatum(gjs->gts.gcontext));
 	ExecGpuScanInitWorker(node, toc, ((char *)coordinate +
 									  gj_sstate->ss_length));
 }

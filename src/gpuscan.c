@@ -110,8 +110,8 @@ deform_gpuscan_info(CustomScan *cscan)
 }
 
 typedef struct {
-	cl_uint			ss_length;
-	cl_int			pg_nworkers;
+	dsm_handle		ss_handle;		/* DSM handle of the SharedState */
+	cl_uint			ss_length;		/* Length of the SharedState */
 	pg_atomic_uint64 nitems_filtered;
 } GpuScanSharedState;
 
@@ -151,7 +151,7 @@ static int gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module);
 static void gpuscan_release_task(GpuTask *gtask);
 
 static GpuScanSharedState *createGpuScanSharedState(GpuScanState *gss,
-													int pg_nworkers,
+													ParallelContext *pcxt,
 													void *dsm_addr);
 static void resetGpuScanSharedState(GpuScanState *gss);
 
@@ -2042,7 +2042,7 @@ ExecGpuScan(CustomScanState *node)
 	GpuScanState   *gss = (GpuScanState *) node;
 
 	if (!gss->gs_sstate)
-		gss->gs_sstate = createGpuScanSharedState(gss, 1, NULL);
+		gss->gs_sstate = createGpuScanSharedState(gss, NULL, NULL);
 	return ExecScan(&node->ss,
 					(ExecScanAccessMtd) pgstromExecGpuTaskState,
 					(ExecScanRecheckMtd) ExecReCheckGpuScan);
@@ -2114,8 +2114,10 @@ ExecGpuScanInitDSM(CustomScanState *node,
 	/* NOTE: GpuJoin or GpuPreAgg may also call this function */
 	if (pgstrom_planstate_is_gpuscan(&gss->gts.css.ss.ps))
 	{
-		gss->gs_sstate = createGpuScanSharedState(gss, pcxt->nworkers + 1,
-												  coordinate);
+		gss->gs_sstate = createGpuScanSharedState(gss, pcxt, coordinate);
+		on_dsm_detach(pcxt->seg,
+					  SynchronizeGpuContextOnDSMDetach,
+					  PointerGetDatum(gss->gts.gcontext));
 		coordinate = ((char *)coordinate + 
 					  MAXALIGN(sizeof(GpuScanSharedState)));
 	}
@@ -2149,6 +2151,9 @@ ExecGpuScanInitWorker(CustomScanState *node,
 	if (pgstrom_planstate_is_gpuscan(&gss->gts.css.ss.ps))
 	{
 		gss->gs_sstate = (GpuScanSharedState *)coordinate;
+		on_dsm_detach(dsm_find_mapping(gss->gs_sstate->ss_handle),
+					  SynchronizeGpuContextOnDSMDetach,
+					  PointerGetDatum(gss->gts.gcontext));
 		coordinate = ((char *)coordinate +
 					  MAXALIGN(sizeof(GpuScanSharedState)));
 	}
@@ -2241,19 +2246,21 @@ ExplainGpuScan(CustomScanState *node, List *ancestors, ExplainState *es)
  * createGpuScanSharedState
  */
 static GpuScanSharedState *
-createGpuScanSharedState(GpuScanState *gss, int pg_nworkers, void *dsm_addr)
+createGpuScanSharedState(GpuScanState *gss,
+						 ParallelContext *pcxt,
+						 void *dsm_addr)
 {
 	GpuScanSharedState *gs_sstate;
-	EState	   *estate = gss->gts.css.ss.ps.state;
+	size_t		ss_length = MAXALIGN(sizeof(GpuScanSharedState));
 
+	Assert(!IsParallelWorker());
 	if (dsm_addr)
 		gs_sstate = dsm_addr;
 	else
-		gs_sstate = MemoryContextAlloc(estate->es_query_cxt,
-									   sizeof(GpuScanSharedState));
-	memset(gs_sstate, 0, sizeof(GpuScanSharedState));
-	gs_sstate->ss_length = sizeof(GpuScanSharedState);
-	gs_sstate->pg_nworkers = pg_nworkers;
+		gs_sstate = MemoryContextAlloc(CurTransactionContext, ss_length);
+	memset(gs_sstate, 0, ss_length);
+	gs_sstate->ss_handle = (pcxt ? dsm_segment_handle(pcxt->seg) : UINT_MAX);
+	gs_sstate->ss_length = ss_length;
 
 	return gs_sstate;
 }

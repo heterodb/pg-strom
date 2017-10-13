@@ -1000,6 +1000,30 @@ SynchronizeGpuContext(GpuContext *gcontext)
 }
 
 /*
+ * SynchronizeGpuContextOnDSMDetach
+ */
+void
+SynchronizeGpuContextOnDSMDetach(dsm_segment *seg, Datum arg)
+{
+	GpuContext *gcontext = (GpuContext *)arg;
+	dlist_iter	iter;
+
+	SpinLockAcquire(&activeGpuContextLock);
+	dlist_foreach(iter, &activeGpuContextList)
+	{
+		GpuContext *curr = dlist_container(GpuContext, chain, iter.cur);
+
+		if (curr == gcontext)
+		{
+			SpinLockRelease(&activeGpuContextLock);
+			SynchronizeGpuContext(gcontext);
+			return;
+		}
+	}
+	SpinLockRelease(&activeGpuContextLock);
+}
+
+/*
  * gpucontext_cleanup_callback - cleanup callback when drop of ResourceOwner
  */
 static void
