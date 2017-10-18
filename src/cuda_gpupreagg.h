@@ -1035,15 +1035,19 @@ clean_restart:
 					num_locked = 0;
 				__syncthreads();
 
-				if (is_owner &&
-					!gpupreagg_final_reduction(&kcxt,
-											   kgpreagg,
-											   kds_slot,
-											   kds_index,
-											   hash_value,
-											   kds_final,
-											   f_hash))
-					atomicAdd(&num_locked, 1);
+				if (is_owner)
+				{
+					if (gpupreagg_final_reduction(&kcxt,
+												  kgpreagg,
+												  kds_slot,
+												  kds_index,
+												  hash_value,
+												  kds_final,
+												  f_hash))
+						is_owner = false;
+					else
+						atomicAdd(&num_locked, 1);
+				}
 				__syncthreads();
 			} while (num_locked > 0);
 
