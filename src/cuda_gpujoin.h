@@ -518,16 +518,16 @@ gpujoin_load_outer(kern_context *kcxt,
 		t_offset = (cl_uint)((char *)&tupitem->htup - (char *)kds_in);
 		htup = &tupitem->htup;
 	}
-
-	if (__syncthreads_count(htup != NULL) > 0)
+	wr_index = write_pos[outer_depth];
+	wr_index += pgstromStairlikeBinaryCount(htup != NULL, &count);
+	__syncthreads();
+	if (count > 0)
 	{
-		wr_index = write_pos[outer_depth];
-		wr_index += pgstromStairlikeBinaryCount(htup != NULL, &count);
 		if (get_local_id() == 0)
 		{
 			write_pos[outer_depth] += count;
 			stat_nitems[outer_depth] += count;
-		}
+        }
 		if (htup)
 		{
 			wr_stack += wr_index * (outer_depth + 1);

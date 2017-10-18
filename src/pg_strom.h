@@ -898,6 +898,10 @@ extern void GpuJoinInnerUnload(GpuTaskState *gts, bool is_rescan);
 extern pgstrom_data_store *GpuJoinExecOuterScanChunk(GpuTaskState *gts,
 													 int *p_filedesc);
 extern bool gpujoinHasRightOuterJoin(GpuTaskState *gts);
+extern int  gpujoinNextRightOuterJoin(GpuTaskState *gts);
+extern void gpujoinSyncRightOuterJoin(GpuTaskState *gts);
+extern void gpujoinColocateOuterJoinMaps(GpuTaskState *gts,
+										 CUmodule cuda_module);
 extern void gpujoinUpdateRunTimeStat(GpuTaskState *gts,
 									 struct kern_gpujoin *kgjoin);
 

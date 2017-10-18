@@ -189,6 +189,7 @@ typedef struct
 	size_t				kds_slot_length; /* for kds_slot */
 	kern_gpujoin	   *kgjoin;		/* kern_gpujoin, if combined mode */
 	CUdeviceptr			m_kmrels;	/* kern_multirels, if combined mode */
+	cl_int				outer_depth;/* RIGHT OUTER depth, if combined mode */
 	kern_gpupreagg		kern;
 } GpuPreAggTask;
 
@@ -4097,7 +4098,8 @@ static GpuTask *
 gpupreagg_create_task(GpuPreAggState *gpas,
 					  pgstrom_data_store *pds_src,
 					  int file_desc,
-					  CUdeviceptr m_kmrels)
+					  CUdeviceptr m_kmrels,
+					  int outer_depth)
 {
 	GpuContext	   *gcontext = gpas->gts.gcontext;
 	TupleTableSlot *gpa_slot = gpas->gpreagg_slot;
@@ -4105,7 +4107,7 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 	GpuPreAggTask  *gpreagg;
 	bool			with_nvme_strom = false;
 	cl_uint			nrows_per_block = 0;
-	size_t			kds_slot_nrooms = (pds_src ? pds_src->kds.nitems : 0);
+	size_t			kds_slot_nrooms = 0;
 	size_t			kds_slot_length;
 	CUdeviceptr		m_deviceptr;
 	CUresult		rc;
@@ -4116,30 +4118,38 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 	if (!gpas->pds_final)
 		gpupreagg_alloc_final_buffer(gpas);
 
-	/* adjust parameters if block format */
-	if (pds_src && pds_src->kds.format == KDS_FORMAT_BLOCK)
+	/* rough estimation of the result buffer */
+	if (!pds_src)
+		kds_slot_length = pgstrom_chunk_size();
+	else
 	{
-		struct NVMEScanState *nvme_sstate
-			= (gpas->combined_gpujoin
-			   ? ((GpuTaskState *)outerPlanState(gpas))->nvme_sstate
-			   : gpas->gts.nvme_sstate);
+		kds_slot_nrooms = pds_src->kds.nitems;
 
-		Assert(nvme_sstate != NULL);
-		with_nvme_strom = (pds_src->nblocks_uncached > 0);
-		nrows_per_block = nvme_sstate->nrows_per_block;
-		// FIXME: we have to pay attention whether 150% of nrows_per_block is
-		// exactly adeque estimation or not. Small nrows_per_block (often
-		// less than 32) has higher volatility but total amount of actual
-		// memory consumption is not so big.
-		// Large nrows_per_block has less volatility but length of
-		// kern_resultbuf is not so short.
-		kds_slot_nrooms = 1.5 * (double)(kds_slot_nrooms * nrows_per_block);
+		if (pds_src->kds.format == KDS_FORMAT_BLOCK)
+		{
+			struct NVMEScanState *nvme_sstate
+				= (gpas->combined_gpujoin
+				   ? ((GpuTaskState *)outerPlanState(gpas))->nvme_sstate
+				   : gpas->gts.nvme_sstate);
+
+			Assert(nvme_sstate != NULL);
+			with_nvme_strom = (pds_src->nblocks_uncached > 0);
+			nrows_per_block = nvme_sstate->nrows_per_block;
+			/*
+			 * It is arguable whether 150% of nrows_per_block * nitems; which
+			 * means number of blocks in KDS_FORMAT_BLOCK, is adeque
+			 * estimation, or not.
+			 * Suspend/Resume like GpuJoin may make sense for the future
+			 * improvement.
+			 */
+			kds_slot_nrooms = 1.5 * (double)(kds_slot_nrooms *
+											 nrows_per_block);
+		}
+		kds_slot_length = STROMALIGN(offsetof(kern_data_store,
+											  colmeta[gpa_tupdesc->natts])) +
+			STROMALIGN(LONGALIGN((sizeof(Datum) + sizeof(char)) *
+								 gpa_tupdesc->natts) * kds_slot_nrooms);
 	}
-	kds_slot_length = STROMALIGN(offsetof(kern_data_store,
-										  colmeta[gpa_tupdesc->natts])) +
-		STROMALIGN(LONGALIGN((sizeof(Datum) + sizeof(char)) *
-							 gpa_tupdesc->natts) * kds_slot_nrooms);
-
 	/* allocation of GpuPreAggTask */
 	head_sz = STROMALIGN(offsetof(GpuPreAggTask, kern.kparams) +
 						 gpas->gts.kern_params->length);
@@ -4170,6 +4180,7 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 		gpreagg->kgjoin = (kern_gpujoin *)((char *)gpreagg + head_sz);
 		GpuJoinSetupTask(gpreagg->kgjoin, outer_gts, pds_src);
 		gpreagg->m_kmrels = m_kmrels;
+		gpreagg->outer_depth = outer_depth;
 	}
 	else
 	{
@@ -4258,7 +4269,7 @@ gpupreagg_next_task(GpuTaskState *gts)
 		}
 	}
 	if (pds)
-		gtask = gpupreagg_create_task(gpas, pds, filedesc, m_kmrels);
+		gtask = gpupreagg_create_task(gpas, pds, filedesc, m_kmrels, -1);
 	return gtask;
 }
 
@@ -4269,16 +4280,37 @@ static GpuTask *
 gpupreagg_terminator_task(GpuTaskState *gts, cl_bool *task_is_ready)
 {
 	GpuPreAggState *gpas = (GpuPreAggState *) gts;
-	GpuTask		   *gtask = NULL;
 
-	//TODO: if combined GpuJoin, may need to kick RIGHT OUTER reduction
-	if (!gpas->terminator_done)
+	if (gpas->terminator_done)
+		return NULL;
+
+	/*
+	 * Do we need to kick RIGHT OUTER JOIN + GpuPreAgg task if combined mode.
+	 */
+	if (gpas->combined_gpujoin)
 	{
-		gpas->terminator_done = true;
-		gtask = gpupreagg_create_task(gpas, NULL, -1, 0UL);
-		*task_is_ready = true;
+		GpuTaskState   *outer_gts = (GpuTaskState *)outerPlanState(gpas);
+		CUdeviceptr		m_kmrels = 0UL;
+		cl_int			outer_depth;
+
+		/* Has RIGHT/FULL OUTER JOIN? */
+		if (gpujoinHasRightOuterJoin(outer_gts))
+		{
+			gpujoinSyncRightOuterJoin(outer_gts);
+			if (!IsParallelWorker() &&
+				(outer_depth = gpujoinNextRightOuterJoin(outer_gts)) > 0)
+			{
+				if (GpuJoinInnerPreload(outer_gts, &m_kmrels))
+					return gpupreagg_create_task(gpas, NULL, -1,
+												 m_kmrels,
+												 outer_depth);
+			}
+		}
 	}
-	return gtask;
+	/* setup a terminator task */
+	gpas->terminator_done = true;
+	*task_is_ready = true;
+	return gpupreagg_create_task(gpas, NULL, -1, 0UL, -1);
 }
 
 /*
@@ -4693,7 +4725,6 @@ gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 	pgstrom_data_store *pds_src = gpreagg->pds_src;
 	kern_gpujoin   *kgjoin = gpreagg->kgjoin;
 	CUfunction		kern_gpujoin_main;
-	CUfunction		kern_gpupreagg_setup;
 	CUfunction		kern_gpupreagg_reduction;
 	CUdeviceptr		m_gpreagg = (CUdeviceptr)&gpreagg->kern;
 	CUdeviceptr		m_kgjoin = (CUdeviceptr)kgjoin;
@@ -4722,13 +4753,9 @@ gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 	 */
 	rc = cuModuleGetFunction(&kern_gpujoin_main,
 							 cuda_module,
-							 "gpujoin_main");
-	if (rc != CUDA_SUCCESS)
-		werror("failed on cuModuleGetFunction: %s", errorText(rc));
-
-	rc = cuModuleGetFunction(&kern_gpupreagg_setup,
-							 cuda_module,
-							 "gpupreagg_setup_row");
+							 pds_src != NULL
+							 ? "gpujoin_main"
+							 : "gpujoin_right_outer");
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuModuleGetFunction: %s", errorText(rc));
 
@@ -4815,6 +4842,12 @@ gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 							  pds_src);
 		}
 	}
+	else
+	{
+		GpuTaskState   *outer_gts = (GpuTaskState *)
+			outerPlanState(gpreagg->task.gts);
+		gpujoinColocateOuterJoinMaps(outer_gts, cuda_module);
+	}
 
 resume_kernel:
 	/* init or reset kds_slot */
@@ -4831,6 +4864,14 @@ resume_kernel:
 	 *              kern_data_store *kds_src,
 	 *              kern_data_store *kds_slot,
 	 *              kern_parambuf *kparams_gpreagg)
+	 * OR
+	 *
+	 * KERNEL_FUNCTION(void)
+	 * gpujoin_right_outer(kern_gpujoin *kgjoin,
+	 *                     kern_multirels *kmrels,
+	 *                     cl_int outer_depth,
+	 *                     kern_data_store *kds_dst,
+	 *                     kern_parambuf *kparams_gpreagg)
 	 */
 	grid_sz = devAttrs[CU_DINDEX_PER_THREAD].MULTIPROCESSOR_COUNT;
 	rc = gpuOptimalBlockSize(NULL,
@@ -4843,7 +4884,10 @@ resume_kernel:
 
 	kern_args[0] = &m_kgjoin;
 	kern_args[1] = &m_kmrels;
-	kern_args[2] = &m_kds_src;
+	if (pds_src != NULL)
+		kern_args[2] = &m_kds_src;
+	else
+		kern_args[2] = &gpreagg->outer_depth;
 	kern_args[3] = &m_kds_slot;
 	kern_args[4] = &m_kparams;
 

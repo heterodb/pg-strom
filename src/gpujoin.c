@@ -3580,7 +3580,8 @@ GpuJoinSetupTask(struct kern_gpujoin *kgjoin, GpuTaskState *gts,
 static GpuTask *
 gpujoin_create_task(GpuJoinState *gjs,
 					pgstrom_data_store *pds_src,
-					int file_desc)
+					int file_desc,
+					int outer_depth)
 {
 	TupleTableSlot *scan_slot = gjs->gts.css.ss.ss_ScanTupleSlot;
 	TupleDesc		scan_tupdesc = scan_slot->tts_tupleDescriptor;
@@ -3589,23 +3590,8 @@ gpujoin_create_task(GpuJoinState *gjs,
 	Size			required;
 	CUdeviceptr		m_deviceptr;
 	CUresult		rc;
-	cl_int			outer_depth = -1;
 
-	if (!pds_src)
-	{
-		kern_multirels *h_kmrels = dsm_segment_address(gjs->seg_kmrels);
-
-		for (outer_depth = Max(gjs->curr_outer_depth + 1, 1);
-			 outer_depth <= gjs->num_rels;
-			 outer_depth++)
-		{
-			if (h_kmrels->chunks[outer_depth - 1].right_outer)
-				goto found;
-		}
-		return NULL;	/* no more depth of RIGHT OUTER JOIN */
-	found:
-		gjs->curr_outer_depth = outer_depth;
-	}
+	Assert(pds_src || (outer_depth > 0 && outer_depth <= gjs->num_rels));
 
 	required = GpuJoinSetupTask(NULL, &gjs->gts, pds_src);
 	rc = gpuMemAllocManaged(gcontext,
@@ -3700,32 +3686,48 @@ gpujoin_next_task(GpuTaskState *gts)
 
 	pds = GpuJoinExecOuterScanChunk(gts, &filedesc);
 	if (pds)
-		gtask = gpujoin_create_task(gjs, pds, filedesc);
+		gtask = gpujoin_create_task(gjs, pds, filedesc, -1);
 	return gtask;
 }
 
 /*
- * gpujoin_terminator_task
+ * gpujoinNextRightOuterJoin
  */
-static GpuTask *
-gpujoin_terminator_task(GpuTaskState *gts, cl_bool *task_is_ready)
+int
+gpujoinNextRightOuterJoin(GpuTaskState *gts)
 {
-	GpuJoinState	   *gjs = (GpuJoinState *) gts;
+	GpuJoinState   *gjs = (GpuJoinState *) gts;
+	kern_multirels *h_kmrels = dsm_segment_address(gjs->seg_kmrels);
+	int				outer_depth = -1;
+
+	for (outer_depth = Max(gjs->curr_outer_depth + 1, 1);
+		 outer_depth <= gjs->num_rels;
+		 outer_depth++)
+	{
+		if (h_kmrels->chunks[outer_depth - 1].right_outer)
+		{
+			gjs->curr_outer_depth = outer_depth;
+			return outer_depth;
+		}
+	}
+	return -1;	/* no more RIGHT/FULL OUTER JOIN task */
+}
+
+/*
+ * gpujoinSyncRightOuterJoin
+ */
+void
+gpujoinSyncRightOuterJoin(GpuTaskState *gts)
+{
+	GpuJoinState   *gjs = (GpuJoinState *) gts;
 	GpuJoinSharedState *gj_sstate = gjs->gj_sstate;
-	kern_multirels	   *h_kmrels = dsm_segment_address(gjs->seg_kmrels);
-	GpuContext		   *gcontext = gjs->gts.gcontext;
-	GpuTask			   *gtask = NULL;
-	cl_int				dindex = gcontext->cuda_dindex;
+	GpuContext	   *gcontext = gjs->gts.gcontext;
 
-	/* No RIGHT/FULL OUTER JOIN? */
-	if (h_kmrels->ojmaps_length == 0)
-		return NULL;
-
+	/*
+	 * wait for completion of PG workers, if any
+	 */
 	if (!IsParallelWorker())
 	{
-		/*
-		 * Wait for completion of PG workers, if any
-		 */
 		ResetLatch(MyLatch);
 		while (pg_atomic_read_u32(&gj_sstate->pg_nworkers) > 1)
 		{
@@ -3740,8 +3742,7 @@ gpujoin_terminator_task(GpuTaskState *gts, cl_bool *task_is_ready)
 				elog(FATAL, "Unexpected Postmaster Dead");
 			ResetLatch(MyLatch);
 		}
-		/* OK, no PG workers at this point */
-		gtask = gpujoin_create_task(gjs, NULL, -1);
+		/* OK, no PG workers run GpuJoin at this point */
 	}
 	else
 	{
@@ -3749,7 +3750,9 @@ gpujoin_terminator_task(GpuTaskState *gts, cl_bool *task_is_ready)
 		 * In case of PG workers, the last process per GPU needs to write back
 		 * OUTER JOIN map to the DSM area. (only happen on multi-GPU mode)
 		 */
-		uint32	pg_nworkers_pergpu =
+		kern_multirels *h_kmrels = dsm_segment_address(gjs->seg_kmrels);
+		cl_int			dindex = gcontext->cuda_dindex;
+		uint32			pg_nworkers_pergpu =
 			pg_atomic_sub_fetch_u32(&gj_sstate->pergpu[dindex].pg_nworkers, 1);
 
 		if (pg_nworkers_pergpu == 0)
@@ -3774,6 +3777,26 @@ gpujoin_terminator_task(GpuTaskState *gts, cl_bool *task_is_ready)
 		}
 		pg_atomic_fetch_sub_u32(&gj_sstate->pg_nworkers, 1);
 		SetLatch(gj_sstate->masterLatch);
+	}
+}
+
+/*
+ * gpujoin_terminator_task
+ */
+static GpuTask *
+gpujoin_terminator_task(GpuTaskState *gts, cl_bool *task_is_ready)
+{
+	GpuJoinState   *gjs = (GpuJoinState *) gts;
+	GpuTask		   *gtask = NULL;
+	cl_int			outer_depth;
+
+	/* Has RIGHT/FULL OUTER JOIN? */
+	if (gpujoinHasRightOuterJoin(&gjs->gts))
+	{
+		gpujoinSyncRightOuterJoin(&gjs->gts);
+		if (!IsParallelWorker() &&
+			(outer_depth = gpujoinNextRightOuterJoin(&gjs->gts)) > 0)
+			gtask = gpujoin_create_task(gjs, NULL, -1, outer_depth);
 	}
 	return gtask;
 }
@@ -4598,9 +4621,10 @@ gpujoinUpdateRunTimeStat(GpuTaskState *gts, kern_gpujoin *kgjoin)
 	}
 }
 
-static void
-gpujoin_colocate_outerjoin_maps(GpuJoinState *gjs, CUmodule cuda_module)
+void
+gpujoinColocateOuterJoinMaps(GpuTaskState *gts, CUmodule cuda_module)
 {
+	GpuJoinState   *gjs = (GpuJoinState *) gts;
 	GpuJoinSharedState *gj_sstate = gjs->gj_sstate;
 	kern_multirels *h_kmrels = dsm_segment_address(gjs->seg_kmrels);
 	cl_bool		   *h_ojmaps;
@@ -4874,7 +4898,7 @@ gpujoin_process_right_outer(GpuJoinTask *pgjoin, CUmodule cuda_module)
 	kds_in = KERN_MULTIRELS_INNER_KDS(h_kmrels, outer_depth);
 
 	/* Co-location of the outer join map */
-	gpujoin_colocate_outerjoin_maps(gjs, cuda_module);
+	gpujoinColocateOuterJoinMaps(&gjs->gts, cuda_module);
 
 	/* Lookup GPU kernel function */
 	rc = cuModuleGetFunction(&kern_gpujoin_main,
