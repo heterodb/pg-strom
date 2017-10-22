@@ -138,18 +138,12 @@ deform_gpupreagg_info(CustomScan *cscan)
  */
 typedef struct
 {
-	dsm_handle		ss_handle;	/* DSM handle of the SharedState */
-	cl_uint			ss_length;	/* Length of the SharedState */
-} GpuPreAggSharedState;
-
-typedef struct
-{
 	GpuTaskState	gts;
-	GpuPreAggSharedState *gpa_sstate;
+	struct GpuPreAggSharedState *gpa_sstate;
+	struct GpuPreAggRuntimeStat *gpa_rtstat;
 	cl_bool			combined_gpujoin;
 	cl_bool			terminator_done;
 	cl_int			num_group_keys;
-	cl_ulong		num_fallback_rows; /* # of rows processed by fallback */
 	TupleTableSlot *gpreagg_slot;	/* Slot reflects tlist_dev (w/o junks) */
 	List		   *outer_quals;	/* List of ExprState */
 	TupleTableSlot *outer_slot;
@@ -168,6 +162,23 @@ typedef struct
 	size_t			plan_ngroups;	/* num of groups planned */
 	size_t			plan_extra_sz;	/* size of varlena planned */
 } GpuPreAggState;
+
+struct GpuPreAggRuntimeStat
+{
+	pg_atomic_uint64	source_nitems;
+	pg_atomic_uint64	nitems_filtered;
+	pg_atomic_uint64	num_fallback_rows;
+	pg_atomic_uint32	pg_nworkers;
+};
+typedef struct GpuPreAggRuntimeStat	GpuPreAggRuntimeStat;
+
+struct GpuPreAggSharedState
+{
+	dsm_handle		ss_handle;	/* DSM handle of the SharedState */
+	cl_uint			ss_length;	/* Length of the SharedState */
+	GpuPreAggRuntimeStat gpa_rtstat;	/* Run-time statistics */
+};
+typedef struct GpuPreAggSharedState	GpuPreAggSharedState;
 
 /*
  * GpuPreAggTask
@@ -3690,7 +3701,6 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 	gpas->gts.outer_nrows_per_block = gpa_info->outer_nrows_per_block;
 
 	gpas->num_group_keys     = gpa_info->num_group_keys;
-	gpas->num_fallback_rows  = 0;
 
 	/* initialization of the outer relation */
 	if (outerPlan(cscan))
@@ -3808,7 +3818,10 @@ ExecGpuPreAgg(CustomScanState *node)
 	GpuPreAggState *gpas = (GpuPreAggState *) node;
 
 	if (!gpas->gpa_sstate)
+	{
 		gpas->gpa_sstate = createGpuPreAggSharedState(gpas, NULL, NULL);
+		gpas->gpa_rtstat = &gpas->gpa_sstate->gpa_rtstat;
+	}
 	return ExecScan(&node->ss,
 					(ExecScanAccessMtd) pgstromExecGpuTaskState,
 					(ExecScanRecheckMtd) ExecReCheckGpuPreAgg);
@@ -3824,9 +3837,6 @@ ExecEndGpuPreAgg(CustomScanState *node)
 	GpuContext	   *gcontext = gpas->gts.gcontext;
 	CUresult		rc;
 
-	if (gpas->num_fallback_rows > 0)
-		elog(WARNING, "GpuPreAgg processed %lu rows by CPU fallback",
-			gpas->num_fallback_rows);
 	/* wait for completion of any asynchronous GpuTask */
 	if (gpas->ev_init_fhash)
 	{
@@ -3921,12 +3931,32 @@ ExecGpuPreAggInitWorker(CustomScanState *node,
 	GpuPreAggSharedState   *gpa_sstate = coordinate;
 
 	gpas->gpa_sstate = gpa_sstate;
+	pg_atomic_add_fetch_u32(&gpa_sstate->gpa_rtstat.pg_nworkers, 1);
 	on_dsm_detach(dsm_find_mapping(gpa_sstate->ss_handle),
 				  SynchronizeGpuContextOnDSMDetach,
 				  PointerGetDatum(gpas->gts.gcontext));
 	ExecGpuScanInitWorker(node, toc, ((char *)coordinate +
 									  gpa_sstate->ss_length));
 }
+
+#if PG_VERSION_NUM >= 100000
+/*
+ * ExecShutdownGpuPreAgg
+ */
+static void
+ExecShutdownGpuPreAgg(CustomScanState *node)
+{
+	GpuPreAggState	   *gpas = (GpuPreAggState *) node;
+	GpuPreAggSharedState *gpa_sstate = gpas->gpa_sstate;
+
+	Assert(!gpas->gpa_rtstat);
+	gpas->gpa_rtstat = MemoryContextAlloc(CurTransactionContext,
+										  sizeof(GpuPreAggRuntimeStat));
+	memcpy(gpas->gpa_rtstat,
+		   &gpas->gpa_sstate->gpa_rtstat,
+		   sizeof(GpuPreAggRuntimeStat));
+}
+#endif
 
 /*
  * ExplainGpuPreAgg
@@ -3935,8 +3965,8 @@ static void
 ExplainGpuPreAgg(CustomScanState *node, List *ancestors, ExplainState *es)
 {
 	GpuPreAggState		   *gpas = (GpuPreAggState *) node;
+	GpuPreAggRuntimeStat   *gpa_rtstat = gpas->gpa_rtstat;
 	CustomScan			   *cscan = (CustomScan *) node->ss.ps.plan;
-	GpuPreAggSharedState   *gpa_sstate = gpas->gpa_sstate;
 	GpuPreAggInfo		   *gpa_info = deform_gpupreagg_info(cscan);
 	List				   *dcontext;
 	List				   *gpu_proj = NIL;
@@ -3944,17 +3974,16 @@ ExplainGpuPreAgg(CustomScanState *node, List *ancestors, ExplainState *es)
 	const char			   *policy;
 	char				   *exprstr;
 
-	/* merge worker's statistics if any */
-	if (gpa_sstate)
+	if (gpa_rtstat)
 	{
-#if 0
-		//FIXME
 		gpas->gts.outer_instrument.tuplecount = 0;
-		gpas->gts.outer_instrument.ntuples = gpa_sstate->exec_nrows_in;
-		gpas->gts.outer_instrument.nfiltered1 = gpa_sstate->exec_nfiltered;
+		gpas->gts.outer_instrument.ntuples
+			= pg_atomic_read_u64(&gpa_rtstat->source_nitems);
+		gpas->gts.outer_instrument.nfiltered1
+			= pg_atomic_read_u64(&gpa_rtstat->nitems_filtered);
 		gpas->gts.outer_instrument.nfiltered2 = 0;
-		gpas->gts.outer_instrument.nloops = gpa_sstate->exec_pg_nworkers;
-#endif
+		gpas->gts.outer_instrument.nloops
+			= pg_atomic_read_u32(&gpa_rtstat->pg_nworkers);
 	}
 
 	/* shows reduction policy */
@@ -3988,9 +4017,18 @@ ExplainGpuPreAgg(CustomScanState *node, List *ancestors, ExplainState *es)
 		ExplainPropertyText("Combined GpuJoin", "enabled", es);
 	else if (es->format != EXPLAIN_FORMAT_TEXT)
 		ExplainPropertyText("Combined GpuJoin", "disabled", es);
-
 	/* other common fields */
 	pgstromExplainGpuTaskState(&gpas->gts, es);
+	/* other run-time statistics, if any */
+	if (gpa_rtstat)
+	{
+		uint64		num_fallback_rows
+			= pg_atomic_read_u64(&gpa_rtstat->num_fallback_rows);
+
+		if (num_fallback_rows > 0)
+			ExplainPropertyLong("Num of CPU fallback rows",
+								num_fallback_rows, es);
+	}
 }
 
 /*
@@ -4012,6 +4050,7 @@ createGpuPreAggSharedState(GpuPreAggState *gpas,
 	memset(gpa_sstate, 0, ss_length);
 	gpa_sstate->ss_handle = (pcxt ? dsm_segment_handle(pcxt->seg) : UINT_MAX);
 	gpa_sstate->ss_length = ss_length;
+	pg_atomic_init_u32(&gpa_sstate->gpa_rtstat.pg_nworkers, 1);
 
 	return gpa_sstate;
 }
@@ -4319,6 +4358,7 @@ gpupreagg_terminator_task(GpuTaskState *gts, cl_bool *task_is_ready)
 static TupleTableSlot *
 gpupreagg_next_tuple_fallback(GpuPreAggState *gpas, GpuPreAggTask *gpreagg)
 {
+	GpuPreAggRuntimeStat *gpa_rtstat = &gpas->gpa_sstate->gpa_rtstat;
 	ExprContext		   *econtext = gpas->gts.css.ss.ps.ps_ExprContext;
 	ExprDoneCond		is_done;
 	TupleTableSlot	   *slot;
@@ -4366,7 +4406,7 @@ gpupreagg_next_tuple_fallback(GpuPreAggState *gpas, GpuPreAggTask *gpreagg)
 		if (is_done != ExprEndResult)
 			break;		/* XXX is this logic really right? */
 	}
-	gpas->num_fallback_rows++;
+	pg_atomic_add_fetch_u64(&gpa_rtstat->num_fallback_rows, 1);
 	return slot;
 }
 
@@ -4478,6 +4518,13 @@ gpupreagg_init_final_hash(GpuPreAggTask *gpreagg,
 static void
 gpupreaggUpdateRunTimeStat(GpuTaskState *gts, kern_gpupreagg *kgpreagg)
 {
+	GpuPreAggState *gpas = (GpuPreAggState *) gts;
+	GpuPreAggRuntimeStat *gpa_rtstat = &gpas->gpa_sstate->gpa_rtstat;
+
+	pg_atomic_add_fetch_u64(&gpa_rtstat->source_nitems,
+							(int64)kgpreagg->nitems_real);
+	pg_atomic_add_fetch_u64(&gpa_rtstat->nitems_filtered,
+							(int64)kgpreagg->nitems_filtered);
 }
 
 /*
@@ -5094,6 +5141,9 @@ pgstrom_init_gpupreagg(void)
 	gpupreagg_exec_methods.EstimateDSMCustomScan = ExecGpuPreAggEstimateDSM;
     gpupreagg_exec_methods.InitializeDSMCustomScan = ExecGpuPreAggInitDSM;
     gpupreagg_exec_methods.InitializeWorkerCustomScan = ExecGpuPreAggInitWorker;
+#if PG_VERSION_NUM >= 100000
+	gpupreagg_exec_methods.ShutdownCustomScan  = ExecShutdownGpuPreAgg;
+#endif
 	gpupreagg_exec_methods.ExplainCustomScan   = ExplainGpuPreAgg;
 	/* hook registration */
 	create_upper_paths_next = create_upper_paths_hook;
