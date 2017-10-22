@@ -902,6 +902,9 @@ extern int  gpujoinNextRightOuterJoin(GpuTaskState *gts);
 extern void gpujoinSyncRightOuterJoin(GpuTaskState *gts);
 extern void gpujoinColocateOuterJoinMaps(GpuTaskState *gts,
 										 CUmodule cuda_module);
+extern TupleTableSlot *gpujoinNextTupleFallback(GpuTaskState *gts,
+												pgstrom_data_store *pds_src,
+												cl_int outer_depth);
 extern void gpujoinUpdateRunTimeStat(GpuTaskState *gts,
 									 struct kern_gpujoin *kgjoin);
 

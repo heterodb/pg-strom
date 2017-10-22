@@ -71,6 +71,9 @@ typedef struct
 	cl_uint			outer_nrows_per_block;
 	Index			outer_scanrelid;/* RTI, if outer path pulled up */
 	List		   *outer_quals;	/* device executable quals of outer-scan */
+	List		   *tlist_fallback;	/* projection from outer-tlist to GPU's
+									 * initial projection; note that setrefs.c
+									 * should not update this field */
 	char		   *kern_source;
 	int				extra_flags;
 	List		   *used_params;	/* referenced Const/Param */
@@ -93,6 +96,7 @@ form_gpupreagg_info(CustomScan *cscan, GpuPreAggInfo *gpa_info)
 	privs = lappend(privs, makeInteger(gpa_info->outer_nrows_per_block));
 	privs = lappend(privs, makeInteger(gpa_info->outer_scanrelid));
 	exprs = lappend(exprs, gpa_info->outer_quals);
+	privs = lappend(privs, gpa_info->tlist_fallback);
 	privs = lappend(privs, makeString(gpa_info->kern_source));
 	privs = lappend(privs, makeInteger(gpa_info->extra_flags));
 	exprs = lappend(exprs, gpa_info->used_params);
@@ -121,6 +125,7 @@ deform_gpupreagg_info(CustomScan *cscan)
 	gpa_info->outer_nrows_per_block = intVal(list_nth(privs, pindex++));
 	gpa_info->outer_scanrelid = intVal(list_nth(privs, pindex++));
 	gpa_info->outer_quals = list_nth(exprs, eindex++);
+	gpa_info->tlist_fallback = list_nth(privs, pindex++);
 	gpa_info->kern_source = strVal(list_nth(privs, pindex++));
 	gpa_info->extra_flags = intVal(list_nth(privs, pindex++));
 	gpa_info->used_params = list_nth(exprs, eindex++);
@@ -207,7 +212,7 @@ static char	   *gpupreagg_codegen(codegen_context *context,
 								  CustomScan *cscan,
 								  List *tlist_dev,
 								  List *outer_tlist,
-								  List *outer_quals);
+								  GpuPreAggInfo *gpa_info);
 static GpuPreAggSharedState *createGpuPreAggSharedState(GpuPreAggState *gpas,
 														ParallelContext *pcxt,
 														void *dsm_addr);
@@ -2280,7 +2285,7 @@ PlanGpuPreAggPath(PlannerInfo *root,
 									cscan,
 									tlist_dev,
 									outer_tlist,
-									gpa_info->outer_quals);
+									gpa_info);
 	gpa_info->kern_source = kern_source;
 	gpa_info->extra_flags = context.extra_flags;
 	gpa_info->used_params = context.used_params;
@@ -2610,7 +2615,9 @@ static void
 gpupreagg_codegen_projection_row(StringInfo kern,
 								 codegen_context *context,
 								 PlannerInfo *root,
-								 List *tlist_dev,
+								 List *tlist_alt,
+								 Bitmapset *outer_refs_any,
+								 Bitmapset *outer_refs_expr,
 								 Index outer_scanrelid,
 								 List *outer_tlist)
 {
@@ -2619,9 +2626,6 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 	StringInfoData	temp;
 	Relation		outer_rel = NULL;
 	TupleDesc		outer_desc = NULL;
-	Bitmapset	   *outer_refs_any = NULL;
-	Bitmapset	   *outer_refs_expr = NULL;
-	List		   *tlist_dev_alt;
 	ListCell	   *lc;
 	int				i, k, nattrs;
 
@@ -2659,19 +2663,6 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 		Assert(outer_scanrelid == 0);
 		nattrs = list_length(outer_tlist);
 	}
-
-	/*
-	 * pick up columns which are referenced by the initial projection, 
-	 * then returns an alternative tlist that contains Var-node with
-	 * INDEX_VAR + resno, for convenience of the later stages.
-	 */
-	tlist_dev_alt = make_tlist_device_projection(tlist_dev,
-												 outer_scanrelid,
-												 outer_tlist,
-												 &outer_refs_any,
-												 &outer_refs_expr);
-	Assert(list_length(tlist_dev_alt) == list_length(tlist_dev));
-	Assert(bms_is_subset(outer_refs_expr, outer_refs_any));
 
 	/* extract the supplied tuple and load variables */
 	if (!bms_is_empty(outer_refs_any))
@@ -2734,7 +2725,7 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 						i, dtype->type_name);
 				}
 
-				foreach (lc, tlist_dev_alt)
+				foreach (lc, tlist_alt)
 				{
 					TargetEntry *tle = lfirst(lc);
 					Var		   *varnode;
@@ -2773,7 +2764,7 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 	/*
 	 * Execute expression and store the value on dst_values/dst_isnull
 	 */
-	foreach (lc, tlist_dev_alt)
+	foreach (lc, tlist_alt)
 	{
 		TargetEntry	   *tle = lfirst(lc);
 		Expr		   *expr;
@@ -2859,7 +2850,9 @@ static void
 gpupreagg_codegen_projection_slot(StringInfo kern,
 								  codegen_context *context,
 								  PlannerInfo *root,
-								  List *tlist_dev,
+								  List *tlist_alt,
+								  Bitmapset *outer_refs_any,
+								  Bitmapset *outer_refs_expr,
 								  Index outer_scanrelid,
 								  List *outer_tlist)
 {
@@ -2867,9 +2860,6 @@ gpupreagg_codegen_projection_slot(StringInfo kern,
 	StringInfoData	body;
 	StringInfoData	temp;
 	Relation		outer_rel = NULL;
-	Bitmapset	   *outer_refs_any = NULL;
-	Bitmapset	   *outer_refs_expr = NULL;
-	List		   *tlist_dev_alt;
 	ListCell	   *lc;
 	int				nattrs = list_length(outer_tlist);
 	int				i, k;
@@ -2899,19 +2889,6 @@ gpupreagg_codegen_projection_slot(StringInfo kern,
 		"{\n"
 		"  void        *addr    __attribute__((unused));\n"
 		"  pg_anytype_t temp    __attribute__((unused));\n");
-
-	/*
-	 * pick up columns which are referenced by the initial projection, 
-	 * then returns an alternative tlist that contains Var-node with
-	 * INDEX_VAR + resno, for convenience of the later stages.
-	 */
-	tlist_dev_alt = make_tlist_device_projection(tlist_dev,
-												 outer_scanrelid,
-												 outer_tlist,
-												 &outer_refs_any,
-												 &outer_refs_expr);
-	Assert(list_length(tlist_dev_alt) == list_length(tlist_dev));
-	Assert(bms_is_subset(outer_refs_expr, outer_refs_any));
 
 	/* extract the supplied tuple and load variables */
 	if (!bms_is_empty(outer_refs_any))
@@ -2958,7 +2935,7 @@ gpupreagg_codegen_projection_slot(StringInfo kern,
 							i, dtype->type_name, i-1, i-1);
 				}
 
-				foreach (lc, tlist_dev_alt)
+				foreach (lc, tlist_alt)
 				{
 					TargetEntry *tle = lfirst(lc);
 					Var		   *varnode;
@@ -2993,7 +2970,7 @@ gpupreagg_codegen_projection_slot(StringInfo kern,
 	/*
 	 * Execute expression and store the value on dst_values/dst_isnull
 	 */
-	foreach (lc, tlist_dev_alt)
+	foreach (lc, tlist_alt)
 	{
 		TargetEntry	   *tle = lfirst(lc);
 		Expr		   *expr;
@@ -3486,13 +3463,17 @@ gpupreagg_codegen(codegen_context *context,
 				  CustomScan *cscan,
 				  List *tlist_dev,
 				  List *outer_tlist,
-				  List *outer_quals)
+				  GpuPreAggInfo *gpa_info)
 {
 	StringInfoData	kern;
 	StringInfoData	body;
 	Size			length;
 	bytea		   *kparam_0;
+	List		   *outer_quals = gpa_info->outer_quals;
+	List		   *tlist_alt;
 	ListCell	   *lc;
+	Bitmapset	   *outer_refs_any = NULL;
+	Bitmapset	   *outer_refs_expr = NULL;
 	int				i = 0;
 
 	initStringInfo(&kern);
@@ -3528,11 +3509,29 @@ gpupreagg_codegen(codegen_context *context,
 							  outer_quals);
 		context->extra_flags |= DEVKERNEL_NEEDS_GPUSCAN;
 	}
-	/* gpupreagg_projection_(row|slot) */
-	gpupreagg_codegen_projection_row(&body, context, root, tlist_dev,
+
+	/*
+	 * gpupreagg_projection_(row|slot)
+	 *
+	 * pick up columns which are referenced by the initial projection,
+	 * then constructs an alternative tlist that contains Var-node with
+     * INDEX_VAR + resno, for convenience of the later stages.
+	 */
+	tlist_alt = make_tlist_device_projection(tlist_dev,
+											 cscan->scan.scanrelid,
+											 outer_tlist,
+											 &outer_refs_any,
+											 &outer_refs_expr);
+	Assert(list_length(tlist_alt) == list_length(tlist_dev));
+	Assert(bms_is_subset(outer_refs_expr, outer_refs_any));
+
+	gpupreagg_codegen_projection_row(&body, context, root, tlist_alt,
+									 outer_refs_any, outer_refs_expr,
 									 cscan->scan.scanrelid, outer_tlist);
-	gpupreagg_codegen_projection_slot(&body, context, root, tlist_dev,
-									  cscan->scan.scanrelid, outer_tlist);	
+	gpupreagg_codegen_projection_slot(&body, context, root, tlist_alt,
+									  outer_refs_any, outer_refs_expr,
+									  cscan->scan.scanrelid, outer_tlist);
+	gpa_info->tlist_fallback = tlist_alt;
 	/* gpupreagg_hashvalue */
 	gpupreagg_codegen_hashvalue(&body, context, tlist_dev);
 	/* gpupreagg_keymatch */
@@ -3663,7 +3662,7 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 	CustomScan	   *cscan = (CustomScan *) node->ss.ps.plan;
 	GpuPreAggInfo  *gpa_info = deform_gpupreagg_info(cscan);
 	List		   *tlist_dev = cscan->custom_scan_tlist;
-	List		   *pseudo_tlist;
+	List		   *tlist_fallback;
 	TupleDesc		gpreagg_tupdesc;
 	TupleDesc		outer_tupdesc;
 	StringInfoData	kern_define;
@@ -3730,15 +3729,16 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 	 * Projection from the outer-relation to the custom_scan_tlist is a job
 	 * of CPU fallback. It is equivalent to the initial device projection.
 	 */
-	pseudo_tlist = (List *)ExecInitExpr((Expr *)tlist_dev,
-										&gpas->gts.css.ss.ps);
+	tlist_fallback = (List *)ExecInitExpr((Expr *)gpa_info->tlist_fallback,
+										  &gpas->gts.css.ss.ps);
 	if (!ExecContextForcesOids(&gpas->gts.css.ss.ps, &has_oid))
 		has_oid = false;
 	gpreagg_tupdesc = ExecCleanTypeFromTL(tlist_dev, has_oid);
 	gpas->gpreagg_slot = MakeSingleTupleTableSlot(gpreagg_tupdesc);
+	//XXX - tlist_dev and tlist_fallback are compatible; needs Assert()?
 
 	gpas->outer_slot = MakeSingleTupleTableSlot(outer_tupdesc);
-	gpas->outer_proj = ExecBuildProjectionInfo(pseudo_tlist,
+	gpas->outer_proj = ExecBuildProjectionInfo(tlist_fallback,
 											   econtext,
 											   gpas->gpreagg_slot,
 											   outer_tupdesc);
@@ -4323,34 +4323,44 @@ gpupreagg_next_tuple_fallback(GpuPreAggState *gpas, GpuPreAggTask *gpreagg)
 	ExprDoneCond		is_done;
 	TupleTableSlot	   *slot;
 
-	/*
-	 * TODO: CPU fallback with combined GpuJoin + GpuPreAgg
-	 * - write back source PDS (if NVMe Strom)
-	 * - utilize GpuJoin code
-	 * - projection on GpuPreAgg side
-	 */
-	if (gpas->combined_gpujoin)
-		elog(ERROR, "CPU fallback with combined GpuJoin + GpuPreAgg is not implemented right now");
-
 	for (;;)
 	{
-		/* fetch a tuple from the data-store */
-		ExecClearTuple(gpas->outer_slot);
-		if (!gpreagg->pds_src ||
-			!PDS_fetch_tuple(gpas->outer_slot,
-							 gpreagg->pds_src,
-							 &gpas->gts))
-			return NULL;
+		if (gpas->combined_gpujoin)
+		{
+			GpuTaskState   *outer_gts = (GpuTaskState *)outerPlanState(gpas);
 
-		econtext->ecxt_scantuple = gpas->outer_slot;
+			slot = gpujoinNextTupleFallback(outer_gts,
+											gpreagg->pds_src,
+											Max(gpreagg->outer_depth, 0));
+			if (TupIsNull(slot))
+				return NULL;
+			/* Run CPU Projection of GpuJoin, instead */
+			if (outer_gts->css.ss.ps.ps_ProjInfo)
+			{
+				ExprContext *__econtext = outer_gts->css.ss.ps.ps_ExprContext;
 
+				__econtext->ecxt_scantuple = slot;
+				slot = ExecProject(outer_gts->css.ss.ps.ps_ProjInfo, &is_done);
+			}
+			econtext->ecxt_scantuple = slot;
+		}
+		else
+		{
+			/* fetch a tuple from the data-store */
+			ExecClearTuple(gpas->outer_slot);
+			if (!gpreagg->pds_src ||
+				!PDS_fetch_tuple(gpas->outer_slot,
+								 gpreagg->pds_src,
+								 &gpas->gts))
+				return NULL;
+			econtext->ecxt_scantuple = gpas->outer_slot;
+		}
 		/* filter out the tuple, if any outer quals */
 		if (!ExecQual(gpas->outer_quals, econtext, false))
 		{
 			//Inc num filtered
 			continue;
 		}
-
 		/* makes a projection from the outer-scan to the pseudo-tlist */
 		slot = ExecProject(gpas->outer_proj, &is_done);
 		if (is_done != ExprEndResult)
