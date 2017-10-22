@@ -58,6 +58,7 @@ typedef struct
 	size_t			kern_deflen;
 	char		   *kern_source;
 	size_t			kern_srclen;
+	pg_crc32		bin_crc;
 	char		   *bin_image;		/* may be CUDA_PROGRAM_BUILD_FAILURE */
 	size_t			bin_length;
 	char		   *error_msg;
@@ -840,9 +841,17 @@ build_cuda_program(program_cache_entry *src_entry)
 			bin_entry->bin_image	= CUDA_PROGRAM_BUILD_FAILURE;
 		else
 		{
+			pg_crc32	bin_crc;
+
 			bin_entry->bin_image	= bin_entry->data + offset;
+			bin_entry->bin_length	= bin_length;
 			memcpy(bin_entry->bin_image, bin_image, bin_length);
 			offset += MAXALIGN(bin_length + 1);
+
+			INIT_LEGACY_CRC32(bin_crc);
+			COMP_LEGACY_CRC32(bin_crc, bin_image, bin_length);
+			FIN_LEGACY_CRC32(bin_crc);
+			bin_entry->bin_crc		= bin_crc;
 		}
 
 		bin_entry->error_msg		= bin_entry->data + offset;
@@ -1254,8 +1263,22 @@ retry_checks:
 	}
 	else if (entry->bin_image)
 	{
+		pg_crc32	bin_crc		__attribute__((unused));
+
 		get_cuda_program_entry_nolock(entry);
 		bin_image = entry->bin_image;
+#ifdef PGSTROM_DEBUG
+		INIT_LEGACY_CRC32(bin_crc);
+		COMP_LEGACY_CRC32(bin_crc, entry->bin_image, entry->bin_length);
+		FIN_LEGACY_CRC32(bin_crc);
+		if (bin_crc != entry->bin_crc)
+		{
+			pg_crc32	__bin_crc = entry->bin_crc;
+			SpinLockRelease(&pgcache_head->lock);
+			werror("CUDA program binary corrupted (%08x / %08x)",
+				   __bin_crc, bin_crc);
+		}
+#endif
 		SpinLockRelease(&pgcache_head->lock);
 	}
 	else if (entry->build_chain.prev || entry->build_chain.next)
