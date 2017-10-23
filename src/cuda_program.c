@@ -714,6 +714,10 @@ build_cuda_program(program_cache_entry *src_entry)
 				   nvrtcGetErrorString(rc));
 		/*
 		 * Put command line options
+		 *
+		 * MEMO: (23-Oct-2017) It looks to me "--device-debug" leads
+		 * CUDA_ERROR_ILLEGAL_INSTRUCTION error on execution.
+		 * So, as a workaround, we removed this option here.
 		 */
 		snprintf(gpu_arch_option, sizeof(gpu_arch_option),
 				 "--gpu-architecture=compute_%lu", devComputeCapability);
@@ -722,10 +726,7 @@ build_cuda_program(program_cache_entry *src_entry)
 		snprintf(gpu_arch_option, sizeof(gpu_arch_option),
                  "--gpu-architecture=compute_%lu", devComputeCapability);
 		options[opt_index++] = gpu_arch_option;
-#ifdef PGSTROM_DEBUG
-		options[opt_index++] = "--device-debug";
 		options[opt_index++] = "--generate-line-info";
-#endif
 		options[opt_index++] = "--use_fast_math";
 //		options[opt_index++] = "--device-as-default-execution-space";
 		/* library linkage needs relocatable PTX */
