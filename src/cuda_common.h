@@ -611,6 +611,10 @@ typedef struct {
 	cl_uint			atttypid;
 	/* typmod of the SQL data type */
 	cl_int			atttypmod;
+	/* (only column) offset to the values array */
+	cl_uint			values_offset;
+	/* (only column) total size of varlena body or NULL bitmap if fixed-len */
+	cl_uint			extra_sz;
 } kern_colmeta;
 
 /*
@@ -639,6 +643,7 @@ typedef struct
 #define KDS_FORMAT_SLOT			2
 #define KDS_FORMAT_HASH			3	/* inner hash table for GpuHashJoin */
 #define KDS_FORMAT_BLOCK		4	/* raw blocks for direct loading */
+#define KDS_FORMAT_COLUMN		5	/* columnar based storage format */
 
 typedef struct {
 	hostptr_t		hostptr;	/* address of kds on the host */

@@ -1188,6 +1188,8 @@ __setup_kern_colmeta(Oid type_oid, int arg_index)
 	result.attcacheoff = -1;	/* we don't use attcacheoff */
 	result.atttypid = type_oid;
 	result.atttypmod = typeForm->typtypmod;
+	result.values_offset = 0;
+	result.extra_sz = 0;
 
 	ReleaseSysCache(tuple);
 

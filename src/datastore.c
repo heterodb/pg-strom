@@ -353,6 +353,8 @@ init_kernel_data_store(kern_data_store *kds,
 		kds->colmeta[i].attcacheoff = attcacheoff;
 		kds->colmeta[i].atttypid = (cl_uint)attr->atttypid;
 		kds->colmeta[i].atttypmod = (cl_int)attr->atttypmod;
+		kds->colmeta[i].values_offset = 0;
+		kds->colmeta[i].extra_sz = 0;
 		if (attcacheoff >= 0)
 			attcacheoff += attr->attlen;
 		/*

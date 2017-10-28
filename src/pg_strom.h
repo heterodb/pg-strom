@@ -930,6 +930,13 @@ extern Datum plcuda_function_source(PG_FUNCTION_ARGS);
 extern void pgstrom_init_plcuda(void);
 
 /*
+ * gstore_fdw.c
+ */
+extern Datum pgstrom_gstore_fdw_validator(PG_FUNCTION_ARGS);
+extern Datum pgstrom_gstore_fdw_handler(PG_FUNCTION_ARGS);
+extern void pgstrom_init_gstore_fdw(void);
+
+/*
  * main.c
  */
 extern bool		pgstrom_enabled;
