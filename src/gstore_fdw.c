@@ -41,6 +41,7 @@
 #include "utils/pg_crc.h"
 #include "utils/rel.h"
 #include "utils/resowner.h"
+#include "utils/snapmgr.h"
 #include "utils/syscache.h"
 #include "utils/tqual.h"
 #include "pg_strom.h"
@@ -100,6 +101,146 @@ static GpuStoreHead	   *gstore_head = NULL;
 static GpuStoreMap	   *gstore_maps = NULL;
 
 /*
+ * gstore_fdw_satisfies_visibility - equivalent to HeapTupleSatisfiesMVCC,
+ * but simplified for GpuStoreChunk.
+ */
+static bool
+gstore_fdw_satisfies_visibility(GpuStoreChunk *gs_chunk, Snapshot snapshot)
+{
+	HeapTupleHeader	tuple = &gs_chunk->htup;
+
+	if (!HeapTupleHeaderXminCommitted(tuple))
+	{
+		if (HeapTupleHeaderXminInvalid(tuple))
+			return false;
+		else if (TransactionIdIsCurrentTransactionId(HeapTupleHeaderGetRawXmin(tuple)))
+		{
+			if (HeapTupleHeaderGetCmin(tuple) >= snapshot->curcid)
+				return false;	/* inserted after scan started */
+
+			if (tuple->t_infomask & HEAP_XMAX_INVALID)		/* xid invalid */
+				return true;
+
+			if (HEAP_XMAX_IS_LOCKED_ONLY(tuple->t_infomask))/* not deleter */
+				return true;
+
+			if (tuple->t_infomask & HEAP_XMAX_IS_MULTI)
+			{
+				TransactionId xmax;
+
+				xmax = HeapTupleGetUpdateXid(tuple);
+
+				/* not LOCKED_ONLY, so it has to have an xmax */
+				Assert(TransactionIdIsValid(xmax));
+
+				/* updating subtransaction must have aborted */
+				if (!TransactionIdIsCurrentTransactionId(xmax))
+					return true;
+				else if (HeapTupleHeaderGetCmax(tuple) >= snapshot->curcid)
+					return true;    /* updated after scan started */
+				else
+					return false;       /* updated before scan started */
+			}
+
+			if (!TransactionIdIsCurrentTransactionId(HeapTupleHeaderGetRawXmax(tuple)))
+			{
+				/* deleting subtransaction must have aborted */
+				tuple->t_infomask |= HEAP_XMAX_INVALID;
+				return true;
+			}
+
+			if (HeapTupleHeaderGetCmax(tuple) >= snapshot->curcid)
+				return true;    /* deleted after scan started */
+			else
+				return false;   /* deleted before scan started */
+		}
+		else if (XidInMVCCSnapshot(HeapTupleHeaderGetRawXmin(tuple), snapshot))
+			return false;
+		else if (TransactionIdDidCommit(HeapTupleHeaderGetRawXmin(tuple)))
+			tuple->t_infomask |= HEAP_XMIN_COMMITTED;
+		else
+		{
+			/* it must have aborted or crashed */
+			tuple->t_infomask |= HEAP_XMIN_INVALID;
+			return false;
+		}
+	}
+	else
+	{
+		/* xmin is committed, but maybe not according to our snapshot */
+		if (!HeapTupleHeaderXminFrozen(tuple) &&
+			XidInMVCCSnapshot(HeapTupleHeaderGetRawXmin(tuple), snapshot))
+			return false;	/* treat as still in progress */
+	}
+
+	/* by here, the inserting transaction has committed */
+
+	if (tuple->t_infomask & HEAP_XMAX_INVALID)  /* xid invalid or aborted */
+		return true;
+
+	if (HEAP_XMAX_IS_LOCKED_ONLY(tuple->t_infomask))
+		return true;
+
+	if (tuple->t_infomask & HEAP_XMAX_IS_MULTI)
+	{
+		TransactionId xmax;
+
+		/* already checked above */
+		Assert(!HEAP_XMAX_IS_LOCKED_ONLY(tuple->t_infomask));
+
+		xmax = HeapTupleGetUpdateXid(tuple);
+
+		/* not LOCKED_ONLY, so it has to have an xmax */
+		Assert(TransactionIdIsValid(xmax));
+
+		if (TransactionIdIsCurrentTransactionId(xmax))
+		{
+			if (HeapTupleHeaderGetCmax(tuple) >= snapshot->curcid)
+				return true;    /* deleted after scan started */
+			else
+				return false;   /* deleted before scan started */
+		}
+		if (XidInMVCCSnapshot(xmax, snapshot))
+			return true;
+		if (TransactionIdDidCommit(xmax))
+			return false;       /* updating transaction committed */
+		/* it must have aborted or crashed */
+		return true;
+	}
+
+	if (!(tuple->t_infomask & HEAP_XMAX_COMMITTED))
+	{
+		if (TransactionIdIsCurrentTransactionId(HeapTupleHeaderGetRawXmax(tuple)))
+		{
+			if (HeapTupleHeaderGetCmax(tuple) >= snapshot->curcid)
+				return true;    /* deleted after scan started */
+			else
+				return false;   /* deleted before scan started */
+        }
+
+		if (XidInMVCCSnapshot(HeapTupleHeaderGetRawXmax(tuple), snapshot))
+			return true;
+
+        if (!TransactionIdDidCommit(HeapTupleHeaderGetRawXmax(tuple)))
+        {
+            /* it must have aborted or crashed */
+			tuple->t_infomask |= HEAP_XMAX_INVALID;
+            return true;
+        }
+		/* xmax transaction committed */
+		tuple->t_infomask |= HEAP_XMAX_COMMITTED;
+    }
+    else
+    {
+		/* xmax is committed, but maybe not according to our snapshot */
+		if (XidInMVCCSnapshot(HeapTupleHeaderGetRawXmax(tuple), snapshot))
+			return true;        /* treat as still in progress */
+    }
+	/* xmax transaction committed */
+	return false;
+}
+
+/*
  * gstore_fdw_mapped_chunk
  */
 static inline kern_data_store *
@@ -127,17 +268,16 @@ gstore_fdw_mapped_chunk(GpuStoreChunk *gs_chunk)
 static GpuStoreChunk *
 gstore_fdw_first_chunk(Relation frel, Snapshot snapshot)
 {
-	Oid				database_oid = MyDatabaseId;
 	Oid				table_oid = RelationGetRelid(frel);
 	GpuStoreChunk  *gs_chunk;
 	dlist_iter		iter;
 	pg_crc32		hash;
 	int				index;
 
-	INIT_TRADITIONAL_CRC32(hash);
-	COMP_TRADITIONAL_CRC32(hash, &database_oid, sizeof(Oid));
-	COMP_TRADITIONAL_CRC32(hash, &table_oid, sizeof(Oid));
-	FIN_TRADITIONAL_CRC32(hash);
+	INIT_LEGACY_CRC32(hash);
+	COMP_LEGACY_CRC32(hash, &MyDatabaseId, sizeof(Oid));
+	COMP_LEGACY_CRC32(hash, &table_oid, sizeof(Oid));
+	FIN_LEGACY_CRC32(hash);
 	index = hash % GSTORE_CHUNK_HASH_NSLOTS;
 
 	dlist_foreach(iter, &gstore_head->active_chunks[index])
@@ -148,13 +288,7 @@ gstore_fdw_first_chunk(Relation frel, Snapshot snapshot)
 			gs_chunk->database_oid == MyDatabaseId &&
 			gs_chunk->table_oid == table_oid)
 		{
-			HeapTupleData	tuple;
-
-			if (!snapshot)
-				return gs_chunk;
-			memset(&tuple, 0, sizeof(HeapTupleData));
-			tuple.t_data = &gs_chunk->htup;
-			if (HeapTupleSatisfiesVisibility(&tuple, snapshot, -1))
+			if (gstore_fdw_satisfies_visibility(gs_chunk, snapshot))
 				return gs_chunk;
 		}
 	}
@@ -180,13 +314,7 @@ gstore_fdw_next_chunk(GpuStoreChunk *gs_chunk, Snapshot snapshot)
 			gs_chunk->database_oid == database_oid &&
 			gs_chunk->table_oid == table_oid)
 		{
-			HeapTupleData	tuple;
-
-			if (!snapshot)
-				return gs_chunk;
-			memset(&tuple, 0, sizeof(HeapTupleData));
-			tuple.t_data = &gs_chunk->htup;
-			if (HeapTupleSatisfiesVisibility(&tuple, snapshot, -1))
+			if (gstore_fdw_satisfies_visibility(gs_chunk, snapshot))
 				return gs_chunk;
 		}
 	}
@@ -221,15 +349,19 @@ gstoreGetForeignRelSize(PlannerInfo *root,
 	SpinLockAcquire(&gstore_head->lock);
 	PG_TRY();
 	{
-		for (gs_chunk = gstore_fdw_first_chunk(frel, NULL);
+		Snapshot	snapshot = RegisterSnapshot(GetTransactionSnapshot());
+
+		for (gs_chunk = gstore_fdw_first_chunk(frel, snapshot);
 			 gs_chunk != NULL;
-			 gs_chunk = gstore_fdw_next_chunk(gs_chunk, NULL))
+			 gs_chunk = gstore_fdw_next_chunk(gs_chunk, snapshot))
 		{
 			kern_data_store *kds = gstore_fdw_mapped_chunk(gs_chunk);
 
 			nitems += kds->nitems;
 			length += TYPEALIGN(BLCKSZ, kds->length);
 		}
+
+		UnregisterSnapshot(snapshot);
 	}
 	PG_CATCH();
 	{
@@ -335,14 +467,18 @@ static void
 gstoreBeginForeignScan(ForeignScanState *node, int eflags)
 {
 	//ForeignScan	   *fscan = (ForeignScan *) node->ss.ps.plan;
-	TupleDesc		tupdesc = RelationGetDescr(node->ss.ss_currentRelation);
-	Relation		gs_rel = NULL;
+	EState	   *estate = node->ss.ps.state;
+	TupleDesc	tupdesc = RelationGetDescr(node->ss.ss_currentRelation);
+	Relation	gs_rel = NULL;
 	gstoreScanState *gss_state;
-	char		   *synonym;
-	int				i, j;
+	char	   *synonym;
+	int			i, j;
 
 	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
 		return;
+
+	if (!IsMVCCSnapshot(estate->es_snapshot))
+		elog(ERROR, "cannot scan gstore_fdw table without MVCC snapshot");
 
 	gstore_fdw_read_options(RelationGetRelid(node->ss.ss_currentRelation),
 							&synonym, NULL);
@@ -421,6 +557,7 @@ gstoreIterateForeignScan(ForeignScanState *node)
 	}
 next:
 	kds = gstore_fdw_mapped_chunk(gss_state->gs_chunk);
+
 	if (gss_state->gs_index >= kds->nitems)
 	{
 		gss_state->gs_chunk = gstore_fdw_next_chunk(gss_state->gs_chunk,
@@ -452,6 +589,7 @@ next:
 					continue;
 			}
 			att_values += kcmeta->attlen * index;
+			slot->tts_isnull[i] = false;
 			slot->tts_values[i] = fetch_att(att_values,
 											kcmeta->attbyval,
 											kcmeta->attlen);
@@ -467,6 +605,7 @@ next:
 				continue;
 			Assert(offset >= sizeof(cl_uint) * kds->nitems &&
 				   offset <  sizeof(cl_uint) * kds->nitems + kcmeta->extra_sz);
+			slot->tts_isnull[i] = false;
 			slot->tts_values[i] = PointerGetDatum(att_values + offset);
 		}
 	}
@@ -506,7 +645,7 @@ gstoreIsForeignRelUpdatable(Relation rel)
 	if (synonym != NULL)
 		return 0;
 
-	return CMD_INSERT | CMD_DELETE;
+	return (1 << CMD_INSERT) | (1 << CMD_DELETE);
 }
 
 /*
@@ -636,13 +775,13 @@ vl_dict_create(MemoryContext memcxt, size_t nrooms)
 static void
 gstore_fdw_writeout_chunk(Relation relation, gstoreLoadState *gs_lstate)
 {
+	Oid				table_oid = RelationGetRelid(relation);
 	TupleDesc		tupdesc = RelationGetDescr(relation);
 	MemoryContext	memcxt = gs_lstate->memcxt;
 	size_t			nrooms = gs_lstate->nrooms;
 	size_t			nitems = gs_lstate->nitems;
 	size_t			length;
 	size_t			offset;
-	Oid				table_oid = RelationGetRelid(relation);
 	pg_crc32		hash;
 	cl_int			i, j, unitsz;
 	dsm_segment	   *dsm_seg;
@@ -673,6 +812,8 @@ gstore_fdw_writeout_chunk(Relation relation, gstoreLoadState *gs_lstate)
 	}
 
 	dsm_seg = dsm_create(length, 0);
+	dsm_pin_mapping(dsm_seg);
+	dsm_pin_segment(dsm_seg);
 	kds = dsm_segment_address(dsm_seg);
 
 	init_kernel_data_store(kds,
@@ -733,11 +874,13 @@ gstore_fdw_writeout_chunk(Relation relation, gstoreLoadState *gs_lstate)
 			}
 		}
 	}
+	kds->nitems = nitems;
+
 	/* hash value */
-	INIT_TRADITIONAL_CRC32(hash);
-    COMP_TRADITIONAL_CRC32(hash, &MyDatabaseId, sizeof(Oid));
-	COMP_TRADITIONAL_CRC32(hash, &table_oid, sizeof(Oid));
-	FIN_TRADITIONAL_CRC32(hash);
+	INIT_LEGACY_CRC32(hash);
+    COMP_LEGACY_CRC32(hash, &MyDatabaseId, sizeof(Oid));
+	COMP_LEGACY_CRC32(hash, &table_oid, sizeof(Oid));
+	FIN_LEGACY_CRC32(hash);
 	/* see heap_prepare_insert() */
 	memset(&htup, 0, sizeof(HeapTupleHeaderData));
 	htup.t_infomask = HEAP_XMAX_INVALID;
@@ -1092,6 +1235,8 @@ gstoreXactCallbackPerChunk(XactEvent event, GpuStoreChunk *gs_chunk,
 			memset(&gs_chunk->htup, 0, sizeof(HeapTupleHeaderData));
 			gs_chunk->handle = UINT_MAX;
 
+			elog(NOTICE, "gs_chunk %p dead", gs_chunk);
+
 			dlist_push_tail(&gstore_head->free_chunks, &gs_chunk->chain);
 		}
 		retval = true;
@@ -1118,6 +1263,8 @@ gstoreXactCallbackPerChunk(XactEvent event, GpuStoreChunk *gs_chunk,
 				/* make it frozen */
 				HeapTupleHeaderSetXmin(htup, FrozenTransactionId);
 				HeapTupleHeaderSetXminFrozen(htup);
+
+				elog(NOTICE, "gs_chunk %p frozen", gs_chunk);
 			}
 		}
 		retval = true;

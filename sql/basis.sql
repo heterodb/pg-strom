@@ -94,6 +94,26 @@ CREATE LANGUAGE pltext
 COMMENT ON LANGUAGE pltext IS 'PL/Text contents holder';
 
 --
+-- Handlers for gstore_fdw extension
+--
+CREATE FUNCTION pgstrom_gstore_fdw_handler()
+  RETURNS fdw_handler
+  AS  'MODULE_PATHNAME'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pgstrom_gstore_fdw_validator(text[],oid)
+  RETURNS void
+  AS 'MODULE_PATHNAME'
+  LANGUAGE C STRICT;
+
+CREATE FOREIGN DATA WRAPPER gstore_fdw
+  HANDLER pgstrom_gstore_fdw_handler
+  VALIDATOR pgstrom_gstore_fdw_validator;
+
+CREATE SERVER gstore_fdw
+  FOREIGN DATA WRAPPER gstore_fdw;
+
+--
 -- Type re-interpretation routines
 --
 CREATE FUNCTION pg_catalog.float4_as_int4(float4)

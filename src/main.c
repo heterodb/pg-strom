@@ -488,6 +488,7 @@ _PG_init(void)
 	/* miscellaneous initializations */
 	pgstrom_init_codegen();
 	pgstrom_init_plcuda();
+	pgstrom_init_gstore_fdw();
 
 	/* dummy custom-scan node */
 	memset(&pgstrom_dummy_path_methods, 0, sizeof(CustomPathMethods));
