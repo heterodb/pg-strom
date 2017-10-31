@@ -228,6 +228,7 @@ typedef uintptr_t		hostptr_t;
 #define StromError_InvalidValue			1003	/* Invalid values */
 #define StromError_DataStoreNoSpace		1004	/* No space left on KDS */
 #define StromError_WrongCodeGeneration	1005	/* Wrong GPU code generation */
+#define StromError_OutOfMemory			1006	/* Out of Memory */
 
 #define StromError_CudaDevRunTimeBase	1000000
 

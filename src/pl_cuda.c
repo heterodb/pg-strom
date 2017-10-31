@@ -1215,8 +1215,7 @@ plcuda_exec_begin(HeapTuple protup, FunctionCallInfo fcinfo)
 	int				i, n_meta;
 
 	gcontext = AllocGpuContext(-1, true);
-	if (fcinfo != NULL)
-		ActivateGpuContext(gcontext);
+	ActivateGpuContext(gcontext);
 	/* setup a dummy GTS for PL/CUDA (see pgstromInitGpuTaskState) */
 	plts = MemoryContextAllocZero(CurTransactionContext,
 								  sizeof(plcudaTaskState));

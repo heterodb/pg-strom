@@ -626,6 +626,9 @@ errorText(int errcode)
 		case StromError_WrongCodeGeneration:
 			label = "Wrong code generation";
 			break;
+		case StromError_OutOfMemory:
+			label = "Out of Memory";
+			break;
 
 		/*
 		 * CUDA Runtime Error - we don't want to link entire CUDA runtime
