@@ -33,15 +33,10 @@
 #include "cuda_plcuda.h"
 
 /*
- * plcudaTaskState
+ * plcudaCodeProperty
  */
-typedef struct plcudaTaskState
+typedef struct plcudaCodeProperty
 {
-	GpuTaskState	gts;		/* dummy */
-	ResourceOwner	owner;
-	dlist_node		chain;
-	kern_plcuda	   *kplcuda_head;
-	CUdeviceptr		last_results_buf;	/* results buffer last used */
 	/* kernel requirement */
 	cl_uint		extra_flags;		/* flags to standard includes */
 	/* kernel declarations */
@@ -85,6 +80,20 @@ typedef struct plcudaTaskState
 	/* comprehensive functions */
 	Oid			fn_sanity_check;
 	Oid			fn_cpu_fallback;
+} plcudaCodeProperty;
+
+/*
+ * plcudaTaskState
+ */
+typedef struct plcudaTaskState
+{
+	GpuTaskState	gts;		/* dummy */
+	ResourceOwner	owner;
+	dlist_node		chain;
+	kern_plcuda	   *kplcuda_head;
+	CUdeviceptr		last_results_buf;	/* results buffer last used */
+	/* property of the code block */
+	plcudaCodeProperty p;
 } plcudaTaskState;
 
 /*
@@ -400,14 +409,38 @@ typedef struct {
 	bool				has_sanity_check;
 	bool				has_cpu_fallback;
 	List			   *include_func_oids;
+	plcudaCodeProperty	p;
 } plcuda_code_context;
 
 static void
-__plcuda_code_validation(plcudaTaskState *plts,		/* dummy GTS */
-						 plcuda_code_context *con,
+plcuda_init_code_context(plcuda_code_context *context,
+						 Form_pg_proc procForm,
+						 bool validation_only)
+{
+	memset(context, 0, sizeof(plcuda_code_context));
+
+	context->proowner	= procForm->proowner;
+	context->proargtypes= &procForm->proargtypes;
+	context->prorettype	= procForm->prorettype;
+	initStringInfo(&context->decl_src);
+    initStringInfo(&context->prep_src);
+    initStringInfo(&context->main_src);
+    initStringInfo(&context->post_src);
+    initStringInfo(&context->emsg);
+	context->not_exec_now = validation_only;
+	/* default setting */
+	context->p.extra_flags = DEVKERNEL_NEEDS_PLCUDA;
+	context->p.val_prep_num_threads = 1;
+	context->p.val_main_num_threads = 1;
+	context->p.val_post_num_threads = 1;
+}
+
+static void
+__plcuda_code_validation(plcuda_code_context *con,
 						 char *source_name,
 						 char *source)
 {
+	plcudaCodeProperty *prop = &con->p;
 	int			lineno;
 	char	   *line;
 	char	   *saveptr = NULL;
@@ -543,18 +576,18 @@ __plcuda_code_validation(plcudaTaskState *plts,		/* dummy GTS */
 					}
 					else if (con->curr == &con->prep_src)
 					{
-						plts->fn_prep_num_threads = fn_num_threads;
-						plts->val_prep_num_threads = val_num_threads;
+						prop->fn_prep_num_threads = fn_num_threads;
+						prop->val_prep_num_threads = val_num_threads;
 					}
 					else if (con->curr == &con->main_src)
 					{
-						plts->fn_main_num_threads = fn_num_threads;
-						plts->val_main_num_threads = val_num_threads;
+						prop->fn_main_num_threads = fn_num_threads;
+						prop->val_main_num_threads = val_num_threads;
 					}
 					else if (con->curr == &con->post_src)
 					{
-						plts->fn_post_num_threads = fn_num_threads;
-						plts->val_post_num_threads = val_num_threads;
+						prop->fn_post_num_threads = fn_num_threads;
+						prop->val_post_num_threads = val_num_threads;
 					}
 					else
 						EMSG("cannot use \"%s\" in this code block", cmd);
@@ -585,18 +618,18 @@ __plcuda_code_validation(plcudaTaskState *plts,		/* dummy GTS */
 					}
 					else if (con->curr == &con->prep_src)
 					{
-						plts->fn_prep_shmem_unitsz = fn_shmem_unitsz;
-						plts->val_prep_shmem_unitsz = val_shmem_unitsz;
+						prop->fn_prep_shmem_unitsz = fn_shmem_unitsz;
+						prop->val_prep_shmem_unitsz = val_shmem_unitsz;
 					}
 					else if (con->curr == &con->main_src)
 					{
-						plts->fn_main_shmem_unitsz = fn_shmem_unitsz;
-						plts->val_main_shmem_unitsz = val_shmem_unitsz;
+						prop->fn_main_shmem_unitsz = fn_shmem_unitsz;
+						prop->val_main_shmem_unitsz = val_shmem_unitsz;
 					}
 					else if (con->curr == &con->post_src)
 					{
-						plts->fn_post_shmem_unitsz = fn_shmem_unitsz;
-						plts->val_post_shmem_unitsz = val_shmem_unitsz;
+						prop->fn_post_shmem_unitsz = fn_shmem_unitsz;
+						prop->val_post_shmem_unitsz = val_shmem_unitsz;
 					}
 					else
 						EMSG("cannot use \"%s\" in this code block", cmd);
@@ -627,18 +660,18 @@ __plcuda_code_validation(plcudaTaskState *plts,		/* dummy GTS */
 					}
 					else if (con->curr == &con->prep_src)
 					{
-						plts->fn_prep_shmem_blocksz = fn_shmem_blocksz;
-						plts->val_prep_shmem_blocksz = val_shmem_blocksz;
+						prop->fn_prep_shmem_blocksz = fn_shmem_blocksz;
+						prop->val_prep_shmem_blocksz = val_shmem_blocksz;
 					}
 					else if (con->curr == &con->main_src)
 					{
-						plts->fn_main_shmem_blocksz = fn_shmem_blocksz;
-						plts->val_main_shmem_blocksz = val_shmem_blocksz;
+						prop->fn_main_shmem_blocksz = fn_shmem_blocksz;
+						prop->val_main_shmem_blocksz = val_shmem_blocksz;
 					}
 					else if (con->curr == &con->post_src)
 					{
-						plts->fn_post_shmem_blocksz = fn_shmem_blocksz;
-						plts->val_post_shmem_blocksz = val_shmem_blocksz;
+						prop->fn_post_shmem_blocksz = fn_shmem_blocksz;
+						prop->val_post_shmem_blocksz = val_shmem_blocksz;
 					}
 					else
 						EMSG("cannot use \"%s\" in this code block", cmd);
@@ -669,18 +702,18 @@ __plcuda_code_validation(plcudaTaskState *plts,		/* dummy GTS */
 					}
 					else if (con->curr == &con->prep_src)
 					{
-						plts->fn_prep_kern_blocksz = fn_kern_blocksz;
-						plts->val_prep_kern_blocksz = val_kern_blocksz;
+						prop->fn_prep_kern_blocksz = fn_kern_blocksz;
+						prop->val_prep_kern_blocksz = val_kern_blocksz;
 					}
 					else if (con->curr == &con->main_src)
 					{
-						plts->fn_main_kern_blocksz = fn_kern_blocksz;
-						plts->val_main_kern_blocksz = val_kern_blocksz;
+						prop->fn_main_kern_blocksz = fn_kern_blocksz;
+						prop->val_main_kern_blocksz = val_kern_blocksz;
 					}
 					else if (con->curr == &con->post_src)
 					{
-						plts->fn_post_kern_blocksz = fn_kern_blocksz;
-						plts->val_post_kern_blocksz = val_kern_blocksz;
+						prop->fn_post_kern_blocksz = fn_kern_blocksz;
+						prop->val_post_kern_blocksz = val_kern_blocksz;
 					}
 					else
 						EMSG("cannot use \"%s\" in this code block", cmd);
@@ -698,10 +731,10 @@ __plcuda_code_validation(plcudaTaskState *plts,		/* dummy GTS */
 					EMSG("%s appeared twice", cmd);
 				else if (plcuda_lookup_helper(options,
 											  con->proargtypes, INT8OID,
-											  &plts->fn_working_bufsz,
-											  &plts->val_working_bufsz))
+											  &prop->fn_working_bufsz,
+											  &prop->val_working_bufsz))
 				{
-					if (HELPER_PRIV_CHECK(plts->fn_working_bufsz))
+					if (HELPER_PRIV_CHECK(prop->fn_working_bufsz))
 						con->has_working_bufsz = true;
 					else
 						EMSG("permission denied on helper function %s",
@@ -720,10 +753,10 @@ __plcuda_code_validation(plcudaTaskState *plts,		/* dummy GTS */
 					EMSG("%s appeared twice", cmd);
 				else if (plcuda_lookup_helper(options,
 											  con->proargtypes, INT8OID,
-											  &plts->fn_results_bufsz,
-											  &plts->val_results_bufsz))
+											  &prop->fn_results_bufsz,
+											  &prop->val_results_bufsz))
 				{
-					if (HELPER_PRIV_CHECK(plts->fn_results_bufsz))
+					if (HELPER_PRIV_CHECK(prop->fn_results_bufsz))
 						con->has_results_bufsz = true;
 					else
 						EMSG("permission denied on helper function %s",
@@ -765,7 +798,7 @@ __plcuda_code_validation(plcudaTaskState *plts,		/* dummy GTS */
 						extra_flags |= DEVKERNEL_NEEDS_CUBLAS;
 				}
 				if (extra_flags != 0)
-					plts->extra_flags |= extra_flags;
+					prop->extra_flags |= extra_flags;
 				else if (!con->curr)
 					EMSG("#plcuda_include must appear in code block:\n%s",
 						 line);
@@ -805,7 +838,7 @@ __plcuda_code_validation(plcudaTaskState *plts,		/* dummy GTS */
 
 								src = OidFunctionCall0(fn_extra_include);
 								__plcuda_code_validation(
-									plts, con,
+									con,
 									ident_to_cstring(options),
 									text_to_cstring(DatumGetTextP(src)));
 
@@ -834,10 +867,10 @@ __plcuda_code_validation(plcudaTaskState *plts,		/* dummy GTS */
 					EMSG("%s appeared twice", cmd);
 				else if (plcuda_lookup_helper(options,
 											  con->proargtypes, BOOLOID,
-											  &plts->fn_sanity_check,
+											  &prop->fn_sanity_check,
 											  NULL))
 				{
-					if (HELPER_PRIV_CHECK(plts->fn_sanity_check))
+					if (HELPER_PRIV_CHECK(prop->fn_sanity_check))
 						con->has_sanity_check = true;
 					else
 						EMSG("permission denied on helper function %s",
@@ -857,10 +890,10 @@ __plcuda_code_validation(plcudaTaskState *plts,		/* dummy GTS */
 				else if (plcuda_lookup_helper(options,
 											  con->proargtypes,
 											  con->prorettype,
-											  &plts->fn_cpu_fallback,
+											  &prop->fn_cpu_fallback,
 											  NULL))
 				{
-					if (HELPER_PRIV_CHECK(plts->fn_cpu_fallback))
+					if (HELPER_PRIV_CHECK(prop->fn_cpu_fallback))
 						con->has_cpu_fallback = true;
 					else
 						EMSG("permission denied on helper function %s",
@@ -883,37 +916,39 @@ __plcuda_code_validation(plcudaTaskState *plts,		/* dummy GTS */
 }
 
 static void
-plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
-					   bool not_exec_now,
-					   Oid proowner,
-					   oidvector *proargtypes,
-					   Oid prorettype,
-					   char *prosrc)
+plcuda_code_validation(plcudaCodeProperty *prop,
+					   HeapTuple proc_tuple,
+					   bool validation_only)
 {
+	Form_pg_proc	procForm = (Form_pg_proc) GETSTRUCT(proc_tuple);
 	plcuda_code_context	context;
 	devtype_info   *dtype;
+	Datum			prosrc;
+	bool			isnull;
 	int				i;
 
+	plcuda_init_code_context(&context, procForm, validation_only);
 	/* check result type */
-	dtype = pgstrom_devtype_lookup(prorettype);
+	dtype = pgstrom_devtype_lookup(procForm->prorettype);
 	if (dtype)
-		plts->extra_flags |= dtype->type_flags;
-	else if (get_typlen(prorettype) == -1)
+		context.p.extra_flags |= dtype->type_flags;
+	else if (get_typlen(procForm->prorettype) == -1)
 	{
-		Assert(!get_typbyval(prorettype));
-		if (context.not_exec_now)
+		Assert(!get_typbyval(procForm->prorettype));
+		if (validation_only)
 			elog(NOTICE, "Unknown varlena result - PL/CUDA must be responsible to the data format to return");
 	}
 	else
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("Result type \"%s\" is not device executable",
-						format_type_be(prorettype))));
+						format_type_be(procForm->prorettype))));
 
 	/* check argument types */
-	for (i=0; i < proargtypes->dim1; i++)
+	Assert(procForm->pronargs == procForm->proargtypes.dim1);
+	for (i=0; i < procForm->pronargs; i++)
 	{
-		Oid		argtype_oid = proargtypes->values[i];
+		Oid		argtype_oid = context.proargtypes->values[i];
 
 		dtype = pgstrom_devtype_lookup(argtype_oid);
 		if (!dtype)
@@ -921,24 +956,17 @@ plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("Result type \"%s\" is not device executable",
 							format_type_be(argtype_oid))));
-		plts->extra_flags |= dtype->type_flags;
+		context.p.extra_flags |= dtype->type_flags;
 	}
-
-	/* parse procedure source */
-	plts->extra_flags = DEVKERNEL_NEEDS_PLCUDA;
-
-	memset(&context, 0, sizeof(plcuda_code_context));
-	initStringInfo(&context.decl_src);
-    initStringInfo(&context.prep_src);
-    initStringInfo(&context.main_src);
-    initStringInfo(&context.post_src);
-    initStringInfo(&context.emsg);
-	context.not_exec_now = not_exec_now;
-	context.proowner = proowner;
-	context.proargtypes = proargtypes;
-	context.prorettype = prorettype;
+	/* Fetch CUDA code block */
+	prosrc = SysCacheGetAttr(PROCOID, proc_tuple,
+							 Anum_pg_proc_prosrc,
+							 &isnull);
+	if (isnull)
+		elog(ERROR, "Bug? no program source was supplied");
 	/* walk on the pl/cuda source */
-	__plcuda_code_validation(plts, &context, NULL, prosrc);
+	__plcuda_code_validation(&context, NULL,
+							 TextDatumGetCString(prosrc));
 	/* raise syntax error if any */
 	if (context.curr != NULL)
 		appendStringInfo(&context.emsg, "\n???: Code block was not closed");
@@ -950,10 +978,20 @@ plcuda_code_validation(plcudaTaskState *plts,	/* dummy GTS */
 				 errmsg("pl/cuda function syntax error\n%s",
 						context.emsg.data)));
 
-	plts->kern_decl = (context.has_decl_block ? context.decl_src.data : NULL);
-	plts->kern_prep = (context.has_prep_block ? context.prep_src.data : NULL);
-	plts->kern_main = (context.main_src.data);
-	plts->kern_post = (context.has_post_block ? context.post_src.data : NULL);
+	memcpy(prop, &context.p, sizeof(plcudaCodeProperty));
+	if (context.has_decl_block)
+		prop->kern_decl = context.decl_src.data;
+
+	if (context.has_prep_block)
+		prop->kern_prep = context.prep_src.data;
+	else
+		pfree(context.prep_src.data);
+
+	prop->kern_main = context.main_src.data;
+	if (context.has_post_block)
+		prop->kern_post = context.post_src.data;
+	else
+		pfree(context.post_src.data);
 
 	pfree(context.emsg.data);
 }
@@ -1105,41 +1143,41 @@ plcuda_codegen_part(StringInfo kern,
 }
 
 static char *
-plcuda_codegen(Form_pg_proc procForm, plcudaTaskState *plts)
+plcuda_codegen(Form_pg_proc procForm, plcudaCodeProperty *prop)
 {
 	StringInfoData	kern;
 	const char	   *last_stage = NULL;
 
 	initStringInfo(&kern);
 
-	if (plts->kern_decl)
-		appendStringInfo(&kern, "%s\n", plts->kern_decl);
-	if (plts->kern_prep)
+	if (prop->kern_decl)
+		appendStringInfo(&kern, "%s\n", prop->kern_decl);
+	if (prop->kern_prep)
 	{
 		plcuda_codegen_part(&kern, "prep",
-							plts->kern_prep,
-							(OidIsValid(plts->fn_prep_kern_blocksz) ||
-							 plts->val_prep_kern_blocksz > 0),
+							prop->kern_prep,
+							(OidIsValid(prop->fn_prep_kern_blocksz) ||
+							 prop->val_prep_kern_blocksz > 0),
 							procForm,
 							last_stage);
 		last_stage = "prep";
 	}
-	if (plts->kern_main)
+	if (prop->kern_main)
 	{
 		plcuda_codegen_part(&kern, "main",
-							plts->kern_main,
-							(OidIsValid(plts->fn_main_kern_blocksz) ||
-							 plts->val_main_kern_blocksz > 0),
+							prop->kern_main,
+							(OidIsValid(prop->fn_main_kern_blocksz) ||
+							 prop->val_main_kern_blocksz > 0),
 							procForm,
 							last_stage);
 		last_stage = "main";
 	}
-	if (plts->kern_post)
+	if (prop->kern_post)
 	{
 		plcuda_codegen_part(&kern, "post",
-							plts->kern_post,
-							(OidIsValid(plts->fn_post_kern_blocksz) ||
-							 plts->val_post_kern_blocksz > 0),
+							prop->kern_post,
+							(OidIsValid(prop->fn_post_kern_blocksz) ||
+							 prop->val_post_kern_blocksz > 0),
 							procForm,
 							last_stage);
 		last_stage = "post";
@@ -1147,6 +1185,146 @@ plcuda_codegen(Form_pg_proc procForm, plcudaTaskState *plts)
 	return kern.data;
 }
 
+/*
+ * pgstrom_devfunc_construct_plcuda
+ */
+void
+pgstrom_devfunc_construct_plcuda(devfunc_info *entry, HeapTuple proc_tuple)
+{
+	plcudaCodeProperty prop;
+	Oid				procOid = HeapTupleGetOid(proc_tuple);
+	Form_pg_proc	procForm = (Form_pg_proc) GETSTRUCT(proc_tuple);
+	devtype_info   *dtype;
+	StringInfoData	decl;
+	ListCell	   *lc;
+	AttrNumber		attno;
+
+	memset(&prop, 0, sizeof(plcudaCodeProperty));
+
+	/* result type must be fixed-length */
+	dtype = entry->func_rettype;
+	if (dtype->type_length < 0)
+	{
+		elog(DEBUG2, "PL/CUDA function: %s result %s should be fixed-length",
+			 format_procedure(procOid),
+			 format_type_be(procForm->prorettype));
+		goto not_supported;
+	}
+	plcuda_code_validation(&prop, proc_tuple, true);
+
+	if (prop.kern_prep != NULL)
+	{
+		elog(DEBUG2, "PL/CUDA function: %s has prep-kernel declaration",
+			 format_procedure(procOid));
+		goto not_supported;
+	}
+	if (prop.kern_post != NULL)
+	{
+		elog(DEBUG2, "PL/CUDA function: %s has post-kernel declaration",
+			 format_procedure(procOid));
+		goto not_supported;
+	}
+
+	if (OidIsValid(prop.fn_main_kern_blocksz) ||
+		prop.val_main_kern_blocksz > 1)
+	{
+		elog(DEBUG2, "PL/CUDA function: %s main kernel specifies block size dynamically, or statically but more than 1",
+			 format_procedure(procOid));
+		goto not_supported;
+	}
+
+	if (OidIsValid(prop.fn_main_num_threads) ||
+		prop.val_main_num_threads > 1)
+	{
+		elog(DEBUG2, "PL/CUDA function: %s main kernel specifies num threads dynamically, or statically but more than 1",
+			 format_procedure(procOid));
+		goto not_supported;
+	}
+
+	if (OidIsValid(prop.fn_main_shmem_unitsz) ||
+		prop.val_main_shmem_unitsz > 0 ||
+		OidIsValid(prop.fn_main_shmem_blocksz) ||
+		prop.val_main_shmem_blocksz > 0)
+	{
+		elog(DEBUG2, "PL/CUDA function: %s main kernel requires dynamic shared memory",
+			 format_procedure(procOid));
+		goto not_supported;
+	}
+
+	if (OidIsValid(prop.fn_working_bufsz) ||
+		prop.val_working_bufsz != 0)
+	{
+		elog(DEBUG2, "PL/CUDA function: %s main kernel requires working buffer",
+			 format_procedure(procOid));
+		goto not_supported;
+	}
+
+	if (OidIsValid(prop.fn_results_bufsz) ||
+		prop.val_results_bufsz != 0)
+	{
+		elog(DEBUG2, "PL/CUDA function: %s main kernel requires result buffer",
+			 format_procedure(procOid));
+		goto not_supported;
+	}
+
+	if (OidIsValid(prop.fn_sanity_check))
+	{
+		elog(DEBUG2, "PL/CUDA function: %s has sanity check function",
+			 format_procedure(procOid));
+		goto not_supported;
+	}
+	/* setup entries */
+	entry->func_devname = psprintf("plcuda_%u", entry->func_oid);
+
+	initStringInfo(&decl);
+	appendStringInfo(
+		&decl,
+		"STATIC_FUNCTION(pg_%s_t)\n"
+		"pgfn_%s(kern_context *kcxt",
+		entry->func_rettype->type_name,
+		entry->func_devname);
+	attno=0;
+	foreach(lc, entry->func_args)
+	{
+		dtype = lfirst(lc);
+
+		appendStringInfo(
+			&decl,
+			", pg_%s_t arg%u",
+			dtype->type_name, ++attno);
+	}
+
+	dtype = entry->func_rettype;
+	appendStringInfo(
+		&decl,
+		")\n"
+		"{\n"
+		"  pg_%s_t __retval = { true, 0 };\n"
+		"  pg_%s_t *retval = &__retval;\n"
+		"  /* #plcuda_begin */\n"
+		"%s\n"
+		"  /* #plcuda_end */\n"
+		"  return __retval;\n"
+		"}\n",
+		dtype->type_name,
+		dtype->type_name,
+		prop.kern_main);
+
+	entry->func_decl = decl.data;
+	pfree(prop.kern_main);
+	return;
+
+not_supported:
+	if (prop.kern_decl)
+		pfree(prop.kern_decl);
+	if (prop.kern_prep)
+		pfree(prop.kern_prep);
+	if (prop.kern_main)
+		pfree(prop.kern_main);
+	if (prop.kern_post)
+		pfree(prop.kern_post);
+	entry->func_is_negative = true;
+}
 
 static void
 plcuda_cleanup_resources(ResourceReleasePhase phase,
@@ -1203,9 +1381,7 @@ plcuda_exec_begin(HeapTuple protup, FunctionCallInfo fcinfo)
 	GpuContext	   *gcontext;
 	plcudaTaskState *plts;
 	kern_plcuda	   *kplcuda;
-	Datum			prosrc;
 	HeapTuple		tup;
-	bool			isnull;
 	Oid				ret_reloid = InvalidOid; /* valid if composite type */
 	cl_int			ret_nattrs = -1;
 	size_t			kplcuda_length;
@@ -1226,28 +1402,17 @@ plcuda_exec_begin(HeapTuple protup, FunctionCallInfo fcinfo)
 	plts->gts.cb_release_task = plcuda_release_task;
 	dlist_init(&plts->gts.ready_tasks);
 
-	plts->val_prep_num_threads = 1;
-	plts->val_main_num_threads = 1;
-	plts->val_post_num_threads = 1;
-
 	/* validate PL/CUDA source code */
-	prosrc = SysCacheGetAttr(PROCOID, protup, Anum_pg_proc_prosrc, &isnull);
-	if (isnull)
-		elog(ERROR, "Bug? no program source was supplied");
 	procForm = (Form_pg_proc) GETSTRUCT(protup);
-	plcuda_code_validation(plts, !fcinfo,
-						   procForm->proowner,
-						   &procForm->proargtypes,
-						   procForm->prorettype,
-						   TextDatumGetCString(prosrc));
+	plcuda_code_validation(&plts->p, protup, !fcinfo);
 	/* construct a flat kernel source to be built */
 	initStringInfo(&kern_define);
-	kern_source = plcuda_codegen(procForm, plts);
+	kern_source = plcuda_codegen(procForm, &plts->p);
 	pgstrom_build_session_info(&kern_define,
 							   &plts->gts,
-							   plts->extra_flags);
+							   plts->p.extra_flags);
 	program_id = pgstrom_create_cuda_program(gcontext,
-											 plts->extra_flags,
+											 plts->p.extra_flags,
 											 kern_source,
 											 kern_define.data,
 											 true);
@@ -1568,22 +1733,22 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 
 	/* sanitycheck of the supplied arguments, prior to GPU launch */
 	if (!DatumGetBool(kernel_launch_helper(fcinfo,
-										   plts->fn_sanity_check,
+										   plts->p.fn_sanity_check,
 										   BoolGetDatum(true),
 										   NULL)))
 		elog(ERROR, "function '%s' argument sanity check failed",
-			 format_procedure(plts->fn_sanity_check));
+			 format_procedure(plts->p.fn_sanity_check));
 
 	/* determine the kernel launch parameters */
 	working_bufsz =
 		DatumGetInt64(kernel_launch_helper(fcinfo,
-										   plts->fn_working_bufsz,
-										   plts->val_working_bufsz,
+										   plts->p.fn_working_bufsz,
+										   plts->p.val_working_bufsz,
 										   NULL));
 	results_bufsz =
 		DatumGetInt64(kernel_launch_helper(fcinfo,
-										   plts->fn_results_bufsz,
-										   plts->val_results_bufsz,
+										   plts->p.fn_results_bufsz,
+										   plts->p.val_results_bufsz,
 										   NULL));
 	elog(DEBUG2, "working_bufsz = %zu, results_bufsz = %zu",
 		 working_bufsz, results_bufsz);
@@ -1592,37 +1757,37 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 	ptask = create_plcuda_task(plts, fcinfo,
 							   working_bufsz,
 							   results_bufsz);
-	if (plts->kern_prep)
+	if (plts->p.kern_prep)
 	{
 		int64		v;
 
 		v = DatumGetInt64(kernel_launch_helper(fcinfo,
-											   plts->fn_prep_num_threads,
-											   plts->val_prep_num_threads,
+											   plts->p.fn_prep_num_threads,
+											   plts->p.val_prep_num_threads,
 											   NULL));
 		if (v <= 0)
 			elog(ERROR, "kern_prep: invalid number of threads: %ld", v);
 		ptask->kern.prep_num_threads = (cl_ulong)v;
 
 		v = DatumGetInt64(kernel_launch_helper(fcinfo,
-											   plts->fn_prep_kern_blocksz,
-											   plts->val_prep_kern_blocksz,
+											   plts->p.fn_prep_kern_blocksz,
+											   plts->p.val_prep_kern_blocksz,
 											   NULL));
 		if (v < 0 || v > INT_MAX)
 			elog(ERROR, "kern_prep: invalid kernel block size: %ld", v);
 		ptask->kern.prep_kern_blocksz = (cl_uint)v;
 
 		v = DatumGetInt64(kernel_launch_helper(fcinfo,
-											   plts->fn_prep_shmem_unitsz,
-											   plts->val_prep_shmem_unitsz,
+											   plts->p.fn_prep_shmem_unitsz,
+											   plts->p.val_prep_shmem_unitsz,
 											   NULL));
 		if (v < 0 || v > INT_MAX)
 			elog(ERROR, "kern_prep: invalid shared memory required: %ld", v);
 		ptask->kern.prep_shmem_unitsz = (cl_uint)v;
 
 		v = DatumGetInt64(kernel_launch_helper(fcinfo,
-											   plts->fn_prep_shmem_blocksz,
-											   plts->val_prep_shmem_blocksz,
+											   plts->p.fn_prep_shmem_blocksz,
+											   plts->p.val_prep_shmem_blocksz,
 											   NULL));
 		if (v < 0 || v > INT_MAX)
 			elog(ERROR, "kern_prep: invalid shared memory required: %ld", v);
@@ -1636,37 +1801,37 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 		ptask->exec_prep_kernel = true;
 	}
 
-	if (plts->kern_main)
+	if (plts->p.kern_main)
 	{
 		int64		v;
 
 		v = DatumGetInt64(kernel_launch_helper(fcinfo,
-											   plts->fn_main_num_threads,
-											   plts->val_main_num_threads,
+											   plts->p.fn_main_num_threads,
+											   plts->p.val_main_num_threads,
 											   NULL));
 		if (v <= 0)
 			elog(ERROR, "kern_main: invalid number of threads: %ld", v);
 		ptask->kern.main_num_threads = (cl_ulong)v;
 
 		v = DatumGetInt64(kernel_launch_helper(fcinfo,
-											   plts->fn_main_kern_blocksz,
-											   plts->val_main_kern_blocksz,
+											   plts->p.fn_main_kern_blocksz,
+											   plts->p.val_main_kern_blocksz,
 											   NULL));
 		if (v < 0 || v > INT_MAX)
 			elog(ERROR, "kern_main: invalid kernel block size: %ld", v);
 		ptask->kern.main_kern_blocksz = (cl_uint)v;
 
 		v = DatumGetInt64(kernel_launch_helper(fcinfo,
-											   plts->fn_main_shmem_unitsz,
-											   plts->val_main_shmem_unitsz,
+											   plts->p.fn_main_shmem_unitsz,
+											   plts->p.val_main_shmem_unitsz,
 											   NULL));
 		if (v < 0 || v > INT_MAX)
 			elog(ERROR, "kern_main: invalid shared memory required: %ld", v);
 		ptask->kern.main_shmem_unitsz = (cl_uint)v;
 
 		v = DatumGetInt64(kernel_launch_helper(fcinfo,
-											   plts->fn_main_shmem_blocksz,
-											   plts->val_main_shmem_blocksz,
+											   plts->p.fn_main_shmem_blocksz,
+											   plts->p.val_main_shmem_blocksz,
 											   NULL));
 		if (v < 0 || v > INT_MAX)
 			elog(ERROR, "kern_main: invalid shared memory required: %ld", v);
@@ -1679,37 +1844,37 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 			 ptask->kern.main_shmem_blocksz);
 	}
 
-	if (plts->kern_post)
+	if (plts->p.kern_post)
 	{
 		int64		v;
 
 		v = DatumGetInt64(kernel_launch_helper(fcinfo,
-											   plts->fn_post_num_threads,
-											   plts->val_post_num_threads,
+											   plts->p.fn_post_num_threads,
+											   plts->p.val_post_num_threads,
 											   NULL));
 		if (v <= 0)
 			elog(ERROR, "kern_post: invalid number of threads: %ld", v);
 		ptask->kern.post_num_threads = (cl_ulong)v;
 
 		v = DatumGetInt64(kernel_launch_helper(fcinfo,
-											   plts->fn_post_kern_blocksz,
-											   plts->val_post_kern_blocksz,
+											   plts->p.fn_post_kern_blocksz,
+											   plts->p.val_post_kern_blocksz,
 											   NULL));
 		if (v < 0 || v > INT_MAX)
 			elog(ERROR, "kern_post: invalid kernel block size: %ld", v);
 		ptask->kern.post_kern_blocksz = (cl_uint)v;
 
 		v = DatumGetInt64(kernel_launch_helper(fcinfo,
-											   plts->fn_post_shmem_unitsz,
-											   plts->val_post_shmem_unitsz,
+											   plts->p.fn_post_shmem_unitsz,
+											   plts->p.val_post_shmem_unitsz,
 											   NULL));
 		if (v < 0 || v > INT_MAX)
 			elog(ERROR, "kern_post: invalid shared memory required: %ld", v);
 		ptask->kern.post_shmem_unitsz = (cl_uint)v;
 
 		v = DatumGetInt64(kernel_launch_helper(fcinfo,
-											   plts->fn_post_shmem_blocksz,
-											   plts->val_post_shmem_blocksz,
+											   plts->p.fn_post_shmem_blocksz,
+											   plts->p.val_post_shmem_blocksz,
 											   NULL));
 		if (v < 0 || v > INT_MAX)
 			elog(ERROR, "kern_post: invalid shared memory required: %ld", v);
@@ -1808,11 +1973,11 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 		}
 
 		if (kerror.errcode == StromError_CpuReCheck &&
-			OidIsValid(plts->fn_cpu_fallback))
+			OidIsValid(plts->p.fn_cpu_fallback))
 		{
 			/* CPU fallback, if any */
 			retval = kernel_launch_helper(fcinfo,
-										  plts->fn_cpu_fallback,
+										  plts->p.fn_cpu_fallback,
 										  (Datum)0,
 										  &isnull);
 		}

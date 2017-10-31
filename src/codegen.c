@@ -22,6 +22,7 @@
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
+#include "commands/proclang.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/pg_list.h"
 #include "optimizer/clauses.h"
@@ -1167,31 +1168,14 @@ devfunc_setup_func_impl(devfunc_info *entry,
 
 static void
 __construct_devfunc_info(devfunc_info *entry,
-						 const char *template,
-						 int func_nargs,
-						 Oid func_argtypes[],
-						 Oid func_rettype)
+						 const char *template)
 {
-	devtype_info *dtype;
 	const char *extra;
 	const char *pos;
 	const char *end;
 	int32		flags = 0;
 	bool		has_alias = false;
 	bool		has_collation = false;
-	int			i;
-
-	entry->func_rettype = pgstrom_devtype_lookup(func_rettype);
-	if (!entry->func_rettype)
-		elog(ERROR, "Bug? unsupported device function result type");
-
-	for (i=0; i < func_nargs; i++)
-	{
-		dtype = pgstrom_devtype_lookup(func_argtypes[i]);
-		if (!dtype)
-			elog(ERROR, "Bug? unsupported device function arguments");
-		entry->func_args = lappend(entry->func_args, dtype);
-	}
 
 	/* fetch attribute */
 	end = strchr(template, '/');
@@ -1286,11 +1270,7 @@ pgstrom_devfunc_construct_common(devfunc_info *entry,
 			memcmp(procat->func_argtypes, func_argtypes,
 				   sizeof(Oid) * func_nargs) == 0)
 		{
-			__construct_devfunc_info(entry,
-									 procat->func_template,
-									 func_nargs,
-									 func_argtypes,
-									 func_rettype);
+			__construct_devfunc_info(entry, procat->func_template);
 			return;
 		}
 	}
@@ -1299,14 +1279,11 @@ pgstrom_devfunc_construct_common(devfunc_info *entry,
 }
 
 static void
-pgstrom_devfunc_construct_extra(devfunc_info *entry,
-								Oid func_namespace,
-								int func_nargs,
-								Oid func_argtypes[],
-								Oid func_rettype_oid)
+pgstrom_devfunc_construct_extra(devfunc_info *entry)
 {
+	Oid		rettype_oid = entry->func_rettype->type_oid;
 	char   *func_signature = format_procedure_qualified(entry->func_oid);
-	char   *func_rettype = format_type_be_qualified(func_rettype_oid);
+	char   *func_rettype = format_type_be_qualified(rettype_oid);
 	int		i;
 
 	for (i=0; i < lengthof(devfunc_extra_catalog); i++)
@@ -1316,11 +1293,7 @@ pgstrom_devfunc_construct_extra(devfunc_info *entry,
 		if (strcmp(procat->func_signature, func_signature) == 0 &&
 			strcmp(procat->func_rettype, func_rettype) == 0)
 		{
-			__construct_devfunc_info(entry,
-									 procat->func_template,
-									 func_nargs,
-									 func_argtypes,
-									 func_rettype_oid);
+			__construct_devfunc_info(entry, procat->func_template);
 			return;
 		}
 	}
@@ -1332,14 +1305,16 @@ devfunc_info *
 pgstrom_devfunc_lookup(Oid func_oid, Oid func_collid)
 {
 	devfunc_info   *entry;
+	devtype_info   *dtype;
 	Form_pg_proc	proc;
 	HeapTuple		tuple;
+	List		   *func_args = NIL;
 	ListCell	   *lc;
-	int				index;
+	int				i, j;
 	MemoryContext	oldcxt;
 
-	index = hash_uint32((uint32) func_oid) % lengthof(devfunc_info_slot);
-	foreach (lc, devfunc_info_slot[index])
+	i = hash_uint32((uint32) func_oid) % lengthof(devfunc_info_slot);
+	foreach (lc, devfunc_info_slot[i])
 	{
 		entry = lfirst(lc);
 
@@ -1369,6 +1344,28 @@ pgstrom_devfunc_lookup(Oid func_oid, Oid func_collid)
 	entry->func_sqlname = pstrdup(NameStr(proc->proname));
 	entry->func_is_strict = proc->proisstrict;
 
+	for (j=0; j < proc->pronargs; j++)
+	{
+		dtype = pgstrom_devtype_lookup(proc->proargtypes.values[j]);
+		if (!dtype)
+		{
+			list_free(func_args);
+			entry->func_is_negative = true;
+			goto not_supported;
+		}
+		func_args = lappend(func_args, dtype);
+	}
+
+	dtype = pgstrom_devtype_lookup(proc->prorettype);
+	if (!dtype)
+	{
+		list_free(func_args);
+		entry->func_is_negative = true;
+		goto not_supported;
+	}
+	entry->func_args = func_args;
+	entry->func_rettype = dtype;
+
 	if (proc->pronamespace == PG_CATALOG_NAMESPACE)
 	{
 		/* for system default functions (pg_catalog) */
@@ -1377,17 +1374,18 @@ pgstrom_devfunc_lookup(Oid func_oid, Oid func_collid)
 										 proc->proargtypes.values,
 										 proc->prorettype);
 	}
+	else if (proc->prolang == get_language_oid("plcuda", true))
+	{
+		/* for PL/CUDA functions */
+		pgstrom_devfunc_construct_plcuda(entry, tuple);
+	}
 	else
 	{
 		/* for extra functions */
-		pgstrom_devfunc_construct_extra(entry,
-										proc->pronamespace,
-										proc->pronargs,
-										proc->proargtypes.values,
-										proc->prorettype);
-
+		pgstrom_devfunc_construct_extra(entry);
 	}
-	devfunc_info_slot[index] = lappend(devfunc_info_slot[index], entry);
+not_supported:
+	devfunc_info_slot[i] = lappend(devfunc_info_slot[i], entry);
 	MemoryContextSwitchTo(oldcxt);
 
 	ReleaseSysCache(tuple);

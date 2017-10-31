@@ -922,6 +922,8 @@ extern void pgstrom_init_gpupreagg(void);
 /*
  * pl_cuda.c
  */
+extern void pgstrom_devfunc_construct_plcuda(devfunc_info *entry,
+											 HeapTuple proc_tuple);
 extern Datum pltext_function_validator(PG_FUNCTION_ARGS);
 extern Datum pltext_function_handler(PG_FUNCTION_ARGS);
 extern Datum plcuda_function_validator(PG_FUNCTION_ARGS);
