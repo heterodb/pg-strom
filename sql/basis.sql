@@ -37,6 +37,17 @@ CREATE FUNCTION pgstrom_device_info()
   AS 'MODULE_PATHNAME'
   LANGUAGE C STRICT;
 
+CREATE TYPE __pgstrom_device_preserved_meminfo AS (
+  device_id int4,
+  handle    bytea,
+  owner     regrole,
+  length    int8
+);
+CREATE FUNCTION pgstrom_device_preserved_meminfo()
+  RETURNS SETOF __pgstrom_device_preserved_meminfo
+  AS 'MODULE_PATHNAME'
+  LANGUAGE C STRICT;
+
 --CREATE TYPE __pgstrom_program_info AS (
 --  addr			int8,
 --  length		int8,

@@ -447,6 +447,10 @@ extern CUresult __gpuMemAllocHost(GpuContext *gcontext,
 								  void **p_hostptr,
 								  size_t bytesize,
 								  const char *filename, int lineno);
+extern CUresult __gpuMemAllocPreserved(GpuContext *gcontext,
+									   CUipcMemHandle *m_handle,
+									   size_t bytesize,
+									   const char *filename, int lineno);
 extern CUresult __gpuIpcOpenMemHandle(GpuContext *gcontext,
 									  CUdeviceptr *p_deviceptr,
 									  CUipcMemHandle m_handle,
@@ -456,6 +460,8 @@ extern CUresult gpuMemFree(GpuContext *gcontext,
 						   CUdeviceptr devptr);
 extern CUresult gpuMemFreeHost(GpuContext *gcontext,
 							   void *hostptr);
+extern CUresult gpuMemFreePreserved(GpuContext *gcontext,
+									CUipcMemHandle *m_handle);
 extern CUresult gpuIpcCloseMemHandle(GpuContext *gcontext,
 									 CUdeviceptr m_deviceptr);
 
@@ -475,8 +481,12 @@ extern CUresult gpuIpcCloseMemHandle(GpuContext *gcontext,
 	__gpuMemAllocIOMap((a),(b),(c),__FILE__,__LINE__)
 #define gpuMemAllocHost(a,b,c)				\
 	__gpuMemAllocHost((a),(b),(c),__FILE__,__LINE__)
+#define gpuMemAllocPreserved(a,b,c)						\
+	__gpuMemAllocPreserved((a),(b),(c),__FILE__,__LINE__)
 #define gpuIpcOpenMemHandle(a,b,c,d)		\
 	__gpuIpcOpenMemHandle((a),(b),(c),(d),__FILE__,__LINE__)
+
+extern Datum pgstrom_device_preserved_meminfo(PG_FUNCTION_ARGS);
 
 extern void gpuMemReclaimSegment(GpuContext *gcontext);
 
