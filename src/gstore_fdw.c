@@ -1542,6 +1542,76 @@ pgstrom_gstore_fdw_handler(PG_FUNCTION_ARGS)
 PG_FUNCTION_INFO_V1(pgstrom_gstore_fdw_handler);
 
 /*
+ * pgstrom_reggstore_in
+ */
+Datum
+pgstrom_reggstore_in(PG_FUNCTION_ARGS)
+{
+	Datum	datum = regclassin(fcinfo);
+
+	if (!relation_is_gstore_fdw(DatumGetObjectId(datum), true))
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("Relation %u is not a foreign table of gstore_fdw",
+						DatumGetObjectId(datum))));
+	PG_RETURN_DATUM(datum);
+}
+PG_FUNCTION_INFO_V1(pgstrom_reggstore_in);
+
+/*
+ * pgstrom_reggstore_out
+ */
+Datum
+pgstrom_reggstore_out(PG_FUNCTION_ARGS)
+{
+	Oid		relid = PG_GETARG_OID(0);
+
+	if (!relation_is_gstore_fdw(relid, true))
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("Relation %u is not a foreign table of gstore_fdw",
+						relid)));
+	return regclassout(fcinfo);
+}
+PG_FUNCTION_INFO_V1(pgstrom_reggstore_out);
+
+/*
+ * pgstrom_reggstore_recv
+ */
+Datum
+pgstrom_reggstore_recv(PG_FUNCTION_ARGS)
+{
+	/* exactly the same as oidrecv, so share code */
+	Datum	datum = oidrecv(fcinfo);
+
+	if (!relation_is_gstore_fdw(DatumGetObjectId(datum), true))
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("Relation %u is not a foreign table of gstore_fdw",
+						DatumGetObjectId(datum))));
+	PG_RETURN_DATUM(datum);
+}
+PG_FUNCTION_INFO_V1(pgstrom_reggstore_recv);
+
+/*
+ * pgstrom_reggstore_send
+ */
+Datum
+pgstrom_reggstore_send(PG_FUNCTION_ARGS)
+{
+	Oid		relid = PG_GETARG_OID(0);
+
+	if (!relation_is_gstore_fdw(relid, true))
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("Relation %u is not a foreign table of gstore_fdw",
+						relid)));
+	/* Exactly the same as oidsend, so share code */
+	return oidsend(fcinfo);
+}
+PG_FUNCTION_INFO_V1(pgstrom_reggstore_send);
+
+/*
  * pgstrom_startup_gstore_fdw
  */
 static void

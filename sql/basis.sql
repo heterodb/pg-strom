@@ -124,6 +124,47 @@ CREATE FOREIGN DATA WRAPPER gstore_fdw
 CREATE SERVER gstore_fdw
   FOREIGN DATA WRAPPER gstore_fdw;
 
+CREATE TYPE reggstore;
+CREATE FUNCTION pgstrom.reggstore_in(cstring)
+  RETURNS reggstore
+  AS 'MODULE_PATHNAME','pgstrom_reggstore_in'
+  LANGUAGE C STRICT IMMUTABLE;
+CREATE FUNCTION pgstrom.reggstore_out(reggstore)
+  RETURNS cstring
+  AS 'MODULE_PATHNAME','pgstrom_reggstore_out'
+  LANGUAGE C STRICT IMMUTABLE;
+CREATE FUNCTION pgstrom.reggstore_recv(internal)
+  RETURNS reggstore
+  AS 'MODULE_PATHNAME','pgstrom_reggstore_recv'
+  LANGUAGE C STRICT IMMUTABLE;
+CREATE FUNCTION pgstrom.reggstore_send(reggstore)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_reggstore_send'
+  LANGUAGE C STRICT IMMUTABLE;
+CREATE TYPE reggstore
+(
+  input = pgstrom.reggstore_in,
+  output = pgstrom.reggstore_out,
+  receive = pgstrom.reggstore_recv,
+  send = pgstrom.reggstore_send,
+  like = pg_catalog.oid
+);
+
+CREATE CAST (reggstore AS oid)
+  WITHOUT FUNCTION AS IMPLICIT;
+CREATE CAST (oid AS reggstore)
+  WITHOUT FUNCTION AS IMPLICIT;
+CREATE CAST (reggstore AS integer)
+  WITHOUT FUNCTION AS ASSIGNMENT;
+CREATE CAST (reggstore AS bigint)
+  WITH FUNCTION pg_catalog.int8(oid) AS ASSIGNMENT;
+CREATE CAST (integer AS reggstore)
+  WITHOUT FUNCTION AS IMPLICIT;
+CREATE CAST (smallint AS reggstore)
+  WITH FUNCTION pg_catalog.int4(smallint) AS IMPLICIT;
+CREATE CAST (bigint AS reggstore)
+  WITH FUNCTION oid(bigint) AS IMPLICIT;
+
 --
 -- Type re-interpretation routines
 --

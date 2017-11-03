@@ -946,6 +946,10 @@ extern void pgstrom_init_plcuda(void);
  */
 extern Datum pgstrom_gstore_fdw_validator(PG_FUNCTION_ARGS);
 extern Datum pgstrom_gstore_fdw_handler(PG_FUNCTION_ARGS);
+extern Datum pgstrom_reggstore_in(PG_FUNCTION_ARGS);
+extern Datum pgstrom_reggstore_out(PG_FUNCTION_ARGS);
+extern Datum pgstrom_reggstore_recv(PG_FUNCTION_ARGS);
+extern Datum pgstrom_reggstore_send(PG_FUNCTION_ARGS);
 extern void pgstrom_init_gstore_fdw(void);
 
 /*
