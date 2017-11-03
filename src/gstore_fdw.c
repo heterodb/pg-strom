@@ -53,12 +53,16 @@
  */
 struct GpuStoreChunk
 {
-	struct GpuStoreMap *gs_map;	/* reference to relevant GpuStoreMap */
+//	struct GpuStoreMap *gs_map;	/* reference to relevant GpuStoreMap */
 	dlist_node	chain;
 	pg_crc32	hash;			/* hash value by (database_oid + table_oid) */
 	Oid			database_oid;
 	Oid			table_oid;
-	HeapTupleHeaderData htup;	/* for MVCC checks */
+	TransactionId xmax;
+	TransactionId xmin;
+	CommandId	cid;
+	bool		xmax_commited;
+	bool		xmin_commited;
 	dsm_handle	handle;
 };
 typedef struct GpuStoreChunk	GpuStoreChunk;
@@ -68,10 +72,13 @@ typedef struct GpuStoreChunk	GpuStoreChunk;
  */
 struct GpuStoreMap
 {
-	struct GpuStoreChunk *gs_chunk;	/* reference to relevant GpuStoreChunk */
+//	struct GpuStoreChunk *gs_chunk;	/* reference to relevant GpuStoreChunk */
 	dsm_segment	   *dsm_seg;
 };
 typedef struct GpuStoreMap		GpuStoreMap;
+
+#define GPUSTOREMAP_FOR_CHUNK(gs_chunk)			\
+	(&gstore_maps[(gs_chunk) - (gstore_head->gs_chunks)])
 
 /*
  * GpuStoreHead
@@ -91,9 +98,6 @@ static Oid	gstore_fdw_read_options(Oid table_oid,
 									char **p_synonym,
 									bool *p_pinning);
 
-
-
-
 /* ---- static variables ---- */
 static int				gstore_max_nchunks;		/* GUC */
 static shmem_startup_hook_type shmem_startup_next;
@@ -107,133 +111,77 @@ static GpuStoreMap	   *gstore_maps = NULL;
 static bool
 gstore_fdw_satisfies_visibility(GpuStoreChunk *gs_chunk, Snapshot snapshot)
 {
-	HeapTupleHeader	tuple = &gs_chunk->htup;
-
-	if (!HeapTupleHeaderXminCommitted(tuple))
+	if (!gs_chunk->xmin_commited)
 	{
-		if (HeapTupleHeaderXminInvalid(tuple))
-			return false;
-		else if (TransactionIdIsCurrentTransactionId(HeapTupleHeaderGetRawXmin(tuple)))
+		if (!TransactionIdIsValid(gs_chunk->xmin))
+			return false;		/* aborted or crashed */
+		if (TransactionIdIsCurrentTransactionId(gs_chunk->xmin))
 		{
-			if (HeapTupleHeaderGetCmin(tuple) >= snapshot->curcid)
+			if (gs_chunk->cid >= snapshot->curcid)
 				return false;	/* inserted after scan started */
+			
+			if (gs_chunk->xmax == InvalidTransactionId)
+				return true;	/* nobody delete it yet */
 
-			if (tuple->t_infomask & HEAP_XMAX_INVALID)		/* xid invalid */
-				return true;
-
-			if (HEAP_XMAX_IS_LOCKED_ONLY(tuple->t_infomask))/* not deleter */
-				return true;
-
-			if (tuple->t_infomask & HEAP_XMAX_IS_MULTI)
-			{
-				TransactionId xmax;
-
-				xmax = HeapTupleGetUpdateXid(tuple);
-
-				/* not LOCKED_ONLY, so it has to have an xmax */
-				Assert(TransactionIdIsValid(xmax));
-
-				/* updating subtransaction must have aborted */
-				if (!TransactionIdIsCurrentTransactionId(xmax))
-					return true;
-				else if (HeapTupleHeaderGetCmax(tuple) >= snapshot->curcid)
-					return true;    /* updated after scan started */
-				else
-					return false;       /* updated before scan started */
-			}
-
-			if (!TransactionIdIsCurrentTransactionId(HeapTupleHeaderGetRawXmax(tuple)))
+			if (!TransactionIdIsCurrentTransactionId(gs_chunk->xmax))
 			{
 				/* deleting subtransaction must have aborted */
-				tuple->t_infomask |= HEAP_XMAX_INVALID;
+				gs_chunk->xmax = InvalidTransactionId;
 				return true;
 			}
-
-			if (HeapTupleHeaderGetCmax(tuple) >= snapshot->curcid)
+			if (gs_chunk->cid >= snapshot->curcid)
 				return true;    /* deleted after scan started */
 			else
 				return false;   /* deleted before scan started */
 		}
-		else if (XidInMVCCSnapshot(HeapTupleHeaderGetRawXmin(tuple), snapshot))
+		else if (XidInMVCCSnapshot(gs_chunk->xmin, snapshot))
 			return false;
-		else if (TransactionIdDidCommit(HeapTupleHeaderGetRawXmin(tuple)))
-			tuple->t_infomask |= HEAP_XMIN_COMMITTED;
+		else if (TransactionIdDidCommit(gs_chunk->xmin))
+			gs_chunk->xmin_commited = true;
 		else
 		{
 			/* it must have aborted or crashed */
-			tuple->t_infomask |= HEAP_XMIN_INVALID;
+			gs_chunk->xmin = InvalidTransactionId;
 			return false;
 		}
 	}
 	else
 	{
 		/* xmin is committed, but maybe not according to our snapshot */
-		if (!HeapTupleHeaderXminFrozen(tuple) &&
-			XidInMVCCSnapshot(HeapTupleHeaderGetRawXmin(tuple), snapshot))
+		if (gs_chunk->xmin != FrozenTransactionId &&
+			XidInMVCCSnapshot(gs_chunk->xmin, snapshot))
 			return false;	/* treat as still in progress */
 	}
-
 	/* by here, the inserting transaction has committed */
+	if (!TransactionIdIsValid(gs_chunk->xmax))
+		return true;	/* nobody deleted yet */
 
-	if (tuple->t_infomask & HEAP_XMAX_INVALID)  /* xid invalid or aborted */
-		return true;
-
-	if (HEAP_XMAX_IS_LOCKED_ONLY(tuple->t_infomask))
-		return true;
-
-	if (tuple->t_infomask & HEAP_XMAX_IS_MULTI)
+	if (!gs_chunk->xmax_commited)
 	{
-		TransactionId xmax;
-
-		/* already checked above */
-		Assert(!HEAP_XMAX_IS_LOCKED_ONLY(tuple->t_infomask));
-
-		xmax = HeapTupleGetUpdateXid(tuple);
-
-		/* not LOCKED_ONLY, so it has to have an xmax */
-		Assert(TransactionIdIsValid(xmax));
-
-		if (TransactionIdIsCurrentTransactionId(xmax))
+		if (TransactionIdIsCurrentTransactionId(gs_chunk->xmax))
 		{
-			if (HeapTupleHeaderGetCmax(tuple) >= snapshot->curcid)
-				return true;    /* deleted after scan started */
-			else
-				return false;   /* deleted before scan started */
-		}
-		if (XidInMVCCSnapshot(xmax, snapshot))
-			return true;
-		if (TransactionIdDidCommit(xmax))
-			return false;       /* updating transaction committed */
-		/* it must have aborted or crashed */
-		return true;
-	}
-
-	if (!(tuple->t_infomask & HEAP_XMAX_COMMITTED))
-	{
-		if (TransactionIdIsCurrentTransactionId(HeapTupleHeaderGetRawXmax(tuple)))
-		{
-			if (HeapTupleHeaderGetCmax(tuple) >= snapshot->curcid)
+			if (gs_chunk->cid >= snapshot->curcid)
 				return true;    /* deleted after scan started */
 			else
 				return false;   /* deleted before scan started */
         }
 
-		if (XidInMVCCSnapshot(HeapTupleHeaderGetRawXmax(tuple), snapshot))
+		if (XidInMVCCSnapshot(gs_chunk->xmax, snapshot))
 			return true;
 
-        if (!TransactionIdDidCommit(HeapTupleHeaderGetRawXmax(tuple)))
+        if (!TransactionIdDidCommit(gs_chunk->xmax))
         {
             /* it must have aborted or crashed */
-			tuple->t_infomask |= HEAP_XMAX_INVALID;
+			gs_chunk->xmax = InvalidTransactionId;
             return true;
         }
 		/* xmax transaction committed */
-		tuple->t_infomask |= HEAP_XMAX_COMMITTED;
-    }
+		gs_chunk->xmax_commited = true;
+	}
     else
-    {
+	{
 		/* xmax is committed, but maybe not according to our snapshot */
-		if (XidInMVCCSnapshot(HeapTupleHeaderGetRawXmax(tuple), snapshot))
+		if (XidInMVCCSnapshot(gs_chunk->xmax, snapshot))
 			return true;        /* treat as still in progress */
     }
 	/* xmax transaction committed */
@@ -246,11 +194,12 @@ gstore_fdw_satisfies_visibility(GpuStoreChunk *gs_chunk, Snapshot snapshot)
 static inline kern_data_store *
 gstore_fdw_mapped_chunk(GpuStoreChunk *gs_chunk)
 {
-	GpuStoreMap	   *gs_map = gs_chunk->gs_map;
+	GpuStoreMap	   *gs_map = GPUSTOREMAP_FOR_CHUNK(gs_chunk);
 
 	if (!gs_map->dsm_seg)
 	{
 		gs_map->dsm_seg = dsm_attach(gs_chunk->handle);
+		dsm_pin_mapping(gs_map->dsm_seg);
 	}
 	else if (dsm_segment_handle(gs_map->dsm_seg) != gs_chunk->handle)
 	{
@@ -673,10 +622,9 @@ gstorePlanDirectModify(PlannerInfo *root,
 	if (!IsA(subplan, ForeignScan))
 		return false;
 
-	/*
-	 * XXX - can we expect data type compatibility of target-list
-	 * by the core? likely, no need to check again.
-	 */
+	/* OK, Update the operation */
+	((ForeignScan *) subplan)->operation = CMD_DELETE;
+
 	return true;
 }
 
@@ -789,7 +737,6 @@ gstore_fdw_writeout_chunk(Relation relation, gstoreLoadState *gs_lstate)
 	dlist_node	   *dnode;
 	GpuStoreChunk  *gs_chunk = NULL;
 	GpuStoreMap	   *gs_map = NULL;
-	HeapTupleHeaderData htup;
 
 	length = offset = MAXALIGN(offsetof(kern_data_store,
 										colmeta[tupdesc->natts]));
@@ -881,12 +828,6 @@ gstore_fdw_writeout_chunk(Relation relation, gstoreLoadState *gs_lstate)
     COMP_LEGACY_CRC32(hash, &MyDatabaseId, sizeof(Oid));
 	COMP_LEGACY_CRC32(hash, &table_oid, sizeof(Oid));
 	FIN_LEGACY_CRC32(hash);
-	/* see heap_prepare_insert() */
-	memset(&htup, 0, sizeof(HeapTupleHeaderData));
-	htup.t_infomask = HEAP_XMAX_INVALID;
-	HeapTupleHeaderSetXmin(&htup, GetCurrentTransactionId());
-	HeapTupleHeaderSetCmin(&htup, GetCurrentCommandId(true));
-	HeapTupleHeaderSetXmax(&htup, 0);
 
 	SpinLockAcquire(&gstore_head->lock);
 	if (dlist_is_empty(&gstore_head->free_chunks))
@@ -898,17 +839,22 @@ gstore_fdw_writeout_chunk(Relation relation, gstoreLoadState *gs_lstate)
 	}
 	dnode = dlist_pop_head_node(&gstore_head->free_chunks);
 	gs_chunk = dlist_container(GpuStoreChunk, chain, dnode);
-	gs_map = gs_chunk->gs_map;
-
+	gs_map = GPUSTOREMAP_FOR_CHUNK(gs_chunk);
+	memset(gs_chunk, 0, sizeof(GpuStoreChunk));
 	gs_chunk->hash = hash;
 	gs_chunk->database_oid = MyDatabaseId;
 	gs_chunk->table_oid = table_oid;
-	memcpy(&gs_chunk->htup, &htup, sizeof(HeapTupleHeaderData));
+	gs_chunk->xmax = InvalidTransactionId;
+	gs_chunk->xmin = GetCurrentTransactionId();
+	gs_chunk->cid = GetCurrentCommandId(true);
+	gs_chunk->xmax_commited = false;
+	gs_chunk->xmin_commited = false;
 	gs_chunk->handle = dsm_segment_handle(dsm_seg);
 	gs_map->dsm_seg = dsm_seg;
 
 	i = hash % GSTORE_CHUNK_HASH_NSLOTS;
 	dlist_push_tail(&gstore_head->active_chunks[i], &gs_chunk->chain);
+	pg_atomic_add_fetch_u32(&gstore_head->has_warm_chunks, 1);
 	SpinLockRelease(&gstore_head->lock);
 
 	/* reset temporary buffer */
@@ -924,6 +870,31 @@ gstore_fdw_writeout_chunk(Relation relation, gstoreLoadState *gs_lstate)
 		}
 	}
 	gs_lstate->nitems = 0;
+}
+
+/*
+ * gstore_fdw_release_chunk
+ */
+static void
+gstore_fdw_release_chunk(GpuStoreChunk *gs_chunk)
+{
+	GpuStoreMap    *gs_map = GPUSTOREMAP_FOR_CHUNK(gs_chunk);
+
+	dlist_delete(&gs_chunk->chain);
+	if (gs_map->dsm_seg)
+		dsm_detach(gs_map->dsm_seg);
+	gs_map->dsm_seg = NULL;
+#if PG_VERSION_NUM >= 100000
+	/*
+	 * NOTE: PG9.6 has no way to release DSM segment once pinned.
+	 * dsm_unpin_segment() was newly supported at PG10.
+	 */
+	dsm_unpin_segment(gs_chunk->handle);
+#endif
+	memset(gs_chunk, 0, sizeof(GpuStoreMap));
+	gs_chunk->handle = UINT_MAX;
+	dlist_push_head(&gstore_head->free_chunks,
+					&gs_chunk->chain);
 }
 
 /*
@@ -944,12 +915,12 @@ gstoreBeginForeignModify(ModifyTableState *mtstate,
 	size_t			nrooms;
 	cl_int			i, unitsz;
 
-	LockRelationOid(RelationGetRelid(relation), AccessExclusiveLock);
+	LockRelationOid(RelationGetRelid(relation), ShareUpdateExclusiveLock);
 	SpinLockAcquire(&gstore_head->lock);
 	gs_chunk = gstore_fdw_first_chunk(relation, estate->es_snapshot);
 	SpinLockRelease(&gstore_head->lock);
 
-	//XXX - resowner hook may be able to merge them
+	//XXX - xact hook may be able to merge smaller chunks
 	if (gs_chunk)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -1155,6 +1126,18 @@ gstoreExecForeignInsert(EState *estate,
 }
 
 /*
+ * gstoreExecForeignDelete
+ */
+static TupleTableSlot *
+gstoreExecForeignDelete(EState *estate,
+						ResultRelInfo *rinfo,
+						TupleTableSlot *slot,
+						TupleTableSlot *planSlot)
+{
+	elog(ERROR, "Only Direct DELETE is supported");
+}
+
+/*
  * gstoreEndForeignModify
  */
 static void
@@ -1172,7 +1155,13 @@ gstoreEndForeignModify(EState *estate,
  */
 static void
 gstoreBeginDirectModify(ForeignScanState *node, int eflags)
-{}
+{
+	EState	   *estate = node->ss.ps.state;
+	ResultRelInfo *rrinfo = estate->es_result_relation_info;
+	Relation	frel = rrinfo->ri_RelationDesc;
+
+	LockRelationOid(RelationGetRelid(frel), ShareUpdateExclusiveLock);
+}
 
 /*
  * gstoreIterateDirectModify
@@ -1180,7 +1169,27 @@ gstoreBeginDirectModify(ForeignScanState *node, int eflags)
 static TupleTableSlot *
 gstoreIterateDirectModify(ForeignScanState *node)
 {
-	return NULL;
+	EState	   *estate = node->ss.ps.state;
+	ResultRelInfo *rrinfo = estate->es_result_relation_info;
+	Relation	frel = rrinfo->ri_RelationDesc;
+	Snapshot	snapshot = estate->es_snapshot;
+	TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
+	Instrumentation *instr = node->ss.ps.instrument;
+	GpuStoreChunk *gs_chunk;
+
+	SpinLockAcquire(&gstore_head->lock);
+	for (gs_chunk = gstore_fdw_first_chunk(frel, snapshot);
+		 gs_chunk != NULL;
+		 gs_chunk = gstore_fdw_next_chunk(gs_chunk, snapshot))
+	{
+		Assert(!TransactionIdIsValid(gs_chunk->xmax));
+		gs_chunk->xmax = GetCurrentTransactionId();
+		gs_chunk->cid = GetCurrentCommandId(true);
+	}
+	pg_atomic_add_fetch_u32(&gstore_head->has_warm_chunks, 1);
+	SpinLockRelease(&gstore_head->lock);
+
+	return ExecClearTuple(slot);
 }
 
 /*
@@ -1194,82 +1203,63 @@ gstoreEndDirectModify(ForeignScanState *node)
  * gstoreXactCallbackPerChunk
  */
 static bool
-gstoreXactCallbackPerChunk(XactEvent event, GpuStoreChunk *gs_chunk,
-						   TransactionId oldestXmin)
+gstoreOnXactCallbackPerChunk(bool is_commit, GpuStoreChunk *gs_chunk,
+							 TransactionId oldestXmin)
 {
-	HeapTupleHeader	htup = &gs_chunk->htup;
-	bool		retval = false;
-
-	if ((htup->t_infomask & HEAP_XMAX_INVALID) == 0)
+	if (TransactionIdIsCurrentTransactionId(gs_chunk->xmax))
 	{
+		if (is_commit)
+			gs_chunk->xmax_commited = true;
+		else
+			gs_chunk->xmax = InvalidTransactionId;
+	}
+	if (TransactionIdIsCurrentTransactionId(gs_chunk->xmin))
+	{
+		if (is_commit)
+			gs_chunk->xmin_commited = true;
+		else
+		{
+			gstore_fdw_release_chunk(gs_chunk);
+			return false;
+		}
+	}
+
+	if (TransactionIdIsValid(gs_chunk->xmax))
+	{
+		/* someone tried to delete chunk, but not commited yet */
+		if (!gs_chunk->xmax_commited)
+			return true;
 		/*
-		 * Remove chunk if not visible to any concurrent transactions.
-		 * Logic follows how vacuum prunes dead tuples
+		 * chunk deletion is commited, but some open transactions may
+		 * still reference the chunk
 		 */
-		HeapTupleData	tupleData;
-		HTSV_Result		state;
+		if (!TransactionIdPrecedes(gs_chunk->xmax, oldestXmin))
+			return true;
 
-		memset(&tupleData, 0, sizeof(HeapTupleData));
-		tupleData.t_self.ip_posid = 1;
-		tupleData.t_tableOid = gs_chunk->table_oid;
-		tupleData.t_data = htup;
-
-		state = HeapTupleSatisfiesVacuum(&tupleData, oldestXmin, -1);
-		if (state == HEAPTUPLE_DEAD)
-		{
-			GpuStoreMap	   *gs_map = gs_chunk->gs_map;
-
-			dlist_delete(&gs_chunk->chain);
-			if (gs_map->dsm_seg != NULL)
-			{
-				dsm_detach(gs_map->dsm_seg);
-				gs_map->dsm_seg = NULL;
-			}
-			/* NOTE: dsm_unpin_segment() is supported at PGv10 */
-			//dsm_unpin_segment(gs_chunk->handle);
-
-			/* reset */
-			gs_chunk->hash = 0;
-			gs_chunk->table_oid = 0;
-			gs_chunk->database_oid = 0;
-			memset(&gs_chunk->htup, 0, sizeof(HeapTupleHeaderData));
-			gs_chunk->handle = UINT_MAX;
-
-			elog(NOTICE, "gs_chunk %p dead", gs_chunk);
-
-			dlist_push_tail(&gstore_head->free_chunks, &gs_chunk->chain);
-		}
-		retval = true;
+		/* Otherwise, GpuStoreChunk can be released immediately */
+		gstore_fdw_release_chunk(gs_chunk);
 	}
-	else if (!HeapTupleHeaderXminFrozen(htup))
+	else if (TransactionIdIsNormal(gs_chunk->xmin))
 	{
-		/* freeze chunks if visible to any transactions */
-		/* see logic in tuple_all_visible() */
-		HeapTupleData	tupleData;
-		HTSV_Result		state;
+		/* someone tried to insert chunk, but not commited yet */
+		if (!gs_chunk->xmin_commited)
+			return true;
+		/*
+		 * chunk insertion is commited, but some open transaction may
+		 * need MVCC style visibility control
+		 */
+		if (!TransactionIdPrecedes(gs_chunk->xmin, oldestXmin))
+			return true;
 
-		memset(&tupleData, 0, sizeof(HeapTupleData));
-		tupleData.t_self.ip_posid = 1;
-		tupleData.t_tableOid = gs_chunk->table_oid;
-		tupleData.t_data = htup;
-
-		state = HeapTupleSatisfiesVacuum(&tupleData, oldestXmin, -1);
-		if (state == HEAPTUPLE_LIVE)
-		{
-			TransactionId	xmin = HeapTupleHeaderGetXmin(htup);
-
-			if (TransactionIdPrecedes(xmin, oldestXmin))
-			{
-				/* make it frozen */
-				HeapTupleHeaderSetXmin(htup, FrozenTransactionId);
-				HeapTupleHeaderSetXminFrozen(htup);
-
-				elog(NOTICE, "gs_chunk %p frozen", gs_chunk);
-			}
-		}
-		retval = true;
+		/* Otherwise, GpuStoreChunk can be visible to everybody */
+		gs_chunk->xmin = FrozenTransactionId;
 	}
-	return retval;
+	else if (!TransactionIdIsValid(gs_chunk->xmin))
+	{
+		/* GpuChunk insertion aborted */
+		gstore_fdw_release_chunk(gs_chunk);
+	}
+	return false;
 }
 
 /*
@@ -1279,8 +1269,18 @@ static void
 gstoreXactCallback(XactEvent event, void *arg)
 {
 	TransactionId oldestXmin;
+	bool		is_commit;
 	bool		meet_warm_chunks = false;
 	cl_int		i;
+
+	if (event == XACT_EVENT_COMMIT)
+		is_commit = true;
+	else if (event == XACT_EVENT_ABORT)
+		is_commit = false;
+	else
+		return;		/* do nothing */
+
+//	elog(INFO, "gstoreXactCallback xid=%u", GetCurrentTransactionIdIfAny());
 
 	if (pg_atomic_read_u32(&gstore_head->has_warm_chunks) == 0)
 		return;
@@ -1296,15 +1296,31 @@ gstoreXactCallback(XactEvent event, void *arg)
 			GpuStoreChunk  *gs_chunk
 				= dlist_container(GpuStoreChunk, chain, iter.cur);
 
-			if (gstoreXactCallbackPerChunk(event, gs_chunk, oldestXmin))
+			if (gstoreOnXactCallbackPerChunk(is_commit, gs_chunk, oldestXmin))
 				meet_warm_chunks = true;
 		}
 	}
-
 	if (!meet_warm_chunks)
 		pg_atomic_write_u32(&gstore_head->has_warm_chunks, 0);
 	SpinLockRelease(&gstore_head->lock);
 }
+
+#if 0
+/*
+ * gstoreSubXactCallback - just for debug
+ */
+static void
+gstoreSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
+					  SubTransactionId parentSubid, void *arg)
+{
+	elog(INFO, "gstoreSubXactCallback event=%s my_xid=%u pr_xid=%u",
+		 (event == SUBXACT_EVENT_START_SUB ? "StartSub" :
+		  event == SUBXACT_EVENT_COMMIT_SUB ? "CommitSub" :
+		  event == SUBXACT_EVENT_ABORT_SUB ? "AbortSub" :
+		  event == SUBXACT_EVENT_PRE_COMMIT_SUB ? "PreCommitSub" : "???"),
+		 mySubid, parentSubid);
+}
+#endif
 
 /*
  * relation_is_gstore_fdw
@@ -1513,6 +1529,7 @@ pgstrom_gstore_fdw_handler(PG_FUNCTION_ARGS)
 	routine->PlanForeignModify	= gstorePlanForeignModify;
 	routine->BeginForeignModify	= gstoreBeginForeignModify;
 	routine->ExecForeignInsert	= gstoreExecForeignInsert;
+	routine->ExecForeignDelete	= gstoreExecForeignDelete;
 	routine->EndForeignModify	= gstoreEndForeignModify;
 
 	routine->PlanDirectModify	= gstorePlanDirectModify;
@@ -1542,8 +1559,9 @@ pgstrom_startup_gstore_fdw(void)
 								  &found);
 	if (found)
 		elog(ERROR, "Bug? shared memory for gstore_fdw already built");
-	gstore_maps = MemoryContextAlloc(TopMemoryContext,
-									 sizeof(GpuStoreMap) * gstore_max_nchunks);
+	gstore_maps = calloc(gstore_max_nchunks, sizeof(GpuStoreMap));
+	if (!gstore_maps)
+		elog(ERROR, "out of memory");
 	SpinLockInit(&gstore_head->lock);
 	dlist_init(&gstore_head->free_chunks);
 	for (i=0; i < GSTORE_CHUNK_HASH_NSLOTS; i++)
@@ -1551,14 +1569,9 @@ pgstrom_startup_gstore_fdw(void)
 	for (i=0; i < gstore_max_nchunks; i++)
 	{
 		GpuStoreChunk  *gs_chunk = &gstore_head->gs_chunks[i];
-		GpuStoreMap	   *gs_map = &gstore_maps[i];
 
 		memset(gs_chunk, 0, sizeof(GpuStoreChunk));
-		gs_chunk->gs_map = gs_map;
 		gs_chunk->handle = UINT_MAX;
-
-		gs_map->gs_chunk = gs_chunk;
-		gs_map->dsm_seg = NULL;
 
 		dlist_push_tail(&gstore_head->free_chunks, &gs_chunk->chain);
 	}
@@ -1586,4 +1599,5 @@ pgstrom_init_gstore_fdw(void)
 	shmem_startup_hook = pgstrom_startup_gstore_fdw;
 
 	RegisterXactCallback(gstoreXactCallback, NULL);
+	//RegisterSubXactCallback(gstoreSubXactCallback, NULL);
 }
