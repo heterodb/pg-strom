@@ -325,10 +325,18 @@ init_kernel_data_store(kern_data_store *kds,
 	kds->hash_max = UINT_MAX;
 	kds->nrows_per_block = 0;
 
-	attcacheoff = offsetof(HeapTupleHeaderData, t_bits);
-	if (tupdesc->tdhasoid)
-		attcacheoff += sizeof(Oid);
-	attcacheoff = MAXALIGN(attcacheoff);
+	if (format != KDS_FORMAT_COLUMN)
+	{
+		attcacheoff = offsetof(HeapTupleHeaderData, t_bits);
+		if (tupdesc->tdhasoid)
+			attcacheoff += sizeof(Oid);
+		attcacheoff = MAXALIGN(attcacheoff);
+	}
+	else
+	{
+		/* attcacheoff does not make sense for columnar format */
+		attcacheoff = -1;
+	}
 
 	for (i=0; i < tupdesc->natts; i++)
 	{

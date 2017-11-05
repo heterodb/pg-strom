@@ -26,6 +26,7 @@
 #include "catalog/pg_foreign_table.h"
 #include "catalog/pg_language.h"
 #include "catalog/pg_proc.h"
+#include "catalog/pg_type.h"
 #include "commands/defrem.h"
 #include "foreign/fdwapi.h"
 #include "optimizer/cost.h"
@@ -45,6 +46,7 @@
 #include "utils/syscache.h"
 #include "utils/tqual.h"
 #include "pg_strom.h"
+#include "cuda_plcuda.h"
 
 #define GPUSTORE_CHUNK_SIZE		(1UL << 30)
 
@@ -53,7 +55,6 @@
  */
 struct GpuStoreChunk
 {
-//	struct GpuStoreMap *gs_map;	/* reference to relevant GpuStoreMap */
 	dlist_node	chain;
 	pg_crc32	hash;			/* hash value by (database_oid + table_oid) */
 	Oid			database_oid;
@@ -63,6 +64,9 @@ struct GpuStoreChunk
 	CommandId	cid;
 	bool		xmax_commited;
 	bool		xmin_commited;
+	cl_uint		kds_nitems;			/* copy of kds->nitems */
+	cl_uint		kds_length;			/* copy of kds->length */
+	CUipcMemHandle ipc_mhandle;
 	dsm_handle	handle;
 };
 typedef struct GpuStoreChunk	GpuStoreChunk;
@@ -72,7 +76,6 @@ typedef struct GpuStoreChunk	GpuStoreChunk;
  */
 struct GpuStoreMap
 {
-//	struct GpuStoreChunk *gs_chunk;	/* reference to relevant GpuStoreChunk */
 	dsm_segment	   *dsm_seg;
 };
 typedef struct GpuStoreMap		GpuStoreMap;
@@ -304,12 +307,9 @@ gstoreGetForeignRelSize(PlannerInfo *root,
 			 gs_chunk != NULL;
 			 gs_chunk = gstore_fdw_next_chunk(gs_chunk, snapshot))
 		{
-			kern_data_store *kds = gstore_fdw_mapped_chunk(gs_chunk);
-
-			nitems += kds->nitems;
-			length += TYPEALIGN(BLCKSZ, kds->length);
+			nitems += gs_chunk->kds_nitems;
+			length += TYPEALIGN(BLCKSZ, gs_chunk->kds_length);
 		}
-
 		UnregisterSnapshot(snapshot);
 	}
 	PG_CATCH();
@@ -849,6 +849,8 @@ gstore_fdw_writeout_chunk(Relation relation, gstoreLoadState *gs_lstate)
 	gs_chunk->cid = GetCurrentCommandId(true);
 	gs_chunk->xmax_commited = false;
 	gs_chunk->xmin_commited = false;
+	gs_chunk->kds_length = kds->length;
+	gs_chunk->kds_nitems = kds->nitems;
 	gs_chunk->handle = dsm_segment_handle(dsm_seg);
 	gs_map->dsm_seg = dsm_seg;
 
@@ -1185,6 +1187,10 @@ gstoreIterateDirectModify(ForeignScanState *node)
 		Assert(!TransactionIdIsValid(gs_chunk->xmax));
 		gs_chunk->xmax = GetCurrentTransactionId();
 		gs_chunk->cid = GetCurrentCommandId(true);
+
+		estate->es_processed += gs_chunk->kds_nitems;
+		if (instr)
+			instr->tuplecount += gs_chunk->kds_nitems;
 	}
 	pg_atomic_add_fetch_u32(&gstore_head->has_warm_chunks, 1);
 	SpinLockRelease(&gstore_head->lock);
@@ -1610,6 +1616,257 @@ pgstrom_reggstore_send(PG_FUNCTION_ARGS)
 	return oidsend(fcinfo);
 }
 PG_FUNCTION_INFO_V1(pgstrom_reggstore_send);
+
+/*
+ * type_is_reggstore
+ */
+bool
+type_is_reggstore(Oid type_oid)
+{
+	Oid			typinput;
+	HeapTuple	tup;
+	char	   *prosrc;
+	char	   *probin;
+	Datum		datum;
+	bool		isnull;
+	PGFunction	handler_fn;
+
+	tup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(type_oid));
+	if (!HeapTupleIsValid(tup))
+		elog(ERROR, "cache lookup failed for type %u", type_oid);
+	typinput = ((Form_pg_type) GETSTRUCT(tup))->typinput;
+	ReleaseSysCache(tup);
+
+	tup = SearchSysCache1(PROCOID, ObjectIdGetDatum(typinput));
+	if (!HeapTupleIsValid(tup))
+		elog(ERROR, "cache lookup failed for function %u", typinput);
+
+	datum = SysCacheGetAttr(PROCOID, tup, Anum_pg_proc_prosrc, &isnull);
+	if (isnull)
+		elog(ERROR, "null prosrc for C function %u", typinput);
+	prosrc = TextDatumGetCString(datum);
+
+	datum = SysCacheGetAttr(PROCOID, tup, Anum_pg_proc_probin, &isnull);
+	if (isnull)
+		elog(ERROR, "null probin for C function %u", typinput);
+	probin = TextDatumGetCString(datum);
+	ReleaseSysCache(tup);
+
+	/* check whether function pointer is identical */
+	handler_fn = load_external_function(probin, prosrc, true, NULL);
+	if (handler_fn != pgstrom_reggstore_in)
+		return false;
+	/* ok, it is reggstore type */
+	return true;
+}
+
+/*
+ * load_normal_gstore_fdw
+ */
+static CUdeviceptr
+load_normal_gstore_fdw(GpuContext *gcontext, Relation frel, TupleDesc tupdesc)
+{
+	GpuStoreChunk  *gs_chunk;
+	List		   *gs_chunks_list = NIL;
+	size_t			total_nitems = 0;
+	size_t			length = 0;
+	size_t			usage;
+	cl_int			i, j, nchunks;
+	ListCell	   *lc;
+	kern_reggstore *kr_gstore;
+	kern_data_store *kds_src;
+	kern_data_store *kds_dst;
+	CUresult		rc;
+	CUdeviceptr		m_gstore;
+
+	SpinLockAcquire(&gstore_head->lock);
+	PG_TRY();
+	{
+		Snapshot		snapshot = GetActiveSnapshot();
+
+		for (gs_chunk = gstore_fdw_first_chunk(frel, snapshot);
+			 gs_chunk != NULL;
+			 gs_chunk = gstore_fdw_next_chunk(gs_chunk, snapshot))
+		{
+			kds_src = gstore_fdw_mapped_chunk(gs_chunk);
+
+			gs_chunks_list = lappend(gs_chunks_list, gs_chunk);
+			total_nitems += kds_src->nitems;
+			length += STROMALIGN(kds_src->length);
+		}
+		SpinLockRelease(&gstore_head->lock);
+	}
+	PG_CATCH();
+	{
+		SpinLockRelease(&gstore_head->lock);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	SpinLockRelease(&gstore_head->lock);
+
+	if (gs_chunks_list == NIL)
+		return 0UL;		/* No GpuStore chunks */
+
+	/* allocation of managed memory */
+	nchunks = list_length(gs_chunks_list);
+	length += STROMALIGN(offsetof(kern_reggstore, kds[nchunks]));
+	length += nchunks * STROMALIGN(offsetof(kern_data_store,
+											colmeta[tupdesc->natts]));
+	rc = gpuMemAllocManagedRaw(gcontext,
+							   &m_gstore,
+							   length,
+							   CU_MEM_ATTACH_GLOBAL);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "out of managed memory");
+
+	/* setup buffer */
+	kr_gstore = (kern_reggstore *)m_gstore;
+	kr_gstore->nchunks = nchunks;
+	kr_gstore->total_nitems = total_nitems;
+
+	usage = STROMALIGN(offsetof(kern_reggstore, kds[nchunks]));
+	i=0;
+	foreach (lc, gs_chunks_list)
+	{
+		size_t		values_offset;
+
+		gs_chunk = lfirst(lc);
+
+		kds_src = gstore_fdw_mapped_chunk(gs_chunk);
+		kds_dst = (kern_data_store *)(m_gstore + usage);
+		kr_gstore->kds[i] = kds_dst;
+
+		Assert(kds_src->format == KDS_FORMAT_COLUMN);
+		init_kernel_data_store(kds_dst,
+							   tupdesc,
+							   UINT_MAX,	/* dummy */
+							   KDS_FORMAT_COLUMN,
+							   kds_src->nitems);
+		kds_dst->nitems = kds_src->nitems;
+		values_offset = STROMALIGN(offsetof(kern_data_store,
+											colmeta[kds_dst->ncols]));
+		for (j=0; j < tupdesc->natts; j++)
+		{
+			Form_pg_attribute attr = tupdesc->attrs[j];
+			kern_colmeta   *cmeta;
+			cl_int			unitsz;
+
+			Assert(attr->attnum > 0 && attr->attnum <= kds_src->ncols);
+			cmeta = &kds_src->colmeta[attr->attnum - 1];
+			Assert(kds_dst->colmeta[j].attbyval == cmeta->attbyval &&
+				   kds_dst->colmeta[j].attalign == cmeta->attalign &&
+				   kds_dst->colmeta[j].attlen   == cmeta->attlen &&
+				   kds_dst->colmeta[j].attcacheoff == -1 &&
+				   kds_dst->colmeta[j].atttypid == cmeta->atttypid &&
+				   kds_dst->colmeta[j].atttypmod == cmeta->atttypmod);
+			kds_dst->colmeta[j].values_offset = values_offset;
+			kds_dst->colmeta[j].extra_sz = cmeta->extra_sz;
+
+			if (cmeta->attlen < 0)
+				unitsz = sizeof(cl_uint);
+			else
+				unitsz = TYPEALIGN(cmeta->attalign, cmeta->attlen);
+
+			memcpy((char *)kds_dst + kds_dst->colmeta[j].values_offset,
+				   (char *)kds_src + cmeta->values_offset,
+				   unitsz * kds_src->nitems + cmeta->extra_sz);
+
+			values_offset += STROMALIGN(unitsz * kds_src->nitems +
+										cmeta->extra_sz);
+		}
+		kds_dst->length = values_offset;
+		usage += STROMALIGN(kds_dst->length);
+		i++;
+	}
+	return m_gstore;
+}
+
+/*
+ * load_pinned_gstore_fdw
+ */
+static CUdeviceptr
+load_pinned_gstore_fdw(GpuContext *gcontext, Relation frel, TupleDesc tupdesc)
+{
+	elog(ERROR, "%s: not supported yet", __FUNCTION__);
+}
+
+/*
+ * pgstrom_load_gstore_fdw
+ */
+CUdeviceptr
+pgstrom_load_gstore_fdw(GpuContext *gcontext, Oid gstore_oid)
+{
+	char	   *synonym;
+	bool		pinning;
+	Relation	frel;
+	Relation	grel = NULL;
+	TupleDesc	tupdesc = NULL;
+	CUdeviceptr	result;
+
+	if (!relation_is_gstore_fdw(gstore_oid, true))
+		elog(ERROR, "relation %s is not gstore_fdw foreign table",
+			 get_rel_name(gstore_oid));
+
+	frel = heap_open(gstore_oid, AccessShareLock);
+	gstore_fdw_read_options(gstore_oid, &synonym, &pinning);
+	if (synonym)
+	{
+		List	   *names;
+		int			i, nattrs;
+
+		if (pinning)
+			elog(ERROR, "not a consistent gstore_fdw foreign table options");
+
+		names = stringToQualifiedNameList(synonym);
+		grel = heap_openrv(makeRangeVarFromNameList(names),
+						   AccessShareLock);
+		if (!relation_is_gstore_fdw(RelationGetRelid(frel), false))
+			elog(ERROR, "relation %s is not gstore_fdw foreign table, or not a suitable configuration",
+				 RelationGetRelationName(frel));
+		gstore_fdw_read_options(gstore_oid, &synonym, &pinning);
+		Assert(!synonym);
+
+		/* construct a pseudo tupdesc */
+		nattrs = RelationGetNumberOfAttributes(frel);
+		tupdesc = CreateTemplateTupleDesc(nattrs, false);
+		for (i=0; i < nattrs; i++)
+		{
+			Form_pg_attribute attr = RelationGetDescr(frel)->attrs[i];
+			AttrNumber	anum;
+
+			anum = get_attnum(RelationGetRelid(grel),
+							  NameStr(attr->attname));
+			if (anum <= InvalidAttrNumber)
+				elog(ERROR, "no \"%s\" attribute found on the gstore \"%s\"",
+					 NameStr(attr->attname),
+					 RelationGetRelationName(grel));
+
+			memcpy(tupdesc->attrs[i],
+				   RelationGetDescr(grel)->attrs[anum-1],
+				   ATTRIBUTE_FIXED_PART_SIZE);
+		}
+		gstore_oid = RelationGetRelid(grel);
+	}
+
+	if (grel)
+	{
+		if (pinning)
+			result = load_pinned_gstore_fdw(gcontext, grel, tupdesc);
+		else
+			result = load_normal_gstore_fdw(gcontext, grel, tupdesc);
+		heap_close(grel, NoLock);
+	}
+	else
+	{
+		if (pinning)
+			result = load_pinned_gstore_fdw(gcontext, frel, tupdesc);
+		else
+			result = load_normal_gstore_fdw(gcontext, frel, tupdesc);
+	}
+	heap_close(frel, NoLock);
+
+	return result;
+}
 
 /*
  * pgstrom_startup_gstore_fdw
