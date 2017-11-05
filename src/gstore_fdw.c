@@ -98,7 +98,7 @@ typedef struct
 
 /* ---- static functions ---- */
 static Oid	gstore_fdw_read_options(Oid table_oid,
-									char **p_synonym,
+									char **p_referenced,
 									bool *p_pinning);
 
 /* ---- static variables ---- */
@@ -284,15 +284,15 @@ gstoreGetForeignRelSize(PlannerInfo *root,
 	GpuStoreChunk  *gs_chunk;
 	size_t			nitems = 0;
 	size_t			length = 0;
-	char		   *synonym;
+	char		   *referenced;
 	Relation		frel = NULL;
 
-	gstore_fdw_read_options(ftable_oid, &synonym, NULL);
-	if (!synonym)
+	gstore_fdw_read_options(ftable_oid, &referenced, NULL);
+	if (!referenced)
 		frel = heap_open(ftable_oid, AccessShareLock);
 	else
 	{
-		List   *names = stringToQualifiedNameList(synonym);
+		List   *names = stringToQualifiedNameList(referenced);
 
 		frel = heap_openrv(makeRangeVarFromNameList(names),
 						   AccessShareLock);
@@ -420,7 +420,7 @@ gstoreBeginForeignScan(ForeignScanState *node, int eflags)
 	TupleDesc	tupdesc = RelationGetDescr(node->ss.ss_currentRelation);
 	Relation	gs_rel = NULL;
 	gstoreScanState *gss_state;
-	char	   *synonym;
+	char	   *referenced;
 	int			i, j;
 
 	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
@@ -430,10 +430,10 @@ gstoreBeginForeignScan(ForeignScanState *node, int eflags)
 		elog(ERROR, "cannot scan gstore_fdw table without MVCC snapshot");
 
 	gstore_fdw_read_options(RelationGetRelid(node->ss.ss_currentRelation),
-							&synonym, NULL);
-	if (synonym)
+							&referenced, NULL);
+	if (referenced)
 	{
-		List   *names = stringToQualifiedNameList(synonym);
+		List   *names = stringToQualifiedNameList(referenced);
 
 		gs_rel = heap_openrv(makeRangeVarFromNameList(names),
 							 AccessShareLock);
@@ -587,11 +587,11 @@ gstoreEndForeignScan(ForeignScanState *node)
 static int
 gstoreIsForeignRelUpdatable(Relation rel)
 {
-	char   *synonym;
+	char   *referenced;
 
-	gstore_fdw_read_options(RelationGetRelid(rel), &synonym, NULL);
-	/* 'synonym' table is not updatable */
-	if (synonym != NULL)
+	gstore_fdw_read_options(RelationGetRelid(rel), &referenced, NULL);
+	/* only primary gstore_fdw tables are updatable */
+	if (referenced)
 		return 0;
 
 	return (1 << CMD_INSERT) | (1 << CMD_DELETE);
@@ -1332,7 +1332,7 @@ gstoreSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
  * relation_is_gstore_fdw
  */
 static bool
-relation_is_gstore_fdw(Oid table_oid, bool allow_synonym)
+relation_is_gstore_fdw(Oid table_oid, bool allows_reference_gstore)
 {
 	HeapTuple	tup;
 	Oid			fserv_oid;
@@ -1340,7 +1340,7 @@ relation_is_gstore_fdw(Oid table_oid, bool allow_synonym)
 	Oid			handler_oid;
 	PGFunction	handler_fn;
 	Datum		datum;
-	char	   *synonym;
+	char	   *referenced;
 	char	   *prosrc;
 	char	   *probin;
 	bool		isnull;
@@ -1349,9 +1349,9 @@ relation_is_gstore_fdw(Oid table_oid, bool allow_synonym)
 		return false;
 	/* pull OID of foreign-server */
 	fserv_oid = gstore_fdw_read_options(table_oid,
-										&synonym,
+										&referenced,
 										NULL);
-	if (!allow_synonym && synonym != NULL)
+	if (!allows_reference_gstore && referenced)
 		return false;
 
 	/* pull OID of foreign-data-wrapper */
@@ -1397,14 +1397,14 @@ relation_is_gstore_fdw(Oid table_oid, bool allow_synonym)
  */
 static Oid
 gstore_fdw_read_options(Oid table_oid,
-						char **p_synonym,
+						char **p_referenced,
 						bool *p_pinning)
 {
 	HeapTuple	tup;
 	Datum		datum;
 	bool		isnull;
 	Oid			fserv_oid;
-	char	   *synonym = NULL;
+	char	   *referenced = NULL;
 	bool		pinning = false;
 
 	tup = SearchSysCache1(FOREIGNTABLEREL, ObjectIdGetDatum(table_oid));
@@ -1423,9 +1423,9 @@ gstore_fdw_read_options(Oid table_oid,
 		{
 			DefElem	   *defel = lfirst(lc);
 
-			if (strcmp(defel->defname, "synonym") == 0)
+			if (strcmp(defel->defname, "reference") == 0)
 			{
-				synonym = defGetString(defel);
+				referenced = defGetString(defel);
 			}
 			else if (strcmp(defel->defname, "pinning") == 0)
 			{
@@ -1437,8 +1437,8 @@ gstore_fdw_read_options(Oid table_oid,
 		}
 	}
 	ReleaseSysCache(tup);
-	if (p_synonym)
-		*p_synonym = synonym;
+	if (p_referenced)
+		*p_referenced = referenced;
 	if (p_pinning)
 		*p_pinning = pinning;
 	return fserv_oid;
@@ -1453,7 +1453,7 @@ pgstrom_gstore_fdw_validator(PG_FUNCTION_ARGS)
 	List	   *options = untransformRelOptions(PG_GETARG_DATUM(0));
 	Oid			catalog = PG_GETARG_OID(1);
 	ListCell   *lc;
-	bool		meet_synonym = false;
+	bool		meet_reference = false;
 	bool		meet_pinning = false;
 	bool		config_pinning = false;
 
@@ -1461,25 +1461,25 @@ pgstrom_gstore_fdw_validator(PG_FUNCTION_ARGS)
 	{
 		DefElem	   *defel = lfirst(lc);
 
-		if (strcmp(defel->defname, "synonym") == 0 &&
+		if (strcmp(defel->defname, "reference") == 0 &&
 			catalog == ForeignTableRelationId)
 		{
 			char   *relname = defGetString(defel);
 			List   *names;
 			Oid		reloid;
 
-			if (meet_synonym)
+			if (meet_reference)
 				ereport(ERROR,
 						(errcode(ERRCODE_SYNTAX_ERROR),
-                         errmsg("\"synonym\" option appears twice")));
+                         errmsg("\"reference\" option appears twice")));
 
 			names = stringToQualifiedNameList(relname);
 			reloid = RangeVarGetRelid(makeRangeVarFromNameList(names),
 									  NoLock, false);
 			if (!relation_is_gstore_fdw(reloid, false))
-				elog(ERROR, "%s: not a gstore_fdw foreign table, or synonym",
+				elog(ERROR, "%s: not a primary gstore_fdw foreign table",
 					 relname);
-			meet_synonym = true;
+			meet_reference = true;
 		}
 		else if (strcmp(defel->defname, "pinning") == 0 &&
 				 catalog == ForeignTableRelationId)
@@ -1504,10 +1504,10 @@ pgstrom_gstore_fdw_validator(PG_FUNCTION_ARGS)
 							defel->defname, defGetString(defel))));
 		}
 	}
-	if (config_pinning && meet_synonym)
+	if (config_pinning && meet_reference)
 		ereport(ERROR,
 				(errcode(ERRCODE_SYNTAX_ERROR),
-				 errmsg("cannot use 'synonym' and 'pinning' together")));
+				 errmsg("cannot use 'reference' and 'pinning' together")));
 	PG_RETURN_VOID();
 }
 PG_FUNCTION_INFO_V1(pgstrom_gstore_fdw_validator);
@@ -1796,7 +1796,7 @@ load_pinned_gstore_fdw(GpuContext *gcontext, Relation frel, TupleDesc tupdesc)
 CUdeviceptr
 pgstrom_load_gstore_fdw(GpuContext *gcontext, Oid gstore_oid)
 {
-	char	   *synonym;
+	char	   *referenced;
 	bool		pinning;
 	Relation	frel;
 	Relation	grel = NULL;
@@ -1808,8 +1808,8 @@ pgstrom_load_gstore_fdw(GpuContext *gcontext, Oid gstore_oid)
 			 get_rel_name(gstore_oid));
 
 	frel = heap_open(gstore_oid, AccessShareLock);
-	gstore_fdw_read_options(gstore_oid, &synonym, &pinning);
-	if (synonym)
+	gstore_fdw_read_options(gstore_oid, &referenced, &pinning);
+	if (referenced)
 	{
 		List	   *names;
 		int			i, nattrs;
@@ -1817,14 +1817,14 @@ pgstrom_load_gstore_fdw(GpuContext *gcontext, Oid gstore_oid)
 		if (pinning)
 			elog(ERROR, "not a consistent gstore_fdw foreign table options");
 
-		names = stringToQualifiedNameList(synonym);
+		names = stringToQualifiedNameList(referenced);
 		grel = heap_openrv(makeRangeVarFromNameList(names),
 						   AccessShareLock);
 		if (!relation_is_gstore_fdw(RelationGetRelid(frel), false))
-			elog(ERROR, "relation %s is not gstore_fdw foreign table, or not a suitable configuration",
+			elog(ERROR, "\"%s\" is not a primary gstore_fdw foreign table",
 				 RelationGetRelationName(frel));
-		gstore_fdw_read_options(gstore_oid, &synonym, &pinning);
-		Assert(!synonym);
+		gstore_fdw_read_options(gstore_oid, &referenced, &pinning);
+		Assert(!referenced);
 
 		/* construct a pseudo tupdesc */
 		nattrs = RelationGetNumberOfAttributes(frel);
