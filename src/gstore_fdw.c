@@ -66,6 +66,7 @@ struct GpuStoreChunk
 	bool		xmin_commited;
 	cl_uint		kds_nitems;			/* copy of kds->nitems */
 	cl_uint		kds_length;			/* copy of kds->length */
+	cl_int		cuda_dindex;		/* set by 'pinning' option */
 	CUipcMemHandle ipc_mhandle;
 	dsm_handle	dsm_handle;
 };
@@ -653,6 +654,7 @@ gstorePlanForeignModify(PlannerInfo *root,
  */
 typedef struct
 {
+	GpuContext *gcontext;	/* GpuContext, if pinned gstore */
 	size_t		length;		/* available size except for KDS header */
 	size_t		nrooms;		/* available max number of items */
 	size_t		nitems;		/* current number of items */
@@ -723,6 +725,7 @@ vl_dict_create(MemoryContext memcxt, size_t nrooms)
 static void
 gstore_fdw_writeout_chunk(Relation relation, gstoreLoadState *gs_lstate)
 {
+	GpuContext	   *gcontext = gs_lstate->gcontext;
 	Oid				table_oid = RelationGetRelid(relation);
 	TupleDesc		tupdesc = RelationGetDescr(relation);
 	MemoryContext	memcxt = gs_lstate->memcxt;
@@ -732,8 +735,10 @@ gstore_fdw_writeout_chunk(Relation relation, gstoreLoadState *gs_lstate)
 	size_t			offset;
 	pg_crc32		hash;
 	cl_int			i, j, unitsz;
+	cl_int			cuda_dindex = (gcontext ? gcontext->cuda_dindex : -1);
 	dsm_segment	   *dsm_seg;
 	kern_data_store *kds;
+	CUipcMemHandle	ipc_mhandle;
 	dlist_node	   *dnode;
 	GpuStoreChunk  *gs_chunk = NULL;
 	GpuStoreMap	   *gs_map = NULL;
@@ -759,8 +764,6 @@ gstore_fdw_writeout_chunk(Relation relation, gstoreLoadState *gs_lstate)
 	}
 
 	dsm_seg = dsm_create(length, 0);
-	dsm_pin_mapping(dsm_seg);
-	dsm_pin_segment(dsm_seg);
 	kds = dsm_segment_address(dsm_seg);
 
 	init_kernel_data_store(kds,
@@ -823,6 +826,54 @@ gstore_fdw_writeout_chunk(Relation relation, gstoreLoadState *gs_lstate)
 	}
 	kds->nitems = nitems;
 
+	/* allocation of device memory if 'pinning' mode */
+	if (gcontext)
+	{
+		CUdeviceptr	m_deviceptr;
+		CUresult	rc;
+
+		rc = gpuMemAllocPreserved(cuda_dindex,
+								  &ipc_mhandle,
+								  length);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on gpuMemAllocPreserved: %s", errorText(rc));
+		PG_TRY();
+		{
+			rc = gpuIpcOpenMemHandle(gcontext,
+									 &m_deviceptr,
+									 ipc_mhandle,
+									 CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS);
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on gpuIpcOpenMemHandle: %s",
+					 errorText(rc));
+
+			rc = cuCtxPushCurrent(gcontext->cuda_context);
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
+
+			rc = cuMemcpyHtoD(m_deviceptr, kds, length);
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on cuMemcpyHtoD: %s", errorText(rc));
+
+			rc = cuCtxPopCurrent(NULL);
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on cuCtxPopCurrent: %s", errorText(rc));
+		}
+		PG_CATCH();
+		{
+			gpuMemFreePreserved(cuda_dindex, ipc_mhandle);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+	}
+	else
+	{
+		memset(&ipc_mhandle, 0, sizeof(CUipcMemHandle));
+	}
+	/* pin the DSM segment to servive over the transaction */
+	dsm_pin_mapping(dsm_seg);
+	dsm_pin_segment(dsm_seg);
+
 	/* hash value */
 	INIT_LEGACY_CRC32(hash);
     COMP_LEGACY_CRC32(hash, &MyDatabaseId, sizeof(Oid));
@@ -833,6 +884,8 @@ gstore_fdw_writeout_chunk(Relation relation, gstoreLoadState *gs_lstate)
 	if (dlist_is_empty(&gstore_head->free_chunks))
 	{
 		SpinLockRelease(&gstore_head->lock);
+		if (gcontext)
+			gpuMemFreePreserved(cuda_dindex, ipc_mhandle);
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_RESOURCES),
 				 errmsg("too many gstore_fdw chunks required")));
@@ -851,6 +904,8 @@ gstore_fdw_writeout_chunk(Relation relation, gstoreLoadState *gs_lstate)
 	gs_chunk->xmin_commited = false;
 	gs_chunk->kds_length = kds->length;
 	gs_chunk->kds_nitems = kds->nitems;
+	memcpy(&gs_chunk->ipc_mhandle, &ipc_mhandle, sizeof(CUipcMemHandle));
+	gs_chunk->cuda_dindex = cuda_dindex;
 	gs_chunk->dsm_handle = dsm_segment_handle(dsm_seg);
 	gs_map->dsm_seg = dsm_seg;
 
@@ -883,6 +938,8 @@ gstore_fdw_release_chunk(GpuStoreChunk *gs_chunk)
 	GpuStoreMap    *gs_map = GPUSTOREMAP_FOR_CHUNK(gs_chunk);
 
 	dlist_delete(&gs_chunk->chain);
+	if (gs_chunk->cuda_dindex >= 0)
+		gpuMemFreePreserved(gs_chunk->cuda_dindex, gs_chunk->ipc_mhandle);
 	if (gs_map->dsm_seg)
 		dsm_detach(gs_map->dsm_seg);
 	gs_map->dsm_seg = NULL;
@@ -912,11 +969,27 @@ gstoreBeginForeignModify(ModifyTableState *mtstate,
 	EState		   *estate = mtstate->ps.state;
 	Relation		relation = rrinfo->ri_RelationDesc;
 	TupleDesc		tupdesc = RelationGetDescr(relation);
+	GpuContext	   *gcontext = NULL;
 	GpuStoreChunk  *gs_chunk;
 	gstoreLoadState *gs_lstate;
+	char		   *referenced;
+	int				pinning;
 	size_t			nrooms;
 	cl_int			i, unitsz;
 
+	gstore_fdw_read_options(RelationGetRelid(relation),
+							&referenced, &pinning);
+	if (referenced)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("\"%s\" is not a primary gstore_fdw foreign table",
+						RelationGetRelationName(relation))));
+	if (pinning >= 0)
+	{
+		gcontext = AllocGpuContext(pinning, false);
+		if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
+			ActivateGpuContext(gcontext);
+	}
 	LockRelationOid(RelationGetRelid(relation), ShareUpdateExclusiveLock);
 	SpinLockAcquire(&gstore_head->lock);
 	gs_chunk = gstore_fdw_first_chunk(relation, estate->es_snapshot);
@@ -930,6 +1003,7 @@ gstoreBeginForeignModify(ModifyTableState *mtstate,
 						RelationGetRelationName(relation))));
 	/* state object */
 	gs_lstate = palloc0(offsetof(gstoreLoadState, a[tupdesc->natts]));
+	gs_lstate->gcontext = gcontext;
 	gs_lstate->memcxt = AllocSetContextCreate(estate->es_query_cxt,
 											  "gstore_fdw temporary context",
 											  ALLOCSET_DEFAULT_SIZES);
@@ -1150,6 +1224,8 @@ gstoreEndForeignModify(EState *estate,
 
 	if (gs_lstate->nitems > 0)
 		gstore_fdw_writeout_chunk(rrinfo->ri_RelationDesc, gs_lstate);
+	if (gs_lstate->gcontext)
+		PutGpuContext(gs_lstate->gcontext);
 }
 
 /*
@@ -1429,7 +1505,7 @@ gstore_fdw_read_options(Oid table_oid,
 			}
 			else if (strcmp(defel->defname, "pinning") == 0)
 			{
-				pinning = defGetInt32(defel);
+				pinning = atoi(defGetString(defel));
 				if (pinning < 0 || pinning >= numDevAttrs)
 					elog(ERROR, "pinning on unknown GPU device: %d", pinning);
 			}
@@ -1493,7 +1569,7 @@ pgstrom_gstore_fdw_validator(PG_FUNCTION_ARGS)
 				ereport(ERROR,
 						(errcode(ERRCODE_SYNTAX_ERROR),
 						 errmsg("\"pinning\" option appears twice")));
-			pinning = defGetInt32(defel);
+			pinning = atoi(defGetString(defel));
 			if (pinning < 0 || pinning >= numDevAttrs)
 				ereport(ERROR,
 						(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),

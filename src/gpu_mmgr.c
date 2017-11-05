@@ -832,7 +832,7 @@ __gpuMemAllocHost(GpuContext *gcontext,
  * __gpuMemRequestPreserved
  */
 static CUresult
-__gpuMemPreservedRequest(GpuContext *gcontext,
+__gpuMemPreservedRequest(cl_int cuda_dindex,
 						 CUipcMemHandle *m_handle,
 						 size_t bytesize)
 {
@@ -862,7 +862,7 @@ __gpuMemPreservedRequest(GpuContext *gcontext,
 	gmemp_req->backend = MyLatch;
 	gmemp_req->result = (CUresult) UINT_MAX;
 	memcpy(&gmemp_req->m_handle, m_handle, sizeof(CUipcMemHandle));
-	gmemp_req->cuda_dindex = gcontext->cuda_dindex;
+	gmemp_req->cuda_dindex = cuda_dindex;
 	gmemp_req->bytesize = bytesize;
 
 	dlist_push_tail(&gmemp_head->gmemp_req_pending_list,
@@ -912,7 +912,7 @@ __gpuMemPreservedRequest(GpuContext *gcontext,
  * __gpuMemAllocPreserved
  */
 CUresult
-__gpuMemAllocPreserved(GpuContext *gcontext,
+__gpuMemAllocPreserved(cl_int cuda_dindex,
 					   CUipcMemHandle *m_handle,
 					   size_t bytesize,
 					   const char *filename, int lineno)
@@ -921,7 +921,7 @@ __gpuMemAllocPreserved(GpuContext *gcontext,
 	CUresult		rc;
 
 	memset(&temp, 0, sizeof(CUipcMemHandle));
-	rc = __gpuMemPreservedRequest(gcontext, &temp, bytesize);
+	rc = __gpuMemPreservedRequest(cuda_dindex, &temp, bytesize);
 	if (rc == CUDA_SUCCESS)
 		memcpy(m_handle, &temp, sizeof(CUipcMemHandle));
 	return rc;
@@ -931,13 +931,10 @@ __gpuMemAllocPreserved(GpuContext *gcontext,
  * gpuMemFreePreserved
  */
 CUresult
-gpuMemFreePreserved(GpuContext *gcontext,
-					CUipcMemHandle *m_handle)
+gpuMemFreePreserved(cl_int cuda_dindex,
+					CUipcMemHandle m_handle)
 {
-	CUipcMemHandle	temp;
-
-	memcpy(&temp, m_handle, sizeof(CUipcMemHandle));
-	return __gpuMemPreservedRequest(gcontext, &temp, 0);
+	return __gpuMemPreservedRequest(cuda_dindex, &m_handle, 0);
 }
 
 /*
@@ -1323,6 +1320,9 @@ gpummgrBgWorkerMain(Datum arg)
 				dlist_push_tail(&gmemp_head->gmemp_active_list[i],
 								&gmemp->chain);
 
+				elog(LOG, "alloc: preserved memory %zu bytes",
+					 gmemp_req->bytesize);
+
 				/* successfully done */
 				memcpy(&gmemp_req->m_handle, &m_handle,
 					   sizeof(CUipcMemHandle));
@@ -1367,6 +1367,9 @@ gpummgrBgWorkerMain(Datum arg)
 					elog(WARNING, "failed on cuMemFree: %s", errorText(rc));
 					goto skip;
 				}
+				elog(LOG, "free: preserved memory at %p",
+					 (void *)gmemp->m_devptr);
+
 				dlist_delete(&gmemp->chain);
 				memset(gmemp, 0, sizeof(GpuMemPreserved));
 				dlist_push_head(&gmemp_head->gmemp_free_list,

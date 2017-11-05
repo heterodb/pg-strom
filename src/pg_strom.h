@@ -447,7 +447,7 @@ extern CUresult __gpuMemAllocHost(GpuContext *gcontext,
 								  void **p_hostptr,
 								  size_t bytesize,
 								  const char *filename, int lineno);
-extern CUresult __gpuMemAllocPreserved(GpuContext *gcontext,
+extern CUresult __gpuMemAllocPreserved(cl_int cuda_dindex,
 									   CUipcMemHandle *m_handle,
 									   size_t bytesize,
 									   const char *filename, int lineno);
@@ -460,8 +460,8 @@ extern CUresult gpuMemFree(GpuContext *gcontext,
 						   CUdeviceptr devptr);
 extern CUresult gpuMemFreeHost(GpuContext *gcontext,
 							   void *hostptr);
-extern CUresult gpuMemFreePreserved(GpuContext *gcontext,
-									CUipcMemHandle *m_handle);
+extern CUresult gpuMemFreePreserved(cl_int cuda_dindex,
+									CUipcMemHandle m_handle);
 extern CUresult gpuIpcCloseMemHandle(GpuContext *gcontext,
 									 CUdeviceptr m_deviceptr);
 
