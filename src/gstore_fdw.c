@@ -67,7 +67,7 @@ struct GpuStoreChunk
 	cl_uint		kds_nitems;			/* copy of kds->nitems */
 	cl_uint		kds_length;			/* copy of kds->length */
 	CUipcMemHandle ipc_mhandle;
-	dsm_handle	handle;
+	dsm_handle	dsm_handle;
 };
 typedef struct GpuStoreChunk	GpuStoreChunk;
 
@@ -99,7 +99,7 @@ typedef struct
 /* ---- static functions ---- */
 static Oid	gstore_fdw_read_options(Oid table_oid,
 									char **p_referenced,
-									bool *p_pinning);
+									int *p_pinning);
 
 /* ---- static variables ---- */
 static int				gstore_max_nchunks;		/* GUC */
@@ -201,14 +201,14 @@ gstore_fdw_mapped_chunk(GpuStoreChunk *gs_chunk)
 
 	if (!gs_map->dsm_seg)
 	{
-		gs_map->dsm_seg = dsm_attach(gs_chunk->handle);
+		gs_map->dsm_seg = dsm_attach(gs_chunk->dsm_handle);
 		dsm_pin_mapping(gs_map->dsm_seg);
 	}
-	else if (dsm_segment_handle(gs_map->dsm_seg) != gs_chunk->handle)
+	else if (dsm_segment_handle(gs_map->dsm_seg) != gs_chunk->dsm_handle)
 	{
 		dsm_detach(gs_map->dsm_seg);
 
-		gs_map->dsm_seg = dsm_attach(gs_chunk->handle);
+		gs_map->dsm_seg = dsm_attach(gs_chunk->dsm_handle);
 		dsm_pin_mapping(gs_map->dsm_seg);
 	}
 	return (kern_data_store *)dsm_segment_address(gs_map->dsm_seg);
@@ -851,7 +851,7 @@ gstore_fdw_writeout_chunk(Relation relation, gstoreLoadState *gs_lstate)
 	gs_chunk->xmin_commited = false;
 	gs_chunk->kds_length = kds->length;
 	gs_chunk->kds_nitems = kds->nitems;
-	gs_chunk->handle = dsm_segment_handle(dsm_seg);
+	gs_chunk->dsm_handle = dsm_segment_handle(dsm_seg);
 	gs_map->dsm_seg = dsm_seg;
 
 	i = hash % GSTORE_CHUNK_HASH_NSLOTS;
@@ -894,7 +894,7 @@ gstore_fdw_release_chunk(GpuStoreChunk *gs_chunk)
 	dsm_unpin_segment(gs_chunk->handle);
 #endif
 	memset(gs_chunk, 0, sizeof(GpuStoreMap));
-	gs_chunk->handle = UINT_MAX;
+	gs_chunk->dsm_handle = UINT_MAX;
 	dlist_push_head(&gstore_head->free_chunks,
 					&gs_chunk->chain);
 }
@@ -1398,14 +1398,14 @@ relation_is_gstore_fdw(Oid table_oid, bool allows_reference_gstore)
 static Oid
 gstore_fdw_read_options(Oid table_oid,
 						char **p_referenced,
-						bool *p_pinning)
+						int *p_pinning)
 {
 	HeapTuple	tup;
 	Datum		datum;
 	bool		isnull;
 	Oid			fserv_oid;
 	char	   *referenced = NULL;
-	bool		pinning = false;
+	int			pinning = -1;
 
 	tup = SearchSysCache1(FOREIGNTABLEREL, ObjectIdGetDatum(table_oid));
 	if (!HeapTupleIsValid(tup))
@@ -1429,7 +1429,9 @@ gstore_fdw_read_options(Oid table_oid,
 			}
 			else if (strcmp(defel->defname, "pinning") == 0)
 			{
-				pinning = defGetBoolean(defel);
+				pinning = defGetInt32(defel);
+				if (pinning < 0 || pinning >= numDevAttrs)
+					elog(ERROR, "pinning on unknown GPU device: %d", pinning);
 			}
 			else
 				elog(ERROR, "Unknown FDW option: '%s'='%s'",
@@ -1437,6 +1439,10 @@ gstore_fdw_read_options(Oid table_oid,
 		}
 	}
 	ReleaseSysCache(tup);
+	if (pinning >= 0 && referenced)
+		elog(ERROR, "cannot use 'reference' and 'pinning' option together");
+
+
 	if (p_referenced)
 		*p_referenced = referenced;
 	if (p_pinning)
@@ -1453,9 +1459,8 @@ pgstrom_gstore_fdw_validator(PG_FUNCTION_ARGS)
 	List	   *options = untransformRelOptions(PG_GETARG_DATUM(0));
 	Oid			catalog = PG_GETARG_OID(1);
 	ListCell   *lc;
-	bool		meet_reference = false;
-	bool		meet_pinning = false;
-	bool		config_pinning = false;
+	char	   *referenced = NULL;
+	int			pinning = -1;
 
 	foreach(lc, options)
 	{
@@ -1468,7 +1473,7 @@ pgstrom_gstore_fdw_validator(PG_FUNCTION_ARGS)
 			List   *names;
 			Oid		reloid;
 
-			if (meet_reference)
+			if (referenced)
 				ereport(ERROR,
 						(errcode(ERRCODE_SYNTAX_ERROR),
                          errmsg("\"reference\" option appears twice")));
@@ -1479,22 +1484,20 @@ pgstrom_gstore_fdw_validator(PG_FUNCTION_ARGS)
 			if (!relation_is_gstore_fdw(reloid, false))
 				elog(ERROR, "%s: not a primary gstore_fdw foreign table",
 					 relname);
-			meet_reference = true;
+			referenced = relname;
 		}
 		else if (strcmp(defel->defname, "pinning") == 0 &&
 				 catalog == ForeignTableRelationId)
 		{
-			if (meet_pinning)
+			if (pinning >= 0)
 				ereport(ERROR,
 						(errcode(ERRCODE_SYNTAX_ERROR),
 						 errmsg("\"pinning\" option appears twice")));
-
-			/* Don't care what the value is, as long as it's a legal boolean */
-			config_pinning = defGetBoolean(defel);
-
-			elog(ERROR, "Not supported yet");			
-
-			meet_pinning = true;
+			pinning = defGetInt32(defel);
+			if (pinning < 0 || pinning >= numDevAttrs)
+				ereport(ERROR,
+						(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+						 errmsg("\"pinning\" on unavailable GPU device")));
 		}
 		else
 		{
@@ -1504,7 +1507,7 @@ pgstrom_gstore_fdw_validator(PG_FUNCTION_ARGS)
 							defel->defname, defGetString(defel))));
 		}
 	}
-	if (config_pinning && meet_reference)
+	if (pinning >= 0 && referenced)
 		ereport(ERROR,
 				(errcode(ERRCODE_SYNTAX_ERROR),
 				 errmsg("cannot use 'reference' and 'pinning' together")));
@@ -1797,7 +1800,7 @@ CUdeviceptr
 pgstrom_load_gstore_fdw(GpuContext *gcontext, Oid gstore_oid)
 {
 	char	   *referenced;
-	bool		pinning;
+	int			pinning;
 	Relation	frel;
 	Relation	grel = NULL;
 	TupleDesc	tupdesc = NULL;
@@ -1809,12 +1812,16 @@ pgstrom_load_gstore_fdw(GpuContext *gcontext, Oid gstore_oid)
 
 	frel = heap_open(gstore_oid, AccessShareLock);
 	gstore_fdw_read_options(gstore_oid, &referenced, &pinning);
-	if (referenced)
+	if (!referenced)
+	{
+		tupdesc = RelationGetDescr(frel);
+	}
+	else
 	{
 		List	   *names;
 		int			i, nattrs;
 
-		if (pinning)
+		if (pinning >= 0)
 			elog(ERROR, "not a consistent gstore_fdw foreign table options");
 
 		names = stringToQualifiedNameList(referenced);
@@ -1898,7 +1905,7 @@ pgstrom_startup_gstore_fdw(void)
 		GpuStoreChunk  *gs_chunk = &gstore_head->gs_chunks[i];
 
 		memset(gs_chunk, 0, sizeof(GpuStoreChunk));
-		gs_chunk->handle = UINT_MAX;
+		gs_chunk->dsm_handle = UINT_MAX;
 
 		dlist_push_tail(&gstore_head->free_chunks, &gs_chunk->chain);
 	}
