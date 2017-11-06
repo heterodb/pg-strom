@@ -19,6 +19,7 @@
 #include "access/reloptions.h"
 #include "access/xact.h"
 #include "catalog/namespace.h"
+#include "catalog/objectaccess.h"
 #include "catalog/pg_attribute.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_foreign_data_wrapper.h"
@@ -103,6 +104,7 @@ static Oid	gstore_fdw_read_options(Oid table_oid, int *p_pinning);
 /* ---- static variables ---- */
 static int				gstore_max_nchunks;		/* GUC */
 static shmem_startup_hook_type shmem_startup_next;
+static object_access_hook_type object_access_next;
 static GpuStoreHead	   *gstore_head = NULL;
 static GpuStoreMap	   *gstore_maps = NULL;
 
@@ -1449,6 +1451,55 @@ gstore_fdw_read_options(Oid table_oid, int *p_pinning)
 }
 
 /*
+ * gstore_fdw_object_access - post DROP cleanups
+ */
+static void
+gstore_fdw_object_access(ObjectAccessType access,
+						 Oid classId,
+						 Oid objectId,
+						 int subId,
+						 void *arg)
+{
+	if (object_access_next)
+		(*object_access_next)(access, classId, objectId, subId, arg);
+
+	/*
+	 * Cleanup GpuStoreChunk on DROP FOREIGN TABLE
+	 */
+	if (access == OAT_DROP &&
+		classId == RelationRelationId &&
+		relation_is_gstore_fdw(objectId))
+	{
+		GpuStoreChunk *gs_chunk;
+		pg_crc32	hash;
+		int			index;
+		dlist_iter	iter;
+
+		INIT_LEGACY_CRC32(hash);
+		COMP_LEGACY_CRC32(hash, &MyDatabaseId, sizeof(Oid));
+		COMP_LEGACY_CRC32(hash, &objectId, sizeof(Oid));
+		FIN_LEGACY_CRC32(hash);
+		index = hash % GSTORE_CHUNK_HASH_NSLOTS;
+
+		SpinLockAcquire(&gstore_head->lock);
+		dlist_foreach(iter, &gstore_head->active_chunks[index])
+		{
+			gs_chunk = dlist_container(GpuStoreChunk, chain, iter.cur);
+
+			if (gs_chunk->hash == hash &&
+				gs_chunk->database_oid == MyDatabaseId &&
+				gs_chunk->table_oid == objectId &&
+				gs_chunk->xmax == InvalidTransactionId)
+			{
+				gs_chunk->xmax = GetCurrentTransactionId();
+			}
+		}
+		pg_atomic_add_fetch_u32(&gstore_head->has_warm_chunks, 1);
+		SpinLockRelease(&gstore_head->lock);
+	}
+}
+
+/*
  * pgstrom_gstore_fdw_validator
  */
 Datum
@@ -1912,6 +1963,9 @@ pgstrom_init_gstore_fdw(void)
 											 gs_chunks[gstore_max_nchunks])));
 	shmem_startup_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_gstore_fdw;
+
+	object_access_next = object_access_hook;
+	object_access_hook = gstore_fdw_object_access;
 
 	RegisterXactCallback(gstoreXactCallback, NULL);
 	//RegisterSubXactCallback(gstoreSubXactCallback, NULL);
