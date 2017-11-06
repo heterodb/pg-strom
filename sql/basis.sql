@@ -165,6 +165,11 @@ CREATE CAST (smallint AS reggstore)
 CREATE CAST (bigint AS reggstore)
   WITH FUNCTION oid(bigint) AS IMPLICIT;
 
+CREATE FUNCTION gstore_export_ipchandle(reggstore)
+  RETURNS bytea[]
+  AS 'MODULE_PATHNAME','pgstrom_gstore_export_ipchandle'
+  LANGUAGE C STRICT;
+
 --
 -- Type re-interpretation routines
 --

@@ -287,7 +287,7 @@ gstoreGetForeignRelSize(PlannerInfo *root,
 	size_t			nitems = 0;
 	size_t			length = 0;
 
-	frel = heap_open(ftable_oid, AccessShareLock);;
+	frel = heap_open(ftable_oid, AccessShareLock);
 	SpinLockAcquire(&gstore_head->lock);
 	PG_TRY();
 	{
@@ -1643,6 +1643,105 @@ pgstrom_reggstore_send(PG_FUNCTION_ARGS)
 	return oidsend(fcinfo);
 }
 PG_FUNCTION_INFO_V1(pgstrom_reggstore_send);
+
+/*
+ * pgstrom_gstore_export_ipchandle
+ */
+Datum
+pgstrom_gstore_export_ipchandle(PG_FUNCTION_ARGS)
+{
+	Oid			gstore_oid = PG_GETARG_OID(0);
+	Relation	frel;
+	cl_int		pinning;
+	cl_int		nchunks = 0;
+	StringInfoData buf;
+
+	if (!relation_is_gstore_fdw(gstore_oid))
+		elog(ERROR, "relation %u is not gstore_fdw foreign table",
+			 gstore_oid);
+
+	frel = heap_open(gstore_oid, AccessShareLock);
+	gstore_fdw_read_options(gstore_oid, &pinning);
+	if (pinning < 0)
+		elog(ERROR, "gstore_fdw: foreign table \"%s\" is not pinned on a particular GPU devices",
+			 RelationGetRelationName(frel));
+	if (pinning >= numDevAttrs)
+		elog(ERROR, "gstore_fdw: foreign table \"%s\" is not pinned on a valid GPU device",
+			 RelationGetRelationName(frel));
+
+	initStringInfo(&buf);
+	SpinLockAcquire(&gstore_head->lock);
+    PG_TRY();
+    {
+		Snapshot		snapshot = GetActiveSnapshot();
+		GpuStoreChunk  *gs_chunk;
+		ArrayType		array;
+		int				dims = 0;
+		int				lbound = 1;
+
+		/* ArrayType (incl. varlena header) */
+		memset(&array, 0, sizeof(ArrayType));
+		array.ndim = 1;
+		array.dataoffset = 0;
+		array.elemtype = BYTEAOID;
+		appendBinaryStringInfo(&buf, (char *)&array, sizeof(ArrayType));
+		/* array dims and lbounds */
+		appendBinaryStringInfo(&buf, (char *)&dims, sizeof(int));
+		appendBinaryStringInfo(&buf, (char *)&lbound, sizeof(int));
+
+		for (gs_chunk = gstore_fdw_first_chunk(frel, snapshot);
+             gs_chunk != NULL;
+             gs_chunk = gstore_fdw_next_chunk(gs_chunk, snapshot))
+		{
+			int32		vl_head;
+
+			SET_VARSIZE(&vl_head, VARHDRSZ + sizeof(CUipcMemHandle));
+			appendBinaryStringInfo(&buf, (char *)&vl_head, sizeof(int32));
+			appendBinaryStringInfo(&buf, (char *)&gs_chunk->ipc_mhandle,
+								   sizeof(CUipcMemHandle));
+			nchunks++;
+		}
+		SpinLockRelease(&gstore_head->lock);
+
+		ARR_DIMS((ArrayType *)buf.data)[0] = nchunks;
+		SET_VARSIZE(buf.data, buf.len);
+	}
+	PG_CATCH();
+	{
+		SpinLockRelease(&gstore_head->lock);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	SpinLockRelease(&gstore_head->lock);
+	heap_close(frel, NoLock);
+
+	if (nchunks == 0)
+		PG_RETURN_NULL();
+	PG_RETURN_ARRAYTYPE_P(buf.data);
+}
+PG_FUNCTION_INFO_V1(pgstrom_gstore_export_ipchandle);
+
+/*
+ * pgstrom_lo_export_ipchandle
+ */
+Datum
+pgstrom_lo_export_ipchandle(PG_FUNCTION_ARGS)
+{
+	elog(ERROR, "not implemented yet");
+	PG_RETURN_NULL();
+}
+PG_FUNCTION_INFO_V1(pgstrom_lo_export_ipchandle);
+
+/*
+ * pgstrom_lo_import_ipchandle
+ */
+Datum
+pgstrom_lo_import_ipchandle(PG_FUNCTION_ARGS)
+{
+	elog(ERROR, "not implemented yet");
+	PG_RETURN_NULL();
+}
+PG_FUNCTION_INFO_V1(pgstrom_lo_import_ipchandle);
 
 /*
  * type_is_reggstore

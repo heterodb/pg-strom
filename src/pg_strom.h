@@ -950,6 +950,9 @@ extern Datum pgstrom_reggstore_in(PG_FUNCTION_ARGS);
 extern Datum pgstrom_reggstore_out(PG_FUNCTION_ARGS);
 extern Datum pgstrom_reggstore_recv(PG_FUNCTION_ARGS);
 extern Datum pgstrom_reggstore_send(PG_FUNCTION_ARGS);
+extern Datum pgstrom_gstore_export_ipchandle(PG_FUNCTION_ARGS);
+extern Datum pgstrom_lo_export_ipchandle(PG_FUNCTION_ARGS);
+extern Datum pgstrom_lo_import_ipchandle(PG_FUNCTION_ARGS);
 extern bool type_is_reggstore(Oid type_oid);
 extern CUdeviceptr pgstrom_load_gstore_fdw(GpuContext *gcontext,
 										   Oid ftable_oid);
