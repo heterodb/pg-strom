@@ -112,6 +112,7 @@ typedef struct
 typedef struct
 {
 	cl_ulong	total_nitems;
+	cl_int		cuda_dindex;
 	cl_int		nchunks;
 	kern_data_store *kds[FLEXIBLE_ARRAY_MEMBER];
 } kern_reggstore;

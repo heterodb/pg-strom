@@ -953,6 +953,8 @@ extern Datum pgstrom_reggstore_send(PG_FUNCTION_ARGS);
 extern bool type_is_reggstore(Oid type_oid);
 extern CUdeviceptr pgstrom_load_gstore_fdw(GpuContext *gcontext,
 										   Oid ftable_oid);
+extern void pgstrom_unload_gstore_fdw(GpuContext *gcontext,
+									  CUdeviceptr m_gstore);
 extern void pgstrom_init_gstore_fdw(void);
 
 /*

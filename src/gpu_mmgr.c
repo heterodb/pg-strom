@@ -950,6 +950,13 @@ __gpuIpcOpenMemHandle(GpuContext *gcontext,
 	CUdeviceptr	m_deviceptr;
 	CUresult	rc;
 
+	//lookup restracker
+	//if any, inc refcount,
+
+	//elsewhere, map 
+
+
+
 	rc = cuCtxPushCurrent(gcontext->cuda_context);
 	if (rc != CUDA_SUCCESS)
 	{
