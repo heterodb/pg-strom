@@ -492,7 +492,7 @@ next:
 			/* varlena field */
 			Assert(kcmeta->attlen == -1);
 
-			offset = ((cl_uint *)att_values)[i];
+			offset = ALIGNOF_INT * ((cl_uint *)att_values)[i];
 			/* null-check */
 			if (offset == 0)
 				continue;
@@ -656,21 +656,73 @@ vl_dict_create(MemoryContext memcxt, size_t nrooms)
 }
 
 /*
- * gstore_fdw_writeout_chunk
+ * gstore_fdw_load_gpu_preserved
  */
 static void
-gstore_fdw_writeout_chunk(Relation relation, gstoreLoadState *gs_lstate)
+gstore_fdw_load_gpu_preserved(GpuContext *gcontext,
+							  CUipcMemHandle *ptr_mhandle,
+							  dsm_segment *dsm_seg)
+{
+	CUipcMemHandle ipc_mhandle;
+	CUdeviceptr	m_deviceptr;
+	CUresult	rc;
+	size_t		length = dsm_segment_map_length(dsm_seg);
+
+	rc = gpuMemAllocPreserved(gcontext->cuda_dindex,
+							  &ipc_mhandle,
+							  length);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on gpuMemAllocPreserved: %s", errorText(rc));
+	PG_TRY();
+	{
+		rc = gpuIpcOpenMemHandle(gcontext,
+								 &m_deviceptr,
+								 ipc_mhandle,
+								 CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on gpuIpcOpenMemHandle: %s", errorText(rc));
+
+		rc = cuCtxPushCurrent(gcontext->cuda_context);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
+
+		rc = cuMemcpyHtoD(m_deviceptr,
+						  dsm_segment_address(dsm_seg),
+						  length);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuMemcpyHtoD: %s", errorText(rc));
+
+		rc = gpuIpcCloseMemHandle(gcontext, m_deviceptr);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on gpuIpcCloseMemHandle: %s", errorText(rc));
+
+		rc = cuCtxPopCurrent(NULL);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuCtxPopCurrent: %s", errorText(rc));
+	}
+	PG_CATCH();
+	{
+		gpuMemFreePreserved(gcontext->cuda_dindex, ipc_mhandle);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	memcpy(ptr_mhandle, &ipc_mhandle, sizeof(CUipcMemHandle));
+}
+
+/*
+ * gstore_fdw_writeout_default
+ */
+static void
+gstore_fdw_writeout_default(Relation relation, gstoreLoadState *gs_lstate)
 {
 	GpuContext	   *gcontext = gs_lstate->gcontext;
 	Oid				table_oid = RelationGetRelid(relation);
 	TupleDesc		tupdesc = RelationGetDescr(relation);
-	MemoryContext	memcxt = gs_lstate->memcxt;
-	size_t			nrooms = gs_lstate->nrooms;
 	size_t			nitems = gs_lstate->nitems;
 	size_t			length;
 	size_t			offset;
+	size_t			i, j, unitsz;
 	pg_crc32		hash;
-	cl_int			i, j, unitsz;
 	cl_int			cuda_dindex = (gcontext ? gcontext->cuda_dindex : -1);
 	dsm_segment	   *dsm_seg;
 	kern_data_store *kds;
@@ -681,35 +733,34 @@ gstore_fdw_writeout_chunk(Relation relation, gstoreLoadState *gs_lstate)
 
 	length = offset = MAXALIGN(offsetof(kern_data_store,
 										colmeta[tupdesc->natts]));
-	for (i=0; i < tupdesc->natts; i++)
+	for (j=0; j < tupdesc->natts; j++)
 	{
-		Form_pg_attribute	attr = tupdesc->attrs[i];
+		Form_pg_attribute	attr = tupdesc->attrs[j];
 
 		if (attr->attlen < 0)
 		{
 			length += (MAXALIGN(sizeof(cl_uint) * nitems) +
-					   gs_lstate->a[i].extra_sz);
+					   MAXALIGN(gs_lstate->a[j].extra_sz));
 		}
 		else
 		{
-			if (gs_lstate->a[i].nullmap)
-				length += MAXALIGN(BITMAPLEN(nitems));
-			length += MAXALIGN(TYPEALIGN(gs_lstate->a[i].align,
+			length += MAXALIGN(TYPEALIGN(gs_lstate->a[j].align,
 										 attr->attlen) * nitems);
+			if (gs_lstate->a[j].nullmap)
+				length += MAXALIGN(BITMAPLEN(nitems));
 		}
 	}
 
 	dsm_seg = dsm_create(length, 0);
 	kds = dsm_segment_address(dsm_seg);
-
 	init_kernel_data_store(kds,
 						   tupdesc,
 						   length,
 						   KDS_FORMAT_COLUMN,
 						   nitems);
-	for (i=0; i < tupdesc->natts; i++)
+	for (j=0; j < tupdesc->natts; j++)
 	{
-		kern_colmeta   *cmeta = &kds->colmeta[i];
+		kern_colmeta   *cmeta = &kds->colmeta[j];
 
 		cmeta->values_offset = offset;
 		if (cmeta->attlen < 0)
@@ -723,34 +774,38 @@ gstore_fdw_writeout_chunk(Relation relation, gstoreLoadState *gs_lstate)
 			/* put varlena datum on the extra area */
 			base = (cl_uint *)((char *)kds + offset);
 			extra = (char *)base + MAXALIGN(sizeof(cl_uint) * nitems);
-			hash_seq_init(&hseq, gs_lstate->a[i].vl_dict);
+			hash_seq_init(&hseq, gs_lstate->a[j].vl_dict);
 			while ((entry = hash_seq_search(&hseq)) != NULL)
 			{
-				entry->offset = extra - (char *)base;
+				size_t		shift = (size_t)(extra - (char *)base);
+
+				Assert((shift & (ALIGNOF_INT - 1)) == 0);
+				entry->offset = shift / ALIGNOF_INT;
 				unitsz = VARSIZE_ANY(entry->vl_datum);
 				memcpy(extra, entry->vl_datum, unitsz);
-				cmeta->extra_sz += MAXALIGN(unitsz);
-				extra += MAXALIGN(unitsz);
+				cmeta->extra_sz += INTALIGN(unitsz);
+				extra += INTALIGN(unitsz);
 			}
 			hash_seq_term(&hseq);
 
 			/* put offset of varlena datum */
-			entries_array = (vl_dict_key **)gs_lstate->a[i].values;
-			for (j=0; j < nitems; j++)
+			entries_array = (vl_dict_key **)gs_lstate->a[j].values;
+			for (i=0; i < nitems; i++)
 			{
-				entry = entries_array[j];
-				base[j] = (!entry ? 0 : entry->offset);
+				entry = entries_array[i];
+				base[i] = (!entry ? 0 : entry->offset);
 			}
 		}
 		else
 		{
-			unitsz = TYPEALIGN(gs_lstate->a[i].align, cmeta->attlen);
+			int		unitsz = TYPEALIGN(cmeta->attalign, cmeta->attlen);
 
 			memcpy((char *)kds + offset,
-				   gs_lstate->a[i].values,
+				   gs_lstate->a[j].values,
 				   unitsz * nitems);
-			offset += MAXALIGN(unitsz * nitems);
-			if (gs_lstate->a[i].nullmap)
+			offset += unitsz * nitems;
+
+			if (gs_lstate->a[j].nullmap)
 			{
 				memcpy((char *)kds + offset,
 					   gs_lstate->a[i].nullmap,
@@ -764,53 +819,10 @@ gstore_fdw_writeout_chunk(Relation relation, gstoreLoadState *gs_lstate)
 
 	/* allocation of device memory if 'pinning' mode */
 	if (gcontext)
-	{
-		CUdeviceptr	m_deviceptr;
-		CUresult	rc;
-
-		rc = gpuMemAllocPreserved(cuda_dindex,
-								  &ipc_mhandle,
-								  length);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on gpuMemAllocPreserved: %s", errorText(rc));
-		PG_TRY();
-		{
-			rc = gpuIpcOpenMemHandle(gcontext,
-									 &m_deviceptr,
-									 ipc_mhandle,
-									 CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS);
-			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on gpuIpcOpenMemHandle: %s",
-					 errorText(rc));
-
-			rc = cuCtxPushCurrent(gcontext->cuda_context);
-			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
-
-			rc = cuMemcpyHtoD(m_deviceptr, kds, length);
-			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on cuMemcpyHtoD: %s", errorText(rc));
-
-			rc = gpuIpcCloseMemHandle(gcontext, m_deviceptr);
-			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on gpuIpcCloseMemHandle: %s",
-					 errorText(rc));
-
-			rc = cuCtxPopCurrent(NULL);
-			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on cuCtxPopCurrent: %s", errorText(rc));
-		}
-		PG_CATCH();
-		{
-			gpuMemFreePreserved(cuda_dindex, ipc_mhandle);
-			PG_RE_THROW();
-		}
-		PG_END_TRY();
-	}
+		gstore_fdw_load_gpu_preserved(gcontext, &ipc_mhandle, dsm_seg);
 	else
-	{
 		memset(&ipc_mhandle, 0, sizeof(CUipcMemHandle));
-	}
+
 	/* pin the DSM segment to servive over the transaction */
 	dsm_pin_mapping(dsm_seg);
 	dsm_pin_segment(dsm_seg);
@@ -854,20 +866,6 @@ gstore_fdw_writeout_chunk(Relation relation, gstoreLoadState *gs_lstate)
 	dlist_push_tail(&gstore_head->active_chunks[i], &gs_chunk->chain);
 	pg_atomic_add_fetch_u32(&gstore_head->has_warm_chunks, 1);
 	SpinLockRelease(&gstore_head->lock);
-
-	/* reset temporary buffer */
-	MemoryContextReset(memcxt);
-	for (i=0; i < tupdesc->natts; i++)
-	{
-		if (gs_lstate->a[i].vl_dict)
-			gs_lstate->a[i].vl_dict = vl_dict_create(memcxt, nrooms);
-		if (gs_lstate->a[i].nullmap)
-		{
-			pfree(gs_lstate->a[i].nullmap);
-			gs_lstate->a[i].nullmap = NULL;
-		}
-	}
-	gs_lstate->nitems = 0;
 }
 
 /*
@@ -913,8 +911,8 @@ gstoreBeginForeignModify(ModifyTableState *mtstate,
 	GpuContext	   *gcontext = NULL;
 	GpuStoreChunk  *gs_chunk;
 	gstoreLoadState *gs_lstate;
+	MemoryContext	oldcxt;
 	int				pinning;
-	size_t			nrooms;
 	cl_int			i, unitsz;
 
 	gstore_fdw_read_options(RelationGetRelid(relation), &pinning);
@@ -929,7 +927,6 @@ gstoreBeginForeignModify(ModifyTableState *mtstate,
 	gs_chunk = gstore_fdw_first_chunk(relation, estate->es_snapshot);
 	SpinLockRelease(&gstore_head->lock);
 
-	//XXX - xact hook may be able to merge smaller chunks
 	if (gs_chunk)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -941,59 +938,38 @@ gstoreBeginForeignModify(ModifyTableState *mtstate,
 	gs_lstate->memcxt = AllocSetContextCreate(estate->es_query_cxt,
 											  "gstore_fdw temporary context",
 											  ALLOCSET_DEFAULT_SIZES);
-	gs_lstate->length = GPUSTORE_CHUNK_SIZE -
-		offsetof(kern_data_store, colmeta[tupdesc->natts]);
+	gs_lstate->nrooms = 10000;	/* tentative */
 
-	/*
-	 * calculation of the maximum possible nrooms, in case when all the
-	 * column has no NULLs (thus no null bitmap), and extra_sz by varlena
-	 * values are ignored.
-	 */
-	unitsz = 0;
+	oldcxt = MemoryContextSwitchTo(gs_lstate->memcxt);
 	for (i=0; i < tupdesc->natts; i++)
 	{
 		Form_pg_attribute attr = tupdesc->attrs[i];
-		int		align;
 
 		if (attr->attlen < 0)
-			unitsz += sizeof(cl_uint);	/* varlena offset */
+		{
+			gs_lstate->a[i].align = sizeof(cl_uint);
+			gs_lstate->a[i].vl_dict = vl_dict_create(gs_lstate->memcxt,
+													 gs_lstate->nrooms);
+			gs_lstate->a[i].values = palloc(sizeof(vl_dict_key *) *
+											gs_lstate->nrooms);
+		}
 		else
 		{
 			if (attr->attalign == 'c')
-				align = sizeof(cl_char);
-			else if (attr->attalign == 's')
-				align = sizeof(cl_short);
-			else if (attr->attalign == 'i')
-				align = sizeof(cl_int);
-			else if (attr->attalign == 'd')
-				align = sizeof(cl_long);
-			else
+                gs_lstate->a[i].align = sizeof(cl_char);
+            else if (attr->attalign == 's')
+                gs_lstate->a[i].align = sizeof(cl_short);
+            else if (attr->attalign == 'i')
+                gs_lstate->a[i].align = sizeof(cl_int);
+            else if (attr->attalign == 'd')
+                gs_lstate->a[i].align = sizeof(cl_long);
+            else
 				elog(ERROR, "Bug? unexpected alignment: %c", attr->attalign);
-			unitsz += TYPEALIGN(align, attr->attlen);
-			gs_lstate->a[i].align = align;
+			unitsz = TYPEALIGN(gs_lstate->a[i].align, attr->attlen);
+			gs_lstate->a[i].values = palloc(unitsz * gs_lstate->nrooms);
 		}
 	}
-	nrooms = (gs_lstate->length -	/* consider the margin for alignment */
-			  MAXIMUM_ALIGNOF * tupdesc->natts) / unitsz;
-	gs_lstate->nrooms = nrooms;
-	gs_lstate->nitems = 0;
-
-	for (i=0; i < tupdesc->natts; i++)
-	{
-		Form_pg_attribute attr = tupdesc->attrs[i];
-
-		if (attr->attlen < 0)
-		{
-			MemoryContext	memcxt = gs_lstate->memcxt;
-			gs_lstate->a[i].vl_dict = vl_dict_create(memcxt, nrooms);
-			gs_lstate->a[i].values = palloc(sizeof(void *) * nrooms);
-		}
-		else
-		{
-			gs_lstate->a[i].values = palloc(TYPEALIGN(gs_lstate->a[i].align,
-													  attr->attlen) * nrooms);
-		}
-	}
+	MemoryContextSwitchTo(oldcxt);
 	rrinfo->ri_FdwState = gs_lstate;
 }
 
@@ -1008,57 +984,57 @@ gstoreExecForeignInsert(EState *estate,
 {
 	TupleDesc	tupdesc = slot->tts_tupleDescriptor;
 	gstoreLoadState *gs_lstate = rrinfo->ri_FdwState;
-	size_t		nrooms = gs_lstate->nrooms;
-	size_t		nitems = gs_lstate->nitems;
-	size_t		usage = 0;
-	size_t		index;
-	cl_int		i;
+	size_t		i, j;
 
 	slot_getallattrs(slot);
-
 	/*
-	 * calculation of extra consumption by this new line
+	 * expand local buffer on demand
 	 */
-	for (i=0; i < tupdesc->natts; i++)
+	if (gs_lstate->nitems == gs_lstate->nrooms)
 	{
-		Form_pg_attribute	attr = tupdesc->attrs[i];
+		MemoryContext	oldcxt = MemoryContextSwitchTo(gs_lstate->memcxt);
 
-		if (attr->attlen < 0)
+		gs_lstate->nrooms *= 2;
+		for (j=0; j < tupdesc->natts; j++)
 		{
-			if (!slot->tts_isnull[i])
+			Form_pg_attribute attr = tupdesc->attrs[j];
+
+			if (attr->attlen < 0)
 			{
-				vl_dict_key	key;
-
-				key.offset = 0;
-				key.vl_datum = (struct varlena *)slot->tts_values[i];
-
-				if (!hash_search(gs_lstate->a[i].vl_dict,
-								 &key, HASH_FIND, NULL))
-					usage += MAXALIGN(VARSIZE_ANY(key.vl_datum));
+				Assert(!gs_lstate->a[j].nullmap);
+				gs_lstate->a[j].values
+					= repalloc(gs_lstate->a[j].values,
+							   sizeof(vl_dict_key *) * gs_lstate->nrooms);
 			}
-			usage += sizeof(cl_uint);
+			else
+			{
+				int		unitsz = TYPEALIGN(gs_lstate->a[j].align,
+										   attr->attlen);
+				gs_lstate->a[j].values
+					= repalloc(gs_lstate->a[j].values,
+							   unitsz * gs_lstate->nrooms);
+				if (gs_lstate->a[j].nullmap)
+				{
+					gs_lstate->a[j].nullmap
+						= repalloc(gs_lstate->a[j].nullmap,
+								   BITMAPLEN(gs_lstate->nrooms));
+				}
+			}
 		}
-		else
-		{
-			if (gs_lstate->a[i].nullmap || slot->tts_isnull[i])
-				usage += MAXALIGN(BITMAPLEN(nitems + 1));
-			usage += TYPEALIGN(gs_lstate->a[i].align,
-							   attr->attlen) * (nitems + 1);
-		}
+		MemoryContextSwitchTo(oldcxt);
 	}
+	i = gs_lstate->nitems++;
+	Assert(i < gs_lstate->nrooms);
 
-	if (usage > gs_lstate->length)
-		gstore_fdw_writeout_chunk(rrinfo->ri_RelationDesc, gs_lstate);
-
-	index = gs_lstate->nitems++;
-	for (i=0; i < tupdesc->natts; i++)
+	for (j=0; j < tupdesc->natts; j++)
 	{
-		Form_pg_attribute attr = tupdesc->attrs[i];
-		bits8	   *nullmap = gs_lstate->a[i].nullmap;
-		char	   *values = gs_lstate->a[i].values;
-		Datum		datum = slot->tts_values[i];
+		Form_pg_attribute attr = tupdesc->attrs[j];
+		bits8	   *nullmap = gs_lstate->a[j].nullmap;
+		char	   *values = gs_lstate->a[j].values;
+		int			align = gs_lstate->a[j].align;
+		Datum		datum = slot->tts_values[j];
 
-		if (slot->tts_isnull[i])
+		if (slot->tts_isnull[j])
 		{
 			if (attr->attnotnull)
 				elog(ERROR,
@@ -1068,16 +1044,16 @@ gstoreExecForeignInsert(EState *estate,
 			if (!nullmap)
 			{
 				nullmap = MemoryContextAlloc(gs_lstate->memcxt,
-											 MAXALIGN(BITMAPLEN(nrooms)));
-				memset(nullmap, -1, BITMAPLEN(index));
+									MAXALIGN(BITMAPLEN(gs_lstate->nrooms)));
+				memset(nullmap, -1, BITMAPLEN(i));
 				gs_lstate->a[i].nullmap = nullmap;
 			}
-			nullmap[index >> 3] &= ~(1 << (index & 7));
+			nullmap[i >> 3] &= ~(1 << (i & 7));
 		}
 		else
 		{
 			if (nullmap)
-				nullmap[index >> 3] |=  (1 << (index & 7));
+				nullmap[i >> 3] |=  (1 << (i & 7));
 			if (attr->attlen < 0)
 			{
 				vl_dict_key	key, *entry;
@@ -1085,7 +1061,7 @@ gstoreExecForeignInsert(EState *estate,
 
 				key.offset = 0;
 				key.vl_datum = (struct varlena *)DatumGetPointer(datum);
-				entry = hash_search(gs_lstate->a[i].vl_dict,
+				entry = hash_search(gs_lstate->a[j].vl_dict,
 									&key,
 									HASH_ENTER,
 									&found);
@@ -1097,20 +1073,24 @@ gstoreExecForeignInsert(EState *estate,
 					entry->vl_datum = PG_DETOAST_DATUM_COPY(datum);
 					MemoryContextSwitchTo(oldcxt);
 
-					gs_lstate->a[i].extra_sz += MAXALIGN(VARSIZE_ANY(datum));
+					gs_lstate->a[j].extra_sz += MAXALIGN(VARSIZE_ANY(datum));
+
+					if (MAXALIGN(sizeof(cl_uint) * i) +
+						gs_lstate->a[j].extra_sz >= ((size_t)UINT_MAX *
+													 ALIGNOF_INT))
+						elog(ERROR, "attribute \"%s\" consumed too much",
+							 NameStr(attr->attname));
 				}
-				((vl_dict_key **)values)[index] = entry;
+				((vl_dict_key **)values)[i] = entry;
 			}
 			else if (!attr->attbyval)
 			{
-				values += TYPEALIGN(gs_lstate->a[i].align,
-									attr->attlen) * index;
+				values += TYPEALIGN(align, attr->attlen) * i;
 				memcpy(values, DatumGetPointer(datum), attr->attlen);
 			}
 			else
 			{
-				values += TYPEALIGN(gs_lstate->a[i].align,
-									attr->attlen) * index;
+				values += TYPEALIGN(align, attr->attlen) * i;
 				switch (attr->attlen)
 				{
 					case sizeof(cl_char):
@@ -1157,9 +1137,13 @@ gstoreEndForeignModify(EState *estate,
 	gstoreLoadState *gs_lstate = rrinfo->ri_FdwState;
 
 	if (gs_lstate->nitems > 0)
-		gstore_fdw_writeout_chunk(rrinfo->ri_RelationDesc, gs_lstate);
+	{
+		/* writeout by the default format */
+		gstore_fdw_writeout_default(rrinfo->ri_RelationDesc, gs_lstate);
+	}
 	if (gs_lstate->gcontext)
 		PutGpuContext(gs_lstate->gcontext);
+	MemoryContextDelete(gs_lstate->memcxt);
 }
 
 /*
@@ -1879,9 +1863,8 @@ load_pinned_gstore_fdw(GpuContext *gcontext, Relation frel)
 	cl_int			i, nchunks;
 	ListCell	   *lc;
 	kern_reggstore *kr_gstore;
-	kern_data_store *kds_src;
-	CUresult		rc;
 	CUdeviceptr		m_gstore;
+	CUresult		rc;
 
 	SpinLockAcquire(&gstore_head->lock);
 	PG_TRY();
@@ -1892,12 +1875,10 @@ load_pinned_gstore_fdw(GpuContext *gcontext, Relation frel)
 			 gs_chunk != NULL;
 			 gs_chunk = gstore_fdw_next_chunk(gs_chunk, snapshot))
 		{
-			kds_src = gstore_fdw_mapped_chunk(gs_chunk);
-
 			if (gs_chunk->cuda_dindex != gcontext->cuda_dindex)
 				elog(ERROR, "GPU context works on the different device where '%s' foreign table is pinned", RelationGetRelationName(frel));
 
-			total_nitems += kds_src->nitems;
+			total_nitems += gs_chunk->kds_nitems;
 			gs_chunks_list = lappend(gs_chunks_list, gs_chunk);
 		}
 		SpinLockRelease(&gstore_head->lock);
