@@ -358,6 +358,7 @@ construct_flat_cuda_source(uint32 extra_flags,
 					"#define DEVICEPTRLEN %lu\n"
 					"#define BLCKSZ %u\n"
 					"#define MAXIMUM_ALIGNOF %u\n"
+					"#define MAXIMUM_ALIGNOF_SHIFT %u\n"
 #ifdef PGSTROM_DEBUG
 					"#define PGSTROM_DEBUG 1\n"
 #endif
@@ -365,7 +366,8 @@ construct_flat_cuda_source(uint32 extra_flags,
 					SIZEOF_VOID_P,
 					sizeof(CUdeviceptr),
 					BLCKSZ,
-					MAXIMUM_ALIGNOF);
+					MAXIMUM_ALIGNOF,
+					MAXIMUM_ALIGNOF_SHIFT);
 	/* Common PG-Strom device routine */
 	ofs += snprintf(source + ofs, len - ofs,
 					"#include \"cuda_common.h\"\n");

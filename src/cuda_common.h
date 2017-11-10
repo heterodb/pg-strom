@@ -612,9 +612,12 @@ typedef struct {
 	cl_uint			atttypid;
 	/* typmod of the SQL data type */
 	cl_int			atttypmod;
-	/* (only column) offset to the values array */
-	cl_uint			values_offset;
-	/* (only column) total size of varlena body or NULL bitmap if fixed-len */
+	/* (only column) offset to the values array; that is always aligned by
+	 * MAXALIGN(). For large KDS >4GB, va_offset shall be used with 3bits-
+	 * shift to represents up to 32GB. */
+	cl_uint			va_offset;
+	/* (only column) total size of varlena body or NULL bitmap if attbyval;
+	 * because of the same reason, extra_sz shall be used with 3bits shift. */
 	cl_uint			extra_sz;
 } kern_colmeta;
 
@@ -647,15 +650,14 @@ typedef struct
 #define KDS_FORMAT_COLUMN		5	/* columnar based storage format */
 
 typedef struct {
-	hostptr_t		hostptr;	/* address of kds on the host */
-	cl_uint			length;		/* length of this data-store */
-	cl_uint			nrooms;		/* number of available rows in this store */
+	size_t			length;		/* length of this data-store */
 	/*
 	 * NOTE: {nitems + usage} must be aligned to 64bit because these pair of
 	 * values can be updated atomically using cmpxchg.
 	 */
 	cl_uint			nitems; 	/* number of rows in this store */
 	cl_uint			usage;		/* usage of this data-store */
+	cl_uint			nrooms;		/* number of available rows in this store */
 	cl_uint			ncols;		/* number of columns in this store */
 	cl_char			format;		/* one of KDS_FORMAT_* above */
 	cl_char			has_notbyval; /* true, if any of column is !attbyval */
@@ -789,23 +791,90 @@ KERN_HASH_NEXT_ITEM(kern_data_store *kds, kern_hashitem *khitem)
 										 __ldg(&(kds)->nrooms)) +	\
 							  BLCKSZ * kds_index)
 
-/* transform device pointer to host address */
-#define devptr_to_host(kds,devptr)		\
-	((hostptr_t)(devptr) -				\
-	 (hostptr_t)(&(kds)->hostptr) +		\
-	 (hostptr_t)((kds)->hostptr))
-/* transform host pointer to device address */
-#define hostptr_to_dev(kds,hostptr)		\
-	((hostptr_t)(hostptr) -				\
-	 (hostptr_t)((kds)->hostptr) +		\
-	 (hostptr_t)(&(kds)->hostptr))
-
-/* check pointer's location */
-STATIC_INLINE(cl_bool)
-pointer_on_kds(void *ptr, kern_data_store *kds)
+/* access macro for column format */
+STATIC_INLINE(void *)
+KDS_COLUMN_VALUES(kern_data_store *kds, cl_int colidx)
 {
-	return kds && ((char *)ptr >= (char *)kds &&
-				   (char *)ptr <  (char *)kds + kds->length);
+	size_t	offset;
+
+	Assert(colidx >= 0 && colidx < kds->ncols);
+	offset = kds->colmeta[colidx].va_offset;
+
+	return (char *)kds + (offset << MAXIMUM_ALIGNOF_SHIFT);
+}
+
+STATIC_INLINE(char *)
+KDS_COLUMN_NULLMAP(kern_data_store *kds, cl_int colidx)
+{
+	kern_colmeta	cmeta;
+
+	Assert(colidx >= 0 && colidx < kds->ncols);
+	cmeta = kds->colmeta[colidx];
+	if (cmeta.attlen < 0 || cmeta.extra_sz == 0)
+		return NULL;
+	return ((char *)KDS_COLUMN_VALUES(kds, colidx) +
+			MAXALIGN(TYPEALIGN(cmeta.attalign,
+							   cmeta.attlen) * kds->nitems));
+}
+
+STATIC_INLINE(Datum)
+KDS_COLUMN_GET_VALUE(kern_data_store *kds,
+					 cl_int colidx, size_t row_index,
+					 cl_bool *isnull)
+{
+	kern_colmeta cmeta;
+	size_t		offset;
+	char	   *values;
+	char	   *nullmap;
+	Datum		result;
+
+	Assert(colidx >= 0 && colidx < kds->ncols);
+	cmeta = kds->colmeta[colidx];
+	values = (char *)kds + ((size_t)cmeta.va_offset << MAXIMUM_ALIGNOF_SHIFT);
+	if (cmeta.attlen < 0)
+	{
+		Assert(!cmeta.attbyval);
+		offset = ((cl_uint *)values)[row_index];
+		if (offset == 0)
+		{
+			*isnull = true;
+			return 0L;
+		}
+		values += (size_t)offset << MAXIMUM_ALIGNOF_SHIFT;
+		result = PointerGetDatum(values);
+	}
+	else
+	{
+		size_t		unitsz = TYPEALIGN(cmeta.attalign, cmeta.attlen);
+		if (row_index < ((size_t)cmeta.extra_sz << MAXIMUM_ALIGNOF_SHIFT))
+		{
+			nullmap =  values + MAXALIGN(unitsz * kds->nitems);
+			if (att_isnull(row_index, nullmap))
+			{
+				*isnull = true;
+				return 0L;
+			}
+		}
+		values += unitsz * row_index;
+		if (!cmeta.attbyval)
+			result = PointerGetDatum(values);
+		else if (cmeta.attlen == sizeof(cl_long))
+			result = SET_8_BYTES(*((cl_long *)values));
+		else if (cmeta.attlen == sizeof(cl_int))
+			result = SET_4_BYTES(*((cl_int *)values));
+		else if (cmeta.attlen == sizeof(cl_short))
+			result = SET_2_BYTES(*((cl_short *)values));
+		else if (cmeta.attlen == sizeof(cl_char))
+			result = SET_1_BYTE(*((cl_char *)values));
+		else
+		{
+			/* should not happen */
+			*isnull = true;
+			return 0L;
+		}
+	}
+	*isnull = false;
+	return result;
 }
 
 /*
@@ -2048,6 +2117,7 @@ compute_heaptuple_size(kern_context *kcxt,
 	return t_hoff + datalen;
 }
 
+#if 0
 /*
  * deform_kern_heaptuple
  *
@@ -2150,6 +2220,7 @@ deform_kern_heaptuple(kern_context *kcxt,
 	}
 	return MAXALIGN(extra_len);
 }
+#endif
 
 /*
  * form_kern_heaptuple

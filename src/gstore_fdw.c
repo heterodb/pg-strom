@@ -317,8 +317,8 @@ gstoreGetForeignRelSize(PlannerInfo *root,
 	gs_chunk = gstore_fdw_lookup_chunk(frel, snapshot);
 	UnregisterSnapshot(snapshot);
 
-	baserel->rows	= gs_chunk->kds_nitems;
-	baserel->pages	= gs_chunk->kds_length / BLCKSZ;
+	baserel->rows	= (gs_chunk ? gs_chunk->kds_nitems : 0);
+	baserel->pages	= (gs_chunk ? gs_chunk->kds_length / BLCKSZ : 0);
 	heap_close(frel, NoLock);
 }
 
@@ -442,9 +442,8 @@ gstoreIterateForeignScan(ForeignScanState *node)
 	Snapshot		snapshot = estate->es_snapshot;
 	kern_data_store *kds;
 	cl_long			i, j;
-	cl_uint			offset;
-	kern_colmeta   *kcmeta;
-	char		   *att_values;
+	Datum			datum;
+	cl_bool			isnull;
 
 	ExecClearTuple(slot);
 	if (!gss_state->gs_chunk)
@@ -463,42 +462,11 @@ gstoreIterateForeignScan(ForeignScanState *node)
 
 	for (j=0; j < kds->ncols; j++)
 	{
-		kcmeta = &kds->colmeta[j];
-		att_values = (char *)kds + kcmeta->values_offset;
-		if (kcmeta->attlen > 0)
-		{
-			/* null-check */
-			if (kcmeta->extra_sz > 0 &&
-				i < BITS_PER_BYTE * kcmeta->extra_sz)
-			{
-				bits8  *nullmap = (bits8 *)
-					(att_values + MAXALIGN(kcmeta->attlen * kds->nitems));
-
-				if (att_isnull(i, nullmap))
-					continue;
-			}
-			att_values += TYPEALIGN(kcmeta->attalign,
-									kcmeta->attlen) * i;
-			slot->tts_isnull[j] = false;
-			slot->tts_values[j] = fetch_att(att_values,
-											kcmeta->attbyval,
-											kcmeta->attlen);
-		}
-		else
-		{
-			/* varlena field */
-			Assert(kcmeta->attlen == -1);
-
-			offset = ALIGNOF_INT * ((cl_uint *)att_values)[i];
-			/* null-check */
-			if (offset == 0)
-				continue;
-			Assert(offset >= sizeof(cl_uint) * kds->nitems &&
-				   offset <  sizeof(cl_uint) * kds->nitems + kcmeta->extra_sz);
-			slot->tts_isnull[i] = false;
-			slot->tts_values[i] = PointerGetDatum(att_values + offset);
-		}
+		datum = KDS_COLUMN_GET_VALUE(kds, j, i, &isnull);
+		slot->tts_isnull[j] = isnull;
+		slot->tts_values[j] = datum;
 	}
+	ExecMaterializeSlot(slot);
 	return slot;
 }
 
@@ -613,7 +581,6 @@ vl_dict_hash_value(const void *__key, Size keysize)
 	const vl_dict_key *key = __key;
 	pg_crc32		crc;
 
-	Assert(keysize == sizeof(vl_dict_key));
 	INIT_LEGACY_CRC32(crc);
 	COMP_LEGACY_CRC32(crc, key->vl_datum, VARSIZE_ANY(key->vl_datum));
 	FIN_LEGACY_CRC32(crc);
@@ -627,9 +594,10 @@ vl_dict_compare(const void *__key1, const void *__key2, Size keysize)
 	const vl_dict_key *key1 = __key1;
 	const vl_dict_key *key2 = __key2;
 
-	if (VARSIZE_ANY(key1->vl_datum) == VARSIZE_ANY(key2->vl_datum))
-		return memcmp(key1->vl_datum, key2->vl_datum,
-					  VARSIZE_ANY(key1->vl_datum));
+	if (VARSIZE_ANY_EXHDR(key1->vl_datum) == VARSIZE_ANY_EXHDR(key2->vl_datum))
+		return memcmp(VARDATA_ANY(key1->vl_datum),
+					  VARDATA_ANY(key2->vl_datum),
+					  VARSIZE_ANY_EXHDR(key1->vl_datum));
 	return 1;
 }
 
@@ -707,17 +675,17 @@ gstore_fdw_load_gpu_preserved(GpuContext *gcontext,
 }
 
 /*
- * gstore_fdw_writeout_default
+ * gstore_fdw_writeout_pgstrom
  */
 static void
-gstore_fdw_writeout_default(Relation relation, gstoreLoadState *gs_lstate)
+gstore_fdw_writeout_pgstrom(Relation relation, gstoreLoadState *gs_lstate)
 {
 	GpuContext	   *gcontext = gs_lstate->gcontext;
 	Oid				table_oid = RelationGetRelid(relation);
 	TupleDesc		tupdesc = RelationGetDescr(relation);
 	size_t			nitems = gs_lstate->nitems;
 	size_t			length;
-	size_t			offset;
+	size_t			usage;
 	size_t			i, j, unitsz;
 	pg_crc32		hash;
 	cl_int			cuda_dindex = (gcontext ? gcontext->cuda_dindex : -1);
@@ -728,8 +696,8 @@ gstore_fdw_writeout_default(Relation relation, gstoreLoadState *gs_lstate)
 	GpuStoreChunk  *gs_chunk = NULL;
 	GpuStoreMap	   *gs_map = NULL;
 
-	length = offset = MAXALIGN(offsetof(kern_data_store,
-										colmeta[tupdesc->natts]));
+	length = usage = STROMALIGN(offsetof(kern_data_store,
+										 colmeta[tupdesc->natts]));
 	for (j=0; j < tupdesc->natts; j++)
 	{
 		Form_pg_attribute	attr = tupdesc->attrs[j];
@@ -759,7 +727,9 @@ gstore_fdw_writeout_default(Relation relation, gstoreLoadState *gs_lstate)
 	{
 		kern_colmeta   *cmeta = &kds->colmeta[j];
 
-		cmeta->values_offset = offset;
+		Assert((usage & (MAXIMUM_ALIGNOF - 1)) == 0);
+		cmeta->va_offset = (usage >> MAXIMUM_ALIGNOF_SHIFT);
+
 		if (cmeta->attlen < 0)
 		{
 			HASH_SEQ_STATUS	hseq;
@@ -769,22 +739,20 @@ gstore_fdw_writeout_default(Relation relation, gstoreLoadState *gs_lstate)
 			char		   *extra;
 
 			/* put varlena datum on the extra area */
-			base = (cl_uint *)((char *)kds + offset);
+			base = (cl_uint *)((char *)kds + usage);
 			extra = (char *)base + MAXALIGN(sizeof(cl_uint) * nitems);
 			hash_seq_init(&hseq, gs_lstate->a[j].vl_dict);
 			while ((entry = hash_seq_search(&hseq)) != NULL)
 			{
-				size_t		shift = (size_t)(extra - (char *)base);
+				size_t		offset = (size_t)(extra - (char *)base);
 
-				Assert((shift & (ALIGNOF_INT - 1)) == 0);
-				entry->offset = shift / ALIGNOF_INT;
+				Assert((offset & (MAXIMUM_ALIGNOF - 1)) == 0);
+				entry->offset = (offset >> MAXIMUM_ALIGNOF_SHIFT);
 				unitsz = VARSIZE_ANY(entry->vl_datum);
 				memcpy(extra, entry->vl_datum, unitsz);
-				cmeta->extra_sz += INTALIGN(unitsz);
-				extra += INTALIGN(unitsz);
+				cmeta->extra_sz += MAXALIGN(unitsz) >> MAXIMUM_ALIGNOF_SHIFT;
+				extra += MAXALIGN(unitsz);
 			}
-			hash_seq_term(&hseq);
-
 			/* put offset of varlena datum */
 			entries_array = (vl_dict_key **)gs_lstate->a[j].values;
 			for (i=0; i < nitems; i++)
@@ -792,23 +760,25 @@ gstore_fdw_writeout_default(Relation relation, gstoreLoadState *gs_lstate)
 				entry = entries_array[i];
 				base[i] = (!entry ? 0 : entry->offset);
 			}
+			usage += (char *)extra - (char *)base;
 		}
 		else
 		{
-			int		unitsz = TYPEALIGN(cmeta->attalign, cmeta->attlen);
-
-			memcpy((char *)kds + offset,
+			unitsz = TYPEALIGN(cmeta->attalign, cmeta->attlen);
+			memcpy((char *)kds + usage,
 				   gs_lstate->a[j].values,
 				   unitsz * nitems);
-			offset += unitsz * nitems;
-
+			usage += MAXALIGN(unitsz * nitems);
 			if (gs_lstate->a[j].nullmap)
 			{
-				memcpy((char *)kds + offset,
-					   gs_lstate->a[i].nullmap,
+				size_t	nullmap_sz;
+
+				memcpy((char *)kds + usage,
+					   gs_lstate->a[j].nullmap,
 					   BITMAPLEN(nitems));
-				cmeta->extra_sz = BITMAPLEN(nitems);
-				offset += MAXALIGN(BITMAPLEN(nitems));
+				nullmap_sz = MAXALIGN(BITMAPLEN(nitems));
+				cmeta->extra_sz = nullmap_sz >> MAXIMUM_ALIGNOF_SHIFT;
+				usage += nullmap_sz;
 			}
 		}
 	}
@@ -1071,7 +1041,7 @@ gstoreExecForeignInsert(EState *estate,
 
 					if (MAXALIGN(sizeof(cl_uint) * i) +
 						gs_lstate->a[j].extra_sz >= ((size_t)UINT_MAX *
-													 ALIGNOF_INT))
+													 MAXIMUM_ALIGNOF))
 						elog(ERROR, "attribute \"%s\" consumed too much",
 							 NameStr(attr->attname));
 				}
@@ -1132,8 +1102,8 @@ gstoreEndForeignModify(EState *estate,
 
 	if (gs_lstate->nitems > 0)
 	{
-		/* writeout by the default format */
-		gstore_fdw_writeout_default(rrinfo->ri_RelationDesc, gs_lstate);
+		/* writeout by 'pgstrom' format */
+		gstore_fdw_writeout_pgstrom(rrinfo->ri_RelationDesc, gs_lstate);
 	}
 	if (gs_lstate->gcontext)
 		PutGpuContext(gs_lstate->gcontext);

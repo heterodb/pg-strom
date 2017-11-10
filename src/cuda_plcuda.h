@@ -109,8 +109,12 @@ typedef struct
 /*
  * support for gstore_fdw
  */
+#define GSTORE_FDW_FORMAT__PGSTROM		500		/* kern_data_store */
+//#define GSTORE_FDW_FORMAT__PGARRAY
+//#define GSTORE_FDW_FORMAT__NUMPY
+
 #ifdef __CUDACC__
-STROMCL_SIMPLE_TYPE_TEMPLATE(reggstore, kern_data_store *)
+STROMCL_SIMPLE_TYPE_TEMPLATE(reggstore, void *)
 #endif
 
 #endif	/* CUDA_PLCUDA.H */

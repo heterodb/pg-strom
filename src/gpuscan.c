@@ -546,7 +546,10 @@ gpuscan_add_scan_path(PlannerInfo *root,
 		return;
 
 	/* only base relation we can handle */
-	if (baserel->rtekind != RTE_RELATION || baserel->relid == 0)
+	if (rte->rtekind != RTE_RELATION)
+		return;
+	if (rte->relkind != RELKIND_RELATION &&
+		rte->relkind != RELKIND_MATVIEW)
 		return;
 
 	/* Check whether the qualifier can run on GPU device */
@@ -839,10 +842,6 @@ codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
 	appendStringInfo(
 		kern,
 		"\n"
-//		"  if (get_local_id() == 123) {\n"
-//		"    printf(\"KVAR_3 {%%d/%%d}\\n\", KVAR_3.isnull, KVAR_3.value);\n"
-//		"    printf(\"KPARAM_0 {%%d/%%d}\\n\", KPARAM_0.isnull, KPARAM_0.value);\n"
-//		"  }\n"
 		"  return EVAL(%s);\n"
 		"}\n\n",
 		expr_code);
