@@ -938,69 +938,6 @@ gpuMemFreePreserved(cl_int cuda_dindex,
 }
 
 /*
- * __gpuIpcOpenMemHandle
- */
-CUresult
-__gpuIpcOpenMemHandle(GpuContext *gcontext,
-					  CUdeviceptr *p_deviceptr,
-					  CUipcMemHandle m_handle,
-					  unsigned int flags,
-					  const char *filename, int lineno)
-{
-	CUdeviceptr	m_deviceptr;
-	CUresult	rc;
-
-	//lookup restracker
-	//if any, inc refcount,
-
-	//elsewhere, map 
-
-
-
-	rc = cuCtxPushCurrent(gcontext->cuda_context);
-	if (rc != CUDA_SUCCESS)
-	{
-		wnotice("failed on cuCtxPushCurrent: %s", errorText(rc));
-		return rc;
-	}
-
-	rc = cuIpcOpenMemHandle(&m_deviceptr, m_handle, flags);
-	if (rc != CUDA_SUCCESS)
-	{
-		wnotice("failed on cuIpcOpenMemHandle: %s", errorText(rc));
-		cuCtxPopCurrent(NULL);
-		return rc;
-	}
-
-	if (!trackGpuMemIPC(gcontext, m_deviceptr,
-						GPUMEM_DEVICE_RAW_EXTRA,
-						filename, lineno))
-	{
-		cuIpcCloseMemHandle(m_deviceptr);
-		cuCtxPopCurrent(NULL);
-		return CUDA_ERROR_OUT_OF_MEMORY;
-	}
-	cuCtxPopCurrent(NULL);
-
-	*p_deviceptr = m_deviceptr;
-
-	return CUDA_SUCCESS;
-}
-
-/*
- * gpuIpcCloseMemHandle
- */
-CUresult
-gpuIpcCloseMemHandle(GpuContext *gcontext, CUdeviceptr m_deviceptr)
-{
-	void   *extra = untrackGpuMemIPC(gcontext, m_deviceptr);
-
-	if (extra != GPUMEM_DEVICE_RAW_EXTRA)
-		return CUDA_ERROR_INVALID_VALUE;
-	return cuIpcCloseMemHandle(m_deviceptr);
-}
-
-/*
  * gpuMemReclaimSegment - release a free segment if any
  */
 void

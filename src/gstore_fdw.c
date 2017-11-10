@@ -216,38 +216,63 @@ gstore_fdw_mapped_chunk(GpuStoreChunk *gs_chunk)
 }
 
 /*
- * gstore_fdw_(first|next)_chunk
+ * gstore_fdw_lookup_chunk
  */
 static GpuStoreChunk *
-gstore_fdw_first_chunk(Relation frel, Snapshot snapshot)
+gstore_fdw_lookup_chunk_nolock(Relation frel, Snapshot snapshot)
 {
-	Oid				table_oid = RelationGetRelid(frel);
-	GpuStoreChunk  *gs_chunk;
+	Oid				gstore_oid = RelationGetRelid(frel);
+	GpuStoreChunk  *gs_chunk = NULL;
 	dlist_iter		iter;
 	pg_crc32		hash;
 	int				index;
 
 	INIT_LEGACY_CRC32(hash);
 	COMP_LEGACY_CRC32(hash, &MyDatabaseId, sizeof(Oid));
-	COMP_LEGACY_CRC32(hash, &table_oid, sizeof(Oid));
+	COMP_LEGACY_CRC32(hash, &gstore_oid, sizeof(Oid));
 	FIN_LEGACY_CRC32(hash);
 	index = hash % GSTORE_CHUNK_HASH_NSLOTS;
 
 	dlist_foreach(iter, &gstore_head->active_chunks[index])
 	{
-		gs_chunk = dlist_container(GpuStoreChunk, chain, iter.cur);
-
-		if (gs_chunk->hash == hash &&
-			gs_chunk->database_oid == MyDatabaseId &&
-			gs_chunk->table_oid == table_oid)
+		GpuStoreChunk  *gs_temp = dlist_container(GpuStoreChunk,
+												  chain, iter.cur);
+		if (gs_temp->hash == hash &&
+			gs_temp->database_oid == MyDatabaseId &&
+			gs_temp->table_oid == gstore_oid &&
+			gstore_fdw_satisfies_visibility(gs_temp, snapshot))
 		{
-			if (gstore_fdw_satisfies_visibility(gs_chunk, snapshot))
-				return gs_chunk;
+			if (!gs_chunk)
+				gs_chunk = gs_temp;
+			else
+				elog(ERROR, "Bug? multiple GpuStoreChunks are visible");
 		}
 	}
-	return NULL;
+	return gs_chunk;
 }
 
+static GpuStoreChunk *
+gstore_fdw_lookup_chunk(Relation frel, Snapshot snapshot)
+{
+	GpuStoreChunk  *gs_chunk;
+
+	PG_TRY();
+	{
+		gs_chunk = gstore_fdw_lookup_chunk_nolock(frel, snapshot);
+	}
+	PG_CATCH();
+	{
+		SpinLockRelease(&gstore_head->lock);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	SpinLockRelease(&gstore_head->lock);
+
+	return gs_chunk;
+}
+
+
+#if 0
 static GpuStoreChunk *
 gstore_fdw_next_chunk(GpuStoreChunk *gs_chunk, Snapshot snapshot)
 {
@@ -273,6 +298,7 @@ gstore_fdw_next_chunk(GpuStoreChunk *gs_chunk, Snapshot snapshot)
 	}
 	return NULL;
 }
+#endif
 
 /*
  * gstoreGetForeignRelSize
@@ -283,34 +309,16 @@ gstoreGetForeignRelSize(PlannerInfo *root,
 						Oid ftable_oid)
 {
 	Relation		frel;
+	Snapshot		snapshot;
 	GpuStoreChunk  *gs_chunk;
-	size_t			nitems = 0;
-	size_t			length = 0;
 
 	frel = heap_open(ftable_oid, AccessShareLock);
-	SpinLockAcquire(&gstore_head->lock);
-	PG_TRY();
-	{
-		Snapshot	snapshot = RegisterSnapshot(GetTransactionSnapshot());
+	snapshot = RegisterSnapshot(GetTransactionSnapshot());
+	gs_chunk = gstore_fdw_lookup_chunk(frel, snapshot);
+	UnregisterSnapshot(snapshot);
 
-		for (gs_chunk = gstore_fdw_first_chunk(frel, snapshot);
-			 gs_chunk != NULL;
-			 gs_chunk = gstore_fdw_next_chunk(gs_chunk, snapshot))
-		{
-			nitems += gs_chunk->kds_nitems;
-			length += TYPEALIGN(BLCKSZ, gs_chunk->kds_length);
-		}
-		UnregisterSnapshot(snapshot);
-	}
-	PG_CATCH();
-	{
-		SpinLockRelease(&gstore_head->lock);
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-	SpinLockRelease(&gstore_head->lock);
-	baserel->rows	= nitems;
-	baserel->pages	= length / BLCKSZ;
+	baserel->rows	= gs_chunk->kds_nitems;
+	baserel->pages	= gs_chunk->kds_length / BLCKSZ;
 	heap_close(frel, NoLock);
 }
 
@@ -432,7 +440,6 @@ gstoreIterateForeignScan(ForeignScanState *node)
 	TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
 	EState		   *estate = node->ss.ps.state;
 	Snapshot		snapshot = estate->es_snapshot;
-	GpuStoreChunk  *gs_chunk;
 	kern_data_store *kds;
 	cl_long			i, j;
 	cl_uint			offset;
@@ -442,25 +449,15 @@ gstoreIterateForeignScan(ForeignScanState *node)
 	ExecClearTuple(slot);
 	if (!gss_state->gs_chunk)
 	{
-		SpinLockAcquire(&gstore_head->lock);
-		gs_chunk = gstore_fdw_first_chunk(frel, snapshot);
-		SpinLockRelease(&gstore_head->lock);
-		if (!gs_chunk)
+		gss_state->gs_chunk = gstore_fdw_lookup_chunk(frel, snapshot);
+		if (!gss_state->gs_chunk)
 			return NULL;
-		gss_state->gs_chunk = gs_chunk;
 	}
-next:
 	kds = gstore_fdw_mapped_chunk(gss_state->gs_chunk);
 
 	if (gss_state->gs_index >= kds->nitems)
-	{
-		gss_state->gs_chunk = gstore_fdw_next_chunk(gss_state->gs_chunk,
-													snapshot);
-		gss_state->gs_index = 0;
-		if (!gss_state->gs_chunk)
-			return NULL;
-		goto next;
-	}
+		return NULL;
+
 	i = gss_state->gs_index++;
 	ExecStoreAllNullTuple(slot);
 
@@ -923,10 +920,7 @@ gstoreBeginForeignModify(ModifyTableState *mtstate,
 			ActivateGpuContext(gcontext);
 	}
 	LockRelationOid(RelationGetRelid(relation), ShareUpdateExclusiveLock);
-	SpinLockAcquire(&gstore_head->lock);
-	gs_chunk = gstore_fdw_first_chunk(relation, estate->es_snapshot);
-	SpinLockRelease(&gstore_head->lock);
-
+	gs_chunk = gstore_fdw_lookup_chunk(relation, estate->es_snapshot);
 	if (gs_chunk)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -1165,26 +1159,28 @@ gstoreBeginDirectModify(ForeignScanState *node, int eflags)
 static TupleTableSlot *
 gstoreIterateDirectModify(ForeignScanState *node)
 {
-	EState	   *estate = node->ss.ps.state;
-	ResultRelInfo *rrinfo = estate->es_result_relation_info;
-	Relation	frel = rrinfo->ri_RelationDesc;
-	Snapshot	snapshot = estate->es_snapshot;
+	EState		   *estate = node->ss.ps.state;
+	ResultRelInfo  *rrinfo = estate->es_result_relation_info;
+	Relation		frel = rrinfo->ri_RelationDesc;
+	Snapshot		snapshot = estate->es_snapshot;
 	TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
 	Instrumentation *instr = node->ss.ps.instrument;
-	GpuStoreChunk *gs_chunk;
+	GpuStoreChunk  *gs_chunk;
+	GpuStoreMap	   *gs_map;
 
 	SpinLockAcquire(&gstore_head->lock);
-	for (gs_chunk = gstore_fdw_first_chunk(frel, snapshot);
-		 gs_chunk != NULL;
-		 gs_chunk = gstore_fdw_next_chunk(gs_chunk, snapshot))
+	gs_chunk = gstore_fdw_lookup_chunk(frel, snapshot);
+	Assert(!TransactionIdIsValid(gs_chunk->xmax));
+	gs_chunk->xmax = GetCurrentTransactionId();
+	gs_chunk->cid = GetCurrentCommandId(true);
+	estate->es_processed += gs_chunk->kds_nitems;
+	if (instr)
+		instr->tuplecount += gs_chunk->kds_nitems;
+	gs_map = GPUSTOREMAP_FOR_CHUNK(gs_chunk);
+	if (gs_map->dsm_seg)
 	{
-		Assert(!TransactionIdIsValid(gs_chunk->xmax));
-		gs_chunk->xmax = GetCurrentTransactionId();
-		gs_chunk->cid = GetCurrentCommandId(true);
-
-		estate->es_processed += gs_chunk->kds_nitems;
-		if (instr)
-			instr->tuplecount += gs_chunk->kds_nitems;
+		dsm_detach(gs_map->dsm_seg);
+		gs_map->dsm_seg = NULL;
 	}
 	pg_atomic_add_fetch_u32(&gstore_head->has_warm_chunks, 1);
 	SpinLockRelease(&gstore_head->lock);
@@ -1634,11 +1630,11 @@ PG_FUNCTION_INFO_V1(pgstrom_reggstore_send);
 Datum
 pgstrom_gstore_export_ipchandle(PG_FUNCTION_ARGS)
 {
-	Oid			gstore_oid = PG_GETARG_OID(0);
-	Relation	frel;
-	cl_int		pinning;
-	cl_int		nchunks = 0;
-	StringInfoData buf;
+	Oid				gstore_oid = PG_GETARG_OID(0);
+	Relation		frel;
+	cl_int			pinning;
+	GpuStoreChunk  *gs_chunk;
+	char		   *result;
 
 	if (!relation_is_gstore_fdw(gstore_oid))
 		elog(ERROR, "relation %u is not gstore_fdw foreign table",
@@ -1653,55 +1649,17 @@ pgstrom_gstore_export_ipchandle(PG_FUNCTION_ARGS)
 		elog(ERROR, "gstore_fdw: foreign table \"%s\" is not pinned on a valid GPU device",
 			 RelationGetRelationName(frel));
 
-	initStringInfo(&buf);
-	SpinLockAcquire(&gstore_head->lock);
-    PG_TRY();
-    {
-		Snapshot		snapshot = GetActiveSnapshot();
-		GpuStoreChunk  *gs_chunk;
-		ArrayType		array;
-		int				dims = 0;
-		int				lbound = 1;
+	gs_chunk = gstore_fdw_lookup_chunk(frel, GetActiveSnapshot());
+	if (!gs_chunk)
+		PG_RETURN_NULL();
 
-		/* ArrayType (incl. varlena header) */
-		memset(&array, 0, sizeof(ArrayType));
-		array.ndim = 1;
-		array.dataoffset = 0;
-		array.elemtype = BYTEAOID;
-		appendBinaryStringInfo(&buf, (char *)&array, sizeof(ArrayType));
-		/* array dims and lbounds */
-		appendBinaryStringInfo(&buf, (char *)&dims, sizeof(int));
-		appendBinaryStringInfo(&buf, (char *)&lbound, sizeof(int));
+	result = palloc(VARHDRSZ + sizeof(CUipcMemHandle));
+	memcpy(result + VARHDRSZ, &gs_chunk->ipc_mhandle, sizeof(CUipcMemHandle));
+	SET_VARSIZE(result, VARHDRSZ + sizeof(CUipcMemHandle));
 
-		for (gs_chunk = gstore_fdw_first_chunk(frel, snapshot);
-             gs_chunk != NULL;
-             gs_chunk = gstore_fdw_next_chunk(gs_chunk, snapshot))
-		{
-			int32		vl_head;
-
-			SET_VARSIZE(&vl_head, VARHDRSZ + sizeof(CUipcMemHandle));
-			appendBinaryStringInfo(&buf, (char *)&vl_head, sizeof(int32));
-			appendBinaryStringInfo(&buf, (char *)&gs_chunk->ipc_mhandle,
-								   sizeof(CUipcMemHandle));
-			nchunks++;
-		}
-		SpinLockRelease(&gstore_head->lock);
-
-		ARR_DIMS((ArrayType *)buf.data)[0] = nchunks;
-		SET_VARSIZE(buf.data, buf.len);
-	}
-	PG_CATCH();
-	{
-		SpinLockRelease(&gstore_head->lock);
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-	SpinLockRelease(&gstore_head->lock);
 	heap_close(frel, NoLock);
 
-	if (nchunks == 0)
-		PG_RETURN_NULL();
-	PG_RETURN_ARRAYTYPE_P(buf.data);
+	PG_RETURN_POINTER(result);
 }
 PG_FUNCTION_INFO_V1(pgstrom_gstore_export_ipchandle);
 
@@ -1777,77 +1735,27 @@ static CUdeviceptr
 load_normal_gstore_fdw(GpuContext *gcontext, Relation frel)
 {
 	GpuStoreChunk  *gs_chunk;
-	List		   *gs_chunks_list = NIL;
-	size_t			total_nitems = 0;
-	size_t			total_length = 0;
-	size_t			usage;
-	cl_int			i, nchunks;
-	ListCell	   *lc;
-	kern_reggstore *kr_gstore;
 	kern_data_store *kds_src;
 	kern_data_store *kds_dst;
 	CUresult		rc;
 	CUdeviceptr		m_gstore;
 
-	SpinLockAcquire(&gstore_head->lock);
-	PG_TRY();
-	{
-		Snapshot		snapshot = GetActiveSnapshot();
-
-		for (gs_chunk = gstore_fdw_first_chunk(frel, snapshot);
-			 gs_chunk != NULL;
-			 gs_chunk = gstore_fdw_next_chunk(gs_chunk, snapshot))
-		{
-			kds_src = gstore_fdw_mapped_chunk(gs_chunk);
-
-			Assert(gs_chunk->cuda_dindex < 0);
-			gs_chunks_list = lappend(gs_chunks_list, gs_chunk);
-			total_nitems += kds_src->nitems;
-			total_length += STROMALIGN(kds_src->length);
-		}
-		SpinLockRelease(&gstore_head->lock);
-	}
-	PG_CATCH();
-	{
-		SpinLockRelease(&gstore_head->lock);
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-	SpinLockRelease(&gstore_head->lock);
-
-	if (gs_chunks_list == NIL)
-		return 0UL;		/* No GpuStore chunks */
+	gs_chunk = gstore_fdw_lookup_chunk(frel, GetActiveSnapshot());
+	if (!gs_chunk)
+		return 0UL;		/* empty GpuStore */
 
 	/* allocation of managed memory */
-	nchunks = list_length(gs_chunks_list);
-	total_length += STROMALIGN(offsetof(kern_reggstore, kds[nchunks]));
 	rc = gpuMemAllocManagedRaw(gcontext,
 							   &m_gstore,
-							   total_length,
+							   gs_chunk->kds_length,
 							   CU_MEM_ATTACH_GLOBAL);
 	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "out of managed memory");
+		elog(ERROR, "failed on gpuMemAllocManagedRaw: %s", errorText(rc));
+	kds_dst = (kern_data_store *)m_gstore;
+	kds_src = gstore_fdw_mapped_chunk(gs_chunk);
+	Assert(kds_src->length == gs_chunk->kds_length);
+	memcpy(kds_dst, kds_src, gs_chunk->kds_length);
 
-	/* setup buffer */
-	kr_gstore = (kern_reggstore *)m_gstore;
-	kr_gstore->cuda_dindex = -1;
-	kr_gstore->nchunks = nchunks;
-	kr_gstore->total_nitems = total_nitems;
-
-	usage = STROMALIGN(offsetof(kern_reggstore, kds[nchunks]));
-	i=0;
-	foreach (lc, gs_chunks_list)
-	{
-		gs_chunk = lfirst(lc);
-
-		kds_src = gstore_fdw_mapped_chunk(gs_chunk);
-		kds_dst = (kern_data_store *)(m_gstore + usage);
-		kr_gstore->kds[i] = kds_dst;
-
-		memcpy(kds_dst, kds_src, kds_src->length);
-		usage += STROMALIGN(kds_src->length);
-		i++;
-	}
 	return m_gstore;
 }
 
@@ -1858,87 +1766,38 @@ static CUdeviceptr
 load_pinned_gstore_fdw(GpuContext *gcontext, Relation frel)
 {
 	GpuStoreChunk  *gs_chunk;
-	List		   *gs_chunks_list = NIL;
-	size_t			total_nitems = 0;
-	cl_int			i, nchunks;
-	ListCell	   *lc;
-	kern_reggstore *kr_gstore;
-	CUdeviceptr		m_gstore;
+	CUdeviceptr		m_deviceptr;
 	CUresult		rc;
 
-	SpinLockAcquire(&gstore_head->lock);
-	PG_TRY();
-	{
-		Snapshot		snapshot = GetActiveSnapshot();
-
-		for (gs_chunk = gstore_fdw_first_chunk(frel, snapshot);
-			 gs_chunk != NULL;
-			 gs_chunk = gstore_fdw_next_chunk(gs_chunk, snapshot))
-		{
-			if (gs_chunk->cuda_dindex != gcontext->cuda_dindex)
-				elog(ERROR, "GPU context works on the different device where '%s' foreign table is pinned", RelationGetRelationName(frel));
-
-			total_nitems += gs_chunk->kds_nitems;
-			gs_chunks_list = lappend(gs_chunks_list, gs_chunk);
-		}
-		SpinLockRelease(&gstore_head->lock);
-	}
-	PG_CATCH();
-	{
-		SpinLockRelease(&gstore_head->lock);
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-	SpinLockRelease(&gstore_head->lock);
-
-	if (gs_chunks_list == NIL)
-		return 0UL;		/* No GpuStore chunks */
-
-	/* allocation of managed memory */
-	nchunks = list_length(gs_chunks_list);
-	rc = gpuMemAllocManagedRaw(gcontext,
-							   &m_gstore,
-							   STROMALIGN(offsetof(kern_reggstore,
-												   kds[nchunks])),
-							   CU_MEM_ATTACH_GLOBAL);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "out of managed memory");
-
-	/* setup buffer */
-	kr_gstore = (kern_reggstore *)m_gstore;
-	kr_gstore->cuda_dindex = gcontext->cuda_dindex;
-	kr_gstore->nchunks = nchunks;
-	kr_gstore->total_nitems = total_nitems;
+	gs_chunk = gstore_fdw_lookup_chunk(frel, GetActiveSnapshot());
+	if (!gs_chunk)
+		return 0UL;		/* empty GpuStore */
+	if (gs_chunk->cuda_dindex != gcontext->cuda_dindex)
+		elog(ERROR, "GPU context works on the different device where '%s' foreign table is pinned", RelationGetRelationName(frel));
 
 	rc = cuCtxPushCurrent(gcontext->cuda_context);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
-	i=0;
-	foreach (lc, gs_chunks_list)
-	{
-		CUdeviceptr	m_deviceptr;
 
-		rc = gpuIpcOpenMemHandle(gcontext,
-								 &m_deviceptr,
-								 gs_chunk->ipc_mhandle,
-								 CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on gpuIpcOpenMemHandle: %s", errorText(rc));
-		kr_gstore->kds[i] = (kern_data_store *)m_deviceptr;
-		i++;
-	}
+	rc = gpuIpcOpenMemHandle(gcontext,
+							 &m_deviceptr,
+							 gs_chunk->ipc_mhandle,
+							 CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on gpuIpcOpenMemHandle: %s", errorText(rc));
+
 	rc = cuCtxPopCurrent(NULL);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on cuCtxPopCurrent: %s", errorText(rc));
 
-	return m_gstore;
+	return m_deviceptr;
 }
 
 /*
  * pgstrom_load_gstore_fdw
  */
 CUdeviceptr
-pgstrom_load_gstore_fdw(GpuContext *gcontext, Oid gstore_oid)
+pgstrom_load_gstore_fdw(GpuContext *gcontext, Oid gstore_oid, bool *is_pinned)
 {
 	Relation	frel;
 	int			pinning;
@@ -1957,34 +1816,6 @@ pgstrom_load_gstore_fdw(GpuContext *gcontext, Oid gstore_oid)
 	heap_close(frel, NoLock);
 
 	return result;
-}
-
-/*
- * pgstrom_unload_gstore_fdw
- */
-void
-pgstrom_unload_gstore_fdw(GpuContext *gcontext, CUdeviceptr m_gstore)
-{
-	kern_reggstore *kr_gstore = (kern_reggstore *) m_gstore;
-	CUdeviceptr		m_deviceptr;
-	CUresult		rc;
-	cl_int			i;
-
-	if (kr_gstore->cuda_dindex >= 0)
-	{
-		Assert(kr_gstore->cuda_dindex == gcontext->cuda_dindex);
-		for (i=0; i < kr_gstore->nchunks; i++)
-		{
-			m_deviceptr = (CUdeviceptr)kr_gstore->kds[i];
-			rc = gpuIpcCloseMemHandle(gcontext, m_deviceptr);
-			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on gpuIpcCloseMemHandle: %s",
-					 errorText(rc));
-		}
-	}
-	rc = gpuMemFree(gcontext, m_gstore);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on gpuMemFree: %s", errorText(rc));
 }
 
 /*

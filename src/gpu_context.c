@@ -70,9 +70,14 @@ typedef struct ResourceTracker
 	cl_int		lineno;
 	union {
 		struct {
-			CUdeviceptr	ptr;	/* RESTRACK_CLASS__GPUMEMORY or */
-			void   *extra;		/* RESTRACK_CLASS__GPUMEMORY_IPC */
+			CUdeviceptr	ptr;	/* RESTRACK_CLASS__GPUMEMORY */
+			void   *extra;
 		} devmem;
+		struct {				/* RESTRACK_CLASS__GPUMEMORY_IPC */
+			CUdeviceptr ptr;
+			CUipcMemHandle handle;
+			cl_uint		mapcount;
+		} ipcmem;
 		ProgramId	program_id;	/* RESTRACK_CLASS__GPUPROGRAM */
 	} u;
 } ResourceTracker;
@@ -239,66 +244,131 @@ untrackGpuMem(GpuContext *gcontext, CUdeviceptr devptr)
 }
 
 /*
- * resource tracker for device memory imported using IPC
+ * Routines to manage external device memory opened via IPC handles.
+ *
+ * Note that gpu_context.c has these routines instead of gpu_mmgr.c,
+ * because open/close of IPC handles must be serialized by restriction
+ * of CUDA API.
  */
-bool
-trackGpuMemIPC(GpuContext *gcontext,
-			   CUdeviceptr devptr, void *extra,
-			   const char *filename, int lineno)
+
+/*
+ * __gpuIpcOpenMemHandle
+ */
+CUresult
+__gpuIpcOpenMemHandle(GpuContext *gcontext,
+					  CUdeviceptr *p_deviceptr,
+					  CUipcMemHandle m_handle,
+					  unsigned int flags,
+					  const char *filename, int lineno)
 {
-	ResourceTracker *tracker = calloc(1, sizeof(ResourceTracker));
-	pg_crc32	crc;
+	ResourceTracker *tracker;
+	CUdeviceptr	m_deviceptr;
+	CUresult	rc = CUDA_ERROR_OUT_OF_MEMORY;
+	dlist_iter	iter;
+	int			i;
 
+	SpinLockAcquire(&gcontext->restrack_lock);
+	/* XXX - do we have wise way to lookup mapped IPC memory? */
+	for (i=0; i < RESTRACK_HASHSIZE; i++)
+	{
+		dlist_foreach(iter, &gcontext->restrack[i])
+		{
+			tracker = dlist_container(ResourceTracker, chain, iter.cur);
+			if (tracker->resclass == RESTRACK_CLASS__GPUMEMORY_IPC &&
+				memcmp(&tracker->u.ipcmem.handle, &m_handle,
+					   sizeof(CUipcMemHandle)) == 0)
+			{
+				*p_deviceptr = tracker->u.ipcmem.ptr;
+				tracker->u.ipcmem.mapcount++;
+				SpinLockRelease(&gcontext->restrack_lock);
+
+				return CUDA_SUCCESS;
+			}
+		}
+	}
+	/* not open yet */
+	tracker = calloc(1, sizeof(ResourceTracker));
 	if (!tracker)
-		return false;	/* out of memory */
+		goto error_1;
 
-	crc = resource_tracker_hashval(RESTRACK_CLASS__GPUMEMORY_IPC,
-								   &devptr, sizeof(CUdeviceptr));
-	tracker->crc = crc;
+	rc = cuCtxPushCurrent(gcontext->cuda_context);
+	if (rc != CUDA_SUCCESS)
+		goto error_2;
+
+	rc = cuIpcOpenMemHandle(&m_deviceptr, m_handle, flags);
+	if (rc != CUDA_SUCCESS)
+		goto error_3;
+	cuCtxPopCurrent(NULL);
+
+	tracker->crc = resource_tracker_hashval(RESTRACK_CLASS__GPUMEMORY_IPC,
+											&m_deviceptr, sizeof(CUdeviceptr));
 	tracker->resclass = RESTRACK_CLASS__GPUMEMORY_IPC;
 	tracker->filename = filename;
 	tracker->lineno = lineno;
-	tracker->u.devmem.ptr = devptr;
-	tracker->u.devmem.extra = extra;
+	tracker->u.ipcmem.ptr = m_deviceptr;
+	memcpy(&tracker->u.ipcmem.handle, &m_handle, sizeof(CUipcMemHandle));
+	tracker->u.ipcmem.mapcount = 1;
 
-	SpinLockAcquire(&gcontext->restrack_lock);
-	dlist_push_tail(&gcontext->restrack[crc % RESTRACK_HASHSIZE],
+	dlist_push_tail(&gcontext->restrack[tracker->crc % RESTRACK_HASHSIZE],
 					&tracker->chain);
 	SpinLockRelease(&gcontext->restrack_lock);
-	return true;
+
+	*p_deviceptr = m_deviceptr;
+
+	return CUDA_SUCCESS;
+
+error_3:
+	cuCtxPopCurrent(NULL);
+error_2:
+	free(tracker);
+error_1:
+	SpinLockRelease(&gcontext->restrack_lock);
+	return rc;
 }
 
-void *
-untrackGpuMemIPC(GpuContext *gcontext, CUdeviceptr devptr)
+/*
+ * gpuIpcCloseMemHandle
+ */
+CUresult
+gpuIpcCloseMemHandle(GpuContext *gcontext, CUdeviceptr m_deviceptr)
 {
 	dlist_head *restrack_list;
 	dlist_iter	iter;
 	pg_crc32	crc;
-	void	   *extra;
+	CUresult	rc;
 
 	crc = resource_tracker_hashval(RESTRACK_CLASS__GPUMEMORY_IPC,
-								   &devptr, sizeof(CUdeviceptr));
+								   &m_deviceptr, sizeof(CUdeviceptr));
 	restrack_list = &gcontext->restrack[crc % RESTRACK_HASHSIZE];
-	SpinLockAcquire(&gcontext->restrack_lock);
-	dlist_foreach (iter, restrack_list)
+    SpinLockAcquire(&gcontext->restrack_lock);
+	dlist_foreach(iter, restrack_list)
 	{
-		ResourceTracker *tracker
-			= dlist_container(ResourceTracker, chain, iter.cur);
-
+		ResourceTracker *tracker = dlist_container(ResourceTracker,
+												   chain, iter.cur);
 		if (tracker->crc == crc &&
 			tracker->resclass == RESTRACK_CLASS__GPUMEMORY_IPC &&
-			tracker->u.devmem.ptr == devptr)
+			tracker->u.ipcmem.ptr == m_deviceptr)
 		{
+			Assert(tracker->u.ipcmem.mapcount > 0);
+			if (--tracker->u.ipcmem.mapcount > 0)
+			{
+				SpinLockRelease(&gcontext->restrack_lock);
+				return CUDA_SUCCESS;
+			}
 			dlist_delete(&tracker->chain);
-			extra = tracker->u.devmem.extra;
+
+			rc = cuIpcCloseMemHandle(m_deviceptr);
+
 			SpinLockRelease(&gcontext->restrack_lock);
 			free(tracker);
-			return extra;
+
+			return rc;
 		}
 	}
 	SpinLockRelease(&gcontext->restrack_lock);
-	wnotice("Bug? GPU Device Memory (IPC) %p was not tracked", (void *)devptr);
-	return NULL;
+	wnotice("Bug? GPU Device Memory (IPC) %p was not tracked",
+			(void *)m_deviceptr);
+	return CUDA_ERROR_INVALID_VALUE;
 }
 
 /*

@@ -107,18 +107,10 @@ typedef struct
 	} while(0)
 
 /*
- * definitions for on-GPU data store
+ * support for gstore_fdw
  */
-typedef struct
-{
-	cl_ulong	total_nitems;
-	cl_int		cuda_dindex;
-	cl_int		nchunks;
-	kern_data_store *kds[FLEXIBLE_ARRAY_MEMBER];
-} kern_reggstore;
-
 #ifdef __CUDACC__
-STROMCL_SIMPLE_TYPE_TEMPLATE(reggstore, kern_reggstore *)
+STROMCL_SIMPLE_TYPE_TEMPLATE(reggstore, kern_data_store *)
 #endif
 
 #endif	/* CUDA_PLCUDA.H */
