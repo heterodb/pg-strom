@@ -27,44 +27,26 @@ CREATE CAST (bigint AS tid)
 --
 -- pg_strom installation queries
 --
-CREATE TYPE __pgstrom_device_info AS (
+CREATE TYPE pgstrom.__pgstrom_device_info AS (
   id		int4,
   property	text,
   value		text
 );
-CREATE FUNCTION pgstrom_device_info()
-  RETURNS SETOF __pgstrom_device_info
+CREATE FUNCTION public.pgstrom_device_info()
+  RETURNS SETOF pgstrom.__pgstrom_device_info
   AS 'MODULE_PATHNAME'
   LANGUAGE C STRICT;
 
-CREATE TYPE __pgstrom_device_preserved_meminfo AS (
+CREATE TYPE pgstrom.__pgstrom_device_preserved_meminfo AS (
   device_id int4,
   handle    bytea,
   owner     regrole,
   length    int8
 );
-CREATE FUNCTION pgstrom_device_preserved_meminfo()
-  RETURNS SETOF __pgstrom_device_preserved_meminfo
+CREATE FUNCTION public.pgstrom_device_preserved_meminfo()
+  RETURNS SETOF pgstrom.__pgstrom_device_preserved_meminfo
   AS 'MODULE_PATHNAME'
   LANGUAGE C STRICT;
-
---CREATE TYPE __pgstrom_program_info AS (
---  addr			int8,
---  length		int8,
---  active		bool,
---  status		text,
---  crc32			int4,
---  flags			int4,
---  kern_define   text,
---  kern_source	text,
---  kern_binary	bytea,
---  error_msg		text,
---  backends		text
---);
---CREATE FUNCTION pgstrom_program_info()
---  RETURNS SETOF __pgstrom_program_info
---  AS 'MODULE_PATHNAME'
---  LANGUAGE C STRICT;
 
 --
 -- Functions/Languages to support PL/CUDA
@@ -141,7 +123,7 @@ CREATE FUNCTION pgstrom.reggstore_send(reggstore)
   RETURNS bytea
   AS 'MODULE_PATHNAME','pgstrom_reggstore_send'
   LANGUAGE C STRICT IMMUTABLE;
-CREATE TYPE reggstore
+CREATE TYPE public.reggstore
 (
   input = pgstrom.reggstore_in,
   output = pgstrom.reggstore_out,
@@ -165,7 +147,7 @@ CREATE CAST (smallint AS reggstore)
 CREATE CAST (bigint AS reggstore)
   WITH FUNCTION oid(bigint) AS IMPLICIT;
 
-CREATE FUNCTION gstore_export_ipchandle(reggstore)
+CREATE FUNCTION public.gstore_export_ipchandle(reggstore)
   RETURNS bytea
   AS 'MODULE_PATHNAME','pgstrom_gstore_export_ipchandle'
   LANGUAGE C STRICT;

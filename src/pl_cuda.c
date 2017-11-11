@@ -106,6 +106,9 @@ typedef struct plcudaTask
 	bool			exec_post_kernel;
 	bool			has_cpu_fallback;
 	CUdeviceptr		m_results_buf;	/* results buffer as unified memory */
+	List		   *gstore_oid_list;	/* OID of GpuStore foreign table */
+	List		   *gstore_devptr_list;	/* CUdeviceptr of GpuStore */
+	List		   *gstore_dindex_list;	/* Preferable dindex if any */
 	kern_plcuda		kern;
 } plcudaTask;
 
@@ -1057,6 +1060,16 @@ plcuda_codegen_part(StringInfo kern,
 	{
 		Oid		type_oid = procForm->proargtypes.values[i];
 
+		/* special case if reggstore type */
+		if (type_oid == get_reggstore_type_oid())
+		{
+			appendStringInfo(
+				kern,
+				"  kern_reggstore_t *arg%u __attribute__((unused));\n",
+				i+1);
+			continue;
+		}
+
 		dtype = pgstrom_devtype_lookup(type_oid);
 		if (!dtype)
 			elog(ERROR, "cache lookup failed for type '%s'",
@@ -1079,6 +1092,16 @@ plcuda_codegen_part(StringInfo kern,
 	for (i=0; i < procForm->pronargs; i++)
 	{
 		Oid		type_oid = procForm->proargtypes.values[i];
+
+		/* special case if reggstore type */
+		if (type_oid == get_reggstore_type_oid())
+		{
+			appendStringInfo(
+				kern,
+				"  arg%u = pg_reggstore_param(kcxt,%d);\n",
+				i+1, i);
+			continue;
+		}
 
 		dtype = pgstrom_devtype_lookup(type_oid);
 		if (!dtype)
@@ -1347,11 +1370,27 @@ plcuda_cleanup_resources(ResourceReleasePhase phase,
 }
 
 static inline kern_colmeta
-__setup_kern_colmeta(Oid type_oid, int arg_index)
+__setup_kern_colmeta(Oid type_oid, int attnum)
 {
 	HeapTuple		tuple;
 	Form_pg_type	typeForm;
 	kern_colmeta	result;
+
+	/* special case handling for reggstore if PL/CUDA used */
+	if (type_oid == get_reggstore_type_oid())
+	{
+		result.attbyval = true;
+		result.attalign = sizeof(cl_long);
+		result.attlen = sizeof(CUdeviceptr);
+		result.attnum = attnum;
+		result.attcacheoff = -1;	/* we don't use attcacheoff */
+		result.atttypid = type_oid;
+		result.atttypmod = -1;
+		result.va_offset = 0;
+		result.extra_sz = 0;
+
+		return result;
+	}
 
 	tuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(type_oid));
 	if (!HeapTupleIsValid(tuple))
@@ -1362,7 +1401,7 @@ __setup_kern_colmeta(Oid type_oid, int arg_index)
 	result.attbyval = typeForm->typbyval;
 	result.attalign = typealign_get_width(typeForm->typalign);
 	result.attlen = typeForm->typlen;
-	result.attnum = arg_index;
+	result.attnum = attnum;
 	result.attcacheoff = -1;	/* we don't use attcacheoff */
 	result.atttypid = type_oid;
 	result.atttypmod = typeForm->typtypmod;
@@ -1389,8 +1428,22 @@ plcuda_exec_begin(HeapTuple protup, FunctionCallInfo fcinfo)
 	StringInfoData	kern_define;
 	ProgramId		program_id;
 	int				i, n_meta;
+	int				cuda_dindex = -1;
 
-	gcontext = AllocGpuContext(-1, true);
+	/*
+	 * NOTE: In case when PL/CUDA function call contains gstore_fdw in
+	 * the argument list, some of them might be pinned to a particular
+	 * GPU device. In this case, we set up GpuContext on the preferable
+	 * location.
+	 *
+	 * FIXME: If a particular PL/CUDA function is invoked multiple times
+	 * in a single query, right now, it cannot have gstore_fdw which are
+	 * pinned to the different devices from the former invocations cases.
+	 * For more ideal performance, GPU kernel should be also built to
+	 * the dedicated device instead of the common capability.
+	 */
+	cuda_dindex = gstore_fdw_preferable_device(fcinfo);
+	gcontext = AllocGpuContext(cuda_dindex, true);
 	ActivateGpuContext(gcontext);
 	/* setup a dummy GTS for PL/CUDA (see pgstromInitGpuTaskState) */
 	plts = MemoryContextAllocZero(CurTransactionContext,
@@ -1443,7 +1496,7 @@ plcuda_exec_begin(HeapTuple protup, FunctionCallInfo fcinfo)
 	{
 		Oid		argtype_oid = procForm->proargtypes.values[i];
 
-		kplcuda->argmeta[i] = __setup_kern_colmeta(argtype_oid, i);
+		kplcuda->argmeta[i] = __setup_kern_colmeta(argtype_oid, i+1);
 	}
 
 	/* also carry attributes of sub-fields if result is composite type */
@@ -1461,7 +1514,7 @@ plcuda_exec_begin(HeapTuple protup, FunctionCallInfo fcinfo)
 					 i+1, ret_reloid);
 			attr = (Form_pg_attribute)GETSTRUCT(tup);
 			kplcuda->argmeta[procForm->pronargs + i]
-				= __setup_kern_colmeta(attr->atttypid, i);
+				= __setup_kern_colmeta(attr->atttypid, i+1);
 			ReleaseSysCache(tup);
 		}
 	}
@@ -1587,10 +1640,19 @@ create_plcuda_task(plcudaTaskState *plts, FunctionCallInfo fcinfo,
 	kern_plcuda	   *kplcuda_head = plts->kplcuda_head;
 	Size			total_length;
 	Size			offset;
+	List		   *gstore_oid_list;
+	List		   *gstore_devptr_list;
+	List		   *gstore_dindex_list;
 	CUdeviceptr		m_deviceptr;
 	CUresult		rc;
 	int				i;
 
+	/* load gstore_fdw if any */
+	gstore_fdw_load_function_args(gcontext,
+								  fcinfo,
+								  &gstore_oid_list,
+								  &gstore_devptr_list,
+								  &gstore_dindex_list);
 	/* calculation of the length */
 	Assert(fcinfo->nargs == kplcuda_head->nargs);
 	Assert(kplcuda_head->length
@@ -1604,11 +1666,13 @@ create_plcuda_task(plcudaTaskState *plts, FunctionCallInfo fcinfo,
 										poffset[fcinfo->nargs]));
 	for (i=0; i < fcinfo->nargs; i++)
 	{
-		kern_colmeta	cmeta = plts->kplcuda_head->argmeta[i];
+		kern_colmeta	cmeta = kplcuda_head->argmeta[i];
 
 		if (fcinfo->argnull[i])
 			continue;
-		if (cmeta.attlen > 0)
+		if (cmeta.atttypid == get_reggstore_type_oid())
+			total_length += MAXALIGN(sizeof(CUdeviceptr));
+		else if (cmeta.attlen > 0)
 			total_length += MAXALIGN(cmeta.attlen);
 		else
 			total_length += MAXALIGN(toast_raw_datum_size(fcinfo->arg[i]));
@@ -1634,6 +1698,9 @@ create_plcuda_task(plcudaTaskState *plts, FunctionCallInfo fcinfo,
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on gpuMemAllocManaged: %s", errorText(rc));
 	}
+	ptask->gstore_oid_list = gstore_oid_list;
+	ptask->gstore_devptr_list = gstore_devptr_list;
+
 	/* setup kern_plcuda */
 	memcpy(&ptask->kern, kplcuda_head, kplcuda_head->length);
 	ptask->kern.working_bufsz = working_bufsz;
@@ -1650,29 +1717,61 @@ create_plcuda_task(plcudaTaskState *plts, FunctionCallInfo fcinfo,
 								 poffset[fcinfo->nargs]));
 	for (i=0; i < fcinfo->nargs; i++)
 	{
-		kern_colmeta	cmeta = plts->kplcuda_head->argmeta[i];
+		kern_colmeta	cmeta = kplcuda_head->argmeta[i];
 
 		if (fcinfo->argnull[i])
 			kparams->poffset[i] = 0;	/* null */
-		else
+		else if (cmeta.atttypid == get_reggstore_type_oid())
 		{
-			kparams->poffset[i] = offset;
-			if (cmeta.attbyval)
+			ListCell   *lc1, *lc2;
+			Oid			gstore_oid = DatumGetObjectId(fcinfo->arg[i]);
+			CUdeviceptr	m_deviceptr = 0L;
+
+			forboth (lc1, ptask->gstore_oid_list,
+					 lc2, ptask->gstore_devptr_list)
 			{
-				Assert(cmeta.attlen > 0);
-				memcpy((char *)kparams + offset,
-					   &fcinfo->arg[i],
-					   cmeta.attlen);
-				offset += MAXALIGN(cmeta.attlen);
+				if (lfirst_oid(lc1) == gstore_oid)
+				{
+					m_deviceptr = (CUdeviceptr) lfirst(lc2);
+					break;
+				}
 			}
+			if (m_deviceptr == 0L)
+				kparams->poffset[i] = 0;	/* empty gstore deal as NULL */
 			else
 			{
-				char   *vl_ptr = (char *)PG_DETOAST_DATUM(fcinfo->arg[i]);
-				Size	vl_len = VARSIZE_ANY(vl_ptr);
-
-				memcpy((char *)kparams + offset, vl_ptr, vl_len);
-				offset += MAXALIGN(vl_len);
+				kparams->poffset[i] = offset;
+				memcpy((char *)kparams + offset,
+					   &m_deviceptr,
+					   sizeof(CUdeviceptr));
+				offset += MAXALIGN(sizeof(CUdeviceptr));
 			}
+		}
+		else if (cmeta.attbyval)
+		{
+			kparams->poffset[i] = offset;
+			Assert(cmeta.attlen > 0);
+			memcpy((char *)kparams + offset,
+				   &fcinfo->arg[i],
+				   cmeta.attlen);
+			offset += MAXALIGN(cmeta.attlen);
+		}
+		else if (cmeta.attlen > 0)
+		{
+			kparams->poffset[i] = offset;
+			memcpy((char *)kparams + offset,
+				   DatumGetPointer(fcinfo->arg[i]),
+				   cmeta.attlen);
+			offset += MAXALIGN(cmeta.attlen);
+		}
+		else
+		{
+			char   *vl_ptr = (char *)PG_DETOAST_DATUM(fcinfo->arg[i]);
+			Size	vl_len = VARSIZE_ANY(vl_ptr);
+
+			kparams->poffset[i] = offset;
+			memcpy((char *)kparams + offset, vl_ptr, vl_len);
+			offset += MAXALIGN(vl_len);
 		}
 	}
 	kparams->nparams = fcinfo->nargs;
@@ -1699,6 +1798,7 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 	kern_errorbuf	kerror;
 	Datum			retval = 0;
 	bool			isnull = false;
+	ListCell	   *lc1, *lc2, *lc3;
 
 	if (!flinfo->fn_extra)
 	{
@@ -1988,6 +2088,20 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 					 errmsg("PL/CUDA execution error (%s)",
 							errorTextKernel(&kerror))));
 		}
+	}
+	/* close gstore_fdw if any */
+	forthree(lc1, ptask->gstore_oid_list,
+			 lc2, ptask->gstore_devptr_list,
+			 lc3, ptask->gstore_dindex_list)
+	{
+		Oid			gstore_oid __attribute__((unused)) = lfirst_oid(lc1);
+		CUdeviceptr	m_deviceptr = (CUdeviceptr) lfirst(lc2);
+		cl_int		cuda_dindex = lfirst_int(lc3);
+
+		if (cuda_dindex < 0)
+			gpuMemFree(plts->gts.gcontext, m_deviceptr);
+		else
+			gpuIpcCloseMemHandle(plts->gts.gcontext, m_deviceptr);
 	}
 	gpuMemFree(plts->gts.gcontext, (CUdeviceptr)ptask);
 

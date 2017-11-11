@@ -114,7 +114,26 @@ typedef struct
 //#define GSTORE_FDW_FORMAT__NUMPY
 
 #ifdef __CUDACC__
-STROMCL_SIMPLE_TYPE_TEMPLATE(reggstore, void *)
+typedef union {
+	kern_data_store	   *kds;	/* GSTORE_FDW_FORMAT__PGSTROM */
+} kern_reggstore_t;
+
+STATIC_INLINE(kern_reggstore_t *)
+pg_reggstore_param(kern_context *kcxt, cl_uint param_id)
+{
+	kern_parambuf	   *kparams = kcxt->kparams;
+	kern_reggstore_t   *gstore = NULL;
+
+	if (param_id < kparams->nparams &&
+		kparams->poffset[param_id] > 0)
+	{
+		void   *ptr = ((char *)kparams + kparams->poffset[param_id]);
+
+		gstore = *((kern_reggstore_t **)ptr);
+	}
+	return gstore;
+}
+
 #endif
 
 #endif	/* CUDA_PLCUDA.H */

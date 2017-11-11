@@ -26,6 +26,7 @@
 #include "catalog/pg_foreign_server.h"
 #include "catalog/pg_foreign_table.h"
 #include "catalog/pg_language.h"
+#include "catalog/pg_namespace.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
 #include "commands/defrem.h"
@@ -38,6 +39,7 @@
 #include "storage/procarray.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
+#include "utils/inval.h"
 #include "utils/memutils.h"
 #include "utils/lsyscache.h"
 #include "utils/pg_crc.h"
@@ -107,6 +109,7 @@ static shmem_startup_hook_type shmem_startup_next;
 static object_access_hook_type object_access_next;
 static GpuStoreHead	   *gstore_head = NULL;
 static GpuStoreMap	   *gstore_maps = NULL;
+static Oid				reggstore_type_oid = InvalidOid;
 
 /*
  * gstore_fdw_satisfies_visibility - equivalent to HeapTupleSatisfiesMVCC,
@@ -1595,6 +1598,36 @@ pgstrom_reggstore_send(PG_FUNCTION_ARGS)
 PG_FUNCTION_INFO_V1(pgstrom_reggstore_send);
 
 /*
+ * get_reggstore_type_oid
+ */
+Oid
+get_reggstore_type_oid(void)
+{
+	if (!OidIsValid(reggstore_type_oid))
+	{
+		Oid		temp_oid;
+
+		temp_oid = GetSysCacheOid2(TYPENAMENSP,
+								   CStringGetDatum("reggstore"),
+								   ObjectIdGetDatum(PG_PUBLIC_NAMESPACE));
+		if (!OidIsValid(temp_oid) ||
+			!type_is_reggstore(temp_oid))
+			elog(ERROR, "type \"reggstore\" is not defined");
+		reggstore_type_oid = temp_oid;
+	}
+	return reggstore_type_oid;
+}
+
+/*
+ * reset_reggstore_type_oid
+ */
+static void
+reset_reggstore_type_oid(Datum arg, int cacheid, uint32 hashvalue)
+{
+	reggstore_type_oid = InvalidOid;
+}
+
+/*
  * pgstrom_gstore_export_ipchandle
  */
 Datum
@@ -1764,28 +1797,115 @@ load_pinned_gstore_fdw(GpuContext *gcontext, Relation frel)
 }
 
 /*
- * pgstrom_load_gstore_fdw
+ * gstore_fdw_preferable_device
  */
-CUdeviceptr
-pgstrom_load_gstore_fdw(GpuContext *gcontext, Oid gstore_oid, bool *is_pinned)
+int
+gstore_fdw_preferable_device(FunctionCallInfo fcinfo)
 {
-	Relation	frel;
-	int			pinning;
-	CUdeviceptr	result;
+	FmgrInfo   *flinfo = fcinfo->flinfo;
+	Oid			reggstore_typeid = get_reggstore_type_oid();
+	HeapTuple	protup;
+	oidvector  *proargtypes;
+	cl_int		i, cuda_dindex = -1;
 
-	if (!relation_is_gstore_fdw(gstore_oid))
-		elog(ERROR, "relation %s is not gstore_fdw foreign table",
-			 get_rel_name(gstore_oid));
+	protup = SearchSysCache1(PROCOID, ObjectIdGetDatum(flinfo->fn_oid));
+	if (!HeapTupleIsValid(protup))
+		elog(ERROR, "cache lookup failed function %u", flinfo->fn_oid);
+	proargtypes = &((Form_pg_proc)GETSTRUCT(protup))->proargtypes;
+	for (i=0; i < proargtypes->dim1; i++)
+	{
+		Oid		gstore_oid;
+		int		pinning;
 
-	frel = heap_open(gstore_oid, AccessShareLock);
-	gstore_fdw_read_options(gstore_oid, &pinning);
-	if (pinning < 0)
-		result = load_normal_gstore_fdw(gcontext, frel);
-	else
-		result = load_pinned_gstore_fdw(gcontext, frel);
-	heap_close(frel, NoLock);
+		if (proargtypes->values[i] != reggstore_typeid)
+			continue;
+		gstore_oid = DatumGetObjectId(fcinfo->arg[i]);
+		if (!relation_is_gstore_fdw(gstore_oid))
+			elog(ERROR, "relation %u is not gstore_fdw foreign table",
+				 gstore_oid);
+		gstore_fdw_read_options(gstore_oid, &pinning);
+		if (pinning >= 0)
+		{
+			Assert(pinning < numDevAttrs);
+			if (cuda_dindex < 0)
+				cuda_dindex = pinning;
+			else if (cuda_dindex != pinning)
+				elog(ERROR, "function %s: called with gstore_fdw foreign tables in different location",
+					 format_procedure(flinfo->fn_oid));
+		}
+	}
+	ReleaseSysCache(protup);
 
-	return result;
+	return cuda_dindex;
+}
+
+/*
+ * gstore_fdw_load_function_args
+ */
+void
+gstore_fdw_load_function_args(GpuContext *gcontext,
+							  FunctionCallInfo fcinfo,
+							  List **p_gstore_oid_list,
+							  List **p_gstore_devptr_list,
+							  List **p_gstore_dindex_list)
+{
+	FmgrInfo   *flinfo = fcinfo->flinfo;
+	Oid			reggstore_typeid = get_reggstore_type_oid();
+	HeapTuple	protup;
+	oidvector  *proargtypes;
+	List	   *gstore_oid_list = NIL;
+	List	   *gstore_devptr_list = NIL;
+	List	   *gstore_dindex_list = NIL;
+	ListCell   *lc;
+	int			i;
+
+	protup = SearchSysCache1(PROCOID, ObjectIdGetDatum(flinfo->fn_oid));
+	if (!HeapTupleIsValid(protup))
+		elog(ERROR, "cache lookup failed function %u", flinfo->fn_oid);
+	proargtypes = &((Form_pg_proc)GETSTRUCT(protup))->proargtypes;
+	for (i=0; i < proargtypes->dim1; i++)
+	{
+		Relation	frel;
+		Oid			gstore_oid;
+		int			pinning;
+		CUdeviceptr	m_deviceptr;
+
+		if (proargtypes->values[i] != reggstore_typeid)
+			continue;
+		gstore_oid = DatumGetObjectId(fcinfo->arg[i]);
+		/* already loaded? */
+		foreach (lc, gstore_oid_list)
+		{
+			if (gstore_oid == lfirst_oid(lc))
+				break;
+		}
+		if (lc == NULL)
+			continue;
+
+		if (!relation_is_gstore_fdw(gstore_oid))
+			elog(ERROR, "relation %u is not gstore_fdw foreign table",
+				 gstore_oid);
+
+		gstore_fdw_read_options(gstore_oid, &pinning);
+		if (pinning >= 0 && gcontext->cuda_dindex != pinning)
+			elog(ERROR, "unable to load gstore_fdw foreign table \"%s\" on the GPU device %d; GpuContext is assigned on the device %d",
+				 get_rel_name(gstore_oid), pinning, gcontext->cuda_dindex);
+
+		frel = heap_open(gstore_oid, AccessShareLock);
+		if (pinning < 0)
+			m_deviceptr = load_normal_gstore_fdw(gcontext, frel);
+		else
+			m_deviceptr = load_pinned_gstore_fdw(gcontext, frel);
+		heap_close(frel, NoLock);
+
+		gstore_oid_list = lappend_oid(gstore_oid_list, gstore_oid);
+		gstore_devptr_list = lappend(gstore_devptr_list,
+									 (void *)m_deviceptr);
+		gstore_dindex_list = lappend_int(gstore_dindex_list, pinning);
+	}
+	*p_gstore_oid_list = gstore_oid_list;
+	*p_gstore_devptr_list = gstore_devptr_list;
+	*p_gstore_dindex_list = gstore_dindex_list;
 }
 
 /*
@@ -1850,4 +1970,7 @@ pgstrom_init_gstore_fdw(void)
 
 	RegisterXactCallback(gstoreXactCallback, NULL);
 	//RegisterSubXactCallback(gstoreSubXactCallback, NULL);
+
+	/* invalidation of reggstore_oid variable */
+	CacheRegisterSyscacheCallback(TYPEOID, reset_reggstore_type_oid, 0);
 }
