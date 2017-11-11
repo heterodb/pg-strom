@@ -101,7 +101,8 @@ typedef struct
 } GpuStoreHead;
 
 /* ---- static functions ---- */
-static Oid	gstore_fdw_read_options(Oid table_oid, int *p_pinning);
+static void	gstore_fdw_read_options(Oid gstore_oid,
+									int *p_pinning, int *p_format);
 
 /* ---- static variables ---- */
 static int				gstore_max_nchunks;		/* GUC */
@@ -883,9 +884,10 @@ gstoreBeginForeignModify(ModifyTableState *mtstate,
 	gstoreLoadState *gs_lstate;
 	MemoryContext	oldcxt;
 	int				pinning;
+	int				format;
 	cl_int			i, unitsz;
 
-	gstore_fdw_read_options(RelationGetRelid(relation), &pinning);
+	gstore_fdw_read_options(RelationGetRelid(relation), &pinning, &format);
 	if (pinning >= 0)
 	{
 		gcontext = AllocGpuContext(pinning, false);
@@ -1357,50 +1359,87 @@ relation_is_gstore_fdw(Oid table_oid)
 /*
  * gstore_fdw_read_options
  */
-static Oid
-gstore_fdw_read_options(Oid table_oid, int *p_pinning)
+static void
+__gstore_fdw_read_options(List *options,
+						  int *p_pinning,
+						  int *p_format)
+{
+	ListCell   *lc;
+	int			pinning = -1;
+	int			format = -1;
+
+	foreach (lc, options)
+	{
+		DefElem	   *defel = lfirst(lc);
+
+		if (strcmp(defel->defname, "pinning") == 0)
+		{
+			if (pinning >= 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("\"pinning\" option appears twice")));
+			pinning = atoi(defGetString(defel));
+			if (pinning < 0 || pinning >= numDevAttrs)
+				ereport(ERROR,
+						(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+						 errmsg("\"pinning\" on unavailable GPU device")));
+		}
+		else if (strcmp(defel->defname, "format") == 0)
+		{
+			char   *format_name;
+
+			if (format >= 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("\"format\" option appears twice")));
+			format_name = defGetString(defel);
+			if (strcmp(format_name, "pgstrom") == 0 ||
+				strcmp(format_name, "default") == 0)
+				format = GSTORE_FDW_FORMAT__PGSTROM;
+			else
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("gstore_fdw: format \"%s\" is unknown",
+								format_name)));
+		}
+		else
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_SYNTAX_ERROR),
+					 errmsg("gstore_fdw: unknown option \"%s\"",
+							defel->defname)));
+		}
+	}
+	/* put default if not specified */
+	if (format < 0)
+		format = GSTORE_FDW_FORMAT__PGSTROM;
+
+	/* result the results */
+	if (p_pinning)
+		*p_pinning = pinning;
+	if (p_format)
+		*p_format = format;
+}
+
+
+static void
+gstore_fdw_read_options(Oid gstore_oid, int *p_pinning, int *p_format)
 {
 	HeapTuple	tup;
 	Datum		datum;
 	bool		isnull;
-	Oid			fserv_oid;
-	char	   *referenced = NULL;
-	int			pinning = -1;
+	List	   *options = NIL;
 
-	tup = SearchSysCache1(FOREIGNTABLEREL, ObjectIdGetDatum(table_oid));
+	tup = SearchSysCache1(FOREIGNTABLEREL, ObjectIdGetDatum(gstore_oid));
 	if (!HeapTupleIsValid(tup))
-		elog(ERROR, "cache lookup failed for foreign table %u", table_oid);
-	fserv_oid = ((Form_pg_foreign_table) GETSTRUCT(tup))->ftserver;
+		elog(ERROR, "cache lookup failed for foreign table %u", gstore_oid);
 	datum = SysCacheGetAttr(FOREIGNTABLEREL, tup,
 							Anum_pg_foreign_table_ftoptions,
 							&isnull);
 	if (!isnull)
-	{
-		List	   *options = untransformRelOptions(datum);
-		ListCell   *lc;
-
-		foreach (lc, options)
-		{
-			DefElem	   *defel = lfirst(lc);
-
-			if (strcmp(defel->defname, "pinning") == 0)
-			{
-				pinning = atoi(defGetString(defel));
-				if (pinning < 0 || pinning >= numDevAttrs)
-					elog(ERROR, "pinning on unknown GPU device: %d", pinning);
-			}
-			else
-				elog(ERROR, "Unknown FDW option: '%s'='%s'",
-					 defel->defname, defGetString(defel));
-		}
-	}
+		options = untransformRelOptions(datum);
+	__gstore_fdw_read_options(options, p_pinning, p_format);
 	ReleaseSysCache(tup);
-	if (pinning >= 0 && referenced)
-		elog(ERROR, "cannot use 'reference' and 'pinning' option together");
-
-	if (p_pinning)
-		*p_pinning = pinning;
-	return fserv_oid;
 }
 
 /*
@@ -1460,33 +1499,20 @@ pgstrom_gstore_fdw_validator(PG_FUNCTION_ARGS)
 {
 	List	   *options = untransformRelOptions(PG_GETARG_DATUM(0));
 	Oid			catalog = PG_GETARG_OID(1);
-	ListCell   *lc;
-	int			pinning = -1;
+	int			pinning;
+	int			format;
 
-	foreach(lc, options)
+	if (catalog == ForeignTableRelationId)
+		__gstore_fdw_read_options(options, &pinning, &format);
+	else if (options != NIL)
 	{
-		DefElem	   *defel = lfirst(lc);
-
-		if (strcmp(defel->defname, "pinning") == 0 &&
-			catalog == ForeignTableRelationId)
-		{
-			if (pinning >= 0)
-				ereport(ERROR,
-						(errcode(ERRCODE_SYNTAX_ERROR),
-						 errmsg("\"pinning\" option appears twice")));
-			pinning = atoi(defGetString(defel));
-			if (pinning < 0 || pinning >= numDevAttrs)
-				ereport(ERROR,
-						(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-						 errmsg("\"pinning\" on unavailable GPU device")));
-		}
+		if (catalog == ForeignServerRelationId)
+			elog(ERROR, "gstore_fdw: no options are supported on SERVER");
+		else if (catalog == ForeignDataWrapperRelationId)
+			elog(ERROR, "gstore_fdw: no options are supported on FOREIGN DATA WRAPPER");
 		else
-		{
-			ereport(ERROR,
-					(errcode(ERRCODE_SYNTAX_ERROR),
-					 errmsg("FDW option \"%s\" = \"%s\" is not supported",
-							defel->defname, defGetString(defel))));
-		}
+			elog(ERROR, "gstore_fdw: no options are supported on catalog %s",
+				 get_rel_name(catalog));
 	}
 	PG_RETURN_VOID();
 }
@@ -1644,7 +1670,7 @@ pgstrom_gstore_export_ipchandle(PG_FUNCTION_ARGS)
 			 gstore_oid);
 
 	frel = heap_open(gstore_oid, AccessShareLock);
-	gstore_fdw_read_options(gstore_oid, &pinning);
+	gstore_fdw_read_options(gstore_oid, &pinning, NULL);
 	if (pinning < 0)
 		elog(ERROR, "gstore_fdw: foreign table \"%s\" is not pinned on a particular GPU devices",
 			 RelationGetRelationName(frel));
@@ -1822,7 +1848,7 @@ gstore_fdw_preferable_device(FunctionCallInfo fcinfo)
 		if (!relation_is_gstore_fdw(gstore_oid))
 			elog(ERROR, "relation %u is not gstore_fdw foreign table",
 				 gstore_oid);
-		gstore_fdw_read_options(gstore_oid, &pinning);
+		gstore_fdw_read_options(gstore_oid, &pinning, NULL);
 		if (pinning >= 0)
 		{
 			Assert(pinning < numDevAttrs);
@@ -1884,7 +1910,7 @@ gstore_fdw_load_function_args(GpuContext *gcontext,
 			elog(ERROR, "relation %u is not gstore_fdw foreign table",
 				 gstore_oid);
 
-		gstore_fdw_read_options(gstore_oid, &pinning);
+		gstore_fdw_read_options(gstore_oid, &pinning, NULL);
 		if (pinning >= 0 && gcontext->cuda_dindex != pinning)
 			elog(ERROR, "unable to load gstore_fdw foreign table \"%s\" on the GPU device %d; GpuContext is assigned on the device %d",
 				 get_rel_name(gstore_oid), pinning, gcontext->cuda_dindex);
@@ -1905,6 +1931,90 @@ gstore_fdw_load_function_args(GpuContext *gcontext,
 	*p_gstore_devptr_list = gstore_devptr_list;
 	*p_gstore_dindex_list = gstore_dindex_list;
 }
+
+/*
+ * pgstrom_gstore_fdw_format
+ */
+Datum
+pgstrom_gstore_fdw_format(PG_FUNCTION_ARGS)
+{
+	Oid				gstore_oid = PG_GETARG_OID(0);
+
+	if (!relation_is_gstore_fdw(gstore_oid))
+		PG_RETURN_NULL();
+	/* currently, only 'pgstrom' is the supported format */
+	PG_RETURN_TEXT_P(cstring_to_text("pgstrom"));
+}
+PG_FUNCTION_INFO_V1(pgstrom_gstore_fdw_format);
+
+/*
+ * pgstrom_gstore_fdw_height
+ */
+Datum
+pgstrom_gstore_fdw_height(PG_FUNCTION_ARGS)
+{
+	Oid				gstore_oid = PG_GETARG_OID(0);
+	Relation		frel;
+	GpuStoreChunk  *gs_chunk;
+	int64			retval = 0;
+
+	if (!relation_is_gstore_fdw(gstore_oid))
+		PG_RETURN_NULL();
+
+	frel = heap_open(gstore_oid, AccessShareLock);
+	gs_chunk = gstore_fdw_lookup_chunk(frel, GetActiveSnapshot());
+	if (gs_chunk)
+		retval = gs_chunk->kds_nitems;
+	heap_close(frel, NoLock);
+
+	PG_RETURN_INT64(retval);
+}
+PG_FUNCTION_INFO_V1(pgstrom_gstore_fdw_height);
+
+/*
+ * pgstrom_gstore_fdw_width
+ */
+Datum
+pgstrom_gstore_fdw_width(PG_FUNCTION_ARGS)
+{
+	Oid				gstore_oid = PG_GETARG_OID(0);
+	Relation		frel;
+	int64			retval = 0;
+
+	if (!relation_is_gstore_fdw(gstore_oid))
+		PG_RETURN_NULL();
+
+	frel = heap_open(gstore_oid, AccessShareLock);
+	retval = RelationGetNumberOfAttributes(frel);
+	heap_close(frel, NoLock);
+
+	PG_RETURN_INT64(retval);
+}
+PG_FUNCTION_INFO_V1(pgstrom_gstore_fdw_width);
+
+/*
+ * pgstrom_gstore_fdw_rawsize
+ */
+Datum
+pgstrom_gstore_fdw_rawsize(PG_FUNCTION_ARGS)
+{
+	Oid				gstore_oid = PG_GETARG_OID(0);
+	Relation		frel;
+	GpuStoreChunk  *gs_chunk;
+	int64			retval = 0;
+
+	if (!relation_is_gstore_fdw(gstore_oid))
+		PG_RETURN_NULL();
+
+	frel = heap_open(gstore_oid, AccessShareLock);
+	gs_chunk = gstore_fdw_lookup_chunk(frel, GetActiveSnapshot());
+	if (gs_chunk)
+		retval = gs_chunk->kds_length;
+	heap_close(frel, NoLock);
+
+	PG_RETURN_INT64(retval);
+}
+PG_FUNCTION_INFO_V1(pgstrom_gstore_fdw_rawsize);
 
 /*
  * pgstrom_startup_gstore_fdw

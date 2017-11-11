@@ -967,6 +967,10 @@ extern void gstore_fdw_load_function_args(GpuContext *gcontext,
 										  List **p_gstore_oid_list,
 										  List **p_gstore_devptr_list,
 										  List **p_gstore_dindex_list);
+extern Datum pgstrom_gstore_fdw_format(PG_FUNCTION_ARGS);
+extern Datum pgstrom_gstore_fdw_height(PG_FUNCTION_ARGS);
+extern Datum pgstrom_gstore_fdw_width(PG_FUNCTION_ARGS);
+extern Datum pgstrom_gstore_fdw_rawsize(PG_FUNCTION_ARGS);
 extern void pgstrom_init_gstore_fdw(void);
 
 /*

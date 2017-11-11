@@ -152,6 +152,36 @@ CREATE FUNCTION public.gstore_export_ipchandle(reggstore)
   AS 'MODULE_PATHNAME','pgstrom_gstore_export_ipchandle'
   LANGUAGE C STRICT;
 
+CREATE FUNCTION public.lo_export_ipchandle(oid)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_lo_export_ipchandle'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION public.lo_import_ipchandle(bytea)
+  RETURNS oid
+  AS 'MODULE_PATHNAME','pgstrom_lo_import_ipchandle'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION public.gstore_fdw_format(reggstore)
+  RETURNS text
+  AS 'MODULE_PATHNAME','pgstrom_gstore_fdw_format'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION public.gstore_fdw_height(reggstore)
+  RETURNS bigint
+  AS 'MODULE_PATHNAME','pgstrom_gstore_fdw_height'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION public.gstore_fdw_width(reggstore)
+  RETURNS bigint
+  AS 'MODULE_PATHNAME','pgstrom_gstore_fdw_width'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION public.gstore_fdw_rawsize(reggstore)
+  RETURNS bigint
+  AS 'MODULE_PATHNAME','pgstrom_gstore_fdw_rawsize'
+  LANGUAGE C STRICT;
+
 --
 -- Type re-interpretation routines
 --
