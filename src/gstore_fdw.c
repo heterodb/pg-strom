@@ -1803,7 +1803,6 @@ int
 gstore_fdw_preferable_device(FunctionCallInfo fcinfo)
 {
 	FmgrInfo   *flinfo = fcinfo->flinfo;
-	Oid			reggstore_typeid = get_reggstore_type_oid();
 	HeapTuple	protup;
 	oidvector  *proargtypes;
 	cl_int		i, cuda_dindex = -1;
@@ -1817,7 +1816,7 @@ gstore_fdw_preferable_device(FunctionCallInfo fcinfo)
 		Oid		gstore_oid;
 		int		pinning;
 
-		if (proargtypes->values[i] != reggstore_typeid)
+		if (proargtypes->values[i] != REGGSTOREOID)
 			continue;
 		gstore_oid = DatumGetObjectId(fcinfo->arg[i]);
 		if (!relation_is_gstore_fdw(gstore_oid))
@@ -1850,7 +1849,6 @@ gstore_fdw_load_function_args(GpuContext *gcontext,
 							  List **p_gstore_dindex_list)
 {
 	FmgrInfo   *flinfo = fcinfo->flinfo;
-	Oid			reggstore_typeid = get_reggstore_type_oid();
 	HeapTuple	protup;
 	oidvector  *proargtypes;
 	List	   *gstore_oid_list = NIL;
@@ -1870,7 +1868,7 @@ gstore_fdw_load_function_args(GpuContext *gcontext,
 		int			pinning;
 		CUdeviceptr	m_deviceptr;
 
-		if (proargtypes->values[i] != reggstore_typeid)
+		if (proargtypes->values[i] != REGGSTOREOID)
 			continue;
 		gstore_oid = DatumGetObjectId(fcinfo->arg[i]);
 		/* already loaded? */

@@ -1061,7 +1061,7 @@ plcuda_codegen_part(StringInfo kern,
 		Oid		type_oid = procForm->proargtypes.values[i];
 
 		/* special case if reggstore type */
-		if (type_oid == get_reggstore_type_oid())
+		if (type_oid == REGGSTOREOID)
 		{
 			appendStringInfo(
 				kern,
@@ -1094,7 +1094,7 @@ plcuda_codegen_part(StringInfo kern,
 		Oid		type_oid = procForm->proargtypes.values[i];
 
 		/* special case if reggstore type */
-		if (type_oid == get_reggstore_type_oid())
+		if (type_oid == REGGSTOREOID)
 		{
 			appendStringInfo(
 				kern,
@@ -1377,7 +1377,7 @@ __setup_kern_colmeta(Oid type_oid, int attnum)
 	kern_colmeta	result;
 
 	/* special case handling for reggstore if PL/CUDA used */
-	if (type_oid == get_reggstore_type_oid())
+	if (type_oid == REGGSTOREOID)
 	{
 		result.attbyval = true;
 		result.attalign = sizeof(cl_long);
@@ -1670,7 +1670,7 @@ create_plcuda_task(plcudaTaskState *plts, FunctionCallInfo fcinfo,
 
 		if (fcinfo->argnull[i])
 			continue;
-		if (cmeta.atttypid == get_reggstore_type_oid())
+		if (cmeta.atttypid == REGGSTOREOID)
 			total_length += MAXALIGN(sizeof(CUdeviceptr));
 		else if (cmeta.attlen > 0)
 			total_length += MAXALIGN(cmeta.attlen);
@@ -1721,7 +1721,7 @@ create_plcuda_task(plcudaTaskState *plts, FunctionCallInfo fcinfo,
 
 		if (fcinfo->argnull[i])
 			kparams->poffset[i] = 0;	/* null */
-		else if (cmeta.atttypid == get_reggstore_type_oid())
+		else if (cmeta.atttypid == REGGSTOREOID)
 		{
 			ListCell   *lc1, *lc2;
 			Oid			gstore_oid = DatumGetObjectId(fcinfo->arg[i]);

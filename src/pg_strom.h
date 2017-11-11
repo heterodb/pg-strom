@@ -960,6 +960,7 @@ extern Datum pgstrom_lo_export_ipchandle(PG_FUNCTION_ARGS);
 extern Datum pgstrom_lo_import_ipchandle(PG_FUNCTION_ARGS);
 extern bool type_is_reggstore(Oid type_oid);
 extern Oid	get_reggstore_type_oid(void);
+#define REGGSTOREOID		get_reggstore_type_oid()
 extern int  gstore_fdw_preferable_device(FunctionCallInfo fcinfo);
 extern void gstore_fdw_load_function_args(GpuContext *gcontext,
 										  FunctionCallInfo fcinfo,
