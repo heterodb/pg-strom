@@ -953,11 +953,14 @@ plcuda_code_validation(plcudaCodeProperty *prop,
 	{
 		Oid		argtype_oid = context.proargtypes->values[i];
 
+		if (argtype_oid == REGGSTOREOID)
+			continue;	/* OK, only for PL/CUDA argument */
+
 		dtype = pgstrom_devtype_lookup(argtype_oid);
 		if (!dtype)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("Result type \"%s\" is not device executable",
+					 errmsg("Argument type \"%s\" is not device executable",
 							format_type_be(argtype_oid))));
 		context.p.extra_flags |= dtype->type_flags;
 	}
@@ -1065,7 +1068,7 @@ plcuda_codegen_part(StringInfo kern,
 		{
 			appendStringInfo(
 				kern,
-				"  kern_reggstore_t *arg%u __attribute__((unused));\n",
+				"  kern_reggstore_t arg%u __attribute__((unused));\n",
 				i+1);
 			continue;
 		}
@@ -1442,7 +1445,8 @@ plcuda_exec_begin(HeapTuple protup, FunctionCallInfo fcinfo)
 	 * For more ideal performance, GPU kernel should be also built to
 	 * the dedicated device instead of the common capability.
 	 */
-	cuda_dindex = gstore_fdw_preferable_device(fcinfo);
+	if (fcinfo)
+		cuda_dindex = gstore_fdw_preferable_device(fcinfo);
 	gcontext = AllocGpuContext(cuda_dindex, true);
 	ActivateGpuContext(gcontext);
 	/* setup a dummy GTS for PL/CUDA (see pgstromInitGpuTaskState) */
@@ -1687,7 +1691,7 @@ create_plcuda_task(plcudaTaskState *plts, FunctionCallInfo fcinfo,
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on gpuMemAllocManaged: %s", errorText(rc));
 	ptask = (plcudaTask *) m_deviceptr;
-	memset(ptask, 0, offsetof(plcudaTask, kern));
+	memset(ptask, 0, offsetof(plcudaTask, kern.retmeta));
 	pgstromInitGpuTask(&plts->gts, &ptask->task);
 	if (results_bufsz > 0)
 	{
@@ -1700,6 +1704,7 @@ create_plcuda_task(plcudaTaskState *plts, FunctionCallInfo fcinfo,
 	}
 	ptask->gstore_oid_list = gstore_oid_list;
 	ptask->gstore_devptr_list = gstore_devptr_list;
+	ptask->gstore_dindex_list = gstore_dindex_list;
 
 	/* setup kern_plcuda */
 	memcpy(&ptask->kern, kplcuda_head, kplcuda_head->length);
@@ -1778,7 +1783,7 @@ create_plcuda_task(plcudaTaskState *plts, FunctionCallInfo fcinfo,
 	kparams->length = STROMALIGN(offset);
 	Assert(STROMALIGN(offsetof(plcudaTask, kern)
 					  + kplcuda_head->length)
-		   + kparams->length == total_length);
+		   + kparams->length <= total_length);
 	Assert(plts->last_results_buf == 0UL);
 	plts->last_results_buf = ptask->m_results_buf;
 
@@ -2042,7 +2047,7 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 			{
 				/* inline fixed-length variable */
 				memcpy(&retval, precv->kern.__retval,
-					   precv->kern.retmeta.attbyval);
+					   precv->kern.retmeta.attlen);
 			}
 			else
 			{

@@ -1903,7 +1903,7 @@ gstore_fdw_load_function_args(GpuContext *gcontext,
 			if (gstore_oid == lfirst_oid(lc))
 				break;
 		}
-		if (lc == NULL)
+		if (lc != NULL)
 			continue;
 
 		if (!relation_is_gstore_fdw(gstore_oid))
@@ -1927,6 +1927,7 @@ gstore_fdw_load_function_args(GpuContext *gcontext,
 									 (void *)m_deviceptr);
 		gstore_dindex_list = lappend_int(gstore_dindex_list, pinning);
 	}
+	ReleaseSysCache(protup);
 	*p_gstore_oid_list = gstore_oid_list;
 	*p_gstore_devptr_list = gstore_devptr_list;
 	*p_gstore_dindex_list = gstore_dindex_list;

@@ -551,9 +551,12 @@ GpuContextWorkerReportError(int elevel,
 	Assert(gcontext != NULL);
 	Assert(elevel != 0);
 
-	va_start(va_args, fmt);
-	length = vfprintf(stderr, fmt, va_args);
-	va_end(va_args);
+	if (elevel >= log_min_messages)
+	{
+		va_start(va_args, fmt);
+		length = vfprintf(stderr, fmt, va_args);
+		va_end(va_args);
+	}
 	if (elevel < ERROR)
 		return;
 
