@@ -32,6 +32,9 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/pg_locale.h"
+#if PG_VERSION_NUM >= 100000
+#include "utils/regproc.h"
+#endif
 #include "utils/syscache.h"
 #include "utils/typcache.h"
 #include "pg_strom.h"

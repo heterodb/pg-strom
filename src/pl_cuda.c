@@ -28,6 +28,7 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
+#include "utils/regproc.h"
 #include "utils/syscache.h"
 #include "pg_strom.h"
 #include "cuda_plcuda.h"

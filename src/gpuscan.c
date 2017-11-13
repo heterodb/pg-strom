@@ -49,6 +49,7 @@
 #include "pg_strom.h"
 #include "cuda_numeric.h"
 #include "cuda_gpuscan.h"
+#include <math.h>
 
 static set_rel_pathlist_hook_type	set_rel_pathlist_next;
 static CustomPathMethods	gpuscan_path_methods;
@@ -68,7 +69,7 @@ typedef struct {
 	cl_uint		proj_slot_extra;/* extra requirements if slot format */
 	cl_uint		nrows_per_block;/* estimated tuple density per block */
 	List	   *used_params;
-	List	   *dev_quals;
+	List	   *dev_quals;		/* implicitly-ANDed device quals */
 } GpuScanInfo;
 
 static inline void
@@ -119,7 +120,11 @@ typedef struct {
 	GpuTaskState	gts;
 	GpuScanSharedState *gs_sstate;
 	HeapTupleData	scan_tuple;		/* buffer to fetch tuple */
+#if PG_VERSION_NUM < 100000
 	List		   *dev_quals;		/* quals to be run on the device */
+#else
+	ExprState	   *dev_quals;		/* quals to be run on the device */
+#endif
 	bool			dev_projection;	/* true, if device projection is valid */
 	cl_uint			proj_row_extra;
 	cl_uint			proj_slot_extra;
@@ -295,7 +300,7 @@ cost_discount_gpu_projection(PlannerInfo *root, RelOptInfo *rel,
 void
 cost_gpuscan_common(PlannerInfo *root,
 					RelOptInfo *scan_rel,
-					List *scan_quals,
+					Expr *scan_quals,
 					int parallel_workers,
 					double *p_parallel_divisor,
 					double *p_scan_ntuples,
@@ -322,11 +327,11 @@ cost_gpuscan_common(PlannerInfo *root,
 		   scan_rel->relid < root->simple_rel_array_size);
 
 	/* selectivity of device executable qualifiers */
-	selectivity = clauselist_selectivity(root,
-										 scan_quals,
-										 scan_rel->relid,
-										 JOIN_INNER,
-										 NULL);
+	selectivity = clause_selectivity(root,
+									 (Node *)scan_quals,
+									 scan_rel->relid,
+									 JOIN_INNER,
+									 NULL);
 
 	/* fetch estimated page cost for tablespace containing the table */
 	/*
@@ -422,7 +427,7 @@ cost_gpuscan_common(PlannerInfo *root,
 	}
 
 	/* Cost for GPU qualifiers */
-	cost_qual_eval(&qcost, scan_quals, root);
+	cost_qual_eval_node(&qcost, (Node *)scan_quals, root);
 	startup_cost += qcost.startup;
 	run_cost += qcost.per_tuple * gpu_ratio * ntuples;
 	ntuples *= selectivity;
@@ -453,6 +458,7 @@ create_gpuscan_path(PlannerInfo *root,
 	CustomPath	   *cpath;
 	ParamPathInfo  *param_info;
 	List		   *ppi_quals;
+	Expr		   *dev_quals_expr;
 	Cost			startup_cost;
 	Cost			run_cost;
 	Cost			startup_delay;
@@ -463,7 +469,9 @@ create_gpuscan_path(PlannerInfo *root,
 	double			cpu_per_tuple = 0.0;
 
 	/* cost for disk i/o + GPU qualifiers */
-	cost_gpuscan_common(root, baserel, dev_quals,
+	dev_quals_expr = make_flat_ands_explicit(dev_quals);
+	cost_gpuscan_common(root, baserel,
+						dev_quals_expr,
 						parallel_nworkers,
 						&parallel_divisor,
 						&scan_ntuples,
@@ -485,6 +493,7 @@ create_gpuscan_path(PlannerInfo *root,
 	cpath->path.rows = (param_info
 						? param_info->ppi_rows
 						: baserel->rows) / parallel_divisor;
+
 	/* cost for CPU qualifiers */
 	cost_qual_eval(&qcost, host_quals, root);
 	startup_cost += qcost.startup;
@@ -579,7 +588,8 @@ gpuscan_add_scan_path(PlannerInfo *root,
 
 	/* add GpuScan path in single process */
 	pathnode = create_gpuscan_path(root, baserel,
-								   dev_quals, host_quals,
+								   dev_quals,
+								   host_quals,
 								   discount_per_tuple,
 								   0);
 	add_path(baserel, pathnode);
@@ -588,52 +598,20 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	if (baserel->consider_parallel && baserel->lateral_relids == NULL)
 	{
 		int		parallel_nworkers;
-		int		parallel_threshold;
 
+		parallel_nworkers = compute_parallel_worker(baserel,
+													baserel->pages, -1.0);
 		/*
-		 * We follow the logic of create_plain_partial_paths to determine
-		 * the number of parallel workers as baseline. Then, it shall be
-		 * adjusted according to the PG-Strom configuration.
+		 * XXX - Do we need a something specific logic for GpuScan to adjust
+		 * parallel_workers.
 		 */
-		if (baserel->rel_parallel_workers != -1)
-			parallel_nworkers = baserel->rel_parallel_workers;
-		else
-		{
-			/* relation is too small for parallel execution? */
-			if (baserel->pages < (BlockNumber) min_parallel_relation_size &&
-				baserel->reloptkind == RELOPT_BASEREL)
-				return;
-
-			/*
-			 * select the number of workers based on the log of the size of
-			 * the relation.
-			 */
-			parallel_nworkers = 1;
-			parallel_threshold = Max(min_parallel_relation_size, 1);
-			while (baserel->pages >= (BlockNumber) (parallel_threshold * 3))
-			{
-				parallel_nworkers++;
-				parallel_threshold *= 3;
-				if (parallel_threshold > INT_MAX / 3)
-					break;			/* avoid overflow */
-			}
-		}
-		
-		/*
-		 * TODO: Put something specific to GpuScan to adjust parallel_workers
-		 */
-
-		/* max_parallel_workers_per_gather is the upper limit  */
-		parallel_nworkers = Min3(parallel_nworkers,
-								 4 * numDevAttrs,
-								 max_parallel_workers_per_gather);
 		if (parallel_nworkers <= 0)
 			return;
 
 		/* add GpuScan path performing on parallel workers */
 		pathnode = create_gpuscan_path(root, baserel,
-									   copyObject(dev_quals),
-									   copyObject(host_quals),
+									   dev_quals,
+									   host_quals,
 									   discount_per_tuple,
 									   parallel_nworkers);
 		add_partial_path(baserel, pathnode);
@@ -653,7 +631,7 @@ gpuscan_add_scan_path(PlannerInfo *root,
  */
 void
 codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
-					  Index scanrelid, List *dev_quals)
+					  Index scanrelid, Expr *dev_quals)
 {
 	devtype_info   *dtype;
 	Var			   *var;
@@ -667,7 +645,7 @@ codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
 		"                   kern_data_store *kds,\n"
 		"                   ItemPointerData *t_self,\n"
 		"                   HeapTupleHeaderData *htup)\n");
-	if (dev_quals == NIL)
+	if (!dev_quals)
 	{
 		appendStringInfoString(kern,
 							   "{\n"
@@ -1294,7 +1272,7 @@ __replace_ctid_by_double_cast(Node *node, void *__context)
 
 			return (Node *) f;
 		}
-		return copyObject(varnode);
+		return copyObject((Node *)varnode);
 	}
 	return expression_tree_mutator(node,
 								   __replace_ctid_by_double_cast,
@@ -1609,6 +1587,8 @@ PlanGpuScanPath(PlannerInfo *root,
 	{
 		RestrictInfo   *rinfo = lfirst(cell);
 
+		if (exprType((Node *)rinfo->clause) != BOOLOID)
+			elog(ERROR, "Bug? clause on GpuScan does not have BOOL type");
 		if (!pgstrom_device_expression(rinfo->clause))
 			host_quals = lappend(host_quals, rinfo);
 		else
@@ -1627,7 +1607,8 @@ PlanGpuScanPath(PlannerInfo *root,
 	initStringInfo(&kern);
 	initStringInfo(&source);
 	pgstrom_init_codegen_context(&context);
-	codegen_gpuscan_quals(&kern, &context, baserel->relid, dev_quals);
+	codegen_gpuscan_quals(&kern, &context, baserel->relid,
+						  make_flat_ands_explicit(dev_quals));
 
 	tlist = replace_ctid_by_double_cast(tlist);
 	tlist_dev = build_gpuscan_projection(baserel->relid, relation,
@@ -1683,7 +1664,7 @@ PlanGpuScanPath(PlannerInfo *root,
 bool
 pgstrom_pullup_outer_scan(const Path *outer_path,
 						  Index *p_outer_relid,
-						  List **p_outer_quals)
+						  Expr **p_outer_quals)
 {
 	RelOptInfo *baserel = outer_path->parent;
 	PathTarget *outer_target = outer_path->pathtarget;
@@ -1739,7 +1720,7 @@ pgstrom_pullup_outer_scan(const Path *outer_path,
 			return false;
 	}
 	*p_outer_relid = baserel->relid;
-	*p_outer_quals = outer_quals;
+	*p_outer_quals = make_flat_ands_explicit(outer_quals);
 	return true;
 }
 
@@ -1839,7 +1820,7 @@ assign_gpuscan_session_info(StringInfo buf, GpuTaskState *gts)
 				"#define GPUSCAN_DEVICE_PROJECTION_NFIELDS  %d\n",
 				tupdesc->natts);
 		}
-		if (gss->dev_quals != NIL)
+		if (gss->dev_quals)
 		{
 			appendStringInfoString(
 				buf,
@@ -1880,6 +1861,7 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	GpuContext	   *gcontext;
 	List		   *dev_tlist = NIL;
 	List		   *dev_quals_raw;
+	Expr		   *dev_quals_expr;
 	ListCell	   *lc;
 	StringInfoData	kern_define;
 	ProgramId		program_id;
@@ -1922,8 +1904,8 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	gss->gts.cb_next_tuple  = gpuscan_next_tuple;
 	gss->gts.cb_switch_task = gpuscan_switch_task;
 	if (pgstrom_bulkexec_enabled &&
-		gss->gts.css.ss.ps.qual == NIL &&		/* no host quals */
-		gss->gts.css.ss.ps.ps_ProjInfo == NULL)	/* no host projection */
+		!gss->gts.css.ss.ps.qual &&			/* no host qualifier */
+		!gss->gts.css.ss.ps.ps_ProjInfo)	/* no host projection */
 		gss->gts.cb_bulk_exec = pgstromBulkExecGpuTaskState;
 	else
 		gss->gts.cb_bulk_exec = NULL;	/* BulkExec not supported */
@@ -1940,16 +1922,32 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	 */
 	dev_quals_raw = (List *)fixup_varnode_to_origin((Node *)gs_info->dev_quals,
 													cscan->custom_scan_tlist);
-	gss->dev_quals = (List *)
-		ExecInitExpr((Expr *) dev_quals_raw, &gss->gts.css.ss.ps);
+	dev_quals_expr = make_ands_explicit(dev_quals_raw);
+#if PG_VERSION_NUM < 100000
+	gss->dev_quals = list_make1(ExecInitExpr(dev_quals_expr,
+											 &gss->gts.css.ss.ps));
+#else
+	gss->dev_quals = ExecInitExpr(dev_quals_expr,
+								  &gss->gts.css.ss.ps);
+#endif
+
 	foreach (lc, cscan->custom_scan_tlist)
 	{
 		TargetEntry	   *tle = lfirst(lc);
 
 		if (tle->resjunk)
 			break;
+#if PG_VERSION_NUM < 100000
+		/*
+		 * Caution: before PG v10, the targetList was a list of ExprStates;
+		 * now it should be the planner-created targetlist.
+		 * See, ExecBuildProjectionInfo
+		 */
 		dev_tlist = lappend(dev_tlist, ExecInitExpr((Expr *) tle,
 													&gss->gts.css.ss.ps));
+#else
+		dev_tlist = lappend(dev_tlist, tle);
+#endif
 	}
 
 	/* device projection related resource consumption */
@@ -1967,6 +1965,9 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 		gss->base_proj = ExecBuildProjectionInfo(dev_tlist,
 												 econtext,
 												 scan_slot,
+#if PG_VERSION_NUM >= 100000
+												 &gss->gts.css.ss.ps,
+#endif
 												 RelationGetDescr(scan_rel));
 	}
 	else
@@ -2000,7 +2001,8 @@ ExecReCheckGpuScan(CustomScanState *node, TupleTableSlot *slot)
 	ExprContext	   *econtext = node->ss.ps.ps_ExprContext;
 	HeapTuple		tuple = slot->tts_tuple;
 	TupleTableSlot *scan_slot	__attribute__((unused));
-	ExprDoneCond	is_done;
+	ExprDoneCond	is_done		__attribute__((unused));
+	bool			retval;
 
 	/*
 	 * Does the tuple meet the device qual condition?
@@ -2012,10 +2014,12 @@ ExecReCheckGpuScan(CustomScanState *node, TupleTableSlot *slot)
 	econtext->ecxt_scantuple = gss->base_slot;
 	ResetExprContext(econtext);
 
-	if (!ExecQual(gss->dev_quals, econtext, false))
-		return false;
-
-	if (gss->base_proj)
+#if PG_VERSION_NUM < 100000
+	retval = ExecQual(gss->dev_quals, econtext, false);
+#else
+	retval = ExecQual(gss->dev_quals, econtext);
+#endif
+	if (retval && gss->base_proj)
 	{
 		/*
 		 * NOTE: If device projection is valid, we have to adjust the
@@ -2025,11 +2029,14 @@ ExecReCheckGpuScan(CustomScanState *node, TupleTableSlot *slot)
 		 */
 		Assert(!slot->tts_shouldFree);
 		ExecClearTuple(slot);
-
+#if PG_VERSION_NUM < 100000
 		scan_slot = ExecProject(gss->base_proj, &is_done);
+#else
+		scan_slot = ExecProject(gss->base_proj);
+#endif
 		Assert(scan_slot == slot);
 	}
-	return true;
+	return retval;
 }
 
 /*
@@ -2176,7 +2183,7 @@ ExecShutdownGpuScan(CustomScanState *node)
 	GpuScanSharedState *gs_sstate = gss->gs_sstate;
 
 	/* move the statistics from DSM */
-	gss->css.ss.ps.instrument->nfiltered1
+	gss->gts.css.ss.ps.instrument->nfiltered1
 		+= pg_atomic_read_u64(&gs_sstate->nitems_filtered);
 }
 #endif
@@ -2674,7 +2681,6 @@ gpuscan_next_tuple_fallback(GpuScanState *gss, GpuScanTask *gscan)
 	GpuScanSharedState *gs_sstate = gss->gs_sstate;
 	ExprContext		   *econtext = gss->gts.css.ss.ps.ps_ExprContext;
 	TupleTableSlot	   *slot = NULL;
-	ExprDoneCond		is_done;
 
 retry_next:
 	ExecClearTuple(gss->base_slot);
@@ -2687,9 +2693,15 @@ retry_next:
 	/*
 	 * (1) - Evaluation of dev_quals if any
 	 */
-	if (gss->dev_quals != NIL)
+	if (gss->dev_quals)
 	{
-		if (!ExecQual(gss->dev_quals, econtext, false))
+		bool		retval;
+#if PG_VERSION_NUM < 100000
+		retval = ExecQual(gss->dev_quals, econtext, false);
+#else
+		retval = ExecQual(gss->dev_quals, econtext);
+#endif
+		if (!retval)
 		{
 			pg_atomic_add_fetch_u64(&gs_sstate->nitems_filtered, 1);
 			goto retry_next;
@@ -2703,11 +2715,17 @@ retry_next:
 		slot = gss->base_slot;
 	else
 	{
+#if PG_VERSION_NUM < 100000
+		ExprDoneCond		is_done;
+
 		slot = ExecProject(gss->base_proj, &is_done);
 		if (is_done == ExprMultipleResult)
 			gss->gts.css.ss.ps.ps_TupFromTlist = true;
 		else if (is_done != ExprEndResult)
 			gss->gts.css.ss.ps.ps_TupFromTlist = false;
+#else
+		slot = ExecProject(gss->base_proj);
+#endif
 	}
 	return slot;
 }

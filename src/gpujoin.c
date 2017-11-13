@@ -34,6 +34,7 @@
 #include "optimizer/tlist.h"
 #include "optimizer/var.h"
 #include "parser/parsetree.h"
+#include "pgstat.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
@@ -54,7 +55,7 @@ typedef struct
 	CustomPath		cpath;
 	int				num_rels;
 	Index			outer_relid;	/* valid, if outer scan pull-up */
-	List		   *outer_quals;	/* qualifier of outer scan */
+	Expr		   *outer_quals;	/* qualifier of outer scan */
 	cl_uint			outer_nrows_per_block;
 	struct {
 		JoinType	join_type;		/* one of JOIN_* */
@@ -75,7 +76,7 @@ typedef struct
 	char	   *kern_source;
 	int			extra_flags;
 	List	   *used_params;
-	List	   *outer_quals;
+	Expr	   *outer_quals;
 	double		outer_ratio;
 	double		outer_nrows;		/* number of estimated outer nrows*/
 	int			outer_width;		/* copy of @plan_width in outer path */
@@ -189,8 +190,13 @@ typedef struct
 	JoinType			join_type;
 	double				nrows_ratio;
 	cl_uint				ichunk_size;
+#if PG_VERSION_NUM < 100000	
 	List			   *join_quals;		/* single element list of ExprState */
 	List			   *other_quals;	/* single element list of ExprState */
+#else
+	ExprState		   *join_quals;
+	ExprState		   *other_quals;
+#endif
 
 	/*
 	 * Join properties; only hash-join
@@ -227,7 +233,11 @@ typedef struct
 	 * Expressions to be used in the CPU fallback path
 	 */
 	List		   *join_types;
+#if PG_VERSION_NUM < 100000
 	List		   *outer_quals;	/* list of ExprState */
+#else
+	ExprState	   *outer_quals;
+#endif
 	double			outer_ratio;
 	double			outer_nrows;
 	List		   *hash_outer_keys;
@@ -823,7 +833,7 @@ create_gpujoin_path(PlannerInfo *root,
 	gjpath->cpath.flags = 0;
 	gjpath->cpath.methods = &gpujoin_path_methods;
 	gjpath->outer_relid = 0;
-	gjpath->outer_quals = NIL;
+	gjpath->outer_quals = NULL;
 	gjpath->num_rels = num_rels;
 
 	i = 0;
@@ -1242,37 +1252,6 @@ gpujoin_add_join_path(PlannerInfo *root,
 }
 
 /*
- * build_flatten_qualifier
- *
- * It makes a flat AND expression that is equivalent to the given list.
- */
-static Expr *
-build_flatten_qualifier(List *clauses)
-{
-	List	   *args = NIL;
-	ListCell   *lc;
-
-	foreach (lc, clauses)
-	{
-		Node   *expr = lfirst(lc);
-
-		if (!expr)
-			continue;
-		Assert(exprType(expr) == BOOLOID);
-		if (IsA(expr, BoolExpr) &&
-			((BoolExpr *) expr)->boolop == AND_EXPR)
-			args = list_concat(args, ((BoolExpr *) expr)->args);
-		else
-			args = lappend(args, expr);
-	}
-	if (list_length(args) == 0)
-		return NULL;
-	if (list_length(args) == 1)
-		return linitial(args);
-	return make_andclause(args);
-}
-
-/*
  * build_device_targetlist
  *
  * It constructs a tentative custom_scan_tlist, according to
@@ -1635,9 +1614,9 @@ PlanGpuJoinPath(PlannerInfo *root,
 			other_quals = NIL;
 		}
 		gj_info.join_quals = lappend(gj_info.join_quals,
-									 build_flatten_qualifier(join_quals));
+									 make_flat_ands_explicit(join_quals));
 		gj_info.other_quals = lappend(gj_info.other_quals,
-									  build_flatten_qualifier(other_quals));
+									  make_flat_ands_explicit(other_quals));
 		gj_info.hash_inner_keys = lappend(gj_info.hash_inner_keys,
 										  hash_inner_keys);
 		gj_info.hash_outer_keys = lappend(gj_info.hash_outer_keys,
@@ -1841,8 +1820,8 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	gjs->gts.cb_process_task	= gpujoin_process_task;
 	gjs->gts.cb_release_task	= gpujoin_release_task;
 	if (pgstrom_bulkexec_enabled &&
-		gjs->gts.css.ss.ps.qual == NIL &&
-		gjs->gts.css.ss.ps.ps_ProjInfo == NULL)
+		!gjs->gts.css.ss.ps.qual &&			/* no host quals */
+		!gjs->gts.css.ss.ps.ps_ProjInfo)	/* no projection */
 		gjs->gts.cb_bulk_exec = pgstromBulkExecGpuTaskState;
 	gjs->gts.outer_nrows_per_block = gj_info->outer_nrows_per_block;
 
@@ -1866,16 +1845,18 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	 */
 	gjs->num_rels = gj_info->num_rels;
 	gjs->join_types = gj_info->join_types;
-	gjs->outer_quals = NIL;
-	foreach (lc1, gj_info->outer_quals)
+	if (gj_info->outer_quals)
 	{
-		ExprState  *expr_state = ExecInitExpr(lfirst(lc1), &ss->ps);
-		gjs->outer_quals = lappend(gjs->outer_quals, expr_state);
+		ExprState  *expr_state = ExecInitExpr(gj_info->outer_quals, &ss->ps);
+#if PG_VERSION_NUM < 100000
+		gjs->outer_quals = list_make1(expr_state);
+#else
+		gjs->outer_quals = expr_state;
+#endif
 	}
 	gjs->outer_ratio = gj_info->outer_ratio;
 	gjs->outer_nrows = gj_info->outer_nrows;
-	gjs->gts.css.ss.ps.qual = (List *)
-		ExecInitExpr((Expr *)cscan->scan.plan.qual, &ss->ps);
+	Assert(!cscan->scan.plan.qual);
 
 	/*
 	 * Init OUTER child node
@@ -1941,8 +1922,12 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 				/* also, non-simple Var node needs projection */
 				fallback_needs_projection = true;
 			}
+#if PG_VERSION_NUM < 100000
 			tlist_fallback = lappend(tlist_fallback,
-									 ExecInitExpr((Expr *) tle, &ss->ps));
+									 ExecInitExpr(tle->expr, &ss->ps));
+#else
+			tlist_fallback = lappend(tlist_fallback, tle);
+#endif
 		}
 	}
 
@@ -1952,6 +1937,9 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 		gjs->proj_fallback = ExecBuildProjectionInfo(tlist_fallback,
 													 ss->ps.ps_ExprContext,
 													 ss->ss_ScanTupleSlot,
+#if PG_VERSION_NUM >= 100000
+													 &ss->ps,
+#endif
 													 junk_tupdesc);
 	}
 	else
@@ -2023,58 +2011,61 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 		 * are deployed according to the result of child plans.
 		 */
 		join_quals = list_nth(gj_info->join_quals, i);
-		if (!join_quals)
-			istate->join_quals = NIL;
-		else
+		if (join_quals)
 		{
 			ExprState  *expr_state = ExecInitExpr(join_quals, &ss->ps);
+#if PG_VERSION_NUM < 100000
 			istate->join_quals = list_make1(expr_state);
+#else
+			istate->join_quals = expr_state;
+#endif
 		}
 
 		other_quals = list_nth(gj_info->other_quals, i);
-		if (!other_quals)
-			istate->other_quals = NIL;
-		else
+		if (other_quals)
 		{
 			ExprState  *expr_state = ExecInitExpr(other_quals, &ss->ps);
+#if PG_VERSION_NUM < 100000
 			istate->other_quals = list_make1(expr_state);
+#else
+			istate->other_quals = expr_state;
+#endif
 		}
 
 		hash_inner_keys = list_nth(gj_info->hash_inner_keys, i);
-		if (hash_inner_keys != NIL)
+		hash_outer_keys = list_nth(gj_info->hash_outer_keys, i);
+		Assert(list_length(hash_inner_keys) == list_length(hash_outer_keys));
+		if (hash_inner_keys != NIL && hash_outer_keys != NIL)
 		{
 			hash_inner_keys = fixup_varnode_to_origin(i+1,
 													  gj_info->ps_src_depth,
 													  gj_info->ps_src_resno,
 													  hash_inner_keys);
-			foreach (lc1, hash_inner_keys)
+			forboth (lc1, hash_inner_keys,
+					 lc2, hash_outer_keys)
 			{
-				Expr	   *expr = lfirst(lc1);
-				ExprState  *expr_state = ExecInitExpr(expr, &ss->ps);
-				Oid			type_oid = exprType((Node *)expr);
+				Expr	   *i_expr = lfirst(lc1);
+				Expr	   *o_expr = lfirst(lc2);
+				ExprState  *i_expr_state = ExecInitExpr(i_expr, &ss->ps);
+				ExprState  *o_expr_state = ExecInitExpr(o_expr, &ss->ps);
+				Oid			type_oid = exprType((Node *)i_expr);
 				int16		typlen;
 				bool		typbyval;
 
 				istate->hash_inner_keys =
-					lappend(istate->hash_inner_keys, expr_state);
+					lappend(istate->hash_inner_keys, i_expr_state);
+				istate->hash_outer_keys =
+					lappend(istate->hash_outer_keys, o_expr_state);
 
+				Assert(type_oid == exprType((Node *)o_expr));
 				get_typlenbyval(type_oid, &typlen, &typbyval);
-				istate->hash_keytype =
-					lappend_oid(istate->hash_keytype, type_oid);
-				istate->hash_keylen =
-					lappend_int(istate->hash_keylen, typlen);
-				istate->hash_keybyval =
-					lappend_int(istate->hash_keybyval, typbyval);
+                istate->hash_keytype =
+                    lappend_oid(istate->hash_keytype, type_oid);
+                istate->hash_keylen =
+                    lappend_int(istate->hash_keylen, typlen);
+                istate->hash_keybyval =
+                    lappend_int(istate->hash_keybyval, typbyval);
 			}
-			/* outer keys also */
-			hash_outer_keys = list_nth(gj_info->hash_outer_keys, i);
-			Assert(hash_outer_keys != NIL);
-			istate->hash_outer_keys = (List *)
-				ExecInitExpr((Expr *)hash_outer_keys, &ss->ps);
-
-			Assert(IsA(istate->hash_outer_keys, List) &&
-				   list_length(istate->hash_inner_keys) ==
-				   list_length(istate->hash_outer_keys));
 		}
 
 		/*
@@ -3735,8 +3726,14 @@ gpujoinSyncRightOuterJoin(GpuTaskState *gts)
 			CHECK_FOR_GPUCONTEXT(gcontext);
 
 			ev = WaitLatch(MyLatch,
-						   WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
-						   1000L);
+						   WL_LATCH_SET |
+						   WL_TIMEOUT |
+						   WL_POSTMASTER_DEATH,
+						   1000L
+#if PG_VERSION_NUM >= 100000
+						   ,PG_WAIT_EXTENSION
+#endif
+				);
 			if (ev & WL_POSTMASTER_DEATH)
 				elog(FATAL, "Unexpected Postmaster Dead");
 			ResetLatch(MyLatch);
@@ -4063,6 +4060,7 @@ gpujoinFallbackHashJoin(int depth, GpuJoinState *gjs)
 	cl_bool		   *ojmaps = KERN_MULTIRELS_OUTER_JOIN_MAP(h_kmrels, depth);
 	kern_hashitem  *khitem;
 	cl_uint			hash;
+	bool			retval;
 
 	do {
 		if (istate->fallback_inner_index == 0)
@@ -4105,7 +4103,12 @@ gpujoinFallbackHashJoin(int depth, GpuJoinState *gjs)
 									   istate->inner_dst_resno,
 									   istate->inner_src_anum_min,
 									   istate->inner_src_anum_max);
-	} while (!ExecQual(istate->other_quals, econtext, false));
+#if PG_VERSION_NUM < 100000
+		retval = ExecQual(istate->other_quals, econtext, false);
+#else
+		retval = ExecQual(istate->other_quals, econtext);
+#endif
+	} while (!retval);
 
 	/* update outer join map */
 	if (ojmaps)
@@ -4165,6 +4168,7 @@ gpujoinFallbackNestLoop(int depth, GpuJoinState *gjs)
 		 index++)
 	{
 		kern_tupitem   *tupitem = KERN_DATA_STORE_TUPITEM(kds_in, index);
+		bool			retval;
 
 		gpujoin_fallback_tuple_extract(gjs->slot_fallback,
 									   tupdesc,
@@ -4174,7 +4178,12 @@ gpujoinFallbackNestLoop(int depth, GpuJoinState *gjs)
 									   istate->inner_dst_resno,
 									   istate->inner_src_anum_min,
 									   istate->inner_src_anum_max);
-		if (ExecQual(istate->join_quals, econtext, false))
+#if PG_VERSION_NUM < 100000
+		retval = ExecQual(istate->join_quals, econtext, false);
+#else
+		retval = ExecQual(istate->join_quals, econtext);
+#endif
+		if (retval)
 		{
 			istate->fallback_inner_index = index + 1;
 			/* update outer join map */
@@ -4267,6 +4276,7 @@ gpujoinFallbackLoadSource(int depth, GpuJoinState *gjs,
 	kern_data_store *kds_src = &pds_src->kds;
 	ExprContext	   *econtext = gjs->gts.css.ss.ps.ps_ExprContext;
 	TupleDesc		tupdesc;
+	bool			retval;
 
 	Assert(depth == 0);
 	if (gjs->gts.css.ss.ss_currentRelation)
@@ -4333,7 +4343,12 @@ gpujoinFallbackLoadSource(int depth, GpuJoinState *gjs,
 		}
 		else
 			elog(ERROR, "Bug? unexpected KDS format: %d", pds_src->kds.format);
-	} while (!ExecQual(gjs->outer_quals, econtext, false));
+#if PG_VERSION_NUM < 100000
+		retval = ExecQual(gjs->outer_quals, econtext, false);
+#else
+		retval = ExecQual(gjs->outer_quals, econtext);
+#endif
+	} while (!retval);
 
 	/* rewind the next depth */
 	gjs->inners[0].fallback_inner_index = 0;
@@ -4434,11 +4449,18 @@ gpujoinNextTupleFallback(GpuTaskState *gts,
 		else
 		{
 			TupleTableSlot *slot = gjs->slot_fallback;
-			ExprDoneCond	is_done;
 
 			/* projection? */
 			if (gjs->proj_fallback)
+			{
+#if PG_VERSION_NUM < 100000
+				ExprDoneCond	is_done;
+
 				slot = ExecProject(gjs->proj_fallback, &is_done);
+#else
+				slot = ExecProject(gjs->proj_fallback);
+#endif
+			}
 			Assert(slot == gjs->gts.css.ss.ss_ScanTupleSlot);
 			return slot;
 		}
@@ -5047,7 +5069,11 @@ get_tuple_hashvalue(innerState *istate,
 		Datum		value;
 		bool		isnull;
 
+#if PG_VERSION_NUM < 100000
 		value = ExecEvalExpr(clause, istate->econtext, &isnull, NULL);
+#else
+		value = ExecEvalExpr(clause, istate->econtext, &isnull);
+#endif
 		if (isnull)
 			continue;
 		is_null_keys = false;	/* key is non-NULL valid */
@@ -5464,7 +5490,13 @@ GpuJoinInnerPreload(GpuTaskState *gts, CUdeviceptr *p_m_kmrels)
 			/* wait for the completion of inner preload by the master */
 			CHECK_FOR_INTERRUPTS();
 
-			WaitLatch(&MyProc->procLatch, WL_LATCH_SET, -1);
+			WaitLatch(&MyProc->procLatch,
+					  WL_LATCH_SET,
+					  -1
+#if PG_VERSION_NUM >= 100000
+					  ,PG_WAIT_EXTENSION
+#endif
+				);
 			ResetLatch(&MyProc->procLatch);
 		}
 	}

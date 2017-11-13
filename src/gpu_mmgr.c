@@ -19,6 +19,7 @@
 #include "catalog/pg_type.h"
 #include "commands/tablespace.h"
 #include "funcapi.h"
+#include "pgstat.h"
 #include "postmaster/bgworker.h"
 #include "storage/bufmgr.h"
 #include "storage/ipc.h"
@@ -130,6 +131,9 @@ typedef struct
 	GpuMemPreservedRequest gmemp_req_array[100];	
 	GpuMemPreserved	gmemp_array[FLEXIBLE_ARRAY_MEMBER];
 } GpuMemPreservedHead;
+
+/* functions */
+extern void gpummgrBgWorkerMain(Datum arg);
 
 /* static variables */
 static shmem_startup_hook_type shmem_startup_next = NULL;
@@ -877,7 +881,11 @@ __gpuMemPreservedRequest(cl_int cuda_dindex,
 			ev = WaitLatch(MyLatch,
 						   WL_LATCH_SET |
 						   WL_TIMEOUT |
-						   WL_POSTMASTER_DEATH, 1000L);
+						   WL_POSTMASTER_DEATH, 1000L
+#if PG_VERSION_NUM >= 100000
+						   ,PG_WAIT_EXTENSION
+#endif
+);
 			ResetLatch(MyLatch);
 			if (ev & WL_POSTMASTER_DEATH)
 				elog(FATAL, "unexpected postmaster dead");
@@ -1127,7 +1135,7 @@ gpummgrBgWorkerSigTerm(SIGNAL_ARGS)
 /*
  * gpummgrBgWorkerMain - main loop for device memory keeper
  */
-static void
+void
 gpummgrBgWorkerMain(Datum arg)
 {
 	CUdevice	cuda_device;
@@ -1185,7 +1193,11 @@ gpummgrBgWorkerMain(Datum arg)
 			ev = WaitLatch(MyLatch,
 						   WL_LATCH_SET |
 						   WL_TIMEOUT |
-						   WL_POSTMASTER_DEATH, 5000L);
+						   WL_POSTMASTER_DEATH, 5000L
+#if PG_VERSION_NUM >= 100000
+						   ,PG_WAIT_EXTENSION
+#endif
+				);
 			ResetLatch(MyLatch);
 			if (ev & WL_POSTMASTER_DEATH)
 				elog(FATAL, "unexpected Postmaster dead");
@@ -1559,7 +1571,8 @@ pgstrom_init_gpu_mmgr(void)
 	worker.bgw_flags = BGWORKER_SHMEM_ACCESS;
 	worker.bgw_start_time = BgWorkerStart_PostmasterStart;
 	worker.bgw_restart_time = 1;
-	worker.bgw_main = gpummgrBgWorkerMain;
+	snprintf(worker.bgw_library_name, BGW_MAXLEN, "pg_strom");
+	snprintf(worker.bgw_function_name, BGW_MAXLEN, "gpummgrBgWorkerMain");
 	worker.bgw_main_arg = 0;
 	RegisterBackgroundWorker(&worker);
 

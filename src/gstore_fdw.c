@@ -44,6 +44,7 @@
 #include "utils/lsyscache.h"
 #include "utils/pg_crc.h"
 #include "utils/rel.h"
+#include "utils/regproc.h"
 #include "utils/resowner.h"
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
@@ -858,7 +859,7 @@ gstore_fdw_release_chunk(GpuStoreChunk *gs_chunk)
 	 * NOTE: PG9.6 has no way to release DSM segment once pinned.
 	 * dsm_unpin_segment() was newly supported at PG10.
 	 */
-	dsm_unpin_segment(gs_chunk->handle);
+	dsm_unpin_segment(gs_chunk->dsm_handle);
 #endif
 	memset(gs_chunk, 0, sizeof(GpuStoreMap));
 	gs_chunk->dsm_handle = UINT_MAX;

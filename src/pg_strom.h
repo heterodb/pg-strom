@@ -679,18 +679,13 @@ extern void pgstromExplainOuterScan(GpuTaskState *gts,
 									List *deparse_context,
 									List *ancestors,
 									ExplainState *es,
-									List *outer_quals,
+									Expr *outer_quals,
 									Cost outer_startup_cost,
 									Cost outer_total_cost,
 									double outer_plan_rows,
 									int outer_plan_width);
 
 extern void pgstromInitGpuTask(GpuTaskState *gts, GpuTask *gtask);
-//extern int	pgstromProcessGpuTask(GpuTask *gtask, CUmodule cuda_module);
-//extern void pgstromReleaseGpuTask(GpuTask *gtask);
-
-extern const char *errorText(int errcode);
-extern const char *errorTextKernel(kern_errorbuf *kerror);
 extern void pgstrom_init_gputasks(void);
 
 /*
@@ -848,7 +843,7 @@ extern void pgstrom_init_nvme_strom(void);
  */
 extern void cost_gpuscan_common(PlannerInfo *root,
 								RelOptInfo *scan_rel,
-								List *scan_quals,
+								Expr *scan_quals,
 								int parallel_workers,
 								double *p_parallel_divisor,
 								double *p_scan_ntuples,
@@ -859,11 +854,11 @@ extern void cost_gpuscan_common(PlannerInfo *root,
 extern void codegen_gpuscan_quals(StringInfo kern,
 								  codegen_context *context,
 								  Index scanrelid,
-								  List *dev_quals);
+								  Expr *dev_quals);
 extern bool add_unique_expression(Expr *expr, List **p_tlist, bool resjunk);
 extern bool pgstrom_pullup_outer_scan(const Path *outer_path,
 									  Index *p_outer_relid,
-									  List **p_outer_quals);
+									  Expr **p_outer_quals);
 extern bool pgstrom_path_is_gpuscan(const Path *path);
 extern bool pgstrom_plan_is_gpuscan(const Plan *plan);
 extern bool pgstrom_planstate_is_gpuscan(const PlanState *ps);
@@ -972,6 +967,19 @@ extern Datum pgstrom_gstore_fdw_height(PG_FUNCTION_ARGS);
 extern Datum pgstrom_gstore_fdw_width(PG_FUNCTION_ARGS);
 extern Datum pgstrom_gstore_fdw_rawsize(PG_FUNCTION_ARGS);
 extern void pgstrom_init_gstore_fdw(void);
+
+
+/*
+ * misc.c
+ */
+extern Expr *make_flat_ands_explicit(List *andclauses);
+#if PG_VERSION_NUM < 100000
+extern int compute_parallel_worker(RelOptInfo *rel,
+								   double heap_pages,
+								   double index_pages);
+#endif
+extern const char *errorText(int errcode);
+extern const char *errorTextKernel(kern_errorbuf *kerror);
 
 /*
  * main.c

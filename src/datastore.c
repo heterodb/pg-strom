@@ -519,13 +519,67 @@ __PDS_create_block(GpuContext *gcontext,
 /*
  * support for bulkload onto ROW/BLOCK format
  */
-/* see storage/smgr/md.c */
+
+/*
+ * nvme_sstate_open_smgr - fetch File descriptor of relation
+ *
+ * see storage/smgr/md.c
+ */
 typedef struct _MdfdVec
 {
 	File			mdfd_vfd;		/* fd number in fd.c's pool */
 	BlockNumber		mdfd_segno;		/* segment number, from 0 */
+#if PG_VERSION_NUM < 100000
 	struct _MdfdVec *mdfd_chain;	/* next segment, or NULL */
+#endif
 } MdfdVec;
+
+static void
+nvme_sstate_open_smgr(NVMEScanState *nvme_sstate, Relation relation)
+{
+	SMgrRelation rd_smgr = relation->rd_smgr;
+	MdfdVec	   *vec;
+	int			i, nr_segs;
+
+#if PG_VERSION_NUM < 100000
+	/* PG9.6 */
+	nr_segs = nvme_sstate->nr_segs;
+	vec = rd_smgr->md_fd[MAIN_FORKNUM];
+	while (vec)
+	{
+		if (vec->mdfd_vfd < 0 ||
+			vec->mdfd_segno >= nr_segs)
+			elog(ERROR, "Bug? MdfdVec {vfd=%d segno=%u} is out of range",
+				 vec->mdfd_vfd, vec->mdfd_segno);
+		nvme_sstate->mdfd[vec->mdfd_segno].segno = vec->mdfd_segno;
+		nvme_sstate->mdfd[vec->mdfd_segno].vfd   = vec->mdfd_vfd;
+		vec = vec->mdfd_chain;
+	}
+#else
+	/* PG10 or later */
+	nr_segs = rd_smgr->md_num_open_segs[MAIN_FORKNUM];
+	if (nr_segs != nvme_sstate->nr_segs)
+		elog(ERROR, "Bug? not all the segment of relation %s is not opened",
+			 RelationGetRelationName(relation));
+	for (i=0; i < nvme_sstate->nr_segs; i++)
+	{
+		vec = &rd_smgr->md_seg_fds[MAIN_FORKNUM][i];
+		if (vec->mdfd_vfd < 0 ||
+			vec->mdfd_segno >= nr_segs)
+			elog(ERROR, "Bug? MdfdVec {vfd=%d segno=%u} is out of range",
+				 vec->mdfd_vfd, vec->mdfd_segno);
+		nvme_sstate->mdfd[vec->mdfd_segno].segno = vec->mdfd_segno;
+		nvme_sstate->mdfd[vec->mdfd_segno].vfd   = vec->mdfd_vfd;
+	}
+#endif
+	/* sanity checks */
+	for (i=0; i < nr_segs; i++)
+	{
+		if (nvme_sstate->mdfd[i].segno >= nvme_sstate->nr_segs ||
+			nvme_sstate->mdfd[i].vfd < 0)
+			elog(ERROR, "Bug? Here is a hole segment which was not open");
+	}
+}
 
 /*
  * PDS_init_heapscan_state - construct a per-query state for heap-scan
@@ -540,12 +594,10 @@ PDS_init_heapscan_state(GpuTaskState *gts,
 	EState		   *estate = gts->css.ss.ps.state;
 	BlockNumber		nr_blocks;
 	BlockNumber		nr_segs;
-	MdfdVec		   *vec;
 	NVMEScanState  *nvme_sstate;
 	cl_uint			nrooms_max;
 	cl_uint			nchunks;
 	cl_uint			nblocks_per_chunk;
-	cl_uint			i;
 
 	/* check storage capability and relation's size */
 	if (!RelationWillUseNvmeStrom(relation, &nr_blocks))
@@ -584,26 +636,8 @@ PDS_init_heapscan_state(GpuTaskState *gts,
 	nvme_sstate->curr_segno = InvalidBlockNumber;
 	nvme_sstate->curr_vmbuffer = InvalidBuffer;
 	nvme_sstate->nr_segs = nr_segs;
+	nvme_sstate_open_smgr(nvme_sstate, relation);
 
-	vec = relation->rd_smgr->md_fd[MAIN_FORKNUM];
-	while (vec)
-	{
-		if (vec->mdfd_vfd < 0 ||
-			vec->mdfd_segno >= nr_segs)
-			elog(ERROR, "Bug? MdfdVec {vfd=%d segno=%u} is out of range",
-				 vec->mdfd_vfd, vec->mdfd_segno);
-		nvme_sstate->mdfd[vec->mdfd_segno].segno = vec->mdfd_segno;
-		nvme_sstate->mdfd[vec->mdfd_segno].vfd   = vec->mdfd_vfd;
-		vec = vec->mdfd_chain;
-	}
-
-	/* sanity checks */
-	for (i=0; i < nr_segs; i++)
-	{
-		if (nvme_sstate->mdfd[i].segno >= nr_segs ||
-			nvme_sstate->mdfd[i].vfd < 0)
-			elog(ERROR, "Bug? Here is a hole segment which was not open");
-	}
 	gts->nvme_sstate = nvme_sstate;
 }
 

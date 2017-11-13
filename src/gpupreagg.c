@@ -41,6 +41,7 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/pg_crc.h"
+#include "utils/regproc.h"
 #include "utils/rel.h"
 #include "utils/ruleutils.h"
 #include "utils/syscache.h"
@@ -70,7 +71,7 @@ typedef struct
 	int				outer_width;	/* copy of @plan_width in outer path */
 	cl_uint			outer_nrows_per_block;
 	Index			outer_scanrelid;/* RTI, if outer path pulled up */
-	List		   *outer_quals;	/* device executable quals of outer-scan */
+	Expr		   *outer_quals;	/* device executable quals of outer-scan */
 	List		   *tlist_fallback;	/* projection from outer-tlist to GPU's
 									 * initial projection; note that setrefs.c
 									 * should not update this field */
@@ -145,7 +146,11 @@ typedef struct
 	cl_bool			terminator_done;
 	cl_int			num_group_keys;
 	TupleTableSlot *gpreagg_slot;	/* Slot reflects tlist_dev (w/o junks) */
+#if PG_VERSION_NUM < 100000
 	List		   *outer_quals;	/* List of ExprState */
+#else
+	ExprState	   *outer_quals;
+#endif
 	TupleTableSlot *outer_slot;
 	ProjectionInfo *outer_proj;		/* outer tlist -> custom_scan_tlist */
 
@@ -951,8 +956,6 @@ cost_gpupreagg(PlannerInfo *root,
 	QualCost	qual_cost;
 	int			num_group_keys = 0;
 	Size		extra_sz = 0;
-//	cl_uint		ncols;
-//	cl_uint		nrooms;
 	cl_int		key_dist_salt;
 	cl_int		index;
 	ListCell   *lc;
@@ -1299,8 +1302,13 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 								 -1.0);
 			if (parse->groupingSets)
 			{
+#if PG_VERSION_NUM < 100000
 				List	   *rollup_lists = NIL;
 				List	   *rollup_groupclauses = NIL;
+#else
+				AggStrategy	rollup_strategy = AGG_PLAIN;
+				List	   *rollup_data_list = NIL;
+#endif
 				bool		found = false;
 				ListCell   *lc;
 
@@ -1318,8 +1326,13 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 
 					if (IsA(pathnode, GroupingSetsPath))
 					{
+#if PG_VERSION_NUM < 100000
 						rollup_groupclauses = pathnode->rollup_groupclauses;
 						rollup_lists = pathnode->rollup_lists;
+#else
+						rollup_strategy = pathnode->aggstrategy;
+						rollup_data_list = pathnode->rollups;
+#endif
 						found = true;
 						break;
 					}
@@ -1332,8 +1345,13 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 											 sort_path,
 											 target_final,
 											 (List *)parse->havingQual,
+#if PG_VERSION_NUM < 100000
 											 rollup_lists,
 											 rollup_groupclauses,
+#else
+											 rollup_strategy,
+											 rollup_data_list,
+#endif
 											 &agg_final_costs,
 											 num_groups);
 			}
@@ -2072,7 +2090,7 @@ replace_expression_by_altfunc(Node *node,
 										  parse->groupClause) != NULL)
         {
 			if (equal(node, sortgroupkey))
-				return copyObject(sortgroupkey);
+				return copyObject((Node *)sortgroupkey);
 		}
 		i++;
 	}
@@ -2253,7 +2271,7 @@ PlanGpuPreAggPath(PlannerInfo *root,
 	 * @target_device. So, add junk ones on demand.
 	 * (EXPLAIN needs junk entry to lookup variable name)
 	 */
-	if (gpa_info->outer_quals != NIL)
+	if (gpa_info->outer_quals)
 	{
 		List	   *outer_vars
 			= pull_var_clause((Node *)gpa_info->outer_quals,
@@ -2263,7 +2281,7 @@ PlanGpuPreAggPath(PlannerInfo *root,
 		foreach (lc, outer_vars)
 		{
 			TargetEntry *tle;
-			Node	   *node = lfirst(lc);
+			Expr	   *node = lfirst(lc);
 
 			if (!tlist_member(node, tlist_dev))
 			{
@@ -3480,7 +3498,6 @@ gpupreagg_codegen(codegen_context *context,
 	StringInfoData	body;
 	Size			length;
 	bytea		   *kparam_0;
-	List		   *outer_quals = gpa_info->outer_quals;
 	List		   *tlist_alt;
 	ListCell	   *lc;
 	Bitmapset	   *outer_refs_any = NULL;
@@ -3517,7 +3534,7 @@ gpupreagg_codegen(codegen_context *context,
 	{
 		codegen_gpuscan_quals(&body, context,
 							  cscan->scan.scanrelid,
-							  outer_quals);
+							  gpa_info->outer_quals);
 		context->extra_flags |= DEVKERNEL_NEEDS_GPUSCAN;
 	}
 
@@ -3608,7 +3625,7 @@ gpupreagg_post_planner(PlannedStmt *pstmt, CustomScan *cscan)
 {
 	GpuPreAggInfo  *gpa_info = deform_gpupreagg_info(cscan);
 
-	gpa_info->outer_quals = (List *)
+	gpa_info->outer_quals = (Expr *)
 		fixup_gpupreagg_outer_quals((Node *)gpa_info->outer_quals,
 									cscan->custom_scan_tlist);
 
@@ -3632,7 +3649,7 @@ assign_gpupreagg_session_info(StringInfo buf, GpuTaskState *gts)
 	 */
 	if (cscan->scan.scanrelid > 0)
 		appendStringInfo(buf, "#define GPUPREAGG_PULLUP_OUTER_SCAN 1\n");
-	if (gpas->outer_quals != NIL)
+	if (gpas->outer_quals)
 		appendStringInfo(buf, "#define GPUPREAGG_HAS_OUTER_QUALS 1\n");
 	if (gpas->combined_gpujoin)
 		appendStringInfo(buf, "#define GPUPREAGG_COMBINED_JOIN 1\n");
@@ -3673,7 +3690,8 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 	CustomScan	   *cscan = (CustomScan *) node->ss.ps.plan;
 	GpuPreAggInfo  *gpa_info = deform_gpupreagg_info(cscan);
 	List		   *tlist_dev = cscan->custom_scan_tlist;
-	List		   *tlist_fallback;
+	List		   *tlist_fallback = NIL;
+	ListCell	   *lc	__attribute__((unused));
 	TupleDesc		gpreagg_tupdesc;
 	TupleDesc		outer_tupdesc;
 	StringInfoData	kern_define;
@@ -3707,8 +3725,8 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 	{
 		PlanState  *outer_ps;
 
-		Assert(scan_rel == NULL);
-		Assert(gpa_info->outer_quals == NIL);
+		Assert(!scan_rel);
+		Assert(!gpa_info->outer_quals );
 		outer_ps = ExecInitNode(outerPlan(cscan), estate, eflags);
 		if (enable_pullup_outer_join &&
 			pgstrom_planstate_is_gpujoin(outer_ps) &&
@@ -3726,10 +3744,16 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
     }
     else
     {
+		ExprState  *outer_quals_state;
+
 		Assert(scan_rel != NULL);
-		gpas->outer_quals = (List *)
-			ExecInitExpr((Expr *)gpa_info->outer_quals,
-						 &gpas->gts.css.ss.ps);
+		outer_quals_state = ExecInitExpr(gpa_info->outer_quals,
+										 &gpas->gts.css.ss.ps);
+#if PG_VERSION_NUM < 100000
+		gpas->outer_quals = list_make1(outer_quals_state);
+#else
+		gpas->outer_quals = outer_quals_state;
+#endif
 		outer_tupdesc = RelationGetDescr(scan_rel);
 	}
 
@@ -3739,8 +3763,17 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 	 * Projection from the outer-relation to the custom_scan_tlist is a job
 	 * of CPU fallback. It is equivalent to the initial device projection.
 	 */
-	tlist_fallback = (List *)ExecInitExpr((Expr *)gpa_info->tlist_fallback,
-										  &gpas->gts.css.ss.ps);
+#if PG_VERSION_NUM < 100000
+	foreach(lc, gpa_info->tlist_fallback)
+	{
+		TargetEntry *tle = lfirst(lc);
+
+		tlist_fallback = lappend(tlist_fallback,
+							ExecInitExpr(tle->expr, &gpas->gts.css.ss.ps));
+	}
+#else
+	tlist_fallback = gpa_info->tlist_fallback;
+#endif
 	if (!ExecContextForcesOids(&gpas->gts.css.ss.ps, &has_oid))
 		has_oid = false;
 	gpreagg_tupdesc = ExecCleanTypeFromTL(tlist_dev, has_oid);
@@ -3751,6 +3784,9 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 	gpas->outer_proj = ExecBuildProjectionInfo(tlist_fallback,
 											   econtext,
 											   gpas->gpreagg_slot,
+#if PG_VERSION_NUM >= 100000
+											   &gpas->gts.css.ss.ps,
+#endif
 											   outer_tupdesc);
 	/* Template of kds_slot */
 	length = STROMALIGN(offsetof(kern_data_store,
@@ -3953,7 +3989,7 @@ ExecShutdownGpuPreAgg(CustomScanState *node)
 	gpas->gpa_rtstat = MemoryContextAlloc(CurTransactionContext,
 										  sizeof(GpuPreAggRuntimeStat));
 	memcpy(gpas->gpa_rtstat,
-		   &gpas->gpa_sstate->gpa_rtstat,
+		   &gpa_sstate->gpa_rtstat,
 		   sizeof(GpuPreAggRuntimeStat));
 }
 #endif
@@ -4360,8 +4396,9 @@ gpupreagg_next_tuple_fallback(GpuPreAggState *gpas, GpuPreAggTask *gpreagg)
 {
 	GpuPreAggRuntimeStat *gpa_rtstat = &gpas->gpa_sstate->gpa_rtstat;
 	ExprContext		   *econtext = gpas->gts.css.ss.ps.ps_ExprContext;
-	ExprDoneCond		is_done;
+	ExprDoneCond		is_done	__attribute__((unused));
 	TupleTableSlot	   *slot;
+	bool				retval;
 
 	for (;;)
 	{
@@ -4380,7 +4417,11 @@ gpupreagg_next_tuple_fallback(GpuPreAggState *gpas, GpuPreAggTask *gpreagg)
 				ExprContext *__econtext = outer_gts->css.ss.ps.ps_ExprContext;
 
 				__econtext->ecxt_scantuple = slot;
+#if PG_VERSION_NUM < 100000
 				slot = ExecProject(outer_gts->css.ss.ps.ps_ProjInfo, &is_done);
+#else
+				slot = ExecProject(outer_gts->css.ss.ps.ps_ProjInfo);
+#endif
 			}
 			econtext->ecxt_scantuple = slot;
 		}
@@ -4396,15 +4437,25 @@ gpupreagg_next_tuple_fallback(GpuPreAggState *gpas, GpuPreAggTask *gpreagg)
 			econtext->ecxt_scantuple = gpas->outer_slot;
 		}
 		/* filter out the tuple, if any outer quals */
-		if (!ExecQual(gpas->outer_quals, econtext, false))
+#if PG_VERSION_NUM < 100000
+		retval = ExecQual(gpas->outer_quals, econtext, false);
+#else
+		retval = ExecQual(gpas->outer_quals, econtext);
+#endif
+		if (!retval)
 		{
-			//Inc num filtered
+			//TODO: Inc number of filtered rows
 			continue;
 		}
 		/* makes a projection from the outer-scan to the pseudo-tlist */
+#if PG_VERSION_NUM < 100000
 		slot = ExecProject(gpas->outer_proj, &is_done);
 		if (is_done != ExprEndResult)
 			break;		/* XXX is this logic really right? */
+#else
+		slot = ExecProject(gpas->outer_proj);
+		break;
+#endif
 	}
 	pg_atomic_add_fetch_u64(&gpa_rtstat->num_fallback_rows, 1);
 	return slot;
