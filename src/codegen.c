@@ -32,9 +32,6 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/pg_locale.h"
-#if PG_VERSION_NUM >= 100000
-#include "utils/regproc.h"
-#endif
 #include "utils/syscache.h"
 #include "utils/typcache.h"
 #include "pg_strom.h"
@@ -90,8 +87,14 @@ static struct {
 	DEVTYPE_DECL("tid", TIDOID, "ItemPointerData",
 				 NULL, NULL, NULL,
 				 0),
+	/*
+	 * Misc data types
+	 */
 	DEVTYPE_DECL("money",  CASHOID,   "cl_long",
 				 "LONG_MAX", "LONG_MIN", "0",
+				 DEVKERNEL_NEEDS_MISC),
+	DEVTYPE_DECL("uuid",   UUIDOID,   "pg_uuid_t",
+				 NULL, NULL, NULL,
 				 DEVKERNEL_NEEDS_MISC),
 	/*
 	 * Date and time datatypes
@@ -651,6 +654,15 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "cash_le",		2, {CASHOID, CASHOID},		"y/F:cash_le" },
 	{ "cash_gt",		2, {CASHOID, CASHOID},		"y/F:cash_gt" },
 	{ "cash_ge",		2, {CASHOID, CASHOID},		"y/F:cash_ge" },
+	/* uuid comparison */
+	{ "uuid_cmp",		2, {UUIDOID, UUIDOID},		"y/F:uuid_cmp" },
+	{ "uuid_eq",		2, {UUIDOID, UUIDOID},		"y/F:uuid_eq" },
+	{ "uuid_ne",		2, {UUIDOID, UUIDOID},		"y/F:uuid_ne" },
+	{ "uuid_lt",		2, {UUIDOID, UUIDOID},		"y/F:uuid_lt" },
+	{ "uuid_le",		2, {UUIDOID, UUIDOID},		"y/F:uuid_le" },
+	{ "uuid_gt",		2, {UUIDOID, UUIDOID},		"y/F:uuid_gt" },
+	{ "uuid_ge",		2, {UUIDOID, UUIDOID},		"y/F:uuid_ge" },
+
 	/*
      * Mathmatical functions
      */

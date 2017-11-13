@@ -323,6 +323,135 @@ pgfn_cash_ge(kern_context *kcxt, pg_money_t arg1, pg_money_t arg2)
 	return result;
 }
 
+/* pg_uuid_t */
+#define UUID_LEN 16
+typedef struct
+{
+	cl_uchar data[UUID_LEN];
+} pgsql_uuid_t;
+
+#ifndef PG_UUID_TYPE_DEFINED
+#define PG_UUID_TYPE_DEFINED
+STROMCL_INDIRECT_TYPE_TEMPLATE(uuid, pgsql_uuid_t)
+#endif
+
+STATIC_INLINE(int)
+uuid_internal_cmp(pg_uuid_t *arg1, pg_uuid_t *arg2)
+{
+	cl_uchar   *data1 = arg1->value.data;
+	cl_uchar   *data2 = arg2->value.data;
+	cl_int		i, cmp = 0;
+
+	for (i=0; cmp == 0 && i < UUID_LEN; i++)
+		cmp = (int)data1[i] - (int)data2[i];
+	return cmp;
+}
+
+STATIC_FUNCTION(pg_int4_t)
+pgfn_uuid_cmp(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
+{
+	pg_int4_t	result;
+
+	if (arg1.isnull || arg2.isnull)
+		result.isnull = true;
+	else
+	{
+		result.isnull = false;
+		result.value = uuid_internal_cmp(&arg1, &arg2);
+	}
+	return result;
+}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_uuid_lt(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
+{
+	pg_bool_t	result;
+
+	if (arg1.isnull || arg2.isnull)
+		result.isnull = true;
+	else
+	{
+		result.isnull = false;
+		result.value = (cl_bool)(uuid_internal_cmp(&arg1, &arg2) < 0);
+	}
+	return result;
+}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_uuid_le(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
+{
+	pg_bool_t	result;
+
+	if (arg1.isnull || arg2.isnull)
+		result.isnull = true;
+	else
+	{
+		result.isnull = false;
+		result.value = (cl_bool)(uuid_internal_cmp(&arg1, &arg2) <= 0);
+	}
+	return result;
+}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_uuid_eq(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
+{
+	pg_bool_t	result;
+
+	if (arg1.isnull || arg2.isnull)
+		result.isnull = true;
+	else
+	{
+		result.isnull = false;
+		result.value = (cl_bool)(uuid_internal_cmp(&arg1, &arg2) == 0);
+	}
+	return result;
+}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_uuid_ge(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
+{
+	pg_bool_t	result;
+
+	if (arg1.isnull || arg2.isnull)
+		result.isnull = true;
+	else
+	{
+		result.isnull = false;
+		result.value = (cl_bool)(uuid_internal_cmp(&arg1, &arg2) >= 0);
+	}
+	return result;
+}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_uuid_gt(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
+{
+	pg_bool_t	result;
+
+	if (arg1.isnull || arg2.isnull)
+		result.isnull = true;
+	else
+	{
+		result.isnull = false;
+		result.value = (cl_bool)(uuid_internal_cmp(&arg1, &arg2) > 0);
+	}
+	return result;
+}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_uuid_ne(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
+{
+	pg_bool_t	result;
+
+	if (arg1.isnull || arg2.isnull)
+		result.isnull = true;
+	else
+	{
+		result.isnull = false;
+		result.value = (cl_bool)(uuid_internal_cmp(&arg1, &arg2) != 0);
+	}
+	return result;
+}
+
 #else	/* __CUDACC__ */
 #include "utils/pg_locale.h"
 

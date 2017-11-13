@@ -429,6 +429,7 @@ construct_flat_cuda_source(uint32 extra_flags,
 		"#endif\n"
 		"#ifdef CUDA_MISC_H\n"
 		"    pg_money_t       money_v;\n"
+		"    pg_uuid_t        uuid_v;\n"
 		"#endif\n"
 		"#ifdef CUDA_TIMELIB_H\n"
 		"    pg_date_t        date_v;\n"

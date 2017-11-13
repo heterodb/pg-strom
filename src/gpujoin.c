@@ -1924,7 +1924,7 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 			}
 #if PG_VERSION_NUM < 100000
 			tlist_fallback = lappend(tlist_fallback,
-									 ExecInitExpr(tle->expr, &ss->ps));
+									 ExecInitExpr((Expr *)tle, &ss->ps));
 #else
 			tlist_fallback = lappend(tlist_fallback, tle);
 #endif

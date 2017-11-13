@@ -44,7 +44,6 @@
 #include "utils/lsyscache.h"
 #include "utils/pg_crc.h"
 #include "utils/rel.h"
-#include "utils/regproc.h"
 #include "utils/resowner.h"
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"

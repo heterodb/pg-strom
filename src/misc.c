@@ -21,6 +21,8 @@
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/clauses.h"
+#include "optimizer/cost.h"
+#include "optimizer/paths.h"
 #include "pg_strom.h"
 
 
@@ -110,10 +112,10 @@ compute_parallel_worker(RelOptInfo *rel, double heap_pages, double index_pages)
 			 * Select the number of workers based on the log of the size of
 			 * the relation.  This probably needs to be a good deal more
 			 * sophisticated, but we need something here for now.  Note that
-			 * the upper limit of the min_parallel_table_scan_size GUC is
+			 * the upper limit of the min_parallel_relation_size GUC is
 			 * chosen to prevent overflow here.
 			 */
-			heap_parallel_threshold = Max(min_parallel_table_scan_size, 1);
+			heap_parallel_threshold = Max(min_parallel_relation_size, 1);
 			while (heap_pages >= (BlockNumber) (heap_parallel_threshold * 3))
 			{
 				heap_parallel_workers++;

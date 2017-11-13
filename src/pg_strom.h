@@ -32,6 +32,9 @@
 #include "storage/lock.h"
 #include "storage/proc.h"
 #include "storage/spin.h"
+#if PG_VERSION_NUM >= 100000
+#include "utils/regproc.h"
+#endif
 #include "utils/resowner.h"
 #define CUDA_API_PER_THREAD_DEFAULT_STREAM		1
 #include <cuda.h>
