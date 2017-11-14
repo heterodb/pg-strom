@@ -2249,7 +2249,7 @@ PlanGpuPreAggPath(PlannerInfo *root,
 		foreach (lc, outer_vars)
 		{
 			TargetEntry *tle;
-			Node	   *node = lfirst(lc);
+			void		*node = lfirst(lc);
 
 			if (!tlist_member(node, tlist_dev))
 			{
