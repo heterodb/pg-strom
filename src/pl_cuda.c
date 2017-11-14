@@ -15,20 +15,6 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
-#include "postgres.h"
-#include "access/tuptoaster.h"
-#include "access/xact.h"
-#include "catalog/dependency.h"
-#include "catalog/indexing.h"
-#include "catalog/objectaddress.h"
-#include "catalog/pg_proc.h"
-#include "catalog/pg_type.h"
-#include "parser/parse_func.h"
-#include "utils/builtins.h"
-#include "utils/lsyscache.h"
-#include "utils/memutils.h"
-#include "utils/rel.h"
-#include "utils/syscache.h"
 #include "pg_strom.h"
 #include "cuda_plcuda.h"
 

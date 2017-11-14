@@ -13,36 +13,124 @@
  */
 #ifndef PG_STROM_H
 #define PG_STROM_H
+#include "postgres.h"
+#include "access/hash.h"
+#include "access/htup_details.h"
+#include "access/reloptions.h"
+#include "access/relscan.h"
+#include "access/sysattr.h"
+#include "access/tuptoaster.h"
+#include "access/twophase.h"
+#include "access/visibilitymap.h"
+#include "access/xact.h"
+#include "catalog/catalog.h"
+#include "catalog/dependency.h"
+#include "catalog/heap.h"
+#include "catalog/indexing.h"
+#include "catalog/namespace.h"
+#include "catalog/objectaccess.h"
+#include "catalog/objectaddress.h"
+#include "catalog/pg_aggregate.h"
+#include "catalog/pg_attribute.h"
+#include "catalog/pg_cast.h"
+#include "catalog/pg_class.h"
+#include "catalog/pg_foreign_data_wrapper.h"
+#include "catalog/pg_foreign_server.h"
+#include "catalog/pg_foreign_table.h"
+#include "catalog/pg_language.h"
+#include "catalog/pg_namespace.h"
+#include "catalog/pg_proc.h"
+#include "catalog/pg_tablespace.h"
+#include "catalog/pg_type.h"
+#include "commands/defrem.h"
 #include "commands/explain.h"
+#include "commands/proclang.h"
+#include "commands/tablespace.h"
+#include "executor/executor.h"
+#include "executor/nodeAgg.h"
+#include "executor/nodeCustom.h"
 #include "fmgr.h"
+#include "foreign/fdwapi.h"
+#include "funcapi.h"
 #include "lib/ilist.h"
 #include "lib/stringinfo.h"
 #include "miscadmin.h"
 #include "nodes/execnodes.h"
 #include "nodes/extensible.h"
+#include "nodes/makefuncs.h"
+#include "nodes/nodeFuncs.h"
+#include "nodes/pg_list.h"
 #include "nodes/plannodes.h"
 #include "nodes/primnodes.h"
 #include "nodes/readfuncs.h"
 #include "nodes/relation.h"
+#include "optimizer/clauses.h"
+#include "optimizer/cost.h"
+#include "optimizer/pathnode.h"
+#include "optimizer/paths.h"
+#include "optimizer/plancat.h"
+#include "optimizer/planmain.h"
+#include "optimizer/planner.h"
+#include "optimizer/restrictinfo.h"
+#include "optimizer/tlist.h"
+#include "optimizer/var.h"
+#include "parser/parsetree.h"
+#include "parser/parse_func.h"
+#include "pgstat.h"
 #include "port/atomics.h"
-#include "storage/buf.h"
+#include "postmaster/bgworker.h"
+#include "storage/buf_internals.h"
 #include "storage/ipc.h"
 #include "storage/fd.h"
 #include "storage/latch.h"
+#include "storage/lmgr.h"
 #include "storage/lock.h"
+#include "storage/pg_shmem.h"
+#include "storage/predicate.h"
 #include "storage/proc.h"
+#include "storage/procarray.h"
+#include "storage/shmem.h"
+#include "storage/smgr.h"
 #include "storage/spin.h"
+#include "utils/array.h"
+#include "utils/arrayaccess.h"
+#include "utils/builtins.h"
+#include "utils/bytea.h"
+#include "utils/cash.h"
+#include "utils/fmgroids.h"
+#include "utils/guc.h"
+#include "utils/inval.h"
+#include "utils/lsyscache.h"
+#include "utils/memutils.h"
+#include "utils/numeric.h"
+#include "utils/pg_crc.h"
+#include "utils/pg_locale.h"
 #if PG_VERSION_NUM >= 100000
 #include "utils/regproc.h"
 #endif
+#include "utils/rel.h"
 #include "utils/resowner.h"
+#include "utils/ruleutils.h"
+#include "utils/snapmgr.h"
+#include "utils/spccache.h"
+#include "utils/syscache.h"
+#include "utils/tqual.h"
+#include "utils/typcache.h"
+#include "utils/varbit.h"
+
 #define CUDA_API_PER_THREAD_DEFAULT_STREAM		1
 #include <cuda.h>
+#include <nvrtc.h>
+
 #include <pthread.h>
 #include <unistd.h>
 #include <float.h>
 #include <limits.h>
+#include <math.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/time.h>
+#include <sys/types.h>
 
 /*
  * --------------------------------------------------------------------
@@ -1223,6 +1311,19 @@ typealign_get_width(char type_align)
 		 (lc4) != NULL;												\
 		 (lc1) = lnext(lc1), (lc2) = lnext(lc2), (lc3) = lnext(lc3),\
 		 (lc4) = lnext(lc4))
+#endif
+/* XXX - PG10 added lfirst_node() and related */
+#ifndef lfirst_node
+#define lfirst_node(T,x)		((T *)lfirst(x))
+#endif
+#ifndef linitial_node
+#define linitial_node(T,x)		((T *)linitial(x))
+#endif
+#ifndef lsecond_node
+#define lsecond_node(T,x)		((T *)lsecond(x))
+#endif
+#ifndef lthird_node
+#define lthird_node(T,x)		((T *)lthird(x))
 #endif
 
 static inline char *

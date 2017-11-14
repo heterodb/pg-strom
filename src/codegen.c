@@ -15,25 +15,6 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
-#include "postgres.h"
-#include "access/hash.h"
-#include "access/htup_details.h"
-#include "access/sysattr.h"
-#include "catalog/pg_namespace.h"
-#include "catalog/pg_proc.h"
-#include "catalog/pg_type.h"
-#include "commands/proclang.h"
-#include "nodes/nodeFuncs.h"
-#include "nodes/pg_list.h"
-#include "optimizer/clauses.h"
-#include "utils/builtins.h"
-#include "utils/fmgroids.h"
-#include "utils/inval.h"
-#include "utils/lsyscache.h"
-#include "utils/memutils.h"
-#include "utils/pg_locale.h"
-#include "utils/syscache.h"
-#include "utils/typcache.h"
 #include "pg_strom.h"
 
 static MemoryContext	devinfo_memcxt;

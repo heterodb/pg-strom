@@ -15,18 +15,6 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
-#include "postgres.h"
-#include "catalog/pg_type.h"
-#include "funcapi.h"
-#include "utils/array.h"
-#include "utils/arrayaccess.h"
-#include "utils/builtins.h"
-#include "utils/fmgroids.h"
-#include "utils/guc.h"
-#include "utils/lsyscache.h"
-#include "utils/memutils.h"
-#include "utils/syscache.h"
-#include "utils/varbit.h"
 #include "pg_strom.h"
 #include "cuda_matrix.h"
 #include <math.h>

@@ -15,13 +15,6 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
-#include "postgres.h"
-#include "catalog/pg_type.h"
-#include "funcapi.h"
-#include "storage/ipc.h"
-#include "utils/builtins.h"
-#include "utils/guc.h"
-#include "utils/memutils.h"
 #include "pg_strom.h"
 
 /* variable declarations */

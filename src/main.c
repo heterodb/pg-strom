@@ -15,25 +15,6 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
-#include "postgres.h"
-#include "access/hash.h"
-#include "fmgr.h"
-#include "miscadmin.h"
-#include "nodes/nodeFuncs.h"
-#include "optimizer/clauses.h"
-#include "optimizer/cost.h"
-#include "optimizer/pathnode.h"
-#include "optimizer/planner.h"
-#include "parser/parsetree.h"
-#include "storage/ipc.h"
-#include "storage/pg_shmem.h"
-#include "storage/shmem.h"
-#include "utils/builtins.h"
-#include "utils/guc.h"
-#include "utils/lsyscache.h"
-#include "utils/ruleutils.h"
-#include <float.h>
-#include <limits.h>
 #include "pg_strom.h"
 
 PG_MODULE_MAGIC;

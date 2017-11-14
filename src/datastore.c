@@ -16,34 +16,9 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
-#include "postgres.h"
-#include "access/relscan.h"
-#include "access/visibilitymap.h"
-#include "catalog/catalog.h"
-#include "catalog/pg_tablespace.h"
-#include "catalog/pg_type.h"
-#include "commands/tablespace.h"
-#include "optimizer/cost.h"
-#include "storage/bufmgr.h"
-#include "storage/buf_internals.h"
-#include "storage/fd.h"
-#include "storage/predicate.h"
-#include "storage/smgr.h"
-#include "utils/builtins.h"
-#include "utils/bytea.h"
-#include "utils/guc.h"
-#include "utils/inval.h"
-#include "utils/lsyscache.h"
-#include "utils/rel.h"
-#include "utils/syscache.h"
-#include "utils/tqual.h"
 #include "pg_strom.h"
 #include "cuda_numeric.h"
 #include "nvme_strom.h"
-#include <float.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <sys/types.h>
 
 /*
  * pgstrom_bulk_exec_supported - returns true, if supplied planstate

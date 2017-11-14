@@ -15,14 +15,6 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
-#include "postgres.h"
-#include "catalog/pg_type.h"
-#include "fmgr.h"
-#include "utils/array.h"
-#include "utils/builtins.h"
-#include "utils/cash.h"
-#include "utils/numeric.h"
-#include <math.h>
 #include "pg_strom.h"
 #include "cuda_numeric.h"
 

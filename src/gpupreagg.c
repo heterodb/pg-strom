@@ -15,38 +15,7 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
-#include "postgres.h"
-#include "access/sysattr.h"
-#include "access/xact.h"
-#include "catalog/pg_aggregate.h"
-#include "catalog/pg_cast.h"
-#include "catalog/pg_namespace.h"
-#include "catalog/pg_proc.h"
-#include "catalog/pg_type.h"
-#include "executor/nodeAgg.h"
-#include "executor/nodeCustom.h"
-#include "nodes/makefuncs.h"
-#include "nodes/nodeFuncs.h"
-#include "parser/parse_func.h"
-#include "optimizer/clauses.h"
-#include "optimizer/cost.h"
-#include "optimizer/pathnode.h"
-#include "optimizer/planner.h"
-#include "optimizer/tlist.h"
-#include "optimizer/var.h"
-#include "parser/parsetree.h"
-#include "utils/builtins.h"
-#include "utils/fmgroids.h"
-#include "utils/guc.h"
-#include "utils/lsyscache.h"
-#include "utils/memutils.h"
-#include "utils/pg_crc.h"
-#include "utils/rel.h"
-#include "utils/ruleutils.h"
-#include "utils/syscache.h"
-#include <math.h>
 #include "pg_strom.h"
-#include "cuda_common.h"
 #include "cuda_gpujoin.h"
 #include "cuda_gpupreagg.h"
 
@@ -2280,7 +2249,7 @@ PlanGpuPreAggPath(PlannerInfo *root,
 		foreach (lc, outer_vars)
 		{
 			TargetEntry *tle;
-			Expr	   *node = lfirst(lc);
+			Node	   *node = lfirst(lc);
 
 			if (!tlist_member(node, tlist_dev))
 			{

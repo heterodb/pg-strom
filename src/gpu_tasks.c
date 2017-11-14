@@ -15,15 +15,6 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
-#include "postgres.h"
-#include "access/xact.h"
-#include "optimizer/clauses.h"
-#include "parser/parsetree.h"
-#include "pgstat.h"
-#include "utils/builtins.h"
-#include "utils/guc.h"
-#include "utils/lsyscache.h"
-#include "utils/ruleutils.h"
 #include "pg_strom.h"
 
 /*

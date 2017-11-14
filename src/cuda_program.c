@@ -15,25 +15,6 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
-#include "postgres.h"
-#include "access/twophase.h"
-#include "access/xact.h"
-#include "catalog/catalog.h"
-#include "catalog/pg_tablespace.h"
-#include "catalog/pg_type.h"
-#include "funcapi.h"
-#include "postmaster/bgworker.h"
-#include "storage/ipc.h"
-#include "storage/proc.h"
-#include "storage/shmem.h"
-#include "utils/builtins.h"
-#include "utils/guc.h"
-#include "utils/lsyscache.h"
-#include "utils/memutils.h"
-#include "utils/pg_crc.h"
-#include <nvrtc.h>
-#include <sys/stat.h>
-#include <sys/types.h>
 #include "pg_strom.h"
 #include "cuda_misc.h"
 #include "cuda_timelib.h"

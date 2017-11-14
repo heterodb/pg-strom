@@ -15,41 +15,9 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
-#include "postgres.h"
-#include "access/relscan.h"
-#include "access/sysattr.h"
-#include "access/xact.h"
-#include "catalog/heap.h"
-#include "catalog/namespace.h"
-#include "catalog/pg_namespace.h"
-#include "catalog/pg_proc.h"
-#include "catalog/pg_type.h"
-#include "executor/nodeCustom.h"
-#include "miscadmin.h"
-#include "nodes/makefuncs.h"
-#include "nodes/nodeFuncs.h"
-#include "optimizer/clauses.h"
-#include "optimizer/cost.h"
-#include "optimizer/pathnode.h"
-#include "optimizer/paths.h"
-#include "optimizer/plancat.h"
-#include "optimizer/restrictinfo.h"
-#include "optimizer/tlist.h"
-#include "optimizer/var.h"
-#include "parser/parsetree.h"
-#include "storage/bufmgr.h"
-#include "utils/builtins.h"
-#include "utils/guc.h"
-#include "utils/lsyscache.h"
-#include "utils/memutils.h"
-#include "utils/rel.h"
-#include "utils/ruleutils.h"
-#include "utils/spccache.h"
-#include "utils/syscache.h"
 #include "pg_strom.h"
 #include "cuda_numeric.h"
 #include "cuda_gpuscan.h"
-#include <math.h>
 
 static set_rel_pathlist_hook_type	set_rel_pathlist_next;
 static CustomPathMethods	gpuscan_path_methods;

@@ -16,13 +16,6 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
-#include "postgres.h"
-#include "catalog/pg_type.h"
-#include "nodes/makefuncs.h"
-#include "nodes/nodeFuncs.h"
-#include "optimizer/clauses.h"
-#include "optimizer/cost.h"
-#include "optimizer/paths.h"
 #include "pg_strom.h"
 
 
