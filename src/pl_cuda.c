@@ -1289,6 +1289,8 @@ pgstrom_devfunc_construct_plcuda(devfunc_info *entry, HeapTuple proc_tuple)
 	entry->func_devname = psprintf("plcuda_%u", entry->func_oid);
 
 	initStringInfo(&decl);
+	if (prop.kern_decl)
+		appendStringInfo(&decl, "%s\n", prop.kern_decl);
 	appendStringInfo(
 		&decl,
 		"STATIC_FUNCTION(pg_%s_t)\n"
