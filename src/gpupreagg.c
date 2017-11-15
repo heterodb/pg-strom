@@ -3732,13 +3732,8 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 	 * of CPU fallback. It is equivalent to the initial device projection.
 	 */
 #if PG_VERSION_NUM < 100000
-	foreach(lc, gpa_info->tlist_fallback)
-	{
-		TargetEntry *tle = lfirst(lc);
-
-		tlist_fallback = lappend(tlist_fallback,
-							ExecInitExpr(tle->expr, &gpas->gts.css.ss.ps));
-	}
+	tlist_fallback = (List *)ExecInitExpr((Expr *)gpa_info->tlist_fallback,
+										  &gpas->gts.css.ss.ps);
 #else
 	tlist_fallback = gpa_info->tlist_fallback;
 #endif
