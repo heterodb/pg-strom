@@ -469,6 +469,7 @@ _PG_init(void)
 	/* miscellaneous initializations */
 	pgstrom_init_codegen();
 	pgstrom_init_plcuda();
+	pgstrom_init_ccache();
 	pgstrom_init_gstore_fdw();
 
 	/* dummy custom-scan node */
@@ -486,98 +487,3 @@ _PG_init(void)
 	planner_hook_next = planner_hook;
 	planner_hook = pgstrom_post_planner;
 }
-
-#if 1
-// legacy interface
-/* ------------------------------------------------------------
- *
- * Misc routines to support EXPLAIN command
- *
- * ------------------------------------------------------------
- */
-void
-pgstrom_explain_expression(List *expr_list, const char *qlabel,
-						   PlanState *planstate, List *deparse_context,
-						   List *ancestors, ExplainState *es,
-						   bool force_prefix, bool convert_to_and)
-{
-	bool        useprefix = (force_prefix | es->verbose);
-	char       *exprstr;
-
-	/* No work if empty expression list */
-	if (expr_list == NIL)
-		return;
-
-	/* Deparse the expression */
-	/* List shall be replaced by explicit AND, if needed */
-	exprstr = deparse_expression(convert_to_and
-								 ? (Node *) make_ands_explicit(expr_list)
-								 : (Node *) expr_list,
-								 deparse_context,
-								 useprefix,
-								 false);
-	/* And add to es->str */
-	ExplainPropertyText(qlabel, exprstr, es);
-}
-
-void
-show_scan_qual(List *qual, const char *qlabel,
-               PlanState *planstate, List *ancestors,
-               ExplainState *es)
-{
-	bool        useprefix;
-	Node	   *node;
-	List       *context;
-	char       *exprstr;
-
-	useprefix = (IsA(planstate->plan, SubqueryScan) || es->verbose);
-
-	/* No work if empty qual */
-	if (qual == NIL)
-		return;
-
-	/* Convert AND list to explicit AND */
-	node = (Node *) make_ands_explicit(qual);
-
-	/* Set up deparsing context */
-	context = set_deparse_context_planstate(es->deparse_cxt,
-											(Node *) planstate,
-											ancestors);
-	/* Deparse the expression */
-	exprstr = deparse_expression(node, context, useprefix, false);
-
-	/* And add to es->str */
-	ExplainPropertyText(qlabel, exprstr, es);
-}
-
-/*
- * If it's EXPLAIN ANALYZE, show instrumentation information for a plan node
- *
- * "which" identifies which instrumentation counter to print
- */
-void
-show_instrumentation_count(const char *qlabel, int which,
-						   PlanState *planstate, ExplainState *es)
-{
-	double		nfiltered;
-	double		nloops;
-
-	if (!es->analyze || !planstate->instrument)
-		return;
-
-	if (which == 2)
-		nfiltered = planstate->instrument->nfiltered2;
-	else
-		nfiltered = planstate->instrument->nfiltered1;
-	nloops = planstate->instrument->nloops;
-
-	/* In text mode, suppress zero counts; they're not interesting enough */
-	if (nfiltered > 0 || es->format != EXPLAIN_FORMAT_TEXT)
-	{
-		if (nloops > 0)
-			ExplainPropertyFloat(qlabel, nfiltered / nloops, 0, es);
-		else
-			ExplainPropertyFloat(qlabel, 0.0, 0, es);
-	}
-}
-#endif

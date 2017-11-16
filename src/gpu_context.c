@@ -456,6 +456,7 @@ ReleaseLocalResources(GpuContext *gcontext, bool normal_exit)
 		rc = cuCtxDestroy(gcontext->cuda_context);
 		if (rc != CUDA_SUCCESS)
 			elog(WARNING, "Failed on cuCtxDestroy: %s", errorText(rc));
+		fprintf(stderr, "pid=%u: cuCtxDestroy ptr=%p\n", getpid(), gcontext->cuda_context);
 		gcontext->cuda_context = NULL;
 	}
 

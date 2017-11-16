@@ -42,10 +42,12 @@
 #include "catalog/pg_proc.h"
 #include "catalog/pg_tablespace.h"
 #include "catalog/pg_type.h"
+#include "commands/dbcommands.h"
 #include "commands/defrem.h"
 #include "commands/explain.h"
 #include "commands/proclang.h"
 #include "commands/tablespace.h"
+#include "commands/trigger.h"
 #include "executor/executor.h"
 #include "executor/nodeAgg.h"
 #include "executor/nodeCustom.h"
@@ -1031,6 +1033,12 @@ extern Datum plcuda_function_validator(PG_FUNCTION_ARGS);
 extern Datum plcuda_function_handler(PG_FUNCTION_ARGS);
 extern Datum plcuda_function_source(PG_FUNCTION_ARGS);
 extern void pgstrom_init_plcuda(void);
+
+/*
+ * ccache.c
+ */
+extern Datum pgstrom_ccache_invalidator(PG_FUNCTION_ARGS);
+extern void pgstrom_init_ccache(void);
 
 /*
  * gstore_fdw.c
