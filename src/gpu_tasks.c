@@ -579,8 +579,12 @@ pgstromExplainGpuTaskState(GpuTaskState *gts, ExplainState *es)
 		pgstrom_debug_kernel_source)
 	{
 		const char *cuda_source = pgstrom_cuda_source_file(gts->program_id);
+		const char *cuda_binary = pgstrom_cuda_binary_file(gts->program_id);
 
-		ExplainPropertyText("Kernel Source", cuda_source, es);
+		if (cuda_source)
+			ExplainPropertyText("Kernel Source", cuda_source, es);
+		if (cuda_binary)
+			ExplainPropertyText("Kernel Binary", cuda_binary, es);
 	}
 }
 

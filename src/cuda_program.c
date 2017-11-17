@@ -39,9 +39,9 @@ typedef struct
 	size_t			kern_deflen;
 	char		   *kern_source;
 	size_t			kern_srclen;
-	pg_crc32		bin_crc;
-	char		   *bin_image;		/* may be CUDA_PROGRAM_BUILD_FAILURE */
-	size_t			bin_length;
+	pg_crc32		ptx_crc;
+	char		   *ptx_image;		/* may be CUDA_PROGRAM_BUILD_FAILURE */
+	size_t			ptx_length;
 	char		   *error_msg;
 	int				error_code;
 	char			data[FLEXIBLE_ARRAY_MEMBER];
@@ -487,15 +487,11 @@ link_cuda_libraries(char *ptx_image, size_t ptx_length,
 	 * <minor capability>), thus it is equivalent to the definition
 	 * of pgstrom_baseline_cuda_capability.
 	 */
-	jit_options[jit_index] = CU_JIT_TARGET;
-	jit_option_values[jit_index] = (void *)devComputeCapability;
+	jit_options[jit_index] = CU_JIT_TARGET_FROM_CUCONTEXT;
+	jit_option_values[jit_index] = NULL;
 	jit_index++;
 
 #ifdef PGSTROM_DEBUG
-	jit_options[jit_index] = CU_JIT_GENERATE_DEBUG_INFO;
-	jit_option_values[jit_index] = (void *)1UL;
-	jit_index++;
-
 	jit_options[jit_index] = CU_JIT_GENERATE_LINE_INFO;
 	jit_option_values[jit_index] = (void *)1UL;
 	jit_index++;
@@ -587,12 +583,13 @@ link_cuda_libraries(char *ptx_image, size_t ptx_length,
 }
 
 /*
- * writeout_cuda_source_file
+ * writeout_temporary_file
  *
  * It makes a temporary file to write-out cuda source.
  */
 static void
-writeout_cuda_source_file(char *tempfile, const char *source)
+writeout_temporary_file(char *tempfile, const char *suffix,
+						const char *source, size_t length)
 {
 	static pg_atomic_uint64 sourceFileCounter = {0};
 	FILE	   *filp;
@@ -602,11 +599,12 @@ writeout_cuda_source_file(char *tempfile, const char *source)
 	 * database instance.
 	 */
 	snprintf(tempfile, MAXPGPATH,
-			 "%s/base/%s/%s_strom_%d.%ld.gpu",
+			 "%s/base/%s/%s_strom_%d.%ld.%s",
 			 DataDir, PG_TEMP_FILES_DIR,
 			 PG_TEMP_FILE_PREFIX,
 			 MyProcPid,
-			 pg_atomic_fetch_add_u64(&sourceFileCounter, 1));
+			 pg_atomic_fetch_add_u64(&sourceFileCounter, 1),
+			 suffix);
 	/*
 	 * Open the file.  Note: we don't use O_EXCL, in case there is
 	 * an orphaned temp file that can be reused.
@@ -617,7 +615,7 @@ writeout_cuda_source_file(char *tempfile, const char *source)
 }
 
 /*
- * pgstrom_cuda_source_file - write out a CUDA program to temp-file
+ * pgstrom_cuda_source_file - write out a CUDA source program to temporary file
  */
 const char *
 pgstrom_cuda_source_file(ProgramId program_id)
@@ -642,9 +640,41 @@ pgstrom_cuda_source_file(ProgramId program_id)
 	put_cuda_program_entry(entry);
 	if (!source)
 		elog(ERROR, "out of memory");
-	writeout_cuda_source_file(tempfilepath, source);
-
+	writeout_temporary_file(tempfilepath, "gpu",
+							source, strlen(source));
 	free(source);
+
+	return pstrdup(tempfilepath);
+}
+
+/*
+ * pgstrom_cuda_binary_file - write out a CUDA PTX binary to temporary file
+ */
+const char *
+pgstrom_cuda_binary_file(ProgramId program_id)
+{
+	program_cache_entry *entry;
+	char		tempfilepath[MAXPGPATH];
+
+	SpinLockAcquire(&pgcache_head->lock);
+	entry = lookup_cuda_program_entry_nolock(program_id);
+	if (!entry)
+	{
+		SpinLockRelease(&pgcache_head->lock);
+		elog(ERROR, "ProgramId=%lu not found", program_id);
+	}
+	else if (!entry->ptx_image ||
+			 entry->ptx_image == CUDA_PROGRAM_BUILD_FAILURE)
+	{
+		SpinLockRelease(&pgcache_head->lock);
+		return NULL;
+	}
+	get_cuda_program_entry_nolock(entry);
+	SpinLockRelease(&pgcache_head->lock);
+
+	writeout_temporary_file(tempfilepath, "ptx",
+							entry->ptx_image, entry->ptx_length);
+	put_cuda_program_entry(entry);
 
 	return pstrdup(tempfilepath);
 }
@@ -662,10 +692,8 @@ build_cuda_program(program_cache_entry *src_entry)
 	char			tempfile[MAXPGPATH];
 	const char	   *options[10];
 	int				opt_index = 0;
-	void		   *ptx_image = NULL;
+	char		   *ptx_image = NULL;
 	size_t			ptx_length = 0;
-	void		   *bin_image = NULL;
-	size_t			bin_length = 0;
 	char		   *build_log = NULL;
 	size_t			log_length;
 	int				pindex;
@@ -703,12 +731,10 @@ build_cuda_program(program_cache_entry *src_entry)
 		 * CUDA_ERROR_ILLEGAL_INSTRUCTION error on execution.
 		 * So, as a workaround, we removed this option here.
 		 */
-		snprintf(gpu_arch_option, sizeof(gpu_arch_option),
-				 "--gpu-architecture=compute_%lu", devComputeCapability);
 		options[opt_index++] = "-I " CUDA_INCLUDE_PATH;
 		options[opt_index++] = "-I " PGSHAREDIR "/extension";
 		snprintf(gpu_arch_option, sizeof(gpu_arch_option),
-                 "--gpu-architecture=compute_%lu", devComputeCapability);
+				 "--gpu-architecture=compute_%lu", devComputeCapability);
 		options[opt_index++] = gpu_arch_option;
 		options[opt_index++] = "--generate-line-info";
 		options[opt_index++] = "--use_fast_math";
@@ -723,7 +749,8 @@ build_cuda_program(program_cache_entry *src_entry)
 		rc = nvrtcCompileProgram(program, opt_index, options);
 		if (rc == NVRTC_ERROR_COMPILATION)
 		{
-			writeout_cuda_source_file(tempfile, source);
+			writeout_temporary_file(tempfile, "gpu",
+									source, strlen(source));
 		}
 		else if (rc != NVRTC_SUCCESS)
 		{
@@ -747,24 +774,7 @@ build_cuda_program(program_cache_entry *src_entry)
 			if (rc != NVRTC_SUCCESS)
 				werror("failed on nvrtcGetPTX: %s",
 					   nvrtcGetErrorString(rc));
-			//ptx_image[ptx_length++] = '\0';
-
-			/*
-			 * Link with run-time libraries, if any
-			 */
-			if (src_entry->extra_flags & DEVKERNEL_NEEDS_LINKAGE)
-			{
-				link_cuda_libraries(ptx_image, ptx_length,
-									src_entry->extra_flags,
-									&bin_image, &bin_length);
-				free(ptx_image);
-			}
-			else
-			{
-				bin_image = ptx_image;
-				bin_length = ptx_length;
-			}
-			ptx_image = NULL;
+			ptx_image[ptx_length++] = '\0';
 		}
 
 		/*
@@ -791,11 +801,11 @@ build_cuda_program(program_cache_entry *src_entry)
 				   nvrtcGetErrorString(rc));
 
 		/*
-		 * Allocation of a new entry, to keep bin_image/build_log
+		 * Allocation of a new entry, to keep ptx_image/build_log
 		 */
 		length = (MAXALIGN(src_entry->kern_deflen + 1) +
 				  MAXALIGN(src_entry->kern_srclen + 1) +
-				  MAXALIGN(bin_length + 1) +
+				  MAXALIGN(ptx_length + 1) +
 				  MAXALIGN(log_length + 1) +
 				  PGCACHE_MIN_ERRORMSG_BUFSIZE);
 		SpinLockAcquire(&pgcache_head->lock);
@@ -822,25 +832,25 @@ build_cuda_program(program_cache_entry *src_entry)
 		strcpy(bin_entry->kern_source, src_entry->kern_source);
 		offset += MAXALIGN(bin_entry->kern_srclen + 1);
 
-		if (!bin_image)
-			bin_entry->bin_image	= CUDA_PROGRAM_BUILD_FAILURE;
+		if (!ptx_image)
+			bin_entry->ptx_image	= CUDA_PROGRAM_BUILD_FAILURE;
 		else
 		{
-			pg_crc32	bin_crc;
+			pg_crc32	ptx_crc;
 
-			bin_entry->bin_image	= bin_entry->data + offset;
-			bin_entry->bin_length	= bin_length;
-			memcpy(bin_entry->bin_image, bin_image, bin_length);
-			offset += MAXALIGN(bin_length + 1);
+			bin_entry->ptx_image	= bin_entry->data + offset;
+			bin_entry->ptx_length	= ptx_length;
+			memcpy(bin_entry->ptx_image, ptx_image, ptx_length);
+			offset += MAXALIGN(ptx_length);
 
-			INIT_LEGACY_CRC32(bin_crc);
-			COMP_LEGACY_CRC32(bin_crc, bin_image, bin_length);
-			FIN_LEGACY_CRC32(bin_crc);
-			bin_entry->bin_crc		= bin_crc;
+			INIT_LEGACY_CRC32(ptx_crc);
+			COMP_LEGACY_CRC32(ptx_crc, ptx_image, ptx_length);
+			FIN_LEGACY_CRC32(ptx_crc);
+			bin_entry->ptx_crc		= ptx_crc;
 		}
 
 		bin_entry->error_msg		= bin_entry->data + offset;
-		if (!bin_image)
+		if (!ptx_image)
 			snprintf(bin_entry->error_msg, length - offset,
 					 "build failure:\n%s\nsource: %s",
 					 build_log, tempfilepath);
@@ -874,8 +884,6 @@ build_cuda_program(program_cache_entry *src_entry)
 	{
 		if (build_log)
 			free(build_log);
-		if (bin_image)
-			free(bin_image);
 		if (ptx_image)
 			free(ptx_image);
 		if (program)
@@ -921,11 +929,11 @@ pgstrom_try_build_cuda_program(void)
 	entry = dlist_container(program_cache_entry, build_chain, dnode);
 
 	/*
-	 * !bin_image && build_chain==0 means build is in-progress,
+	 * !ptx_image && build_chain==0 means build is in-progress,
 	 * so it can block concurrent program build any more
 	 */
 	memset(&entry->build_chain, 0, sizeof(dlist_node));
-	Assert(!entry->bin_image);	/* must be build in-progress */
+	Assert(!entry->ptx_image);	/* must be build in-progress */
 	get_cuda_program_entry_nolock(entry);
 	SpinLockRelease(&pgcache_head->lock);
 
@@ -1017,7 +1025,7 @@ __pgstrom_create_cuda_program(GpuContext *gcontext,
 			dlist_move_head(&pgcache_head->lru_list, &entry->lru_chain);
 		retry_checks:
 			/* Raise an syntax error if already failed on build */
-			if (entry->bin_image == CUDA_PROGRAM_BUILD_FAILURE)
+			if (entry->ptx_image == CUDA_PROGRAM_BUILD_FAILURE)
 			{
 				put_cuda_program_entry_nolock(entry);
 				SpinLockRelease(&pgcache_head->lock);
@@ -1025,7 +1033,7 @@ __pgstrom_create_cuda_program(GpuContext *gcontext,
 						(errcode(entry->error_code),
 						 errmsg("%s", entry->error_msg)));
 			}
-			else if (entry->bin_image || !wait_for_build)
+			else if (entry->ptx_image || !wait_for_build)
 			{
 				if (!trackCudaProgram(gcontext, program_id,
 									  filename, lineno))
@@ -1092,8 +1100,8 @@ __pgstrom_create_cuda_program(GpuContext *gcontext,
 	usage += MAXALIGN(kern_srclen + 1);
 
 	/* no cuda binary at this moment */
-	entry->bin_image = NULL;
-	entry->bin_length = 0;
+	entry->ptx_image = NULL;
+	entry->ptx_length = 0;
 	/* remaining are for error message */
 	entry->error_msg = (char *)(entry->data + usage);
 
@@ -1133,14 +1141,14 @@ __pgstrom_create_cuda_program(GpuContext *gcontext,
 			SpinLockRelease(&pgcache_head->lock);
 			elog(ERROR, "Bug? ProgramId=%lu has gone.", program_id);
 		}
-		else if (entry->bin_image == CUDA_PROGRAM_BUILD_FAILURE)
+		else if (entry->ptx_image == CUDA_PROGRAM_BUILD_FAILURE)
 		{
 			SpinLockRelease(&pgcache_head->lock);
 			ereport(ERROR,
 					(errcode(entry->error_code),
 					 errmsg("%s", entry->error_msg)));
 		}
-		else if (entry->bin_image)
+		else if (entry->ptx_image)
 		{
 			SpinLockRelease(&pgcache_head->lock);
 			break;
@@ -1228,9 +1236,19 @@ CUmodule
 pgstrom_load_cuda_program(ProgramId program_id)
 {
 	program_cache_entry *entry = NULL;
-	CUmodule		cuda_module;
-	CUresult		rc;
-	char		   *bin_image;
+	CUmodule	cuda_module;
+	CUresult	rc;
+	int			extra_flags;
+	char	   *ptx_image;
+	size_t		ptx_length;
+	void	   *bin_image;
+	size_t		bin_length;
+
+	/*
+	 * To be called by GpuContext worker only, so no need to set current
+	 * CUDA context; per-thread context should be already set.
+	 */
+	Assert(GpuWorkerCurrentContext != NULL);
 
 	SpinLockAcquire(&pgcache_head->lock);
 retry_checks:
@@ -1240,28 +1258,30 @@ retry_checks:
 		SpinLockRelease(&pgcache_head->lock);
 		werror("CUDA Program ID=%lu was not found", program_id);
 	}
-	if (entry->bin_image == CUDA_PROGRAM_BUILD_FAILURE)
+	if (entry->ptx_image == CUDA_PROGRAM_BUILD_FAILURE)
 	{
 		SpinLockRelease(&pgcache_head->lock);
 		werror("CUDA program build failure (id=%lu):\n%s",
 			   (long)program_id, entry->error_msg);
 	}
-	else if (entry->bin_image)
+	else if (entry->ptx_image)
 	{
-		pg_crc32	bin_crc		__attribute__((unused));
+		pg_crc32	ptx_crc		__attribute__((unused));
 
 		get_cuda_program_entry_nolock(entry);
-		bin_image = entry->bin_image;
+		extra_flags = entry->extra_flags;
+		ptx_image = entry->ptx_image;
+		ptx_length = entry->ptx_length;
 #ifdef PGSTROM_DEBUG
-		INIT_LEGACY_CRC32(bin_crc);
-		COMP_LEGACY_CRC32(bin_crc, entry->bin_image, entry->bin_length);
-		FIN_LEGACY_CRC32(bin_crc);
-		if (bin_crc != entry->bin_crc)
+		INIT_LEGACY_CRC32(ptx_crc);
+		COMP_LEGACY_CRC32(ptx_crc, entry->ptx_image, entry->ptx_length);
+		FIN_LEGACY_CRC32(ptx_crc);
+		if (ptx_crc != entry->ptx_crc)
 		{
-			pg_crc32	__bin_crc = entry->bin_crc;
+			pg_crc32	__ptx_crc = entry->ptx_crc;
 			SpinLockRelease(&pgcache_head->lock);
 			werror("CUDA program binary corrupted (%08x / %08x)",
-				   __bin_crc, bin_crc);
+				   __ptx_crc, ptx_crc);
 		}
 #endif
 		SpinLockRelease(&pgcache_head->lock);
@@ -1286,7 +1306,7 @@ retry_checks:
 			STROM_RE_THROW();
 		}
 		STROM_END_TRY();
-		//TODO: bailout if worker shall be terminated
+		CHECK_WORKER_TERMINATION();
 		SpinLockAcquire(&pgcache_head->lock);
 		put_cuda_program_entry_nolock(entry);
 		goto retry_checks;
@@ -1295,13 +1315,29 @@ retry_checks:
 	{
 		/* NVRTC is still in-progress */
 		SpinLockRelease(&pgcache_head->lock);
-		//TODO: bailout if worker shall be terminated
+		CHECK_WORKER_TERMINATION();
 		pg_usleep(50000L);
 		SpinLockAcquire(&pgcache_head->lock);
 		goto retry_checks;
 	}
 
+	/*
+	 * Is linkage of run-time libraries needed?
+	 */
+	if ((extra_flags & DEVKERNEL_NEEDS_LINKAGE) == 0)
+	{
+		bin_image = ptx_image;
+		bin_length = ptx_length;
+	}
+	else
+	{
+		link_cuda_libraries(ptx_image, ptx_length,
+							extra_flags,
+							&bin_image, &bin_length);
+	}
 	rc = cuModuleLoadData(&cuda_module, bin_image);
+	if (ptx_image != bin_image)
+		free(bin_image);
 	put_cuda_program_entry(entry);
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuModuleLoadData: %s", errorText(rc));

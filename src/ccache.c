@@ -628,7 +628,7 @@ pgstrom_init_ccache(void)
 							"number of ccache builder worker processes",
 							NULL,
 							&ccache_num_builders,
-							2,
+							0,
 							0,
 							INT_MAX,
 							PGC_POSTMASTER,
