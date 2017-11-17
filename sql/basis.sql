@@ -87,6 +87,14 @@ CREATE LANGUAGE pltext
 COMMENT ON LANGUAGE pltext IS 'PL/Text contents holder';
 
 --
+-- Functions related to columnar-cache
+--
+CREATE FUNCTION pgstrom.ccache_invalidator()
+  RETURNS trigger
+  AS 'MODULE_PATHNAME','pgstrom_ccache_invalidator'
+  LANGUAGE C STRICT;
+
+--
 -- Handlers for gstore_fdw extension
 --
 CREATE FUNCTION pgstrom_gstore_fdw_handler()
