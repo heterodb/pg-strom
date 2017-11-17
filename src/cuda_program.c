@@ -1036,7 +1036,6 @@ __pgstrom_create_cuda_program(GpuContext *gcontext,
 				if (!explain_only &&
 					entry->ptx_image == CUDA_PROGRAM_BUILD_FAILURE)
 				{
-					put_cuda_program_entry_nolock(entry);
 					SpinLockRelease(&pgcache_head->lock);
 					ereport(ERROR,
 							(errcode(entry->error_code),
