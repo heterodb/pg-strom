@@ -522,7 +522,7 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 			}
 			/* update statistics */
 #ifdef GPUPREAGG_HAS_OUTER_QUALS
-			pgstromStairlikeBinaryCount(htup, &count);
+			pgstromStairlikeBinaryCount(htup != NULL ? 1 : 0, &count);
 #else
 			count = nvalids;
 #endif

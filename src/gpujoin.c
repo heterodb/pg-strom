@@ -1587,9 +1587,13 @@ PlanGpuJoinPath(PlannerInfo *root,
 			other_quals = NIL;
 		}
 		gj_info.join_quals = lappend(gj_info.join_quals,
-									 make_flat_ands_explicit(join_quals));
+									 (join_quals != NIL
+									  ? make_flat_ands_explicit(join_quals)
+									  : NULL));
 		gj_info.other_quals = lappend(gj_info.other_quals,
-									  make_flat_ands_explicit(other_quals));
+									  (other_quals != NIL
+									   ? make_flat_ands_explicit(other_quals)
+									   : NULL));
 		gj_info.hash_inner_keys = lappend(gj_info.hash_inner_keys,
 										  hash_inner_keys);
 		gj_info.hash_outer_keys = lappend(gj_info.hash_outer_keys,

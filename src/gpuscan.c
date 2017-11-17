@@ -426,7 +426,7 @@ create_gpuscan_path(PlannerInfo *root,
 	CustomPath	   *cpath;
 	ParamPathInfo  *param_info;
 	List		   *ppi_quals;
-	Expr		   *dev_quals_expr;
+	Expr		   *dev_quals_expr = NULL;
 	Cost			startup_cost;
 	Cost			run_cost;
 	Cost			startup_delay;
@@ -437,7 +437,8 @@ create_gpuscan_path(PlannerInfo *root,
 	double			cpu_per_tuple = 0.0;
 
 	/* cost for disk i/o + GPU qualifiers */
-	dev_quals_expr = make_flat_ands_explicit(dev_quals);
+	if (dev_quals != NIL)
+		dev_quals_expr = make_flat_ands_explicit(dev_quals);
 	cost_gpuscan_common(root, baserel,
 						dev_quals_expr,
 						parallel_nworkers,
@@ -1531,6 +1532,7 @@ PlanGpuScanPath(PlannerInfo *root,
 	Relation		relation;
 	List		   *host_quals = NIL;
 	List		   *dev_quals = NIL;
+	Expr		   *dev_quals_expr = NULL;
 	List		   *tlist_dev = NIL;
 	ListCell	   *cell;
 	cl_int			proj_row_extra = 0;
@@ -1564,7 +1566,9 @@ PlanGpuScanPath(PlannerInfo *root,
 	}
 	/* Reduce RestrictInfo list to bare expressions; ignore pseudoconstants */
 	host_quals = extract_actual_clauses(host_quals, false);
-    dev_quals = extract_actual_clauses(dev_quals, false);
+	dev_quals = extract_actual_clauses(dev_quals, false);
+	if (dev_quals)
+		dev_quals_expr = make_flat_ands_explicit(dev_quals);
 
 	/*
 	 * Code construction for the CUDA kernel code
@@ -1575,9 +1579,7 @@ PlanGpuScanPath(PlannerInfo *root,
 	initStringInfo(&kern);
 	initStringInfo(&source);
 	pgstrom_init_codegen_context(&context);
-	codegen_gpuscan_quals(&kern, &context, baserel->relid,
-						  make_flat_ands_explicit(dev_quals));
-
+	codegen_gpuscan_quals(&kern, &context, baserel->relid, dev_quals_expr);
 	tlist = replace_ctid_by_double_cast(tlist);
 	tlist_dev = build_gpuscan_projection(baserel->relid, relation,
 										 tlist,
@@ -1688,7 +1690,9 @@ pgstrom_pullup_outer_scan(const Path *outer_path,
 			return false;
 	}
 	*p_outer_relid = baserel->relid;
-	*p_outer_quals = make_flat_ands_explicit(outer_quals);
+	*p_outer_quals = (outer_quals != NIL
+					  ? make_flat_ands_explicit(outer_quals)
+					  : NULL);
 	return true;
 }
 
