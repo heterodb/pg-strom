@@ -1758,6 +1758,7 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	List		   *tlist_fallback = NIL;
 	bool			fallback_needs_projection = false;
 	bool			fallback_meets_resjunk = false;
+	bool			explain_only = ((eflags & EXEC_FLAG_EXPLAIN_ONLY) != 0);
 	ListCell	   *lc1;
 	ListCell	   *lc2;
 	cl_int			i, j, nattrs;
@@ -1766,7 +1767,7 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 
 	/* activate a GpuContext for CUDA kernel execution */
 	gjs->gts.gcontext = AllocGpuContext(-1, false);
-	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
+	if (!explain_only)
 		ActivateGpuContext(gjs->gts.gcontext);
 	/*
 	 * Re-initialization of scan tuple-descriptor and projection-info,
@@ -2095,7 +2096,8 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 											 gj_info->extra_flags,
 											 gj_info->kern_source,
 											 kern_define.data,
-											 false);
+											 false,
+											 explain_only);
 	gjs->gts.program_id = program_id;
 	pfree(kern_define.data);
 
@@ -4457,7 +4459,8 @@ ProgramId
 GpuJoinCreateCombinedProgram(PlanState *node,
 							 GpuTaskState *gpa_gts,
 							 cl_uint gpa_extra_flags,
-							 const char *gpa_kern_source)
+							 const char *gpa_kern_source,
+							 bool explain_only)
 {
 	GpuJoinState   *gjs = (GpuJoinState *) node;
 	GpuJoinInfo	   *gj_info;
@@ -4491,7 +4494,8 @@ GpuJoinCreateCombinedProgram(PlanState *node,
 											 extra_flags,
 											 kern_source.data,
 											 kern_define.data,
-											 false);
+											 false,
+											 explain_only);
 	pfree(kern_source.data);
 	pfree(kern_define.data);
 

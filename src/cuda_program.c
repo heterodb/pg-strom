@@ -340,9 +340,6 @@ construct_flat_cuda_source(uint32 extra_flags,
 					"#define BLCKSZ %u\n"
 					"#define MAXIMUM_ALIGNOF %u\n"
 					"#define MAXIMUM_ALIGNOF_SHIFT %u\n"
-#ifdef PGSTROM_DEBUG
-					"#define PGSTROM_DEBUG 1\n"
-#endif
 					"\n",
 					SIZEOF_VOID_P,
 					sizeof(CUdeviceptr),
@@ -491,7 +488,7 @@ link_cuda_libraries(char *ptx_image, size_t ptx_length,
 	jit_option_values[jit_index] = NULL;
 	jit_index++;
 
-#ifdef PGSTROM_DEBUG
+#if 1
 	jit_options[jit_index] = CU_JIT_GENERATE_LINE_INFO;
 	jit_option_values[jit_index] = (void *)1UL;
 	jit_index++;
@@ -981,6 +978,7 @@ __pgstrom_create_cuda_program(GpuContext *gcontext,
 							  const char *kern_source,
 							  const char *kern_define,
 							  bool wait_for_build,
+							  bool explain_only,
 							  const char *filename, int lineno)
 {
 	program_cache_entry	*entry;
@@ -1024,16 +1022,7 @@ __pgstrom_create_cuda_program(GpuContext *gcontext,
 			/* Move this entry to the head of LRU list */
 			dlist_move_head(&pgcache_head->lru_list, &entry->lru_chain);
 		retry_checks:
-			/* Raise an syntax error if already failed on build */
-			if (entry->ptx_image == CUDA_PROGRAM_BUILD_FAILURE)
-			{
-				put_cuda_program_entry_nolock(entry);
-				SpinLockRelease(&pgcache_head->lock);
-				ereport(ERROR,
-						(errcode(entry->error_code),
-						 errmsg("%s", entry->error_msg)));
-			}
-			else if (entry->ptx_image || !wait_for_build)
+			if (entry->ptx_image != NULL || !wait_for_build)
 			{
 				if (!trackCudaProgram(gcontext, program_id,
 									  filename, lineno))
@@ -1042,8 +1031,19 @@ __pgstrom_create_cuda_program(GpuContext *gcontext,
 					SpinLockRelease(&pgcache_head->lock);
 					elog(ERROR, "out of memory");
 				}
+
+				/* Raise syntax error if already failed on build */
+				if (!explain_only &&
+					entry->ptx_image == CUDA_PROGRAM_BUILD_FAILURE)
+				{
+					put_cuda_program_entry_nolock(entry);
+					SpinLockRelease(&pgcache_head->lock);
+					ereport(ERROR,
+							(errcode(entry->error_code),
+							 errmsg("%s", entry->error_msg)));
+				}
 				SpinLockRelease(&pgcache_head->lock);
-				return program_id;
+                return program_id;
 			}
 			else
 			{
@@ -1241,6 +1241,7 @@ pgstrom_load_cuda_program(ProgramId program_id)
 	int			extra_flags;
 	char	   *ptx_image;
 	size_t		ptx_length;
+	pg_crc32	ptx_crc		__attribute__((unused));
 	void	   *bin_image;
 	size_t		bin_length;
 
@@ -1266,24 +1267,11 @@ retry_checks:
 	}
 	else if (entry->ptx_image)
 	{
-		pg_crc32	ptx_crc		__attribute__((unused));
-
 		get_cuda_program_entry_nolock(entry);
 		extra_flags = entry->extra_flags;
 		ptx_image = entry->ptx_image;
 		ptx_length = entry->ptx_length;
-#ifdef PGSTROM_DEBUG
-		INIT_LEGACY_CRC32(ptx_crc);
-		COMP_LEGACY_CRC32(ptx_crc, entry->ptx_image, entry->ptx_length);
-		FIN_LEGACY_CRC32(ptx_crc);
-		if (ptx_crc != entry->ptx_crc)
-		{
-			pg_crc32	__ptx_crc = entry->ptx_crc;
-			SpinLockRelease(&pgcache_head->lock);
-			werror("CUDA program binary corrupted (%08x / %08x)",
-				   __ptx_crc, ptx_crc);
-		}
-#endif
+		ptx_crc = entry->ptx_crc;
 		SpinLockRelease(&pgcache_head->lock);
 	}
 	else if (entry->build_chain.prev || entry->build_chain.next)
@@ -1338,6 +1326,16 @@ retry_checks:
 	rc = cuModuleLoadData(&cuda_module, bin_image);
 	if (ptx_image != bin_image)
 		free(bin_image);
+#ifdef USE_ASSERT_CHECKING
+	{
+		pg_crc32	__ptx_crc;
+
+		INIT_LEGACY_CRC32(__ptx_crc);
+		COMP_LEGACY_CRC32(__ptx_crc, ptx_image, ptx_length);
+		FIN_LEGACY_CRC32(__ptx_crc);
+		Assert(__ptx_crc == ptx_crc);
+	}
+#endif /* USE_ASSERT_CHECKING */
 	put_cuda_program_entry(entry);
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuModuleLoadData: %s", errorText(rc));

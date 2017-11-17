@@ -1460,7 +1460,8 @@ plcuda_exec_begin(HeapTuple protup, FunctionCallInfo fcinfo)
 											 plts->p.extra_flags,
 											 kern_source,
 											 kern_define.data,
-											 true);
+											 true,
+											 false);
 	plts->gts.program_id = program_id;
 	pfree(kern_define.data);
 

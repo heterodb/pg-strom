@@ -255,23 +255,7 @@ typedef struct
 	cl_int		errcode;	/* one of the StromError_* */
 	cl_short	kernel;		/* one of the StromKernel_* */
 	cl_short	lineno;		/* line number STROM_SET_ERROR is called */
-#ifdef PGSTROM_DEBUG
-	cl_long		extra_x;	/* for debug purpose */
-	cl_long		extra_y;	/* for debug purpose */
-	cl_long		extra_z;	/* for debug purpose */
-#endif
 } kern_errorbuf;
-
-#ifdef PGSTROM_DEBUG
-#define KERN_ERRORBUF_SET_EXTRA(p_kerror,x,y,z)	\
-	do {										\
-		(p_kerror)->extra_x = (cl_long)(x);		\
-		(p_kerror)->extra_y = (cl_long)(y);		\
-		(p_kerror)->extra_z = (cl_long)(z);		\
-	} while(0)
-#else
-#define KERN_ERRORBUF_SET_EXTRA(kcxt,x,y,z)		do {} while(0)
-#endif
 
 /*
  * kern_context - a set of run-time information
@@ -289,7 +273,6 @@ typedef struct
 		(kcxt)->e.errcode = StromError_Success;				\
 		(kcxt)->e.kernel = StromKernel_##kfunction;			\
 		(kcxt)->e.lineno = 0;								\
-		KERN_ERRORBUF_SET_EXTRA(&(kcxt)->e,0,0,0);			\
 		(kcxt)->kparams = (__kparams);						\
 		assert((cl_ulong)(__kparams) == MAXALIGN(__kparams));	\
 	} while(0)
@@ -312,7 +295,6 @@ __STROM_SET_ERROR(kern_errorbuf *p_kerror, cl_int errcode, cl_int lineno,
 	{
 		p_kerror->errcode = errcode;
 		p_kerror->lineno = lineno;
-		KERN_ERRORBUF_SET_EXTRA(p_kerror, extra_x, extra_y, extra_z);
 	}
 }
 
@@ -351,24 +333,10 @@ kern_writeback_error_status(kern_errorbuf *result, kern_errorbuf own_error)
 		/* only primary error workgroup can come into */
 		result->kernel = own_error.kernel;
 		result->lineno = own_error.lineno;
-#ifdef PGSTROM_DEBUG
-		result->extra_x = own_error.extra_x;
-		result->extra_y = own_error.extra_y;
-		result->extra_z = own_error.extra_z;
-#endif
 	}
 }
 
 #else	/* __CUDACC__ */
-#ifdef PGSTROM_DEBUG
-#define KERROR_EXTRA_X(p_kerror)		((p_kerror)->extra_x)
-#define KERROR_EXTRA_Y(p_kerror)		((p_kerror)->extra_y)
-#define KERROR_EXTRA_Z(p_kerror)		((p_kerror)->extra_z)
-#else
-#define KERROR_EXTRA_X(p_kerror)		0UL
-#define KERROR_EXTRA_Y(p_kerror)		0UL
-#define KERROR_EXTRA_Z(p_kerror)		0UL
-#endif
 /*
  * If case when STROM_SET_ERROR is called in the host code,
  * it raises an error using ereport()
@@ -376,6 +344,7 @@ kern_writeback_error_status(kern_errorbuf *result, kern_errorbuf own_error)
 #define STROM_SET_ERROR(p_kerror, errcode)		\
 	elog(ERROR, "%s:%d %s", __FUNCTION__, __LINE__, errorText(errcode))
 #endif	/* !__CUDACC__! */
+
 #ifdef __CUDACC__
 /*
  * NumSmx - reference to the %nsmid register

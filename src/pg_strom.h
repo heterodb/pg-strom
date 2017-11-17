@@ -790,10 +790,11 @@ extern ProgramId __pgstrom_create_cuda_program(GpuContext *gcontext,
 											   const char *kern_source,
 											   const char *kern_define,
 											   bool wait_for_build,
+											   bool explain_only,
 											   const char *filename,
 											   int lineno);
-#define pgstrom_create_cuda_program(a,b,c,d,e)	\
-	__pgstrom_create_cuda_program((a),(b),(c),(d),(e),__FILE__,__LINE__)
+#define pgstrom_create_cuda_program(a,b,c,d,e,f)						\
+	__pgstrom_create_cuda_program((a),(b),(c),(d),(e),(f),__FILE__,__LINE__)
 extern CUmodule pgstrom_load_cuda_program(ProgramId program_id);
 extern void pgstrom_put_cuda_program(GpuContext *gcontext,
 									 ProgramId program_id);
@@ -997,7 +998,8 @@ extern Size GpuJoinSetupTask(struct kern_gpujoin *kgjoin,
 extern ProgramId GpuJoinCreateCombinedProgram(PlanState *node,
 											  GpuTaskState *gpa_gts,
 											  cl_uint gpa_extra_flags,
-											  const char *gpa_kern_source);
+											  const char *gpa_kern_source,
+											  bool explain_only);
 extern bool GpuJoinInnerPreload(GpuTaskState *gts, CUdeviceptr *p_m_kmrels);
 extern void GpuJoinInnerUnload(GpuTaskState *gts, bool is_rescan);
 extern pgstrom_data_store *GpuJoinExecOuterScanChunk(GpuTaskState *gts,

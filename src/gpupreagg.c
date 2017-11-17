@@ -3665,12 +3665,13 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 	StringInfoData	kern_define;
 	ProgramId		program_id;
 	size_t			length;
+	bool			explain_only = ((eflags & EXEC_FLAG_EXPLAIN_ONLY) != 0);
 	bool			has_oid;
 
 	Assert(scan_rel ? outerPlan(node) == NULL : outerPlan(cscan) != NULL);
 	/* activate a GpuContext for CUDA kernel execution */
 	gpas->gts.gcontext = AllocGpuContext(-1, false);
-	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
+	if (!explain_only)
 		ActivateGpuContext(gpas->gts.gcontext);
 
 	/* setup common GpuTaskState fields */
@@ -3777,7 +3778,8 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 		program_id = GpuJoinCreateCombinedProgram(outerPlanState(gpas),
 												  &gpas->gts,
 												  gpa_info->extra_flags,
-												  gpa_info->kern_source);
+												  gpa_info->kern_source,
+												  explain_only);
 	}
 	else
 	{
@@ -3789,7 +3791,8 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 												 gpa_info->extra_flags,
 												 gpa_info->kern_source,
 												 kern_define.data,
-												 false);
+												 false,
+												 explain_only);
 		pfree(kern_define.data);
 	}
 	gpas->gts.program_id = program_id;

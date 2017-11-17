@@ -1831,6 +1831,7 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	CustomScan	   *cscan = (CustomScan *)node->ss.ps.plan;
 	GpuScanInfo	   *gs_info = deform_gpuscan_info(cscan);
 	GpuContext	   *gcontext;
+	bool			explain_only = ((eflags & EXEC_FLAG_EXPLAIN_ONLY) != 0);
 	List		   *dev_tlist = NIL;
 	List		   *dev_quals_raw;
 	Expr		   *dev_quals_expr;
@@ -1845,7 +1846,7 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 
 	/* setup GpuContext for CUDA kernel execution */
 	gcontext = AllocGpuContext(-1, false);
-	if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
+	if (!explain_only)
 		ActivateGpuContext(gcontext);
 	gss->gts.gcontext = gcontext;
 
@@ -1954,7 +1955,8 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 											 gs_info->extra_flags,
 											 gs_info->kern_source,
 											 kern_define.data,
-											 false);
+											 false,
+											 explain_only);
 	gss->gts.program_id = program_id;
 	gss->gs_sstate = NULL;		/* to be set later */
 	pfree(kern_define.data);
