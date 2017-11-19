@@ -302,6 +302,7 @@ gpujoin_rewind_stack(cl_int depth, cl_uint *l_state, cl_bool *matched)
 	static __shared__ cl_int	__depth;
 
 	assert(depth >= base_depth && depth <= GPUJOIN_MAX_DEPTH);
+	__syncthreads();
 	if (get_local_id() == 0)
 	{
 		__depth = depth;
@@ -1166,6 +1167,7 @@ gpujoin_main(kern_gpujoin *kgjoin,
 	cl_uint		   *pstack_base;
 	cl_uint			l_state[GPUJOIN_MAX_DEPTH+1];
 	cl_bool			matched[GPUJOIN_MAX_DEPTH+1];
+	__shared__ cl_int depth_thread0 __attribute__((unused));
 
 	INIT_KERNEL_CONTEXT(&kcxt, gpujoin_main, kparams);
 	assert(kds_src->format == KDS_FORMAT_ROW ||
@@ -1184,9 +1186,6 @@ gpujoin_main(kern_gpujoin *kgjoin,
 	pstack_base = (cl_uint *)((char *)kgjoin + kgjoin->pstack_offset)
 		+ get_global_index() * pstack_nrooms * ((GPUJOIN_MAX_DEPTH+1) *
 												(GPUJOIN_MAX_DEPTH+2)) / 2;
-	memset(l_state, 0, sizeof(l_state));
-	memset(matched, 0, sizeof(matched));
-
 	/* setup crc32 table */
 	for (index = get_local_id();
 		 index < lengthof(pg_crc32_table);
@@ -1277,7 +1276,10 @@ gpujoin_main(kern_gpujoin *kgjoin,
 										  l_state,
 										  matched);
 		}
+		if (get_local_id() == 0)
+			depth_thread0 = depth;
 		__syncthreads();
+		assert(depth_thread0 == depth);
 	}
 
 	/* update statistics only if normal exit */
@@ -1340,6 +1342,7 @@ gpujoin_right_outer(kern_gpujoin *kgjoin,
 	cl_uint		   *pstack_base;
 	cl_uint			l_state[GPUJOIN_MAX_DEPTH+1];
 	cl_bool			matched[GPUJOIN_MAX_DEPTH+1];
+	__shared__ cl_int depth_thread0 __attribute__((unused));
 
 	INIT_KERNEL_CONTEXT(&kcxt, gpujoin_right_outer, kparams);
 	assert(KERN_MULTIRELS_RIGHT_OUTER_JOIN(kmrels, outer_depth));
@@ -1445,7 +1448,10 @@ gpujoin_right_outer(kern_gpujoin *kgjoin,
 										  l_state,
 										  matched);
 		}
+		if (get_local_id() == 0)
+			depth_thread0 = depth;
 		__syncthreads();
+		assert(depth == depth_thread0);
 	}
 	/* write out statistics */
 	if (get_local_id() == 0)

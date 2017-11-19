@@ -487,7 +487,11 @@ link_cuda_libraries(char *ptx_image, size_t ptx_length,
 	jit_options[jit_index] = CU_JIT_TARGET_FROM_CUCONTEXT;
 	jit_option_values[jit_index] = NULL;
 	jit_index++;
-
+#if 1
+	jit_options[jit_index] = CU_JIT_GENERATE_DEBUG_INFO;
+	jit_option_values[jit_index] = (void *)1UL;
+	jit_index++;
+#endif
 #if 1
 	jit_options[jit_index] = CU_JIT_GENERATE_LINE_INFO;
 	jit_option_values[jit_index] = (void *)1UL;
@@ -733,6 +737,7 @@ build_cuda_program(program_cache_entry *src_entry)
 		snprintf(gpu_arch_option, sizeof(gpu_arch_option),
 				 "--gpu-architecture=compute_%lu", devComputeCapability);
 		options[opt_index++] = gpu_arch_option;
+		options[opt_index++] = "--device-debug";
 		options[opt_index++] = "--generate-line-info";
 		options[opt_index++] = "--use_fast_math";
 //		options[opt_index++] = "--device-as-default-execution-space";
