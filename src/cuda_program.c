@@ -76,6 +76,7 @@ typedef struct
 
 /* ---- GUC variables ---- */
 static int		program_cache_size_kb;
+static bool		pgstrom_debug_jit_compile_options;
 
 /* ---- static variables ---- */
 static shmem_startup_hook_type shmem_startup_next;
@@ -339,19 +340,22 @@ construct_flat_cuda_source(uint32 extra_flags,
 					"#define DEVICEPTRLEN %lu\n"
 					"#define BLCKSZ %u\n"
 					"#define MAXIMUM_ALIGNOF %u\n"
-					"#define MAXIMUM_ALIGNOF_SHIFT %u\n"
-					"\n",
+					"#define MAXIMUM_ALIGNOF_SHIFT %u\n",
 					SIZEOF_VOID_P,
 					sizeof(CUdeviceptr),
 					BLCKSZ,
 					MAXIMUM_ALIGNOF,
 					MAXIMUM_ALIGNOF_SHIFT);
+	/* Enables Debug build? */
+	if ((extra_flags & DEVKERNEL_BUILD_DEBUG_INFO) != 0)
+		ofs += snprintf(source + ofs, len - ofs,
+						"#define PGSTROM_KERNEL_DEBUG 1\n");
 	/* Common PG-Strom device routine */
 	ofs += snprintf(source + ofs, len - ofs,
 					"#include \"cuda_common.h\"\n");
 	/* Per session definition if any */
 	ofs += snprintf(source + ofs, len - ofs,
-					"%s\n", kern_define);
+					"\n%s\n", kern_define);
 
 	/*
 	 * PG-Strom CUDA device code libraries
@@ -478,32 +482,29 @@ link_cuda_libraries(char *ptx_image, size_t ptx_length,
 
 	/*
 	 * JIT Options
-	 *
-	 * NOTE: Even though CU_JIT_TARGET expects CU_TARGET_COMPUTE_XX is
-	 * supplied, it is actually defined as (10 * <major capability> +
-	 * <minor capability>), thus it is equivalent to the definition
-	 * of pgstrom_baseline_cuda_capability.
 	 */
+
+	/* Get optimal binary to the current context */
 	jit_options[jit_index] = CU_JIT_TARGET_FROM_CUCONTEXT;
 	jit_option_values[jit_index] = NULL;
 	jit_index++;
-#if 1
-	jit_options[jit_index] = CU_JIT_GENERATE_DEBUG_INFO;
-	jit_option_values[jit_index] = (void *)1UL;
-	jit_index++;
-#endif
-#if 1
-	jit_options[jit_index] = CU_JIT_GENERATE_LINE_INFO;
-	jit_option_values[jit_index] = (void *)1UL;
-	jit_index++;
-#endif
-#if 1
-	/* how much effective? */
+
+	/* Compile with L1 cache enabled */
 	jit_options[jit_index] = CU_JIT_CACHE_MODE;
 	jit_option_values[jit_index] = (void *)CU_JIT_CACHE_OPTION_CA;
 	jit_index++;
-#endif
 
+	/* Enables debug options if required */
+	if ((extra_flags & DEVKERNEL_BUILD_DEBUG_INFO) != 0)
+	{
+		jit_options[jit_index] = CU_JIT_GENERATE_DEBUG_INFO;
+		jit_option_values[jit_index] = (void *)1UL;
+		jit_index++;
+
+		jit_options[jit_index] = CU_JIT_GENERATE_LINE_INFO;
+		jit_option_values[jit_index] = (void *)1UL;
+		jit_index++;
+	}
 	/* makes a linkage object */
 	rc = cuLinkCreate(jit_index, jit_options, jit_option_values, &lstate);
 	if (rc != CUDA_SUCCESS)
@@ -737,10 +738,12 @@ build_cuda_program(program_cache_entry *src_entry)
 		snprintf(gpu_arch_option, sizeof(gpu_arch_option),
 				 "--gpu-architecture=compute_%lu", devComputeCapability);
 		options[opt_index++] = gpu_arch_option;
-		options[opt_index++] = "--device-debug";
-		options[opt_index++] = "--generate-line-info";
+		if ((src_entry->extra_flags & DEVKERNEL_BUILD_DEBUG_INFO) != 0)
+		{
+			options[opt_index++] = "--device-debug";
+			options[opt_index++] = "--generate-line-info";
+		}
 		options[opt_index++] = "--use_fast_math";
-//		options[opt_index++] = "--device-as-default-execution-space";
 		/* library linkage needs relocatable PTX */
 		if (src_entry->extra_flags & DEVKERNEL_NEEDS_LINKAGE)
 			options[opt_index++] = "--relocatable-device-code=true";
@@ -1003,6 +1006,10 @@ __pgstrom_create_cuda_program(GpuContext *gcontext,
 	 */
 	if (wait_for_build && !gcontext->cuda_context)
 		elog(ERROR, "Bug? unable to kick synchronous code build with inactive GpuContext");
+
+	/* build with debug option? */
+	if (pgstrom_debug_jit_compile_options)
+		extra_flags |= DEVKERNEL_BUILD_DEBUG_INFO;
 
 	/* makes a hash value */
 	INIT_LEGACY_CRC32(crc);
@@ -1505,12 +1512,24 @@ pgstrom_init_cuda_program(void)
 							"size of shared program cache",
 							NULL,
 							&program_cache_size_kb,
-							512 * 1024,		/* 512MB */
+							256 * 1024,		/* 256MB */
 							16 * 1024,		/* 16MB */
 							INT_MAX,
 							PGC_POSTMASTER,
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
 							NULL, NULL, NULL);
+
+	/*
+	 * Enables debug option on GPU kernel build
+	 */
+	DefineCustomBoolVariable("pg_strom.debug_jit_compile_options",
+							 "Enables debug options on GPU kernel build",
+							 NULL,
+							 &pgstrom_debug_jit_compile_options,
+							 false,
+							 PGC_SUSET,
+							 GUC_NOT_IN_SAMPLE | GUC_SUPERUSER_ONLY,
+							 NULL, NULL, NULL);
 
 	/*
 	 * Init CUDA run-time compiler library
