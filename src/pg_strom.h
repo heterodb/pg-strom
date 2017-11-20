@@ -82,6 +82,7 @@
 #include "pgstat.h"
 #include "port/atomics.h"
 #include "postmaster/bgworker.h"
+#include "postmaster/postmaster.h"
 #include "storage/buf_internals.h"
 #include "storage/ipc.h"
 #include "storage/fd.h"

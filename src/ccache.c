@@ -19,6 +19,7 @@
 
 typedef struct
 {
+	//DB oid, current state?
 	Latch	   *latch;
 } ccacheBuilder;
 
@@ -33,13 +34,54 @@ typedef struct
 	ccacheBuilder cc_builders[FLEXIBLE_ARRAY_MEMBER];
 } ccacheBuilderControl;
 
-static ccacheBuilderControl	   *cc_builder_control = NULL;
+/*
+ * ccacheChunk
+ */
+#define CCACHE_CHUNK_SIZE		(128L << 20)	/* 128MB */
+#define CCACHE_MAX_NATTRS		80		/* up to 80 columns right now */
+typedef struct
+{
+	dlist_node	chain;
+	pg_crc32	hash;
+	Oid			database_oid;
+	Oid			table_oid;
+	BlockNumber	block_nr;		/* block_nr of chunk-size aligned */
+	cl_int		refcnt;
+	struct timeval ctime;		/* timestamp on creation */
+	struct timeval atime;		/* timestamp last referenced */
+	pg_atomic_uint32 nreads;	/* number of cache read */
+	cl_int		nattrs;
+	struct {
+		size_t	offset;			/* offset on the ccache file */
+		size_t	length;			/* length of the ccache array */
+	} attrs[CCACHE_MAX_NATTRS];
+} ccacheChunk;
+
+/*
+ * ccacheHead
+ */
+typedef struct
+{
+	slock_t		free_chunks_lock;
+	dlist_head	free_chunks_list;
+	cl_uint		num_chunks;		/* total number of ccacheChunk */
+	cl_uint		num_slots;		/* width of active_locks/slots */
+	slock_t	   *active_locks;
+	dlist_head *active_slots;
+	ccacheChunk	ccache_chunks[FLEXIBLE_ARRAY_MEMBER];
+} ccacheHead;
 
 /* static variables */
 static shmem_startup_hook_type shmem_startup_next = NULL;
 static char		   *ccache_startup_databases;	/* GUC */
 static int			ccache_num_builders;		/* GUC */
 static size_t		ccache_max_size;			/* GUC */
+static char		   *ccache_base_dir_name;		/* GUC */
+static DIR		   *ccache_base_dir = NULL;
+static ccacheHead  *ccache_head = NULL;
+static cl_uint		ccache_num_chunks;
+static cl_uint		ccache_num_slots;
+static ccacheBuilderControl	   *cc_builder_control = NULL;	/* shmem */
 static bool			ccache_builder_got_sigterm = false;
 static int			ccache_builder_id = -1;
 static HTAB		   *ccache_relations_htab = NULL;
@@ -48,6 +90,102 @@ static MemoryContext ccache_relations_mcxt;
 static Oid			ccache_invalidator_func_oid = InvalidOid;
 
 extern void ccache_builder_main(Datum arg);
+
+/*
+ * ccache_compute_hashvalue
+ */
+static inline pg_crc32
+ccache_compute_hashvalue(Oid database_oid, Oid table_oid, BlockNumber block_nr)
+{
+	pg_crc32	hash;
+
+	Assert((block_nr & ((CCACHE_CHUNK_SIZE / BLCKSZ) - 1)) == 0);
+	INIT_LEGACY_CRC32(hash);
+	COMP_LEGACY_CRC32(hash, &database_oid, sizeof(Oid));
+	COMP_LEGACY_CRC32(hash, &table_oid, sizeof(Oid));
+	COMP_LEGACY_CRC32(hash, &block_nr, sizeof(BlockNumber));
+	FIN_LEGACY_CRC32(hash);
+
+	return hash;
+}
+
+/*
+ * ccache_get_chunk
+ */
+static ccacheChunk *
+ccache_get_chunk(Oid table_oid, BlockNumber block_nr)
+{
+	pg_crc32	hash;
+	cl_int		index;
+	dlist_iter	iter;
+	ccacheChunk *cc_chunk = NULL;
+
+	hash = ccache_compute_hashvalue(MyDatabaseId, table_oid, block_nr);
+	index = hash % ccache_num_slots;
+
+	SpinLockAcquire(&ccache_head->active_locks[index]);
+	dlist_foreach (iter, &ccache_head->active_slots[index])
+	{
+		ccacheChunk *temp = dlist_container(ccacheChunk, chain, iter.cur);
+
+		if (temp->hash == hash &&
+			temp->database_oid == MyDatabaseId &&
+			temp->table_oid == table_oid &&
+			temp->block_nr == block_nr)
+		{
+			cc_chunk = temp;
+			cc_chunk->refcnt++;
+			break;
+		}
+	}
+	SpinLockRelease(&ccache_head->active_locks[index]);
+
+	return cc_chunk;
+}
+
+/*
+ * ccache_put_chunk
+ */
+static void
+ccache_put_chunk(ccacheChunk *cc_chunk)
+{
+	cl_int		index = cc_chunk->hash % ccache_num_slots;
+	char		fname[MAXPGPATH];
+
+	SpinLockAcquire(&ccache_head->active_locks[index]);
+	Assert(cc_chunk->refcnt > 0);
+	if (--cc_chunk->refcnt == 0)
+	{
+		dlist_delete(&cc_chunk->chain);
+		SpinLockRelease(&ccache_head->active_locks[index]);
+
+		snprintf(fname, MAXPGPATH, "CC%08x-%08x:%08x.dat",
+				 cc_chunk->database_oid,
+				 cc_chunk->table_oid,
+				 cc_chunk->block_nr);
+		if (unlinkat(dirfd(ccache_base_dir), fname, 0) != 0)
+			elog(WARNING, "failed on unlinkat \"%s\": %m", fname);
+
+		/* back to the free list */
+		SpinLockAcquire(&ccache_head->free_chunks_lock);
+		dlist_push_head(&ccache_head->free_chunks_list,
+						&cc_chunk->chain);
+		SpinLockRelease(&ccache_head->free_chunks_lock);
+	}
+	else
+	{
+		SpinLockRelease(&ccache_head->active_locks[index]);
+	}
+}
+
+
+
+
+
+
+
+
+
 
 /*
  * ccache_invalidator_oid - returns OID of invalidator trigger function
@@ -579,6 +717,7 @@ pgstrom_startup_ccache(void)
 {
 	size_t		required;
 	bool		found;
+	int			i;
 	void	   *extra = NULL;
 
 	if (shmem_startup_next)
@@ -593,6 +732,39 @@ pgstrom_startup_ccache(void)
 
 	memset(cc_builder_control, 0, required);
 	SpinLockInit(&cc_builder_control->lock);
+
+	required = (MAXALIGN(offsetof(ccacheHead,
+								  ccache_chunks[ccache_num_chunks])) +
+				MAXALIGN(sizeof(slock_t) * ccache_num_slots) +
+				MAXALIGN(sizeof(dlist_head) * ccache_num_slots));
+	ccache_head = ShmemInitStruct("CCache Chunks Head",
+								  required, &found);
+	if (found)
+		elog(ERROR, "Bug? shared memory for ccache chunks already built");
+	SpinLockInit(&ccache_head->free_chunks_lock);
+	dlist_init(&ccache_head->free_chunks_list);
+	ccache_head->num_chunks = ccache_num_chunks;
+	ccache_head->num_slots = ccache_num_slots;
+	ccache_head->active_locks = (slock_t *)
+		((char *)ccache_head +
+		 MAXALIGN(offsetof(ccacheHead, ccache_chunks[ccache_num_chunks])));
+	ccache_head->active_slots = (dlist_head *)
+		((char *)ccache_head->active_locks +
+		 MAXALIGN(sizeof(slock_t) * ccache_num_slots));
+	for (i=0; i < ccache_num_slots; i++)
+	{
+		SpinLockInit(&ccache_head->active_locks[i]);
+		dlist_init(&ccache_head->active_slots[i]);
+	}
+
+	for (i=0; i < ccache_num_chunks; i++)
+	{
+		ccacheChunk	   *cc_chunk = &ccache_head->ccache_chunks[i];
+
+		memset(cc_chunk, 0, sizeof(ccacheChunk));
+		dlist_push_tail(&ccache_head->free_chunks_list,
+						&cc_chunk->chain);
+	}
 
 	/* setup GUC again */
 	if (!guc_check_ccache_databases(&ccache_startup_databases,
@@ -610,8 +782,9 @@ pgstrom_init_ccache(void)
 	static int	ccache_max_size_kb;
 	long		sc_pagesize = sysconf(_SC_PAGESIZE);
 	long		sc_phys_pages = sysconf(_SC_PHYS_PAGES);
-	size_t		required;
+	size_t		required = 0;
 	BackgroundWorker worker;
+	char		pathname[MAXPGPATH];
 	int			i;
 
 	DefineCustomStringVariable("pg_strom.ccache_databases",
@@ -645,6 +818,46 @@ pgstrom_init_ccache(void)
 							GUC_UNIT_KB,
 							NULL, NULL, NULL);
 	ccache_max_size = (size_t)ccache_max_size_kb << 10;
+	ccache_num_slots = Max(ccache_max_size / CCACHE_CHUNK_SIZE, 100);
+	ccache_num_chunks = 2 * ccache_num_chunks;
+
+	DefineCustomStringVariable("pg_strom.ccache_base_dir",
+							   "directory name used by ccache",
+							   NULL,
+							   &ccache_base_dir_name,
+							   "/dev/shm",
+							   PGC_POSTMASTER,
+							   GUC_NOT_IN_SAMPLE,
+							   NULL, NULL, NULL);
+	snprintf(pathname, sizeof(pathname), "%s/.pg_strom.ccache.%u",
+			 ccache_base_dir_name, PostPortNumber);
+	ccache_base_dir = opendir(pathname);
+	if (!ccache_base_dir)
+	{
+		if (errno != ENOENT)
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not open ccache directory \"%s\": %m",
+							pathname)));
+		else if (ccache_num_builders > 0)
+		{
+			/*
+			 * Even if ccache directory is not found, we try to make
+			 * an empty directory if ccache builder process will run.
+			 */
+			if (mkdir(pathname, 0700) != 0)
+				ereport(ERROR,
+						(errcode_for_file_access(),
+						 errmsg("could not make a ccache directory \"%s\": %m",
+								pathname)));
+			ccache_base_dir = opendir(pathname);
+			if (!ccache_base_dir)
+				ereport(ERROR,
+						(errcode_for_file_access(),
+						 errmsg("could not open ccache directory \"%s\": %m",
+								pathname)));
+		}
+	}
 
 	ccache_relations_mcxt = AllocSetContextCreate(CacheMemoryContext,
 												  "HTAB of ccache relations",
@@ -666,8 +879,12 @@ pgstrom_init_ccache(void)
 	}
 
 	/* request for static shared memory */
-	required = MAXALIGN(offsetof(ccacheBuilderControl,
-								 cc_builders[ccache_num_builders]));
+	required = (MAXALIGN(offsetof(ccacheBuilderControl,
+								  cc_builders[ccache_num_builders])) +
+				MAXALIGN(offsetof(ccacheHead,
+								  ccache_chunks[ccache_num_chunks])) +
+				MAXALIGN(sizeof(slock_t) * ccache_num_slots) +
+				MAXALIGN(sizeof(dlist_head) * ccache_num_slots));
 	RequestAddinShmemSpace(required);
 
 	shmem_startup_next = shmem_startup_hook;
