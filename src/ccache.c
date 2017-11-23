@@ -17,59 +17,62 @@
  */
 #include "pg_strom.h"
 
+#define CCACHE_MAX_NUM_DATABASES	100
+#define CCBUILDER_STATE__SHUTDOWN	0
+#define CCBUILDER_STATE__STARTUP	1
+#define CCBUILDER_STATE__PRELOAD	2
+#define CCBUILDER_STATE__TRYLOAD	3
+#define CCBUILDER_STATE__SLEEP		4
 typedef struct
 {
-	//DB oid, current state?
+	char		dbname[NAMEDATALEN];
+	bool		invalid_database;
+	pg_atomic_uint64 curr_scan_pos;
+} ccacheDatabase;
+
+typedef struct
+{
+	Oid			database_oid;
+	int			state;		/* one of CCBUILDER_STATE__* */
 	Latch	   *latch;
 } ccacheBuilder;
 
-#define CCACHE_MAX_NUM_DATABASES	100
 typedef struct
 {
+	/* hash slot of ccache chunks */
+	slock_t		free_chunks_lock;
+	dlist_head	free_chunks_list;
+	slock_t	   *active_locks;
+	dlist_head *active_slots;
+	/* management of ccache builder workers */
 	pg_atomic_uint32 generation;
-	slock_t		lock;
-	int			rr_count;
-	int			num_databases;
-	char		dbnames[CCACHE_MAX_NUM_DATABASES][NAMEDATALEN];
-	ccacheBuilder cc_builders[FLEXIBLE_ARRAY_MEMBER];
-} ccacheBuilderControl;
+	slock_t			lock;
+	int				rr_count;
+	int				num_databases;
+	ccacheDatabase	databases[CCACHE_MAX_NUM_DATABASES];
+	ccacheBuilder	builders[FLEXIBLE_ARRAY_MEMBER];
+} ccacheState;
 
 /*
  * ccacheChunk
  */
 #define CCACHE_CHUNK_SIZE		(128L << 20)	/* 128MB */
-#define CCACHE_MAX_NATTRS		80		/* up to 80 columns right now */
+
 typedef struct
 {
 	dlist_node	chain;
-	pg_crc32	hash;
-	Oid			database_oid;
-	Oid			table_oid;
-	BlockNumber	block_nr;		/* block_nr of chunk-size aligned */
-	cl_int		refcnt;
-	struct timeval ctime;		/* timestamp on creation */
-	struct timeval atime;		/* timestamp last referenced */
-	pg_atomic_uint32 nreads;	/* number of cache read */
-	cl_int		nattrs;
+	pg_crc32	hash;			/* hash value */
+	Oid			database_oid;	/* OID of the cached database */
+	Oid			table_oid;		/* OID of the cached table */
+	BlockNumber	block_nr;		/* block number where is head of the chunk */
+	cl_int		refcnt;			/* reference counter */
+	struct timeval ctime;		/* time of the cache creation */
+	struct timeval atime;		/* time of the last access */
 	struct {
-		size_t	offset;			/* offset on the ccache file */
-		size_t	length;			/* length of the ccache array */
-	} attrs[CCACHE_MAX_NATTRS];
+		off_t	offset;
+		size_t	length;
+	} attrs[FLEXIBLE_ARRAY_MEMBER];
 } ccacheChunk;
-
-/*
- * ccacheHead
- */
-typedef struct
-{
-	slock_t		free_chunks_lock;
-	dlist_head	free_chunks_list;
-	cl_uint		num_chunks;		/* total number of ccacheChunk */
-	cl_uint		num_slots;		/* width of active_locks/slots */
-	slock_t	   *active_locks;
-	dlist_head *active_slots;
-	ccacheChunk	ccache_chunks[FLEXIBLE_ARRAY_MEMBER];
-} ccacheHead;
 
 /* static variables */
 static shmem_startup_hook_type shmem_startup_next = NULL;
@@ -78,15 +81,14 @@ static int			ccache_num_builders;		/* GUC */
 static size_t		ccache_max_size;			/* GUC */
 static char		   *ccache_base_dir_name;		/* GUC */
 static DIR		   *ccache_base_dir = NULL;
-static ccacheHead  *ccache_head = NULL;
-static cl_uint		ccache_num_chunks;
-static cl_uint		ccache_num_slots;
-static ccacheBuilderControl	   *cc_builder_control = NULL;	/* shmem */
+static ccacheState *ccache_state = NULL;		/* shmem */
+static cl_int		ccache_num_chunks;
+static cl_int		ccache_num_slots;
+static cl_int 		ccache_max_nattrs;			/* GUC (hidden) */
+static ccacheDatabase *ccache_database = NULL;	/* only builder */
+static ccacheBuilder  *ccache_builder = NULL;	/* only builder */
 static bool			ccache_builder_got_sigterm = false;
-static int			ccache_builder_id = -1;
-static HTAB		   *ccache_relations_htab = NULL;
-static MemoryContext ccache_relations_mcxt;
-
+static oidvector   *ccache_relations_oid = NULL;
 static Oid			ccache_invalidator_func_oid = InvalidOid;
 
 extern void ccache_builder_main(Datum arg);
@@ -110,6 +112,20 @@ ccache_compute_hashvalue(Oid database_oid, Oid table_oid, BlockNumber block_nr)
 }
 
 /*
+ * ccache_chunk_filename
+ */
+static inline void
+ccache_chunk_filename(char *fname,
+					  Oid database_oid, Oid table_oid, BlockNumber block_nr)
+{
+	Assert((block_nr & ((CCACHE_CHUNK_SIZE / BLCKSZ)-1)) == 0);
+
+	snprintf(fname, MAXPGPATH, "CC%u-%u:%ld.dat",
+			 database_oid, table_oid,
+			 block_nr / (CCACHE_CHUNK_SIZE / BLCKSZ));
+}
+
+/*
  * ccache_get_chunk
  */
 static ccacheChunk *
@@ -123,8 +139,8 @@ ccache_get_chunk(Oid table_oid, BlockNumber block_nr)
 	hash = ccache_compute_hashvalue(MyDatabaseId, table_oid, block_nr);
 	index = hash % ccache_num_slots;
 
-	SpinLockAcquire(&ccache_head->active_locks[index]);
-	dlist_foreach (iter, &ccache_head->active_slots[index])
+	SpinLockAcquire(&ccache_state->active_locks[index]);
+	dlist_foreach (iter, &ccache_state->active_slots[index])
 	{
 		ccacheChunk *temp = dlist_container(ccacheChunk, chain, iter.cur);
 
@@ -138,7 +154,7 @@ ccache_get_chunk(Oid table_oid, BlockNumber block_nr)
 			break;
 		}
 	}
-	SpinLockRelease(&ccache_head->active_locks[index]);
+	SpinLockRelease(&ccache_state->active_locks[index]);
 
 	return cc_chunk;
 }
@@ -147,36 +163,39 @@ ccache_get_chunk(Oid table_oid, BlockNumber block_nr)
  * ccache_put_chunk
  */
 static void
-ccache_put_chunk(ccacheChunk *cc_chunk)
+ccache_put_chunk_nolock(ccacheChunk *cc_chunk)
 {
-	cl_int		index = cc_chunk->hash % ccache_num_slots;
-	char		fname[MAXPGPATH];
-
-	SpinLockAcquire(&ccache_head->active_locks[index]);
 	Assert(cc_chunk->refcnt > 0);
 	if (--cc_chunk->refcnt == 0)
 	{
-		dlist_delete(&cc_chunk->chain);
-		SpinLockRelease(&ccache_head->active_locks[index]);
+		char		fname[MAXPGPATH];
 
-		snprintf(fname, MAXPGPATH, "CC%08x-%08x:%08x.dat",
-				 cc_chunk->database_oid,
-				 cc_chunk->table_oid,
-				 cc_chunk->block_nr);
+		Assert(cc_chunk->chain.prev == NULL &&
+			   cc_chunk->chain.next == NULL);
+		ccache_chunk_filename(fname,
+							  cc_chunk->database_oid,
+							  cc_chunk->table_oid,
+							  cc_chunk->block_nr);
 		if (unlinkat(dirfd(ccache_base_dir), fname, 0) != 0)
 			elog(WARNING, "failed on unlinkat \"%s\": %m", fname);
-
 		/* back to the free list */
-		SpinLockAcquire(&ccache_head->free_chunks_lock);
-		dlist_push_head(&ccache_head->free_chunks_list,
+		SpinLockAcquire(&ccache_state->free_chunks_lock);
+		dlist_push_head(&ccache_state->free_chunks_list,
 						&cc_chunk->chain);
-		SpinLockRelease(&ccache_head->free_chunks_lock);
-	}
-	else
-	{
-		SpinLockRelease(&ccache_head->active_locks[index]);
+		SpinLockRelease(&ccache_state->free_chunks_lock);
 	}
 }
+
+static void
+ccache_put_chunk(ccacheChunk *cc_chunk)
+{
+	cl_int		index = cc_chunk->hash % ccache_num_slots;
+
+	SpinLockAcquire(&ccache_state->active_locks[index]);
+	ccache_put_chunk_nolock(cc_chunk);
+	SpinLockRelease(&ccache_state->active_locks[index]);
+}
+
 
 
 
@@ -250,44 +269,40 @@ ccache_invalidator_oid(bool missing_ok)
 	if (invalidator_fn != pgstrom_ccache_invalidator)
 		return InvalidOid;
 
+	elog(LOG, "ccache invalidator found: oid=%u %s",
+		 invalidator_oid, format_procedure(invalidator_oid));
+
 	ccache_invalidator_func_oid = invalidator_oid;
 	return ccache_invalidator_func_oid;
 }
 
 /*
- * refresh_ccache_relations_htab
+ * refresh_ccache_source_relations
  */
 static void
-refresh_ccache_relations_htab(void)
+refresh_ccache_source_relations(void)
 {
 	Oid			invalidator_oid;
 	Relation	hrel;
 	Relation	irel;
 	SysScanDesc	sscan;
 	HeapTuple	tup;
-	Form_pg_trigger trig_form;
-	HTAB	   *htab;
-	HASHCTL		hctl;
-	bool		found;
+	List	   *relations_oid = NIL;
+	ListCell   *lc;
+	cl_int		i, len;
 	Oid			curr_relid = InvalidOid;
-	int			curr_config = 0;
-#define MASK_CONFIG		(TRIGGER_TYPE_TRUNCATE | TRIGGER_TYPE_INSERT | \
-						 TRIGGER_TYPE_UPDATE | TRIGGER_TYPE_DELETE)
+	bool		has_row_insert = false;
+	bool		has_row_update = false;
+	bool		has_row_delete = false;
+	bool		has_stmt_truncate = false;
+
 	/* already built? */
-	if (ccache_relations_htab)
+	if (ccache_relations_oid)
 		return;
 	/* invalidator function installed? */
 	invalidator_oid = ccache_invalidator_oid(true);
 	if (!OidIsValid(invalidator_oid))
 		return;
-	/* construct a hash table */
-	hctl.keysize = sizeof(Oid);
-	hctl.entrysize = sizeof(Oid);	//other information?
-	hctl.hcxt = ccache_relations_mcxt;
-	htab = hash_create("CCache Relations HTAB",
-					   256,
-					   &hctl,
-					   HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 	/* walk on the pg_trigger catalog */
 	hrel = heap_open(TriggerRelationId, AccessShareLock);
 	irel = index_open(TriggerRelidNameIndexId, AccessShareLock);
@@ -295,69 +310,84 @@ refresh_ccache_relations_htab(void)
 
 	for (;;)
 	{
+		Oid		trig_tgrelid;
+		int		trig_tgtype;
+
 		tup = systable_getnext_ordered(sscan, ForwardScanDirection);
-		if (!HeapTupleIsValid(tup))
-			break;
-		trig_form = (Form_pg_trigger) GETSTRUCT(tup);
-		/* related trigger? */
-		if (trig_form->tgfoid != invalidator_oid)
-			continue;
-
-		if (!trig_form->tgenabled ||
-			!TRIGGER_FOR_AFTER(trig_form->tgtype))
-			continue;
-
-		if (curr_relid != trig_form->tgrelid)
+		if (HeapTupleIsValid(tup))
 		{
-			if ((curr_config & MASK_CONFIG) == MASK_CONFIG)
-			{
-				hash_search(htab,
-							&curr_relid,
-							HASH_ENTER,
-							&found);
-				if (found)
-					elog(ERROR, "Bug? relation %u appears twice on ccache",
-						 curr_relid);
-				elog(LOG, "ccache builder%d: added relation \"%s\"",
-					 ccache_builder_id, get_rel_name(curr_relid));
-			}
-			curr_relid = trig_form->tgrelid;
-			curr_config = 0;
-		}
+			Form_pg_trigger trig_form = (Form_pg_trigger) GETSTRUCT(tup);
 
-		if (TRIGGER_FOR_ROW(trig_form->tgtype))
-		{
-			if (TRIGGER_FOR_INSERT(trig_form->tgtype))
-				curr_config |= TRIGGER_TYPE_INSERT;
-			if (TRIGGER_FOR_UPDATE(trig_form->tgtype))
-				curr_config |= TRIGGER_TYPE_UPDATE;
-			if (TRIGGER_FOR_DELETE(trig_form->tgtype))
-				curr_config |= TRIGGER_TYPE_DELETE;
+			if (trig_form->tgfoid != invalidator_oid)
+				continue;
+			if (trig_form->tgenabled)
+				continue;
+
+			trig_tgrelid = trig_form->tgrelid;
+			trig_tgtype  = trig_form->tgtype;
 		}
 		else
 		{
-			if (TRIGGER_FOR_TRUNCATE(trig_form->tgtype))
-				curr_config |= TRIGGER_TYPE_TRUNCATE;
+			trig_tgrelid = InvalidOid;
+			trig_tgtype = 0;
 		}
-	}
-	/* last one entry if any */
-	if ((curr_config & MASK_CONFIG) == MASK_CONFIG)
-	{
-		hash_search(htab,
-					&curr_relid,
-					HASH_ENTER,
-					&found);
-		if (found)
-			elog(ERROR, "Bug? relation %u appears twice on ccache",
-				 curr_relid);
-		elog(LOG, "ccache builder%d: added relation \"%s\"",
-			 ccache_builder_id, get_rel_name(curr_relid));
+
+		/* switch current focus if any */
+		if (OidIsValid(curr_relid) && curr_relid != trig_tgrelid)
+		{
+			if (has_row_insert &&
+				has_row_update &&
+				has_row_delete &&
+				has_stmt_truncate)
+			{
+				Assert(curr_relid != InvalidOid);
+				relations_oid = list_append_unique_oid(relations_oid,
+													   curr_relid);
+			}
+			curr_relid = trig_tgrelid;
+			has_row_insert = false;
+			has_row_update = false;
+			has_row_delete = false;
+			has_stmt_truncate = false;
+		}
+		if (!HeapTupleIsValid(tup))
+			break;
+
+		/* is invalidator configured correctly? */
+		if (TRIGGER_FOR_AFTER(trig_tgtype))
+		{
+			if (TRIGGER_FOR_ROW(trig_tgtype))
+			{
+				if (TRIGGER_FOR_INSERT(trig_tgtype))
+					has_row_insert = true;
+				if (TRIGGER_FOR_UPDATE(trig_tgtype))
+					has_row_update = true;
+				if (TRIGGER_FOR_DELETE(trig_tgtype))
+					has_row_delete = true;
+			}
+			else
+			{
+				if (TRIGGER_FOR_TRUNCATE(trig_tgtype))
+					has_stmt_truncate = true;
+			}
+		}
 	}
 	systable_endscan_ordered(sscan);
 	index_close(irel, AccessShareLock);
 	heap_close(hrel, AccessShareLock);
 
-	ccache_relations_htab = htab;
+	len = offsetof(oidvector, values[list_length(relations_oid)]);
+	ccache_relations_oid = MemoryContextAlloc(CacheMemoryContext, len);
+	SET_VARSIZE(ccache_relations_oid, len);
+	ccache_relations_oid->ndim = 1;
+	ccache_relations_oid->dataoffset = 0;
+	ccache_relations_oid->elemtype = OIDOID;
+	ccache_relations_oid->dim1 = list_length(relations_oid);
+	ccache_relations_oid->lbound1 = 0;
+	i = 0;
+	foreach (lc, relations_oid)
+		ccache_relations_oid->values[i++] = lfirst_oid(lc);
+	list_free(relations_oid);
 }
 
 /*
@@ -368,8 +398,9 @@ ccache_callback_on_reloid(Datum arg, int cacheid, uint32 hashvalue)
 {
 	Assert(cacheid == RELOID);
 
-	MemoryContextReset(ccache_relations_mcxt);
-	ccache_relations_htab = NULL;
+	if (ccache_relations_oid)
+		pfree(ccache_relations_oid);
+	ccache_relations_oid = NULL;
 }
 
 /*
@@ -397,10 +428,78 @@ ccache_callback_on_procoid(Datum arg, int cacheid, uint32 hashvalue)
 Datum
 pgstrom_ccache_invalidator(PG_FUNCTION_ARGS)
 {
-	TriggerData *trigdata = (TriggerData *) fcinfo->context;
+	TriggerData	   *trigdata = (TriggerData *) fcinfo->context;
 
-	//memo: see suppress_redundant_updates_trigger
+	if (!CALLED_AS_TRIGGER(fcinfo))
+		elog(ERROR, "%s: must be called as trigger", __FUNCTION__);
+	if (!TRIGGER_FIRED_AFTER(trigdata->tg_event))
+		elog(ERROR, "%s: must be configured as AFTER trigger", __FUNCTION__);
+	if (TRIGGER_FIRED_FOR_ROW(trigdata->tg_event))
+	{
+		Relation	rel = trigdata->tg_relation;
+		HeapTuple	tuple = trigdata->tg_trigtuple;
+		BlockNumber	block_nr;
+		pg_crc32	hash;
+		int			index;
+		dlist_iter	iter;
 
+		if (!TRIGGER_FIRED_BY_INSERT(trigdata->tg_event) &&
+			!TRIGGER_FIRED_BY_DELETE(trigdata->tg_event) &&
+			!TRIGGER_FIRED_BY_UPDATE(trigdata->tg_event))
+			elog(ERROR, "%s: triggered by unknown event", __FUNCTION__);
+
+		block_nr = BlockIdGetBlockNumber(&tuple->t_self.ip_blkid);
+		block_nr &= ~((CCACHE_CHUNK_SIZE / BLCKSZ) - 1);
+
+		hash = ccache_compute_hashvalue(MyDatabaseId,
+										RelationGetRelid(rel),
+										block_nr);
+		index = hash % ccache_num_slots;
+		SpinLockAcquire(&ccache_state->active_locks[index]);
+		dlist_foreach(iter, &ccache_state->active_slots[index])
+		{
+			ccacheChunk *temp = dlist_container(ccacheChunk,
+												chain, iter.cur);
+			if (temp->hash == hash &&
+				temp->database_oid == MyDatabaseId &&
+				temp->table_oid == RelationGetRelid(rel) &&
+				temp->block_nr == block_nr)
+			{
+				dlist_delete(&temp->chain);
+				memset(&temp->chain, 0, sizeof(dlist_node));
+				ccache_put_chunk_nolock(temp);
+				break;
+			}
+		}
+		SpinLockRelease(&ccache_state->active_locks[index]);
+	}
+	else
+	{
+		Relation	rel = trigdata->tg_relation;
+		int			index;
+		dlist_mutable_iter iter;
+
+		if (!TRIGGER_FIRED_BY_TRUNCATE(trigdata->tg_event))
+			elog(ERROR, "%s: triggered by unknown event", __FUNCTION__);
+
+		for (index=0; index < ccache_num_slots; index++)
+		{
+			SpinLockAcquire(&ccache_state->active_locks[index]);
+			dlist_foreach_modify(iter, &ccache_state->active_slots[index])
+			{
+				ccacheChunk *temp = dlist_container(ccacheChunk,
+													chain, iter.cur);
+				if (temp->database_oid == MyDatabaseId &&
+					temp->table_oid == RelationGetRelid(rel))
+				{
+					dlist_delete(&temp->chain);
+					memset(&temp->chain, 0, sizeof(dlist_node));
+					ccache_put_chunk_nolock(temp);
+				}
+			}
+			SpinLockRelease(&ccache_state->active_locks[index]);
+		}
+	}
 	return PointerGetDatum(NULL);
 }
 PG_FUNCTION_INFO_V1(pgstrom_ccache_invalidator);
@@ -432,17 +531,139 @@ ccache_builder_sighup(SIGNAL_ARGS)
 }
 
 /*
+ * ccache_builder_connectdb
+ */
+static uint32
+ccache_builder_connectdb(cl_int builder_id)
+{
+	int		i, j, ev;
+	uint32	generation;
+	char	dbname[NAMEDATALEN];
+	bool	startup_log = false;
+
+	/*
+	 * Pick up a database to connect
+	 */
+	for (;;)
+	{
+		ResetLatch(MyLatch);
+
+		if (ccache_builder_got_sigterm)
+			elog(ERROR, "terminating ccache builder%d", builder_id);
+
+		SpinLockAcquire(&ccache_state->lock);
+		for (i=0; i < ccache_state->num_databases; i++)
+		{
+			if (!ccache_state->databases[i].invalid_database)
+				break;
+		}
+
+		if (i < ccache_state->num_databases)
+		{
+			/* any valid databases are configured */
+			j = (ccache_state->rr_count++ %
+				 ccache_state->num_databases);
+			if (ccache_state->databases[j].invalid_database)
+			{
+				SpinLockRelease(&ccache_state->lock);
+				continue;
+			}
+			ccache_database = &ccache_state->databases[j];
+			strncpy(dbname, ccache_database->dbname, NAMEDATALEN);
+			generation = pg_atomic_read_u32(&ccache_state->generation);
+			SpinLockRelease(&ccache_state->lock);
+			break;
+		}
+		else
+		{
+			/* no valid databases are configured right now */
+			SpinLockRelease(&ccache_state->lock);
+			if (!startup_log)
+			{
+				elog(LOG, "ccache builder%d is now started but not assigned to a particular database", builder_id);
+				startup_log = true;
+			}
+
+			ev = WaitLatch(MyLatch,
+						   WL_LATCH_SET |
+						   WL_TIMEOUT |
+						   WL_POSTMASTER_DEATH,
+						   60000L);
+			if (ev & WL_POSTMASTER_DEATH)
+				elog(FATAL, "Unexpected postmaster dead");
+		}
+	}
+
+	/*
+	 * Try to connect database
+	 */
+	PG_TRY();
+	{
+		//XXX - How to catch FATAL error and invalidate database?
+		BackgroundWorkerInitializeConnection(dbname, NULL);
+	}
+	PG_CATCH();
+	{
+		/* remove database entry from pg_strom.ccache_databases */
+		SpinLockAcquire(&ccache_state->lock);
+		ccache_database->invalid_database = true;
+		SpinLockRelease(&ccache_state->lock);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	elog(LOG, "ccache builder%d (gen=%u) now ready on database \"%s\"",
+		 builder_id, generation, dbname);
+	return generation;
+}
+
+/*
+ * ccache_builder_startup
+ *
+ * Filesystem may still keep valid ccache-chunks. Reload it on startup time.
+ */
+static int
+ccache_builder_startup(cl_long *timeout)
+{
+
+
+	return CCBUILDER_STATE__PRELOAD;
+}
+
+/*
+ * ccache_builder_preload
+ *
+ * Load target relations to empty chunks.
+ */
+static int
+ccache_builder_preload(cl_long *timeout)
+{
+	return CCBUILDER_STATE__TRYLOAD;
+}
+
+/*
+ * ccache_builder_tryload
+ */
+static int
+ccache_builder_tryload(cl_long *timeout)
+{
+
+	*timeout = 5000L;
+
+	return CCBUILDER_STATE__TRYLOAD;
+}
+
+/*
  * ccache_builder_main 
  */
 void
 ccache_builder_main(Datum arg)
 {
-	char	dbname[NAMEDATALEN];
-	uint32	generation;
-	int		i, j, ev;
-	bool	startup_log = false;
+	cl_int		builder_id = DatumGetInt32(arg);
+	uint32		generation;
+	int			curr_state;
+	int			next_state;
+	int			ev;
 
-	ccache_builder_id = DatumGetInt32(arg);
 	pqsignal(SIGTERM, ccache_builder_sigterm);
 	pqsignal(SIGHUP, ccache_builder_sighup);
 	BackgroundWorkerUnblockSignals();
@@ -451,90 +672,29 @@ ccache_builder_main(Datum arg)
 	CurrentMemoryContext = AllocSetContextCreate(TopMemoryContext,
 												 "CCache Builder Context",
 												 ALLOCSET_DEFAULT_SIZES);
-	SpinLockAcquire(&cc_builder_control->lock);
-	cc_builder_control->cc_builders[ccache_builder_id].latch = MyLatch;
-	SpinLockRelease(&cc_builder_control->lock);
+	ccache_builder = &ccache_state->builders[builder_id];
+	SpinLockAcquire(&ccache_state->lock);
+	ccache_builder->database_oid = InvalidOid;
+	ccache_builder->state = curr_state = CCBUILDER_STATE__STARTUP;
+	ccache_builder->latch = MyLatch;
+	SpinLockRelease(&ccache_state->lock);
 
 	PG_TRY();
 	{
-		/*
-		 * Pick up a database to connect
-		 */
+		/* connect to one of the databases */
+		generation = ccache_builder_connectdb(builder_id);
+
 		for (;;)
 		{
+			long		timeout = 0L;
+
 			if (ccache_builder_got_sigterm)
-				elog(ERROR, "terminating ccache builder%d", ccache_builder_id);
-
-			SpinLockAcquire(&cc_builder_control->lock);
-			if (cc_builder_control->num_databases == 0)
-			{
-				SpinLockRelease(&cc_builder_control->lock);
-				if (!startup_log)
-				{
-					elog(LOG, "ccache builder%d is now started but not assigned to a particular database", ccache_builder_id);
-					startup_log = true;
-				}
-
-				ev = WaitLatch(MyLatch,
-							   WL_LATCH_SET |
-							   WL_TIMEOUT |
-							   WL_POSTMASTER_DEATH,
-							   60000L);
-				if (ev & WL_POSTMASTER_DEATH)
-					elog(FATAL, "Unexpected postmaster dead");
-			}
-			else
-			{
-				i = (cc_builder_control->rr_count++ %
-					 cc_builder_control->num_databases);
-				strcpy(dbname, cc_builder_control->dbnames[i]);
-				generation = pg_atomic_read_u32(&cc_builder_control->generation);
-				SpinLockRelease(&cc_builder_control->lock);
-
-				break;
-			}
-		}
-
-		/*
-		 * Try to connect database
-		 */
-		PG_TRY();
-		{
-			BackgroundWorkerInitializeConnection(dbname, NULL);
-		}
-		PG_CATCH();
-		{
-			/* remove database entry from pg_strom.ccache_databases */
-			SpinLockAcquire(&cc_builder_control->lock);
-			for (i=0; i < cc_builder_control->num_databases; i++)
-			{
-				if (strcmp(cc_builder_control->dbnames[i], dbname) == 0)
-				{
-					for (j=i+1; j < cc_builder_control->num_databases; j++)
-					{
-						strcpy(cc_builder_control->dbnames[j-1],
-							   cc_builder_control->dbnames[j]);
-					}
-					cc_builder_control->num_databases--;
-					break;
-				}
-			}
-			SpinLockRelease(&cc_builder_control->lock);
-			PG_RE_THROW();
-		}
-		PG_END_TRY();
-
-		elog(LOG, "ccache builder%d now ready on database \"%s\"",
-			 ccache_builder_id, dbname);
-
-		while (!ccache_builder_got_sigterm)
-		{
+				elog(ERROR, "terminating ccache builder%d", builder_id);
 			ResetLatch(MyLatch);
 
 			/* pg_strom.ccache_databases updated? */
-			if (generation !=
-				pg_atomic_read_u32(&cc_builder_control->generation))
-				elog(ERROR,"restarting ccache builder%d", ccache_builder_id);
+			if (generation != pg_atomic_read_u32(&ccache_state->generation))
+				elog(ERROR,"restarting ccache builder%d", builder_id);
 
 			/*
 			 * ---------------------
@@ -545,13 +705,26 @@ ccache_builder_main(Datum arg)
 			StartTransactionCommand();
 			PushActiveSnapshot(GetTransactionSnapshot());
 
-			/* setup list of relations to be cached */
-			refresh_ccache_relations_htab();
+			/* setup oidvector of relations to be cached */
+			refresh_ccache_source_relations();
 
+			switch (curr_state)
+			{
+				case CCBUILDER_STATE__STARTUP:
+					next_state = ccache_builder_startup(&timeout);
+					break;
 
+				case CCBUILDER_STATE__PRELOAD:
+					next_state = ccache_builder_preload(&timeout);
+					break;
 
+				case CCBUILDER_STATE__TRYLOAD:
+					next_state = ccache_builder_tryload(&timeout);
+					break;
 
-
+				default:
+					break;
+			}
 
 			/*
 			 * -------------------
@@ -561,28 +734,34 @@ ccache_builder_main(Datum arg)
 			PopActiveSnapshot();
 			CommitTransactionCommand();
 
+			SpinLockAcquire(&ccache_state->lock);
+			ccache_builder->state = CCBUILDER_STATE__SLEEP;
+			SpinLockRelease(&ccache_state->lock);
+
 			ev = WaitLatch(MyLatch,
 						   WL_LATCH_SET |
 						   WL_TIMEOUT |
 						   WL_POSTMASTER_DEATH,
-						   5000L);
+						   timeout);
 			if (ev & WL_POSTMASTER_DEATH)
 				elog(FATAL, "Unexpected postmaster dead");
+
+			SpinLockAcquire(&ccache_state->lock);
+			ccache_builder->state = curr_state = next_state;
+			SpinLockRelease(&ccache_state->lock);
 		}
 	}
 	PG_CATCH();
 	{
-		SpinLockAcquire(&cc_builder_control->lock);
-		cc_builder_control->cc_builders[ccache_builder_id].latch = MyLatch;
-		SpinLockRelease(&cc_builder_control->lock);
+		SpinLockAcquire(&ccache_state->lock);
+		ccache_builder->database_oid = InvalidOid;
+		ccache_builder->state = CCBUILDER_STATE__SHUTDOWN;
+		ccache_builder->latch = NULL;
+		SpinLockRelease(&ccache_state->lock);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
-	/* normal termination */
-	SpinLockAcquire(&cc_builder_control->lock);
-	cc_builder_control->cc_builders[ccache_builder_id].latch = MyLatch;
-	SpinLockRelease(&cc_builder_control->lock);
-	elog(LOG, "terminating ccache builder%d", ccache_builder_id);
+	elog(FATAL, "Bug? ccache builder%d should not exit normaly", builder_id);
 }
 
 /*
@@ -593,13 +772,9 @@ guc_check_ccache_databases(char **newval, void **extra, GucSource source)
 {
 	char	   *rawnames = pstrdup(*newval);
 	List	   *options;
-	ListCell   *lc;
-	ccacheBuilderControl *my_extra;
-
-	my_extra = malloc(offsetof(ccacheBuilderControl, cc_builders));
-	if (!my_extra)
-		elog(ERROR, "out of memory");
-	memset(my_extra, 0, offsetof(ccacheBuilderControl, cc_builders));
+	ListCell   *lc1, *lc2;
+	ccacheDatabase *my_extra;
+	int			i;
 
 	/* Parse string into list of identifiers */
 	if (!SplitIdentifierString(rawnames, ',', &options))
@@ -611,40 +786,41 @@ guc_check_ccache_databases(char **newval, void **extra, GucSource source)
 		return false;
 	}
 
-	PG_TRY();
+	foreach (lc1, options)
 	{
-		foreach (lc, options)
+		const char   *dbname = lfirst(lc1);
+
+		if (strlen(dbname) >= NAMEDATALEN)
+			elog(ERROR, "too long database name: \"%s\"", dbname);
+		/* check existence if under transaction */
+		if (IsTransactionState())
+			get_database_oid(dbname, false);
+		/* duplication check */
+		foreach (lc2, options)
 		{
-			char   *dbname = lfirst(lc);
-			int		i;
-
-			if (strlen(dbname) >= NAMEDATALEN)
-				elog(ERROR, "too long database name: \"%s\"", dbname);
-			/* check existence if under transaction */
-			if (IsTransactionState())
-				get_database_oid(dbname, false);
-			/* duplication check */
-			for (i=0; i < my_extra->num_databases; i++)
-			{
-				if (strcmp(dbname, my_extra->dbnames[i]) == 0)
-					elog(ERROR, "database \"%s\" appeared in pg_strom.ccache_databases twice", dbname);
-			}
-			strcpy(my_extra->dbnames[my_extra->num_databases], dbname);
-			my_extra->num_databases++;
-
-			if (my_extra->num_databases > CCACHE_MAX_NUM_DATABASES)
-				elog(ERROR, "pg_strom.ccache_databases specified too much databases");
+			if (lc1 == lc2)
+				break;
+			if (strcmp(dbname, lfirst(lc2)) == 0)
+				elog(ERROR, "database \"%s\" appeared twice", dbname);
 		}
+	}
 
-		if (my_extra->num_databases > ccache_num_builders)
-			elog(WARNING, "number of specified databases in pg_strom.ccache_databases are larger than pg_strom.ccache_num_builders, so columnar cache will never build on some databases");
-	}
-	PG_CATCH();
+	if (list_length(options) > CCACHE_MAX_NUM_DATABASES)
+		elog(ERROR, "pg_strom.ccache_databases configured too much databases");
+	if (list_length(options) > ccache_num_builders)
+		elog(ERROR, "number of the configured databases by pg_strom.ccache_databases is larger than number of the builder processes by pg_strom.ccache_num_builders, so columnar cache will be never built on some databases");
+
+	my_extra = calloc(list_length(options) + 1, sizeof(ccacheDatabase));
+	if (!my_extra)
+		elog(ERROR, "out of memory");
+	i = 0;
+	foreach (lc1, options)
 	{
-		free(my_extra);
-		PG_RE_THROW();
+		strncpy(my_extra[i].dbname, lfirst(lc1), NAMEDATALEN);
+		i++;
 	}
-	PG_END_TRY();
+	my_extra[i].invalid_database = true;
+
 	*extra = my_extra;
 
 	return true;
@@ -653,31 +829,32 @@ guc_check_ccache_databases(char **newval, void **extra, GucSource source)
 static void
 guc_assign_ccache_databases(const char *newval, void *extra)
 {
-	ccacheBuilderControl *my_extra = extra;
-	int			i;
+	ccacheDatabase *my_extra = extra;
 
-	Assert(my_extra->num_databases <= CCACHE_MAX_NUM_DATABASES);
-	if (cc_builder_control)
+	if (ccache_state)
 	{
-		/* update cc_builder_control */
-		SpinLockAcquire(&cc_builder_control->lock);
-		for (i=0; i < my_extra->num_databases; i++)
+		int		i = 0;
+
+		SpinLockAcquire(&ccache_state->lock);
+		while (!my_extra[i].invalid_database)
 		{
-			strncpy(cc_builder_control->dbnames[i],
-					my_extra->dbnames[i],
+			Assert(i < CCACHE_MAX_NUM_DATABASES);
+			strncpy(ccache_state->databases[i].dbname,
+					my_extra[i].dbname,
 					NAMEDATALEN);
+			ccache_state->databases[i].invalid_database = false;
+			i++;
 		}
-		cc_builder_control->num_databases = i;
+		ccache_state->num_databases = i;
+
 		/* force to restart ccache builder */
-		pg_atomic_fetch_add_u32(&cc_builder_control->generation, 1);
+		pg_atomic_fetch_add_u32(&ccache_state->generation, 1);
 		for (i=0; i < ccache_num_builders; i++)
 		{
-			ccacheBuilder *cc_builder = &cc_builder_control->cc_builders[i];
-
-			if (cc_builder->latch)
-				SetLatch(cc_builder->latch);
+			if (ccache_state->builders[i].latch)
+				SetLatch(ccache_state->builders[i].latch);
 		}
-		SpinLockRelease(&cc_builder_control->lock);
+		SpinLockRelease(&ccache_state->lock);
 	}
 }
 
@@ -688,23 +865,25 @@ guc_show_ccache_databases(void)
 	int		i;
 
 	initStringInfo(&str);
-	SpinLockAcquire(&cc_builder_control->lock);
+	SpinLockAcquire(&ccache_state->lock);
 	PG_TRY();
 	{
-		for (i=0; i < cc_builder_control->num_databases; i++)
+		for (i=0; i < ccache_state->num_databases; i++)
 		{
-			const char *dbname = cc_builder_control->dbnames[i];
-			appendStringInfo(&str, "%s%s",
-							 str.len > 0 ? "," : "",
-							 quote_identifier(dbname));
+			const char *dbname = ccache_state->databases[i].dbname;
+
+			if (!ccache_state->databases[i].invalid_database)
+				appendStringInfo(&str, "%s%s",
+								 str.len > 0 ? "," : "",
+								 quote_identifier(dbname));
 		}
 	}
 	PG_CATCH();
 	{
-		SpinLockRelease(&cc_builder_control->lock);
+		SpinLockRelease(&ccache_state->lock);
 	}
 	PG_END_TRY();
-	SpinLockRelease(&cc_builder_control->lock);
+	SpinLockRelease(&ccache_state->lock);
 
 	return str.data;
 }
@@ -715,6 +894,7 @@ guc_show_ccache_databases(void)
 static void
 pgstrom_startup_ccache(void)
 {
+	ccacheChunk *cc_chunk;
 	size_t		required;
 	bool		found;
 	int			i;
@@ -723,48 +903,46 @@ pgstrom_startup_ccache(void)
 	if (shmem_startup_next)
 		(*shmem_startup_next)();
 
-	required = offsetof(ccacheBuilderControl,
-						cc_builders[ccache_num_builders]);
-	cc_builder_control = ShmemInitStruct("CCache Builder Control Segment",
-										 required, &found);
+	required = MAXALIGN(offsetof(ccacheState,
+								 builders[ccache_num_builders])) +
+		MAXALIGN(sizeof(slock_t) * ccache_num_slots) +
+		MAXALIGN(sizeof(dlist_head) * ccache_num_slots) +
+		MAXALIGN(offsetof(ccacheChunk,
+						  attrs[ccache_max_nattrs+1])) * ccache_num_chunks;
+	ccache_state = ShmemInitStruct("Columnar Cache Shared Segment",
+								   required, &found);
 	if (found)
-		elog(ERROR, "Bug? shared memory for ccache builders already built");
+		elog(ERROR, "Bug? Columnar Cache Shared Segment is already built");
+	memset(ccache_state, 0, required);
 
-	memset(cc_builder_control, 0, required);
-	SpinLockInit(&cc_builder_control->lock);
-
-	required = (MAXALIGN(offsetof(ccacheHead,
-								  ccache_chunks[ccache_num_chunks])) +
-				MAXALIGN(sizeof(slock_t) * ccache_num_slots) +
-				MAXALIGN(sizeof(dlist_head) * ccache_num_slots));
-	ccache_head = ShmemInitStruct("CCache Chunks Head",
-								  required, &found);
-	if (found)
-		elog(ERROR, "Bug? shared memory for ccache chunks already built");
-	SpinLockInit(&ccache_head->free_chunks_lock);
-	dlist_init(&ccache_head->free_chunks_list);
-	ccache_head->num_chunks = ccache_num_chunks;
-	ccache_head->num_slots = ccache_num_slots;
-	ccache_head->active_locks = (slock_t *)
-		((char *)ccache_head +
-		 MAXALIGN(offsetof(ccacheHead, ccache_chunks[ccache_num_chunks])));
-	ccache_head->active_slots = (dlist_head *)
-		((char *)ccache_head->active_locks +
+	ccache_state->active_locks = (slock_t *)
+		((char *)ccache_state +
+		 MAXALIGN(offsetof(ccacheState, builders[ccache_num_builders])));
+	ccache_state->active_slots = (dlist_head *)
+		((char *)ccache_state->active_locks +
 		 MAXALIGN(sizeof(slock_t) * ccache_num_slots));
+	/* hash slot of ccache chunks */
+	SpinLockInit(&ccache_state->free_chunks_lock);
+	dlist_init(&ccache_state->free_chunks_list);
 	for (i=0; i < ccache_num_slots; i++)
 	{
-		SpinLockInit(&ccache_head->active_locks[i]);
-		dlist_init(&ccache_head->active_slots[i]);
+		SpinLockInit(&ccache_state->active_locks[i]);
+		dlist_init(&ccache_state->active_slots[i]);
 	}
-
+	/* ccache-chunks */
+	cc_chunk = (ccacheChunk *)
+		((char *)ccache_state->active_slots +
+		 MAXALIGN(sizeof(dlist_head) * ccache_num_slots));
 	for (i=0; i < ccache_num_chunks; i++)
 	{
-		ccacheChunk	   *cc_chunk = &ccache_head->ccache_chunks[i];
-
-		memset(cc_chunk, 0, sizeof(ccacheChunk));
-		dlist_push_tail(&ccache_head->free_chunks_list,
+		dlist_push_tail(&ccache_state->free_chunks_list,
 						&cc_chunk->chain);
+		cc_chunk = (ccacheChunk *)
+			((char *)cc_chunk +
+			 MAXALIGN(offsetof(ccacheChunk, attrs[ccache_max_nattrs+1])));
 	}
+	/* fields for management of builder processes */
+	SpinLockInit(&ccache_state->lock);
 
 	/* setup GUC again */
 	if (!guc_check_ccache_databases(&ccache_startup_databases,
@@ -801,7 +979,7 @@ pgstrom_init_ccache(void)
 							"number of ccache builder worker processes",
 							NULL,
 							&ccache_num_builders,
-							0,
+							2,
 							0,
 							INT_MAX,
 							PGC_POSTMASTER,
@@ -817,9 +995,20 @@ pgstrom_init_ccache(void)
 							PGC_POSTMASTER,
 							GUC_UNIT_KB,
 							NULL, NULL, NULL);
+	DefineCustomIntVariable("pg_strom.ccache_max_nattrs",
+							"maximum number of attributes ccache can keep",
+							NULL,
+							&ccache_max_nattrs,
+							40,
+							20,
+							INT_MAX,
+							PGC_POSTMASTER,
+							GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL,
+							NULL, NULL, NULL);
+
 	ccache_max_size = (size_t)ccache_max_size_kb << 10;
-	ccache_num_slots = Max(ccache_max_size / CCACHE_CHUNK_SIZE, 100);
-	ccache_num_chunks = 2 * ccache_num_chunks;
+	ccache_num_slots = Max(ccache_max_size / CCACHE_CHUNK_SIZE, 300);
+	ccache_num_chunks = 3 * ccache_num_slots;
 
 	DefineCustomStringVariable("pg_strom.ccache_base_dir",
 							   "directory name used by ccache",
@@ -859,9 +1048,6 @@ pgstrom_init_ccache(void)
 		}
 	}
 
-	ccache_relations_mcxt = AllocSetContextCreate(CacheMemoryContext,
-												  "HTAB of ccache relations",
-												  ALLOCSET_DEFAULT_SIZES);
 	/* bgworker registration */
 	for (i=0; i < ccache_num_builders; i++)
 	{
@@ -879,12 +1065,12 @@ pgstrom_init_ccache(void)
 	}
 
 	/* request for static shared memory */
-	required = (MAXALIGN(offsetof(ccacheBuilderControl,
-								  cc_builders[ccache_num_builders])) +
-				MAXALIGN(offsetof(ccacheHead,
-								  ccache_chunks[ccache_num_chunks])) +
-				MAXALIGN(sizeof(slock_t) * ccache_num_slots) +
-				MAXALIGN(sizeof(dlist_head) * ccache_num_slots));
+	required = MAXALIGN(offsetof(ccacheState,
+								 builders[ccache_num_builders])) +
+		MAXALIGN(sizeof(slock_t) * ccache_num_slots) +
+		MAXALIGN(sizeof(dlist_head) * ccache_num_slots) +
+		MAXALIGN(offsetof(ccacheChunk,
+						  attrs[ccache_max_nattrs+1])) * ccache_num_chunks;
 	RequestAddinShmemSpace(required);
 
 	shmem_startup_next = shmem_startup_hook;
