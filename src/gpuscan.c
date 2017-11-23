@@ -438,7 +438,10 @@ create_gpuscan_path(PlannerInfo *root,
 
 	/* cost for disk i/o + GPU qualifiers */
 	if (dev_quals != NIL)
-		dev_quals_expr = make_flat_ands_explicit(dev_quals);
+	{
+		List   *extract_list = extract_actual_clauses(dev_quals, false);
+		dev_quals_expr = make_flat_ands_explicit(extract_list);
+	}
 	cost_gpuscan_common(root, baserel,
 						dev_quals_expr,
 						parallel_nworkers,
