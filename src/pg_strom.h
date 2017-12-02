@@ -83,6 +83,7 @@
 #include "port/atomics.h"
 #include "postmaster/bgworker.h"
 #include "postmaster/postmaster.h"
+#include "storage/buf.h"
 #include "storage/buf_internals.h"
 #include "storage/ipc.h"
 #include "storage/fd.h"
@@ -1043,6 +1044,12 @@ extern void pgstrom_init_plcuda(void);
 /*
  * ccache.c
  */
+typedef struct
+{
+	cl_uint		offset;		/* to be used later */
+	struct varlena *vl_datum;
+} vl_dict_key;
+extern HTAB *create_varlena_dictionary(size_t nrooms);
 extern Datum pgstrom_ccache_invalidator(PG_FUNCTION_ARGS);
 extern void pgstrom_init_ccache(void);
 

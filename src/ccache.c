@@ -31,6 +31,7 @@ typedef struct
 
 typedef struct
 {
+	int			builder_id;
 	Oid			database_oid;
 	int			state;		/* one of CCBUILDER_STATE__* */
 	Latch	   *latch;
@@ -55,7 +56,8 @@ typedef struct
 /*
  * ccacheChunk
  */
-#define CCACHE_CHUNK_SIZE		(128L << 20)	/* 128MB */
+#define CCACHE_CHUNK_SIZE			(128L << 20)	/* 128MB */
+#define NBLOCKS_PER_CCACHE_CHUNK	(CCACHE_CHUNK_SIZE / BLCKSZ)
 
 typedef struct
 {
@@ -66,6 +68,7 @@ typedef struct
 	BlockNumber	block_nr;		/* block number where is head of the chunk */
 	cl_int		refcnt;			/* reference counter */
 	struct timeval ctime;		/* time of the cache creation */
+								/* zero, if not constructed yet */
 	struct timeval atime;		/* time of the last access */
 	struct {
 		off_t	offset;
@@ -335,7 +338,7 @@ refresh_ccache_source_relations(void)
 
 				if (trig_form->tgfoid != invalidator_oid)
 					continue;
-				if (trig_form->tgenabled)
+				if (trig_form->tgenabled != TRIGGER_FIRES_ALWAYS)
 					continue;
 
 				trig_tgrelid = trig_form->tgrelid;
@@ -356,7 +359,7 @@ refresh_ccache_source_relations(void)
 					has_row_delete &&
 					has_stmt_truncate)
 				{
-					Assert(curr_relid != InvalidOid);
+					elog(LOG, "ccache relation %s is target", get_rel_name(curr_relid));
 					hash_search(htab,
 								&curr_relid,
 								HASH_ENTER,
@@ -391,6 +394,7 @@ refresh_ccache_source_relations(void)
 				}
 			}
 		}
+		ccache_relations_htab = htab;
 		systable_endscan_ordered(sscan);
 		index_close(irel, AccessShareLock);
 		heap_close(hrel, AccessShareLock);
@@ -669,6 +673,381 @@ ccache_builder_connectdb(cl_int builder_id)
 }
 
 /*
+ * vl_dict_hash_value - hash value of varlena dictionary
+ */
+static uint32
+vl_dict_hash_value(const void *__key, Size keysize)
+{
+	const vl_dict_key *key = __key;
+	pg_crc32	crc;
+
+	if (VARATT_IS_COMPRESSED(key->vl_datum))
+		elog(ERROR, "unexpected compressed varlena datum");
+	if (VARATT_IS_EXTERNAL(key->vl_datum))
+		elog(ERROR, "unexpected external toast datum");
+
+	INIT_LEGACY_CRC32(crc);
+	COMP_LEGACY_CRC32(crc, key->vl_datum, VARSIZE_ANY(key->vl_datum));
+	FIN_LEGACY_CRC32(crc);
+
+	return (uint32) crc;
+}
+
+/*
+ * vl_dict_compare - comparison of varlena dictionary
+ */
+static int
+vl_dict_compare(const void *__key1, const void *__key2, Size keysize)
+{
+	const vl_dict_key *key1 = __key1;
+	const vl_dict_key *key2 = __key2;
+
+	if (VARATT_IS_COMPRESSED(key1->vl_datum) ||
+		VARATT_IS_COMPRESSED(key2->vl_datum))
+		elog(ERROR, "unexpected compressed varlena datum");
+	if (VARATT_IS_EXTERNAL(key1->vl_datum) ||
+		VARATT_IS_EXTERNAL(key2->vl_datum))
+		elog(ERROR, "unexpected external toast datum");
+
+	if (VARSIZE_ANY_EXHDR(key1->vl_datum) == VARSIZE_ANY_EXHDR(key2->vl_datum))
+		return memcmp(VARDATA_ANY(key1->vl_datum),
+					  VARDATA_ANY(key2->vl_datum),
+					  VARSIZE_ANY_EXHDR(key1->vl_datum));
+	return 1;
+}
+
+/*
+ * create_varlena_dictionary
+ */
+HTAB *
+create_varlena_dictionary(size_t nrooms)
+{
+	HASHCTL		hctl;
+
+	memset(&hctl, 0, sizeof(HASHCTL));
+	hctl.hash = vl_dict_hash_value;
+	hctl.match = vl_dict_compare;
+	hctl.keysize = sizeof(vl_dict_key);
+
+	return hash_create("varlena dictionary hash-table",
+					   Max(nrooms / 5, 4096),
+					   &hctl,
+					   HASH_FUNCTION |
+					   HASH_COMPARE);
+}
+
+
+
+
+
+
+/*
+ * ccache_preload_chunk - preload a chunk
+ */
+static bool
+ccache_preload_chunk(ccacheChunk *cc_chunk,
+					 Relation srel,
+					 BlockNumber block_nr,
+					 BlockNumber nblocks,
+					 BufferAccessStrategy strategy,
+					 char *chunk_buffer)
+{
+	TupleDesc	tupdesc = RelationGetDescr(srel);
+	Buffer		vmbuffer = InvalidBuffer;
+	size_t		nrooms = 0;
+	size_t		nitems = 0;
+	Datum	   *tup_values;
+	bool	   *tup_isnull;
+	void	  **cs_values;
+	bool	   *cs_hasnull;
+	bits8	  **cs_nullmap;
+	HTAB	  **cs_vl_dict;
+	size_t	   *cs_extra_sz;
+	int			i, j, fdesc;
+	size_t		length;
+	char		fname[MAXPGPATH];
+	char	   *pos;
+	kern_data_store *kds;
+
+	/* check visibility map first */
+	Assert((block_nr % NBLOCKS_PER_CCACHE_CHUNK) == 0);
+	Assert(nblocks <= NBLOCKS_PER_CCACHE_CHUNK);
+	for (i=0; i < nblocks; i++)
+	{
+		if (!VM_ALL_VISIBLE(srel, block_nr+i, &vmbuffer))
+		{
+			if (vmbuffer != InvalidBuffer)
+				ReleaseBuffer(vmbuffer);
+			return false;
+		}
+	}
+
+	/* load and lock buffers */
+	for (i=0; i < nblocks; i++)
+	{
+		Buffer	buffer;
+		Page	page;
+
+		CHECK_FOR_INTERRUPTS();
+		buffer = ReadBufferExtended(srel, MAIN_FORKNUM, block_nr+i,
+									RBM_NORMAL, strategy);
+		LockBuffer(buffer, BUFFER_LOCK_SHARE);
+		page = (Page) BufferGetPage(buffer);
+		if (!PageIsAllVisible(page))
+		{
+			UnlockReleaseBuffer(buffer);
+			if (vmbuffer != InvalidBuffer)
+				ReleaseBuffer(vmbuffer);
+			return false;
+		}
+		nrooms += PageGetMaxOffsetNumber(page);
+		memcpy(chunk_buffer + i * BLCKSZ, page, BLCKSZ);
+		UnlockReleaseBuffer(buffer);
+	}
+	/* ok, all the buffers are all-visible */
+
+	/*
+	 * read buffers and convert to the columnar format
+	 *
+	 * TODO: special columns for sysattrs
+	 */
+	cs_values = palloc0(sizeof(void *) * tupdesc->natts);
+	cs_hasnull = palloc0(sizeof(bool) * tupdesc->natts);
+	cs_nullmap = palloc0(sizeof(void *) * tupdesc->natts);
+	cs_vl_dict = palloc0(sizeof(HTAB *) * tupdesc->natts);
+	cs_extra_sz = palloc0(sizeof(size_t) * tupdesc->natts);
+	tup_values = palloc(sizeof(Datum) * tupdesc->natts);
+	tup_isnull = palloc(sizeof(bool) * tupdesc->natts);
+	for (j=0; j < tupdesc->natts; j++)
+	{
+		Form_pg_attribute attr = tupdesc->attrs[j];
+
+		if (attr->attlen < 0)
+		{
+			cs_vl_dict[j] = create_varlena_dictionary(nrooms);
+			cs_values[j] = palloc0(sizeof(vl_dict_key) * nrooms);
+		}
+		else
+		{
+			cs_values[j] = palloc(att_align_nominal(attr->attlen,
+													attr->attalign) * nrooms);
+			cs_nullmap[j] = palloc0(BITMAPLEN(nrooms));
+		}
+	}
+
+	/*
+	 * extract rows
+	 */
+	for (i=0; i < nblocks; i++)
+	{
+		Page	page = (Page)(chunk_buffer + BLCKSZ * i);
+		int		lines = PageGetMaxOffsetNumber(page);
+		OffsetNumber lineoff;
+		ItemId	lpp;
+
+		for (lineoff = FirstOffsetNumber, lpp = PageGetItemId(page, lineoff);
+			 lineoff <= lines;
+			 lineoff++, lpp++)
+		{
+			HeapTupleData	tup;
+
+			if (!ItemIdIsNormal(lpp))
+				continue;
+			tup.t_tableOid = RelationGetRelid(srel);
+			tup.t_data = (HeapTupleHeader) PageGetItem(page, lpp);
+			tup.t_len = ItemIdGetLength(lpp);
+			ItemPointerSet(&tup.t_self, block_nr+i, lineoff);
+
+			Assert(nitems < nrooms);
+			heap_deform_tuple(&tup, tupdesc, tup_values, tup_isnull);
+			for (j=0; j < tupdesc->natts; j++)
+			{
+				Form_pg_attribute attr = tupdesc->attrs[j];
+				bool		isnull = tup_isnull[j];
+				Datum		datum = tup_values[j];
+
+				if (attr->attlen < 0)
+				{
+					vl_dict_key *entry = NULL;
+
+					if (!isnull)
+					{
+						struct varlena *v = PG_DETOAST_DATUM_PACKED(datum);
+						vl_dict_key	key;
+						bool		found;
+
+						key.offset = 0;
+						key.vl_datum = v;
+						entry = hash_search(cs_vl_dict[j],
+											&key,
+											HASH_ENTER,
+											&found);
+						if (!found)
+						{
+							entry->offset = 0;
+							if (PointerGetDatum(v) != datum)
+								entry->vl_datum = v;
+							else
+								entry->vl_datum = PG_DETOAST_DATUM_COPY(v);
+							cs_extra_sz[j] += MAXALIGN(VARSIZE_ANY(v));
+						}
+						else if (PointerGetDatum(v) != datum)
+							pfree(v);
+					}
+					((vl_dict_key **)cs_values[j])[nitems] = entry;
+				}
+				else
+				{
+					bits8  *nullmap = cs_nullmap[j];
+					char   *base = cs_values[j];
+
+					if (isnull)
+					{
+						nullmap[nitems >> 3] &= (~(1 << (nitems & 7)) & 0xff);
+						cs_hasnull[j] = true;
+					}
+					else if (!attr->attbyval)
+					{
+						nullmap[nitems >> 3] |= (1 << (nitems & 7));
+						base += att_align_nominal(attr->attlen,
+												  attr->attalign) * nitems;
+						memcpy(base, DatumGetPointer(datum), attr->attlen);
+					}
+					else
+					{
+						nullmap[nitems >> 3] |= (1 << (nitems & 7));
+						base += att_align_nominal(attr->attlen,
+												  attr->attalign) * nitems;
+						memcpy(base, &datum, attr->attlen);
+					}
+				}
+			}
+			nitems++;
+		}
+	}
+	if (nitems == 0)
+	{
+		if (vmbuffer != InvalidBuffer)
+			ReleaseBuffer(vmbuffer);
+		return false;
+	}
+
+	/*
+	 * write out to the ccache file
+	 */
+	length = STROMALIGN(offsetof(kern_data_store,
+								 colmeta[tupdesc->natts]));
+	for (j=0; j < tupdesc->natts; j++)
+	{
+		Form_pg_attribute attr = tupdesc->attrs[j];
+
+		if (attr->attlen < 0)
+		{
+			length += (MAXALIGN(sizeof(cl_uint) * nitems) +
+					   MAXALIGN(cs_extra_sz[j]));
+		}
+		else
+		{
+			length += MAXALIGN(att_align_nominal(attr->attlen,
+												 attr->attalign) * nitems);
+			if (cs_hasnull[j])
+				length += MAXALIGN(BITMAPLEN(nitems));
+		}
+	}
+	ccache_chunk_filename(fname,
+						  MyDatabaseId,
+						  RelationGetRelid(srel),
+						  block_nr);
+	fdesc = openat(dirfd(ccache_base_dir), fname,
+				   O_RDWR | O_CREAT | O_TRUNC, 0600);
+	if (fdesc < 0)
+		elog(ERROR, "failed on openat('%s'): %m", fname);
+	if (fallocate(fdesc, 0, 0, length) < 0)
+	{
+		close(fdesc);
+		elog(ERROR, "failed on fallocate: %m");
+	}
+	kds = mmap(NULL, length,
+			   PROT_READ | PROT_WRITE,
+			   MAP_SHARED,
+			   fdesc, 0);
+	if (kds == MAP_FAILED)
+	{
+		close(fdesc);
+		elog(ERROR, "failed on mmap: %m");
+	}
+
+	init_kernel_data_store(kds, tupdesc, length, KDS_FORMAT_COLUMN, nitems);
+	pos = (char *)kds + STROMALIGN(offsetof(kern_data_store,
+											colmeta[tupdesc->natts]));
+	for (j=0; j < tupdesc->natts; j++)
+	{
+		Form_pg_attribute attr = tupdesc->attrs[j];
+		kern_colmeta   *cmeta = &kds->colmeta[j];
+		size_t			offset;
+		size_t			nbytes;
+
+		if (attr->attlen < 0)
+		{
+			/* variable-length column */
+			HASH_SEQ_STATUS hseq;
+			vl_dict_key *entry;
+			cl_uint	   *base = (cl_uint *)pos;
+			char	   *extra = pos + MAXALIGN(sizeof(cl_uint) * nitems);
+
+			hash_seq_init(&hseq, cs_vl_dict[j]);
+			while ((entry = hash_seq_search(&hseq)) != NULL)
+			{
+				offset = (size_t)(extra - (char *)base);
+				Assert((offset & (MAXIMUM_ALIGNOF - 1)) == 0);
+
+				entry->offset = (offset >> MAXIMUM_ALIGNOF_SHIFT);
+				nbytes = VARSIZE_ANY(entry->vl_datum);
+				memcpy(extra, entry->vl_datum, nbytes);
+				cmeta->extra_sz += MAXALIGN(nbytes) >> MAXIMUM_ALIGNOF_SHIFT;
+				extra += MAXALIGN(nbytes);
+			}
+
+			for (i=0; i < nitems; i++)
+			{
+				entry = ((vl_dict_key **)cs_values[j])[i];
+				base[i] = (!entry ? 0 : entry->offset);
+			}
+			pos += (char *)extra - (char *)base;
+		}
+		else
+		{
+			/* fixed-length column */
+			offset = pos - (char *)kds;
+			Assert((offset & (MAXIMUM_ALIGNOF - 1)) == 0);
+
+			cmeta->va_offset = offset / MAXIMUM_ALIGNOF;
+			nbytes = MAXALIGN(att_align_nominal(attr->attlen,
+												attr->attalign) * nitems);
+			memcpy(pos, cs_values[j], nbytes);
+			pos += nbytes;
+			/* null bitmap, if any */
+			if (cs_hasnull[j])
+			{
+				cmeta->extra_sz = nbytes = MAXALIGN(BITMAPLEN(nitems));
+				memcpy(pos, cs_nullmap[j], nbytes);
+				pos += nbytes;
+			}
+		}
+	}
+	kds->nitems = nitems;
+	Assert(kds->length == (char *)pos - (char *)kds);
+
+	if (munmap(kds, length) != 0)
+		elog(WARNING, "failed on munmap: %m");
+	if (close(fdesc) != 0)
+		elog(WARNING, "failed on munmap: %m");
+	if (vmbuffer != InvalidBuffer)
+		ReleaseBuffer(vmbuffer);
+	return true;
+}
+
+/*
  * ccache_builder_preload
  *
  * Load target relations to empty chunks.
@@ -676,6 +1055,179 @@ ccache_builder_connectdb(cl_int builder_id)
 static int
 ccache_builder_preload(cl_long *timeout)
 {
+	BlockNumber	   *rel_nblocks;
+	Relation	   *relations;
+	Relation		srel;
+	BufferAccessStrategy strategy;
+	MemoryContext	preload_cxt, oldcxt;
+	cl_int			i, num_rels, num_open_rels;
+	char		   *chunk_buffer;
+
+	num_rels = ccache_relations_oid->dim1;
+	if (num_rels == 0)
+		return CCBUILDER_STATE__TRYLOAD;
+
+	relations = palloc0(sizeof(Relation) * num_rels);
+	rel_nblocks = palloc0(sizeof(BlockNumber) * num_rels);
+	for (i=0; i < num_rels; i++)
+	{
+		relations[i] = heap_open(ccache_relations_oid->values[i],
+								 AccessShareLock);
+		rel_nblocks[i] = RelationGetNumberOfBlocks(relations[i]);
+	}
+	num_open_rels = num_rels;
+	strategy = GetAccessStrategy(BAS_BULKREAD);
+
+	chunk_buffer = palloc(CCACHE_CHUNK_SIZE);
+
+	preload_cxt = AllocSetContextCreate(CurrentMemoryContext,
+										"per-chunk working memory",
+										ALLOCSET_DEFAULT_SIZES);
+	oldcxt = MemoryContextSwitchTo(preload_cxt);
+	for (;;)
+	{
+		cl_bool		skip_preload = false;
+		cl_ulong	count;
+		BlockNumber	block_nr;
+		ccacheChunk *cc_chunk;
+		dlist_node *dnode;
+		dlist_iter	iter;
+
+		MemoryContextReset(preload_cxt);
+
+		count = pg_atomic_fetch_add_u64(&ccache_database->curr_scan_pos, 1);
+		i = count % num_rels;
+		if (!relations[i])
+			continue;
+		srel = relations[i];
+		block_nr = (count / num_rels) * NBLOCKS_PER_CCACHE_CHUNK;
+		if (block_nr >= rel_nblocks[i])
+		{
+			heap_close(srel, NoLock);
+			relations[i] = NULL;
+			if (--num_open_rels == 0)
+				break;	/* no more relations to preload */
+		}
+
+		SpinLockAcquire(&ccache_state->free_chunks_lock);
+		if (dlist_is_empty(&ccache_state->free_chunks_list))
+		{
+			SpinLockRelease(&ccache_state->free_chunks_lock);
+			elog(LOG, "ccache builder%d: no free ccacheChunk",
+				 ccache_builder->builder_id);
+			break;
+		}
+		dnode = dlist_pop_head_node(&ccache_state->free_chunks_list);
+		cc_chunk = dlist_container(ccacheChunk, chain, dnode);
+		SpinLockRelease(&ccache_state->free_chunks_lock);
+
+		/* setup ccacheChunk */
+		cc_chunk->database_oid = MyDatabaseId;
+		cc_chunk->table_oid = RelationGetRelid(srel);
+		cc_chunk->block_nr = block_nr;
+		cc_chunk->hash = ccache_compute_hashvalue(cc_chunk->database_oid,
+												  cc_chunk->table_oid,
+												  cc_chunk->block_nr);
+		cc_chunk->refcnt = 1;
+		memset(&cc_chunk->ctime, 0, sizeof(struct timeval));
+		memset(&cc_chunk->atime, 0, sizeof(struct timeval));
+
+		/* ensure this chunk is not cached yet */
+		i = cc_chunk->hash % ccache_num_slots;
+		SpinLockAcquire(&ccache_state->active_locks[i]);
+		dlist_foreach(iter, &ccache_state->active_slots[i])
+		{
+			ccacheChunk *temp = dlist_container(ccacheChunk, chain, iter.cur);
+
+			if (temp->hash == cc_chunk->hash &&
+				temp->database_oid == cc_chunk->database_oid &&
+				temp->table_oid == cc_chunk->table_oid &&
+				temp->block_nr == cc_chunk->block_nr)
+			{
+				/* oops, this chunks is already cached */
+				skip_preload = true;
+				break;
+			}
+		}
+		if (skip_preload)
+		{
+			SpinLockRelease(&ccache_state->active_locks[i]);
+			SpinLockAcquire(&ccache_state->free_chunks_lock);
+			memset(cc_chunk, 0, sizeof(ccacheChunk));
+			dlist_push_head(&ccache_state->free_chunks_list,
+							&cc_chunk->chain);
+			SpinLockRelease(&ccache_state->free_chunks_lock);
+			continue;
+		}
+		else
+		{
+			dlist_push_head(&ccache_state->active_slots[i],
+							&cc_chunk->chain);
+			SpinLockRelease(&ccache_state->active_locks[i]);
+		}
+
+		/* run preload of this chunk */
+		PG_TRY();
+		{
+			BlockNumber	nblocks = Min(rel_nblocks[i] - block_nr,
+									  NBLOCKS_PER_CCACHE_CHUNK);
+
+			if (ccache_preload_chunk(cc_chunk,
+									 srel,
+									 block_nr,
+									 nblocks,
+									 strategy,
+									 chunk_buffer))
+			{
+				SpinLockAcquire(&ccache_state->active_locks[i]);
+				Assert(cc_chunk->refcnt == 1);
+				gettimeofday(&cc_chunk->ctime, NULL);
+				memcpy(&cc_chunk->atime, &cc_chunk->ctime,
+					   sizeof(struct timeval));
+				SpinLockRelease(&ccache_state->active_locks[i]);
+			}
+			else
+			{
+				/* detach from the active */
+				SpinLockAcquire(&ccache_state->active_locks[i]);
+				Assert(cc_chunk->refcnt == 1);
+				dlist_delete(&cc_chunk->chain);
+				SpinLockRelease(&ccache_state->active_locks[i]);
+				/* return to the free list */
+				SpinLockAcquire(&ccache_state->free_chunks_lock);
+				memset(cc_chunk, 0, sizeof(ccacheChunk));
+				dlist_push_head(&ccache_state->free_chunks_list,
+								&cc_chunk->chain);
+				SpinLockRelease(&ccache_state->free_chunks_lock);
+			}
+		}
+		PG_CATCH();
+		{
+			/* detach from the active */
+			SpinLockAcquire(&ccache_state->active_locks[i]);
+			Assert(cc_chunk->refcnt == 1);
+			dlist_delete(&cc_chunk->chain);
+			SpinLockRelease(&ccache_state->active_locks[i]);
+			/* return to the free list */
+			SpinLockAcquire(&ccache_state->free_chunks_lock);
+			memset(cc_chunk, 0, sizeof(ccacheChunk));
+			dlist_push_head(&ccache_state->free_chunks_list,
+							&cc_chunk->chain);
+			SpinLockRelease(&ccache_state->free_chunks_lock);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+	}
+	MemoryContextSwitchTo(oldcxt);
+	MemoryContextDelete(preload_cxt);
+	pfree(strategy);
+	pfree(chunk_buffer);
+
+	for (i=0; i < num_rels; i++)
+	{
+		if (relations[i])
+			heap_close(relations[i], NoLock);
+	}
 	return CCBUILDER_STATE__TRYLOAD;
 }
 
@@ -712,6 +1264,7 @@ ccache_builder_main(Datum arg)
 												 ALLOCSET_DEFAULT_SIZES);
 	ccache_builder = &ccache_state->builders[builder_id];
 	SpinLockAcquire(&ccache_state->lock);
+	ccache_builder->builder_id = builder_id;
 	ccache_builder->database_oid = InvalidOid;
 	ccache_builder->state = curr_state = CCBUILDER_STATE__PRELOAD;
 	ccache_builder->latch = MyLatch;

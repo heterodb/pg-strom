@@ -761,6 +761,11 @@ KERN_HASH_NEXT_ITEM(kern_data_store *kds, kern_hashitem *khitem)
 							  BLCKSZ * kds_index)
 
 /* access macro for column format */
+typedef struct
+{
+	ItemPointerData		t_self;
+} packed_sysattrs;
+
 STATIC_INLINE(void *)
 KDS_COLUMN_VALUES(kern_data_store *kds, cl_int colidx)
 {
