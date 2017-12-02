@@ -94,6 +94,61 @@ CREATE FUNCTION pgstrom.ccache_invalidator()
   AS 'MODULE_PATHNAME','pgstrom_ccache_invalidator'
   LANGUAGE C STRICT;
 
+CREATE OR REPLACE FUNCTION public.pgstrom_ccache_enabled(regclass)
+RETURNS text
+AS $$
+DECLARE
+  qres RECORD;
+BEGIN
+  SELECT oid,relnamespace::regnamespace relnsp,relname
+    INTO qres
+    FROM pg_catalog.pg_class
+   WHERE oid = $1;
+
+  EXECUTE format('CREATE TRIGGER __ccache_%s_inval_r '
+                 'AFTER INSERT OR UPDATE OR DELETE '
+                 'ON %I.%I FOR ROW '
+                 'EXECUTE PROCEDURE pgstrom.ccache_invalidator()',
+                 qres.oid, qres.relnsp, qres.relname);
+  EXECUTE format('CREATE TRIGGER __ccache_%s_inval_s '
+                 'AFTER TRUNCATE '
+                 'ON %I.%I FOR STATEMENT '
+                 'EXECUTE PROCEDURE pgstrom.ccache_invalidator()',
+                 qres.oid, qres.relnsp, qres.relname);
+  EXECUTE format('ALTER TRIGGER __ccache_%s_inval_r ON %I.%I DEPENDS ON EXTENSION pg_strom',
+                 qres.oid, qres.relnsp, qres.relname);
+  EXECUTE format('ALTER TRIGGER __ccache_%s_inval_s ON %I.%I DEPENDS ON EXTENSION pg_strom',
+                 qres.oid, qres.relnsp, qres.relname);
+  EXECUTE format('ALTER TABLE %I.%I ENABLE ALWAYS TRIGGER __ccache_%s_inval_r',
+                 qres.relnsp, qres.relname, qres.oid);
+  EXECUTE format('ALTER TABLE %I.%I ENABLE ALWAYS TRIGGER __ccache_%s_inval_s',
+                 qres.relnsp, qres.relname, qres.oid);
+  RETURN 'enabled';
+END
+$$ LANGUAGE 'plpgsql';
+
+CREATE OR REPLACE FUNCTION public.pgstrom_ccache_disabled(regclass)
+RETURNS text
+AS $$
+DECLARE
+  qres RECORD;
+BEGIN
+  SELECT oid,relnamespace::regnamespace relnsp,relname
+    INTO qres
+    FROM pg_catalog.pg_class
+   WHERE oid = $1;
+
+  EXECUTE format('DROP TRIGGER IF EXISTS __ccache_%s_inval_r ON %I.%I RESTRICT',
+                 qres.oid, qres.relnsp, qres.relname);
+  EXECUTE format('DROP TRIGGER IF EXISTS __ccache_%s_inval_s ON %I.%I RESTRICT',
+                 qres.oid, qres.relnsp, qres.relname);
+  RETURN 'disabled';
+END
+$$ LANGUAGE 'plpgsql';
+
+
+
+
 --
 -- Handlers for gstore_fdw extension
 --
