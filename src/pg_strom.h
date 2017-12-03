@@ -34,6 +34,7 @@
 #include "catalog/pg_attribute.h"
 #include "catalog/pg_cast.h"
 #include "catalog/pg_class.h"
+#include "catalog/pg_database.h"
 #include "catalog/pg_foreign_data_wrapper.h"
 #include "catalog/pg_foreign_server.h"
 #include "catalog/pg_foreign_table.h"

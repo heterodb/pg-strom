@@ -130,6 +130,66 @@ ccache_chunk_filename(char *fname,
 }
 
 /*
+ * ccache_check_filename
+ */
+static bool
+ccache_check_filename(const char *fname,
+					  Oid *p_database_oid, Oid *p_table_oid,
+					  BlockNumber *p_block_nr)
+{
+	const char *pos = fname;
+	cl_long		database_oid = -1;
+	cl_long		table_oid = -1;
+	cl_long		block_nr = -1;
+
+	if (fname[0] != 'C' || fname[1] != 'C')
+		return false;
+	pos = fname + 2;
+	while (isdigit(*pos))
+	{
+		if (database_oid < 0)
+			database_oid = (*pos - '0');
+		else
+			database_oid = 10 * database_oid + (*pos - '0');
+		if (database_oid > OID_MAX)
+			return false;
+		pos++;
+	}
+	if (database_oid < 0 || *pos++ != '_')
+		return false;
+	while (isdigit(*pos))
+	{
+		if (table_oid < 0)
+			table_oid = (*pos - '0');
+		else
+			table_oid = 10 * table_oid + (*pos - '0');
+		if (table_oid > OID_MAX)
+			return false;
+		pos++;
+	}
+	if (table_oid < 0 || *pos++ != ':')
+		return false;
+	while (isdigit(*pos))
+	{
+		if (block_nr < 0)
+			block_nr = (*pos - '0');
+		else
+			block_nr = 10 * block_nr + (*pos - '0');
+		if (block_nr > MaxBlockNumber)
+			return false;
+		pos++;
+	}
+	if (block_nr < 0 || strcmp(pos, ".dat") != 0)
+		return false;
+
+	*p_database_oid	= database_oid;
+	*p_table_oid	= table_oid;
+	*p_block_nr		= block_nr;
+
+	return true;
+}
+
+/*
  * ccache_get_chunk
  */
 static ccacheChunk *
@@ -408,7 +468,8 @@ refresh_ccache_source_relations(void)
 			int		i = 0;
 			HASH_SEQ_STATUS	seq;
 
-			vec = palloc(len);
+//			vec = palloc(len);
+			vec = MemoryContextAlloc(CacheMemoryContext, len);
 			SET_VARSIZE(vec, len);
 			vec->ndim = 1;
 			vec->dataoffset = 0;
@@ -1483,7 +1544,7 @@ pgstrom_startup_ccache(void)
 	ccacheChunk *cc_chunk;
 	size_t		required;
 	bool		found;
-	int			i;
+	int			i, num_databases;
 	void	   *extra = NULL;
 
 	if (shmem_startup_next)
@@ -1535,6 +1596,33 @@ pgstrom_startup_ccache(void)
 									&extra, PGC_S_DEFAULT))
 		elog(ERROR, "Bug? failed on parse pg_strom.ccache_databases");
 	guc_assign_ccache_databases(ccache_startup_databases, extra);
+
+	/* cleanup ccache files if no database is configured */
+	SpinLockAcquire(&ccache_state->lock);
+	num_databases = ccache_state->num_databases;
+	SpinLockRelease(&ccache_state->lock);
+	if (num_databases == 0)
+	{
+		struct dirent *dent;
+
+		rewinddir(ccache_base_dir);
+		while ((dent = readdir(ccache_base_dir)) != NULL)
+		{
+			Oid			database_oid;
+			Oid			table_oid;
+			BlockNumber	block_nr;
+
+			if (ccache_check_filename(dent->d_name,
+									  &database_oid,
+									  &table_oid,
+									  &block_nr))
+			{
+				if (unlinkat(dirfd(ccache_base_dir), dent->d_name, 0) != 0)
+					elog(LOG, "failed on unlinkat('%s','%s'): %m",
+						 ccache_base_dir_name, dent->d_name);
+			}
+		}
+	}
 }
 
 /*
