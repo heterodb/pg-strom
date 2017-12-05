@@ -1051,6 +1051,22 @@ typedef struct
 	struct varlena *vl_datum;
 } vl_dict_key;
 extern HTAB *create_varlena_dictionary(size_t nrooms);
+extern void pgstrom_ccache_extract_row(TupleDesc tupdesc,
+									   size_t nitems,
+									   size_t nrooms,
+									   bool *tup_isnull,
+									   Datum *tup_values,
+									   bits8 **cs_nullmap,
+									   bool *cs_hasnull,
+									   void **cs_values,
+									   HTAB **cs_vl_dict,
+									   size_t *cs_extra_sz);
+extern void pgstrom_ccache_writeout_chunk(kern_data_store *kds,
+										  bits8 **cs_nullmap,
+										  bool *cs_hasnull,
+										  void **cs_values,
+										  HTAB **cs_vl_dict,
+										  size_t *cs_extra_sz);
 extern Datum pgstrom_ccache_invalidator(PG_FUNCTION_ARGS);
 extern void pgstrom_init_ccache(void);
 

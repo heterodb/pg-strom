@@ -531,65 +531,12 @@ typedef struct
 	size_t		nrooms;		/* available max number of items */
 	size_t		nitems;		/* current number of items */
 	MemoryContext memcxt;	/* memcxt for construction per chunk */
-	struct {
-		HTAB   *vl_dict;	/* dictionary of varlena datum, if any */
-		size_t	extra_sz;	/* usage by varlena datum */
-		bits8  *nullmap;	/* NULL-bitmap */
-		void   *values;		/* array of values */
-		int		align;		/* numeric form of attalign */
-	} a[FLEXIBLE_ARRAY_MEMBER];
+	HTAB	  **cs_vl_dict;	/* dictionary of varlena datum, if any */
+	size_t	   *cs_extra_sz;/* usage by varlena datum */
+	bool	   *cs_hasnull;	/* true, if any NULL */
+	bits8	  **cs_nullmap;	/* NULL-bitmap */
+	void	  **cs_values;	/* array of values */
 } gstoreLoadState;
-
-typedef struct
-{
-	cl_uint		offset;		/* to be used later */
-	struct varlena *vl_datum;
-} vl_dict_key;
-
-static uint32
-vl_dict_hash_value(const void *__key, Size keysize)
-{
-	const vl_dict_key *key = __key;
-	pg_crc32		crc;
-
-	INIT_LEGACY_CRC32(crc);
-	COMP_LEGACY_CRC32(crc, key->vl_datum, VARSIZE_ANY(key->vl_datum));
-	FIN_LEGACY_CRC32(crc);
-
-	return (uint32) crc;
-}
-
-static int
-vl_dict_compare(const void *__key1, const void *__key2, Size keysize)
-{
-	const vl_dict_key *key1 = __key1;
-	const vl_dict_key *key2 = __key2;
-
-	if (VARSIZE_ANY_EXHDR(key1->vl_datum) == VARSIZE_ANY_EXHDR(key2->vl_datum))
-		return memcmp(VARDATA_ANY(key1->vl_datum),
-					  VARDATA_ANY(key2->vl_datum),
-					  VARSIZE_ANY_EXHDR(key1->vl_datum));
-	return 1;
-}
-
-static HTAB *
-vl_dict_create(MemoryContext memcxt, size_t nrooms)
-{
-	HASHCTL		hctl;
-
-	memset(&hctl, 0, sizeof(HASHCTL));
-	hctl.hash = vl_dict_hash_value;
-	hctl.match = vl_dict_compare;
-	hctl.keysize = sizeof(vl_dict_key);
-	hctl.hcxt = memcxt;
-
-	return hash_create("varlena dictionary hash-table",
-					   Max(nrooms / 10, 4096),
-					   &hctl,
-					   HASH_FUNCTION |
-					   HASH_COMPARE |
-					   HASH_CONTEXT);
-}
 
 /*
  * gstore_fdw_load_gpu_preserved
@@ -657,7 +604,7 @@ gstore_fdw_writeout_pgstrom(Relation relation, gstoreLoadState *gs_lstate)
 	size_t			nitems = gs_lstate->nitems;
 	size_t			length;
 	size_t			usage;
-	size_t			i, j, unitsz;
+	size_t			i, j;
 	pg_crc32		hash;
 	cl_int			cuda_dindex = (gcontext ? gcontext->cuda_dindex : -1);
 	dsm_segment	   *dsm_seg;
@@ -676,17 +623,16 @@ gstore_fdw_writeout_pgstrom(Relation relation, gstoreLoadState *gs_lstate)
 		if (attr->attlen < 0)
 		{
 			length += (MAXALIGN(sizeof(cl_uint) * nitems) +
-					   MAXALIGN(gs_lstate->a[j].extra_sz));
+					   MAXALIGN(gs_lstate->cs_extra_sz[j]));
 		}
 		else
 		{
-			length += MAXALIGN(TYPEALIGN(gs_lstate->a[j].align,
-										 attr->attlen) * nitems);
-			if (gs_lstate->a[j].nullmap)
+			length += MAXALIGN(att_align_nominal(attr->attlen,
+												 attr->attalign) * nitems);
+			if (gs_lstate->cs_hasnull[j])
 				length += MAXALIGN(BITMAPLEN(nitems));
 		}
 	}
-
 	dsm_seg = dsm_create(length, 0);
 	kds = dsm_segment_address(dsm_seg);
 	init_kernel_data_store(kds,
@@ -694,66 +640,14 @@ gstore_fdw_writeout_pgstrom(Relation relation, gstoreLoadState *gs_lstate)
 						   length,
 						   KDS_FORMAT_COLUMN,
 						   nitems);
-	for (j=0; j < tupdesc->natts; j++)
-	{
-		kern_colmeta   *cmeta = &kds->colmeta[j];
-
-		Assert((usage & (MAXIMUM_ALIGNOF - 1)) == 0);
-		cmeta->va_offset = (usage >> MAXIMUM_ALIGNOF_SHIFT);
-
-		if (cmeta->attlen < 0)
-		{
-			HASH_SEQ_STATUS	hseq;
-			vl_dict_key	  **entries_array;
-			vl_dict_key	   *entry;
-			cl_uint		   *base;
-			char		   *extra;
-
-			/* put varlena datum on the extra area */
-			base = (cl_uint *)((char *)kds + usage);
-			extra = (char *)base + MAXALIGN(sizeof(cl_uint) * nitems);
-			hash_seq_init(&hseq, gs_lstate->a[j].vl_dict);
-			while ((entry = hash_seq_search(&hseq)) != NULL)
-			{
-				size_t		offset = (size_t)(extra - (char *)base);
-
-				Assert((offset & (MAXIMUM_ALIGNOF - 1)) == 0);
-				entry->offset = (offset >> MAXIMUM_ALIGNOF_SHIFT);
-				unitsz = VARSIZE_ANY(entry->vl_datum);
-				memcpy(extra, entry->vl_datum, unitsz);
-				cmeta->extra_sz += MAXALIGN(unitsz) >> MAXIMUM_ALIGNOF_SHIFT;
-				extra += MAXALIGN(unitsz);
-			}
-			/* put offset of varlena datum */
-			entries_array = (vl_dict_key **)gs_lstate->a[j].values;
-			for (i=0; i < nitems; i++)
-			{
-				entry = entries_array[i];
-				base[i] = (!entry ? 0 : entry->offset);
-			}
-			usage += (char *)extra - (char *)base;
-		}
-		else
-		{
-			unitsz = TYPEALIGN(cmeta->attalign, cmeta->attlen);
-			memcpy((char *)kds + usage,
-				   gs_lstate->a[j].values,
-				   unitsz * nitems);
-			usage += MAXALIGN(unitsz * nitems);
-			if (gs_lstate->a[j].nullmap)
-			{
-				size_t	nullmap_sz;
-
-				memcpy((char *)kds + usage,
-					   gs_lstate->a[j].nullmap,
-					   BITMAPLEN(nitems));
-				nullmap_sz = MAXALIGN(BITMAPLEN(nitems));
-				cmeta->extra_sz = nullmap_sz >> MAXIMUM_ALIGNOF_SHIFT;
-				usage += nullmap_sz;
-			}
-		}
-	}
 	kds->nitems = nitems;
+	kds->table_oid = RelationGetRelid(relation);
+	pgstrom_ccache_writeout_chunk(kds,
+								  gs_lstate->cs_nullmap,
+								  gs_lstate->cs_hasnull,
+								  gs_lstate->cs_values,
+								  gs_lstate->cs_vl_dict,
+								  gs_lstate->cs_extra_sz);
 
 	/* allocation of device memory if 'pinning' mode */
 	if (gcontext)
@@ -852,7 +746,7 @@ gstoreBeginForeignModify(ModifyTableState *mtstate,
 	MemoryContext	oldcxt;
 	int				pinning;
 	int				format;
-	cl_int			i, unitsz;
+	cl_int			i;
 
 	gstore_fdw_read_options(RelationGetRelid(relation), &pinning, &format);
 	if (pinning >= 0)
@@ -869,7 +763,13 @@ gstoreBeginForeignModify(ModifyTableState *mtstate,
 				 errmsg("gstore_fdw: foreign table \"%s\" is not empty",
 						RelationGetRelationName(relation))));
 	/* state object */
-	gs_lstate = palloc0(offsetof(gstoreLoadState, a[tupdesc->natts]));
+	gs_lstate = palloc0(sizeof(gstoreLoadState));
+	gs_lstate->cs_vl_dict = palloc0(sizeof(HTAB *) * tupdesc->natts);
+	gs_lstate->cs_extra_sz = palloc0(sizeof(size_t) * tupdesc->natts);
+	gs_lstate->cs_hasnull = palloc0(sizeof(bool) * tupdesc->natts);
+	gs_lstate->cs_nullmap = palloc0(sizeof(bits8 *) * tupdesc->natts);
+	gs_lstate->cs_values = palloc0(sizeof(void *) * tupdesc->natts);
+
 	gs_lstate->gcontext = gcontext;
 	gs_lstate->memcxt = AllocSetContextCreate(estate->es_query_cxt,
 											  "gstore_fdw temporary context",
@@ -883,26 +783,17 @@ gstoreBeginForeignModify(ModifyTableState *mtstate,
 
 		if (attr->attlen < 0)
 		{
-			gs_lstate->a[i].align = sizeof(cl_uint);
-			gs_lstate->a[i].vl_dict = vl_dict_create(gs_lstate->memcxt,
-													 gs_lstate->nrooms);
-			gs_lstate->a[i].values = palloc(sizeof(vl_dict_key *) *
-											gs_lstate->nrooms);
+			gs_lstate->cs_vl_dict[i] =
+				create_varlena_dictionary(gs_lstate->nrooms);
+			gs_lstate->cs_values[i] = palloc0(sizeof(vl_dict_key *) *
+											  gs_lstate->nrooms);
 		}
 		else
 		{
-			if (attr->attalign == 'c')
-                gs_lstate->a[i].align = sizeof(cl_char);
-            else if (attr->attalign == 's')
-                gs_lstate->a[i].align = sizeof(cl_short);
-            else if (attr->attalign == 'i')
-                gs_lstate->a[i].align = sizeof(cl_int);
-            else if (attr->attalign == 'd')
-                gs_lstate->a[i].align = sizeof(cl_long);
-            else
-				elog(ERROR, "Bug? unexpected alignment: %c", attr->attalign);
-			unitsz = TYPEALIGN(gs_lstate->a[i].align, attr->attlen);
-			gs_lstate->a[i].values = palloc(unitsz * gs_lstate->nrooms);
+			gs_lstate->cs_values[i] =
+				palloc0(att_align_nominal(attr->attlen,
+										  attr->attalign) * gs_lstate->nrooms);
+			gs_lstate->cs_nullmap[i] = palloc0(BITMAPLEN(gs_lstate->nrooms));
 		}
 	}
 	MemoryContextSwitchTo(oldcxt);
@@ -920,7 +811,7 @@ gstoreExecForeignInsert(EState *estate,
 {
 	TupleDesc	tupdesc = slot->tts_tupleDescriptor;
 	gstoreLoadState *gs_lstate = rrinfo->ri_FdwState;
-	size_t		i, j;
+	size_t		j;
 
 	slot_getallattrs(slot);
 	/*
@@ -930,124 +821,42 @@ gstoreExecForeignInsert(EState *estate,
 	{
 		MemoryContext	oldcxt = MemoryContextSwitchTo(gs_lstate->memcxt);
 
-		gs_lstate->nrooms *= 2;
+		gs_lstate->nrooms += gs_lstate->nrooms + 5000;
 		for (j=0; j < tupdesc->natts; j++)
 		{
 			Form_pg_attribute attr = tupdesc->attrs[j];
 
 			if (attr->attlen < 0)
 			{
-				Assert(!gs_lstate->a[j].nullmap);
-				gs_lstate->a[j].values
-					= repalloc(gs_lstate->a[j].values,
+				Assert(!gs_lstate->cs_nullmap[j]);
+				gs_lstate->cs_values[j]
+					= repalloc(gs_lstate->cs_values[j],
 							   sizeof(vl_dict_key *) * gs_lstate->nrooms);
 			}
 			else
 			{
-				int		unitsz = TYPEALIGN(gs_lstate->a[j].align,
-										   attr->attlen);
-				gs_lstate->a[j].values
-					= repalloc(gs_lstate->a[j].values,
-							   unitsz * gs_lstate->nrooms);
-				if (gs_lstate->a[j].nullmap)
-				{
-					gs_lstate->a[j].nullmap
-						= repalloc(gs_lstate->a[j].nullmap,
-								   BITMAPLEN(gs_lstate->nrooms));
-				}
+				gs_lstate->cs_values[j]
+					= repalloc(gs_lstate->cs_values[j],
+							   att_align_nominal(attr->attlen,
+												 attr->attalign) *
+							   gs_lstate->nrooms);
+				gs_lstate->cs_nullmap[j]
+					= repalloc(gs_lstate->cs_nullmap[j],
+							   BITMAPLEN(gs_lstate->nrooms));
 			}
 		}
 		MemoryContextSwitchTo(oldcxt);
 	}
-	i = gs_lstate->nitems++;
-	Assert(i < gs_lstate->nrooms);
-
-	for (j=0; j < tupdesc->natts; j++)
-	{
-		Form_pg_attribute attr = tupdesc->attrs[j];
-		bits8	   *nullmap = gs_lstate->a[j].nullmap;
-		char	   *values = gs_lstate->a[j].values;
-		int			align = gs_lstate->a[j].align;
-		Datum		datum = slot->tts_values[j];
-
-		if (slot->tts_isnull[j])
-		{
-			if (attr->attnotnull)
-				elog(ERROR,
-					 "attribute \"%s\" of relation \"%s\" must be NOT NULL",
-					 NameStr(attr->attname),
-					 RelationGetRelationName(rrinfo->ri_RelationDesc));
-			if (!nullmap)
-			{
-				nullmap = MemoryContextAlloc(gs_lstate->memcxt,
-									MAXALIGN(BITMAPLEN(gs_lstate->nrooms)));
-				memset(nullmap, -1, BITMAPLEN(i));
-				gs_lstate->a[i].nullmap = nullmap;
-			}
-			nullmap[i >> 3] &= ~(1 << (i & 7));
-		}
-		else
-		{
-			if (nullmap)
-				nullmap[i >> 3] |=  (1 << (i & 7));
-			if (attr->attlen < 0)
-			{
-				vl_dict_key	key, *entry;
-				bool		found;
-
-				key.offset = 0;
-				key.vl_datum = (struct varlena *)DatumGetPointer(datum);
-				entry = hash_search(gs_lstate->a[j].vl_dict,
-									&key,
-									HASH_ENTER,
-									&found);
-				if (!found)
-				{
-					MemoryContext oldcxt
-						= MemoryContextSwitchTo(gs_lstate->memcxt);
-					entry->offset = 0;
-					entry->vl_datum = PG_DETOAST_DATUM_COPY(datum);
-					MemoryContextSwitchTo(oldcxt);
-
-					gs_lstate->a[j].extra_sz += MAXALIGN(VARSIZE_ANY(datum));
-
-					if (MAXALIGN(sizeof(cl_uint) * i) +
-						gs_lstate->a[j].extra_sz >= ((size_t)UINT_MAX *
-													 MAXIMUM_ALIGNOF))
-						elog(ERROR, "attribute \"%s\" consumed too much",
-							 NameStr(attr->attname));
-				}
-				((vl_dict_key **)values)[i] = entry;
-			}
-			else if (!attr->attbyval)
-			{
-				values += TYPEALIGN(align, attr->attlen) * i;
-				memcpy(values, DatumGetPointer(datum), attr->attlen);
-			}
-			else
-			{
-				values += TYPEALIGN(align, attr->attlen) * i;
-				switch (attr->attlen)
-				{
-					case sizeof(cl_char):
-						*((cl_char *)values) = DatumGetChar(datum);
-						break;
-					case sizeof(cl_short):
-						*((cl_short *)values) = DatumGetInt16(datum);
-						break;
-					case sizeof(cl_int):
-						*((cl_int *)values) = DatumGetInt32(datum);
-						break;
-					case sizeof(cl_long):
-						*((cl_long *)values) = DatumGetInt64(datum);
-						break;
-					default:
-						elog(ERROR, "Unexpected attribute length: %d",
-							 attr->attlen);
-				}
-			}
-		}
-	}
+	pgstrom_ccache_extract_row(tupdesc,
+							   gs_lstate->nitems++,
+							   gs_lstate->nrooms,
+							   slot->tts_isnull,
+							   slot->tts_values,
+							   gs_lstate->cs_nullmap,
+							   gs_lstate->cs_hasnull,
+							   gs_lstate->cs_values,
+							   gs_lstate->cs_vl_dict,
+							   gs_lstate->cs_extra_sz);
 	return slot;
 }
 

@@ -468,7 +468,6 @@ refresh_ccache_source_relations(void)
 			int		i = 0;
 			HASH_SEQ_STATUS	seq;
 
-//			vec = palloc(len);
 			vec = MemoryContextAlloc(CacheMemoryContext, len);
 			SET_VARSIZE(vec, len);
 			vec->ndim = 1;
@@ -797,10 +796,166 @@ create_varlena_dictionary(size_t nrooms)
 					   HASH_COMPARE);
 }
 
+/*
+ * pgstrom_ccache_extract_row
+ */
+void
+pgstrom_ccache_extract_row(TupleDesc tupdesc,
+						   size_t nitems,
+						   size_t nrooms,
+						   bool *tup_isnull,
+						   Datum *tup_values,
+						   bits8 **cs_nullmap,
+						   bool *cs_hasnull,
+						   void **cs_values,
+						   HTAB **cs_vl_dict,
+						   size_t *cs_extra_sz)
+{
+	int		j;
 
+	for (j=0; j < tupdesc->natts; j++)
+	{
+		Form_pg_attribute attr = tupdesc->attrs[j];
+		bool	isnull = tup_isnull[j];
+		Datum	datum = tup_values[j];
 
+		if (attr->attlen < 0)
+		{
+			vl_dict_key *entry = NULL;
 
+			if (!isnull)
+			{
+				struct varlena *vl = PG_DETOAST_DATUM_PACKED(datum);
+				vl_dict_key key;
+				bool		found;
 
+				key.offset = 0;
+				key.vl_datum = vl;
+				entry = hash_search(cs_vl_dict[j],
+									&key,
+									HASH_ENTER,
+									&found);
+				if (!found)
+				{
+					entry->offset = 0;
+					if (PointerGetDatum(vl) != datum)
+						entry->vl_datum = vl;
+					else
+						entry->vl_datum = PG_DETOAST_DATUM_COPY(datum);
+					cs_extra_sz[j] += MAXALIGN(VARSIZE_ANY(vl));
+
+					if (MAXALIGN(sizeof(cl_uint) * nrooms) +
+						cs_extra_sz[j] >= ((size_t)UINT_MAX * MAXIMUM_ALIGNOF))
+						elog(ERROR, "attribute \"%s\" consumed too much",
+							 NameStr(attr->attname));
+				}
+			}
+			((vl_dict_key **)cs_values[j])[nitems] = entry;
+		}
+		else
+		{
+			bits8  *nullmap = cs_nullmap[j];
+			char   *base = cs_values[j];
+
+			if (isnull)
+			{
+				cs_hasnull[j] = true;
+				nullmap[nitems >> 3] &= ~(1 << (nitems & 7));
+			}
+			else if (!attr->attbyval)
+			{
+				nullmap[nitems >> 3] |= (1 << (nitems & 7));
+				base += att_align_nominal(attr->attlen,
+										  attr->attalign) * nitems;
+				memcpy(base, DatumGetPointer(datum), attr->attlen);
+			}
+			else
+			{
+				nullmap[nitems >> 3] |= (1 << (nitems & 7));
+				base += att_align_nominal(attr->attlen,
+										  attr->attalign) * nitems;
+				memcpy(base, &datum, attr->attlen);
+			}
+		}
+	}
+}
+
+/*
+ * pgstrom_ccache_writeout_chunk
+ */
+void
+pgstrom_ccache_writeout_chunk(kern_data_store *kds,
+							  bits8 **cs_nullmap,
+							  bool *cs_hasnull,
+							  void **cs_values,
+							  HTAB **cs_vl_dict,
+							  size_t *cs_extra_sz)
+{
+	size_t	nitems = kds->nitems;
+	char   *pos;
+	int		i, j;
+
+	pos = (char *)kds + STROMALIGN(offsetof(kern_data_store,
+											colmeta[kds->ncols]));
+	for (j=0; j < kds->ncols; j++)
+	{
+		kern_colmeta   *cmeta = &kds->colmeta[j];
+		size_t			offset;
+		size_t			nbytes;
+
+		offset = ((char *)pos - (char *)kds);
+		Assert((offset & (MAXIMUM_ALIGNOF - 1)) == 0);
+		cmeta->va_offset = offset / MAXIMUM_ALIGNOF;
+		if (cmeta->attlen < 0)
+		{
+			/* variable-length column */
+			HASH_SEQ_STATUS hseq;
+			vl_dict_key *entry;
+			cl_uint	   *base = (cl_uint *)pos;
+			char	   *extra = pos + MAXALIGN(sizeof(cl_uint) * nitems);
+
+			hash_seq_init(&hseq, cs_vl_dict[j]);
+			while ((entry = hash_seq_search(&hseq)) != NULL)
+			{
+				offset = (size_t)(extra - (char *)base);
+				Assert((offset & (MAXIMUM_ALIGNOF - 1)) == 0);
+
+				entry->offset = offset / MAXIMUM_ALIGNOF;
+				nbytes = VARSIZE_ANY(entry->vl_datum);
+				memcpy(extra, entry->vl_datum, nbytes);
+				cmeta->extra_sz += MAXALIGN(nbytes) / MAXIMUM_ALIGNOF;
+				extra += MAXALIGN(nbytes);
+			}
+
+			for (i=0; i < nitems; i++)
+			{
+				entry = ((vl_dict_key **)cs_values[j])[i];
+				base[i] = (!entry ? 0 : entry->offset);
+			}
+			pos += (char *)extra - (char *)base;
+		}
+		else
+		{
+			/* fixed-length column */
+			offset = pos - (char *)kds;
+			Assert((offset & (MAXIMUM_ALIGNOF - 1)) == 0);
+
+			cmeta->va_offset = offset / MAXIMUM_ALIGNOF;
+			nbytes = MAXALIGN(TYPEALIGN(cmeta->attalign,
+										cmeta->attlen) * nitems);
+			memcpy(pos, cs_values[j], nbytes);
+			pos += nbytes;
+			/* null bitmap, if any */
+			if (cs_hasnull[j])
+			{
+				cmeta->extra_sz = nbytes = MAXALIGN(BITMAPLEN(nitems));
+				memcpy(pos, cs_nullmap[j], nbytes);
+				pos += nbytes;
+			}
+		}
+	}
+	Assert(kds->length == (char *)pos - (char *)kds);
+}
 
 /*
  * ccache_preload_chunk - preload a chunk
@@ -827,7 +982,6 @@ ccache_preload_chunk(ccacheChunk *cc_chunk,
 	int			i, j, fdesc;
 	size_t		length;
 	char		fname[MAXPGPATH];
-	char	   *pos;
 	kern_data_store *kds;
 
 	/* check visibility map first */
@@ -921,68 +1075,15 @@ ccache_preload_chunk(ccacheChunk *cc_chunk,
 
 			Assert(nitems < nrooms);
 			heap_deform_tuple(&tup, tupdesc, tup_values, tup_isnull);
-			for (j=0; j < tupdesc->natts; j++)
-			{
-				Form_pg_attribute attr = tupdesc->attrs[j];
-				bool		isnull = tup_isnull[j];
-				Datum		datum = tup_values[j];
-
-				if (attr->attlen < 0)
-				{
-					vl_dict_key *entry = NULL;
-
-					if (!isnull)
-					{
-						struct varlena *v = PG_DETOAST_DATUM_PACKED(datum);
-						vl_dict_key	key;
-						bool		found;
-
-						key.offset = 0;
-						key.vl_datum = v;
-						entry = hash_search(cs_vl_dict[j],
-											&key,
-											HASH_ENTER,
-											&found);
-						if (!found)
-						{
-							entry->offset = 0;
-							if (PointerGetDatum(v) != datum)
-								entry->vl_datum = v;
-							else
-								entry->vl_datum = PG_DETOAST_DATUM_COPY(v);
-							cs_extra_sz[j] += MAXALIGN(VARSIZE_ANY(v));
-						}
-						else if (PointerGetDatum(v) != datum)
-							pfree(v);
-					}
-					((vl_dict_key **)cs_values[j])[nitems] = entry;
-				}
-				else
-				{
-					bits8  *nullmap = cs_nullmap[j];
-					char   *base = cs_values[j];
-
-					if (isnull)
-					{
-						nullmap[nitems >> 3] &= (~(1 << (nitems & 7)) & 0xff);
-						cs_hasnull[j] = true;
-					}
-					else if (!attr->attbyval)
-					{
-						nullmap[nitems >> 3] |= (1 << (nitems & 7));
-						base += att_align_nominal(attr->attlen,
-												  attr->attalign) * nitems;
-						memcpy(base, DatumGetPointer(datum), attr->attlen);
-					}
-					else
-					{
-						nullmap[nitems >> 3] |= (1 << (nitems & 7));
-						base += att_align_nominal(attr->attlen,
-												  attr->attalign) * nitems;
-						memcpy(base, &datum, attr->attlen);
-					}
-				}
-			}
+			pgstrom_ccache_extract_row(tupdesc,
+									   nitems, nrooms,
+									   tup_isnull,
+									   tup_values,
+									   cs_nullmap,
+									   cs_hasnull,
+									   cs_values,
+									   cs_vl_dict,
+									   cs_extra_sz);
 			nitems++;
 		}
 	}
@@ -1039,65 +1140,13 @@ ccache_preload_chunk(ccacheChunk *cc_chunk,
 	}
 
 	init_kernel_data_store(kds, tupdesc, length, KDS_FORMAT_COLUMN, nitems);
-	pos = (char *)kds + STROMALIGN(offsetof(kern_data_store,
-											colmeta[tupdesc->natts]));
-	for (j=0; j < tupdesc->natts; j++)
-	{
-		Form_pg_attribute attr = tupdesc->attrs[j];
-		kern_colmeta   *cmeta = &kds->colmeta[j];
-		size_t			offset;
-		size_t			nbytes;
-
-		if (attr->attlen < 0)
-		{
-			/* variable-length column */
-			HASH_SEQ_STATUS hseq;
-			vl_dict_key *entry;
-			cl_uint	   *base = (cl_uint *)pos;
-			char	   *extra = pos + MAXALIGN(sizeof(cl_uint) * nitems);
-
-			hash_seq_init(&hseq, cs_vl_dict[j]);
-			while ((entry = hash_seq_search(&hseq)) != NULL)
-			{
-				offset = (size_t)(extra - (char *)base);
-				Assert((offset & (MAXIMUM_ALIGNOF - 1)) == 0);
-
-				entry->offset = (offset >> MAXIMUM_ALIGNOF_SHIFT);
-				nbytes = VARSIZE_ANY(entry->vl_datum);
-				memcpy(extra, entry->vl_datum, nbytes);
-				cmeta->extra_sz += MAXALIGN(nbytes) >> MAXIMUM_ALIGNOF_SHIFT;
-				extra += MAXALIGN(nbytes);
-			}
-
-			for (i=0; i < nitems; i++)
-			{
-				entry = ((vl_dict_key **)cs_values[j])[i];
-				base[i] = (!entry ? 0 : entry->offset);
-			}
-			pos += (char *)extra - (char *)base;
-		}
-		else
-		{
-			/* fixed-length column */
-			offset = pos - (char *)kds;
-			Assert((offset & (MAXIMUM_ALIGNOF - 1)) == 0);
-
-			cmeta->va_offset = offset / MAXIMUM_ALIGNOF;
-			nbytes = MAXALIGN(att_align_nominal(attr->attlen,
-												attr->attalign) * nitems);
-			memcpy(pos, cs_values[j], nbytes);
-			pos += nbytes;
-			/* null bitmap, if any */
-			if (cs_hasnull[j])
-			{
-				cmeta->extra_sz = nbytes = MAXALIGN(BITMAPLEN(nitems));
-				memcpy(pos, cs_nullmap[j], nbytes);
-				pos += nbytes;
-			}
-		}
-	}
 	kds->nitems = nitems;
-	Assert(kds->length == (char *)pos - (char *)kds);
+	pgstrom_ccache_writeout_chunk(kds,
+								  cs_nullmap,
+								  cs_hasnull,
+								  cs_values,
+								  cs_vl_dict,
+								  cs_extra_sz);
 
 	if (munmap(kds, length) != 0)
 		elog(WARNING, "failed on munmap: %m");
