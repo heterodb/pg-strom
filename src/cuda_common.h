@@ -476,7 +476,7 @@ typedef struct {
 } HeapTupleHeaderData;
 
 #define att_isnull(ATT, BITS) (!((BITS)[(ATT) >> 3] & (1 << ((ATT) & 0x07))))
-#define bitmaplen(NATTS) (((int)(NATTS) + BITS_PER_BYTE - 1) / BITS_PER_BYTE)
+#define BITMAPLEN(NATTS) (((int)(NATTS) + BITS_PER_BYTE - 1) / BITS_PER_BYTE)
 
 /*
  * information stored in t_infomask:
@@ -791,64 +791,45 @@ KDS_COLUMN_NULLMAP(kern_data_store *kds, cl_int colidx)
 							   cmeta.attlen) * kds->nitems));
 }
 
-STATIC_INLINE(Datum)
+STATIC_INLINE(void *)
 KDS_COLUMN_GET_VALUE(kern_data_store *kds,
-					 cl_int colidx, size_t row_index,
-					 cl_bool *isnull)
+					 cl_int colidx, size_t row_index)
 {
-	kern_colmeta cmeta;
+	kern_colmeta *cmeta;
 	size_t		offset;
 	char	   *values;
 	char	   *nullmap;
-	Datum		result;
 
 	Assert(colidx >= 0 && colidx < kds->ncols);
-	cmeta = kds->colmeta[colidx];
-	values = (char *)kds + ((size_t)cmeta.va_offset << MAXIMUM_ALIGNOF_SHIFT);
-	if (cmeta.attlen < 0)
+	cmeta = &kds->colmeta[colidx];
+	offset = __ldg(&cmeta->va_offset) << MAXIMUM_ALIGNOF_SHIFT;
+	if (offset == 0)
+		return NULL;
+	values = (char *)kds + offset;
+	if (__ldg(&cmeta->attlen) < 0)
 	{
-		Assert(!cmeta.attbyval);
+		Assert(!__ldg(&cmeta->attbyval));
 		offset = ((cl_uint *)values)[row_index];
 		if (offset == 0)
-		{
-			*isnull = true;
-			return 0L;
-		}
-		values += (size_t)offset << MAXIMUM_ALIGNOF_SHIFT;
-		result = PointerGetDatum(values);
+			return NULL;
+		Assert(offset < __ldg(&cmeta->extra_sz));
+		values += (offset << MAXIMUM_ALIGNOF_SHIFT);
 	}
 	else
 	{
-		size_t		unitsz = TYPEALIGN(cmeta.attalign, cmeta.attlen);
-		if (row_index < ((size_t)cmeta.extra_sz << MAXIMUM_ALIGNOF_SHIFT))
+		cl_uint		extra_sz = __ldg(&cmeta->extra_sz);
+		cl_int		unitsz = TYPEALIGN(__ldg(&cmeta->attalign),
+									   __ldg(&cmeta->attlen));
+		if (extra_sz > 0)
 		{
-			nullmap =  values + MAXALIGN(unitsz * kds->nitems);
+			Assert(MAXALIGN(BITMAPLEN(nitems)) == extra_sz);
+			nullmap = values + MAXALIGN(unitsz * __ldg(&kds->nitems));
 			if (att_isnull(row_index, nullmap))
-			{
-				*isnull = true;
-				return 0L;
-			}
+				return NULL;
 		}
 		values += unitsz * row_index;
-		if (!cmeta.attbyval)
-			result = PointerGetDatum(values);
-		else if (cmeta.attlen == sizeof(cl_long))
-			result = SET_8_BYTES(*((cl_long *)values));
-		else if (cmeta.attlen == sizeof(cl_int))
-			result = SET_4_BYTES(*((cl_int *)values));
-		else if (cmeta.attlen == sizeof(cl_short))
-			result = SET_2_BYTES(*((cl_short *)values));
-		else if (cmeta.attlen == sizeof(cl_char))
-			result = SET_1_BYTE(*((cl_char *)values));
-		else
-		{
-			/* should not happen */
-			*isnull = true;
-			return 0L;
-		}
 	}
-	*isnull = false;
-	return result;
+	return (void *)values;
 }
 
 /*
@@ -2083,7 +2064,7 @@ compute_heaptuple_size(kern_context *kcxt,
 	/* compute header offset */
 	t_hoff = offsetof(HeapTupleHeaderData, t_bits);
 	if (heap_hasnull)
-		t_hoff += bitmaplen(ncols);
+		t_hoff += BITMAPLEN(ncols);
 	if (kds->tdhasoid)
 		t_hoff += sizeof(cl_uint);
 	t_hoff = MAXALIGN(t_hoff);
@@ -2245,7 +2226,7 @@ form_kern_heaptuple(kern_context *kcxt,
 	/* Compute header offset */
 	t_hoff = offsetof(HeapTupleHeaderData, t_bits);
 	if (heap_hasnull)
-		t_hoff += bitmaplen(ncols);
+		t_hoff += BITMAPLEN(ncols);
 	if (kds->tdhasoid)
 	{
 		t_infomask |= HEAP_HASOID;
@@ -2405,7 +2386,7 @@ setup_kern_heaptuple(void *buffer,
 	/* computer header size */
 	t_hoff = offsetof(HeapTupleHeaderData, t_bits);
 	if (tup_hasnull)
-		t_hoff += bitmaplen(nfields);
+		t_hoff += BITMAPLEN(nfields);
 	/* NOTE: composite type should never have OID */
 	t_hoff = MAXALIGN(t_hoff);
 

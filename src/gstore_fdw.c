@@ -604,7 +604,7 @@ gstore_fdw_writeout_pgstrom(Relation relation, gstoreLoadState *gs_lstate)
 	size_t			nitems = gs_lstate->nitems;
 	size_t			length;
 	size_t			usage;
-	size_t			i, j;
+	size_t			ncols, i, j;
 	pg_crc32		hash;
 	cl_int			cuda_dindex = (gcontext ? gcontext->cuda_dindex : -1);
 	dsm_segment	   *dsm_seg;
@@ -614,8 +614,8 @@ gstore_fdw_writeout_pgstrom(Relation relation, gstoreLoadState *gs_lstate)
 	GpuStoreChunk  *gs_chunk = NULL;
 	GpuStoreMap	   *gs_map = NULL;
 
-	length = usage = STROMALIGN(offsetof(kern_data_store,
-										 colmeta[tupdesc->natts]));
+	ncols = tupdesc->natts - (FirstLowInvalidHeapAttributeNumber + 1);
+	length = usage = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
 	for (j=0; j < tupdesc->natts; j++)
 	{
 		Form_pg_attribute	attr = tupdesc->attrs[j];
@@ -746,7 +746,7 @@ gstoreBeginForeignModify(ModifyTableState *mtstate,
 	MemoryContext	oldcxt;
 	int				pinning;
 	int				format;
-	cl_int			i;
+	cl_int			i, ncols;
 
 	gstore_fdw_read_options(RelationGetRelid(relation), &pinning, &format);
 	if (pinning >= 0)
@@ -763,12 +763,13 @@ gstoreBeginForeignModify(ModifyTableState *mtstate,
 				 errmsg("gstore_fdw: foreign table \"%s\" is not empty",
 						RelationGetRelationName(relation))));
 	/* state object */
+	ncols = tupdesc->natts - FirstLowInvalidHeapAttributeNumber;
 	gs_lstate = palloc0(sizeof(gstoreLoadState));
-	gs_lstate->cs_vl_dict = palloc0(sizeof(HTAB *) * tupdesc->natts);
-	gs_lstate->cs_extra_sz = palloc0(sizeof(size_t) * tupdesc->natts);
-	gs_lstate->cs_hasnull = palloc0(sizeof(bool) * tupdesc->natts);
-	gs_lstate->cs_nullmap = palloc0(sizeof(bits8 *) * tupdesc->natts);
-	gs_lstate->cs_values = palloc0(sizeof(void *) * tupdesc->natts);
+	gs_lstate->cs_vl_dict = palloc0(sizeof(HTAB *) * ncols);
+	gs_lstate->cs_extra_sz = palloc0(sizeof(size_t) * ncols);
+	gs_lstate->cs_hasnull = palloc0(sizeof(bool) * ncols);
+	gs_lstate->cs_nullmap = palloc0(sizeof(bits8 *) * ncols);
+	gs_lstate->cs_values = palloc0(sizeof(void *) * ncols);
 
 	gs_lstate->gcontext = gcontext;
 	gs_lstate->memcxt = AllocSetContextCreate(estate->es_query_cxt,

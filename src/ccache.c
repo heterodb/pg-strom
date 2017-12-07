@@ -69,16 +69,12 @@ typedef struct
 	Oid			table_oid;		/* OID of the cached table */
 	BlockNumber	block_nr;		/* block number where is head of the chunk */
 	size_t		length;			/* length of the ccache file */
+	cl_int		nattrs;			/* number of regular columns. KDS on ccache
+								 * file has more rows for system columns */
 	cl_int		refcnt;			/* reference counter */
-	TimestampTz	ctime;			/* time of the cache creation */
-								/* zero, if not constructed yet */
+	TimestampTz	ctime;			/* timestamp of the cache creation.
+								 * may be zero, if not constructed yet. */
 	TimestampTz	atime;			/* time of the latest access */
-#if 1
-	struct {
-		off_t	offset;
-		size_t	length;
-	} attrs[FLEXIBLE_ARRAY_MEMBER];
-#endif
 } ccacheChunk;
 
 /* static variables */
@@ -91,7 +87,6 @@ static DIR		   *ccache_base_dir = NULL;
 static ccacheState *ccache_state = NULL;		/* shmem */
 static cl_int		ccache_num_chunks;
 static cl_int		ccache_num_slots;
-static cl_int 		ccache_max_nattrs;			/* GUC (hidden) */
 static ccacheDatabase *ccache_database = NULL;	/* only builder */
 static ccacheBuilder  *ccache_builder = NULL;	/* only builder */
 static uint32		ccache_builder_generation = UINT_MAX;	/* only builder */
@@ -1101,6 +1096,9 @@ pgstrom_ccache_writeout_chunk(kern_data_store *kds,
 		size_t			offset;
 		size_t			nbytes;
 
+		if (!cs_values[j])
+			continue;
+
 		offset = ((char *)pos - (char *)kds);
 		Assert((offset & (MAXIMUM_ALIGNOF - 1)) == 0);
 		cmeta->va_offset = offset / MAXIMUM_ALIGNOF;
@@ -1158,7 +1156,7 @@ pgstrom_ccache_writeout_chunk(kern_data_store *kds,
 /*
  * ccache_preload_chunk - preload a chunk
  */
-static bool
+static size_t
 ccache_preload_chunk(ccacheChunk *cc_chunk,
 					 Relation srel,
 					 BlockNumber block_nr,
@@ -1177,6 +1175,7 @@ ccache_preload_chunk(ccacheChunk *cc_chunk,
 	bits8	  **cs_nullmap;
 	HTAB	  **cs_vl_dict;
 	size_t	   *cs_extra_sz;
+	int			ncols;
 	int			i, j, fdesc;
 	size_t		length;
 	char		fname[MAXPGPATH];
@@ -1191,7 +1190,7 @@ ccache_preload_chunk(ccacheChunk *cc_chunk,
 		{
 			if (vmbuffer != InvalidBuffer)
 				ReleaseBuffer(vmbuffer);
-			return false;
+			return 0;
 		}
 	}
 
@@ -1211,7 +1210,7 @@ ccache_preload_chunk(ccacheChunk *cc_chunk,
 			UnlockReleaseBuffer(buffer);
 			if (vmbuffer != InvalidBuffer)
 				ReleaseBuffer(vmbuffer);
-			return false;
+			return 0;
 		}
 		nrooms += PageGetMaxOffsetNumber(page);
 		memcpy(chunk_buffer + i * BLCKSZ, page, BLCKSZ);
@@ -1221,14 +1220,13 @@ ccache_preload_chunk(ccacheChunk *cc_chunk,
 
 	/*
 	 * read buffers and convert to the columnar format
-	 *
-	 * TODO: special columns for sysattrs
 	 */
-	cs_values = palloc0(sizeof(void *) * tupdesc->natts);
-	cs_hasnull = palloc0(sizeof(bool) * tupdesc->natts);
-	cs_nullmap = palloc0(sizeof(void *) * tupdesc->natts);
-	cs_vl_dict = palloc0(sizeof(HTAB *) * tupdesc->natts);
-	cs_extra_sz = palloc0(sizeof(size_t) * tupdesc->natts);
+	ncols = tupdesc->natts + (1 - FirstLowInvalidHeapAttributeNumber);
+	cs_values = palloc0(sizeof(void *) * ncols);
+	cs_hasnull = palloc0(sizeof(bool) * ncols);
+	cs_nullmap = palloc0(sizeof(void *) * ncols);
+	cs_vl_dict = palloc0(sizeof(HTAB *) * ncols);
+	cs_extra_sz = palloc0(sizeof(size_t) * ncols);
 	tup_values = palloc(sizeof(Datum) * tupdesc->natts);
 	tup_isnull = palloc(sizeof(bool) * tupdesc->natts);
 	for (j=0; j < tupdesc->natts; j++)
@@ -1246,6 +1244,18 @@ ccache_preload_chunk(ccacheChunk *cc_chunk,
 													attr->attalign) * nrooms);
 			cs_nullmap[j] = palloc0(BITMAPLEN(nrooms));
 		}
+	}
+	/* system columns (except for 'tableoid') */
+	for (j=FirstLowInvalidHeapAttributeNumber+1; j < 0; j++)
+	{
+		Form_pg_attribute attr = SystemAttributeDefinition(j, true);
+
+		if (j == TableOidAttributeNumber ||
+			(j == ObjectIdAttributeNumber && !tupdesc->tdhasoid))
+			continue;
+		cs_values[ncols + j] =
+			palloc0(att_align_nominal(attr->attlen,
+									  attr->attalign) * nrooms);
 	}
 
 	/*
@@ -1282,6 +1292,27 @@ ccache_preload_chunk(ccacheChunk *cc_chunk,
 									   cs_values,
 									   cs_vl_dict,
 									   cs_extra_sz);
+			/* extract system columns */
+			for (j=FirstLowInvalidHeapAttributeNumber+1; j < 0; j++)
+			{
+				Form_pg_attribute attr = SystemAttributeDefinition(j, true);
+				char   *base = cs_values[ncols + j];
+				Datum	datum;
+				bool	isnull;
+
+				if (j == TableOidAttributeNumber ||
+					(j == ObjectIdAttributeNumber && !tupdesc->tdhasoid))
+					continue;
+				datum = heap_getsysattr(&tup, j, tupdesc, &isnull);
+				Assert(!isnull);
+
+				base += att_align_nominal(attr->attlen,
+										  attr->attalign) * nitems;
+				if (!attr->attbyval)
+					memcpy(base, DatumGetPointer(datum), attr->attlen);
+				else
+					memcpy(base, &datum, attr->attlen);
+			}
 			nitems++;
 		}
 	}
@@ -1289,17 +1320,27 @@ ccache_preload_chunk(ccacheChunk *cc_chunk,
 	{
 		if (vmbuffer != InvalidBuffer)
 			ReleaseBuffer(vmbuffer);
-		return false;
+		return 0;
 	}
 
 	/*
 	 * write out to the ccache file
 	 */
-	length = STROMALIGN(offsetof(kern_data_store,
-								 colmeta[tupdesc->natts]));
-	for (j=0; j < tupdesc->natts; j++)
+	length = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
+	for (j=FirstLowInvalidHeapAttributeNumber+1; j < tupdesc->natts; j++)
 	{
-		Form_pg_attribute attr = tupdesc->attrs[j];
+		Form_pg_attribute attr;
+
+		if (j < 0)
+		{
+			if (j == TableOidAttributeNumber)
+				continue;
+			if (j == ObjectIdAttributeNumber && !tupdesc->tdhasoid)
+				continue;
+			attr = SystemAttributeDefinition(j, true);
+		}
+		else
+			attr = tupdesc->attrs[j];
 
 		if (attr->attlen < 0)
 		{
@@ -1352,7 +1393,7 @@ ccache_preload_chunk(ccacheChunk *cc_chunk,
 		elog(WARNING, "failed on munmap: %m");
 	if (vmbuffer != InvalidBuffer)
 		ReleaseBuffer(vmbuffer);
-	return true;
+	return length;
 }
 
 /*
@@ -1372,7 +1413,6 @@ ccache_builder_preload(cl_long *timeout)
 	char		   *chunk_buffer;
 
 	num_rels = ccache_relations_oid->dim1;
-	elog(LOG, "num_rels = %d", num_rels);
 	if (num_rels == 0)
 		return CCBUILDER_STATE__TRYLOAD;
 
@@ -1480,20 +1520,25 @@ ccache_builder_preload(cl_long *timeout)
 		{
 			BlockNumber	nblocks = Min(rel_nblocks[i] - block_nr,
 									  NBLOCKS_PER_CCACHE_CHUNK);
+			size_t		length;
+
 			SpinLockAcquire(&ccache_state->lock);
 			ccache_builder->table_oid = cc_chunk->table_oid;
 			ccache_builder->block_nr = cc_chunk->block_nr;
 			SpinLockRelease(&ccache_state->lock);
 
-			if (ccache_preload_chunk(cc_chunk,
-									 srel,
-									 block_nr,
-									 nblocks,
-									 strategy,
-									 chunk_buffer))
+			length = ccache_preload_chunk(cc_chunk,
+										  srel,
+										  block_nr,
+										  nblocks,
+										  strategy,
+										  chunk_buffer);
+			if (length > 0)
 			{
 				SpinLockAcquire(&ccache_state->active_locks[i]);
 				Assert(cc_chunk->refcnt == 1);
+				cc_chunk->length = length;
+				cc_chunk->nattrs = RelationGetNumberOfAttributes(srel);
 				cc_chunk->ctime = cc_chunk->atime = GetCurrentTimestamp();
 				SpinLockRelease(&ccache_state->active_locks[i]);
 			}
@@ -1818,8 +1863,7 @@ pgstrom_startup_ccache(void)
 								 builders[ccache_num_builders])) +
 		MAXALIGN(sizeof(slock_t) * ccache_num_slots) +
 		MAXALIGN(sizeof(dlist_head) * ccache_num_slots) +
-		MAXALIGN(offsetof(ccacheChunk,
-						  attrs[ccache_max_nattrs+1])) * ccache_num_chunks;
+		MAXALIGN(sizeof(ccacheChunk) * ccache_num_chunks);
 	ccache_state = ShmemInitStruct("Columnar Cache Shared Segment",
 								   required, &found);
 	if (found)
@@ -1848,9 +1892,7 @@ pgstrom_startup_ccache(void)
 	{
 		dlist_push_tail(&ccache_state->free_chunks_list,
 						&cc_chunk->chain);
-		cc_chunk = (ccacheChunk *)
-			((char *)cc_chunk +
-			 MAXALIGN(offsetof(ccacheChunk, attrs[ccache_max_nattrs+1])));
+		cc_chunk++;
 	}
 	/* fields for management of builder processes */
 	SpinLockInit(&ccache_state->lock);
@@ -1941,16 +1983,6 @@ pgstrom_init_ccache(void)
 							PGC_POSTMASTER,
 							GUC_UNIT_KB,
 							NULL, NULL, NULL);
-	DefineCustomIntVariable("pg_strom.ccache_max_nattrs",
-							"maximum number of attributes ccache can keep",
-							NULL,
-							&ccache_max_nattrs,
-							40,
-							20,
-							INT_MAX,
-							PGC_POSTMASTER,
-							GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL,
-							NULL, NULL, NULL);
 
 	ccache_max_size = (size_t)ccache_max_size_kb << 10;
 	ccache_num_slots = Max(ccache_max_size / CCACHE_CHUNK_SIZE, 300);
@@ -2015,8 +2047,7 @@ pgstrom_init_ccache(void)
 								 builders[ccache_num_builders])) +
 		MAXALIGN(sizeof(slock_t) * ccache_num_slots) +
 		MAXALIGN(sizeof(dlist_head) * ccache_num_slots) +
-		MAXALIGN(offsetof(ccacheChunk,
-						  attrs[ccache_max_nattrs+1])) * ccache_num_chunks;
+		MAXALIGN(sizeof(ccacheChunk) * ccache_num_chunks);
 	RequestAddinShmemSpace(required);
 
 	shmem_startup_next = shmem_startup_hook;

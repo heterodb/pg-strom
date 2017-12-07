@@ -281,7 +281,7 @@ init_kernel_data_store(kern_data_store *kds,
 					   int format,
 					   uint nrooms)
 {
-	int		i, attcacheoff;
+	int		i, j, attcacheoff;
 
 	memset(kds, 0, offsetof(kern_data_store, colmeta));
 	kds->length = length;
@@ -343,6 +343,31 @@ init_kernel_data_store(kern_data_store *kds,
 		 * !!don't forget to update pl_cuda.c if kern_colmeta layout would
 		 * be updated !!
 		 */
+	}
+
+	/*
+	 * columnar format has system attribute definition next to the regular
+	 * attributes. If no data array, keep va_offset/extra_sz zero.
+	 */
+	if (format == KDS_FORMAT_COLUMN)
+	{
+		kds->ncols += (1 - FirstLowInvalidHeapAttributeNumber);
+
+		for (j=FirstLowInvalidHeapAttributeNumber+1; j < 0; j++)
+		{
+			Form_pg_attribute attr = SystemAttributeDefinition(j, true);
+
+			i = kds->ncols + j;
+			kds->colmeta[i].attbyval = attr->attbyval;
+			kds->colmeta[i].attalign = typealign_get_width(attr->attalign);
+			kds->colmeta[i].attlen = attr->attlen;
+			kds->colmeta[i].attnum = j;
+			kds->colmeta[i].attcacheoff = -1;
+			kds->colmeta[i].atttypid = (cl_uint)attr->atttypid;
+			kds->colmeta[i].atttypmod = (cl_int)attr->atttypmod;
+			kds->colmeta[i].va_offset = 0;
+			kds->colmeta[i].extra_sz = 0;
+		}
 	}
 }
 
