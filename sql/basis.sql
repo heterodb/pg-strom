@@ -146,8 +146,30 @@ BEGIN
 END
 $$ LANGUAGE 'plpgsql';
 
+CREATE TYPE pgstrom.__pgstrom_ccache_info AS (
+    database_id  oid,
+    table_id     regclass,
+    block_nr     int,
+    length       bigint,
+    ctime        timestamp with time zone,
+    atime        timestamp with time zone
+);
+CREATE FUNCTION public.pgstrom_ccache_info()
+    RETURNS SETOF pgstrom.__pgstrom_ccache_info
+    AS 'MODULE_PATHNAME'
+    LANGUAGE C STRICT;
 
-
+CREATE TYPE pgstrom.__pgstrom_ccache_builder_info AS (
+    builder_id   int,
+    state        text,
+    database_id  oid,
+    table_id     regclass,
+    block_nr     int
+);
+CREATE FUNCTION public.pgstrom_ccache_builder_info()
+    RETURNS SETOF pgstrom.__pgstrom_ccache_builder_info
+    AS 'MODULE_PATHNAME'
+    LANGUAGE C STRICT;
 
 --
 -- Handlers for gstore_fdw extension

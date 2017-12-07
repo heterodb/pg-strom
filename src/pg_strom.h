@@ -1045,6 +1045,8 @@ extern void pgstrom_init_plcuda(void);
 /*
  * ccache.c
  */
+#define CCACHE_CHUNK_SIZE			(128L << 20)	/* 128MB */
+
 typedef struct
 {
 	cl_uint		offset;		/* to be used later */
@@ -1068,6 +1070,8 @@ extern void pgstrom_ccache_writeout_chunk(kern_data_store *kds,
 										  HTAB **cs_vl_dict,
 										  size_t *cs_extra_sz);
 extern Datum pgstrom_ccache_invalidator(PG_FUNCTION_ARGS);
+extern Datum pgstrom_ccache_info(PG_FUNCTION_ARGS);
+extern Datum pgstrom_ccache_builder_info(PG_FUNCTION_ARGS);
 extern void pgstrom_init_ccache(void);
 
 /*

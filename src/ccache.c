@@ -19,9 +19,10 @@
 
 #define CCACHE_MAX_NUM_DATABASES	100
 #define CCBUILDER_STATE__SHUTDOWN	0
-#define CCBUILDER_STATE__PRELOAD	1
-#define CCBUILDER_STATE__TRYLOAD	2
-#define CCBUILDER_STATE__SLEEP		3
+#define CCBUILDER_STATE__STARTUP	1
+#define CCBUILDER_STATE__PRELOAD	2
+#define CCBUILDER_STATE__TRYLOAD	3
+#define CCBUILDER_STATE__SLEEP		4
 typedef struct
 {
 	char		dbname[NAMEDATALEN];
@@ -33,6 +34,8 @@ typedef struct
 {
 	int			builder_id;
 	Oid			database_oid;
+	Oid			table_oid;
+	BlockNumber	block_nr;
 	int			state;		/* one of CCBUILDER_STATE__* */
 	Latch	   *latch;
 } ccacheBuilder;
@@ -56,7 +59,6 @@ typedef struct
 /*
  * ccacheChunk
  */
-#define CCACHE_CHUNK_SIZE			(128L << 20)	/* 128MB */
 #define NBLOCKS_PER_CCACHE_CHUNK	(CCACHE_CHUNK_SIZE / BLCKSZ)
 
 typedef struct
@@ -66,14 +68,17 @@ typedef struct
 	Oid			database_oid;	/* OID of the cached database */
 	Oid			table_oid;		/* OID of the cached table */
 	BlockNumber	block_nr;		/* block number where is head of the chunk */
+	size_t		length;			/* length of the ccache file */
 	cl_int		refcnt;			/* reference counter */
-	struct timeval ctime;		/* time of the cache creation */
+	TimestampTz	ctime;			/* time of the cache creation */
 								/* zero, if not constructed yet */
-	struct timeval atime;		/* time of the last access */
+	TimestampTz	atime;			/* time of the latest access */
+#if 1
 	struct {
 		off_t	offset;
 		size_t	length;
 	} attrs[FLEXIBLE_ARRAY_MEMBER];
+#endif
 } ccacheChunk;
 
 /* static variables */
@@ -419,7 +424,8 @@ refresh_ccache_source_relations(void)
 					has_row_delete &&
 					has_stmt_truncate)
 				{
-					elog(LOG, "ccache relation %s is target", get_rel_name(curr_relid));
+					elog(LOG, "ccache-builder%d added relation %s as source",
+						 ccache_builder->builder_id, get_rel_name(curr_relid));
 					hash_search(htab,
 								&curr_relid,
 								HASH_ENTER,
@@ -612,6 +618,194 @@ pgstrom_ccache_invalidator(PG_FUNCTION_ARGS)
 PG_FUNCTION_INFO_V1(pgstrom_ccache_invalidator);
 
 /*
+ * pgstrom_ccache_info
+ */
+Datum
+pgstrom_ccache_info(PG_FUNCTION_ARGS)
+{
+	FuncCallContext *fncxt;
+	ccacheChunk	   *cc_chunk;
+	List		   *cc_chunks_list = NIL;
+	HeapTuple		tuple;
+	bool			isnull[6];
+	Datum			values[6];
+
+	if (SRF_IS_FIRSTCALL())
+	{
+		TupleDesc		tupdesc;
+		MemoryContext	oldcxt;
+		dlist_iter		iter;
+		int				i;
+
+		fncxt = SRF_FIRSTCALL_INIT();
+		oldcxt = MemoryContextSwitchTo(fncxt->multi_call_memory_ctx);
+
+		tupdesc = CreateTemplateTupleDesc(6, false);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "database_id",
+						   OIDOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "table_id",
+						   REGCLASSOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 3, "block_nr",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 4, "length",
+						   INT8OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 5, "ctime",
+						   TIMESTAMPTZOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 6, "atime",
+						   TIMESTAMPTZOID, -1, 0);
+		fncxt->tuple_desc = BlessTupleDesc(tupdesc);
+		/* collect current cache state */
+		for (i=0; i < ccache_num_slots; i++)
+		{
+			SpinLockAcquire(&ccache_state->active_locks[i]);
+			PG_TRY();
+			{
+				dlist_foreach(iter, &ccache_state->active_slots[i])
+				{
+					ccacheChunk	   *temp
+						= dlist_container(ccacheChunk, chain, iter.cur);
+
+					if (temp->ctime == 0)
+						continue;
+					cc_chunk = palloc(sizeof(ccacheChunk));
+					memcpy(cc_chunk, temp, sizeof(ccacheChunk));
+					cc_chunks_list = lappend(cc_chunks_list, cc_chunk);
+				}
+			}
+			PG_CATCH();
+			{
+				SpinLockRelease(&ccache_state->active_locks[i]);
+				PG_RE_THROW();
+			}
+			PG_END_TRY();
+			SpinLockRelease(&ccache_state->active_locks[i]);
+		}
+		fncxt->user_fctx = cc_chunks_list;
+		MemoryContextSwitchTo(oldcxt);
+	}
+	fncxt = SRF_PERCALL_SETUP();
+	cc_chunks_list = fncxt->user_fctx;
+
+	if (cc_chunks_list == NIL)
+		SRF_RETURN_DONE(fncxt);
+	cc_chunk = linitial(cc_chunks_list);
+	fncxt->user_fctx = list_delete_ptr(cc_chunks_list, cc_chunk);
+
+	memset(isnull, 0, sizeof(isnull));
+	values[0] = ObjectIdGetDatum(cc_chunk->database_oid);
+	values[1] = ObjectIdGetDatum(cc_chunk->table_oid);
+	values[2] = Int32GetDatum(cc_chunk->block_nr);
+	values[3] = Int64GetDatum(cc_chunk->length);
+	values[4] = TimestampTzGetDatum(cc_chunk->ctime);
+	values[5] = TimestampTzGetDatum(cc_chunk->atime);
+
+	tuple = heap_form_tuple(fncxt->tuple_desc, values, isnull);
+
+	SRF_RETURN_NEXT(fncxt, HeapTupleGetDatum(tuple));
+}
+PG_FUNCTION_INFO_V1(pgstrom_ccache_info);
+
+/*
+ * pgstrom_ccache_builder_info
+ */
+Datum
+pgstrom_ccache_builder_info(PG_FUNCTION_ARGS)
+{
+	FuncCallContext *fncxt;
+	ccacheBuilder *builder;
+	List	   *builders_list = NIL;
+	Datum		values[5];
+	bool		isnull[5];
+	HeapTuple	tuple;
+
+	if (SRF_IS_FIRSTCALL())
+	{
+		TupleDesc		tupdesc;
+		MemoryContext	oldcxt;
+		int				i;
+
+		fncxt = SRF_FIRSTCALL_INIT();
+		oldcxt = MemoryContextSwitchTo(fncxt->multi_call_memory_ctx);
+
+		tupdesc = CreateTemplateTupleDesc(5, false);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "builder_id",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "state",
+						   TEXTOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 3, "database_id",
+						   OIDOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 4, "table_id",
+						   REGCLASSOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 5, "block_nr",
+						   INT4OID, -1, 0);
+		fncxt->tuple_desc = BlessTupleDesc(tupdesc);
+		/* collect current builder state */
+		SpinLockAcquire(&ccache_state->lock);
+		PG_TRY();
+		{
+			for (i=0; i < ccache_num_builders; i++)
+			{
+				builder = palloc(sizeof(ccacheBuilder));
+				memcpy(builder, &ccache_state->builders[i],
+					   sizeof(ccacheBuilder));
+				builders_list = lappend(builders_list, builder);
+			}
+		}
+		PG_CATCH();
+		{
+			SpinLockRelease(&ccache_state->lock);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+		SpinLockRelease(&ccache_state->lock);
+
+		fncxt->user_fctx = builders_list;
+		MemoryContextSwitchTo(oldcxt);
+	}
+	fncxt = SRF_PERCALL_SETUP();
+	builders_list = fncxt->user_fctx;
+
+	if (builders_list == NIL)
+		SRF_RETURN_DONE(fncxt);
+	builder = linitial(builders_list);
+	fncxt->user_fctx = list_delete_ptr(builders_list, builder);
+
+	memset(isnull, 0, sizeof(isnull));
+	values[0] = Int32GetDatum(builder->builder_id);
+	if (builder->state == CCBUILDER_STATE__SHUTDOWN)
+		values[1] = CStringGetTextDatum("shutdown");
+	else if (builder->state == CCBUILDER_STATE__STARTUP)
+		values[1] = CStringGetTextDatum("startup");
+	else if (builder->state == CCBUILDER_STATE__PRELOAD)
+		values[1] = CStringGetTextDatum("preload");
+	else if (builder->state == CCBUILDER_STATE__TRYLOAD)
+		values[1] = CStringGetTextDatum("tryload");
+	else if (builder->state == CCBUILDER_STATE__SLEEP)
+		values[1] = CStringGetTextDatum("sleep");
+	else
+		values[1] = CStringGetTextDatum("unknown");
+
+	if (OidIsValid(builder->database_oid))
+		values[2] = ObjectIdGetDatum(builder->database_oid);
+	else
+		isnull[2] = true;
+	if (OidIsValid(builder->table_oid))
+		values[3] = ObjectIdGetDatum(builder->table_oid);
+	else
+		isnull[3] = true;
+
+	if (builder->block_nr != InvalidBlockNumber)
+		values[4] = Int32GetDatum(builder->block_nr);
+	else
+		isnull[4] = true;
+
+	tuple = heap_form_tuple(fncxt->tuple_desc, values, isnull);
+
+	SRF_RETURN_NEXT(fncxt, HeapTupleGetDatum(tuple));
+}
+PG_FUNCTION_INFO_V1(pgstrom_ccache_builder_info);
+
+/*
  * ccache_builder_sigterm
  */
 static void
@@ -650,15 +844,14 @@ ccache_builder_fail_on_connectdb(int code, Datum arg)
 	generation = pg_atomic_read_u32(&ccache_state->generation);
 	if (generation == ccache_builder_generation)
 		ccache_database->invalid_database = true;
-	ccache_builder->state = CCBUILDER_STATE__SHUTDOWN;
 	SpinLockRelease(&ccache_state->lock);
 }
 
 /*
  * ccache_builder_connectdb
  */
-static void
-ccache_builder_connectdb(cl_int builder_id)
+static int
+ccache_builder_connectdb(void)
 {
 	int		i, j, ev;
 	uint32	generation;
@@ -673,7 +866,8 @@ ccache_builder_connectdb(cl_int builder_id)
 		ResetLatch(MyLatch);
 
 		if (ccache_builder_got_sigterm)
-			elog(ERROR, "terminating ccache builder%d", builder_id);
+			elog(ERROR, "terminating ccache-builder%d",
+				 ccache_builder->builder_id);
 
 		SpinLockAcquire(&ccache_state->lock);
 		for (i=0; i < ccache_state->num_databases; i++)
@@ -696,18 +890,16 @@ ccache_builder_connectdb(cl_int builder_id)
 			ccache_builder_generation = generation;
 			ccache_database = &ccache_state->databases[j];
 			strncpy(dbname, ccache_database->dbname, NAMEDATALEN);
-			ccache_builder->state = CCBUILDER_STATE__PRELOAD;
 			SpinLockRelease(&ccache_state->lock);
 			break;
 		}
 		else
 		{
 			/* no valid databases are configured right now */
-			ccache_builder->state = CCBUILDER_STATE__SLEEP;
 			SpinLockRelease(&ccache_state->lock);
 			if (!startup_log)
 			{
-				elog(LOG, "ccache builder%d is now started but not assigned to a particular database", builder_id);
+				elog(LOG, "ccache-builder%d: not assigned to a particular database", ccache_builder->builder_id);
 				startup_log = true;
 			}
 			ev = WaitLatch(MyLatch,
@@ -728,8 +920,14 @@ ccache_builder_connectdb(cl_int builder_id)
 		BackgroundWorkerInitializeConnection(dbname, NULL);
 	}
 	PG_END_ENSURE_ERROR_CLEANUP(ccache_builder_fail_on_connectdb, 0L);
-	elog(LOG, "ccache builder%d (gen=%u) now ready on database \"%s\"",
-		 builder_id, generation, dbname);
+	elog(LOG, "ccache-builder%d (gen=%u) now ready on database \"%s\"",
+		 ccache_builder->builder_id, generation, dbname);
+	SpinLockAcquire(&ccache_state->lock);
+	ccache_builder->database_oid = MyDatabaseId;
+	ccache_builder->state = CCBUILDER_STATE__PRELOAD;
+	SpinLockRelease(&ccache_state->lock);
+
+	return CCBUILDER_STATE__PRELOAD;
 }
 
 /*
@@ -1174,6 +1372,7 @@ ccache_builder_preload(cl_long *timeout)
 	char		   *chunk_buffer;
 
 	num_rels = ccache_relations_oid->dim1;
+	elog(LOG, "num_rels = %d", num_rels);
 	if (num_rels == 0)
 		return CCBUILDER_STATE__TRYLOAD;
 
@@ -1223,7 +1422,7 @@ ccache_builder_preload(cl_long *timeout)
 		if (dlist_is_empty(&ccache_state->free_chunks_list))
 		{
 			SpinLockRelease(&ccache_state->free_chunks_lock);
-			elog(LOG, "ccache builder%d: no free ccacheChunk",
+			elog(LOG, "ccache-builder%d: no free ccacheChunk",
 				 ccache_builder->builder_id);
 			break;
 		}
@@ -1239,8 +1438,8 @@ ccache_builder_preload(cl_long *timeout)
 												  cc_chunk->table_oid,
 												  cc_chunk->block_nr);
 		cc_chunk->refcnt = 1;
-		memset(&cc_chunk->ctime, 0, sizeof(struct timeval));
-		memset(&cc_chunk->atime, 0, sizeof(struct timeval));
+		cc_chunk->ctime = 0;
+		cc_chunk->atime = 0;
 
 		/* ensure this chunk is not cached yet */
 		i = cc_chunk->hash % ccache_num_slots;
@@ -1281,6 +1480,10 @@ ccache_builder_preload(cl_long *timeout)
 		{
 			BlockNumber	nblocks = Min(rel_nblocks[i] - block_nr,
 									  NBLOCKS_PER_CCACHE_CHUNK);
+			SpinLockAcquire(&ccache_state->lock);
+			ccache_builder->table_oid = cc_chunk->table_oid;
+			ccache_builder->block_nr = cc_chunk->block_nr;
+			SpinLockRelease(&ccache_state->lock);
 
 			if (ccache_preload_chunk(cc_chunk,
 									 srel,
@@ -1291,9 +1494,7 @@ ccache_builder_preload(cl_long *timeout)
 			{
 				SpinLockAcquire(&ccache_state->active_locks[i]);
 				Assert(cc_chunk->refcnt == 1);
-				gettimeofday(&cc_chunk->ctime, NULL);
-				memcpy(&cc_chunk->atime, &cc_chunk->ctime,
-					   sizeof(struct timeval));
+				cc_chunk->ctime = cc_chunk->atime = GetCurrentTimestamp();
 				SpinLockRelease(&ccache_state->active_locks[i]);
 			}
 			else
@@ -1310,6 +1511,10 @@ ccache_builder_preload(cl_long *timeout)
 								&cc_chunk->chain);
 				SpinLockRelease(&ccache_state->free_chunks_lock);
 			}
+			SpinLockAcquire(&ccache_state->lock);
+			ccache_builder->table_oid = InvalidOid;
+			ccache_builder->block_nr = InvalidBlockNumber;
+			SpinLockRelease(&ccache_state->lock);
 		}
 		PG_CATCH();
 		{
@@ -1324,6 +1529,11 @@ ccache_builder_preload(cl_long *timeout)
 			dlist_push_head(&ccache_state->free_chunks_list,
 							&cc_chunk->chain);
 			SpinLockRelease(&ccache_state->free_chunks_lock);
+			/* revert builder state */
+			SpinLockAcquire(&ccache_state->lock);
+			ccache_builder->table_oid = InvalidOid;
+			ccache_builder->block_nr = InvalidBlockNumber;
+			SpinLockRelease(&ccache_state->lock);
 			PG_RE_THROW();
 		}
 		PG_END_TRY();
@@ -1354,6 +1564,21 @@ ccache_builder_tryload(cl_long *timeout)
 }
 
 /*
+ * ccache_builder_main_on_shutdown
+ */
+static void
+ccache_builder_main_on_shutdown(int code, Datum arg)
+{
+	SpinLockAcquire(&ccache_state->lock);
+    ccache_builder->database_oid = InvalidOid;
+	ccache_builder->table_oid = InvalidOid;
+	ccache_builder->block_nr = InvalidBlockNumber;
+    ccache_builder->state = CCBUILDER_STATE__SHUTDOWN;
+    ccache_builder->latch = NULL;
+    SpinLockRelease(&ccache_state->lock);
+}
+
+/*
  * ccache_builder_main 
  */
 void
@@ -1368,34 +1593,33 @@ ccache_builder_main(Datum arg)
 	pqsignal(SIGHUP, ccache_builder_sighup);
 	BackgroundWorkerUnblockSignals();
 
-	CurrentResourceOwner = ResourceOwnerCreate(NULL, "CCache Builder");
+	CurrentResourceOwner = ResourceOwnerCreate(NULL, "ccache builder");
 	CurrentMemoryContext = AllocSetContextCreate(TopMemoryContext,
-												 "CCache Builder Context",
+												 "ccache builder context",
 												 ALLOCSET_DEFAULT_SIZES);
 	ccache_builder = &ccache_state->builders[builder_id];
 	SpinLockAcquire(&ccache_state->lock);
-	ccache_builder->builder_id = builder_id;
 	ccache_builder->database_oid = InvalidOid;
-	ccache_builder->state = curr_state = CCBUILDER_STATE__PRELOAD;
+	ccache_builder->state = curr_state = CCBUILDER_STATE__STARTUP;
 	ccache_builder->latch = MyLatch;
 	SpinLockRelease(&ccache_state->lock);
 
-	PG_TRY();
+	PG_ENSURE_ERROR_CLEANUP(ccache_builder_main_on_shutdown, 0);
 	{
 		/* connect to one of the databases */
-		ccache_builder_connectdb(builder_id);
+		curr_state = ccache_builder_connectdb();
 		for (;;)
 		{
 			long		timeout = 0L;
 
 			if (ccache_builder_got_sigterm)
-				elog(ERROR, "terminating ccache builder%d", builder_id);
+				elog(ERROR, "terminating ccache-builder%d", builder_id);
 			ResetLatch(MyLatch);
 
 			/* pg_strom.ccache_databases updated? */
 			if (ccache_builder_generation !=
 				pg_atomic_read_u32(&ccache_state->generation))
-				elog(ERROR,"restarting ccache builder%d", builder_id);
+				elog(ERROR,"restarting ccache-builder%d", builder_id);
 
 			/*
 			 * ---------------------
@@ -1448,17 +1672,8 @@ ccache_builder_main(Datum arg)
 			SpinLockRelease(&ccache_state->lock);
 		}
 	}
-	PG_CATCH();
-	{
-		SpinLockAcquire(&ccache_state->lock);
-		ccache_builder->database_oid = InvalidOid;
-		ccache_builder->state = CCBUILDER_STATE__SHUTDOWN;
-		ccache_builder->latch = NULL;
-		SpinLockRelease(&ccache_state->lock);
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-	elog(FATAL, "Bug? ccache builder%d should not exit normaly", builder_id);
+	PG_END_ENSURE_ERROR_CLEANUP(ccache_builder_main_on_shutdown, 0);
+	elog(FATAL, "Bug? ccache-builder%d should not exit normaly", builder_id);
 }
 
 /*
@@ -1646,10 +1861,18 @@ pgstrom_startup_ccache(void)
 		elog(ERROR, "Bug? failed on parse pg_strom.ccache_databases");
 	guc_assign_ccache_databases(ccache_startup_databases, extra);
 
-	/* cleanup ccache files if no database is configured */
 	SpinLockAcquire(&ccache_state->lock);
+	for (i=0; i < ccache_num_builders; i++)
+	{
+		ccache_state->builders[i].builder_id = i;
+		ccache_state->builders[i].state = CCBUILDER_STATE__SHUTDOWN;
+		ccache_state->builders[i].database_oid = InvalidOid;
+		ccache_state->builders[i].table_oid = InvalidOid;
+		ccache_state->builders[i].block_nr = InvalidBlockNumber;
+	}
 	num_databases = ccache_state->num_databases;
 	SpinLockRelease(&ccache_state->lock);
+	/* cleanup ccache files if no database is configured */
 	if (num_databases == 0)
 	{
 		struct dirent *dent;
@@ -1776,7 +1999,7 @@ pgstrom_init_ccache(void)
 	{
 		memset(&worker, 0, sizeof(BackgroundWorker));
 		snprintf(worker.bgw_name, sizeof(worker.bgw_name),
-				 "PG-Strom CCache Builder[%d]", i+1);
+				 "PG-Strom ccache-builder%d", i+1);
 		worker.bgw_flags = BGWORKER_SHMEM_ACCESS
 			| BGWORKER_BACKEND_DATABASE_CONNECTION;
 		worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
