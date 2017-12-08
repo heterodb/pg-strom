@@ -1161,11 +1161,11 @@ ccache_preload_chunk(ccacheChunk *cc_chunk,
 					 Relation srel,
 					 BlockNumber block_nr,
 					 BlockNumber nblocks,
+					 Buffer *p_vmbuffer,
 					 BufferAccessStrategy strategy,
 					 char *chunk_buffer)
 {
 	TupleDesc	tupdesc = RelationGetDescr(srel);
-	Buffer		vmbuffer = InvalidBuffer;
 	size_t		nrooms = 0;
 	size_t		nitems = 0;
 	Datum	   *tup_values;
@@ -1186,12 +1186,8 @@ ccache_preload_chunk(ccacheChunk *cc_chunk,
 	Assert(nblocks <= NBLOCKS_PER_CCACHE_CHUNK);
 	for (i=0; i < nblocks; i++)
 	{
-		if (!VM_ALL_VISIBLE(srel, block_nr+i, &vmbuffer))
-		{
-			if (vmbuffer != InvalidBuffer)
-				ReleaseBuffer(vmbuffer);
-			return 0;
-		}
+		if (!VM_ALL_VISIBLE(srel, block_nr+i, p_vmbuffer))
+			return false;
 	}
 
 	/* load and lock buffers */
@@ -1208,9 +1204,7 @@ ccache_preload_chunk(ccacheChunk *cc_chunk,
 		if (!PageIsAllVisible(page))
 		{
 			UnlockReleaseBuffer(buffer);
-			if (vmbuffer != InvalidBuffer)
-				ReleaseBuffer(vmbuffer);
-			return 0;
+			return false;
 		}
 		nrooms += PageGetMaxOffsetNumber(page);
 		memcpy(chunk_buffer + i * BLCKSZ, page, BLCKSZ);
@@ -1317,11 +1311,7 @@ ccache_preload_chunk(ccacheChunk *cc_chunk,
 		}
 	}
 	if (nitems == 0)
-	{
-		if (vmbuffer != InvalidBuffer)
-			ReleaseBuffer(vmbuffer);
-		return 0;
-	}
+		return false;
 
 	/*
 	 * write out to the ccache file
@@ -1391,9 +1381,39 @@ ccache_preload_chunk(ccacheChunk *cc_chunk,
 		elog(WARNING, "failed on munmap: %m");
 	if (close(fdesc) != 0)
 		elog(WARNING, "failed on munmap: %m");
-	if (vmbuffer != InvalidBuffer)
-		ReleaseBuffer(vmbuffer);
-	return length;
+
+	/* ensure all-visible flags under the lock */
+	i = cc_chunk->hash % ccache_num_slots;
+	SpinLockAcquire(&ccache_state->active_locks[i]);
+	PG_TRY();
+	{
+		for (j=0; j < nblocks; j++)
+		{
+			if (!VM_ALL_VISIBLE(srel, block_nr+j, p_vmbuffer))
+			{
+				if (unlinkat(dirfd(ccache_base_dir), fname, 0) != 0)
+					elog(WARNING, "failed on unlinkat('%s'): %m", fname);
+				length = 0;
+				break;
+			}
+		}
+	}
+	PG_CATCH();
+	{
+		SpinLockRelease(&ccache_state->active_locks[i]);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	/* OK, ccache is now ready */
+	if (length > 0)
+	{
+		cc_chunk->length = length;
+		cc_chunk->nattrs = RelationGetNumberOfAttributes(srel);
+		cc_chunk->ctime = cc_chunk->atime = GetCurrentTimestamp();
+	}
+	SpinLockRelease(&ccache_state->active_locks[i]);
+
+	return true;
 }
 
 /*
@@ -1407,9 +1427,12 @@ ccache_builder_preload(cl_long *timeout)
 	BlockNumber	   *rel_nblocks;
 	Relation	   *relations;
 	Relation		srel;
+	Buffer			vmbuffer = InvalidBuffer;
 	BufferAccessStrategy strategy;
 	MemoryContext	preload_cxt, oldcxt;
-	cl_int			i, num_rels, num_open_rels;
+	cl_int			num_rels;
+	cl_int			num_open_rels;
+	cl_int			i;
 	char		   *chunk_buffer;
 
 	num_rels = ccache_relations_oid->dim1;
@@ -1508,41 +1531,28 @@ ccache_builder_preload(cl_long *timeout)
 			SpinLockRelease(&ccache_state->free_chunks_lock);
 			continue;
 		}
-		else
-		{
-			dlist_push_head(&ccache_state->active_slots[i],
-							&cc_chunk->chain);
-			SpinLockRelease(&ccache_state->active_locks[i]);
-		}
+		dlist_push_head(&ccache_state->active_slots[i],
+						&cc_chunk->chain);
+		SpinLockRelease(&ccache_state->active_locks[i]);
 
 		/* run preload of this chunk */
 		PG_TRY();
 		{
 			BlockNumber	nblocks = Min(rel_nblocks[i] - block_nr,
 									  NBLOCKS_PER_CCACHE_CHUNK);
-			size_t		length;
 
 			SpinLockAcquire(&ccache_state->lock);
 			ccache_builder->table_oid = cc_chunk->table_oid;
 			ccache_builder->block_nr = cc_chunk->block_nr;
 			SpinLockRelease(&ccache_state->lock);
 
-			length = ccache_preload_chunk(cc_chunk,
-										  srel,
-										  block_nr,
-										  nblocks,
-										  strategy,
-										  chunk_buffer);
-			if (length > 0)
-			{
-				SpinLockAcquire(&ccache_state->active_locks[i]);
-				Assert(cc_chunk->refcnt == 1);
-				cc_chunk->length = length;
-				cc_chunk->nattrs = RelationGetNumberOfAttributes(srel);
-				cc_chunk->ctime = cc_chunk->atime = GetCurrentTimestamp();
-				SpinLockRelease(&ccache_state->active_locks[i]);
-			}
-			else
+			if (!ccache_preload_chunk(cc_chunk,
+									  srel,
+									  block_nr,
+									  nblocks,
+									  &vmbuffer,
+									  strategy,
+									  chunk_buffer))
 			{
 				/* detach from the active */
 				SpinLockAcquire(&ccache_state->active_locks[i]);
@@ -1568,12 +1578,14 @@ ccache_builder_preload(cl_long *timeout)
 			Assert(cc_chunk->refcnt == 1);
 			dlist_delete(&cc_chunk->chain);
 			SpinLockRelease(&ccache_state->active_locks[i]);
+
 			/* return to the free list */
 			SpinLockAcquire(&ccache_state->free_chunks_lock);
 			memset(cc_chunk, 0, sizeof(ccacheChunk));
 			dlist_push_head(&ccache_state->free_chunks_list,
 							&cc_chunk->chain);
 			SpinLockRelease(&ccache_state->free_chunks_lock);
+
 			/* revert builder state */
 			SpinLockAcquire(&ccache_state->lock);
 			ccache_builder->table_oid = InvalidOid;
@@ -1583,6 +1595,8 @@ ccache_builder_preload(cl_long *timeout)
 		}
 		PG_END_TRY();
 	}
+	if (vmbuffer != InvalidBuffer)
+		ReleaseBuffer(vmbuffer);
 	MemoryContextSwitchTo(oldcxt);
 	MemoryContextDelete(preload_cxt);
 	pfree(strategy);

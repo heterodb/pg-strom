@@ -822,7 +822,7 @@ KDS_COLUMN_GET_VALUE(kern_data_store *kds,
 									   __ldg(&cmeta->attlen));
 		if (extra_sz > 0)
 		{
-			Assert(MAXALIGN(BITMAPLEN(nitems)) == extra_sz);
+			Assert(MAXALIGN(BITMAPLEN(__ldg(&kds->nitems))) == extra_sz);
 			nullmap = values + MAXALIGN(unitsz * __ldg(&kds->nitems));
 			if (att_isnull(row_index, nullmap))
 				return NULL;
