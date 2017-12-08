@@ -1069,6 +1069,9 @@ extern void pgstrom_ccache_writeout_chunk(kern_data_store *kds,
 										  void **cs_values,
 										  HTAB **cs_vl_dict,
 										  size_t *cs_extra_sz);
+
+extern bool RelationCanUseColumnarCache(Relation relation);
+
 extern Datum pgstrom_ccache_invalidator(PG_FUNCTION_ARGS);
 extern Datum pgstrom_ccache_info(PG_FUNCTION_ARGS);
 extern Datum pgstrom_ccache_builder_info(PG_FUNCTION_ARGS);

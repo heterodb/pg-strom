@@ -522,13 +522,57 @@ ccache_callback_on_procoid(Datum arg, int cacheid, uint32 hashvalue)
 	ccache_callback_on_reloid(0, RELOID, 0);
 }
 
+/*
+ * RelationCanUseColumnarCache
+ */
+bool
+RelationCanUseColumnarCache(Relation relation)
+{
+	TriggerDesc *trigdesc = relation->trigdesc;
+	bool	has_row_insert = false;
+	bool	has_row_update = false;
+	bool	has_row_delete = false;
+	bool	has_stmt_truncate = false;
+	int		i;
 
+	if (!trigdesc ||
+		!trigdesc->trig_insert_after_row ||
+		!trigdesc->trig_update_after_row ||
+		!trigdesc->trig_delete_after_row ||
+		!trigdesc->trig_truncate_after_statement)
+		return false;
 
+	for (i=0; i < trigdesc->numtriggers; i++)
+	{
+		Trigger	   *trigger = &trigdesc->triggers[i];
 
-
-
-
-
+		if (trigger->tgfoid != ccache_invalidator_oid(true))
+			continue;
+		if (trigger->tgenabled != TRIGGER_FIRES_ALWAYS)
+			continue;
+		if (TRIGGER_FOR_AFTER(trigger->tgtype))
+		{
+			if (TRIGGER_FOR_ROW(trigger->tgtype))
+			{
+				if (TRIGGER_FOR_INSERT(trigger->tgtype))
+					has_row_insert = true;
+				if (TRIGGER_FOR_UPDATE(trigger->tgtype))
+					has_row_update = true;
+				if (TRIGGER_FOR_DELETE(trigger->tgtype))
+					has_row_delete = true;
+			}
+			else
+			{
+				if (TRIGGER_FOR_TRUNCATE(trigger->tgtype))
+					has_stmt_truncate = true;
+			}
+		}
+	}
+	return (has_row_insert &&
+			has_row_update &&
+			has_row_delete &&
+			has_stmt_truncate);
+}
 
 /*
  * pgstrom_ccache_invalidator
