@@ -45,6 +45,7 @@ typedef struct
 									 * should not update this field */
 	char		   *kern_source;
 	int				extra_flags;
+	List		   *ccache_refs;	/* referenced columns */
 	List		   *used_params;	/* referenced Const/Param */
 } GpuPreAggInfo;
 
@@ -68,6 +69,7 @@ form_gpupreagg_info(CustomScan *cscan, GpuPreAggInfo *gpa_info)
 	privs = lappend(privs, gpa_info->tlist_fallback);
 	privs = lappend(privs, makeString(gpa_info->kern_source));
 	privs = lappend(privs, makeInteger(gpa_info->extra_flags));
+	privs = lappend(privs, gpa_info->ccache_refs);
 	exprs = lappend(exprs, gpa_info->used_params);
 
 	cscan->custom_private = privs;
@@ -97,6 +99,7 @@ deform_gpupreagg_info(CustomScan *cscan)
 	gpa_info->tlist_fallback = list_nth(privs, pindex++);
 	gpa_info->kern_source = strVal(list_nth(privs, pindex++));
 	gpa_info->extra_flags = intVal(list_nth(privs, pindex++));
+	gpa_info->ccache_refs = list_nth(privs, pindex++);
 	gpa_info->used_params = list_nth(exprs, eindex++);
 
 	return gpa_info;
@@ -2194,6 +2197,9 @@ PlanGpuPreAggPath(PlannerInfo *root,
 	GpuPreAggInfo  *gpa_info;
 	PathTarget	   *target_device;
 	List		   *tlist_dev = NIL;
+	Index			outer_scanrelid = 0;
+	Bitmapset	   *varattnos = NULL;
+	List		   *ccache_refs = NIL;
 	Plan		   *outer_plan = NULL;
 	List		   *outer_tlist = NIL;
 	ListCell	   *lc;
@@ -2201,15 +2207,18 @@ PlanGpuPreAggPath(PlannerInfo *root,
 	char		   *kern_source;
 	codegen_context	context;
 
+	Assert(list_length(best_path->custom_private) == 2);
+	gpa_info = linitial(best_path->custom_private);
+	target_device = lsecond(best_path->custom_private);
+
 	Assert(list_length(custom_plans) <= 1);
-	if (custom_plans != NIL)
+	if (custom_plans == NIL)
+		outer_scanrelid = gpa_info->outer_scanrelid;
+	else
 	{
 		outer_plan = linitial(custom_plans);
 		outer_tlist = outer_plan->targetlist;
 	}
-	Assert(list_length(best_path->custom_private) == 2);
-	gpa_info = linitial(best_path->custom_private);
-	target_device = lsecond(best_path->custom_private);
 
 	/*
 	 * Transform expressions in the @target_device to usual TLE form
@@ -2219,6 +2228,9 @@ PlanGpuPreAggPath(PlannerInfo *root,
 	{
 		TargetEntry *tle;
 		Node	   *node = lfirst(lc);
+
+		if (outer_scanrelid)
+			pull_varattnos(node, outer_scanrelid, &varattnos);
 
 		Assert(!best_path->path.param_info);
 		tle = makeTargetEntry((Expr *)node,
@@ -2241,11 +2253,16 @@ PlanGpuPreAggPath(PlannerInfo *root,
 	 */
 	if (gpa_info->outer_quals)
 	{
-		List	   *outer_vars
-			= pull_var_clause((Node *)gpa_info->outer_quals,
-							  PVC_RECURSE_AGGREGATES |
-							  PVC_RECURSE_WINDOWFUNCS |
-							  PVC_INCLUDE_PLACEHOLDERS);
+		List	   *outer_vars;
+
+		if (outer_scanrelid)
+			pull_varattnos((Node *)gpa_info->outer_quals,
+						   outer_scanrelid, &varattnos);
+
+		outer_vars = pull_var_clause((Node *)gpa_info->outer_quals,
+									 PVC_RECURSE_AGGREGATES |
+									 PVC_RECURSE_WINDOWFUNCS |
+									 PVC_INCLUDE_PLACEHOLDERS);
 		foreach (lc, outer_vars)
 		{
 			TargetEntry *tle;
@@ -2260,6 +2277,14 @@ PlanGpuPreAggPath(PlannerInfo *root,
 				tlist_dev = lappend(tlist_dev, tle);
 			}
 		}
+	}
+
+	for (index = bms_first_member(varattnos);
+		 index >= 0;
+		 index = bms_next_member(varattnos, index))
+	{
+		ccache_refs = lappend_int(ccache_refs, index +
+								  FirstLowInvalidHeapAttributeNumber);
 	}
 
 	/* setup CustomScan node */
@@ -2285,6 +2310,7 @@ PlanGpuPreAggPath(PlannerInfo *root,
 									gpa_info);
 	gpa_info->kern_source = kern_source;
 	gpa_info->extra_flags = context.extra_flags;
+	gpa_info->ccache_refs = ccache_refs;
 	gpa_info->used_params = context.used_params;
 
 	form_gpupreagg_info(cscan, gpa_info);
@@ -3678,6 +3704,7 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 	pgstromInitGpuTaskState(&gpas->gts,
 							gpas->gts.gcontext,
 							GpuTaskKind_GpuPreAgg,
+							gpa_info->ccache_refs,
 							gpa_info->used_params,
 							estate);
 	gpas->gts.cb_next_task       = gpupreagg_next_task;

@@ -272,6 +272,7 @@ struct GpuTaskState
 	GpuTaskKind		task_kind;		/* one of GpuTaskKind_* */
 	ProgramId		program_id;		/* CUDA Program (to be acquired) */
 	kern_parambuf  *kern_params;	/* Const/Param buffer */
+	Relids			ccache_refs;	/* referenced attributed, if ccache */
 	bool			scan_done;		/* True, if no more rows to read */
 
 	/* fields for outer scan */
@@ -763,6 +764,7 @@ CHECK_WORKER_TERMINATION(void)
 extern void pgstromInitGpuTaskState(GpuTaskState *gts,
 									GpuContext *gcontext,
 									GpuTaskKind task_kind,
+									List *ccache_refs,
 									List *used_params,
 									EState *estate);
 extern TupleTableSlot *pgstromExecGpuTaskState(GpuTaskState *gts);

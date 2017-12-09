@@ -48,6 +48,7 @@ typedef struct
 	int			num_rels;
 	char	   *kern_source;
 	int			extra_flags;
+	List	   *ccache_refs;
 	List	   *used_params;
 	Expr	   *outer_quals;
 	double		outer_ratio;
@@ -80,6 +81,7 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 	privs = lappend(privs, makeInteger(gj_info->num_rels));
 	privs = lappend(privs, makeString(pstrdup(gj_info->kern_source)));
 	privs = lappend(privs, makeInteger(gj_info->extra_flags));
+	privs = lappend(privs, gj_info->ccache_refs);
 	exprs = lappend(exprs, gj_info->used_params);
 	exprs = lappend(exprs, gj_info->outer_quals);
 	privs = lappend(privs, pmakeFloat(gj_info->outer_ratio));
@@ -118,6 +120,7 @@ deform_gpujoin_info(CustomScan *cscan)
 	gj_info->num_rels = intVal(list_nth(privs, pindex++));
 	gj_info->kern_source = strVal(list_nth(privs, pindex++));
 	gj_info->extra_flags = intVal(list_nth(privs, pindex++));
+	gj_info->ccache_refs = list_nth(privs, pindex++);
 	gj_info->used_params = list_nth(exprs, eindex++);
 	gj_info->outer_quals = list_nth(exprs, eindex++);
 	gj_info->outer_ratio = floatVal(list_nth(privs, pindex++));
@@ -1496,14 +1499,17 @@ PlanGpuJoinPath(PlannerInfo *root,
 				List *custom_plans)
 {
 	GpuJoinPath	   *gjpath = (GpuJoinPath *) best_path;
+	Index			outer_relid = gjpath->outer_relid;
 	GpuJoinInfo		gj_info;
 	CustomScan	   *cscan;
 	codegen_context	context;
 	char		   *kern_source;
 	Plan		   *outer_plan;
 	ListCell	   *lc;
+	Bitmapset	   *varattnos = NULL;
+	List		   *ccache_refs = NULL;
 	double			outer_nrows;
-	int				i;
+	int				i, j;
 
 	Assert(gjpath->num_rels + 1 == list_length(custom_plans));
 	outer_plan = linitial(custom_plans);
@@ -1522,6 +1528,9 @@ PlanGpuJoinPath(PlannerInfo *root,
 	gj_info.outer_startup_cost = outer_plan->startup_cost;
 	gj_info.outer_total_cost = outer_plan->total_cost;
 	gj_info.num_rels = gjpath->num_rels;
+
+	if (outer_relid)
+		pull_varattnos((Node *)tlist, outer_relid, &varattnos);
 
 	outer_nrows = outer_plan->plan_rows;
 	for (i=0; i < gjpath->num_rels; i++)
@@ -1599,6 +1608,13 @@ PlanGpuJoinPath(PlannerInfo *root,
 		gj_info.hash_outer_keys = lappend(gj_info.hash_outer_keys,
 										  hash_outer_keys);
 		outer_nrows = gjpath->inners[i].join_nrows;
+
+		if (outer_relid)
+		{
+			pull_varattnos((Node *)hash_outer_keys, outer_relid, &varattnos);
+			pull_varattnos((Node *)join_quals, outer_relid, &varattnos);
+			pull_varattnos((Node *)other_quals, outer_relid, &varattnos);
+		}
 	}
 
 	/*
@@ -1606,10 +1622,19 @@ PlanGpuJoinPath(PlannerInfo *root,
 	 * device executable qualifiers, GpuJoin can handle the relation scan
 	 * for better i/o performance. Elsewhere, call the child outer node.
 	 */
-	if (gjpath->outer_relid)
+	if (outer_relid)
 	{
-		cscan->scan.scanrelid = gjpath->outer_relid;
+		cscan->scan.scanrelid = outer_relid;
 		gj_info.outer_quals = gjpath->outer_quals;
+		pull_varattnos((Node *)gjpath->outer_quals, outer_relid, &varattnos);
+
+		for (i = bms_first_member(varattnos);
+			 i >= 0;
+			 i = bms_next_member(varattnos, i))
+		{
+			j = i + FirstLowInvalidHeapAttributeNumber;
+			ccache_refs = lappend_int(ccache_refs, j);
+		}
 	}
 	else
 	{
@@ -1646,6 +1671,7 @@ PlanGpuJoinPath(PlannerInfo *root,
 						   DEVKERNEL_NEEDS_GPUJOIN |
 						   DEVKERNEL_NEEDS_DYNPARA |
 						   context.extra_flags);
+	gj_info.ccache_refs = ccache_refs;
 	gj_info.used_params = context.used_params;
 
 	form_gpujoin_info(cscan, &gj_info);
@@ -1789,6 +1815,7 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	pgstromInitGpuTaskState(&gjs->gts,
 							gjs->gts.gcontext,
 							GpuTaskKind_GpuJoin,
+							gj_info->ccache_refs,
 							gj_info->used_params,
 							estate);
 	gjs->gts.cb_next_tuple		= gpujoin_next_tuple;

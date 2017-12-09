@@ -1443,6 +1443,7 @@ plcuda_exec_begin(HeapTuple protup, FunctionCallInfo fcinfo)
 	plts->gts.gcontext = gcontext;
 	plts->gts.task_kind = GpuTaskKind_PL_CUDA;
 	plts->gts.kern_params = NULL;
+	plts->gts.ccache_refs = NULL;
 	plts->gts.cb_process_task = plcuda_process_task;
 	plts->gts.cb_release_task = plcuda_release_task;
 	dlist_init(&plts->gts.ready_tasks);

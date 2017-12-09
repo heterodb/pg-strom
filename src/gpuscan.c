@@ -36,6 +36,7 @@ typedef struct {
 	cl_uint		proj_row_extra;	/* extra requirements if row format */
 	cl_uint		proj_slot_extra;/* extra requirements if slot format */
 	cl_uint		nrows_per_block;/* estimated tuple density per block */
+	List	   *ccache_refs;	/* attributed to be referenced by ccache */
 	List	   *used_params;
 	List	   *dev_quals;		/* implicitly-ANDed device quals */
 } GpuScanInfo;
@@ -51,6 +52,7 @@ form_gpuscan_info(CustomScan *cscan, GpuScanInfo *gs_info)
 	privs = lappend(privs, makeInteger(gs_info->proj_row_extra));
 	privs = lappend(privs, makeInteger(gs_info->proj_slot_extra));
 	privs = lappend(privs, makeInteger(gs_info->nrows_per_block));
+	privs = lappend(privs, gs_info->ccache_refs);
 	exprs = lappend(exprs, gs_info->used_params);
 	exprs = lappend(exprs, gs_info->dev_quals);
 
@@ -72,6 +74,7 @@ deform_gpuscan_info(CustomScan *cscan)
 	gs_info->proj_row_extra = intVal(list_nth(privs, pindex++));
 	gs_info->proj_slot_extra = intVal(list_nth(privs, pindex++));
 	gs_info->nrows_per_block = intVal(list_nth(privs, pindex++));
+	gs_info->ccache_refs = list_nth(privs, pindex++);
 	gs_info->used_params = list_nth(exprs, eindex++);
 	gs_info->dev_quals = list_nth(exprs, eindex++);
 
@@ -1537,9 +1540,12 @@ PlanGpuScanPath(PlannerInfo *root,
 	List		   *dev_quals = NIL;
 	Expr		   *dev_quals_expr = NULL;
 	List		   *tlist_dev = NIL;
+	List		   *ccache_refs = NIL;
 	ListCell	   *cell;
+	Bitmapset	   *varattnos = NULL;
 	cl_int			proj_row_extra = 0;
 	cl_int			proj_slot_extra = 0;
+	cl_int			i, j;
 	StringInfoData	kern;
 	StringInfoData	source;
 	codegen_context	context;
@@ -1604,6 +1610,18 @@ PlanGpuScanPath(PlannerInfo *root,
 	appendStringInfoString(&source, kern.data);
 	pfree(kern.data);
 
+	/* pickup referenced attributes */
+	pull_varattnos((Node *)dev_quals, baserel->relid, &varattnos);
+	pull_varattnos((Node *)host_quals, baserel->relid, &varattnos);
+	pull_varattnos((Node *)tlist, baserel->relid, &varattnos);
+	for (i = bms_first_member(varattnos);
+		 i >= 0;
+		 i = bms_next_member(varattnos, i))
+	{
+		j = i + FirstLowInvalidHeapAttributeNumber;
+		ccache_refs = lappend_int(ccache_refs, j);
+	}
+
 	/*
 	 * Construction of GpuScanPlan node; on top of CustomPlan node
 	 */
@@ -1623,6 +1641,7 @@ PlanGpuScanPath(PlannerInfo *root,
 		DEVKERNEL_NEEDS_DYNPARA | DEVKERNEL_NEEDS_GPUSCAN;
 	gs_info->proj_row_extra = proj_row_extra;
 	gs_info->proj_slot_extra = proj_slot_extra;
+	gs_info->ccache_refs = ccache_refs;
 	gs_info->used_params = context.used_params;
 	gs_info->dev_quals = dev_quals;
 	form_gpuscan_info(cscan, gs_info);
@@ -1874,6 +1893,7 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	pgstromInitGpuTaskState(&gss->gts,
 							gcontext,
 							GpuTaskKind_GpuScan,
+							gs_info->ccache_refs,
 							gs_info->used_params,
 							estate);
 	gss->gts.cb_next_task   = gpuscan_next_task;

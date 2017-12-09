@@ -189,17 +189,67 @@ void
 pgstromInitGpuTaskState(GpuTaskState *gts,
 						GpuContext *gcontext,
 						GpuTaskKind task_kind,
+						List *ccache_refs_list,
 						List *used_params,
 						EState *estate)
 {
+	Relation		relation = gts->css.ss.ss_currentRelation;
 	ExprContext	   *econtext = gts->css.ss.ps.ps_ExprContext;
 	CustomScan	   *cscan = (CustomScan *)(gts->css.ss.ps.plan);
+	Relids			ccache_refs = NULL;
+	ListCell	   *lc;
 
 	Assert(gts->gcontext == gcontext);
 	gts->task_kind = task_kind;
 	gts->program_id = INVALID_PROGRAM_ID;	/* to be set later */
 	gts->kern_params = construct_kern_parambuf(used_params, econtext,
 											   cscan->custom_scan_tlist);
+	if (relation && RelationCanUseColumnarCache(relation))
+	{
+		foreach (lc, ccache_refs_list)
+		{
+			int		i, anum = lfirst_int(lc);
+
+			if (anum == InvalidAttrNumber)
+			{
+				TupleDesc	tupdesc = RelationGetDescr(relation);
+
+				for (i=0; i < tupdesc->natts; i++)
+				{
+					Form_pg_attribute	attr = tupdesc->attrs[i];
+
+					if (attr->attisdropped)
+						continue;
+					anum = attr->attnum - FirstLowInvalidHeapAttributeNumber;
+					ccache_refs = bms_add_member(ccache_refs, anum);
+				}
+			}
+			else
+			{
+				anum -= FirstLowInvalidHeapAttributeNumber;
+				ccache_refs = bms_add_member(ccache_refs, anum);
+			}
+		}
+	}
+#if 0
+	if (!ccache_refs)
+		elog(INFO, "ccache_refs = NULL");
+	else
+	{
+		int		i, j;
+
+		for (i = bms_first_member(ccache_refs);
+			 i >= 0;
+			 i = bms_next_member(ccache_refs, i))
+		{
+			j = i + FirstLowInvalidHeapAttributeNumber;
+			elog(INFO, "ccache_refs: [%s].[%s]",
+				 RelationGetRelationName(relation),
+				 get_attname(RelationGetRelid(relation), j));
+		}
+	}
+#endif
+	gts->ccache_refs = ccache_refs;
 	gts->scan_done = false;
 
 	gts->outer_bulk_exec = false;

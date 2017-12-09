@@ -413,8 +413,6 @@ gstoreIterateForeignScan(ForeignScanState *node)
 	Snapshot		snapshot = estate->es_snapshot;
 	kern_data_store *kds;
 	cl_long			i, j;
-	Datum			datum;
-	cl_bool			isnull;
 
 	ExecClearTuple(slot);
 	if (!gss_state->gs_chunk)
@@ -433,9 +431,27 @@ gstoreIterateForeignScan(ForeignScanState *node)
 
 	for (j=0; j < kds->ncols; j++)
 	{
-		datum = KDS_COLUMN_GET_VALUE(kds, j, i, &isnull);
-		slot->tts_isnull[j] = isnull;
-		slot->tts_values[j] = datum;
+		void   *addr = KDS_COLUMN_GET_VALUE(kds, j, i);
+		int		attlen = kds->colmeta[j].attlen;
+
+		if (!addr)
+			slot->tts_isnull[j] = true;
+		else
+		{
+			slot->tts_isnull[j] = false;
+			if (!kds->colmeta[j].attbyval)
+				slot->tts_values[j] = PointerGetDatum(addr);
+			else if (attlen == sizeof(cl_char))
+				slot->tts_values[j] = CharGetDatum(*((cl_char *)addr));
+			else if (attlen == sizeof(cl_short))
+				slot->tts_values[j] = Int16GetDatum(*((cl_short *)addr));
+			else if (attlen == sizeof(cl_int))
+				slot->tts_values[j] = Int32GetDatum(*((cl_int *)addr));
+			else if (attlen == sizeof(cl_long))
+				slot->tts_values[j] = Int64GetDatum(*((cl_long *)addr));
+			else
+				elog(ERROR, "unexpected attlen: %d", attlen);
+		}
 	}
 	ExecMaterializeSlot(slot);
 	return slot;
