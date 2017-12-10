@@ -480,7 +480,6 @@ pg_numeric_vref(kern_data_store *kds,
 	return pg_numeric_datum_ref(kcxt,datum);
 }
 
-/* pg_numeric_vstore() is same as template */
 STROMCL_VARLENA_VARSTORE_TEMPLATE(numeric)
 
 STATIC_FUNCTION(pg_numeric_t)

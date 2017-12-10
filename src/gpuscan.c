@@ -3018,8 +3018,9 @@ gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 
 	if (pds_dst)
 	{
-		if (extra_size > 0)
+		if (nitems_out > 0)
 		{
+			Assert(extra_size > 0);
 			offset = pds_dst->kds.length - extra_size;
 			rc = cuMemPrefetchAsync((CUdeviceptr)(&pds_dst->kds) + offset,
 									extra_size,
@@ -3027,14 +3028,15 @@ gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 									CU_STREAM_PER_THREAD);
 			if (rc != CUDA_SUCCESS)
 				werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
+
+			length = KERN_DATA_STORE_HEAD_LENGTH(&pds_dst->kds);
+			rc = cuMemPrefetchAsync((CUdeviceptr)(&pds_dst->kds),
+									length + sizeof(cl_uint) * nitems_out,
+									CU_DEVICE_CPU,
+									CU_STREAM_PER_THREAD);
+			if (rc != CUDA_SUCCESS)
+				werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
 		}
-		length = KERN_DATA_STORE_HEAD_LENGTH(&pds_dst->kds);
-		rc = cuMemPrefetchAsync((CUdeviceptr)(&pds_dst->kds),
-								length + sizeof(cl_uint) * nitems_out,
-								CU_DEVICE_CPU,
-								CU_STREAM_PER_THREAD);
-		if (rc != CUDA_SUCCESS)
-			werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
 	}
 	else
 	{

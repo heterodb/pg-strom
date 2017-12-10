@@ -2769,8 +2769,17 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 
 					appendStringInfo(
 						&temp,
-						"  pg_%s_vstore(dst_isnull+%d,dst_values+%d,addr);\n",
-						dtype->type_name, tle->resno - 1, tle->resno - 1);
+						"  if (!addr)\n"
+						"    dst_isnull[%d] = true;\n"
+						"  else\n"
+						"  {\n"
+						"    dst_isnull[%d] = false;\n"
+						"    dst_values[%d] = pg_%s_as_datum(addr);\n"
+						"  }\n",
+						tle->resno - 1,
+						tle->resno - 1,
+						tle->resno - 1,
+						dtype->type_name);
 				}
 				appendStringInfoString(&body, temp.data);
                 resetStringInfo(&temp);

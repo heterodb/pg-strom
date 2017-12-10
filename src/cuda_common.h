@@ -965,6 +965,17 @@ kern_get_datum(kern_data_store *kds,
 	{														\
 		void  *datum = kern_get_datum(kds,colidx,rowidx);	\
 		return pg_##NAME##_datum_ref(kcxt,datum);			\
+	}														\
+															\
+	STATIC_INLINE(cl_uint)									\
+	pg_##NAME##_datum_store(kern_context *kcxt,				\
+							void *extra_buf,				\
+							pg_##NAME##_t datum)			\
+	{														\
+		if (datum.isnull)									\
+			return 0;										\
+		*((BASE *)extra_buf) = datum.value;					\
+		return sizeof(BASE);								\
 	}
 
 #define STROMCL_SIMPLE_PARAMREF_TEMPLATE(NAME,BASE)			\
@@ -1040,16 +1051,17 @@ kern_get_datum(kern_data_store *kds,
 	{														\
 		void  *datum = kern_get_datum(kds,colidx,rowidx);	\
 		return pg_##NAME##_datum_ref(kcxt,datum);			\
-	}
-
-#define STROMCL_INDIRECT_VARSTORE_TEMPLATE(NAME,BASE)		\
-	STATIC_INLINE(void)										\
-	pg_##NAME##_vstore(cl_bool *isnull,						\
-					   Datum *value,						\
-					   void *addr)							\
+	}														\
+															\
+	STATIC_INLINE(cl_uint)									\
+	pg_##NAME##_datum_store(kern_context *kcxt,				\
+							void *extra_buf,				\
+							pg_##NAME##_t datum)			\
 	{														\
-		*isnull = !addr;									\
-		*value = PointerGetDatum(addr);						\
+		if (datum.isnull)									\
+			return 0;										\
+		memcpy(extra_buf, &datum.value, sizeof(BASE));		\
+		return sizeof(BASE);								\
 	}
 
 #define STROMCL_INDIRECT_PARAMREF_TEMPLATE(NAME,BASE)		\
@@ -1117,24 +1129,39 @@ pg_common_comp_crc32(const cl_uint *crc32_table,
 		return hash;											\
 	}
 
-#define STROMCL_SIMPLE_TYPE_TEMPLATE(NAME,BASE)		\
-	STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME,BASE)		\
-	STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE)		\
-	STROMCL_SIMPLE_PARAMREF_TEMPLATE(NAME,BASE)		\
-	STROMCL_SIMPLE_NULLTEST_TEMPLATE(NAME)			\
-	STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(NAME,BASE)
+#define STROMCL_SIMPLE_TYPE_TEMPLATE(NAME,BASE)			\
+	STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME,BASE)			\
+	STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE)			\
+	STROMCL_SIMPLE_PARAMREF_TEMPLATE(NAME,BASE)			\
+	STROMCL_SIMPLE_NULLTEST_TEMPLATE(NAME)				\
+	STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(NAME,BASE)		\
+	STATIC_INLINE(Datum)								\
+	pg_##NAME##_as_datum(void *addr)					\
+	{													\
+		BASE	val = *((BASE *) addr);					\
+		Datum	mask = ~0L;								\
+		if (sizeof(BASE) < sizeof(Datum))				\
+			mask &= (1L << (8 * sizeof(BASE))) - 1;		\
+		return ((Datum)val & mask);						\
+	}
+
+#define STROMCL_SIMPLE_FLOAT_TYPE_TEMPLATE(NAME,BASE)	\
+	STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME,BASE)			\
+	STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE)			\
+	STROMCL_SIMPLE_PARAMREF_TEMPLATE(NAME,BASE)			\
+	STROMCL_SIMPLE_NULLTEST_TEMPLATE(NAME)				\
+	STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(NAME,BASE)		\
 
 #define STROMCL_INDIRECT_TYPE_TEMPLATE(NAME,BASE)	\
 	STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME,BASE)		\
 	STROMCL_INDIRECT_VARREF_TEMPLATE(NAME,BASE)		\
-	STROMCL_INDIRECT_VARSTORE_TEMPLATE(NAME,BASE)	\
 	STROMCL_INDIRECT_PARAMREF_TEMPLATE(NAME,BASE)	\
 	STROMCL_SIMPLE_NULLTEST_TEMPLATE(NAME)          \
 	STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(NAME,BASE)	\
 	STATIC_INLINE(Datum)							\
-	pg_##NAME##_to_datum(BASE *p_value)				\
+	pg_##NAME##_as_datum(void *addr)				\
 	{												\
-		return PointerGetDatum(p_value);			\
+		return PointerGetDatum(addr);				\
 	}
 
 /* pg_bool_t */
@@ -1145,13 +1172,6 @@ STATIC_INLINE(Datum)
 pg_bool_to_datum(cl_bool value)
 {
 	return (Datum)(value ? true : false);
-}
-STATIC_INLINE(void)
-pg_bool_vstore(cl_bool *isnull, Datum *value, void *addr)
-{
-	*isnull = !addr;
-	if (addr)
-		*value = (Datum)(*((cl_bool *)addr) ? 1 : 0);
 }
 #endif
 
@@ -1164,13 +1184,6 @@ pg_int2_to_datum(cl_short value)
 {
 	return (Datum)(((Datum) value) & 0x0000ffffUL);
 }
-STATIC_INLINE(void)
-pg_int2_vstore(cl_bool *isnull, Datum *value, void *addr)
-{
-	*isnull = !addr;
-	if (addr)
-		*value = (Datum) SET_2_BYTES(*((cl_short *)addr));
-}
 #endif
 
 /* pg_int4_t */
@@ -1181,13 +1194,6 @@ STATIC_INLINE(Datum)
 pg_int4_to_datum(cl_int value)
 {
 	return (Datum)(((Datum) value) & 0xffffffffUL);
-}
-STATIC_INLINE(void)
-pg_int4_vstore(cl_bool *isnull, Datum *value, void *addr)
-{
-	*isnull = !addr;
-	if (addr)
-		*value = (Datum) SET_4_BYTES(*((cl_int *)addr));
 }
 #endif
 
@@ -1200,48 +1206,39 @@ pg_int8_to_datum(cl_long value)
 {
 	return (Datum)(value);
 }
-STATIC_INLINE(void)
-pg_int8_vstore(cl_bool *isnull, Datum *value, void *addr)
-{
-	*isnull = !addr;
-	if (addr)
-		*value = (Datum)SET_8_BYTES(*((cl_long *)addr));
-}
 #endif
 
 /* pg_float4_t */
 #ifndef PG_FLOAT4_TYPE_DEFINED
 #define PG_FLOAT4_TYPE_DEFINED
-STROMCL_SIMPLE_TYPE_TEMPLATE(float4, cl_float)
+STROMCL_SIMPLE_FLOAT_TYPE_TEMPLATE(float4, cl_float)
 STATIC_INLINE(Datum)
 pg_float4_to_datum(cl_float value)
 {
 	return (Datum)((Datum)__float_as_int(value) & 0xffffffffUL);
 }
-STATIC_INLINE(void)
-pg_float4_vstore(cl_bool *isnull, Datum *value, void *addr)
+STATIC_INLINE(Datum)
+pg_float4_as_datum(void *addr)
 {
-	*isnull = !addr;
-	if (addr)
-		*value = (Datum)SET_4_BYTES(__float_as_int(*((cl_float *)addr)));
+	cl_float	val = *((cl_float *)addr);
+	return ((Datum)__float_as_int(val) & 0xffffffff);
 }
 #endif
 
 /* pg_float8_t */
 #ifndef PG_FLOAT8_TYPE_DEFINED
 #define PG_FLOAT8_TYPE_DEFINED
-STROMCL_SIMPLE_TYPE_TEMPLATE(float8, cl_double)
+STROMCL_SIMPLE_FLOAT_TYPE_TEMPLATE(float8, cl_double)
 STATIC_INLINE(Datum)
 pg_float8_to_datum(cl_double value)
 {
 	return (Datum)__double_as_longlong(value);
 }
-STATIC_INLINE(void)
-pg_float8_vstore(cl_bool *isnull, Datum *value, void *addr)
+STATIC_INLINE(Datum)
+pg_float8_as_datum(void *addr)
 {
-	*isnull = !addr;
-	if (addr)
-		*value = (Datum)SET_8_BYTES(__double_as_longlong(*((cl_double *)addr)));
+	cl_double	val = *((cl_double *)addr);
+	return ((Datum)__double_as_longlong(val));
 }
 #endif
 
@@ -1718,10 +1715,20 @@ pg_varlena_comp_crc32(const cl_uint *crc32_table,
 	{														\
 		void  *datum = kern_get_datum(kds,colidx,rowidx);	\
 		return pg_varlena_datum_ref(kcxt,datum);			\
+	}														\
+															\
+	STATIC_INLINE(cl_uint)									\
+	pg_##NAME##_datum_store(kern_context *kcxt,				\
+							void *extra_buf,				\
+							pg_##NAME##_t datum)			\
+	{														\
+		cl_uint		vl_size;								\
+		if (datum.isnull)									\
+			return 0;										\
+		vl_size = VARSIZE_ANY(datum.value);					\
+		memcpy(extra_buf, datum.value, vl_size);			\
+		return vl_size;										\
 	}
-
-#define STROMCL_VARLENA_VARSTORE_TEMPLATE(NAME)				\
-	STROMCL_INDIRECT_VARSTORE_TEMPLATE(NAME,varlena *)
 
 #define STROMCL_VARLENA_PARAMREF_TEMPLATE(NAME)						\
 	STATIC_INLINE(pg_##NAME##_t)									\
@@ -1753,7 +1760,6 @@ pg_varlena_comp_crc32(const cl_uint *crc32_table,
 #define STROMCL_VARLENA_TYPE_TEMPLATE(NAME)			\
 	STROMCL_VARLENA_DATATYPE_TEMPLATE(NAME)			\
 	STROMCL_VARLENA_VARREF_TEMPLATE(NAME)			\
-	STROMCL_VARLENA_VARSTORE_TEMPLATE(NAME)			\
 	STROMCL_VARLENA_PARAMREF_TEMPLATE(NAME)			\
 	STROMCL_VARLENA_NULLTEST_TEMPLATE(NAME)			\
 	STROMCL_VARLENA_COMP_CRC32_TEMPLATE(NAME)		\
@@ -1761,6 +1767,11 @@ pg_varlena_comp_crc32(const cl_uint *crc32_table,
 	pg_##NAME##_to_datum(varlena *value)			\
 	{												\
 		return PointerGetDatum(value);				\
+	}												\
+	STATIC_INLINE(Datum)							\
+	pg_##NAME##_as_datum(void *addr)				\
+	{												\
+		return PointerGetDatum(addr);				\
 	}
 
 /* pg_bytea_t */

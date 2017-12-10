@@ -28,13 +28,6 @@ pg_money_to_datum(cl_long value)
 {
 	return pg_int8_to_datum(value);
 }
-STATIC_INLINE(void)
-pg_money_vstore(cl_bool *isnull, Datum *value, void *addr)
-{
-	*isnull = !addr;
-	if (addr)
-		*value = (Datum)SET_8_BYTES(*((cl_long *)addr));
-}
 #endif
 
 /*
