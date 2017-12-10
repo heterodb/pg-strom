@@ -1102,7 +1102,7 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 			appendStringInfo(
 				&temp,
 				"    if (!expr_%u_v.isnull)\n"
-				"      tup_values[%d] = pg_%s_to_datum(expr_%u_v.value);\n",
+				"      tup_values[%d] = pg_%s_as_datum(&expr_%u_v.value);\n",
 				tle->resno,
 				tle->resno - 1,
 				dtype->type_name,
@@ -1802,18 +1802,21 @@ assign_gpuscan_session_info(StringInfo buf, GpuTaskState *gts)
 	if (pgstrom_plan_is_gpuscan((Plan *) cscan))
 	{
 		GpuScanState   *gss = (GpuScanState *)gts;
+		TupleTableSlot *slot = gts->css.ss.ss_ScanTupleSlot;
+		TupleDesc		tupdesc = slot->tts_tupleDescriptor;
 
+		appendStringInfo(
+			buf,
+			"#define GPUSCAN_KERNEL_FUNCTION_ENABLED        1\n");
 		if (gss->dev_projection)
-		{
-			TupleTableSlot *slot = gts->css.ss.ss_ScanTupleSlot;
-			TupleDesc       tupdesc = slot->tts_tupleDescriptor;
-
 			appendStringInfo(
 				buf,
-				"#define GPUSCAN_DEVICE_PROJECTION          1\n"
-				"#define GPUSCAN_DEVICE_PROJECTION_NFIELDS  %d\n",
-				tupdesc->natts);
-		}
+				"#define GPUSCAN_DEVICE_PROJECTION          1\n");
+		appendStringInfo(
+			buf,
+			"#define GPUSCAN_DEVICE_PROJECTION_NFIELDS  %d\n",
+			tupdesc->natts);
+
 		if (gss->dev_quals)
 		{
 			appendStringInfoString(

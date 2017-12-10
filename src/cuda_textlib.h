@@ -44,7 +44,7 @@ bpchar_truelen(struct varlena *arg)
 #define PG_BPCHAR_TYPE_DEFINED
 STROMCL_VARLENA_DATATYPE_TEMPLATE(bpchar)
 STROMCL_VARLENA_VARREF_TEMPLATE(bpchar)
-STROMCL_VARLENA_VARSTORE_TEMPLATE(bpchar)
+//STROMCL_VARLENA_VARSTORE_TEMPLATE(bpchar)
 STROMCL_VARLENA_PARAMREF_TEMPLATE(bpchar)
 STROMCL_VARLENA_NULLTEST_TEMPLATE(bpchar)
 /* pg_bpchar_comp_crc32 has to be defined with own way */
@@ -59,12 +59,6 @@ pg_bpchar_comp_crc32(const cl_uint *crc32_table,
 									bpchar_truelen(datum.value));
 	}
 	return hash;
-}
-
-STATIC_INLINE(Datum)
-pg_bpchar_to_datum(varlena *value)
-{
-	return PointerGetDatum(value);
 }
 #endif
 

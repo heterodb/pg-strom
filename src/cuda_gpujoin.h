@@ -697,7 +697,8 @@ gpujoin_projection_row(kern_context *kcxt,
 			((char *)kds_dst + kds_dst->length - dest_offset);
 
 		row_index[dest_index] = kds_dst->length - dest_offset;
-		form_kern_heaptuple(kcxt, kds_dst, tupitem, NULL,
+		form_kern_heaptuple(kcxt, kds_dst, tupitem,
+							NULL, NULL,
 							tup_values, tup_isnull, NULL);
 	}
 	if (__syncthreads_count(kcxt->e.errcode) > 0)

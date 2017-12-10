@@ -1669,7 +1669,6 @@ PlanGpuJoinPath(PlannerInfo *root,
 	gj_info.kern_source = kern_source;
 	gj_info.extra_flags = (DEVKERNEL_NEEDS_GPUSCAN |
 						   DEVKERNEL_NEEDS_GPUJOIN |
-						   DEVKERNEL_NEEDS_DYNPARA |
 						   context.extra_flags);
 	gj_info.ccache_refs = ccache_refs;
 	gj_info.used_params = context.used_params;
@@ -3293,7 +3292,7 @@ gpujoin_codegen_projection(StringInfo source,
 				"  temp.%s_v = %s;\n"
 				"  tup_isnull[%d] = temp.%s_v.isnull;\n"
 				"  if (!temp.%s_v.isnull)\n"
-				"    tup_values[%d] = pg_%s_to_datum(temp.%s_v.value);\n"
+				"    tup_values[%d] = pg_%s_as_datum(&temp.%s_v.value);\n"
 				"  use_extra_buf[%d] = false;\n",
 				dtype->type_name,
 				pgstrom_codegen_expression((Node *)tle->expr, context),

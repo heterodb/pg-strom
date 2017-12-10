@@ -480,6 +480,9 @@ pg_numeric_vref(kern_data_store *kds,
 	return pg_numeric_datum_ref(kcxt,datum);
 }
 
+//FIXME:
+//If pg_numeric_t is just a varlena pointer, do just a copy
+//Elsewhere cl_ulong -> varlena numeric transfer is needed
 STROMCL_VARLENA_VARSTORE_TEMPLATE(numeric)
 
 STATIC_FUNCTION(pg_numeric_t)
@@ -508,12 +511,6 @@ pg_numeric_param(kern_context *kcxt,
 STROMCL_SIMPLE_NULLTEST_TEMPLATE(numeric)
 /* CRC32 calculation function */
 STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(numeric,cl_long)
-/* NUMERIC internal to Datum */
-STATIC_INLINE(Datum)
-pg_numeric_to_datum(cl_ulong value)
-{
-	return (Datum) value;
-}
 
 /* to avoid conflicts with auto-generated data type */
 #define PG_NUMERIC_TYPE_DEFINED

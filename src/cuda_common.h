@@ -1138,11 +1138,15 @@ pg_common_comp_crc32(const cl_uint *crc32_table,
 	STATIC_INLINE(Datum)								\
 	pg_##NAME##_as_datum(void *addr)					\
 	{													\
-		BASE	val = *((BASE *) addr);					\
-		Datum	mask = ~0L;								\
-		if (sizeof(BASE) < sizeof(Datum))				\
-			mask &= (1L << (8 * sizeof(BASE))) - 1;		\
-		return ((Datum)val & mask);						\
+		BASE	value = *((BASE *) addr);				\
+		if (sizeof(BASE) == sizeof(cl_char))			\
+			return SET_1_BYTE(value);					\
+		else if (sizeof(BASE) == sizeof(cl_short))		\
+			return SET_2_BYTES(value);					\
+		else if (sizeof(BASE) == sizeof(cl_int))		\
+			return SET_4_BYTES(value);					\
+		else											\
+			return SET_8_BYTES(value);					\
 	}
 
 #define STROMCL_SIMPLE_FLOAT_TYPE_TEMPLATE(NAME,BASE)	\
@@ -1168,55 +1172,30 @@ pg_common_comp_crc32(const cl_uint *crc32_table,
 #ifndef PG_BOOL_TYPE_DEFINED
 #define PG_BOOL_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(bool, cl_bool)
-STATIC_INLINE(Datum)
-pg_bool_to_datum(cl_bool value)
-{
-	return (Datum)(value ? true : false);
-}
 #endif
 
 /* pg_int2_t */
 #ifndef PG_INT2_TYPE_DEFINED
 #define PG_INT2_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(int2, cl_short)
-STATIC_INLINE(Datum)
-pg_int2_to_datum(cl_short value)
-{
-	return (Datum)(((Datum) value) & 0x0000ffffUL);
-}
 #endif
 
 /* pg_int4_t */
 #ifndef PG_INT4_TYPE_DEFINED
 #define PG_INT4_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(int4, cl_int)
-STATIC_INLINE(Datum)
-pg_int4_to_datum(cl_int value)
-{
-	return (Datum)(((Datum) value) & 0xffffffffUL);
-}
 #endif
 
 /* pg_int8_t */
 #ifndef PG_INT8_TYPE_DEFINED
 #define PG_INT8_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(int8, cl_long)
-STATIC_INLINE(Datum)
-pg_int8_to_datum(cl_long value)
-{
-	return (Datum)(value);
-}
 #endif
 
 /* pg_float4_t */
 #ifndef PG_FLOAT4_TYPE_DEFINED
 #define PG_FLOAT4_TYPE_DEFINED
 STROMCL_SIMPLE_FLOAT_TYPE_TEMPLATE(float4, cl_float)
-STATIC_INLINE(Datum)
-pg_float4_to_datum(cl_float value)
-{
-	return (Datum)((Datum)__float_as_int(value) & 0xffffffffUL);
-}
 STATIC_INLINE(Datum)
 pg_float4_as_datum(void *addr)
 {
@@ -1229,11 +1208,6 @@ pg_float4_as_datum(void *addr)
 #ifndef PG_FLOAT8_TYPE_DEFINED
 #define PG_FLOAT8_TYPE_DEFINED
 STROMCL_SIMPLE_FLOAT_TYPE_TEMPLATE(float8, cl_double)
-STATIC_INLINE(Datum)
-pg_float8_to_datum(cl_double value)
-{
-	return (Datum)__double_as_longlong(value);
-}
 STATIC_INLINE(Datum)
 pg_float8_as_datum(void *addr)
 {
@@ -1763,11 +1737,6 @@ pg_varlena_comp_crc32(const cl_uint *crc32_table,
 	STROMCL_VARLENA_PARAMREF_TEMPLATE(NAME)			\
 	STROMCL_VARLENA_NULLTEST_TEMPLATE(NAME)			\
 	STROMCL_VARLENA_COMP_CRC32_TEMPLATE(NAME)		\
-	STATIC_INLINE(Datum)							\
-	pg_##NAME##_to_datum(varlena *value)			\
-	{												\
-		return PointerGetDatum(value);				\
-	}												\
 	STATIC_INLINE(Datum)							\
 	pg_##NAME##_as_datum(void *addr)				\
 	{												\

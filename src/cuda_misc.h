@@ -24,10 +24,6 @@
 #define PG_MONEY_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(money, cl_long);
 STATIC_INLINE(Datum)
-pg_money_to_datum(cl_long value)
-{
-	return pg_int8_to_datum(value);
-}
 #endif
 
 /*

@@ -209,9 +209,6 @@ gpuscan_quals_eval_column(kern_context *kcxt,
 	return false;
 }
 
-/*
- * forward declaration of the function to be generated on the fly
- */
 STATIC_FUNCTION(void)
 gpuscan_projection(kern_context *kcxt,
 				   kern_data_store *kds_src,
@@ -232,6 +229,7 @@ gpuscan_projection_column(kern_context *kcxt,
 						  cl_char *tup_extra)
 {}
 
+#ifdef GPUSCAN_KERNEL_REQUIRED
 /*
  * gpuscan_exec_quals_row - GpuScan logic for KDS_FORMAT_ROW
  */
@@ -408,7 +406,9 @@ gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
 	}
 	kern_writeback_error_status(&kgpuscan->kerror, kcxt.e);
 }
+#endif	/* GPUSCAN_KERNEL_REQUIRED */
 
+#ifdef GPUSCAN_KERNEL_REQUIRED
 /*
  * gpuscan_exec_quals_block - GpuScan logic for KDS_FORMAT_BLOCK
  */
@@ -634,7 +634,9 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 	/* write back error code to the host */
 	kern_writeback_error_status(&kgpuscan->kerror, kcxt.e);
 }
+#endif	/* GPUSCAN_KERNEL_REQUIRED */
 
+#ifdef GPUSCAN_KERNEL_REQUIRED
 /*
  * gpuscan_exec_quals_column - GpuScan logic for KDS_FORMAT_COLUMN
  */
@@ -644,8 +646,6 @@ gpuscan_exec_quals_column(kern_gpuscan *kgpuscan,
 						  kern_data_store *kds_dst)
 {
 	kern_parambuf  *kparams = KERN_GPUSCAN_PARAMBUF(kgpuscan);
-//	kern_resultbuf *kresults		__attribute__((unused))
-//		= KERN_GPUSCAN_RESULTBUF(kgpuscan);
 	kern_context	kcxt;
 	cl_uint			src_index;
 	cl_uint			src_nitems = kds_src->nitems;
@@ -792,5 +792,6 @@ gpuscan_exec_quals_column(kern_gpuscan *kgpuscan,
 	}
 	kern_writeback_error_status(&kgpuscan->kerror, kcxt.e);
 }
+#endif	/* GPUSCAN_KERNEL_REQUIRED */
 #endif	/* __CUDACC__ */
 #endif	/* CUDA_GPUSCAN_H */

@@ -2842,24 +2842,35 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 			dtype->type_name,
 			pgstrom_codegen_expression((Node *)expr, context),
 			tle->resno - 1, dtype->type_name);
-		if (!null_const_value)
+		if (dtype->type_byval)
 		{
 			appendStringInfo(
 				&body,
 				"  if (!temp.%s_v.isnull)\n"
-				"    dst_values[%d] = pg_%s_to_datum(temp.%s_v.value);\n",
+				"    dst_values[%d] = pg_%s_as_datum(&temp.%s_v.value);\n",
 				dtype->type_name,
-				tle->resno - 1, dtype->type_name, dtype->type_name);
+				tle->resno-1,
+				dtype->type_name,
+				dtype->type_name);
 		}
 		else
 		{
 			appendStringInfo(
 				&body,
-				"  dst_values[%d] = pg_%s_to_datum(!temp.%s_v.isnull\n"
-				"                                  ? temp.%s_v.value\n"
-				"                                  : %s);\n",
-				tle->resno - 1, dtype->type_name, dtype->type_name,
+				"  if (!temp.%s_v.isnull)\n"
+				"    dst_values[%d] = PointerGetDatum(temp.%s_v.value);\n",
 				dtype->type_name,
+				tle->resno-1,
+				dtype->type_name);
+		}
+
+		if (null_const_value)
+		{
+			appendStringInfo(
+				&body,
+				"  else\n"
+				"    dst_values[%d] = %s;\n",
+				tle->resno-1,
 				null_const_value);
 		}
 	}
@@ -3048,24 +3059,35 @@ gpupreagg_codegen_projection_slot(StringInfo kern,
 			dtype->type_name,
 			pgstrom_codegen_expression((Node *)expr, context),
 			tle->resno - 1, dtype->type_name);
-		if (!null_const_value)
+		if (dtype->type_byval)
 		{
 			appendStringInfo(
 				&body,
 				"  if (!temp.%s_v.isnull)\n"
-				"    dst_values[%d] = pg_%s_to_datum(temp.%s_v.value);\n",
+				"    dst_values[%d] = pg_%s_as_datum(&temp.%s_v.value);\n",
 				dtype->type_name,
-				tle->resno - 1, dtype->type_name, dtype->type_name);
+				tle->resno-1,
+				dtype->type_name,
+				dtype->type_name);
 		}
 		else
 		{
 			appendStringInfo(
 				&body,
-				"  dst_values[%d] = pg_%s_to_datum(!temp.%s_v.isnull\n"
-				"                                  ? temp.%s_v.value\n"
-				"                                  : %s);\n",
-				tle->resno - 1, dtype->type_name, dtype->type_name,
+				"  if (!temp.%s_v.isnull)\n"
+				"    dst_values[%d] = PointerGetDatum(temp.%s_v.value);\n",
 				dtype->type_name,
+				tle->resno-1,
+				dtype->type_name);
+		}
+
+		if (null_const_value)
+		{
+			appendStringInfo(
+				&body,
+				"  else\n"
+				"    dst_values[%d] = %s;\n",
+				tle->resno-1,
 				null_const_value);
 		}
 	}
