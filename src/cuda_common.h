@@ -240,6 +240,7 @@ typedef uintptr_t		hostptr_t;
 #define StromKernel_NVMeStrom						0x0003
 #define StromKernel_gpuscan_exec_quals_row			0x0101
 #define StromKernel_gpuscan_exec_quals_block		0x0102
+#define StromKernel_gpuscan_exec_quals_column		0x0103
 #define StromKernel_gpujoin_main					0x0201
 #define StromKernel_gpujoin_right_outer				0x0202
 #define StromKernel_gpupreagg_setup_row				0x0301
@@ -449,21 +450,28 @@ typedef struct {
 	cl_ushort		ip_posid;
 } ItemPointerData;
 
+typedef struct HeapTupleFields
+{
+	cl_uint			t_xmin;		/* inserting xact ID */
+	cl_uint			t_xmax;		/* deleting or locking xact ID */
+	union
+	{
+		cl_uint		t_cid;		/* inserting or deleting command ID, or both */
+		cl_uint		t_xvac;		/* old-style VACUUM FULL xact ID */
+    }	t_field3;
+} HeapTupleFields;
+
+typedef struct DatumTupleFields
+{
+	cl_int		datum_len_;		/* varlena header (do not touch directly!) */
+	cl_int		datum_typmod;	/* -1, or identifier of a record type */
+	cl_uint		datum_typeid;	/* composite type OID, or RECORDOID */
+} DatumTupleFields;
+
 typedef struct {
 	union {
-		struct {
-			cl_uint	t_xmin;		/* inserting xact ID */
-			cl_uint	t_xmax;		/* deleting or locking xact ID */
-			union {
-				cl_uint	t_cid;	/* inserting or deleting command ID, or both */
-				cl_uint	t_xvac;	/* old-style VACUUM FULL xact ID */
-			} t_field3;
-		} t_heap;
-		struct {
-			cl_uint	datum_len_;	/* varlena header (do not touch directly!) */
-			cl_uint	datum_typmod;	/* -1, or identifier of a record type */
-			cl_uint	datum_typeid;	/* composite type OID, or RECORDOID */
-		} t_datum;
+		HeapTupleFields		t_heap;
+		DatumTupleFields	t_datum;
 	} t_choice;
 
 	ItemPointerData	t_ctid;			/* current TID of this or newer tuple */
@@ -2188,6 +2196,7 @@ deform_kern_heaptuple(kern_context *kcxt,
  * tuple_len    ... length of the tuple; shall be MAXALIGN(t_hoff) + data_len
  * heap_hasnull ... true, if tup_values/tup_isnull contains NULL
  * tup_self     ... item pointer of the tuple, if any
+ * tx_attrs     ... xmin,xmax,cmin/cmax, if any
  * tup_values   ... array of result datum
  * tup_isnull   ... array of null flags
  * tup_internal ... array of internal flags
@@ -2197,6 +2206,7 @@ form_kern_heaptuple(kern_context *kcxt,
 					kern_data_store *kds,		/* out */
 					kern_tupitem *tupitem,		/* out */
 					ItemPointerData *tup_self,	/* in, optional */
+					HeapTupleFields *tx_attrs,	/* in, optional */
 					Datum *tup_values,			/* in */
 					cl_bool *tup_isnull,		/* in */
 					cl_bool *tup_internal)		/* in */
@@ -2247,9 +2257,14 @@ form_kern_heaptuple(kern_context *kcxt,
 	htup = &tupitem->htup;
 
 	/* setup HeapTupleHeader */
-	// datum_len_ shall be set later
-	htup->t_choice.t_datum.datum_typmod = kds->tdtypmod;
-	htup->t_choice.t_datum.datum_typeid = kds->tdtypeid;
+	if (tx_attrs)
+		htup->t_choice.t_heap = *tx_attrs;
+	else
+	{
+		// datum_len_ shall be set later
+		htup->t_choice.t_datum.datum_typmod = kds->tdtypmod;
+		htup->t_choice.t_datum.datum_typeid = kds->tdtypeid;
+	}
 	htup->t_ctid.ip_blkid.bi_hi = 0xffff;
 	htup->t_ctid.ip_blkid.bi_lo = 0xffff;
 	htup->t_ctid.ip_posid = 0;
@@ -2332,7 +2347,8 @@ form_kern_heaptuple(kern_context *kcxt,
 	//BUG? curr already shift by t_hoff
 	curr += t_hoff;		/* add header length */
 	tupitem->t_len = curr;
-	SET_VARSIZE(&htup->t_choice.t_datum, MAXALIGN(curr));
+	if (!tx_attrs)
+		SET_VARSIZE(&htup->t_choice.t_datum, curr);
 	htup->t_infomask = t_infomask;
 
 	return curr;

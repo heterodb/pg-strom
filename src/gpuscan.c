@@ -1818,7 +1818,7 @@ assign_gpuscan_session_info(StringInfo buf, GpuTaskState *gts)
 		{
 			appendStringInfoString(
 				buf,
-				"#define GPUSCAN_HASH_WHERE_QUALS           1\n");
+				"#define GPUSCAN_HAS_WHERE_QUALS            1\n");
 		}
 	}
 }
@@ -3018,14 +3018,16 @@ gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 
 	if (pds_dst)
 	{
-		offset = pds_dst->kds.length - extra_size;
-		rc = cuMemPrefetchAsync((CUdeviceptr)(&pds_dst->kds) + offset,
-								extra_size,
-								CU_DEVICE_CPU,
-								CU_STREAM_PER_THREAD);
-		if (rc != CUDA_SUCCESS)
-			werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
-
+		if (extra_size > 0)
+		{
+			offset = pds_dst->kds.length - extra_size;
+			rc = cuMemPrefetchAsync((CUdeviceptr)(&pds_dst->kds) + offset,
+									extra_size,
+									CU_DEVICE_CPU,
+									CU_STREAM_PER_THREAD);
+			if (rc != CUDA_SUCCESS)
+				werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
+		}
 		length = KERN_DATA_STORE_HEAD_LENGTH(&pds_dst->kds);
 		rc = cuMemPrefetchAsync((CUdeviceptr)(&pds_dst->kds),
 								length + sizeof(cl_uint) * nitems_out,
