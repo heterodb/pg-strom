@@ -431,7 +431,7 @@ gstoreIterateForeignScan(ForeignScanState *node)
 
 	for (j=0; j < kds->ncols; j++)
 	{
-		void   *addr = KDS_COLUMN_GET_VALUE(kds, j, i);
+		void   *addr = kern_get_datum_column(kds, j, i);
 		int		attlen = kds->colmeta[j].attlen;
 
 		if (!addr)

@@ -3236,6 +3236,7 @@ gpupreagg_codegen_keymatch(StringInfo kern,
 		"{\n"
 		"  pg_anytype_t temp_x  __attribute__((unused));\n"
 		"  pg_anytype_t temp_y  __attribute__((unused));\n"
+		"  void        *datum   __attribute__((unused));\n"
 		"\n");
 
 	foreach (lc, tlist_dev)
@@ -3267,8 +3268,10 @@ gpupreagg_codegen_keymatch(StringInfo kern,
 		/* load the key values, and compare */
 		appendStringInfo(
 			kern,
-			"  temp_x.%s_v = pg_%s_vref(x_kds,kcxt,%u,x_index);\n"
-			"  temp_y.%s_v = pg_%s_vref(y_kds,kcxt,%u,y_index);\n"
+			"  datum = kern_get_datum_slot(x_kds,%u,x_index);\n"
+			"  temp_x.%s_v = pg_%s_datum_ref(kcxt,datum);\n"
+			"  datum = kern_get_datum_slot(y_kds,%u,y_index);\n"
+			"  temp_y.%s_v = pg_%s_datum_ref(kcxt,datum);\n"
 			"  if (!temp_x.%s_v.isnull && !temp_y.%s_v.isnull)\n"
 			"  {\n"
 			"    if (!EVAL(pgfn_%s(kcxt, temp_x.%s_v, temp_y.%s_v)))\n"
@@ -3278,8 +3281,10 @@ gpupreagg_codegen_keymatch(StringInfo kern,
 			"           (!temp_x.%s_v.isnull && temp_y.%s_v.isnull))\n"
 			"      return false;\n"
 			"\n",
-			dtype->type_name, dtype->type_name, tle->resno - 1,
-			dtype->type_name, dtype->type_name, tle->resno - 1,
+			tle->resno-1,
+			dtype->type_name, dtype->type_name,
+			tle->resno-1,
+			dtype->type_name, dtype->type_name,
 			dtype->type_name, dtype->type_name,
 			dfunc->func_devname, dtype->type_name, dtype->type_name,
 			dtype->type_name, dtype->type_name,

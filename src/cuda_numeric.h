@@ -449,7 +449,7 @@ pg_numeric_to_varlena(kern_context *kcxt, char *vl_buffer,
 
 
 /*
- * pg_numeric_vref
+ * pg_numeric_datum_(ref|store)
  *
  * It contains special case handling due to internal numeric format.
  * If kds intends to have varlena format (PostgreSQL compatible), it tries
@@ -469,21 +469,14 @@ pg_numeric_datum_ref(kern_context *kcxt,
 	return result;
 }
 
-STATIC_FUNCTION(pg_numeric_t)
-pg_numeric_vref(kern_data_store *kds,
-				kern_context *kcxt,
-				cl_uint colidx,
-				cl_uint rowidx)
+STATIC_INLINE(cl_uint)
+pg_numeric_datum_store(kern_context *kcxt,
+					   void *extra_buf,
+					   pg_numeric_t datum)
 {
-	void	   *datum = kern_get_datum(kds,colidx,rowidx);
-
-	return pg_numeric_datum_ref(kcxt,datum);
+	return pg_numeric_to_varlena(kcxt, extra_buf,
+								 datum.value, datum.isnull);
 }
-
-//FIXME:
-//If pg_numeric_t is just a varlena pointer, do just a copy
-//Elsewhere cl_ulong -> varlena numeric transfer is needed
-STROMCL_VARLENA_VARSTORE_TEMPLATE(numeric)
 
 STATIC_FUNCTION(pg_numeric_t)
 pg_numeric_param(kern_context *kcxt,

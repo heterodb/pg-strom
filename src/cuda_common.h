@@ -767,79 +767,6 @@ KERN_HASH_NEXT_ITEM(kern_data_store *kds, kern_hashitem *khitem)
 							  STROMALIGN(sizeof(BlockNumber) *		\
 										 __ldg(&(kds)->nrooms)) +	\
 							  BLCKSZ * kds_index)
-
-/* access macro for column format */
-typedef struct
-{
-	ItemPointerData		t_self;
-} packed_sysattrs;
-
-STATIC_INLINE(void *)
-KDS_COLUMN_VALUES(kern_data_store *kds, cl_int colidx)
-{
-	size_t	offset;
-
-	Assert(colidx >= 0 && colidx < kds->ncols);
-	offset = kds->colmeta[colidx].va_offset;
-
-	return (char *)kds + (offset << MAXIMUM_ALIGNOF_SHIFT);
-}
-
-STATIC_INLINE(char *)
-KDS_COLUMN_NULLMAP(kern_data_store *kds, cl_int colidx)
-{
-	kern_colmeta	cmeta;
-
-	Assert(colidx >= 0 && colidx < kds->ncols);
-	cmeta = kds->colmeta[colidx];
-	if (cmeta.attlen < 0 || cmeta.extra_sz == 0)
-		return NULL;
-	return ((char *)KDS_COLUMN_VALUES(kds, colidx) +
-			MAXALIGN(TYPEALIGN(cmeta.attalign,
-							   cmeta.attlen) * kds->nitems));
-}
-
-STATIC_INLINE(void *)
-KDS_COLUMN_GET_VALUE(kern_data_store *kds,
-					 cl_int colidx, size_t row_index)
-{
-	kern_colmeta *cmeta;
-	size_t		offset;
-	char	   *values;
-	char	   *nullmap;
-
-	Assert(colidx >= 0 && colidx < kds->ncols);
-	cmeta = &kds->colmeta[colidx];
-	offset = __ldg(&cmeta->va_offset) << MAXIMUM_ALIGNOF_SHIFT;
-	if (offset == 0)
-		return NULL;
-	values = (char *)kds + offset;
-	if (__ldg(&cmeta->attlen) < 0)
-	{
-		Assert(!__ldg(&cmeta->attbyval));
-		offset = ((cl_uint *)values)[row_index];
-		if (offset == 0)
-			return NULL;
-		Assert(offset < __ldg(&cmeta->extra_sz));
-		values += (offset << MAXIMUM_ALIGNOF_SHIFT);
-	}
-	else
-	{
-		cl_uint		extra_sz = __ldg(&cmeta->extra_sz);
-		cl_int		unitsz = TYPEALIGN(__ldg(&cmeta->attalign),
-									   __ldg(&cmeta->attlen));
-		if (extra_sz > 0)
-		{
-			Assert(MAXALIGN(BITMAPLEN(__ldg(&kds->nitems))) == extra_sz);
-			nullmap = values + MAXALIGN(unitsz * __ldg(&kds->nitems));
-			if (att_isnull(row_index, nullmap))
-				return NULL;
-		}
-		values += unitsz * row_index;
-	}
-	return (void *)values;
-}
-
 /*
  * kern_parambuf
  *
@@ -900,36 +827,37 @@ typedef struct {
 	((kresults)->results + (kresults)->nrels * (index))
 
 #ifdef __CUDACC__
-/*
- * PostgreSQL Data Type support in OpenCL kernel
+/* ----------------------------------------------------------------
+ * PostgreSQL Data Type support in CUDA kernel
  *
- * A stream of data sequencea are moved to OpenCL kernel, according to
- * the above row-/column-store definition. The device code being generated
- * by PG-Strom deals with each data item using the following data type;
+ * Device code will have the following representation for data types of
+ * PostgreSQL, once it gets loaded from any type of data store above.
  *
  * typedef struct
  * {
- *     BASE    value;
  *     bool    isnull;
- * } pg_##NAME##_t
+ *     BASE    value;
+ * } pg_XXXX_t
  *
- * PostgreSQL has three different data classes:
- *  - fixed-length referenced by value
- *  - fixed-length referenced by pointer
- *  - variable-length value
+ * PostgreSQL has four different classes:
+ *  - fixed-length referenced by value (simple)
+ *  - fixed-length referenced by pointer (indirect)
+ *  - variable-length (varlena)
  *
- * Right now, we support the two except for fixed-length referenced by
- * pointer (because these are relatively minor data type than others).
- * BASE reflects the data type in PostgreSQL; may be an integer, a float
- * or something others, however, all the variable-length value has same
- * BASE type; that is an offset of associated toast buffer, to reference
- * varlena structure on the global memory.
+ * The 'simple' and 'indirect' types are always inlined to pg_XXX_t,
+ * and often transformed to internal representation.
+ * Some of 'varlena' types are also inlined to pg_XXXX_t variable,
+ * mostly, if this varlena type has upper limit length short enough.
+ *
+ * pg_XXXX_datum_ref() routine of types are responsible to transform disk
+ * format to internal representation.
+ * pg_XXXX_datum_store() routine of types are also responsible to transform
+ * internal representation to disk format. We need to pay attention on
+ * projection stage. If and when GPU code tries to store expressions which
+ * are not simple Var, Const or Param, these internal representation must
+ * be written to extra-buffer first.
  */
 
-/* forward declaration of access interface to kern_data_store */
-STATIC_INLINE(void *)
-kern_get_datum(kern_data_store *kds,
-			   cl_uint colidx, cl_uint rowidx);
 /*
  * Template of variable classes: fixed-length referenced by value
  * ---------------------------------------------------------------
@@ -957,16 +885,6 @@ kern_get_datum(kern_data_store *kds,
 		return result;										\
 	}														\
 															\
-	STATIC_FUNCTION(pg_##NAME##_t)							\
-	pg_##NAME##_vref(kern_data_store *kds,					\
-					 kern_context *kcxt,					\
-					 cl_uint colidx,						\
-					 cl_uint rowidx)						\
-	{														\
-		void  *datum = kern_get_datum(kds,colidx,rowidx);	\
-		return pg_##NAME##_datum_ref(kcxt,datum);			\
-	}														\
-															\
 	STATIC_INLINE(cl_uint)									\
 	pg_##NAME##_datum_store(kern_context *kcxt,				\
 							void *extra_buf,				\
@@ -974,7 +892,8 @@ kern_get_datum(kern_data_store *kds,
 	{														\
 		if (datum.isnull)									\
 			return 0;										\
-		*((BASE *)extra_buf) = datum.value;					\
+		if (extra_buf)										\
+			*((BASE *)extra_buf) = datum.value;				\
 		return sizeof(BASE);								\
 	}
 
@@ -1043,16 +962,6 @@ kern_get_datum(kern_data_store *kds,
 		return result;										\
 	}														\
 															\
-	STATIC_FUNCTION(pg_##NAME##_t)							\
-	pg_##NAME##_vref(kern_data_store *kds,					\
-					 kern_context *kcxt,					\
-					 cl_uint colidx,						\
-					 cl_uint rowidx)						\
-	{														\
-		void  *datum = kern_get_datum(kds,colidx,rowidx);	\
-		return pg_##NAME##_datum_ref(kcxt,datum);			\
-	}														\
-															\
 	STATIC_INLINE(cl_uint)									\
 	pg_##NAME##_datum_store(kern_context *kcxt,				\
 							void *extra_buf,				\
@@ -1060,7 +969,8 @@ kern_get_datum(kern_data_store *kds,
 	{														\
 		if (datum.isnull)									\
 			return 0;										\
-		memcpy(extra_buf, &datum.value, sizeof(BASE));		\
+		if (extra_buf)										\
+			memcpy(extra_buf, &datum.value, sizeof(BASE));	\
 		return sizeof(BASE);								\
 	}
 
@@ -1397,6 +1307,159 @@ toast_raw_datum_size(kern_context *kcxt, varlena *attr)
 }
 
 /*
+ * functions to reference variable length variables
+ */
+STROMCL_SIMPLE_DATATYPE_TEMPLATE(varlena, varlena *)
+
+STATIC_FUNCTION(pg_varlena_t)
+pg_varlena_datum_ref(kern_context *kcxt,
+					 void *datum)
+{
+	varlena		   *vl_val = (varlena *) datum;
+	pg_varlena_t	result;
+
+	if (!datum)
+		result.isnull = true;
+	else
+	{
+		if (VARATT_IS_4B_U(vl_val) || VARATT_IS_1B(vl_val))
+		{
+			result.isnull = false;
+			result.value = vl_val;
+		}
+		else
+		{
+			result.isnull = true;
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		}
+	}
+	return result;
+}
+
+STATIC_FUNCTION(cl_uint)
+pg_varlena_datum_store(kern_context *kcxt,
+					   void *extra_buf,
+					   pg_varlena_t datum)
+{
+	cl_uint		vl_size;
+
+	if (datum.isnull)
+		return 0;
+	vl_size = VARSIZE_ANY(datum.value);
+	if (extra_buf)
+		memcpy(extra_buf, datum.value, vl_size);
+	return vl_size;
+}
+
+STATIC_FUNCTION(pg_varlena_t)
+pg_varlena_param(kern_context *kcxt, cl_uint param_id)
+{
+	kern_parambuf  *kparams = kcxt->kparams;
+	pg_varlena_t	result;
+
+	if (param_id < kparams->nparams &&
+		kparams->poffset[param_id] > 0)
+	{
+		varlena *vl_val = (varlena *)((char *)kparams +
+									  kparams->poffset[param_id]);
+		if (VARATT_IS_4B_U(vl_val) || VARATT_IS_1B(vl_val))
+		{
+			result.value = vl_val;
+			result.isnull = false;
+		}
+		else
+		{
+			result.isnull = true;
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		}
+	}
+	else
+		result.isnull = true;
+
+	return result;
+}
+
+STROMCL_SIMPLE_NULLTEST_TEMPLATE(varlena)
+
+STATIC_FUNCTION(cl_uint)
+pg_varlena_comp_crc32(const cl_uint *crc32_table,
+					  cl_uint hash, pg_varlena_t datum)
+{
+	if (!datum.isnull)
+	{
+		hash = pg_common_comp_crc32(crc32_table,
+									hash,
+									VARDATA_ANY(datum.value),
+									VARSIZE_ANY_EXHDR(datum.value));
+	}
+	return hash;
+}
+
+#define STROMCL_VARLENA_DATATYPE_TEMPLATE(NAME)				\
+	typedef pg_varlena_t	pg_##NAME##_t;
+
+#define STROMCL_VARLENA_VARREF_TEMPLATE(NAME)					\
+	STATIC_INLINE(pg_##NAME##_t)								\
+	pg_##NAME##_datum_ref(kern_context *kcxt,					\
+						  void *datum)							\
+	{															\
+		return pg_varlena_datum_ref(kcxt,datum);				\
+	}															\
+																\
+	STATIC_INLINE(cl_uint)										\
+	pg_##NAME##_datum_store(kern_context *kcxt,					\
+							void *extra_buf,					\
+							pg_##NAME##_t datum)				\
+	{															\
+		return pg_varlena_datum_store(kcxt,extra_buf,datum);	\
+	}
+
+#define STROMCL_VARLENA_PARAMREF_TEMPLATE(NAME)					\
+	STATIC_INLINE(pg_##NAME##_t)								\
+	pg_##NAME##_param(kern_context *kcxt, cl_uint param_id)		\
+	{															\
+		return pg_varlena_param(kcxt,param_id);					\
+	}
+
+#define STROMCL_VARLENA_NULLTEST_TEMPLATE(NAME)					\
+	STATIC_INLINE(pg_bool_t)									\
+	pgfn_##NAME##_isnull(kern_context *kcxt, pg_##NAME##_t arg)	\
+	{															\
+		return pgfn_varlena_isnull(kcxt, arg);					\
+	}															\
+	STATIC_INLINE(pg_bool_t)									\
+	pgfn_##NAME##_isnotnull(kern_context *kcxt, pg_##NAME##_t arg)	\
+	{															\
+		return pgfn_varlena_isnotnull(kcxt, arg);				\
+	}
+
+#define STROMCL_VARLENA_COMP_CRC32_TEMPLATE(NAME)				\
+	STATIC_INLINE(cl_uint)										\
+	pg_##NAME##_comp_crc32(const cl_uint *crc32_table,			\
+						   cl_uint hash, pg_##NAME##_t datum)	\
+	{															\
+		return pg_varlena_comp_crc32(crc32_table, hash, datum);	\
+	}
+
+#define STROMCL_VARLENA_TYPE_TEMPLATE(NAME)			\
+	STROMCL_VARLENA_DATATYPE_TEMPLATE(NAME)			\
+	STROMCL_VARLENA_VARREF_TEMPLATE(NAME)			\
+	STROMCL_VARLENA_PARAMREF_TEMPLATE(NAME)			\
+	STROMCL_VARLENA_NULLTEST_TEMPLATE(NAME)			\
+	STROMCL_VARLENA_COMP_CRC32_TEMPLATE(NAME)		\
+	STATIC_INLINE(Datum)							\
+	pg_##NAME##_as_datum(void *addr)				\
+	{												\
+		return PointerGetDatum(addr);				\
+	}
+
+/* pg_bytea_t */
+#ifndef PG_BYTEA_TYPE_DEFINED
+#define PG_BYTEA_TYPE_DEFINED
+STROMCL_VARLENA_TYPE_TEMPLATE(bytea)
+#endif
+
+/*
  * Macro to extract a heap-tuple
  *
  * usage:
@@ -1462,6 +1525,7 @@ toast_raw_datum_size(kern_context *kcxt, varlena *attr)
 
 #define EXTRACT_HEAP_TUPLE_END()										\
 	} while(0)
+#endif	/* __CUDACC__ */
 
 /*
  * kern_get_datum
@@ -1569,6 +1633,47 @@ kern_get_datum_slot(kern_data_store *kds,
 	return (char *)values[colidx];
 }
 
+STATIC_FUNCTION(void *)
+kern_get_datum_column(kern_data_store *kds,
+					  cl_uint colidx, cl_uint rowidx)
+{
+	kern_colmeta *cmeta;
+	size_t		offset;
+	char	   *values;
+	char	   *nullmap;
+
+	Assert(colidx >= 0 && colidx < kds->ncols);
+	cmeta = &kds->colmeta[colidx];
+	offset = __ldg(&cmeta->va_offset) << MAXIMUM_ALIGNOF_SHIFT;
+	if (offset == 0)
+		return NULL;
+	values = (char *)kds + offset;
+	if (__ldg(&cmeta->attlen) < 0)
+	{
+		Assert(!__ldg(&cmeta->attbyval));
+		offset = ((cl_uint *)values)[rowidx];
+		if (offset == 0)
+			return NULL;
+		Assert(offset < __ldg(&cmeta->extra_sz));
+		values += (offset << MAXIMUM_ALIGNOF_SHIFT);
+	}
+	else
+	{
+		cl_uint		extra_sz = __ldg(&cmeta->extra_sz);
+		cl_int		unitsz = TYPEALIGN(__ldg(&cmeta->attalign),
+									   __ldg(&cmeta->attlen));
+		if (extra_sz > 0)
+		{
+			Assert(MAXALIGN(BITMAPLEN(__ldg(&kds->nitems))) == extra_sz);
+			nullmap = values + MAXALIGN(unitsz * __ldg(&kds->nitems));
+			if (att_isnull(rowidx, nullmap))
+				return NULL;
+		}
+		values += unitsz * rowidx;
+	}
+	return (void *)values;
+}
+
 STATIC_INLINE(void *)
 kern_get_datum(kern_data_store *kds,
 			   cl_uint colidx, cl_uint rowidx)
@@ -1581,174 +1686,13 @@ kern_get_datum(kern_data_store *kds,
 		return kern_get_datum_row(kds, colidx, rowidx);
 	if (kds->format == KDS_FORMAT_SLOT)
 		return kern_get_datum_slot(kds, colidx, rowidx);
+	if (kds->format == KDS_FORMAT_COLUMN)
+		return kern_get_datum_column(kds, colidx, rowidx);
 	/* TODO: put StromError_DataStoreCorruption error here */
 	return NULL;
 }
 
-/*
- * functions to reference variable length variables
- */
-STROMCL_SIMPLE_DATATYPE_TEMPLATE(varlena, varlena *)
-
-STATIC_FUNCTION(pg_varlena_t)
-pg_varlena_datum_ref(kern_context *kcxt,
-					 void *datum)
-{
-	varlena		   *vl_val = (varlena *) datum;
-	pg_varlena_t	result;
-
-	if (!datum)
-		result.isnull = true;
-	else
-	{
-		if (VARATT_IS_4B_U(vl_val) || VARATT_IS_1B(vl_val))
-		{
-			result.isnull = false;
-			result.value = vl_val;
-		}
-		else
-		{
-			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-		}
-	}
-	return result;
-}
-
-STATIC_FUNCTION(pg_varlena_t)
-pg_varlena_vref(kern_data_store *kds,
-				kern_context *kcxt,
-				cl_uint colidx,
-				cl_uint rowidx)
-{
-	void   *datum = kern_get_datum(kds,colidx,rowidx);
-
-	return pg_varlena_datum_ref(kcxt,datum);
-}
-
-STATIC_FUNCTION(pg_varlena_t)
-pg_varlena_param(kern_context *kcxt, cl_uint param_id)
-{
-	kern_parambuf  *kparams = kcxt->kparams;
-	pg_varlena_t	result;
-
-	if (param_id < kparams->nparams &&
-		kparams->poffset[param_id] > 0)
-	{
-		varlena *vl_val = (varlena *)((char *)kparams +
-									  kparams->poffset[param_id]);
-		if (VARATT_IS_4B_U(vl_val) || VARATT_IS_1B(vl_val))
-		{
-			result.value = vl_val;
-			result.isnull = false;
-		}
-		else
-		{
-			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-		}
-	}
-	else
-		result.isnull = true;
-
-	return result;
-}
-
-STROMCL_SIMPLE_NULLTEST_TEMPLATE(varlena)
-
-STATIC_FUNCTION(cl_uint)
-pg_varlena_comp_crc32(const cl_uint *crc32_table,
-					  cl_uint hash, pg_varlena_t datum)
-{
-	if (!datum.isnull)
-	{
-		hash = pg_common_comp_crc32(crc32_table,
-									hash,
-									VARDATA_ANY(datum.value),
-									VARSIZE_ANY_EXHDR(datum.value));
-	}
-	return hash;
-}
-
-#define STROMCL_VARLENA_DATATYPE_TEMPLATE(NAME)				\
-	typedef pg_varlena_t	pg_##NAME##_t;
-
-#define STROMCL_VARLENA_VARREF_TEMPLATE(NAME)				\
-	STATIC_INLINE(pg_##NAME##_t)							\
-	pg_##NAME##_datum_ref(kern_context *kcxt,				\
-						  void *datum)						\
-	{														\
-		return pg_varlena_datum_ref(kcxt,datum);			\
-	}														\
-															\
-	STATIC_INLINE(pg_##NAME##_t)							\
-	pg_##NAME##_vref(kern_data_store *kds,					\
-					 kern_context *kcxt,					\
-					 cl_uint colidx,						\
-					 cl_uint rowidx)						\
-	{														\
-		void  *datum = kern_get_datum(kds,colidx,rowidx);	\
-		return pg_varlena_datum_ref(kcxt,datum);			\
-	}														\
-															\
-	STATIC_INLINE(cl_uint)									\
-	pg_##NAME##_datum_store(kern_context *kcxt,				\
-							void *extra_buf,				\
-							pg_##NAME##_t datum)			\
-	{														\
-		cl_uint		vl_size;								\
-		if (datum.isnull)									\
-			return 0;										\
-		vl_size = VARSIZE_ANY(datum.value);					\
-		memcpy(extra_buf, datum.value, vl_size);			\
-		return vl_size;										\
-	}
-
-#define STROMCL_VARLENA_PARAMREF_TEMPLATE(NAME)						\
-	STATIC_INLINE(pg_##NAME##_t)									\
-	pg_##NAME##_param(kern_context *kcxt, cl_uint param_id)			\
-	{																\
-		return pg_varlena_param(kcxt,param_id);						\
-	}
-
-#define STROMCL_VARLENA_NULLTEST_TEMPLATE(NAME)						\
-	STATIC_INLINE(pg_bool_t)										\
-	pgfn_##NAME##_isnull(kern_context *kcxt, pg_##NAME##_t arg)		\
-	{																\
-		return pgfn_varlena_isnull(kcxt, arg);					\
-	}																\
-	STATIC_INLINE(pg_bool_t)										\
-	pgfn_##NAME##_isnotnull(kern_context *kcxt, pg_##NAME##_t arg)	\
-	{																\
-		return pgfn_varlena_isnotnull(kcxt, arg);					\
-	}
-
-#define STROMCL_VARLENA_COMP_CRC32_TEMPLATE(NAME)					\
-	STATIC_INLINE(cl_uint)											\
-	pg_##NAME##_comp_crc32(const cl_uint *crc32_table,				\
-						   cl_uint hash, pg_##NAME##_t datum)		\
-	{																\
-		return pg_varlena_comp_crc32(crc32_table, hash, datum);		\
-	}
-
-#define STROMCL_VARLENA_TYPE_TEMPLATE(NAME)			\
-	STROMCL_VARLENA_DATATYPE_TEMPLATE(NAME)			\
-	STROMCL_VARLENA_VARREF_TEMPLATE(NAME)			\
-	STROMCL_VARLENA_PARAMREF_TEMPLATE(NAME)			\
-	STROMCL_VARLENA_NULLTEST_TEMPLATE(NAME)			\
-	STROMCL_VARLENA_COMP_CRC32_TEMPLATE(NAME)		\
-	STATIC_INLINE(Datum)							\
-	pg_##NAME##_as_datum(void *addr)				\
-	{												\
-		return PointerGetDatum(addr);				\
-	}
-
-/* pg_bytea_t */
-#ifndef PG_BYTEA_TYPE_DEFINED
-#define PG_BYTEA_TYPE_DEFINED
-STROMCL_VARLENA_TYPE_TEMPLATE(bytea)
-#endif
-
+#ifdef __CUDACC__
 /* ------------------------------------------------------------------
  *
  * Declaration of utility functions
