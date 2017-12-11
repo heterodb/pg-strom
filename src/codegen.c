@@ -16,12 +16,22 @@
  * GNU General Public License for more details.
  */
 #include "pg_strom.h"
+#include "cuda_numeric.h"
 
 static MemoryContext	devinfo_memcxt;
 static bool		devtype_info_is_built;
 static List	   *devtype_info_slot[128];
 static List	   *devfunc_info_slot[1024];
 
+static pg_crc32 generic_devtype_hashfunc(devtype_info *dtype,
+										 pg_crc32 hash,
+										 Datum datum, bool isnull);
+static pg_crc32 pg_numeric_devtype_hashfunc(devtype_info *dtype,
+											pg_crc32 hash,
+											Datum datum, bool isnull);
+static pg_crc32 pg_bpchar_devtype_hashfunc(devtype_info *dtype,
+										   pg_crc32 hash,
+										   Datum datum, bool isnull);
 /*
  * Catalog of data types supported by device code
  *
@@ -29,9 +39,10 @@ static List	   *devfunc_info_slot[1024];
  *   pg_<type_name>_t
  */
 #define DEVTYPE_DECL(type_name,type_oid,type_base,						\
-					 min_const,max_const,zero_const,type_flags)			\
+					 min_const,max_const,zero_const,					\
+					 type_flags,extra_sz,hash_func)						\
 	{ "pg_catalog", type_name, type_oid, #type_oid, type_base,			\
-	  min_const, max_const, zero_const, type_flags }
+	  min_const, max_const, zero_const, type_flags, extra_sz, hash_func }
 
 static struct {
 	const char	   *type_schema;
@@ -42,84 +53,101 @@ static struct {
 	const char	   *max_const;
 	const char	   *min_const;
 	const char	   *zero_const;
-	int32			type_flags;		/* library to declare this type */
+	cl_uint			type_flags;		/* library to declare this type */
+	cl_uint			extra_sz;		/* required size to store internal form */
+	devtype_hashfunc_type hash_func;
 } devtype_catalog[] = {
 	/*
 	 * Primitive datatypes
 	 */
 	DEVTYPE_DECL("bool",   BOOLOID,   "cl_bool",
 				 NULL, NULL, "false",
-				 0),
+				 0, 0, generic_devtype_hashfunc),
 	DEVTYPE_DECL("int2",   INT2OID,   "cl_short",
 				 "SHRT_MAX", "SHRT_MIN", "0",
-				 0),
+				 0, 0, generic_devtype_hashfunc),
 	DEVTYPE_DECL("int4",   INT4OID,   "cl_int",
 				 "INT_MAX", "INT_MIN", "0",
-				 0),
+				 0, 0, generic_devtype_hashfunc),
 	DEVTYPE_DECL("int8",   INT8OID,   "cl_long",
 				 "LONG_MAX", "LONG_MIN", "0",
-				 0),
+				 0, 0, generic_devtype_hashfunc),
 	DEVTYPE_DECL("float4", FLOAT4OID, "cl_float",
 				 "__float_as_int(FLT_MAX)",
 				 "__float_as_int(-FLT_MAX)",
 				 "__float_as_int(0.0)",
-				 0),
+				 0, 0, generic_devtype_hashfunc),
 	DEVTYPE_DECL("float8", FLOAT8OID, "cl_double",
 				 "__double_as_longlong(DBL_MAX)",
 				 "__double_as_longlong(-DBL_MAX)",
 				 "__double_as_longlong(0.0)",
-				 0),
+				 0, 0, generic_devtype_hashfunc),
 	DEVTYPE_DECL("tid", TIDOID, "ItemPointerData",
 				 NULL, NULL, NULL,
-				 0),
+				 0, sizeof(ItemPointerData),
+				 generic_devtype_hashfunc),
 	/*
 	 * Misc data types
 	 */
 	DEVTYPE_DECL("money",  CASHOID,   "cl_long",
 				 "LONG_MAX", "LONG_MIN", "0",
-				 DEVKERNEL_NEEDS_MISC),
+				 DEVKERNEL_NEEDS_MISC, 0,
+				 generic_devtype_hashfunc),
 	DEVTYPE_DECL("uuid",   UUIDOID,   "pg_uuid_t",
 				 NULL, NULL, NULL,
-				 DEVKERNEL_NEEDS_MISC),
+				 DEVKERNEL_NEEDS_MISC, UUID_LEN,
+				 generic_devtype_hashfunc),
 	/*
 	 * Date and time datatypes
 	 */
 	DEVTYPE_DECL("date", DATEOID, "DateADT",
 				 "INT_MAX", "INT_MIN", "0",
-				 DEVKERNEL_NEEDS_TIMELIB),
+				 DEVKERNEL_NEEDS_TIMELIB, 0,
+				 generic_devtype_hashfunc),
 	DEVTYPE_DECL("time", TIMEOID, "TimeADT",
 				 "LONG_MAX", "LONG_MIN", "0",
-				 DEVKERNEL_NEEDS_TIMELIB),
+				 DEVKERNEL_NEEDS_TIMELIB, 0,
+				 generic_devtype_hashfunc),
 	DEVTYPE_DECL("timetz", TIMETZOID, "TimeTzADT",
 				 NULL, NULL, NULL,
-				 DEVKERNEL_NEEDS_TIMELIB),
+				 DEVKERNEL_NEEDS_TIMELIB, sizeof(TimeTzADT),
+				 generic_devtype_hashfunc),
 	DEVTYPE_DECL("timestamp", TIMESTAMPOID,"Timestamp",
 				 "LONG_MAX", "LONG_MIN", "0",
-				 DEVKERNEL_NEEDS_TIMELIB),
+				 DEVKERNEL_NEEDS_TIMELIB, 0,
+				 generic_devtype_hashfunc),
 	DEVTYPE_DECL("timestamptz", TIMESTAMPTZOID, "TimestampTz",
 				 "LONG_MAX", "LONG_MIN", "0",
-				 DEVKERNEL_NEEDS_TIMELIB),
+				 DEVKERNEL_NEEDS_TIMELIB, 0,
+				 generic_devtype_hashfunc),
 	DEVTYPE_DECL("interval", INTERVALOID, "Interval",
 				 NULL, NULL, NULL,
-				 DEVKERNEL_NEEDS_TIMELIB),
+				 DEVKERNEL_NEEDS_TIMELIB, sizeof(Interval),
+				 generic_devtype_hashfunc),
 	/*
 	 * variable length datatypes
 	 */
 	DEVTYPE_DECL("bpchar",  BPCHAROID,  "varlena *",
 				 NULL, NULL, NULL,
-				 DEVKERNEL_NEEDS_TEXTLIB),
+				 DEVKERNEL_NEEDS_TEXTLIB, 0,
+				 pg_bpchar_devtype_hashfunc),
 	DEVTYPE_DECL("varchar", VARCHAROID, "varlena *",
 				 NULL, NULL, NULL,
-				 DEVKERNEL_NEEDS_TEXTLIB),
+				 DEVKERNEL_NEEDS_TEXTLIB, 0,
+				 generic_devtype_hashfunc),
 	DEVTYPE_DECL("numeric", NUMERICOID, "cl_ulong",
 				 NULL, NULL, NULL,
-				 DEVKERNEL_NEEDS_NUMERIC),
+				 DEVKERNEL_NEEDS_NUMERIC,
+				 VARHDRSZ + sizeof(union NumericChoice),
+				 pg_numeric_devtype_hashfunc),
 	DEVTYPE_DECL("bytea",   BYTEAOID,   "varlena *",
 				 NULL, NULL, NULL,
-				 0),
+				 0, 0,
+				 generic_devtype_hashfunc),
 	DEVTYPE_DECL("text",    TEXTOID,    "varlena *",
 				 NULL, NULL, NULL,
-				 DEVKERNEL_NEEDS_TEXTLIB),
+				 DEVKERNEL_NEEDS_TEXTLIB, 0,
+				 generic_devtype_hashfunc),
 };
 
 static devtype_info *
@@ -129,6 +157,8 @@ build_devtype_info_entry(Oid type_oid,
 						 const char *max_const,
 						 const char *min_const,
 						 const char *zero_const,
+						 cl_uint extra_sz,
+						 devtype_hashfunc_type hash_func,
 						 devtype_info *element)
 {
 	HeapTuple		tuple;
@@ -168,7 +198,9 @@ build_devtype_info_entry(Oid type_oid,
 	entry->max_const = max_const;	/* may be NULL */
 	entry->min_const = min_const;	/* may be NULL */
 	entry->zero_const = zero_const;	/* may be NULL */
-   	entry->type_eqfunc = get_opcode(tcache->eq_opr);
+	entry->extra_sz = extra_sz;
+	entry->hash_func = hash_func;
+	entry->type_eqfunc = get_opcode(tcache->eq_opr);
 	entry->type_cmpfunc = tcache->cmp_proc;
 	if (!element)
 		entry->type_array = build_devtype_info_entry(type_form->typarray,
@@ -178,6 +210,8 @@ build_devtype_info_entry(Oid type_oid,
 													 NULL,
 													 NULL,
 													 NULL,
+													 0,
+													 generic_devtype_hashfunc,
 													 entry);
 	else
 		entry->type_element = element;
@@ -224,6 +258,8 @@ build_devtype_info(void)
 										devtype_catalog[i].max_const,
 										devtype_catalog[i].min_const,
 										devtype_catalog[i].zero_const,
+										devtype_catalog[i].extra_sz,
+										devtype_catalog[i].hash_func,
 										NULL);
 	}
 	MemoryContextSwitchTo(oldcxt);
@@ -309,6 +345,77 @@ pgstrom_codegen_typeoid_declarations(StringInfo source)
 
 		appendStringInfo(source, "#define PG_%s %u\n", oid_label, typ_oid);
 	}
+}
+
+/*
+ * Device type specific hash-functions
+ *
+ * Some device types have internal representation, like numeric, which shall
+ * be used to GpuHashJoin for join-key hashing.
+ */
+static pg_crc32
+generic_devtype_hashfunc(devtype_info *dtype,
+						 pg_crc32 hash,
+						 Datum datum, bool isnull)
+{
+	if (isnull)
+		return hash;
+	else if (dtype->type_byval)
+		COMP_LEGACY_CRC32(hash, &datum, dtype->type_length);
+	else if (dtype->type_length > 0)
+		COMP_LEGACY_CRC32(hash, DatumGetPointer(datum), dtype->type_length);
+	else
+		COMP_LEGACY_CRC32(hash, VARDATA_ANY(datum), VARSIZE_ANY_EXHDR(datum));
+	return hash;
+}
+
+static pg_crc32
+pg_numeric_devtype_hashfunc(devtype_info *dtype,
+							pg_crc32 hash,
+							Datum datum, bool isnull)
+{
+	Assert(dtype->type_oid == NUMERICOID);
+	if (!isnull)
+	{
+		kern_context	dummy;
+		pg_numeric_t	temp;
+
+		memset(&dummy, 0, sizeof(kern_context));
+		/*
+		 * FIXME: If NUMERIC value is out of range, we may not be able to
+		 * execute GpuJoin in the kernel space for all the outer chunks.
+		 * Is it still valuable to run on GPU kernel?
+		 */
+		temp = pg_numeric_from_varlena(&dummy, (struct varlena *)
+									   DatumGetPointer(datum));
+		if (dummy.e.errcode != StromError_Success)
+			elog(ERROR, "failed on hash calculation of device numeric: %s",
+				 DatumGetCString(DirectFunctionCall1(numeric_out, datum)));
+		COMP_LEGACY_CRC32(hash, &temp.value, sizeof(temp.value));
+	}
+	return hash;
+}
+
+static pg_crc32
+pg_bpchar_devtype_hashfunc(devtype_info *dtype,
+						   pg_crc32 hash,
+						   Datum datum, bool isnull)
+{
+	/*
+	 * whitespace is the tail end of CHAR(n) data shall be ignored
+	 * when we calculate hash-value, to match same text exactly.
+	 */
+	Assert(dtype->type_oid == BPCHAROID);
+	if (!isnull)
+	{
+		char   *s = VARDATA_ANY(datum);
+		int		i, len = VARSIZE_ANY_EXHDR(datum);
+
+		for (i = len - 1; i >= 0 && s[i] == ' '; i--)
+			;
+		COMP_LEGACY_CRC32(hash, VARDATA_ANY(datum), i+1);
+	}
+	return hash;
 }
 
 /*

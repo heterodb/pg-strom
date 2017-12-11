@@ -103,6 +103,7 @@
 #include "utils/builtins.h"
 #include "utils/bytea.h"
 #include "utils/cash.h"
+#include "utils/date.h"
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
 #include "utils/inval.h"
@@ -122,6 +123,7 @@
 #include "utils/syscache.h"
 #include "utils/tqual.h"
 #include "utils/typcache.h"
+#include "utils/uuid.h"
 #include "utils/varbit.h"
 
 #define CUDA_API_PER_THREAD_DEFAULT_STREAM		1
@@ -373,6 +375,10 @@ struct GpuTask
 struct devtype_info;
 struct devfunc_info;
 
+typedef pg_crc32 (*devtype_hashfunc_type)(struct devtype_info *dtype,
+										  pg_crc32 hash,
+										  Datum datum, bool isnull);
+
 typedef struct devtype_info {
 	Oid			type_oid;
 	uint32		type_flags;
@@ -388,6 +394,11 @@ typedef struct devtype_info {
 	const char *max_const;		/* static initializer, if any */
 	const char *min_const;		/* static initializer, if any */
 	const char *zero_const;		/* static initializer, if any */
+	int			extra_sz;		/* required size for extra buffer, if device
+								 * type has internal representation. 0 means
+								 * this device type never has inline format,
+								 * or simple data type. */
+	devtype_hashfunc_type hash_func;	/* type specific hash function */
 	const struct devtype_info *type_array;	/* array type of itself, if any */
 	const struct devtype_info *type_element;/* element type of array, if any */
 } devtype_info;

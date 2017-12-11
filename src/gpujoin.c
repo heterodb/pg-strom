@@ -5045,10 +5045,7 @@ get_tuple_hashvalue(innerState *istate,
 	ExprContext	   *econtext = istate->econtext;
 	pg_crc32		hash;
 	List		   *hash_keys_list;
-	ListCell	   *lc1;
-	ListCell	   *lc2;
-	ListCell	   *lc3;
-	ListCell	   *lc4;
+	ListCell	   *lc;
 	bool			is_null_keys = true;
 
 	if (is_inner_hashkeys)
@@ -5064,62 +5061,26 @@ get_tuple_hashvalue(innerState *istate,
 
 	/* calculation of a hash value of this entry */
 	INIT_LEGACY_CRC32(hash);
-	forfour (lc1, hash_keys_list,
-			 lc2, istate->hash_keylen,
-			 lc3, istate->hash_keybyval,
-			 lc4, istate->hash_keytype)
+	foreach (lc, hash_keys_list)
 	{
-		ExprState  *clause = lfirst(lc1);
-		int			keylen = lfirst_int(lc2);
-		bool		keybyval = lfirst_int(lc3);
-		Oid			keytype = lfirst_oid(lc4);
-		Datum		value;
-		bool		isnull;
+		ExprState	   *clause = lfirst(lc);
+		devtype_info   *dtype;
+		Datum			datum;
+		bool			isnull;
 
 #if PG_VERSION_NUM < 100000
-		value = ExecEvalExpr(clause, istate->econtext, &isnull, NULL);
+		datum = ExecEvalExpr(clause, istate->econtext, &isnull, NULL);
 #else
-		value = ExecEvalExpr(clause, istate->econtext, &isnull);
+	    datum = ExecEvalExpr(clause, istate->econtext, &isnull);
 #endif
 		if (isnull)
 			continue;
-		is_null_keys = false;	/* key is non-NULL valid */
+		is_null_keys = false;	/* key contains at least a valid value */
 
-		/* fixup host representation to special internal format. */
-		if (keytype == NUMERICOID)
-		{
-			kern_context	dummy;
-			pg_numeric_t	temp;
+		dtype = pgstrom_devtype_lookup(exprType((Node *)clause->expr));
+		Assert(dtype != NULL);
 
-			/*
-			 * FIXME: If NUMERIC value is out of range, we cannot execute
-			 * GpuJoin in the kernel space, so needs a fallback routine.
-			 */
-			temp = pg_numeric_from_varlena(&dummy, (struct varlena *)
-										   DatumGetPointer(value));
-			COMP_LEGACY_CRC32(hash, &temp.value, sizeof(temp.value));
-		}
-		else if (keytype == BPCHAROID)
-		{
-			/*
-			 * whitespace is the tail end of CHAR(n) data shall be ignored
-			 * when we calculate hash-value, to match same text exactly.
-			 */
-			cl_char	   *s = VARDATA_ANY(value);
-			cl_int		i, len = VARSIZE_ANY_EXHDR(value);
-
-			for (i = len - 1; i >= 0 && s[i] == ' '; i--)
-				;
-			COMP_LEGACY_CRC32(hash, VARDATA_ANY(value), i+1);
-		}
-		else if (keybyval)
-			COMP_LEGACY_CRC32(hash, &value, keylen);
-		else if (keylen > 0)
-			COMP_LEGACY_CRC32(hash, DatumGetPointer(value), keylen);
-		else
-			COMP_LEGACY_CRC32(hash,
-							  VARDATA_ANY(value),
-							  VARSIZE_ANY_EXHDR(value));
+		hash = dtype->hash_func(dtype, hash, datum, isnull);
 	}
 	FIN_LEGACY_CRC32(hash);
 
