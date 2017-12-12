@@ -329,15 +329,12 @@ fetch_next_gputask(GpuTaskState *gts)
 			 */
 			pthreadMutexUnlock(gcontext->mutex);
 
-			ev = WaitLatch(MyLatch,
-						   WL_LATCH_SET |
-						   WL_TIMEOUT |
-						   WL_POSTMASTER_DEATH,
-						   500L
-#if PG_VERSION_NUM >= 100000
-						   ,PG_WAIT_EXTENSION
-#endif
-				);
+			ev = StromWaitLatch(MyLatch,
+								WL_LATCH_SET |
+								WL_TIMEOUT |
+								WL_POSTMASTER_DEATH,
+								500L,
+								PG_WAIT_EXTENSION);
 			if (ev & WL_POSTMASTER_DEATH)
 				ereport(FATAL,
 						(errcode(ERRCODE_ADMIN_SHUTDOWN),
@@ -409,15 +406,12 @@ retry:
 
 		CHECK_FOR_GPUCONTEXT(gcontext);
 
-		ev = WaitLatch(MyLatch,
-					   WL_LATCH_SET |
-					   WL_TIMEOUT |
-					   WL_POSTMASTER_DEATH,
-					   500L
-#if PG_VERSION_NUM >= 100000
-					   ,PG_WAIT_EXTENSION
-#endif
-			);
+		ev = StromWaitLatch(MyLatch,
+							WL_LATCH_SET |
+							WL_TIMEOUT |
+							WL_POSTMASTER_DEATH,
+							500L,
+							PG_WAIT_EXTENSION);
 		if (ev & WL_POSTMASTER_DEATH)
 			ereport(FATAL,
 					(errcode(ERRCODE_ADMIN_SHUTDOWN),

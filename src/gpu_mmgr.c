@@ -878,14 +878,11 @@ __gpuMemPreservedRequest(cl_int cuda_dindex,
 
 		PG_TRY();
 		{
-			ev = WaitLatch(MyLatch,
-						   WL_LATCH_SET |
-						   WL_TIMEOUT |
-						   WL_POSTMASTER_DEATH, 1000L
-#if PG_VERSION_NUM >= 100000
-						   ,PG_WAIT_EXTENSION
-#endif
-);
+			ev = StromWaitLatch(MyLatch,
+								WL_LATCH_SET |
+								WL_TIMEOUT |
+								WL_POSTMASTER_DEATH, 1000L,
+								PG_WAIT_EXTENSION);
 			ResetLatch(MyLatch);
 			if (ev & WL_POSTMASTER_DEATH)
 				elog(FATAL, "unexpected postmaster dead");
@@ -1190,14 +1187,11 @@ gpummgrBgWorkerMain(Datum arg)
 
 			SpinLockRelease(&gmemp_head->lock);
 
-			ev = WaitLatch(MyLatch,
-						   WL_LATCH_SET |
-						   WL_TIMEOUT |
-						   WL_POSTMASTER_DEATH, 5000L
-#if PG_VERSION_NUM >= 100000
-						   ,PG_WAIT_EXTENSION
-#endif
-				);
+			ev = StromWaitLatch(MyLatch,
+								WL_LATCH_SET |
+								WL_TIMEOUT |
+								WL_POSTMASTER_DEATH, 5000L,
+								PG_WAIT_EXTENSION);
 			ResetLatch(MyLatch);
 			if (ev & WL_POSTMASTER_DEATH)
 				elog(FATAL, "unexpected Postmaster dead");

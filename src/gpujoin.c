@@ -3730,15 +3730,12 @@ gpujoinSyncRightOuterJoin(GpuTaskState *gts)
 
 			CHECK_FOR_GPUCONTEXT(gcontext);
 
-			ev = WaitLatch(MyLatch,
-						   WL_LATCH_SET |
-						   WL_TIMEOUT |
-						   WL_POSTMASTER_DEATH,
-						   1000L
-#if PG_VERSION_NUM >= 100000
-						   ,PG_WAIT_EXTENSION
-#endif
-				);
+			ev = StromWaitLatch(MyLatch,
+								WL_LATCH_SET |
+								WL_TIMEOUT |
+								WL_POSTMASTER_DEATH,
+								1000L,
+								PG_WAIT_EXTENSION);
 			if (ev & WL_POSTMASTER_DEATH)
 				elog(FATAL, "Unexpected Postmaster Dead");
 			ResetLatch(MyLatch);
@@ -5458,13 +5455,10 @@ GpuJoinInnerPreload(GpuTaskState *gts, CUdeviceptr *p_m_kmrels)
 			/* wait for the completion of inner preload by the master */
 			CHECK_FOR_INTERRUPTS();
 
-			WaitLatch(&MyProc->procLatch,
-					  WL_LATCH_SET,
-					  -1
-#if PG_VERSION_NUM >= 100000
-					  ,PG_WAIT_EXTENSION
-#endif
-				);
+			StromWaitLatch(&MyProc->procLatch,
+						   WL_LATCH_SET,
+						   -1,
+						   PG_WAIT_EXTENSION);
 			ResetLatch(&MyProc->procLatch);
 		}
 	}

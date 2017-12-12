@@ -192,6 +192,14 @@
 #endif
 #include "cuda_common.h"
 
+#if PG_VERSION_NUM >= 100000
+#define StromWaitLatch(latch, wakeEvents, timeout, wait_event_info)     \
+	WaitLatch((latch), (wakeEvents), (timeout), (wait_event_info))
+#else
+#define StromWaitLatch(latch, wakeEvents, timeout, wait_event_info)     \
+	WaitLatch((latch), (wakeEvents), (timeout))
+#endif
+
 #define PGSTROM_SCHEMA_NAME		"pgstrom"
 
 #define RESTRACK_HASHSIZE		53
