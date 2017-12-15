@@ -471,7 +471,7 @@ pg_numeric_datum_ref(kern_context *kcxt,
 
 STATIC_INLINE(cl_uint)
 pg_numeric_datum_store(kern_context *kcxt,
-					   void *extra_buf,
+					   char *extra_buf,
 					   pg_numeric_t datum)
 {
 	return pg_numeric_to_varlena(kcxt, extra_buf,

@@ -82,10 +82,6 @@ static struct {
 				 "__double_as_longlong(-DBL_MAX)",
 				 "__double_as_longlong(0.0)",
 				 0, 0, generic_devtype_hashfunc),
-	DEVTYPE_DECL("tid", TIDOID, "ItemPointerData",
-				 NULL, NULL, NULL,
-				 0, sizeof(ItemPointerData),
-				 generic_devtype_hashfunc),
 	/*
 	 * Misc data types
 	 */
@@ -1078,10 +1074,12 @@ typedef struct devfunc_extra_catalog_t {
 } devfunc_extra_catalog_t;
 
 static devfunc_extra_catalog_t devfunc_extra_catalog[] = {
+#if 0
 	/* type cast tid <--> bigint */
 	{"pgstrom.cast_tid_to_int8(pg_catalog.tid)",
 	 "bigint",
 	 "F:cast_tid_to_int8"},
+#endif
 };
 
 static void

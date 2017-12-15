@@ -201,22 +201,20 @@ gpuscan_quals_eval(kern_context *kcxt,
 				   kern_data_store *kds,
 				   ItemPointerData *t_self,
 				   HeapTupleHeaderData *htup);
+
 STATIC_FUNCTION(cl_bool)
 gpuscan_quals_eval_column(kern_context *kcxt,
 						  kern_data_store *kds,
-						  cl_uint src_index)
-{
-	return false;
-}
+						  cl_uint src_index);
 
 STATIC_FUNCTION(void)
-gpuscan_projection(kern_context *kcxt,
-				   kern_data_store *kds_src,
-				   HeapTupleHeaderData *htup,
-				   ItemPointerData *t_self,
-				   Datum *tup_values,
-				   cl_bool *tup_isnull,
-				   cl_bool *tup_internal);
+gpuscan_projection_tuple(kern_context *kcxt,
+						 kern_data_store *kds_src,
+						 HeapTupleHeaderData *htup,
+						 ItemPointerData *t_self,
+						 Datum *tup_values,
+						 cl_bool *tup_isnull,
+						 char *extra_buf);
 
 STATIC_FUNCTION(void)
 gpuscan_projection_column(kern_context *kcxt,
@@ -226,10 +224,9 @@ gpuscan_projection_column(kern_context *kcxt,
 						  HeapTupleFields *tx_attrs,
 						  Datum *tup_values,
 						  cl_bool *tup_isnull,
-						  cl_char *tup_extra)
-{}
+						  char *extra_buf);
 
-#ifdef GPUSCAN_KERNEL_REQUIRED
+#ifdef GPUSCAN_KERNEL_FUNCTION_ENABLED
 /*
  * gpuscan_exec_quals_row - GpuScan logic for KDS_FORMAT_ROW
  */
@@ -249,10 +246,14 @@ gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
 	cl_uint			usage_offset	__attribute__((unused));
 	cl_uint			total_nitems_out = 0;	/* stat */
 	cl_uint			total_extra_size = 0;	/* stat */
-#ifdef GPUSCAN_DEVICE_PROJECTION
+#ifdef GPUSCAN_HAS_DEVICE_PROJECTION
 	Datum			tup_values[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
 	cl_bool			tup_isnull[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
-	cl_bool			tup_internal[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
+#if GPUSCAN_DEVICE_PROJECTION_EXTRA_SIZE > 0
+	char			tup_extra[GPUSCAN_DEVICE_PROJECTION_EXTRA_SIZE];
+#else
+	char		   *tup_extra = NULL;
+#endif
 #endif
 	__shared__ cl_int	src_base;
 	__shared__ cl_int	nitems_base;
@@ -309,7 +310,7 @@ gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
 		if (nvalids == 0)
 			goto skip;
 
-#ifdef GPUSCAN_DEVICE_PROJECTION
+#ifdef GPUSCAN_HAS_DEVICE_PROJECTION
 		if (get_local_id() == 0)
 			nitems_base = atomicAdd(&kds_dst->nitems, nvalids);
 		__syncthreads();
@@ -317,19 +318,19 @@ gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
 		/* extract the source tuple to the private slot, if any */
 		if (tupitem && rc)
 		{
-			gpuscan_projection(&kcxt,
-							   kds_src,
-							   &tupitem->htup,
-							   &tupitem->t_self,
-							   tup_values,
-							   tup_isnull,
-							   tup_internal);
+			gpuscan_projection_tuple(&kcxt,
+									 kds_src,
+									 &tupitem->htup,
+									 &tupitem->t_self,
+									 tup_values,
+									 tup_isnull,
+									 tup_extra);
 			required = MAXALIGN(offsetof(kern_tupitem, htup) +
 								compute_heaptuple_size(&kcxt,
 													   kds_dst,
 													   tup_values,
 													   tup_isnull,
-													   tup_internal));
+													   NULL));
 		}
 		else
 			required = 0;
@@ -361,7 +362,7 @@ gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
 								NULL,
 								tup_values,
 								tup_isnull,
-								tup_internal);
+								NULL);
 		}
 
 		/* bailout if any error */
@@ -428,6 +429,15 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 	cl_uint			total_nitems_out = 0;	/* stat */
 	cl_uint			total_extra_size = 0;	/* stat */
 	cl_bool			try_next_window = true;
+#ifdef GPUSCAN_HAS_DEVICE_PROJECTION
+	Datum			tup_values[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
+	cl_bool			tup_isnull[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
+#if GPUSCAN_DEVICE_PROJECTION_EXTRA_SIZE > 0
+	char			tup_extra[GPUSCAN_DEVICE_PROJECTION_EXTRA_SIZE];
+#else
+	char		   *tup_extra = NULL;
+#endif
+#endif
 	__shared__ cl_uint	base;
 	__shared__ cl_uint	nitems_base;
 	__shared__ cl_uint	usage_base;
@@ -514,22 +524,22 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 				goto skip;
 
 			/* store the result heap-tuple to destination buffer */
-#ifdef GPUSCAN_DEVICE_PROJECTION_COMMON
+#ifdef GPUSCAN_HAS_DEVICE_PROJECTION
 			if (htup && rc)
 			{
-				gpuscan_projection(&kcxt,
-								   kds_src,
-								   htup,
-								   &t_self,
-								   tup_values,
-								   tup_isnull,
-								   tup_internal);
+				gpuscan_projection_tuple(&kcxt,
+										 kds_src,
+										 htup,
+										 &t_self,
+										 tup_values,
+										 tup_isnull,
+										 tup_extra);
 				required = MAXALIGN(offsetof(kern_tupitem, htup) +
 									compute_heaptuple_size(&kcxt,
 														   kds_dst,
 														   tup_values,
 														   tup_isnull,
-														   tup_internal));
+														   NULL));
 			}
 			else
 				required = 0;
@@ -561,7 +571,7 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 									NULL,
 									tup_values,
 									tup_isnull,
-									tup_internal);
+									NULL);
 			}
 #else
 			/* no projection - write back souce tuple as is */
@@ -719,6 +729,7 @@ gpuscan_exec_quals_column(kern_gpuscan *kgpuscan,
 
 		if (rc)
 		{
+#ifdef GPUSCAN_HAS_DEVICE_PROJECTION
 			gpuscan_projection_column(&kcxt,
 									  kds_src,
 									  src_index,
@@ -733,6 +744,13 @@ gpuscan_exec_quals_column(kern_gpuscan *kgpuscan,
 													   tup_values,
 													   tup_isnull,
 													   NULL));
+#else
+			//extract all the fields as is
+
+
+
+
+#endif
 		}
 		else
 			required = 0;

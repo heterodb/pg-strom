@@ -75,10 +75,15 @@ typedef cl_ulong	Datum;
 #define PointerGetDatum(X)	((Datum) (X))
 #define DatumGetPointer(X)	((char *) (X))
 
-#define SET_1_BYTE(value)	(((Datum) (value)) & 0x000000ff)
-#define SET_2_BYTES(value)	(((Datum) (value)) & 0x0000ffff)
-#define SET_4_BYTES(value)	(((Datum) (value)) & 0xffffffff)
+#define SET_1_BYTE(value)	(((Datum) (value)) & 0x000000ffL)
+#define SET_2_BYTES(value)	(((Datum) (value)) & 0x0000ffffL)
+#define SET_4_BYTES(value)	(((Datum) (value)) & 0xffffffffL)
 #define SET_8_BYTES(value)	((Datum) (value))
+
+#define READ_INT8_PTR(addr)		SET_1_BYTE(*((cl_uchar *)(addr)))
+#define READ_INT16_PTR(addr)	SET_2_BYTES(*((cl_ushort *)(addr)))
+#define READ_INT32_PTR(addr)	SET_4_BYTES(*((cl_uint *)(addr)))
+#define READ_INT64_PTR(addr)	SET_8_BYTES(*((cl_ulong *)(addr)))
 
 #define INT64CONST(x)	((cl_long) x##L)
 #define UINT64CONST(x)	((cl_ulong) x##UL)
@@ -1867,15 +1872,7 @@ kern_getsysatt_ctid(kern_data_store *kds,
 					HeapTupleHeaderData *htup,
 					ItemPointerData *t_self)
 {
-	union {
-		Datum			datum;
-		ItemPointerData	ip;
-	} u;
-
-	u.datum = 0;
-	u.ip = *t_self;
-
-	return u.datum;
+	return PointerGetDatum(t_self);
 }
 
 STATIC_INLINE(Datum)
@@ -2517,26 +2514,5 @@ pgfn_bool_is_not_unknown(kern_context *kcxt, pg_bool_t result)
 	result.isnull = false;
 	return result;
 }
-
-/*
- * Type cast for tid-->bigint, but no reverse direction in kernel space
- */
-STATIC_INLINE(pg_int8_t)
-pgfn_cast_tid_to_int8(kern_context *kcxt, pg_tid_t arg)
-{
-	pg_int8_t	result;
-
-	if (arg.isnull)
-		result.isnull = true;
-	else
-	{
-		result.isnull = false;
-		result.value = (((cl_long)arg.value.ip_blkid.bi_hi << 32) |
-						((cl_long)arg.value.ip_blkid.bi_lo << 16) |
-						((cl_long)arg.value.ip_posid));
-	}
-	return result;
-}
-
 #endif	/* __CUDACC__ */
 #endif	/* CUDA_COMMON_H */
