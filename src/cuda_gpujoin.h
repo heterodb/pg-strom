@@ -1296,7 +1296,7 @@ gpujoin_main(kern_gpujoin *kgjoin,
 					  stat_nitems[index+1]);
 	}
 	__syncthreads();
-	kern_writeback_error_status(&kgjoin->kerror, kcxt.e);
+	kern_writeback_error_status(&kgjoin->kerror, &kcxt.e);
 }
 
 /*
@@ -1469,7 +1469,7 @@ gpujoin_right_outer(kern_gpujoin *kgjoin,
 		}
 	}
 	__syncthreads();
-	kern_writeback_error_status(&kgjoin->kerror, kcxt.e);
+	kern_writeback_error_status(&kgjoin->kerror, &kcxt.e);
 }
 
 #endif	/* __CUDACC__ */

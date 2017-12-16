@@ -393,7 +393,7 @@ gpupreagg_setup_row(kern_gpupreagg *kgpreagg,
 	} while(try_next_window);
 
 	/* write back error status if any */
-	kern_writeback_error_status(&kgpreagg->kerror, kcxt.e);
+	kern_writeback_error_status(&kgpreagg->kerror, &kcxt.e);
 }
 
 #ifdef GPUPREAGG_PULLUP_OUTER_SCAN
@@ -547,7 +547,7 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 	} while(try_next_window);
 out:
 	/* write back error status if any */
-	kern_writeback_error_status(&kgpreagg->kerror, kcxt.e);
+	kern_writeback_error_status(&kgpreagg->kerror, &kcxt.e);
 }
 #endif	/* GPUPREAGG_PULLUP_OUTER_SCAN */
 
@@ -671,7 +671,7 @@ gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,		/* in/out */
 	} while (!is_last_reduction);
 
 	/* write-back execution status into host side */
-    kern_writeback_error_status(&kgpreagg->kerror, kcxt.e);
+    kern_writeback_error_status(&kgpreagg->kerror, &kcxt.e);
 }
 
 /*
@@ -1057,7 +1057,7 @@ clean_restart:
 	} while(!is_last_reduction);
 
 	/* write-back execution status into host side */
-	kern_writeback_error_status(&kgpreagg->kerror, kcxt.e);
+	kern_writeback_error_status(&kgpreagg->kerror, &kcxt.e);
 }
 
 /* ----------------------------------------------------------------

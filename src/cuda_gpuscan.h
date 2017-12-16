@@ -405,7 +405,7 @@ gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
 		atomicAdd(&kgpuscan->nitems_out, total_nitems_out);
 		atomicAdd(&kgpuscan->extra_size, total_extra_size);
 	}
-	kern_writeback_error_status(&kgpuscan->kerror, kcxt.e);
+	kern_writeback_error_status(&kgpuscan->kerror, &kcxt.e);
 }
 #endif	/* GPUSCAN_KERNEL_REQUIRED */
 
@@ -642,7 +642,7 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 		atomicAdd(&kgpuscan->extra_size, total_extra_size);
 	}
 	/* write back error code to the host */
-	kern_writeback_error_status(&kgpuscan->kerror, kcxt.e);
+	kern_writeback_error_status(&kgpuscan->kerror, &kcxt.e);
 }
 #endif	/* GPUSCAN_KERNEL_REQUIRED */
 
@@ -808,7 +808,7 @@ gpuscan_exec_quals_column(kern_gpuscan *kgpuscan,
 		atomicAdd(&kgpuscan->nitems_out, total_nitems_out);
 		atomicAdd(&kgpuscan->extra_size, total_extra_size);
 	}
-	kern_writeback_error_status(&kgpuscan->kerror, kcxt.e);
+	kern_writeback_error_status(&kgpuscan->kerror, &kcxt.e);
 }
 #endif	/* GPUSCAN_KERNEL_REQUIRED */
 #endif	/* __CUDACC__ */

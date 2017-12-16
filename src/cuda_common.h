@@ -256,11 +256,13 @@ typedef uintptr_t		hostptr_t;
 #define StromKernel_plcuda_main_kernel				0x0502
 #define StromKernel_plcuda_post_kernel				0x0503
 
+#define KERN_ERRORBUF_FILENAME_LEN		24
 typedef struct
 {
 	cl_int		errcode;	/* one of the StromError_* */
 	cl_short	kernel;		/* one of the StromKernel_* */
 	cl_short	lineno;		/* line number STROM_SET_ERROR is called */
+	char		filename[KERN_ERRORBUF_FILENAME_LEN];
 } kern_errorbuf;
 
 /*
@@ -279,6 +281,7 @@ typedef struct
 		(kcxt)->e.errcode = StromError_Success;				\
 		(kcxt)->e.kernel = StromKernel_##kfunction;			\
 		(kcxt)->e.lineno = 0;								\
+		(kcxt)->e.filename[0] = '\0';						\
 		(kcxt)->kparams = (__kparams);						\
 		assert((cl_ulong)(__kparams) == MAXALIGN(__kparams));	\
 	} while(0)
@@ -291,39 +294,42 @@ typedef struct
  */
 #ifdef __CUDACC__
 STATIC_INLINE(void)
-__STROM_SET_ERROR(kern_errorbuf *p_kerror, cl_int errcode, cl_int lineno,
-				  cl_long extra_x, cl_long extra_y, cl_long extra_z)
+__STROM_SET_ERROR(kern_errorbuf *p_kerror, cl_int errcode,
+				  const char *filename, cl_int lineno)
 {
-	cl_int			oldcode = p_kerror->errcode;
+	cl_int		oldcode = p_kerror->errcode;
 
 	if (oldcode == StromError_Success &&
 		errcode != StromError_Success)
 	{
+		const char *pos;
+		cl_int		fn_len;
+
+		for (pos=filename; *pos != '\0'; pos++)
+		{
+			if (pos[0] == '/' && pos[1] != '\0')
+				filename = pos + 1;
+		}
 		p_kerror->errcode = errcode;
 		p_kerror->lineno = lineno;
+
+		fn_len = Min(pos - filename, KERN_ERRORBUF_FILENAME_LEN - 1);
+		memcpy(p_kerror->filename, filename, fn_len);
+		p_kerror->filename[fn_len] = '\0';
 	}
 }
 
 #define STROM_SET_ERROR(p_kerror, errcode)		\
-	__STROM_SET_ERROR((p_kerror), (errcode), __LINE__, 123, 456, 789)
-#define STROM_SET_ERROR_EXTRA(p_kerror, errcode, x, y, z)	\
-	__STROM_SET_ERROR((p_kerror), (errcode), __LINE__, (x), (y), (z))
+	__STROM_SET_ERROR((p_kerror), (errcode), __FILE__, __LINE__)
 #define STROM_SET_RUNTIME_ERROR(p_kerror, errcode)						\
 	STROM_SET_ERROR((p_kerror), (errcode) == cudaSuccess ?				\
 					(cl_int)(errcode) :									\
 					(cl_int)(errcode) + StromError_CudaDevRunTimeBase)
-#define STROM_SET_RUNTIME_ERROR_EXTRA(p_kerror, errcode, x, y, z)		\
-	STROM_SET_ERROR_EXTRA((p_kerror),									\
-						  (errcode) == cudaSuccess ?					\
-						  (cl_int)(errcode) :							\
-						  (cl_int)(errcode) + StromError_CudaDevRunTimeBase, \
-						  (x), (y), (z))
-
 /*
  * kern_writeback_error_status
  */
 STATIC_INLINE(void)
-kern_writeback_error_status(kern_errorbuf *result, kern_errorbuf own_error)
+kern_writeback_error_status(kern_errorbuf *result, kern_errorbuf *my_error)
 {
 	/*
 	 * It writes back a thread local error status only when the global
@@ -331,14 +337,17 @@ kern_writeback_error_status(kern_errorbuf *result, kern_errorbuf own_error)
 	 * error status. Elsewhere, we don't involves any atomic operation
 	 * in the most of code path.
 	 */
-	if (own_error.errcode != StromError_Success &&
+	if (my_error->errcode != StromError_Success &&
 		atomicCAS(&result->errcode,
 				  StromError_Success,
-				  own_error.errcode) == StromError_Success)
+				  my_error->errcode) == StromError_Success)
 	{
 		/* only primary error workgroup can come into */
-		result->kernel = own_error.kernel;
-		result->lineno = own_error.lineno;
+		result->kernel = my_error->kernel;
+		result->lineno = my_error->lineno;
+		memcpy(result->filename,
+			   my_error->filename,
+			   KERN_ERRORBUF_FILENAME_LEN);
 	}
 }
 

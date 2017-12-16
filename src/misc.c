@@ -332,8 +332,8 @@ errorTextKernel(kern_errorbuf *kerror)
 			break;
 	}
 #undef KERN_ENTRY
-	snprintf(buffer, sizeof(buffer), "%s:%d %s",
-			 kernel_name, kerror->lineno,
-			 errorText(kerror->errcode));
+	snprintf(buffer, sizeof(buffer), "%s at %s:%d by %s",
+			 errorText(kerror->errcode),
+			 kerror->filename, kerror->lineno, kernel_name);
 	return buffer;
 }

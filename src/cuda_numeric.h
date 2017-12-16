@@ -938,8 +938,7 @@ pgfn_numeric_add(kern_context *kcxt,
 			// magnify is overflow
 			v.isnull = true;
 			v.value  = 0;
-			STROM_SET_ERROR_EXTRA(&kcxt->e, StromError_CpuReCheck,
-								  arg1.value, arg2.value, expoDiff);
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 			return v;
 		}
 
@@ -952,8 +951,7 @@ pgfn_numeric_add(kern_context *kcxt,
 		if ((value * mag) / mag != value) {
 			v.isnull = true;
 			v.value  = 0;
-			STROM_SET_ERROR_EXTRA(&kcxt->e, StromError_CpuReCheck,
-								  arg1.value, arg2.value, mag);
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 			return v;
 		}
 
@@ -979,8 +977,7 @@ pgfn_numeric_add(kern_context *kcxt,
 			// Overflow
 			v.isnull = true;
 			v.value  = 0;
-			STROM_SET_ERROR_EXTRA(&kcxt->e, StromError_CpuReCheck,
-								  arg1.value, arg2.value, mant1);
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 			return v;
 		}
 		mant1 += mant2;
@@ -1004,8 +1001,7 @@ pgfn_numeric_add(kern_context *kcxt,
 		(mant1 & ~PG_NUMERIC_MANTISSA_MASK)) {
 		v.isnull = true;
 		v.value  = 0;
-		STROM_SET_ERROR_EXTRA(&kcxt->e, StromError_CpuReCheck,
-							  arg1.value, arg2.value, expo1);
+		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 		return v;
 	}
 
