@@ -323,6 +323,9 @@ struct GpuTaskState
 	cl_uint			num_running_tasks;	/* # of running tasks */
 	cl_uint			num_ready_tasks;	/* # of ready tasks */
 
+	/* misc fields */
+	cl_long			num_cpu_fallbacks;	/* # of CPU fallback chunks */
+
 	/* co-operation with CPU parallel */
 	ParallelContext	*pcxt;
 };

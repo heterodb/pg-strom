@@ -1797,16 +1797,16 @@ fixup_varnode_to_origin(Node *node, List *custom_scan_tlist)
 	if (IsA(node, Var))
 	{
 		Var	   *varnode = (Var *)node;
-		Node   *altnode;
+		TargetEntry *tle;
 
 		if (custom_scan_tlist != NIL)
 		{
 			Assert(varnode->varno == INDEX_VAR);
 			Assert(varnode->varattno >= 1 &&
 				   varnode->varattno <= list_length(custom_scan_tlist));
-			altnode = list_nth(custom_scan_tlist, varnode->varattno - 1);
-
-			return copyObject(altnode);
+			tle = list_nth(custom_scan_tlist,
+						   varnode->varattno - 1);
+			return copyObject(tle->expr);
 		}
 		Assert(!IS_SPECIAL_VARNO(varnode->varno));
 	}

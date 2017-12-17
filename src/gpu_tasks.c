@@ -461,6 +461,8 @@ pgstromExecGpuTaskState(GpuTaskState *gts)
 		gtask = fetch_next_gputask(gts);
 		if (!gtask)
 			break;
+		if (gtask->cpu_fallback)
+			gts->num_cpu_fallbacks++;
 		gts->curr_task = gtask;
 		gts->curr_index = 0;
 		gts->curr_lp_index = 0;
@@ -622,6 +624,10 @@ pgstromExplainGpuTaskState(GpuTaskState *gts, ExplainState *es)
 		ExplainPropertyText("NVMe-Strom", "enabled", es);
 	else if (es->format != EXPLAIN_FORMAT_TEXT)
 		ExplainPropertyText("NVMe-Strom", "disabled", es);
+
+	/* Number of CPU fallbacks, if any */
+	if (es->analyze && gts->num_cpu_fallbacks > 0)
+		ExplainPropertyLong("CPU fallbacks", gts->num_cpu_fallbacks, es);
 
 	/* Source path of the GPU kernel */
 	if (es->verbose &&
