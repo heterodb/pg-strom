@@ -2484,7 +2484,6 @@ make_tlist_device_projection(List *tlist_dev,
  *                          HeapTupleHeaderData *htup,
  *                          Datum *dst_values,
  *                          cl_char *dst_isnull);
- *
  * and
  *
  * STATIC_FUNCTION(void)
@@ -2493,6 +2492,13 @@ make_tlist_device_projection(List *tlist_dev,
  *                           cl_bool *src_isnull,
  *                           Datum *dst_values,
  *                           cl_bool *dst_values);
+ * and
+ * STATIC_FUNCTION(void)
+ * gpupreagg_projection_column(kern_context *kcxt,
+ *                             kern_data_store *kds_src,
+ *                             cl_uint src_index,
+ *                             Datum *dst_values,
+ *                             cl_char *dst_isnull);
  */
 static Expr *
 codegen_projection_partial_funcion(FuncExpr *f,
@@ -2645,7 +2651,9 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 								 List *outer_tlist)
 {
 	StringInfoData	decl;
-	StringInfoData	body;
+	StringInfoData	tbody;
+	StringInfoData	sbody;
+	StringInfoData	cbody;
 	StringInfoData	temp;
 	Relation		outer_rel = NULL;
 	TupleDesc		outer_desc = NULL;
@@ -2653,19 +2661,14 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 	int				i, k, nattrs;
 
 	initStringInfo(&decl);
-	initStringInfo(&body);
+	initStringInfo(&tbody);
+	initStringInfo(&sbody);
+	initStringInfo(&cbody);
 	initStringInfo(&temp);
 	context->param_refs = NULL;
 
 	appendStringInfoString(
 		&decl,
-		"STATIC_FUNCTION(void)\n"
-		"gpupreagg_projection_row(kern_context *kcxt,\n"
-		"                         kern_data_store *kds_src,\n"
-		"                         HeapTupleHeaderData *htup,\n"
-		"                         Datum *dst_values,\n"
-		"                         cl_char *dst_isnull)\n"
-		"{\n"
 		"  void        *addr    __attribute__((unused));\n"
 		"  pg_anytype_t temp    __attribute__((unused));\n");
 
@@ -2698,12 +2701,14 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 		}
 
 		appendStringInfoString(
-			&body,
+			&tbody,
 			"\n"
 			"  /* extract the given htup and load variables */\n"
 			"  EXTRACT_HEAP_TUPLE_BEGIN(addr, kds_src, htup);\n");
 		for (i=1; i <= nattrs; i++)
 		{
+			bool	addr_is_valid = false;
+
 			k = i - FirstLowInvalidHeapAttributeNumber;
 			if (bms_is_member(k, outer_refs_any))
 			{
@@ -2742,10 +2747,33 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 						&decl,
 						"  pg_%s_t KVAR_%u;\n",
 						dtype->type_name, i);
+					/* row */
 					appendStringInfo(
 						&temp,
 						"  KVAR_%u = pg_%s_datum_ref(kcxt,addr);\n",
 						i, dtype->type_name);
+					/* slot */
+					if (dtype->type_byval)
+						appendStringInfo(
+							&sbody,
+							"  addr = src_isnull[%d] ? NULL : &src_values[%d];\n",
+							i-1, i-1);
+					else
+						appendStringInfo(
+							&sbody,
+							"  addr = src_isnull[%d] ? NULL : DatumGetPointer(src_values[%d]);\n",
+							i-1, i-1);
+					appendStringInfo(
+						&sbody,
+						"  KVAR_%u = pg_%s_datum_ref(kcxt,addr);\n",
+						i, dtype->type_name);
+					/* column */
+					appendStringInfo(
+						&cbody,
+						"  addr = kern_get_datum_column(kds_src,%d,src_index);\n"
+						"  KVAR_%u = pg_%s_datum_ref(kcxt,addr);\n",
+						i-1, i, dtype->type_name);
+					addr_is_valid = true;
 				}
 
 				foreach (lc, tlist_alt)
@@ -2767,6 +2795,7 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 					if (varnode->varattno != i)
 						continue;
 
+					/* row */
 					appendStringInfo(
 						&temp,
 						"  if (!addr)\n"
@@ -2780,8 +2809,36 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 						tle->resno - 1,
 						tle->resno - 1,
 						dtype->type_name);
+
+					/* slot */
+					appendStringInfo(
+						&sbody,
+						"  dst_isnull[%d] = src_isnull[%d];\n"
+						"  dst_values[%d] = src_values[%d];\n",
+						tle->resno-1, i-1,
+						tle->resno-1, i-1);
+
+					/* column */
+					if (!addr_is_valid)
+						appendStringInfo(
+							&cbody,
+							"  addr = kern_get_datum_column(kds_src,%d,src_index);\n",
+							i-1);
+					appendStringInfo(
+						&cbody,
+						"  if (!addr)\n"
+						"    dst_isnull[%d] = true;\n"
+						"  else\n"
+						"  {\n"
+						"    dst_isnull[%d] = false;\n"
+						"    dst_values[%d] = pg_%s_as_datum(addr);\n"
+						"  }\n",
+						tle->resno - 1,
+						tle->resno - 1,
+						tle->resno - 1,
+						dtype->type_name);
 				}
-				appendStringInfoString(&body, temp.data);
+				appendStringInfoString(&tbody, temp.data);
                 resetStringInfo(&temp);
 			}
 			appendStringInfoString(
@@ -2789,13 +2846,14 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 				"  EXTRACT_HEAP_TUPLE_NEXT(addr);\n");
 		}
 		appendStringInfoString(
-			&body,
+			&tbody,
 			"  EXTRACT_HEAP_TUPLE_END();\n");
 	}
 
 	/*
 	 * Execute expression and store the value on dst_values/dst_isnull
 	 */
+	resetStringInfo(&temp);
 	foreach (lc, tlist_alt)
 	{
 		TargetEntry	   *tle = lfirst(lc);
@@ -2833,7 +2891,7 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 			elog(ERROR, "device type lookup failed: %s",
 				 format_type_be(exprType((Node *)expr)));
 		appendStringInfo(
-			&body,
+			&temp,
 			"\n"
 			"  /* initial attribute %d (%s) */\n"
 			"  temp.%s_v = %s;\n"
@@ -2845,7 +2903,7 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 		if (dtype->type_byval)
 		{
 			appendStringInfo(
-				&body,
+				&temp,
 				"  if (!temp.%s_v.isnull)\n"
 				"    dst_values[%d] = pg_%s_as_datum(&temp.%s_v.value);\n",
 				dtype->type_name,
@@ -2856,7 +2914,7 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 		else
 		{
 			appendStringInfo(
-				&body,
+				&temp,
 				"  if (!temp.%s_v.isnull)\n"
 				"    dst_values[%d] = PointerGetDatum(temp.%s_v.value);\n",
 				dtype->type_name,
@@ -2867,28 +2925,70 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 		if (null_const_value)
 		{
 			appendStringInfo(
-				&body,
+				&temp,
 				"  else\n"
 				"    dst_values[%d] = %s;\n",
 				tle->resno-1,
 				null_const_value);
 		}
 	}
+	appendStringInfoString(&tbody, temp.data);
+	appendStringInfoString(&sbody, temp.data);
+	appendStringInfoString(&cbody, temp.data);
+
 	/* const/params */
 	pgstrom_codegen_param_declarations(&decl, context);
+
+	/* writeout kernel functions */
 	appendStringInfo(
-		&decl,
-		"%s"
-		"}\n\n", body.data);
+		kern,
+		"STATIC_FUNCTION(void)\n"
+		"gpupreagg_projection_row(kern_context *kcxt,\n"
+		"                         kern_data_store *kds_src,\n"
+		"                         HeapTupleHeaderData *htup,\n"
+		"                         Datum *dst_values,\n"
+		"                         cl_char *dst_isnull)\n"
+		"{\n"
+		"%s\n%s"
+		"}\n\n"
+		"#ifdef GPUPREAGG_COMBINED_JOIN\n"
+		"STATIC_FUNCTION(void)\n"
+		"gpupreagg_projection_slot(kern_context *kcxt,\n"
+		"                          Datum   *src_values,\n"
+		"                          cl_char *src_isnull,\n"
+		"                          Datum   *dst_values,\n"
+		"                          cl_char *dst_isnull)\n"
+		"{\n"
+		"%s\n%s"
+		"}\n"
+		"#endif /* GPUPREAGG_COMBINED_JOIN */\n\n"
+		"STATIC_FUNCTION(void)\n"
+		"gpupreagg_projection_column(kern_context *kcxt,"
+		"                            kern_data_store *kds_src,\n"
+		"                            cl_uint src_index,\n"
+		"                            Datum *dst_values,\n"
+		"                            cl_char *dst_isnull)\n"
+		"{\n"
+		"%s\n%s"
+		"}\n\n",
+		decl.data,
+		tbody.data,
+		decl.data,
+		sbody.data,
+		decl.data,
+		cbody.data);
 
 	if (outer_rel)
 		heap_close(outer_rel, NoLock);
 
-	appendStringInfoString(kern, decl.data);
 	pfree(decl.data);
-	pfree(body.data);
+	pfree(tbody.data);
+	pfree(sbody.data);
+	pfree(cbody.data);
+	pfree(temp.data);
 }
 
+#if 0
 static void
 gpupreagg_codegen_projection_slot(StringInfo kern,
 								  codegen_context *context,
@@ -3108,6 +3208,7 @@ gpupreagg_codegen_projection_slot(StringInfo kern,
 	pfree(decl.data);
 	pfree(body.data);
 }
+#endif
 
 /*
  * gpupreagg_codegen_hashvalue - code generator for
@@ -3586,9 +3687,11 @@ gpupreagg_codegen(codegen_context *context,
 	gpupreagg_codegen_projection_row(&body, context, root, tlist_alt,
 									 outer_refs_any, outer_refs_expr,
 									 cscan->scan.scanrelid, outer_tlist);
+#if 0
 	gpupreagg_codegen_projection_slot(&body, context, root, tlist_alt,
 									  outer_refs_any, outer_refs_expr,
 									  cscan->scan.scanrelid, outer_tlist);
+#endif
 	gpa_info->tlist_fallback = tlist_alt;
 	/* gpupreagg_hashvalue */
 	gpupreagg_codegen_hashvalue(&body, context, tlist_dev);

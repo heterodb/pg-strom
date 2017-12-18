@@ -185,6 +185,13 @@ gpupreagg_projection_row(kern_context *kcxt,
 						 Datum *dst_values,			/* out */
 						 cl_char *dst_isnull);		/* out */
 
+STATIC_FUNCTION(void)
+gpupreagg_projection_column(kern_context *kcxt,
+							kern_data_store *kds_src,	/* in */
+							cl_uint src_index,			/* out */
+							Datum *dst_values,			/* out */
+							cl_char *dst_isnull);		/* out */
+
 /*
  * gpupreagg_final_data_move
  *
@@ -550,6 +557,110 @@ out:
 	kern_writeback_error_status(&kgpreagg->kerror, &kcxt.e);
 }
 #endif	/* GPUPREAGG_PULLUP_OUTER_SCAN */
+
+/*
+ * gpupreagg_setup_column
+ */
+KERNEL_FUNCTION(void)
+gpupreagg_setup_column(kern_gpupreagg *kgpreagg,
+					   kern_data_store *kds_src,	/* in: KDS_FORMAT_COLUMN */
+					   kern_data_store *kds_slot)	/* out: KDS_FORMAT_SLOT */
+{
+	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
+	kern_context	kcxt;
+	kern_tupitem   *tupitem;
+	cl_uint			src_nitems = kds_src->nitems;
+	cl_uint			src_index;
+	cl_uint			slot_index;
+	cl_uint			offset;
+	cl_uint			count;
+	cl_uint			nvalids;
+	Datum		   *slot_values;
+	cl_bool		   *slot_isnull;
+	cl_bool			try_next_window = true;
+	cl_bool			rc;
+	__shared__ cl_uint	base;
+	__shared__ cl_int	status;
+
+	INIT_KERNEL_CONTEXT(&kcxt, gpupreagg_setup_column, kparams);
+	if (get_local_id() == 0)
+		status = StromError_Success;
+	__syncthreads();
+
+	do {
+		if (get_local_id() == 0)
+			base = atomicAdd(&kgpreagg->read_src_pos, get_local_size());
+		__syncthreads();
+
+		if (base + get_local_size() >= src_nitems)
+			try_next_window = false;
+		if (base >= src_nitems)
+			break;
+
+		src_index = base + get_local_id();
+		if (src_index < src_nitems)
+		{
+#ifdef GPUPREAGG_PULLUP_OUTER_SCAN
+			rc = gpuscan_quals_eval_column(&kcxt, kds_src, src_index);
+#else
+			rc = true;
+#endif
+		}
+		else
+		{
+			rc = false;
+		}
+#ifdef GPUPREAGG_PULLUP_OUTER_SCAN
+		/* Bailout if any error */
+		if (kcxt.e.errcode != StromError_Success)
+			atomicCAS(&status, StromError_Success, kcxt.e.errcode);
+		__syncthreads();
+		if (status != StromError_Success)
+			break;
+#endif
+		/* allocation of kds_slot buffer, if any */
+		offset = pgstromStairlikeBinaryCount(rc, &nvalids);
+		if (nvalids > 0)
+		{
+			if (get_local_id() == 0)
+				base = atomicAdd(&kds_slot->nitems, nvalids);
+			__syncthreads();
+			if (base + nvalids > kds_slot->nrooms)
+			{
+				STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
+				break;
+			}
+			slot_index = base + offset;
+			if (tupitem && rc)
+			{
+				slot_values = KERN_DATA_STORE_VALUES(kds_slot, slot_index);
+				slot_isnull = KERN_DATA_STORE_ISNULL(kds_slot, slot_index);
+
+				gpupreagg_projection_column(&kcxt,
+											kds_src,
+											src_index,
+											slot_values,
+											slot_isnull);
+			}
+		}
+		/* bailout if any error */
+		if (kcxt.e.errcode != StromError_Success)
+            atomicCAS(&status, StromError_Success, kcxt.e.errcode);
+        __syncthreads();
+        if (status != StromError_Success)
+            break;
+		/* update statistics */
+		pgstromStairlikeBinaryCount(tupitem ? 1 : 0, &count);
+		if (get_local_id() == 0)
+		{
+			atomicAdd(&kgpreagg->nitems_real, count);
+			atomicAdd(&kgpreagg->nitems_filtered, count - nvalids);
+		}
+	} while(try_next_window);
+
+	/* write back error status if any */
+	kern_writeback_error_status(&kgpreagg->kerror, &kcxt.e);
+}
 
 /*
  * gpupreagg_nogroup_reduction
