@@ -941,11 +941,12 @@ ccache_builder_connectdb(void)
 				elog(LOG, "ccache-builder%d: not assigned to a particular database", ccache_builder->builder_id);
 				startup_log = true;
 			}
-			ev = WaitLatch(MyLatch,
-						   WL_LATCH_SET |
-						   WL_TIMEOUT |
-						   WL_POSTMASTER_DEATH,
-						   60000L);
+			ev = StromWaitLatch(MyLatch,
+								WL_LATCH_SET |
+								WL_TIMEOUT |
+								WL_POSTMASTER_DEATH,
+								60000L,
+								PG_WAIT_EXTENSION);
 			if (ev & WL_POSTMASTER_DEATH)
 				elog(FATAL, "Unexpected postmaster dead");
 		}
@@ -1762,11 +1763,12 @@ ccache_builder_main(Datum arg)
 			ccache_builder->state = CCBUILDER_STATE__SLEEP;
 			SpinLockRelease(&ccache_state->lock);
 
-			ev = WaitLatch(MyLatch,
-						   WL_LATCH_SET |
-						   WL_TIMEOUT |
-						   WL_POSTMASTER_DEATH,
-						   timeout);
+			ev = StromWaitLatch(MyLatch,
+								WL_LATCH_SET |
+								WL_TIMEOUT |
+								WL_POSTMASTER_DEATH,
+								timeout,
+								PG_WAIT_EXTENSION);
 			if (ev & WL_POSTMASTER_DEATH)
 				elog(FATAL, "Unexpected postmaster dead");
 
