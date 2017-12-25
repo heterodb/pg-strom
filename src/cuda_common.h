@@ -1246,6 +1246,24 @@ typedef struct varatt_indirect
 #define VARSIZE_EXTERNAL(PTR)	\
 	(VARHDRSZ_EXTERNAL + VARTAG_SIZE(VARTAG_EXTERNAL(PTR)))
 
+/*
+ * compressed varlena format
+ */
+typedef struct toast_compress_header
+{
+	cl_int		vl_len_;	/* varlena header (do not touch directly!) */
+	cl_int		rawsize;
+} toast_compress_header;
+
+#define TOAST_COMPRESS_HDRSZ		((cl_int)sizeof(toast_compress_header))
+#define TOAST_COMPRESS_RAWSIZE(ptr)				\
+	(((toast_compress_header *) (ptr))->rawsize)
+#define TOAST_COMPRESS_RAWDATA(ptr)				\
+	(((char *) (ptr)) + TOAST_COMPRESS_HDRSZ)
+#define TOAST_COMPRESS_SET_RAWSIZE(ptr, len)	\
+	(((toast_compress_header *) (ptr))->rawsize = (len))
+
+/* basic varlena macros */
 #define VARATT_IS_4B(PTR) \
 	((((varattrib_1b *) (PTR))->va_header & 0x01) == 0x00)
 #define VARATT_IS_4B_U(PTR) \
@@ -1328,6 +1346,129 @@ toast_raw_datum_size(kern_context *kcxt, varlena *attr)
 		result = VARSIZE(attr);
 	}
 	return result;
+}
+
+/*
+ * toast_decompress_datum - decompress a compressed version of a varlena datum
+ */
+STATIC_FUNCTION(cl_int)
+pglz_decompress(const char *source, cl_int slen,
+				char *dest, cl_int rawsize)
+{
+	const cl_uchar *sp;
+	const cl_uchar *srcend;
+	cl_uchar	   *dp;
+	cl_uchar	   *destend;
+
+	sp = (const cl_uchar *) source;
+	srcend = ((const cl_uchar *) source) + slen;
+	dp = (cl_uchar *) dest;
+	destend = dp + rawsize;
+
+	while (sp < srcend && dp < destend)
+	{
+		/*
+		 * Read one control byte and process the next 8 items (or as many as
+		 * remain in the compressed input).
+		 */
+		cl_uchar	ctrl = *sp++;
+		int			ctrlc;
+
+		for (ctrlc = 0; ctrlc < 8 && sp < srcend; ctrlc++)
+		{
+			if (ctrl & 1)
+			{
+				/*
+				 * Otherwise it contains the match length minus 3 and the
+				 * upper 4 bits of the offset. The next following byte
+				 * contains the lower 8 bits of the offset. If the length is
+				 * coded as 18, another extension tag byte tells how much
+				 * longer the match really was (0-255).
+				 */
+				cl_int		len;
+				cl_int		off;
+
+				len = (sp[0] & 0x0f) + 3;
+				off = ((sp[0] & 0xf0) << 4) | sp[1];
+				sp += 2;
+				if (len == 18)
+					len += *sp++;
+
+				/*
+				 * Check for output buffer overrun, to ensure we don't clobber
+				 * memory in case of corrupt input.  Note: we must advance dp
+				 * here to ensure the error is detected below the loop.  We
+				 * don't simply put the elog inside the loop since that will
+				 * probably interfere with optimization.
+				 */
+				if (dp + len > destend)
+				{
+					dp += len;
+					break;
+				}
+				/*
+				 * Now we copy the bytes specified by the tag from OUTPUT to
+				 * OUTPUT. It is dangerous and platform dependent to use
+				 * memcpy() here, because the copied areas could overlap
+				 * extremely!
+				 */
+				while (len--)
+				{
+					*dp = dp[-off];
+					dp++;
+				}
+			}
+			else
+			{
+				/*
+				 * An unset control bit means LITERAL BYTE. So we just copy
+				 * one from INPUT to OUTPUT.
+				 */
+				if (dp >= destend)		/* check for buffer overrun */
+					break;				/* do not clobber memory */
+
+				*dp++ = *sp++;
+			}
+
+			/*
+			 * Advance the control bit
+			 */
+			ctrl >>= 1;
+		}
+	}
+
+	/*
+	 * Check we decompressed the right amount.
+	 */
+	if (dp != destend || sp != srcend)
+		return -1;
+
+	/*
+	 * That's it.
+	 */
+	return rawsize;
+}
+
+STATIC_INLINE(cl_bool)
+toast_decompress_datum(char *buffer, cl_uint buflen,
+					   const struct varlena *datum)
+{
+	cl_int		rawsize;
+
+	assert(VARATT_IS_COMPRESSED(datum));
+	rawsize = TOAST_COMPRESS_RAWSIZE(datum);
+	if (rawsize + VARHDRSZ > buflen)
+		return false;
+	SET_VARSIZE(buffer, rawsize + VARHDRSZ);
+	if (pglz_decompress(TOAST_COMPRESS_RAWDATA(datum),
+						VARSIZE(datum) - TOAST_COMPRESS_HDRSZ,
+						buffer + VARHDRSZ,
+						rawsize) < 0)
+	{
+		printf("GPU kernel: compressed varlena datum is corrupted\n");
+		return false;
+	}
+	return true;
 }
 
 /*
