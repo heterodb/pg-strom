@@ -286,11 +286,18 @@ struct GpuTaskState
 	cl_uint			outer_nrows_per_block;
 	Instrumentation	outer_instrument; /* runtime statistics, if any */
 	TupleTableSlot *scan_overflow;	/* temporary buffer, if no space on PDS */
-	struct NVMEScanState *nvme_sstate;/* A state object for NVMe-Strom.
-									   * If not NULL, GTS prefers BLOCK format
-									   * as source data store. Then, SSD2GPU
-									   * Direct DMA will be kicked.
-									   */
+	/*
+	 * A pending PDS object. Load from the outer relation can be suspended
+	 * if columnar cache segment is already built and valid.
+	 */
+	struct pgstrom_data_store *outer_pds_suspend;
+
+	/*
+	 * A state object for NVMe-Strom. If not NULL, GTS prefers BLOCK format
+	 * as source data store. Then, SSD2GPU Direct SQL Execution will be kicked.
+	 */
+	struct NVMEScanState *nvme_sstate;
+
 	/*
 	 * fields to fetch rows from the current task
 	 *
@@ -348,7 +355,7 @@ struct GpuTask
 	ProgramId		program_id;		/* same with GTS's one */
 	GpuTaskState   *gts;			/* GTS reference in the backend */
 	bool			cpu_fallback;	/* true, if task needs CPU fallback */
-	int				file_desc;		/* file-descriptor on backend side */
+//	int				file_desc;		/* file-descriptor on backend side */
 };
 
 /*
@@ -450,8 +457,10 @@ typedef struct pgstrom_data_store
 	 * @nblocks_uncached is number of PostgreSQL blocks, to be processed
 	 * by NVMe-Strom. If @nblocks_uncached > 0, the tail of PDS shall be
 	 * filled up by an array of strom_dma_chunk.
+	 * @filedesc is file-descriptor of the underlying blocks
 	 */
 	cl_uint				nblocks_uncached;
+	cl_int				filedesc;
 
 	/* data chunk in kernel portion */
 	kern_data_store kds	__attribute__ ((aligned (STROMALIGN_LEN)));
@@ -608,9 +617,7 @@ extern Datum pgstrom_device_preserved_meminfo(PG_FUNCTION_ARGS);
 
 extern void gpuMemReclaimSegment(GpuContext *gcontext);
 
-extern void gpuMemCopyFromSSD(GpuTask *gtask,
-							  CUdeviceptr m_kds,
-							  pgstrom_data_store *pds);
+extern void gpuMemCopyFromSSD(CUdeviceptr m_kds, pgstrom_data_store *pds);
 
 extern void pgstrom_gpu_mmgr_init_gpucontext(GpuContext *gcontext);
 extern void pgstrom_gpu_mmgr_cleanup_gpucontext(GpuContext *gcontext);
@@ -920,15 +927,14 @@ extern void PDS_init_heapscan_state(GpuTaskState *gts,
 									cl_uint nrows_per_block);
 extern void PDS_end_heapscan_state(GpuTaskState *gts);
 extern bool PDS_exec_heapscan(GpuTaskState *gts,
-							  pgstrom_data_store *pds,
-							  int *p_filedesc);
+							  pgstrom_data_store *pds);
 extern cl_uint NVMESS_NBlocksPerChunk(struct NVMEScanState *nvme_sstate);
 
 #define PGSTROM_DATA_STORE_BLOCK_FILEPOS(pds)							\
 	((loff_t *)((char *)KERN_DATA_STORE_BLOCK_PGPAGE(&(pds)->kds,		\
 													 (pds)->kds.nrooms) - \
 				(sizeof(loff_t) * (pds)->nblocks_uncached)))
-extern void PDS_fillup_blocks(pgstrom_data_store *pds, int file_desc);
+extern void PDS_fillup_blocks(pgstrom_data_store *pds);
 
 extern bool KDS_insert_tuple(kern_data_store *kds,
 							 TupleTableSlot *slot);
@@ -981,8 +987,8 @@ extern bool pgstrom_planstate_is_gpuscan(const PlanState *ps);
 
 extern void gpuscan_rewind_position(GpuTaskState *gts);
 
-extern pgstrom_data_store *gpuscanExecScanChunk(GpuTaskState *gts,
-												int *p_filedesc);
+extern pgstrom_data_store *gpuscanExecScanChunk(GpuTaskState *gts);
+
 extern void gpuscanRewindScanChunk(GpuTaskState *gts);
 
 extern Size ExecGpuScanEstimateDSM(CustomScanState *node,
@@ -1022,8 +1028,7 @@ extern ProgramId GpuJoinCreateCombinedProgram(PlanState *node,
 											  bool explain_only);
 extern bool GpuJoinInnerPreload(GpuTaskState *gts, CUdeviceptr *p_m_kmrels);
 extern void GpuJoinInnerUnload(GpuTaskState *gts, bool is_rescan);
-extern pgstrom_data_store *GpuJoinExecOuterScanChunk(GpuTaskState *gts,
-													 int *p_filedesc);
+extern pgstrom_data_store *GpuJoinExecOuterScanChunk(GpuTaskState *gts);
 extern bool gpujoinHasRightOuterJoin(GpuTaskState *gts);
 extern int  gpujoinNextRightOuterJoin(GpuTaskState *gts);
 extern void gpujoinSyncRightOuterJoin(GpuTaskState *gts);
@@ -1062,6 +1067,8 @@ extern void pgstrom_init_plcuda(void);
  * ccache.c
  */
 #define CCACHE_CHUNK_SIZE			(128L << 20)	/* 128MB */
+#define CCACHE_CHUNK_NBLOCKS		(CCACHE_CHUNK_SIZE / BLCKSZ)
+struct ccacheChunk;
 
 typedef struct
 {
@@ -1087,7 +1094,14 @@ extern void pgstrom_ccache_writeout_chunk(kern_data_store *kds,
 										  size_t *cs_extra_sz);
 
 extern bool RelationCanUseColumnarCache(Relation relation);
-
+extern struct ccacheChunk *pgstrom_ccache_get_chunk(Relation relation,
+													BlockNumber block_nr);
+extern void pgstrom_ccache_put_chunk(struct ccacheChunk *cc_chunk);
+extern pgstrom_data_store *
+pgstrom_ccache_load_chunk(struct ccacheChunk *cc_chunk,
+						  GpuContext *gcontext,
+						  Relation relation,
+						  Relids ccache_refs);
 extern Datum pgstrom_ccache_invalidator(PG_FUNCTION_ARGS);
 extern Datum pgstrom_ccache_info(PG_FUNCTION_ARGS);
 extern Datum pgstrom_ccache_builder_info(PG_FUNCTION_ARGS);

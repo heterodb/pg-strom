@@ -59,9 +59,7 @@ typedef struct
 /*
  * ccacheChunk
  */
-#define NBLOCKS_PER_CCACHE_CHUNK	(CCACHE_CHUNK_SIZE / BLCKSZ)
-
-typedef struct
+struct ccacheChunk
 {
 	dlist_node	chain;
 	pg_crc32	hash;			/* hash value */
@@ -75,7 +73,8 @@ typedef struct
 	TimestampTz	ctime;			/* timestamp of the cache creation.
 								 * may be zero, if not constructed yet. */
 	TimestampTz	atime;			/* time of the latest access */
-} ccacheChunk;
+};
+typedef struct ccacheChunk		ccacheChunk;
 
 /* static variables */
 static shmem_startup_hook_type shmem_startup_next = NULL;
@@ -105,7 +104,7 @@ ccache_compute_hashvalue(Oid database_oid, Oid table_oid, BlockNumber block_nr)
 {
 	pg_crc32	hash;
 
-	Assert((block_nr & ((CCACHE_CHUNK_SIZE / BLCKSZ) - 1)) == 0);
+	Assert((block_nr & (CCACHE_CHUNK_NBLOCKS - 1)) == 0);
 	INIT_LEGACY_CRC32(hash);
 	COMP_LEGACY_CRC32(hash, &database_oid, sizeof(Oid));
 	COMP_LEGACY_CRC32(hash, &table_oid, sizeof(Oid));
@@ -122,11 +121,11 @@ static inline void
 ccache_chunk_filename(char *fname,
 					  Oid database_oid, Oid table_oid, BlockNumber block_nr)
 {
-	Assert((block_nr & ((CCACHE_CHUNK_SIZE / BLCKSZ)-1)) == 0);
+	Assert((block_nr & (CCACHE_CHUNK_NBLOCKS - 1)) == 0);
 
 	snprintf(fname, MAXPGPATH, "CC%u_%u:%ld.dat",
 			 database_oid, table_oid,
-			 block_nr / (CCACHE_CHUNK_SIZE / BLCKSZ));
+			 block_nr / CCACHE_CHUNK_NBLOCKS);
 }
 
 /*
@@ -190,11 +189,12 @@ ccache_check_filename(const char *fname,
 }
 
 /*
- * ccache_get_chunk
+ * pgstrom_ccache_get_chunk
  */
-static ccacheChunk *
-ccache_get_chunk(Oid table_oid, BlockNumber block_nr)
+ccacheChunk *
+pgstrom_ccache_get_chunk(Relation relation, BlockNumber block_nr)
 {
+	Oid			table_oid = RelationGetRelid(relation);
 	pg_crc32	hash;
 	cl_int		index;
 	dlist_iter	iter;
@@ -211,7 +211,8 @@ ccache_get_chunk(Oid table_oid, BlockNumber block_nr)
 		if (temp->hash == hash &&
 			temp->database_oid == MyDatabaseId &&
 			temp->table_oid == table_oid &&
-			temp->block_nr == block_nr)
+			temp->block_nr == block_nr &&
+			temp->ctime != 0)
 		{
 			cc_chunk = temp;
 			cc_chunk->refcnt++;
@@ -250,8 +251,8 @@ ccache_put_chunk_nolock(ccacheChunk *cc_chunk)
 	}
 }
 
-static void
-ccache_put_chunk(ccacheChunk *cc_chunk)
+void
+pgstrom_ccache_put_chunk(ccacheChunk *cc_chunk)
 {
 	cl_int		index = cc_chunk->hash % ccache_num_slots;
 
@@ -260,15 +261,123 @@ ccache_put_chunk(ccacheChunk *cc_chunk)
 	SpinLockRelease(&ccache_state->active_locks[index]);
 }
 
+/*
+ * pgstrom_ccache_load_chunk
+ */
+pgstrom_data_store *
+pgstrom_ccache_load_chunk(ccacheChunk *cc_chunk,
+						  GpuContext *gcontext,
+						  Relation relation,
+						  Relids ccache_refs)
+{
+	TupleDesc	tupdesc = RelationGetDescr(relation);
+	int			i, ncols;
+	int			fdesc = -1;
+	ssize_t		nitems;
+	ssize_t		length;
+	ssize_t		offset;
+	CUdeviceptr	m_deviceptr;
+	CUresult	rc;
+	char		buffer[MAXPGPATH];
+	kern_data_store *kds_head = (kern_data_store *)buffer;
+	pgstrom_data_store *pds;
 
+	/* open the ccache file */
+	ccache_chunk_filename(buffer,
+						  MyDatabaseId,
+						  RelationGetRelid(relation),
+						  cc_chunk->block_nr);
+	fdesc = openat(dirfd(ccache_base_dir), buffer, O_RDONLY);
+	if (fdesc < 0)
+		elog(ERROR, "failed on open('%s'): %m", buffer);
 
+	PG_TRY();
+	{
+		/* load the header portion of kds-column */
+		Assert(cc_chunk->nattrs == tupdesc->natts);
+		ncols = cc_chunk->nattrs - (1 + FirstLowInvalidHeapAttributeNumber);
+		length = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
+		if (length > sizeof(buffer))
+			kds_head = palloc(length);
+		if (pread(fdesc, kds_head, length, 0) != length)
+			elog(ERROR, "failed on pread(2): %m");
+		nitems = kds_head->nitems;
+		/* count length of the PDS_column */
+		for (i = bms_next_member(ccache_refs, -1);
+			 i >= 0;
+			 i = bms_next_member(ccache_refs, i))
+		{
+			kern_colmeta   *cmeta = &kds_head->colmeta[i];
 
+			length += cmeta->extra_sz * MAXIMUM_ALIGNOF;
+			if (cmeta->attlen > 0)
+				length += MAXALIGN(TYPEALIGN(cmeta->attalign,
+											 cmeta->attlen) * nitems);
+			else
+				length += MAXALIGN(sizeof(cl_uint) * nitems);
+		}
+		/* allocation of pds_column buffer */
+		rc = gpuMemAllocManaged(gcontext,
+								&m_deviceptr,
+								offsetof(pgstrom_data_store,
+										 kds) + length,
+								CU_MEM_ATTACH_GLOBAL);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "out of managed memory");
+		pds = (pgstrom_data_store *)m_deviceptr;
+		memset(&pds->chain, 0, sizeof(dlist_node));
+		pds->gcontext = gcontext;
+		pg_atomic_init_u32(&pds->refcnt, 1);
+		init_kernel_data_store(&pds->kds, tupdesc, length,
+							   KDS_FORMAT_COLUMN, nitems);
+		/* load from the ccache file */
+		offset = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
+		for (i = bms_next_member(ccache_refs, -1);
+			 i >= 0;
+			 i = bms_next_member(ccache_refs, i))
+		{
+			kern_colmeta   *cmeta = &kds_head->colmeta[i];
+			size_t			nbytes;
 
+			Assert(pds->kds.colmeta[i].attbyval  == cmeta->attbyval &&
+				   pds->kds.colmeta[i].attalign  == cmeta->attalign &&
+				   pds->kds.colmeta[i].attlen    == cmeta->attlen &&
+				   pds->kds.colmeta[i].attnum    == cmeta->attnum &&
+				   pds->kds.colmeta[i].atttypid  == cmeta->atttypid &&
+				   pds->kds.colmeta[i].atttypmod == cmeta->atttypmod);
+			Assert(offset == MAXALIGN(offset));
+			pds->kds.colmeta[i].va_offset = offset / MAXIMUM_ALIGNOF;
+			pds->kds.colmeta[i].extra_sz = cmeta->extra_sz;
 
+			nbytes = cmeta->extra_sz * MAXIMUM_ALIGNOF;
+			if (cmeta->attlen > 0)
+				nbytes += MAXALIGN(TYPEALIGN(cmeta->attalign,
+											 cmeta->attlen) * nitems);
+			else
+				nbytes += MAXALIGN(sizeof(cl_uint) * nitems);
 
+			if (pread(fdesc,
+					  (char *)&pds->kds + offset,
+					  nbytes,
+					  cmeta->va_offset * MAXIMUM_ALIGNOF) != nbytes)
+				elog(ERROR, "failed on pread(2): %m");
+			offset += nbytes;
+		}
+		pds->kds.nitems = nitems;
+		Assert(offset == length);
+	}
+	PG_CATCH();
+	{
+		close(fdesc);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	close(fdesc);
+	if ((char *)kds_head != buffer)
+		pfree(kds_head);
 
-
-
+	return pds;
+}
 
 /*
  * ccache_invalidator_oid - returns OID of invalidator trigger function
@@ -1152,7 +1261,8 @@ pgstrom_ccache_writeout_chunk(kern_data_store *kds,
 			HASH_SEQ_STATUS hseq;
 			vl_dict_key *entry;
 			cl_uint	   *base = (cl_uint *)pos;
-			char	   *extra = pos + MAXALIGN(sizeof(cl_uint) * nitems);
+			size_t		base_len = MAXALIGN(sizeof(cl_uint) * nitems);
+			char	   *extra = pos + base_len;
 
 			hash_seq_init(&hseq, cs_vl_dict[j]);
 			while ((entry = hash_seq_search(&hseq)) != NULL)
@@ -1170,7 +1280,13 @@ pgstrom_ccache_writeout_chunk(kern_data_store *kds,
 			for (i=0; i < nitems; i++)
 			{
 				entry = ((vl_dict_key **)cs_values[j])[i];
-				base[i] = (!entry ? 0 : entry->offset);
+				if (!entry)
+					base[i] = 0;
+				else
+				{
+					Assert(entry->offset < cmeta->extra_sz + base_len);
+					base[i] = entry->offset;
+				}
 			}
 			pos += (char *)extra - (char *)base;
 		}
@@ -1226,8 +1342,8 @@ ccache_preload_chunk(ccacheChunk *cc_chunk,
 	kern_data_store *kds;
 
 	/* check visibility map first */
-	Assert((block_nr % NBLOCKS_PER_CCACHE_CHUNK) == 0);
-	Assert(nblocks <= NBLOCKS_PER_CCACHE_CHUNK);
+	Assert((block_nr & (CCACHE_CHUNK_NBLOCKS-1)) == 0);
+	Assert(nblocks <= CCACHE_CHUNK_NBLOCKS);
 	for (i=0; i < nblocks; i++)
 	{
 		if (!VM_ALL_VISIBLE(srel, block_nr+i, p_vmbuffer))
@@ -1259,7 +1375,7 @@ ccache_preload_chunk(ccacheChunk *cc_chunk,
 	/*
 	 * read buffers and convert to the columnar format
 	 */
-	ncols = tupdesc->natts + (1 - FirstLowInvalidHeapAttributeNumber);
+	ncols = tupdesc->natts - (1 + FirstLowInvalidHeapAttributeNumber);
 	cs_values = palloc0(sizeof(void *) * ncols);
 	cs_hasnull = palloc0(sizeof(bool) * ncols);
 	cs_nullmap = palloc0(sizeof(void *) * ncols);
@@ -1516,7 +1632,7 @@ ccache_builder_preload(cl_long *timeout)
 		if (!relations[i])
 			continue;
 		srel = relations[i];
-		block_nr = (count / num_rels) * NBLOCKS_PER_CCACHE_CHUNK;
+		block_nr = (count / num_rels) * CCACHE_CHUNK_NBLOCKS;
 		if (block_nr >= rel_nblocks[i])
 		{
 			heap_close(srel, NoLock);
@@ -1583,7 +1699,7 @@ ccache_builder_preload(cl_long *timeout)
 		PG_TRY();
 		{
 			BlockNumber	nblocks = Min(rel_nblocks[i] - block_nr,
-									  NBLOCKS_PER_CCACHE_CHUNK);
+									  CCACHE_CHUNK_NBLOCKS);
 
 			SpinLockAcquire(&ccache_state->lock);
 			ccache_builder->table_oid = cc_chunk->table_oid;
@@ -1747,7 +1863,8 @@ ccache_builder_main(Datum arg)
 					break;
 
 				default:
-					break;
+					elog(ERROR, "ccache-builder%d has unknown state",
+						 builder_id);
 			}
 
 			/*
@@ -2025,7 +2142,7 @@ pgstrom_init_ccache(void)
 							"number of ccache builder worker processes",
 							NULL,
 							&ccache_num_builders,
-							2,
+							1,
 							0,
 							INT_MAX,
 							PGC_POSTMASTER,

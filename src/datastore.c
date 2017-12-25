@@ -217,9 +217,10 @@ __PDS_clone(pgstrom_data_store *pds_old,
 
 	/* setup */
 	memset(&pds_new->chain, 0, sizeof(dlist_node));
-    pds_new->gcontext = pds_old->gcontext;
-    pg_atomic_init_u32(&pds_new->refcnt, 1);
+	pds_new->gcontext = pds_old->gcontext;
+	pg_atomic_init_u32(&pds_new->refcnt, 1);
 	pds_new->nblocks_uncached = 0;
+	pds_new->filedesc = -1;
 	memcpy(&pds_new->kds,
 		   &pds_old->kds,
 		   KERN_DATA_STORE_HEAD_LENGTH(&pds_old->kds));
@@ -351,7 +352,7 @@ init_kernel_data_store(kern_data_store *kds,
 	 */
 	if (format == KDS_FORMAT_COLUMN)
 	{
-		kds->ncols += (1 - FirstLowInvalidHeapAttributeNumber);
+		kds->ncols += -(1 + FirstLowInvalidHeapAttributeNumber);
 
 		for (j=FirstLowInvalidHeapAttributeNumber+1; j < 0; j++)
 		{
@@ -399,6 +400,7 @@ __PDS_create_row(GpuContext *gcontext,
 	init_kernel_data_store(&pds->kds, tupdesc, bytesize,
 						   KDS_FORMAT_ROW, INT_MAX);
 	pds->nblocks_uncached = 0;
+	pds->filedesc = -1;
 
 	return pds;
 }
@@ -434,6 +436,7 @@ __PDS_create_hash(GpuContext *gcontext,
 	init_kernel_data_store(&pds->kds, tupdesc, bytesize,
 						   KDS_FORMAT_HASH, INT_MAX);
 	pds->nblocks_uncached = 0;
+	pds->filedesc = -1;
 
 	return pds;
 }
@@ -474,6 +477,7 @@ __PDS_create_slot(GpuContext *gcontext,
 						   bytesize - offsetof(pgstrom_data_store, kds),
 						   KDS_FORMAT_SLOT, nrooms);
 	pds->nblocks_uncached = 0;
+	pds->filedesc = -1;
 
 	return pds;
 }
@@ -512,6 +516,7 @@ __PDS_create_block(GpuContext *gcontext,
 						   KDS_FORMAT_BLOCK, nrooms);
     pds->kds.nrows_per_block = nvme_sstate->nrows_per_block;
     pds->nblocks_uncached = 0;
+	pds->filedesc = -1;
 
 	return pds;
 }
@@ -669,8 +674,7 @@ static bool
 PDS_exec_heapscan_block(pgstrom_data_store *pds,
 						Relation relation,
 						HeapScanDesc hscan,
-						NVMEScanState *nvme_sstate,
-						int *p_filedesc)
+						NVMEScanState *nvme_sstate)
 {
 	BlockNumber		blknum = hscan->rs_cblock;
 	BlockNumber	   *block_nums;
@@ -727,12 +731,12 @@ PDS_exec_heapscan_block(pgstrom_data_store *pds,
 			 * If heapscan_block comes across segment boundary, rest of the
 			 * blocks must be read on the next PDS chunk.
 			 */
-			if (*p_filedesc >= 0 && *p_filedesc != filedesc)
+			if (pds->filedesc >= 0 && pds->filedesc != filedesc)
 				retval = false;
 			else
 			{
-				if (*p_filedesc < 0)
-					*p_filedesc = filedesc;
+				if (pds->filedesc < 0)
+					pds->filedesc = filedesc;
 				/* add uncached block for direct load */
 				pds->nblocks_uncached++;
 				pds->kds.nitems++;
@@ -921,8 +925,7 @@ PDS_exec_heapscan_row(pgstrom_data_store *pds,
  * PDS_exec_heapscan - PDS scan entrypoint
  */
 bool
-PDS_exec_heapscan(GpuTaskState *gts,
-				  pgstrom_data_store *pds, int *p_filedesc)
+PDS_exec_heapscan(GpuTaskState *gts, pgstrom_data_store *pds)
 {
 	Relation		relation = gts->css.ss.ss_currentRelation;
 	HeapScanDesc	hscan = gts->css.ss.ss_currentScanDesc;
@@ -936,7 +939,7 @@ PDS_exec_heapscan(GpuTaskState *gts,
 	{
 		Assert(gts->nvme_sstate);
 		retval = PDS_exec_heapscan_block(pds, relation, hscan,
-										 gts->nvme_sstate, p_filedesc);
+										 gts->nvme_sstate);
 	}
 	else
 		elog(ERROR, "Bug? unexpected PDS format: %d", pds->kds.format);
@@ -1047,8 +1050,9 @@ KDS_insert_hashitem(kern_data_store *kds,
  * It fills up uncached blocks using synchronous read APIs.
  */
 void
-PDS_fillup_blocks(pgstrom_data_store *pds, int file_desc)
+PDS_fillup_blocks(pgstrom_data_store *pds)
 {
+	cl_int			filedesc = pds->filedesc;
 	cl_int			i, nr_loaded;
 	ssize_t			nbytes;
 	char		   *dest_addr;
@@ -1062,6 +1066,7 @@ PDS_fillup_blocks(pgstrom_data_store *pds, int file_desc)
 	if (pds->nblocks_uncached == 0)
 		return;		/* already filled up */
 
+	Assert(filedesc >= 0);
 	Assert(pds->nblocks_uncached <= pds->kds.nitems);
 	nr_loaded = pds->kds.nitems - pds->nblocks_uncached;
 	block_nums = (BlockNumber *)KERN_DATA_STORE_BODY(&pds->kds);
@@ -1082,7 +1087,7 @@ PDS_fillup_blocks(pgstrom_data_store *pds, int file_desc)
 		{
 			while (curr_size > 0)
 			{
-				nbytes = pread(file_desc, dest_addr, curr_size, curr_fpos);
+				nbytes = pread(filedesc, dest_addr, curr_size, curr_fpos);
 				Assert(nbytes <= curr_size);
 				if (nbytes < 0 || (nbytes == 0 && errno != EINTR))
 					elog(ERROR, "failed on pread(2): %m");
@@ -1097,7 +1102,7 @@ PDS_fillup_blocks(pgstrom_data_store *pds, int file_desc)
 
 	while (curr_size > 0)
 	{
-		nbytes = pread(file_desc, dest_addr, curr_size, curr_fpos);
+		nbytes = pread(filedesc, dest_addr, curr_size, curr_fpos);
 		Assert(nbytes <= curr_size);
 		if (nbytes < 0 || (nbytes == 0 && errno != EINTR))
 			elog(ERROR, "failed on pread(2): %m");

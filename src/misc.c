@@ -18,8 +18,6 @@
  */
 #include "pg_strom.h"
 
-
-
 /*
  * make_flat_ands_expr - similar to make_ands_explicit but it pulls up
  * underlying and-clause
@@ -49,11 +47,6 @@ make_flat_ands_explicit(List *andclauses)
 	Assert(list_length(args) > 1);
 	return make_andclause(args);
 }
-
-
-
-
-
 
 #if PG_VERSION_NUM < 100000
 /*

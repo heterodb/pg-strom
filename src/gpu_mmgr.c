@@ -1612,9 +1612,7 @@ gpuMemCopyFromSSDWaitRaw(unsigned long dma_task_id)
  * gpuMemCopyFromSSD - kick SSD-to-GPU Direct DMA, then wait for completion
  */
 void
-gpuMemCopyFromSSD(GpuTask *gtask,
-				  CUdeviceptr m_kds,
-				  pgstrom_data_store *pds)
+gpuMemCopyFromSSD(CUdeviceptr m_kds, pgstrom_data_store *pds)
 {
 	GpuContext	   *gcontext = GpuWorkerCurrentContext;
 	StromCmd__MemCopySsdToGpu cmd;
@@ -1663,7 +1661,7 @@ gpuMemCopyFromSSD(GpuTask *gtask,
 	memset(&cmd, 0, sizeof(StromCmd__MemCopySsdToGpu));
 	cmd.handle		= gm_seg->iomap_handle;
 	cmd.offset		= offset;
-	cmd.file_desc	= gtask->file_desc;
+	cmd.file_desc	= pds->filedesc;
 	cmd.nr_chunks	= pds->nblocks_uncached;
 	cmd.chunk_sz	= BLCKSZ;
 	cmd.relseg_sz	= RELSEG_SIZE;

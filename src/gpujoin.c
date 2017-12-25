@@ -3575,7 +3575,6 @@ GpuJoinSetupTask(struct kern_gpujoin *kgjoin, GpuTaskState *gts,
 static GpuTask *
 gpujoin_create_task(GpuJoinState *gjs,
 					pgstrom_data_store *pds_src,
-					int file_desc,
 					int outer_depth)
 {
 	TupleTableSlot *scan_slot = gjs->gts.css.ss.ss_ScanTupleSlot;
@@ -3600,7 +3599,6 @@ gpujoin_create_task(GpuJoinState *gjs,
 
 	memset(pgjoin, 0, offsetof(GpuJoinTask, kern));
 	pgstromInitGpuTask(&gjs->gts, &pgjoin->task);
-	pgjoin->task.file_desc = file_desc;
 	pgjoin->pds_src = pds_src;
 	pgjoin->pds_dst = PDS_create_row(gcontext,
 									 scan_tupdesc,
@@ -3624,13 +3622,13 @@ gpujoin_create_task(GpuJoinState *gjs,
  * gpujoinExecOuterScanChunk
  */
 pgstrom_data_store *
-GpuJoinExecOuterScanChunk(GpuTaskState *gts, int *p_filedesc)
+GpuJoinExecOuterScanChunk(GpuTaskState *gts)
 {
 	GpuJoinState   *gjs = (GpuJoinState *) gts;
 	pgstrom_data_store *pds = NULL;
 
 	if (gjs->gts.css.ss.ss_currentRelation)
-		pds = gpuscanExecScanChunk(gts, p_filedesc);
+		pds = gpuscanExecScanChunk(gts);
 	else
 	{
 		PlanState	   *outer_node = outerPlanState(gjs);
@@ -3677,11 +3675,10 @@ gpujoin_next_task(GpuTaskState *gts)
 	GpuJoinState   *gjs = (GpuJoinState *) gts;
 	GpuTask		   *gtask = NULL;
 	pgstrom_data_store *pds;
-	int				filedesc = -1;
 
-	pds = GpuJoinExecOuterScanChunk(gts, &filedesc);
+	pds = GpuJoinExecOuterScanChunk(gts);
 	if (pds)
-		gtask = gpujoin_create_task(gjs, pds, filedesc, -1);
+		gtask = gpujoin_create_task(gjs, pds, -1);
 	return gtask;
 }
 
@@ -3797,7 +3794,7 @@ gpujoin_terminator_task(GpuTaskState *gts, cl_bool *task_is_ready)
 		gpujoinSyncRightOuterJoin(&gjs->gts);
 		if (!IsParallelWorker() &&
 			(outer_depth = gpujoinNextRightOuterJoin(&gjs->gts)) > 0)
-			gtask = gpujoin_create_task(gjs, NULL, -1, outer_depth);
+			gtask = gpujoin_create_task(gjs, NULL, outer_depth);
 	}
 	return gtask;
 }
@@ -4701,7 +4698,7 @@ gpujoin_process_inner_join(GpuJoinTask *pgjoin, CUmodule cuda_module)
 								  required);
 			if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 			{
-				PDS_fillup_blocks(pds_src, pgjoin->task.file_desc);
+				PDS_fillup_blocks(pds_src);
 				pgjoin->with_nvme_strom = false;
 			}
 			else if (rc != CUDA_SUCCESS)
@@ -4743,8 +4740,7 @@ gpujoin_process_inner_join(GpuJoinTask *pgjoin, CUmodule cuda_module)
 	}
 	else
 	{
-		gpuMemCopyFromSSD(&pgjoin->task,
-						  m_kds_src,
+		gpuMemCopyFromSSD(m_kds_src,
 						  pds_src);
 	}
 

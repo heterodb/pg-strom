@@ -568,7 +568,6 @@ gpupreagg_setup_column(kern_gpupreagg *kgpreagg,
 {
 	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	kern_context	kcxt;
-	kern_tupitem   *tupitem;
 	cl_uint			src_nitems = kds_src->nitems;
 	cl_uint			src_index;
 	cl_uint			slot_index;
@@ -619,7 +618,7 @@ gpupreagg_setup_column(kern_gpupreagg *kgpreagg,
 			break;
 #endif
 		/* allocation of kds_slot buffer, if any */
-		offset = pgstromStairlikeBinaryCount(rc, &nvalids);
+		offset = pgstromStairlikeBinaryCount(rc ? 1 : 0, &nvalids);
 		if (nvalids > 0)
 		{
 			if (get_local_id() == 0)
@@ -631,7 +630,7 @@ gpupreagg_setup_column(kern_gpupreagg *kgpreagg,
 				break;
 			}
 			slot_index = base + offset;
-			if (tupitem && rc)
+			if (rc)
 			{
 				slot_values = KERN_DATA_STORE_VALUES(kds_slot, slot_index);
 				slot_isnull = KERN_DATA_STORE_ISNULL(kds_slot, slot_index);
@@ -650,7 +649,7 @@ gpupreagg_setup_column(kern_gpupreagg *kgpreagg,
         if (status != StromError_Success)
             break;
 		/* update statistics */
-		pgstromStairlikeBinaryCount(tupitem ? 1 : 0, &count);
+		pgstromStairlikeBinaryCount(rc, &count);
 		if (get_local_id() == 0)
 		{
 			atomicAdd(&kgpreagg->nitems_real, count);

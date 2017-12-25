@@ -194,6 +194,7 @@ pgstromInitGpuTaskState(GpuTaskState *gts,
 						EState *estate)
 {
 	Relation		relation = gts->css.ss.ss_currentRelation;
+	TupleDesc		tupdesc = RelationGetDescr(relation);
 	ExprContext	   *econtext = gts->css.ss.ps.ps_ExprContext;
 	CustomScan	   *cscan = (CustomScan *)(gts->css.ss.ps.plan);
 	Relids			ccache_refs = NULL;
@@ -212,8 +213,6 @@ pgstromInitGpuTaskState(GpuTaskState *gts,
 
 			if (anum == InvalidAttrNumber)
 			{
-				TupleDesc	tupdesc = RelationGetDescr(relation);
-
 				for (i=0; i < tupdesc->natts; i++)
 				{
 					Form_pg_attribute	attr = tupdesc->attrs[i];
@@ -224,11 +223,26 @@ pgstromInitGpuTaskState(GpuTaskState *gts,
 					ccache_refs = bms_add_member(ccache_refs, anum);
 				}
 			}
-			else
+			else if (anum < 0)
 			{
-				anum -= FirstLowInvalidHeapAttributeNumber;
+				anum += (tupdesc->natts -
+						 (1 + FirstLowInvalidHeapAttributeNumber));
 				ccache_refs = bms_add_member(ccache_refs, anum);
 			}
+			else
+			{
+				ccache_refs = bms_add_member(ccache_refs, anum-1);
+			}
+		}
+		/*
+		 * Non-NULL ccache_refs also means the relation can have columnar-
+		 * cache, but no columns are referenced in the query like:
+		 *   SELECT count(*) FROM tbl;
+		 */
+		if (!ccache_refs)
+		{
+			ccache_refs = palloc0(offsetof(Bitmapset, words[1]));
+			ccache_refs->nwords = 1;
 		}
 	}
 #if 0
@@ -255,6 +269,8 @@ pgstromInitGpuTaskState(GpuTaskState *gts,
 	gts->outer_bulk_exec = false;
 	InstrInit(&gts->outer_instrument, estate->es_instrument);
 	gts->scan_overflow = NULL;
+	gts->outer_pds_suspend = NULL;
+	gts->nvme_sstate = NULL;
 
 	/*
 	 * NOTE: initialization of HeapScanDesc was moved to the first try of
@@ -654,7 +670,6 @@ pgstromInitGpuTask(GpuTaskState *gts, GpuTask *gtask)
 	gtask->program_id   = gts->program_id;
 	gtask->gts          = gts;
 	gtask->cpu_fallback = false;
-	gtask->file_desc    = -1;
 }
 
 

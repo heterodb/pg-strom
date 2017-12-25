@@ -226,7 +226,7 @@ gpuscan_projection_column(kern_context *kcxt,
 						  cl_bool *tup_isnull,
 						  char *extra_buf);
 
-#ifdef GPUSCAN_KERNEL_FUNCTION_ENABLED
+#ifdef GPUSCAN_KERNEL_REQUIRED
 /*
  * gpuscan_exec_quals_row - GpuScan logic for KDS_FORMAT_ROW
  */
@@ -558,7 +558,7 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 			}
 
 			/* store the result heap tuple */
-			if (tupitem && rc)
+			if (htup && rc)
 			{
 				cl_uint	   *tup_index = KERN_DATA_STORE_ROWINDEX(kds_dst);
 				cl_uint		pos;
@@ -568,7 +568,7 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 				form_kern_heaptuple(&kcxt, kds_dst,
 									(kern_tupitem *)((char *)kds_dst + pos),
 									&t_self,
-									NULL,
+									&htup->t_choice.t_heap,
 									tup_values,
 									tup_isnull,
 									NULL);

@@ -665,6 +665,15 @@ typedef struct {
 	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER]; /* metadata of columns */
 } kern_data_store;
 
+/* attribute number of system columns */
+#define SelfItemPointerAttributeNumber			(-1)
+#define ObjectIdAttributeNumber					(-2)
+#define MinTransactionIdAttributeNumber			(-3)
+#define MinCommandIdAttributeNumber				(-4)
+#define MaxTransactionIdAttributeNumber			(-5)
+#define MaxCommandIdAttributeNumber				(-6)
+#define TableOidAttributeNumber					(-7)
+#define FirstLowInvalidHeapAttributeNumber		(-8)
 
 /* length estimator */
 #define KDS_CALCULATE_HEAD_LENGTH(ncols)		\
@@ -1659,6 +1668,9 @@ kern_get_datum_column(kern_data_store *kds,
 
 	Assert(colidx >= 0 && colidx < kds->ncols);
 	cmeta = &kds->colmeta[colidx];
+	/* special case handling if 'tableoid' system column */
+	if (cmeta->attnum == TableOidAttributeNumber)
+		return &kds->table_oid;
 	offset = __ldg(&cmeta->va_offset) << MAXIMUM_ALIGNOF_SHIFT;
 	if (offset == 0)
 		return NULL;
@@ -1669,7 +1681,8 @@ kern_get_datum_column(kern_data_store *kds,
 		offset = ((cl_uint *)values)[rowidx];
 		if (offset == 0)
 			return NULL;
-		Assert(offset < __ldg(&cmeta->extra_sz));
+		Assert(offset < (__ldg(&kds->nitems) * sizeof(cl_uint) +
+						 __ldg(&cmeta->extra_sz)));
 		values += (offset << MAXIMUM_ALIGNOF_SHIFT);
 	}
 	else
@@ -1802,7 +1815,11 @@ pgstromStairlikeBinaryCount(int predicate, cl_uint *total_count)
 	cl_int		unit_sz;
 	cl_int		i, j;
 
+#if CUDA_VERSION < 9000
 	w_bitmap = __ballot(predicate);
+#else
+	w_bitmap = __ballot_sync(__activemask(), predicate);
+#endif
 	if ((get_local_id() & (warpSize-1)) == 0)
 		items[warp_id] = __popc(w_bitmap);
 	__syncthreads();

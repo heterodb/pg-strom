@@ -1513,16 +1513,18 @@ bufsz_estimate_gpuscan_projection(RelOptInfo *baserel,
 		{
 			devtype_info   *dtype;
 
-			proj_full_width += (dtype->type_length > 0
-								? dtype->type_length
-								: get_typavgwidth(type_oid, type_mod));
 			dtype = pgstrom_devtype_lookup(type_oid);
 			if (!dtype)
 				elog(ERROR, "device type %u lookup failed", type_oid);
+			proj_full_width += (dtype->type_length > 0
+								? dtype->type_length
+								: get_typavgwidth(type_oid, type_mod));
 			if (!dtype->type_byval)
 			{
 				if (dtype->extra_sz == 0)
-					elog(ERROR, "expression has indirect/varlena type but no extra-size definition: %s", nodeToString(tle->expr));
+					elog(ERROR, "Bug? device type '%s' has indirect/varlena definition but no extra-size parameter at expression of: %s",
+						 dtype->type_name,
+						 nodeToString(tle->expr));
 				proj_extra_sz += MAXALIGN(dtype->extra_sz);
 			}
 		}
@@ -1832,7 +1834,7 @@ assign_gpuscan_session_info(StringInfo buf, GpuTaskState *gts)
 
 		appendStringInfo(
 			buf,
-			"#define GPUSCAN_KERNEL_FUNCTION_ENABLED        1\n");
+			"#define GPUSCAN_KERNEL_REQUIRED                1\n");
 		if (gss->dev_projection)
 			appendStringInfo(
 				buf,
@@ -2089,12 +2091,14 @@ ExecEndGpuScan(CustomScanState *node)
 {
 	GpuScanState	   *gss = (GpuScanState *)node;
 
+	elog(INFO, "begin of ExecEndGpuScan");
 	/* wait for completion of asynchronous GpuTaks */
 	SynchronizeGpuContext(gss->gts.gcontext);
 	/* reset fallback resources */
 	if (gss->base_slot)
 		ExecDropSingleTupleTableSlot(gss->base_slot);
 	pgstromReleaseGpuTaskState(&gss->gts);
+	elog(INFO, "end of ExecEndGpuScan");
 }
 
 /*
@@ -2312,8 +2316,7 @@ resetGpuScanSharedState(GpuScanState *gss)
  */
 static GpuScanTask *
 gpuscan_create_task(GpuScanState *gss,
-					pgstrom_data_store *pds_src,
-					int file_desc)
+					pgstrom_data_store *pds_src)
 {
 	TupleDesc		scan_tupdesc = GTS_GET_SCAN_TUPDESC(gss);
 	GpuContext	   *gcontext = gss->gts.gcontext;
@@ -2358,7 +2361,6 @@ gpuscan_create_task(GpuScanState *gss,
 	memset(gscan, 0, (offsetof(GpuScanTask, kern) +
 					  offsetof(kern_gpuscan, kparams)));
 	pgstromInitGpuTask(&gss->gts, &gscan->task);
-	gscan->task.file_desc = file_desc;
 	gscan->gs_sstate = gss->gs_sstate;
 	Assert(gscan->gs_sstate != NULL);
 	gscan->with_nvme_strom = (pds_src->kds.format == KDS_FORMAT_BLOCK &&
@@ -2382,16 +2384,28 @@ gpuscan_create_task(GpuScanState *gss,
 }
 
 /*
- * heap_parallelscan_nextpage - see access/heap/heapam.c
+ * gpuscan_parallel_nextpage
+ *
+ * similar role of heap_parallelscan_nextpage in access/heap/heapam.c,
+ * however, it reserves multiple pages at once, and may construct
+ * a new PDS if columnar cache is valid.
  */
-static BlockNumber
-heap_parallelscan_nextpage(HeapScanDesc scan, cl_uint *p_nblocks_atonce)
+static pgstrom_data_store *
+gpuscan_parallel_nextpage(HeapScanDesc scan,
+						  GpuContext *gcontext,
+						  Relids ccache_refs,
+						  cl_uint nr_blocks)
 {
-	BlockNumber		page = InvalidBlockNumber;
+	Relation		relation = scan->rs_rd;
 	BlockNumber		sync_startpage = InvalidBlockNumber;
 	BlockNumber		report_page = InvalidBlockNumber;
+	BlockNumber		page = InvalidBlockNumber;
+	BlockNumber		base;
+	struct ccacheChunk *cc_chunk = NULL;
+	pgstrom_data_store *pds_column = NULL;
 	ParallelHeapScanDesc parallel_scan;
 
+	Assert(scan->rs_numblocks == 0);
 	Assert(scan->rs_parallel);
 	parallel_scan = scan->rs_parallel;
 
@@ -2418,7 +2432,7 @@ retry:
 		else
 		{
 			SpinLockRelease(&parallel_scan->phs_mutex);
-			sync_startpage = ss_get_location(scan->rs_rd, scan->rs_nblocks);
+			sync_startpage = ss_get_location(relation, scan->rs_nblocks);
 			goto retry;
 		}
 		parallel_scan->phs_cblock = parallel_scan->phs_startblock;
@@ -2432,44 +2446,50 @@ retry:
 	 * scanned.
 	 */
 	page = parallel_scan->phs_cblock;
-	if (page != InvalidBlockNumber)
+	if (page == InvalidBlockNumber)
+		goto out_unlock;
+
+	Assert(page < scan->rs_nblocks);
+	Assert(nr_blocks > 0 && nr_blocks < RELSEG_SIZE);
+	/* should never read multiple blocks across the segment boundary */
+	if ((page / RELSEG_SIZE) != (page + nr_blocks - 1) / RELSEG_SIZE)
+		nr_blocks = RELSEG_SIZE - (page % RELSEG_SIZE);
+	/* terminate multiple block reads beyond end of the relation */
+	if (page + nr_blocks > scan->rs_nblocks)
+		nr_blocks = scan->rs_nblocks - page;
+	/* terminate multiple block reads across start block */
+	if (page < parallel_scan->phs_startblock &&
+		page + nr_blocks >= parallel_scan->phs_startblock)
+		nr_blocks = parallel_scan->phs_startblock - page;
+	Assert(nr_blocks > 0);
+
+	/* try to lookup columnar cache if any */
+	base = (page + CCACHE_CHUNK_NBLOCKS-1) & ~(CCACHE_CHUNK_NBLOCKS-1);
+	if (ccache_refs &&
+		(page <= base && page + nr_blocks >= base) &&
+		(base >= parallel_scan->phs_startblock ||
+		 base + CCACHE_CHUNK_NBLOCKS <= parallel_scan->phs_startblock) &&
+		(base + CCACHE_CHUNK_NBLOCKS <= scan->rs_nblocks))
 	{
-		BlockNumber	phs_cblock = parallel_scan->phs_cblock;
-		cl_uint		nr_blocks = (!p_nblocks_atonce ? 1 : *p_nblocks_atonce);
-
-		Assert(phs_cblock < scan->rs_nblocks);
-		Assert(nr_blocks > 0 && nr_blocks < RELSEG_SIZE);
-		/* multiple blocks read never goes across segment boundary */
-		if ((phs_cblock / RELSEG_SIZE) !=
-			(phs_cblock + nr_blocks - 1) / RELSEG_SIZE)
-			nr_blocks = RELSEG_SIZE - (phs_cblock % RELSEG_SIZE);
-		/* stop multiple blocks reads if end of the relation */
-		if (phs_cblock + nr_blocks > scan->rs_nblocks)
-			nr_blocks = scan->rs_nblocks - phs_cblock;
-		/* check end of the relation scan */
-		if (phs_cblock + nr_blocks == scan->rs_nblocks &&
-			parallel_scan->phs_startblock == 0)
+		cc_chunk = pgstrom_ccache_get_chunk(relation, base);
+		if (cc_chunk)
 		{
-			parallel_scan->phs_cblock = InvalidBlockNumber;
-			report_page = parallel_scan->phs_startblock;
+			nr_blocks = base - page;
+			parallel_scan->phs_cblock = base + CCACHE_CHUNK_NBLOCKS;
 		}
-		else if (phs_cblock < parallel_scan->phs_startblock &&
-				 phs_cblock + nr_blocks >= parallel_scan->phs_startblock)
-		{
-			nr_blocks = parallel_scan->phs_startblock - phs_cblock;
-			parallel_scan->phs_cblock = InvalidBlockNumber;
-			report_page = parallel_scan->phs_startblock;
-		}
-		else
-		{
-			parallel_scan->phs_cblock =
-				(parallel_scan->phs_cblock + nr_blocks) % scan->rs_nblocks;
-		}
-		if (p_nblocks_atonce)
-			*p_nblocks_atonce = nr_blocks;
 	}
+	if (!cc_chunk)
+		parallel_scan->phs_cblock = page + nr_blocks;
 
-	/* Release the lock. */
+	if (parallel_scan->phs_cblock >= scan->rs_nblocks)
+		parallel_scan->phs_cblock = 0;
+	if (parallel_scan->phs_cblock == parallel_scan->phs_startblock)
+	{
+		parallel_scan->phs_cblock = InvalidBlockNumber;
+		report_page = parallel_scan->phs_startblock;
+	}
+	/* Release the lock */
+out_unlock:
 	SpinLockRelease(&parallel_scan->phs_mutex);
 
 	/*
@@ -2487,19 +2507,43 @@ retry:
 		if (report_page != InvalidBlockNumber)
 			ss_report_location(scan->rs_rd, report_page);
 	}
-	return page;
+
+	/*
+	 * construction of PDS based on the columnar cache, if any
+	 */
+	if (cc_chunk)
+	{
+		PG_TRY();
+		{
+			pds_column = pgstrom_ccache_load_chunk(cc_chunk,
+												   gcontext,
+												   relation,
+												   ccache_refs);
+		}
+		PG_CATCH();
+		{
+			pgstrom_ccache_put_chunk(cc_chunk);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+		pgstrom_ccache_put_chunk(cc_chunk);
+	}
+	scan->rs_cblock = page;
+	scan->rs_numblocks = nr_blocks;
+
+	return pds_column;
 }
 
 /*
  * gpuscanExecScanChunk - read the relation by one chunk
  */
 pgstrom_data_store *
-gpuscanExecScanChunk(GpuTaskState *gts, int *p_filedesc)
+gpuscanExecScanChunk(GpuTaskState *gts)
 {
 	Relation		base_rel = gts->css.ss.ss_currentRelation;
 	HeapScanDesc	scan;
 	pgstrom_data_store *pds = NULL;
-	int				filedesc = -1;
+	pgstrom_data_store *pds_column = NULL;
 
 	/*
 	 * Setup scan-descriptor, if the scan is not parallel, of if we're
@@ -2520,118 +2564,174 @@ gpuscanExecScanChunk(GpuTaskState *gts, int *p_filedesc)
 		PDS_init_heapscan_state(gts, gts->outer_nrows_per_block);
 	}
 	scan = gts->css.ss.ss_currentScanDesc;
-
 	InstrStartNode(&gts->outer_instrument);
 
-	/* return NULL immediately if relation is empty */
-	if (!scan->rs_inited &&
-		(scan->rs_nblocks == 0 || scan->rs_numblocks == 0))
-		goto out;
-
-	/*
-	 * MEMO: A key of i/o performance is consolidation of continuous block
-	 * reads with a small number of system-call invocation.
-	 * The default one-by-one block read logic tend to generate i/o request
-	 * fragmentation, and it will increase submit of i/o request and slow
-	 * down the performance. So, in case of NVMe-Strom under CPU parallel,
-	 * we make advance the @scan->rs_cblock pointer by multiple blocks at
-	 * once. It ensures block numbers to read are continuous, thus, i/o
-	 * stack can load data blocks with minimum number of DMA requests.
-	 */
-	if (scan->rs_parallel && gts->nvme_sstate)
+	/* fetch suspended PDS, if any */
+	pds = gts->outer_pds_suspend;
+	gts->outer_pds_suspend = NULL;
+	for (;;)
 	{
-		NVMEScanState  *nvme_sstate = gts->nvme_sstate;
-		cl_uint			nblocks_atonce = nvme_sstate->nblocks_per_chunk;
-
-		scan->rs_cblock = heap_parallelscan_nextpage(scan, &nblocks_atonce);
-		/* already done? */
-		if (!BlockNumberIsValid(scan->rs_cblock) || nblocks_atonce == 0)
-			goto out;
-
-		/* PDS allocation */
-		pds = PDS_create_block(gts->gcontext,
-							   RelationGetDescr(base_rel),
-							   nvme_sstate);
-		/* Scan nblocks */
-		while (nblocks_atonce-- > 0)
-		{
-			if (!PDS_exec_heapscan(gts, pds, &filedesc))
-				elog(ERROR, "Bug? failed to read block-%u", scan->rs_cblock);
-			/* move to the next block */
-			scan->rs_cblock++;
-			if (scan->rs_cblock >= scan->rs_nblocks)
-				scan->rs_cblock = 0;
-			if (scan->rs_syncscan)
-				ss_report_location(scan->rs_rd, scan->rs_cblock);
-			/* end of the scan? */
-			if (scan->rs_cblock == scan->rs_startblock ||
-				(BlockNumberIsValid(scan->rs_numblocks) &&
-				 --scan->rs_numblocks == 0))
-				scan->rs_cblock = InvalidBlockNumber;
-		}
-	}
-	else
-	{
-		/*
-		 * Elsewhere, we will fetch blocks one-by-one manner.
-		 */
 		if (!scan->rs_inited)
 		{
-			if (scan->rs_parallel)
-				scan->rs_cblock = heap_parallelscan_nextpage(scan, NULL);
-			else
+			if (scan->rs_nblocks == 0)
+			{
+				Assert(pds == NULL);
+				goto out;
+			}
+			if (!scan->rs_parallel)
+			{
 				scan->rs_cblock = scan->rs_startblock;
-			scan->rs_inited = true;
-		}
-
-		/* already done? */
-		if (!BlockNumberIsValid(scan->rs_cblock))
-			goto out;
-
-		if (gts->nvme_sstate)
-			pds = PDS_create_block(gts->gcontext,
-								   RelationGetDescr(base_rel),
-								   gts->nvme_sstate);
-		else
-			pds = PDS_create_row(gts->gcontext,
-								 RelationGetDescr(base_rel),
-								 pgstrom_chunk_size());
-		pds->kds.table_oid = RelationGetRelid(base_rel);
-
-		/*
-		 * TODO: We have to stop block insert if and when device projection
-		 * will increase the buffer consumption than threshold.
-		 * OR,
-		 * specify smaller chunk by caller. GpuScan may become wise using
-		 * adaptive buffer size control by row selevtivity on run-time.
-		 */
-		while (BlockNumberIsValid(scan->rs_cblock))
-		{
-			/* try to load scan->rs_cblock */
-			Assert(scan->rs_cblock < scan->rs_nblocks);
-			if (!PDS_exec_heapscan(gts, pds, &filedesc))
-				break;
-
-			/* move to the next block */
-			if (scan->rs_parallel)
-				scan->rs_cblock = heap_parallelscan_nextpage(scan, NULL);
+				Assert(scan->rs_numblocks == InvalidBlockNumber);
+			}
 			else
 			{
-				scan->rs_cblock++;
-				if (scan->rs_cblock >= scan->rs_nblocks)
-					scan->rs_cblock = 0;
-				if (scan->rs_syncscan)
-					ss_report_location(scan->rs_rd, scan->rs_cblock);
-				/* end of the scan? */
-				if (scan->rs_cblock == scan->rs_startblock ||
-					(BlockNumberIsValid(scan->rs_numblocks) &&
-					 --scan->rs_numblocks == 0))
-					scan->rs_cblock = InvalidBlockNumber;
+				/* force to call gpuscan_parallel_nextpage() */
+				scan->rs_cblock = InvalidBlockNumber;
+				scan->rs_numblocks = 0;
+			}
+			scan->rs_inited = true;
+		}
+		else if (scan->rs_cblock == InvalidBlockNumber)
+		{
+			/* no more blocks to read */
+			break;
+		}
+
+		/* move to the next position to load */
+		if (!scan->rs_parallel)
+		{
+			BlockNumber		page = scan->rs_cblock;
+			struct ccacheChunk *cc_chunk;
+
+			/* try to fetch columnar-cache, if any */
+			if (gts->ccache_refs &&
+				(page & (CCACHE_CHUNK_NBLOCKS - 1)) == 0 &&
+				(page >= scan->rs_startblock ||
+				 page + CCACHE_CHUNK_NBLOCKS <= scan->rs_startblock) &&
+				(page + CCACHE_CHUNK_NBLOCKS <= scan->rs_nblocks))
+			{
+				cc_chunk = pgstrom_ccache_get_chunk(scan->rs_rd, page);
+				if (cc_chunk)
+				{
+					PG_TRY();
+					{
+						pds_column =
+							pgstrom_ccache_load_chunk(cc_chunk,
+													  gts->gcontext,
+													  scan->rs_rd,
+													  gts->ccache_refs);
+					}
+					PG_CATCH();
+					{
+						pgstrom_ccache_put_chunk(cc_chunk);
+						PG_RE_THROW();
+					}
+					PG_END_TRY();
+					pgstrom_ccache_put_chunk(cc_chunk);
+
+					scan->rs_cblock += CCACHE_CHUNK_NBLOCKS;
+					if (scan->rs_cblock >= scan->rs_nblocks)
+						scan->rs_cblock = 0;
+					Assert(scan->rs_numblocks == InvalidBlockNumber);
+					if (scan->rs_syncscan)
+						ss_report_location(scan->rs_rd, scan->rs_cblock);
+					if (scan->rs_cblock == scan->rs_startblock)
+						scan->rs_cblock = InvalidBlockNumber;
+					break;
+				}
 			}
 		}
+		else if (scan->rs_numblocks == 0)
+		{
+			NVMEScanState  *nvme_sstate = gts->nvme_sstate;
+			cl_uint			nblocks_atonce;
+
+			Assert(scan->rs_parallel != NULL);
+
+			/*
+			 * Suspend the heap-scan of row-based PDS, and returns columnar
+			 * PDS instead. In case when bgworker tries to fetch multiple
+			 * blocks which contains the head block of ccache, "gap" blocks
+			 * are loaded to row-based PDS, then resumed when bgworker meets
+			 * the range with no ccache.
+			 */
+			if (pds_column)
+				break;
+
+			/*
+			 * MEMO: A key of i/o performance is consolidation of continuous
+			 * block reads with a small number of system-call invocation.
+			 * The default one-by-one block read logic tend to generate i/o
+			 * request fragmentation under CPU parallel execution, thus it
+			 * leads larger number of read commands submit and performance
+			 * slow-down.
+			 * So, in case of NVMe-Strom under CPU parallel, we make the
+			 * @scan->rs_cblock pointer advanced by multiple blocks at once.
+			 * It ensures the block numbers to read are continuous, thus,
+			 * i/o stack will be able to load storage blocks with minimum
+			 * number of DMA requests.
+			 */
+			if (!nvme_sstate)
+				nblocks_atonce = 8;
+			else if (pds)
+				nblocks_atonce = pds->kds.nrooms - pds->kds.nitems;
+			else
+				nblocks_atonce = nvme_sstate->nblocks_per_chunk;
+
+			pds_column = gpuscan_parallel_nextpage(scan,
+												   gts->gcontext,
+												   gts->ccache_refs,
+												   nblocks_atonce);
+			/* no more blocks to read? */
+			if (scan->rs_numblocks == 0)
+				break;
+		}
+
+		/* allocation of row-based PDS on demand */
+		if (!pds)
+		{
+			if (gts->nvme_sstate)
+				pds = PDS_create_block(gts->gcontext,
+									   RelationGetDescr(base_rel),
+									   gts->nvme_sstate);
+			else
+				pds = PDS_create_row(gts->gcontext,
+									 RelationGetDescr(base_rel),
+									 pgstrom_chunk_size());
+			pds->kds.table_oid = RelationGetRelid(base_rel);
+		}
+		/* scan next block */
+		if (scan->rs_cblock == InvalidBlockNumber ||
+			!PDS_exec_heapscan(gts, pds))
+			break;
+
+		/* move to the next block */
+		scan->rs_cblock++;
+		if (scan->rs_cblock >= scan->rs_nblocks)
+			scan->rs_cblock = 0;
+		if (scan->rs_numblocks != InvalidBlockNumber)
+		{
+			Assert(scan->rs_numblocks > 0);
+			scan->rs_numblocks--;
+		}
+		if (scan->rs_syncscan)
+			ss_report_location(scan->rs_rd, scan->rs_cblock);
+		/* end of the scan? */
+		if (scan->rs_cblock == scan->rs_startblock)
+			scan->rs_cblock = InvalidBlockNumber;
 	}
 
-	if (pds->kds.nitems == 0)
+	if (pds_column)
+	{
+		gts->outer_pds_suspend = pds;
+		pds = pds_column;
+	}
+	else if (!pds)
+	{
+		/* end of the scan */
+		Assert(!BlockNumberIsValid(scan->rs_cblock));
+	}
+	else if (pds->kds.nitems == 0)
 	{
 		Assert(!BlockNumberIsValid(scan->rs_cblock));
 		PDS_release(pds);
@@ -2642,9 +2742,9 @@ gpuscanExecScanChunk(GpuTaskState *gts, int *p_filedesc)
 			 pds->nblocks_uncached > 0)
 	{
 		/*
-		 * MEMO: Special case handling if KDS_FORMAT_BLOCK was not filled up
-		 * entirely. KDS_FORMAT_BLOCK has an array of block-number to support
-		 * "ctid" system column, located on next to the KDS-head.
+		 * MEMO: Special case handling if KDS_FORMAT_BLOCK was not filled
+		 * up entirely. KDS_FORMAT_BLOCK has an array of block-number to
+		 * support "ctid" system column, located on next to the KDS-head.
 		 * Block-numbers of pre-loaded blocks (hit on shared buffer) are
 		 * used from the head, and others (to be read from the file) are
 		 * used from the tail. If nitems < nrooms, this array has a hole
@@ -2660,7 +2760,6 @@ gpuscanExecScanChunk(GpuTaskState *gts, int *p_filedesc)
 				sizeof(BlockNumber) * pds->nblocks_uncached);
 	}
 out:
-	*p_filedesc = filedesc;
 	InstrStopNode(&gts->outer_instrument,
 				  !pds ? 0.0 : (double)pds->kds.nitems);
 	return pds;
@@ -2675,7 +2774,7 @@ gpuscan_switch_task(GpuTaskState *gts, GpuTask *gtask)
 	if (pds_src->nblocks_uncached > 0)
 	{
 		Assert(pds_src->kds.format == KDS_FORMAT_BLOCK);
-		PDS_fillup_blocks(pds_src, gscan->task.file_desc);
+		PDS_fillup_blocks(pds_src);
 	}
 }
 
@@ -2688,12 +2787,11 @@ gpuscan_next_task(GpuTaskState *gts)
 	GpuScanState	   *gss = (GpuScanState *) gts;
 	GpuScanTask		   *gscan;
 	pgstrom_data_store *pds;
-	int					filedesc;
 
-	pds = gpuscanExecScanChunk(gts, &filedesc);
+	pds = gpuscanExecScanChunk(gts);
 	if (!pds)
 		return NULL;
-	gscan = gpuscan_create_task(gss, pds, filedesc);
+	gscan = gpuscan_create_task(gss, pds);
 
 	return &gscan->task;
 }
@@ -2843,6 +2941,7 @@ gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 	CUdeviceptr		m_gpuscan = (CUdeviceptr)&gscan->kern;
 	CUdeviceptr		m_kds_src = 0UL;
 	CUdeviceptr		m_kds_dst = (pds_dst ? (CUdeviceptr)&pds_dst->kds : 0UL);
+	const char	   *kern_fname;
 	void		   *kern_args[5];
 	size_t			offset;
 	size_t			length;
@@ -2857,13 +2956,21 @@ gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 	/*
 	 * Lookup GPU kernel functions
 	 */
+	if (pds_src->kds.format == KDS_FORMAT_ROW)
+		kern_fname = "gpuscan_exec_quals_row";
+	else if (pds_src->kds.format == KDS_FORMAT_BLOCK)
+		kern_fname = "gpuscan_exec_quals_block";
+	else if (pds_src->kds.format == KDS_FORMAT_COLUMN)
+		kern_fname = "gpuscan_exec_quals_column";
+	else
+		werror("GpuScan: unknown PDS format: %d", pds_src->kds.format);
+
 	rc = cuModuleGetFunction(&kern_gpuscan_quals,
 							 cuda_module,
-							 pds_src->kds.format == KDS_FORMAT_ROW
-							 ? "gpuscan_exec_quals_row"
-							 : "gpuscan_exec_quals_block");
+							 kern_fname);
 	if (rc != CUDA_SUCCESS)
-		werror("failed on cuModuleGetFunction: %s", errorText(rc));
+		werror("failed on cuModuleGetFunction('%s'): %s",
+			   kern_fname, errorText(rc));
 
 	/*
 	 * Allocation of device memory
@@ -2884,7 +2991,7 @@ gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 								  pds_src->kds.length);
 			if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 			{
-				PDS_fillup_blocks(pds_src, gtask->file_desc);
+				PDS_fillup_blocks(pds_src);
 				gscan->with_nvme_strom = false;
 			}
 			else if (rc != CUDA_SUCCESS)
@@ -2935,9 +3042,7 @@ gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 	else
 	{
 		Assert(pds_src->kds.format == KDS_FORMAT_BLOCK);
-		gpuMemCopyFromSSD(&gscan->task,
-						  m_kds_src,
-						  pds_src);
+		gpuMemCopyFromSSD(m_kds_src, pds_src);
 	}
 
 	/* head of the kds_dst, if any */
@@ -3104,52 +3209,6 @@ gpuscan_release_task(GpuTask *gtask)
 		PDS_release(gscan->pds_dst);
 	gpuMemFree(gts->gcontext, (CUdeviceptr) gscan);
 }
-
-#if 0
-/*
- * SQL functions to support reference ctid system column.
- *
- * MEMO: TID type is declared as !typbyval type, although it has 6-bytes
- * length, thus, it needs to be a pointer to reference 6-byte datum.
- * It is a bit painful for GpuScan because any of data types does not
- * require extra area of indirect/varlena datum (because they already exist
- * on the KDS). However, we don't have ctid on KDS_FORMAT_BLOCK case, thus,
- * needs to allocate extra area or return ctid as bigint then transform to
- * indirect datum on the host space. We choose the later option.
- */
-Datum pgstrom_cast_tid_to_int8(PG_FUNCTION_ARGS);
-Datum pgstrom_cast_int8_to_tid(PG_FUNCTION_ARGS);
-
-#define DatumGetItemPointer(X)		((ItemPointer) DatumGetPointer(X))
-#define ItemPointerGetDatum(X)		PointerGetDatum(X)
-#define PG_GETARG_ITEMPOINTER(n)	DatumGetItemPointer(PG_GETARG_DATUM(n))
-#define PG_RETURN_ITEMPOINTER(x)	return ItemPointerGetDatum(x)
-
-Datum
-pgstrom_cast_tid_to_int8(PG_FUNCTION_ARGS)
-{
-	ItemPointer	ctid = PG_GETARG_ITEMPOINTER(0);
-
-	PG_RETURN_INT64(((int64)ctid->ip_blkid.bi_hi << 32) |
-					((int64)ctid->ip_blkid.bi_lo << 16) |
-					((int64)ctid->ip_posid));
-}
-PG_FUNCTION_INFO_V1(pgstrom_cast_tid_to_int8);
-
-Datum
-pgstrom_cast_int8_to_tid(PG_FUNCTION_ARGS)
-{
-	int64		value = PG_GETARG_INT64(0);
-	ItemPointer	ctid = palloc(sizeof(ItemPointerData));
-
-	ctid->ip_blkid.bi_hi = ((value >> 32) & 0xffff);
-	ctid->ip_blkid.bi_lo = ((value >> 16) & 0xffff);
-	ctid->ip_posid = (value & 0x0000ffffUL);
-
-	PG_RETURN_ITEMPOINTER(ctid);
-}
-PG_FUNCTION_INFO_V1(pgstrom_cast_int8_to_tid);
-#endif
 
 /*
  * pgstrom_init_gpuscan

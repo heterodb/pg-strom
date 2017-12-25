@@ -2963,7 +2963,7 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 		"}\n"
 		"#endif /* GPUPREAGG_COMBINED_JOIN */\n\n"
 		"STATIC_FUNCTION(void)\n"
-		"gpupreagg_projection_column(kern_context *kcxt,"
+		"gpupreagg_projection_column(kern_context *kcxt,\n"
 		"                            kern_data_store *kds_src,\n"
 		"                            cl_uint src_index,\n"
 		"                            Datum *dst_values,\n"
@@ -4304,7 +4304,6 @@ gpupreagg_alloc_final_buffer(GpuPreAggState *gpas)
 static GpuTask *
 gpupreagg_create_task(GpuPreAggState *gpas,
 					  pgstrom_data_store *pds_src,
-					  int file_desc,
 					  CUdeviceptr m_kmrels,
 					  int outer_depth)
 {
@@ -4340,6 +4339,7 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 				   : gpas->gts.nvme_sstate);
 
 			Assert(nvme_sstate != NULL);
+			Assert(pds_src->filedesc >= 0);
 			with_nvme_strom = (pds_src->nblocks_uncached > 0);
 			nrows_per_block = nvme_sstate->nrows_per_block;
 			/*
@@ -4376,7 +4376,6 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 	memset(gpreagg, 0, offsetof(GpuPreAggTask, kern.kparams));
 
 	pgstromInitGpuTask(&gpas->gts, &gpreagg->task);
-	gpreagg->task.file_desc = file_desc;
 	gpreagg->with_nvme_strom = with_nvme_strom;
 	gpreagg->pds_src = pds_src;
 	gpreagg->kds_slot_nrooms = kds_slot_nrooms;
@@ -4421,7 +4420,6 @@ gpupreagg_next_task(GpuTaskState *gts)
 	GpuTask		   *gtask = NULL;
 	pgstrom_data_store *pds = NULL;
 	CUdeviceptr		m_kmrels = 0UL;
-	int				filedesc = -1;
 
 	if (gpas->combined_gpujoin)
 	{
@@ -4429,11 +4427,11 @@ gpupreagg_next_task(GpuTaskState *gts)
 
 		if (!GpuJoinInnerPreload(outer_gts, &m_kmrels))
 			return NULL;	/* an empty results */
-		pds = GpuJoinExecOuterScanChunk(outer_gts, &filedesc);
+		pds = GpuJoinExecOuterScanChunk(outer_gts);
 	}
 	else if (gpas->gts.css.ss.ss_currentRelation)
 	{
-		pds = gpuscanExecScanChunk(&gpas->gts, &filedesc);
+		pds = gpuscanExecScanChunk(&gpas->gts);
 	}
 	else
 	{
@@ -4476,7 +4474,7 @@ gpupreagg_next_task(GpuTaskState *gts)
 		}
 	}
 	if (pds)
-		gtask = gpupreagg_create_task(gpas, pds, filedesc, m_kmrels, -1);
+		gtask = gpupreagg_create_task(gpas, pds, m_kmrels, -1);
 	return gtask;
 }
 
@@ -4508,7 +4506,7 @@ gpupreagg_terminator_task(GpuTaskState *gts, cl_bool *task_is_ready)
 				(outer_depth = gpujoinNextRightOuterJoin(outer_gts)) > 0)
 			{
 				if (GpuJoinInnerPreload(outer_gts, &m_kmrels))
-					return gpupreagg_create_task(gpas, NULL, -1,
+					return gpupreagg_create_task(gpas, NULL,
 												 m_kmrels,
 												 outer_depth);
 			}
@@ -4517,7 +4515,7 @@ gpupreagg_terminator_task(GpuTaskState *gts, cl_bool *task_is_ready)
 	/* setup a terminator task */
 	gpas->terminator_done = true;
 	*task_is_ready = true;
-	return gpupreagg_create_task(gpas, NULL, -1, 0UL, -1);
+	return gpupreagg_create_task(gpas, NULL, 0UL, -1);
 }
 
 /*
@@ -4724,6 +4722,7 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 	pgstrom_data_store *pds_final = gpas->pds_final;
 	pgstrom_data_store *pds_src = gpreagg->pds_src;
 	cl_char			kds_src_format = pds_src->kds.format;
+	const char	   *kfunc_setup;
 	CUfunction		kern_setup;
 	CUfunction		kern_reduction;
 	CUdeviceptr		m_gpreagg = (CUdeviceptr)&gpreagg->kern;
@@ -4747,11 +4746,18 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 	/*
 	 * Lookup kernel functions
 	 */
+	if (kds_src_format == KDS_FORMAT_ROW)
+		kfunc_setup = "gpupreagg_setup_row";
+	else if (kds_src_format == KDS_FORMAT_BLOCK)
+		kfunc_setup = "gpupreagg_setup_block";
+	else if (kds_src_format == KDS_FORMAT_COLUMN)
+		kfunc_setup = "gpupreagg_setup_column";
+	else
+		werror("GpuPreAgg: unknown PDS format: %d", kds_src_format);
+
 	rc = cuModuleGetFunction(&kern_setup,
 							 cuda_module,
-							 kds_src_format == KDS_FORMAT_ROW
-							 ? "gpupreagg_setup_row"
-							 : "gpupreagg_setup_block");
+							 kfunc_setup);
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuModuleGetFunction: %s", errorText(rc));
 
@@ -4778,7 +4784,7 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 								  GPUMEMALIGN(pds_src->kds.length));
 			if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 			{
-				PDS_fillup_blocks(pds_src, gpreagg->task.file_desc);
+				PDS_fillup_blocks(pds_src);
 				gpreagg->with_nvme_strom = false;
 			}
 			else if (rc != CUDA_SUCCESS)
@@ -4837,9 +4843,7 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 	}
 	else
 	{
-		gpuMemCopyFromSSD(&gpreagg->task,
-						  m_kds_src,
-						  pds_src);
+		gpuMemCopyFromSSD(m_kds_src, pds_src);
 	}
 
 	/*
@@ -5023,7 +5027,7 @@ gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 									  GPUMEMALIGN(pds_src->kds.length));
 				if (rc == CUDA_ERROR_OUT_OF_MEMORY)
 				{
-					PDS_fillup_blocks(pds_src, gpreagg->task.file_desc);
+					PDS_fillup_blocks(pds_src);
 					gpreagg->with_nvme_strom = false;
 				}
 				else if (rc != CUDA_SUCCESS)
@@ -5077,9 +5081,7 @@ gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 		}
 		else
 		{
-			gpuMemCopyFromSSD(&gpreagg->task,
-							  m_kds_src,
-							  pds_src);
+			gpuMemCopyFromSSD(m_kds_src, pds_src);
 		}
 	}
 	else
