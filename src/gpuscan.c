@@ -1808,7 +1808,7 @@ fixup_varnode_to_origin(Node *node, List *custom_scan_tlist)
 				   varnode->varattno <= list_length(custom_scan_tlist));
 			tle = list_nth(custom_scan_tlist,
 						   varnode->varattno - 1);
-			return copyObject(tle->expr);
+			return (Node *)copyObject(tle->expr);
 		}
 		Assert(!IS_SPECIAL_VARNO(varnode->varno));
 	}

@@ -1054,7 +1054,11 @@ ccache_builder_connectdb(void)
 						   WL_LATCH_SET |
 						   WL_TIMEOUT |
 						   WL_POSTMASTER_DEATH,
-						   60000L);
+						   60000L
+#if PG_VERSION_NUM >= 100000
+						   ,PG_WAIT_EXTENSION
+#endif
+);
 			if (ev & WL_POSTMASTER_DEATH)
 				elog(FATAL, "Unexpected postmaster dead");
 		}
@@ -1883,7 +1887,11 @@ ccache_builder_main(Datum arg)
 						   WL_LATCH_SET |
 						   WL_TIMEOUT |
 						   WL_POSTMASTER_DEATH,
-						   timeout);
+						   timeout
+#if PG_VERSION_NUM >= 100000
+						   ,PG_WAIT_EXTENSION
+#endif
+				);
 			if (ev & WL_POSTMASTER_DEATH)
 				elog(FATAL, "Unexpected postmaster dead");
 

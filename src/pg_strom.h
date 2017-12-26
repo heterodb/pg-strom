@@ -125,6 +125,9 @@
 #include "utils/typcache.h"
 #include "utils/uuid.h"
 #include "utils/varbit.h"
+#if PG_VERSION_NUM >= 100000
+#include "utils/varlena.h"
+#endif
 
 #define CUDA_API_PER_THREAD_DEFAULT_STREAM		1
 #include <cuda.h>
