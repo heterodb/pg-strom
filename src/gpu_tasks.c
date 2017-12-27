@@ -194,7 +194,6 @@ pgstromInitGpuTaskState(GpuTaskState *gts,
 						EState *estate)
 {
 	Relation		relation = gts->css.ss.ss_currentRelation;
-	TupleDesc		tupdesc = RelationGetDescr(relation);
 	ExprContext	   *econtext = gts->css.ss.ps.ps_ExprContext;
 	CustomScan	   *cscan = (CustomScan *)(gts->css.ss.ps.plan);
 	Relids			ccache_refs = NULL;
@@ -207,6 +206,8 @@ pgstromInitGpuTaskState(GpuTaskState *gts,
 											   cscan->custom_scan_tlist);
 	if (relation && RelationCanUseColumnarCache(relation))
 	{
+		TupleDesc	tupdesc = RelationGetDescr(relation);
+
 		foreach (lc, ccache_refs_list)
 		{
 			int		i, anum = lfirst_int(lc);

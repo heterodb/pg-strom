@@ -729,9 +729,15 @@ KDS_ROW_REF_HTUP(kern_data_store *kds,
 				 ItemPointerData *p_self,
 				 cl_uint *p_len)
 {
-	kern_tupitem   *tupitem = (kern_tupitem *)((char *)(kds)
-											   + tup_offset
-											   - offsetof(kern_tupitem, htup));
+	kern_tupitem   *tupitem;
+
+	Assert(__ldg(&kds->format) == KDS_FORMAT_ROW ||
+		   __ldg(&kds->format) == KDS_FORMAT_HASH);
+	if (tup_offset == 0)
+		return NULL;
+	tupitem = (kern_tupitem *)((char *)(kds)
+							   + tup_offset
+							   - offsetof(kern_tupitem, htup));
 	if (p_self)
 		*p_self = tupitem->t_self;
 	if (p_len)
@@ -2034,19 +2040,10 @@ pgstromTotalSum(T *values, cl_uint nitems)
 
 /*
  * Utility functions to reference system columns
+ *   (except for ctid and table_oid)
  */
 STATIC_INLINE(Datum)
-kern_getsysatt_ctid(kern_data_store *kds,
-					HeapTupleHeaderData *htup,
-					ItemPointerData *t_self)
-{
-	return PointerGetDatum(t_self);
-}
-
-STATIC_INLINE(Datum)
-kern_getsysatt_oid(kern_data_store *kds,
-				   HeapTupleHeaderData *htup,
-				   ItemPointerData *t_self)
+kern_getsysatt_oid(HeapTupleHeaderData *htup)
 {
 	if ((htup->t_infomask & HEAP_HASOID) != 0)
 		return *((cl_uint *)((char *) htup
@@ -2056,43 +2053,27 @@ kern_getsysatt_oid(kern_data_store *kds,
 }
 
 STATIC_INLINE(Datum)
-kern_getsysatt_xmin(kern_data_store *kds,
-					HeapTupleHeaderData *htup,
-					ItemPointerData *t_self)
+kern_getsysatt_xmin(HeapTupleHeaderData *htup)
 {
 	return (Datum) htup->t_choice.t_heap.t_xmin;
 }
 
 STATIC_INLINE(Datum)
-kern_getsysatt_xmax(kern_data_store *kds,
-					HeapTupleHeaderData *htup,
-					ItemPointerData *t_self)
+kern_getsysatt_xmax(HeapTupleHeaderData *htup)
 {
 	return (Datum) htup->t_choice.t_heap.t_xmax;
 }
 
 STATIC_INLINE(Datum)
-kern_getsysatt_cmin(kern_data_store *kds,
-					HeapTupleHeaderData *htup,
-					ItemPointerData *t_self)
+kern_getsysatt_cmin(HeapTupleHeaderData *htup)
 {
 	return (Datum) htup->t_choice.t_heap.t_field3.t_cid;
 }
 
 STATIC_INLINE(Datum)
-kern_getsysatt_cmax(kern_data_store *kds,
-					HeapTupleHeaderData *htup,
-					ItemPointerData *t_self)
+kern_getsysatt_cmax(HeapTupleHeaderData *htup)
 {
 	return (Datum) htup->t_choice.t_heap.t_field3.t_cid;
-}
-
-STATIC_INLINE(Datum)
-kern_getsysatt_tableoid(kern_data_store *kds,
-						HeapTupleHeaderData *htup,
-						ItemPointerData *t_self)
-{
-	return (Datum) kds->table_oid;
 }
 
 /*

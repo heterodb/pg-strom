@@ -171,6 +171,8 @@ KDS_BLOCK_REF_HTUP(kern_data_store *kds,
 	PageHeaderData *pg_page;
 
 	Assert(__ldg(&kds->format) == KDS_FORMAT_BLOCK);
+	if (lp_offset == 0)
+		return NULL;
 	head_size = (KERN_DATA_STORE_HEAD_LENGTH(kds) +
 				 STROMALIGN(sizeof(BlockNumber) * __ldg(&kds->nrooms)));
 	Assert(lp_offset >= head_size &&

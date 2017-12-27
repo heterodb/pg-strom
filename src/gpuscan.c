@@ -916,41 +916,68 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 		attr = SystemAttributeDefinition(varremaps[i], true);
 		j = attr->attnum + 1 + FirstLowInvalidHeapAttributeNumber;
 
-		appendStringInfo(
-			&tbody,
-			"  /* %s system column */\n"
-			"  tup_isnull[%d] = !htup;\n"
-			"  if (htup)\n"
-			"    tup_values[%d] = kern_getsysatt_%s(kds_src,htup,t_self);\n",
-			NameStr(attr->attname),
-			i,
-			i, NameStr(attr->attname));
+		if (attr->attnum == TableOidAttributeNumber)
+		{
+			resetStringInfo(&temp);
+			appendStringInfo(
+				&temp,
+				"  /* %s system column */\n"
+				"  tup_isnull[%d] = !htup;\n"
+				"  tup_values[%d] = kds_src->table_oid;\n",
+				NameStr(attr->attname), i, i);
+			appendStringInfoString(&tbody, temp.data);
+			appendStringInfoString(&cbody, temp.data);
+			continue;
+		}
+
+		if (attr->attnum == SelfItemPointerAttributeNumber)
+		{
+			appendStringInfo(
+				&tbody,
+				"  /* %s system column */\n"
+				"  tup_isnull[%d] = !t_self;\n"
+				"  if (t_self)\n"
+				"  {\n"
+				"    tup_values[%d] = PointerGetDatum(tup_extra);\n"
+				"    memcpy(tup_extra, t_self, sizeof(ItemPointerData));\n"
+				"    tup_extra += MAXALIGN(sizeof(ItemPointerData));\n"
+				"  }\n",
+				NameStr(attr->attname), i, i);
+		}
+		else
+		{
+			appendStringInfo(
+				&tbody,
+				"  /* %s system column */\n"
+				"  tup_isnull[%d] = !htup;\n"
+				"  if (!htup)\n"
+				"    tup_values[%d] = kern_getsysatt_%s(htup);\n",
+				NameStr(attr->attname),
+				i, i, NameStr(attr->attname));
+		}
 		appendStringInfo(
 			&cbody,
 			"  /* %s system column */\n"
-			"  addr = kern_get_datum_column(kds_src,%u,src_index);\n"
+			"  addr = kern_get_datum_column(kds_src,kds_src%d,src_index);\n"
 			"  tup_isnull[%d] = !addr;\n",
 			NameStr(attr->attname),
-			tupdesc->natts + j,
-			i);
+			attr->attnum, i);
 		if (!attr->attbyval)
 			appendStringInfo(
 				&cbody,
 				"  tup_values[%d] = PointerGetDatum(addr);\n",
 				i);
 		else
-		{
-			Assert(attr->attlen == sizeof(cl_uint));
 			appendStringInfo(
 				&cbody,
-				"  tup_values[%d] = SET_4_BYTES(*((cl_uint *)addr));\n",
-				i);
-		}
+				"  tup_values[%d] = READ_INT%d_PTR(addr);\n",
+				i, attr->attlen);
 	}
 
 	/*
 	 * Extract regular tuples
 	 */
+	resetStringInfo(&temp);
 	appendStringInfoString(
 		&temp,
 		"  EXTRACT_HEAP_TUPLE_BEGIN(curr, kds_src, htup);\n");
@@ -2091,14 +2118,12 @@ ExecEndGpuScan(CustomScanState *node)
 {
 	GpuScanState	   *gss = (GpuScanState *)node;
 
-	elog(INFO, "begin of ExecEndGpuScan");
 	/* wait for completion of asynchronous GpuTaks */
 	SynchronizeGpuContext(gss->gts.gcontext);
 	/* reset fallback resources */
 	if (gss->base_slot)
 		ExecDropSingleTupleTableSlot(gss->base_slot);
 	pgstromReleaseGpuTaskState(&gss->gts);
-	elog(INFO, "end of ExecEndGpuScan");
 }
 
 /*

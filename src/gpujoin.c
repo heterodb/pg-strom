@@ -2589,8 +2589,10 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 	List	   *kern_vars = NIL;
 	ListCell   *cell;
 	int			depth;
+	StringInfoData column;
 
 	Assert(cur_depth > 0 && cur_depth <= gj_info->num_rels);
+	initStringInfo(&column);
 
 	/*
 	 * Pick up variables in-use and append its properties in the order
@@ -2669,8 +2671,8 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 		source,
 		"  HeapTupleHeaderData *htup  __attribute__((unused));\n"
 		"  kern_data_store *kds_in    __attribute__((unused));\n"
-		"  kern_colmeta *colmeta      __attribute__((unused));\n"
-		"  void *datum                __attribute__((unused));\n");
+		"  void *datum                __attribute__((unused));\n"
+		"  cl_uint offset             __attribute__((unused));\n");
 
 	foreach (cell, kern_vars)
 	{
@@ -2688,6 +2690,7 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 			dtype->type_name,
 			kernode->varoattno);
 	}
+	appendStringInfoChar(source, '\n');
 
 	/*
 	 * variable initialization
@@ -2705,21 +2708,35 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 
 		if (depth != keynode->varno)
 		{
+			if (depth == 0)
+			{
+				appendStringInfo(
+					source,
+					"  }\n"
+					"  else\n"
+					"  {\n"
+					"    datum = NULL;\n"
+					"%s"
+					"  }\n", column.data);
+			}
+
 			if (keynode->varno == 0)
 			{
 				/* htup from KDS */
 				appendStringInfoString(
 					source,
 					"  /* variable load in depth-0 (outer KDS) */\n"
-					"  colmeta = kds->colmeta;\n"
-					"  if (!o_buffer)\n"
-					"    htup = NULL;\n"
-					"  else if (kds->format != KDS_FORMAT_BLOCK)\n"
-					"    htup = KDS_ROW_REF_HTUP(kds,o_buffer[0],\n"
-					"                            NULL,NULL);\n"
-					"  else\n"
-					"    htup = KDS_BLOCK_REF_HTUP(kds,o_buffer[0],\n"
-					"                              NULL,NULL);\n");
+					"  offset = (!o_buffer ? 0 : o_buffer[0]);\n"
+					"  if (__ldg(&kds->format) != KDS_FORMAT_COLUMN)\n"
+					"  {\n"
+					"    if (offset == 0)\n"
+					"      htup = NULL;\n"
+					"    else if (__ldg(&kds->format) == KDS_FORMAT_ROW)\n"
+					"      htup = KDS_ROW_REF_HTUP(kds,offset,NULL,NULL);\n"
+					"    else if (__ldg(&kds->format) == KDS_FORMAT_BLOCK)\n"
+					"      htup = KDS_BLOCK_REF_HTUP(kds,offset,NULL,NULL);\n"
+					"    else\n"
+					"      htup = NULL; /* bug */\n");
 			}
 			else
 			{
@@ -2728,8 +2745,7 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 					source,
 					"  /* variable load in depth-%u (data store) */\n"
 					"  kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, %u);\n"
-					"  assert(kds_in->format == %s);\n"
-					"  colmeta = kds_in->colmeta;\n",
+					"  assert(__ldg(&kds_in->format) == %s);\n",
 					keynode->varno,
 					keynode->varno,
 					list_nth(gj_info->hash_outer_keys,
@@ -2756,14 +2772,43 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 			}
 			depth = keynode->varno;
 		}
+
 		appendStringInfo(
 			source,
-			"  datum = GPUJOIN_REF_DATUM(colmeta,htup,%u);\n"
-			"  KVAR_%u = pg_%s_datum_ref(kcxt,datum);\n",
+			"%s  datum = GPUJOIN_REF_DATUM(%s->colmeta,htup,%u);\n"
+			"%s  KVAR_%u = pg_%s_datum_ref(kcxt,datum);\n",
+			(depth == 0 ? "  " : ""),
+			(depth == 0 ? "kds" : "kds_in"),
 			keynode->varattno - 1,
-			keynode->varoattno,
-			dtype->type_name);
+			(depth == 0 ? "  " : ""),
+			keynode->varoattno, dtype->type_name);
+
+		if (depth == 0)
+		{
+			appendStringInfo(
+				&column,
+				"    if (offset > 0)\n"
+				"      datum = kern_get_datum_column(kds,%u,offset-1);\n"
+				"    KVAR_%u = pg_%s_datum_ref(kcxt,datum);\n",
+				keynode->varattno - 1,
+				keynode->varoattno,
+				dtype->type_name);
+		}
 	}
+
+	if (depth == 0)
+	{
+		appendStringInfo(
+			source,
+			"  }\n"
+			"  else\n"
+			"  {\n"
+			"    datum = NULL;\n"
+			"%s"
+			"  }\n", column.data);
+	}
+	pfree(column.data);
+
 	appendStringInfo(source, "\n");
 }
 
@@ -2810,18 +2855,19 @@ gpujoin_codegen_join_quals(StringInfo source,
 		source,
 		"STATIC_FUNCTION(cl_bool)\n"
 		"gpujoin_join_quals_depth%d(kern_context *kcxt,\n"
-		"                           kern_data_store *kds,\n"
-        "                           kern_multirels *kmrels,\n"
-		"                           cl_uint *o_buffer,\n"
-		"                           HeapTupleHeaderData *i_htup,\n"
-		"                           cl_bool *joinquals_matched)\n"
+		"                          kern_data_store *kds,\n"
+        "                          kern_multirels *kmrels,\n"
+		"                          cl_uint *o_buffer,\n"
+		"                          HeapTupleHeaderData *i_htup,\n"
+		"                          cl_bool *joinquals_matched)\n"
 		"{\n",
 		cur_depth);
 
 	/*
 	 * variable/params declaration & initialization
 	 */
-	gpujoin_codegen_var_param_decl(source, gj_info, cur_depth, context);
+	gpujoin_codegen_var_param_decl(source, gj_info,
+								   cur_depth, context);
 
 	/*
 	 * evaluation of other-quals and join-quals
@@ -2853,7 +2899,8 @@ gpujoin_codegen_join_quals(StringInfo source,
 	appendStringInfo(
 		source,
 		"  return true;\n"
-		"}\n");
+		"}\n"
+		"\n");
 }
 
 /*
@@ -2884,16 +2931,15 @@ gpujoin_codegen_hash_value(StringInfo source,
 		source,
 		"STATIC_FUNCTION(cl_uint)\n"
 		"gpujoin_hash_value_depth%u(kern_context *kcxt,\n"
-		"                           cl_uint *pg_crc32_table,\n"
-		"                           kern_data_store *kds,\n"
-		"                           kern_multirels *kmrels,\n"
-		"                           cl_uint *o_buffer,\n"
-		"                           cl_bool *p_is_null_keys)\n"
+		"                          cl_uint *pg_crc32_table,\n"
+		"                          kern_data_store *kds,\n"
+		"                          kern_multirels *kmrels,\n"
+		"                          cl_uint *o_buffer,\n"
+		"                          cl_bool *p_is_null_keys)\n"
 		"{\n"
 		"  pg_anytype_t temp    __attribute__((unused));\n"
 		"  cl_uint hash;\n"
-		"  cl_bool is_null_keys = true;\n"
-		"\n",
+		"  cl_bool is_null_keys = true;\n",
 		cur_depth);
 
 	context->used_vars = NIL;
@@ -2931,8 +2977,8 @@ gpujoin_codegen_hash_value(StringInfo source,
 	/*
 	 * variable/params declaration & initialization
 	 */
-	gpujoin_codegen_var_param_decl(source, gj_info, cur_depth, context);
-
+	gpujoin_codegen_var_param_decl(source, gj_info,
+								   cur_depth, context);
 	appendStringInfo(
 		source,
 		"%s"
@@ -2968,13 +3014,15 @@ gpujoin_codegen_projection(StringInfo source,
 	Bitmapset	   *refs_by_expr = NULL;
 	StringInfoData	body;
 	StringInfoData	temp;
+	StringInfoData	column;
 	cl_int			depth;
-	cl_uint			extra_maxlen;
+	cl_uint			extra_maxlen = 0;
 	cl_bool			is_first;
 
 	varattmaps = palloc(sizeof(AttrNumber) * list_length(tlist_dev));
 	initStringInfo(&body);
 	initStringInfo(&temp);
+	initStringInfo(&column);
 
 	/*
 	 * Pick up all the var-node referenced directly or indirectly by
@@ -3029,9 +3077,15 @@ gpujoin_codegen_projection(StringInfo source,
 		"  HeapTupleHeaderData *htup    __attribute__((unused));\n"
 		"  kern_data_store *kds_in      __attribute__((unused));\n"
 		"  ItemPointerData  t_self      __attribute__((unused));\n"
-		"  char *addr                   __attribute__((unused));\n"
-		"  char *extra_pos = extra_buf;\n"
-		"  pg_anytype_t temp            __attribute__((unused));\n");
+		"  cl_uint          offset      __attribute__((unused));\n"
+		"  void            *addr        __attribute__((unused));\n"
+		"  char            *extra_pos = extra_buf;\n"
+		"  pg_anytype_t     temp        __attribute__((unused));\n"
+		"\n"
+		"  if (use_extra_buf)\n"
+		"    memset(use_extra_buf, 0, sizeof(cl_bool) *\n"
+		"                             GPUJOIN_DEVICE_PROJECTION_NFIELDS);\n"
+		"\n");
 
 	for (depth=0; depth <= gj_info->num_rels; depth++)
 	{
@@ -3039,6 +3093,8 @@ gpujoin_codegen_projection(StringInfo source,
 		List	   *kvars_dstnum = NIL;
 		const char *kds_label;
 		cl_int		i, nattrs = -1;
+
+		resetStringInfo(&column);
 
 		/* collect information in this depth */
 		memset(varattmaps, 0, sizeof(AttrNumber) * list_length(tlist_dev));
@@ -3072,11 +3128,19 @@ gpujoin_codegen_projection(StringInfo source,
 
 		appendStringInfo(
 			&body,
-			"  /* ---- extract %s relation (depth=%d) */\n",
-			depth > 0 ? "inner" : "outer", depth);
+			"  /* ---- extract %s relation (depth=%d) */\n"
+			"  offset = r_buffer[%d];\n",
+			depth > 0 ? "inner" : "outer", depth,
+			depth);
 
 		if (depth == 0)
+		{
+			appendStringInfo(
+				&body,
+				"  if (__ldg(&kds_src->format) != KDS_FORMAT_COLUMN)\n"
+				"  {\n");
 			kds_label = "kds_src";
+		}
 		else
 		{
 			appendStringInfo(
@@ -3088,21 +3152,20 @@ gpujoin_codegen_projection(StringInfo source,
 
 		appendStringInfo(
 			&body,
-			"  if (r_buffer[%d] == 0)\n"
-			"    htup = NULL;\n",
-			depth);
+			"  if (offset == 0)\n"
+			"    htup = NULL;\n");
 		if (depth == 0)
 			appendStringInfo(
 				&body,
 				"  else if (%s->format == KDS_FORMAT_BLOCK)\n"
-				"    htup = KDS_BLOCK_REF_HTUP(%s,r_buffer[%d],&t_self,NULL);\n",
+				"    htup = KDS_BLOCK_REF_HTUP(%s,offset,&t_self,NULL);\n",
 				kds_label,
-				kds_label, depth);
+				kds_label);
 		appendStringInfo(
 			&body,
 			"  else\n"
-			"    htup = KDS_ROW_REF_HTUP(%s,r_buffer[%d],&t_self,NULL);\n",
-			kds_label, depth);
+			"    htup = KDS_ROW_REF_HTUP(%s,offset,&t_self,NULL);\n",
+			kds_label);
 
 		/* System column reference if any */
 		foreach (lc1, tlist_dev)
@@ -3113,21 +3176,80 @@ gpujoin_codegen_projection(StringInfo source,
 			if (varattmaps[tle->resno-1] >= 0)
 				continue;
 			attr = SystemAttributeDefinition(varattmaps[tle->resno-1], true);
+			if (attr->attnum == TableOidAttributeNumber)
+			{
+				appendStringInfo(
+					&body,
+					"  /* %s system column */\n"
+					"  tup_isnull[%d] = !htup;\n"
+					"  tup_values[%d] = (htup ? %s->table_oid : 0);\n",
+					NameStr(attr->attname),
+					tle->resno - 1,
+					tle->resno - 1,
+					kds_label);
+				appendStringInfo(
+					&column,
+					"    /* %s system column */\n"
+					"    tup_isnull[%d] = (offset == 0);\n"
+					"    tup_values[%d] = (offset > 0 ? %s->table_oid : 0);\n",
+					NameStr(attr->attname),
+					tle->resno - 1,
+					tle->resno - 1,
+					kds_label);
+				continue;
+			}
+			if (attr->attnum == SelfItemPointerAttributeNumber)
+			{
+				appendStringInfo(
+					&body,
+					"  /* %s system column */\n"
+					"  tup_isnull[%d] = false;\n"
+					"  tup_values[%d] = PointerGetDatum(extra_pos);\n"
+					"  use_extra_buf[%d] = true;\n"
+					"  memcpy(extra_pos, &t_self, sizeof(t_self));\n"
+					"  extra_pos += MAXALIGN(t_self);\n",
+					NameStr(attr->attname),
+					tle->resno - 1,
+					tle->resno - 1,
+					tle->resno - 1);
+				extra_maxlen += MAXALIGN(attr->attlen);
+			}
+			else
+			{
+				appendStringInfo(
+					&body,
+					"  /* %s system column */\n"
+					"  tup_isnull[%d] = !htup;\n"
+					"  if (htup)\n"
+					"    tup_values[%d] = kern_getsysatt_%s(htup);\n",
+					NameStr(attr->attname),
+					tle->resno-1,
+					tle->resno-1,
+					NameStr(attr->attname));
+			}
 			appendStringInfo(
-				&body,
-				"  /* %s system column */\n"
-				"  if (!htup)\n"
-				"    tup_isnull[%d] = true;\n"
-				"  else {\n"
-				"    tup_isnull[%d] = false;\n"
-				"    tup_values[%d] = kern_getsysatt_%s(%s, htup, &t_self);\n"
-				"  }\n",
+				&column,
+				"    /* %s system column */\n"
+				"    addr = (offset == 0 ? NULL"
+				" : kern_get_datum_column(%s,%s->ncols%d,offset-1));\n"
+				"    tup_isnull[%d] = !addr;\n",
 				NameStr(attr->attname),
-				tle->resno-1,
-				tle->resno-1,
-				tle->resno-1,
-				NameStr(attr->attname),
-				kds_label);
+				kds_label,
+				kds_label,
+				attr->attnum,
+				tle->resno-1);
+			if (!attr->attbyval)
+				appendStringInfo(
+					&column,
+					"    tup_values[%d] = PointerGetDatum(addr);\n",
+					tle->resno-1);
+			else
+				appendStringInfo(
+					&column,
+					"    if (addr)\n"
+					"      tup_values[%d] = READ_INT%d_PTR(addr);\n",
+					tle->resno-1,
+					8 * attr->attlen);
 		}
 
 		/* begin to walk on the tuple */
@@ -3151,14 +3273,25 @@ gpujoin_codegen_projection(StringInfo source,
 				/* attribute shall be directly copied */
 				get_typlenbyval(exprType((Node *)tle->expr),
 								&typelen, &typebyval);
+				if (!referenced)
+					appendStringInfo(
+						&column,
+						"    addr = (offset == 0 ? NULL"
+						" : kern_get_datum_column(%s,%d,offset-1));\n",
+						kds_label, i-1);
+
 				if (!typebyval)
 				{
 					appendStringInfo(
 						&temp,
-						"  tup_isnull[%d] = (addr != NULL ? false : true);\n"
-						"  tup_values[%d] = PointerGetDatum(addr);\n"
-						"  use_extra_buf[%d] = false;\n",
+						"  tup_isnull[%d] = !addr;\n"
+						"  tup_values[%d] = PointerGetDatum(addr);\n",
 						tle->resno - 1,
+						tle->resno - 1);
+					appendStringInfo(
+						&column,
+						"    tup_isnull[%d] = !addr;\n"
+						"    tup_values[%d] = PointerGetDatum(addr);\n",
 						tle->resno - 1,
 						tle->resno - 1);
 				}
@@ -3166,17 +3299,20 @@ gpujoin_codegen_projection(StringInfo source,
 				{
 					appendStringInfo(
 						&temp,
-						"  tup_isnull[%d] = (addr != NULL ? false : true);\n"
+						"  tup_isnull[%d] = !addr;\n"
 						"  if (addr)\n"
-						"    tup_values[%d] = *((%s *) addr);\n"
-						"  use_extra_buf[%d] = false;\n",
+						"    tup_values[%d] = READ_INT%d_PTR(addr);\n",
 						tle->resno - 1,
-                        tle->resno - 1,
-						(typelen == sizeof(cl_long)  ? "cl_long" :
-						 typelen == sizeof(cl_int)   ? "cl_int" :
-						 typelen == sizeof(cl_short) ? "cl_short"
-													 : "cl_char"),
-						tle->resno - 1);
+						tle->resno - 1,
+						8 * typelen);
+					appendStringInfo(
+						&column,
+						"    tup_isnull[%d] = !addr;\n"
+						"    if (addr)\n"
+						"      tup_values[%d] = READ_INT%d_PTR(addr);\n",
+						tle->resno - 1,
+						tle->resno - 1,
+						8 * typelen);
 				}
 				referenced = true;
 			}
@@ -3209,7 +3345,17 @@ gpujoin_codegen_projection(StringInfo source,
 					"  KVAR_%u = pg_%s_datum_ref(kcxt,addr);\n",
 					dst_num,
 					dtype->type_name);
-
+				if (!referenced)
+					appendStringInfo(
+						&column,
+						"    addr = (offset == 0 ? NULL"
+						" : kern_get_datum_column(%s,%d,offset-1));\n",
+						kds_label, i-1);
+				appendStringInfo(
+					&column,
+					"    KVAR_%u = pg_%s_datum_ref(kcxt,addr);\n",
+					dst_num,
+					dtype->type_name);
 				referenced = true;
 			}
 
@@ -3226,13 +3372,24 @@ gpujoin_codegen_projection(StringInfo source,
 		appendStringInfoString(
 			&body,
 			"  EXTRACT_HEAP_TUPLE_END();\n");
+
+		if (depth == 0)
+		{
+			appendStringInfo(
+				&body,
+				"  }\n"
+				"  else\n"
+				"  {\n"
+				"%s"
+				"  }\n",
+				column.data);
+		}
 	}
 
 	/*
 	 * Execution of the expression
 	 */
 	is_first = true;
-	extra_maxlen = 0;
 	forboth (lc1, tlist_dev,
 			 lc2, ps_src_depth)
 	{
@@ -3257,34 +3414,7 @@ gpujoin_codegen_projection(StringInfo source,
 			elog(ERROR, "cache lookup failed for device type: %s",
 				 format_type_be(exprType((Node *) tle->expr)));
 
-		if (dtype->type_oid == NUMERICOID)
-		{
-			extra_maxlen += 32;
-			appendStringInfo(
-				&body,
-				"  temp.%s_v = %s;\n"
-				"  tup_isnull[%d] = temp.%s_v.isnull;\n"
-				"  if (!temp.%s_v.isnull)\n"
-				"  {\n"
-				"    cl_uint numeric_len =\n"
-				"        pg_numeric_to_varlena(kcxt, extra_pos,\n"
-				"                              temp.%s_v.value,\n"
-				"                              temp.%s_v.isnull);\n"
-				"    tup_values[%d] = PointerGetDatum(extra_pos);\n"
-				"    extra_pos += MAXALIGN(numeric_len);\n"
-				"  }\n"
-				"  use_extra_buf[%d] = true;\n",
-				dtype->type_name,
-				pgstrom_codegen_expression((Node *)tle->expr, context),
-				tle->resno - 1,
-				dtype->type_name,
-				dtype->type_name,
-				dtype->type_name,
-				dtype->type_name,
-				tle->resno - 1,
-				tle->resno - 1);
-		}
-		else if (dtype->type_byval)
+		if (dtype->type_byval)
 		{
 			/* fixed length built-in data type */
 			appendStringInfo(
@@ -3292,8 +3422,7 @@ gpujoin_codegen_projection(StringInfo source,
 				"  temp.%s_v = %s;\n"
 				"  tup_isnull[%d] = temp.%s_v.isnull;\n"
 				"  if (!temp.%s_v.isnull)\n"
-				"    tup_values[%d] = pg_%s_as_datum(&temp.%s_v.value);\n"
-				"  use_extra_buf[%d] = false;\n",
+				"    tup_values[%d] = pg_%s_as_datum(&temp.%s_v.value);\n",
 				dtype->type_name,
 				pgstrom_codegen_expression((Node *)tle->expr, context),
 				tle->resno - 1,
@@ -3301,13 +3430,11 @@ gpujoin_codegen_projection(StringInfo source,
 				dtype->type_name,
 				tle->resno - 1,
 				dtype->type_name,
-				dtype->type_name,
-				tle->resno - 1);
+				dtype->type_name);
 		}
 		else if (dtype->type_length > 0)
 		{
 			/* fixed length pointer data type */
-			extra_maxlen += MAXALIGN(dtype->type_length);
 			appendStringInfo(
 				&body,
 				"  temp.%s_v = %s;\n"
@@ -3318,8 +3445,8 @@ gpujoin_codegen_projection(StringInfo source,
 				"           sizeof(temp.%s_v.value));\n"
 				"    tup_values[%d] = PointerGetDatum(extra_pos);\n"
 				"    extra_pos += MAXALIGN(sizeof(temp.%s_v.value));\n"
-				"  }\n"
-				"  use_extra_buf[%d] = true;\n",
+				"    use_extra_buf[%d] = true;\n"
+				"  }\n",
 				dtype->type_name,
 				pgstrom_codegen_expression((Node *)tle->expr, context),
 				tle->resno - 1,
@@ -3330,6 +3457,35 @@ gpujoin_codegen_projection(StringInfo source,
 				tle->resno - 1,
 				dtype->type_name,
 				tle->resno - 1);
+			extra_maxlen += MAXALIGN(dtype->type_length);
+		}
+		else if (dtype->extra_sz > 0)
+		{
+			/* variable length field with an explicit upper limit */
+			appendStringInfo(
+				&body,
+				"  temp.%s_v = %s;\n"
+				"  tup_isnull[%d] = temp.%s_v.isnull;\n"
+				"  if (!temp.%s_v.isnull)\n"
+				"  {\n"
+				"    cl_uint  __len;\n"
+				"    tup_values[%d] = PointerGetDatum(extra_pos);\n"
+				"    __len = pg_%s_datum_store(kcxt,extra_pos,temp.%s_v);"
+				"    assert(__len <= %zu);\n"
+				"    extra_pos += MAXALIGN(__len);\n"
+				"    use_extra_buf[%d] = true;\n"
+				"  }\n",
+				dtype->type_name,
+				pgstrom_codegen_expression((Node *)tle->expr, context),
+				tle->resno - 1,
+				dtype->type_name,
+				dtype->type_name,
+				tle->resno - 1,
+				dtype->type_name,
+				dtype->type_name,
+				MAXALIGN(dtype->extra_sz),
+				tle->resno - 1);
+			extra_maxlen += MAXALIGN(dtype->extra_sz);
 		}
 		else
 		{
@@ -3400,6 +3556,7 @@ gpujoin_codegen(PlannerInfo *root,
 	context->pseudo_tlist = cscan->custom_scan_tlist;
 	for (depth=1; depth <= gj_info->num_rels; depth++)
 		gpujoin_codegen_join_quals(&source, gj_info, depth, context);
+
 	appendStringInfo(
 		&source,
 		"STATIC_FUNCTION(cl_bool)\n"
@@ -3419,7 +3576,9 @@ gpujoin_codegen(PlannerInfo *root,
 		appendStringInfo(
 			&source,
 			"  case %d:\n"
-			"    return gpujoin_join_quals_depth%d(kcxt, kds, kmrels, o_buffer, i_htup, needs_outer_row);\n",
+			"    return gpujoin_join_quals_depth%d(kcxt, kds, kmrels,\n"
+			"                                     o_buffer, i_htup,\n"
+			"                                     needs_outer_row);\n",
 			depth, depth);
 	}
 	appendStringInfo(
@@ -4767,8 +4926,6 @@ resume_gpujoin:
 	kern_args[2] = &m_kds_src;
 	kern_args[3] = &m_kds_dst;
 	kern_args[4] = &m_nullptr;
-
-	//wnotice("kgjoin %p (block=%zu, grid=%zu) {resume=%d} kds_src=%p kds_dst=%p", &pgjoin->kern, block_sz, grid_sz, pgjoin->kern.resume_context, &pds_src->kds, &pds_dst->kds);
 
 	rc = cuLaunchKernel(kern_gpujoin_main,
 						grid_sz, 1, 1,

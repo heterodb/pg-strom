@@ -341,15 +341,13 @@ gpujoin_load_source(kern_context *kcxt,
 					cl_uint *wr_stack,
 					cl_uint *l_state)
 {
-	HeapTupleHeaderData *htup = NULL;
-	ItemPointerData	t_self;
-	cl_uint			t_offset;
-	cl_uint			count;
-	cl_bool			visible;
-	cl_uint			wr_index;
+	cl_uint		t_offset = UINT_MAX;
+	cl_bool		visible = false;
+	cl_uint		count;
+	cl_uint		wr_index;
 
 	/* extract a HeapTupleHeader */
-	if (kds_src->format == KDS_FORMAT_ROW)
+	if (__ldg(&kds_src->format) == KDS_FORMAT_ROW)
 	{
 		kern_tupitem   *tupitem;
 		cl_uint			row_index;
@@ -365,11 +363,14 @@ gpujoin_load_source(kern_context *kcxt,
 		{
 			tupitem = KERN_DATA_STORE_TUPITEM(kds_src, row_index);
 			t_offset = (cl_uint)((char *)&tupitem->htup - (char *)kds_src);
-			t_self = tupitem->t_self;
-			htup = &tupitem->htup;
+
+			visible = gpuscan_quals_eval(kcxt,
+										 kds_src,
+										 &tupitem->t_self,
+										 &tupitem->htup);
 		}
 	}
-	else
+	else if (__ldg(&kds_src->format) == KDS_FORMAT_BLOCK)
 	{
 		cl_uint		part_sz = KERN_DATA_STORE_PARTSZ(kds_src);
 		cl_uint		n_parts = get_local_size() / part_sz;
@@ -389,7 +390,9 @@ gpujoin_load_source(kern_context *kcxt,
 			get_local_id() < part_sz * n_parts)
 		{
 			PageHeaderData *pg_page;
-			BlockNumber	block_nr;
+			BlockNumber		block_nr;
+			ItemPointerData	t_self;
+			HeapTupleHeaderData *htup;
 
 			pg_page = KERN_DATA_STORE_BLOCK_PGPAGE(kds_src, part_id);
 			n_lines = PageGetMaxOffsetNumber(pg_page);
@@ -406,32 +409,49 @@ gpujoin_load_source(kern_context *kcxt,
 					t_self.ip_posid = line_no;
 
 					htup = PageGetItem(pg_page, lpp);
+
+					visible = gpuscan_quals_eval(kcxt,
+												 kds_src,
+												 &t_self,
+												 htup);
 				}
 			}
 		}
 	}
+	else
+	{
+		assert(__ldg(&kds_src->format) == KDS_FORMAT_COLUMN);
+		cl_uint			row_index;
 
-	count = __syncthreads_count(htup != NULL);
+		/* fetch next window */
+		if (get_local_id() == 0)
+			src_read_pos = atomicAdd(&kgjoin->src_read_pos,
+									 get_local_size());
+		__syncthreads();
+		row_index = src_read_pos + get_local_id();
+
+		if (row_index < __ldg(&kds_src->nitems))
+		{
+			t_offset = row_index + 1;
+			visible = gpuscan_quals_eval_column(kcxt,
+												kds_src,
+												row_index);
+		}
+	}
+	/* error checks */
+	if (__syncthreads_count(kcxt->e.errcode) > 0)
+		return -1;
+	/* statistics */
+	count = __syncthreads_count(t_offset != UINT_MAX);
+	if (get_local_id() == 0)
+		stat_source_nitems += count;
+
+	/* store the source tuple if visible */
+	wr_index = pgstromStairlikeBinaryCount(visible, &count);
 	if (count > 0)
 	{
-		if (get_local_id() == 0)
-			stat_source_nitems += count;
-
-		if (htup)
-			visible = gpuscan_quals_eval(kcxt,
-										 kds_src,
-										 &t_self,
-										 htup);
-		else
-			visible = false;
-
-		/* error checks */
-		if (__syncthreads_count(kcxt->e.errcode) > 0)
-			return -1;
-
-		/* store the tuple-offset if visible */
-		wr_index = write_pos[0];
-		wr_index += pgstromStairlikeBinaryCount(visible, &count);
+		wr_index += write_pos[0];
+		__syncthreads();
 		if (get_local_id() == 0)
 		{
 			write_pos[0] += count;
@@ -1171,13 +1191,14 @@ gpujoin_main(kern_gpujoin *kgjoin,
 	__shared__ cl_int depth_thread0 __attribute__((unused));
 
 	INIT_KERNEL_CONTEXT(&kcxt, gpujoin_main, kparams);
-	assert(kds_src->format == KDS_FORMAT_ROW ||
-		   kds_src->format == KDS_FORMAT_BLOCK);
+	assert(__ldg(&kds_src->format) == KDS_FORMAT_ROW ||
+		   __ldg(&kds_src->format) == KDS_FORMAT_BLOCK ||
+		   __ldg(&kds_src->format) == KDS_FORMAT_COLUMN);
 #ifndef GPUPREAGG_COMBINED_JOIN
-	assert(kds_dst->format == KDS_FORMAT_ROW);
+	assert(__ldg(&kds_dst->format) == KDS_FORMAT_ROW);
 	assert(kparams_gpreagg == NULL);
 #else
-	assert(kds_dst->format == KDS_FORMAT_SLOT);
+	assert(__ldg(&kds_dst->format) == KDS_FORMAT_SLOT);
 	assert(kparams_gpreagg != NULL);
 	INIT_KERNEL_CONTEXT(&kcxt_gpreagg, gpujoin_main, kparams_gpreagg);
 #endif
@@ -1218,7 +1239,7 @@ gpujoin_main(kern_gpujoin *kgjoin,
 	{
 		if (depth == 0)
 		{
-			/* LOAD FROM KDS_SRC (ROW/BLOCK) */
+			/* LOAD FROM KDS_SRC (ROW/BLOCK/COLUMN) */
 			depth = gpujoin_load_source(&kcxt,
 										kgjoin,
 										kds_src,
