@@ -671,7 +671,7 @@ gpuscan_exec_quals_column(kern_gpuscan *kgpuscan,
 #if GPUSCAN_DEVICE_PROJECTION_EXTRA_SIZE > 0
 	cl_char			tup_extra[GPUSCAN_DEVICE_PROJECTION_EXTRA_SIZE];
 #else
-	cl_char		   *tup_extra = NULL;
+	cl_char		   *tup_extra __attribute__((unused)) = NULL;
 #endif
 	__shared__ cl_int	src_base;
 	__shared__ cl_int	nitems_base;
@@ -749,7 +749,7 @@ gpuscan_exec_quals_column(kern_gpuscan *kgpuscan,
 #else
 			//extract all the fields as is
 
-
+			//to be implemented;
 
 
 #endif

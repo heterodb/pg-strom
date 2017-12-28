@@ -93,6 +93,18 @@ static struct {
 				 NULL, NULL, NULL,
 				 DEVKERNEL_NEEDS_MISC, UUID_LEN,
 				 generic_devtype_hashfunc),
+	DEVTYPE_DECL("macaddr", MACADDROID, "macaddr",
+				 NULL, NULL, NULL,
+				 DEVKERNEL_NEEDS_MISC, sizeof(macaddr),
+				 generic_devtype_hashfunc),
+	DEVTYPE_DECL("inet",   INETOID,   "inet_struct",
+				 NULL, NULL, NULL,
+				 DEVKERNEL_NEEDS_MISC, sizeof(inet),
+				 generic_devtype_hashfunc),
+	DEVTYPE_DECL("cidr",   CIDROID,   "inet_struct",
+				 NULL, NULL, NULL,
+				 DEVKERNEL_NEEDS_MISC, sizeof(inet),
+				 generic_devtype_hashfunc),
 	/*
 	 * Date and time datatypes
 	 */
@@ -750,6 +762,29 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "uuid_le",		2, {UUIDOID, UUIDOID},		"y/F:uuid_le" },
 	{ "uuid_gt",		2, {UUIDOID, UUIDOID},		"y/F:uuid_gt" },
 	{ "uuid_ge",		2, {UUIDOID, UUIDOID},		"y/F:uuid_ge" },
+	/* macaddr comparison */
+	{ "macaddr_cmp",    2, {MACADDROID,MACADDROID}, "y/F:macaddr_cmp" },
+	{ "macaddr_eq",     2, {MACADDROID,MACADDROID}, "y/F:macaddr_eq" },
+	{ "macaddr_ne",     2, {MACADDROID,MACADDROID}, "y/F:macaddr_ne" },
+	{ "macaddr_lt",     2, {MACADDROID,MACADDROID}, "y/F:macaddr_lt" },
+	{ "macaddr_le",     2, {MACADDROID,MACADDROID}, "y/F:macaddr_le" },
+	{ "macaddr_gt",     2, {MACADDROID,MACADDROID}, "y/F:macaddr_gt" },
+	{ "macaddr_ge",     2, {MACADDROID,MACADDROID}, "y/F:macaddr_ge" },
+	/* inet comparison */
+	{ "network_cmp",    2, {INETOID,INETOID},       "y/F:network_cmp" },
+	{ "network_eq",     2, {INETOID,INETOID},       "y/F:network_eq" },
+	{ "network_ne",     2, {INETOID,INETOID},       "y/F:network_ne" },
+	{ "network_lt",     2, {INETOID,INETOID},       "y/F:network_lt" },
+	{ "network_le",     2, {INETOID,INETOID},       "y/F:network_le" },
+	{ "network_gt",     2, {INETOID,INETOID},       "y/F:network_gt" },
+	{ "network_ge",     2, {INETOID,INETOID},       "y/F:network_ge" },
+	{ "network_larger", 2, {INETOID,INETOID},       "y/F:network_larger" },
+	{ "network_smaller", 2, {INETOID,INETOID},      "y/F:network_smaller" },
+	{ "network_sub",    2, {INETOID,INETOID},       "y/F:network_sub" },
+	{ "network_subeq",  2, {INETOID,INETOID},       "y/F:network_subeq" },
+	{ "network_sup",    2, {INETOID,INETOID},       "y/F:network_sup" },
+	{ "network_supeq",  2, {INETOID,INETOID},       "y/F:network_supeq" },
+	{ "network_overlap",2, {INETOID,INETOID},       "y/F:network_overlap" },
 
 	/*
      * Mathmatical functions
@@ -1026,10 +1061,33 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 					  TIMESTAMPTZOID, TIMESTAMPTZOID},
 	  "t/F:overlaps_timestamptz" },
 
-	/*
-	 * Misc time and date functions
-	 */
+	/* other time and data functions */
 	{ "now", 0, {}, "t/F:now" },
+
+	/* macaddr functions */
+	{ "trunc",       1, {MACADDROID},            "y/F:macaddr_trunc" },
+	{ "macaddr_not", 1, {MACADDROID},            "y/F:macaddr_not" },
+	{ "macaddr_and", 2, {MACADDROID,MACADDROID}, "y/F:macaddr_and" },
+	{ "macaddr_or",  2, {MACADDROID,MACADDROID}, "y/F:macaddr_or" },
+
+	/* inet/cidr functions */
+	{ "set_masklen", 2, {INETOID,INT4OID},       "y/F:inet_set_masklen" },
+	{ "set_masklen", 2, {CIDROID,INT4OID},       "y/F:cidr_set_masklen" },
+	{ "family",      1, {INETOID},               "y/F:inet_family" },
+	{ "network",     1, {INETOID},               "y/F:network_network" },
+	{ "netmask",     1, {INETOID},               "y/F:inet_netmask" },
+	{ "masklen",     1, {INETOID},               "y/F:inet_masklen" },
+	{ "broadcast",   1, {INETOID},               "y/F:inet_broadcast" },
+	{ "hostmask",    1, {INETOID},               "y/F:inet_hostmask" },
+	{ "cidr",        1, {INETOID},               "y/F:inet_to_cidr" },
+	{ "inetnot",     1, {INETOID},               "y/F:inet_not" },
+	{ "inetand",     2, {INETOID,INETOID},       "y/F:inet_and" },
+	{ "inetor",      2, {INETOID,INETOID},       "y/F:inet_or" },
+	{ "inetpl",      2, {INETOID,INT8OID},       "y/F:inetpl_int8" },
+	{ "inetmi_int8", 2, {INETOID,INT8OID},       "y/F:inetmi_int8" },
+	{ "inetmi",      2, {INETOID,INETOID},       "y/F:inetmi" },
+	{ "inet_same_family", 2, {INETOID,INETOID},  "y/F:inet_same_family" },
+	{ "inet_merge",  2, {INETOID,INETOID},       "y/F:inet_merge" },
 
 	/*
 	 * Text functions

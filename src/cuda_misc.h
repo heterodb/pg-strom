@@ -23,7 +23,6 @@
 #ifndef PG_MONEY_TYPE_DEFINED
 #define PG_MONEY_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(money, cl_long);
-STATIC_INLINE(Datum)
 #endif
 
 /*
@@ -33,7 +32,16 @@ STATIC_INLINE(Datum)
 STATIC_FUNCTION(pg_money_t)
 pgfn_numeric_cash(kern_context *kcxt, pg_numeric_t arg1)
 {
+	pg_int8			temp = { PGLC_CURRENCY_SCALE, false };
+	pg_numeric_t	div;
+	pg_money_t		result;
 
+	div = pgfn_int8_numeric(kcxt, temp);
+	temp = pgfn_numeric_int8(kcxt, pgfn_numeric_mul(kcxt, arg1, div));
+	result.isnull = temp.isnull;
+	result.value = temp.value;
+
+	return result;
 }
 #endif
 
@@ -322,7 +330,7 @@ typedef struct
 #ifndef PG_UUID_TYPE_DEFINED
 #define PG_UUID_TYPE_DEFINED
 STROMCL_INDIRECT_TYPE_TEMPLATE(uuid, pgsql_uuid_t)
-#endif
+#endif	/* PG_UUID_TYPE_DEFINED */
 
 STATIC_INLINE(int)
 uuid_internal_cmp(pg_uuid_t *arg1, pg_uuid_t *arg2)
@@ -441,6 +449,1224 @@ pgfn_uuid_ne(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
 	return result;
 }
 
+/*
+ * Data Types for network address types
+ * ---------------------------------------------------------------- */
+
+/* pg_macaddr_t */
+typedef struct macaddr
+{
+	cl_uchar	a;
+	cl_uchar	b;
+	cl_uchar	c;
+	cl_uchar	d;
+	cl_uchar	e;
+	cl_uchar	f;
+} macaddr;
+
+#define hibits(addr) \
+	((unsigned long)(((addr)->a<<16)|((addr)->b<<8)|((addr)->c)))
+
+#define lobits(addr) \
+	((unsigned long)(((addr)->d<<16)|((addr)->e<<8)|((addr)->f)))
+
+#ifndef PG_MACADDR_TYPE_DEFINED
+#define PG_MACADDR_TYPE_DEFINED
+STROMCL_INDIRECT_TYPE_TEMPLATE(macaddr,macaddr)
+#endif	/* PG_MACADDR_TYPE_DEFINED */
+
+STATIC_FUNCTION(pg_macaddr_t)
+pgfn_macaddr_trunc(kern_context *kcxt, pg_macaddr_t arg1)
+{
+	arg1.value.d = 0;
+	arg1.value.e = 0;
+	arg1.value.f = 0;
+
+	return arg1;
+}
+
+STATIC_INLINE(cl_int)
+macaddr_cmp_internal(macaddr *a1, macaddr *a2)
+{
+	if (hibits(a1) < hibits(a2))
+		return -1;
+	else if (hibits(a1) > hibits(a2))
+		return 1;
+	else if (lobits(a1) < lobits(a2))
+		return -1;
+	else if (lobits(a1) > lobits(a2))
+		return 1;
+	else
+		return 0;
+}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_macaddr_eq(kern_context *kcxt, pg_macaddr_t arg1, pg_macaddr_t arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+		result.value = (macaddr_cmp_internal(&arg1.value, &arg2.value) == 0);
+	return result;
+}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_macaddr_lt(kern_context *kcxt, pg_macaddr_t arg1, pg_macaddr_t arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+		result.value = (macaddr_cmp_internal(&arg1.value, &arg2.value) < 0);
+	return result;
+}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_macaddr_le(kern_context *kcxt, pg_macaddr_t arg1, pg_macaddr_t arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+		result.value = (macaddr_cmp_internal(&arg1.value, &arg2.value) <= 0);
+	return result;
+}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_macaddr_gt(kern_context *kcxt, pg_macaddr_t arg1, pg_macaddr_t arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+		result.value = (macaddr_cmp_internal(&arg1.value, &arg2.value) > 0);
+	return result;
+}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_macaddr_ge(kern_context *kcxt, pg_macaddr_t arg1, pg_macaddr_t arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+		result.value = (macaddr_cmp_internal(&arg1.value, &arg2.value) >= 0);
+	return result;
+}
+
+STATIC_FUNCTION(pg_bool_t)
+pgfn_macaddr_ne(kern_context *kcxt, pg_macaddr_t arg1, pg_macaddr_t arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+		result.value = (macaddr_cmp_internal(&arg1.value, &arg2.value) != 0);
+	return result;
+}
+
+STATIC_FUNCTION(pg_int4_t)
+pgfn_macaddr_cmp(kern_context *kcxt, pg_macaddr_t arg1, pg_macaddr_t arg2)
+{
+	pg_int4_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+		result.value = macaddr_cmp_internal(&arg1.value, &arg2.value);
+	return result;
+}
+
+STATIC_FUNCTION(pg_macaddr_t)
+pgfn_macaddr_not(kern_context *kcxt, pg_macaddr_t arg1)
+{
+	pg_macaddr_t	result;
+
+	result.isnull = arg1.isnull;
+	if (!result.isnull)
+	{
+		result.value.a	= ~arg1.value.a;
+		result.value.b	= ~arg1.value.b;
+		result.value.c	= ~arg1.value.c;
+		result.value.d	= ~arg1.value.d;
+		result.value.e	= ~arg1.value.e;
+		result.value.f	= ~arg1.value.f;
+	}
+	return result;
+}
+
+STATIC_FUNCTION(pg_macaddr_t)
+pgfn_macaddr_and(kern_context *kcxt, pg_macaddr_t arg1, pg_macaddr_t arg2)
+{
+	pg_macaddr_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		result.value.a	= arg1.value.a & arg2.value.a;
+		result.value.b	= arg1.value.b & arg2.value.b;
+		result.value.c	= arg1.value.c & arg2.value.c;
+		result.value.d	= arg1.value.d & arg2.value.d;
+		result.value.e	= arg1.value.e & arg2.value.e;
+		result.value.f	= arg1.value.f & arg2.value.f;
+	}
+	return result;
+}
+
+STATIC_FUNCTION(pg_macaddr_t)
+pgfn_macaddr_or(kern_context *kcxt, pg_macaddr_t arg1, pg_macaddr_t arg2)
+{
+	pg_macaddr_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		result.value.a	= arg1.value.a | arg2.value.a;
+		result.value.b	= arg1.value.b | arg2.value.b;
+		result.value.c	= arg1.value.c | arg2.value.c;
+		result.value.d	= arg1.value.d | arg2.value.d;
+		result.value.e	= arg1.value.e | arg2.value.e;
+		result.value.f	= arg1.value.f | arg2.value.f;
+	}
+	return result;
+}
+
+/* pg_inet_t */
+
+/*
+ *  This is the internal storage format for IP addresses
+ *  (both INET and CIDR datatypes):
+ */
+typedef struct
+{
+	cl_uchar	family;		/* PGSQL_AF_INET or PGSQL_AF_INET6 */
+	cl_uchar	bits;		/* number of bits in netmask */
+	cl_uchar	ipaddr[16];	/* up to 128 bits of address */
+} inet_struct;
+
+#define PGSQL_AF_INET		(AF_INET + 0)
+#define PGSQL_AF_INET6		(AF_INET + 1)
+
+typedef struct
+{
+	char		vl_len_[4];	/* Do not touch this field directly! */
+	inet_struct	inet_data;
+} inet;
+
+#define ip_family(inetptr)		(inetptr)->family
+#define ip_bits(inetptr)		(inetptr)->bits
+#define ip_addr(inetptr)		(inetptr)->ipaddr
+#define ip_addrsize(inetptr)	\
+	((inetptr)->family == PGSQL_AF_INET ? 4 : 16)
+#define ip_maxbits(inetptr)		\
+	((inetptr)->family == PGSQL_AF_INET ? 32 : 128)
+
+#ifndef PG_INET_TYPE_DEFINED
+#define PG_INET_TYPE_DEFINED
+STROMCL_SIMPLE_DATATYPE_TEMPLATE(inet,inet_struct)
+
+STATIC_INLINE(pg_inet_t)
+pg_inet_datum_ref(kern_context *kcxt, void *datum)
+{
+	pg_inet_t	result;
+
+	result.isnull = !datum;
+	if (datum)
+	{
+		if (VARATT_IS_COMPRESSED(datum))
+		{
+			inet	temp;
+
+			if (toast_decompress_datum((char *)&temp, sizeof(inet),
+									   (struct varlena *)datum))
+			{
+				memcpy(&result.value, &temp.inet_data, sizeof(inet_struct));
+			}
+			else
+			{
+				STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+				result.isnull = true;
+			}
+		}
+		else if (!VARATT_IS_EXTERNAL(datum) &&
+				 VARSIZE_ANY_EXHDR(datum) == sizeof(inet_struct))
+		{
+			memcpy(&result.value, datum, sizeof(inet_struct));
+		}
+		else
+		{
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			result.isnull = true;
+		}
+	}
+	return result;
+}
+
+STATIC_INLINE(cl_uint)
+pg_inet_datum_store(kern_context *kcxt, void *extra_buf, pg_inet_t datum)
+{
+	if (datum.isnull)
+		return 0;
+	if (extra_buf)
+	{
+		SET_VARSIZE(extra_buf, VARHDRSZ + sizeof(inet_struct));
+		memcpy((char *)extra_buf + VARHDRSZ,
+			   &datum.value, sizeof(inet_struct));
+	}
+	return VARHDRSZ + sizeof(inet_struct);
+}
+
+STATIC_FUNCTION(pg_inet_t)
+pg_inet_param(kern_context *kcxt, cl_uint param_id)
+{
+	kern_parambuf  *kparams = kcxt->kparams;
+	void		   *paddr;
+
+	if (param_id < kparams->nparams &&
+		kparams->poffset[param_id] > 0)
+		paddr = ((char *)kparams + kparams->poffset[param_id]);
+	else
+		paddr = NULL;
+
+	return pg_inet_datum_ref(kcxt,paddr);
+}
+STROMCL_SIMPLE_NULLTEST_TEMPLATE(inet)
+STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(inet,inet_struct)
+#endif	/* PG_INET_TYPE_DEFINED */
+
+#ifndef PG_CIDR_TYPE_DEFINED
+#define PG_CIDR_TYPE_DEFINED
+typedef pg_inet_t					pg_cidr_t;
+#define pg_cidr_datum_ref(a,b)		pg_inet_datum_ref(a,b)
+#define pg_cidr_datum_store(a,b,c)	pg_inet_datum_store(a,b,c)
+#define pg_cidr_param(a,b)			pg_inet_param(a,b)
+#define pg_cidr_isnull(a,b)			pg_inet_isnull(a,b)
+#define pg_cidr_isnotnull(a,b)		pg_inet_isnotnull(a,b,c)
+#define pg_cidr_comp_crc32(a,b,c)	pg_inet_comp_crc32(a,b,c)
+#define pg_cidr_as_datum(a)			pg_inet_as_datum(a)
+#endif	/* PG_CIDR_TYPE_DEFINED */
+
+/*
+ * int
+ * bitncmp(l, r, n)
+ *      compare bit masks l and r, for n bits.
+ * return:
+ *      <0, >0, or 0 in the libc tradition.
+ * note:
+ *      network byte order assumed.  this means 192.5.5.240/28 has
+ *      0x11110000 in its fourth octet.
+ * author:
+ *      Paul Vixie (ISC), June 1996
+ */
+#define IS_HIGHBIT_SET(ch)		((unsigned char)(ch) & 0x80)
+
+STATIC_INLINE(int)
+bitncmp(const unsigned char *l, const unsigned char *r, int n)
+{
+	unsigned int	lb, rb;
+	int				x, b;
+
+	b = n / 8;
+	x = memcmp(l, r, b);
+	if (x || (n % 8) == 0)
+		return x;
+
+	lb = l[b];
+	rb = r[b];
+	for (b = n % 8; b > 0; b--)
+	{
+		if (IS_HIGHBIT_SET(lb) != IS_HIGHBIT_SET(rb))
+		{
+			if (IS_HIGHBIT_SET(lb))
+				return 1;
+			return -1;
+		}
+		lb <<= 1;
+		rb <<= 1;
+	}
+	return 0;
+}
+
+STATIC_INLINE(cl_int)
+network_cmp_internal(inet_struct *a1, inet_struct *a2)
+{
+	if (ip_family(a1) == ip_family(a2))
+	{
+		int		order;
+
+		order = bitncmp(ip_addr(a1), ip_addr(a2),
+						Min(ip_bits(a1), ip_bits(a2)));
+		if (order != 0)
+			return order;
+		order = ((int) ip_bits(a1)) - ((int) ip_bits(a2));
+		if (order != 0)
+			return order;
+		return bitncmp(ip_addr(a1), ip_addr(a2), ip_maxbits(a1));
+	}
+	return ip_family(a1) - ip_family(a2);
+}
+
+/*
+ * network_lt
+ */
+STATIC_FUNCTION(pg_bool_t)
+pgfn_network_lt(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+		result.value = (network_cmp_internal(&arg1.value, &arg2.value) < 0);
+	return result;
+}
+
+/*
+ * network_le
+ */
+STATIC_FUNCTION(pg_bool_t)
+pgfn_network_le(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+		result.value = (network_cmp_internal(&arg1.value, &arg2.value) <= 0);
+	return result;
+}
+
+/*
+ * network_eq
+ */
+STATIC_FUNCTION(pg_bool_t)
+pgfn_network_eq(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+		result.value = (network_cmp_internal(&arg1.value, &arg2.value) == 0);
+	return result;
+}
+
+/*
+ * network_ge
+ */
+STATIC_FUNCTION(pg_bool_t)
+pgfn_network_ge(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+		result.value = (network_cmp_internal(&arg1.value, &arg2.value) >= 0);
+	return result;
+}
+
+/*
+ * network_gt
+ */
+STATIC_FUNCTION(pg_bool_t)
+pgfn_network_gt(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+		result.value = (network_cmp_internal(&arg1.value, &arg2.value) > 0);
+	return result;
+}
+
+/*
+ * network_ne
+ */
+STATIC_FUNCTION(pg_bool_t)
+pgfn_network_ne(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+		result.value = (network_cmp_internal(&arg1.value, &arg2.value) != 0);
+	return result;
+}
+
+/*
+ * network_cmp
+ */
+STATIC_FUNCTION(pg_int4_t)
+pgfn_network_cmp(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
+{
+	pg_int4_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+		result.value = network_cmp_internal(&arg1.value, &arg2.value);
+	return result;
+}
+
+/*
+ * network_larger
+ */
+STATIC_FUNCTION(pg_inet_t)
+pgfn_network_larger(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
+{
+	if (arg1.isnull || arg2.isnull)
+	{
+		pg_inet_t	dummy = { 0, true };
+
+		return dummy;
+	}
+
+	if (network_cmp_internal(&arg1.value, &arg2.value) > 0)
+		return arg1;
+	else
+		return arg2;
+}
+
+/*
+ * network_smaller
+ */
+STATIC_FUNCTION(pg_inet_t)
+pgfn_network_smaller(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
+{
+	if (arg1.isnull || arg2.isnull)
+	{
+		pg_inet_t	dummy = { 0, true };
+
+		return dummy;
+	}
+
+	if (network_cmp_internal(&arg1.value, &arg2.value) < 0)
+		return arg1;
+	else
+		return arg2;
+}
+
+/*
+ * network_sub
+ */
+STATIC_FUNCTION(pg_bool_t)
+pgfn_network_sub(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		if (ip_family(&arg1.value) == ip_family(&arg2.value) &&
+			ip_bits(&arg1.value) > ip_bits(&arg2.value))
+			result.value = (bitncmp(ip_addr(&arg1.value),
+									ip_addr(&arg2.value),
+									ip_bits(&arg2.value)) == 0);
+		else
+			result.value = false;
+	}
+	return result;
+}
+
+/*
+ * network_subeq
+ */
+STATIC_FUNCTION(pg_bool_t)
+pgfn_network_subeq(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		if (ip_family(&arg1.value) == ip_family(&arg2.value) &&
+			ip_bits(&arg1.value) >= ip_bits(&arg2.value))
+			result.value = (bitncmp(ip_addr(&arg1.value),
+									ip_addr(&arg2.value),
+									ip_bits(&arg2.value)) == 0);
+		else
+			result.value = false;
+	}
+	return result;
+}
+
+/*
+ * network_sup
+ */
+STATIC_FUNCTION(pg_bool_t)
+pgfn_network_sup(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		if (ip_family(&arg1.value) == ip_family(&arg2.value) &&
+			ip_bits(&arg1.value) < ip_bits(&arg2.value))
+			result.value = (bitncmp(ip_addr(&arg1.value),
+									ip_addr(&arg2.value),
+									ip_bits(&arg1.value)) == 0);
+		else
+			result.value = false;
+	}
+	return result;
+
+}
+
+/*
+ * network_supeq(inet)
+ */
+STATIC_FUNCTION(pg_bool_t)
+pgfn_network_supeq(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		if (ip_family(&arg1.value) == ip_family(&arg2.value) &&
+			ip_bits(&arg1.value) <= ip_bits(&arg2.value))
+			result.value = (bitncmp(ip_addr(&arg1.value),
+									ip_addr(&arg2.value),
+									ip_bits(&arg1.value)) == 0);
+		else
+			result.value = false;
+	}
+	return result;
+}
+
+/*
+ * network_overlap(inet)
+ */
+STATIC_FUNCTION(pg_bool_t)
+pgfn_network_overlap(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		if (ip_family(&arg1.value) == ip_family(&arg2.value))
+			result.value = (bitncmp(ip_addr(&arg1.value),
+									ip_addr(&arg2.value),
+									Min(ip_bits(&arg1.value),
+										ip_bits(&arg2.value))) == 0);
+		else
+			result.value = false;
+	}
+	return result;
+}
+
+/*
+ * set_masklen(inet,int)
+ */
+STATIC_FUNCTION(pg_inet_t)
+pgfn_inet_set_masklen(kern_context *kcxt, pg_inet_t arg1, pg_int4_t arg2)
+{
+	pg_inet_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		cl_int		bits = arg2.value;
+
+		if (bits == -1)
+			bits = ip_maxbits(&arg1.value);
+		if (bits < 0 || bits > ip_maxbits(&arg1.value))
+		{
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			result.isnull = true;
+		}
+		else
+		{
+			memcpy(&result.value, &arg1.value, sizeof(inet_struct));
+			ip_bits(&result.value) = bits;
+		}
+	}
+	return result;
+}
+
+/*
+ * set_masklen(cidr,int)
+ */
+STATIC_FUNCTION(pg_cidr_t)
+pgfn_cidr_set_masklen(kern_context *kcxt, pg_cidr_t arg1, pg_int4_t arg2)
+{
+	pg_cidr_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		cl_int	bits = arg2.value;
+		cl_int	byte;
+		cl_int	nbits;
+		cl_int	maxbytes;
+
+		if (bits == -1)
+			bits = ip_maxbits(&arg1.value);
+		if (bits < 0 || bits > ip_maxbits(&arg1.value))
+		{
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			result.isnull = true;
+		}
+		else
+		{
+			/* clone the original data */
+			memcpy(&result.value, &arg1.value, sizeof(inet_struct));
+			ip_bits(&result.value) = bits;
+
+			/* zero out any bits to the right of the new netmask */
+			byte = bits / 8;
+			nbits = bits % 8;
+			/* clear the first byte, this might be a partial byte */
+			if (nbits != 0)
+			{
+				ip_addr(&result.value)[byte] &= ~(0xff >> nbits);
+				byte++;
+			}
+			/* clear remaining bytes */
+			maxbytes = ip_addrsize(&result.value);
+			while (byte < maxbytes)
+			{
+				ip_addr(&result.value)[byte] = 0;
+				byte++;
+			}
+		}
+	}
+	return result;
+}
+
+/*
+ * family(inet)
+ */
+STATIC_FUNCTION(pg_int4_t)
+pgfn_inet_family(kern_context *kcxt, pg_inet_t arg1)
+{
+	pg_int4_t	result;
+
+	result.isnull = arg1.isnull;
+	if (!result.isnull)
+	{
+		switch (ip_family(&arg1.value))
+		{
+			case PGSQL_AF_INET:
+				result.value = 4;
+				break;
+			case PGSQL_AF_INET6:
+				result.value = 6;
+				break;
+			default:
+				result.value = 0;
+				break;
+		}
+	}
+	return result;
+}
+
+/*
+ * network(inet)
+ */
+STATIC_FUNCTION(pg_cidr_t)
+pgfn_network_network(kern_context *kcxt, pg_inet_t arg1)
+{
+	pg_cidr_t	result;
+
+	result.isnull = arg1.isnull;
+	if (!result.isnull)
+	{
+		cl_int		byte = 0;
+		cl_int		bits;
+		cl_uchar	mask;
+		cl_uchar   *a, *b;
+
+		/* make sure any unused bits are zeroed */
+		memset(&result.value, 0, sizeof(result.value));
+		bits = ip_bits(&arg1.value);
+		a = ip_addr(&arg1.value);
+		b = ip_addr(&result.value);
+
+		while (bits)
+		{
+			if (bits >= 8)
+			{
+				mask = 0xff;
+				bits -= 8;
+			}
+			else
+			{
+				mask = 0xff << (8 - bits);
+				bits = 0;
+			}
+			b[byte] = a[byte] & mask;
+			byte++;
+		}
+		ip_family(&result.value) = ip_family(&arg1.value);
+		ip_bits(&result.value) = ip_bits(&arg1.value);
+	}
+	return result;
+}
+
+/*
+ * netmask(inet)
+ */
+STATIC_FUNCTION(pg_inet_t)
+pgfn_inet_netmask(kern_context *kcxt, pg_inet_t arg1)
+{
+	pg_inet_t	result;
+	cl_int		byte;
+	cl_int		bits;
+	cl_uchar	mask;
+	cl_uchar   *a, *b;
+
+	result.isnull = arg1.isnull;
+	if (!result.isnull)
+	{
+		byte = 0;
+		bits = ip_bits(&arg1.value);
+		a = ip_addr(&arg1.value);
+		b = ip_addr(&result.value);
+
+		while (bits)
+		{
+			if (bits >= 8)
+			{
+				mask = 0xff;
+				bits -= 8;
+			}
+			else
+			{
+				mask = 0xff << (8 - bits);
+				bits = 0;
+			}
+			b[byte] = a[byte] & mask;
+			byte++;
+		}
+
+		ip_family(&result.value) = ip_family(&arg1.value);
+		ip_bits(&result.value) = ip_family(&arg1.value);
+	}
+	return result;
+}
+
+/*
+ * masklen(inet)
+ */
+STATIC_FUNCTION(pg_int4_t)
+pgfn_inet_masklen(kern_context *kcxt, pg_inet_t arg1)
+{
+	pg_int4_t	result;
+
+	result.isnull = arg1.isnull;
+	if (!result.isnull)
+		result.value = ip_bits(&arg1.value);
+	return result;
+}
+
+/*
+ * broadcast(inet)
+ */
+STATIC_FUNCTION(pg_inet_t)
+pgfn_inet_broadcast(kern_context *kcxt, pg_inet_t arg1)
+{
+	pg_inet_t	result;
+
+	result.isnull = arg1.isnull;
+	if (!result.isnull)
+	{
+		cl_int		byte;
+		cl_int		bits;
+		cl_int		maxbytes;
+		cl_uchar	mask;
+		cl_uchar   *a, *b;
+
+		/* make sure any unused bits are zeroed */
+		memset(&result.value, 0, sizeof(result.value));
+		if (ip_family(&arg1.value))
+			maxbytes = 4;
+		else
+			maxbytes = 16;
+
+		bits = ip_bits(&arg1.value);
+		a = ip_addr(&arg1.value);
+		b = ip_addr(&result.value);
+
+		for (byte = 0; byte < maxbytes; byte++)
+		{
+			if (bits >= 8)
+			{
+				mask = 0x00;
+				bits -= 8;
+			}
+			else if (bits == 0)
+				mask = 0xff;
+			else
+			{
+				mask = 0xff >> bits;
+				bits = 0;
+			}
+			b[byte] = a[byte] | mask;
+		}
+		ip_family(&result.value) = ip_family(&arg1.value);
+		ip_bits(&result.value) = ip_bits(&arg1.value);
+	}
+	return result;
+}
+
+/*
+ * host(inet)
+ */
+STATIC_FUNCTION(pg_inet_t)
+pgfn_inet_hostmask(kern_context *kcxt, pg_inet_t arg1)
+{
+	pg_inet_t	result;
+
+	result.isnull = arg1.isnull;
+	if (!result.isnull)
+	{
+		cl_int		byte;
+		cl_int		bits;
+		cl_int		maxbytes;
+		cl_uchar	mask;
+		cl_uchar   *b;
+
+		/* make sure any unused bits are zeroed */
+		memset(&result.value, 0, sizeof(result.value));
+
+		if (ip_family(&arg1.value) == PGSQL_AF_INET)
+			maxbytes = 4;
+		else
+			maxbytes = 16;
+
+		bits = ip_maxbits(&arg1.value) - ip_bits(&arg1.value);
+		b = ip_addr(&result.value);
+
+		byte = maxbytes - 1;
+
+		while (bits)
+		{
+			if (bits >= 8)
+			{
+				mask = 0xff;
+				bits -= 8;
+			}
+			else
+			{
+				mask = 0xff >> (8 - bits);
+				bits = 0;
+			}
+			b[byte] = mask;
+			byte--;
+		}
+		ip_family(&result.value) = ip_family(&arg1.value);
+		ip_bits(&result.value) = ip_maxbits(&arg1.value);
+	}
+	return result;
+}
+
+/*
+ * cidr(inet)
+ */
+STATIC_FUNCTION(pg_cidr_t)
+pgfn_inet_to_cidr(kern_context *kcxt, pg_inet_t arg1)
+{
+	pg_cidr_t	result;
+
+	result.isnull = arg1.isnull;
+	if (!result.isnull)
+	{
+		cl_int	bits = ip_bits(&arg1.value);
+		cl_int	byte;
+		cl_int	nbits;
+		cl_int	maxbytes;
+
+		/* sanity check */
+		if (bits < 0 || bits > ip_maxbits(&arg1.value))
+		{
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			result.isnull = true;
+		}
+		else
+		{
+			/* clone the original data */
+			memcpy(&result.value, &arg1.value, sizeof(inet_struct));
+
+			/* zero out any bits to the right of the netmask */
+			byte = bits / 8;
+
+			nbits = bits % 8;
+			/* clear the first byte, this might be a partial byte */
+			if (nbits != 0)
+			{
+				ip_addr(&result.value)[byte] &= ~(0xFF >> nbits);
+				byte++;
+			}
+			/* clear remaining bytes */
+			maxbytes = ip_addrsize(&result.value);
+			while (byte < maxbytes)
+			{
+				ip_addr(&result.value)[byte] = 0;
+				byte++;
+			}
+		}
+	}
+	return result;
+}
+
+/*
+ * inetnot(inet)
+ */
+STATIC_FUNCTION(pg_inet_t)
+pgfn_inet_not(kern_context *kcxt, pg_inet_t arg1)
+{
+	pg_inet_t	result;
+
+	result.isnull = arg1.isnull;
+	if (!result.isnull)
+	{
+		cl_int		nb = ip_addrsize(&arg1.value);
+		cl_uchar   *pip = ip_addr(&arg1.value);
+		cl_uchar   *pdst = ip_addr(&result.value);
+
+		memset(&result.value, 0, sizeof(result.value));
+
+		while (nb-- > 0)
+			pdst[nb] = ~pip[nb];
+
+		ip_bits(&result.value) = ip_bits(&arg1.value);
+		ip_family(&result.value) = ip_family(&arg1.value);
+	}
+	return result;
+}
+
+/*
+ * inetand(inet)
+ */
+STATIC_FUNCTION(pg_inet_t)
+pgfn_inet_and(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
+{
+	pg_inet_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		memset(&result.value, 0, sizeof(result.value));
+		if (ip_family(&arg1.value) != ip_family(&arg2.value))
+		{
+			result.isnull = true;
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		}
+		else
+		{
+			cl_int		nb = ip_addrsize(&arg1.value);
+			cl_uchar   *pip = ip_addr(&arg1.value);
+			cl_uchar   *pip2 = ip_addr(&arg2.value);
+			cl_uchar   *pdst = ip_addr(&result.value);
+
+			while (nb-- > 0)
+				pdst[nb] = pip[nb] & pip2[nb];
+
+			ip_bits(&result.value) = Max(ip_bits(&arg1.value),
+										 ip_bits(&arg2.value));
+			ip_family(&result.value) = ip_family(&arg1.value);
+		}
+	}
+	return result;
+}
+
+/*
+ * inetor(inet)
+ */
+STATIC_FUNCTION(pg_inet_t)
+pgfn_inet_or(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
+{
+	pg_inet_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		memset(&result.value, 0, sizeof(result.value));
+		if (ip_family(&arg1.value) != ip_family(&arg2.value))
+		{
+			result.isnull = true;
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		}
+		else
+		{
+			cl_int		nb = ip_addrsize(&arg1.value);
+			cl_uchar   *pip = ip_addr(&arg1.value);
+			cl_uchar   *pip2 = ip_addr(&arg2.value);
+			cl_uchar   *pdst = ip_addr(&result.value);
+
+			while (nb-- > 0)
+				pdst[nb] = pip[nb] | pip2[nb];
+
+			ip_bits(&result.value) = Max(ip_bits(&arg1.value),
+										 ip_bits(&arg2.value));
+			ip_family(&result.value) = ip_family(&arg1.value);
+		}
+	}
+	return result;
+}
+
+STATIC_INLINE(pg_inet_t)
+internal_inetpl(kern_context *kcxt, inet_struct *ip, cl_long addend)
+{
+	pg_inet_t	result;
+	cl_int		nb = ip_addrsize(ip);
+	cl_uchar   *pip = ip_addr(ip);
+	cl_uchar   *pdst = ip_addr(&result.value);
+	int			carry = 0;
+
+	memset(&result, 0, sizeof(result));
+	while (nb-- > 0)
+	{
+		carry = pip[nb] + (int) (addend & 0xFF) + carry;
+		pdst[nb] = (unsigned char) (carry & 0xFF);
+		carry >>= 8;
+
+		/*
+		 * We have to be careful about right-shifting addend because
+		 * right-shift isn't portable for negative values, while simply
+		 * dividing by 256 doesn't work (the standard rounding is in the
+		 * wrong direction, besides which there may be machines out there
+		 * that round the wrong way).  So, explicitly clear the low-order
+		 * byte to remove any doubt about the correct result of the
+		 * division, and then divide rather than shift.
+		 */
+		addend &= ~((cl_long) 0xFF);
+		addend /= 0x100;
+	}
+
+	/*
+	 * At this point we should have addend and carry both zero if original
+	 * addend was >= 0, or addend -1 and carry 1 if original addend was <
+	 * 0.  Anything else means overflow.
+	 */
+	if (!((addend == 0 && carry == 0) || (addend == -1 && carry == 1)))
+	{
+		result.isnull = true;
+		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+	}
+	else
+	{
+		ip_bits(&result.value) = ip_bits(ip);
+		ip_family(&result.value) = ip_family(ip);
+	}
+	return result;
+}
+
+/*
+ * inetpl(inet,bigint)
+ */
+STATIC_FUNCTION(pg_inet_t)
+pgfn_inetpl_int8(kern_context *kcxt, pg_inet_t arg1, pg_int8_t arg2)
+{
+	if (arg1.isnull | arg2.isnull)
+	{
+		pg_inet_t	dummy;
+
+		dummy.isnull = true;
+		return dummy;
+	}
+	return internal_inetpl(kcxt, &arg1.value, arg2.value);
+}
+
+/*
+ * inetmi(inet,bigint)
+ */
+STATIC_FUNCTION(pg_inet_t)
+pgfn_inetmi_int8(kern_context *kcxt, pg_inet_t arg1, pg_int8_t arg2)
+{
+	if (arg1.isnull | arg2.isnull)
+	{
+		pg_inet_t	dummy;
+
+		dummy.isnull = true;
+		return dummy;
+	}
+	return internal_inetpl(kcxt, &arg1.value, -arg2.value);
+}
+
+/*
+ * inetmi(inet,inet)
+ */
+STATIC_FUNCTION(pg_int8_t)
+pgfn_inetmi(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
+{
+	pg_int8_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		if (ip_family(&arg1.value) != ip_family(&arg2.value))
+		{
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			result.isnull = true;
+		}
+		else
+		{
+			/*
+			 * We form the difference using the traditional complement,
+			 * increment, and add rule, with the increment part being handled
+			 * by starting the carry off at 1.  If you don't think integer
+			 * arithmetic is done in two's complement, too bad.
+			 */
+			cl_int		nb = ip_addrsize(&arg1.value);
+			cl_int		byte = 0;
+			cl_uchar   *pip = ip_addr(&arg1.value);
+			cl_uchar   *pip2 = ip_addr(&arg2.value);
+			cl_int		carry = 1;
+			cl_long		res = 0;
+
+			while (nb-- > 0)
+			{
+				int		lobyte;
+
+				carry = pip[nb] + (~pip2[nb] & 0xFF) + carry;
+				lobyte = carry & 0xFF;
+				if (byte < sizeof(cl_long))
+				{
+					res |= ((cl_long) lobyte) << (byte * 8);
+				}
+				else
+				{
+					/*
+					 * Input wider than int64: check for overflow.
+					 * All bytes to the left of what will fit should be 0 or
+					 * 0xFF, depending on sign of the now-complete result.
+					 */
+					if ((res < 0) ? (lobyte != 0xFF) : (lobyte != 0))
+					{
+						STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+						result.isnull = true;
+						return result;
+					}
+				}
+				carry >>= 8;
+				byte++;
+			}
+			/*
+			 * If input is narrower than int64, overflow is not possible,
+			 * but we have to do proper sign extension.
+			 */
+			if (carry == 0 && byte < sizeof(cl_long))
+				res |= ((cl_long) -1) << (byte * 8);
+			result.value = res;
+		}
+	}
+	return result;
+}
+
+/*
+ * inet_same_family(inet,inet)
+ */
+STATIC_FUNCTION(pg_bool_t)
+pgfn_inet_same_family(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+		result.value = (ip_family(&arg1.value) == ip_family(&arg2.value));
+	return result;
+}
+
 #else	/* __CUDACC__ */
 #include "utils/pg_locale.h"
 
@@ -471,10 +1697,12 @@ assign_misclib_session_info(StringInfo buf)
 		"\n"
 		"#define PGLC_CURRENCY_SCALE_LOG10  %d\n"
 		"#define PGLC_CURRENCY_SCALE        %ld\n"
+		"#define AF_INET                    %d\n"
 		"\n"
 		"#endif /* __CUDACC__ */\n",
 		fpoint,
-		scale);
+		scale,
+		AF_INET);
 }
 #endif	/* __CUDACC__ */
 #endif	/* CUDA_MISC_H */

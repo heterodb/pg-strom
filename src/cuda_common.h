@@ -2548,6 +2548,23 @@ EVAL(pg_bool_t arg)
 	return false;
 }
 
+/* memory compare */
+STATIC_INLINE(cl_int)
+memcmp(const void *s1, const void *s2, size_t n)
+{
+	const cl_uchar *p1 = (const cl_uchar *)s1;
+	const cl_uchar *p2 = (const cl_uchar *)s2;
+
+	while (n--)
+	{
+		if (*p1 != *p2)
+			return ((int)*p1) - ((int)*p2);
+		p1++;
+		p2++;
+	}
+	return 0;
+}
+
 /*
  * Support routine for BoolExpr
  */
