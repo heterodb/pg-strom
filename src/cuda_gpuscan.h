@@ -331,8 +331,7 @@ gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
 								compute_heaptuple_size(&kcxt,
 													   kds_dst,
 													   tup_values,
-													   tup_isnull,
-													   NULL));
+													   tup_isnull));
 		}
 		else
 			required = 0;
@@ -363,8 +362,7 @@ gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
 								&tupitem->t_self,
 								NULL,
 								tup_values,
-								tup_isnull,
-								NULL);
+								tup_isnull);
 		}
 
 		/* bailout if any error */
@@ -540,8 +538,7 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 									compute_heaptuple_size(&kcxt,
 														   kds_dst,
 														   tup_values,
-														   tup_isnull,
-														   NULL));
+														   tup_isnull));
 			}
 			else
 				required = 0;
@@ -572,8 +569,7 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 									&t_self,
 									&htup->t_choice.t_heap,
 									tup_values,
-									tup_isnull,
-									NULL);
+									tup_isnull);
 			}
 #else
 			/* no projection - write back souce tuple as is */
@@ -744,8 +740,7 @@ gpuscan_exec_quals_column(kern_gpuscan *kgpuscan,
 								compute_heaptuple_size(&kcxt,
 													   kds_dst,
 													   tup_values,
-													   tup_isnull,
-													   NULL));
+													   tup_isnull));
 #else
 			//extract all the fields as is
 
@@ -784,8 +779,7 @@ gpuscan_exec_quals_column(kern_gpuscan *kgpuscan,
 								&t_self,
 								&tx_attrs,
 								tup_values,
-								tup_isnull,
-								NULL);
+								tup_isnull);
 		}
 
 		/* bailout if any error */

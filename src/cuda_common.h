@@ -2093,8 +2093,7 @@ STATIC_FUNCTION(cl_uint)
 compute_heaptuple_size(kern_context *kcxt,
 					   kern_data_store *kds,
 					   Datum *tup_values,
-					   cl_bool *tup_isnull,
-					   cl_bool *tup_internal)
+					   cl_bool *tup_isnull)
 {
 	cl_uint		t_hoff;
 	cl_uint		datalen = 0;
@@ -2110,22 +2109,10 @@ compute_heaptuple_size(kern_context *kcxt,
 			heap_hasnull = true;
 		else
 		{
-			if (tup_internal && tup_internal[i])
-			{
-				/*
-				 * NOTE: Right now, only numeric data type has internal
-				 * data representation. It has to be transformed to the
-				 * regular format prior to CPU write back.
-				 */
-				datalen = TYPEALIGN(sizeof(cl_uint), datalen);
-				datalen += pg_numeric_to_varlena(kcxt, NULL,
-												 tup_values[i],
-												 tup_isnull[i]);
-			}
-			else if (cmeta.attlen > 0)
+			if (cmeta.attlen > 0)
 			{
 				datalen = TYPEALIGN(cmeta.attalign, datalen);
-			    datalen += cmeta.attlen;
+				datalen += cmeta.attlen;
 			}
 			else
 			{
@@ -2269,7 +2256,6 @@ deform_kern_heaptuple(kern_context *kcxt,
  * tx_attrs     ... xmin,xmax,cmin/cmax, if any
  * tup_values   ... array of result datum
  * tup_isnull   ... array of null flags
- * tup_internal ... array of internal flags
  */
 STATIC_FUNCTION(cl_uint)
 form_kern_heaptuple(kern_context *kcxt,
@@ -2278,8 +2264,7 @@ form_kern_heaptuple(kern_context *kcxt,
 					ItemPointerData *tup_self,	/* in, optional */
 					HeapTupleFields *tx_attrs,	/* in, optional */
 					Datum *tup_values,			/* in */
-					cl_bool *tup_isnull,		/* in */
-					cl_bool *tup_internal)		/* in */
+					cl_bool *tup_isnull)		/* in */
 {
 	HeapTupleHeaderData *htup;
 	cl_uint		i, ncols = kds->ncols;
@@ -2357,18 +2342,7 @@ form_kern_heaptuple(kern_context *kcxt,
 			if (heap_hasnull)
 				htup->t_bits[i >> 3] |= (1 << (i & 0x07));
 
-			if (tup_internal && tup_internal[i])
-			{
-				/*
-				 * NOTE: Right now, only NUMERIC has internal data format.
-				 * It has to be transformed again prior to CPU write back.
-				 */
-				curr = TYPEALIGN(sizeof(cl_uint), curr);
-				curr += pg_numeric_to_varlena(kcxt, ((char *)htup + curr),
-											  tup_values[i],
-											  tup_isnull[i]);
-			}
-			else if (cmeta.attbyval)
+			if (cmeta.attbyval)
 			{
 				char   *dest;
 

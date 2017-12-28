@@ -658,8 +658,7 @@ gpujoin_projection_row(kern_context *kcxt,
 							compute_heaptuple_size(kcxt,
 												   kds_dst,
 												   tup_values,
-												   tup_isnull,
-												   NULL));
+												   tup_isnull));
 	}
 	else
 		required = 0;
@@ -719,7 +718,7 @@ gpujoin_projection_row(kern_context *kcxt,
 		row_index[dest_index] = kds_dst->length - dest_offset;
 		form_kern_heaptuple(kcxt, kds_dst, tupitem,
 							NULL, NULL,
-							tup_values, tup_isnull, NULL);
+							tup_values, tup_isnull);
 	}
 	if (__syncthreads_count(kcxt->e.errcode) > 0)
 		return -1;	/* bailout */
