@@ -215,6 +215,7 @@ static __shared__ cl_int	base_depth;
 static __shared__ cl_uint	src_read_pos;
 static __shared__ cl_uint	dst_base_index;
 static __shared__ cl_uint	dst_base_usage;
+static __shared__ cl_uint	wip_count[GPUJOIN_MAX_DEPTH+1];
 static __shared__ cl_uint	read_pos[GPUJOIN_MAX_DEPTH+1];
 static __shared__ cl_uint	write_pos[GPUJOIN_MAX_DEPTH+1];
 static __shared__ cl_uint	stat_source_nitems;
@@ -229,6 +230,7 @@ struct gpujoin_suspend_block
 	cl_int			depth;
 	cl_bool			scan_done;
 	cl_uint			src_read_pos;
+	cl_uint			wip_count[GPUJOIN_MAX_DEPTH+1];
 	cl_uint			read_pos[GPUJOIN_MAX_DEPTH+1];
 	cl_uint			write_pos[GPUJOIN_MAX_DEPTH+1];
 	cl_uint			stat_source_nitems;
@@ -254,6 +256,7 @@ gpujoin_suspend_context(kern_gpujoin *kgjoin,
 		sb->depth = depth;
 		sb->scan_done = scan_done;
 		sb->src_read_pos = src_read_pos;
+		memcpy(sb->wip_count, wip_count, sizeof(wip_count));
 		memcpy(sb->read_pos, read_pos, sizeof(read_pos));
 		memcpy(sb->write_pos, write_pos, sizeof(write_pos));
 		sb->stat_source_nitems = stat_source_nitems;
@@ -280,6 +283,7 @@ gpujoin_resume_context(kern_gpujoin *kgjoin,
 	{
 		scan_done = sb->scan_done;
 		src_read_pos = sb->src_read_pos;
+		memcpy(wip_count, sb->wip_count, sizeof(wip_count));
 		memcpy(read_pos, sb->read_pos, sizeof(read_pos));
 		memcpy(write_pos, sb->write_pos, sizeof(write_pos));
 		stat_source_nitems = sb->stat_source_nitems;
@@ -308,6 +312,18 @@ gpujoin_rewind_stack(cl_int depth, cl_uint *l_state, cl_bool *matched)
 		__depth = depth;
 		for (;;)
 		{
+			/*
+			 * If any of outer combinations are in progress to find out
+			 * matching inner tuple, we have to resume the task, prior
+			 * to the increment of read pointer.
+			 */
+			if (wip_count[__depth] > 0)
+				break;
+			/*
+			 * If all the outer combinations are already processed on
+			 * the deeper depth, we can release the combination buffer
+			 * to reuse further join combinations.
+			 */
 			if (read_pos[__depth] >= write_pos[__depth])
 			{
 				read_pos[__depth] = 0;
@@ -328,6 +344,8 @@ gpujoin_rewind_stack(cl_int depth, cl_uint *l_state, cl_bool *matched)
 		memset(matched + depth + 1, 0,
 			   sizeof(cl_bool) * (GPUJOIN_MAX_DEPTH - depth));
 	}
+	if (scan_done && depth == base_depth)
+		return -1;
 	return depth;
 }
 
@@ -369,6 +387,7 @@ gpujoin_load_source(kern_context *kcxt,
 										 &tupitem->t_self,
 										 &tupitem->htup);
 		}
+		assert(wip_count[0] == 0);
 	}
 	else if (__ldg(&kds_src->format) == KDS_FORMAT_BLOCK)
 	{
@@ -437,6 +456,7 @@ gpujoin_load_source(kern_context *kcxt,
 												kds_src,
 												row_index);
 		}
+		assert(wip_count[0] == 0);
 	}
 	/* error checks */
 	if (__syncthreads_count(kcxt->e.errcode) > 0)
@@ -444,7 +464,11 @@ gpujoin_load_source(kern_context *kcxt,
 	/* statistics */
 	count = __syncthreads_count(t_offset != UINT_MAX);
 	if (get_local_id() == 0)
+	{
+		if (__ldg(&kds_src->format) == KDS_FORMAT_BLOCK)
+			wip_count[0] = count;
 		stat_source_nitems += count;
+	}
 
 	/* store the source tuple if visible */
 	wr_index = pgstromStairlikeBinaryCount(visible, &count);
@@ -626,11 +650,7 @@ gpujoin_projection_row(kern_context *kcxt,
 
 	/* Any more result rows to be written? */
 	if (read_pos[nrels] >= write_pos[nrels])
-	{
-		if (scan_done)
-			return -1;
 		return gpujoin_rewind_stack(nrels, l_state, matched);
-	}
 
 	/* pick up combinations from the pseudo-stack */
 	nvalids = Min(write_pos[nrels] - read_pos[nrels],
@@ -781,11 +801,7 @@ gpujoin_projection_slot(kern_context *kcxt,
 
 	/* Any more result rows to be written? */
 	if (read_pos[nrels] >= write_pos[nrels])
-	{
-		if (scan_done)
-			return -1;
 		return gpujoin_rewind_stack(nrels, l_state, matched);
-	}
 
 	/* pick up combinations from the pseudo-stack */
 	nvalids = Min(write_pos[nrels] - read_pos[nrels],
@@ -951,18 +967,29 @@ gpujoin_exec_nestloop(kern_context *kcxt,
 		l_state[depth] = 0;
 		matched[depth] = false;
 		if (get_local_id() == 0)
+		{
+			wip_count[depth] = 0;
 			read_pos[depth-1] += get_local_size();
+		}
 		return depth;
 	}
 	else if (read_pos[depth-1] >= write_pos[depth-1])
 	{
 		/*
-         * when this depth has enough room to store the combinations, upper
-         * depth can generate more outer tuples.
-         */
-		if (!scan_done &&
-			write_pos[depth] + get_local_size() <= kgjoin->pstack_nrooms)
-			return gpujoin_rewind_stack(depth-1, l_state, matched);
+		 * When this depth has enough room (even if all the threads generate
+		 * join combinations on the next try), upper depth may be able to
+		 * generate more outer tuples; which shall be used to input for the
+		 * next depth.
+		 * It is mostly valuable to run many combinations on the next depth.
+		 */
+		assert(wip_count[depth] == 0);
+		if (write_pos[depth] + get_local_size() <= kgjoin->pstack_nrooms)
+		{
+			cl_int	__depth = gpujoin_rewind_stack(depth-1, l_state, matched);
+
+			if (__depth >= base_depth)
+				return __depth;
+		}
 		/* elsewhere, dive into the deeper depth or projection */
 		return depth + 1;
 	}
@@ -970,6 +997,8 @@ gpujoin_exec_nestloop(kern_context *kcxt,
 	assert(kds_index < kds_in->nitems);
 	tupitem = KERN_DATA_STORE_TUPITEM(kds_in, kds_index);
 
+	//FIXME: if (write_pos - read_pos) is much smaller than get_local_size()
+	//we can run multiple inner steps at once.
 	rd_index = read_pos[depth-1] + get_local_id();
 	rd_stack += (rd_index * depth);
 	if (rd_index < write_pos[depth-1])
@@ -996,6 +1025,7 @@ left_outer:
 	wr_index += pgstromStairlikeBinaryCount(result, &count);
 	if (get_local_id() == 0)
 	{
+		wip_count[depth] = get_local_size();
 		write_pos[depth] += count;
 		stat_nitems[depth] += count;
 	}
@@ -1057,13 +1087,21 @@ gpujoin_exec_hashjoin(kern_context *kcxt,
 	else if (read_pos[depth-1] >= write_pos[depth-1])
 	{
 		/*
-		 * When this depth has enough room to store the combinations, upper
-		 * depth can generate more outer tuples.
+		 * When this depth has enough room (even if all the threads generate
+		 * join combinations on the next try), upper depth may be able to
+		 * generate more outer tuples; which shall be used to input for the
+		 * next depth.
+		 * It is mostly valuable to run many combinations on the next depth.
 		 */
-		if (!scan_done &&
-			write_pos[depth] + get_local_size() <= kgjoin->pstack_nrooms)
-			return gpujoin_rewind_stack(depth-1, l_state, matched);
-		/* Elsewhere, dive into the deeper depth or projection */
+		assert(wip_count[depth] == 0);
+		if (write_pos[depth] + get_local_size() <= kgjoin->pstack_nrooms)
+		{
+			cl_int	__depth = gpujoin_rewind_stack(depth-1, l_state, matched);
+
+			if (__depth >= base_depth)
+				return __depth;
+		}
+		/* elsewhere, dive into the deeper depth or projection */
 		return depth + 1;
 	}
 	rd_index = read_pos[depth-1] + get_local_id();
@@ -1157,7 +1195,10 @@ gpujoin_exec_hashjoin(kern_context *kcxt,
 		wr_stack[depth] = (!khitem ? 0U : (cl_uint)((char *)&khitem->t.htup -
 													(char *)kds_hash));
 	}
-	__syncthreads();
+	/* count number of threads still in-progress */
+	count = __syncthreads_count(khitem != NULL);
+	if (get_local_id() == 0)
+		wip_count[depth] = count;
 	/* enough room exists on this depth? */
 	if (write_pos[depth] + get_local_size() <= kgjoin->pstack_nrooms)
 		return depth;
@@ -1222,6 +1263,7 @@ gpujoin_main(kern_gpujoin *kgjoin,
 		src_read_pos = UINT_MAX;
 		stat_source_nitems = 0;
 		memset(stat_nitems, 0, sizeof(stat_nitems));
+		memset(wip_count, 0, sizeof(wip_count));
 		memset(read_pos, 0, sizeof(read_pos));
 		memset(write_pos, 0, sizeof(write_pos));
 		scan_done = false;
@@ -1236,6 +1278,8 @@ gpujoin_main(kern_gpujoin *kgjoin,
 	/* main logic of GpuJoin */
 	while (depth >= 0)
 	{
+		if (get_local_id() == 0)
+			printf("depth=%d scan_done=%d Rpos=[%d %d %d] Wpos=[%d %d %d] wip_count[%d %d %d]\n", depth, scan_done, read_pos[0], read_pos[1], read_pos[2], write_pos[0], write_pos[1], write_pos[2], wip_count[0], wip_count[1], wip_count[2]);
 		if (depth == 0)
 		{
 			/* LOAD FROM KDS_SRC (ROW/BLOCK/COLUMN) */
@@ -1302,6 +1346,8 @@ gpujoin_main(kern_gpujoin *kgjoin,
 		__syncthreads();
 		assert(depth_thread0 == depth);
 	}
+	if (get_local_id() == 0)
+		printf("GpuJoin exit depth=%d\n", depth);
 
 	/* update statistics only if normal exit */
 	if (depth == -1 && get_local_id() == 0)

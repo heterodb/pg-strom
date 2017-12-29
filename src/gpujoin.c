@@ -3682,6 +3682,7 @@ GpuJoinSetupTask(struct kern_gpujoin *kgjoin, GpuTaskState *gts,
 	suspend_sz = (sizeof(cl_int) +					/* depth */
 				  sizeof(cl_int) +					/* scan_done */
 				  sizeof(cl_uint) +					/* src_read_pos */
+				  sizeof(cl_uint) * (nrels + 1) +	/* wip_count */
 				  sizeof(cl_uint) * (nrels + 1) +	/* read_pos */
 				  sizeof(cl_uint) * (nrels + 1) +	/* write_pos */
 				  sizeof(cl_uint) +					/* stat_source_nitems */
