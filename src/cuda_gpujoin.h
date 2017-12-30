@@ -313,22 +313,20 @@ gpujoin_rewind_stack(cl_int depth, cl_uint *l_state, cl_bool *matched)
 		for (;;)
 		{
 			/*
+			 * At the time of rewind, all the upper tuples (outer combinations
+			 * from the standpoint of deeper depth) are already processed.
+			 * So, we can safely rewind the read/write index of this depth.
+			 */
+			read_pos[__depth] = 0;
+			write_pos[__depth] = 0;
+
+			/*
 			 * If any of outer combinations are in progress to find out
 			 * matching inner tuple, we have to resume the task, prior
 			 * to the increment of read pointer.
 			 */
 			if (wip_count[__depth] > 0)
 				break;
-			/*
-			 * If all the outer combinations are already processed on
-			 * the deeper depth, we can release the combination buffer
-			 * to reuse further join combinations.
-			 */
-			if (read_pos[__depth] >= write_pos[__depth])
-			{
-				read_pos[__depth] = 0;
-				write_pos[__depth] = 0;
-			}
 			if (__depth == base_depth ||
 				read_pos[__depth-1] < write_pos[__depth-1])
 				break;
@@ -745,7 +743,7 @@ gpujoin_projection_row(kern_context *kcxt,
 
 	/* step.4 - make advance the read position */
 	if (get_local_id() == 0)
-		read_pos[nrels] += get_local_size();
+		read_pos[nrels] += nvalids;
 	return nrels + 1;
 }
 
@@ -917,7 +915,7 @@ gpujoin_projection_slot(kern_context *kcxt,
 
 	/* step.4 - make advance the read position */
 	if (get_local_id() == 0)
-		read_pos[nrels] += get_local_size();
+		read_pos[nrels] += nvalids; //get_local_size();
 	return nrels + 1;
 }
 #endif /* GPUPREAGG_COMBINED_JOIN */
@@ -939,41 +937,18 @@ gpujoin_exec_nestloop(kern_context *kcxt,
 	kern_data_store *kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
 	cl_bool		   *oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth);
 	kern_tupitem   *tupitem = NULL;
-	cl_uint			kds_index;
-	cl_uint			rd_index;
+	cl_uint			x_unitsz;
+	cl_uint			y_unitsz;
+	cl_uint			x_index;	/* outer index */
+	cl_uint			y_index;	/* inner index */
 	cl_uint			wr_index;
 	cl_uint			count;
-	cl_bool			result;
+	cl_bool			result = false;
+	__shared__ cl_bool matched_sync[MAXTHREADS_PER_BLOCK];
 
 	assert(kds_in->format == KDS_FORMAT_ROW);
 	assert(depth >= 1 && depth <= GPUJOIN_MAX_DEPTH);
-
-	if (l_state[depth] >= kds_in->nitems)
-	{
-		/*
-		 * If LEFT OUTER JOIN, we need to check whether the outer
-		 * combination had any matched inner tuple, or not.
-		 */
-		if (KERN_MULTIRELS_LEFT_OUTER_JOIN(kmrels, depth) &&
-			__syncthreads_count(!matched[depth]))
-		{
-			if (read_pos[depth-1] + get_local_id() < write_pos[depth-1])
-				result = matched[depth];
-			else
-				result = false;
-			matched[depth] = true;
-			goto left_outer;
-		}
-		l_state[depth] = 0;
-		matched[depth] = false;
-		if (get_local_id() == 0)
-		{
-			wip_count[depth] = 0;
-			read_pos[depth-1] += get_local_size();
-		}
-		return depth;
-	}
-	else if (read_pos[depth-1] >= write_pos[depth-1])
+	if (read_pos[depth-1] >= write_pos[depth-1])
 	{
 		/*
 		 * When this depth has enough room (even if all the threads generate
@@ -993,32 +968,73 @@ gpujoin_exec_nestloop(kern_context *kcxt,
 		/* elsewhere, dive into the deeper depth or projection */
 		return depth + 1;
 	}
-	kds_index = l_state[depth]++;
-	assert(kds_index < kds_in->nitems);
-	tupitem = KERN_DATA_STORE_TUPITEM(kds_in, kds_index);
+	x_unitsz = Min(write_pos[depth-1] - read_pos[depth-1],
+				   get_local_size());
+	y_unitsz = get_local_size() / x_unitsz;
 
-	//FIXME: if (write_pos - read_pos) is much smaller than get_local_size()
-	//we can run multiple inner steps at once.
-	rd_index = read_pos[depth-1] + get_local_id();
-	rd_stack += (rd_index * depth);
-	if (rd_index < write_pos[depth-1])
+	x_index = get_local_id() % x_unitsz;
+	y_index = get_local_id() / x_unitsz;
+
+	if (y_unitsz * l_state[depth] >= kds_in->nitems)
 	{
-		result = gpujoin_join_quals(kcxt,
-									kds_src,
-									kmrels,
-									depth,
-									rd_stack,
-									&tupitem->htup,
-									NULL);
-		if (result)
+		/*
+		 * In case of LEFT OUTER JOIN, we need to check whether the outer
+		 * combination had any matched inner tuples, or not.
+		 */
+		if (KERN_MULTIRELS_LEFT_OUTER_JOIN(kmrels, depth))
 		{
-			matched[depth] = true;
-			if (oj_map && !oj_map[kds_index])
-				oj_map[kds_index] = true;
+			if (get_local_id() < x_unitsz)
+				matched_sync[get_local_id()] = false;
+			__syncthreads();
+			if (matched[depth])
+				matched_sync[x_index] = true;
+			if (__syncthreads_count(!matched_sync[x_index]) > 0)
+			{
+				if (y_index == 0)
+					result = !matched_sync[x_index];
+				else
+					result = false;
+				/* don't generate LEFT OUTER tuple twice */
+				matched[depth] = true;
+				goto left_outer;
+			}
+		}
+		l_state[depth] = 0;
+		matched[depth] = false;
+		if (get_local_id() == 0)
+		{
+			wip_count[depth] = 0;
+			read_pos[depth-1] += x_unitsz;
+		}
+		return depth;
+	}
+
+	x_index += read_pos[depth-1];
+	assert(x_index < write_pos[depth-1]);
+	rd_stack += (x_index * depth);
+	if (y_index < y_unitsz)
+	{
+		y_index += y_unitsz * l_state[depth];
+		if (y_index < kds_in->nitems)
+		{
+			tupitem = KERN_DATA_STORE_TUPITEM(kds_in, y_index);
+
+			result = gpujoin_join_quals(kcxt,
+										kds_src,
+										kmrels,
+										depth,
+										rd_stack,
+										&tupitem->htup,
+										NULL);
+			if (result)
+			{
+				matched[depth] = true;
+				if (oj_map && !oj_map[y_index])
+					oj_map[y_index] = true;
+			}
 		}
 	}
-	else
-		result = false;
+	l_state[depth]++;
 
 left_outer:
 	wr_index = write_pos[depth];
@@ -1278,8 +1294,6 @@ gpujoin_main(kern_gpujoin *kgjoin,
 	/* main logic of GpuJoin */
 	while (depth >= 0)
 	{
-		if (get_local_id() == 0)
-			printf("depth=%d scan_done=%d Rpos=[%d %d %d] Wpos=[%d %d %d] wip_count[%d %d %d]\n", depth, scan_done, read_pos[0], read_pos[1], read_pos[2], write_pos[0], write_pos[1], write_pos[2], wip_count[0], wip_count[1], wip_count[2]);
 		if (depth == 0)
 		{
 			/* LOAD FROM KDS_SRC (ROW/BLOCK/COLUMN) */
@@ -1346,8 +1360,6 @@ gpujoin_main(kern_gpujoin *kgjoin,
 		__syncthreads();
 		assert(depth_thread0 == depth);
 	}
-	if (get_local_id() == 0)
-		printf("GpuJoin exit depth=%d\n", depth);
 
 	/* update statistics only if normal exit */
 	if (depth == -1 && get_local_id() == 0)
