@@ -94,15 +94,6 @@ typedef struct
  * buffer does not run out, thus, it shall not consume devuce physical pages
  * because we allocate the control segment using unified managed memory.
  */
-typedef struct
-{
-	cl_uint		window_orig;	//deprecated
-	cl_uint		window_base;	//deprecated
-	cl_uint		window_size;	//deprecated
-	cl_uint		stat_nitems;	/* out: # of join results in this depth */
-	cl_float	row_dist_score;	//deprecated
-} kern_join_scale;
-
 struct kern_gpujoin
 {
 	kern_errorbuf	kerror;				/* kernel error information */
@@ -116,15 +107,9 @@ struct kern_gpujoin
 	/* error status to be backed (OUT) */
 	cl_uint			source_nitems;		/* out: # of source rows */
 	cl_uint			outer_nitems;		/* out: # of filtered source rows */
-
-	/*
-	 * Scale of inner virtual window for each depth
-	 * (note that jscale has (num_rels + 1) elements
-	 */
-	kern_join_scale	jscale[FLEXIBLE_ARRAY_MEMBER];
-	/*
-	 * pseudo-stack and suspend/resume context
-	 */
+	cl_uint			stat_nitems[FLEXIBLE_ARRAY_MEMBER]; /* out: stat nitems */
+	/*-- pseudo-stack and suspend/resume context --*/
+	/*-- kernel param/const buffer --*/
 };
 typedef struct kern_gpujoin		kern_gpujoin;
 
@@ -1370,7 +1355,7 @@ gpujoin_main(kern_gpujoin *kgjoin,
 		atomicAdd(&kgjoin->source_nitems, stat_source_nitems);
 		atomicAdd(&kgjoin->outer_nitems, stat_nitems[0]);
 		for (index=0; index < GPUJOIN_MAX_DEPTH; index++)
-			atomicAdd(&kgjoin->jscale[index].stat_nitems,
+			atomicAdd(&kgjoin->stat_nitems[index],
 					  stat_nitems[index+1]);
 	}
 	__syncthreads();
@@ -1542,7 +1527,7 @@ gpujoin_right_outer(kern_gpujoin *kgjoin,
 		assert(stat_nitems[0] == 0);
 		for (index = outer_depth; index <= GPUJOIN_MAX_DEPTH; index++)
 		{
-			atomicAdd(&kgjoin->jscale[index-1].stat_nitems,
+			atomicAdd(&kgjoin->stat_nitems[index-1],
 					  stat_nitems[index]);
 		}
 	}

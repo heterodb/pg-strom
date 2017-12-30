@@ -482,7 +482,7 @@ estimate_inner_buffersize(PlannerInfo *root,
 		 */
 		join_ntuples = gpath->inners[i].join_nrows / (double)num_chunks;
 		num_items = (Size)((double)(i+2) * join_ntuples);
-		buffer_size = offsetof(kern_gpujoin, jscale[num_rels + 1])
+		buffer_size = offsetof(kern_gpujoin, stat_nitems[num_rels + 1])
 			+ BLCKSZ	/* alternative of kern_parambuf */
 			+ STROMALIGN(offsetof(kern_resultbuf, results[num_items]))
 			+ STROMALIGN(offsetof(kern_resultbuf, results[num_items]));
@@ -3658,18 +3658,17 @@ GpuJoinSetupTask(struct kern_gpujoin *kgjoin, GpuTaskState *gts,
 {
 	GpuJoinState *gjs = (GpuJoinState *) gts;
 	GpuContext *gcontext = gjs->gts.gcontext;
-	kern_multirels *h_kmrels = dsm_segment_address(gjs->seg_kmrels);
 	cl_int		nrels = gjs->num_rels;
 	size_t		head_sz;
 	size_t		param_sz;
 	size_t		pstack_sz;
 	size_t		pstack_nrooms;
 	size_t		suspend_sz;
-	int			i, mp_count;
+	int			mp_count;
 
 	mp_count = devAttrs[gcontext->cuda_dindex].MULTIPROCESSOR_COUNT;
 	head_sz = STROMALIGN(offsetof(kern_gpujoin,
-								  jscale[gjs->num_rels + 1]));
+								  stat_nitems[gjs->num_rels + 1]));
 	param_sz = STROMALIGN(gjs->gts.kern_params->length);
 	pstack_nrooms = 2048;
 	pstack_sz = MAXALIGN(sizeof(cl_uint) *
@@ -3704,25 +3703,6 @@ GpuJoinSetupTask(struct kern_gpujoin *kgjoin, GpuTaskState *gts,
 		memcpy(KERN_GPUJOIN_PARAMBUF(kgjoin),
 			   gjs->gts.kern_params,
 			   gjs->gts.kern_params->length);
-
-		/* setup initial jscale[] */
-		for (i=0; i <= gjs->num_rels; i++)
-		{
-			kern_join_scale	   *jscale = kgjoin->jscale;
-			kern_data_store	   *kds_in;
-			cl_uint				nitems;
-
-			if (i == 0)
-				nitems = (!pds_src ? 0 : pds_src->kds.nitems);
-			else
-			{
-				kds_in = KERN_MULTIRELS_INNER_KDS(h_kmrels, i);
-				nitems = kds_in->nitems;
-			}
-			jscale[i].window_base = 0;
-			jscale[i].window_size = nitems;
-			jscale[i].window_orig = jscale[i].window_base;
-		}
 	}
 	return (head_sz + param_sz +
 			mp_count * pstack_sz +
@@ -4741,7 +4721,7 @@ gpujoinUpdateRunTimeStat(GpuTaskState *gts, kern_gpujoin *kgjoin)
 	for (i=0; i < gjs->num_rels; i++)
 	{
 		pg_atomic_fetch_add_u64(&gj_rtstat->jstat[i+1].inner_nitems,
-								kgjoin->jscale[i].stat_nitems);
+								kgjoin->stat_nitems[i]);
 	}
 }
 
