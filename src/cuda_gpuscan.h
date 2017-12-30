@@ -684,7 +684,7 @@ gpuscan_exec_quals_column(kern_gpuscan *kgpuscan,
 	do {
 		HeapTupleFields	tx_attrs;	/* xmin, xmax, cmin/cmax, if any */
 		ItemPointerData	t_self;		/* t_self, if any */
-		kern_tupitem   *tupitem;
+		kern_tupitem   *tupitem		__attribute__((unused));
 		cl_bool			rc;
 		cl_uint			nvalids;
 		cl_uint			required	__attribute__((unused));

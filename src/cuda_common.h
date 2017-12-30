@@ -135,10 +135,12 @@ typedef cl_ulong	Datum;
 #define FLT_MIN			__int_as_float(0x00800000U)
 #define FLT_DIG			6
 #define FLT_MANT_DIG	24
+#define FLT_INFINITY	__int_as_float(0x7f800000U)
 #define DBL_MAX			__longlong_as_double(0x7fefffffffffffffULL)
 #define DBL_MIN			__longlong_as_double(0x0010000000000000ULL)
 #define DBL_DIG			15
 #define DBL_MANT_DIG	53
+#define DBL_INFINITY	__longlong_as_double(0x7ff0000000000000ULL)
 
 /*
  * MEMO: We takes dynamic local memory using cl_ulong data-type because of
@@ -2537,6 +2539,25 @@ memcmp(const void *s1, const void *s2, size_t n)
 		p2++;
 	}
 	return 0;
+}
+
+/* string comparison */
+STATIC_INLINE(cl_int)
+strcmp(const char *__s1, const char *__s2)
+{
+	const cl_uchar *s1 = (const cl_uchar *) __s1;
+	const cl_uchar *s2 = (const cl_uchar *) __s2;
+	cl_int		c1, c2;
+
+	do {
+		c1 = (cl_uchar) *s1++;
+		c2 = (cl_uchar) *s2++;
+
+		if (c1 == '\0')
+			return c1 - c2;
+	} while (c1 == c2);
+
+	return c1 - c2;
 }
 
 /*

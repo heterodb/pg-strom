@@ -1,7 +1,7 @@
 /*
- * opencl_math.h
+ * cuda_mathlib.h
  *
- * Collection of math functions for OpenCL devices
+ * Collection of math functions for CUDA GPU devices
  * --
  * Copyright 2011-2017 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
  * Copyright 2014-2017 (C) The PG-Strom Development Team

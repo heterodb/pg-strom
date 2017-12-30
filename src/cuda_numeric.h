@@ -1,7 +1,7 @@
 /*
  * cuda_numeric.h
  *
- * Collection of numeric functions for OpenCL devices
+ * Collection of numeric functions for CUDA GPU devices
  * --
  * Copyright 2011-2017 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
  * Copyright 2014-2017 (C) The PG-Strom Development Team

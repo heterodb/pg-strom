@@ -1,7 +1,7 @@
 /*
  * cuda_textlib.h
  *
- * Collection of text functions for OpenCL devices
+ * Collection of text functions for CUDA GPU devices
  * --
  * Copyright 2011-2017 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
  * Copyright 2014-2017 (C) The PG-Strom Development Team

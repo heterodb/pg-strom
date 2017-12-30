@@ -1061,6 +1061,13 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 					  TIMESTAMPTZOID, TIMESTAMPTZOID},
 	  "t/F:overlaps_timestamptz" },
 
+	/* extract() */
+	{ "date_part", 2, {TEXTOID,TIMESTAMPOID},   "st/F:extract_timestamp"},
+	{ "date_part", 2, {TEXTOID,TIMESTAMPTZOID}, "st/F:extract_timestamptz"},
+	{ "date_part", 2, {TEXTOID,INTERVALOID},    "st/F:extract_interval"},
+	{ "date_part", 2, {TEXTOID,TIMETZOID},      "st/F:extract_timetz"},
+	{ "date_part", 2, {TEXTOID,TIMEOID},        "st/F:extract_time"},
+
 	/* other time and data functions */
 	{ "now", 0, {}, "t/F:now" },
 

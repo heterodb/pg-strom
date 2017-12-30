@@ -376,14 +376,14 @@ construct_flat_cuda_source(uint32 extra_flags,
 	if ((extra_flags & DEVKERNEL_NEEDS_MATHLIB) == DEVKERNEL_NEEDS_MATHLIB)
 		ofs += snprintf(source + ofs, len - ofs,
 						"#include \"cuda_mathlib.h\"\n");
-	/* cuda timelib.h */
-	if ((extra_flags & DEVKERNEL_NEEDS_TIMELIB) == DEVKERNEL_NEEDS_TIMELIB)
-		ofs += snprintf(source + ofs, len - ofs,
-						"#include \"cuda_timelib.h\"\n");
 	/* cuda textlib.h */
 	if ((extra_flags & DEVKERNEL_NEEDS_TEXTLIB) == DEVKERNEL_NEEDS_TEXTLIB)
 		ofs += snprintf(source + ofs, len - ofs,
 						"#include \"cuda_textlib.h\"\n");
+	/* cuda timelib.h */
+	if ((extra_flags & DEVKERNEL_NEEDS_TIMELIB) == DEVKERNEL_NEEDS_TIMELIB)
+		ofs += snprintf(source + ofs, len - ofs,
+						"#include \"cuda_timelib.h\"\n");
 	/* cuda numeric.h */
 	if ((extra_flags & DEVKERNEL_NEEDS_NUMERIC) == DEVKERNEL_NEEDS_NUMERIC)
 		ofs += snprintf(source + ofs, len - ofs,
@@ -412,6 +412,9 @@ construct_flat_cuda_source(uint32 extra_flags,
 		"#ifdef CUDA_MISC_H\n"
 		"    pg_money_t       money_v;\n"
 		"    pg_uuid_t        uuid_v;\n"
+		"    pg_macaddr_t     macaddr_v;\n"
+		"    pg_inet_t        inet_v;\n"
+		"    pg_cidr_t        cidr_t;\n"
 		"#endif\n"
 		"#ifdef CUDA_TIMELIB_H\n"
 		"    pg_date_t        date_v;\n"
