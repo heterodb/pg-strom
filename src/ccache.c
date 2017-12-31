@@ -655,11 +655,51 @@ refresh_ccache_source_relations(void)
 static void
 ccache_callback_on_reloid(Datum arg, int cacheid, uint32 hashvalue)
 {
+	dlist_mutable_iter iter;
+	int			i;
+	Datum		reloid;
+	uint32		relhash;
+
 	Assert(cacheid == RELOID);
-	hash_destroy(ccache_relations_htab);
-	ccache_relations_htab = NULL;
-	if (ccache_relations_oid)
-		pfree(ccache_relations_oid);
+	if (!ccache_relations_htab)
+		return;
+
+	/* invalidation of related cache */
+	SpinLockAcquire(&ccache_state->chunks_lock);
+	PG_TRY();
+	{
+		for (i=0; i < ccache_num_slots; i++)
+		{
+			dlist_foreach_modify(iter, &ccache_state->active_slots[i])
+			{
+				ccacheChunk	   *temp = dlist_container(ccacheChunk,
+													   hash_chain,
+													   iter.cur);
+				if (temp->database_oid != MyDatabaseId)
+					continue;
+				if (hashvalue != 0)
+				{
+					reloid = ObjectIdGetDatum(temp->table_oid);
+					relhash = GetSysCacheHashValue(RELOID, reloid, 0, 0, 0);
+					if (relhash != hashvalue)
+						continue;
+				}
+				/* ccache invalidation */
+				dlist_delete(&temp->hash_chain);
+				dlist_delete(&temp->lru_chain);
+				memset(&temp->hash_chain, 0, sizeof(dlist_node));
+				memset(&temp->lru_chain, 0, sizeof(dlist_node));
+				ccache_put_chunk_nolock(temp);
+			}
+		}
+	}
+	PG_CATCH();
+	{
+		SpinLockRelease(&ccache_state->chunks_lock);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	SpinLockRelease(&ccache_state->chunks_lock);
 	ccache_relations_oid = NULL;
 }
 
@@ -670,8 +710,18 @@ static void
 ccache_callback_on_procoid(Datum arg, int cacheid, uint32 hashvalue)
 {
 	Assert(cacheid == PROCOID);
-	ccache_invalidator_func_oid = InvalidOid;
-	ccache_callback_on_reloid(0, RELOID, 0);
+	if (OidIsValid(ccache_invalidator_func_oid))
+	{
+		Datum	fnoid = ObjectIdGetDatum(ccache_invalidator_func_oid);
+		uint32	inval_hash = GetSysCacheHashValue(PROCOID, fnoid, 0, 0, 0);
+
+		if (inval_hash == hashvalue)
+		{
+			elog(LOG, "pig=%u ccache_callback_on_procoid cacheid=%d hashvalue=%u", getpid(), cacheid, hashvalue);
+			ccache_invalidator_func_oid = InvalidOid;
+			ccache_callback_on_reloid(0, RELOID, 0);
+		}
+	}
 }
 
 /*
@@ -1904,6 +1954,8 @@ ccache_builder_main(Datum arg)
 			if (ccache_builder_generation !=
 				pg_atomic_read_u32(&ccache_state->generation))
 				elog(ERROR,"restarting ccache-builder%d", builder_id);
+
+			CHECK_FOR_INTERRUPTS();
 
 			/*
 			 * ---------------------
