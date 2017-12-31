@@ -43,10 +43,11 @@ typedef struct
 typedef struct
 {
 	/* hash slot of ccache chunks */
-	slock_t		free_chunks_lock;
-	dlist_head	free_chunks_list;
-	slock_t	   *active_locks;
-	dlist_head *active_slots;
+	slock_t			chunks_lock;
+	dlist_head		lru_misshit_list;
+	dlist_head		lru_active_list;
+	dlist_head		free_chunks_list;
+	dlist_head	   *active_slots;
 	/* management of ccache builder workers */
 	pg_atomic_uint32 generation;
 	slock_t			lock;
@@ -61,7 +62,8 @@ typedef struct
  */
 struct ccacheChunk
 {
-	dlist_node	chain;
+	dlist_node	lru_chain;		/* link to LRU list */
+	dlist_node	hash_chain;		/* link to Hash list */
 	pg_crc32	hash;			/* hash value */
 	Oid			database_oid;	/* OID of the cached database */
 	Oid			table_oid;		/* OID of the cached table */
@@ -80,7 +82,7 @@ typedef struct ccacheChunk		ccacheChunk;
 static shmem_startup_hook_type shmem_startup_next = NULL;
 static char		   *ccache_startup_databases;	/* GUC */
 static int			ccache_num_builders;		/* GUC */
-static size_t		ccache_max_size;			/* GUC */
+static size_t		ccache_total_size;			/* GUC */
 static char		   *ccache_base_dir_name;		/* GUC */
 static DIR		   *ccache_base_dir = NULL;
 static ccacheState *ccache_state = NULL;		/* shmem */
@@ -189,42 +191,6 @@ ccache_check_filename(const char *fname,
 }
 
 /*
- * pgstrom_ccache_get_chunk
- */
-ccacheChunk *
-pgstrom_ccache_get_chunk(Relation relation, BlockNumber block_nr)
-{
-	Oid			table_oid = RelationGetRelid(relation);
-	pg_crc32	hash;
-	cl_int		index;
-	dlist_iter	iter;
-	ccacheChunk *cc_chunk = NULL;
-
-	hash = ccache_compute_hashvalue(MyDatabaseId, table_oid, block_nr);
-	index = hash % ccache_num_slots;
-
-	SpinLockAcquire(&ccache_state->active_locks[index]);
-	dlist_foreach (iter, &ccache_state->active_slots[index])
-	{
-		ccacheChunk *temp = dlist_container(ccacheChunk, chain, iter.cur);
-
-		if (temp->hash == hash &&
-			temp->database_oid == MyDatabaseId &&
-			temp->table_oid == table_oid &&
-			temp->block_nr == block_nr &&
-			temp->ctime != 0)
-		{
-			cc_chunk = temp;
-			cc_chunk->refcnt++;
-			break;
-		}
-	}
-	SpinLockRelease(&ccache_state->active_locks[index]);
-
-	return cc_chunk;
-}
-
-/*
  * ccache_put_chunk
  */
 static void
@@ -235,30 +201,106 @@ ccache_put_chunk_nolock(ccacheChunk *cc_chunk)
 	{
 		char		fname[MAXPGPATH];
 
-		Assert(cc_chunk->chain.prev == NULL &&
-			   cc_chunk->chain.next == NULL);
-		ccache_chunk_filename(fname,
-							  cc_chunk->database_oid,
-							  cc_chunk->table_oid,
-							  cc_chunk->block_nr);
-		if (unlinkat(dirfd(ccache_base_dir), fname, 0) != 0)
-			elog(WARNING, "failed on unlinkat \"%s\": %m", fname);
+		Assert(cc_chunk->hash_chain.prev == NULL &&
+			   cc_chunk->hash_chain.next == NULL);
+		Assert(cc_chunk->lru_chain.prev == NULL &&
+			   cc_chunk->lru_chain.next == NULL);
+		if (cc_chunk->ctime != 0)
+		{
+			ccache_chunk_filename(fname,
+								  cc_chunk->database_oid,
+								  cc_chunk->table_oid,
+								  cc_chunk->block_nr);
+			if (unlinkat(dirfd(ccache_base_dir), fname, 0) != 0)
+				elog(WARNING, "failed on unlinkat \"%s\": %m", fname);
+		}
 		/* back to the free list */
-		SpinLockAcquire(&ccache_state->free_chunks_lock);
+		memset(cc_chunk, 0, sizeof(ccacheChunk));
 		dlist_push_head(&ccache_state->free_chunks_list,
-						&cc_chunk->chain);
-		SpinLockRelease(&ccache_state->free_chunks_lock);
+						&cc_chunk->hash_chain);
 	}
 }
 
 void
 pgstrom_ccache_put_chunk(ccacheChunk *cc_chunk)
 {
-	cl_int		index = cc_chunk->hash % ccache_num_slots;
-
-	SpinLockAcquire(&ccache_state->active_locks[index]);
+	SpinLockAcquire(&ccache_state->chunks_lock);
 	ccache_put_chunk_nolock(cc_chunk);
-	SpinLockRelease(&ccache_state->active_locks[index]);
+	SpinLockRelease(&ccache_state->chunks_lock);
+}
+
+/*
+ * pgstrom_ccache_get_chunk
+ */
+ccacheChunk *
+pgstrom_ccache_get_chunk(Relation relation, BlockNumber block_nr)
+{
+	Oid			table_oid = RelationGetRelid(relation);
+	pg_crc32	hash;
+	cl_int		index;
+	dlist_iter	iter;
+	dlist_node *dnode;
+	ccacheChunk *cc_chunk = NULL;
+	ccacheChunk *temp;
+
+	hash = ccache_compute_hashvalue(MyDatabaseId, table_oid, block_nr);
+	index = hash % ccache_num_slots;
+
+	SpinLockAcquire(&ccache_state->chunks_lock);
+	dlist_foreach (iter, &ccache_state->active_slots[index])
+	{
+		temp = dlist_container(ccacheChunk, hash_chain, iter.cur);
+		if (temp->hash == hash &&
+			temp->database_oid == MyDatabaseId &&
+			temp->table_oid == table_oid &&
+			temp->block_nr == block_nr)
+		{
+			temp->atime = GetCurrentTimestamp();
+			dlist_move_head(&ccache_state->lru_active_list,
+							&temp->lru_chain);
+			if (temp->ctime != 0)
+			{
+				cc_chunk = temp;
+				cc_chunk->refcnt++;
+			}
+			goto found;
+		}
+	}
+	/* neither active nor inactive entry exist */
+	if (!dlist_is_empty(&ccache_state->free_chunks_list))
+	{
+		dnode = dlist_pop_head_node(&ccache_state->free_chunks_list);
+		temp = dlist_container(ccacheChunk, hash_chain, dnode);
+		Assert(temp->lru_chain.prev == NULL &&
+			   temp->lru_chain.next == NULL &&
+			   temp->refcnt == 0 &&
+			   temp->ctime == 0);
+	}
+	else if (!dlist_is_empty(&ccache_state->lru_misshit_list))
+	{
+		dnode = dlist_tail_node(&ccache_state->lru_misshit_list);
+		temp = dlist_container(ccacheChunk, lru_chain, dnode);
+		Assert(temp->hash_chain.prev == NULL &&
+			   temp->hash_chain.next == NULL &&
+			   temp->refcnt == 1 &&
+			   temp->ctime == 0);
+		dlist_delete(&temp->lru_chain);
+	}
+	memset(temp, 0, sizeof(ccacheChunk));
+	temp->hash = hash;
+	temp->database_oid = MyDatabaseId;
+	temp->table_oid = table_oid;
+	temp->block_nr = block_nr;
+	temp->refcnt = 1;
+	temp->atime = GetCurrentTimestamp();
+	dlist_push_tail(&ccache_state->active_slots[index],
+					&temp->hash_chain);
+	dlist_push_head(&ccache_state->lru_misshit_list,
+					&temp->lru_chain);
+found:
+	SpinLockRelease(&ccache_state->chunks_lock);
+
+	return cc_chunk;
 }
 
 /*
@@ -283,6 +325,7 @@ pgstrom_ccache_load_chunk(ccacheChunk *cc_chunk,
 	pgstrom_data_store *pds;
 
 	/* open the ccache file */
+	Assert(cc_chunk->ctime != 0);
 	ccache_chunk_filename(buffer,
 						  MyDatabaseId,
 						  RelationGetRelid(relation),
@@ -716,23 +759,25 @@ pgstrom_ccache_invalidator(PG_FUNCTION_ARGS)
 										RelationGetRelid(rel),
 										block_nr);
 		index = hash % ccache_num_slots;
-		SpinLockAcquire(&ccache_state->active_locks[index]);
+		SpinLockAcquire(&ccache_state->chunks_lock);
 		dlist_foreach(iter, &ccache_state->active_slots[index])
 		{
 			ccacheChunk *temp = dlist_container(ccacheChunk,
-												chain, iter.cur);
+												hash_chain, iter.cur);
 			if (temp->hash == hash &&
 				temp->database_oid == MyDatabaseId &&
 				temp->table_oid == RelationGetRelid(rel) &&
 				temp->block_nr == block_nr)
 			{
-				dlist_delete(&temp->chain);
-				memset(&temp->chain, 0, sizeof(dlist_node));
+				dlist_delete(&temp->hash_chain);
+				dlist_delete(&temp->lru_chain);
+				memset(&temp->hash_chain, 0, sizeof(dlist_node));
+				memset(&temp->lru_chain, 0, sizeof(dlist_node));
 				ccache_put_chunk_nolock(temp);
 				break;
 			}
 		}
-		SpinLockRelease(&ccache_state->active_locks[index]);
+		SpinLockRelease(&ccache_state->chunks_lock);
 	}
 	else
 	{
@@ -745,20 +790,23 @@ pgstrom_ccache_invalidator(PG_FUNCTION_ARGS)
 
 		for (index=0; index < ccache_num_slots; index++)
 		{
-			SpinLockAcquire(&ccache_state->active_locks[index]);
+			SpinLockAcquire(&ccache_state->chunks_lock);
 			dlist_foreach_modify(iter, &ccache_state->active_slots[index])
 			{
 				ccacheChunk *temp = dlist_container(ccacheChunk,
-													chain, iter.cur);
+													hash_chain,
+													iter.cur);
 				if (temp->database_oid == MyDatabaseId &&
 					temp->table_oid == RelationGetRelid(rel))
 				{
-					dlist_delete(&temp->chain);
-					memset(&temp->chain, 0, sizeof(dlist_node));
+					dlist_delete(&temp->hash_chain);
+					dlist_delete(&temp->lru_chain);
+					memset(&temp->hash_chain, 0, sizeof(dlist_node));
+					memset(&temp->lru_chain, 0, sizeof(dlist_node));
 					ccache_put_chunk_nolock(temp);
 				}
 			}
-			SpinLockRelease(&ccache_state->active_locks[index]);
+			SpinLockRelease(&ccache_state->chunks_lock);
 		}
 	}
 	return PointerGetDatum(NULL);
@@ -803,16 +851,16 @@ pgstrom_ccache_info(PG_FUNCTION_ARGS)
 						   TIMESTAMPTZOID, -1, 0);
 		fncxt->tuple_desc = BlessTupleDesc(tupdesc);
 		/* collect current cache state */
-		for (i=0; i < ccache_num_slots; i++)
+		SpinLockAcquire(&ccache_state->chunks_lock);
+		PG_TRY();
 		{
-			SpinLockAcquire(&ccache_state->active_locks[i]);
-			PG_TRY();
+			for (i=0; i < ccache_num_slots; i++)
 			{
 				dlist_foreach(iter, &ccache_state->active_slots[i])
 				{
-					ccacheChunk	   *temp
-						= dlist_container(ccacheChunk, chain, iter.cur);
-
+					ccacheChunk	   *temp = dlist_container(ccacheChunk,
+														   hash_chain,
+														   iter.cur);
 					if (temp->ctime == 0)
 						continue;
 					cc_chunk = palloc(sizeof(ccacheChunk));
@@ -820,14 +868,14 @@ pgstrom_ccache_info(PG_FUNCTION_ARGS)
 					cc_chunks_list = lappend(cc_chunks_list, cc_chunk);
 				}
 			}
-			PG_CATCH();
-			{
-				SpinLockRelease(&ccache_state->active_locks[i]);
-				PG_RE_THROW();
-			}
-			PG_END_TRY();
-			SpinLockRelease(&ccache_state->active_locks[i]);
 		}
+		PG_CATCH();
+		{
+			SpinLockRelease(&ccache_state->chunks_lock);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+		SpinLockRelease(&ccache_state->chunks_lock);
 		fncxt->user_fctx = cc_chunks_list;
 		MemoryContextSwitchTo(oldcxt);
 	}
@@ -1548,7 +1596,7 @@ ccache_preload_chunk(ccacheChunk *cc_chunk,
 
 	/* ensure all-visible flags under the lock */
 	i = cc_chunk->hash % ccache_num_slots;
-	SpinLockAcquire(&ccache_state->active_locks[i]);
+	SpinLockAcquire(&ccache_state->chunks_lock);
 	PG_TRY();
 	{
 		for (j=0; j < nblocks; j++)
@@ -1564,7 +1612,7 @@ ccache_preload_chunk(ccacheChunk *cc_chunk,
 	}
 	PG_CATCH();
 	{
-		SpinLockRelease(&ccache_state->active_locks[i]);
+		SpinLockRelease(&ccache_state->chunks_lock);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
@@ -1574,8 +1622,10 @@ ccache_preload_chunk(ccacheChunk *cc_chunk,
 		cc_chunk->length = length;
 		cc_chunk->nattrs = RelationGetNumberOfAttributes(srel);
 		cc_chunk->ctime = cc_chunk->atime = GetCurrentTimestamp();
+		dlist_move_head(&ccache_state->lru_active_list,
+						&cc_chunk->lru_chain);
 	}
-	SpinLockRelease(&ccache_state->active_locks[i]);
+	SpinLockRelease(&ccache_state->chunks_lock);
 
 	return true;
 }
@@ -1645,19 +1695,35 @@ ccache_builder_preload(cl_long *timeout)
 				break;	/* no more relations to preload */
 		}
 
-		SpinLockAcquire(&ccache_state->free_chunks_lock);
-		if (dlist_is_empty(&ccache_state->free_chunks_list))
+		SpinLockAcquire(&ccache_state->chunks_lock);
+		if (!dlist_is_empty(&ccache_state->free_chunks_list))
 		{
-			SpinLockRelease(&ccache_state->free_chunks_lock);
+			dnode = dlist_pop_head_node(&ccache_state->free_chunks_list);
+			cc_chunk = dlist_container(ccacheChunk, hash_chain, dnode);
+			Assert(cc_chunk->lru_chain.prev == NULL &&
+				   cc_chunk->lru_chain.next == NULL &&
+				   cc_chunk->refcnt == 0 &&
+				   cc_chunk->ctime == 0);
+		}
+		else if (!dlist_is_empty(&ccache_state->lru_misshit_list))
+		{
+			dnode = dlist_tail_node(&ccache_state->lru_misshit_list);
+			dlist_delete(&cc_chunk->lru_chain);
+			cc_chunk = dlist_container(ccacheChunk, lru_chain, dnode);
+			Assert(cc_chunk->hash_chain.prev == NULL &&
+				   cc_chunk->hash_chain.next == NULL &&
+				   cc_chunk->refcnt == 1 &&
+				   cc_chunk->ctime == 0);
+		}
+		else
+		{
+			SpinLockRelease(&ccache_state->chunks_lock);
 			elog(LOG, "ccache-builder%d: no free ccacheChunk",
 				 ccache_builder->builder_id);
 			break;
 		}
-		dnode = dlist_pop_head_node(&ccache_state->free_chunks_list);
-		cc_chunk = dlist_container(ccacheChunk, chain, dnode);
-		SpinLockRelease(&ccache_state->free_chunks_lock);
-
 		/* setup ccacheChunk */
+		memset(cc_chunk, 0, sizeof(ccacheChunk));
 		cc_chunk->database_oid = MyDatabaseId;
 		cc_chunk->table_oid = RelationGetRelid(srel);
 		cc_chunk->block_nr = block_nr;
@@ -1666,15 +1732,15 @@ ccache_builder_preload(cl_long *timeout)
 												  cc_chunk->block_nr);
 		cc_chunk->refcnt = 1;
 		cc_chunk->ctime = 0;
-		cc_chunk->atime = 0;
+		cc_chunk->atime = GetCurrentTimestamp();
 
 		/* ensure this chunk is not cached yet */
 		i = cc_chunk->hash % ccache_num_slots;
-		SpinLockAcquire(&ccache_state->active_locks[i]);
 		dlist_foreach(iter, &ccache_state->active_slots[i])
 		{
-			ccacheChunk *temp = dlist_container(ccacheChunk, chain, iter.cur);
-
+			ccacheChunk *temp = dlist_container(ccacheChunk,
+												hash_chain,
+												iter.cur);
 			if (temp->hash == cc_chunk->hash &&
 				temp->database_oid == cc_chunk->database_oid &&
 				temp->table_oid == cc_chunk->table_oid &&
@@ -1687,24 +1753,24 @@ ccache_builder_preload(cl_long *timeout)
 		}
 		if (skip_preload)
 		{
-			SpinLockRelease(&ccache_state->active_locks[i]);
-			SpinLockAcquire(&ccache_state->free_chunks_lock);
 			memset(cc_chunk, 0, sizeof(ccacheChunk));
 			dlist_push_head(&ccache_state->free_chunks_list,
-							&cc_chunk->chain);
-			SpinLockRelease(&ccache_state->free_chunks_lock);
+							&cc_chunk->hash_chain);
+			SpinLockRelease(&ccache_state->chunks_lock);
 			continue;
 		}
 		dlist_push_head(&ccache_state->active_slots[i],
-						&cc_chunk->chain);
-		SpinLockRelease(&ccache_state->active_locks[i]);
+						&cc_chunk->hash_chain);
+		dlist_push_head(&ccache_state->lru_active_list,
+						&cc_chunk->lru_chain);
+		SpinLockRelease(&ccache_state->chunks_lock);
 
 		/* run preload of this chunk */
 		PG_TRY();
 		{
 			BlockNumber	nblocks = Min(rel_nblocks[i] - block_nr,
 									  CCACHE_CHUNK_NBLOCKS);
-
+			/* update builder's state */
 			SpinLockAcquire(&ccache_state->lock);
 			ccache_builder->table_oid = cc_chunk->table_oid;
 			ccache_builder->block_nr = cc_chunk->block_nr;
@@ -1718,18 +1784,17 @@ ccache_builder_preload(cl_long *timeout)
 									  strategy,
 									  chunk_buffer))
 			{
-				/* detach from the active */
-				SpinLockAcquire(&ccache_state->active_locks[i]);
+				/* detach from the active and back to the free list */
+				SpinLockAcquire(&ccache_state->chunks_lock);
 				Assert(cc_chunk->refcnt == 1);
-				dlist_delete(&cc_chunk->chain);
-				SpinLockRelease(&ccache_state->active_locks[i]);
-				/* return to the free list */
-				SpinLockAcquire(&ccache_state->free_chunks_lock);
+				dlist_delete(&cc_chunk->hash_chain);
+				dlist_delete(&cc_chunk->lru_chain);
 				memset(cc_chunk, 0, sizeof(ccacheChunk));
 				dlist_push_head(&ccache_state->free_chunks_list,
-								&cc_chunk->chain);
-				SpinLockRelease(&ccache_state->free_chunks_lock);
+								&cc_chunk->hash_chain);
+				SpinLockRelease(&ccache_state->chunks_lock);
 			}
+			/* update builder's state */
 			SpinLockAcquire(&ccache_state->lock);
 			ccache_builder->table_oid = InvalidOid;
 			ccache_builder->block_nr = InvalidBlockNumber;
@@ -1737,20 +1802,16 @@ ccache_builder_preload(cl_long *timeout)
 		}
 		PG_CATCH();
 		{
-			/* detach from the active */
-			SpinLockAcquire(&ccache_state->active_locks[i]);
+			/* detach from the active and back to the free list */
+			SpinLockAcquire(&ccache_state->chunks_lock);
 			Assert(cc_chunk->refcnt == 1);
-			dlist_delete(&cc_chunk->chain);
-			SpinLockRelease(&ccache_state->active_locks[i]);
-
-			/* return to the free list */
-			SpinLockAcquire(&ccache_state->free_chunks_lock);
+			dlist_delete(&cc_chunk->hash_chain);
+			dlist_delete(&cc_chunk->lru_chain);
 			memset(cc_chunk, 0, sizeof(ccacheChunk));
 			dlist_push_head(&ccache_state->free_chunks_list,
-							&cc_chunk->chain);
-			SpinLockRelease(&ccache_state->free_chunks_lock);
-
-			/* revert builder state */
+							&cc_chunk->hash_chain);
+			SpinLockRelease(&ccache_state->chunks_lock);
+			/* update builder's state */
 			SpinLockAcquire(&ccache_state->lock);
 			ccache_builder->table_oid = InvalidOid;
 			ccache_builder->block_nr = InvalidBlockNumber;
@@ -2044,7 +2105,6 @@ pgstrom_startup_ccache(void)
 
 	required = MAXALIGN(offsetof(ccacheState,
 								 builders[ccache_num_builders])) +
-		MAXALIGN(sizeof(slock_t) * ccache_num_slots) +
 		MAXALIGN(sizeof(dlist_head) * ccache_num_slots) +
 		MAXALIGN(sizeof(ccacheChunk) * ccache_num_chunks);
 	ccache_state = ShmemInitStruct("Columnar Cache Shared Segment",
@@ -2052,21 +2112,16 @@ pgstrom_startup_ccache(void)
 	if (found)
 		elog(ERROR, "Bug? Columnar Cache Shared Segment is already built");
 	memset(ccache_state, 0, required);
-
-	ccache_state->active_locks = (slock_t *)
+	ccache_state->active_slots = (dlist_head *)
 		((char *)ccache_state +
 		 MAXALIGN(offsetof(ccacheState, builders[ccache_num_builders])));
-	ccache_state->active_slots = (dlist_head *)
-		((char *)ccache_state->active_locks +
-		 MAXALIGN(sizeof(slock_t) * ccache_num_slots));
 	/* hash slot of ccache chunks */
-	SpinLockInit(&ccache_state->free_chunks_lock);
+	SpinLockInit(&ccache_state->chunks_lock);
+	dlist_init(&ccache_state->lru_misshit_list);
+	dlist_init(&ccache_state->lru_active_list);
 	dlist_init(&ccache_state->free_chunks_list);
 	for (i=0; i < ccache_num_slots; i++)
-	{
-		SpinLockInit(&ccache_state->active_locks[i]);
 		dlist_init(&ccache_state->active_slots[i]);
-	}
 	/* ccache-chunks */
 	cc_chunk = (ccacheChunk *)
 		((char *)ccache_state->active_slots +
@@ -2074,7 +2129,7 @@ pgstrom_startup_ccache(void)
 	for (i=0; i < ccache_num_chunks; i++)
 	{
 		dlist_push_tail(&ccache_state->free_chunks_list,
-						&cc_chunk->chain);
+						&cc_chunk->hash_chain);
 		cc_chunk++;
 	}
 	/* fields for management of builder processes */
@@ -2128,48 +2183,15 @@ pgstrom_startup_ccache(void)
 void
 pgstrom_init_ccache(void)
 {
-	static int	ccache_max_size_kb;
+	static int	ccache_total_size_kb;
+	int			ccache_total_size_default;
 	long		sc_pagesize = sysconf(_SC_PAGESIZE);
 	long		sc_phys_pages = sysconf(_SC_PHYS_PAGES);
+	struct statfs statbuf;
 	size_t		required = 0;
 	BackgroundWorker worker;
 	char		pathname[MAXPGPATH];
 	int			i;
-
-	DefineCustomStringVariable("pg_strom.ccache_databases",
-							   "databases where ccache builder works on",
-							   NULL,
-							   &ccache_startup_databases,
-							   "",
-							   PGC_SUSET,
-							   GUC_NOT_IN_SAMPLE,
-							   guc_check_ccache_databases,
-							   guc_assign_ccache_databases,
-							   guc_show_ccache_databases);
-	DefineCustomIntVariable("pg_strom.ccache_num_builders",
-							"number of ccache builder worker processes",
-							NULL,
-							&ccache_num_builders,
-							1,
-							0,
-							INT_MAX,
-							PGC_POSTMASTER,
-							GUC_NOT_IN_SAMPLE,
-							NULL, NULL, NULL);
-	DefineCustomIntVariable("pg_strom.ccache_max_size",
-							"possible maximum allocation of ccache",
-							NULL,
-							&ccache_max_size_kb,
-							sc_phys_pages * (sc_pagesize >> 10),
-							0,
-							INT_MAX,
-							PGC_POSTMASTER,
-							GUC_UNIT_KB,
-							NULL, NULL, NULL);
-
-	ccache_max_size = (size_t)ccache_max_size_kb << 10;
-	ccache_num_slots = Max(ccache_max_size / CCACHE_CHUNK_SIZE, 300);
-	ccache_num_chunks = 3 * ccache_num_slots;
 
 	DefineCustomStringVariable("pg_strom.ccache_base_dir",
 							   "directory name used by ccache",
@@ -2208,6 +2230,47 @@ pgstrom_init_ccache(void)
 								pathname)));
 		}
 	}
+	if (fstatfs(dirfd(ccache_base_dir), &statbuf) != 0)
+		elog(ERROR, "failed on fstatfs('%s'): %m", pathname);
+
+	DefineCustomStringVariable("pg_strom.ccache_databases",
+							   "databases where ccache builder works on",
+							   NULL,
+							   &ccache_startup_databases,
+							   "",
+							   PGC_SUSET,
+							   GUC_NOT_IN_SAMPLE,
+							   guc_check_ccache_databases,
+							   guc_assign_ccache_databases,
+							   guc_show_ccache_databases);
+	DefineCustomIntVariable("pg_strom.ccache_num_builders",
+							"number of ccache builder worker processes",
+							NULL,
+							&ccache_num_builders,
+							2,
+							0,
+							INT_MAX,
+							PGC_POSTMASTER,
+							GUC_NOT_IN_SAMPLE,
+							NULL, NULL, NULL);
+	/* calculation of the default 'pg_strom.ccache_total_size' */
+	ccache_total_size_default =
+		Min((((3 * statbuf.f_blocks) / 4) * statbuf.f_bsize) >> 10,
+			(((2 * sc_phys_pages) / 3) * (sc_pagesize >> 10)));
+	DefineCustomIntVariable("pg_strom.ccache_total_size",
+							"possible maximum allocation of ccache",
+							NULL,
+							&ccache_total_size_kb,
+							ccache_total_size_default,
+							0,
+							INT_MAX,
+							PGC_POSTMASTER,
+							GUC_UNIT_KB,
+							NULL, NULL, NULL);
+
+	ccache_total_size = (size_t)ccache_total_size_kb << 10;
+	ccache_num_slots = Max(ccache_total_size / CCACHE_CHUNK_SIZE, 300);
+	ccache_num_chunks = 5 * ccache_num_slots;
 
 	/* bgworker registration */
 	for (i=0; i < ccache_num_builders; i++)
