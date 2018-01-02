@@ -17,8 +17,8 @@
  * So, we launch gpuinfo command as a separated command to avoid to call
  * cuInit() by postmaster process.
  * ----
- * Copyright 2011-2016 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2016 (C) The PG-Strom Development Team
+ * Copyright 2011-2018 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2018 (C) The PG-Strom Development Team
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as

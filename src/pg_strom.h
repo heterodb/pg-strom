@@ -2,10 +2,9 @@
  * pg_strom.h
  *
  * Header file of pg_strom module
- *
  * --
- * Copyright 2011-2017 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
- * Copyright 2014-2017 (C) The PG-Strom Development Team
+ * Copyright 2011-2018 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
+ * Copyright 2014-2018 (C) The PG-Strom Development Team
  *
  * This software is an extension of PostgreSQL; You can use, copy,
  * modify or distribute it under the terms of 'LICENSE' included
