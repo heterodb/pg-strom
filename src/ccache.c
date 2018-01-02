@@ -950,8 +950,8 @@ pgstrom_ccache_info(PG_FUNCTION_ARGS)
 	ccacheChunk	   *cc_chunk;
 	List		   *cc_chunks_list = NIL;
 	HeapTuple		tuple;
-	bool			isnull[6];
-	Datum			values[6];
+	bool			isnull[7];
+	Datum			values[7];
 
 	if (SRF_IS_FIRSTCALL())
 	{
@@ -963,18 +963,20 @@ pgstrom_ccache_info(PG_FUNCTION_ARGS)
 		fncxt = SRF_FIRSTCALL_INIT();
 		oldcxt = MemoryContextSwitchTo(fncxt->multi_call_memory_ctx);
 
-		tupdesc = CreateTemplateTupleDesc(6, false);
+		tupdesc = CreateTemplateTupleDesc(7, false);
 		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "database_id",
 						   OIDOID, -1, 0);
 		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "table_id",
 						   REGCLASSOID, -1, 0);
 		TupleDescInitEntry(tupdesc, (AttrNumber) 3, "block_nr",
 						   INT4OID, -1, 0);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 4, "length",
+		TupleDescInitEntry(tupdesc, (AttrNumber) 4, "nitems",
 						   INT8OID, -1, 0);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 5, "ctime",
+		TupleDescInitEntry(tupdesc, (AttrNumber) 5, "length",
+						   INT8OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 6, "ctime",
 						   TIMESTAMPTZOID, -1, 0);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 6, "atime",
+		TupleDescInitEntry(tupdesc, (AttrNumber) 7, "atime",
 						   TIMESTAMPTZOID, -1, 0);
 		fncxt->tuple_desc = BlessTupleDesc(tupdesc);
 		/* collect current cache state */
@@ -1018,10 +1020,10 @@ pgstrom_ccache_info(PG_FUNCTION_ARGS)
 	values[0] = ObjectIdGetDatum(cc_chunk->database_oid);
 	values[1] = ObjectIdGetDatum(cc_chunk->table_oid);
 	values[2] = Int32GetDatum(cc_chunk->block_nr);
-	values[3] = Int64GetDatum(cc_chunk->length);
-	//nitems?
-	values[4] = TimestampTzGetDatum(cc_chunk->ctime);
-	values[5] = TimestampTzGetDatum(cc_chunk->atime);
+	values[3] = Int64GetDatum(cc_chunk->nitems);
+	values[4] = Int64GetDatum(cc_chunk->length);
+	values[5] = TimestampTzGetDatum(cc_chunk->ctime);
+	values[6] = TimestampTzGetDatum(cc_chunk->atime);
 
 	tuple = heap_form_tuple(fncxt->tuple_desc, values, isnull);
 

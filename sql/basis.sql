@@ -129,6 +129,7 @@ CREATE TYPE pgstrom.__pgstrom_ccache_info AS (
     database_id  oid,
     table_id     regclass,
     block_nr     int,
+    nitems       bigint,
     length       bigint,
     ctime        timestamp with time zone,
     atime        timestamp with time zone
