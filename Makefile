@@ -49,6 +49,7 @@ __STROM_OBJS = main.o codegen.o datastore.o cuda_program.o \
 		gpu_device.o gpu_context.o gpu_mmgr.o \
 		gpu_tasks.o gpuscan.o gpujoin.o gpupreagg.o pl_cuda.o \
 		aggfuncs.o matrix.o ccache.o gstore_fdw.o misc.o
+__STROM_HEADERS = pg_strom.h nvme_strom.h device_attrs.h cuda_filelist
 STROM_OBJS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__STROM_OBJS))
 __STROM_SOURCES = $(__STROM_OBJS:.o=.c)
 STROM_SOURCES = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__STROM_SOURCES))
@@ -68,12 +69,13 @@ STROM_UTILS = $(addprefix $(STROM_BUILD_ROOT)/utils/, $(__STROM_UTILS))
 __RPM_SPECFILE = pg_strom.spec
 RPM_SPECFILE = $(addprefix $(STROM_BUILD_ROOT)/, $(__RPM_SPECFILE))
 __MISC_FILES = LICENSE README.md Makefile \
-	pg_strom.control $(PGSTROM_SQL) \
-	src/Makefile src/pg_strom.h
+	pg_strom.control src/Makefile \
+	$(addprefix sql/,$(PGSTROM_SQL_SRC))
 
 PACKAGE_FILES = $(__MISC_FILES)					\
-	$(addprefix src/,$(__STROM_SOURCES))		\
+	$(addprefix src/,$(__STROM_SOURCES))			\
 	$(addprefix src/,$(__CUDA_SOURCES))			\
+	$(addprefix src/,$(__STROM_HEADERS))			\
 	$(addprefix utils/,$(addsuffix .c,$(__STROM_UTILS)))
 __STROM_TGZ = pg_strom-$(PGSTROM_VERSION).tar.gz
 STROM_TGZ = $(addprefix $(STROM_BUILD_ROOT)/, $(__STROM_TGZ))
@@ -246,6 +248,7 @@ html: $(HTML_FILES)
 
 $(STROM_TGZ): $(addprefix $(STROM_BUILD_ROOT)/, $(PACKAGE_FILES))
 	$(MKDIR_P) $(STROM_BUILD_ROOT)/__tarball/$(@:.tar.gz=)/src
+	$(MKDIR_P) $(STROM_BUILD_ROOT)/__tarball/$(@:.tar.gz=)/sql
 	$(MKDIR_P) $(STROM_BUILD_ROOT)/__tarball/$(@:.tar.gz=)/utils
 	$(foreach x,$(PACKAGE_FILES),cp -f $(STROM_BUILD_ROOT)/$x $(STROM_BUILD_ROOT)/__tarball/$(@:.tar.gz=)/$(x);)
 	tar zc -C $(STROM_BUILD_ROOT)/__tarball $(@:.tar.gz=) > $@
