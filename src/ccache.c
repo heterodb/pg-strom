@@ -309,38 +309,43 @@ pgstrom_ccache_get_chunk(Relation relation, BlockNumber block_nr)
 			goto found;
 		}
 	}
+	Assert(cc_chunk == NULL);
 	/* no chunks are tracked, add it as misshit entry */
 	if (!dlist_is_empty(&ccache_state->free_chunks_list))
 	{
 		dnode = dlist_pop_head_node(&ccache_state->free_chunks_list);
-		cc_temp = dlist_container(ccacheChunk, hash_chain, dnode);
-		Assert(cc_temp->lru_chain.prev == NULL &&
-			   cc_temp->lru_chain.next == NULL &&
-			   cc_temp->refcnt == 0 &&
-			   cc_temp->ctime == CCACHE_CTIME_NOT_BUILD);
+		cc_chunk = dlist_container(ccacheChunk, hash_chain, dnode);
+		Assert(cc_chunk->lru_chain.prev == NULL &&
+			   cc_chunk->lru_chain.next == NULL &&
+			   cc_chunk->refcnt == 0 &&
+			   cc_chunk->ctime == CCACHE_CTIME_NOT_BUILD);
 	}
 	else if (!dlist_is_empty(&ccache_state->lru_misshit_list))
 	{
 		dnode = dlist_tail_node(&ccache_state->lru_misshit_list);
-		cc_temp = dlist_container(ccacheChunk, lru_chain, dnode);
-		Assert(cc_temp->hash_chain.prev != NULL &&
-			   cc_temp->hash_chain.next != NULL &&
-			   cc_temp->refcnt == 1 &&
-			   cc_temp->ctime == CCACHE_CTIME_NOT_BUILD);
-		dlist_delete(&cc_temp->hash_chain);
-		dlist_delete(&cc_temp->lru_chain);
+		cc_chunk = dlist_container(ccacheChunk, lru_chain, dnode);
+		Assert(cc_chunk->hash_chain.prev != NULL &&
+			   cc_chunk->hash_chain.next != NULL &&
+			   cc_chunk->refcnt == 1 &&
+			   cc_chunk->ctime == CCACHE_CTIME_NOT_BUILD);
+		dlist_delete(&cc_chunk->hash_chain);
+		dlist_delete(&cc_chunk->lru_chain);
 	}
-	memset(cc_temp, 0, sizeof(ccacheChunk));
-	cc_temp->hash = hash;
-	cc_temp->database_oid = MyDatabaseId;
-	cc_temp->table_oid = table_oid;
-	cc_temp->block_nr = block_nr;
-	cc_temp->refcnt = 1;
-	cc_temp->atime = GetCurrentTimestamp();
-	dlist_push_tail(&ccache_state->active_slots[index],
-					&cc_temp->hash_chain);
-	dlist_push_head(&ccache_state->lru_misshit_list,
-					&cc_temp->lru_chain);
+
+	if (cc_chunk)
+	{
+		memset(cc_chunk, 0, sizeof(ccacheChunk));
+		cc_chunk->hash = hash;
+		cc_chunk->database_oid = MyDatabaseId;
+		cc_chunk->table_oid = table_oid;
+		cc_chunk->block_nr = block_nr;
+		cc_chunk->refcnt = 1;
+		cc_chunk->atime = GetCurrentTimestamp();
+		dlist_push_tail(&ccache_state->active_slots[index],
+						&cc_chunk->hash_chain);
+		dlist_push_head(&ccache_state->lru_misshit_list,
+						&cc_chunk->lru_chain);
+	}
 found:
 	SpinLockRelease(&ccache_state->chunks_lock);
 
@@ -1946,8 +1951,8 @@ static int
 ccache_tryload_chilly_chunk(int nchunks_atonce)
 {
 	Relation	   *open_relations = NULL;
-	cl_long		   *open_nchunks;
-	cl_long		   *start_count;
+	cl_long		   *open_nchunks = NULL;
+	cl_long		   *start_count = NULL;
 	Relation		relation;
 	cl_int			num_rels;
 	cl_int			num_open_rels;
