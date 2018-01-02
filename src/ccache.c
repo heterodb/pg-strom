@@ -41,6 +41,7 @@ typedef struct
 
 typedef struct
 {
+	pg_atomic_uint32 builder_log_output;
 	/* management of ccache chunks */
 	size_t			ccache_usage;
 	slock_t			chunks_lock;
@@ -56,6 +57,9 @@ typedef struct
 	ccacheDatabase	databases[CCACHE_MAX_NUM_DATABASES];
 	ccacheBuilder	builders[FLEXIBLE_ARRAY_MEMBER];
 } ccacheState;
+
+#define BUILDER_LOG \
+	(ccache_state && pg_atomic_read_u32(&ccache_state->builder_log_output) > 0 ? LOG : DEBUG2)
 
 /*
  * ccacheChunk
@@ -88,6 +92,7 @@ typedef struct ccacheChunk		ccacheChunk;
 static shmem_startup_hook_type shmem_startup_next = NULL;
 static char		   *ccache_startup_databases;	/* GUC */
 static int			ccache_num_builders;		/* GUC */
+static bool			__ccache_log_output;		/* GUC */
 static size_t		ccache_total_size;			/* GUC */
 static char		   *ccache_base_dir_name;		/* GUC */
 static DIR		   *ccache_base_dir = NULL;
@@ -524,9 +529,6 @@ ccache_invalidator_oid(bool missing_ok)
 	if (invalidator_fn != pgstrom_ccache_invalidator)
 		return InvalidOid;
 
-	elog(LOG, "ccache invalidator found: oid=%u %s",
-		 invalidator_oid, format_procedure(invalidator_oid));
-
 	ccache_invalidator_func_oid = invalidator_oid;
 	return ccache_invalidator_func_oid;
 }
@@ -610,7 +612,7 @@ refresh_ccache_source_relations(void)
 					has_row_delete &&
 					has_stmt_truncate)
 				{
-					elog(LOG, "ccache-builder%d added relation %s as source",
+					elog(BUILDER_LOG, "ccache-builder%d added relation \"%s\"",
 						 ccache_builder->builder_id, get_rel_name(curr_relid));
 					hash_search(htab,
 								&curr_relid,
@@ -735,7 +737,8 @@ ccache_callback_on_reloid(Datum arg, int cacheid, uint32 hashvalue)
 					if (relhash != hashvalue)
 						continue;
 				}
-				elog(LOG, "ccache: relation oid:%u block_nr %u invalidation",
+				elog(BUILDER_LOG,
+					 "ccache: relation oid:%u block_nr %u invalidation",
 					 cc_temp->table_oid, cc_temp->block_nr);
 				/* ccache invalidation */
 				dlist_delete(&cc_temp->hash_chain);
@@ -773,7 +776,6 @@ ccache_callback_on_procoid(Datum arg, int cacheid, uint32 hashvalue)
 
 		if (inval_hash == hashvalue)
 		{
-			elog(LOG, "pig=%u ccache_callback_on_procoid cacheid=%d hashvalue=%u", getpid(), cacheid, hashvalue);
 			ccache_invalidator_func_oid = InvalidOid;
 			ccache_callback_on_reloid(0, RELOID, 0);
 		}
@@ -887,7 +889,8 @@ pgstrom_ccache_invalidator(PG_FUNCTION_ARGS)
 				dlist_delete(&cc_temp->hash_chain);
 				memset(&cc_temp->hash_chain, 0, sizeof(dlist_node));
 				ccache_put_chunk_nolock(cc_temp);
-				elog(LOG, "ccache: relation %s, block %u invalidation",
+				elog(BUILDER_LOG,
+					 "ccache: relation %s, block %u invalidation",
 					 RelationGetRelationName(rel), block_nr);
 				break;
 			}
@@ -925,7 +928,8 @@ pgstrom_ccache_invalidator(PG_FUNCTION_ARGS)
 					memset(&cc_temp->hash_chain, 0, sizeof(dlist_node));
 					block_nr = cc_temp->block_nr;
 					ccache_put_chunk_nolock(cc_temp);
-					elog(LOG, "ccache: relation %s, block %u invalidation",
+					elog(BUILDER_LOG,
+						 "ccache: relation %s, block %u invalidation",
 						 RelationGetRelationName(rel), block_nr);
 				}
 			}
@@ -1217,7 +1221,9 @@ ccache_builder_connectdb(void)
 			SpinLockRelease(&ccache_state->lock);
 			if (!startup_log)
 			{
-				elog(LOG, "ccache-builder%d: not assigned to a particular database", ccache_builder->builder_id);
+				elog(BUILDER_LOG,
+					 "ccache-builder%d launched with no database assignment",
+					 ccache_builder->builder_id);
 				startup_log = true;
 			}
 			ev = WaitLatch(MyLatch,
@@ -1242,7 +1248,8 @@ ccache_builder_connectdb(void)
 		BackgroundWorkerInitializeConnection(dbname, NULL);
 	}
 	PG_END_ENSURE_ERROR_CLEANUP(ccache_builder_fail_on_connectdb, 0L);
-	elog(LOG, "ccache-builder%d (gen=%u) now ready on database \"%s\"",
+	elog(BUILDER_LOG,
+		 "ccache-builder%d (gen=%u) now ready on database \"%s\"",
 		 ccache_builder->builder_id, generation, dbname);
 	SpinLockAcquire(&ccache_state->lock);
 	ccache_builder->database_oid = MyDatabaseId;
@@ -1525,7 +1532,8 @@ __ccache_preload_chunk(ccacheChunk *cc_chunk,
 	{
 		if (!VM_ALL_VISIBLE(relation, block_nr+i, &VisibilityMapBuffer))
 		{
-			elog(LOG, "relation %s, block_nr %u - %lu not all visible",
+			elog(BUILDER_LOG,
+				 "relation %s, block_nr %u - %lu not all visible",
 				 RelationGetRelationName(relation),
 				 block_nr, block_nr + CCACHE_CHUNK_NBLOCKS - 1);
 			return false;
@@ -1548,7 +1556,8 @@ __ccache_preload_chunk(ccacheChunk *cc_chunk,
 		{
 			UnlockReleaseBuffer(buffer);
 			pfree(strategy);
-			elog(LOG, "relation %s, block_nr %u failed on read",
+			elog(BUILDER_LOG,
+				 "relation %s, block_nr %u failed on read",
 				 RelationGetRelationName(relation),
 				 block_nr + i);
 			return false;
@@ -1742,7 +1751,8 @@ __ccache_preload_chunk(ccacheChunk *cc_chunk,
 				if (unlinkat(dirfd(ccache_base_dir), fname, 0) != 0)
 					elog(WARNING, "failed on unlinkat('%s'): %m", fname);
 				length = 0;
-				elog(LOG, "relation %s, block_nr %u - %lu not all visible",
+				elog(BUILDER_LOG,
+					 "relation %s, block_nr %u - %lu not all visible",
 					 RelationGetRelationName(relation),
 					 block_nr, block_nr + CCACHE_CHUNK_NBLOCKS - 1);
 				break;
@@ -1803,7 +1813,8 @@ ccache_preload_chunk(ccacheChunk *cc_chunk,
 		retval = __ccache_preload_chunk(cc_chunk, relation, block_nr);
 		if (retval)
 		{
-			elog(LOG, "ccache-builder%d: relation \"%s\" block_nr %u loaded",
+			elog(BUILDER_LOG,
+				 "ccache-builder%d: relation \"%s\" block_nr %u loaded",
 				 ccache_builder->builder_id,
 				 RelationGetRelationName(relation), block_nr);
 		}
@@ -2388,6 +2399,22 @@ guc_show_ccache_databases(void)
 	return str.data;
 }
 
+static void
+guc_assign_ccache_log_output(bool newval, void *extra)
+{
+	if (ccache_state)
+		pg_atomic_write_u32(&ccache_state->builder_log_output,
+							(uint32)newval);
+}
+
+static const char *
+guc_show_ccache_log_output(void)
+{
+	if (pg_atomic_read_u32(&ccache_state->builder_log_output) == 0)
+		return "off";
+	return "on";
+}
+
 /*
  * pgstrom_startup_ccache
  */
@@ -2470,7 +2497,7 @@ pgstrom_startup_ccache(void)
 									  &block_nr))
 			{
 				if (unlinkat(dirfd(ccache_base_dir), dent->d_name, 0) != 0)
-					elog(LOG, "failed on unlinkat('%s','%s'): %m",
+					elog(WARNING, "failed on unlinkat('%s','%s'): %m",
 						 ccache_base_dir_name, dent->d_name);
 			}
 		}
@@ -2553,6 +2580,17 @@ pgstrom_init_ccache(void)
 							PGC_POSTMASTER,
 							GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
+	DefineCustomBoolVariable("pg_strom.ccache_log_output",
+							 "turn on/off log output by ccache builder",
+							 NULL,
+							 &__ccache_log_output,
+							 false,
+							 PGC_SUSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL,
+							 guc_assign_ccache_log_output,
+							 guc_show_ccache_log_output);
+
 	/* calculation of the default 'pg_strom.ccache_total_size' */
 	ccache_total_size_default =
 		Min((((3 * statbuf.f_blocks) / 4) * statbuf.f_bsize) >> 10,
