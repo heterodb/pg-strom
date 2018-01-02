@@ -2501,6 +2501,19 @@ retry:
 		{
 			nr_blocks = base - page;
 			parallel_scan->phs_cblock = base + CCACHE_CHUNK_NBLOCKS;
+			/*
+			 * corner case: if ccache chunk is empty, we can skip blocks
+			 * and try to pick up next segment if any.
+			 */
+			while (pgstrom_ccache_is_empty(cc_chunk))
+			{
+				pgstrom_ccache_put_chunk(cc_chunk);
+				cc_chunk = pgstrom_ccache_get_chunk(relation,
+													parallel_scan->phs_cblock);
+				if (!cc_chunk)
+					break;
+				parallel_scan->phs_cblock += CCACHE_CHUNK_NBLOCKS;
+			}
 		}
 	}
 	if (!cc_chunk)

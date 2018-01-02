@@ -20,8 +20,7 @@
 #define CCACHE_MAX_NUM_DATABASES	100
 #define CCBUILDER_STATE__SHUTDOWN	0
 #define CCBUILDER_STATE__STARTUP	1
-#define CCBUILDER_STATE__PRELOAD	2
-#define CCBUILDER_STATE__TRYLOAD	3
+#define CCBUILDER_STATE__LOADING	3
 #define CCBUILDER_STATE__SLEEP		4
 typedef struct
 {
@@ -42,7 +41,8 @@ typedef struct
 
 typedef struct
 {
-	/* hash slot of ccache chunks */
+	/* management of ccache chunks */
+	size_t			ccache_usage;
 	slock_t			chunks_lock;
 	dlist_head		lru_misshit_list;
 	dlist_head		lru_active_list;
@@ -69,6 +69,7 @@ struct ccacheChunk
 	Oid			table_oid;		/* OID of the cached table */
 	BlockNumber	block_nr;		/* block number where is head of the chunk */
 	size_t		length;			/* length of the ccache file */
+	cl_uint		nitems;			/* number of valid rows cached */
 	cl_int		nattrs;			/* number of regular columns. KDS on ccache
 								 * file has more rows for system columns */
 	cl_int		refcnt;			/* reference counter */
@@ -77,6 +78,11 @@ struct ccacheChunk
 	TimestampTz	atime;			/* time of the latest access */
 };
 typedef struct ccacheChunk		ccacheChunk;
+
+#define CCACHE_CTIME_NOT_BUILD		(0)
+#define CCACHE_CTIME_IN_PROGRESS	(DT_NOEND)
+#define CCACHE_CTIME_IS_READY(ctime)			\
+	((ctime) != CCACHE_CTIME_NOT_BUILD && (ctime) != CCACHE_CTIME_IN_PROGRESS)
 
 /* static variables */
 static shmem_startup_hook_type shmem_startup_next = NULL;
@@ -203,16 +209,24 @@ ccache_put_chunk_nolock(ccacheChunk *cc_chunk)
 
 		Assert(cc_chunk->hash_chain.prev == NULL &&
 			   cc_chunk->hash_chain.next == NULL);
-		Assert(cc_chunk->lru_chain.prev == NULL &&
-			   cc_chunk->lru_chain.next == NULL);
-		if (cc_chunk->ctime != 0)
+		if (cc_chunk->lru_chain.prev != NULL ||
+			cc_chunk->lru_chain.next != NULL)
+			dlist_delete(&cc_chunk->lru_chain);
+		if (cc_chunk->ctime == CCACHE_CTIME_NOT_BUILD ||
+			cc_chunk->ctime == CCACHE_CTIME_IN_PROGRESS)
+			Assert(cc_chunk->length == 0);
+		else
 		{
+			Assert(cc_chunk->length > 0);
 			ccache_chunk_filename(fname,
 								  cc_chunk->database_oid,
 								  cc_chunk->table_oid,
 								  cc_chunk->block_nr);
 			if (unlinkat(dirfd(ccache_base_dir), fname, 0) != 0)
 				elog(WARNING, "failed on unlinkat \"%s\": %m", fname);
+			Assert(ccache_state->ccache_usage >= TYPEALIGN(BLCKSZ,
+														   cc_chunk->length));
+			ccache_state->ccache_usage -= TYPEALIGN(BLCKSZ, cc_chunk->length);
 		}
 		/* back to the free list */
 		memset(cc_chunk, 0, sizeof(ccacheChunk));
@@ -229,6 +243,12 @@ pgstrom_ccache_put_chunk(ccacheChunk *cc_chunk)
 	SpinLockRelease(&ccache_state->chunks_lock);
 }
 
+bool
+pgstrom_ccache_is_empty(ccacheChunk *cc_chunk)
+{
+	return (cc_chunk->nitems == 0);
+}
+
 /*
  * pgstrom_ccache_get_chunk
  */
@@ -241,7 +261,7 @@ pgstrom_ccache_get_chunk(Relation relation, BlockNumber block_nr)
 	dlist_iter	iter;
 	dlist_node *dnode;
 	ccacheChunk *cc_chunk = NULL;
-	ccacheChunk *temp;
+	ccacheChunk *cc_temp;
 
 	hash = ccache_compute_hashvalue(MyDatabaseId, table_oid, block_nr);
 	index = hash % ccache_num_slots;
@@ -249,54 +269,73 @@ pgstrom_ccache_get_chunk(Relation relation, BlockNumber block_nr)
 	SpinLockAcquire(&ccache_state->chunks_lock);
 	dlist_foreach (iter, &ccache_state->active_slots[index])
 	{
-		temp = dlist_container(ccacheChunk, hash_chain, iter.cur);
-		if (temp->hash == hash &&
-			temp->database_oid == MyDatabaseId &&
-			temp->table_oid == table_oid &&
-			temp->block_nr == block_nr)
+		cc_temp = dlist_container(ccacheChunk, hash_chain, iter.cur);
+		if (cc_temp->hash == hash &&
+			cc_temp->database_oid == MyDatabaseId &&
+			cc_temp->table_oid == table_oid &&
+			cc_temp->block_nr == block_nr)
 		{
-			temp->atime = GetCurrentTimestamp();
-			dlist_move_head(&ccache_state->lru_active_list,
-							&temp->lru_chain);
-			if (temp->ctime != 0)
+			cc_temp->atime = GetCurrentTimestamp();
+			if (cc_temp->ctime == CCACHE_CTIME_NOT_BUILD)
 			{
-				cc_chunk = temp;
+				Assert(cc_temp->length == 0 &&
+					   cc_temp->lru_chain.next != NULL &&
+					   cc_temp->lru_chain.prev != NULL);
+				dlist_move_head(&ccache_state->lru_misshit_list,
+								&cc_temp->lru_chain);
+				cc_temp->atime = GetCurrentTimestamp();
+			}
+			else if (cc_temp->ctime == CCACHE_CTIME_IN_PROGRESS)
+			{
+				Assert(cc_temp->length == 0 &&
+					   cc_temp->lru_chain.next == NULL &&
+					   cc_temp->lru_chain.prev == NULL);
+				cc_temp->atime = GetCurrentTimestamp();
+			}
+			else
+			{
+				Assert(cc_temp->length > 0);
+				dlist_move_head(&ccache_state->lru_active_list,
+								&cc_temp->lru_chain);
+				cc_chunk = cc_temp;
 				cc_chunk->refcnt++;
+				cc_chunk->atime = GetCurrentTimestamp();
 			}
 			goto found;
 		}
 	}
-	/* neither active nor inactive entry exist */
+	/* no chunks are tracked, add it as misshit entry */
 	if (!dlist_is_empty(&ccache_state->free_chunks_list))
 	{
 		dnode = dlist_pop_head_node(&ccache_state->free_chunks_list);
-		temp = dlist_container(ccacheChunk, hash_chain, dnode);
-		Assert(temp->lru_chain.prev == NULL &&
-			   temp->lru_chain.next == NULL &&
-			   temp->refcnt == 0 &&
-			   temp->ctime == 0);
+		cc_temp = dlist_container(ccacheChunk, hash_chain, dnode);
+		Assert(cc_temp->lru_chain.prev == NULL &&
+			   cc_temp->lru_chain.next == NULL &&
+			   cc_temp->refcnt == 0 &&
+			   cc_temp->ctime == CCACHE_CTIME_NOT_BUILD);
 	}
 	else if (!dlist_is_empty(&ccache_state->lru_misshit_list))
 	{
 		dnode = dlist_tail_node(&ccache_state->lru_misshit_list);
-		temp = dlist_container(ccacheChunk, lru_chain, dnode);
-		Assert(temp->hash_chain.prev == NULL &&
-			   temp->hash_chain.next == NULL &&
-			   temp->refcnt == 1 &&
-			   temp->ctime == 0);
-		dlist_delete(&temp->lru_chain);
+		cc_temp = dlist_container(ccacheChunk, lru_chain, dnode);
+		Assert(cc_temp->hash_chain.prev != NULL &&
+			   cc_temp->hash_chain.next != NULL &&
+			   cc_temp->refcnt == 1 &&
+			   cc_temp->ctime == CCACHE_CTIME_NOT_BUILD);
+		dlist_delete(&cc_temp->hash_chain);
+		dlist_delete(&cc_temp->lru_chain);
 	}
-	memset(temp, 0, sizeof(ccacheChunk));
-	temp->hash = hash;
-	temp->database_oid = MyDatabaseId;
-	temp->table_oid = table_oid;
-	temp->block_nr = block_nr;
-	temp->refcnt = 1;
-	temp->atime = GetCurrentTimestamp();
+	memset(cc_temp, 0, sizeof(ccacheChunk));
+	cc_temp->hash = hash;
+	cc_temp->database_oid = MyDatabaseId;
+	cc_temp->table_oid = table_oid;
+	cc_temp->block_nr = block_nr;
+	cc_temp->refcnt = 1;
+	cc_temp->atime = GetCurrentTimestamp();
 	dlist_push_tail(&ccache_state->active_slots[index],
-					&temp->hash_chain);
+					&cc_temp->hash_chain);
 	dlist_push_head(&ccache_state->lru_misshit_list,
-					&temp->lru_chain);
+					&cc_temp->lru_chain);
 found:
 	SpinLockRelease(&ccache_state->chunks_lock);
 
@@ -325,7 +364,7 @@ pgstrom_ccache_load_chunk(ccacheChunk *cc_chunk,
 	pgstrom_data_store *pds;
 
 	/* open the ccache file */
-	Assert(cc_chunk->ctime != 0);
+	Assert(CCACHE_CTIME_IS_READY(cc_chunk->ctime));
 	ccache_chunk_filename(buffer,
 						  MyDatabaseId,
 						  RelationGetRelid(relation),
@@ -525,7 +564,7 @@ refresh_ccache_source_relations(void)
 
 		memset(&hctl, 0, sizeof(HASHCTL));
 		hctl.keysize = sizeof(Oid);
-		hctl.entrysize = sizeof(void *);	//XXX atime and so on?
+		hctl.entrysize = sizeof(void *);
 
 		htab = hash_create("ccache relations hash-table",
 						   1024,
@@ -662,7 +701,19 @@ ccache_callback_on_reloid(Datum arg, int cacheid, uint32 hashvalue)
 
 	Assert(cacheid == RELOID);
 	if (!ccache_relations_htab)
+	{
+		if (ccache_state)
+		{
+			SpinLockAcquire(&ccache_state->lock);
+			for (i=0; i < ccache_num_builders; i++)
+			{
+				if (ccache_state->builders[i].latch)
+					SetLatch(ccache_state->builders[i].latch);
+			}
+			SpinLockRelease(&ccache_state->lock);
+		}
 		return;
+	}
 
 	/* invalidation of related cache */
 	SpinLockAcquire(&ccache_state->chunks_lock);
@@ -672,24 +723,28 @@ ccache_callback_on_reloid(Datum arg, int cacheid, uint32 hashvalue)
 		{
 			dlist_foreach_modify(iter, &ccache_state->active_slots[i])
 			{
-				ccacheChunk	   *temp = dlist_container(ccacheChunk,
-													   hash_chain,
-													   iter.cur);
-				if (temp->database_oid != MyDatabaseId)
+				ccacheChunk	   *cc_temp = dlist_container(ccacheChunk,
+														  hash_chain,
+														  iter.cur);
+				if (cc_temp->database_oid != MyDatabaseId)
 					continue;
 				if (hashvalue != 0)
 				{
-					reloid = ObjectIdGetDatum(temp->table_oid);
+					reloid = ObjectIdGetDatum(cc_temp->table_oid);
 					relhash = GetSysCacheHashValue(RELOID, reloid, 0, 0, 0);
 					if (relhash != hashvalue)
 						continue;
 				}
+				elog(LOG, "ccache: relation oid:%u block_nr %u invalidation",
+					 cc_temp->table_oid, cc_temp->block_nr);
 				/* ccache invalidation */
-				dlist_delete(&temp->hash_chain);
-				dlist_delete(&temp->lru_chain);
-				memset(&temp->hash_chain, 0, sizeof(dlist_node));
-				memset(&temp->lru_chain, 0, sizeof(dlist_node));
-				ccache_put_chunk_nolock(temp);
+				dlist_delete(&cc_temp->hash_chain);
+				if (cc_temp->lru_chain.prev &&
+					cc_temp->lru_chain.next)
+					dlist_delete(&cc_temp->lru_chain);
+				memset(&cc_temp->hash_chain, 0, sizeof(dlist_node));
+				memset(&cc_temp->lru_chain, 0, sizeof(dlist_node));
+				ccache_put_chunk_nolock(cc_temp);
 			}
 		}
 	}
@@ -700,7 +755,8 @@ ccache_callback_on_reloid(Datum arg, int cacheid, uint32 hashvalue)
 	}
 	PG_END_TRY();
 	SpinLockRelease(&ccache_state->chunks_lock);
-	ccache_relations_oid = NULL;
+	hash_destroy(ccache_relations_htab);
+	ccache_relations_htab = NULL;
 }
 
 /*
@@ -782,6 +838,7 @@ RelationCanUseColumnarCache(Relation relation)
 Datum
 pgstrom_ccache_invalidator(PG_FUNCTION_ARGS)
 {
+	FmgrInfo	   *flinfo = fcinfo->flinfo;
 	TriggerData	   *trigdata = (TriggerData *) fcinfo->context;
 
 	if (!CALLED_AS_TRIGGER(fcinfo))
@@ -793,6 +850,7 @@ pgstrom_ccache_invalidator(PG_FUNCTION_ARGS)
 		Relation	rel = trigdata->tg_relation;
 		HeapTuple	tuple = trigdata->tg_trigtuple;
 		BlockNumber	block_nr;
+		BlockNumber	block_nr_last;
 		pg_crc32	hash;
 		int			index;
 		dlist_iter	iter;
@@ -802,9 +860,15 @@ pgstrom_ccache_invalidator(PG_FUNCTION_ARGS)
 			!TRIGGER_FIRED_BY_UPDATE(trigdata->tg_event))
 			elog(ERROR, "%s: triggered by unknown event", __FUNCTION__);
 
+		block_nr_last = DatumGetInt32(flinfo->fn_extra);
 		block_nr = BlockIdGetBlockNumber(&tuple->t_self.ip_blkid);
-		block_nr &= ~((CCACHE_CHUNK_SIZE / BLCKSZ) - 1);
-
+		block_nr &= ~(CCACHE_CHUNK_NBLOCKS - 1);
+		if ((block_nr_last & ~(CCACHE_CHUNK_NBLOCKS - 1)) != 0)
+		{
+			block_nr_last &= ~(CCACHE_CHUNK_NBLOCKS - 1);
+			if (block_nr == block_nr_last)
+				PG_RETURN_VOID();
+		}
 		hash = ccache_compute_hashvalue(MyDatabaseId,
 										RelationGetRelid(rel),
 										block_nr);
@@ -812,27 +876,35 @@ pgstrom_ccache_invalidator(PG_FUNCTION_ARGS)
 		SpinLockAcquire(&ccache_state->chunks_lock);
 		dlist_foreach(iter, &ccache_state->active_slots[index])
 		{
-			ccacheChunk *temp = dlist_container(ccacheChunk,
-												hash_chain, iter.cur);
-			if (temp->hash == hash &&
-				temp->database_oid == MyDatabaseId &&
-				temp->table_oid == RelationGetRelid(rel) &&
-				temp->block_nr == block_nr)
+			ccacheChunk *cc_temp = dlist_container(ccacheChunk,
+												   hash_chain,
+												   iter.cur);
+			if (cc_temp->hash == hash &&
+				cc_temp->database_oid == MyDatabaseId &&
+				cc_temp->table_oid == RelationGetRelid(rel) &&
+				cc_temp->block_nr == block_nr)
 			{
-				dlist_delete(&temp->hash_chain);
-				dlist_delete(&temp->lru_chain);
-				memset(&temp->hash_chain, 0, sizeof(dlist_node));
-				memset(&temp->lru_chain, 0, sizeof(dlist_node));
-				ccache_put_chunk_nolock(temp);
+				dlist_delete(&cc_temp->hash_chain);
+				memset(&cc_temp->hash_chain, 0, sizeof(dlist_node));
+				ccache_put_chunk_nolock(cc_temp);
+				elog(LOG, "ccache: relation %s, block %u invalidation",
+					 RelationGetRelationName(rel), block_nr);
 				break;
 			}
 		}
 		SpinLockRelease(&ccache_state->chunks_lock);
+
+		/*
+		 * Several least bits of @block_nr should be always zero.
+		 * So, we use the least bit as a mark of valid @block_nr_last.
+		 */
+		flinfo->fn_extra = DatumGetPointer((Datum)(block_nr + 1));
 	}
 	else
 	{
 		Relation	rel = trigdata->tg_relation;
 		int			index;
+		BlockNumber	block_nr;
 		dlist_mutable_iter iter;
 
 		if (!TRIGGER_FIRED_BY_TRUNCATE(trigdata->tg_event))
@@ -843,23 +915,24 @@ pgstrom_ccache_invalidator(PG_FUNCTION_ARGS)
 			SpinLockAcquire(&ccache_state->chunks_lock);
 			dlist_foreach_modify(iter, &ccache_state->active_slots[index])
 			{
-				ccacheChunk *temp = dlist_container(ccacheChunk,
-													hash_chain,
-													iter.cur);
-				if (temp->database_oid == MyDatabaseId &&
-					temp->table_oid == RelationGetRelid(rel))
+				ccacheChunk *cc_temp = dlist_container(ccacheChunk,
+													   hash_chain,
+													   iter.cur);
+				if (cc_temp->database_oid == MyDatabaseId &&
+					cc_temp->table_oid == RelationGetRelid(rel))
 				{
-					dlist_delete(&temp->hash_chain);
-					dlist_delete(&temp->lru_chain);
-					memset(&temp->hash_chain, 0, sizeof(dlist_node));
-					memset(&temp->lru_chain, 0, sizeof(dlist_node));
-					ccache_put_chunk_nolock(temp);
+					dlist_delete(&cc_temp->hash_chain);
+					memset(&cc_temp->hash_chain, 0, sizeof(dlist_node));
+					block_nr = cc_temp->block_nr;
+					ccache_put_chunk_nolock(cc_temp);
+					elog(LOG, "ccache: relation %s, block %u invalidation",
+						 RelationGetRelationName(rel), block_nr);
 				}
 			}
 			SpinLockRelease(&ccache_state->chunks_lock);
 		}
 	}
-	return PointerGetDatum(NULL);
+	PG_RETURN_VOID();
 }
 PG_FUNCTION_INFO_V1(pgstrom_ccache_invalidator);
 
@@ -908,13 +981,13 @@ pgstrom_ccache_info(PG_FUNCTION_ARGS)
 			{
 				dlist_foreach(iter, &ccache_state->active_slots[i])
 				{
-					ccacheChunk	   *temp = dlist_container(ccacheChunk,
-														   hash_chain,
-														   iter.cur);
-					if (temp->ctime == 0)
+					ccacheChunk	   *cc_temp = dlist_container(ccacheChunk,
+															  hash_chain,
+															  iter.cur);
+					if (!CCACHE_CTIME_IS_READY(cc_temp->ctime))
 						continue;
 					cc_chunk = palloc(sizeof(ccacheChunk));
-					memcpy(cc_chunk, temp, sizeof(ccacheChunk));
+					memcpy(cc_chunk, cc_temp, sizeof(ccacheChunk));
 					cc_chunks_list = lappend(cc_chunks_list, cc_chunk);
 				}
 			}
@@ -942,6 +1015,7 @@ pgstrom_ccache_info(PG_FUNCTION_ARGS)
 	values[1] = ObjectIdGetDatum(cc_chunk->table_oid);
 	values[2] = Int32GetDatum(cc_chunk->block_nr);
 	values[3] = Int64GetDatum(cc_chunk->length);
+	//nitems?
 	values[4] = TimestampTzGetDatum(cc_chunk->ctime);
 	values[5] = TimestampTzGetDatum(cc_chunk->atime);
 
@@ -1022,10 +1096,8 @@ pgstrom_ccache_builder_info(PG_FUNCTION_ARGS)
 		values[1] = CStringGetTextDatum("shutdown");
 	else if (builder->state == CCBUILDER_STATE__STARTUP)
 		values[1] = CStringGetTextDatum("startup");
-	else if (builder->state == CCBUILDER_STATE__PRELOAD)
-		values[1] = CStringGetTextDatum("preload");
-	else if (builder->state == CCBUILDER_STATE__TRYLOAD)
-		values[1] = CStringGetTextDatum("tryload");
+	else if (builder->state == CCBUILDER_STATE__LOADING)
+		values[1] = CStringGetTextDatum("loading");
 	else if (builder->state == CCBUILDER_STATE__SLEEP)
 		values[1] = CStringGetTextDatum("sleep");
 	else
@@ -1096,7 +1168,7 @@ ccache_builder_fail_on_connectdb(int code, Datum arg)
 /*
  * ccache_builder_connectdb
  */
-static int
+static void
 ccache_builder_connectdb(void)
 {
 	int		i, j, ev;
@@ -1174,10 +1246,8 @@ ccache_builder_connectdb(void)
 		 ccache_builder->builder_id, generation, dbname);
 	SpinLockAcquire(&ccache_state->lock);
 	ccache_builder->database_oid = MyDatabaseId;
-	ccache_builder->state = CCBUILDER_STATE__PRELOAD;
+	ccache_builder->state = CCBUILDER_STATE__LOADING;
 	SpinLockRelease(&ccache_state->lock);
-
-	return CCBUILDER_STATE__PRELOAD;
 }
 
 /*
@@ -1416,18 +1486,21 @@ pgstrom_ccache_writeout_chunk(kern_data_store *kds,
 }
 
 /*
+ * long-life resources for preload/tryload
+ */
+static MemoryContext	PerChunkMemoryContext;
+static char			   *PerChunkLoadBuffer;
+static Buffer			VisibilityMapBuffer = InvalidBuffer;
+
+/*
  * ccache_preload_chunk - preload a chunk
  */
-static size_t
-ccache_preload_chunk(ccacheChunk *cc_chunk,
-					 Relation srel,
-					 BlockNumber block_nr,
-					 BlockNumber nblocks,
-					 Buffer *p_vmbuffer,
-					 BufferAccessStrategy strategy,
-					 char *chunk_buffer)
+static bool
+__ccache_preload_chunk(ccacheChunk *cc_chunk,
+					   Relation relation,
+					   BlockNumber block_nr)
 {
-	TupleDesc	tupdesc = RelationGetDescr(srel);
+	TupleDesc	tupdesc = RelationGetDescr(relation);
 	size_t		nrooms = 0;
 	size_t		nitems = 0;
 	Datum	   *tup_values;
@@ -1442,36 +1515,49 @@ ccache_preload_chunk(ccacheChunk *cc_chunk,
 	size_t		length;
 	char		fname[MAXPGPATH];
 	kern_data_store *kds;
+	BufferAccessStrategy strategy;
 
 	/* check visibility map first */
 	Assert((block_nr & (CCACHE_CHUNK_NBLOCKS-1)) == 0);
-	Assert(nblocks <= CCACHE_CHUNK_NBLOCKS);
-	for (i=0; i < nblocks; i++)
+	if (block_nr + CCACHE_CHUNK_NBLOCKS >= RelationGetNumberOfBlocks(relation))
+		return false;
+	for (i=0; i < CCACHE_CHUNK_NBLOCKS; i++)
 	{
-		if (!VM_ALL_VISIBLE(srel, block_nr+i, p_vmbuffer))
+		if (!VM_ALL_VISIBLE(relation, block_nr+i, &VisibilityMapBuffer))
+		{
+			elog(LOG, "relation %s, block_nr %u - %lu not all visible",
+				 RelationGetRelationName(relation),
+				 block_nr, block_nr + CCACHE_CHUNK_NBLOCKS - 1);
 			return false;
+		}
 	}
 
 	/* load and lock buffers */
-	for (i=0; i < nblocks; i++)
+	strategy = GetAccessStrategy(BAS_BULKREAD);
+	for (i=0; i < CCACHE_CHUNK_NBLOCKS; i++)
 	{
 		Buffer	buffer;
 		Page	page;
 
 		CHECK_FOR_INTERRUPTS();
-		buffer = ReadBufferExtended(srel, MAIN_FORKNUM, block_nr+i,
+		buffer = ReadBufferExtended(relation, MAIN_FORKNUM, block_nr+i,
 									RBM_NORMAL, strategy);
 		LockBuffer(buffer, BUFFER_LOCK_SHARE);
 		page = (Page) BufferGetPage(buffer);
 		if (!PageIsAllVisible(page))
 		{
 			UnlockReleaseBuffer(buffer);
+			pfree(strategy);
+			elog(LOG, "relation %s, block_nr %u failed on read",
+				 RelationGetRelationName(relation),
+				 block_nr + i);
 			return false;
 		}
 		nrooms += PageGetMaxOffsetNumber(page);
-		memcpy(chunk_buffer + i * BLCKSZ, page, BLCKSZ);
+		memcpy(PerChunkLoadBuffer + i * BLCKSZ, page, BLCKSZ);
 		UnlockReleaseBuffer(buffer);
 	}
+	pfree(strategy);
 	/* ok, all the buffers are all-visible */
 
 	/*
@@ -1517,9 +1603,9 @@ ccache_preload_chunk(ccacheChunk *cc_chunk,
 	/*
 	 * extract rows
 	 */
-	for (i=0; i < nblocks; i++)
+	for (i=0; i < CCACHE_CHUNK_NBLOCKS; i++)
 	{
-		Page	page = (Page)(chunk_buffer + BLCKSZ * i);
+		Page	page = (Page)(PerChunkLoadBuffer + BLCKSZ * i);
 		int		lines = PageGetMaxOffsetNumber(page);
 		OffsetNumber lineoff;
 		ItemId	lpp;
@@ -1532,7 +1618,7 @@ ccache_preload_chunk(ccacheChunk *cc_chunk,
 
 			if (!ItemIdIsNormal(lpp))
 				continue;
-			tup.t_tableOid = RelationGetRelid(srel);
+			tup.t_tableOid = RelationGetRelid(relation);
 			tup.t_data = (HeapTupleHeader) PageGetItem(page, lpp);
 			tup.t_len = ItemIdGetLength(lpp);
 			ItemPointerSet(&tup.t_self, block_nr+i, lineoff);
@@ -1572,8 +1658,6 @@ ccache_preload_chunk(ccacheChunk *cc_chunk,
 			nitems++;
 		}
 	}
-	if (nitems == 0)
-		return false;
 
 	/*
 	 * write out to the ccache file
@@ -1609,7 +1693,7 @@ ccache_preload_chunk(ccacheChunk *cc_chunk,
 	}
 	ccache_chunk_filename(fname,
 						  MyDatabaseId,
-						  RelationGetRelid(srel),
+						  RelationGetRelid(relation),
 						  block_nr);
 	fdesc = openat(dirfd(ccache_base_dir), fname,
 				   O_RDWR | O_CREAT | O_TRUNC, 0600);
@@ -1629,7 +1713,6 @@ ccache_preload_chunk(ccacheChunk *cc_chunk,
 		close(fdesc);
 		elog(ERROR, "failed on mmap: %m");
 	}
-
 	init_kernel_data_store(kds, tupdesc, length, KDS_FORMAT_COLUMN, nitems);
 	kds->nitems = nitems;
 	pgstrom_ccache_writeout_chunk(kds,
@@ -1647,15 +1730,21 @@ ccache_preload_chunk(ccacheChunk *cc_chunk,
 	/* ensure all-visible flags under the lock */
 	i = cc_chunk->hash % ccache_num_slots;
 	SpinLockAcquire(&ccache_state->chunks_lock);
+	Assert(cc_chunk->lru_chain.next == NULL &&
+		   cc_chunk->lru_chain.prev == NULL &&
+		   cc_chunk->ctime == CCACHE_CTIME_IN_PROGRESS);
 	PG_TRY();
 	{
-		for (j=0; j < nblocks; j++)
+		for (j=0; j < CCACHE_CHUNK_NBLOCKS; j++)
 		{
-			if (!VM_ALL_VISIBLE(srel, block_nr+j, p_vmbuffer))
+			if (!VM_ALL_VISIBLE(relation, block_nr+j, &VisibilityMapBuffer))
 			{
 				if (unlinkat(dirfd(ccache_base_dir), fname, 0) != 0)
 					elog(WARNING, "failed on unlinkat('%s'): %m", fname);
 				length = 0;
+				elog(LOG, "relation %s, block_nr %u - %lu not all visible",
+					 RelationGetRelationName(relation),
+					 block_nr, block_nr + CCACHE_CHUNK_NBLOCKS - 1);
 				break;
 			}
 		}
@@ -1666,184 +1755,355 @@ ccache_preload_chunk(ccacheChunk *cc_chunk,
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
-	/* OK, ccache is now ready */
+
 	if (length > 0)
 	{
+		dlist_iter		iter;
+		ccacheChunk	   *cc_temp;
+
+		ccache_state->ccache_usage += TYPEALIGN(BLCKSZ, length);
+
 		cc_chunk->length = length;
-		cc_chunk->nattrs = RelationGetNumberOfAttributes(srel);
-		cc_chunk->ctime = cc_chunk->atime = GetCurrentTimestamp();
-		dlist_move_head(&ccache_state->lru_active_list,
-						&cc_chunk->lru_chain);
+		cc_chunk->nitems = nitems;
+		cc_chunk->nattrs = RelationGetNumberOfAttributes(relation);
+		cc_chunk->ctime = GetCurrentTimestamp();
+		/* move to the LRU active list */
+		dlist_foreach(iter, &ccache_state->lru_active_list)
+		{
+			cc_temp = dlist_container(ccacheChunk, lru_chain, iter.cur);
+            if (cc_chunk->atime > cc_temp->atime)
+			{
+				dlist_insert_before(&cc_temp->lru_chain,
+									&cc_chunk->lru_chain);
+				ccache_put_chunk_nolock(cc_chunk);
+				cc_chunk = NULL;
+				break;
+			}
+		}
+		if (cc_chunk)
+		{
+			dlist_push_tail(&ccache_state->lru_active_list,
+							&cc_chunk->lru_chain);
+			ccache_put_chunk_nolock(cc_chunk);
+		}
 	}
 	SpinLockRelease(&ccache_state->chunks_lock);
+	return (length > 0);
+}
 
-	return true;
+static bool
+ccache_preload_chunk(ccacheChunk *cc_chunk,
+					 Relation relation,
+					 BlockNumber block_nr)
+{
+	bool	retval;
+
+	PG_TRY();
+	{
+		retval = __ccache_preload_chunk(cc_chunk, relation, block_nr);
+		if (retval)
+		{
+			elog(LOG, "ccache-builder%d: relation \"%s\" block_nr %u loaded",
+				 ccache_builder->builder_id,
+				 RelationGetRelationName(relation), block_nr);
+		}
+		else
+		{
+			/*
+			 * Fail of ccache_preload_chunk() is likely due to partial
+			 * all-visible blocks. It needs to be set by auto or manual
+			 * vacuum analyze, thus it is hopeless to cache this segment
+			 * very soon.
+			 * So, we purge this ccache misshit at this moment.
+			 */
+			SpinLockAcquire(&ccache_state->chunks_lock);
+			Assert(cc_chunk->lru_chain.next == NULL &&
+				   cc_chunk->lru_chain.prev == NULL &&
+				   cc_chunk->ctime == CCACHE_CTIME_IN_PROGRESS);
+			dlist_delete(&cc_chunk->hash_chain);
+			memset(&cc_chunk->hash_chain, 0, sizeof(dlist_node));
+			ccache_put_chunk_nolock(cc_chunk);
+			ccache_put_chunk_nolock(cc_chunk);
+			SpinLockRelease(&ccache_state->chunks_lock);
+		}
+	}
+	PG_CATCH();
+	{
+		/* see comment above */
+		SpinLockAcquire(&ccache_state->chunks_lock);
+		Assert(cc_chunk->lru_chain.next == NULL &&
+			   cc_chunk->lru_chain.prev == NULL &&
+			   cc_chunk->ctime == CCACHE_CTIME_IN_PROGRESS);
+		dlist_delete(&cc_chunk->hash_chain);
+		memset(&cc_chunk->hash_chain, 0, sizeof(dlist_node));
+		ccache_put_chunk_nolock(cc_chunk);
+		ccache_put_chunk_nolock(cc_chunk);
+		SpinLockRelease(&ccache_state->chunks_lock);
+
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	return retval;
 }
 
 /*
- * ccache_builder_preload
- *
- * Load target relations to empty chunks.
+ * ccache_tryload_misshit_chunk - called by tryload
+ */
+static bool
+ccache_tryload_misshit_chunk(void)
+{
+	dlist_node	   *dnode;
+	ccacheChunk	   *cc_chunk;
+	ccacheChunk	   *cc_temp;
+	bool			retval;
+
+	/* pick up a target chunk to be loaded, which is recently referenced */
+	SpinLockAcquire(&ccache_state->chunks_lock);
+	if (dlist_is_empty(&ccache_state->lru_misshit_list))
+	{
+		SpinLockRelease(&ccache_state->chunks_lock);
+		return false;
+	}
+	dnode = dlist_head_node(&ccache_state->lru_misshit_list);
+	cc_chunk = dlist_container(ccacheChunk, lru_chain, dnode);
+	Assert(cc_chunk->hash_chain.prev != NULL &&
+		   cc_chunk->hash_chain.next != NULL &&
+		   cc_chunk->ctime == CCACHE_CTIME_NOT_BUILD);
+
+	/* release existing chunks if ccache usage is nearby the limitation */
+	while (ccache_state->ccache_usage +
+		   CCACHE_CHUNK_SIZE > ccache_total_size)
+	{
+		if (dlist_is_empty(&ccache_state->lru_active_list))
+		{
+			SpinLockRelease(&ccache_state->chunks_lock);
+			return false;
+		}
+		dnode = dlist_tail_node(&ccache_state->lru_active_list);
+		cc_temp = dlist_container(ccacheChunk, lru_chain, dnode);
+		Assert(cc_temp->ctime != CCACHE_CTIME_IN_PROGRESS);
+		dlist_delete(&cc_temp->hash_chain);
+		memset(&cc_temp->hash_chain, 0, sizeof(dlist_node));
+		ccache_put_chunk_nolock(cc_temp);
+	}
+	/* detach from the LRU list and mark it 'in-progress' */
+	dlist_delete(&cc_chunk->lru_chain);
+	memset(&cc_chunk->lru_chain, 0, sizeof(dlist_node));
+	cc_chunk->ctime = CCACHE_CTIME_IN_PROGRESS;
+	cc_chunk->refcnt++;
+	SpinLockRelease(&ccache_state->chunks_lock);
+	/* update builder's state */
+	SpinLockAcquire(&ccache_state->lock);
+	ccache_builder->table_oid = cc_chunk->table_oid;
+	ccache_builder->block_nr = cc_chunk->block_nr;
+	SpinLockRelease(&ccache_state->lock);
+
+	PG_TRY();
+	{
+		Relation	relation;
+
+		relation = heap_open(cc_chunk->table_oid, AccessShareLock);
+		retval = ccache_preload_chunk(cc_chunk, relation, cc_chunk->block_nr);
+		heap_close(relation, NoLock);
+	}
+	PG_CATCH();
+	{
+		/* update builder's state */
+		SpinLockAcquire(&ccache_state->lock);
+		ccache_builder->table_oid = InvalidOid;
+		ccache_builder->block_nr = InvalidBlockNumber;
+		SpinLockRelease(&ccache_state->lock);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	/* update builder's state */
+	SpinLockAcquire(&ccache_state->lock);
+	ccache_builder->table_oid = InvalidOid;
+	ccache_builder->block_nr = InvalidBlockNumber;
+	SpinLockRelease(&ccache_state->lock);
+
+	return retval;
+}
+
+/*
+ * ccache_tryload_chilly_chunk
  */
 static int
-ccache_builder_preload(cl_long *timeout)
+ccache_tryload_chilly_chunk(int nchunks_atonce)
 {
-	BlockNumber	   *rel_nblocks;
-	Relation	   *relations;
-	Relation		srel;
-	Buffer			vmbuffer = InvalidBuffer;
-	BufferAccessStrategy strategy;
-	MemoryContext	preload_cxt, oldcxt;
+	Relation	   *open_relations = NULL;
+	cl_long		   *open_nchunks;
+	cl_long		   *start_count;
+	Relation		relation;
 	cl_int			num_rels;
 	cl_int			num_open_rels;
-	cl_int			i;
-	char		   *chunk_buffer;
+	cl_ulong		i, j, k;
+	cl_ulong		count;
+	BlockNumber		nchunks;
+	BlockNumber		block_nr;
+	pg_crc32		hashvalue;
+	dlist_node	   *dnode;
+	dlist_iter		iter;
+	ccacheChunk	   *cc_chunk;
+	ccacheChunk	   *cc_temp;
 
+	/* any relations to be loaded? */
+	if (!ccache_relations_oid)
+		return nchunks_atonce;
 	num_rels = ccache_relations_oid->dim1;
 	if (num_rels == 0)
-		return CCBUILDER_STATE__TRYLOAD;
-
-	relations = palloc0(sizeof(Relation) * num_rels);
-	rel_nblocks = palloc0(sizeof(BlockNumber) * num_rels);
-	for (i=0; i < num_rels; i++)
-	{
-		relations[i] = heap_open(ccache_relations_oid->values[i],
-								 AccessShareLock);
-		rel_nblocks[i] = RelationGetNumberOfBlocks(relations[i]);
-	}
+		return nchunks_atonce;
 	num_open_rels = num_rels;
-	strategy = GetAccessStrategy(BAS_BULKREAD);
 
-	chunk_buffer = palloc(CCACHE_CHUNK_SIZE);
-
-	preload_cxt = AllocSetContextCreate(CurrentMemoryContext,
-										"per-chunk working memory",
-										ALLOCSET_DEFAULT_SIZES);
-	oldcxt = MemoryContextSwitchTo(preload_cxt);
-	for (;;)
+	/* check available space for quick exit */
+	SpinLockAcquire(&ccache_state->chunks_lock);
+	if (ccache_state->ccache_usage +
+		CCACHE_CHUNK_SIZE > ccache_total_size)
 	{
-		cl_bool		skip_preload = false;
-		cl_ulong	count;
-		BlockNumber	block_nr;
-		ccacheChunk *cc_chunk;
-		dlist_node *dnode;
-		dlist_iter	iter;
+		SpinLockRelease(&ccache_state->chunks_lock);
+		return nchunks_atonce;
+	}
+	SpinLockRelease(&ccache_state->chunks_lock);
 
-		MemoryContextReset(preload_cxt);
-
-		count = pg_atomic_fetch_add_u64(&ccache_database->curr_scan_pos, 1);
-		i = count % num_rels;
-		if (!relations[i])
-			continue;
-		srel = relations[i];
-		block_nr = (count / num_rels) * CCACHE_CHUNK_NBLOCKS;
-		if (block_nr >= rel_nblocks[i])
+	while (num_open_rels > 0 && nchunks_atonce > 0)
+	{
+		/* allocation of relations array on first try */
+		if (!open_relations)
 		{
-			heap_close(srel, NoLock);
-			relations[i] = NULL;
-			if (--num_open_rels == 0)
-				break;	/* no more relations to preload */
+			open_relations = palloc0(sizeof(Relation) * num_rels);
+			open_nchunks = palloc0(sizeof(cl_long) * num_rels);
+			start_count = palloc0(sizeof(cl_long) * num_rels);
+		}
+		count = pg_atomic_fetch_add_u64(&ccache_database->curr_scan_pos, 1);
+		j = count % num_rels;	/* relation selector */
+		i = count / num_rels;	/* block selector */
+
+		if (!open_relations[j])
+		{
+			relation = heap_open(ccache_relations_oid->values[j],
+								 AccessShareLock);
+			nchunks = (RelationGetNumberOfBlocks(relation)
+					   / CCACHE_CHUNK_NBLOCKS);
+			open_relations[j] = relation;
+			open_nchunks[j] = nchunks;
+			start_count[j] = i;
+		}
+		relation = open_relations[j];
+		nchunks = open_nchunks[j];
+		/* already done? */
+		if (relation == (void *)(~0L))
+			continue;
+		/* end of the scan? */
+		i -= start_count[j];
+		if (i > nchunks)
+		{
+			heap_close(relation, NoLock);
+			open_relations[j] = (void *)(~0UL);
+			num_open_rels--;
+			continue;
 		}
 
+		/* try to lookup ccache already build */
+		cc_chunk = NULL;
+		block_nr = i * CCACHE_CHUNK_NBLOCKS;
+		hashvalue = ccache_compute_hashvalue(MyDatabaseId,
+											 RelationGetRelid(relation),
+											 block_nr);
 		SpinLockAcquire(&ccache_state->chunks_lock);
-		if (!dlist_is_empty(&ccache_state->free_chunks_list))
+		if (ccache_state->ccache_usage +
+			CCACHE_CHUNK_SIZE > ccache_total_size)
 		{
+			SpinLockRelease(&ccache_state->chunks_lock);
+			break;
+		}
+		k = hashvalue % ccache_num_slots;
+		dlist_foreach(iter, &ccache_state->active_slots[k])
+		{
+			cc_temp = dlist_container(ccacheChunk, hash_chain, iter.cur);
+			if (cc_temp->hash == hashvalue &&
+				cc_temp->database_oid == MyDatabaseId &&
+				cc_temp->table_oid == RelationGetRelid(relation) &&
+				cc_temp->block_nr == block_nr)
+			{
+				if (cc_temp->ctime == CCACHE_CTIME_NOT_BUILD)
+					cc_chunk = cc_temp;
+				else
+					cc_chunk = (void *)(~0L);
+				break;
+			}
+		}
+		/* this chunk is already loaded, or in-progress */
+		if (cc_chunk == (void *)(~0L))
+		{
+			SpinLockRelease(&ccache_state->chunks_lock);
+			continue;
+		}
+		else if (cc_chunk)
+		{
+			/* once detach cc_chunk from the LRU misshit list */
+			dlist_delete(&cc_chunk->lru_chain);
+			memset(&cc_chunk->lru_chain, 0, sizeof(dlist_node));
+			cc_chunk->refcnt++;
+		}
+		else if (!dlist_is_empty(&ccache_state->free_chunks_list))
+		{
+			/* try to fetch a free ccacheChunk object */
 			dnode = dlist_pop_head_node(&ccache_state->free_chunks_list);
 			cc_chunk = dlist_container(ccacheChunk, hash_chain, dnode);
 			Assert(cc_chunk->lru_chain.prev == NULL &&
 				   cc_chunk->lru_chain.next == NULL &&
-				   cc_chunk->refcnt == 0 &&
-				   cc_chunk->ctime == 0);
+				   cc_chunk->refcnt == 0);
+			memset(cc_chunk, 0, sizeof(ccacheChunk));
+			cc_chunk->hash = hashvalue;
+			cc_chunk->database_oid = MyDatabaseId;
+			cc_chunk->table_oid = RelationGetRelid(relation);
+			cc_chunk->block_nr = block_nr;
+			cc_chunk->refcnt = 2;
+			cc_chunk->ctime = CCACHE_CTIME_IN_PROGRESS;
+			cc_chunk->atime = GetCurrentTimestamp();
+			dlist_push_head(&ccache_state->active_slots[k],
+							&cc_chunk->hash_chain);
 		}
 		else if (!dlist_is_empty(&ccache_state->lru_misshit_list))
 		{
+			/* purge oldest misshit entry, if any */
 			dnode = dlist_tail_node(&ccache_state->lru_misshit_list);
-			dlist_delete(&cc_chunk->lru_chain);
 			cc_chunk = dlist_container(ccacheChunk, lru_chain, dnode);
-			Assert(cc_chunk->hash_chain.prev == NULL &&
-				   cc_chunk->hash_chain.next == NULL &&
+			dlist_delete(&cc_chunk->hash_chain);
+			dlist_delete(&cc_chunk->lru_chain);
+			Assert(cc_chunk->length == 0 &&
 				   cc_chunk->refcnt == 1 &&
-				   cc_chunk->ctime == 0);
+				   cc_chunk->ctime == CCACHE_CTIME_NOT_BUILD);
+			memset(cc_chunk, 0, sizeof(ccacheChunk));
+			cc_chunk->hash = hashvalue;
+			cc_chunk->database_oid = MyDatabaseId;
+			cc_chunk->table_oid = RelationGetRelid(relation);
+			cc_chunk->block_nr = block_nr;
+			cc_chunk->refcnt = 2;
+			cc_chunk->ctime = CCACHE_CTIME_IN_PROGRESS;
+			cc_chunk->atime = GetCurrentTimestamp();
+			dlist_push_head(&ccache_state->active_slots[k],
+							&cc_chunk->hash_chain);
 		}
 		else
 		{
 			SpinLockRelease(&ccache_state->chunks_lock);
-			elog(LOG, "ccache-builder%d: no free ccacheChunk",
-				 ccache_builder->builder_id);
 			break;
 		}
-		/* setup ccacheChunk */
-		memset(cc_chunk, 0, sizeof(ccacheChunk));
-		cc_chunk->database_oid = MyDatabaseId;
-		cc_chunk->table_oid = RelationGetRelid(srel);
-		cc_chunk->block_nr = block_nr;
-		cc_chunk->hash = ccache_compute_hashvalue(cc_chunk->database_oid,
-												  cc_chunk->table_oid,
-												  cc_chunk->block_nr);
-		cc_chunk->refcnt = 1;
-		cc_chunk->ctime = 0;
-		cc_chunk->atime = GetCurrentTimestamp();
-
-		/* ensure this chunk is not cached yet */
-		i = cc_chunk->hash % ccache_num_slots;
-		dlist_foreach(iter, &ccache_state->active_slots[i])
-		{
-			ccacheChunk *temp = dlist_container(ccacheChunk,
-												hash_chain,
-												iter.cur);
-			if (temp->hash == cc_chunk->hash &&
-				temp->database_oid == cc_chunk->database_oid &&
-				temp->table_oid == cc_chunk->table_oid &&
-				temp->block_nr == cc_chunk->block_nr)
-			{
-				/* oops, this chunks is already cached */
-				skip_preload = true;
-				break;
-			}
-		}
-		if (skip_preload)
-		{
-			memset(cc_chunk, 0, sizeof(ccacheChunk));
-			dlist_push_head(&ccache_state->free_chunks_list,
-							&cc_chunk->hash_chain);
-			SpinLockRelease(&ccache_state->chunks_lock);
-			continue;
-		}
-		dlist_push_head(&ccache_state->active_slots[i],
-						&cc_chunk->hash_chain);
-		dlist_push_head(&ccache_state->lru_active_list,
-						&cc_chunk->lru_chain);
 		SpinLockRelease(&ccache_state->chunks_lock);
 
-		/* run preload of this chunk */
+		/* try to load this chunk */
 		PG_TRY();
 		{
-			BlockNumber	nblocks = Min(rel_nblocks[i] - block_nr,
-									  CCACHE_CHUNK_NBLOCKS);
 			/* update builder's state */
 			SpinLockAcquire(&ccache_state->lock);
 			ccache_builder->table_oid = cc_chunk->table_oid;
 			ccache_builder->block_nr = cc_chunk->block_nr;
 			SpinLockRelease(&ccache_state->lock);
 
-			if (!ccache_preload_chunk(cc_chunk,
-									  srel,
-									  block_nr,
-									  nblocks,
-									  &vmbuffer,
-									  strategy,
-									  chunk_buffer))
-			{
-				/* detach from the active and back to the free list */
-				SpinLockAcquire(&ccache_state->chunks_lock);
-				Assert(cc_chunk->refcnt == 1);
-				dlist_delete(&cc_chunk->hash_chain);
-				dlist_delete(&cc_chunk->lru_chain);
-				memset(cc_chunk, 0, sizeof(ccacheChunk));
-				dlist_push_head(&ccache_state->free_chunks_list,
-								&cc_chunk->hash_chain);
-				SpinLockRelease(&ccache_state->chunks_lock);
-			}
+			ccache_preload_chunk(cc_chunk, relation, cc_chunk->block_nr);
+
 			/* update builder's state */
 			SpinLockAcquire(&ccache_state->lock);
 			ccache_builder->table_oid = InvalidOid;
@@ -1852,49 +2112,28 @@ ccache_builder_preload(cl_long *timeout)
 		}
 		PG_CATCH();
 		{
-			/* detach from the active and back to the free list */
-			SpinLockAcquire(&ccache_state->chunks_lock);
-			Assert(cc_chunk->refcnt == 1);
-			dlist_delete(&cc_chunk->hash_chain);
-			dlist_delete(&cc_chunk->lru_chain);
-			memset(cc_chunk, 0, sizeof(ccacheChunk));
-			dlist_push_head(&ccache_state->free_chunks_list,
-							&cc_chunk->hash_chain);
-			SpinLockRelease(&ccache_state->chunks_lock);
 			/* update builder's state */
 			SpinLockAcquire(&ccache_state->lock);
 			ccache_builder->table_oid = InvalidOid;
 			ccache_builder->block_nr = InvalidBlockNumber;
 			SpinLockRelease(&ccache_state->lock);
+
 			PG_RE_THROW();
 		}
 		PG_END_TRY();
+		/* load a chunk */
+		nchunks_atonce--;
 	}
-	if (vmbuffer != InvalidBuffer)
-		ReleaseBuffer(vmbuffer);
-	MemoryContextSwitchTo(oldcxt);
-	MemoryContextDelete(preload_cxt);
-	pfree(strategy);
-	pfree(chunk_buffer);
 
-	for (i=0; i < num_rels; i++)
+	if (open_relations)
 	{
-		if (relations[i])
-			heap_close(relations[i], NoLock);
+		for (i=0; i < num_rels; i++)
+		{
+			if (open_relations[i] && open_relations[i] != (void *)(~0L))
+				heap_close(open_relations[i], NoLock);
+		}
 	}
-	return CCBUILDER_STATE__TRYLOAD;
-}
-
-/*
- * ccache_builder_tryload
- */
-static int
-ccache_builder_tryload(cl_long *timeout)
-{
-
-	*timeout = 5000L;
-
-	return CCBUILDER_STATE__TRYLOAD;
+	return nchunks_atonce;
 }
 
 /*
@@ -1919,8 +2158,6 @@ void
 ccache_builder_main(Datum arg)
 {
 	cl_int		builder_id = DatumGetInt32(arg);
-	int			curr_state;
-	int			next_state;
 	int			ev;
 
 	pqsignal(SIGTERM, ccache_builder_sigterm);
@@ -1931,20 +2168,27 @@ ccache_builder_main(Datum arg)
 	CurrentMemoryContext = AllocSetContextCreate(TopMemoryContext,
 												 "ccache builder context",
 												 ALLOCSET_DEFAULT_SIZES);
+	PerChunkMemoryContext = AllocSetContextCreate(TopMemoryContext,
+												  "per-chunk memory context",
+												  ALLOCSET_DEFAULT_SIZES);
+	PerChunkLoadBuffer = MemoryContextAlloc(TopMemoryContext,
+											CCACHE_CHUNK_SIZE);
 	ccache_builder = &ccache_state->builders[builder_id];
 	SpinLockAcquire(&ccache_state->lock);
 	ccache_builder->database_oid = InvalidOid;
-	ccache_builder->state = curr_state = CCBUILDER_STATE__STARTUP;
+	ccache_builder->state = CCBUILDER_STATE__STARTUP;
 	ccache_builder->latch = MyLatch;
 	SpinLockRelease(&ccache_state->lock);
 
 	PG_ENSURE_ERROR_CLEANUP(ccache_builder_main_on_shutdown, 0);
 	{
 		/* connect to one of the databases */
-		curr_state = ccache_builder_connectdb();
+		ccache_builder_connectdb();
 		for (;;)
 		{
-			long		timeout = 0L;
+			MemoryContext	oldcxt;
+			long			timeout = 0L;
+			int				nchunks_atonce = 12;
 
 			if (ccache_builder_got_sigterm)
 				elog(ERROR, "terminating ccache-builder%d", builder_id);
@@ -1958,9 +2202,9 @@ ccache_builder_main(Datum arg)
 			CHECK_FOR_INTERRUPTS();
 
 			/*
-			 * ---------------------
+			 * -------------------------
 			 *   BEGIN Transaction
-			 * ---------------------
+			 * -------------------------
 			 */
 			SetCurrentStatementStartTimestamp();
 			StartTransactionCommand();
@@ -1968,34 +2212,38 @@ ccache_builder_main(Datum arg)
 
 			/* refresh ccache relations, if needed */
 			refresh_ccache_source_relations();
-
-			switch (curr_state)
+			/* try to load several chunks at once */
+			oldcxt = MemoryContextSwitchTo(PerChunkMemoryContext);
+			VisibilityMapBuffer = InvalidBuffer;
+			while (nchunks_atonce > 0)
 			{
-				case CCBUILDER_STATE__PRELOAD:
-					next_state = ccache_builder_preload(&timeout);
+				if (ccache_tryload_misshit_chunk())
+					nchunks_atonce--;
+				else
 					break;
-
-				case CCBUILDER_STATE__TRYLOAD:
-					next_state = ccache_builder_tryload(&timeout);
-					break;
-
-				default:
-					elog(ERROR, "ccache-builder%d has unknown state",
-						 builder_id);
 			}
+			if (nchunks_atonce > 0)
+				nchunks_atonce = ccache_tryload_chilly_chunk(nchunks_atonce);
+			timeout = (nchunks_atonce == 0 ? 0 : 4000);
 
+			if (VisibilityMapBuffer != InvalidBuffer)
+				ReleaseBuffer(VisibilityMapBuffer);
+			MemoryContextSwitchTo(oldcxt);
+			MemoryContextReset(PerChunkMemoryContext);
 			/*
-			 * -------------------
+			 * -----------------------
 			 *   END Transaction
-			 * -------------------
+			 * -----------------------
 			 */
 			PopActiveSnapshot();
 			CommitTransactionCommand();
 
-			SpinLockAcquire(&ccache_state->lock);
-			ccache_builder->state = CCBUILDER_STATE__SLEEP;
-			SpinLockRelease(&ccache_state->lock);
-
+			if (timeout > 0)
+			{
+				SpinLockAcquire(&ccache_state->lock);
+				ccache_builder->state = CCBUILDER_STATE__SLEEP;
+				SpinLockRelease(&ccache_state->lock);
+			}
 			ev = WaitLatch(MyLatch,
 						   WL_LATCH_SET |
 						   WL_TIMEOUT |
@@ -2009,7 +2257,7 @@ ccache_builder_main(Datum arg)
 				elog(FATAL, "Unexpected postmaster dead");
 
 			SpinLockAcquire(&ccache_state->lock);
-			ccache_builder->state = curr_state = next_state;
+			ccache_builder->state = CCBUILDER_STATE__LOADING;
 			SpinLockRelease(&ccache_state->lock);
 		}
 	}

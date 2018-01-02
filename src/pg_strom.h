@@ -1102,6 +1102,7 @@ extern bool RelationCanUseColumnarCache(Relation relation);
 extern struct ccacheChunk *pgstrom_ccache_get_chunk(Relation relation,
 													BlockNumber block_nr);
 extern void pgstrom_ccache_put_chunk(struct ccacheChunk *cc_chunk);
+extern bool pgstrom_ccache_is_empty(struct ccacheChunk *cc_chunk);
 extern pgstrom_data_store *
 pgstrom_ccache_load_chunk(struct ccacheChunk *cc_chunk,
 						  GpuContext *gcontext,
@@ -1199,6 +1200,9 @@ extern void show_instrumentation_count(const char *qlabel, int which,
 #define Min3(a,b,c)		((a) > (b) ? Min((a),(c)) : Min((b),(c)))
 #define Min4(a,b,c,d)	Min(Min((a),(b)), Min((c),(d)))
 
+#ifndef SAMESIGN
+#define SAMESIGN(a,b)	(((a) < 0) == ((b) < 0))
+#endif
 /*
  * int/float reinterpret functions
  */
