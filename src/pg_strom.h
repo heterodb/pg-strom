@@ -54,6 +54,7 @@
 #include "executor/nodeCustom.h"
 #include "fmgr.h"
 #include "foreign/fdwapi.h"
+#include "foreign/foreign.h"
 #include "funcapi.h"
 #include "lib/ilist.h"
 #include "lib/stringinfo.h"

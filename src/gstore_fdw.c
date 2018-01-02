@@ -18,8 +18,6 @@
 #include "pg_strom.h"
 #include "cuda_plcuda.h"
 
-#define GPUSTORE_CHUNK_SIZE		(1UL << 30)
-
 /*
  * GpuStoreChunk
  */
@@ -68,16 +66,26 @@ typedef struct
 } GpuStoreHead;
 
 /* ---- static functions ---- */
-static void	gstore_fdw_read_options(Oid gstore_oid,
+static void	gstore_fdw_table_options(Oid gstore_oid,
 									int *p_pinning, int *p_format);
+static void gstore_fdw_column_options(Oid gstore_oid, AttrNumber attnum,
+									  int *p_compression);
 
 /* ---- static variables ---- */
-static int				gstore_max_nchunks;		/* GUC */
+static int				gstore_max_relations;		/* GUC */
 static shmem_startup_hook_type shmem_startup_next;
 static object_access_hook_type object_access_next;
 static GpuStoreHead	   *gstore_head = NULL;
 static GpuStoreMap	   *gstore_maps = NULL;
 static Oid				reggstore_type_oid = InvalidOid;
+
+/* relation 'format' options */
+#define GSTORE_FORMAT__PGSTROM			1
+//#define GSTORE_FORMAT__CUPY			2
+
+/* column 'compression' option */
+#define GSTORE_COMPRESSION__NONE		1
+#define GSTORE_COMPRESSION__PGLZ		2
 
 /*
  * gstore_fdw_satisfies_visibility - equivalent to HeapTupleSatisfiesMVCC,
@@ -764,7 +772,7 @@ gstoreBeginForeignModify(ModifyTableState *mtstate,
 	int				format;
 	cl_int			i, ncols;
 
-	gstore_fdw_read_options(RelationGetRelid(relation), &pinning, &format);
+	gstore_fdw_table_options(RelationGetRelid(relation), &pinning, &format);
 	if (pinning >= 0)
 	{
 		gcontext = AllocGpuContext(pinning, false);
@@ -1150,10 +1158,10 @@ relation_is_gstore_fdw(Oid table_oid)
 }
 
 /*
- * gstore_fdw_read_options
+ * gstore_fdw_table_options
  */
 static void
-__gstore_fdw_read_options(List *options,
+__gstore_fdw_table_options(List *options,
 						  int *p_pinning,
 						  int *p_format)
 {
@@ -1203,6 +1211,12 @@ __gstore_fdw_read_options(List *options,
 							defel->defname)));
 		}
 	}
+	if (pinning < 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_SYNTAX_ERROR),
+				 errmsg("gstore_fdw: No pinning GPU device"),
+				 errhint("use 'pinning' option to specify GPU device")));
+
 	/* put default if not specified */
 	if (format < 0)
 		format = GSTORE_FDW_FORMAT__PGSTROM;
@@ -1214,9 +1228,8 @@ __gstore_fdw_read_options(List *options,
 		*p_format = format;
 }
 
-
 static void
-gstore_fdw_read_options(Oid gstore_oid, int *p_pinning, int *p_format)
+gstore_fdw_table_options(Oid gstore_oid, int *p_pinning, int *p_format)
 {
 	HeapTuple	tup;
 	Datum		datum;
@@ -1231,12 +1244,103 @@ gstore_fdw_read_options(Oid gstore_oid, int *p_pinning, int *p_format)
 							&isnull);
 	if (!isnull)
 		options = untransformRelOptions(datum);
-	__gstore_fdw_read_options(options, p_pinning, p_format);
+	__gstore_fdw_table_options(options, p_pinning, p_format);
 	ReleaseSysCache(tup);
 }
 
 /*
- * gstore_fdw_object_access - post DROP cleanups
+ * gstore_fdw_column_options
+ */
+static void
+__gstore_fdw_column_options(List *options, int *p_compression)
+{
+	ListCell   *lc;
+	char	   *temp;
+	int			compression = -1;
+
+	foreach (lc, options)
+	{
+		DefElem	   *defel = lfirst(lc);
+
+		if (strcmp(defel->defname, "compression") == 0)
+		{
+			if (compression >= 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("\"compression\" option appears twice")));
+			temp = defGetString(defel);
+			if (pg_strcasecmp(temp, "none") == 0)
+				compression = GSTORE_COMPRESSION__NONE;
+			else if (pg_strcasecmp(temp, "pglz") == 0)
+				compression = GSTORE_COMPRESSION__PGLZ;
+			else
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("unknown compression logic: %s", temp)));
+		}
+		else
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_SYNTAX_ERROR),
+					 errmsg("gstore_fdw: unknown option \"%s\"",
+							defel->defname)));
+		}
+	}
+	/* set default, if no valid options were supplied */
+	if (compression < 0)
+		compression = GSTORE_COMPRESSION__NONE;
+
+	/* set results */
+	if (p_compression)
+		*p_compression = compression;
+}
+
+static void
+gstore_fdw_column_options(Oid gstore_oid, AttrNumber attnum,
+						  int *p_compression)
+{
+	List	   *options = GetForeignColumnOptions(gstore_oid, attnum);
+
+	__gstore_fdw_column_options(options, p_compression);
+}
+
+/*
+ * gstore_fdw_post_drop
+ */
+static void
+gstore_fdw_post_drop(Oid relid, AttrNumber attnum,
+					 ObjectAccessDrop *arg)
+{
+	GpuStoreChunk *gs_chunk;
+	pg_crc32	hash;
+	int			index;
+	dlist_iter	iter;
+
+	INIT_LEGACY_CRC32(hash);
+	COMP_LEGACY_CRC32(hash, &MyDatabaseId, sizeof(Oid));
+	COMP_LEGACY_CRC32(hash, &relid, sizeof(Oid));
+	FIN_LEGACY_CRC32(hash);
+	index = hash % GSTORE_CHUNK_HASH_NSLOTS;
+
+	SpinLockAcquire(&gstore_head->lock);
+	dlist_foreach(iter, &gstore_head->active_chunks[index])
+	{
+		gs_chunk = dlist_container(GpuStoreChunk, chain, iter.cur);
+
+		if (gs_chunk->hash == hash &&
+			gs_chunk->database_oid == MyDatabaseId &&
+			gs_chunk->table_oid == relid &&
+			gs_chunk->xmax == InvalidTransactionId)
+		{
+			gs_chunk->xmax = GetCurrentTransactionId();
+		}
+	}
+	pg_atomic_add_fetch_u32(&gstore_head->has_warm_chunks, 1);
+	SpinLockRelease(&gstore_head->lock);
+}
+
+/*
+ * gstore_fdw_object_access
  */
 static void
 gstore_fdw_object_access(ObjectAccessType access,
@@ -1248,39 +1352,17 @@ gstore_fdw_object_access(ObjectAccessType access,
 	if (object_access_next)
 		(*object_access_next)(access, classId, objectId, subId, arg);
 
-	/*
-	 * Cleanup GpuStoreChunk on DROP FOREIGN TABLE
-	 */
-	if (access == OAT_DROP &&
-		classId == RelationRelationId &&
-		relation_is_gstore_fdw(objectId))
+	switch (access)
 	{
-		GpuStoreChunk *gs_chunk;
-		pg_crc32	hash;
-		int			index;
-		dlist_iter	iter;
+		case OAT_DROP:
+			if (classId == RelationRelationId &&
+				relation_is_gstore_fdw(objectId))
+				gstore_fdw_post_drop(objectId, subId, arg);
+			break;
 
-		INIT_LEGACY_CRC32(hash);
-		COMP_LEGACY_CRC32(hash, &MyDatabaseId, sizeof(Oid));
-		COMP_LEGACY_CRC32(hash, &objectId, sizeof(Oid));
-		FIN_LEGACY_CRC32(hash);
-		index = hash % GSTORE_CHUNK_HASH_NSLOTS;
-
-		SpinLockAcquire(&gstore_head->lock);
-		dlist_foreach(iter, &gstore_head->active_chunks[index])
-		{
-			gs_chunk = dlist_container(GpuStoreChunk, chain, iter.cur);
-
-			if (gs_chunk->hash == hash &&
-				gs_chunk->database_oid == MyDatabaseId &&
-				gs_chunk->table_oid == objectId &&
-				gs_chunk->xmax == InvalidTransactionId)
-			{
-				gs_chunk->xmax = GetCurrentTransactionId();
-			}
-		}
-		pg_atomic_add_fetch_u32(&gstore_head->has_warm_chunks, 1);
-		SpinLockRelease(&gstore_head->lock);
+		default:
+			/* do nothing */
+			break;
 	}
 }
 
@@ -1292,20 +1374,31 @@ pgstrom_gstore_fdw_validator(PG_FUNCTION_ARGS)
 {
 	List	   *options = untransformRelOptions(PG_GETARG_DATUM(0));
 	Oid			catalog = PG_GETARG_OID(1);
-	int			pinning;
-	int			format;
 
-	if (catalog == ForeignTableRelationId)
-		__gstore_fdw_read_options(options, &pinning, &format);
-	else if (options != NIL)
+	switch (catalog)
 	{
-		if (catalog == ForeignServerRelationId)
-			elog(ERROR, "gstore_fdw: no options are supported on SERVER");
-		else if (catalog == ForeignDataWrapperRelationId)
-			elog(ERROR, "gstore_fdw: no options are supported on FOREIGN DATA WRAPPER");
-		else
+		case ForeignTableRelationId:
+			__gstore_fdw_table_options(options, NULL, NULL);
+			break;
+
+		case AttributeRelationId:
+			__gstore_fdw_column_options(options, NULL);
+			break;
+
+		case ForeignServerRelationId:
+			if (options)
+				elog(ERROR, "gstore_fdw: no options are supported on SERVER");
+			break;
+
+		case ForeignDataWrapperRelationId:
+			if (options)
+				elog(ERROR, "gstore_fdw: no options are supported on FOREIGN DATA WRAPPER");
+			break;
+
+		default:
 			elog(ERROR, "gstore_fdw: no options are supported on catalog %s",
 				 get_rel_name(catalog));
+			break;
 	}
 	PG_RETURN_VOID();
 }
@@ -1463,7 +1556,7 @@ pgstrom_gstore_export_ipchandle(PG_FUNCTION_ARGS)
 			 gstore_oid);
 
 	frel = heap_open(gstore_oid, AccessShareLock);
-	gstore_fdw_read_options(gstore_oid, &pinning, NULL);
+	gstore_fdw_table_options(gstore_oid, &pinning, NULL);
 	if (pinning < 0)
 		elog(ERROR, "gstore_fdw: foreign table \"%s\" is not pinned on a particular GPU devices",
 			 RelationGetRelationName(frel));
@@ -1641,7 +1734,7 @@ gstore_fdw_preferable_device(FunctionCallInfo fcinfo)
 		if (!relation_is_gstore_fdw(gstore_oid))
 			elog(ERROR, "relation %u is not gstore_fdw foreign table",
 				 gstore_oid);
-		gstore_fdw_read_options(gstore_oid, &pinning, NULL);
+		gstore_fdw_table_options(gstore_oid, &pinning, NULL);
 		if (pinning >= 0)
 		{
 			Assert(pinning < numDevAttrs);
@@ -1703,7 +1796,7 @@ gstore_fdw_load_function_args(GpuContext *gcontext,
 			elog(ERROR, "relation %u is not gstore_fdw foreign table",
 				 gstore_oid);
 
-		gstore_fdw_read_options(gstore_oid, &pinning, NULL);
+		gstore_fdw_table_options(gstore_oid, &pinning, NULL);
 		if (pinning >= 0 && gcontext->cuda_dindex != pinning)
 			elog(ERROR, "unable to load gstore_fdw foreign table \"%s\" on the GPU device %d; GpuContext is assigned on the device %d",
 				 get_rel_name(gstore_oid), pinning, gcontext->cuda_dindex);
@@ -1824,18 +1917,18 @@ pgstrom_startup_gstore_fdw(void)
 
 	gstore_head = ShmemInitStruct("GPU Store Control Structure",
 								  offsetof(GpuStoreHead,
-										   gs_chunks[gstore_max_nchunks]),
+										   gs_chunks[gstore_max_relations]),
 								  &found);
 	if (found)
 		elog(ERROR, "Bug? shared memory for gstore_fdw already built");
-	gstore_maps = calloc(gstore_max_nchunks, sizeof(GpuStoreMap));
+	gstore_maps = calloc(gstore_max_relations, sizeof(GpuStoreMap));
 	if (!gstore_maps)
 		elog(ERROR, "out of memory");
 	SpinLockInit(&gstore_head->lock);
 	dlist_init(&gstore_head->free_chunks);
 	for (i=0; i < GSTORE_CHUNK_HASH_NSLOTS; i++)
 		dlist_init(&gstore_head->active_chunks[i]);
-	for (i=0; i < gstore_max_nchunks; i++)
+	for (i=0; i < gstore_max_relations; i++)
 	{
 		GpuStoreChunk  *gs_chunk = &gstore_head->gs_chunks[i];
 
@@ -1852,18 +1945,18 @@ pgstrom_startup_gstore_fdw(void)
 void
 pgstrom_init_gstore_fdw(void)
 {
-	DefineCustomIntVariable("pg_strom.gstore_max_nchunks",
+	DefineCustomIntVariable("pg_strom.gstore_max_relations",
 							"maximum number of gstore_fdw relations",
 							NULL,
-							&gstore_max_nchunks,
-							2048,
-							1024,
+							&gstore_max_relations,
+							100,
+							1,
 							INT_MAX,
 							PGC_POSTMASTER,
 							GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
 	RequestAddinShmemSpace(MAXALIGN(offsetof(GpuStoreHead,
-											 gs_chunks[gstore_max_nchunks])));
+											gs_chunks[gstore_max_relations])));
 	shmem_startup_next = shmem_startup_hook;
 	shmem_startup_hook = pgstrom_startup_gstore_fdw;
 
