@@ -1309,42 +1309,446 @@ vl_dict_compare(const void *__key1, const void *__key2, Size keysize)
 }
 
 /*
- * create_varlena_dictionary
+ * ccache_setup_buffer
  */
-HTAB *
-create_varlena_dictionary(size_t nrooms)
+void
+ccache_setup_buffer(TupleDesc tupdesc,
+					ccacheBuffer *cc_buf,
+					bool with_system_columns,
+					size_t nrooms,
+					MemoryContext memcxt)
 {
-	HASHCTL		hctl;
+	MemoryContext oldcxt = MemoryContextSwitchTo(memcxt);
+	int		j, nattrs = tupdesc->natts;
 
-	memset(&hctl, 0, sizeof(HASHCTL));
-	hctl.hash = vl_dict_hash_value;
-	hctl.match = vl_dict_compare;
-	hctl.keysize = sizeof(vl_dict_key);
+	memset(cc_buf, 0, sizeof(ccacheBuffer));
+	if (with_system_columns)
+		nattrs -= (1 + FirstLowInvalidHeapAttributeNumber);
+	cc_buf->nattrs = tupdesc->natts;
+	cc_buf->nitems = 0;
+	cc_buf->nrooms = nrooms;
+	cc_buf->vl_dict = palloc0(sizeof(HTAB *) * nattrs);
+	cc_buf->extra_sz = palloc0(sizeof(size_t) * nattrs);
+	cc_buf->hasnull = palloc0(sizeof(bool) * nattrs);
+	cc_buf->nullmap = palloc0(sizeof(bits8 *) * nattrs);
+	cc_buf->values = palloc0(sizeof(void *) * nattrs);
+	for (j=0; j < tupdesc->natts; j++)
+	{
+		Form_pg_attribute attr = tupdesc->attrs[j];
 
-	return hash_create("varlena dictionary hash-table",
-					   Max(nrooms / 5, 4096),
-					   &hctl,
-					   HASH_FUNCTION |
-					   HASH_COMPARE);
+		if (attr->attlen < 0)
+		{
+			HASHCTL		hctl;
+
+			memset(&hctl, 0, sizeof(HASHCTL));
+			hctl.hash = vl_dict_hash_value;
+			hctl.match = vl_dict_compare;
+			hctl.keysize = sizeof(vl_dict_key);
+			hctl.hcxt = memcxt;
+
+			cc_buf->vl_dict[j] = hash_create("varlena dictionary",
+											 Max(nrooms / 5, 4096),
+											 &hctl,
+											 HASH_FUNCTION |
+											 HASH_COMPARE |
+											 HASH_CONTEXT);
+			cc_buf->values[j] = palloc_huge(sizeof(vl_dict_key *) * nrooms);
+		}
+		else
+		{
+			int		unitsz = att_align_nominal(attr->attlen,
+											   attr->attalign);
+			cc_buf->nullmap[j] = palloc_huge(BITMAPLEN(nrooms));
+			cc_buf->values[j] = palloc_huge(unitsz * nrooms);
+		}
+	}
+
+	if (with_system_columns)
+	{
+		for (j=FirstLowInvalidHeapAttributeNumber + 1; j < 0; j++)
+		{
+			Form_pg_attribute attr = SystemAttributeDefinition(j, true);
+			int		unitsz = att_align_nominal(attr->attlen,
+											   attr->attalign);
+
+			/* all the system columns are fixed-length */
+			Assert(attr->attlen > 0);
+			if (j == TableOidAttributeNumber ||
+				(j == ObjectIdAttributeNumber && !tupdesc->tdhasoid))
+				continue;
+			
+			cc_buf->nullmap[nattrs + j] = palloc_huge(BITMAPLEN(nrooms));
+			cc_buf->values[nattrs + j] = palloc_huge(unitsz * nrooms);
+		}
+	}
+	MemoryContextSwitchTo(oldcxt);
+}
+
+/*
+ * ccache_expand_buffer
+ */
+void
+ccache_expand_buffer(TupleDesc tupdesc, ccacheBuffer *cc_buf,
+					 MemoryContext memcxt)
+{
+	MemoryContext oldcxt = MemoryContextSwitchTo(memcxt);
+	size_t		nrooms = (3 * cc_buf->nrooms / 2 + 20000);
+	cl_int		j;
+
+	for (j=0; j < cc_buf->nattrs; j++)
+	{
+		Form_pg_attribute attr;
+
+		if (j < tupdesc->natts)
+			attr = tupdesc->attrs[j];
+		else
+			attr = SystemAttributeDefinition(j - cc_buf->nattrs, true);
+
+		if (attr->attlen < 0)
+		{
+			Assert(!cc_buf->nullmap[j]);
+			cc_buf->values[j] = repalloc_huge(cc_buf->values[j],
+											  sizeof(vl_dict_key *) * nrooms);
+			Assert(!cc_buf->vl_dict[j]);
+		}
+		else if (cc_buf->values[j] != NULL)
+		{
+			int		unitsz = att_align_nominal(attr->attlen,
+											   attr->attalign);
+			cc_buf->nullmap[j] = repalloc_huge(cc_buf->nullmap[j],
+											   BITMAPLEN(nrooms));
+			cc_buf->values[j] = repalloc_huge(cc_buf->values[j],
+											  unitsz * nrooms);
+		}
+	}
+	cc_buf->nrooms = nrooms;
+	MemoryContextSwitchTo(oldcxt);
+}
+
+/*
+ * ccache_release_buffer
+ */
+void
+ccache_release_buffer(ccacheBuffer *cc_buf)
+{
+	cl_int		j;
+
+	for (j=0; j < cc_buf->nattrs; j++)
+	{
+		if (cc_buf->nullmap[j] != NULL)
+			pfree(cc_buf->nullmap[j]);
+		if (cc_buf->values[j] != NULL)
+			pfree(cc_buf->values[j]);
+		if (cc_buf->vl_dict[j] != NULL)
+			hash_destroy(cc_buf->vl_dict[j]);
+	}
+	memset(cc_buf->hasnull, 0, sizeof(bool) * cc_buf->nattrs);
+	memset(cc_buf->nullmap, 0, sizeof(bits8 *) * cc_buf->nattrs);
+	memset(cc_buf->values, 0, sizeof(void *) * cc_buf->nattrs);
+	memset(cc_buf->vl_dict, 0, sizeof(HTAB *) * cc_buf->nattrs);
+	cc_buf->nitems = 0;
+	cc_buf->nrooms = 0;
+}
+
+/*
+ * ccacheBufferSanityCheckKDS
+ */
+static inline bool
+ccacheBufferSanityCheckKDS(TupleDesc tupdesc,
+						   kern_data_store *kds)
+{
+	int		j;
+
+	if (kds->format != KDS_FORMAT_COLUMN)
+		return false;
+	if (kds->ncols != tupdesc->natts)
+	{
+		if (kds->ncols != (tupdesc->natts -
+						   FirstLowInvalidHeapAttributeNumber + 1))
+			return false;
+	}
+	for (j=0; j < kds->ncols; j++)
+	{
+		kern_colmeta *cmeta = &kds->colmeta[j];
+		Form_pg_attribute attr;
+
+		if (j < tupdesc->natts)
+			attr = tupdesc->attrs[j];
+		else
+			attr = SystemAttributeDefinition(j - kds->ncols, true);
+
+		if (cmeta->attbyval  != attr->attbyval ||
+			cmeta->attalign  != att_align_nominal(1, attr->attalign) ||
+			cmeta->attlen    != attr->attlen ||
+			cmeta->attnum    != attr->attnum ||
+			cmeta->atttypid  != attr->atttypid ||
+			cmeta->atttypmod != attr->atttypmod)
+			return false;
+	}
+	return true;
+}
+
+/*
+ * ccache_copy_from_kds_column
+ */
+void
+ccache_copy_buffer_from_kds(TupleDesc tupdesc,
+							ccacheBuffer *cc_buf,
+							kern_data_store *kds,
+							MemoryContext memcxt)
+{
+	size_t		i, nitems = kds->nitems;
+	cl_uint		j;
+	MemoryContext oldcxt;
+
+	Assert(ccacheBufferSanityCheckKDS(tupdesc, kds));
+	if (kds->nitems > cc_buf->nrooms)
+		elog(ERROR, "lack of ccache buffer rooms");
+
+	oldcxt = MemoryContextSwitchTo(memcxt);
+	for (j=0; j < cc_buf->nattrs; j++)
+	{
+		kern_colmeta *cmeta = &kds->colmeta[j];
+		size_t		va_offset;
+		size_t		extra_sz;
+		void	   *addr;
+
+		va_offset = (size_t)cmeta->va_offset << MAXIMUM_ALIGNOF_SHIFT;
+		extra_sz = (size_t)cmeta->extra_sz << MAXIMUM_ALIGNOF_SHIFT;
+		/* considered as all-null */
+		if (va_offset == 0)
+		{
+			if (cmeta->attlen < 0)
+			{
+				Assert(cc_buf->nullmap[j] == NULL);
+				cc_buf->hasnull[j] = true;
+				memset(cc_buf->values[j], 0, sizeof(vl_dict_key *) * nitems);
+				Assert(cc_buf->vl_dict[j] != NULL);
+				cc_buf->extra_sz[j] = 0;
+			}
+			else
+			{
+				memset(cc_buf->nullmap[j], 0, BITMAPLEN(nitems));
+				cc_buf->hasnull[j] = true;
+				Assert(cc_buf->vl_dict[j] == NULL);
+				cc_buf->extra_sz[j] = 0;
+			}
+			continue;
+		}
+		addr = (char *)kds + va_offset;
+		if (cmeta->attlen < 0)
+		{
+			for (i=0; i < kds->nitems; i++)
+			{
+				vl_dict_key	key, *entry;
+				size_t		offset;
+				void	   *datum;
+				bool		found;
+
+				offset = ((cl_uint *)addr)[i] << MAXIMUM_ALIGNOF_SHIFT;
+				if (offset == 0)
+				{
+					((vl_dict_key **)cc_buf->values[j])[i] = NULL;
+					continue;
+				}
+				datum = (char *)addr + offset;
+				key.offset = 0;
+				key.vl_datum = (struct varlena *)datum;
+				entry = hash_search(cc_buf->vl_dict[j],
+									&key,
+									HASH_ENTER,
+									&found);
+				if (!found)
+				{
+					entry->vl_datum = PG_DETOAST_DATUM_COPY(datum);
+					cc_buf->extra_sz[j] += MAXALIGN(VARSIZE(entry->vl_datum));
+				}
+				if (MAXALIGN(sizeof(cl_uint) * nitems) +
+					cc_buf->extra_sz[j] >= (size_t)UINT_MAX * MAXIMUM_ALIGNOF)
+					elog(ERROR, "too much vl_dictionary consumption");
+			}
+		}
+		else
+		{
+			int		unitsz = TYPEALIGN(cmeta->attalign,
+									   cmeta->attlen);
+			if (extra_sz > 0)
+			{
+				Assert(extra_sz == BITMAPLEN(nitems));
+				memcpy(cc_buf->nullmap[j],
+					   (char *)addr + MAXALIGN(unitsz * nitems),
+					   BITMAPLEN(nitems));
+				cc_buf->hasnull[j] = true;
+			}
+			else
+			{
+				memset(cc_buf->nullmap[j], ~0, BITMAPLEN(nitems));
+				cc_buf->hasnull[j] = false;
+			}
+			memcpy(cc_buf->values[j], addr, unitsz * nitems);
+			Assert(cc_buf->vl_dict[j] == NULL);
+			cc_buf->extra_sz[j] = 0;
+		}
+	}
+	MemoryContextSwitchTo(oldcxt);
+}
+
+/*
+ * ccache_copy_buffer_to_kds
+ */
+void
+ccache_copy_buffer_to_kds(kern_data_store *kds,
+						  TupleDesc tupdesc,
+						  ccacheBuffer *cc_buf,
+						  bits8 *rowmap, size_t visible_nitems)
+{
+	size_t	nrooms = (!rowmap ? cc_buf->nitems : visible_nitems);
+	char   *pos;
+	long	i, j, k;
+
+	Assert(kds->ncols >= cc_buf->nattrs);
+	init_kernel_data_store(kds,
+						   tupdesc,
+						   SIZE_MAX,	/* to be set later */
+						   KDS_FORMAT_COLUMN,
+						   nrooms);
+	pos = (char *)kds + STROMALIGN(offsetof(kern_data_store,
+											colmeta[kds->ncols]));
+	for (j=0; j < kds->ncols; j++)
+	{
+		kern_colmeta   *cmeta = &kds->colmeta[j];
+		size_t			offset;
+		size_t			nbytes;
+
+		/* include system columns? */
+		if (j >= cc_buf->nattrs)
+			continue;
+
+		offset = ((char *)pos - (char *)kds);
+		Assert((offset & (MAXIMUM_ALIGNOF - 1)) == 0);
+		cmeta->va_offset = offset / MAXIMUM_ALIGNOF;
+		if (cmeta->attlen < 0)
+		{
+			cl_uint	   *base = (cl_uint *)pos;
+			char	   *extra = pos + MAXALIGN(sizeof(cl_uint) * nrooms);
+			vl_dict_key **vl_entries = (vl_dict_key **)cc_buf->values[j];
+			vl_dict_key *entry;
+
+            for (i=0, k=0; i < cc_buf->nitems; i++)
+            {
+                /* only visible rows */
+                if (rowmap && att_isnull(i, rowmap))
+					continue;
+				entry = vl_entries[i];
+				if (!entry)
+					base[k] = 0;
+				else
+				{
+					if (entry->offset == 0)
+					{
+						offset = (size_t)(extra - (char *)base);
+						Assert((offset & (MAXIMUM_ALIGNOF - 1)) == 0);
+						entry->offset = offset / MAXIMUM_ALIGNOF;
+						nbytes = VARSIZE_ANY(entry->vl_datum);
+						memcpy(extra, entry->vl_datum, nbytes);
+						cmeta->extra_sz += MAXALIGN(nbytes) / MAXIMUM_ALIGNOF;
+						extra += MAXALIGN(nbytes);
+					}
+					base[k] = entry->offset;
+				}
+				k++;
+			}
+			Assert(k == nrooms);
+			pos += (char *)extra - (char *)base;
+		}
+		else if (!rowmap)
+		{
+			/* fixed-length attribute without row-visibility map */
+			offset = pos - (char *)kds;
+			Assert((offset & (MAXIMUM_ALIGNOF - 1)) == 0);
+
+			cmeta->va_offset = offset / MAXIMUM_ALIGNOF;
+			nbytes = MAXALIGN(TYPEALIGN(cmeta->attalign,
+										cmeta->attlen) * nrooms);
+			memcpy(pos, cc_buf->values[j], nbytes);
+			pos += nbytes;
+			/* null bitmap, if any */
+			if (!cc_buf->hasnull[j])
+				cmeta->extra_sz = 0;
+			else
+			{
+				nbytes = MAXALIGN(BITMAPLEN(nrooms));
+				cmeta->extra_sz = nbytes  / MAXIMUM_ALIGNOF;
+				memcpy(pos, cc_buf->nullmap[j], nbytes);
+				pos += nbytes;
+			}
+		}
+		else
+		{
+			bool		meet_null = false;
+			char	   *src = cc_buf->values[j];
+			bits8	   *d_nullmap;
+			bits8	   *s_nullmap;
+			int			unitsz = TYPEALIGN(cmeta->attalign, cmeta->attlen);
+			/* fixed-length attribute with row-visibility map */
+			offset = pos - (char *)kds;
+			Assert((offset & (MAXIMUM_ALIGNOF - 1)) == 0);
+
+			cmeta->va_offset = offset / MAXIMUM_ALIGNOF;
+			d_nullmap = (cc_buf->hasnull[j] ? (bits8 *)(pos + nbytes) : NULL);
+			s_nullmap = (cc_buf->hasnull[j] ? cc_buf->nullmap[j] : NULL);
+
+			for (i=0, k=0; i < cc_buf->nitems; i++)
+			{
+				/* only visible rows */
+				if (att_isnull(i, rowmap))
+					continue;
+
+				if (s_nullmap && att_isnull(i, s_nullmap))
+				{
+					Assert(d_nullmap != NULL);
+					d_nullmap[k>>3] &= ~(1 << (k & (BITS_PER_BYTE - 1)));
+					meet_null = true;
+				}
+				else
+				{
+					if (d_nullmap)
+						d_nullmap[k>>3] |=  (1 << (k & (BITS_PER_BYTE - 1)));
+					memcpy(pos + unitsz * k, src + unitsz * i, unitsz);
+				}
+				k++;
+			}
+			Assert(k == nrooms);
+			pos += MAXALIGN(unitsz * nrooms);
+			if (meet_null)
+			{
+				nbytes = MAXALIGN(BITMAPLEN(nrooms));
+				cmeta->extra_sz = nbytes / MAXIMUM_ALIGNOF;
+				pos += nbytes;
+			}
+		}
+	}
+	kds->length = (char *)pos - (char *)kds;
 }
 
 /*
  * pgstrom_ccache_extract_row
  */
 void
-pgstrom_ccache_extract_row(TupleDesc tupdesc,
-						   size_t nitems,
-						   size_t nrooms,
-						   bool *tup_isnull,
-						   Datum *tup_values,
-						   bits8 **cs_nullmap,
-						   bool *cs_hasnull,
-						   void **cs_values,
-						   HTAB **cs_vl_dict,
-						   size_t *cs_extra_sz)
+ccache_buffer_append_row(TupleDesc tupdesc,
+						 ccacheBuffer *cc_buf,
+						 HeapTuple tup,		/* only for system columns */
+						 bool *tup_isnull,
+						 Datum *tup_values,
+						 MemoryContext memcxt)
 {
-	int		j;
+	MemoryContext oldcxt = MemoryContextSwitchTo(memcxt);
+	size_t		j, nitems;
 
+	if (cc_buf->nitems >= cc_buf->nrooms)
+		elog(ERROR, "lack of ccache buffer rooms");
+
+	nitems = cc_buf->nitems;
 	for (j=0; j < tupdesc->natts; j++)
 	{
 		Form_pg_attribute attr = tupdesc->attrs[j];
@@ -1360,10 +1764,11 @@ pgstrom_ccache_extract_row(TupleDesc tupdesc,
 				struct varlena *vl = PG_DETOAST_DATUM_PACKED(datum);
 				vl_dict_key key;
 				bool		found;
+				size_t		usage;
 
 				key.offset = 0;
 				key.vl_datum = vl;
-				entry = hash_search(cs_vl_dict[j],
+				entry = hash_search(cc_buf->vl_dict[j],
 									&key,
 									HASH_ENTER,
 									&found);
@@ -1374,24 +1779,25 @@ pgstrom_ccache_extract_row(TupleDesc tupdesc,
 						entry->vl_datum = vl;
 					else
 						entry->vl_datum = PG_DETOAST_DATUM_COPY(datum);
-					cs_extra_sz[j] += MAXALIGN(VARSIZE_ANY(vl));
+					cc_buf->extra_sz[j] += MAXALIGN(VARSIZE_ANY(vl));
 
-					if (MAXALIGN(sizeof(cl_uint) * nrooms) +
-						cs_extra_sz[j] >= ((size_t)UINT_MAX * MAXIMUM_ALIGNOF))
+					usage = (MAXALIGN(sizeof(cl_uint) * nitems) +
+							 cc_buf->extra_sz[j]);
+					if (usage >= (size_t)UINT_MAX * MAXIMUM_ALIGNOF)
 						elog(ERROR, "attribute \"%s\" consumed too much",
 							 NameStr(attr->attname));
 				}
 			}
-			((vl_dict_key **)cs_values[j])[nitems] = entry;
+			((vl_dict_key **)cc_buf->values[j])[nitems] = entry;
 		}
 		else
 		{
-			bits8  *nullmap = cs_nullmap[j];
-			char   *base = cs_values[j];
+			bits8  *nullmap = cc_buf->nullmap[j];
+			char   *base = cc_buf->values[j];
 
 			if (isnull)
 			{
-				cs_hasnull[j] = true;
+				cc_buf->hasnull[j] = true;
 				nullmap[nitems >> 3] &= ~(1 << (nitems & 7));
 			}
 			else if (!attr->attbyval)
@@ -1410,93 +1816,33 @@ pgstrom_ccache_extract_row(TupleDesc tupdesc,
 			}
 		}
 	}
-}
 
-/*
- * pgstrom_ccache_writeout_chunk
- */
-void
-pgstrom_ccache_writeout_chunk(kern_data_store *kds,
-							  bits8 **cs_nullmap,
-							  bool *cs_hasnull,
-							  void **cs_values,
-							  HTAB **cs_vl_dict,
-							  size_t *cs_extra_sz)
-{
-	size_t	nitems = kds->nitems;
-	char   *pos;
-	int		i, j;
-
-	pos = (char *)kds + STROMALIGN(offsetof(kern_data_store,
-											colmeta[kds->ncols]));
-	for (j=0; j < kds->ncols; j++)
+	if (cc_buf->nattrs > tupdesc->natts && tup)
 	{
-		kern_colmeta   *cmeta = &kds->colmeta[j];
-		size_t			offset;
-		size_t			nbytes;
-
-		if (!cs_values[j])
-			continue;
-
-		offset = ((char *)pos - (char *)kds);
-		Assert((offset & (MAXIMUM_ALIGNOF - 1)) == 0);
-		cmeta->va_offset = offset / MAXIMUM_ALIGNOF;
-		if (cmeta->attlen < 0)
+		Assert(cc_buf->nattrs == (tupdesc->natts -
+								  FirstLowInvalidHeapAttributeNumber + 1));
+		/* extract system columns */
+		for (j=FirstLowInvalidHeapAttributeNumber+1; j < 0; j++)
 		{
-			/* variable-length column */
-			HASH_SEQ_STATUS hseq;
-			vl_dict_key *entry;
-			cl_uint	   *base = (cl_uint *)pos;
-			size_t		base_len = MAXALIGN(sizeof(cl_uint) * nitems);
-			char	   *extra = pos + base_len;
+			Form_pg_attribute attr = SystemAttributeDefinition(j, true);
+			char   *addr = cc_buf->values[cc_buf->nattrs + j];
+			Datum	datum;
+			bool	isnull;
 
-			hash_seq_init(&hseq, cs_vl_dict[j]);
-			while ((entry = hash_seq_search(&hseq)) != NULL)
-			{
-				offset = (size_t)(extra - (char *)base);
-				Assert((offset & (MAXIMUM_ALIGNOF - 1)) == 0);
+			if (!addr)
+				continue;
+			datum = heap_getsysattr(tup, j, tupdesc, &isnull);
+			Assert(!isnull);
 
-				entry->offset = offset / MAXIMUM_ALIGNOF;
-				nbytes = VARSIZE_ANY(entry->vl_datum);
-				memcpy(extra, entry->vl_datum, nbytes);
-				cmeta->extra_sz += MAXALIGN(nbytes) / MAXIMUM_ALIGNOF;
-				extra += MAXALIGN(nbytes);
-			}
-
-			for (i=0; i < nitems; i++)
-			{
-				entry = ((vl_dict_key **)cs_values[j])[i];
-				if (!entry)
-					base[i] = 0;
-				else
-				{
-					Assert(entry->offset < cmeta->extra_sz + base_len);
-					base[i] = entry->offset;
-				}
-			}
-			pos += (char *)extra - (char *)base;
-		}
-		else
-		{
-			/* fixed-length column */
-			offset = pos - (char *)kds;
-			Assert((offset & (MAXIMUM_ALIGNOF - 1)) == 0);
-
-			cmeta->va_offset = offset / MAXIMUM_ALIGNOF;
-			nbytes = MAXALIGN(TYPEALIGN(cmeta->attalign,
-										cmeta->attlen) * nitems);
-			memcpy(pos, cs_values[j], nbytes);
-			pos += nbytes;
-			/* null bitmap, if any */
-			if (cs_hasnull[j])
-			{
-				cmeta->extra_sz = nbytes = MAXALIGN(BITMAPLEN(nitems));
-				memcpy(pos, cs_nullmap[j], nbytes);
-				pos += nbytes;
-			}
+			addr +=  att_align_nominal(attr->attlen,
+									   attr->attalign) * nitems;
+			if (!attr->attbyval)
+				memcpy(addr, DatumGetPointer(datum), attr->attlen);
+			else
+				memcpy(addr, &datum, attr->attlen);
 		}
 	}
-	Assert(kds->length == (char *)pos - (char *)kds);
+	MemoryContextSwitchTo(oldcxt);
 }
 
 /*
@@ -1516,15 +1862,9 @@ __ccache_preload_chunk(ccacheChunk *cc_chunk,
 {
 	TupleDesc	tupdesc = RelationGetDescr(relation);
 	size_t		nrooms = 0;
-	size_t		nitems = 0;
 	Datum	   *tup_values;
 	bool	   *tup_isnull;
-	void	  **cs_values;
-	bool	   *cs_hasnull;
-	bits8	  **cs_nullmap;
-	HTAB	  **cs_vl_dict;
-	size_t	   *cs_extra_sz;
-	int			ncols;
+	ccacheBuffer cc_buf;
 	int			i, j, fdesc;
 	size_t		length;
 	char		fname[MAXPGPATH];
@@ -1574,51 +1914,14 @@ __ccache_preload_chunk(ccacheChunk *cc_chunk,
 		UnlockReleaseBuffer(buffer);
 	}
 	pfree(strategy);
-	/* ok, all the buffers are all-visible */
-
 	/*
-	 * read buffers and convert to the columnar format
+	 * ok, all the buffers are all-visible
+	 * Let's extract rows
 	 */
-	ncols = tupdesc->natts - (1 + FirstLowInvalidHeapAttributeNumber);
-	cs_values = palloc0(sizeof(void *) * ncols);
-	cs_hasnull = palloc0(sizeof(bool) * ncols);
-	cs_nullmap = palloc0(sizeof(void *) * ncols);
-	cs_vl_dict = palloc0(sizeof(HTAB *) * ncols);
-	cs_extra_sz = palloc0(sizeof(size_t) * ncols);
+	ccache_setup_buffer(tupdesc, &cc_buf, true, nrooms,
+						CurrentMemoryContext);
 	tup_values = palloc(sizeof(Datum) * tupdesc->natts);
 	tup_isnull = palloc(sizeof(bool) * tupdesc->natts);
-	for (j=0; j < tupdesc->natts; j++)
-	{
-		Form_pg_attribute attr = tupdesc->attrs[j];
-
-		if (attr->attlen < 0)
-		{
-			cs_vl_dict[j] = create_varlena_dictionary(nrooms);
-			cs_values[j] = palloc0(sizeof(vl_dict_key) * nrooms);
-		}
-		else
-		{
-			cs_values[j] = palloc(att_align_nominal(attr->attlen,
-													attr->attalign) * nrooms);
-			cs_nullmap[j] = palloc0(BITMAPLEN(nrooms));
-		}
-	}
-	/* system columns (except for 'tableoid') */
-	for (j=FirstLowInvalidHeapAttributeNumber+1; j < 0; j++)
-	{
-		Form_pg_attribute attr = SystemAttributeDefinition(j, true);
-
-		if (j == TableOidAttributeNumber ||
-			(j == ObjectIdAttributeNumber && !tupdesc->tdhasoid))
-			continue;
-		cs_values[ncols + j] =
-			palloc0(att_align_nominal(attr->attlen,
-									  attr->attalign) * nrooms);
-	}
-
-	/*
-	 * extract rows
-	 */
 	for (i=0; i < CCACHE_CHUNK_NBLOCKS; i++)
 	{
 		Page	page = (Page)(PerChunkLoadBuffer + BLCKSZ * i);
@@ -1639,46 +1942,21 @@ __ccache_preload_chunk(ccacheChunk *cc_chunk,
 			tup.t_len = ItemIdGetLength(lpp);
 			ItemPointerSet(&tup.t_self, block_nr+i, lineoff);
 
-			Assert(nitems < nrooms);
+			Assert(cc_buf.nitems < nrooms);
 			heap_deform_tuple(&tup, tupdesc, tup_values, tup_isnull);
-			pgstrom_ccache_extract_row(tupdesc,
-									   nitems, nrooms,
-									   tup_isnull,
-									   tup_values,
-									   cs_nullmap,
-									   cs_hasnull,
-									   cs_values,
-									   cs_vl_dict,
-									   cs_extra_sz);
-			/* extract system columns */
-			for (j=FirstLowInvalidHeapAttributeNumber+1; j < 0; j++)
-			{
-				Form_pg_attribute attr = SystemAttributeDefinition(j, true);
-				char   *base = cs_values[ncols + j];
-				Datum	datum;
-				bool	isnull;
-
-				if (j == TableOidAttributeNumber ||
-					(j == ObjectIdAttributeNumber && !tupdesc->tdhasoid))
-					continue;
-				datum = heap_getsysattr(&tup, j, tupdesc, &isnull);
-				Assert(!isnull);
-
-				base += att_align_nominal(attr->attlen,
-										  attr->attalign) * nitems;
-				if (!attr->attbyval)
-					memcpy(base, DatumGetPointer(datum), attr->attlen);
-				else
-					memcpy(base, &datum, attr->attlen);
-			}
-			nitems++;
+			ccache_buffer_append_row(tupdesc,
+									 &cc_buf,
+									 &tup,
+									 tup_isnull,
+									 tup_values,
+									 CurrentMemoryContext);
+			cc_buf.nitems++;
 		}
 	}
 
-	/*
-	 * write out to the ccache file
-	 */
-	length = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
+	/* write out to the ccache file */
+	length = STROMALIGN(offsetof(kern_data_store,
+								 colmeta[cc_buf.nattrs]));
 	for (j=FirstLowInvalidHeapAttributeNumber+1; j < tupdesc->natts; j++)
 	{
 		Form_pg_attribute attr;
@@ -1696,15 +1974,16 @@ __ccache_preload_chunk(ccacheChunk *cc_chunk,
 
 		if (attr->attlen < 0)
 		{
-			length += (MAXALIGN(sizeof(cl_uint) * nitems) +
-					   MAXALIGN(cs_extra_sz[j]));
+			length += (MAXALIGN(sizeof(cl_uint) * cc_buf.nitems) +
+					   MAXALIGN(cc_buf.extra_sz[j]));
 		}
 		else
 		{
-			length += MAXALIGN(att_align_nominal(attr->attlen,
-												 attr->attalign) * nitems);
-			if (cs_hasnull[j])
-				length += MAXALIGN(BITMAPLEN(nitems));
+			int		unitsz = att_align_nominal(attr->attlen,
+											   attr->attalign);
+			length += MAXALIGN(unitsz * cc_buf.nitems);
+			if (cc_buf.hasnull[j])
+				length += MAXALIGN(BITMAPLEN(cc_buf.nitems));
 		}
 	}
 	ccache_chunk_filename(fname,
@@ -1729,15 +2008,7 @@ __ccache_preload_chunk(ccacheChunk *cc_chunk,
 		close(fdesc);
 		elog(ERROR, "failed on mmap: %m");
 	}
-	init_kernel_data_store(kds, tupdesc, length, KDS_FORMAT_COLUMN, nitems);
-	kds->nitems = nitems;
-	pgstrom_ccache_writeout_chunk(kds,
-								  cs_nullmap,
-								  cs_hasnull,
-								  cs_values,
-								  cs_vl_dict,
-								  cs_extra_sz);
-
+	ccache_copy_buffer_to_kds(kds, tupdesc, &cc_buf, NULL, 0);
 	if (munmap(kds, length) != 0)
 		elog(WARNING, "failed on munmap: %m");
 	if (close(fdesc) != 0)
@@ -1781,7 +2052,7 @@ __ccache_preload_chunk(ccacheChunk *cc_chunk,
 		ccache_state->ccache_usage += TYPEALIGN(BLCKSZ, length);
 
 		cc_chunk->length = length;
-		cc_chunk->nitems = nitems;
+		cc_chunk->nitems = cc_buf.nitems;
 		cc_chunk->nattrs = RelationGetNumberOfAttributes(relation);
 		cc_chunk->ctime = GetCurrentTimestamp();
 		/* move to the LRU active list */

@@ -1831,14 +1831,14 @@ kern_get_datum_column(kern_data_store *kds,
 		if (offset == 0)
 			return NULL;
 		Assert(offset < (__ldg(&kds->nitems) * sizeof(cl_uint) +
-						 __ldg(&cmeta->extra_sz)));
+						 (__ldg(&cmeta->extra_sz) << MAXIMUM_ALIGNOF_SHIFT)));
 		values += (offset << MAXIMUM_ALIGNOF_SHIFT);
 	}
 	else
 	{
-		cl_uint		extra_sz = __ldg(&cmeta->extra_sz);
-		cl_int		unitsz = TYPEALIGN(__ldg(&cmeta->attalign),
-									   __ldg(&cmeta->attlen));
+		cl_uint	extra_sz = __ldg(&cmeta->extra_sz) << MAXIMUM_ALIGNOF_SHIFT;
+		cl_int	unitsz = TYPEALIGN(__ldg(&cmeta->attalign),
+								   __ldg(&cmeta->attlen));
 		if (extra_sz > 0)
 		{
 			Assert(MAXALIGN(BITMAPLEN(__ldg(&kds->nitems))) == extra_sz);

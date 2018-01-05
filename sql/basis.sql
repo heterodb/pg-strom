@@ -232,14 +232,14 @@ CREATE FUNCTION public.gstore_fdw_format(reggstore)
   AS 'MODULE_PATHNAME','pgstrom_gstore_fdw_format'
   LANGUAGE C STRICT;
 
-CREATE FUNCTION public.gstore_fdw_height(reggstore)
+CREATE FUNCTION public.gstore_fdw_nitems(reggstore)
   RETURNS bigint
-  AS 'MODULE_PATHNAME','pgstrom_gstore_fdw_height'
+  AS 'MODULE_PATHNAME','pgstrom_gstore_fdw_nitems'
   LANGUAGE C STRICT;
 
-CREATE FUNCTION public.gstore_fdw_width(reggstore)
+CREATE FUNCTION public.gstore_fdw_nattrs(reggstore)
   RETURNS bigint
-  AS 'MODULE_PATHNAME','pgstrom_gstore_fdw_width'
+  AS 'MODULE_PATHNAME','pgstrom_gstore_fdw_nattrs'
   LANGUAGE C STRICT;
 
 CREATE FUNCTION public.gstore_fdw_rawsize(reggstore)

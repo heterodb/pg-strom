@@ -175,6 +175,52 @@ KDS_fetch_tuple_block(TupleTableSlot *slot,
 }
 
 bool
+KDS_fetch_tuple_column(TupleTableSlot *slot,
+					   kern_data_store *kds,
+					   size_t row_index)
+{
+	TupleDesc	tupdesc = slot->tts_tupleDescriptor;
+	int			j;
+
+	Assert(kds->format == KDS_FORMAT_COLUMN);
+	Assert(kds->ncols == (tupdesc->natts -
+						  FirstLowInvalidHeapAttributeNumber + 1));
+	if (row_index >= kds->nitems)
+	{
+		ExecClearTuple(slot);
+		return false;
+	}
+
+	for (j=0; j < kds->ncols; j++)
+	{
+		void   *addr = kern_get_datum_column(kds, j, row_index);
+		int		attlen = kds->colmeta[j].attlen;
+
+		if (!addr)
+			slot->tts_isnull[j] = true;
+		else
+		{
+			slot->tts_isnull[j] = false;
+			if (!kds->colmeta[j].attbyval)
+				slot->tts_values[j] = PointerGetDatum(addr);
+			else if (attlen == sizeof(cl_char))
+				slot->tts_values[j] = CharGetDatum(*((cl_char *)addr));
+			else if (attlen == sizeof(cl_short))
+				slot->tts_values[j] = Int16GetDatum(*((cl_short *)addr));
+			else if (attlen == sizeof(cl_int))
+				slot->tts_values[j] = Int32GetDatum(*((cl_int *)addr));
+			else if (attlen == sizeof(cl_long))
+				slot->tts_values[j] = Int64GetDatum(*((cl_long *)addr));
+			else
+				elog(ERROR, "unexpected attlen: %d", attlen);
+		}
+	}
+	ExecStoreVirtualTuple(slot);
+
+	return true;
+}
+
+bool
 PDS_fetch_tuple(TupleTableSlot *slot,
 				pgstrom_data_store *pds,
 				GpuTaskState *gts)
@@ -188,6 +234,8 @@ PDS_fetch_tuple(TupleTableSlot *slot,
 			return KDS_fetch_tuple_slot(slot, &pds->kds, gts);
 		case KDS_FORMAT_BLOCK:
 			return KDS_fetch_tuple_block(slot, &pds->kds, gts);
+		case KDS_FORMAT_COLUMN:
+			return KDS_fetch_tuple_column(slot, &pds->kds, gts->curr_index++);
 		default:
 			elog(ERROR, "Bug? unsupported data store format: %d",
 				pds->kds.format);

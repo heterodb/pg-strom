@@ -882,10 +882,9 @@ extern void pgstrom_init_codegen(void);
  */
 extern bool pgstrom_bulk_exec_supported(const PlanState *planstate);
 extern cl_uint estimate_num_chunks(Path *pathnode);
-extern bool pgstrom_fetch_data_store(TupleTableSlot *slot,
-									 pgstrom_data_store *pds,
-									 size_t row_index,
-									 HeapTuple tuple);
+extern bool KDS_fetch_tuple_column(TupleTableSlot *slot,
+								   kern_data_store *kds,
+								   size_t row_index);
 extern bool PDS_fetch_tuple(TupleTableSlot *slot,
 							pgstrom_data_store *pds,
 							GpuTaskState *gts);
@@ -1080,7 +1079,42 @@ typedef struct
 	cl_uint		offset;		/* to be used later */
 	struct varlena *vl_datum;
 } vl_dict_key;
-extern HTAB *create_varlena_dictionary(size_t nrooms);
+
+typedef struct
+{
+	int			nattrs;
+	size_t		nitems;
+	size_t		nrooms;
+	bool	   *hasnull;
+	bits8	  **nullmap;
+	void	  **values;
+	HTAB	  **vl_dict;
+	size_t	   *extra_sz;
+} ccacheBuffer;
+
+extern void ccache_setup_buffer(TupleDesc tupdesc,
+								ccacheBuffer *cc_buf,
+								bool with_syscols,
+								size_t nrooms,
+								MemoryContext memcxt);
+extern void ccache_expand_buffer(TupleDesc tupdesc,
+								 ccacheBuffer *cc_buf,
+								 MemoryContext memcxt);
+extern void ccache_release_buffer(ccacheBuffer *cc_buf);
+extern void ccache_buffer_append_row(TupleDesc tupdesc,
+									 ccacheBuffer *cc_buf,
+									 HeapTuple tup, /* only for syscols */
+									 bool *tup_isnull,
+									 Datum *tup_values,
+									 MemoryContext memcxt);
+extern void ccache_copy_buffer_from_kds(TupleDesc tupdesc,
+										ccacheBuffer *cc_buf,
+										kern_data_store *kds,
+										MemoryContext mcxt);
+extern void ccache_copy_buffer_to_kds(kern_data_store *kds,
+									  TupleDesc tupdesc,
+									  ccacheBuffer *cc_buf,
+									  bits8 *rowmap, size_t visible_nitems);
 extern void pgstrom_ccache_extract_row(TupleDesc tupdesc,
 									   size_t nitems,
 									   size_t nrooms,
@@ -1135,11 +1169,10 @@ extern void gstore_fdw_load_function_args(GpuContext *gcontext,
 										  List **p_gstore_devptr_list,
 										  List **p_gstore_dindex_list);
 extern Datum pgstrom_gstore_fdw_format(PG_FUNCTION_ARGS);
-extern Datum pgstrom_gstore_fdw_height(PG_FUNCTION_ARGS);
-extern Datum pgstrom_gstore_fdw_width(PG_FUNCTION_ARGS);
+extern Datum pgstrom_gstore_fdw_nitems(PG_FUNCTION_ARGS);
+extern Datum pgstrom_gstore_fdw_nattrs(PG_FUNCTION_ARGS);
 extern Datum pgstrom_gstore_fdw_rawsize(PG_FUNCTION_ARGS);
 extern void pgstrom_init_gstore_fdw(void);
-
 
 /*
  * misc.c
@@ -1456,6 +1489,11 @@ __basename(const char *filename)
 
 	return pos ? pos + 1 : filename;
 }
+
+/*
+ * XXX - why PG does not have palloc_huge()?
+ */
+#define palloc_huge(sz)		MemoryContextAllocHuge(CurrentMemoryContext,(sz))
 
 /*
  * simple wrapper for pthread_mutex_lock
