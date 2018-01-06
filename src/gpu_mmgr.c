@@ -1055,6 +1055,111 @@ gpuMemReclaimSegment(GpuContext *gcontext)
 }
 
 /*
+ * gpuIpcMemCopyToHost / gpuIpcMemCopyFromHost
+ */
+static void
+__gpuIpcMemCopyCommon(cl_int cuda_dindex,
+					  CUipcMemHandle ipc_mhandle,
+					  void *hbuffer, size_t length,
+					  bool host_to_device)
+{
+	CUdevice	cuda_device;
+	CUcontext	cuda_context = NULL;
+	CUdeviceptr	m_deviceptr = 0UL;
+	CUresult	rc;
+
+	PG_TRY();
+	{
+		rc = gpuInit(0);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on gpuInit: %s", errorText(rc));
+
+		Assert(cuda_dindex >= 0 && cuda_dindex < numDevAttrs);
+		rc = cuDeviceGet(&cuda_device, devAttrs[cuda_dindex].DEV_ID);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuDeviceGet: %s", errorText(rc));
+
+		rc = cuCtxCreate(&cuda_context, 0, cuda_device);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuCtxCreate: %s", errorText(rc));
+
+		rc = cuIpcOpenMemHandle(&m_deviceptr,
+								ipc_mhandle,
+								CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS);
+		if (rc == CUDA_ERROR_UNKNOWN)
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("failed on cuIpcOpenMemHandle: %s", errorText(rc)),
+					 errdetail("Likely a known issue at CUDA9.x or prior - application cannot open IPC handle of device memory allocated under non-MPS context on the CUDA context with MPS proxy. NVIDIA says it should be fixed at CUDA10."),
+					 errhint("Stop CUDA MPS daemon; echo quit | nvidia-cuda-mps-control")));
+		else if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuIpcOpenMemHandle: %s", errorText(rc));
+
+		if (host_to_device)
+		{
+			rc = cuMemcpyHtoD(m_deviceptr, hbuffer, length);
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on cuMemcpyHtoD: %s", errorText(rc));
+		}
+		else
+		{
+			rc = cuMemcpyDtoH(hbuffer, m_deviceptr, length);
+			if (rc != CUDA_SUCCESS)
+				elog(ERROR, "failed on cuMemcpyDtoH: %s", errorText(rc));
+		}
+
+		rc = cuIpcCloseMemHandle(m_deviceptr);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuIpcCloseMemHandle: %s", errorText(rc));
+		m_deviceptr = 0UL;
+
+		rc = cuCtxPopCurrent(NULL);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuCtxPopCurrent: %s", errorText(rc));
+
+		rc = cuCtxDestroy(cuda_context);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuCtxDestroy: %s", errorText(rc));
+	}
+	PG_CATCH();
+	{
+		if (m_deviceptr != 0UL)
+		{
+			rc = cuIpcCloseMemHandle(m_deviceptr);
+			if (rc != CUDA_SUCCESS)
+				elog(WARNING, "failed on cuIpcCloseMemHandle: %s",
+					 errorText(rc));
+		}
+		if (cuda_context)
+		{
+			rc = cuCtxDestroy(cuda_context);
+			if (rc != CUDA_SUCCESS)
+			   elog(WARNING, "failed on cuCtxDestroy: %s", errorText(rc));
+		}
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+}
+
+void
+gpuIpcMemCopyFromHost(cl_int cuda_dindex,
+					  CUipcMemHandle ipc_mhandle,
+					  void *hbuffer,
+					  size_t length)
+{
+	__gpuIpcMemCopyCommon(cuda_dindex, ipc_mhandle, hbuffer, length, true);
+}
+
+void
+gpuIpcMemCopyToHost(cl_int cuda_dindex,
+					CUipcMemHandle ipc_mhandle,
+					void *hbuffer,
+					size_t length)
+{
+	__gpuIpcMemCopyCommon(cuda_dindex, ipc_mhandle, hbuffer, length, false);
+}
+
+/*
  * pgstrom_gpu_mmgr_init_gpucontext - Per GpuContext initialization
  */
 void

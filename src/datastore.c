@@ -182,16 +182,22 @@ KDS_fetch_tuple_column(TupleTableSlot *slot,
 	TupleDesc	tupdesc = slot->tts_tupleDescriptor;
 	int			j;
 
+	/*
+	 * XXX - Is a mode to fetch system columns (if any) valuable?
+	 * Right now, KDS_fetch_tuple_column() is only used by gstore_fdw.c
+	 * to fetch rows from KDS(column), however, its transaction control
+	 * properties are separately saved, thus, nobody tries to pick up
+	 * system columns via this API.
+	 */
 	Assert(kds->format == KDS_FORMAT_COLUMN);
-	Assert(kds->ncols == (tupdesc->natts -
-						  FirstLowInvalidHeapAttributeNumber + 1));
+	Assert(kds->ncols == tupdesc->natts + NumOfSystemAttrs);
 	if (row_index >= kds->nitems)
 	{
 		ExecClearTuple(slot);
 		return false;
 	}
 
-	for (j=0; j < kds->ncols; j++)
+	for (j=0; j < tupdesc->natts; j++)
 	{
 		void   *addr = kern_get_datum_column(kds, j, row_index);
 		int		attlen = kds->colmeta[j].attlen;
@@ -400,8 +406,7 @@ init_kernel_data_store(kern_data_store *kds,
 	 */
 	if (format == KDS_FORMAT_COLUMN)
 	{
-		kds->ncols += -(1 + FirstLowInvalidHeapAttributeNumber);
-
+		kds->ncols += NumOfSystemAttrs;
 		for (j=FirstLowInvalidHeapAttributeNumber+1; j < 0; j++)
 		{
 			Form_pg_attribute attr = SystemAttributeDefinition(j, true);

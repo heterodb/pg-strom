@@ -726,12 +726,29 @@ GpuContextWorkerMain(void *arg)
 }
 
 /*
+ * gpuInit - a thin wrapper for cuInit
+ */
+CUresult
+gpuInit(unsigned int flags)
+{
+	static bool	cuda_driver_initialized = false;
+	CUresult	rc = CUDA_SUCCESS;
+
+	if (!cuda_driver_initialized)
+	{
+		rc = cuInit(0);
+		if (rc == CUDA_SUCCESS)
+			cuda_driver_initialized = true;
+	}
+	return rc;
+}
+
+/*
  * GetGpuContext - acquire a free GpuContext
  */
 GpuContext *
 AllocGpuContext(int cuda_dindex, bool never_use_mps)
 {
-	static bool		cuda_driver_initialized = false;
 	GpuContextIPCEntry *ipc_entry;
 	GpuContext	   *gcontext = NULL;
 	dlist_node	   *dnode;
@@ -740,14 +757,9 @@ AllocGpuContext(int cuda_dindex, bool never_use_mps)
 	int				i, num_workers = local_max_async_tasks;
 
 	/* per-process driver initialization */
-	if (!cuda_driver_initialized)
-	{
-		rc = cuInit(0);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuInit: %s", errorText(rc));
-		cuda_driver_initialized = true;
-		elog(DEBUG2, "CUDA Driver Initialized");
-	}
+	rc = gpuInit(0);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on gpuInit: %s", errorText(rc));
 
 	/*
 	 * Lookup an existing active GpuContext
@@ -1002,7 +1014,10 @@ SwitchGpuContext(GpuContext *gcontext, int cuda_dindex)
 	{
 		rc = cuCtxPushCurrent(gcontext->cuda_context);
 		if (rc != CUDA_SUCCESS)
+		{
+			Assert(false);
 			wfatal("failed on cuCtxPushCurrent: %s", errorText(rc));
+		}
 	}
 	else
 	{

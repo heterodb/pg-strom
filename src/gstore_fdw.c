@@ -95,6 +95,7 @@ typedef struct
 {
 	GpuStoreBuffer *gs_buffer;
 	cl_ulong		gs_index;
+	AttrNumber		ctid_anum;	/* only UPDATE or DELETE */
 } GpuStoreExecState;
 
 /* ---- static functions ---- */
@@ -222,7 +223,7 @@ gstore_fdw_tuple_visibility(MVCCAttrs *mvcc, Snapshot snapshot)
 static bits8 *
 gstore_fdw_visibility_bitmap(GpuStoreBuffer *gs_buffer, size_t *p_nrooms)
 {
-	size_t		i, nitems = gs_buffer->cc_buf.nitems;
+	size_t		i, j, nitems = gs_buffer->cc_buf.nitems;
 	size_t		nrooms = 0;
 	bits8	   *rowmap;
 
@@ -233,10 +234,12 @@ gstore_fdw_visibility_bitmap(GpuStoreBuffer *gs_buffer, size_t *p_nrooms)
 	}
 
 	rowmap = palloc0(BITMAPLEN(nitems));
-	for (i=0; i < nitems; i++)
+	for (i=0, j=-1; i < nitems; i++)
 	{
 		MVCCAttrs  *mvcc = &gs_buffer->cs_mvcc[i];
 
+		if ((i & (BITS_PER_BYTE-1)) == 0)
+			j++;
 		if (!TransactionIdIsCurrentTransactionId(mvcc->xmax))
 		{
 			/*
@@ -246,11 +249,9 @@ gstore_fdw_visibility_bitmap(GpuStoreBuffer *gs_buffer, size_t *p_nrooms)
 			 * UPDATE/DELETE), so no need to pay attention for the updates
 			 * by the concurrent transactions.
 			 */
-			*rowmap |= 1 << (i & (BITS_PER_BYTE-1));
+			rowmap[j] |= (1 << (i & 7));
 			nrooms++;
 		}
-		if (i % BITS_PER_BYTE == BITS_PER_BYTE - 1)
-			rowmap++;
 	}
 	*p_nrooms = nrooms;
 	return rowmap;
@@ -316,17 +317,16 @@ gstore_fdw_lookup_chunk(Oid gstore_oid, Snapshot snapshot)
  * gstore_fdw_insert_chunk - host-to-device DMA
  */
 static void
-gstore_fdw_insert_chunk(GpuContext *gcontext,
-						GpuStoreBuffer *gs_buffer,
-						size_t nrooms)
+gstore_fdw_insert_chunk(GpuStoreBuffer *gs_buffer, size_t nrooms)
 {
-	CUdeviceptr		m_deviceptr;
 	CUresult		rc;
 	dlist_node	   *dnode;
 	GpuStoreChunk  *gs_chunk;
 	pg_crc32		hash;
 	int				index;
 	dlist_iter		iter;
+
+	Assert(gs_buffer->pinning < numDevAttrs);
 
 	/* setup GpuStoreChunk */
 	SpinLockAcquire(&gstore_head->lock);
@@ -356,40 +356,23 @@ gstore_fdw_insert_chunk(GpuContext *gcontext,
 	gs_chunk->nitems = nrooms;
 
 	/* DMA to device */
+	rc = gpuMemAllocPreserved(gs_buffer->pinning,
+							  &gs_chunk->ipc_mhandle,
+							  gs_buffer->rawsize);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on gpuMemAllocPreserved: %s", errorText(rc));
+
 	PG_TRY();
 	{
-		rc = gpuMemAllocPreserved(gs_buffer->pinning,
-								  &gs_chunk->ipc_mhandle,
-								  gs_buffer->rawsize);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on gpuMemAllocPreserved: %s", errorText(rc));
-
-		SwitchGpuContext(gcontext, gs_buffer->pinning);
-
-		rc = gpuIpcOpenMemHandle(gcontext,
-								 &m_deviceptr,
-								 gs_chunk->ipc_mhandle,
-								 CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on gpuIpcOpenMemHandle: %s", errorText(rc));
-
-		rc = cuMemcpyHtoD(m_deviceptr,
-						  gs_buffer->h.buffer,
-						  gs_buffer->rawsize);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuMemcpyHtoD: %s", errorText(rc));
-
-		rc = gpuIpcCloseMemHandle(gcontext, m_deviceptr);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on gpuIpcCloseMemHandle: %s", errorText(rc));
-
-		rc = cuCtxPopCurrent(NULL);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on cuCtxPopCurrent: %s", errorText(rc));
+		gpuIpcMemCopyFromHost(gs_chunk->pinning,
+							  gs_chunk->ipc_mhandle,
+							  gs_buffer->h.buffer,
+							  gs_buffer->rawsize);
 	}
 	PG_CATCH();
 	{
-		gpuMemFreePreserved(gs_buffer->pinning, gs_chunk->ipc_mhandle);
+		gpuMemFreePreserved(gs_buffer->pinning,
+							gs_chunk->ipc_mhandle);
 		memset(gs_chunk, 0, sizeof(GpuStoreChunk));
 		SpinLockAcquire(&gstore_head->lock);
 		dlist_push_head(&gstore_head->free_chunks, &gs_chunk->chain);
@@ -397,6 +380,7 @@ gstore_fdw_insert_chunk(GpuContext *gcontext,
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
+	gs_buffer->revision = gs_chunk->revision;
 
 	/* add GpuStoreChunk to the shared hash table */
 	index = gs_chunk->hash % GSTORE_CHUNK_HASH_NSLOTS;
@@ -508,6 +492,7 @@ gstore_fdw_make_buffer_writable(Relation frel, GpuStoreBuffer *gs_buffer)
 			mvcc->xmax_committed = false;
 		}
 	}
+	gs_buffer->read_only = false;
 }
 
 /*
@@ -518,7 +503,7 @@ gstore_fdw_create_buffer(Relation frel, Snapshot snapshot)
 {
 	GpuStoreBuffer *gs_buffer = NULL;
 	GpuStoreChunk  *gs_chunk = NULL;
-	MemoryContext	memcxt;
+	MemoryContext	memcxt = NULL;
 	bool			found;
 
 	if (!gstore_buffer_htab)
@@ -537,10 +522,10 @@ gstore_fdw_create_buffer(Relation frel, Snapshot snapshot)
 	}
 
 	gs_buffer = hash_search(gstore_buffer_htab,
-						   &RelationGetRelid(frel),
-						   HASH_FIND,
-						   &found);
-	if (gs_buffer)
+							&RelationGetRelid(frel),
+							HASH_ENTER,
+							&found);
+	if (found)
 	{
 		Assert(gs_buffer->table_oid == RelationGetRelid(frel));
 		gs_chunk = gstore_fdw_lookup_chunk(RelationGetRelid(frel), snapshot);
@@ -553,71 +538,54 @@ gstore_fdw_create_buffer(Relation frel, Snapshot snapshot)
 			return gs_buffer;		/* ok local buffer is up to date */
 		/* oops, local cache is older than in-GPU image... */
 		MemoryContextDelete(gs_buffer->memcxt);
-		hash_search(gstore_buffer_htab,
-					&RelationGetRelid(frel),
-					HASH_REMOVE,
-					&found);
-		Assert(found);
 	}
 	else
 	{
 		gs_chunk = gstore_fdw_lookup_chunk(RelationGetRelid(frel), snapshot);
 	}
-	/* create a new one */
-	memcxt = AllocSetContextCreate(CacheMemoryContext,
-								   "GpuStoreBuffer",
-								   ALLOCSET_DEFAULT_SIZES);
+
+	/*
+	 * Local buffer is not found, or invalid. So, re-initialize it again.
+	 */
 	PG_TRY();
 	{
 		cl_int		pinning;
 		cl_int		format;
 		cl_uint		revision;
 
-		if (gs_chunk)
+		memcxt = AllocSetContextCreate(CacheMemoryContext,
+									   "GpuStoreBuffer",
+									   ALLOCSET_DEFAULT_SIZES);
+		if (!gs_chunk)
 		{
-			GpuContext *gcontext;
-			CUdeviceptr	m_deviceptr;
-			CUresult	rc;
+			gstore_fdw_table_options(RelationGetRelid(frel),
+									 &pinning, &format);
+			gs_buffer->pinning   = pinning;
+			gs_buffer->format    = format;
+			gs_buffer->revision  = 0;
+			gs_buffer->read_only = true;
+			gs_buffer->is_dirty  = false;
+			gs_buffer->memcxt    = memcxt;
+			gs_buffer->h.buffer  = NULL;
+			gs_buffer->cs_mvcc   = NULL;
+			memset(&gs_buffer->cc_buf, 0, sizeof(ccacheBuffer));
+			gstore_fdw_make_buffer_writable(frel, gs_buffer);
+		}
+		else
+		{
+			size_t		rawsize;
 			void	   *hbuf;
 
-			gcontext = AllocGpuContext(gs_chunk->pinning, false);
 			pinning  = gs_chunk->pinning;
 			format   = gs_chunk->format;
 			revision = gs_chunk->revision;
-			hbuf = MemoryContextAlloc(memcxt, gs_chunk->rawsize);
+			rawsize  = gs_chunk->rawsize;
+			hbuf = MemoryContextAlloc(memcxt, rawsize);
 
-			rc = gpuIpcOpenMemHandle(gcontext,
-									 &m_deviceptr,
-									 gs_chunk->ipc_mhandle,
-									 CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS);
-			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on gpuIpcOpenMemHandle: %s",
-					 errorText(rc));
+			gpuIpcMemCopyToHost(gs_chunk->pinning,
+								gs_chunk->ipc_mhandle,
+								hbuf, rawsize);
 
-			rc = cuCtxPushCurrent(gcontext->cuda_context);
-			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
-
-			rc = cuMemcpyHtoD(m_deviceptr, hbuf, gs_chunk->rawsize);
-			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on cuMemcpyHtoD: %s", errorText(rc));
-
-			rc = gpuIpcCloseMemHandle(gcontext, m_deviceptr);
-			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on gpuIpcCloseMemHandle: %s",
-					 errorText(rc));
-
-			rc = cuCtxPopCurrent(NULL);
-			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on cuCtxPopCurrent: %s", errorText(rc));
-
-			PutGpuContext(gcontext);
-
-			gs_buffer = hash_search(gstore_buffer_htab,
-									&RelationGetRelid(frel),
-									HASH_ENTER,
-									&found);
-			Assert(!found);
 			Assert(gs_buffer->table_oid == RelationGetRelid(frel));
 			gs_buffer->pinning   = pinning;
 			gs_buffer->format    = format;
@@ -626,28 +594,9 @@ gstore_fdw_create_buffer(Relation frel, Snapshot snapshot)
 			gs_buffer->is_dirty  = false;
 			gs_buffer->memcxt    = memcxt;
 			gs_buffer->h.buffer  = hbuf;
+			gs_buffer->rawsize   = rawsize;
 			gs_buffer->cs_mvcc   = NULL;
 			memset(&gs_buffer->cc_buf, 0, sizeof(ccacheBuffer));
-		}
-		else
-		{
-			gstore_fdw_table_options(RelationGetRelid(frel),
-									 &pinning, &format);
-			gs_buffer = hash_search(gstore_buffer_htab,
-									&RelationGetRelid(frel),
-									HASH_ENTER,
-									&found);
-			Assert(!found);
-			gs_buffer->pinning   = pinning;
-			gs_buffer->format    = format;
-			gs_buffer->revision  = 0;
-			gs_buffer->read_only = false;
-			gs_buffer->is_dirty  = false;
-			gs_buffer->memcxt    = memcxt;
-			gs_buffer->h.buffer  = NULL;
-			gs_buffer->cs_mvcc   = NULL;
-			memset(&gs_buffer->cc_buf, 0, sizeof(ccacheBuffer));
-			gstore_fdw_make_buffer_writable(frel, gs_buffer);
 		}
 	}
 	PG_CATCH();
@@ -660,7 +609,9 @@ gstore_fdw_create_buffer(Relation frel, Snapshot snapshot)
 						&found);
 			Assert(found);
 		}
-		MemoryContextDelete(memcxt);
+		if (memcxt)
+			MemoryContextDelete(memcxt);
+		PG_RE_THROW();
 	}
 	PG_END_TRY();
 
@@ -798,19 +749,13 @@ static void
 gstoreBeginForeignScan(ForeignScanState *node, int eflags)
 {
 	EState	   *estate = node->ss.ps.state;
-	Relation	frel = node->ss.ss_currentRelation;
 	GpuStoreExecState *gstate;
-	int			pinning;
-	int			format;
 
 	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
 		return;
 
 	if (!IsMVCCSnapshot(estate->es_snapshot))
 		elog(ERROR, "cannot scan gstore_fdw table without MVCC snapshot");
-
-	gstore_fdw_table_options(RelationGetRelid(frel),
-							 &pinning, &format);
 
 	gstate = palloc0(sizeof(GpuStoreExecState));
 	node->fdw_state = (void *) gstate;
@@ -831,6 +776,8 @@ gstoreIterateForeignScan(ForeignScanState *node)
 	ForeignScan	   *fscan = (ForeignScan *)node->ss.ps.plan;
 	GpuStoreBuffer *gs_buffer;
 	size_t			row_index;
+
+	MemoryContextCheck(estate->es_query_cxt);
 
 	ExecClearTuple(slot);
 	if (!gstate->gs_buffer)
@@ -917,15 +864,24 @@ lnext:
 	if (fscan->fsSystemCol && !TupIsNull(slot))
 	{
 		HeapTuple   tup = ExecMaterializeSlot(slot);
-		MVCCAttrs  *mvcc = &gs_buffer->cs_mvcc[row_index];
 
 		tup->t_self.ip_blkid.bi_hi = (row_index >> 32) & 0x0000ffff;
 		tup->t_self.ip_blkid.bi_lo = (row_index >> 16) & 0x0000ffff;
 		tup->t_self.ip_posid       = (row_index & 0x0000ffff);
 		tup->t_tableOid = RelationGetRelid(frel);
-		tup->t_data->t_choice.t_heap.t_xmin = mvcc->xmin;
-		tup->t_data->t_choice.t_heap.t_xmax = mvcc->xmax;
-		tup->t_data->t_choice.t_heap.t_field3.t_cid = mvcc->cid;
+		if (gs_buffer->read_only)
+		{
+			tup->t_data->t_choice.t_heap.t_xmin = FrozenTransactionId;
+			tup->t_data->t_choice.t_heap.t_xmax = InvalidTransactionId;
+			tup->t_data->t_choice.t_heap.t_field3.t_cid = 0;
+		}
+		else
+		{
+			MVCCAttrs  *mvcc = &gs_buffer->cs_mvcc[row_index];
+			tup->t_data->t_choice.t_heap.t_xmin = mvcc->xmin;
+			tup->t_data->t_choice.t_heap.t_xmax = mvcc->xmax;
+			tup->t_data->t_choice.t_heap.t_field3.t_cid = mvcc->cid;
+		}
 	}
 	return slot;
 }
@@ -948,13 +904,19 @@ static void
 gstoreEndForeignScan(ForeignScanState *node)
 {
 	GpuStoreExecState  *gstate = (GpuStoreExecState *) node->fdw_state;
-	GpuStoreBuffer	   *gs_buffer = gstate->gs_buffer;
 
-	/* once buffer gets dirty, read-only buffer is not valid any more */
-	if (gs_buffer->is_dirty && gs_buffer->h.buffer)
+	if (gstate)
 	{
-		pfree(gs_buffer->h.buffer);
-		gs_buffer->h.buffer = NULL;
+		GpuStoreBuffer *gs_buffer = gstate->gs_buffer;
+		/*
+		 * Once buffer gets dirty, read-only buffer shall not
+		 * contain valid image no longer.
+		 */
+		if (gs_buffer->is_dirty && gs_buffer->h.buffer)
+		{
+			pfree(gs_buffer->h.buffer);
+			gs_buffer->h.buffer = NULL;
+		}
 	}
 }
 
@@ -989,7 +951,8 @@ gstoreBeginForeignModify(ModifyTableState *mtstate,
 						 int eflags)
 {
 	GpuStoreExecState *gstate = palloc0(sizeof(GpuStoreExecState));
-	Relation		frel = rrinfo->ri_RelationDesc;
+	Relation	frel = rrinfo->ri_RelationDesc;
+	CmdType		operation = mtstate->operation;
 
 	/*
 	 * NOTE: gstore_fdw does not support update operations by multiple
@@ -999,6 +962,17 @@ gstoreBeginForeignModify(ModifyTableState *mtstate,
 	 */
 	LockRelationOid(RelationGetRelid(frel), ShareUpdateExclusiveLock);
 
+	/* Find the ctid resjunk column in the subplan's result */
+	if (operation == CMD_UPDATE || operation == CMD_DELETE)
+	{
+		Plan	   *subplan = mtstate->mt_plans[subplan_index]->plan;
+		AttrNumber	ctid_anum;
+
+		ctid_anum = ExecFindJunkAttributeInTlist(subplan->targetlist, "ctid");
+		if (!AttributeNumberIsValid(ctid_anum))
+			elog(ERROR, "could not find junk ctid column");
+		gstate->ctid_anum = ctid_anum;
+	}
 	rrinfo->ri_FdwState = gstate;
 }
 
@@ -1029,6 +1003,7 @@ gstoreExecForeignInsert(EState *estate,
 	if (gs_buffer->read_only)
 		gstore_fdw_make_buffer_writable(frel, gs_buffer);
 	cc_buf = &gs_buffer->cc_buf;
+
 	/* expand buffer on demand */
 	while (cc_buf->nitems >= cc_buf->nrooms)
 	{
@@ -1050,7 +1025,6 @@ gstoreExecForeignInsert(EState *estate,
 	mvcc->xmin = GetCurrentTransactionId();
 	mvcc->xmax = InvalidTransactionId;
 	mvcc->cid  = snapshot->curcid;
-
 	gs_buffer->is_dirty = true;
 
 	return slot;
@@ -1071,8 +1045,10 @@ gstoreExecForeignUpdate(EState *estate,
 	Snapshot		snapshot = estate->es_snapshot;
 	GpuStoreBuffer *gs_buffer;
 	ccacheBuffer   *cc_buf;
+	Datum			datum;
+	bool			isnull;
+	ItemPointer		t_self;
 	MVCCAttrs	   *mvcc;
-	HeapTuple		tup;
 	size_t			index;
 
 	if (snapshot->curcid > INT_MAX)
@@ -1085,7 +1061,23 @@ gstoreExecForeignUpdate(EState *estate,
 		gstore_fdw_make_buffer_writable(frel, gs_buffer);
 	cc_buf = &gs_buffer->cc_buf;
 
-	/* expand buffer on demand */
+	/* extract ctid from a resjunk column */
+	datum = ExecGetJunkAttribute(planSlot,
+								 gstate->ctid_anum,
+								 &isnull);
+	if (isnull)
+		elog(ERROR, "gstore_fdw: ctid is null");
+	t_self = (ItemPointer)DatumGetPointer(datum);
+	index = (((cl_ulong)ItemPointerGetBlockNumber(t_self) << 16) |
+			 ((cl_ulong)ItemPointerGetOffsetNumber(t_self) & 0x0000ffffL));
+	if (index >= gs_buffer->cc_buf.nitems)
+		elog(ERROR, "gstore_fdw: UPDATE row out of range (%lu of %zu)",
+			 index, gs_buffer->cc_buf.nitems);
+	mvcc = &gs_buffer->cs_mvcc[index];
+	mvcc->xmax = GetCurrentTransactionId();
+	mvcc->cid  = snapshot->curcid;
+
+	/* insert a new version */
 	while (cc_buf->nitems >= cc_buf->nrooms)
 	{
 		ccache_expand_buffer(tupdesc, cc_buf, gs_buffer->memcxt);
@@ -1093,7 +1085,6 @@ gstoreExecForeignUpdate(EState *estate,
 										   sizeof(HeapTupleFields) *
 										   cc_buf->nrooms);
 	}
-	/* insert a new version */
 	ccache_buffer_append_row(RelationGetDescr(frel),
 							 cc_buf,
 							 NULL,	/* no system columns */
@@ -1105,18 +1096,6 @@ gstoreExecForeignUpdate(EState *estate,
 	memset(mvcc, 0, sizeof(MVCCAttrs));
 	mvcc->xmin = GetCurrentTransactionId();
 	mvcc->xmax = InvalidTransactionId;
-	mvcc->cid  = snapshot->curcid;
-
-	/* delete old version */
-	tup = ExecMaterializeSlot(slot);
-	index = (((cl_ulong)tup->t_self.ip_blkid.bi_hi << 32) |
-			 ((cl_ulong)tup->t_self.ip_blkid.bi_lo << 16) |
-			 ((cl_ulong)tup->t_self.ip_posid));
-	if (index >= gs_buffer->cc_buf.nitems)
-		elog(ERROR, "gstore_fdw: UPDATE row out of range (%lu of %zu)",
-			 index, gs_buffer->cc_buf.nrooms);
-	mvcc = &gs_buffer->cs_mvcc[index];
-	mvcc->xmax = GetCurrentTransactionId();
 	mvcc->cid  = snapshot->curcid;
 
 	/* make buffer dirty */
@@ -1138,7 +1117,9 @@ gstoreExecForeignDelete(EState *estate,
 	Relation		frel = rrinfo->ri_RelationDesc;
 	Snapshot		snapshot = estate->es_snapshot;
 	GpuStoreBuffer *gs_buffer;
-	HeapTuple		tup;
+	Datum			datum;
+	bool			isnull;
+	ItemPointer		t_self;
 	MVCCAttrs	   *mvcc;
 	cl_ulong		index;
 
@@ -1151,13 +1132,18 @@ gstoreExecForeignDelete(EState *estate,
 	if (gs_buffer->read_only)
 		gstore_fdw_make_buffer_writable(frel, gs_buffer);
 
-	tup = ExecMaterializeSlot(slot);
-	index = (((cl_ulong)tup->t_self.ip_blkid.bi_hi << 32) |
-			 ((cl_ulong)tup->t_self.ip_blkid.bi_lo << 16) |
-			 ((cl_ulong)tup->t_self.ip_posid));
-	if (index >= gs_buffer->cc_buf.nrooms)
+	/* extract ctid from a resjunk column */
+	datum = ExecGetJunkAttribute(planSlot,
+								 gstate->ctid_anum,
+								 &isnull);
+	if (isnull)
+		elog(ERROR, "gstore_fdw: ctid is null");
+	t_self = (ItemPointer)DatumGetPointer(datum);
+	index = (((cl_ulong)ItemPointerGetBlockNumber(t_self) << 16) |
+			 ((cl_ulong)ItemPointerGetOffsetNumber(t_self) & 0x0000ffffL));
+	if (index >= gs_buffer->cc_buf.nitems)
 		elog(ERROR, "gstore_fdw: DELETE row out of range (%lu of %zu)",
-			 index, gs_buffer->cc_buf.nrooms);
+			 index, gs_buffer->cc_buf.nitems);
 	/* negative command id means the tuple was removed */
 	mvcc = &gs_buffer->cs_mvcc[index];
 	mvcc->xmax = GetCurrentTransactionId();
@@ -1201,16 +1187,18 @@ gstore_fdw_alloc_pgstrom_buffer(Relation frel,
 	ccacheBuffer *cc_buf = &gs_buffer->cc_buf;
 	kern_data_store *kds;
 	size_t		length;
-	int			j;
+	int			j, ncols;
 
 	Assert(tupdesc->natts == gs_buffer->cc_buf.nattrs);
 	/* 1. size estimation */
-	length = STROMALIGN(offsetof(kern_data_store,
-								 colmeta[tupdesc->natts]));
+	ncols = tupdesc->natts + NumOfSystemAttrs;
+	length = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
 	for (j=0; j < tupdesc->natts; j++)
 	{
 		Form_pg_attribute attr = tupdesc->attrs[j];
 
+		if (attr->attisdropped)
+			continue;
 		if (attr->attlen < 0)
 		{
 			length += (MAXALIGN(sizeof(cl_uint) * nrooms) +
@@ -1230,6 +1218,8 @@ gstore_fdw_alloc_pgstrom_buffer(Relation frel,
 
 	/* 3. write out kern_data_store */
 	ccache_copy_buffer_to_kds(kds, tupdesc, cc_buf, rowmap, nrooms);
+	Assert(kds->length == length);
+
 	gs_buffer->rawsize = kds->length;
 	gs_buffer->h.kds = kds;
 }
@@ -1242,7 +1232,6 @@ gstoreXactCallbackOnPreCommit(void)
 {
 	HASH_SEQ_STATUS	status;
 	GpuStoreBuffer *gs_buffer;
-	GpuContext	   *gcontext = NULL;
 
 	if (!gstore_buffer_htab)
 		return;
@@ -1252,20 +1241,19 @@ gstoreXactCallbackOnPreCommit(void)
 	{
 		Relation	frel;
 		bits8	   *rowmap;
-		size_t		nrooms;
+		size_t		nrooms = gs_buffer->cc_buf.nitems;
 
+		/* any writes happen? */
 		if (!gs_buffer->is_dirty)
 			continue;
 		/* release read-only buffer if any */
 		if (gs_buffer->h.buffer)
 		{
-			elog(INFO, "Bug? read-only buffer should be released already");
 			pfree(gs_buffer->h.buffer);
 			gs_buffer->h.buffer = NULL;
 		}
 		/* check visibility for each rows (if any) */
 		rowmap = gstore_fdw_visibility_bitmap(gs_buffer, &nrooms);
-
 		/* construction of new version of GPU device memory image */
 		frel = heap_open(gs_buffer->table_oid, NoLock);
 		if (gs_buffer->format == GSTORE_FDW_FORMAT__PGSTROM)
@@ -1273,18 +1261,21 @@ gstoreXactCallbackOnPreCommit(void)
 		else
 			elog(ERROR, "gstore_fdw: unknown format %d", gs_buffer->format);
 		heap_close(frel, NoLock);
+		pfree(rowmap);
+
 		/* host-to-device DMA */
-		if (!gcontext)
-			gcontext = AllocGpuContext(gs_buffer->pinning, false);
-		gstore_fdw_insert_chunk(gcontext, gs_buffer, nrooms);
+		gstore_fdw_insert_chunk(gs_buffer, nrooms);
 
 		/* release read-write buffer */
+		pfree(gs_buffer->cs_mvcc);
+		pfree(gs_buffer->cs_compress);
+		gs_buffer->cs_mvcc = NULL;
+		gs_buffer->cs_compress = NULL;
 		ccache_release_buffer(&gs_buffer->cc_buf);
+
 		gs_buffer->read_only = true;
 		gs_buffer->is_dirty = false;
 	}
-	if (gcontext)
-		PutGpuContext(gcontext);
 }
 
 /*
@@ -1397,7 +1388,6 @@ gstoreXactCallback(XactEvent event, void *arg)
 			/* do nothing */
 			return;
 	}
-
 //	elog(INFO, "gstoreXactCallback xid=%u", GetCurrentTransactionIdIfAny());
 
 	if (pg_atomic_read_u32(&gstore_head->has_warm_chunks) == 0)
@@ -2041,7 +2031,7 @@ gstore_open_device_memory(GpuContext *gcontext, Relation frel)
 	 */
 	if (!gs_buffer)
 	{
-		ncols = (tupdesc->natts - FirstLowInvalidHeapAttributeNumber - 1);
+		ncols = tupdesc->natts + NumOfSystemAttrs;
 		length = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
 		rc = gpuMemAllocManaged(gcontext,
 								&m_deviceptr,
@@ -2065,12 +2055,14 @@ gstore_open_device_memory(GpuContext *gcontext, Relation frel)
 	 * Logic is almost same to gstore_fdw_alloc_pgstrom_buffer()
 	 */
 	rowmap = gstore_fdw_visibility_bitmap(gs_buffer, &nrooms);
-	ncols = (tupdesc->natts - FirstLowInvalidHeapAttributeNumber - 1);
+	ncols = tupdesc->natts + NumOfSystemAttrs;
 	length = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
 	for (j=0; j < tupdesc->natts; j++)
 	{
 		Form_pg_attribute attr = tupdesc->attrs[j];
 
+		if (attr->attisdropped)
+			continue;
 		if (attr->attlen < 0)
 		{
 			length += (MAXALIGN(sizeof(cl_uint) * nrooms) +

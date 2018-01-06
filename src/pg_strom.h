@@ -596,7 +596,14 @@ extern CUresult gpuMemFreePreserved(cl_int cuda_dindex,
 									CUipcMemHandle m_handle);
 extern CUresult gpuIpcCloseMemHandle(GpuContext *gcontext,
 									 CUdeviceptr m_deviceptr);
-
+extern void gpuIpcMemCopyFromHost(cl_int cuda_dindex,
+								  CUipcMemHandle m_handle,
+								  void *hbuffer,
+								  size_t length);
+extern void gpuIpcMemCopyToHost(cl_int cuda_dindex,
+								CUipcMemHandle m_handle,
+								void *hbuffer,
+								size_t length);
 #define gpuMemAllocRaw(a,b,c)				\
 	__gpuMemAllocRaw((a),(b),(c),__FILE__,__LINE__)
 #define gpuMemAllocManagedRaw(a,b,c,d)		\
@@ -672,7 +679,7 @@ CHECK_FOR_GPUCONTEXT(GpuContext *gcontext)
 	}
 	CHECK_FOR_INTERRUPTS();
 }
-
+extern CUresult gpuInit(unsigned int flags);
 extern GpuContext *AllocGpuContext(int cuda_dindex,
 								   bool never_use_mps);
 extern void ActivateGpuContext(GpuContext *gcontext);
@@ -1225,6 +1232,9 @@ extern void show_instrumentation_count(const char *qlabel, int which,
  * Miscellaneous static inline functions
  *
  * ---------------------------------------------------------------- */
+
+/* looong label is not friendly for indent */
+#define NumOfSystemAttrs	(-(1+FirstLowInvalidHeapAttributeNumber))
 
 /* Max/Min macros that takes 3 or more arguments */
 #define Max3(a,b,c)		((a) > (b) ? Max((a),(c)) : Max((b),(c)))

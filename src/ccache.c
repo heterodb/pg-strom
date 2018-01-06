@@ -387,7 +387,7 @@ pgstrom_ccache_load_chunk(ccacheChunk *cc_chunk,
 	{
 		/* load the header portion of kds-column */
 		Assert(cc_chunk->nattrs == tupdesc->natts);
-		ncols = cc_chunk->nattrs - (1 + FirstLowInvalidHeapAttributeNumber);
+		ncols = cc_chunk->nattrs + NumOfSystemAttrs;
 		length = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
 		if (length > sizeof(buffer))
 			kds_head = palloc(length);
@@ -1323,7 +1323,7 @@ ccache_setup_buffer(TupleDesc tupdesc,
 
 	memset(cc_buf, 0, sizeof(ccacheBuffer));
 	if (with_system_columns)
-		nattrs -= (1 + FirstLowInvalidHeapAttributeNumber);
+		nattrs += NumOfSystemAttrs;
 	cc_buf->nattrs = tupdesc->natts;
 	cc_buf->nitems = 0;
 	cc_buf->nrooms = nrooms;
@@ -1365,7 +1365,7 @@ ccache_setup_buffer(TupleDesc tupdesc,
 
 	if (with_system_columns)
 	{
-		for (j=FirstLowInvalidHeapAttributeNumber + 1; j < 0; j++)
+		for (j=FirstLowInvalidHeapAttributeNumber+1; j < 0; j++)
 		{
 			Form_pg_attribute attr = SystemAttributeDefinition(j, true);
 			int		unitsz = att_align_nominal(attr->attlen,
@@ -1463,8 +1463,7 @@ ccacheBufferSanityCheckKDS(TupleDesc tupdesc,
 		return false;
 	if (kds->ncols != tupdesc->natts)
 	{
-		if (kds->ncols != (tupdesc->natts -
-						   FirstLowInvalidHeapAttributeNumber + 1))
+		if (kds->ncols != tupdesc->natts + NumOfSystemAttrs)
 			return false;
 	}
 	for (j=0; j < kds->ncols; j++)
@@ -1606,22 +1605,29 @@ ccache_copy_buffer_to_kds(kern_data_store *kds,
 	char   *pos;
 	long	i, j, k;
 
-	Assert(kds->ncols >= cc_buf->nattrs);
 	init_kernel_data_store(kds,
 						   tupdesc,
 						   SIZE_MAX,	/* to be set later */
 						   KDS_FORMAT_COLUMN,
 						   nrooms);
+	Assert(tupdesc->natts == cc_buf->nattrs ||
+		   tupdesc->natts == cc_buf->nattrs + NumOfSystemAttrs);
+
 	pos = (char *)kds + STROMALIGN(offsetof(kern_data_store,
 											colmeta[kds->ncols]));
-	for (j=0; j < kds->ncols; j++)
+	for (j=0; j < cc_buf->nattrs; j++)
 	{
+		Form_pg_attribute attr;
 		kern_colmeta   *cmeta = &kds->colmeta[j];
 		size_t			offset;
 		size_t			nbytes;
 
-		/* include system columns? */
-		if (j >= cc_buf->nattrs)
+		if (j < tupdesc->natts)
+			attr = tupdesc->attrs[j];
+		else
+			attr = SystemAttributeDefinition(j - kds->ncols, true);
+		/* skip dropped columns */
+		if (attr->attisdropped)
 			continue;
 
 		offset = ((char *)pos - (char *)kds);
@@ -1728,6 +1734,7 @@ ccache_copy_buffer_to_kds(kern_data_store *kds,
 			}
 		}
 	}
+	kds->nitems = nrooms;
 	kds->length = (char *)pos - (char *)kds;
 }
 
@@ -1819,8 +1826,7 @@ ccache_buffer_append_row(TupleDesc tupdesc,
 
 	if (cc_buf->nattrs > tupdesc->natts && tup)
 	{
-		Assert(cc_buf->nattrs == (tupdesc->natts -
-								  FirstLowInvalidHeapAttributeNumber + 1));
+		Assert(cc_buf->nattrs == tupdesc->natts + NumOfSystemAttrs);
 		/* extract system columns */
 		for (j=FirstLowInvalidHeapAttributeNumber+1; j < 0; j++)
 		{
