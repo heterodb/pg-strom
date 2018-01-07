@@ -107,6 +107,7 @@
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
 #include "utils/inet.h"
+#include "utils/int8.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
