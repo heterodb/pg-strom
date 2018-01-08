@@ -66,6 +66,8 @@ Datum pgstrom_float2_lt(PG_FUNCTION_ARGS);
 Datum pgstrom_float2_le(PG_FUNCTION_ARGS);
 Datum pgstrom_float2_gt(PG_FUNCTION_ARGS);
 Datum pgstrom_float2_ge(PG_FUNCTION_ARGS);
+Datum pgstrom_float2_larger(PG_FUNCTION_ARGS);
+Datum pgstrom_float2_smaller(PG_FUNCTION_ARGS);
 
 Datum pgstrom_float42_eq(PG_FUNCTION_ARGS);
 Datum pgstrom_float42_ne(PG_FUNCTION_ARGS);
@@ -136,6 +138,10 @@ Datum pgstrom_float2_as_int2(PG_FUNCTION_ARGS);
 Datum pgstrom_int8_as_float8(PG_FUNCTION_ARGS);
 Datum pgstrom_int4_as_float4(PG_FUNCTION_ARGS);
 Datum pgstrom_int2_as_float2(PG_FUNCTION_ARGS);
+
+/* aggregate functions */
+Datum pgstrom_float2_accum(PG_FUNCTION_ARGS);
+Datum pgstrom_float2_sum(PG_FUNCTION_ARGS);
 
 //#define DEBUG_FP16 1
 
@@ -644,6 +650,26 @@ pgstrom_float2_ge(PG_FUNCTION_ARGS)
 	PG_RETURN_BOOL(float4_cmp_internal(arg1, arg2) >= 0);
 }
 PG_FUNCTION_INFO_V1(pgstrom_float2_ge);
+
+Datum
+pgstrom_float2_larger(PG_FUNCTION_ARGS)
+{
+	half_t	arg1 = PG_GETARG_FLOAT2(0);
+	half_t	arg2 = PG_GETARG_FLOAT2(1);
+
+	PG_RETURN_FLOAT2(fp16_to_fp32(arg1) > fp16_to_fp32(arg2) ? arg1 : arg2);
+}
+PG_FUNCTION_INFO_V1(pgstrom_float2_larger);
+
+Datum
+pgstrom_float2_smaller(PG_FUNCTION_ARGS)
+{
+	half_t	arg1 = PG_GETARG_FLOAT2(0);
+	half_t	arg2 = PG_GETARG_FLOAT2(1);
+
+	PG_RETURN_FLOAT2(fp16_to_fp32(arg1) < fp16_to_fp32(arg2) ? arg1 : arg2);
+}
+PG_FUNCTION_INFO_V1(pgstrom_float2_smaller);
 
 Datum
 pgstrom_float42_eq(PG_FUNCTION_ARGS)
@@ -1324,3 +1350,83 @@ pgstrom_int2_as_float2(PG_FUNCTION_ARGS)
 	PG_RETURN_FLOAT2(ival);	/* actually, half_t is unsigned short */
 }
 PG_FUNCTION_INFO_V1(pgstrom_int2_as_float2);
+
+Datum
+pgstrom_float2_accum(PG_FUNCTION_ARGS)
+{
+	ArrayType  *transarray = PG_GETARG_ARRAYTYPE_P(0);
+	/* do computations as float8 */
+	float8      newval = fp16_to_fp64(PG_GETARG_FLOAT2(1));
+	float8     *transvalues;
+	float8      N, sumX, sumX2;
+
+	/* logic in check_float8_array at utils/adt/float.c */
+	if (ARR_NDIM(transarray) != 1 ||
+		ARR_DIMS(transarray)[0] != 3 ||
+		ARR_HASNULL(transarray) ||
+		ARR_ELEMTYPE(transarray) != FLOAT8OID)
+		elog(ERROR, "float2_accum: expected 3-element float8 array");
+
+	transvalues = (float8 *) ARR_DATA_PTR(transarray);
+	N = transvalues[0];
+	sumX = transvalues[1];
+	sumX2 = transvalues[2];
+
+	N += 1.0;
+	sumX += newval;
+	CHECKFLOATVAL(sumX, isinf(transvalues[1]) || isinf(newval), true);
+	sumX2 += newval * newval;
+	CHECKFLOATVAL(sumX2, isinf(transvalues[2]) || isinf(newval), true);
+
+	/*
+	 * If we're invoked as an aggregate, we can cheat and modify our first
+	 * parameter in-place to reduce palloc overhead. Otherwise we construct a
+	 * new array with the updated transition data and return it.
+	 */
+	if (AggCheckCallContext(fcinfo, NULL))
+	{
+		transvalues[0] = N;
+		transvalues[1] = sumX;
+		transvalues[2] = sumX2;
+
+		PG_RETURN_ARRAYTYPE_P(transarray);
+	}
+	else
+	{
+		Datum		transdatums[3];
+		ArrayType  *result;
+
+		transdatums[0] = Float8GetDatumFast(N);
+		transdatums[1] = Float8GetDatumFast(sumX);
+		transdatums[2] = Float8GetDatumFast(sumX2);
+
+		result = construct_array(transdatums, 3,
+								 FLOAT8OID,
+								 sizeof(float8), FLOAT8PASSBYVAL, 'd');
+
+		PG_RETURN_ARRAYTYPE_P(result);
+	}
+}
+PG_FUNCTION_INFO_V1(pgstrom_float2_accum);
+
+Datum
+pgstrom_float2_sum(PG_FUNCTION_ARGS)
+{
+	float8		newval;
+
+	if (PG_ARGISNULL(0))
+	{
+		if (PG_ARGISNULL(1))
+			PG_RETURN_NULL();	/* still no non-null */
+		newval = fp16_to_fp64(PG_GETARG_FLOAT2(1));
+	}
+	else
+	{
+		newval = PG_GETARG_FLOAT8(0);
+
+		if (!PG_ARGISNULL(1))
+			newval += fp16_to_fp64(PG_GETARG_FLOAT2(1));
+	}
+	PG_RETURN_FLOAT8(newval);
+}
+PG_FUNCTION_INFO_V1(pgstrom_float2_sum);
