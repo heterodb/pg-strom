@@ -103,10 +103,16 @@ BASIC_INT_ADDFUNC_TEMPLATE(int82pl,int8,int8,int2)
 BASIC_INT_ADDFUNC_TEMPLATE(int84pl,int8,int8,int4)
 BASIC_INT_ADDFUNC_TEMPLATE(int8pl, int8,int8,int8)
 
+BASIC_FLOAT_ADDFUNC_TEMPLATE(float2pl, float2, float2, float4)
+BASIC_FLOAT_ADDFUNC_TEMPLATE(float24pl,float2, float4, float4)
+BASIC_FLOAT_ADDFUNC_TEMPLATE(float28pl,float2, float8, float8)
+BASIC_FLOAT_ADDFUNC_TEMPLATE(float42pl,float4, float2, float4)
 BASIC_FLOAT_ADDFUNC_TEMPLATE(float4pl, float4, float4, float4)
 BASIC_FLOAT_ADDFUNC_TEMPLATE(float48pl,float8, float4, float8)
+BASIC_FLOAT_ADDFUNC_TEMPLATE(float82pl,float8, float2, float8)
 BASIC_FLOAT_ADDFUNC_TEMPLATE(float84pl,float8, float8, float4)
 BASIC_FLOAT_ADDFUNC_TEMPLATE(float8pl, float8, float8, float8)
+
 
 #undef BASIC_INT_ADDFUNC_TEMPLATE
 #undef BASIC_FLOAT_ADDFUNC_TEMPLATE
@@ -165,8 +171,13 @@ BASIC_INT_SUBFUNC_TEMPLATE(int82mi, int8, int8, int2)
 BASIC_INT_SUBFUNC_TEMPLATE(int84mi, int8, int8, int4)
 BASIC_INT_SUBFUNC_TEMPLATE(int8mi,  int8, int8, int8)
 
+BASIC_FLOAT_SUBFUNC_TEMPLATE(float2mi,  float2, float2, float4)
+BASIC_FLOAT_SUBFUNC_TEMPLATE(float24mi, float2, float4, float4)
+BASIC_FLOAT_SUBFUNC_TEMPLATE(float28mi, float2, float8, float8)
+BASIC_FLOAT_SUBFUNC_TEMPLATE(float42mi, float4, float2, float4)
 BASIC_FLOAT_SUBFUNC_TEMPLATE(float4mi,  float4, float4, float4)
 BASIC_FLOAT_SUBFUNC_TEMPLATE(float48mi, float8, float4, float8)
+BASIC_FLOAT_SUBFUNC_TEMPLATE(float82mi, float8, float2, float8)
 BASIC_FLOAT_SUBFUNC_TEMPLATE(float84mi, float8, float8, float4)
 BASIC_FLOAT_SUBFUNC_TEMPLATE(float8mi,  float8, float8, float8)
 
@@ -369,6 +380,71 @@ pgfn_int8mul(kern_context *kcxt, pg_int8_t arg1, pg_int8_t arg2)
 }
 
 STATIC_FUNCTION(pg_float4_t)
+pgfn_float2mul(kern_context *kcxt, pg_float2_t arg1, pg_float2_t arg2)
+{
+	pg_float4_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		result.value = (cl_float)arg1.value * (cl_float)arg2.value;
+		CHECKFLOATVAL(&kcxt->e, result,
+					  isinf(arg1.value) || isinf(arg2.value),
+					  arg1.value == 0.0 || arg2.value == 0.0);
+	}
+	return result;
+}
+
+
+STATIC_FUNCTION(pg_float4_t)
+pgfn_float24mul(kern_context *kcxt, pg_float2_t arg1, pg_float4_t arg2)
+{
+	pg_float4_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		result.value = (cl_float)arg1.value * arg2.value;
+		CHECKFLOATVAL(&kcxt->e, result,
+					  isinf(arg1.value) || isinf(arg2.value),
+					  arg1.value == 0.0 || arg2.value == 0.0);
+	}
+	return result;
+}
+
+STATIC_FUNCTION(pg_float8_t)
+pgfn_float28mul(kern_context *kcxt, pg_float2_t arg1, pg_float8_t arg2)
+{
+	pg_float8_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		result.value = (cl_double)arg1.value * arg2.value;
+		CHECKFLOATVAL(&kcxt->e, result,
+					  isinf(arg1.value) || isinf(arg2.value),
+					  arg1.value == 0.0 || arg2.value == 0.0);
+	}
+	return result;
+}
+
+STATIC_FUNCTION(pg_float4_t)
+pgfn_float42mul(kern_context *kcxt, pg_float4_t arg1, pg_float2_t arg2)
+{
+	pg_float4_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		result.value = arg1.value * (cl_float)arg2.value;
+		CHECKFLOATVAL(&kcxt->e, result,
+					  isinf(arg1.value) || isinf(arg2.value),
+					  arg1.value == 0.0 || arg2.value == 0.0);
+	}
+	return result;
+}
+
+STATIC_FUNCTION(pg_float4_t)
 pgfn_float4mul(kern_context *kcxt, pg_float4_t arg1, pg_float4_t arg2)
 {
 	pg_float4_t	result;
@@ -392,7 +468,23 @@ pgfn_float48mul(kern_context *kcxt, pg_float4_t arg1, pg_float8_t arg2)
 	result.isnull = arg1.isnull | arg2.isnull;
 	if (!result.isnull)
 	{
-		result.value = arg1.value * arg2.value;
+		result.value = (cl_double)arg1.value * arg2.value;
+		CHECKFLOATVAL(&kcxt->e, result,
+					  isinf(arg1.value) || isinf(arg2.value),
+					  arg1.value == 0.0 || arg2.value == 0.0);
+	}
+	return result;
+}
+
+STATIC_FUNCTION(pg_float8_t)
+pgfn_float82mul(kern_context *kcxt, pg_float8_t arg1, pg_float2_t arg2)
+{
+	pg_float8_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		result.value = arg1.value * (cl_double)arg2.value;
 		CHECKFLOATVAL(&kcxt->e, result,
 					  isinf(arg1.value) || isinf(arg2.value),
 					  arg1.value == 0.0 || arg2.value == 0.0);
@@ -408,7 +500,7 @@ pgfn_float84mul(kern_context *kcxt, pg_float8_t arg1, pg_float4_t arg2)
 	result.isnull = arg1.isnull | arg2.isnull;
 	if (!result.isnull)
 	{
-		result.value = arg1.value * arg2.value;
+		result.value = arg1.value * (cl_double)arg2.value;
 		CHECKFLOATVAL(&kcxt->e, result,
 					  isinf(arg1.value) || isinf(arg2.value),
 					  arg1.value == 0.0 || arg2.value == 0.0);
@@ -663,6 +755,103 @@ pgfn_int8div(kern_context *kcxt, pg_int8_t arg1, pg_int8_t arg2)
 }
 
 STATIC_FUNCTION(pg_float4_t)
+pgfn_float2div(kern_context *kcxt, pg_float2_t arg1, pg_float2_t arg2)
+{
+	pg_float4_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+    if (!result.isnull)
+    {
+		if (arg2.value == 0.0)
+		{
+			result.isnull = true;
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		}
+		else
+		{
+			result.value = (cl_float)arg1.value / (cl_float)arg2.value;
+			CHECKFLOATVAL(&kcxt->e, result,
+						  isinf(arg1.value) || isinf(arg2.value),
+						  arg1.value == 0.0);
+		}
+	}
+	return result;
+}
+
+
+STATIC_FUNCTION(pg_float4_t)
+pgfn_float24div(kern_context *kcxt, pg_float2_t arg1, pg_float4_t arg2)
+{
+	pg_float4_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+    if (!result.isnull)
+    {
+		if (arg2.value == 0.0)
+		{
+			result.isnull = true;
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		}
+		else
+		{
+			result.value = (cl_float)arg1.value / arg2.value;
+			CHECKFLOATVAL(&kcxt->e, result,
+						  isinf(arg1.value) || isinf(arg2.value),
+						  arg1.value == 0.0);
+		}
+	}
+	return result;
+}
+
+STATIC_FUNCTION(pg_float8_t)
+pgfn_float28div(kern_context *kcxt, pg_float2_t arg1, pg_float8_t arg2)
+{
+	pg_float4_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+    if (!result.isnull)
+    {
+		if (arg2.value == 0.0)
+		{
+			result.isnull = true;
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		}
+		else
+		{
+			result.value = (cl_double)arg1.value / arg2.value;
+			CHECKFLOATVAL(&kcxt->e, result,
+						  isinf(arg1.value) || isinf(arg2.value),
+						  arg1.value == 0.0);
+		}
+	}
+	return result;
+}
+
+STATIC_FUNCTION(pg_float4_t)
+pgfn_float42div(kern_context *kcxt, pg_float4_t arg1, pg_float2_t arg2)
+{
+	pg_float4_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+    if (!result.isnull)
+    {
+		if (arg2.value == 0.0)
+		{
+			result.isnull = true;
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		}
+		else
+		{
+			result.value = arg1.value / (cl_float)arg2.value;
+			CHECKFLOATVAL(&kcxt->e, result,
+						  isinf(arg1.value) || isinf(arg2.value),
+						  arg1.value == 0.0);
+		}
+	}
+	return result;
+}
+
+STATIC_FUNCTION(pg_float4_t)
 pgfn_float4div(kern_context *kcxt, pg_float4_t arg1, pg_float4_t arg2)
 {
 	pg_float4_t	result;
@@ -701,7 +890,31 @@ pgfn_float48div(kern_context *kcxt, pg_float4_t arg1, pg_float8_t arg2)
 		}
 		else
 		{
-			result.value = arg1.value / arg2.value;
+			result.value = (cl_double)arg1.value / arg2.value;
+			CHECKFLOATVAL(&kcxt->e, result,
+						  isinf(arg1.value) || isinf(arg2.value),
+						  arg1.value == 0.0);
+		}
+	}
+	return result;
+}
+
+STATIC_FUNCTION(pg_float8_t)
+pgfn_float82div(kern_context *kcxt, pg_float8_t arg1, pg_float2_t arg2)
+{
+	pg_float4_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+    if (!result.isnull)
+    {
+		if (arg2.value == 0.0)
+		{
+			result.isnull = true;
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		}
+		else
+		{
+			result.value = arg1.value / (cl_double)arg2.value;
 			CHECKFLOATVAL(&kcxt->e, result,
 						  isinf(arg1.value) || isinf(arg2.value),
 						  arg1.value == 0.0);
@@ -725,7 +938,7 @@ pgfn_float84div(kern_context *kcxt, pg_float8_t arg1, pg_float4_t arg2)
 		}
 		else
 		{
-			result.value = arg1.value / arg2.value;
+			result.value = arg1.value / (cl_double)arg2.value;
 			CHECKFLOATVAL(&kcxt->e, result,
 						  isinf(arg1.value) || isinf(arg2.value),
 						  arg1.value == 0.0);

@@ -38,6 +38,10 @@ typedef unsigned long long	cl_ulong;
 typedef long				cl_long;
 typedef unsigned long		cl_ulong;
 #endif
+#ifdef __CUDACC__
+#include <cuda_fp16.h>
+typedef __half				cl_half;
+#endif
 typedef float				cl_float;
 typedef double				cl_double;
 
@@ -131,6 +135,9 @@ typedef cl_ulong	Datum;
 #define LONG_MAX		0x7FFFFFFFFFFFFFFFLL
 #define LONG_MIN        (-LONG_MAX - 1LL)
 #define ULONG_MAX		0xFFFFFFFFFFFFFFFFULL
+#define HALF_MAX		__short_as_half(0x7bff)
+#define HALF_MIN		__short_as_half(0x0400)
+#define HALF_INFINITY	__short_as_half(0x0x7c00)
 #define FLT_MAX			__int_as_float(0x7f7fffffU)
 #define FLT_MIN			__int_as_float(0x00800000U)
 #define FLT_DIG			6
@@ -1035,7 +1042,7 @@ typedef struct {
 #define FIN_LEGACY_CRC32(crc)		((crc) ^= 0xFFFFFFFF)
 #define EQ_LEGACY_CRC32(crc1,crc2)	((crc1) == (crc2))
 
-STATIC_INLINE(cl_uint)
+STATIC_FUNCTION(cl_uint)
 pg_common_comp_crc32(const cl_uint *crc32_table,
 					 cl_uint hash,
 					 const char *__data, cl_uint __len)
@@ -1051,21 +1058,15 @@ pg_common_comp_crc32(const cl_uint *crc32_table,
 }
 
 #define STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(NAME,BASE)			\
-	STATIC_FUNCTION(cl_uint)									\
+	STATIC_INLINE(cl_uint)										\
 	pg_##NAME##_comp_crc32(const cl_uint *crc32_table,			\
 						   cl_uint hash, pg_##NAME##_t datum)	\
 	{															\
 		if (!datum.isnull)										\
 		{														\
-			union {												\
-				BASE	as_base;								\
-				char	as_char[sizeof(BASE)];					\
-			} __data;											\
-																\
-			__data.as_base = datum.value;						\
 			hash = pg_common_comp_crc32(crc32_table,			\
 										hash,					\
-										__data.as_char,			\
+										(char *)&datum.value,	\
 										sizeof(BASE));			\
 		}														\
 		return hash;											\
@@ -1134,6 +1135,18 @@ STROMCL_SIMPLE_TYPE_TEMPLATE(int4, cl_int)
 STROMCL_SIMPLE_TYPE_TEMPLATE(int8, cl_long)
 #endif
 
+/* pg_float2_t */
+#ifndef PG_FLOAT2_TYPE_DEFINED
+#define PG_FLOAT2_TYPE_DEFINED
+STROMCL_SIMPLE_FLOAT_TYPE_TEMPLATE(float2, cl_half)
+STATIC_INLINE(Datum)
+pg_float2_as_datum(void *addr)
+{
+	cl_half		val = *((cl_half *)addr);
+	return SET_2_BYTES(__half_as_short(val));
+}
+#endif
+
 /* pg_float4_t */
 #ifndef PG_FLOAT4_TYPE_DEFINED
 #define PG_FLOAT4_TYPE_DEFINED
@@ -1142,7 +1155,7 @@ STATIC_INLINE(Datum)
 pg_float4_as_datum(void *addr)
 {
 	cl_float	val = *((cl_float *)addr);
-	return ((Datum)__float_as_int(val) & 0xffffffff);
+	return SET_4_BYTES(__float_as_int(val));
 }
 #endif
 
@@ -1154,14 +1167,8 @@ STATIC_INLINE(Datum)
 pg_float8_as_datum(void *addr)
 {
 	cl_double	val = *((cl_double *)addr);
-	return ((Datum)__double_as_longlong(val));
+	return SET_8_BYTES(__double_as_longlong(val));
 }
-#endif
-
-/* pg_tid_t */
-#ifndef PG_TID_TYPE_DEFINED
-#define PG_TID_TYPE_DEFINED
-STROMCL_INDIRECT_TYPE_TEMPLATE(tid, ItemPointerData)
 #endif
 
 /*
@@ -1554,7 +1561,7 @@ pg_varlena_param(kern_context *kcxt, cl_uint param_id)
 
 STROMCL_SIMPLE_NULLTEST_TEMPLATE(varlena)
 
-STATIC_FUNCTION(cl_uint)
+STATIC_INLINE(cl_uint)
 pg_varlena_comp_crc32(const cl_uint *crc32_table,
 					  cl_uint hash, pg_varlena_t datum)
 {

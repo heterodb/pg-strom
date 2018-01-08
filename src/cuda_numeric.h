@@ -655,22 +655,36 @@ pgfn_numeric_int8(kern_context *kcxt, pg_numeric_t arg)
 	return numeric_to_integer(kcxt, arg, sizeof(v.value));
 }
 
-STATIC_FUNCTION(pg_float4_t)
+STATIC_INLINE(pg_float2_t)
+pgfn_numeric_float2(kern_context *kcxt, pg_numeric_t arg)
+{
+	pg_float8_t	tmp = numeric_to_float(kcxt, arg);
+	pg_float2_t v = { (cl_half)tmp.value, tmp.isnull };
+
+	if (!v.isnull && isinf(v.value))
+	{
+		v.isnull = true;
+		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+	}
+	return v;
+}
+
+STATIC_INLINE(pg_float4_t)
 pgfn_numeric_float4(kern_context *kcxt, pg_numeric_t arg)
 {
 
 	pg_float8_t tmp = numeric_to_float(kcxt, arg);
 	pg_float4_t	v   = { (cl_float)tmp.value, tmp.isnull };
 
-	if (v.isnull == false  &&  isinf(v.value)) {
-		v.isnull	= true;
-		v.value		= 0;
+	if (!v.isnull && isinf(v.value))
+	{
+		v.isnull = true;
 		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 	}
 	return v;
 }
 
-STATIC_FUNCTION(pg_float8_t)
+STATIC_INLINE(pg_float8_t)
 pgfn_numeric_float8(kern_context *kcxt, pg_numeric_t arg)
 {
 	return numeric_to_float(kcxt, arg);
@@ -754,7 +768,6 @@ float_to_numeric(kern_context *kcxt, pg_float8_t arg, int dig)
 		v.value  = PG_NUMERIC_SET(0, 0, 0);
 		return v;
 	}
-
 
 	{
 		double	fval, fmant, thrMax, thrMin;
@@ -862,6 +875,13 @@ STATIC_FUNCTION(pg_numeric_t)
 pgfn_int8_numeric(kern_context *kcxt, pg_int8_t arg)
 {
 	return integer_to_numeric(kcxt, arg, sizeof(arg.value));
+}
+
+STATIC_INLINE(pg_numeric_t)
+pgfn_float2_numeric(kern_context *kcxt, pg_float2_t arg)
+{
+	pg_float8_t tmp = { (cl_double)arg.value, arg.isnull };
+	return float_to_numeric(kcxt, tmp, HALF_DIG);
 }
 
 STATIC_FUNCTION(pg_numeric_t)

@@ -38,16 +38,15 @@ static pg_crc32 pg_bpchar_devtype_hashfunc(devtype_info *dtype,
  * naming convension of types:
  *   pg_<type_name>_t
  */
-#define DEVTYPE_DECL(type_name,type_oid,type_base,						\
-					 min_const,max_const,zero_const,					\
-					 type_flags,extra_sz,hash_func)						\
-	{ "pg_catalog", type_name, type_oid, #type_oid, type_base,			\
+#define DEVTYPE_DECL(type_name,type_oid_label,type_base,		\
+					 min_const,max_const,zero_const,			\
+					 type_flags,extra_sz,hash_func)				\
+	{ "pg_catalog", type_name, type_oid_label, type_base,		\
 	  min_const, max_const, zero_const, type_flags, extra_sz, hash_func }
 
 static struct {
 	const char	   *type_schema;
 	const char	   *type_name;
-	Oid				type_oid_static;
 	const char	   *type_oid_label;
 	const char	   *type_base;
 	const char	   *max_const;
@@ -60,24 +59,30 @@ static struct {
 	/*
 	 * Primitive datatypes
 	 */
-	DEVTYPE_DECL("bool",   BOOLOID,   "cl_bool",
+	DEVTYPE_DECL("bool",   "BOOLOID",   "cl_bool",
 				 NULL, NULL, "false",
 				 0, 0, generic_devtype_hashfunc),
-	DEVTYPE_DECL("int2",   INT2OID,   "cl_short",
+	DEVTYPE_DECL("int2",   "INT2OID",   "cl_short",
 				 "SHRT_MAX", "SHRT_MIN", "0",
 				 0, 0, generic_devtype_hashfunc),
-	DEVTYPE_DECL("int4",   INT4OID,   "cl_int",
+	DEVTYPE_DECL("int4",   "INT4OID",   "cl_int",
 				 "INT_MAX", "INT_MIN", "0",
 				 0, 0, generic_devtype_hashfunc),
-	DEVTYPE_DECL("int8",   INT8OID,   "cl_long",
+	DEVTYPE_DECL("int8",   "INT8OID",   "cl_long",
 				 "LONG_MAX", "LONG_MIN", "0",
 				 0, 0, generic_devtype_hashfunc),
-	DEVTYPE_DECL("float4", FLOAT4OID, "cl_float",
+	/* XXX - float2 is not a built-in data type */
+	DEVTYPE_DECL("float2", "FLOAT2OID", "cl_half",
+				 "__half_as_short(HALF_MAX)",
+				 "__half_as_short(-HALF_MAX)",
+				 "__half_as_short(0.0)",
+				 0, 0, generic_devtype_hashfunc),
+	DEVTYPE_DECL("float4", "FLOAT4OID", "cl_float",
 				 "__float_as_int(FLT_MAX)",
 				 "__float_as_int(-FLT_MAX)",
 				 "__float_as_int(0.0)",
 				 0, 0, generic_devtype_hashfunc),
-	DEVTYPE_DECL("float8", FLOAT8OID, "cl_double",
+	DEVTYPE_DECL("float8", "FLOAT8OID", "cl_double",
 				 "__double_as_longlong(DBL_MAX)",
 				 "__double_as_longlong(-DBL_MAX)",
 				 "__double_as_longlong(0.0)",
@@ -85,74 +90,74 @@ static struct {
 	/*
 	 * Misc data types
 	 */
-	DEVTYPE_DECL("money",  CASHOID,   "cl_long",
+	DEVTYPE_DECL("money",  "CASHOID",   "cl_long",
 				 "LONG_MAX", "LONG_MIN", "0",
 				 DEVKERNEL_NEEDS_MISC, 0,
 				 generic_devtype_hashfunc),
-	DEVTYPE_DECL("uuid",   UUIDOID,   "pg_uuid_t",
+	DEVTYPE_DECL("uuid",   "UUIDOID",   "pg_uuid_t",
 				 NULL, NULL, NULL,
 				 DEVKERNEL_NEEDS_MISC, UUID_LEN,
 				 generic_devtype_hashfunc),
-	DEVTYPE_DECL("macaddr", MACADDROID, "macaddr",
+	DEVTYPE_DECL("macaddr", "MACADDROID", "macaddr",
 				 NULL, NULL, NULL,
 				 DEVKERNEL_NEEDS_MISC, sizeof(macaddr),
 				 generic_devtype_hashfunc),
-	DEVTYPE_DECL("inet",   INETOID,   "inet_struct",
+	DEVTYPE_DECL("inet",   "INETOID",   "inet_struct",
 				 NULL, NULL, NULL,
 				 DEVKERNEL_NEEDS_MISC, sizeof(inet),
 				 generic_devtype_hashfunc),
-	DEVTYPE_DECL("cidr",   CIDROID,   "inet_struct",
+	DEVTYPE_DECL("cidr",   "CIDROID",   "inet_struct",
 				 NULL, NULL, NULL,
 				 DEVKERNEL_NEEDS_MISC, sizeof(inet),
 				 generic_devtype_hashfunc),
 	/*
 	 * Date and time datatypes
 	 */
-	DEVTYPE_DECL("date", DATEOID, "DateADT",
+	DEVTYPE_DECL("date", "DATEOID", "DateADT",
 				 "INT_MAX", "INT_MIN", "0",
 				 DEVKERNEL_NEEDS_TIMELIB, 0,
 				 generic_devtype_hashfunc),
-	DEVTYPE_DECL("time", TIMEOID, "TimeADT",
+	DEVTYPE_DECL("time", "TIMEOID", "TimeADT",
 				 "LONG_MAX", "LONG_MIN", "0",
 				 DEVKERNEL_NEEDS_TIMELIB, 0,
 				 generic_devtype_hashfunc),
-	DEVTYPE_DECL("timetz", TIMETZOID, "TimeTzADT",
+	DEVTYPE_DECL("timetz", "TIMETZOID", "TimeTzADT",
 				 NULL, NULL, NULL,
 				 DEVKERNEL_NEEDS_TIMELIB, sizeof(TimeTzADT),
 				 generic_devtype_hashfunc),
-	DEVTYPE_DECL("timestamp", TIMESTAMPOID,"Timestamp",
+	DEVTYPE_DECL("timestamp", "TIMESTAMPOID","Timestamp",
 				 "LONG_MAX", "LONG_MIN", "0",
 				 DEVKERNEL_NEEDS_TIMELIB, 0,
 				 generic_devtype_hashfunc),
-	DEVTYPE_DECL("timestamptz", TIMESTAMPTZOID, "TimestampTz",
+	DEVTYPE_DECL("timestamptz", "TIMESTAMPTZOID", "TimestampTz",
 				 "LONG_MAX", "LONG_MIN", "0",
 				 DEVKERNEL_NEEDS_TIMELIB, 0,
 				 generic_devtype_hashfunc),
-	DEVTYPE_DECL("interval", INTERVALOID, "Interval",
+	DEVTYPE_DECL("interval", "INTERVALOID", "Interval",
 				 NULL, NULL, NULL,
 				 DEVKERNEL_NEEDS_TIMELIB, sizeof(Interval),
 				 generic_devtype_hashfunc),
 	/*
 	 * variable length datatypes
 	 */
-	DEVTYPE_DECL("bpchar",  BPCHAROID,  "varlena *",
+	DEVTYPE_DECL("bpchar",  "BPCHAROID",  "varlena *",
 				 NULL, NULL, NULL,
 				 DEVKERNEL_NEEDS_TEXTLIB, 0,
 				 pg_bpchar_devtype_hashfunc),
-	DEVTYPE_DECL("varchar", VARCHAROID, "varlena *",
+	DEVTYPE_DECL("varchar", "VARCHAROID", "varlena *",
 				 NULL, NULL, NULL,
 				 DEVKERNEL_NEEDS_TEXTLIB, 0,
 				 generic_devtype_hashfunc),
-	DEVTYPE_DECL("numeric", NUMERICOID, "cl_ulong",
+	DEVTYPE_DECL("numeric", "NUMERICOID", "cl_ulong",
 				 NULL, NULL, NULL,
 				 DEVKERNEL_NEEDS_NUMERIC,
 				 VARHDRSZ + sizeof(union NumericChoice),
 				 pg_numeric_devtype_hashfunc),
-	DEVTYPE_DECL("bytea",   BYTEAOID,   "varlena *",
+	DEVTYPE_DECL("bytea",   "BYTEAOID",   "varlena *",
 				 NULL, NULL, NULL,
 				 0, 0,
 				 generic_devtype_hashfunc),
-	DEVTYPE_DECL("text",    TEXTOID,    "varlena *",
+	DEVTYPE_DECL("text",    "TEXTOID",    "varlena *",
 				 NULL, NULL, NULL,
 				 DEVKERNEL_NEEDS_TEXTLIB, 0,
 				 generic_devtype_hashfunc),
@@ -462,7 +467,9 @@ pg_bpchar_devtype_hashfunc(devtype_info *dtype,
  * 'r' : this function is right operator that takes an argument
  * 'l' : this function is left operator that takes an argument
  * 'b' : this function is both operator that takes two arguments
- *     ==> extra is the operator character on OpenCL
+ *       type cast shall be added, if type length mismatch
+ *     ==> extra is the operator character on CUDA
+ * 'B' : almost equivalent to 'b', but type cast will not happen.
  * 'f' : this function utilizes built-in functions
  *     ==> extra is the built-in function name
  * 'F' : this function is externally declared.
@@ -702,14 +709,14 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "int8not", 1, {INT8OID}, "b:~" },
 
 	/* '>>' : right shift */
-	{ "int2shr", 2, {INT2OID, INT4OID}, "b:>>" },
-	{ "int4shr", 2, {INT4OID, INT4OID}, "b:>>" },
-	{ "int8shr", 2, {INT8OID, INT4OID}, "b:>>" },
+	{ "int2shr", 2, {INT2OID, INT4OID}, "B:>>" },
+	{ "int4shr", 2, {INT4OID, INT4OID}, "B:>>" },
+	{ "int8shr", 2, {INT8OID, INT4OID}, "B:>>" },
 
 	/* '<<' : left shift */
-	{ "int2shl", 2, {INT2OID, INT4OID}, "b:<<" },
-	{ "int4shl", 2, {INT4OID, INT4OID}, "b:<<" },
-	{ "int8shl", 2, {INT8OID, INT4OID}, "b:<<" },
+	{ "int2shl", 2, {INT2OID, INT4OID}, "B:<<" },
+	{ "int4shl", 2, {INT4OID, INT4OID}, "B:<<" },
+	{ "int8shl", 2, {INT8OID, INT4OID}, "B:<<" },
 
 	/* comparison functions */
 	{ "btboolcmp",  2, {BOOLOID, BOOLOID}, "f:devfunc_int_comp" },
@@ -1138,14 +1145,114 @@ typedef struct devfunc_extra_catalog_t {
 	const char *func_template;
 } devfunc_extra_catalog_t;
 
+#define BOOL    "boolean"
+#define INT2	"smallint"
+#define INT4	"integer"
+#define INT8	"bigint"
+#define FLOAT2	"pg_catalog.float2"
+#define FLOAT4	"real"
+#define FLOAT8	"double precision"
+#define NUMERIC	"numeric"
+
 static devfunc_extra_catalog_t devfunc_extra_catalog[] = {
-#if 0
-	/* type cast tid <--> bigint */
-	{"pgstrom.cast_tid_to_int8(pg_catalog.tid)",
-	 "bigint",
-	 "F:cast_tid_to_int8"},
-#endif
+	/* float2 - type cast functions */
+	{ "pgstrom.float4("FLOAT2")",  FLOAT4,  "a/c:" },
+	{ "pgstrom.float8("FLOAT2")",  FLOAT8,  "a/c:" },
+	{ "pgstrom.int2("FLOAT2")",    INT2,    "a/c:" },
+	{ "pgstrom.int4("FLOAT2")",    INT4,    "a/c:" },
+	{ "pgstrom.int8("FLOAT2")",    INT8,    "a/c:" },
+	{ "pgstrom.numeric("FLOAT2")", NUMERIC, "n/F:float2_numeric" },
+	{ "pgstrom.float2("FLOAT4")",  FLOAT2,  "a/c:" },
+	{ "pgstrom.float2("FLOAT8")",  FLOAT2,  "a/c:" },
+	{ "pgstrom.float2("INT2")",    FLOAT2,  "a/c:" },
+	{ "pgstrom.float2("INT4")",    FLOAT2,  "a/c:" },
+	{ "pgstrom.float2("INT8")",    FLOAT2,  "a/c:" },
+	{ "pgstrom.float2("NUMERIC")", FLOAT2,  "n/F:numeric_float2" },
+	/* float2 - type comparison functions */
+	{ "pgstrom.float2_eq("FLOAT2","FLOAT2")",  BOOL, "b:==" },
+	{ "pgstrom.float2_ne("FLOAT2","FLOAT2")",  BOOL, "b:!=" },
+	{ "pgstrom.float2_lt("FLOAT2","FLOAT2")",  BOOL, "b:<" },
+	{ "pgstrom.float2_le("FLOAT2","FLOAT2")",  BOOL, "b:<=" },
+	{ "pgstrom.float2_gt("FLOAT2","FLOAT2")",  BOOL, "b:>" },
+	{ "pgstrom.float2_ge("FLOAT2","FLOAT2")",  BOOL, "b:>=" },
+	{ "pgstrom.float2_larger("FLOAT2","FLOAT2")",  FLOAT2, "f:Max" },
+	{ "pgstrom.float2_smaller("FLOAT2","FLOAT2")", FLOAT2, "f:Min" },
+
+	{ "pgstrom.float42_eq("FLOAT4","FLOAT2")", BOOL, "b:==" },
+	{ "pgstrom.float42_ne("FLOAT4","FLOAT2")", BOOL, "b:!=" },
+	{ "pgstrom.float42_lt("FLOAT4","FLOAT2")", BOOL, "b:<" },
+	{ "pgstrom.float42_le("FLOAT4","FLOAT2")", BOOL, "b:<=" },
+	{ "pgstrom.float42_gt("FLOAT4","FLOAT2")", BOOL, "b:>" },
+	{ "pgstrom.float42_ge("FLOAT4","FLOAT2")", BOOL, "b:>=" },
+
+	{ "pgstrom.float82_eq("FLOAT8","FLOAT2")", BOOL, "b:==" },
+	{ "pgstrom.float82_ne("FLOAT8","FLOAT2")", BOOL, "b:!=" },
+	{ "pgstrom.float82_lt("FLOAT8","FLOAT2")", BOOL, "b:<" },
+	{ "pgstrom.float82_le("FLOAT8","FLOAT2")", BOOL, "b:<=" },
+	{ "pgstrom.float82_gt("FLOAT8","FLOAT2")", BOOL, "b:>" },
+	{ "pgstrom.float82_ge("FLOAT8","FLOAT2")", BOOL, "b:>=" },
+
+	{ "pgstrom.float24_eq("FLOAT2","FLOAT4")", BOOL, "b:==" },
+	{ "pgstrom.float24_ne("FLOAT2","FLOAT4")", BOOL, "b:!=" },
+	{ "pgstrom.float24_lt("FLOAT2","FLOAT4")", BOOL, "b:<" },
+	{ "pgstrom.float24_le("FLOAT2","FLOAT4")", BOOL, "b:<=" },
+	{ "pgstrom.float24_gt("FLOAT2","FLOAT4")", BOOL, "b:>" },
+	{ "pgstrom.float24_ge("FLOAT2","FLOAT4")", BOOL, "b:>=" },
+
+	{ "pgstrom.float28_eq("FLOAT2","FLOAT8")", BOOL, "b:==" },
+	{ "pgstrom.float28_ne("FLOAT2","FLOAT8")", BOOL, "b:!=" },
+	{ "pgstrom.float28_lt("FLOAT2","FLOAT8")", BOOL, "b:<" },
+	{ "pgstrom.float28_le("FLOAT2","FLOAT8")", BOOL, "b:<=" },
+	{ "pgstrom.float28_gt("FLOAT2","FLOAT8")", BOOL, "b:>" },
+	{ "pgstrom.float28_ge("FLOAT2","FLOAT8")", BOOL, "b:>=" },
+
+	/* float2 - unary operator */
+	{ "pgstrom.float2_up("FLOAT2")",  FLOAT2, "l:+" },
+	{ "pgstrom.float2_um("FLOAT2")",  FLOAT2, "l:-" },
+	{ "pgstrom.float2_abs("FLOAT2")", FLOAT2, "f:abs" },
+
+	/* float2 - arithmetic operators */
+	{ "pgstrom.float2_pl("FLOAT2","FLOAT2")",   FLOAT4, "m/F:float2pl" },
+	{ "pgstrom.float2_mi("FLOAT2","FLOAT2")",   FLOAT4, "m/F:float2mi" },
+	{ "pgstrom.float2_mul("FLOAT2","FLOAT2")",  FLOAT4, "m/F:float2mul" },
+	{ "pgstrom.float2_div("FLOAT2","FLOAT2")",  FLOAT4, "m/F:float2div" },
+	{ "pgstrom.float24_pl("FLOAT2","FLOAT4")",  FLOAT4, "m/F:float24pl" },
+	{ "pgstrom.float24_mi("FLOAT2","FLOAT4")",  FLOAT4, "m/F:float24mi" },
+	{ "pgstrom.float24_mul("FLOAT2","FLOAT4")", FLOAT4, "m/F:float24mul" },
+	{ "pgstrom.float24_div("FLOAT2","FLOAT4")", FLOAT4, "m/F:float24div" },
+	{ "pgstrom.float28_pl("FLOAT2","FLOAT8")",  FLOAT8, "m/F:float28pl" },
+	{ "pgstrom.float28_mi("FLOAT2","FLOAT8")",  FLOAT8, "m/F:float28mi" },
+	{ "pgstrom.float28_mul("FLOAT2","FLOAT8")", FLOAT8, "m/F:float28mul" },
+	{ "pgstrom.float28_div("FLOAT2","FLOAT8")", FLOAT8, "m/F:float28div" },
+	{ "pgstrom.float42_pl("FLOAT4","FLOAT2")",  FLOAT4, "m/F:float42pl" },
+	{ "pgstrom.float42_mi("FLOAT4","FLOAT2")",  FLOAT4, "m/F:float42mi" },
+	{ "pgstrom.float42_mul("FLOAT4","FLOAT2")", FLOAT4, "m/F:float42mul" },
+	{ "pgstrom.float42_div("FLOAT4","FLOAT2")", FLOAT4, "m/F:float42div" },
+	{ "pgstrom.float82_pl("FLOAT8","FLOAT2")",  FLOAT8, "m/F:float82pl" },
+	{ "pgstrom.float82_mi("FLOAT8","FLOAT2")",  FLOAT8, "m/F:float82mi" },
+	{ "pgstrom.float82_mul("FLOAT8","FLOAT2")", FLOAT8, "m/F:float82mul" },
+	{ "pgstrom.float82_div("FLOAT8","FLOAT2")", FLOAT8, "m/F:float82div" },
+	{ "pgstrom.cash_mul_flt2(money,"FLOAT2")", "money", "y:cash_mul_flt2" },
+	{ "pgstrom.flt2_mul_cash("FLOAT2",money)", "money", "y:flt2_mul_cash" },
+	{ "pgstrom.cash_div_flt2(money,"FLOAT2")", "money", "y:cash_div_flt2" },
+
+	/* type re-interpretation */
+	{ "pg_catalog.as_int8("FLOAT8")", INT8,   "f:__double_as_longlong" },
+	{ "pg_catalog.as_int4("FLOAT4")", INT4,   "f:__float_as_int" },
+	{ "pg_catalog.as_int2("FLOAT2")", INT2,   "f:__half_as_short" },
+	{ "pg_catalog.as_float8("INT8")", FLOAT8, "f:__longlong_as_double" },
+	{ "pg_catalog.as_float4("INT4")", FLOAT4, "f:__int_as_float" },
+	{ "pg_catalog.as_float2("INT2")", FLOAT2, "f:__short_as_half" },
 };
+
+#undef BOOL
+#undef INT2
+#undef INT4
+#undef INT8
+#undef FLOAT2
+#undef FLOAT4
+#undef FLOAT8
+#undef NUMERIC
 
 static void
 devfunc_setup_cast(devfunc_info *entry,
@@ -1177,10 +1284,13 @@ devfunc_setup_cast(devfunc_info *entry,
 
 static void
 devfunc_setup_oper_both(devfunc_info *entry,
-						const char *extra, bool has_alias)
+						const char *extra, bool has_alias, bool add_type_cast)
 {
 	devtype_info   *dtype1 = linitial(entry->func_args);
 	devtype_info   *dtype2 = lsecond(entry->func_args);
+	const char	   *type_cast1 = "";
+	const char	   *type_cast2 = "";
+	char			temp[NAMEDATALEN+10];
 
 	Assert(list_length(entry->func_args) == 2);
 	entry->func_devname = (!has_alias
@@ -1189,12 +1299,26 @@ devfunc_setup_oper_both(devfunc_info *entry,
 									  entry->func_sqlname,
 									  dtype1->type_name,
 									  dtype2->type_name));
+	if (add_type_cast && dtype1->type_oid != dtype2->type_oid)
+	{
+		if (dtype1->type_length >= dtype2->type_length)
+		{
+			snprintf(temp, sizeof(temp), "(%s) ", dtype1->type_base);
+			type_cast2 = temp;
+		}
+		else
+		{
+			snprintf(temp, sizeof(temp), "(%s) ", dtype2->type_base);
+			type_cast1 = temp;
+		}
+	}
+
 	entry->func_decl
 		= psprintf("STATIC_FUNCTION(pg_%s_t)\n"
 				   "pgfn_%s(kern_context *kcxt, pg_%s_t arg1, pg_%s_t arg2)\n"
 				   "{\n"
 				   "    pg_%s_t result;\n"
-				   "    result.value = (%s)(arg1.value %s arg2.value);\n"
+				   "    result.value = (%s)(%sarg1.value %s %sarg2.value);\n"
 				   "    result.isnull = arg1.isnull | arg2.isnull;\n"
 				   "    return result;\n"
 				   "}\n",
@@ -1204,7 +1328,9 @@ devfunc_setup_oper_both(devfunc_info *entry,
 				   dtype2->type_name,
 				   entry->func_rettype->type_name,
 				   entry->func_rettype->type_base,
-				   extra);
+				   type_cast1,
+				   extra,
+				   type_cast2);
 }
 
 static void
@@ -1406,7 +1532,9 @@ __construct_devfunc_info(devfunc_info *entry,
 	if (strncmp(template, "c:", 2) == 0)
 		devfunc_setup_cast(entry, extra, has_alias);
 	else if (strncmp(template, "b:", 2) == 0)
-		devfunc_setup_oper_both(entry, extra, has_alias);
+		devfunc_setup_oper_both(entry, extra, has_alias, true);
+	else if (strncmp(template, "B:", 2) == 0)
+		devfunc_setup_oper_both(entry, extra, has_alias, false);
 	else if (strncmp(template, "l:", 2) == 0)
 		devfunc_setup_oper_left(entry, extra, has_alias);
 	else if (strncmp(template, "r:", 2) == 0)
@@ -1455,6 +1583,8 @@ pgstrom_devfunc_construct_extra(devfunc_info *entry)
 	char   *func_signature = format_procedure_qualified(entry->func_oid);
 	char   *func_rettype = format_type_be_qualified(rettype_oid);
 	int		i;
+
+	elog(INFO, "sig[%s] ret[%s]", func_signature, func_rettype);
 
 	for (i=0; i < lengthof(devfunc_extra_catalog); i++)
 	{

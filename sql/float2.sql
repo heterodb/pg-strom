@@ -30,92 +30,92 @@ CREATE TYPE pg_catalog.float2
 --
 -- Type Cast Definitions
 --
-CREATE FUNCTION pgstrom.as_float4(float2)
+CREATE FUNCTION pgstrom.float4(float2)
   RETURNS float4
   AS 'MODULE_PATHNAME','pgstrom_float2_to_float4'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-CREATE FUNCTION pgstrom.as_float8(float2)
+CREATE FUNCTION pgstrom.float8(float2)
   RETURNS float8
   AS 'MODULE_PATHNAME','pgstrom_float2_to_float8'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-CREATE FUNCTION pgstrom.as_int2(float2)
+CREATE FUNCTION pgstrom.int2(float2)
   RETURNS int2
   AS 'MODULE_PATHNAME','pgstrom_float2_to_int2'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-CREATE FUNCTION pgstrom.as_int4(float2)
+CREATE FUNCTION pgstrom.int4(float2)
   RETURNS int4
   AS 'MODULE_PATHNAME','pgstrom_float2_to_int4'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-CREATE FUNCTION pgstrom.as_int8(float2)
+CREATE FUNCTION pgstrom.int8(float2)
   RETURNS int8
   AS 'MODULE_PATHNAME','pgstrom_float2_to_int8'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-CREATE FUNCTION pgstrom.as_numeric(float2)
+CREATE FUNCTION pgstrom.numeric(float2)
   RETURNS numeric
   AS 'MODULE_PATHNAME','pgstrom_float2_to_numeric'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.as_float2(float4)
+CREATE FUNCTION pgstrom.float2(float4)
   RETURNS float2
   AS 'MODULE_PATHNAME','pgstrom_float4_to_float2'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-CREATE FUNCTION pgstrom.as_float2(float8)
+CREATE FUNCTION pgstrom.float2(float8)
   RETURNS float2
   AS 'MODULE_PATHNAME','pgstrom_float8_to_float2'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-CREATE FUNCTION pgstrom.as_float2(int2)
+CREATE FUNCTION pgstrom.float2(int2)
   RETURNS float2
   AS 'MODULE_PATHNAME','pgstrom_int2_to_float2'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-CREATE FUNCTION pgstrom.as_float2(int4)
+CREATE FUNCTION pgstrom.float2(int4)
   RETURNS float2
   AS 'MODULE_PATHNAME','pgstrom_int4_to_float2'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-CREATE FUNCTION pgstrom.as_float2(int8)
+CREATE FUNCTION pgstrom.float2(int8)
   RETURNS float2
   AS 'MODULE_PATHNAME','pgstrom_int8_to_float2'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
-CREATE FUNCTION pgstrom.as_float2(numeric)
+CREATE FUNCTION pgstrom.float2(numeric)
   RETURNS float2
   AS 'MODULE_PATHNAME','pgstrom_numeric_to_float2'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 CREATE CAST (float2 AS float4)
-  WITH FUNCTION pgstrom.as_float4(float2)
+  WITH FUNCTION pgstrom.float4(float2)
   AS IMPLICIT;
 CREATE CAST (float2 AS float8)
-  WITH FUNCTION pgstrom.as_float8(float2)
+  WITH FUNCTION pgstrom.float8(float2)
   AS IMPLICIT;
 CREATE CAST (float2 AS int2)
-  WITH FUNCTION pgstrom.as_int2(float2)
+  WITH FUNCTION pgstrom.int2(float2)
   AS ASSIGNMENT;
 CREATE CAST (float2 AS int4)
-  WITH FUNCTION pgstrom.as_int4(float2)
+  WITH FUNCTION pgstrom.int4(float2)
   AS ASSIGNMENT;
 CREATE CAST (float2 AS int8)
-  WITH FUNCTION pgstrom.as_int8(float2)
+  WITH FUNCTION pgstrom.int8(float2)
   AS ASSIGNMENT;
 CREATE CAST (float2 AS numeric)
-  WITH FUNCTION pgstrom.as_numeric(float2)
+  WITH FUNCTION pgstrom.numeric(float2)
   AS ASSIGNMENT;
 
 CREATE CAST (float4 AS float2)
-  WITH FUNCTION pgstrom.as_float2(float4)
+  WITH FUNCTION pgstrom.float2(float4)
   AS IMPLICIT;
 CREATE CAST (float8 AS float2)
-  WITH FUNCTION pgstrom.as_float2(float8)
+  WITH FUNCTION pgstrom.float2(float8)
   AS IMPLICIT;
 CREATE CAST (int2 AS float2)
-  WITH FUNCTION pgstrom.as_float2(int2)
+  WITH FUNCTION pgstrom.float2(int2)
   AS ASSIGNMENT;
 CREATE CAST (int4 AS float2)
-  WITH FUNCTION pgstrom.as_float2(int4)
+  WITH FUNCTION pgstrom.float2(int4)
   AS ASSIGNMENT;
 CREATE CAST (int8 AS float2)
-  WITH FUNCTION pgstrom.as_float2(int8)
+  WITH FUNCTION pgstrom.float2(int8)
   AS ASSIGNMENT;
 CREATE CAST (numeric AS float2)
-  WITH FUNCTION pgstrom.as_float2(numeric)
+  WITH FUNCTION pgstrom.float2(numeric)
   AS ASSIGNMENT;
 
 --
@@ -744,35 +744,35 @@ CREATE OPERATOR pg_catalog./ (
 --
 -- Misc operators
 --
-CREATE FUNCTION pgstrom.cash_mul_float2(money,float2)
+CREATE FUNCTION pgstrom.cash_mul_flt2(money,float2)
   RETURNS money
-  AS 'MODULE_PATHNAME','pgstrom_cash_mul_float2'
+  AS 'MODULE_PATHNAME','pgstrom_cash_mul_flt2'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.float2_mul_cash(float2,money)
+CREATE FUNCTION pgstrom.flt2_mul_cash(float2,money)
   RETURNS money
-  AS 'MODULE_PATHNAME','pgstrom_float2_mul_cash'
+  AS 'MODULE_PATHNAME','pgstrom_flt2_mul_cash'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.cash_div_float2(money,float2)
+CREATE FUNCTION pgstrom.cash_div_flt2(money,float2)
   RETURNS money
-  AS 'MODULE_PATHNAME','pgstrom_cash_div_float2'
+  AS 'MODULE_PATHNAME','pgstrom_cash_div_flt2'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 CREATE OPERATOR pg_catalog.* (
-  PROCEDURE = pgstrom.cash_mul_float2,
+  PROCEDURE = pgstrom.cash_mul_flt2,
   LEFTARG = pg_catalog.money,
   RIGHTARG = pg_catalog.float2
 );
 
 CREATE OPERATOR pg_catalog.* (
-  PROCEDURE = pgstrom.float2_mul_cash,
+  PROCEDURE = pgstrom.flt2_mul_cash,
   LEFTARG = pg_catalog.float2,
   RIGHTARG = pg_catalog.money
 );
 
 CREATE OPERATOR pg_catalog./ (
-  PROCEDURE = pgstrom.cash_div_float2,
+  PROCEDURE = pgstrom.cash_div_flt2,
   LEFTARG = pg_catalog.money,
   RIGHTARG = pg_catalog.float2
 );

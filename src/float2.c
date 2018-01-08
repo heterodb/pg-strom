@@ -129,9 +129,9 @@ Datum pgstrom_float82_mul(PG_FUNCTION_ARGS);
 Datum pgstrom_float82_div(PG_FUNCTION_ARGS);
 
 /* misc functions */
-Datum pgstrom_cash_mul_float2(PG_FUNCTION_ARGS);
-Datum pgstrom_float2_mul_cash(PG_FUNCTION_ARGS);
-Datum pgstrom_cash_div_float2(PG_FUNCTION_ARGS);
+Datum pgstrom_cash_mul_flt2(PG_FUNCTION_ARGS);
+Datum pgstrom_flt2_mul_cash(PG_FUNCTION_ARGS);
+Datum pgstrom_cash_div_flt2(PG_FUNCTION_ARGS);
 Datum pgstrom_float8_as_int8(PG_FUNCTION_ARGS);
 Datum pgstrom_float4_as_int4(PG_FUNCTION_ARGS);
 Datum pgstrom_float2_as_int2(PG_FUNCTION_ARGS);
@@ -1257,7 +1257,7 @@ PG_FUNCTION_INFO_V1(pgstrom_float82_div);
  * Misc functions
  */
 Datum
-pgstrom_cash_mul_float2(PG_FUNCTION_ARGS)
+pgstrom_cash_mul_flt2(PG_FUNCTION_ARGS)
 {
 	Cash		c = PG_GETARG_CASH(0);
 	float8		f = fp16_to_fp64(PG_GETARG_FLOAT2(1));
@@ -1266,10 +1266,10 @@ pgstrom_cash_mul_float2(PG_FUNCTION_ARGS)
 	result = rint(c * f);
 	PG_RETURN_CASH(result);
 }
-PG_FUNCTION_INFO_V1(pgstrom_cash_mul_float2);
+PG_FUNCTION_INFO_V1(pgstrom_cash_mul_flt2);
 
 Datum
-pgstrom_float2_mul_cash(PG_FUNCTION_ARGS)
+pgstrom_flt2_mul_cash(PG_FUNCTION_ARGS)
 {
 	float8		f = fp16_to_fp64(PG_GETARG_FLOAT2(0));
 	Cash		c = PG_GETARG_CASH(1);
@@ -1278,10 +1278,10 @@ pgstrom_float2_mul_cash(PG_FUNCTION_ARGS)
 	result = rint(f * c);
 	PG_RETURN_CASH(result);
 }
-PG_FUNCTION_INFO_V1(pgstrom_float2_mul_cash);
+PG_FUNCTION_INFO_V1(pgstrom_flt2_mul_cash);
 
 Datum
-pgstrom_cash_div_float2(PG_FUNCTION_ARGS)
+pgstrom_cash_div_flt2(PG_FUNCTION_ARGS)
 {
 	Cash		c = PG_GETARG_CASH(0);
 	float8		f = fp16_to_fp64(PG_GETARG_FLOAT2(1));
@@ -1295,7 +1295,7 @@ pgstrom_cash_div_float2(PG_FUNCTION_ARGS)
 	result = rint(c / f);
 	PG_RETURN_CASH(result);
 }
-PG_FUNCTION_INFO_V1(pgstrom_cash_div_float2);
+PG_FUNCTION_INFO_V1(pgstrom_cash_div_flt2);
 
 Datum
 pgstrom_float8_as_int8(PG_FUNCTION_ARGS)
