@@ -140,13 +140,9 @@ typedef cl_ulong	Datum;
 #define HALF_INFINITY	__short_as_half(0x0x7c00)
 #define FLT_MAX			__int_as_float(0x7f7fffffU)
 #define FLT_MIN			__int_as_float(0x00800000U)
-#define FLT_DIG			6
-#define FLT_MANT_DIG	24
 #define FLT_INFINITY	__int_as_float(0x7f800000U)
 #define DBL_MAX			__longlong_as_double(0x7fefffffffffffffULL)
 #define DBL_MIN			__longlong_as_double(0x0010000000000000ULL)
-#define DBL_DIG			15
-#define DBL_MANT_DIG	53
 #define DBL_INFINITY	__longlong_as_double(0x7ff0000000000000ULL)
 
 /*

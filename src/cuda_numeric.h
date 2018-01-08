@@ -114,22 +114,26 @@ union NumericChoice
 
 
 /* IEEE 754 FORMAT */
-#if 0
-#define PG_FLOAT_SIGN_POS	31
-#define PG_FLOAT_SIGN_BITS	1
-#define PG_FLOAT_EXPO_POS	23
-#define PG_FLOAT_EXPO_BITS	8
-#define PG_FLOAT_MANT_POS	0
-#define PG_FLOAT_MANT_BITS	23
+#define FP64_FRAC_BITS		52
+#define FP64_FRAC_MASK		((1UL << FP64_FRAC_BITS) - 1)
+#define FP64_EXPO_BITS		11
+#define FP64_EXPO_MASK		(((1UL << FP64_EXPO_BITS) - 1) << FP64_FRAC_BITS)
+#define FP64_EXPO_BIAS		1023
+#define FP64_SIGN_MASK		(1UL << 63)
 
-#define PG_DOUBLE_SIGN_POS	63
-#define PG_DOUBLE_SIGN_BITS	1
-#define PG_DOUBLE_EXPO_POS	52
-#define PG_DOUBLE_EXPO_BITS	11
-#define PG_DOUBLE_MANT_POS	0
-#define PG_DOUBLE_MANT_BITS	52
-#endif
+#define FP32_FRAC_BITS		23
+#define FP32_FRAC_MASK		((1U << FP32_FRAC_BITS) - 1)
+#define FP32_EXPO_BITS		8
+#define FP32_EXPO_MASK		(((1U << FP32_EXPO_BITS) - 1) << FP32_FRAC_BITS)
+#define FP32_EXPO_BIAS		127
+#define FP32_SIGN_MASK		(1U << 31)
 
+#define FP16_FRAC_BITS		10
+#define FP16_FRAC_MASK		((1U << FP16_FRAC_BITS) - 1)
+#define FP16_EXPO_BITS		5
+#define FP16_EXPO_MASK		(((1U << FP16_EXPO_BITS) - 1) << FP16_FRAC_BITS)
+#define FP16_EXPO_BIAS		15
+#define FP16_SIGN_MASK		(1U << 15)
 
 /*
  * PG-Strom internal representation of NUMERIC data type
@@ -661,7 +665,7 @@ pgfn_numeric_float2(kern_context *kcxt, pg_numeric_t arg)
 	pg_float8_t	tmp = numeric_to_float(kcxt, arg);
 	pg_float2_t v = { (cl_half)tmp.value, tmp.isnull };
 
-	if (!v.isnull && isinf(v.value))
+	if (!v.isnull && isinf((cl_float)v.value))
 	{
 		v.isnull = true;
 		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
@@ -743,20 +747,23 @@ integer_to_numeric(kern_context *kcxt, pg_int8_t arg, cl_int size)
 }
 
 STATIC_FUNCTION(pg_numeric_t)
-float_to_numeric(kern_context *kcxt, pg_float8_t arg, int dig)
+float_to_numeric(kern_context *kcxt, pg_float8_t arg)
 {
 	pg_numeric_t	v;
+	cl_ulong		fval;
 	int				sign, expo;
-	cl_ulong		mant;
+	cl_ulong		frac;
+	int				base2, base10;
+	double			x;
 
-
-	if (arg.isnull) {
+	if (arg.isnull)
+	{
 		v.isnull = true;
 		v.value  = 0;
 		return v;
 	}
-
-	if (isnan(arg.value) || isinf(arg.value)) {
+	if (isnan(arg.value) || isinf(arg.value))
+	{
 		v.isnull = true;
 		v.value  = 0;
 		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
@@ -769,90 +776,58 @@ float_to_numeric(kern_context *kcxt, pg_float8_t arg, int dig)
 		return v;
 	}
 
+	fval = __double_as_longlong(arg.value);
+	sign = (fval >> 63);
+	expo = ((fval & FP64_EXPO_MASK) >> FP64_FRAC_BITS) - FP64_EXPO_BIAS;
+	frac = (fval & FP64_FRAC_MASK);
+	if (expo == 0)
 	{
-		double	fval, fmant, thrMax, thrMin;
-		int		fexpo;
-
-		if (0 <= arg.value) {
-			sign = 0;
-			fval = arg.value;
-		} else {
-			sign = 1;
-			fval = -arg.value;
-		}
-
-		fexpo = ceil(log10(fval)) + 1;
-		fmant = fval * (double)exp10((double)(dig - fexpo));
-		if(isinf(fmant)) {
-			v.isnull = true;
-			v.value  = 0;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-			return v;
-		}
-
-		expo  = fexpo - dig;
-
-		thrMax = exp10((double)(dig));
-		while(thrMax < fmant) {
-			fmant /= 10;
-			expo ++;
-		}
-		thrMin = thrMax / 10;
-		while(fmant < thrMin) {
-			fmant *= 10;
-			expo --;
-		}
-
-		mant = fmant + 0.5;
-	}
-
-
-	// normalize
-	while (mant % 10 == 0  &&  expo < PG_NUMERIC_EXPONENT_MAX) {
-		mant /= 10;
-		expo ++;
-	}
-
-	if (PG_NUMERIC_EXPONENT_MAX < expo) {
-		// Exponent is overflow.
-		int 		expoDiff = expo - PG_NUMERIC_EXPONENT_MAX;
-		int			i;
-		cl_ulong	mag;
-
-		if (PG_MAX_DIGITS <= expoDiff) {
-			// magnify is overflow
-			v.isnull = true;
-			v.value  = 0;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-			return v;
-		}
-
-		for (i=0, mag=1; i < expoDiff; i++) {
-			mag *= 10;
-		}
-
-		if ((mant * mag) / mag != mant) {
-			v.isnull = true;
-			v.value  = 0;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-			return v;
-		}
-
-		expo -= expoDiff;
-		mant *= mag;
-	}
-
-	// Error check
-	if (expo < PG_NUMERIC_EXPONENT_MIN || PG_NUMERIC_EXPONENT_MAX < expo ||
-		(mant & ~PG_NUMERIC_MANTISSA_MASK)) {
-		v.isnull = true;
-		v.value  = 0;
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		/* denormalized number is obviously 0.0 in pg_numeric_t */
+		v.isnull = false;
+		v.value = PG_NUMERIC_SET(0, sign, 0);
 		return v;
 	}
+	frac |= (1UL << FP64_FRAC_BITS);
+	base2 = FP64_FRAC_BITS - expo;
+	base10 = floor(log10(pow(2.0, (double)base2)));
+	/*
+	 * value = frac / 2^base2, it is equivalent to:
+	 * value = 10^(-base10) * frac * (10^base10 / 2^base2))
+	 */
+	x = (double)frac * (pow(10.0, (double)base10) /
+						pow( 2.0, (double)base2));
+	fval = __double_as_longlong(x);
+	assert((fval >> 63) == 0);		/* should be positive */
+	expo = ((fval & FP64_EXPO_MASK) >> FP64_FRAC_BITS) - FP64_EXPO_BIAS;
+	frac = (fval & FP64_FRAC_MASK) | (1UL << FP64_FRAC_BITS);
+	if (expo < FP64_FRAC_BITS)
+		frac >>= (FP64_FRAC_BITS - expo);
+	else if (expo > FP64_FRAC_BITS)
+		frac <<= (expo - FP64_FRAC_BITS);
 
+	/* final adjustment */
+	while (base10 < 0)
+	{
+		frac *= 10;
+		base10++;
+		if ((frac & ~PG_NUMERIC_MANTISSA_MASK) != 0)
+		{
+			/* out of range */
+			v.isnull = true;
+			v.value  = 0;
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			return v;
+		}
+	}
+
+	while (base10 > PG_NUMERIC_EXPONENT_MAX ||
+		   (base10 > 0 && frac % 10 == 0))
+	{
+		frac /= 10;
+		base10--;
+	}
 	v.isnull = false;
-	v.value  = PG_NUMERIC_SET(expo, sign, mant);
+	v.value = PG_NUMERIC_SET(base10, sign, frac);
 
 	return v;
 }
@@ -881,20 +856,20 @@ STATIC_INLINE(pg_numeric_t)
 pgfn_float2_numeric(kern_context *kcxt, pg_float2_t arg)
 {
 	pg_float8_t tmp = { (cl_double)arg.value, arg.isnull };
-	return float_to_numeric(kcxt, tmp, HALF_DIG);
+	return float_to_numeric(kcxt, tmp);
 }
 
 STATIC_FUNCTION(pg_numeric_t)
 pgfn_float4_numeric(kern_context *kcxt, pg_float4_t arg)
 {
 	pg_float8_t tmp = { (cl_double)arg.value, arg.isnull };
-	return float_to_numeric(kcxt, tmp, FLT_DIG);
+	return float_to_numeric(kcxt, tmp);
 }
 
 STATIC_FUNCTION(pg_numeric_t)
 pgfn_float8_numeric(kern_context *kcxt, pg_float8_t arg)
 {
-	return float_to_numeric(kcxt, arg, DBL_DIG);
+	return float_to_numeric(kcxt, arg);
 }
 
 /*
