@@ -523,7 +523,276 @@ CREATE OPERATOR pg_catalog.@ (
   RIGHTARG = pg_catalog.float2
 );
 
+--
+-- Arithmetic operators
+--
+CREATE FUNCTION pgstrom.float2_pl(float2,float2)
+  RETURNS float4
+  AS 'MODULE_PATHNAME','pgstrom_float2_pl'
+  LANGUAGE C STRICT IMMUTABLE;
 
+CREATE FUNCTION pgstrom.float2_mi(float2,float2)
+  RETURNS float4
+  AS 'MODULE_PATHNAME','pgstrom_float2_mi'
+  LANGUAGE C STRICT IMMUTABLE;
 
+CREATE FUNCTION pgstrom.float2_mul(float2,float2)
+  RETURNS float4
+  AS 'MODULE_PATHNAME','pgstrom_float2_mul'
+  LANGUAGE C STRICT IMMUTABLE;
 
+CREATE FUNCTION pgstrom.float2_div(float2,float2)
+  RETURNS float4
+  AS 'MODULE_PATHNAME','pgstrom_float2_div'
+  LANGUAGE C STRICT IMMUTABLE;
 
+CREATE FUNCTION pgstrom.float24_pl(float2,float4)
+  RETURNS float4
+  AS 'MODULE_PATHNAME','pgstrom_float24_pl'
+  LANGUAGE C STRICT IMMUTABLE;
+
+CREATE FUNCTION pgstrom.float24_mi(float2,float4)
+  RETURNS float4
+  AS 'MODULE_PATHNAME','pgstrom_float24_mi'
+  LANGUAGE C STRICT IMMUTABLE;
+
+CREATE FUNCTION pgstrom.float24_mul(float2,float4)
+  RETURNS float4
+  AS 'MODULE_PATHNAME','pgstrom_float24_mul'
+  LANGUAGE C STRICT IMMUTABLE;
+
+CREATE FUNCTION pgstrom.float24_div(float2,float4)
+  RETURNS float4
+  AS 'MODULE_PATHNAME','pgstrom_float24_div'
+  LANGUAGE C STRICT IMMUTABLE;
+
+CREATE FUNCTION pgstrom.float28_pl(float2,float8)
+  RETURNS float4
+  AS 'MODULE_PATHNAME','pgstrom_float28_pl'
+  LANGUAGE C STRICT IMMUTABLE;
+
+CREATE FUNCTION pgstrom.float28_mi(float2,float8)
+  RETURNS float4
+  AS 'MODULE_PATHNAME','pgstrom_float28_mi'
+  LANGUAGE C STRICT IMMUTABLE;
+
+CREATE FUNCTION pgstrom.float28_mul(float2,float8)
+  RETURNS float4
+  AS 'MODULE_PATHNAME','pgstrom_float28_mul'
+  LANGUAGE C STRICT IMMUTABLE;
+
+CREATE FUNCTION pgstrom.float28_div(float2,float8)
+  RETURNS float4
+  AS 'MODULE_PATHNAME','pgstrom_float28_div'
+  LANGUAGE C STRICT IMMUTABLE;
+
+CREATE FUNCTION pgstrom.float42_pl(float4,float2)
+  RETURNS float4
+  AS 'MODULE_PATHNAME','pgstrom_float42_pl'
+  LANGUAGE C STRICT IMMUTABLE;
+
+CREATE FUNCTION pgstrom.float42_mi(float4,float2)
+  RETURNS float4
+  AS 'MODULE_PATHNAME','pgstrom_float42_mi'
+  LANGUAGE C STRICT IMMUTABLE;
+
+CREATE FUNCTION pgstrom.float42_mul(float4,float2)
+  RETURNS float4
+  AS 'MODULE_PATHNAME','pgstrom_float42_mul'
+  LANGUAGE C STRICT IMMUTABLE;
+
+CREATE FUNCTION pgstrom.float42_div(float4,float2)
+  RETURNS float4
+  AS 'MODULE_PATHNAME','pgstrom_float42_div'
+  LANGUAGE C STRICT IMMUTABLE;
+
+CREATE FUNCTION pgstrom.float82_pl(float8,float2)
+  RETURNS float4
+  AS 'MODULE_PATHNAME','pgstrom_float82_pl'
+  LANGUAGE C STRICT IMMUTABLE;
+
+CREATE FUNCTION pgstrom.float82_mi(float8,float2)
+  RETURNS float4
+  AS 'MODULE_PATHNAME','pgstrom_float82_mi'
+  LANGUAGE C STRICT IMMUTABLE;
+
+CREATE FUNCTION pgstrom.float82_mul(float8,float2)
+  RETURNS float4
+  AS 'MODULE_PATHNAME','pgstrom_float82_mul'
+  LANGUAGE C STRICT IMMUTABLE;
+
+CREATE FUNCTION pgstrom.float82_div(float8,float2)
+  RETURNS float4
+  AS 'MODULE_PATHNAME','pgstrom_float82_div'
+  LANGUAGE C STRICT IMMUTABLE;
+
+CREATE OPERATOR pg_catalog.+ (
+  PROCEDURE = pgstrom.float2_pl,
+  LEFTARG = pg_catalog.float2,
+  RIGHTARG = pg_catalog.float2
+);
+CREATE OPERATOR pg_catalog.- (
+  PROCEDURE = pgstrom.float2_mi,
+  LEFTARG = pg_catalog.float2,
+  RIGHTARG = pg_catalog.float2
+);
+CREATE OPERATOR pg_catalog.* (
+  PROCEDURE = pgstrom.float2_mul,
+  LEFTARG = pg_catalog.float2,
+  RIGHTARG = pg_catalog.float2
+);
+CREATE OPERATOR pg_catalog./ (
+  PROCEDURE = pgstrom.float2_div,
+  LEFTARG = pg_catalog.float2,
+  RIGHTARG = pg_catalog.float2
+);
+
+CREATE OPERATOR pg_catalog.+ (
+  PROCEDURE = pgstrom.float24_pl,
+  LEFTARG = pg_catalog.float2,
+  RIGHTARG = pg_catalog.float4
+);
+CREATE OPERATOR pg_catalog.- (
+  PROCEDURE = pgstrom.float24_mi,
+  LEFTARG = pg_catalog.float2,
+  RIGHTARG = pg_catalog.float4
+);
+CREATE OPERATOR pg_catalog.* (
+  PROCEDURE = pgstrom.float24_mul,
+  LEFTARG = pg_catalog.float2,
+  RIGHTARG = pg_catalog.float4
+);
+CREATE OPERATOR pg_catalog./ (
+  PROCEDURE = pgstrom.float24_div,
+  LEFTARG = pg_catalog.float2,
+  RIGHTARG = pg_catalog.float4
+);
+
+CREATE OPERATOR pg_catalog.+ (
+  PROCEDURE = pgstrom.float28_pl,
+  LEFTARG = pg_catalog.float2,
+  RIGHTARG = pg_catalog.float8
+);
+CREATE OPERATOR pg_catalog.- (
+  PROCEDURE = pgstrom.float28_mi,
+  LEFTARG = pg_catalog.float2,
+  RIGHTARG = pg_catalog.float8
+);
+CREATE OPERATOR pg_catalog.* (
+  PROCEDURE = pgstrom.float28_mul,
+  LEFTARG = pg_catalog.float2,
+  RIGHTARG = pg_catalog.float8
+);
+CREATE OPERATOR pg_catalog./ (
+  PROCEDURE = pgstrom.float28_div,
+  LEFTARG = pg_catalog.float2,
+  RIGHTARG = pg_catalog.float8
+);
+
+CREATE OPERATOR pg_catalog.+ (
+  PROCEDURE = pgstrom.float42_pl,
+  LEFTARG = pg_catalog.float4,
+  RIGHTARG = pg_catalog.float2
+);
+CREATE OPERATOR pg_catalog.- (
+  PROCEDURE = pgstrom.float42_mi,
+  LEFTARG = pg_catalog.float4,
+  RIGHTARG = pg_catalog.float2
+);
+CREATE OPERATOR pg_catalog.* (
+  PROCEDURE = pgstrom.float42_mul,
+  LEFTARG = pg_catalog.float4,
+  RIGHTARG = pg_catalog.float2
+);
+CREATE OPERATOR pg_catalog./ (
+  PROCEDURE = pgstrom.float42_div,
+  LEFTARG = pg_catalog.float4,
+  RIGHTARG = pg_catalog.float2
+);
+
+CREATE OPERATOR pg_catalog.+ (
+  PROCEDURE = pgstrom.float82_pl,
+  LEFTARG = pg_catalog.float8,
+  RIGHTARG = pg_catalog.float2
+);
+CREATE OPERATOR pg_catalog.- (
+  PROCEDURE = pgstrom.float82_mi,
+  LEFTARG = pg_catalog.float8,
+  RIGHTARG = pg_catalog.float2
+);
+CREATE OPERATOR pg_catalog.* (
+  PROCEDURE = pgstrom.float82_mul,
+  LEFTARG = pg_catalog.float8,
+  RIGHTARG = pg_catalog.float2
+);
+CREATE OPERATOR pg_catalog./ (
+  PROCEDURE = pgstrom.float82_div,
+  LEFTARG = pg_catalog.float8,
+  RIGHTARG = pg_catalog.float2
+);
+
+--
+-- Misc operators
+--
+CREATE FUNCTION pgstrom.cash_mul_float2(money,float2)
+  RETURNS money
+  AS 'MODULE_PATHNAME','pgstrom_cash_mul_float2'
+  LANGUAGE C STRICT IMMUTABLE;
+
+CREATE FUNCTION pgstrom.float2_mul_cash(float2,money)
+  RETURNS money
+  AS 'MODULE_PATHNAME','pgstrom_float2_mul_cash'
+  LANGUAGE C STRICT IMMUTABLE;
+
+CREATE FUNCTION pgstrom.cash_div_float2(money,float2)
+  RETURNS money
+  AS 'MODULE_PATHNAME','pgstrom_cash_div_float2'
+  LANGUAGE C STRICT IMMUTABLE;
+
+CREATE OPERATOR pg_catalog.* (
+  PROCEDURE = pgstrom.cash_mul_float2,
+  LEFTARG = pg_catalog.money,
+  RIGHTARG = pg_catalog.float2
+);
+
+CREATE OPERATOR pg_catalog.* (
+  PROCEDURE = pgstrom.float2_mul_cash,
+  LEFTARG = pg_catalog.float2,
+  RIGHTARG = pg_catalog.money
+);
+
+CREATE OPERATOR pg_catalog./ (
+  PROCEDURE = pgstrom.cash_div_float2,
+  LEFTARG = pg_catalog.money,
+  RIGHTARG = pg_catalog.float2
+);
+
+CREATE FUNCTION pg_catalog.as_int8(float8)
+  RETURNS int8
+  AS 'MODULE_PATHNAME','pgstrom_float8_as_int8'
+  LANGUAGE C STRICT IMMUTABLE;
+
+CREATE FUNCTION pg_catalog.as_int4(float4)
+  RETURNS int4
+  AS 'MODULE_PATHNAME','pgstrom_float4_as_int4'
+  LANGUAGE C STRICT IMMUTABLE;
+
+CREATE FUNCTION pg_catalog.as_int2(float2)
+  RETURNS int2
+  AS 'MODULE_PATHNAME','pgstrom_float2_as_int2'
+  LANGUAGE C STRICT IMMUTABLE;
+
+CREATE FUNCTION pg_catalog.as_float8(int8)
+  RETURNS float8
+  AS 'MODULE_PATHNAME','pgstrom_int8_as_float8'
+  LANGUAGE C STRICT IMMUTABLE;
+
+CREATE FUNCTION pg_catalog.as_float4(int4)
+  RETURNS float4
+  AS 'MODULE_PATHNAME','pgstrom_int4_as_float4'
+  LANGUAGE C STRICT IMMUTABLE;
+
+CREATE FUNCTION pg_catalog.as_float2(int2)
+  RETURNS float2
+  AS 'MODULE_PATHNAME','pgstrom_int2_as_float2'
+  LANGUAGE C STRICT IMMUTABLE;
