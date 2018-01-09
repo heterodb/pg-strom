@@ -1097,6 +1097,7 @@ typedef struct
 	bits8	  **nullmap;
 	void	  **values;
 	HTAB	  **vl_dict;
+	int		   *vl_compress;	/* one of GSTORE_COMPRESSION__* */
 	size_t	   *extra_sz;
 } ccacheBuffer;
 

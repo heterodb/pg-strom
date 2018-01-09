@@ -115,8 +115,8 @@ typedef struct
 //#define GSTORE_FDW_FORMAT__NUMPY
 
 /* column 'compression' option */
-#define GSTORE_COMPRESSION__NONE		1
-#define GSTORE_COMPRESSION__PGLZ		2
+#define GSTORE_COMPRESSION__NONE		0
+#define GSTORE_COMPRESSION__PGLZ		1
 
 #ifdef __CUDACC__
 typedef union {

@@ -84,7 +84,6 @@ typedef struct
 	size_t			rawsize;
 	/* read/write buffer */
 	MVCCAttrs	   *cs_mvcc;	/* t_xmin/t_xmax/t_cid and flags */
-	cl_int		   *cs_compress;/* one of GSTORE_COMPRESSION__* */
 	ccacheBuffer	cc_buf;		/* buffer for regular attributes */
 } GpuStoreBuffer;
 
@@ -427,7 +426,6 @@ gstore_fdw_make_buffer_writable(Relation frel, GpuStoreBuffer *gs_buffer)
 {
 	TupleDesc		tupdesc = RelationGetDescr(frel);
 	ccacheBuffer   *cc_buf = &gs_buffer->cc_buf;
-	MemoryContext	oldcxt;
 	size_t			nrooms;
 	size_t			nitems;
 	size_t			i;
@@ -449,23 +447,22 @@ gstore_fdw_make_buffer_writable(Relation frel, GpuStoreBuffer *gs_buffer)
 	else
 		elog(ERROR, "gstore_fdw: Bug? unknown buffer format: %d",
 			 gs_buffer->format);
-
-	oldcxt = MemoryContextSwitchTo(gs_buffer->memcxt);
-	gs_buffer->cs_mvcc = palloc_huge(sizeof(MVCCAttrs) * nrooms);
-	gs_buffer->cs_compress = palloc(sizeof(cl_int) * tupdesc->natts);
-	MemoryContextSwitchTo(oldcxt);
-	for (i=0; i < tupdesc->natts; i++)
-	{
-		Form_pg_attribute attr = tupdesc->attrs[i];
-
-		gstore_fdw_column_options(RelationGetRelid(frel), attr->attnum,
-								  &gs_buffer->cs_compress[i]);
-	}
+	gs_buffer->cs_mvcc = MemoryContextAllocHuge(gs_buffer->memcxt,
+												sizeof(MVCCAttrs) * nrooms);
 	ccache_setup_buffer(tupdesc,
 						&gs_buffer->cc_buf,
 						false,	/* no system columns */
 						nrooms,
 						gs_buffer->memcxt);
+	for (i=0; i < tupdesc->natts; i++)
+	{
+		Form_pg_attribute attr = tupdesc->attrs[i];
+		int		vl_compress;
+
+		gstore_fdw_column_options(attr->attrelid, attr->attnum,
+								  &vl_compress);
+		gs_buffer->cc_buf.vl_compress[i] = vl_compress;
+	}
 	gs_buffer->cc_buf.nitems = nitems;
 	if (nitems > 0)
 	{
@@ -1268,9 +1265,7 @@ gstoreXactCallbackOnPreCommit(void)
 
 		/* release read-write buffer */
 		pfree(gs_buffer->cs_mvcc);
-		pfree(gs_buffer->cs_compress);
 		gs_buffer->cs_mvcc = NULL;
-		gs_buffer->cs_compress = NULL;
 		ccache_release_buffer(&gs_buffer->cc_buf);
 
 		gs_buffer->read_only = true;

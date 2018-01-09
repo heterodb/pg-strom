@@ -16,6 +16,7 @@
  * GNU General Public License for more details.
  */
 #include "pg_strom.h"
+#include "cuda_plcuda.h"
 
 #define CCACHE_MAX_NUM_DATABASES	100
 #define CCBUILDER_STATE__SHUTDOWN	0
@@ -1327,6 +1328,7 @@ ccache_setup_buffer(TupleDesc tupdesc,
 	cc_buf->nattrs = tupdesc->natts;
 	cc_buf->nitems = 0;
 	cc_buf->nrooms = nrooms;
+	cc_buf->vl_compress = palloc0(sizeof(int) * nattrs);
 	cc_buf->vl_dict = palloc0(sizeof(HTAB *) * nattrs);
 	cc_buf->extra_sz = palloc0(sizeof(size_t) * nattrs);
 	cc_buf->hasnull = palloc0(sizeof(bool) * nattrs);
@@ -1442,12 +1444,13 @@ ccache_release_buffer(ccacheBuffer *cc_buf)
 		if (cc_buf->vl_dict[j] != NULL)
 			hash_destroy(cc_buf->vl_dict[j]);
 	}
-	memset(cc_buf->hasnull, 0, sizeof(bool) * cc_buf->nattrs);
-	memset(cc_buf->nullmap, 0, sizeof(bits8 *) * cc_buf->nattrs);
-	memset(cc_buf->values, 0, sizeof(void *) * cc_buf->nattrs);
-	memset(cc_buf->vl_dict, 0, sizeof(HTAB *) * cc_buf->nattrs);
-	cc_buf->nitems = 0;
-	cc_buf->nrooms = 0;
+	pfree(cc_buf->hasnull);
+	pfree(cc_buf->nullmap);
+	pfree(cc_buf->values);
+	pfree(cc_buf->vl_dict);
+	pfree(cc_buf->vl_compress);
+	pfree(cc_buf->extra_sz);
+	memset(cc_buf, 0, sizeof(ccacheBuffer));
 }
 
 /*
@@ -1768,10 +1771,39 @@ ccache_buffer_append_row(TupleDesc tupdesc,
 
 			if (!isnull)
 			{
+				int			vl_compress = cc_buf->vl_compress[j];
 				struct varlena *vl = PG_DETOAST_DATUM_PACKED(datum);
 				vl_dict_key key;
 				bool		found;
 				size_t		usage;
+
+				if (vl_compress == GSTORE_COMPRESSION__NONE)
+				{
+					/* always decompressed */
+					vl = PG_DETOAST_DATUM(datum);
+				}
+				else if (vl_compress == GSTORE_COMPRESSION__PGLZ)
+				{
+					/* try compression */
+					if (VARATT_IS_COMPRESSED(datum))
+						vl = (struct varlena *)DatumGetPointer(datum);
+					else
+					{
+						struct varlena *src = PG_DETOAST_DATUM(datum);
+						struct varlena *temp = (struct varlena *)
+							toast_compress_datum(PointerGetDatum(src));
+						if (temp)
+						{
+							vl = temp;
+							if (PointerGetDatum(src) != datum)
+								pfree(src);
+						}
+						else
+							vl = src;
+					}
+				}
+				else
+					elog(ERROR, "unknown compression policy: %d", vl_compress);
 
 				key.offset = 0;
 				key.vl_datum = vl;
@@ -1782,10 +1814,14 @@ ccache_buffer_append_row(TupleDesc tupdesc,
 				if (!found)
 				{
 					entry->offset = 0;
-					if (PointerGetDatum(vl) != datum)
-						entry->vl_datum = vl;
-					else
-						entry->vl_datum = PG_DETOAST_DATUM_COPY(datum);
+					if (PointerGetDatum(vl) == datum)
+					{
+						size_t		len = VARSIZE_ANY(datum);
+
+						vl = (struct varlena *) palloc(len);
+						memcpy(vl, DatumGetPointer(datum), len);
+					}
+					entry->vl_datum = vl;
 					cc_buf->extra_sz[j] += MAXALIGN(VARSIZE_ANY(vl));
 
 					usage = (MAXALIGN(sizeof(cl_uint) * nitems) +
