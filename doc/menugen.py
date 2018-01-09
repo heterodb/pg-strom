@@ -51,8 +51,10 @@ class StromDocParser(HTMLParser):
             result += line
         result = result[result.find('>') + 1:]
 
-        link = "<a href=\"./" + os.path.basename(self.html_filename) + \
-               "#" + self.__section_id + "\">" + result + "</a>"
+        link = "<a href=\"./" + os.path.basename(self.html_filename)
+        if (self.__htag_kind != "h1"):
+            link += "#" + self.__section_id
+        link += "\">" + result + "</a>"
         self.toc_index.append([self.__section_id, link])
         if (self.__htag_kind == "h1" or self.__htag_kind == "h2"):
             self.menu_items += "<li class=\"menuitem_"+tag+"\">"+link+"</li>\n"
