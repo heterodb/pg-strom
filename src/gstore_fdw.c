@@ -466,8 +466,6 @@ gstore_fdw_make_buffer_writable(Relation frel, GpuStoreBuffer *gs_buffer)
 	gs_buffer->cc_buf.nitems = nitems;
 	if (nitems > 0)
 	{
-		gs_buffer->cs_mvcc = MemoryContextAllocHuge(gs_buffer->memcxt,
-												   sizeof(MVCCAttrs) * nrooms);
 		if (gs_buffer->format == GSTORE_FDW_FORMAT__PGSTROM)
 		{
 			ccache_copy_buffer_from_kds(tupdesc, cc_buf,
@@ -577,7 +575,7 @@ gstore_fdw_create_buffer(Relation frel, Snapshot snapshot)
 			format   = gs_chunk->format;
 			revision = gs_chunk->revision;
 			rawsize  = gs_chunk->rawsize;
-			hbuf = MemoryContextAlloc(memcxt, rawsize);
+			hbuf = MemoryContextAllocHuge(memcxt, rawsize);
 
 			gpuIpcMemCopyToHost(gs_chunk->pinning,
 								gs_chunk->ipc_mhandle,
@@ -773,8 +771,6 @@ gstoreIterateForeignScan(ForeignScanState *node)
 	ForeignScan	   *fscan = (ForeignScan *)node->ss.ps.plan;
 	GpuStoreBuffer *gs_buffer;
 	size_t			row_index;
-
-	MemoryContextCheck(estate->es_query_cxt);
 
 	ExecClearTuple(slot);
 	if (!gstate->gs_buffer)
@@ -1006,8 +1002,7 @@ gstoreExecForeignInsert(EState *estate,
 	{
 		ccache_expand_buffer(tupdesc, cc_buf, gs_buffer->memcxt);
 		gs_buffer->cs_mvcc = repalloc_huge(gs_buffer->cs_mvcc,
-										   sizeof(HeapTupleFields) *
-										   cc_buf->nrooms);
+										   sizeof(MVCCAttrs) * cc_buf->nrooms);
 	}
 	/* write out a tuple */
 	ccache_buffer_append_row(RelationGetDescr(frel),

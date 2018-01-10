@@ -1274,8 +1274,6 @@ vl_dict_hash_value(const void *__key, Size keysize)
 	const vl_dict_key *key = __key;
 	pg_crc32	crc;
 
-	if (VARATT_IS_COMPRESSED(key->vl_datum))
-		elog(ERROR, "unexpected compressed varlena datum");
 	if (VARATT_IS_EXTERNAL(key->vl_datum))
 		elog(ERROR, "unexpected external toast datum");
 
@@ -1295,17 +1293,45 @@ vl_dict_compare(const void *__key1, const void *__key2, Size keysize)
 	const vl_dict_key *key1 = __key1;
 	const vl_dict_key *key2 = __key2;
 
-	if (VARATT_IS_COMPRESSED(key1->vl_datum) ||
-		VARATT_IS_COMPRESSED(key2->vl_datum))
-		elog(ERROR, "unexpected compressed varlena datum");
 	if (VARATT_IS_EXTERNAL(key1->vl_datum) ||
 		VARATT_IS_EXTERNAL(key2->vl_datum))
 		elog(ERROR, "unexpected external toast datum");
 
-	if (VARSIZE_ANY_EXHDR(key1->vl_datum) == VARSIZE_ANY_EXHDR(key2->vl_datum))
-		return memcmp(VARDATA_ANY(key1->vl_datum),
-					  VARDATA_ANY(key2->vl_datum),
-					  VARSIZE_ANY_EXHDR(key1->vl_datum));
+	if (VARATT_IS_COMPRESSED(key1->vl_datum) ==
+		VARATT_IS_COMPRESSED(key2->vl_datum))
+	{
+		/*
+		 * Both of the varlena datum are compressed or uncompressed,
+		 * so binary comparison is sufficient to check full-match.
+		 */
+		if (VARSIZE_ANY_EXHDR(key1->vl_datum) ==
+			VARSIZE_ANY_EXHDR(key2->vl_datum))
+			return memcmp(VARDATA_ANY(key1->vl_datum),
+						  VARDATA_ANY(key2->vl_datum),
+						  VARSIZE_ANY_EXHDR(key1->vl_datum));
+	}
+	else
+	{
+		struct varlena *temp1 = pg_detoast_datum(key1->vl_datum);
+		struct varlena *temp2 = pg_detoast_datum(key2->vl_datum);
+		int			result;
+
+		if (VARSIZE_ANY_EXHDR(temp1) == VARSIZE_ANY_EXHDR(temp2))
+		{
+			result = memcmp(VARDATA_ANY(temp1),
+							VARDATA_ANY(temp2),
+							VARSIZE_ANY_EXHDR(temp1));
+			if (temp1 != key1->vl_datum)
+				pfree(temp1);
+			if (temp2 != key2->vl_datum)
+				pfree(temp2);
+			return result;
+		}
+		if (temp1 != key1->vl_datum)
+			pfree(temp1);
+		if (temp2 != key2->vl_datum)
+			pfree(temp2);
+	}
 	return 1;
 }
 
@@ -1394,7 +1420,7 @@ ccache_expand_buffer(TupleDesc tupdesc, ccacheBuffer *cc_buf,
 					 MemoryContext memcxt)
 {
 	MemoryContext oldcxt = MemoryContextSwitchTo(memcxt);
-	size_t		nrooms = (3 * cc_buf->nrooms / 2 + 20000);
+	size_t		nrooms = (2 * cc_buf->nrooms + 20000);
 	cl_int		j;
 
 	for (j=0; j < cc_buf->nattrs; j++)
@@ -1411,7 +1437,7 @@ ccache_expand_buffer(TupleDesc tupdesc, ccacheBuffer *cc_buf,
 			Assert(!cc_buf->nullmap[j]);
 			cc_buf->values[j] = repalloc_huge(cc_buf->values[j],
 											  sizeof(vl_dict_key *) * nrooms);
-			Assert(!cc_buf->vl_dict[j]);
+			Assert(cc_buf->vl_dict[j] != NULL);
 		}
 		else if (cc_buf->values[j] != NULL)
 		{
@@ -1421,6 +1447,7 @@ ccache_expand_buffer(TupleDesc tupdesc, ccacheBuffer *cc_buf,
 											   BITMAPLEN(nrooms));
 			cc_buf->values[j] = repalloc_huge(cc_buf->values[j],
 											  unitsz * nrooms);
+			Assert(cc_buf->vl_dict[j] == NULL);
 		}
 	}
 	cc_buf->nrooms = nrooms;
@@ -1704,6 +1731,8 @@ ccache_copy_buffer_to_kds(kern_data_store *kds,
 			Assert((offset & (MAXIMUM_ALIGNOF - 1)) == 0);
 
 			cmeta->va_offset = offset / MAXIMUM_ALIGNOF;
+			nbytes = MAXALIGN(TYPEALIGN(cmeta->attalign,
+										cmeta->attlen) * nrooms);
 			d_nullmap = (cc_buf->hasnull[j] ? (bits8 *)(pos + nbytes) : NULL);
 			s_nullmap = (cc_buf->hasnull[j] ? cc_buf->nullmap[j] : NULL);
 
