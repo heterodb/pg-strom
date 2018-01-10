@@ -1603,7 +1603,7 @@ ccache_copy_buffer_from_kds(TupleDesc tupdesc,
 									   cmeta->attlen);
 			if (extra_sz > 0)
 			{
-				Assert(extra_sz == BITMAPLEN(nitems));
+				Assert(extra_sz == MAXALIGN(BITMAPLEN(nitems)));
 				memcpy(cc_buf->nullmap[j],
 					   (char *)addr + MAXALIGN(unitsz * nitems),
 					   BITMAPLEN(nitems));
@@ -1672,8 +1672,8 @@ ccache_copy_buffer_to_kds(kern_data_store *kds,
 
             for (i=0, k=0; i < cc_buf->nitems; i++)
             {
-                /* only visible rows */
-                if (rowmap && att_isnull(i, rowmap))
+				/* only visible rows */
+				if (rowmap && att_isnull(i, rowmap))
 					continue;
 				entry = vl_entries[i];
 				if (!entry)

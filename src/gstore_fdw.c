@@ -257,21 +257,31 @@ gstore_fdw_visibility_bitmap(GpuStoreBuffer *gs_buffer, size_t *p_nrooms)
 }
 
 /*
+ * gstore_fdw_chunk_hashvalue
+ */
+static inline pg_crc32
+gstore_fdw_chunk_hashvalue(Oid gstore_oid)
+{
+	pg_crc32	hash;
+
+	INIT_LEGACY_CRC32(hash);
+	COMP_LEGACY_CRC32(hash, &MyDatabaseId, sizeof(Oid));
+	COMP_LEGACY_CRC32(hash, &gstore_oid, sizeof(Oid));
+	FIN_LEGACY_CRC32(hash);
+
+	return hash;
+}
+
+/*
  * gstore_fdw_lookup_chunk
  */
 static GpuStoreChunk *
 gstore_fdw_lookup_chunk_nolock(Oid gstore_oid, Snapshot snapshot)
 {
 	GpuStoreChunk *gs_chunk = NULL;
+	pg_crc32	hash = gstore_fdw_chunk_hashvalue(gstore_oid);
+	int			index = hash % GSTORE_CHUNK_HASH_NSLOTS;
 	dlist_iter	iter;
-	pg_crc32	hash;
-	int			index;
-
-	INIT_LEGACY_CRC32(hash);
-	COMP_LEGACY_CRC32(hash, &MyDatabaseId, sizeof(Oid));
-	COMP_LEGACY_CRC32(hash, &gstore_oid, sizeof(Oid));
-	FIN_LEGACY_CRC32(hash);
-	index = hash % GSTORE_CHUNK_HASH_NSLOTS;
 
 	dlist_foreach(iter, &gstore_head->active_chunks[index])
 	{
@@ -321,7 +331,6 @@ gstore_fdw_insert_chunk(GpuStoreBuffer *gs_buffer, size_t nrooms)
 	CUresult		rc;
 	dlist_node	   *dnode;
 	GpuStoreChunk  *gs_chunk;
-	pg_crc32		hash;
 	int				index;
 	dlist_iter		iter;
 
@@ -338,13 +347,9 @@ gstore_fdw_insert_chunk(GpuStoreBuffer *gs_buffer, size_t nrooms)
 	gs_chunk = dlist_container(GpuStoreChunk, chain, dnode);
 	SpinLockRelease(&gstore_head->lock);
 
-	INIT_LEGACY_CRC32(hash);
-	COMP_LEGACY_CRC32(hash, &MyDatabaseId, sizeof(Oid));
-	COMP_LEGACY_CRC32(hash, &gs_buffer->table_oid, sizeof(Oid));
-	FIN_LEGACY_CRC32(hash);
 	gs_chunk->revision
 		= pg_atomic_add_fetch_u32(&gstore_head->revision_seed, 1);
-	gs_chunk->hash = hash;
+	gs_chunk->hash = gstore_fdw_chunk_hashvalue(gs_buffer->table_oid);
 	gs_chunk->database_oid = MyDatabaseId;
 	gs_chunk->table_oid = gs_buffer->table_oid;
 	gs_chunk->xmax = InvalidTransactionId;
@@ -1131,8 +1136,9 @@ gstoreExecForeignDelete(EState *estate,
 	if (isnull)
 		elog(ERROR, "gstore_fdw: ctid is null");
 	t_self = (ItemPointer)DatumGetPointer(datum);
-	index = (((cl_ulong)ItemPointerGetBlockNumber(t_self) << 16) |
-			 ((cl_ulong)ItemPointerGetOffsetNumber(t_self) & 0x0000ffffL));
+	index = (((cl_ulong)t_self->ip_blkid.bi_hi << 32) |
+			 ((cl_ulong)t_self->ip_blkid.bi_hi << 16) |
+			 ((cl_ulong)t_self->ip_posid));
 	if (index >= gs_buffer->cc_buf.nitems)
 		elog(ERROR, "gstore_fdw: DELETE row out of range (%lu of %zu)",
 			 index, gs_buffer->cc_buf.nitems);
@@ -1210,7 +1216,7 @@ gstore_fdw_alloc_pgstrom_buffer(Relation frel,
 
 	/* 3. write out kern_data_store */
 	ccache_copy_buffer_to_kds(kds, tupdesc, cc_buf, rowmap, nrooms);
-	Assert(kds->length == length);
+	Assert(kds->length <= length);
 
 	gs_buffer->rawsize = kds->length;
 	gs_buffer->h.kds = kds;
@@ -1246,6 +1252,47 @@ gstoreXactCallbackOnPreCommit(void)
 		}
 		/* check visibility for each rows (if any) */
 		rowmap = gstore_fdw_visibility_bitmap(gs_buffer, &nrooms);
+
+		/*
+		 * once all the rows are removed from the gstore_fdw, we don't
+		 * add new version of GpuStoreChunk/GpuStoreBuffer.
+		 * Older version will be removed when it becomes invisible from
+		 * all the transactions.
+		 */
+		if (nrooms == 0)
+		{
+			Oid			gstore_oid = gs_buffer->table_oid;
+			pg_crc32	hash = gstore_fdw_chunk_hashvalue(gstore_oid);
+			int			index = hash % GSTORE_CHUNK_HASH_NSLOTS;
+			dlist_iter	iter;
+			bool		found;
+
+			SpinLockAcquire(&gstore_head->lock);
+			dlist_foreach(iter, &gstore_head->active_chunks[index])
+			{
+				GpuStoreChunk  *gs_temp = dlist_container(GpuStoreChunk,
+														  chain, iter.cur);
+				if (gs_temp->hash == hash &&
+					gs_temp->database_oid == MyDatabaseId &&
+					gs_temp->table_oid == gstore_oid &&
+					gs_temp->xmax == InvalidTransactionId)
+				{
+					gs_temp->xmax = GetCurrentTransactionId();
+				}
+			}
+			pg_atomic_add_fetch_u32(&gstore_head->has_warm_chunks, 1);
+			SpinLockRelease(&gstore_head->lock);
+			/* also remove the buffer */
+			pfree(gs_buffer->cs_mvcc);
+			ccache_release_buffer(&gs_buffer->cc_buf);
+			hash_search(gstore_buffer_htab,
+						&gstore_oid,
+						HASH_REMOVE,
+						&found);
+			Assert(found);
+			continue;
+		}
+
 		/* construction of new version of GPU device memory image */
 		frel = heap_open(gs_buffer->table_oid, NoLock);
 		if (gs_buffer->format == GSTORE_FDW_FORMAT__PGSTROM)
@@ -1631,22 +1678,51 @@ gstore_fdw_column_options(Oid gstore_oid, AttrNumber attnum,
 }
 
 /*
+ * gstore_fdw_post_alter
+ */
+static void
+gstore_fdw_post_alter(Oid relid, AttrNumber attnum)
+{
+	GpuStoreBuffer *gs_buffer;
+	GpuStoreChunk  *gs_chunk;
+	bool			found;
+
+	/* not a gstore_fdw foreign-table */
+	if (!relation_is_gstore_fdw(relid))
+		return;
+
+	/* we don't allow ALTER FOREIGN TABLE onto non-empty gstore_fdw */
+	if (gstore_buffer_htab)
+	{
+		gs_buffer = hash_search(gstore_buffer_htab,
+								&relid,
+								HASH_FIND,
+								&found);
+		if (gs_buffer)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("gstore_fdw: unable to run ALTER FOREIGN TABLE for non-empty gstore_fdw table")));
+	}
+
+	gs_chunk = gstore_fdw_lookup_chunk(relid, GetActiveSnapshot());
+	if (gs_chunk)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("gstore_fdw: unable to run ALTER FOREIGN TABLE for non-empty gstore_fdw table")));
+	}
+}
+
+/*
  * gstore_fdw_post_drop
  */
 static void
-gstore_fdw_post_drop(Oid relid, AttrNumber attnum,
-					 ObjectAccessDrop *arg)
+gstore_fdw_post_drop(Oid relid, AttrNumber attnum)
 {
 	GpuStoreChunk *gs_chunk;
-	pg_crc32	hash;
-	int			index;
+	pg_crc32	hash = gstore_fdw_chunk_hashvalue(relid);
+	int			index = hash % GSTORE_CHUNK_HASH_NSLOTS;
 	dlist_iter	iter;
-
-	INIT_LEGACY_CRC32(hash);
-	COMP_LEGACY_CRC32(hash, &MyDatabaseId, sizeof(Oid));
-	COMP_LEGACY_CRC32(hash, &relid, sizeof(Oid));
-	FIN_LEGACY_CRC32(hash);
-	index = hash % GSTORE_CHUNK_HASH_NSLOTS;
 
 	SpinLockAcquire(&gstore_head->lock);
 	dlist_foreach(iter, &gstore_head->active_chunks[index])
@@ -1673,17 +1749,53 @@ gstore_fdw_object_access(ObjectAccessType access,
 						 Oid classId,
 						 Oid objectId,
 						 int subId,
-						 void *arg)
+						 void *__arg)
 {
 	if (object_access_next)
-		(*object_access_next)(access, classId, objectId, subId, arg);
+		(*object_access_next)(access, classId, objectId, subId, __arg);
 
 	switch (access)
 	{
+		case OAT_POST_CREATE:
+			if (classId == RelationRelationId)
+			{
+				ObjectAccessPostCreate *arg = __arg;
+
+				if (arg->is_internal)
+					break;
+				/* A new gstore_fdw table is obviously empty */
+				if (subId != 0)
+					gstore_fdw_post_alter(objectId, subId);
+			}
+			break;
+
+		case OAT_POST_ALTER:
+			if (classId == RelationRelationId)
+			{
+				ObjectAccessPostAlter  *arg = __arg;
+
+				if (arg->is_internal)
+					break;
+				gstore_fdw_post_alter(objectId, subId);
+			}
+			break;
+
 		case OAT_DROP:
-			if (classId == RelationRelationId &&
-				relation_is_gstore_fdw(objectId))
-				gstore_fdw_post_drop(objectId, subId, arg);
+			if (classId == RelationRelationId)
+			{
+				ObjectAccessDrop	   *arg = __arg;
+
+				if ((arg->dropflags & PERFORM_DELETION_INTERNAL) != 0)
+					break;
+
+				if (subId == 0)
+				{
+					if (relation_is_gstore_fdw(objectId))
+						gstore_fdw_post_drop(objectId, subId);
+				}
+				else
+					gstore_fdw_post_alter(objectId, subId);
+			}
 			break;
 
 		default:
