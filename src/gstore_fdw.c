@@ -111,6 +111,17 @@ static GpuStoreHead	   *gstore_head = NULL;
 static HTAB			   *gstore_buffer_htab = NULL;
 static Oid				reggstore_type_oid = InvalidOid;
 
+extern Datum pgstrom_gstore_fdw_validator(PG_FUNCTION_ARGS);
+extern Datum pgstrom_gstore_fdw_handler(PG_FUNCTION_ARGS);
+extern Datum pgstrom_gstore_fdw_chunk_info(PG_FUNCTION_ARGS);
+extern Datum pgstrom_reggstore_in(PG_FUNCTION_ARGS);
+extern Datum pgstrom_reggstore_out(PG_FUNCTION_ARGS);
+extern Datum pgstrom_reggstore_recv(PG_FUNCTION_ARGS);
+extern Datum pgstrom_reggstore_send(PG_FUNCTION_ARGS);
+extern Datum pgstrom_gstore_export_ipchandle(PG_FUNCTION_ARGS);
+extern Datum pgstrom_lo_export_ipchandle(PG_FUNCTION_ARGS);
+extern Datum pgstrom_lo_import_ipchandle(PG_FUNCTION_ARGS);
+
 /*
  * gstore_fdw_chunk_visibility - equivalent to HeapTupleSatisfiesMVCC,
  * but simplified for GpuStoreChunk because only commited chunks are written
@@ -2383,6 +2394,109 @@ pgstrom_gstore_fdw_rawsize(PG_FUNCTION_ARGS)
 	PG_RETURN_INT64(retval);
 }
 PG_FUNCTION_INFO_V1(pgstrom_gstore_fdw_rawsize);
+
+/*
+ * pgstrom_gstore_fdw_chunk_info
+ */
+Datum
+pgstrom_gstore_fdw_chunk_info(PG_FUNCTION_ARGS)
+{
+	FuncCallContext *fncxt;
+	GpuStoreChunk  *gs_chunk;
+	GpuStoreChunk  *gs_temp;
+	List	   *chunks_list;
+	Datum		values[9];
+	bool		isnull[9];
+	HeapTuple	tuple;
+
+	if (SRF_IS_FIRSTCALL())
+	{
+		TupleDesc		tupdesc;
+		MemoryContext	oldcxt;
+
+		fncxt = SRF_FIRSTCALL_INIT();
+		oldcxt = MemoryContextSwitchTo(fncxt->multi_call_memory_ctx);
+
+		tupdesc = CreateTemplateTupleDesc(9, false);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "database_oid",
+						   OIDOID, -1, 0);
+        TupleDescInitEntry(tupdesc, (AttrNumber) 2, "table_oid",
+						   REGCLASSOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 3, "revision",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 4, "xmin",
+						   XIDOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 5, "xmax",
+						   XIDOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 6, "pinning",
+						   INT4OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 7, "format",
+						   TEXTOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 8, "rawsize",
+						   INT8OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 9, "nitems",
+						   INT8OID, -1, 0);
+		fncxt->tuple_desc = BlessTupleDesc(tupdesc);
+
+		chunks_list = NIL;
+		SpinLockAcquire(&gstore_head->lock);
+		PG_TRY();
+		{
+			dlist_iter	iter;
+			int			i;
+
+			for (i=0; i < GSTORE_CHUNK_HASH_NSLOTS; i++)
+			{
+				dlist_foreach(iter, &gstore_head->active_chunks[i])
+				{
+					gs_chunk = dlist_container(GpuStoreChunk, chain, iter.cur);
+					gs_temp = palloc(sizeof(GpuStoreChunk));
+					memcpy(gs_temp, gs_chunk, sizeof(GpuStoreChunk));
+
+					chunks_list = lappend(chunks_list, gs_temp);
+				}
+			}
+		}
+		PG_CATCH();
+		{
+			SpinLockRelease(&gstore_head->lock);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+		SpinLockRelease(&gstore_head->lock);
+
+		fncxt->user_fctx = chunks_list;
+		MemoryContextSwitchTo(oldcxt);
+	}
+	fncxt = SRF_PERCALL_SETUP();
+
+	chunks_list = fncxt->user_fctx;
+	if (chunks_list == NIL)
+		SRF_RETURN_DONE(fncxt);
+	gs_chunk = linitial(chunks_list);
+	Assert(gs_chunk != NULL);
+	fncxt->user_fctx = list_delete_first(chunks_list);
+
+	memset(isnull, 0, sizeof(isnull));
+	values[0] = ObjectIdGetDatum(gs_chunk->database_oid);
+	values[1] = ObjectIdGetDatum(gs_chunk->table_oid);
+	values[2] = Int32GetDatum(gs_chunk->revision);
+	values[3] = TransactionIdGetDatum(gs_chunk->xmin);
+	values[4] = TransactionIdGetDatum(gs_chunk->xmax);
+	values[5] = Int32GetDatum(gs_chunk->pinning);
+	if (gs_chunk->format == GSTORE_FDW_FORMAT__PGSTROM)
+		values[6] = CStringGetTextDatum("pgstrom");
+	else
+		values[6] = CStringGetTextDatum(psprintf("unknown - %u",
+												 gs_chunk->format));
+	values[7] = Int64GetDatum(gs_chunk->rawsize);
+	values[8] = Int64GetDatum(gs_chunk->nitems);
+
+	tuple = heap_form_tuple(fncxt->tuple_desc, values, isnull);
+
+	SRF_RETURN_NEXT(fncxt, HeapTupleGetDatum(tuple));
+}
+PG_FUNCTION_INFO_V1(pgstrom_gstore_fdw_chunk_info);
 
 /*
  * pgstrom_startup_gstore_fdw

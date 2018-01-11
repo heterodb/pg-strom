@@ -14,7 +14,7 @@ CREATE TYPE pgstrom.__pgstrom_device_info AS (
 CREATE FUNCTION public.pgstrom_device_info()
   RETURNS SETOF pgstrom.__pgstrom_device_info
   AS 'MODULE_PATHNAME'
-  LANGUAGE C STRICT;
+  LANGUAGE C VOLATILE;
 
 CREATE TYPE pgstrom.__pgstrom_device_preserved_meminfo AS (
   device_id int4,
@@ -25,7 +25,7 @@ CREATE TYPE pgstrom.__pgstrom_device_preserved_meminfo AS (
 CREATE FUNCTION public.pgstrom_device_preserved_meminfo()
   RETURNS SETOF pgstrom.__pgstrom_device_preserved_meminfo
   AS 'MODULE_PATHNAME'
-  LANGUAGE C STRICT;
+  LANGUAGE C VOLATILE;
 
 --
 -- Functions/Languages to support PL/CUDA
@@ -246,6 +246,22 @@ CREATE FUNCTION public.gstore_fdw_rawsize(reggstore)
   RETURNS bigint
   AS 'MODULE_PATHNAME','pgstrom_gstore_fdw_rawsize'
   LANGUAGE C STRICT;
+
+CREATE TYPE pgstrom.__gstore_fdw_chunk_info AS (
+  database_oid	oid,
+  table_oid		oid,
+  revision		int,
+  xmin			xid,
+  xmax			xid,
+  pinning		int,
+  format		text,
+  rawsize		bigint,
+  nitems		bigint
+);
+CREATE FUNCTION public.gstore_fdw_chunk_info()
+  RETURNS SETOF pgstrom.__gstore_fdw_chunk_info
+  AS 'MODULE_PATHNAME','pgstrom_gstore_fdw_chunk_info'
+  LANGUAGE C VOLATILE;
 
 --
 -- Type re-interpretation routines
