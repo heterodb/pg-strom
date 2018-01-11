@@ -1010,6 +1010,7 @@ gstoreExecForeignInsert(EState *estate,
 										   sizeof(MVCCAttrs) * cc_buf->nrooms);
 	}
 	/* write out a tuple */
+	slot_getallattrs(slot);
 	ccache_buffer_append_row(RelationGetDescr(frel),
 							 cc_buf,
 							 NULL,	/* no system columns */
@@ -1082,6 +1083,7 @@ gstoreExecForeignUpdate(EState *estate,
 										   sizeof(HeapTupleFields) *
 										   cc_buf->nrooms);
 	}
+	slot_getallattrs(slot);
 	ccache_buffer_append_row(RelationGetDescr(frel),
 							 cc_buf,
 							 NULL,	/* no system columns */
