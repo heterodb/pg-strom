@@ -15,7 +15,7 @@ endif
 #
 # PG-Strom versioning
 #
-PGSTROM_VERSION=2.0devel
+PGSTROM_VERSION=1.9
 
 PGSTROM_VERSION_NUM=$(shell echo $(PGSTROM_VERSION)			\
 	| sed -e 's/\./ /g' -e 's/[A-Za-z].*$$//g'			\
@@ -68,15 +68,10 @@ STROM_UTILS = $(addprefix $(STROM_BUILD_ROOT)/utils/, $(__STROM_UTILS))
 #
 __RPM_SPECFILE = pg_strom.spec
 RPM_SPECFILE = $(addprefix $(STROM_BUILD_ROOT)/, $(__RPM_SPECFILE))
-__MISC_FILES = LICENSE README.md Makefile \
-	pg_strom.control src/Makefile \
-	$(addprefix sql/,$(PGSTROM_SQL_SRC))
 
-PACKAGE_FILES = $(__MISC_FILES)					\
-	$(addprefix src/,$(__STROM_SOURCES))			\
-	$(addprefix src/,$(__CUDA_SOURCES))			\
-	$(addprefix src/,$(__STROM_HEADERS))			\
-	$(addprefix utils/,$(addsuffix .c,$(__STROM_UTILS)))
+__PACKAGE_FILES = LICENSE README.md Makefile pg_strom.control	\
+	$(shell git ls-files src sql utils test)
+PACKAGE_FILES = $(addprefix $(STROM_BUILD_ROOT)/, $(__PACKAGE_FILES))
 __STROM_TGZ = pg_strom-$(PGSTROM_VERSION).tar.gz
 STROM_TGZ = $(addprefix $(STROM_BUILD_ROOT)/, $(__STROM_TGZ))
 
@@ -246,12 +241,10 @@ $(HTML_FILES): $(HTML_SOURCES) $(HTML_TEMPLATE)
 
 html: $(HTML_FILES)
 
-$(STROM_TGZ): $(addprefix $(STROM_BUILD_ROOT)/, $(PACKAGE_FILES))
-	$(MKDIR_P) $(STROM_BUILD_ROOT)/__tarball/$(@:.tar.gz=)/src
-	$(MKDIR_P) $(STROM_BUILD_ROOT)/__tarball/$(@:.tar.gz=)/sql
-	$(MKDIR_P) $(STROM_BUILD_ROOT)/__tarball/$(@:.tar.gz=)/utils
-	$(foreach x,$(PACKAGE_FILES),cp -f $(STROM_BUILD_ROOT)/$x $(STROM_BUILD_ROOT)/__tarball/$(@:.tar.gz=)/$(x);)
-	tar zc -C $(STROM_BUILD_ROOT)/__tarball $(@:.tar.gz=) > $@
+$(STROM_TGZ): $(PACKAGE_FILES)
+	git archive	--format=tar.gz \
+			--prefix=pg_strom-$(PGSTROM_VERSION)/ \
+			-o $@ HEAD $(PACKAGE_FILES)
 
 tarball: $(STROM_TGZ)
 
