@@ -73,7 +73,7 @@ pgfn_int4_bool(kern_context *kcxt, pg_int4_t arg)
 		return result;												\
 	}
 
-#define BASIC_FLOAT_ADDFUNC_TEMPLATE(name,r_type,x_type,y_type)		\
+#define BASIC_FLOAT_ADDFUNC_TEMPLATE(name,r_type,x_type,y_type,cast_t) \
 	STATIC_FUNCTION(pg_##r_type##_t)								\
 	pgfn_##name(kern_context *kcxt,									\
 				pg_##x_type##_t arg1, pg_##y_type##_t arg2)         \
@@ -83,10 +83,10 @@ pgfn_int4_bool(kern_context *kcxt, pg_int4_t arg)
 		result.isnull = arg1.isnull | arg2.isnull;					\
 		if (!result.isnull)											\
 		{															\
-			result.value = arg1.value + arg2.value;					\
+			result.value = (cast_t)arg1.value + (cast_t)arg2.value;	\
 			CHECKFLOATVAL(&kcxt->e, result,							\
-						  isinf(arg1.value) ||						\
-						  isinf(arg2.value), true);					\
+						  isinf((cast_t)arg1.value) ||				\
+						  isinf((cast_t)arg2.value), true);			\
 		}                                                           \
 		return result;												\
 	}
@@ -103,15 +103,15 @@ BASIC_INT_ADDFUNC_TEMPLATE(int82pl,int8,int8,int2)
 BASIC_INT_ADDFUNC_TEMPLATE(int84pl,int8,int8,int4)
 BASIC_INT_ADDFUNC_TEMPLATE(int8pl, int8,int8,int8)
 
-BASIC_FLOAT_ADDFUNC_TEMPLATE(float2pl, float2, float2, float4)
-BASIC_FLOAT_ADDFUNC_TEMPLATE(float24pl,float2, float4, float4)
-BASIC_FLOAT_ADDFUNC_TEMPLATE(float28pl,float2, float8, float8)
-BASIC_FLOAT_ADDFUNC_TEMPLATE(float42pl,float4, float2, float4)
-BASIC_FLOAT_ADDFUNC_TEMPLATE(float4pl, float4, float4, float4)
-BASIC_FLOAT_ADDFUNC_TEMPLATE(float48pl,float8, float4, float8)
-BASIC_FLOAT_ADDFUNC_TEMPLATE(float82pl,float8, float2, float8)
-BASIC_FLOAT_ADDFUNC_TEMPLATE(float84pl,float8, float8, float4)
-BASIC_FLOAT_ADDFUNC_TEMPLATE(float8pl, float8, float8, float8)
+BASIC_FLOAT_ADDFUNC_TEMPLATE(float2pl, float4, float2, float2, cl_float)
+BASIC_FLOAT_ADDFUNC_TEMPLATE(float24pl,float4, float2, float4, cl_float)
+BASIC_FLOAT_ADDFUNC_TEMPLATE(float28pl,float8, float2, float8, cl_double)
+BASIC_FLOAT_ADDFUNC_TEMPLATE(float42pl,float4, float4, float4, cl_float)
+BASIC_FLOAT_ADDFUNC_TEMPLATE(float4pl, float4, float4, float4, cl_float)
+BASIC_FLOAT_ADDFUNC_TEMPLATE(float48pl,float8, float4, float8, cl_double)
+BASIC_FLOAT_ADDFUNC_TEMPLATE(float82pl,float8, float8, float2, cl_double)
+BASIC_FLOAT_ADDFUNC_TEMPLATE(float84pl,float8, float8, float4, cl_double)
+BASIC_FLOAT_ADDFUNC_TEMPLATE(float8pl, float8, float8, float8, cl_double)
 
 
 #undef BASIC_INT_ADDFUNC_TEMPLATE
@@ -141,7 +141,7 @@ BASIC_FLOAT_ADDFUNC_TEMPLATE(float8pl, float8, float8, float8)
 		return result;												\
 	}
 
-#define BASIC_FLOAT_SUBFUNC_TEMPLATE(name,r_type,x_type,y_type)		\
+#define BASIC_FLOAT_SUBFUNC_TEMPLATE(name,r_type,x_type,y_type,cast_t) \
 	STATIC_FUNCTION(pg_##r_type##_t)								\
 	pgfn_##name(kern_context *kcxt,									\
 				pg_##x_type##_t arg1, pg_##y_type##_t arg2)         \
@@ -151,10 +151,10 @@ BASIC_FLOAT_ADDFUNC_TEMPLATE(float8pl, float8, float8, float8)
 		result.isnull = arg1.isnull | arg2.isnull;					\
 		if (!result.isnull)											\
 		{															\
-			result.value = arg1.value - arg2.value;					\
+			result.value = (cast_t)arg1.value - (cast_t)arg2.value;	\
 			CHECKFLOATVAL(&kcxt->e, result,							\
-						  isinf(arg1.value) ||						\
-						  isinf(arg2.value), true);					\
+						  isinf((cast_t)arg1.value) ||				\
+						  isinf((cast_t)arg2.value), true);			\
 		}                                                           \
 		return result;												\
 	}
@@ -171,15 +171,15 @@ BASIC_INT_SUBFUNC_TEMPLATE(int82mi, int8, int8, int2)
 BASIC_INT_SUBFUNC_TEMPLATE(int84mi, int8, int8, int4)
 BASIC_INT_SUBFUNC_TEMPLATE(int8mi,  int8, int8, int8)
 
-BASIC_FLOAT_SUBFUNC_TEMPLATE(float2mi,  float2, float2, float4)
-BASIC_FLOAT_SUBFUNC_TEMPLATE(float24mi, float2, float4, float4)
-BASIC_FLOAT_SUBFUNC_TEMPLATE(float28mi, float2, float8, float8)
-BASIC_FLOAT_SUBFUNC_TEMPLATE(float42mi, float4, float2, float4)
-BASIC_FLOAT_SUBFUNC_TEMPLATE(float4mi,  float4, float4, float4)
-BASIC_FLOAT_SUBFUNC_TEMPLATE(float48mi, float8, float4, float8)
-BASIC_FLOAT_SUBFUNC_TEMPLATE(float82mi, float8, float2, float8)
-BASIC_FLOAT_SUBFUNC_TEMPLATE(float84mi, float8, float8, float4)
-BASIC_FLOAT_SUBFUNC_TEMPLATE(float8mi,  float8, float8, float8)
+BASIC_FLOAT_SUBFUNC_TEMPLATE(float2mi,  float4, float2, float2, cl_float)
+BASIC_FLOAT_SUBFUNC_TEMPLATE(float24mi, float4, float2, float4, cl_float)
+BASIC_FLOAT_SUBFUNC_TEMPLATE(float28mi, float8, float2, float8, cl_double)
+BASIC_FLOAT_SUBFUNC_TEMPLATE(float42mi, float4, float4, float2, cl_float)
+BASIC_FLOAT_SUBFUNC_TEMPLATE(float4mi,  float4, float4, float4, cl_float)
+BASIC_FLOAT_SUBFUNC_TEMPLATE(float48mi, float8, float4, float8, cl_double)
+BASIC_FLOAT_SUBFUNC_TEMPLATE(float82mi, float8, float2, float8, cl_double)
+BASIC_FLOAT_SUBFUNC_TEMPLATE(float84mi, float8, float8, float4, cl_double)
+BASIC_FLOAT_SUBFUNC_TEMPLATE(float8mi,  float8, float8, float8, cl_double)
 
 #undef BASIC_INT_SUBFUNC_TEMPLATE
 #undef BASIC_FLOAT_SUBFUNC_TEMPLATE
@@ -382,15 +382,17 @@ pgfn_int8mul(kern_context *kcxt, pg_int8_t arg1, pg_int8_t arg2)
 STATIC_FUNCTION(pg_float4_t)
 pgfn_float2mul(kern_context *kcxt, pg_float2_t arg1, pg_float2_t arg2)
 {
+	cl_float	value1 = arg1.value;
+	cl_float	value2 = arg2.value;
 	pg_float4_t	result;
 
 	result.isnull = arg1.isnull | arg2.isnull;
 	if (!result.isnull)
 	{
-		result.value = (cl_float)arg1.value * (cl_float)arg2.value;
+		result.value = value1 * value2;
 		CHECKFLOATVAL(&kcxt->e, result,
-					  isinf(arg1.value) || isinf(arg2.value),
-					  arg1.value == 0.0 || arg2.value == 0.0);
+					  isinf(value1) * isinf(value2),
+					  value1 == 0.0 || value2 == 0.0);
 	}
 	return result;
 }
@@ -399,15 +401,16 @@ pgfn_float2mul(kern_context *kcxt, pg_float2_t arg1, pg_float2_t arg2)
 STATIC_FUNCTION(pg_float4_t)
 pgfn_float24mul(kern_context *kcxt, pg_float2_t arg1, pg_float4_t arg2)
 {
+	cl_float	value1 = arg1.value;
 	pg_float4_t	result;
 
 	result.isnull = arg1.isnull | arg2.isnull;
 	if (!result.isnull)
 	{
-		result.value = (cl_float)arg1.value * arg2.value;
+		result.value = value1 * arg2.value;
 		CHECKFLOATVAL(&kcxt->e, result,
-					  isinf(arg1.value) || isinf(arg2.value),
-					  arg1.value == 0.0 || arg2.value == 0.0);
+					  isinf(value1) || isinf(arg2.value),
+					  value1 == 0.0 || arg2.value == 0.0);
 	}
 	return result;
 }
@@ -415,15 +418,16 @@ pgfn_float24mul(kern_context *kcxt, pg_float2_t arg1, pg_float4_t arg2)
 STATIC_FUNCTION(pg_float8_t)
 pgfn_float28mul(kern_context *kcxt, pg_float2_t arg1, pg_float8_t arg2)
 {
+	cl_double	value1 = arg1.value;
 	pg_float8_t	result;
 
 	result.isnull = arg1.isnull | arg2.isnull;
 	if (!result.isnull)
 	{
-		result.value = (cl_double)arg1.value * arg2.value;
+		result.value = value1 * arg2.value;
 		CHECKFLOATVAL(&kcxt->e, result,
-					  isinf(arg1.value) || isinf(arg2.value),
-					  arg1.value == 0.0 || arg2.value == 0.0);
+					  isinf(value1) || isinf(arg2.value),
+					  value1 == 0.0 || arg2.value == 0.0);
 	}
 	return result;
 }
@@ -431,6 +435,7 @@ pgfn_float28mul(kern_context *kcxt, pg_float2_t arg1, pg_float8_t arg2)
 STATIC_FUNCTION(pg_float4_t)
 pgfn_float42mul(kern_context *kcxt, pg_float4_t arg1, pg_float2_t arg2)
 {
+	cl_float	value2 = arg2.value;
 	pg_float4_t	result;
 
 	result.isnull = arg1.isnull | arg2.isnull;
@@ -438,8 +443,8 @@ pgfn_float42mul(kern_context *kcxt, pg_float4_t arg1, pg_float2_t arg2)
 	{
 		result.value = arg1.value * (cl_float)arg2.value;
 		CHECKFLOATVAL(&kcxt->e, result,
-					  isinf(arg1.value) || isinf(arg2.value),
-					  arg1.value == 0.0 || arg2.value == 0.0);
+					  isinf(arg1.value) || isinf(value2),
+					  arg1.value == 0.0 || value2 == 0.0);
 	}
 	return result;
 }
@@ -479,15 +484,16 @@ pgfn_float48mul(kern_context *kcxt, pg_float4_t arg1, pg_float8_t arg2)
 STATIC_FUNCTION(pg_float8_t)
 pgfn_float82mul(kern_context *kcxt, pg_float8_t arg1, pg_float2_t arg2)
 {
+	cl_double	value2 = arg2.value;
 	pg_float8_t	result;
 
 	result.isnull = arg1.isnull | arg2.isnull;
 	if (!result.isnull)
 	{
-		result.value = arg1.value * (cl_double)arg2.value;
+		result.value = arg1.value * value2;
 		CHECKFLOATVAL(&kcxt->e, result,
-					  isinf(arg1.value) || isinf(arg2.value),
-					  arg1.value == 0.0 || arg2.value == 0.0);
+					  isinf(arg1.value) || isinf(value2),
+					  arg1.value == 0.0 || value2 == 0.0);
 	}
 	return result;
 }
@@ -757,22 +763,24 @@ pgfn_int8div(kern_context *kcxt, pg_int8_t arg1, pg_int8_t arg2)
 STATIC_FUNCTION(pg_float4_t)
 pgfn_float2div(kern_context *kcxt, pg_float2_t arg1, pg_float2_t arg2)
 {
+	cl_float	value1 = arg1.value;
+	cl_float	value2 = arg2.value;
 	pg_float4_t	result;
 
 	result.isnull = arg1.isnull | arg2.isnull;
     if (!result.isnull)
     {
-		if (arg2.value == 0.0)
+		if (value2 == 0.0)
 		{
 			result.isnull = true;
 			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 		}
 		else
 		{
-			result.value = (cl_float)arg1.value / (cl_float)arg2.value;
+			result.value = value1 / value2;
 			CHECKFLOATVAL(&kcxt->e, result,
-						  isinf(arg1.value) || isinf(arg2.value),
-						  arg1.value == 0.0);
+						  isinf(value1) || isinf(value2),
+						  value1 == 0.0);
 		}
 	}
 	return result;
@@ -782,6 +790,7 @@ pgfn_float2div(kern_context *kcxt, pg_float2_t arg1, pg_float2_t arg2)
 STATIC_FUNCTION(pg_float4_t)
 pgfn_float24div(kern_context *kcxt, pg_float2_t arg1, pg_float4_t arg2)
 {
+	cl_float	value1 = arg1.value;
 	pg_float4_t	result;
 
 	result.isnull = arg1.isnull | arg2.isnull;
@@ -794,10 +803,10 @@ pgfn_float24div(kern_context *kcxt, pg_float2_t arg1, pg_float4_t arg2)
 		}
 		else
 		{
-			result.value = (cl_float)arg1.value / arg2.value;
+			result.value = value1 / arg2.value;
 			CHECKFLOATVAL(&kcxt->e, result,
-						  isinf(arg1.value) || isinf(arg2.value),
-						  arg1.value == 0.0);
+						  isinf(value1) || isinf(arg2.value),
+						  value1 == 0.0);
 		}
 	}
 	return result;
@@ -806,7 +815,8 @@ pgfn_float24div(kern_context *kcxt, pg_float2_t arg1, pg_float4_t arg2)
 STATIC_FUNCTION(pg_float8_t)
 pgfn_float28div(kern_context *kcxt, pg_float2_t arg1, pg_float8_t arg2)
 {
-	pg_float4_t	result;
+	cl_double	value1 = arg1.value;
+	pg_float8_t	result;
 
 	result.isnull = arg1.isnull | arg2.isnull;
     if (!result.isnull)
@@ -818,10 +828,10 @@ pgfn_float28div(kern_context *kcxt, pg_float2_t arg1, pg_float8_t arg2)
 		}
 		else
 		{
-			result.value = (cl_double)arg1.value / arg2.value;
+			result.value = value1 / arg2.value;
 			CHECKFLOATVAL(&kcxt->e, result,
-						  isinf(arg1.value) || isinf(arg2.value),
-						  arg1.value == 0.0);
+						  isinf(value1) || isinf(arg2.value),
+						  value1 == 0.0);
 		}
 	}
 	return result;
@@ -830,21 +840,22 @@ pgfn_float28div(kern_context *kcxt, pg_float2_t arg1, pg_float8_t arg2)
 STATIC_FUNCTION(pg_float4_t)
 pgfn_float42div(kern_context *kcxt, pg_float4_t arg1, pg_float2_t arg2)
 {
+	cl_float	value2 = arg2.value;
 	pg_float4_t	result;
 
 	result.isnull = arg1.isnull | arg2.isnull;
     if (!result.isnull)
     {
-		if (arg2.value == 0.0)
+		if (value2 == 0.0)
 		{
 			result.isnull = true;
 			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 		}
 		else
 		{
-			result.value = arg1.value / (cl_float)arg2.value;
+			result.value = arg1.value / value2;
 			CHECKFLOATVAL(&kcxt->e, result,
-						  isinf(arg1.value) || isinf(arg2.value),
+						  isinf(arg1.value) || isinf(value2),
 						  arg1.value == 0.0);
 		}
 	}
@@ -902,21 +913,22 @@ pgfn_float48div(kern_context *kcxt, pg_float4_t arg1, pg_float8_t arg2)
 STATIC_FUNCTION(pg_float8_t)
 pgfn_float82div(kern_context *kcxt, pg_float8_t arg1, pg_float2_t arg2)
 {
-	pg_float4_t	result;
+	cl_double	value2 = arg2.value;
+	pg_float8_t	result;
 
 	result.isnull = arg1.isnull | arg2.isnull;
     if (!result.isnull)
     {
-		if (arg2.value == 0.0)
+		if (value2 == 0.0)
 		{
 			result.isnull = true;
 			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 		}
 		else
 		{
-			result.value = arg1.value / (cl_double)arg2.value;
+			result.value = arg1.value / value2;
 			CHECKFLOATVAL(&kcxt->e, result,
-						  isinf(arg1.value) || isinf(arg2.value),
+						  isinf(arg1.value) || isinf(value2),
 						  arg1.value == 0.0);
 		}
 	}
