@@ -1336,6 +1336,40 @@ vl_dict_compare(const void *__key1, const void *__key2, Size keysize)
 }
 
 /*
+ * vl_datum_compression - makes varlena compressed
+ */
+static struct varlena *
+vl_datum_compression(void *datum, int vl_comression)
+{
+	struct varlena *vl;
+
+	if (vl_comression == GSTORE_COMPRESSION__NONE)
+	{
+		/* not compressed */
+		vl = PG_DETOAST_DATUM(datum);
+	}
+	else if (vl_comression == GSTORE_COMPRESSION__PGLZ)
+	{
+		/* try pglz comression */
+		if (VARATT_IS_COMPRESSED(datum))
+			vl = (struct varlena *)DatumGetPointer(datum);
+		else
+		{
+			struct varlena *temp = PG_DETOAST_DATUM(datum);
+
+			vl = (struct varlena *)
+				toast_compress_datum(PointerGetDatum(temp));
+			if (vl != temp)
+				pfree(temp);
+		}
+	}
+	else
+		elog(ERROR, "unknown format %d", vl_comression);
+
+	return vl;
+}
+
+/*
  * ccache_setup_buffer
  */
 void
@@ -1567,6 +1601,8 @@ ccache_copy_buffer_from_kds(TupleDesc tupdesc,
 		addr = (char *)kds + va_offset;
 		if (cmeta->attlen < 0)
 		{
+			vl_dict_key	  **vl_array = (vl_dict_key **)cc_buf->values[j];
+
 			for (i=0; i < kds->nitems; i++)
 			{
 				vl_dict_key	key, *entry;
@@ -1577,7 +1613,7 @@ ccache_copy_buffer_from_kds(TupleDesc tupdesc,
 				offset = ((cl_uint *)addr)[i] << MAXIMUM_ALIGNOF_SHIFT;
 				if (offset == 0)
 				{
-					((vl_dict_key **)cc_buf->values[j])[i] = NULL;
+					vl_array[i] = NULL;
 					continue;
 				}
 				datum = (char *)addr + offset;
@@ -1589,12 +1625,22 @@ ccache_copy_buffer_from_kds(TupleDesc tupdesc,
 									&found);
 				if (!found)
 				{
-					entry->vl_datum = PG_DETOAST_DATUM_COPY(datum);
-					cc_buf->extra_sz[j] += MAXALIGN(VARSIZE(entry->vl_datum));
+					struct varlena *vl
+						= vl_datum_compression(datum, cc_buf->vl_compress[j]);
+					if (vl == datum)
+					{
+						struct varlena *temp = palloc(VARSIZE_ANY(vl));
+
+						memcpy(temp, vl, VARSIZE_ANY(vl));
+						vl = temp;
+					}
+					entry->vl_datum = vl;
+					cc_buf->extra_sz[j] += MAXALIGN(VARSIZE(vl));
 				}
 				if (MAXALIGN(sizeof(cl_uint) * nitems) +
 					cc_buf->extra_sz[j] >= (size_t)UINT_MAX * MAXIMUM_ALIGNOF)
 					elog(ERROR, "too much vl_dictionary consumption");
+				vl_array[i] = entry;
 			}
 		}
 		else
@@ -1686,6 +1732,7 @@ ccache_copy_buffer_to_kds(kern_data_store *kds,
 						Assert((offset & (MAXIMUM_ALIGNOF - 1)) == 0);
 						entry->offset = offset / MAXIMUM_ALIGNOF;
 						nbytes = VARSIZE_ANY(entry->vl_datum);
+						Assert(nbytes > 0);
 						memcpy(extra, entry->vl_datum, nbytes);
 						cmeta->extra_sz += MAXALIGN(nbytes) / MAXIMUM_ALIGNOF;
 						extra += MAXALIGN(nbytes);
@@ -1800,40 +1847,13 @@ ccache_buffer_append_row(TupleDesc tupdesc,
 
 			if (!isnull)
 			{
-				int			vl_compress = cc_buf->vl_compress[j];
-				struct varlena *vl = PG_DETOAST_DATUM_PACKED(datum);
+				struct varlena *vl;
 				vl_dict_key key;
 				bool		found;
 				size_t		usage;
 
-				if (vl_compress == GSTORE_COMPRESSION__NONE)
-				{
-					/* always decompressed */
-					vl = PG_DETOAST_DATUM(datum);
-				}
-				else if (vl_compress == GSTORE_COMPRESSION__PGLZ)
-				{
-					/* try compression */
-					if (VARATT_IS_COMPRESSED(datum))
-						vl = (struct varlena *)DatumGetPointer(datum);
-					else
-					{
-						struct varlena *src = PG_DETOAST_DATUM(datum);
-						struct varlena *temp = (struct varlena *)
-							toast_compress_datum(PointerGetDatum(src));
-						if (temp)
-						{
-							vl = temp;
-							if (PointerGetDatum(src) != datum)
-								pfree(src);
-						}
-						else
-							vl = src;
-					}
-				}
-				else
-					elog(ERROR, "unknown compression policy: %d", vl_compress);
-
+				vl = vl_datum_compression(DatumGetPointer(datum),
+										  cc_buf->vl_compress[j]);
 				key.offset = 0;
 				key.vl_datum = vl;
 				entry = hash_search(cc_buf->vl_dict[j],
@@ -1852,6 +1872,7 @@ ccache_buffer_append_row(TupleDesc tupdesc,
 					}
 					entry->vl_datum = vl;
 					cc_buf->extra_sz[j] += MAXALIGN(VARSIZE_ANY(vl));
+					Assert(memcxt == GetMemoryChunkContext(vl));
 
 					usage = (MAXALIGN(sizeof(cl_uint) * nitems) +
 							 cc_buf->extra_sz[j]);

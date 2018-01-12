@@ -58,11 +58,11 @@ typedef struct
  */
 typedef struct
 {
-	TransactionId	xmax;
 	TransactionId	xmin;
+	TransactionId	xmax;
 	CommandId		cid;
-	bool			xmax_committed;
 	bool			xmin_committed;
+	bool			xmax_committed;
 } MVCCAttrs;
 
 typedef struct
@@ -497,7 +497,7 @@ gstore_fdw_make_buffer_writable(Relation frel, GpuStoreBuffer *gs_buffer)
 			MVCCAttrs   *mvcc = &gs_buffer->cs_mvcc[i];
 
 			mvcc->xmin = FrozenTransactionId;
-			mvcc->xmin = InvalidTransactionId;
+			mvcc->xmax = InvalidTransactionId;
 			mvcc->cid = 0;
 			mvcc->xmin_committed = true;
 			mvcc->xmax_committed = false;
@@ -1077,8 +1077,9 @@ gstoreExecForeignUpdate(EState *estate,
 	if (isnull)
 		elog(ERROR, "gstore_fdw: ctid is null");
 	t_self = (ItemPointer)DatumGetPointer(datum);
-	index = (((cl_ulong)ItemPointerGetBlockNumber(t_self) << 16) |
-			 ((cl_ulong)ItemPointerGetOffsetNumber(t_self) & 0x0000ffffL));
+	index = ((cl_ulong)t_self->ip_blkid.bi_hi << 32 |
+			 (cl_ulong)t_self->ip_blkid.bi_lo << 16 |
+			 (cl_ulong)t_self->ip_posid);
 	if (index >= gs_buffer->cc_buf.nitems)
 		elog(ERROR, "gstore_fdw: UPDATE row out of range (%lu of %zu)",
 			 index, gs_buffer->cc_buf.nitems);
@@ -1149,9 +1150,9 @@ gstoreExecForeignDelete(EState *estate,
 	if (isnull)
 		elog(ERROR, "gstore_fdw: ctid is null");
 	t_self = (ItemPointer)DatumGetPointer(datum);
-	index = (((cl_ulong)t_self->ip_blkid.bi_hi << 32) |
-			 ((cl_ulong)t_self->ip_blkid.bi_hi << 16) |
-			 ((cl_ulong)t_self->ip_posid));
+	index = ((cl_ulong)t_self->ip_blkid.bi_hi << 32 |
+			 (cl_ulong)t_self->ip_blkid.bi_lo << 16 |
+			 (cl_ulong)t_self->ip_posid);
 	if (index >= gs_buffer->cc_buf.nitems)
 		elog(ERROR, "gstore_fdw: DELETE row out of range (%lu of %zu)",
 			 index, gs_buffer->cc_buf.nitems);
@@ -1214,6 +1215,7 @@ gstore_fdw_alloc_pgstrom_buffer(Relation frel,
 		{
 			length += (MAXALIGN(sizeof(cl_uint) * nrooms) +
 					   MAXALIGN(cc_buf->extra_sz[j]));
+			elog(INFO, "att=%s %zu %zu", NameStr(attr->attname), MAXALIGN(sizeof(cl_uint) * nrooms), MAXALIGN(cc_buf->extra_sz[j]));
 		}
 		else
 		{
@@ -1222,6 +1224,7 @@ gstore_fdw_alloc_pgstrom_buffer(Relation frel,
 			length += MAXALIGN(unitsz * nrooms);
 			if (cc_buf->hasnull[j])
 				length += MAXALIGN(BITMAPLEN(nrooms));
+			elog(INFO, "att=%s %zu %zu", NameStr(attr->attname), MAXALIGN(unitsz * nrooms), MAXALIGN(BITMAPLEN(nrooms)));
 		}
 	}
 	/* 2. allocation */
