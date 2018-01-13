@@ -148,6 +148,8 @@
 #include <sys/types.h>
 #include <sys/vfs.h>
 
+#include "nvme_strom.h"
+
 /*
  * --------------------------------------------------------------------
  *
@@ -541,9 +543,6 @@ extern CUresult	gpuOptimalBlockSize(size_t *p_min_grid_sz,
 									CUfunction kern_function,
 									size_t dynamic_shmem_per_block,
 									size_t dynamic_shmem_per_thread);
-
-extern Datum pgstrom_device_info(PG_FUNCTION_ARGS);
-
 /*
  * gpu_mmgr.c
  */
@@ -628,8 +627,6 @@ extern void gpuIpcMemCopyToHost(cl_int cuda_dindex,
 #define gpuIpcOpenMemHandle(a,b,c,d)		\
 	__gpuIpcOpenMemHandle((a),(b),(c),(d),__FILE__,__LINE__)
 
-extern Datum pgstrom_device_preserved_meminfo(PG_FUNCTION_ARGS);
-
 extern void gpuMemReclaimSegment(GpuContext *gcontext);
 
 extern void gpuMemCopyFromSSD(CUdeviceptr m_kds, pgstrom_data_store *pds);
@@ -637,7 +634,6 @@ extern void gpuMemCopyFromSSD(CUdeviceptr m_kds, pgstrom_data_store *pds);
 extern void pgstrom_gpu_mmgr_init_gpucontext(GpuContext *gcontext);
 extern void pgstrom_gpu_mmgr_cleanup_gpucontext(GpuContext *gcontext);
 extern void pgstrom_init_gpu_mmgr(void);
-extern Datum pgstrom_device_meminfo(PG_FUNCTION_ARGS);
 
 /*
  * gpu_context.c
@@ -965,16 +961,6 @@ extern bool RelationWillUseNvmeStrom(Relation relation,
 extern void pgstrom_init_datastore(void);
 
 /*
- * nvme_strom.c
- */
-#include "nvme_strom.h"
-
-extern Size gpuMemSizeIOMap(void);
-extern void dump_iomap_buffer_info(void);
-extern Datum pgstrom_iomap_buffer_info(PG_FUNCTION_ARGS);
-extern void pgstrom_init_nvme_strom(void);
-
-/*
  * gpuscan.c
  */
 extern void cost_gpuscan_common(PlannerInfo *root,
@@ -1070,11 +1056,6 @@ extern void pgstrom_init_gpupreagg(void);
  */
 extern void pgstrom_devfunc_construct_plcuda(devfunc_info *entry,
 											 HeapTuple proc_tuple);
-extern Datum pltext_function_validator(PG_FUNCTION_ARGS);
-extern Datum pltext_function_handler(PG_FUNCTION_ARGS);
-extern Datum plcuda_function_validator(PG_FUNCTION_ARGS);
-extern Datum plcuda_function_handler(PG_FUNCTION_ARGS);
-extern Datum plcuda_function_source(PG_FUNCTION_ARGS);
 extern void pgstrom_init_plcuda(void);
 
 /*
@@ -1153,9 +1134,6 @@ pgstrom_ccache_load_chunk(struct ccacheChunk *cc_chunk,
 						  GpuContext *gcontext,
 						  Relation relation,
 						  Relids ccache_refs);
-extern Datum pgstrom_ccache_invalidator(PG_FUNCTION_ARGS);
-extern Datum pgstrom_ccache_info(PG_FUNCTION_ARGS);
-extern Datum pgstrom_ccache_builder_info(PG_FUNCTION_ARGS);
 extern void pgstrom_init_ccache(void);
 
 /*
@@ -1170,10 +1148,6 @@ extern void gstore_fdw_load_function_args(GpuContext *gcontext,
 										  List **p_gstore_oid_list,
 										  List **p_gstore_devptr_list,
 										  List **p_gstore_dindex_list);
-extern Datum pgstrom_gstore_fdw_format(PG_FUNCTION_ARGS);
-extern Datum pgstrom_gstore_fdw_nitems(PG_FUNCTION_ARGS);
-extern Datum pgstrom_gstore_fdw_nattrs(PG_FUNCTION_ARGS);
-extern Datum pgstrom_gstore_fdw_rawsize(PG_FUNCTION_ARGS);
 extern void pgstrom_init_gstore_fdw(void);
 
 /*

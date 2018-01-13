@@ -149,6 +149,7 @@ static int			num_preserved_gpu_memory_regions;	/* GUC */
 static bool			gpummgr_bgworker_got_signal = false;
 static GpuMemPreservedHead *gmemp_head = NULL;
 
+Datum pgstrom_device_preserved_meminfo(PG_FUNCTION_ARGS);
 
 #define GPUMEM_DEVICE_RAW_EXTRA		((void *)(~0L))
 #define GPUMEM_HOST_RAW_EXTRA		((void *)(~1L))

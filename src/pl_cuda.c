@@ -98,16 +98,21 @@ typedef struct plcudaTask
 	kern_plcuda		kern;
 } plcudaTask;
 
-/*
- * static functions
- */
+/* static functions */
 static plcudaTaskState *plcuda_exec_begin(HeapTuple protup,
 										  FunctionCallInfo fcinfo);
 static void plcuda_exec_end(plcudaTaskState *plts);
 static int  plcuda_process_task(GpuTask *gtask, CUmodule cuda_module);
 static void plcuda_release_task(GpuTask *gtask);
 
-/* tracker of plcudaState */
+/* SQL functions */
+Datum pltext_function_validator(PG_FUNCTION_ARGS);
+Datum pltext_function_handler(PG_FUNCTION_ARGS);
+Datum plcuda_function_validator(PG_FUNCTION_ARGS);
+Datum plcuda_function_handler(PG_FUNCTION_ARGS);
+Datum plcuda_function_source(PG_FUNCTION_ARGS);
+
+/* Tracker of plcudaState */
 static dlist_head	plcuda_state_list;
 
 

@@ -111,18 +111,20 @@ static GpuStoreHead	   *gstore_head = NULL;
 static HTAB			   *gstore_buffer_htab = NULL;
 static Oid				reggstore_type_oid = InvalidOid;
 
-extern Datum pgstrom_gstore_fdw_validator(PG_FUNCTION_ARGS);
-extern Datum pgstrom_gstore_fdw_handler(PG_FUNCTION_ARGS);
-extern Datum pgstrom_gstore_fdw_chunk_info(PG_FUNCTION_ARGS);
-extern Datum pgstrom_reggstore_in(PG_FUNCTION_ARGS);
-extern Datum pgstrom_reggstore_out(PG_FUNCTION_ARGS);
-extern Datum pgstrom_reggstore_recv(PG_FUNCTION_ARGS);
-extern Datum pgstrom_reggstore_send(PG_FUNCTION_ARGS);
-extern Datum pgstrom_gstore_export_ipchandle(PG_FUNCTION_ARGS);
-extern Datum pgstrom_lo_write_to_gpumemory(PG_FUNCTION_ARGS);
-extern Datum pgstrom_lo_read_from_gpumemory(PG_FUNCTION_ARGS);
-extern Datum pgstrom_lo_export_gpumemory(PG_FUNCTION_ARGS);
-extern Datum pgstrom_lo_import_gpumemory(PG_FUNCTION_ARGS);
+Datum pgstrom_gstore_fdw_validator(PG_FUNCTION_ARGS);
+Datum pgstrom_gstore_fdw_handler(PG_FUNCTION_ARGS);
+Datum pgstrom_gstore_fdw_chunk_info(PG_FUNCTION_ARGS);
+Datum pgstrom_gstore_fdw_format(PG_FUNCTION_ARGS);
+Datum pgstrom_gstore_fdw_nitems(PG_FUNCTION_ARGS);
+Datum pgstrom_gstore_fdw_nattrs(PG_FUNCTION_ARGS);
+Datum pgstrom_gstore_fdw_rawsize(PG_FUNCTION_ARGS);
+Datum pgstrom_reggstore_in(PG_FUNCTION_ARGS);
+Datum pgstrom_reggstore_out(PG_FUNCTION_ARGS);
+Datum pgstrom_reggstore_recv(PG_FUNCTION_ARGS);
+Datum pgstrom_reggstore_send(PG_FUNCTION_ARGS);
+Datum pgstrom_gstore_export_ipchandle(PG_FUNCTION_ARGS);
+Datum pgstrom_lo_write_to_gpumemory(PG_FUNCTION_ARGS);
+Datum pgstrom_lo_read_from_gpumemory(PG_FUNCTION_ARGS);
 
 /*
  * gstore_fdw_chunk_visibility - equivalent to HeapTupleSatisfiesMVCC,

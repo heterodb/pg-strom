@@ -108,7 +108,11 @@ static HTAB		   *ccache_relations_htab = NULL;
 static oidvector   *ccache_relations_oid = NULL;
 static Oid			ccache_invalidator_func_oid = InvalidOid;
 
-extern void ccache_builder_main(Datum arg);
+/* functions */
+void ccache_builder_main(Datum arg);
+Datum pgstrom_ccache_invalidator(PG_FUNCTION_ARGS);
+Datum pgstrom_ccache_info(PG_FUNCTION_ARGS);
+Datum pgstrom_ccache_builder_info(PG_FUNCTION_ARGS);
 
 /*
  * ccache_compute_hashvalue

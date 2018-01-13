@@ -51,6 +51,7 @@ static struct {
 };
 
 /* declaration */
+Datum pgstrom_device_info(PG_FUNCTION_ARGS);
 Datum pgstrom_gpu_device_name(PG_FUNCTION_ARGS);
 Datum pgstrom_gpu_global_memsize(PG_FUNCTION_ARGS);
 Datum pgstrom_gpu_max_blocksize(PG_FUNCTION_ARGS);
