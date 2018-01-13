@@ -50,6 +50,19 @@ static struct {
 #undef DEV_ATTR
 };
 
+/* declaration */
+Datum pgstrom_gpu_device_name(PG_FUNCTION_ARGS);
+Datum pgstrom_gpu_global_memsize(PG_FUNCTION_ARGS);
+Datum pgstrom_gpu_max_blocksize(PG_FUNCTION_ARGS);
+Datum pgstrom_gpu_warp_size(PG_FUNCTION_ARGS);
+Datum pgstrom_gpu_max_shared_memory_perblock(PG_FUNCTION_ARGS);
+Datum pgstrom_gpu_num_registers_perblock(PG_FUNCTION_ARGS);
+Datum pgstrom_gpu_num_multiptocessors(PG_FUNCTION_ARGS);
+Datum pgstrom_gpu_num_cuda_cores(PG_FUNCTION_ARGS);
+Datum pgstrom_gpu_cc_major(PG_FUNCTION_ARGS);
+Datum pgstrom_gpu_cc_minor(PG_FUNCTION_ARGS);
+Datum pgstrom_gpu_pci_id(PG_FUNCTION_ARGS);
+
 /*
  * pgstrom_collect_gpu_device
  */
@@ -221,6 +234,8 @@ pgstrom_collect_gpu_device(void)
 			else
 				dattrs->CORES_PER_MPU = 128;
 		}
+		else if (dattrs->COMPUTE_CAPABILITY_MAJOR == 7)
+			dattrs->CORES_PER_MPU = 64;
 		else
 			dattrs->CORES_PER_MPU = 0;	/* unknown */
 
@@ -597,7 +612,164 @@ pgstrom_device_info(PG_FUNCTION_ARGS)
 }
 PG_FUNCTION_INFO_V1(pgstrom_device_info);
 
+/*
+ * SQL functions for GPU attributes
+ */
+Datum
+pgstrom_gpu_device_name(PG_FUNCTION_ARGS)
+{
+	DevAttributes *dattr;
+	int		cuda_dindex = PG_GETARG_INT32(0);
 
+	if (cuda_dindex < 0 || cuda_dindex >= numDevAttrs)
+		elog(ERROR, "invalid GPU device index: %d", cuda_dindex);
+	dattr = &devAttrs[cuda_dindex];
 
+	PG_RETURN_TEXT_P(cstring_to_text(dattr->DEV_NAME));
+}
+PG_FUNCTION_INFO_V1(pgstrom_gpu_device_name);
 
+Datum
+pgstrom_gpu_global_memsize(PG_FUNCTION_ARGS)
+{
+	DevAttributes *dattr;
+	int		cuda_dindex = PG_GETARG_INT32(0);
 
+	if (cuda_dindex < 0 || cuda_dindex >= numDevAttrs)
+		elog(ERROR, "invalid GPU device index: %d", cuda_dindex);
+	dattr = &devAttrs[cuda_dindex];
+
+	PG_RETURN_INT64(dattr->DEV_TOTAL_MEMSZ);
+}
+PG_FUNCTION_INFO_V1(pgstrom_gpu_global_memsize);
+
+Datum
+pgstrom_gpu_max_blocksize(PG_FUNCTION_ARGS)
+{
+	DevAttributes *dattr;
+	int		cuda_dindex = PG_GETARG_INT32(0);
+
+	if (cuda_dindex < 0 || cuda_dindex >= numDevAttrs)
+		elog(ERROR, "invalid GPU device index: %d", cuda_dindex);
+	dattr = &devAttrs[cuda_dindex];
+
+	PG_RETURN_INT32(dattr->MAX_THREADS_PER_BLOCK);
+}
+PG_FUNCTION_INFO_V1(pgstrom_gpu_max_blocksize);
+
+Datum
+pgstrom_gpu_warp_size(PG_FUNCTION_ARGS)
+{
+	DevAttributes *dattr;
+	int		cuda_dindex = PG_GETARG_INT32(0);
+
+	if (cuda_dindex < 0 || cuda_dindex >= numDevAttrs)
+		elog(ERROR, "invalid GPU device index: %d", cuda_dindex);
+	dattr = &devAttrs[cuda_dindex];
+
+	PG_RETURN_INT32(dattr->WARP_SIZE);
+}
+PG_FUNCTION_INFO_V1(pgstrom_gpu_warp_size);
+
+Datum
+pgstrom_gpu_max_shared_memory_perblock(PG_FUNCTION_ARGS)
+{
+	DevAttributes *dattr;
+	int		cuda_dindex = PG_GETARG_INT32(0);
+
+	if (cuda_dindex < 0 || cuda_dindex >= numDevAttrs)
+		elog(ERROR, "invalid GPU device index: %d", cuda_dindex);
+	dattr = &devAttrs[cuda_dindex];
+
+	PG_RETURN_INT32(dattr->MAX_SHARED_MEMORY_PER_BLOCK);
+}
+PG_FUNCTION_INFO_V1(pgstrom_gpu_max_shared_memory_perblock);
+
+Datum
+pgstrom_gpu_num_registers_perblock(PG_FUNCTION_ARGS)
+{
+	DevAttributes *dattr;
+	int		cuda_dindex = PG_GETARG_INT32(0);
+
+	if (cuda_dindex < 0 || cuda_dindex >= numDevAttrs)
+		elog(ERROR, "invalid GPU device index: %d", cuda_dindex);
+	dattr = &devAttrs[cuda_dindex];
+
+	PG_RETURN_INT32(dattr->MAX_REGISTERS_PER_BLOCK);
+}
+PG_FUNCTION_INFO_V1(pgstrom_gpu_num_registers_perblock);
+
+Datum
+pgstrom_gpu_num_multiptocessors(PG_FUNCTION_ARGS)
+{
+	DevAttributes *dattr;
+	int		cuda_dindex = PG_GETARG_INT32(0);
+
+	if (cuda_dindex < 0 || cuda_dindex >= numDevAttrs)
+		elog(ERROR, "invalid GPU device index: %d", cuda_dindex);
+	dattr = &devAttrs[cuda_dindex];
+
+	PG_RETURN_INT32(dattr->MULTIPROCESSOR_COUNT);
+}
+PG_FUNCTION_INFO_V1(pgstrom_gpu_num_multiptocessors);
+
+Datum
+pgstrom_gpu_num_cuda_cores(PG_FUNCTION_ARGS)
+{
+	DevAttributes *dattr;
+	int		cuda_dindex = PG_GETARG_INT32(0);
+
+	if (cuda_dindex < 0 || cuda_dindex >= numDevAttrs)
+		elog(ERROR, "invalid GPU device index: %d", cuda_dindex);
+	dattr = &devAttrs[cuda_dindex];
+
+	PG_RETURN_INT32(dattr->CORES_PER_MPU *
+					dattr->MULTIPROCESSOR_COUNT);
+}
+PG_FUNCTION_INFO_V1(pgstrom_gpu_num_cuda_cores);
+
+Datum
+pgstrom_gpu_cc_major(PG_FUNCTION_ARGS)
+{
+	DevAttributes *dattr;
+	int		cuda_dindex = PG_GETARG_INT32(0);
+
+	if (cuda_dindex < 0 || cuda_dindex >= numDevAttrs)
+		elog(ERROR, "invalid GPU device index: %d", cuda_dindex);
+	dattr = &devAttrs[cuda_dindex];
+
+	PG_RETURN_INT32(dattr->COMPUTE_CAPABILITY_MAJOR);
+}
+PG_FUNCTION_INFO_V1(pgstrom_gpu_cc_major);
+
+Datum
+pgstrom_gpu_cc_minor(PG_FUNCTION_ARGS)
+{
+	DevAttributes *dattr;
+	int		cuda_dindex = PG_GETARG_INT32(0);
+
+	if (cuda_dindex < 0 || cuda_dindex >= numDevAttrs)
+		elog(ERROR, "invalid GPU device index: %d", cuda_dindex);
+	dattr = &devAttrs[cuda_dindex];
+
+	PG_RETURN_INT32(dattr->COMPUTE_CAPABILITY_MINOR);
+}
+PG_FUNCTION_INFO_V1(pgstrom_gpu_cc_minor);
+
+Datum
+pgstrom_gpu_pci_id(PG_FUNCTION_ARGS)
+{
+	DevAttributes *dattr;
+	int		cuda_dindex = PG_GETARG_INT32(0);
+	char	temp[256];
+
+	if (cuda_dindex < 0 || cuda_dindex >= numDevAttrs)
+		elog(ERROR, "invalid GPU device index: %d", cuda_dindex);
+	dattr = &devAttrs[cuda_dindex];
+	snprintf(temp, sizeof(temp), "%04d:%02d:%02d",
+			 dattr->PCI_DOMAIN_ID,
+			 dattr->PCI_BUS_ID,
+			 dattr->PCI_DEVICE_ID);
+	PG_RETURN_TEXT_P(cstring_to_text(temp));
+}
+PG_FUNCTION_INFO_V1(pgstrom_gpu_pci_id);

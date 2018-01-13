@@ -4,7 +4,7 @@
 CREATE SCHEMA IF NOT EXISTS pgstrom;
 
 --
--- pg_strom installation queries
+-- Functions for 
 --
 CREATE TYPE pgstrom.__pgstrom_device_info AS (
   id		int4,
@@ -14,8 +14,67 @@ CREATE TYPE pgstrom.__pgstrom_device_info AS (
 CREATE FUNCTION public.pgstrom_device_info()
   RETURNS SETOF pgstrom.__pgstrom_device_info
   AS 'MODULE_PATHNAME'
-  LANGUAGE C VOLATILE;
+  LANGUAGE C STRICT;
 
+CREATE FUNCTION public.gpu_device_name(int = 0)
+  RETURNS text
+  AS 'MODULE_PATHNAME','pgstrom_gpu_device_name'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION public.gpu_global_memsize(int = 0)
+  RETURNS bigint
+  AS 'MODULE_PATHNAME','pgstrom_gpu_global_memsize'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION public.gpu_max_blocksize(int = 0)
+  RETURNS int
+  AS 'MODULE_PATHNAME','pgstrom_gpu_max_blocksize'
+  LANGUAGE C STRICT;
+
+
+CREATE FUNCTION public.gpu_warp_size(int = 0)
+  RETURNS int
+  AS 'MODULE_PATHNAME','pgstrom_gpu_warp_size'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION public.gpu_max_shared_memory_perblock(int = 0)
+  RETURNS int
+  AS 'MODULE_PATHNAME','pgstrom_gpu_max_shared_memory_perblock'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION public.gpu_num_registers_perblock(int = 0)
+  RETURNS int
+  AS 'MODULE_PATHNAME','pgstrom_gpu_num_registers_perblock'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION public.gpu_num_multiptocessors(int = 0)
+  RETURNS int
+  AS 'MODULE_PATHNAME','pgstrom_gpu_num_multiptocessors'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION public.gpu_num_cuda_cores(int = 0)
+  RETURNS int
+  AS 'MODULE_PATHNAME','pgstrom_gpu_num_cuda_cores'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION public.gpu_cc_major(int = 0)
+  RETURNS int
+  AS 'MODULE_PATHNAME','pgstrom_gpu_cc_major'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION public.gpu_cc_minor(int = 0)
+  RETURNS int
+  AS 'MODULE_PATHNAME','pgstrom_gpu_cc_minor'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION public.gpu_pci_id(int = 0)
+  RETURNS text
+  AS 'MODULE_PATHNAME','pgstrom_gpu_pci_id'
+  LANGUAGE C STRICT;
+
+--
+-- Functions for system internal state
+--
 CREATE TYPE pgstrom.__pgstrom_device_preserved_meminfo AS (
   device_id int4,
   handle    bytea,
