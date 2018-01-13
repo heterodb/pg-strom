@@ -596,3 +596,8 @@ pgstrom_device_info(PG_FUNCTION_ARGS)
 	SRF_RETURN_NEXT(fncxt, HeapTupleGetDatum(tuple));
 }
 PG_FUNCTION_INFO_V1(pgstrom_device_info);
+
+
+
+
+

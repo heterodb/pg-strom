@@ -60,8 +60,18 @@ STROM_SOURCES = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__STROM_SOURCES))
 __CUDA_SOURCES = $(shell cpp -D 'PGSTROM_CUDA(x)=cuda_\#\#x.h' \
                  $(STROM_BUILD_ROOT)/src/cuda_filelist | grep -v ^\#)
 CUDA_SOURCES = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__CUDA_SOURCES))
+
+#
+# Source file of utilities
+#
 __STROM_UTILS = gpuinfo kfunc_info
 STROM_UTILS = $(addprefix $(STROM_BUILD_ROOT)/utils/, $(__STROM_UTILS))
+
+#
+# Header files
+#
+__STROM_HEADERS = pg_strom.h nvme_strom.h device_attrs.h
+STROM_HEADERS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__STROM_HEADERS))
 
 #
 # Files to be packaged
@@ -228,7 +238,7 @@ endif
 $(PGSTROM_SQL): $(addprefix $(STROM_BUILD_ROOT)/sql/, $(PGSTROM_SQL_SRC))
 	cat $^ > $@
 
-$(STROM_UTILS): $(addsuffix .c,$(STROM_UTILS))
+$(STROM_UTILS): $(addsuffix .c,$(STROM_UTILS)) $(STROM_HEADERS)
 	$(CC) $(CFLAGS) $(addsuffix .c,$@) $(PGSTROM_FLAGS) -I $(IPATH) -L $(LPATH) -lcuda -lnvrtc -o $@$(X)
 
 $(HTML_FILES): $(HTML_SOURCES) $(HTML_TEMPLATE)

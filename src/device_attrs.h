@@ -97,4 +97,12 @@ DEV_ATTR(PAGEABLE_MEMORY_ACCESS, BOOL, 0, "Device supports coherently accessing 
 DEV_ATTR(CONCURRENT_MANAGED_ACCESS, BOOL, 0, "Device can coherently access managed memory concurrently with the CPU")
 DEV_ATTR(COMPUTE_PREEMPTION_SUPPORTED, BOOL, 0, "Device supports compute preemption")
 DEV_ATTR(CAN_USE_HOST_POINTER_FOR_REGISTERED_MEM, BOOL, 0, "Device can access host registered memory at the same virtual address as the CPU")
+#if CUDA_VERSION >= 9000
+DEV_ATTR(CAN_USE_STREAM_MEM_OPS, BOOL, 0, "cuStreamBatchMemOp and related APIs are supported")
+DEV_ATTR(CAN_USE_64_BIT_STREAM_MEM_OPS, BOOL, 1, "64-bit operations are supported in ::cuStreamBatchMemOp and related APIs")
+DEV_ATTR(CAN_USE_STREAM_WAIT_VALUE_NOR, BOOL, 1, "CU_STREAM_WAIT_VALUE_NOR is supported")
+DEV_ATTR(COOPERATIVE_LAUNCH, BOOL, 0, "Device supports launching cooperative kernels via cuLaunchCooperativeKernel")
+DEV_ATTR(COOPERATIVE_MULTI_DEVICE_LAUNCH, BOOL, 0, "Device can participate in cooperative kernels launched via cuLaunchCooperativeKernelMultiDevice")
+DEV_ATTR(MAX_SHARED_MEMORY_PER_BLOCK_OPTIN, INT, 0, "Maximum optin shared memory per block")
+#endif	/* CUDA 9.0 */
 #endif	/* CUDA 8.0 */
