@@ -119,8 +119,10 @@ extern Datum pgstrom_reggstore_out(PG_FUNCTION_ARGS);
 extern Datum pgstrom_reggstore_recv(PG_FUNCTION_ARGS);
 extern Datum pgstrom_reggstore_send(PG_FUNCTION_ARGS);
 extern Datum pgstrom_gstore_export_ipchandle(PG_FUNCTION_ARGS);
-extern Datum pgstrom_lo_export_ipchandle(PG_FUNCTION_ARGS);
-extern Datum pgstrom_lo_import_ipchandle(PG_FUNCTION_ARGS);
+extern Datum pgstrom_lo_write_to_gpumemory(PG_FUNCTION_ARGS);
+extern Datum pgstrom_lo_read_from_gpumemory(PG_FUNCTION_ARGS);
+extern Datum pgstrom_lo_export_gpumemory(PG_FUNCTION_ARGS);
+extern Datum pgstrom_lo_import_gpumemory(PG_FUNCTION_ARGS);
 
 /*
  * gstore_fdw_chunk_visibility - equivalent to HeapTupleSatisfiesMVCC,
@@ -2025,26 +2027,95 @@ pgstrom_gstore_export_ipchandle(PG_FUNCTION_ARGS)
 PG_FUNCTION_INFO_V1(pgstrom_gstore_export_ipchandle);
 
 /*
- * pgstrom_lo_export_ipchandle
+ * pgstrom_lo_write_to_gpumemory(fd, cuda_dindex, ipc_mhandle, offset, size)
  */
 Datum
-pgstrom_lo_export_ipchandle(PG_FUNCTION_ARGS)
+pgstrom_lo_write_to_gpumemory(PG_FUNCTION_ARGS)
 {
-	elog(ERROR, "not implemented yet");
-	PG_RETURN_NULL();
+	int			fdesc = PG_GETARG_INT32(0);
+	int			cuda_dindex = PG_GETARG_INT32(1);
+	bytea	   *handle = PG_GETARG_BYTEA_P(2);
+	ssize_t		offset = PG_GETARG_INT64(3);
+	ssize_t		length = PG_GETARG_INT64(4);
+	ssize_t		lo_pos;
+	int			nbytes;
+	char	   *hbuffer;
+	CUipcMemHandle ipc_mhandle;
+
+	if (cuda_dindex < 0 || cuda_dindex >= numDevAttrs)
+		elog(ERROR, "GPU device index %d is out of range", cuda_dindex);
+	if (VARSIZE_ANY_EXHDR(handle) != sizeof(ipc_mhandle))
+		elog(ERROR, "Size of CUipcMemHandle mismatch");
+	memcpy(&ipc_mhandle, VARDATA_ANY(handle), sizeof(ipc_mhandle));
+	if (offset < 0)
+		elog(ERROR, "Invalid offset");
+	if (length < 1)
+		elog(ERROR, "Invalid length");
+
+	/* read largeobject onto the host buffer */
+	hbuffer = palloc_huge(length);
+	for (lo_pos=0; lo_pos < length; lo_pos += nbytes)
+	{
+		/* not that 'nbytes' argument of inv_read() is int */
+		nbytes = lo_read(fdesc, hbuffer + lo_pos,
+						 Min(length, (1U << 30)));
+		if (nbytes == 0)
+			elog(ERROR, "cannot read from the largeobject any more");
+	}
+	/* move to the device memory */
+	gpuIpcMemCopyFromHost(cuda_dindex, ipc_mhandle, hbuffer, length);
+
+	/* cleanup */
+	pfree(hbuffer);
+
+	PG_RETURN_INT64(length);
 }
-PG_FUNCTION_INFO_V1(pgstrom_lo_export_ipchandle);
+PG_FUNCTION_INFO_V1(pgstrom_lo_write_to_gpumemory);
 
 /*
- * pgstrom_lo_import_ipchandle
+ * pgstrom_lo_read_from_gpumemory(fd, cuda_dindex, ipc_mhandle, offset, size)
  */
 Datum
-pgstrom_lo_import_ipchandle(PG_FUNCTION_ARGS)
+pgstrom_lo_read_from_gpumemory(PG_FUNCTION_ARGS)
 {
-	elog(ERROR, "not implemented yet");
-	PG_RETURN_NULL();
+	int		fdesc = PG_GETARG_INT32(0);
+	int		cuda_dindex = PG_GETARG_INT32(1);
+	bytea  *handle = PG_GETARG_BYTEA_P(2);
+	ssize_t	offset = PG_GETARG_INT64(3);
+	ssize_t	length = PG_GETARG_INT64(4);
+	ssize_t	lo_pos;
+	int		nbytes;
+	char   *hbuffer;
+	CUipcMemHandle ipc_mhandle;
+
+	if (cuda_dindex < 0 || cuda_dindex >= numDevAttrs)
+		elog(ERROR, "GPU device index %d is out of range", cuda_dindex);
+	if (VARSIZE_ANY_EXHDR(handle) != sizeof(ipc_mhandle))
+		elog(ERROR, "Size of CUipcMemHandle mismatch");
+	memcpy(&ipc_mhandle, VARDATA_ANY(handle), sizeof(ipc_mhandle));
+	if (offset < 0)
+		elog(ERROR, "Invalid offset");
+	if (length < 1)
+		elog(ERROR, "Invalid length");
+
+	/* read gpumemory onto the host buffer */
+	hbuffer = palloc_huge(length);
+	gpuIpcMemCopyToHost(cuda_dindex, ipc_mhandle, hbuffer, length);
+
+	/* write to large object */
+	for (lo_pos=0; lo_pos < length; lo_pos += nbytes)
+	{
+		nbytes = lo_write(fdesc, hbuffer + lo_pos,
+						  Min(length, (1U << 30)));
+		if (nbytes == 0)
+			elog(ERROR, "cannot write to the largeobject any more");
+	}
+	/* cleanup */
+	pfree(hbuffer);
+
+	PG_RETURN_INT64(length);
 }
-PG_FUNCTION_INFO_V1(pgstrom_lo_import_ipchandle);
+PG_FUNCTION_INFO_V1(pgstrom_lo_read_from_gpumemory);
 
 /*
  * type_is_reggstore

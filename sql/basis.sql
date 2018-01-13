@@ -274,17 +274,17 @@ CREATE CAST (bigint AS reggstore)
 CREATE FUNCTION public.gstore_export_ipchandle(reggstore)
   RETURNS bytea
   AS 'MODULE_PATHNAME','pgstrom_gstore_export_ipchandle'
-  LANGUAGE C STRICT;
+  LANGUAGE C;
 
-CREATE FUNCTION public.lo_export_ipchandle(oid)
-  RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_lo_export_ipchandle'
-  LANGUAGE C STRICT;
+CREATE FUNCTION public.lo_write_to_gpumemory(int, int, bytes, bigint, bigint)
+  RETURNS bigint
+  AS 'MODULE_PATHNAME','pgstrom_lo_write_to_gpumemory'
+  LANGUAGE C;
 
-CREATE FUNCTION public.lo_import_ipchandle(bytea)
-  RETURNS oid
-  AS 'MODULE_PATHNAME','pgstrom_lo_import_ipchandle'
-  LANGUAGE C STRICT;
+CREATE FUNCTION public.lo_read_from_gpumemory(int, int, bytes, bigint, bigint)
+  RETURNS bigint
+  AS 'MODULE_PATHNAME','pgstrom_lo_write_to_gpumemory'
+  LANGUAGE C;
 
 CREATE FUNCTION public.gstore_fdw_format(reggstore)
   RETURNS text
