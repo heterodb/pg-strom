@@ -396,6 +396,11 @@ construct_flat_cuda_source(uint32 extra_flags,
 	if ((extra_flags & DEVKERNEL_NEEDS_MATRIX) == DEVKERNEL_NEEDS_MATRIX)
 		ofs += snprintf(source + ofs, len - ofs,
 						"#include \"cuda_matrix.h\"\n");
+	/* cuda_rangetypes.h */
+	if ((extra_flags & DEVKERNEL_NEEDS_RANGETYPE) == DEVKERNEL_NEEDS_RANGETYPE)
+		ofs += snprintf(source + ofs, len - oft,
+						"#include \"cuda_rangetype.h\"\n");
+
 	/* pg_anytype_t declaration */
 	pg_anytype =
 		"typedef union {\n"

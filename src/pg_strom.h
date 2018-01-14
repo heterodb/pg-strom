@@ -365,7 +365,6 @@ struct GpuTask
 	ProgramId		program_id;		/* same with GTS's one */
 	GpuTaskState   *gts;			/* GTS reference in the backend */
 	bool			cpu_fallback;	/* true, if task needs CPU fallback */
-//	int				file_desc;		/* file-descriptor on backend side */
 };
 
 /*
@@ -384,6 +383,7 @@ struct GpuTask
 #define DEVKERNEL_NEEDS_NUMERIC			0x00001000
 #define DEVKERNEL_NEEDS_MATHLIB			0x00002000
 #define DEVKERNEL_NEEDS_MISC			0x00004000
+#define DEVKERNEL_NEEDS_RANGETYPE		0x00008000
 
 #define DEVKERNEL_NEEDS_CURAND			0x00100000
 #define DEVKERNEL_NEEDS_CUBLAS		   (0x00200000 | DEVKERNEL_NEEDS_DYNPARA)
