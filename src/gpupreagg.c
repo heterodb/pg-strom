@@ -3256,7 +3256,7 @@ gpupreagg_codegen_hashvalue(StringInfo kern,
 
 		type_oid = exprType((Node *)tle->expr);
 		dtype = pgstrom_devtype_lookup_and_track(type_oid, context);
-		if (!dtype || !OidIsValid(dtype->type_cmpfunc))
+		if (!dtype || !dtype->type_eqfunc_name)
 			elog(ERROR, "Bug? type (%s) is not supported",
 				 format_type_be(type_oid));
 		/* variable declarations */
@@ -3355,16 +3355,14 @@ gpupreagg_codegen_keymatch(StringInfo kern,
 		type_oid = exprType((Node *)tle->expr);
 		coll_oid = exprCollation((Node *)tle->expr);
 		dtype = pgstrom_devtype_lookup_and_track(type_oid, context);
-		if (!dtype || !OidIsValid(dtype->type_eqfunc))
-			elog(ERROR, "Bug? type (%s) has no device comparison function",
+		if (!dtype)
+			elog(ERROR, "Bug? type (%s) is not supported at GPU",
 				 format_type_be(type_oid));
-
-		dfunc = pgstrom_devfunc_lookup_and_track(dtype->type_eqfunc,
-												 coll_oid,
-												 context);
+		dfunc = pgstrom_devfunc_lookup_type_equal(dtype, coll_oid);
 		if (!dfunc)
-			elog(ERROR, "Bug? device function (%u) was not found",
-				 dtype->type_eqfunc);
+			elog(ERROR, "Bug? type (%s) has no device equality function",
+				 format_type_be(type_oid));
+		pgstrom_devfunc_track(context, dfunc);
 
 		/* load the key values, and compare */
 		appendStringInfo(

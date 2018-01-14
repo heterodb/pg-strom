@@ -409,8 +409,10 @@ typedef struct devtype_info {
 	char	   *type_name;	/* name of device type; same of SQL's type */
 	char	   *type_base;	/* base name of this type (like varlena) */
 	/* oid of type related functions */
-	Oid			type_eqfunc;	/* function to check equality */
-	Oid			type_cmpfunc;	/* function to compare two values */
+	Oid			type_eqfunc_nsp;	/* function to check equality */
+	const char *type_eqfunc_name;
+	Oid			type_cmpfunc_nsp;	/* function to compare two values */
+	const char *type_cmpfunc_name;
 	const char *max_const;		/* static initializer, if any */
 	const char *min_const;		/* static initializer, if any */
 	const char *zero_const;		/* static initializer, if any */
@@ -424,14 +426,18 @@ typedef struct devtype_info {
 } devtype_info;
 
 typedef struct devfunc_info {
+	pg_crc32c	hash;			/* hash-value on the cache */
 	Oid			func_oid;		/* OID of the SQL function */
+	Oid			func_namespace;	/* OID of the function namespace */
+	const char *func_sqlname;	/* name of the function in SQL side */
+	oidvector  *func_argtypes;	/* OID vector of function arguments */
 	Oid			func_collid;	/* OID of collation, if collation aware */
-	int32		func_flags;		/* Extra flags of this function */
 	bool		func_is_negative;	/* True, if not supported by GPU */
 	bool		func_is_strict;		/* True, if NULL strict function */
+	/* fields below are valid only if func_is_negative is true */
+	int32		func_flags;		/* Extra flags of this function */
 	List	   *func_args;		/* argument types by devtype_info */
 	devtype_info *func_rettype;	/* result type by devtype_info */
-	const char *func_sqlname;	/* name of the function in SQL side */
 	const char *func_devname;	/* name of the function in device side */
 	const char *func_decl;	/* declaration of device function, if any */
 } devfunc_info;
@@ -865,12 +871,14 @@ typedef struct {
 
 extern void pgstrom_codegen_typeoid_declarations(StringInfo buf);
 extern devtype_info *pgstrom_devtype_lookup(Oid type_oid);
-extern devfunc_info *pgstrom_devfunc_lookup(Oid func_oid, Oid func_collid);
 extern devtype_info *pgstrom_devtype_lookup_and_track(Oid type_oid,
 											  codegen_context *context);
-extern devfunc_info *pgstrom_devfunc_lookup_and_track(Oid func_oid,
-													  Oid func_collid,
-											  codegen_context *context);
+extern devfunc_info *pgstrom_devfunc_lookup_type_equal(devtype_info *dtype,
+													   Oid type_collid);
+extern devfunc_info *pgstrom_devfunc_lookup_type_compare(devtype_info *dtype,
+														 Oid type_collid);
+extern void pgstrom_devfunc_track(codegen_context *context,
+								  devfunc_info *dfunc);
 
 extern char *pgstrom_codegen_expression(Node *expr, codegen_context *context);
 extern void pgstrom_codegen_func_declarations(StringInfo buf,
