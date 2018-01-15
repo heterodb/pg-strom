@@ -210,6 +210,11 @@ CREATE FUNCTION public.pgstrom_ccache_builder_info()
     AS 'MODULE_PATHNAME'
     LANGUAGE C STRICT;
 
+CREATE FUNCTION public.pgstrom_ccache_prewarm(regclass)
+  RETURNS int
+  AS 'MODULE_PATHNAME','pgstrom_ccache_prewarm'
+  LANGUAGE C STRICT;
+
 --
 -- Handlers for gstore_fdw extension
 --

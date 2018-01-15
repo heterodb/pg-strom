@@ -113,6 +113,7 @@ void ccache_builder_main(Datum arg);
 Datum pgstrom_ccache_invalidator(PG_FUNCTION_ARGS);
 Datum pgstrom_ccache_info(PG_FUNCTION_ARGS);
 Datum pgstrom_ccache_builder_info(PG_FUNCTION_ARGS);
+Datum pgstrom_ccache_prewarm(PG_FUNCTION_ARGS);
 
 /*
  * ccache_compute_hashvalue
@@ -622,8 +623,11 @@ refresh_ccache_source_relations(void)
 					has_row_delete &&
 					has_stmt_truncate)
 				{
-					elog(BUILDER_LOG, "ccache-builder%d added relation \"%s\"",
-						 ccache_builder->builder_id, get_rel_name(curr_relid));
+					if (ccache_builder)
+						elog(BUILDER_LOG,
+							 "ccache-builder%d added relation \"%s\"",
+							 ccache_builder->builder_id,
+							 get_rel_name(curr_relid));
 					hash_search(htab,
 								&curr_relid,
 								HASH_ENTER,
@@ -2187,10 +2191,11 @@ ccache_preload_chunk(ccacheChunk *cc_chunk,
 		retval = __ccache_preload_chunk(cc_chunk, relation, block_nr);
 		if (retval)
 		{
-			elog(BUILDER_LOG,
-				 "ccache-builder%d: relation \"%s\" block_nr %u loaded",
-				 ccache_builder->builder_id,
-				 RelationGetRelationName(relation), block_nr);
+			if (ccache_builder)
+				elog(BUILDER_LOG,
+					 "ccache-builder%d: relation \"%s\" block_nr %u loaded",
+					 ccache_builder->builder_id,
+					 RelationGetRelationName(relation), block_nr);
 		}
 		else
 		{
@@ -2312,10 +2317,117 @@ ccache_tryload_misshit_chunk(void)
 }
 
 /*
- * ccache_tryload_chilly_chunk
+ * ccache_tryload_one_chunk
  */
 static int
-ccache_tryload_chilly_chunk(int nchunks_atonce)
+ccache_tryload_one_chunk(Relation relation, BlockNumber block_nr)
+{
+	ccacheChunk	   *cc_chunk = NULL;
+	ccacheChunk	   *cc_temp;
+	pg_crc32		hashvalue;
+	dlist_iter		iter;
+	dlist_node	   *dnode;
+	cl_int			k;
+
+	Assert((block_nr & (CCACHE_CHUNK_NBLOCKS - 1)) == 0);
+	/* try to lookup a ccache chunk already built */
+	hashvalue = ccache_compute_hashvalue(MyDatabaseId,
+										 RelationGetRelid(relation),
+										 block_nr);
+	SpinLockAcquire(&ccache_state->chunks_lock);
+	if (ccache_state->ccache_usage +
+		CCACHE_CHUNK_SIZE > ccache_total_size)
+	{
+		SpinLockRelease(&ccache_state->chunks_lock);
+		return -1;	/* exceeds the resource limit */
+	}
+	k = hashvalue % ccache_num_slots;
+	dlist_foreach(iter, &ccache_state->active_slots[k])
+	{
+		cc_temp = dlist_container(ccacheChunk, hash_chain, iter.cur);
+		if (cc_temp->hash == hashvalue &&
+			cc_temp->database_oid == MyDatabaseId &&
+			cc_temp->table_oid == RelationGetRelid(relation) &&
+			cc_temp->block_nr == block_nr)
+		{
+			if (cc_temp->ctime == CCACHE_CTIME_NOT_BUILD)
+				cc_chunk = cc_temp;
+			else
+				cc_chunk = (void *)(~0L);
+			break;
+		}
+	}
+	/* this chunk is already loaded, or in-progress */
+	if (cc_chunk == (void *)(~0L))
+	{
+		SpinLockRelease(&ccache_state->chunks_lock);
+		return 0;
+	}
+	else if (cc_chunk)
+	{
+		/* once detach cc_chunk from the LRU misshit list */
+		dlist_delete(&cc_chunk->lru_chain);
+		memset(&cc_chunk->lru_chain, 0, sizeof(dlist_node));
+		cc_chunk->refcnt++;
+	}
+	else if (!dlist_is_empty(&ccache_state->free_chunks_list))
+	{
+		/* try to fetch a free ccacheChunk object */
+		dnode = dlist_pop_head_node(&ccache_state->free_chunks_list);
+		cc_chunk = dlist_container(ccacheChunk, hash_chain, dnode);
+		Assert(cc_chunk->lru_chain.prev == NULL &&
+			   cc_chunk->lru_chain.next == NULL &&
+			   cc_chunk->refcnt == 0);
+		memset(cc_chunk, 0, sizeof(ccacheChunk));
+		cc_chunk->hash = hashvalue;
+		cc_chunk->database_oid = MyDatabaseId;
+		cc_chunk->table_oid = RelationGetRelid(relation);
+		cc_chunk->block_nr = block_nr;
+		cc_chunk->refcnt = 2;
+		cc_chunk->ctime = CCACHE_CTIME_IN_PROGRESS;
+		cc_chunk->atime = GetCurrentTimestamp();
+		dlist_push_head(&ccache_state->active_slots[k],
+						&cc_chunk->hash_chain);
+	}
+	else if (!dlist_is_empty(&ccache_state->lru_misshit_list))
+	{
+		/* purge oldest misshit entry, if any */
+		dnode = dlist_tail_node(&ccache_state->lru_misshit_list);
+		cc_chunk = dlist_container(ccacheChunk, lru_chain, dnode);
+		dlist_delete(&cc_chunk->hash_chain);
+		dlist_delete(&cc_chunk->lru_chain);
+		Assert(cc_chunk->length == 0 &&
+			   cc_chunk->refcnt == 1 &&
+			   cc_chunk->ctime == CCACHE_CTIME_NOT_BUILD);
+		memset(cc_chunk, 0, sizeof(ccacheChunk));
+		cc_chunk->hash = hashvalue;
+		cc_chunk->database_oid = MyDatabaseId;
+		cc_chunk->table_oid = RelationGetRelid(relation);
+		cc_chunk->block_nr = block_nr;
+		cc_chunk->refcnt = 2;
+		cc_chunk->ctime = CCACHE_CTIME_IN_PROGRESS;
+		cc_chunk->atime = GetCurrentTimestamp();
+		dlist_push_head(&ccache_state->active_slots[k],
+						&cc_chunk->hash_chain);
+	}
+	else
+	{
+		SpinLockRelease(&ccache_state->chunks_lock);
+		return -1;		/* no more ccache entry (should not happen) */
+	}
+	SpinLockRelease(&ccache_state->chunks_lock);
+
+	/* try to load this chunk */
+	ccache_preload_chunk(cc_chunk, relation, cc_chunk->block_nr);
+
+	return 1;
+}
+
+/*
+ * ccache_tryload_chilly_chunks
+ */
+static int
+ccache_tryload_chilly_chunks(int nchunks_atonce)
 {
 	Relation	   *open_relations = NULL;
 	cl_long		   *open_nchunks = NULL;
@@ -2323,15 +2435,10 @@ ccache_tryload_chilly_chunk(int nchunks_atonce)
 	Relation		relation;
 	cl_int			num_rels;
 	cl_int			num_open_rels;
-	cl_ulong		i, j, k;
+	cl_ulong		i, j;
 	cl_ulong		count;
 	BlockNumber		nchunks;
 	BlockNumber		block_nr;
-	pg_crc32		hashvalue;
-	dlist_node	   *dnode;
-	dlist_iter		iter;
-	ccacheChunk	   *cc_chunk;
-	ccacheChunk	   *cc_temp;
 
 	/* any relations to be loaded? */
 	if (!ccache_relations_oid)
@@ -2388,7 +2495,38 @@ ccache_tryload_chilly_chunk(int nchunks_atonce)
 			num_open_rels--;
 			continue;
 		}
+		/* try to load the chunk, if not loaded already */
+		block_nr = i * CCACHE_CHUNK_NBLOCKS;
+		PG_TRY();
+		{
+			/* update builder's state */
+			SpinLockAcquire(&ccache_state->lock);
+			ccache_builder->table_oid = RelationGetRelid(relation);
+			ccache_builder->block_nr = block_nr;
+			SpinLockRelease(&ccache_state->lock);
 
+			ccache_tryload_one_chunk(relation, block_nr);
+		}
+		PG_CATCH();
+		{
+			/* update builder's state */
+			SpinLockAcquire(&ccache_state->lock);
+			ccache_builder->table_oid = InvalidOid;
+			ccache_builder->block_nr = InvalidBlockNumber;
+			SpinLockRelease(&ccache_state->lock);
+
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+
+		/* update builder's state */
+		SpinLockAcquire(&ccache_state->lock);
+		ccache_builder->table_oid = InvalidOid;
+		ccache_builder->block_nr = InvalidBlockNumber;
+		SpinLockRelease(&ccache_state->lock);
+
+
+#if 0
 		/* try to lookup ccache already build */
 		cc_chunk = NULL;
 		block_nr = i * CCACHE_CHUNK_NBLOCKS;
@@ -2506,6 +2644,7 @@ ccache_tryload_chilly_chunk(int nchunks_atonce)
 			PG_RE_THROW();
 		}
 		PG_END_TRY();
+#endif
 		/* load a chunk */
 		nchunks_atonce--;
 	}
@@ -2520,6 +2659,61 @@ ccache_tryload_chilly_chunk(int nchunks_atonce)
 	}
 	return nchunks_atonce;
 }
+
+/*
+ * pgstrom_ccache_prewarm
+ *
+ * API for synchronous ccache build
+ */
+Datum
+pgstrom_ccache_prewarm(PG_FUNCTION_ARGS)
+{
+	Oid			table_oid = PG_GETARG_OID(0);
+	Relation	relation;
+	cl_uint		i, nchunks;
+	cl_uint		load_count = 0;
+	cl_int		rc;
+
+	refresh_ccache_source_relations();
+	if (!hash_search(ccache_relations_htab, &table_oid, HASH_FIND, NULL))
+		elog(ERROR, "ccache: not configured on the table %u", table_oid);
+
+	relation = heap_open(table_oid, AccessShareLock);
+	nchunks = RelationGetNumberOfBlocks(relation) / CCACHE_CHUNK_NBLOCKS;
+
+	Assert(!PerChunkLoadBuffer);
+	PerChunkLoadBuffer = palloc(CCACHE_CHUNK_SIZE);
+	VisibilityMapBuffer = InvalidBuffer;
+	PG_TRY();
+	{
+		for (i=0; i < nchunks; i++)
+		{
+			BlockNumber		block_nr = i * CCACHE_CHUNK_NBLOCKS;
+
+			rc = ccache_tryload_one_chunk(relation, block_nr);
+			if (rc < 0)
+				break;		/* cannot continue to load any more */
+			if (rc > 0)
+				load_count++;
+		}
+	}
+	PG_CATCH();
+	{
+		pfree(PerChunkLoadBuffer);
+		PerChunkLoadBuffer = NULL;
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	if (VisibilityMapBuffer != InvalidBuffer)
+		ReleaseBuffer(VisibilityMapBuffer);
+	pfree(PerChunkLoadBuffer);
+	PerChunkLoadBuffer = NULL;
+
+	heap_close(relation, NoLock);
+
+	PG_RETURN_INT32(load_count);
+}
+PG_FUNCTION_INFO_V1(pgstrom_ccache_prewarm);
 
 /*
  * ccache_builder_main_on_shutdown
@@ -2608,7 +2802,7 @@ ccache_builder_main(Datum arg)
 					break;
 			}
 			if (nchunks_atonce > 0)
-				nchunks_atonce = ccache_tryload_chilly_chunk(nchunks_atonce);
+				nchunks_atonce = ccache_tryload_chilly_chunks(nchunks_atonce);
 			timeout = (nchunks_atonce == 0 ? 0 : 4000);
 
 			if (VisibilityMapBuffer != InvalidBuffer)

@@ -2004,8 +2004,6 @@ __pgstrom_devfunc_lookup(HeapTuple protup,
 	entry->func_rettype = dtype;
 	entry->func_sqlname = pstrdup(NameStr(proc->proname));
 
-	elog(INFO, "funcid = %u rettype = %u arg1 = %u", func_oid, func_rettype, func_argtypes->values[0]);
-
 	/* for system default functions (pg_catalog) */
 	if (proc->pronamespace == PG_CATALOG_NAMESPACE &&
 		pgstrom_devfunc_construct_common(entry))
