@@ -32,6 +32,10 @@ static pg_crc32 pg_numeric_devtype_hashfunc(devtype_info *dtype,
 static pg_crc32 pg_bpchar_devtype_hashfunc(devtype_info *dtype,
 										   pg_crc32 hash,
 										   Datum datum, bool isnull);
+static pg_crc32 pg_range_devtype_hashfunc(devtype_info *dtype,
+										  pg_crc32 hash,
+										  Datum datum, bool isnull);
+
 /*
  * Catalog of data types supported by device code
  *
@@ -43,6 +47,13 @@ static pg_crc32 pg_bpchar_devtype_hashfunc(devtype_info *dtype,
 					 type_flags,extra_sz,hash_func)				\
 	{ "pg_catalog", type_name, type_oid_label, type_base,		\
 	  min_const, max_const, zero_const, type_flags, extra_sz, hash_func }
+
+/* XXX - These types have no constant definition at catalog/pg_type.h */
+#define INT8RANGEOID	3926
+#define NUMRANGEOID		3906
+#define TSRANGEOID		3908
+#define TSTZRANGEOID	3910
+#define DATERANEGOID	3912
 
 static struct {
 	const char	   *type_schema;
@@ -161,6 +172,34 @@ static struct {
 				 NULL, NULL, NULL,
 				 DEVKERNEL_NEEDS_TEXTLIB, 0,
 				 generic_devtype_hashfunc),
+	/*
+	 * range types
+	 */
+	DEVTYPE_DECL("int4range",  "INT4RANGEOID",  "__int4range",
+				 NULL, NULL, NULL,
+				 DEVKERNEL_NEEDS_RANGETYPE,
+				 sizeof(RangeType) + 2 * sizeof(cl_int) + 1,
+				 pg_range_devtype_hashfunc),
+	DEVTYPE_DECL("int8range",  "INT8RANGEOID",  "__int8range",
+				 NULL, NULL, NULL,
+				 DEVKERNEL_NEEDS_RANGETYPE,
+				 sizeof(RangeType) + 2 * sizeof(cl_long) + 1,
+				 pg_range_devtype_hashfunc),
+	DEVTYPE_DECL("tsrange",    "TSRANGEOID",    "__tsrange",
+				 NULL, NULL, NULL,
+				 DEVKERNEL_NEEDS_TIMELIB | DEVKERNEL_NEEDS_RANGETYPE,
+				 sizeof(RangeType) + 2 * sizeof(Timestamp) + 1,
+				 pg_range_devtype_hashfunc),
+	DEVTYPE_DECL("tstzrange",  "TSTZRANGEOID",  "__tstzrange",
+				 NULL, NULL, NULL,
+				 DEVKERNEL_NEEDS_TIMELIB | DEVKERNEL_NEEDS_RANGETYPE,
+				 sizeof(RangeType) + 2 * sizeof(TimestampTz) + 1,
+				 pg_range_devtype_hashfunc),
+	DEVTYPE_DECL("daterange",  "DATERANGEOID",  "__daterange",
+				 NULL, NULL, NULL,
+                 DEVKERNEL_NEEDS_TIMELIB | DEVKERNEL_NEEDS_RANGETYPE,
+				 sizeof(RangeType) + 2 * sizeof(DateADT) + 1,
+				 pg_range_devtype_hashfunc),
 };
 
 static devtype_info *
@@ -176,11 +215,9 @@ build_devtype_info_entry(Oid type_oid,
 {
 	HeapTuple		tuple;
 	Form_pg_type	type_form;
-	Form_pg_proc	proc_form;
 	TypeCacheEntry *tcache;
 	devtype_info   *entry;
 	cl_int			hindex;
-	Oid				func_oid;
 
 	tuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(type_oid));
 	if (!HeapTupleIsValid(tuple))
@@ -216,51 +253,8 @@ build_devtype_info_entry(Oid type_oid,
 	entry->extra_sz = extra_sz;
 	entry->hash_func = hash_func;
 	/* type equality function */
-	func_oid = get_opcode(tcache->eq_opr);
-	if (OidIsValid(func_oid))
-	{
-		HeapTuple		tup = SearchSysCache1(PROCOID,
-											  ObjectIdGetDatum(func_oid));
-		if (!HeapTupleIsValid(tup))
-			elog(ERROR, "cache lookup failed for function %u", func_oid);
-		proc_form = (Form_pg_proc) GETSTRUCT(tup);
-		/* sanity checks */
-		if (proc_form->prorettype == BOOLOID &&
-			proc_form->pronargs == 2 &&
-			proc_form->proargtypes.values[0] == type_oid &&
-			proc_form->proargtypes.values[1] == type_oid)
-		{
-			/*
-			 * array type has 'array_eq' as equality function, but this
-			 * function takes {ANYARRAYOID,ANYARRAYOID}.
-			 * It does not fit to the supplied type_oid, but harmless here.
-			 */
-			entry->type_eqfunc_nsp = proc_form->pronamespace;
-			entry->type_eqfunc_name = pstrdup(NameStr(proc_form->proname));
-		}
-		ReleaseSysCache(tup);
-	}
-	/* type comparison function */
-	func_oid = tcache->cmp_proc;
-	if (OidIsValid(func_oid))
-	{
-		HeapTuple		tup = SearchSysCache1(PROCOID,
-											  ObjectIdGetDatum(func_oid));
-		if (!HeapTupleIsValid(tup))
-			elog(ERROR, "cache lookup failed for function %u", func_oid);
-		proc_form = (Form_pg_proc) GETSTRUCT(tup);
-		/* sanity checks */
-		if (proc_form->prorettype == INT4OID &&
-			proc_form->pronargs == 2 &&
-			proc_form->proargtypes.values[0] == type_oid &&
-			proc_form->proargtypes.values[1] == type_oid)
-		{
-			/* see comment above */
-			entry->type_cmpfunc_nsp = proc_form->pronamespace;
-			entry->type_cmpfunc_name = pstrdup(NameStr(proc_form->proname));
-		}
-		ReleaseSysCache(tup);
-	}
+	entry->type_eqfunc = get_opcode(tcache->eq_opr);
+	entry->type_cmpfunc = tcache->cmp_proc;
 
 	if (!element)
 		entry->type_array = build_devtype_info_entry(type_form->typarray,
@@ -477,6 +471,32 @@ pg_bpchar_devtype_hashfunc(devtype_info *dtype,
 	return hash;
 }
 
+static pg_crc32
+pg_range_devtype_hashfunc(devtype_info *dtype,
+						  pg_crc32 hash,
+						  Datum datum, bool isnull)
+{
+	if (!isnull)
+	{
+		RangeType  *r = DatumGetRangeType(datum);
+		char	   *pos = (char *)(r + 1);
+		char		flags = *((char *)r + VARSIZE(r) - 1);
+
+		if (RANGE_HAS_LBOUND(flags))
+		{
+			COMP_LEGACY_CRC32(hash, pos, dtype->type_length);
+			pos += TYPEALIGN(dtype->type_align,
+							 dtype->type_length);
+		}
+		if (RANGE_HAS_UBOUND(flags))
+		{
+			COMP_LEGACY_CRC32(hash, pos, dtype->type_length);
+		}
+		COMP_LEGACY_CRC32(hash, &flags, sizeof(char));
+	}
+	return hash;
+}
+
 /*
  * Catalog of functions supported by device code
  *
@@ -507,6 +527,7 @@ pg_bpchar_devtype_hashfunc(devtype_info *dtype,
  * 's' : this function needs cuda_textlib.h
  * 't' : this function needs cuda_timelib.h
  * 'y' : this function needs cuda_misc.h
+ * 'r' : this function needs cuda_rangetype.h
  *
  * class character:
  * 'c' : this function is type cast that takes an argument
@@ -1181,7 +1202,7 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "texticlike",    2, {TEXTOID, TEXTOID},   "sc/F:texticlike" },
 	{ "bpchariclike",  2, {TEXTOID, TEXTOID},   "sc/F:texticlike" },
 	{ "texticnlike",   2, {TEXTOID, TEXTOID},   "sc/F:texticnlike" },
-	{ "bpcharicnlike", 2, {BPCHAROID, TEXTOID}, "sc/F:texticnlike" },	
+	{ "bpcharicnlike", 2, {BPCHAROID, TEXTOID}, "sc/F:texticnlike" },
 };
 
 /*
@@ -1284,13 +1305,67 @@ static devfunc_extra_catalog_t devfunc_extra_catalog[] = {
 	{ "pgstrom.flt2_mul_cash("FLOAT2",money)", "money", "y:flt2_mul_cash" },
 	{ "pgstrom.cash_div_flt2(money,"FLOAT2")", "money", "y:cash_div_flt2" },
 
+	/* int4range operators */
+	{ "lower(int4range)", INT4, "r/F:int4range_lower" },
+	{ "upper(int4range)", INT4, "r/F:int4range_upper" },
+	{ "isempty(int4range)", BOOL, "r/F:generic_range_isempty" },
+	{ "lower_inc(int4range)", BOOL, "r/F:generic_range_lower_inc" },
+	{ "upper_inc(int4range)", BOOL, "r/F:generic_range_upper_inc" },
+	{ "lower_inf(int4range)", BOOL, "r/F:generic_range_lower_inf" },
+	{ "upper_inf(int4range)", BOOL, "r/F:generic_range_upper_inf" },
+	{ "range_eq(int4range,int4range)", BOOL, "r/F:generic_range_eq" },
+	{ "range_ne(int4range,int4range)", BOOL, "r/F:generic_range_ne" },
+	{ "range_lt(int4range,int4range)", BOOL, "r/F:generic_range_lt" },
+	{ "range_le(int4range,int4range)", BOOL, "r/F:generic_range_le" },
+	{ "range_gt(int4range,int4range)", BOOL, "r/F:generic_range_gt" },
+	{ "range_ge(int4range,int4range)", BOOL, "r/F:generic_range_ge" },
+	{ "range_cmp(int4range,int4range)",
+	  INT4, "r/F:generic_range_cmp" },
+	{ "range_overlaps(int4range,int4range)",
+	  BOOL, "r/F:generic_range_overlaps" },
+	{ "range_contains_elem(int4range,"INT4")",
+	  BOOL, "r/F:generic_range_contains_elem" },
+	{ "range_contains(int4range,int4range)",
+	  BOOL, "r/F:generic_range_contains" },
+	{ "elem_contained_by_range("INT4",int4range)",
+	  BOOL, "r/F:generic_elem_contained_by_range" },
+	{ "range_contained_by(int4range,int4range)",
+	  BOOL, "r/F:generic_range_contained_by" },
+	{ "range_adjacent(int4range,int4range)",
+	  BOOL, "r/F:generic_range_adjacent" },
+	{ "range_before(int4range,int4range)",
+	  BOOL, "r/F:generic_range_before" },
+	{ "range_after(int4range,int4range)",
+	  BOOL, "r/F:generic_range_after" },
+	{ "range_overleft(int4range,int4range)",
+	  BOOL, "r/F:generic_range_overleft" },
+	{ "range_overright(int4range,int4range)",
+	  BOOL, "r/F:generic_range_overleft" },
+	{ "range_union(int4range,int4range)",
+	  "int4range", "r/F:generic_range_union" },
+	{ "range_merge(int4range,int4range)",
+	  "int4range", "r/F:generic_range_merge" },
+	{ "range_intersect(int4range,int4range)",
+	  "int4range", "r/F:generic_range_intersect" },
+	{ "range_minus(int4range,int4range)",
+	  "int4range", "r/F:generic_range_minus" },
+
+	/* int8range operators */
+	/* tsrange operators */
+	/* tstzrange operators */
+	/* daterange operators */
+
+
+
+
+
 	/* type re-interpretation */
-	{ "pg_catalog.as_int8("FLOAT8")", INT8,   "f:__double_as_longlong" },
-	{ "pg_catalog.as_int4("FLOAT4")", INT4,   "f:__float_as_int" },
-	{ "pg_catalog.as_int2("FLOAT2")", INT2,   "f:__half_as_short" },
-	{ "pg_catalog.as_float8("INT8")", FLOAT8, "f:__longlong_as_double" },
-	{ "pg_catalog.as_float4("INT4")", FLOAT4, "f:__int_as_float" },
-	{ "pg_catalog.as_float2("INT2")", FLOAT2, "f:__short_as_half" },
+	{ "as_int8("FLOAT8")", INT8,   "f:__double_as_longlong" },
+	{ "as_int4("FLOAT4")", INT4,   "f:__float_as_int" },
+	{ "as_int2("FLOAT2")", INT2,   "f:__half_as_short" },
+	{ "as_float8("INT8")", FLOAT8, "f:__longlong_as_double" },
+	{ "as_float4("INT4")", FLOAT4, "f:__int_as_float" },
+	{ "as_float2("INT2")", FLOAT2, "f:__short_as_half" },
 };
 
 #undef BOOL
@@ -1550,6 +1625,9 @@ __construct_devfunc_info(devfunc_info *entry,
 				case 'y':
 					flags |= DEVKERNEL_NEEDS_MISC;
 					break;
+				case 'r':
+					flags |= DEVKERNEL_NEEDS_RANGETYPE;
+					break;
 				default:
 					elog(NOTICE,
 						 "Bug? unkwnon devfunc property: %c",
@@ -1599,11 +1677,8 @@ __construct_devfunc_info(devfunc_info *entry,
 	}
 }
 
-static void
-pgstrom_devfunc_construct_common(devfunc_info *entry,
-								 int func_nargs,
-								 Oid func_argtypes[],
-								 Oid func_rettype)
+static bool
+pgstrom_devfunc_construct_common(devfunc_info *entry)
 {
 	int		i;
 
@@ -1612,50 +1687,89 @@ pgstrom_devfunc_construct_common(devfunc_info *entry,
 		devfunc_catalog_t  *procat = devfunc_common_catalog + i;
 
 		if (strcmp(procat->func_name, entry->func_sqlname) == 0 &&
-			procat->func_nargs == func_nargs &&
-			memcmp(procat->func_argtypes, func_argtypes,
-				   sizeof(Oid) * func_nargs) == 0)
+			procat->func_nargs == entry->func_argtypes->dim1 &&
+			memcmp(procat->func_argtypes,
+				   entry->func_argtypes->values,
+				   sizeof(Oid) * procat->func_nargs) == 0)
 		{
 			__construct_devfunc_info(entry, procat->func_template);
-			return;
+			return true;
 		}
 	}
-	/* no entries on the device function catalog */
-	entry->func_is_negative = true;
+	return false;
 }
 
-static void
-pgstrom_devfunc_construct_extra(devfunc_info *entry)
+static bool
+pgstrom_devfunc_construct_extra(devfunc_info *entry, HeapTuple protup)
 {
-	Oid		rettype_oid = entry->func_rettype->type_oid;
-	char   *func_signature = format_procedure_qualified(entry->func_oid);
-	char   *func_rettype = format_type_be_qualified(rettype_oid);
-	int		i;
+	Form_pg_proc proc = (Form_pg_proc) GETSTRUCT(protup);
+	StringInfoData sig;
+	oidvector  *func_argtypes = entry->func_argtypes;
+	int			i, nargs = func_argtypes->dim1;
+	bool		result = false;
+	char	   *func_rettype;
+	char	   *temp;
+
+	/* make a signature string */
+	initStringInfo(&sig);
+	if (proc->pronamespace != PG_CATALOG_NAMESPACE)
+	{
+		temp = get_namespace_name(proc->pronamespace);
+		appendStringInfo(&sig, "%s.", quote_identifier(temp));
+		pfree(temp);
+	}
+	appendStringInfo(&sig, "%s(", quote_identifier(NameStr(proc->proname)));
+
+	for (i=0; i < nargs; i++)
+	{
+		Oid		type_oid = entry->func_argtypes->values[i];
+
+		if (i > 0)
+			appendStringInfoChar(&sig, ',');
+		temp = format_type_be_qualified(type_oid);
+		if (strncmp(temp, "pg_catalog.", 11) == 0)
+			appendStringInfo(&sig, "%s", temp + 11);
+		else
+			appendStringInfo(&sig, "%s", temp);
+		pfree(temp);
+	}
+	appendStringInfoChar(&sig, ')');
+
+	temp = format_type_be_qualified(entry->func_rettype_oid);
+	if (strncmp(temp, "pg_catalog.", 11) == 0)
+		func_rettype = temp + 11;
+	else
+		func_rettype = temp;
+
+	elog(INFO, "sig=[%s] ret=[%s]", sig.data, func_rettype);
 
 	for (i=0; i < lengthof(devfunc_extra_catalog); i++)
 	{
 		devfunc_extra_catalog_t  *procat = devfunc_extra_catalog + i;
 
-		if (strcmp(procat->func_signature, func_signature) == 0 &&
+		if (strcmp(procat->func_signature, sig.data) == 0 &&
 			strcmp(procat->func_rettype, func_rettype) == 0)
 		{
 			__construct_devfunc_info(entry, procat->func_template);
-			return;
+			result = true;
+			break;
 		}
 	}
-	/* no entries on the device function catalog */
-	entry->func_is_negative = true;
+	pfree(sig.data);
+	pfree(temp);
+	return result;
 }
 
 static devfunc_info *
-__pgstrom_devfunc_lookup(Oid func_nsp, const char *func_name,
-						 Oid func_rettype, oidvector *func_argtypes,
+__pgstrom_devfunc_lookup(HeapTuple protup,
+						 Oid func_rettype,
+						 oidvector *func_argtypes,
 						 Oid func_collid)
 {
+	Form_pg_proc	proc = (Form_pg_proc) GETSTRUCT(protup);
+	Oid				func_oid = HeapTupleGetOid(protup);
 	devfunc_info   *entry;
 	devtype_info   *dtype;
-	Form_pg_proc	proc;
-	HeapTuple		tuple;
 	List		   *func_args = NIL;
 	ListCell	   *lc;
 	pg_crc32c		hash;
@@ -1663,8 +1777,8 @@ __pgstrom_devfunc_lookup(Oid func_nsp, const char *func_name,
 	MemoryContext	oldcxt;
 
 	INIT_CRC32C(hash);
-	COMP_CRC32C(hash, &func_nsp, sizeof(Oid));
-	COMP_CRC32C(hash, func_name, strlen(func_name));
+	COMP_CRC32C(hash, &func_oid, sizeof(Oid));
+	COMP_CRC32C(hash, &func_rettype, sizeof(Oid));
 	COMP_CRC32C(hash, func_argtypes->values,
 				sizeof(Oid) * func_argtypes->dim1);
 	FIN_CRC32C(hash);
@@ -1675,8 +1789,8 @@ __pgstrom_devfunc_lookup(Oid func_nsp, const char *func_name,
 		entry = lfirst(lc);
 
 		if (entry->hash == hash &&
-			entry->func_namespace == func_nsp &&
-			strcmp(entry->func_sqlname, func_name) == 0 &&
+			entry->func_oid == func_oid &&
+			entry->func_rettype_oid == func_rettype &&
 			entry->func_argtypes->dim1 == func_argtypes->dim1 &&
 			memcmp(entry->func_argtypes->values,
 				   func_argtypes->values,
@@ -1691,72 +1805,59 @@ __pgstrom_devfunc_lookup(Oid func_nsp, const char *func_name,
 	}
 
 	/*
-	 * Not found, construct a new entry for device function
+	 * Not found, construct a new entry of the device function
 	 */
-	tuple = SearchSysCache3(PROCNAMEARGSNSP,
-							PointerGetDatum(func_name),
-							PointerGetDatum(func_argtypes),
-							ObjectIdGetDatum(func_nsp));
-	if (!HeapTupleIsValid(tuple))
-		elog(ERROR, "cache lookup failed for function %s", func_name);
-	proc = (Form_pg_proc) GETSTRUCT(tuple);
-
 	oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
 	entry = palloc0(sizeof(devfunc_info));
 	entry->hash = hash;
-	entry->func_oid = HeapTupleGetOid(tuple);
-	entry->func_namespace = proc->pronamespace;
-	entry->func_sqlname = pstrdup(NameStr(proc->proname));
+	entry->func_oid = func_oid;
+	entry->func_rettype_oid = func_rettype;
 	entry->func_argtypes = (oidvector *)
-		pg_detoast_datum_copy((struct varlena *)&proc->proargtypes);
+		pg_detoast_datum_copy((struct varlena *)func_argtypes);
 	entry->func_collid = func_collid;	/* may be cleared later */
 	entry->func_is_strict = proc->proisstrict;
 	/* above is signature of SQL functions */
 	for (j=0; j < proc->pronargs; j++)
 	{
-		dtype = pgstrom_devtype_lookup(proc->proargtypes.values[j]);
+		dtype = pgstrom_devtype_lookup(func_argtypes->values[j]);
 		if (!dtype)
 		{
 			list_free(func_args);
 			entry->func_is_negative = true;
-			goto not_supported;
+			goto skip;
 		}
 		func_args = lappend(func_args, dtype);
 	}
 
-	dtype = pgstrom_devtype_lookup(proc->prorettype);
+	dtype = pgstrom_devtype_lookup(func_rettype);
 	if (!dtype)
 	{
 		list_free(func_args);
 		entry->func_is_negative = true;
-		goto not_supported;
+		goto skip;
 	}
 	entry->func_args = func_args;
 	entry->func_rettype = dtype;
+	entry->func_sqlname = pstrdup(NameStr(proc->proname));
 
-	if (proc->pronamespace == PG_CATALOG_NAMESPACE)
-	{
-		/* for system default functions (pg_catalog) */
-		pgstrom_devfunc_construct_common(entry,
-										 proc->pronargs,
-										 proc->proargtypes.values,
-										 proc->prorettype);
-	}
-	else if (proc->prolang == get_language_oid("plcuda", true))
-	{
-		/* for PL/CUDA functions */
-		pgstrom_devfunc_construct_plcuda(entry, tuple);
-	}
-	else
-	{
-		/* for extra functions */
-		pgstrom_devfunc_construct_extra(entry);
-	}
-not_supported:
+	elog(INFO, "funcid = %u rettype = %u arg1 = %u", func_oid, func_rettype, func_argtypes->values[0]);
+
+	/* for system default functions (pg_catalog) */
+	if (proc->pronamespace == PG_CATALOG_NAMESPACE &&
+		pgstrom_devfunc_construct_common(entry))
+		goto skip;
+	/* other extra or polymorphic functions */
+	if (pgstrom_devfunc_construct_extra(entry, protup))
+		goto skip;
+	/* for inline PL/CUDA functions */
+	if (proc->prolang == get_language_oid("plcuda", true) &&
+		pgstrom_devfunc_construct_plcuda(entry, protup))
+		goto skip;
+	/* oops, function has no entry */
+	entry->func_is_negative = true;
+skip:
 	devfunc_info_slot[i] = lappend(devfunc_info_slot[i], entry);
 	MemoryContextSwitchTo(oldcxt);
-
-	ReleaseSysCache(tuple);
 
 	if (entry->func_is_negative)
 		return NULL;
@@ -1780,8 +1881,6 @@ pgstrom_devfunc_lookup(Oid func_oid,
 		elog(ERROR, "cache lookup failed for function %u", func_oid);
 	proc = (Form_pg_proc) GETSTRUCT(tup);
 	Assert(proc->pronargs == list_length(func_args));
-	Assert(IsPolymorphicType(proc->prorettype) ||
-		   proc->prorettype == func_rettype);
 	if (proc->pronargs <= DEVFUNC_MAX_NARGS)
 	{
 		size_t		len = offsetof(oidvector, values[proc->pronargs]);
@@ -1797,14 +1896,11 @@ pgstrom_devfunc_lookup(Oid func_oid,
 		{
 			Oid		type_oid = exprType((Node *)lfirst(lc));
 
-			Assert(IsPolymorphicType(proc->proargtypes.values[i]) ||
-				   proc->proargtypes.values[i] == type_oid);
-			func_argtypes->values[i++] = exprType((Node *)lfirst(lc));
+			func_argtypes->values[i++] = type_oid;
 		}
 		SET_VARSIZE(func_argtypes, len);
 
-		result = __pgstrom_devfunc_lookup(proc->pronamespace,
-										  NameStr(proc->proname),
+		result = __pgstrom_devfunc_lookup(tup,
 										  func_rettype,
 										  func_argtypes,
 										  func_collid);
@@ -1817,11 +1913,20 @@ pgstrom_devfunc_lookup(Oid func_oid,
 devfunc_info *
 pgstrom_devfunc_lookup_type_equal(devtype_info *dtype, Oid type_collid)
 {
+	devfunc_info *result = NULL;
 	char		buffer[offsetof(oidvector, values[2])];
 	oidvector  *func_argtypes = (oidvector *)buffer;
+	HeapTuple	tup;
+	Form_pg_proc proc;
 
-	if (!OidIsValid(dtype->type_eqfunc_nsp) || !dtype->type_eqfunc_name)
+	if (!OidIsValid(dtype->type_eqfunc))
 		return NULL;
+	tup = SearchSysCache1(PROCOID, ObjectIdGetDatum(dtype->type_eqfunc));
+	if (!HeapTupleIsValid(tup))
+		elog(ERROR, "cache lookup failed for function %u", dtype->type_eqfunc);
+	proc = (Form_pg_proc) GETSTRUCT(tup);
+	Assert(proc->pronargs == 2);
+	Assert(proc->prorettype == BOOLOID);
 
 	memset(func_argtypes, 0, offsetof(oidvector, values[2]));
 	func_argtypes->ndim = 1;
@@ -1833,21 +1938,32 @@ pgstrom_devfunc_lookup_type_equal(devtype_info *dtype, Oid type_collid)
 	func_argtypes->values[1] = dtype->type_oid;
 	SET_VARSIZE(func_argtypes, offsetof(oidvector, values[2]));
 
-	return __pgstrom_devfunc_lookup(dtype->type_eqfunc_nsp,
-									dtype->type_eqfunc_name,
-									BOOLOID,
-									func_argtypes,
-									type_collid);
+	result = __pgstrom_devfunc_lookup(tup,
+									  BOOLOID,
+									  func_argtypes,
+									  type_collid);
+	ReleaseSysCache(tup);
+
+	return result;
 }
 
 devfunc_info *
 pgstrom_devfunc_lookup_type_compare(devtype_info *dtype, Oid type_collid)
 {
+	devfunc_info *result = NULL;
 	char		buffer[offsetof(oidvector, values[2])];
 	oidvector  *func_argtypes = (oidvector *)buffer;
+	HeapTuple	tup;
+	Form_pg_proc proc;
 
-	if (!OidIsValid(dtype->type_eqfunc_nsp) || !dtype->type_eqfunc_name)
+	if (!OidIsValid(dtype->type_cmpfunc))
 		return NULL;
+	tup = SearchSysCache1(PROCOID, ObjectIdGetDatum(dtype->type_cmpfunc));
+	if (!HeapTupleIsValid(tup))
+        elog(ERROR, "cache lookup failed for function %u", dtype->type_cmpfunc);
+	proc = (Form_pg_proc) GETSTRUCT(tup);
+	Assert(proc->pronargs == 2);
+	Assert(proc->prorettype == INT4OID);
 
 	memset(func_argtypes, 0, offsetof(oidvector, values[2]));
 	func_argtypes->ndim = 1;
@@ -1859,11 +1975,13 @@ pgstrom_devfunc_lookup_type_compare(devtype_info *dtype, Oid type_collid)
 	func_argtypes->values[1] = dtype->type_oid;
 	SET_VARSIZE(func_argtypes, offsetof(oidvector, values[2]));
 
-	return __pgstrom_devfunc_lookup(dtype->type_cmpfunc_nsp,
-									dtype->type_cmpfunc_name,
-									INT4OID,
-									func_argtypes,
-									type_collid);
+	result = __pgstrom_devfunc_lookup(tup,
+									  INT4OID,
+									  func_argtypes,
+									  type_collid);
+	ReleaseSysCache(tup);
+
+	return result;
 }
 
 void
@@ -2204,7 +2322,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 				dfunc = pgstrom_devfunc_lookup_type_equal(dtype, colloid);
 				if (!dfunc)
 					elog(ERROR,"codegen: failed to lookup device function: %s",
-						 dtype->type_eqfunc_name);
+						 format_procedure_qualified(dtype->type_eqfunc));
 				pgstrom_devfunc_track(context, dfunc);
 
 				appendStringInfo(&context->str,
@@ -2456,7 +2574,7 @@ codegen_minmax_expression(MinMaxExpr *minmax, codegen_context *context)
 	dfunc = pgstrom_devfunc_lookup_type_compare(dtype, minmax->inputcollid);
 	if (!dfunc)
 		elog(ERROR, "unsupported device function in LEAST/GREATEST: %s",
-			 dtype->type_cmpfunc_name);
+			 format_procedure_qualified(dtype->type_cmpfunc));
 	pgstrom_devfunc_track(context, dfunc);
 
 	/* find out identical predefined device LEAST/GREATEST */

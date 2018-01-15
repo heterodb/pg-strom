@@ -849,13 +849,13 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 		"  void    *addr __attribute__((unused));\n"
 		"  cl_uint  len  __attribute__((unused));\n");
 
-	varremaps = palloc0(sizeof(AttrNumber) * tupdesc->natts);
+	varremaps = palloc0(sizeof(AttrNumber) * list_length(tlist_dev));
 	varattnos = NULL;
 	foreach (lc, tlist_dev)
 	{
 		TargetEntry	   *tle = lfirst(lc);
 
-		Assert(tle->resno > 0);
+		Assert(tle->resno > 0 && tle->resno <= list_length(tlist_dev));
 		/*
 		 * NOTE: If expression of TargetEntry is a simple Var-node,
 		 * we can load the value into tup_values[]/tup_isnull[]

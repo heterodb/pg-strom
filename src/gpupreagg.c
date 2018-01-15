@@ -3256,7 +3256,7 @@ gpupreagg_codegen_hashvalue(StringInfo kern,
 
 		type_oid = exprType((Node *)tle->expr);
 		dtype = pgstrom_devtype_lookup_and_track(type_oid, context);
-		if (!dtype || !dtype->type_eqfunc_name)
+		if (!dtype || !OidIsValid(dtype->type_eqfunc))
 			elog(ERROR, "Bug? type (%s) is not supported",
 				 format_type_be(type_oid));
 		/* variable declarations */

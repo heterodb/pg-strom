@@ -432,6 +432,15 @@ construct_flat_cuda_source(uint32 extra_flags,
 		"    pg_text_t        text_v;\n"
 		"    pg_varchar_t     varchar_v;\n"
 		"#endif\n"
+		"#ifdef CUDA_RANGETYPE_H\n"
+		"    pg_int4range_t   int4range_v;\n"
+		"    pg_int8range_t   int8range_v;\n"
+		"#ifdef CUDA_TIMELIB_H\n"
+		"    pg_tsrange_t     tsrange_v;\n"
+		"    pg_tstzrange_t   tstzrange_v;\n"
+		"    pg_daterange_t   daterange_v;\n"
+		"#endif\n"
+		"#endif\n"
 		"  } pg_anytype_t;\n\n";
 	ofs += snprintf(source + ofs, len - ofs, "%s\n", pg_anytype);
 

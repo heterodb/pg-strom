@@ -477,7 +477,7 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 			ItemPointerData t_self;
 			PageHeaderData *pg_page;
 			BlockNumber	block_nr;
-			cl_ushort	t_len;
+			cl_ushort	t_len	__attribute__((unused));
 			cl_uint		required;
 			cl_uint		extra_sz = 0;
 			cl_bool		rc;

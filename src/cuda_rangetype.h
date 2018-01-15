@@ -15,7 +15,7 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
-#ifdef CUDA_RANGETYPES_H
+#ifndef CUDA_RANGETYPES_H
 #define CUDA_RANGETYPES_H
 
 /* A range's flags byte contains these bits: */
@@ -36,123 +36,19 @@
 											  RANGE_UB_NULL |	\
 											  RANGE_UB_INF)))
 
-/*
- * !!NOTE!!
- * This template assumes BASE type is aligned to sizeof(BASE)
- */
-template<typename T>
-STATIC_INLINE(cl_bool)
-__rangetype_datum_ref(void *datum,
-					  T &lbound, cl_bool &l_infinite, cl_bool &l_inclusive,
-					  T &ubound, cl_bool &u_infinite, cl_bool &u_inclusive,
-					  cl_bool &is_empty)
-{
-	char	vl_buf[MAXALIGN(VARHDRSZ + sizeof(cl_uint) +
-							s * sizeof(T) + 1)];
-	char	flags;
-	char   *pos;
-
-	if (VARATT_IS_EXTERNAL(datum))
-		return false;
-	else if (VARATT_IS_COMPRESSED(datum))
-	{
-		if (!toast_decompress_datum(vl_buf, sizeof(vl_buf),
-									(struct varlena *)datum))
-			return false;
-		datum = vl_buf;
-	}
-	flags = *((char *)datum + VARSIZE_ANY(datum) - 1);
-	pos = VARDATA_ANY(datum) + sizeof(cl_uint);
-	if (!RANGE_HAS_LBOUND(flags))
-		lbound = 0;
-	else
-	{
-		memcpy(&lbound, pos, sizeof(T));
-		pos += sizeof(BASE);
-	}
-	if (!RANGE_HAS_UBOUND(flags))
-		ubound = 0;
-	else
-	{
-		memcpy(&ubound, pos, sizeof(T));
-		pos += sizeof(BASE);
-	}
-	is_empty = ((flags & RANGE_EMPTY) != 0);
-	l_infinite = ((flags & RANGE_LB_INF) != 0);
-	l_inclusive = ((flags & RANGE_LB_INC) != 0);
-	u_infinite = ((flags & RANGE_UB_INF) != 0);
-	u_inclusive = ((flags & RANGE_UB_INC) != 0);
-
-	return true;
-}
-
-template<typename T>
-STATIC_INLINE(void)
-__rangetype_datum_store(char *extra_buf,
-						cl_uint type_oid,
-						T lbound, cl_bool l_infinite, cl_bool l_inclusive,
-						T ubound, cl_bool u_infinite, cl_bool u_inclusive,
-						cl_bool is_empty)
-{
-	char   *pos = extra_buf + VARHDRSZ;
-	char	flags = ((l_infinite ? RANGE_LB_INF : 0)  |
-					 (l_inclusive ? RANGE_LB_INC : 0) |
-					 (u_infinite ? RANGE_UB_INF : 0)  |
-					 (u_inclusive ? RANGE_UB_INC : 0) |
-					 (is_empty ? RANGE_EMPTY : 0));
-	*((cl_uint *)pos) = type_oid;
-	pos += sizeof(cl_uint);
-	*((T *)pos) = lbound;
-	pos += sizeof(T);
-	*((T *)pos) = ubound;
-	pos += sizeof(T);
-	*((char *)pos) = flags;
-	SET_VARSIZE(extra_buf, pos - extra_buf);
-}
-
-template<typename T>
-STATIC_INLINE(cl_uint)
-__rangetype_comp_crc32(const cl_uint *crc32_table,
-					   cl_uint hash,
-					   cl_uint type_oid,
-					   T lbound, cl_bool l_infinite, cl_bool l_inclusive,
-					   T ubound, cl_bool u_infinite, cl_bool u_inclusive,
-					   cl_bool is_empty)
-{
-	char	flags = ((l_infinite ? RANGE_LB_INF : 0)  |
-					 (l_inclusive ? RANGE_LB_INC : 0) |
-					 (u_infinite ? RANGE_UB_INF : 0)  |
-					 (u_inclusive ? RANGE_UB_INC : 0) |
-					 (is_empty ? RANGE_EMPTY : 0));
-
-	pg_common_comp_crc32(crc32_table, hash,
-						 (char *)&type_oid,
-						 sizeof(cl_uint));
-	pg_common_comp_crc32(crc32_table, hash,
-						 (char *)&lbound,
-						 sizeof(lbound));
-	pg_common_comp_crc32(crc32_table, hash,
-						 (char *)&ubound,
-						 sizeof(ubound));
-	pg_common_comp_crc32(crc32_table, hash,
-						 (char *)&flags,
-						 sizeof(char));
-	return hash;
-}
-
-#define PG_RANGETYPE_TEMPLATE(NAME,BASE,TYPEOID)					\
+#define PG_RANGETYPE_TEMPLATE(NAME,BASE,PG_TYPEOID)					\
 	typedef struct													\
 	{																\
-		struct {													\
-			BASE	val;											\
-			cl_bool	infinite;										\
-			cl_bool	inclusive;										\
-		} l;	/* lower bound */									\
-		struct {													\
-			BASE	val;											\
-			cl_bool	infinite;										\
-			cl_bool	inclusive;										\
-		} u;	/* upper bound */									\
+		BASE	val;												\
+		cl_bool	infinite;		/* bound is +/- infinity */			\
+		cl_bool	inclusive;		/* bound is inclusive */			\
+		cl_bool	lower;			/* bound is lower */				\
+	} __##NAME##_bound;												\
+																	\
+	typedef struct													\
+	{																\
+		__##NAME##_bound	l;	/* lower bound */					\
+		__##NAME##_bound	u;	/* upper bound */					\
 		bool		empty;											\
 	} __##NAME;														\
 																	\
@@ -161,22 +57,68 @@ __rangetype_comp_crc32(const cl_uint *crc32_table,
 	STATIC_FUNCTION(pg_##NAME##_t)									\
 	pg_##NAME##_datum_ref(kern_context *kcxt, void *datum)			\
 	{																\
-		pg_##NAME##_t	result;										\
+		pg_##NAME##_t result;										\
+		char		vl_buf[MAXALIGN(VARHDRSZ + sizeof(cl_uint) +	\
+									2 * sizeof(BASE) + 1)];			\
+		char		flags;											\
+		char	   *pos;											\
+		cl_uint		type_oid;										\
 																	\
-		if (__rangetype_datum_ref(datum,							\
-								  result.l.val,						\
-								  result.l.infinite,				\
-								  result.l.inclusive,				\
-								  result.u.val,						\
-								  result.u.infinite,				\
-								  result.u.inclusive,				\
-								  result.empty))					\
-			result.isnull = false;									\
-		else														\
+		if (!datum)													\
+		{															\
+			result.isnull = true;									\
+			return result;											\
+		}															\
+																	\
+		if (VARATT_IS_EXTERNAL(datum))								\
 		{															\
 			result.isnull = true;									\
 			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);		\
+			return result;											\
 		}															\
+		else if (VARATT_IS_COMPRESSED(datum))						\
+		{															\
+			if (!toast_decompress_datum(vl_buf, sizeof(vl_buf),		\
+										(struct varlena *)datum))	\
+			{														\
+				result.isnull = true;								\
+				STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);	\
+				return result;										\
+			}														\
+			datum = vl_buf;											\
+		}															\
+		flags = *((char *)datum + VARSIZE_ANY(datum) - 1);			\
+		memcpy(&type_oid, VARDATA_ANY(datum), sizeof(cl_uint));		\
+		if (type_oid != PG_TYPEOID)									\
+		{															\
+			result.isnull = true;									\
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);		\
+			return result;											\
+		}															\
+		pos = VARDATA_ANY(datum) + sizeof(cl_uint);					\
+		if (!RANGE_HAS_LBOUND(flags))								\
+			result.value.l.val = 0;									\
+		else														\
+		{															\
+			memcpy(&result.value.l.val, pos, sizeof(BASE));			\
+			pos += sizeof(BASE);									\
+		}															\
+		if (!RANGE_HAS_UBOUND(flags))								\
+			result.value.u.val = 0;									\
+		else														\
+		{															\
+			memcpy(&result.value.u.val, pos, sizeof(BASE));			\
+			pos += sizeof(BASE);									\
+		}															\
+		result.value.empty = ((flags & RANGE_EMPTY) != 0);			\
+		result.value.l.infinite = ((flags & RANGE_LB_INF) != 0);	\
+		result.value.l.inclusive = ((flags & RANGE_LB_INC) != 0);	\
+		result.value.l.lower = true;								\
+		result.value.u.infinite = ((flags & RANGE_UB_INF) != 0);	\
+		result.value.u.inclusive = ((flags & RANGE_UB_INC) != 0);	\
+		result.value.u.lower = false;								\
+																	\
+		return result;												\
 	}																\
 																	\
 	STATIC_FUNCTION(cl_uint)										\
@@ -184,18 +126,28 @@ __rangetype_comp_crc32(const cl_uint *crc32_table,
 							void *extra_buf,						\
 							pg_##NAME##_t datum)					\
 	{																\
+		char	   *pos = (char *)extra_buf + VARHDRSZ;				\
+		char		flags;											\
+																	\
 		if (datum.isnull)											\
 			return 0;												\
 		if (extra_buf)												\
-			__rangetype_datum_store(extra_buf,						\
-									TYPEOID,						\
-									datum.l.val,					\
-									datum.l.infinite,				\
-									datum.l.inclusive,				\
-									datum.u.val,					\
-									datum.u.infinite,				\
-									datum.u.inclusive,				\
-									datum.empty);					\
+		{															\
+			flags = ((datum.value.l.infinite ? RANGE_LB_INF : 0)  |	\
+					 (datum.value.l.inclusive ? RANGE_LB_INC : 0) |	\
+					 (datum.value.u.infinite ? RANGE_UB_INF : 0)  |	\
+					 (datum.value.u.inclusive ? RANGE_UB_INC : 0) |	\
+					 (datum.value.empty ? RANGE_EMPTY : 0));		\
+			*((cl_uint *)pos) = PG_TYPEOID;							\
+			pos += sizeof(cl_uint);									\
+			*((BASE *)pos) = datum.value.l.val;						\
+			pos += sizeof(BASE);									\
+			*((BASE *)pos) = datum.value.u.val;						\
+			pos += sizeof(BASE);									\
+			*((char *)pos) = flags;									\
+			pos++;													\
+			SET_VARSIZE(extra_buf, pos - (char *)extra_buf);		\
+		}															\
 		return VARHDRSZ + sizeof(cl_uint) + 2 * sizeof(BASE) + 1;	\
 	}																\
 																	\
@@ -212,7 +164,6 @@ __rangetype_comp_crc32(const cl_uint *crc32_table,
 			paddr = NULL;											\
 																	\
 		return pg_##NAME##_datum_ref(kcxt,paddr);					\
-																	\
 	}																\
 																	\
 	STROMCL_SIMPLE_NULLTEST_TEMPLATE(NAME)							\
@@ -221,17 +172,25 @@ __rangetype_comp_crc32(const cl_uint *crc32_table,
 	pg_##NAME##_comp_crc32(const cl_uint *crc32_table,				\
 						   cl_uint hash, pg_##NAME##_t datum)		\
 	{																\
+		char		flags;											\
 		if (!datum.isnull)											\
-			hash = __rangetype_comp_crc32(crc32_table,				\
-										  hash,						\
-										  TYPEOID,					\
-										  datum.l.val,				\
-										  datum.l.infinite,			\
-										  datum.l.inclusive,		\
-										  datum.u.val,				\
-										  datum.u.infinite,			\
-										  datum.u.inclusive,		\
-										  datum.empty);				\
+		{															\
+			flags = ((datum.value.l.infinite ? RANGE_LB_INF : 0) |	\
+					 (datum.value.l.inclusive ? RANGE_LB_INC : 0) |	\
+					 (datum.value.u.infinite ? RANGE_UB_INF : 0) |	\
+					 (datum.value.u.inclusive ? RANGE_UB_INC : 0) |	\
+					 (datum.value.empty ? RANGE_EMPTY : 0));		\
+																	\
+			pg_common_comp_crc32(crc32_table, hash,					\
+								 (char *)&datum.value.l.val,		\
+								 sizeof(BASE));						\
+			pg_common_comp_crc32(crc32_table, hash,					\
+								 (char *)&datum.value.u.val,		\
+								 sizeof(BASE));						\
+			pg_common_comp_crc32(crc32_table, hash,					\
+								 (char *)&flags,					\
+								 sizeof(char));						\
+		}															\
 		return hash;												\
 	}																\
 																	\
@@ -268,11 +227,13 @@ PG_RANGETYPE_TEMPLATE(daterange,DateADT,PG_DATEOID)
 #endif	/* PG_DATERANGE_TYPE_DEFINED */
 #endif	/* CUDA_TIMELIB_H */
 
-template<typename R,typename T>
-STATIC_INLINE(R)
-pgfn_range_lower(kern_context *kcxt, T arg1)
+/*
+ * range_lower
+ */
+STATIC_FUNCTION(pg_int4_t)
+pgfn_int4range_lower(kern_context *kcxt, pg_int4range_t arg1)
 {
-	R	result;
+	pg_int4_t	result;
 
 	result.isnull = arg1.isnull;
 	if (!result.isnull)
@@ -285,11 +246,13 @@ pgfn_range_lower(kern_context *kcxt, T arg1)
 	return result;
 }
 
-template<typename R,typename T>
-STATIC_INLINE(R)
-pgfn_range_upper(kern_context *kcxt, T arg1)
+/*
+ * range_upper
+ */
+STATIC_FUNCTION(pg_int4_t)
+pgfn_int4range_upper(kern_context *kcxt, pg_int4range_t arg1)
 {
-	R	result;
+	pg_int4_t	result;
 
 	result.isnull = arg1.isnull;
 	if (!result.isnull)
@@ -302,9 +265,653 @@ pgfn_range_upper(kern_context *kcxt, T arg1)
 	return result;
 }
 
+/*
+ * misc functions with template
+ */
+template <typename T>
+STATIC_FUNCTION(pg_bool_t)
+pgfn_generic_range_isempty(kern_context *kcxt, T arg1)
+{
+	pg_bool_t	result;
 
+	result.isnull = arg1.isnull;
+	if (!result.isnull)
+		result.value = arg1.value.empty;
+	return result;
+}
 
+template <typename T>
+STATIC_FUNCTION(pg_bool_t)
+pgfn_generic_range_lower_inc(kern_context *kcxt, T arg1)
+{
+	pg_bool_t	result;
 
+	result.isnull = arg1.isnull;
+	if (!result.isnull)
+		result.value = arg1.value.l.inclusive;
+	return result;
+}
 
+template <typename T>
+STATIC_FUNCTION(pg_bool_t)
+pgfn_generic_range_upper_inc(kern_context *kcxt, T arg1)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull;
+	if (!result.isnull)
+		result.value = arg1.value.u.inclusive;
+	return result;
+}
+
+template <typename T>
+STATIC_FUNCTION(pg_bool_t)
+pgfn_generic_range_lower_inf(kern_context *kcxt, T arg1)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull;
+	if (!result.isnull)
+		result.value = arg1.value.l.infinite;
+	return result;
+}
+
+template <typename T>
+STATIC_FUNCTION(pg_bool_t)
+pgfn_generic_range_upper_inf(kern_context *kcxt, T arg1)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull;
+	if (!result.isnull)
+		result.value = arg1.value.u.infinite;
+	return result;
+}
+
+template <typename RangeBound>
+STATIC_INLINE(int)
+__range_cmp_bound_values(RangeBound *b1, RangeBound *b2)
+{
+	if (b1->infinite && b2->infinite)
+	{
+		if (b1->lower == b2->lower)
+			return 0;
+		else
+			return b1->lower ? -1 : 1;
+	}
+	else if (b1->infinite)
+		return b1->lower ? -1 : 1;
+	else if (b2->infinite)
+		return b2->lower ? 1 : -1;
+
+	return Compare(b1->val, b2->val);
+}
+
+template <typename RangeBound>
+STATIC_INLINE(int)
+__range_cmp_bounds(RangeBound *b1, RangeBound *b2)
+{
+	int		cmp = __range_cmp_bound_values(b1, b2);
+
+	if (cmp == 0)
+	{
+		if (!b1->inclusive && !b2->inclusive)
+		{
+			if (b1->lower == b2->lower)
+				cmp = 0;
+			else
+				cmp = (b1->lower ? 1 : -1);
+		}
+		else if (!b1->inclusive)
+			cmp = (b1->lower ? 1 : -1);
+        else if (!b2->inclusive)
+            cmp = (b2->lower ? -1 : 1);
+	}
+	return cmp;
+}
+
+template <typename RangeType>
+STATIC_INLINE(int)
+__range_cmp(RangeType *r1, RangeType *r2)
+{
+	int		cmp;
+
+	if (r1->empty && r2->empty)
+		cmp = 0;
+	else if (r1->empty)
+		cmp = -1;
+	else if (r2->empty)
+		cmp = 1;
+	else
+	{
+		cmp = __range_cmp_bounds(&r1->l, &r2->l);
+		if (cmp == 0)
+			cmp = __range_cmp_bounds(&r1->u, &r2->u);
+	}
+	return cmp;
+}
+
+template <typename pg_range_type>
+STATIC_FUNCTION(pg_bool_t)
+pgfn_generic_range_eq(kern_context *kcxt,
+					  pg_range_type arg1, pg_range_type arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		if (arg1.value.empty && arg2.value.empty)
+			result.value = true;
+		else if (arg1.value.empty != arg2.value.empty)
+			result.value = false;
+		else if (__range_cmp_bounds(&arg1.value.l, &arg2.value.l) != 0)
+			result.value = false;
+		else if (__range_cmp_bounds(&arg1.value.u, &arg2.value.u) != 0)
+			result.value = false;
+		else
+			result.value = true;
+	}
+	return result;
+}
+
+template <typename pg_range_type>
+STATIC_FUNCTION(pg_bool_t)
+pgfn_generic_range_ne(kern_context *kcxt,
+					  pg_range_type arg1, pg_range_type arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		if (arg1.value.empty && arg2.value.empty)
+			result.value = false;
+		else if (arg1.value.empty != arg2.value.empty)
+			result.value = true;
+		else if (__range_cmp_bounds(&arg1.value.l, &arg2.value.l) != 0)
+			result.value = true;
+		else if (__range_cmp_bounds(&arg1.value.u, &arg2.value.u) != 0)
+			result.value = true;
+		else
+			result.value = false;
+	}
+	return result;
+}
+
+template <typename pg_range_type>
+STATIC_FUNCTION(pg_bool_t)
+pgfn_generic_range_gt(kern_context *kcxt,
+					  pg_range_type arg1, pg_range_type arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+		result.value = (__range_cmp(&arg1.value, &arg2.value) > 0);
+	return result;
+}
+
+template <typename pg_range_type>
+STATIC_FUNCTION(pg_bool_t)
+pgfn_generic_range_ge(kern_context *kcxt,
+					  pg_range_type arg1, pg_range_type arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+		result.value = (__range_cmp(&arg1.value, &arg2.value) >= 0);
+	return result;
+}
+
+template <typename pg_range_type>
+STATIC_FUNCTION(pg_bool_t)
+pgfn_generic_range_lt(kern_context *kcxt,
+					  pg_range_type arg1, pg_range_type arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+		result.value = (__range_cmp(&arg1.value, &arg2.value) < 0);
+	return result;
+}
+
+template <typename pg_range_type>
+STATIC_FUNCTION(pg_bool_t)
+pgfn_generic_range_le(kern_context *kcxt,
+					  pg_range_type arg1, pg_range_type arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+		result.value = (__range_cmp(&arg1.value, &arg2.value) <= 0);
+	return result;
+}
+
+template <typename pg_range_type>
+STATIC_FUNCTION(pg_int4_t)
+pgfn_generic_range_cmp(kern_context *kcxt,
+					  pg_range_type arg1, pg_range_type arg2)
+{
+	pg_int4_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+		result.value = __range_cmp(&arg1.value, &arg2.value);
+	return result;
+}
+
+template <typename RangeType>
+STATIC_FUNCTION(cl_bool)
+__range_overlaps_internal(RangeType *r1, RangeType *r2)
+{
+	if (r1->empty || r2->empty)
+		return false;
+	if (__range_cmp_bounds(&r1->l, &r2->l) >= 0 &&
+		__range_cmp_bounds(&r1->l, &r2->u) <= 0)
+		return true;
+	if (__range_cmp_bounds(&r2->l, &r1->l) >= 0 &&
+		__range_cmp_bounds(&r2->l, &r1->u) <= 0)
+		return true;
+	return false;
+}
+
+template <typename pg_range_type>
+STATIC_FUNCTION(pg_bool_t)
+pgfn_generic_range_overlaps(kern_context *kcxt,
+							pg_range_type arg1, pg_range_type arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+		result.value = __range_overlaps_internal(&arg1.value,
+												 &arg2.value);
+	return result;
+}
+
+template <typename RangeType, typename ElementType>
+STATIC_FUNCTION(cl_bool)
+__range_contains_elem_internal(RangeType *r, ElementType val)
+{
+	int		cmp;
+
+	if (r->empty)
+		return false;
+	if (!r->l.infinite)
+	{
+		cmp = Compare(r->l.val, val);
+		if (cmp > 0)
+			return false;
+		if (cmp == 0 && !r->l.inclusive)
+			return false;
+	}
+
+	if (!r->u.infinite)
+	{
+		cmp = Compare(r->u.val, val);
+		if (cmp < 0)
+			return false;
+		if (cmp == 0 && !r->u.inclusive)
+			return false;
+	}
+	return true;
+}
+
+template <typename pg_range_type, typename pg_element_type>
+STATIC_FUNCTION(pg_bool_t)
+pgfn_generic_range_contains_elem(kern_context *kcxt,
+								 pg_range_type arg1, pg_element_type arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+		result.value = __range_contains_elem_internal(&arg1.value,
+													  arg2.value);
+	return result;
+}
+
+template <typename RangeType>
+STATIC_INLINE(cl_bool)
+__range_contains_internal(RangeType *r1, RangeType *r2)
+{
+	if (r2->empty)
+		return true;
+	else if (r1->empty)
+		return false;
+	/* else we must have lower1 <= lower2 and upper1 >= upper2 */
+	if (__range_cmp_bounds(&r1->l, &r2->l) > 0)
+		return false;
+	if (__range_cmp_bounds(&r1->u, &r2->u) < 0)
+		return false;
+
+	return true;
+}
+
+template <typename pg_range_type>
+STATIC_FUNCTION(pg_bool_t)
+pgfn_generic_range_contains(kern_context *kcxt,
+							pg_range_type arg1, pg_range_type arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+		result.value = __range_contains_internal(&arg1.value,
+												 &arg2.value);
+	return result;
+}
+
+template <typename pg_range_type, typename pg_element_type>
+STATIC_FUNCTION(pg_bool_t)
+pgfn_generic_elem_contained_by_range(kern_context *kcxt,
+									 pg_element_type arg1, pg_range_type arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+		result.value = __range_contains_elem_internal(&arg2.value,
+													  arg1.value);
+	return result;
+}
+
+template <typename pg_range_type>
+STATIC_FUNCTION(pg_bool_t)
+pgfn_generic_range_contained_by(kern_context *kcxt,
+								pg_range_type arg1, pg_range_type arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+		result.value = __range_contains_internal(&arg2.value,
+												 &arg1.value);
+	return result;
+}
+
+template <typename RangeBound>
+STATIC_INLINE(cl_bool)
+__bounds_adjacent(RangeBound b1, RangeBound b2)
+{
+	int		cmp;
+
+	assert(!b1.lower && b2.lower);
+	cmp = __range_cmp_bound_values(&b1, &b2);
+	if (cmp < 0)
+	{
+		/* The bounds are of a discrete range type */
+		b1.inclusive = !b1.inclusive;
+		b2.inclusive = !b2.inclusive;
+		b1.lower = true;
+		b2.lower = false;
+		cmp = __range_cmp_bound_values(&b1, &b2);
+		if (cmp == 0 && !(b1.inclusive && b2.inclusive))
+			return true;
+	}
+	else if (cmp == 0)
+		return b1.inclusive != b2.inclusive;
+	return false;	/* bounds overlap */
+}
+
+template <typename RangeType>
+STATIC_INLINE(cl_bool)
+__range_adjacent_internal(RangeType *r1, RangeType *r2)
+{
+	if (r1->empty || r2->empty)
+		return false;
+	return (__bounds_adjacent(r1->u, r2->l) ||
+			__bounds_adjacent(r2->u, r1->l));
+}
+
+template <typename pg_range_type>
+STATIC_FUNCTION(pg_bool_t)
+pgfn_generic_range_adjacent(kern_context *kcxt,
+							pg_range_type arg1, pg_range_type arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+		result.value = __range_adjacent_internal(&arg1.value,
+												 &arg2.value);
+	return result;
+}
+
+template <typename pg_range_type>
+STATIC_FUNCTION(pg_bool_t)
+pgfn_generic_range_before(kern_context *kcxt,
+						  pg_range_type arg1, pg_range_type arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		if (arg1.value.empty || arg2.value.empty)
+			result.value = false;
+		else
+			result.value = (__range_cmp_bounds(&arg1.value.u,
+											   &arg2.value.l) < 0);
+	}
+	return result;
+}
+
+template <typename pg_range_type>
+STATIC_FUNCTION(pg_bool_t)
+pgfn_generic_range_after(kern_context *kcxt,
+                         pg_range_type arg1, pg_range_type arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		if (arg1.value.empty || arg2.value.empty)
+			result.value = false;
+		else
+			result.value = (__range_cmp_bounds(&arg1.value.l,
+											   &arg2.value.u) > 0);
+	}
+	return result;
+}
+
+template <typename pg_range_type>
+STATIC_FUNCTION(pg_bool_t)
+pgfn_generic_range_overright(kern_context *kcxt,
+							 pg_range_type arg1, pg_range_type arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		if (arg1.value.empty || arg2.value.empty)
+			result.value = false;
+		else
+			result.value = (__range_cmp_bounds(&arg1.value.l,
+											   &arg2.value.l) >= 0);
+	}
+	return result;
+}
+
+template <typename pg_range_type>
+STATIC_FUNCTION(pg_bool_t)
+pgfn_generic_range_overleft(kern_context *kcxt,
+							pg_range_type arg1, pg_range_type arg2)
+{
+	pg_bool_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		if (arg1.value.empty || arg2.value.empty)
+			result.value = false;
+		else
+			result.value = (__range_cmp_bounds(&arg1.value.u,
+											   &arg2.value.u) <= 0);
+	}
+	return result;
+}
+
+template <typename pg_range_type>
+STATIC_FUNCTION(pg_range_type)
+pgfn_generic_range_union(kern_context *kcxt,
+						 pg_range_type arg1, pg_range_type arg2)
+{
+	pg_range_type result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		if (arg1.value.empty)
+			return arg2;
+		if (arg2.value.empty)
+			return arg1;
+
+		if (!__range_overlaps_internal(&arg1.value, &arg2.value) &&
+			!__range_adjacent_internal(&arg1.value, &arg2.value))
+		{
+			result.isnull = true;
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		}
+		else
+		{
+			if (__range_cmp_bounds(&arg1.value.l, &arg2.value.l) < 0)
+				result.value.l = arg1.value.l;
+			else
+				result.value.l = arg2.value.l;
+
+			if (__range_cmp_bounds(&arg1.value.u, &arg2.value.u) > 0)
+				result.value.u = arg1.value.l;
+			else
+				result.value.u = arg2.value.l;
+
+			result.value.empty = false;
+		}
+	}
+	return result;
+}
+
+template <typename pg_range_type>
+STATIC_FUNCTION(pg_range_type)
+pgfn_generic_range_merge(kern_context *kcxt,
+						 pg_range_type arg1, pg_range_type arg2)
+{
+	pg_range_type result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		if (arg1.value.empty)
+			return arg2;
+		if (arg2.value.empty)
+			return arg1;
+
+		if (__range_cmp_bounds(&arg1.value.l, &arg2.value.l) < 0)
+			result.value.l = arg1.value.l;
+		else
+			result.value.l = arg2.value.l;
+
+		if (__range_cmp_bounds(&arg1.value.u, &arg2.value.u) > 0)
+			result.value.u = arg1.value.l;
+		else
+			result.value.u = arg2.value.l;
+
+		result.value.empty = false;
+	}
+	return result;
+}
+
+template <typename pg_range_type>
+STATIC_FUNCTION(pg_range_type)
+pgfn_generic_range_intersect(kern_context *kcxt,
+							 pg_range_type arg1, pg_range_type arg2)
+{
+	pg_range_type result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		if (arg1.value.empty ||
+			arg2.value.empty ||
+			!__range_overlaps_internal(&arg1.value, &arg2.value))
+		{
+			memset(&result.value, 0, sizeof(result.value));
+			result.value.empty = true;
+		}
+		else
+		{
+			if (__range_cmp_bounds(&arg1.value.l, &arg2.value.l) >= 0)
+				result.value.l = arg1.value.l;
+			else
+				result.value.l = arg1.value.l;
+
+			if (__range_cmp_bounds(&arg1.value.u, &arg2.value.u) <= 0)
+				result.value.u = arg1.value.u;
+			else
+				result.value.u = arg2.value.u;
+
+			result.value.empty = false;
+		}
+	}
+	return result;
+}
+
+template <typename pg_range_type>
+STATIC_FUNCTION(pg_range_type)
+pgfn_generic_range_minus(kern_context *kcxt,
+						 pg_range_type arg1, pg_range_type arg2)
+{
+	pg_range_type result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		int		cmp_l1l2 = __range_cmp_bounds(&arg1.value.l, &arg2.value.l);
+		int		cmp_l1u2 = __range_cmp_bounds(&arg1.value.l, &arg2.value.u);
+		int		cmp_u1l2 = __range_cmp_bounds(&arg1.value.u, &arg2.value.l);
+		int		cmp_u1u2 = __range_cmp_bounds(&arg1.value.u, &arg2.value.u);
+
+		if (cmp_l1l2 < 0 && cmp_u1u2 > 0)
+		{
+			result.isnull = true;
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		}
+		else if (cmp_l1u2 > 0 || cmp_u1l2 < 0)
+		{
+			result.value = arg1.value;
+		}
+		else if (cmp_l1l2 >= 0 && cmp_u1u2 <= 0)
+		{
+			memset(&result.value, 0, sizeof(result.value));
+			result.value.empty = true;
+		}
+		else if (cmp_l1l2 <= 0 && cmp_u1l2 >= 0 && cmp_u1u2 <= 0)
+		{
+			arg2.value.l.inclusive = !arg2.value.l.inclusive;
+			arg2.value.l.lower = false;
+			result.value.l = arg1.value.l;
+			result.value.u = arg2.value.l;
+		}
+		else if (cmp_l1l2 >= 0 && cmp_u1u2 >= 0 && cmp_l1u2 <= 0)
+		{
+			arg2.value.u.inclusive = !arg2.value.u.inclusive;
+			arg2.value.u.lower = true;
+			result.value.l = arg2.value.u;
+			result.value.u = arg1.value.u;
+		}
+		else
+		{
+			result.isnull = true;
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		}
+	}
+	return result;
+}
 
 #endif	/* CUDA_RANGETYPES_H */

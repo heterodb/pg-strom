@@ -116,6 +116,7 @@
 #include "utils/numeric.h"
 #include "utils/pg_crc.h"
 #include "utils/pg_locale.h"
+#include "utils/rangetypes.h"
 #if PG_VERSION_NUM >= 100000
 #include "utils/regproc.h"
 #endif
@@ -409,10 +410,8 @@ typedef struct devtype_info {
 	char	   *type_name;	/* name of device type; same of SQL's type */
 	char	   *type_base;	/* base name of this type (like varlena) */
 	/* oid of type related functions */
-	Oid			type_eqfunc_nsp;	/* function to check equality */
-	const char *type_eqfunc_name;
-	Oid			type_cmpfunc_nsp;	/* function to compare two values */
-	const char *type_cmpfunc_name;
+	Oid			type_eqfunc;	/* function to check equality */
+	Oid			type_cmpfunc;	/* function to compare two values */
 	const char *max_const;		/* static initializer, if any */
 	const char *min_const;		/* static initializer, if any */
 	const char *zero_const;		/* static initializer, if any */
@@ -428,8 +427,7 @@ typedef struct devtype_info {
 typedef struct devfunc_info {
 	pg_crc32c	hash;			/* hash-value on the cache */
 	Oid			func_oid;		/* OID of the SQL function */
-	Oid			func_namespace;	/* OID of the function namespace */
-	const char *func_sqlname;	/* name of the function in SQL side */
+	Oid			func_rettype_oid; /* OID of the function result */
 	oidvector  *func_argtypes;	/* OID vector of function arguments */
 	Oid			func_collid;	/* OID of collation, if collation aware */
 	bool		func_is_negative;	/* True, if not supported by GPU */
@@ -438,6 +436,7 @@ typedef struct devfunc_info {
 	int32		func_flags;		/* Extra flags of this function */
 	List	   *func_args;		/* argument types by devtype_info */
 	devtype_info *func_rettype;	/* result type by devtype_info */
+	const char *func_sqlname;	/* name of the function in SQL side */
 	const char *func_devname;	/* name of the function in device side */
 	const char *func_decl;	/* declaration of device function, if any */
 } devfunc_info;
@@ -1062,7 +1061,7 @@ extern void pgstrom_init_gpupreagg(void);
 /*
  * pl_cuda.c
  */
-extern void pgstrom_devfunc_construct_plcuda(devfunc_info *entry,
+extern bool pgstrom_devfunc_construct_plcuda(devfunc_info *entry,
 											 HeapTuple proc_tuple);
 extern void pgstrom_init_plcuda(void);
 

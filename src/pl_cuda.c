@@ -1205,7 +1205,7 @@ plcuda_codegen(Form_pg_proc procForm, plcudaCodeProperty *prop)
 /*
  * pgstrom_devfunc_construct_plcuda
  */
-void
+bool
 pgstrom_devfunc_construct_plcuda(devfunc_info *entry, HeapTuple proc_tuple)
 {
 	plcudaCodeProperty prop;
@@ -1331,7 +1331,7 @@ pgstrom_devfunc_construct_plcuda(devfunc_info *entry, HeapTuple proc_tuple)
 
 	entry->func_decl = decl.data;
 	pfree(prop.kern_main);
-	return;
+	return true;
 
 not_supported:
 	if (prop.kern_decl)
@@ -1342,7 +1342,7 @@ not_supported:
 		pfree(prop.kern_main);
 	if (prop.kern_post)
 		pfree(prop.kern_post);
-	entry->func_is_negative = true;
+	return false;
 }
 
 static void

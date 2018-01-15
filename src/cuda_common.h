@@ -104,6 +104,8 @@ typedef cl_ulong	Datum;
 #define Add3(a,b,c)		((a) + (b) + (c))
 #define Add4(a,b,c,d)	((a) + (b) + (c) + (d))
 
+#define Compare(a,b)	((a) > (b) ? 1 : ((a) < (b) ? -1 : 0))
+
 /* same as host side get_next_log2() */
 #define get_next_log2(value)								\
 	((value) == 0 ? 0 : (sizeof(cl_ulong) * BITS_PER_BYTE - \
