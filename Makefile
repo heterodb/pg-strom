@@ -40,7 +40,7 @@ PG_MAX_VERSION_NUM=$(shell echo $(PG_MAX_VERSION) | awk '{print $$NF}'	\
 # Installation related
 #
 PGSTROM_SQL := $(STROM_BUILD_ROOT)/pg_strom--1.0.sql
-PGSTROM_SQL_SRC = basis.sql aggfuncs.sql matrix.sql float2.sql
+PGSTROM_SQL_SRC = basis.sql aggfuncs.sql matrix.sql float2.sql test.sql
 
 #
 # Source file of CPU portion

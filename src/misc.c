@@ -330,3 +330,262 @@ errorTextKernel(kern_errorbuf *kerror)
 			 kerror->filename, kerror->lineno, kernel_name);
 	return buffer;
 }
+
+/*
+ * ----------------------------------------------------------------
+ *
+ * SQL functions to support regression test
+ *
+ * ----------------------------------------------------------------
+ */
+Datum pgstrom_random_int(PG_FUNCTION_ARGS);
+Datum pgstrom_random_float(PG_FUNCTION_ARGS);
+Datum pgstrom_random_date(PG_FUNCTION_ARGS);
+Datum pgstrom_random_time(PG_FUNCTION_ARGS);
+Datum pgstrom_random_timestamp(PG_FUNCTION_ARGS);
+Datum pgstrom_random_interval(PG_FUNCTION_ARGS);
+Datum pgstrom_random_macaddr(PG_FUNCTION_ARGS);
+Datum pgstrom_random_inet4(PG_FUNCTION_ARGS);
+
+static inline bool
+generate_null(double ratio)
+{
+	if (ratio <= 0.0)
+		return false;
+	if (100 * drand48() < ratio)
+		return true;
+	return false;
+}
+
+Datum
+pgstrom_random_int(PG_FUNCTION_ARGS)
+{
+	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
+	int64		lower = (!PG_ARGISNULL(1) ? PG_GETARG_INT64(1) : 0);
+	int64		upper = (!PG_ARGISNULL(2) ? PG_GETARG_INT64(2) : INT_MAX);
+	cl_ulong	v;
+
+	if (upper < lower)
+		elog(ERROR, "%s: lower bound is larger than upper", __FUNCTION__);
+	if (generate_null(ratio))
+		PG_RETURN_NULL();
+	if (upper == lower)
+		PG_RETURN_INT64(lower);
+	v = ((cl_ulong)random() << 31) | (cl_ulong)random();
+
+	PG_RETURN_INT64(lower + v % (upper - lower));
+}
+PG_FUNCTION_INFO_V1(pgstrom_random_int);
+
+Datum
+pgstrom_random_float(PG_FUNCTION_ARGS)
+{
+	float8	ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
+	float8	lower = (!PG_ARGISNULL(1) ? PG_GETARG_FLOAT8(1) : 0.0);
+	float8	upper = (!PG_ARGISNULL(2) ? PG_GETARG_FLOAT8(2) : 1.0);
+
+	if (upper < lower)
+		elog(ERROR, "%s: lower bound is larger than upper", __FUNCTION__);
+	if (generate_null(ratio))
+		PG_RETURN_NULL();
+	if (upper == lower)
+		PG_RETURN_FLOAT8(lower);
+
+	PG_RETURN_FLOAT8((upper - lower) * drand48() + lower);
+}
+PG_FUNCTION_INFO_V1(pgstrom_random_float);
+
+Datum
+pgstrom_random_date(PG_FUNCTION_ARGS)
+{
+	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
+	DateADT		lower;
+	DateADT		upper;
+	cl_ulong	v;
+
+	if (!PG_ARGISNULL(1))
+		lower = PG_GETARG_DATEADT(1);
+	else
+		lower = date2j(2015, 1, 1) - POSTGRES_EPOCH_JDATE;
+	if (!PG_ARGISNULL(2))
+		upper = PG_GETARG_DATEADT(2);
+	else
+		upper = date2j(2025, 12, 31) - POSTGRES_EPOCH_JDATE;
+
+	if (upper < lower)
+		elog(ERROR, "%s: lower bound is larger than upper", __FUNCTION__);
+	if (generate_null(ratio))
+		PG_RETURN_NULL();
+	if (upper == lower)
+		PG_RETURN_DATEADT(lower);
+	v = ((cl_ulong)random() << 31) | (cl_ulong)random();
+
+	PG_RETURN_DATEADT(lower + v % (upper - lower));
+}
+PG_FUNCTION_INFO_V1(pgstrom_random_date);
+
+Datum
+pgstrom_random_time(PG_FUNCTION_ARGS)
+{
+	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
+	TimeADT		lower = (!PG_ARGISNULL(1) ? PG_GETARG_TIMEADT(1) : 0);
+	TimeADT		upper = (!PG_ARGISNULL(2)
+						 ? PG_GETARG_TIMEADT(2)
+						 : HOURS_PER_DAY * USECS_PER_HOUR - 1);
+	cl_ulong	v;
+
+	if (upper < lower)
+		elog(ERROR, "%s: lower bound is larger than upper", __FUNCTION__);
+	if (generate_null(ratio))
+		PG_RETURN_NULL();
+	if (upper == lower)
+		PG_RETURN_TIMEADT(lower);
+	v = ((cl_ulong)random() << 31) | (cl_ulong)random();
+
+	PG_RETURN_TIMEADT(lower + v % (upper - lower));
+}
+PG_FUNCTION_INFO_V1(pgstrom_random_time);
+
+Datum
+pgstrom_random_timestamp(PG_FUNCTION_ARGS)
+{
+	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
+	Timestamp	lower;
+	Timestamp	upper;
+	cl_ulong	v;
+	struct pg_tm tm;
+
+	if (!PG_ARGISNULL(1))
+		lower = PG_GETARG_TIMESTAMP(1);
+	else
+	{
+		GetEpochTime(&tm);
+		tm.tm_year += 45;	/* '2015-01-01' */
+		if (tm2timestamp(&tm, 0, NULL, &lower) != 0)
+			elog(ERROR, "timestamp out of range");
+	}
+
+	if (!PG_ARGISNULL(2))
+		upper = PG_GETARG_TIMESTAMP(2);
+	else
+	{
+		GetEpochTime(&tm);
+		tm.tm_year += 55;	/* '2025-01-01' */
+		if (tm2timestamp(&tm, 0, NULL, &upper) != 0)
+			elog(ERROR, "timestamp out of range");
+	}
+	if (upper < lower)
+		elog(ERROR, "%s: lower bound is larger than upper", __FUNCTION__);
+	if (generate_null(ratio))
+		PG_RETURN_NULL();
+	if (upper == lower)
+		PG_RETURN_TIMEADT(lower);
+	v = ((cl_ulong)random() << 31) | (cl_ulong)random();
+
+	PG_RETURN_TIMESTAMP(lower + v % (upper - lower));
+}
+PG_FUNCTION_INFO_V1(pgstrom_random_timestamp);
+
+Datum
+pgstrom_random_macaddr(PG_FUNCTION_ARGS)
+{
+	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
+	macaddr	   *temp;
+	cl_ulong	lower;
+	cl_ulong	upper;
+	cl_ulong	v, x;
+
+	if (PG_ARGISNULL(1))
+		lower = 0xabcd00000000UL;
+	else
+	{
+		temp = PG_GETARG_MACADDR_P(1);
+		lower = (((cl_ulong)temp->a << 40) | ((cl_ulong)temp->b << 32) |
+				 ((cl_ulong)temp->c << 24) | ((cl_ulong)temp->d << 16) |
+				 ((cl_ulong)temp->e <<  8) | ((cl_ulong)temp->f));
+	}
+
+	if (PG_ARGISNULL(2))
+		upper = 0xabcdffffffffUL;
+	else
+	{
+		temp = PG_GETARG_MACADDR_P(2);
+		upper = (((cl_ulong)temp->a << 40) | ((cl_ulong)temp->b << 32) |
+				 ((cl_ulong)temp->c << 24) | ((cl_ulong)temp->d << 16) |
+				 ((cl_ulong)temp->e <<  8) | ((cl_ulong)temp->f));
+	}
+
+	if (upper < lower)
+		elog(ERROR, "%s: lower bound is larger than upper", __FUNCTION__);
+	if (generate_null(ratio))
+		PG_RETURN_NULL();
+	if (upper == lower)
+		x = lower;
+	else
+	{
+		v = ((cl_ulong)random() << 31) | (cl_ulong)random();
+		x = lower + v % (upper - lower);
+	}
+	temp = palloc(sizeof(macaddr));
+	temp->a = (x >> 40) & 0x00ff;
+	temp->b = (x >> 32) & 0x00ff;
+	temp->c = (x >> 24) & 0x00ff;
+	temp->d = (x >> 16) & 0x00ff;
+	temp->e = (x >>  8) & 0x00ff;
+	temp->f = (x      ) & 0x00ff;
+	PG_RETURN_MACADDR_P(temp);
+}
+PG_FUNCTION_INFO_V1(pgstrom_random_macaddr);
+
+Datum
+pgstrom_random_inet4(PG_FUNCTION_ARGS)
+{
+	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
+	inet	   *temp;
+	int			bits = -1;
+	cl_ulong	lower;
+	cl_ulong	upper;
+	cl_ulong	v, x;
+
+	if (PG_ARGISNULL(1))
+	{
+		lower = 0xc0a80101;		/* 192.168.1.1 */
+		upper = 0xc0a8ffff;		/* 192.168.255.255 */
+		bits = 16;
+	}
+	else
+	{
+		temp = PG_GETARG_INET_P(1);
+		if (ip_family(temp) != PGSQL_AF_INET)
+			elog(ERROR, "template is not inet4");
+		bits = ip_bits(temp);
+		lower = (((cl_ulong)ip_addr(temp)[0] << 24) |
+				 ((cl_ulong)ip_addr(temp)[1] << 16) |
+				 ((cl_ulong)ip_addr(temp)[2] <<  8) |
+				 ((cl_ulong)ip_addr(temp)[3]));
+		Assert(bits >= 0 && bits <= 32);
+		lower &= ~((1UL << (32-bits)) - 1);
+		upper = lower | ((1UL << (32-bits)) - 1);
+	}
+
+	if (generate_null(ratio))
+		PG_RETURN_NULL();
+	if (upper == lower)
+		x = lower;
+	else
+	{
+		v = ((cl_ulong)random() << 31) | (cl_ulong)random();
+		x = lower + v % (upper - lower);
+	}
+    temp = palloc(sizeof(inet));
+	temp->inet_data.family = PGSQL_AF_INET;
+	temp->inet_data.bits = (bits < 0 ? 16 : bits);
+	temp->inet_data.ipaddr[0] = (x >> 24) & 0x00ff;
+	temp->inet_data.ipaddr[1] = (x >> 16) & 0x00ff;
+	temp->inet_data.ipaddr[2] = (x >>  8) & 0x00ff;
+	temp->inet_data.ipaddr[3] = (x      ) & 0x00ff;
+	SET_INET_VARSIZE(temp);
+
+	PG_RETURN_INET_P(temp);
+}
+PG_FUNCTION_INFO_V1(pgstrom_random_inet4);

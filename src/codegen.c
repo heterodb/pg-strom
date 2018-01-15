@@ -1907,8 +1907,6 @@ pgstrom_devfunc_construct_extra(devfunc_info *entry, HeapTuple protup)
 	else
 		func_rettype = temp;
 
-	elog(INFO, "sig=[%s] ret=[%s]", sig.data, func_rettype);
-
 	for (i=0; i < lengthof(devfunc_extra_catalog); i++)
 	{
 		devfunc_extra_catalog_t  *procat = devfunc_extra_catalog + i;
