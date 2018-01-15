@@ -246,6 +246,72 @@ pgfn_int4range_lower(kern_context *kcxt, pg_int4range_t arg1)
 	return result;
 }
 
+STATIC_FUNCTION(pg_int8_t)
+pgfn_int8range_lower(kern_context *kcxt, pg_int8range_t arg1)
+{
+	pg_int8_t	result;
+
+	result.isnull = arg1.isnull;
+	if (!result.isnull)
+	{
+		if (arg1.value.empty || arg1.value.l.infinite)
+			result.isnull = true;
+		else
+			result.value = arg1.value.l.val;
+	}
+	return result;
+}
+
+#ifdef CUDA_TIMELIB_H
+STATIC_FUNCTION(pg_timestamp_t)
+pgfn_tsrange_lower(kern_context *kcxt, pg_tsrange_t arg1)
+{
+	pg_timestamp_t	result;
+
+	result.isnull = arg1.isnull;
+	if (!result.isnull)
+	{
+		if (arg1.value.empty || arg1.value.l.infinite)
+			result.isnull = true;
+		else
+			result.value = arg1.value.l.val;
+	}
+	return result;
+}
+
+STATIC_FUNCTION(pg_timestamptz_t)
+pgfn_tstzrange_lower(kern_context *kcxt, pg_tstzrange_t arg1)
+{
+	pg_timestamptz_t	result;
+
+	result.isnull = arg1.isnull;
+	if (!result.isnull)
+	{
+		if (arg1.value.empty || arg1.value.l.infinite)
+			result.isnull = true;
+		else
+			result.value = arg1.value.l.val;
+	}
+	return result;
+}
+
+STATIC_FUNCTION(pg_date_t)
+pgfn_daterange_lower(kern_context *kcxt, pg_daterange_t arg1)
+{
+	pg_date_t	result;
+
+	result.isnull = arg1.isnull;
+	if (!result.isnull)
+	{
+		if (arg1.value.empty || arg1.value.l.infinite)
+			result.isnull = true;
+		else
+			result.value = arg1.value.l.val;
+	}
+	return result;
+}
+#endif	/* CUDA_TIMELIB_H */
+
 /*
  * range_upper
  */
@@ -264,6 +330,72 @@ pgfn_int4range_upper(kern_context *kcxt, pg_int4range_t arg1)
 	}
 	return result;
 }
+
+STATIC_FUNCTION(pg_int8_t)
+pgfn_int8range_upper(kern_context *kcxt, pg_int8range_t arg1)
+{
+	pg_int8_t	result;
+
+	result.isnull = arg1.isnull;
+	if (!result.isnull)
+	{
+		if (arg1.value.empty || arg1.value.u.infinite)
+			result.isnull = true;
+		else
+			result.value = arg1.value.u.val;
+	}
+	return result;
+}
+
+#ifdef CUDA_TIMELIB_H
+STATIC_FUNCTION(pg_timestamp_t)
+pgfn_tsrange_upper(kern_context *kcxt, pg_tsrange_t arg1)
+{
+	pg_timestamp_t	result;
+
+	result.isnull = arg1.isnull;
+	if (!result.isnull)
+	{
+		if (arg1.value.empty || arg1.value.u.infinite)
+			result.isnull = true;
+		else
+			result.value = arg1.value.u.val;
+	}
+	return result;
+}
+
+STATIC_FUNCTION(pg_timestamptz_t)
+pgfn_tstzrange_upper(kern_context *kcxt, pg_tstzrange_t arg1)
+{
+	pg_timestamp_t	result;
+
+	result.isnull = arg1.isnull;
+	if (!result.isnull)
+	{
+		if (arg1.value.empty || arg1.value.u.infinite)
+			result.isnull = true;
+		else
+			result.value = arg1.value.u.val;
+	}
+	return result;
+}
+
+STATIC_FUNCTION(pg_date_t)
+pgfn_daterange_upper(kern_context *kcxt, pg_daterange_t arg1)
+{
+	pg_date_t	result;
+
+	result.isnull = arg1.isnull;
+	if (!result.isnull)
+	{
+		if (arg1.value.empty || arg1.value.u.infinite)
+			result.isnull = true;
+		else
+			result.value = arg1.value.u.val;
+	}
+	return result;
+}
+#endif	/* CUDA_TIMELIB_H */
 
 /*
  * misc functions with template
