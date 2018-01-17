@@ -351,6 +351,7 @@ pgstrom_ccache_get_chunk(Relation relation, BlockNumber block_nr)
 						&cc_chunk->hash_chain);
 		dlist_push_head(&ccache_state->lru_misshit_list,
 						&cc_chunk->lru_chain);
+		cc_chunk = NULL;
 	}
 found:
 	SpinLockRelease(&ccache_state->chunks_lock);
@@ -2351,23 +2352,22 @@ ccache_tryload_one_chunk(Relation relation, BlockNumber block_nr)
 			cc_temp->block_nr == block_nr)
 		{
 			if (cc_temp->ctime == CCACHE_CTIME_NOT_BUILD)
+			{
 				cc_chunk = cc_temp;
-			else
-				cc_chunk = (void *)(~0L);
-			break;
+				break;
+			}
+			/* elsewhere, this chunk is already loaded, or in-progress */
+			SpinLockRelease(&ccache_state->chunks_lock);
+			return 0;
 		}
 	}
-	/* this chunk is already loaded, or in-progress */
-	if (cc_chunk == (void *)(~0L))
-	{
-		SpinLockRelease(&ccache_state->chunks_lock);
-		return 0;
-	}
-	else if (cc_chunk)
+
+	if (cc_chunk)
 	{
 		/* once detach cc_chunk from the LRU misshit list */
 		dlist_delete(&cc_chunk->lru_chain);
 		memset(&cc_chunk->lru_chain, 0, sizeof(dlist_node));
+		cc_chunk->ctime = CCACHE_CTIME_IN_PROGRESS;
 		cc_chunk->refcnt++;
 	}
 	else if (!dlist_is_empty(&ccache_state->free_chunks_list))

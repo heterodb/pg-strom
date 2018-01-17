@@ -4812,7 +4812,8 @@ gpujoin_process_inner_join(GpuJoinTask *pgjoin, CUmodule cuda_module)
 
 	/* sanity checks */
 	Assert(!pds_src || (pds_src->kds.format == KDS_FORMAT_ROW ||
-						pds_src->kds.format == KDS_FORMAT_BLOCK));
+						pds_src->kds.format == KDS_FORMAT_BLOCK ||
+						pds_src->kds.format == KDS_FORMAT_COLUMN));
 	Assert(pds_dst->kds.format == KDS_FORMAT_ROW);
 
 	/* Lookup GPU kernel function */

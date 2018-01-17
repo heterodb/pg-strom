@@ -719,9 +719,14 @@ gpujoin_projection_row(kern_context *kcxt,
 			((char *)kds_dst + kds_dst->length - dest_offset);
 
 		row_index[dest_index] = kds_dst->length - dest_offset;
-		form_kern_heaptuple(kcxt, kds_dst, tupitem,
-							NULL, NULL,
-							tup_values, tup_isnull);
+		form_kern_heaptuple(tupitem,
+							kds_dst->ncols,
+							kds_dst->colmeta,
+							NULL,		/* ItemPointerData */
+							NULL,		/* HeapTupleFields */
+							kds_dst->tdhasoid ? 0xffffffff : 0,
+							tup_values,
+							tup_isnull);
 	}
 	if (__syncthreads_count(kcxt->e.errcode) > 0)
 		return -1;	/* bailout */

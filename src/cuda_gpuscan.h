@@ -222,8 +222,8 @@ STATIC_FUNCTION(void)
 gpuscan_projection_column(kern_context *kcxt,
 						  kern_data_store *kds_src,
 						  size_t src_index,
-						  ItemPointerData *t_self,
-						  HeapTupleFields *tx_attrs,
+//						  ItemPointerData *t_self,
+//						  HeapTupleFields *htup_field,
 						  Datum *tup_values,
 						  cl_bool *tup_isnull,
 						  char *extra_buf);
@@ -354,13 +354,22 @@ gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
 		{
 			cl_uint	   *tup_index = KERN_DATA_STORE_ROWINDEX(kds_dst);
 			cl_uint		pos;
+			cl_uint		htuple_oid = 0;
 
+			if (kds_dst->tdhasoid)
+			{
+				htuple_oid = kern_getsysatt_oid(&tupitem->htup);
+				if (htuple_oid == 0)
+					htuple_oid = 0xffffffff;
+			}
 			pos = kds_dst->length - (usage_base + usage_offset + required);
 			tup_index[nitems_base + nitems_offset] = pos;
-			form_kern_heaptuple(&kcxt, kds_dst,
-								(kern_tupitem *)((char *)kds_dst + pos),
+			form_kern_heaptuple((kern_tupitem *)((char *)kds_dst + pos),
+								kds_dst->ncols,
+								kds_dst->colmeta,
 								&tupitem->t_self,
-								NULL,
+								&tupitem->htup.t_choice.t_heap,
+								htuple_oid,
 								tup_values,
 								tup_isnull);
 		}
@@ -561,13 +570,23 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 			{
 				cl_uint	   *tup_index = KERN_DATA_STORE_ROWINDEX(kds_dst);
 				cl_uint		pos;
+				cl_uint		htuple_oid = 0;
+
+				if (kds_dst->tdhasoid)
+				{
+					htuple_oid = kern_getsysatt_oid(htup);
+					if (htuple_oid == 0)
+						htuple_oid = 0xffffffff;
+				}
 
 				pos = kds_dst->length - (usage_base + usage_offset + required);
 				tup_index[nitems_base + nitems_offset] = pos;
-				form_kern_heaptuple(&kcxt, kds_dst,
-									(kern_tupitem *)((char *)kds_dst + pos),
+				form_kern_heaptuple((kern_tupitem *)((char *)kds_dst + pos),
+									kds_dst->ncols,
+									kds_dst->colmeta,
 									&t_self,
 									&htup->t_choice.t_heap,
+									htuple_oid,
 									tup_values,
 									tup_isnull);
 			}
@@ -682,8 +701,6 @@ gpuscan_exec_quals_column(kern_gpuscan *kgpuscan,
 	__syncthreads();
 
 	do {
-		HeapTupleFields	tx_attrs;	/* xmin, xmax, cmin/cmax, if any */
-		ItemPointerData	t_self;		/* t_self, if any */
 		kern_tupitem   *tupitem		__attribute__((unused));
 		cl_bool			rc;
 		cl_uint			nvalids;
@@ -727,12 +744,9 @@ gpuscan_exec_quals_column(kern_gpuscan *kgpuscan,
 
 		if (rc)
 		{
-#ifdef GPUSCAN_HAS_DEVICE_PROJECTION
 			gpuscan_projection_column(&kcxt,
 									  kds_src,
 									  src_index,
-									  &t_self,
-									  &tx_attrs,
 									  tup_values,
 									  tup_isnull,
 									  tup_extra);
@@ -741,13 +755,6 @@ gpuscan_exec_quals_column(kern_gpuscan *kgpuscan,
 													   kds_dst,
 													   tup_values,
 													   tup_isnull));
-#else
-			//extract all the fields as is
-
-			//to be implemented;
-
-
-#endif
 		}
 		else
 			required = 0;
@@ -773,11 +780,12 @@ gpuscan_exec_quals_column(kern_gpuscan *kgpuscan,
 
 			pos = kds_dst->length - (usage_base + usage_offset + required);
 			tup_index[nitems_base + nitems_offset] = pos;
-			form_kern_heaptuple(&kcxt,
-								kds_dst,
-								(kern_tupitem *)((char *)kds_dst + pos),
-								&t_self,
-								&tx_attrs,
+			form_kern_heaptuple((kern_tupitem *)((char *)kds_dst + pos),
+								kds_dst->ncols,
+								kds_dst->colmeta,
+								NULL,	/* ItemPointerData */
+								NULL,	/* HeapTupleFields */
+								kds_dst->tdhasoid ? 0xffffffff : 0,
 								tup_values,
 								tup_isnull);
 		}

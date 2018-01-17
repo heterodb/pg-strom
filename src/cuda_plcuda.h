@@ -115,12 +115,12 @@ typedef struct
 																		\
 		ct_desc = pg_lookup_composite_typedesc(kparams, type_oid);		\
 		assert(ct_desc != NULL);										\
-		setup_kern_heaptuple((buffer),									\
-							 &(kplcuda)->retmeta,						\
-							 ct_desc->colmeta,							\
-							 ct_desc->nattrs,							\
-							 (tup_datum),								\
-							 (tup_isnull));								\
+		form_kern_composite_type((buffer),								\
+								 &kplcuda->retmeta,						\
+								 ct_desc->nattrs,						\
+								 ct_desc->colmeta,						\
+								 (tup_datum),							\
+								 (tup_isnull));							\
 	} while(0)
 
 /*

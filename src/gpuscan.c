@@ -840,8 +840,8 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 		"gpuscan_projection_column(kern_context *kcxt,\n"
 		"                          kern_data_store *kds_src,\n"
 		"                          size_t src_index,\n"
-		"                          ItemPointerData *t_self,\n"
-		"                          HeapTupleFields *tx_attrs,\n"
+//		"                          ItemPointerData *t_self,\n"
+//		"                          HeapTupleFields *htup_field,\n"
 		"                          Datum *tup_values,\n"
 		"                          cl_bool *tup_isnull,\n"
 		"                          char *tup_extra)\n"
@@ -958,7 +958,7 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 		appendStringInfo(
 			&cbody,
 			"  /* %s system column */\n"
-			"  addr = kern_get_datum_column(kds_src,kds_src%d,src_index);\n"
+			"  addr = kern_get_datum_column(kds_src,kds_src->ncols%d,src_index);\n"
 			"  tup_isnull[%d] = !addr;\n",
 			NameStr(attr->attname),
 			attr->attnum, i);
@@ -971,7 +971,7 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 			appendStringInfo(
 				&cbody,
 				"  tup_values[%d] = READ_INT%d_PTR(addr);\n",
-				i, attr->attlen);
+				i, 8 * attr->attlen);
 	}
 
 	/*
