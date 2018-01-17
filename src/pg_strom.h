@@ -846,6 +846,7 @@ extern void pgstrom_build_session_info(StringInfo str,
 									   cl_uint extra_flags);
 extern bool pgstrom_try_build_cuda_program(void);
 
+extern char *pgstrom_cuda_source_string(ProgramId program_id);
 extern const char *pgstrom_cuda_source_file(ProgramId program_id);
 extern const char *pgstrom_cuda_binary_file(ProgramId program_id);
 extern void pgstrom_init_cuda_program(void);

@@ -39,6 +39,7 @@ typedef struct
 	 *   --> valid varlena if 'results' != NULL
 	 */
 	char			__retval[__DATATYPE_MAX_WIDTH];
+	char			__vl_buffer[512];	/* short varlena buffer */
 
 	/*
 	 * NOTE: The PL/CUDA code can use the debug counter below. If and when
@@ -71,9 +72,8 @@ typedef struct
 	cl_ulong		results_bufsz;
 	cl_ulong		results_usage;
 	cl_int			nargs;
-	cl_int			retnatts;	/* # of sub-attributes if result type is */
-	kern_colmeta	retmeta;	/* composite data type. Elsewhere, -1. */
-	kern_colmeta	argmeta[FLEXIBLE_ARRAY_MEMBER];	/* metadata of arguments */
+	kern_colmeta	retmeta;	/* result data type */
+	kern_colmeta	argmeta[FLEXIBLE_ARRAY_MEMBER];	/* argument's data types */
 } kern_plcuda;
 
 #define KERN_PLCUDA_PARAMBUF(kplcuda)			\
@@ -95,13 +95,30 @@ typedef struct
 		return;									\
 	} while(0)
 
+/*
+ * composite data type support in kernel space
+ */
+typedef struct
+{
+	cl_uint			vl_len_;	/* varlena header */
+	cl_uint			type_oid;	/* oid of the composite type */
+	cl_int			nattrs;		/* number of attributes */
+	cl_int			__padding__;/* for alignment */
+	kern_colmeta	colmeta[FLEXIBLE_ARRAY_MEMBER];
+} pg_composite_typedesc;
+
 #define PLCUDA_SETUP_COMPOSITE_RESULT(kplcuda,buffer,tup_datum,tup_isnull) \
 	do {																\
-		assert((kplcuda)->retnatts >= 0);								\
+		kern_parambuf *kparams = KERN_PLCUDA_PARAMBUF(kplcuda);			\
+		cl_uint        type_oid = kplcuda->retmeta.atttypid;			\
+		pg_composite_typedesc *ct_desc;									\
+																		\
+		ct_desc = pg_lookup_composite_typedesc(kparams, type_oid);		\
+		assert(ct_desc != NULL);										\
 		setup_kern_heaptuple((buffer),									\
 							 &(kplcuda)->retmeta,						\
-							 (kplcuda)->argmeta + (kplcuda)->nargs,		\
-							 (kplcuda)->retnatts,						\
+							 ct_desc->colmeta,							\
+							 ct_desc->nattrs,							\
 							 (tup_datum),								\
 							 (tup_isnull));								\
 	} while(0)

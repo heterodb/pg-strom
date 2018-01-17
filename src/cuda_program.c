@@ -634,14 +634,16 @@ writeout_temporary_file(char *tempfile, const char *suffix,
 }
 
 /*
- * pgstrom_cuda_source_file - write out a CUDA source program to temporary file
+ * pgstrom_cuda_source_string
+ *
+ * NOTE: construct_flat_cuda_source() returns cstring which is allocated
+ * with malloc(3), so caller must ensure to release this buffer.
  */
-const char *
-pgstrom_cuda_source_file(ProgramId program_id)
+char *
+pgstrom_cuda_source_string(ProgramId program_id)
 {
 	program_cache_entry *entry;
 	char	   *source;
-	char		tempfilepath[MAXPGPATH];
 
 	SpinLockAcquire(&pgcache_head->lock);
 	entry = lookup_cuda_program_entry_nolock(program_id);
@@ -659,6 +661,19 @@ pgstrom_cuda_source_file(ProgramId program_id)
 	put_cuda_program_entry(entry);
 	if (!source)
 		elog(ERROR, "out of memory");
+
+	return source;
+}
+
+/*
+ * pgstrom_cuda_source_file - write out a CUDA source program to temporary file
+ */
+const char *
+pgstrom_cuda_source_file(ProgramId program_id)
+{
+	char	   *source = pgstrom_cuda_source_string(program_id);
+	char		tempfilepath[MAXPGPATH];
+
 	writeout_temporary_file(tempfilepath, "gpu",
 							source, strlen(source));
 	free(source);
@@ -719,7 +734,6 @@ build_cuda_program(program_cache_entry *src_entry)
 	int				hindex;
 	size_t			offset;
 	size_t			length;
-	char			tempfilepath[MAXPGPATH];
 
 	Assert(!src_entry->build_chain.prev && !src_entry->build_chain.next);
 
@@ -875,7 +889,7 @@ build_cuda_program(program_cache_entry *src_entry)
 		if (!ptx_image)
 			snprintf(bin_entry->error_msg, length - offset,
 					 "build failure:\n%s\nsource: %s",
-					 build_log, tempfilepath);
+					 build_log, tempfile);
 		else
 			snprintf(bin_entry->error_msg, length - offset,
 					 "build success:\n%s\n",

@@ -1820,7 +1820,7 @@ kern_get_datum_column(kern_data_store *kds,
 	char	   *values;
 	char	   *nullmap;
 
-	Assert(colidx >= 0 && colidx < kds->ncols);
+	Assert(colidx < kds->ncols);
 	cmeta = &kds->colmeta[colidx];
 	/* special case handling if 'tableoid' system column */
 	if (cmeta->attnum == TableOidAttributeNumber)
@@ -2144,43 +2144,36 @@ compute_heaptuple_size(kern_context *kcxt,
 	return t_hoff + datalen;
 }
 
-#if 0
 /*
  * deform_kern_heaptuple
  *
  * Like deform_heap_tuple in host side, it extracts the supplied tuple-item
- * into tup_values / tup_isnull array. Note that pointer datum shall be
- * adjusted to the host-side address space.
+ * into tup_values / tup_isnull array.
+ *
+ * NOTE: composite datum which is built-in other composite datum might not
+ * be aligned to 4-bytes boundary. So, we don't touch htup fields directly,
+ * except for 1-byte datum.
  */
-STATIC_FUNCTION(size_t)
-deform_kern_heaptuple(kern_context *kcxt,
-					  kern_data_store *kds,		/* in */
+STATIC_FUNCTION(void)
+deform_kern_heaptuple(cl_int	nattrs,			/* in */
+					  kern_colmeta *tup_attrs,	/* in */
 					  HeapTupleHeaderData *htup,/* in */
-					  cl_uint	nfields,		/* in */
-					  cl_bool	as_host_addr,	/* in */
 					  Datum	   *tup_values,		/* out */
 					  cl_bool  *tup_isnull)		/* out */
 {
-	size_t		extra_len = 0;
-
-	/* sanity check */
-	assert(kds->format == KDS_FORMAT_ROW ||
-		   kds->format == KDS_FORMAT_HASH ||
-		   kds->format == KDS_FORMAT_BLOCK);
-	if (htup)
+	/* 'htup' must be aligned to 8bytes */
+	assert(((cl_ulong)htup & (MAXIMUM_ALIGNOF-1)) == 0);
+	if (!htup)
+	{
+		memset(tup_isnull, -1, sizeof(cl_bool) * nattrs);
+	}
+	else
 	{
 		cl_uint		offset = htup->t_hoff;
-		cl_uint		i, ncols = (htup->t_infomask2 & HEAP_NATTS_MASK);
 		cl_bool		tup_hasnull = ((htup->t_infomask & HEAP_HASNULL) != 0);
+		cl_uint		i, ncols = (htup->t_infomask2 & HEAP_NATTS_MASK);
 
-		/*
-		 * In case of 'nfields' is less than length of array, we extract
-		 * the first N columns only. On the other hands, t_informask2
-		 * should not contain attributes than definition.
-		 */
-		assert(ncols <= kds->ncols);
-		ncols = min(ncols, nfields);
-
+		ncols = min(ncols, nattrs);
 		for (i=0; i < ncols; i++)
 		{
 			if (tup_hasnull && att_isnull(i, htup->t_bits))
@@ -2190,64 +2183,52 @@ deform_kern_heaptuple(kern_context *kcxt,
 			}
 			else
 			{
-				kern_colmeta	cmeta = kds->colmeta[i];
+				kern_colmeta   *cmeta = &tup_attrs[i];
 				char		   *addr;
 
-				if (cmeta.attlen > 0)
-					offset = TYPEALIGN(cmeta.attalign, offset);
+				if (cmeta->attlen > 0)
+					offset = TYPEALIGN(cmeta->attalign, offset);
 				else if (!VARATT_NOT_PAD_BYTE((char *)htup + offset))
-					offset = TYPEALIGN(cmeta.attalign, offset);
+					offset = TYPEALIGN(cmeta->attalign, offset);
 
-				/*
-				 * Store the value
-				 */
+				/* Store the value */
 				addr = ((char *) htup + offset);
-				if (cmeta.attbyval)
+				if (cmeta->attbyval)
 				{
-					if (cmeta.attlen == sizeof(cl_long))
-						tup_values[i] = *((cl_long *) addr);
-					else if (cmeta.attlen == sizeof(cl_int))
-						tup_values[i] = *((cl_int *) addr);
-					else if (cmeta.attlen == sizeof(cl_short))
-						tup_values[i] = *((cl_short *) addr);
+					if (cmeta->attlen == sizeof(cl_char))
+						tup_values[i] = *((cl_char *)addr);
+					else if (cmeta->attlen == sizeof(cl_short))
+						tup_values[i] = *((cl_short *)addr);
+					else if (cmeta->attlen == sizeof(cl_int))
+						tup_values[i] = *((cl_int *)addr);
+					else if (cmeta->attlen == sizeof(cl_long))
+						tup_values[i] = *((cl_long *)addr);
 					else
 					{
-						assert(cmeta.attlen == sizeof(cl_char));
-						tup_values[i] = *((cl_char *) addr);
+						tup_isnull[i] = true;
+						assert(false);
 					}
-					offset += cmeta.attlen;
+					offset += cmeta->attlen;
 				}
 				else
 				{
-					cl_uint		attlen = (cmeta.attlen > 0
-										  ? cmeta.attlen
+					cl_uint		attlen = (cmeta->attlen > 0
+										  ? cmeta->attlen
 										  : VARSIZE_ANY(addr));
-					/*
-					 * store either device or host pointer according to
-					 * the supplied flag
-					 */
-					tup_values[i] = (as_host_addr
-									 ? devptr_to_host(kds, addr)
-									 : PointerGetDatum(addr));
+					tup_values[i] = PointerGetDatum(addr);
 					offset += attlen;
-					/* caller may need extra area */
-					extra_len = TYPEALIGN(cmeta.attalign, extra_len);
-					extra_len += attlen;
 				}
 				tup_isnull[i] = false;
 			}
 		}
-
 		/*
 		 * Fill up remaining columns if source tuple has less columns than
 		 * length of the array; that is definition of the destination
 		 */
-		while (i < nfields)
+		while (i < nattrs)
 			tup_isnull[i++] = true;
 	}
-	return MAXALIGN(extra_len);
 }
-#endif
 
 /*
  * form_kern_heaptuple
@@ -2428,13 +2409,12 @@ setup_kern_heaptuple(void *buffer,
 					 kern_colmeta *comp_type,	/* in: composite type attrs */
 					 kern_colmeta *sub_types,	/* in: sub-types attrs */
 					 cl_uint nfields,		/* in: # of sub-fields */
-					 Datum *tup_datum,		/* in: individual sub-fields length
-											 * out: pointer of the fields */
-					 cl_bool *tup_isnull)		/* in; can be NULL */
+					 Datum *tup_datum,		/* in: values */
+					 cl_bool *tup_isnull)	/* in; nulls */
 					 
 {
 	HeapTupleHeaderData *htup = (HeapTupleHeaderData *)buffer;
-	cl_bool		tup_hasnull = (!tup_isnull ? true : false);
+	cl_bool		tup_hasnull = false;
 	cl_ushort	t_infomask;
 	cl_uint		t_hoff;
 	cl_uint		i, curr;
@@ -2443,10 +2423,13 @@ setup_kern_heaptuple(void *buffer,
 	assert(htup == (HeapTupleHeaderData *)MAXALIGN(htup));
 
 	/* has any NULL attribute? */
-	for (i=0; !tup_hasnull && i < nfields; i++)
+	if (tup_isnull)
 	{
-		if (tup_isnull[i])
-			tup_hasnull = true;
+		for (i=0; !tup_hasnull && i < nfields; i++)
+		{
+			if (tup_isnull[i])
+				tup_hasnull = true;
+		}
 	}
 	t_infomask = (tup_hasnull ? HEAP_HASNULL : 0);
 
@@ -2471,37 +2454,43 @@ setup_kern_heaptuple(void *buffer,
 	/* calculate position of the fields */
 	for (i=0; i < nfields; i++)
 	{
-		kern_colmeta	cmeta = sub_types[i];
+		kern_colmeta   *cmeta = &sub_types[i];
 		Datum			datum = tup_datum[i];
 		cl_bool			isnull = (!tup_isnull ? false : tup_isnull[i]);
 
 		if (isnull)
 		{
+			assert(tup_hasnull);
 			htup->t_bits[i >> 3] &= ~(1 << (i & 0x07));
-			datum = 0;
 		}
 		else
 		{
 			if (tup_hasnull)
 				htup->t_bits[i >> 3] |= (1 << (i & 0x07));
 
-			while (TYPEALIGN(cmeta.attalign, curr) != curr)
+			while (TYPEALIGN(cmeta->attalign, curr) != curr)
 				((char *)htup)[curr++] = '\0';
-			if (cmeta.attbyval || cmeta.attlen > 0)
+			if (cmeta->attbyval)
 			{
-				assert(datum == cmeta.attlen);
-				datum = PointerGetDatum((char *)htup + curr);
-				curr += cmeta.attlen;
+				assert(cmeta->attlen <= sizeof(datum));
+				memcpy((char *)htup + curr, &datum, cmeta->attlen);
+				curr += cmeta->attlen;
+			}
+			else if (cmeta->attlen > 0)
+			{
+				memcpy((char *)htup + curr,
+					   DatumGetPointer(datum), cmeta->attlen);
+				curr += cmeta->attlen;
 			}
 			else
 			{
-				Datum	shift = datum;
+				cl_uint		vl_len = VARSIZE_ANY(datum);
 
 				t_infomask |= HEAP_HASVARWIDTH;
-				datum = PointerGetDatum((char *)htup + curr);
-				curr += shift;
+				memcpy((char *)htup + curr,
+					   DatumGetPointer(datum), vl_len);
+				curr += vl_len;
 			}
-			tup_datum[i] = datum;
 		}
 	}
 	htup->t_infomask = t_infomask;
