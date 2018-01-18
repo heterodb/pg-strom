@@ -364,10 +364,6 @@ construct_flat_cuda_source(uint32 extra_flags,
 	if ((extra_flags & DEVKERNEL_NEEDS_CURAND) == DEVKERNEL_NEEDS_CURAND)
 		ofs += snprintf(source + ofs, len - ofs,
 						"#include \"cuda_curand.h\"\n");
-	/* cuBlas library */
-	if ((extra_flags & DEVKERNEL_NEEDS_CUBLAS) == DEVKERNEL_NEEDS_CUBLAS)
-		ofs += snprintf(source + ofs, len - ofs,
-						"#include \"cuda_cublas.h\"\n");
 	/* cuda dynpara.h */
 	if ((extra_flags & DEVKERNEL_NEEDS_DYNPARA) == DEVKERNEL_NEEDS_DYNPARA)
 		ofs += snprintf(source + ofs, len - ofs,
@@ -547,6 +543,7 @@ link_cuda_libraries(char *ptx_image, size_t ptx_length,
 				werror("failed on cuLinkAddFile(\"%s\"): %s",
 					   pathname, errorText(rc));
 		}
+
 		/* curand is accessed via wrapper library */
 		if ((extra_flags & DEVKERNEL_NEEDS_CURAND) == DEVKERNEL_NEEDS_CURAND)
 		{
@@ -559,17 +556,6 @@ link_cuda_libraries(char *ptx_image, size_t ptx_length,
 				werror("failed on cuLinkAddData: %s", errorText(rc));
 		}
 
-		/* libcublas_device.a, if any */
-		if ((extra_flags & DEVKERNEL_NEEDS_CUBLAS) == DEVKERNEL_NEEDS_CUBLAS)
-		{
-			snprintf(pathname, sizeof(pathname), "%s/libcublas_device.a",
-					 CUDA_LIBRARY_PATH);
-			rc = cuLinkAddFile(lstate, CU_JIT_INPUT_LIBRARY, pathname,
-							   0, NULL, NULL);
-			if (rc != CUDA_SUCCESS)
-				werror("failed on cuLinkAddFile(\"%s\"): %s",
-					   pathname, errorText(rc));
-		}
 		/* do the linkage */
 		rc = cuLinkComplete(lstate, &temp, &bin_length);
 		if (rc != CUDA_SUCCESS)

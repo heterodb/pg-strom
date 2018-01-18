@@ -790,8 +790,6 @@ __plcuda_code_validation(plcuda_code_context *con,
 						extra_flags |= DEVKERNEL_NEEDS_MISC;
 					else if (strcmp(target, "cuda_curand.h") == 0)
 						extra_flags |= DEVKERNEL_NEEDS_CURAND;
-					else if (strcmp(target, "cuda_cublas.h") == 0)
-						extra_flags |= DEVKERNEL_NEEDS_CUBLAS;
 				}
 				if (extra_flags != 0)
 					prop->extra_flags |= extra_flags;

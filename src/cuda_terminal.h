@@ -38,21 +38,4 @@ gpuscan_projection(kern_context *kcxt,
 }
 #endif	/* CUDA_GPUSCAN_HAS_PROJECTION */
 #endif	/* CUDA_GPUSCAN_H */
-
-#ifndef CUDA_NUMERIC_H
-/*
- * pg_numeric_to_varlena - has to be defined in cuda_numeric.h if NUMERIC
- * data type is required, however, kern_form_heaptuple need to call this
- * function to treat internal representation of NUMERIC type.
- * The function below is a dummy alternative not to be called.
- */
-STATIC_FUNCTION(cl_uint)
-pg_numeric_to_varlena(kern_context *kcxt, char *vl_buffer,
-                      Datum value, cl_bool isnull)
-{
-	STROM_SET_ERROR(&kcxt->e, StromError_WrongCodeGeneration);
-	return 0;
-}
-#endif
-
 #endif	/* CUDA_TERMINAL_H */
