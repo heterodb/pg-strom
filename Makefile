@@ -252,9 +252,10 @@ $(HTML_FILES): $(HTML_SOURCES) $(HTML_TEMPLATE)
 html: $(HTML_FILES)
 
 $(STROM_TGZ): $(PACKAGE_FILES)
-	git archive	--format=tar.gz \
+	(cd $(STROM_BUILD_ROOT); \
+	 git archive	--format=tar.gz \
 			--prefix=pg_strom-$(PGSTROM_VERSION)/ \
-			-o $@ HEAD $(PACKAGE_FILES)
+			-o $(__STROM_TGZ) HEAD $(__PACKAGE_FILES))
 
 tarball: $(STROM_TGZ)
 
