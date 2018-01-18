@@ -34,6 +34,7 @@ typedef struct
 	/* fields below are never updated once entry is constructed */
 	ProgramId		program_id;
 	pg_crc32		crc;			/* hash value by extra_flags */
+	int				target_cc;		/*             + target_cc   */
 	int				extra_flags;	/*             + kern_define */
 	char		   *kern_define;	/*             + kern_source */
 	size_t			kern_deflen;
@@ -753,7 +754,7 @@ build_cuda_program(program_cache_entry *src_entry)
 		options[opt_index++] = "-I " CUDA_INCLUDE_PATH;
 		options[opt_index++] = "-I " PGSHAREDIR "/extension";
 		snprintf(gpu_arch_option, sizeof(gpu_arch_option),
-				 "--gpu-architecture=compute_%lu", devComputeCapability);
+				 "--gpu-architecture=compute_%u", src_entry->target_cc);
 		options[opt_index++] = gpu_arch_option;
 		if ((src_entry->extra_flags & DEVKERNEL_BUILD_DEBUG_INFO) != 0)
 		{
@@ -843,6 +844,7 @@ build_cuda_program(program_cache_entry *src_entry)
 		offset = 0;
 		bin_entry->program_id		= src_entry->program_id;
 		bin_entry->crc				= src_entry->crc;
+		bin_entry->target_cc        = src_entry->target_cc;
 		bin_entry->extra_flags		= src_entry->extra_flags;
 		bin_entry->kern_deflen		= src_entry->kern_deflen;
 		bin_entry->kern_define		= bin_entry->data + offset;
@@ -1012,7 +1014,9 @@ __pgstrom_create_cuda_program(GpuContext *gcontext,
 	Size		kern_deflen = strlen(kern_define);
 	Size		length;
 	Size		usage = 0;
+	int			dindex = gcontext->cuda_dindex;
 	int			hindex;
+	cl_int		target_cc;
 	dlist_iter	iter;
 	pg_crc32	crc;
 
@@ -1027,9 +1031,13 @@ __pgstrom_create_cuda_program(GpuContext *gcontext,
 	/* build with debug option? */
 	if (pgstrom_debug_jit_compile_options)
 		extra_flags |= DEVKERNEL_BUILD_DEBUG_INFO;
-
+	/* target binary to build */
+	Assert(dindex >= 0 && dindex < numDevAttrs);
+	target_cc = (devAttrs[dindex].COMPUTE_CAPABILITY_MAJOR * 10 +
+				 devAttrs[dindex].COMPUTE_CAPABILITY_MINOR);
 	/* makes a hash value */
 	INIT_LEGACY_CRC32(crc);
+	COMP_LEGACY_CRC32(crc, &target_cc, sizeof(cl_int));
 	COMP_LEGACY_CRC32(crc, &extra_flags, sizeof(int32));
 	COMP_LEGACY_CRC32(crc, kern_source, kern_srclen);
 	COMP_LEGACY_CRC32(crc, kern_define, kern_deflen);
@@ -1042,6 +1050,7 @@ __pgstrom_create_cuda_program(GpuContext *gcontext,
 		entry = dlist_container(program_cache_entry, hash_chain, iter.cur);
 
 		if (entry->crc == crc &&
+			entry->target_cc == target_cc &&
 			entry->extra_flags == extra_flags &&
 			strcmp(entry->kern_source, kern_source) == 0 &&
 			strcmp(entry->kern_define, kern_define) == 0)
@@ -1113,10 +1122,10 @@ __pgstrom_create_cuda_program(GpuContext *gcontext,
 		program_id = ++pgcache_head->last_program_id;
 	} while (lookup_cuda_program_entry_nolock(program_id) != NULL);
 
-	entry->program_id = program_id;
-	entry->crc = crc;
+	entry->program_id  = program_id;
+	entry->crc         = crc;
+	entry->target_cc   = target_cc;
 	entry->extra_flags = extra_flags;
-
 	entry->kern_define = (char *)(entry->data + usage);
 	entry->kern_deflen = kern_deflen;
 	memcpy(entry->kern_define, kern_define, kern_deflen + 1);

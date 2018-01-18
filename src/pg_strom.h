@@ -521,7 +521,6 @@ typedef struct DevAttributes
 extern DevAttributes   *devAttrs;
 extern cl_int			numDevAttrs;
 extern cl_ulong			devComputeCapability;
-extern cl_ulong			devBaselineMemorySize;
 extern cl_uint			devBaselineMaxThreadsPerBlock;
 
 extern void pgstrom_init_gpu_device(void);

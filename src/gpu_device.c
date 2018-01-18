@@ -21,7 +21,6 @@
 DevAttributes	   *devAttrs = NULL;
 cl_int				numDevAttrs = 0;
 cl_ulong			devComputeCapability = UINT_MAX;
-cl_ulong			devBaselineMemorySize = ULONG_MAX;
 cl_uint				devBaselineMaxThreadsPerBlock = UINT_MAX;
 
 /* catalog of device attributes */
@@ -79,7 +78,6 @@ pgstrom_collect_gpu_device(void)
 	char	   *pos;
 	char	   *cuda_runtime_version = NULL;
 	char	   *nvidia_driver_version = NULL;
-	bool		warn_on_kepler_maxwell = false;
 	int			num_devices = -1;	/* total num of GPUs; incl legacy models */
 	int			i, j;
 
@@ -174,10 +172,8 @@ pgstrom_collect_gpu_device(void)
 		DevAttributes  *dattrs = &devAttrs[i];
 		int				compute_capability;
 
-		/* Is it supported CC? */
-		if (dattrs->COMPUTE_CAPABILITY_MAJOR < 3 ||
-			(dattrs->COMPUTE_CAPABILITY_MAJOR == 3 &&
-			 dattrs->COMPUTE_CAPABILITY_MINOR < 5))
+		/* Recommend to use Pascal or later */
+		if (dattrs->COMPUTE_CAPABILITY_MAJOR < 6)
 		{
 			elog(LOG, "PG-Strom: GPU%d %s - CC %d.%d is not supported",
 				 dattrs->DEV_ID,
@@ -187,28 +183,11 @@ pgstrom_collect_gpu_device(void)
 			continue;
 		}
 
-		/* Recommend to use Pascal or later */
-		if (dattrs->COMPUTE_CAPABILITY_MAJOR < 6)
-		{
-			elog(LOG, "PG-Strom: GPU%d %s - CC %d.%d is not recommended",
-				 dattrs->DEV_ID,
-				 dattrs->DEV_NAME,
-				 dattrs->COMPUTE_CAPABILITY_MAJOR,
-				 dattrs->COMPUTE_CAPABILITY_MINOR);
-			if (!warn_on_kepler_maxwell)
-			{
-				elog(WARNING, "Hint: Kepler/Maxwell architecture does not support demand paging on device's virtual address space, thus, memory allocation overcommit tends to consume very large physical memory immediately. We strongly recommend to upgrade your GPU to Pascal or later.");
-				warn_on_kepler_maxwell = true;
-			}
-		}
-
 		/* Update the baseline device capability */
 		compute_capability = (dattrs->COMPUTE_CAPABILITY_MAJOR * 10 +
 							  dattrs->COMPUTE_CAPABILITY_MINOR);
 		devComputeCapability = Min(devComputeCapability,
 								   compute_capability);
-		devBaselineMemorySize = Min(devBaselineMemorySize,
-									dattrs->DEV_TOTAL_MEMSZ);
 		devBaselineMaxThreadsPerBlock = Min(devBaselineMaxThreadsPerBlock,
 											dattrs->MAX_THREADS_PER_BLOCK);
 
