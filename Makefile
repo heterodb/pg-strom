@@ -65,9 +65,11 @@ __PACKAGE_FILES = LICENSE README.md Makefile pg_strom.control	\
 	$(shell git ls-files src sql utils test doc)
 PACKAGE_FILES = $(addprefix $(STROM_BUILD_ROOT)/, $(__PACKAGE_FILES))
 ifdef PGSTROM_VERSION
-__STROM_TGZ = pg-strom-$(PGSTROM_VERSION)
+__STROM_TGZ = pg-strom-$(shell echo $(PGSTROM_VERSION) | sed -e 's/^v//g')
+__STROM_TGZ_TAG = $(PGSTROM_VERSION)
 else
 __STROM_TGZ = pg-strom-master
+__STROM_TGZ_TAG = HEAD
 endif
 STROM_TGZ = $(addprefix $(STROM_BUILD_ROOT)/, $(__STROM_TGZ).tar.gz)
 
@@ -204,10 +206,11 @@ $(HTML_FILES): $(HTML_SOURCES) $(HTML_TEMPLATE)
 html: $(HTML_FILES)
 
 $(STROM_TGZ): $(PACKAGE_FILES)
-	(cd $(STROM_BUILD_ROOT);			\
-	 git archive	--format=tar.gz		\
-			--prefix=$(__STROM_TGZ)/	\
-			-o $(__STROM_TGZ).tar.gz HEAD $(__PACKAGE_FILES))
+	(cd $(STROM_BUILD_ROOT);                 \
+	 git archive	--format=tar.gz          \
+			--prefix=$(__STROM_TGZ)/ \
+			-o $(__STROM_TGZ).tar.gz \
+			$(__STROM_TGZ_TAG) $(__PACKAGE_FILES))
 
 tarball: $(STROM_TGZ)
 endif
