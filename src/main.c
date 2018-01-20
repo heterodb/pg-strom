@@ -447,8 +447,12 @@ _PG_init(void)
 		errmsg("PG-Strom must be loaded via shared_preload_libraries")));
 
 	/* dump version number */
+#ifdef PGSTROM_VERSION
 	elog(LOG, "PG-Strom version %s built for PostgreSQL %s",
 		 PGSTROM_VERSION, PG_MAJORVERSION);
+#else
+	elog(LOG, "PG-Strom built for PostgreSQL %s", PG_MAJORVERSION);
+#endif
 
 	/* check status of the NVIDIA MPS */
 	check_nvidia_mps();

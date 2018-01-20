@@ -3,7 +3,6 @@
 #
 PG_CONFIG := pg_config
 PYTHON_CMD := python
-HAS_RPM_CMD := $(shell if which rpm > /dev/null; then echo 1; else echo 0; fi)
 
 ifndef STROM_BUILD_ROOT
 STROM_BUILD_ROOT = .
@@ -13,29 +12,15 @@ endif
 -include $(STROM_BUILD_ROOT)/Makefile.custom
 
 #
-# PG-Strom versioning
+# PostgreSQL versioning
 #
-PGSTROM_VERSION=1.9
-
-PGSTROM_VERSION_NUM=$(shell echo $(PGSTROM_VERSION)			\
-	| sed -e 's/\./ /g' -e 's/[A-Za-z].*$$//g'			\
-	| awk '{printf "%d%02d%02d", $$1, $$2, (NF >=3) ? $$3 : 0}')
 PG_VERSION_NUM=$(shell $(PG_CONFIG) --version | awk '{print $$NF}'	\
 	| sed -e 's/\./ /g' -e 's/[A-Za-z].*$$//g'			\
 	| awk '{printf "%d%02d%02d", $$1, $$2, (NF >=3) ? $$3 : 0}')
+# PG9.6 or later is required
+PG_MIN_VERSION_NUM=90600
+#PG_MAX_VERSION_NUM=
 
-# available platform versions
-PG_MIN_VERSION=9.6.0
-PG_MAX_VERSION=
-CUDA_MIN_VERSION=8.0
-CUDA_MAX_VERSION=
-
-PG_MIN_VERSION_NUM=$(shell echo $(PG_MIN_VERSION) | awk '{print $$NF}'	\
-	| sed -e 's/\./ /g' -e 's/[A-Za-z].*$$//g'	\
-	| awk '{printf "%d%02d%02d", $$1, $$2, (NF >=3) ? $$3 : 0}')
-PG_MAX_VERSION_NUM=$(shell echo $(PG_MAX_VERSION) | awk '{print $$NF}'	\
-	| sed -e 's/\./ /g' -e 's/[A-Za-z].*$$//g'	\
-	| awk '{printf "%d%02d%02d", $$1, $$2, (NF >=3) ? $$3 : 0}')
 #
 # Installation related
 #
@@ -76,14 +61,15 @@ STROM_HEADERS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__STROM_HEADERS))
 #
 # Files to be packaged
 #
-__RPM_SPECFILE = pg_strom.spec
-RPM_SPECFILE = $(addprefix $(STROM_BUILD_ROOT)/, $(__RPM_SPECFILE))
-
 __PACKAGE_FILES = LICENSE README.md Makefile pg_strom.control	\
-	$(shell git ls-files src sql utils test)
+	$(shell git ls-files src sql utils test doc)
 PACKAGE_FILES = $(addprefix $(STROM_BUILD_ROOT)/, $(__PACKAGE_FILES))
-__STROM_TGZ = pg_strom-$(PGSTROM_VERSION).tar.gz
-STROM_TGZ = $(addprefix $(STROM_BUILD_ROOT)/, $(__STROM_TGZ))
+ifdef PGSTROM_VERSION
+__STROM_TGZ = pg-strom-$(PGSTROM_VERSION)
+else
+__STROM_TGZ = pg-strom-master
+endif
+STROM_TGZ = $(addprefix $(STROM_BUILD_ROOT)/, $(__STROM_TGZ).tar.gz)
 
 #
 # Source file of HTML document
@@ -111,46 +97,13 @@ HTML_SOURCES = $(addprefix $(STROM_BUILD_ROOT)/doc/, $(__HTML_SOURCES))
 HTML_FILES = $(addprefix $(STROM_BUILD_ROOT)/doc/html/, $(__HTML_SOURCES:.src.html=.html))
 HTML_TEMPLATE = $(addprefix $(STROM_BUILD_ROOT)/doc/, $(__HTML_TEMPLATE))
 IMAGE_SOURCES = $(addprefix $(STROM_BUILD_ROOT)/doc/html/figs/, $(__IMAGE_SOURCES))
+ifdef PGSTROM_VERSION
+HTML_VERSION=$(shell echo $(PGSTROM_VERSION) | sed 's/\-.*$//g')
+else
+HTML_VERSION=master
+endif
 MANUAL_CSS = $(addprefix $(STROM_BUILD_ROOT)/doc/html/css/, $(__MANUAL_CSS))
 MENUGEN_PY = $(addprefix $(STROM_BUILD_ROOT)/doc/, $(__MENUGEN_PY))
-
-#
-# Parameters for RPM package build
-#
-ifeq ($(HAS_RPM_CMD), 1)
-__PGSQL_PKGS = $(shell rpm -q -g 'Applications/Databases' | grep -E '^postgresql[0-9]+-')
-PGSQL_PKG_VERSION := $(shell \
-        if [ -n "$(__PGSQL_PKGS)" ];			\
-        then						\
-            rpm -q $(__PGSQL_PKGS) --queryformat '%{version}\n'; \
-        else						\
-            $(PG_CONFIG) --version | awk '{print $$NF}'; \
-        fi | uniq | sort -V | tail -1 |			\
-        sed -e 's/\./ /g' -e 's/[A-Za-z].*$$//g' |	\
-        awk '{printf "%d%d", $$1, $$2}')
-CUDA_PKG_VERSION := $(shell				\
-        rpm -q cuda --queryformat '%{version}\n' |	\
-        sort -V | tail -1 |				\
-        sed -e 's/\./ /g' -e 's/[A-Za-z].*$$//g' |	\
-        awk '{printf "%d-%d", $$1, $$2}')
-
-RPMBUILD_PARAMS := $(shell				\
-    test -n "$(PGSTROM_VERSION)" &&			\
-        echo " -D 'strom_version $(PGSTROM_VERSION)'";	\
-    test -n "$(PGSQL_PKG_VERSION)" &&			\
-        echo " -D 'pgsql_pkgver $(PGSQL_PKG_VERSION)'";	\
-    test -n "$(CUDA_PKG_VERSION)" &&			\
-        echo " -D 'cuda_pkgver $(CUDA_PKG_VERSION)'";	\
-    test -n "$(PG_MIN_VERSION)" &&			\
-        echo " -D 'pgsql_minver $(PG_MIN_VERSION)'";	\
-    test -n "$(PG_MAX_VERSION)" &&			\
-        echo " -D 'pgsql_maxver $(PG_MAX_VERSION)'";	\
-    test -n "$(CUDA_MIN_VERSION)" &&			\
-        echo " -D 'cuda_minver $(CUDA_MIN_VERSION)'";	\
-    test -n "$(CUDA_MAX_VERSION)" &&			\
-        echo " -D 'cuda_maxver $(CUDA_MAX_VERSION)'";	\
-)
-endif
 
 #
 # Header and Libraries of CUDA
@@ -171,16 +124,15 @@ LPATH := $(CUDA_PATH)/lib64
 #       PGSTROM_FLAGS_CUSTOM := -g -O0 -Werror
 #
 PGSTROM_FLAGS += $(PGSTROM_FLAGS_CUSTOM)
-PGSTROM_FLAGS += -DPGSTROM_VERSION=\"$(PGSTROM_VERSION)\"
-PGSTROM_FLAGS += -DPGSTROM_VERSION_NUM=$(PGSTROM_VERSION_NUM)
-PGSTROM_FLAGS += $(shell	\
-        if [ -n "$(PG_MIN_VERSION)" ]; then \
-            echo "-DPG_MIN_VERSION_NUM=$(PG_MIN_VERSION_NUM)"; \
-        fi)
-PGSTROM_FLAGS += $(shell	\
-        if [ -n "$(PG_MAX_VERSION)" ]; then \
-            echo "-DPG_MAX_VERSION_NUM=$(PG_MAX_VERSION_NUM)"; \
-        fi)
+ifdef PGSTROM_VERSION
+PGSTROM_FLAGS += "-DPGSTROM_VERSION=\"$(PGSTROM_VERSION)\""
+endif
+ifdef PG_MIN_VERSION_NUM
+PGSTROM_FLAGS += "-DPG_MIN_VERSION_NUM=$(PG_MIN_VERSION_NUM)"
+endif
+ifdef PG_MAX_VERSION_NUM
+PGSTROM_FLAGS += "-DPG_MAX_VERSION_NUM=$(PG_MAX_VERSION_NUM)"
+endif
 PGSTROM_FLAGS += -DPGSHAREDIR=\"$(shell $(PG_CONFIG) --sharedir)\"
 PGSTROM_FLAGS += -DCUDA_INCLUDE_PATH=\"$(IPATH)\"
 PGSTROM_FLAGS += -DCUDA_BINARY_PATH=\"$(BPATH)\"
@@ -245,24 +197,17 @@ $(HTML_FILES): $(HTML_SOURCES) $(HTML_TEMPLATE)
 	@$(MKDIR_P) $(STROM_BUILD_ROOT)/doc/html
 	$(PYTHON_CMD) $(MENUGEN_PY) \
 		-t $(HTML_TEMPLATE) \
-		-v '$(PGSTROM_VERSION)' \
+		-v '$(HTML_VERSION)' \
 		-m $(addprefix $(STROM_BUILD_ROOT)/doc/, $(notdir $(basename $@)).src.html) \
 		$(HTML_SOURCES) > $@
 
 html: $(HTML_FILES)
 
 $(STROM_TGZ): $(PACKAGE_FILES)
-	(cd $(STROM_BUILD_ROOT); \
-	 git archive	--format=tar.gz \
-			--prefix=pg_strom-$(PGSTROM_VERSION)/ \
-			-o $(__STROM_TGZ) HEAD $(__PACKAGE_FILES))
+	(cd $(STROM_BUILD_ROOT);			\
+	 git archive	--format=tar.gz		\
+			--prefix=$(__STROM_TGZ)/	\
+			-o $(__STROM_TGZ).tar.gz HEAD $(__PACKAGE_FILES))
 
 tarball: $(STROM_TGZ)
-
-ifeq ($(HAS_RPM_CMD), 1)
-rpm: tarball $(RPM_SPECFILE)
-	$(MKDIR_P) $(shell rpmbuild -E %{_sourcedir})
-	cp -f $(STROM_TGZ) $(shell rpmbuild -E %{_sourcedir})
-	rpmbuild $(RPMBUILD_PARAMS) -ba $(RPM_SPECFILE)
-endif
 endif
