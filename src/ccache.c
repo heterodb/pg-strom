@@ -3102,11 +3102,13 @@ pgstrom_init_ccache(void)
 	if (!ccache_base_dir)
 	{
 		if (errno != ENOENT)
+		{
 			ereport(ERROR,
 					(errcode_for_file_access(),
 					 errmsg("could not open ccache directory \"%s\": %m",
 							pathname)));
-		else if (ccache_num_builders > 0)
+		}
+		else
 		{
 			/*
 			 * Even if ccache directory is not found, we try to make

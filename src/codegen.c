@@ -2079,7 +2079,7 @@ pgstrom_devfunc_lookup_type_equal(devtype_info *dtype, Oid type_collid)
 	char		buffer[offsetof(oidvector, values[2])];
 	oidvector  *func_argtypes = (oidvector *)buffer;
 	HeapTuple	tup;
-	Form_pg_proc proc;
+	Form_pg_proc proc	__attribute__((unused));
 
 	if (!OidIsValid(dtype->type_eqfunc))
 		return NULL;
@@ -2116,7 +2116,7 @@ pgstrom_devfunc_lookup_type_compare(devtype_info *dtype, Oid type_collid)
 	char		buffer[offsetof(oidvector, values[2])];
 	oidvector  *func_argtypes = (oidvector *)buffer;
 	HeapTuple	tup;
-	Form_pg_proc proc;
+	Form_pg_proc proc	__attribute__((unused));
 
 	if (!OidIsValid(dtype->type_cmpfunc))
 		return NULL;
