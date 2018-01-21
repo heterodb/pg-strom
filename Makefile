@@ -62,8 +62,7 @@ STROM_HEADERS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__STROM_HEADERS))
 # Files to be packaged
 #
 __PACKAGE_FILES = LICENSE README.md Makefile pg_strom.control	\
-	$(shell git ls-files src sql utils test doc)
-PACKAGE_FILES = $(addprefix $(STROM_BUILD_ROOT)/, $(__PACKAGE_FILES))
+	          src sql utils test doc
 ifdef PGSTROM_VERSION
 __STROM_TGZ = pg-strom-$(shell echo $(PGSTROM_VERSION) | sed -e 's/^v//g')
 __STROM_TGZ_TAG = $(PGSTROM_VERSION)
@@ -174,7 +173,7 @@ SCRIPTS_built = $(STROM_UTILS)
 # Extra files to be cleaned
 EXTRA_CLEAN = $(HTML_FILES) $(STROM_UTILS) \
 	$(shell ls */Makefile | sed 's/Makefile/pg_strom.control/g') \
-	$(STROM_BUILD_ROOT)/__tarball $(STROM_TGZ)
+	$(shell ls pg-strom-*.tar.gz)
 
 #
 # Build chain of PostgreSQL
@@ -205,7 +204,7 @@ $(HTML_FILES): $(HTML_SOURCES) $(HTML_TEMPLATE)
 
 html: $(HTML_FILES)
 
-$(STROM_TGZ): $(PACKAGE_FILES)
+$(STROM_TGZ): $(shell cd $(STROM_BUILD_ROOT); git ls-files $(__PACKAGE_FILES))
 	(cd $(STROM_BUILD_ROOT);                 \
 	 git archive	--format=tar.gz          \
 			--prefix=$(__STROM_TGZ)/ \
