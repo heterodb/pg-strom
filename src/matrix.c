@@ -1614,7 +1614,7 @@ array_matrix_cbind_final(matrix_cbind_state *mcstate)
 		cl_uint		i;
 
 		Assert(VALIDATE_ARRAY_MATRIX(X));
-		src = ARRAY_MATRIX_DATAPTR(R);
+		src = ARRAY_MATRIX_DATAPTR(X);
 		for (i=0; i < x_width; i++)
 		{
 			memcpy(dst, src, typlen * x_height);
