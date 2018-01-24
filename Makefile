@@ -3,6 +3,7 @@
 #
 PG_CONFIG := pg_config
 PYTHON_CMD := python
+PSQL := $(shell dirname $(shell which $(PG_CONFIG)))/psql
 
 ifndef STROM_BUILD_ROOT
 STROM_BUILD_ROOT = .
@@ -144,21 +145,6 @@ SHLIB_LINK := -L $(LPATH) -lnvrtc -lcuda
 #LDFLAGS_SL := -Wl,-rpath,'$(LPATH)'
 
 #
-# Options for regression test
-#
-# Regression test options
-REGRESS = --schedule=$(STROM_BUILD_ROOT)/test/parallel_schedule
-REGRESS_OPTS = --inputdir=$(STROM_BUILD_ROOT)/test
-ifdef TEMP_INSTANCE
-    REGRESS_OPTS += --temp-instance=$(STROM_BUILD_ROOT)/tmp_check
-    ifndef CPUTEST
-        REGRESS_OPTS += --temp-config=$(STROM_BUILD_ROOT)/test/enable.conf
-    else
-        REGRESS_OPTS += --temp-config=$(STROM_BUILD_ROOT)/test/disable.conf
-    endif
-endif
-
-#
 # Definition of PG-Strom Extension
 #
 MODULE_big = pg_strom
@@ -176,10 +162,17 @@ EXTRA_CLEAN = $(HTML_FILES) $(STROM_UTILS) \
 	$(shell ls pg-strom-*.tar.gz)
 
 #
+# Regression Test
+#
+USE_MODULE_DB = 1
+REGRESS = --schedule=$(STROM_BUILD_ROOT)/test/parallel_schedule
+REGRESS_DBNAME = contrib_regression_$(MODULE_big)
+REGRESS_OPTS = --inputdir=$(STROM_BUILD_ROOT)/test --use-existing
+REGRESS_PREP = init_regression_testdb
+
+#
 # Build chain of PostgreSQL
 #
-ifndef PGSTROM_MAKEFILE_ONLY_PARAMDEF
-
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 
@@ -212,4 +205,6 @@ $(STROM_TGZ): $(shell cd $(STROM_BUILD_ROOT); git ls-files $(__PACKAGE_FILES))
 			$(__STROM_TGZ_TAG) $(__PACKAGE_FILES))
 
 tarball: $(STROM_TGZ)
-endif
+
+init_regression_testdb:
+	test "`$(PSQL) $(REGRESS_DBNAME) -q -f ./test/testdb_check.sql`" = "t" || $(PSQL) $(REGRESS_DBNAME) -f ./test/testdb_init.sql
