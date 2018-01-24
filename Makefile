@@ -167,6 +167,7 @@ EXTRA_CLEAN = $(HTML_FILES) $(STROM_UTILS) \
 USE_MODULE_DB = 1
 REGRESS = --schedule=$(STROM_BUILD_ROOT)/test/parallel_schedule
 REGRESS_DBNAME = contrib_regression_$(MODULE_big)
+REGRESS_REVISION = SELECT public.pgstrom_regression_test_revision()
 REGRESS_OPTS = --inputdir=$(STROM_BUILD_ROOT)/test --use-existing
 REGRESS_PREP = init_regression_testdb
 
@@ -207,4 +208,7 @@ $(STROM_TGZ): $(shell cd $(STROM_BUILD_ROOT); git ls-files $(__PACKAGE_FILES))
 tarball: $(STROM_TGZ)
 
 init_regression_testdb:
-	test "`$(PSQL) $(REGRESS_DBNAME) -q -f ./test/testdb_check.sql`" = "t" || $(PSQL) $(REGRESS_DBNAME) -f ./test/testdb_init.sql
+	@test `$(PSQL) -Atq postgres -c "SELECT count(*) > 0 FROM pg_database WHERE datname = '$(REGRESS_DBNAME)'"` = "t" || \
+		$(PSQL) -q postgres -c 'CREATE DATABASE $(REGRESS_DBNAME)'
+	@test "`$(PSQL) $(REGRESS_DBNAME) -Atq -c 'SELECT public.pgstrom_regression_test_revision()'`" = "20180124" || \
+		$(PSQL) $(REGRESS_DBNAME) -f ./test/testdb_init.sql

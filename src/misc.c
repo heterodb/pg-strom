@@ -342,18 +342,21 @@ Datum pgstrom_random_int(PG_FUNCTION_ARGS);
 Datum pgstrom_random_float(PG_FUNCTION_ARGS);
 Datum pgstrom_random_date(PG_FUNCTION_ARGS);
 Datum pgstrom_random_time(PG_FUNCTION_ARGS);
+Datum pgstrom_random_timetz(PG_FUNCTION_ARGS);
 Datum pgstrom_random_timestamp(PG_FUNCTION_ARGS);
+Datum pgstrom_random_timestamptz(PG_FUNCTION_ARGS);
 Datum pgstrom_random_interval(PG_FUNCTION_ARGS);
 Datum pgstrom_random_macaddr(PG_FUNCTION_ARGS);
 Datum pgstrom_random_inet(PG_FUNCTION_ARGS);
 Datum pgstrom_random_text(PG_FUNCTION_ARGS);
+Datum pgstrom_random_text_length(PG_FUNCTION_ARGS);
 
 static inline bool
 generate_null(double ratio)
 {
 	if (ratio <= 0.0)
 		return false;
-	if (100 * drand48() < ratio)
+	if (100.0 * drand48() < ratio)
 		return true;
 	return false;
 }
@@ -429,12 +432,14 @@ Datum
 pgstrom_random_time(PG_FUNCTION_ARGS)
 {
 	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
-	TimeADT		lower = (!PG_ARGISNULL(1) ? PG_GETARG_TIMEADT(1) : 0);
-	TimeADT		upper = (!PG_ARGISNULL(2)
-						 ? PG_GETARG_TIMEADT(2)
-						 : HOURS_PER_DAY * USECS_PER_HOUR - 1);
+	TimeADT		lower = 0;
+	TimeADT		upper = HOURS_PER_DAY * USECS_PER_HOUR - 1;
 	cl_ulong	v;
 
+	if (!PG_ARGISNULL(1))
+		lower = PG_GETARG_TIMEADT(1);
+	if (!PG_ARGISNULL(2))
+		upper = PG_GETARG_TIMEADT(2);
 	if (upper < lower)
 		elog(ERROR, "%s: lower bound is larger than upper", __FUNCTION__);
 	if (generate_null(ratio))
@@ -446,6 +451,36 @@ pgstrom_random_time(PG_FUNCTION_ARGS)
 	PG_RETURN_TIMEADT(lower + v % (upper - lower));
 }
 PG_FUNCTION_INFO_V1(pgstrom_random_time);
+
+Datum
+pgstrom_random_timetz(PG_FUNCTION_ARGS)
+{
+	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
+	TimeADT		lower = 0;
+	TimeADT		upper = HOURS_PER_DAY * USECS_PER_HOUR - 1;
+	TimeTzADT  *temp;
+	cl_ulong	v;
+
+	if (!PG_ARGISNULL(1))
+		lower = PG_GETARG_TIMEADT(1);
+	if (!PG_ARGISNULL(2))
+		upper = PG_GETARG_TIMEADT(2);
+	if (upper < lower)
+		elog(ERROR, "%s: lower bound is larger than upper", __FUNCTION__);
+	if (generate_null(ratio))
+		PG_RETURN_NULL();
+	temp = palloc(sizeof(TimeTzADT));
+	temp->zone = (random() % 23 - 11) * USECS_PER_HOUR;
+	if (upper == lower)
+		temp->time = lower;
+	else
+	{
+		v = ((cl_ulong)random() << 31) | (cl_ulong)random();
+		temp->time = lower + v % (upper - lower);
+	}
+	PG_RETURN_TIMETZADT_P(temp);
+}
+PG_FUNCTION_INFO_V1(pgstrom_random_timetz);
 
 Datum
 pgstrom_random_timestamp(PG_FUNCTION_ARGS)
@@ -627,3 +662,39 @@ pgstrom_random_text(PG_FUNCTION_ARGS)
 	PG_RETURN_TEXT_P(temp);
 }
 PG_FUNCTION_INFO_V1(pgstrom_random_text);
+
+Datum
+pgstrom_random_text_length(PG_FUNCTION_ARGS)
+{
+	static const char *base32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890";
+	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
+	cl_int		maxlen;
+	text	   *temp;
+	char	   *pos;
+	int			i, j, n;
+	cl_ulong	v = 0;
+
+	if (generate_null(ratio))
+		PG_RETURN_NULL();
+	maxlen = (PG_ARGISNULL(1) ? 10 : PG_GETARG_INT32(1));
+	if (maxlen < 1 || maxlen > BLCKSZ)
+		elog(ERROR, "%s: max length too much", __FUNCTION__);
+	n = 1 + random() % maxlen;
+
+	temp = palloc(VARHDRSZ + n);
+	SET_VARSIZE(temp, VARHDRSZ + n);
+	pos = VARDATA(temp);
+	for (i=0, j=0; i < n; i++, pos++)
+	{
+		if (j < 5)
+		{
+			v |= (cl_ulong)random() << j;
+			j += 31;
+		}
+		*pos = base32[v & 0x1f];
+		v >>= 5;
+		j -= 5;
+	}
+	PG_RETURN_TEXT_P(temp);
+}
+PG_FUNCTION_INFO_V1(pgstrom_random_text_length);
