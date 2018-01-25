@@ -598,24 +598,36 @@ writeout_temporary_file(char *tempfile, const char *suffix,
 						const char *source, size_t length)
 {
 	static pg_atomic_uint64 sourceFileCounter = {0};
+	char		tempdir[MAXPGPATH];
 	FILE	   *filp;
 
 	/*
 	 * Generate a tempfile name that should be unique within the current
 	 * database instance.
 	 */
-	snprintf(tempfile, MAXPGPATH,
-			 "%s/base/%s/%s_strom_%d.%ld.%s",
-			 DataDir, PG_TEMP_FILES_DIR,
+	snprintf(tempdir, MAXPGPATH, "%s/%s",
+			 DataDir,
+			 PG_TEMP_FILES_DIR);
+	snprintf(tempfile, MAXPGPATH, "%s/%s_strom_%d.%ld.%s",
+			 tempdir,
 			 PG_TEMP_FILE_PREFIX,
 			 MyProcPid,
 			 pg_atomic_fetch_add_u64(&sourceFileCounter, 1),
 			 suffix);
-	/*
-	 * Open the file.  Note: we don't use O_EXCL, in case there is
-	 * an orphaned temp file that can be reused.
-	 */
+	/* Open the temporary file */
 	filp = fopen(tempfile, "w+b");
+	if (!filp)
+	{
+		mkdir(tempdir, S_IRWXU);
+
+		filp = fopen(tempfile, "w+b");
+		if (!filp)
+		{
+			snprintf(tempfile, MAXPGPATH,
+					 "!!unable open temporary file!! (%m)");
+			return;
+		}
+	}
 	fputs(source, filp);
 	fclose(filp);
 }

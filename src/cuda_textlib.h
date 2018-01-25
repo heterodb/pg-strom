@@ -60,6 +60,11 @@ pg_bpchar_comp_crc32(const cl_uint *crc32_table,
 	}
 	return hash;
 }
+STATIC_INLINE(Datum)
+pg_bpchar_as_datum(void *addr)
+{
+	return PointerGetDatum(addr);
+}
 #endif
 
 STATIC_FUNCTION(cl_int)
