@@ -2238,9 +2238,21 @@ ExecShutdownGpuScan(CustomScanState *node)
 	GpuScanState   *gss = (GpuScanState *) node;
 	GpuScanSharedState *gs_sstate = gss->gs_sstate;
 
-	/* move the statistics from DSM */
-	gss->gts.css.ss.ps.instrument->nfiltered1
-		+= pg_atomic_read_u64(&gs_sstate->nitems_filtered);
+	/*
+	 * Note that GpuScan may not be executed if GpuScan node is located
+	 * under the GpuJoin at parallel background worker context, because
+	 * only master process of GpuJoin is responsible to run inner nodes
+	 * to load inner tuples. In other words, any inner plan nodes are
+	 * not executed at the parallel worker context.
+	 * So, we may not have a valid GpuScanSharedState here.
+	 *
+	 * Elsewhere, move the statistics from DSM
+	 */
+	if (gs_sstate && gss->gts.css.ss.ps.instrument)
+	{
+		gss->gts.css.ss.ps.instrument->nfiltered1
+			+= pg_atomic_read_u64(&gs_sstate->nitems_filtered);
+	}
 }
 #endif
 
