@@ -862,13 +862,12 @@ retry_fnext:
 		new_slot.s.index = atomicAdd(&kds_final->nitems, 1);
 		if (new_slot.s.index < kds_final->nrooms)
 		{
-			cl_int		len;
-
-			if ((len = gpupreagg_final_data_move(kcxt,
-												 kds_slot,
-												 slot_index,
-												 kds_final,
-												 new_slot.s.index)) < 0)
+			cl_int	len = gpupreagg_final_data_move(kcxt,
+													kds_slot,
+													slot_index,
+													kds_final,
+													new_slot.s.index);
+			if (len < 0)
 				new_slot.s.index = (cl_uint)(0xffffffffU);	/* EMPTY */
 			else
 				allocated += len;
@@ -925,8 +924,25 @@ retry_fnext:
 		 * Once atomic operations got finished, isnull/values of the current
 		 * thread shall be accumulated.
 		 */
+
+#if 0
+		/*
+		 * MEMO: Multiple concurrent threads updates @kds_final->nitems
+		 * using atomicAdd(), thus, this operation works on L2-cache.
+		 * On the other hands, NVIDIA says Volta architecture uses L1-cache
+		 * implicitly, if compiler detects the target variable is read-only.
+		 * If NVRTC compiler oversights memory update of atomicXXX() and
+		 * it does not invalidate L1-cache, we may look at older version
+		 * of the variable.
+		 * In fact, we never reproduce the problem when @kds_final->nitems
+		 * is referenced using atomic operation which has no effect.
+		 *
+		 * The above memo is just my hypothesis, shall be reported to
+		 * NVIDIA for confirmation and further investigation later.
+		 */
 		assert(cur_slot.s.index < Min(kds_final->nitems,
 									  kds_final->nrooms));
+#endif
 		gpupreagg_global_calc(
 			KERN_DATA_STORE_ISNULL(kds_final, cur_slot.s.index),
 			KERN_DATA_STORE_VALUES(kds_final, cur_slot.s.index),
