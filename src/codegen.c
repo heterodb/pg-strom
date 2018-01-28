@@ -155,10 +155,6 @@ static struct {
 				 NULL, NULL, NULL,
 				 DEVKERNEL_NEEDS_TEXTLIB, 0,
 				 pg_bpchar_devtype_hashfunc),
-	DEVTYPE_DECL("varchar", "VARCHAROID", "varlena *",
-				 NULL, NULL, NULL,
-				 DEVKERNEL_NEEDS_TEXTLIB, 0,
-				 generic_devtype_hashfunc),
 	DEVTYPE_DECL("numeric", "NUMERICOID", "cl_ulong",
 				 NULL, NULL, NULL,
 				 DEVKERNEL_NEEDS_NUMERIC,
@@ -519,9 +515,9 @@ pg_range_devtype_hashfunc(devtype_info *dtype,
  * [<attributes>/](c|r|l|b|f|F):<extra>
  *
  * attributes:
- * 'a' : this function needs an alias, instead of SQL function name
  * 'c' : this function is locale aware, thus, available only if simple
  *       collation configuration (none, and C-locale).
+ * 'p' : this function needs cuda_primitive.h
  * 'm' : this function needs cuda_mathlib.h
  * 'n' : this function needs cuda_numeric.h
  * 's' : this function needs cuda_textlib.h
@@ -530,16 +526,12 @@ pg_range_devtype_hashfunc(devtype_info *dtype,
  * 'r' : this function needs cuda_rangetype.h
  *
  * class character:
- * 'c' : this function is type cast that takes an argument
  * 'r' : this function is right operator that takes an argument
  * 'l' : this function is left operator that takes an argument
  * 'b' : this function is both operator that takes two arguments
  *       type cast shall be added, if type length mismatch
  *     ==> extra is the operator character on CUDA
- * 'B' : almost equivalent to 'b', but type cast will not happen.
- * 'f' : this function utilizes built-in functions
- *     ==> extra is the built-in function name
- * 'F' : this function is externally declared.
+ * 'F' : this function is implemented as device function.
  *     ==> extra is the function name being declared somewhere
  */
 #define DEVFUNC_MAX_NARGS	4
@@ -555,31 +547,31 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	/* Type cast functions */
 	{ "bool", 1, {INT4OID},   "m/F:int4_bool" },
 
-	{ "int2", 1, {INT4OID},   "a/c:" },
-	{ "int2", 1, {INT8OID},   "a/c:" },
-	{ "int2", 1, {FLOAT4OID}, "a/c:" },
-	{ "int2", 1, {FLOAT8OID}, "a/c:" },
+	{ "int2", 1, {INT4OID},   "p/F:to_int2" },
+	{ "int2", 1, {INT8OID},   "p/F:to_int2" },
+	{ "int2", 1, {FLOAT4OID}, "p/F:to_int2" },
+	{ "int2", 1, {FLOAT8OID}, "p/F:to_int2" },
 
-	{ "int4", 1, {BOOLOID},   "a/c:" },
-	{ "int4", 1, {INT2OID},   "a/c:" },
-	{ "int4", 1, {INT8OID},   "a/c:" },
-	{ "int4", 1, {FLOAT4OID}, "a/c:" },
-	{ "int4", 1, {FLOAT8OID}, "a/c:" },
+	{ "int4", 1, {BOOLOID},   "p/F:to_int4" },
+	{ "int4", 1, {INT2OID},   "p/F:to_int4" },
+	{ "int4", 1, {INT8OID},   "p/F:to_int4" },
+	{ "int4", 1, {FLOAT4OID}, "p/F:to_int4" },
+	{ "int4", 1, {FLOAT8OID}, "p/F:to_int4" },
 
-	{ "int8", 1, {INT2OID},   "a/c:" },
-	{ "int8", 1, {INT4OID},   "a/c:" },
-	{ "int8", 1, {FLOAT4OID}, "a/c:" },
-	{ "int8", 1, {FLOAT8OID}, "a/c:" },
+	{ "int8", 1, {INT2OID},   "p/F:to_int8" },
+	{ "int8", 1, {INT4OID},   "p/F:to_int8" },
+	{ "int8", 1, {FLOAT4OID}, "p/F:to_int8" },
+	{ "int8", 1, {FLOAT8OID}, "p/F:to_int8" },
 
-	{ "float4", 1, {INT2OID},   "a/c:" },
-	{ "float4", 1, {INT4OID},   "a/c:" },
-	{ "float4", 1, {INT8OID},   "a/c:" },
-	{ "float4", 1, {FLOAT8OID}, "a/c:" },
+	{ "float4", 1, {INT2OID},   "p/F:to_float4" },
+	{ "float4", 1, {INT4OID},   "p/F:to_float4" },
+	{ "float4", 1, {INT8OID},   "p/F:to_float4" },
+	{ "float4", 1, {FLOAT8OID}, "p/F:to_float4" },
 
-	{ "float8", 1, {INT2OID},   "a/c:" },
-	{ "float8", 1, {INT4OID},   "a/c:" },
-	{ "float8", 1, {INT8OID},   "a/c:" },
-	{ "float8", 1, {FLOAT4OID}, "a/c:" },
+	{ "float8", 1, {INT2OID},   "p/F:to_float8" },
+	{ "float8", 1, {INT4OID},   "p/F:to_float8" },
+	{ "float8", 1, {INT8OID},   "p/F:to_float8" },
+	{ "float8", 1, {FLOAT4OID}, "p/F:to_float8" },
 
 	/* '+' : add operators */
 	{ "int2pl",  2, {INT2OID, INT2OID}, "m/F:int2pl" },
@@ -647,161 +639,162 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "int8mod", 2, {INT8OID, INT8OID}, "m/F:int8mod" },
 
 	/* '+' : unary plus operators */
-	{ "int2up", 1, {INT2OID}, "l:+" },
-	{ "int4up", 1, {INT4OID}, "l:+" },
-	{ "int8up", 1, {INT8OID}, "l:+" },
-	{ "float4up", 1, {FLOAT4OID}, "l:+" },
-	{ "float8up", 1, {FLOAT8OID}, "l:+" },
+	{ "int2up", 1, {INT2OID},      "p/l:+" },
+	{ "int4up", 1, {INT4OID},      "p/l:+" },
+	{ "int8up", 1, {INT8OID},      "p/l:+" },
+	{ "float4up", 1, {FLOAT4OID},  "p/l:+" },
+	{ "float8up", 1, {FLOAT8OID},  "p/l:+" },
 
 	/* '-' : unary minus operators */
-	{ "int2um", 1, {INT2OID}, "l:-" },
-	{ "int4um", 1, {INT4OID}, "l:-" },
-	{ "int8um", 1, {INT8OID}, "l:-" },
-	{ "float4um", 1, {FLOAT4OID}, "l:-" },
-	{ "float8um", 1, {FLOAT8OID}, "l:-" },
+	{ "int2um", 1, {INT2OID},      "p/l:-" },
+	{ "int4um", 1, {INT4OID},      "p/l:-" },
+	{ "int8um", 1, {INT8OID},      "p/l:-" },
+	{ "float4um", 1, {FLOAT4OID},  "p/l:-" },
+	{ "float8um", 1, {FLOAT8OID},  "p/l:-" },
 
 	/* '@' : absolute value operators */
-	{ "int2abs", 1, {INT2OID}, "f:abs" },
-	{ "int4abs", 1, {INT4OID}, "f:abs" },
-	{ "int8abs", 1, {INT8OID}, "f:abs" },
-	{ "float4abs", 1, {FLOAT4OID}, "f:fabs" },
-	{ "float8abs", 1, {FLOAT8OID}, "f:fabs" },
+	{ "int2abs", 1, {INT2OID},     "p/F:abs" },
+	{ "int4abs", 1, {INT4OID},     "p/F:abs" },
+	{ "int8abs", 1, {INT8OID},     "p/F:abs" },
+	{ "float4abs", 1, {FLOAT4OID}, "p/F:abs" },
+	{ "float8abs", 1, {FLOAT8OID}, "p/F:abs" },
 
 	/* '=' : equal operators */
-	{ "int2eq",  2, {INT2OID, INT2OID}, "b:==" },
-	{ "int24eq", 2, {INT2OID, INT4OID}, "b:==" },
-	{ "int28eq", 2, {INT2OID, INT8OID}, "b:==" },
-	{ "int42eq", 2, {INT4OID, INT2OID}, "b:==" },
-	{ "int4eq",  2, {INT4OID, INT4OID}, "b:==" },
-	{ "int48eq", 2, {INT4OID, INT8OID}, "b:==" },
-	{ "int82eq", 2, {INT8OID, INT2OID}, "b:==" },
-	{ "int84eq", 2, {INT8OID, INT4OID}, "b:==" },
-	{ "int8eq",  2, {INT8OID, INT8OID}, "b:==" },
-	{ "float4eq",  2, {FLOAT4OID, FLOAT4OID}, "b:==" },
-	{ "float48eq", 2, {FLOAT4OID, FLOAT8OID}, "b:==" },
-	{ "float84eq", 2, {FLOAT8OID, FLOAT4OID}, "b:==" },
-	{ "float8eq",  2, {FLOAT8OID, FLOAT8OID}, "b:==" },
+	{ "int2eq",  2, {INT2OID, INT2OID}, "p/b:==" },
+	{ "int24eq", 2, {INT2OID, INT4OID}, "p/b:==" },
+	{ "int28eq", 2, {INT2OID, INT8OID}, "p/b:==" },
+	{ "int42eq", 2, {INT4OID, INT2OID}, "p/b:==" },
+	{ "int4eq",  2, {INT4OID, INT4OID}, "p/b:==" },
+	{ "int48eq", 2, {INT4OID, INT8OID}, "p/b:==" },
+	{ "int82eq", 2, {INT8OID, INT2OID}, "p/b:==" },
+	{ "int84eq", 2, {INT8OID, INT4OID}, "p/b:==" },
+	{ "int8eq",  2, {INT8OID, INT8OID}, "p/b:==" },
+	{ "float4eq",  2, {FLOAT4OID, FLOAT4OID}, "p/b:==" },
+	{ "float48eq", 2, {FLOAT4OID, FLOAT8OID}, "p/b:==" },
+	{ "float84eq", 2, {FLOAT8OID, FLOAT4OID}, "p/b:==" },
+	{ "float8eq",  2, {FLOAT8OID, FLOAT8OID}, "p/b:==" },
 
 	/* '<>' : not equal operators */
-	{ "int2ne",  2, {INT2OID, INT2OID}, "b:!=" },
-	{ "int24ne", 2, {INT2OID, INT4OID}, "b:!=" },
-	{ "int28ne", 2, {INT2OID, INT8OID}, "b:!=" },
-	{ "int42ne", 2, {INT4OID, INT2OID}, "b:!=" },
-	{ "int4ne",  2, {INT4OID, INT4OID}, "b:!=" },
-	{ "int48ne", 2, {INT4OID, INT8OID}, "b:!=" },
-	{ "int82ne", 2, {INT8OID, INT2OID}, "b:!=" },
-	{ "int84ne", 2, {INT8OID, INT4OID}, "b:!=" },
-	{ "int8ne",  2, {INT8OID, INT8OID}, "b:!=" },
-	{ "float4ne",  2, {FLOAT4OID, FLOAT4OID}, "b:!=" },
-	{ "float48ne", 2, {FLOAT4OID, FLOAT8OID}, "b:!=" },
-	{ "float84ne", 2, {FLOAT8OID, FLOAT4OID}, "b:!=" },
-	{ "float8ne",  2, {FLOAT8OID, FLOAT8OID}, "b:!=" },
+	{ "int2ne",  2, {INT2OID, INT2OID}, "p/b:!=" },
+	{ "int24ne", 2, {INT2OID, INT4OID}, "p/b:!=" },
+	{ "int28ne", 2, {INT2OID, INT8OID}, "p/b:!=" },
+	{ "int42ne", 2, {INT4OID, INT2OID}, "p/b:!=" },
+	{ "int4ne",  2, {INT4OID, INT4OID}, "p/b:!=" },
+	{ "int48ne", 2, {INT4OID, INT8OID}, "p/b:!=" },
+	{ "int82ne", 2, {INT8OID, INT2OID}, "p/b:!=" },
+	{ "int84ne", 2, {INT8OID, INT4OID}, "p/b:!=" },
+	{ "int8ne",  2, {INT8OID, INT8OID}, "p/b:!=" },
+	{ "float4ne",  2, {FLOAT4OID, FLOAT4OID}, "p/b:!=" },
+	{ "float48ne", 2, {FLOAT4OID, FLOAT8OID}, "p/b:!=" },
+	{ "float84ne", 2, {FLOAT8OID, FLOAT4OID}, "p/b:!=" },
+	{ "float8ne",  2, {FLOAT8OID, FLOAT8OID}, "p/b:!=" },
 
 	/* '>' : equal operators */
-	{ "int2gt",  2, {INT2OID, INT2OID}, "b:>" },
-	{ "int24gt", 2, {INT2OID, INT4OID}, "b:>" },
-	{ "int28gt", 2, {INT2OID, INT8OID}, "b:>" },
-	{ "int42gt", 2, {INT4OID, INT2OID}, "b:>" },
-	{ "int4gt",  2, {INT4OID, INT4OID}, "b:>" },
-	{ "int48gt", 2, {INT4OID, INT8OID}, "b:>" },
-	{ "int82gt", 2, {INT8OID, INT2OID}, "b:>" },
-	{ "int84gt", 2, {INT8OID, INT4OID}, "b:>" },
-	{ "int8gt",  2, {INT8OID, INT8OID}, "b:>" },
-	{ "float4gt",  2, {FLOAT4OID, FLOAT4OID}, "b:>" },
-	{ "float48gt", 2, {FLOAT4OID, FLOAT8OID}, "b:>" },
-	{ "float84gt", 2, {FLOAT8OID, FLOAT4OID}, "b:>" },
-	{ "float8gt",  2, {FLOAT8OID, FLOAT8OID}, "b:>" },
+	{ "int2gt",  2, {INT2OID, INT2OID}, "p/b:>" },
+	{ "int24gt", 2, {INT2OID, INT4OID}, "p/b:>" },
+	{ "int28gt", 2, {INT2OID, INT8OID}, "p/b:>" },
+	{ "int42gt", 2, {INT4OID, INT2OID}, "p/b:>" },
+	{ "int4gt",  2, {INT4OID, INT4OID}, "p/b:>" },
+	{ "int48gt", 2, {INT4OID, INT8OID}, "p/b:>" },
+	{ "int82gt", 2, {INT8OID, INT2OID}, "p/b:>" },
+	{ "int84gt", 2, {INT8OID, INT4OID}, "p/b:>" },
+	{ "int8gt",  2, {INT8OID, INT8OID}, "p/b:>" },
+	{ "float4gt",  2, {FLOAT4OID, FLOAT4OID}, "p/b:>" },
+	{ "float48gt", 2, {FLOAT4OID, FLOAT8OID}, "p/b:>" },
+	{ "float84gt", 2, {FLOAT8OID, FLOAT4OID}, "p/b:>" },
+	{ "float8gt",  2, {FLOAT8OID, FLOAT8OID}, "p/b:>" },
 
 	/* '<' : equal operators */
-	{ "int2lt",  2, {INT2OID, INT2OID}, "b:<" },
-	{ "int24lt", 2, {INT2OID, INT4OID}, "b:<" },
-	{ "int28lt", 2, {INT2OID, INT8OID}, "b:<" },
-	{ "int42lt", 2, {INT4OID, INT2OID}, "b:<" },
-	{ "int4lt",  2, {INT4OID, INT4OID}, "b:<" },
-	{ "int48lt", 2, {INT4OID, INT8OID}, "b:<" },
-	{ "int82lt", 2, {INT8OID, INT2OID}, "b:<" },
-	{ "int84lt", 2, {INT8OID, INT4OID}, "b:<" },
-	{ "int8lt",  2, {INT8OID, INT8OID}, "b:<" },
-	{ "float4lt",  2, {FLOAT4OID, FLOAT4OID}, "b:<" },
-	{ "float48lt", 2, {FLOAT4OID, FLOAT8OID}, "b:<" },
-	{ "float84lt", 2, {FLOAT8OID, FLOAT4OID}, "b:<" },
-	{ "float8lt",  2, {FLOAT8OID, FLOAT8OID}, "b:<" },
+	{ "int2lt",  2, {INT2OID, INT2OID}, "p/b:<" },
+	{ "int24lt", 2, {INT2OID, INT4OID}, "p/b:<" },
+	{ "int28lt", 2, {INT2OID, INT8OID}, "p/b:<" },
+	{ "int42lt", 2, {INT4OID, INT2OID}, "p/b:<" },
+	{ "int4lt",  2, {INT4OID, INT4OID}, "p/b:<" },
+	{ "int48lt", 2, {INT4OID, INT8OID}, "p/b:<" },
+	{ "int82lt", 2, {INT8OID, INT2OID}, "p/b:<" },
+	{ "int84lt", 2, {INT8OID, INT4OID}, "p/b:<" },
+	{ "int8lt",  2, {INT8OID, INT8OID}, "p/b:<" },
+	{ "float4lt",  2, {FLOAT4OID, FLOAT4OID}, "p/b:<" },
+	{ "float48lt", 2, {FLOAT4OID, FLOAT8OID}, "p/b:<" },
+	{ "float84lt", 2, {FLOAT8OID, FLOAT4OID}, "p/b:<" },
+	{ "float8lt",  2, {FLOAT8OID, FLOAT8OID}, "p/b:<" },
 
 	/* '>=' : relational greater-than or equal-to */
-	{ "int2ge",  2, {INT2OID, INT2OID}, "b:>=" },
-	{ "int24ge", 2, {INT2OID, INT4OID}, "b:>=" },
-	{ "int28ge", 2, {INT2OID, INT8OID}, "b:>=" },
-	{ "int42ge", 2, {INT4OID, INT2OID}, "b:>=" },
-	{ "int4ge",  2, {INT4OID, INT4OID}, "b:>=" },
-	{ "int48ge", 2, {INT4OID, INT8OID}, "b:>=" },
-	{ "int82ge", 2, {INT8OID, INT2OID}, "b:>=" },
-	{ "int84ge", 2, {INT8OID, INT4OID}, "b:>=" },
-	{ "int8ge",  2, {INT8OID, INT8OID}, "b:>=" },
-	{ "float4ge",  2, {FLOAT4OID, FLOAT4OID}, "b:>=" },
-	{ "float48ge", 2, {FLOAT4OID, FLOAT8OID}, "b:>=" },
-	{ "float84ge", 2, {FLOAT8OID, FLOAT4OID}, "b:>=" },
-	{ "float8ge",  2, {FLOAT8OID, FLOAT8OID}, "b:>=" },
+	{ "int2ge",  2, {INT2OID, INT2OID}, "p/b:>=" },
+	{ "int24ge", 2, {INT2OID, INT4OID}, "p/b:>=" },
+	{ "int28ge", 2, {INT2OID, INT8OID}, "p/b:>=" },
+	{ "int42ge", 2, {INT4OID, INT2OID}, "p/b:>=" },
+	{ "int4ge",  2, {INT4OID, INT4OID}, "p/b:>=" },
+	{ "int48ge", 2, {INT4OID, INT8OID}, "p/b:>=" },
+	{ "int82ge", 2, {INT8OID, INT2OID}, "p/b:>=" },
+	{ "int84ge", 2, {INT8OID, INT4OID}, "p/b:>=" },
+	{ "int8ge",  2, {INT8OID, INT8OID}, "p/b:>=" },
+	{ "float4ge",  2, {FLOAT4OID, FLOAT4OID}, "p/b:>=" },
+	{ "float48ge", 2, {FLOAT4OID, FLOAT8OID}, "p/b:>=" },
+	{ "float84ge", 2, {FLOAT8OID, FLOAT4OID}, "p/b:>=" },
+	{ "float8ge",  2, {FLOAT8OID, FLOAT8OID}, "p/b:>=" },
 
 	/* '<=' : relational greater-than or equal-to */
-	{ "int2le",  2, {INT2OID, INT2OID}, "b:<=" },
-	{ "int24le", 2, {INT2OID, INT4OID}, "b:<=" },
-	{ "int28le", 2, {INT2OID, INT8OID}, "b:<=" },
-	{ "int42le", 2, {INT4OID, INT2OID}, "b:<=" },
-	{ "int4le",  2, {INT4OID, INT4OID}, "b:<=" },
-	{ "int48le", 2, {INT4OID, INT8OID}, "b:<=" },
-	{ "int82le", 2, {INT8OID, INT2OID}, "b:<=" },
-	{ "int84le", 2, {INT8OID, INT4OID}, "b:<=" },
-	{ "int8le",  2, {INT8OID, INT8OID}, "b:<=" },
-	{ "float4le",  2, {FLOAT4OID, FLOAT4OID}, "b:<=" },
-	{ "float48le", 2, {FLOAT4OID, FLOAT8OID}, "b:<=" },
-	{ "float84le", 2, {FLOAT8OID, FLOAT4OID}, "b:<=" },
-	{ "float8le",  2, {FLOAT8OID, FLOAT8OID}, "b:<=" },
+	{ "int2le",  2, {INT2OID, INT2OID}, "p/b:<=" },
+	{ "int24le", 2, {INT2OID, INT4OID}, "p/b:<=" },
+	{ "int28le", 2, {INT2OID, INT8OID}, "p/b:<=" },
+	{ "int42le", 2, {INT4OID, INT2OID}, "p/b:<=" },
+	{ "int4le",  2, {INT4OID, INT4OID}, "p/b:<=" },
+	{ "int48le", 2, {INT4OID, INT8OID}, "p/b:<=" },
+	{ "int82le", 2, {INT8OID, INT2OID}, "p/b:<=" },
+	{ "int84le", 2, {INT8OID, INT4OID}, "p/b:<=" },
+	{ "int8le",  2, {INT8OID, INT8OID}, "p/b:<=" },
+	{ "float4le",  2, {FLOAT4OID, FLOAT4OID}, "p/b:<=" },
+	{ "float48le", 2, {FLOAT4OID, FLOAT8OID}, "p/b:<=" },
+	{ "float84le", 2, {FLOAT8OID, FLOAT4OID}, "p/b:<=" },
+	{ "float8le",  2, {FLOAT8OID, FLOAT8OID}, "p/b:<=" },
 
 	/* '&' : bitwise and */
-	{ "int2and", 2, {INT2OID, INT2OID}, "b:&" },
-	{ "int4and", 2, {INT4OID, INT4OID}, "b:&" },
-	{ "int8and", 2, {INT8OID, INT8OID}, "b:&" },
+	{ "int2and", 2, {INT2OID, INT2OID}, "p/b:&" },
+	{ "int4and", 2, {INT4OID, INT4OID}, "p/b:&" },
+	{ "int8and", 2, {INT8OID, INT8OID}, "p/b:&" },
 
 	/* '|'  : bitwise or */
-	{ "int2or", 2, {INT2OID, INT2OID}, "b:|" },
-	{ "int4or", 2, {INT4OID, INT4OID}, "b:|" },
-	{ "int8or", 2, {INT8OID, INT8OID}, "b:|" },
+	{ "int2or", 2, {INT2OID, INT2OID}, "p/b:|" },
+	{ "int4or", 2, {INT4OID, INT4OID}, "p/b:|" },
+	{ "int8or", 2, {INT8OID, INT8OID}, "p/b:|" },
 
 	/* '#'  : bitwise xor */
-	{ "int2xor", 2, {INT2OID, INT2OID}, "b:^" },
-	{ "int4xor", 2, {INT4OID, INT4OID}, "b:^" },
-	{ "int8xor", 2, {INT8OID, INT8OID}, "b:^" },
+	{ "int2xor", 2, {INT2OID, INT2OID}, "p/b:^" },
+	{ "int4xor", 2, {INT4OID, INT4OID}, "p/b:^" },
+	{ "int8xor", 2, {INT8OID, INT8OID}, "p/b:^" },
 
 	/* '~'  : bitwise not operators */
-	{ "int2not", 1, {INT2OID}, "b:~" },
-	{ "int4not", 1, {INT4OID}, "b:~" },
-	{ "int8not", 1, {INT8OID}, "b:~" },
+	{ "int2not", 1, {INT2OID}, "p/l:~" },
+	{ "int4not", 1, {INT4OID}, "p/l:~" },
+	{ "int8not", 1, {INT8OID}, "p/l:~" },
 
 	/* '>>' : right shift */
-	{ "int2shr", 2, {INT2OID, INT4OID}, "B:>>" },
-	{ "int4shr", 2, {INT4OID, INT4OID}, "B:>>" },
-	{ "int8shr", 2, {INT8OID, INT4OID}, "B:>>" },
+	{ "int2shr", 2, {INT2OID, INT4OID}, "p/b:>>" },
+	{ "int4shr", 2, {INT4OID, INT4OID}, "p/b:>>" },
+	{ "int8shr", 2, {INT8OID, INT4OID}, "p/b:>>" },
 
 	/* '<<' : left shift */
-	{ "int2shl", 2, {INT2OID, INT4OID}, "B:<<" },
-	{ "int4shl", 2, {INT4OID, INT4OID}, "B:<<" },
-	{ "int8shl", 2, {INT8OID, INT4OID}, "B:<<" },
+	{ "int2shl", 2, {INT2OID, INT4OID}, "p/b:<<" },
+	{ "int4shl", 2, {INT4OID, INT4OID}, "p/b:<<" },
+	{ "int8shl", 2, {INT8OID, INT4OID}, "p/b:<<" },
 
 	/* comparison functions */
-	{ "btboolcmp",  2, {BOOLOID, BOOLOID}, "f:devfunc_int_comp" },
-	{ "btint2cmp",  2, {INT2OID, INT2OID}, "f:devfunc_int_comp" },
-	{ "btint24cmp", 2, {INT2OID, INT4OID}, "f:devfunc_int_comp" },
-	{ "btint28cmp", 2, {INT2OID, INT8OID}, "f:devfunc_int_comp" },
-	{ "btint42cmp", 2, {INT4OID, INT2OID}, "f:devfunc_int_comp" },
-	{ "btint4cmp",  2, {INT4OID, INT4OID}, "f:devfunc_int_comp" },
-	{ "btint48cmp", 2, {INT4OID, INT8OID}, "f:devfunc_int_comp" },
-	{ "btint82cmp", 2, {INT8OID, INT2OID}, "f:devfunc_int_comp" },
-	{ "btint84cmp", 2, {INT8OID, INT4OID}, "f:devfunc_int_comp" },
-	{ "btint8cmp",  2, {INT8OID, INT8OID}, "f:devfunc_int_comp" },
-	{ "btfloat4cmp",  2, {FLOAT4OID, FLOAT4OID}, "f:devfunc_float_comp" },
-	{ "btfloat48cmp", 2, {FLOAT4OID, FLOAT8OID}, "f:devfunc_float_comp" },
-	{ "btfloat84cmp", 2, {FLOAT8OID, FLOAT4OID}, "f:devfunc_float_comp" },
-	{ "btfloat8cmp",  2, {FLOAT8OID, FLOAT8OID}, "f:devfunc_float_comp" },
+	{ "btboolcmp",  2, {BOOLOID, BOOLOID}, "p/F:type_compare" },
+	{ "btint2cmp",  2, {INT2OID, INT2OID}, "p/F:type_compare" },
+	{ "btint24cmp", 2, {INT2OID, INT4OID}, "p/F:type_compare" },
+	{ "btint28cmp", 2, {INT2OID, INT8OID}, "p/F:type_compare" },
+	{ "btint42cmp", 2, {INT4OID, INT2OID}, "p/F:type_compare" },
+	{ "btint4cmp",  2, {INT4OID, INT4OID}, "p/F:type_compare" },
+	{ "btint48cmp", 2, {INT4OID, INT8OID}, "p/F:type_compare" },
+	{ "btint82cmp", 2, {INT8OID, INT2OID}, "p/F:type_compare" },
+	{ "btint84cmp", 2, {INT8OID, INT4OID}, "p/F:type_compare" },
+	{ "btint8cmp",  2, {INT8OID, INT8OID}, "p/F:type_compare" },
+	{ "btfloat4cmp",  2, {FLOAT4OID, FLOAT4OID}, "p/F:type_compare" },
+	{ "btfloat48cmp", 2, {FLOAT4OID, FLOAT8OID}, "p/F:type_compare" },
+	{ "btfloat84cmp", 2, {FLOAT8OID, FLOAT4OID}, "p/F:type_compare" },
+	{ "btfloat8cmp",  2, {FLOAT8OID, FLOAT8OID}, "p/F:type_compare" },
+
 	/* currency cast */
 	{ "money",			1, {NUMERICOID},			"y/F:numeric_cash" },
 	{ "money",			1, {INT4OID},				"y/F:int4_cash" },
@@ -823,15 +816,15 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "flt4_mul_cash",	2, {FLOAT4OID, CASHOID},	"y/F:flt4_mul_cash" },
 	{ "flt8_mul_cash",	2, {FLOAT8OID, CASHOID},	"y/F:flt8_mul_cash" },
 	/* currency comparison */
-	{ "cash_cmp",		2, {CASHOID, CASHOID},		"y/F:cash_cmp" },
-	{ "cash_eq",		2, {CASHOID, CASHOID},		"y/F:cash_eq" },
-	{ "cash_ne",		2, {CASHOID, CASHOID},		"y/F:cash_ne" },
-	{ "cash_lt",		2, {CASHOID, CASHOID},		"y/F:cash_lt" },
-	{ "cash_le",		2, {CASHOID, CASHOID},		"y/F:cash_le" },
-	{ "cash_gt",		2, {CASHOID, CASHOID},		"y/F:cash_gt" },
-	{ "cash_ge",		2, {CASHOID, CASHOID},		"y/F:cash_ge" },
+	{ "cash_cmp",		2, {CASHOID, CASHOID},		"y/F:type_compare" },
+	{ "cash_eq",		2, {CASHOID, CASHOID},		"y/b:==" },
+	{ "cash_ne",		2, {CASHOID, CASHOID},		"y/b:!=" },
+	{ "cash_lt",		2, {CASHOID, CASHOID},		"y/b:<" },
+	{ "cash_le",		2, {CASHOID, CASHOID},		"y/b:<=" },
+	{ "cash_gt",		2, {CASHOID, CASHOID},		"y/b:>" },
+	{ "cash_ge",		2, {CASHOID, CASHOID},		"y/b:>=" },
 	/* uuid comparison */
-	{ "uuid_cmp",		2, {UUIDOID, UUIDOID},		"y/F:uuid_cmp" },
+	{ "uuid_cmp",		2, {UUIDOID, UUIDOID},		"y/F:type_compare" },
 	{ "uuid_eq",		2, {UUIDOID, UUIDOID},		"y/F:uuid_eq" },
 	{ "uuid_ne",		2, {UUIDOID, UUIDOID},		"y/F:uuid_ne" },
 	{ "uuid_lt",		2, {UUIDOID, UUIDOID},		"y/F:uuid_lt" },
@@ -839,7 +832,7 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "uuid_gt",		2, {UUIDOID, UUIDOID},		"y/F:uuid_gt" },
 	{ "uuid_ge",		2, {UUIDOID, UUIDOID},		"y/F:uuid_ge" },
 	/* macaddr comparison */
-	{ "macaddr_cmp",    2, {MACADDROID,MACADDROID}, "y/F:macaddr_cmp" },
+	{ "macaddr_cmp",    2, {MACADDROID,MACADDROID}, "y/F:type_compare" },
 	{ "macaddr_eq",     2, {MACADDROID,MACADDROID}, "y/F:macaddr_eq" },
 	{ "macaddr_ne",     2, {MACADDROID,MACADDROID}, "y/F:macaddr_ne" },
 	{ "macaddr_lt",     2, {MACADDROID,MACADDROID}, "y/F:macaddr_lt" },
@@ -847,7 +840,7 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "macaddr_gt",     2, {MACADDROID,MACADDROID}, "y/F:macaddr_gt" },
 	{ "macaddr_ge",     2, {MACADDROID,MACADDROID}, "y/F:macaddr_ge" },
 	/* inet comparison */
-	{ "network_cmp",    2, {INETOID,INETOID},       "y/F:network_cmp" },
+	{ "network_cmp",    2, {INETOID,INETOID},       "y/F:type_compare" },
 	{ "network_eq",     2, {INETOID,INETOID},       "y/F:network_eq" },
 	{ "network_ne",     2, {INETOID,INETOID},       "y/F:network_ne" },
 	{ "network_lt",     2, {INETOID,INETOID},       "y/F:network_lt" },
@@ -865,47 +858,47 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	/*
      * Mathmatical functions
      */
-	{ "abs", 1, {INT2OID}, "a/f:abs" },
-	{ "abs", 1, {INT4OID}, "a/f:abs" },
-	{ "abs", 1, {INT8OID}, "a/f:abs" },
-	{ "abs", 1, {FLOAT4OID}, "a/f:fabs" },
-	{ "abs", 1, {FLOAT8OID}, "a/f:fabs" },
-	{ "cbrt",  1, {FLOAT4OID}, "f:cbrt" },
-	{ "dcbrt", 1, {FLOAT8OID}, "f:cbrt" },
-	{ "ceil", 1, {FLOAT8OID}, "f:ceil" },
-	{ "ceiling", 1, {FLOAT8OID}, "f:ceil" },
-	{ "exp", 1, {FLOAT8OID}, "f:exp" },
-	{ "dexp", 1, {FLOAT8OID}, "f:exp" },
-	{ "floor", 1, {FLOAT8OID}, "f:dfloor" },
-	{ "ln", 1, {FLOAT8OID}, "f:log" },
-	{ "dlog1", 1, {FLOAT8OID}, "f:log" },
-	{ "log", 1, {FLOAT8OID}, "f:log10" },
-	{ "dlog10", 1, {FLOAT8OID}, "f:log10" },
+	{ "abs", 1, {INT2OID}, "p/F:abs" },
+	{ "abs", 1, {INT4OID}, "p/F:abs" },
+	{ "abs", 1, {INT8OID}, "p/F:abs" },
+	{ "abs", 1, {FLOAT4OID}, "p/F:abs" },
+	{ "abs", 1, {FLOAT8OID}, "p/F:abs" },
+	{ "cbrt",  1, {FLOAT8OID}, "m/F:cbrt" },
+	{ "dcbrt", 1, {FLOAT8OID}, "m/F:cbrt" },
+	{ "ceil", 1, {FLOAT8OID}, "m/F:ceil" },
+	{ "ceiling", 1, {FLOAT8OID}, "m/F:ceil" },
+	{ "exp", 1, {FLOAT8OID}, "m/F:exp" },
+	{ "dexp", 1, {FLOAT8OID}, "m/F:exp" },
+	{ "floor", 1, {FLOAT8OID}, "m/F:floor" },
+	{ "ln", 1, {FLOAT8OID}, "m/F:ln" },
+	{ "dlog1", 1, {FLOAT8OID}, "m/F:ln" },
+	{ "log", 1, {FLOAT8OID}, "m/F:log10" },
+	{ "dlog10", 1, {FLOAT8OID}, "m/F:log10" },
 	{ "pi", 0, {}, "m/F:dpi" },
 	{ "power", 2, {FLOAT8OID, FLOAT8OID}, "m/F:dpow" },
 	{ "pow", 2, {FLOAT8OID, FLOAT8OID}, "m/F:dpow" },
 	{ "dpow", 2, {FLOAT8OID, FLOAT8OID}, "m/F:dpow" },
-	{ "round", 1, {FLOAT8OID}, "f:round" },
-	{ "dround", 1, {FLOAT8OID}, "f:round" },
-	{ "sign", 1, {FLOAT8OID}, "f:sign" },
+	{ "round", 1, {FLOAT8OID}, "m/F:round" },
+	{ "dround", 1, {FLOAT8OID}, "m/F:round" },
+	{ "sign", 1, {FLOAT8OID}, "m/F:sign" },
 	{ "sqrt", 1, {FLOAT8OID}, "m/F:dsqrt" },
 	{ "dsqrt", 1, {FLOAT8OID}, "m/F:dsqrt" },
-	{ "trunc", 1, {FLOAT8OID}, "f:trunc" },
-	{ "dtrunc", 1, {FLOAT8OID}, "f:trunc" },
+	{ "trunc", 1, {FLOAT8OID}, "m/F:trunc" },
+	{ "dtrunc", 1, {FLOAT8OID}, "m/F:trunc" },
 
 	/*
      * Trigonometric function
      */
-	{ "degrees", 1, {FLOAT8OID}, "f:degrees" },
-	{ "radians", 1, {FLOAT8OID}, "f:radians" },
-	{ "acos",    1, {FLOAT8OID}, "f:acos" },
-	{ "asin",    1, {FLOAT8OID}, "f:asin" },
-	{ "atan",    1, {FLOAT8OID}, "f:atan" },
-	{ "atan2",   2, {FLOAT8OID, FLOAT8OID}, "f:atan2" },
-	{ "cos",     1, {FLOAT8OID}, "f:cos" },
-	{ "cot",     1, {FLOAT8OID}, "m/F:dcot" },
-	{ "sin",     1, {FLOAT8OID}, "f:sin" },
-	{ "tan",     1, {FLOAT8OID}, "f:tan" },
+	{ "degrees", 1, {FLOAT8OID}, "m/F:degrees" },
+	{ "radians", 1, {FLOAT8OID}, "m/F:radians" },
+	{ "acos",    1, {FLOAT8OID}, "m/F:acos" },
+	{ "asin",    1, {FLOAT8OID}, "m/F:asin" },
+	{ "atan",    1, {FLOAT8OID}, "m/F:atan" },
+	{ "atan2",   2, {FLOAT8OID, FLOAT8OID}, "m/F:atan2" },
+	{ "cos",     1, {FLOAT8OID}, "m/F:cos" },
+	{ "cot",     1, {FLOAT8OID}, "m/F:cot" },
+	{ "sin",     1, {FLOAT8OID}, "m/F:sin" },
+	{ "tan",     1, {FLOAT8OID}, "m/F:tan" },
 
 	/*
 	 * Numeric functions
@@ -936,16 +929,14 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "numeric_le", 2, {NUMERICOID, NUMERICOID},  "n/F:numeric_le" },
 	{ "numeric_gt", 2, {NUMERICOID, NUMERICOID},  "n/F:numeric_gt" },
 	{ "numeric_ge", 2, {NUMERICOID, NUMERICOID},  "n/F:numeric_ge" },
-	{ "numeric_cmp", 2, {NUMERICOID, NUMERICOID}, "n/F:numeric_cmp" },
+	{ "numeric_cmp", 2, {NUMERICOID, NUMERICOID}, "n/F:type_compare" },
 
 	/*
 	 * Date and time functions
 	 * ------------------------------- */
 	/* Type cast functions */
-	{ "date", 1, {DATEOID}, "ta/c:" },
 	{ "date", 1, {TIMESTAMPOID}, "t/F:timestamp_date" },
 	{ "date", 1, {TIMESTAMPTZOID}, "t/F:timestamptz_date" },
-	{ "time", 1, {TIMEOID}, "ta/c:" },
 	{ "time", 1, {TIMETZOID}, "t/F:timetz_time" },
 	{ "time", 1, {TIMESTAMPOID}, "t/F:timestamp_time" },
 	{ "time", 1, {TIMESTAMPTZOID}, "t/F:timestamptz_time" },
@@ -955,7 +946,6 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "timetz", 2, {TIMETZOID, INT4OID}, "t/F:timetz_scale" },
 #endif
 	{ "timestamp", 1, {DATEOID}, "t/F:date_timestamp" },
-	{ "timestamp", 1, {TIMESTAMPOID}, "ta/c:" },
 	{ "timestamp", 1, {TIMESTAMPTZOID}, "t/F:timestamptz_timestamp" },
 	{ "timestamptz", 1, {DATEOID}, "t/F:date_timestamptz" },
 	{ "timestamptz", 1, {TIMESTAMPOID}, "t/F:timestamp_timestamptz" },
@@ -994,7 +984,7 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "date_le", 2, {DATEOID, DATEOID}, "t/b:<=" },
 	{ "date_gt", 2, {DATEOID, DATEOID}, "t/b:>"  },
 	{ "date_ge", 2, {DATEOID, DATEOID}, "t/b:>=" },
-	{ "date_cmp", 2, {DATEOID, DATEOID}, "t/f:devfunc_int_comp" },
+	{ "date_cmp", 2, {DATEOID, DATEOID}, "t/F:type_compare" },
 	/* comparison of date and timestamp */
 	{ "date_eq_timestamp", 2, {DATEOID, TIMESTAMPOID},
 	  "t/F:date_eq_timestamp" },
@@ -1017,7 +1007,7 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "time_le", 2, {TIMEOID, TIMEOID}, "t/b:<=" },
 	{ "time_gt", 2, {TIMEOID, TIMEOID}, "t/b:>"  },
 	{ "time_ge", 2, {TIMEOID, TIMEOID}, "t/b:>=" },
-	{ "time_cmp", 2, {TIMEOID, TIMEOID}, "t/f:devfunc_int_comp" },
+	{ "time_cmp", 2, {TIMEOID, TIMEOID}, "t/F:type_compare" },
 	/* comparison between timetz */
 	{ "timetz_eq", 2, {TIMETZOID, TIMETZOID}, "t/F:timetz_eq" },
 	{ "timetz_ne", 2, {TIMETZOID, TIMETZOID}, "t/F:timetz_ne" },
@@ -1033,8 +1023,7 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "timestamp_le", 2, {TIMESTAMPOID, TIMESTAMPOID}, "t/b:<=" },
 	{ "timestamp_gt", 2, {TIMESTAMPOID, TIMESTAMPOID}, "t/b:>"  },
 	{ "timestamp_ge", 2, {TIMESTAMPOID, TIMESTAMPOID}, "t/b:>=" },
-	{ "timestamp_cmp", 2, {TIMESTAMPOID, TIMESTAMPOID},
-	  "t/f:devfunc_int_comp" },
+	{ "timestamp_cmp", 2, {TIMESTAMPOID, TIMESTAMPOID}, "t/F:timestamp_cmp" },
 	/* comparison of timestamp and date */
 	{ "timestamp_eq_date", 2, {TIMESTAMPOID, DATEOID},
 	  "t/F:timestamp_eq_date" },
@@ -1058,7 +1047,7 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "timestamptz_gt", 2, {TIMESTAMPTZOID, TIMESTAMPTZOID}, "t/b:>" },
 	{ "timestamptz_ge", 2, {TIMESTAMPTZOID, TIMESTAMPTZOID}, "t/b:>=" },
 	{ "timestamptz_cmp", 2, {TIMESTAMPTZOID, TIMESTAMPTZOID}, 
-	  "t/f:devfunc_int_comp" },
+	  "t/F:type_compare" },
 
 	/* comparison between date and timestamptz */
 	{ "date_lt_timestamptz", 2, {DATEOID, TIMESTAMPTZOID},
@@ -1181,7 +1170,7 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "bpcharle",  2, {BPCHAROID,BPCHAROID},  "sc/F:bpcharle" },
 	{ "bpchargt",  2, {BPCHAROID,BPCHAROID},  "sc/F:bpchargt" },
 	{ "bpcharge",  2, {BPCHAROID,BPCHAROID},  "sc/F:bpcharge" },
-	{ "bpcharcmp", 2, {BPCHAROID, BPCHAROID}, "sc/F:bpcharcmp"},
+	{ "bpcharcmp", 2, {BPCHAROID, BPCHAROID}, "sc/F:type_compare"},
 	{ "length",    1, {BPCHAROID},            "sc/F:bpcharlen"},
 	{ "texteq",    2, {TEXTOID, TEXTOID},     "s/F:texteq" },
 	{ "textne",    2, {TEXTOID, TEXTOID},     "s/F:textne" },
@@ -1189,7 +1178,7 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "text_le",   2, {TEXTOID, TEXTOID},     "sc/F:text_le" },
 	{ "text_gt",   2, {TEXTOID, TEXTOID},     "sc/F:text_gt" },
 	{ "text_ge",   2, {TEXTOID, TEXTOID},     "sc/F:text_ge" },
-	{ "bttextcmp", 2, {TEXTOID, TEXTOID},     "sc/F:text_cmp" },
+	{ "bttextcmp", 2, {TEXTOID, TEXTOID},     "sc/F:type_compare" },
 	{ "length",    1, {TEXTOID},              "sc/F:textlen" },
 	/* LIKE operators */
 	{ "like",        2, {TEXTOID, TEXTOID},   "s/F:textlike" },
@@ -1225,60 +1214,63 @@ typedef struct devfunc_extra_catalog_t {
 
 static devfunc_extra_catalog_t devfunc_extra_catalog[] = {
 	/* float2 - type cast functions */
-	{ FLOAT4,  "pgstrom.float4("FLOAT2")",  "a/c:" },
-	{ FLOAT8,  "pgstrom.float8("FLOAT2")",  "a/c:" },
-	{ INT2,    "pgstrom.int2("FLOAT2")",    "a/c:" },
-	{ INT4,    "pgstrom.int4("FLOAT2")",    "a/c:" },
-	{ INT8,    "pgstrom.int8("FLOAT2")",    "a/c:" },
+	{ FLOAT4,  "pgstrom.float4("FLOAT2")",  "p/F:to_float4" },
+	{ FLOAT8,  "pgstrom.float8("FLOAT2")",  "p/F:to_float8" },
+	{ INT2,    "pgstrom.int2("FLOAT2")",    "p/F:to_int2" },
+	{ INT4,    "pgstrom.int4("FLOAT2")",    "p/F:to_int4" },
+	{ INT8,    "pgstrom.int8("FLOAT2")",    "p/F:to_int8" },
 	{ NUMERIC, "pgstrom.numeric("FLOAT2")", "n/F:float2_numeric" },
-	{ FLOAT2,  "pgstrom.float2("FLOAT4")",  "a/c:" },
-	{ FLOAT2,  "pgstrom.float2("FLOAT8")",  "a/c:" },
-	{ FLOAT2,  "pgstrom.float2("INT2")",    "a/c:" },
-	{ FLOAT2,  "pgstrom.float2("INT4")",    "a/c:" },
-	{ FLOAT2,  "pgstrom.float2("INT8")",    "a/c:" },
+	{ FLOAT2,  "pgstrom.float2("FLOAT4")",  "p/F:to_float2" },
+	{ FLOAT2,  "pgstrom.float2("FLOAT8")",  "p/F:to_float2" },
+	{ FLOAT2,  "pgstrom.float2("INT2")",    "p/F:to_float2" },
+	{ FLOAT2,  "pgstrom.float2("INT4")",    "p/F:to_float2" },
+	{ FLOAT2,  "pgstrom.float2("INT8")",    "p/F:to_float2" },
 	{ FLOAT2,  "pgstrom.float2("NUMERIC")", "n/F:numeric_float2" },
 	/* float2 - type comparison functions */
-	{ BOOL,    "pgstrom.float2_eq("FLOAT2","FLOAT2")",  "b:==" },
-	{ BOOL,    "pgstrom.float2_ne("FLOAT2","FLOAT2")",  "b:!=" },
-	{ BOOL,    "pgstrom.float2_lt("FLOAT2","FLOAT2")",  "b:<" },
-	{ BOOL,    "pgstrom.float2_le("FLOAT2","FLOAT2")",  "b:<=" },
-	{ BOOL,    "pgstrom.float2_gt("FLOAT2","FLOAT2")",  "b:>" },
-	{ BOOL,    "pgstrom.float2_ge("FLOAT2","FLOAT2")",  "b:>=" },
-	{ BOOL,    "pgstrom.float2_larger("FLOAT2","FLOAT2")",  "f:Max" },
-	{ BOOL,    "pgstrom.float2_smaller("FLOAT2","FLOAT2")", "f:Min" },
+	{ BOOL,    "pgstrom.float2_eq("FLOAT2","FLOAT2")",  "p/b:==" },
+	{ BOOL,    "pgstrom.float2_ne("FLOAT2","FLOAT2")",  "p/b:!=" },
+	{ BOOL,    "pgstrom.float2_lt("FLOAT2","FLOAT2")",  "p/b:<" },
+	{ BOOL,    "pgstrom.float2_le("FLOAT2","FLOAT2")",  "p/b:<=" },
+	{ BOOL,    "pgstrom.float2_gt("FLOAT2","FLOAT2")",  "p/b:>" },
+	{ BOOL,    "pgstrom.float2_ge("FLOAT2","FLOAT2")",  "p/b:>=" },
+	{ BOOL,    "pgstrom.float2_cmp("FLOAT2","FLOAT2")", "p/F:type_compare" },
 
-	{ BOOL,    "pgstrom.float42_eq("FLOAT4","FLOAT2")", "b:==" },
-	{ BOOL,    "pgstrom.float42_ne("FLOAT4","FLOAT2")", "b:!=" },
-	{ BOOL,    "pgstrom.float42_lt("FLOAT4","FLOAT2")", "b:<" },
-	{ BOOL,    "pgstrom.float42_le("FLOAT4","FLOAT2")", "b:<=" },
-	{ BOOL,    "pgstrom.float42_gt("FLOAT4","FLOAT2")", "b:>" },
-	{ BOOL,    "pgstrom.float42_ge("FLOAT4","FLOAT2")", "b:>=" },
+	{ BOOL,    "pgstrom.float42_eq("FLOAT4","FLOAT2")", "p/b:==" },
+	{ BOOL,    "pgstrom.float42_ne("FLOAT4","FLOAT2")", "p/b:!=" },
+	{ BOOL,    "pgstrom.float42_lt("FLOAT4","FLOAT2")", "p/b:<" },
+	{ BOOL,    "pgstrom.float42_le("FLOAT4","FLOAT2")", "p/b:<=" },
+	{ BOOL,    "pgstrom.float42_gt("FLOAT4","FLOAT2")", "p/b:>" },
+	{ BOOL,    "pgstrom.float42_ge("FLOAT4","FLOAT2")", "p/b:>=" },
+	{ BOOL,    "pgstrom.float42_cmp("FLOAT4","FLOAT2")", "p/F:type_compare" },
 
-	{ BOOL,    "pgstrom.float82_eq("FLOAT8","FLOAT2")", "b:==" },
-	{ BOOL,    "pgstrom.float82_ne("FLOAT8","FLOAT2")", "b:!=" },
-	{ BOOL,    "pgstrom.float82_lt("FLOAT8","FLOAT2")", "b:<" },
-	{ BOOL,    "pgstrom.float82_le("FLOAT8","FLOAT2")", "b:<=" },
-	{ BOOL,    "pgstrom.float82_gt("FLOAT8","FLOAT2")", "b:>" },
-	{ BOOL,    "pgstrom.float82_ge("FLOAT8","FLOAT2")", "b:>=" },
+	{ BOOL,    "pgstrom.float82_eq("FLOAT8","FLOAT2")", "p/b:==" },
+	{ BOOL,    "pgstrom.float82_ne("FLOAT8","FLOAT2")", "p/b:!=" },
+	{ BOOL,    "pgstrom.float82_lt("FLOAT8","FLOAT2")", "p/b:<" },
+	{ BOOL,    "pgstrom.float82_le("FLOAT8","FLOAT2")", "p/b:<=" },
+	{ BOOL,    "pgstrom.float82_gt("FLOAT8","FLOAT2")", "p/b:>" },
+	{ BOOL,    "pgstrom.float82_ge("FLOAT8","FLOAT2")", "p/b:>=" },
+	{ BOOL,    "pgstrom.float82_cmp("FLOAT8","FLOAT2")", "p/F:type_compare" },
 
-	{ BOOL,    "pgstrom.float24_eq("FLOAT2","FLOAT4")", "b:==" },
-	{ BOOL,    "pgstrom.float24_ne("FLOAT2","FLOAT4")", "b:!=" },
-	{ BOOL,    "pgstrom.float24_lt("FLOAT2","FLOAT4")", "b:<" },
-	{ BOOL,    "pgstrom.float24_le("FLOAT2","FLOAT4")", "b:<=" },
-	{ BOOL,    "pgstrom.float24_gt("FLOAT2","FLOAT4")", "b:>" },
-	{ BOOL,    "pgstrom.float24_ge("FLOAT2","FLOAT4")", "b:>=" },
+	{ BOOL,    "pgstrom.float24_eq("FLOAT2","FLOAT4")", "p/b:==" },
+	{ BOOL,    "pgstrom.float24_ne("FLOAT2","FLOAT4")", "p/b:!=" },
+	{ BOOL,    "pgstrom.float24_lt("FLOAT2","FLOAT4")", "p/b:<" },
+	{ BOOL,    "pgstrom.float24_le("FLOAT2","FLOAT4")", "p/b:<=" },
+	{ BOOL,    "pgstrom.float24_gt("FLOAT2","FLOAT4")", "p/b:>" },
+	{ BOOL,    "pgstrom.float24_ge("FLOAT2","FLOAT4")", "p/b:>=" },
+	{ BOOL,    "pgstrom.float24_cmp("FLOAT2","FLOAT4")", "p/F:type_compare" },
 
-	{ BOOL,    "pgstrom.float28_eq("FLOAT2","FLOAT8")", "b:==" },
-	{ BOOL,    "pgstrom.float28_ne("FLOAT2","FLOAT8")", "b:!=" },
-	{ BOOL,    "pgstrom.float28_lt("FLOAT2","FLOAT8")", "b:<" },
-	{ BOOL,    "pgstrom.float28_le("FLOAT2","FLOAT8")", "b:<=" },
-	{ BOOL,    "pgstrom.float28_gt("FLOAT2","FLOAT8")", "b:>" },
-	{ BOOL,    "pgstrom.float28_ge("FLOAT2","FLOAT8")", "b:>=" },
+	{ BOOL,    "pgstrom.float28_eq("FLOAT2","FLOAT8")", "p/b:==" },
+	{ BOOL,    "pgstrom.float28_ne("FLOAT2","FLOAT8")", "p/b:!=" },
+	{ BOOL,    "pgstrom.float28_lt("FLOAT2","FLOAT8")", "p/b:<" },
+	{ BOOL,    "pgstrom.float28_le("FLOAT2","FLOAT8")", "p/b:<=" },
+	{ BOOL,    "pgstrom.float28_gt("FLOAT2","FLOAT8")", "p/b:>" },
+	{ BOOL,    "pgstrom.float28_ge("FLOAT2","FLOAT8")", "p/b:>=" },
+	{ BOOL,    "pgstrom.float28_cmp("FLOAT2","FLOAT8")", "p/F:type_compare" },
 
 	/* float2 - unary operator */
-	{ FLOAT2,  "pgstrom.float2_up("FLOAT2")",  "l:+" },
-	{ FLOAT2,  "pgstrom.float2_um("FLOAT2")",  "l:-" },
-	{ FLOAT2,  "pgstrom.float2_abs("FLOAT2")", "f:abs" },
+	{ FLOAT2,  "pgstrom.float2_up("FLOAT2")",  "p/l:+" },
+	{ FLOAT2,  "pgstrom.float2_um("FLOAT2")",  "p/l:-" },
+	{ FLOAT2,  "pgstrom.float2_abs("FLOAT2")", "p/F:abs" },
 
 	/* float2 - arithmetic operators */
 	{ FLOAT4, "pgstrom.float2_pl("FLOAT2","FLOAT2")",   "m/F:float2pl" },
@@ -1301,9 +1293,9 @@ static devfunc_extra_catalog_t devfunc_extra_catalog[] = {
 	{ FLOAT8, "pgstrom.float82_mi("FLOAT8","FLOAT2")",  "m/F:float82mi" },
 	{ FLOAT8, "pgstrom.float82_mul("FLOAT8","FLOAT2")", "m/F:float82mul" },
 	{ FLOAT8, "pgstrom.float82_div("FLOAT8","FLOAT2")", "m/F:float82div" },
-	{ "money", "pgstrom.cash_mul_flt2(money,"FLOAT2")", "y:cash_mul_flt2" },
-	{ "money", "pgstrom.flt2_mul_cash("FLOAT2",money)", "y:flt2_mul_cash" },
-	{ "money", "pgstrom.cash_div_flt2(money,"FLOAT2")", "y:cash_div_flt2" },
+	{ "money", "pgstrom.cash_mul_flt2(money,"FLOAT2")", "y/F:cash_mul_flt2" },
+	{ "money", "pgstrom.flt2_mul_cash("FLOAT2",money)", "y/F:flt2_mul_cash" },
+	{ "money", "pgstrom.cash_div_flt2(money,"FLOAT2")", "y/F:cash_div_flt2" },
 
 	/* int4range operators */
 	{ INT4, "lower(int4range)",               "r/F:int4range_lower" },
@@ -1526,12 +1518,12 @@ static devfunc_extra_catalog_t devfunc_extra_catalog[] = {
 	  "r/F:generic_range_minus" },
 
 	/* type re-interpretation */
-	{ INT8,   "as_int8("FLOAT8")", "f:__double_as_longlong" },
-	{ INT4,   "as_int4("FLOAT4")", "f:__float_as_int" },
-	{ INT2,   "as_int2("FLOAT2")", "f:__half_as_short" },
-	{ FLOAT8, "as_float8("INT8")", "f:__longlong_as_double" },
-	{ FLOAT4, "as_float4("INT4")", "f:__int_as_float" },
-	{ FLOAT2, "as_float2("INT2")", "f:__short_as_half" },
+	{ INT8,   "as_int8("FLOAT8")", "p/F:as_int8" },
+	{ INT4,   "as_int4("FLOAT4")", "p/F:as_int4" },
+	{ INT2,   "as_int2("FLOAT2")", "p/F:as_int2" },
+	{ FLOAT8, "as_float8("INT8")", "p/F:as_float8" },
+	{ FLOAT4, "as_float4("INT4")", "p/F:as_float4" },
+	{ FLOAT2, "as_float2("INT2")", "p/F:as_float2" },
 };
 
 #undef BOOL
@@ -1544,222 +1536,12 @@ static devfunc_extra_catalog_t devfunc_extra_catalog[] = {
 #undef NUMERIC
 
 static void
-devfunc_setup_cast(devfunc_info *entry,
-				   const char *extra, bool has_alias)
-{
-	devtype_info   *dtype = linitial(entry->func_args);
-
-	Assert(list_length(entry->func_args) == 1);
-	entry->func_devname = (!has_alias
-						   ? entry->func_sqlname
-						   : psprintf("%s_%s",
-									  dtype->type_name,
-									  entry->func_rettype->type_name));
-	entry->func_decl
-		= psprintf("STATIC_FUNCTION(pg_%s_t)\n"
-				   "pgfn_%s(kern_context *kcxt, pg_%s_t arg)\n"
-				   "{\n"
-				   "    pg_%s_t result;\n"
-				   "    result.value  = (%s)arg.value;\n"
-				   "    result.isnull = arg.isnull;\n"
-				   "    return result;\n"
-				   "}\n",
-				   entry->func_rettype->type_name,
-				   entry->func_devname,
-				   dtype->type_name,
-				   entry->func_rettype->type_name,
-				   entry->func_rettype->type_base);
-}
-
-static void
-devfunc_setup_oper_both(devfunc_info *entry,
-						const char *extra, bool has_alias, bool add_type_cast)
-{
-	devtype_info   *dtype1 = linitial(entry->func_args);
-	devtype_info   *dtype2 = lsecond(entry->func_args);
-	const char	   *type_cast1 = "";
-	const char	   *type_cast2 = "";
-	char			temp[NAMEDATALEN+10];
-
-	Assert(list_length(entry->func_args) == 2);
-	entry->func_devname = (!has_alias
-						   ? entry->func_sqlname
-						   : psprintf("%s_%s_%s",
-									  entry->func_sqlname,
-									  dtype1->type_name,
-									  dtype2->type_name));
-	if (add_type_cast && dtype1->type_oid != dtype2->type_oid)
-	{
-		if (dtype1->type_length >= dtype2->type_length)
-		{
-			snprintf(temp, sizeof(temp), "(%s) ", dtype1->type_base);
-			type_cast2 = temp;
-		}
-		else
-		{
-			snprintf(temp, sizeof(temp), "(%s) ", dtype2->type_base);
-			type_cast1 = temp;
-		}
-	}
-
-	entry->func_decl
-		= psprintf("STATIC_FUNCTION(pg_%s_t)\n"
-				   "pgfn_%s(kern_context *kcxt, pg_%s_t arg1, pg_%s_t arg2)\n"
-				   "{\n"
-				   "    pg_%s_t result;\n"
-				   "    result.value = (%s)(%sarg1.value %s %sarg2.value);\n"
-				   "    result.isnull = arg1.isnull | arg2.isnull;\n"
-				   "    return result;\n"
-				   "}\n",
-				   entry->func_rettype->type_name,
-				   entry->func_devname,
-				   dtype1->type_name,
-				   dtype2->type_name,
-				   entry->func_rettype->type_name,
-				   entry->func_rettype->type_base,
-				   type_cast1,
-				   extra,
-				   type_cast2);
-}
-
-static void
-devfunc_setup_oper_either(devfunc_info *entry,
-						  const char *left_extra,
-						  const char *right_extra,
-						  bool has_alias)
-{
-	devtype_info   *dtype = linitial(entry->func_args);
-
-	Assert(list_length(entry->func_args) == 1);
-	entry->func_devname = (!has_alias
-						   ? entry->func_sqlname
-						   : psprintf("%s_%s",
-									  entry->func_sqlname,
-									  dtype->type_name));
-	entry->func_decl
-		= psprintf("STATIC_FUNCTION(pg_%s_t)\n"
-				   "pgfn_%s(kern_context *kcxt, pg_%s_t arg)\n"
-				   "{\n"
-				   "    pg_%s_t result;\n"
-				   "    result.value = (%s)(%sarg.value%s);\n"
-				   "    result.isnull = arg.isnull;\n"
-				   "    return result;\n"
-				   "}\n",
-				   entry->func_rettype->type_name,
-				   entry->func_devname,
-				   dtype->type_name,
-				   entry->func_rettype->type_name,
-				   entry->func_rettype->type_base,
-				   !left_extra ? "" : left_extra,
-				   !right_extra ? "" : right_extra);
-}
-
-static void
-devfunc_setup_oper_left(devfunc_info *entry,
-						const char *extra, bool has_alias)
-{
-	devfunc_setup_oper_either(entry, extra, NULL, has_alias);
-}
-
-static void
-devfunc_setup_oper_right(devfunc_info *entry,
-						 const char *extra, bool has_alias)
-{
-	devfunc_setup_oper_either(entry, NULL, extra, has_alias);
-}
-
-static void
-devfunc_setup_func_decl(devfunc_info *entry,
-						const char *extra, bool has_alias)
-{
-	StringInfoData	str;
-	ListCell	   *cell;
-	int				index;
-
-	initStringInfo(&str);
-	if (!has_alias)
-		entry->func_devname = entry->func_sqlname;
-	else
-	{
-		appendStringInfo(&str, "%s", entry->func_sqlname);
-		foreach (cell, entry->func_args)
-		{
-			devtype_info   *dtype = lfirst(cell);
-
-			appendStringInfo(&str, "_%s", dtype->type_name);
-		}
-		entry->func_devname = pstrdup(str.data);
-	}
-
-	/* declaration */
-	resetStringInfo(&str);
-	appendStringInfo(&str,
-					 "STATIC_FUNCTION(pg_%s_t)\n"
-					 "pgfn_%s(kern_context *kcxt",
-					 entry->func_rettype->type_name,
-					 entry->func_devname);
-	index = 1;
-	foreach (cell, entry->func_args)
-	{
-		devtype_info   *dtype = lfirst(cell);
-
-		appendStringInfo(&str, ", pg_%s_t arg%d",
-						 dtype->type_name,
-						 index++);
-	}
-	appendStringInfo(&str, ")\n"
-					 "{\n"
-					 "    pg_%s_t result;\n"
-					 "    result.isnull = ",
-					 entry->func_rettype->type_name);
-	if (entry->func_args == NIL)
-		appendStringInfo(&str, "false");
-	else
-	{
-		index = 1;
-		foreach (cell, entry->func_args)
-		{
-			appendStringInfo(&str, "%sarg%d.isnull",
-							 cell == list_head(entry->func_args) ? "" : " | ",
-							 index++);
-		}
-	}
-	appendStringInfo(&str, ";\n"
-					 "    if (!result.isnull)\n"
-					 "        result.value = (%s) %s(",
-					 entry->func_rettype->type_base,
-					 extra);
-	index = 1;
-	foreach (cell, entry->func_args)
-	{
-		appendStringInfo(&str, "%sarg%d.value",
-						 cell == list_head(entry->func_args) ? "" : ", ",
-						 index++);
-	}
-	appendStringInfo(&str, ");\n"
-					 "    return result;\n"
-					 "}\n");
-	entry->func_decl = str.data;
-}
-
-static void
-devfunc_setup_func_impl(devfunc_info *entry,
-						const char *extra, bool has_alias)
-{
-	if (has_alias)
-		elog(ERROR, "Bug? implimented device function should not have alias");
-	entry->func_devname = extra;
-}
-
-static void
 __construct_devfunc_info(devfunc_info *entry,
 						 const char *template)
 {
-	const char *extra;
 	const char *pos;
 	const char *end;
 	int32		flags = 0;
-	bool		has_alias = false;
 	bool		has_collation = false;
 
 	/* fetch attribute */
@@ -1770,11 +1552,11 @@ __construct_devfunc_info(devfunc_info *entry,
 		{
 			switch (*pos)
 			{
-				case 'a':
-					has_alias = true;
-					break;
 				case 'c':
 					has_collation = true;
+					break;
+				case 'p':
+					flags |= DEVKERNEL_NEEDS_PRIMITIVE;
 					break;
 				case 'n':
 					flags |= DEVKERNEL_NEEDS_NUMERIC;
@@ -1820,21 +1602,15 @@ __construct_devfunc_info(devfunc_info *entry,
 			return;
 		}
 	}
-	extra = template + 2;
-	if (strncmp(template, "c:", 2) == 0)
-		devfunc_setup_cast(entry, extra, has_alias);
-	else if (strncmp(template, "b:", 2) == 0)
-		devfunc_setup_oper_both(entry, extra, has_alias, true);
-	else if (strncmp(template, "B:", 2) == 0)
-		devfunc_setup_oper_both(entry, extra, has_alias, false);
-	else if (strncmp(template, "l:", 2) == 0)
-		devfunc_setup_oper_left(entry, extra, has_alias);
-	else if (strncmp(template, "r:", 2) == 0)
-		devfunc_setup_oper_right(entry, extra, has_alias);
-	else if (strncmp(template, "f:", 2) == 0)
-		devfunc_setup_func_decl(entry, extra, has_alias);
-	else if (strncmp(template, "F:", 2) == 0)
-		devfunc_setup_func_impl(entry, extra, has_alias);
+
+	if (strncmp(template, "b:", 2) == 0 ||
+		strncmp(template, "l:", 2) == 0 ||
+		strncmp(template, "r:", 2) == 0 ||
+		strncmp(template, "F:", 2) == 0)
+	{
+		entry->func_devname = template + 2;
+		entry->func_class = template[0];
+	}
 	else
 	{
 		elog(NOTICE, "Bug? unknown device function template: '%s'",
@@ -2011,10 +1787,14 @@ __pgstrom_devfunc_lookup(HeapTuple protup,
 	/* other extra or polymorphic functions */
 	if (pgstrom_devfunc_construct_extra(entry, protup))
 		goto skip;
-	/* for inline PL/CUDA functions */
+#if NOT_USED
+	/*
+	 * XXX - Right now, we skip to support inline PL/CUDA function
+	 */
 	if (proc->prolang == get_language_oid("plcuda", true) &&
 		pgstrom_devfunc_construct_plcuda(entry, protup))
 		goto skip;
+#endif
 	/* oops, function has no entry */
 	entry->func_is_negative = true;
 skip:
@@ -2171,10 +1951,8 @@ skip:
 /*
  * codegen_expression_walker - main logic of run-time code generator
  */
-static void codegen_coalesce_expression(CoalesceExpr *coalesce,
+static void codegen_function_expression(devfunc_info *dfunc, List *args,
 										codegen_context *context);
-static void codegen_minmax_expression(MinMaxExpr *minmax,
-									  codegen_context *context);
 static void codegen_scalar_array_op_expression(ScalarArrayOpExpr *opexpr,
 											   codegen_context *context);
 
@@ -2299,16 +2077,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 			elog(ERROR, "codegen: failed to lookup device function: %s",
 				 format_procedure(func->funcid));
 		pgstrom_devfunc_track(context, dfunc);
-
-		appendStringInfo(&context->str,
-						 "pgfn_%s(kcxt", dfunc->func_devname);
-
-		foreach (cell, func->args)
-		{
-			appendStringInfo(&context->str, ", ");
-			codegen_expression_walker(lfirst(cell), context);
-		}
-		appendStringInfoChar(&context->str, ')');
+		codegen_function_expression(dfunc, func->args, context);
 	}
 	else if (IsA(node, OpExpr) ||
 			 IsA(node, DistinctExpr))
@@ -2323,22 +2092,12 @@ codegen_expression_walker(Node *node, codegen_context *context)
 			elog(ERROR, "codegen: failed to lookup device function: %s",
 				 format_procedure(dfunc->func_oid));
 		pgstrom_devfunc_track(context, dfunc);
-
-		appendStringInfo(&context->str,
-						 "pgfn_%s(kcxt", dfunc->func_devname);
-
-		foreach (cell, op->args)
-		{
-			appendStringInfo(&context->str, ", ");
-			codegen_expression_walker(lfirst(cell), context);
-		}
-		appendStringInfoChar(&context->str, ')');
+		codegen_function_expression(dfunc, op->args, context);
 	}
 	else if (IsA(node, NullTest))
 	{
 		NullTest   *nulltest = (NullTest *) node;
 		Oid			typeoid = exprType((Node *)nulltest->arg);
-		const char *func_name;
 
 		if (nulltest->argisrow)
 			elog(ERROR, "codegen: NullTest towards RECORD data");
@@ -2348,21 +2107,15 @@ codegen_expression_walker(Node *node, codegen_context *context)
 			elog(ERROR, "codegen: failed to lookup device type: %s",
 				 format_type_be(typeoid));
 
-		switch (nulltest->nulltesttype)
-		{
-			case IS_NULL:
-				func_name = "isnull";
-				break;
-			case IS_NOT_NULL:
-				func_name = "isnotnull";
-				break;
-			default:
-				elog(ERROR, "unrecognized nulltesttype: %d",
-					 (int)nulltest->nulltesttype);
-				break;
-		}
-		appendStringInfo(&context->str, "pgfn_%s_%s(kcxt, ",
-						 dtype->type_name, func_name);
+		if (nulltest->nulltesttype == IS_NULL)
+			appendStringInfo(&context->str, "PG_ISNULL");
+		else if (nulltest->nulltesttype == IS_NOT_NULL)
+			appendStringInfo(&context->str, "PG_ISNOTNULL");
+		else
+			elog(ERROR, "unrecognized nulltesttype: %d",
+				 (int)nulltest->nulltesttype);
+
+		appendStringInfoChar(&context->str, '(');
 		codegen_expression_walker((Node *) nulltest->arg, context);
 		appendStringInfoChar(&context->str, ')');
 	}
@@ -2441,13 +2194,64 @@ codegen_expression_walker(Node *node, codegen_context *context)
 	{
 		CoalesceExpr   *coalesce = (CoalesceExpr *) node;
 
-		codegen_coalesce_expression(coalesce, context);
+		dtype = pgstrom_devtype_lookup(coalesce->coalescetype);
+		if (!dtype)
+			elog(ERROR, "codegen: unsupported device type in COALESCE: %s",
+				 format_type_be(coalesce->coalescetype));
+
+		appendStringInfo(&context->str, "pg_coalesce(");
+		foreach (cell, coalesce->args)
+		{
+			Node   *expr = (Node *)lfirst(cell);
+			Oid		type_oid = exprType(expr);
+
+			if (dtype->type_oid != type_oid)
+				elog(ERROR, "device type mismatch in COALESCE: %s / %s",
+					 format_type_be(dtype->type_oid),
+					 format_type_be(type_oid));
+			if (list_head(coalesce->args) != cell)
+				appendStringInfo(&context->str, ", ");
+			codegen_expression_walker(expr, context);
+		}
+		appendStringInfo(&context->str, ")");
 	}
 	else if (IsA(node, MinMaxExpr))
 	{
 		MinMaxExpr	   *minmax = (MinMaxExpr *) node;
 
-		codegen_minmax_expression(minmax, context);
+		dtype = pgstrom_devtype_lookup(minmax->minmaxtype);
+		if (!dtype)
+			elog(ERROR, "unsupported device type in LEAST/GREATEST: %s",
+				 format_type_be(minmax->minmaxtype));
+
+		dfunc = pgstrom_devfunc_lookup_type_compare(dtype,
+													minmax->inputcollid);
+		if (!dfunc)
+			elog(ERROR, "unsupported device type in LEAST/GREATEST: %s",
+				 format_type_be(minmax->minmaxtype));
+
+		if (minmax->op == IS_GREATEST)
+			appendStringInfo(&context->str, "PG_GREATEST");
+		else if (minmax->op == IS_LEAST)
+			appendStringInfo(&context->str, "PG_LEAST");
+		else
+			elog(ERROR, "unknown operation at MinMaxExpr: %d",
+                 (int)minmax->op);
+
+		appendStringInfo(&context->str, "(kcxt");
+		foreach (cell, minmax->args)
+		{
+			Node   *expr = lfirst(cell);
+			Oid		type_oid = exprType(expr);
+
+			if (dtype->type_oid != type_oid)
+				elog(ERROR, "device type mismatch in LEAST/GREATEST: %s / %s",
+					 format_type_be(dtype->type_oid),
+					 format_type_be(exprType(expr)));
+			appendStringInfo(&context->str, ", ");
+			codegen_expression_walker(expr, context);
+		}
+		appendStringInfoChar(&context->str, ')');
 	}
 	else if (IsA(node, RelabelType))
 	{
@@ -2486,12 +2290,11 @@ codegen_expression_walker(Node *node, codegen_context *context)
 					elog(ERROR,"codegen: failed to lookup device function: %s",
 						 format_procedure_qualified(dtype->type_eqfunc));
 				pgstrom_devfunc_track(context, dfunc);
-
-				appendStringInfo(&context->str,
-								 "EVAL(pgfn_%s(", dfunc->func_devname);
-				codegen_expression_walker((Node *) caseexpr->arg, context);
-				appendStringInfo(&context->str, ", ");
-				codegen_expression_walker((Node *) casewhen->expr, context);
+				appendStringInfo(&context->str, "EVAL(");
+				codegen_function_expression(dfunc,
+											list_make2(caseexpr->arg,
+													   casewhen->expr),
+											context);
 				appendStringInfo(&context->str, ") ? (");
 				codegen_expression_walker((Node *) casewhen->result, context);
 				appendStringInfo(&context->str, ") : (");
@@ -2500,7 +2303,6 @@ codegen_expression_walker(Node *node, codegen_context *context)
 			{
 				Assert(exprType((Node *) casewhen->expr) == BOOLOID);
 				Assert(exprType((Node *) casewhen->result) == caseexpr->casetype);
-
 				appendStringInfo(&context->str, "EVAL(");
 				codegen_expression_walker((Node *) casewhen->expr, context);
 				appendStringInfo(&context->str, ") ? (");
@@ -2597,264 +2399,55 @@ deform_devexpr_info(devexpr_info *devexpr, List *contents)
 }
 
 static void
-codegen_coalesce_expression(CoalesceExpr *coalesce, codegen_context *context)
+codegen_function_expression(devfunc_info *dfunc, List *args,
+							codegen_context *context)
 {
-	devtype_info   *dtype;
-	devexpr_info	devexpr;
-	ListCell	   *cell;
+	ListCell   *lc;
 
-	dtype = pgstrom_devtype_lookup(coalesce->coalescetype);
-	if (!dtype)
-		elog(ERROR, "codegen: unsupported device type in COALESCE: %s",
-			 format_type_be(coalesce->coalescetype));
-
-	/* find out identical predefined device COALESCE */
-	foreach (cell, context->expr_defs)
+	if (dfunc->func_class == 'b')
 	{
-		deform_devexpr_info(&devexpr, (List *)lfirst(cell));
+		if (list_length(args) != 2)
+			elog(ERROR, "Bug? unexpected number of arguments");
 
-		if (devexpr.expr_tag == T_CoalesceExpr &&
-			devexpr.expr_rettype->type_oid == coalesce->coalescetype &&
-			devexpr.expr_collid == InvalidOid &&
-			list_length(devexpr.expr_args) == list_length(coalesce->args))
-			break;		/* ok, found */
+		appendStringInfoChar(&context->str, '(');
+		lc = list_head(args);
+		codegen_expression_walker(lfirst(lc), context);
+		appendStringInfo(&context->str, " %s ", dfunc->func_devname);
+		lc = lnext(lc);
+		codegen_expression_walker(lfirst(lc), context);
+		appendStringInfoChar(&context->str, ')');
 	}
-
-	/* if no predefined one, make a special expression device function */
-	if (!cell)
+	else if (dfunc->func_class == 'l')
 	{
-		StringInfoData decl;
-		int		arg_index;
-
-		memset(&devexpr, 0, sizeof(devexpr_info));
-		devexpr.expr_tag = T_CoalesceExpr;
-		devexpr.expr_collid = InvalidOid;	/* never collation aware */
-		foreach (cell, coalesce->args)
-		{
-			Oid		type_oid = exprType((Node *)lfirst(cell));
-
-			if (dtype->type_oid != type_oid)
-				elog(ERROR, "device type mismatch in COALESCE: %s / %s",
-					 format_type_be(dtype->type_oid),
-					 format_type_be(type_oid));
-
-			devexpr.expr_args = lappend(devexpr.expr_args, dtype);
-		}
-
-		if (coalesce->coalescetype != dtype->type_oid)
-			elog(ERROR, "device type mismatch in COALESCE: %s / %s",
-				 format_type_be(dtype->type_oid),
-				 format_type_be(coalesce->coalescetype));
-
-		devexpr.expr_rettype = dtype;
-		devexpr.expr_extra1 = 0;		/* no extra information */
-		devexpr.expr_extra2 = 0;		/* no extra information */
-
-		/* device function name */
-		devexpr.expr_name = psprintf("%s_coalesce_%u",
-									 dtype->type_name,
-									 list_length(coalesce->args));
-		/* device function body */
-		initStringInfo(&decl);
-		appendStringInfo(&decl,
-						 "STATIC_INLINE(pg_%s_t)\n"
-						 "pgfn_%s(kern_context *kcxt",
-						 dtype->type_name,
-						 devexpr.expr_name);
-		arg_index = 1;
-		foreach (cell, devexpr.expr_args)
-		{
-			dtype = lfirst(cell);
-
-			appendStringInfo(&decl,
-							 ", pg_%s_t arg%d",
-							 dtype->type_name,
-							 arg_index++);
-		}
-		appendStringInfo(&decl, ")\n{\n");
-
-		arg_index = 1;
-		foreach (cell, devexpr.expr_args)
-		{
-			appendStringInfo(
-				&decl,
-				"  if (!arg%d.isnull)\n"
-				"    return arg%d;\n",
-				arg_index,
-				arg_index);
-			arg_index++;
-		}
-		appendStringInfo(
-			&decl,
-			"\n"
-			"  /* return NULL if any arguments are NULL */\n"
-			"  memset(&arg1, 0, sizeof(arg1));\n"
-			"  arg1.isnull = true;\n"
-			"  return arg1;\n"
-			"}\n");
-
-		devexpr.expr_decl = decl.data;
-		/* track this special expression */
-		context->expr_defs = lappend(context->expr_defs,
-									 form_devexpr_info(&devexpr));
+		if (list_length(args) != 1)
+			elog(ERROR, "Bug? unexpected number of arguments");
+		appendStringInfo(&context->str, "(%s", dfunc->func_devname);
+		codegen_expression_walker(linitial(args), context);
+		appendStringInfoChar(&context->str, ')');
 	}
-
-	/* write out this special expression */
-	appendStringInfo(&context->str, "pgfn_%s(kcxt", devexpr.expr_name);
-	foreach (cell, coalesce->args)
+	else if (dfunc->func_class == 'r')
 	{
-		Node	   *expr = lfirst(cell);
-
-		if (dtype->type_oid != exprType(expr))
-			elog(ERROR, "codegen: device type mismatch in COALESCE: %s / %s",
-				 format_type_be(dtype->type_oid),
-				 format_type_be(exprType(expr)));
-
-		appendStringInfo(&context->str, ", ");
-		codegen_expression_walker(expr, context);
+		if (list_length(args) != 1)
+			elog(ERROR, "Bug? unexpected number of arguments");
+		appendStringInfoChar(&context->str, '(');
+		codegen_expression_walker(linitial(args), context);
+		appendStringInfo(&context->str, "%s)", dfunc->func_devname);
 	}
-	appendStringInfo(&context->str, ")");
-}
-
-static void
-codegen_minmax_expression(MinMaxExpr *minmax, codegen_context *context)
-{
-	devtype_info   *dtype;
-	devfunc_info   *dfunc;
-	devexpr_info	devexpr;
-	ListCell	   *cell;
-
-	if (minmax->op != IS_GREATEST && minmax->op != IS_LEAST)
-		elog(ERROR, "unknown operation at MinMaxExpr: %d",
-			 (int)minmax->op);
-
-	dtype = pgstrom_devtype_lookup(minmax->minmaxtype);
-	if (!dtype)
-		elog(ERROR, "unsupported device type in LEAST/GREATEST: %s",
-			 format_type_be(minmax->minmaxtype));
-
-	dfunc = pgstrom_devfunc_lookup_type_compare(dtype, minmax->inputcollid);
-	if (!dfunc)
-		elog(ERROR, "unsupported device function in LEAST/GREATEST: %s",
-			 format_procedure_qualified(dtype->type_cmpfunc));
-	pgstrom_devfunc_track(context, dfunc);
-
-	/* find out identical predefined device LEAST/GREATEST */
-	foreach (cell, context->expr_defs)
+	else if (dfunc->func_class == 'F')
 	{
-		deform_devexpr_info(&devexpr, (List *)lfirst(cell));
-
-		if (devexpr.expr_tag == T_MinMaxExpr &&
-			devexpr.expr_rettype->type_oid == minmax->minmaxtype &&
-			devexpr.expr_collid == minmax->inputcollid &&
-			list_length(devexpr.expr_args) == list_length(minmax->args) &&
-			devexpr.expr_extra1 == ObjectIdGetDatum(minmax->op))
-			break;		/* ok, found */
+		appendStringInfo(&context->str,
+						 "pgfn_%s(kcxt",
+						 dfunc->func_devname);
+        foreach (lc, args)
+        {
+			appendStringInfo(&context->str, ", ");
+			codegen_expression_walker(lfirst(lc), context);
+        }
+        appendStringInfoChar(&context->str, ')');
 	}
-
-	/* if no predefined one, make a special expression device function */
-	if (!cell)
-	{
-		StringInfoData decl;
-		int		arg_index;
-
-		memset(&devexpr, 0, sizeof(devexpr_info));
-		devexpr.expr_tag = T_MinMaxExpr;
-		devexpr.expr_collid = minmax->inputcollid;
-		foreach (cell, minmax->args)
-		{
-			Node		   *expr = lfirst(cell);
-
-			if (dtype->type_oid != exprType(expr))
-				elog(ERROR, "device type mismatch in LEAST/GREATEST: %s / %s",
-					 format_type_be(dtype->type_oid),
-					 format_type_be(exprType(expr)));
-
-			devexpr.expr_args = lappend(devexpr.expr_args, dtype);
-		}
-
-		if (dtype->type_oid != minmax->minmaxtype)
-			elog(ERROR, "device type mismatch in LEAST/GREATEST: %s / %s",
-				 format_type_be(dtype->type_oid),
-				 format_type_be(minmax->minmaxtype));
-
-		devexpr.expr_rettype = dtype;
-		devexpr.expr_extra1 = (Datum) minmax->op;
-		devexpr.expr_name = psprintf("%s_%s_%u",
-									 dtype->type_name,
-									 minmax->op == IS_LEAST
-									 ? "least"
-									 : "greatest",
-									 list_length(minmax->args));
-		/* device function body */
-		initStringInfo(&decl);
-		appendStringInfo(&decl,
-						 "STATIC_INLINE(pg_%s_t)\n"
-						 "pgfn_%s(kern_context *kcxt",
-						 devexpr.expr_rettype->type_name,
-						 devexpr.expr_name);
-		arg_index = 1;
-		foreach (cell, devexpr.expr_args)
-		{
-			appendStringInfo(&decl, ", pg_%s_t arg%d",
-							 dtype->type_name,
-							 arg_index++);
-		}
-		appendStringInfo(&decl, ")\n"
-						 "{\n"
-						 "  pg_%s_t   result;\n"
-						 "  pg_int4_t eval;\n"
-						 "\n"
-						 "  memset(&result, 0, sizeof(result));\n"
-						 "  result.isnull = true;\n\n",
-						 devexpr.expr_rettype->type_name);
-		arg_index = 1;
-		foreach (cell, devexpr.expr_args)
-		{
-			appendStringInfo(
-				&decl,
-				"  if (result.isnull)\n"
-				"    result = arg%d;\n"
-				"  else if (!arg%d.isnull)\n"
-				"  {\n"
-				"    eval = pgfn_%s(kcxt, result, arg%d);\n"
-				"    if (!eval.isnull && eval.value %s 0)\n"
-				"      result = arg%d;\n"
-				"  }\n\n",
-				arg_index,
-				arg_index,
-				dfunc->func_devname,
-				arg_index,
-				minmax->op == IS_LEAST ? ">" : "<",
-				arg_index);
-			arg_index++;
-		}
-		appendStringInfo(
-			&decl,
-			"  return result;\n"
-			"}\n\n");
-
-		devexpr.expr_decl = decl.data;
-		/* track this special expression */
-		context->expr_defs = lappend(context->expr_defs,
-									 form_devexpr_info(&devexpr));
-	}
-
-	/* write out this special expression */
-	appendStringInfo(&context->str, "pgfn_%s(kcxt", devexpr.expr_name);
-	foreach (cell, minmax->args)
-	{
-		Node	   *expr = lfirst(cell);
-
-		if (dtype->type_oid != exprType(expr))
-			elog(ERROR, "device type mismatch in LEAST / GREATEST: %s / %s",
-				 format_type_be(dtype->type_oid),
-				 format_type_be(exprType(expr)));
-
-		appendStringInfo(&context->str, ", ");
-		codegen_expression_walker(expr, context);
-    }
-	appendStringInfo(&context->str, ")");
+	else
+		elog(ERROR, "codegen: unexpected device function class %d at %s",
+			 dfunc->func_class, dfunc->func_sqlname);
 }
 
 static void
@@ -3111,6 +2704,7 @@ pgstrom_codegen_expression(Node *expr, codegen_context *context)
 void
 pgstrom_codegen_func_declarations(StringInfo buf, codegen_context *context)
 {
+#if 0
 	ListCell	   *lc;
 
 	foreach (lc, context->func_defs)
@@ -3120,6 +2714,7 @@ pgstrom_codegen_func_declarations(StringInfo buf, codegen_context *context)
 		if (dfunc->func_decl)
 			appendStringInfo(buf, "%s\n", dfunc->func_decl);
 	}
+#endif
 }
 
 /*

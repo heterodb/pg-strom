@@ -1265,8 +1265,12 @@ plcuda_codegen(Form_pg_proc procForm, plcudaCodeProperty *prop)
 	return kern.data;
 }
 
+#ifdef NOT_USED
 /*
  * pgstrom_devfunc_construct_plcuda
+ *
+ * It setup device function when PL/CUDA is used as inline device function.
+ * Right now, we disabled support of the feature at the time of v2.0.
  */
 bool
 pgstrom_devfunc_construct_plcuda(devfunc_info *entry, HeapTuple proc_tuple)
@@ -1407,6 +1411,7 @@ not_supported:
 		pfree(prop.kern_post);
 	return false;
 }
+#endif
 
 static void
 plcuda_cleanup_resources(ResourceReleasePhase phase,

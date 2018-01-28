@@ -397,7 +397,10 @@ construct_flat_cuda_source(uint32 extra_flags,
 	if ((extra_flags & DEVKERNEL_NEEDS_RANGETYPE) == DEVKERNEL_NEEDS_RANGETYPE)
 		ofs += snprintf(source + ofs, len - ofs,
 						"#include \"cuda_rangetype.h\"\n");
-
+	/* cuda_primitive.h (must be last) */
+	if ((extra_flags & DEVKERNEL_NEEDS_PRIMITIVE) == DEVKERNEL_NEEDS_PRIMITIVE)
+		ofs += snprintf(source + ofs, len - ofs,
+                        "#include \"cuda_primitive.h\"\n");
 	/* pg_anytype_t declaration */
 	pg_anytype =
 		"typedef union {\n"
@@ -777,6 +780,8 @@ build_cuda_program(program_cache_entry *src_entry)
 		/* library linkage needs relocatable PTX */
 		if (src_entry->extra_flags & DEVKERNEL_NEEDS_LINKAGE)
 			options[opt_index++] = "--relocatable-device-code=true";
+		/* enables c++11 template features */
+		options[opt_index++] = "--std=c++11";
 
 		/*
 		 * Kick runtime compiler

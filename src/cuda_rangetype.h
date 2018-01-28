@@ -626,7 +626,7 @@ pgfn_generic_range_le(kern_context *kcxt,
 template <typename pg_range_type>
 STATIC_FUNCTION(pg_int4_t)
 pgfn_generic_range_cmp(kern_context *kcxt,
-					  pg_range_type arg1, pg_range_type arg2)
+					   pg_range_type arg1, pg_range_type arg2)
 {
 	pg_int4_t	result;
 
@@ -634,6 +634,35 @@ pgfn_generic_range_cmp(kern_context *kcxt,
 	if (!result.isnull)
 		result.value = __range_cmp(&arg1.value, &arg2.value);
 	return result;
+}
+
+/*
+ * MEMO: We don't use C++ template for the type common interface function,
+ * because it is considered as a default one for any other unrelated
+ * functions, thus, it makes hard to find bugs!
+ */
+STATIC_INLINE(pg_int4_t)
+pgfn_type_compare(kern_context *kcxt, pg_int4range_t arg1, pg_int4range_t arg2)
+{
+	return pgfn_generic_range_cmp(kcxt, arg1, arg2);
+}
+
+STATIC_INLINE(pg_int4_t)
+pgfn_type_compare(kern_context *kcxt, pg_int8range_t arg1, pg_int8range_t arg2)
+{
+	return pgfn_generic_range_cmp(kcxt, arg1, arg2);
+}
+
+STATIC_INLINE(pg_int4_t)
+pgfn_type_compare(kern_context *kcxt, pg_tsrange_t arg1, pg_tsrange_t arg2)
+{
+	return pgfn_generic_range_cmp(kcxt, arg1, arg2);
+}
+
+STATIC_INLINE(pg_int4_t)
+pgfn_type_compare(kern_context *kcxt, pg_tstzrange_t arg1, pg_tstzrange_t arg2)
+{
+	return pgfn_generic_range_cmp(kcxt, arg1, arg2);
 }
 
 template <typename RangeType>

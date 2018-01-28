@@ -143,9 +143,11 @@ typedef cl_ulong	Datum;
 #define FLT_MAX			__int_as_float(0x7f7fffffU)
 #define FLT_MIN			__int_as_float(0x00800000U)
 #define FLT_INFINITY	__int_as_float(0x7f800000U)
+#define FLT_NAN			__int_as_float(0x7fffffffU)
 #define DBL_MAX			__longlong_as_double(0x7fefffffffffffffULL)
 #define DBL_MIN			__longlong_as_double(0x0010000000000000ULL)
 #define DBL_INFINITY	__longlong_as_double(0x7ff0000000000000ULL)
+#define DBL_NAN			__longlong_as_double(0x7fffffffffffffffULL)
 
 /*
  * MEMO: We takes dynamic local memory using cl_ulong data-type because of
@@ -932,9 +934,8 @@ typedef struct {
 		if (extra_buf)										\
 			*((BASE *)extra_buf) = datum.value;				\
 		return sizeof(BASE);								\
-	}
-
-#define STROMCL_SIMPLE_PARAMREF_TEMPLATE(NAME,BASE)			\
+	}														\
+															\
 	STATIC_FUNCTION(pg_##NAME##_t)							\
 	pg_##NAME##_param(kern_context *kcxt,cl_uint param_id)	\
 	{														\
@@ -953,27 +954,6 @@ typedef struct {
 		else												\
 			result.isnull = true;							\
 															\
-		return result;										\
-	}
-
-#define STROMCL_SIMPLE_NULLTEST_TEMPLATE(NAME)				\
-	STATIC_FUNCTION(pg_bool_t)								\
-	pgfn_##NAME##_isnull(kern_context *kcxt, pg_##NAME##_t arg)	\
-	{														\
-		pg_bool_t result;									\
-															\
-		result.isnull = false;								\
-		result.value = arg.isnull;							\
-		return result;										\
-	}														\
-															\
-	STATIC_FUNCTION(pg_bool_t)								\
-	pgfn_##NAME##_isnotnull(kern_context *kcxt, pg_##NAME##_t arg)	\
-	{														\
-		pg_bool_t result;									\
-															\
-		result.isnull = false;								\
-		result.value = !arg.isnull;							\
 		return result;										\
 	}
 
@@ -1009,9 +989,8 @@ typedef struct {
 		if (extra_buf)										\
 			memcpy(extra_buf, &datum.value, sizeof(BASE));	\
 		return sizeof(BASE);								\
-	}
-
-#define STROMCL_INDIRECT_PARAMREF_TEMPLATE(NAME,BASE)		\
+	}														\
+															\
 	STATIC_FUNCTION(pg_##NAME##_t)							\
 	pg_##NAME##_param(kern_context *kcxt,cl_uint param_id)	\
 	{														\
@@ -1070,38 +1049,33 @@ pg_common_comp_crc32(const cl_uint *crc32_table,
 		return hash;											\
 	}
 
-#define STROMCL_SIMPLE_TYPE_TEMPLATE(NAME,BASE)			\
-	STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME,BASE)			\
-	STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE)			\
-	STROMCL_SIMPLE_PARAMREF_TEMPLATE(NAME,BASE)			\
-	STROMCL_SIMPLE_NULLTEST_TEMPLATE(NAME)				\
-	STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(NAME,BASE)		\
-	STATIC_INLINE(Datum)								\
-	pg_##NAME##_as_datum(void *addr)					\
-	{													\
-		BASE	value = *((BASE *) addr);				\
-		if (sizeof(BASE) == sizeof(cl_char))			\
-			return SET_1_BYTE(value);					\
-		else if (sizeof(BASE) == sizeof(cl_short))		\
-			return SET_2_BYTES(value);					\
-		else if (sizeof(BASE) == sizeof(cl_int))		\
-			return SET_4_BYTES(value);					\
-		else											\
-			return SET_8_BYTES(value);					\
+#define __STROMCL_SIMPLE_COMPARE_OPER_TEMPLATE(NAME,OPER)	\
+	STATIC_INLINE(pg_bool_t)								\
+	operator OPER (pg_##NAME##_t arg1, pg_##NAME##_t arg2)	\
+	{														\
+		pg_bool_t result;									\
+															\
+		result.isnull = arg1.isnull | arg2.isnull;			\
+		if (!result.isnull)									\
+			result.value = (arg1.value OPER arg2.value);	\
+		return result;										\
 	}
+#define STROMCL_SIMPLE_COMPARE_OPER_TEMPLATE(NAME)			\
+	__STROMCL_SIMPLE_COMPARE_OPER_TEMPLATE(NAME,==)			\
+	__STROMCL_SIMPLE_COMPARE_OPER_TEMPLATE(NAME,!=)			\
+	__STROMCL_SIMPLE_COMPARE_OPER_TEMPLATE(NAME,<)			\
+	__STROMCL_SIMPLE_COMPARE_OPER_TEMPLATE(NAME,<=)			\
+	__STROMCL_SIMPLE_COMPARE_OPER_TEMPLATE(NAME,>)			\
+	__STROMCL_SIMPLE_COMPARE_OPER_TEMPLATE(NAME,>=)
 
-#define STROMCL_SIMPLE_FLOAT_TYPE_TEMPLATE(NAME,BASE)	\
-	STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME,BASE)			\
-	STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE)			\
-	STROMCL_SIMPLE_PARAMREF_TEMPLATE(NAME,BASE)			\
-	STROMCL_SIMPLE_NULLTEST_TEMPLATE(NAME)				\
-	STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(NAME,BASE)		\
+#define STROMCL_SIMPLE_TYPE_TEMPLATE(NAME,BASE)		\
+	STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME,BASE)		\
+	STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE)		\
+	STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(NAME,BASE)
 
 #define STROMCL_INDIRECT_TYPE_TEMPLATE(NAME,BASE)	\
 	STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME,BASE)		\
 	STROMCL_INDIRECT_VARREF_TEMPLATE(NAME,BASE)		\
-	STROMCL_INDIRECT_PARAMREF_TEMPLATE(NAME,BASE)	\
-	STROMCL_SIMPLE_NULLTEST_TEMPLATE(NAME)          \
 	STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(NAME,BASE)	\
 	STATIC_INLINE(Datum)							\
 	pg_##NAME##_as_datum(void *addr)				\
@@ -1113,60 +1087,91 @@ pg_common_comp_crc32(const cl_uint *crc32_table,
 #ifndef PG_BOOL_TYPE_DEFINED
 #define PG_BOOL_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(bool, cl_bool)
+STATIC_INLINE(Datum)
+pg_bool_as_datum(void *addr)
+{
+	cl_bool		val = *((cl_bool *)addr);
+	return SET_1_BYTE(val);
+}
+STROMCL_SIMPLE_COMPARE_OPER_TEMPLATE(bool)
 #endif
 
 /* pg_int2_t */
 #ifndef PG_INT2_TYPE_DEFINED
 #define PG_INT2_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(int2, cl_short)
+STATIC_INLINE(Datum)
+pg_int2_as_datum(void *addr)
+{
+	cl_short	val = *((cl_short *)addr);
+	return SET_2_BYTES(val);
+}
+STROMCL_SIMPLE_COMPARE_OPER_TEMPLATE(int2)
 #endif
 
 /* pg_int4_t */
 #ifndef PG_INT4_TYPE_DEFINED
 #define PG_INT4_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(int4, cl_int)
+STATIC_INLINE(Datum)
+pg_int4_as_datum(void *addr)
+{
+	cl_int		val = *((cl_int *)addr);
+	return SET_4_BYTES(val);
+}
+STROMCL_SIMPLE_COMPARE_OPER_TEMPLATE(int4)
 #endif
 
 /* pg_int8_t */
 #ifndef PG_INT8_TYPE_DEFINED
 #define PG_INT8_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(int8, cl_long)
+STATIC_INLINE(Datum)
+pg_int8_as_datum(void *addr)
+{
+	cl_long		val = *((cl_long *)addr);
+	return SET_8_BYTES(val);
+}
+STROMCL_SIMPLE_COMPARE_OPER_TEMPLATE(int8)
 #endif
 
 /* pg_float2_t */
 #ifndef PG_FLOAT2_TYPE_DEFINED
 #define PG_FLOAT2_TYPE_DEFINED
-STROMCL_SIMPLE_FLOAT_TYPE_TEMPLATE(float2, cl_half)
+STROMCL_SIMPLE_TYPE_TEMPLATE(float2, cl_half)
 STATIC_INLINE(Datum)
 pg_float2_as_datum(void *addr)
 {
 	cl_half		val = *((cl_half *)addr);
 	return SET_2_BYTES(__half_as_short(val));
 }
+STROMCL_SIMPLE_COMPARE_OPER_TEMPLATE(float2)
 #endif
 
 /* pg_float4_t */
 #ifndef PG_FLOAT4_TYPE_DEFINED
 #define PG_FLOAT4_TYPE_DEFINED
-STROMCL_SIMPLE_FLOAT_TYPE_TEMPLATE(float4, cl_float)
+STROMCL_SIMPLE_TYPE_TEMPLATE(float4, cl_float)
 STATIC_INLINE(Datum)
 pg_float4_as_datum(void *addr)
 {
 	cl_float	val = *((cl_float *)addr);
 	return SET_4_BYTES(__float_as_int(val));
 }
+STROMCL_SIMPLE_COMPARE_OPER_TEMPLATE(float4)
 #endif
 
 /* pg_float8_t */
 #ifndef PG_FLOAT8_TYPE_DEFINED
 #define PG_FLOAT8_TYPE_DEFINED
-STROMCL_SIMPLE_FLOAT_TYPE_TEMPLATE(float8, cl_double)
+STROMCL_SIMPLE_TYPE_TEMPLATE(float8, cl_double)
 STATIC_INLINE(Datum)
 pg_float8_as_datum(void *addr)
 {
 	cl_double	val = *((cl_double *)addr);
 	return SET_8_BYTES(__double_as_longlong(val));
 }
+STROMCL_SIMPLE_COMPARE_OPER_TEMPLATE(float8)
 #endif
 
 /*
@@ -1485,103 +1490,32 @@ toast_decompress_datum(char *buffer, cl_uint buflen,
 }
 
 /*
- * functions to reference variable length variables
+ * template to reference variable length variables
  */
-STROMCL_SIMPLE_DATATYPE_TEMPLATE(varlena, varlena *)
-
-STATIC_FUNCTION(pg_varlena_t)
-pg_varlena_datum_ref(kern_context *kcxt,
-					 void *datum)
-{
-	varlena		   *vl_val = (varlena *) datum;
-	pg_varlena_t	result;
-
-	if (!datum)
-		result.isnull = true;
-	else
-	{
-		if (VARATT_IS_4B_U(vl_val) || VARATT_IS_1B(vl_val))
-		{
-			result.isnull = false;
-			result.value = vl_val;
-		}
-		else
-		{
-			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-		}
-	}
-	return result;
-}
-
-STATIC_FUNCTION(cl_uint)
-pg_varlena_datum_store(kern_context *kcxt,
-					   void *extra_buf,
-					   pg_varlena_t datum)
-{
-	cl_uint		vl_size;
-
-	if (datum.isnull)
-		return 0;
-	vl_size = VARSIZE_ANY(datum.value);
-	if (extra_buf)
-		memcpy(extra_buf, datum.value, vl_size);
-	return vl_size;
-}
-
-STATIC_FUNCTION(pg_varlena_t)
-pg_varlena_param(kern_context *kcxt, cl_uint param_id)
-{
-	kern_parambuf  *kparams = kcxt->kparams;
-	pg_varlena_t	result;
-
-	if (param_id < kparams->nparams &&
-		kparams->poffset[param_id] > 0)
-	{
-		varlena *vl_val = (varlena *)((char *)kparams +
-									  kparams->poffset[param_id]);
-		if (VARATT_IS_4B_U(vl_val) || VARATT_IS_1B(vl_val))
-		{
-			result.value = vl_val;
-			result.isnull = false;
-		}
-		else
-		{
-			result.isnull = true;
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-		}
-	}
-	else
-		result.isnull = true;
-
-	return result;
-}
-
-STROMCL_SIMPLE_NULLTEST_TEMPLATE(varlena)
-
-STATIC_INLINE(cl_uint)
-pg_varlena_comp_crc32(const cl_uint *crc32_table,
-					  cl_uint hash, pg_varlena_t datum)
-{
-	if (!datum.isnull)
-	{
-		hash = pg_common_comp_crc32(crc32_table,
-									hash,
-									VARDATA_ANY(datum.value),
-									VARSIZE_ANY_EXHDR(datum.value));
-	}
-	return hash;
-}
-
-#define STROMCL_VARLENA_DATATYPE_TEMPLATE(NAME)				\
-	typedef pg_varlena_t	pg_##NAME##_t;
+#define STROMCL_VARLENA_DATATYPE_TEMPLATE(NAME)					\
+	STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME, varlena *)
 
 #define STROMCL_VARLENA_VARREF_TEMPLATE(NAME)					\
 	STATIC_INLINE(pg_##NAME##_t)								\
 	pg_##NAME##_datum_ref(kern_context *kcxt,					\
 						  void *datum)							\
 	{															\
-		return pg_varlena_datum_ref(kcxt,datum);				\
+		pg_##NAME##_t result;									\
+																\
+		if (!datum)												\
+			result.isnull = true;								\
+		else if (!VARATT_IS_4B_U(datum) &&						\
+				 !VARATT_IS_1B(datum))							\
+		{														\
+			result.isnull = true;								\
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);	\
+		}														\
+		else													\
+		{														\
+			result.isnull = false;								\
+			result.value = (varlena *)datum;					\
+		}														\
+		return result;											\
 	}															\
 																\
 	STATIC_INLINE(cl_uint)										\
@@ -1589,26 +1523,42 @@ pg_varlena_comp_crc32(const cl_uint *crc32_table,
 							void *extra_buf,					\
 							pg_##NAME##_t datum)				\
 	{															\
-		return pg_varlena_datum_store(kcxt,extra_buf,datum);	\
-	}
-
-#define STROMCL_VARLENA_PARAMREF_TEMPLATE(NAME)					\
+		cl_uint		vl_size;									\
+																\
+		if (datum.isnull)										\
+			return 0;											\
+		vl_size = VARSIZE_ANY(datum.value);						\
+		if (extra_buf)											\
+			memcpy(extra_buf, datum.value, vl_size);			\
+		return vl_size;											\
+	}															\
+																\
 	STATIC_INLINE(pg_##NAME##_t)								\
 	pg_##NAME##_param(kern_context *kcxt, cl_uint param_id)		\
 	{															\
-		return pg_varlena_param(kcxt,param_id);					\
-	}
-
-#define STROMCL_VARLENA_NULLTEST_TEMPLATE(NAME)					\
-	STATIC_INLINE(pg_bool_t)									\
-	pgfn_##NAME##_isnull(kern_context *kcxt, pg_##NAME##_t arg)	\
-	{															\
-		return pgfn_varlena_isnull(kcxt, arg);					\
-	}															\
-	STATIC_INLINE(pg_bool_t)									\
-	pgfn_##NAME##_isnotnull(kern_context *kcxt, pg_##NAME##_t arg)	\
-	{															\
-		return pgfn_varlena_isnotnull(kcxt, arg);				\
+		kern_parambuf  *kparams = kcxt->kparams;				\
+		pg_##NAME##_t	result;									\
+																\
+		if (param_id < kparams->nparams &&						\
+			kparams->poffset[param_id] > 0)						\
+		{														\
+			varlena *vl_val = (varlena *)						\
+				((char *)kparams + kparams->poffset[param_id]);	\
+			if (VARATT_IS_4B_U(vl_val) || VARATT_IS_1B(vl_val))	\
+			{													\
+				result.value = vl_val;							\
+				result.isnull = false;							\
+			}													\
+			else												\
+			{													\
+				result.isnull = true;							\
+				STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck); \
+			}													\
+		}														\
+		else													\
+			result.isnull = true;								\
+																\
+		return result;											\
 	}
 
 #define STROMCL_VARLENA_COMP_CRC32_TEMPLATE(NAME)				\
@@ -1616,20 +1566,30 @@ pg_varlena_comp_crc32(const cl_uint *crc32_table,
 	pg_##NAME##_comp_crc32(const cl_uint *crc32_table,			\
 						   cl_uint hash, pg_##NAME##_t datum)	\
 	{															\
-		return pg_varlena_comp_crc32(crc32_table, hash, datum);	\
+		if (datum.isnull)										\
+			return hash;										\
+		hash = pg_common_comp_crc32(crc32_table,				\
+									hash,						\
+									VARDATA_ANY(datum.value),	\
+									VARSIZE_ANY_EXHDR(datum.value)); \
+		return hash;											\
 	}
 
-#define STROMCL_VARLENA_TYPE_TEMPLATE(NAME)			\
-	STROMCL_VARLENA_DATATYPE_TEMPLATE(NAME)			\
-	STROMCL_VARLENA_VARREF_TEMPLATE(NAME)			\
-	STROMCL_VARLENA_PARAMREF_TEMPLATE(NAME)			\
-	STROMCL_VARLENA_NULLTEST_TEMPLATE(NAME)			\
-	STROMCL_VARLENA_COMP_CRC32_TEMPLATE(NAME)		\
-	STATIC_INLINE(Datum)							\
-	pg_##NAME##_as_datum(void *addr)				\
-	{												\
-		return PointerGetDatum(addr);				\
+#define STROMCL_VARLENA_TYPE_TEMPLATE(NAME)						\
+	STROMCL_VARLENA_DATATYPE_TEMPLATE(NAME)						\
+	STROMCL_VARLENA_VARREF_TEMPLATE(NAME)						\
+	STROMCL_VARLENA_COMP_CRC32_TEMPLATE(NAME)					\
+	STATIC_INLINE(Datum)										\
+	pg_##NAME##_as_datum(void *addr)							\
+	{															\
+		return PointerGetDatum(addr);							\
 	}
+
+/* generic varlena */
+#ifndef PG_VARLENA_TYPE_DEFINED
+#define PG_VARLENA_TYPE_DEFINED
+STROMCL_VARLENA_TYPE_TEMPLATE(varlena)
+#endif
 
 /* pg_bytea_t */
 #ifndef PG_BYTEA_TYPE_DEFINED
@@ -2528,19 +2488,106 @@ operator || (pg_bool_t arg1, pg_bool_t arg2)
 }
 
 /*
- * macros for general binary compare functions
+ * Support routine for COALESCE / GREATEST / LEAST
  */
-#define devfunc_int_comp(x,y)					\
-	((x) < (y) ? -1 : ((x) > (y) ? 1 : 0))
+template <typename T>
+STATIC_INLINE(T)
+PG_COALESCE(kern_context *kcxt, const T& arg)
+{
+	return arg;
+}
 
-#define devfunc_float_comp(x,y)					\
-	(isnan(x)									\
-	 ? (isnan(y)								\
-		? 0		/* NAN = NAM */					\
-		: 1)	/* NAN > non-NAN */				\
-	 : (isnan(y)								\
-		? -1	/* non-NAN < NAN */				\
-		: devfunc_int_comp((x),(y))))
+template <typename T, typename ...R>
+STATIC_INLINE(T)
+PG_COALESCE(kern_context *kcxt, const T& arg1, const R&... args_rest)
+{
+	if (!arg1.isnull)
+		return arg1;
+	return PG_COALESCE(kcxt, args_rest...);
+}
+
+template <typename T>
+STATIC_INLINE(T)
+PG_GREATEST(kern_context *kcxt, const T& arg)
+{
+	return arg;
+}
+
+template <typename T, typename ...R>
+STATIC_INLINE(T)
+PG_GREATEST(kern_context *kcxt, const T& arg1, const R&... args_rest)
+{
+	if (arg1.isnull)
+		return PG_GREATEST(kcxt, args_rest...);
+	else
+	{
+		T			arg2 = PG_GREATEST(kcxt, args_rest...);
+		pg_bool_t	cmp;
+
+		cmp = pgfn_type_compare(kcxt, arg1, arg2);
+		if (cmp.isnull)
+			return arg1;
+		else if (cmp.value > 0)
+			return arg1;
+		else
+			return arg2;
+	}
+}
+
+template <typename T>
+STATIC_INLINE(T)
+PG_LEAST(kern_context *kcxt, const T& arg)
+{
+	return arg;
+}
+
+template <typename T, typename... R>
+STATIC_INLINE(T)
+PG_LEAST(kern_context *kcxt, const T& arg1, const R&... args_rest)
+{
+	if (arg1.isnull)
+		return PG_LEAST(kcxt, args_rest...);
+	else
+	{
+		T			arg2 = PG_LEAST(kcxt, args_rest...);
+		pg_bool_t	cmp;
+
+		cmp = pgfn_type_compare(kcxt, arg1, arg2);
+		if (cmp.isnull)
+			return arg1;
+		else if (cmp.value > 0)
+			return arg2;
+		else
+			return arg1;
+	}
+}
+
+/*
+ * Support routine for NullTest
+ */
+template <typename T>
+STATIC_INLINE(pg_bool_t)
+PG_ISNULL(kern_context *kcxt, T arg)
+{
+	pg_bool_t	result;
+
+	result.isnull = false;
+	result.value = arg.isnull;
+
+	return result;
+}
+
+template <typename T>
+STATIC_INLINE(pg_bool_t)
+PG_ISNOTNULL(kern_context *kcxt, T arg)
+{
+	pg_bool_t	result;
+
+	result.isnull = false;
+	result.value = !arg.isnull;
+
+	return result;
+}
 
 /*
  * Functions for BooleanTest

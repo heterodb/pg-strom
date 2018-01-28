@@ -385,6 +385,7 @@ struct GpuTask
 #define DEVKERNEL_NEEDS_MATHLIB			0x00002000
 #define DEVKERNEL_NEEDS_MISC			0x00004000
 #define DEVKERNEL_NEEDS_RANGETYPE		0x00008000
+#define DEVKERNEL_NEEDS_PRIMITIVE		0x00010000
 
 #define DEVKERNEL_NEEDS_CURAND			0x00100000
 #define DEVKERNEL_BUILD_DEBUG_INFO		0x80000000
@@ -436,7 +437,7 @@ typedef struct devfunc_info {
 	devtype_info *func_rettype;	/* result type by devtype_info */
 	const char *func_sqlname;	/* name of the function in SQL side */
 	const char *func_devname;	/* name of the function in device side */
-	const char *func_decl;	/* declaration of device function, if any */
+	char		func_class;		/* 'F', 'b', 'l' or 'r' */
 } devfunc_info;
 
 typedef struct devexpr_info {
@@ -1059,8 +1060,6 @@ extern void pgstrom_init_gpupreagg(void);
 /*
  * pl_cuda.c
  */
-extern bool pgstrom_devfunc_construct_plcuda(devfunc_info *entry,
-											 HeapTuple proc_tuple);
 extern void pgstrom_init_plcuda(void);
 
 /*

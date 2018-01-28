@@ -44,9 +44,6 @@ bpchar_truelen(struct varlena *arg)
 #define PG_BPCHAR_TYPE_DEFINED
 STROMCL_VARLENA_DATATYPE_TEMPLATE(bpchar)
 STROMCL_VARLENA_VARREF_TEMPLATE(bpchar)
-//STROMCL_VARLENA_VARSTORE_TEMPLATE(bpchar)
-STROMCL_VARLENA_PARAMREF_TEMPLATE(bpchar)
-STROMCL_VARLENA_NULLTEST_TEMPLATE(bpchar)
 /* pg_bpchar_comp_crc32 has to be defined with own way */
 STATIC_FUNCTION(cl_uint)
 pg_bpchar_comp_crc32(const cl_uint *crc32_table,
@@ -170,7 +167,7 @@ pgfn_bpcharge(kern_context *kcxt, pg_bpchar_t arg1, pg_bpchar_t arg2)
 }
 
 STATIC_FUNCTION(pg_int4_t)
-pgfn_bpcharcmp(kern_context *kcxt, pg_bpchar_t arg1, pg_bpchar_t arg2)
+pgfn_type_compare(kern_context *kcxt, pg_bpchar_t arg1, pg_bpchar_t arg2)
 {
 	pg_int4_t	result;
 
@@ -309,7 +306,7 @@ pgfn_text_ge(kern_context *kcxt, pg_text_t arg1, pg_text_t arg2)
 }
 
 STATIC_FUNCTION(pg_int4_t)
-pgfn_text_cmp(kern_context *kcxt, pg_text_t arg1, pg_text_t arg2)
+pgfn_type_compare(kern_context *kcxt, pg_text_t arg1, pg_text_t arg2)
 {
 	pg_int4_t	result;
 

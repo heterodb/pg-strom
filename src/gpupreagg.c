@@ -3372,20 +3372,33 @@ gpupreagg_codegen_keymatch(StringInfo kern,
 			"  datum = kern_get_datum_slot(y_kds,%u,y_index);\n"
 			"  temp_y.%s_v = pg_%s_datum_ref(kcxt,datum);\n"
 			"  if (!temp_x.%s_v.isnull && !temp_y.%s_v.isnull)\n"
-			"  {\n"
-			"    if (!EVAL(pgfn_%s(kcxt, temp_x.%s_v, temp_y.%s_v)))\n"
+			"  {\n",
+			tle->resno-1,
+			dtype->type_name, dtype->type_name,
+			tle->resno-1,
+			dtype->type_name, dtype->type_name,
+			dtype->type_name, dtype->type_name);
+		if (dfunc->func_class == 'F')
+			appendStringInfo(
+				kern,
+				"    if (!EVAL(pgfn_%s(kcxt, temp_x.%s_v, temp_y.%s_v)))\n",
+				dfunc->func_devname, dtype->type_name, dtype->type_name);
+		else if (dfunc->func_class == 'b')
+			appendStringInfo(
+				kern,
+				"    if (!EVAL(temp_x.%s_v %s temp_y.%s_v))\n",
+				dtype->type_name, dfunc->func_devname, dtype->type_name);
+		else
+			elog(ERROR, "Bug? unexpected device function class");
+
+		appendStringInfo(
+			kern,
 			"      return false;\n"
 			"  }\n"
 			"  else if ((temp_x.%s_v.isnull && !temp_y.%s_v.isnull) ||\n"
 			"           (!temp_x.%s_v.isnull && temp_y.%s_v.isnull))\n"
 			"      return false;\n"
 			"\n",
-			tle->resno-1,
-			dtype->type_name, dtype->type_name,
-			tle->resno-1,
-			dtype->type_name, dtype->type_name,
-			dtype->type_name, dtype->type_name,
-			dfunc->func_devname, dtype->type_name, dtype->type_name,
 			dtype->type_name, dtype->type_name,
 			dtype->type_name, dtype->type_name);
 	}

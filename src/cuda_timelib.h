@@ -197,11 +197,25 @@ struct pg_tm
 #ifndef PG_DATE_TYPE_DEFINED
 #define PG_DATE_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(date,DateADT)
+STATIC_INLINE(Datum)
+pg_date_as_datum(void *addr)
+{
+	DateADT		val = *((DateADT *)addr);
+	return SET_4_BYTES(val);
+}
+STROMCL_SIMPLE_COMPARE_OPER_TEMPLATE(date)
 #endif
 
 #ifndef PG_TIME_TYPE_DEFINED
 #define PG_TIME_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(time,TimeADT)
+STATIC_INLINE(Datum)
+pg_time_as_datum(void *addr)
+{
+	TimeADT		val = *((TimeADT *)addr);
+	return SET_8_BYTES(val);
+}
+STROMCL_SIMPLE_COMPARE_OPER_TEMPLATE(TimeADT)
 #endif
 
 #ifndef PG_TIMETZ_TYPE_DEFINED
@@ -212,11 +226,25 @@ STROMCL_INDIRECT_TYPE_TEMPLATE(timetz,TimeTzADT)
 #ifndef PG_TIMESTAMP_TYPE_DEFINED
 #define PG_TIMESTAMP_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(timestamp,Timestamp)
+STATIC_INLINE(Datum)
+pg_timestamp_as_datum(void *addr)
+{
+	Timestamp	val = *((Timestamp *)addr);
+	return SET_8_BYTES(val);
+}
+STROMCL_SIMPLE_COMPARE_OPER_TEMPLATE(Timestamp)
 #endif
 
 #ifndef PG_TIMESTAMPTZ_TYPE_DEFINED
 #define PG_TIMESTAMPTZ_TYPE_DEFINED
 STROMCL_SIMPLE_TYPE_TEMPLATE(timestamptz,TimestampTz)
+STATIC_INLINE(Datum)
+pg_timestamptz_as_datum(void *addr)
+{
+	TimestampTz	val = *((TimestampTz *)addr);
+	return SET_8_BYTES(val);
+}
+STROMCL_SIMPLE_COMPARE_OPER_TEMPLATE(TimestampTz)
 #endif
 
 #ifndef PG_INTERVAL_TYPE_DEFINED
@@ -1824,6 +1852,83 @@ pgfn_timestamp_timestamptz(kern_context *kcxt, pg_timestamp_t arg1)
 }
 
 /*
+ * Simple comparison
+ */
+STATIC_INLINE(pg_int4_t)
+pgfn_type_cmp(kern_context *kcxt, pg_date_t arg1, pg_date_t arg2)
+{
+	pg_int4_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		if (arg1.value < arg2.value)
+			result.value = 1;
+		else if (arg1.value > arg2.value)
+			result.value = -1;
+		else
+			result.value = 0;
+	}
+	return result;
+}
+
+STATIC_INLINE(pg_int4_t)
+pgfn_time_cmp(kern_context *kcxt, pg_time_t arg1, pg_time_t arg2)
+{
+	pg_int4_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		if (arg1.value < arg2.value)
+			result.value = 1;
+		else if (arg1.value > arg2.value)
+			result.value = -1;
+		else
+			result.value = 0;
+	}
+	return result;
+}
+
+STATIC_INLINE(pg_int4_t)
+pgfn_type_compare(kern_context *kcxt,
+				  pg_timestamp_t arg1, pg_timestamp_t arg2)
+{
+	pg_int4_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		if (arg1.value < arg2.value)
+			result.value = 1;
+		else if (arg1.value > arg2.value)
+			result.value = -1;
+		else
+			result.value = 0;
+	}
+	return result;
+}
+
+STATIC_INLINE(pg_int4_t)
+pgfn_type_compare(kern_context *kcxt,
+				  pg_timestamptz_t arg1, pg_timestamptz_t arg2)
+{
+	pg_int4_t	result;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		if (arg1.value < arg2.value)
+			result.value = 1;
+		else if (arg1.value > arg2.value)
+			result.value = -1;
+		else
+			result.value = 0;
+	}
+	return result;
+}
+
+/*
  * Time/Date operators
  */
 STATIC_FUNCTION(pg_date_t)
@@ -2525,10 +2630,9 @@ pgfn_timetz_gt(kern_context *kcxt, pg_timetz_t arg1, pg_timetz_t arg2)
 }
 
 STATIC_FUNCTION(pg_int4_t)
-pgfn_timetz_cmp(kern_context *kcxt, pg_timetz_t arg1, pg_timetz_t arg2)
+pgfn_type_compare(kern_context *kcxt, pg_timetz_t arg1, pg_timetz_t arg2)
 {
 	pg_int4_t	result;
-
 
 	if (arg1.isnull || arg2.isnull) 
 		result.isnull = true;
@@ -2537,8 +2641,7 @@ pgfn_timetz_cmp(kern_context *kcxt, pg_timetz_t arg1, pg_timetz_t arg2)
 		result.isnull = false;
 		result.value  = timetz_cmp_internal(arg1.value, arg2.value);
 	}
-
-    return result;	
+	return result;	
 }
 
 /*
@@ -3107,7 +3210,7 @@ pgfn_interval_gt(kern_context *kcxt, pg_interval_t arg1, pg_interval_t arg2)
 }
 
 STATIC_FUNCTION(pg_int4_t)
-pgfn_interval_cmp(kern_context *kcxt, pg_interval_t arg1, pg_interval_t arg2)
+pgfn_type_compare(kern_context *kcxt, pg_interval_t arg1, pg_interval_t arg2)
 {
 	pg_int4_t	result;
 
