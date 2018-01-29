@@ -2253,6 +2253,7 @@ __form_kern_heaptuple(void    *buffer,		/* out */
 		kern_colmeta   *cmeta = &colmeta[i];
 		Datum			datum = tup_values[i];
 		cl_bool			isnull = (!tup_isnull ? false : tup_isnull[i]);
+		cl_int			padding;
 
 		if (isnull)
 		{
@@ -2264,16 +2265,19 @@ __form_kern_heaptuple(void    *buffer,		/* out */
 			if (tup_hasnull)
 				htup->t_bits[i >> 3] |= (1 << (i & 0x07));
 
-			while (TYPEALIGN(cmeta->attalign, curr) != curr)
-				((char *)htup)[curr++] = '\0';
+			padding = TYPEALIGN(cmeta->attalign, curr) - curr;
 			if (cmeta->attbyval)
 			{
+				while (padding-- > 0)
+					((char *)htup)[curr++] = '\0';
 				assert(cmeta->attlen <= sizeof(datum));
 				memcpy((char *)htup + curr, &datum, cmeta->attlen);
 				curr += cmeta->attlen;
 			}
 			else if (cmeta->attlen > 0)
 			{
+				while (padding-- > 0)
+					((char *)htup)[curr++] = '\0';
 				memcpy((char *)htup + curr,
 					   DatumGetPointer(datum), cmeta->attlen);
 				curr += cmeta->attlen;
@@ -2282,6 +2286,11 @@ __form_kern_heaptuple(void    *buffer,		/* out */
 			{
 				cl_uint		vl_len = VARSIZE_ANY(datum);
 
+				if (!VARATT_IS_1B(datum))
+				{
+					while (padding-- > 0)
+						((char *)htup)[curr++] = '\0';
+				}
 				t_infomask |= HEAP_HASVARWIDTH;
 				memcpy((char *)htup + curr,
 					   DatumGetPointer(datum), vl_len);
