@@ -424,10 +424,7 @@ typedef struct devtype_info {
 } devtype_info;
 
 typedef struct devfunc_info {
-	pg_crc32c	hash;			/* hash-value on the cache */
 	Oid			func_oid;		/* OID of the SQL function */
-	Oid			func_rettype_oid; /* OID of the function result */
-	oidvector  *func_argtypes;	/* OID vector of function arguments */
 	Oid			func_collid;	/* OID of collation, if collation aware */
 	bool		func_is_negative;	/* True, if not supported by GPU */
 	bool		func_is_strict;		/* True, if NULL strict function */

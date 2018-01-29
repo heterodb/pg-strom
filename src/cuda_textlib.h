@@ -338,6 +338,12 @@ pgfn_textlen(kern_context *kcxt, pg_text_t arg1)
 STROMCL_VARLENA_TYPE_TEMPLATE(varchar)
 #endif
 
+/* binary compatible type cast */
+STROMCL_SIMPLE_TYPECAST_TEMPLATE(text,    bpchar)
+STROMCL_SIMPLE_TYPECAST_TEMPLATE(varchar, bpchar)
+STROMCL_SIMPLE_TYPECAST_TEMPLATE(text,    varchar)
+STROMCL_SIMPLE_TYPECAST_TEMPLATE(varchar, text)
+
 /*
  * Support for LIKE operator
  */

@@ -155,6 +155,10 @@ static struct {
 				 NULL, NULL, NULL,
 				 DEVKERNEL_NEEDS_TEXTLIB, 0,
 				 pg_bpchar_devtype_hashfunc),
+	DEVTYPE_DECL("varchar", "VARCHAROID", "varlena *",
+				 NULL, NULL, NULL,
+				 DEVKERNEL_NEEDS_TEXTLIB, 0,
+				 generic_devtype_hashfunc),
 	DEVTYPE_DECL("numeric", "NUMERICOID", "cl_ulong",
 				 NULL, NULL, NULL,
 				 DEVKERNEL_NEEDS_NUMERIC,
@@ -1622,20 +1626,30 @@ __construct_devfunc_info(devfunc_info *entry,
 static bool
 pgstrom_devfunc_construct_common(devfunc_info *entry)
 {
-	int		i;
+	int		i, j;
 
 	for (i=0; i < lengthof(devfunc_common_catalog); i++)
 	{
 		devfunc_catalog_t  *procat = devfunc_common_catalog + i;
 
 		if (strcmp(procat->func_name, entry->func_sqlname) == 0 &&
-			procat->func_nargs == entry->func_argtypes->dim1 &&
-			memcmp(procat->func_argtypes,
-				   entry->func_argtypes->values,
-				   sizeof(Oid) * procat->func_nargs) == 0)
+			procat->func_nargs == list_length(entry->func_args))
 		{
-			__construct_devfunc_info(entry, procat->func_template);
-			return true;
+			ListCell   *lc;
+
+			j = 0;
+			foreach (lc, entry->func_args)
+			{
+				devtype_info   *dtype = lfirst(lc);
+
+				if (dtype->type_oid != procat->func_argtypes[j++])
+					break;
+			}
+			if (lc == NULL)
+			{
+				__construct_devfunc_info(entry, procat->func_template);
+				return true;
+			}
 		}
 	}
 	return false;
@@ -1646,8 +1660,8 @@ pgstrom_devfunc_construct_extra(devfunc_info *entry, HeapTuple protup)
 {
 	Form_pg_proc proc = (Form_pg_proc) GETSTRUCT(protup);
 	StringInfoData sig;
-	oidvector  *func_argtypes = entry->func_argtypes;
-	int			i, nargs = func_argtypes->dim1;
+	ListCell   *lc;
+	int			i;
 	bool		result = false;
 	char	   *func_rettype;
 	char	   *temp;
@@ -1660,15 +1674,15 @@ pgstrom_devfunc_construct_extra(devfunc_info *entry, HeapTuple protup)
 		appendStringInfo(&sig, "%s.", quote_identifier(temp));
 		pfree(temp);
 	}
+
 	appendStringInfo(&sig, "%s(", quote_identifier(NameStr(proc->proname)));
-
-	for (i=0; i < nargs; i++)
+	foreach (lc, entry->func_args)
 	{
-		Oid		type_oid = entry->func_argtypes->values[i];
+		devtype_info   *dtype = lfirst(lc);
 
-		if (i > 0)
+		if (lc != list_head(entry->func_args))
 			appendStringInfoChar(&sig, ',');
-		temp = format_type_be_qualified(type_oid);
+		temp = format_type_be_qualified(dtype->type_oid);
 		if (strncmp(temp, "pg_catalog.", 11) == 0)
 			appendStringInfo(&sig, "%s", temp + 11);
 		else
@@ -1677,7 +1691,7 @@ pgstrom_devfunc_construct_extra(devfunc_info *entry, HeapTuple protup)
 	}
 	appendStringInfoChar(&sig, ')');
 
-	temp = format_type_be_qualified(entry->func_rettype_oid);
+	temp = format_type_be_qualified(entry->func_rettype->type_oid);
 	if (strncmp(temp, "pg_catalog.", 11) == 0)
 		func_rettype = temp + 11;
 	else
@@ -1701,40 +1715,24 @@ pgstrom_devfunc_construct_extra(devfunc_info *entry, HeapTuple protup)
 }
 
 static devfunc_info *
-__pgstrom_devfunc_lookup(HeapTuple protup,
-						 Oid func_rettype,
-						 oidvector *func_argtypes,
-						 Oid func_collid)
+__pgstrom_devfunc_lookup_or_create(HeapTuple protup, Oid func_collid)
 {
 	Form_pg_proc	proc = (Form_pg_proc) GETSTRUCT(protup);
 	Oid				func_oid = HeapTupleGetOid(protup);
+	oidvector	   *proargtypes = &proc->proargtypes;
 	devfunc_info   *entry;
 	devtype_info   *dtype;
 	List		   *func_args = NIL;
 	ListCell	   *lc;
-	pg_crc32c		hash;
 	int				i, j;
 	MemoryContext	oldcxt;
 
-	INIT_CRC32C(hash);
-	COMP_CRC32C(hash, &func_oid, sizeof(Oid));
-	COMP_CRC32C(hash, &func_rettype, sizeof(Oid));
-	COMP_CRC32C(hash, func_argtypes->values,
-				sizeof(Oid) * func_argtypes->dim1);
-	FIN_CRC32C(hash);
-
-	i = hash % lengthof(devfunc_info_slot);
+	i = func_oid % lengthof(devfunc_info_slot);
 	foreach (lc, devfunc_info_slot[i])
 	{
 		entry = lfirst(lc);
 
-		if (entry->hash == hash &&
-			entry->func_oid == func_oid &&
-			entry->func_rettype_oid == func_rettype &&
-			entry->func_argtypes->dim1 == func_argtypes->dim1 &&
-			memcmp(entry->func_argtypes->values,
-				   func_argtypes->values,
-				   sizeof(Oid) * func_argtypes->dim1) == 0 &&
+		if (entry->func_oid == func_oid &&
 			(!OidIsValid(entry->func_collid) ||
 			 entry->func_collid == func_collid))
 		{
@@ -1749,17 +1747,13 @@ __pgstrom_devfunc_lookup(HeapTuple protup,
 	 */
 	oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
 	entry = palloc0(sizeof(devfunc_info));
-	entry->hash = hash;
 	entry->func_oid = func_oid;
-	entry->func_rettype_oid = func_rettype;
-	entry->func_argtypes = (oidvector *)
-		pg_detoast_datum_copy((struct varlena *)func_argtypes);
 	entry->func_collid = func_collid;	/* may be cleared later */
 	entry->func_is_strict = proc->proisstrict;
-	/* above is signature of SQL functions */
+	Assert(proc->pronargs == proargtypes->dim1);
 	for (j=0; j < proc->pronargs; j++)
 	{
-		dtype = pgstrom_devtype_lookup(func_argtypes->values[j]);
+		dtype = pgstrom_devtype_lookup(proargtypes->values[j]);
 		if (!dtype)
 		{
 			list_free(func_args);
@@ -1769,7 +1763,7 @@ __pgstrom_devfunc_lookup(HeapTuple protup,
 		func_args = lappend(func_args, dtype);
 	}
 
-	dtype = pgstrom_devtype_lookup(func_rettype);
+	dtype = pgstrom_devtype_lookup(proc->prorettype);
 	if (!dtype)
 	{
 		list_free(func_args);
@@ -1787,14 +1781,6 @@ __pgstrom_devfunc_lookup(HeapTuple protup,
 	/* other extra or polymorphic functions */
 	if (pgstrom_devfunc_construct_extra(entry, protup))
 		goto skip;
-#if NOT_USED
-	/*
-	 * XXX - Right now, we skip to support inline PL/CUDA function
-	 */
-	if (proc->prolang == get_language_oid("plcuda", true) &&
-		pgstrom_devfunc_construct_plcuda(entry, protup))
-		goto skip;
-#endif
 	/* oops, function has no entry */
 	entry->func_is_negative = true;
 skip:
@@ -1804,6 +1790,76 @@ skip:
 	if (entry->func_is_negative)
 		return NULL;
 	return entry;
+}
+
+static devfunc_info *
+__pgstrom_devfunc_lookup(HeapTuple protup,
+						 Oid func_rettype,
+						 oidvector *func_argtypes,
+						 Oid func_collid)
+{
+	devfunc_info   *dfunc;
+	devtype_info   *dtype;
+	ListCell	   *lc;
+	int				j = 0;
+	HeapTuple		tuple;
+
+	dfunc = __pgstrom_devfunc_lookup_or_create(protup, func_collid);
+	if (!dfunc)
+		return NULL;
+	/*
+	 * NOTE: In some cases, function might be called with different argument
+	 * types or result type from its definition, if both of the types are
+	 * binary compatible.
+	 * For example, type equality function of varchar(N) is texteq.
+	 * It is legal and adequate in PostgreSQL, however, CUDA C++ code takes
+	 * strict type checks, so we have to inject type relabel in this case.
+	 */
+	foreach (lc, dfunc->func_args)
+	{
+		dtype = lfirst(lc);
+
+		if (dtype->type_oid != func_argtypes->values[j])
+		{
+			Oid		source_type = func_argtypes->values[j];
+			char	castmethod;
+
+			tuple = SearchSysCache2(CASTSOURCETARGET,
+									ObjectIdGetDatum(source_type),
+									ObjectIdGetDatum(dtype->type_oid));
+			if (!HeapTupleIsValid(tuple))
+				return NULL;	/* no cast */
+			castmethod = ((Form_pg_cast) GETSTRUCT(tuple))->castmethod;
+			ReleaseSysCache(tuple);
+
+			/*
+			 * It might be possible to inject device function to cast
+			 * source type to the destination type. However, it should
+			 * be already attached by the code PostgreSQL.
+			 * Right now, we don't support it.
+			 */
+			if (castmethod != COERCION_METHOD_BINARY)
+				return NULL;
+		}
+	}
+
+	dtype = dfunc->func_rettype;
+	if (dtype->type_oid != func_rettype)
+	{
+		char	castmethod;
+
+		tuple = SearchSysCache2(CASTSOURCETARGET,
+								ObjectIdGetDatum(func_rettype),
+								ObjectIdGetDatum(dtype->type_oid));
+		if (!HeapTupleIsValid(tuple))
+			return NULL;	/* no cast */
+		castmethod = ((Form_pg_cast) GETSTRUCT(tuple))->castmethod;
+		ReleaseSysCache(tuple);
+
+		if (castmethod != COERCION_METHOD_BINARY)
+			return NULL;
+	}
+	return dfunc;
 }
 
 static devfunc_info *
@@ -2256,13 +2312,14 @@ codegen_expression_walker(Node *node, codegen_context *context)
 	else if (IsA(node, RelabelType))
 	{
 		RelabelType *relabel = (RelabelType *) node;
-		/*
-		 * RelabelType translates just label of data types. Both of types
-		 * same binary form (and also PG-Strom kernel defines all varlena
-		 * data types as alias of __global *varlena), so no need to do
-		 * anything special.
-		 */
+
+		dtype = pgstrom_devtype_lookup_and_track(relabel->resulttype, context);
+		if (!dtype)
+			elog(ERROR, "codegen: failed to lookup device type: %s",
+				 format_type_be(relabel->resulttype));
+		appendStringInfo(&context->str, "to_%s(", dtype->type_name);
 		codegen_expression_walker((Node *)relabel->arg, context);
+		appendStringInfo(&context->str, ")");
 	}
 	else if (IsA(node, CaseExpr))
 	{
@@ -2402,47 +2459,97 @@ static void
 codegen_function_expression(devfunc_info *dfunc, List *args,
 							codegen_context *context)
 {
-	ListCell   *lc;
-
 	if (dfunc->func_class == 'b')
 	{
-		if (list_length(args) != 2)
-			elog(ERROR, "Bug? unexpected number of arguments");
+		devtype_info   *dtype1 = linitial(dfunc->func_args);
+		devtype_info   *dtype2 = lsecond(dfunc->func_args);
+		Node		   *expr1 = linitial(args);
+		Node		   *expr2 = lsecond(args);
 
+		Assert(list_length(args) == 2);
 		appendStringInfoChar(&context->str, '(');
-		lc = list_head(args);
-		codegen_expression_walker(lfirst(lc), context);
+		if (dtype1->type_oid == exprType(expr1))
+			codegen_expression_walker(expr1, context);
+		else
+		{
+			appendStringInfo(&context->str,
+							 "to_%s(", dtype1->type_name);
+			codegen_expression_walker(expr1, context);
+			appendStringInfo(&context->str, ")");
+		}
 		appendStringInfo(&context->str, " %s ", dfunc->func_devname);
-		lc = lnext(lc);
-		codegen_expression_walker(lfirst(lc), context);
+		if (dtype2->type_oid == exprType(expr2))
+			codegen_expression_walker(expr2, context);
+		else
+		{
+			appendStringInfo(&context->str,
+							 "to_%s(", dtype2->type_name);
+			codegen_expression_walker(expr2, context);
+			appendStringInfo(&context->str, ")");
+		}
 		appendStringInfoChar(&context->str, ')');
 	}
 	else if (dfunc->func_class == 'l')
 	{
-		if (list_length(args) != 1)
-			elog(ERROR, "Bug? unexpected number of arguments");
+		devtype_info   *dtype = linitial(dfunc->func_args);
+		Node		   *expr = linitial(args);
+
+		Assert(list_length(args) == 1);
 		appendStringInfo(&context->str, "(%s", dfunc->func_devname);
-		codegen_expression_walker(linitial(args), context);
+		if (dtype->type_oid == exprType(expr))
+			codegen_expression_walker(expr, context);
+		else
+		{
+			appendStringInfo(&context->str,
+							 "to_%s(", dtype->type_name);
+			codegen_expression_walker(expr, context);
+			appendStringInfo(&context->str, ")");
+		}
 		appendStringInfoChar(&context->str, ')');
 	}
 	else if (dfunc->func_class == 'r')
 	{
-		if (list_length(args) != 1)
-			elog(ERROR, "Bug? unexpected number of arguments");
+		devtype_info   *dtype = linitial(dfunc->func_args);
+		Node		   *expr = linitial(args);
+
+		Assert(list_length(args) == 1);
 		appendStringInfoChar(&context->str, '(');
-		codegen_expression_walker(linitial(args), context);
+		if (dtype->type_oid == exprType(expr))
+			codegen_expression_walker(expr, context);
+		else
+		{
+			appendStringInfo(&context->str,
+							 "to_%s(", dtype->type_name);
+			codegen_expression_walker(expr, context);
+			appendStringInfo(&context->str, ")");
+		}
 		appendStringInfo(&context->str, "%s)", dfunc->func_devname);
 	}
 	else if (dfunc->func_class == 'F')
 	{
+		ListCell   *lc1;
+		ListCell   *lc2;
+
 		appendStringInfo(&context->str,
 						 "pgfn_%s(kcxt",
 						 dfunc->func_devname);
-        foreach (lc, args)
-        {
+		forboth (lc1, dfunc->func_args,
+				 lc2, args)
+		{
+			devtype_info *dtype = lfirst(lc1);
+			Node   *expr = lfirst(lc2);
+
 			appendStringInfo(&context->str, ", ");
-			codegen_expression_walker(lfirst(lc), context);
-        }
+			if (dtype->type_oid == exprType(expr))
+				codegen_expression_walker(expr, context);
+			else
+			{
+				appendStringInfo(&context->str,
+								 "to_%s(", dtype->type_name);
+				codegen_expression_walker(expr, context);
+				appendStringInfo(&context->str, ")");
+			}
+		}
         appendStringInfoChar(&context->str, ')');
 	}
 	else

@@ -1083,6 +1083,17 @@ pg_common_comp_crc32(const cl_uint *crc32_table,
 		return PointerGetDatum(addr);				\
 	}
 
+/* template for binary compatible type-cast */
+#define STROMCL_SIMPLE_TYPECAST_TEMPLATE(SOURCE,TARGET)		\
+	STATIC_INLINE(pg_##TARGET##_t)							\
+	to_##TARGET(pg_##SOURCE##_t arg)						\
+	{														\
+		pg_##TARGET##_t r;									\
+		r.isnull = arg.isnull;								\
+		r.value = arg.value;								\
+		return r;											\
+	}
+
 /* pg_bool_t */
 #ifndef PG_BOOL_TYPE_DEFINED
 #define PG_BOOL_TYPE_DEFINED

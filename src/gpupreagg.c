@@ -3364,7 +3364,14 @@ gpupreagg_codegen_keymatch(StringInfo kern,
 				 format_type_be(type_oid));
 		pgstrom_devfunc_track(context, dfunc);
 
-		/* load the key values, and compare */
+		/*
+		 * Load the key values, then compare
+		 *
+		 * Please pay attention that key comparison function may take
+		 * arguments in different type, but binary compatible.
+		 * Union data structure temp_x/temp_y implicitly convert binary
+		 * compatible types, so we don't inject PG_RELABEL operator here.
+		 */
 		appendStringInfo(
 			kern,
 			"  datum = kern_get_datum_slot(x_kds,%u,x_index);\n"
@@ -3379,18 +3386,34 @@ gpupreagg_codegen_keymatch(StringInfo kern,
 			dtype->type_name, dtype->type_name,
 			dtype->type_name, dtype->type_name);
 		if (dfunc->func_class == 'F')
+		{
+			devtype_info   *argtype1 = linitial(dfunc->func_args);
+			devtype_info   *argtype2 = lsecond(dfunc->func_args);
+
 			appendStringInfo(
 				kern,
 				"    if (!EVAL(pgfn_%s(kcxt, temp_x.%s_v, temp_y.%s_v)))\n",
-				dfunc->func_devname, dtype->type_name, dtype->type_name);
+				dfunc->func_devname,
+				argtype1->type_name,
+				argtype2->type_name);
+		}
 		else if (dfunc->func_class == 'b')
+		{
+			devtype_info   *argtype1 = linitial(dfunc->func_args);
+			devtype_info   *argtype2 = lsecond(dfunc->func_args);
+
 			appendStringInfo(
 				kern,
 				"    if (!EVAL(temp_x.%s_v %s temp_y.%s_v))\n",
-				dtype->type_name, dfunc->func_devname, dtype->type_name);
+				argtype1->type_name,
+				dfunc->func_devname,
+				argtype2->type_name);
+		}
 		else
-			elog(ERROR, "Bug? unexpected device function class");
-
+		{
+			elog(ERROR, "Bug? unexpected device function class (%c)",
+				 dfunc->func_class);
+		}
 		appendStringInfo(
 			kern,
 			"      return false;\n"
