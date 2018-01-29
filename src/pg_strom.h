@@ -289,7 +289,6 @@ struct GpuTaskState
 	bool			scan_done;		/* True, if no more rows to read */
 
 	/* fields for outer scan */
-	bool			outer_bulk_exec;/* True, if bulk-exec mode is supported */
 	Cost			outer_startup_cost;	/* copy from the outer path node */
 	Cost			outer_total_cost;	/* copy from the outer path node */
 	double			outer_plan_rows;	/* copy from the outer path node */
@@ -331,8 +330,6 @@ struct GpuTaskState
 										cl_bool *task_is_ready);
 	void		  (*cb_switch_task)(GpuTaskState *gts, GpuTask *gtask);
 	TupleTableSlot *(*cb_next_tuple)(GpuTaskState *gts);
-	struct pgstrom_data_store *(*cb_bulk_exec)(GpuTaskState *gts,
-											   size_t chunk_size);
 	int			  (*cb_process_task)(GpuTask *gtask,
 									 CUmodule cuda_module);
 	void		  (*cb_release_task)(GpuTask *gtask);
@@ -374,7 +371,7 @@ struct GpuTask
 #define DEVKERNEL_NEEDS_GPUSCAN			0x00000001	/* GpuScan logic */
 #define DEVKERNEL_NEEDS_GPUJOIN			0x00000002	/* GpuJoin logic */
 #define DEVKERNEL_NEEDS_GPUPREAGG		0x00000004	/* GpuPreAgg logic */
-#define DEVKERNEL_NEEDS_GPUSORT			0x00000008	/* GpuSort logic */
+//#define DEVKERNEL_NEEDS_GPUSORT			0x00000008	/* GpuSort logic */
 #define DEVKERNEL_NEEDS_PLCUDA			0x00000080	/* PL/CUDA related */
 
 #define DEVKERNEL_NEEDS_DYNPARA			0x00000100	/* aks, device runtime */
@@ -788,8 +785,6 @@ extern void pgstromInitGpuTaskState(GpuTaskState *gts,
 									List *used_params,
 									EState *estate);
 extern TupleTableSlot *pgstromExecGpuTaskState(GpuTaskState *gts);
-extern pgstrom_data_store *pgstromBulkExecGpuTaskState(GpuTaskState *gts,
-													   size_t chunk_size);
 extern void pgstromRescanGpuTaskState(GpuTaskState *gts);
 extern void pgstromReleaseGpuTaskState(GpuTaskState *gts);
 extern void pgstromExplainGpuTaskState(GpuTaskState *gts,
@@ -873,7 +868,6 @@ extern void pgstrom_init_codegen(void);
 /*
  * datastore.c
  */
-extern bool pgstrom_bulk_exec_supported(const PlanState *planstate);
 extern cl_uint estimate_num_chunks(Path *pathnode);
 extern bool KDS_fetch_tuple_column(TupleTableSlot *slot,
 								   kern_data_store *kds,
@@ -919,7 +913,7 @@ extern pgstrom_data_store *__PDS_create_block(GpuContext *gcontext,
 #define PDS_clone(a)							\
 	__PDS_clone((a),__FILE__,__LINE__)
 
-//to be gpu_task.c?
+//XXX - to be gpu_task.c?
 extern void PDS_init_heapscan_state(GpuTaskState *gts,
 									cl_uint nrows_per_block);
 extern void PDS_end_heapscan_state(GpuTaskState *gts);

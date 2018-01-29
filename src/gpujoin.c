@@ -1814,10 +1814,6 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	gjs->gts.cb_switch_task		= NULL;
 	gjs->gts.cb_process_task	= gpujoin_process_task;
 	gjs->gts.cb_release_task	= gpujoin_release_task;
-	if (pgstrom_bulkexec_enabled &&
-		!gjs->gts.css.ss.ps.qual &&			/* no host quals */
-		!gjs->gts.css.ss.ps.ps_ProjInfo)	/* no projection */
-		gjs->gts.cb_bulk_exec = pgstromBulkExecGpuTaskState;
 	gjs->gts.outer_nrows_per_block = gj_info->outer_nrows_per_block;
 
 	/* DSM & GPU memory of inner buffer */

@@ -21,25 +21,6 @@
 #include "nvme_strom.h"
 
 /*
- * pgstrom_bulk_exec_supported - returns true, if supplied planstate
- * supports bulk execution mode.
- */
-bool
-pgstrom_bulk_exec_supported(const PlanState *planstate)
-{
-	if (pgstrom_plan_is_gpuscan(planstate->plan) ||
-		pgstrom_plan_is_gpujoin(planstate->plan) ||
-		pgstrom_plan_is_gpupreagg(planstate->plan))
-	{
-		GpuTaskState	   *gts = (GpuTaskState *) planstate;
-
-		if (gts->cb_bulk_exec != NULL)
-			return true;
-	}
-	return false;
-}
-
-/*
  * estimate_num_chunks
  *
  * it estimates number of chunks to be fetched from the supplied Path

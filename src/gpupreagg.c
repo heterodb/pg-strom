@@ -3874,10 +3874,6 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 		{
 			gpas->combined_gpujoin = true;
 		}
-		else if (pgstrom_bulk_exec_supported(outer_ps))
-		{
-			gpas->gts.outer_bulk_exec = true;
-		}
 		outerPlanState(gpas) = outer_ps;
 		/* GpuPreAgg don't need re-initialization of projection info */
 		outer_tupdesc = outer_ps->ps_ResultTupleSlot->tts_tupleDescriptor;

@@ -267,7 +267,6 @@ pgstromInitGpuTaskState(GpuTaskState *gts,
 	gts->ccache_refs = ccache_refs;
 	gts->scan_done = false;
 
-	gts->outer_bulk_exec = false;
 	InstrInit(&gts->outer_instrument, estate->es_instrument);
 	gts->scan_overflow = NULL;
 	gts->outer_pds_suspend = NULL;
@@ -491,88 +490,6 @@ pgstromExecGpuTaskState(GpuTaskState *gts)
 }
 
 /*
- * pgstromBulkExecGpuTaskState
- */
-pgstrom_data_store *
-pgstromBulkExecGpuTaskState(GpuTaskState *gts, size_t chunk_size)
-{
-	pgstrom_data_store *pds_dst = NULL;
-	TupleTableSlot	   *slot;
-
-	/* GTS should not have neither host qualifier nor projection */
-	Assert(!gts->css.ss.ps.qual);
-	Assert(!gts->css.ss.ps.ps_ProjInfo);
-
-	do {
-		GpuTask	   *gtask = gts->curr_task;
-
-		/* Reload next GpuTask to be scanned, if needed */
-		if (!gtask)
-		{
-			gtask = fetch_next_gputask(gts);
-			if (!gtask)
-				break;	/* end of the scan */
-			gts->curr_task = gtask;
-			gts->curr_index = 0;
-			gts->curr_lp_index = 0;
-			if (gts->cb_switch_task)
-				gts->cb_switch_task(gts, gtask);
-		}
-		Assert(gtask != NULL);
-
-		while ((slot = gts->cb_next_tuple(gts)) != NULL)
-		{
-			/*
-			 * Creation of the destination store on demand.
-			 */
-			if (!pds_dst)
-			{
-				pds_dst = PDS_create_row(gts->gcontext,
-										 slot->tts_tupleDescriptor,
-										 chunk_size);
-			}
-
-			/*
-			 * Move rows from the source data-store to the destination store
-			 * until:
-			 *  The destination store still has space.
-			 *  The source store still has unread rows.
-			 */
-			if (!PDS_insert_tuple(pds_dst, slot))
-			{
-				/* Rewind the source PDS, if destination gets filled up */
-				Assert(gts->curr_index > 0 && gts->curr_lp_index == 0);
-				gts->curr_index--;
-
-				/*
-				 * At least one tuple can be stored, unless the supplied
-				 * chunk_size is not too small.
-				 */
-				if (pds_dst->kds.nitems == 0)
-				{
-					HeapTuple	tuple = ExecFetchSlotTuple(slot);
-					elog(ERROR,
-						 "Bug? Too short chunk_size (%zu) for tuple (len=%u)",
-						 chunk_size, tuple->t_len);
-				}
-				return pds_dst;
-			}
-		}
-
-		/*
-		 * All the rows in pds_src are already fetched,
-		 * so current GpuTask shall be detached.
-		 */
-		gts->cb_release_task(gtask);
-		gts->curr_task = NULL;
-		gts->curr_index = 0;
-		gts->curr_lp_index = 0;
-	} while (true);
-
-	return pds_dst;
-}
-
-/*
  * pgstromRescanGpuTaskState
  */
 void
@@ -627,12 +544,6 @@ pgstromReleaseGpuTaskState(GpuTaskState *gts)
 void
 pgstromExplainGpuTaskState(GpuTaskState *gts, ExplainState *es)
 {
-	/* outer-bulk-exec? */
-	if (gts->outer_bulk_exec)
-		ExplainPropertyText("Outer Bulk Exec", "enabled", es);
-	else if (es->format != EXPLAIN_FORMAT_TEXT)
-		ExplainPropertyText("Outer Bulk Exec", "disabled", es);
-
 	/* NVMe-Strom support */
 	if (gts->nvme_sstate ||
 		(!es->analyze &&

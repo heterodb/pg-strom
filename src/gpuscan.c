@@ -1955,12 +1955,6 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	gss->gts.cb_next_task   = gpuscan_next_task;
 	gss->gts.cb_next_tuple  = gpuscan_next_tuple;
 	gss->gts.cb_switch_task = gpuscan_switch_task;
-	if (pgstrom_bulkexec_enabled &&
-		!gss->gts.css.ss.ps.qual &&			/* no host qualifier */
-		!gss->gts.css.ss.ps.ps_ProjInfo)	/* no host projection */
-		gss->gts.cb_bulk_exec = pgstromBulkExecGpuTaskState;
-	else
-		gss->gts.cb_bulk_exec = NULL;	/* BulkExec not supported */
 	gss->gts.cb_process_task = gpuscan_process_task;
 	gss->gts.cb_release_task = gpuscan_release_task;
 	/* estimated number of rows per block */

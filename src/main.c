@@ -24,7 +24,6 @@ PG_MODULE_MAGIC;
  */
 bool		pgstrom_enabled;
 bool		pgstrom_debug_kernel_source;
-bool		pgstrom_bulkexec_enabled;
 bool		pgstrom_cpu_fallback_enabled;
 static int	pgstrom_chunk_size_kb;
 
@@ -57,21 +56,12 @@ pgstrom_init_misc_guc(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
-	/* turn on/off bulkload feature to exchange PG-Strom nodes */
-	DefineCustomBoolVariable("pg_strom.bulkexec",
-							 "Enables the bulk-execution mode of PG-Strom",
-							 NULL,
-							 &pgstrom_bulkexec_enabled,
-							 true,
-							 PGC_USERSET,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
 	/* turn on/off CPU fallback if GPU could not execute the query */
 	DefineCustomBoolVariable("pg_strom.cpu_fallback",
-							 "Enables CPU fallback if GPU is ",
+							 "Enables CPU fallback if GPU required re-run",
 							 NULL,
 							 &pgstrom_cpu_fallback_enabled,
-							 true,
+							 false,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
