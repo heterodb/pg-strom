@@ -84,7 +84,8 @@ PG_SIMPLE_TYPECAST_TEMPLATE(float8,float4,cl_double)
  */
 #define PG_UNARY_PLUS_TEMPLATE(NAME)			\
 	STATIC_INLINE(pg_##NAME##_t)				\
-	operator + (pg_##NAME##_t arg)				\
+	pgfn_##NAME##up(kern_context *kcxt,			\
+					pg_##NAME##_t arg)			\
 	{											\
 		return arg;								\
 	}
@@ -98,7 +99,8 @@ PG_UNARY_PLUS_TEMPLATE(float8)
 
 #define PG_UNARY_MINUS_TEMPLATE(NAME)			\
 	STATIC_INLINE(pg_##NAME##_t)				\
-	operator - (pg_##NAME##_t arg)				\
+	pgfn_##NAME##um(kern_context *kcxt,			\
+					pg_##NAME##_t arg)			\
 	{											\
 		if (!arg.isnull)						\
 			arg.value = -arg.value;				\
@@ -114,7 +116,8 @@ PG_UNARY_MINUS_TEMPLATE(float8)
 
 #define PG_UNARY_NOT_TEMPLATE(NAME)				\
 	STATIC_INLINE(pg_##NAME##_t)				\
-	operator ~ (pg_##NAME##_t arg)				\
+	pgfn_##NAME##not(kern_context *kcxt,		\
+					 pg_##NAME##_t arg)			\
 	{											\
 		if (!arg.isnull)						\
 			arg.value = ~arg.value;				\
@@ -126,8 +129,8 @@ PG_UNARY_NOT_TEMPLATE(int8)
 
 #define PG_UNARY_ABS_TEMPLATE(NAME,CAST)		\
 	STATIC_INLINE(pg_##NAME##_t)				\
-	pgfn_abs(kern_context *kcxt,				\
-			 pg_##NAME##_t arg)					\
+	pgfn_##NAME##abs(kern_context *kcxt,		\
+					 pg_##NAME##_t arg)			\
 	{											\
 		if (!arg.isnull)						\
 			arg.value = abs((CAST)arg.value);	\
@@ -143,40 +146,24 @@ PG_UNARY_ABS_TEMPLATE(float8, cl_double)
 /*
  * Simple comparison operators across data types
  */
-#define PG_SIMPLE_COMPARE_OPER_TEMPLATE(LNAME,RNAME,CAST,OPER)	\
-	STATIC_INLINE(pg_bool_t)									\
-	operator OPER (pg_##LNAME##_t arg1, pg_##RNAME##_t arg2)	\
-	{															\
-		pg_bool_t result;										\
-																\
-		result.isnull = arg1.isnull | arg2.isnull;				\
-		if (!result.isnull)										\
-			result.value = ((CAST)arg1.value OPER				\
-							(CAST)arg2.value);					\
-		return result;											\
-	}
-#define PG_SIMPLE_COMPARE_TEMPLATE(LNAME,RNAME,CAST)		\
-	PG_SIMPLE_COMPARE_OPER_TEMPLATE(LNAME,RNAME,CAST,==)	\
-	PG_SIMPLE_COMPARE_OPER_TEMPLATE(LNAME,RNAME,CAST,!=)	\
-	PG_SIMPLE_COMPARE_OPER_TEMPLATE(LNAME,RNAME,CAST,>)		\
-	PG_SIMPLE_COMPARE_OPER_TEMPLATE(LNAME,RNAME,CAST,>=)	\
-	PG_SIMPLE_COMPARE_OPER_TEMPLATE(LNAME,RNAME,CAST,<)		\
-	PG_SIMPLE_COMPARE_OPER_TEMPLATE(LNAME,RNAME,CAST,<=)
-
-PG_SIMPLE_COMPARE_TEMPLATE(int2,int4,cl_int)
-PG_SIMPLE_COMPARE_TEMPLATE(int2,int8,cl_long)
-PG_SIMPLE_COMPARE_TEMPLATE(int4,int2,cl_int)
-PG_SIMPLE_COMPARE_TEMPLATE(int4,int8,cl_long)
-PG_SIMPLE_COMPARE_TEMPLATE(int8,int2,cl_long)
-PG_SIMPLE_COMPARE_TEMPLATE(int8,int4,cl_long)
-PG_SIMPLE_COMPARE_TEMPLATE(float2,float4,cl_float)
-PG_SIMPLE_COMPARE_TEMPLATE(float2,float8,cl_double)
-PG_SIMPLE_COMPARE_TEMPLATE(float4,float2,cl_float)
-PG_SIMPLE_COMPARE_TEMPLATE(float4,float8,cl_double)
-PG_SIMPLE_COMPARE_TEMPLATE(float8,float2,cl_double)
-PG_SIMPLE_COMPARE_TEMPLATE(float8,float4,cl_double)
-#undef PG_SIMPLE_COMPARE_TEMPLATE
-#undef PG_SIMPLE_COMPARE_OPER_TEMPLATE
+STROMCL_SIMPLE_COMPARE_TEMPLATE(int2,    int2,   int2,   cl_short)
+STROMCL_SIMPLE_COMPARE_TEMPLATE(int24,   int2,   int4,   cl_int)
+STROMCL_SIMPLE_COMPARE_TEMPLATE(int28,   int2,   int8,   cl_long)
+STROMCL_SIMPLE_COMPARE_TEMPLATE(int42,   int4,   int2,   cl_int)
+STROMCL_SIMPLE_COMPARE_TEMPLATE(int4,    int4,   int4,   cl_int)
+STROMCL_SIMPLE_COMPARE_TEMPLATE(int48,   int4,   int8,   cl_long)
+STROMCL_SIMPLE_COMPARE_TEMPLATE(int82,   int8,   int2,   cl_long)
+STROMCL_SIMPLE_COMPARE_TEMPLATE(int84,   int8,   int4,   cl_long)
+STROMCL_SIMPLE_COMPARE_TEMPLATE(int8,    int8,   int8,   cl_long)
+STROMCL_SIMPLE_COMPARE_TEMPLATE(float2,  float2, float2, cl_float)
+STROMCL_SIMPLE_COMPARE_TEMPLATE(float24, float2, float4, cl_float)
+STROMCL_SIMPLE_COMPARE_TEMPLATE(float28, float2, float8, cl_double)
+STROMCL_SIMPLE_COMPARE_TEMPLATE(float42, float4, float2, cl_float)
+STROMCL_SIMPLE_COMPARE_TEMPLATE(float4,  float4, float4, cl_float)
+STROMCL_SIMPLE_COMPARE_TEMPLATE(float48, float4, float8, cl_double)
+STROMCL_SIMPLE_COMPARE_TEMPLATE(float82, float8, float2, cl_double)
+STROMCL_SIMPLE_COMPARE_TEMPLATE(float84, float8, float4, cl_double)
+STROMCL_SIMPLE_COMPARE_TEMPLATE(float88, float8, float8, cl_double)
 
 /*
  * scalar comparison functions
@@ -298,9 +285,10 @@ PG_SIMPLE_LARGER_SMALLER_TEMPLATE(float8)
 /*
  * integer bitwise operations
  */
-#define PG_INTEGER_BITWISE_OPER_TEMPLATE(NAME,OPER)			\
+#define PG_INTEGER_BITWISE_OPER_TEMPLATE(NAME,OPER,EXTRA)	\
 	STATIC_INLINE(pg_##NAME##_t)							\
-	operator OPER (pg_##NAME##_t arg1, pg_##NAME##_t arg2)	\
+	pgfn_##NAME##EXTRA(kern_context *kcxt,					\
+					   pg_##NAME##_t arg1, pg_##NAME##_t arg2)	\
 	{														\
 		pg_##NAME##_t result;								\
 															\
@@ -309,23 +297,24 @@ PG_SIMPLE_LARGER_SMALLER_TEMPLATE(float8)
 			result.value = (arg1.value OPER arg2.value);	\
 		return result;										\
 	}
-PG_INTEGER_BITWISE_OPER_TEMPLATE(int2,&)
-PG_INTEGER_BITWISE_OPER_TEMPLATE(int4,&)
-PG_INTEGER_BITWISE_OPER_TEMPLATE(int8,&)
-PG_INTEGER_BITWISE_OPER_TEMPLATE(int2,|)
-PG_INTEGER_BITWISE_OPER_TEMPLATE(int4,|)
-PG_INTEGER_BITWISE_OPER_TEMPLATE(int8,|)
-PG_INTEGER_BITWISE_OPER_TEMPLATE(int2,^)
-PG_INTEGER_BITWISE_OPER_TEMPLATE(int4,^)
-PG_INTEGER_BITWISE_OPER_TEMPLATE(int8,^)
+PG_INTEGER_BITWISE_OPER_TEMPLATE(int2,&,and)
+PG_INTEGER_BITWISE_OPER_TEMPLATE(int4,&,and)
+PG_INTEGER_BITWISE_OPER_TEMPLATE(int8,&,and)
+PG_INTEGER_BITWISE_OPER_TEMPLATE(int2,|,or)
+PG_INTEGER_BITWISE_OPER_TEMPLATE(int4,|,or)
+PG_INTEGER_BITWISE_OPER_TEMPLATE(int8,|,or)
+PG_INTEGER_BITWISE_OPER_TEMPLATE(int2,^,not)
+PG_INTEGER_BITWISE_OPER_TEMPLATE(int4,^,not)
+PG_INTEGER_BITWISE_OPER_TEMPLATE(int8,^,not)
 #undef PG_INTEGER_BITWISE_OPER_TEMPLATE
 
 /*
  * integer bit shift operators
  */
-#define PG_INTEGER_BITSHIFT_OPER_TEMPLATE(NAME,OPER)		\
+#define PG_INTEGER_BITSHIFT_OPER_TEMPLATE(NAME,OPER,EXTRA)	\
 	STATIC_INLINE(pg_##NAME##_t)							\
-	operator OPER (pg_##NAME##_t arg1, pg_int4_t arg2)		\
+	pgfn_##NAME##EXTRA(kern_context *kcxt,					\
+					   pg_##NAME##_t arg1, pg_int4_t arg2)	\
 	{														\
 		pg_##NAME##_t result;								\
 															\
@@ -334,12 +323,12 @@ PG_INTEGER_BITWISE_OPER_TEMPLATE(int8,^)
 			result.value = (arg1.value OPER arg2.value);	\
 		return result;										\
 	}
-PG_INTEGER_BITSHIFT_OPER_TEMPLATE(int2,<<)
-PG_INTEGER_BITSHIFT_OPER_TEMPLATE(int2,>>)
-PG_INTEGER_BITSHIFT_OPER_TEMPLATE(int4,<<)
-PG_INTEGER_BITSHIFT_OPER_TEMPLATE(int4,>>)
-PG_INTEGER_BITSHIFT_OPER_TEMPLATE(int8,<<)
-PG_INTEGER_BITSHIFT_OPER_TEMPLATE(int8,>>)
+PG_INTEGER_BITSHIFT_OPER_TEMPLATE(int2,<<,shr)
+PG_INTEGER_BITSHIFT_OPER_TEMPLATE(int2,>>,shl)
+PG_INTEGER_BITSHIFT_OPER_TEMPLATE(int4,<<,shr)
+PG_INTEGER_BITSHIFT_OPER_TEMPLATE(int4,>>,shl)
+PG_INTEGER_BITSHIFT_OPER_TEMPLATE(int8,<<,shr)
+PG_INTEGER_BITSHIFT_OPER_TEMPLATE(int8,>>,shl)
 
 /*
  * type re-interpretation routines
@@ -362,7 +351,5 @@ PG_TYPE_REINTERPRETE_TEMPLATE(float8,int8,__longlong_as_double)
 PG_TYPE_REINTERPRETE_TEMPLATE(float4,int4,__int_as_float)
 PG_TYPE_REINTERPRETE_TEMPLATE(float2,int2,__short_as_half)
 #undef PG_TYPE_REINTERPRETE_TEMPLATE
-
-
 
 #endif	/* CUDA_PRIMITIVE_H */

@@ -1658,9 +1658,6 @@ PlanGpuScanPath(PlannerInfo *root,
 							   relation,
 							   tlist_dev ? tlist_dev : tlist);
 	heap_close(relation, NoLock);
-
-	pgstrom_codegen_func_declarations(&source, &context);
-	pgstrom_codegen_expr_declarations(&source, &context);
 	appendStringInfoString(&source, kern.data);
 	pfree(kern.data);
 

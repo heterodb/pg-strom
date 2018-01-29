@@ -120,6 +120,12 @@
 																	\
 		return result;												\
 	}																\
+	STATIC_INLINE(void)												\
+	pg_datum_ref(kern_context *kcxt,								\
+				 pg_##NAME##_t &result, void *datum)				\
+	{																\
+		result = pg_##NAME##_datum_ref(kcxt, datum);				\
+	}																\
 																	\
 	STATIC_FUNCTION(cl_uint)										\
 	pg_##NAME##_datum_store(kern_context *kcxt,						\

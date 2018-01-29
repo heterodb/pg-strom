@@ -923,6 +923,12 @@ typedef struct {
 		}													\
 		return result;										\
 	}														\
+	STATIC_INLINE(void)										\
+	pg_datum_ref(kern_context *kcxt,						\
+				 pg_##NAME##_t &result, void *datum)		\
+	{														\
+		result = pg_##NAME##_datum_ref(kcxt, datum);		\
+	}														\
 															\
 	STATIC_INLINE(cl_uint)									\
 	pg_##NAME##_datum_store(kern_context *kcxt,				\
@@ -977,6 +983,12 @@ typedef struct {
 				   sizeof(BASE));							\
 		}													\
 		return result;										\
+	}														\
+	STATIC_INLINE(void)										\
+	pg_datum_ref(kern_context *kcxt,						\
+				 pg_##NAME##_t &result, void *datum)		\
+	{														\
+		result = pg_##NAME##_datum_ref(kcxt, datum);		\
 	}														\
 															\
 	STATIC_INLINE(cl_uint)									\
@@ -1094,6 +1106,28 @@ pg_common_comp_crc32(const cl_uint *crc32_table,
 		return r;											\
 	}
 
+#define __STROMCL_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,OPER,EXTRA) \
+	STATIC_INLINE(pg_bool_t)								\
+	pgfn_##FNAME##EXTRA(kern_context *kcxt,					\
+						pg_##LNAME##_t arg1,				\
+						pg_##RNAME##_t arg2)				\
+	{														\
+		pg_bool_t result;									\
+															\
+		result.isnull = arg1.isnull | arg2.isnull;			\
+		if (!result.isnull)									\
+			result.value = ((CAST)arg1.value OPER			\
+							(CAST)arg2.value);				\
+		return result;										\
+	}
+#define STROMCL_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST)		\
+	__STROMCL_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,==,eq)	\
+	__STROMCL_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,!=,ne)	\
+	__STROMCL_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,<, lt)	\
+	__STROMCL_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,<=,le)	\
+	__STROMCL_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,>, gt)	\
+	__STROMCL_SIMPLE_COMPARE_TEMPLATE(FNAME,LNAME,RNAME,CAST,>=,ge)
+
 /* pg_bool_t */
 #ifndef PG_BOOL_TYPE_DEFINED
 #define PG_BOOL_TYPE_DEFINED
@@ -1104,7 +1138,6 @@ pg_bool_as_datum(void *addr)
 	cl_bool		val = *((cl_bool *)addr);
 	return SET_1_BYTE(val);
 }
-STROMCL_SIMPLE_COMPARE_OPER_TEMPLATE(bool)
 #endif
 
 /* pg_int2_t */
@@ -1117,7 +1150,6 @@ pg_int2_as_datum(void *addr)
 	cl_short	val = *((cl_short *)addr);
 	return SET_2_BYTES(val);
 }
-STROMCL_SIMPLE_COMPARE_OPER_TEMPLATE(int2)
 #endif
 
 /* pg_int4_t */
@@ -1130,7 +1162,6 @@ pg_int4_as_datum(void *addr)
 	cl_int		val = *((cl_int *)addr);
 	return SET_4_BYTES(val);
 }
-STROMCL_SIMPLE_COMPARE_OPER_TEMPLATE(int4)
 #endif
 
 /* pg_int8_t */
@@ -1143,7 +1174,6 @@ pg_int8_as_datum(void *addr)
 	cl_long		val = *((cl_long *)addr);
 	return SET_8_BYTES(val);
 }
-STROMCL_SIMPLE_COMPARE_OPER_TEMPLATE(int8)
 #endif
 
 /* pg_float2_t */
@@ -1156,7 +1186,6 @@ pg_float2_as_datum(void *addr)
 	cl_half		val = *((cl_half *)addr);
 	return SET_2_BYTES(__half_as_short(val));
 }
-STROMCL_SIMPLE_COMPARE_OPER_TEMPLATE(float2)
 #endif
 
 /* pg_float4_t */
@@ -1169,7 +1198,6 @@ pg_float4_as_datum(void *addr)
 	cl_float	val = *((cl_float *)addr);
 	return SET_4_BYTES(__float_as_int(val));
 }
-STROMCL_SIMPLE_COMPARE_OPER_TEMPLATE(float4)
 #endif
 
 /* pg_float8_t */
@@ -1182,7 +1210,6 @@ pg_float8_as_datum(void *addr)
 	cl_double	val = *((cl_double *)addr);
 	return SET_8_BYTES(__double_as_longlong(val));
 }
-STROMCL_SIMPLE_COMPARE_OPER_TEMPLATE(float8)
 #endif
 
 /*
@@ -1527,6 +1554,12 @@ toast_decompress_datum(char *buffer, cl_uint buflen,
 			result.value = (varlena *)datum;					\
 		}														\
 		return result;											\
+	}															\
+	STATIC_INLINE(void)											\
+	pg_datum_ref(kern_context *kcxt,							\
+				 pg_##NAME##_t &result, void *datum)			\
+	{															\
+		result = pg_##NAME##_datum_ref(kcxt, datum);			\
 	}															\
 																\
 	STATIC_INLINE(cl_uint)										\

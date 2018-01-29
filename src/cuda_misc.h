@@ -29,7 +29,7 @@ pg_monery_as_datum(void *addr)
 	cl_long		val = *((cl_long *)addr);
 	return SET_8_BYTES(val);
 }
-STROMCL_SIMPLE_COMPARE_OPER_TEMPLATE(money)
+STROMCL_SIMPLE_COMPARE_TEMPLATE(cash_,money,money,cl_long)
 #endif
 
 /*
@@ -273,7 +273,7 @@ uuid_internal_cmp(pg_uuid_t *arg1, pg_uuid_t *arg2)
 	return cmp;
 }
 
-STATIC_FUNCTION(pg_int4_t)
+STATIC_INLINE(pg_int4_t)
 pgfn_type_compare(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
 {
 	pg_int4_t	result;
@@ -288,7 +288,7 @@ pgfn_type_compare(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
 	return result;
 }
 
-STATIC_FUNCTION(pg_bool_t)
+STATIC_INLINE(pg_bool_t)
 pgfn_uuid_lt(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
 {
 	pg_bool_t	result;
@@ -303,7 +303,7 @@ pgfn_uuid_lt(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
 	return result;
 }
 
-STATIC_FUNCTION(pg_bool_t)
+STATIC_INLINE(pg_bool_t)
 pgfn_uuid_le(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
 {
 	pg_bool_t	result;
@@ -318,7 +318,7 @@ pgfn_uuid_le(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
 	return result;
 }
 
-STATIC_FUNCTION(pg_bool_t)
+STATIC_INLINE(pg_bool_t)
 pgfn_uuid_eq(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
 {
 	pg_bool_t	result;
@@ -333,7 +333,7 @@ pgfn_uuid_eq(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
 	return result;
 }
 
-STATIC_FUNCTION(pg_bool_t)
+STATIC_INLINE(pg_bool_t)
 pgfn_uuid_ge(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
 {
 	pg_bool_t	result;
@@ -348,7 +348,7 @@ pgfn_uuid_ge(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
 	return result;
 }
 
-STATIC_FUNCTION(pg_bool_t)
+STATIC_INLINE(pg_bool_t)
 pgfn_uuid_gt(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
 {
 	pg_bool_t	result;
@@ -363,7 +363,7 @@ pgfn_uuid_gt(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
 	return result;
 }
 
-STATIC_FUNCTION(pg_bool_t)
+STATIC_INLINE(pg_bool_t)
 pgfn_uuid_ne(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
 {
 	pg_bool_t	result;
@@ -629,6 +629,11 @@ pg_inet_datum_ref(kern_context *kcxt, void *datum)
 		}
 	}
 	return result;
+}
+STATIC_INLINE(void)
+pg_datum_ref(kern_context *kcxt, pg_inet_t &result, void *datum)
+{
+	result = pg_inet_datum_ref(kcxt, datum);
 }
 
 STATIC_INLINE(cl_uint)

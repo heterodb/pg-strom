@@ -3347,6 +3347,8 @@ gpupreagg_codegen_keymatch(StringInfo kern,
 		Oid				coll_oid;
 		devtype_info   *dtype;
 		devfunc_info   *dfunc;
+		devtype_info   *darg1;
+		devtype_info   *darg2;
 
 		if (tle->resjunk || !tle->ressortgroupref)
 			continue;
@@ -3363,6 +3365,8 @@ gpupreagg_codegen_keymatch(StringInfo kern,
 			elog(ERROR, "Bug? type (%s) has no device equality function",
 				 format_type_be(type_oid));
 		pgstrom_devfunc_track(context, dfunc);
+		darg1 = linitial(dfunc->func_args);
+		darg2 = lsecond(dfunc->func_args);
 
 		/*
 		 * Load the key values, then compare
@@ -3379,49 +3383,20 @@ gpupreagg_codegen_keymatch(StringInfo kern,
 			"  datum = kern_get_datum_slot(y_kds,%u,y_index);\n"
 			"  temp_y.%s_v = pg_%s_datum_ref(kcxt,datum);\n"
 			"  if (!temp_x.%s_v.isnull && !temp_y.%s_v.isnull)\n"
-			"  {\n",
-			tle->resno-1,
-			dtype->type_name, dtype->type_name,
-			tle->resno-1,
-			dtype->type_name, dtype->type_name,
-			dtype->type_name, dtype->type_name);
-		if (dfunc->func_class == 'F')
-		{
-			devtype_info   *argtype1 = linitial(dfunc->func_args);
-			devtype_info   *argtype2 = lsecond(dfunc->func_args);
-
-			appendStringInfo(
-				kern,
-				"    if (!EVAL(pgfn_%s(kcxt, temp_x.%s_v, temp_y.%s_v)))\n",
-				dfunc->func_devname,
-				argtype1->type_name,
-				argtype2->type_name);
-		}
-		else if (dfunc->func_class == 'b')
-		{
-			devtype_info   *argtype1 = linitial(dfunc->func_args);
-			devtype_info   *argtype2 = lsecond(dfunc->func_args);
-
-			appendStringInfo(
-				kern,
-				"    if (!EVAL(temp_x.%s_v %s temp_y.%s_v))\n",
-				argtype1->type_name,
-				dfunc->func_devname,
-				argtype2->type_name);
-		}
-		else
-		{
-			elog(ERROR, "Bug? unexpected device function class (%c)",
-				 dfunc->func_class);
-		}
-		appendStringInfo(
-			kern,
+			"  {\n"
+			"    if (!EVAL(pgfn_%s(kcxt, temp_x.%s_v, temp_y.%s_v)))\n"
 			"      return false;\n"
 			"  }\n"
 			"  else if ((temp_x.%s_v.isnull && !temp_y.%s_v.isnull) ||\n"
 			"           (!temp_x.%s_v.isnull && temp_y.%s_v.isnull))\n"
 			"      return false;\n"
 			"\n",
+			tle->resno-1,
+			dtype->type_name, dtype->type_name,
+			tle->resno-1,
+			dtype->type_name, dtype->type_name,
+			dtype->type_name, dtype->type_name,
+			dfunc->func_devname, darg1->type_name, darg2->type_name,
 			dtype->type_name, dtype->type_name,
 			dtype->type_name, dtype->type_name);
 	}
@@ -3737,10 +3712,6 @@ gpupreagg_codegen(codegen_context *context,
 	gpupreagg_codegen_global_calc(&body, context, tlist_dev);
 	/* gpupreagg_nogroup_calc */
 	gpupreagg_codegen_nogroup_calc(&body, context, tlist_dev);
-	/* function declarations */
-	pgstrom_codegen_func_declarations(&kern, context);
-	/* special expression declarations */
-	pgstrom_codegen_expr_declarations(&kern, context);
 	/* merge above kernel functions */
 	appendStringInfoString(&kern, body.data);
 	pfree(body.data);

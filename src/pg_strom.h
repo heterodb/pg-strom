@@ -418,9 +418,9 @@ typedef struct devtype_info {
 								 * type has internal representation. 0 means
 								 * this device type never has inline format,
 								 * or simple data type. */
-	devtype_hashfunc_type hash_func;	/* type specific hash function */
-	const struct devtype_info *type_array;	/* array type of itself, if any */
-	const struct devtype_info *type_element;/* element type of array, if any */
+	devtype_hashfunc_type hash_func;  /* type specific hash function */
+	struct devtype_info *type_array;  /* array type of itself, if any */
+	struct devtype_info *type_element;/* element type of array, if any */
 } devtype_info;
 
 typedef struct devfunc_info {
@@ -434,19 +434,7 @@ typedef struct devfunc_info {
 	devtype_info *func_rettype;	/* result type by devtype_info */
 	const char *func_sqlname;	/* name of the function in SQL side */
 	const char *func_devname;	/* name of the function in device side */
-	char		func_class;		/* 'F', 'b', 'l' or 'r' */
 } devfunc_info;
-
-typedef struct devexpr_info {
-	NodeTag		expr_tag;		/* tag of the expression */
-	Oid			expr_collid;	/* OID of collation, if collation aware */
-	List	   *expr_args;		/* argument types by devtype_info */
-	devtype_info *expr_rettype;	/* result type by devtype_info */
-	Datum		expr_extra1;	/* 1st extra information per node type */
-	Datum		expr_extra2;	/* 2nd extra information per node type */
-	const char *expr_name;	/* name of the function in device side */
-	const char *expr_decl;	/* declaration of device function, if any */
-} devexpr_info;
 
 /*
  * pgstrom_data_store - a data structure with various format to exchange
@@ -876,10 +864,6 @@ extern void pgstrom_devfunc_track(codegen_context *context,
 								  devfunc_info *dfunc);
 
 extern char *pgstrom_codegen_expression(Node *expr, codegen_context *context);
-extern void pgstrom_codegen_func_declarations(StringInfo buf,
-											  codegen_context *context);
-extern void pgstrom_codegen_expr_declarations(StringInfo buf,
-											  codegen_context *context);
 extern void pgstrom_codegen_param_declarations(StringInfo buf,
 											   codegen_context *context);
 extern bool pgstrom_device_expression(Expr *expr);

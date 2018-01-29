@@ -1503,7 +1503,6 @@ PlanGpuJoinPath(PlannerInfo *root,
 	GpuJoinInfo		gj_info;
 	CustomScan	   *cscan;
 	codegen_context	context;
-	char		   *kern_source;
 	Plan		   *outer_plan;
 	ListCell	   *lc;
 	Bitmapset	   *varattnos = NULL;
@@ -1654,19 +1653,11 @@ PlanGpuJoinPath(PlannerInfo *root,
 	 * construct kernel code
 	 */
 	pgstrom_init_codegen_context(&context);
-	kern_source = gpujoin_codegen(root, cscan, &gj_info, tlist, &context);
-	if (context.func_defs || context.expr_defs)
-	{
-		StringInfoData	buf;
-
-		initStringInfo(&buf);
-		pgstrom_codegen_func_declarations(&buf, &context);
-		pgstrom_codegen_expr_declarations(&buf, &context);
-		appendStringInfo(&buf, "%s", kern_source);
-
-		kern_source = buf.data;
-	}
-	gj_info.kern_source = kern_source;
+	gj_info.kern_source = gpujoin_codegen(root,
+										  cscan,
+										  &gj_info,
+										  tlist,
+										  &context);
 	gj_info.extra_flags = (DEVKERNEL_NEEDS_GPUSCAN |
 						   DEVKERNEL_NEEDS_GPUJOIN |
 						   context.extra_flags);

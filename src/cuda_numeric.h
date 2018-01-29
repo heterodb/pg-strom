@@ -472,6 +472,12 @@ pg_numeric_datum_ref(kern_context *kcxt,
 		result = pg_numeric_from_varlena(kcxt, (varlena *) datum);
 	return result;
 }
+STATIC_INLINE(void)
+pg_datum_ref(kern_context *kcxt,
+			 pg_numeric_t &result, void *datum)
+{
+	result = pg_numeric_datum_ref(kcxt, datum);
+}
 
 STATIC_INLINE(cl_uint)
 pg_numeric_datum_store(kern_context *kcxt,

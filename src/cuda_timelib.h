@@ -203,7 +203,7 @@ pg_date_as_datum(void *addr)
 	DateADT		val = *((DateADT *)addr);
 	return SET_4_BYTES(val);
 }
-STROMCL_SIMPLE_COMPARE_OPER_TEMPLATE(date)
+STROMCL_SIMPLE_COMPARE_TEMPLATE(date_,date,date,DateADT)
 #endif
 
 #ifndef PG_TIME_TYPE_DEFINED
@@ -215,7 +215,7 @@ pg_time_as_datum(void *addr)
 	TimeADT		val = *((TimeADT *)addr);
 	return SET_8_BYTES(val);
 }
-STROMCL_SIMPLE_COMPARE_OPER_TEMPLATE(TimeADT)
+STROMCL_SIMPLE_COMPARE_TEMPLATE(time_,time,time,TimeADT)
 #endif
 
 #ifndef PG_TIMETZ_TYPE_DEFINED
