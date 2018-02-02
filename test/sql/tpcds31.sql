@@ -18,7 +18,7 @@ with ss as
        ,ss2.store_sales/ss1.store_sales store_q1_q2_increase
        ,ws3.web_sales/ws2.web_sales web_q2_q3_increase
        ,ss3.store_sales/ss2.store_sales store_q2_q3_increase
- into tpcds_q31
+ into pg_temp.tpcds_q31
  from
         ss ss1
        ,ss ss2
@@ -51,3 +51,12 @@ with ss as
  order by ss1.d_year;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q31.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q31.sql);
+(SELECT * FROM public.tpcds_q31.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q31.sql);

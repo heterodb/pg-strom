@@ -44,8 +44,17 @@ select case when (select count(*)
             else (select avg(ss_net_profit)
                   from store_sales
                   where ss_quantity between 81 and 100) end bucket5
-into tpcds_q09
+into pg_temp.tpcds_q09
 from reason
 where r_reason_sk = 1
 ;
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q09.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q09.sql);
+(SELECT * FROM public.tpcds_q09.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q09.sql);

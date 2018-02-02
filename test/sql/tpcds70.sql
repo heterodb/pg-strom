@@ -34,7 +34,7 @@ with results as
  	partition by lochierarchy, 
  	case when g_county = 0 then s_state end 
  	order by total_sum desc) as rank_within_parent
-into tpcds_q70
+into pg_temp.tpcds_q70
  from results_rollup
  order by
    lochierarchy desc
@@ -43,3 +43,12 @@ into tpcds_q70
  limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q70.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q70.sql);
+(SELECT * FROM public.tpcds_q70.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q70.sql);

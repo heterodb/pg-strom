@@ -1,6 +1,6 @@
 
 select  *
- into tpcds_q21
+ into pg_temp.tpcds_q21
  from(select w_warehouse_name
             ,i_item_id
             ,sum(case when (cast(d_date as date) < cast ('1998-04-08' as date))
@@ -29,3 +29,12 @@ select  *
  limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q21.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q21.sql);
+(SELECT * FROM public.tpcds_q21.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q21.sql);

@@ -1,6 +1,6 @@
 
 select  sum(cs_ext_discount_amt)  as "excess discount amount" 
-into tpcds_q32
+into pg_temp.tpcds_q32
 from 
    catalog_sales 
    ,item 
@@ -26,3 +26,12 @@ and cs_ext_discount_amt
       ) 
 limit 100;
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q32.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q32.sql);
+(SELECT * FROM public.tpcds_q32.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q32.sql);

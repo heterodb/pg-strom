@@ -7,7 +7,7 @@ select  i_item_id
       ,sum(ws_ext_sales_price) as itemrevenue 
       ,sum(ws_ext_sales_price)*100/sum(sum(ws_ext_sales_price)) over
           (partition by i_class) as revenueratio
-into tpcds_q12
+into pg_temp.tpcds_q12
 from	
 	web_sales
     	,item 
@@ -33,3 +33,12 @@ order by
 limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q12.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q12.sql);
+(SELECT * FROM public.tpcds_q12.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q12.sql);

@@ -1,5 +1,5 @@
 select *
-into tpcds_q49
+into pg_temp.tpcds_q49
 from (
 select  
  'web' as channel
@@ -127,3 +127,12 @@ select
  limit 100) hoge;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q49.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q49.sql);
+(SELECT * FROM public.tpcds_q49.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q49.sql);

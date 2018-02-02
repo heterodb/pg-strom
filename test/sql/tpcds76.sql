@@ -1,6 +1,6 @@
 
 select  channel, col_name, d_year, d_qoy, i_category, COUNT(*) sales_cnt, SUM(ext_sales_price) sales_amt
- into tpcds_q76
+ into pg_temp.tpcds_q76
  FROM (
         SELECT 'store' as channel, 'ss_addr_sk' col_name, d_year, d_qoy, i_category, ss_ext_sales_price ext_sales_price
          FROM store_sales, item, date_dim
@@ -24,3 +24,12 @@ ORDER BY channel, col_name, d_year, d_qoy, i_category
 limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q76.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q76.sql);
+(SELECT * FROM public.tpcds_q76.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q76.sql);

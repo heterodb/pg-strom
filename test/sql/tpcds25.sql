@@ -7,7 +7,7 @@ select
  ,sum(ss_net_profit) as store_sales_profit
  ,sum(sr_net_loss) as store_returns_loss
  ,sum(cs_net_profit) as catalog_sales_profit
- into tpcds_q25
+ into pg_temp.tpcds_q25
  from
  store_sales
  ,store_returns
@@ -47,3 +47,12 @@ select
  limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q25.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q25.sql);
+(SELECT * FROM public.tpcds_q25.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q25.sql);

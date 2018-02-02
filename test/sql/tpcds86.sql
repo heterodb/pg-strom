@@ -24,7 +24,7 @@ with results as
  	partition by lochierarchy,
  	case when g_class = 0 then i_category end 
  	order by total_sum desc) as rank_within_parent
-into tpcds_q86
+into pg_temp.tpcds_q86
  from
  results_rollup
  order by
@@ -34,3 +34,12 @@ into tpcds_q86
  limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q86.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q86.sql);
+(SELECT * FROM public.tpcds_q86.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q86.sql);

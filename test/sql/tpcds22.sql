@@ -25,9 +25,15 @@ results_rollup as
  union all select null i_product_name, null i_brand, null i_class, null i_category,sum(qoh) from results
 )
  select  i_product_name, i_brand, i_class, i_category,qoh
-into tpcds_22
+into pg_temp.tpcds_q22
       from results_rollup
       order by qoh, i_product_name, i_brand, i_class, i_category
 limit 100;
 
-
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q22.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q22.sql);
+(SELECT * FROM public.tpcds_q22.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q22.sql);

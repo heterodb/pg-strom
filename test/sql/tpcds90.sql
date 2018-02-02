@@ -1,6 +1,6 @@
 
 select  cast(amc as decimal(15,4))/cast(pmc as decimal(15,4)) am_pm_ratio
-into tpcds_q90
+into pg_temp.tpcds_q90
  from ( select count(*) amc
        from web_sales, household_demographics , time_dim, web_page
        where ws_sold_time_sk = time_dim.t_time_sk
@@ -21,3 +21,12 @@ into tpcds_q90
  limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q90.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q90.sql);
+(SELECT * FROM public.tpcds_q90.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q90.sql);

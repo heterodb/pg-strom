@@ -45,7 +45,7 @@ with results as
   from results)
 
  select  *
-into tpcds_q67
+into pg_temp.tpcds_q67
 from (select i_category
             ,i_class
             ,i_brand
@@ -71,3 +71,12 @@ order by i_category
 limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q67.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q67.sql);
+(SELECT * FROM public.tpcds_q67.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q67.sql);

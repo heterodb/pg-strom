@@ -7,7 +7,7 @@ with ws_wh as
    count(distinct ws1.ws_order_number) as "order count"
   ,sum(ws_ext_ship_cost) as "total shipping cost"
   ,sum(ws_net_profit) as "total net profit"
-into tpcds_q95
+into pg_temp.tpcds_q95x
 from
    web_sales ws1
   ,date_dim
@@ -31,3 +31,12 @@ order by count(distinct ws1.ws_order_number)
 limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q95x.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q95x.sql);
+(SELECT * FROM public.tpcds_q95x.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q95x.sql);

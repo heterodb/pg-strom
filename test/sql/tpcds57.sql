@@ -38,7 +38,7 @@ with v1 as(
        v1.rn = v1_lag.rn + 1 and
        v1.rn = v1_lead.rn - 1)
   select  *
-into tpcds_q57
+into pg_temp.tpcds_q57
  from v2
  where  d_year = 2000 and
         avg_monthly_sales > 0 and
@@ -47,3 +47,12 @@ into tpcds_q57
  limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q57.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q57.sql);
+(SELECT * FROM public.tpcds_q57.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q57.sql);

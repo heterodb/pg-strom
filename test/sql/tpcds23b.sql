@@ -28,7 +28,7 @@ with frequent_ss_items as
   *
  from max_store_sales))
   select  c_last_name,c_first_name,sales
-into tpcds_q23b
+into pg_temp.tpcds_q23b
  from (select c_last_name,c_first_name,sum(cs_quantity*cs_list_price) sales
         from catalog_sales
             ,customer
@@ -54,3 +54,12 @@ into tpcds_q23b
        group by c_last_name,c_first_name) csws
      order by c_last_name,c_first_name,sales
   limit 100;
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q23b.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q23b.sql);
+(SELECT * FROM public.tpcds_q23b.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q23b.sql);

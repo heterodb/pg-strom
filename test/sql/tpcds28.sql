@@ -1,6 +1,6 @@
 
 select  *
-into tpcds_q28
+into pg_temp.tpcds_q28
 from (select avg(ss_list_price) B1_LP
             ,count(ss_list_price) B1_CNT
             ,count(distinct ss_list_price) B1_CNTD
@@ -52,3 +52,12 @@ from (select avg(ss_list_price) B1_LP
 limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q28.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q28.sql);
+(SELECT * FROM public.tpcds_q28.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q28.sql);

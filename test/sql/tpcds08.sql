@@ -1,7 +1,7 @@
 
 select  s_store_name
       ,sum(ss_net_profit)
- into tpcds_q08
+ into pg_temp.tpcds_q08
  from store_sales
      ,date_dim
      ,store,
@@ -107,3 +107,12 @@ select  s_store_name
  limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q08.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q08.sql);
+(SELECT * FROM public.tpcds_q08.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q08.sql);

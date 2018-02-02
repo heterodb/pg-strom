@@ -18,7 +18,7 @@ select
   ,sum(case when (sr_returned_date_sk - ss_sold_date_sk > 90) and
                  (sr_returned_date_sk - ss_sold_date_sk <= 120) then 1 else 0 end)  as "91-120 days" 
   ,sum(case when (sr_returned_date_sk - ss_sold_date_sk  > 120) then 1 else 0 end)  as ">120 days" 
-into tpcds_q50
+into pg_temp.tpcds_q50
 from
    store_sales
   ,store_returns
@@ -58,3 +58,12 @@ order by s_store_name
 limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q50.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q50.sql);
+(SELECT * FROM public.tpcds_q50.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q50.sql);

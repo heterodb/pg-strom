@@ -8,7 +8,7 @@ select
   count(*) cnt2,
   cd_credit_rating,
   count(*) cnt3
-into tpcds_q69
+into pg_temp.tpcds_q69
  from
   customer c,customer_address ca,customer_demographics
  where
@@ -46,3 +46,12 @@ into tpcds_q69
  limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q69.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q69.sql);
+(SELECT * FROM public.tpcds_q69.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q69.sql);

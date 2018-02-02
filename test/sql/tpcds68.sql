@@ -7,7 +7,7 @@ select  c_last_name
        ,extended_price
        ,extended_tax
        ,list_price
-into tpcds_q68
+into pg_temp.tpcds_q68
  from (select ss_ticket_number
              ,ss_customer_sk
              ,ca_city bought_city
@@ -41,3 +41,12 @@ into tpcds_q68
  limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q68.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q68.sql);
+(SELECT * FROM public.tpcds_q68.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q68.sql);

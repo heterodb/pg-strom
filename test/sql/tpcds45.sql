@@ -1,6 +1,6 @@
 
 select  ca_zip, ca_county, sum(ws_sales_price)
-into tpcds_q45
+into pg_temp.tpcds_q45
  from web_sales, customer, customer_address, date_dim, item
  where ws_bill_customer_sk = c_customer_sk
  	and c_current_addr_sk = ca_address_sk 
@@ -19,3 +19,12 @@ into tpcds_q45
  limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q45.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q45.sql);
+(SELECT * FROM public.tpcds_q45.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q45.sql);

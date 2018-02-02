@@ -5,7 +5,7 @@ select  i_item_desc
       ,sum(case when p_promo_sk is null then 1 else 0 end) no_promo
       ,sum(case when p_promo_sk is not null then 1 else 0 end) promo
       ,count(*) total_cnt
-into tpcds_q72
+into pg_temp.tpcds_q72
 from catalog_sales
 join inventory on (cs_item_sk = inv_item_sk)
 join warehouse on (w_warehouse_sk=inv_warehouse_sk)
@@ -28,3 +28,12 @@ order by total_cnt desc, i_item_desc, w_warehouse_name, d_week_seq
 limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q72.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q72.sql);
+(SELECT * FROM public.tpcds_q72.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q72.sql);

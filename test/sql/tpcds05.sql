@@ -123,7 +123,7 @@ with ssr as
  from   wsr
  ) x
  group by channel, id)
- select  channel, id, sales, returns, profit into tpcds_q05 from ( 
+ select  channel, id, sales, returns, profit into pg_temp.tpcds_q05 from ( 
   select channel, id, sales, returns, profit from results
   union
   select channel, null as id, sum(sales), sum(returns), sum(profit) from results group by channel
@@ -133,3 +133,12 @@ order by channel, id
 limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q05.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q05.sql);
+(SELECT * FROM public.tpcds_q05.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q05.sql);

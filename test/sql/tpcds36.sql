@@ -32,7 +32,7 @@ with results as
   gross_margin ,i_category ,i_class, lochierarchy,rank() over (
  	partition by lochierarchy, case when t_class = 0 then i_category end 
  	order by gross_margin asc) as rank_within_parent
-into tpcds_q36
+into pg_temp.tpcds_q36
  from results_rollup
  order by
    lochierarchy desc
@@ -41,3 +41,12 @@ into tpcds_q36
   limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q36.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q36.sql);
+(SELECT * FROM public.tpcds_q36.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q36.sql);

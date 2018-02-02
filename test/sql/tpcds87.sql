@@ -1,6 +1,6 @@
 
 select count(*) 
-into tpcds_q87
+into pg_temp.tpcds_q87
 from ((select distinct c_last_name, c_first_name, d_date
        from store_sales, date_dim, customer
        where store_sales.ss_sold_date_sk = date_dim.d_date_sk
@@ -22,3 +22,12 @@ from ((select distinct c_last_name, c_first_name, d_date
 ;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q87.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q87.sql);
+(SELECT * FROM public.tpcds_q87.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q87.sql);

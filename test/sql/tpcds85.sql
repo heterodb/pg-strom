@@ -3,7 +3,7 @@ select  substr(r_reason_desc,1,20)
        ,avg(ws_quantity)  x
        ,avg(wr_refunded_cash) y
        ,avg(wr_fee) z
-into tpcds_q85
+into pg_temp.tpcds_q85
  from web_sales, web_returns, web_page, customer_demographics cd1,
       customer_demographics cd2, customer_address, date_dim, reason 
  where ws_web_page_sk = wp_web_page_sk
@@ -83,3 +83,12 @@ order by substr(r_reason_desc,1,20)
 limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q85.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q85.sql);
+(SELECT * FROM public.tpcds_q85.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q85.sql);

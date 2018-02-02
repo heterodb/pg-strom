@@ -48,10 +48,19 @@ with my_customers as (
   from   my_revenue
  )
   select  segment, count(*) as num_customers, segment*50 as segment_base
-into tpcds_q54
+into pg_temp.tpcds_q54
  from segments
  group by segment
  order by segment, num_customers
  limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q54.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q54.sql);
+(SELECT * FROM public.tpcds_q54.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q54.sql);

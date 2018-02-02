@@ -2,7 +2,7 @@
 select  i_item_id
        ,i_item_desc
        ,i_current_price
-into tpcds_q82
+into pg_temp.tpcds_q82
  from item, inventory, date_dim, store_sales
  where i_current_price between 30 and 30+30
  and inv_item_sk = i_item_sk
@@ -16,3 +16,12 @@ into tpcds_q82
  limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q82.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q82.sql);
+(SELECT * FROM public.tpcds_q82.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q82.sql);

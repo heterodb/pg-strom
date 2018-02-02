@@ -38,7 +38,7 @@ select c_last_name
       ,c_first_name
       ,s_store_name
       ,sum(netpaid) paid
-into tpcds_q24a
+into pg_temp.tpcds_q24a
 from ssales
 where i_color = 'orchid'
 group by c_last_name
@@ -47,3 +47,12 @@ group by c_last_name
 having sum(netpaid) > (select 0.05*avg(netpaid)
                                  from ssales)
 ;
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q24a.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q24a.sql);
+(SELECT * FROM public.tpcds_q24a.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q24a.sql);

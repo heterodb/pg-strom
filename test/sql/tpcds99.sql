@@ -11,7 +11,7 @@ select
   ,sum(case when (cs_ship_date_sk - cs_sold_date_sk > 90) and
                  (cs_ship_date_sk - cs_sold_date_sk <= 120) then 1 else 0 end)  as "91-120 days" 
   ,sum(case when (cs_ship_date_sk - cs_sold_date_sk  > 120) then 1 else 0 end)  as ">120 days" 
-into tpcds_q99
+into pg_temp.tpcds_q99
 from
    catalog_sales
   ,warehouse
@@ -34,3 +34,12 @@ order by substr(w_warehouse_name,1,20)
 limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q99.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q99.sql);
+(SELECT * FROM public.tpcds_q99.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q99.sql);

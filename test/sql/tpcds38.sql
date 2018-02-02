@@ -1,6 +1,6 @@
 
 select  count(*)
-into tpcds_q38
+into pg_temp.tpcds_q38
 from (
     select distinct c_last_name, c_first_name, d_date
     from store_sales, date_dim, customer
@@ -23,3 +23,12 @@ from (
 limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q38.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q38.sql);
+(SELECT * FROM public.tpcds_q38.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q38.sql);

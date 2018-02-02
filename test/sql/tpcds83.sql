@@ -55,7 +55,7 @@ with sr_items as
        ,wr_item_qty
        ,wr_item_qty/(sr_item_qty+cr_item_qty+wr_item_qty)/3.0 * 100 wr_dev
        ,(sr_item_qty+cr_item_qty+wr_item_qty)/3.0 average
-into tpcds_q83
+into pg_temp.tpcds_q83
  from sr_items
      ,cr_items
      ,wr_items
@@ -66,3 +66,12 @@ into tpcds_q83
  limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q83.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q83.sql);
+(SELECT * FROM public.tpcds_q83.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q83.sql);

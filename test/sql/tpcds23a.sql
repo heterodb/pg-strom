@@ -29,7 +29,7 @@ with frequent_ss_items as
 from
  max_store_sales))
   select  sum(sales)
- into tpcds_q23a
+ into pg_temp.tpcds_q23a
  from (select cs_quantity*cs_list_price sales
        from catalog_sales
            ,date_dim 
@@ -48,3 +48,12 @@ from
          and ws_item_sk in (select item_sk from frequent_ss_items)
          and ws_bill_customer_sk in (select c_customer_sk from best_ss_customer)) csss
  limit 100;
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q23a.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q23a.sql);
+(SELECT * FROM public.tpcds_q23a.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q23a.sql);

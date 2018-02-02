@@ -4,7 +4,7 @@ select  i_item_id,
         avg(cs_list_price) agg2,
         avg(cs_coupon_amt) agg3,
         avg(cs_sales_price) agg4 
-into tpcds_q26
+into pg_temp.tpcds_q26
  from catalog_sales, customer_demographics, date_dim, item, promotion
  where cs_sold_date_sk = d_date_sk and
        cs_item_sk = i_item_sk and
@@ -20,3 +20,12 @@ into tpcds_q26
  limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q26.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q26.sql);
+(SELECT * FROM public.tpcds_q26.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q26.sql);

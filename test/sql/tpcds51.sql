@@ -22,7 +22,7 @@ where ss_sold_date_sk=d_date_sk
   and ss_item_sk is not NULL
 group by ss_item_sk, d_date)
  select  *
-into tpcds_q51
+into pg_temp.tpcds_q51
 from (select item_sk
      ,d_date
      ,web_sales
@@ -44,3 +44,12 @@ order by item_sk
 limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q51.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q51.sql);
+(SELECT * FROM public.tpcds_q51.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q51.sql);

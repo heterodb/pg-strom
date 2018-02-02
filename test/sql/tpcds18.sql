@@ -25,7 +25,7 @@ with results as
        ca_state in ('ND','WI','AL','NC','OK','MS','TN')
  group by i_item_id, ca_country, ca_state, ca_county)
   select  i_item_id, ca_country, ca_state, ca_county, agg1, agg2, agg3, agg4, agg5, agg6, agg7
-into tpcds_q18
+into pg_temp.tpcds_q18
  from (
  select i_item_id, ca_country, ca_state, ca_county, agg1, agg2, agg3, agg4, agg5, agg6, agg7 from results
  union
@@ -48,3 +48,12 @@ into tpcds_q18
  limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q18.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q18.sql);
+(SELECT * FROM public.tpcds_q18.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q18.sql);

@@ -49,7 +49,7 @@ with ss_items as
        ,ws_item_rev
        ,ws_item_rev/(ss_item_rev+cs_item_rev+ws_item_rev)/3 * 100 ws_dev
        ,(ss_item_rev+cs_item_rev+ws_item_rev)/3 average
-into tpcds_q58
+into pg_temp.tpcds_q58
  from ss_items,cs_items,ws_items
  where ss_items.item_id=cs_items.item_id
    and ss_items.item_id=ws_items.item_id 
@@ -64,3 +64,12 @@ into tpcds_q58
  limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q58.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q58.sql);
+(SELECT * FROM public.tpcds_q58.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q58.sql);

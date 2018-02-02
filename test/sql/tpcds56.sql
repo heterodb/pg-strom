@@ -56,7 +56,7 @@ where i_color in ('orchid','chiffon','lace'))
  and     ca_gmt_offset           = -8
  group by i_item_id)
 select  i_item_id ,sum(total_sales) total_sales
-  into tpcds_q56
+  into pg_temp.tpcds_q56
  from  (select * from ss 
         union all
         select * from cs 
@@ -67,3 +67,12 @@ select  i_item_id ,sum(total_sales) total_sales
  limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q56.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q56.sql);
+(SELECT * FROM public.tpcds_q56.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q56.sql);

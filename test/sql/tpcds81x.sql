@@ -14,7 +14,7 @@ with customer_total_return as
   select  c_customer_id,c_salutation,c_first_name,c_last_name,ca_street_number,ca_street_name
                    ,ca_street_type,ca_suite_number,ca_city,ca_county,ca_state,ca_zip,ca_country,ca_gmt_offset
                   ,ca_location_type,ctr_total_return
-into tpcds_q81x
+into pg_temp.tpcds_q81x
  from customer_total_return ctr1
      ,customer_address
      ,customer
@@ -32,3 +32,12 @@ into tpcds_q81x
  limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q81x.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q81x.sql);
+(SELECT * FROM public.tpcds_q81x.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q81x.sql);

@@ -6,7 +6,7 @@ select
 	i_current_price,
 	i_wholesale_cost,
 	i_brand
-into tpcds_q65
+into pg_temp.tpcds_q65
  from store, item,
      (select ss_store_sk, avg(revenue) as ave
  	from
@@ -28,3 +28,12 @@ into tpcds_q65
 limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q65.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q65.sql);
+(SELECT * FROM public.tpcds_q65.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q65.sql);

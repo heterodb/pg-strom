@@ -5,7 +5,7 @@ select c_last_name
        ,c_preferred_cust_flag 
        ,ss_ticket_number
        ,cnt
-into tpcds_q73
+into pg_temp.tpcds_q73
 from
    (select ss_ticket_number
           ,ss_customer_sk
@@ -28,3 +28,12 @@ from
     order by cnt desc, c_last_name asc;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q73.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q73.sql);
+(SELECT * FROM public.tpcds_q73.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q73.sql);

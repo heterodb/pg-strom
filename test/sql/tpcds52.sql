@@ -3,7 +3,7 @@ select  dt.d_year
  	,item.i_brand_id brand_id
  	,item.i_brand brand
  	,sum(ss_ext_sales_price) ext_price
-into tpcds_q52
+into pg_temp.tpcds_q52
  from date_dim dt
      ,store_sales
      ,item
@@ -21,3 +21,12 @@ into tpcds_q52
 limit 100 ;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q52.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q52.sql);
+(SELECT * FROM public.tpcds_q52.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q52.sql);

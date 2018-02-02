@@ -1,6 +1,6 @@
 
 select  distinct(i_product_name)
-into tpcds_q41
+into pg_temp.tpcds_q41
  from item i1
  where i_manufact_id between 742 and 742+40 
    and (select count(*) as item_cnt
@@ -51,3 +51,12 @@ into tpcds_q41
  limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q41.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q41.sql);
+(SELECT * FROM public.tpcds_q41.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q41.sql);

@@ -63,7 +63,7 @@ where i_category in ('Books'))
  and     ca_gmt_offset           = -5
  group by i_manufact_id)
 select  i_manufact_id ,sum(total_sales) total_sales
-into tpcds_q33
+into pg_temp.tpcds_q33
  from  (select * from ss 
         union all
         select * from cs 
@@ -74,3 +74,12 @@ into tpcds_q33
 limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q33.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q33.sql);
+(SELECT * FROM public.tpcds_q33.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q33.sql);

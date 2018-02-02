@@ -1,6 +1,6 @@
 
 select  * 
-into tpcds_q63
+into pg_temp.tpcds_q63
 from (select i_manager_id
              ,sum(ss_sales_price) sum_sales
              ,avg(sum(ss_sales_price)) over (partition by i_manager_id) avg_monthly_sales
@@ -28,3 +28,12 @@ order by i_manager_id
 limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q63.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q63.sql);
+(SELECT * FROM public.tpcds_q63.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q63.sql);

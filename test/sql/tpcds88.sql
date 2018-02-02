@@ -1,6 +1,6 @@
 
 select  *
-into tpcds_q88
+into pg_temp.tpcds_q88
 from
  (select count(*) h8_30_to_9
  from store_sales, household_demographics , time_dim, store
@@ -93,3 +93,12 @@ from
 ;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q88.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q88.sql);
+(SELECT * FROM public.tpcds_q88.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q88.sql);

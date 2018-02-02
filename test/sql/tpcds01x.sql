@@ -9,7 +9,7 @@ and d_year =2000
 group by sr_customer_sk
 ,sr_store_sk)
 select  c_customer_id
-into tpcds_q01x
+into pg_temp.tpcds_q01x
 from customer_total_return ctr1
 ,store
 ,customer
@@ -23,3 +23,13 @@ and s_state = 'TN'
 and ctr1.ctr_customer_sk = c_customer_sk
 order by c_customer_id
 limit 100;
+
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q01x.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q01x.sql);
+(SELECT * FROM public.tpcds_q01x.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q01x.sql);

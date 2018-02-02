@@ -1,6 +1,6 @@
 
 select  *
-into tpcds_q53
+into pg_temp.tpcds_q53
 from 
 (select i_manufact_id,
 sum(ss_sales_price) sum_sales,
@@ -28,3 +28,12 @@ order by avg_quarterly_sales,
 limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q53.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q53.sql);
+(SELECT * FROM public.tpcds_q53.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q53.sql);

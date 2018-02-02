@@ -1,6 +1,6 @@
 
 select  promotions,total,cast(promotions as decimal(15,4))/cast(total as decimal(15,4))*100
-into tpcds_q61
+into pg_temp.tpcds_q61
 from
   (select sum(ss_ext_sales_price) promotions
    from  store_sales
@@ -43,3 +43,12 @@ order by promotions, total
 limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q61.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q61.sql);
+(SELECT * FROM public.tpcds_q61.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q61.sql);

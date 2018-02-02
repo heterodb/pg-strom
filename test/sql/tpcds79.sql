@@ -1,7 +1,7 @@
 
 select 
   c_last_name,c_first_name,substr(s_city,1,30),ss_ticket_number,amt,profit
-into tpcds_q79
+into pg_temp.tpcds_q79
   from
    (select ss_ticket_number
           ,ss_customer_sk
@@ -22,3 +22,12 @@ into tpcds_q79
 limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q79.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q79.sql);
+(SELECT * FROM public.tpcds_q79.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q79.sql);

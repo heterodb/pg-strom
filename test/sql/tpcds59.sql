@@ -21,7 +21,7 @@ with wss as
        ,thu_sales1/thu_sales2 e
        ,fri_sales1/fri_sales2 f
        ,sat_sales1/sat_sales2 g
-into tpcds_q59
+into pg_temp.tpcds_q59
  from
  (select s_store_name s_store_name1,wss.d_week_seq d_week_seq1
         ,s_store_id s_store_id1,sun_sales sun_sales1
@@ -47,3 +47,12 @@ into tpcds_q59
 limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q59.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q59.sql);
+(SELECT * FROM public.tpcds_q59.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q59.sql);

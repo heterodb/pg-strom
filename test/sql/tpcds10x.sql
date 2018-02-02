@@ -14,7 +14,7 @@ select
   count(*) cnt5,
   cd_dep_college_count,
   count(*) cnt6
- into tpcds_q10
+ into pg_temp.tpcds_q10x
  from
   customer c,customer_address ca,customer_demographics
   ,(select ss_customer_sk
@@ -61,3 +61,12 @@ select
 limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q10x.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q10x.sql);
+(SELECT * FROM public.tpcds_q10x.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q10x.sql);

@@ -110,7 +110,7 @@ with  cross_items as
  group by channel, i_brand_id,i_class_id,i_category_id)
 
  select channel, i_brand_id, i_class_id, i_category_id, sum_sales, number_sales
-   into tpcds_q14a
+   into pg_temp.tpcds_q14a
    from (
       select channel, i_brand_id, i_class_id, i_category_id, sum_sales, number_sales from results
       union
@@ -126,3 +126,12 @@ with  cross_items as
       select null as channel, null as i_brand_id, null as i_class_id, null as i_category_id, sum(sum_sales), sum(number_sales) from results ) z
  order by channel, i_brand_id, i_class_id, i_category_id
  limit 100;
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q14a.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q14a.sql);
+(SELECT * FROM public.tpcds_q14a.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q14a.sql);

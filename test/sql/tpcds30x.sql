@@ -14,7 +14,7 @@ with customer_total_return as
   select  c_customer_id,c_salutation,c_first_name,c_last_name,c_preferred_cust_flag
        ,c_birth_day,c_birth_month,c_birth_year,c_birth_country,c_login,c_email_address
        ,c_last_review_date,ctr_total_return
-into tpcds_q30x
+into pg_temp.tpcds_q30x
  from customer_total_return ctr1
      ,customer_address
      ,customer
@@ -32,3 +32,12 @@ into tpcds_q30x
 limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q30x.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q30x.sql);
+(SELECT * FROM public.tpcds_q30x.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q30x.sql);

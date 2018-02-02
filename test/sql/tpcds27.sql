@@ -25,7 +25,7 @@ with results as
           agg2,
           agg3,
           agg4
-   into tpcds_q27
+   into pg_temp.tpcds_q27
    from (
         select i_item_id, s_state, g_state, agg1, agg2, agg3, agg4 from results
          union
@@ -40,3 +40,12 @@ with results as
  limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q27.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q27.sql);
+(SELECT * FROM public.tpcds_q27.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q27.sql);

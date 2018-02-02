@@ -1,6 +1,6 @@
 
 select  a.ca_state state, count(*) cnt
- into tpcds_q06
+ into pg_temp.tpcds_q06x
  from customer_address a
      ,customer c
      ,store_sales s
@@ -25,4 +25,10 @@ select  a.ca_state state, count(*) cnt
  order by cnt 
  limit 100;
 
-
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q06x.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q06x.sql);
+(SELECT * FROM public.tpcds_q06x.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q06x.sql);

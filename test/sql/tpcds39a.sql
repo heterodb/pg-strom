@@ -23,7 +23,7 @@ select inv1.w_warehouse_sk   w_warehouse_sk1
       ,inv2.d_moy            d_moy2
       ,inv2.mean             mean2
       ,inv2.cov              cov2
-into tpcds_q39a
+into pg_temp.tpcds_q39a
 from inv inv1,inv inv2
 where inv1.i_item_sk = inv2.i_item_sk
   and inv1.w_warehouse_sk =  inv2.w_warehouse_sk
@@ -32,3 +32,12 @@ where inv1.i_item_sk = inv2.i_item_sk
 order by inv1.w_warehouse_sk,inv1.i_item_sk,inv1.d_moy,inv1.mean,inv1.cov
         ,inv2.d_moy,inv2.mean, inv2.cov
 ;
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q39a.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q39a.sql);
+(SELECT * FROM public.tpcds_q39a.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q39a.sql);

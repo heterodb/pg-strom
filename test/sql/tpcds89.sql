@@ -1,6 +1,6 @@
 
 select  *
-into tpcds_q89
+into pg_temp.tpcds_q89
 from(
 select i_category, i_class, i_brand,
        s_store_name, s_company_name,
@@ -27,3 +27,12 @@ order by sum_sales - avg_monthly_sales, s_store_name
 limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q89.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q89.sql);
+(SELECT * FROM public.tpcds_q89.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q89.sql);

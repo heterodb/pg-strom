@@ -104,7 +104,7 @@ with ss as
  group by channel, id )
 
   select  *
-into tpcds_q77
+into pg_temp.tpcds_q77
  from (
  select channel, id, sales, returns, profit from  results
  union
@@ -114,3 +114,12 @@ into tpcds_q77
 ) foo
 order by channel, id
  limit 100;
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q77.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q77.sql);
+(SELECT * FROM public.tpcds_q77.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q77.sql);

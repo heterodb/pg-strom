@@ -7,7 +7,7 @@ select  s_store_name, s_store_id,
         sum(case when (d_day_name='Thursday') then ss_sales_price else null end) thu_sales,
         sum(case when (d_day_name='Friday') then ss_sales_price else null end) fri_sales,
         sum(case when (d_day_name='Saturday') then ss_sales_price else null end) sat_sales
-into tpcds_q43
+into pg_temp.tpcds_q43
  from date_dim, store_sales, store
  where d_date_sk = ss_sold_date_sk and
        s_store_sk = ss_store_sk and
@@ -18,3 +18,12 @@ into tpcds_q43
  limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q43.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q43.sql);
+(SELECT * FROM public.tpcds_q43.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q43.sql);

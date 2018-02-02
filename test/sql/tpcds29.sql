@@ -7,7 +7,7 @@ select
     ,sum(ss_quantity)        as store_sales_quantity
     ,sum(sr_return_quantity) as store_returns_quantity
     ,sum(cs_quantity)        as catalog_sales_quantity
- into tpcds_q29
+ into pg_temp.tpcds_q29
  from
     store_sales
    ,store_returns
@@ -46,3 +46,12 @@ select
  limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q29.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q29.sql);
+(SELECT * FROM public.tpcds_q29.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q29.sql);

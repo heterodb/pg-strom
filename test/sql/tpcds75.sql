@@ -56,7 +56,7 @@ WITH all_sales AS (
                           ,curr_yr.sales_cnt AS curr_yr_cnt
                           ,curr_yr.sales_cnt-prev_yr.sales_cnt AS sales_cnt_diff
                           ,curr_yr.sales_amt-prev_yr.sales_amt AS sales_amt_diff
-into tpcds_q75
+into pg_temp.tpcds_q75
  FROM all_sales curr_yr, all_sales prev_yr
  WHERE curr_yr.i_brand_id=prev_yr.i_brand_id
    AND curr_yr.i_class_id=prev_yr.i_class_id
@@ -69,3 +69,12 @@ into tpcds_q75
  limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q75.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q75.sql);
+(SELECT * FROM public.tpcds_q75.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q75.sql);

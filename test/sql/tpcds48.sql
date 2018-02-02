@@ -1,6 +1,6 @@
 
 select sum (ss_quantity)
- into tpcds_q48
+ into pg_temp.tpcds_q48
  from store_sales, store, customer_demographics, customer_address, date_dim
  where s_store_sk = ss_store_sk
  and  ss_sold_date_sk = d_date_sk and d_year = 1998
@@ -66,3 +66,12 @@ select sum (ss_quantity)
 ;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q48.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q48.sql);
+(SELECT * FROM public.tpcds_q48.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q48.sql);

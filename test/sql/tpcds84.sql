@@ -1,7 +1,7 @@
 
 select  c_customer_id as customer_id
        ,c_last_name || ', ' || c_first_name as customername
-into tpcds_q84
+into pg_temp.tpcds_q84
  from customer
      ,customer_address
      ,customer_demographics
@@ -20,3 +20,12 @@ into tpcds_q84
  limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q84.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q84.sql);
+(SELECT * FROM public.tpcds_q84.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q84.sql);

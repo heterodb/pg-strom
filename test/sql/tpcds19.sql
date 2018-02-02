@@ -1,7 +1,7 @@
 
 select  i_brand_id brand_id, i_brand brand, i_manufact_id, i_manufact,
  	sum(ss_ext_sales_price) ext_price
- into tpcds_q19
+ into pg_temp.tpcds_q19
  from date_dim, store_sales, item,customer,customer_address,store
  where d_date_sk = ss_sold_date_sk
    and ss_item_sk = i_item_sk
@@ -24,3 +24,12 @@ select  i_brand_id brand_id, i_brand brand, i_manufact_id, i_manufact,
 limit 100 ;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q19.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q19.sql);
+(SELECT * FROM public.tpcds_q19.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q19.sql);

@@ -4,19 +4,19 @@ select
   cd_marital_status,
   cd_dep_count,
   count(*) cnt1,
-  avg(cd_dep_count),
-  max(cd_dep_count),
-  sum(cd_dep_count),
+  avg(cd_dep_count)    avg_cd_dep_count,
+  max(cd_dep_count)    max_cd_dep_count,
+  sum(cd_dep_count)    sum_cd_dep_count,
   cd_dep_employed_count,
   count(*) cnt2,
-  avg(cd_dep_employed_count),
-  max(cd_dep_employed_count),
-  sum(cd_dep_employed_count),
+  avg(cd_dep_employed_count)  avg_cd_dep_employed_count,
+  max(cd_dep_employed_count)  max_cd_dep_employed_count,
+  sum(cd_dep_employed_count)  sum_cd_dep_employed_count,
   cd_dep_college_count,
   count(*) cnt3,
-  avg(cd_dep_college_count),
-  max(cd_dep_college_count),
-  sum(cd_dep_college_count)
+  avg(cd_dep_college_count)   avg_cd_dep_college_count,
+  max(cd_dep_college_count)   max_cd_dep_college_count,
+  sum(cd_dep_college_count)   sum_cd_dep_college_count
  from
   customer c,customer_address ca,customer_demographics
   ,(select ss_customer_sk
@@ -56,3 +56,12 @@ select
           cd_dep_employed_count,
           cd_dep_college_count
  limit 100;
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q35x.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q35x.sql);
+(SELECT * FROM public.tpcds_q35x.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q35x.sql);

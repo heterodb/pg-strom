@@ -4,7 +4,7 @@ select
         cc_name Call_Center_Name,
         cc_manager Manager,
         sum(cr_net_loss) Returns_Loss
-into tpcds_q91
+into pg_temp.tpcds_q91
 from
         call_center,
         catalog_returns,
@@ -30,3 +30,12 @@ group by cc_call_center_id,cc_name,cc_manager,cd_marital_status,cd_education_sta
 order by sum(cr_net_loss) desc;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q91.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q91.sql);
+(SELECT * FROM public.tpcds_q91.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q91.sql);

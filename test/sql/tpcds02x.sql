@@ -30,7 +30,7 @@ with wscs as
        ,thu_sales1/thu_sales2::numeric(12,2)  e
        ,fri_sales1/fri_sales2::numeric(12,2)  f
        ,sat_sales1/sat_sales2::numeric(12,2)  g
- into tpcds_q02
+ into pg_temp.tpcds_q02x
  from
  (select wswscs.d_week_seq d_week_seq1
         ,sun_sales sun_sales1
@@ -59,3 +59,12 @@ with wscs as
  order by d_week_seq1;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q02x.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q02x.sql);
+(SELECT * FROM public.tpcds_q02x.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q02x.sql);

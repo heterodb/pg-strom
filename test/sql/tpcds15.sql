@@ -1,7 +1,7 @@
 
 select  ca_zip
        ,sum(cs_sales_price)
- into tpcds_q15
+ into pg_temp.tpcds_q15
  from catalog_sales
      ,customer
      ,customer_address
@@ -19,3 +19,12 @@ select  ca_zip
  limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q15.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q15.sql);
+(SELECT * FROM public.tpcds_q15.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q15.sql);

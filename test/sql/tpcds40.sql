@@ -6,7 +6,7 @@ select
  		then cs_sales_price - coalesce(cr_refunded_cash,0) else 0 end) as sales_before
   ,sum(case when (cast(d_date as date) >= cast ('1998-04-08' as date)) 
  		then cs_sales_price - coalesce(cr_refunded_cash,0) else 0 end) as sales_after
- into tpcds_q40
+ into pg_temp.tpcds_q40
  from
    catalog_sales left outer join catalog_returns on
        (cs_order_number = cr_order_number 
@@ -27,3 +27,12 @@ select
 limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q40.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q40.sql);
+(SELECT * FROM public.tpcds_q40.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q40.sql);

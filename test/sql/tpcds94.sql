@@ -3,7 +3,7 @@ select
    count(distinct ws_order_number) as "order count"
   ,sum(ws_ext_ship_cost) as "total shipping cost"
   ,sum(ws_net_profit) as "total net profit"
-into tpcds_q94
+into pg_temp.tpcds_q94
 from
    web_sales ws1
   ,date_dim
@@ -28,3 +28,12 @@ order by count(distinct ws_order_number)
 limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q94.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q94.sql);
+(SELECT * FROM public.tpcds_q94.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q94.sql);

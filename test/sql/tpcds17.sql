@@ -13,7 +13,7 @@ select  i_item_id
        ,count(cs_quantity) as catalog_sales_quantitycount ,avg(cs_quantity) as catalog_sales_quantityave
        ,stddev_samp(cs_quantity)/avg(cs_quantity) as catalog_sales_quantitystdev
        ,stddev_samp(cs_quantity)/avg(cs_quantity) as catalog_sales_quantitycov
- into tpcds_q17
+ into pg_temp.tpcds_q17
  from store_sales
      ,store_returns
      ,catalog_sales
@@ -44,3 +44,12 @@ select  i_item_id
 limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q17.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q17.sql);
+(SELECT * FROM public.tpcds_q17.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q17.sql);

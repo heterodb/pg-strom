@@ -97,7 +97,7 @@ results as
         , sales
         , returns
         , profit
-into tpcds_q80
+into pg_temp.tpcds_q80
  from (
    select channel, id, sales, returns, profit from  results
    union
@@ -109,3 +109,12 @@ into tpcds_q80
  limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q80.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q80.sql);
+(SELECT * FROM public.tpcds_q80.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q80.sql);

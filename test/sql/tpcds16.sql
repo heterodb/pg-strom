@@ -3,7 +3,7 @@ select
    count(distinct cs_order_number) as "order count"
   ,sum(cs_ext_ship_cost) as "total shipping cost"
   ,sum(cs_net_profit) as "total net profit"
-into tpcds_q16
+into pg_temp.tpcds_q16
 from
    catalog_sales cs1
   ,date_dim
@@ -30,3 +30,12 @@ order by count(distinct cs_order_number)
 limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q16.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q16.sql);
+(SELECT * FROM public.tpcds_q16.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q16.sql);

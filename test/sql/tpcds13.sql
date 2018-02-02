@@ -3,7 +3,7 @@ select avg(ss_quantity)             avg_quantity
        ,avg(ss_ext_sales_price)     avg_ext_sales_price
        ,avg(ss_ext_wholesale_cost)  avg_ext_wholesale_cost
        ,sum(ss_ext_wholesale_cost)  sum_ext_wholesale_cost
-into tpcds_q13
+into pg_temp.tpcds_q13
  from store_sales
      ,store
      ,customer_demographics
@@ -51,3 +51,12 @@ into tpcds_q13
 ;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q13.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q13.sql);
+(SELECT * FROM public.tpcds_q13.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q13.sql);

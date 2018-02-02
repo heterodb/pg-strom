@@ -5,7 +5,7 @@ select  c_last_name
        ,bought_city
        ,ss_ticket_number
        ,amt,profit 
- into tpcds_q46
+ into pg_temp.tpcds_q46
  from
    (select ss_ticket_number
           ,ss_customer_sk
@@ -34,3 +34,12 @@ select  c_last_name
   limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q46.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q46.sql);
+(SELECT * FROM public.tpcds_q46.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q46.sql);

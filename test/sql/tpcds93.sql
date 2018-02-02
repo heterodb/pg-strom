@@ -1,7 +1,7 @@
 
 select  ss_customer_sk
             ,sum(act_sales) sumsales
-into tpcds_q93
+into pg_temp.tpcds_q93
       from (select ss_item_sk
                   ,ss_ticket_number
                   ,ss_customer_sk
@@ -17,3 +17,12 @@ into tpcds_q93
 limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q93.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q93.sql);
+(SELECT * FROM public.tpcds_q93.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q93.sql);

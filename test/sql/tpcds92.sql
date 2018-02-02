@@ -1,7 +1,7 @@
 
 select  
    sum(ws_ext_discount_amt)  as "Excess Discount Amount" 
-into tpcds_q92
+into pg_temp.tpcds_q92
 from 
     web_sales 
    ,item 
@@ -29,3 +29,12 @@ order by sum(ws_ext_discount_amt)
 limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q92.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q92.sql);
+(SELECT * FROM public.tpcds_q92.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q92.sql);

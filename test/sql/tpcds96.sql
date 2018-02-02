@@ -1,6 +1,6 @@
 
 select  count(*) 
-into tpcds_q96
+into pg_temp.tpcds_q96
 from store_sales
     ,household_demographics 
     ,time_dim, store
@@ -15,3 +15,12 @@ order by count(*)
 limit 100;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q96.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q96.sql);
+(SELECT * FROM public.tpcds_q96.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q96.sql);

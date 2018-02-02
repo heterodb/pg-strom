@@ -1,5 +1,5 @@
 select *
-  into tpcds_q66
+  into pg_temp.tpcds_q66
   from (
 select   
          w_warehouse_name
@@ -220,3 +220,12 @@ select
  limit 100) hoge;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q66.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q66.sql);
+(SELECT * FROM public.tpcds_q66.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q66.sql);

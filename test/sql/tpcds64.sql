@@ -105,7 +105,7 @@ select cs1.product_name
      ,cs2.s3    s32
      ,cs2.syear syear2
      ,cs2.cnt   cnt2
-into tpcds_q64
+into pg_temp.tpcds_q64
 from cross_sales cs1,cross_sales cs2
 where cs1.item_sk=cs2.item_sk and
      cs1.syear = 2000 and
@@ -118,3 +118,12 @@ order by cs1.product_name
        ,cs2.cnt;
 
 
+
+
+--- validation check
+(SELECT * FROM pg_temp.tpcds_q64.sql
+ EXCEPT
+ SELECT * FROM public.tpcds_q64.sql);
+(SELECT * FROM public.tpcds_q64.sql
+ EXCEPT
+ SELECT * FROM pg_temp.tpcds_q64.sql);
