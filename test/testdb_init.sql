@@ -133,29 +133,29 @@ CREATE TABLE t_int2(id int primary key, dummy text,
                     c int,
                     e bigint);
 INSERT INTO t_int1 (SELECT x, random_text_len(0.5, 20),
-                           random_int(0.5, -32768, 32767),
-                           random_int(0.5, -32768, 32767),
-                           random_int(0.5, -2147483648, 2147483647),
-                           random_int(0.5, -2147483648, 2147483647),
-                           random_int(0.5, -2147483648, 2147483647),
-                           random_int(0.5, -2147483648, 2147483647)
+                           random_int(0.5, -32767, 32767),
+                           random_int(0.5, -32767, 32767),
+                           random_int(0.5, -2147483647, 2147483647),
+                           random_int(0.5, -2147483647, 2147483647),
+                           random_int(0.5, -2147483647, 2147483647),
+                           random_int(0.5, -2147483647, 2147483647)
                       FROM generate_series(1,1000000) X);
 INSERT INTO t_int2 (SELECT x, random_text_len(0.5, 20),
-                           random_int(0.5, -32768, 32767),
-                           random_int(0.5, -2147483648, 2147483647),
-                           random_int(0.5, -2147483648, 2147483647)
+                           random_int(0.5, -32767, 32767),
+                           random_int(0.5, -2147483647, 2147483647),
+                           random_int(0.5, -2147483647, 2147483647)
                       FROM generate_series(1,800000) X);
 ALTER TABLE t_int1 DROP COLUMN dummy;
 ALTER TABLE t_int2 DROP COLUMN dummy;
 ALTER TABLE t_int2 ADD COLUMN b smallint;
 ALTER TABLE t_int2 ADD COLUMN d int;
 ALTER TABLE t_int2 ADD COLUMN f bigint;
-INSERT INTO t_int2 (SELECT x, random_int(0.5, -32768, 32767),
-                              random_int(0.5, -2147483648, 2147483647),
-                              random_int(0.5, -2147483648, 2147483647),
-                              random_int(0.5, -32768, 32767),
-                              random_int(0.5, -2147483648, 2147483647),
-                              random_int(0.5, -2147483648, 2147483647)
+INSERT INTO t_int2 (SELECT x, random_int(0.5, -32767, 32767),
+                              random_int(0.5, -2147483647, 2147483647),
+                              random_int(0.5, -2147483647, 2147483647),
+                              random_int(0.5, -32767, 32767),
+                              random_int(0.5, -2147483647, 2147483647),
+                              random_int(0.5, -2147483647, 2147483647)
                       FROM generate_series(800001,1000000) X);
 
 /* floating point data types */

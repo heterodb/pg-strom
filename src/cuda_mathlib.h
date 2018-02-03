@@ -1321,6 +1321,7 @@ STATIC_INLINE(pg_float8_t)
 pgfn_atan2(kern_context *kcxt, pg_float8_t arg1, pg_float8_t arg2)
 {
 	pg_float8_t	result;
+	cl_double	atan1_0;
 	cl_double	atan2_arg1_arg2;
 
 	result.isnull = arg1.isnull | arg2.isnull;
@@ -1331,8 +1332,8 @@ pgfn_atan2(kern_context *kcxt, pg_float8_t arg1, pg_float8_t arg2)
 		else
 		{
 			atan2_arg1_arg2 = atan2(arg1.value, arg2.value);
-			atan_1_0 = atan(1.0);
-			result.value = (atan2_arg1_arg2 / atan_1_0) * 45.0;
+			atan1_0 = atan(1.0);
+			result.value = (atan2_arg1_arg2 / atan1_0) * 45.0;
 
 			CHECKFLOATVAL(&kcxt->e, result, false, true);
 		}
@@ -1352,8 +1353,8 @@ pgfn_cos(kern_context *kcxt, pg_float8_t arg1)
 			result.value = DBL_NAN;
 		else
 		{
-			result.value = cos(arg1);
-			CHECKFLOATVAL(result, false, true);
+			result.value = cos(arg1.value);
+			CHECKFLOATVAL(&kcxt->e, result, false, true);
 		}
 	}
 	return result;

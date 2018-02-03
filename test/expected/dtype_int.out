@@ -1,0 +1,80 @@
+---
+--- Test cases for integer data types
+---
+--
+-- int2
+--
+RESET pg_strom.enabled;
+SELECT a, b
+  INTO pg_temp.test_01a
+  FROM t_int1
+ WHERE a > b AND @b > a;
+SELECT a,b,-a v1, @b v2
+  INTO pg_temp.test_02a
+  FROM t_int2
+ WHERE (a < b AND @a > b) OR a = b;
+SELECT a, b, a::int + b::int v1, a::int - b::int v2, a::int * b::int v3
+  INTO pg_temp.test_03a
+  FROM t_int1
+ WHERE a % 5 < 3 AND a::int + b::int < a::int * b::int;
+SELECT a,b, a&b v1, a|b v2, a#b v3, ~a v4, a>>3 v5, b<<2 v6
+  INTO pg_temp.test_04a
+  FROM t_int2
+ WHERE a % 4 = 3 and a::int + b::int < a::int * b::int;
+SET pg_strom.enabled = off;
+SELECT a, b
+  INTO pg_temp.test_01b
+  FROM t_int1
+ WHERE a > b AND @b > a;
+SELECT a,b,-a v1, @b v2
+  INTO pg_temp.test_02b
+  FROM t_int2
+ WHERE (a < b AND @a > b) OR a = b;
+SELECT a, b, a::int + b::int v1, a::int - b::int v2, a::int * b::int v3
+  INTO pg_temp.test_03b
+  FROM t_int1
+ WHERE a % 5 < 3 AND a::int + b::int < a::int * b::int;
+SELECT a,b, a&b v1, a|b v2, a#b v3, ~a v4, a>>3 v5, b<<2 v6
+  INTO pg_temp.test_04b
+  FROM t_int2
+ WHERE a % 4 = 3 and a::int + b::int < a::int * b::int;
+(SELECT * FROM pg_temp.test_01a EXCEPT ALL SELECT * FROM pg_temp.test_01b);
+ a | b 
+---+---
+(0 rows)
+
+(SELECT * FROM pg_temp.test_01b EXCEPT ALL SELECT * FROM pg_temp.test_01a);
+ a | b 
+---+---
+(0 rows)
+
+(SELECT * FROM pg_temp.test_02a EXCEPT ALL SELECT * FROM pg_temp.test_02b);
+ a | b | v1 | v2 
+---+---+----+----
+(0 rows)
+
+(SELECT * FROM pg_temp.test_02b EXCEPT ALL SELECT * FROM pg_temp.test_02a);
+ a | b | v1 | v2 
+---+---+----+----
+(0 rows)
+
+(SELECT * FROM pg_temp.test_03a EXCEPT ALL SELECT * FROM pg_temp.test_03b);
+ a | b | v1 | v2 | v3 
+---+---+----+----+----
+(0 rows)
+
+(SELECT * FROM pg_temp.test_03b EXCEPT ALL SELECT * FROM pg_temp.test_03a);
+ a | b | v1 | v2 | v3 
+---+---+----+----+----
+(0 rows)
+
+(SELECT * FROM pg_temp.test_04a EXCEPT ALL SELECT * FROM pg_temp.test_04b);
+ a | b | v1 | v2 | v3 | v4 | v5 | v6 
+---+---+----+----+----+----+----+----
+(0 rows)
+
+(SELECT * FROM pg_temp.test_04b EXCEPT ALL SELECT * FROM pg_temp.test_04a);
+ a | b | v1 | v2 | v3 | v4 | v5 | v6 
+---+---+----+----+----+----+----+----
+(0 rows)
+
