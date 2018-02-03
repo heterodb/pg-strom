@@ -1061,25 +1061,6 @@ pg_common_comp_crc32(const cl_uint *crc32_table,
 		return hash;											\
 	}
 
-#define __STROMCL_SIMPLE_COMPARE_OPER_TEMPLATE(NAME,OPER)	\
-	STATIC_INLINE(pg_bool_t)								\
-	operator OPER (pg_##NAME##_t arg1, pg_##NAME##_t arg2)	\
-	{														\
-		pg_bool_t result;									\
-															\
-		result.isnull = arg1.isnull | arg2.isnull;			\
-		if (!result.isnull)									\
-			result.value = (arg1.value OPER arg2.value);	\
-		return result;										\
-	}
-#define STROMCL_SIMPLE_COMPARE_OPER_TEMPLATE(NAME)			\
-	__STROMCL_SIMPLE_COMPARE_OPER_TEMPLATE(NAME,==)			\
-	__STROMCL_SIMPLE_COMPARE_OPER_TEMPLATE(NAME,!=)			\
-	__STROMCL_SIMPLE_COMPARE_OPER_TEMPLATE(NAME,<)			\
-	__STROMCL_SIMPLE_COMPARE_OPER_TEMPLATE(NAME,<=)			\
-	__STROMCL_SIMPLE_COMPARE_OPER_TEMPLATE(NAME,>)			\
-	__STROMCL_SIMPLE_COMPARE_OPER_TEMPLATE(NAME,>=)
-
 #define STROMCL_SIMPLE_TYPE_TEMPLATE(NAME,BASE)		\
 	STROMCL_SIMPLE_DATATYPE_TEMPLATE(NAME,BASE)		\
 	STROMCL_SIMPLE_VARREF_TEMPLATE(NAME,BASE)		\

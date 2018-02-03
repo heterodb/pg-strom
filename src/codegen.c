@@ -528,6 +528,7 @@ pg_range_devtype_hashfunc(devtype_info *dtype,
  * 't' : this function needs cuda_timelib.h
  * 'y' : this function needs cuda_misc.h
  * 'r' : this function needs cuda_rangetype.h
+ * 'E' : this function needs cuda_time_extract.h
  *
  * class character:
  * 'r' : right operator that takes an argument (deprecated)
@@ -1135,11 +1136,11 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	  "t/f:overlaps_timestamptz" },
 
 	/* extract() */
-	{ "date_part", 2, {TEXTOID,TIMESTAMPOID},   "st/f:extract_timestamp"},
-	{ "date_part", 2, {TEXTOID,TIMESTAMPTZOID}, "st/f:extract_timestamptz"},
-	{ "date_part", 2, {TEXTOID,INTERVALOID},    "st/f:extract_interval"},
-	{ "date_part", 2, {TEXTOID,TIMETZOID},      "st/f:extract_timetz"},
-	{ "date_part", 2, {TEXTOID,TIMEOID},        "st/f:extract_time"},
+	{ "date_part", 2, {TEXTOID,TIMESTAMPOID},   "stE/f:extract_timestamp"},
+	{ "date_part", 2, {TEXTOID,TIMESTAMPTZOID}, "stE/f:extract_timestamptz"},
+	{ "date_part", 2, {TEXTOID,INTERVALOID},    "stE/f:extract_interval"},
+	{ "date_part", 2, {TEXTOID,TIMETZOID},      "stE/f:extract_timetz"},
+	{ "date_part", 2, {TEXTOID,TIMEOID},        "stE/f:extract_time"},
 
 	/* other time and data functions */
 	{ "now", 0, {}, "t/f:now" },
@@ -1583,6 +1584,9 @@ __construct_devfunc_info(devfunc_info *entry,
 					break;
 				case 'r':
 					flags |= DEVKERNEL_NEEDS_RANGETYPE;
+					break;
+				case 'E':
+					flags |= DEVKERNEL_NEEDS_TIME_EXTRACT;
 					break;
 				default:
 					elog(NOTICE,

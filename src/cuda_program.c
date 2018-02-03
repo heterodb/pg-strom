@@ -401,6 +401,10 @@ construct_flat_cuda_source(uint32 extra_flags,
 	if ((extra_flags & DEVKERNEL_NEEDS_PRIMITIVE) == DEVKERNEL_NEEDS_PRIMITIVE)
 		ofs += snprintf(source + ofs, len - ofs,
                         "#include \"cuda_primitive.h\"\n");
+	if ((extra_flags & DEVKERNEL_NEEDS_TIME_EXTRACT) == DEVKERNEL_NEEDS_TIME_EXTRACT)
+		ofs += snprintf(source + ofs, len - ofs,
+						"#include \"cuda_time_extract.h\"\n");
+
 	/* pg_anytype_t declaration */
 	pg_anytype =
 		"typedef union {\n"
