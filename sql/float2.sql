@@ -269,7 +269,7 @@ CREATE FUNCTION pgstrom.float24_ge(float2,float4)
   AS 'MODULE_PATHNAME','pgstrom_float24_ge'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.float24_ge(float2,float4)
+CREATE FUNCTION pgstrom.float24_cmp(float2,float4)
   RETURNS int
   AS 'MODULE_PATHNAME','pgstrom_float24_cmp'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
