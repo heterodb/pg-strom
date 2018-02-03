@@ -163,7 +163,7 @@ STROMCL_SIMPLE_COMPARE_TEMPLATE(float4,  float4, float4, cl_float)
 STROMCL_SIMPLE_COMPARE_TEMPLATE(float48, float4, float8, cl_double)
 STROMCL_SIMPLE_COMPARE_TEMPLATE(float82, float8, float2, cl_double)
 STROMCL_SIMPLE_COMPARE_TEMPLATE(float84, float8, float4, cl_double)
-STROMCL_SIMPLE_COMPARE_TEMPLATE(float88, float8, float8, cl_double)
+STROMCL_SIMPLE_COMPARE_TEMPLATE(float8,  float8, float8, cl_double)
 
 /*
  * scalar comparison functions

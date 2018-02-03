@@ -1216,7 +1216,7 @@ typedef struct devfunc_extra_catalog_t {
 #define INT2	"smallint"
 #define INT4	"integer"
 #define INT8	"bigint"
-#define FLOAT2	"pg_catalog.float2"
+#define FLOAT2	"float2"
 #define FLOAT4	"real"
 #define FLOAT8	"double precision"
 #define NUMERIC	"numeric"
@@ -1708,9 +1708,12 @@ pgstrom_devfunc_construct_extra(devfunc_info *entry, HeapTuple protup)
 		{
 			__construct_devfunc_info(entry, procat->func_template);
 			result = true;
-			break;
+			goto found;
 		}
 	}
+	elog(DEBUG2, "no extra function found for sig=[%s] rettype=[%s]",
+		 sig.data, func_rettype);
+found:
 	pfree(sig.data);
 	pfree(temp);
 	return result;
