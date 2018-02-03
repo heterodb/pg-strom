@@ -657,10 +657,10 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 
 	/* '@' : absolute value operators */
 	{ "int2abs", 1, {INT2OID},     "p/f:int2abs" },
-	{ "int4abs", 1, {INT4OID},     "p/f:int2abs" },
-	{ "int8abs", 1, {INT8OID},     "p/f:int2abs" },
-	{ "float4abs", 1, {FLOAT4OID}, "p/f:int2abs" },
-	{ "float8abs", 1, {FLOAT8OID}, "p/f:int2abs" },
+	{ "int4abs", 1, {INT4OID},     "p/f:int4abs" },
+	{ "int8abs", 1, {INT8OID},     "p/f:int8abs" },
+	{ "float4abs", 1, {FLOAT4OID}, "p/f:float4abs" },
+	{ "float8abs", 1, {FLOAT8OID}, "p/f:float8abs" },
 
 	/* '=' : equal operators */
 	{ "int2eq",  2, {INT2OID, INT2OID}, "p/f:int2eq" },
@@ -2171,7 +2171,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 			elog(ERROR, "unrecognized nulltesttype: %d",
 				 (int)nulltest->nulltesttype);
 
-		appendStringInfoChar(&context->str, '(');
+		appendStringInfo(&context->str, "(kcxt, ");
 		codegen_expression_walker((Node *) nulltest->arg, context);
 		appendStringInfoChar(&context->str, ')');
 	}

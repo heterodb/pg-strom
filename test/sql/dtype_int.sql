@@ -30,6 +30,7 @@ SELECT l.a, null::int, r.b
   FROM t_int1 l, t_int2 r
  WHERE (l.a = r.a OR l.b = r.b)
    AND l.a % 100 in (37,53) AND r.b % 100 in (28,79);
+
 SET pg_strom.enabled = off;
 SELECT a, b
   INTO pg_temp.test_s01b
@@ -56,65 +57,19 @@ SELECT l.a, null::int, r.b
   FROM t_int1 l, t_int2 r
  WHERE (l.a = r.a OR l.b = r.b)
    AND l.a % 100 in (37,53) AND r.b % 100 in (28,79);
+
 (SELECT * FROM pg_temp.test_s01a EXCEPT ALL SELECT * FROM pg_temp.test_s01b);
- a | b 
----+---
-(0 rows)
-
 (SELECT * FROM pg_temp.test_s01b EXCEPT ALL SELECT * FROM pg_temp.test_s01a);
- a | b 
----+---
-(0 rows)
-
 (SELECT * FROM pg_temp.test_s02a EXCEPT ALL SELECT * FROM pg_temp.test_s02b);
- a | b | v1 | v2 
----+---+----+----
-(0 rows)
-
 (SELECT * FROM pg_temp.test_s02b EXCEPT ALL SELECT * FROM pg_temp.test_s02a);
- a | b | v1 | v2 
----+---+----+----
-(0 rows)
-
 (SELECT * FROM pg_temp.test_s03a EXCEPT ALL SELECT * FROM pg_temp.test_s03b);
- a | b | v1 | v2 | v3 
----+---+----+----+----
-(0 rows)
-
 (SELECT * FROM pg_temp.test_s03b EXCEPT ALL SELECT * FROM pg_temp.test_s03a);
- a | b | v1 | v2 | v3 
----+---+----+----+----
-(0 rows)
-
 (SELECT * FROM pg_temp.test_s04a EXCEPT ALL SELECT * FROM pg_temp.test_s04b);
- a | b | v1 | v2 | int4 | v3 | v4 | v5 | v6 
----+---+----+----+------+----+----+----+----
-(0 rows)
-
 (SELECT * FROM pg_temp.test_s04b EXCEPT ALL SELECT * FROM pg_temp.test_s04a);
- a | b | v1 | v2 | int4 | v3 | v4 | v5 | v6 
----+---+----+----+------+----+----+----+----
-(0 rows)
-
 (SELECT * FROM pg_temp.test_s05a EXCEPT ALL SELECT * FROM pg_temp.test_s05b);
- a | b | v1 | v2 
----+---+----+----
-(0 rows)
-
 (SELECT * FROM pg_temp.test_s05b EXCEPT ALL SELECT * FROM pg_temp.test_s05a);
- a | b | v1 | v2 
----+---+----+----
-(0 rows)
-
 (SELECT * FROM pg_temp.test_s06a EXCEPT ALL SELECT * FROM pg_temp.test_s06b);
- a | int4 | b 
----+------+---
-(0 rows)
-
 (SELECT * FROM pg_temp.test_s06b EXCEPT ALL SELECT * FROM pg_temp.test_s06a);
- a | int4 | b 
----+------+---
-(0 rows)
 
 --
 -- int4
@@ -145,6 +100,7 @@ SELECT l.c, null::int, r.d
   FROM t_int1 l, t_int2 r
  WHERE (l.c % 100000 = r.c % 100000 OR l.d % 400000 = r.d % 400000)
    AND l.c % 100 in (17,83) AND r.d % 100 in (31,57);
+
 SET pg_strom.enabled = off;
 SELECT c, d
   INTO pg_temp.test_i01b
@@ -171,65 +127,19 @@ SELECT l.c, null::int, r.d
   FROM t_int1 l, t_int2 r
  WHERE (l.c % 100000 = r.c % 100000 OR l.d % 400000 = r.d % 400000)
    AND l.c % 100 in (17,83) AND r.d % 100 in (31,57);
+
 (SELECT * FROM pg_temp.test_i01a EXCEPT ALL SELECT * FROM pg_temp.test_i01b);
- c | d 
----+---
-(0 rows)
-
 (SELECT * FROM pg_temp.test_i01b EXCEPT ALL SELECT * FROM pg_temp.test_i01a);
- c | d 
----+---
-(0 rows)
-
 (SELECT * FROM pg_temp.test_i02a EXCEPT ALL SELECT * FROM pg_temp.test_i02b);
- c | d | v1 | v2 
----+---+----+----
-(0 rows)
-
 (SELECT * FROM pg_temp.test_i02b EXCEPT ALL SELECT * FROM pg_temp.test_i02a);
- c | d | v1 | v2 
----+---+----+----
-(0 rows)
-
 (SELECT * FROM pg_temp.test_i03a EXCEPT ALL SELECT * FROM pg_temp.test_i03b);
- c | d | v1 | v2 | v3 
----+---+----+----+----
-(0 rows)
-
 (SELECT * FROM pg_temp.test_i03b EXCEPT ALL SELECT * FROM pg_temp.test_i03a);
- c | d | v1 | v2 | v3 
----+---+----+----+----
-(0 rows)
-
 (SELECT * FROM pg_temp.test_i04a EXCEPT ALL SELECT * FROM pg_temp.test_i04b);
- v1 | v2 | int4 | v3 | v4 | v5 | v6 
-----+----+------+----+----+----+----
-(0 rows)
-
 (SELECT * FROM pg_temp.test_i04b EXCEPT ALL SELECT * FROM pg_temp.test_i04a);
- v1 | v2 | int4 | v3 | v4 | v5 | v6 
-----+----+------+----+----+----+----
-(0 rows)
-
 (SELECT * FROM pg_temp.test_i05a EXCEPT ALL SELECT * FROM pg_temp.test_i05b);
- lc | d | v1 | v2 
-----+---+----+----
-(0 rows)
-
 (SELECT * FROM pg_temp.test_i05b EXCEPT ALL SELECT * FROM pg_temp.test_i05a);
- lc | d | v1 | v2 
-----+---+----+----
-(0 rows)
-
 (SELECT * FROM pg_temp.test_i06a EXCEPT ALL SELECT * FROM pg_temp.test_i06b);
- c | int4 | d 
----+------+---
-(0 rows)
-
 (SELECT * FROM pg_temp.test_i06b EXCEPT ALL SELECT * FROM pg_temp.test_i06a);
- c | int4 | d 
----+------+---
-(0 rows)
 
 --
 -- int8
@@ -260,6 +170,7 @@ SELECT l.e, null::int, r.f
   FROM t_int1 l, t_int2 r
  WHERE (l.e % 100000 = r.e % 100000 OR l.f % 400000 = r.f % 400000)
    AND l.e % 100 in (19,76) AND r.f % 100 in (29,61);
+
 SET pg_strom.enabled = off;
 SELECT e, f
   INTO pg_temp.test_l01b
@@ -286,63 +197,16 @@ SELECT l.e, null::int, r.f
   FROM t_int1 l, t_int2 r
  WHERE (l.e % 100000 = r.e % 100000 OR l.f % 400000 = r.f % 400000)
    AND l.e % 100 in (19,76) AND r.f % 100 in (29,61);
+
 (SELECT * FROM pg_temp.test_l01a EXCEPT ALL SELECT * FROM pg_temp.test_l01b);
- e | f 
----+---
-(0 rows)
-
 (SELECT * FROM pg_temp.test_l01b EXCEPT ALL SELECT * FROM pg_temp.test_l01a);
- e | f 
----+---
-(0 rows)
-
 (SELECT * FROM pg_temp.test_l02a EXCEPT ALL SELECT * FROM pg_temp.test_l02b);
- e | f | v1 | v2 
----+---+----+----
-(0 rows)
-
 (SELECT * FROM pg_temp.test_l02b EXCEPT ALL SELECT * FROM pg_temp.test_l02a);
- e | f | v1 | v2 
----+---+----+----
-(0 rows)
-
 (SELECT * FROM pg_temp.test_l03a EXCEPT ALL SELECT * FROM pg_temp.test_l03b);
- e | f | v1 | v2 | v3 
----+---+----+----+----
-(0 rows)
-
 (SELECT * FROM pg_temp.test_l03b EXCEPT ALL SELECT * FROM pg_temp.test_l03a);
- e | f | v1 | v2 | v3 
----+---+----+----+----
-(0 rows)
-
 (SELECT * FROM pg_temp.test_l04a EXCEPT ALL SELECT * FROM pg_temp.test_l04b);
- v1 | v2 | int4 | v3 | v4 | v5 | v6 
-----+----+------+----+----+----+----
-(0 rows)
-
 (SELECT * FROM pg_temp.test_l04b EXCEPT ALL SELECT * FROM pg_temp.test_l04a);
- v1 | v2 | int4 | v3 | v4 | v5 | v6 
-----+----+------+----+----+----+----
-(0 rows)
-
 (SELECT * FROM pg_temp.test_l05a EXCEPT ALL SELECT * FROM pg_temp.test_l05b);
- e | f | v1 | v2 
----+---+----+----
-(0 rows)
-
 (SELECT * FROM pg_temp.test_l05b EXCEPT ALL SELECT * FROM pg_temp.test_l05a);
- e | f | v1 | v2 
----+---+----+----
-(0 rows)
-
 (SELECT * FROM pg_temp.test_l06a EXCEPT ALL SELECT * FROM pg_temp.test_l06b);
- e | int4 | f 
----+------+---
-(0 rows)
-
 (SELECT * FROM pg_temp.test_l06b EXCEPT ALL SELECT * FROM pg_temp.test_l06a);
- e | int4 | f 
----+------+---
-(0 rows)
-
