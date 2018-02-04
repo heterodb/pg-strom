@@ -413,6 +413,7 @@ construct_flat_cuda_source(uint32 extra_flags,
 		"    pg_int2_t        int2_v;\n"
 		"    pg_int4_t        int4_v;\n"
 		"    pg_int8_t        int8_v;\n"
+		"    pg_float2_t      float2_v;\n"
 		"    pg_float4_t      float4_v;\n"
 		"    pg_float8_t      float8_v;\n"
 		"#ifdef CUDA_NUMERIC_H\n"

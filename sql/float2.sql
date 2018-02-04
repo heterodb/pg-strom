@@ -166,6 +166,10 @@ CREATE FUNCTION pgstrom.float2_smaller(float2,float2)
   AS 'MODULE_PATHNAME','pgstrom_float2_smaller'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
+CREATE FUNCTION pgstrom.float2_hash(float2)
+  RETURNS int
+  AS 'MODULE_PATHNAME','pgstrom_float2_hash'
+  LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.float42_eq(float4,float2)
   RETURNS bool
@@ -915,3 +919,21 @@ CREATE AGGREGATE pg_catalog.stddev(float2) (
   combinefunc = float8_combine,
   initcond = "{0,0,0}"
 );
+
+--
+-- Index Support
+--
+CREATE OPERATOR CLASS pg_catalog.float2_ops
+  default for type pg_catalog.float2
+  using btree family pg_catalog.float_ops as
+  operator 1 <  (float2, float2) for search,
+  operator 2 <= (float2, float2) for search,
+  operator 3 =  (float2, float2) for search,
+  operator 4 >= (float2, float2) for search,
+  operator 5 >  (float2, float2) for search,
+  function 1 (float2, float2) pgstrom.float2_cmp(float2, float2);
+ 
+CREATE OPERATOR CLASS pg_catalog.float2_ops
+  default for type pg_catalog.float2
+  using hash family pg_catalog.float_ops as
+  function 1 (float2) pgstrom.float2_hash(float2);

@@ -69,6 +69,7 @@ Datum pgstrom_float2_ge(PG_FUNCTION_ARGS);
 Datum pgstrom_float2_cmp(PG_FUNCTION_ARGS);
 Datum pgstrom_float2_larger(PG_FUNCTION_ARGS);
 Datum pgstrom_float2_smaller(PG_FUNCTION_ARGS);
+Datum pgstrom_float2_hash(PG_FUNCTION_ARGS);
 
 Datum pgstrom_float42_eq(PG_FUNCTION_ARGS);
 Datum pgstrom_float42_ne(PG_FUNCTION_ARGS);
@@ -688,6 +689,29 @@ pgstrom_float2_smaller(PG_FUNCTION_ARGS)
 PG_FUNCTION_INFO_V1(pgstrom_float2_smaller);
 
 Datum
+pgstrom_float2_hash(PG_FUNCTION_ARGS)
+{
+	half_t	fval = PG_GETARG_FLOAT2(0);
+	cl_int	sign = (fval & 0x8000);
+	cl_int	expo = (fval & 0x7c00) >> 10;
+	cl_int	frac = (fval & 0x03ff);
+
+	if (expo == 0x1f)
+	{
+		if (frac == 0)
+			PG_RETURN_INT32(sign ? -INT_MAX : INT_MAX);	/* +/-Infinity */
+		else
+			PG_RETURN_INT32(UINT_MAX);					/* NaN */
+	}
+	else if (expo == 0 && frac == 0)
+		PG_RETURN_INT32(0);								/* +/-0.0 */
+
+	/* elsewhere, normal finite values */
+	return hash_any((unsigned char *)&fval, sizeof(half_t));
+}
+PG_FUNCTION_INFO_V1(pgstrom_float2_hash);
+
+Datum
 pgstrom_float42_eq(PG_FUNCTION_ARGS)
 {
 	float	arg1 = PG_GETARG_FLOAT4(0);
@@ -1016,8 +1040,6 @@ pgstrom_float2_pl(PG_FUNCTION_ARGS)
 	float	result;
 
 	result = arg1 + arg2;
-
-	elog(INFO, "arg1 %f arg2 %f result %f", arg1, arg2, result);
 
 	CHECKFLOATVAL(result, isinf(arg1) || isinf(arg2), true);
 	PG_RETURN_FLOAT4(result);

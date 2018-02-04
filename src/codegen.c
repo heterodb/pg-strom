@@ -1833,7 +1833,12 @@ __pgstrom_devfunc_lookup(HeapTuple protup,
 									ObjectIdGetDatum(source_type),
 									ObjectIdGetDatum(dtype->type_oid));
 			if (!HeapTupleIsValid(tuple))
+			{
+				elog(DEBUG2, "no type cast definition (%s->%s)",
+					 format_type_be(source_type),
+					 format_type_be(dtype->type_oid));
 				return NULL;	/* no cast */
+			}
 			castmethod = ((Form_pg_cast) GETSTRUCT(tuple))->castmethod;
 			ReleaseSysCache(tuple);
 
@@ -1844,8 +1849,14 @@ __pgstrom_devfunc_lookup(HeapTuple protup,
 			 * Right now, we don't support it.
 			 */
 			if (castmethod != COERCION_METHOD_BINARY)
+			{
+				elog(DEBUG2, "not binary compatible type cast (%s->%s)",
+					 format_type_be(source_type),
+					 format_type_be(dtype->type_oid));
 				return NULL;
+			}
 		}
+		j++;
 	}
 
 	dtype = dfunc->func_rettype;
@@ -1857,12 +1868,22 @@ __pgstrom_devfunc_lookup(HeapTuple protup,
 								ObjectIdGetDatum(func_rettype),
 								ObjectIdGetDatum(dtype->type_oid));
 		if (!HeapTupleIsValid(tuple))
+		{
+			elog(DEBUG2, "no type cast definition (%s->%s)",
+				 format_type_be(func_rettype),
+				 format_type_be(dtype->type_oid));
 			return NULL;	/* no cast */
+		}
 		castmethod = ((Form_pg_cast) GETSTRUCT(tuple))->castmethod;
 		ReleaseSysCache(tuple);
 
 		if (castmethod != COERCION_METHOD_BINARY)
+		{
+			elog(DEBUG2, "not binary compatible type cast (%s->%s)",
+				 format_type_be(func_rettype),
+				 format_type_be(dtype->type_oid));
 			return NULL;
+		}
 	}
 	return dfunc;
 }
