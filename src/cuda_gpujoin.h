@@ -778,7 +778,7 @@ gpujoin_projection_slot(kern_context *kcxt,
 #endif
 #if GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE > 0
 	cl_char		extra_buf[GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE]
-		__attribute__ ((aligned(MAXIMUM_ALIGNOF)));
+				__attribute__ ((aligned(MAXIMUM_ALIGNOF)));
 #else
 	cl_char	   *extra_buf = NULL;
 #endif

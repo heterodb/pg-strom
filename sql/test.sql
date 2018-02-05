@@ -29,6 +29,13 @@ CREATE FUNCTION pgstrom.random_time(float=0.0,
   AS 'MODULE_PATHNAME','pgstrom_random_time'
   LANGUAGE C CALLED ON NULL INPUT;
 
+CREATE FUNCTION pgstrom.random_timetz(float=0.0,
+                                      time=null,
+                                      time=null)
+  RETURNS timetz
+  AS 'MODULE_PATHNAME','pgstrom_random_timetz'
+  LANGUAGE C CALLED ON NULL INPUT;
+
 CREATE FUNCTION pgstrom.random_timestamp(float=0.0,
                                          timestamp=null,
                                          timestamp=null)
@@ -43,8 +50,20 @@ CREATE FUNCTION pgstrom.random_macaddr(float=0.0,
   AS 'MODULE_PATHNAME','pgstrom_random_macaddr'
   LANGUAGE C CALLED ON NULL INPUT;
 
-CREATE FUNCTION pgstrom.random_inet4(float=0.0,
-                                     inet=null)
+CREATE FUNCTION pgstrom.random_inet(float=0.0,
+                                    inet=null)
   RETURNS inet
-  AS 'MODULE_PATHNAME','pgstrom_random_inet4'
+  AS 'MODULE_PATHNAME','pgstrom_random_inet'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE FUNCTION pgstrom.random_text(float=0.0,
+                                    text=null)
+  RETURNS text
+  AS 'MODULE_PATHNAME','pgstrom_random_text'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE FUNCTION pgstrom.random_text_len(float=0.0,
+                                        int=null)
+  RETURNS text
+  AS 'MODULE_PATHNAME','pgstrom_random_text_length'
   LANGUAGE C CALLED ON NULL INPUT;

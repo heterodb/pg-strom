@@ -1018,7 +1018,142 @@ BASIC_INT_MODFUNC_TEMPLATE(int8mod, int8)
 /*
  * Misc mathematic functions
  */
-STATIC_FUNCTION(pg_float8_t)
+STATIC_INLINE(pg_float8_t)
+pgfn_cbrt(kern_context *kcxt, pg_float8_t arg1)
+{
+	pg_float8_t result;
+
+	result.isnull = arg1.isnull;
+	if (!result.isnull)
+	{
+		result.value = cbrt(arg1.value);
+		CHECKFLOATVAL(&kcxt->e, result,
+					  isinf(arg1.value),
+					  arg1.value == 0.0);
+	}
+	return result;
+}
+
+STATIC_INLINE(pg_float8_t)
+pgfn_ceil(kern_context *kcxt, pg_float8_t arg1)
+{
+	if (!arg1.isnull)
+		arg1.value = ceil(arg1.value);
+	return arg1;
+}
+
+STATIC_INLINE(pg_float8_t)
+pgfn_exp(kern_context *kcxt, pg_float8_t arg1)
+{
+	pg_float8_t	result;
+
+	result.isnull = arg1.isnull;
+	if (!arg1.isnull)
+	{
+		result.value = exp(arg1.value);
+		CHECKFLOATVAL(&kcxt->e, result, isinf(arg1.value), false);
+	}
+	return result;
+}
+
+STATIC_INLINE(pg_float8_t)
+pgfn_floor(kern_context *kcxt, pg_float8_t arg1)
+{
+	if (!arg1.isnull)
+		arg1.value = floor(arg1.value);
+	return arg1;
+}
+
+STATIC_INLINE(pg_float8_t)
+pgfn_ln(kern_context *kcxt, pg_float8_t arg1)
+{
+	pg_float8_t result;
+
+	result.isnull = arg1.isnull;
+	if (!arg1.isnull)
+	{
+		if (arg1.value <= 0.0)
+		{
+			result.isnull = true;
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		}
+		else
+		{
+			result.value = log(arg1.value);
+			CHECKFLOATVAL(&kcxt->e, result,
+						  isinf(arg1.value),
+						  arg1.value == 1.0);
+		}
+	}
+	return result;
+}
+
+STATIC_INLINE(pg_float8_t)
+pgfn_log10(kern_context *kcxt, pg_float8_t arg1)
+{
+	pg_float8_t result;
+
+	result.isnull = arg1.isnull;
+	if (!arg1.isnull)
+	{
+		if (arg1.value <= 0.0)
+		{
+			result.isnull = true;
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		}
+		else
+		{
+			result.value = log10(arg1.value);
+			CHECKFLOATVAL(&kcxt->e, result,
+						  isinf(arg1.value),
+						  arg1.value == 1.0);
+		}
+	}
+	return result;
+}
+
+STATIC_INLINE(pg_float8_t)
+pgfn_dpi(kern_context *kcxt)
+{
+	pg_float8_t	result;
+
+	result.isnull = false;
+	result.value = 3.141592653589793115998;
+
+	return result;
+}
+
+STATIC_INLINE(pg_float8_t)
+pgfn_round(kern_context *kcxt, pg_float8_t arg1)
+{
+	pg_float8_t result;
+
+	result.isnull = arg1.isnull;
+	if (!arg1.isnull)
+		result.value = rint(arg1.value);
+	return result;
+}
+
+
+STATIC_INLINE(pg_float8_t)
+pgfn_sign(kern_context *kcxt, pg_float8_t arg1)
+{
+    pg_float8_t result;
+
+    result.isnull = arg1.isnull;
+	if (!arg1.isnull)
+	{
+		if (arg1.value > 0.0)
+			result.value = 1.0;
+		else if (arg1.value < 0.0)
+			result.value = -1.0;
+		else
+			result.value = 0.0;
+	}
+    return result;
+}
+
+STATIC_INLINE(pg_float8_t)
 pgfn_dsqrt(kern_context *kcxt, pg_float8_t arg1)
 {
 	pg_float8_t	result;
@@ -1041,7 +1176,7 @@ pgfn_dsqrt(kern_context *kcxt, pg_float8_t arg1)
 	return result;
 }
 
-STATIC_FUNCTION(pg_float8_t)
+STATIC_INLINE(pg_float8_t)
 pgfn_dpow(kern_context *kcxt, pg_float8_t arg1, pg_float8_t arg2)
 {
 	pg_float8_t	result;
@@ -1062,19 +1197,172 @@ pgfn_dpow(kern_context *kcxt, pg_float8_t arg1, pg_float8_t arg2)
 	return result;
 }
 
-STATIC_FUNCTION(pg_float8_t)
-pgfn_dpi(kern_context *kcxt)
+STATIC_INLINE(pg_float8_t)
+pgfn_trunc(kern_context *kcxt, pg_float8_t arg1)
 {
-	pg_float8_t	result;
+	pg_float8_t result;
 
-	result.isnull = false;
-	result.value = 3.141592653589793115998;
-
+	result.isnull = arg1.isnull;
+	if (!result.isnull)
+	{
+		if (arg1.value >= 0.0)
+			result.value = floor(arg1.value);
+		else
+			result.value = -floor(-arg1.value);
+	}
 	return result;
 }
 
-STATIC_FUNCTION(pg_float8_t)
-pgfn_dcot(kern_context *kcxt, pg_float8_t arg1)
+/*
+ * Trigonometric function
+ */
+STATIC_INLINE(pg_float8_t)
+pgfn_degrees(kern_context *kcxt, pg_float8_t arg1)
+{
+	pg_float8_t result;
+
+	result.isnull = arg1.isnull;
+	if (!result.isnull)
+	{
+		/* RADIANS_PER_DEGREE */
+		result.value = arg1.value / 0.0174532925199432957692;
+		CHECKFLOATVAL(&kcxt->e, result,
+					  isinf(arg1.value),
+					  arg1.value == 0.0);
+	}
+	return result;
+}
+
+STATIC_INLINE(pg_float8_t)
+pgfn_radians(kern_context *kcxt, pg_float8_t arg1)
+{
+	pg_float8_t result;
+
+	result.isnull = arg1.isnull;
+	if (!result.isnull)
+	{
+		/* RADIANS_PER_DEGREE */
+		result.value = arg1.value * 0.0174532925199432957692;
+		CHECKFLOATVAL(&kcxt->e, result,
+					  isinf(arg1.value),
+					  arg1.value == 0.0);
+	}
+	return result;
+}
+
+STATIC_INLINE(pg_float8_t)
+pgfn_acos(kern_context *kcxt, pg_float8_t arg1)
+{
+	pg_float8_t result;
+
+	result.isnull = arg1.isnull;
+	if (!result.isnull)
+	{
+		if (isnan(arg1.value))
+			result.value = DBL_NAN;
+		else if (arg1.value < -1.0 || arg1.value > 1.0)
+		{
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			result.isnull = true;
+		}
+		else
+		{
+			result.value = acos(arg1.value);
+			CHECKFLOATVAL(&kcxt->e, result, false, true);
+		}
+	}
+	return result;
+}
+
+STATIC_INLINE(pg_float8_t)
+pgfn_asin(kern_context *kcxt, pg_float8_t arg1)
+{
+	pg_float8_t result;
+
+	result.isnull = arg1.isnull;
+	if (!result.isnull)
+	{
+		if (isnan(arg1.value))
+			result.value = DBL_NAN;
+		else if (arg1.value < -1.0 || arg1.value > 1.0)
+		{
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			result.isnull = true;
+		}
+		else
+		{
+			result.value = asin(arg1.value);
+			CHECKFLOATVAL(&kcxt->e, result, false, true);
+		}
+	}
+	return result;
+}
+
+STATIC_INLINE(pg_float8_t)
+pgfn_atan(kern_context *kcxt, pg_float8_t arg1)
+{
+	pg_float8_t result;
+
+	result.isnull = arg1.isnull;
+	if (!result.isnull)
+	{
+		if (isnan(arg1.value))
+			result.value = DBL_NAN;
+		else
+		{
+			result.value = atan(arg1.value);
+			CHECKFLOATVAL(&kcxt->e, result, false, true);
+		}
+	}
+	return result;
+}
+
+STATIC_INLINE(pg_float8_t)
+pgfn_atan2(kern_context *kcxt, pg_float8_t arg1, pg_float8_t arg2)
+{
+	pg_float8_t	result;
+	cl_double	atan1_0;
+	cl_double	atan2_arg1_arg2;
+
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (!result.isnull)
+	{
+		if (isnan(arg1.value) || isnan(arg2.value))
+			result.value = DBL_NAN;
+		else
+		{
+			atan2_arg1_arg2 = atan2(arg1.value, arg2.value);
+			atan1_0 = atan(1.0);
+			result.value = (atan2_arg1_arg2 / atan1_0) * 45.0;
+
+			CHECKFLOATVAL(&kcxt->e, result, false, true);
+		}
+	}
+	return result;
+}
+
+STATIC_INLINE(pg_float8_t)
+pgfn_cos(kern_context *kcxt, pg_float8_t arg1)
+{
+	pg_float8_t result;
+
+	result.isnull = arg1.isnull;
+	if (!result.isnull)
+	{
+		if (isnan(arg1.value))
+			result.value = DBL_NAN;
+		else
+		{
+			result.value = cos(arg1.value);
+			CHECKFLOATVAL(&kcxt->e, result, false, true);
+		}
+	}
+	return result;
+}
+
+
+STATIC_INLINE(pg_float8_t)
+pgfn_cot(kern_context *kcxt, pg_float8_t arg1)
 {
 	pg_float8_t	result;
 
@@ -1087,6 +1375,44 @@ pgfn_dcot(kern_context *kcxt, pg_float8_t arg1)
 		result.value = 1.0 / tan(arg1.value);
 
 		CHECKFLOATVAL(&kcxt->e, result, true /* cot(pi/2) == inf */, true);
+	}
+	return result;
+}
+
+STATIC_INLINE(pg_float8_t)
+pgfn_sin(kern_context *kcxt, pg_float8_t arg1)
+{
+    pg_float8_t result;
+
+    result.isnull = arg1.isnull;
+    if (!arg1.isnull)
+	{
+		if (isnan(arg1.value))
+			result.value = DBL_NAN;
+		else
+		{
+			result.value = sin(arg1.value);
+			CHECKFLOATVAL(&kcxt->e, result, false, true);
+		}
+	}
+	return result;
+}
+
+STATIC_INLINE(pg_float8_t)
+pgfn_tan(kern_context *kcxt, pg_float8_t arg1)
+{
+    pg_float8_t result;
+
+    result.isnull = arg1.isnull;
+    if (!arg1.isnull)
+	{
+		if (isnan(arg1.value))
+			result.value = DBL_NAN;
+		else
+		{
+			result.value = tan(arg1.value);
+			CHECKFLOATVAL(&kcxt->e, result, true, true);
+		}
 	}
 	return result;
 }

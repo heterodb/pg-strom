@@ -1503,7 +1503,6 @@ PlanGpuJoinPath(PlannerInfo *root,
 	GpuJoinInfo		gj_info;
 	CustomScan	   *cscan;
 	codegen_context	context;
-	char		   *kern_source;
 	Plan		   *outer_plan;
 	ListCell	   *lc;
 	Bitmapset	   *varattnos = NULL;
@@ -1654,19 +1653,11 @@ PlanGpuJoinPath(PlannerInfo *root,
 	 * construct kernel code
 	 */
 	pgstrom_init_codegen_context(&context);
-	kern_source = gpujoin_codegen(root, cscan, &gj_info, tlist, &context);
-	if (context.func_defs || context.expr_defs)
-	{
-		StringInfoData	buf;
-
-		initStringInfo(&buf);
-		pgstrom_codegen_func_declarations(&buf, &context);
-		pgstrom_codegen_expr_declarations(&buf, &context);
-		appendStringInfo(&buf, "%s", kern_source);
-
-		kern_source = buf.data;
-	}
-	gj_info.kern_source = kern_source;
+	gj_info.kern_source = gpujoin_codegen(root,
+										  cscan,
+										  &gj_info,
+										  tlist,
+										  &context);
 	gj_info.extra_flags = (DEVKERNEL_NEEDS_GPUSCAN |
 						   DEVKERNEL_NEEDS_GPUJOIN |
 						   context.extra_flags);
@@ -1823,10 +1814,6 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	gjs->gts.cb_switch_task		= NULL;
 	gjs->gts.cb_process_task	= gpujoin_process_task;
 	gjs->gts.cb_release_task	= gpujoin_release_task;
-	if (pgstrom_bulkexec_enabled &&
-		!gjs->gts.css.ss.ps.qual &&			/* no host quals */
-		!gjs->gts.css.ss.ps.ps_ProjInfo)	/* no projection */
-		gjs->gts.cb_bulk_exec = pgstromBulkExecGpuTaskState;
 	gjs->gts.outer_nrows_per_block = gj_info->outer_nrows_per_block;
 
 	/* DSM & GPU memory of inner buffer */

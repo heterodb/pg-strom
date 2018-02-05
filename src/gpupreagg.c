@@ -3347,6 +3347,8 @@ gpupreagg_codegen_keymatch(StringInfo kern,
 		Oid				coll_oid;
 		devtype_info   *dtype;
 		devfunc_info   *dfunc;
+		devtype_info   *darg1;
+		devtype_info   *darg2;
 
 		if (tle->resjunk || !tle->ressortgroupref)
 			continue;
@@ -3363,8 +3365,17 @@ gpupreagg_codegen_keymatch(StringInfo kern,
 			elog(ERROR, "Bug? type (%s) has no device equality function",
 				 format_type_be(type_oid));
 		pgstrom_devfunc_track(context, dfunc);
+		darg1 = linitial(dfunc->func_args);
+		darg2 = lsecond(dfunc->func_args);
 
-		/* load the key values, and compare */
+		/*
+		 * Load the key values, then compare
+		 *
+		 * Please pay attention that key comparison function may take
+		 * arguments in different type, but binary compatible.
+		 * Union data structure temp_x/temp_y implicitly convert binary
+		 * compatible types, so we don't inject PG_RELABEL operator here.
+		 */
 		appendStringInfo(
 			kern,
 			"  datum = kern_get_datum_slot(x_kds,%u,x_index);\n"
@@ -3385,7 +3396,7 @@ gpupreagg_codegen_keymatch(StringInfo kern,
 			tle->resno-1,
 			dtype->type_name, dtype->type_name,
 			dtype->type_name, dtype->type_name,
-			dfunc->func_devname, dtype->type_name, dtype->type_name,
+			dfunc->func_devname, darg1->type_name, darg2->type_name,
 			dtype->type_name, dtype->type_name,
 			dtype->type_name, dtype->type_name);
 	}
@@ -3701,10 +3712,6 @@ gpupreagg_codegen(codegen_context *context,
 	gpupreagg_codegen_global_calc(&body, context, tlist_dev);
 	/* gpupreagg_nogroup_calc */
 	gpupreagg_codegen_nogroup_calc(&body, context, tlist_dev);
-	/* function declarations */
-	pgstrom_codegen_func_declarations(&kern, context);
-	/* special expression declarations */
-	pgstrom_codegen_expr_declarations(&kern, context);
 	/* merge above kernel functions */
 	appendStringInfoString(&kern, body.data);
 	pfree(body.data);
@@ -3866,10 +3873,6 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 			!outer_ps->ps_ProjInfo)
 		{
 			gpas->combined_gpujoin = true;
-		}
-		else if (pgstrom_bulk_exec_supported(outer_ps))
-		{
-			gpas->gts.outer_bulk_exec = true;
 		}
 		outerPlanState(gpas) = outer_ps;
 		/* GpuPreAgg don't need re-initialization of projection info */

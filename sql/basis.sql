@@ -281,12 +281,12 @@ CREATE FUNCTION public.gstore_export_ipchandle(reggstore)
   AS 'MODULE_PATHNAME','pgstrom_gstore_export_ipchandle'
   LANGUAGE C;
 
-CREATE FUNCTION public.lo_write_to_gpumemory(int, int, bytes, bigint, bigint)
+CREATE FUNCTION public.lo_write_to_gpumemory(int, int, bytea, bigint, bigint)
   RETURNS bigint
   AS 'MODULE_PATHNAME','pgstrom_lo_write_to_gpumemory'
   LANGUAGE C;
 
-CREATE FUNCTION public.lo_read_from_gpumemory(int, int, bytes, bigint, bigint)
+CREATE FUNCTION public.lo_read_from_gpumemory(int, int, bytea, bigint, bigint)
   RETURNS bigint
   AS 'MODULE_PATHNAME','pgstrom_lo_write_to_gpumemory'
   LANGUAGE C;

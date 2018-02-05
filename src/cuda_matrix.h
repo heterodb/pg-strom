@@ -114,6 +114,98 @@ ArrayGetNItems(kern_context *kcxt, cl_int ndim, const cl_int *dims)
 	return ret;
 }
 
+/*
+ * Support routine for ScalarArrayOpExpr
+ */
+template <typename ScalarType, typename ElementType>
+STATIC_FUNCTION(pg_bool_t)
+PG_SCALAR_ARRAY_OP(kern_context *kcxt,
+				   pg_bool_t (*compare_fn)(kern_context *kcxt,
+										   ScalarType scalar,
+										   ElementType element),
+				   ScalarType scalar,
+				   pg_array_t array,
+				   cl_bool useOr,	/* true = ANY, false = ALL */
+				   cl_int typelen,
+				   cl_int typealign)
+{
+	ElementType	element;
+	pg_bool_t	result;
+	pg_bool_t	rv;
+	char	   *base;
+	cl_uint		offset;
+	char	   *bitmap;
+	int			bitmask;
+	cl_uint		i, nitems;
+
+	/* NULL results towards NULL array */
+	if (array.isnull)
+	{
+		result.isnull = true;
+		result.value = false;
+		return result;
+	}
+	result.isnull = false;
+	result.value = (useOr ? false : true);
+
+	/* how many items in the array? */
+	nitems = ArrayGetNItems(kcxt,
+							ARR_NDIM(array.value),
+							ARR_DIMS(array.value));
+	if (nitems == 0)
+		return result;
+
+	/* loop on the array elements */
+	base = ARR_DATA_PTR(array.value);
+	offset = 0;
+	bitmap = ARR_NULLBITMAP(array.value);
+	bitmask = 1;
+
+	for (i=0; i < nitems; i++)
+	{
+		if (bitmap && (*bitmap & bitmask) == 0)
+			pg_datum_ref(kcxt, element, NULL);
+		else
+		{
+			pg_datum_ref(kcxt, element, base + offset);
+			offset = TYPEALIGN(typealign, (offset + typelen));
+		}
+		/* call for the comparison function */
+		rv = compare_fn(kcxt, scalar, element);
+		if (rv.isnull)
+			result.isnull = true;
+		else if (useOr)
+		{
+			if (rv.value)
+			{
+				result.isnull = false;
+				result.value = true;
+				break;
+			}
+		}
+		else
+		{
+			if (!rv.value)
+			{
+				result.isnull = false;
+				result.value = false;
+				break;
+			}
+		}
+		/* advance the bitmap pointer if any */
+		if (bitmap)
+		{
+			bitmask <<= 1;
+			if (bitmask == 0x0100)
+			{
+				bitmap++;
+				bitmask = 1;
+			}
+		}
+	}
+	return result;
+}
+
 /* ----------------------------------------------------------------
  *
  * MATRIX data type support

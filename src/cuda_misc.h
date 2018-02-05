@@ -22,7 +22,14 @@
 /* pg_money_t */
 #ifndef PG_MONEY_TYPE_DEFINED
 #define PG_MONEY_TYPE_DEFINED
-STROMCL_SIMPLE_TYPE_TEMPLATE(money, cl_long);
+STROMCL_SIMPLE_TYPE_TEMPLATE(money, cl_long)
+STATIC_INLINE(Datum)
+pg_monery_as_datum(void *addr)
+{
+	cl_long		val = *((cl_long *)addr);
+	return SET_8_BYTES(val);
+}
+STROMCL_SIMPLE_COMPARE_TEMPLATE(cash_,money,money,cl_long)
 #endif
 
 /*
@@ -223,7 +230,7 @@ pgfn_flt8_mul_cash(kern_context *kcxt, pg_float8_t arg1, pg_money_t arg2)
  * Currency comparison functions
  */
 STATIC_FUNCTION(pg_int4_t)
-pgfn_cash_cmp(kern_context *kcxt, pg_money_t arg1, pg_money_t arg2)
+pgfn_type_compare(kern_context *kcxt, pg_money_t arg1, pg_money_t arg2)
 {
 	pg_int4_t	result;
 
@@ -232,98 +239,12 @@ pgfn_cash_cmp(kern_context *kcxt, pg_money_t arg1, pg_money_t arg2)
 	else
 	{
 		result.isnull = false;
-		result.value = (arg1.value > arg2.value ? 1 :
-						arg1.value < arg2.value ? -1 : 0);
-	}
-	return result;
-}
-
-STATIC_FUNCTION(pg_bool_t)
-pgfn_cash_eq(kern_context *kcxt, pg_money_t arg1, pg_money_t arg2)
-{
-	pg_bool_t	result;
-
-	if (arg1.isnull || arg2.isnull)
-		result.isnull = true;
-	else
-	{
-		result.isnull = false;
-		result.value = (arg1.value == arg2.value);
-	}
-	return result;
-}
-
-STATIC_FUNCTION(pg_bool_t)
-pgfn_cash_ne(kern_context *kcxt, pg_money_t arg1, pg_money_t arg2)
-{
-	pg_bool_t	result;
-
-	if (arg1.isnull || arg2.isnull)
-		result.isnull = true;
-	else
-	{
-		result.isnull = false;
-		result.value = (arg1.value != arg2.value);
-	}
-	return result;
-}
-
-STATIC_FUNCTION(pg_bool_t)
-pgfn_cash_lt(kern_context *kcxt, pg_money_t arg1, pg_money_t arg2)
-{
-	pg_bool_t	result;
-
-	if (arg1.isnull || arg2.isnull)
-		result.isnull = true;
-	else
-	{
-		result.isnull = false;
-		result.value = (arg1.value < arg2.value);
-	}
-	return result;
-}
-
-STATIC_FUNCTION(pg_bool_t)
-pgfn_cash_le(kern_context *kcxt, pg_money_t arg1, pg_money_t arg2)
-{
-	pg_bool_t	result;
-
-	if (arg1.isnull || arg2.isnull)
-		result.isnull = true;
-	else
-	{
-		result.isnull = false;
-		result.value = (arg1.value <= arg2.value);
-	}
-	return result;
-}
-
-STATIC_FUNCTION(pg_bool_t)
-pgfn_cash_gt(kern_context *kcxt, pg_money_t arg1, pg_money_t arg2)
-{
-	pg_bool_t	result;
-
-	if (arg1.isnull || arg2.isnull)
-		result.isnull = true;
-	else
-	{
-		result.isnull = false;
-		result.value = (arg1.value > arg2.value);
-	}
-	return result;
-}
-
-STATIC_FUNCTION(pg_bool_t)
-pgfn_cash_ge(kern_context *kcxt, pg_money_t arg1, pg_money_t arg2)
-{
-	pg_bool_t	result;
-
-	if (arg1.isnull || arg2.isnull)
-		result.isnull = true;
-	else
-	{
-		result.isnull = false;
-		result.value = (arg1.value >= arg2.value);
+		if (arg1.value > arg2.value)
+			result.value = 1;
+		else if (arg1.value < arg2.value)
+			result.value = -1;
+		else
+			result.value = 0;
 	}
 	return result;
 }
@@ -352,8 +273,8 @@ uuid_internal_cmp(pg_uuid_t *arg1, pg_uuid_t *arg2)
 	return cmp;
 }
 
-STATIC_FUNCTION(pg_int4_t)
-pgfn_uuid_cmp(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
+STATIC_INLINE(pg_int4_t)
+pgfn_type_compare(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
 {
 	pg_int4_t	result;
 
@@ -367,7 +288,7 @@ pgfn_uuid_cmp(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
 	return result;
 }
 
-STATIC_FUNCTION(pg_bool_t)
+STATIC_INLINE(pg_bool_t)
 pgfn_uuid_lt(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
 {
 	pg_bool_t	result;
@@ -382,7 +303,7 @@ pgfn_uuid_lt(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
 	return result;
 }
 
-STATIC_FUNCTION(pg_bool_t)
+STATIC_INLINE(pg_bool_t)
 pgfn_uuid_le(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
 {
 	pg_bool_t	result;
@@ -397,7 +318,7 @@ pgfn_uuid_le(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
 	return result;
 }
 
-STATIC_FUNCTION(pg_bool_t)
+STATIC_INLINE(pg_bool_t)
 pgfn_uuid_eq(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
 {
 	pg_bool_t	result;
@@ -412,7 +333,7 @@ pgfn_uuid_eq(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
 	return result;
 }
 
-STATIC_FUNCTION(pg_bool_t)
+STATIC_INLINE(pg_bool_t)
 pgfn_uuid_ge(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
 {
 	pg_bool_t	result;
@@ -427,7 +348,7 @@ pgfn_uuid_ge(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
 	return result;
 }
 
-STATIC_FUNCTION(pg_bool_t)
+STATIC_INLINE(pg_bool_t)
 pgfn_uuid_gt(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
 {
 	pg_bool_t	result;
@@ -442,7 +363,7 @@ pgfn_uuid_gt(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
 	return result;
 }
 
-STATIC_FUNCTION(pg_bool_t)
+STATIC_INLINE(pg_bool_t)
 pgfn_uuid_ne(kern_context *kcxt, pg_uuid_t arg1, pg_uuid_t arg2)
 {
 	pg_bool_t	result;
@@ -575,7 +496,7 @@ pgfn_macaddr_ne(kern_context *kcxt, pg_macaddr_t arg1, pg_macaddr_t arg2)
 }
 
 STATIC_FUNCTION(pg_int4_t)
-pgfn_macaddr_cmp(kern_context *kcxt, pg_macaddr_t arg1, pg_macaddr_t arg2)
+pgfn_type_compare(kern_context *kcxt, pg_macaddr_t arg1, pg_macaddr_t arg2)
 {
 	pg_int4_t	result;
 
@@ -708,6 +629,11 @@ pg_inet_datum_ref(kern_context *kcxt, void *datum)
 		}
 	}
 	return result;
+}
+STATIC_INLINE(void)
+pg_datum_ref(kern_context *kcxt, pg_inet_t &result, void *datum)
+{
+	result = pg_inet_datum_ref(kcxt, datum);
 }
 
 STATIC_INLINE(cl_uint)
@@ -902,7 +828,7 @@ pgfn_network_ne(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
  * network_cmp
  */
 STATIC_FUNCTION(pg_int4_t)
-pgfn_network_cmp(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
+pgfn_type_compare(kern_context *kcxt, pg_inet_t arg1, pg_inet_t arg2)
 {
 	pg_int4_t	result;
 

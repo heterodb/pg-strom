@@ -2,6 +2,7 @@
 # Common definitions for PG-Strom Makefile
 #
 PG_CONFIG := pg_config
+PSQL := $(shell dirname $(shell which $(PG_CONFIG)))/psql
 MKDOCS := mkdocs
 
 ifndef STROM_BUILD_ROOT
@@ -110,21 +111,6 @@ SHLIB_LINK := -L $(LPATH) -lnvrtc -lcuda
 #LDFLAGS_SL := -Wl,-rpath,'$(LPATH)'
 
 #
-# Options for regression test
-#
-# Regression test options
-REGRESS = --schedule=$(STROM_BUILD_ROOT)/test/parallel_schedule
-REGRESS_OPTS = --inputdir=$(STROM_BUILD_ROOT)/test
-ifdef TEMP_INSTANCE
-    REGRESS_OPTS += --temp-instance=$(STROM_BUILD_ROOT)/tmp_check
-    ifndef CPUTEST
-        REGRESS_OPTS += --temp-config=$(STROM_BUILD_ROOT)/test/enable.conf
-    else
-        REGRESS_OPTS += --temp-config=$(STROM_BUILD_ROOT)/test/disable.conf
-    endif
-endif
-
-#
 # Definition of PG-Strom Extension
 #
 MODULE_big = pg_strom
@@ -137,15 +123,24 @@ DATA = $(shell cpp -D 'PGSTROM_CUDA(x)=$(STROM_BUILD_ROOT)/src/cuda_\#\#x.h' \
 # Support utilities
 SCRIPTS_built = $(STROM_UTILS)
 # Extra files to be cleaned
-EXTRA_CLEAN = $(HTML_FILES) $(STROM_UTILS) \
+EXTRA_CLEAN = $(STROM_UTILS) \
+	$(shell ls $(STROM_BUILD_ROOT)/man/docs/*.md) \
 	$(shell ls */Makefile | sed 's/Makefile/pg_strom.control/g') \
 	$(shell ls pg-strom-*.tar.gz)
 
 #
+# Regression Test
+#
+USE_MODULE_DB = 1
+REGRESS = --schedule=$(STROM_BUILD_ROOT)/test/parallel_schedule
+REGRESS_DBNAME = contrib_regression_$(MODULE_big)
+REGRESS_REVISION = SELECT public.pgstrom_regression_test_revision()
+REGRESS_OPTS = --inputdir=$(STROM_BUILD_ROOT)/test --use-existing
+REGRESS_PREP = init_regression_testdb
+
+#
 # Build chain of PostgreSQL
 #
-ifndef PGSTROM_MAKEFILE_ONLY_PARAMDEF
-
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 
@@ -187,6 +182,7 @@ $(STROM_TGZ): $(shell cd $(STROM_BUILD_ROOT); git ls-files $(__PACKAGE_FILES))
 			$(__STROM_TGZ_TAG) $(__PACKAGE_FILES))
 
 tarball: $(STROM_TGZ)
-endif
 
+init_regression_testdb:
+	$(STROM_BUILD_ROOT)/test/testdb_init.sh $(REGRESS_DBNAME) $(PSQL)
 .PHONY: docs

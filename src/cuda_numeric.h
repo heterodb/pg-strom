@@ -472,6 +472,12 @@ pg_numeric_datum_ref(kern_context *kcxt,
 		result = pg_numeric_from_varlena(kcxt, (varlena *) datum);
 	return result;
 }
+STATIC_INLINE(void)
+pg_datum_ref(kern_context *kcxt,
+			 pg_numeric_t &result, void *datum)
+{
+	result = pg_numeric_datum_ref(kcxt, datum);
+}
 
 STATIC_INLINE(cl_uint)
 pg_numeric_datum_store(kern_context *kcxt,
@@ -504,8 +510,6 @@ pg_numeric_param(kern_context *kcxt,
 	return result;
 }
 
-/* NULL check functions */
-STROMCL_SIMPLE_NULLTEST_TEMPLATE(numeric)
 /* CRC32 calculation function */
 STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(numeric,cl_long)
 
@@ -826,8 +830,9 @@ float_to_numeric(kern_context *kcxt, pg_float8_t arg)
 		frac /= 10;
 		base10--;
 	}
+	/* now fval = (sign ? -1 : 1) * 10^(-base10) * frac */
 	v.isnull = false;
-	v.value = PG_NUMERIC_SET(base10, sign, frac);
+	v.value = PG_NUMERIC_SET(-base10, sign, frac);
 
 	return v;
 }
@@ -1285,19 +1290,16 @@ pgfn_numeric_ge(kern_context *kcxt,
 }
 
 STATIC_FUNCTION(pg_int4_t)
-pgfn_numeric_cmp(kern_context *kcxt,
-				 pg_numeric_t arg1, pg_numeric_t arg2)
+pgfn_type_compare(kern_context *kcxt,
+				  pg_numeric_t arg1, pg_numeric_t arg2)
 {
 	pg_int4_t	result;
 
-	if (arg1.isnull  ||  arg2.isnull) {
-		result.isnull = true;
-		result.value  = 0;
-
-	} else {
-		result.isnull = false;
+	result.isnull = arg1.isnull | arg2.isnull;
+	if (result.isnull)
+		result.value = 0;
+	else
 		result.value = numeric_cmp(kcxt, arg1, arg2);
-	}
 
 	return result;
 }
@@ -1345,17 +1347,17 @@ pg_atomic_min_numeric(kern_context *kcxt,
 					  cl_ulong *ptr, cl_ulong numeric_value)
 {
 	pg_numeric_t	x, y;
-	pg_int4_t		comp;
 	cl_ulong		oldval;
 	cl_ulong		curval = *ptr;
+	int				comp;
 
 	do {
 		x.isnull = false;
 		y.isnull = false;
 		x.value = oldval = curval;
 		y.value = numeric_value;
-		comp = pgfn_numeric_cmp(kcxt, x, y);
-		if (comp.value < 0)
+		comp = numeric_cmp(kcxt, x, y);
+		if (comp < 0)
 			break;
 	} while ((curval = atomicCAS(ptr, oldval, numeric_value)) != oldval);
 
@@ -1367,17 +1369,17 @@ pg_atomic_max_numeric(kern_context *kcxt,
 					  cl_ulong *ptr, cl_ulong numeric_value)
 {
 	pg_numeric_t	x, y;
-	pg_int4_t		comp;
 	cl_ulong		oldval;
 	cl_ulong		curval = *ptr;
+	int				comp;
 
 	do {
 		x.isnull = false;
 		y.isnull = false;
 		x.value = oldval = curval;
 		y.value = numeric_value;
-		comp = pgfn_numeric_cmp(kcxt, x, y);
-		if (comp.value > 0)
+		comp = numeric_cmp(kcxt, x, y);
+		if (comp > 0)
 			break;
 	} while ((curval = atomicCAS(ptr, oldval, numeric_value)) != oldval);
 

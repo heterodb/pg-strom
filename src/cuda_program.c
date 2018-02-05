@@ -397,6 +397,13 @@ construct_flat_cuda_source(uint32 extra_flags,
 	if ((extra_flags & DEVKERNEL_NEEDS_RANGETYPE) == DEVKERNEL_NEEDS_RANGETYPE)
 		ofs += snprintf(source + ofs, len - ofs,
 						"#include \"cuda_rangetype.h\"\n");
+	/* cuda_primitive.h (must be last) */
+	if ((extra_flags & DEVKERNEL_NEEDS_PRIMITIVE) == DEVKERNEL_NEEDS_PRIMITIVE)
+		ofs += snprintf(source + ofs, len - ofs,
+                        "#include \"cuda_primitive.h\"\n");
+	if ((extra_flags & DEVKERNEL_NEEDS_TIME_EXTRACT) == DEVKERNEL_NEEDS_TIME_EXTRACT)
+		ofs += snprintf(source + ofs, len - ofs,
+						"#include \"cuda_time_extract.h\"\n");
 
 	/* pg_anytype_t declaration */
 	pg_anytype =
@@ -406,6 +413,7 @@ construct_flat_cuda_source(uint32 extra_flags,
 		"    pg_int2_t        int2_v;\n"
 		"    pg_int4_t        int4_v;\n"
 		"    pg_int8_t        int8_v;\n"
+		"    pg_float2_t      float2_v;\n"
 		"    pg_float4_t      float4_v;\n"
 		"    pg_float8_t      float8_v;\n"
 		"#ifdef CUDA_NUMERIC_H\n"
@@ -598,24 +606,36 @@ writeout_temporary_file(char *tempfile, const char *suffix,
 						const char *source, size_t length)
 {
 	static pg_atomic_uint64 sourceFileCounter = {0};
+	char		tempdir[MAXPGPATH];
 	FILE	   *filp;
 
 	/*
 	 * Generate a tempfile name that should be unique within the current
 	 * database instance.
 	 */
-	snprintf(tempfile, MAXPGPATH,
-			 "%s/base/%s/%s_strom_%d.%ld.%s",
-			 DataDir, PG_TEMP_FILES_DIR,
+	snprintf(tempdir, MAXPGPATH, "%s/%s",
+			 DataDir,
+			 PG_TEMP_FILES_DIR);
+	snprintf(tempfile, MAXPGPATH, "%s/%s_strom_%d.%ld.%s",
+			 tempdir,
 			 PG_TEMP_FILE_PREFIX,
 			 MyProcPid,
 			 pg_atomic_fetch_add_u64(&sourceFileCounter, 1),
 			 suffix);
-	/*
-	 * Open the file.  Note: we don't use O_EXCL, in case there is
-	 * an orphaned temp file that can be reused.
-	 */
+	/* Open the temporary file */
 	filp = fopen(tempfile, "w+b");
+	if (!filp)
+	{
+		mkdir(tempdir, S_IRWXU);
+
+		filp = fopen(tempfile, "w+b");
+		if (!filp)
+		{
+			snprintf(tempfile, MAXPGPATH,
+					 "!!unable open temporary file!! (%m)");
+			return;
+		}
+	}
 	fputs(source, filp);
 	fclose(filp);
 }
@@ -765,6 +785,8 @@ build_cuda_program(program_cache_entry *src_entry)
 		/* library linkage needs relocatable PTX */
 		if (src_entry->extra_flags & DEVKERNEL_NEEDS_LINKAGE)
 			options[opt_index++] = "--relocatable-device-code=true";
+		/* enables c++11 template features */
+		options[opt_index++] = "--std=c++11";
 
 		/*
 		 * Kick runtime compiler

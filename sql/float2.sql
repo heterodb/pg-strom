@@ -151,6 +151,11 @@ CREATE FUNCTION pgstrom.float2_ge(float2,float2)
   AS 'MODULE_PATHNAME','pgstrom_float2_ge'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
+CREATE FUNCTION pgstrom.float2_cmp(float2,float2)
+  RETURNS int
+  AS 'MODULE_PATHNAME','pgstrom_float2_cmp'
+  LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
 CREATE FUNCTION pgstrom.float2_larger(float2,float2)
   RETURNS float2
   AS 'MODULE_PATHNAME','pgstrom_float2_larger'
@@ -161,6 +166,10 @@ CREATE FUNCTION pgstrom.float2_smaller(float2,float2)
   AS 'MODULE_PATHNAME','pgstrom_float2_smaller'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
+CREATE FUNCTION pgstrom.float2_hash(float2)
+  RETURNS int
+  AS 'MODULE_PATHNAME','pgstrom_float2_hash'
+  LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.float42_eq(float4,float2)
   RETURNS bool
@@ -190,6 +199,11 @@ CREATE FUNCTION pgstrom.float42_gt(float4,float2)
 CREATE FUNCTION pgstrom.float42_ge(float4,float2)
   RETURNS bool
   AS 'MODULE_PATHNAME','pgstrom_float42_ge'
+  LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
+CREATE FUNCTION pgstrom.float42_cmp(float4,float2)
+  RETURNS int
+  AS 'MODULE_PATHNAME','pgstrom_float42_cmp'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 
@@ -223,6 +237,11 @@ CREATE FUNCTION pgstrom.float82_ge(float8,float2)
   AS 'MODULE_PATHNAME','pgstrom_float82_ge'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
+CREATE FUNCTION pgstrom.float82_cmp(float8,float2)
+  RETURNS int
+  AS 'MODULE_PATHNAME','pgstrom_float82_cmp'
+  LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
 
 CREATE FUNCTION pgstrom.float24_eq(float2,float4)
   RETURNS bool
@@ -254,6 +273,11 @@ CREATE FUNCTION pgstrom.float24_ge(float2,float4)
   AS 'MODULE_PATHNAME','pgstrom_float24_ge'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
+CREATE FUNCTION pgstrom.float24_cmp(float2,float4)
+  RETURNS int
+  AS 'MODULE_PATHNAME','pgstrom_float24_cmp'
+  LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
 
 CREATE FUNCTION pgstrom.float28_eq(float2,float8)
   RETURNS bool
@@ -283,6 +307,11 @@ CREATE FUNCTION pgstrom.float28_gt(float2,float8)
 CREATE FUNCTION pgstrom.float28_ge(float2,float8)
   RETURNS bool
   AS 'MODULE_PATHNAME','pgstrom_float28_ge'
+  LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
+CREATE FUNCTION pgstrom.float28_cmp(float2,float8)
+  RETURNS int
+  AS 'MODULE_PATHNAME','pgstrom_float28_cmp'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
 
@@ -890,3 +919,21 @@ CREATE AGGREGATE pg_catalog.stddev(float2) (
   combinefunc = float8_combine,
   initcond = "{0,0,0}"
 );
+
+--
+-- Index Support
+--
+CREATE OPERATOR CLASS pg_catalog.float2_ops
+  default for type pg_catalog.float2
+  using btree family pg_catalog.float_ops as
+  operator 1 <  (float2, float2) for search,
+  operator 2 <= (float2, float2) for search,
+  operator 3 =  (float2, float2) for search,
+  operator 4 >= (float2, float2) for search,
+  operator 5 >  (float2, float2) for search,
+  function 1 (float2, float2) pgstrom.float2_cmp(float2, float2);
+ 
+CREATE OPERATOR CLASS pg_catalog.float2_ops
+  default for type pg_catalog.float2
+  using hash family pg_catalog.float_ops as
+  function 1 (float2) pgstrom.float2_hash(float2);

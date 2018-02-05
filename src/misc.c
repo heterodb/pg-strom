@@ -311,10 +311,12 @@ errorTextKernel(kern_errorbuf *kerror)
 		KERN_ENTRY(NVMeStrom);
 		KERN_ENTRY(gpuscan_exec_quals_block);
 		KERN_ENTRY(gpuscan_exec_quals_row);
+		KERN_ENTRY(gpuscan_exec_quals_column);
 		KERN_ENTRY(gpujoin_main);
 		KERN_ENTRY(gpujoin_right_outer);
 		KERN_ENTRY(gpupreagg_setup_row);
 		KERN_ENTRY(gpupreagg_setup_block);
+		KERN_ENTRY(gpupreagg_setup_column);
 		KERN_ENTRY(gpupreagg_nogroup_reduction);
 		KERN_ENTRY(gpupreagg_groupby_reduction);
 		KERN_ENTRY(plcuda_prep_kernel);
@@ -342,17 +344,21 @@ Datum pgstrom_random_int(PG_FUNCTION_ARGS);
 Datum pgstrom_random_float(PG_FUNCTION_ARGS);
 Datum pgstrom_random_date(PG_FUNCTION_ARGS);
 Datum pgstrom_random_time(PG_FUNCTION_ARGS);
+Datum pgstrom_random_timetz(PG_FUNCTION_ARGS);
 Datum pgstrom_random_timestamp(PG_FUNCTION_ARGS);
+Datum pgstrom_random_timestamptz(PG_FUNCTION_ARGS);
 Datum pgstrom_random_interval(PG_FUNCTION_ARGS);
 Datum pgstrom_random_macaddr(PG_FUNCTION_ARGS);
-Datum pgstrom_random_inet4(PG_FUNCTION_ARGS);
+Datum pgstrom_random_inet(PG_FUNCTION_ARGS);
+Datum pgstrom_random_text(PG_FUNCTION_ARGS);
+Datum pgstrom_random_text_length(PG_FUNCTION_ARGS);
 
 static inline bool
 generate_null(double ratio)
 {
 	if (ratio <= 0.0)
 		return false;
-	if (100 * drand48() < ratio)
+	if (100.0 * drand48() < ratio)
 		return true;
 	return false;
 }
@@ -428,12 +434,14 @@ Datum
 pgstrom_random_time(PG_FUNCTION_ARGS)
 {
 	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
-	TimeADT		lower = (!PG_ARGISNULL(1) ? PG_GETARG_TIMEADT(1) : 0);
-	TimeADT		upper = (!PG_ARGISNULL(2)
-						 ? PG_GETARG_TIMEADT(2)
-						 : HOURS_PER_DAY * USECS_PER_HOUR - 1);
+	TimeADT		lower = 0;
+	TimeADT		upper = HOURS_PER_DAY * USECS_PER_HOUR - 1;
 	cl_ulong	v;
 
+	if (!PG_ARGISNULL(1))
+		lower = PG_GETARG_TIMEADT(1);
+	if (!PG_ARGISNULL(2))
+		upper = PG_GETARG_TIMEADT(2);
 	if (upper < lower)
 		elog(ERROR, "%s: lower bound is larger than upper", __FUNCTION__);
 	if (generate_null(ratio))
@@ -445,6 +453,36 @@ pgstrom_random_time(PG_FUNCTION_ARGS)
 	PG_RETURN_TIMEADT(lower + v % (upper - lower));
 }
 PG_FUNCTION_INFO_V1(pgstrom_random_time);
+
+Datum
+pgstrom_random_timetz(PG_FUNCTION_ARGS)
+{
+	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
+	TimeADT		lower = 0;
+	TimeADT		upper = HOURS_PER_DAY * USECS_PER_HOUR - 1;
+	TimeTzADT  *temp;
+	cl_ulong	v;
+
+	if (!PG_ARGISNULL(1))
+		lower = PG_GETARG_TIMEADT(1);
+	if (!PG_ARGISNULL(2))
+		upper = PG_GETARG_TIMEADT(2);
+	if (upper < lower)
+		elog(ERROR, "%s: lower bound is larger than upper", __FUNCTION__);
+	if (generate_null(ratio))
+		PG_RETURN_NULL();
+	temp = palloc(sizeof(TimeTzADT));
+	temp->zone = (random() % 23 - 11) * USECS_PER_HOUR;
+	if (upper == lower)
+		temp->time = lower;
+	else
+	{
+		v = ((cl_ulong)random() << 31) | (cl_ulong)random();
+		temp->time = lower + v % (upper - lower);
+	}
+	PG_RETURN_TIMETZADT_P(temp);
+}
+PG_FUNCTION_INFO_V1(pgstrom_random_timetz);
 
 Datum
 pgstrom_random_timestamp(PG_FUNCTION_ARGS)
@@ -538,54 +576,127 @@ pgstrom_random_macaddr(PG_FUNCTION_ARGS)
 PG_FUNCTION_INFO_V1(pgstrom_random_macaddr);
 
 Datum
-pgstrom_random_inet4(PG_FUNCTION_ARGS)
+pgstrom_random_inet(PG_FUNCTION_ARGS)
 {
 	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
 	inet	   *temp;
-	int			bits = -1;
-	cl_ulong	lower;
-	cl_ulong	upper;
-	cl_ulong	v, x;
-
-	if (PG_ARGISNULL(1))
-	{
-		lower = 0xc0a80101;		/* 192.168.1.1 */
-		upper = 0xc0a8ffff;		/* 192.168.255.255 */
-		bits = 16;
-	}
-	else
-	{
-		temp = PG_GETARG_INET_P(1);
-		if (ip_family(temp) != PGSQL_AF_INET)
-			elog(ERROR, "template is not inet4");
-		bits = ip_bits(temp);
-		lower = (((cl_ulong)ip_addr(temp)[0] << 24) |
-				 ((cl_ulong)ip_addr(temp)[1] << 16) |
-				 ((cl_ulong)ip_addr(temp)[2] <<  8) |
-				 ((cl_ulong)ip_addr(temp)[3]));
-		Assert(bits >= 0 && bits <= 32);
-		lower &= ~((1UL << (32-bits)) - 1);
-		upper = lower | ((1UL << (32-bits)) - 1);
-	}
+	int			i, j, bits;
+	cl_ulong	v;
 
 	if (generate_null(ratio))
 		PG_RETURN_NULL();
-	if (upper == lower)
-		x = lower;
+
+	if (!PG_ARGISNULL(1))
+		temp = (inet *)PG_DETOAST_DATUM_COPY(PG_GETARG_DATUM(1));
 	else
 	{
-		v = ((cl_ulong)random() << 31) | (cl_ulong)random();
-		x = lower + v % (upper - lower);
+		/* default template 192.168.0.1/16 */
+		temp = palloc(sizeof(inet));
+		temp->inet_data.family = PGSQL_AF_INET;
+		temp->inet_data.bits = 16;
+		temp->inet_data.ipaddr[0] = 0xc0;
+		temp->inet_data.ipaddr[1] = 0xa8;
+		temp->inet_data.ipaddr[2] = 0x01;
+		temp->inet_data.ipaddr[3] = 0x00;
+		SET_VARSIZE(temp, sizeof(inet));
 	}
-    temp = palloc(sizeof(inet));
-	temp->inet_data.family = PGSQL_AF_INET;
-	temp->inet_data.bits = (bits < 0 ? 16 : bits);
-	temp->inet_data.ipaddr[0] = (x >> 24) & 0x00ff;
-	temp->inet_data.ipaddr[1] = (x >> 16) & 0x00ff;
-	temp->inet_data.ipaddr[2] = (x >>  8) & 0x00ff;
-	temp->inet_data.ipaddr[3] = (x      ) & 0x00ff;
-	SET_INET_VARSIZE(temp);
+	bits = ip_bits(temp);
+	i = ip_maxbits(temp) / 8 - 1;
+	j = v = 0;
+	while (bits > 0)
+	{
+		if (j < 8)
+		{
+			v |= (cl_ulong)random() << j;
+			j += 31;	/* note: only 31b of random() are valid */
+		}
+		if (bits >= 8)
+			temp->inet_data.ipaddr[i--] = (v & 0xff);
+		else
+		{
+			cl_uint		mask = (1 << bits) - 1;
 
+			temp->inet_data.ipaddr[i] &= ~(mask);
+			temp->inet_data.ipaddr[i] |= (v & mask);
+			i--;
+		}
+		bits -= 8;
+		v >>= 8;
+	}
 	PG_RETURN_INET_P(temp);
 }
-PG_FUNCTION_INFO_V1(pgstrom_random_inet4);
+PG_FUNCTION_INFO_V1(pgstrom_random_inet);
+
+Datum
+pgstrom_random_text(PG_FUNCTION_ARGS)
+{
+	static const char *base32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890";
+	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
+	text	   *temp;
+	char	   *pos;
+	int			i, j, n;
+	cl_ulong	v;
+
+	if (generate_null(ratio))
+		PG_RETURN_NULL();
+
+	if (PG_ARGISNULL(1))
+		temp = cstring_to_text("test_**");
+	else
+		temp = PG_GETARG_TEXT_P_COPY(1);
+
+	n = VARSIZE_ANY_EXHDR(temp);
+	pos = VARDATA_ANY(temp);
+	for (i=0, j=0, v=0; i < n; i++, pos++)
+	{
+		if (*pos == '*')
+		{
+			if (j < 5)
+			{
+				v |= (cl_ulong)random() << j;
+				j += 31;
+			}
+			*pos = base32[v & 0x1f];
+			v >>= 5;
+			j -= 5;
+		}
+	}
+	PG_RETURN_TEXT_P(temp);
+}
+PG_FUNCTION_INFO_V1(pgstrom_random_text);
+
+Datum
+pgstrom_random_text_length(PG_FUNCTION_ARGS)
+{
+	static const char *base32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890";
+	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
+	cl_int		maxlen;
+	text	   *temp;
+	char	   *pos;
+	int			i, j, n;
+	cl_ulong	v = 0;
+
+	if (generate_null(ratio))
+		PG_RETURN_NULL();
+	maxlen = (PG_ARGISNULL(1) ? 10 : PG_GETARG_INT32(1));
+	if (maxlen < 1 || maxlen > BLCKSZ)
+		elog(ERROR, "%s: max length too much", __FUNCTION__);
+	n = 1 + random() % maxlen;
+
+	temp = palloc(VARHDRSZ + n);
+	SET_VARSIZE(temp, VARHDRSZ + n);
+	pos = VARDATA(temp);
+	for (i=0, j=0; i < n; i++, pos++)
+	{
+		if (j < 5)
+		{
+			v |= (cl_ulong)random() << j;
+			j += 31;
+		}
+		*pos = base32[v & 0x1f];
+		v >>= 5;
+		j -= 5;
+	}
+	PG_RETURN_TEXT_P(temp);
+}
+PG_FUNCTION_INFO_V1(pgstrom_random_text_length);

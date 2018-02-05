@@ -289,7 +289,6 @@ struct GpuTaskState
 	bool			scan_done;		/* True, if no more rows to read */
 
 	/* fields for outer scan */
-	bool			outer_bulk_exec;/* True, if bulk-exec mode is supported */
 	Cost			outer_startup_cost;	/* copy from the outer path node */
 	Cost			outer_total_cost;	/* copy from the outer path node */
 	double			outer_plan_rows;	/* copy from the outer path node */
@@ -331,8 +330,6 @@ struct GpuTaskState
 										cl_bool *task_is_ready);
 	void		  (*cb_switch_task)(GpuTaskState *gts, GpuTask *gtask);
 	TupleTableSlot *(*cb_next_tuple)(GpuTaskState *gts);
-	struct pgstrom_data_store *(*cb_bulk_exec)(GpuTaskState *gts,
-											   size_t chunk_size);
 	int			  (*cb_process_task)(GpuTask *gtask,
 									 CUmodule cuda_module);
 	void		  (*cb_release_task)(GpuTask *gtask);
@@ -374,7 +371,7 @@ struct GpuTask
 #define DEVKERNEL_NEEDS_GPUSCAN			0x00000001	/* GpuScan logic */
 #define DEVKERNEL_NEEDS_GPUJOIN			0x00000002	/* GpuJoin logic */
 #define DEVKERNEL_NEEDS_GPUPREAGG		0x00000004	/* GpuPreAgg logic */
-#define DEVKERNEL_NEEDS_GPUSORT			0x00000008	/* GpuSort logic */
+//#define DEVKERNEL_NEEDS_GPUSORT			0x00000008	/* GpuSort logic */
 #define DEVKERNEL_NEEDS_PLCUDA			0x00000080	/* PL/CUDA related */
 
 #define DEVKERNEL_NEEDS_DYNPARA			0x00000100	/* aks, device runtime */
@@ -385,6 +382,8 @@ struct GpuTask
 #define DEVKERNEL_NEEDS_MATHLIB			0x00002000
 #define DEVKERNEL_NEEDS_MISC			0x00004000
 #define DEVKERNEL_NEEDS_RANGETYPE		0x00008000
+#define DEVKERNEL_NEEDS_PRIMITIVE		0x00010000
+#define DEVKERNEL_NEEDS_TIME_EXTRACT	0x00020000
 
 #define DEVKERNEL_NEEDS_CURAND			0x00100000
 #define DEVKERNEL_BUILD_DEBUG_INFO		0x80000000
@@ -417,16 +416,13 @@ typedef struct devtype_info {
 								 * type has internal representation. 0 means
 								 * this device type never has inline format,
 								 * or simple data type. */
-	devtype_hashfunc_type hash_func;	/* type specific hash function */
-	const struct devtype_info *type_array;	/* array type of itself, if any */
-	const struct devtype_info *type_element;/* element type of array, if any */
+	devtype_hashfunc_type hash_func;  /* type specific hash function */
+	struct devtype_info *type_array;  /* array type of itself, if any */
+	struct devtype_info *type_element;/* element type of array, if any */
 } devtype_info;
 
 typedef struct devfunc_info {
-	pg_crc32c	hash;			/* hash-value on the cache */
 	Oid			func_oid;		/* OID of the SQL function */
-	Oid			func_rettype_oid; /* OID of the function result */
-	oidvector  *func_argtypes;	/* OID vector of function arguments */
 	Oid			func_collid;	/* OID of collation, if collation aware */
 	bool		func_is_negative;	/* True, if not supported by GPU */
 	bool		func_is_strict;		/* True, if NULL strict function */
@@ -436,19 +432,7 @@ typedef struct devfunc_info {
 	devtype_info *func_rettype;	/* result type by devtype_info */
 	const char *func_sqlname;	/* name of the function in SQL side */
 	const char *func_devname;	/* name of the function in device side */
-	const char *func_decl;	/* declaration of device function, if any */
 } devfunc_info;
-
-typedef struct devexpr_info {
-	NodeTag		expr_tag;		/* tag of the expression */
-	Oid			expr_collid;	/* OID of collation, if collation aware */
-	List	   *expr_args;		/* argument types by devtype_info */
-	devtype_info *expr_rettype;	/* result type by devtype_info */
-	Datum		expr_extra1;	/* 1st extra information per node type */
-	Datum		expr_extra2;	/* 2nd extra information per node type */
-	const char *expr_name;	/* name of the function in device side */
-	const char *expr_decl;	/* declaration of device function, if any */
-} devexpr_info;
 
 /*
  * pgstrom_data_store - a data structure with various format to exchange
@@ -802,8 +786,6 @@ extern void pgstromInitGpuTaskState(GpuTaskState *gts,
 									List *used_params,
 									EState *estate);
 extern TupleTableSlot *pgstromExecGpuTaskState(GpuTaskState *gts);
-extern pgstrom_data_store *pgstromBulkExecGpuTaskState(GpuTaskState *gts,
-													   size_t chunk_size);
 extern void pgstromRescanGpuTaskState(GpuTaskState *gts);
 extern void pgstromReleaseGpuTaskState(GpuTaskState *gts);
 extern void pgstromExplainGpuTaskState(GpuTaskState *gts,
@@ -878,10 +860,6 @@ extern void pgstrom_devfunc_track(codegen_context *context,
 								  devfunc_info *dfunc);
 
 extern char *pgstrom_codegen_expression(Node *expr, codegen_context *context);
-extern void pgstrom_codegen_func_declarations(StringInfo buf,
-											  codegen_context *context);
-extern void pgstrom_codegen_expr_declarations(StringInfo buf,
-											  codegen_context *context);
 extern void pgstrom_codegen_param_declarations(StringInfo buf,
 											   codegen_context *context);
 extern bool pgstrom_device_expression(Expr *expr);
@@ -891,7 +869,6 @@ extern void pgstrom_init_codegen(void);
 /*
  * datastore.c
  */
-extern bool pgstrom_bulk_exec_supported(const PlanState *planstate);
 extern cl_uint estimate_num_chunks(Path *pathnode);
 extern bool KDS_fetch_tuple_column(TupleTableSlot *slot,
 								   kern_data_store *kds,
@@ -937,7 +914,7 @@ extern pgstrom_data_store *__PDS_create_block(GpuContext *gcontext,
 #define PDS_clone(a)							\
 	__PDS_clone((a),__FILE__,__LINE__)
 
-//to be gpu_task.c?
+//XXX - to be gpu_task.c?
 extern void PDS_init_heapscan_state(GpuTaskState *gts,
 									cl_uint nrows_per_block);
 extern void PDS_end_heapscan_state(GpuTaskState *gts);
@@ -1059,8 +1036,6 @@ extern void pgstrom_init_gpupreagg(void);
 /*
  * pl_cuda.c
  */
-extern bool pgstrom_devfunc_construct_plcuda(devfunc_info *entry,
-											 HeapTuple proc_tuple);
 extern void pgstrom_init_plcuda(void);
 
 /*

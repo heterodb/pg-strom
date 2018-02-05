@@ -252,7 +252,8 @@ gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
 	Datum			tup_values[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
 	cl_bool			tup_isnull[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
 #if GPUSCAN_DEVICE_PROJECTION_EXTRA_SIZE > 0
-	char			tup_extra[GPUSCAN_DEVICE_PROJECTION_EXTRA_SIZE];
+	char			tup_extra[GPUSCAN_DEVICE_PROJECTION_EXTRA_SIZE]
+					__attribute__ ((aligned(MAXIMUM_ALIGNOF)));
 #else
 	char		   *tup_extra = NULL;
 #endif
@@ -442,7 +443,8 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 	Datum			tup_values[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
 	cl_bool			tup_isnull[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
 #if GPUSCAN_DEVICE_PROJECTION_EXTRA_SIZE > 0
-	char			tup_extra[GPUSCAN_DEVICE_PROJECTION_EXTRA_SIZE];
+	char			tup_extra[GPUSCAN_DEVICE_PROJECTION_EXTRA_SIZE]
+					__attribute__ ((aligned(MAXIMUM_ALIGNOF)));
 #else
 	char		   *tup_extra = NULL;
 #endif
@@ -684,7 +686,8 @@ gpuscan_exec_quals_column(kern_gpuscan *kgpuscan,
 	Datum			tup_values[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
 	cl_bool			tup_isnull[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
 #if GPUSCAN_DEVICE_PROJECTION_EXTRA_SIZE > 0
-	cl_char			tup_extra[GPUSCAN_DEVICE_PROJECTION_EXTRA_SIZE];
+	cl_char			tup_extra[GPUSCAN_DEVICE_PROJECTION_EXTRA_SIZE]
+					__attribute__ ((aligned(MAXIMUM_ALIGNOF)));
 #else
 	cl_char		   *tup_extra __attribute__((unused)) = NULL;
 #endif

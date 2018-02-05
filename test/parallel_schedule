@@ -6,37 +6,16 @@
 # ----------
 
 # ----------
-# Initialize data for strom tests. (it needs to run first.)
+# Check default parameter setting
 # ----------
-test: test_init
+test: pgstrom_guc
 
 # ----------
-# GpuPreAgg Pattern
+# Test for each data types
 # ----------
-# GpuPreAgg parallel test-cases.
-test: explain_gpa zero_gpa where_gpa nogrp_gpa recheck_gpa group_gpa time_gpa overflow_gpa
-# GpuPreAgg Complex test-case
-test: misc_gpa
+test: dtype_int dtype_float
 
 # ----------
-# GpuScan pattern
+# Test for complicated expressions
 # ----------
-# GpuScan parallel test-cases.
-test: explain_gs zero_gs normal_gs recheck_gs overflow_gs 
-
-# ----------
-# GpuHashJoin pattern
-# ----------
-# GpuHashJoin parallel test-cases.
-test: explain_ghj normal_ghj nobulk_ghj
-# GpuHashJoin closed issue test-cases.
-test: varremap_ghj
-
-# ----------
-# GpuSort pattern
-# ----------
-# GpuSort parallel test-cases.
-test: explain_gso normal_gso group_gso multikey_gso text_gso zero_gso time_gso
-#test: merge_gso
-# GpuSort closed issue test-cases.
-test: 2+key_gso
+#test: case_when float_math

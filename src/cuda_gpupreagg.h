@@ -199,7 +199,7 @@ gpupreagg_projection_column(kern_context *kcxt,
  * to allocate variable-length buffer, it expands extra area of the final
  * buffer and returns allocated area.
  */
-STATIC_FUNCTION(cl_uint)
+STATIC_FUNCTION(cl_int)
 gpupreagg_final_data_move(kern_context *kcxt,
 						  kern_data_store *kds_src, cl_uint rowidx_src,
 						  kern_data_store *kds_dst, cl_uint rowidx_dst)
@@ -209,7 +209,7 @@ gpupreagg_final_data_move(kern_context *kcxt,
 	cl_char	   *src_isnull = KERN_DATA_STORE_ISNULL(kds_src, rowidx_src);
 	cl_char	   *dst_isnull = KERN_DATA_STORE_ISNULL(kds_dst, rowidx_dst);
 	cl_uint		i, ncols = kds_src->ncols;
-	cl_uint		alloc_size = 0;
+	cl_int		alloc_size = 0;
 	char	   *alloc_ptr = NULL;
 
 	/* Paranoire checks? */
@@ -258,7 +258,7 @@ gpupreagg_final_data_move(kern_context *kcxt,
 				dst_isnull[i] = true;
 				dst_values[i] = src_values[i];
 			}
-			return 0;
+			return -1;
 		}
 		alloc_ptr = ((char *)kds_dst + kds_dst->length -
 					 (usage_prev + alloc_size));
@@ -833,9 +833,9 @@ gpupreagg_final_reduction(kern_context *kcxt,
 	pagg_hashslot	cur_slot;
 
 	new_slot.s.hash	 = hash_value;
-	new_slot.s.index = (cl_uint)(0xfffffffe);	/* LOCK */
+	new_slot.s.index = (cl_uint)(0xfffffffeU);	/* LOCK */
 	old_slot.s.hash  = 0;
-	old_slot.s.index = (cl_uint)(0xffffffff);	/* EMPTY */
+	old_slot.s.index = (cl_uint)(0xffffffffU);	/* EMPTY */
 	index = hash_value % f_hashsize;
 
 retry_fnext:
@@ -862,18 +862,27 @@ retry_fnext:
 		new_slot.s.index = atomicAdd(&kds_final->nitems, 1);
 		if (new_slot.s.index < kds_final->nrooms)
 		{
-			allocated += gpupreagg_final_data_move(kcxt,
-												   kds_slot,
-												   slot_index,
-												   kds_final,
-												   new_slot.s.index);
+			cl_int	len = gpupreagg_final_data_move(kcxt,
+													kds_slot,
+													slot_index,
+													kds_final,
+													new_slot.s.index);
+			if (len < 0)
+				new_slot.s.index = (cl_uint)(0xffffffffU);	/* EMPTY */
+			else
+				allocated += len;
 		}
 		else
 		{
+			new_slot.s.index = (cl_uint)(0xffffffffU);
 			STROM_SET_ERROR(&kcxt->e, StromError_DataStoreNoSpace);
 		}
 		__threadfence();
-		f_hash->hash_slot[index].s.index = new_slot.s.index;	/* UNLOCK */
+		/* UNLOCK */
+		old_slot.value = atomicExch(&f_hash->hash_slot[index].value,
+									new_slot.value);
+		assert(old_slot.s.hash == new_slot.s.hash &&
+			   old_slot.s.index == (cl_uint)(0xfffffffeU));
 		/* this thread performs as owner of this slot */
 		is_owner = true;
 	}
@@ -915,17 +924,30 @@ retry_fnext:
 		 * Once atomic operations got finished, isnull/values of the current
 		 * thread shall be accumulated.
 		 */
-		if (cur_slot.s.index < Min(kds_final->nitems,
-								   kds_final->nrooms))
-		{
-			gpupreagg_global_calc(
-				KERN_DATA_STORE_ISNULL(kds_final, cur_slot.s.index),
-				KERN_DATA_STORE_VALUES(kds_final, cur_slot.s.index),
-				KERN_DATA_STORE_ISNULL(kds_slot, slot_index),
-				KERN_DATA_STORE_VALUES(kds_slot, slot_index));
-		}
-		else
-			STROM_SET_ERROR(&kcxt->e, StromError_DataStoreNoSpace);
+
+#if 0
+		/*
+		 * MEMO: Multiple concurrent threads updates @kds_final->nitems
+		 * using atomicAdd(), thus, this operation works on L2-cache.
+		 * On the other hands, NVIDIA says Volta architecture uses L1-cache
+		 * implicitly, if compiler detects the target variable is read-only.
+		 * If NVRTC compiler oversights memory update of atomicXXX() and
+		 * it does not invalidate L1-cache, we may look at older version
+		 * of the variable.
+		 * In fact, we never reproduce the problem when @kds_final->nitems
+		 * is referenced using atomic operation which has no effect.
+		 *
+		 * The above memo is just my hypothesis, shall be reported to
+		 * NVIDIA for confirmation and further investigation later.
+		 */
+		assert(cur_slot.s.index < Min(kds_final->nitems,
+									  kds_final->nrooms));
+#endif
+		gpupreagg_global_calc(
+			KERN_DATA_STORE_ISNULL(kds_final, cur_slot.s.index),
+			KERN_DATA_STORE_VALUES(kds_final, cur_slot.s.index),
+			KERN_DATA_STORE_ISNULL(kds_slot, slot_index),
+			KERN_DATA_STORE_VALUES(kds_slot, slot_index));
 	}
 
 	/*

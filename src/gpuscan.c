@@ -33,7 +33,7 @@ typedef struct {
 	ExtensibleNode	ex;
 	char	   *kern_source;	/* source of the CUDA kernel */
 	cl_uint		extra_flags;	/* extra libraries to be included */
-	cl_uint		proj_expand_sz;	/* nbytes in expected size expansion per row */
+	cl_uint		proj_tuple_sz;	/* nbytes of the expected result tuple size */
 	cl_uint		proj_extra_sz;	/* length of extra-buffer on kernel */
 	cl_uint		nrows_per_block;/* estimated tuple density per block */
 	List	   *ccache_refs;	/* attributed to be referenced by ccache */
@@ -49,7 +49,7 @@ form_gpuscan_info(CustomScan *cscan, GpuScanInfo *gs_info)
 
 	privs = lappend(privs, makeString(gs_info->kern_source));
 	privs = lappend(privs, makeInteger(gs_info->extra_flags));
-	privs = lappend(privs, makeInteger(gs_info->proj_expand_sz));
+	privs = lappend(privs, makeInteger(gs_info->proj_tuple_sz));
 	privs = lappend(privs, makeInteger(gs_info->proj_extra_sz));
 	privs = lappend(privs, makeInteger(gs_info->nrows_per_block));
 	privs = lappend(privs, gs_info->ccache_refs);
@@ -71,7 +71,7 @@ deform_gpuscan_info(CustomScan *cscan)
 
 	gs_info->kern_source = strVal(list_nth(privs, pindex++));
 	gs_info->extra_flags = intVal(list_nth(privs, pindex++));
-	gs_info->proj_expand_sz = intVal(list_nth(privs, pindex++));
+	gs_info->proj_tuple_sz = intVal(list_nth(privs, pindex++));
 	gs_info->proj_extra_sz = intVal(list_nth(privs, pindex++));
 	gs_info->nrows_per_block = intVal(list_nth(privs, pindex++));
 	gs_info->ccache_refs = list_nth(privs, pindex++);
@@ -97,7 +97,7 @@ typedef struct {
 	ExprState	   *dev_quals;		/* quals to be run on the device */
 #endif
 	bool			dev_projection;	/* true, if device projection is valid */
-	cl_uint			proj_expand_sz;
+	cl_uint			proj_tuple_sz;
 	cl_uint			proj_extra_sz;
 	/* resource for CPU fallback */
 	TupleTableSlot *base_slot;
@@ -1489,31 +1489,50 @@ static void
 bufsz_estimate_gpuscan_projection(RelOptInfo *baserel,
 								  Relation relation,
 								  List *tlist_proj,
-								  cl_int *p_proj_expand_sz,
+								  cl_int *p_proj_tuple_sz,
 								  cl_int *p_proj_extra_sz)
 {
 	TupleDesc	tupdesc = RelationGetDescr(relation);
+	cl_int		proj_tuple_sz = 0;
 	cl_int		proj_extra_sz = 0;
-	cl_int		proj_full_width;
-	cl_int		base_rel_width;
-	AttrNumber	anum;
-	int16		typlen;
-	bool		typbyval;
-	char		typalign;
+	int			j, nattrs;
 	ListCell   *lc;
 
-	proj_full_width = offsetof(HeapTupleHeaderData,
-							   t_bits[BITMAPLEN(list_length(tlist_proj))]);
+	if (!tlist_proj)
+	{
+		proj_tuple_sz = offsetof(kern_tupitem,
+								 htup.t_bits[BITMAPLEN(tupdesc->natts)]);
+		if (tupdesc->tdhasoid)
+			proj_tuple_sz += sizeof(Oid);
+		proj_tuple_sz = MAXALIGN(proj_tuple_sz);
+
+		for (j=0; j < tupdesc->natts; j++)
+		{
+			Form_pg_attribute attr = tupdesc->attrs[j];
+
+			proj_tuple_sz = att_align_nominal(proj_tuple_sz, attr->attalign);
+			proj_tuple_sz += baserel->attr_widths[j + 1 - baserel->min_attr];
+		}
+		proj_tuple_sz = MAXALIGN(proj_tuple_sz);
+		goto out;
+	}
+
+	nattrs = list_length(tlist_proj);
+	proj_tuple_sz = offsetof(kern_tupitem,
+							 htup.t_bits[BITMAPLEN(nattrs)]);
+	proj_tuple_sz = MAXALIGN(proj_tuple_sz);
 	foreach (lc, tlist_proj)
 	{
 		TargetEntry *tle = lfirst(lc);
 		Oid		type_oid = exprType((Node *)tle->expr);
 		int32	type_mod = exprTypmod((Node *)tle->expr);
+		int16	typlen;
+		bool	typbyval;
+		char	typalign;
 
 		/* alignment */
 		get_typlenbyvalalign(type_oid, &typlen, &typbyval, &typalign);
-		proj_full_width = att_align_nominal(proj_full_width, typalign);
-
+		proj_tuple_sz = att_align_nominal(proj_tuple_sz, typalign);
 		if (IsA(tle->expr, Var))
 		{
 			Var	   *var = (Var *) tle->expr;
@@ -1523,8 +1542,8 @@ bufsz_estimate_gpuscan_projection(RelOptInfo *baserel,
 			Assert(var->varno == baserel->relid &&
 				   var->varattno >= baserel->min_attr &&
 				   var->varattno <= baserel->max_attr);
-			proj_full_width += baserel->attr_widths[var->varattno -
-													baserel->min_attr];
+			proj_tuple_sz += baserel->attr_widths[var->varattno -
+												  baserel->min_attr];
 		}
 		else if (IsA(tle->expr, Const))
 		{
@@ -1532,9 +1551,9 @@ bufsz_estimate_gpuscan_projection(RelOptInfo *baserel,
 
 			/* raw-data is the most reliable information source :) */
 			if (!con->constisnull)
-				proj_full_width += (con->constlen > 0
-									? con->constlen
-									: VARSIZE_ANY(con->constvalue));
+				proj_tuple_sz += (con->constlen > 0
+								  ? con->constlen
+								  : VARSIZE_ANY(con->constvalue));
 		}
 		else
 		{
@@ -1543,9 +1562,9 @@ bufsz_estimate_gpuscan_projection(RelOptInfo *baserel,
 			dtype = pgstrom_devtype_lookup(type_oid);
 			if (!dtype)
 				elog(ERROR, "device type %u lookup failed", type_oid);
-			proj_full_width += (dtype->type_length > 0
-								? dtype->type_length
-								: get_typavgwidth(type_oid, type_mod));
+			proj_tuple_sz += (dtype->type_length > 0
+							  ? dtype->type_length
+							  : get_typavgwidth(type_oid, type_mod));
 			if (!dtype->type_byval)
 			{
 				if (dtype->extra_sz == 0)
@@ -1556,23 +1575,9 @@ bufsz_estimate_gpuscan_projection(RelOptInfo *baserel,
 			}
 		}
 	}
-	proj_full_width = MAXALIGN(proj_full_width);
-
-	/*
-	 * Length of the source relation
-	 */
-	base_rel_width = offsetof(HeapTupleHeaderData,
-							  t_bits[BITMAPLEN(baserel->max_attr)]);
-	for (anum = 1; anum <= baserel->max_attr; anum++)
-	{
-		Form_pg_attribute	attr = tupdesc->attrs[anum - 1];
-
-		base_rel_width = att_align_nominal(base_rel_width, attr->attalign);
-		base_rel_width += baserel->attr_widths[anum - baserel->min_attr];
-	}
-	base_rel_width = MAXALIGN(base_rel_width);
-
-	*p_proj_expand_sz = Max(proj_full_width - base_rel_width, 0);
+	proj_tuple_sz = MAXALIGN(proj_tuple_sz);
+out:
+	*p_proj_tuple_sz = proj_tuple_sz;
 	*p_proj_extra_sz = proj_extra_sz;
 }
 
@@ -1598,7 +1603,7 @@ PlanGpuScanPath(PlannerInfo *root,
 	List		   *ccache_refs = NIL;
 	ListCell	   *cell;
 	Bitmapset	   *varattnos = NULL;
-	cl_int			proj_expand_sz = 0;
+	cl_int			proj_tuple_sz = 0;
 	cl_int			proj_extra_sz = 0;
 	cl_int			i, j;
 	StringInfoData	kern;
@@ -1648,19 +1653,15 @@ PlanGpuScanPath(PlannerInfo *root,
 										 tlist,
 										 host_quals,
 										 dev_quals);
-	if (tlist_dev)
-		bufsz_estimate_gpuscan_projection(baserel, relation, tlist_dev,
-										  &proj_expand_sz,
-										  &proj_extra_sz);
+	bufsz_estimate_gpuscan_projection(baserel, relation, tlist_dev,
+									  &proj_tuple_sz,
+									  &proj_extra_sz);
 	context.param_refs = NULL;
 	codegen_gpuscan_projection(&kern, &context,
 							   baserel->relid,
 							   relation,
 							   tlist_dev ? tlist_dev : tlist);
 	heap_close(relation, NoLock);
-
-	pgstrom_codegen_func_declarations(&source, &context);
-	pgstrom_codegen_expr_declarations(&source, &context);
 	appendStringInfoString(&source, kern.data);
 	pfree(kern.data);
 
@@ -1693,7 +1694,7 @@ PlanGpuScanPath(PlannerInfo *root,
 	gs_info->kern_source = source.data;
 	gs_info->extra_flags = context.extra_flags |
 		DEVKERNEL_NEEDS_DYNPARA | DEVKERNEL_NEEDS_GPUSCAN;
-	gs_info->proj_expand_sz = proj_expand_sz;
+	gs_info->proj_tuple_sz = proj_tuple_sz;
 	gs_info->proj_extra_sz = proj_extra_sz;
 	gs_info->ccache_refs = ccache_refs;
 	gs_info->used_params = context.used_params;
@@ -1958,12 +1959,6 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	gss->gts.cb_next_task   = gpuscan_next_task;
 	gss->gts.cb_next_tuple  = gpuscan_next_tuple;
 	gss->gts.cb_switch_task = gpuscan_switch_task;
-	if (pgstrom_bulkexec_enabled &&
-		!gss->gts.css.ss.ps.qual &&			/* no host qualifier */
-		!gss->gts.css.ss.ps.ps_ProjInfo)	/* no host projection */
-		gss->gts.cb_bulk_exec = pgstromBulkExecGpuTaskState;
-	else
-		gss->gts.cb_bulk_exec = NULL;	/* BulkExec not supported */
 	gss->gts.cb_process_task = gpuscan_process_task;
 	gss->gts.cb_release_task = gpuscan_release_task;
 	/* estimated number of rows per block */
@@ -2006,7 +2001,7 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	}
 
 	/* device projection related resource consumption */
-	gss->proj_expand_sz = gs_info->proj_expand_sz;
+	gss->proj_tuple_sz = gs_info->proj_tuple_sz;
 	gss->proj_extra_sz = gs_info->proj_extra_sz;
 	/* 'tableoid' should not change during relation scan */
 	gss->scan_tuple.t_tableOid = RelationGetRelid(scan_rel);
@@ -2238,9 +2233,21 @@ ExecShutdownGpuScan(CustomScanState *node)
 	GpuScanState   *gss = (GpuScanState *) node;
 	GpuScanSharedState *gs_sstate = gss->gs_sstate;
 
-	/* move the statistics from DSM */
-	gss->gts.css.ss.ps.instrument->nfiltered1
-		+= pg_atomic_read_u64(&gs_sstate->nitems_filtered);
+	/*
+	 * Note that GpuScan may not be executed if GpuScan node is located
+	 * under the GpuJoin at parallel background worker context, because
+	 * only master process of GpuJoin is responsible to run inner nodes
+	 * to load inner tuples. In other words, any inner plan nodes are
+	 * not executed at the parallel worker context.
+	 * So, we may not have a valid GpuScanSharedState here.
+	 *
+	 * Elsewhere, move the statistics from DSM
+	 */
+	if (gs_sstate && gss->gts.css.ss.ps.instrument)
+	{
+		gss->gts.css.ss.ps.instrument->nfiltered1
+			+= pg_atomic_read_u64(&gs_sstate->nitems_filtered);
+	}
 }
 #endif
 
@@ -2360,14 +2367,23 @@ gpuscan_create_task(GpuScanState *gss,
 		nresults = pds_src->kds.nitems;
 	else
 	{
-		Size	ntuples = pds_src->kds.nitems;
+		double	ntuples = pds_src->kds.nitems;
+		double	proj_tuple_sz = gss->proj_tuple_sz;
+		Size	length;
+
 		if (pds_src->kds.format == KDS_FORMAT_BLOCK)
-			ntuples = (Size)(1.5 * (double)ntuples);
+		{
+			Assert(pds_src->kds.nrows_per_block > 0);
+			ntuples *= (double)pds_src->kds.nrows_per_block;
+		}
+		length = STROMALIGN(offsetof(kern_data_store,
+									 colmeta[scan_tupdesc->natts])) +
+			STROMALIGN((Size)(sizeof(cl_uint) * ntuples)) +
+			STROMALIGN((Size)(1.2 * proj_tuple_sz * ntuples));
 
 		pds_dst = PDS_create_row(gcontext,
 								 scan_tupdesc,
-								 pds_src->kds.length +
-								 gss->proj_expand_sz * ntuples);
+								 length);
 	}
 
 	/*
@@ -2712,10 +2728,13 @@ gpuscanExecScanChunk(GpuTaskState *gts)
 			if (!nvme_sstate)
 				nblocks_atonce = 8;
 			else if (pds)
+			{
+				if (pds->kds.nitems >= pds->kds.nrooms)
+					break;	/* no more rooms in this PDS */
 				nblocks_atonce = pds->kds.nrooms - pds->kds.nitems;
+			}
 			else
 				nblocks_atonce = nvme_sstate->nblocks_per_chunk;
-
 			pds_column = gpuscan_parallel_nextpage(scan,
 												   gts->gcontext,
 												   gts->ccache_refs,
