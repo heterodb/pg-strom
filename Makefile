@@ -75,7 +75,7 @@ STROM_TGZ = $(addprefix $(STROM_BUILD_ROOT)/, $(__STROM_TGZ).tar.gz)
 #
 # Source file of the markdown documentation
 #
-__DOCS_SOURCES = index.md
+__DOCS_SOURCES = index.md install.md tutorial.md features.md plcuda.md reference.md release-note.md
 DOCS_SOURCES = $(addprefix $(STROM_BUILD_ROOT)/man/src/, $(__DOCS_SOURCES))
 
 #
@@ -196,3 +196,5 @@ $(STROM_TGZ): $(shell cd $(STROM_BUILD_ROOT); git ls-files $(__PACKAGE_FILES))
 
 tarball: $(STROM_TGZ)
 endif
+
+.PHONY: docs
