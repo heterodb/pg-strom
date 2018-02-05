@@ -2,7 +2,7 @@
 # Common definitions for PG-Strom Makefile
 #
 PG_CONFIG := pg_config
-PYTHON_CMD := python
+MKDOCS := mkdocs
 
 ifndef STROM_BUILD_ROOT
 STROM_BUILD_ROOT = .
@@ -49,7 +49,7 @@ CUDA_SOURCES = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__CUDA_SOURCES))
 #
 # Source file of utilities
 #
-__STROM_UTILS = gpuinfo kfunc_info
+__STROM_UTILS = gpuinfo
 STROM_UTILS = $(addprefix $(STROM_BUILD_ROOT)/utils/, $(__STROM_UTILS))
 
 #
@@ -73,38 +73,10 @@ endif
 STROM_TGZ = $(addprefix $(STROM_BUILD_ROOT)/, $(__STROM_TGZ).tar.gz)
 
 #
-# Source file of HTML document
+# Source file of the markdown documentation
 #
-__HTML_TEMPLATE = template.src.html
-__HTML_SOURCES = manual.src.html \
-	install.src.html \
-	tutrial.src.html \
-	pl_cuda.src.html \
-	release.src.html
-__IMAGE_SOURCES = lang_en.png \
-	lang_ja.png \
-	icon-warning.png \
-	icon-caution.png \
-	icon-hint.png \
-	pgstrom-install-download-zip.png \
-	cuda-install-target.png \
-	plcuda-callflow.png \
-	plcuda-overview.png \
-	release-policy.png
-__MANUAL_CSS = manual.css
-__MENUGEN_PY = menugen.py
-
-HTML_SOURCES = $(addprefix $(STROM_BUILD_ROOT)/doc/, $(__HTML_SOURCES))
-HTML_FILES = $(addprefix $(STROM_BUILD_ROOT)/doc/html/, $(__HTML_SOURCES:.src.html=.html))
-HTML_TEMPLATE = $(addprefix $(STROM_BUILD_ROOT)/doc/, $(__HTML_TEMPLATE))
-IMAGE_SOURCES = $(addprefix $(STROM_BUILD_ROOT)/doc/html/figs/, $(__IMAGE_SOURCES))
-ifdef PGSTROM_VERSION
-HTML_VERSION=$(shell echo $(PGSTROM_VERSION) | sed 's/\-.*$//g')
-else
-HTML_VERSION=master
-endif
-MANUAL_CSS = $(addprefix $(STROM_BUILD_ROOT)/doc/html/css/, $(__MANUAL_CSS))
-MENUGEN_PY = $(addprefix $(STROM_BUILD_ROOT)/doc/, $(__MENUGEN_PY))
+__DOCS_SOURCES = index.md
+DOCS_SOURCES = $(addprefix $(STROM_BUILD_ROOT)/man/src/, $(__DOCS_SOURCES))
 
 #
 # Header and Libraries of CUDA
@@ -202,7 +174,18 @@ $(HTML_FILES): $(HTML_SOURCES) $(HTML_TEMPLATE)
 		-m $(addprefix $(STROM_BUILD_ROOT)/doc/, $(notdir $(basename $@)).src.html) \
 		$(HTML_SOURCES) > $@
 
-html: $(HTML_FILES)
+$(STROM_BUILD_ROOT)/man/markdown_i18n: $(STROM_BUILD_ROOT)/man/markdown_i18n.c
+	$(CC) $(CFLAGS) -o $@ $(addsuffix .c,$@)
+
+docs:	$(STROM_BUILD_ROOT)/man/markdown_i18n
+	# English document (default)
+	git clean -fdx $(STROM_BUILD_ROOT)/man/docs
+	for f in $(DOCS_SOURCES); do $(STROM_BUILD_ROOT)/man/markdown_i18n -f $$f > $(STROM_BUILD_ROOT)/man/docs/`basename $$f`; done;
+	pushd $(STROM_BUILD_ROOT)/man; $(MKDOCS) build -c -d ../docs; popd;
+	# Japanese document
+	git clean -fdx $(STROM_BUILD_ROOT)/man/docs
+	for f in $(DOCS_SOURCES); do $(STROM_BUILD_ROOT)/man/markdown_i18n -f $$f -l ja > $(STROM_BUILD_ROOT)/man/docs/`basename $$f`; done;
+	pushd $(STROM_BUILD_ROOT)/man; $(MKDOCS) build -c -d ../docs/ja; popd;
 
 $(STROM_TGZ): $(shell cd $(STROM_BUILD_ROOT); git ls-files $(__PACKAGE_FILES))
 	(cd $(STROM_BUILD_ROOT);                 \
