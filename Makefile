@@ -73,12 +73,6 @@ endif
 STROM_TGZ = $(addprefix $(STROM_BUILD_ROOT)/, $(__STROM_TGZ).tar.gz)
 
 #
-# Source file of the markdown documentation
-#
-__DOCS_SOURCES = index.md install.md tutorial.md features.md plcuda.md reference.md release-note.md
-DOCS_SOURCES = $(addprefix $(STROM_BUILD_ROOT)/man/src/, $(__DOCS_SOURCES))
-
-#
 # Header and Libraries of CUDA
 #
 CUDA_PATH_LIST := /usr/local/cuda /usr/local/cuda-*
@@ -178,14 +172,12 @@ $(STROM_BUILD_ROOT)/man/markdown_i18n: $(STROM_BUILD_ROOT)/man/markdown_i18n.c
 	$(CC) $(CFLAGS) -o $@ $(addsuffix .c,$@)
 
 docs:	$(STROM_BUILD_ROOT)/man/markdown_i18n
+	git clean -fdx $(STROM_BUILD_ROOT)/man/docs
 	# English document (default)
-	git clean -fdx $(STROM_BUILD_ROOT)/man/docs
-	for f in $(DOCS_SOURCES); do $(STROM_BUILD_ROOT)/man/markdown_i18n -f $$f > $(STROM_BUILD_ROOT)/man/docs/`basename $$f`; done;
+	$(STROM_BUILD_ROOT)/man/markdown_i18n -f $(STROM_BUILD_ROOT)/man/index.md > $(STROM_BUILD_ROOT)/man/docs/index.md
+	# Other Languages (Japanese)
+	for l in ja; do $(STROM_BUILD_ROOT)/man/markdown_i18n -l $$l -f $(STROM_BUILD_ROOT)/man/index.md > $(STROM_BUILD_ROOT)/man/docs/$$l.index.md; done
 	pushd $(STROM_BUILD_ROOT)/man; $(MKDOCS) build -c -d ../docs; popd;
-	# Japanese document
-	git clean -fdx $(STROM_BUILD_ROOT)/man/docs
-	for f in $(DOCS_SOURCES); do $(STROM_BUILD_ROOT)/man/markdown_i18n -f $$f -l ja > $(STROM_BUILD_ROOT)/man/docs/`basename $$f`; done;
-	pushd $(STROM_BUILD_ROOT)/man; $(MKDOCS) build -c -d ../docs/ja; popd;
 
 $(STROM_TGZ): $(shell cd $(STROM_BUILD_ROOT); git ls-files $(__PACKAGE_FILES))
 	(cd $(STROM_BUILD_ROOT);                 \

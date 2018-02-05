@@ -1,3 +1,0 @@
-@ja:#hogehoge
-@en:#Tutorial
-

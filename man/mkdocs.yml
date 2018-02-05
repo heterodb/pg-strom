@@ -1,1 +1,12 @@
-site_name: My Docs
+site_name: PG-Strom Manual
+site_description: PG-Strom v2.0 Official Documentation
+site_author: PG-Strom Development Team
+pages:
+    - 'English': 'index.md'
+    - 'Japanese': 'ja.index.md'
+extra_css:
+    - "//fonts.googleapis.com/earlyaccess/notosansjp.css"
+    - "//fonts.googleapis.com/css?family=Open+Sans:600,800"
+markdown_extensions:
+    - admonition
+    - footnotes

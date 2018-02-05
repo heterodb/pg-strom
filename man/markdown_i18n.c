@@ -55,8 +55,9 @@ parse_i18n(FILE *filp, const char *lang)
 					meet_newline = 0;
 					while ((c = fgetc(filp)) != EOF)
 					{
-						if (c == '\r' || c == '\n')
-							meet_newline = 1;
+						if ((!meet_newline && (c == '\r' || c == '\n')) ||
+							(meet_newline == '\r' && c == '\n'))
+							meet_newline = c;
 						else if (meet_newline)
 							goto restart;
 						if (valid_line)
@@ -89,11 +90,15 @@ parse_i18n(FILE *filp, const char *lang)
 		{
 			if (c == '{')
 				depth++;
-			else if (c == '\n' || c == '\r')
-				meet_newline = 1;
+			else if ((!meet_newline && (c == '\n' || c == '\r')) ||
+					 (meet_newline == '\r' && c == '\n'))
+				meet_newline = c;
 			else if (meet_newline)
 			{
-				meet_newline = 0;
+				if (c == '\n' || c == '\r')
+					meet_newline = c;
+				else
+					meet_newline = 0;
 				lineno++;
 			}
 			if (c == '}' && --depth == 0)
@@ -103,11 +108,15 @@ parse_i18n(FILE *filp, const char *lang)
 		}
 		else
 		{
-			if (c == '\n' || c == 'r')
-				meet_newline = 1;
+			if ((!meet_newline && (c == '\n' || c == '\r')) ||
+				(meet_newline == '\r' && c == '\n'))
+				meet_newline = c;
 			else if (meet_newline)
 			{
-				meet_newline = 0;
+				if (c == '\n' || c == '\r')
+                    meet_newline = c;
+				else
+					meet_newline = 0;
 				lineno++;
 			}
 			putchar(c);
