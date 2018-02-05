@@ -29,7 +29,7 @@ SELECT l.a, null::int, r.b
   INTO pg_temp.test_s06a
   FROM t_int1 l, t_int2 r
  WHERE (l.a = r.a OR l.b = r.b)
-   AND l.a % 100 in (37,53) AND r.b % 100 in (28,79);
+   AND l.a % 100 = 37 AND r.b % 100 in (28,79);
 
 SET pg_strom.enabled = off;
 SELECT a, b
@@ -56,7 +56,7 @@ SELECT l.a, null::int, r.b
   INTO pg_temp.test_s06b
   FROM t_int1 l, t_int2 r
  WHERE (l.a = r.a OR l.b = r.b)
-   AND l.a % 100 in (37,53) AND r.b % 100 in (28,79);
+   AND l.a % 100 = 37 AND r.b % 100 in (28,79);
 
 (SELECT * FROM pg_temp.test_s01a EXCEPT ALL SELECT * FROM pg_temp.test_s01b);
 (SELECT * FROM pg_temp.test_s01b EXCEPT ALL SELECT * FROM pg_temp.test_s01a);
@@ -99,7 +99,7 @@ SELECT l.c, null::int, r.d
   INTO pg_temp.test_i06a
   FROM t_int1 l, t_int2 r
  WHERE (l.c % 100000 = r.c % 100000 OR l.d % 400000 = r.d % 400000)
-   AND l.c % 100 in (17,83) AND r.d % 100 in (31,57);
+   AND l.c % 100 = 17 AND r.d % 100 in (31,57);
 
 SET pg_strom.enabled = off;
 SELECT c, d
@@ -126,7 +126,7 @@ SELECT l.c, null::int, r.d
   INTO pg_temp.test_i06b
   FROM t_int1 l, t_int2 r
  WHERE (l.c % 100000 = r.c % 100000 OR l.d % 400000 = r.d % 400000)
-   AND l.c % 100 in (17,83) AND r.d % 100 in (31,57);
+   AND l.c % 100 = 17 AND r.d % 100 in (31,57);
 
 (SELECT * FROM pg_temp.test_i01a EXCEPT ALL SELECT * FROM pg_temp.test_i01b);
 (SELECT * FROM pg_temp.test_i01b EXCEPT ALL SELECT * FROM pg_temp.test_i01a);
@@ -169,7 +169,7 @@ SELECT l.e, null::int, r.f
   INTO pg_temp.test_l06a
   FROM t_int1 l, t_int2 r
  WHERE (l.e % 100000 = r.e % 100000 OR l.f % 400000 = r.f % 400000)
-   AND l.e % 100 in (19,76) AND r.f % 100 in (29,61);
+   AND l.e % 100 = 19 AND r.f % 100 in (29,61);
 
 SET pg_strom.enabled = off;
 SELECT e, f
@@ -196,7 +196,7 @@ SELECT l.e, null::int, r.f
   INTO pg_temp.test_l06b
   FROM t_int1 l, t_int2 r
  WHERE (l.e % 100000 = r.e % 100000 OR l.f % 400000 = r.f % 400000)
-   AND l.e % 100 in (19,76) AND r.f % 100 in (29,61);
+   AND l.e % 100 = 19 AND r.f % 100 in (29,61);
 
 (SELECT * FROM pg_temp.test_l01a EXCEPT ALL SELECT * FROM pg_temp.test_l01b);
 (SELECT * FROM pg_temp.test_l01b EXCEPT ALL SELECT * FROM pg_temp.test_l01a);

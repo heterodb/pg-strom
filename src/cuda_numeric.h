@@ -830,8 +830,9 @@ float_to_numeric(kern_context *kcxt, pg_float8_t arg)
 		frac /= 10;
 		base10--;
 	}
+	/* now fval = (sign ? -1 : 1) * 10^(-base10) * frac */
 	v.isnull = false;
-	v.value = PG_NUMERIC_SET(base10, sign, frac);
+	v.value = PG_NUMERIC_SET(-base10, sign, frac);
 
 	return v;
 }

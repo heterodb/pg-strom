@@ -13,9 +13,9 @@ test: pgstrom_guc
 # ----------
 # Test for each data types
 # ----------
-test: dtype_int
+test: dtype_int dtype_float
 
 # ----------
 # Test for complicated expressions
 # ----------
-#test: case_when
+#test: case_when float_math

@@ -364,7 +364,7 @@ fp64_to_fp16(double value)
 static float
 fp16_to_fp64(half_t fp16val)
 {
-	cl_uint		sign = ((cl_uint)(fp16val & 0x8000) << 16);
+	cl_ulong	sign = ((cl_ulong)(fp16val & 0x8000) << 48);
 	cl_long		expo = ((fp16val & 0x7c00) >> 10);
 	cl_long		frac = ((fp16val & 0x03ff));
 	cl_ulong	result;
@@ -516,7 +516,7 @@ PG_FUNCTION_INFO_V1(pgstrom_float2_to_int8);
 Datum
 pgstrom_float2_to_numeric(PG_FUNCTION_ARGS)
 {
-	float	fval = PG_GETARG_FLOAT2(0);
+	float	fval = fp16_to_fp32(PG_GETARG_FLOAT2(0));
 
 	return DirectFunctionCall1(float4_numeric, Float4GetDatum(fval));
 }
@@ -1097,10 +1097,11 @@ Datum
 pgstrom_float24_pl(PG_FUNCTION_ARGS)
 {
 	float	arg1 = fp16_to_fp32(PG_GETARG_FLOAT2(0));
-	float	arg2 = PG_GETARG_FLOAT2(1);
+	float	arg2 = PG_GETARG_FLOAT4(1);
 	float	result;
 
 	result = arg1 + arg2;
+
 	CHECKFLOATVAL(result, isinf(arg1) || isinf(arg2), true);
 	PG_RETURN_FLOAT4(result);
 }
@@ -1110,10 +1111,11 @@ Datum
 pgstrom_float24_mi(PG_FUNCTION_ARGS)
 {
 	float	arg1 = fp16_to_fp32(PG_GETARG_FLOAT2(0));
-	float	arg2 = PG_GETARG_FLOAT2(1);
+	float	arg2 = PG_GETARG_FLOAT4(1);
 	float	result;
 
 	result = arg1 - arg2;
+
 	CHECKFLOATVAL(result, isinf(arg1) || isinf(arg2), true);
 	PG_RETURN_FLOAT4(result);
 }
@@ -1123,7 +1125,7 @@ Datum
 pgstrom_float24_mul(PG_FUNCTION_ARGS)
 {
 	float	arg1 = fp16_to_fp32(PG_GETARG_FLOAT2(0));
-	float	arg2 = PG_GETARG_FLOAT2(1);
+	float	arg2 = PG_GETARG_FLOAT4(1);
 	float	result;
 
 	result = arg1 * arg2;
@@ -1138,7 +1140,7 @@ Datum
 pgstrom_float24_div(PG_FUNCTION_ARGS)
 {
 	float	arg1 = fp16_to_fp32(PG_GETARG_FLOAT2(0));
-	float	arg2 = PG_GETARG_FLOAT2(1);
+	float	arg2 = PG_GETARG_FLOAT4(1);
 	float	result;
 
 	if (arg2 == 0.0)
