@@ -276,21 +276,6 @@ CREATE CAST (smallint AS reggstore)
 CREATE CAST (bigint AS reggstore)
   WITH FUNCTION oid(bigint) AS IMPLICIT;
 
-CREATE FUNCTION public.gstore_export_ipchandle(reggstore)
-  RETURNS bytea
-  AS 'MODULE_PATHNAME','pgstrom_gstore_export_ipchandle'
-  LANGUAGE C;
-
-CREATE FUNCTION public.lo_write_to_gpumemory(int, int, bytea, bigint, bigint)
-  RETURNS bigint
-  AS 'MODULE_PATHNAME','pgstrom_lo_write_to_gpumemory'
-  LANGUAGE C;
-
-CREATE FUNCTION public.lo_read_from_gpumemory(int, int, bytea, bigint, bigint)
-  RETURNS bigint
-  AS 'MODULE_PATHNAME','pgstrom_lo_write_to_gpumemory'
-  LANGUAGE C;
-
 CREATE FUNCTION public.gstore_fdw_format(reggstore)
   RETURNS text
   AS 'MODULE_PATHNAME','pgstrom_gstore_fdw_format'
@@ -311,6 +296,11 @@ CREATE FUNCTION public.gstore_fdw_rawsize(reggstore)
   AS 'MODULE_PATHNAME','pgstrom_gstore_fdw_rawsize'
   LANGUAGE C STRICT;
 
+CREATE FUNCTION public.gstore_export_ipchandle(reggstore)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_gstore_export_ipchandle'
+  LANGUAGE C;
+
 CREATE TYPE pgstrom.__gstore_fdw_chunk_info AS (
   database_oid	oid,
   table_oid		oid,
@@ -326,6 +316,16 @@ CREATE FUNCTION public.gstore_fdw_chunk_info()
   RETURNS SETOF pgstrom.__gstore_fdw_chunk_info
   AS 'MODULE_PATHNAME','pgstrom_gstore_fdw_chunk_info'
   LANGUAGE C VOLATILE;
+
+CREATE FUNCTION public.lo_import_gpu(int, bytea, bigint, bigint, oid=0)
+  RETURNS oid
+  AS 'MODULE_PATHNAME','pgstrom_lo_import_gpu'
+  LANGUAGE C STRICT VOLATILE;
+
+CREATE FUNCTION public.lo_export_gpu(oid, int, bytea, bigint, bigint)
+  RETURNS bigint
+  AS 'MODULE_PATHNAME','pgstrom_lo_export_gpu'
+  LANGUAGE C STRICT VOLATILE;
 
 --
 -- Type re-interpretation routines

@@ -59,6 +59,7 @@
 #include "lib/ilist.h"
 #include "lib/stringinfo.h"
 #include "libpq/be-fsstubs.h"
+#include "libpq/libpq-fs.h"
 #include "miscadmin.h"
 #include "nodes/execnodes.h"
 #include "nodes/extensible.h"
@@ -586,11 +587,13 @@ extern CUresult gpuIpcCloseMemHandle(GpuContext *gcontext,
 									 CUdeviceptr m_deviceptr);
 extern void gpuIpcMemCopyFromHost(cl_int cuda_dindex,
 								  CUipcMemHandle m_handle,
+								  size_t offset,
 								  void *hbuffer,
 								  size_t length);
-extern void gpuIpcMemCopyToHost(cl_int cuda_dindex,
+extern void gpuIpcMemCopyToHost(void *hbuffer,
+								cl_int cuda_dindex,
 								CUipcMemHandle m_handle,
-								void *hbuffer,
+								size_t offset,
 								size_t length);
 #define gpuMemAllocRaw(a,b,c)				\
 	__gpuMemAllocRaw((a),(b),(c),__FILE__,__LINE__)

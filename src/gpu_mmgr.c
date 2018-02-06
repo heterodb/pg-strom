@@ -1061,7 +1061,9 @@ gpuMemReclaimSegment(GpuContext *gcontext)
 static void
 __gpuIpcMemCopyCommon(cl_int cuda_dindex,
 					  CUipcMemHandle ipc_mhandle,
-					  void *hbuffer, size_t length,
+					  size_t offset,
+					  void *hbuffer,
+					  size_t length,
 					  bool host_to_device)
 {
 	CUdevice	cuda_device;
@@ -1098,13 +1100,13 @@ __gpuIpcMemCopyCommon(cl_int cuda_dindex,
 
 		if (host_to_device)
 		{
-			rc = cuMemcpyHtoD(m_deviceptr, hbuffer, length);
+			rc = cuMemcpyHtoD(m_deviceptr + offset, hbuffer, length);
 			if (rc != CUDA_SUCCESS)
 				elog(ERROR, "failed on cuMemcpyHtoD: %s", errorText(rc));
 		}
 		else
 		{
-			rc = cuMemcpyDtoH(hbuffer, m_deviceptr, length);
+			rc = cuMemcpyDtoH(hbuffer, m_deviceptr + offset, length);
 			if (rc != CUDA_SUCCESS)
 				elog(ERROR, "failed on cuMemcpyDtoH: %s", errorText(rc));
 		}
@@ -1145,19 +1147,23 @@ __gpuIpcMemCopyCommon(cl_int cuda_dindex,
 void
 gpuIpcMemCopyFromHost(cl_int cuda_dindex,
 					  CUipcMemHandle ipc_mhandle,
+					  size_t offset,
 					  void *hbuffer,
 					  size_t length)
 {
-	__gpuIpcMemCopyCommon(cuda_dindex, ipc_mhandle, hbuffer, length, true);
+	__gpuIpcMemCopyCommon(cuda_dindex, ipc_mhandle, offset,
+						  hbuffer, length, true);
 }
 
 void
-gpuIpcMemCopyToHost(cl_int cuda_dindex,
+gpuIpcMemCopyToHost(void *hbuffer,
+					cl_int cuda_dindex,
 					CUipcMemHandle ipc_mhandle,
-					void *hbuffer,
+					size_t offset,
 					size_t length)
 {
-	__gpuIpcMemCopyCommon(cuda_dindex, ipc_mhandle, hbuffer, length, false);
+	__gpuIpcMemCopyCommon(cuda_dindex, ipc_mhandle, offset,
+						  hbuffer, length, false);
 }
 
 /*
