@@ -46,7 +46,6 @@ if [ $? -ne 0 -o "$RV" != "1" ]; then
     exit 1
   fi
 fi
-echo hoge1
 
 SQL="SELECT count(*) FROM pg_extension WHERE extname = 'pgcrypto'"
 RV=`$PSQL -Atq -c "$SQL" "$REGRESS_DBNAME"`
@@ -57,7 +56,6 @@ if [ $? -ne 0 -o "$RV" != "1" ]; then
     exot 1
   fi
 fi
-echo hoge2
 
 #
 # construct test database if not exists
@@ -92,5 +90,11 @@ if [ $? -ne 0 -o "$RV" != "20180124" ]; then
     exit 1
   fi
 fi
-exit 0
 
+#
+# Run test for lo_export_gpu / lo_import_gpu
+#
+echo "====== independent test cases ======"
+${DIR}/testapp_largeobject -d ${REGRESS_DBNAME}
+
+exit 0

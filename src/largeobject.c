@@ -41,11 +41,10 @@ pgstrom_lo_import_gpu(PG_FUNCTION_ARGS)
 	int64		offset = PG_GETARG_INT64(2);
 	int64		length = PG_GETARG_INT64(3);
 	Oid			loid = PG_GETARG_OID(4);
+	int			lo_fd;
 	char	   *hbuffer;
 	char	   *pos;
 	CUipcMemHandle ipc_mhandle;
-	LargeObjectDesc *lo_desc = NULL;
-	MemoryContext ccxt_saved = CurrentMemoryContext;
 
 	/* sanity checks */
 	if (cuda_dindex < 0 || cuda_dindex >= numDevAttrs)
@@ -67,66 +66,36 @@ pgstrom_lo_import_gpu(PG_FUNCTION_ARGS)
 						ipc_mhandle,
 						offset,
 						length);
-
-	/* try to open largeobject if valid loid is supplied */
-	PG_TRY();
+	/*
+	 * Try to create a new largeobject, if loid is not valid.
+	 * Then, open the largeobject and truncate it if any.
+	 */
+	if (!OidIsValid(loid))
+		loid = DatumGetObjectId(DirectFunctionCall1(lo_create,
+											  ObjectIdGetDatum(InvalidOid)));
+	lo_fd = DatumGetInt32(DirectFunctionCall2(lo_open,
+											  ObjectIdGetDatum(loid),
+											  Int32GetDatum(INV_WRITE)));
+	DirectFunctionCall2(lo_truncate64,
+						Int32GetDatum(lo_fd),
+						Int64GetDatum(0));
+	/*
+	 * Write out the buffer to largeobject
+	 */
+	pos = hbuffer;
+	while (length > 0)
 	{
-		if (OidIsValid(loid))
-			lo_desc = inv_open(loid, INV_WRITE, CurrentMemoryContext);
+		int		nbytes = Min(length, (1U << 30));	/* up to 1GB at once */
+		int		nwritten;
+
+		nwritten = lo_write(lo_fd, pos, nbytes);
+		pos += nwritten;
+		length -= nwritten;
 	}
-	PG_CATCH();
-	{
-		MemoryContext ecxt = MemoryContextSwitchTo(ccxt_saved);
-		ErrorData	 *edata;
 
-		edata = CopyErrorData();
-		if (edata->sqlerrcode != ERRCODE_UNDEFINED_OBJECT)
-		{
-			MemoryContextSwitchTo(ecxt);
-			PG_RE_THROW();
-		}
-		FlushErrorState();
-		Assert(lo_desc == NULL);
-	}
-	PG_END_TRY();
-
-	PG_TRY();
-	{
-		if (lo_desc)
-		{
-			/* once truncate existing largeobject */
-			inv_truncate(lo_desc, 0);
-		}
-		else
-		{
-			/* create a new empty largeobject */
-			loid = inv_create(loid);
-
-			lo_desc = inv_open(loid, INV_WRITE, CurrentMemoryContext);
-			if (!lo_desc)
-				elog(ERROR, "failed to open a new largeobject");
-		}
-
-		pos = hbuffer;
-		while (length > 0)
-		{
-			int		nbytes = Min(length, (1U << 30));	/* up to 1GB at once */
-			int		nwritten;
-
-			nwritten = inv_write(lo_desc, pos, nbytes);
-			pos += nwritten;
-			length -= nwritten;
-		}
-	}
-	PG_CATCH();
-	{
-		if (lo_desc)
-			inv_close(lo_desc);
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-
-	inv_close(lo_desc);
+	/* close the largeobject */
+	DirectFunctionCall1(lo_close,
+						Int32GetDatum(lo_fd));
 	pfree(hbuffer);
 
 	PG_RETURN_OID(loid);
@@ -152,11 +121,11 @@ pgstrom_lo_export_gpu(PG_FUNCTION_ARGS)
 	bytea	   *handle = PG_GETARG_BYTEA_PP(2);
 	int64		offset = PG_GETARG_INT64(3);
 	int64		length = PG_GETARG_INT64(4);
-	int64		lo_size;
-	int64		lo_offset;
+	int			lo_fd;
+	size_t		lo_size;
+	size_t		lo_offset;
 	char	   *hbuffer;
 	CUipcMemHandle ipc_mhandle;
-	LargeObjectDesc *lo_desc = NULL;
 
 	/* sanity checks */
 	if (cuda_dindex < 0 || cuda_dindex >= numDevAttrs)
@@ -174,39 +143,40 @@ pgstrom_lo_export_gpu(PG_FUNCTION_ARGS)
 	hbuffer = MemoryContextAllocHuge(CurrentMemoryContext, length);
 
 	/* get length of the largeobject */
-	lo_desc = inv_open(loid, INV_READ, CurrentMemoryContext);
-	PG_TRY();
+	lo_fd = DatumGetInt32(DirectFunctionCall2(lo_open,
+											  ObjectIdGetDatum(loid),
+											  Int32GetDatum(INV_READ)));
+	lo_size = DatumGetInt64(DirectFunctionCall3(lo_lseek64,
+												Int32GetDatum(lo_fd),
+												Int64GetDatum(0),
+												Int32GetDatum(SEEK_END)));
+	/* rewind to the head, then read the large object */
+	DirectFunctionCall3(lo_lseek64,
+						lo_fd,
+						Int64GetDatum(0),
+						Int32GetDatum(SEEK_SET));
+	lo_offset = 0;
+	while (lo_offset < lo_size)
 	{
-		lo_size = inv_seek(lo_desc, 0, SEEK_END);
+		int		nbytes = Min(lo_size - lo_offset, (1U << 30));
+		int		nread;
 
-		/* rewind to the head, then read large object */
-		inv_seek(lo_desc, 0, SEEK_SET);
-		lo_offset = 0;
-		while (lo_offset < lo_size)
-		{
-			int		nbytes = Min(lo_size - lo_offset, (1U << 30));
-			int		nread;
-
-			nread = inv_read(lo_desc, hbuffer + lo_offset, nbytes);
-			lo_offset += nread;
-		}
-		if (lo_size < length)
-			memset(hbuffer, 0, length - lo_size);
-
-		/* send to GPU memory chunk */
-		gpuIpcMemCopyFromHost(cuda_dindex,
-							  ipc_mhandle,
-							  offset,
-							  hbuffer,
-							  length);
+		nread = lo_read(lo_fd, hbuffer + lo_offset, nbytes);
+		lo_offset += nread;
 	}
-	PG_CATCH();
-	{
-		inv_close(lo_desc);
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
-	inv_close(lo_desc);
+	if (lo_size < length)
+		memset(hbuffer + lo_size, 0, length - lo_size);
+
+	/* send to GPU memory chunk */
+	gpuIpcMemCopyFromHost(cuda_dindex,
+						  ipc_mhandle,
+						  offset,
+						  hbuffer,
+						  length);
+
+	/* release resources */
+	DirectFunctionCall1(lo_close,
+						Int32GetDatum(lo_fd));
 	pfree(hbuffer);
 
 	PG_RETURN_INT64(lo_size);

@@ -83,6 +83,7 @@ CUDA_PATH := $(shell for x in $(CUDA_PATH_LIST);    \
 IPATH := $(CUDA_PATH)/include
 BPATH := $(CUDA_PATH)/bin
 LPATH := $(CUDA_PATH)/lib64
+NVCC  := $(CUDA_PATH)/bin/nvcc
 
 #
 # Flags to build
@@ -184,6 +185,12 @@ $(STROM_TGZ): $(shell cd $(STROM_BUILD_ROOT); git ls-files $(__PACKAGE_FILES))
 
 tarball: $(STROM_TGZ)
 
-init_regression_testdb:
+$(STROM_BUILD_ROOT)/test/testapp_largeobject: $(STROM_BUILD_ROOT)/test/testapp_largeobject.cu
+	$(NVCC) -I $(shell $(PG_CONFIG) --pkgincludedir) 					\
+	        -L $(shell $(PG_CONFIG) --pkglibdir)						\
+	        -Xcompiler \"-Wl,-rpath,$(shell $(PG_CONFIG) --pkglibdir)\"	\
+	        -lpq -o $(STROM_BUILD_ROOT)/test/testapp_largeobject $^
+
+init_regression_testdb: $(STROM_BUILD_ROOT)/test/testapp_largeobject
 	$(STROM_BUILD_ROOT)/test/testdb_init.sh $(REGRESS_DBNAME) $(PSQL)
 .PHONY: docs
