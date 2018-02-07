@@ -90,11 +90,4 @@ if [ $? -ne 0 -o "$RV" != "20180124" ]; then
     exit 1
   fi
 fi
-
-#
-# Run test for lo_export_gpu / lo_import_gpu
-#
-echo "====== independent test cases ======"
-${DIR}/testapp_largeobject -d ${REGRESS_DBNAME}
-
 exit 0

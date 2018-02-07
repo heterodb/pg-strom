@@ -129,34 +129,86 @@ These mechanism efficiently works to OLAP(Online Analytical Processing) class wo
 @ja:PG-Stromは以下のデータ型をGPUで利用する事ができます。
 @en:PG-Strom support the following data types for use on GPU.
 
+@ja{
+**標準の数値データ型**
+
+|SQLデータ型       |内部データ型      |データ長|備考|
+|:-----------------|:-----------------|:-------|:---|
+|```smallint```    |```cl_short```    |2 bytes ||
+|```integer```     |```cl_int```      |4 bytes ||
+|```bigint```      |```cl_long```     |8 bytes ||
+|```real```        |```cl_float```    |4 bytes ||
+|```float```       |```cl_double```   |8 bytes ||
+|```numeric```     |```cl_ulong```    |可変長  |64bitの内部形式にマップ|
+}
+@en{
 **Built-in numeric types**
 
-@ja:|SQLデータ型|内部データ型|データ長|備考|
-@en:|SQL data types|Internal data types|data length|memo|
-|:----------|:-----------|:-------|:---|
-|```smallint```|```cl_short```|2 bytes||
-|```integer```|```cl_int```|4 bytes||
-|```bigint```|```cl_long```|8 bytes||
-|```real```|```cl_float```|4 bytes||
-|```float```|```cl_double```|8 bytes||
-|```numeric```|```cl_ulong```|@en{variable length}@ja{可変長}|@en{maps to 64bit internal format}@jp{64bitの内部形式で処理}|
+|SQL data types    |Internal data type|Length  |Memo|
+|:-----------------|:-----------------|:-------|:---|
+|```smallint```    |```cl_short```    |2 bytes ||
+|```integer```     |```cl_int```      |4 bytes ||
+|```bigint```      |```cl_long```     |8 bytes ||
+|```real```        |```cl_float```    |4 bytes ||
+|```float```       |```cl_double```   |8 bytes ||
+|```numeric```     |```cl_ulong```    |variable length|mapped to 64bit internal format|
+}
 
+!!! notice
+    numericの桁あふれ
+
+@ja{
+**標準の日付時刻型**
+
+|SQLデータ型       |内部データ型      |データ長|備考|
+|:-----------------|:-----------------|:-------|:---|
+|```date```        |```DateADT```     |4 bytes ||
+|```time```        |```TimeADT```     |8 bytes ||
+|```timetz```      |```TimeTzADT```   |12 bytes||
+|```timestamp```   |```Timestamp```   |8 bytes ||
+|```timestamptz``` |```TimestampTz``` |8 bytes ||
+|```interval```    |```Interval```    |16 bytes||
+}
+
+@en{
 **Built-in date and time types**
 
-@ja:|SQLデータ型|内部データ型|データ長|備考|
-@en:|SQL data types|Internal data types|data length|memo|
+|SQL data types    |Internal data types|Length|Memo|
+|:-----------------|:-----------------|:-------|:---|
+|```date```        |```DateADT```     |4 bytes ||
+|```time```        |```TimeADT```     |8 bytes ||
+|```timetz```      |```TimeTzADT```   |12 bytes||
+|```timestamp```   |```Timestamp```   |8 bytes ||
+|```timestamptz``` |```TimestampTz``` |8 bytes ||
+|```interval```    |```Interval```    |16 bytes||
+}
+
+@ja{
+**標準の可変長データ型**
+
+|SQLデータ型|内部データ型|データ長|備考|
 |:----------|:-----------|:-------|:---|
-|```date```|```DateADT```|4 bytes||
-|```time```|```TimeADT```|8 bytes||
-|```timetz```|```TimeTzADT```|12 bytes||
-|```timestamp```|```Timestamp```|8 bytes||
-|```timestamptz```|```TimestampTz```|8 bytes||
-|```interval```|```Interval```|16 bytes||
+|```bpchar```|```varlena *```|可変長||
+|```varchar```|```varlena *```|可変長|||
+|```bytea```|```varlena *```|可変長|||
+|```text```|```varlena *```|可変長||
+}
 
-**Built-in miscellaneous types**
+@en{
+**Built-in variable length types**
 
-@ja:|SQLデータ型|内部データ型|データ長|備考|
-@en:|SQL data types|Internal data types|data length|memo|
+|SQL data types|Internal data types|data length|memo|
+|:----------|:-----------|:-------|:---|
+|```bpchar```|```varlena *```|variable length||
+|```varchar```|```varlena *```|variable length||
+|```bytea```|```varlena *```|variable length||
+|```text```|```varlena *```|variable length||
+}
+
+@ja{
+**標準の雑多なデータ型**
+
+|SQLデータ型|内部データ型|データ長|備考|
 |:----------|:-----------|:-------|:---|
 |```boolean```|```cl_bool```|1 byte||
 |```money```|```cl_long```|8 bytes||
@@ -165,20 +217,25 @@ These mechanism efficiently works to OLAP(Online Analytical Processing) class wo
 |```inet```|```inet_struct```|7 bytes or 19 bytes||
 |```cidr```|```inet_struct```|7 bytes or 19 bytes||
 
-**Built-in variable length types**
 
-@ja:|SQLデータ型|内部データ型|データ長|備考|
-@en:|SQL data types|Internal data types|data length|memo|
+}
+@en{
+**Built-in miscellaneous types**
+
+|SQL data types|Internal data types|data length|memo|
 |:----------|:-----------|:-------|:---|
-|```bpchar```|```varlena *```|@en{variable length}@ja{可変長}||
-|```varchar```|```varlena *```|@en{variable length}@ja{可変長}||
-|```bytea```|```varlena *```|@en{variable length}@ja{可変長}||
-|```text```|```varlena *```|@en{variable length}@ja{可変長}||
+|```boolean```|```cl_bool```|1 byte||
+|```money```|```cl_long```|8 bytes||
+|```uuid```|```pg_uuid```|16 bytes||
+|```macaddr```|```macaddr```|6 bytes||
+|```inet```|```inet_struct```|7 bytes or 19 bytes||
+|```cidr```|```inet_struct```|7 bytes or 19 bytes||
+}
 
-**Built-in range data types**
+@ja{
+**標準の範囲型**
 
-@ja:|SQLデータ型|内部データ型|データ長|備考|
-@en:|SQL data types|Internal data types|data length|memo|
+|SQLデータ型|内部データ型|データ長|備考|
 |:----------|:-----------|:-------|:---|
 |```int4range```|```__int4range```|19 bytes||
 |```int8range```|```__int8range```|||
@@ -186,12 +243,36 @@ These mechanism efficiently works to OLAP(Online Analytical Processing) class wo
 |```tstzrange```|```__tstzrange```|||
 |```daterange```|```__daterange```|||
 
-**Extra Types**
-@ja:|SQLデータ型|内部データ型|データ長|備考|
-@en:|SQL data types|Internal data types|data length|memo|
-|:----------|:-----------|:-------|:---|
-|```float2```|```half_t```|2 bytes||
 
+
+}
+@en{
+**Built-in range data types**
+
+|SQL data types|Internal data types|data length|memo|
+|:----------|:-----------|:-------|:---|
+|```int4range```|```__int4range```|19 bytes||
+|```int8range```|```__int8range```|||
+|```tsrange```|```__tsrange```|||
+|```tstzrange```|```__tstzrange```|||
+|```daterange```|```__daterange```|||
+}
+
+@ja{
+**PG-Stromが追加で提供するデータ型**
+
+|SQLデータ型|内部データ型|データ長|備考|
+|:----------|:-----------|:-------|:---|
+|```float2```|```half_t```|2 bytes|半精度浮動小数点数|
+
+}
+@en{
+**Extra Types**
+
+|SQL data types|Internal data types|data length|memo|
+|:----------|:-----------|:-------|:---|
+|```float2```|```half_t```|2 bytes|Half precision data type|
+}
 
 Built-in Types
 ==============

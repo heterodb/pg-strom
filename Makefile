@@ -128,7 +128,9 @@ SCRIPTS_built = $(STROM_UTILS)
 EXTRA_CLEAN = $(STROM_UTILS) \
 	$(shell ls $(STROM_BUILD_ROOT)/man/docs/*.md) \
 	$(shell ls */Makefile | sed 's/Makefile/pg_strom.control/g') \
-	$(shell ls pg-strom-*.tar.gz)
+	$(shell ls pg-strom-*.tar.gz) \
+	$(STROM_BUILD_ROOT)/man/markdown_i18n \
+	$(STROM_BUILD_ROOT)/test/testapp_largeobject
 
 #
 # Regression Test
@@ -137,7 +139,8 @@ USE_MODULE_DB = 1
 REGRESS = --schedule=$(STROM_BUILD_ROOT)/test/parallel_schedule
 REGRESS_DBNAME = contrib_regression_$(MODULE_big)
 REGRESS_REVISION = SELECT public.pgstrom_regression_test_revision()
-REGRESS_OPTS = --inputdir=$(STROM_BUILD_ROOT)/test --use-existing
+REGRESS_OPTS = --inputdir=$(STROM_BUILD_ROOT)/test --use-existing \
+               --launcher="env PGDATABASE=$(REGRESS_DBNAME)"
 REGRESS_PREP = init_regression_testdb
 
 #

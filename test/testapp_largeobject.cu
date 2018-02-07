@@ -16,7 +16,7 @@ int main(int argc, char *argv[])
 	char	   *sql;
 	cudaIpcMemHandle_t ipc_mhandle;
 	int			device_nr;
-	int			c, i, n, ofs = 0;
+	int			i, n;
 	unsigned int loid;
 	long		lo_size;
 	PGconn	   *conn;
@@ -24,30 +24,12 @@ int main(int argc, char *argv[])
 	char	   *datum;
 	unsigned char *bytea_hex;
 	size_t		bytea_sz;
-	const char *dbname = NULL;
-	const char *host = NULL;
-	int			port = 5432;
 	char		buf[2048];
 
-	while ((c = getopt(argc, argv, "d:h:p:")) != -1)
+	if (argc != 1)
 	{
-		switch (c)
-		{
-			case 'd':
-				dbname = optarg;
-				break;
-			case 'h':
-				host = optarg;
-				break;
-			case 'p':
-				port = atoi(optarg);
-				break;
-			default:
-				fprintf(stderr,
-						"usage: %s [-d <dbname>][-h <host>][-p <port>]\n",
-						basename(argv[0]));
-				return 1;
-		}
+		fprintf(stderr, "usage: %s\n", basename(argv[0]));
+		return 1;
 	}
 
 	rc = cudaGetDevice(&device_nr);
@@ -84,16 +66,10 @@ int main(int argc, char *argv[])
 	}
 
 	/*
-	 * Connect to PostgreSQL
+	 * Connect to PostgreSQL; note that all the connection info are passed
+	 * by environment variables - PGDATABASE, PGHOST, PGPORT, PGUSER
 	 */
-	if (dbname)
-		ofs += snprintf(buf+ofs, sizeof(buf)-ofs, "dbname=%s ", dbname);
-	if (host)
-		ofs += snprintf(buf+ofs, sizeof(buf)-ofs, "host=%s ", host);
-	if (port > 0)
-		ofs += snprintf(buf+ofs, sizeof(buf)-ofs, "port=%d", port);
-
-	conn = PQconnectdb(buf);
+	conn = PQconnectdb("");
 	if (PQstatus(conn) != CONNECTION_OK)
 	{
 		fprintf(stderr, "%s\n", PQerrorMessage(conn));
@@ -156,7 +132,7 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
-	printf("lo_export_gpu --> %s\n",
+	printf("lo_export_gpu\t%s\n",
 		   memcmp(lbuffer, hbuffer, lo_size) == 0 ? "OK" : "FAIL");
 	PQclear(res);
 
@@ -216,7 +192,7 @@ int main(int argc, char *argv[])
 	}
 	datum = PQgetvalue(res, 0, 0);
 
-	printf("lo_import_gpu --> %s\n",
+	printf("lo_import_gpu\t%s\n",
 		   strcmp(datum, "t") == 0 ? "OK" : "FAIL");
     PQclear(res);
 
