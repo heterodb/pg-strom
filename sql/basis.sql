@@ -7,14 +7,17 @@ CREATE SCHEMA IF NOT EXISTS pgstrom;
 -- Functions for 
 --
 CREATE TYPE pgstrom.__pgstrom_device_info AS (
-  id		int4,
-  property	text,
-  value		text
+  device_nr     int,
+  aindex        int,
+  attribute     text,
+  value         text
 );
-CREATE FUNCTION public.pgstrom_device_info()
+CREATE FUNCTION pgstrom.pgstrom_device_info()
   RETURNS SETOF pgstrom.__pgstrom_device_info
   AS 'MODULE_PATHNAME'
   LANGUAGE C STRICT;
+CREATE VIEW pgstrom.device_info AS
+  SELECT * FROM pgstrom.pgstrom_device_info();
 
 CREATE FUNCTION public.gpu_device_name(int = 0)
   RETURNS text
@@ -30,7 +33,6 @@ CREATE FUNCTION public.gpu_max_blocksize(int = 0)
   RETURNS int
   AS 'MODULE_PATHNAME','pgstrom_gpu_max_blocksize'
   LANGUAGE C STRICT;
-
 
 CREATE FUNCTION public.gpu_warp_size(int = 0)
   RETURNS int
@@ -76,15 +78,18 @@ CREATE FUNCTION public.gpu_pci_id(int = 0)
 -- Functions for system internal state
 --
 CREATE TYPE pgstrom.__pgstrom_device_preserved_meminfo AS (
-  device_id int4,
+  device_nr int4,
   handle    bytea,
   owner     regrole,
-  length    int8
+  length    int8,
+  ctime     timestamp with time zone
 );
-CREATE FUNCTION public.pgstrom_device_preserved_meminfo()
+CREATE FUNCTION pgstrom.pgstrom_device_preserved_meminfo()
   RETURNS SETOF pgstrom.__pgstrom_device_preserved_meminfo
   AS 'MODULE_PATHNAME'
   LANGUAGE C VOLATILE;
+CREATE VIEW pgstrom.device_preserved_meminfo
+  AS SELECT * FROM pgstrom.pgstrom_device_preserved_meminfo();
 
 --
 -- Functions/Languages to support PL/CUDA
@@ -193,10 +198,12 @@ CREATE TYPE pgstrom.__pgstrom_ccache_info AS (
     ctime        timestamp with time zone,
     atime        timestamp with time zone
 );
-CREATE FUNCTION public.pgstrom_ccache_info()
+CREATE FUNCTION pgstrom.pgstrom_ccache_info()
     RETURNS SETOF pgstrom.__pgstrom_ccache_info
     AS 'MODULE_PATHNAME'
     LANGUAGE C STRICT;
+CREATE VIEW pgstrom.ccache_info AS
+    SELECT * FROM pgstrom.pgstrom_ccache_info();
 
 CREATE TYPE pgstrom.__pgstrom_ccache_builder_info AS (
     builder_id   int,
@@ -205,10 +212,12 @@ CREATE TYPE pgstrom.__pgstrom_ccache_builder_info AS (
     table_id     regclass,
     block_nr     int
 );
-CREATE FUNCTION public.pgstrom_ccache_builder_info()
+CREATE FUNCTION pgstrom.pgstrom_ccache_builder_info()
     RETURNS SETOF pgstrom.__pgstrom_ccache_builder_info
     AS 'MODULE_PATHNAME'
     LANGUAGE C STRICT;
+CREATE VIEW pgstrom.ccache_builder_info AS
+    SELECT * FROM pgstrom.pgstrom_ccache_builder_info();
 
 CREATE FUNCTION public.pgstrom_ccache_prewarm(regclass)
   RETURNS int
@@ -218,24 +227,24 @@ CREATE FUNCTION public.pgstrom_ccache_prewarm(regclass)
 --
 -- Handlers for gstore_fdw extension
 --
-CREATE FUNCTION pgstrom_gstore_fdw_handler()
+CREATE FUNCTION pgstrom.gstore_fdw_handler()
   RETURNS fdw_handler
-  AS  'MODULE_PATHNAME'
+  AS  'MODULE_PATHNAME','pgstrom_gstore_fdw_handler'
   LANGUAGE C STRICT;
 
-CREATE FUNCTION pgstrom_gstore_fdw_validator(text[],oid)
+CREATE FUNCTION pgstrom.gstore_fdw_validator(text[],oid)
   RETURNS void
-  AS 'MODULE_PATHNAME'
+  AS 'MODULE_PATHNAME','pgstrom_gstore_fdw_validator'
   LANGUAGE C STRICT;
 
 CREATE FOREIGN DATA WRAPPER gstore_fdw
-  HANDLER pgstrom_gstore_fdw_handler
-  VALIDATOR pgstrom_gstore_fdw_validator;
+  HANDLER   pgstrom.gstore_fdw_handler
+  VALIDATOR pgstrom.gstore_fdw_validator;
 
 CREATE SERVER gstore_fdw
   FOREIGN DATA WRAPPER gstore_fdw;
 
-CREATE TYPE reggstore;
+CREATE TYPE public.reggstore;
 CREATE FUNCTION pgstrom.reggstore_in(cstring)
   RETURNS reggstore
   AS 'MODULE_PATHNAME','pgstrom_reggstore_in'
@@ -312,10 +321,12 @@ CREATE TYPE pgstrom.__gstore_fdw_chunk_info AS (
   rawsize		bigint,
   nitems		bigint
 );
-CREATE FUNCTION public.gstore_fdw_chunk_info()
+CREATE FUNCTION pgstrom.gstore_fdw_chunk_info()
   RETURNS SETOF pgstrom.__gstore_fdw_chunk_info
   AS 'MODULE_PATHNAME','pgstrom_gstore_fdw_chunk_info'
   LANGUAGE C VOLATILE;
+CREATE VIEW pgstrom.gstore_fdw_chunk_info AS
+  SELECT * FROM pgstrom.gstore_fdw_chunk_info();
 
 CREATE FUNCTION public.lo_import_gpu(int, bytea, bigint, bigint, oid=0)
   RETURNS oid

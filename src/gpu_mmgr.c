@@ -98,6 +98,8 @@ typedef struct
 	size_t			bytesize;
    	CUdeviceptr		m_devptr;	/* valid only keeper */
 	CUipcMemHandle	m_handle;
+	Oid				owner;		/* owner of the preserved memory */
+	TimestampTz		ctime;		/* time of creation */
 } GpuMemPreserved;
 
 /*
@@ -107,6 +109,7 @@ typedef struct
 {
 	dlist_node		chain;
 	Latch		   *backend;
+	Oid				owner;
 	CUresult		result;
 	CUipcMemHandle	m_handle;
 	cl_int			cuda_dindex;
@@ -865,6 +868,7 @@ __gpuMemPreservedRequest(cl_int cuda_dindex,
 	gmemp_req = dlist_container(GpuMemPreservedRequest, chain, dnode);
 	memset(gmemp_req, 0, sizeof(GpuMemPreservedRequest));
 	gmemp_req->backend = MyLatch;
+	gmemp_req->owner = GetUserId();
 	gmemp_req->result = (CUresult) UINT_MAX;
 	memcpy(&gmemp_req->m_handle, m_handle, sizeof(CUipcMemHandle));
 	gmemp_req->cuda_dindex = cuda_dindex;
@@ -1377,6 +1381,8 @@ gpummgrBgWorkerMain(Datum arg)
 				gmemp->m_devptr	= m_devptr;
 				memcpy(&gmemp->m_handle, &m_handle,
 					   sizeof(CUipcMemHandle));
+				gmemp->owner = gmemp_req->owner;
+				gmemp->ctime = GetCurrentTimestamp();
 
 				INIT_LEGACY_CRC32(crc);
 				COMP_LEGACY_CRC32(crc, &gmemp->cuda_dindex,
@@ -1458,8 +1464,8 @@ Datum
 pgstrom_device_preserved_meminfo(PG_FUNCTION_ARGS)
 {
 	FuncCallContext *fncxt;
-	Datum		values[4];
-	bool		isnull[4];
+	Datum		values[5];
+	bool		isnull[5];
 	HeapTuple	tuple;
 	GpuMemPreserved *gmemp, *lcopy;
 	List	   *gmemp_list = NIL;
@@ -1475,8 +1481,8 @@ pgstrom_device_preserved_meminfo(PG_FUNCTION_ARGS)
 		fncxt = SRF_FIRSTCALL_INIT();
 		oldcxt = MemoryContextSwitchTo(fncxt->multi_call_memory_ctx);
 
-		tupdesc = CreateTemplateTupleDesc(4, false);
-		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "device_id",
+		tupdesc = CreateTemplateTupleDesc(5, false);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "device_nr",
 						   INT4OID, -1, 0);
 		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "handle",
 						   BYTEAOID, -1, 0);
@@ -1484,6 +1490,8 @@ pgstrom_device_preserved_meminfo(PG_FUNCTION_ARGS)
 						   REGROLEOID, -1, 0);
 		TupleDescInitEntry(tupdesc, (AttrNumber) 4, "length",
 						   INT8OID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 5, "ctime",
+						   TIMESTAMPTZOID, -1, 0);
 		fncxt->tuple_desc = BlessTupleDesc(tupdesc);
 
 		/* collect current preserved GPU memory information */
@@ -1530,8 +1538,9 @@ pgstrom_device_preserved_meminfo(PG_FUNCTION_ARGS)
 	memcpy(temp + VARHDRSZ, &gmemp->m_handle, sizeof(CUipcMemHandle));
 	SET_VARSIZE(temp, sizeof(CUipcMemHandle) + VARHDRSZ);
 	values[1] = PointerGetDatum(temp);
-	values[2] = ObjectIdGetDatum(1234);
+	values[2] = ObjectIdGetDatum(gmemp->owner);
 	values[3] = Int64GetDatum(gmemp->bytesize);
+	values[4] = TimestampTzGetDatum(gmemp->ctime);
 
 	tuple = heap_form_tuple(fncxt->tuple_desc, values, isnull);
 	SRF_RETURN_NEXT(fncxt, HeapTupleGetDatum(tuple));
