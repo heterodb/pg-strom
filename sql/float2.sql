@@ -542,7 +542,7 @@ CREATE FUNCTION pgstrom.float2_um(float2)
   AS 'MODULE_PATHNAME','pgstrom_float2_um'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
 
-CREATE FUNCTION pgstrom.float2_abs(float2)
+CREATE FUNCTION pg_catalog.abs(float2)
   RETURNS float2
   AS 'MODULE_PATHNAME','pgstrom_float2_abs'
   LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
@@ -558,7 +558,7 @@ CREATE OPERATOR pg_catalog.- (
 );
 
 CREATE OPERATOR pg_catalog.@ (
-  PROCEDURE = pgstrom.float2_abs,
+  PROCEDURE = pg_catalog.abs,
   RIGHTARG = pg_catalog.float2
 );
 

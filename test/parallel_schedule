@@ -19,8 +19,7 @@ test: dtype_int dtype_float
 # Test for complicated expressions
 # ----------
 #test: case_when float_math
-
-
+test: float_math
 
 # ----------
 # Test for largeobject

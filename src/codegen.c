@@ -1279,7 +1279,7 @@ static devfunc_extra_catalog_t devfunc_extra_catalog[] = {
 	/* float2 - unary operator */
 	{ FLOAT2,  "pgstrom.float2_up("FLOAT2")",  "p/f:float2up" },
 	{ FLOAT2,  "pgstrom.float2_um("FLOAT2")",  "p/f:float2um" },
-	{ FLOAT2,  "pgstrom.float2_abs("FLOAT2")", "p/f:float2abs" },
+	{ FLOAT2,  "abs("FLOAT2")", "p/f:float2abs" },
 
 	/* float2 - arithmetic operators */
 	{ FLOAT4, "pgstrom.float2_pl("FLOAT2","FLOAT2")",   "m/f:float2pl" },
