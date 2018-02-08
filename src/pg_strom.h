@@ -1028,6 +1028,7 @@ extern void gpujoinUpdateRunTimeStat(GpuTaskState *gts,
 /*
  * gpupreagg.c
  */
+extern bool pgstrom_enable_numeric_type;
 extern bool pgstrom_path_is_gpupreagg(const Path *pathnode);
 extern bool pgstrom_plan_is_gpupreagg(const Plan *plan);
 extern bool pgstrom_planstate_is_gpupreagg(const PlanState *ps);

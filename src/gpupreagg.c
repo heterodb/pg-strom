@@ -24,7 +24,6 @@ static CustomPathMethods		gpupreagg_path_methods;
 static CustomScanMethods		gpupreagg_scan_methods;
 static CustomExecMethods		gpupreagg_exec_methods;
 static bool						enable_gpupreagg;
-static bool						enable_gpupreagg_with_numeric;
 static bool						enable_pullup_outer_join;
 
 typedef struct
@@ -890,10 +889,8 @@ aggfunc_lookup_by_oid(Oid aggfnoid)
 				   proform->proargtypes.values,
 				   sizeof(Oid) * catalog->aggfn_nargs) == 0)
 		{
-			/*
-			 * Check status of NUMERIC type support
-			 */
-			if (!enable_gpupreagg_with_numeric &&
+			/* check status of device NUMERIC type support */
+			if (!pgstrom_enable_numeric_type &&
 				(catalog->extra_flags & DEVKERNEL_NEEDS_NUMERIC) != 0)
 				catalog = NULL;
 
@@ -5283,15 +5280,6 @@ pgstrom_init_gpupreagg(void)
 							 "Enables the use of GPU preprocessed aggregate",
 							 NULL,
 							 &enable_gpupreagg,
-							 true,
-							 PGC_USERSET,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
-	/* pg_strom.enable_gpupreagg_with_numeric */
-	DefineCustomBoolVariable("pg_strom.enable_gpupreagg_with_numeric",
-							 "Enables NUMERIC type in GpuPreAgg",
-							 NULL,
-							 &enable_gpupreagg_with_numeric,
 							 true,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,

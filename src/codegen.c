@@ -22,6 +22,7 @@ static MemoryContext	devinfo_memcxt;
 static bool		devtype_info_is_built;
 static List	   *devtype_info_slot[128];
 static List	   *devfunc_info_slot[1024];
+bool			pgstrom_enable_numeric_type;	/* GUC */
 
 static pg_crc32 generic_devtype_hashfunc(devtype_info *dtype,
 										 pg_crc32 hash,
@@ -329,6 +330,14 @@ pgstrom_devtype_lookup(Oid type_oid)
 
 	if (!devtype_info_is_built)
 		build_devtype_info();
+
+	/*
+	 * Numeric data type with large digits tend to cause CPU fallback.
+	 * It may cause performance slowdown or random fault. So, we give
+	 * an option to disable only numeric values.
+	 */
+	if (type_oid == NUMERICOID && !pgstrom_enable_numeric_type)
+		return NULL;
 
 	hindex = hash_uint32((uint32) type_oid) % lengthof(devtype_info_slot);
 
@@ -2805,6 +2814,12 @@ codegen_cache_invalidator(Datum arg, int cacheid, uint32 hashvalue)
 	devtype_info_is_built = false;
 }
 
+static void
+guc_assign_cache_invalidator(bool newval, void *extra)
+{
+	codegen_cache_invalidator(0, 0, 0);
+}
+
 void
 pgstrom_init_codegen_context(codegen_context *context)
 {
@@ -2830,4 +2845,16 @@ pgstrom_init_codegen(void)
 										   ALLOCSET_DEFAULT_MAXSIZE);
 	CacheRegisterSyscacheCallback(PROCOID, codegen_cache_invalidator, 0);
 	CacheRegisterSyscacheCallback(TYPEOID, codegen_cache_invalidator, 0);
+
+	/* pg_strom.enable_numeric_type */
+    DefineCustomBoolVariable("pg_strom.enable_numeric_type",
+							 "Turn on/off device numeric type support",
+							 NULL,
+							 &pgstrom_enable_numeric_type,
+							 true,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL,
+							 guc_assign_cache_invalidator,
+							 NULL);
 }
