@@ -1,6 +1,7 @@
 site_name: PG-Strom Manual
 site_description: PG-Strom v2.0 Official Documentation
 site_author: PG-Strom Development Team
+theme: readthedocs
 pages:
     - 'English': 'index.md'
     - 'Japanese': 'ja.index.md'
@@ -10,3 +11,4 @@ extra_css:
 markdown_extensions:
     - admonition
     - footnotes
+    - def_list
