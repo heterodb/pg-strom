@@ -3,8 +3,20 @@ site_description: PG-Strom v2.0 Official Documentation
 site_author: PG-Strom Development Team
 theme: readthedocs
 pages:
-    - 'English': 'index.md'
-    - 'Japanese': 'ja.index.md'
+    - 'English' :
+        - 'Home' : 'index.md'
+        - 'Install' : 'install.md'
+        - 'Advanced Features' : 'features.md'
+        - 'PL/CUDA' : 'plcuda.md'
+        - 'References' : 'references.md'
+        - 'Release Note' : 'release_note.md'
+    - 'Japanese' :
+        - 'Home' : 'ja.index.md'
+        - 'Install' : 'ja.install.md'
+        - 'Advanced Features' : 'ja.features.md'
+        - 'PL/CUDA' : 'ja.plcuda.md'
+        - 'References' : 'ja.references.md'
+        - 'Release Note' : 'ja.release_note.md'
 extra_css:
     - "//fonts.googleapis.com/earlyaccess/notosansjp.css"
     - "//fonts.googleapis.com/css?family=Open+Sans:600,800"

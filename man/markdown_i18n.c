@@ -17,7 +17,7 @@ static const char *known_langs[] = {
 };
 
 static void
-parse_i18n(FILE *filp, const char *lang)
+parse_i18n(FILE *filp, FILE *fout, const char *lang)
 {
 	char	buf[20];
 	int		depth = 0;
@@ -61,7 +61,7 @@ parse_i18n(FILE *filp, const char *lang)
 						else if (meet_newline)
 							goto restart;
 						if (valid_line)
-							putchar(c);
+							fputc(c, fout);
 					}
 					return;		/* EOF */
 				}
@@ -84,7 +84,7 @@ parse_i18n(FILE *filp, const char *lang)
 			}
 			/* it was not a control token */
 			buf[i] = '\0';
-			printf("@%s", buf);
+			fprintf(fout, "@%s", buf);
 		}
 		else if (depth > 0)
 		{
@@ -104,7 +104,7 @@ parse_i18n(FILE *filp, const char *lang)
 			if (c == '}' && --depth == 0)
 				valid_block = 1;
 			else if (valid_block)
-				putchar(c);
+				fputc(c, fout);
 		}
 		else
 		{
@@ -119,7 +119,7 @@ parse_i18n(FILE *filp, const char *lang)
 					meet_newline = 0;
 				lineno++;
 			}
-			putchar(c);
+			fputc(c, fout);
 		}
 	next_char:
 		;
@@ -130,10 +130,12 @@ int main(int argc, char *argv[])
 {
 	const char *lang = NULL;
 	const char *filename = NULL;
+	const char *outfile = NULL;
 	int		i, c;
 	FILE   *filp;
+	FILE   *fout = stdout;
 
-	while ((c = getopt(argc, argv, "f:l:h")) != -1)
+	while ((c = getopt(argc, argv, "f:l:o:h")) != -1)
 	{
 		switch (c)
 		{
@@ -166,6 +168,14 @@ int main(int argc, char *argv[])
 					return 1;
 				}
 				break;
+			case 'o':
+				if (outfile != NULL)
+				{
+					fputs("-o was specified twice", stderr);
+					return 1;
+				}
+				outfile = optarg;
+				break;
 			case 'h':
 			default:
 				fprintf(stderr, "usage: %s [-f <filename>][-l <lang>]\n",
@@ -181,14 +191,29 @@ int main(int argc, char *argv[])
 	{
 		filp = fopen(filename, "rb");
 		if (!filp)
+		{
 			fprintf(stderr, "failed on fopen('%s'): %m", filename);
+			return 1;
+		}
 	}
 
 	/* default: en */
 	if (!lang)
 		lang = known_langs[0];
 
-	parse_i18n(filp, lang);
+	/* default: stdout */
+	if (!outfile)
+		fout = stdout;
+	else
+	{
+		fout = fopen(outfile, "wb");
+		if (!fout)
+		{
+			fprintf(stderr, "failed on fopen('%s'): %m", outfile);
+			return 1;
+		}
+	}
+	parse_i18n(filp, fout, lang);
 
 	if (filename)
 		fclose(filp);

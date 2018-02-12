@@ -61,6 +61,12 @@ __STROM_HEADERS = pg_strom.h nvme_strom.h device_attrs.h
 STROM_HEADERS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__STROM_HEADERS))
 
 #
+# Markdown (document) files
+#
+__DOC_FILES = index.md install.md features.md \
+	      plcuda.md references.md release_note.md
+
+#
 # Files to be packaged
 #
 __PACKAGE_FILES = LICENSE README.md Makefile pg_strom.control	\
@@ -173,10 +179,18 @@ $(STROM_BUILD_ROOT)/man/markdown_i18n: $(STROM_BUILD_ROOT)/man/markdown_i18n.c
 
 docs:	$(STROM_BUILD_ROOT)/man/markdown_i18n
 	git clean -fdx $(STROM_BUILD_ROOT)/man/docs
-	# English document (default)
-	$(STROM_BUILD_ROOT)/man/markdown_i18n -f $(STROM_BUILD_ROOT)/man/index.md > $(STROM_BUILD_ROOT)/man/docs/index.md
-	# Other Languages (Japanese)
-	for l in ja; do $(STROM_BUILD_ROOT)/man/markdown_i18n -l $$l -f $(STROM_BUILD_ROOT)/man/index.md > $(STROM_BUILD_ROOT)/man/docs/$$l.index.md; done
+	for x in $(__DOC_FILES);                \
+	do                                      \
+	  $(STROM_BUILD_ROOT)/man/markdown_i18n \
+	    -f $(STROM_BUILD_ROOT)/man/$$x      \
+	    -o $(STROM_BUILD_ROOT)/man/docs/$$x;    \
+	done
+	for x in $(__DOC_FILES);                \
+	do                                      \
+	  $(STROM_BUILD_ROOT)/man/markdown_i18n -l ja \
+	    -f $(STROM_BUILD_ROOT)/man/$$x      \
+	    -o $(STROM_BUILD_ROOT)/man/docs/ja.$$x;    \
+	done
 	pushd $(STROM_BUILD_ROOT)/man; $(MKDOCS) build -c -d ../docs; popd;
 
 $(STROM_TGZ): $(shell cd $(STROM_BUILD_ROOT); git ls-files $(__PACKAGE_FILES))
