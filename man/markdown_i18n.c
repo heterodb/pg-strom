@@ -83,8 +83,11 @@ parse_i18n(FILE *filp, FILE *fout, const char *lang)
 					break;
 			}
 			/* it was not a control token */
-			buf[i] = '\0';
-			fprintf(fout, "@%s", buf);
+			if (valid_block)
+			{
+				buf[i] = '\0';
+				fprintf(fout, "@%s", buf);
+			}
 		}
 		else if (depth > 0)
 		{
