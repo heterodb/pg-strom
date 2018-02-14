@@ -22,6 +22,24 @@ Datum pgstrom_lo_import_gpu(PG_FUNCTION_ARGS);
 Datum pgstrom_lo_export_gpu(PG_FUNCTION_ARGS);
 
 /*
+ * NOTE: entrypoint name of the largeobject functions were changed at
+ * the PostgreSQL v10, but no arguments differences.
+ */
+#if PG_VERSION_NUM < 100000
+#define fn__lo_create		lo_create
+#define fn__lo_open			lo_open
+#define fn__lo_close		lo_close
+#define fn__lo_truncate64	lo_truncate64
+#define fn__lo_lseek64		lo_lseek64
+#else
+#define fn__lo_create		be_lo_create
+#define fn__lo_open			be_lo_open
+#define fn__lo_close		be_lo_close
+#define fn__lo_truncate64	be_lo_truncate64
+#define fn__lo_lseek64		be_lo_lseek64
+#endif
+
+/*
  * oid pgstrom_lo_import_gpu(
  *         int    cuda_dindex, -- index of the source GPU device
  *         bytea  ipc_handle,  -- identifier of the GPU memory block
@@ -44,6 +62,7 @@ pgstrom_lo_import_gpu(PG_FUNCTION_ARGS)
 	int			lo_fd;
 	char	   *hbuffer;
 	char	   *pos;
+	Datum		datum;
 	CUipcMemHandle ipc_mhandle;
 
 	/* sanity checks */
@@ -71,12 +90,16 @@ pgstrom_lo_import_gpu(PG_FUNCTION_ARGS)
 	 * Then, open the largeobject and truncate it if any.
 	 */
 	if (!OidIsValid(loid))
-		loid = DatumGetObjectId(DirectFunctionCall1(lo_create,
-											  ObjectIdGetDatum(InvalidOid)));
-	lo_fd = DatumGetInt32(DirectFunctionCall2(lo_open,
-											  ObjectIdGetDatum(loid),
-											  Int32GetDatum(INV_WRITE)));
-	DirectFunctionCall2(lo_truncate64,
+	{
+		datum = DirectFunctionCall1(fn__lo_create,
+									ObjectIdGetDatum(InvalidOid));
+		loid = DatumGetObjectId(datum);
+	}
+	datum = DirectFunctionCall2(fn__lo_open,
+								ObjectIdGetDatum(loid),
+								Int32GetDatum(INV_WRITE));
+	lo_fd = DatumGetInt32(datum);
+	DirectFunctionCall2(fn__lo_truncate64,
 						Int32GetDatum(lo_fd),
 						Int64GetDatum(0));
 	/*
@@ -94,7 +117,7 @@ pgstrom_lo_import_gpu(PG_FUNCTION_ARGS)
 	}
 
 	/* close the largeobject */
-	DirectFunctionCall1(lo_close,
+	DirectFunctionCall1(fn__lo_close,
 						Int32GetDatum(lo_fd));
 	pfree(hbuffer);
 
@@ -124,6 +147,7 @@ pgstrom_lo_export_gpu(PG_FUNCTION_ARGS)
 	int			lo_fd;
 	size_t		lo_size;
 	size_t		lo_offset;
+	Datum		datum;
 	char	   *hbuffer;
 	CUipcMemHandle ipc_mhandle;
 
@@ -143,15 +167,19 @@ pgstrom_lo_export_gpu(PG_FUNCTION_ARGS)
 	hbuffer = MemoryContextAllocHuge(CurrentMemoryContext, length);
 
 	/* get length of the largeobject */
-	lo_fd = DatumGetInt32(DirectFunctionCall2(lo_open,
-											  ObjectIdGetDatum(loid),
-											  Int32GetDatum(INV_READ)));
-	lo_size = DatumGetInt64(DirectFunctionCall3(lo_lseek64,
-												Int32GetDatum(lo_fd),
-												Int64GetDatum(0),
-												Int32GetDatum(SEEK_END)));
+	datum = DirectFunctionCall2(fn__lo_open,
+								ObjectIdGetDatum(loid),
+								Int32GetDatum(INV_READ));
+	lo_fd = DatumGetInt32(datum);
+
+
+	datum = DirectFunctionCall3(fn__lo_lseek64,
+								Int32GetDatum(lo_fd),
+								Int64GetDatum(0),
+								Int32GetDatum(SEEK_END));
+	lo_size = DatumGetInt64(datum);
 	/* rewind to the head, then read the large object */
-	DirectFunctionCall3(lo_lseek64,
+	DirectFunctionCall3(fn__lo_lseek64,
 						lo_fd,
 						Int64GetDatum(0),
 						Int32GetDatum(SEEK_SET));
@@ -175,7 +203,7 @@ pgstrom_lo_export_gpu(PG_FUNCTION_ARGS)
 						  length);
 
 	/* release resources */
-	DirectFunctionCall1(lo_close,
+	DirectFunctionCall1(fn__lo_close,
 						Int32GetDatum(lo_fd));
 	pfree(hbuffer);
 
