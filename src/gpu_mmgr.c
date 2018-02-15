@@ -144,9 +144,8 @@ static GpuMemStatistics *gm_stat_array = NULL;
 static int			gpu_memory_segment_size_kb;	/* GUC */
 static size_t		gm_segment_sz;	/* bytesize */
 
-static bool			debug_force_nvme_strom;		/* GUC */
 static bool			nvme_strom_enabled;			/* GUC */
-static long			nvme_strom_threshold;
+static int			nvme_strom_threshold_kb;	/* GUC */
 
 static int			num_preserved_gpu_memory_regions;	/* GUC */
 static bool			gpummgr_bgworker_got_signal = false;
@@ -1608,6 +1607,7 @@ pgstrom_init_gpu_mmgr(void)
 {
 	long		sysconf_pagesize;		/* _SC_PAGESIZE */
 	long		sysconf_phys_pages;		/* _SC_PHYS_PAGES */
+	long		default_threshold;
 	Size		shared_buffer_size = (Size)NBuffers * (Size)BLCKSZ;
 	Size		segment_sz;
 	Size		required;
@@ -1642,16 +1642,6 @@ pgstrom_init_gpu_mmgr(void)
 							 PGC_SUSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
-
-	/* pg_strom.debug_force_nvme_strom */
-	DefineCustomBoolVariable("pg_strom.debug_force_nvme_strom",
-							 "(DEBUG) force to use raw block scan mode",
-							 NULL,
-							 &debug_force_nvme_strom,
-							 false,
-							 PGC_SUSET,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
 	/*
 	 * MEMO: Threshold of table's physical size to use NVMe-Strom:
 	 *   ((System RAM size) -
@@ -1668,9 +1658,19 @@ pgstrom_init_gpu_mmgr(void)
 		elog(ERROR, "failed on sysconf(_SC_PHYS_PAGES): %m");
 	if (sysconf_pagesize * sysconf_phys_pages < shared_buffer_size)
 		elog(ERROR, "Bug? shared_buffer is larger than system RAM");
-	nvme_strom_threshold = ((sysconf_pagesize * sysconf_phys_pages -
-							 shared_buffer_size) * 2 / 3 +
-							shared_buffer_size) / BLCKSZ;
+	default_threshold = ((sysconf_pagesize * sysconf_phys_pages -
+						  shared_buffer_size) * 2 / 3 +
+						 shared_buffer_size) / BLCKSZ;
+	DefineCustomIntVariable("pg_strom.nvme_strom_threshold",
+							"Tablesize threshold to use SSD-to-GPU P2P DMA",
+							NULL,
+							&nvme_strom_threshold_kb,
+							default_threshold,
+							0,
+							INT_MAX,
+							PGC_SUSET,
+							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
+							NULL, NULL, NULL);
 
 	/* pg_strom.max_nchunks_for_multi_processes */
 	DefineCustomIntVariable("pg_strom.max_num_preserved_gpu_memory",
@@ -1954,8 +1954,7 @@ RelationWillUseNvmeStrom(Relation relation, BlockNumber *p_nr_blocks)
 	 * ReadBuffer().
 	 */
 	nr_blocks = RelationGetNumberOfBlocks(relation);
-	if (!debug_force_nvme_strom &&
-		nr_blocks < nvme_strom_threshold)
+	if (nr_blocks < ((size_t)nvme_strom_threshold_kb << 10))
 		return false;
 
 	/*
@@ -1993,7 +1992,7 @@ ScanPathWillUseNvmeStrom(PlannerInfo *root, RelOptInfo *baserel)
 		return false;
 
 	/* Is number of blocks sufficient to NVMe-Strom? */
-	if (!debug_force_nvme_strom && baserel->pages < nvme_strom_threshold)
+	if (baserel->pages < ((size_t)nvme_strom_threshold_kb << 10))
 		return false;
 
 	/* ok, this table scan can use nvme-strom */
