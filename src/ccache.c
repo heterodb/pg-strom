@@ -2418,9 +2418,14 @@ ccache_tryload_one_chunk(Relation relation, BlockNumber block_nr)
 	SpinLockRelease(&ccache_state->chunks_lock);
 
 	/* try to load this chunk */
-	ccache_preload_chunk(cc_chunk, relation, cc_chunk->block_nr);
+	if (ccache_preload_chunk(cc_chunk, relation, cc_chunk->block_nr))
+		return 1;
 
-	return 1;
+	/*
+	 * Elsewhere, ccache_preload_chunk() could not construct a columnar
+	 * cache chunk, because of (likely) all-visible restriction.
+	 */
+	return 0;
 }
 
 /*
