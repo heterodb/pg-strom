@@ -108,91 +108,12 @@ static int  plcuda_process_task(GpuTask *gtask, CUmodule cuda_module);
 static void plcuda_release_task(GpuTask *gtask);
 
 /* SQL functions */
-Datum pltext_function_validator(PG_FUNCTION_ARGS);
-Datum pltext_function_handler(PG_FUNCTION_ARGS);
 Datum plcuda_function_validator(PG_FUNCTION_ARGS);
 Datum plcuda_function_handler(PG_FUNCTION_ARGS);
 Datum plcuda_function_source(PG_FUNCTION_ARGS);
 
 /* Tracker of plcudaState */
 static dlist_head	plcuda_state_list;
-
-
-/*
- * pltext_function_validator - contents holder
- */
-Datum
-pltext_function_validator(PG_FUNCTION_ARGS)
-{
-	Oid			func_oid = PG_GETARG_OID(0);
-	HeapTuple	tuple;
-	Form_pg_proc proc;
-
-	if (!CheckFunctionValidatorAccess(fcinfo->flinfo->fn_oid, func_oid))
-		PG_RETURN_VOID();
-
-	tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(func_oid));
-	if (!HeapTupleIsValid(tuple))
-		elog(ERROR, "cache lookup failed for function %u", func_oid);
-	proc = (Form_pg_proc) GETSTRUCT(tuple);
-
-	if (proc->proisagg)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("Unable to use PL/TEXT for aggregate functions")));
-	if (proc->proiswindow)
-		ereport(ERROR,
-                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                 errmsg("Unable to use PL/TEXT for window functions")));
-	if (proc->proretset)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("Unable to use PL/TEXT for set returning function")));
-	if (proc->pronargs)
-		ereport(ERROR,
-                (errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
-				 errmsg("PL/TEXT function cannot have arguments")));
-	if (proc->prorettype != TEXTOID)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
-				 errmsg("PL/TEXT function must return text type")));
-
-	ReleaseSysCache(tuple);
-
-	PG_RETURN_VOID();
-}
-PG_FUNCTION_INFO_V1(pltext_function_validator);
-
-/*
- * pltext_function_handler - contents holder
- */
-Datum
-pltext_function_handler(PG_FUNCTION_ARGS)
-{
-	FmgrInfo   *flinfo = fcinfo->flinfo;
-	HeapTuple	tuple;
-	text	   *retval = NULL;
-	Datum		datum;
-	bool		isnull;
-
-	tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(flinfo->fn_oid));
-	if (!HeapTupleIsValid(tuple))
-		elog(ERROR, "cache lookup failed for function %u",
-			 flinfo->fn_oid);
-
-	datum = SysCacheGetAttr(PROCOID, tuple,
-							Anum_pg_proc_prosrc,
-							&isnull);
-	if (!isnull)
-		retval = PG_DETOAST_DATUM_COPY(datum);
-
-	ReleaseSysCache(tuple);
-
-	if (isnull)
-		PG_RETURN_NULL();
-	PG_RETURN_TEXT_P(retval);
-}
-PG_FUNCTION_INFO_V1(pltext_function_handler);
 
 /*
  * plcuda_parse_cmdline
@@ -395,6 +316,7 @@ typedef struct {
 	StringInfoData		main_src;
 	StringInfoData		post_src;
 	StringInfoData		emsg;
+	FunctionCallInfo	fcinfo;
 	bool				not_exec_now;
 	bool				has_decl_block;
 	bool				has_prep_block;
@@ -411,7 +333,7 @@ typedef struct {
 static void
 plcuda_init_code_context(plcuda_code_context *context,
 						 Form_pg_proc procForm,
-						 bool validation_only)
+						 FunctionCallInfo fcinfo)
 {
 	memset(context, 0, sizeof(plcuda_code_context));
 
@@ -423,7 +345,8 @@ plcuda_init_code_context(plcuda_code_context *context,
     initStringInfo(&context->main_src);
     initStringInfo(&context->post_src);
     initStringInfo(&context->emsg);
-	context->not_exec_now = validation_only;
+	context->fcinfo = fcinfo;
+	context->not_exec_now = !fcinfo;
 	/* default setting */
 	context->p.extra_flags = DEVKERNEL_NEEDS_PLCUDA;
 	context->p.val_prep_num_threads = 1;
@@ -431,9 +354,13 @@ plcuda_init_code_context(plcuda_code_context *context,
 	context->p.val_post_num_threads = 1;
 }
 
+static void __plcuda_code_include(plcuda_code_context *con,
+								  Oid fn_extra_include,
+								  const char *source_name, int lineno);
+
 static void
 __plcuda_code_validation(plcuda_code_context *con,
-						 char *source_name,
+						 const char *source_name,
 						 char *source)
 {
 	plcudaCodeProperty *prop = &con->p;
@@ -441,10 +368,10 @@ __plcuda_code_validation(plcuda_code_context *con,
 	char	   *line;
 	char	   *saveptr = NULL;
 
-#define EMSG(fmt,...)													\
-	appendStringInfo(&con->emsg, "\n%s%s%u: " fmt,						\
-					 !source_name ? "" : source_name,					\
-					 !source_name ? "" : ":",							\
+#define EMSG(fmt,...)									\
+	appendStringInfo(&con->emsg, "\n%s%s%u: " fmt,		\
+					 !source_name ? "" : source_name,	\
+					 !source_name ? "" : ":",			\
 					 lineno, ##__VA_ARGS__)
 #define NOTE(fmt,...)							\
 	elog(NOTICE, "%s%s%u: " fmt,				\
@@ -457,7 +384,7 @@ __plcuda_code_validation(plcuda_code_context *con,
 	 con->not_exec_now ||						\
 	 pg_proc_ownercheck((func_oid), con->proowner))
 
-	for (line = strtok_r(source, "\n", &saveptr), lineno = 1;
+	for (line = strtok_r(source, "\n", &saveptr), lineno=1;
 		 line != NULL;
 		 line = strtok_r(NULL, "\n", &saveptr), lineno++)
 	{
@@ -768,6 +695,7 @@ __plcuda_code_validation(plcuda_code_context *con,
 			else if (strcmp(cmd, "#plcuda_include") == 0)
 			{
 				cl_uint		extra_flags = 0;
+				Oid			fn_extra_include = InvalidOid;
 
 				/* built-in include? */
 				if (list_length(options) == 1)
@@ -796,64 +724,25 @@ __plcuda_code_validation(plcuda_code_context *con,
 				else if (!con->curr)
 					EMSG("#plcuda_include must appear in code block:\n%s",
 						 line);
-				else
+				else if (plcuda_lookup_helper(options,
+											  con->proargtypes,
+											  TEXTOID,
+											  &fn_extra_include,
+											  NULL))
 				{
-					Oid		fn_extra_include = InvalidOid;
-
-					/* function that returns text */
-					if (plcuda_lookup_helper(options,
-											 buildoidvector(NULL, 0),
-											 TEXTOID,
-											 &fn_extra_include,
-											 NULL))
-					{
-						if (HELPER_PRIV_CHECK(fn_extra_include))
-						{
-							ListCell   *lc;
-							Datum		src;
-
-							/* prevent infinite inclusion */
-							foreach (lc, con->include_func_oids)
-							{
-								if (lfirst_oid(lc) == fn_extra_include)
-								{
-									EMSG("\"%s\" leads infinite inclusion",
-										 ident_to_cstring(options));
-									break;
-								}
-							}
-							if (!lc)
-							{
-								appendStringInfo(con->curr,
-												 "/* BEGIN %s */\n", line);
-								con->include_func_oids =
-									lappend_oid(con->include_func_oids,
-												fn_extra_include);
-
-								src = OidFunctionCall0(fn_extra_include);
-								__plcuda_code_validation(
-									con,
-									ident_to_cstring(options),
-									text_to_cstring(DatumGetTextP(src)));
-
-								con->include_func_oids =
-									list_delete_oid(con->include_func_oids,
-													fn_extra_include);
-								appendStringInfo(con->curr,
-												 "/* END %s */\n", line);
-							}
-						}
-						else
-							EMSG("permission denied on helper function %s",
-								 NameListToString(options));
-					}
-					else if (con->not_exec_now)
-						NOTE("\"%s\" may be a function but not declared yet",
-							 ident_to_cstring(options));
+					if (HELPER_PRIV_CHECK(fn_extra_include))
+						__plcuda_code_include(con, fn_extra_include,
+											  source_name, lineno);
 					else
-						EMSG("\"%s\" was not a valid function name",
-							 ident_to_cstring(options));
+						EMSG("permission denied on helper function %s",
+							 NameListToString(options));
 				}
+				else if (con->not_exec_now)
+					NOTE("\"%s\" may be a function but not declared yet",
+						 ident_to_cstring(options));
+				else
+					EMSG("\"%s\" was not a valid function name",
+						 ident_to_cstring(options));
 			}
 			else if (strcmp(cmd, "#plcuda_sanity_check") == 0)
 			{
@@ -904,15 +793,71 @@ __plcuda_code_validation(plcuda_code_context *con,
 				EMSG("unknown command: %s", line);
 		}
 	}
+}
+
+static void
+__plcuda_code_include(plcuda_code_context *con, Oid fn_extra_include,
+					  const char *source_name, int lineno)
+{
+	ListCell   *lc;
+	Datum		src;
+	const char *func_name = get_func_name(fn_extra_include);
+
+	/* prevent infinite inclusion */
+	foreach (lc, con->include_func_oids)
+	{
+		if (lfirst_oid(lc) == fn_extra_include)
+		{
+			EMSG("\"%s\" leads infinite inclusion", func_name);
+			return;
+		}
+	}
+
+	if (con->fcinfo)
+	{
+		FmgrInfo	flinfo;
+		FunctionCallInfoData fcinfo;
+		FunctionCallInfo __fcinfo = con->fcinfo;
+
+		appendStringInfo(con->curr,
+						 "/* ------ BEGIN %s ------ */\n", func_name);
+		con->include_func_oids = lappend_oid(con->include_func_oids,
+											 fn_extra_include);
+
+		/* see OidFunctionCallXX */
+		fmgr_info(fn_extra_include, &flinfo);
+		InitFunctionCallInfoData(fcinfo,
+								 &flinfo,
+								 __fcinfo->nargs,
+								 __fcinfo->fncollation,
+								 NULL,
+								 NULL);
+		memcpy(&fcinfo.arg, __fcinfo->arg,
+			   __fcinfo->nargs * sizeof(Datum));
+		memcpy(&fcinfo.argnull, __fcinfo->argnull,
+			   __fcinfo->nargs * sizeof(bool));
+		src = FunctionCallInvoke(&fcinfo);
+		if (fcinfo.isnull)
+			elog(ERROR, "function %u returned NULL", fn_extra_include);
+
+		/* recursive walks of the included source */
+		__plcuda_code_validation(con, func_name,
+								 text_to_cstring(DatumGetTextP(src)));
+
+		con->include_func_oids = list_delete_oid(con->include_func_oids,
+												 fn_extra_include);
+		appendStringInfo(con->curr,
+						 "/* ------ END %s ------ */\n", func_name);
+	}
+}
 #undef NMSG
 #undef EMSG
 #undef HELPER_PRIV_CHECK
-}
 
 static void
 plcuda_code_validation(plcudaCodeProperty *prop,
 					   HeapTuple proc_tuple,
-					   bool validation_only)
+					   FunctionCallInfo fcinfo)
 {
 	Form_pg_proc	procForm = (Form_pg_proc) GETSTRUCT(proc_tuple);
 	plcuda_code_context	context;
@@ -921,7 +866,7 @@ plcuda_code_validation(plcudaCodeProperty *prop,
 	bool			isnull;
 	int				i;
 
-	plcuda_init_code_context(&context, procForm, validation_only);
+	plcuda_init_code_context(&context, procForm, fcinfo);
 	/* check result type */
 	dtype = pgstrom_devtype_lookup(procForm->prorettype);
 	if (dtype)
@@ -929,7 +874,7 @@ plcuda_code_validation(plcudaCodeProperty *prop,
 	else if (get_typlen(procForm->prorettype) == -1)
 	{
 		Assert(!get_typbyval(procForm->prorettype));
-		if (validation_only)
+		if (!fcinfo)
 			elog(NOTICE, "Unknown varlena result - PL/CUDA must be responsible to the data format to return");
 	}
 	else
@@ -953,7 +898,7 @@ plcuda_code_validation(plcudaCodeProperty *prop,
 		else if (get_typlen(argtype_oid) == -1)
 		{
 			Assert(!get_typbyval(argtype_oid));
-			if (validation_only)
+			if (!fcinfo)
 				elog(NOTICE, "Unknown varlena argument%d - PL/CUDA must be responsible to interpretation of the supplied data format", i+1);
 		}
 		else
@@ -1294,7 +1239,7 @@ pgstrom_devfunc_construct_plcuda(devfunc_info *entry, HeapTuple proc_tuple)
 			 format_type_be(procForm->prorettype));
 		goto not_supported;
 	}
-	plcuda_code_validation(&prop, proc_tuple, true);
+	plcuda_code_validation(&prop, proc_tuple, NULL);
 
 	if (prop.kern_prep != NULL)
 	{
@@ -1609,7 +1554,7 @@ plcuda_exec_begin(HeapTuple protup, FunctionCallInfo fcinfo)
 
 	/* validate PL/CUDA source code */
 	procForm = (Form_pg_proc) GETSTRUCT(protup);
-	plcuda_code_validation(&plts->p, protup, !fcinfo);
+	plcuda_code_validation(&plts->p, protup, fcinfo);
 
 	/* build the template of the kern_plcuda */
 	kplcuda_length = STROMALIGN(offsetof(kern_plcuda,
