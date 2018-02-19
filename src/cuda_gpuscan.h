@@ -409,9 +409,10 @@ gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
 	} while (try_next_window);
 
 	/* write back error code and statistics to the host */
+	if (get_global_id() == 0)
+		atomicAdd(&kgpuscan->nitems_in,  kds_src->nitems);
 	if (get_local_id() == 0)
 	{
-		atomicAdd(&kgpuscan->nitems_in,  kds_src->nitems);
 		atomicAdd(&kgpuscan->nitems_out, total_nitems_out);
 		atomicAdd(&kgpuscan->extra_size, total_extra_size);
 	}
@@ -809,9 +810,10 @@ gpuscan_exec_quals_column(kern_gpuscan *kgpuscan,
 	} while (try_next_window);
 
 	/* write back error code and statistics to the host */
+	if (get_global_id() == 0)
+		atomicAdd(&kgpuscan->nitems_in,  kds_src->nitems);
 	if (get_local_id() == 0)
 	{
-		atomicAdd(&kgpuscan->nitems_in,  kds_src->nitems);
 		atomicAdd(&kgpuscan->nitems_out, total_nitems_out);
 		atomicAdd(&kgpuscan->extra_size, total_extra_size);
 	}

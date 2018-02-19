@@ -265,6 +265,7 @@ typedef struct GpuJoinSharedState	GpuJoinSharedState;
  */
 struct GpuJoinRuntimeStat
 {
+	pg_atomic_uint64	ccache_count;
 	pg_atomic_uint64	source_nitems;
 	struct {
 		pg_atomic_uint64 inner_nitems;
@@ -2262,6 +2263,7 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 		gjs->gts.outer_instrument.nfiltered1 =
 			(pg_atomic_read_u64(&gj_rtstat->source_nitems) -
 			 pg_atomic_read_u64(&gj_rtstat->jstat[0].inner_nitems));
+		gjs->gts.ccache_count = pg_atomic_read_u64(&gj_rtstat->ccache_count);
 	}
 	pgstromExplainOuterScan(&gjs->gts, dcontext, ancestors, es,
 							gj_info->outer_quals,
@@ -2516,6 +2518,7 @@ ExecGpuJoinInitDSM(CustomScanState *node,
 				  PointerGetDatum(gjs->gts.gcontext));
 	/* allocation of an empty multirel buffer */
 	gjs->gj_sstate = createGpuJoinSharedState(gjs, pcxt, coordinate);
+	gjs->gj_rtstat = GPUJOIN_RUNTIME_STAT(gjs->gj_sstate);
 	ExecGpuScanInitDSM(node, pcxt, ((char *)coordinate +
 									gjs->gj_sstate->ss_length));
 }
@@ -2532,6 +2535,7 @@ ExecGpuJoinInitWorker(CustomScanState *node,
 	GpuJoinSharedState *gj_sstate = (GpuJoinSharedState *) coordinate;
 
 	gjs->gj_sstate = gj_sstate;
+	gjs->gj_rtstat = GPUJOIN_RUNTIME_STAT(gjs->gj_sstate);
 	/* ensure to stop workers prior to detach DSM */
 	on_dsm_detach(dsm_find_mapping(gj_sstate->ss_handle),
 				  SynchronizeGpuContextOnDSMDetach,
@@ -2551,14 +2555,13 @@ static void
 ExecShutdownGpuJoin(CustomScanState *node)
 {
 	GpuJoinState	   *gjs = (GpuJoinState *) node;
-	GpuJoinRuntimeStat *gj_rtstat = GPUJOIN_RUNTIME_STAT(gjs->gj_sstate);
-	size_t		length;
+	GpuJoinRuntimeStat *gj_rtstat_old = gjs->gj_rtstat;
+	size_t				length;
 
-	Assert(!gjs->gj_rtstat);
 	length = offsetof(GpuJoinRuntimeStat, jstat[gjs->num_rels + 1]);
 	gjs->gj_rtstat = MemoryContextAlloc(CurTransactionContext,
 										MAXALIGN(length));
-	memcpy(gjs->gj_rtstat, gj_rtstat, length);
+	memcpy(gjs->gj_rtstat, gj_rtstat_old, length);
 }
 #endif
 
@@ -3752,10 +3755,15 @@ pgstrom_data_store *
 GpuJoinExecOuterScanChunk(GpuTaskState *gts)
 {
 	GpuJoinState   *gjs = (GpuJoinState *) gts;
+	GpuJoinRuntimeStat *gj_rtstat = gjs->gj_rtstat;
 	pgstrom_data_store *pds = NULL;
 
 	if (gjs->gts.css.ss.ss_currentRelation)
+	{
 		pds = gpuscanExecScanChunk(gts);
+		if (pds && pds->kds.format == KDS_FORMAT_COLUMN)
+			pg_atomic_add_fetch_u64(&gj_rtstat->ccache_count, 1);
+	}
 	else
 	{
 		PlanState	   *outer_node = outerPlanState(gjs);
@@ -4697,8 +4705,7 @@ void
 gpujoinUpdateRunTimeStat(GpuTaskState *gts, kern_gpujoin *kgjoin)
 {
 	GpuJoinState	   *gjs = (GpuJoinState *)gts;
-	GpuJoinSharedState *gj_sstate = gjs->gj_sstate;
-	GpuJoinRuntimeStat *gj_rtstat = GPUJOIN_RUNTIME_STAT(gj_sstate);
+	GpuJoinRuntimeStat *gj_rtstat = gjs->gj_rtstat;
 	cl_int		i;
 
 	pg_atomic_fetch_add_u64(&gj_rtstat->source_nitems,

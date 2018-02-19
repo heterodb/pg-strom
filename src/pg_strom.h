@@ -287,6 +287,7 @@ struct GpuTaskState
 	ProgramId		program_id;		/* CUDA Program (to be acquired) */
 	kern_parambuf  *kern_params;	/* Const/Param buffer */
 	Relids			ccache_refs;	/* referenced attributed, if ccache */
+	long			ccache_count;	/* # of ccache hit */
 	bool			scan_done;		/* True, if no more rows to read */
 
 	/* fields for outer scan */

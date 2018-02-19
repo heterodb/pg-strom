@@ -143,6 +143,7 @@ struct GpuPreAggRuntimeStat
 	pg_atomic_uint64	source_nitems;
 	pg_atomic_uint64	nitems_filtered;
 	pg_atomic_uint64	num_fallback_rows;
+	pg_atomic_uint64	ccache_count;
 	pg_atomic_uint32	pg_nworkers;
 };
 typedef struct GpuPreAggRuntimeStat	GpuPreAggRuntimeStat;
@@ -4081,6 +4082,7 @@ ExecGpuPreAggInitDSM(CustomScanState *node,
 				  PointerGetDatum(gpas->gts.gcontext));
 	/* allocation of shared state */
 	gpas->gpa_sstate = createGpuPreAggSharedState(gpas, pcxt, coordinate);
+	gpas->gpa_rtstat = &gpas->gpa_sstate->gpa_rtstat;
 	ExecGpuScanInitDSM(node, pcxt, ((char *)coordinate +
 									gpas->gpa_sstate->ss_length));
 }
@@ -4097,6 +4099,7 @@ ExecGpuPreAggInitWorker(CustomScanState *node,
 	GpuPreAggSharedState   *gpa_sstate = coordinate;
 
 	gpas->gpa_sstate = gpa_sstate;
+	gpas->gpa_rtstat = &gpas->gpa_sstate->gpa_rtstat;
 	pg_atomic_add_fetch_u32(&gpa_sstate->gpa_rtstat.pg_nworkers, 1);
 	on_dsm_detach(dsm_find_mapping(gpa_sstate->ss_handle),
 				  SynchronizeGpuContextOnDSMDetach,
@@ -4113,13 +4116,12 @@ static void
 ExecShutdownGpuPreAgg(CustomScanState *node)
 {
 	GpuPreAggState	   *gpas = (GpuPreAggState *) node;
-	GpuPreAggSharedState *gpa_sstate = gpas->gpa_sstate;
+	GpuPreAggRuntimeStat *gpa_rtstat_old = gpas->gpa_rtstat;
 
-	Assert(!gpas->gpa_rtstat);
 	gpas->gpa_rtstat = MemoryContextAlloc(CurTransactionContext,
 										  sizeof(GpuPreAggRuntimeStat));
 	memcpy(gpas->gpa_rtstat,
-		   &gpa_sstate->gpa_rtstat,
+		   gpa_rtstat_old,
 		   sizeof(GpuPreAggRuntimeStat));
 }
 #endif
@@ -4150,6 +4152,7 @@ ExplainGpuPreAgg(CustomScanState *node, List *ancestors, ExplainState *es)
 		gpas->gts.outer_instrument.nfiltered2 = 0;
 		gpas->gts.outer_instrument.nloops
 			= pg_atomic_read_u32(&gpa_rtstat->pg_nworkers);
+		gpas->gts.ccache_count = pg_atomic_read_u64(&gpa_rtstat->ccache_count);
 	}
 
 	/* shows reduction policy */
@@ -4414,6 +4417,7 @@ static GpuTask *
 gpupreagg_next_task(GpuTaskState *gts)
 {
 	GpuPreAggState *gpas = (GpuPreAggState *) gts;
+	GpuPreAggRuntimeStat *gpa_rtstat = gpas->gpa_rtstat;
 	GpuContext	   *gcontext = gpas->gts.gcontext;
 	GpuTask		   *gtask = NULL;
 	pgstrom_data_store *pds = NULL;
@@ -4430,6 +4434,8 @@ gpupreagg_next_task(GpuTaskState *gts)
 	else if (gpas->gts.css.ss.ss_currentRelation)
 	{
 		pds = gpuscanExecScanChunk(&gpas->gts);
+		if (pds && pds->kds.format == KDS_FORMAT_COLUMN)
+			pg_atomic_add_fetch_u64(&gpa_rtstat->ccache_count, 1);
 	}
 	else
 	{
@@ -4522,7 +4528,7 @@ gpupreagg_terminator_task(GpuTaskState *gts, cl_bool *task_is_ready)
 static TupleTableSlot *
 gpupreagg_next_tuple_fallback(GpuPreAggState *gpas, GpuPreAggTask *gpreagg)
 {
-	GpuPreAggRuntimeStat *gpa_rtstat = &gpas->gpa_sstate->gpa_rtstat;
+	GpuPreAggRuntimeStat *gpa_rtstat = gpas->gpa_rtstat;
 	ExprContext		   *econtext = gpas->gts.css.ss.ps.ps_ExprContext;
 	ExprDoneCond		is_done	__attribute__((unused));
 	TupleTableSlot	   *slot;
@@ -4698,7 +4704,7 @@ static void
 gpupreaggUpdateRunTimeStat(GpuTaskState *gts, kern_gpupreagg *kgpreagg)
 {
 	GpuPreAggState *gpas = (GpuPreAggState *) gts;
-	GpuPreAggRuntimeStat *gpa_rtstat = &gpas->gpa_sstate->gpa_rtstat;
+	GpuPreAggRuntimeStat *gpa_rtstat = gpas->gpa_rtstat;
 
 	pg_atomic_add_fetch_u64(&gpa_rtstat->source_nitems,
 							(int64)kgpreagg->nitems_real);

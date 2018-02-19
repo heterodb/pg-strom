@@ -82,14 +82,20 @@ deform_gpuscan_info(CustomScan *cscan)
 }
 
 typedef struct {
+	pg_atomic_uint64 nitems_filtered;
+	pg_atomic_uint64 ccache_count;
+} GpuScanRuntimeStat;
+
+typedef struct {
 	dsm_handle		ss_handle;		/* DSM handle of the SharedState */
 	cl_uint			ss_length;		/* Length of the SharedState */
-	pg_atomic_uint64 nitems_filtered;
+	GpuScanRuntimeStat gs_rtstat;
 } GpuScanSharedState;
 
 typedef struct {
 	GpuTaskState	gts;
 	GpuScanSharedState *gs_sstate;
+	GpuScanRuntimeStat *gs_rtstat;
 	HeapTupleData	scan_tuple;		/* buffer to fetch tuple */
 #if PG_VERSION_NUM < 100000
 	List		   *dev_quals;		/* quals to be run on the device */
@@ -107,7 +113,6 @@ typedef struct {
 typedef struct
 {
 	GpuTask				task;
-	GpuScanSharedState *gs_sstate;
 	bool				with_nvme_strom;
 	bool				with_projection;
 	/* DMA buffers */
@@ -2035,7 +2040,6 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 											 false,
 											 explain_only);
 	gss->gts.program_id = program_id;
-	gss->gs_sstate = NULL;		/* to be set later */
 	pfree(kern_define.data);
 }
 
@@ -2099,7 +2103,10 @@ ExecGpuScan(CustomScanState *node)
 	GpuScanState   *gss = (GpuScanState *) node;
 
 	if (!gss->gs_sstate)
+	{
 		gss->gs_sstate = createGpuScanSharedState(gss, NULL, NULL);
+		gss->gs_rtstat = &gss->gs_sstate->gs_rtstat;
+	}
 	return ExecScan(&node->ss,
 					(ExecScanAccessMtd) pgstromExecGpuTaskState,
 					(ExecScanRecheckMtd) ExecReCheckGpuScan);
@@ -2172,6 +2179,7 @@ ExecGpuScanInitDSM(CustomScanState *node,
 	if (pgstrom_planstate_is_gpuscan(&gss->gts.css.ss.ps))
 	{
 		gss->gs_sstate = createGpuScanSharedState(gss, pcxt, coordinate);
+		gss->gs_rtstat = &gss->gs_sstate->gs_rtstat;
 		on_dsm_detach(pcxt->seg,
 					  SynchronizeGpuContextOnDSMDetach,
 					  PointerGetDatum(gss->gts.gcontext));
@@ -2208,6 +2216,7 @@ ExecGpuScanInitWorker(CustomScanState *node,
 	if (pgstrom_planstate_is_gpuscan(&gss->gts.css.ss.ps))
 	{
 		gss->gs_sstate = (GpuScanSharedState *)coordinate;
+		gss->gs_rtstat = &gss->gs_sstate->gs_rtstat;
 		on_dsm_detach(dsm_find_mapping(gss->gs_sstate->ss_handle),
 					  SynchronizeGpuContextOnDSMDetach,
 					  PointerGetDatum(gss->gts.gcontext));
@@ -2231,7 +2240,7 @@ static void
 ExecShutdownGpuScan(CustomScanState *node)
 {
 	GpuScanState   *gss = (GpuScanState *) node;
-	GpuScanSharedState *gs_sstate = gss->gs_sstate;
+	GpuScanRuntimeStat *gs_rtstat_old = gss->gs_rtstat;
 
 	/*
 	 * Note that GpuScan may not be executed if GpuScan node is located
@@ -2243,10 +2252,13 @@ ExecShutdownGpuScan(CustomScanState *node)
 	 *
 	 * Elsewhere, move the statistics from DSM
 	 */
-	if (gs_sstate && gss->gts.css.ss.ps.instrument)
+	if (gs_rtstat_old)
 	{
-		gss->gts.css.ss.ps.instrument->nfiltered1
-			+= pg_atomic_read_u64(&gs_sstate->nitems_filtered);
+		gss->gs_rtstat = MemoryContextAlloc(CurTransactionContext,
+											sizeof(GpuScanRuntimeStat));
+		memcpy(gss->gs_rtstat,
+			   gs_rtstat_old,
+			   sizeof(GpuScanRuntimeStat));
 	}
 }
 #endif
@@ -2258,13 +2270,20 @@ static void
 ExplainGpuScan(CustomScanState *node, List *ancestors, ExplainState *es)
 {
 	GpuScanState	   *gss = (GpuScanState *) node;
-	GpuScanSharedState *gs_sstate = gss->gs_sstate;
+	GpuScanRuntimeStat *gs_rtstat = gss->gs_rtstat;
 	CustomScan		   *cscan = (CustomScan *) gss->gts.css.ss.ps.plan;
 	GpuScanInfo		   *gs_info = deform_gpuscan_info(cscan);
 	List			   *dcontext;
 	List			   *dev_proj = NIL;
 	char			   *exprstr;
 	ListCell		   *lc;
+	uint64				nitems_filtered = 0;
+
+	if (gs_rtstat)
+	{
+		nitems_filtered = pg_atomic_read_u64(&gs_rtstat->nitems_filtered);
+		gss->gts.ccache_count = pg_atomic_read_u64(&gs_rtstat->ccache_count);
+	}
 
 	/* Set up deparsing context */
 	dcontext = set_deparse_context_planstate(es->deparse_cxt,
@@ -2290,23 +2309,19 @@ ExplainGpuScan(CustomScanState *node, List *ancestors, ExplainState *es)
 	if (gs_info->dev_quals != NIL)
 	{
 		Node   *dev_quals = (Node *)make_ands_explicit(gs_info->dev_quals);
-		size_t	nitems_filtered;
 
 		exprstr = deparse_expression(dev_quals, dcontext,
 									 es->verbose, false);
 		ExplainPropertyText("GPU Filter", exprstr, es);
-		if (gs_sstate && gss->gts.css.ss.ps.instrument)
+		if (gss->gts.css.ss.ps.instrument && nitems_filtered > 0)
 		{
-			//statistics ... PostgreSQL 10 feature
-			Instrumentation *instrument = gss->gts.css.ss.ps.instrument;
+			Instrumentation *instr = gss->gts.css.ss.ps.instrument;
 
-			nitems_filtered = pg_atomic_read_u64(&gs_sstate->nitems_filtered);
-			if (nitems_filtered > 0)
-				ExplainPropertyLong("Rows Removed by GPU Filter",
-									nitems_filtered / instrument->nloops,
-									es);
+			ExplainPropertyLong("Rows Removed by GPU Filter",
+								nitems_filtered / instr->nloops, es);
 		}
 	}
+
 	/* common portion of EXPLAIN */
 	pgstromExplainGpuTaskState(&gss->gts, es);
 }
@@ -2402,8 +2417,6 @@ gpuscan_create_task(GpuScanState *gss,
 	memset(gscan, 0, (offsetof(GpuScanTask, kern) +
 					  offsetof(kern_gpuscan, kparams)));
 	pgstromInitGpuTask(&gss->gts, &gscan->task);
-	gscan->gs_sstate = gss->gs_sstate;
-	Assert(gscan->gs_sstate != NULL);
 	gscan->with_nvme_strom = (pds_src->kds.format == KDS_FORMAT_BLOCK &&
 							  pds_src->nblocks_uncached > 0);
 	gscan->pds_src = pds_src;
@@ -2842,12 +2855,15 @@ static GpuTask *
 gpuscan_next_task(GpuTaskState *gts)
 {
 	GpuScanState	   *gss = (GpuScanState *) gts;
+	GpuScanRuntimeStat *gs_rtstat = gss->gs_rtstat;
 	GpuScanTask		   *gscan;
 	pgstrom_data_store *pds;
 
 	pds = gpuscanExecScanChunk(gts);
 	if (!pds)
 		return NULL;
+	if (pds->kds.format == KDS_FORMAT_COLUMN)
+		pg_atomic_add_fetch_u64(&gs_rtstat->ccache_count, 1);
 	gscan = gpuscan_create_task(gss, pds);
 
 	return &gscan->task;
@@ -2860,7 +2876,7 @@ static TupleTableSlot *
 gpuscan_next_tuple_fallback(GpuScanState *gss, GpuScanTask *gscan)
 {
 	pgstrom_data_store *pds_src = gscan->pds_src;
-	GpuScanSharedState *gs_sstate = gss->gs_sstate;
+	GpuScanRuntimeStat *gs_rtstat = gss->gs_rtstat;
 	ExprContext		   *econtext = gss->gts.css.ss.ps.ps_ExprContext;
 	TupleTableSlot	   *slot = NULL;
 
@@ -2885,7 +2901,7 @@ retry_next:
 #endif
 		if (!retval)
 		{
-			pg_atomic_add_fetch_u64(&gs_sstate->nitems_filtered, 1);
+			pg_atomic_add_fetch_u64(&gs_rtstat->nitems_filtered, 1);
 			goto retry_next;
 		}
 	}
@@ -3163,9 +3179,10 @@ gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 	gscan->task.kerror = ((kern_gpuscan *)m_gpuscan)->kerror;
 	if (gscan->task.kerror.errcode == StromError_Success)
 	{
-		GpuScanSharedState *gs_sstate = gscan->gs_sstate;
+		GpuScanState	   *gss = (GpuScanState *)gscan->task.gts;
+		GpuScanRuntimeStat *gs_rtstat = gss->gs_rtstat;
 
-		pg_atomic_add_fetch_u64(&gs_sstate->nitems_filtered,
+		pg_atomic_add_fetch_u64(&gs_rtstat->nitems_filtered,
 								nitems_in - nitems_out);
 	}
 	else

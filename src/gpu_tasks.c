@@ -265,6 +265,7 @@ pgstromInitGpuTaskState(GpuTaskState *gts,
 	}
 #endif
 	gts->ccache_refs = ccache_refs;
+	gts->ccache_count = 0;
 	gts->scan_done = false;
 
 	InstrInit(&gts->outer_instrument, estate->es_instrument);
@@ -544,6 +545,22 @@ pgstromReleaseGpuTaskState(GpuTaskState *gts)
 void
 pgstromExplainGpuTaskState(GpuTaskState *gts, ExplainState *es)
 {
+	/* status of columnar-cache */
+	if (!es->analyze)
+	{
+		if (gts->ccache_refs)
+			ExplainPropertyText("CCache", "enabled", es);
+		else if (es->format != EXPLAIN_FORMAT_TEXT)
+			ExplainPropertyText("CCache", "disabled", es);
+	}
+	else
+	{
+		if (gts->ccache_refs)
+			ExplainPropertyLong("CCache Hits", gts->ccache_count, es);
+		else if (es->format != EXPLAIN_FORMAT_TEXT)
+			ExplainPropertyLong("CCache Hits", gts->ccache_count, es);
+	}
+
 	/* NVMe-Strom support */
 	if (gts->nvme_sstate ||
 		(!es->analyze &&
