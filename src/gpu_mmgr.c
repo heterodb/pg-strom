@@ -1660,7 +1660,7 @@ pgstrom_init_gpu_mmgr(void)
 		elog(ERROR, "Bug? shared_buffer is larger than system RAM");
 	default_threshold = ((sysconf_pagesize * sysconf_phys_pages -
 						  shared_buffer_size) * 2 / 3 +
-						 shared_buffer_size) / BLCKSZ;
+						 shared_buffer_size) / 1024;
 	DefineCustomIntVariable("pg_strom.nvme_strom_threshold",
 							"Tablesize threshold to use SSD-to-GPU P2P DMA",
 							NULL,
@@ -1954,7 +1954,7 @@ RelationWillUseNvmeStrom(Relation relation, BlockNumber *p_nr_blocks)
 	 * ReadBuffer().
 	 */
 	nr_blocks = RelationGetNumberOfBlocks(relation);
-	if (nr_blocks < ((size_t)nvme_strom_threshold_kb << 10))
+	if (nr_blocks < ((size_t)nvme_strom_threshold_kb << 10) / BLCKSZ)
 		return false;
 
 	/*
