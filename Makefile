@@ -72,10 +72,10 @@ __DOC_FILES = index.md install.md features.md \
 __PACKAGE_FILES = LICENSE README.md Makefile pg_strom.control	\
 	          src sql utils test doc
 ifdef PGSTROM_VERSION
-__STROM_TGZ = pg-strom-$(shell echo $(PGSTROM_VERSION) | sed -e 's/^v//g')
+__STROM_TGZ = pg_strom-$(shell echo $(PGSTROM_VERSION) | sed -e 's/^v//g')
 __STROM_TGZ_TAG = $(PGSTROM_VERSION)
 else
-__STROM_TGZ = pg-strom-master
+__STROM_TGZ = pg_strom-master
 __STROM_TGZ_TAG = HEAD
 endif
 STROM_TGZ = $(addprefix $(STROM_BUILD_ROOT)/, $(__STROM_TGZ).tar.gz)
