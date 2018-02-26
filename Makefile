@@ -70,7 +70,7 @@ __DOC_FILES = index.md install.md features.md \
 # Files to be packaged
 #
 __PACKAGE_FILES = LICENSE README.md Makefile pg_strom.control	\
-	          src sql utils test doc
+	          src sql utils test man
 ifdef PGSTROM_VERSION
 __STROM_TGZ = pg_strom-$(shell echo $(PGSTROM_VERSION) | sed -e 's/^v//g')
 __STROM_TGZ_TAG = $(PGSTROM_VERSION)
