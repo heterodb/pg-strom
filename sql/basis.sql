@@ -4,7 +4,7 @@
 CREATE SCHEMA IF NOT EXISTS pgstrom;
 
 --
--- Functions for 
+-- Functions for device properties
 --
 CREATE TYPE pgstrom.__pgstrom_device_info AS (
   device_nr     int,
@@ -344,4 +344,12 @@ CREATE FUNCTION pg_catalog.float8_as_int8(float8)
 CREATE FUNCTION pg_catalog.int8_as_float8(int8)
   RETURNS int8
   AS 'MODULE_PATHNAME','int8_as_float8'
+  LANGUAGE C STRICT;
+
+--
+-- Function to validate commercial license
+--
+CREATE FUNCTION pgstrom.license_validation()
+  RETURNS text
+  AS 'MODULE_PATHNAME','pgstrom_license_validation'
   LANGUAGE C STRICT;

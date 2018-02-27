@@ -15,6 +15,7 @@
 #include <asm/ioctl.h>
 
 enum {
+	STROM_IOCTL__LICENSE_VALIDATION	= _IO('S',0x60),
 	STROM_IOCTL__CHECK_FILE			= _IO('S',0x80),
 	STROM_IOCTL__MAP_GPU_MEMORY		= _IO('S',0x81),
 	STROM_IOCTL__UNMAP_GPU_MEMORY	= _IO('S',0x82),
@@ -29,6 +30,21 @@ enum {
 
 /* path of ioctl(2) entrypoint */
 #define NVME_STROM_IOCTL_PATHNAME		"/proc/nvme-strom"
+
+/* STROM_IOCTL__LICENSE_VALIDATION */
+typedef struct StromCmd__LicenseValidation
+{
+	uint32_t	version;		/* out: VERSION field */
+	const char *serial_nr;		/* out: SERIAL_NR field */
+	uint32_t	issued_at;		/* out: ISSUED_AT field; YYYYMMDD */
+	uint32_t	expired_at;		/* out: EXPIRED_AT field; YYYYMMDD */
+	const char *licensee_name;	/* out: LICENSEE_NAME field */
+	const char *licensee_mail;	/* out: LICENSEE_MAIL field */
+	const char *license_desc;	/* out: LICENSE_DESC field, if any */
+	uint32_t	length;			/* in: length of the binary license image */
+	unsigned char license[1];	/* in: binary license image
+								 * out: buffer of variable length data */
+} StromCmd__LicenseValidation;
 
 /* STROM_IOCTL__CHECK_FILE */
 typedef struct StromCmd__CheckFile
@@ -138,11 +154,16 @@ typedef struct StromCmd__AllocDMABuffer
 } StromCmd__AllocDMABuffer;
 
 /* STROM_IOCTL__STAT_INFO */
+#define NVME_STROM_STATFLAGS__DEBUG		0x0001
 typedef struct StromCmd__StatInfo
 {
 	unsigned int	version;	/* in: = 1, always */
-	unsigned char	has_debug;	/* out: true, if debug fields are valid */
+	unsigned int	flags;		/* in: one of NVME_STROM_STATFLAGS__* */
 	uint64_t		tsc;		/* tsc counter */
+	uint64_t		nr_ioctl_memcpy_submit;		/* MEMCPY_SSD2GPU or */
+	uint64_t		clk_ioctl_memcpy_submit;	/* MEMCPY_SSD2RAM */
+	uint64_t		nr_ioctl_memcpy_wait;		/* MEMCPY_WAIT */
+	uint64_t		clk_ioctl_memcpy_wait;
 	uint64_t		nr_ssd2gpu;
 	uint64_t		clk_ssd2gpu;
 	uint64_t		nr_setup_prps;
@@ -152,6 +173,7 @@ typedef struct StromCmd__StatInfo
 	uint64_t		nr_wait_dtask;
 	uint64_t		clk_wait_dtask;
 	uint64_t		nr_wrong_wakeup;
+	uint64_t		total_dma_length;
 	uint64_t		cur_dma_count;
 	uint64_t		max_dma_count;
 	uint64_t		nr_debug1;
