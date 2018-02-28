@@ -15,7 +15,7 @@
 #include <asm/ioctl.h>
 
 enum {
-	STROM_IOCTL__LICENSE_VALIDATION	= _IO('S',0x60),
+	STROM_IOCTL__LICENSE_ADMIN		= _IO('S',0x60),
 	STROM_IOCTL__CHECK_FILE			= _IO('S',0x80),
 	STROM_IOCTL__MAP_GPU_MEMORY		= _IO('S',0x81),
 	STROM_IOCTL__UNMAP_GPU_MEMORY	= _IO('S',0x82),
@@ -31,7 +31,7 @@ enum {
 /* path of ioctl(2) entrypoint */
 #define NVME_STROM_IOCTL_PATHNAME		"/proc/nvme-strom"
 
-/* STROM_IOCTL__LICENSE_VALIDATION */
+/* STROM_IOCTL__LICENSE_ADMIN */
 typedef struct StromCmd__LicenseInfo
 {
 	uint32_t	version;		/* out: VERSION field */

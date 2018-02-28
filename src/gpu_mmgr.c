@@ -271,7 +271,7 @@ pgstrom_commercial_license_validation(StringInfo buf)
 		cmd->length = st_buf.st_size;
 
 		/* License validation */
-		if (nvme_strom_ioctl(STROM_IOCTL__LICENSE_VALIDATION, cmd) != 0)
+		if (nvme_strom_ioctl(STROM_IOCTL__LICENSE_ADMIN, cmd) != 0)
 			elog(ERROR, "failed on nvme_strom_ioctl(2): %m");
 
 		i_year = (cmd->issued_at / 10000);
@@ -376,11 +376,11 @@ pgstrom_license_query(PG_FUNCTION_ARGS)
 	cmd->validation = 0;
 	cmd->length = buflen;
 
-	rc = nvme_strom_ioctl(STROM_IOCTL__LICENSE_VALIDATION, cmd);
+	rc = nvme_strom_ioctl(STROM_IOCTL__LICENSE_ADMIN, cmd);
 	if (rc == ENOENT)
 		PG_RETURN_NULL();
 	else if (rc != 0)
-		elog(ERROR, "failed on STROM_IOCTL__LICENSE_VALIDATION: %m");
+		elog(ERROR, "failed on STROM_IOCTL__LICENSE_ADMIN: %m");
 	else
 	{
 		int		i_year = (cmd->issued_at / 10000);
