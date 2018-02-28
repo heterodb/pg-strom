@@ -32,19 +32,24 @@ enum {
 #define NVME_STROM_IOCTL_PATHNAME		"/proc/nvme-strom"
 
 /* STROM_IOCTL__LICENSE_VALIDATION */
-typedef struct StromCmd__LicenseValidation
+typedef struct StromCmd__LicenseInfo
 {
 	uint32_t	version;		/* out: VERSION field */
 	const char *serial_nr;		/* out: SERIAL_NR field */
 	uint32_t	issued_at;		/* out: ISSUED_AT field; YYYYMMDD */
 	uint32_t	expired_at;		/* out: EXPIRED_AT field; YYYYMMDD */
+	const char *licensee_org;	/* out: LICENSEE_ORG field */
 	const char *licensee_name;	/* out: LICENSEE_NAME field */
 	const char *licensee_mail;	/* out: LICENSEE_MAIL field */
 	const char *license_desc;	/* out: LICENSE_DESC field, if any */
-	uint32_t	length;			/* in: length of the binary license image */
-	unsigned char license[1];	/* in: binary license image
-								 * out: buffer of variable length data */
-} StromCmd__LicenseValidation;
+	uint32_t	validation;		/* in: If 0, just query current licence info.
+								 *     Elsewhere, validate a new license */
+	uint32_t	length;			/* in: length of the variable length buffer */
+	unsigned char buffer[1];	/* in: binary license image, if @validation
+								 *     is not zero.
+								 * out: buffer of variable length data.
+								 */
+} StromCmd__LicenseInfo;
 
 /* STROM_IOCTL__CHECK_FILE */
 typedef struct StromCmd__CheckFile

@@ -353,3 +353,8 @@ CREATE FUNCTION pgstrom.license_validation()
   RETURNS text
   AS 'MODULE_PATHNAME','pgstrom_license_validation'
   LANGUAGE C STRICT;
+
+CREATE FUNCTION pgstrom.license_query()
+  RETURNS text
+  AS 'MODULE_PATHNAME','pgstrom_license_query'
+  LANGUAGE C STRICT;
