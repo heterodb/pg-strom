@@ -3,23 +3,26 @@ site_description: PG-Strom v2.0 Official Documentation
 site_author: PG-Strom Development Team
 theme: readthedocs
 pages:
-    - 'English' :
-        - 'Home' : 'index.md'
-        - 'Install' : 'install.md'
-        - 'Advanced Features' : 'features.md'
-        - 'PL/CUDA' : 'plcuda.md'
-        - 'References' : 'references.md'
-        - 'Release Note' : 'release_note.md'
-    - 'Japanese' :
-        - 'Home' : 'ja.index.md'
-        - 'Install' : 'ja.install.md'
-        - 'Advanced Features' : 'ja.features.md'
-        - 'PL/CUDA' : 'ja.plcuda.md'
-        - 'References' : 'ja.references.md'
-        - 'Release Note' : 'ja.release_note.md'
+@en{
+- 'Home' : 'index.md'
+- 'Install' : 'install.md'
+- 'Advanced Features' : 'features.md'
+- 'PL/CUDA' : 'plcuda.md'
+- 'References' : 'references.md'
+- 'Release Note' : 'release_note.md'
+}
+@ja{
+- 'はじめに' : 'index.md'
+- 'インストール' : 'install.md'
+- '先進機能' : 'features.md'
+- 'PL/CUDA' : 'plcuda.md'
+- 'リファレンス' : 'references.md'
+- 'リリースノート' : 'release_note.md'
+}
 extra_css:
     - "//fonts.googleapis.com/earlyaccess/notosansjp.css"
     - "//fonts.googleapis.com/css?family=Open+Sans:600,800"
+    - "custom.css"
 markdown_extensions:
     - admonition
     - footnotes

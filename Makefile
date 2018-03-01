@@ -178,20 +178,30 @@ $(STROM_BUILD_ROOT)/man/markdown_i18n: $(STROM_BUILD_ROOT)/man/markdown_i18n.c
 	$(CC) $(CFLAGS) -o $@ $(addsuffix .c,$@)
 
 docs:	$(STROM_BUILD_ROOT)/man/markdown_i18n
-	git clean -fdx $(STROM_BUILD_ROOT)/man/docs
-	for x in $(__DOC_FILES);                \
-	do                                      \
-	  $(STROM_BUILD_ROOT)/man/markdown_i18n \
-	    -f $(STROM_BUILD_ROOT)/man/$$x      \
-	    -o $(STROM_BUILD_ROOT)/man/docs/$$x;    \
+	for x in $(__DOC_FILES);			\
+	do						\
+	  $(STROM_BUILD_ROOT)/man/markdown_i18n		\
+	    -f $(STROM_BUILD_ROOT)/man/$$x		\
+	    -o $(STROM_BUILD_ROOT)/man/docs/$$x;	\
 	done
-	for x in $(__DOC_FILES);                \
-	do                                      \
-	  $(STROM_BUILD_ROOT)/man/markdown_i18n -l ja \
-	    -f $(STROM_BUILD_ROOT)/man/$$x      \
-	    -o $(STROM_BUILD_ROOT)/man/docs/ja.$$x;    \
+	$(STROM_BUILD_ROOT)/man/markdown_i18n		\
+	    -f $(STROM_BUILD_ROOT)/man/mkdocs.yml	\
+	    -o $(STROM_BUILD_ROOT)/man/mkdocs.en.yml
+	pushd $(STROM_BUILD_ROOT)/man;			\
+	$(MKDOCS) build -c -f mkdocs.en.yml -d ../docs;	\
+	popd
+	for x in $(__DOC_FILES);			\
+	do						\
+	  $(STROM_BUILD_ROOT)/man/markdown_i18n -l ja	\
+	    -f $(STROM_BUILD_ROOT)/man/$$x		\
+	    -o $(STROM_BUILD_ROOT)/man/docs/$$x;	\
 	done
-	pushd $(STROM_BUILD_ROOT)/man; $(MKDOCS) build -c -d ../docs; popd;
+	$(STROM_BUILD_ROOT)/man/markdown_i18n -l ja	\
+	    -f $(STROM_BUILD_ROOT)/man/mkdocs.yml	\
+	    -o $(STROM_BUILD_ROOT)/man/mkdocs.ja.yml
+	pushd $(STROM_BUILD_ROOT)/man;			\
+	$(MKDOCS) build -c -f mkdocs.ja.yml -d ../docs/ja; \
+	popd
 
 $(STROM_TGZ): $(shell cd $(STROM_BUILD_ROOT); git ls-files $(__PACKAGE_FILES))
 	(cd $(STROM_BUILD_ROOT);                 \

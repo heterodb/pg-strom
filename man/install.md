@@ -1,9 +1,12 @@
-@ja:# インストール
-@en:# Install
+@ja{
+本章ではPG-Stromのインストール手順について説明します。
+}
+@en{
+This chapter introduces the steps to install PG-Strom.
+}
 
-
-@ja:## チェックリスト
-@en:## Checklist
+@ja:# チェックリスト
+@en:# Checklist
 
 @ja{
 - **ハードウェア**
@@ -39,8 +42,8 @@
     - PG-Strom provides half-precision floating point type (`float2`), and it internally use `half_t` type of CUDA C, so we cannot build it with older CUDA Toolkit.
 }
 
-@ja:## OSのインストール
-@en:## OS Installation
+@ja:# OSのインストール
+@en:# OS Installation
 
 @ja{
 CUDA ToolkitのサポートするLinuxディストリビューションを選択し、個々のディストリビューションのインストールプロセスに従ってインストール作業を行ってください。 CUDA ToolkitのサポートするLinuxディストリビューションは、NVIDIA DEVELOPER ZONEにおいて紹介されています。
@@ -55,58 +58,32 @@ Red Hat Enterprise Linux 7.x系列、またはCentOS 7.x系列の場合、「...
 - 認
 }
 
-@ja:### OSインストール後の設定
-@en:### Post OS Installation Configuration
+@ja:## OSインストール後の設定
+@en:## Post OS Installation Configuration
 
 @ja{
 システムへのOSのインストール後、後のステップでGPUドライバとNVMe-Stromドライバをインストールするために、いくつかの追加設定が必要です。
 }
 
-@ja:#### DKMSのインストール
-@en:#### DKMS Installation
+@ja:### DKMSのインストール
+@en:### DKMS Installation
 
 @ja{
 DKMS (Dynamic Kernel Module Support) は、動作中のLinuxカーネル向けのLinuxカーネルモジュールを必要に応じてビルドするためのフレームワークで、NVIDIAのドライバも対応しています。Linuxカーネルのバージョンアップに追従してカーネルモジュールも更新されるため、DKMSのセットアップは推奨です。
 
 DKMSパッケージはEPEL (Extra Packages for Enterprise Linux) の一部として配布されています。ですので、CentOSのパブリックFTPサイトから `epel-release-<distribution version>.noarch.rpm` をダウンロードし、これをインストールしてください。 いったん epel-release パッケージがインストールされると、EPELリポジトリから非標準のパッケージを入手するためのyumシステムへの設定が追加されます。
-
+}
 - Fedora Project Public FTP Site
     - [https://dl.fedoraproject.org/pub/epel/7/x86_64/](https://dl.fedoraproject.org/pub/epel/7/x86_64/)
 
-DKMSに加えて、nvidiaカーネルモジュールをビルドするには以下のパッケージが必要です。以降のステップに進む前に、これらをインストールしてください。
+@ja:### HeteroDB-SWDCのインストール
+@en:### HeteroDB-SWDC Installation
 
-- kernel-devel
-- kernel-headers
-- kernel-tools
-- kernel-tools-libs
-}
 
-@ja:#### nouveauドライバの無効化
-@en:#### Disables nouveau driver
 
-@ja{
-CUDA Toolkitが動作するためにはNVIDIAの提供する`nvidia`ドライバが必要です。しかし、オープンソースの互換ドライバである`nouveau`と競合してしまうため、OSインストーラが`nouveau`ドライバをインストールしている場合には、CUDA Toolkitのインストールに先立って`nouveau`ドライバを無効化する必要があります。
 
-`nouveau`ドライバがロードされないよう、以下の設定を`/etc/modprobe.d/blacklist-nouveau.conf`に追加します。
-}
-
-```
-blacklist nouveau
-options nouveau modeset=0
-```
-
-@ja{
-その後、カーネルブートイメージを更新するために `dracut -f /boot/initramfs-$(uname -r).img $(uname -r)` を実行してください。
-
-最後に、この設定を反映させるために`shutdown -r now`を実行してシステムを再起動します。`lsmod`の出力に`nouveau`が含まれていなければ正しく設定されています。
-}
-```
-$ lsmod | grep nouveau
-$
-```
-
-@ja:## CUDA Toolkitのインストール
-@en:## CUDA Toolkit Installation
+@ja:# CUDA Toolkitのインストール
+@en:# CUDA Toolkit Installation
 
 @ja{
 本節ではCUDA Toolkitのインストールについて説明します。 既に対応バージョンのCUDA Toolkitをインストール済みであれば、本節の内容は読み飛ばして構いません
@@ -140,21 +117,6 @@ doc     jre      libnvvp           nvvm       share    version.txt
 extras  lib64    nsightee_plugins  pkgconfig  src
 ```
 
-!!! hint
-   `nvidia`ドライバのビルドやインストールに失敗する場合は、 OSのインストール において必要なパッケージが導入されている事、および`nouveau`ドライバが無効化されている事を確認してください。特に`dracut`スクリプトを実行するまでは`nouveau`ドライバの無効化設定が起動イメージに反映されない事に留意してください。
-
-@ja:### インストール後の設定
-@en:### Post Installation Configuration
-
-@ja{
-少なくともCUDA-9.1において、PG-Stromの使用するNVRTCライブラリのリンケージに関して問題がある事が分かっており、これを回避するため、ワークアラウンドとして以下の設定を行ってください。
-}
-
-```
-# echo /usr/local/cuda/lib64 > /etc/ld.so.conf.d/cuda-lib64.conf
-# ldconfig
-```
-
 @ja{
 CUDAおよび`nvidia`ドライバのインストールが完了したら、GPUが正しく認識されている事を確認してください。`nvidia-smi`コマンドを実行すると、以下の出力例のように、システムに搭載されているGPUの情報が表示されます。
 }
@@ -180,8 +142,8 @@ Wed Feb 14 09:43:48 2018
 +-----------------------------------------------------------------------------+
 ```
 
-@ja:## PostgreSQLのインストール
-@en:## PostgreSQL Installation
+@ja:# PostgreSQLのインストール
+@en:# PostgreSQL Installation
 
 @ja{
 本節ではRPMによるPostgreSQLのインストールについて紹介します。
@@ -240,8 +202,8 @@ Dependency Installed:
 Complete!
 ```
 
-@ja:## PG-Stromのインストール
-@en:## PG-Strom Installation
+@ja:# PG-Stromのインストール
+@en:# PG-Strom Installation
 
 @ja{
 本節ではPG-Stromのインストール方法について説明します。
@@ -253,8 +215,8 @@ We recommend RPM installation, however, also mention about the steps to build PG
 }
 
 
-@ja:### RPMによるインストール
-@en:### RPM Installation
+@ja:## RPMによるインストール
+@en:## RPM Installation
 
 @ja{
 PG-Stromおよび関連パッケージは[HeteroDB Software Distribution Center](https://heterodb.github.io/swdc/)より配布されています。このサイトはyumリポジトリとしても機能するよう作成されており、`heterodb-swdc`パッケージをインストールする事でyumリポジトリのエントリが追加されます。
@@ -284,8 +246,8 @@ Updating / installing...
 }
 
 
-@ja:### ソースからのビルド
-@en:### Build from the source
+@ja:## ソースからのビルド
+@en:## Build from the source
 
 @ja{
 開発者向けに、ソースコードからPG-Stromをビルドする方法についても紹介します。

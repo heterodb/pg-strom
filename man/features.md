@@ -220,8 +220,9 @@ NVMe-SSDにP2P DMAを要求する時点では、ストレージブロックの�
 
 これに対処するため、PostgreSQLはVisibility Mapと呼ばれるインフラを持っています。これは、あるデータブロック中に存在するレコードが全てのトランザクションから可視である事が明らかであれば、該当するビットを立てる事で、データブロックを読むことなく当該ブロックにMVCC不可視なレコードが存在するか否かを判定する事を可能とするものです。
 
-SSD-to-GPUダイレクトSQL実行はこのインフラを利用しています。つまり、Visibility Mapがセットされており、MVCC可視性チェックに意味のないブロックのみを選択してSSD-to-GPUのP2P DMAを実行するのです。Visibility Mapは通常、autovacuumプロセスにより非同期で作成されますが、、、、
+SSD-to-GPUダイレクトSQL実行はこのインフラを利用しています。つまり、Visibility Mapがセットされており、MVCC可視性チェックに意味のないブロックのみを選択してSSD-to-GPUのP2P DMAを実行するのです。
 
+Visibility MapはVACUUMのタイミングで作成されるため、以下のように明示的にVACUUMを実行する事で強制的にVisibility Mapを構築する事ができます。
 }
 ```
 VACUUM ANALYZE linerorder;
@@ -330,9 +331,62 @@ contrib_regression_pg_strom=# SELECT * FROM pgstrom.ccache_info ;
 @ja:###列キャッシュの利用を確認する
 @en:###Check usage of columnar cache
 
-EXPLAIN ANALYZEでccacheのヒット件数を出したい。
+@ja{
+あるクエリが列キャッシュを使用する可能性があるかどうか、`EXPLAIN`コマンドを使用して確認する事ができます。
 
+以下のクエリは、テーブル`t0`と`t1`をジョインしますが、`t0`に対するスキャンを含む`Custom Scan (GpuJoin)`に`CCache: enabled`と表示されています。
+これは、`t0`に対するスキャンの際に列キャッシュを使用する可能性がある事を示しています。ただし、実際に使われるかどうかはクエリが実行されるまで分かりません。並行する更新処理の影響で、列キャッシュが破棄される可能性もあるからです。
+}
 
+```
+postgres=# EXPLAIN SELECT id,ax FROM t0 NATURAL JOIN t1 WHERE aid < 1000;
+
+                                  QUERY PLAN
+-------------------------------------------------------------------------------
+ Custom Scan (GpuJoin) on t0  (cost=12398.65..858048.45 rows=1029348 width=12)
+   GPU Projection: t0.id, t1.ax
+   Outer Scan: t0  (cost=10277.55..864623.44 rows=1029348 width=8)
+   Outer Scan Filter: (aid < 1000)
+   Depth 1: GpuHashJoin  (nrows 1029348...1029348)
+            HashKeys: t0.aid
+            JoinQuals: (t0.aid = t1.aid)
+            KDS-Hash (size: 10.78MB)
+   CCache: enabled
+   ->  Seq Scan on t1  (cost=0.00..1935.00 rows=100000 width=12)
+(10 rows)
+```
+
+@ja{
+`EXPLAIN ANALYZE`コマンドを使用すると、クエリが実際に列キャッシュを何回参照したのかを知る事ができます。
+
+先ほどのクエリを実行すると、`t0`に対するスキャンを含む`Custom Scan (GpuJoin)`に`CCache Hits: 50`と表示されています。
+これは、列キャッシュへの参照が50回行われた事を示しています。列キャッシュのチャンクサイズは128MBですので、合計で6.4GB分のストレージアクセスが列キャッシュにより代替された事となります。
+}
+
+```
+postgres=# EXPLAIN ANALYZE SELECT id,ax FROM t0 NATURAL JOIN t1 WHERE aid < 1000;
+
+                                    QUERY PLAN
+
+-------------------------------------------------------------------------------------------
+ Custom Scan (GpuJoin) on t0  (cost=12398.65..858048.45 rows=1029348 width=12)
+                              (actual time=91.766..723.549 rows=1000224 loops=1)
+   GPU Projection: t0.id, t1.ax
+   Outer Scan: t0  (cost=10277.55..864623.44 rows=1029348 width=8)
+                   (actual time=7.129..398.270 rows=100000000 loops=1)
+   Outer Scan Filter: (aid < 1000)
+   Rows Removed by Outer Scan Filter: 98999776
+   Depth 1: GpuHashJoin  (plan nrows: 1029348...1029348, actual nrows: 1000224...1000224)
+            HashKeys: t0.aid
+            JoinQuals: (t0.aid = t1.aid)
+            KDS-Hash (size plan: 10.78MB, exec: 64.00MB)
+   CCache Hits: 50
+   ->  Seq Scan on t1  (cost=0.00..1935.00 rows=100000 width=12)
+                       (actual time=0.011..13.542 rows=100000 loops=1)
+ Planning time: 23.390 ms
+ Execution time: 1409.073 ms
+(13 rows)
+```
 
 @ja:### `DROP DATABASE`コマンドに関する注意事項
 @en:### Attension for `DROP DATABASE` command
@@ -341,14 +395,123 @@ EXPLAIN ANALYZEでccacheのヒット件数を出したい。
 列キャッシュビルダを使用して非同期に列キャッシュを構築する場合、内部的にはバックグラウンドワーカープロセスが指定されたデータベースに接続し続ける事になります。
 `DROP DATABASE`コマンドを使用してデータベースを削除する時、PostgreSQLは当該データベースに接続しているセッションが存在するかどうかをチェックします。この時、ユーザセッションが一つも存在していないにも関わらず、列キャッシュビルダがデータベースへの接続を保持し続ける事で`DROP DATABASE`コマンドが失敗してしまいます。
 
-これを避けるには、`DROP DATABASE`コマンドの実行前に、`pg_strom.ccache_databases`パラメータから当該データベースを削除してください。列キャッシュビルダは直ちに再起動し、新しい設定に基づいてデータベースへの接続を試みます。
+これを避けるには、`DROP DATABASE`コマンドの実行前に、`pg_strom.ccache_databases`パラメータから当該データベースを除外してください。列キャッシュビルダは直ちに再起動し、新しい設定に基づいてデータベースへの接続を試みます。
+}
+
+@ja:#GPUメモリストア(gstore_fdw)
+@en:#GPU Memory Store(gstore_fdw)
+
+@ja:##概要
+@en:##Overview
+
+@ja{
+通常、PG-StromはGPUデバイスメモリを一時的にだけ利用します。クエリの実行中に必要なだけのデバイスメモリを割り当て、その領域にデータを転送してSQLワークロードを実行するためにGPUカーネルを実行します。GPUカーネルの実行が完了すると、当該領域は速やかに開放され、他のワークロードでまた利用する事が可能となります。
+
+これは複数セッションの並行実行やGPUデバイスメモリよりも巨大なテーブルのスキャンを可能にするための設計ですが、状況によっては必ずしも適切ではない場合もあります。
+
+典型的な例は、それほど巨大ではなくGPUデバイスメモリに載る程度の大きさのデータに対して、繰り返し様々な条件で計算を行うといった利用シーンです。これは機械学習やパターンマッチ、類似度サーチといったワークロードが該当します。
+}
+
+@ja{
+現在のGPUにとって、数GB程度のデータをオンメモリで処理する事はそれほど難しい処理ではありませんが、PL/CUDA関数の呼び出しの度にGPUへロードすべきデータをCPUで加工し、これをGPUへ転送するのはコストのかかる処理です。
+
+加えて、PostgreSQLの可変長データには1GBのサイズ上限があるため、これをPL/CUDA関数の引数として与える場合、データサイズ自体は十分にGPUデバイスメモリに載るものであってもデータ形式には一定の制約が存在する事になります。
+}
+
+@ja{
+GPUメモリストア(gstore_fdw)は、あらかじめGPUデバイスメモリを確保しデータをロードしておくための機能です。
+これにより、PL/CUDA関数の呼び出しの度に引数をセットアップしたりデータを転送する必要がなくなるほか、GPUデバイスメモリの容量が許す限りデータを確保する事ができますので、可変長データの1GBサイズ制限も無くなります。
+
+gstore_fdwはその名の通り、PostgreSQLの外部データラッパ（Foreign Data Wrapper）を使用して実装されています。
+gstore_fdwの制御する外部テーブル（Foreign Table）に対して`INSERT`、`UPDATE`、`DELETE`の各コマンドを実行する事で、GPUデバイスメモリ上のデータ構造を更新する事ができます。また、同様に`SELECT`文を用いてデータを読み出す事ができます。
+
+外部テーブルを通してGPUデバイスメモリに格納されたデータは、PL/CUDA関数から参照する事ができます。
+現在のところ、SQLから透過的に生成されたGPUプログラムは当該GPUデバイスメモリ領域を参照する事はできませんが、将来のバージョンにおいて改良が予定されています。
+}
+
+@ja:##初期設定
+@en:##Setup
+
+@ja{
+通常、外部テーブルを作成するには以下の3ステップが必要です。
+- `CREATE FOREIGN DATA WRAPPER`コマンドにより外部データラッパを定義する
+- `CREATE SERVER`コマンドにより外部サーバを定義する
+- `CREATE FOREIGN TABLE`コマンドにより外部テーブルを定義する
+
+このうち、最初の2ステップは`CREATE EXTENSION pg_strom`コマンドの実行に含まれており、個別に実行が必要なのは最後の`CREATE FOREIGN TABLE`のみです。
+}
+
+```
+CREATE FOREIGN TABLE ft (
+    id int,
+    x0 real,
+    x1 real,
+    x2 real,
+    x3 real,
+    x4 real,
+    x5 real,
+    x6 real,
+    x7 real,
+    x8 real,
+    x9 real
+) SERVER gstore_fdw OPTIONS (pinning '0', format 'pgstrom');
+```
+
+@ja{
+`CREATE FOREIGN TABLE`コマンドを使用して外部テーブルを作成する際、いくつかのオプションを指定する必要があります。
+
+`SERVER gstore_fdw`は必須です。外部テーブルがgstore_fdwによって制御されることを指定しています。
+
+`OPTIONS`句では`pinning`および`format`オプションを指定します。
+
+`pinning`オプションは、外部テーブルがデバイスメモリを割り当てるGPUのデバイス番号を指定します。このオプションは必須です。
+
+`format`オプションは、外部テーブルがデバイスメモリ上にデータを書き込む際の内部データ形式を指定します。純粋にSQLを用いてデータ入出力を行い場合、ユーザが内部データ形式を意識する必要はありませんが、PL/CUDA関数をプログラミングしたり、IPCハンドルを用いて外部プログラムとGPUデバイスメモリの連携を取る場合には考慮が必要です。
 }
 
 
 
 
-@ja:#GPUメモリストア(gstore_fdw)
-@en:#GPU Memory Store(gstore_fdw)
+@ja:##運用
+@en:##Operations
+
+
+データのロード
+
+トランザクショナルではあるが、、、
+
+データ容量の確認
+
+preserved memoryの確認
+
+注意事項
+
+
+
+
+@ja:###内部データ構造（pgstromフォーマット）
+@en:###Internal Data Format (pgstrom format)
+
+
+
+
+
+
+
+
+
+
+@ja:##関連機能
+@en:##Related Features
+
+ラージオブジェクト
+
+
+
+
+
+
+
 
 
 
