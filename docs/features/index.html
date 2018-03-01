@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<!--[if IE 8]><html class="no-js lt-ie9" lang="en" > <![endif]-->
+<!--[if gt IE 8]><!--> <html class="no-js" lang="en" > <!--<![endif]-->
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  
+  <meta name="author" content="PG-Strom Development Team">
+  <link rel="shortcut icon" href="../img/favicon.ico">
+  <title>Advanced Features - PG-Strom Manual</title>
+  <link href='https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700' rel='stylesheet' type='text/css'>
+
+  <link rel="stylesheet" href="../css/theme.css" type="text/css" />
+  <link rel="stylesheet" href="../css/theme_extra.css" type="text/css" />
+  <link rel="stylesheet" href="../css/highlight.css">
+  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet">
+  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet">
+  <link href="../custom.css" rel="stylesheet">
+  
+  <script>
+    // Current page data
+    var mkdocs_page_name = "Advanced Features";
+    var mkdocs_page_input_path = "features.md";
+    var mkdocs_page_url = "/features/";
+  </script>
+  
+  <script src="../js/jquery-2.1.1.min.js"></script>
+  <script src="../js/modernizr-2.8.3.min.js"></script>
+  <script type="text/javascript" src="../js/highlight.pack.js"></script> 
+  
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+
+    
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+      <div class="wy-side-nav-search">
+        <a href=".." class="icon icon-home"> PG-Strom Manual</a>
+        <div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
+	<ul class="current">
+	  
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="..">Home</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../install/">Install</a>
+	    </li>
+          
+            <li class="toctree-l1 current">
+		
+    <a class="current" href="./">Advanced Features</a>
+    <ul class="subnav">
+            
+    <li class="toctree-l2"><a href="#ssd-to-gpu-direct-sql-execution">SSD-to-GPU Direct SQL Execution</a></li>
+    
+        <ul>
+        
+            <li><a class="toctree-l3" href="#overview">Overview</a></li>
+        
+            <li><a class="toctree-l3" href="#system-setup">System Setup</a></li>
+        
+            <li><a class="toctree-l3" href="#operations">Operations</a></li>
+        
+        </ul>
+    
+
+    <li class="toctree-l2"><a href="#in-memory-columnar-cache">In-memory Columnar Cache</a></li>
+    
+        <ul>
+        
+            <li><a class="toctree-l3" href="#overview_1">Overview</a></li>
+        
+            <li><a class="toctree-l3" href="#system-setup_1">System Setup</a></li>
+        
+            <li><a class="toctree-l3" href="#operations_1">Operations</a></li>
+        
+        </ul>
+    
+
+    <li class="toctree-l2"><a href="#gpu-memory-storegstore_fdw">GPU Memory Store(gstore_fdw)</a></li>
+    
+        <ul>
+        
+            <li><a class="toctree-l3" href="#overview_2">Overview</a></li>
+        
+            <li><a class="toctree-l3" href="#setup">Setup</a></li>
+        
+            <li><a class="toctree-l3" href="#operations_2">Operations</a></li>
+        
+            <li><a class="toctree-l3" href="#related-features">Related Features</a></li>
+        
+        </ul>
+    
+
+    </ul>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../plcuda/">PL/CUDA</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../references/">References</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../release_note/">Release Note</a>
+	    </li>
+          
+        </ul>
+      </div>
+      &nbsp;
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+
+      
+      <nav class="wy-nav-top" role="navigation" aria-label="top navigation">
+        <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+        <a href="..">PG-Strom Manual</a>
+      </nav>
+
+      
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href="..">Docs</a> &raquo;</li>
+    
+      
+    
+    <li>Advanced Features</li>
+    <li class="wy-breadcrumbs-aside">
+      
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main">
+            <div class="section">
+              
+                <p>This chapter introduces advanced features of PG-Strom.</p>
+<h1 id="ssd-to-gpu-direct-sql-execution">SSD-to-GPU Direct SQL Execution</h1>
+<h2 id="overview">Overview</h2>
+<p><img alt="SSD2GPU Direct SQL Execution Overview" src="../img/ssd2gpu-overview.png" /></p>
+<h2 id="system-setup">System Setup</h2>
+<h3 id="driver-installation">Driver Installation</h3>
+<pre><code>$ sudo yum install nvme-strom
+Loaded plugins: fastestmirror
+      :
+Resolving Dependencies
+--&gt; Running transaction check
+---&gt; Package nvme-strom.x86_64 0:0.6-1.el7 will be installed
+--&gt; Finished Dependency Resolution
+
+Dependencies Resolved
+
+================================================================================
+ Package             Arch            Version            Repository         Size
+================================================================================
+Installing:
+ nvme-strom          x86_64          0.6-1.el7          heterodb           58 k
+
+Transaction Summary
+================================================================================
+Install  1 Package
+
+Total download size: 58 k
+Installed size: 217 k
+Is this ok [y/d/N]: y
+Downloading packages:
+Package nvme-strom-0.6-1.el7.x86_64.rpm is not signed0 B/s |    0 B   --:-- ETA
+nvme-strom-0.6-1.el7.x86_64.rpm                            |  58 kB   00:00
+
+
+Package nvme-strom-0.6-1.el7.x86_64.rpm is not signed
+</code></pre>
+
+<pre><code>$ lsmod | grep nvme
+nvme_strom             12625  0
+nvme                   27722  4
+nvme_core              52964  9 nvme
+</code></pre>
+
+<h3 id="designing-tablespace">Designing Tablespace</h3>
+<pre><code>CREATE TABLESPACE my_nvme LOCATION '/opt/nvme';
+</code></pre>
+
+<pre><code>CREATE TABLE my_table ()
+</code></pre>
+
+<pre><code>ALTER DATABASE my_database SET TABLESPACE my_nvme;
+</code></pre>
+
+<h2 id="operations">Operations</h2>
+<h3 id="controls-using-guc-parameters">Controls using GUC parameters</h3>
+<p>{
+もう一つのパラメータは<code>pg_strom.nvme_strom_threshold</code>で、SSD-to-GPUダイレクトSQL実行が使われるべき最小のテーブルサイズを指定します。</p>
+<p>テーブルの物理配置がNVMe-SSD区画（または、NVMe-SSDのみで構成されたmd-raid0区画）上に存在し、かつ、テーブルのサイズが本パラメータの指定値よりも大きな場合、PG-StromはSSD-to-GPUダイレクトSQL実行を選択します。
+本パラメータのデフォルト値は、システムの物理メモリサイズと<code>shared_buffers</code>パラメータの指定値の1/3です。つまり、初期設定では間違いなくオンメモリで処理しきれないサイズのテーブルに対してだけSSD-to-GPUダイレクトSQL実行を行うよう調整されています。</p>
+<p>これは、一回の読み出しであればSSD-to-GPUダイレクトSQL実行に優位性があったとしても、オンメモリ処理ができる程度のテーブルに対しては、二回目以降のディスクキャッシュ利用を考慮すると、必ずしも優位とは言えないという仮定に立っているという事です。</p>
+<p>ワークロードの特性によっては必ずしもこの設定が正しいとは限りません。
+}</p>
+<h3 id="ensure-usage-of-ssd-to-gpu-direct-sql-execution">Ensure usage of SSD-to-GPU Direct SQL Execution</h3>
+<pre><code># explain (costs off)
+select sum(lo_revenue), d_year, p_brand1
+from lineorder, date1, part, supplier
+where lo_orderdate = d_datekey
+and lo_partkey = p_partkey
+and lo_suppkey = s_suppkey
+and p_category = 'MFGR#12'
+and s_region = 'AMERICA'
+  group by d_year, p_brand1
+  order by d_year, p_brand1;
+                                          QUERY PLAN
+----------------------------------------------------------------------------------------------
+ GroupAggregate
+   Group Key: date1.d_year, part.p_brand1
+   -&gt;  Sort
+         Sort Key: date1.d_year, part.p_brand1
+         -&gt;  Custom Scan (GpuPreAgg)
+               Reduction: Local
+               GPU Projection: pgstrom.psum((lo_revenue)::double precision), d_year, p_brand1
+               Combined GpuJoin: enabled
+               -&gt;  Custom Scan (GpuJoin) on lineorder
+                     GPU Projection: date1.d_year, part.p_brand1, lineorder.lo_revenue
+                     Outer Scan: lineorder
+                     Depth 1: GpuHashJoin  (nrows 2406009600...97764190)
+                              HashKeys: lineorder.lo_partkey
+                              JoinQuals: (lineorder.lo_partkey = part.p_partkey)
+                              KDS-Hash (size: 10.67MB)
+                     Depth 2: GpuHashJoin  (nrows 97764190...18544060)
+                              HashKeys: lineorder.lo_suppkey
+                              JoinQuals: (lineorder.lo_suppkey = supplier.s_suppkey)
+                              KDS-Hash (size: 131.59MB)
+                     Depth 3: GpuHashJoin  (nrows 18544060...18544060)
+                              HashKeys: lineorder.lo_orderdate
+                              JoinQuals: (lineorder.lo_orderdate = date1.d_datekey)
+                              KDS-Hash (size: 461.89KB)
+                     NVMe-Strom: enabled
+                     -&gt;  Custom Scan (GpuScan) on part
+                           GPU Projection: p_brand1, p_partkey
+                           GPU Filter: (p_category = 'MFGR#12'::bpchar)
+                     -&gt;  Custom Scan (GpuScan) on supplier
+                           GPU Projection: s_suppkey
+                           GPU Filter: (s_region = 'AMERICA'::bpchar)
+                     -&gt;  Seq Scan on date1
+(31 rows)
+</code></pre>
+
+<h3 id="attension-for-visibility-map">Attension for visibility map</h3>
+<pre><code>VACUUM ANALYZE linerorder;
+</code></pre>
+
+<h1 id="in-memory-columnar-cache">In-memory Columnar Cache</h1>
+<h2 id="overview_1">Overview</h2>
+<h2 id="system-setup_1">System Setup</h2>
+<h3 id="location-of-the-columnar-cache">Location of the columnar cache</h3>
+<h3 id="columnar-cache-builder-configuration">Columnar Cache Builder Configuration</h3>
+<h3 id="source-table-configuration">Source Table Configuration</h3>
+<pre><code>postgres=# select pgstrom_ccache_enabled('t0');
+ pgstrom_ccache_enabled
+------------------------
+ enabled
+(1 row)
+</code></pre>
+
+<h2 id="operations_1">Operations</h2>
+<h3 id="check-status-of-columnar-cache">Check status of columnar cache</h3>
+<pre><code>contrib_regression_pg_strom=# SELECT * FROM pgstrom.ccache_info ;
+ database_id | table_id | block_nr | nitems  |  length   |             ctime             |             atime
+-------------+----------+----------+---------+-----------+-------------------------------+-------------------------------
+       13323 | 25887    |   622592 | 1966080 | 121897472 | 2018-02-18 14:31:30.898389+09 | 2018-02-18 14:38:43.711287+09
+       13323 | 25887    |   425984 | 1966080 | 121897472 | 2018-02-18 14:28:39.356952+09 | 2018-02-18 14:38:43.514788+09
+       13323 | 25887    |    98304 | 1966080 | 121897472 | 2018-02-18 14:28:01.542261+09 | 2018-02-18 14:38:42.930281+09
+         :       :             :         :          :                :                               :
+       13323 | 25887    |    16384 | 1963079 | 121711472 | 2018-02-18 14:28:00.647021+09 | 2018-02-18 14:38:42.909112+09
+       13323 | 25887    |   737280 | 1966080 | 121897472 | 2018-02-18 14:34:32.249899+09 | 2018-02-18 14:38:43.882029+09
+       13323 | 25887    |   770048 | 1966080 | 121897472 | 2018-02-18 14:28:57.321121+09 | 2018-02-18 14:38:43.90157+09
+(50 rows)
+</code></pre>
+
+<h3 id="check-usage-of-columnar-cache">Check usage of columnar cache</h3>
+<pre><code>postgres=# EXPLAIN SELECT id,ax FROM t0 NATURAL JOIN t1 WHERE aid &lt; 1000;
+
+                                  QUERY PLAN
+-------------------------------------------------------------------------------
+ Custom Scan (GpuJoin) on t0  (cost=12398.65..858048.45 rows=1029348 width=12)
+   GPU Projection: t0.id, t1.ax
+   Outer Scan: t0  (cost=10277.55..864623.44 rows=1029348 width=8)
+   Outer Scan Filter: (aid &lt; 1000)
+   Depth 1: GpuHashJoin  (nrows 1029348...1029348)
+            HashKeys: t0.aid
+            JoinQuals: (t0.aid = t1.aid)
+            KDS-Hash (size: 10.78MB)
+   CCache: enabled
+   -&gt;  Seq Scan on t1  (cost=0.00..1935.00 rows=100000 width=12)
+(10 rows)
+</code></pre>
+
+<pre><code>postgres=# EXPLAIN ANALYZE SELECT id,ax FROM t0 NATURAL JOIN t1 WHERE aid &lt; 1000;
+
+                                    QUERY PLAN
+
+-------------------------------------------------------------------------------------------
+ Custom Scan (GpuJoin) on t0  (cost=12398.65..858048.45 rows=1029348 width=12)
+                              (actual time=91.766..723.549 rows=1000224 loops=1)
+   GPU Projection: t0.id, t1.ax
+   Outer Scan: t0  (cost=10277.55..864623.44 rows=1029348 width=8)
+                   (actual time=7.129..398.270 rows=100000000 loops=1)
+   Outer Scan Filter: (aid &lt; 1000)
+   Rows Removed by Outer Scan Filter: 98999776
+   Depth 1: GpuHashJoin  (plan nrows: 1029348...1029348, actual nrows: 1000224...1000224)
+            HashKeys: t0.aid
+            JoinQuals: (t0.aid = t1.aid)
+            KDS-Hash (size plan: 10.78MB, exec: 64.00MB)
+   CCache Hits: 50
+   -&gt;  Seq Scan on t1  (cost=0.00..1935.00 rows=100000 width=12)
+                       (actual time=0.011..13.542 rows=100000 loops=1)
+ Planning time: 23.390 ms
+ Execution time: 1409.073 ms
+(13 rows)
+</code></pre>
+
+<h3 id="attension-for-drop-database-command">Attension for <code>DROP DATABASE</code> command</h3>
+<h1 id="gpu-memory-storegstore_fdw">GPU Memory Store(gstore_fdw)</h1>
+<h2 id="overview_2">Overview</h2>
+<h2 id="setup">Setup</h2>
+<pre><code>CREATE FOREIGN TABLE ft (
+    id int,
+    x0 real,
+    x1 real,
+    x2 real,
+    x3 real,
+    x4 real,
+    x5 real,
+    x6 real,
+    x7 real,
+    x8 real,
+    x9 real
+) SERVER gstore_fdw OPTIONS (pinning '0', format 'pgstrom');
+</code></pre>
+
+<h2 id="operations_2">Operations</h2>
+<p>データのロード</p>
+<p>トランザクショナルではあるが、、、</p>
+<p>データ容量の確認</p>
+<p>preserved memoryの確認</p>
+<p>注意事項</p>
+<h3 id="internal-data-format-pgstrom-format">Internal Data Format (pgstrom format)</h3>
+<h2 id="related-features">Related Features</h2>
+<p>ラージオブジェクト</p>
+              
+            </div>
+          </div>
+          <footer>
+  
+    <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
+      
+        <a href="../plcuda/" class="btn btn-neutral float-right" title="PL/CUDA">Next <span class="icon icon-circle-arrow-right"></span></a>
+      
+      
+        <a href="../install/" class="btn btn-neutral" title="Install"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+      
+    </div>
+  
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+    
+  </div>
+
+  Built with <a href="http://www.mkdocs.org">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+      
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" style="cursor: pointer">
+    <span class="rst-current-version" data-toggle="rst-current-version">
+      
+      
+        <span><a href="../install/" style="color: #fcfcfc;">&laquo; Previous</a></span>
+      
+      
+        <span style="margin-left: 15px"><a href="../plcuda/" style="color: #fcfcfc">Next &raquo;</a></span>
+      
+    </span>
+</div>
+    <script>var base_url = '..';</script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/require.js"></script>
+      <script src="../search/search.js"></script>
+
+</body>
+</html>

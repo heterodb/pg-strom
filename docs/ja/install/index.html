@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<!--[if IE 8]><html class="no-js lt-ie9" lang="en" > <![endif]-->
+<!--[if gt IE 8]><!--> <html class="no-js" lang="en" > <!--<![endif]-->
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  
+  <meta name="author" content="PG-Strom Development Team">
+  <link rel="shortcut icon" href="../img/favicon.ico">
+  <title>インストール - PG-Strom Manual</title>
+  <link href='https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700' rel='stylesheet' type='text/css'>
+
+  <link rel="stylesheet" href="../css/theme.css" type="text/css" />
+  <link rel="stylesheet" href="../css/theme_extra.css" type="text/css" />
+  <link rel="stylesheet" href="../css/highlight.css">
+  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet">
+  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet">
+  <link href="../custom.css" rel="stylesheet">
+  
+  <script>
+    // Current page data
+    var mkdocs_page_name = "\u30a4\u30f3\u30b9\u30c8\u30fc\u30eb";
+    var mkdocs_page_input_path = "install.md";
+    var mkdocs_page_url = "/install/";
+  </script>
+  
+  <script src="../js/jquery-2.1.1.min.js"></script>
+  <script src="../js/modernizr-2.8.3.min.js"></script>
+  <script type="text/javascript" src="../js/highlight.pack.js"></script> 
+  
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+
+    
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+      <div class="wy-side-nav-search">
+        <a href=".." class="icon icon-home"> PG-Strom Manual</a>
+        <div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
+	<ul class="current">
+	  
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="..">はじめに</a>
+	    </li>
+          
+            <li class="toctree-l1 current">
+		
+    <a class="current" href="./">インストール</a>
+    <ul class="subnav">
+            
+    <li class="toctree-l2"><a href="#_1">チェックリスト</a></li>
+    
+
+    <li class="toctree-l2"><a href="#os">OSのインストール</a></li>
+    
+        <ul>
+        
+            <li><a class="toctree-l3" href="#os_1">OSインストール後の設定</a></li>
+        
+        </ul>
+    
+
+    <li class="toctree-l2"><a href="#cuda-toolkit">CUDA Toolkitのインストール</a></li>
+    
+
+    <li class="toctree-l2"><a href="#postgresql">PostgreSQLのインストール</a></li>
+    
+
+    <li class="toctree-l2"><a href="#pg-strom">PG-Stromのインストール</a></li>
+    
+        <ul>
+        
+            <li><a class="toctree-l3" href="#rpm">RPMによるインストール</a></li>
+        
+            <li><a class="toctree-l3" href="#_2">ソースからのビルド</a></li>
+        
+            <li><a class="toctree-l3" href="#_4">インストール後の設定</a></li>
+        
+        </ul>
+    
+
+    </ul>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../features/">先進機能</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../plcuda/">PL/CUDA</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../references/">リファレンス</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../release_note/">リリースノート</a>
+	    </li>
+          
+        </ul>
+      </div>
+      &nbsp;
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+
+      
+      <nav class="wy-nav-top" role="navigation" aria-label="top navigation">
+        <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+        <a href="..">PG-Strom Manual</a>
+      </nav>
+
+      
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href="..">Docs</a> &raquo;</li>
+    
+      
+    
+    <li>インストール</li>
+    <li class="wy-breadcrumbs-aside">
+      
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main">
+            <div class="section">
+              
+                <p>本章ではPG-Stromのインストール手順について説明します。</p>
+<h1 id="_1">チェックリスト</h1>
+<ul>
+<li><strong>ハードウェア</strong><ul>
+<li>CUDA ToolkitのサポートするLinuxオペレーティングシステムを動作可能な x86_64 アーキテクチャのハードウェアが必要です。 </li>
+<li>CPU、ストレージ、およびネットワークデバイスには特別な要件はありませんが、<a href="https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List">note002:HW Validation List</a>はハードウェア選定の上で参考になるかもしれません。</li>
+<li>SSD-to-GPUダイレクトSQL実行を利用するにはNVMe規格に対応したSSDが必要で、GPUと同一のPCIe Root Complex配下に接続されている必要があります。</li>
+</ul>
+</li>
+<li><strong>GPUデバイス</strong><ul>
+<li>PG-Stromを実行するには少なくとも一個のGPUデバイスがシステム上に必要です。これらはCUDA Toolkitでサポートされており、computing capability が6.0以降のモデル（Pascal世代以降）である必要があります。</li>
+<li><a href="https://github.com/heterodb/pg-strom/wiki/001:-GPU-Availability-Matrix">note001:GPU Availability Matrix</a>により詳細な情報が記載されています。SSD-to-GPUダイレクトSQL実行の対応状況に関してもこちらを参照してください。</li>
+</ul>
+</li>
+<li><strong>Operating System</strong><ul>
+<li>PG-Stromの実行には、CUDA Toolkitによりサポートされているx86_64アーキテクチャ向けのLinux OSが必要です。推奨環境はRed Hat Enterprise LinuxまたはCentOSのバージョン7.xシリーズです。</li>
+<li>SSD-to-GPUダイレクトSQL実行を利用するには、Red Hat Enterprise Linux または CentOS のバージョン7.3以降が必要です。</li>
+</ul>
+</li>
+<li><strong>PostgreSQL</strong><ul>
+<li>PG-Stromの実行にはPostgreSQLバージョン9.6以降が必要です。これは、Custom ScanインターフェースがCPU並列実行やGROUP BYに対応するため刷新され、拡張モジュールが提供するカスタム実行計画を自然な形で統合できるようになったためです。</li>
+</ul>
+</li>
+<li><strong>CUDA Toolkit</strong><ul>
+<li>PG-Stromの実行にはCUDA Toolkit バージョン9.1以降が必要です。</li>
+<li>PG-Stromが提供する半精度浮動小数点（<code>float2</code>）型は、内部的にCUDA Cのhalf_t型を使用しており、古いCUDA Toolkitではこれをビルドできないためです。</li>
+</ul>
+</li>
+</ul>
+<h1 id="os">OSのインストール</h1>
+<p>CUDA ToolkitのサポートするLinuxディストリビューションを選択し、個々のディストリビューションのインストールプロセスに従ってインストール作業を行ってください。 CUDA ToolkitのサポートするLinuxディストリビューションは、NVIDIA DEVELOPER ZONEにおいて紹介されています。</p>
+<p>Red Hat Enterprise Linux 7.x系列、またはCentOS 7.x系列の場合、「...」「....」を選択し、以下のパッケージを追加してください。</p>
+<ul>
+<li>あ</li>
+<li>と</li>
+<li>で</li>
+<li>確</li>
+<li>認</li>
+</ul>
+<h2 id="os_1">OSインストール後の設定</h2>
+<p>システムへのOSのインストール後、後のステップでGPUドライバとNVMe-Stromドライバをインストールするために、いくつかの追加設定が必要です。</p>
+<h3 id="dkms">DKMSのインストール</h3>
+<p>DKMS (Dynamic Kernel Module Support) は、動作中のLinuxカーネル向けのLinuxカーネルモジュールを必要に応じてビルドするためのフレームワークで、NVIDIAのドライバも対応しています。Linuxカーネルのバージョンアップに追従してカーネルモジュールも更新されるため、DKMSのセットアップは推奨です。</p>
+<p>DKMSパッケージはEPEL (Extra Packages for Enterprise Linux) の一部として配布されています。ですので、CentOSのパブリックFTPサイトから <code>epel-release-&lt;distribution version&gt;.noarch.rpm</code> をダウンロードし、これをインストールしてください。 いったん epel-release パッケージがインストールされると、EPELリポジトリから非標準のパッケージを入手するためのyumシステムへの設定が追加されます。</p>
+<ul>
+<li>Fedora Project Public FTP Site<ul>
+<li><a href="https://dl.fedoraproject.org/pub/epel/7/x86_64/">https://dl.fedoraproject.org/pub/epel/7/x86_64/</a></li>
+</ul>
+</li>
+</ul>
+<h3 id="heterodb-swdc">HeteroDB-SWDCのインストール</h3>
+<h1 id="cuda-toolkit">CUDA Toolkitのインストール</h1>
+<p>本節ではCUDA Toolkitのインストールについて説明します。 既に対応バージョンのCUDA Toolkitをインストール済みであれば、本節の内容は読み飛ばして構いません</p>
+<p>NVIDIAはCUDA Toolkitのインストールに２通りの方法を提供しています。一つは自己実行型アーカイブ（runfileと呼ばれる）によるもの。もう一つはRPMパッケージによるものです。
+ソフトウェアの更新が容易である事から、後者のRPMパッケージによるインストールが推奨です。</p>
+<p>CUDA Toolkitのインストール用パッケージはNVIDIA DEVELOPER ZONEからダウンロードする事ができます。 適切なOS、アーキテクチャ、ディストリビューション、バージョンを指定し、『rpm(network)』版を選択してください。</p>
+<p><img alt="CUDA Toolkit download" src="../img/cuda-download.png" /></p>
+<p>『rpm(network)』パッケージにはCUDA Toolkitを配布するyumリポジトリの定義情報が含まれているだけです。これは OSのインストール においてシステムにEPELリポジトリの定義を追加したのと同様の方法です。 したがって、cudaリポジトリを登録した後、関連したRPMパッケージをネットワークインストールする必要があります。 下記のコマンドを実行してください。</p>
+<pre><code>$ sudo rpm -i cuda-repo-&lt;distribution&gt;-&lt;version&gt;.x86_64.rpm
+$ sudo yum clean all
+$ sudo yum install cuda
+</code></pre>
+
+<p>正常にインストールが完了すると、<code>/usr/local/cuda</code>配下にCUDA Toolkitが導入されています。</p>
+<pre><code>$ ls /usr/local/cuda
+bin     include  libnsight         nvml       samples  tools
+doc     jre      libnvvp           nvvm       share    version.txt
+extras  lib64    nsightee_plugins  pkgconfig  src
+</code></pre>
+
+<p>CUDAおよび<code>nvidia</code>ドライバのインストールが完了したら、GPUが正しく認識されている事を確認してください。<code>nvidia-smi</code>コマンドを実行すると、以下の出力例のように、システムに搭載されているGPUの情報が表示されます。</p>
+<pre><code>$ nvidia-smi
+Wed Feb 14 09:43:48 2018
++-----------------------------------------------------------------------------+
+| NVIDIA-SMI 387.26                 Driver Version: 387.26                    |
+|-------------------------------+----------------------+----------------------+
+| GPU  Name        Persistence-M| Bus-Id        Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp  Perf  Pwr:Usage/Cap|         Memory-Usage | GPU-Util  Compute M. |
+|===============================+======================+======================|
+|   0  Tesla V100-PCIE...  Off  | 00000000:02:00.0 Off |                    0 |
+| N/A   41C    P0    37W / 250W |      0MiB / 16152MiB |      0%      Default |
++-------------------------------+----------------------+----------------------+
+
++-----------------------------------------------------------------------------+
+| Processes:                                                       GPU Memory |
+|  GPU       PID   Type   Process name                             Usage      |
+|=============================================================================|
+|  No running processes found                                                 |
++-----------------------------------------------------------------------------+
+</code></pre>
+
+<h1 id="postgresql">PostgreSQLのインストール</h1>
+<p>本節ではRPMによるPostgreSQLのインストールについて紹介します。
+ソースからのインストールに関しては既にドキュメントが数多く存在し、<code>./configure</code>スクリプトのオプションが多岐にわたる事から、ここでは紹介しません。</p>
+<p>Linuxディストリビューションの配布するパッケージにもPostgreSQLは含まれていますが、必ずしも最新ではなく、PG-Stromの対応バージョンよりも古いものである事が多々あります。例えば、Red Hat Enterprise Linux 7.xやCentOS 7.xで配布されているPostgreSQLはv9.2.xですが、これはPostgreSQLコミュニティとして既にEOLとなっているバージョンです。</p>
+<p>PostgreSQL Global Development Groupは、最新のPostgreSQLおよび関連ソフトウェアの配布のためにyumリポジトリを提供しています。
+EPELの設定のように、yumリポジトリの設定を行うだけの小さなパッケージをインストールし、その後、PostgreSQLやその他のソフトウェアをインストールします。</p>
+<p>yumリポジトリ定義の一覧は <a href="http://yum.postgresql.org/repopackages.php">http://yum.postgresql.org/repopackages.php</a> です。</p>
+<p>PostgreSQLメジャーバージョンとLinuxディストリビューションごとに多くのリポジトリ定義がありますが、あなたのLinuxディストリビューション向けのPostgreSQL 9.6以降のものを選択する必要があります。</p>
+<p>以下のように、yumリポジトリの定義をインストールし、次いで、PostgreSQLパッケージをインストールすれば完了です。 PostgreSQL v10を使用する場合、PG-Stromのインストールには以下のパッケージが必要です。</p>
+<ul>
+<li>postgresql10-devel</li>
+<li>postgresql10-server</li>
+</ul>
+<pre><code>$ sudo rpm -ivh pgdg-redhat10-10-2.noarch.rpm
+$ sudo yum install -y postgresql10-server postgresql10-devel
+            :
+            :
+================================================================================
+ Package                  Arch        Version                 Repository   Size
+================================================================================
+Installing:
+ postgresql10-devel       x86_64      10.2-1PGDG.rhel7        pgdg10      2.0 M
+ postgresql10-server      x86_64      10.2-1PGDG.rhel7        pgdg10      4.4 M
+Installing for dependencies:
+ postgresql10             x86_64      10.2-1PGDG.rhel7        pgdg10      1.5 M
+ postgresql10-libs        x86_64      10.2-1PGDG.rhel7        pgdg10      354 k
+
+Transaction Summary
+================================================================================
+Install  2 Packages (+2 Dependent packages)
+
+Total download size: 8.3 M
+Installed size: 35 M
+            :
+            :
+Installed:
+  postgresql10-devel.x86_64 0:10.2-1PGDG.rhel7
+  postgresql10-server.x86_64 0:10.2-1PGDG.rhel7
+
+Dependency Installed:
+  postgresql10.x86_64 0:10.2-1PGDG.rhel7
+  postgresql10-libs.x86_64 0:10.2-1PGDG.rhel7
+
+Complete!
+</code></pre>
+
+<h1 id="pg-strom">PG-Stromのインストール</h1>
+<p>本節ではPG-Stromのインストール方法について説明します。
+推奨はRPMによるインストールですが、開発者向けにソースコードからのビルド方法についても紹介します。</p>
+<h2 id="rpm">RPMによるインストール</h2>
+<p>PG-Stromおよび関連パッケージは<a href="https://heterodb.github.io/swdc/">HeteroDB Software Distribution Center</a>より配布されています。このサイトはyumリポジトリとしても機能するよう作成されており、<code>heterodb-swdc</code>パッケージをインストールする事でyumリポジトリのエントリが追加されます。</p>
+<pre><code>$ wget https://heterodb.github.io/swdc/yum/rhel7-noarch/heterodb-swdc-1.0-1.el7.noarch.rpm
+$ sudo rpm -ivh heterodb-swdc-1.0-1.el7.noarch.rpm
+Preparing...                          ################################# [100%]
+Updating / installing...
+   1:heterodb-swdc-1.0-1.el7          ################################# [100%]
+
+</code></pre>
+
+<p>続いて、PG-StromのRPMパッケージをインストールします。
+対象となるPostgreSQLバージョン毎に別個のRPMパッケージが準備されており、PostgreSQL v9.6用であれば<code>pg-strom-PG96</code>パッケージを、PostgreSQL v10用であれば<code>pg-strom-PG10</code>パッケージをインストールします。</p>
+<pre><code>
+</code></pre>
+
+<p>以上でパッケージのインストールは完了です。</p>
+<h2 id="_2">ソースからのビルド</h2>
+<p>開発者向けに、ソースコードからPG-Stromをビルドする方法についても紹介します。</p>
+<h3 id="_3">ソースコードの入手</h3>
+<p>RPMパッケージと同様に、ソースコードのtarballを<a href="https://heterodb.github.io/swdc/">HeteroDB Software Distribution Center</a>から入手する事ができます。</p>
+<p>ただ、tarballのリリースにはある程度のタイムラグが生じてしまうため、最新の開発版を使いたい場合には<a href="https://github.com/heterodb/pg-strom">PG-StromのGitHubリポジトリ</a>の<code>master</code>ブランチをチェックアウトする方法の方が好まれるかもしれません。</p>
+<pre><code>$ git clone https://github.com/heterodb/pg-strom.git
+Cloning into 'pg-strom'...
+remote: Counting objects: 13797, done.
+remote: Compressing objects: 100% (215/215), done.
+remote: Total 13797 (delta 208), reused 339 (delta 167), pack-reused 13400
+Receiving objects: 100% (13797/13797), 11.81 MiB | 1.76 MiB/s, done.
+Resolving deltas: 100% (10504/10504), done.
+</code></pre>
+
+<h3 id="pg-strom_1">PG-Stromのビルド</h3>
+<p>PG-Stromをビルドする時のコンフィグは、インストール先のPostgreSQLと厳密に一致していなければいけません。例えば、同じ構造体がビルド時のコンフィグによりPostgreSQLとPG-Stromで異なったレイアウトを持ってしまったとすれば、非常に発見の難しいバグを生み出してしまうかもしれません。 したがって、（一貫性のない状態を避けるため）PG-Stromは独自にconfigureスクリプトを走らせたりはせず、<code>pg_config</code>を使ってPostgreSQLのビルド時設定を参照します。</p>
+<p><code>pg_config</code>にパスが通っており、それがインストール先のPostgreSQLのものであれば、そのまま<code>make</code>、<code>make install</code>を実行します。
+直接パスが通っていない場合は、<code>make</code>コマンドに<code>PG_CONFIG=...</code>パラメータを与え、<code>pg_config</code>のフルパスを渡します。</p>
+<pre><code>$ cd pg-strom
+$ make PG_CONFIG=/usr/pgsql-10/bin/pg_config
+$ sudo make install PG_CONFIG=/usr/pgsql-10/bin/pg_config
+</code></pre>
+
+<h2 id="_4">インストール後の設定</h2>
+              
+            </div>
+          </div>
+          <footer>
+  
+    <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
+      
+        <a href="../features/" class="btn btn-neutral float-right" title="先進機能">Next <span class="icon icon-circle-arrow-right"></span></a>
+      
+      
+        <a href=".." class="btn btn-neutral" title="はじめに"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+      
+    </div>
+  
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+    
+  </div>
+
+  Built with <a href="http://www.mkdocs.org">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+      
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" style="cursor: pointer">
+    <span class="rst-current-version" data-toggle="rst-current-version">
+      
+      
+        <span><a href=".." style="color: #fcfcfc;">&laquo; Previous</a></span>
+      
+      
+        <span style="margin-left: 15px"><a href="../features/" style="color: #fcfcfc">Next &raquo;</a></span>
+      
+    </span>
+</div>
+    <script>var base_url = '..';</script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/require.js"></script>
+      <script src="../search/search.js"></script>
+
+</body>
+</html>

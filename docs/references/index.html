@@ -1,0 +1,874 @@
+<!DOCTYPE html>
+<!--[if IE 8]><html class="no-js lt-ie9" lang="en" > <![endif]-->
+<!--[if gt IE 8]><!--> <html class="no-js" lang="en" > <!--<![endif]-->
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  
+  <meta name="author" content="PG-Strom Development Team">
+  <link rel="shortcut icon" href="../img/favicon.ico">
+  <title>References - PG-Strom Manual</title>
+  <link href='https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700' rel='stylesheet' type='text/css'>
+
+  <link rel="stylesheet" href="../css/theme.css" type="text/css" />
+  <link rel="stylesheet" href="../css/theme_extra.css" type="text/css" />
+  <link rel="stylesheet" href="../css/highlight.css">
+  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet">
+  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet">
+  <link href="../custom.css" rel="stylesheet">
+  
+  <script>
+    // Current page data
+    var mkdocs_page_name = "References";
+    var mkdocs_page_input_path = "references.md";
+    var mkdocs_page_url = "/references/";
+  </script>
+  
+  <script src="../js/jquery-2.1.1.min.js"></script>
+  <script src="../js/modernizr-2.8.3.min.js"></script>
+  <script type="text/javascript" src="../js/highlight.pack.js"></script> 
+  
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+
+    
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+      <div class="wy-side-nav-search">
+        <a href=".." class="icon icon-home"> PG-Strom Manual</a>
+        <div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
+	<ul class="current">
+	  
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="..">Home</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../install/">Install</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../features/">Advanced Features</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../plcuda/">PL/CUDA</a>
+	    </li>
+          
+            <li class="toctree-l1 current">
+		
+    <a class="current" href="./">References</a>
+    <ul class="subnav">
+            
+    <li class="toctree-l2"><a href="#references">References</a></li>
+    
+        <ul>
+        
+            <li><a class="toctree-l3" href="#supported-data-types">Supported Data Types</a></li>
+        
+            <li><a class="toctree-l3" href="#functions-and-operators">Functions and Operators</a></li>
+        
+            <li><a class="toctree-l3" href="#system-view">System View</a></li>
+        
+            <li><a class="toctree-l3" href="#guc-parameters">GUC Parameters</a></li>
+        
+        </ul>
+    
+
+    </ul>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../release_note/">Release Note</a>
+	    </li>
+          
+        </ul>
+      </div>
+      &nbsp;
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+
+      
+      <nav class="wy-nav-top" role="navigation" aria-label="top navigation">
+        <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+        <a href="..">PG-Strom Manual</a>
+      </nav>
+
+      
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href="..">Docs</a> &raquo;</li>
+    
+      
+    
+    <li>References</li>
+    <li class="wy-breadcrumbs-aside">
+      
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main">
+            <div class="section">
+              
+                <h1 id="references">References</h1>
+<h2 id="supported-data-types">Supported Data Types</h2>
+<p>PG-Strom support the following data types for use on GPU device.</p>
+<p><strong>Built-in numeric types</strong></p>
+<table>
+<thead>
+<tr>
+<th align="left">SQL data types</th>
+<th align="left">Internal format</th>
+<th align="left">Length</th>
+<th align="left">Memo</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>smallint</code></td>
+<td align="left"><code>cl_short</code></td>
+<td align="left">2 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>integer</code></td>
+<td align="left"><code>cl_int</code></td>
+<td align="left">4 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>bigint</code></td>
+<td align="left"><code>cl_long</code></td>
+<td align="left">8 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>real</code></td>
+<td align="left"><code>cl_float</code></td>
+<td align="left">4 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>float</code></td>
+<td align="left"><code>cl_double</code></td>
+<td align="left">8 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>numeric</code></td>
+<td align="left"><code>cl_ulong</code></td>
+<td align="left">variable length</td>
+<td align="left">mapped to 64bit internal format</td>
+</tr>
+</tbody>
+</table>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>When GPU processes values in <code>numeric</code> data type, it is converted to an internal 64bit format because of implementation reason.
+It is transparently converted to/from the internal format, on the other hands, PG-Strom cannot convert <code>numaric</code> datum with large number of digits, so tries to fallback operations by CPU. Therefore, it may lead slowdown if <code>numeric</code> data with large number of digits are supplied to GPU device.
+To avoid the problem, turn off the GUC option <code>pg_strom.enable_numeric_type</code> not to run operational expression including <code>numeric</code> data types on GPU devices.</p>
+</div>
+<p><strong>Built-in date and time types</strong></p>
+<table>
+<thead>
+<tr>
+<th align="left">SQL data types</th>
+<th align="left">Internal format</th>
+<th align="left">Length</th>
+<th align="left">Memo</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>date</code></td>
+<td align="left"><code>DateADT</code></td>
+<td align="left">4 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>time</code></td>
+<td align="left"><code>TimeADT</code></td>
+<td align="left">8 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>timetz</code></td>
+<td align="left"><code>TimeTzADT</code></td>
+<td align="left">12 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>timestamp</code></td>
+<td align="left"><code>Timestamp</code></td>
+<td align="left">8 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>timestamptz</code></td>
+<td align="left"><code>TimestampTz</code></td>
+<td align="left">8 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>interval</code></td>
+<td align="left"><code>Interval</code></td>
+<td align="left">16 bytes</td>
+<td align="left"></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Built-in variable length types</strong></p>
+<table>
+<thead>
+<tr>
+<th align="left">SQL data types</th>
+<th align="left">Internal format</th>
+<th align="left">Length</th>
+<th align="left">Memo</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>bpchar</code></td>
+<td align="left"><code>varlena *</code></td>
+<td align="left">variable length</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>varchar</code></td>
+<td align="left"><code>varlena *</code></td>
+<td align="left">variable length</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>bytea</code></td>
+<td align="left"><code>varlena *</code></td>
+<td align="left">variable length</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>text</code></td>
+<td align="left"><code>varlena *</code></td>
+<td align="left">variable length</td>
+<td align="left"></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Built-in miscellaneous types</strong></p>
+<table>
+<thead>
+<tr>
+<th align="left">SQL data types</th>
+<th align="left">Internal format</th>
+<th align="left">Length</th>
+<th align="left">Memo</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>boolean</code></td>
+<td align="left"><code>cl_bool</code></td>
+<td align="left">1 byte</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>money</code></td>
+<td align="left"><code>cl_long</code></td>
+<td align="left">8 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>uuid</code></td>
+<td align="left"><code>pg_uuid</code></td>
+<td align="left">16 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>macaddr</code></td>
+<td align="left"><code>macaddr</code></td>
+<td align="left">6 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>inet</code></td>
+<td align="left"><code>inet_struct</code></td>
+<td align="left">7 bytes or 19 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>cidr</code></td>
+<td align="left"><code>inet_struct</code></td>
+<td align="left">7 bytes or 19 bytes</td>
+<td align="left"></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Built-in range data types</strong></p>
+<table>
+<thead>
+<tr>
+<th align="left">SQL data types</th>
+<th align="left">Internal format</th>
+<th align="left">Length</th>
+<th align="left">Memo</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>int4range</code></td>
+<td align="left"><code>__int4range</code></td>
+<td align="left">14 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>int8range</code></td>
+<td align="left"><code>__int8range</code></td>
+<td align="left">22 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>tsrange</code></td>
+<td align="left"><code>__tsrange</code></td>
+<td align="left">22 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>tstzrange</code></td>
+<td align="left"><code>__tstzrange</code></td>
+<td align="left">22 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>daterange</code></td>
+<td align="left"><code>__daterange</code></td>
+<td align="left">14 bytes</td>
+<td align="left"></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Extra Types</strong></p>
+<table>
+<thead>
+<tr>
+<th align="left">SQL data types</th>
+<th align="left">Internal format</th>
+<th align="left">Length</th>
+<th align="left">Memo</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>float2</code></td>
+<td align="left"><code>half_t</code></td>
+<td align="left">2 bytes</td>
+<td align="left">Half precision data type</td>
+</tr>
+</tbody>
+</table>
+<h2 id="functions-and-operators">Functions and Operators</h2>
+<h3 id="device-information-functions">Device information functions</h3>
+<h2 id="system-view">System View</h2>
+<p>PG-Strom provides several system view to export its internal state for users or applications.
+The future version may add extra fields here. So, it is not recommended to reference these information schemas using <code>SELECT * FROM ...</code>.</p>
+<h3 id="pgstromdevice_info">pgstrom.device_info</h3>
+<p><code>pgstrom.device_into</code> system view exports device attributes of the GPUs recognized by PG-Strom.
+GPU has different specification for each model, like number of cores, capacity of global memory, maximum number of threads and etc, user's software should be optimized according to the information if you try raw GPU programming with PL/CUDA functions.</p>
+<table>
+<thead>
+<tr>
+<th align="left">Name</th>
+<th align="left">Data Type</th>
+<th align="left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left">device_nr</td>
+<td align="left"><code>int</code></td>
+<td align="left">GPU device number</td>
+</tr>
+<tr>
+<td align="left">aindex</td>
+<td align="left"><code>int</code></td>
+<td align="left">Attribute index</td>
+</tr>
+<tr>
+<td align="left">attribute</td>
+<td align="left"><code>text</code></td>
+<td align="left">Attribute name</td>
+</tr>
+<tr>
+<td align="left">value</td>
+<td align="left"><code>text</code></td>
+<td align="left">Value of the attribute</td>
+</tr>
+</tbody>
+</table>
+<h3 id="pgstromdevice_preserved_meminfo">pgstrom.device_preserved_meminfo</h3>
+<p><code>pgstrom.device_preserved_meminfo</code> system view exports information of the preserved device memory; which can be shared multiple PostgreSQL backend.
+Right now, only gstore_fdw uses this feature.</p>
+<table>
+<thead>
+<tr>
+<th align="left">Name</th>
+<th align="left">Data Type</th>
+<th align="left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left">device_nr</td>
+<td align="left"><code>int</code></td>
+<td align="left">GPU device number</td>
+</tr>
+<tr>
+<td align="left">handle</td>
+<td align="left"><code>bytea</code></td>
+<td align="left">IPC handle of the preserved device memory</td>
+</tr>
+<tr>
+<td align="left">owner</td>
+<td align="left"><code>regrole</code></td>
+<td align="left">Owner of the preserved device memory</td>
+</tr>
+<tr>
+<td align="left">length</td>
+<td align="left"><code>bigint</code></td>
+<td align="left">Length of the preserved device memory in bytes</td>
+</tr>
+<tr>
+<td align="left">ctime</td>
+<td align="left"><code>timestamp with time zone</code></td>
+<td align="left">Timestamp when the preserved device memory is created</td>
+</tr>
+</tbody>
+</table>
+<h3 id="pgstromccache_info">pgstrom.ccache_info</h3>
+<p><code>pgstrom.ccache_info</code> system view exports attribute of the columnar-cache chunks (128MB unit for each).</p>
+<table>
+<thead>
+<tr>
+<th align="left">Name</th>
+<th align="left">Data Type</th>
+<th align="left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left">database_id</td>
+<td align="left"><code>oid</code></td>
+<td align="left">Database Id</td>
+</tr>
+<tr>
+<td align="left">table_id</td>
+<td align="left"><code>regclass</code></td>
+<td align="left">Table Id</td>
+</tr>
+<tr>
+<td align="left">block_nr</td>
+<td align="left"><code>int</code></td>
+<td align="left">Head block-number of the chunk</td>
+</tr>
+<tr>
+<td align="left">nitems</td>
+<td align="left"><code>bigint</code></td>
+<td align="left">Number of rows in the chunk</td>
+</tr>
+<tr>
+<td align="left">length</td>
+<td align="left"><code>bigint</code></td>
+<td align="left">Raw size of the cached chunk</td>
+</tr>
+<tr>
+<td align="left">ctime</td>
+<td align="left"><code>timestamp with time zone</code></td>
+<td align="left">Timestamp of the chunk creation</td>
+</tr>
+<tr>
+<td align="left">atime</td>
+<td align="left"><code>timestamp with time zone</code></td>
+<td align="left">Timestamp of the least access to the chunk</td>
+</tr>
+</tbody>
+</table>
+<h3 id="pgstromccache_builder_info">pgstrom.ccache_builder_info</h3>
+<p><code>pgstrom.ccache_builder_info</code> system view exports information of asynchronous builder process of columnar cache.</p>
+<table>
+<thead>
+<tr>
+<th align="left">Name</th>
+<th align="left">Data Type</th>
+<th align="left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left">builder_id</td>
+<td align="left"><code>int</code></td>
+<td align="left">Asynchronous builder Id of columnar cache</td>
+</tr>
+<tr>
+<td align="left">state</td>
+<td align="left"><code>text</code></td>
+<td align="left">State of the builder process (<code>shutdown</code>, <code>startup</code>, <code>loading</code> or <code>sleep</code>)</td>
+</tr>
+<tr>
+<td align="left">database_id</td>
+<td align="left"><code>oid</code></td>
+<td align="left">Database Id where builder process is assigned on</td>
+</tr>
+<tr>
+<td align="left">table_id</td>
+<td align="left"><code>regclass</code></td>
+<td align="left">Table Id where the builder process is scanning on, if <code>state</code> is <code>loading</code>.</td>
+</tr>
+<tr>
+<td align="left">block_nr</td>
+<td align="left"><code>int</code></td>
+<td align="left">Block number where the builder process is scanning on, if <code>state</code> is <code>loading</code>.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="guc-parameters">GUC Parameters</h2>
+<p>This session introduces PG-Strom's configuration parameters.</p>
+<h3 id="enablesdisables-a-particular-feature">Enables/disables a particular feature</h3>
+<table>
+<thead>
+<tr>
+<th align="left">Parameter</th>
+<th align="center">Type</th>
+<th align="center">Default</th>
+<th align="left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>pg_strom.enabled</code></td>
+<td align="center"><code>bool</code></td>
+<td align="center"><code>on</code></td>
+<td align="left">Enables/disables entire PG-Strom features at once</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.enable_gpuscan</code></td>
+<td align="center"><code>bool</code></td>
+<td align="center"><code>on</code></td>
+<td align="left">Enables/disables GpuScan</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.enable_gpuhashjoin</code></td>
+<td align="center"><code>bool</code></td>
+<td align="center"><code>on</code></td>
+<td align="left">Enables/disables GpuJoin by HashJoin</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.enable_gpunestloop</code></td>
+<td align="center"><code>bool</code></td>
+<td align="center"><code>on</code></td>
+<td align="left">Enables/disables GpuJoin by NestLoop</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.enable_gpupreagg</code></td>
+<td align="center"><code>bool</code></td>
+<td align="center"><code>on</code></td>
+<td align="left">Enables/disables GpuPreAgg</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.pullup_outer_scan</code></td>
+<td align="center"><code>bool</code></td>
+<td align="center"><code>on</code></td>
+<td align="left">Enables/disables to pull up full-table scan if it is just below GpuPreAgg/GpuJoin, to reduce data transfer between CPU/RAM and GPU.</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.pullup_outer_join</code></td>
+<td align="center"><code>bool</code></td>
+<td align="center"><code>on</code></td>
+<td align="left">Enables/disables to pull up tables-join if GpuJoin is just below GpuPreAgg, to reduce data transfer between CPU/RAM and GPU.</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.enable_numeric_type</code></td>
+<td align="center"><code>bool</code></td>
+<td align="center"><code>on</code></td>
+<td align="left">Enables/disables support of <code>numeric</code> data type in arithmetic expression on GPU device</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.cpu_fallback</code></td>
+<td align="center"><code>bool</code></td>
+<td align="center"><code>off</code></td>
+<td align="left">Controls whether it actually run CPU fallback operations, if GPU program returned "CPU ReCheck Error"</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.nvme_strom_enabled</code></td>
+<td align="center"><code>bool</code></td>
+<td align="center"><code>on</code></td>
+<td align="left">Enables/disables the feature of SSD-to-GPU Direct SQL Execution</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.nvme_strom_threshold</code></td>
+<td align="center"><code>int</code></td>
+<td align="center">自動</td>
+<td align="left">Controls the table-size threshold to invoke the feature of SSD-to-GPU Direct SQL Execution</td>
+</tr>
+</tbody>
+</table>
+<h3 id="optimizer-configuration">Optimizer Configuration</h3>
+<table>
+<thead>
+<tr>
+<th align="left">Parameter</th>
+<th align="center">Type</th>
+<th align="center">Default</th>
+<th align="left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>pg_strom.chunk_size</code></td>
+<td align="center"><code>int</code></td>
+<td align="center">65534kB</td>
+<td align="left">Size of the data blocks processed by a single GPU kernel invocation. It was configurable, but makes less sense, so fixed to about 64MB in the current version.</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.gpu_setup_cost</code></td>
+<td align="center"><code>real</code></td>
+<td align="center">4000</td>
+<td align="left">Cost value for initialization of GPU device</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.gpu_dma_cost</code></td>
+<td align="center"><code>real</code></td>
+<td align="center">10</td>
+<td align="left">Cost value for DMA transfer over PCIe bus per data-chunk (64MB)</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.gpu_operator_cost</code></td>
+<td align="center"><code>real</code></td>
+<td align="center">0.00015</td>
+<td align="left">Cost value to process an expression formula on GPU. If larger value than <code>cpu_operator_cost</code> is configured, no chance to choose PG-Strom towards any size of tables</td>
+</tr>
+</tbody>
+</table>
+<h3 id="executor-configuration">Executor Configuration</h3>
+<table>
+<thead>
+<tr>
+<th align="left">Parameter</th>
+<th align="center">Type</th>
+<th align="center">Default</th>
+<th align="left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>pg_strom.global_max_async_tasks</code></td>
+<td align="center"><code>int</code></td>
+<td align="center">160</td>
+<td align="left">Number of asynchronous taks PG-Strom can throw into GPU's execution queue in the whole system.</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.local_max_async_tasks</code></td>
+<td align="center"><code>int</code></td>
+<td align="center">8</td>
+<td align="left">Number of asynchronous taks PG-Strom can throw into GPU's execution queue per process. If CPU parallel is used in combination, this limitation shall be applied for each background worker. So, more than <code>pg_strom.local_max_async_tasks</code> asynchronous tasks are executed in parallel on the entire batch job.</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.max_number_of_gpucontext</code></td>
+<td align="center"><code>int</code></td>
+<td align="center">auto</td>
+<td align="left">Specifies the number of internal data structure <code>GpuContext</code> to abstract GPU device. Usually, no need to expand the initial value.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="columnar-cache-configuration">Columnar Cache Configuration</h3>
+<table>
+<thead>
+<tr>
+<th align="left">Parameter</th>
+<th align="center">Type</th>
+<th align="center">Default</th>
+<th align="left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>pg_strom.ccache_base_dir</code></td>
+<td align="center"><code>string</code></td>
+<td align="center"><code>'/dev/shm'</code></td>
+<td align="left">Specifies the directory path to store columnar cache data files. Usually, no need to change from <code>/dev/shm</code> where <code>tmpfs</code> is mounted at.</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.ccache_databases</code></td>
+<td align="center"><code>string</code></td>
+<td align="center"><code>''</code></td>
+<td align="left">Specified the target databases for asynchronous columnar cache build, in comma separated list. It does not affect to the manual cache build by <code>pgstrom_ccache_prewarm()</code>.</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.ccache_num_builders</code></td>
+<td align="center"><code>int</code></td>
+<td align="center"><code>2</code></td>
+<td align="left">Specified the number of worker processes for asynchronous columnar cache build. It needs to be larger than or equeal to the number of databases in <code>pg_strom.ccache_databases</code>.</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.ccache_log_output</code></td>
+<td align="center"><code>bool</code></td>
+<td align="center"><code>false</code></td>
+<td align="left">Controls whether columnar cache builder prints log messages, or not</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.ccache_total_size</code></td>
+<td align="center"><code>int</code></td>
+<td align="center">auto</td>
+<td align="left">Upper limit of the columnar cache in kB. Default is the smaller in 75% of volume size or 66% of system physical memory.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="gstore_fdw-configuration">gstore_fdw Configuration</h3>
+<table>
+<thead>
+<tr>
+<th align="left">Parameter</th>
+<th align="center">Type</th>
+<th align="center">Default</th>
+<th align="left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>pg_strom.gstore_max_relations</code></td>
+<td align="center"><code>int</code></td>
+<td align="center">100</td>
+<td align="left">Upper limit of the number of foreign tables with gstore_fdw. It needs restart to update the parameter.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="configuration-of-gpu-code-generation-and-build">Configuration of GPU code generation and build</h3>
+<table>
+<thead>
+<tr>
+<th align="left">Parameter</th>
+<th align="center">Type</th>
+<th align="center">Default</th>
+<th align="left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>pg_strom.program_cache_size</code></td>
+<td align="center"><code>int</code></td>
+<td align="center"><code>256MB</code></td>
+<td align="left">Amount of the shared memory size to cache GPU programs already built. It needs restart to update the parameter.</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.debug_jit_compile_options</code></td>
+<td align="center"><code>bool</code></td>
+<td align="center"><code>off</code></td>
+<td align="left">Controls to include debug option (line-numbers and symbol information) on JIT compile of GPU programs. It is valuable for complicated bug analysis using GPU core dump, however, should not be enabled on daily use because of performance degradation.</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.debug_kernel_source</code></td>
+<td align="center"><code>bool</code></td>
+<td align="center"><code>off</code></td>
+<td align="left">If enables, <code>EXPLAIN VERBOSE</code> command also prints out file paths of GPU programs written out.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="gpu-device-configuration">GPU Device Configuration</h3>
+<table>
+<thead>
+<tr>
+<th align="left">Parameter</th>
+<th align="center">Type</th>
+<th align="center">Default</th>
+<th align="left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>pg_strom.cuda_visible_devices</code></td>
+<td align="center"><code>string</code></td>
+<td align="center"><code>''</code></td>
+<td align="left">List of GPU device numbers in comma separated, if you want to recognize particular GPUs on PostgreSQL startup. It is equivalent to the environment variable <code>CUDAVISIBLE_DEVICES</code></td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.gpu_memory_segment_size</code></td>
+<td align="center"><code>int</code></td>
+<td align="center"><code>512MB</code></td>
+<td align="left">Specifies the amount of device memory to be allocated per CUDA API call. Larger configuration will reduce the overhead of API calls, but not efficient usage of device memory.</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.max_num_preserved_gpu_memory</code></td>
+<td align="center"><code>int</code></td>
+<td align="center">2048</td>
+<td align="left">Upper limit of the number of preserved GPU device memory segment. Usually, don't need to change from the default value.</td>
+</tr>
+</tbody>
+</table>
+              
+            </div>
+          </div>
+          <footer>
+  
+    <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
+      
+        <a href="../release_note/" class="btn btn-neutral float-right" title="Release Note">Next <span class="icon icon-circle-arrow-right"></span></a>
+      
+      
+        <a href="../plcuda/" class="btn btn-neutral" title="PL/CUDA"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+      
+    </div>
+  
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+    
+  </div>
+
+  Built with <a href="http://www.mkdocs.org">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+      
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" style="cursor: pointer">
+    <span class="rst-current-version" data-toggle="rst-current-version">
+      
+      
+        <span><a href="../plcuda/" style="color: #fcfcfc;">&laquo; Previous</a></span>
+      
+      
+        <span style="margin-left: 15px"><a href="../release_note/" style="color: #fcfcfc">Next &raquo;</a></span>
+      
+    </span>
+</div>
+    <script>var base_url = '..';</script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/require.js"></script>
+      <script src="../search/search.js"></script>
+
+</body>
+</html>

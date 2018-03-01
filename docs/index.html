@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<!--[if IE 8]><html class="no-js lt-ie9" lang="en" > <![endif]-->
+<!--[if gt IE 8]><!--> <html class="no-js" lang="en" > <!--<![endif]-->
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="PG-Strom v2.0 Official Documentation">
+  <meta name="author" content="PG-Strom Development Team">
+  <link rel="shortcut icon" href="./img/favicon.ico">
+  <title>Home - PG-Strom Manual</title>
+  <link href='https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700' rel='stylesheet' type='text/css'>
+
+  <link rel="stylesheet" href="./css/theme.css" type="text/css" />
+  <link rel="stylesheet" href="./css/theme_extra.css" type="text/css" />
+  <link rel="stylesheet" href="./css/highlight.css">
+  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet">
+  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet">
+  <link href="./custom.css" rel="stylesheet">
+  
+  <script>
+    // Current page data
+    var mkdocs_page_name = "Home";
+    var mkdocs_page_input_path = "index.md";
+    var mkdocs_page_url = "/";
+  </script>
+  
+  <script src="./js/jquery-2.1.1.min.js"></script>
+  <script src="./js/modernizr-2.8.3.min.js"></script>
+  <script type="text/javascript" src="./js/highlight.pack.js"></script> 
+  
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+
+    
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+      <div class="wy-side-nav-search">
+        <a href="." class="icon icon-home"> PG-Strom Manual</a>
+        <div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="./search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
+	<ul class="current">
+	  
+          
+            <li class="toctree-l1 current">
+		
+    <a class="current" href=".">Home</a>
+    <ul class="subnav">
+            
+    <li class="toctree-l2"><a href="#preface">Preface</a></li>
+    
+        <ul>
+        
+            <li><a class="toctree-l3" href="#what-is-pg-strom">What is PG-Strom?</a></li>
+        
+            <li><a class="toctree-l3" href="#community">Community</a></li>
+        
+        </ul>
+    
+
+    </ul>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="install/">Install</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="features/">Advanced Features</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="plcuda/">PL/CUDA</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="references/">References</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="release_note/">Release Note</a>
+	    </li>
+          
+        </ul>
+      </div>
+      &nbsp;
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+
+      
+      <nav class="wy-nav-top" role="navigation" aria-label="top navigation">
+        <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+        <a href=".">PG-Strom Manual</a>
+      </nav>
+
+      
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href=".">Docs</a> &raquo;</li>
+    
+      
+    
+    <li>Home</li>
+    <li class="wy-breadcrumbs-aside">
+      
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main">
+            <div class="section">
+              
+                <h1 id="preface">Preface</h1>
+<p>This chapter introduces the overview of PG-Strom, and developer's community.</p>
+<h2 id="what-is-pg-strom">What is PG-Strom?</h2>
+<p>PG-Strom is an extension module of PostgreSQL designed for version 9.6 or later. By utilization of GPU (Graphic Processor Unit) device which has thousands cores per chip, it enables to accelerate SQL workloads for data analytics or batch processing to big data set.</p>
+<p>Its core features are GPU code generator that automatically generates GPU program according to the SQL commands and asynchronous parallel execution engine to run SQL workloads on GPU device. The latest version supports SCAN (evaluation of WHERE-clause), JOIN and GROUP BY workloads. In the case when GPU-processing has advantage, PG-Strom replaces the vanilla implementation of PostgreSQL and transparentlly works from users and applications.</p>
+<p>Unlike some DWH systems, PG-Strom shares the storage system of PostgreSQL which saves data in row-format. It is not always best choice for summary or analytics workloads, however, it is also an advantage as well. Users don't need to export and transform the data from transactional database for processing.</p>
+<p>PG-Strom v2.0 enhanced the capability to read from the storage. SSD-to-GPU Direct SQL Execution and in-memory columnar cache make up for the slowness of storage devices, and enable to provide massive data blocks to GPU fast which runs SQL workloads.</p>
+<p>On the other hands, the feature of PL/CUDA and gstore_fdw allows to run highly computing density problems, like advanced statistical analytics or machine learning, on the database management system, and to return only results to users.</p>
+<h3 id="license-and-copyright">License and Copyright</h3>
+<p>PG-Strom is an open source software distributed under the GPL(GNU Public License) v2.
+See <a href="https://raw.githubusercontent.com/heterodb/pg-strom/master/LICENSE">LICENSE</a> for the license details.</p>
+<p>PG-Strom Development Team reserves the copyright of the software.
+PG-Strom Development Team is an international, unincorporated association of individuals and companies who have contributed to the PG-Strom project, but not a legal entity.</p>
+<h2 id="community">Community</h2>
+<p>We have a community mailing-list at: <a href="https://groups.google.com/a/heterodb.com/forum/#!forum/pgstrom">PG-Strom community ML</a> It is a right place to post questions, requests, troubles and etc, related to PG-Strom project.</p>
+<p>Please pay attention it is a public list for world wide. So, it is your own responsibility not to disclose confidential information.</p>
+<p>The primary language of the mailing-list is English. On the other hands, we know major portion of PG-Strom users are Japanese because of its development history, so we admit to have a discussion on the list in Japanese language. In this case, please don't forget to attach <code>(JP)</code> prefix on the subject like, for non-Japanese speakers to skip messages.</p>
+<h3 id="bug-or-troubles-report">Bug or troubles report</h3>
+<p>If you got troubles like incorrect results, system crash / lockup, or something strange behavior, please open a new issue with <strong>bug</strong> tag at the <a href="https://github.com/heterodb/pg-strom/issues">PG-Strom Issue Tracker</a>.</p>
+<p>Please ensure the items below on bug reports.</p>
+<ul>
+<li>Whether you can reproduce the same problem on the latest revision?<ul>
+<li>Hopefully, we recommend to test on the latest OS, CUDA, PostgreSQL and related software.</li>
+</ul>
+</li>
+<li>Whether you can reproduce the same problem if PG-Strom is disabled?<ul>
+<li>GUC option pg_strom.enabled can turn on/off PG-Strom.</li>
+</ul>
+</li>
+<li>Is there any known issues on the issue tracker of GitHub?<ul>
+<li>Please don't forget to search <em>closed</em> issues</li>
+</ul>
+</li>
+</ul>
+<p>The information below are helpful for bug-reports.</p>
+<ul>
+<li>Output of <code>EXPLAIN VERBOSE</code> for the queries in trouble.</li>
+<li>Data structure of the tables involved with <code>\d+ &lt;table name&gt;</code> on psql command.</li>
+<li>Log messages (verbose messages are more helpful)</li>
+<li>Status of GUC options you modified from the default configurations.</li>
+<li>Hardware configuration - GPU model and host RAM size especially.</li>
+</ul>
+<p>If you are not certain whether the strange behavior on your site is bug or not, please report it to the mailing-list prior to the open a new issue ticket. Developers may be able to suggest you next action - like a request for extra information.</p>
+<h3 id="new-features-proposition">New features proposition</h3>
+<p>If you have any ideas of new features, please open a new issue with <strong>feature</strong> tag at the <a href="https://github.com/heterodb/pg-strom/issues">PG-Strom Issue Tracker</a>, then have a discussion with other developers.</p>
+<p>A preferable design proposal will contain the items below.</p>
+<ul>
+<li>What is your problem to solve / improve?</li>
+<li>How much serious is it on your workloads / user case?</li>
+<li>Way to implement your idea?</li>
+<li>Expected downside, if any.</li>
+</ul>
+<p>Once we could make a consensus about its necessity, coordinator will attach accepted tag and the issue ticket is used to track rest of the development. Elsewhere, the issue ticket got rejected tag and closed.</p>
+<p>Once a proposal got rejected, we may have different decision in the future. If comprehensive circumstance would be changed, you don't need to hesitate revised proposition again.</p>
+<p>On the development stage, please attach patch file on the issue ticket. We don't use pull request.</p>
+<h3 id="support-policy">Support Policy</h3>
+<p>The PG-Strom development team will support the latest release which are distributed from the HeteroDB Software Distribution Center only. So, people who met troubles needs to ensure the problems can be reproduced with the latest release.</p>
+<p>Please note that it is volunteer based community support policy, so our support is best effort and no SLA definition.</p>
+<p>If you need commercial support, contact to HeteroDB,Inc (contact@heterodbcom).</p>
+<h3 id="versioning-policy">Versioning Policy</h3>
+<p>PG-Strom's version number is consists of two portion; major and minor version. <code>&lt;major&gt;.&lt;minor&gt;</code></p>
+<p>Its minor version shall be incremented for each release; including bug fixes and new features.
+Its major version shall be incremented in the following situation.</p>
+<ul>
+<li>Some of supported PostgreSQL version gets deprecated.</li>
+<li>Some of supported GPU devices gets deprecated.</li>
+<li>New version adds epoch making features.</li>
+</ul>
+              
+            </div>
+          </div>
+          <footer>
+  
+    <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
+      
+        <a href="install/" class="btn btn-neutral float-right" title="Install">Next <span class="icon icon-circle-arrow-right"></span></a>
+      
+      
+    </div>
+  
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+    
+  </div>
+
+  Built with <a href="http://www.mkdocs.org">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+      
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" style="cursor: pointer">
+    <span class="rst-current-version" data-toggle="rst-current-version">
+      
+      
+      
+        <span style="margin-left: 15px"><a href="install/" style="color: #fcfcfc">Next &raquo;</a></span>
+      
+    </span>
+</div>
+    <script>var base_url = '.';</script>
+    <script src="./js/theme.js"></script>
+      <script src="./search/require.js"></script>
+      <script src="./search/search.js"></script>
+
+</body>
+</html>
+
+<!--
+MkDocs version : 0.17.2
+Build Date UTC : 2018-03-01 14:50:57
+-->

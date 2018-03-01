@@ -1,0 +1,874 @@
+<!DOCTYPE html>
+<!--[if IE 8]><html class="no-js lt-ie9" lang="en" > <![endif]-->
+<!--[if gt IE 8]><!--> <html class="no-js" lang="en" > <!--<![endif]-->
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  
+  <meta name="author" content="PG-Strom Development Team">
+  <link rel="shortcut icon" href="../img/favicon.ico">
+  <title>リファレンス - PG-Strom Manual</title>
+  <link href='https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700' rel='stylesheet' type='text/css'>
+
+  <link rel="stylesheet" href="../css/theme.css" type="text/css" />
+  <link rel="stylesheet" href="../css/theme_extra.css" type="text/css" />
+  <link rel="stylesheet" href="../css/highlight.css">
+  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet">
+  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet">
+  <link href="../custom.css" rel="stylesheet">
+  
+  <script>
+    // Current page data
+    var mkdocs_page_name = "\u30ea\u30d5\u30a1\u30ec\u30f3\u30b9";
+    var mkdocs_page_input_path = "references.md";
+    var mkdocs_page_url = "/references/";
+  </script>
+  
+  <script src="../js/jquery-2.1.1.min.js"></script>
+  <script src="../js/modernizr-2.8.3.min.js"></script>
+  <script type="text/javascript" src="../js/highlight.pack.js"></script> 
+  
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+
+    
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+      <div class="wy-side-nav-search">
+        <a href=".." class="icon icon-home"> PG-Strom Manual</a>
+        <div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
+	<ul class="current">
+	  
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="..">はじめに</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../install/">インストール</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../features/">先進機能</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../plcuda/">PL/CUDA</a>
+	    </li>
+          
+            <li class="toctree-l1 current">
+		
+    <a class="current" href="./">リファレンス</a>
+    <ul class="subnav">
+            
+    <li class="toctree-l2"><a href="#_1">リファレンス</a></li>
+    
+        <ul>
+        
+            <li><a class="toctree-l3" href="#_2">データ型</a></li>
+        
+            <li><a class="toctree-l3" href="#_3">関数と演算子</a></li>
+        
+            <li><a class="toctree-l3" href="#_5">システムビュー</a></li>
+        
+            <li><a class="toctree-l3" href="#guc">GUCパラメータ</a></li>
+        
+        </ul>
+    
+
+    </ul>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../release_note/">リリースノート</a>
+	    </li>
+          
+        </ul>
+      </div>
+      &nbsp;
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+
+      
+      <nav class="wy-nav-top" role="navigation" aria-label="top navigation">
+        <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+        <a href="..">PG-Strom Manual</a>
+      </nav>
+
+      
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href="..">Docs</a> &raquo;</li>
+    
+      
+    
+    <li>リファレンス</li>
+    <li class="wy-breadcrumbs-aside">
+      
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main">
+            <div class="section">
+              
+                <h1 id="_1">リファレンス</h1>
+<h2 id="_2">データ型</h2>
+<p>PG-Stromは以下のデータ型をGPUで利用する事ができます。</p>
+<p><strong>標準の数値データ型</strong></p>
+<table>
+<thead>
+<tr>
+<th align="left">SQLデータ型</th>
+<th align="left">内部データ形式</th>
+<th align="left">データ長</th>
+<th align="left">備考</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>smallint</code></td>
+<td align="left"><code>cl_short</code></td>
+<td align="left">2 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>integer</code></td>
+<td align="left"><code>cl_int</code></td>
+<td align="left">4 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>bigint</code></td>
+<td align="left"><code>cl_long</code></td>
+<td align="left">8 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>real</code></td>
+<td align="left"><code>cl_float</code></td>
+<td align="left">4 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>float</code></td>
+<td align="left"><code>cl_double</code></td>
+<td align="left">8 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>numeric</code></td>
+<td align="left"><code>cl_ulong</code></td>
+<td align="left">可変長</td>
+<td align="left">64bitの内部形式にマップ</td>
+</tr>
+</tbody>
+</table>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>GPUが<code>numeric</code>型のデータを処理する際、実装上の理由からこれを64bitの内部表現に変換して処理します。
+これら内部表現への/からの変換は透過的に行われますが、例えば、桁数の大きな<code>numeric</code>型のデータは表現する事ができないため、PG-StromはCPU側でのフォールバック処理を試みます。したがって、桁数の大きな<code>numeric</code>型のデータをGPUに与えると却って実行速度が低下してしまう事になります。
+これを避けるには、GUCパラメータ<code>pg_strom.enable_numeric_type</code>を使用して<code>numeric</code>データ型を含む演算式をGPUで実行しないように設定します。</p>
+</div>
+<p><strong>標準の日付時刻型</strong></p>
+<table>
+<thead>
+<tr>
+<th align="left">SQLデータ型</th>
+<th align="left">内部データ形式</th>
+<th align="left">データ長</th>
+<th align="left">備考</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>date</code></td>
+<td align="left"><code>DateADT</code></td>
+<td align="left">4 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>time</code></td>
+<td align="left"><code>TimeADT</code></td>
+<td align="left">8 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>timetz</code></td>
+<td align="left"><code>TimeTzADT</code></td>
+<td align="left">12 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>timestamp</code></td>
+<td align="left"><code>Timestamp</code></td>
+<td align="left">8 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>timestamptz</code></td>
+<td align="left"><code>TimestampTz</code></td>
+<td align="left">8 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>interval</code></td>
+<td align="left"><code>Interval</code></td>
+<td align="left">16 bytes</td>
+<td align="left">time interval</td>
+</tr>
+</tbody>
+</table>
+<p><strong>標準の可変長データ型</strong></p>
+<table>
+<thead>
+<tr>
+<th align="left">SQLデータ型</th>
+<th align="left">内部データ形式</th>
+<th align="left">データ長</th>
+<th align="left">備考</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>bpchar</code></td>
+<td align="left"><code>varlena *</code></td>
+<td align="left">可変長</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>varchar</code></td>
+<td align="left"><code>varlena *</code></td>
+<td align="left">可変長</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>bytea</code></td>
+<td align="left"><code>varlena *</code></td>
+<td align="left">可変長</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>text</code></td>
+<td align="left"><code>varlena *</code></td>
+<td align="left">可変長</td>
+<td align="left"></td>
+</tr>
+</tbody>
+</table>
+<p><strong>標準の雑多なデータ型</strong></p>
+<table>
+<thead>
+<tr>
+<th align="left">SQLデータ型</th>
+<th align="left">内部データ形式</th>
+<th align="left">データ長</th>
+<th align="left">備考</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>boolean</code></td>
+<td align="left"><code>cl_bool</code></td>
+<td align="left">1 byte</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>money</code></td>
+<td align="left"><code>cl_long</code></td>
+<td align="left">8 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>uuid</code></td>
+<td align="left"><code>pg_uuid</code></td>
+<td align="left">16 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>macaddr</code></td>
+<td align="left"><code>macaddr</code></td>
+<td align="left">6 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>inet</code></td>
+<td align="left"><code>inet_struct</code></td>
+<td align="left">7 bytes or 19 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>cidr</code></td>
+<td align="left"><code>inet_struct</code></td>
+<td align="left">7 bytes or 19 bytes</td>
+<td align="left"></td>
+</tr>
+</tbody>
+</table>
+<p><strong>標準の範囲型</strong></p>
+<table>
+<thead>
+<tr>
+<th align="left">SQLデータ型</th>
+<th align="left">内部データ形式</th>
+<th align="left">データ長</th>
+<th align="left">備考</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>int4range</code></td>
+<td align="left"><code>__int4range</code></td>
+<td align="left">14 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>int8range</code></td>
+<td align="left"><code>__int8range</code></td>
+<td align="left">22 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>tsrange</code></td>
+<td align="left"><code>__tsrange</code></td>
+<td align="left">22 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>tstzrange</code></td>
+<td align="left"><code>__tstzrange</code></td>
+<td align="left">22 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>daterange</code></td>
+<td align="left"><code>__daterange</code></td>
+<td align="left">14 bytes</td>
+<td align="left"></td>
+</tr>
+</tbody>
+</table>
+<p><strong>PG-Stromが追加で提供するデータ型</strong></p>
+<table>
+<thead>
+<tr>
+<th align="left">SQLデータ型</th>
+<th align="left">内部データ形式</th>
+<th align="left">データ長</th>
+<th align="left">備考</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>float2</code></td>
+<td align="left"><code>half_t</code></td>
+<td align="left">2 bytes</td>
+<td align="left">半精度浮動小数点数</td>
+</tr>
+</tbody>
+</table>
+<h2 id="_3">関数と演算子</h2>
+<h3 id="_4">デバイス情報関数</h3>
+<h2 id="_5">システムビュー</h2>
+<p>PG-Stromは内部状態をユーザやアプリケーションに出力するためのシステムビューをいくつか提供しています。
+これらのシステムビューは将来のバージョンで情報が追加される可能性があります。そのため、アプリケーションから<code>SELECT * FROM ...</code>によってこれらシステムビューを参照する事は避けてください。</p>
+<h3 id="pgstromdevice_info">pgstrom.device_info</h3>
+<p><code>pgstrom.device_info</code>システムビューは、PG-Stromが認識しているGPUのデバイス属性値を出力します。
+GPUはモデルごとにコア数やメモリ容量、最大スレッド数などのスペックが異なっており、PL/CUDA関数などで直接GPUのプログラミングを行う場合には、これらの情報を元にソフトウェアを最適化する必要があります。</p>
+<table>
+<thead>
+<tr>
+<th align="left">名前</th>
+<th align="left">データ型</th>
+<th align="left">説明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left">device_nr</td>
+<td align="left"><code>int</code></td>
+<td align="left">GPUデバイス番号</td>
+</tr>
+<tr>
+<td align="left">aindex</td>
+<td align="left"><code>int</code></td>
+<td align="left">属性インデックス</td>
+</tr>
+<tr>
+<td align="left">attribute</td>
+<td align="left"><code>text</code></td>
+<td align="left">デバイス属性名</td>
+</tr>
+<tr>
+<td align="left">value</td>
+<td align="left"><code>text</code></td>
+<td align="left">デバイス属性値</td>
+</tr>
+</tbody>
+</table>
+<h3 id="pgstromdevice_preserved_meminfo">pgstrom.device_preserved_meminfo</h3>
+<p><code>pgstrom.device_preserved_meminfo</code>システムビューは、複数のPostgreSQLバックエンドプロセスから共有するために予め確保済みのGPUデバイスメモリ領域の情報を出力します。
+現在のところ、gstore_fdwのみが本機能を使用しています。</p>
+<table>
+<thead>
+<tr>
+<th align="left">名前</th>
+<th align="left">データ型</th>
+<th align="left">説明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left">device_nr</td>
+<td align="left"><code>int</code></td>
+<td align="left">GPUデバイス番号</td>
+</tr>
+<tr>
+<td align="left">handle</td>
+<td align="left"><code>bytea</code></td>
+<td align="left">確保済みGPUデバイスメモリのIPCハンドラ</td>
+</tr>
+<tr>
+<td align="left">owner</td>
+<td align="left"><code>regrole</code></td>
+<td align="left">確保済みGPUデバイスメモリの作成者</td>
+</tr>
+<tr>
+<td align="left">length</td>
+<td align="left"><code>bigint</code></td>
+<td align="left">確保済みGPUデバイスメモリのバイト単位の長さ</td>
+</tr>
+<tr>
+<td align="left">ctime</td>
+<td align="left"><code>timestamp with time zone</code></td>
+<td align="left">確保済みGPUデバイスメモリの作成時刻</td>
+</tr>
+</tbody>
+</table>
+<h3 id="pgstromccache_info">pgstrom.ccache_info</h3>
+<p><code>pgstrom.ccache_info</code>システムビューは、列指向キャッシュの各チャンク（128MB単位）の情報を出力します。</p>
+<table>
+<thead>
+<tr>
+<th align="left">名前</th>
+<th align="left">データ型</th>
+<th align="left">説明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left">database_id</td>
+<td align="left"><code>oid</code></td>
+<td align="left">データベースID</td>
+</tr>
+<tr>
+<td align="left">table_id</td>
+<td align="left"><code>regclass</code></td>
+<td align="left">テーブルID</td>
+</tr>
+<tr>
+<td align="left">block_nr</td>
+<td align="left"><code>int</code></td>
+<td align="left">チャンクの先頭ブロック番号</td>
+</tr>
+<tr>
+<td align="left">nitems</td>
+<td align="left"><code>bigint</code></td>
+<td align="left">チャンクに含まれる行数</td>
+</tr>
+<tr>
+<td align="left">length</td>
+<td align="left"><code>bigint</code></td>
+<td align="left">キャッシュされたチャンクのサイズ</td>
+</tr>
+<tr>
+<td align="left">ctime</td>
+<td align="left"><code>timestamp with time zone</code></td>
+<td align="left">チャンク作成時刻</td>
+</tr>
+<tr>
+<td align="left">atime</td>
+<td align="left"><code>timestamp with time zone</code></td>
+<td align="left">チャンク最終アクセス時刻</td>
+</tr>
+</tbody>
+</table>
+<h3 id="pgstromccache_builder_info">pgstrom.ccache_builder_info</h3>
+<p><code>pgstrom.ccache_builder_info</code>システムビューは、列指向キャッシュの非同期ビルダープロセスの情報を出力します。</p>
+<table>
+<thead>
+<tr>
+<th align="left">名前</th>
+<th align="left">データ型</th>
+<th align="left">説明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left">builder_id</td>
+<td align="left"><code>int</code></td>
+<td align="left">列指向キャッシュ非同期ビルダーのID</td>
+</tr>
+<tr>
+<td align="left">state</td>
+<td align="left"><code>text</code></td>
+<td align="left">ビルダープロセスの状態。（<code>shutdown</code>: 停止中、<code>startup</code>: 起動中、<code>loading</code>: 列指向キャッシュの構築中、<code>sleep</code>: 一時停止中）</td>
+</tr>
+<tr>
+<td align="left">database_id</td>
+<td align="left"><code>oid</code></td>
+<td align="left">ビルダープロセスが割り当てられているデータベースID</td>
+</tr>
+<tr>
+<td align="left">table_id</td>
+<td align="left"><code>regclass</code></td>
+<td align="left"><code>state</code>が<code>loading</code>の場合、読出し中のテーブルID</td>
+</tr>
+<tr>
+<td align="left">block_nr</td>
+<td align="left"><code>int</code></td>
+<td align="left"><code>state</code>が<code>loading</code>の場合、読出し中のブロック番号</td>
+</tr>
+</tbody>
+</table>
+<h2 id="guc">GUCパラメータ</h2>
+<p>本節ではPG-Stromの提供する設定パラメータについて説明します。</p>
+<h3 id="_6">特定機能の有効化/無効化</h3>
+<table>
+<thead>
+<tr>
+<th align="left">パラメータ名</th>
+<th align="center">型</th>
+<th align="center">初期値</th>
+<th align="left">説明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>pg_strom.enabled</code></td>
+<td align="center"><code>bool</code></td>
+<td align="center"><code>on</code></td>
+<td align="left">PG-Strom機能全体を一括して有効化/無効化する。</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.enable_gpuscan</code></td>
+<td align="center"><code>bool</code></td>
+<td align="center"><code>on</code></td>
+<td align="left">GpuScanによるスキャンを有効化/無効化する。</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.enable_gpuhashjoin</code></td>
+<td align="center"><code>bool</code></td>
+<td align="center"><code>on</code></td>
+<td align="left">HashJoinによるGpuJoinを有効化/無効化する。</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.enable_gpunestloop</code></td>
+<td align="center"><code>bool</code></td>
+<td align="center"><code>on</code></td>
+<td align="left">NestLoopによるGpuJoinを有効化/無効化する。</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.enable_gpupreagg</code></td>
+<td align="center"><code>bool</code></td>
+<td align="center"><code>on</code></td>
+<td align="left">GpuPreAggによる集約処理を有効化/無効化する。</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.pullup_outer_scan</code></td>
+<td align="center"><code>bool</code></td>
+<td align="center"><code>on</code></td>
+<td align="left">GpuPreAgg/GpuJoin直下の実行計画が全件スキャンである場合に、上位ノードでスキャン処理も行い、CPU/RAM⇔GPU間のデータ転送を省略するかどうかを制御する。</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.pullup_outer_join</code></td>
+<td align="center"><code>bool</code></td>
+<td align="center"><code>on</code></td>
+<td align="left">GpuPreAgg直下がGpuJoinである場合に、JOIN処理を上位の実行計画に引き上げ、CPU⇔GPU間のデータ転送を省略するかどうかを制御する。</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.enable_numeric_type</code></td>
+<td align="center"><code>bool</code></td>
+<td align="center"><code>on</code></td>
+<td align="left">GPUで<code>numeric</code>データ型を含む演算式を処理するかどうかを制御する。</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.cpu_fallback</code></td>
+<td align="center"><code>bool</code></td>
+<td align="center"><code>off</code></td>
+<td align="left">GPUプログラムが"CPU再実行"エラーを返したときに、実際にCPUでの再実行を試みるかどうかを制御する。</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.nvme_strom_enabled</code></td>
+<td align="center"><code>bool</code></td>
+<td align="center"><code>on</code></td>
+<td align="left">SSD-to-GPUダイレクトSQL実行機能を有効化/無効化する。</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.nvme_strom_threshold</code></td>
+<td align="center"><code>int</code></td>
+<td align="center">自動</td>
+<td align="left">SSD-to-GPUダイレクトSQL実行機能を発動させるテーブルサイズの閾値を設定する。</td>
+</tr>
+</tbody>
+</table>
+<h3 id="_7">オプティマイザに関する設定</h3>
+<table>
+<thead>
+<tr>
+<th align="left">パラメータ名</th>
+<th align="center">型</th>
+<th align="center">初期値</th>
+<th align="left">説明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>pg_strom.chunk_size</code></td>
+<td align="center"><code>int</code></td>
+<td align="center">65534kB</td>
+<td align="left">PG-Stromが1回のGPUカーネル呼び出しで処理するデータブロックの大きさです。かつては変更可能でしたが、ほとんど意味がないため、現在では約64MBに固定されています。</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.gpu_setup_cost</code></td>
+<td align="center"><code>real</code></td>
+<td align="center">4000</td>
+<td align="left">GPUデバイスの初期化に要するコストとして使用する値。</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.gpu_dma_cost</code></td>
+<td align="center"><code>real</code></td>
+<td align="center">10</td>
+<td align="left">チャンク(64MB)あたりのDMA転送に要するコストとして使用する値。</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.gpu_operator_cost</code></td>
+<td align="center"><code>real</code></td>
+<td align="center">0.00015</td>
+<td align="left">GPUの演算式あたりの処理コストとして使用する値。<code>cpu_operator_cost</code>よりも大きな値を設定してしまうと、いかなるサイズのテーブルに対してもPG-Stromが選択されることはなくなる。</td>
+</tr>
+</tbody>
+</table>
+<h3 id="_8">エグゼキュータに関する設定</h3>
+<table>
+<thead>
+<tr>
+<th align="left">パラメータ名</th>
+<th align="center">型</th>
+<th align="center">初期値</th>
+<th align="left">説明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>pg_strom.global_max_async_tasks</code></td>
+<td align="center"><code>int</code></td>
+<td align="center">160</td>
+<td align="left">PG-StromがGPU実行キューに投入する事ができる非同期タスクのシステム全体での最大値。</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.local_max_async_tasks</code></td>
+<td align="center"><code>int</code></td>
+<td align="center">8</td>
+<td align="left">PG-StromがGPU実行キューに投入する事ができる非同期タスクのプロセス毎の最大値。CPUパラレル処理と併用する場合、この上限値は個々のバックグラウンドワーカー毎に適用されます。したがって、バッチジョブ全体では<code>pg_strom.local_max_async_tasks</code>よりも多くの非同期タスクが実行されることになります。</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.max_number_of_gpucontext</code></td>
+<td align="center"><code>int</code></td>
+<td align="center">自動</td>
+<td align="left">GPUデバイスを抽象化した内部データ構造 GpuContext の数を指定します。通常、初期値を変更する必要はありません。</td>
+</tr>
+</tbody>
+</table>
+<h3 id="_9">列指向キャッシュ関連の設定</h3>
+<table>
+<thead>
+<tr>
+<th align="left">パラメータ名</th>
+<th align="center">型</th>
+<th align="left">初期値</th>
+<th align="left">説明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>pg_strom.ccache_base_dir</code></td>
+<td align="center"><code>string</code></td>
+<td align="left"><code>'/dev/shm'</code></td>
+<td align="left">列指向キャッシュを保持するファイルシステム上のパスを指定します。通常、<code>tmpfs</code>がマウントされている<code>/dev/shm</code>を変更する必要はありません。</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.ccache_databases</code></td>
+<td align="center"><code>string</code></td>
+<td align="left"><code>''</code></td>
+<td align="left">列指向キャッシュの非同期ビルドを行う対象データベースをカンマ区切りで指定します。<code>pgstrom_ccache_prewarm()</code>によるマニュアルでのキャッシュビルドには影響しません。</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.ccache_num_builders</code></td>
+<td align="center"><code>int</code></td>
+<td align="left"><code>2</code></td>
+<td align="left">列指向キャッシュの非同期ビルドを行うワーカープロセス数を指定します。少なくとも<code>pg_strom.ccache_databases</code>で設定するデータベースの数以上にワーカーが必要です。</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.ccache_log_output</code></td>
+<td align="center"><code>bool</code></td>
+<td align="left"><code>false</code></td>
+<td align="left">列指向キャッシュの非同期ビルダーがログメッセージを出力するかどうかを制御します。</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.ccache_total_size</code></td>
+<td align="center"><code>int</code></td>
+<td align="left">自動</td>
+<td align="left">列指向キャッシュの上限を kB 単位で指定します。区画サイズの75%またはシステムの物理メモリの66%のいずれか小さな方がデフォルト値です。</td>
+</tr>
+</tbody>
+</table>
+<h3 id="gstore_fdw">gstore_fdw関連の設定</h3>
+<table>
+<thead>
+<tr>
+<th align="left">パラメータ名</th>
+<th align="center">型</th>
+<th align="left">初期値</th>
+<th align="left">説明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>pg_strom.gstore_max_relations</code></td>
+<td align="center"><code>int</code></td>
+<td align="left">100</td>
+<td align="left">gstore_fdwを用いた外部表数の上限です。パラメータの更新には再起動が必要です。</td>
+</tr>
+</tbody>
+</table>
+<h3 id="gpu">GPUプログラムの生成とビルドに関連する設定</h3>
+<table>
+<thead>
+<tr>
+<th align="left">パラメータ名</th>
+<th align="center">型</th>
+<th align="left">初期値</th>
+<th align="left">説明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>pg_strom.program_cache_size</code></td>
+<td align="center"><code>int</code></td>
+<td align="left"><code>256MB</code></td>
+<td align="left">ビルド済みのGPUプログラムをキャッシュしておくための共有メモリ領域のサイズです。パラメータの更新には再起動が必要です。</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.debug_jit_compile_options</code></td>
+<td align="center"><code>bool</code></td>
+<td align="left"><code>off</code></td>
+<td align="left">GPUプログラムのJITコンパイル時に、デバッグオプション（行番号とシンボル情報）を含めるかどうかを指定します。GPUコアダンプ等を用いた複雑なバグの解析に有用ですが、性能のデグレードを引き起こすため、通常は使用すべきでありません。</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.debug_kernel_source</code></td>
+<td align="center"><code>bool</code></td>
+<td align="left"><code>off</code></td>
+<td align="left">このオプションが<code>on</code>の場合、<code>EXPLAIN VERBOSE</code>コマンドで自動生成されたGPUプログラムを書き出したファイルパスを出力します。</td>
+</tr>
+</tbody>
+</table>
+<h3 id="gpu_1">GPUデバイスに関連する設定</h3>
+<table>
+<thead>
+<tr>
+<th align="left">パラメータ名</th>
+<th align="center">型</th>
+<th align="left">初期値</th>
+<th align="left">説明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>pg_strom.cuda_visible_devices</code></td>
+<td align="center"><code>string</code></td>
+<td align="left"><code>''</code></td>
+<td align="left">PostgreSQLの起動時に特定のGPUデバイスだけを認識させてい場合は、カンマ区切りでGPUデバイス番号を記述します。これは環境変数<code>CUDA_VISIBLE_DEVICES</code>を設定するのと同等です。</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.gpu_memory_segment_size</code></td>
+<td align="center"><code>int</code></td>
+<td align="left"><code>512MB</code></td>
+<td align="left">PG-StromがGPUメモリをアロケーションする際に、1回のCUDA API呼び出しで獲得するGPUデバイスメモリのサイズを指定します。この値が大きいとAPI呼び出しのオーバーヘッドは減らせますが、デバイスメモリのロスは大きくなります。</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.max_num_preserved_gpu_memory</code></td>
+<td align="center"><code>int</code></td>
+<td align="left">2048</td>
+<td align="left">確保済みGPUデバイスメモリのセグメント数の上限を指定します。通常は初期値を変更する必要はありません。</td>
+</tr>
+</tbody>
+</table>
+              
+            </div>
+          </div>
+          <footer>
+  
+    <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
+      
+        <a href="../release_note/" class="btn btn-neutral float-right" title="リリースノート">Next <span class="icon icon-circle-arrow-right"></span></a>
+      
+      
+        <a href="../plcuda/" class="btn btn-neutral" title="PL/CUDA"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+      
+    </div>
+  
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+    
+  </div>
+
+  Built with <a href="http://www.mkdocs.org">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+      
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" style="cursor: pointer">
+    <span class="rst-current-version" data-toggle="rst-current-version">
+      
+      
+        <span><a href="../plcuda/" style="color: #fcfcfc;">&laquo; Previous</a></span>
+      
+      
+        <span style="margin-left: 15px"><a href="../release_note/" style="color: #fcfcfc">Next &raquo;</a></span>
+      
+    </span>
+</div>
+    <script>var base_url = '..';</script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/require.js"></script>
+      <script src="../search/search.js"></script>
+
+</body>
+</html>

@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<!--[if IE 8]><html class="no-js lt-ie9" lang="en" > <![endif]-->
+<!--[if gt IE 8]><!--> <html class="no-js" lang="en" > <!--<![endif]-->
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  
+  <meta name="author" content="PG-Strom Development Team">
+  <link rel="shortcut icon" href="../img/favicon.ico">
+  <title>Install - PG-Strom Manual</title>
+  <link href='https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700' rel='stylesheet' type='text/css'>
+
+  <link rel="stylesheet" href="../css/theme.css" type="text/css" />
+  <link rel="stylesheet" href="../css/theme_extra.css" type="text/css" />
+  <link rel="stylesheet" href="../css/highlight.css">
+  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet">
+  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet">
+  <link href="../custom.css" rel="stylesheet">
+  
+  <script>
+    // Current page data
+    var mkdocs_page_name = "Install";
+    var mkdocs_page_input_path = "install.md";
+    var mkdocs_page_url = "/install/";
+  </script>
+  
+  <script src="../js/jquery-2.1.1.min.js"></script>
+  <script src="../js/modernizr-2.8.3.min.js"></script>
+  <script type="text/javascript" src="../js/highlight.pack.js"></script> 
+  
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+
+    
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+      <div class="wy-side-nav-search">
+        <a href=".." class="icon icon-home"> PG-Strom Manual</a>
+        <div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
+	<ul class="current">
+	  
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="..">Home</a>
+	    </li>
+          
+            <li class="toctree-l1 current">
+		
+    <a class="current" href="./">Install</a>
+    <ul class="subnav">
+            
+    <li class="toctree-l2"><a href="#checklist">Checklist</a></li>
+    
+
+    <li class="toctree-l2"><a href="#os-installation">OS Installation</a></li>
+    
+        <ul>
+        
+            <li><a class="toctree-l3" href="#post-os-installation-configuration">Post OS Installation Configuration</a></li>
+        
+        </ul>
+    
+
+    <li class="toctree-l2"><a href="#cuda-toolkit-installation">CUDA Toolkit Installation</a></li>
+    
+
+    <li class="toctree-l2"><a href="#postgresql-installation">PostgreSQL Installation</a></li>
+    
+
+    <li class="toctree-l2"><a href="#pg-strom-installation">PG-Strom Installation</a></li>
+    
+        <ul>
+        
+            <li><a class="toctree-l3" href="#rpm-installation">RPM Installation</a></li>
+        
+            <li><a class="toctree-l3" href="#build-from-the-source">Build from the source</a></li>
+        
+            <li><a class="toctree-l3" href="#post-installation-setup">Post Installation Setup</a></li>
+        
+        </ul>
+    
+
+    </ul>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../features/">Advanced Features</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../plcuda/">PL/CUDA</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../references/">References</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../release_note/">Release Note</a>
+	    </li>
+          
+        </ul>
+      </div>
+      &nbsp;
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+
+      
+      <nav class="wy-nav-top" role="navigation" aria-label="top navigation">
+        <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+        <a href="..">PG-Strom Manual</a>
+      </nav>
+
+      
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href="..">Docs</a> &raquo;</li>
+    
+      
+    
+    <li>Install</li>
+    <li class="wy-breadcrumbs-aside">
+      
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main">
+            <div class="section">
+              
+                <p>This chapter introduces the steps to install PG-Strom.</p>
+<h1 id="checklist">Checklist</h1>
+<ul>
+<li><strong>Server Hardware</strong><ul>
+<li>It requires generic x86_64 hardware that can run Linux operating system supported by CUDA Toolkit. We have no special requirement for CPU, storage and network devices.</li>
+<li><a href="https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List">note002:HW Validation List</a> may help you to choose the hardware.</li>
+<li>SSD-to-GPU Direct SQL Execution needs SSD devices which support NVMe specification, and to be installed under the same PCIe Root Complex where GPU is located on.</li>
+</ul>
+</li>
+<li><strong>GPU Device</strong><ul>
+<li>PG-Strom requires at least one GPU device on the system, which is supported by CUDA Toolkit, has computing capability 6.0 (Pascal generation) or later;</li>
+<li><a href="https://github.com/heterodb/pg-strom/wiki/001:-GPU-Availability-Matrix">note001:GPU Availability Matrix</a> shows more detailed information. Check this list for the support status of SSD-to-GPU Direct SQL Execution.</li>
+</ul>
+</li>
+<li><strong>Operating System</strong><ul>
+<li>PG-Strom requires Linux operating system for x86_64 architecture, and its distribution supported by CUDA Toolkit. Our recommendation is Red Hat Enterprise Linux or CentOS version 7.x series.    - SSD-to-GPU Direct SQL Execution needs Red Hat Enterprise Linux or CentOS version 7.3 or later.</li>
+</ul>
+</li>
+<li><strong>PostgreSQL</strong><ul>
+<li>PG-Strom requires PostgreSQL version 9.6 or later. PostgreSQL v9.6 renew the custom-scan interface for CPU-parallel execution or <code>GROUP BY</code> planning, thus, it allows cooperation of custom-plans provides by extension modules.</li>
+</ul>
+</li>
+<li><strong>CUDA Toolkit</strong><ul>
+<li>PG-Strom requires CUDA Toolkit version 9.1 or later.</li>
+<li>PG-Strom provides half-precision floating point type (<code>float2</code>), and it internally use <code>half_t</code> type of CUDA C, so we cannot build it with older CUDA Toolkit.</li>
+</ul>
+</li>
+</ul>
+<h1 id="os-installation">OS Installation</h1>
+<h2 id="post-os-installation-configuration">Post OS Installation Configuration</h2>
+<h3 id="dkms-installation">DKMS Installation</h3>
+<ul>
+<li>Fedora Project Public FTP Site<ul>
+<li><a href="https://dl.fedoraproject.org/pub/epel/7/x86_64/">https://dl.fedoraproject.org/pub/epel/7/x86_64/</a></li>
+</ul>
+</li>
+</ul>
+<h3 id="heterodb-swdc-installation">HeteroDB-SWDC Installation</h3>
+<h1 id="cuda-toolkit-installation">CUDA Toolkit Installation</h1>
+<p><img alt="CUDA Toolkit download" src="../img/cuda-download.png" /></p>
+<pre><code>$ sudo rpm -i cuda-repo-&lt;distribution&gt;-&lt;version&gt;.x86_64.rpm
+$ sudo yum clean all
+$ sudo yum install cuda
+</code></pre>
+
+<pre><code>$ ls /usr/local/cuda
+bin     include  libnsight         nvml       samples  tools
+doc     jre      libnvvp           nvvm       share    version.txt
+extras  lib64    nsightee_plugins  pkgconfig  src
+</code></pre>
+
+<pre><code>$ nvidia-smi
+Wed Feb 14 09:43:48 2018
++-----------------------------------------------------------------------------+
+| NVIDIA-SMI 387.26                 Driver Version: 387.26                    |
+|-------------------------------+----------------------+----------------------+
+| GPU  Name        Persistence-M| Bus-Id        Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp  Perf  Pwr:Usage/Cap|         Memory-Usage | GPU-Util  Compute M. |
+|===============================+======================+======================|
+|   0  Tesla V100-PCIE...  Off  | 00000000:02:00.0 Off |                    0 |
+| N/A   41C    P0    37W / 250W |      0MiB / 16152MiB |      0%      Default |
++-------------------------------+----------------------+----------------------+
+
++-----------------------------------------------------------------------------+
+| Processes:                                                       GPU Memory |
+|  GPU       PID   Type   Process name                             Usage      |
+|=============================================================================|
+|  No running processes found                                                 |
++-----------------------------------------------------------------------------+
+</code></pre>
+
+<h1 id="postgresql-installation">PostgreSQL Installation</h1>
+<pre><code>$ sudo rpm -ivh pgdg-redhat10-10-2.noarch.rpm
+$ sudo yum install -y postgresql10-server postgresql10-devel
+            :
+            :
+================================================================================
+ Package                  Arch        Version                 Repository   Size
+================================================================================
+Installing:
+ postgresql10-devel       x86_64      10.2-1PGDG.rhel7        pgdg10      2.0 M
+ postgresql10-server      x86_64      10.2-1PGDG.rhel7        pgdg10      4.4 M
+Installing for dependencies:
+ postgresql10             x86_64      10.2-1PGDG.rhel7        pgdg10      1.5 M
+ postgresql10-libs        x86_64      10.2-1PGDG.rhel7        pgdg10      354 k
+
+Transaction Summary
+================================================================================
+Install  2 Packages (+2 Dependent packages)
+
+Total download size: 8.3 M
+Installed size: 35 M
+            :
+            :
+Installed:
+  postgresql10-devel.x86_64 0:10.2-1PGDG.rhel7
+  postgresql10-server.x86_64 0:10.2-1PGDG.rhel7
+
+Dependency Installed:
+  postgresql10.x86_64 0:10.2-1PGDG.rhel7
+  postgresql10-libs.x86_64 0:10.2-1PGDG.rhel7
+
+Complete!
+</code></pre>
+
+<h1 id="pg-strom-installation">PG-Strom Installation</h1>
+<h2 id="rpm-installation">RPM Installation</h2>
+<pre><code>$ wget https://heterodb.github.io/swdc/yum/rhel7-noarch/heterodb-swdc-1.0-1.el7.noarch.rpm
+$ sudo rpm -ivh heterodb-swdc-1.0-1.el7.noarch.rpm
+Preparing...                          ################################# [100%]
+Updating / installing...
+   1:heterodb-swdc-1.0-1.el7          ################################# [100%]
+
+</code></pre>
+
+<pre><code>
+</code></pre>
+
+<h2 id="build-from-the-source">Build from the source</h2>
+<h3 id="getting-the-source-code">Getting the source code</h3>
+<pre><code>$ git clone https://github.com/heterodb/pg-strom.git
+Cloning into 'pg-strom'...
+remote: Counting objects: 13797, done.
+remote: Compressing objects: 100% (215/215), done.
+remote: Total 13797 (delta 208), reused 339 (delta 167), pack-reused 13400
+Receiving objects: 100% (13797/13797), 11.81 MiB | 1.76 MiB/s, done.
+Resolving deltas: 100% (10504/10504), done.
+</code></pre>
+
+<h3 id="building-the-pg-strom">Building the PG-Strom</h3>
+<pre><code>$ cd pg-strom
+$ make PG_CONFIG=/usr/pgsql-10/bin/pg_config
+$ sudo make install PG_CONFIG=/usr/pgsql-10/bin/pg_config
+</code></pre>
+
+<h2 id="post-installation-setup">Post Installation Setup</h2>
+              
+            </div>
+          </div>
+          <footer>
+  
+    <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
+      
+        <a href="../features/" class="btn btn-neutral float-right" title="Advanced Features">Next <span class="icon icon-circle-arrow-right"></span></a>
+      
+      
+        <a href=".." class="btn btn-neutral" title="Home"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+      
+    </div>
+  
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+    
+  </div>
+
+  Built with <a href="http://www.mkdocs.org">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+      
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" style="cursor: pointer">
+    <span class="rst-current-version" data-toggle="rst-current-version">
+      
+      
+        <span><a href=".." style="color: #fcfcfc;">&laquo; Previous</a></span>
+      
+      
+        <span style="margin-left: 15px"><a href="../features/" style="color: #fcfcfc">Next &raquo;</a></span>
+      
+    </span>
+</div>
+    <script>var base_url = '..';</script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/require.js"></script>
+      <script src="../search/search.js"></script>
+
+</body>
+</html>
