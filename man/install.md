@@ -48,12 +48,22 @@ This chapter introduces the steps to install PG-Strom.
 @ja{
 CUDA ToolkitのサポートするLinuxディストリビューションを選択し、個々のディストリビューションのインストールプロセスに従ってインストール作業を行ってください。 CUDA ToolkitのサポートするLinuxディストリビューションは、NVIDIA DEVELOPER ZONEにおいて紹介されています。
 }
+@en{
+Choose a Linux distribution which is supported by CUDA Toolkit, then install the system according to the installation process of the distribution. NVIDIA CUDA DEVELOPER ZONE introduces the list of Linux distributions which are supported by CUDA Toolkit.
+}
 @ja{
 Red Hat Enterprise Linux 7.x系列、またはCentOS 7.x系列の場合、ベース環境として「最小限のインストール」を選択し、さらに以下のアドオンを選択してください。
 
 - デバッグツール
 - 開発ツール
 }
+@en{
+In case of Red Hat Enterprise Linux 7.x or CentOS 7.x series, choose "Minimal installation" as base environment, and also check the following add-ons.
+
+- Debugging Tools
+- Development Tools
+}
+
 
 @ja:## OSインストール後の設定
 @en:## Post OS Installation Configuration
@@ -61,6 +71,10 @@ Red Hat Enterprise Linux 7.x系列、またはCentOS 7.x系列の場合、ベー
 @ja{
 システムへのOSのインストール後、後のステップでGPUドライバとNVMe-Stromドライバをインストールするために、いくつかの追加設定が必要です。
 }
+@en{
+Next to the OS installation, a few additionsl configurations are required to install GPU-drivers and NVMe-Strom driver on the later steps.
+}
+
 
 @ja:### EPELリポジトリの設定
 @en:### Setup EPEL Repository
@@ -69,18 +83,27 @@ Red Hat Enterprise Linux 7.x系列、またはCentOS 7.x系列の場合、ベー
 PG-Stromの実行に必要なソフトウェアモジュールのいくつかは、EPEL(Extra Packages for Enterprise Linux)の一部として配布されています。
 これらのソフトウェアを入手するためにEPELパッケージ群のリポジトリ定義をyumシステムに追加する必要があります。
 }
-
+@en{
+Several software modules required by PG-Strom are distributed as a part of EPEL (Extra Packages for Enterprise Linux).
+You need to add a repository definition of EPEL packages for yum system to obtain these software.
+}
 @ja{
 EPELリポジトリから入手するパッケージの一つがDKMS(Dynamic Kernel Module Support)です。これは動作中のLinuxカーネルに適合したLinuxカーネルモジュールをオンデマンドでビルドするためのフレームワークで、NVIDIAのGPUデバイスドライバや、SSD-to-GPUダイレクトSQL実行をサポートするカーネルモジュール(nvme_strom)が使用しています。
 Linuxカーネルモジュールは、Linuxカーネルのバージョンアップに追従して再ビルドが必要であるため、DKMSなしでのシステム運用は現実的ではありません。
 }
-
+@en{
+One of the package we will get from EPEL repository is DKMS (Dynamic Kernel Module Support). It is a framework to build Linux kernel module for the running Linux kernel on demand; used for NVIDIA's GPU driver or NVMe-Strom which is a kernel module to support SSD-to-GPU Direct SQL Execution.
+}
 @ja{
 EPELリポジトリの定義は`epel-release`パッケージにより提供されます。
-これはCentOSのパブリックFTPサイトから入手する事が可能で、`epel-release-<distribution version>.noarch.rpm`をダウンロードし、これをインストールしてください。 
-`epel-release`パッケージがインストールされると、EPELリポジトリからソフトウェアを入手するためのyumシステムへの設定が追加されます。
+これはFedora ProjectのパブリックFTPサイトから入手する事が可能で、`epel-release-<distribution version>.noarch.rpm`をダウンロードし、これをインストールしてください。 
+`epel-release`パッケージがインストールされると、EPELリポジトリからソフトウェアを入手するための設定がyumシステムへ追加されます。
 }
-
+@en{
+`epel-release` package provides the repository definition of EPEL.
+You can obtain this package from the public FTP site of Fedora Project. Downloads the `epel-release-<distribution version>.noarch.rpm`, and install the package.
+Once `epel-release` package gets installed, yum system configuration is updated to get software from the EPEL repository.
+}
 - Fedora Project Public FTP Site
     - [https://dl.fedoraproject.org/pub/epel/7/x86_64/](https://dl.fedoraproject.org/pub/epel/7/x86_64/)
 @ja{
@@ -95,7 +118,9 @@ EPELリポジトリの定義は`epel-release`パッケージにより提供さ�
 @ja{
 以下のようにepel-releaseパッケージをインストールします。
 }
-
+@en{
+Install the `epel-release` package as follows.
+}
 ```
 $ sudo yum install https://dl.fedoraproject.org/pub/epel/7/x86_64/Packages/e/epel-release-7-11.noarch.rpm
           :
@@ -115,7 +140,6 @@ Installed:
 Complete!
 ```
 
-
 @ja:### HeteroDB-SWDCのインストール
 @en:### HeteroDB-SWDC Installation
 
@@ -123,15 +147,26 @@ Complete!
 PG-Stromほか関連パッケージは[HeteroDB Software Distribution Center](https://heterodb.github.io/swdc/)から配布されています。
 これらのソフトウェアを入手するために、HeteroDB-SWDCのリポジトリ定義をyumシステムに追加する必要があります。
 }
+@en{
+PG-Strom and related packages are distributed from [HeteroDB Software Distribution Center](https://heterodb.github.io/swdc/).
+You need to add a repository definition of HeteroDB-SWDC for you system to obtain these software.
+}
 
 @ja{
 HeteroDB-SWDCリポジトリの定義はheterodb-swdcパッケージにより提供されます。
 Webブラウザなどで[HeteroDB Software Distribution Center](https://heterodb.github.io/swdc/)へアクセスし、ページの先頭にリンクの記載されている`heterodb-swdc-1.0-1.el7.noarch.rpm`をダウンロードしてインストールしてください。
 heterodb-swdcパッケージがインストールされると、HeteroDB-SWDCからソフトウェアを入手するためのyumシステムへの設定が追加されます。
 }
-
+@en{
+`heterodb-swdc` package provides the repository definition of HeteroDB-SWDC.
+Access to the [HeteroDB Software Distribution Center](https://heterodb.github.io/swdc/) using Web browser, download the `heterodb-swdc-1.0-1.el7.noarch.rpm` on top of the file list, then install this package.
+Once heterodb-swdc package gets installed, yum system configuration is updated to get software from the HeteroDB-SWDC repository.
+}
 @ja{
 以下のようにheterodb-swdcパッケージをインストールします。
+}
+@en{
+Install the `heterodb-swdc` package as follows.
 }
 
 ```
@@ -158,18 +193,34 @@ Complete!
 @en:# CUDA Toolkit Installation
 
 @ja{
-本節ではCUDA Toolkitのインストールについて説明します。 既に対応バージョンのCUDA Toolkitをインストール済みであれば、本節の内容は読み飛ばして構いません
-
+本節ではCUDA Toolkitのインストールについて説明します。 既に最新のCUDA Toolkitをインストール済みであれば、本節の内容は読み飛ばして構いません
+}
+@en{
+This section introduces the installation of CUDA Toolkit. If you already installed the latest CUDA Toolkit, you can skip this section.
+}
+@ja{
 NVIDIAはCUDA Toolkitのインストールに２通りの方法を提供しています。一つは自己実行型アーカイブ（runfileと呼ばれる）によるもの。もう一つはRPMパッケージによるものです。
 ソフトウェアの更新が容易である事から、後者のRPMパッケージによるインストールが推奨です。
-
+}
+@en{
+NVIDIA offers two approach to install CUDA Toolkit; one is by self-extracting archive (called runfile), and the other is by RPM packages.
+We recommend RPM installation because it allows simple software updates.
+}
+@ja{
 CUDA Toolkitのインストール用パッケージはNVIDIA DEVELOPER ZONEからダウンロードする事ができます。 適切なOS、アーキテクチャ、ディストリビューション、バージョンを指定し、『rpm(network)』版を選択してください。
+}
+@en{
+You can download the installation package for CUDA Toolkit from NVIDIA DEVELOPER ZONE. Choose your OS, architecture, distribution and version, then choose "rpm(network)" edition.
 }
 
 ![CUDA Toolkit download](./img/cuda-download.png)
 
 @ja{
 『rpm(network)』パッケージにはCUDA Toolkitを配布するyumリポジトリの定義情報が含まれているだけです。これは OSのインストール においてシステムにEPELリポジトリの定義を追加したのと同様の方法です。 したがって、cudaリポジトリを登録した後、関連したRPMパッケージをネットワークインストールする必要があります。 下記のコマンドを実行してください。
+}
+@en{
+The "rpm(network)" edition contains only yum repositoty definition to distribute CUDA Toolkit. It is similar to the EPEL repository definition at the OS installation.
+So, you needs to installa the related RPM packages over network after the resistoration of CUDA repository. Run the following command.
 }
 
 ```
@@ -182,6 +233,10 @@ $ sudo yum install cuda
 正常にインストールが完了すると、`/usr/local/cuda`配下にCUDA Toolkitが導入されています。
 }
 
+@en{
+Once installation completed successfully, CUDA Toolkit is deployed at `/usr/local/cuda`.
+}
+
 ```
 $ ls /usr/local/cuda
 bin     include  libnsight         nvml       samples  tools
@@ -190,7 +245,11 @@ extras  lib64    nsightee_plugins  pkgconfig  src
 ```
 
 @ja{
-CUDAおよび`nvidia`ドライバのインストールが完了したら、GPUが正しく認識されている事を確認してください。`nvidia-smi`コマンドを実行すると、以下の出力例のように、システムに搭載されているGPUの情報が表示されます。
+インストールが完了したら、GPUが正しく認識されている事を確認してください。`nvidia-smi`コマンドを実行すると、以下の出力例のように、システムに搭載されているGPUの情報が表示されます。
+}
+@en{
+Once installation gets completed, ensure the system recognizes the GPU devices correctly.
+`nvidia-smi` command shows GPU information installed on your system, as follows.
 }
 
 ```
@@ -219,7 +278,11 @@ Wed Feb 14 09:43:48 2018
     nvidiaドライバと競合するnouveauドライバがロードされている場合、直ちにnvidiaドライバをロードする事ができません。
     この場合は、システムを一度再起動してnvidia-smiコマンドを実行できるかどうか確認してください。CUDAのインストーラはnouveauドライバの無効化設定を行うため、次回起動時にはnouveauドライバがロードされることはありません。
 }
-
+@en{
+!!! Tip
+    If nouveau driver which conflicts to nvidia driver is loaded, system cannot load the nvidia driver immediately.
+    In this case, reboot the operating system once, then confirm whether you can run nvidia-smi command successfully, or not. CUDA installer also disables nouveau driver, nouveau driver will not be loaded on the next boot.
+}
 
 @ja:# PostgreSQLのインストール
 @en:# PostgreSQL Installation
@@ -228,12 +291,24 @@ Wed Feb 14 09:43:48 2018
 本節ではRPMによるPostgreSQLのインストールについて紹介します。
 ソースからのインストールに関しては既にドキュメントが数多く存在し、`./configure`スクリプトのオプションが多岐にわたる事から、ここでは紹介しません。
 }
+@en{
+This section introduces PostgreSQL installation with RPM.
+We don't introduce the installation steps from the source because there are many documents for this approach, and there are also various options for the `./configure` script.
+}
 
 @ja{
 Linuxディストリビューションの配布するパッケージにもPostgreSQLは含まれていますが、必ずしも最新ではなく、PG-Stromの対応バージョンよりも古いものである事が多々あります。例えば、Red Hat Enterprise Linux 7.xやCentOS 7.xで配布されているPostgreSQLはv9.2.xですが、これはPostgreSQLコミュニティとして既にEOLとなっているバージョンです。
-
+}
+@en{
+PostgreSQL is also distributed in the packages of Linux distributions, however, it is not the latest one, and often older than the version which supports PG-Strom. For example, Red Hat Enterprise Linux 7.x or CentOS 7.x distributes PostgreSQL v9.2.x series. This version had been EOL by the PostgreSQL community.
+}
+@ja{
 PostgreSQL Global Development Groupは、最新のPostgreSQLおよび関連ソフトウェアの配布のためにyumリポジトリを提供しています。
 EPELの設定のように、yumリポジトリの設定を行うだけの小さなパッケージをインストールし、その後、PostgreSQLやその他のソフトウェアをインストールします。
+}
+@en{
+PostgreSQL Global Development Group provides yum repository to distribute the latest PostgreSQL and related packages.
+Like the configuration of EPEL, you can install a small package to set up yum repository, then install PostgreSQL and related software.
 }
 
 @ja{
@@ -241,15 +316,20 @@ yumリポジトリ定義の一覧は [http://yum.postgresql.org/repopackages.php
 
 PostgreSQLメジャーバージョンとLinuxディストリビューションごとに多くのリポジトリ定義がありますが、あなたのLinuxディストリビューション向けのPostgreSQL 9.6以降のものを選択する必要があります。
 }
+@en{
+Here is the list of yum repository definition: [http://yum.postgresql.org/repopackages.php](http://yum.postgresql.org/repopackages.php).
 
+Repository definitions are per PostgreSQL major version and Linux distribution. You need to choose the one for your Linux distribution, and for PostgreSQL v9.6 or later.
+}
 
 @ja{
 以下のように、yumリポジトリの定義をインストールし、次いで、PostgreSQLパッケージをインストールすれば完了です。 PostgreSQL v10を使用する場合、PG-Stromのインストールには以下のパッケージが必要です。
-
+}
+@en{
+All you need to install are yum repository definition, and PostgreSQL packages. If you choose PostgreSQL v10, the pakages below are required to install PG-Strom.
+}
 - postgresql10-devel
 - postgresql10-server
-}
-
 ```
 $ sudo yum install -y https://download.postgresql.org/pub/repos/yum/10/redhat/rhel-7-x86_64/pgdg-redhat10-10-2.noarch.rpm
 $ sudo yum install -y postgresql10-server postgresql10-devel
@@ -283,6 +363,11 @@ Complete!
 PostgreSQL Global Development Groupの提供するRPMパッケージは`/usr/pgsql-<version>`という少々変則的なディレクトリにソフトウェアをインストールするため、`psql`等の各種コマンドを実行する際にはパスが通っているかどうか注意する必要があります。
 
 `postgresql-alternatives`パッケージをインストールしておくと、各種コマンドへのシンボリックリンクを`/usr/local/bin`以下に作成するため各種オペレーションが便利です。また、複数バージョンのPostgreSQLをインストールした場合でも、`alternatives`コマンドによってターゲットとなるPostgreSQLバージョンを切り替える事が可能です。
+}
+@en{
+The RPM packages provided by PostgreSQL Global Development Group installs software under the `/usr/pgsql-<version>` directory, so you may pay attention whether the PATH environment variable is configured appropriately.
+
+`postgresql-alternative` package set up symbolic links to the related commands under `/usr/local/bin`, so allows to simplify the operations. Also, it enables to switch target version using `alternatives` command even if multiple version of PostgreSQL.
 }
 
 ```
@@ -322,7 +407,6 @@ This section introduces the steps to install PG-Strom.
 We recommend RPM installation, however, also mention about the steps to build PG-Strom from the source code.
 }
 
-
 @ja:## RPMによるインストール
 @en:## RPM Installation
 
@@ -330,9 +414,16 @@ We recommend RPM installation, however, also mention about the steps to build PG
 PG-Stromおよび関連パッケージは[HeteroDB Software Distribution Center](https://heterodb.github.io/swdc/)より配布されています。
 既にyumシステムへリポジトリを追加済みであれば、それほど作業は多くありません。
 }
-
+@en{
+PG-Strom and related packages are distributed from [HeteroDB Software Distribution Center](https://heterodb.github.io/swdc/).
+If you repository definition has been added, not many tasks are needed.
+}
 @ja{
 基盤となるPostgreSQLのバージョンごとに別個のPG-StromのRPMパッケージが準備されており、PostgreSQL v9.6用であれば`pg_strom-PG96`パッケージを、PostgreSQL v10用であれば`pg_strom-PG10`パッケージをインストールします。
+}
+@en{
+We provide individual RPM packages of PG-Strom for each base PostgreSQL version. `pg_strom-PG96` package is built for PostgreSQL 9.6, and `pg_strom-PG10` is also built for PostgreSQL v10.
+
 }
 
 ```
@@ -356,13 +447,18 @@ Complete!
 @ja{
 以上でパッケージのインストールは完了です。
 }
-
+@en{
+That's all for package installation.
+}
 
 @ja:## ソースからのインストール
 @en:## Installation from the source
 
 @ja{
 開発者向けに、ソースコードからPG-Stromをビルドする方法についても紹介します。
+}
+@en{
+For developers, we also introduces the steps to build and install PG-Strom from the source code.
 }
 
 @ja:### ソースコードの入手
@@ -372,7 +468,10 @@ RPMパッケージと同様に、ソースコードのtarballを[HeteroDB Softwa
 
 ただ、tarballのリリースにはある程度のタイムラグが生じてしまうため、最新の開発版を使いたい場合には[PG-StromのGitHubリポジトリ](https://github.com/heterodb/pg-strom)の`master`ブランチをチェックアウトする方法の方が好まれるかもしれません。
 }
-
+@en{
+Like RPM packages, you can download tarball of the source code from [HeteroDB Software Distribution Center](https://heterodb.github.io/swdc/).
+On the other hands, here is a certain time-lags to release the tarball, it may be preferable to checkout the master branch of [PG-Strom on GitHub](https://github.com/heterodb/pg-strom) to use the latest development branch.
+}
 ```
 $ git clone https://github.com/heterodb/pg-strom.git
 Cloning into 'pg-strom'...
@@ -390,6 +489,13 @@ PG-Stromをビルドする時のコンフィグは、インストール先のPos
 
 `pg_config`にパスが通っており、それがインストール先のPostgreSQLのものであれば、そのまま`make`、`make install`を実行します。
 直接パスが通っていない場合は、`make`コマンドに`PG_CONFIG=...`パラメータを与え、`pg_config`のフルパスを渡します。
+}
+@en{
+Configuration to build PG-Strom must match to the target PostgreSQL strictly. For example, if a particular `strcut` has inconsistent layout by the configuration at build, it may lead problematic bugs; not easy to find out.
+Thus, not to have inconsistency, PG-Strom does not have own configure script, but references the build configuration of PostgreSQL using `pg_config` command.
+
+If PATH environment variable is set to the `pg_config` command of the target PostgreSQL, run `make` and `make install`.
+Elsewhere, give `PG_CONFIG=...` parameter on `make` command to tell the full path of the `pg_config` command.
 }
 
 ```
@@ -410,7 +516,12 @@ $ sudo make install PG_CONFIG=/usr/pgsql-10/bin/pg_config
 RPMインストールにおけるデフォルトのデータベースクラスタのパスは`/var/lib/pgsql/<version number>/data`です。
 `postgresql-alternatives`パッケージをインストールしている場合は、PostgreSQLのバージョンに拠らず`/var/lib/pgdata`で参照する事ができます。
 }
+@en{
+Database cluster is not constructed yet, run `initdb` command to set up initial database of PostgreSQL.
 
+The default path of the database cluster on RPM installation is `/var/lib/pgsql/<version number>/data`.
+If you install `postgresql-alternatives` package, this default path can be referenced by `/var/lib/pgdata` regardless of the PostgreSQL version.
+}
 ```
 $ sudo su - postgres
 $ initdb -D /var/lib/pgdata/
@@ -451,7 +562,13 @@ Success. You can now start the database server using:
 PG-Stromを動作させるためには、最低限、以下のパラメータの設定が必要です。
 これ以外のパラメータについても、システムの用途や想定ワークロードを踏まえて検討してください。
 }
+@en{
+Next, edit `postgresql.conf` which is a configuration file of PostgreSQL.
+The parameters below should be edited at least to work PG-Strom.
+Investigate other parameters according to usage of the system and expected workloads.
+}
 
+@ja{
 - **shared_preload_libraries**
     - PG-Stromモジュールは`shared_preload_libraries`パラメータによりpostmasterプロセスの起動時にロードされる必要があります。オンデマンドでの拡張モジュールのロードはサポート対象外です。したがって、以下の設定項目は必須です。
     - ```shared_preload_libraries = '$libdir/pg_strom'```
@@ -470,7 +587,26 @@ PG-Stromを動作させるためには、最低限、以下のパラメータの
     - 典型的な例は、ソート処理にオンメモリのクイックソートではなく、ディスクベースのマージソートを選択するといったものです。
     - 以下のように、ある程度の余裕を持った値を設定すべきです。
     - ```work_mem = 1GB```
-
+}
+@en{
+- **shared_preload_libraries**
+    - PG-Strom module must be loaded on startup of the postmaster process by the `shared_preload_libraries`. Unable to load it on demand. Therefore, you must add the configuration below.
+    - ```shared_preload_libraries = '$libdir/pg_strom'```
+- **max_worker_processes**
+    - PG-Strom internally uses several background workers, so the default configuration (= 8) is too small for other usage. So, we recommand to expand the variable for a certain margin.
+    - ```max_worker_processes = 100```
+- **shared_buffers**
+    - Although it depends on the workloads, the initial configuration of `shared_buffers` is too small for the data size where PG-Strom tries to work, thus storage workloads restricts the entire performance, and may be unable to work GPU efficiently.
+    - So, we recommend to expand the variable for a certain margin.
+    - ```shared_buffers = 10GB```
+    - Please consider to apply **SSD-to-GPU Direct SQL Execution** to process larger than system's physical RAM size.
+    - Please consider to apply **Columnar Cache** if you want to cache particular tables.
+- **work_mem**
+    - Although it depends on the workloads, the initial configuration of `work_mem` is too small to choose the optimal query execution plan on analytic queries.
+    - An typical example is, disk-based merge sort may be chosen instead of the in-memory quick-sorting.
+    - So, we recommend to expand the variable for a certain margin.
+    - ```work_mem = 1GB```
+}
 
 @ja:### PostgreSQLの起動
 @en:### Start PostgreSQL
@@ -480,6 +616,12 @@ PostgreSQLを起動します。
 
 正常にセットアップが完了していれば、ログにPG-StromがGPUを認識した事を示すメッセージが記録されているはずです。
 以下の例では、Tesla V100(PCIe; 16GB版)を認識しています。
+}
+@en{
+Start PostgreSQL service.
+
+If PG-Strom is set up appropriately, it writes out log message which shows PG-Strom recognized GPU devices.
+The example below recognized the Tesla V100(PCIe; 16GB edition) device.
 }
 
 ```
@@ -522,10 +664,20 @@ Mar 03 15:45:23 saba.heterodb.com systemd[1]: Started PostgreSQL 10 database ser
 @ja{
 最後に、PG-Stromに関連するSQL関数などのDBオブジェクトを作成します。
 この手順はPostgreSQLのEXTENSION機能を用いてパッケージ化されており、SQLコマンドラインで`CREATE EXTENSION`コマンドを実行するだけです。
-
-なお、この手順は新しいデータベースを作成するたびに必要になる事に注意してください。
-新しいデータベースを作成した時点で既にPG-Strom関連オブジェクトが作成されていてほしい場合は、予め`template1`データベースで下記のコマンドを実行しておけば、`CREATE DATABASE`コマンドの実行時に新しいデータベースへ設定がコピーされます。
 }
+@en{
+At the last, create database objects related to PG-Strom, like SQL functions.
+This steps are packaged using EXTENSION feature of PostgreSQL. So, all you needs to run is `CREATE EXTENSION` on the SQL command line.
+}
+@ja{
+なお、この手順は新しいデータベースを作成するたびに必要になる事に注意してください。
+新しいデータベースを作成した時点で既にPG-Strom関連オブジェクトが作成されていてほしい場合は、予め`template1`データベースでPG-Stromエクステンションを作成しておけば、`CREATE DATABASE`コマンドの実行時に新しいデータベースへ設定がコピーされます。
+}
+@en{
+Please note that this step is needed for each new database.
+If you want PG-Strom is pre-configured on new database creation, you can create PG-Strom extension on the `template1` database, its configuration will be copied to the new database on `CREATE DATABASE` command.
+}
+
 ```
 $ psql postgres -U postgres
 psql (10.2)

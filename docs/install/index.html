@@ -180,8 +180,21 @@
 </li>
 </ul>
 <h1 id="os-installation">OS Installation</h1>
+<p>Choose a Linux distribution which is supported by CUDA Toolkit, then install the system according to the installation process of the distribution. NVIDIA CUDA DEVELOPER ZONE introduces the list of Linux distributions which are supported by CUDA Toolkit.</p>
+<p>In case of Red Hat Enterprise Linux 7.x or CentOS 7.x series, choose "Minimal installation" as base environment, and also check the following add-ons.</p>
+<ul>
+<li>Debugging Tools</li>
+<li>Development Tools</li>
+</ul>
 <h2 id="post-os-installation-configuration">Post OS Installation Configuration</h2>
+<p>Next to the OS installation, a few additionsl configurations are required to install GPU-drivers and NVMe-Strom driver on the later steps.</p>
 <h3 id="setup-epel-repository">Setup EPEL Repository</h3>
+<p>Several software modules required by PG-Strom are distributed as a part of EPEL (Extra Packages for Enterprise Linux).
+You need to add a repository definition of EPEL packages for yum system to obtain these software.</p>
+<p>One of the package we will get from EPEL repository is DKMS (Dynamic Kernel Module Support). It is a framework to build Linux kernel module for the running Linux kernel on demand; used for NVIDIA's GPU driver or NVMe-Strom which is a kernel module to support SSD-to-GPU Direct SQL Execution.</p>
+<p><code>epel-release</code> package provides the repository definition of EPEL.
+You can obtain this package from the public FTP site of Fedora Project. Downloads the <code>epel-release-&lt;distribution version&gt;.noarch.rpm</code>, and install the package.
+Once <code>epel-release</code> package gets installed, yum system configuration is updated to get software from the EPEL repository.</p>
 <ul>
 <li>Fedora Project Public FTP Site<ul>
 <li><a href="https://dl.fedoraproject.org/pub/epel/7/x86_64/">https://dl.fedoraproject.org/pub/epel/7/x86_64/</a></li>
@@ -192,6 +205,7 @@
 <p class="admonition-title">Tip</p>
 <p>Walk down the directory: <code>Packages</code> --&gt; <code>e</code>, from the above URL.</p>
 </div>
+<p>Install the <code>epel-release</code> package as follows.</p>
 <pre><code>$ sudo yum install https://dl.fedoraproject.org/pub/epel/7/x86_64/Packages/e/epel-release-7-11.noarch.rpm
           :
 ================================================================================
@@ -211,6 +225,12 @@ Complete!
 </code></pre>
 
 <h3 id="heterodb-swdc-installation">HeteroDB-SWDC Installation</h3>
+<p>PG-Strom and related packages are distributed from <a href="https://heterodb.github.io/swdc/">HeteroDB Software Distribution Center</a>.
+You need to add a repository definition of HeteroDB-SWDC for you system to obtain these software.</p>
+<p><code>heterodb-swdc</code> package provides the repository definition of HeteroDB-SWDC.
+Access to the <a href="https://heterodb.github.io/swdc/">HeteroDB Software Distribution Center</a> using Web browser, download the <code>heterodb-swdc-1.0-1.el7.noarch.rpm</code> on top of the file list, then install this package.
+Once heterodb-swdc package gets installed, yum system configuration is updated to get software from the HeteroDB-SWDC repository.</p>
+<p>Install the <code>heterodb-swdc</code> package as follows.</p>
 <pre><code>$ sudo yum install https://heterodb.github.io/swdc/yum/rhel7-x86_64/heterodb-swdc-1.0-1.el7.noarch.rpm
           :
 ================================================================================
@@ -230,18 +250,27 @@ Complete!
 </code></pre>
 
 <h1 id="cuda-toolkit-installation">CUDA Toolkit Installation</h1>
+<p>This section introduces the installation of CUDA Toolkit. If you already installed the latest CUDA Toolkit, you can skip this section.</p>
+<p>NVIDIA offers two approach to install CUDA Toolkit; one is by self-extracting archive (called runfile), and the other is by RPM packages.
+We recommend RPM installation because it allows simple software updates.</p>
+<p>You can download the installation package for CUDA Toolkit from NVIDIA DEVELOPER ZONE. Choose your OS, architecture, distribution and version, then choose "rpm(network)" edition.</p>
 <p><img alt="CUDA Toolkit download" src="../img/cuda-download.png" /></p>
+<p>The "rpm(network)" edition contains only yum repositoty definition to distribute CUDA Toolkit. It is similar to the EPEL repository definition at the OS installation.
+So, you needs to installa the related RPM packages over network after the resistoration of CUDA repository. Run the following command.</p>
 <pre><code>$ sudo rpm -i cuda-repo-&lt;distribution&gt;-&lt;version&gt;.x86_64.rpm
 $ sudo yum clean all
 $ sudo yum install cuda
 </code></pre>
 
+<p>Once installation completed successfully, CUDA Toolkit is deployed at <code>/usr/local/cuda</code>.</p>
 <pre><code>$ ls /usr/local/cuda
 bin     include  libnsight         nvml       samples  tools
 doc     jre      libnvvp           nvvm       share    version.txt
 extras  lib64    nsightee_plugins  pkgconfig  src
 </code></pre>
 
+<p>Once installation gets completed, ensure the system recognizes the GPU devices correctly.
+<code>nvidia-smi</code> command shows GPU information installed on your system, as follows.</p>
 <pre><code>$ nvidia-smi
 Wed Feb 14 09:43:48 2018
 +-----------------------------------------------------------------------------+
@@ -262,7 +291,24 @@ Wed Feb 14 09:43:48 2018
 +-----------------------------------------------------------------------------+
 </code></pre>
 
+<div class="admonition tip">
+<p class="admonition-title">Tip</p>
+<p>If nouveau driver which conflicts to nvidia driver is loaded, system cannot load the nvidia driver immediately.
+In this case, reboot the operating system once, then confirm whether you can run nvidia-smi command successfully, or not. CUDA installer also disables nouveau driver, nouveau driver will not be loaded on the next boot.</p>
+</div>
 <h1 id="postgresql-installation">PostgreSQL Installation</h1>
+<p>This section introduces PostgreSQL installation with RPM.
+We don't introduce the installation steps from the source because there are many documents for this approach, and there are also various options for the <code>./configure</code> script.</p>
+<p>PostgreSQL is also distributed in the packages of Linux distributions, however, it is not the latest one, and often older than the version which supports PG-Strom. For example, Red Hat Enterprise Linux 7.x or CentOS 7.x distributes PostgreSQL v9.2.x series. This version had been EOL by the PostgreSQL community.</p>
+<p>PostgreSQL Global Development Group provides yum repository to distribute the latest PostgreSQL and related packages.
+Like the configuration of EPEL, you can install a small package to set up yum repository, then install PostgreSQL and related software.</p>
+<p>Here is the list of yum repository definition: <a href="http://yum.postgresql.org/repopackages.php">http://yum.postgresql.org/repopackages.php</a>.</p>
+<p>Repository definitions are per PostgreSQL major version and Linux distribution. You need to choose the one for your Linux distribution, and for PostgreSQL v9.6 or later.</p>
+<p>All you need to install are yum repository definition, and PostgreSQL packages. If you choose PostgreSQL v10, the pakages below are required to install PG-Strom.</p>
+<ul>
+<li>postgresql10-devel</li>
+<li>postgresql10-server</li>
+</ul>
 <pre><code>$ sudo yum install -y https://download.postgresql.org/pub/repos/yum/10/redhat/rhel-7-x86_64/pgdg-redhat10-10-2.noarch.rpm
 $ sudo yum install -y postgresql10-server postgresql10-devel
           :
@@ -291,6 +337,8 @@ Dependency Installed:
 Complete!
 </code></pre>
 
+<p>The RPM packages provided by PostgreSQL Global Development Group installs software under the <code>/usr/pgsql-&lt;version&gt;</code> directory, so you may pay attention whether the PATH environment variable is configured appropriately.</p>
+<p><code>postgresql-alternative</code> package set up symbolic links to the related commands under <code>/usr/local/bin</code>, so allows to simplify the operations. Also, it enables to switch target version using <code>alternatives</code> command even if multiple version of PostgreSQL.</p>
 <pre><code>$ sudo yum install postgresql-alternatives
           :
 Resolving Dependencies
@@ -317,6 +365,9 @@ Complete!
 
 <h1 id="pg-strom-installation">PG-Strom Installation</h1>
 <h2 id="rpm-installation">RPM Installation</h2>
+<p>PG-Strom and related packages are distributed from <a href="https://heterodb.github.io/swdc/">HeteroDB Software Distribution Center</a>.
+If you repository definition has been added, not many tasks are needed.</p>
+<p>We provide individual RPM packages of PG-Strom for each base PostgreSQL version. <code>pg_strom-PG96</code> package is built for PostgreSQL 9.6, and <code>pg_strom-PG10</code> is also built for PostgreSQL v10.</p>
 <pre><code>$ sudo yum install pg_strom-PG10
           :
 ================================================================================
@@ -334,8 +385,12 @@ Installed:
 Complete!
 </code></pre>
 
+<p>That's all for package installation.</p>
 <h2 id="installation-from-the-source">Installation from the source</h2>
+<p>For developers, we also introduces the steps to build and install PG-Strom from the source code.</p>
 <h3 id="getting-the-source-code">Getting the source code</h3>
+<p>Like RPM packages, you can download tarball of the source code from <a href="https://heterodb.github.io/swdc/">HeteroDB Software Distribution Center</a>.
+On the other hands, here is a certain time-lags to release the tarball, it may be preferable to checkout the master branch of <a href="https://github.com/heterodb/pg-strom">PG-Strom on GitHub</a> to use the latest development branch.</p>
 <pre><code>$ git clone https://github.com/heterodb/pg-strom.git
 Cloning into 'pg-strom'...
 remote: Counting objects: 13797, done.
@@ -346,6 +401,10 @@ Resolving deltas: 100% (10504/10504), done.
 </code></pre>
 
 <h3 id="building-the-pg-strom">Building the PG-Strom</h3>
+<p>Configuration to build PG-Strom must match to the target PostgreSQL strictly. For example, if a particular <code>strcut</code> has inconsistent layout by the configuration at build, it may lead problematic bugs; not easy to find out.
+Thus, not to have inconsistency, PG-Strom does not have own configure script, but references the build configuration of PostgreSQL using <code>pg_config</code> command.</p>
+<p>If PATH environment variable is set to the <code>pg_config</code> command of the target PostgreSQL, run <code>make</code> and <code>make install</code>.
+Elsewhere, give <code>PG_CONFIG=...</code> parameter on <code>make</code> command to tell the full path of the <code>pg_config</code> command.</p>
 <pre><code>$ cd pg-strom
 $ make PG_CONFIG=/usr/pgsql-10/bin/pg_config
 $ sudo make install PG_CONFIG=/usr/pgsql-10/bin/pg_config
@@ -353,6 +412,9 @@ $ sudo make install PG_CONFIG=/usr/pgsql-10/bin/pg_config
 
 <h2 id="post-installation-setup">Post Installation Setup</h2>
 <h3 id="creation-of-database-cluster">Creation of database cluster</h3>
+<p>Database cluster is not constructed yet, run <code>initdb</code> command to set up initial database of PostgreSQL.</p>
+<p>The default path of the database cluster on RPM installation is <code>/var/lib/pgsql/&lt;version number&gt;/data</code>.
+If you install <code>postgresql-alternatives</code> package, this default path can be referenced by <code>/var/lib/pgdata</code> regardless of the PostgreSQL version.</p>
 <pre><code>$ sudo su - postgres
 $ initdb -D /var/lib/pgdata/
 The files belonging to this database system will be owned by user &quot;postgres&quot;.
@@ -384,35 +446,40 @@ Success. You can now start the database server using:
 </code></pre>
 
 <h3 id="setup-postgresqlconf">Setup postgresql.conf</h3>
+<p>Next, edit <code>postgresql.conf</code> which is a configuration file of PostgreSQL.
+The parameters below should be edited at least to work PG-Strom.
+Investigate other parameters according to usage of the system and expected workloads.</p>
 <ul>
 <li><strong>shared_preload_libraries</strong><ul>
-<li>PG-Stromモジュールは<code>shared_preload_libraries</code>パラメータによりpostmasterプロセスの起動時にロードされる必要があります。オンデマンドでの拡張モジュールのロードはサポート対象外です。したがって、以下の設定項目は必須です。</li>
+<li>PG-Strom module must be loaded on startup of the postmaster process by the <code>shared_preload_libraries</code>. Unable to load it on demand. Therefore, you must add the configuration below.</li>
 <li><code>shared_preload_libraries = '$libdir/pg_strom'</code></li>
 </ul>
 </li>
 <li><strong>max_worker_processes</strong><ul>
-<li>PG-Stromは数個のバックグラウンドワーカーを内部的に使用します。そのため、デフォルト値である 8 では、それ以外の処理に利用できるバックグラウンドワーカープロセス数があまりにも少なすぎてしまいます。</li>
-<li>以下のように、ある程度の余裕を持った値を設定すべきです。</li>
+<li>PG-Strom internally uses several background workers, so the default configuration (= 8) is too small for other usage. So, we recommand to expand the variable for a certain margin.</li>
 <li><code>max_worker_processes = 100</code></li>
 </ul>
 </li>
 <li><strong>shared_buffers</strong><ul>
-<li>ワークロードによりますが、<code>shared_buffers</code>の初期設定は非常に小さいため、PG-Stromが有効に機能する水準のデータサイズに対しては、ストレージへの読み書きが律速要因となってしまい、GPUの並列計算機能を有効に利用できない可能性があります。</li>
-<li>以下のように、ある程度の余裕を持った値を設定すべきです。</li>
+<li>Although it depends on the workloads, the initial configuration of <code>shared_buffers</code> is too small for the data size where PG-Strom tries to work, thus storage workloads restricts the entire performance, and may be unable to work GPU efficiently.</li>
+<li>So, we recommend to expand the variable for a certain margin.</li>
 <li><code>shared_buffers = 10GB</code></li>
-<li>明らかにメモリサイズよりも大きなデータを処理する必要がある場合は、SSD-to-GPUダイレクトSQL実行の利用を検討してください。</li>
-<li>特定のテーブルをインメモリでキャッシュしておきたい場合は、インメモリ列キャッシュの利用を検討してください。</li>
+<li>Please consider to apply <strong>SSD-to-GPU Direct SQL Execution</strong> to process larger than system's physical RAM size.</li>
+<li>Please consider to apply <strong>Columnar Cache</strong> if you want to cache particular tables.</li>
 </ul>
 </li>
 <li><strong>work_mem</strong><ul>
-<li>ワークロードによりますが、<code>work_mem</code>の初期設定は非常に小さいため、解析系クエリで最適なクエリ実行計画が選択されない可能性があります。</li>
-<li>典型的な例は、ソート処理にオンメモリのクイックソートではなく、ディスクベースのマージソートを選択するといったものです。</li>
-<li>以下のように、ある程度の余裕を持った値を設定すべきです。</li>
+<li>Although it depends on the workloads, the initial configuration of <code>work_mem</code> is too small to choose the optimal query execution plan on analytic queries.</li>
+<li>An typical example is, disk-based merge sort may be chosen instead of the in-memory quick-sorting.</li>
+<li>So, we recommend to expand the variable for a certain margin.</li>
 <li><code>work_mem = 1GB</code></li>
 </ul>
 </li>
 </ul>
 <h3 id="start-postgresql">Start PostgreSQL</h3>
+<p>Start PostgreSQL service.</p>
+<p>If PG-Strom is set up appropriately, it writes out log message which shows PG-Strom recognized GPU devices.
+The example below recognized the Tesla V100(PCIe; 16GB edition) device.</p>
 <pre><code># systemctl start postgresql-10
 # systemctl status -l postgresql-10
 * postgresql-10.service - PostgreSQL 10 database server
@@ -447,6 +514,10 @@ Mar 03 15:45:23 saba.heterodb.com systemd[1]: Started PostgreSQL 10 database ser
 </code></pre>
 
 <h3 id="creation-of-pg-strom-related-objects">Creation of PG-Strom related objects</h3>
+<p>At the last, create database objects related to PG-Strom, like SQL functions.
+This steps are packaged using EXTENSION feature of PostgreSQL. So, all you needs to run is <code>CREATE EXTENSION</code> on the SQL command line.</p>
+<p>Please note that this step is needed for each new database.
+If you want PG-Strom is pre-configured on new database creation, you can create PG-Strom extension on the <code>template1</code> database, its configuration will be copied to the new database on <code>CREATE DATABASE</code> command.</p>
 <pre><code>$ psql postgres -U postgres
 psql (10.2)
 Type &quot;help&quot; for help.

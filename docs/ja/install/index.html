@@ -195,8 +195,8 @@
 <p>EPELリポジトリから入手するパッケージの一つがDKMS(Dynamic Kernel Module Support)です。これは動作中のLinuxカーネルに適合したLinuxカーネルモジュールをオンデマンドでビルドするためのフレームワークで、NVIDIAのGPUデバイスドライバや、SSD-to-GPUダイレクトSQL実行をサポートするカーネルモジュール(nvme_strom)が使用しています。
 Linuxカーネルモジュールは、Linuxカーネルのバージョンアップに追従して再ビルドが必要であるため、DKMSなしでのシステム運用は現実的ではありません。</p>
 <p>EPELリポジトリの定義は<code>epel-release</code>パッケージにより提供されます。
-これはCentOSのパブリックFTPサイトから入手する事が可能で、<code>epel-release-&lt;distribution version&gt;.noarch.rpm</code>をダウンロードし、これをインストールしてください。 
-<code>epel-release</code>パッケージがインストールされると、EPELリポジトリからソフトウェアを入手するためのyumシステムへの設定が追加されます。</p>
+これはFedora ProjectのパブリックFTPサイトから入手する事が可能で、<code>epel-release-&lt;distribution version&gt;.noarch.rpm</code>をダウンロードし、これをインストールしてください。 
+<code>epel-release</code>パッケージがインストールされると、EPELリポジトリからソフトウェアを入手するための設定がyumシステムへ追加されます。</p>
 <ul>
 <li>Fedora Project Public FTP Site<ul>
 <li><a href="https://dl.fedoraproject.org/pub/epel/7/x86_64/">https://dl.fedoraproject.org/pub/epel/7/x86_64/</a></li>
@@ -252,7 +252,7 @@ Complete!
 </code></pre>
 
 <h1 id="cuda-toolkit">CUDA Toolkitのインストール</h1>
-<p>本節ではCUDA Toolkitのインストールについて説明します。 既に対応バージョンのCUDA Toolkitをインストール済みであれば、本節の内容は読み飛ばして構いません</p>
+<p>本節ではCUDA Toolkitのインストールについて説明します。 既に最新のCUDA Toolkitをインストール済みであれば、本節の内容は読み飛ばして構いません</p>
 <p>NVIDIAはCUDA Toolkitのインストールに２通りの方法を提供しています。一つは自己実行型アーカイブ（runfileと呼ばれる）によるもの。もう一つはRPMパッケージによるものです。
 ソフトウェアの更新が容易である事から、後者のRPMパッケージによるインストールが推奨です。</p>
 <p>CUDA Toolkitのインストール用パッケージはNVIDIA DEVELOPER ZONEからダウンロードする事ができます。 適切なOS、アーキテクチャ、ディストリビューション、バージョンを指定し、『rpm(network)』版を選択してください。</p>
@@ -270,7 +270,7 @@ doc     jre      libnvvp           nvvm       share    version.txt
 extras  lib64    nsightee_plugins  pkgconfig  src
 </code></pre>
 
-<p>CUDAおよび<code>nvidia</code>ドライバのインストールが完了したら、GPUが正しく認識されている事を確認してください。<code>nvidia-smi</code>コマンドを実行すると、以下の出力例のように、システムに搭載されているGPUの情報が表示されます。</p>
+<p>インストールが完了したら、GPUが正しく認識されている事を確認してください。<code>nvidia-smi</code>コマンドを実行すると、以下の出力例のように、システムに搭載されているGPUの情報が表示されます。</p>
 <pre><code>$ nvidia-smi
 Wed Feb 14 09:43:48 2018
 +-----------------------------------------------------------------------------+
@@ -519,7 +519,7 @@ Mar 03 15:45:23 saba.heterodb.com systemd[1]: Started PostgreSQL 10 database ser
 <p>最後に、PG-Stromに関連するSQL関数などのDBオブジェクトを作成します。
 この手順はPostgreSQLのEXTENSION機能を用いてパッケージ化されており、SQLコマンドラインで<code>CREATE EXTENSION</code>コマンドを実行するだけです。</p>
 <p>なお、この手順は新しいデータベースを作成するたびに必要になる事に注意してください。
-新しいデータベースを作成した時点で既にPG-Strom関連オブジェクトが作成されていてほしい場合は、予め<code>template1</code>データベースで下記のコマンドを実行しておけば、<code>CREATE DATABASE</code>コマンドの実行時に新しいデータベースへ設定がコピーされます。</p>
+新しいデータベースを作成した時点で既にPG-Strom関連オブジェクトが作成されていてほしい場合は、予め<code>template1</code>データベースでPG-Stromエクステンションを作成しておけば、<code>CREATE DATABASE</code>コマンドの実行時に新しいデータベースへ設定がコピーされます。</p>
 <pre><code>$ psql postgres -U postgres
 psql (10.2)
 Type &quot;help&quot; for help.
