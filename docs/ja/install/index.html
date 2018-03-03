@@ -84,7 +84,7 @@
         
             <li><a class="toctree-l3" href="#rpm">RPMによるインストール</a></li>
         
-            <li><a class="toctree-l3" href="#_2">ソースからのビルド</a></li>
+            <li><a class="toctree-l3" href="#_2">ソースからのインストール</a></li>
         
             <li><a class="toctree-l3" href="#_4">インストール後の設定</a></li>
         
@@ -92,6 +92,11 @@
     
 
     </ul>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../tutorial/">利用ガイド</a>
 	    </li>
           
             <li class="toctree-l1">
@@ -177,26 +182,75 @@
 </ul>
 <h1 id="os">OSのインストール</h1>
 <p>CUDA ToolkitのサポートするLinuxディストリビューションを選択し、個々のディストリビューションのインストールプロセスに従ってインストール作業を行ってください。 CUDA ToolkitのサポートするLinuxディストリビューションは、NVIDIA DEVELOPER ZONEにおいて紹介されています。</p>
-<p>Red Hat Enterprise Linux 7.x系列、またはCentOS 7.x系列の場合、「...」「....」を選択し、以下のパッケージを追加してください。</p>
+<p>Red Hat Enterprise Linux 7.x系列、またはCentOS 7.x系列の場合、ベース環境として「最小限のインストール」を選択し、さらに以下のアドオンを選択してください。</p>
 <ul>
-<li>あ</li>
-<li>と</li>
-<li>で</li>
-<li>確</li>
-<li>認</li>
+<li>デバッグツール</li>
+<li>開発ツール</li>
 </ul>
 <h2 id="os_1">OSインストール後の設定</h2>
 <p>システムへのOSのインストール後、後のステップでGPUドライバとNVMe-Stromドライバをインストールするために、いくつかの追加設定が必要です。</p>
-<h3 id="dkms">DKMSのインストール</h3>
-<p>DKMS (Dynamic Kernel Module Support) は、動作中のLinuxカーネル向けのLinuxカーネルモジュールを必要に応じてビルドするためのフレームワークで、NVIDIAのドライバも対応しています。Linuxカーネルのバージョンアップに追従してカーネルモジュールも更新されるため、DKMSのセットアップは推奨です。</p>
-<p>DKMSパッケージはEPEL (Extra Packages for Enterprise Linux) の一部として配布されています。ですので、CentOSのパブリックFTPサイトから <code>epel-release-&lt;distribution version&gt;.noarch.rpm</code> をダウンロードし、これをインストールしてください。 いったん epel-release パッケージがインストールされると、EPELリポジトリから非標準のパッケージを入手するためのyumシステムへの設定が追加されます。</p>
+<h3 id="epel">EPELリポジトリの設定</h3>
+<p>PG-Stromの実行に必要なソフトウェアモジュールのいくつかは、EPEL(Extra Packages for Enterprise Linux)の一部として配布されています。
+これらのソフトウェアを入手するためにEPELパッケージ群のリポジトリ定義をyumシステムに追加する必要があります。</p>
+<p>EPELリポジトリから入手するパッケージの一つがDKMS(Dynamic Kernel Module Support)です。これは動作中のLinuxカーネルに適合したLinuxカーネルモジュールをオンデマンドでビルドするためのフレームワークで、NVIDIAのGPUデバイスドライバや、SSD-to-GPUダイレクトSQL実行をサポートするカーネルモジュール(nvme_strom)が使用しています。
+Linuxカーネルモジュールは、Linuxカーネルのバージョンアップに追従して再ビルドが必要であるため、DKMSなしでのシステム運用は現実的ではありません。</p>
+<p>EPELリポジトリの定義は<code>epel-release</code>パッケージにより提供されます。
+これはCentOSのパブリックFTPサイトから入手する事が可能で、<code>epel-release-&lt;distribution version&gt;.noarch.rpm</code>をダウンロードし、これをインストールしてください。 
+<code>epel-release</code>パッケージがインストールされると、EPELリポジトリからソフトウェアを入手するためのyumシステムへの設定が追加されます。</p>
 <ul>
 <li>Fedora Project Public FTP Site<ul>
 <li><a href="https://dl.fedoraproject.org/pub/epel/7/x86_64/">https://dl.fedoraproject.org/pub/epel/7/x86_64/</a></li>
 </ul>
 </li>
 </ul>
+<div class="admonition tip">
+<p class="admonition-title">Tip</p>
+<p>上記URLから<code>Packages</code>→<code>e</code>へとディレクトリ階層を下ります。</p>
+</div>
+<p>以下のようにepel-releaseパッケージをインストールします。</p>
+<pre><code>$ sudo yum install https://dl.fedoraproject.org/pub/epel/7/x86_64/Packages/e/epel-release-7-11.noarch.rpm
+          :
+================================================================================
+ Package           Arch        Version     Repository                      Size
+================================================================================
+Installing:
+ epel-release      noarch      7-11        /epel-release-7-11.noarch       24 k
+
+Transaction Summary
+================================================================================
+Install  1 Package
+          :
+Installed:
+  epel-release.noarch 0:7-11
+
+Complete!
+</code></pre>
+
 <h3 id="heterodb-swdc">HeteroDB-SWDCのインストール</h3>
+<p>PG-Stromほか関連パッケージは<a href="https://heterodb.github.io/swdc/">HeteroDB Software Distribution Center</a>から配布されています。
+これらのソフトウェアを入手するために、HeteroDB-SWDCのリポジトリ定義をyumシステムに追加する必要があります。</p>
+<p>HeteroDB-SWDCリポジトリの定義はheterodb-swdcパッケージにより提供されます。
+Webブラウザなどで<a href="https://heterodb.github.io/swdc/">HeteroDB Software Distribution Center</a>へアクセスし、ページの先頭にリンクの記載されている<code>heterodb-swdc-1.0-1.el7.noarch.rpm</code>をダウンロードしてインストールしてください。
+heterodb-swdcパッケージがインストールされると、HeteroDB-SWDCからソフトウェアを入手するためのyumシステムへの設定が追加されます。</p>
+<p>以下のようにheterodb-swdcパッケージをインストールします。</p>
+<pre><code>$ sudo yum install https://heterodb.github.io/swdc/yum/rhel7-x86_64/heterodb-swdc-1.0-1.el7.noarch.rpm
+          :
+================================================================================
+ Package         Arch     Version       Repository                         Size
+================================================================================
+Installing:
+ heterodb-swdc   noarch   1.0-1.el7     /heterodb-swdc-1.0-1.el7.noarch   2.4 k
+
+Transaction Summary
+================================================================================
+Install  1 Package
+          :
+Installed:
+  heterodb-swdc.noarch 0:1.0-1.el7
+
+Complete!
+</code></pre>
+
 <h1 id="cuda-toolkit">CUDA Toolkitのインストール</h1>
 <p>本節ではCUDA Toolkitのインストールについて説明します。 既に対応バージョンのCUDA Toolkitをインストール済みであれば、本節の内容は読み飛ばして構いません</p>
 <p>NVIDIAはCUDA Toolkitのインストールに２通りの方法を提供しています。一つは自己実行型アーカイブ（runfileと呼ばれる）によるもの。もう一つはRPMパッケージによるものです。
@@ -237,6 +291,11 @@ Wed Feb 14 09:43:48 2018
 +-----------------------------------------------------------------------------+
 </code></pre>
 
+<div class="admonition tip">
+<p class="admonition-title">Tip</p>
+<p>nvidiaドライバと競合するnouveauドライバがロードされている場合、直ちにnvidiaドライバをロードする事ができません。
+この場合は、システムを一度再起動してnvidia-smiコマンドを実行できるかどうか確認してください。CUDAのインストーラはnouveauドライバの無効化設定を行うため、次回起動時にはnouveauドライバがロードされることはありません。</p>
+</div>
 <h1 id="postgresql">PostgreSQLのインストール</h1>
 <p>本節ではRPMによるPostgreSQLのインストールについて紹介します。
 ソースからのインストールに関しては既にドキュメントが数多く存在し、<code>./configure</code>スクリプトのオプションが多岐にわたる事から、ここでは紹介しません。</p>
@@ -250,10 +309,9 @@ EPELの設定のように、yumリポジトリの設定を行うだけの小さ�
 <li>postgresql10-devel</li>
 <li>postgresql10-server</li>
 </ul>
-<pre><code>$ sudo rpm -ivh pgdg-redhat10-10-2.noarch.rpm
+<pre><code>$ sudo yum install -y https://download.postgresql.org/pub/repos/yum/10/redhat/rhel-7-x86_64/pgdg-redhat10-10-2.noarch.rpm
 $ sudo yum install -y postgresql10-server postgresql10-devel
-            :
-            :
+          :
 ================================================================================
  Package                  Arch        Version                 Repository   Size
 ================================================================================
@@ -267,11 +325,7 @@ Installing for dependencies:
 Transaction Summary
 ================================================================================
 Install  2 Packages (+2 Dependent packages)
-
-Total download size: 8.3 M
-Installed size: 35 M
-            :
-            :
+          :
 Installed:
   postgresql10-devel.x86_64 0:10.2-1PGDG.rhel7
   postgresql10-server.x86_64 0:10.2-1PGDG.rhel7
@@ -283,26 +337,58 @@ Dependency Installed:
 Complete!
 </code></pre>
 
+<p>PostgreSQL Global Development Groupの提供するRPMパッケージは<code>/usr/pgsql-&lt;version&gt;</code>という少々変則的なディレクトリにソフトウェアをインストールするため、<code>psql</code>等の各種コマンドを実行する際にはパスが通っているかどうか注意する必要があります。</p>
+<p><code>postgresql-alternatives</code>パッケージをインストールしておくと、各種コマンドへのシンボリックリンクを<code>/usr/local/bin</code>以下に作成するため各種オペレーションが便利です。また、複数バージョンのPostgreSQLをインストールした場合でも、<code>alternatives</code>コマンドによってターゲットとなるPostgreSQLバージョンを切り替える事が可能です。</p>
+<pre><code>$ sudo yum install postgresql-alternatives
+          :
+Resolving Dependencies
+--&gt; Running transaction check
+---&gt; Package postgresql-alternatives.noarch 0:1.0-1.el7 will be installed
+--&gt; Finished Dependency Resolution
+
+Dependencies Resolved
+          :
+================================================================================
+ Package                      Arch        Version           Repository     Size
+================================================================================
+Installing:
+ postgresql-alternatives      noarch      1.0-1.el7         heterodb      9.2 k
+
+Transaction Summary
+================================================================================
+          :
+Installed:
+  postgresql-alternatives.noarch 0:1.0-1.el7
+
+Complete!
+</code></pre>
+
 <h1 id="pg-strom">PG-Stromのインストール</h1>
 <p>本節ではPG-Stromのインストール方法について説明します。
 推奨はRPMによるインストールですが、開発者向けにソースコードからのビルド方法についても紹介します。</p>
 <h2 id="rpm">RPMによるインストール</h2>
-<p>PG-Stromおよび関連パッケージは<a href="https://heterodb.github.io/swdc/">HeteroDB Software Distribution Center</a>より配布されています。このサイトはyumリポジトリとしても機能するよう作成されており、<code>heterodb-swdc</code>パッケージをインストールする事でyumリポジトリのエントリが追加されます。</p>
-<pre><code>$ wget https://heterodb.github.io/swdc/yum/rhel7-noarch/heterodb-swdc-1.0-1.el7.noarch.rpm
-$ sudo rpm -ivh heterodb-swdc-1.0-1.el7.noarch.rpm
-Preparing...                          ################################# [100%]
-Updating / installing...
-   1:heterodb-swdc-1.0-1.el7          ################################# [100%]
+<p>PG-Stromおよび関連パッケージは<a href="https://heterodb.github.io/swdc/">HeteroDB Software Distribution Center</a>より配布されています。
+既にyumシステムへリポジトリを追加済みであれば、それほど作業は多くありません。</p>
+<p>基盤となるPostgreSQLのバージョンごとに別個のPG-StromのRPMパッケージが準備されており、PostgreSQL v9.6用であれば<code>pg_strom-PG96</code>パッケージを、PostgreSQL v10用であれば<code>pg_strom-PG10</code>パッケージをインストールします。</p>
+<pre><code>$ sudo yum install pg_strom-PG10
+          :
+================================================================================
+ Package              Arch          Version               Repository       Size
+================================================================================
+Installing:
+ pg_strom-PG10        x86_64        1.9-180301.el7        heterodb        320 k
 
-</code></pre>
+Transaction Summary
+================================================================================
+          :
+Installed:
+  pg_strom-PG10.x86_64 0:1.9-180301.el7
 
-<p>続いて、PG-StromのRPMパッケージをインストールします。
-対象となるPostgreSQLバージョン毎に別個のRPMパッケージが準備されており、PostgreSQL v9.6用であれば<code>pg-strom-PG96</code>パッケージを、PostgreSQL v10用であれば<code>pg-strom-PG10</code>パッケージをインストールします。</p>
-<pre><code>
+Complete!
 </code></pre>
 
 <p>以上でパッケージのインストールは完了です。</p>
-<h2 id="_2">ソースからのビルド</h2>
+<h2 id="_2">ソースからのインストール</h2>
 <p>開発者向けに、ソースコードからPG-Stromをビルドする方法についても紹介します。</p>
 <h3 id="_3">ソースコードの入手</h3>
 <p>RPMパッケージと同様に、ソースコードのtarballを<a href="https://heterodb.github.io/swdc/">HeteroDB Software Distribution Center</a>から入手する事ができます。</p>
@@ -326,6 +412,123 @@ $ sudo make install PG_CONFIG=/usr/pgsql-10/bin/pg_config
 </code></pre>
 
 <h2 id="_4">インストール後の設定</h2>
+<h3 id="_5">データベースクラスタの作成</h3>
+<p>データベースクラスタの作成が済んでいない場合は、<code>initdb</code>コマンドを実行してPostgreSQLの初期データベースを作成します。</p>
+<p>RPMインストールにおけるデフォルトのデータベースクラスタのパスは<code>/var/lib/pgsql/&lt;version number&gt;/data</code>です。
+<code>postgresql-alternatives</code>パッケージをインストールしている場合は、PostgreSQLのバージョンに拠らず<code>/var/lib/pgdata</code>で参照する事ができます。</p>
+<pre><code>$ sudo su - postgres
+$ initdb -D /var/lib/pgdata/
+The files belonging to this database system will be owned by user &quot;postgres&quot;.
+This user must also own the server process.
+
+The database cluster will be initialized with locale &quot;en_US.UTF-8&quot;.
+The default database encoding has accordingly been set to &quot;UTF8&quot;.
+The default text search configuration will be set to &quot;english&quot;.
+
+Data page checksums are disabled.
+
+fixing permissions on existing directory /var/lib/pgdata ... ok
+creating subdirectories ... ok
+selecting default max_connections ... 100
+selecting default shared_buffers ... 128MB
+selecting dynamic shared memory implementation ... posix
+creating configuration files ... ok
+running bootstrap script ... ok
+performing post-bootstrap initialization ... ok
+syncing data to disk ... ok
+
+WARNING: enabling &quot;trust&quot; authentication for local connections
+You can change this by editing pg_hba.conf or using the option -A, or
+--auth-local and --auth-host, the next time you run initdb.
+
+Success. You can now start the database server using:
+
+    pg_ctl -D /var/lib/pgdata/ -l logfile start
+</code></pre>
+
+<h3 id="postgresqlconf">postgresql.confの編集</h3>
+<p>続いて、PostgreSQLの設定ファイルである <code>postgresql.conf</code> を編集します。</p>
+<p>PG-Stromを動作させるためには、最低限、以下のパラメータの設定が必要です。
+これ以外のパラメータについても、システムの用途や想定ワークロードを踏まえて検討してください。</p>
+<ul>
+<li><strong>shared_preload_libraries</strong><ul>
+<li>PG-Stromモジュールは<code>shared_preload_libraries</code>パラメータによりpostmasterプロセスの起動時にロードされる必要があります。オンデマンドでの拡張モジュールのロードはサポート対象外です。したがって、以下の設定項目は必須です。</li>
+<li><code>shared_preload_libraries = '$libdir/pg_strom'</code></li>
+</ul>
+</li>
+<li><strong>max_worker_processes</strong><ul>
+<li>PG-Stromは数個のバックグラウンドワーカーを内部的に使用します。そのため、デフォルト値である 8 では、それ以外の処理に利用できるバックグラウンドワーカープロセス数があまりにも少なすぎてしまいます。</li>
+<li>以下のように、ある程度の余裕を持った値を設定すべきです。</li>
+<li><code>max_worker_processes = 100</code></li>
+</ul>
+</li>
+<li><strong>shared_buffers</strong><ul>
+<li>ワークロードによりますが、<code>shared_buffers</code>の初期設定は非常に小さいため、PG-Stromが有効に機能する水準のデータサイズに対しては、ストレージへの読み書きが律速要因となってしまい、GPUの並列計算機能を有効に利用できない可能性があります。</li>
+<li>以下のように、ある程度の余裕を持った値を設定すべきです。</li>
+<li><code>shared_buffers = 10GB</code></li>
+<li>明らかにメモリサイズよりも大きなデータを処理する必要がある場合は、SSD-to-GPUダイレクトSQL実行の利用を検討してください。</li>
+<li>特定のテーブルをインメモリでキャッシュしておきたい場合は、インメモリ列キャッシュの利用を検討してください。</li>
+</ul>
+</li>
+<li><strong>work_mem</strong><ul>
+<li>ワークロードによりますが、<code>work_mem</code>の初期設定は非常に小さいため、解析系クエリで最適なクエリ実行計画が選択されない可能性があります。</li>
+<li>典型的な例は、ソート処理にオンメモリのクイックソートではなく、ディスクベースのマージソートを選択するといったものです。</li>
+<li>以下のように、ある程度の余裕を持った値を設定すべきです。</li>
+<li><code>work_mem = 1GB</code></li>
+</ul>
+</li>
+</ul>
+<h3 id="postgresql_1">PostgreSQLの起動</h3>
+<p>PostgreSQLを起動します。</p>
+<p>正常にセットアップが完了していれば、ログにPG-StromがGPUを認識した事を示すメッセージが記録されているはずです。
+以下の例では、Tesla V100(PCIe; 16GB版)を認識しています。</p>
+<pre><code># systemctl start postgresql-10
+# systemctl status -l postgresql-10
+* postgresql-10.service - PostgreSQL 10 database server
+   Loaded: loaded (/usr/lib/systemd/system/postgresql-10.service; disabled; vendor preset: disabled)
+   Active: active (running) since Sat 2018-03-03 15:45:23 JST; 2min 21s ago
+     Docs: https://www.postgresql.org/docs/10/static/
+  Process: 24851 ExecStartPre=/usr/pgsql-10/bin/postgresql-10-check-db-dir ${PGDATA} (code=exited, status=0/SUCCESS)
+ Main PID: 24858 (postmaster)
+   CGroup: /system.slice/postgresql-10.service
+           |-24858 /usr/pgsql-10/bin/postmaster -D /var/lib/pgsql/10/data/
+           |-24890 postgres: logger process
+           |-24892 postgres: bgworker: PG-Strom GPU memory keeper
+           |-24896 postgres: checkpointer process
+           |-24897 postgres: writer process
+           |-24898 postgres: wal writer process
+           |-24899 postgres: autovacuum launcher process
+           |-24900 postgres: stats collector process
+           |-24901 postgres: bgworker: PG-Strom ccache-builder2
+           |-24902 postgres: bgworker: PG-Strom ccache-builder1
+           `-24903 postgres: bgworker: logical replication launcher
+
+Mar 03 15:45:19 saba.heterodb.com postmaster[24858]: 2018-03-03 15:45:19.195 JST [24858] HINT:  Run 'nvidia-cuda-mps-control -d', then start server process. Check 'man nvidia-cuda-mps-control' for more details.
+Mar 03 15:45:20 saba.heterodb.com postmaster[24858]: 2018-03-03 15:45:20.509 JST [24858] LOG:  PG-Strom: GPU0 Tesla V100-PCIE-16GB (5120 CUDA cores; 1380MHz, L2 6144kB), RAM 15.78GB (4096bits, 856MHz), CC 7.0
+Mar 03 15:45:20 saba.heterodb.com postmaster[24858]: 2018-03-03 15:45:20.510 JST [24858] LOG:  NVRTC - CUDA Runtime Compilation vertion 9.1
+Mar 03 15:45:23 saba.heterodb.com postmaster[24858]: 2018-03-03 15:45:23.378 JST [24858] LOG:  listening on IPv6 address &quot;::1&quot;, port 5432
+Mar 03 15:45:23 saba.heterodb.com postmaster[24858]: 2018-03-03 15:45:23.378 JST [24858] LOG:  listening on IPv4 address &quot;127.0.0.1&quot;, port 5432
+Mar 03 15:45:23 saba.heterodb.com postmaster[24858]: 2018-03-03 15:45:23.442 JST [24858] LOG:  listening on Unix socket &quot;/var/run/postgresql/.s.PGSQL.5432&quot;
+Mar 03 15:45:23 saba.heterodb.com postmaster[24858]: 2018-03-03 15:45:23.492 JST [24858] LOG:  listening on Unix socket &quot;/tmp/.s.PGSQL.5432&quot;
+Mar 03 15:45:23 saba.heterodb.com postmaster[24858]: 2018-03-03 15:45:23.527 JST [24858] LOG:  redirecting log output to logging collector process
+Mar 03 15:45:23 saba.heterodb.com postmaster[24858]: 2018-03-03 15:45:23.527 JST [24858] HINT:  Future log output will appear in directory &quot;log&quot;.
+Mar 03 15:45:23 saba.heterodb.com systemd[1]: Started PostgreSQL 10 database server.
+</code></pre>
+
+<h3 id="pg-strom_2">PG-Strom関連オブジェクトの作成</h3>
+<p>最後に、PG-Stromに関連するSQL関数などのDBオブジェクトを作成します。
+この手順はPostgreSQLのEXTENSION機能を用いてパッケージ化されており、SQLコマンドラインで<code>CREATE EXTENSION</code>コマンドを実行するだけです。</p>
+<p>なお、この手順は新しいデータベースを作成するたびに必要になる事に注意してください。
+新しいデータベースを作成した時点で既にPG-Strom関連オブジェクトが作成されていてほしい場合は、予め<code>template1</code>データベースで下記のコマンドを実行しておけば、<code>CREATE DATABASE</code>コマンドの実行時に新しいデータベースへ設定がコピーされます。</p>
+<pre><code>$ psql postgres -U postgres
+psql (10.2)
+Type &quot;help&quot; for help.
+
+postgres=# CREATE EXTENSION pg_strom ;
+CREATE EXTENSION
+</code></pre>
+
+<p>以上でインストール作業は完了です。</p>
               
             </div>
           </div>
@@ -333,7 +536,7 @@ $ sudo make install PG_CONFIG=/usr/pgsql-10/bin/pg_config
   
     <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
       
-        <a href="../features/" class="btn btn-neutral float-right" title="先進機能">Next <span class="icon icon-circle-arrow-right"></span></a>
+        <a href="../tutorial/" class="btn btn-neutral float-right" title="利用ガイド">Next <span class="icon icon-circle-arrow-right"></span></a>
       
       
         <a href=".." class="btn btn-neutral" title="はじめに"><span class="icon icon-circle-arrow-left"></span> Previous</a>
@@ -365,7 +568,7 @@ $ sudo make install PG_CONFIG=/usr/pgsql-10/bin/pg_config
         <span><a href=".." style="color: #fcfcfc;">&laquo; Previous</a></span>
       
       
-        <span style="margin-left: 15px"><a href="../features/" style="color: #fcfcfc">Next &raquo;</a></span>
+        <span style="margin-left: 15px"><a href="../tutorial/" style="color: #fcfcfc">Next &raquo;</a></span>
       
     </span>
 </div>

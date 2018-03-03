@@ -6,6 +6,7 @@ pages:
 @en{
 - 'Home' : 'index.md'
 - 'Install' : 'install.md'
+- 'Tutorial' : 'tutorial.md'
 - 'Advanced Features' : 'features.md'
 - 'PL/CUDA' : 'plcuda.md'
 - 'References' : 'references.md'
@@ -14,6 +15,7 @@ pages:
 @ja{
 - 'はじめに' : 'index.md'
 - 'インストール' : 'install.md'
+- '利用ガイド' : 'tutorial.md'
 - '先進機能' : 'features.md'
 - 'PL/CUDA' : 'plcuda.md'
 - 'リファレンス' : 'references.md'

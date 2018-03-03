@@ -84,7 +84,7 @@
         
             <li><a class="toctree-l3" href="#rpm-installation">RPM Installation</a></li>
         
-            <li><a class="toctree-l3" href="#build-from-the-source">Build from the source</a></li>
+            <li><a class="toctree-l3" href="#installation-from-the-source">Installation from the source</a></li>
         
             <li><a class="toctree-l3" href="#post-installation-setup">Post Installation Setup</a></li>
         
@@ -92,6 +92,11 @@
     
 
     </ul>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../tutorial/">Tutorial</a>
 	    </li>
           
             <li class="toctree-l1">
@@ -176,14 +181,54 @@
 </ul>
 <h1 id="os-installation">OS Installation</h1>
 <h2 id="post-os-installation-configuration">Post OS Installation Configuration</h2>
-<h3 id="dkms-installation">DKMS Installation</h3>
+<h3 id="setup-epel-repository">Setup EPEL Repository</h3>
 <ul>
 <li>Fedora Project Public FTP Site<ul>
 <li><a href="https://dl.fedoraproject.org/pub/epel/7/x86_64/">https://dl.fedoraproject.org/pub/epel/7/x86_64/</a></li>
 </ul>
 </li>
 </ul>
+<div class="admonition tip">
+<p class="admonition-title">Tip</p>
+<p>Walk down the directory: <code>Packages</code> --&gt; <code>e</code>, from the above URL.</p>
+</div>
+<pre><code>$ sudo yum install https://dl.fedoraproject.org/pub/epel/7/x86_64/Packages/e/epel-release-7-11.noarch.rpm
+          :
+================================================================================
+ Package           Arch        Version     Repository                      Size
+================================================================================
+Installing:
+ epel-release      noarch      7-11        /epel-release-7-11.noarch       24 k
+
+Transaction Summary
+================================================================================
+Install  1 Package
+          :
+Installed:
+  epel-release.noarch 0:7-11
+
+Complete!
+</code></pre>
+
 <h3 id="heterodb-swdc-installation">HeteroDB-SWDC Installation</h3>
+<pre><code>$ sudo yum install https://heterodb.github.io/swdc/yum/rhel7-x86_64/heterodb-swdc-1.0-1.el7.noarch.rpm
+          :
+================================================================================
+ Package         Arch     Version       Repository                         Size
+================================================================================
+Installing:
+ heterodb-swdc   noarch   1.0-1.el7     /heterodb-swdc-1.0-1.el7.noarch   2.4 k
+
+Transaction Summary
+================================================================================
+Install  1 Package
+          :
+Installed:
+  heterodb-swdc.noarch 0:1.0-1.el7
+
+Complete!
+</code></pre>
+
 <h1 id="cuda-toolkit-installation">CUDA Toolkit Installation</h1>
 <p><img alt="CUDA Toolkit download" src="../img/cuda-download.png" /></p>
 <pre><code>$ sudo rpm -i cuda-repo-&lt;distribution&gt;-&lt;version&gt;.x86_64.rpm
@@ -218,10 +263,9 @@ Wed Feb 14 09:43:48 2018
 </code></pre>
 
 <h1 id="postgresql-installation">PostgreSQL Installation</h1>
-<pre><code>$ sudo rpm -ivh pgdg-redhat10-10-2.noarch.rpm
+<pre><code>$ sudo yum install -y https://download.postgresql.org/pub/repos/yum/10/redhat/rhel-7-x86_64/pgdg-redhat10-10-2.noarch.rpm
 $ sudo yum install -y postgresql10-server postgresql10-devel
-            :
-            :
+          :
 ================================================================================
  Package                  Arch        Version                 Repository   Size
 ================================================================================
@@ -235,11 +279,7 @@ Installing for dependencies:
 Transaction Summary
 ================================================================================
 Install  2 Packages (+2 Dependent packages)
-
-Total download size: 8.3 M
-Installed size: 35 M
-            :
-            :
+          :
 Installed:
   postgresql10-devel.x86_64 0:10.2-1PGDG.rhel7
   postgresql10-server.x86_64 0:10.2-1PGDG.rhel7
@@ -251,20 +291,50 @@ Dependency Installed:
 Complete!
 </code></pre>
 
+<pre><code>$ sudo yum install postgresql-alternatives
+          :
+Resolving Dependencies
+--&gt; Running transaction check
+---&gt; Package postgresql-alternatives.noarch 0:1.0-1.el7 will be installed
+--&gt; Finished Dependency Resolution
+
+Dependencies Resolved
+          :
+================================================================================
+ Package                      Arch        Version           Repository     Size
+================================================================================
+Installing:
+ postgresql-alternatives      noarch      1.0-1.el7         heterodb      9.2 k
+
+Transaction Summary
+================================================================================
+          :
+Installed:
+  postgresql-alternatives.noarch 0:1.0-1.el7
+
+Complete!
+</code></pre>
+
 <h1 id="pg-strom-installation">PG-Strom Installation</h1>
 <h2 id="rpm-installation">RPM Installation</h2>
-<pre><code>$ wget https://heterodb.github.io/swdc/yum/rhel7-noarch/heterodb-swdc-1.0-1.el7.noarch.rpm
-$ sudo rpm -ivh heterodb-swdc-1.0-1.el7.noarch.rpm
-Preparing...                          ################################# [100%]
-Updating / installing...
-   1:heterodb-swdc-1.0-1.el7          ################################# [100%]
+<pre><code>$ sudo yum install pg_strom-PG10
+          :
+================================================================================
+ Package              Arch          Version               Repository       Size
+================================================================================
+Installing:
+ pg_strom-PG10        x86_64        1.9-180301.el7        heterodb        320 k
 
+Transaction Summary
+================================================================================
+          :
+Installed:
+  pg_strom-PG10.x86_64 0:1.9-180301.el7
+
+Complete!
 </code></pre>
 
-<pre><code>
-</code></pre>
-
-<h2 id="build-from-the-source">Build from the source</h2>
+<h2 id="installation-from-the-source">Installation from the source</h2>
 <h3 id="getting-the-source-code">Getting the source code</h3>
 <pre><code>$ git clone https://github.com/heterodb/pg-strom.git
 Cloning into 'pg-strom'...
@@ -282,6 +352,110 @@ $ sudo make install PG_CONFIG=/usr/pgsql-10/bin/pg_config
 </code></pre>
 
 <h2 id="post-installation-setup">Post Installation Setup</h2>
+<h3 id="creation-of-database-cluster">Creation of database cluster</h3>
+<pre><code>$ sudo su - postgres
+$ initdb -D /var/lib/pgdata/
+The files belonging to this database system will be owned by user &quot;postgres&quot;.
+This user must also own the server process.
+
+The database cluster will be initialized with locale &quot;en_US.UTF-8&quot;.
+The default database encoding has accordingly been set to &quot;UTF8&quot;.
+The default text search configuration will be set to &quot;english&quot;.
+
+Data page checksums are disabled.
+
+fixing permissions on existing directory /var/lib/pgdata ... ok
+creating subdirectories ... ok
+selecting default max_connections ... 100
+selecting default shared_buffers ... 128MB
+selecting dynamic shared memory implementation ... posix
+creating configuration files ... ok
+running bootstrap script ... ok
+performing post-bootstrap initialization ... ok
+syncing data to disk ... ok
+
+WARNING: enabling &quot;trust&quot; authentication for local connections
+You can change this by editing pg_hba.conf or using the option -A, or
+--auth-local and --auth-host, the next time you run initdb.
+
+Success. You can now start the database server using:
+
+    pg_ctl -D /var/lib/pgdata/ -l logfile start
+</code></pre>
+
+<h3 id="setup-postgresqlconf">Setup postgresql.conf</h3>
+<ul>
+<li><strong>shared_preload_libraries</strong><ul>
+<li>PG-Stromモジュールは<code>shared_preload_libraries</code>パラメータによりpostmasterプロセスの起動時にロードされる必要があります。オンデマンドでの拡張モジュールのロードはサポート対象外です。したがって、以下の設定項目は必須です。</li>
+<li><code>shared_preload_libraries = '$libdir/pg_strom'</code></li>
+</ul>
+</li>
+<li><strong>max_worker_processes</strong><ul>
+<li>PG-Stromは数個のバックグラウンドワーカーを内部的に使用します。そのため、デフォルト値である 8 では、それ以外の処理に利用できるバックグラウンドワーカープロセス数があまりにも少なすぎてしまいます。</li>
+<li>以下のように、ある程度の余裕を持った値を設定すべきです。</li>
+<li><code>max_worker_processes = 100</code></li>
+</ul>
+</li>
+<li><strong>shared_buffers</strong><ul>
+<li>ワークロードによりますが、<code>shared_buffers</code>の初期設定は非常に小さいため、PG-Stromが有効に機能する水準のデータサイズに対しては、ストレージへの読み書きが律速要因となってしまい、GPUの並列計算機能を有効に利用できない可能性があります。</li>
+<li>以下のように、ある程度の余裕を持った値を設定すべきです。</li>
+<li><code>shared_buffers = 10GB</code></li>
+<li>明らかにメモリサイズよりも大きなデータを処理する必要がある場合は、SSD-to-GPUダイレクトSQL実行の利用を検討してください。</li>
+<li>特定のテーブルをインメモリでキャッシュしておきたい場合は、インメモリ列キャッシュの利用を検討してください。</li>
+</ul>
+</li>
+<li><strong>work_mem</strong><ul>
+<li>ワークロードによりますが、<code>work_mem</code>の初期設定は非常に小さいため、解析系クエリで最適なクエリ実行計画が選択されない可能性があります。</li>
+<li>典型的な例は、ソート処理にオンメモリのクイックソートではなく、ディスクベースのマージソートを選択するといったものです。</li>
+<li>以下のように、ある程度の余裕を持った値を設定すべきです。</li>
+<li><code>work_mem = 1GB</code></li>
+</ul>
+</li>
+</ul>
+<h3 id="start-postgresql">Start PostgreSQL</h3>
+<pre><code># systemctl start postgresql-10
+# systemctl status -l postgresql-10
+* postgresql-10.service - PostgreSQL 10 database server
+   Loaded: loaded (/usr/lib/systemd/system/postgresql-10.service; disabled; vendor preset: disabled)
+   Active: active (running) since Sat 2018-03-03 15:45:23 JST; 2min 21s ago
+     Docs: https://www.postgresql.org/docs/10/static/
+  Process: 24851 ExecStartPre=/usr/pgsql-10/bin/postgresql-10-check-db-dir ${PGDATA} (code=exited, status=0/SUCCESS)
+ Main PID: 24858 (postmaster)
+   CGroup: /system.slice/postgresql-10.service
+           |-24858 /usr/pgsql-10/bin/postmaster -D /var/lib/pgsql/10/data/
+           |-24890 postgres: logger process
+           |-24892 postgres: bgworker: PG-Strom GPU memory keeper
+           |-24896 postgres: checkpointer process
+           |-24897 postgres: writer process
+           |-24898 postgres: wal writer process
+           |-24899 postgres: autovacuum launcher process
+           |-24900 postgres: stats collector process
+           |-24901 postgres: bgworker: PG-Strom ccache-builder2
+           |-24902 postgres: bgworker: PG-Strom ccache-builder1
+           `-24903 postgres: bgworker: logical replication launcher
+
+Mar 03 15:45:19 saba.heterodb.com postmaster[24858]: 2018-03-03 15:45:19.195 JST [24858] HINT:  Run 'nvidia-cuda-mps-control -d', then start server process. Check 'man nvidia-cuda-mps-control' for more details.
+Mar 03 15:45:20 saba.heterodb.com postmaster[24858]: 2018-03-03 15:45:20.509 JST [24858] LOG:  PG-Strom: GPU0 Tesla V100-PCIE-16GB (5120 CUDA cores; 1380MHz, L2 6144kB), RAM 15.78GB (4096bits, 856MHz), CC 7.0
+Mar 03 15:45:20 saba.heterodb.com postmaster[24858]: 2018-03-03 15:45:20.510 JST [24858] LOG:  NVRTC - CUDA Runtime Compilation vertion 9.1
+Mar 03 15:45:23 saba.heterodb.com postmaster[24858]: 2018-03-03 15:45:23.378 JST [24858] LOG:  listening on IPv6 address &quot;::1&quot;, port 5432
+Mar 03 15:45:23 saba.heterodb.com postmaster[24858]: 2018-03-03 15:45:23.378 JST [24858] LOG:  listening on IPv4 address &quot;127.0.0.1&quot;, port 5432
+Mar 03 15:45:23 saba.heterodb.com postmaster[24858]: 2018-03-03 15:45:23.442 JST [24858] LOG:  listening on Unix socket &quot;/var/run/postgresql/.s.PGSQL.5432&quot;
+Mar 03 15:45:23 saba.heterodb.com postmaster[24858]: 2018-03-03 15:45:23.492 JST [24858] LOG:  listening on Unix socket &quot;/tmp/.s.PGSQL.5432&quot;
+Mar 03 15:45:23 saba.heterodb.com postmaster[24858]: 2018-03-03 15:45:23.527 JST [24858] LOG:  redirecting log output to logging collector process
+Mar 03 15:45:23 saba.heterodb.com postmaster[24858]: 2018-03-03 15:45:23.527 JST [24858] HINT:  Future log output will appear in directory &quot;log&quot;.
+Mar 03 15:45:23 saba.heterodb.com systemd[1]: Started PostgreSQL 10 database server.
+</code></pre>
+
+<h3 id="creation-of-pg-strom-related-objects">Creation of PG-Strom related objects</h3>
+<pre><code>$ psql postgres -U postgres
+psql (10.2)
+Type &quot;help&quot; for help.
+
+postgres=# CREATE EXTENSION pg_strom ;
+CREATE EXTENSION
+</code></pre>
+
+<p>That's all for the installation.</p>
               
             </div>
           </div>
@@ -289,7 +463,7 @@ $ sudo make install PG_CONFIG=/usr/pgsql-10/bin/pg_config
   
     <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
       
-        <a href="../features/" class="btn btn-neutral float-right" title="Advanced Features">Next <span class="icon icon-circle-arrow-right"></span></a>
+        <a href="../tutorial/" class="btn btn-neutral float-right" title="Tutorial">Next <span class="icon icon-circle-arrow-right"></span></a>
       
       
         <a href=".." class="btn btn-neutral" title="Home"><span class="icon icon-circle-arrow-left"></span> Previous</a>
@@ -321,7 +495,7 @@ $ sudo make install PG_CONFIG=/usr/pgsql-10/bin/pg_config
         <span><a href=".." style="color: #fcfcfc;">&laquo; Previous</a></span>
       
       
-        <span style="margin-left: 15px"><a href="../features/" style="color: #fcfcfc">Next &raquo;</a></span>
+        <span style="margin-left: 15px"><a href="../tutorial/" style="color: #fcfcfc">Next &raquo;</a></span>
       
     </span>
 </div>
