@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<!--[if IE 8]><html class="no-js lt-ie9" lang="en" > <![endif]-->
+<!--[if gt IE 8]><!--> <html class="no-js" lang="en" > <!--<![endif]-->
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  
+  <meta name="author" content="PG-Strom Development Team">
+  <link rel="shortcut icon" href="../img/favicon.ico">
+  <title>Tutorial - PG-Strom Manual</title>
+  <link href='https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700' rel='stylesheet' type='text/css'>
+
+  <link rel="stylesheet" href="../css/theme.css" type="text/css" />
+  <link rel="stylesheet" href="../css/theme_extra.css" type="text/css" />
+  <link rel="stylesheet" href="../css/highlight.css">
+  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet">
+  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet">
+  <link href="../custom.css" rel="stylesheet">
+  
+  <script>
+    // Current page data
+    var mkdocs_page_name = "Tutorial";
+    var mkdocs_page_input_path = "tutorial.md";
+    var mkdocs_page_url = "/tutorial/";
+  </script>
+  
+  <script src="../js/jquery-2.1.1.min.js"></script>
+  <script src="../js/modernizr-2.8.3.min.js"></script>
+  <script type="text/javascript" src="../js/highlight.pack.js"></script> 
+  
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+
+    
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+      <div class="wy-side-nav-search">
+        <a href=".." class="icon icon-home"> PG-Strom Manual</a>
+        <div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
+	<ul class="current">
+	  
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="..">Home</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../install/">Install</a>
+	    </li>
+          
+            <li class="toctree-l1 current">
+		
+    <a class="current" href="./">Tutorial</a>
+    <ul class="subnav">
+            
+    <li class="toctree-l2"><a href="#basic-operations">Basic operations</a></li>
+    
+        <ul>
+        
+            <li><a class="toctree-l3" href="#enablesdisables-pg-strom">Enables/disables PG-Strom</a></li>
+        
+            <li><a class="toctree-l3" href="#cpugpu-hybrid-parallel">CPU+GPU Hybrid Parallel</a></li>
+        
+            <li><a class="toctree-l3" href="#pullup-underlying-plans">Pullup underlying plans</a></li>
+        
+        </ul>
+    
+
+    <li class="toctree-l2"><a href="#_1">運用に関するヒント</a></li>
+    
+        <ul>
+        
+            <li><a class="toctree-l3" href="#mps">MPSデーモンの利用</a></li>
+        
+        </ul>
+    
+
+    <li class="toctree-l2"><a href="#_2">トラブルシューティング</a></li>
+    
+        <ul>
+        
+            <li><a class="toctree-l3" href="#known-problems">Known Problems</a></li>
+        
+            <li><a class="toctree-l3" href="#_3">問題の切り分け</a></li>
+        
+            <li><a class="toctree-l3" href="#_4">クラッシュダンプの採取</a></li>
+        
+        </ul>
+    
+
+    </ul>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../features/">Advanced Features</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../plcuda/">PL/CUDA</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../references/">References</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../release_note/">Release Note</a>
+	    </li>
+          
+        </ul>
+      </div>
+      &nbsp;
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+
+      
+      <nav class="wy-nav-top" role="navigation" aria-label="top navigation">
+        <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+        <a href="..">PG-Strom Manual</a>
+      </nav>
+
+      
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href="..">Docs</a> &raquo;</li>
+    
+      
+    
+    <li>Tutorial</li>
+    <li class="wy-breadcrumbs-aside">
+      
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main">
+            <div class="section">
+              
+                <h1 id="basic-operations">Basic operations</h1>
+<h2 id="enablesdisables-pg-strom">Enables/disables PG-Strom</h2>
+<p>You can turn on/off PG-Strom functionality using pg_strom.enabled configuration parameter.</p>
+<pre><code># SET pg_strom.enabled = on/off;
+</code></pre>
+
+<p>You can turn off PG-Strom on troubles, then confirm whether the problem is reproducible with no PG-Strom support.</p>
+<pre><code>postgres=# EXPLAIN SELECT cat,count(*),avg(ax)
+                     FROM t0 NATURAL JOIN t1 NATURAL JOIN t2
+                    GROUP BY cat;
+                                  QUERY PLAN
+--------------------------------------------------------------------------------
+ GroupAggregate  (cost=989186.82..989190.94 rows=27 width=20)
+   Group Key: t0.cat
+   -&gt;  Sort  (cost=989186.82..989187.29 rows=189 width=44)
+         Sort Key: t0.cat
+         -&gt;  Custom Scan (GpuPreAgg)  (cost=989175.89..989179.67 rows=189 width=44)
+               Reduction: Local
+               GPU Projection: cat, pgstrom.nrows(), pgstrom.nrows((ax IS NOT NULL)), pgstrom.psum(ax)
+               Combined GpuJoin: enabled
+               -&gt;  Custom Scan (GpuJoin) on t0  (cost=14744.40..875804.46 rows=99996736 width=12)
+                     GPU Projection: t0.cat, t1.ax
+                     Outer Scan: t0  (cost=0.00..1833360.36 rows=99996736 width=12)
+                     Depth 1: GpuHashJoin  (nrows 99996736...99996736)
+                              HashKeys: t0.aid
+                              JoinQuals: (t0.aid = t1.aid)
+                              KDS-Hash (size: 10.39MB)
+                     Depth 2: GpuHashJoin  (nrows 99996736...99996736)
+                              HashKeys: t0.bid
+                              JoinQuals: (t0.bid = t2.bid)
+                              KDS-Hash (size: 10.78MB)
+                     -&gt;  Seq Scan on t1  (cost=0.00..1972.85 rows=103785 width=12)
+                     -&gt;  Seq Scan on t2  (cost=0.00..1935.00 rows=100000 width=4)
+(21 rows)
+</code></pre>
+
+<h2 id="cpugpu-hybrid-parallel">CPU+GPU Hybrid Parallel</h2>
+<pre><code># EXPLAIN SELECT cat,count(*),avg(ax)
+            FROM t0 NATURAL JOIN t1
+           GROUP by cat;
+                                   QUERY PLAN
+--------------------------------------------------------------------------------
+ GroupAggregate  (cost=955705.47..955720.93 rows=27 width=20)
+   Group Key: t0.cat
+   -&gt;  Sort  (cost=955705.47..955707.36 rows=756 width=44)
+         Sort Key: t0.cat
+         -&gt;  Gather  (cost=955589.95..955669.33 rows=756 width=44)
+               Workers Planned: 4
+               -&gt;  Parallel Custom Scan (GpuPreAgg)  (cost=954589.95..954593.73 rows=189 width=44)
+                     Reduction: Local
+                     GPU Projection: cat, pgstrom.nrows(), pgstrom.nrows((ax IS NOT NULL)), pgstrom.psum(ax)
+                     Combined GpuJoin: enabled
+                     -&gt;  Parallel Custom Scan (GpuJoin) on t0  (cost=27682.82..841218.52 rows=99996736 width=12)
+                           GPU Projection: t0.cat, t1.ax
+                           Outer Scan: t0  (cost=0.00..1083384.84 rows=24999184 width=8)
+                           Depth 1: GpuHashJoin  (nrows 24999184...99996736)
+                                    HashKeys: t0.aid
+                                    JoinQuals: (t0.aid = t1.aid)
+                                    KDS-Hash (size: 10.39MB)
+                           -&gt;  Seq Scan on t1  (cost=0.00..1972.85 rows=103785 width=12)
+(18 rows)
+</code></pre>
+
+<h2 id="pullup-underlying-plans">Pullup underlying plans</h2>
+<p>(ここに絵)</p>
+<pre><code># EXPLAIN SELECT cat,count(*),avg(ax)
+            FROM t0 NATURAL JOIN t1
+           WHERE aid &lt; bid
+           GROUP BY cat;
+                              QUERY PLAN
+
+--------------------------------------------------------------------------------
+ GroupAggregate  (cost=1239991.03..1239995.15 rows=27 width=20)
+   Group Key: t0.cat
+   -&gt;  Sort  (cost=1239991.03..1239991.50 rows=189 width=44)
+         Sort Key: t0.cat
+         -&gt;  Custom Scan (GpuPreAgg)  (cost=1239980.10..1239983.88 rows=189 width=44)
+               Reduction: Local
+               GPU Projection: cat, pgstrom.nrows(), pgstrom.nrows((ax IS NOT NULL)), pgstrom.psum(ax)
+               -&gt;  Custom Scan (GpuJoin)  (cost=50776.43..1199522.96 rows=33332245 width=12)
+                     GPU Projection: t0.cat, t1.ax
+                     Depth 1: GpuHashJoin  (nrows 33332245...33332245)
+                              HashKeys: t0.aid
+                              JoinQuals: (t0.aid = t1.aid)
+                              KDS-Hash (size: 10.39MB)
+                     -&gt;  Custom Scan (GpuScan) on t0  (cost=12634.49..1187710.85 rows=33332245 width=8)
+                           GPU Projection: cat, aid
+                           GPU Filter: (aid &lt; bid)
+                     -&gt;  Seq Scan on t1  (cost=0.00..1972.85 rows=103785 width=12)
+(18 rows)
+</code></pre>
+
+<pre><code># EXPLAIN ANALYZE SELECT cat,count(*),avg(ax)
+                    FROM t0 NATURAL JOIN t1
+                   WHERE aid &lt; bid
+                   GROUP BY cat;
+                              QUERY PLAN
+--------------------------------------------------------------------------------
+ GroupAggregate  (cost=903669.50..903673.62 rows=27 width=20)
+                 (actual time=7761.630..7761.644 rows=27 loops=1)
+   Group Key: t0.cat
+   -&gt;  Sort  (cost=903669.50..903669.97 rows=189 width=44)
+             (actual time=7761.621..7761.626 rows=27 loops=1)
+         Sort Key: t0.cat
+         Sort Method: quicksort  Memory: 28kB
+         -&gt;  Custom Scan (GpuPreAgg)  (cost=903658.57..903662.35 rows=189 width=44)
+                                      (actual time=7761.531..7761.540 rows=27 loops=1)
+               Reduction: Local
+               GPU Projection: cat, pgstrom.nrows(), pgstrom.nrows((ax IS NOT NULL)), pgstrom.psum(ax)
+               Combined GpuJoin: enabled
+               -&gt;  Custom Scan (GpuJoin) on t0  (cost=12483.41..863201.43 rows=33332245 width=12)
+                                                (never executed)
+                     GPU Projection: t0.cat, t1.ax
+                     Outer Scan: t0  (cost=12634.49..1187710.85 rows=33332245 width=8)
+                                     (actual time=59.623..5557.052 rows=100000000 loops=1)
+                     Outer Scan Filter: (aid &lt; bid)
+                     Rows Removed by Outer Scan Filter: 50002874
+                     Depth 1: GpuHashJoin  (plan nrows: 33332245...33332245, actual nrows: 49997126...49997126)
+                              HashKeys: t0.aid
+                              JoinQuals: (t0.aid = t1.aid)
+                              KDS-Hash (size plan: 10.39MB, exec: 64.00MB)
+                     -&gt;  Seq Scan on t1  (cost=0.00..1972.85 rows=103785 width=12)
+                                         (actual time=0.013..15.303 rows=100000 loops=1)
+ Planning time: 0.506 ms
+ Execution time: 8495.391 ms
+(21 rows)
+</code></pre>
+
+<h1 id="_1">運用に関するヒント</h1>
+<h2 id="mps">MPSデーモンの利用</h2>
+<h1 id="_2">トラブルシューティング</h1>
+<h2 id="known-problems">Known Problems</h2>
+<p>wikiを参照</p>
+<h2 id="_3">問題の切り分け</h2>
+<h2 id="_4">クラッシュダンプの採取</h2>
+              
+            </div>
+          </div>
+          <footer>
+  
+    <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
+      
+        <a href="../features/" class="btn btn-neutral float-right" title="Advanced Features">Next <span class="icon icon-circle-arrow-right"></span></a>
+      
+      
+        <a href="../install/" class="btn btn-neutral" title="Install"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+      
+    </div>
+  
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+    
+  </div>
+
+  Built with <a href="http://www.mkdocs.org">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+      
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" style="cursor: pointer">
+    <span class="rst-current-version" data-toggle="rst-current-version">
+      
+      
+        <span><a href="../install/" style="color: #fcfcfc;">&laquo; Previous</a></span>
+      
+      
+        <span style="margin-left: 15px"><a href="../features/" style="color: #fcfcfc">Next &raquo;</a></span>
+      
+    </span>
+</div>
+    <script>var base_url = '..';</script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/require.js"></script>
+      <script src="../search/search.js"></script>
+
+</body>
+</html>

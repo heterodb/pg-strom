@@ -5,7 +5,7 @@
 This chapter introduces advanced features of PG-Strom.
 }
 
-@ja:#[SSD-to-GPUダイレクトSQL実行](#hoge)
+@ja:#SSD-to-GPUダイレクトSQL実行
 @en:#SSD-to-GPU Direct SQL Execution
 
 @ja:##概要
