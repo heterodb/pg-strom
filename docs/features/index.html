@@ -350,28 +350,30 @@ and s_region = 'AMERICA'
 <h2 id="setup">Setup</h2>
 <pre><code>CREATE FOREIGN TABLE ft (
     id int,
-    x0 real,
-    x1 real,
-    x2 real,
-    x3 real,
-    x4 real,
-    x5 real,
-    x6 real,
-    x7 real,
-    x8 real,
-    x9 real
-) SERVER gstore_fdw OPTIONS (pinning '0', format 'pgstrom');
+    signature smallint[] OPTIONS (compression 'pglz')
+)
+SERVER gstore_fdw OPTIONS(pinning '0', format 'pgstrom');
 </code></pre>
 
 <h2 id="operations_2">Operations</h2>
 <p>データのロード</p>
-<p>トランザクショナルではあるが、、、</p>
+<p>トランザクショナルではあるがバルクロードが得意</p>
 <p>データ容量の確認</p>
 <p>preserved memoryの確認</p>
 <p>注意事項</p>
 <h3 id="internal-data-format-pgstrom-format">Internal Data Format (pgstrom format)</h3>
 <h2 id="related-features">Related Features</h2>
-<p>ラージオブジェクト</p>
+<h3 id="gstore_export_ipchandlereggstore">gstore_export_ipchandle(reggstore)</h3>
+<pre><code># select gstore_export_ipchandle('ft');
+                                                      gstore_export_ipchandle
+
+------------------------------------------------------------------------------------------------------------------------------------
+ \xe057880100000000de3a000000000000904e7909000000000000800900000000000000000000000000020000000000005c000000000000001200d0c10101005c
+(1 row)
+</code></pre>
+
+<h3 id="lo_import_gpuint-bytea-bigint-bigint-oid0">lo_import_gpu(int, bytea, bigint, bigint, oid=0)</h3>
+<h3 id="lo_export_gpuoid-int-bytea-bigint-bigint">lo_export_gpu(oid, int, bytea, bigint, bigint)</h3>
               
             </div>
           </div>
