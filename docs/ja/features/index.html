@@ -223,12 +223,13 @@ nvme_core              52964  9 nvme
 - テーブルサイズが<code>pg_strom.nvme_strom_threshold</code>よりも大きい事。
     - この設定値は任意に変更可能ですが、デフォルト値は本体搭載物理メモリに<code>shared_buffers</code>の設定値の1/3を加えた大きさです。</p>
 <p>テーブルをNVMe-SSDで構成された区画に配置するには、データベースクラスタ全体をNVMe-SSDボリュームに格納する以外にも、PostgreSQLのテーブルスペース機能を用いて特定のテーブルや特定のデータベースのみをNVMe-SSDボリュームに配置する事ができます。</p>
-<p>例えば <code>/opt/nvme</code> にNVMe-SSDボリュームがマウントされている場合、以下のようにテーブルスペースを作成する事ができます。</p>
+<p>例えば <code>/opt/nvme</code> にNVMe-SSDボリュームがマウントされている場合、以下のようにテーブルスペースを作成する事ができます。
+PostgreSQLのサーバプロセスの権限で当該ディレクトリ配下のファイルを読み書きできるようパーミッションが設定されている必要がある事に留意してください。</p>
 <pre><code>CREATE TABLESPACE my_nvme LOCATION '/opt/nvme';
 </code></pre>
 
 <p>このテーブルスペース上にテーブルを作成するには、<code>CREATE TABLE</code>構文で以下のように指定します。</p>
-<pre><code>CREATE TABLE my_table ()
+<pre><code>CREATE TABLE my_table (...) TABLESPACE my_nvme;
 </code></pre>
 
 <p>あるいは、データベースのデフォルトテーブルスペースを変更するには、<code>ALTER DATABASE</code>構文で以下のように指定します。

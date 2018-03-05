@@ -208,7 +208,7 @@ nvme_core              52964  9 nvme
 <pre><code>CREATE TABLESPACE my_nvme LOCATION '/opt/nvme';
 </code></pre>
 
-<pre><code>CREATE TABLE my_table ()
+<pre><code>CREATE TABLE my_table (...) TABLESPACE my_nvme;
 </code></pre>
 
 <pre><code>ALTER DATABASE my_database SET TABLESPACE my_nvme;

@@ -107,6 +107,7 @@ SSD-to-GPUダイレクトSQL実行は以下の条件で使用されます。
 テーブルをNVMe-SSDで構成された区画に配置するには、データベースクラスタ全体をNVMe-SSDボリュームに格納する以外にも、PostgreSQLのテーブルスペース機能を用いて特定のテーブルや特定のデータベースのみをNVMe-SSDボリュームに配置する事ができます。
 
 例えば `/opt/nvme` にNVMe-SSDボリュームがマウントされている場合、以下のようにテーブルスペースを作成する事ができます。
+PostgreSQLのサーバプロセスの権限で当該ディレクトリ配下のファイルを読み書きできるようパーミッションが設定されている必要がある事に留意してください。
 }
 
 ```
@@ -118,7 +119,7 @@ CREATE TABLESPACE my_nvme LOCATION '/opt/nvme';
 }
 
 ```
-CREATE TABLE my_table ()
+CREATE TABLE my_table (...) TABLESPACE my_nvme;
 ```
 
 @ja{
