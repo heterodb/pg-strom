@@ -69,8 +69,6 @@
     
         <ul>
         
-            <li><a class="toctree-l3" href="#enablesdisables-pg-strom">Enables/disables PG-Strom</a></li>
-        
             <li><a class="toctree-l3" href="#cpugpu-hybrid-parallel">CPU+GPU Hybrid Parallel</a></li>
         
             <li><a class="toctree-l3" href="#pullup-underlying-plans">Pullup underlying plans</a></li>
@@ -78,24 +76,24 @@
         </ul>
     
 
-    <li class="toctree-l2"><a href="#_1">運用に関するヒント</a></li>
+    <li class="toctree-l2"><a href="#notes-for-system-administration">Notes for system administration</a></li>
     
         <ul>
         
-            <li><a class="toctree-l3" href="#mps">MPSデーモンの利用</a></li>
+            <li><a class="toctree-l3" href="#knowledge-base">Knowledge base</a></li>
+        
+            <li><a class="toctree-l3" href="#usage-of-mps-daemon">Usage of MPS daemon</a></li>
         
         </ul>
     
 
-    <li class="toctree-l2"><a href="#_2">トラブルシューティング</a></li>
+    <li class="toctree-l2"><a href="#trouble-shooting">Trouble Shooting</a></li>
     
         <ul>
         
-            <li><a class="toctree-l3" href="#known-problems">Known Problems</a></li>
+            <li><a class="toctree-l3" href="#identify-the-problem">Identify the problem</a></li>
         
-            <li><a class="toctree-l3" href="#_3">問題の切り分け</a></li>
-        
-            <li><a class="toctree-l3" href="#_4">クラッシュダンプの採取</a></li>
+            <li><a class="toctree-l3" href="#collecting-crash-dump">Collecting crash dump</a></li>
         
         </ul>
     
@@ -156,12 +154,6 @@
             <div class="section">
               
                 <h1 id="basic-operations">Basic operations</h1>
-<h2 id="enablesdisables-pg-strom">Enables/disables PG-Strom</h2>
-<p>You can turn on/off PG-Strom functionality using pg_strom.enabled configuration parameter.</p>
-<pre><code># SET pg_strom.enabled = on/off;
-</code></pre>
-
-<p>You can turn off PG-Strom on troubles, then confirm whether the problem is reproducible with no PG-Strom support.</p>
 <pre><code>postgres=# EXPLAIN SELECT cat,count(*),avg(ax)
                      FROM t0 NATURAL JOIN t1 NATURAL JOIN t2
                     GROUP BY cat;
@@ -219,7 +211,6 @@
 </code></pre>
 
 <h2 id="pullup-underlying-plans">Pullup underlying plans</h2>
-<p>(ここに絵)</p>
 <pre><code># EXPLAIN SELECT cat,count(*),avg(ax)
             FROM t0 NATURAL JOIN t1
            WHERE aid &lt; bid
@@ -247,6 +238,7 @@
 (18 rows)
 </code></pre>
 
+<p><img alt="combined gpu kernel" src="../img/combined-gpu-kernel.png" /></p>
 <pre><code># EXPLAIN ANALYZE SELECT cat,count(*),avg(ax)
                     FROM t0 NATURAL JOIN t1
                    WHERE aid &lt; bid
@@ -283,13 +275,83 @@
 (21 rows)
 </code></pre>
 
-<h1 id="_1">運用に関するヒント</h1>
-<h2 id="mps">MPSデーモンの利用</h2>
-<h1 id="_2">トラブルシューティング</h1>
-<h2 id="known-problems">Known Problems</h2>
-<p>wikiを参照</p>
-<h2 id="_3">問題の切り分け</h2>
-<h2 id="_4">クラッシュダンプの採取</h2>
+<h1 id="notes-for-system-administration">Notes for system administration</h1>
+<h2 id="knowledge-base">Knowledge base</h2>
+<p>We publish several articles, just called "notes", on the project wiki-site of PG-Strom.</p>
+<p>(https://github.com/heterodb/pg-strom/wiki)[https://github.com/heterodb/pg-strom/wiki]</p>
+<h2 id="usage-of-mps-daemon">Usage of MPS daemon</h2>
+<p>(https://docs.nvidia.com/deploy/mps/index.html)[https://docs.nvidia.com/deploy/mps/index.html]</p>
+<h1 id="trouble-shooting">Trouble Shooting</h1>
+<h2 id="identify-the-problem">Identify the problem</h2>
+<pre><code># SET pg_strom.enabled = off;
+</code></pre>
+
+<h2 id="collecting-crash-dump">Collecting crash dump</h2>
+<h3 id="add-limitcore-configuration">Add LimitCORE configuration</h3>
+<pre><code>/etc/systemd/system/postgresql-&lt;version&gt;.service.d/override.conf
+</code></pre>
+
+<pre><code>[Service]
+LimitCORE=infinity
+</code></pre>
+
+<pre><code>$ cat /proc/&lt;PID of postmaster&gt;/limits
+Limit                     Soft Limit           Hard Limit           Units
+    :                         :                    :                  :
+Max core file size        unlimited            unlimited            bytes
+    :                         :                    :                  :
+</code></pre>
+
+<h3 id="installation-of-debuginfo-package">Installation of debuginfo package</h3>
+<pre><code># yum install postgresql10-debuginfo pg_strom-PG10-debuginfo
+            :
+================================================================================
+ Package                  Arch    Version             Repository           Size
+================================================================================
+Installing:
+ pg_strom-PG10-debuginfo  x86_64  1.9-180301.el7      heterodb-debuginfo  766 k
+ postgresql10-debuginfo   x86_64  10.3-1PGDG.rhel7    pgdg10              9.7 M
+
+Transaction Summary
+================================================================================
+Install  2 Packages
+            :
+Installed:
+  pg_strom-PG10-debuginfo.x86_64 0:1.9-180301.el7
+  postgresql10-debuginfo.x86_64 0:10.3-1PGDG.rhel7
+
+Complete!
+</code></pre>
+
+<h3 id="checking-the-backtrace">Checking the backtrace</h3>
+<pre><code># gdb -c /var/lib/pgdata/core.134680 -f /usr/pgsql-10/bin/postgres
+GNU gdb (GDB) Red Hat Enterprise Linux 7.6.1-100.el7_4.1
+       :
+(gdb) bt
+#0  0x00007fb942af3903 in __epoll_wait_nocancel () from /lib64/libc.so.6
+#1  0x00000000006f71ae in WaitEventSetWaitBlock (nevents=1,
+    occurred_events=0x7ffee51e1d70, cur_timeout=-1, set=0x2833298)
+    at latch.c:1048
+#2  WaitEventSetWait (set=0x2833298, timeout=timeout@entry-1,
+    occurred_events=occurred_events@entry0x7ffee51e1d70,
+    nevents=nevents@entry1, wait_event_info=wait_event_info@entry100663296)
+    at latch.c:1000
+#3  0x00000000006210fb in secure_read (port=0x2876120,
+    ptr=0xcaa7e0 &lt;PqRecvBuffer&gt;, len=8192) at be-secure.c:166
+#4  0x000000000062b6e8 in pq_recvbuf () at pqcomm.c:963
+#5  0x000000000062c345 in pq_getbyte () at pqcomm.c:1006
+#6  0x0000000000718682 in SocketBackend (inBuf=0x7ffee51e1ef0)
+    at postgres.c:328
+#7  ReadCommand (inBuf=0x7ffee51e1ef0) at postgres.c:501
+#8  PostgresMain (argc=&lt;optimized out&gt;, argv=argv@entry0x287bb68,
+    dbname=0x28333f8 &quot;postgres&quot;, username=&lt;optimized out&gt;) at postgres.c:4030
+#9  0x000000000047adbc in BackendRun (port=0x2876120) at postmaster.c:4405
+#10 BackendStartup (port=0x2876120) at postmaster.c:4077
+#11 ServerLoop () at postmaster.c:1755
+#12 0x00000000006afb7f in PostmasterMain (argc=argc@entry3,
+    argv=argv@entry0x2831280) at postmaster.c:1363
+#13 0x000000000047bbef in main (argc=3, argv=0x2831280) at main.c:228
+</code></pre>
               
             </div>
           </div>

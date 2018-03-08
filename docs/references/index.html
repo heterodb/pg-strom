@@ -80,19 +80,39 @@
     <a class="current" href="./">References</a>
     <ul class="subnav">
             
-    <li class="toctree-l2"><a href="#references">References</a></li>
+    <li class="toctree-l2"><a href="#supported-data-types">Supported Data Types</a></li>
+    
+
+    <li class="toctree-l2"><a href="#device-functions-and-operators">Device functions and operators</a></li>
     
         <ul>
         
-            <li><a class="toctree-l3" href="#supported-data-types">Supported Data Types</a></li>
+            <li><a class="toctree-l3" href="#type-cast">Type cast</a></li>
         
-            <li><a class="toctree-l3" href="#functions-and-operators">Functions and Operators</a></li>
+            <li><a class="toctree-l3" href="#functions-and-operators">Functions and operators</a></li>
         
-            <li><a class="toctree-l3" href="#system-view">System View</a></li>
-        
-            <li><a class="toctree-l3" href="#guc-parameters">GUC Parameters</a></li>
+            <li><a class="toctree-l3" href="#miscellaneous-device-functions">Miscellaneous device functions</a></li>
         
         </ul>
+    
+
+    <li class="toctree-l2"><a href="#pg-strom-specific-sql-functions">PG-Strom Specific SQL functions</a></li>
+    
+        <ul>
+        
+            <li><a class="toctree-l3" href="#device-information">Device Information</a></li>
+        
+            <li><a class="toctree-l3" href="#array-based-matrix-support">Array-based matrix support</a></li>
+        
+            <li><a class="toctree-l3" href="#miscellaneous-functions">Miscellaneous functions</a></li>
+        
+        </ul>
+    
+
+    <li class="toctree-l2"><a href="#system-view">System View</a></li>
+    
+
+    <li class="toctree-l2"><a href="#guc-parameters">GUC Parameters</a></li>
     
 
     </ul>
@@ -135,8 +155,7 @@
           <div role="main">
             <div class="section">
               
-                <h1 id="references">References</h1>
-<h2 id="supported-data-types">Supported Data Types</h2>
+                <h1 id="supported-data-types">Supported Data Types</h1>
 <p>PG-Strom support the following data types for use on GPU device.</p>
 <p><strong>Built-in numeric types</strong></p>
 <table>
@@ -388,14 +407,1128 @@ To avoid the problem, turn off the GUC option <code>pg_strom.enable_numeric_type
 <td align="left">2 bytes</td>
 <td align="left">Half precision data type</td>
 </tr>
+<tr>
+<td align="left"><code>reggstore</code></td>
+<td align="left"><code>cl_uint</code></td>
+<td align="left">4 bytes</td>
+<td align="left">Specific version of regclass for gstore_fdw. Special handling at PL/CUDA function invocation.</td>
+</tr>
 </tbody>
 </table>
-<h2 id="functions-and-operators">Functions and Operators</h2>
-<h3 id="device-information-functions">Device information functions</h3>
-<h2 id="system-view">System View</h2>
+<h1 id="device-functions-and-operators">Device functions and operators</h1>
+<h2 id="type-cast">Type cast</h2>
+<table>
+<thead>
+<tr>
+<th align="left">destination type</th>
+<th align="left">source type</th>
+<th align="left">description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>bool</code></td>
+<td align="left"><code>int4</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>int2</code></td>
+<td align="left"><code>int4,int8,float2,float4,float8,numeric</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>int4</code></td>
+<td align="left"><code>int2,int8,float2,float4,float8,numeric</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>int8</code></td>
+<td align="left"><code>int2,int4,float2,float4,float8,numeric</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>float2</code></td>
+<td align="left"><code>int2,int4,int8,float4,float8,numeric</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>float4</code></td>
+<td align="left"><code>int2,int4,int8,float2,float8,numeric</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>float8</code></td>
+<td align="left"><code>int2,int4,int8,float2,float4,numeric</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>numeric</code></td>
+<td align="left"><code>int2,int4,int8,float2,float4,float8</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>money</code></td>
+<td align="left"><code>int4,int8,numeric</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>inet</code></td>
+<td align="left"><code>cidr</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>date</code></td>
+<td align="left"><code>timestamp,timestamptz</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>time</code></td>
+<td align="left"><code>timetz,timestamp,timestamptz</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>timetz</code></td>
+<td align="left"><code>time,timestamptz</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>timestamp</code></td>
+<td align="left"><code>date,timestamptz</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>timestamptz</code></td>
+<td align="left"><code>date,timestamp</code></td>
+<td align="left"></td>
+</tr>
+</tbody>
+</table>
+<h2 id="functions-and-operators">Functions and operators</h2>
+<p><strong>Numeric functions/operators</strong></p>
+<table>
+<thead>
+<tr>
+<th align="left">function/operator</th>
+<th align="left">description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>TYPE = TYPE</code></td>
+<td align="left">Comparison of two values<br><code>TYPE</code> is any of <code>int2,int4,int8</code><br><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></td>
+</tr>
+<tr>
+<td align="left"><code>TYPE = TYPE</code></td>
+<td align="left">Comparison of two values<br><code>TYPE</code> is any of <code>float2,float4,float8</code><br><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></td>
+</tr>
+<tr>
+<td align="left"><code>numeric COMP numeric</code></td>
+<td align="left">Comparison of two values<br><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></td>
+</tr>
+<tr>
+<td align="left"><code>TYPE + TYPE</code></td>
+<td align="left">Arithemetic addition<br><code>TYPE</code> is any of <code>int2,int4,int8,float2,float4,float8,numeric</code></td>
+</tr>
+<tr>
+<td align="left"><code>TYPE - TYPE</code></td>
+<td align="left">Arithemetic substract<br><code>TYPE</code> is any of <code>int2,int4,int8,float2,float4,float8,numeric</code></td>
+</tr>
+<tr>
+<td align="left"><code>TYPE * TYPE</code></td>
+<td align="left">Arithemetic multiplication<br><code>TYPE</code> is any of <code>int2,int4,int8,float2,float4,float8,numeric</code></td>
+</tr>
+<tr>
+<td align="left"><code>TYPE / TYPE</code></td>
+<td align="left">Arithemetic division<br><code>TYPE</code> is any of <code>int2,int4,int8,float2,float4,float8,numeric</code></td>
+</tr>
+<tr>
+<td align="left"><code>TYPE % TYPE</code></td>
+<td align="left">Reminer operator<br><code>TYPE</code> is any of <code>int2,int4,int8</code></td>
+</tr>
+<tr>
+<td align="left"><code>TYPE &amp; TYPE</code></td>
+<td align="left">Bitwise AND<br><code>TYPE</code> is any of <code>int2,int4,int8</code></td>
+</tr>
+<tr>
+<td align="left"><code>TYPE &#124; TYPE</code></td>
+<td align="left">Bitwise OR<br><code>TYPE</code> is any of <code>int2,int4,int8</code></td>
+</tr>
+<tr>
+<td align="left"><code>TYPE # TYPE</code></td>
+<td align="left">Bitwise XOR<br><code>TYPE</code> is any of <code>int2,int4,int8</code></td>
+</tr>
+<tr>
+<td align="left"><code>~ TYPE</code></td>
+<td align="left">Bitwise NOT<br><code>TYPE</code> is any if <code>int2,int4,int8</code></td>
+</tr>
+<tr>
+<td align="left"><code>TYPE &gt;&gt; int4</code></td>
+<td align="left">Right shift<br><code>TYPE</code> is any of <code>int2,int4,int8</code></td>
+</tr>
+<tr>
+<td align="left"><code>TYPE &lt;&lt; int4</code></td>
+<td align="left">Left shift<br><code>TYPE</code> is any of <code>int2,int4,int8</code></td>
+</tr>
+<tr>
+<td align="left"><code>+ TYPE</code></td>
+<td align="left">Unary plus<br><code>TYPE</code> is any of <code>int2,int4,int8,float2,float4,float8,numeric</code></td>
+</tr>
+<tr>
+<td align="left"><code>- TYPE</code></td>
+<td align="left">Unary minus<br><code>TYPE</code> is any of <code>int2,int4,int8,float2,float4,float8,numeric</code></td>
+</tr>
+<tr>
+<td align="left"><code>@TYPE</code></td>
+<td align="left">Absolute value<br><code>TYPE</code> is any of <code>int2,int4,int8,float2,float4,float8,numeric</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Mathematical functions</strong></p>
+<table>
+<thead>
+<tr>
+<th align="left">functions/operators</th>
+<th align="left">description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>cbrt(float8)</code></td>
+<td align="left">cube root</td>
+</tr>
+<tr>
+<td align="left"><code>dcbrt(float8)</code></td>
+<td align="left">cube root</td>
+</tr>
+<tr>
+<td align="left"><code>ceil(float8)</code></td>
+<td align="left">nearest integer greater than or equal to argument</td>
+</tr>
+<tr>
+<td align="left"><code>ceiling(float8)</code></td>
+<td align="left">nearest integer greater than or equal to argument</td>
+</tr>
+<tr>
+<td align="left"><code>exp(float8)</code></td>
+<td align="left">exponential</td>
+</tr>
+<tr>
+<td align="left"><code>dexp(float8)</code></td>
+<td align="left">exponential</td>
+</tr>
+<tr>
+<td align="left"><code>floor(float8)</code></td>
+<td align="left">nearest integer less than or equal to argument</td>
+</tr>
+<tr>
+<td align="left"><code>ln(float8)</code></td>
+<td align="left">natural logarithm</td>
+</tr>
+<tr>
+<td align="left"><code>dlog1(float8)</code></td>
+<td align="left">natural logarithm</td>
+</tr>
+<tr>
+<td align="left"><code>log(float8)</code></td>
+<td align="left">base 10 logarithm</td>
+</tr>
+<tr>
+<td align="left"><code>dlog10(float8)</code></td>
+<td align="left">base 10 logarithm</td>
+</tr>
+<tr>
+<td align="left"><code>pi()</code></td>
+<td align="left">circumference ratio</td>
+</tr>
+<tr>
+<td align="left"><code>power(float8,float8)</code></td>
+<td align="left">power</td>
+</tr>
+<tr>
+<td align="left"><code>pow(float8,float8)</code></td>
+<td align="left">power</td>
+</tr>
+<tr>
+<td align="left"><code>dpow(float8,float8)</code></td>
+<td align="left">power</td>
+</tr>
+<tr>
+<td align="left"><code>round(float8)</code></td>
+<td align="left">round to the nearest integer</td>
+</tr>
+<tr>
+<td align="left"><code>dround(float8)</code></td>
+<td align="left">round to the nearest integer</td>
+</tr>
+<tr>
+<td align="left"><code>sign(float8)</code></td>
+<td align="left">sign of the argument</td>
+</tr>
+<tr>
+<td align="left"><code>sqrt(float8)</code></td>
+<td align="left">square root</td>
+</tr>
+<tr>
+<td align="left"><code>dsqrt(float8)</code></td>
+<td align="left">square root</td>
+</tr>
+<tr>
+<td align="left"><code>trunc(float8)</code></td>
+<td align="left">truncate toward zero</td>
+</tr>
+<tr>
+<td align="left"><code>dtrunc(float8)</code></td>
+<td align="left">truncate toward zero</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Trigonometric functions</strong></p>
+<table>
+<thead>
+<tr>
+<th align="left">functions/operators</th>
+<th align="left">description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>degrees(float8)</code></td>
+<td align="left">radians to degrees</td>
+</tr>
+<tr>
+<td align="left"><code>radians(float8)</code></td>
+<td align="left">degrees to radians</td>
+</tr>
+<tr>
+<td align="left"><code>acos(float8)</code></td>
+<td align="left">inverse cosine</td>
+</tr>
+<tr>
+<td align="left"><code>asin(float8)</code></td>
+<td align="left">inverse sine</td>
+</tr>
+<tr>
+<td align="left"><code>atan(float8)</code></td>
+<td align="left">inverse tangent</td>
+</tr>
+<tr>
+<td align="left"><code>atan2(float8,float8)</code></td>
+<td align="left">inverse tangent of <code>arg1 / arg2</code></td>
+</tr>
+<tr>
+<td align="left"><code>cos(float8)</code></td>
+<td align="left">cosine</td>
+</tr>
+<tr>
+<td align="left"><code>cot(float8)</code></td>
+<td align="left">cotangent</td>
+</tr>
+<tr>
+<td align="left"><code>sin(float8)</code></td>
+<td align="left">sine</td>
+</tr>
+<tr>
+<td align="left"><code>tan(float8)</code></td>
+<td align="left">tangent</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Date and time operators</strong></p>
+<table>
+<thead>
+<tr>
+<th align="left">functions/operators</th>
+<th align="left">description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>date COMP date</code></td>
+<td align="left"><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></td>
+</tr>
+<tr>
+<td align="left"><code>date COMP timestamp</code></td>
+<td align="left"><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></td>
+</tr>
+<tr>
+<td align="left"><code>date COMP timestamptz</code></td>
+<td align="left"><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></td>
+</tr>
+<tr>
+<td align="left"><code>time COMP time</code></td>
+<td align="left"><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></td>
+</tr>
+<tr>
+<td align="left"><code>timetz COMP timetz</code></td>
+<td align="left"><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></td>
+</tr>
+<tr>
+<td align="left"><code>timestamp COMP timestamp</code></td>
+<td align="left"><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></td>
+</tr>
+<tr>
+<td align="left"><code>timestamp COMP date</code></td>
+<td align="left"><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></td>
+</tr>
+<tr>
+<td align="left"><code>timestamptz COMP timestamptz</code></td>
+<td align="left"><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></td>
+</tr>
+<tr>
+<td align="left"><code>timestamptz COMP date</code></td>
+<td align="left"><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></td>
+</tr>
+<tr>
+<td align="left"><code>timestamp COMP timestamptz</code></td>
+<td align="left"><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></td>
+</tr>
+<tr>
+<td align="left"><code>timestamptz COMP timestamp</code></td>
+<td align="left"><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></td>
+</tr>
+<tr>
+<td align="left"><code>interval COMP interval</code></td>
+<td align="left"><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></td>
+</tr>
+<tr>
+<td align="left"><code>date OP int4</code></td>
+<td align="left"><code>OP</code> is either of <code>+,-</code></td>
+</tr>
+<tr>
+<td align="left"><code>int4 + date</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>date - date</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>date + time</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>date + timetz</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>time + date</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>time - time</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>timestamp - timestamp</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>timetz OP interval</code></td>
+<td align="left"><code>OP</code> is either of <code>+,-</code></td>
+</tr>
+<tr>
+<td align="left"><code>timestamptz OP interval</code></td>
+<td align="left"><code>OP</code> is either of <code>+,-</code></td>
+</tr>
+<tr>
+<td align="left"><code>overlaps(TYPE,TYPE,TYPE,TYPE)</code></td>
+<td align="left"><code>TYPE</code> is any of <code>time,timetz,timestamp,timestamptz</code></td>
+</tr>
+<tr>
+<td align="left"><code>extract(text FROM TYPE)</code></td>
+<td align="left"><code>TYPE</code> is any of <code>time,timetz,timestamp,timestamptz,interval</code></td>
+</tr>
+<tr>
+<td align="left"><code>now()</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>- interval</code></td>
+<td align="left">unary minus operator</td>
+</tr>
+<tr>
+<td align="left"><code>interval OP interval</code></td>
+<td align="left"><code>OP</code> is either of <code>+,-</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Text functions/operators</strong></p>
+<table>
+<thead>
+<tr>
+<th align="left">functions/operators</th>
+<th align="left">description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>{text,bpchar} COMP {text,bpchar}</code></td>
+<td align="left"><code>COMP</code> is either of <code>=,&lt;&gt;</code></td>
+</tr>
+<tr>
+<td align="left"><code>{text,bpchar} COMP {text,bpchar}</code></td>
+<td align="left"><code>COMP</code> is either of <code>&lt;,&lt;=,&gt;=,&gt;</code><br>Only available on no-locale or UTF-8</td>
+</tr>
+<tr>
+<td align="left"><code>length(TYPE)</code></td>
+<td align="left">length of the string<br><code>TYPE</code> is either of <code>text,bpchar</code></td>
+</tr>
+<tr>
+<td align="left"><code>TYPE LIKE text</code></td>
+<td align="left"><code>TYPE</code> is either of <code>text,bpchar</code></td>
+</tr>
+<tr>
+<td align="left"><code>TYPE NOT LIKE text</code></td>
+<td align="left"><code>TYPE</code> is either of <code>text,bpchar</code></td>
+</tr>
+<tr>
+<td align="left"><code>TYPE ILIKE text</code></td>
+<td align="left"><code>TYPE</code> is either of <code>text,bpchar</code><br>Only available on no-locale or UTF-8</td>
+</tr>
+<tr>
+<td align="left"><code>TYPE NOT ILIKE text</code></td>
+<td align="left"><code>TYPE</code> is either of <code>text,bpchar</code><br>Only available on no-locale or UTF-8</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Network functions/operators</strong></p>
+<table>
+<thead>
+<tr>
+<th align="left">functions/operators</th>
+<th align="left">description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>macaddr COMP macaddr</code></td>
+<td align="left"><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></td>
+</tr>
+<tr>
+<td align="left"><code>macaddr &amp; macaddr</code></td>
+<td align="left">Bitwise AND operator</td>
+</tr>
+<tr>
+<td align="left"><code>macaddr &#124; macaddr</code></td>
+<td align="left">Bitwise OR operator</td>
+</tr>
+<tr>
+<td align="left"><code>~ macaddr</code></td>
+<td align="left">Bitwise NOT operator</td>
+</tr>
+<tr>
+<td align="left"><code>trunc(macaddr)</code></td>
+<td align="left">Set last 3 bytes to zero</td>
+</tr>
+<tr>
+<td align="left"><code>inet COMP inet</code></td>
+<td align="left"><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></td>
+</tr>
+<tr>
+<td align="left"><code>inet INCL inet</code></td>
+<td align="left"><code>INCL</code> is any of <code>&lt;&lt;,&lt;&lt;=,&gt;&gt;,&gt;&gt;=,&amp;&amp;</code></td>
+</tr>
+<tr>
+<td align="left"><code>~ inet</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>inet &amp; inet</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>inet &#124; inet</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>inet + int8</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>inet - int8</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>inet - inet</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>broadcast(inet)</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>family(inet)</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>hostmask(inet)</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>masklen(inet)</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>netmask(inet)</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>network(inet)</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>set_masklen(cidr,int)</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>set_masklen(inet,int)</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>inet_same_family(inet, inet)</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>inet_merge(inet,inet)</code></td>
+<td align="left"></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Currency operators</strong></p>
+<table>
+<thead>
+<tr>
+<th align="left">functions/operators</th>
+<th align="left">description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>money COMP money</code></td>
+<td align="left"><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></td>
+</tr>
+<tr>
+<td align="left"><code>money OP money</code></td>
+<td align="left"><code>OP</code> is any of <code>+,-,/</code></td>
+</tr>
+<tr>
+<td align="left"><code>money * TYPE</code></td>
+<td align="left"><code>TYPE</code> is any of <code>int2,int4,float2,float4,float8</code></td>
+</tr>
+<tr>
+<td align="left"><code>TYPE * money</code></td>
+<td align="left"><code>TYPE</code> is any of <code>int2,int4,float2,float4,float8</code></td>
+</tr>
+<tr>
+<td align="left"><code>money / TYPE</code></td>
+<td align="left"><code>TYPE</code> is any of <code>int2,int4,float2,float4,float8</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>UUID operators</strong></p>
+<table>
+<thead>
+<tr>
+<th align="left">functions/operators</th>
+<th align="left">description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>uuid COMP uuid</code></td>
+<td align="left"><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Range type functions/operators</strong></p>
+<table>
+<thead>
+<tr>
+<th align="left">functions/operators</th>
+<th align="left">description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>RANGE = RANGE</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>RANGE &lt;&gt; RANGE</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>RANGE &lt; RANGE</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>RANGE &lt;= RANGE</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>RANGE &gt; RANGE</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>RANGE &gt;= RANGE</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>RANGE @ RANGE</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>RANGE @ TYPE</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code><br><code>TYPE</code> is element type of <code>RANGE</code>.</td>
+</tr>
+<tr>
+<td align="left"><code>RANGE &lt;@RANGE</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>TYPE &lt;@RANGE</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code><br><code>TYPE</code> is element type of <code>RANGE</code>.</td>
+</tr>
+<tr>
+<td align="left"><code>RANGE &amp;&amp; RANGE</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>RANGE &lt;&lt; RANGE</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>RANGE &gt;&gt; RANGE</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>RANGE &amp;&lt; RANGE</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>RANGE &amp;&gt; RANGE</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>RANGE -&#124;- RANGE</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>RANGE + RANGE</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>RANGE * RANGE</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>RANGE - RANGE</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>lower(RANGE)</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>upper(RANGE)</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>isempty(RANGE)</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>lower_inc(RANGE)</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>upper_inc(RANGE)</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>lower_inf(RANGE)</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>upper_inf(RANGE)</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>range_merge(RANGE,RANGE)</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="miscellaneous-device-functions">Miscellaneous device functions</h2>
+<table>
+<thead>
+<tr>
+<th align="left">functions/operators</th>
+<th align="left">result</th>
+<th align="left">description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>as_int8(float8)</code></td>
+<td align="left"><code>int8</code></td>
+<td align="left">Re-interpret double-precision floating point bit-pattern as 64bit integer value</td>
+</tr>
+<tr>
+<td align="left"><code>as_int4(float4)</code></td>
+<td align="left"><code>int4</code></td>
+<td align="left">Re-interpret single-precision floating point bit-pattern as 32bit integer value</td>
+</tr>
+<tr>
+<td align="left"><code>as_int2(float2)</code></td>
+<td align="left"><code>int2</code></td>
+<td align="left">Re-interpret half-precision floating point bit-pattern as 16bit integer value</td>
+</tr>
+<tr>
+<td align="left"><code>as_float8(int8)</code></td>
+<td align="left"><code>float8</code></td>
+<td align="left">Re-interpret 64bit integer bit-pattern as double-precision floating point value</td>
+</tr>
+<tr>
+<td align="left"><code>as_float4(int4)</code></td>
+<td align="left"><code>float4</code></td>
+<td align="left">Re-interpret 32bit integer bit-pattern as single-precision floating point value</td>
+</tr>
+<tr>
+<td align="left"><code>as_float2(int2)</code></td>
+<td align="left"><code>float2</code></td>
+<td align="left">Re-interpret 16bit integer bit-pattern as half-precision floating point value</td>
+</tr>
+</tbody>
+</table>
+<h1 id="pg-strom-specific-sql-functions">PG-Strom Specific SQL functions</h1>
+<p>This section introduces SQL functions which are additionally provided by PG-Strom.</p>
+<h2 id="device-information">Device Information</h2>
+<table>
+<thead>
+<tr>
+<th align="left">Function</th>
+<th align="center">Result</th>
+<th align="left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>gpu_device_name(int = 0)</code></td>
+<td align="center"><code>text</code></td>
+<td align="left">It tells name of the specified GPU device.</td>
+</tr>
+<tr>
+<td align="left"><code>gpu_global_memsize(int = 0)</code></td>
+<td align="center"><code>bigint</code></td>
+<td align="left">It tells amount of the specified GPU device in bytes.</td>
+</tr>
+<tr>
+<td align="left"><code>gpu_max_blocksize(int = 0)</code></td>
+<td align="center"><code>int</code></td>
+<td align="left">It tells maximum block-size on the specified GPU device. 1024, in the currently supported GPU models.</td>
+</tr>
+<tr>
+<td align="left"><code>gpu_warp_size(int = 0)</code></td>
+<td align="center"><code>int</code></td>
+<td align="left">It tells warp-size on the specified GPU device. 32, in the currently supported GPU models.</td>
+</tr>
+<tr>
+<td align="left"><code>gpu_max_shared_memory_perblock(int = 0)</code></td>
+<td align="center"><code>int</code></td>
+<td align="left">It tells maximum shared memory size per block on the specified GPU device.</td>
+</tr>
+<tr>
+<td align="left"><code>gpu_num_registers_perblock(int = 0)</code></td>
+<td align="center"><code>int</code></td>
+<td align="left">It tells total number of registers per block on the specified GPU device.</td>
+</tr>
+<tr>
+<td align="left"><code>gpu_num_multiptocessors(int = 0)</code></td>
+<td align="center"><code>int</code></td>
+<td align="left">It tells number of SM(Streaming Multiprocessor) units on the specified GPU device.</td>
+</tr>
+<tr>
+<td align="left"><code>gpu_num_cuda_cores(int = 0)</code></td>
+<td align="center"><code>int</code></td>
+<td align="left">It tells number of CUDA cores on the specified GPU device.</td>
+</tr>
+<tr>
+<td align="left"><code>gpu_cc_major(int = 0)</code></td>
+<td align="center"><code>int</code></td>
+<td align="left">It tells major CC(Compute Capability) version of the specified GPU device.</td>
+</tr>
+<tr>
+<td align="left"><code>gpu_cc_minor(int = 0)</code></td>
+<td align="center"><code>int</code></td>
+<td align="left">It tells minor CC(Compute Capability) version of the specified GPU device.</td>
+</tr>
+<tr>
+<td align="left"><code>gpu_pci_id(int = 0)</code></td>
+<td align="center"><code>int</code></td>
+<td align="left">It tells PCI bus-id of the specified GPU device.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="array-based-matrix-support">Array-based matrix support</h2>
+<p>You can use array data type of PostgreSQL to deliver matrix-data for PL/CUDA functions.
+A two-dimensional array of fixed-length boolean/numeric values without NULL has flat data structure (expect for the array header). It allows to identify the address of elements by indexes of the matrix uniquely.
+PG-Strom provides several SQL functions to handle array-based matrix.</p>
+<p><strong>Type cast</strong></p>
+<table>
+<thead>
+<tr>
+<th align="left">destination type</th>
+<th align="left">source type</th>
+<th align="left">description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>int[]</code></td>
+<td align="left"><code>bit</code></td>
+<td align="left">convert bit-string to 32bit integer array. Unaligned bits are filled up by 0.</td>
+</tr>
+<tr>
+<td align="left"><code>bit</code></td>
+<td align="left"><code>int[]</code></td>
+<td align="left">convert 32bit integer to bit-string</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Array-based matrix functions</strong></p>
+<table>
+<thead>
+<tr>
+<th align="left">functions/operators</th>
+<th align="left">result</th>
+<th align="left">description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>array_matrix_validation(anyarray)</code></td>
+<td align="left"><code>bool</code></td>
+<td align="left">It checks whether the supplied array satisfies the requirement of array-based matrix.</td>
+</tr>
+<tr>
+<td align="left"><code>array_matrix_height(anyarray)</code></td>
+<td align="left"><code>int</code></td>
+<td align="left">It tells height of the array-based matrix.</td>
+</tr>
+<tr>
+<td align="left"><code>array_matrix_width(anyarray)</code></td>
+<td align="left"><code>int</code></td>
+<td align="left">It tells width of the array-based matrix.</td>
+</tr>
+<tr>
+<td align="left"><code>array_vector_rawsize(regtype,int)</code></td>
+<td align="left"><code>bigint</code></td>
+<td align="left">It tells expected size if N-items vector is created with the specified type.</td>
+</tr>
+<tr>
+<td align="left"><code>array_matrix_rawsize(regtype,int,int)</code></td>
+<td align="left"><code>bigint</code></td>
+<td align="left">It tells expected size if HxW matrix is created with the specified type.</td>
+</tr>
+<tr>
+<td align="left"><code>array_cube_rawsize(regtype,int,int,int)</code></td>
+<td align="left"><code>bigint</code></td>
+<td align="left">It tells expected size if HxWxD cube is created with the specified type.</td>
+</tr>
+<tr>
+<td align="left"><code>type_len(regtype)</code></td>
+<td align="left"><code>bigint</code></td>
+<td align="left">It tells unit length of the specified type.</td>
+</tr>
+<tr>
+<td align="left"><code>composite_type_rawsize(LEN,...)</code></td>
+<td align="left"><code>bigint</code></td>
+<td align="left">It tells expected size of the composite type if constructed with the specified data-length order. We expect to use the function with <code>type_len()</code><br><code>LEN</code> is either of <code>int,bigint</code></td>
+</tr>
+<tr>
+<td align="left"><code>matrix_unnest(anyarray)</code></td>
+<td align="left"><code>record</code></td>
+<td align="left">It is a function to return set, to fetch rows from top of the supplied array-based matrix. PostgreSQL has no type information of the record, so needs to give type information using <code>ROW()</code> clause.</td>
+</tr>
+<tr>
+<td align="left"><code>rbind(MATRIX,MATRIX)</code></td>
+<td align="left"><code>MATRIX</code></td>
+<td align="left">It combines two array-based matrix vertically.<br><code>MATRIX</code> is array type of any of <code>bool,int2,int4,int8,float4,float8</code></td>
+</tr>
+<tr>
+<td align="left"><code>rbind(TYPE,MATRIX)</code></td>
+<td align="left"><code>MATRIX</code></td>
+<td align="left">It adds a scalar value on head of the array-based matrix. If multiple columns exist, the scalar value shall be set on all the column of the head row.<br><code>MATRIX</code> is array type of any of <code>bool,int2,int4,int8,float4,float8</code>.<br><code>TYPE</code> is element of <code>MATRIX</code></td>
+</tr>
+<tr>
+<td align="left"><code>rbind(MATRIX,TYPE)</code></td>
+<td align="left"><code>MATRIX</code></td>
+<td align="left">It adds a scalar value on bottom of the array-based matrix. If multiple columns exist, the scalar value shall be set on all the column of the bottom row.<code>MATRIX</code> is array type of any of <code>bool,int2,int4,int8,float4,float8</code><br><code>TYPE</code> is element type of <code>MATRIX</code></td>
+</tr>
+<tr>
+<td align="left"><code>cbind(MATRIX,MATRIX)</code></td>
+<td align="left"><code>MATRIX</code></td>
+<td align="left">It combines two array-based matrix horizontally.<br><code>MATRIX</code> is array type of any of <code>bool,int2,int4,int8,float4,float8</code></td>
+</tr>
+<tr>
+<td align="left"><code>cbind(TYPE,MATRIX)</code></td>
+<td align="left"><code>MATRIX</code></td>
+<td align="left">It adds a scalar value on left of the array-based matrix. If multiple rows exist, the scalar value shall be set on all the rows of the left column.<br><code>MATRIX</code> is array type of any of <code>bool,int2,int4,int8,float4,float8</code><br><code>TYPE</code> is element type of <code>MATRIX</code></td>
+</tr>
+<tr>
+<td align="left"><code>cbind(MATRIX,TYPE)</code></td>
+<td align="left"><code>MATRIX</code></td>
+<td align="left">It adds a scalar value on right of the array-based matrix. If multiple rows exist, the scalar value shall be set on all the rows of the right column.<br><code>MATRIX</code> is array type of any of <code>bool,int2,int4,int8,float4,float8</code>.<br><code>TYPE</code> is element type of <code>MATRIX</code></td>
+</tr>
+<tr>
+<td align="left"><code>transpose(MATRIX)</code></td>
+<td align="left"><code>MATRIX</code></td>
+<td align="left">It transposes the array-based matrix.<br><code>MATRIX</code> is array type of any of <code>bool,int2,int4,int8,float4,float8</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Aggregate functions</strong></p>
+<table>
+<thead>
+<tr>
+<th align="left">functions/operators</th>
+<th align="left">result</th>
+<th align="left">description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>array_matrix(TYPE,...)</code></td>
+<td align="left"><code>TYPE[]</code></td>
+<td align="left">An aggregate function with varidic arguments. It produces M-cols x N-rows array-based matrix if N-rows were supplied with M-columns.<br><code>TYPE</code> is any of <code>bool,int2,int4,int8,float4,float8</code></td>
+</tr>
+<tr>
+<td align="left"><code>array_matrix(bit)</code></td>
+<td align="left"><code>bit[]</code></td>
+<td align="left">An aggregate function to produce <code>int4[]</code> array-based matrix. It considers bit-string as a set of 32bits integer values.</td>
+</tr>
+<tr>
+<td align="left"><code>rbind(MATRIX)</code></td>
+<td align="left"><code>MATRIX</code></td>
+<td align="left">An aggregate function to combine the supplied array-based matrix vertically.<br><code>MATRIX</code> is array type of any of <code>bool,int2,int4,int8,float4,float8</code></td>
+</tr>
+<tr>
+<td align="left"><code>cbind(MATRIX)</code></td>
+<td align="left"><code>MATRIX</code></td>
+<td align="left">An aggregate function to combine the supplied array-based matrix horizontally.<code>MATRIX</code> is array type of any of <code>bool,int2,int4,int8,float4,float8</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="miscellaneous-functions">Miscellaneous functions</h2>
+<table>
+<thead>
+<tr>
+<th align="left">Function</th>
+<th align="center">Result</th>
+<th align="left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>pgstrom_ccache_enabled(regclass)</code></td>
+<td align="center"><code>text</code></td>
+<td align="left">Enables in-memory columnar cache on the specified table.</td>
+</tr>
+<tr>
+<td align="left"><code>pgstrom_ccache_disabled(regclass)</code></td>
+<td align="center"><code>text</code></td>
+<td align="left">Disables in-memory columnar cache on the specified table.</td>
+</tr>
+<tr>
+<td align="left"><code>pgstrom_ccache_prewarm(regclass)</code></td>
+<td align="center"><code>int</code></td>
+<td align="left">Build in-memory columnar cache on the specified table synchronously, until cache usage is less than the threshold.</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th align="left">Function</th>
+<th align="center">Result</th>
+<th align="left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>gstore_fdw_format(reggstore)</code></td>
+<td align="center"><code>text</code></td>
+<td align="left">It tells internal format of the specified gstore_fdw foreign table.</td>
+</tr>
+<tr>
+<td align="left"><code>gstore_fdw_nitems(reggstore)</code></td>
+<td align="center"><code>bigint</code></td>
+<td align="left">It tells number of rows of the specified gstore_fdw foreign table.</td>
+</tr>
+<tr>
+<td align="left"><code>gstore_fdw_nattrs(reggstore)</code></td>
+<td align="center"><code>bigint</code></td>
+<td align="left">It tells number of columns of the specified gstore_fdw foreign table.</td>
+</tr>
+<tr>
+<td align="left"><code>gstore_fdw_rawsize(reggstore)</code></td>
+<td align="center"><code>bigint</code></td>
+<td align="left">It tells raw size of the specified gstore_fdw foreign table in bytes.</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th align="left">Function</th>
+<th align="center">Result</th>
+<th align="left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>gstore_export_ipchandle(reggstore)</code></td>
+<td align="center"><code>bytea</code></td>
+<td align="left">It tells IPC-handle of the GPU device memory region of the specified gstore_fdw foreign table.</td>
+</tr>
+<tr>
+<td align="left"><code>lo_import_gpu(int, bytea, bigint, bigint, oid=0)</code></td>
+<td align="center"><code>oid</code></td>
+<td align="left">It maps GPU device memory region acquired by external application, then import its contents into a largeobject.</td>
+</tr>
+<tr>
+<td align="left"><code>lo_export_gpu(oid, int, bytea, bigint, bigint)</code></td>
+<td align="center"><code>bigint</code></td>
+<td align="left">It maps GPU device memory region acquired by external application, then export contents of the specified largeobject into the region.</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th align="left">Function</th>
+<th align="center">Result</th>
+<th align="left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>pgstrom.license_validation()</code></td>
+<td align="center"><code>text</code></td>
+<td align="left">It validates commercial subscription.</td>
+</tr>
+<tr>
+<td align="left"><code>pgstrom.license_query()</code></td>
+<td align="center"><code>text</code></td>
+<td align="left">It shows the active commercial subscription.</td>
+</tr>
+</tbody>
+</table>
+<h1 id="system-view">System View</h1>
 <p>PG-Strom provides several system view to export its internal state for users or applications.
 The future version may add extra fields here. So, it is not recommended to reference these information schemas using <code>SELECT * FROM ...</code>.</p>
-<h3 id="pgstromdevice_info">pgstrom.device_info</h3>
+<p><strong>pgstrom.device_info</strong></p>
 <p><code>pgstrom.device_into</code> system view exports device attributes of the GPUs recognized by PG-Strom.
 GPU has different specification for each model, like number of cores, capacity of global memory, maximum number of threads and etc, user's software should be optimized according to the information if you try raw GPU programming with PL/CUDA functions.</p>
 <table>
@@ -429,7 +1562,7 @@ GPU has different specification for each model, like number of cores, capacity o
 </tr>
 </tbody>
 </table>
-<h3 id="pgstromdevice_preserved_meminfo">pgstrom.device_preserved_meminfo</h3>
+<p><strong>pgstrom.device_preserved_meminfo</strong></p>
 <p><code>pgstrom.device_preserved_meminfo</code> system view exports information of the preserved device memory; which can be shared multiple PostgreSQL backend.
 Right now, only gstore_fdw uses this feature.</p>
 <table>
@@ -468,7 +1601,7 @@ Right now, only gstore_fdw uses this feature.</p>
 </tr>
 </tbody>
 </table>
-<h3 id="pgstromccache_info">pgstrom.ccache_info</h3>
+<p><strong>pgstrom.ccache_info</strong></p>
 <p><code>pgstrom.ccache_info</code> system view exports attribute of the columnar-cache chunks (128MB unit for each).</p>
 <table>
 <thead>
@@ -516,7 +1649,7 @@ Right now, only gstore_fdw uses this feature.</p>
 </tr>
 </tbody>
 </table>
-<h3 id="pgstromccache_builder_info">pgstrom.ccache_builder_info</h3>
+<p><strong>pgstrom.ccache_builder_info</strong></p>
 <p><code>pgstrom.ccache_builder_info</code> system view exports information of asynchronous builder process of columnar cache.</p>
 <table>
 <thead>
@@ -554,9 +1687,9 @@ Right now, only gstore_fdw uses this feature.</p>
 </tr>
 </tbody>
 </table>
-<h2 id="guc-parameters">GUC Parameters</h2>
+<h1 id="guc-parameters">GUC Parameters</h1>
 <p>This session introduces PG-Strom's configuration parameters.</p>
-<h3 id="enablesdisables-a-particular-feature">Enables/disables a particular feature</h3>
+<p>Enables/disables a particular feature</p>
 <table>
 <thead>
 <tr>
@@ -635,7 +1768,7 @@ Right now, only gstore_fdw uses this feature.</p>
 </tr>
 </tbody>
 </table>
-<h3 id="optimizer-configuration">Optimizer Configuration</h3>
+<p><strong>Optimizer Configuration</strong></p>
 <table>
 <thead>
 <tr>
@@ -672,7 +1805,7 @@ Right now, only gstore_fdw uses this feature.</p>
 </tr>
 </tbody>
 </table>
-<h3 id="executor-configuration">Executor Configuration</h3>
+<p><strong>Executor Configuration</strong></p>
 <table>
 <thead>
 <tr>
@@ -703,7 +1836,7 @@ Right now, only gstore_fdw uses this feature.</p>
 </tr>
 </tbody>
 </table>
-<h3 id="columnar-cache-configuration">Columnar Cache Configuration</h3>
+<p><strong>Columnar Cache Configuration</strong></p>
 <table>
 <thead>
 <tr>
@@ -746,7 +1879,7 @@ Right now, only gstore_fdw uses this feature.</p>
 </tr>
 </tbody>
 </table>
-<h3 id="gstore_fdw-configuration">gstore_fdw Configuration</h3>
+<p><strong>gstore_fdw Configuration</strong></p>
 <table>
 <thead>
 <tr>
@@ -765,7 +1898,7 @@ Right now, only gstore_fdw uses this feature.</p>
 </tr>
 </tbody>
 </table>
-<h3 id="configuration-of-gpu-code-generation-and-build">Configuration of GPU code generation and build</h3>
+<p><strong>Configuration of GPU code generation and build</strong></p>
 <table>
 <thead>
 <tr>
@@ -796,7 +1929,7 @@ Right now, only gstore_fdw uses this feature.</p>
 </tr>
 </tbody>
 </table>
-<h3 id="gpu-device-configuration">GPU Device Configuration</h3>
+<p><strong>GPU Device Configuration</strong></p>
 <table>
 <thead>
 <tr>

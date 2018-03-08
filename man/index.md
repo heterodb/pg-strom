@@ -1,11 +1,8 @@
-@ja:# はじめに
-@en:# Preface
-
 @ja: 本章ではPG-Stromの概要、および開発者コミュニティについて説明します。
 @en: This chapter introduces the overview of PG-Strom, and developer's community.
 
-@ja:## PG-Stromとは?
-@en:## What is PG-Strom?
+@ja:# PG-Stromとは?
+@en:# What is PG-Strom?
 
 @ja{
 PG-StromはPostgreSQL v9.6および以降のバージョン向けに設計された拡張モジュールで、チップあたり数千個のコアを持つGPU(Graphic Processor Unit)デバイスを利用する事で、大規模なデータセットに対する集計・解析処理やバッチ処理向けのSQLワークロードを高速化するために設計されています。
@@ -38,8 +35,8 @@ PG-Strom v2.0 enhanced the capability to read from the storage. SSD-to-GPU Direc
 On the other hands, the feature of PL/CUDA and gstore_fdw allows to run highly computing density problems, like advanced statistical analytics or machine learning, on the database management system, and to return only results to users.
 }
 
-@ja:### ライセンスと著作権
-@en:### License and Copyright
+@ja:## ライセンスと著作権
+@en:## License and Copyright
 
 @ja{
 PG-StromはGPL(GNU Public License)v2に基づいて公開・配布されているオープンソースソフトウェアです。
@@ -57,8 +54,8 @@ PG-Strom Development Team reserves the copyright of the software.
 PG-Strom Development Team is an international, unincorporated association of individuals and companies who have contributed to the PG-Strom project, but not a legal entity.
 }
 
-@ja:## コミュニティ
-@en:## Community
+@ja:# コミュニティ
+@en:# Community
 
 @ja{
 開発者コミュニティのMLが[PG-Strom community ML](https://groups.google.com/a/heterodb.com/forum/#!forum/pgstrom)に準備されています。
@@ -77,8 +74,8 @@ Please pay attention it is a public list for world wide. So, it is your own resp
 The primary language of the mailing-list is English. On the other hands, we know major portion of PG-Strom users are Japanese because of its development history, so we admit to have a discussion on the list in Japanese language. In this case, please don't forget to attach `(JP)` prefix on the subject like, for non-Japanese speakers to skip messages.
 }
 
-@ja:### バグや障害の報告
-@en:### Bug or troubles report
+@ja:## バグや障害の報告
+@en:## Bug or troubles report
 @ja{
 結果不正やシステムクラッシュ/ロックアップ、その他の疑わしい動作を発見した場合は、[PG-Strom Issue Tracker](https://github.com/heterodb/pg-strom/issues)で新しいイシューをオープンし **bug** タグを付けてください。
 }
@@ -131,8 +128,8 @@ The information below are helpful for bug-reports.
 If you are not certain whether the strange behavior on your site is bug or not, please report it to the mailing-list prior to the open a new issue ticket. Developers may be able to suggest you next action - like a request for extra information.
 }
 
-@ja:### 新機能の提案
-@en:### New features proposition
+@ja:## 新機能の提案
+@en:## New features proposition
 @ja{
 何か新機能のアイデアがある場合、[PG-Strom Issue Tracker](https://github.com/heterodb/pg-strom/issues)で新しいイシューをオープンし **feature** タグを付けてください。続いて、他の開発者と議論を行いましょう。
 }
@@ -172,8 +169,8 @@ Once a proposal got rejected, we may have different decision in the future. If c
 On the development stage, please attach patch file on the issue ticket. We don't use pull request.
 }
 
-@ja:### サポートポリシー
-@en:### Support Policy
+@ja:## サポートポリシー
+@en:## Support Policy
 @ja{
 PG-Strom development teamはHeteroDB Software Distribution Centerから配布された最新版のみをサポートします。
 トラブルが発生した場合、まずその問題は最新版のリリースで再現するかどうかを確かめてください。
@@ -190,8 +187,8 @@ Please note that it is volunteer based community support policy, so our support 
 If you need commercial support, contact to HeteroDB,Inc (contact@heterodb.com).
 }
 
-@ja:###バージョンポリシー
-@en:###Versioning Policy
+@ja:##バージョンポリシー
+@en:##Versioning Policy
 
 @ja{
 PG-Stromのバージョン番号は`<major>.<minor>`という2つの要素から成ります。

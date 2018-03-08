@@ -1,24 +1,6 @@
 @ja:# 基本的な操作
 @en:# Basic operations
 
-@ja:## PG-Stromの有効化/無効化
-@en:## Enables/disables PG-Strom
-@ja{
-`pg_strom.enabled` パラメータを使用してPG-Strom機能の有効/無効を切替える事ができます。
-}
-@en{
-You can turn on/off PG-Strom functionality using pg_strom.enabled configuration parameter.
-}
-```
-# SET pg_strom.enabled = on/off;
-```
-@ja{
-トラブル時にはこれらのコマンドを用いてPG-Stromを無効化し、その状態でも問題が再現可能かどうかを確認する事ができます。
-}
-@en{
-You can turn off PG-Strom on troubles, then confirm whether the problem is reproducible with no PG-Strom support.
-}
-
 @ja:## GPUオフロードの確認
 
 @ja{
@@ -128,8 +110,6 @@ SCANが終わった後のデータをいったんホスト側のバッファに�
 - SCAN + JOIN + GROUP BY
 }
 
-(ここに絵)
-
 @ja{
 以下の実行計画は、下位プランの引き上げを全く行わないケースです。
 
@@ -165,13 +145,13 @@ GpuScanの実行結果をGpuJoinが受取り、さらにその実行結果をGpu
 ```
 
 @ja{
+図：下位ノードの引き上げとCombined GPU kernelの模式図
+}
+
+![combined gpu kernel](./img/combined-gpu-kernel.png)
+
+@ja{
 一方、以下の実行計画は、下位ノードの引き上げを行ったものです。
-
-まず、テーブル`t0`へのスキャンがGpuJoinの実行計画に埋め込まれ、GpuScanが消えている事にお気付きでしょう。
-これはGpuJoinが配下のGpuScanを引き上げ、一体化したGPUカーネル関数でWHERE句の処理も行った事を意味しています。
-
-加えて奇妙なことに、GpuJoinが(never executed)と表示されています。これはGpuPreAggが配下のGpuJoinを引き上げ、
-一体化したGPUカーネル関数でJOINとGROUP BYを実行した事を意味しています。
 }
 
 ```
@@ -210,6 +190,13 @@ GpuScanの実行結果をGpuJoinが受取り、さらにその実行結果をGpu
  Execution time: 8495.391 ms
 (21 rows)
 ```
+@ja{
+まず、テーブル`t0`へのスキャンがGpuJoinの実行計画に埋め込まれ、GpuScanが消えている事にお気付きでしょう。
+これはGpuJoinが配下のGpuScanを引き上げ、一体化したGPUカーネル関数でWHERE句の処理も行った事を意味しています。
+
+加えて奇妙なことに、GpuJoinが(never executed)と表示されています。これはGpuPreAggが配下のGpuJoinを引き上げ、
+一体化したGPUカーネル関数でJOINとGROUP BYを実行した事を意味しています。
+}
 
 @ja{
 SCAN処理の引き上げは`pg_strom.pullup_outer_scan`パラメータによって制御できます。
@@ -218,31 +205,185 @@ SCAN処理の引き上げは`pg_strom.pullup_outer_scan`パラメータによっ
 }
 
 
+@ja:# システム管理上の注意
+@en:# Notes for system administration
+
+@ja:## ナレッジベース
+@en:## Knowledge base
+
+@ja{
+PG-Stromプロジェクトのwikiサイトには、ノートと呼ばれる詳細な技術情報が公開されています。
+}
+@en{
+We publish several articles, just called "notes", on the project wiki-site of PG-Strom.
+}
+(https://github.com/heterodb/pg-strom/wiki)[https://github.com/heterodb/pg-strom/wiki]
+
+@ja:## MPSデーモンの利用
+@en:## Usage of MPS daemon
+
+@ja{
+PostgreSQLのようにマルチプロセス環境でGPUを使用する場合、GPU側コンテキストスイッチの低減やデバイス管理に必要なリソースの低減を目的として、MPS(Multi-Process Service)を使用する事が一般的なソリューションです。
+}
+
+(https://docs.nvidia.com/deploy/mps/index.html)[https://docs.nvidia.com/deploy/mps/index.html]
+
+@ja{
+しかし、PG-Stromの利用シーンでは、MPSサービスの既知問題により正常に動作しないCUDA APIが存在し、以下のような限定された条件下を除いては使用すべきではありません。
+
+- GPUを使用するPostgreSQLプロセス（CPU並列クエリにおけるバックグラウンドワーカを含む）の数が16個以下であること。
+    - Volta世代のGPUでは48個以下
+- gstore_fdwを使用しない事。
+}
+
+@ja{
+これは`CUipcMemHandle`を用いてプロセス間でGPUデバイスメモリを共有する際に、MPSサービス下のプロセスで獲得したGPUデバイスメモリを非MPSサービス下のプロセスでオープンできない事で、GpuJoinが使用するハッシュ表をバックグラウンドワーカー間で共有できなくなるための制限事項です。
+
+この問題は既にNVIDIAへ報告され、新しいバージョンのCUDA Toolkitにおいて修正されるとの回答を得ています。
+}
 
 
+@ja:# トラブルシューティング
+@en:# Trouble Shooting
 
+@ja:## 問題の切り分け
+@en:## Identify the problem
 
-# 運用に関するヒント
+@ja{
+特定のワークロードを実行した際に何がしかの問題が発生する場合には、それが何に起因するものであるのかを特定するのはトラブルシューティングの第一歩です。
 
-## MPSデーモンの利用
+残念ながら、PostgreSQL開発者コミュニティと比べPG-Stromの開発者コミュニティは非常に少ない数の開発者によって支えられています。そのため、ソフトウェアの品質や実績といった観点から、まずPG-Stromが悪さをしていないか疑うのは妥当な判断です。
 
+PG-Stromの全機能を一度に有効化/無効化するには`pg_strom.enabled`パラメータを使用する事ができます。
+以下の設定を行う事でPG-Stromは無効化され、標準のPostgreSQLと全く同一の状態となります。
+それでもなお問題が再現するかどうかは一つの判断材料となるでしょう。
+}
+```
+# SET pg_strom.enabled = off;
+```
 
-# トラブルシューティング
+@ja{
+この他にも、GpuScan、GpuJoin、GpuPreAggといった特定の実行計画のみを無効化するパラメータや、SCANやJOINの引き上げを無効化するパラメータも定義されています。
 
-@ja:## 既知の問題
-@en:## Known Problems
+これらの詳細は(リファレンス)[references.md#gpu]を参照してください。
+}
 
-wikiを参照
+@ja:## クラッシュダンプの採取
+@en:## Collecting crash dump
 
-## 問題の切り分け
+@ja{
+システムのクラッシュを引き起こすような重大なトラブルの解析にはクラッシュダンプの採取が欠かせません。
+本節では、PostgreSQLとPG-Stromをクラッシュダンプを取得し、障害発生時のバックトレースを採取するための手順を説明します。
+}
 
+@ja:### LimitCORE 設定の追加
+@en:### Add LimitCORE configuration
 
+@ja{
+システムのクラッシュ時にクラッシュダンプを生成させるには、PostgreSQLサーバプロセスが生成する事のできるcoreファイルのサイズを無制限に変更する必要があります。
 
+systemdからPostgreSQLを起動する場合、これを設定するのは以下のファイルです。
+}
 
-## クラッシュダンプの採取
+```
+/etc/systemd/system/postgresql-<version>.service.d/override.conf
+```
+@ja{
+このファイルに以下の内容を追記します。
+}
+```
+[Service]
+LimitCORE=infinity
+```
+@ja{
+この後でPostgreSQLサーバプロセスを再起動すると、*Max core file size*がunlimitedに設定されているはずです。
 
+以下のように確認する事ができます。
+}
 
+```
+$ cat /proc/<PID of postmaster>/limits
+Limit                     Soft Limit           Hard Limit           Units
+    :                         :                    :                  :
+Max core file size        unlimited            unlimited            bytes
+    :                         :                    :                  :
+```
 
+@ja:### debuginfoパッケージのインストール
+@en:### Installation of debuginfo package
 
+@ja{
+クラッシュダンプから意味のある情報を読み取るにはシンボル情報が必要です。
+
+これらは`-debuginfo`パッケージに格納されており、システムにインストールされているPostgreSQLおよびPG-Stromのパッケージに応じてそれぞれ追加インストールが必要です。
+}
+
+```
+# yum install postgresql10-debuginfo pg_strom-PG10-debuginfo
+            :
+================================================================================
+ Package                  Arch    Version             Repository           Size
+================================================================================
+Installing:
+ pg_strom-PG10-debuginfo  x86_64  1.9-180301.el7      heterodb-debuginfo  766 k
+ postgresql10-debuginfo   x86_64  10.3-1PGDG.rhel7    pgdg10              9.7 M
+
+Transaction Summary
+================================================================================
+Install  2 Packages
+            :
+Installed:
+  pg_strom-PG10-debuginfo.x86_64 0:1.9-180301.el7
+  postgresql10-debuginfo.x86_64 0:10.3-1PGDG.rhel7
+
+Complete!
+```
+
+@ja:### バックトレースの確認
+@en:### Checking the backtrace
+
+@ja{
+クラッシュダンプの作成されるパスは、カーネルパラメータ`kernel.core_pattern`および`kernel.core_uses_pid`の値によって決まります。
+通常はプロセスのカレントディレクトリに作成されますので、systemdからPostgreSQLを起動した場合はデータベースクラスタが構築される`/var/lib/pgdata`を確認してください。
+
+`core.<PID>`ファイルが生成されているのを確認したら、gdbを用いてクラッシュに至るバックトレースを確認します。
+
+gdbの`-c`オプションでコアファイルを、`-f`オプションでクラッシュしたプログラムを指定します。
+}
+
+```
+# gdb -c /var/lib/pgdata/core.134680 -f /usr/pgsql-10/bin/postgres
+GNU gdb (GDB) Red Hat Enterprise Linux 7.6.1-100.el7_4.1
+       :
+(gdb) bt
+#0  0x00007fb942af3903 in __epoll_wait_nocancel () from /lib64/libc.so.6
+#1  0x00000000006f71ae in WaitEventSetWaitBlock (nevents=1,
+    occurred_events=0x7ffee51e1d70, cur_timeout=-1, set=0x2833298)
+    at latch.c:1048
+#2  WaitEventSetWait (set=0x2833298, timeout=timeout@entry=-1,
+    occurred_events=occurred_events@entry=0x7ffee51e1d70,
+    nevents=nevents@entry=1, wait_event_info=wait_event_info@entry=100663296)
+    at latch.c:1000
+#3  0x00000000006210fb in secure_read (port=0x2876120,
+    ptr=0xcaa7e0 <PqRecvBuffer>, len=8192) at be-secure.c:166
+#4  0x000000000062b6e8 in pq_recvbuf () at pqcomm.c:963
+#5  0x000000000062c345 in pq_getbyte () at pqcomm.c:1006
+#6  0x0000000000718682 in SocketBackend (inBuf=0x7ffee51e1ef0)
+    at postgres.c:328
+#7  ReadCommand (inBuf=0x7ffee51e1ef0) at postgres.c:501
+#8  PostgresMain (argc=<optimized out>, argv=argv@entry=0x287bb68,
+    dbname=0x28333f8 "postgres", username=<optimized out>) at postgres.c:4030
+#9  0x000000000047adbc in BackendRun (port=0x2876120) at postmaster.c:4405
+#10 BackendStartup (port=0x2876120) at postmaster.c:4077
+#11 ServerLoop () at postmaster.c:1755
+#12 0x00000000006afb7f in PostmasterMain (argc=argc@entry=3,
+    argv=argv@entry=0x2831280) at postmaster.c:1363
+#13 0x000000000047bbef in main (argc=3, argv=0x2831280) at main.c:228
+```
+
+@ja{
+gdbの`bt`コマンドでバックトレースを確認します。
+このケースでは、クライアントからのクエリを待っている状態のPostgreSQLバックエンドに`SIGSEGV`シグナルを送出してクラッシュを引き起こしたため、`WaitEventSetWait`延長上の`__epoll_wait_nocancel`でプロセスがクラッシュしている事がわかります。
+}
 
 

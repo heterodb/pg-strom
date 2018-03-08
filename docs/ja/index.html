@@ -55,13 +55,26 @@
     <a class="current" href=".">はじめに</a>
     <ul class="subnav">
             
-    <li class="toctree-l2"><a href="#_1">はじめに</a></li>
+    <li class="toctree-l2"><a href="#pg-strom">PG-Stromとは?</a></li>
     
         <ul>
         
-            <li><a class="toctree-l3" href="#pg-strom">PG-Stromとは?</a></li>
+            <li><a class="toctree-l3" href="#_1">ライセンスと著作権</a></li>
         
-            <li><a class="toctree-l3" href="#_3">コミュニティ</a></li>
+        </ul>
+    
+
+    <li class="toctree-l2"><a href="#_2">コミュニティ</a></li>
+    
+        <ul>
+        
+            <li><a class="toctree-l3" href="#_3">バグや障害の報告</a></li>
+        
+            <li><a class="toctree-l3" href="#_4">新機能の提案</a></li>
+        
+            <li><a class="toctree-l3" href="#_5">サポートポリシー</a></li>
+        
+            <li><a class="toctree-l3" href="#_6">バージョンポリシー</a></li>
         
         </ul>
     
@@ -131,24 +144,23 @@
           <div role="main">
             <div class="section">
               
-                <h1 id="_1">はじめに</h1>
-<p>本章ではPG-Stromの概要、および開発者コミュニティについて説明します。</p>
-<h2 id="pg-strom">PG-Stromとは?</h2>
+                <p>本章ではPG-Stromの概要、および開発者コミュニティについて説明します。</p>
+<h1 id="pg-strom">PG-Stromとは?</h1>
 <p>PG-StromはPostgreSQL v9.6および以降のバージョン向けに設計された拡張モジュールで、チップあたり数千個のコアを持つGPU(Graphic Processor Unit)デバイスを利用する事で、大規模なデータセットに対する集計・解析処理やバッチ処理向けのSQLワークロードを高速化するために設計されています。</p>
 <p>PG-Stromの中核となる機能は、SQL命令から自動的にGPUプログラムを生成するコードジェネレータと、SQLワークロードをGPU上で非同期かつ並列に実行する実行エンジンです。現バージョンではSCAN（WHERE句の評価）、JOINおよびGROUP BYのワークロードに対応しており、GPU処理にアドバンテージがある場合にはPostgreSQL標準の実装を置き換える事で、ユーザやアプリケーションからは透過的に動作します。</p>
 <p>また、PG-StromはいくつかのDWH専用システムとは異なり、行形式でデータを保存するPostgreSQLとストレージシステムを共有しています。これは必ずしも集計・解析系ワークロードに最適ではありませんが、一方で、トランザクション系データベースからデータを移動することなく集計処理を実行できるというアドバンテージでもあります。</p>
 <p>PG-Strom v2.0ではストレージ読出し能力が強化されました。SSD-to-GPUダイレクトSQL実行や、インメモリ列指向キャッシュはストレージの遅さを補い、クエリを処理するGPUへ高速にデータを供給する事を可能にします。</p>
 <p>一方、高度な統計解析や機械学習といった極めて計算集約度の高い問題に対しても、PL/CUDAやgstore_fdwといった機能を使用する事で、データベース管理システム上で計算処理を行い、結果だけをユーザへ返すといった使い方をする事が可能です。</p>
-<h3 id="_2">ライセンスと著作権</h3>
+<h2 id="_1">ライセンスと著作権</h2>
 <p>PG-StromはGPL(GNU Public License)v2に基づいて公開・配布されているオープンソースソフトウェアです。
 ライセンスの詳細は<a href="https://raw.githubusercontent.com/heterodb/pg-strom/master/LICENSE">LICENSE</a>を参照してください。</p>
 <p>PG-Stromの著作権はPG-Strom Development Teamが有しています。PG-Strom Development Teamは法的な主体ではなく、国籍を問わず、PG-Stromプロジェクトに貢献した個々の開発者や企業の総称です。</p>
-<h2 id="_3">コミュニティ</h2>
+<h1 id="_2">コミュニティ</h1>
 <p>開発者コミュニティのMLが<a href="https://groups.google.com/a/heterodb.com/forum/#!forum/pgstrom">PG-Strom community ML</a>に準備されています。
 PG-Stromに関連した質問、要望、障害報告などはこちらにポストしてください。</p>
 <p>本MLは世界中に公開されたパブリックのMLである事に留意してください。つまり、自己責任の下、秘密情報が誤って投稿されないように注意してください。</p>
 <p>本MLの優先言語は英語です。ただ一方で、歴史的経緯によりPG-Stromユーザの多くの割合が日本人である事は承知しており、ML上で日本語を利用した議論が行われることも可能とします。その場合、Subject(件名)に<code>(JP)</code>という接頭句を付ける事を忘れないようにしてください。これは非日本語話者が不要なメッセージを読み飛ばすために有用です。</p>
-<h3 id="_4">バグや障害の報告</h3>
+<h2 id="_3">バグや障害の報告</h2>
 <p>結果不正やシステムクラッシュ/ロックアップ、その他の疑わしい動作を発見した場合は、<a href="https://github.com/heterodb/pg-strom/issues">PG-Strom Issue Tracker</a>で新しいイシューをオープンし <strong>bug</strong> タグを付けてください。</p>
 <p>バグレポートの作成に際しては、下記の点に留意してください。
 - 同じ問題を最新版で再現する事ができるかどうか?
@@ -166,7 +178,7 @@ PG-Stromに関連した質問、要望、障害報告などはこちらにポス
 <li>ハードウェア設定（特にGPUの型番とRAM容量）</li>
 </ul>
 <p>あなたの環境で発生した疑わしい動作がバグかどうか定かではない場合、新しいイシューのチケットをオープンする前にメーリングリストへ報告してください。追加的な情報採取の依頼など、開発者は次に取るべきアクションを提案してくれるでしょう。</p>
-<h3 id="_5">新機能の提案</h3>
+<h2 id="_4">新機能の提案</h2>
 <p>何か新機能のアイデアがある場合、<a href="https://github.com/heterodb/pg-strom/issues">PG-Strom Issue Tracker</a>で新しいイシューをオープンし <strong>feature</strong> タグを付けてください。続いて、他の開発者と議論を行いましょう。</p>
 <p>望ましい新機能提案は以下のような要素を含んでいます。</p>
 <ul>
@@ -178,12 +190,12 @@ PG-Stromに関連した質問、要望、障害報告などはこちらにポス
 <p>開発者の間でその必要性に関してコンセンサスが得られると、コーディネーターはイシューチケットに<strong>accepted</strong>タグを付け、そのチケットはその後の開発作業のトラッキングのために利用されます。それ以外の場合、イシューチケットには<strong>rejected</strong>タグを付けてクローズされます。</p>
 <p>一度プロポーザルが却下されたとしても、将来においてまた異なった決定があるかもしれません。周辺状況が変わった場合、新機能の再提案を躊躇する必要はありません。</p>
 <p>開発段階では、パッチファイルをイシューチケットに添付するようにしてください。pull-requestは使用しません。</p>
-<h3 id="_6">サポートポリシー</h3>
+<h2 id="_5">サポートポリシー</h2>
 <p>PG-Strom development teamはHeteroDB Software Distribution Centerから配布された最新版のみをサポートします。
 トラブルが発生した場合、まずその問題は最新版のリリースで再現するかどうかを確かめてください。</p>
 <p>また、これはボランティアベースのコミュニティサポートのポリシーである事に留意してください。つまり、サポートはベストエフォートでかつ、SLAの定義もありません。</p>
 <p>もし商用のサポートが必要である場合、HeteroDB社（contact@heterodbcom）にコンタクトしてください。</p>
-<h3 id="_7">バージョンポリシー</h3>
+<h2 id="_6">バージョンポリシー</h2>
 <p>PG-Stromのバージョン番号は<code>&lt;major&gt;.&lt;minor&gt;</code>という2つの要素から成ります。</p>
 <p>マイナーバージョン番号は各リリース毎に増加し、バグ修正と新機能の追加を含みます。</p>
 <p>メジャーバージョン番号は以下のような場合に増加します。</p>
@@ -241,5 +253,5 @@ PG-Stromに関連した質問、要望、障害報告などはこちらにポス
 
 <!--
 MkDocs version : 0.17.2
-Build Date UTC : 2018-03-05 04:40:21
+Build Date UTC : 2018-03-08 15:01:58
 -->
