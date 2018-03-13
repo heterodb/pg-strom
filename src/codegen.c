@@ -2288,7 +2288,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 			elog(ERROR, "codegen: unsupported device type in COALESCE: %s",
 				 format_type_be(coalesce->coalescetype));
 
-		appendStringInfo(&context->str, "pg_coalesce(");
+		appendStringInfo(&context->str, "PG_COALESCE(kcxt");
 		foreach (cell, coalesce->args)
 		{
 			Node   *expr = (Node *)lfirst(cell);
@@ -2298,8 +2298,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 				elog(ERROR, "device type mismatch in COALESCE: %s / %s",
 					 format_type_be(dtype->type_oid),
 					 format_type_be(type_oid));
-			if (list_head(coalesce->args) != cell)
-				appendStringInfo(&context->str, ", ");
+			appendStringInfo(&context->str, ", ");
 			codegen_expression_walker(expr, context);
 		}
 		appendStringInfo(&context->str, ")");
