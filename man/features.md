@@ -16,17 +16,31 @@ SQLワークロードを高速に処理するには、プロセッサが効率�
 
 SSD-to-GPUダイレクトSQL実行機能は、PCIeバスに直結する事で高速なI/O処理を実現するNVMe-SSDと、同じPCIeバス上に接続されたGPUをダイレクトに接続し、ハードウェア限界に近い速度でデータをプロセッサに供給する事でSQLワークロードを高速に処理するための機能です。
 }
+@en{
+For the fast execution of SQL workloads, it needs to provide processors rapid data stream from storage or memory, in addition to processor's execution efficiency. Processor will run idle if data stream would not be delivered.
+
+SSD-to-GPU Direct SQL Execution directly connects NVMe-SSD which enables high-speed I/O processing by direct attach to the PCIe bus and GPU device that is also attached on the same PCIe bus, and runs SQL workloads very high speed by supplying data stream close to the wired speed of the hardware.
+}
 
 @ja{
-通常、ストレージブロック上に格納されたPostgreSQLデータブロックは、PCIeバスを通していったんCPU/RAMへとロードされます。その後、クエリ実行計画にしたがってWHERE句によるフィルタリングやJOIN/GROUP BYといった処理を行うわけですが、集計系ワークロードの特性上、入力するデータ件数より出力するデータ件数の方がはるかに少ない件数となります。例えば数十億行を読み出した結果をGROUP BYで集約した結果が高々数百行という事も珍しくありません。
+通常、ストレージ上に格納されたPostgreSQLデータブロックは、PCIeバスを通していったんCPU/RAMへとロードされます。その後、クエリ実行計画にしたがってWHERE句によるフィルタリングやJOIN/GROUP BYといった処理を行うわけですが、集計系ワークロードの特性上、入力するデータ件数より出力するデータ件数の方がはるかに少ない件数となります。例えば数十億行を読み出した結果をGROUP BYで集約した結果が高々数百行という事も珍しくありません。
 
 言い換えれば、我々はゴミデータを運ぶためにPCIeバス上の帯域を消費しているとも言えますが、CPUがレコードの中身を調べるまでは、その要不要を判断できないため、一般的な実装ではこれは不可避と言えます。
 }
+@en{
+Usually, PostgreSQL data blocks on the storage shall be once loaded to CPU/RAM through the PCIe bus, then, PostgreSQL runs WHERE-clause for filtering or JOIN/GROUP BY according to the query execution plan. Due to the characteristics of analytic workloads, the amount of result data set is much smaller than the source data set. For example, it is not rare case to read billions rows but output just hundreds rows after the aggregation operations with GROUP BY.
+
+In the other words, we consume bandwidth of the PCIe bus to move junk data, however, we cannot determine whether rows are necessary or not prior to the evaluation by SQL workloads on CPU. So, it is not avoidable restriction in usual implementation.
+}
+
 
 ![SSD2GPU Direct SQL Execution Overview](./img/ssd2gpu-overview.png)
 
 @ja{
-SSD-to-GPUダイレクトSQL実行機能は、ストレージから読み出すデータの流れを変え、データブロックをCPU/RAMへとロードする前にGPUへ転送してSQLワークロードを処理する事でデータ件数を劇的に減らすための機能です。いわば、GPUをストレージとCPU/RAMの間に位置するプリプロセッサーとして利用する事で、CPUの負荷を下げ、結果としてI/O処理の高速化を実現しようとするアプローチです。
+SSD-to-GPUダイレクトSQL実行はデータの流れを変え、ストレージ上のデータブロックをPCIeバス上のP2P DMAを用いてGPUに直接転送し、GPUでSQLワークロードを処理する事でCPUが処理すべきレコード数を減らすための機能です。いわば、ストレージとCPU/RAMの間に位置してSQLを処理するためのプリプロセッサとしてGPUを活用し、結果としてI/O処理を高速化するためのアプローチです。
+}
+@en{
+SSD-to-GPU Direct SQL Execution changes the flow to read blocks from the storage sequentially. It directly loads data blocks to GPU using peer-to-peer DMA over PCIe bus, then runs SQL workloads on GPU device to reduce number of rows to be processed by CPU. In other words, it utilizes GPU as a pre-processor of SQL which locates in the middle of the storage and CPU/RAM for reduction of CPU's load, then tries to accelerate I/O processing in the results.
 }
 
 @ja{
@@ -34,6 +48,13 @@ SSD-to-GPUダイレクトSQL実行機能は、ストレージから読み出す�
 そのため、本機能を利用するには、PostgreSQLの拡張モジュールであるPG-Stromだけではなく、Linux kernelの拡張モジュールであるNVMe-Stromドライバが必要です。
 
 また、本機能が対応しているのはNVMe仕様のSSDのみです。SASやSATAといったインターフェースで接続されたSSDはサポートされていません。今までに動作実績のあるNVMe-SSDについては [002: HW Validation List](https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List#nvme-ssd-validation-list) が参考になるでしょう。
+}
+@en{
+This feature internally uses NVIDIA GPUDirect RDMA. It allows peer-to-peer data transfer over PCIe bus between GPU device memory and third parth device by coordination using a custom Linux kernel module.
+So, this feature requires NVMe-Strom driver which is a Linux kernel module in addition to PG-Strom which is a PostgreSQL extension module.
+
+Also note that this feature supports only NVMe-SSD. It does not support SAS or SATA SSD.
+We have tested several NVMe-SSD models. You can refer [002: HW Validation List](https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List#nvme-ssd-validation-list) for your information.
 }
 
 @ja:##初期設定
@@ -43,45 +64,43 @@ SSD-to-GPUダイレクトSQL実行機能は、ストレージから読み出す�
 @en:###Driver Installation
 
 @ja{
-SSD-to-GPUダイレクトSQL実行機能を利用するには`nvme-strom`パッケージが必要です。このパッケージはNVMe-SSDとGPU間のpeer-to-peer DMAを仲介するLinux kernel moduleを含んでおり、[HeteroDB Software Distribution Center](https://heterodb.github.io/swdc/)から入手可能です。
+SSD-to-GPUダイレクトSQL実行機能を利用するには`nvme_strom`パッケージが必要です。このパッケージはNVMe-SSDとGPU間のP2P DMAを仲介するLinux kernel moduleを含んでおり、[HeteroDB Software Distribution Center](https://heterodb.github.io/swdc/)から入手可能です。
 
 既に`heterodb-swdc`パッケージをインストールしている場合、`yum`コマンドによるインストールも可能です。
 }
+@en{
+`nvme_strom` package is required to activate SSD-to-GPU Direct SQL Execution. This package contains a custom Linux kernel module which intermediates P2P DMA from NVME-SSD to GPU. You can obtain the package from the [HeteroDB Software Distribution Center](https://heterodb.github.io/swdc/).
+
+If `heterodb-swdc` package is already installed, you can install the package by `yum` command.
+}
 
 ```
-$ sudo yum install nvme-strom
-Loaded plugins: fastestmirror
-      :
-Resolving Dependencies
---> Running transaction check
----> Package nvme-strom.x86_64 0:0.6-1.el7 will be installed
---> Finished Dependency Resolution
-
-Dependencies Resolved
-
+$ sudo yum install nvme_strom
+            :
 ================================================================================
  Package             Arch            Version            Repository         Size
 ================================================================================
 Installing:
- nvme-strom          x86_64          0.6-1.el7          heterodb           58 k
+ nvme_strom          x86_64          0.8-1.el7          heterodb          178 k
 
 Transaction Summary
 ================================================================================
 Install  1 Package
+            :
+DKMS: install completed.
+  Verifying  : nvme_strom-0.8-1.el7.x86_64                                  1/1
 
-Total download size: 58 k
-Installed size: 217 k
-Is this ok [y/d/N]: y
-Downloading packages:
-Package nvme-strom-0.6-1.el7.x86_64.rpm is not signed0 B/s |    0 B   --:-- ETA
-nvme-strom-0.6-1.el7.x86_64.rpm                            |  58 kB   00:00
+Installed:
+  nvme_strom.x86_64 0:0.8-1.el7
 
-
-Package nvme-strom-0.6-1.el7.x86_64.rpm is not signed
+Complete!
 ```
 
 @ja{
-`nvme-strom`パッケージのインストールが完了すると、以下のように`lsmod`コマンドで`nvme_strom`モジュールが出力されます。
+`nvme_strom`パッケージのインストールが完了すると、以下のように`lsmod`コマンドで`nvme_strom`モジュールが出力されます。
+}
+@en{
+Once `nvme_strom` package gets installed, you can see `nvme_strom` module using `lsmod` command below.
 }
 
 ```
@@ -95,27 +114,44 @@ nvme_core              52964  9 nvme
 @en:###Designing Tablespace
 
 @ja{
-SSD-to-GPUダイレクトSQL実行は以下の条件で使用されます。
+SSD-to-GPUダイレクトSQL実行は以下の条件で発動します。
+
 - スキャン対象のテーブルがNVMe-SSDで構成された区画に配置されている。
     - `/dev/nvmeXXXX`ブロックデバイス、または`/dev/nvmeXXXX`ブロックデバイスのみから構成されたmd-raid0区画が対象です。
-    - md-raid0を用いたストライピング読出しに関しては、HeteroDB社の提供するサブスクリプションが必要です。
 - テーブルサイズが`pg_strom.nvme_strom_threshold`よりも大きい事。
     - この設定値は任意に変更可能ですが、デフォルト値は本体搭載物理メモリに`shared_buffers`の設定値の1/3を加えた大きさです。
+}
+@en{
+SSD-to-GPU Direct SQL Execution shall be invoked in the following case.
+
+- The target table to be scanned locates on the partition being consist of NVMe-SSD.
+    - `/dev/nvmeXXXX` block device, or md-raid0 volume which consists of NVMe-SSDs only.
+- The target table size is larger than `pg_strom.nvme_strom_threshold`.
+    - You can adjust this configuration. Its default is physical RAM size of the system plus 1/3 of `shared_buffers` configuration.
 }
 
 @ja{
 テーブルをNVMe-SSDで構成された区画に配置するには、データベースクラスタ全体をNVMe-SSDボリュームに格納する以外にも、PostgreSQLのテーブルスペース機能を用いて特定のテーブルや特定のデータベースのみをNVMe-SSDボリュームに配置する事ができます。
-
+}
+@en{
+In order to deploy the tables on the partition consists of NVMe-SSD, you can use the tablespace function of PostgreSQL to specify particular tables or databases to place them on NVMe-SSD volume, in addition to construction of the entire database cluster on the NVMe-SSD volume.
+}
+@ja{
 例えば `/opt/nvme` にNVMe-SSDボリュームがマウントされている場合、以下のようにテーブルスペースを作成する事ができます。
 PostgreSQLのサーバプロセスの権限で当該ディレクトリ配下のファイルを読み書きできるようパーミッションが設定されている必要がある事に留意してください。
 }
-
+@en{
+For example, you can create a new tablespace below, if NVMe-SSD is mounted at `/opt/nvme`.
+}
 ```
 CREATE TABLESPACE my_nvme LOCATION '/opt/nvme';
 ```
 
 @ja{
 このテーブルスペース上にテーブルを作成するには、`CREATE TABLE`構文で以下のように指定します。
+}
+@en{
+In order to create a new table on the tablespace, specify the `TABLESPACE` option at the `CREATE TABLE` command below.
 }
 
 ```
@@ -125,6 +161,10 @@ CREATE TABLE my_table (...) TABLESPACE my_nvme;
 @ja{
 あるいは、データベースのデフォルトテーブルスペースを変更するには、`ALTER DATABASE`構文で以下のように指定します。
 この場合、既存テーブルの配置されたテーブルスペースは変更されない事に留意してください。
+}
+@en{
+Or, use `ALTER DATABASE` command as follows, to change the default tablespace of the database.
+Note that tablespace of the existing tables are not changed in thie case.
 }
 ```
 ALTER DATABASE my_database SET TABLESPACE my_nvme;
@@ -138,12 +178,19 @@ ALTER DATABASE my_database SET TABLESPACE my_nvme;
 
 @ja{
 SSD-to-GPUダイレクトSQL実行に関連するGUCパラメータは2つあります。
-
+}
+@en{
+There are two GPU parameters related to SSD-to-GPU Direct SQL Execution.
+}
+@ja{
 一つは`pg_strom.nvme_strom_enabled`で、SSD-to-GPUダイレクト機能の有効/無効を単純にon/offします。
 本パラメータが`off`になっていると、テーブルのサイズや物理配置とは無関係にSSD-to-GPUダイレクトSQL実行は使用されません。デフォルト値は`on`です。
 }
-
-{
+@en{
+The first is `pg_strom.nvme_strom_enabled` that simply turn on/off the function of SSD-to-GPU Direct SQL Execution.
+If `off`, SSD-to-GPU Direct SQL Execution should not be used regardless of the table size or physical location. Default is `on`.
+}
+@ja{
 もう一つのパラメータは`pg_strom.nvme_strom_threshold`で、SSD-to-GPUダイレクトSQL実行が使われるべき最小のテーブルサイズを指定します。
 
 テーブルの物理配置がNVMe-SSD区画（または、NVMe-SSDのみで構成されたmd-raid0区画）上に存在し、かつ、テーブルのサイズが本パラメータの指定値よりも大きな場合、PG-StromはSSD-to-GPUダイレクトSQL実行を選択します。
@@ -153,6 +200,16 @@ SSD-to-GPUダイレクトSQL実行に関連するGUCパラメータは2つあり
 
 ワークロードの特性によっては必ずしもこの設定が正しいとは限りません。
 }
+@en{
+The other one is `pg_strom.nvme_strom_threshold` which specifies the least table size to invoke SSD-to-GPU Direct SQL Execution.
+
+PG-Strom will choose SSD-to-GPU Direct SQL Execution when target table is located on NVMe-SSD volume (or md-raid0 volume which consists of NVMe-SSD only), and the table size is larger than this parameter.
+Its default is sum of the physical memory size and 1/3 of the `shared_buffers`. It means default configuration invokes SSD-to-GPU Direct SQL Execution only for the tables where we certainly cannot process them on memory.
+
+Even if SSD-to-GPU Direct SQL Execution has advantages on a single table scan workload, usage of disk cache may work better on the second or later trial for the tables which are available to load onto the main memory.
+
+On course, this assumption is not always right depending on the workload charasteristics.
+}
 
 @ja:###SSD-to-GPUダイレクトSQL実行の利用を確認する
 @en:###Ensure usage of SSD-to-GPU Direct SQL Execution
@@ -161,6 +218,11 @@ SSD-to-GPUダイレクトSQL実行に関連するGUCパラメータは2つあり
 `EXPLAIN`コマンドを実行すると、当該クエリでSSD-to-GPUダイレクトSQL実行が利用されるのかどうかを確認する事ができます。
 
 以下のクエリの例では、`Custom Scan (GpuJoin)`による`lineorder`テーブルに対するスキャンに`NVMe-Strom: enabled`との表示が出ています。この場合、`lineorder`テーブルからの読出しにはSSD-to-GPUダイレクトSQL実行が利用されます。
+}
+@en{
+`EXPLAIN` command allows to ensure whether SSD-to-GPU Direct SQL Execution shall be used in the target query, or not.
+
+In the example below, a scan on the `lineorder` table by `Custom Scan (GpuJoin)` shows `NVMe-Strom: enabled`. In this case, SSD-to-GPU Direct SQL Execution shall be used to read from the `lineorder` table.
 }
 
 ```
@@ -216,15 +278,31 @@ and s_region = 'AMERICA'
 
 @ja{
 現在のところ、PG-StromのGPU側処理では行単位のMVCC可視性チェックを行う事ができません。これは、可視性チェックを行うために必要なデータ構造がホスト側だけに存在するためですが、ストレージ上のブロックを直接GPUに転送する場合、少々厄介な問題が生じます。
-
+}
+@en{
+Right now, GPU routines of PG-Strom cannot run MVCC visibility checks per row, because only host code has a special data structure for visibility checks. It also leads a problem.
+}
+@ja{
 NVMe-SSDにP2P DMAを要求する時点では、ストレージブロックの内容はまだCPU/RAMへと読み出されていないため、具体的にどの行が可視であるのか、どの行が不可視であるのかを判別する事ができません。これは、PostgreSQLがレコードをストレージへ書き出す際にMVCC関連の属性と共に書き込んでいるためで、似たような問題がIndexOnlyScanを実装する際に表面化しました。
 
 これに対処するため、PostgreSQLはVisibility Mapと呼ばれるインフラを持っています。これは、あるデータブロック中に存在するレコードが全てのトランザクションから可視である事が明らかであれば、該当するビットを立てる事で、データブロックを読むことなく当該ブロックにMVCC不可視なレコードが存在するか否かを判定する事を可能とするものです。
 
-SSD-to-GPUダイレクトSQL実行はこのインフラを利用しています。つまり、Visibility Mapがセットされており、MVCC可視性チェックに意味のないブロックのみを選択してSSD-to-GPUのP2P DMAを実行するのです。
+SSD-to-GPUダイレクトSQL実行はこのインフラを利用しています。つまり、Visibility Mapがセットされており、"all-visible"であるブロックだけがSSD-to-GPU P2P DMAで読み出すようリクエストが送出されます。
+}
+@en{
+We cannot know which row is visible, or invisible at the time when PG-Strom requires P2P DMA for NVMe-SSD, because contents of the storage blocks are not yet loaded to CPU/RAM, and MVCC related attributes are written with individual records. PostgreSQL had similar problem when it supports IndexOnlyScan.
 
+To address the problem, PostgreSQL has an infrastructure of visibility map which is a bunch of flags to indicate whether any records in a particular data block are visible from all the transactions. If associated bit is set, we can know the associated block has no invisible records without reading the block itself.
+
+SSD-to-GPU Direct SQL Execution utilizes this infrastructure. It checks the visibility map first, then only "all-visible" blocks are required to read with SSD-to-GPU P2P DMA.
+}
+@ja{
 Visibility MapはVACUUMのタイミングで作成されるため、以下のように明示的にVACUUMを実行する事で強制的にVisibility Mapを構築する事ができます。
 }
+@en{
+VACUUM constructs visibility map, so you can enforce PostgreSQL to construct visibility map by explicit launch of VACUUM command.
+}
+
 ```
 VACUUM ANALYZE linerorder;
 ```
@@ -241,13 +319,25 @@ PG-Stromはプロセッサへ高速にデータを供給するためのストレ
 
 インメモリ列キャッシュは、対象テーブルのデータブロックを読み出し、PostgreSQL標準のデータ形式である行データから集計・解析ワークロードに適した列データ形式へと変換し、メモリ上にキャッシュする機能です。
 
-SSD-to-GPUダイレクトSQL実行とは異なり、この機能を利用するには特別なハードウェアは必要ありません。しかし一方で、現在もなおRAMの容量はSSDに比べると小さく、目安としてはシステムRAMサイズの60%～75%程度の「大規模でないデータセット」を取り扱うのに向いた機能です。
+SSD-to-GPUダイレクトSQL実行とは異なり、この機能を利用するには特別なハードウェアは必要ありません。しかし一方で、現在もなおRAMの容量はSSDよりも小さく、目安としてはシステムRAMサイズの60%～75%程度の「大規模でないデータセット」を取り扱うのに向いた機能です。
+}
+@en{
+PG-Strom has one another feature related to storage to supply processors data stream.
+
+In-memory columnar cache reads data blocks of the target table, convert the row-format of PostgreSQL to columnar format which is suitable for summary and analytics, and cache them on memory.
+
+This feature requires no special hardware like SSD-to-GPU Direct SQL Execution, on the other hands, RAM capacity is still smaller than SSD, so this feature is suitable to handle "not a large scale data set" up to 60%-75% of the system RAM size.
 }
 
 @ja{
-本機能は「列ストア」ではありません。すなわち、列データに変換しキャッシュされた内容はPostgreSQLサーバプロセスを再起動すれば消えてしまいます。また、キャッシュされた領域を更新するような`UPDATE`文を実行すると、PG-Stromは当該キャッシュを消去します。
+本機能は「列ストア」ではありません。すなわち、列データに変換しキャッシュされた内容は例えばPostgreSQLサーバプロセスを再起動すれば消えてしまいます。また、キャッシュされた領域を更新するような`UPDATE`文を実行すると、PG-Stromは当該キャッシュを消去します。
 これは、列データ形式は本質的に更新ワークロードに弱い事を踏まえた上での設計です。つまり、行ストアの更新に対して整合性を保ったまま列ストアを更新しようとすると、書き込み性能の大幅な劣化は不可避です。一方で、単純に更新されたブロックを含む列キャッシュを消去（invalidation）するだけであれば、ほとんど処理コストはかかりません。
 PG-Stromは行データであっても列データであっても、起動するGPUプログラムを変更するだけで対応可能です。すなわち、列キャッシュが消去され、通常通りPostgreSQLのshared bufferからデータを読み出さざるを得ない状況であっても柔軟に対応する事ができるのです。
+}
+@en{
+This feature is not "a columnar store". It means cached and converted data blocks are flashed once PostgreSQL server process has restarted for example. When any cached rows get updated, PG-Strom invalidates the columnar cache block which contains the updated rows.
+This design on the basis that columnar format is vulnerable to updating workloads. If we try to update columnar-store with keeping consistency towards update of row-store, huge degradation of write performance is not avoidable. On the other hands, it is lightweight operation to invalidate the columnar cache block which contains the updated row.
+PG-Strom can switch GPU kernels to be invoked for row- or columnar-format according to format of the loading data blocks. So, it works flexibly, even if a columnar cache block gets invalidated thus PG-Strom has to load data blocks from the shared buffer of PostgreSQL.
 }
 
 @ja:##初期設定
@@ -261,7 +351,11 @@ PG-Stromは行データであっても列データであっても、起動する
 
 このパラメータを変更する事で、例えばNVMe-SSD等、より大容量かつリーズナブルに高速なストレージ領域をバッキングストアとする列キャッシュを構築する事ができます。ただし、列キャッシュの更新はたとえ一行であってもその前後の領域を含むチャンク全体（128MB単位）の無効化を引き起こす事は留意してください。I/Oを伴う読み書きが頻発するような状況になると、意図しない性能劣化を招く可能性があります。
 }
+@en{
+The `pg_strom.ccache_base_dir` parameter allows to specify the path to store the columnar cache. The default is `/dev/shm` where general Linux distribution mounts `tmpfs` filesystem, so files under the directory are "volatile", with no backing store.
 
+Custom configuration of the parameter enables to construct columnar cache on larger and reasonably fast storage, like NVMe-SSD, as backing store. However, note that update of the cached rows invalidates whole of the chunk (128MB) which contains the updated rows. It may lead unexpected performance degradation, if workloads have frequent read / write involving I/O operations.
+}
 @ja:###列キャッシュビルダの設定
 @en:###Columnar Cache Builder Configuration
 
@@ -271,7 +365,15 @@ PG-Stromは一つまたは複数のバックグラウンドワーカーを使用
 列キャッシュビルダーは、ユーザのSQLを処理するセッションの動作とは非同期に、指定されたデータベース内のテーブルのうち列キャッシュを構築すべき対象をラウンドロビンでスキャンし、これを列データへと変換した上でキャッシュします。
 
 一度列キャッシュが構築されると、他の全てのバックエンドからこれを参照する事ができます。一般的なディスクキャッシュのメカニズムとは異なり、列キャッシュが構築されていない領域へのアクセスであっても、列キャッシュをオンデマンドで作成する事はありません。この場合は、通常のPostgreSQLのストレージシステムを通して行データを参照する事となります。
+}
+@en{
+PG-Strom can build in-memory columnar cache automatically and asynchronously using one or multiple background workers. These background workers are called columnar cache builder.
 
+Columnar cache builder scans the target tables to construct columnar cache in the specified database, by round-robin, then converts to columnar format and keep it on the cache. It is an asynchronous job from the backend process which handles user's SQL.
+
+Once a columnar cache is built, any other backend process can reference them. PG-Strom never construct columnar cache on demand, unlike usual disk cache mechanism, even if it is access to the area where columnar cache is not built yet. In this case, PG-Strom loads row-data through the normal storage system of PostgreSQL.
+}
+@ja{
 列キャッシュビルダの数は起動時に決まっていますので、これを増やすには後述の`pg_strom.ccache_num_builders`パラメータを設定し、PostgreSQLの再起動が必要です。
 また、列キャッシュビルダは特定のデータベースに紐付けられますので、複数のデータベースで列キャッシュを使用する場合には、少なくともデータベース数以上の列キャッシュビルダが存在している事が必要です。
 
@@ -280,6 +382,15 @@ PG-Stromは一つまたは複数のバックグラウンドワーカーを使用
 
 データベース名をカンマ区切りで指定すると、列キャッシュビルダが順番に指定したデータベースに関連付けられていきます。例えば、列キャッシュビルダが5プロセス存在し、`postgres,my_test,benchmark`という3つのデータベースを`pg_strom.ccache_databases`に指定した場合、`postgres`および`my_test`データベースには2プロセスの、`benchmark`データベースには1プロセスの列キャッシュビルダが割り当てられる事になります。
 }
+@en{
+The number of columnar cache builders are fixed on the startup, so you need to setup `pg_strom.ccache_num_builders` parameters then restart PostgreSQL to increase the number of workers.
+
+The `pg_strom.ccache_databases` parameter configures the databases associated with columnar cache builders.
+It requires superuser privilege to setup, and is updatable on PostgreSQL running. (Of course, it is possible to assign by `postgresql.conf` configuration on startup.)
+
+Once a comma separated list of database names are assigned, columnar cache builders are associated to the specified databases in rotation. For example, if 5 columnar cache builders are running then 3 databases (`postgres,my_test,benchmark`) are assigned on the `pg_strom.ccache_databases`, 2 columnar cache builders are assigned on the `postgres` and `my_test` database for each, and 1 columnar cache builder is assigned on the `benchmark` database.
+}
+
 
 @ja:###対象テーブルの設定
 @en:###Source Table Configuration
@@ -292,6 +403,15 @@ SQL関数`pgstrom_ccache_enabled(regclass)`は、引数で指定したテーブ�
 
 内部的には、これらの操作は対象テーブルに対して更新時のキャッシュ無効化を行うトリガ関数の設定として実装されています。
 つまり、キャッシュを無効化する手段を持たないテーブルに対しては列キャッシュを作成しないという事です。
+}
+@en{
+DBA needs to specify the target tables to build columnar cache.
+
+A SQL function `pgstrom_ccache_enabled(regclass)` adds the supplied table as target to build columnar cache.
+Other way round, a SQL function `pgstrom_ccache_disabled(regclass)` drops the supplied table from the target to build.
+
+Internally, it is implemented as a special trigger function which invalidate columnar cache on write to the target tables.
+It means we don't build columnar cache on the tables which have no way to invalidate columnar cache.
 }
 
 ```
@@ -312,6 +432,11 @@ postgres=# select pgstrom_ccache_enabled('t0');
 列キャッシュの状態を確認するには`pgstrom.ccache_info`システムビューを使用します。
 
 チャンク単位で、テーブル、ブロック番号やキャッシュの作成時刻、最終アクセス時刻などを参照する事ができます。
+}
+@en{
+`pgstrom.ccache_info` provides the status of the current columnar cache.
+
+You can check the table, block number, cache creation time and last access time per chunk.
 }
 
 ```
@@ -338,7 +463,12 @@ contrib_regression_pg_strom=# SELECT * FROM pgstrom.ccache_info ;
 以下のクエリは、テーブル`t0`と`t1`をジョインしますが、`t0`に対するスキャンを含む`Custom Scan (GpuJoin)`に`CCache: enabled`と表示されています。
 これは、`t0`に対するスキャンの際に列キャッシュを使用する可能性がある事を示しています。ただし、実際に使われるかどうかはクエリが実行されるまで分かりません。並行する更新処理の影響で、列キャッシュが破棄される可能性もあるからです。
 }
+@en{
+You can check whether a particular query may reference columnar cache, or not, using `EXPLAIN` command.
 
+The query below joins the table `t0` and `t1`, and the `Custom Scan (GpuJoin)` which contains scan on the `t0` shows `CCache: enabled`.
+It means columnar cache may be referenced at the scan on `t0`, however, it is not certain whether it is actually referenced until query execution. Columnar cache may be invalidated by the concurrent updates.
+}
 ```
 postgres=# EXPLAIN SELECT id,ax FROM t0 NATURAL JOIN t1 WHERE aid < 1000;
 
@@ -363,7 +493,12 @@ postgres=# EXPLAIN SELECT id,ax FROM t0 NATURAL JOIN t1 WHERE aid < 1000;
 先ほどのクエリを実行すると、`t0`に対するスキャンを含む`Custom Scan (GpuJoin)`に`CCache Hits: 50`と表示されています。
 これは、列キャッシュへの参照が50回行われた事を示しています。列キャッシュのチャンクサイズは128MBですので、合計で6.4GB分のストレージアクセスが列キャッシュにより代替された事となります。
 }
+@en{
+`EXPLAIN ANALYZE` command tells how many times columnar cache is referenced during the query execution.
 
+After the execution of this query, `Custom Scan (GpuJoin)` which contains scan on `t0` shows `CCache Hits: 50`.
+It means that columnar cache is referenced 50 times. Because the chunk size of columnar cache is 128MB, storage access is replaced to the columnar cache by 6.4GB.
+}
 ```
 postgres=# EXPLAIN ANALYZE SELECT id,ax FROM t0 NATURAL JOIN t1 WHERE aid < 1000;
 
@@ -395,8 +530,17 @@ postgres=# EXPLAIN ANALYZE SELECT id,ax FROM t0 NATURAL JOIN t1 WHERE aid < 1000
 @ja{
 列キャッシュビルダを使用して非同期に列キャッシュを構築する場合、内部的にはバックグラウンドワーカープロセスが指定されたデータベースに接続し続ける事になります。
 `DROP DATABASE`コマンドを使用してデータベースを削除する時、PostgreSQLは当該データベースに接続しているセッションが存在するかどうかをチェックします。この時、ユーザセッションが一つも存在していないにも関わらず、列キャッシュビルダがデータベースへの接続を保持し続ける事で`DROP DATABASE`コマンドが失敗してしまいます。
-
+}
+@en{
+When columnar cache builder constructs columnar cache asynchronously, background worker process has internally connected to the specified database.
+When `DROP DATABASE` command tries to drop a database, PostgreSQL checks whether any session connects to the database. At that time, even if no user session connects to the database, `DROP DATABASE` will fail by columnar cache builder which keeps connection to the database.
+}
+@ja{
 これを避けるには、`DROP DATABASE`コマンドの実行前に、`pg_strom.ccache_databases`パラメータから当該データベースを除外してください。列キャッシュビルダは直ちに再起動し、新しい設定に基づいてデータベースへの接続を試みます。
+}
+@en{
+Please remove the database name from the `pg_strom.ccache_databases` parameter prior to execution of `DROP DATABASE` command.
+Columnar cache builder will restart soon, then tries to connect databases according to the new configuration.
 }
 
 @ja:#GPUメモリストア(gstore_fdw)

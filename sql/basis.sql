@@ -114,6 +114,31 @@ CREATE LANGUAGE plcuda
   VALIDATOR pgstrom.plcuda_function_validator;
 COMMENT ON LANGUAGE plcuda IS 'PL/CUDA procedural language';
 
+CREATE FUNCTION pg_catalog.plcuda_kernel_max_blocksz()
+  RETURNS int
+  AS 'MODULE_PATHNAME','plcuda_kernel_max_blocksz'
+  LANGUAGE C VOLATILE;
+
+CREATE FUNCTION pg_catalog.plcuda_kernel_static_shmsz()
+  RETURNS int
+  AS 'MODULE_PATHNAME','plcuda_kernel_static_shmsz'
+  LANGUAGE C VOLATILE;
+
+CREATE FUNCTION pg_catalog.plcuda_kernel_dynamic_shmsz()
+  RETURNS int
+  AS 'MODULE_PATHNAME','plcuda_kernel_dynamic_shmsz'
+  LANGUAGE C VOLATILE;
+
+CREATE FUNCTION pg_catalog.plcuda_kernel_const_memsz()
+  RETURNS int
+  AS 'MODULE_PATHNAME','plcuda_kernel_const_memsz'
+  LANGUAGE C VOLATILE;
+
+CREATE FUNCTION pg_catalog.plcuda_kernel_local_memsz()
+  RETURNS int
+  AS 'MODULE_PATHNAME','plcuda_kernel_local_memsz'
+  LANGUAGE C VOLATILE;
+
 --
 -- Functions related to columnar-cache
 --

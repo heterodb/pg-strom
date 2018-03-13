@@ -82,6 +82,22 @@ typedef struct plcudaTaskState
 	CUdeviceptr		last_results_buf;	/* results buffer last used */
 	/* property of the code block */
 	plcudaCodeProperty p;
+	/* property of the PL/CUDA kernel functions */
+	int				kprep_max_blocksz;
+	int				kprep_static_shmsz;
+	int				kprep_dynamic_shmsz;
+	int				kprep_const_memsz;
+	int				kprep_local_memsz;
+	int				kmain_max_blocksz;
+	int				kmain_static_shmsz;
+	int				kmain_dynamic_shmsz;
+	int				kmain_const_memsz;
+	int				kmain_local_memsz;
+	int				kpost_max_blocksz;
+	int				kpost_static_shmsz;
+	int				kpost_dynamic_shmsz;
+	int				kpost_const_memsz;
+	int				kpost_local_memsz;
 } plcudaTaskState;
 
 /*
@@ -111,9 +127,71 @@ static void plcuda_release_task(GpuTask *gtask);
 Datum plcuda_function_validator(PG_FUNCTION_ARGS);
 Datum plcuda_function_handler(PG_FUNCTION_ARGS);
 Datum plcuda_function_source(PG_FUNCTION_ARGS);
+Datum plcuda_kernel_max_blocksz(PG_FUNCTION_ARGS);
+Datum plcuda_kernel_static_shmsz(PG_FUNCTION_ARGS);
+Datum plcuda_kernel_dynamic_shmsz(PG_FUNCTION_ARGS);
+Datum plcuda_kernel_const_memsz(PG_FUNCTION_ARGS);
+Datum plcuda_kernel_local_memsz(PG_FUNCTION_ARGS);
 
 /* Tracker of plcudaState */
 static dlist_head	plcuda_state_list;
+
+/* PL/CUDA function property */
+static int	plcuda_kfunc_max_blocksz    = -1;
+static int	plcuda_kfunc_static_shmsz   = -1;
+static int	plcuda_kfunc_dynamic_shmsz  = -1;
+static int	plcuda_kfunc_const_memsz    = -1;
+static int	plcuda_kfunc_local_memsz    = -1;
+
+Datum
+plcuda_kernel_max_blocksz(PG_FUNCTION_ARGS)
+{
+	if (plcuda_kfunc_max_blocksz < 0)
+		elog(ERROR, "%s is called out of the PL/CUDA helper context",
+			 format_procedure(fcinfo->flinfo->fn_oid));
+	PG_RETURN_INT32(plcuda_kfunc_max_blocksz);
+}
+PG_FUNCTION_INFO_V1(plcuda_kernel_max_blocksz);
+
+Datum
+plcuda_kernel_static_shmsz(PG_FUNCTION_ARGS)
+{
+	if (plcuda_kfunc_static_shmsz < 0)
+		elog(ERROR, "%s is called out of the PL/CUDA helper context",
+			 format_procedure(fcinfo->flinfo->fn_oid));
+	PG_RETURN_INT32(plcuda_kfunc_static_shmsz);
+}
+PG_FUNCTION_INFO_V1(plcuda_kernel_static_shmsz);
+
+Datum
+plcuda_kernel_dynamic_shmsz(PG_FUNCTION_ARGS)
+{
+	if (plcuda_kfunc_dynamic_shmsz < 0)
+		elog(ERROR, "%s is called out of the PL/CUDA helper context",
+			 format_procedure(fcinfo->flinfo->fn_oid));
+	PG_RETURN_INT32(plcuda_kfunc_dynamic_shmsz);
+}
+PG_FUNCTION_INFO_V1(plcuda_kernel_dynamic_shmsz);
+
+Datum
+plcuda_kernel_const_memsz(PG_FUNCTION_ARGS)
+{
+	if (plcuda_kfunc_const_memsz < 0)
+		elog(ERROR, "%s is called out of the PL/CUDA helper context",
+             format_procedure(fcinfo->flinfo->fn_oid));
+	PG_RETURN_INT32(plcuda_kfunc_const_memsz);
+}
+PG_FUNCTION_INFO_V1(plcuda_kernel_const_memsz);
+
+Datum
+plcuda_kernel_local_memsz(PG_FUNCTION_ARGS)
+{
+	if (plcuda_kfunc_local_memsz < 0)
+		elog(ERROR, "%s is called out of the PL/CUDA helper context",
+			 format_procedure(fcinfo->flinfo->fn_oid));
+	PG_RETURN_INT32(plcuda_kfunc_local_memsz);
+}
+PG_FUNCTION_INFO_V1(plcuda_kernel_local_memsz);
 
 /*
  * plcuda_parse_cmdline
@@ -1210,154 +1288,6 @@ plcuda_codegen(Form_pg_proc procForm, plcudaCodeProperty *prop)
 	return kern.data;
 }
 
-#ifdef NOT_USED
-/*
- * pgstrom_devfunc_construct_plcuda
- *
- * It setup device function when PL/CUDA is used as inline device function.
- * Right now, we disabled support of the feature at the time of v2.0.
- */
-bool
-pgstrom_devfunc_construct_plcuda(devfunc_info *entry, HeapTuple proc_tuple)
-{
-	plcudaCodeProperty prop;
-	Oid				procOid = HeapTupleGetOid(proc_tuple);
-	Form_pg_proc	procForm = (Form_pg_proc) GETSTRUCT(proc_tuple);
-	devtype_info   *dtype;
-	StringInfoData	decl;
-	ListCell	   *lc;
-	AttrNumber		attno;
-
-	memset(&prop, 0, sizeof(plcudaCodeProperty));
-
-	/* result type must be fixed-length */
-	dtype = entry->func_rettype;
-	if (dtype->type_length < 0)
-	{
-		elog(DEBUG2, "PL/CUDA function: %s result %s should be fixed-length",
-			 format_procedure(procOid),
-			 format_type_be(procForm->prorettype));
-		goto not_supported;
-	}
-	plcuda_code_validation(&prop, proc_tuple, NULL);
-
-	if (prop.kern_prep != NULL)
-	{
-		elog(DEBUG2, "PL/CUDA function: %s has prep-kernel declaration",
-			 format_procedure(procOid));
-		goto not_supported;
-	}
-	if (prop.kern_post != NULL)
-	{
-		elog(DEBUG2, "PL/CUDA function: %s has post-kernel declaration",
-			 format_procedure(procOid));
-		goto not_supported;
-	}
-
-	if (OidIsValid(prop.fn_main_kern_blocksz) ||
-		prop.val_main_kern_blocksz > 1)
-	{
-		elog(DEBUG2, "PL/CUDA function: %s main kernel specifies block size dynamically, or statically but more than 1",
-			 format_procedure(procOid));
-		goto not_supported;
-	}
-
-	if (OidIsValid(prop.fn_main_num_threads) ||
-		prop.val_main_num_threads > 1)
-	{
-		elog(DEBUG2, "PL/CUDA function: %s main kernel specifies num threads dynamically, or statically but more than 1",
-			 format_procedure(procOid));
-		goto not_supported;
-	}
-
-	if (OidIsValid(prop.fn_main_shmem_unitsz) ||
-		prop.val_main_shmem_unitsz > 0 ||
-		OidIsValid(prop.fn_main_shmem_blocksz) ||
-		prop.val_main_shmem_blocksz > 0)
-	{
-		elog(DEBUG2, "PL/CUDA function: %s main kernel requires dynamic shared memory",
-			 format_procedure(procOid));
-		goto not_supported;
-	}
-
-	if (OidIsValid(prop.fn_working_bufsz) ||
-		prop.val_working_bufsz != 0)
-	{
-		elog(DEBUG2, "PL/CUDA function: %s main kernel requires working buffer",
-			 format_procedure(procOid));
-		goto not_supported;
-	}
-
-	if (OidIsValid(prop.fn_results_bufsz) ||
-		prop.val_results_bufsz != 0)
-	{
-		elog(DEBUG2, "PL/CUDA function: %s main kernel requires result buffer",
-			 format_procedure(procOid));
-		goto not_supported;
-	}
-
-	if (OidIsValid(prop.fn_sanity_check))
-	{
-		elog(DEBUG2, "PL/CUDA function: %s has sanity check function",
-			 format_procedure(procOid));
-		goto not_supported;
-	}
-	/* setup entries */
-	entry->func_devname = psprintf("plcuda_%u", entry->func_oid);
-
-	initStringInfo(&decl);
-	if (prop.kern_decl)
-		appendStringInfo(&decl, "%s\n", prop.kern_decl);
-	appendStringInfo(
-		&decl,
-		"STATIC_FUNCTION(pg_%s_t)\n"
-		"pgfn_%s(kern_context *kcxt",
-		entry->func_rettype->type_name,
-		entry->func_devname);
-	attno=0;
-	foreach(lc, entry->func_args)
-	{
-		dtype = lfirst(lc);
-
-		appendStringInfo(
-			&decl,
-			", pg_%s_t arg%u",
-			dtype->type_name, ++attno);
-	}
-
-	dtype = entry->func_rettype;
-	appendStringInfo(
-		&decl,
-		")\n"
-		"{\n"
-		"  pg_%s_t __retval = { true, 0 };\n"
-		"  pg_%s_t *retval = &__retval;\n"
-		"  /* #plcuda_begin */\n"
-		"%s\n"
-		"  /* #plcuda_end */\n"
-		"  return __retval;\n"
-		"}\n",
-		dtype->type_name,
-		dtype->type_name,
-		prop.kern_main);
-
-	entry->func_decl = decl.data;
-	pfree(prop.kern_main);
-	return true;
-
-not_supported:
-	if (prop.kern_decl)
-		pfree(prop.kern_decl);
-	if (prop.kern_prep)
-		pfree(prop.kern_prep);
-	if (prop.kern_main)
-		pfree(prop.kern_main);
-	if (prop.kern_post)
-		pfree(prop.kern_post);
-	return false;
-}
-#endif
-
 static void
 plcuda_cleanup_resources(ResourceReleasePhase phase,
 						 bool isCommit,
@@ -1512,6 +1442,152 @@ __setup_kern_colmeta(Oid type_oid, int attnum, plcudaCodeProperty *p)
 	return result;
 }
 
+static void
+plcuda_assign_kernel_properties(plcudaTaskState *plts)
+{
+	CUmodule	cuda_module;
+	CUfunction	cuda_function;
+	CUresult	rc;
+
+	cuda_module = pgstrom_load_cuda_program(plts->gts.program_id);
+	/* prep kernel */
+	rc = cuModuleGetFunction(&cuda_function, cuda_module,
+							 "plcuda_prep_kernel_entrypoint");
+	if (rc == CUDA_ERROR_NOT_FOUND)
+	{
+		plts->kprep_max_blocksz = -1;
+		plts->kprep_static_shmsz = -1;
+		plts->kprep_dynamic_shmsz = -1;
+		plts->kprep_const_memsz = -1;
+		plts->kprep_local_memsz = -1;
+	}
+	else if (rc == CUDA_SUCCESS)
+	{
+		rc = cuFuncGetAttribute(&plts->kprep_max_blocksz,
+								CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK,
+								cuda_function);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
+
+		rc = cuFuncGetAttribute(&plts->kprep_static_shmsz,
+								CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES,
+								cuda_function);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
+
+		rc = cuFuncGetAttribute(&plts->kprep_dynamic_shmsz,
+							   CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+								cuda_function);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
+
+		rc = cuFuncGetAttribute(&plts->kprep_const_memsz,
+								CU_FUNC_ATTRIBUTE_CONST_SIZE_BYTES,
+								cuda_function);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
+
+		rc = cuFuncGetAttribute(&plts->kprep_local_memsz,
+								CU_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES,
+								cuda_function);
+	}
+	else
+		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
+
+	/* main kernel */
+	rc = cuModuleGetFunction(&cuda_function, cuda_module,
+							 "plcuda_main_kernel_entrypoint");
+	if (rc == CUDA_ERROR_NOT_FOUND)
+	{
+		plts->kmain_max_blocksz = -1;
+        plts->kmain_static_shmsz = -1;
+        plts->kmain_dynamic_shmsz = -1;
+        plts->kmain_const_memsz = -1;
+        plts->kmain_local_memsz = -1;
+	}
+	else if (rc == CUDA_SUCCESS)
+	{
+		rc = cuFuncGetAttribute(&plts->kmain_max_blocksz,
+								CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK,
+								cuda_function);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
+
+		rc = cuFuncGetAttribute(&plts->kmain_static_shmsz,
+								CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES,
+								cuda_function);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
+
+		rc = cuFuncGetAttribute(&plts->kmain_dynamic_shmsz,
+							   CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+								cuda_function);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
+
+		rc = cuFuncGetAttribute(&plts->kmain_const_memsz,
+								CU_FUNC_ATTRIBUTE_CONST_SIZE_BYTES,
+								cuda_function);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
+
+		rc = cuFuncGetAttribute(&plts->kmain_local_memsz,
+								CU_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES,
+								cuda_function);
+	}
+	else
+		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
+
+
+	/* post kernel */
+	rc = cuModuleGetFunction(&cuda_function, cuda_module,
+							 "plcuda_post_kernel_entrypoint");
+	if (rc == CUDA_ERROR_NOT_FOUND)
+	{
+		plts->kpost_max_blocksz = -1;
+		plts->kpost_static_shmsz = -1;
+		plts->kpost_dynamic_shmsz = -1;
+		plts->kpost_const_memsz = -1;
+		plts->kpost_local_memsz = -1;
+	}
+	else if (rc == CUDA_SUCCESS)
+	{
+		rc = cuFuncGetAttribute(&plts->kpost_max_blocksz,
+								CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK,
+								cuda_function);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
+
+		rc = cuFuncGetAttribute(&plts->kpost_static_shmsz,
+								CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES,
+								cuda_function);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
+
+		rc = cuFuncGetAttribute(&plts->kpost_dynamic_shmsz,
+							   CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+								cuda_function);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
+
+		rc = cuFuncGetAttribute(&plts->kpost_const_memsz,
+								CU_FUNC_ATTRIBUTE_CONST_SIZE_BYTES,
+								cuda_function);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuFuncGetAttribute: %s", errorText(rc));
+
+		rc = cuFuncGetAttribute(&plts->kpost_local_memsz,
+								CU_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES,
+								cuda_function);
+	}
+	else
+		elog(ERROR, "failed on cuModuleGetFunction: %s", errorText(rc));
+
+	rc = cuModuleUnload(cuda_module);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuModuleUnload: %s", errorText(rc));
+}
+
 static plcudaTaskState *
 plcuda_exec_begin(HeapTuple protup, FunctionCallInfo fcinfo)
 {
@@ -1590,6 +1666,8 @@ plcuda_exec_begin(HeapTuple protup, FunctionCallInfo fcinfo)
 	/* track plcudaTaskState by local tracker */
 	plts->owner = CurrentResourceOwner;
 	dlist_push_head(&plcuda_state_list, &plts->chain);
+	/* assign properties of the kernel functions */
+	plcuda_assign_kernel_properties(plts);
 
 	return plts;
 }
@@ -1956,133 +2034,241 @@ plcuda_function_handler(PG_FUNCTION_ARGS)
 							   results_bufsz);
 	if (plts->p.kern_prep)
 	{
-		int64		v;
+		int		saved_max_blocksz   = plcuda_kfunc_max_blocksz;
+		int		saved_static_shmsz  = plcuda_kfunc_static_shmsz;
+		int		saved_dynamic_shmsz = plcuda_kfunc_dynamic_shmsz;
+		int		saved_const_memsz   = plcuda_kfunc_const_memsz;
+		int		saved_local_memsz   = plcuda_kfunc_local_memsz;
+		int64	v;
 
-		v = DatumGetInt64(kernel_launch_helper(fcinfo,
-											   plts->p.fn_prep_num_threads,
-											   plts->p.val_prep_num_threads,
-											   NULL));
-		if (v <= 0)
-			elog(ERROR, "kern_prep: invalid number of threads: %ld", v);
-		ptask->kern.prep_num_threads = (cl_ulong)v;
+		PG_TRY();
+		{
+			plcuda_kfunc_max_blocksz   = plts->kprep_max_blocksz;
+			plcuda_kfunc_static_shmsz  = plts->kprep_static_shmsz;
+			plcuda_kfunc_dynamic_shmsz = plts->kprep_dynamic_shmsz;
+			plcuda_kfunc_const_memsz   = plts->kprep_const_memsz;
+			plcuda_kfunc_local_memsz   = plts->kprep_local_memsz;
 
-		v = DatumGetInt64(kernel_launch_helper(fcinfo,
-											   plts->p.fn_prep_kern_blocksz,
-											   plts->p.val_prep_kern_blocksz,
-											   NULL));
-		if (v < 0 || v > INT_MAX)
-			elog(ERROR, "kern_prep: invalid kernel block size: %ld", v);
-		ptask->kern.prep_kern_blocksz = (cl_uint)v;
+			v = DatumGetInt64(
+					kernel_launch_helper(fcinfo,
+										 plts->p.fn_prep_num_threads,
+										 plts->p.val_prep_num_threads,
+										 NULL));
+			if (v <= 0)
+				elog(ERROR, "kern_prep: invalid number of threads: %ld", v);
+			ptask->kern.prep_num_threads = (cl_ulong)v;
 
-		v = DatumGetInt64(kernel_launch_helper(fcinfo,
-											   plts->p.fn_prep_shmem_unitsz,
-											   plts->p.val_prep_shmem_unitsz,
-											   NULL));
-		if (v < 0 || v > INT_MAX)
-			elog(ERROR, "kern_prep: invalid shared memory required: %ld", v);
-		ptask->kern.prep_shmem_unitsz = (cl_uint)v;
+			v = DatumGetInt64(
+					kernel_launch_helper(fcinfo,
+										 plts->p.fn_prep_kern_blocksz,
+										 plts->p.val_prep_kern_blocksz,
+										 NULL));
+			if (v < 0 || v > INT_MAX)
+				elog(ERROR, "kern_prep: invalid kernel block size: %ld", v);
+			ptask->kern.prep_kern_blocksz = (cl_uint)v;
 
-		v = DatumGetInt64(kernel_launch_helper(fcinfo,
-											   plts->p.fn_prep_shmem_blocksz,
-											   plts->p.val_prep_shmem_blocksz,
-											   NULL));
-		if (v < 0 || v > INT_MAX)
-			elog(ERROR, "kern_prep: invalid shared memory required: %ld", v);
-		ptask->kern.prep_shmem_blocksz = v;
+			v = DatumGetInt64(
+					kernel_launch_helper(fcinfo,
+										 plts->p.fn_prep_shmem_unitsz,
+										 plts->p.val_prep_shmem_unitsz,
+										 NULL));
+			if (v < 0 || v > INT_MAX)
+				elog(ERROR,
+					 "kern_prep: invalid shared memory requirement: %ld", v);
+			ptask->kern.prep_shmem_unitsz = (cl_uint)v;
 
-		elog(DEBUG2, "kern_prep {blocksz=%u, nitems=%lu, shmem=%u,%u}",
-			 ptask->kern.prep_kern_blocksz,
-			 ptask->kern.prep_num_threads,
-			 ptask->kern.prep_shmem_unitsz,
-			 ptask->kern.prep_shmem_blocksz);
-		ptask->exec_prep_kernel = true;
+			v = DatumGetInt64(
+					kernel_launch_helper(fcinfo,
+										 plts->p.fn_prep_shmem_blocksz,
+										 plts->p.val_prep_shmem_blocksz,
+										 NULL));
+			if (v < 0 || v > INT_MAX)
+				elog(ERROR,
+					 "kern_prep: invalid shared memory requirement: %ld", v);
+			ptask->kern.prep_shmem_blocksz = v;
+
+			elog(DEBUG2, "kern_prep {blocksz=%u, nitems=%lu, shmem=%u,%u}",
+				 ptask->kern.prep_kern_blocksz,
+				 ptask->kern.prep_num_threads,
+				 ptask->kern.prep_shmem_unitsz,
+				 ptask->kern.prep_shmem_blocksz);
+			ptask->exec_prep_kernel = true;
+
+			plcuda_kfunc_max_blocksz   = saved_max_blocksz;
+			plcuda_kfunc_static_shmsz  = saved_static_shmsz;
+			plcuda_kfunc_dynamic_shmsz = saved_dynamic_shmsz;
+			plcuda_kfunc_const_memsz   = saved_const_memsz;
+			plcuda_kfunc_local_memsz   = saved_local_memsz;
+		}
+		PG_CATCH();
+		{
+			plcuda_kfunc_max_blocksz   = saved_max_blocksz;
+			plcuda_kfunc_static_shmsz  = saved_static_shmsz;
+			plcuda_kfunc_dynamic_shmsz = saved_dynamic_shmsz;
+			plcuda_kfunc_const_memsz   = saved_const_memsz;
+			plcuda_kfunc_local_memsz   = saved_local_memsz;
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
 	}
 
 	if (plts->p.kern_main)
 	{
-		int64		v;
+		int		saved_max_blocksz   = plcuda_kfunc_max_blocksz;
+		int		saved_static_shmsz  = plcuda_kfunc_static_shmsz;
+		int		saved_dynamic_shmsz = plcuda_kfunc_dynamic_shmsz;
+		int		saved_const_memsz   = plcuda_kfunc_const_memsz;
+		int		saved_local_memsz   = plcuda_kfunc_local_memsz;
+		int64	v;
 
-		v = DatumGetInt64(kernel_launch_helper(fcinfo,
-											   plts->p.fn_main_num_threads,
-											   plts->p.val_main_num_threads,
-											   NULL));
-		if (v <= 0)
-			elog(ERROR, "kern_main: invalid number of threads: %ld", v);
-		ptask->kern.main_num_threads = (cl_ulong)v;
+		PG_TRY();
+		{
+			plcuda_kfunc_max_blocksz   = plts->kmain_max_blocksz;
+			plcuda_kfunc_static_shmsz  = plts->kmain_static_shmsz;
+			plcuda_kfunc_dynamic_shmsz = plts->kmain_dynamic_shmsz;
+			plcuda_kfunc_const_memsz   = plts->kmain_const_memsz;
+			plcuda_kfunc_local_memsz   = plts->kmain_local_memsz;
 
-		v = DatumGetInt64(kernel_launch_helper(fcinfo,
-											   plts->p.fn_main_kern_blocksz,
-											   plts->p.val_main_kern_blocksz,
-											   NULL));
-		if (v < 0 || v > INT_MAX)
-			elog(ERROR, "kern_main: invalid kernel block size: %ld", v);
-		ptask->kern.main_kern_blocksz = (cl_uint)v;
+			v = DatumGetInt64(
+					kernel_launch_helper(fcinfo,
+										 plts->p.fn_main_num_threads,
+										 plts->p.val_main_num_threads,
+										 NULL));
+			if (v <= 0)
+				elog(ERROR, "kern_main: invalid number of threads: %ld", v);
+			ptask->kern.main_num_threads = (cl_ulong)v;
 
-		v = DatumGetInt64(kernel_launch_helper(fcinfo,
-											   plts->p.fn_main_shmem_unitsz,
-											   plts->p.val_main_shmem_unitsz,
-											   NULL));
-		if (v < 0 || v > INT_MAX)
-			elog(ERROR, "kern_main: invalid shared memory required: %ld", v);
-		ptask->kern.main_shmem_unitsz = (cl_uint)v;
+			v = DatumGetInt64(
+					kernel_launch_helper(fcinfo,
+										 plts->p.fn_main_kern_blocksz,
+										 plts->p.val_main_kern_blocksz,
+										 NULL));
+			if (v < 0 || v > INT_MAX)
+				elog(ERROR, "kern_main: invalid kernel block size: %ld", v);
+			ptask->kern.main_kern_blocksz = (cl_uint)v;
 
-		v = DatumGetInt64(kernel_launch_helper(fcinfo,
-											   plts->p.fn_main_shmem_blocksz,
-											   plts->p.val_main_shmem_blocksz,
-											   NULL));
-		if (v < 0 || v > INT_MAX)
-			elog(ERROR, "kern_main: invalid shared memory required: %ld", v);
-		ptask->kern.main_shmem_blocksz = v;
+			v = DatumGetInt64(
+					kernel_launch_helper(fcinfo,
+										 plts->p.fn_main_shmem_unitsz,
+										 plts->p.val_main_shmem_unitsz,
+										 NULL));
+			if (v < 0 || v > INT_MAX)
+				elog(ERROR,
+					 "kern_main: invalid shared memory requirement: %ld", v);
+			ptask->kern.main_shmem_unitsz = (cl_uint)v;
 
-		elog(DEBUG2, "kern_main {blocksz=%u, nitems=%lu, shmem=%u,%u}",
-			 ptask->kern.main_kern_blocksz,
-			 ptask->kern.main_num_threads,
-			 ptask->kern.main_shmem_unitsz,
-			 ptask->kern.main_shmem_blocksz);
+			v = DatumGetInt64(
+					kernel_launch_helper(fcinfo,
+										 plts->p.fn_main_shmem_blocksz,
+										 plts->p.val_main_shmem_blocksz,
+										 NULL));
+			if (v < 0 || v > INT_MAX)
+				elog(ERROR,
+					 "kern_main: invalid shared memory requirement: %ld", v);
+			ptask->kern.main_shmem_blocksz = v;
+
+			elog(DEBUG2, "kern_main {blocksz=%u, nitems=%lu, shmem=%u,%u}",
+				 ptask->kern.main_kern_blocksz,
+				 ptask->kern.main_num_threads,
+				 ptask->kern.main_shmem_unitsz,
+				 ptask->kern.main_shmem_blocksz);
+
+			plcuda_kfunc_max_blocksz   = saved_max_blocksz;
+			plcuda_kfunc_static_shmsz  = saved_static_shmsz;
+			plcuda_kfunc_dynamic_shmsz = saved_dynamic_shmsz;
+			plcuda_kfunc_const_memsz   = saved_const_memsz;
+			plcuda_kfunc_local_memsz   = saved_local_memsz;
+		}
+		PG_CATCH();
+		{
+			plcuda_kfunc_max_blocksz   = saved_max_blocksz;
+			plcuda_kfunc_static_shmsz  = saved_static_shmsz;
+			plcuda_kfunc_dynamic_shmsz = saved_dynamic_shmsz;
+			plcuda_kfunc_const_memsz   = saved_const_memsz;
+			plcuda_kfunc_local_memsz   = saved_local_memsz;
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
 	}
 
 	if (plts->p.kern_post)
 	{
-		int64		v;
+		int		saved_max_blocksz   = plcuda_kfunc_max_blocksz;
+		int		saved_static_shmsz  = plcuda_kfunc_static_shmsz;
+		int		saved_dynamic_shmsz = plcuda_kfunc_dynamic_shmsz;
+		int		saved_const_memsz   = plcuda_kfunc_const_memsz;
+		int		saved_local_memsz   = plcuda_kfunc_local_memsz;
+		int64	v;
 
-		v = DatumGetInt64(kernel_launch_helper(fcinfo,
-											   plts->p.fn_post_num_threads,
-											   plts->p.val_post_num_threads,
-											   NULL));
-		if (v <= 0)
-			elog(ERROR, "kern_post: invalid number of threads: %ld", v);
-		ptask->kern.post_num_threads = (cl_ulong)v;
+		PG_TRY();
+		{
+			plcuda_kfunc_max_blocksz   = plts->kpost_max_blocksz;
+			plcuda_kfunc_static_shmsz  = plts->kpost_static_shmsz;
+			plcuda_kfunc_dynamic_shmsz = plts->kpost_dynamic_shmsz;
+			plcuda_kfunc_const_memsz   = plts->kpost_const_memsz;
+			plcuda_kfunc_local_memsz   = plts->kpost_local_memsz;
 
-		v = DatumGetInt64(kernel_launch_helper(fcinfo,
-											   plts->p.fn_post_kern_blocksz,
-											   plts->p.val_post_kern_blocksz,
-											   NULL));
-		if (v < 0 || v > INT_MAX)
-			elog(ERROR, "kern_post: invalid kernel block size: %ld", v);
-		ptask->kern.post_kern_blocksz = (cl_uint)v;
+			v = DatumGetInt64(
+					kernel_launch_helper(fcinfo,
+										 plts->p.fn_post_num_threads,
+										 plts->p.val_post_num_threads,
+										 NULL));
+			if (v <= 0)
+				elog(ERROR, "kern_post: invalid number of threads: %ld", v);
+			ptask->kern.post_num_threads = (cl_ulong)v;
 
-		v = DatumGetInt64(kernel_launch_helper(fcinfo,
-											   plts->p.fn_post_shmem_unitsz,
-											   plts->p.val_post_shmem_unitsz,
-											   NULL));
-		if (v < 0 || v > INT_MAX)
-			elog(ERROR, "kern_post: invalid shared memory required: %ld", v);
-		ptask->kern.post_shmem_unitsz = (cl_uint)v;
+			v = DatumGetInt64(
+					kernel_launch_helper(fcinfo,
+										 plts->p.fn_post_kern_blocksz,
+										 plts->p.val_post_kern_blocksz,
+										 NULL));
+			if (v < 0 || v > INT_MAX)
+				elog(ERROR, "kern_post: invalid kernel block size: %ld", v);
+			ptask->kern.post_kern_blocksz = (cl_uint)v;
 
-		v = DatumGetInt64(kernel_launch_helper(fcinfo,
-											   plts->p.fn_post_shmem_blocksz,
-											   plts->p.val_post_shmem_blocksz,
-											   NULL));
-		if (v < 0 || v > INT_MAX)
-			elog(ERROR, "kern_post: invalid shared memory required: %ld", v);
-		ptask->kern.post_shmem_blocksz = v;
+			v = DatumGetInt64(
+					kernel_launch_helper(fcinfo,
+										 plts->p.fn_post_shmem_unitsz,
+										 plts->p.val_post_shmem_unitsz,
+										 NULL));
+			if (v < 0 || v > INT_MAX)
+				elog(ERROR,
+					 "kern_post: invalid shared memory requirement: %ld", v);
+			ptask->kern.post_shmem_unitsz = (cl_uint)v;
 
-		elog(DEBUG2, "kern_post {blocksz=%u, nitems=%lu, shmem=%u,%u}",
-			 ptask->kern.post_kern_blocksz,
-			 ptask->kern.post_num_threads,
-			 ptask->kern.post_shmem_unitsz,
-			 ptask->kern.post_shmem_blocksz);
-		ptask->exec_post_kernel = true;
+			v = DatumGetInt64(
+					kernel_launch_helper(fcinfo,
+										 plts->p.fn_post_shmem_blocksz,
+										 plts->p.val_post_shmem_blocksz,
+										 NULL));
+			if (v < 0 || v > INT_MAX)
+				elog(ERROR,
+					 "kern_post: invalid shared memory requirement: %ld", v);
+			ptask->kern.post_shmem_blocksz = v;
+
+			elog(DEBUG2, "kern_post {blocksz=%u, nitems=%lu, shmem=%u,%u}",
+				 ptask->kern.post_kern_blocksz,
+				 ptask->kern.post_num_threads,
+				 ptask->kern.post_shmem_unitsz,
+				 ptask->kern.post_shmem_blocksz);
+			ptask->exec_post_kernel = true;
+
+			plcuda_kfunc_max_blocksz   = saved_max_blocksz;
+			plcuda_kfunc_static_shmsz  = saved_static_shmsz;
+			plcuda_kfunc_dynamic_shmsz = saved_dynamic_shmsz;
+			plcuda_kfunc_const_memsz   = saved_const_memsz;
+			plcuda_kfunc_local_memsz   = saved_local_memsz;
+		}
+		PG_CATCH();
+		{
+			plcuda_kfunc_max_blocksz   = saved_max_blocksz;
+			plcuda_kfunc_static_shmsz  = saved_static_shmsz;
+			plcuda_kfunc_dynamic_shmsz = saved_dynamic_shmsz;
+			plcuda_kfunc_const_memsz   = saved_const_memsz;
+			plcuda_kfunc_local_memsz   = saved_local_memsz;
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
 	}
 
 	/* Exec PL/CUDA function by GPU */
