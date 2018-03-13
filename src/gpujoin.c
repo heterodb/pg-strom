@@ -3494,13 +3494,14 @@ gpujoin_codegen_projection(StringInfo source,
 			 */
 			appendStringInfo(
 				&body,
-				"  temp.varlena_v = %s;\n"
-				"  tup_isnull[%d] = temp.varlena_v.isnull;\n"
-				"  tup_values[%d] = PointerGetDatum(temp.varlena_v.value);\n"
+				"  temp.%s_v = %s;\n"
+				"  tup_isnull[%d] = temp.%s_v.isnull;\n"
+				"  tup_values[%d] = PointerGetDatum(temp.%s_v.value);\n"
 				"  use_extra_buf[%d] = false;\n",
+				dtype->type_name,
 				pgstrom_codegen_expression((Node *)tle->expr, context),
-				tle->resno - 1,
-				tle->resno - 1,
+				tle->resno - 1, dtype->type_name,
+				tle->resno - 1, dtype->type_name,
 				tle->resno - 1);
 		}
 	}
