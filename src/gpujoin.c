@@ -5232,11 +5232,12 @@ gpujoin_expand_inner_kds(dsm_segment *seg, size_t kds_offset)
 	cl_uint	   *row_index;
 	cl_int		i;
 
-	new_size = (3 * dsm_segment_map_length(seg)) / 2;
+	new_size = TYPEALIGN(BLCKSZ, (3 * dsm_segment_map_length(seg)) / 2);
 	new_kmrels = dsm_resize(seg, new_size);
 	kds = (kern_data_store *)(new_kmrels + kds_offset);
 	row_index = KERN_DATA_STORE_ROWINDEX(kds);
 	shift = new_size - kds_offset - kds->length;
+	Assert(shift == MAXALIGN(shift));
 	if (kds->nitems > 0)
 	{
 		Assert(kds->usage > 0);
