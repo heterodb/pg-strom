@@ -3049,7 +3049,6 @@ gpujoin_codegen_projection(StringInfo source,
 			list_free(expr_vars);
 		}
 	}
-
 	appendStringInfoString(
 		source,
 		"STATIC_FUNCTION(void)\n"
@@ -3083,6 +3082,7 @@ gpujoin_codegen_projection(StringInfo source,
 		List	   *kvars_dstnum = NIL;
 		const char *kds_label;
 		cl_int		i, nattrs = -1;
+		bool		sysattr_refs = false;
 
 		resetStringInfo(&column);
 
@@ -3100,6 +3100,12 @@ gpujoin_codegen_projection(StringInfo source,
 
 			if (depth != src_depth)
 				continue;
+			if (src_resno < 0)
+			{
+				if (depth != 0)
+					elog(ERROR, "Bug? sysattr reference at inner table");
+				sysattr_refs = true;
+			}
 			if (bms_is_member(k, refs_by_vars))
 				varattmaps[tle->resno - 1] = src_resno;
 			if (bms_is_member(k, refs_by_expr))
@@ -3113,7 +3119,7 @@ gpujoin_codegen_projection(StringInfo source,
 		}
 
 		/* no need to extract inner/outer tuple in this depth */
-		if (nattrs < 1)
+		if (nattrs < 1 && !sysattr_refs)
 			continue;
 
 		appendStringInfo(
@@ -3197,7 +3203,7 @@ gpujoin_codegen_projection(StringInfo source,
 					"  tup_values[%d] = PointerGetDatum(extra_pos);\n"
 					"  use_extra_buf[%d] = true;\n"
 					"  memcpy(extra_pos, &t_self, sizeof(t_self));\n"
-					"  extra_pos += MAXALIGN(t_self);\n",
+					"  extra_pos += MAXALIGN(sizeof(t_self));\n",
 					NameStr(attr->attname),
 					tle->resno - 1,
 					tle->resno - 1,
@@ -3243,9 +3249,10 @@ gpujoin_codegen_projection(StringInfo source,
 		}
 
 		/* begin to walk on the tuple */
-		appendStringInfo(
-			&body,
-			"  EXTRACT_HEAP_TUPLE_BEGIN(addr, %s, htup);\n", kds_label);
+		if (nattrs > 0)
+			appendStringInfo(
+				&body,
+				"  EXTRACT_HEAP_TUPLE_BEGIN(addr, %s, htup);\n", kds_label);
 		resetStringInfo(&temp);
 		for (i=1; i <= nattrs; i++)
 		{
@@ -3359,9 +3366,10 @@ gpujoin_codegen_projection(StringInfo source,
 				&temp,
 				"  EXTRACT_HEAP_TUPLE_NEXT(addr);\n");
 		}
-		appendStringInfoString(
-			&body,
-			"  EXTRACT_HEAP_TUPLE_END();\n");
+		if (nattrs > 0)
+			appendStringInfoString(
+				&body,
+				"  EXTRACT_HEAP_TUPLE_END();\n");
 
 		if (depth == 0)
 		{
