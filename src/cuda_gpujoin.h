@@ -1135,6 +1135,14 @@ gpujoin_exec_hashjoin(kern_context *kcxt,
 					khitem = KERN_HASH_FIRST_ITEM(kds_hash, hash_value);
 			}
 		}
+		else
+		{
+			/*
+			 * MEMO: We must ensure the threads without outer tuple don't
+			 * generate any LEFT OUTER results.
+			 */
+			l_state[depth] = UINT_MAX;
+		}
 	}
 	else if (l_state[depth] != UINT_MAX)
 	{
@@ -1164,6 +1172,7 @@ gpujoin_exec_hashjoin(kern_context *kcxt,
 									rd_stack,
 									&khitem->t.htup,
 									&joinquals_matched);
+		assert(result == joinquals_matched);
 		if (joinquals_matched)
 		{
 			/* No LEFT/FULL JOIN are needed */
