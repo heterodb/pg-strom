@@ -2494,7 +2494,17 @@ pgstrom_codegen_expression(Node *expr, codegen_context *context)
 		else
 			expr = (Node *)make_andclause((List *)expr);
 	}
-	codegen_expression_walker(expr, &walker_context);
+
+	PG_TRY();
+	{
+		codegen_expression_walker(expr, &walker_context);
+	}
+	PG_CATCH();
+	{
+		errdetail("problematic expression: %s", nodeToString(expr));
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 
 	context->type_defs = walker_context.type_defs;
 	context->func_defs = walker_context.func_defs;

@@ -1103,6 +1103,7 @@ try_add_gpujoin_paths(PlannerInfo *root,
 				 outer_path->pathtype == T_MergeJoin)
 		{
 			JoinPath   *join_path = (JoinPath *) outer_path;
+			List	   *join_quals = join_path->joinrestrictinfo;
 
 			/*
 			 * We cannot pull-up outer join path if its inner/outer paths
@@ -1112,6 +1113,9 @@ try_add_gpujoin_paths(PlannerInfo *root,
 							join_path->outerjoinpath->parent->relids) ||
 				bms_overlap(PATH_REQ_OUTER(join_path->outerjoinpath),
 							join_path->innerjoinpath->parent->relids))
+				return;
+
+			if (!pgstrom_device_expression((Expr *)join_quals))
 				return;
 
 			ip_item = palloc0(sizeof(inner_path_item));
