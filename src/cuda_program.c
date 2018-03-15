@@ -431,6 +431,7 @@ construct_flat_cuda_source(uint32 extra_flags,
 		"    pg_time_t        time_v;\n"
 		"    pg_timestamp_t   timestamp_v;\n"
 		"    pg_timestamptz_t timestamptz_v;\n"
+		"    pg_interval_t    interval_v;\n"
 		"#endif\n"
 		"#ifdef CUDA_TEXTLIB_H\n"
 		"    pg_bpchar_t      bpchar_v;\n"
@@ -444,7 +445,11 @@ construct_flat_cuda_source(uint32 extra_flags,
 		"    pg_tsrange_t     tsrange_v;\n"
 		"    pg_tstzrange_t   tstzrange_v;\n"
 		"    pg_daterange_t   daterange_v;\n"
-		"#endif\n"
+		"#endif\n"	/* CUDA_TIMELIB_H */
+		"#endif\n"	/* CUDA_RANGETYPE_H */
+		"#ifdef CUDA_MATRIX_H\n"
+		"    pg_array_t       array_v;\n"
+		"    pg_matrix_t      matrix_v;\n"
 		"#endif\n"
 		"  } pg_anytype_t;\n\n";
 	ofs += snprintf(source + ofs, len - ofs, "%s\n", pg_anytype);
