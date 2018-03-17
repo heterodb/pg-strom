@@ -26,18 +26,18 @@
 typedef struct
 {
 	cl_uint			pg_crc32_table[256];	/* used to hashjoin */
-	cl_uint			kmrels_length;	/* length of kern_multirels */
-	cl_uint			ojmaps_length;	/* length of outer-join map, if any */
+	cl_ulong		kmrels_length;	/* length of kern_multirels */
+	cl_ulong		ojmaps_length;	/* length of outer-join map, if any */
 	cl_uint			cuda_dindex;	/* device index of PG-Strom */
 	cl_uint			nrels;			/* number of inner relations */
 	struct
 	{
-		cl_uint		chunk_offset;	/* offset to KDS or Hash */
-		cl_uint		ojmap_offset;	/* offset to outer-join map, if any */
+		cl_ulong	chunk_offset;	/* offset to KDS or Hash */
+		cl_ulong	ojmap_offset;	/* offset to outer-join map, if any */
 		cl_bool		is_nestloop;	/* true, if NestLoop. */
 		cl_bool		left_outer;		/* true, if JOIN_LEFT or JOIN_FULL */
 		cl_bool		right_outer;	/* true, if JOIN_RIGHT or JOIN_FULL */
-		cl_char		__padding__[1];
+		cl_char		__padding__[5];
 	} chunks[FLEXIBLE_ARRAY_MEMBER];
 } kern_multirels;
 

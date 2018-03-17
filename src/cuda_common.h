@@ -696,14 +696,12 @@ typedef struct {
 /* 'nslots' estimation; 25% larger than nitems, but 128 at least */
 #define __KDS_NSLOTS(nitems)					\
 	Max(128, ((nitems) * 5) >> 2)
-#define KDS_CALCULATE_ROW_FRONTLEN(ncols,nitems)	\
-	KDS_CALCULATE_FRONTEND_LENGTH((ncols),0,(nitems))
-#define KDS_CALCULATE_HASH_FRONTLEN(ncols,nitems)	\
-	KDS_CALCULATE_FRONTEND_LENGTH((ncols),__KDS_NSLOTS(nitems),(nitems))
 #define KDS_CALCULATE_ROW_LENGTH(ncols,nitems,data_len)		\
-	(KDS_CALCULATE_ROW_FRONTLEN((ncols),(nitems)) + STROMALIGN(data_len))
+	(KDS_CALCULATE_FRONTEND_LENGTH((ncols),0,(nitems)) +	\
+	 MAXALIGN(data_len))
 #define KDS_CALCULATE_HASH_LENGTH(ncols,nitems,data_len)	\
-	(KDS_CALCULATE_HASH_FRONTLEN((ncols),(nitems)) + STROMALIGN(data_len))
+	(KDS_CALCULATE_FRONTEND_LENGTH((ncols),__KDS_NSLOTS(nitems),(nitems)) +	\
+	 MAXALIGN(data_len))
 #define KDS_CALCULATE_SLOT_LENGTH(ncols,nitems)	\
 	(KDS_CALCULATE_HEAD_LENGTH(ncols) +			\
 	 LONGALIGN((sizeof(Datum) +					\

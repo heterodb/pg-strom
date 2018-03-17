@@ -5119,6 +5119,7 @@ gpujoin_process_task(GpuTask *gtask, CUmodule cuda_module)
  * ================================================================
  */
 
+#ifdef NOT_USED
 /*
  * add_extra_randomness
  *
@@ -5174,6 +5175,7 @@ add_extra_randomness(kern_data_store *kds)
 	else
 		elog(ERROR, "Bug? add_extra_randomness for unexpected format");
 }
+#endif
 
 /*
  * calculation of the hash-value
@@ -5265,6 +5267,39 @@ gpujoin_expand_inner_kds(dsm_segment *seg, size_t kds_offset)
 }
 
 /*
+ * gpujoin_compaction_inner_kds - close the hole between row-index/hash-slots
+ * and heap-tuples in the KDS tail.
+ */
+static void
+gpujoin_compaction_inner_kds(kern_data_store *kds_in)
+{
+	size_t		head_sz;
+	size_t		shift;
+	cl_uint	   *row_index;
+	cl_uint		i;
+
+	Assert(kds_in->format == KDS_FORMAT_HASH ||
+		   kds_in->nslots == 0);
+	Assert(kds_in->usage == MAXALIGN(kds_in->usage));
+	head_sz = KDS_CALCULATE_FRONTEND_LENGTH(kds_in->ncols,
+											kds_in->nslots,
+											kds_in->nitems);
+	Assert(head_sz == MAXALIGN(head_sz));
+	Assert(head_sz + kds_in->usage <= kds_in->length);
+	shift = kds_in->length - (head_sz + kds_in->usage);
+	if (shift > 32 * 1024)	/* close the hole larger than 32KB */
+	{
+		memmove((char *)kds_in + head_sz,
+				(char *)kds_in + kds_in->length - kds_in->usage,
+				kds_in->usage);
+		row_index = KERN_DATA_STORE_ROWINDEX(kds_in);
+		for (i=0; i < kds_in->nitems; i++)
+			row_index[i] -= shift;
+		kds_in->length = head_sz + kds_in->usage;
+	}
+}
+
+/*
  * gpujoin_inner_hash_preload
  *
  * Preload inner relation to the data store with hash-format, for hash-
@@ -5279,7 +5314,7 @@ gpujoin_inner_hash_preload(innerState *istate,
 	TupleTableSlot *scan_slot;
 	cl_uint		   *row_index;
 	cl_uint		   *hash_slot;
-	cl_uint			i, j, nslots;
+	cl_uint			i, j;
 	pg_crc32		hash;
 	bool			is_null_keys;
 
@@ -5304,24 +5339,21 @@ gpujoin_inner_hash_preload(innerState *istate,
 		while (!KDS_insert_hashitem(kds_hash, scan_slot, hash))
 			kds_hash = gpujoin_expand_inner_kds(seg, kds_offset);
 	}
-	/* add extra randomness for better key distribution */
-	add_extra_randomness(kds_hash);
+	kds_hash->nslots = __KDS_NSLOTS(kds_hash->nitems);
+	gpujoin_compaction_inner_kds(kds_hash);
 	/* construction of the hash table */
 	row_index = KERN_DATA_STORE_ROWINDEX(kds_hash);
 	hash_slot = KERN_DATA_STORE_HASHSLOT(kds_hash);
-	nslots = __KDS_NSLOTS(kds_hash->nitems);
-
-	memset(hash_slot, 0, sizeof(cl_uint) * nslots);
+	memset(hash_slot, 0, sizeof(cl_uint) * kds_hash->nslots);
 	for (i=0; i < kds_hash->nitems; i++)
 	{
 		kern_hashitem  *khitem = (kern_hashitem *)
 			((char *)kds_hash + row_index[i] - offsetof(kern_hashitem, t));
 		Assert(khitem->rowid == i);
-		j = khitem->hash % nslots;
+		j = khitem->hash % kds_hash->nslots;
 		khitem->next = hash_slot[j];
         hash_slot[j] = (uintptr_t)khitem - (uintptr_t)kds_hash;
 	}
-	kds_hash->nslots = nslots;
 }
 
 /*
@@ -5338,10 +5370,6 @@ gpujoin_inner_heap_preload(innerState *istate,
 {
 	PlanState	   *scan_ps = istate->state;
 	TupleTableSlot *scan_slot;
-	size_t			head_sz;
-	size_t			shift;
-	cl_uint		   *row_index;
-	cl_int			i;
 
 	for (;;)
 	{
@@ -5352,23 +5380,10 @@ gpujoin_inner_heap_preload(innerState *istate,
 		while (!KDS_insert_tuple(kds_heap, scan_slot))
 			kds_heap = gpujoin_expand_inner_kds(seg, kds_offset);
 	}
-	/* add extra randomness for better key distribution */
-	add_extra_randomness(kds_heap);
-	/* close up the hole between row-index and heap-tuples */
-	head_sz = KDS_CALCULATE_ROW_FRONTLEN(kds_heap->ncols,
-										 kds_heap->nitems);
-	Assert(head_sz + kds_heap->usage <= kds_heap->length);
-	shift = kds_heap->length - (head_sz + kds_heap->usage);
-	if (shift > 32*1024)	/* shrink holes larger than 32KB */
-	{
-		memmove((char *)kds_heap + head_sz,
-				(char *)kds_heap + kds_heap->length - kds_heap->usage,
-				kds_heap->usage);
-		row_index = KERN_DATA_STORE_ROWINDEX(kds_heap);
-		for (i=0; i < kds_heap->nitems; i++)
-			row_index[i] -= shift;
-		kds_heap->length = head_sz + kds_heap->usage;
-	}
+	Assert(kds_heap->nslots == 0);
+	gpujoin_compaction_inner_kds(kds_heap);
+	if (kds_heap->length > (size_t)UINT_MAX)
+		elog(ERROR, "GpuJoin: inner heap table larger than 4GB is not supported right now (%zu bytes)", kds_heap->length);		
 }
 
 /*
@@ -5419,7 +5434,7 @@ __gpujoin_inner_preload(GpuJoinState *gjs, bool with_cpu_parallel)
 										  colmeta[ps_desc->natts]));
 		while (kmrels_usage + kds_head_sz > dsm_length)
 		{
-			h_kmrels = dsm_resize(seg, (3 * dsm_length) / 2);
+			h_kmrels = dsm_resize(seg, TYPEALIGN(BLCKSZ, (3*dsm_length)/2));
 			dsm_length = dsm_segment_map_length(seg);
 		}
 		kds = (kern_data_store *)((char *)h_kmrels + kmrels_usage);
