@@ -273,28 +273,36 @@ PG-Stromの全機能を一度に有効化/無効化するには`pg_strom.enabled
 
 @ja{
 システムのクラッシュを引き起こすような重大なトラブルの解析にはクラッシュダンプの採取が欠かせません。
-本節では、PostgreSQLとPG-Stromをクラッシュダンプを取得し、障害発生時のバックトレースを採取するための手順を説明します。
+本節では、PostgreSQLとPG-Stromプロセスのクラッシュダンプ(CPU側)、およびPG-StromのGPUカーネルのクラッシュダンプ(GPU側)を取得し、障害発生時のバックトレースを採取するための手段を説明します。
+}
+@en{
+Crash dump is very helpful for analysis of serious problems which lead system crash for example.
+This session introduces the way to collect crash dump of the PostgreSQL and PG-Strom process (CPU side) and PG-Strom's GPU kernel, and show the back trace on the serious problems.
 }
 
-@ja:### LimitCORE 設定の追加
-@en:### Add LimitCORE configuration
+@ja:### PostgreSQL起動時設定の追加
+@en:### Add configuration on PostgreSQL startup
 
 @ja{
-システムのクラッシュ時にクラッシュダンプを生成させるには、PostgreSQLサーバプロセスが生成する事のできるcoreファイルのサイズを無制限に変更する必要があります。
+プロセスのクラッシュ時にクラッシュダンプ(CPU側)を生成するには、PostgreSQLサーバプロセスが生成する事のできる core ファイルのサイズを無制限に変更する必要があります。これはPostgreSQLサーバプロセスを起動するシェル上で`ulimit -c`コマンドを実行して変更する事ができます。
 
-systemdからPostgreSQLを起動する場合、これを設定するのは以下のファイルです。
-}
+GPUカーネルのエラー時にクラッシュダンプ(GPU側)を生成するには、PostgreSQLサーバプロセスが環境変数`CUDA_ENABLE_COREDUMP_ON_EXCEPTION`に`1`が設定されている必要があります。
 
-```
-/etc/systemd/system/postgresql-<version>.service.d/override.conf
-```
-@ja{
-このファイルに以下の内容を追記します。
+systemdからPostgreSQLを起動する場合、`/etc/systemd/system/postgresql-<version>.service.d/`以下に設定ファイルを作成し、これらの設定を追加する事ができます。
+ファイル名の末尾が`.conf`であるファイルを作成し、以下の内容を追記します。
+RPMインストールの場合は既に`pg_strom.conf`というファイルが作成されています。
 }
 ```
 [Service]
 LimitCORE=infinity
+Environment=CUDA_ENABLE_COREDUMP_ON_EXCEPTION=1
 ```
+@ja{
+CUDA9.1においては、通常、GPUカーネルのクラッシュダンプの生成には数分以上の時間を要し、その間、エラーを発生したPostgreSQLセッションの応答は完全に停止してしまします。
+そのため、は特定クエリの実行においてGPUカーネルに起因するエラーの原因調査を行う場合にだけ、`CUDA_ENABLE_COREDUMP_ON_EXCEPTION`環境変数を設定する事をお勧めします。
+RPMインストールにおけるデフォルト設定は、`CUDA_ENABLE_COREDUMP_ON_EXCEPTION`環境変数の行をコメントアウトしています。
+}
+
 @ja{
 この後でPostgreSQLサーバプロセスを再起動すると、*Max core file size*がunlimitedに設定されているはずです。
 
@@ -302,7 +310,7 @@ LimitCORE=infinity
 }
 
 ```
-$ cat /proc/<PID of postmaster>/limits
+# cat /proc/<PID of postmaster>/limits
 Limit                     Soft Limit           Hard Limit           Units
     :                         :                    :                  :
 Max core file size        unlimited            unlimited            bytes
@@ -339,8 +347,8 @@ Installed:
 Complete!
 ```
 
-@ja:### バックトレースの確認
-@en:### Checking the backtrace
+@ja:### CPU側バックトレースの確認
+@en:### Checking the backtrace on CPU
 
 @ja{
 クラッシュダンプの作成されるパスは、カーネルパラメータ`kernel.core_pattern`および`kernel.core_uses_pid`の値によって決まります。
@@ -385,5 +393,75 @@ GNU gdb (GDB) Red Hat Enterprise Linux 7.6.1-100.el7_4.1
 gdbの`bt`コマンドでバックトレースを確認します。
 このケースでは、クライアントからのクエリを待っている状態のPostgreSQLバックエンドに`SIGSEGV`シグナルを送出してクラッシュを引き起こしたため、`WaitEventSetWait`延長上の`__epoll_wait_nocancel`でプロセスがクラッシュしている事がわかります。
 }
+
+@ja:### GPU側バックトレースの確認
+@en:### Checking the backtrace on GPU
+
+@ja{
+GPUカーネルのクラッシュダンプは、（`CUDA_COREDUMP_FILE`環境変数を用いて明示的に指定しなければ）PostgreSQLサーバプロセスのカレントディレクトリに生成されます。
+systemdからPostgreSQLを起動した場合はデータベースクラスタが構築される`/var/lib/pgdata`を確認してください。以下の名前でGPUカーネルのクラッシュダンプが生成されています。
+}
+
+`core_<timestamp>_<hostname>_<PID>.nvcudmp`
+
+@ja{
+なお、デフォルト設定ではGPUカーネルのクラッシュダンプにはシンボル情報などのデバッグ情報が含まれていません。この状態では障害解析を行う事はほとんど不可能ですので、以下の設定を行ってPG-Stromが生成するGPUプログラムにデバッグ情報を含めるようにしてください。
+
+ただし、この設定は実行時のパフォーマンスを低下させるため、恒常的な使用は非推奨です。
+トラブル解析時にだけ使用するようにしてください。
+}
+
+```
+nvme=# set pg_strom.debug_jit_compile_options = on;
+SET
+```
+
+@ja{
+生成されたGPUカーネルのクラッシュダンプを確認するには`cuda-gdb`コマンドを使用します。
+}
+
+```
+# /usr/local/cuda/bin/cuda-gdb
+NVIDIA (R) CUDA Debugger
+9.1 release
+Portions Copyright (C) 2007-2017 NVIDIA Corporation
+        :
+For help, type "help".
+Type "apropos word" to search for commands related to "word".
+(cuda-gdb)
+```
+
+@ja{
+引数なしで`cuda-gdb`コマンドを実行し、プロンプト上で`target`コマンドを使用して先ほどのクラッシュダンプを読み込みます。
+}
+
+```
+(cuda-gdb) target cudacore /var/lib/pgdata/core_1521131828_magro.heterodb.com_216238.nvcudmp
+Opening GPU coredump: /var/lib/pgdata/core_1521131828_magro.heterodb.com_216238.nvcudmp
+[New Thread 216240]
+
+CUDA Exception: Warp Illegal Address
+The exception was triggered at PC 0x7ff4dc82f930 (cuda_gpujoin.h:1159)
+[Current focus set to CUDA kernel 0, grid 1, block (0,0,0), thread (0,0,0), device 0, sm 0, warp 0, lane 0]
+#0  0x00007ff4dc82f938 in _INTERNAL_8_pg_strom_0124cb94::gpujoin_exec_hashjoin (kcxt=0x7ff4f7fffbf8, kgjoin=0x7fe9f4800078,
+    kmrels=0x7fe9f8800000, kds_src=0x7fe9f0800030, depth=3, rd_stack=0x7fe9f4806118, wr_stack=0x7fe9f480c118, l_state=0x7ff4f7fffc48,
+    matched=0x7ff4f7fffc7c "") at /usr/pgsql-10/share/extension/cuda_gpujoin.h:1159
+1159            while (khitem && khitem->hash != hash_value)
+```
+
+@ja{
+この状態で`bt`コマンドを使用し、問題発生個所へのバックトレースを採取する事ができます。
+}
+
+```
+(cuda-gdb) bt
+#0  0x00007ff4dc82f938 in _INTERNAL_8_pg_strom_0124cb94::gpujoin_exec_hashjoin (kcxt=0x7ff4f7fffbf8, kgjoin=0x7fe9f4800078,
+    kmrels=0x7fe9f8800000, kds_src=0x7fe9f0800030, depth=3, rd_stack=0x7fe9f4806118, wr_stack=0x7fe9f480c118, l_state=0x7ff4f7fffc48,
+    matched=0x7ff4f7fffc7c "") at /usr/pgsql-10/share/extension/cuda_gpujoin.h:1159
+#1  0x00007ff4dc9428f0 in gpujoin_main<<<(30,1,1),(256,1,1)>>> (kgjoin=0x7fe9f4800078, kmrels=0x7fe9f8800000, kds_src=0x7fe9f0800030,
+    kds_dst=0x7fe9e8800030, kparams_gpreagg=0x0) at /usr/pgsql-10/share/extension/cuda_gpujoin.h:1347
+```
+
+
 
 
