@@ -522,7 +522,7 @@
         }, 
         {
             "location": "/release_note/", 
-            "text": "PG-Strom v2.0 Release\n\n\nPG-Strom Development Team (xx-Apr-2018)\n\n\n\n\u6982\u8981\n\n\nOverview\n\n\nMajor enhancement in PG-Strom v2.0 includes:\n\n\n\n\nOverall redesign of the internal infrastructure to manage GPU and stabilization\n\n\nCPU+GPU hybrid parallel execution\n\n\nSSD-to-GPU Direct SQL Execution\n\n\nIn-memory columnar cache\n\n\nGPU memory store (gstore_fdw)\n\n\nRedesign of GpuJoin and GpuPreAgg and speed-up\n\n\nGpuPreAgg + GpuJoin + GpuScan combined GPU kernel\n\n\n\n\n\u52d5\u4f5c\u74b0\u5883\n\n\nPrerequisites\n\n\n\n\nPostgreSQL v9.6, v10\n\n\nCUDA Toolkit 9.1\n\n\nLinux distributions supported by CUDA Toolkit\n\n\nIntel x86 64bit architecture (x86_64)\n\n\nNVIDIA GPU CC 6.0 or later (Pascal or Volta)\n\n\n\n\n\u65b0\u6a5f\u80fd\n\n\nNew Features\n\n\n\u5ec3\u6b62\u3055\u308c\u305f\u6a5f\u80fd\n\n\nDropped features\n\n\n\n\nPostgreSQL v9.5 Support\n\n\nPostgreSQL v9.6 had big changes in both of the optimizer and executor to support CPU parallel query execution. The biggest change for extension modules that interact them is an enhancement of the interface called \"upper planner path-ification\". It allows to choose an optimal execution-plan from the multiple candidates based on the estimated cost, even if it is aggregation or sorting.\n\n\nIt is fundamentally different from the older way where we rewrote query execution plan to inject GpuPreAgg using the hooks. It allows to inject GpuPreAgg node in more reasonable and reliable way, and we could drop complicated (and buggy) logic to rewrite query execution plan once constructed.\n\n\nCustomScan interface is also enhanced to support CPU parallel execution. Due to the reason, we dropped PostgreSQL v9.5 support to follow these new enhancement.\n\n\n\n\n\n\nGpuSort feature\n\n\nWe dropped GpuSort because we have little advantages in the performance.\n\n\nSorting is one of the GPU suitable workloads. However, in case when we try to sort data blocks larger than GPU device memory, we have to split the data blocks into multiple chunks, then partially sort them and merge them by CPU to generate final results.\n\n\nLarger chunk size is better to reduce the load to merge multiple chunks by CPU, on the other hands, larger chunk size takes larger lead time to launch GPU kernel to sort. It means here is a trade-off; which disallows asynchronous processing by PG-Strom to make data transfer latency invisible.\n\n\nIt is hard to solve the problem, or too early to solve the problem, we dropped GpuSort feature once.", 
+            "text": "PG-Strom v2.0 Release\n\n\nPG-Strom Development Team (xx-Apr-2018)\n\n\n\nOverview\n\n\nMajor enhancement in PG-Strom v2.0 includes:\n\n\n\n\nOverall redesign of the internal infrastructure to manage GPU and stabilization\n\n\nCPU+GPU hybrid parallel execution\n\n\nSSD-to-GPU Direct SQL Execution\n\n\nIn-memory columnar cache\n\n\nGPU memory store (gstore_fdw)\n\n\nRedesign of GpuJoin and GpuPreAgg and speed-up\n\n\nGpuPreAgg + GpuJoin + GpuScan combined GPU kernel\n\n\n\n\nPrerequisites\n\n\n\n\nPostgreSQL v9.6, v10\n\n\nCUDA Toolkit 9.1\n\n\nLinux distributions supported by CUDA Toolkit\n\n\nIntel x86 64bit architecture (x86_64)\n\n\nNVIDIA GPU CC 6.0 or later (Pascal or Volta)\n\n\n\n\nNew Features\n\n\nDropped features\n\n\n\n\n\n\nPostgreSQL v9.5 Support\n\n\n\n\nPostgreSQL v9.6 had big changes in both of the optimizer and executor to support CPU parallel query execution. The biggest change for extension modules that interact them is an enhancement of the interface called \"upper planner path-ification\". It allows to choose an optimal execution-plan from the multiple candidates based on the estimated cost, even if it is aggregation or sorting.\n\n\nIt is fundamentally different from the older way where we rewrote query execution plan to inject GpuPreAgg using the hooks. It allows to inject GpuPreAgg node in more reasonable and reliable way, and we could drop complicated (and buggy) logic to rewrite query execution plan once constructed.\n\n\nCustomScan interface is also enhanced to support CPU parallel execution. Due to the reason, we dropped PostgreSQL v9.5 support to follow these new enhancement.\n\n\n\n\n\n\n\n\nGpuSort feature\n\n\n\n\nWe dropped GpuSort because we have little advantages in the performance.\n\n\nSorting is one of the GPU suitable workloads. However, in case when we try to sort data blocks larger than GPU device memory, we have to split the data blocks into multiple chunks, then partially sort them and merge them by CPU to generate final results.\n\n\nLarger chunk size is better to reduce the load to merge multiple chunks by CPU, on the other hands, larger chunk size takes larger lead time to launch GPU kernel to sort. It means here is a trade-off; which disallows asynchronous processing by PG-Strom to make data transfer latency invisible.\n\n\nIt is hard to solve the problem, or too early to solve the problem, we dropped GpuSort feature once.", 
             "title": "Release Note"
         }, 
         {
@@ -531,19 +531,9 @@
             "title": "PG-Strom v2.0 Release"
         }, 
         {
-            "location": "/release_note/#_1", 
-            "text": "", 
-            "title": "\u6982\u8981"
-        }, 
-        {
             "location": "/release_note/#overview", 
             "text": "Major enhancement in PG-Strom v2.0 includes:   Overall redesign of the internal infrastructure to manage GPU and stabilization  CPU+GPU hybrid parallel execution  SSD-to-GPU Direct SQL Execution  In-memory columnar cache  GPU memory store (gstore_fdw)  Redesign of GpuJoin and GpuPreAgg and speed-up  GpuPreAgg + GpuJoin + GpuScan combined GPU kernel", 
             "title": "Overview"
-        }, 
-        {
-            "location": "/release_note/#_2", 
-            "text": "", 
-            "title": "\u52d5\u4f5c\u74b0\u5883"
         }, 
         {
             "location": "/release_note/#prerequisites", 
@@ -551,23 +541,13 @@
             "title": "Prerequisites"
         }, 
         {
-            "location": "/release_note/#_3", 
-            "text": "", 
-            "title": "\u65b0\u6a5f\u80fd"
-        }, 
-        {
             "location": "/release_note/#new-features", 
             "text": "", 
             "title": "New Features"
         }, 
         {
-            "location": "/release_note/#_4", 
-            "text": "", 
-            "title": "\u5ec3\u6b62\u3055\u308c\u305f\u6a5f\u80fd"
-        }, 
-        {
             "location": "/release_note/#dropped-features", 
-            "text": "PostgreSQL v9.5 Support  PostgreSQL v9.6 had big changes in both of the optimizer and executor to support CPU parallel query execution. The biggest change for extension modules that interact them is an enhancement of the interface called \"upper planner path-ification\". It allows to choose an optimal execution-plan from the multiple candidates based on the estimated cost, even if it is aggregation or sorting.  It is fundamentally different from the older way where we rewrote query execution plan to inject GpuPreAgg using the hooks. It allows to inject GpuPreAgg node in more reasonable and reliable way, and we could drop complicated (and buggy) logic to rewrite query execution plan once constructed.  CustomScan interface is also enhanced to support CPU parallel execution. Due to the reason, we dropped PostgreSQL v9.5 support to follow these new enhancement.    GpuSort feature  We dropped GpuSort because we have little advantages in the performance.  Sorting is one of the GPU suitable workloads. However, in case when we try to sort data blocks larger than GPU device memory, we have to split the data blocks into multiple chunks, then partially sort them and merge them by CPU to generate final results.  Larger chunk size is better to reduce the load to merge multiple chunks by CPU, on the other hands, larger chunk size takes larger lead time to launch GPU kernel to sort. It means here is a trade-off; which disallows asynchronous processing by PG-Strom to make data transfer latency invisible.  It is hard to solve the problem, or too early to solve the problem, we dropped GpuSort feature once.", 
+            "text": "PostgreSQL v9.5 Support   PostgreSQL v9.6 had big changes in both of the optimizer and executor to support CPU parallel query execution. The biggest change for extension modules that interact them is an enhancement of the interface called \"upper planner path-ification\". It allows to choose an optimal execution-plan from the multiple candidates based on the estimated cost, even if it is aggregation or sorting.  It is fundamentally different from the older way where we rewrote query execution plan to inject GpuPreAgg using the hooks. It allows to inject GpuPreAgg node in more reasonable and reliable way, and we could drop complicated (and buggy) logic to rewrite query execution plan once constructed.  CustomScan interface is also enhanced to support CPU parallel execution. Due to the reason, we dropped PostgreSQL v9.5 support to follow these new enhancement.     GpuSort feature   We dropped GpuSort because we have little advantages in the performance.  Sorting is one of the GPU suitable workloads. However, in case when we try to sort data blocks larger than GPU device memory, we have to split the data blocks into multiple chunks, then partially sort them and merge them by CPU to generate final results.  Larger chunk size is better to reduce the load to merge multiple chunks by CPU, on the other hands, larger chunk size takes larger lead time to launch GPU kernel to sort. It means here is a trade-off; which disallows asynchronous processing by PG-Strom to make data transfer latency invisible.  It is hard to solve the problem, or too early to solve the problem, we dropped GpuSort feature once.", 
             "title": "Dropped features"
         }
     ]

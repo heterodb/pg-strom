@@ -44,7 +44,7 @@
     <input type="text" name="q" placeholder="Search docs" />
   </form>
 
-  [<a href="../ja" style="color: #fcfcfc">Japanese</a> | <strong>English</strong>]
+  [<a href="../ja" style="color: #cccccc">Japanese</a> | <strong>English</strong>]
 
 </div>
       </div>
@@ -92,19 +92,11 @@
     
         <ul>
         
-            <li><a class="toctree-l3" href="#_1">概要</a></li>
-        
             <li><a class="toctree-l3" href="#overview">Overview</a></li>
-        
-            <li><a class="toctree-l3" href="#_2">動作環境</a></li>
         
             <li><a class="toctree-l3" href="#prerequisites">Prerequisites</a></li>
         
-            <li><a class="toctree-l3" href="#_3">新機能</a></li>
-        
             <li><a class="toctree-l3" href="#new-features">New Features</a></li>
-        
-            <li><a class="toctree-l3" href="#_4">廃止された機能</a></li>
         
             <li><a class="toctree-l3" href="#dropped-features">Dropped features</a></li>
         
@@ -149,7 +141,6 @@
                 <h1 id="pg-strom-v20-release">PG-Strom v2.0 Release</h1>
 <div style="text-align: right;">PG-Strom Development Team (xx-Apr-2018)</div>
 
-<h2 id="_1">概要</h2>
 <h2 id="overview">Overview</h2>
 <p>Major enhancement in PG-Strom v2.0 includes:</p>
 <ul>
@@ -161,7 +152,6 @@
 <li>Redesign of GpuJoin and GpuPreAgg and speed-up</li>
 <li>GpuPreAgg + GpuJoin + GpuScan combined GPU kernel</li>
 </ul>
-<h2 id="_2">動作環境</h2>
 <h2 id="prerequisites">Prerequisites</h2>
 <ul>
 <li>PostgreSQL v9.6, v10</li>
@@ -170,18 +160,20 @@
 <li>Intel x86 64bit architecture (x86_64)</li>
 <li>NVIDIA GPU CC 6.0 or later (Pascal or Volta)</li>
 </ul>
-<h2 id="_3">新機能</h2>
 <h2 id="new-features">New Features</h2>
-<h2 id="_4">廃止された機能</h2>
 <h2 id="dropped-features">Dropped features</h2>
 <ul>
-<li>PostgreSQL v9.5 Support<ul>
+<li>
+<p>PostgreSQL v9.5 Support</p>
+<ul>
 <li>PostgreSQL v9.6 had big changes in both of the optimizer and executor to support CPU parallel query execution. The biggest change for extension modules that interact them is an enhancement of the interface called "upper planner path-ification". It allows to choose an optimal execution-plan from the multiple candidates based on the estimated cost, even if it is aggregation or sorting.</li>
 <li>It is fundamentally different from the older way where we rewrote query execution plan to inject GpuPreAgg using the hooks. It allows to inject GpuPreAgg node in more reasonable and reliable way, and we could drop complicated (and buggy) logic to rewrite query execution plan once constructed.</li>
 <li>CustomScan interface is also enhanced to support CPU parallel execution. Due to the reason, we dropped PostgreSQL v9.5 support to follow these new enhancement.</li>
 </ul>
 </li>
-<li>GpuSort feature<ul>
+<li>
+<p>GpuSort feature</p>
+<ul>
 <li>We dropped GpuSort because we have little advantages in the performance.</li>
 <li>Sorting is one of the GPU suitable workloads. However, in case when we try to sort data blocks larger than GPU device memory, we have to split the data blocks into multiple chunks, then partially sort them and merge them by CPU to generate final results.</li>
 <li>Larger chunk size is better to reduce the load to merge multiple chunks by CPU, on the other hands, larger chunk size takes larger lead time to launch GPU kernel to sort. It means here is a trade-off; which disallows asynchronous processing by PG-Strom to make data transfer latency invisible.</li>
