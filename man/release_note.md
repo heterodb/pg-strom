@@ -3,94 +3,87 @@
 
 <div style="text-align: right;">PG-Strom Development Team (xx-Apr-2018)</div>
 
-### 本バージョンの位置づけ
-
-
-### 特長
-
-
-### 新機能
-
-SSD-to-GPUダイレクトSQL実行
-
-GpuPreAgg+GpuJoin+GpuScan 
-
-列指向キャッシュ
-
-gstore_fdw (GPUデータストア)
-
-
-ネットワークデータ型への対応
-    inet型/macaddr型に対応しました。ログデータの解析に便利です。
-
-範囲型データへの対応
-
-
-
-### その他の修正
-
-
-### 廃止された機能
-
-- PostgreSQL v9.5のサポートは廃止されました。
-- 性能上のメリットが得られないため、GpuSort機能は廃止されました。
-
-
-
-
-
-@ja:# PG-Strom v1.0 リリース
-@en:# PG-Strom v1.0 Release
-
-<div style="text-align: right;">PG-Strom Development Team (26-Oct-2016)</div>
-
-@ja:## リリースハイライト
-@en:## Release High Light
+## 概要
+## Overview
 
 @ja{
-**本バージョンの位置付け
-2016-10-26にリリースされたv1.0は、PostgreSQLクエリ処理を透過的にGPUへオフロードする事で高速化する拡張モジュールPG-Stromの最初のリリースとなります。
-新しい技術に関心の高いアーリーアダプタ層を主たるターゲットとしており、データベース領域におけるGPUの適用可能性の評価・検証に適します。
+PG-Strom v2.0における主要な機能強化は以下の通りです。
+
+- GPUを管理する内部インフラストラクチャの全体的な再設計と安定化
+- CPU+GPUハイブリッド並列実行
+- SSD-to-GPUダイレクトSQL実行
+- インメモリ列指向キャッシュ
+- GPUメモリストア(store_fdw)
+- GpuJoinとGpuPreAggの再設計に伴う高速化
+- GpuPreAgg+GpuJoin+GpuScan 密結合GPUカーネル
 }
 
-### 特長
-半導体技術の進化に伴い、GPUはワンチップに数百～数千並列コアと数百GB/sの広帯域RAMの搭載が一般的になり、かつてはスーパーコンピューター水準の性能とされていた処理能力が、個人の手にも届く水準となってきました。 PG-StromはこのようなGPUの計算能力をクエリ処理の分野に適用する事で、既存のPostgreSQL運用環境に手を加えることなく（つまり、既存のアプリケーションやデータ構造を修正なく使い続けるという条件下で）、チューニングレスかつ安価に性能上の限界を突破する事を意図して設計されています。
-PG-Stromの中核となる技術は、①入力されたSQLワークロードを処理するGPU用バイナリを生成するコードジェネレータ、②数万～数十万行程度のデータチャンク単位で非同期処理を行う実行エンジンの２つです。 PostgreSQL v9.5で新たに対応した CustomScan Interface に対応する事で、PostgreSQL側にはパッチ等を適用することなく、純粋な拡張モジュールとしてこれらの機能を実装する事が可能となりました。
+@en{
+Major enhancement in PG-Strom v2.0 includes:
 
-### 想定用途
-PG-Strom v1.0は、以下のような用途での利用を想定して設計されています。
-- BIなどOLAP系処理を行うアプリケーションのバックエンド
-- ETLやレポーティングなどバッチ処理系
-- トランザクション系DBと情報系DBの統合
-- データベース上での統計解析処理
+- Overall redesign of the internal infrastructure to manage GPU and stabilization
+- CPU+GPU hybrid parallel execution
+- SSD-to-GPU Direct SQL Execution
+- In-memory columnar cache
+- GPU memory store (gstore_fdw)
+- Redesign of GpuJoin and GpuPreAgg and speed-up
+- GpuPreAgg + GpuJoin + GpuScan combined GPU kernel
+}
 
-### 新機能
+## 動作環境
+## Prerequisites
 
-GpuScan
-:    条件句を伴うテーブルの全件スキャンをGPUで実行します。テーブルの大部分がオンメモリの状況では条件句の評価が負荷の大部分を占めるため、並列処理は有効なチューニング策です。
+@ja{
+- PostgreSQL v9.6, v10
+- CUDA Toolkit 9.1
+- CUDA ToolkitのサポートするLinuxディストリビューション
+- Intel x86 64bit アーキテクチャ(x86_64)
+- NVIDIA GPU CC 6.0 以降 (Pascal以降)
+}
+@en{
+- PostgreSQL v9.6, v10
+- CUDA Toolkit 9.1
+- Linux distributions supported by CUDA Toolkit
+- Intel x86 64bit architecture (x86_64)
+- NVIDIA GPU CC 6.0 or later (Pascal or Volta)
+}
 
-GpuJoin
-:    テーブルJOINをGPUで実行します。並列版HashJoinおよびNestLoopアルゴリズムが実装されており、また、1回のGPU呼び出しで3個以上のテーブルを結合する事もありますので、通常、RDBMSの処理ボトルネックとなりがちなテーブル同士の結合を効率的に実行する事ができます。
+## 新機能
+## New Features
 
-GpuPreAgg
-:    集約演算をGPUで実行しCPUの負荷を軽減します。非常に多くの演算コアが協調して大量の入力データをごく少数のサマリへと縮約する演算はGPUが最も得意とするもので、特に、GROUP BYの結果集約率が非常に高くなるケースで効果を発揮します。
+@ja{
+- SSD-to-GPUダイレクトSQL実行
+- インメモリ列指向キャッシュ
 
-GpuSort
-:    GPUでのBitonic Sortingと、CPU側でのMerge Sortingを組み合わせる事で、本体のソート処理を代替します。できるだけ多くのデータを一度にGPUで処理した方が効率的である一方、データチャンクの拡大に伴って非同期処理の効率は低下します。そのため、現バージョンでは十分な性能優位性が得られておらず、デフォルトでは無効化されています。
+}
+@en{
 
-GpuProjection
-:    データベースから取り出したデータを複雑な計算式で処理し、その結果を利用者へと返却する事があります。プロジェクションと呼ばれるこの処理は、結果の件数や計算式の複雑さ次第では、スキャンやジョインといったデータベースの中核的な処理よりも処理時間を要します。GpuProjection機能は、これらの複雑な計算をGPU側で予め行っておき、CPU側では『GPUでの計算結果を参照する』ようクエリ実行計画を書き換える事でクエリ処理を高速化します。
+}
 
-PL/CUDA
-:    任意のCUDAプログラムをSQL関数として実行するための機能です。PostgreSQLのProcedural Languageとして実装されており、SQL関数の引数や実行結果は自動的にCPU～GPU間で受け渡されるため、ユーザは高度なデータ解析アルゴリズムの実装に集中する事ができます。PL/CUDA関数はGPUの本来持っている速度でアルゴリズムを動作させる事ができるため、効率的なin-databaseデータ解析を実現する事ができます。
 
-LIKE句
-:    LIKE句によるパターンマッチングに対応しています。
+## 廃止された機能
+## Dropped features
 
-### 制限事項
-- デバイス初期化に要する時間
-    - GPUデバイスの初期化およびCUDAコンテキストの作成には、概ね0.2～0.3秒程度の時間を要します。短時間で完了するクエリにとってはこの追加コストは無視できないものになるかもしれません。いったん作成したCUDAコンテキストは再利用されるため、コネクションプーリングの利用によりこの制限はある程度緩和されますが、本質的にはv2.0での改善を待つ必要があります。
-- 同時並行セッション数
-    - CUDAコンテキストの再利用に伴い、既にGPUを使い終えたセッションが次回の利用に備えてGPUのRAMをキャッシュする事があります。これは次回のデバイス初期化時間を短縮するためですが、無関係のセッションがGPUのリソースを確保する時の障害ともなります。これを避けるには、同時にPG-Stromを使用するセッション数は最大3～5程度に抑えてください。v2.0での改善が予定されています。
-- データベースサイズ
-    - 一般に、ストレージへのI/Oを伴うデータアクセスはRAMへのアクセスに比べて非常に低速です。PG-StromはSQL処理に伴うCPU負荷をオフロードしますが、I/O主体のワークロードに対しては効果を発揮する事ができません。処理対象のデータがPostgreSQLの共有バッファか、少なくともOSのディスクキャッシュに載り切る程度の大きさのものに対して適用されるべきです。 この制限は、v2.0で導入される予定のSSD連携機能によりある程度緩和される見通しです。
+@ja{
+- PostgreSQL v9.5サポート
+    - PostgreSQL v9.6ではCPU並列クエリの提供に伴い、オプティマイザ/エグゼキュータ共に大きな修正が加えられました。これらと密接に連携する拡張モジュールにとって最もインパクトの大きな変更は『upper planner path-ification』と呼ばれるインターフェースの強化で、集約演算やソートなどの実行計画もコストベースで複数の異なる方法を比較して最適なものを選択できるようになりました。
+    - これはGpuPreAggを実装するためにフックを利用して実行計画を書き換えていた従来の方法とは根本的に異なり、より合理的かつ信頼できる方法でGPUを用いた集約演算を挿入する事が可能となり、バグの温床であった実行計画の書き換えロジックを捨てる事が可能になりました。
+    - 同時に、CustomScanインターフェースにもCPU並列に対応するためのAPIが拡張され、これらに対応するためにPostgreSQL v9.5サポートは廃止されました。
+- GpuSort機能
+    - GpuSort機能は性能上のメリットが得られないため廃止されました。
+    - ソートはGPUの得意とするワークロードの一つです。しかし、GPUデバイスメモリの大きさを越えるサイズのデータをソートする場合、複数のチャンクに分割して部分ソートを行い、後でCPU側でこれを結合して最終結果を出力する必要があります。
+    - 結合フェーズの処理を軽くするには、GPUでソートすべきチャンクのサイズを大きく必要がありますが、一方でチャンクサイズが大きくなるとソート処理を開始するためのリードタイムが長くなり、PG-Stromの特長の一つである非同期処理によるデータ転送レイテンシの隠ぺいが効かなくなるというトレードオフがあります。
+    - これらの問題に対処するのは困難、少なくとも時期尚早であると判断し、GpuSort機能は廃止されました。
+}
+@en{
+- PostgreSQL v9.5 Support
+    - PostgreSQL v9.6 had big changes in both of the optimizer and executor to support CPU parallel query execution. The biggest change for extension modules that interact them is an enhancement of the interface called "upper planner path-ification". It allows to choose an optimal execution-plan from the multiple candidates based on the estimated cost, even if it is aggregation or sorting.
+    - It is fundamentally different from the older way where we rewrote query execution plan to inject GpuPreAgg using the hooks. It allows to inject GpuPreAgg node in more reasonable and reliable way, and we could drop complicated (and buggy) logic to rewrite query execution plan once constructed.
+    - CustomScan interface is also enhanced to support CPU parallel execution. Due to the reason, we dropped PostgreSQL v9.5 support to follow these new enhancement.
+- GpuSort feature
+    - We dropped GpuSort because we have little advantages in the performance.
+    - Sorting is one of the GPU suitable workloads. However, in case when we try to sort data blocks larger than GPU device memory, we have to split the data blocks into multiple chunks, then partially sort them and merge them by CPU to generate final results.
+    - Larger chunk size is better to reduce the load to merge multiple chunks by CPU, on the other hands, larger chunk size takes larger lead time to launch GPU kernel to sort. It means here is a trade-off; which disallows asynchronous processing by PG-Strom to make data transfer latency invisible.
+    - It is hard to solve the problem, or too early to solve the problem, we dropped GpuSort feature once.
+}
+

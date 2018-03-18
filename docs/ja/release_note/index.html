@@ -43,6 +43,9 @@
   <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
     <input type="text" name="q" placeholder="Search docs" />
   </form>
+
+  [<strong>Japanese</strong> | <a href="../../" style="color: #fcfcfc">English</a>]
+
 </div>
       </div>
 
@@ -89,24 +92,21 @@
     
         <ul>
         
-            <li><a class="toctree-l3" href="#_1">本バージョンの位置づけ</a></li>
+            <li><a class="toctree-l3" href="#_1">概要</a></li>
         
-            <li><a class="toctree-l3" href="#_2">特長</a></li>
+            <li><a class="toctree-l3" href="#overview">Overview</a></li>
+        
+            <li><a class="toctree-l3" href="#_2">動作環境</a></li>
+        
+            <li><a class="toctree-l3" href="#prerequisites">Prerequisites</a></li>
         
             <li><a class="toctree-l3" href="#_3">新機能</a></li>
         
-            <li><a class="toctree-l3" href="#_4">その他の修正</a></li>
+            <li><a class="toctree-l3" href="#new-features">New Features</a></li>
         
-            <li><a class="toctree-l3" href="#_5">廃止された機能</a></li>
+            <li><a class="toctree-l3" href="#_4">廃止された機能</a></li>
         
-        </ul>
-    
-
-    <li class="toctree-l2"><a href="#pg-strom-v10">PG-Strom v1.0 リリース</a></li>
-    
-        <ul>
-        
-            <li><a class="toctree-l3" href="#_6">リリースハイライト</a></li>
+            <li><a class="toctree-l3" href="#dropped-features">Dropped features</a></li>
         
         </ul>
     
@@ -149,67 +149,47 @@
                 <h1 id="pg-strom-v20">PG-Strom v2.0リリース</h1>
 <div style="text-align: right;">PG-Strom Development Team (xx-Apr-2018)</div>
 
-<h3 id="_1">本バージョンの位置づけ</h3>
-<h3 id="_2">特長</h3>
-<h3 id="_3">新機能</h3>
-<p>SSD-to-GPUダイレクトSQL実行</p>
-<p>GpuPreAgg+GpuJoin+GpuScan </p>
-<p>列指向キャッシュ</p>
-<p>gstore_fdw (GPUデータストア)</p>
-<p>ネットワークデータ型への対応
-    inet型/macaddr型に対応しました。ログデータの解析に便利です。</p>
-<p>範囲型データへの対応</p>
-<h3 id="_4">その他の修正</h3>
-<h3 id="_5">廃止された機能</h3>
+<h2 id="_1">概要</h2>
+<h2 id="overview">Overview</h2>
+<p>PG-Strom v2.0における主要な機能強化は以下の通りです。</p>
 <ul>
-<li>PostgreSQL v9.5のサポートは廃止されました。</li>
-<li>性能上のメリットが得られないため、GpuSort機能は廃止されました。</li>
+<li>GPUを管理する内部インフラストラクチャの全体的な再設計と安定化</li>
+<li>CPU+GPUハイブリッド並列実行</li>
+<li>SSD-to-GPUダイレクトSQL実行</li>
+<li>インメモリ列指向キャッシュ</li>
+<li>GPUメモリストア(store_fdw)</li>
+<li>GpuJoinとGpuPreAggの再設計に伴う高速化</li>
+<li>GpuPreAgg+GpuJoin+GpuScan 密結合GPUカーネル</li>
 </ul>
-<h1 id="pg-strom-v10">PG-Strom v1.0 リリース</h1>
-<div style="text-align: right;">PG-Strom Development Team (26-Oct-2016)</div>
-
-<h2 id="_6">リリースハイライト</h2>
-<p>**本バージョンの位置付け
-2016-10-26にリリースされたv1.0は、PostgreSQLクエリ処理を透過的にGPUへオフロードする事で高速化する拡張モジュールPG-Stromの最初のリリースとなります。
-新しい技術に関心の高いアーリーアダプタ層を主たるターゲットとしており、データベース領域におけるGPUの適用可能性の評価・検証に適します。</p>
-<h3 id="_7">特長</h3>
-<p>半導体技術の進化に伴い、GPUはワンチップに数百～数千並列コアと数百GB/sの広帯域RAMの搭載が一般的になり、かつてはスーパーコンピューター水準の性能とされていた処理能力が、個人の手にも届く水準となってきました。 PG-StromはこのようなGPUの計算能力をクエリ処理の分野に適用する事で、既存のPostgreSQL運用環境に手を加えることなく（つまり、既存のアプリケーションやデータ構造を修正なく使い続けるという条件下で）、チューニングレスかつ安価に性能上の限界を突破する事を意図して設計されています。
-PG-Stromの中核となる技術は、①入力されたSQLワークロードを処理するGPU用バイナリを生成するコードジェネレータ、②数万～数十万行程度のデータチャンク単位で非同期処理を行う実行エンジンの２つです。 PostgreSQL v9.5で新たに対応した CustomScan Interface に対応する事で、PostgreSQL側にはパッチ等を適用することなく、純粋な拡張モジュールとしてこれらの機能を実装する事が可能となりました。</p>
-<h3 id="_8">想定用途</h3>
-<p>PG-Strom v1.0は、以下のような用途での利用を想定して設計されています。
-- BIなどOLAP系処理を行うアプリケーションのバックエンド
-- ETLやレポーティングなどバッチ処理系
-- トランザクション系DBと情報系DBの統合
-- データベース上での統計解析処理</p>
-<h3 id="_9">新機能</h3>
-<dl>
-<dt>GpuScan</dt>
-<dd>条件句を伴うテーブルの全件スキャンをGPUで実行します。テーブルの大部分がオンメモリの状況では条件句の評価が負荷の大部分を占めるため、並列処理は有効なチューニング策です。</dd>
-<dt>GpuJoin</dt>
-<dd>テーブルJOINをGPUで実行します。並列版HashJoinおよびNestLoopアルゴリズムが実装されており、また、1回のGPU呼び出しで3個以上のテーブルを結合する事もありますので、通常、RDBMSの処理ボトルネックとなりがちなテーブル同士の結合を効率的に実行する事ができます。</dd>
-<dt>GpuPreAgg</dt>
-<dd>集約演算をGPUで実行しCPUの負荷を軽減します。非常に多くの演算コアが協調して大量の入力データをごく少数のサマリへと縮約する演算はGPUが最も得意とするもので、特に、GROUP BYの結果集約率が非常に高くなるケースで効果を発揮します。</dd>
-<dt>GpuSort</dt>
-<dd>GPUでのBitonic Sortingと、CPU側でのMerge Sortingを組み合わせる事で、本体のソート処理を代替します。できるだけ多くのデータを一度にGPUで処理した方が効率的である一方、データチャンクの拡大に伴って非同期処理の効率は低下します。そのため、現バージョンでは十分な性能優位性が得られておらず、デフォルトでは無効化されています。</dd>
-<dt>GpuProjection</dt>
-<dd>データベースから取り出したデータを複雑な計算式で処理し、その結果を利用者へと返却する事があります。プロジェクションと呼ばれるこの処理は、結果の件数や計算式の複雑さ次第では、スキャンやジョインといったデータベースの中核的な処理よりも処理時間を要します。GpuProjection機能は、これらの複雑な計算をGPU側で予め行っておき、CPU側では『GPUでの計算結果を参照する』ようクエリ実行計画を書き換える事でクエリ処理を高速化します。</dd>
-<dt>PL/CUDA</dt>
-<dd>任意のCUDAプログラムをSQL関数として実行するための機能です。PostgreSQLのProcedural Languageとして実装されており、SQL関数の引数や実行結果は自動的にCPU～GPU間で受け渡されるため、ユーザは高度なデータ解析アルゴリズムの実装に集中する事ができます。PL/CUDA関数はGPUの本来持っている速度でアルゴリズムを動作させる事ができるため、効率的なin-databaseデータ解析を実現する事ができます。</dd>
-<dt>LIKE句</dt>
-<dd>LIKE句によるパターンマッチングに対応しています。</dd>
-</dl>
-<h3 id="_10">制限事項</h3>
+<h2 id="_2">動作環境</h2>
+<h2 id="prerequisites">Prerequisites</h2>
 <ul>
-<li>デバイス初期化に要する時間<ul>
-<li>GPUデバイスの初期化およびCUDAコンテキストの作成には、概ね0.2～0.3秒程度の時間を要します。短時間で完了するクエリにとってはこの追加コストは無視できないものになるかもしれません。いったん作成したCUDAコンテキストは再利用されるため、コネクションプーリングの利用によりこの制限はある程度緩和されますが、本質的にはv2.0での改善を待つ必要があります。</li>
+<li>PostgreSQL v9.6, v10</li>
+<li>CUDA Toolkit 9.1</li>
+<li>CUDA ToolkitのサポートするLinuxディストリビューション</li>
+<li>Intel x86 64bit アーキテクチャ(x86_64)</li>
+<li>NVIDIA GPU CC 6.0 以降 (Pascal以降)</li>
+</ul>
+<h2 id="_3">新機能</h2>
+<h2 id="new-features">New Features</h2>
+<ul>
+<li>SSD-to-GPUダイレクトSQL実行</li>
+<li>インメモリ列指向キャッシュ</li>
+</ul>
+<h2 id="_4">廃止された機能</h2>
+<h2 id="dropped-features">Dropped features</h2>
+<ul>
+<li>PostgreSQL v9.5サポート<ul>
+<li>PostgreSQL v9.6ではCPU並列クエリの提供に伴い、オプティマイザ/エグゼキュータ共に大きな修正が加えられました。これらと密接に連携する拡張モジュールにとって最もインパクトの大きな変更は『upper planner path-ification』と呼ばれるインターフェースの強化で、集約演算やソートなどの実行計画もコストベースで複数の異なる方法を比較して最適なものを選択できるようになりました。</li>
+<li>これはGpuPreAggを実装するためにフックを利用して実行計画を書き換えていた従来の方法とは根本的に異なり、より合理的かつ信頼できる方法でGPUを用いた集約演算を挿入する事が可能となり、バグの温床であった実行計画の書き換えロジックを捨てる事が可能になりました。</li>
+<li>同時に、CustomScanインターフェースにもCPU並列に対応するためのAPIが拡張され、これらに対応するためにPostgreSQL v9.5サポートは廃止されました。</li>
 </ul>
 </li>
-<li>同時並行セッション数<ul>
-<li>CUDAコンテキストの再利用に伴い、既にGPUを使い終えたセッションが次回の利用に備えてGPUのRAMをキャッシュする事があります。これは次回のデバイス初期化時間を短縮するためですが、無関係のセッションがGPUのリソースを確保する時の障害ともなります。これを避けるには、同時にPG-Stromを使用するセッション数は最大3～5程度に抑えてください。v2.0での改善が予定されています。</li>
-</ul>
-</li>
-<li>データベースサイズ<ul>
-<li>一般に、ストレージへのI/Oを伴うデータアクセスはRAMへのアクセスに比べて非常に低速です。PG-StromはSQL処理に伴うCPU負荷をオフロードしますが、I/O主体のワークロードに対しては効果を発揮する事ができません。処理対象のデータがPostgreSQLの共有バッファか、少なくともOSのディスクキャッシュに載り切る程度の大きさのものに対して適用されるべきです。 この制限は、v2.0で導入される予定のSSD連携機能によりある程度緩和される見通しです。</li>
+<li>GpuSort機能<ul>
+<li>GpuSort機能は性能上のメリットが得られないため廃止されました。</li>
+<li>ソートはGPUの得意とするワークロードの一つです。しかし、GPUデバイスメモリの大きさを越えるサイズのデータをソートする場合、複数のチャンクに分割して部分ソートを行い、後でCPU側でこれを結合して最終結果を出力する必要があります。</li>
+<li>結合フェーズの処理を軽くするには、GPUでソートすべきチャンクのサイズを大きく必要がありますが、一方でチャンクサイズが大きくなるとソート処理を開始するためのリードタイムが長くなり、PG-Stromの特長の一つである非同期処理によるデータ転送レイテンシの隠ぺいが効かなくなるというトレードオフがあります。</li>
+<li>これらの問題に対処するのは困難、少なくとも時期尚早であると判断し、GpuSort機能は廃止されました。</li>
 </ul>
 </li>
 </ul>

@@ -1,7 +1,14 @@
 site_name: PG-Strom Manual
 site_description: PG-Strom v2.0 Official Documentation
 site_author: PG-Strom Development Team
-theme: readthedocs
+theme:
+    name: readthedocs
+@en{
+    custom_dir: docs/custom_en
+}
+@ja{
+    custom_dir: docs/custom_ja
+}
 pages:
 @en{
 - 'Home' : 'index.md'
