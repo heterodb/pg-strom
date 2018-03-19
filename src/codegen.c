@@ -2357,39 +2357,66 @@ codegen_expression_walker(Node *node, codegen_context *context)
 	{
 		CaseExpr   *caseexpr = (CaseExpr *) node;
 		ListCell   *cell;
+		Oid			type_oid;
 
-		foreach (cell, caseexpr->args)
+		if (caseexpr->arg)
 		{
-			CaseWhen   *casewhen = (CaseWhen *) lfirst(cell);
+			appendStringInfo(
+				&context->str,
+				"PG_CASEWHEN_%s(kcxt,",
+				caseexpr->defresult ? "ELSE" : "EXPR");
 
-			Assert(IsA(casewhen, CaseWhen));
-			if (caseexpr->arg)
+			/* type compare function internally used */
+			type_oid = exprType((Node *) caseexpr->arg);
+			dtype = pgstrom_devtype_lookup(type_oid);
+			if (!dtype)
+				elog(ERROR, "codegen: failed to lookup device type: %s",
+					 format_type_be(type_oid));
+			dfunc = pgstrom_devfunc_lookup_type_compare(dtype, InvalidOid);
+			if (!dfunc)
+				elog(ERROR, "codegen: failed to lookup type compare func: %s",
+					 format_type_be(type_oid));
+			pgstrom_devfunc_track(context, dfunc);
+
+			codegen_expression_walker((Node *) caseexpr->arg, context);
+			if (caseexpr->defresult)
 			{
-				devtype_info   *dtype;
-				devfunc_info   *dfunc;
-				Oid		expr_type = exprType((Node *)caseexpr->arg);
-				Oid		colloid = caseexpr->casecollid;
-
-				dtype = pgstrom_devtype_lookup_and_track(expr_type, context);
-				if (!dtype)
-					elog(ERROR, "codegen: failed to lookup device type: %s",
-						 format_type_be(expr_type));
-				dfunc = pgstrom_devfunc_lookup_type_equal(dtype, colloid);
-				if (!dfunc)
-					elog(ERROR,"codegen: failed to lookup device function: %s",
-						 format_procedure_qualified(dtype->type_eqfunc));
-				pgstrom_devfunc_track(context, dfunc);
-				appendStringInfo(&context->str, "EVAL(");
-				codegen_function_expression(dfunc,
-											list_make2(caseexpr->arg,
-													   casewhen->expr),
-											context);
-				appendStringInfo(&context->str, ") ? (");
-				codegen_expression_walker((Node *) casewhen->result, context);
-				appendStringInfo(&context->str, ") : (");
+				appendStringInfo(&context->str, ", ");
+				codegen_expression_walker((Node *)caseexpr->defresult,
+										  context);
 			}
-			else
+			foreach (cell, caseexpr->args)
 			{
+				CaseWhen   *casewhen = (CaseWhen *) lfirst(cell);
+				OpExpr	   *op_expr = (OpExpr *) casewhen->expr;
+				Node	   *test_val;
+
+				Assert(IsA(casewhen, CaseWhen));
+				if (!IsA(op_expr, OpExpr) ||
+					op_expr->opresulttype != BOOLOID ||
+					list_length(op_expr->args) != 2)
+					elog(ERROR, "Bug? unexpected expression node at CASE ... WHEN");
+				if (IsA(linitial(op_expr->args), CaseTestExpr) &&
+					!IsA(lsecond(op_expr->args), CaseTestExpr))
+					test_val = lsecond(op_expr->args);
+				else if (!IsA(linitial(op_expr->args), CaseTestExpr) &&
+						 IsA(lsecond(op_expr->args), CaseTestExpr))
+					test_val = linitial(op_expr->args);
+				else
+					elog(ERROR, "Bug? CaseTestExpr is expected for either of OpExpr args");
+				appendStringInfo(&context->str, ", ");
+				codegen_expression_walker(test_val, context);
+				appendStringInfo(&context->str, ", ");
+				codegen_expression_walker((Node *)casewhen->result, context);
+			}
+			appendStringInfo(&context->str, ")");
+		}
+		else
+		{
+			foreach (cell, caseexpr->args)
+			{
+				CaseWhen   *casewhen = (CaseWhen *) lfirst(cell);
+
 				Assert(exprType((Node *) casewhen->expr) == BOOLOID);
 				Assert(exprType((Node *) casewhen->result) == caseexpr->casetype);
 				appendStringInfo(&context->str, "EVAL(");
@@ -2398,10 +2425,10 @@ codegen_expression_walker(Node *node, codegen_context *context)
 				codegen_expression_walker((Node *) casewhen->result, context);
 				appendStringInfo(&context->str, ") : (");
 			}
+			codegen_expression_walker((Node *) caseexpr->defresult, context);
+			foreach (cell, caseexpr->args)
+				appendStringInfo(&context->str, ")");
 		}
-		codegen_expression_walker((Node *) caseexpr->defresult, context);
-		foreach (cell, caseexpr->args)
-			appendStringInfo(&context->str, ")");
 	}
 	else if (IsA(node, ScalarArrayOpExpr))
 	{
@@ -2755,8 +2782,7 @@ pgstrom_device_expression(Expr *expr)
 			CaseWhen   *casewhen = lfirst(cell);
 
 			Assert(IsA(casewhen, CaseWhen));
-			if (exprType((Node *)casewhen->expr) !=
-				(caseexpr->arg ? exprType((Node *)caseexpr->arg) : BOOLOID))
+			if (exprType((Node *)casewhen->expr) != BOOLOID)
 				goto unable_node;
 
 			if (!pgstrom_device_expression(casewhen->expr))

@@ -2520,6 +2520,59 @@ operator || (pg_bool_t arg1, pg_bool_t arg2)
 }
 
 /*
+ * Support routine for CASE x WHEN y then ... else ... end
+ */
+template <typename E, typename T>
+STATIC_INLINE(T)
+PG_CASEWHEN_ELSE(kern_context *kcxt,
+				 const E& case_val,
+				 const T& else_val)
+{
+	return else_val;
+}
+
+template <typename E, typename T, typename ...R>
+STATIC_INLINE(T)
+PG_CASEWHEN_ELSE(kern_context *kcxt,
+				 const E& case_val,
+				 const T& else_val,
+				 const E& test_val,
+				 const T& then_val,
+				 const R&... args_rest)
+{
+	pg_int4_t	cmp;
+
+	if (!case_val.isnull && !test_val.isnull)
+	{
+		cmp = pgfn_type_compare(kcxt, case_val, test_val);
+		if (!cmp.isnull && cmp.value == 0)
+			return then_val;
+	}
+	return PG_CASEWHEN_ELSE(kcxt, case_val, else_val, args_rest...);
+}
+
+template <typename E, typename T, typename ...R>
+STATIC_INLINE(T)
+PG_CASEWHEN_EXPR(kern_context *kcxt,
+				 const E& case_val,
+				 const E& test_val,
+				 const T& then_val,
+				 const R&... args_rest)
+{
+	pg_int4_t	cmp;
+	E			else_val;
+
+	if (!case_val.isnull && !test_val.isnull)
+	{
+		cmp = pgfn_type_compare(kcxt, case_val, test_val);
+		if (!cmp.isnull && cmp.value == 0)
+			return then_val;
+	}
+	else_val.isnull = true;
+	return PG_CASEWHEN_ELSE(kcxt, case_val, else_val, args_rest...);
+}
+
+/*
  * Support routine for COALESCE / GREATEST / LEAST
  */
 template <typename T>
@@ -2554,7 +2607,7 @@ PG_GREATEST(kern_context *kcxt, const T& arg1, const R&... args_rest)
 	else
 	{
 		T			arg2 = PG_GREATEST(kcxt, args_rest...);
-		pg_bool_t	cmp;
+		pg_int4_t	cmp;
 
 		cmp = pgfn_type_compare(kcxt, arg1, arg2);
 		if (cmp.isnull)
@@ -2582,7 +2635,7 @@ PG_LEAST(kern_context *kcxt, const T& arg1, const R&... args_rest)
 	else
 	{
 		T			arg2 = PG_LEAST(kcxt, args_rest...);
-		pg_bool_t	cmp;
+		pg_int4_t	cmp;
 
 		cmp = pgfn_type_compare(kcxt, arg1, arg2);
 		if (cmp.isnull)

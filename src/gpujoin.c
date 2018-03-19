@@ -1261,7 +1261,7 @@ typedef struct
 	bool			resjunk;
 } build_device_tlist_context;
 
-static bool
+static void
 build_device_tlist_walker(Node *node, build_device_tlist_context *context)
 {
 	GpuJoinPath	   *gpath = context->gpath;
@@ -1270,8 +1270,21 @@ build_device_tlist_walker(Node *node, build_device_tlist_context *context)
 	int				i;
 
 	if (!node)
-		return false;
-	if (IsA(node, Var))
+		return;
+	if (IsA(node, List))
+	{
+		List   *temp = (List *)node;
+
+		foreach (cell, temp)
+			build_device_tlist_walker(lfirst(cell), context);
+	}
+	else if (IsA(node, TargetEntry))
+	{
+		TargetEntry *tle = (TargetEntry *)node;
+
+		build_device_tlist_walker((Node *)tle->expr, context);
+	}
+	else if (IsA(node, Var))
 	{
 		Var	   *varnode = (Var *) node;
 		Var	   *ps_node;
@@ -1292,7 +1305,7 @@ build_device_tlist_walker(Node *node, build_device_tlist_context *context)
 				Assert(ps_node->vartype == varnode->vartype &&
 					   ps_node->vartypmod == varnode->vartypmod &&
 					   ps_node->varcollid == varnode->varcollid);
-				return false;
+				return;
 			}
 		}
 
@@ -1320,7 +1333,7 @@ build_device_tlist_walker(Node *node, build_device_tlist_context *context)
 													varnode->varattno);
 					Assert(bms_is_member(varnode->varno, rel->relids));
 					Assert(varnode->varno == rel->relid);
-					return false;
+					return;
 				}
 			}
 			else
@@ -1345,7 +1358,7 @@ build_device_tlist_walker(Node *node, build_device_tlist_context *context)
 						context->ps_depth = lappend_int(context->ps_depth, i);
 						context->ps_resno = lappend_int(context->ps_resno,
 														tle->resno);
-						return false;
+						return;
 					}
 				}
 				break;
@@ -1363,7 +1376,7 @@ build_device_tlist_walker(Node *node, build_device_tlist_context *context)
 			TargetEntry	   *tle = lfirst(cell);
 
 			if (equal(phvnode, tle->expr))
-				return false;
+				return;
 		}
 
 		/* Not in the pseudo-scan target-list, so append a new one */
@@ -1411,7 +1424,7 @@ build_device_tlist_walker(Node *node, build_device_tlist_context *context)
 					context->ps_depth = lappend_int(context->ps_depth, i);
 					context->ps_resno = lappend_int(context->ps_resno,
 													tle->resno);
-					return false;
+					return;
 				}
 			}
 		}
@@ -1428,7 +1441,7 @@ build_device_tlist_walker(Node *node, build_device_tlist_context *context)
 			TargetEntry	   *tle = lfirst(cell);
 
 			if (equal(node, tle->expr))
-				return false;
+				return;
 		}
 
 		ps_tle = makeTargetEntry((Expr *) copyObject(node),
@@ -1438,11 +1451,14 @@ build_device_tlist_walker(Node *node, build_device_tlist_context *context)
 		context->ps_tlist = lappend(context->ps_tlist, ps_tle);
 		context->ps_depth = lappend_int(context->ps_depth, -1);	/* dummy */
 		context->ps_resno = lappend_int(context->ps_resno, -1);	/* dummy */
-
-		return false;
 	}
-	return expression_tree_walker(node, build_device_tlist_walker,
-								  (void *) context);
+	else
+	{
+		List   *temp = pull_var_clause(node, PVC_RECURSE_PLACEHOLDERS);
+
+		foreach (cell, temp)
+			build_device_tlist_walker(lfirst(cell), context);
+	}
 }
 
 static void
@@ -1452,7 +1468,7 @@ build_device_targetlist(GpuJoinPath *gpath,
 						List *targetlist,
 						List *custom_plans)
 {
-	build_device_tlist_context	context;
+	build_device_tlist_context context;
 
 	Assert(outerPlan(cscan)
 		   ? cscan->scan.scanrelid == 0
@@ -1463,7 +1479,6 @@ build_device_targetlist(GpuJoinPath *gpath,
 	context.custom_plans = custom_plans;
 	context.outer_scanrelid = cscan->scan.scanrelid;
 	context.resjunk = false;
-
 	build_device_tlist_walker((Node *)targetlist, &context);
 
 	/*
