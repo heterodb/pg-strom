@@ -600,6 +600,25 @@ PG-Strom provides several SQL functions to handle array-based matrix.
 @ja{
 |関数|戻り値|説明|
 |:---|:----:|:---|
+|`plcuda_kernel_max_blocksz`    |`int`|PL/CUDA関数のヘルパーとして呼ばれた場合、当該GPUカーネルの最大ブロックサイズを返す。|
+|`plcuda_kernel_static_shmsz()` |`int`|PL/CUDA関数のヘルパーとして呼ばれた場合、当該GPUカーネルが静的に確保したブロックあたり共有メモリサイズを返す。|
+|`plcuda_kernel_dynamic_shmsz()`|`int`|PL/CUDA関数のヘルパーとして呼ばれた場合、当該GPUカーネルが動的に確保する事のできるブロックあたり共有メモリサイズを返す。|
+|`plcuda_kernel_const_memsz()`  |`int`|PL/CUDA関数のヘルパーとして呼ばれた場合、当該GPUカーネルが静的に確保したコンスタントメモリのサイズを返す。|
+|`plcuda_kernel_local_memsz()`  |`int`|PL/CUDA関数のヘルパーとして呼ばれた場合、当該GPUカーネルが使用するスレッドあたりローカルメモリのサイズを返す。|
+}
+@en{
+|Function|Result|Description|
+|:-------|:----:|:----------|
+|`plcuda_kernel_max_blocksz`    |`int`|It tells maximum block size of the GPU kernel of PL/CUDA function when it is called as its helper.|
+|`plcuda_kernel_static_shmsz()` |`int`|It tells size of the statically acquired shared memory per block by the GPU kernel of PL/CUDA function when it is called as its helper.|
+|`plcuda_kernel_dynamic_shmsz()`|`int`|It tells size of the dynamic shared memory per block, which GPU kernel of the PL/CUDA function can allocate, when it is called as its helper.|
+|`plcuda_kernel_const_memsz()`  |`int`|It tells size of the constant memory acquired by the GPU kernel of PL/CUDA function, when it is called as its helper.
+|`plcuda_kernel_local_memsz()`  |`int`|It tells size of the local memory per thread acquired by the GPU kernel of PL/CUDA function, when it is called as its helper.
+}
+
+@ja{
+|関数|戻り値|説明|
+|:---|:----:|:---|
 |`pgstrom.license_validation()`|`text`|商用サブスクリプションを手動でロードします。|
 |`pgstrom.license_query()`|`text`|現在ロードされている商用サブスクリプションを表示します。|
 }

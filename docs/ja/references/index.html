@@ -1517,6 +1517,42 @@ PG-Stromは配列ベースの行列を取り扱うためのSQL関数をいくつ
 </thead>
 <tbody>
 <tr>
+<td align="left"><code>plcuda_kernel_max_blocksz</code></td>
+<td align="center"><code>int</code></td>
+<td align="left">PL/CUDA関数のヘルパーとして呼ばれた場合、当該GPUカーネルの最大ブロックサイズを返す。</td>
+</tr>
+<tr>
+<td align="left"><code>plcuda_kernel_static_shmsz()</code></td>
+<td align="center"><code>int</code></td>
+<td align="left">PL/CUDA関数のヘルパーとして呼ばれた場合、当該GPUカーネルが静的に確保したブロックあたり共有メモリサイズを返す。</td>
+</tr>
+<tr>
+<td align="left"><code>plcuda_kernel_dynamic_shmsz()</code></td>
+<td align="center"><code>int</code></td>
+<td align="left">PL/CUDA関数のヘルパーとして呼ばれた場合、当該GPUカーネルが動的に確保する事のできるブロックあたり共有メモリサイズを返す。</td>
+</tr>
+<tr>
+<td align="left"><code>plcuda_kernel_const_memsz()</code></td>
+<td align="center"><code>int</code></td>
+<td align="left">PL/CUDA関数のヘルパーとして呼ばれた場合、当該GPUカーネルが静的に確保したコンスタントメモリのサイズを返す。</td>
+</tr>
+<tr>
+<td align="left"><code>plcuda_kernel_local_memsz()</code></td>
+<td align="center"><code>int</code></td>
+<td align="left">PL/CUDA関数のヘルパーとして呼ばれた場合、当該GPUカーネルが使用するスレッドあたりローカルメモリのサイズを返す。</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th align="left">関数</th>
+<th align="center">戻り値</th>
+<th align="left">説明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
 <td align="left"><code>pgstrom.license_validation()</code></td>
 <td align="center"><code>text</code></td>
 <td align="left">商用サブスクリプションを手動でロードします。</td>

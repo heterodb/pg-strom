@@ -1517,6 +1517,42 @@ PG-Strom provides several SQL functions to handle array-based matrix.</p>
 </thead>
 <tbody>
 <tr>
+<td align="left"><code>plcuda_kernel_max_blocksz</code></td>
+<td align="center"><code>int</code></td>
+<td align="left">It tells maximum block size of the GPU kernel of PL/CUDA function when it is called as its helper.</td>
+</tr>
+<tr>
+<td align="left"><code>plcuda_kernel_static_shmsz()</code></td>
+<td align="center"><code>int</code></td>
+<td align="left">It tells size of the statically acquired shared memory per block by the GPU kernel of PL/CUDA function when it is called as its helper.</td>
+</tr>
+<tr>
+<td align="left"><code>plcuda_kernel_dynamic_shmsz()</code></td>
+<td align="center"><code>int</code></td>
+<td align="left">It tells size of the dynamic shared memory per block, which GPU kernel of the PL/CUDA function can allocate, when it is called as its helper.</td>
+</tr>
+<tr>
+<td align="left"><code>plcuda_kernel_const_memsz()</code></td>
+<td align="center"><code>int</code></td>
+<td align="left">It tells size of the constant memory acquired by the GPU kernel of PL/CUDA function, when it is called as its helper.</td>
+</tr>
+<tr>
+<td align="left"><code>plcuda_kernel_local_memsz()</code></td>
+<td align="center"><code>int</code></td>
+<td align="left">It tells size of the local memory per thread acquired by the GPU kernel of PL/CUDA function, when it is called as its helper.</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th align="left">Function</th>
+<th align="center">Result</th>
+<th align="left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
 <td align="left"><code>pgstrom.license_validation()</code></td>
 <td align="center"><code>text</code></td>
 <td align="left">It validates commercial subscription.</td>
