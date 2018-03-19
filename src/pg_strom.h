@@ -656,15 +656,25 @@ CHECK_FOR_GPUCONTEXT(GpuContext *gcontext)
 	uint32		error_level = pg_atomic_read_u32(&gcontext->error_level);
 	const char *error_message;
 
-	if (error_level >= ERROR)
+	/*
+	 * NOTE: The least bit of the error_level is a flag to indicate
+	 * whether the error information is ready or not.
+	 */
+	if (error_level >= 2 * ERROR)
 	{
+		while ((error_level & 1) != 0)
+		{
+			pg_usleep(1000L);
+			error_level = pg_atomic_read_u32(&gcontext->error_level);
+		}
+
 		error_message = strchr(gcontext->error_message, '(');
 		if (!error_message)
 			error_message = gcontext->error_message;
 		elog_start(gcontext->error_filename,
 				   gcontext->error_lineno,
 				   gcontext->error_funcname);
-		elog_finish(error_level, "%s", error_message);
+		elog_finish(error_level / 2, "%s", error_message);
 	}
 	CHECK_FOR_INTERRUPTS();
 }

@@ -562,7 +562,7 @@ GpuContextWorkerReportError(int elevel,
 		return;
 
 	if (pg_atomic_compare_exchange_u32(&gcontext->error_level,
-									   &expected, (uint32)elevel))
+									   &expected, (uint32)(2 * elevel + 1)))
 	{
 		gcontext->error_filename	= filename;
 		gcontext->error_lineno		= lineno;
@@ -574,6 +574,8 @@ GpuContextWorkerReportError(int elevel,
 			vsnprintf(gcontext->error_message, length, fmt, va_args);
 			va_end(va_args);
 		}
+		/* unlock error information */
+		pg_atomic_fetch_and_u32(&gcontext->error_level, 0xfffffffeU);
 	}
 
 	if (GpuWorkerExceptionStack)
