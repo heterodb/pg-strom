@@ -222,8 +222,6 @@ STATIC_FUNCTION(void)
 gpuscan_projection_column(kern_context *kcxt,
 						  kern_data_store *kds_src,
 						  size_t src_index,
-//						  ItemPointerData *t_self,
-//						  HeapTupleFields *htup_field,
 						  Datum *tup_values,
 						  cl_bool *tup_isnull,
 						  char *extra_buf);
@@ -249,8 +247,13 @@ gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
 	cl_uint			total_nitems_out = 0;	/* stat */
 	cl_uint			total_extra_size = 0;	/* stat */
 #ifdef GPUSCAN_HAS_DEVICE_PROJECTION
+#if GPUSCAN_DEVICE_PROJECTION_NFIELDS > 0
 	Datum			tup_values[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
 	cl_bool			tup_isnull[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
+#else
+	Datum		   *tup_values = NULL;
+	cl_bool		   *tup_isnull = NULL;
+#endif
 #if GPUSCAN_DEVICE_PROJECTION_EXTRA_SIZE > 0
 	char			tup_extra[GPUSCAN_DEVICE_PROJECTION_EXTRA_SIZE]
 					__attribute__ ((aligned(MAXIMUM_ALIGNOF)));
@@ -441,8 +444,13 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 	cl_uint			total_extra_size = 0;	/* stat */
 	cl_bool			try_next_window = true;
 #ifdef GPUSCAN_HAS_DEVICE_PROJECTION
+#if GPUSCAN_DEVICE_PROJECTION_NFIELDS > 0
 	Datum			tup_values[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
 	cl_bool			tup_isnull[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
+#else
+	Datum		   *tup_values = NULL;
+	cl_bool		   *tup_isnull = NULL;
+#endif
 #if GPUSCAN_DEVICE_PROJECTION_EXTRA_SIZE > 0
 	char			tup_extra[GPUSCAN_DEVICE_PROJECTION_EXTRA_SIZE]
 					__attribute__ ((aligned(MAXIMUM_ALIGNOF)));
@@ -684,8 +692,13 @@ gpuscan_exec_quals_column(kern_gpuscan *kgpuscan,
 	cl_uint			usage_offset	__attribute__((unused));
 	cl_uint			total_nitems_out = 0;	/* stat */
 	cl_uint			total_extra_size = 0;	/* stat */
+#if GPUSCAN_DEVICE_PROJECTION_NFIELDS > 0
 	Datum			tup_values[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
 	cl_bool			tup_isnull[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
+#else
+	Datum		   *tup_values = NULL;
+	cl_bool		   *tup_isnull = NULL;
+#endif
 #if GPUSCAN_DEVICE_PROJECTION_EXTRA_SIZE > 0
 	cl_char			tup_extra[GPUSCAN_DEVICE_PROJECTION_EXTRA_SIZE]
 					__attribute__ ((aligned(MAXIMUM_ALIGNOF)));

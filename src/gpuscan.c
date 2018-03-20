@@ -798,6 +798,7 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 	ListCell	   *lc;
 	int				prev;
 	int				i, j, k;
+	bool			has_extract_tuple = false;
 	size_t			extra_size = 0;
 	devtype_info   *dtype;
 	StringInfoData	tdecl;
@@ -845,8 +846,6 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 		"gpuscan_projection_column(kern_context *kcxt,\n"
 		"                          kern_data_store *kds_src,\n"
 		"                          size_t src_index,\n"
-//		"                          ItemPointerData *t_self,\n"
-//		"                          HeapTupleFields *htup_field,\n"
 		"                          Datum *tup_values,\n"
 		"                          cl_bool *tup_isnull,\n"
 		"                          char *tup_extra)\n"
@@ -1077,15 +1076,17 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 		{
 			appendStringInfoString(&tbody, temp.data);
 			resetStringInfo(&temp);
+			has_extract_tuple = true;
 		}
 		appendStringInfoString(
 			&temp,
 			"  EXTRACT_HEAP_TUPLE_NEXT(curr);\n");
 	}
-	appendStringInfoString(
-		&tbody,
-		"  EXTRACT_HEAP_TUPLE_END();\n"
-		"\n");
+	if (has_extract_tuple)
+		appendStringInfoString(
+			&tbody,
+			"  EXTRACT_HEAP_TUPLE_END();\n"
+			"\n");
 
 	/*
 	 * step.3 - execute expression node, then store the result onto KVAR_xx
