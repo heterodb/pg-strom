@@ -139,6 +139,7 @@
 #include <cuda.h>
 #include <nvrtc.h>
 
+#include <assert.h>
 #include <pthread.h>
 #include <unistd.h>
 #include <float.h>

@@ -766,6 +766,7 @@ KERN_HASH_FIRST_ITEM(kern_data_store *kds, cl_uint hash)
 
 	if (slot[index] == 0)
 		return NULL;
+	Assert(slot[index] < kds->length);
 	return (kern_hashitem *)((char *)kds + slot[index]);
 }
 
@@ -774,6 +775,7 @@ KERN_HASH_NEXT_ITEM(kern_data_store *kds, kern_hashitem *khitem)
 {
 	if (!khitem || khitem->next == 0)
 		return NULL;
+	Assert(khitem->next < kds->length);
 	return (kern_hashitem *)((char *)kds + khitem->next);
 }
 

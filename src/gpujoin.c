@@ -562,20 +562,6 @@ cost_gpujoin(PlannerInfo *root,
 												gpath,
 												num_chunks,
 												&kern_nloops);
-#if 0
-	// unified memory kills a hard restriction of device memory,
-	// but some penalty is needed for large device memory allocation
-	//
-	if (inner_buffer_sz > gpuMemMaxAllocSize())
-	{
-		double	ratio = ((double)(gpuMemMaxAllocSize() - inner_buffer_sz) /
-						 (double)(gpuMemMaxAllocSize()));
-		page_fault_factor += ratio * ratio;
-		if (inner_buffer_sz > 5 * gpuMemMaxAllocSize())
-			startup_cost += disable_cost;
-	}
-#endif
-
 	/*
 	 * Cost for each depth
 	 */
@@ -586,7 +572,21 @@ cost_gpujoin(PlannerInfo *root,
 		List	   *hash_quals = gpath->inners[i].hash_quals;
 		List	   *join_quals = gpath->inners[i].join_quals;
 		double		join_nrows = gpath->inners[i].join_nrows;
+		Size		ichunk_size = gpath->inners[i].ichunk_size;
 		QualCost	join_quals_cost;
+
+		/*
+		 * FIXME: Right now, KDS_FORMAT_ROW/HASH does not support KDS size
+		 * larger than 4GB because of 32bit index from row_index[] or
+		 * hash_slot[]. So, tentatively, we prohibit to construct GpuJoin
+		 * path which contains large tables (expected 1.5GB, with safety
+		 * margin) in the inner buffer.
+		 * In the future version, up to 32GB chunk will be supported using
+		 * least 3bit because row-/hash-item shall be always put on 64bit
+		 * aligned location.
+		 */
+		if (ichunk_size >= 0x600000UL)
+			return false;
 
 		/* cost to load all the tuples from inner-path */
 		startup_cost += scan_path->total_cost;
@@ -5255,29 +5255,36 @@ static kern_data_store *
 gpujoin_expand_inner_kds(dsm_segment *seg, size_t kds_offset)
 {
 	kern_data_store *kds;
-	size_t		new_size;
+	size_t		new_dsmlen;
+	size_t		kds_length;
 	size_t		shift;
 	char	   *new_kmrels;
 	cl_uint	   *row_index;
 	cl_int		i;
 
-	new_size = TYPEALIGN(BLCKSZ, (3 * dsm_segment_map_length(seg)) / 2);
-	new_kmrels = dsm_resize(seg, new_size);
+	/* check current size */
+	kds = (kern_data_store *)
+		((char *)dsm_segment_address(seg) + kds_offset);
+	if (kds->length >= 0x100000000)
+		elog(ERROR, "GpuJoin: inner hash table larger than 4GB is not supported right now (nitems=%u, usage=%u)", kds->nitems, kds->usage);
+
+	new_dsmlen = TYPEALIGN(BLCKSZ, (3 * dsm_segment_map_length(seg)) / 2);
+	new_kmrels = dsm_resize(seg, new_dsmlen);
 	kds = (kern_data_store *)(new_kmrels + kds_offset);
 	row_index = KERN_DATA_STORE_ROWINDEX(kds);
-	shift = new_size - kds_offset - kds->length;
+	kds_length = Min(new_dsmlen - kds_offset, 0x100000000);
+	shift = kds_length - kds->length;
 	Assert(shift == MAXALIGN(shift));
 	if (kds->nitems > 0)
 	{
 		Assert(kds->usage > 0);
-		memmove(new_kmrels + new_size - kds->usage,
-				(char *)kds + kds->length - kds->usage,
+		memmove((char *)kds + kds_length  - kds->usage,	/* new pos */
+				(char *)kds + kds->length - kds->usage,	/* old pos */
 				kds->usage);
 		for (i=0; i < kds->nitems; i++)
 			row_index[i] += shift;
 	}
-	Assert(dsm_segment_map_length(seg) - kds_offset > kds->length);
-	kds->length = dsm_segment_map_length(seg) - kds_offset;
+	kds->length = kds_length;
 	return kds;
 }
 
@@ -5367,7 +5374,7 @@ gpujoin_inner_hash_preload(innerState *istate,
 		Assert(khitem->rowid == i);
 		j = khitem->hash % kds_hash->nslots;
 		khitem->next = hash_slot[j];
-        hash_slot[j] = (uintptr_t)khitem - (uintptr_t)kds_hash;
+		hash_slot[j] = (uintptr_t)khitem - (uintptr_t)kds_hash;
 	}
 }
 
@@ -5441,6 +5448,7 @@ __gpujoin_inner_preload(GpuJoinState *gjs, bool with_cpu_parallel)
 		TupleDesc		ps_desc = ps_slot->tts_tupleDescriptor;
 		kern_data_store *kds;
 		size_t			dsm_length;
+		size_t			kds_length;
 		size_t			kds_head_sz;
 
 		/* expand DSM on demand */
@@ -5453,9 +5461,10 @@ __gpujoin_inner_preload(GpuJoinState *gjs, bool with_cpu_parallel)
 			dsm_length = dsm_segment_map_length(seg);
 		}
 		kds = (kern_data_store *)((char *)h_kmrels + kmrels_usage);
+		kds_length = Min(dsm_length - kmrels_usage, 0x100000000L);
 		init_kernel_data_store(kds,
 							   ps_desc,
-							   dsm_length - kmrels_usage,
+							   kds_length,
 							   (istate->hash_inner_keys != NIL
 								? KDS_FORMAT_HASH
 								: KDS_FORMAT_ROW),
