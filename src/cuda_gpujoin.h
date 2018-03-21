@@ -618,7 +618,7 @@ gpujoin_projection_row(kern_context *kcxt,
 #else
 	Datum	   *tup_values = NULL;
 	cl_bool	   *tup_isnull = NULL;
-	cl_bool	   *use_extra_buf[GPUJOIN_DEVICE_PROJECTION_NFIELDS];
+	cl_bool	   *use_extra_buf = NULL;
 #endif
 #if GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE > 0
 	cl_char		extra_buf[GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE]
