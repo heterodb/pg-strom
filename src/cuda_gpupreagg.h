@@ -416,9 +416,9 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 	cl_uint			count;
 	cl_uint			offset;
 	cl_bool			try_next_window = true;
+	cl_bool			thread_is_valid = false;
 	__shared__ cl_uint	base;
 	__shared__ cl_int	status;
-	__shared__ cl_int	gang_sync;
 
 	INIT_KERNEL_CONTEXT(&kcxt, gpupreagg_setup_block, kparams);
 	if (get_local_id() == 0)
@@ -431,6 +431,8 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 	part_sz = Min((kds_src->nrows_per_block +
 				   warpSize-1) & ~(warpSize-1), get_local_size());
 	n_parts = get_local_size() / part_sz;
+	if (get_local_id() < part_sz * n_parts)
+		thread_is_valid = true;
 	do {
 		cl_uint		part_id;
 		cl_uint		line_no;
@@ -458,7 +460,7 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 			Datum	   *slot_values;
 			cl_bool		rc = false;
 
-			if (part_id < kds_src->nitems)
+			if (thread_is_valid && part_id < kds_src->nitems)
 			{
 				pg_page = KERN_DATA_STORE_BLOCK_PGPAGE(kds_src, part_id);
 				n_lines = PageGetMaxOffsetNumber(pg_page);
@@ -466,6 +468,13 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 				t_self.ip_blkid.bi_hi = block_nr >> 16;
 				t_self.ip_blkid.bi_lo = block_nr & 0xffff;
 				t_self.ip_posid = line_no + 1;
+
+				if (line_no < n_lines)
+				{
+					ItemIdData *lpp = PageGetItemId(pg_page, line_no + 1);
+					if (ItemIdIsNormal(lpp))
+						htup = PageGetItem(pg_page, lpp);
+				}
 			}
 			else
 			{
@@ -473,23 +482,12 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 				n_lines = 0;
 			}
 
-			/* fetch a heap_tuple if valid */
-			if (line_no < n_lines)
-			{
-				ItemIdData	   *lpp = PageGetItemId(pg_page, line_no + 1);
-				if (ItemIdIsNormal(lpp))
-					htup = PageGetItem(pg_page, lpp);
-			}
-
 			/* evaluation of the qualifier */
 #ifdef GPUPREAGG_HAS_OUTER_QUALS
 			if (htup)
 				rc = gpuscan_quals_eval(&kcxt, kds_src, &t_self, htup);
 			/* bailout if any errors */
-			if (kcxt.e.errcode != StromError_Success)
-				atomicCAS(&status, StromError_Success, kcxt.e.errcode);
-			__syncthreads();
-			if (status != StromError_Success)
+			if (__syncthreads_count(kcxt.e.errcode) > 0)
 				goto out;
 #else
 			rc = true;
@@ -521,10 +519,7 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 											 slot_isnull);
 				}
 				/* bailout if any errors */
-				if (kcxt.e.errcode != StromError_Success)
-					atomicCAS(&status, StromError_Success, kcxt.e.errcode);
-				__syncthreads();
-				if (status != StromError_Success)
+				if (__syncthreads_count(kcxt.e.errcode) > 0)
 					goto out;
 			}
 			/* update statistics */
@@ -544,13 +539,8 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 			 * If no threads in CUDA block wants to continue, exit the loop.
 			 */
 			line_no += part_sz;
-			if (get_local_id() == 0)
-				gang_sync = 0;
-			__syncthreads();
-			if (get_local_id() % part_sz == 0 && line_no < n_lines)
-				gang_sync = 1;
-			__syncthreads();
-		} while (gang_sync > 0);
+		} while (__syncthreads_count(thread_is_valid &&
+									 line_no < n_lines) > 0);
 	} while(try_next_window);
 out:
 	/* write back error status if any */
