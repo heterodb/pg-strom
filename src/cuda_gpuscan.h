@@ -305,10 +305,7 @@ gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
 		}
 #ifdef GPUSCAN_HAS_WHERE_QUALS
 		/* bailout if any error */
-		if (kcxt.e.errcode != StromError_Success)
-			atomicCAS(&status, StromError_Success, kcxt.e.errcode);
-		__syncthreads();
-		if (status != StromError_Success)
+		if (__syncthreads_count(kcxt.e.errcode) > 0)
 			break;
 #endif
 		/* how many rows servived WHERE-clause evaluation? */
@@ -443,6 +440,7 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 	cl_uint			total_nitems_out = 0;	/* stat */
 	cl_uint			total_extra_size = 0;	/* stat */
 	cl_bool			try_next_window = true;
+	cl_bool			thread_is_valid = false;
 #ifdef GPUSCAN_HAS_DEVICE_PROJECTION
 #if GPUSCAN_DEVICE_PROJECTION_NFIELDS > 0
 	Datum			tup_values[GPUSCAN_DEVICE_PROJECTION_NFIELDS];
@@ -462,7 +460,6 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 	__shared__ cl_uint	nitems_base;
 	__shared__ cl_uint	usage_base;
 	__shared__ cl_int	status __attribute__((unused));
-	__shared__ cl_int	gang_sync;
 
 	assert(kds_src->format == KDS_FORMAT_BLOCK);
 	assert(kds_dst->format == KDS_FORMAT_ROW);
@@ -473,6 +470,8 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 
 	part_sz = KERN_DATA_STORE_PARTSZ(kds_src);
 	n_parts = get_local_size() / part_sz;
+	if (get_local_id() < part_sz * n_parts)
+		thread_is_valid = true;
 	do {
 		cl_uint		part_id;
 		cl_uint		line_no;
@@ -503,7 +502,7 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 			cl_bool		rc;
 
 			/* identify the block */
-			if (part_id < src_nitems)
+			if (thread_is_valid && part_id < src_nitems)
 			{
 				pg_page = KERN_DATA_STORE_BLOCK_PGPAGE(kds_src, part_id);
 				n_lines = PageGetMaxOffsetNumber(pg_page);
@@ -530,11 +529,11 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 			else
 				rc = false;
 			/* bailout if any error */
-			if (kcxt.e.errcode != StromError_Success)
-				atomicCAS(&status, StromError_Success, kcxt.e.errcode);
-			__syncthreads();
-			if (status != StromError_Success)
+			if (__syncthreads_count(kcxt.e.errcode) > 0)
+			{
+				try_next_window = false;
 				break;
+			}
 #else
 			rc = true;
 #endif
@@ -544,9 +543,9 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 				goto skip;
 
 			/* store the result heap-tuple to destination buffer */
-#ifdef GPUSCAN_HAS_DEVICE_PROJECTION
 			if (htup && rc)
 			{
+#ifdef GPUSCAN_HAS_DEVICE_PROJECTION
 				gpuscan_projection_tuple(&kcxt,
 										 kds_src,
 										 htup,
@@ -559,20 +558,48 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 														   kds_dst,
 														   tup_values,
 														   tup_isnull));
+#else
+				/* no projection; just write the source tuple as is */
+				required = MAXALIGN(offsetof(kern_tupitem, htup) + t_len);
+#endif
 			}
 			else
 				required = 0;
 
 			usage_offset = pgstromStairlikeSum(required, &extra_sz);
 			if (get_local_id() == 0)
-				usage_base = atomicAdd(&kds_dst->usage, extra_sz);
-			__syncthreads();
-
-			if (KERN_DATA_STORE_HEAD_LENGTH(kds_dst) +
-				STROMALIGN(sizeof(cl_uint) * (nitems_base + nvalids)) +
-				usage_base + extra_sz > kds_dst->length)
 			{
-				STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
+				union {
+					struct {
+						cl_uint	nitems;
+						cl_uint	usage;
+					} i;
+					cl_ulong	v64;
+				} oldval, curval, newval;
+
+				curval.i.nitems = kds_dst->nitems;
+				curval.i.usage  = kds_dst->usage;
+				do {
+					newval = oldval = curval;
+					newval.i.nitems += nvalids;
+					newval.i.usage  += extra_sz;
+
+					if (KERN_DATA_STORE_HEAD_LENGTH(kds_dst) +
+						STROMALIGN(sizeof(cl_uint) * newval.i.nitems) +
+						newval.i.usage > kds_dst->length)
+					{
+						STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
+						break;
+					}
+				} while ((curval.v64 = atomicCAS((cl_ulong *)&kds_dst->nitems,
+												 oldval.v64,
+												 newval.v64)) != oldval.v64);
+				nitems_base = oldval.i.nitems;
+				usage_base  = oldval.i.usage;
+			}
+			if (__syncthreads_count(kcxt.e.errcode) > 0)
+			{
+				try_next_window = false;
 				break;
 			}
 
@@ -580,7 +607,9 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 			if (htup && rc)
 			{
 				cl_uint	   *tup_index = KERN_DATA_STORE_ROWINDEX(kds_dst);
-				cl_uint		pos;
+				cl_uint		pos =
+					(kds_dst->length - (usage_base + usage_offset + required));
+#ifdef GPUSCAN_HAS_DEVICE_PROJECTION
 				cl_uint		htuple_oid = 0;
 
 				if (kds_dst->tdhasoid)
@@ -589,9 +618,6 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 					if (htuple_oid == 0)
 						htuple_oid = 0xffffffff;
 				}
-
-				pos = kds_dst->length - (usage_base + usage_offset + required);
-				tup_index[nitems_base + nitems_offset] = pos;
 				form_kern_heaptuple((kern_tupitem *)((char *)kds_dst + pos),
 									kds_dst->ncols,
 									kds_dst->colmeta,
@@ -600,44 +626,16 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 									htuple_oid,
 									tup_values,
 									tup_isnull);
-			}
 #else
-			/* no projection - write back souce tuple as is */
-			if (get_local_id() == 0)
-				nitems_base = atomicAdd(&kds_dst->nitems, nvalids);
-			__syncthreads();
-
-			if (htup && rc)
-				required = MAXALIGN(offsetof(kern_tupitem, htup) + t_len);
-			else
-				required = 0;
-			
-			usage_offset = pgstromStairlikeSum(required, &extra_sz);
-			if (get_local_id() == 0)
-				usage_base = atomicAdd(&kds_dst->usage, extra_sz);
-			__syncthreads();
-
-			if (KERN_DATA_STORE_HEAD_LENGTH(kds_dst) +
-				STROMALIGN(sizeof(cl_uint) * (nitems_base + nvalids)) +
-				usage_base + extra_sz > kds_dst->length)
-			{
-				STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
-				break;
-			}
-
-			if (htup && rc)
-			{
 				kern_tupitem *tupitem;
-				cl_uint	   *tup_index = KERN_DATA_STORE_ROWINDEX(kds_dst);
-				cl_uint		pos = kds_dst->length - (usage_base +
-													 usage_offset + required);
+
 				tupitem = (kern_tupitem *)((char *)kds_dst + pos);
 				tupitem->t_len = t_len;
 				tupitem->t_self = t_self;
 				memcpy(&tupitem->htup, htup, t_len);
+#endif
 				tup_index[nitems_base + nitems_offset] = pos;
 			}
-#endif
 		skip:
 			/* update statistics */
 			pgstromStairlikeBinaryCount(htup != NULL, &nitems_real);
@@ -653,13 +651,8 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 			 * If no threads in CUDA block wants to continue, exit the loop.
 			 */
 			line_no += part_sz;
-			if (get_local_id() == 0)
-				gang_sync = 0;
-			__syncthreads();
-			if (get_local_id() % part_sz == 0 && line_no < n_lines)
-				gang_sync = 1;
-			__syncthreads();
-		} while (gang_sync > 0);
+		} while (__syncthreads_count(thread_is_valid &&
+									 line_no < n_lines) > 0);
 	} while (try_next_window);
 
 	/* update statistics */
