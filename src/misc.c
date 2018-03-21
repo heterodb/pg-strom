@@ -623,6 +623,7 @@ pgstrom_random_inet(PG_FUNCTION_ARGS)
 		bits -= 8;
 		v >>= 8;
 	}
+	ip_bits(temp) = ip_maxbits(temp);
 	PG_RETURN_INET_P(temp);
 }
 PG_FUNCTION_INFO_V1(pgstrom_random_inet);
