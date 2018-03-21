@@ -138,7 +138,7 @@ pgfn_cash_div_cash(kern_context *kcxt, pg_money_t arg1, pg_money_t arg2)
 	return result;
 }
 
-#define PGFN_MONEY_MULFUNC_TEMPLATE(name,d_type)					\
+#define PGFN_MONEY_MULFUNC_TEMPLATE(name,d_type,d_cast)				\
 	STATIC_FUNCTION(pg_money_t)										\
 	pgfn_cash_mul_##name(kern_context *kcxt,						\
 						 pg_money_t arg1, pg_##d_type##_t arg2)		\
@@ -150,17 +150,17 @@ pgfn_cash_div_cash(kern_context *kcxt, pg_money_t arg1, pg_money_t arg2)
 		else														\
 		{															\
 			result.isnull = false;									\
-			result.value =  arg1.value * arg2.value;				\
+			result.value = arg1.value * (d_cast)arg2.value;			\
 		}															\
 		return result;												\
 	}
 
-PGFN_MONEY_MULFUNC_TEMPLATE(int2, int2)
-PGFN_MONEY_MULFUNC_TEMPLATE(int4, int4)
+PGFN_MONEY_MULFUNC_TEMPLATE(int2, int2, cl_long)
+PGFN_MONEY_MULFUNC_TEMPLATE(int4, int4, cl_long)
 //PGFN_MONEY_MULFUNC_TEMPLATE(int8, int8)
-PGFN_MONEY_MULFUNC_TEMPLATE(flt2, float2)
-PGFN_MONEY_MULFUNC_TEMPLATE(flt4, float4)
-PGFN_MONEY_MULFUNC_TEMPLATE(flt8, float8)
+PGFN_MONEY_MULFUNC_TEMPLATE(flt2, float2, cl_float)
+PGFN_MONEY_MULFUNC_TEMPLATE(flt4, float4, cl_float)
+PGFN_MONEY_MULFUNC_TEMPLATE(flt8, float8, cl_double)
 #undef PGFN_MONEY_MULFUNC_TEMPLATE
 
 #define PGFN_MONEY_DIVFUNC_TEMPLATE(name,d_type,zero)				\
@@ -182,7 +182,8 @@ PGFN_MONEY_MULFUNC_TEMPLATE(flt8, float8)
 			else													\
 			{														\
 				result.isnull = false;								\
-				result.value =  arg1.value / arg2.value;			\
+				result.value = rint((cl_double)arg1.value /			\
+									(cl_double)arg2.value);			\
 			}														\
 		}															\
 		return result;												\
@@ -191,7 +192,7 @@ PGFN_MONEY_MULFUNC_TEMPLATE(flt8, float8)
 PGFN_MONEY_DIVFUNC_TEMPLATE(int2, int2, 0)
 PGFN_MONEY_DIVFUNC_TEMPLATE(int4, int4, 0)
 //PGFN_MONEY_DIVFUNC_TEMPLATE(int8, int8, 0)
-PGFN_MONEY_DIVFUNC_TEMPLATE(flt2, float2, 0.0)
+PGFN_MONEY_DIVFUNC_TEMPLATE(flt2, float2, (__half)0.0)
 PGFN_MONEY_DIVFUNC_TEMPLATE(flt4, float4, 0.0)
 PGFN_MONEY_DIVFUNC_TEMPLATE(flt8, float8, 0.0)
 #undef PGFN_MONEY_DIVFUNC_TEMPLATE
@@ -617,15 +618,27 @@ pg_inet_datum_ref(kern_context *kcxt, void *datum)
 				result.isnull = true;
 			}
 		}
-		else if (!VARATT_IS_EXTERNAL(datum) &&
-				 VARSIZE_ANY_EXHDR(datum) == sizeof(inet_struct))
-		{
-			memcpy(&result.value, datum, sizeof(inet_struct));
-		}
-		else
+		else if (VARATT_IS_EXTERNAL(datum) ||
+				 VARSIZE_ANY_EXHDR(datum) < offsetof(inet_struct, ipaddr))
 		{
 			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 			result.isnull = true;
+		}
+		else
+		{
+			inet_struct	   *ip_data = (inet_struct *)VARDATA_ANY(datum);
+			cl_int			ip_size = ip_addrsize(ip_data);
+
+			if (VARSIZE_ANY_EXHDR(datum) >= ip_size)
+			{
+				memcpy(&result.value, VARDATA_ANY(datum), ip_size);
+				result.isnull = false;
+			}
+			else
+			{
+				STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+				result.isnull = true;
+			}
 		}
 	}
 	return result;
@@ -664,7 +677,6 @@ pg_inet_param(kern_context *kcxt, cl_uint param_id)
 
 	return pg_inet_datum_ref(kcxt,paddr);
 }
-STROMCL_SIMPLE_NULLTEST_TEMPLATE(inet)
 STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(inet,inet_struct)
 #endif	/* PG_INET_TYPE_DEFINED */
 

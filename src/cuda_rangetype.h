@@ -172,8 +172,6 @@
 		return pg_##NAME##_datum_ref(kcxt,paddr);					\
 	}																\
 																	\
-	STROMCL_SIMPLE_NULLTEST_TEMPLATE(NAME)							\
-																	\
 	STATIC_FUNCTION(cl_uint)										\
 	pg_##NAME##_comp_crc32(const cl_uint *crc32_table,				\
 						   cl_uint hash, pg_##NAME##_t datum)		\
