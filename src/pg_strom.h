@@ -512,13 +512,6 @@ extern cl_uint			devBaselineMaxThreadsPerBlock;
 
 extern void pgstrom_init_gpu_device(void);
 #if 1
-extern void optimal_workgroup_size(size_t *p_grid_size,
-								   size_t *p_block_size,
-								   CUfunction function,
-								   CUdevice device,
-								   size_t nitems,
-								   size_t dynamic_shmem_per_block,
-								   size_t dynamic_shmem_per_thread);
 extern void largest_workgroup_size(size_t *p_grid_size,
 								   size_t *p_block_size,
 								   CUfunction function,
@@ -527,9 +520,10 @@ extern void largest_workgroup_size(size_t *p_grid_size,
 								   size_t dynamic_shmem_per_block,
 								   size_t dynamic_shmem_per_thread);
 #endif
-extern CUresult	gpuOptimalBlockSize(size_t *p_min_grid_sz,
-									size_t *p_max_block_sz,
+extern CUresult	gpuOptimalBlockSize(size_t *p_grid_sz,
+									size_t *p_block_sz,
 									CUfunction kern_function,
+									size_t max_num_threads,
 									size_t dynamic_shmem_per_block,
 									size_t dynamic_shmem_per_thread);
 /*

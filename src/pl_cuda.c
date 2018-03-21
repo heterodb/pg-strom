@@ -2539,13 +2539,16 @@ plcuda_process_task(GpuTask *gtask, CUmodule cuda_module)
 		}
 		else
 		{
-			optimal_workgroup_size(&grid_size,
-								   &block_size,
-								   kern_plcuda_prep,
-								   CU_DEVICE_PER_THREAD,
-								   ptask->kern.prep_num_threads,
-								   ptask->kern.prep_shmem_blocksz,
-								   ptask->kern.prep_shmem_unitsz);
+			rc = gpuOptimalBlockSize(NULL,
+									 &block_size,
+									 kern_plcuda_prep,
+									 ptask->kern.prep_num_threads,
+									 ptask->kern.prep_shmem_blocksz,
+									 ptask->kern.prep_shmem_unitsz);
+			if (rc != CUDA_SUCCESS)
+				werror("failed on gpuOptimalBlockSize: %s", errorText(rc));
+			grid_size = (ptask->kern.prep_num_threads +
+						 block_size - 1) / block_size;
 		}
 
 		rc = cuLaunchKernel(kern_plcuda_prep,
@@ -2579,13 +2582,16 @@ plcuda_process_task(GpuTask *gtask, CUmodule cuda_module)
 	}
 	else
 	{
-		optimal_workgroup_size(&grid_size,
-							   &block_size,
-							   kern_plcuda_main,
-							   CU_DEVICE_PER_THREAD,
-							   ptask->kern.main_num_threads,
-							   ptask->kern.main_shmem_blocksz,
-							   ptask->kern.main_shmem_unitsz);
+		rc = gpuOptimalBlockSize(NULL,
+								 &block_size,
+								 kern_plcuda_main,
+								 ptask->kern.main_num_threads,
+								 ptask->kern.main_shmem_blocksz,
+								 ptask->kern.main_shmem_unitsz);
+		if (rc != CUDA_SUCCESS)
+			werror("failed on gpuOptimalBlockSize: %s", errorText(rc));
+		grid_size = (ptask->kern.main_num_threads +
+					 block_size - 1) / block_size;
 	}
 
 	rc = cuLaunchKernel(kern_plcuda_main,
@@ -2620,13 +2626,16 @@ plcuda_process_task(GpuTask *gtask, CUmodule cuda_module)
 		}
 		else
 		{
-			optimal_workgroup_size(&grid_size,
-								   &block_size,
-								   kern_plcuda_post,
-								   CU_DEVICE_PER_THREAD,
-								   ptask->kern.post_num_threads,
-								   ptask->kern.post_shmem_blocksz,
-								   ptask->kern.post_shmem_unitsz);
+			rc = gpuOptimalBlockSize(NULL,
+									 &block_size,
+									 kern_plcuda_post,
+									 ptask->kern.post_num_threads,
+									 ptask->kern.post_shmem_blocksz,
+									 ptask->kern.post_shmem_unitsz);
+			if (rc != CUDA_SUCCESS)
+				werror("failed on gpuOptimalBlockSize: %s", errorText(rc));
+			grid_size = (ptask->kern.post_num_threads +
+						 block_size - 1) / block_size;
 		}
 
 		rc = cuLaunchKernel(kern_plcuda_post,

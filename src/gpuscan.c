@@ -2839,14 +2839,8 @@ out:
 static void
 gpuscan_switch_task(GpuTaskState *gts, GpuTask *gtask)
 {
-	GpuScanTask		   *gscan = (GpuScanTask *) gtask;
-	pgstrom_data_store *pds_src = gscan->pds_src;
-
-	if (pds_src->nblocks_uncached > 0)
-	{
-		Assert(pds_src->kds.format == KDS_FORMAT_BLOCK);
-		PDS_fillup_blocks(pds_src);
-	}
+	GpuScanTask		   *gscan	__attribute__((unused))
+		= (GpuScanTask *) gtask;
 }
 
 /*
@@ -3137,15 +3131,12 @@ gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 	 *                         kern_data_store *kds_src,
 	 *                         kern_data_store *kds_dst)
 	 */
-	optimal_workgroup_size(&grid_sz,
-						   &block_sz,
-						   kern_gpuscan_quals,
-						   gcontext->cuda_device,
-						   pds_src->kds.nitems,
-						   sizeof(cl_int) * 1024,
-						   0);
-	grid_sz = Min(grid_sz,
-				  devAttrs[CU_DINDEX_PER_THREAD].MULTIPROCESSOR_COUNT);
+	gpuOptimalBlockSize(&grid_sz,
+						&block_sz,
+						kern_gpuscan_quals,
+						0,		/* max activation */
+						0,
+						sizeof(cl_int));
 	kern_args[0] = &m_gpuscan;
 	kern_args[1] = &m_kds_src;
 	kern_args[2] = &m_kds_dst;

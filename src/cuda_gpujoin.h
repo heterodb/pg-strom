@@ -1388,16 +1388,19 @@ gpujoin_colocate_outer_join_map(kern_multirels *kmrels,
 	size_t		nrooms = kmrels->ojmaps_length / sizeof(cl_uint);
 	cl_uint	   *ojmaps = (cl_uint *)((char *)kmrels + kmrels->kmrels_length);
 	cl_uint	   *destmap = ojmaps + kmrels->cuda_dindex * nrooms;
-	cl_uint		i, map = 0;
+	cl_uint		i, j, map;
 
-	if (get_global_id() < nrooms)
+	for (i = get_global_id();
+		 i < nrooms;
+		 i += get_global_size())
 	{
-		for (i=0; i <= num_devices; i++)
+		map = 0;
+		for (j = 0; j <= num_devices; j++)
 		{
-			map |= ojmaps[get_global_id()];
+			map |= ojmaps[i];
 			ojmaps += nrooms;
 		}
-		destmap[get_global_id()] = map;
+		destmap[i] = map;
 	}
 }
 

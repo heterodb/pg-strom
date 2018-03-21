@@ -4794,11 +4794,15 @@ gpujoinColocateOuterJoinMaps(GpuTaskState *gts, CUmodule cuda_module)
 	 * gpujoin_colocate_outer_join_map(kern_multirels *kmrels,
 	 *                                 cl_uint num_devices)
 	 */
-	optimal_workgroup_size(&grid_sz,
-						   &block_sz,
-						   kern_colocate,
-						   CU_DEVICE_PER_THREAD,
-						   ojmaps_sz / sizeof(cl_bool), 0, 0);
+	rc = gpuOptimalBlockSize(&grid_sz,
+							 &block_sz,
+							 kern_colocate,
+							 ojmaps_sz / sizeof(cl_uint),
+							 0,
+							 0);
+	if (rc != CUDA_SUCCESS)
+		werror("failed on gpuOptimalBlockSize: %s", errorText(rc));
+
 	kern_args[0] = &gjs->m_kmrels;
 	kern_args[1] = &numDevAttrs;
 
@@ -4915,10 +4919,10 @@ gpujoin_process_inner_join(GpuJoinTask *pgjoin, CUmodule cuda_module)
 	 *              kern_data_store *kds_dst,
 	 *              kern_parambuf *kparams_gpreagg)
 	 */
-	grid_sz = devAttrs[CU_DINDEX_PER_THREAD].MULTIPROCESSOR_COUNT;
-	rc = gpuOptimalBlockSize(NULL,
+	rc = gpuOptimalBlockSize(&grid_sz,
 							 &block_sz,
 							 kern_gpujoin_main,
+							 0,		/* max activation */
 							 0,
 							 sizeof(cl_int));
 	if (rc != CUDA_SUCCESS)
@@ -5000,16 +5004,13 @@ static cl_int
 gpujoin_process_right_outer(GpuJoinTask *pgjoin, CUmodule cuda_module)
 {
 	GpuJoinState	   *gjs = (GpuJoinState *) pgjoin->task.gts;
-	kern_multirels	   *h_kmrels = dsm_segment_address(gjs->seg_kmrels);
 	pgstrom_data_store *pds_dst = pgjoin->pds_dst;
-	kern_data_store	   *kds_in;
 	CUfunction			kern_gpujoin_main;
 	CUdeviceptr			m_kgjoin = (CUdeviceptr)&pgjoin->kern;
 	CUdeviceptr			m_kds_dst = (CUdeviceptr)&pds_dst->kds;
 	CUdeviceptr			m_nullptr = 0UL;
 	CUresult			rc;
 	cl_int				outer_depth = pgjoin->outer_depth;
-	cl_int				mp_count;
 	Size				grid_sz;
 	Size				block_sz;
 	void			   *kern_args[5];
@@ -5019,7 +5020,6 @@ gpujoin_process_right_outer(GpuJoinTask *pgjoin, CUmodule cuda_module)
 	Assert(!pgjoin->pds_src);
 	Assert(pds_dst->kds.format == KDS_FORMAT_ROW);
 	Assert(outer_depth > 0 && outer_depth <= gjs->num_rels);
-	kds_in = KERN_MULTIRELS_INNER_KDS(h_kmrels, outer_depth);
 
 	/* Co-location of the outer join map */
 	gpujoinColocateOuterJoinMaps(&gjs->gts, cuda_module);
@@ -5040,16 +5040,12 @@ gpujoin_process_right_outer(GpuJoinTask *pgjoin, CUmodule cuda_module)
 	 *                     kern_parambuf *kparams_gpreagg)
 	 */
 resume_gpujoin:
-	optimal_workgroup_size(&grid_sz,
-						   &block_sz,
-						   kern_gpujoin_main,
-						   CU_DEVICE_PER_THREAD,
-						   kds_in->nitems,
-						   0,
-						   sizeof(cl_int));	/* stairLike operations */
-	mp_count = devAttrs[CU_DINDEX_PER_THREAD].MULTIPROCESSOR_COUNT;
-	grid_sz = Min(grid_sz, mp_count);
-
+	rc = gpuOptimalBlockSize(&grid_sz,
+							 &block_sz,
+							 kern_gpujoin_main,
+							 0,		/* max activation */
+							 0,
+							 sizeof(cl_int));	/* stairLike operations */
 	kern_args[0] = &m_kgjoin;
 	kern_args[1] = &gjs->m_kmrels;
 	kern_args[2] = &outer_depth;

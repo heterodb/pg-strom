@@ -4628,9 +4628,8 @@ gpupreagg_init_final_hash(GpuPreAggTask *gpreagg,
 	CUfunction	kern_init_fhash;
 	CUevent		ev_init_fhash;
 	CUresult	rc;
-	int			sm_count;
-	size_t		grid_size;
-	size_t		block_size;
+	size_t		grid_sz;
+	size_t		block_sz;
 	void	   *kern_args[2];
 
 	pthreadMutexLock(&gpas->f_mutex);
@@ -4649,20 +4648,19 @@ gpupreagg_init_final_hash(GpuPreAggTask *gpreagg,
 			if (rc != CUDA_SUCCESS)
 				werror("failed on cuEventCreate: %s", errorText(rc));
 
-			optimal_workgroup_size(&grid_size,
-								   &block_size,
-								   kern_init_fhash,
-								   CU_DEVICE_PER_THREAD,
-								   gpas->f_hashsize,
-								   0, 0);
-			sm_count = devAttrs[CU_DINDEX_PER_THREAD].MULTIPROCESSOR_COUNT;
-			if (grid_size > sm_count)
-				grid_size = sm_count;
+			rc = gpuOptimalBlockSize(&grid_sz,
+									 &block_sz,
+									 kern_init_fhash,
+									 gpas->f_hashsize,
+									 0, 0);
+			if (rc != CUDA_SUCCESS)
+				werror("failed on gpuOptimalBlockSize: %s", errorText(rc));
+
 			kern_args[0] = &gpas->f_hashsize;
 			kern_args[1] = &gpas->m_fhash;
 			rc = cuLaunchKernel(kern_init_fhash,
-								grid_size, 1, 1,
-								block_size, 1, 1,
+								grid_sz, 1, 1,
+								block_sz, 1, 1,
 								0,
 								CU_STREAM_PER_THREAD,
 								kern_args,
@@ -5119,10 +5117,10 @@ resume_kernel:
 	 *                     kern_data_store *kds_dst,
 	 *                     kern_parambuf *kparams_gpreagg)
 	 */
-	grid_sz = devAttrs[CU_DINDEX_PER_THREAD].MULTIPROCESSOR_COUNT;
-	rc = gpuOptimalBlockSize(NULL,
+	rc = gpuOptimalBlockSize(&grid_sz,
 							 &block_sz,
 							 kern_gpujoin_main,
+							 0,		/* max activation */
 							 0,
 							 sizeof(int));
 	if (rc != CUDA_SUCCESS)
@@ -5156,10 +5154,10 @@ resume_kernel:
 	 *                          kern_data_store *kds_final,
 	 *                          kern_global_hashslot *f_hash)
 	 */
-	grid_sz = devAttrs[CU_DINDEX_PER_THREAD].MULTIPROCESSOR_COUNT;
-	rc = gpuOptimalBlockSize(NULL,
+	rc = gpuOptimalBlockSize(&grid_sz,
 							 &block_sz,
 							 kern_gpupreagg_reduction,
+							 0,		/* max activation */
 							 0,
 							 sizeof(int));
 	if (rc != CUDA_SUCCESS)

@@ -308,47 +308,6 @@ blocksize_to_shmemsize_helper(int blocksize)
 			__dynamic_shmem_per_thread * (size_t)blocksize);
 }
 
-void
-optimal_workgroup_size(size_t *p_grid_size,
-					   size_t *p_block_size,
-					   CUfunction function,
-					   CUdevice device,
-					   size_t nitems,
-					   size_t dynamic_shmem_per_block,
-					   size_t dynamic_shmem_per_thread)
-{
-	cl_int		min_grid_sz;
-	cl_int		max_block_sz;
-	cl_int		warpSize;
-	CUresult	rc;
-
-	rc = cuDeviceGetAttribute(&warpSize,
-							  CU_DEVICE_ATTRIBUTE_WARP_SIZE,
-							  device);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuDeviceGetAttribute: %s", errorText(rc));
-
-	__dynamic_shmem_per_block = dynamic_shmem_per_block;
-	__dynamic_shmem_per_thread = dynamic_shmem_per_thread;
-	rc = cuOccupancyMaxPotentialBlockSize(&min_grid_sz,
-										  &max_block_sz,
-										  function,
-										  blocksize_to_shmemsize_helper,
-										  0,
-										  Min((size_t)nitems,
-											  (size_t)INT_MAX));
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuOccupancyMaxPotentialBlockSize: %s",
-			 errorText(rc));
-
-	if ((size_t)max_block_sz * (size_t)INT_MAX < nitems)
-		elog(ERROR, "to large nitems (%zu) to launch kernel (blockSz=%d)",
-			 nitems, max_block_sz);
-
-	*p_block_size = (size_t)max_block_sz;
-	*p_grid_size  = (nitems + (size_t)max_block_sz - 1) / (size_t)max_block_sz;
-}
-
 /*
  * largest_workgroup_size - calculate the block size maximum available
  */
@@ -433,32 +392,46 @@ largest_workgroup_size(size_t *p_grid_size,
  * gpuOptimalBlockSize - a simple wrapper of cuOccupancyMaxPotentialBlockSize
  */
 CUresult
-gpuOptimalBlockSize(size_t *p_min_grid_sz,
-					size_t *p_max_block_sz,
+gpuOptimalBlockSize(size_t *p_grid_sz,
+					size_t *p_block_sz,
 					CUfunction kern_function,
+					size_t max_num_threads,
 					size_t dynamic_shmem_per_block,
 					size_t dynamic_shmem_per_thread)
 {
 	int		min_grid_sz;
-	int		max_block_sz;
+	int		opt_grid_sz;
+	int		max_grid_sz;
+	int		block_sz;
 	CUresult rc;
 
 	__dynamic_shmem_per_block = dynamic_shmem_per_block;
 	__dynamic_shmem_per_thread = dynamic_shmem_per_thread;
 	rc = cuOccupancyMaxPotentialBlockSize(&min_grid_sz,
-										  &max_block_sz,
+										  &block_sz,
 										  kern_function,
 										  blocksize_to_shmemsize_helper,
 										  0,
 										  0);
-	if (rc == CUDA_SUCCESS)
+	if (rc != CUDA_SUCCESS)
+		return rc;
+	if (p_grid_sz)
 	{
-		if (p_min_grid_sz)
-			*p_min_grid_sz = min_grid_sz;
-		if (p_max_block_sz)
-			*p_max_block_sz = max_block_sz;
+		size_t		dyn_shmem_sz = (dynamic_shmem_per_block +
+									dynamic_shmem_per_thread * block_sz);
+		rc = cuOccupancyMaxActiveBlocksPerMultiprocessor(&opt_grid_sz,
+														 kern_function,
+														 block_sz,
+														 dyn_shmem_sz);
+		if (rc != CUDA_SUCCESS)
+			return rc;
+
+		max_grid_sz = (max_num_threads + block_sz - 1) / block_sz;
+		*p_grid_sz = Max(min_grid_sz, Min(max_grid_sz, opt_grid_sz));
 	}
-	return rc;
+	*p_block_sz = block_sz;
+
+	return CUDA_SUCCESS;
 }
 
 /*
