@@ -109,6 +109,7 @@
 #include "utils/date.h"
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
+#include "utils/json.h"
 #include "utils/inet.h"
 #include "utils/int8.h"
 #include "utils/inval.h"
