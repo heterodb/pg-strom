@@ -169,16 +169,7 @@ nvme_strom_ioctl(int cmd, void *arg)
 	{
 		fdesc_nvme_strom = open(NVME_STROM_IOCTL_PATHNAME, O_RDONLY);
 		if (fdesc_nvme_strom < 0)
-		{
-#ifdef NOT_USED
-			int		saved_errno = errno;
-
-			fprintf(stderr, "failed on open('%s'): %m\n",
-					NVME_STROM_IOCTL_PATHNAME);
-			errno = saved_errno;
-#endif
-			return -1;
-		}
+			return -2;
 	}
 	return ioctl(fdesc_nvme_strom, cmd, arg);
 }
@@ -198,11 +189,7 @@ commercial_license_query(StringInfo buf)
 	cmd->length = buflen;
 
 	rc = nvme_strom_ioctl(STROM_IOCTL__LICENSE_ADMIN, cmd);
-	if (rc == ENOENT)
-		return false;
-	else if (rc != 0)
-		elog(ERROR, "failed on STROM_IOCTL__LICENSE_ADMIN: %m");
-	else
+	if (rc == 0)
 	{
 		int		i_year = (cmd->issued_at / 10000);
 		int		i_mon  = (cmd->issued_at / 100) % 100;
@@ -242,8 +229,26 @@ commercial_license_query(StringInfo buf)
 				", \"license_desc\" : %s",
 				quote_identifier(cmd->license_desc));
 		appendStringInfo(buf, " }");
+
+		return true;
 	}
-	return true;
+	else if (rc == -2)
+	{
+		/* failed at open(2) */
+		if (errno == ENOENT)
+			elog(LOG, "hint: nvme_strom driver is not installed");
+		else
+			elog(LOG, "failed to open \"%s\": %m", NVME_STROM_IOCTL_PATHNAME);
+	}
+	else if (errno == ENOENT)
+		elog(LOG, "no commercial license is not installed");
+	else if (errno == EBADMSG)
+		elog(LOG, "commercial license file \"%s\" is corrupted",
+			 HETERODB_LICENSE_PATHNAME);
+	else
+		elog(LOG, "failed on STROM_IOCTL__LICENSE_ADMIN: %m");
+
+	return false;
 }
 
 Datum
