@@ -29,15 +29,23 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
-#include <stdio.h>
-#include <unistd.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <libgen.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <cuda.h>
+#include "../src/nvme_strom.h"
 
 /*
  * command line options
  */
 static int	machine_format = 0;
+static int	print_license = 0;
 static int	detailed_output = 0;
 
 #define lengthof(array)		(sizeof (array) / sizeof ((array)[0]))
@@ -60,6 +68,176 @@ __error_exit(const char *file_name, int lineno,
 
 #define error_exit(errcode, message)			\
 	__error_exit(__FILE__,__LINE__,(errcode),(message))
+
+/*
+ * commercial license validation if any
+ */
+static int
+nvme_strom_ioctl(int cmd, void *arg)
+{
+	static int		fdesc_nvme_strom = -1;
+
+	if (fdesc_nvme_strom < 0)
+	{
+		fdesc_nvme_strom = open(NVME_STROM_IOCTL_PATHNAME, O_RDONLY);
+		if (fdesc_nvme_strom < 0)
+			return -1;
+	}
+	return ioctl(fdesc_nvme_strom, cmd, arg);
+}
+
+static int
+commercial_license_validation(int *nr_gpus)
+{
+	int			fdesc;
+	struct stat st_buf;
+	ssize_t		i, n;
+	char	   *temp = NULL;
+	int			i_year, i_mon, i_day;
+	int			e_year, e_mon, e_day;
+	int			total_bits = 0;
+	int			bits = 0;
+	long		val = 0;
+	unsigned char *pos;
+	StromCmd__LicenseInfo *cmd = NULL;
+	static const char *months[] =
+		{"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+		 "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+
+	fdesc = open(HETERODB_LICENSE_PATHNAME, O_RDONLY);
+	if (fdesc < 0)
+	{
+		if (errno != ENOENT)
+		{
+			fprintf(stderr, "failed on open('%s'): %m\n",
+					HETERODB_LICENSE_PATHNAME);
+			return 1;
+		}
+		return 0;
+	}
+
+	if (fstat(fdesc, &st_buf) != 0)
+		fprintf(stderr, "failed on fstat('%s'): %m\n",
+				HETERODB_LICENSE_PATHNAME);
+
+	temp = malloc(st_buf.st_size + 1);
+	for (i=0; i < st_buf.st_size; i++)
+	{
+		n = read(fdesc, temp + i, st_buf.st_size - i);
+		if (n < 0)
+		{
+			fprintf(stderr, "failed on read('%s'): %m\n",
+					HETERODB_LICENSE_PATHNAME);
+			return 1;
+		}
+	}
+	cmd = malloc(sizeof(StromCmd__LicenseInfo) + st_buf.st_size);
+	memset(cmd, 0, sizeof(StromCmd__LicenseInfo) + st_buf.st_size);
+
+	/* Extract base64 */
+	pos = cmd->buffer;
+	for (i=0; i < st_buf.st_size; i++)
+	{
+		int		c = temp[i];
+
+		if (c == '=')
+			break;
+		if (c >= 'A' && c <= 'Z')
+			val |= ((c - 'A') << bits);
+		else if (c >= 'a' && c <= 'z')
+			val |= ((c - 'a' + 26) << bits);
+		else if (c >= '0' && c <= '9')
+			val |= ((c - '0' + 52) << bits);
+		else if (c == '+')
+			val |= (62 << bits);
+		else if (c == '/')
+			val |= (63 << bits);
+		else
+		{
+			fprintf(stderr, "unexpected base64 character: %c\n", c);
+			return 1;
+		}
+		total_bits += 6;
+		bits += 6;
+		while (bits >= 8)
+		{
+			*pos++ = (val & 0xff);
+			val >>= 8;
+			bits -= 8;
+		}
+	}
+	if (bits > 0)
+		*pos++ = (val & 0xff);
+	cmd->validation = 1;
+	cmd->length = st_buf.st_size;
+
+	/* License validation */
+	if (nvme_strom_ioctl(STROM_IOCTL__LICENSE_ADMIN, cmd) != 0)
+	{
+		fprintf(stderr, "failed on nvme_strom_ioctl(2): %m\n");
+		return 1;
+	}
+
+	/* Print License Info */
+	i_year = (cmd->issued_at / 10000);
+	i_mon  = (cmd->issued_at / 100) % 100;
+	i_day  = (cmd->issued_at % 100);
+	e_year = (cmd->expired_at / 10000);
+	e_mon  = (cmd->expired_at / 100) % 100;
+	e_day  = (cmd->expired_at % 100);
+
+	if (print_license)
+	{
+		if (machine_format)
+		{
+			printf("LICENSE_VERSION: %u\n"
+				   "LICENSE_SERIAL_NR: %s\n"
+				   "LICENSE_ISSUED_AT: %d-%s-%d\n"
+				   "LICENSE_EXPIRED_AT: %d-%s-%d\n"
+				   "LICENSE_NR_GPUS: %d\n"
+				   "LICENSEE_ORG: %s\n"
+				   "LICENSEE_NAME: %s\n"
+				   "LICENSEE_MAIL: %s\n"
+				   "LICENSE_DESC: %s\n",
+				   cmd->version,
+				   cmd->serial_nr,
+				   i_day, months[i_mon-1], i_year,
+				   e_day, months[e_mon-1], e_year,
+				   cmd->nr_gpus,
+				   cmd->licensee_org,
+				   cmd->licensee_name,
+				   cmd->licensee_mail,
+				   cmd->license_desc ? cmd->license_desc : "");
+		}
+		else
+		{
+			printf("License Version: %u\n"
+				   "License Serial Number: %s\n"
+				   "License Issued at: %d-%s-%d\n"
+				   "License Expired at: %d-%s-%d\n"
+				   "License Num of GPUs: %d\n"
+				   "Licensee Organization: %s\n"
+				   "Licensee Name: %s\n"
+				   "Licensee Mail: %s\n",
+				   cmd->version,
+				   cmd->serial_nr,
+				   i_day, months[i_mon-1], i_year,
+				   e_day, months[e_mon-1], e_year,
+				   cmd->nr_gpus,
+				   cmd->licensee_org,
+				   cmd->licensee_name,
+				   cmd->licensee_mail);
+			if (cmd->license_desc)
+				printf("License Description: %s\n", cmd->license_desc);
+		}
+	}
+	*nr_gpus = cmd->nr_gpus;
+
+	free(temp);
+	free(cmd);
+
+	return 0;
+}
 
 /*
  * attribute format class
@@ -223,18 +401,22 @@ int main(int argc, char *argv[])
 	CUresult	rc;
 	int			version;
 	int			i, count;
+	int			nr_gpus = 1;
 	int			opt;
 	FILE	   *filp;
 
 	/*
 	 * Parse options
 	 */
-	while ((opt = getopt(argc, argv, "mdh")) != -1)
+	while ((opt = getopt(argc, argv, "mldh")) != -1)
 	{
 		switch (opt)
 		{
 			case 'm':
 				machine_format = 1;
+				break;
+			case 'l':
+				print_license = 1;
 				break;
 			case 'd':
 				detailed_output = 1;
@@ -251,6 +433,9 @@ int main(int argc, char *argv[])
 				return 1;
 		}
 	}
+	/* Commercial License Validation (if any) */
+	if (commercial_license_validation(&nr_gpus) != 0)
+		return 1;
 
 	rc = cuInit(0);
 	if (rc != CUDA_SUCCESS)
@@ -298,13 +483,14 @@ int main(int argc, char *argv[])
 	rc = cuDeviceGetCount(&count);
 	if (rc != CUDA_SUCCESS)
 		error_exit(rc, "failed on cuDeviceGetCount");
-
+	if (nr_gpus > count)
+		nr_gpus = count;
 	if (!machine_format)
-		printf("Number of devices: %d\n", count);
+		printf("Number of devices: %d\n", nr_gpus);
 	else
-		printf("PLATFORM:NUMBER_OF_DEVICES=%d\n", count);
+		printf("PLATFORM:NUMBER_OF_DEVICES=%d\n", nr_gpus);
 
-	for (i=0; i < count; i++)
+	for (i=0; i < nr_gpus; i++)
 	{
 		rc = cuDeviceGet(&device, i);
 		if (rc != CUDA_SUCCESS)

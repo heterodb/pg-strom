@@ -372,14 +372,9 @@ CREATE FUNCTION pg_catalog.int8_as_float8(int8)
   LANGUAGE C STRICT;
 
 --
--- Function to validate commercial license
+-- Function to query commercial license
 --
-CREATE FUNCTION pgstrom.license_validation()
-  RETURNS text
-  AS 'MODULE_PATHNAME','pgstrom_license_validation'
-  LANGUAGE C STRICT;
-
 CREATE FUNCTION pgstrom.license_query()
-  RETURNS text
+  RETURNS json
   AS 'MODULE_PATHNAME','pgstrom_license_query'
   LANGUAGE C STRICT;

@@ -31,6 +31,9 @@ enum {
 /* path of ioctl(2) entrypoint */
 #define NVME_STROM_IOCTL_PATHNAME		"/proc/nvme-strom"
 
+/* default license location */
+#define HETERODB_LICENSE_PATHNAME		"/etc/heterodb.license"
+
 /* STROM_IOCTL__LICENSE_ADMIN */
 typedef struct StromCmd__LicenseInfo
 {
@@ -38,6 +41,7 @@ typedef struct StromCmd__LicenseInfo
 	const char *serial_nr;		/* out: SERIAL_NR field */
 	uint32_t	issued_at;		/* out: ISSUED_AT field; YYYYMMDD */
 	uint32_t	expired_at;		/* out: EXPIRED_AT field; YYYYMMDD */
+	uint32_t	nr_gpus;		/* out: NR_GPUS field */
 	const char *licensee_org;	/* out: LICENSEE_ORG field */
 	const char *licensee_name;	/* out: LICENSEE_NAME field */
 	const char *licensee_mail;	/* out: LICENSEE_MAIL field */

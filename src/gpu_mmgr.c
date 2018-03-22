@@ -144,7 +144,6 @@ static GpuMemStatistics *gm_stat_array = NULL;
 static int			gpu_memory_segment_size_kb;	/* GUC */
 static size_t		gm_segment_sz;	/* bytesize */
 
-static char		   *pgstrom_license_filepath;	/* GUC */
 static bool			nvme_strom_enabled;			/* GUC */
 static int			nvme_strom_threshold_kb;	/* GUC */
 
@@ -152,7 +151,6 @@ static int			num_preserved_gpu_memory_regions;	/* GUC */
 static bool			gpummgr_bgworker_got_signal = false;
 static GpuMemPreservedHead *gmemp_head = NULL;
 
-Datum pgstrom_license_validation(PG_FUNCTION_ARGS);
 Datum pgstrom_license_query(PG_FUNCTION_ARGS);
 Datum pgstrom_device_preserved_meminfo(PG_FUNCTION_ARGS);
 
@@ -186,191 +184,14 @@ nvme_strom_ioctl(int cmd, void *arg)
 }
 
 /*
- * pgstrom_commercial_license_validation
- */
-static bool
-pgstrom_commercial_license_validation(StringInfo buf)
-{
-	bool		retval = false;
-	int			fdesc;
-	struct stat st_buf;
-	char	   *temp = NULL;
-	StromCmd__LicenseInfo *cmd = NULL;
-	MemoryContext	memcxt = CurrentMemoryContext;
-	static const char *months[] =
-		{"Jan", "Feb", "Mar", "Apr", "May", "Jun",
-		 "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
-
-	fdesc = open(pgstrom_license_filepath, O_RDONLY);
-	if (fdesc < 0)
-	{
-		if (errno != ENOENT)
-			elog(LOG, "failed on open('%s'): %m", pgstrom_license_filepath);
-		return false;
-	}
-
-	PG_TRY();
-	{
-		ssize_t		i, n;
-		int			i_year, i_mon, i_day;
-		int			e_year, e_mon, e_day;
-		int			total_bits = 0;
-		int			bits = 0;
-		long		val = 0;
-		unsigned char *pos;
-
-		if (fstat(fdesc, &st_buf) != 0)
-			elog(ERROR, "failed on fstat('%s'): %m",
-				 pgstrom_license_filepath);
-
-		temp = palloc(st_buf.st_size);
-		for (i=0; i < st_buf.st_size; i += n)
-		{
-			n = read(fdesc, temp + i, st_buf.st_size - i);
-			if (n < 0)
-				elog(ERROR, "failed on read('%s'): %m",
-					 pgstrom_license_filepath);
-		}
-		cmd = palloc(offsetof(StromCmd__LicenseInfo,
-							  buffer) + st_buf.st_size);
-		memset(cmd, 0, offsetof(StromCmd__LicenseInfo, buffer));
-
-		/* Extract base64 */
-		pos = cmd->buffer;
-		for (i=0; i < st_buf.st_size; i++)
-		{
-			int		c = temp[i];
-
-			if (c == '=')
-				break;
-			if (c >= 'A' && c <= 'Z')
-				val |= ((c - 'A') << bits);
-			else if (c >= 'a' && c <= 'z')
-				val |= ((c - 'a' + 26) << bits);
-			else if (c >= '0' && c <= '9')
-				val |= ((c - '0' + 52) << bits);
-			else if (c == '+')
-				val |= (62 << bits);
-			else if (c == '/')
-				val |= (63 << bits);
-			else
-				elog(ERROR, "unexpected base64 character: %c", c);
-
-			total_bits += 6;
-			bits += 6;
-			while (bits >= 8)
-			{
-				*pos++ = (val & 0xff);
-				val >>= 8;
-				bits -= 8;
-			}
-		}
-		if (bits > 0)
-			*pos++ = (val & 0xff);
-		cmd->validation = 1;
-		cmd->length = st_buf.st_size;
-
-		/* License validation */
-		if (nvme_strom_ioctl(STROM_IOCTL__LICENSE_ADMIN, cmd) != 0)
-			elog(ERROR, "failed on nvme_strom_ioctl(2): %m");
-
-		i_year = (cmd->issued_at / 10000);
-		i_mon  = (cmd->issued_at / 100) % 100;
-		i_day  = (cmd->issued_at % 100);
-		e_year = (cmd->expired_at / 10000);
-		e_mon  = (cmd->expired_at / 100) % 100;
-		e_day  = (cmd->expired_at % 100);
-
-		if (i_year < 2000 || i_year > 9999 || i_mon < 1 || i_mon > 12)
-			elog(ERROR, "Strange date in the ISSUED_AT field: %08d",
-				 cmd->issued_at);
-		if (e_year < 2000 || e_year > 9999 || e_mon < 1 || e_mon > 12)
-			elog(ERROR, "Strange date in the EXPIRED_AT_AT field: %08d",
-				 cmd->issued_at);
-
-		appendStringInfo(buf,
-						 "VERSION=%u, "
-						 "SERIAL_NR=%s, "
-						 "ISSUED_AT=%d-%s-%d, "
-						 "EXPIRED_AT=%d-%s-%d, "
-						 "LICENSEE_ORG=[%s], "
-						 "LICENSEE_NAME=[%s], "
-						 "LICENSEE_MAIL=[%s]",
-						 cmd->version,
-						 cmd->serial_nr,
-						 i_day, months[i_mon-1], i_year,
-						 e_day, months[e_mon-1], e_year,
-						 cmd->licensee_org,
-						 cmd->licensee_name,
-						 cmd->licensee_mail);
-		if (cmd->license_desc)
-			appendStringInfo(buf,
-							 ", LICENSE_DESC=[%s]",
-							 cmd->license_desc);
-		retval = true;
-		pfree(temp);
-		pfree(cmd);
-		close(fdesc);
-	}
-	PG_CATCH();
-	{
-		ErrorData  *edata;
-
-		if (temp)
-			pfree(temp);
-		if (cmd)
-			pfree(cmd);
-		close(fdesc);
-
-		MemoryContextSwitchTo(memcxt);
-		edata = CopyErrorData();
-		elog(LOG, "%s:%d %s",
-			 edata->filename,
-			 edata->lineno,
-			 edata->message);
-		FlushErrorState();
-	}
-	PG_END_TRY();
-
-	return retval;
-}
-
-/*
- * pgstrom_license_validation
- */
-Datum
-pgstrom_license_validation(PG_FUNCTION_ARGS)
-{
-	StringInfoData	buf;
-
-	if (!superuser())
-		ereport(ERROR,
-				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 (errmsg("only superuser can validate commercial license"))));
-
-	initStringInfo(&buf);
-	if (!pgstrom_commercial_license_validation(&buf))
-		elog(ERROR, "failed on license validation");
-
-	PG_RETURN_TEXT_P(cstring_to_text(buf.data));
-}
-PG_FUNCTION_INFO_V1(pgstrom_license_validation);
-
-/*
  * pgstrom_license_query
  */
-Datum
-pgstrom_license_query(PG_FUNCTION_ARGS)
+static bool
+commercial_license_query(StringInfo buf)
 {
-	StringInfoData	buf;
-	size_t			buflen = 4096;
-	int				rc;
+	size_t	buflen = 4096;
+	int		rc;
 	StromCmd__LicenseInfo *cmd;
-
-	if (!superuser())
-		ereport(ERROR,
-				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 (errmsg("only superuser can validate commercial license"))));
 
 	cmd = palloc0(sizeof(StromCmd__LicenseInfo) + buflen);
 	cmd->validation = 0;
@@ -378,7 +199,7 @@ pgstrom_license_query(PG_FUNCTION_ARGS)
 
 	rc = nvme_strom_ioctl(STROM_IOCTL__LICENSE_ADMIN, cmd);
 	if (rc == ENOENT)
-		PG_RETURN_NULL();
+		return false;
 	else if (rc != 0)
 		elog(ERROR, "failed on STROM_IOCTL__LICENSE_ADMIN: %m");
 	else
@@ -397,28 +218,47 @@ pgstrom_license_query(PG_FUNCTION_ARGS)
 			elog(ERROR, "Strange date in the EXPIRED_AT_AT field: %08d",
 				 cmd->issued_at);
 
-		initStringInfo(&buf);
-		appendStringInfo(&buf,
-						 "VERSION=%u, "
-						 "SERIAL_NR=%s, "
-						 "ISSUED_AT=%d-%s-%d, "
-						 "EXPIRED_AT=%d-%s-%d, "
-						 "LICENSEE_ORG=[%s], "
-						 "LICENSEE_NAME=[%s], "
-						 "LICENSEE_MAIL=[%s]",
-						 cmd->version,
-						 cmd->serial_nr,
-						 i_day, months[i_mon-1], i_year,
-						 e_day, months[e_mon-1], e_year,
-						 cmd->licensee_org,
-						 cmd->licensee_name,
-						 cmd->licensee_mail);
+		appendStringInfo(
+			buf,
+			"{ \"version\" : %u"
+			", \"serial_nr\" : %s"
+			", \"issued_at\" : \"%d-%s-%d\""
+			", \"expired_at\" : \"%d-%s-%d\""
+			", \"nr_gpus\" : %d"
+			", \"licensee_org\" : %s"
+			", \"licensee_name\" : %s"
+			", \"licensee_mail\" : %s",
+			cmd->version,
+			quote_identifier(cmd->serial_nr),
+			i_day, months[i_mon-1], i_year,
+			e_day, months[e_mon-1], e_year,
+			cmd->nr_gpus,
+			quote_identifier(cmd->licensee_org),
+			quote_identifier(cmd->licensee_name),
+			quote_identifier(cmd->licensee_mail));
 		if (cmd->license_desc)
-			appendStringInfo(&buf,
-							 ", LICENSE_DESC=[%s]",
-							 cmd->license_desc);
-		PG_RETURN_TEXT_P(cstring_to_text(buf.data));
+			appendStringInfo(
+				buf,
+				", \"license_desc\" : %s",
+				quote_identifier(cmd->license_desc));
+		appendStringInfo(buf, " }");
 	}
+	return true;
+}
+
+Datum
+pgstrom_license_query(PG_FUNCTION_ARGS)
+{
+	StringInfoData	buf;
+
+	if (!superuser())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 (errmsg("only superuser can validate commercial license"))));
+	initStringInfo(&buf);
+	if (!commercial_license_query(&buf))
+		PG_RETURN_NULL();
+	PG_RETURN_POINTER(DirectFunctionCall1(json_in, PointerGetDatum(buf.data)));
 }
 PG_FUNCTION_INFO_V1(pgstrom_license_query);
 
@@ -1874,22 +1714,6 @@ pgstrom_init_gpu_mmgr(void)
 			 (int)(pgstrom_chunk_size() >> 10));
 	gm_segment_sz = (size_t)gpu_memory_segment_size_kb << 10;
 
-	/* pg_strom.license_filepath */
-	DefineCustomStringVariable("pg_strom.license_filepath",
-							   "Full path of the commercial license file",
-							   NULL,
-							   &pgstrom_license_filepath,
-							   "/etc/pg_strom.license",
-							   PGC_SUSET,
-							   GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
-							   NULL, NULL, NULL);
-	elog(LOG, "License begin");
-	initStringInfo(&buf);
-	if (pgstrom_commercial_license_validation(&buf))
-		elog(LOG, "PG-Strom commercial license: %s", buf.data);
-	pfree(buf.data);
-	elog(LOG, "License end");
-
 	/* pg_strom.nvme_strom_enabled */
 	DefineCustomBoolVariable("pg_strom.nvme_strom_enabled",
 							 "Turn on/off SSD-to-GPU P2P DMA",
@@ -1940,6 +1764,14 @@ pgstrom_init_gpu_mmgr(void)
 							PGC_POSTMASTER,
 							GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
+	/*
+	 * Commercial license info, if any
+	 */
+	initStringInfo(&buf);
+	if (commercial_license_query(&buf))
+		elog(LOG, "HeteroDB License: %s", buf.data);
+	pfree(buf.data);
+
 	/*
 	 * Background workers per device, to keep device memory for multi-process
 	 */
