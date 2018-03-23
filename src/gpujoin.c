@@ -3801,6 +3801,8 @@ GpuJoinExecOuterScanChunk(GpuTaskState *gts)
 		{
 			if (gjs->gts.scan_overflow)
 			{
+				if (gjs->gts.scan_overflow == (void *)(~0UL))
+					break;
 				slot = gjs->gts.scan_overflow;
 				gjs->gts.scan_overflow = NULL;
 			}
@@ -3808,7 +3810,13 @@ GpuJoinExecOuterScanChunk(GpuTaskState *gts)
 			{
 				slot = ExecProcNode(outer_node);
 				if (TupIsNull(slot))
+				{
+					/*
+					 * FIXME: Why not just scan_done = true here?
+					 */
+					gjs->gts.scan_overflow = (void *)(~0UL);
 					break;
+				}
 			}
 
 			/* creation of a new data-store on demand */
