@@ -1812,15 +1812,21 @@ pgstrom_init_gpu_mmgr(void)
  * gpuMemCopyFromSSDWaitRaw
  */
 static void
-gpuMemCopyFromSSDWaitRaw(unsigned long dma_task_id)
+gpuMemCopyFromSSDWaitRaw(GpuContext *gcontext, unsigned long dma_task_id)
 {
 	StromCmd__MemCopyWait cmd;
 
 	memset(&cmd, 0, sizeof(StromCmd__MemCopyWait));
 	cmd.dma_task_id = dma_task_id;
-
+retry:
 	if (nvme_strom_ioctl(STROM_IOCTL__MEMCPY_WAIT, &cmd) != 0)
-		werror("failed on nvme_strom_ioctl(STROM_IOCTL__MEMCPY_WAIT): %m");
+	{
+		if (errno != EINTR)
+			werror("failed on nvme_strom_ioctl(STROM_IOCTL__MEMCPY_WAIT): %m");
+		if (pg_atomic_read_u32(&gcontext->terminate_workers) != 0)
+			werror("termination of GpuContext worker");
+		goto retry;
+	}
 }
 
 /*
@@ -1894,7 +1900,7 @@ gpuMemCopyFromSSD(CUdeviceptr m_kds, pgstrom_data_store *pds)
 						   CU_STREAM_PER_THREAD);
 	if (rc != CUDA_SUCCESS)
 	{
-		gpuMemCopyFromSSDWaitRaw(cmd.dma_task_id);
+		gpuMemCopyFromSSDWaitRaw(gcontext, cmd.dma_task_id);
 		werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
 	}
 
@@ -1911,12 +1917,12 @@ gpuMemCopyFromSSD(CUdeviceptr m_kds, pgstrom_data_store *pds)
 							   CU_STREAM_PER_THREAD);
 		if (rc != CUDA_SUCCESS)
 		{
-			gpuMemCopyFromSSDWaitRaw(cmd.dma_task_id);
+			gpuMemCopyFromSSDWaitRaw(gcontext, cmd.dma_task_id);
 			werror("failed on cuMemcpyHtoDAsync: %s", errorText(rc));
 		}
 	}
 	/* (4) wait for completion of SSD2GPU P2P DMA */
-	gpuMemCopyFromSSDWaitRaw(cmd.dma_task_id);
+	gpuMemCopyFromSSDWaitRaw(gcontext, cmd.dma_task_id);
 }
 
 /*
