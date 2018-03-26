@@ -33,6 +33,8 @@ enum {
 
 /* default license location */
 #define HETERODB_LICENSE_PATHNAME		"/etc/heterodb.license"
+/* fixed length of the license key (2048bits) */
+#define HETERODB_LICENSE_KEYLEN			256
 
 /* STROM_IOCTL__LICENSE_ADMIN */
 typedef struct StromCmd__LicenseInfo
@@ -48,11 +50,10 @@ typedef struct StromCmd__LicenseInfo
 	const char *license_desc;	/* out: LICENSE_DESC field, if any */
 	uint32_t	validation;		/* in: If 0, just query current licence info.
 								 *     Elsewhere, validate a new license */
-	uint32_t	length;			/* in: length of the variable length buffer */
-	unsigned char buffer[1];	/* in: binary license image, if @validation
+	unsigned char buffer[HETERODB_LICENSE_KEYLEN+2];
+								/* in: binary license image, if @validation
 								 *     is not zero.
-								 * out: buffer of variable length data.
-								 */
+								 * out: buffer of the variable length data. */
 } StromCmd__LicenseInfo;
 
 /* STROM_IOCTL__CHECK_FILE */
@@ -195,4 +196,92 @@ typedef struct StromCmd__StatInfo
 	uint64_t		clk_debug4;
 } StromCmd__StatInfo;
 
+#ifndef	__KERNEL__
+#include <stdio.h>
+
+/* support routine to parse heterodb license file */
+static inline int
+read_heterodb_license_file(StromCmd__LicenseInfo *cmd,
+						   const char *license_file_name,
+						   FILE *outerr)
+{
+	FILE	   *filp = NULL;
+	ssize_t		i;
+	int			retval = -1;
+	long		val = 0;
+	int			bits = 0;
+
+	filp = fopen(license_file_name, "rb");
+	if (!filp)
+	{
+		if (outerr)
+			fprintf(outerr, "failed to open '%s': %m", license_file_name);
+		return -1;
+	}
+	/* Extract base64 */
+	for (i=0; ;)
+	{
+		int		c = fgetc(filp);
+
+		if (c == '=' || c == EOF)
+			break;
+		if (c >= 'A' && c <= 'Z')
+			val |= ((c - 'A') << bits);
+		else if (c >= 'a' && c <= 'z')
+			val |= ((c - 'a' + 26) << bits);
+		else if (c >= '0' && c <= '9')
+			val |= ((c - '0' + 52) << bits);
+		else if (c == '+')
+			val |= (62 << bits);
+		else if (c == '/')
+			val |= (63 << bits);
+		else
+		{
+			if (outerr)
+				fprintf(outerr, "unexpected base64 character: %c\n", c);
+			goto out;
+		}
+		bits += 6;
+		while (bits >= 8)
+		{
+			if (i >= sizeof(cmd->buffer))
+			{
+				if (outerr)
+					fprintf(outerr, "license file too large\n");
+				goto out;
+			}
+			cmd->buffer[i++] = (val & 0xff);
+			val >>= 8;
+			bits -= 8;
+		}
+	}
+	if (bits > 0)
+	{
+		if (i >= sizeof(cmd->buffer))
+		{
+			if (outerr)
+				fprintf(outerr, "license file too large\n");
+			goto out;
+		}
+		cmd->buffer[i++] = (val & 0xff);
+	}
+	if (i != sizeof(cmd->buffer))
+	{
+		if (outerr)
+			fprintf(outerr, "license file length mismatch\n");
+		goto out;
+	}
+	if (8 * HETERODB_LICENSE_KEYLEN != (((int)cmd->buffer[0] << 8) |
+										((int)cmd->buffer[1])))
+	{
+		if (outerr)
+			fprintf(outerr, "license file corruption?\n");
+		goto out;
+	}
+	retval = 0;
+out:
+	fclose(filp);
+	return retval;
+}
+#endif /* __KERNEL__ */
 #endif /* NVME_STROM_H */

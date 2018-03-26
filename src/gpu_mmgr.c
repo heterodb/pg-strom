@@ -15,23 +15,7 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
-#include "postgres.h"
-#include "catalog/pg_type.h"
-#include "commands/tablespace.h"
-#include "funcapi.h"
-#include "pgstat.h"
-#include "postmaster/bgworker.h"
-#include "storage/bufmgr.h"
-#include "storage/ipc.h"
-#include "storage/latch.h"
-#include "utils/guc.h"
-#include "utils/inval.h"
-#include "utils/memutils.h"
-#include "utils/pg_crc.h"
-#include "utils/rel.h"
-#include "utils/syscache.h"
 #include "pg_strom.h"
-#include <sys/ioctl.h>
 
 #define GPUMEM_CHUNKSZ_MAX_BIT		30		/* 1GB */
 #define GPUMEM_CHUNKSZ_MIN_BIT		14		/* 16KB */
@@ -151,7 +135,6 @@ static int			num_preserved_gpu_memory_regions;	/* GUC */
 static bool			gpummgr_bgworker_got_signal = false;
 static GpuMemPreservedHead *gmemp_head = NULL;
 
-Datum pgstrom_license_query(PG_FUNCTION_ARGS);
 Datum pgstrom_device_preserved_meminfo(PG_FUNCTION_ARGS);
 
 #define GPUMEM_DEVICE_RAW_EXTRA		((void *)(~0L))
@@ -173,99 +156,6 @@ nvme_strom_ioctl(int cmd, void *arg)
 	}
 	return ioctl(fdesc_nvme_strom, cmd, arg);
 }
-
-/*
- * pgstrom_license_query
- */
-static bool
-commercial_license_query(StringInfo buf)
-{
-	size_t	buflen = 4096;
-	int		rc;
-	StromCmd__LicenseInfo *cmd;
-
-	cmd = palloc0(sizeof(StromCmd__LicenseInfo) + buflen);
-	cmd->validation = 0;
-	cmd->length = buflen;
-
-	rc = nvme_strom_ioctl(STROM_IOCTL__LICENSE_ADMIN, cmd);
-	if (rc == 0)
-	{
-		int		i_year = (cmd->issued_at / 10000);
-		int		i_mon  = (cmd->issued_at / 100) % 100;
-		int		i_day  = (cmd->issued_at % 100);
-		int		e_year = (cmd->expired_at / 10000);
-		int		e_mon  = (cmd->expired_at / 100) % 100;
-		int		e_day  = (cmd->expired_at % 100);
-
-		if (i_year < 2000 || i_year > 9999 || i_mon < 1 || i_mon > 12)
-			elog(ERROR, "Strange date in the ISSUED_AT field: %08d",
-				 cmd->issued_at);
-		if (e_year < 2000 || e_year > 9999 || e_mon < 1 || e_mon > 12)
-			elog(ERROR, "Strange date in the EXPIRED_AT_AT field: %08d",
-				 cmd->issued_at);
-
-		appendStringInfo(
-			buf,
-			"{ \"version\" : %u"
-			", \"serial_nr\" : %s"
-			", \"issued_at\" : \"%d-%s-%d\""
-			", \"expired_at\" : \"%d-%s-%d\""
-			", \"nr_gpus\" : %d"
-			", \"licensee_org\" : %s"
-			", \"licensee_name\" : %s"
-			", \"licensee_mail\" : %s",
-			cmd->version,
-			quote_identifier(cmd->serial_nr),
-			i_day, months[i_mon-1], i_year,
-			e_day, months[e_mon-1], e_year,
-			cmd->nr_gpus,
-			quote_identifier(cmd->licensee_org),
-			quote_identifier(cmd->licensee_name),
-			quote_identifier(cmd->licensee_mail));
-		if (cmd->license_desc)
-			appendStringInfo(
-				buf,
-				", \"license_desc\" : %s",
-				quote_identifier(cmd->license_desc));
-		appendStringInfo(buf, " }");
-
-		return true;
-	}
-	else if (rc == -2)
-	{
-		/* failed at open(2) */
-		if (errno == ENOENT)
-			elog(LOG, "hint: nvme_strom driver is not installed");
-		else
-			elog(LOG, "failed to open \"%s\": %m", NVME_STROM_IOCTL_PATHNAME);
-	}
-	else if (errno == ENOENT)
-		elog(LOG, "no commercial license is not installed");
-	else if (errno == EBADMSG)
-		elog(LOG, "commercial license file \"%s\" is corrupted",
-			 HETERODB_LICENSE_PATHNAME);
-	else
-		elog(LOG, "failed on STROM_IOCTL__LICENSE_ADMIN: %m");
-
-	return false;
-}
-
-Datum
-pgstrom_license_query(PG_FUNCTION_ARGS)
-{
-	StringInfoData	buf;
-
-	if (!superuser())
-		ereport(ERROR,
-				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 (errmsg("only superuser can validate commercial license"))));
-	initStringInfo(&buf);
-	if (!commercial_license_query(&buf))
-		PG_RETURN_NULL();
-	PG_RETURN_POINTER(DirectFunctionCall1(json_in, PointerGetDatum(buf.data)));
-}
-PG_FUNCTION_INFO_V1(pgstrom_license_query);
 
 /*
  * gpuMemFreeChunk
@@ -1696,7 +1586,6 @@ pgstrom_init_gpu_mmgr(void)
 	Size		shared_buffer_size = (Size)NBuffers * (Size)BLCKSZ;
 	Size		segment_sz;
 	Size		required;
-	StringInfoData buf;
 	BackgroundWorker worker;
 
 	/*
@@ -1769,14 +1658,6 @@ pgstrom_init_gpu_mmgr(void)
 							PGC_POSTMASTER,
 							GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
-	/*
-	 * Commercial license info, if any
-	 */
-	initStringInfo(&buf);
-	if (commercial_license_query(&buf))
-		elog(LOG, "HeteroDB License: %s", buf.data);
-	pfree(buf.data);
-
 	/*
 	 * Background workers per device, to keep device memory for multi-process
 	 */

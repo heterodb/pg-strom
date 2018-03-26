@@ -73,118 +73,44 @@ __error_exit(const char *file_name, int lineno,
  * commercial license validation if any
  */
 static int
-nvme_strom_ioctl(int cmd, void *arg)
-{
-	static int		fdesc_nvme_strom = -1;
-
-	if (fdesc_nvme_strom < 0)
-	{
-		fdesc_nvme_strom = open(NVME_STROM_IOCTL_PATHNAME, O_RDONLY);
-		if (fdesc_nvme_strom < 0)
-			return -1;
-	}
-	return ioctl(fdesc_nvme_strom, cmd, arg);
-}
-
-static int
 commercial_license_validation(int *nr_gpus)
 {
+	StromCmd__LicenseInfo cmd;
 	int			fdesc;
-	struct stat st_buf;
-	ssize_t		i, n;
-	char	   *temp = NULL;
 	int			i_year, i_mon, i_day;
 	int			e_year, e_mon, e_day;
-	int			total_bits = 0;
-	int			bits = 0;
-	long		val = 0;
-	unsigned char *pos;
-	StromCmd__LicenseInfo *cmd = NULL;
 	static const char *months[] =
 		{"Jan", "Feb", "Mar", "Apr", "May", "Jun",
 		 "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
 
-	fdesc = open(HETERODB_LICENSE_PATHNAME, O_RDONLY);
-	if (fdesc < 0)
-	{
-		if (errno != ENOENT)
-		{
-			fprintf(stderr, "failed on open('%s'): %m\n",
-					HETERODB_LICENSE_PATHNAME);
-			return 1;
-		}
-		return 0;
-	}
-
-	if (fstat(fdesc, &st_buf) != 0)
-		fprintf(stderr, "failed on fstat('%s'): %m\n",
-				HETERODB_LICENSE_PATHNAME);
-
-	temp = malloc(st_buf.st_size + 1);
-	for (i=0; i < st_buf.st_size; i++)
-	{
-		n = read(fdesc, temp + i, st_buf.st_size - i);
-		if (n < 0)
-		{
-			fprintf(stderr, "failed on read('%s'): %m\n",
-					HETERODB_LICENSE_PATHNAME);
-			return 1;
-		}
-	}
-	cmd = malloc(sizeof(StromCmd__LicenseInfo) + st_buf.st_size);
-	memset(cmd, 0, sizeof(StromCmd__LicenseInfo) + st_buf.st_size);
-
-	/* Extract base64 */
-	pos = cmd->buffer;
-	for (i=0; i < st_buf.st_size; i++)
-	{
-		int		c = temp[i];
-
-		if (c == '=')
-			break;
-		if (c >= 'A' && c <= 'Z')
-			val |= ((c - 'A') << bits);
-		else if (c >= 'a' && c <= 'z')
-			val |= ((c - 'a' + 26) << bits);
-		else if (c >= '0' && c <= '9')
-			val |= ((c - '0' + 52) << bits);
-		else if (c == '+')
-			val |= (62 << bits);
-		else if (c == '/')
-			val |= (63 << bits);
-		else
-		{
-			fprintf(stderr, "unexpected base64 character: %c\n", c);
-			return 1;
-		}
-		total_bits += 6;
-		bits += 6;
-		while (bits >= 8)
-		{
-			*pos++ = (val & 0xff);
-			val >>= 8;
-			bits -= 8;
-		}
-	}
-	if (bits > 0)
-		*pos++ = (val & 0xff);
-	cmd->validation = 1;
-	cmd->length = st_buf.st_size;
+	/* Read the license file */
+	memset(&cmd, 0, sizeof(StromCmd__LicenseInfo));
+	if (read_heterodb_license_file(&cmd, HETERODB_LICENSE_PATHNAME, stderr))
+		return 1;
+	cmd.validation = 1;
 
 	/* License validation */
-	if (nvme_strom_ioctl(STROM_IOCTL__LICENSE_ADMIN, cmd) != 0)
+	fdesc = open(NVME_STROM_IOCTL_PATHNAME, O_RDONLY);
+	if (fdesc < 0)
 	{
-		fprintf(stderr, "failed on nvme_strom_ioctl(2): %m\n");
+		fprintf(stderr, "failed on open('%s'): %m\n",
+				NVME_STROM_IOCTL_PATHNAME);
 		return 1;
 	}
+	if (ioctl(fdesc, STROM_IOCTL__LICENSE_ADMIN, &cmd) != 0)
+	{
+		fprintf(stderr, "failed on ioctl(STROM_IOCTL__LICENSE_ADMIN): %m\n");
+		return 1;
+	}
+	close(fdesc);
 
 	/* Print License Info */
-	i_year = (cmd->issued_at / 10000);
-	i_mon  = (cmd->issued_at / 100) % 100;
-	i_day  = (cmd->issued_at % 100);
-	e_year = (cmd->expired_at / 10000);
-	e_mon  = (cmd->expired_at / 100) % 100;
-	e_day  = (cmd->expired_at % 100);
+	i_year = (cmd.issued_at / 10000);
+	i_mon  = (cmd.issued_at / 100) % 100;
+	i_day  = (cmd.issued_at % 100);
+	e_year = (cmd.expired_at / 10000);
+	e_mon  = (cmd.expired_at / 100) % 100;
+	e_day  = (cmd.expired_at % 100);
 
 	if (print_license)
 	{
@@ -199,15 +125,15 @@ commercial_license_validation(int *nr_gpus)
 				   "LICENSEE_NAME: %s\n"
 				   "LICENSEE_MAIL: %s\n"
 				   "LICENSE_DESC: %s\n",
-				   cmd->version,
-				   cmd->serial_nr,
+				   cmd.version,
+				   cmd.serial_nr,
 				   i_day, months[i_mon-1], i_year,
 				   e_day, months[e_mon-1], e_year,
-				   cmd->nr_gpus,
-				   cmd->licensee_org,
-				   cmd->licensee_name,
-				   cmd->licensee_mail,
-				   cmd->license_desc ? cmd->license_desc : "");
+				   cmd.nr_gpus,
+				   cmd.licensee_org,
+				   cmd.licensee_name,
+				   cmd.licensee_mail,
+				   cmd.license_desc ? cmd.license_desc : "");
 		}
 		else
 		{
@@ -219,22 +145,19 @@ commercial_license_validation(int *nr_gpus)
 				   "Licensee Organization: %s\n"
 				   "Licensee Name: %s\n"
 				   "Licensee Mail: %s\n",
-				   cmd->version,
-				   cmd->serial_nr,
+				   cmd.version,
+				   cmd.serial_nr,
 				   i_day, months[i_mon-1], i_year,
 				   e_day, months[e_mon-1], e_year,
-				   cmd->nr_gpus,
-				   cmd->licensee_org,
-				   cmd->licensee_name,
-				   cmd->licensee_mail);
-			if (cmd->license_desc)
-				printf("License Description: %s\n", cmd->license_desc);
+				   cmd.nr_gpus,
+				   cmd.licensee_org,
+				   cmd.licensee_name,
+				   cmd.licensee_mail);
+			if (cmd.license_desc)
+				printf("License Description: %s\n", cmd.license_desc);
 		}
 	}
-	*nr_gpus = cmd->nr_gpus;
-
-	free(temp);
-	free(cmd);
+	*nr_gpus = cmd.nr_gpus;
 
 	return 0;
 }
@@ -434,8 +357,7 @@ int main(int argc, char *argv[])
 		}
 	}
 	/* Commercial License Validation (if any) */
-	if (commercial_license_validation(&nr_gpus) != 0)
-		return 1;
+	commercial_license_validation(&nr_gpus);
 
 	rc = cuInit(0);
 	if (rc != CUDA_SUCCESS)

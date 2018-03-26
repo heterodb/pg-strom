@@ -36,6 +36,8 @@ double		pgstrom_gpu_operator_cost;
 static planner_hook_type	planner_hook_next;
 static CustomPathMethods	pgstrom_dummy_path_methods;
 static CustomScanMethods	pgstrom_dummy_plan_methods;
+/* SQL function declarations */
+Datum pgstrom_license_query(PG_FUNCTION_ARGS);
 
 /* pg_strom.chunk_size */
 Size
@@ -419,6 +421,118 @@ check_nvidia_mps(void)
 }
 
 /*
+ * pgstrom_license_query
+ */
+static bool
+commercial_license_query(StringInfo buf)
+{
+	StromCmd__LicenseInfo cmd;
+	int		fdesc;
+	int		i_year, i_mon, i_day;
+	int		e_year, e_mon, e_day;
+
+	memset(&cmd, 0, sizeof(StromCmd__LicenseInfo));
+	fdesc = open(NVME_STROM_IOCTL_PATHNAME, O_RDONLY);
+	if (fdesc < 0)
+	{
+		if (errno == ENOENT)
+			elog(LOG, "PG-Strom: nvme_strom driver is not installed");
+		else
+			elog(LOG, "failed to open \"%s\": %m", NVME_STROM_IOCTL_PATHNAME);
+		return false;
+	}
+	if (ioctl(fdesc, STROM_IOCTL__LICENSE_ADMIN, &cmd) != 0)
+	{
+		if (errno == EINVAL)
+			elog(LOG, "PG-Strom: no valid commercial license is installed");
+		else if (errno == EKEYEXPIRED)
+			elog(LOG, "PG-Strom: commercial license is expired");
+		else
+			elog(LOG, "PG-Strom: failed on STROM_IOCTL__LICENSE_ADMIN: %m");
+		close(fdesc);
+		return false;
+	}
+	/* convert to text */
+	i_year = (cmd.issued_at / 10000);
+	i_mon  = (cmd.issued_at / 100) % 100;
+	i_day  = (cmd.issued_at % 100);
+	e_year = (cmd.expired_at / 10000);
+	e_mon  = (cmd.expired_at / 100) % 100;
+	e_day  = (cmd.expired_at % 100);
+
+	if (i_year < 2000 || i_year > 9999 || i_mon < 1 || i_mon > 12)
+	{
+		elog(LOG, "Strange date in the ISSUED_AT field: %08d",
+			 cmd.issued_at);
+		close(fdesc);
+		return false;
+	}
+	if (e_year < 2000 || e_year > 9999 || e_mon < 1 || e_mon > 12)
+	{
+		elog(LOG, "Strange date in the EXPIRED_AT_AT field: %08d",
+			 cmd.expired_at);
+		close(fdesc);
+		return false;
+	}
+	appendStringInfo(
+		buf,
+		"{ \"version\" : %u"
+		", \"serial_nr\" : %s"
+		", \"issued_at\" : \"%d-%s-%d\""
+		", \"expired_at\" : \"%d-%s-%d\""
+		", \"nr_gpus\" : %d"
+		", \"licensee_org\" : %s"
+		", \"licensee_name\" : %s"
+		", \"licensee_mail\" : %s",
+		cmd.version,
+		quote_identifier(cmd.serial_nr),
+		i_day, months[i_mon-1], i_year,
+		e_day, months[e_mon-1], e_year,
+		cmd.nr_gpus,
+		quote_identifier(cmd.licensee_org),
+		quote_identifier(cmd.licensee_name),
+		quote_identifier(cmd.licensee_mail));
+	if (cmd.license_desc)
+		appendStringInfo(
+			buf,
+			", \"license_desc\" : %s",
+			quote_identifier(cmd.license_desc));
+	appendStringInfo(buf, " }");
+
+	return true;
+}
+
+Datum
+pgstrom_license_query(PG_FUNCTION_ARGS)
+{
+	StringInfoData	buf;
+
+	if (!superuser())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 (errmsg("only superuser can query commercial license"))));
+	initStringInfo(&buf);
+	if (!commercial_license_query(&buf))
+		PG_RETURN_NULL();
+	PG_RETURN_POINTER(DirectFunctionCall1(json_in, PointerGetDatum(buf.data)));
+}
+PG_FUNCTION_INFO_V1(pgstrom_license_query);
+
+/*
+ * check_heterodb_license
+ */
+static void
+check_heterodb_license(void)
+{
+	StringInfoData	buf;
+
+	initStringInfo(&buf);
+	if (commercial_license_query(&buf))
+		elog(LOG, "HeteroDB License: %s", buf.data);
+	pfree(buf.data);
+}
+
+/*
  * _PG_init
  *
  * Main entrypoint of PG-Strom. It shall be invoked only once when postmaster
@@ -465,6 +579,9 @@ _PG_init(void)
 	pgstrom_init_plcuda();
 	pgstrom_init_ccache();
 	pgstrom_init_gstore_fdw();
+
+	/* check commercial license, if any */
+	check_heterodb_license();
 
 	/* dummy custom-scan node */
 	memset(&pgstrom_dummy_path_methods, 0, sizeof(CustomPathMethods));

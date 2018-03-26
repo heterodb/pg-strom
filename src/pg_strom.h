@@ -146,6 +146,7 @@
 #include <float.h>
 #include <limits.h>
 #include <math.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/time.h>
