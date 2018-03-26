@@ -391,7 +391,12 @@ GpuContextLookupModule(GpuContext *gcontext, ProgramId program_id)
 
 	STROM_TRY();
 	{
-		SpinLockAcquire(&gcontext->cuda_modules_lock);
+		while (!pthreadMutexLockTimeout(&gcontext->cuda_modules_lock, 500))
+		{
+			if (pg_atomic_read_u32(&gcontext->terminate_workers) != 0)
+				werror("worker termination is required");
+		}
+
 		dlist_foreach(iter, &gcontext->cuda_modules_slot[index])
 		{
 			entry = dlist_container(GpuContextModuleEntry, chain, iter.cur);
@@ -411,11 +416,11 @@ GpuContextLookupModule(GpuContext *gcontext, ProgramId program_id)
 		dlist_push_head(&gcontext->cuda_modules_slot[index],
 						&entry->chain);
 	found:
-		SpinLockRelease(&gcontext->cuda_modules_lock);
+		pthreadMutexUnlock(&gcontext->cuda_modules_lock);
 	}
 	STROM_CATCH();
 	{
-		SpinLockRelease(&gcontext->cuda_modules_lock);
+		pthreadMutexUnlock(&gcontext->cuda_modules_lock);
 		STROM_RE_THROW();
 	}
 	STROM_END_TRY();
@@ -810,7 +815,7 @@ AllocGpuContext(int cuda_dindex, bool never_use_mps)
 	dnode = dlist_pop_head_node(&gcontext_ipc_head->free_list);
 	ipc_entry = dlist_container(GpuContextIPCEntry, chain, dnode);
 	SpinLockRelease(&gcontext_ipc_head->lock);
-	pthreadMutexInit(&ipc_entry->mutex);
+	pthreadMutexInit(&ipc_entry->mutex, 1);
 	pthreadCondInit(&ipc_entry->cond);
 	pg_atomic_init_u32(&ipc_entry->command, 0);
 
@@ -819,7 +824,7 @@ AllocGpuContext(int cuda_dindex, bool never_use_mps)
 	gcontext->resowner		= CurrentResourceOwner;
 	gcontext->never_use_mps	= never_use_mps;
 	gcontext->cuda_dindex	= cuda_dindex;
-	SpinLockInit(&gcontext->cuda_modules_lock);
+	pthreadMutexInit(&gcontext->cuda_modules_lock, 0);
 	for (i=0; i < CUDA_MODULES_HASHSIZE; i++)
 		dlist_init(&gcontext->cuda_modules_slot[i]);
 	/* resource management */

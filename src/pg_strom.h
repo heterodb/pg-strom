@@ -227,7 +227,7 @@ typedef struct GpuContext
 	CUcontext	   *cuda_context_multi;	/* valid only multi-device mode */
 	CUevent		   *cuda_events0; /* per-worker general purpose event */
 	CUevent		   *cuda_events1; /* per-worker general purpose event */
-	slock_t			cuda_modules_lock;
+	pthread_mutex_t	cuda_modules_lock;
 	dlist_head		cuda_modules_slot[CUDA_MODULES_HASHSIZE];
 	/* resource management */
 	slock_t			restrack_lock;
@@ -1470,16 +1470,16 @@ __basename(const char *filename)
  * simple wrapper for pthread_mutex_lock
  */
 static inline void
-pthreadMutexInit(pthread_mutex_t *mutex)
+pthreadMutexInit(pthread_mutex_t *mutex, int pshared)
 {
 	pthread_mutexattr_t mattr;
 
 	if ((errno = pthread_mutexattr_init(&mattr)) != 0)
 		wfatal("failed on pthread_mutexattr_init: %m");
-    if ((errno = pthread_mutexattr_setpshared(&mattr, 1)) != 0)
-        wfatal("failed on pthread_mutexattr_setpshared: %m");
-    if ((errno = pthread_mutex_init(mutex, &mattr)) != 0)
-        wfatal("failed on pthread_mutex_init: %m");
+	if ((errno = pthread_mutexattr_setpshared(&mattr, pshared)) != 0)
+		wfatal("failed on pthread_mutexattr_setpshared: %m");
+	if ((errno = pthread_mutex_init(mutex, &mattr)) != 0)
+		wfatal("failed on pthread_mutex_init: %m");
 	if ((errno = pthread_mutexattr_destroy(&mattr)) != 0)
 		wfatal("failed on pthread_mutexattr_destroy: %m");
 }
@@ -1489,6 +1489,29 @@ pthreadMutexLock(pthread_mutex_t *mutex)
 {
 	if ((errno = pthread_mutex_lock(mutex)) != 0)
 		wfatal("failed on pthread_mutex_lock: %m");
+}
+
+static inline bool
+pthreadMutexLockTimeout(pthread_mutex_t *mutex, cl_ulong timeout_ms)
+{
+	struct timespec	tm;
+
+	if (clock_gettime(CLOCK_REALTIME, &tm) != 0)
+		wfatal("failed on clock_gettime: %m");
+	tm.tv_sec  += (timeout_ms / 1000);
+	tm.tv_nsec += (timeout_ms % 1000) * 1000000;
+	if (tm.tv_nsec >= 1000000000L)
+	{
+		tm.tv_sec += tm.tv_nsec / 1000000000L;
+		tm.tv_nsec = tm.tv_nsec % 1000000000L;
+	}
+
+	errno = pthread_mutex_timedlock(mutex, &tm);
+	if (errno == ETIMEDOUT)
+		return false;
+	else if (errno != 0)
+		wfatal("failed on pthread_mutex_timedlock: %m");
+	return true;
 }
 
 static inline void
