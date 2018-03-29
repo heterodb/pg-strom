@@ -2026,10 +2026,8 @@ static Node *
 replace_expression_by_altfunc(Node *node,
 							  gpupreagg_build_path_target_context *con)
 {
-	Query	   *parse = con->parse;
-	PathTarget *target_upper = con->target_upper;
+	PathTarget *target_input = con->target_input;
 	ListCell   *lc;
-	int			i = 0;
 
 	if (!node)
 		return NULL;
@@ -2044,29 +2042,21 @@ replace_expression_by_altfunc(Node *node,
 		return aggfn;
 	}
 
-	/*
-	 * If expression is identical with any of grouping-keys, it shall be
-	 * transformed to a simple var reference on execution time, so we don't
-	 * need to dive into any more.
-	 */
-	foreach (lc, target_upper->exprs)
-    {
-		Expr   *sortgroupkey = lfirst(lc);
-		Index	sortgroupref = get_pathtarget_sortgroupref(target_upper, i);
+	foreach (lc, target_input->exprs)
+	{
+		Expr   *expr_in = lfirst(lc);
 
-		if (sortgroupref && parse->groupClause &&
-			get_sortgroupref_clause_noerr(sortgroupref,
-										  parse->groupClause) != NULL)
-        {
-			if (equal(node, sortgroupkey))
-				return copyObject((Node *)sortgroupkey);
+		if (equal(node, expr_in))
+		{
+			add_new_column_to_pathtarget(con->target_partial,
+										 copyObject(expr_in));
+			add_new_column_to_pathtarget(con->target_device,
+										 copyObject(expr_in));
+			return copyObject(node);
 		}
-		i++;
 	}
-
-	/* Not found */
 	if (IsA(node, Var) || IsA(node, PlaceHolderVar))
-		elog(ERROR, "Bug? non-grouping key variables are referenced: %s",
+		elog(ERROR, "Bug? referenced variable is neither grouping-key nor its dependent key: %s",
 			 nodeToString(node));
 	return expression_tree_mutator(node, replace_expression_by_altfunc, con);
 }
@@ -2091,7 +2081,7 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 	Query	   *parse = root->parse;
 	Node	   *havingQual = NULL;
 	ListCell   *lc;
-	cl_int		i = 0;
+	cl_int		i, j, n;
 
 	memset(&con, 0, sizeof(con));
 	con.device_executable = true;
@@ -2101,21 +2091,32 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 	con.target_device	= target_device;
 	con.target_input	= target_input;
 
+	/*
+	 * NOTE: Not to inject unnecessary projection on the sub-path node,
+	 * target_device shall be initialized according to the target_input
+	 * once, but its sortgrouprefs are not set.
+	 */
+	n = list_length(target_input->exprs);
+	target_device->exprs = copyObject(target_input->exprs);
+	target_device->sortgrouprefs = palloc0(sizeof(Index) * (n + 1));
+
+	i = 0;
 	foreach (lc, target_upper->exprs)
 	{
 		Expr   *expr = lfirst(lc);
 		Index	sortgroupref = get_pathtarget_sortgroupref(target_upper, i);
-		Node   *temp;
 	
 		if (sortgroupref && parse->groupClause &&
 			get_sortgroupref_clause_noerr(sortgroupref,
 										  parse->groupClause) != NULL)
 		{
+			ListCell   *cell;
+
 			/*
 			 * NOTE: In case when grouping-key is an expression that is not
-			 * inline data type (right now, we expect NUMERIC expression),
-			 * outer-scan pullup should be prohibited, because we have no
-			 * varlena buffer to store the expression.
+			 * inline data type, outer-scan pullup should be prohibited,
+			 * because we have no varlena buffer to store result of the
+			 * expression.
 			 * Once outer-scan node is separated, expression with varlena
 			 * or indirect data shall be built on the underlying node, thus,
 			 * GpuPreAgg can treat these variables as a simple var-reference.
@@ -2123,39 +2124,66 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 			if (!IsA(expr, Var) &&
 				!IsA(expr, Param) &&
 				!IsA(expr, Const) &&
-				!get_typbyval(exprType((Node *) expr)))
+				(!pgstrom_device_expression(expr) ||
+				 !get_typbyval(exprType((Node *) expr))))
 			{
 				*p_can_pullup_outerscan = false;
 			}
 
-			temp = replace_expression_by_outerref((Node *)expr,
-												  target_input);
-			if (!pgstrom_device_expression((Expr *)temp))
+			/* grouping-key should be on the any of input items */
+			j = 0;
+			foreach (cell, target_device->exprs)
 			{
-				elog(DEBUG2, "Expression is not device executable: %s",
-					 nodeToString(expr));
-				return false;
+				if (equal(expr, lfirst(cell)))
+				{
+					if (target_device->sortgrouprefs[j] != 0)
+						elog(ERROR, "Bug? duplicated grouping-keys");
+					target_device->sortgrouprefs[j] = sortgroupref;
+					break;
+				}
+				j++;
 			}
-
+			if (!cell)
+				elog(ERROR, "Bug? grouping-key is not found on input tlist");
 			/*
-			 * It's a grouping column, so add it to both of the target_final,
-			 * target_partial and target_device as-is.
+			 * OK, It's a grouping-key column, so add it to both of
+			 * the target_final, target_partial and target_device as-is.
 			 */
+			j=0;
+			foreach (cell, target_partial->exprs)
+			{
+				if (equal(expr, lfirst(cell)) &&
+					(!target_partial->sortgrouprefs ||
+					 target_partial->sortgrouprefs[j] == 0))
+				{
+					n = list_length(target_partial->exprs);
+					target_partial->sortgrouprefs =
+						(!target_partial->sortgrouprefs
+						 ? palloc0(sizeof(Index) * (n+1))
+						 : repalloc(target_partial->sortgrouprefs,
+									sizeof(Index) * (n+1)));
+					target_partial->sortgrouprefs[j] = sortgroupref;
+					break;
+				}
+				j++;
+			}
+			if (!cell)
+				add_column_to_pathtarget(target_partial, expr, sortgroupref);
+
 			add_column_to_pathtarget(target_final, expr, sortgroupref);
-			add_column_to_pathtarget(target_partial, expr, sortgroupref);
-			add_column_to_pathtarget(target_device, expr, sortgroupref);
 		}
 		else
 		{
 			Oid		orig_type = exprType((Node *)expr);
+			Expr   *temp;
 
-			expr = (Expr *)replace_expression_by_altfunc((Node *)expr, &con);
+			temp = (Expr *)replace_expression_by_altfunc((Node *)expr, &con);
 			if (!con.device_executable)
 				return false;
 			if (orig_type != exprType((Node *)expr))
 				elog(ERROR, "Bug? GpuPreAgg catalog is not consistent: %s",
 					 nodeToString(expr));
-			add_column_to_pathtarget(target_final, expr, sortgroupref);
+			add_column_to_pathtarget(target_final, temp, 0);
 		}
 		i++;
 	}
