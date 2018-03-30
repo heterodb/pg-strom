@@ -334,7 +334,7 @@ static GpuJoinSharedState *createGpuJoinSharedState(GpuJoinState *gjs,
  * returns true, if pathnode is GpuJoin
  */
 bool
-pgstrom_path_is_gpujoin(Path *pathnode)
+pgstrom_path_is_gpujoin(const Path *pathnode)
 {
 	CustomPath *cpath = (CustomPath *) pathnode;
 
@@ -366,6 +366,26 @@ pgstrom_planstate_is_gpujoin(const PlanState *ps)
 		((CustomScanState *) ps)->methods == &gpujoin_exec_methods)
 		return true;
 	return false;
+}
+
+/*
+ * returns copy of GpuJoinPath node, but not recursive.
+ */
+Path *
+pgstrom_copy_gpujoin_path(const Path *pathnode)
+{
+	GpuJoinPath	   *gjpath_old = (GpuJoinPath *) pathnode;
+	GpuJoinPath	   *gjpath_new;
+	Size			length;
+
+	if (!pgstrom_path_is_gpujoin(pathnode))
+		elog(ERROR, "Bug? tried to copy non-GpuJoinPath node");
+
+	length = offsetof(GpuJoinPath, inners[gjpath_old->num_rels]);
+	gjpath_new = palloc0(length);
+	memcpy(gjpath_new, gjpath_old, length);
+
+	return &gjpath_new->cpath.path;
 }
 
 /*
@@ -513,7 +533,6 @@ cost_gpujoin(PlannerInfo *root,
 			 Relids required_outer,
 			 int parallel_nworkers)
 {
-	PathTarget *join_reltarget = joinrel->reltarget;
 	Cost		startup_cost = 0.0;
 	Cost		run_cost = 0.0;
 	Cost		run_cost_per_chunk = 0.0;
@@ -522,8 +541,7 @@ cost_gpujoin(PlannerInfo *root,
 	double		gpu_ratio = pgstrom_gpu_operator_cost / cpu_operator_cost;
 	double		parallel_divisor = 1.0;
 	double		num_chunks;
-	double		chunk_ntuples;
-	double		page_fault_factor = 1.0;
+	double		outer_ntuples;
 	double		kern_nloops = 1.0;
 	int			i, num_rels = gpath->num_rels;
 
@@ -539,11 +557,12 @@ cost_gpujoin(PlannerInfo *root,
 							gpath->outer_quals,
 							parallel_nworkers,
 							&parallel_divisor,
-							&dummy,		/* equivalent to outer_path->rows */
+							&dummy,
 							&num_chunks,
 							&gpath->outer_nrows_per_block,
 							&startup_cost,
 							&run_cost);
+		gpath->cpath.path.rows /= parallel_divisor;
 	}
 	else
 	{
@@ -565,7 +584,7 @@ cost_gpujoin(PlannerInfo *root,
 	/*
 	 * Cost for each depth
 	 */
-	chunk_ntuples = outer_path->rows / num_chunks;
+	outer_ntuples = outer_path->rows;
 	for (i=0; i < num_rels; i++)
 	{
 		Path	   *scan_path = gpath->inners[i].scan_path;
@@ -614,13 +633,14 @@ cost_gpujoin(PlannerInfo *root,
 			/* cost to compute inner hash value by CPU */
 			startup_cost += (cpu_operator_cost * num_hashkeys *
 							 scan_path->rows);
-			/* cost to compute hash value by GPU */
-			run_cost_per_chunk += (pgstrom_gpu_operator_cost *
-								   num_hashkeys *
-								   chunk_ntuples);
+			/* cost to comput hash value by GPU */
+			run_cost += (pgstrom_gpu_operator_cost *
+						 num_hashkeys *
+						 outer_ntuples);
 			/* cost to evaluate join qualifiers */
-			run_cost_per_chunk += (join_quals_cost.per_tuple *
-								   Max(hash_nsteps, 1.0));
+			run_cost += (join_quals_cost.per_tuple *
+						 Max(hash_nsteps, 1.0) *
+						 outer_ntuples);
 		}
 		else
 		{
@@ -636,75 +656,31 @@ cost_gpujoin(PlannerInfo *root,
 
 			/* cost to evaluate join qualifiers */
 			run_cost_per_chunk += (join_quals_cost.per_tuple *
-								   chunk_ntuples *
+								   outer_ntuples *
 								   inner_ntuples);
 		}
 		/* number of outer items on the next depth */
-		chunk_ntuples = join_nrows / num_chunks;
+		outer_ntuples = join_nrows / parallel_divisor;
 	}
-	/* total GPU execution cost */
-	run_cost += (run_cost_per_chunk *
-				 num_chunks *
-				 kern_nloops *
-				 page_fault_factor);
 	/* outer DMA send cost */
 	run_cost += (double)num_chunks * pgstrom_gpu_dma_cost;
 	/* inner DMA send cost */
 	run_cost += ((double)inner_buffer_sz /
 				 (double)pgstrom_chunk_size()) * pgstrom_gpu_dma_cost;
+	/* cost for projection */
+	startup_cost += joinrel->reltarget->cost.startup;
+	run_cost += joinrel->reltarget->cost.per_tuple * gpath->cpath.path.rows;
 
-	/*
-	 * cost discount by GPU projection, if this join is the last level
-	 */
-	if (final_tlist != NIL)
-	{
-		Cost		discount_per_tuple = 0.0;
-		Cost		discount_total;
-		QualCost	qcost;
-		cl_uint		num_vars = 0;
-		ListCell   *lc;
+	/* cost for DMA receive (GPU-->host) */
+	run_cost += cost_for_dma_receive(joinrel, -1.0);
 
-		foreach (lc, final_tlist)
-		{
-			TargetEntry	   *tle = lfirst(lc);
-
-			if (IsA(tle->expr, Var) ||
-				IsA(tle->expr, Const) ||
-				IsA(tle->expr, Param))
-				num_vars++;
-			else if (pgstrom_device_expression(tle->expr))
-            {
-                cost_qual_eval_node(&qcost, (Node *)tle->expr, root);
-                discount_per_tuple += (qcost.per_tuple *
-                                       Max(1.0 - gpu_ratio, 0.0) / 10.0);
-                num_vars++;
-            }
-            else
-            {
-				List	   *vars_list
-					= pull_vars_of_level((Node *)tle->expr, 0);
-				num_vars += list_length(vars_list);
-				list_free(vars_list);
-			}
-		}
-
-		if (num_vars > list_length(join_reltarget->exprs))
-			discount_per_tuple -= cpu_tuple_cost *
-				(double)(num_vars - list_length(join_reltarget->exprs));
-		discount_total = Max(discount_per_tuple, 0.0) * joinrel->rows;
-
-		run_cost = Max(run_cost - discount_total, 0.0);
-	}
+	/* cost to exchange tuples */
+	run_cost += cpu_tuple_cost * gpath->cpath.path.rows;
 
 	/*
 	 * delay to fetch the first tuple
 	 */
 	startup_delay = run_cost * (1.0 / num_chunks);
-
-	/*
-	 * cost of final materialization, but GPU does projection
-	 */
-//	run_cost += cpu_tuple_cost * gpath->cpath.path.rows;
 
 	/*
 	 * Put cost value on the gpath.
@@ -720,42 +696,40 @@ cost_gpujoin(PlannerInfo *root,
 	 */
 	Assert(gpath->cpath.path.startup_cost >= 0.0 &&
 		   gpath->cpath.path.total_cost >= 0.0);
+	if (!add_path_precheck(gpath->cpath.path.parent,
+						   gpath->cpath.path.startup_cost,
+						   gpath->cpath.path.total_cost,
+						   NULL, required_outer))
+		return false;
 
-	if (add_path_precheck(gpath->cpath.path.parent,
-						  gpath->cpath.path.startup_cost,
-						  gpath->cpath.path.total_cost,
-						  NULL, required_outer))
+	/* Dumps candidate GpuJoinPath for debugging */
+	if (client_min_messages <= DEBUG1)
 	{
-		/* Dumps candidate GpuJoinPath for debugging */
-		if (client_min_messages <= DEBUG1)
+		StringInfoData buf;
+
+		initStringInfo(&buf);
+		__dump_gpujoin_path(&buf, root, outer_path);
+		for (i=0; i < gpath->num_rels; i++)
 		{
-			StringInfoData buf;
+			JoinType	join_type = gpath->inners[i].join_type;
+			Path	   *inner_path = gpath->inners[i].scan_path;
+			bool		is_nestloop = (gpath->inners[i].hash_quals == NIL);
 
-			initStringInfo(&buf);
-			__dump_gpujoin_path(&buf, root, outer_path);
-			for (i=0; i < gpath->num_rels; i++)
-			{
-				JoinType	join_type = gpath->inners[i].join_type;
-				Path	   *inner_path = gpath->inners[i].scan_path;
-				bool		is_nestloop = (gpath->inners[i].hash_quals == NIL);
+			appendStringInfo(&buf, " %s%s ",
+							 join_type == JOIN_FULL ? "F" :
+							 join_type == JOIN_LEFT ? "L" :
+							 join_type == JOIN_RIGHT ? "R" : "I",
+							 is_nestloop ? "NL" : "HJ");
 
-				appendStringInfo(&buf, " %s%s ",
-								 join_type == JOIN_FULL ? "F" :
-								 join_type == JOIN_LEFT ? "L" :
-								 join_type == JOIN_RIGHT ? "R" : "I",
-								 is_nestloop ? "NL" : "HJ");
-
-				__dump_gpujoin_path(&buf, root, inner_path);
-			}
-			elog(DEBUG1, "GpuJoin: %s Cost=%.2f..%.2f",
-				 buf.data,
-				 gpath->cpath.path.startup_cost,
-				 gpath->cpath.path.total_cost);
-			pfree(buf.data);
+			__dump_gpujoin_path(&buf, root, inner_path);
 		}
-		return true;
+		elog(DEBUG1, "GpuJoin: %s Cost=%.2f..%.2f",
+			 buf.data,
+			 gpath->cpath.path.startup_cost,
+			 gpath->cpath.path.total_cost);
+		pfree(buf.data);
 	}
-	return false;
+	return true;
 }
 
 typedef struct

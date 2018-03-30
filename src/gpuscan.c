@@ -137,135 +137,6 @@ static GpuScanSharedState *createGpuScanSharedState(GpuScanState *gss,
 static void resetGpuScanSharedState(GpuScanState *gss);
 
 /*
- * cost_discount_gpu_projection
- *
- * Because of the current optimizer's design of PostgreSQL, an exact
- * target-list is not informed during path consideration.
- * It shall be attached prior to the plan creation stage once entire
- * path gets determined based on the estimated cost.
- * If GpuProjection does not make sense, it returns false,
- *
- * Note that it is just a cost reduction factor, don't set complex
- * expression on the rel->reltarget. Right now, PostgreSQL does not
- * expect such an intelligence.
- */
-static bool
-cost_discount_gpu_projection(PlannerInfo *root, RelOptInfo *rel,
-							 Cost *p_discount_per_tuple)
-{
-	Query	   *parse = root->parse;
-	bool		have_grouping = false;
-	bool		may_gpu_projection = false;
-	List	   *proj_var_list = NIL;
-	List	   *proj_phv_list = NIL;
-	cl_uint		proj_num_attrs = 0;
-	cl_uint		normal_num_attrs = 0;
-	Cost		discount_per_tuple = 0.0;
-	double		gpu_ratio = pgstrom_gpu_operator_cost / cpu_operator_cost;
-	ListCell   *lc;
-
-	/* GpuProjection makes sense only if top-level of scan/join */
-	if (!bms_equal(root->all_baserels, rel->relids))
-		return false;
-
-	/*
-	 * In case when this scan/join path is underlying other grouping
-	 * clauses, or aggregations, scan/join will generate expressions
-	 * only if it is grouping/sorting keys. Other expressions shall
-	 * be broken down into Var nodes, then calculated in the later
-	 * stage.
-	 */
-	if (parse->groupClause || parse->groupingSets ||
-		parse->hasAggs || root->hasHavingQual)
-		have_grouping = true;
-
-	/*
-	 * Walk on the prospective final target list.
-	 */
-	foreach (lc, root->processed_tlist)
-	{
-		TargetEntry	   *tle = lfirst(lc);
-
-		if (IsA(tle->expr, Var))
-		{
-			if (!list_member(proj_var_list, tle->expr))
-				proj_var_list = lappend(proj_var_list, tle->expr);
-			normal_num_attrs++;
-		}
-		else if (IsA(tle->expr, PlaceHolderVar))
-		{
-			if (!list_member(proj_phv_list, tle->expr))
-				proj_phv_list = lappend(proj_phv_list, tle->expr);
-			normal_num_attrs++;
-		}
-		else if (IsA(tle->expr, Const) || IsA(tle->expr, Param))
-		{
-			proj_num_attrs++;
-			normal_num_attrs++;
-		}
-		else if ((!have_grouping ||
-				  (tle->ressortgroupref &&
-				   parse->groupClause &&
-				   get_sortgroupref_clause_noerr(tle->ressortgroupref,
-												 parse->groupClause) != NULL))
-				 && pgstrom_device_expression(tle->expr))
-		{
-			QualCost	qcost;
-
-			cost_qual_eval_node(&qcost, (Node *)tle->expr, root);
-			discount_per_tuple += (qcost.per_tuple *
-								   Max(1.0 - gpu_ratio, 0.0) / 8.0);
-			proj_num_attrs++;
-			normal_num_attrs++;
-			may_gpu_projection = true;
-		}
-		else
-		{
-			List	   *temp_vars;
-			ListCell   *temp_lc;
-
-			temp_vars = pull_var_clause((Node *)tle->expr,
-										PVC_RECURSE_AGGREGATES |
-										PVC_RECURSE_WINDOWFUNCS |
-										PVC_INCLUDE_PLACEHOLDERS);
-			foreach (temp_lc, temp_vars)
-			{
-				Expr   *temp_expr = lfirst(temp_lc);
-
-				if (IsA(temp_expr, Var))
-				{
-					if (!list_member(proj_var_list, temp_expr))
-						proj_var_list = lappend(proj_var_list, temp_expr);
-				}
-				else if (IsA(temp_expr, PlaceHolderVar))
-				{
-					if (!list_member(proj_phv_list, temp_expr))
-						proj_phv_list = lappend(proj_phv_list, temp_expr);
-				}
-				else
-					elog(ERROR, "Bug? unexpected node: %s",
-						 nodeToString(temp_expr));
-			}
-			normal_num_attrs++;
-		}
-	}
-
-	proj_num_attrs += (list_length(proj_var_list) +
-					   list_length(proj_phv_list));
-	if (proj_num_attrs > normal_num_attrs)
-		discount_per_tuple -= cpu_tuple_cost *
-			(double)(proj_num_attrs - normal_num_attrs);
-
-	list_free(proj_var_list);
-	list_free(proj_phv_list);
-
-	*p_discount_per_tuple = (may_gpu_projection
-							 ? Max(discount_per_tuple, 0.0)
-							 : 0.0);
-	return may_gpu_projection;
-}
-
-/*
  * cost_gpuscan_common - common part of cost estimation for GpuScan
  * 
  * Once a simple scan path is pulled up to upper node, this node takes over
@@ -408,15 +279,35 @@ cost_gpuscan_common(PlannerInfo *root,
 	run_cost += qcost.per_tuple * gpu_ratio * ntuples;
 	ntuples *= selectivity;
 
-	/* Cost for DMA transfer */
+	/* Cost for DMA transfer (host/storage --> GPU) */
 	run_cost += pgstrom_gpu_dma_cost * nchunks;
 
 	*p_parallel_divisor = parallel_divisor;
-	*p_scan_ntuples = ntuples;
-	*p_scan_nchunks = nchunks;
+	*p_scan_ntuples = ntuples / parallel_divisor;
+	*p_scan_nchunks = nchunks / parallel_divisor;
 	*p_nrows_per_block = nrows_per_block;
 	*p_startup_cost = startup_cost;
 	*p_run_cost = run_cost;
+}
+
+/*
+ * cost_for_dma_receive - cost estimation for DMA receive (GPU->host)
+ */
+Cost
+cost_for_dma_receive(RelOptInfo *rel, double ntuples)
+{
+	PathTarget *reltarget = rel->reltarget;
+	cl_int		nattrs = list_length(reltarget->exprs);
+	cl_int		width_per_tuple;
+
+	if (ntuples < 0.0)
+		ntuples = rel->rows;
+	width_per_tuple = offsetof(kern_tupitem, htup) +
+		MAXALIGN(offsetof(HeapTupleHeaderData,
+						  t_bits[BITMAPLEN(nattrs)])) +
+		MAXALIGN(reltarget->width);
+	return pgstrom_gpu_dma_cost *
+		(((double)width_per_tuple * ntuples) / (double)pgstrom_chunk_size());
 }
 
 /*
@@ -427,7 +318,6 @@ create_gpuscan_path(PlannerInfo *root,
 					RelOptInfo *baserel,
 					List *dev_quals,
 					List *host_quals,
-					Cost discount_per_tuple,
 					int parallel_nworkers)
 {
 	GpuScanInfo	   *gs_info = palloc0(sizeof(GpuScanInfo));
@@ -474,6 +364,9 @@ create_gpuscan_path(PlannerInfo *root,
 						? param_info->ppi_rows
 						: baserel->rows) / parallel_divisor;
 
+	/* cost for DMA receive (GPU-->host) */
+	run_cost += cost_for_dma_receive(baserel, scan_ntuples);
+
 	/* cost for CPU qualifiers */
 	cost_qual_eval(&qcost, host_quals, root);
 	startup_cost += qcost.startup;
@@ -486,8 +379,20 @@ create_gpuscan_path(PlannerInfo *root,
 	cpu_per_tuple += qcost.per_tuple;
 	run_cost += (cpu_per_tuple + cpu_tuple_cost) * scan_ntuples;
 
-	/* Cost discount by GPU projection */
-	run_cost = Max(run_cost - discount_per_tuple * scan_ntuples, 0.0);
+	/*
+	 * Cost for projection
+	 *
+	 * MEMO: Even if GpuScan can run complicated projection on the device,
+	 * expression on the target-list shall be assigned on the CustomPath node
+	 * after the selection of the cheapest path, and its cost shall be
+	 * discounted by the core logic (see apply_projection_to_path).
+	 * In the previous implementation, we discounted the cost to be processed
+	 * by GpuProjection, however, it leads unexpected optimizer behavior.
+	 * Right now, we stop to discount the cost for GpuProjection.
+	 * Probably, it needs API enhancement of CustomScan.
+	 */
+	startup_cost += baserel->reltarget->cost.startup;
+	run_cost += baserel->reltarget->cost.per_tuple * scan_ntuples;
 
 	/* Latency to get the first chunk */
 	startup_delay = run_cost * (1.0 / scan_nchunks);
@@ -516,7 +421,6 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	List	   *dev_quals = NIL;
 	List	   *host_quals = NIL;
 	ListCell   *lc;
-	Cost		discount_per_tuple;
 
 	/* call the secondary hook */
 	if (set_rel_pathlist_next)
@@ -551,26 +455,13 @@ gpuscan_add_scan_path(PlannerInfo *root,
 		else
 			host_quals = lappend(host_quals, rinfo);
 	}
-
-	/*
-	 * Check whether the GPU Projection may be available
-	 */
-	if (!cost_discount_gpu_projection(root, baserel,
-									  &discount_per_tuple))
-	{
-		/*
-		 * GpuScan does not make sense if neither qualifier nor target-
-		 * list are runnable on GPU device.
-		 */
-		if (dev_quals == NIL)
-			return;
-	}
+	if (dev_quals == NIL)
+		return;
 
 	/* add GpuScan path in single process */
 	pathnode = create_gpuscan_path(root, baserel,
 								   dev_quals,
 								   host_quals,
-								   discount_per_tuple,
 								   0);
 	add_path(baserel, pathnode);
 
@@ -592,7 +483,6 @@ gpuscan_add_scan_path(PlannerInfo *root,
 		pathnode = create_gpuscan_path(root, baserel,
 									   dev_quals,
 									   host_quals,
-									   discount_per_tuple,
 									   parallel_nworkers);
 		add_partial_path(baserel, pathnode);
 
@@ -1234,93 +1124,6 @@ add_unique_expression(Expr *expr, List **p_targetlist, bool resjunk)
 
 	return true;
 }
-
-#if 0
-/*
- * replace_ctid_by_double_cast - replace Var-node that referenced ctid system
- * column by (ctid::bigint)::tid. The earlier half is an executable expression
- * on the device side, then it can be written back as inline fixed-length
- * variable. It enables not to use extra buffer.
- */
-static Node *
-__replace_ctid_by_double_cast(Node *node, void *__context)
-{
-	if (!node)
-		return NULL;
-
-	if (IsA(node, Var))
-	{
-		Var	   *varnode = (Var *) node;
-
-		/*
-		 * NOTE: Special case handling if @ctid system column is referenced.
-		 * We cast @ctid to fixed-length inline datum (bigint) on device side,
-		 * then it shall be backed to tid type on host side again.
-		 */
-		if (varnode->varattno == SelfItemPointerAttributeNumber)
-		{
-			Oid				pgstrom_namespace;
-			Oid				tid_oid = TIDOID;
-			Oid				int8_oid = INT8OID;
-			oidvector	   *arg_oidvec;
-			HeapTuple		tuple;
-			Form_pg_proc	proc_form;
-			FuncExpr	   *f;
-
-			/* pgstrom schema */
-			pgstrom_namespace = get_namespace_oid("pgstrom", false);
-
-			/* pgstrom.cast_tid_to_int8 */
-			arg_oidvec = buildoidvector(&tid_oid, 1);
-			tuple = SearchSysCache3(PROCNAMEARGSNSP,
-									PointerGetDatum("cast_tid_to_int8"),
-									PointerGetDatum(arg_oidvec),
-									ObjectIdGetDatum(pgstrom_namespace));
-			if (!HeapTupleIsValid(tuple))
-				elog(ERROR, "cache lookup failed for cast_tid_to_int8");
-			proc_form = (Form_pg_proc) GETSTRUCT(tuple);
-
-			f = makeFuncExpr(HeapTupleGetOid(tuple),
-							 proc_form->prorettype,
-							 list_make1(copyObject(varnode)),
-							 InvalidOid,
-							 InvalidOid,
-							 COERCE_EXPLICIT_CAST);
-			ReleaseSysCache(tuple);
-
-			/* pgstrom.cast_int8_to_tid */
-			arg_oidvec = buildoidvector(&int8_oid, 1);
-			tuple = SearchSysCache3(PROCNAMEARGSNSP,
-									PointerGetDatum("cast_int8_to_tid"),
-									PointerGetDatum(arg_oidvec),
-									ObjectIdGetDatum(pgstrom_namespace));
-			if (!HeapTupleIsValid(tuple))
-				elog(ERROR, "cache lookup failed for cast_int8_to_tid");
-			proc_form = (Form_pg_proc) GETSTRUCT(tuple);
-
-			f = makeFuncExpr(HeapTupleGetOid(tuple),
-                             proc_form->prorettype,
-                             list_make1(f),
-                             InvalidOid,
-                             InvalidOid,
-                             COERCE_EXPLICIT_CAST);
-			ReleaseSysCache(tuple);
-
-			return (Node *) f;
-		}
-		return copyObject((Node *)varnode);
-	}
-	return expression_tree_mutator(node,
-								   __replace_ctid_by_double_cast,
-								   NULL);
-}
-
-static List *
-replace_ctid_by_double_cast(List *tlist)
-{
-	return (List *)__replace_ctid_by_double_cast((Node *)tlist, NULL);
-}
-#endif
 
 /*
  * build_gpuscan_projection

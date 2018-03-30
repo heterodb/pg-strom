@@ -966,6 +966,7 @@ extern void cost_gpuscan_common(PlannerInfo *root,
 								cl_uint *p_nrows_per_block,
 								Cost *p_startup_cost,
 								Cost *p_run_cost);
+extern Cost cost_for_dma_receive(RelOptInfo *rel, double ntuples);
 extern void codegen_gpuscan_quals(StringInfo kern,
 								  codegen_context *context,
 								  Index scanrelid,
@@ -1002,9 +1003,10 @@ extern void pgstrom_init_gpuscan(void);
 struct GpuJoinSharedState;
 struct kern_gpujoin;
 
-extern bool pgstrom_path_is_gpujoin(Path *pathnode);
+extern bool pgstrom_path_is_gpujoin(const Path *pathnode);
 extern bool pgstrom_plan_is_gpujoin(const Plan *plannode);
 extern bool pgstrom_planstate_is_gpujoin(const PlanState *ps);
+extern Path *pgstrom_copy_gpujoin_path(const Path *pathnode);
 extern int	gpujoin_process_task(GpuTask *gtask, CUmodule cuda_module);
 extern void	gpujoin_release_task(GpuTask *gtask);
 extern void assign_gpujoin_session_info(StringInfo buf,

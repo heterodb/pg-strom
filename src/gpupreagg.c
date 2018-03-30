@@ -932,10 +932,27 @@ cost_gpupreagg(PlannerInfo *root,
 	/* Cost come from the underlying path */
 	if (gpa_info->outer_scanrelid == 0)
 	{
-		gpa_info->outer_startup_cost= input_path->startup_cost;
-		gpa_info->outer_total_cost	= input_path->total_cost;;
+		Cost	outer_startup = input_path->startup_cost;
+		Cost	outer_total   = input_path->total_cost;
 
-		startup_cost = input_path->total_cost + pgstrom_gpu_setup_cost;
+		/*
+		 * Discount cost for DMA-receive if GpuPreAgg can pull-up
+		 * outer GpuJoin.
+		 */
+		if (enable_pullup_outer_join &&
+			pgstrom_path_is_gpujoin(input_path) &&
+			pgstrom_device_expression((Expr *)input_path->pathtarget->exprs))
+		{
+			outer_total -= cost_for_dma_receive(input_path->parent, -1.0);
+			outer_total -= cpu_tuple_cost * input_path->rows;
+		}
+		else
+			outer_total += pgstrom_gpu_setup_cost;
+
+		gpa_info->outer_startup_cost = outer_startup;
+		gpa_info->outer_total_cost   = outer_total;
+
+		startup_cost = outer_total;
 		run_cost = 0.0;
 	}
 	else
@@ -954,6 +971,7 @@ cost_gpupreagg(PlannerInfo *root,
 							&gpa_info->outer_nrows_per_block,
 							&startup_cost,
 							&run_cost);
+		run_cost -= cpu_tuple_cost * ntuples;
 		gpa_info->outer_startup_cost = startup_cost;
 		gpa_info->outer_total_cost	= startup_cost + run_cost;
 
@@ -1137,8 +1155,6 @@ make_gpupreagg_path(PlannerInfo *root,
 
 /*
  * try_add_gpupreagg_paths
- *
- *
  */
 static void
 try_add_gpupreagg_paths(PlannerInfo *root,
@@ -1171,6 +1187,34 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 									 &havingQual,
 									 &can_pullup_outerscan))
 		return;
+
+	/*
+	 * MEMO: See grouping_planner() where it calls create_projection_path()
+	 * on the partial Path-nodes. It forcibly injects ProjectionPath to
+	 * have individual PathTarget on top of the scan/join paths, because
+	 * these scan/join paths may be referenced by other path-trees, thus
+	 * it is unable to set PathTarget in-place.
+	 * In fact, create_projection_plan() pulls up sub-plan and attach its
+	 * target-list if it can be compatible, however, this ProjectionPath
+	 * prevents GpuJoin to have compatible host_tlist and dev_tlist, and
+	 * leads host-side projection. It works as a blocker of combined-GpuJoin
+	 * which is one of the performance key of reporting queries.
+	 * So, we duplicate GpuJoinPath by ourself, and set PathTarget of
+	 * the ProjectionPath here.
+	 */
+	if (IsA(input_path, ProjectionPath))
+	{
+		ProjectionPath *pjpath = (ProjectionPath *)input_path;
+		PathTarget	   *pathtarget = pjpath->path.pathtarget;
+
+		if (pjpath->dummypp &&
+			pgstrom_path_is_gpujoin(pjpath->subpath) &&
+			pgstrom_device_expression((Expr *)pathtarget->exprs))
+		{
+			input_path = pgstrom_copy_gpujoin_path(pjpath->subpath);
+			input_path->pathtarget = pathtarget;
+		}
+	}
 
 	/* Get cost of aggregations */
 	memset(&agg_final_costs, 0, sizeof(AggClauseCosts));
