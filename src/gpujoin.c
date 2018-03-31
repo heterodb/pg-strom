@@ -2572,9 +2572,11 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 	List	   *kern_vars = NIL;
 	ListCell   *cell;
 	int			depth;
+	StringInfoData row;
 	StringInfoData column;
 
 	Assert(cur_depth > 0 && cur_depth <= gj_info->num_rels);
+	initStringInfo(&row);
 	initStringInfo(&column);
 
 	/*
@@ -2688,29 +2690,31 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 		if (!dtype)
 			elog(ERROR, "device type \"%s\" not found",
 				 format_type_be(keynode->vartype));
-
 		if (depth != keynode->varno)
 		{
-			if (depth == 0)
-			{
+			/* close the previous block */
+			if (depth >= 0)
 				appendStringInfo(
 					source,
-					"  }\n"
-					"  else\n"
-					"  {\n"
-					"    datum = NULL;\n"
-					"%s"
-					"  }\n", column.data);
-			}
+					"%s%s  }\n",
+					row.data,
+					column.data);
+			resetStringInfo(&row);
+			resetStringInfo(&column);
 
-			if (keynode->varno == 0)
+			depth = keynode->varno;
+			if (depth == 0)
 			{
-				/* htup from KDS */
 				appendStringInfoString(
 					source,
 					"  /* variable load in depth-0 (outer KDS) */\n"
 					"  offset = (!o_buffer ? 0 : o_buffer[0]);\n"
-					"  if (__ldg(&kds->format) != KDS_FORMAT_COLUMN)\n"
+					"  if (!kds)\n"
+					"  {\n");
+				appendStringInfoString(
+					&row,
+					"  }\n"
+					"  else if (__ldg(&kds->format) != KDS_FORMAT_COLUMN)\n"
 					"  {\n"
 					"    if (offset == 0)\n"
 					"      htup = NULL;\n"
@@ -2720,76 +2724,90 @@ gpujoin_codegen_var_param_decl(StringInfo source,
 					"      htup = KDS_BLOCK_REF_HTUP(kds,offset,NULL,NULL);\n"
 					"    else\n"
 					"      htup = NULL; /* bug */\n");
+				appendStringInfoString(
+					&column,
+					"  }\n"
+					"  else\n"
+					"  {\n"
+					);
 			}
-			else
+			else if (depth < cur_depth)
 			{
-				/* in case of inner data store */
 				appendStringInfo(
-					source,
-					"  /* variable load in depth-%u (data store) */\n"
-					"  kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, %u);\n"
-					"  assert(__ldg(&kds_in->format) == %s);\n",
-					keynode->varno,
-					keynode->varno,
+					&row,
+					"  /* variable load in depth-%u (inner KDS) */\n"
+					"  {\n"
+					"    kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, %u);\n"
+					"    assert(__ldg(&kds_in->format) == %s);\n"
+					"    if (!o_buffer)\n"
+					"      htup = NULL;\n"
+					"    else\n"
+					"      htup = KDS_ROW_REF_HTUP(kds_in,o_buffer[%d],\n"
+					"                              NULL, NULL);\n",
+					depth,
+					depth,
+					list_nth(gj_info->hash_outer_keys,
+							 keynode->varno - 1) == NIL
+					? "KDS_FORMAT_ROW"
+					: "KDS_FORMAT_HASH",
+					depth);
+			}
+			else if (depth == cur_depth)
+			{
+				appendStringInfo(
+					&row,
+					"  /* variable load in depth-%u (inner KDS) */\n"
+					"  {\n"
+					"    kds_in = KERN_MULTIRELS_INNER_KDS(kmrels, %u);\n"
+					"    assert(__ldg(&kds_in->format) == %s);\n"
+					"    htup = i_htup;\n",
+					depth,
+					depth,
 					list_nth(gj_info->hash_outer_keys,
 							 keynode->varno - 1) == NIL
 					? "KDS_FORMAT_ROW"
 					: "KDS_FORMAT_HASH");
-
-				if (keynode->varno < cur_depth)
-					appendStringInfo(
-						source,
-						"  if (!o_buffer)\n"
-						"    htup = NULL;\n"
-						"  else\n"
-						"    htup = KDS_ROW_REF_HTUP(kds_in,o_buffer[%d],\n"
-						"                            NULL, NULL);\n",
-						keynode->varno);
-				else if (keynode->varno == cur_depth)
-					appendStringInfo(
-						source,
-						"  htup = i_htup;\n"
-						);
-				else
-					elog(ERROR, "Bug? too deeper varnode reference");
 			}
-			depth = keynode->varno;
+			else
+				elog(ERROR, "Bug? variables reference too deep");
 		}
+		/* RIGHT OUTER may have kds==NULL */
+		if (depth == 0)
+			appendStringInfo(
+				source,
+				"    KVAR_%u = pg_%s_datum_ref(kcxt,NULL);\n",
+				keynode->varoattno,
+				dtype->type_name);
 
 		appendStringInfo(
-			source,
-			"%s  datum = GPUJOIN_REF_DATUM(%s->colmeta,htup,%u);\n"
-			"%s  KVAR_%u = pg_%s_datum_ref(kcxt,datum);\n",
-			(depth == 0 ? "  " : ""),
+			&row,
+			"    datum = GPUJOIN_REF_DATUM(%s->colmeta,htup,%u);\n"
+			"    KVAR_%u = pg_%s_datum_ref(kcxt,datum);\n",
 			(depth == 0 ? "kds" : "kds_in"),
 			keynode->varattno - 1,
-			(depth == 0 ? "  " : ""),
 			keynode->varoattno, dtype->type_name);
 
+		/* KDS_FORMAT_COLUMN only if depth == 0 */
 		if (depth == 0)
-		{
 			appendStringInfo(
 				&column,
-				"    if (offset > 0)\n"
-				"      datum = kern_get_datum_column(kds,%u,offset-1);\n"
+				"    datum = (offset > 0 ? kern_get_datum_column(kds,%u,offset-1) : NULL);\n"
 				"    KVAR_%u = pg_%s_datum_ref(kcxt,datum);\n",
 				keynode->varattno - 1,
 				keynode->varoattno,
 				dtype->type_name);
-		}
 	}
 
-	if (depth == 0)
+	/* close the previous block */
+	if (depth >= 0)
 	{
 		appendStringInfo(
 			source,
-			"  }\n"
-			"  else\n"
-			"  {\n"
-			"    datum = NULL;\n"
-			"%s"
-			"  }\n", column.data);
+			"%s%s  }\n",
+			row.data,
+			column.data);
 	}
+	pfree(row.data);
 	pfree(column.data);
 
 	appendStringInfo(source, "\n");
@@ -2997,6 +3015,7 @@ gpujoin_codegen_projection(StringInfo source,
 	Bitmapset	   *refs_by_expr = NULL;
 	StringInfoData	body;
 	StringInfoData	temp;
+	StringInfoData	row;
 	StringInfoData	column;
 	cl_int			depth;
 	cl_uint			extra_maxlen = 0;
@@ -3005,6 +3024,7 @@ gpujoin_codegen_projection(StringInfo source,
 	varattmaps = palloc(sizeof(AttrNumber) * list_length(tlist_dev));
 	initStringInfo(&body);
 	initStringInfo(&temp);
+	initStringInfo(&row);
 	initStringInfo(&column);
 
 	/*
@@ -3077,6 +3097,7 @@ gpujoin_codegen_projection(StringInfo source,
 		cl_int		i, nattrs = -1;
 		bool		sysattr_refs = false;
 
+		resetStringInfo(&row);
 		resetStringInfo(&column);
 
 		/* collect information in this depth */
@@ -3126,7 +3147,7 @@ gpujoin_codegen_projection(StringInfo source,
 		{
 			appendStringInfo(
 				&body,
-				"  if (__ldg(&kds_src->format) != KDS_FORMAT_COLUMN)\n"
+				"  if (!kds_src)\n"
 				"  {\n");
 			kds_label = "kds_src";
 		}
@@ -3140,20 +3161,20 @@ gpujoin_codegen_projection(StringInfo source,
 		}
 
 		appendStringInfo(
-			&body,
-			"  if (offset == 0)\n"
-			"    htup = NULL;\n");
+			&row,
+			"    if (offset == 0)\n"
+			"      htup = NULL;\n");
 		if (depth == 0)
 			appendStringInfo(
-				&body,
-				"  else if (%s->format == KDS_FORMAT_BLOCK)\n"
-				"    htup = KDS_BLOCK_REF_HTUP(%s,offset,&t_self,NULL);\n",
+				&row,
+				"    else if (%s->format == KDS_FORMAT_BLOCK)\n"
+				"      htup = KDS_BLOCK_REF_HTUP(%s,offset,&t_self,NULL);\n",
 				kds_label,
 				kds_label);
 		appendStringInfo(
-			&body,
-			"  else\n"
-			"    htup = KDS_ROW_REF_HTUP(%s,offset,&t_self,NULL);\n",
+			&row,
+			"    else\n"
+			"      htup = KDS_ROW_REF_HTUP(%s,offset,&t_self,NULL);\n",
 			kds_label);
 
 		/* System column reference if any */
@@ -3168,10 +3189,10 @@ gpujoin_codegen_projection(StringInfo source,
 			if (attr->attnum == TableOidAttributeNumber)
 			{
 				appendStringInfo(
-					&body,
-					"  /* %s system column */\n"
-					"  tup_isnull[%d] = !htup;\n"
-					"  tup_values[%d] = (htup ? %s->table_oid : 0);\n",
+					&row,
+					"    /* %s system column */\n"
+					"    tup_isnull[%d] = !htup;\n"
+					"    tup_values[%d] = (htup ? %s->table_oid : 0);\n",
 					NameStr(attr->attname),
 					tle->resno - 1,
 					tle->resno - 1,
@@ -3190,13 +3211,13 @@ gpujoin_codegen_projection(StringInfo source,
 			if (attr->attnum == SelfItemPointerAttributeNumber)
 			{
 				appendStringInfo(
-					&body,
-					"  /* %s system column */\n"
-					"  tup_isnull[%d] = false;\n"
-					"  tup_values[%d] = PointerGetDatum(extra_pos);\n"
-					"  use_extra_buf[%d] = true;\n"
-					"  memcpy(extra_pos, &t_self, sizeof(t_self));\n"
-					"  extra_pos += MAXALIGN(sizeof(t_self));\n",
+					&row,
+					"    /* %s system column */\n"
+					"    tup_isnull[%d] = false;\n"
+					"    tup_values[%d] = PointerGetDatum(extra_pos);\n"
+					"    use_extra_buf[%d] = true;\n"
+					"    memcpy(extra_pos, &t_self, sizeof(t_self));\n"
+					"    extra_pos += MAXALIGN(sizeof(t_self));\n",
 					NameStr(attr->attname),
 					tle->resno - 1,
 					tle->resno - 1,
@@ -3206,16 +3227,24 @@ gpujoin_codegen_projection(StringInfo source,
 			else
 			{
 				appendStringInfo(
-					&body,
-					"  /* %s system column */\n"
-					"  tup_isnull[%d] = !htup;\n"
-					"  if (htup)\n"
-					"    tup_values[%d] = kern_getsysatt_%s(htup);\n",
+					&row,
+					"    /* %s system column */\n"
+					"    tup_isnull[%d] = !htup;\n"
+					"    if (htup)\n"
+					"      tup_values[%d] = kern_getsysatt_%s(htup);\n",
 					NameStr(attr->attname),
 					tle->resno-1,
 					tle->resno-1,
 					NameStr(attr->attname));
 			}
+			appendStringInfo(
+				&body,
+				"    /* %s system column */\n"
+				"    tup_isnull[%d] = true;\n"
+				"    tup_values[%d] = 0;\n",
+				NameStr(attr->attname),
+				tle->resno - 1,
+				tle->resno - 1);
 			appendStringInfo(
 				&column,
 				"    /* %s system column */\n"
@@ -3244,8 +3273,9 @@ gpujoin_codegen_projection(StringInfo source,
 		/* begin to walk on the tuple */
 		if (nattrs > 0)
 			appendStringInfo(
-				&body,
-				"  EXTRACT_HEAP_TUPLE_BEGIN(addr, %s, htup);\n", kds_label);
+				&row,
+				"    EXTRACT_HEAP_TUPLE_BEGIN(addr, %s, htup);\n",
+				kds_label);
 		resetStringInfo(&temp);
 		for (i=1; i <= nattrs; i++)
 		{
@@ -3274,8 +3304,8 @@ gpujoin_codegen_projection(StringInfo source,
 				{
 					appendStringInfo(
 						&temp,
-						"  tup_isnull[%d] = !addr;\n"
-						"  tup_values[%d] = PointerGetDatum(addr);\n",
+						"    tup_isnull[%d] = !addr;\n"
+						"    tup_values[%d] = PointerGetDatum(addr);\n",
 						tle->resno - 1,
 						tle->resno - 1);
 					appendStringInfo(
@@ -3289,9 +3319,9 @@ gpujoin_codegen_projection(StringInfo source,
 				{
 					appendStringInfo(
 						&temp,
-						"  tup_isnull[%d] = !addr;\n"
-						"  if (addr)\n"
-						"    tup_values[%d] = READ_INT%d_PTR(addr);\n",
+						"    tup_isnull[%d] = !addr;\n"
+						"    if (addr)\n"
+						"      tup_values[%d] = READ_INT%d_PTR(addr);\n",
 						tle->resno - 1,
 						tle->resno - 1,
 						8 * typelen);
@@ -3304,6 +3334,12 @@ gpujoin_codegen_projection(StringInfo source,
 						tle->resno - 1,
 						8 * typelen);
 				}
+				appendStringInfo(
+					&body,
+					"    tup_isnull[%d] = true;\n"
+					"    tup_values[%d] = 0;\n",
+					tle->resno - 1,
+					tle->resno - 1);
 				referenced = true;
 			}
 
@@ -3352,28 +3388,42 @@ gpujoin_codegen_projection(StringInfo source,
 			/* flush to the main buffer */
 			if (referenced)
 			{
-				appendStringInfoString(&body, temp.data);
+				appendStringInfoString(&row, temp.data);
 				resetStringInfo(&temp);
 			}
 			appendStringInfoString(
 				&temp,
-				"  EXTRACT_HEAP_TUPLE_NEXT(addr);\n");
+				"    EXTRACT_HEAP_TUPLE_NEXT(addr);\n");
 		}
 		if (nattrs > 0)
 			appendStringInfoString(
-				&body,
-				"  EXTRACT_HEAP_TUPLE_END();\n");
+				&row,
+				"    EXTRACT_HEAP_TUPLE_END();\n");
 
 		if (depth == 0)
 		{
 			appendStringInfo(
 				&body,
 				"  }\n"
+				"  else if (__ldg(&kds_src->format) != KDS_FORMAT_COLUMN)\n"
+				"  {\n"
+				"%s"
+				"  }\n"
 				"  else\n"
 				"  {\n"
 				"%s"
 				"  }\n",
+				row.data,
 				column.data);
+		}
+		else
+		{
+			appendStringInfo(
+				&body,
+				"  {\n"
+				"%s"
+				"  }\n",
+				row.data);
 		}
 	}
 
