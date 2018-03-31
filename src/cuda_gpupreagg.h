@@ -664,7 +664,7 @@ gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,		/* in/out */
 	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	kern_context	kcxt;
 	varlena		   *kparam_0 = (varlena *)kparam_get_value(kparams, 0);
-	cl_char		   *attr_is_groupkey = (cl_char *)VARDATA(kparam_0);
+	cl_char		   *attr_is_preagg = (cl_char *)VARDATA(kparam_0);
 	cl_uint			slot_nitems = kds_slot->nitems;
 	cl_uint			nvalids;
 	cl_uint			slot_index;
@@ -710,8 +710,8 @@ gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,		/* in/out */
 		{
 			int		dist, buddy;
 
-			/* do nothing, if attribute is grouping key */
-			if (attr_is_groupkey[index])
+			/* do nothing, if attribute is not preagg-function */
+			if (!attr_is_preagg[index])
 				continue;
 			/* load the value from kds_slot to local */
 			if (get_local_id() < nvalids)
@@ -831,6 +831,7 @@ gpupreagg_final_reduction(kern_context *kcxt,
 retry_fnext:
 	if (f_hash->hash_usage > GLOBAL_HASHSLOT_THRESHOLD(f_hashsize))
 	{
+		//TODO: Needs to expand the final hash-table on demand
 		STROM_SET_ERROR(&kcxt->e, StromError_DataStoreNoSpace);
 		return true;
 	}
@@ -969,7 +970,7 @@ gpupreagg_groupby_reduction(kern_gpupreagg *kgpreagg,		/* in/out */
 {
 	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	varlena		   *kparam_0 = (varlena *)kparam_get_value(kparams, 0);
-	cl_char		   *attr_is_groupkey = (cl_char *)VARDATA(kparam_0);
+	cl_char		   *attr_is_preagg = (cl_char *)VARDATA(kparam_0);
 	kern_context	kcxt;
 	pagg_hashslot	old_slot;
 	pagg_hashslot	new_slot;
@@ -1114,7 +1115,7 @@ clean_restart:
 		/* Local reduction for each column */
 		for (index=0; index < kds_slot->ncols; index++)
 		{
-			if (attr_is_groupkey[index])
+			if (!attr_is_preagg[index])
 				continue;
 			/* load the value to local storage */
 			if (kds_index < slot_nitems)
@@ -1150,12 +1151,10 @@ clean_restart:
 		pgstromStairlikeBinaryCount(is_owner, &count);
 		if (is_last_reduction || count > get_local_size() / 8)
 		{
-			__shared__ int	num_locked;
+			cl_bool		lock_wait;
 
 			do {
-				if (get_local_id() == 0)
-					num_locked = 0;
-				__syncthreads();
+				lock_wait = false;
 
 				if (is_owner)
 				{
@@ -1168,10 +1167,9 @@ clean_restart:
 												  f_hash))
 						is_owner = false;
 					else
-						atomicAdd(&num_locked, 1);
+						lock_wait = true;
 				}
-				__syncthreads();
-			} while (num_locked > 0);
+			} while (__syncthreads_count(lock_wait) > 0);
 
 			if (!is_last_reduction)
 				goto clean_restart;
