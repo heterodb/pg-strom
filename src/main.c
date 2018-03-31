@@ -293,6 +293,14 @@ pgstrom_post_planner_recurse(PlannedStmt *pstmt, Plan **p_plan)
 			}
 			break;
 
+		case T_SubqueryScan:
+			{
+				SubqueryScan *sscan = (SubqueryScan *) plan;
+
+				pgstrom_post_planner_recurse(pstmt, &sscan->subplan);
+			}
+			break;
+
 		case T_CustomScan:
 			{
 				CustomScan *cscan = (CustomScan *) plan;
