@@ -105,9 +105,11 @@ typedef union
 
 typedef struct
 {
-	cl_uint			hash_usage;		/* current number of hash_slot in use */
-	cl_uint			hash_size;		/* total size of the hash_slot below */
-	pagg_hashslot	hash_slot[FLEXIBLE_ARRAY_MEMBER];
+	cl_uint		lock;			/* lock when hash_size is expanded */
+	cl_uint		hash_usage;		/* current number of hash_slot in use */
+	cl_uint		hash_size;		/* current size of the hash_slot */
+	cl_uint		hash_limit;		/* max limit of the hash_slot */
+	pagg_hashslot hash_slot[FLEXIBLE_ARRAY_MEMBER];
 } kern_global_hashslot;
 
 /*
@@ -418,12 +420,8 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 	cl_bool			try_next_window = true;
 	cl_bool			thread_is_valid = false;
 	__shared__ cl_uint	base;
-	__shared__ cl_int	status;
 
 	INIT_KERNEL_CONTEXT(&kcxt, gpupreagg_setup_block, kparams);
-	if (get_local_id() == 0)
-		status = StromError_Success;
-	__syncthreads();
 
 	assert(kds_src->format == KDS_FORMAT_BLOCK ||
 		   kds_slot->format == KDS_FORMAT_SLOT);
@@ -439,7 +437,7 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 		cl_uint		n_lines;
 		cl_uint		nvalids;
 		PageHeaderData *pg_page;
-		ItemPointerData	t_self;
+		ItemPointerData	t_self	__attribute__ ((unused));
 		BlockNumber		block_nr;
 
 		if (get_local_id() == 0)
@@ -780,15 +778,18 @@ gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,		/* in/out */
  * It initializes the f_hash prior to gpupreagg_final_reduction
  */
 KERNEL_FUNCTION(void)
-gpupreagg_init_final_hash(size_t f_hashsize,
-						  kern_global_hashslot *f_hash)
+gpupreagg_init_final_hash(kern_global_hashslot *f_hash,
+						  size_t f_hashsize,
+						  size_t f_hashlimit)
 {
 	size_t		hash_index;
 
 	if (get_global_id() == 0)
 	{
+		f_hash->lock = 0;
 		f_hash->hash_usage = 0;
 		f_hash->hash_size = f_hashsize;
+		f_hash->hash_limit = f_hashlimit;
 	}
 
 	for (hash_index = get_global_id();
@@ -798,6 +799,211 @@ gpupreagg_init_final_hash(size_t f_hashsize,
 		f_hash->hash_slot[hash_index].s.hash = 0;
 		f_hash->hash_slot[hash_index].s.index = (cl_uint)(0xffffffff);
 	}
+}
+
+/*
+ * gpupreagg_expand_final_hash - expand size of the final hash slot on demand,
+ * up to the f_hashlimit. It internally acquires shared lock of the final
+ * hash-slot, if it returns true. So, caller MUST release it when a series of
+ * operations get completed. Elsewhere, it returns false. caller MUST retry.
+ */
+STATIC_FUNCTION(bool)
+gpupreagg_expand_final_hash(kern_context *kcxt,
+							kern_global_hashslot *f_hash,
+							cl_uint num_new_items)
+{
+	pagg_hashslot curval;
+	pagg_hashslot newval;
+	cl_uint		i, j, f_hashsize;
+	cl_uint		old_lock;
+	cl_uint		cur_lock;
+	cl_uint		new_lock;
+	cl_uint		count;
+	cl_bool		lock_wait;
+	cl_bool		has_exclusive_lock = false;
+	__shared__ cl_uint	curr_usage;
+	__shared__ cl_uint	curr_size;
+
+	/*
+	 * Get shared-lock on the final hash-slot
+	 */
+	if (get_local_id() == 0)
+	{
+		old_lock = f_hash->lock;
+		if ((old_lock & 0x0001) != 0)
+			lock_wait = true;		/* someone has exclusive lock */
+		else
+		{
+			new_lock = old_lock + 2;
+			cur_lock = atomicCAS(&f_hash->lock,
+								 old_lock,
+								 new_lock);
+			if (cur_lock == old_lock)
+				lock_wait = false;	/* OK, shared lock is acquired */
+			else
+				lock_wait = true;	/* Oops, conflict. Retry again */
+		}
+	}
+	else
+		lock_wait = false;
+	if (__syncthreads_count(lock_wait) > 0)
+	{
+		cudaDeviceSynchronize();
+		return false;
+	}
+
+	/*
+	 * Expand the final hash-slot on demand, if it may overflow.
+	 * No concurrent blocks are executable during the hash-slot eapansion,
+	 * we need to acquire exclusive lock here.
+	 */
+	if (get_local_id() == 0)
+	{
+		curr_usage = f_hash->hash_usage;
+		curr_size  = f_hash->hash_size;
+	}
+	__syncthreads();
+	if (curr_usage + num_new_items < GLOBAL_HASHSLOT_THRESHOLD(curr_size))
+		return true;		/* no need to expand the hash-slot now */
+	if (curr_size > f_hash->hash_limit)
+	{
+		/* no more space to expand */
+		STROM_SET_ERROR(&kcxt->e, StromError_DataStoreNoSpace);
+		goto out_unlock;
+	}
+
+	/*
+	 * Hmm... it looks current hash-slot usage is close to the current size,
+	 * so try to acquire the exclusive lock and expand the hash-slot.
+	 */
+	if (get_local_id() == 0)
+	{
+		old_lock = f_hash->lock;
+		if ((old_lock & 0x0001) != 0)
+			lock_wait = true;		/* someone already has exclusive lock */
+		else
+		{
+			assert(old_lock >= 0x0002);
+			/* release shared lock, and acquire exclusive lock */
+			new_lock = (old_lock - 2) | 0x0001;
+			cur_lock = atomicCAS(&f_hash->lock,
+								 old_lock,
+								 new_lock);
+			if (cur_lock == old_lock)
+				lock_wait = false;	/* OK, exclusive lock is acquired */
+			else
+				lock_wait = true;
+		}
+	}
+	else
+		lock_wait = false;
+
+	/* cannot acquire the exclusive lock? */
+	if (__syncthreads_count(lock_wait) > 0)
+	{
+		cudaDeviceSynchronize();
+		goto out_unlock;
+	}
+
+	/* wait for completion of other shared-lock holder */
+	for (;;)
+	{
+		if (get_local_id() == 0)
+			lock_wait = (f_hash->lock != 0x0001 ? true : false);
+		else
+			lock_wait = false;
+		if (__syncthreads_count(lock_wait) == 0)
+			break;
+		cudaDeviceSynchronize();
+	}
+	has_exclusive_lock = true;
+
+	/*
+	 * OK, Expand the final hash-slot
+	 */
+	if (get_local_id() == 0)
+		curr_size = f_hash->hash_size;
+	__syncthreads();
+	if (curr_size >= f_hash->hash_limit)
+	{
+		/* no more space to expand */
+		if (get_local_id() == 0)
+			f_hash->hash_size = UINT_MAX;
+		STROM_SET_ERROR(&kcxt->e, StromError_DataStoreNoSpace);
+		goto out_unlock;
+	}
+	else if (curr_size >= f_hash->hash_limit / 2)
+		f_hashsize = f_hash->hash_limit;
+	else
+		f_hashsize = curr_size * 2;
+
+	for (i = curr_size + get_local_id();
+		 i < f_hashsize;
+		 i += get_local_size())
+	{
+		f_hash->hash_slot[i].s.hash = 0;
+		f_hash->hash_slot[i].s.index = (cl_uint)(0xffffffff);
+	}
+	__syncthreads();
+
+	/*
+	 * Move the hash entries to new position
+	 */
+	count = 0;
+	for (i = get_local_id(); i < f_hashsize; i += get_local_size())
+	{
+		cl_int		nloops;
+
+		newval.s.hash = 0;
+		newval.s.index = (cl_uint)(0xffffffff);
+		curval.value = atomicExch(&f_hash->hash_slot[i].value, newval.value);
+
+		for (nloops = 32;
+			 nloops > 0 && curval.s.index != (cl_uint)(0xffffffff);
+			 nloops--)
+		{
+			/* should not be under locking */
+			assert(curval.s.index != (cl_uint)(0xfffffffe));
+			j = curval.s.hash % f_hashsize;
+
+			newval = curval;
+			curval.value = atomicExch(&f_hash->hash_slot[j].value,
+									  newval.value);
+		}
+
+		/*
+		 * NOTE: If hash-key gets too deep confliction than the threshold,
+		 * we give up to find out new location without shift operations.
+		 * It is a little waste of space on the kds_final buffer, but harmless
+		 * because partial aggregation results are already on the kds_final
+		 * buffer, then, further entries with same grouping keys will be added
+		 * as if it is newly injected.
+		 * It takes extra area of kds_final, however, it is much better than
+		 * infinite loop.
+		 */
+		if (curval.s.index != (cl_uint)(0xffffffff))
+			count++;
+	}
+	/* note: pgstromStairlikeSum contains __syncthreads() */
+	count = pgstromStairlikeSum(count, NULL);
+	if (get_local_id() == 0)
+	{
+		printf("GpuPreAgg: expand final hash slot %u -> %u (%u dropped)\n",
+			   f_hash->hash_size, f_hashsize, count);
+		f_hash->hash_size = f_hashsize;
+	}
+	__syncthreads();
+
+out_unlock:
+	/* release exclusive lock and suggest caller retry */
+	if (get_local_id() == 0)
+	{
+		if (has_exclusive_lock)
+			atomicAnd(&f_hash->lock, (cl_uint)(0xfffffffe));
+		else
+			atomicSub(&f_hash->lock, 2);
+	}
+	return false;
 }
 
 /*
@@ -829,11 +1035,16 @@ gpupreagg_final_reduction(kern_context *kcxt,
 	index = hash_value % f_hashsize;
 
 retry_fnext:
-	if (f_hash->hash_usage > GLOBAL_HASHSLOT_THRESHOLD(f_hashsize))
+	if (f_hashsize > f_hash->hash_limit)
 	{
-		//TODO: Needs to expand the final hash-table on demand
+		/* no more space to expand */
 		STROM_SET_ERROR(&kcxt->e, StromError_DataStoreNoSpace);
-		return true;
+		return false;
+	}
+	else if (f_hash->hash_usage > GLOBAL_HASHSLOT_THRESHOLD(f_hashsize))
+	{
+		/* try to expand the final hash-slot */
+		return false;
 	}
 	cur_slot.value = atomicCAS(&f_hash->hash_slot[index].value,
 							   old_slot.value, new_slot.value);
@@ -1064,8 +1275,9 @@ clean_restart:
 		}
 		else
 			assert(l_kds_index[get_local_id()] == kds_index);
-		__syncthreads();
-		//XXX - bailout if any error
+		/* error checks */
+		if (__syncthreads_count(kcxt.e.errcode) > 0)
+			goto bailout;
 
 		/* Local hash-table lookup to get owner index */
 		if (is_owner)
@@ -1104,13 +1316,16 @@ clean_restart:
 				else
 				{
 					index = (index + 1) % GPUPREAGG_LOCAL_HASHSIZE;
-					goto lhash_next;
+					if (kcxt.e.errcode == StromError_Success)
+						goto lhash_next;
 				}
 			}
 		}
 		else
 			owner_index = INT_MAX;
-		__syncthreads();
+		/* error checks */
+		if (__syncthreads_count(kcxt.e.errcode) > 0)
+			goto bailout;
 
 		/* Local reduction for each column */
 		for (index=0; index < kds_slot->ncols; index++)
@@ -1147,35 +1362,54 @@ clean_restart:
 			__syncthreads();
 		}
 	skip_local_reduction:
-		/* final reduction steps on demand */
-		pgstromStairlikeBinaryCount(is_owner, &count);
+		/*
+		 * final reduction steps if needed
+		 */
+		count = __syncthreads_count(is_owner);
 		if (is_last_reduction || count > get_local_size() / 8)
 		{
 			cl_bool		lock_wait;
 
 			do {
-				lock_wait = false;
-
-				if (is_owner)
+				/*
+				 * Get shared-lock of the final hash-slot
+				 * If it may have overflow, expand length of the hash-slot
+				 * on demand, under its exclusive lock.
+				 */
+				if (!gpupreagg_expand_final_hash(&kcxt, f_hash, count))
+					lock_wait = true;
+				else
 				{
-					if (gpupreagg_final_reduction(&kcxt,
-												  kgpreagg,
-												  kds_slot,
-												  kds_index,
-												  hash_value,
-												  kds_final,
-												  f_hash))
-						is_owner = false;
-					else
-						lock_wait = true;
+					lock_wait = false;
+					if (is_owner)
+					{
+						if (gpupreagg_final_reduction(&kcxt,
+													  kgpreagg,
+													  kds_slot,
+													  kds_index,
+													  hash_value,
+													  kds_final,
+													  f_hash))
+							is_owner = false;
+						else
+							lock_wait = true;
+					}
+					__syncthreads();
+					/* release shared lock of the final hash-slot */
+					if (get_local_id() == 0)
+						atomicSub(&f_hash->lock, 2);
 				}
+				/* quick bailout on error */
+				if (__syncthreads_count(kcxt.e.errcode) > 0)
+					goto bailout;
+				count = __syncthreads_count(is_owner);
 			} while (__syncthreads_count(lock_wait) > 0);
-
+			/* OK, successfully moved pending items */
 			if (!is_last_reduction)
 				goto clean_restart;
 		}
 	} while(!is_last_reduction);
-
+bailout:
 	/* write-back execution status into host side */
 	kern_writeback_error_status(&kgpreagg->kerror, &kcxt.e);
 }

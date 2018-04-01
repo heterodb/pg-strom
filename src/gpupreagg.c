@@ -3529,8 +3529,6 @@ gpupreagg_codegen(codegen_context *context,
 	attr_is_preagg = (cl_char *)VARDATA(kparam_0);
 	foreach (lc, tlist_dev)
 	{
-		if (bms_is_member(i, pfunc_bitmap))
-			elog(INFO, "devattr i=%d is pfunc", i);
 		attr_is_preagg[i] = (bms_is_member(i, pfunc_bitmap) ? 1 : 0);
 		i++;
 	}
@@ -4091,7 +4089,7 @@ createGpuPreAggSharedState(GpuPreAggState *gpas,
 	memset(gpa_sstate, 0, ss_length);
 	gpa_sstate->ss_handle = (pcxt ? dsm_segment_handle(pcxt->seg) : UINT_MAX);
 	gpa_sstate->ss_length = ss_length;
-	pg_atomic_init_u32(&gpa_sstate->gpa_rtstat.pg_nworkers, 1);
+	pg_atomic_init_u32(&gpa_sstate->gpa_rtstat.pg_nworkers, 0);
 
 	return gpa_sstate;
 }
@@ -4148,7 +4146,7 @@ gpupreagg_alloc_final_buffer(GpuPreAggState *gpas)
 		f_hashsize = (double)gpas->plan_ngroups * 1.25;
 	else
 		f_hashsize = gpas->plan_ngroups;
-	f_hashsize *= 2;
+
 	/* 2MB: minimum guarantee */
 	if (offsetof(kern_global_hashslot,
 				 hash_slot[f_hashsize]) < (1UL << 21))
@@ -4158,10 +4156,15 @@ gpupreagg_alloc_final_buffer(GpuPreAggState *gpas)
 			/ sizeof(pagg_hashslot);
 	}
 
+	/*
+	 * Hash table allocation up to @f_hashlimit items, however, it initially
+	 * uses only @f_hashsize slot. If needs, GPU kernel extends the final
+	 * hash table on demand.
+	 */
 	rc = gpuMemAllocManaged(gcontext,
 							&m_fhash,
 							offsetof(kern_global_hashslot,
-									 hash_slot[f_hashsize]),
+									 hash_slot[f_hashlimit]),
 							CU_MEM_ATTACH_GLOBAL);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on gpuMemAllocManaged: %s", errorText(rc));
@@ -4503,7 +4506,7 @@ gpupreagg_init_final_hash(GpuPreAggTask *gpreagg,
 	CUresult	rc;
 	size_t		grid_sz;
 	size_t		block_sz;
-	void	   *kern_args[2];
+	void	   *kern_args[3];
 
 	pthreadMutexLock(&gpas->f_mutex);
 	STROM_TRY();
@@ -4529,8 +4532,9 @@ gpupreagg_init_final_hash(GpuPreAggTask *gpreagg,
 			if (rc != CUDA_SUCCESS)
 				werror("failed on gpuOptimalBlockSize: %s", errorText(rc));
 
-			kern_args[0] = &gpas->f_hashsize;
-			kern_args[1] = &gpas->m_fhash;
+			kern_args[0] = &gpas->m_fhash;
+			kern_args[1] = &gpas->f_hashsize;
+			kern_args[2] = &gpas->f_hashlimit;
 			rc = cuLaunchKernel(kern_init_fhash,
 								grid_sz, 1, 1,
 								block_sz, 1, 1,
