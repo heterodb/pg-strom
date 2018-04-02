@@ -286,13 +286,53 @@ julian(long date)
 }
 
 /*
+ * static dists_dss
+ */
+#define STATIC_DISTS 1
+#ifdef STATIC_DISTS
+#include "dists.dss.h"
+
+static char *
+static_dist_fgets(char *d, int len, size_t *pos)
+{
+	static size_t limit = 0;
+	size_t	cur = *pos;
+	const char *s = static_dists_dss + cur;
+	int		i = 0;
+
+	if (limit == 0)
+		limit = strlen(static_dists_dss);
+	if (cur >= limit || *s == '\0')
+		return NULL;
+	while (i < len - 1)
+	{
+		int		c = s[i];
+
+		if (c == '\0')
+			break;
+		d[i++] = c;
+		if (c == '\n')
+			break;
+	}
+	d[i] = '\0';
+	*pos += i;
+
+	return d;
+}
+#endif
+
+/*
 * load a distribution from a flat file into the target structure;
 * should be rewritten to allow multiple dists in a file
 */
 void
 read_dist(char *path, char *name, distribution *target)
 {
+#ifndef STATIC_DISTS
 FILE     *fp;
+#else
+size_t    pos = 0;
+#endif
 char      line[256],
          token[256],
         *c;
@@ -300,6 +340,7 @@ long      weight,
          count = 0,
          name_set = 0;
 
+#ifndef STATIC_DISTS
     if (d_path == NULL)
 		{
 		sprintf(line, "%s%c%s", 
@@ -313,6 +354,9 @@ long      weight,
 		OPEN_CHECK(fp, d_path);
 		}
     while (fgets(line, sizeof(line), fp) != NULL)
+#else
+	while (static_dist_fgets(line, sizeof(line), &pos) != NULL)
+#endif
         {
         if ((c = strchr(line, '\n')) != NULL)
             *c = '\0';
@@ -334,7 +378,9 @@ long      weight,
             {
             if (!dssncasecmp(line, "END", 3))
                 {
+#ifndef STATIC_DISTS
                 fclose(fp);
+#endif
                 return;
                 }
             }
@@ -365,11 +411,15 @@ long      weight,
     if (count != target->count)
         {
         fprintf(stderr, "Read error on dist '%s'\n", name);
+#ifndef STATIC_DISTS
         fclose(fp);
+#endif
         exit(1);
         }
 	target->permute = (long *)NULL;
+#ifndef STATIC_DISTS
     fclose(fp);
+#endif
     return;
 }
 

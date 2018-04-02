@@ -127,7 +127,7 @@ char *spawn_args[25];
 extern seed_t Seed[];
 #endif
 static int bTableSet = 0;
-
+static int use_stdout = 0;
 
 /*
 * general table descriptions. See dss.h for details on structure
@@ -451,7 +451,7 @@ process_options (int count, char **vector)
 	FILE *pF;
 	
 	while ((option = getopt (count, vector,
-		"b:C:d:fi:hO:P:qs:S:T:U:v")) != -1)
+		"b:C:d:fi:hO:P:qs:S:T:U:vX")) != -1)
 	switch (option)
 	{
 		case 'b':				/* load distributions from named file */
@@ -589,9 +589,10 @@ process_options (int count, char **vector)
 				exit (1);
 			}
 			break;
+		case 'X':
+			use_stdout = 1;
+			break;
 		default:
-			printf ("ERROR: option '%c' unknown.\n",
-				*(vector[optind] + 1));
 		case 'h':				/* something unexpected */
 			fprintf (stderr,
 				"%s Population Generator (Version %d.%d.%d build %d)\n",

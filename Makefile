@@ -59,11 +59,12 @@ STROM_UTILS = $(addprefix $(STROM_BUILD_ROOT)/utils/, $(__STROM_UTILS))
 #
 DBT3_DBGEN = $(addprefix $(STROM_BUILD_ROOT)/test/dbt3/, dbgen)
 DBT3_DBGEN_DISTS_DSS = $(addprefix $(STROM_BUILD_ROOT)/test/dbt3/, dists.dss)
-DBT3_DBGEN_SOURCE = bcd2.c build.c load_stub.c print.c rng64.c text.c \
+__DBT3_DBGEN_SOURCE = bcd2.c build.c load_stub.c print.c rng64.c text.c \
                       bm_utils.c driver.c permute.c rnd.c speed_seed.c
+DBT3_DBGEN_SOURCE = $(addprefix $(STROM_BUILD_ROOT)/test/dbt3/, $(__DBT3_DBGEN_SOURCE))
 DBT3_DBGEN_FLAGS = -Wno-unused-variable -Wno-unused-but-set-variable \
                    -Wno-parentheses -Wno-unused-result -Wall \
-                   -I. -DLINUX=1 -DTPCH=1
+                   -g -I. -DLINUX=1 -DTPCH=1
 
 #
 # Header files
@@ -179,12 +180,15 @@ $(STROM_UTILS): $(addsuffix .c,$(STROM_UTILS)) $(STROM_HEADERS)
 	$(CC) $(CFLAGS) $(addsuffix .c,$@) $(PGSTROM_FLAGS) -I $(IPATH) -L $(LPATH) -lcuda -lnvrtc -o $@$(X)
 
 $(addsuffix .h,$(DBT3_DBGEN_DISTS_DSS)): $(DBT3_DBGEN_DISTS_DSS)
-	cat $^ > $@
+	@(echo "const char *static_dists_dss ="; \
+          sed -e 's/\\/\\\\/g' -e 's/\t/\\t/g' -e 's/"/\\"/g' \
+              -e 's/^/  "/g' -e 's/$$/\\n"/g' < $^; \
+          echo ";") > $@
 
-$(DBT3_DBGEN): $(addprefix $(STROM_BUILD_ROOT)/test/dbt3/, $(DBT3_DBGEN_SOURCE)) \
-               $(addsuffix .h,$(DBT3_DBGEN_DISTS_DSS))
-	cd $(STROM_BUILD_ROOT)/test/dbt3 && $(CC) $(DBT3_DBGEN_FLAGS) $(DBT3_DBGEN_SOURCE) \
-                                               -o $(notdir $(DBT3_DBGEN))
+$(DBT3_DBGEN): $(DBT3_DBGEN_SOURCE) $(addsuffix .h,$(DBT3_DBGEN_DISTS_DSS))
+	cd $(STROM_BUILD_ROOT)/test/dbt3 \
+        && $(CC) $(DBT3_DBGEN_FLAGS) $(notdir $(DBT3_DBGEN_SOURCE)) \
+                                  -o $(notdir $(DBT3_DBGEN))
 
 $(HTML_FILES): $(HTML_SOURCES) $(HTML_TEMPLATE)
 	@$(MKDIR_P) $(STROM_BUILD_ROOT)/doc/html
