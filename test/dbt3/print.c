@@ -47,6 +47,8 @@
 #include "dsstypes.h"
 #include <string.h>
 
+extern int print_to_stdout;
+
 /*
  * Function Prototypes
  */
@@ -156,7 +158,7 @@ pr_cust(customer_t *c, int mode)
 static FILE *fp = NULL;
         
    if (fp == NULL)
-        fp = print_prep(CUST, 0);
+	   fp = (print_to_stdout ? stdout : print_prep(CUST, 0));
 
    PR_STRT(fp);
    PR_HUGE(fp, &c->custkey);
@@ -188,7 +190,7 @@ pr_order(order_t *o, int mode)
         {
         if (fp_o) 
             fclose(fp_o);
-        fp_o = print_prep(ORDER, mode);
+        fp_o = (print_to_stdout ? stdout : print_prep(ORDER, mode));
         last_mode = mode;
         }
     PR_STRT(fp_o);
@@ -220,7 +222,7 @@ pr_line(order_t *o, int mode)
         {
         if (fp_l) 
             fclose(fp_l);
-        fp_l = print_prep(LINE, mode);
+        fp_l = (print_to_stdout ? stdout : print_prep(LINE, mode));
         last_mode = mode;
         }
 
@@ -271,7 +273,7 @@ pr_part(part_t *part, int mode)
 static FILE *p_fp = NULL;
 
     if (p_fp == NULL)
-        p_fp = print_prep(PART, 0);
+        p_fp = (print_to_stdout ? stdout : print_prep(PART, 0));
 
    PR_STRT(p_fp);
    PR_HUGE(p_fp, &part->partkey);
@@ -298,7 +300,7 @@ pr_psupp(part_t *part, int mode)
     long      i;
 
     if (ps_fp == NULL)
-        ps_fp = print_prep(PSUPP, mode);
+        ps_fp = (print_to_stdout ? stdout : print_prep(PSUPP, mode));
 
    for (i = 0; i < SUPP_PER_PART; i++)
       {
@@ -333,7 +335,7 @@ pr_supp(supplier_t *supp, int mode)
 static FILE *fp = NULL;
         
    if (fp == NULL)
-        fp = print_prep(SUPP, mode);
+	   fp = (print_to_stdout ? stdout : print_prep(SUPP, mode));
 
    PR_STRT(fp);
    PR_HUGE(fp, &supp->suppkey);
@@ -354,7 +356,7 @@ pr_nation(code_t *c, int mode)
 static FILE *fp = NULL;
         
    if (fp == NULL)
-        fp = print_prep(NATION, mode);
+	   fp = (print_to_stdout ? stdout : print_prep(NATION, mode));
 
    PR_STRT(fp);
    PR_HUGE(fp, &c->code);
@@ -372,7 +374,7 @@ pr_region(code_t *c, int mode)
 static FILE *fp = NULL;
         
    if (fp == NULL)
-        fp = print_prep(REGION, mode);
+	   fp = (print_to_stdout ? stdout : print_prep(REGION, mode));
 
    PR_STRT(fp);
    PR_HUGE(fp, &c->code);
@@ -404,7 +406,7 @@ pr_drange(int tbl, DSS_HUGE min, DSS_HUGE cnt, long num)
         {
         if (dfp)
             fclose(dfp);
-        dfp = print_prep(tbl, -num);
+        dfp = (print_to_stdout ? stdout : print_prep(tbl, -num));
         if (dfp == NULL)
             return(-1);
         last_num = num;
@@ -439,6 +441,3 @@ pr_drange(int tbl, DSS_HUGE min, DSS_HUGE cnt, long num)
     
     return(0);
 }
-
-
-

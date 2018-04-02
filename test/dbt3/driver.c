@@ -127,7 +127,7 @@ char *spawn_args[25];
 extern seed_t Seed[];
 #endif
 static int bTableSet = 0;
-static int use_stdout = 0;
+int print_to_stdout = 1;
 
 /*
 * general table descriptions. See dss.h for details on structure
@@ -407,6 +407,7 @@ usage (void)
 	fprintf (stderr, "-T r   -- generate region ONLY\n");
 	fprintf (stderr, "-T s   -- generate suppliers ONLY\n");
 	fprintf (stderr, "-T S   -- generate partsupp ONLY\n");
+	fprintf (stderr, "-X     -- write out to stdout, if used with -T\n");
 	fprintf (stderr,
 		"\nTo generate the SF=1 (1GB), validation database population, use:\n");
 	fprintf (stderr, "\tdbgen -vf -s 1\n");
@@ -590,7 +591,7 @@ process_options (int count, char **vector)
 			}
 			break;
 		case 'X':
-			use_stdout = 1;
+			print_to_stdout = 1;
 			break;
 		default:
 		case 'h':				/* something unexpected */
@@ -602,6 +603,20 @@ process_options (int count, char **vector)
 			exit (1);
 	}
 
+	/* check print_to_stdout condition */
+	if (print_to_stdout)
+	{
+		if (bTableSet == 0)
+		{
+			fprintf(stderr, "-X needs either of -T options\n");
+			exit(1);
+		}
+		if ((table & (table - 1)) != 0)
+		{
+			fprintf(stderr, "multiple tables are enabled by -T option\n");
+			exit(1);
+		}
+	}
 	return;
 }
 

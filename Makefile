@@ -64,7 +64,7 @@ __DBT3_DBGEN_SOURCE = bcd2.c build.c load_stub.c print.c rng64.c text.c \
 DBT3_DBGEN_SOURCE = $(addprefix $(STROM_BUILD_ROOT)/test/dbt3/, $(__DBT3_DBGEN_SOURCE))
 DBT3_DBGEN_FLAGS = -Wno-unused-variable -Wno-unused-but-set-variable \
                    -Wno-parentheses -Wno-unused-result -Wall \
-                   -g -I. -DLINUX=1 -DTPCH=1
+                   -g -I. -DLINUX=1 -DTPCH=1 -DEOL_HANDLING=1
 
 #
 # Header files
