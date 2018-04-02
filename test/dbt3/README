@@ -1,0 +1,9 @@
+
+Special notifications for the software in test/dbt3
+-----------------------------------------------------
+
+The software in the test/dbt3 directory is a derivative of OSDL DBT-3 (v1.10).
+Its license terms follow the original one regardless of the license terms
+of PG-Strom.
+
+See http://osdldbt.sourceforge.net/ for more details.

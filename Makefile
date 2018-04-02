@@ -55,6 +55,17 @@ __STROM_UTILS = gpuinfo
 STROM_UTILS = $(addprefix $(STROM_BUILD_ROOT)/utils/, $(__STROM_UTILS))
 
 #
+# Test support utilities
+#
+DBT3_DBGEN = $(addprefix $(STROM_BUILD_ROOT)/test/dbt3/, dbgen)
+DBT3_DBGEN_DISTS_DSS = $(addprefix $(STROM_BUILD_ROOT)/test/dbt3/, dists.dss)
+DBT3_DBGEN_SOURCE = bcd2.c build.c load_stub.c print.c rng64.c text.c \
+                      bm_utils.c driver.c permute.c rnd.c speed_seed.c
+DBT3_DBGEN_FLAGS = -Wno-unused-variable -Wno-unused-but-set-variable \
+                   -Wno-parentheses -Wno-unused-result -Wall \
+                   -I. -DLINUX=1 -DTPCH=1
+
+#
 # Header files
 #
 __STROM_HEADERS = pg_strom.h nvme_strom.h device_attrs.h
@@ -129,14 +140,15 @@ DATA = $(shell cpp -D 'PGSTROM_CUDA(x)=$(STROM_BUILD_ROOT)/src/cuda_\#\#x.h' \
                       $(STROM_BUILD_ROOT)/src/cuda_filelist | grep -v ^\#)
 
 # Support utilities
-SCRIPTS_built = $(STROM_UTILS)
+SCRIPTS_built = $(STROM_UTILS) $(DBT3_DBGEN)
 # Extra files to be cleaned
 EXTRA_CLEAN = $(STROM_UTILS) \
 	$(shell ls $(STROM_BUILD_ROOT)/man/docs/*.md) \
 	$(shell ls */Makefile | sed 's/Makefile/pg_strom.control/g') \
 	$(shell ls pg-strom-*.tar.gz) \
 	$(STROM_BUILD_ROOT)/man/markdown_i18n \
-	$(STROM_BUILD_ROOT)/test/testapp_largeobject
+	$(STROM_BUILD_ROOT)/test/testapp_largeobject \
+	$(DBT3_DBGEN) $(DBT3_DBGEN_DISTS_DSS).h
 
 #
 # Regression Test
@@ -165,6 +177,14 @@ $(PGSTROM_SQL): $(addprefix $(STROM_BUILD_ROOT)/sql/, $(PGSTROM_SQL_SRC))
 
 $(STROM_UTILS): $(addsuffix .c,$(STROM_UTILS)) $(STROM_HEADERS)
 	$(CC) $(CFLAGS) $(addsuffix .c,$@) $(PGSTROM_FLAGS) -I $(IPATH) -L $(LPATH) -lcuda -lnvrtc -o $@$(X)
+
+$(addsuffix .h,$(DBT3_DBGEN_DISTS_DSS)): $(DBT3_DBGEN_DISTS_DSS)
+	cat $^ > $@
+
+$(DBT3_DBGEN): $(addprefix $(STROM_BUILD_ROOT)/test/dbt3/, $(DBT3_DBGEN_SOURCE)) \
+               $(addsuffix .h,$(DBT3_DBGEN_DISTS_DSS))
+	cd $(STROM_BUILD_ROOT)/test/dbt3 && $(CC) $(DBT3_DBGEN_FLAGS) $(DBT3_DBGEN_SOURCE) \
+                                               -o $(notdir $(DBT3_DBGEN))
 
 $(HTML_FILES): $(HTML_SOURCES) $(HTML_TEMPLATE)
 	@$(MKDIR_P) $(STROM_BUILD_ROOT)/doc/html
