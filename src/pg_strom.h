@@ -459,7 +459,7 @@ typedef struct pgstrom_data_store
 	 * @nblocks_uncached is number of PostgreSQL blocks, to be processed
 	 * by NVMe-Strom. If @nblocks_uncached > 0, the tail of PDS shall be
 	 * filled up by an array of strom_dma_chunk.
-	 * @filedesc is file-descriptor of the underlying blocks
+	 * @filedesc is file-descriptor of the underlying blocks.
 	 */
 	cl_uint				nblocks_uncached;
 	cl_int				filedesc;
@@ -478,10 +478,7 @@ typedef struct NVMEScanState
 	BlockNumber		curr_segno;
 	Buffer			curr_vmbuffer;
 	BlockNumber		nr_segs;
-	struct {
-		File		vfd;
-		BlockNumber	segno;
-	} mdfd[FLEXIBLE_ARRAY_MEMBER];
+	int				fdesc[FLEXIBLE_ARRAY_MEMBER];
 } NVMEScanState;
 
 /*
@@ -696,6 +693,9 @@ extern bool trackGpuMemIPC(GpuContext *gcontext,
 						   CUdeviceptr devptr, void *extra,
 						   const char *filename, int lineno);
 extern void *untrackGpuMemIPC(GpuContext *gcontext, CUdeviceptr devptr);
+extern bool trackRawFileDesc(GpuContext *gcontext, int filedesc,
+							 const char *filename, int lineno);
+extern void untrackRawFileDesc(GpuContext *gcontext, int filedesc);
 extern void pgstrom_init_gpu_context(void);
 
 /*

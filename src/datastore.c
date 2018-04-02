@@ -573,51 +573,126 @@ typedef struct _MdfdVec
 #endif
 } MdfdVec;
 
+static int
+nvme_sstate_open_segment(SMgrRelation rd_smgr, int seg_nr)
+{
+	/* see _mdfd_openseg() and _mdfd_segpath() */
+	char	   *temp;
+	char	   *path;
+	int			fdesc;
+
+	temp = relpath(rd_smgr->smgr_rnode, MAIN_FORKNUM);
+	if (seg_nr > 0)
+	{
+		path = psprintf("%s.%u", temp, seg_nr);
+		pfree(temp);
+	}
+	else
+		path = temp;
+
+	fdesc = open(path, O_RDWR | PG_BINARY, 0600);
+	if (fdesc < 0)
+		elog(ERROR, "failed on open('%s'): %m", path);
+	pfree(path);
+
+	return fdesc;
+}
+
 static void
-nvme_sstate_open_smgr(NVMEScanState *nvme_sstate, Relation relation)
+nvme_sstate_open_files(GpuContext *gcontext,
+					   NVMEScanState *nvme_sstate,
+					   Relation relation)
 {
 	SMgrRelation rd_smgr = relation->rd_smgr;
 	MdfdVec	   *vec;
 	int			i, nr_segs;
+	int			fdesc;
 
 #if PG_VERSION_NUM < 100000
 	/* PG9.6 */
 	nr_segs = nvme_sstate->nr_segs;
-	vec = rd_smgr->md_fd[MAIN_FORKNUM];
-	while (vec)
+	memset(nvme_sstate->fdesc, -1, sizeof(int) * nr_segs);
+	for (vec = rd_smgr->md_fd[MAIN_FORKNUM];
+		 vec != NULL;
+		 vec = vec->mdfd_chain)
 	{
-		if (vec->mdfd_vfd < 0 ||
-			vec->mdfd_segno >= nr_segs)
-			elog(ERROR, "Bug? MdfdVec {vfd=%d segno=%u} is out of range",
-				 vec->mdfd_vfd, vec->mdfd_segno);
-		nvme_sstate->mdfd[vec->mdfd_segno].segno = vec->mdfd_segno;
-		nvme_sstate->mdfd[vec->mdfd_segno].vfd   = vec->mdfd_vfd;
-		vec = vec->mdfd_chain;
+		if (vec->mdfd_vfd < 0)
+			elog(ERROR, "Bug? seg=%u of relation %s is not opened",
+				 vec->mdfd_segno, RelationGetRelationName(relation));
+		if (vec->mdfd_segno >= nr_segs)
+			continue;	/* skip, out of the range */
+
+		fdesc = FileGetRawDesc(vec->mdfd_vfd);
+		if (fdesc < 0)
+			fdesc = nvme_sstate_open_segment(rd_smgr, vec->mdfd_segno);
+		else
+		{
+			fdesc = dup(fdesc);
+			if (fdesc < 0)
+				elog(ERROR, "failed on dup(2): %m");
+		}
+
+		if (!trackRawFileDesc(gcontext, fdesc, __FILE__, __LINE__))
+		{
+			close(fdesc);
+			elog(ERROR, "out of memory");
+		}
+		nvme_sstate->fdesc[vec->mdfd_segno] = fdesc;
+	}
+
+	for (i=0; i < nr_segs; i++)
+	{
+		if (nvme_sstate->fdesc[i] >= 0)
+			continue;
+		fdesc = nvme_sstate_open_segment(rd_smgr, i);
+		if (!trackRawFileDesc(gcontext, fdesc, __FILE__, __LINE__))
+		{
+			close(fdesc);
+			elog(ERROR, "out of memory");
+		}
+		nvme_sstate->fdesc[i] = fdesc;
 	}
 #else
 	/* PG10 or later */
-	nr_segs = rd_smgr->md_num_open_segs[MAIN_FORKNUM];
-	if (nr_segs != nvme_sstate->nr_segs)
-		elog(ERROR, "Bug? not all the segment of relation %s is not opened",
-			 RelationGetRelationName(relation));
-	for (i=0; i < nvme_sstate->nr_segs; i++)
-	{
-		vec = &rd_smgr->md_seg_fds[MAIN_FORKNUM][i];
-		if (vec->mdfd_vfd < 0 ||
-			vec->mdfd_segno >= nr_segs)
-			elog(ERROR, "Bug? MdfdVec {vfd=%d segno=%u} is out of range",
-				 vec->mdfd_vfd, vec->mdfd_segno);
-		nvme_sstate->mdfd[vec->mdfd_segno].segno = vec->mdfd_segno;
-		nvme_sstate->mdfd[vec->mdfd_segno].vfd   = vec->mdfd_vfd;
-	}
-#endif
-	/* sanity checks */
+	nr_segs = Min(rd_smgr->md_num_open_segs[MAIN_FORKNUM],
+				  nvme_sstate->nr_segs);
 	for (i=0; i < nr_segs; i++)
 	{
-		if (nvme_sstate->mdfd[i].segno >= nvme_sstate->nr_segs ||
-			nvme_sstate->mdfd[i].vfd < 0)
-			elog(ERROR, "Bug? Here is a hole segment which was not open");
+		vec = &rd_smgr->md_seg_fds[MAIN_FORKNUM][i];
+		if (vec->mdfd_segno != i)
+			elog(ERROR, "Bug? mdfd_segno is not consistent");
+		if (vec->mdfd_vfd < 0)
+			elog(ERROR, "Bug? seg=%d of relation %s is not opened",
+				 i, RelationGetRelationName(relation));
+		fdesc = FileGetRawDesc(vec->mdfd_vfd);
+		if (fdesc < 0)
+			fdesc = nvme_sstate_open_segment(rd_smgr, i);
+		else
+		{
+			fdesc = dup(fdesc);
+			if (fdesc < 0)
+				elog(ERROR, "failed on dup(2): %m");
+		}
+
+		if (!trackRawFileDesc(gcontext, fdesc, __FILE__, __LINE__))
+		{
+			close(fdesc);
+			elog(ERROR, "out of memory");
+		}
+		nvme_sstate->fdesc[i] = fdesc;
 	}
+
+	while (i < nvme_sstate->nr_segs)
+	{
+		fdesc = nvme_sstate_open_segment(rd_smgr, i);
+		if (!trackRawFileDesc(gcontext, fdesc, __FILE__, __LINE__))
+		{
+			close(fdesc);
+			elog(ERROR, "out of memory");
+		}
+		nvme_sstate->fdesc[i] = fdesc;
+	}
+#endif
 }
 
 /*
@@ -628,6 +703,7 @@ void
 PDS_init_heapscan_state(GpuTaskState *gts,
 						cl_uint nrows_per_block)
 {
+	GpuContext	   *gcontext = gts->gcontext;
 	Relation		relation = gts->css.ss.ss_currentRelation;
 	TupleDesc		tupdesc = RelationGetDescr(relation);
 	EState		   *estate = gts->css.ss.ps.state;
@@ -667,15 +743,15 @@ PDS_init_heapscan_state(GpuTaskState *gts,
 
 	/* allocation of NVMEScanState structure */
 	nr_segs = (nr_blocks + (BlockNumber) RELSEG_SIZE - 1) / RELSEG_SIZE;
-	nvme_sstate = MemoryContextAlloc(estate->es_query_cxt,
-									 offsetof(NVMEScanState, mdfd[nr_segs]));
-	memset(nvme_sstate, -1, offsetof(NVMEScanState, mdfd[nr_segs]));
+	nvme_sstate = MemoryContextAllocZero(estate->es_query_cxt,
+										 offsetof(NVMEScanState,
+												  fdesc[nr_segs]));
 	nvme_sstate->nrows_per_block = nrows_per_block;
 	nvme_sstate->nblocks_per_chunk = nblocks_per_chunk;
 	nvme_sstate->curr_segno = InvalidBlockNumber;
 	nvme_sstate->curr_vmbuffer = InvalidBuffer;
 	nvme_sstate->nr_segs = nr_segs;
-	nvme_sstate_open_smgr(nvme_sstate, relation);
+	nvme_sstate_open_files(gcontext, nvme_sstate, relation);
 
 	gts->nvme_sstate = nvme_sstate;
 }
@@ -686,7 +762,9 @@ PDS_init_heapscan_state(GpuTaskState *gts,
 void
 PDS_end_heapscan_state(GpuTaskState *gts)
 {
-	NVMEScanState   *nvme_sstate = gts->nvme_sstate;
+	GpuContext	   *gcontext = gts->gcontext;
+	NVMEScanState  *nvme_sstate = gts->nvme_sstate;
+	int		i, fdesc;
 
 	if (nvme_sstate)
 	{
@@ -695,6 +773,14 @@ PDS_end_heapscan_state(GpuTaskState *gts)
 		{
 			ReleaseBuffer(nvme_sstate->curr_vmbuffer);
 			nvme_sstate->curr_vmbuffer = InvalidBuffer;
+		}
+		/* close file descriptors, if any */
+		for (i=0; i < nvme_sstate->nr_segs; i++)
+		{
+			fdesc = nvme_sstate->fdesc[i];
+			untrackRawFileDesc(gcontext, fdesc);
+			if (close(fdesc))
+				elog(NOTICE, "failed on close(%d): %m", fdesc);
 		}
 		pfree(nvme_sstate);
 		gts->nvme_sstate = NULL;
@@ -758,13 +844,12 @@ PDS_exec_heapscan_block(pgstrom_data_store *pds,
 			int			filedesc;
 
 			Assert(segno < nvme_sstate->nr_segs);
-			filedesc = FileGetRawDesc(nvme_sstate->mdfd[segno].vfd);
-
 			/*
 			 * We cannot mix up multiple source files in a single PDS chunk.
 			 * If heapscan_block comes across segment boundary, rest of the
 			 * blocks must be read on the next PDS chunk.
 			 */
+			filedesc = nvme_sstate->fdesc[segno];
 			if (pds->filedesc >= 0 && pds->filedesc != filedesc)
 				retval = false;
 			else

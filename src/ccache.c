@@ -427,6 +427,8 @@ pgstrom_ccache_load_chunk(ccacheChunk *cc_chunk,
 		memset(&pds->chain, 0, sizeof(dlist_node));
 		pds->gcontext = gcontext;
 		pg_atomic_init_u32(&pds->refcnt, 1);
+		pds->nblocks_uncached = 0;
+		pds->filedesc = -1;
 		init_kernel_data_store(&pds->kds, tupdesc, length,
 							   KDS_FORMAT_COLUMN, nitems);
 		/* load from the ccache file */
