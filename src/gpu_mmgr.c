@@ -1586,6 +1586,8 @@ pgstrom_init_gpu_mmgr(void)
 	Size		shared_buffer_size = (Size)NBuffers * (Size)BLCKSZ;
 	Size		segment_sz;
 	Size		required;
+	bool		has_tesla_gpu = false;
+	int			i;
 	BackgroundWorker worker;
 
 	/*
@@ -1609,11 +1611,23 @@ pgstrom_init_gpu_mmgr(void)
 	gm_segment_sz = (size_t)gpu_memory_segment_size_kb << 10;
 
 	/* pg_strom.nvme_strom_enabled */
+	for (i=0; i < numDevAttrs; i++)
+	{
+		const char *dev_name = devAttrs[i].DEV_NAME;
+
+		if (strncasecmp(dev_name, "Tesla P40",   9) == 0 ||
+			strncasecmp(dev_name, "Tesla P100", 10) == 0 ||
+			strncasecmp(dev_name, "Tesla V100", 10) == 0)
+		{
+			has_tesla_gpu = true;
+			break;
+		}
+	}
 	DefineCustomBoolVariable("pg_strom.nvme_strom_enabled",
 							 "Turn on/off SSD-to-GPU P2P DMA",
 							 NULL,
 							 &nvme_strom_enabled,
-							 true,
+							 has_tesla_gpu,
 							 PGC_SUSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
