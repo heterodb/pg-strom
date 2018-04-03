@@ -55,18 +55,6 @@ __STROM_UTILS = gpuinfo
 STROM_UTILS = $(addprefix $(STROM_BUILD_ROOT)/utils/, $(__STROM_UTILS))
 
 #
-# Test support utilities
-#
-DBT3_DBGEN = $(addprefix $(STROM_BUILD_ROOT)/test/dbt3/, dbgen)
-DBT3_DBGEN_DISTS_DSS = $(addprefix $(STROM_BUILD_ROOT)/test/dbt3/, dists.dss)
-__DBT3_DBGEN_SOURCE = bcd2.c build.c load_stub.c print.c rng64.c text.c \
-                      bm_utils.c driver.c permute.c rnd.c speed_seed.c
-DBT3_DBGEN_SOURCE = $(addprefix $(STROM_BUILD_ROOT)/test/dbt3/, $(__DBT3_DBGEN_SOURCE))
-DBT3_DBGEN_FLAGS = -Wno-unused-variable -Wno-unused-but-set-variable \
-                   -Wno-parentheses -Wno-unused-result -Wall \
-                   -g -I. -DLINUX=1 -DTPCH=1 -DEOL_HANDLING=1
-
-#
 # Header files
 #
 __STROM_HEADERS = pg_strom.h nvme_strom.h device_attrs.h
@@ -131,6 +119,33 @@ SHLIB_LINK := -L $(LPATH) -lnvrtc -lcuda
 #LDFLAGS_SL := -Wl,-rpath,'$(LPATH)'
 
 #
+# Regression Test
+#
+USE_MODULE_DB = 1
+REGRESS = --schedule=$(STROM_BUILD_ROOT)/test/parallel_schedule
+REGRESS_DBNAME = contrib_regression_$(MODULE_big)
+REGRESS_REVISION = SELECT public.pgstrom_regression_test_revision()
+REGRESS_OPTS = --inputdir=$(STROM_BUILD_ROOT)/test --use-existing \
+               --launcher="env PGDATABASE=$(REGRESS_DBNAME)"
+REGRESS_PREP = init_regression_testdb
+
+#
+# Test support utilities
+#
+DBT3_DBGEN = $(addprefix $(STROM_BUILD_ROOT)/test/dbt3/, dbgen)
+DBT3_DBGEN_DISTS_DSS = $(addprefix $(STROM_BUILD_ROOT)/test/dbt3/, dists.dss)
+__DBT3_DBGEN_SOURCE = bcd2.c build.c load_stub.c print.c rng64.c text.c \
+                   bm_utils.c driver.c permute.c rnd.c speed_seed.c
+DBT3_DBGEN_SOURCE = $(addprefix $(STROM_BUILD_ROOT)/test/dbt3/, \
+                                $(__DBT3_DBGEN_SOURCE))
+DBT3_DBGEN_FLAGS = -Wno-unused-variable -Wno-unused-but-set-variable \
+                   -Wno-parentheses -Wno-unused-result -Wall \
+                   -g -I. -DLINUX=1 -DTPCH=1 -DEOL_HANDLING=1
+
+TESTAPP_LARGEOBJECT = $(STROM_BUILD_ROOT)/test/testapp_largeobject
+TESTAPP_LARGEOBJECT_SOURCE = $(addsuffix .cu,$(TESTAPP_LARGEOBJECT))
+
+#
 # Definition of PG-Strom Extension
 #
 MODULE_big = pg_strom
@@ -141,26 +156,14 @@ DATA = $(shell cpp -D 'PGSTROM_CUDA(x)=$(STROM_BUILD_ROOT)/src/cuda_\#\#x.h' \
                       $(STROM_BUILD_ROOT)/src/cuda_filelist | grep -v ^\#)
 
 # Support utilities
-SCRIPTS_built = $(STROM_UTILS) $(DBT3_DBGEN)
+SCRIPTS_built = $(STROM_UTILS)
 # Extra files to be cleaned
 EXTRA_CLEAN = $(STROM_UTILS) \
 	$(shell ls $(STROM_BUILD_ROOT)/man/docs/*.md) \
 	$(shell ls */Makefile | sed 's/Makefile/pg_strom.control/g') \
 	$(shell ls pg-strom-*.tar.gz) \
 	$(STROM_BUILD_ROOT)/man/markdown_i18n \
-	$(STROM_BUILD_ROOT)/test/testapp_largeobject \
-	$(DBT3_DBGEN) $(DBT3_DBGEN_DISTS_DSS).h
-
-#
-# Regression Test
-#
-USE_MODULE_DB = 1
-REGRESS = --schedule=$(STROM_BUILD_ROOT)/test/parallel_schedule
-REGRESS_DBNAME = contrib_regression_$(MODULE_big)
-REGRESS_REVISION = SELECT public.pgstrom_regression_test_revision()
-REGRESS_OPTS = --inputdir=$(STROM_BUILD_ROOT)/test --use-existing \
-               --launcher="env PGDATABASE=$(REGRESS_DBNAME)"
-REGRESS_PREP = init_regression_testdb
+        $(TESTAPP_LARGEOBJECT) $(DBT3_DBGEN) $(DBT3_DBGEN_DISTS_DSS).h
 
 #
 # Build chain of PostgreSQL
@@ -184,11 +187,6 @@ $(addsuffix .h,$(DBT3_DBGEN_DISTS_DSS)): $(DBT3_DBGEN_DISTS_DSS)
           sed -e 's/\\/\\\\/g' -e 's/\t/\\t/g' -e 's/"/\\"/g' \
               -e 's/^/  "/g' -e 's/$$/\\n"/g' < $^; \
           echo ";") > $@
-
-$(DBT3_DBGEN): $(DBT3_DBGEN_SOURCE) $(addsuffix .h,$(DBT3_DBGEN_DISTS_DSS))
-	cd $(STROM_BUILD_ROOT)/test/dbt3 \
-        && $(CC) $(DBT3_DBGEN_FLAGS) $(notdir $(DBT3_DBGEN_SOURCE)) \
-                                  -o $(notdir $(DBT3_DBGEN))
 
 $(HTML_FILES): $(HTML_SOURCES) $(HTML_TEMPLATE)
 	@$(MKDIR_P) $(STROM_BUILD_ROOT)/doc/html
@@ -236,11 +234,20 @@ $(STROM_TGZ): $(shell cd $(STROM_BUILD_ROOT); git ls-files $(__PACKAGE_FILES))
 
 tarball: $(STROM_TGZ)
 
-$(STROM_BUILD_ROOT)/test/testapp_largeobject: $(STROM_BUILD_ROOT)/test/testapp_largeobject.cu
-	$(NVCC) -I $(shell $(PG_CONFIG) --pkgincludedir) 					\
-	        -L $(shell $(PG_CONFIG) --pkglibdir)						\
-	        -Xcompiler \"-Wl,-rpath,$(shell $(PG_CONFIG) --pkglibdir)\"	\
-	        -lpq -o $(STROM_BUILD_ROOT)/test/testapp_largeobject $^
+$(notdir $(DBT3_DBGEN)): $(DBT3_DBGEN)
+
+$(DBT3_DBGEN): $(DBT3_DBGEN_SOURCE) $(addsuffix .h,$(DBT3_DBGEN_DISTS_DSS))
+	cd $(STROM_BUILD_ROOT)/test/dbt3 \
+        && $(CC) $(DBT3_DBGEN_FLAGS) $(notdir $(DBT3_DBGEN_SOURCE)) \
+                                  -o $(notdir $(DBT3_DBGEN))
+
+$(notdir $(TESTAPP_LARGEOBJECT)): $(TESTAPP_LARGEOBJECT)
+
+$(TESTAPP_LARGEOBJECT): $(TESTAPP_LARGEOBJECT_SOURCE)
+	$(NVCC) -I $(shell $(PG_CONFIG) --pkgincludedir) \
+                -L $(shell $(PG_CONFIG) --pkglibdir)     \
+                -Xcompiler \"-Wl,-rpath,$(shell $(PG_CONFIG) --pkglibdir)\"  \
+                -lpq -o $@ $^
 
 init_regression_testdb: $(STROM_BUILD_ROOT)/test/testapp_largeobject
 	$(STROM_BUILD_ROOT)/test/testdb_init.sh $(REGRESS_DBNAME) $(PSQL)
