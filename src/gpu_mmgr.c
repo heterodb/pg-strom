@@ -1507,11 +1507,18 @@ pgstrom_device_preserved_meminfo(PG_FUNCTION_ARGS)
 	Assert(gmemp->cuda_dindex >= 0 &&
 		   gmemp->cuda_dindex < numDevAttrs);
 	values[0] = Int32GetDatum(devAttrs[gmemp->cuda_dindex].DEV_ID);
-
-	temp = palloc(sizeof(CUipcMemHandle) + VARHDRSZ);
-	memcpy(temp + VARHDRSZ, &gmemp->m_handle, sizeof(CUipcMemHandle));
-	SET_VARSIZE(temp, sizeof(CUipcMemHandle) + VARHDRSZ);
-	values[1] = PointerGetDatum(temp);
+	if (superuser() || has_privs_of_role(GetUserId(), gmemp->owner))
+	{
+		temp = palloc(sizeof(CUipcMemHandle) + VARHDRSZ);
+		memcpy(temp + VARHDRSZ, &gmemp->m_handle, sizeof(CUipcMemHandle));
+		SET_VARSIZE(temp, sizeof(CUipcMemHandle) + VARHDRSZ);
+		values[1] = PointerGetDatum(temp);
+	}
+	else
+	{
+		isnull[1] = true;
+		values[1] = 0;
+	}
 	values[2] = ObjectIdGetDatum(gmemp->owner);
 	values[3] = Int64GetDatum(gmemp->bytesize);
 	values[4] = TimestampTzGetDatum(gmemp->ctime);
