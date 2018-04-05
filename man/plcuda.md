@@ -1,5 +1,3 @@
-# PL/CUDA
-
 @ja{
 本章では、PL/CUDA言語を用いて、GPUで実行可能なネイティブプログラムをSQL関数として実装する方法について説明します。
 }
@@ -7,8 +5,8 @@
 This chapter introduces the way to implement GPU executable native program as SQL functions, using PL/CUDA procedural language.
 }
 
-@ja:## PL/CUDA概要
-@en:## PL/CUDA Overview
+@ja:# PL/CUDA概要
+@en:# PL/CUDA Overview
 
 @ja{
 内部的に、PG-StromはSQL構文を元にCUDA言語によるGPUプログラムを生成し、これを実行時コンパイルによってGPU用命令バイナリを生成します。 CUDAとはNVIDIA社の提供するプログラミング環境で、C言語に似た構文を用いてGPUで並列実行可能なプログラムを記述する事ができます。 SQL構文からCUDAプログラムへの変換プロセスは内部的なもので、ユーザの視点からは、どのようなGPU用プラグラムが生成、実行されるのかを意識する必要はありません。
@@ -34,7 +32,7 @@ You can also use foreign tables defined with `gstore_fdw` as arguments of PL/CUD
 Therefore, users can focus on productive tasks like implementation of statistical analysis, code optimization and so on, without routine process like data input/output between GPU and databases.
 }
 
-ここに絵
+![PL/CUDA Overview](./img/plcuda-overview.png)
 
 @ja{
 `CREATE FUNCTION`構文を用いてPL/CUDA関数を定義すると、この関数の実行時、関数の定義部をそのままGPUのカーネル関数に埋め込んだCUDAプログラムを作成します。 このカーネル関数は、ユーザ定義処理の他に、PL/CUDA関数の引数を参照するための変数の初期化や、実行時エラーをCPU側へ返却するための補助的なコードを含んでいます。また、PG-Stromの実行をサポートするための各種ランタイム関数をインクルードする事もできます。
@@ -221,8 +219,8 @@ postgres=# SELECT pgstrom.plcuda_function_source('gpu_add'::regproc);
 (1 row)
 ```
 
-@ja:## PL/CUDAの構造
-@en:## PL/CUDA Structure
+@ja:# PL/CUDAの構造
+@en:# PL/CUDA Structure
 
 @ja{
 PL/CUDAの関数定義は、`#plcuda_...`で始まるディレクティブによって分割されたいくつかのコードブロックから構成されます。 このうち、`#plcuda_begin`より始まるコードブロックのみが必須で、必要に応じてその他のコードブロックを追加する事ができます。
@@ -320,11 +318,8 @@ In a similar fashion, `#plcuda_shmem_unitsz` allows to specify the amount of sha
 #plcuda_kernel_maxthreads
 ```
 
-@ja:## PL/CUDAリファレンス
-@en:## PL/CUDAリファレンス
-
-@ja:###PL/CUDAディレクティブ
-@en:###PL/CUDA Directives
+@ja:# PL/CUDAリファレンス
+@en:# PL/CUDAリファレンス
 
 @ja{
 本節はPL/CUDA関数のディレクティブ、および関連するSQL関数のリファレンスです。
@@ -333,7 +328,10 @@ In a similar fashion, `#plcuda_shmem_unitsz` allows to specify the amount of sha
 This section is a reference for PL/CUDA function's directives and related SQL functions.
 }
 
-#### `#plcuda_begin`
+@ja:##PL/CUDAディレクティブ
+@en:##PL/CUDA Directives
+
+### `#plcuda_begin`
 @ja{
 本体カーネル関数のコードブロックの開始を宣言します。このディレクティブは必須です。 GPU上でのコードブロックの実行開始に先立って、PL/CUDA関数の引数は`arg1`、`arg2`、...という変数名で参照可能となるよう初期化されます。 これらの変数は、PG-StromがSQLデータ型をGPU上で表現するのと同じ表現を持っており、例えば、単精度浮動小数点である`real`型の引数は、以下のように定義された`pg_float4_t`型の変数として表現されています。
 }
@@ -355,7 +353,7 @@ typedef struct {
 These variables are kept in private area of each threads, thus, update of these variables are not reflected on execution of the kernel function on the next step. If you want to share the state between kernel functions, value shall be kept in either the working buffer referenced by the `void *workbuf` pointer or the results buffer referenced by the `void *results` pointer.
 }
 
-#### `#plcuda_end`
+### `#plcuda_end`
 @ja{
 コードブロックの終了を宣言します。 なお、あるコードブロックの内側で他のコードブロックの開始を宣言した場合、現在のコードブロックは暗黙のうちに`#plcuda_end`ディレクティブによって終了したものとして扱われます。
 }
@@ -363,7 +361,7 @@ These variables are kept in private area of each threads, thus, update of these 
 It marks end of the kernel function code block. By the way, if a directive to start code block was put inside of the different code block, the current code block is implicitly closed by the `#plcuda_end` directive.
 }
 
-#### `#plcuda_decl`
+### `#plcuda_decl`
 @ja{
 このディレクティブの使用は任意です。 全てのkernel関数の定義に先立って宣言しておくべきコードブロックの開始を宣言します。 他のコードブロックとは異なり、内容が自動的にkernel関数として展開される事はありませんので、完全な関数定義を記述する必要があります。
 }
@@ -371,7 +369,7 @@ It marks end of the kernel function code block. By the way, if a directive to st
 Use of this directive is optional. It marks beginning of the declaration code block that contains the raw code to be declared prior to the definition of any kernel functions. Unlike other code blocks, the contents of this code block shall not be applied as a kernel function, thus, you have to put complete definition of functions.
 }
 
-#### `#plcuda_prep`
+### `#plcuda_prep`
 @ja{
 このディレクティブの使用は任意です。`#plcuda_begin`から始まる本体カーネル関数の実行に先立ってGPUで実行すべき、前処理カーネル関数の処理を記述します。 ここでは、結果バッファや作業バッファの初期化を行う事を意図しており、前処理カーネル関数の実行が完了するまでは本体カーネル関数は実行されません。 PL/CUDA関数の引数へは、本体カーネル関数と同様にアクセスする事ができます。
 }
@@ -379,7 +377,7 @@ Use of this directive is optional. It marks beginning of the declaration code bl
 Use of this directive is optional. It marks beginning of the preparation code block that shall be executed on GPU prior to the main kernel function; begins from `#plcuda_begin` directive. We expect the preparation kernel initializes the results and working buffer. The main kernel shall not be kicked until completion of the preparation kernel. Arguments of PL/CUDA functions can be referenced like as the main kernel function doing.
 }
 
-#### `#plcuda_post`
+### `#plcuda_post`
 @ja{
 このディレクティブの使用は任意です。`#plcuda_begin`から始まる本体カーネル関数の実行後にGPUで実行すべき、後処理カーネル関数の処理を記述します。 ここでは、CPU側に返却する最終結果を結果バッファにセットする事を意図しており、本体カーネル関数の実行が完了するまでは後処理カーネル関数は実行されません。 PL/CUDA関数の引数へは、本体カーネル関数と同様にアクセスする事ができます。
 }
@@ -387,7 +385,7 @@ Use of this directive is optional. It marks beginning of the preparation code bl
 You can optionally use this directive. It marks beginning of the post-process code block that shall be executed on GPU next to the main kernel function; begins from `#plcuda_begin` directive. We expect the post-process kernel set up the final results to be returned to the CPU side. The post-process kernel shall not be kicked until completion of the preparation kernel. Arguments of PL/CUDA functions can be referenced like as the main kernel function doing.
 }
 
-#### `#plcuda_num_threads (<value>|<function>)`
+### `#plcuda_num_threads (<value>|<function>)`
 @ja{
 このディレクティブの使用は任意です。未指定の場合、デフォルト値として定数`1`が使われます。
 
@@ -401,7 +399,7 @@ This directive allows specifying the number of threads to execute the GPU kernel
 If a constant value is specified, PL/CUDA runtime kicks the specified number of GPU threads to run the GPU kernel function. If a SQL function name is specified, PL/CUDA runtime call the specified SQL function, and then result of the function shall be applied as the number of GPU threads to run the GPU kernel function. This SQL function takes identical arguments with PL/CUDA function, and returns bigint data type.
 }
 
-#### `#plcuda_shmem_unitsz (<value>|<function>)`
+### `#plcuda_shmem_unitsz (<value>|<function>)`
 @ja{
 このディレクティブの使用は任意です。未指定の場合のデフォルト値は定数`0`です
 
@@ -428,7 +426,7 @@ GPUカーネル関数の実行時に実際に確保される共有メモリの�
 Please note that amount of the shared memory actually acquired on execution of GPU kernel function depends on the number of threads per streaming-multiprocessor, not only the amount of shared memory per thread specified by this directive. (Also note that the number of threads per streaming-multiprocessor is a different concept what we specified using #plcuda_num_threads.) For example, if amount of shared memory per thread is 8 bytes and the number of streaming-multiprocessor is 384, 3KB of shared memory shall be allocated per streaming-multiprocessor. At that time, if the number of total threads specified by #plcuda_num_threads is 32768, this GPU kernel shall be executed with 86 streaming-multiprocessor. However, it is the role of scheduler to determine the timing to put kernels into, so it does not mean that 86 x 3KB = 256KB of the shared memory is consumed at once.
 }
 
-#### `#plcuda_shmem_blocksz (<value>|<function>)`
+### `#plcuda_shmem_blocksz (<value>|<function>)`
 
 @ja{
 このディレクティブの使用は任意です。未指定の場合のデフォルト値は定数0です
@@ -449,7 +447,7 @@ If a constant value is specified, PL/CUDA runtime kicks GPU kernel function with
 If a SQL function name is specified, PL/CUDA runtime call the specified SQL function, and then result of the function shall be applied as the amount of the shared memory per block to run the GPU kernel function. This SQL function takes identical arguments with PL/CUDA function, and returns bigint data type.
 }
 
-#### `#plcuda_kernel_blocksz (<value>|<function>)`
+### `#plcuda_kernel_blocksz (<value>|<function>)`
 @ja{
 このディレクティブの使用は任意です。
 
@@ -470,7 +468,7 @@ If a SQL function name is specified, PL/CUDA runtime calls the specified SQL fun
 Increase the number of threads per streaming-multiprocessor allows more threads to synchronize other threads using the shared memory, on the other hands, it leads decrease of the amount of registers a thread can use, thus, it may have performance degradation by private variables allocation on the (slow) global memory for example.
 }
 
-#### `#plcuda_include ("library name"|<function name>)`
+### `#plcuda_include ("library name"|<function name>)`
 @ja{
 PG-Stromの静的GPUライブラリ、またはユーザ定義のコードブロックをインクルードし、PL/CUDA関数内で使用できるようにします。サーバシステム上の任意のヘッダファイルをインクルーとして利用するための機能ではない事に留意してください。
 
@@ -513,7 +511,7 @@ If a SQL function name is specified, PL/CUDA runtime calls the specified SQL fun
 |`"cuda_curand.h"` |A collection of GPU runtime functions to use `curand` library which supports random number generation, provided by CUDA.|
 }
 
-#### `#plcuda_results_bufsz (<value>|<function>)`
+### `#plcuda_results_bufsz (<value>|<function>)`
 @ja{
 このディレクティブの使用は任意です。未指定の場合のデフォルト値は定数0です
 
@@ -533,7 +531,7 @@ If a constant value is specified, PL/CUDA language handler acquires the specifie
 GPU kernel functions can access the results buffer as the region pointed by the `void *results` argument. If `0` bytes were specified, `NULL` shall be set on the `void *results`.
 }
 
-#### `#plcuda_working_bufsz (<value>|<function>)`
+### `#plcuda_working_bufsz (<value>|<function>)`
 @ja{
 このディレクティブの使用は任意です。未指定の場合のデフォルト値は定数0です
 
@@ -553,7 +551,7 @@ If a constant value is specified, PL/CUDA language handler acquires the specifie
 GPU kernel functions can access the working buffer as the region pointed by the void *results argument. If 0 bytes were specified, NULL shall be set on the void *results.
 }
 
-#### `#plcuda_sanity_checl <function>`
+### `#plcuda_sanity_checl <function>`
 @ja{
 GPUカーネルの起動に先立って、引数の妥当性を検証するためのSQL関数をしています。
 デフォルトでは妥当性検証関数は設定されていません。
@@ -565,7 +563,7 @@ No sanity check function is configured on the default.
 Usually, launch of GPU kernel function is heavier task than call of another function on CPU, because it also involves initialization of GPU devices. If supplied arguments have unacceptable values from the specification of the PL/CUDA function, a few thousands or millions (or more in some cases) of GPU kernel threads shall be launched just to check the arguments and return an error status. If sanity check can be applied prior to the launch of GPU kernel function with enough small cost, it is a valuable idea to raise an error using sanity check function prior to the GPU kernel function. The sanity check function takes identical arguments with PL/CUDA function, and returns `bool` data type.
 }
 
-#### `#plcuda_cpu_fallback <function>`
+### `#plcuda_cpu_fallback <function>`
 
 @ja{
 GPUカーネル関数と同等の処理を行うCPUフォールバック関数を指定します。 デフォルトではCPUフォールバック関数は設定されていません。
@@ -578,8 +576,8 @@ It allows to specify the CPU fallback function that performs as like GPU kernel 
 If GPU kernel function returns StromError_CpuReCheck error and the CPU fallback function is configured, the PL/CUDA language handler discards the results of processing on GPU side, then call the CPU fallback function. It is valuable to implement an alternative remedy, in case when GPU kernel function is not always executable for all possible input; for example, data size may be too large to load onto GPU RAM. Also note that we must have a trade-off of the performance because CPU fallback function shall be executed in CPU single thread.
 }
 
-@ja:### PL/CUDA 関連関数
-@en:### PL/CUDA Related Functions
+@ja:## PL/CUDA 関連関数
+@en:## PL/CUDA Related Functions
 
 @ja{
 |関数定義  |結果型|説明|

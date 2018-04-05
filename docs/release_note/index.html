@@ -139,7 +139,7 @@
             <div class="section">
               
                 <h1 id="pg-strom-v20-release">PG-Strom v2.0 Release</h1>
-<div style="text-align: right;">PG-Strom Development Team (xx-Apr-2018)</div>
+<div style="text-align: right;">PG-Strom Development Team (16-Apr-2018)</div>
 
 <h2 id="overview">Overview</h2>
 <p>Major enhancement in PG-Strom v2.0 includes:</p>
@@ -161,6 +161,90 @@
 <li>NVIDIA GPU CC 6.0 or later (Pascal or Volta)</li>
 </ul>
 <h2 id="new-features">New Features</h2>
+<ul>
+<li>
+<p>Entire re-design and stabilization of the internal infrastructure to manage GPU device.</p>
+<ul>
+<li>PostgreSQL backend process simultaneously uses only one GPU at most. In case of multi-GPUs installation, it assumes combination use with CPU parallel execution of PostgreSQL. Usually, it is not a matter because throughput of CPU to provide data to GPU is much narrower than capability of GPU processors. We prioritized simpleness of the software architecture.</li>
+<li>We began to utilize the demand paging feature of GPU device memory supported at the GPU models since Pascal generation. In most of SQL workloads, we cannot know exact size of the required result buffer prior to its execution, therefore, we had allocated more buffer than estimated buffer length, and retried piece of the workloads if estimated buffer size is not sufficient actually. This design restricts GPU resources which can be potentially used for other concurrent processes, and complicated error-retry logic was a nightmare for software quality. The demand paging feature allows to eliminate and simplify these stuff.</li>
+<li>We stop to use CUDA asynchronous interface. Use of the demand paging feature on GPU device memory makes asynchronous APIs for DMA (like <code>cuMemCpyHtoD</code>) perform synchronously, then it reduces concurrency and usage ratio of GPU kernels. Instead of the CUDA asynchronous APIs, PG-Strom manages its own worker threads which call synchronous APIs for each. As a by-product, we also could eliminate asynchronous callbacks (<code>cuStreamAddCallback</code>), it allows to use MPS daemon which has a restriction at this API.</li>
+</ul>
+</li>
+<li>
+<p>CPU+GPU Hybrid Parallel Execution</p>
+<ul>
+<li>CPU parallel execution at PostgreSQL v9.6 is newly supported.</li>
+<li>CustomScan logic of GpuScan, GpuJoin and GpuPreAgg provided by PG-Strom are executable on multiple background worker processes of PostgreSQL in parallel.</li>
+<li>Limitation: PG-Strom's own statistics displayed at <code>EXPLAIN ANALYZE</code> if CPU parallel execution. Because PostgreSQL v9.6 does not provide <code>ShutdownCustomScan</code> callback of the CustomScan interface, coordinator process has no way to reclaim information of worker processes prior to the release of DSM (Dynamic Shared Memory) segment.</li>
+</ul>
+</li>
+<li>
+<p>SSD-to-GPU Direct SQL Execution</p>
+<ul>
+<li>By cooperation with the <code>nvme_strom</code> Linux kernel module, it enables to load PostgreSQL's data blocks on NVMe-SSD to GPU device memory directly, bypassing the CPU and host buffer. This feature enables to apply PG-Strom on the area which have to process large data set more than system RAM size.</li>
+<li>It allows to pull out pretty high throughput close to the hardware limitation because its data stream skips block-device or filesystem layer. Then, GPU runs SQL workloads that usually reduce the amount of data to be processed by CPU. The chemical reaction of these characteristics enables to redefine GPU's role as accelerator of I/O workloads also, not only computing intensive workloads.</li>
+</ul>
+</li>
+<li>
+<p>In-memory Columnar Cache</p>
+<ul>
+<li>For middle size data-set loadable onto the system RAM, it allows to cache data-blocks in column format which is more suitable for GPU computing. If cached data-blocks are found during table scan, PG-Strom prefers to reference the columnar cache more than shared buffer of PostgreSQL.</li>
+<li>In-memory columnar cache can be built synchronously, or asynchronously by the background workers.</li>
+<li>You may remember very early revision of PG-Strom had similar feature. In case when a cached tuple gets updated, the latest in-memory columnar cache which we newly implemented in v2.0 invalidates the cache block which includes the updated tuples. It never updates the columnar cache according to the updates of row-store, so performance degradation is quite limited.</li>
+</ul>
+</li>
+<li>
+<p>GPU Memory Store (gstore_fdw)</p>
+<ul>
+<li>It enables to write to / read from preserved GPU device memory region by SELECT/INSERT/UPDATE/DELETE in SQL-level, using foreign table interface.</li>
+<li>In v2.0, only <code>pgstrom</code> internal data format is supported. It saves written data using PG-Strom's buffer format of <code>KDS_FORMAT_COLUMN</code>. It can compress variable length data using LZ algorithm.</li>
+<li>In v2.0, GPU memory store can be used as data source of PL/CUDA user defined function.</li>
+</ul>
+</li>
+<li>
+<p>Redesign and performance improvement of GpuJoin and GpuPreAgg</p>
+<ul>
+<li>Stop using Dynamic Parallelism which we internally used in GpuJoin and GpuPreAgg, and revised entire logic of these operations. Old design had a problem of less GPU usage ratio because a GPU kernel which launches GPU sub-kernel and just waits for its completion occupied GPU's execution slot.</li>
+<li>A coproduct of this redesign is suspend/resume of GpuJoin. In principle, JOIN operation of SQL may generate larger number of rows than number of input rows, but preliminary not predictive. The new design allows to suspend GPU kernel once buffer available space gets lacked, then resume with new result buffer. It simplifies size estimation logic of the result buffer, and eliminates GPU kernel retry by lack of buffer on run-time.</li>
+</ul>
+</li>
+<li>
+<p>GpuPreAgg+GpuJoin+GpuScan combined GPU kernel</p>
+<ul>
+<li>In case when GPU executable SCAN, JOIN and GROUP BY are serially cascaded, a single GPU kernel invocation runs a series of tasks equivalent to the GpuScan, GpuJoin and GpuPreAgg. This is an approach to minimize data exchange between CPU and GPU. For example, result buffer of GpuJoin is used as input buffer of GpuPreAgg.</li>
+<li>This feature is especially valuable if combined with SSD-to-GPU Direct SQL Execution.</li>
+</ul>
+</li>
+<li>
+<p>PL/CUDA Enhancement</p>
+<ul>
+<li><code>#plcuda_include</code> is enhanced to specify SQL function which returns <code>text</code> type. It can change the code block to inject according to the argument, so it also allows to generate multiple GPU kernel variations, not only inclusion of externally defined functions.</li>
+<li>If PL/CUDA takes <code>reggstore</code> type argument, GPU kernel function receives pointer of the GPU memory store. Note that it does not pass the OID value.</li>
+</ul>
+</li>
+<li>
+<p>Other Enhancement</p>
+</li>
+<li>
+<p>Packaging</p>
+<ul>
+<li>Add RPM packages to follow the PostgreSQL packages distributed by PostgreSQL Global Development Group.</li>
+<li>All the software packages are available at HeteroDB SWDC(Software Distribution Center) and downloadable.</li>
+</ul>
+</li>
+<li>
+<p>Document</p>
+<ul>
+<li>PG-Strom documentation was entirely rewritten using markdown and mkdocs. It makes documentation maintenance easier than the previous HTML based approach, so expects timely updates according to the development of new features.</li>
+</ul>
+</li>
+<li>
+<p>Test</p>
+<ul>
+<li>Regression test for PG-Strom was built on top of the regression test framework of PostgreSQL.</li>
+</ul>
+</li>
+</ul>
 <h2 id="dropped-features">Dropped features</h2>
 <ul>
 <li>

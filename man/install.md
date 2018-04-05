@@ -46,10 +46,10 @@ This chapter introduces the steps to install PG-Strom.
 @en:# OS Installation
 
 @ja{
-CUDA ToolkitのサポートするLinuxディストリビューションを選択し、個々のディストリビューションのインストールプロセスに従ってインストール作業を行ってください。 CUDA ToolkitのサポートするLinuxディストリビューションは、NVIDIA DEVELOPER ZONEにおいて紹介されています。
+CUDA ToolkitのサポートするLinuxディストリビューションを選択し、個々のディストリビューションのインストールプロセスに従ってインストール作業を行ってください。 CUDA ToolkitのサポートするLinuxディストリビューションは、[NVIDIA DEVELOPER ZONE](https://developer.nvidia.com/)において紹介されています。
 }
 @en{
-Choose a Linux distribution which is supported by CUDA Toolkit, then install the system according to the installation process of the distribution. NVIDIA CUDA DEVELOPER ZONE introduces the list of Linux distributions which are supported by CUDA Toolkit.
+Choose a Linux distribution which is supported by CUDA Toolkit, then install the system according to the installation process of the distribution. [NVIDIA DEVELOPER ZONE](https://developer.nvidia.com/) introduces the list of Linux distributions which are supported by CUDA Toolkit.
 }
 @ja{
 Red Hat Enterprise Linux 7.x系列、またはCentOS 7.x系列の場合、ベース環境として「最小限のインストール」を選択し、さらに以下のアドオンを選択してください。
@@ -74,7 +74,6 @@ In case of Red Hat Enterprise Linux 7.x or CentOS 7.x series, choose "Minimal in
 @en{
 Next to the OS installation, a few additionsl configurations are required to install GPU-drivers and NVMe-Strom driver on the later steps.
 }
-
 
 @ja:### EPELリポジトリの設定
 @en:### Setup EPEL Repository

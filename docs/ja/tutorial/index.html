@@ -193,12 +193,12 @@ SQL処理は内部的にいくつかの要素に分解され処理されます�
 </code></pre>
 
 <p>実行計画の中に見慣れない処理が含まれている事に気が付かれたでしょう。
-CustomScanのフレームワーク上に、GpuJoinおよびGpuPreAggが実装されています。ここでGpuJoinは<code>t0</code>と<code>t1</code>、および<code>t2</code>とのJOIN処理を実行し、その結果を受け取るGpuPreAggは列<code>cat</code>によるGROUP BY処理をGPUで実行します。</p>
+CustomScan機構を用いてGpuJoinおよびGpuPreAggが実装されています。ここでGpuJoinは<code>t0</code>と<code>t1</code>、および<code>t2</code>とのJOIN処理を実行し、その結果を受け取るGpuPreAggは列<code>cat</code>によるGROUP BY処理をGPUで実行します。</p>
 <p>PostgreSQLがクエリ実行計画を構築する過程でPG-Stromはオプティマイザに介入し、SCAN、JOIN、GROUP BYの各ワークロードをGPUで実行可能である場合、そのコストを算出してPostgreSQLのオプティマイザに実行計画の候補を提示します。
 推定されたコスト値がCPUで実行する他の実行計画よりも小さな値である場合、GPUを用いた代替の実行計画が採用される事になります。</p>
 <p>ワークロードをGPUで実行するためには、少なくとも演算式または関数、および使用されているデータ型がPG-Stromでサポートされている必要があります。
 <code>int</code>や<code>float</code>といった数値型、<code>date</code>や<code>timestamp</code>といった日付時刻型、<code>text</code>のような文字列型がサポートされており、また、四則演算や大小比較といった数多くのビルトイン演算子がサポートされています。
-詳細な一覧に関しては(リファレンス)[reference.md]を参照してください。</p>
+詳細な一覧に関しては<a href="../references/">リファレンス</a>を参照してください。</p>
 <h2 id="cpugpu">CPU+GPUハイブリッド並列</h2>
 <p>PG-StromはPostgreSQLのCPU並列実行に対応しています。</p>
 <p>PostgreSQLのCPU並列実行は、Gatherノードがいくつかのバックグラウンドワーカプロセスを起動し、各バックグラウンドワーカが"部分的に"実行したクエリの結果を後で結合する形で実装されています。
@@ -242,6 +242,7 @@ SCANが終わった後のデータをいったんホスト側のバッファに�
 <li>SCAN + GROUP BY</li>
 <li>SCAN + JOIN + GROUP BY</li>
 </ul>
+<p><img alt="combined gpu kernel" src="../img/combined-kernel-overview.png" /></p>
 <p>以下の実行計画は、下位プランの引き上げを全く行わないケースです。</p>
 <p>GpuScanの実行結果をGpuJoinが受取り、さらにその実行結果をGpuPreAggが受け取って最終結果を生成する事が分かります。</p>
 <pre><code># EXPLAIN SELECT cat,count(*),avg(ax)
@@ -271,8 +272,7 @@ SCANが終わった後のデータをいったんホスト側のバッファに�
 (18 rows)
 </code></pre>
 
-<p>図：下位ノードの引き上げとCombined GPU kernelの模式図</p>
-<p><img alt="combined gpu kernel" src="../img/combined-gpu-kernel.png" /></p>
+<p>この場合、各実行ステージにおいてGPUとホストバッファの間でデータのピンポンが発生するため、実行効率はよくありません。</p>
 <p>一方、以下の実行計画は、下位ノードの引き上げを行ったものです。</p>
 <pre><code># EXPLAIN ANALYZE SELECT cat,count(*),avg(ax)
                     FROM t0 NATURAL JOIN t1
@@ -312,28 +312,25 @@ SCANが終わった後のデータをいったんホスト側のバッファに�
 
 <p>まず、テーブル<code>t0</code>へのスキャンがGpuJoinの実行計画に埋め込まれ、GpuScanが消えている事にお気付きでしょう。
 これはGpuJoinが配下のGpuScanを引き上げ、一体化したGPUカーネル関数でWHERE句の処理も行った事を意味しています。</p>
-<p>加えて奇妙なことに、GpuJoinが(never executed)と表示されています。これはGpuPreAggが配下のGpuJoinを引き上げ、
-一体化したGPUカーネル関数でJOINとGROUP BYを実行した事を意味しています。</p>
+<p>加えて奇妙なことに、<code>EXPLAIN ANALYZE</code>の結果にはGpuJoinが(never executed)と表示されています。
+これはGpuPreAggが配下のGpuJoinを引き上げ、一体化したGPUカーネル関数でJOINとGROUP BYを実行した事を意味しています。</p>
 <p>SCAN処理の引き上げは<code>pg_strom.pullup_outer_scan</code>パラメータによって制御できます。
 また、JOIN処理の引き上げは<code>pg_strom.pullup_outer_join</code>パラメータによって制御できます。
 いずれのパラメータもデフォルトでは<code>on</code>に設定されており、通常はこれを無効化する必要はありませんが、トラブル時の問題切り分け手段の一つとして利用する事ができます。</p>
 <h1 id="_3">システム管理上の注意</h1>
 <h2 id="_4">ナレッジベース</h2>
 <p>PG-Stromプロジェクトのwikiサイトには、ノートと呼ばれる詳細な技術情報が公開されています。</p>
-<p>(https://github.com/heterodb/pg-strom/wiki)[https://github.com/heterodb/pg-strom/wiki]</p>
+<p><a href="https://github.com/heterodb/pg-strom/wiki">https://github.com/heterodb/pg-strom/wiki</a></p>
 <h2 id="mps">MPSデーモンの利用</h2>
 <p>PostgreSQLのようにマルチプロセス環境でGPUを使用する場合、GPU側コンテキストスイッチの低減やデバイス管理に必要なリソースの低減を目的として、MPS(Multi-Process Service)を使用する事が一般的なソリューションです。</p>
-<p>(https://docs.nvidia.com/deploy/mps/index.html)[https://docs.nvidia.com/deploy/mps/index.html]</p>
+<p><a href="https://docs.nvidia.com/deploy/mps/index.html">https://docs.nvidia.com/deploy/mps/index.html</a></p>
 <p>しかし、PG-Stromの利用シーンでは、MPSサービスの既知問題により正常に動作しないCUDA APIが存在し、以下のような限定された条件下を除いては使用すべきではありません。</p>
 <ul>
-<li>GPUを使用するPostgreSQLプロセス（CPU並列クエリにおけるバックグラウンドワーカを含む）の数が16個以下であること。<ul>
-<li>Volta世代のGPUでは48個以下</li>
-</ul>
-</li>
+<li>GPUを使用するPostgreSQLプロセス（CPU並列クエリにおけるバックグラウンドワーカを含む）の数が常に16個以下である。Volta世代のGPUの場合は48個以下である。</li>
 <li>gstore_fdwを使用しない事。</li>
 </ul>
 <p>これは<code>CUipcMemHandle</code>を用いてプロセス間でGPUデバイスメモリを共有する際に、MPSサービス下のプロセスで獲得したGPUデバイスメモリを非MPSサービス下のプロセスでオープンできない事で、GpuJoinが使用するハッシュ表をバックグラウンドワーカー間で共有できなくなるための制限事項です。</p>
-<p>この問題は既にNVIDIAへ報告され、新しいバージョンのCUDA Toolkitにおいて修正されるとの回答を得ています。</p>
+<p>この問題は既にNVIDIAへ報告し、新しいバージョンのCUDA Toolkitにおいて修正されるとの回答を得ています。</p>
 <h1 id="_5">トラブルシューティング</h1>
 <h2 id="_6">問題の切り分け</h2>
 <p>特定のワークロードを実行した際に何がしかの問題が発生する場合には、それが何に起因するものであるのかを特定するのはトラブルシューティングの第一歩です。</p>
@@ -344,26 +341,26 @@ SCANが終わった後のデータをいったんホスト側のバッファに�
 <pre><code># SET pg_strom.enabled = off;
 </code></pre>
 
-<p>この他にも、GpuScan、GpuJoin、GpuPreAggといった特定の実行計画のみを無効化するパラメータや、SCANやJOINの引き上げを無効化するパラメータも定義されています。</p>
-<p>これらの詳細は(リファレンス)[references.md#gpu]を参照してください。</p>
+<p>この他にも、GpuScan、GpuJoin、GpuPreAggといった特定の実行計画のみを無効化するパラメータも定義されています。</p>
+<p>これらの詳細は<a href="../references/#gpu">リファレンス</a>を参照してください。</p>
 <h2 id="_7">クラッシュダンプの採取</h2>
 <p>システムのクラッシュを引き起こすような重大なトラブルの解析にはクラッシュダンプの採取が欠かせません。
 本節では、PostgreSQLとPG-Stromプロセスのクラッシュダンプ(CPU側)、およびPG-StromのGPUカーネルのクラッシュダンプ(GPU側)を取得し、障害発生時のバックトレースを採取するための手段を説明します。</p>
 <h3 id="postgresql">PostgreSQL起動時設定の追加</h3>
 <p>プロセスのクラッシュ時にクラッシュダンプ(CPU側)を生成するには、PostgreSQLサーバプロセスが生成する事のできる core ファイルのサイズを無制限に変更する必要があります。これはPostgreSQLサーバプロセスを起動するシェル上で<code>ulimit -c</code>コマンドを実行して変更する事ができます。</p>
 <p>GPUカーネルのエラー時にクラッシュダンプ(GPU側)を生成するには、PostgreSQLサーバプロセスが環境変数<code>CUDA_ENABLE_COREDUMP_ON_EXCEPTION</code>に<code>1</code>が設定されている必要があります。</p>
-<p>systemdからPostgreSQLを起動する場合、<code>/etc/systemd/system/postgresql-&lt;version&gt;.service.d/</code>以下に設定ファイルを作成し、これらの設定を追加する事ができます。
-ファイル名の末尾が<code>.conf</code>であるファイルを作成し、以下の内容を追記します。
-RPMインストールの場合は既に<code>pg_strom.conf</code>というファイルが作成されています。</p>
+<p>systemdからPostgreSQLを起動する場合、<code>/etc/systemd/system/postgresql-&lt;version&gt;.service.d/</code>以下に設定ファイルを作成し、これらの設定を追加する事ができます。</p>
+<p>RPMインストールの場合は、以下の内容の<code>pg_strom.conf</code>というファイルが作成されています。</p>
 <pre><code>[Service]
+LimitNOFILE=65536
 LimitCORE=infinity
-Environment=CUDA_ENABLE_COREDUMP_ON_EXCEPTION=1
+#Environment=CUDA_ENABLE_COREDUMP_ON_EXCEPTION=1
 </code></pre>
 
 <p>CUDA9.1においては、通常、GPUカーネルのクラッシュダンプの生成には数分以上の時間を要し、その間、エラーを発生したPostgreSQLセッションの応答は完全に停止してしまします。
-そのため、は特定クエリの実行においてGPUカーネルに起因するエラーの原因調査を行う場合にだけ、<code>CUDA_ENABLE_COREDUMP_ON_EXCEPTION</code>環境変数を設定する事をお勧めします。
+そのため、は特定クエリの実行において発生するGPUカーネルに起因するエラーの原因調査を行う場合にだけ、<code>CUDA_ENABLE_COREDUMP_ON_EXCEPTION</code>環境変数を設定する事をお勧めします。
 RPMインストールにおけるデフォルト設定は、<code>CUDA_ENABLE_COREDUMP_ON_EXCEPTION</code>環境変数の行をコメントアウトしています。</p>
-<p>この後でPostgreSQLサーバプロセスを再起動すると、<em>Max core file size</em>がunlimitedに設定されているはずです。</p>
+<p>PostgreSQLサーバプロセスを再起動すると、<em>Max core file size</em>がunlimitedに設定されているはずです。</p>
 <p>以下のように確認する事ができます。</p>
 <pre><code># cat /proc/&lt;PID of postmaster&gt;/limits
 Limit                     Soft Limit           Hard Limit           Units
@@ -398,8 +395,8 @@ Complete!
 <h3 id="cpu">CPU側バックトレースの確認</h3>
 <p>クラッシュダンプの作成されるパスは、カーネルパラメータ<code>kernel.core_pattern</code>および<code>kernel.core_uses_pid</code>の値によって決まります。
 通常はプロセスのカレントディレクトリに作成されますので、systemdからPostgreSQLを起動した場合はデータベースクラスタが構築される<code>/var/lib/pgdata</code>を確認してください。</p>
-<p><code>core.&lt;PID&gt;</code>ファイルが生成されているのを確認したら、gdbを用いてクラッシュに至るバックトレースを確認します。</p>
-<p>gdbの<code>-c</code>オプションでコアファイルを、<code>-f</code>オプションでクラッシュしたプログラムを指定します。</p>
+<p><code>core.&lt;PID&gt;</code>ファイルが生成されているのを確認したら、<code>gdb</code>を用いてクラッシュに至るバックトレースを確認します。</p>
+<p><code>gdb</code>の<code>-c</code>オプションでコアファイルを、<code>-f</code>オプションでクラッシュしたプログラムを指定します。</p>
 <pre><code># gdb -c /var/lib/pgdata/core.134680 -f /usr/pgsql-10/bin/postgres
 GNU gdb (GDB) Red Hat Enterprise Linux 7.6.1-100.el7_4.1
        :
@@ -475,6 +472,8 @@ The exception was triggered at PC 0x7ff4dc82f930 (cuda_gpujoin.h:1159)
 #1  0x00007ff4dc9428f0 in gpujoin_main&lt;&lt;&lt;(30,1,1),(256,1,1)&gt;&gt;&gt; (kgjoin=0x7fe9f4800078, kmrels=0x7fe9f8800000, kds_src=0x7fe9f0800030,
     kds_dst=0x7fe9e8800030, kparams_gpreagg=0x0) at /usr/pgsql-10/share/extension/cuda_gpujoin.h:1347
 </code></pre>
+
+<p>より詳細な<code>cuda-gdb</code>コマンドの利用法は<a href="http://docs.nvidia.com/cuda/cuda-gdb/">CUDA Toolkit Documentation - CUDA-GDB</a>を参照してください。</p>
               
             </div>
           </div>

@@ -139,7 +139,7 @@
             <div class="section">
               
                 <h1 id="pg-strom-v20">PG-Strom v2.0リリース</h1>
-<div style="text-align: right;">PG-Strom Development Team (xx-Apr-2018)</div>
+<div style="text-align: right;">PG-Strom Development Team (16-Apr-2018)</div>
 
 <h2 id="_1">概要</h2>
 <p>PG-Strom v2.0における主要な機能強化は以下の通りです。</p>
@@ -165,7 +165,7 @@
 <li>
 <p>GPUを管理する内部インフラストラクチャの全体的な再設計と安定化</p>
 <ul>
-<li>PostgreSQLバックエンドプロセスは同時に１個のGPUだけを利用するようになりました。マルチGPUを利用する場合はPostgreSQLのCPU並列との併用が前提になりますが、CPUスレッドがGPUへデータを供給するスループットはGPUの処理能力よりもずっと低いため、通常、これは問題とはなりません。設計のシンプル化を優先しました。</li>
+<li>PostgreSQLバックエンドプロセスは同時に１個のGPUだけを利用するようになりました。マルチGPUを利用する場合はPostgreSQLのCPU並列との併用が前提になりますが、CPUスレッドがGPUへデータを供給するスループットはGPUの処理能力よりもずっと低いため、通常、これは問題とはなりません。ソフトウェア設計のシンプル化を優先しました。</li>
 <li>Pascal世代以降のGPUで採用されたGPUデバイスメモリのデマンドページングをほぼ全面的に採用するようになりました。SQLワークロードの多くは実際に実行してみるまで必要な結果バッファの大きさが分からないため、これまでは必要以上にバッファを獲得し、またメモリ不足時には再実行を行っていましたが、これらは同時実行プロセスの利用可能なリソースを制限し、また複雑な例外ロジックはバグの温床でした。GPUデバイスメモリのデマンドページングを利用する事で、設計のシンプル化を行いました。</li>
 <li>CUDAの非同期インターフェースの利用を止めました。GPUデバイスメモリのデマンドページングを利用すると、DMA転送のための非同期API（<code>cuMemCpyHtoD</code>など）は同期的に振舞うようになるため、GPUカーネルの多重度が低下してしまいます。代わりにPG-Strom自身がワーカースレッドを管理し、これらのワーカースレッドがそれぞれ同期APIを呼び出すよう設計変更を行いました。副産物として、非同期コールバック（<code>cuStreamAddCallback</code>）を利用する必要がなくなったので、MPSを利用する事が可能となりました。</li>
 </ul>
@@ -181,8 +181,7 @@
 <li>
 <p>SSD-to-GPUダイレクトSQL実行</p>
 <ul>
-<li>Linuxカーネルモジュール <code>nvme_strom</code> を用いる事で、NVMe規格に対応したSSD上のPostgreSQLデータブロックを、CPUを介さずダイレクトにGPUデバイスメモリへ転送する事が可能となりました。</li>
-<li>本機能を用いる事で、システムRAMに載り切らない大きさのデータを処理する場合であっても、GPUへ安定的に高スループットでデータを供給する事が可能になりました。</li>
+<li>Linuxカーネルモジュール <code>nvme_strom</code> を用いる事で、NVMe規格に対応したSSD上のPostgreSQLデータブロックを、CPU/RAMを介さずダイレクトにGPUデバイスメモリへ転送する事が可能となりました。システムRAMに載り切らない大きさのデータを処理する場合であっても、本機能によりPG-Stromの適用が現実的な選択肢となる事でしょう。</li>
 <li>ブロックデバイス層やファイルシステムを経由しないためハードウェア限界に近い高スループットを引き出す事が可能で、かつ、GPUでSQLワークロードを処理するためCPUの処理すべきデータ量を減らす事ができます。このような特性の組み合わせにより、一般的には計算ワークロードのアクセラレータとして認識されているGPUを、I/Oワークロードの高速化に適用する事に成功しました。</li>
 </ul>
 </li>
@@ -200,20 +199,19 @@
 <li>GPU上に確保したデバイスメモリ領域に対して、外部テーブル（Foreign Table）のインターフェースを利用してSQLのSELECT/INSERT/UPDATE/DELETEにより読み書きを行う機能です。</li>
 <li>内部データ形式は <code>pgstrom</code> 型のみがサポートされています。これは、PG-Stromのバッファ形式<code>KDS_FORMAT_COLUMN</code>タイプと同一の形式でデータを保持するものです。可変長データを保存する場合、LZ方式によるデータ圧縮を行う事も可能です。</li>
 <li>v2.0の時点では、GPUメモリストアはPL/CUDA関数のデータソースとしてだけ利用する事が可能です。</li>
-<li><code>lo_import_gpu</code>および<code>lo_export_gpu</code>関数により、外部アプリケーションの確保したGPUメモリの内容を直接PostgreSQLのラージオブジェクトに記録したり、逆にラージオブジェクトの内容をGPUメモリに書き出す事が可能です。</li>
 </ul>
 </li>
 <li>
 <p>GpuJoinとGpuPreAggの再設計に伴う高速化</p>
 <ul>
-<li>従来、GpuJoinとGpuPreAggで内部的に使用していたDynamic Parallelismの利用をやめ、処理ロジック全体の見直しを行いました。これは、GPUカーネルがサブカーネルを起動後、その完了を待っている間もGPUカーネルの実行スロットを占有してしまっているため、GPUの使用率が上がらないという問題があったためです。</li>
+<li>従来、GpuJoinとGpuPreAggで内部的に使用していたDynamic Parallelismの利用をやめ、処理ロジック全体の見直しを行いました。これは、GPUサブカーネルの起動後、その完了を単に待っているだけのGPUカーネルが実行スロットを占有し、GPUの使用率が上がらないという問題があったためです。</li>
 <li>この再設計に伴う副産物として、GpuJoinのサスペンド/レジューム機能が実装されました。原理上、SQLのJOIN処理は入力した行数よりも出力する行数の方が増えてしまう事がありますが、処理結果を書き込むバッファの残りサイズが不足した時点でGpuJoinをサスペンドし、新しい結果バッファを割り当ててレジュームするように修正されました。これにより、結果バッファのサイズ推定が簡略化されたほか、実行時のバッファ不足による再実行の必要がなくなりました。</li>
 </ul>
 </li>
 <li>
 <p>GpuPreAgg+GpuJoin+GpuScan 密結合GPUカーネル</p>
 <ul>
-<li>GPUで実行可能なSCAN、JOIN、GROUP BYが連続しているとき、対応するGpuScan、GpuJoin、GpuPreAggを一回のGPUカーネル呼び出しで実行する事が可能になりました。これは、GpuJoinの結果バッファをそのままGpuPreAggの入力バッファとして扱うなど、CPUとGPUの間のデータ交換を最小限に抑えるためのアプローチです。</li>
+<li>GPUで実行可能なSCAN、JOIN、GROUP BYが連続しているとき、対応するGpuScan、GpuJoin、GpuPreAggに相当する処理を一回のGPUカーネル呼び出しで実行する事が可能になりました。これは、GpuJoinの結果バッファをそのままGpuPreAggの入力バッファとして扱うなど、CPUとGPUの間のデータ交換を最小限に抑えるためのアプローチです。</li>
 <li>この機能は特に、SSD-to-GPUダイレクトSQL実行と組み合わせて使用すると効果的です。</li>
 </ul>
 </li>
@@ -233,10 +231,31 @@
 </ul>
 </li>
 <li>
+<p>New data type support</p>
+<ul>
+<li><code>uuid</code> type</li>
+<li>Network address types (<code>inet</code>, <code>cidr</code> and <code>macaddr</code>)</li>
+<li>Range data types (<code>int4range</code>, <code>int8range</code>, <code>tsrange</code>, <code>tstzrange</code>, <code>daterange</code>)</li>
+<li>Half-precision floating point type (<code>float2</code>). Its CPU side are also implemented by PG-Strom itself, not PostgreSQL's built-in feature.</li>
+</ul>
+</li>
+<li>
+<p>New operators / functions</p>
+<ul>
+<li><code>EXTRACT(field FROM timestamp)</code> operator on the date and time types</li>
+</ul>
+</li>
+<li>
 <p>PL/CUDA関連の強化</p>
 <ul>
 <li><code>#plcuda_include</code>の拡張により、<code>text</code>型を返すSQL関数を指定できるようになりました。引数の値によって挿入するコードを変える事ができるため、単に外部定義関数を読み込むだけでなく、動的にいくつものGPUカーネルのバリエーションを作り出すことも可能です。</li>
 <li>PL/CUDA関数の引数に<code>reggstore</code>型を指定した場合、GPUカーネル関数へは対応するGPUメモリストアのポインタが渡されます。OID値が渡されるわけではない事に留意してください。</li>
+</ul>
+</li>
+<li>
+<p>その他の機能強化</p>
+<ul>
+<li><code>lo_import_gpu</code>および<code>lo_export_gpu</code>関数により、外部アプリケーションの確保したGPUメモリの内容を直接PostgreSQLのラージオブジェクトに記録したり、逆にラージオブジェクトの内容をGPUメモリに書き出す事が可能です。</li>
 </ul>
 </li>
 <li>

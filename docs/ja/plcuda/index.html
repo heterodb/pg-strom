@@ -78,15 +78,19 @@
     <a class="current" href="./">PL/CUDA</a>
     <ul class="subnav">
             
-    <li class="toctree-l2"><a href="#plcuda">PL/CUDA</a></li>
+    <li class="toctree-l2"><a href="#plcuda">PL/CUDA概要</a></li>
+    
+
+    <li class="toctree-l2"><a href="#plcuda_1">PL/CUDAの構造</a></li>
+    
+
+    <li class="toctree-l2"><a href="#plcuda_2">PL/CUDAリファレンス</a></li>
     
         <ul>
         
-            <li><a class="toctree-l3" href="#plcuda_1">PL/CUDA概要</a></li>
+            <li><a class="toctree-l3" href="#plcuda_3">PL/CUDAディレクティブ</a></li>
         
-            <li><a class="toctree-l3" href="#plcuda_2">PL/CUDAの構造</a></li>
-        
-            <li><a class="toctree-l3" href="#plcuda_3">PL/CUDAリファレンス</a></li>
+            <li><a class="toctree-l3" href="#plcuda_4">PL/CUDA 関連関数</a></li>
         
         </ul>
     
@@ -136,15 +140,14 @@
           <div role="main">
             <div class="section">
               
-                <h1 id="plcuda">PL/CUDA</h1>
-<p>本章では、PL/CUDA言語を用いて、GPUで実行可能なネイティブプログラムをSQL関数として実装する方法について説明します。</p>
-<h2 id="plcuda_1">PL/CUDA概要</h2>
+                <p>本章では、PL/CUDA言語を用いて、GPUで実行可能なネイティブプログラムをSQL関数として実装する方法について説明します。</p>
+<h1 id="plcuda">PL/CUDA概要</h1>
 <p>内部的に、PG-StromはSQL構文を元にCUDA言語によるGPUプログラムを生成し、これを実行時コンパイルによってGPU用命令バイナリを生成します。 CUDAとはNVIDIA社の提供するプログラミング環境で、C言語に似た構文を用いてGPUで並列実行可能なプログラムを記述する事ができます。 SQL構文からCUDAプログラムへの変換プロセスは内部的なもので、ユーザの視点からは、どのようなGPU用プラグラムが生成、実行されるのかを意識する必要はありません。</p>
 <p>一方、PostgreSQLでは<code>CREATE LANGUAGE</code>構文を用いてSQL関数の記述に用いるプログラミング言語を追加する事ができます。 PL/CUDAとは<code>CREATE LANGUAGE</code>構文に対応した言語ハンドラで、SQLを元にPG-Stromが自動生成するGPUプログラムだけでなく、ユーザが実装した任意のGPUプログラムをSQL関数として実行する事が可能となります。</p>
 <p>SQL関数の引数には、数値型や文字列型、行列型など、PG-Stromのサポートするデータ型を使用する事ができますが、これらはPL/CUDA実行系が自動的にGPU側へデータを転送するため、データベースとGPU間のデータロードについて意識する必要はありません。また同様に、PL/CUDA関数の戻り値（可変長データ型である場合を含む）もGPU側からCPU側へと書き戻され、SQL関数の戻り値として整形されます。</p>
 <p>また、PL/CUDA関数の引数としてgstore_fdwを用いて定義した外部表を使用する事ができます。この場合、データは既にGPUにロード済みであるためPL/CUDA関数呼び出しのたびにデータロードを行う必要はなく、またPostgreSQL可変長データの長さ制限である1GBよりも大きなデータを使用する事ができます。</p>
 <p>これらの特徴により、ユーザはGPUやデータベースとの間のデータの入出力といった定型的な処理に煩わされる事なく、統計解析ロジックの実装や高速化といった生産的な作業に注力する事ができます。</p>
-<p>ここに絵</p>
+<p><img alt="PL/CUDA Overview" src="../img/plcuda-overview.png" /></p>
 <p><code>CREATE FUNCTION</code>構文を用いてPL/CUDA関数を定義すると、この関数の実行時、関数の定義部をそのままGPUのカーネル関数に埋め込んだCUDAプログラムを作成します。 このカーネル関数は、ユーザ定義処理の他に、PL/CUDA関数の引数を参照するための変数の初期化や、実行時エラーをCPU側へ返却するための補助的なコードを含んでいます。また、PG-Stromの実行をサポートするための各種ランタイム関数をインクルードする事もできます。</p>
 <p>PL/CUDA関数を用いて作成したネイティブのCUDAプログラムには、特別なメモリ保護などの仕組みはなく、バグのあるPL/CUDA関数の実行により、GPU実行環境や場合によってはPostgreSQL側をクラッシュさせる事も可能です。したがって、PL/CUDA関数の定義はデータベース特権ユーザに限定されています。</p>
 <p>以下に単純なPL/CUDA関数の例を示します。 この関数は、<code>int</code>型の引数を二つ取り、その和を<code>int</code>型で返却します。</p>
@@ -296,7 +299,7 @@ CREATE FUNCTION
 (1 row)
 </code></pre>
 
-<h2 id="plcuda_2">PL/CUDAの構造</h2>
+<h1 id="plcuda_1">PL/CUDAの構造</h1>
 <p>PL/CUDAの関数定義は、<code>#plcuda_...</code>で始まるディレクティブによって分割されたいくつかのコードブロックから構成されます。 このうち、<code>#plcuda_begin</code>より始まるコードブロックのみが必須で、必要に応じてその他のコードブロックを追加する事ができます。</p>
 <pre><code>#plcuda_decl
   [...any declarations...]
@@ -330,10 +333,10 @@ CREATE FUNCTION
 #plcuda_kernel_maxthreads
 </code></pre>
 
-<h2 id="plcuda_3">PL/CUDAリファレンス</h2>
-<h3 id="plcuda_4">PL/CUDAディレクティブ</h3>
+<h1 id="plcuda_2">PL/CUDAリファレンス</h1>
 <p>本節はPL/CUDA関数のディレクティブ、および関連するSQL関数のリファレンスです。</p>
-<h4 id="plcuda_begin"><code>#plcuda_begin</code></h4>
+<h2 id="plcuda_3">PL/CUDAディレクティブ</h2>
+<h3 id="plcuda_begin"><code>#plcuda_begin</code></h3>
 <p>本体カーネル関数のコードブロックの開始を宣言します。このディレクティブは必須です。 GPU上でのコードブロックの実行開始に先立って、PL/CUDA関数の引数は<code>arg1</code>、<code>arg2</code>、...という変数名で参照可能となるよう初期化されます。 これらの変数は、PG-StromがSQLデータ型をGPU上で表現するのと同じ表現を持っており、例えば、単精度浮動小数点である<code>real</code>型の引数は、以下のように定義された<code>pg_float4_t</code>型の変数として表現されています。</p>
 <pre><code>typedef struct {
     cl_float    value;
@@ -342,35 +345,35 @@ CREATE FUNCTION
 </code></pre>
 
 <p>これらの変数は各スレッドのプライベート領域に確保されており、変数を更新したとしても次ステップのカーネル関数には反映されません。カーネル関数の終了後、次のカーネル関数に状態を引き継ぐには、<code>void *workbuf</code>ポインタが参照する作業バッファか、<code>void *results</code>ポインタの参照する結果バッファに値を格納する必要があります。</p>
-<h4 id="plcuda_end"><code>#plcuda_end</code></h4>
+<h3 id="plcuda_end"><code>#plcuda_end</code></h3>
 <p>コードブロックの終了を宣言します。 なお、あるコードブロックの内側で他のコードブロックの開始を宣言した場合、現在のコードブロックは暗黙のうちに<code>#plcuda_end</code>ディレクティブによって終了したものとして扱われます。</p>
-<h4 id="plcuda_decl"><code>#plcuda_decl</code></h4>
+<h3 id="plcuda_decl"><code>#plcuda_decl</code></h3>
 <p>このディレクティブの使用は任意です。 全てのkernel関数の定義に先立って宣言しておくべきコードブロックの開始を宣言します。 他のコードブロックとは異なり、内容が自動的にkernel関数として展開される事はありませんので、完全な関数定義を記述する必要があります。</p>
-<h4 id="plcuda_prep"><code>#plcuda_prep</code></h4>
+<h3 id="plcuda_prep"><code>#plcuda_prep</code></h3>
 <p>このディレクティブの使用は任意です。<code>#plcuda_begin</code>から始まる本体カーネル関数の実行に先立ってGPUで実行すべき、前処理カーネル関数の処理を記述します。 ここでは、結果バッファや作業バッファの初期化を行う事を意図しており、前処理カーネル関数の実行が完了するまでは本体カーネル関数は実行されません。 PL/CUDA関数の引数へは、本体カーネル関数と同様にアクセスする事ができます。</p>
-<h4 id="plcuda_post"><code>#plcuda_post</code></h4>
+<h3 id="plcuda_post"><code>#plcuda_post</code></h3>
 <p>このディレクティブの使用は任意です。<code>#plcuda_begin</code>から始まる本体カーネル関数の実行後にGPUで実行すべき、後処理カーネル関数の処理を記述します。 ここでは、CPU側に返却する最終結果を結果バッファにセットする事を意図しており、本体カーネル関数の実行が完了するまでは後処理カーネル関数は実行されません。 PL/CUDA関数の引数へは、本体カーネル関数と同様にアクセスする事ができます。</p>
-<h4 id="plcuda_num_threads-valuefunction"><code>#plcuda_num_threads (&lt;value&gt;|&lt;function&gt;)</code></h4>
+<h3 id="plcuda_num_threads-valuefunction"><code>#plcuda_num_threads (&lt;value&gt;|&lt;function&gt;)</code></h3>
 <p>このディレクティブの使用は任意です。未指定の場合、デフォルト値として定数<code>1</code>が使われます。</p>
 <p>このディレクティブが#plcuda_prep、#plcuda_begin、および#plcuda_postコードブロックの内側で指定されると、それぞれのGPUカーネル関数を起動する際のスレッド数を指定する事ができます。</p>
 <p>数値が指定されると、PL/CUDAランタイムは指定された数のGPUスレッドを起動してGPUカーネル関数を実行します。 関数名が指定されると、PL/CUDAランタイムは指定されたSQL関数を呼び出し、戻り値で指定された数のGPUスレッドを起動します。このSQL関数は、PL/CUDA関数と同一の引数を取り、bigint型を返す必要があります。</p>
-<h4 id="plcuda_shmem_unitsz-valuefunction"><code>#plcuda_shmem_unitsz (&lt;value&gt;|&lt;function&gt;)</code></h4>
+<h3 id="plcuda_shmem_unitsz-valuefunction"><code>#plcuda_shmem_unitsz (&lt;value&gt;|&lt;function&gt;)</code></h3>
 <p>このディレクティブの使用は任意です。未指定の場合のデフォルト値は定数<code>0</code>です</p>
 <p>このディレクティブが<code>#plcuda_prep</code>、<code>#plcuda_begin</code>、および<code>#plcuda_post</code>コードブロックの内側で指定されると、それぞれのGPUカーネル関数を起動する際に動的に確保するスレッドあたり共有メモリのサイズを指定する事ができます。</p>
 <p>数値が指定されると、PL/CUDAランタイムは指定された大きさのスレッドあたり共有メモリを確保してGPUカーネル関数を実行します。</p>
 <p>関数名が指定されると、PL/CUDAランタイムは指定されたSQL関数を呼び出し、戻り値で指定された大きさのスレッドあたり共有メモリを確保してGPUカーネル関数を実行します。このSQL関数は、PL/CUDA関数と同一の引数を取り、<code>bigint</code>型を返す必要があります。</p>
 <p>GPUカーネル関数の実行時に実際に確保される共有メモリのサイズは、本ディレクティブによって指定したスレッドあたり共有メモリのサイズだけでなく、実行ユニットあたりのスレッド数に依存する事に留意してください。（また、実行ユニットあたりのスレッド数は#plcuda_num_threadsで指定した値とも異なる概念である事に留意してください。） 例えば、スレッドあたり共有メモリのサイズが8バイトであり、実行ユニットあたりのスレッド数が384である場合、実行ユニット毎に3KBの共有メモリが確保されます。この時、#plcuda_num_threadsで指定したスレッド数が32768であれば、このGPUカーネルは86個の実行ユニットを使用して実行されますが、実行ユニットにタスクが投入されるタイミングを決めるのはスケジューラの役割ですので、必ずしも3KB x 86個 = 258KBの共有メモリが一度に消費されるわけではありません。</p>
-<h4 id="plcuda_shmem_blocksz-valuefunction"><code>#plcuda_shmem_blocksz (&lt;value&gt;|&lt;function&gt;)</code></h4>
+<h3 id="plcuda_shmem_blocksz-valuefunction"><code>#plcuda_shmem_blocksz (&lt;value&gt;|&lt;function&gt;)</code></h3>
 <p>このディレクティブの使用は任意です。未指定の場合のデフォルト値は定数0です</p>
 <p>このディレクティブが<code>#plcuda_prep</code>、<code>#plcuda_begin</code>、および<code>#plcuda_post</code>コードブロックの内側で指定されると、それぞれのGPUカーネル関数を起動する際に動的に確保するブロックあたり共有メモリのサイズを指定する事ができます。</p>
 <p>数値が指定されると、PL/CUDAランタイムは指定された大きさのブロック毎共有メモリを確保してGPUカーネル関数を実行します。</p>
 <p>関数名が指定されると、PL/CUDAランタイムは指定されたSQL関数を呼び出し、戻り値で指定された大きさのブロックあたり共有メモリを確保してGPUカーネル関数を実行します。このSQL関数は、PL/CUDA関数と同一の引数を取り、<code>bigint</code>型を返す必要があります。</p>
-<h4 id="plcuda_kernel_blocksz-valuefunction"><code>#plcuda_kernel_blocksz (&lt;value&gt;|&lt;function&gt;)</code></h4>
+<h3 id="plcuda_kernel_blocksz-valuefunction"><code>#plcuda_kernel_blocksz (&lt;value&gt;|&lt;function&gt;)</code></h3>
 <p>このディレクティブの使用は任意です。</p>
 <p><code>#plcuda_prep</code>、<code>#plcuda_begin</code>、および<code>#plcuda_post</code>コードブロックの内側でこのディレクティブを指定すると、実行ユニットあたりのスレッド数を指定する事ができます。通常、この値はデバイスのWARP値の倍数であり1024以下です。 デフォルトでは、GPUカーネル関数のリソース消費量に基づいた最適な値が使用されます。したがって、アルゴリズムの性質上大きなブロックサイズが望ましいなどの理由がない限り、本ディレクティブを使用すべきではありません。</p>
 <p>数値が指定されると、PL/CUDAランタイムは指定された大きさのブロックを設定してGPUカーネル関数を実行します。 関数名が指定されると、PL/CUDAランタイムは指定されたSQL関数を呼び出し、戻り値で指定された大きさのブロックを設定してGPUカーネル関数を実行します。このSQL関数は、PL/CUDA関数と同一の引数を取り、bigint型を返す必要があります。</p>
 <p>ブロックあたりスレッド数が多くなると、より多くのスレッドが共有メモリを介して同期処理を行う事ができるようになる半面、スレッドが使用できるレジスタ数が減少するため、一部のローカル変数がグローバルメモリ上に確保されるなど性能面では不利になる事があります。</p>
-<h4 id="plcuda_include-library-namefunction-name"><code>#plcuda_include ("library name"|&lt;function name&gt;)</code></h4>
+<h3 id="plcuda_include-library-namefunction-name"><code>#plcuda_include ("library name"|&lt;function name&gt;)</code></h3>
 <p>PG-Stromの静的GPUライブラリ、またはユーザ定義のコードブロックをインクルードし、PL/CUDA関数内で使用できるようにします。サーバシステム上の任意のヘッダファイルをインクルーとして利用するための機能ではない事に留意してください。</p>
 <p>以下の表にあるPG-Stromの静的GPUライブラリ名を指定すると、PL/CUDAランタイムは生成されるCUDA Cプログラムの先頭に指定されたライブラリをインクルードします。正直なところ、この用法は古いものであり利用シーンは限られるでしょう。</p>
 <p>関数名が指定されると、PL/CUDAランタイムは指定されたSQL関数を呼び出し、<code>#plcuda_include</code>ディレクティブの存在した場所に、戻り値のテキストを挿入します。このSQL関数は、PL/CUDA関数と同一の引数を取り、<code>text</code>型を返す必要があります。</p>
@@ -416,24 +419,24 @@ CREATE FUNCTION
 </tr>
 </tbody>
 </table>
-<h4 id="plcuda_results_bufsz-valuefunction"><code>#plcuda_results_bufsz (&lt;value&gt;|&lt;function&gt;)</code></h4>
+<h3 id="plcuda_results_bufsz-valuefunction"><code>#plcuda_results_bufsz (&lt;value&gt;|&lt;function&gt;)</code></h3>
 <p>このディレクティブの使用は任意です。未指定の場合のデフォルト値は定数0です</p>
 <p>PL/CUDA関数の実行時に確保する結果バッファの大きさをバイト単位で指定します。PL/CUDA関数が可変長型データを返却する際には、結果バッファの確保は必須です。</p>
 <p>数値が指定されると、PL/CUDA言語ハンドラは指定されたバイト数のGPU RAMを結果バッファとして確保してからGPUカーネル関数を起動します。 関数名が指定されると、PL/CUDA言語ハンドラは指定されたSQL関数を呼び出し、戻り値で指定されたバイト数のGPU RAMを結果バッファとして確保し、GPUカーネル関数を起動します。このSQL関数は、PL/CUDA関数と同一の引数を取り、bigint型を返す必要があります。</p>
 <p>GPUカーネル関数からは、結果バッファは引数<code>void *results</code>で指定された領域としてアクセス可能です。 0バイトが指定された場合、<code>void *results</code>には<code>NULL</code>がセットされます。</p>
-<h4 id="plcuda_working_bufsz-valuefunction"><code>#plcuda_working_bufsz (&lt;value&gt;|&lt;function&gt;)</code></h4>
+<h3 id="plcuda_working_bufsz-valuefunction"><code>#plcuda_working_bufsz (&lt;value&gt;|&lt;function&gt;)</code></h3>
 <p>このディレクティブの使用は任意です。未指定の場合のデフォルト値は定数0です</p>
 <p>PL/CUDA関数の実行時に確保する作業バッファの大きさをバイト単位で指定します。</p>
 <p>数値が指定されると、PL/CUDA言語ハンドラは指定されたバイト数のGPU RAMを作業バッファとして確保してからGPUカーネル関数を起動します。 関数名が指定されると、PL/CUDA言語ハンドラは指定されたSQL関数を呼び出し、戻り値で指定されたバイト数のGPU RAMを作業バッファとして確保し、GPUカーネル関数を起動します。このSQL関数は、PL/CUDA関数と同一の引数を取り、<code>bigint</code>型を返す必要があります。</p>
 <p>GPUカーネル関数からは、作業バッファは引数<code>void *workbuf</code>で指定された領域としてアクセス可能です。 0バイトが指定された場合、<code>void *workbuf</code>には<code>NULL</code>がセットされます。</p>
-<h4 id="plcuda_sanity_checl-function"><code>#plcuda_sanity_checl &lt;function&gt;</code></h4>
+<h3 id="plcuda_sanity_checl-function"><code>#plcuda_sanity_checl &lt;function&gt;</code></h3>
 <p>GPUカーネルの起動に先立って、引数の妥当性を検証するためのSQL関数をしています。
 デフォルトでは妥当性検証関数は設定されていません。
 GPUデバイスの初期化などを行う必要があるため、通常、GPUカーネル関数の起動はCPU上で別の関数を起動するよりも重い処理です。もし引数がPL/CUDA関数の仕様からは許容できない値を持っている場合、GPUカーネル関数を実行する数千～数百万（場合によってはそれ以上の）のGPUスレッドは、ただ引数の妥当性をチェックしてエラー状態を返却するためだけに起動されます。GPUカーネル関数を実行する前に、引数の妥当性チェックを十分小さなコストで行えるならば、妥当性検証関数を使用してGPUカーネル関数の実行前にエラーを発生させることを考慮すべきです。 妥当性検証関数は、PL/CUDA関数と同じ型の引数を持ち、<code>bool</code>返す関数です。</p>
-<h4 id="plcuda_cpu_fallback-function"><code>#plcuda_cpu_fallback &lt;function&gt;</code></h4>
+<h3 id="plcuda_cpu_fallback-function"><code>#plcuda_cpu_fallback &lt;function&gt;</code></h3>
 <p>GPUカーネル関数と同等の処理を行うCPUフォールバック関数を指定します。 デフォルトではCPUフォールバック関数は設定されていません。</p>
 <p>GPUカーネル関数がStromError_CpuReCheckエラーを返却し、さらにCPUフォールバック関数が設定されていると、PL/CUDA言語ハンドラはGPUでの処理結果を破棄してCPUフォールバック関数を呼びだします。 これは、必ずしも全ての入力に対してGPUカーネル関数を実行可能でない（例えばデータサイズがGPU RAMに載りきらないなど）場合に、代替の救済策を実装するために有用です。ただし、CPUフォールバック関数はシングルスレッドで実行されるため、パフォーマンスが犠牲にならざるを得ない点には留意してください。</p>
-<h3 id="plcuda_5">PL/CUDA 関連関数</h3>
+<h2 id="plcuda_4">PL/CUDA 関連関数</h2>
 <table>
 <thead>
 <tr>

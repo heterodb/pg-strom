@@ -72,6 +72,8 @@
     
         <ul>
         
+            <li><a class="toctree-l3" href="#confirmation-of-gpu-off-loading">Confirmation of GPU off-loading</a></li>
+        
             <li><a class="toctree-l3" href="#cpugpu-hybrid-parallel">CPU+GPU Hybrid Parallel</a></li>
         
             <li><a class="toctree-l3" href="#pullup-underlying-plans">Pullup underlying plans</a></li>
@@ -157,6 +159,10 @@
             <div class="section">
               
                 <h1 id="basic-operations">Basic operations</h1>
+<h2 id="confirmation-of-gpu-off-loading">Confirmation of GPU off-loading</h2>
+<p>You can use <code>EXPLAIN</code> command to check whether query is executed on GPU device or not.
+A query is internally split into multiple elements and executed, and PG-Strom is capable to run SCAN, JOIN and GROUP BY in parallel on GPU device. If you can find out GpuScan, GpuJoin or GpuPreAgg was displayed instead of the standard operations by PostgreSQL, it means the query is partially executed on GPU device.</p>
+<p>Below is an example of <code>EXPLAIN</code> command output.</p>
 <pre><code>postgres=# EXPLAIN SELECT cat,count(*),avg(ax)
                      FROM t0 NATURAL JOIN t1 NATURAL JOIN t2
                     GROUP BY cat;
@@ -186,7 +192,20 @@
 (21 rows)
 </code></pre>
 
+<p>You can notice some unusual query execution plans.
+GpuJoin and GpuPreAgg are implemented on the CustomScan mechanism. In this example, GpuJoin runs JOIN operation on <code>t0</code>, <code>t1</code> and <code>t1</code>, then GpuPreAgg which receives the result of GpuJoin runs GROUP BY operation by the <code>cat</code> column on GPU device.</p>
+<p>PG-Strom interacts with the query optimizer during PostgreSQL is building a query execution plan, and it offers alternative query execution plan with estimated cost for PostgreSQL's optimizer, if any of SCAN, JOIN, or GROUP BY are executable on GPU device.
+This estimated cost is better than other query execution plans that run on CPU, it chooses the alternative execution plan that shall run on GPU device.</p>
+<p>For GPU execution, it requires operators, functions and data types in use must be supported by PG-Strom.
+It supports numeric types like <code>int</code> or <code>float</code>, date and time types like <code>date</code> or <code>timestamp</code>, variable length string like <code>text</code> and so on. It also supports arithmetic operations, comparison operators and many built-in operators.
+See <a href="../references/">References</a> for the detailed list.</p>
 <h2 id="cpugpu-hybrid-parallel">CPU+GPU Hybrid Parallel</h2>
+<p>PG-Strom also supports PostgreSQL's CPU parallel execution.</p>
+<p>In the CPU parallel execution mode, Gather node launches several background worker processes, then it gathers the result of "partial" execution by individual background workers.
+CustomScan execution plan provided by PG-Strom, like GpuJoin or GpuPreAgg, support execution at the background workers. They process their partial task using GPU individually. A CPU core usually needs much more time to set up buffer to supply data for GPU than execution of SQL workloads on GPU, so hybrid usage of CPU and GPU parallel can expect higher performance.
+On the other hands, each process creates CUDA context that is required to communicate GPU and consumes a certain amount of GPU resources, so higher parallelism on CPU-side is not always better.</p>
+<p>Look at the query execution plan below.
+Execution plan tree under the Gather is executable on background worker process. It scans <code>t0</code> table which has 100million rows using four background worker processes and the coordinator process, in other words, 20million rows are handled per process by GpuJoin and GpuPreAgg, then its results are merged at Gather node.</p>
 <pre><code># EXPLAIN SELECT cat,count(*),avg(ax)
             FROM t0 NATURAL JOIN t1
            GROUP by cat;
@@ -214,6 +233,17 @@
 </code></pre>
 
 <h2 id="pullup-underlying-plans">Pullup underlying plans</h2>
+<p>PG-Strom can run SCAN, JOIN and GROUP BY workloads on GPU, however, it does not work with best performance if these custom execution plan simply replace the standard operations at PostgreSQL.
+An example of problematic scenario is that SCAN once writes back its result data set to the host buffer then send the same data into GPU again to execute JOIN. Once again, JOIN results are written back and send to GPU to execute GROUP BY. It causes data ping-pong between CPU and GPU.</p>
+<p>To avoid such inefficient jobs, PG-Strom has a special mode which pulls up its sub-plan to execute a bunch of jobs in a single GPU kernel invocation. Combination of the operations blow can cause pull-up of sub-plans.</p>
+<ul>
+<li>SCAN + JOIN</li>
+<li>SCAN + GROUP BY</li>
+<li>SCAN + JOIN + GROUP BY</li>
+</ul>
+<p><img alt="combined gpu kernel" src="../img/combined-kernel-overview.png" /></p>
+<p>The execution plan example below never pulls up the sub-plans.</p>
+<p>GpuJoin receives the result of GpuScan, then its results are passed to GpuPreAgg to generate the final results.</p>
 <pre><code># EXPLAIN SELECT cat,count(*),avg(ax)
             FROM t0 NATURAL JOIN t1
            WHERE aid &lt; bid
@@ -241,7 +271,8 @@
 (18 rows)
 </code></pre>
 
-<p><img alt="combined gpu kernel" src="../img/combined-gpu-kernel.png" /></p>
+<p>This example causes data ping-pong between GPU and host buffers for each execution stage, so not efficient and less performance.</p>
+<p>On the other hands, the query execution plan below pulls up sub-plans.</p>
 <pre><code># EXPLAIN ANALYZE SELECT cat,count(*),avg(ax)
                     FROM t0 NATURAL JOIN t1
                    WHERE aid &lt; bid
@@ -278,26 +309,56 @@
 (21 rows)
 </code></pre>
 
+<p>You may notice that SCAN on the table <code>t0</code> is embedded into GpuJoin, and GpuScan gets vanished.
+It means GpuJoin pulls up the underlying GpuScan, then combined GPU kernel function is also responsible for evaluation of the supplied WHERE-clause.</p>
+<p>In addition, here is a strange output in <code>EXPLAIN ANALYZE</code> result - it displays <em>(never executed)</em> for GpuJoin.
+It means GpuJoin is never executed during the query execution, and it is right. GpuPreAgg pulls up the underlying GpuJoin, then its combined GPU kernel function runs JOIN and GROUP BY.</p>
+<p>The <code>pg_strom.pullup_outer_scan</code> parameter controls whether SCAN is pulled up, and the <code>pg_strom.pullup_outer_join</code> parameter also controls whether JOIN is pulled up.
+Both parameters are configured to <code>on</code>. Usually, no need to disable them, however, you can use the parameters to identify the problems on system troubles.</p>
 <h1 id="notes-for-system-administration">Notes for system administration</h1>
 <h2 id="knowledge-base">Knowledge base</h2>
 <p>We publish several articles, just called "notes", on the project wiki-site of PG-Strom.</p>
-<p>(https://github.com/heterodb/pg-strom/wiki)[https://github.com/heterodb/pg-strom/wiki]</p>
+<p><a href="https://github.com/heterodb/pg-strom/wiki">https://github.com/heterodb/pg-strom/wiki</a></p>
 <h2 id="usage-of-mps-daemon">Usage of MPS daemon</h2>
-<p>(https://docs.nvidia.com/deploy/mps/index.html)[https://docs.nvidia.com/deploy/mps/index.html]</p>
+<p>In case when multi-process application like PostgreSQL uses GPU device, it is a well known solution to use MPS (Multi-Process Service) to reduce context switch on GPU side and resource consumption for device management.</p>
+<p><a href="https://docs.nvidia.com/deploy/mps/index.html">https://docs.nvidia.com/deploy/mps/index.html</a></p>
+<p>However, here is a known issue; some APIs don't work correctly user the use case of PG-Strom due to the problem of MPS daemon. So, we don't recomment to use MPS daemon except for the situation below:</p>
+<ul>
+<li>Number of PostgreSQL processes which use GPU device (including the background workers launched by CPU parallel execution) is always less than 16. If Volta generation, it is less than 48.</li>
+<li>gstore_fdw shall not be used.</li>
+</ul>
+<p>This known problem is, when we share GPU device memory inter processes using <code>CUipcMemHandle</code>, a device memory region acquired by the process under MPS service cannot be opened by the process which does not use MPS. This problem prevents to share the inner hash-table of GpuJoin with background workers on CPU parallel execution.</p>
+<p>This problem is already reported to NVIDIA, then we got a consensu to fix it at the next version of CUDA Toolkit.</p>
 <h1 id="trouble-shooting">Trouble Shooting</h1>
 <h2 id="identify-the-problem">Identify the problem</h2>
+<p>In case when a particular workloads produce problems, it is the first step to identify which stuff may cause the problem.</p>
+<p>Unfortunately, much smaller number of developer supports the PG-Strom development community than PostgreSQL developer's community, thus, due to the standpoint of software quality and history, it is a reasonable estimation to suspect PG-Strom first.</p>
+<p>The <code>pg_strom.enabled</code> parameter allows to turn on/off all the functionality of PG-Strom at once.
+The configuration below disables PG-Strom, thus identically performs with the standard PostgreSQL.</p>
 <pre><code># SET pg_strom.enabled = off;
 </code></pre>
 
+<p>In addition, we provide parameters to disable particular execution plan like GpuScan, GpuJoin and GpuPreAgg.</p>
+<p>See <a href="../references/#gpu">references</a> for more details.</p>
 <h2 id="collecting-crash-dump">Collecting crash dump</h2>
 <p>Crash dump is very helpful for analysis of serious problems which lead system crash for example.
 This session introduces the way to collect crash dump of the PostgreSQL and PG-Strom process (CPU side) and PG-Strom's GPU kernel, and show the back trace on the serious problems.</p>
 <h3 id="add-configuration-on-postgresql-startup">Add configuration on PostgreSQL startup</h3>
+<p>For generation of crash dump (CPU-side) on process crash, you need to change the resource limitation of the operating system for size of core file  PostgreSQL server process can generate.</p>
+<p>For generation of crash dump (GPU-size) on errors of GPU kernel, PostgreSQL server process has <code>CUDA_ENABLE_COREDUMP_ON_EXCEPTION</code>environment variable, and its value has <code>1</code>.</p>
+<p>You can put a configuration file at <code>/etc/systemd/system/postgresql-&lt;version&gt;.service.d/</code> when PostgreSQL is kicked by systemd.</p>
+<p>In case of RPM installation, a configuration file <code>pg_strom.conf</code> is also installed on the directory, and contains the following initial configuration.</p>
 <pre><code>[Service]
+LimitNOFILE=65536
 LimitCORE=infinity
-Environment=CUDA_ENABLE_COREDUMP_ON_EXCEPTION=1
+#Environment=CUDA_ENABLE_COREDUMP_ON_EXCEPTION=1
 </code></pre>
 
+<p>In CUDA 9.1, it usually takes more than several minutes to generate crash dump of GPU kernel, and it entirely stops response of the PostgreSQL session which causes an error.
+So, we recommend to set <code>CUDA_ENABLE_COREDUMP_ON_EXCEPTION</code> environment variable only if you investigate errors of GPU kernels which happen on a certain query.
+The default configuration on RPM installation comments out the line of <code>CUDA_ENABLE_COREDUMP_ON_EXCEPTION</code> environment variable.</p>
+<p>PostgreSQL server process should have unlimited <em>Max core file size</em> configuration, after the next restart.</p>
+<p>You can check it as follows.</p>
 <pre><code># cat /proc/&lt;PID of postmaster&gt;/limits
 Limit                     Soft Limit           Hard Limit           Units
     :                         :                    :                  :
@@ -326,7 +387,11 @@ Installed:
 Complete!
 </code></pre>
 
-<h3 id="checking-the-backtrace-on-cpu">Checking the backtrace on CPU</h3>
+<h3 id="checking-the-back-trace-on-cpu-side">Checking the back-trace on CPU side</h3>
+<p>The kernel parameter <code>kernel.core_pattern</code> and <code>kernel.core_uses_pid</code> determine the path where crash dump is written out.
+It is usually created on the current working directory of the process, check <code>/var/lib/pgdata</code> where the database cluster is deployed, if you start PostgreSQL server using systemd.</p>
+<p>Once <code>core.&lt;PID&gt;</code> file gets generated, you can check its back-trace to reach system crash using <code>gdb</code>.</p>
+<p><code>gdb</code> speficies the core file by <code>-c</code> option, and the crashed program by <code>-f</code> option.</p>
 <pre><code># gdb -c /var/lib/pgdata/core.134680 -f /usr/pgsql-10/bin/postgres
 GNU gdb (GDB) Red Hat Enterprise Linux 7.6.1-100.el7_4.1
        :
@@ -356,12 +421,21 @@ GNU gdb (GDB) Red Hat Enterprise Linux 7.6.1-100.el7_4.1
 #13 0x000000000047bbef in main (argc=3, argv=0x2831280) at main.c:228
 </code></pre>
 
+<p><code>bt</code> command of <code>gdb</code> displays the backtrace.
+In this case, I sent <code>SIGSEGV</code> signal to the PostgreSQL backend which is waiting for queries from the client for intentional crash, the process got crashed at <code>__epoll_wait_nocancel</code> invoked by <code>WaitEventSetWait</code>.</p>
 <h3 id="checking-the-backtrace-on-gpu">Checking the backtrace on GPU</h3>
+<p>Crash dump of GPU kernel is generated on the current working directory of PostgreSQL server process, unless you don't specify the path using <code>CUDA_COREDUMP_FILE</code> environment variable explicitly.
+Check <code>/var/lib/pgdata</code> where the database cluster is deployed, if systemd started PostgreSQL. Dump file will have the following naming convension.</p>
 <p><code>core_&lt;timestamp&gt;_&lt;hostname&gt;_&lt;PID&gt;.nvcudmp</code></p>
+<p>Note that the dump-file of GPU kernel contains no debug information like symbol information in the default configuration.
+It is nearly impossible to investigate the problem, so enable inclusion of debug information for the GPU programs generated by PG-Strom, as follows.</p>
+<p>Also note than we don't recommend to turn on the configuration for daily usage, because it makes query execution performan slow down.
+Turn on only when you investigate the troubles.</p>
 <pre><code>nvme=# set pg_strom.debug_jit_compile_options = on;
 SET
 </code></pre>
 
+<p>You can check crash dump of the GPU kernel using <code>cuda-gdb</code> command.</p>
 <pre><code># /usr/local/cuda/bin/cuda-gdb
 NVIDIA (R) CUDA Debugger
 9.1 release
@@ -372,6 +446,7 @@ Type &quot;apropos word&quot; to search for commands related to &quot;word&quot;
 (cuda-gdb)
 </code></pre>
 
+<p>Run <code>cuda-gdb</code> command, then load the crash dump file above using <code>target</code> command on the prompt.</p>
 <pre><code>(cuda-gdb) target cudacore /var/lib/pgdata/core_1521131828_magro.heterodb.com_216238.nvcudmp
 Opening GPU coredump: /var/lib/pgdata/core_1521131828_magro.heterodb.com_216238.nvcudmp
 [New Thread 216240]
@@ -385,6 +460,7 @@ The exception was triggered at PC 0x7ff4dc82f930 (cuda_gpujoin.h:1159)
 1159            while (khitem &amp;&amp; khitem-&gt;hash != hash_value)
 </code></pre>
 
+<p>You can check backtrace where the error happened on GPU kernel using <code>bt</code> command.</p>
 <pre><code>(cuda-gdb) bt
 #0  0x00007ff4dc82f938 in _INTERNAL_8_pg_strom_0124cb94::gpujoin_exec_hashjoin (kcxt=0x7ff4f7fffbf8, kgjoin=0x7fe9f4800078,
     kmrels=0x7fe9f8800000, kds_src=0x7fe9f0800030, depth=3, rd_stack=0x7fe9f4806118, wr_stack=0x7fe9f480c118, l_state=0x7ff4f7fffc48,
@@ -392,6 +468,8 @@ The exception was triggered at PC 0x7ff4dc82f930 (cuda_gpujoin.h:1159)
 #1  0x00007ff4dc9428f0 in gpujoin_main&lt;&lt;&lt;(30,1,1),(256,1,1)&gt;&gt;&gt; (kgjoin=0x7fe9f4800078, kmrels=0x7fe9f8800000, kds_src=0x7fe9f0800030,
     kds_dst=0x7fe9e8800030, kparams_gpreagg=0x0) at /usr/pgsql-10/share/extension/cuda_gpujoin.h:1347
 </code></pre>
+
+<p>Please check <a href="http://docs.nvidia.com/cuda/cuda-gdb/">CUDA Toolkit Documentation - CUDA-GDB</a> for more detailed usage of <code>cuda-gdb</code> command.</p>
               
             </div>
           </div>
