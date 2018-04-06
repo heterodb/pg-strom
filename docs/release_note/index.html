@@ -166,7 +166,7 @@
 <p>Entire re-design and stabilization of the internal infrastructure to manage GPU device.</p>
 <ul>
 <li>PostgreSQL backend process simultaneously uses only one GPU at most. In case of multi-GPUs installation, it assumes combination use with CPU parallel execution of PostgreSQL. Usually, it is not a matter because throughput of CPU to provide data to GPU is much narrower than capability of GPU processors. We prioritized simpleness of the software architecture.</li>
-<li>We began to utilize the demand paging feature of GPU device memory supported at the GPU models since Pascal generation. In most of SQL workloads, we cannot know exact size of the required result buffer prior to its execution, therefore, we had allocated more buffer than estimated buffer length, and retried piece of the workloads if estimated buffer size is not sufficient actually. This design restricts GPU resources which can be potentially used for other concurrent processes, and complicated error-retry logic was a nightmare for software quality. The demand paging feature allows to eliminate and simplify these stuff.</li>
+<li>We began to utilize the demand paging feature of GPU device memory supported at the GPU models since Pascal generation. In most of SQL workloads, we cannot know exact size of the required result buffer prior to its execution, therefore, we had allocated more buffer than estimated buffer length, and retried piece of the workloads if estimated buffer size is not sufficient actually. This design restricts available resources of GPU which can be potentially used for other concurrent processes, and complicated error-retry logic was a nightmare for software quality. The demand paging feature allows to eliminate and simplify these stuffs.</li>
 <li>We stop to use CUDA asynchronous interface. Use of the demand paging feature on GPU device memory makes asynchronous APIs for DMA (like <code>cuMemCpyHtoD</code>) perform synchronously, then it reduces concurrency and usage ratio of GPU kernels. Instead of the CUDA asynchronous APIs, PG-Strom manages its own worker threads which call synchronous APIs for each. As a by-product, we also could eliminate asynchronous callbacks (<code>cuStreamAddCallback</code>), it allows to use MPS daemon which has a restriction at this API.</li>
 </ul>
 </li>
@@ -224,6 +224,9 @@
 </li>
 <li>
 <p>Other Enhancement</p>
+<ul>
+<li><code>lo_import_gpu</code> and <code>lo_export_gpu</code> functions allows to import contents of the GPU device memory acquired by external applications directly, or export 関数により、外部アプリケーションの確保したGPUメモリの内容を直接PostgreSQLのラージオブジェクトに記録したり、逆にラージオブジェクトの内容をGPUメモリに書き出す事が可能です。</li>
+</ul>
 </li>
 <li>
 <p>Packaging</p>
