@@ -1220,7 +1220,6 @@ gstore_fdw_alloc_pgstrom_buffer(Relation frel,
 		{
 			length += (MAXALIGN(sizeof(cl_uint) * nrooms) +
 					   MAXALIGN(cc_buf->extra_sz[j]));
-			elog(INFO, "att=%s %zu %zu", NameStr(attr->attname), MAXALIGN(sizeof(cl_uint) * nrooms), MAXALIGN(cc_buf->extra_sz[j]));
 		}
 		else
 		{
@@ -1229,7 +1228,6 @@ gstore_fdw_alloc_pgstrom_buffer(Relation frel,
 			length += MAXALIGN(unitsz * nrooms);
 			if (cc_buf->hasnull[j])
 				length += MAXALIGN(BITMAPLEN(nrooms));
-			elog(INFO, "att=%s %zu %zu", NameStr(attr->attname), MAXALIGN(unitsz * nrooms), MAXALIGN(BITMAPLEN(nrooms)));
 		}
 	}
 	/* 2. allocation */
@@ -1446,8 +1444,10 @@ gstoreXactCallback(XactEvent event, void *arg)
 			/* do nothing */
 			return;
 	}
-//	elog(INFO, "gstoreXactCallback xid=%u", GetCurrentTransactionIdIfAny());
-
+#if 0
+	elog(INFO, "gstoreXactCallback xid=%u (oldestXmin=%u)",
+		 GetCurrentTransactionIdIfAny(), oldestXmin);
+#endif
 	if (pg_atomic_read_u32(&gstore_head->has_warm_chunks) == 0)
 		return;
 
