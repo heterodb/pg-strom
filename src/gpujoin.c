@@ -528,7 +528,6 @@ static bool
 cost_gpujoin(PlannerInfo *root,
 			 GpuJoinPath *gpath,
 			 RelOptInfo *joinrel,
-			 List *final_tlist,
 			 Path *outer_path,
 			 Relids required_outer,
 			 int parallel_nworkers)
@@ -544,6 +543,7 @@ cost_gpujoin(PlannerInfo *root,
 	double		outer_ntuples;
 	double		kern_nloops = 1.0;
 	int			i, num_rels = gpath->num_rels;
+	bool		retval = false;
 
 	/*
 	 * Cost comes from the outer-path
@@ -604,8 +604,20 @@ cost_gpujoin(PlannerInfo *root,
 		 * least 3bit because row-/hash-item shall be always put on 64bit
 		 * aligned location.
 		 */
-		if (ichunk_size >= 0x600000UL)
+		if (ichunk_size >= 0x60000000UL)
+		{
+			if (client_min_messages <= DEBUG1)
+			{
+				StringInfoData buf;
+
+				initStringInfo(&buf);
+				__dump_gpujoin_path(&buf, root, scan_path);
+				elog(DEBUG1, "expected inner size (%zu) on %s is too large",
+					 ichunk_size, buf.data);
+				pfree(buf.data);
+			}
 			return false;
+		}
 
 		/* cost to load all the tuples from inner-path */
 		startup_cost += scan_path->total_cost;
@@ -696,12 +708,10 @@ cost_gpujoin(PlannerInfo *root,
 	 */
 	Assert(gpath->cpath.path.startup_cost >= 0.0 &&
 		   gpath->cpath.path.total_cost >= 0.0);
-	if (!add_path_precheck(gpath->cpath.path.parent,
-						   gpath->cpath.path.startup_cost,
-						   gpath->cpath.path.total_cost,
-						   NULL, required_outer))
-		return false;
-
+	retval = add_path_precheck(gpath->cpath.path.parent,
+							   gpath->cpath.path.startup_cost,
+							   gpath->cpath.path.total_cost,
+							   NULL, required_outer);
 	/* Dumps candidate GpuJoinPath for debugging */
 	if (client_min_messages <= DEBUG1)
 	{
@@ -723,13 +733,14 @@ cost_gpujoin(PlannerInfo *root,
 
 			__dump_gpujoin_path(&buf, root, inner_path);
 		}
-		elog(DEBUG1, "GpuJoin: %s Cost=%.2f..%.2f",
+		elog(DEBUG1, "GpuJoin: %s Cost=%.2f..%.2f%s",
 			 buf.data,
 			 gpath->cpath.path.startup_cost,
-			 gpath->cpath.path.total_cost);
+			 gpath->cpath.path.total_cost,
+			 !retval ? " rejected" : "");
 		pfree(buf.data);
 	}
-	return true;
+	return retval;
 }
 
 typedef struct
@@ -746,7 +757,6 @@ create_gpujoin_path(PlannerInfo *root,
 					RelOptInfo *joinrel,
 					Path *outer_path,
 					List *inner_path_items_list,
-					List *final_tlist,
 					ParamPathInfo *param_info,
 					Relids required_outer,
 					bool try_parallel_path)
@@ -828,7 +838,6 @@ create_gpujoin_path(PlannerInfo *root,
 	if (cost_gpujoin(root,
 					 gjpath,
 					 joinrel,
-					 final_tlist,
 					 outer_path,
 					 required_outer,
 					 parallel_nworkers))
@@ -946,7 +955,6 @@ extract_gpuhashjoin_quals(PlannerInfo *root,
 static void
 try_add_gpujoin_paths(PlannerInfo *root,
 					  RelOptInfo *joinrel,
-					  List *final_tlist,
 					  Path *outer_path,
 					  Path *inner_path,
 					  JoinType join_type,
@@ -994,10 +1002,9 @@ try_add_gpujoin_paths(PlannerInfo *root,
 										   required_outer,
 										   &restrict_clauses);
 	/*
-	 * It makes no sense to run cross join on GPU devices without
-	 * GPU projection opportunity.
+	 * t makes no sense to run cross join on GPU devices
 	 */
-	if (!final_tlist && !restrict_clauses)
+	if (!restrict_clauses)
 		return;
 
 	/*
@@ -1037,7 +1044,6 @@ try_add_gpujoin_paths(PlannerInfo *root,
 													 joinrel,
 													 outer_path,
 													 ip_items_list,
-													 final_tlist,
 													 param_info,
 													 required_outer,
 													 try_parallel_path);
@@ -1126,7 +1132,6 @@ gpujoin_add_join_path(PlannerInfo *root,
 {
 	Path	   *outer_path;
 	Path	   *inner_path;
-	List	   *final_tlist = NIL;
 	ListCell   *lc1, *lc2;
 
 	/* calls secondary module if exists */
@@ -1143,28 +1148,6 @@ gpujoin_add_join_path(PlannerInfo *root,
 		return;
 
 	/*
-	 * Pay attention for the device projection cost if this joinrel may become
-	 * the root of plan tree, thus generates the final results.
-	 * The cost for projection shall be added at apply_projection_to_path()
-	 * later, so we decrement the estimated benefit by GpuProjection.
-	 */
-	if (bms_equal(root->all_baserels, joinrel->relids))
-	{
-		foreach (lc1, root->processed_tlist)
-		{
-			TargetEntry	   *tle = lfirst(lc1);
-
-			if (!IsA(tle->expr, Var) &&
-				!IsA(tle->expr, Const) &&
-				!IsA(tle->expr, Param) &&
-				pgstrom_device_expression(tle->expr))
-				break;
-		}
-		if (!lc1)
-			final_tlist = root->processed_tlist;
-	}
-
-	/*
 	 * make a traditional sequential path
 	 */
 	inner_path = gpujoin_find_cheapest_path(root, joinrel, innerrel, false);
@@ -1173,7 +1156,7 @@ gpujoin_add_join_path(PlannerInfo *root,
 	outer_path = gpujoin_find_cheapest_path(root, joinrel, outerrel, false);
 	if (!outer_path)
 		return;
-	try_add_gpujoin_paths(root, joinrel, final_tlist,
+	try_add_gpujoin_paths(root, joinrel,
 						  outer_path, inner_path,
 						  jointype, extra, false);
 
@@ -1198,7 +1181,7 @@ gpujoin_add_join_path(PlannerInfo *root,
 					outer_path->parallel_workers == 0 ||
 					bms_overlap(PATH_REQ_OUTER(outer_path), innerrel->relids))
 					continue;
-				try_add_gpujoin_paths(root, joinrel, final_tlist,
+				try_add_gpujoin_paths(root, joinrel,
 									  outer_path, inner_path,
 									  jointype, extra, true);
 			}
