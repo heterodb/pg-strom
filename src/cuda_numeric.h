@@ -513,6 +513,11 @@ pg_numeric_param(kern_context *kcxt,
 /* CRC32 calculation function */
 STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(numeric,cl_long)
 
+STATIC_INLINE(Datum)
+pg_numeric_as_datum(void *addr)
+{
+	return PointerGetDatum(addr);
+}
 /* to avoid conflicts with auto-generated data type */
 #define PG_NUMERIC_TYPE_DEFINED
 
