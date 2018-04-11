@@ -873,7 +873,10 @@ extern void pgstrom_devfunc_track(codegen_context *context,
 extern char *pgstrom_codegen_expression(Node *expr, codegen_context *context);
 extern void pgstrom_codegen_param_declarations(StringInfo buf,
 											   codegen_context *context);
-extern bool pgstrom_device_expression(Expr *expr);
+extern bool __pgstrom_device_expression(Expr *expr,
+										const char *filename, int lineno);
+#define pgstrom_device_expression(expr)		\
+	__pgstrom_device_expression((expr),__FILE__,__LINE__)
 extern void pgstrom_init_codegen_context(codegen_context *context);
 extern void pgstrom_init_codegen(void);
 

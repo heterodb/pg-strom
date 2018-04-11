@@ -2602,7 +2602,7 @@ pgstrom_codegen_param_declarations(StringInfo buf, codegen_context *context)
  * available to run on CUDA device, or not.
  */
 bool
-pgstrom_device_expression(Expr *expr)
+__pgstrom_device_expression(Expr *expr, const char *filename, int lineno)
 {
 	if (expr == NULL)
 		return true;
@@ -2612,7 +2612,7 @@ pgstrom_device_expression(Expr *expr)
 
 		foreach (cell, (List *) expr)
 		{
-			if (!pgstrom_device_expression(lfirst(cell)))
+			if (!__pgstrom_device_expression(lfirst(cell),filename,lineno))
 				return false;
 		}
 		return true;
@@ -2670,7 +2670,8 @@ pgstrom_device_expression(Expr *expr)
 									func->args,
 									func->inputcollid))
 			goto unable_node;
-		return pgstrom_device_expression((Expr *) func->args);
+		return __pgstrom_device_expression((Expr *) func->args,
+										   filename, lineno);
 	}
 	else if (IsA(expr, OpExpr) || IsA(expr, DistinctExpr))
 	{
@@ -2681,7 +2682,8 @@ pgstrom_device_expression(Expr *expr)
 									op->args,
 									op->inputcollid))
 			goto unable_node;
-		return pgstrom_device_expression((Expr *) op->args);
+		return __pgstrom_device_expression((Expr *) op->args,
+										   filename, lineno);
 	}
 	else if (IsA(expr, NullTest))
 	{
@@ -2690,13 +2692,15 @@ pgstrom_device_expression(Expr *expr)
 		if (nulltest->argisrow)
 			goto unable_node;
 
-		return pgstrom_device_expression((Expr *) nulltest->arg);
+		return __pgstrom_device_expression((Expr *) nulltest->arg,
+										   filename, lineno);
 	}
 	else if (IsA(expr, BooleanTest))
 	{
 		BooleanTest	   *booltest = (BooleanTest *) expr;
 
-		return pgstrom_device_expression((Expr *) booltest->arg);
+		return __pgstrom_device_expression((Expr *) booltest->arg,
+										   filename, lineno);
 	}
 	else if (IsA(expr, BoolExpr))
 	{
@@ -2705,7 +2709,8 @@ pgstrom_device_expression(Expr *expr)
 		Assert(boolexpr->boolop == AND_EXPR ||
 			   boolexpr->boolop == OR_EXPR ||
 			   boolexpr->boolop == NOT_EXPR);
-		return pgstrom_device_expression((Expr *) boolexpr->args);
+		return __pgstrom_device_expression((Expr *) boolexpr->args,
+										   filename, lineno);
 	}
 	else if (IsA(expr, CoalesceExpr))
 	{
@@ -2724,7 +2729,8 @@ pgstrom_device_expression(Expr *expr)
 			if (coalesce->coalescetype != exprType(expr))
 				goto unable_node;
 		}
-		return pgstrom_device_expression((Expr *) coalesce->args);
+		return __pgstrom_device_expression((Expr *) coalesce->args,
+										   filename, lineno);
 	}
 	else if (IsA(expr, MinMaxExpr))
 	{
@@ -2750,7 +2756,8 @@ pgstrom_device_expression(Expr *expr)
 			if (minmax->minmaxtype != exprType(expr))
 				goto unable_node;
 		}
-		return pgstrom_device_expression((Expr *) minmax->args);
+		return __pgstrom_device_expression((Expr *) minmax->args,
+										   filename, lineno);
 	}
 	else if (IsA(expr, RelabelType))
 	{
@@ -2761,7 +2768,8 @@ pgstrom_device_expression(Expr *expr)
 		if (!dtype)
 			goto unable_node;
 
-		return pgstrom_device_expression((Expr *) relabel->arg);
+		return __pgstrom_device_expression((Expr *) relabel->arg,
+										   filename, lineno);
 	}
 	else if (IsA(expr, CaseExpr))
 	{
@@ -2773,7 +2781,8 @@ pgstrom_device_expression(Expr *expr)
 
 		if (caseexpr->arg)
 		{
-			if (!pgstrom_device_expression(caseexpr->arg))
+			if (!__pgstrom_device_expression(caseexpr->arg,
+											 filename, lineno))
 				return false;
 		}
 
@@ -2785,12 +2794,15 @@ pgstrom_device_expression(Expr *expr)
 			if (exprType((Node *)casewhen->expr) != BOOLOID)
 				goto unable_node;
 
-			if (!pgstrom_device_expression(casewhen->expr))
+			if (!__pgstrom_device_expression(casewhen->expr,
+											 filename, lineno))
 				return false;
-			if (!pgstrom_device_expression(casewhen->result))
+			if (!__pgstrom_device_expression(casewhen->result,
+											 filename, lineno))
 				return false;
 		}
-		if (!pgstrom_device_expression((Expr *)caseexpr->defresult))
+		if (!__pgstrom_device_expression((Expr *)caseexpr->defresult,
+										 filename, lineno))
 			return false;
 		return true;
 	}
@@ -2830,13 +2842,15 @@ pgstrom_device_expression(Expr *expr)
 		if (!dtype || dtype->type_array)
 			goto unable_node;
 
-		if (!pgstrom_device_expression((Expr *) opexpr->args))
+		if (!__pgstrom_device_expression((Expr *) opexpr->args,
+										 filename, lineno))
 			return false;
 
 		return true;
 	}
 unable_node:
-	elog(DEBUG2, "Unable to run on device: %s", nodeToString(expr));
+	elog(DEBUG2, "Unable to run on device(%s:%d): %s",
+		 basename(filename), lineno, nodeToString(expr));
 	return false;
 }
 
