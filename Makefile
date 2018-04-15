@@ -3,6 +3,7 @@
 #
 PG_CONFIG := pg_config
 PSQL := $(shell dirname $(shell which $(PG_CONFIG)))/psql
+CREATEDB := $(shell dirname $(shell which $(PG_CONFIG)))/createdb
 MKDOCS := mkdocs
 
 ifndef STROM_BUILD_ROOT
@@ -119,17 +120,6 @@ SHLIB_LINK := -L $(LPATH) -lnvrtc -lcuda
 #LDFLAGS_SL := -Wl,-rpath,'$(LPATH)'
 
 #
-# Regression Test
-#
-USE_MODULE_DB = 1
-REGRESS = --schedule=$(STROM_BUILD_ROOT)/test/parallel_schedule
-REGRESS_DBNAME = contrib_regression_$(MODULE_big)
-REGRESS_REVISION = SELECT public.pgstrom_regression_test_revision()
-REGRESS_OPTS = --inputdir=$(STROM_BUILD_ROOT)/test --use-existing \
-               --launcher="env PGDATABASE=$(REGRESS_DBNAME)"
-REGRESS_PREP = init_regression_testdb
-
-#
 # Test support utilities
 #
 DBT3_DBGEN = $(addprefix $(STROM_BUILD_ROOT)/test/dbt3/, dbgen)
@@ -144,6 +134,18 @@ DBT3_DBGEN_FLAGS = -Wno-unused-variable -Wno-unused-but-set-variable \
 
 TESTAPP_LARGEOBJECT = $(STROM_BUILD_ROOT)/test/testapp_largeobject
 TESTAPP_LARGEOBJECT_SOURCE = $(addsuffix .cu,$(TESTAPP_LARGEOBJECT))
+
+#
+# Regression Test
+#
+USE_MODULE_DB = 1
+REGRESS = --schedule=$(STROM_BUILD_ROOT)/test/parallel_schedule
+REGRESS_DBNAME = contrib_regression_$(MODULE_big)
+REGRESS_REVISION = 20180124
+REGRESS_REVISION_QUERY = 'SELECT public.pgstrom_regression_test_revision()'
+REGRESS_OPTS = --inputdir=$(STROM_BUILD_ROOT)/test --use-existing \
+               --launcher="env PGDATABASE=$(REGRESS_DBNAME)"
+REGRESS_PREP = init_regression_testdb $(TESTAPP_LARGEOBJECT)
 
 #
 # Definition of PG-Strom Extension
@@ -249,6 +251,11 @@ $(TESTAPP_LARGEOBJECT): $(TESTAPP_LARGEOBJECT_SOURCE)
                 -Xcompiler \"-Wl,-rpath,$(shell $(PG_CONFIG) --pkglibdir)\"  \
                 -lpq -o $@ $^
 
-init_regression_testdb: $(STROM_BUILD_ROOT)/test/testapp_largeobject
-	$(STROM_BUILD_ROOT)/test/testdb_init.sh $(REGRESS_DBNAME) $(PSQL)
+init_regression_testdb: $(DBT3_DBGEN)
+	REV=`$(PSQL) $(REGRESS_DBNAME) -At -c $(REGRESS_REVISION_QUERY)`; \
+	if [ "$$REV" != "$(REGRESS_REVISION)" ]; then \
+	  $(CREATEDB) -l C $(REGRESS_DBNAME); \
+	  cd $(STROM_BUILD_ROOT)/test && \
+	  $(PSQL) $(REGRESS_DBNAME) -f testdb_init.sql; \
+	fi
 .PHONY: docs

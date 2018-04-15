@@ -31,9 +31,9 @@ SHOW pg_strom.enable_gpupreagg;
  on
 (1 row)
 
-SHOW pg_strom.enable_gpupreagg_with_numeric;
- pg_strom.enable_gpupreagg_with_numeric 
-----------------------------------------
+SHOW pg_strom.enable_numeric_type;
+ pg_strom.enable_numeric_type 
+------------------------------
  on
 (1 row)
 

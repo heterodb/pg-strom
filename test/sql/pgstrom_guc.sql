@@ -6,7 +6,7 @@ SHOW pg_strom.enable_gpuscan;
 SHOW pg_strom.enable_gpuhashjoin;
 SHOW pg_strom.enable_gpunestloop;
 SHOW pg_strom.enable_gpupreagg;
-SHOW pg_strom.enable_gpupreagg_with_numeric;
+SHOW pg_strom.enable_numeric_type;
 SHOW pg_strom.cpu_fallback;
 SHOW pg_strom.gpu_setup_cost;
 SHOW pg_strom.gpu_operator_cost;
