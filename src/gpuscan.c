@@ -1501,6 +1501,7 @@ build_device_projection(Index scanrelid,
 	 * tlist_old has smaller number of attributes than base relation's
 	 * definition.
 	 */
+	attnum--;
 	if (attnum != tupdesc->natts)
 		tlist_compatible = false;
 
