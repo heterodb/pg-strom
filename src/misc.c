@@ -352,6 +352,11 @@ Datum pgstrom_random_macaddr(PG_FUNCTION_ARGS);
 Datum pgstrom_random_inet(PG_FUNCTION_ARGS);
 Datum pgstrom_random_text(PG_FUNCTION_ARGS);
 Datum pgstrom_random_text_length(PG_FUNCTION_ARGS);
+Datum pgstrom_random_int4range(PG_FUNCTION_ARGS);
+Datum pgstrom_random_int8range(PG_FUNCTION_ARGS);
+Datum pgstrom_random_tsrange(PG_FUNCTION_ARGS);
+Datum pgstrom_random_tstzrange(PG_FUNCTION_ARGS);
+Datum pgstrom_random_daterange(PG_FUNCTION_ARGS);
 
 static inline bool
 generate_null(double ratio)
@@ -701,3 +706,217 @@ pgstrom_random_text_length(PG_FUNCTION_ARGS)
 	PG_RETURN_TEXT_P(temp);
 }
 PG_FUNCTION_INFO_V1(pgstrom_random_text_length);
+
+static Datum
+simple_make_range(TypeCacheEntry *typcache, Datum x_val, Datum y_val)
+{
+	RangeBound	x, y;
+	RangeType  *range;
+
+	memset(&x, 0, sizeof(RangeBound));
+	x.val = x_val;
+	x.infinite = generate_null(0.5);
+	x.inclusive = generate_null(25.0);
+
+	memset(&y, 0, sizeof(RangeBound));
+	y.val = y_val;
+	y.infinite = generate_null(0.5);
+	y.inclusive = generate_null(25.0);
+
+	if (x.infinite || y.infinite || x.val <= y.val)
+	{
+		x.lower = true;
+		range = make_range(typcache, &x, &y, false);
+	}
+	else
+	{
+		y.lower = true;
+		range = make_range(typcache, &y, &x, false);
+	}
+	return PointerGetDatum(range);
+}
+
+Datum
+pgstrom_random_int4range(PG_FUNCTION_ARGS)
+{
+	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
+	int32		lower = (!PG_ARGISNULL(1) ? PG_GETARG_INT32(1) : 0);
+	int32		upper = (!PG_ARGISNULL(2) ? PG_GETARG_INT32(2) : INT_MAX);
+	int32		x, y;
+	Oid			type_oid;
+	TypeCacheEntry *typcache;
+
+	if (generate_null(ratio))
+		PG_RETURN_NULL();
+	type_oid = GetSysCacheOid2(TYPENAMENSP,
+							   CStringGetDatum("int4range"),
+							   ObjectIdGetDatum(PG_CATALOG_NAMESPACE));
+	typcache = range_get_typcache(fcinfo, type_oid);
+	x = lower + random() % (upper - lower);
+	y = lower + random() % (upper - lower);
+	return simple_make_range(typcache,
+							 Int32GetDatum(x),
+							 Int32GetDatum(y));
+}
+PG_FUNCTION_INFO_V1(pgstrom_random_int4range);
+
+Datum
+pgstrom_random_int8range(PG_FUNCTION_ARGS)
+{
+	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
+	int64		lower = (!PG_ARGISNULL(1) ? PG_GETARG_INT64(1) : 0);
+	int64		upper = (!PG_ARGISNULL(2) ? PG_GETARG_INT64(2) : LONG_MAX);
+	TypeCacheEntry *typcache;
+	Oid			type_oid;
+	int64		x, y, v;
+
+	if (generate_null(ratio))
+		PG_RETURN_NULL();
+	type_oid = GetSysCacheOid2(TYPENAMENSP,
+							   CStringGetDatum("int8range"),
+							   ObjectIdGetDatum(PG_CATALOG_NAMESPACE));
+	typcache = range_get_typcache(fcinfo, type_oid);
+	v = ((int64)random() << 31) | (int64)random();
+	x = lower + v % (upper - lower);
+	v = ((int64)random() << 31) | (int64)random();
+	y = lower + v % (upper - lower);
+	return simple_make_range(typcache,
+							 Int64GetDatum(x),
+							 Int64GetDatum(y));
+}
+PG_FUNCTION_INFO_V1(pgstrom_random_int8range);
+
+Datum
+pgstrom_random_tsrange(PG_FUNCTION_ARGS)
+{
+	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
+	Timestamp	lower;
+	Timestamp	upper;
+	struct pg_tm tm;
+	TypeCacheEntry *typcache;
+	Oid			type_oid;
+	Timestamp	x, y;
+	cl_ulong	v;
+
+	if (generate_null(ratio))
+		PG_RETURN_NULL();
+	if (!PG_ARGISNULL(1))
+		lower = PG_GETARG_TIMESTAMP(1);
+	else
+	{
+		GetEpochTime(&tm);
+		tm.tm_year += 45;	/* '2015-01-01' */
+		if (tm2timestamp(&tm, 0, NULL, &lower) != 0)
+			elog(ERROR, "timestamp out of range");
+	}
+
+	if (!PG_ARGISNULL(2))
+		upper = PG_GETARG_TIMESTAMP(2);
+	else
+	{
+		GetEpochTime(&tm);
+		tm.tm_year += 55;	/* '2025-01-01' */
+		if (tm2timestamp(&tm, 0, NULL, &upper) != 0)
+			elog(ERROR, "timestamp out of range");
+	}
+	if (upper < lower)
+		elog(ERROR, "%s: lower bound is larger than upper", __FUNCTION__);
+
+	type_oid = GetSysCacheOid2(TYPENAMENSP,
+							   CStringGetDatum("tsrange"),
+							   ObjectIdGetDatum(PG_CATALOG_NAMESPACE));
+	typcache = range_get_typcache(fcinfo, type_oid);
+	v = ((cl_ulong)random() << 31) | random();
+	x = lower + v % (upper - lower);
+	v = ((cl_ulong)random() << 31) | random();
+	y = lower + v % (upper - lower);
+	return simple_make_range(typcache,
+							 TimestampGetDatum(x),
+							 TimestampGetDatum(y));	
+}
+PG_FUNCTION_INFO_V1(pgstrom_random_tsrange);
+
+Datum
+pgstrom_random_tstzrange(PG_FUNCTION_ARGS)
+{
+	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
+	Timestamp	lower;
+	Timestamp	upper;
+	struct pg_tm tm;
+	TypeCacheEntry *typcache;
+	Oid			type_oid;
+	Timestamp	x, y;
+	cl_ulong	v;
+
+	if (generate_null(ratio))
+		PG_RETURN_NULL();
+	if (!PG_ARGISNULL(1))
+		lower = PG_GETARG_TIMESTAMP(1);
+	else
+	{
+		GetEpochTime(&tm);
+		tm.tm_year += 45;	/* '2015-01-01' */
+		if (tm2timestamp(&tm, 0, NULL, &lower) != 0)
+			elog(ERROR, "timestamp out of range");
+	}
+
+	if (!PG_ARGISNULL(2))
+		upper = PG_GETARG_TIMESTAMP(2);
+	else
+	{
+		GetEpochTime(&tm);
+		tm.tm_year += 55;	/* '2025-01-01' */
+		if (tm2timestamp(&tm, 0, NULL, &upper) != 0)
+			elog(ERROR, "timestamp out of range");
+	}
+	if (upper < lower)
+		elog(ERROR, "%s: lower bound is larger than upper", __FUNCTION__);
+
+	type_oid = GetSysCacheOid2(TYPENAMENSP,
+							   CStringGetDatum("tstzrange"),
+							   ObjectIdGetDatum(PG_CATALOG_NAMESPACE));
+	typcache = range_get_typcache(fcinfo, type_oid);
+	v = ((cl_ulong)random() << 31) | random();
+	x = lower + v % (upper - lower);
+	v = ((cl_ulong)random() << 31) | random();
+	y = lower + v % (upper - lower);
+	return simple_make_range(typcache,
+							 TimestampTzGetDatum(x),
+							 TimestampTzGetDatum(y));	
+}
+PG_FUNCTION_INFO_V1(pgstrom_random_tstzrange);
+
+Datum
+pgstrom_random_daterange(PG_FUNCTION_ARGS)
+{
+	float8		ratio = (!PG_ARGISNULL(0) ? PG_GETARG_FLOAT8(0) : 0.0);
+	DateADT		lower;
+	DateADT		upper;
+	DateADT		x, y;
+	TypeCacheEntry *typcache;
+	Oid			type_oid;
+
+	if (generate_null(ratio))
+		PG_RETURN_NULL();
+	if (!PG_ARGISNULL(1))
+		lower = PG_GETARG_DATEADT(1);
+	else
+		lower = date2j(2015, 1, 1) - POSTGRES_EPOCH_JDATE;
+	if (!PG_ARGISNULL(2))
+		upper = PG_GETARG_DATEADT(2);
+	else
+		upper = date2j(2025, 12, 31) - POSTGRES_EPOCH_JDATE;
+	if (upper < lower)
+		elog(ERROR, "%s: lower bound is larger than upper", __FUNCTION__);
+
+	type_oid = GetSysCacheOid2(TYPENAMENSP,
+							   CStringGetDatum("daterange"),
+							   ObjectIdGetDatum(PG_CATALOG_NAMESPACE));
+	typcache = range_get_typcache(fcinfo, type_oid);
+	x = lower + random() % (upper - lower);
+	y = lower + random() % (upper - lower);
+	return simple_make_range(typcache,
+							 DateADTGetDatum(x),
+							 DateADTGetDatum(y));
+}
+PG_FUNCTION_INFO_V1(pgstrom_random_daterange);

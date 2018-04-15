@@ -67,3 +67,38 @@ CREATE FUNCTION pgstrom.random_text_len(float=0.0,
   RETURNS text
   AS 'MODULE_PATHNAME','pgstrom_random_text_length'
   LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE FUNCTION pgstrom.random_int4range(float=0.0,
+                                         int=null,
+                                         int=null)
+  RETURNS int4range
+  AS 'MODULE_PATHNAME','pgstrom_random_int4range'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE FUNCTION pgstrom.random_int8range(float=0.0,
+                                         bigint=null,
+                                         bigint=null)
+  RETURNS int8range
+  AS 'MODULE_PATHNAME','pgstrom_random_int8range'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE FUNCTION pgstrom.random_tsrange(float=0.0,
+                                       timestamp=null,
+                                       timestamp=null)
+  RETURNS tsrange
+  AS 'MODULE_PATHNAME','pgstrom_random_tsrange'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE FUNCTION pgstrom.random_tstzrange(float=0.0,
+                                         timestamptz=null,
+                                         timestamptz=null)
+  RETURNS tstzrange
+  AS 'MODULE_PATHNAME','pgstrom_random_tstzrange'
+  LANGUAGE C CALLED ON NULL INPUT;
+
+CREATE FUNCTION pgstrom.random_daterange(float=0.0,
+                                         date=null,
+                                         date=null)
+  RETURNS daterange
+  AS 'MODULE_PATHNAME','pgstrom_random_daterange'
+  LANGUAGE C CALLED ON NULL INPUT;
