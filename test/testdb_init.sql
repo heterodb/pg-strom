@@ -41,6 +41,20 @@ DROP TABLE IF EXISTS t_timestamp1;
 DROP TABLE IF EXISTS t_timestamp2;
 DROP TABLE IF EXISTS t_timestamptz1;
 DROP TABLE IF EXISTS t_timestamptz2;
+DROP TABLE IF EXISTS t_interval1;
+DROP TABLE IF EXISTS t_interval2;
+DROP TABLE IF EXISTS t_int4range1;
+DROP TABLE IF EXISTS t_int4range2;
+DROP TABLE IF EXISTS t_int8range1;
+DROP TABLE IF EXISTS t_int8range2;
+DROP TABLE IF EXISTS t_tsrange1;
+DROP TABLE IF EXISTS t_tsrange2;
+DROP TABLE IF EXISTS t_tstzrange1;
+DROP TABLE IF EXISTS t_tstzrange2;
+DROP TABLE IF EXISTS t_daterange1;
+DROP TABLE IF EXISTS t_daterange2;
+DROP TABLE IF EXISTS t_money1;
+DROP TABLE IF EXISTS t_money2;
 DROP TABLE IF EXISTS t_network1;
 DROP TABLE IF EXISTS t_network2;
 DROP TABLE IF EXISTS t_uuid1;
@@ -425,9 +439,58 @@ INSERT INTO t_timestamptz2 (SELECT x, random_timestamp(0.5),
                                       random_timestamp(0.5)
                               FROM generate_series(800001,1000000) X);
 /* interval types (not yet) */
+CREATE TABLE t_interval1 (id int primary key, dummy text,
+                          a interval, b interval, c interval);
+CREATE TABLE t_interval2 (id int primary key, dummy text,
+                          a interval, b interval);
+INSERT INTO t_interval1 (SELECT x, random_text_len(0.5, 20),
+                                random_timestamp(0.5) - random_timestamp(0.5),
+                                random_timestamp(0.5) - random_timestamp(0.5),
+                                random_timestamp(0.5) - random_timestamp(0.5)
+                           FROM generate_series(1,1000000) X);
+INSERT INTO t_interval2 (SELECT x, random_text_len(0.5, 20),
+                                random_timestamp(0.5) - random_timestamp(0.5),
+                                random_timestamp(0.5) - random_timestamp(0.5)
+                           FROM generate_series(1,800000) X);
+ALTER TABLE t_interval1 DROP COLUMN dummy;
+ALTER TABLE t_interval2 DROP COLUMN dummy;
+ALTER TABLE t_interval2 ADD COLUMN c interval;
+INSERT INTO t_interval2 (SELECT x, random_timestamp(0.5)-random_timestamp(0.5),
+                                   random_timestamp(0.5)-random_timestamp(0.5),
+                                   random_timestamp(0.5)-random_timestamp(0.5)
+                           FROM generate_series(800001,1000000) X);
 
-/* money (pay attention for locale) */
-
+/* money (pay attention for 'lc_monetary') */
+SET lc_monetary = 'C';
+CREATE TABLE t_money1 (id int primary key, dummy text,
+                       a money, b money, c money);
+CREATE TABLE t_money2 (id int primary key, dummy text,
+                       a money, b money);
+INSERT INTO t_money1 (SELECT x, random_text_len(0.5, 20),
+                             random_float(0.5, -9999999.99,
+                                                9999999.99)::numeric::money,
+                             random_float(0.5, -9999999.99,
+                                                9999999.99)::numeric::money,
+                             random_float(0.5, -9999999.99,
+                                                9999999.99)::numeric::money
+                        FROM generate_series(1,1000000) X);
+INSERT INTO t_money2 (SELECT x, random_text_len(0.5, 20),
+                             random_float(0.5, -9999999.99,
+                                                9999999.99)::numeric::money,
+                             random_float(0.5, -9999999.99,
+                                                9999999.99)::numeric::money
+                        FROM generate_series(1,800000) X);
+ALTER TABLE t_money1 DROP COLUMN dummy;
+ALTER TABLE t_money2 DROP COLUMN dummy;
+ALTER TABLE t_money2 ADD COLUMN c money;
+INSERT INTO t_money2 (SELECT x,
+                             random_float(0.5, -9999999.99,
+                                                9999999.99)::numeric::money,
+                             random_float(0.5, -9999999.99,
+                                                9999999.99)::numeric::money,
+                             random_float(0.5, -9999999.99,
+                                                9999999.99)::numeric::money
+                        FROM generate_series(800001,1000000) X);
 /* macaddr */
 CREATE TABLE t_network1 (id int primary key, dummy text,
                          a macaddr, b macaddr,
@@ -475,6 +538,101 @@ INSERT INTO t_uuid2 (SELECT row_number() over() + 700000, a, b
                       WHERE random() > 0.5
                       LIMIT 300000);
 
+/* int4range */
+CREATE TABLE t_int4range1 (id int primary key, dummy text,
+                           a int4range, b int4range);
+CREATE TABLE t_int4range2 (id int primary key, dummy text,
+                           a int4range);
+INSERT INTO t_int4range1 (SELECT x, random_text_len(0.5, 20),
+                                 random_int4range(0.5),
+                                 random_int4range(0.5)
+                            FROM generate_series(1,1000000) X);
+INSERT INTO t_int4range2 (SELECT x, random_text_len(0.5, 20),
+                                 random_int4range(0.5)
+                            FROM generate_series(1,800000) X);
+ALTER TABLE t_int4range1 DROP COLUMN dummy;
+ALTER TABLE t_int4range2 DROP COLUMN dummy;
+ALTER TABLE t_int4range2 ADD COLUMN b int4range;
+INSERT INTO t_int4range2 (SELECT x, random_int4range(0.5),
+                                    random_int4range(0.5)
+                            FROM generate_series(800001,1000000) X);
+
+/* int8range */
+CREATE TABLE t_int8range1 (id int primary key, dummy text,
+                           a int8range, b int8range);
+CREATE TABLE t_int8range2 (id int primary key, dummy text,
+                           a int8range);
+INSERT INTO t_int8range1 (SELECT x, random_text_len(0.5, 20),
+                                 random_int8range(0.5),
+                                 random_int8range(0.5)
+                            FROM generate_series(1,1000000) X);
+INSERT INTO t_int8range2 (SELECT x, random_text_len(0.5, 20),
+                                 random_int8range(0.5)
+                            FROM generate_series(1,800000) X);
+ALTER TABLE t_int8range1 DROP COLUMN dummy;
+ALTER TABLE t_int8range2 DROP COLUMN dummy;
+ALTER TABLE t_int8range2 ADD COLUMN b int8range;
+INSERT INTO t_int8range2 (SELECT x, random_int8range(0.5),
+                                    random_int8range(0.5)
+                            FROM generate_series(800001,1000000) X);
+
+/* tsrange */
+CREATE TABLE t_tsrange1 (id int primary key, dummy text,
+                         a tsrange, b tsrange);
+CREATE TABLE t_tsrange2 (id int primary key, dummy text,
+                         a tsrange);
+INSERT INTO t_tsrange1 (SELECT x, random_text_len(0.5, 20),
+                                 random_tsrange(0.5),
+                                 random_tsrange(0.5)
+                          FROM generate_series(1,1000000) X);
+INSERT INTO t_tsrange2 (SELECT x, random_text_len(0.5, 20),
+                                 random_tsrange(0.5)
+                          FROM generate_series(1,800000) X);
+ALTER TABLE t_tsrange1 DROP COLUMN dummy;
+ALTER TABLE t_tsrange2 DROP COLUMN dummy;
+ALTER TABLE t_tsrange2 ADD COLUMN b tsrange;
+INSERT INTO t_tsrange2 (SELECT x, random_tsrange(0.5),
+                                  random_tsrange(0.5)
+                          FROM generate_series(800001,1000000) X);
+
+/* tstzrange */
+CREATE TABLE t_tstzrange1 (id int primary key, dummy text,
+                           a tstzrange, b tstzrange);
+CREATE TABLE t_tstzrange2 (id int primary key, dummy text,
+                           a tstzrange);
+INSERT INTO t_tstzrange1 (SELECT x, random_text_len(0.5, 20),
+                                 random_tstzrange(0.5),
+                                 random_tstzrange(0.5)
+                            FROM generate_series(1,1000000) X);
+INSERT INTO t_tstzrange2 (SELECT x, random_text_len(0.5, 20),
+                                    random_tstzrange(0.5)
+                          FROM generate_series(1,800000) X);
+ALTER TABLE t_tstzrange1 DROP COLUMN dummy;
+ALTER TABLE t_tstzrange2 DROP COLUMN dummy;
+ALTER TABLE t_tstzrange2 ADD COLUMN b tstzrange;
+INSERT INTO t_tstzrange2 (SELECT x, random_tstzrange(0.5),
+                                    random_tstzrange(0.5)
+                            FROM generate_series(800001,1000000) X);
+
+/* daterange */
+CREATE TABLE t_daterange1 (id int primary key, dummy text,
+                           a daterange, b daterange);
+CREATE TABLE t_daterange2 (id int primary key, dummy text,
+                           a daterange);
+INSERT INTO t_daterange1 (SELECT x, random_text_len(0.5, 20),
+                                 random_daterange(0.5),
+                                 random_daterange(0.5)
+                            FROM generate_series(1,1000000) X);
+INSERT INTO t_daterange2 (SELECT x, random_text_len(0.5, 20),
+                                    random_daterange(0.5)
+                          FROM generate_series(1,800000) X);
+ALTER TABLE t_daterange1 DROP COLUMN dummy;
+ALTER TABLE t_daterange2 DROP COLUMN dummy;
+ALTER TABLE t_daterange2 ADD COLUMN b daterange;
+INSERT INTO t_daterange2 (SELECT x, random_daterange(0.5),
+                                    random_daterange(0.5)
+                            FROM generate_series(800001,1000000) X);
+
 -- Mark TestDB construction completed
 CREATE OR REPLACE FUNCTION
 public.pgstrom_regression_test_revision()
@@ -519,9 +677,21 @@ VACUUM ANALYZE t_timestamp1;
 VACUUM ANALYZE t_timestamp2;
 VACUUM ANALYZE t_timestamptz1;
 VACUUM ANALYZE t_timestamptz2;
+VACUUM ANALYZE t_interval1;
+VACUUM ANALYZE t_interval2;
+VACUUM ANALYZE t_money1;
+VACUUM ANALYZE t_money2;
 VACUUM ANALYZE t_network1;
 VACUUM ANALYZE t_network2;
 VACUUM ANALYZE t_uuid1;
 VACUUM ANALYZE t_uuid2;
-
-
+VACUUM ANALYZE t_int4range1;
+VACUUM ANALYZE t_int4range2;
+VACUUM ANALYZE t_int8range1;
+VACUUM ANALYZE t_int8range2;
+VACUUM ANALYZE t_tsrange1;
+VACUUM ANALYZE t_tsrange2;
+VACUUM ANALYZE t_tstzrange1;
+VACUUM ANALYZE t_tstzrange2;
+VACUUM ANALYZE t_daterange1;
+VACUUM ANALYZE t_daterange2;
