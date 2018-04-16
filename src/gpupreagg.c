@@ -3988,6 +3988,16 @@ ExecShutdownGpuPreAgg(CustomScanState *node)
 	GpuPreAggState	   *gpas = (GpuPreAggState *) node;
 	GpuPreAggRuntimeStat *gpa_rtstat_old = gpas->gpa_rtstat;
 
+	if (!gpa_rtstat_old)
+	{
+		/*
+		 * If this GpuPreAgg node is located under the inner side of
+		 * another GpuJoin, it should not be called under the background
+		 * worker context, however, ExecShutdown walks down the node.
+		 */
+		Assert(IsParallelWorker());
+		return;
+	}
 	gpas->gpa_rtstat = MemoryContextAlloc(CurTransactionContext,
 										  sizeof(GpuPreAggRuntimeStat));
 	memcpy(gpas->gpa_rtstat,

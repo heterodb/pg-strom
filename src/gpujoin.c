@@ -2534,6 +2534,16 @@ ExecShutdownGpuJoin(CustomScanState *node)
 	GpuJoinRuntimeStat *gj_rtstat_old = gjs->gj_rtstat;
 	size_t				length;
 
+	if (!gj_rtstat_old)
+	{
+		/*
+		 * If this GpuJoin node is located under the inner side of another
+		 * GpuJoin, it should not be called under the background worker
+		 * context, however, ExecShutdown walks down the node.
+		 */
+		Assert(IsParallelWorker());
+		return;
+	}
 	length = offsetof(GpuJoinRuntimeStat, jstat[gjs->num_rels + 1]);
 	gjs->gj_rtstat = MemoryContextAlloc(CurTransactionContext,
 										MAXALIGN(length));
