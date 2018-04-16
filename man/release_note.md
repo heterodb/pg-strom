@@ -165,8 +165,7 @@ Major enhancement in PG-Strom v2.0 includes:
 }
 @en{
 - Other Enhancement
-    - `lo_import_gpu` and `lo_export_gpu` functions allows to import contents of the GPU device memory acquired by external applications directly, or export 関数により、外部アプリケーションの確保したGPUメモリの内容を直接PostgreSQLのラージオブジェクトに記録したり、逆にラージオブジェクトの内容をGPUメモリに書き出す事が可能です。
-
+    - `lo_import_gpu` and `lo_export_gpu` functions allows to import contents of the GPU device memory acquired by external applications directly, or export contents of the largeobject to the GPU device memory.
 }
 @ja{
 - パッケージング

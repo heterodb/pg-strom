@@ -429,7 +429,7 @@ CREATE FUNCTION
 <p>PL/CUDA関数の実行時に確保する作業バッファの大きさをバイト単位で指定します。</p>
 <p>数値が指定されると、PL/CUDA言語ハンドラは指定されたバイト数のGPU RAMを作業バッファとして確保してからGPUカーネル関数を起動します。 関数名が指定されると、PL/CUDA言語ハンドラは指定されたSQL関数を呼び出し、戻り値で指定されたバイト数のGPU RAMを作業バッファとして確保し、GPUカーネル関数を起動します。このSQL関数は、PL/CUDA関数と同一の引数を取り、<code>bigint</code>型を返す必要があります。</p>
 <p>GPUカーネル関数からは、作業バッファは引数<code>void *workbuf</code>で指定された領域としてアクセス可能です。 0バイトが指定された場合、<code>void *workbuf</code>には<code>NULL</code>がセットされます。</p>
-<h3 id="plcuda_sanity_checl-function"><code>#plcuda_sanity_checl &lt;function&gt;</code></h3>
+<h3 id="plcuda_sanity_check-function"><code>#plcuda_sanity_check &lt;function&gt;</code></h3>
 <p>GPUカーネルの起動に先立って、引数の妥当性を検証するためのSQL関数をしています。
 デフォルトでは妥当性検証関数は設定されていません。
 GPUデバイスの初期化などを行う必要があるため、通常、GPUカーネル関数の起動はCPU上で別の関数を起動するよりも重い処理です。もし引数がPL/CUDA関数の仕様からは許容できない値を持っている場合、GPUカーネル関数を実行する数千～数百万（場合によってはそれ以上の）のGPUスレッドは、ただ引数の妥当性をチェックしてエラー状態を返却するためだけに起動されます。GPUカーネル関数を実行する前に、引数の妥当性チェックを十分小さなコストで行えるならば、妥当性検証関数を使用してGPUカーネル関数の実行前にエラーを発生させることを考慮すべきです。 妥当性検証関数は、PL/CUDA関数と同じ型の引数を持ち、<code>bool</code>返す関数です。</p>

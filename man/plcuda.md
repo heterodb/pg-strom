@@ -319,7 +319,7 @@ In a similar fashion, `#plcuda_shmem_unitsz` allows to specify the amount of sha
 ```
 
 @ja:# PL/CUDAリファレンス
-@en:# PL/CUDAリファレンス
+@en:# PL/CUDA References
 
 @ja{
 本節はPL/CUDA関数のディレクティブ、および関連するSQL関数のリファレンスです。
@@ -551,7 +551,7 @@ If a constant value is specified, PL/CUDA language handler acquires the specifie
 GPU kernel functions can access the working buffer as the region pointed by the void *results argument. If 0 bytes were specified, NULL shall be set on the void *results.
 }
 
-### `#plcuda_sanity_checl <function>`
+### `#plcuda_sanity_check <function>`
 @ja{
 GPUカーネルの起動に先立って、引数の妥当性を検証するためのSQL関数をしています。
 デフォルトでは妥当性検証関数は設定されていません。

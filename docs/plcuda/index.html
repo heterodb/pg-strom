@@ -84,7 +84,7 @@
     <li class="toctree-l2"><a href="#plcuda-structure">PL/CUDA Structure</a></li>
     
 
-    <li class="toctree-l2"><a href="#plcuda">PL/CUDAリファレンス</a></li>
+    <li class="toctree-l2"><a href="#plcuda-references">PL/CUDA References</a></li>
     
         <ul>
         
@@ -333,7 +333,7 @@ CREATE FUNCTION
 #plcuda_kernel_maxthreads
 </code></pre>
 
-<h1 id="plcuda">PL/CUDAリファレンス</h1>
+<h1 id="plcuda-references">PL/CUDA References</h1>
 <p>This section is a reference for PL/CUDA function's directives and related SQL functions.</p>
 <h2 id="plcuda-directives">PL/CUDA Directives</h2>
 <h3 id="plcuda_begin"><code>#plcuda_begin</code></h3>
@@ -431,7 +431,7 @@ Please note that it is NOT a feature to include arbitrary header files on the se
 <p>This directive allows specifying amount of the working buffer in bytes, to be acquired on execution of PL/CUDA function.</p>
 <p>If a constant value is specified, PL/CUDA language handler acquires the specified amount of GPU RAM as the working buffer, and then launch the GPU kernel functions. If a SQL function name is specified, PL/CUDA language handler call the specified SQL function, then result of the function shall be applied as the amount of GPU RAM for the working buffer and launch the GPU kernel functions. This SQL function takes identical arguments with PL/CUDA function, and returns bigint data type.</p>
 <p>GPU kernel functions can access the working buffer as the region pointed by the void <em>results argument. If 0 bytes were specified, NULL shall be set on the void </em>results.</p>
-<h3 id="plcuda_sanity_checl-function"><code>#plcuda_sanity_checl &lt;function&gt;</code></h3>
+<h3 id="plcuda_sanity_check-function"><code>#plcuda_sanity_check &lt;function&gt;</code></h3>
 <p>It allows to specify the sanity check function that preliminary checks adequacy of the supplied arguments, prior to GPU kernel launch.
 No sanity check function is configured on the default.
 Usually, launch of GPU kernel function is heavier task than call of another function on CPU, because it also involves initialization of GPU devices. If supplied arguments have unacceptable values from the specification of the PL/CUDA function, a few thousands or millions (or more in some cases) of GPU kernel threads shall be launched just to check the arguments and return an error status. If sanity check can be applied prior to the launch of GPU kernel function with enough small cost, it is a valuable idea to raise an error using sanity check function prior to the GPU kernel function. The sanity check function takes identical arguments with PL/CUDA function, and returns <code>bool</code> data type.</p>
