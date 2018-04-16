@@ -2,21 +2,18 @@
 -- TPC-H/TPC-R Top Supplier Query (Q15)
 -- Functional Query Definition
 -- Approved February 1998
-:b
-create or replace view revenue:s (supplier_no, total_revenue) as
+create or replace view revenue0 (supplier_no, total_revenue) as
 	select
 		l_suppkey,
 		sum(l_extendedprice * (1 - l_discount))
 	from
 		lineitem
 	where
-		l_shipdate >= ':1'
-		and l_shipdate < date':1' + interval '90 days'
+		l_shipdate >= '1993-01-01'
+		and l_shipdate < date'1993-01-01' + interval '90 days'
 	group by
 		l_suppkey;
 
-:x
-:o
 select
 	s_suppkey,
 	s_name,
@@ -25,17 +22,17 @@ select
 	total_revenue
 from
 	supplier,
-	revenue:s
+	revenue0
 where
 	s_suppkey = supplier_no
 	and total_revenue = (
 		select
 			max(total_revenue)
 		from
-			revenue:s
+			revenue0
 	)
 order by
 	s_suppkey;
 
-drop view revenue:s;
-:e
+drop view revenue0;
+

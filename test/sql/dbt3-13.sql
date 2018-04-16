@@ -2,9 +2,6 @@
 -- TPC-H/TPC-R Customer Distribution Query (Q13)
 -- Functional Query Definition
 -- Approved February 1998
-:b
-:x
-:o
 select
 	c_count,
 	count(*) as custdist
@@ -16,7 +13,7 @@ from
 		from
 			customer left outer join orders on
 				c_custkey = o_custkey
-				and o_comment not like '%:1%:2%'
+				and o_comment not like '%express%packages%'
 		group by
 			c_custkey
 	) as c_orders (c_custkey, c_count)
@@ -25,4 +22,3 @@ group by
 order by
 	custdist desc,
 	c_count desc;
-:e

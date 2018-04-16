@@ -2,9 +2,6 @@
 -- TPC-H/TPC-R Small-Quantity-Order Revenue Query (Q17)
 -- Functional Query Definition
 -- Approved February 1998
-:b
-:x
-:o
 select
 	sum(l_extendedprice) / 7.0 as avg_yearly
 from
@@ -12,8 +9,8 @@ from
 	part
 where
 	p_partkey = l_partkey
-	and p_brand = ':1'
-	and p_container = ':2'
+	and p_brand = 'Brand#52'
+	and p_container = 'LG CAN'
 	and l_quantity < (
 		select
 			0.2 * avg(l_quantity)
@@ -22,4 +19,3 @@ where
 		where
 			l_partkey = p_partkey
 	);
-:e

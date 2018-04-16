@@ -2,9 +2,6 @@
 -- TPC-H/TPC-R Potential Part Promotion Query (Q20)
 -- Function Query Definition
 -- Approved February 1998
-:b
-:x
-:o
 select
 	s_name,
 	s_address
@@ -24,7 +21,7 @@ where
 				from
 					part
 				where
-					p_name like ':1%'
+					p_name like 'frosted%'
 			)
 			and ps_availqty > (
 				select
@@ -34,12 +31,11 @@ where
 				where
 					l_partkey = ps_partkey
 					and l_suppkey = ps_suppkey
-					and l_shipdate >= ':2'
-					and l_shipdate < cast(date ':2' + interval '1 year' as date)
+					and l_shipdate >= '1994-01-01'
+					and l_shipdate < cast(date '1994-01-01' + interval '1 year' as date)
 			)
 	)
 	and s_nationkey = n_nationkey
 	and n_name = ':3'
 order by
 	s_name;
-:e

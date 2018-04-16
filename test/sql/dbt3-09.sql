@@ -2,9 +2,6 @@
 -- TPC-H/TPC-R Product Type Profit Measure Query (Q9)
 -- Functional Query Definition
 -- Approved February 1998
-:b
-:x
-:o
 select
 	nation,
 	o_year,
@@ -29,7 +26,7 @@ from
 			and p_partkey = l_partkey
 			and o_orderkey = l_orderkey
 			and s_nationkey = n_nationkey
-			and p_name like '%:1%'
+			and p_name like '%yellow%'
 	) as profit
 group by
 	nation,
@@ -37,4 +34,3 @@ group by
 order by
 	nation,
 	o_year desc;
-:e

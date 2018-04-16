@@ -2,9 +2,6 @@
 -- TPC-H/TPC-R Pricing Summary Report Query (Q1)
 -- Functional Query Definition
 -- Approved February 1998
-:b
-:x
-:o
 select
 	l_returnflag,
 	l_linestatus,
@@ -26,4 +23,3 @@ group by
 order by
 	l_returnflag,
 	l_linestatus;
-:e

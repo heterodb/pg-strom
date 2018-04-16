@@ -2,9 +2,6 @@
 -- TPC-H/TPC-R Global Sales Opportunity Query (Q22)
 -- Functional Query Definition
 -- Approved February 1998
-:b
-:x
-:o
 select
 	cntrycode,
 	count(*) as numcust,
@@ -18,7 +15,7 @@ from
 			customer
 		where
 			substr(c_phone, 1, 2) in
-				(':1', ':2', ':3', ':4', ':5', ':6', ':7')
+				('30', '24', '31', '38', '25', '34', '37')
 			and c_acctbal > (
 				select
 					avg(c_acctbal)
@@ -27,7 +24,7 @@ from
 				where
 					c_acctbal > 0.00
 					and substr(c_phone, 1, 2) in
-						(':1', ':2', ':3', ':4', ':5', ':6', ':7')
+						('30', '24', '31', '38', '25', '34', '37')
 			)
 			and not exists (
 				select
@@ -42,4 +39,3 @@ group by
 	cntrycode
 order by
 	cntrycode;
-:e
