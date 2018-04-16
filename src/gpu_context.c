@@ -684,47 +684,47 @@ GpuContextWorkerMain(void *arg)
 	}
 	GpuWorkerCurrentContext = gcontext;
 
-	while (pg_atomic_read_u32(&gcontext->terminate_workers) == 0)
+	STROM_TRY();
 	{
-		/* try asyncronous program build if any */
-		if (pgstrom_try_build_cuda_program())
-			continue;
-
-		pthreadMutexLock(gcontext->mutex);
-		if (dlist_is_empty(&gcontext->pending_tasks))
+		while (pg_atomic_read_u32(&gcontext->terminate_workers) == 0)
 		{
-			is_wakeup = pthreadCondWaitTimeout(gcontext->cond,
-											   gcontext->mutex,
-											   4000);
-			pthreadMutexUnlock(gcontext->mutex);
-			if (is_wakeup)
-				command = pg_atomic_exchange_u32(gcontext->command, 0);
-			else
-				command = GPUCTX_CMD__RECLAIM_MEMORY;
+			GpuTaskState *gts;
+			CUmodule	cuda_module;
+			cl_int		retval;
 
-			if ((command & GPUCTX_CMD__RECLAIM_MEMORY) != 0)
+			/* try asyncronous program build if any */
+			if (pgstrom_try_build_cuda_program())
+				continue;
+
+			pthreadMutexLock(gcontext->mutex);
+			if (dlist_is_empty(&gcontext->pending_tasks))
 			{
-				/*
-				 * XXX - Once GPU related tasks get idle, all the worker
-				 * threads may reach the timeout almost simultaneously.
-				 */
-				pthreadCondSignal(gcontext->cond);
-				gpuMemReclaimSegment(gcontext);
+				is_wakeup = pthreadCondWaitTimeout(gcontext->cond,
+												   gcontext->mutex,
+												   4000);
+				pthreadMutexUnlock(gcontext->mutex);
+				if (is_wakeup)
+					command = pg_atomic_exchange_u32(gcontext->command, 0);
+				else
+					command = GPUCTX_CMD__RECLAIM_MEMORY;
+
+				if ((command & GPUCTX_CMD__RECLAIM_MEMORY) != 0)
+				{
+					/*
+					 * XXX - Once GPU related tasks get idle, all the worker
+					 * threads may reach the timeout almost simultaneously.
+					 */
+					pthreadCondSignal(gcontext->cond);
+					gpuMemReclaimSegment(gcontext);
+				}
 			}
-		}
-		else
-		{
-			dnode = dlist_pop_head_node(&gcontext->pending_tasks);
-			gtask = dlist_container(GpuTask, chain, dnode);
-			pthreadMutexUnlock(gcontext->mutex);
-
-			/* Execution of the GpuTask */
-			STROM_TRY();
+			else
 			{
-				GpuTaskState *gts = gtask->gts;
-				CUmodule	cuda_module;
-				cl_int		retval;
+				dnode = dlist_pop_head_node(&gcontext->pending_tasks);
+				gtask = dlist_container(GpuTask, chain, dnode);
+				pthreadMutexUnlock(gcontext->mutex);
 
+				gts = gtask->gts;
 				cuda_module = GpuContextLookupModule(gcontext,
 													 gtask->program_id);
 				do {
@@ -789,16 +789,17 @@ GpuContextWorkerMain(void *arg)
 					}
 				} while (retval > 0);
 			}
-			STROM_CATCH();
-			{
-				/* Wake up and terminate other workers also */
-				pg_atomic_write_u32(&gcontext->terminate_workers, 1);
-				pthreadCondBroadcast(gcontext->cond);
-				SetLatch(MyLatch);
-			}
-			STROM_END_TRY();
 		}
 	}
+	STROM_CATCH();
+	{
+		/* Wake up and terminate other workers also */
+		pg_atomic_write_u32(&gcontext->terminate_workers, 1);
+		pthreadCondBroadcast(gcontext->cond);
+		SetLatch(MyLatch);
+	}
+	STROM_END_TRY();
+
 	return NULL;
 }
 
