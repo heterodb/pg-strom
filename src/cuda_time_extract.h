@@ -15,8 +15,8 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
-#ifndef CUDA_TIMELIB_H
-#define CUDA_TIMELIB_H
+#ifndef CUDA_TIME_EXTRACT_H
+#define CUDA_TIME_EXTRACT_H
 #ifdef __CUDACC__
 
 /*
@@ -299,7 +299,7 @@ extract_decode_unit(struct varlena *units, cl_int *p_type, cl_int *p_value)
 	const datetkn *dtoken;
 	int			i;
 
-	if (slen >= sizeof(key))
+	if (slen >= 20)
 		return false;
 	/* convert to the lower case string */
 	for (i=0; i < slen; i++)
@@ -327,8 +327,6 @@ extract_decode_unit(struct varlena *units, cl_int *p_type, cl_int *p_value)
 		*p_value = dtoken->value;
 		return true;
 	}
-
-
 	return false;
 }
 
@@ -437,49 +435,51 @@ pgfn_extract_timestamp(kern_context *kcxt,
 
 					case DTK_DAY:
 						result.value = tm.tm_mday;
-						break;
+						return result;
 
 					case DTK_MONTH:
 						result.value = tm.tm_mon;
-						break;
+						return result;
 
 					case DTK_QUARTER:
 						result.value = (tm.tm_mon - 1) / 3 + 1;
-						break;
+						return result;
 
 					case DTK_WEEK:
 						result.value = (double) date2isoweek(tm.tm_year,
 															 tm.tm_mon,
 															 tm.tm_mday);
-						break;
+						return result;
+
 					case DTK_YEAR:
 						/* there is no year 0, just 1 BC and 1 AD */
 						if (tm.tm_year > 0)
 							result.value = tm.tm_year;
 						else
 							result.value = tm.tm_year - 1;
-						break;
+						return result;
 
 					case DTK_DECADE:
 						if (tm.tm_year >= 0)
 							result.value = tm.tm_year / 10;
 						else
 							result.value = -((8 - (tm.tm_year - 1)) / 10);
-						break;
+						return result;
 
 					case DTK_CENTURY:
 						if (tm.tm_year > 0)
 							result.value = (tm.tm_year + 99) / 100;
 						else
 							result.value = -((99 - (tm.tm_year - 1)) / 100);
-						break;
+						return result;
 
 					case DTK_MILLENNIUM:
 						if (tm.tm_year > 0)
 							result.value = (tm.tm_year + 999) / 1000;
 						else
 							result.value = -((999 - (tm.tm_year - 1)) / 1000);
-						break;
+						return result;
+
 					case DTK_JULIAN:
 						result.value = date2j(tm.tm_year,
 											  tm.tm_mon,
@@ -488,13 +488,13 @@ pgfn_extract_timestamp(kern_context *kcxt,
 							 tm.tm_min * SECS_PER_MINUTE +
 							 tm.tm_sec +
 							 fsec / 1000000.0) / (double)SECS_PER_DAY;
-						break;
+						return result;
 
 					case DTK_ISOYEAR:
 						result.value = date2isoyear(tm.tm_year,
 													tm.tm_mon,
 													tm.tm_mday);
-						break;
+						return result;
 
 					case DTK_DOW:
 					case DTK_ISODOW:
@@ -503,14 +503,14 @@ pgfn_extract_timestamp(kern_context *kcxt,
 													tm.tm_mday));
 						if (val == DTK_ISODOW && result.value == 0)
 							result.value = 7;
-						break;
+						return result;
 
 					case DTK_DOY:
 						result.value = (date2j(tm.tm_year,
 											   tm.tm_mon,
 											   tm.tm_mday) -
 										date2j(tm.tm_year, 1, 1) + 1);
-						break;
+						return result;
 
 					case DTK_TZ:
 					case DTK_TZ_MINUTE:
@@ -930,5 +930,4 @@ pgfn_extract_time(kern_context *kcxt, pg_text_t arg1, pg_time_t arg2)
 }
 
 #endif /* __CUDACC__ */
-#endif /* CUDA_TIMELIB_H */
-
+#endif /* CUDA_TIME_EXTRACT_H */
