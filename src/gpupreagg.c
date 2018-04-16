@@ -2297,7 +2297,7 @@ PlanGpuPreAggPath(PlannerInfo *root,
 	char		   *kern_source;
 	codegen_context	context;
 
-	Assert(list_length(best_path->custom_private) == 2);
+	Assert(list_length(best_path->custom_private) == 3);
 	gpa_info = linitial(best_path->custom_private);
 	target_device = lsecond(best_path->custom_private);
 	pfunc_bitmap = lthird(best_path->custom_private);
