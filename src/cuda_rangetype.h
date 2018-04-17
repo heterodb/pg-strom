@@ -110,6 +110,7 @@
 			memcpy(&result.value.u.val, pos, sizeof(BASE));			\
 			pos += sizeof(BASE);									\
 		}															\
+		result.isnull = false;										\
 		result.value.empty = ((flags & RANGE_EMPTY) != 0);			\
 		result.value.l.infinite = ((flags & RANGE_LB_INF) != 0);	\
 		result.value.l.inclusive = ((flags & RANGE_LB_INC) != 0);	\
@@ -206,28 +207,28 @@
 
 #ifndef PG_INT4RANGE_TYPE_DEFINED
 #define PG_INT4RANGE_TYPE_DEFINED
-PG_RANGETYPE_TEMPLATE(int4range,cl_int,PG_INT4OID)
+PG_RANGETYPE_TEMPLATE(int4range,cl_int,PG_INT4RANGEOID)
 #endif	/* PG_INT4RANGE_TYPE_DEFINED */
 
 #ifndef PG_INT8RANGE_TYPE_DEFINED
 #define PG_INT8RANGE_TYPE_DEFINED
-PG_RANGETYPE_TEMPLATE(int8range,cl_long,PG_INT8OID)
+PG_RANGETYPE_TEMPLATE(int8range,cl_long,PG_INT8RANGEOID)
 #endif	/* PG_INT4RANGE_TYPE_DEFINED */
 
 #ifdef CUDA_TIMELIB_H
 #ifndef PG_TSRANGE_TYPE_DEFINED
 #define PG_TSRANGE_TYPE_DEFINED
-PG_RANGETYPE_TEMPLATE(tsrange,Timestamp,PG_TIMESTAMPOID)
+PG_RANGETYPE_TEMPLATE(tsrange,Timestamp,PG_TSRANGEOID)
 #endif	/* PG_TSRANGE_TYPE_DEFINED */
 
 #ifndef PG_TSTZRANGE_TYPE_DEFINED
 #define PG_TSTZRANGE_TYPE_DEFINED
-PG_RANGETYPE_TEMPLATE(tstzrange,TimestampTz,PG_TIMESTAMPTZOID)
+PG_RANGETYPE_TEMPLATE(tstzrange,TimestampTz,PG_TSTZRANGEOID)
 #endif	/* PG_TSTZRANGE_TYPE_DEFINED */
 
 #ifndef PG_DATERANGE_TYPE_DEFINED
 #define PG_DATERANGE_TYPE_DEFINED
-PG_RANGETYPE_TEMPLATE(daterange,DateADT,PG_DATEOID)
+PG_RANGETYPE_TEMPLATE(daterange,DateADT,PG_DATERANGEOID)
 #endif	/* PG_DATERANGE_TYPE_DEFINED */
 #endif	/* CUDA_TIMELIB_H */
 
@@ -657,6 +658,7 @@ pgfn_type_compare(kern_context *kcxt, pg_int8range_t arg1, pg_int8range_t arg2)
 	return pgfn_generic_range_cmp(kcxt, arg1, arg2);
 }
 
+#ifdef CUDA_TIMELIB_H
 STATIC_INLINE(pg_int4_t)
 pgfn_type_compare(kern_context *kcxt, pg_tsrange_t arg1, pg_tsrange_t arg2)
 {
@@ -668,6 +670,7 @@ pgfn_type_compare(kern_context *kcxt, pg_tstzrange_t arg1, pg_tstzrange_t arg2)
 {
 	return pgfn_generic_range_cmp(kcxt, arg1, arg2);
 }
+#endif
 
 template <typename RangeType>
 STATIC_FUNCTION(cl_bool)
