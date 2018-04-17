@@ -303,6 +303,7 @@ static bool					enable_gpunestloop;
 static bool					enable_gpuhashjoin;
 
 /* static functions */
+static void gpujoin_switch_task(GpuTaskState *gts, GpuTask *gtask);
 static GpuTask *gpujoin_next_task(GpuTaskState *gts);
 static GpuTask *gpujoin_terminator_task(GpuTaskState *gts,
 										cl_bool *task_is_ready);
@@ -1788,7 +1789,7 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	gjs->gts.cb_next_tuple		= gpujoin_next_tuple;
 	gjs->gts.cb_next_task		= gpujoin_next_task;
 	gjs->gts.cb_terminator_task	= gpujoin_terminator_task;
-	gjs->gts.cb_switch_task		= NULL;
+	gjs->gts.cb_switch_task		= gpujoin_switch_task;
 	gjs->gts.cb_process_task	= gpujoin_process_task;
 	gjs->gts.cb_release_task	= gpujoin_release_task;
 	gjs->gts.outer_nrows_per_block = gj_info->outer_nrows_per_block;
@@ -3855,6 +3856,14 @@ GpuJoinExecOuterScanChunk(GpuTaskState *gts)
 }
 
 /*
+ * gpujoin_switch_task
+ */
+static void
+gpujoin_switch_task(GpuTaskState *gts, GpuTask *gtask)
+{
+}
+
+/*
  * gpujoin_next_task
  */
 static GpuTask *
@@ -4030,16 +4039,6 @@ next_chunk:
 			slot = NULL;
 		}
 	}
-#if 0
-	/*
-	 * MEMO: If GpuJoin generates a corrupted tuple, it may lead crash on
-	 * the upper level of plan node. Even if we got a crash dump, it is not
-	 * easy to analyze corrupted tuple later. ExecMaterializeSlot() can
-	 * cause crash in proper level, and it will assist bug fixes.
-	 */
-	if (slot != NULL)
-		(void) ExecMaterializeSlot(slot);
-#endif
 	return slot;
 }
 

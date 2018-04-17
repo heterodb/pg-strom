@@ -477,7 +477,7 @@ pgstromExecGpuTaskState(GpuTaskState *gts)
 		/* reload next chunk to be scanned */
 		gtask = fetch_next_gputask(gts);
 		if (!gtask)
-			break;
+			return NULL;
 		if (gtask->cpu_fallback)
 			gts->num_cpu_fallbacks++;
 		gts->curr_task = gtask;
