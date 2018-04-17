@@ -1,7 +1,7 @@
 @ja:# PG-Strom v2.0リリース
 @en:# PG-Strom v2.0 Release
 
-<div style="text-align: right;">PG-Strom Development Team (16-Apr-2018)</div>
+<div style="text-align: right;">PG-Strom Development Team (17-Apr-2018)</div>
 
 @ja:## 概要
 @en:## Overview
@@ -16,6 +16,8 @@ PG-Strom v2.0における主要な機能強化は以下の通りです。
 - GPUメモリストア(store_fdw)
 - GpuJoinとGpuPreAggの再設計に伴う高速化
 - GpuPreAgg+GpuJoin+GpuScan 密結合GPUカーネル
+
+新機能のサマリはこちらからダウンロードできます：[PG-Strom v2.0 Technical Brief](./blob/20180417_PGStrom_v2.0_TechBrief.pdf).
 }
 
 @en{
@@ -28,6 +30,8 @@ Major enhancement in PG-Strom v2.0 includes:
 - GPU memory store (gstore_fdw)
 - Redesign of GpuJoin and GpuPreAgg and speed-up
 - GpuPreAgg + GpuJoin + GpuScan combined GPU kernel
+
+You can download the summary of new features from: [PG-Strom v2.0 Technical Brief](./blob/20180417_PGStrom_v2.0_TechBrief.pdf).
 }
 
 @ja:## 動作環境
