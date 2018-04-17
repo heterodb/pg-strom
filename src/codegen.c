@@ -1745,15 +1745,18 @@ found:
 }
 
 static devfunc_info *
-__pgstrom_devfunc_lookup_or_create(HeapTuple protup, Oid func_collid)
+__pgstrom_devfunc_lookup_or_create(HeapTuple protup,
+								   Oid func_rettype,
+								   oidvector *func_argtypes,
+								   Oid func_collid)
 {
-	Form_pg_proc	proc = (Form_pg_proc) GETSTRUCT(protup);
 	Oid				func_oid = HeapTupleGetOid(protup);
-	oidvector	   *proargtypes = &proc->proargtypes;
+	Form_pg_proc	proc = (Form_pg_proc) GETSTRUCT(protup);
 	devfunc_info   *entry;
 	devtype_info   *dtype;
 	List		   *func_args = NIL;
 	ListCell	   *lc;
+	ListCell	   *cell;
 	int				i, j;
 	MemoryContext	oldcxt;
 
@@ -1763,12 +1766,24 @@ __pgstrom_devfunc_lookup_or_create(HeapTuple protup, Oid func_collid)
 		entry = lfirst(lc);
 
 		if (entry->func_oid == func_oid &&
+			list_length(entry->func_args) == func_argtypes->dim1 &&
 			(!OidIsValid(entry->func_collid) ||
 			 entry->func_collid == func_collid))
 		{
-			if (entry->func_is_negative)
-				return NULL;
-			return entry;
+			j = 0;
+			foreach (cell, entry->func_args)
+			{
+				dtype = lfirst(cell);
+				if (dtype->type_oid != func_argtypes->values[j])
+					break;
+				j++;
+			}
+			if (!cell)
+			{
+				if (entry->func_is_negative)
+					return NULL;
+				return entry;
+			}
 		}
 	}
 
@@ -1780,10 +1795,10 @@ __pgstrom_devfunc_lookup_or_create(HeapTuple protup, Oid func_collid)
 	entry->func_oid = func_oid;
 	entry->func_collid = func_collid;	/* may be cleared later */
 	entry->func_is_strict = proc->proisstrict;
-	Assert(proc->pronargs == proargtypes->dim1);
+	Assert(proc->pronargs == func_argtypes->dim1);
 	for (j=0; j < proc->pronargs; j++)
 	{
-		dtype = pgstrom_devtype_lookup(proargtypes->values[j]);
+		dtype = pgstrom_devtype_lookup(func_argtypes->values[j]);
 		if (!dtype)
 		{
 			list_free(func_args);
@@ -1793,7 +1808,7 @@ __pgstrom_devfunc_lookup_or_create(HeapTuple protup, Oid func_collid)
 		func_args = lappend(func_args, dtype);
 	}
 
-	dtype = pgstrom_devtype_lookup(proc->prorettype);
+	dtype = pgstrom_devtype_lookup(func_rettype);
 	if (!dtype)
 	{
 		list_free(func_args);
@@ -1829,39 +1844,47 @@ __pgstrom_devfunc_lookup(HeapTuple protup,
 						 Oid func_collid)
 {
 	devfunc_info   *dfunc;
-	devtype_info   *dtype;
-	ListCell	   *lc;
-	int				j = 0;
-	HeapTuple		tuple;
 
-	dfunc = __pgstrom_devfunc_lookup_or_create(protup, func_collid);
+	dfunc = __pgstrom_devfunc_lookup_or_create(protup,
+											   func_rettype,
+											   func_argtypes,
+											   func_collid);
 	if (!dfunc)
-		return NULL;
-	/*
-	 * NOTE: In some cases, function might be called with different argument
-	 * types or result type from its definition, if both of the types are
-	 * binary compatible.
-	 * For example, type equality function of varchar(N) is texteq.
-	 * It is legal and adequate in PostgreSQL, however, CUDA C++ code takes
-	 * strict type checks, so we have to inject type relabel in this case.
-	 */
-	foreach (lc, dfunc->func_args)
 	{
-		dtype = lfirst(lc);
+		/*
+		 * NOTE: In some cases, function might be called with different
+		 * argument types or result type from its definition, if both of
+		 * the types are binary compatible.
+		 * For example, type equality function of varchar(N) is texteq.
+		 * It is legal and adequate in PostgreSQL, however, CUDA C++ code
+		 * takes strict type checks, so we have to inject type relabel
+		 * in this case.
+		 */
+		Form_pg_proc proc = (Form_pg_proc) GETSTRUCT(protup);
+		oidvector  *proargtypes = &proc->proargtypes;
+		HeapTuple	tuple;
+		Oid			src_type;
+		Oid			dst_type;
+		char		castmethod;
+		int			j;
 
-		if (dtype->type_oid != func_argtypes->values[j])
+		if (func_argtypes->dim1 != proargtypes->dim1)
+			return NULL;
+		for (j = 0; j < proargtypes->dim1; j++)
 		{
-			Oid		source_type = func_argtypes->values[j];
-			char	castmethod;
+			src_type = func_argtypes->values[j];
+			dst_type = proargtypes->values[j];
 
+			if (src_type == dst_type)
+				continue;
 			tuple = SearchSysCache2(CASTSOURCETARGET,
-									ObjectIdGetDatum(source_type),
-									ObjectIdGetDatum(dtype->type_oid));
+                                    ObjectIdGetDatum(src_type),
+									ObjectIdGetDatum(dst_type));
 			if (!HeapTupleIsValid(tuple))
 			{
 				elog(DEBUG2, "no type cast definition (%s->%s)",
-					 format_type_be(source_type),
-					 format_type_be(dtype->type_oid));
+					 format_type_be(src_type),
+					 format_type_be(dst_type));
 				return NULL;	/* no cast */
 			}
 			castmethod = ((Form_pg_cast) GETSTRUCT(tuple))->castmethod;
@@ -1876,39 +1899,43 @@ __pgstrom_devfunc_lookup(HeapTuple protup,
 			if (castmethod != COERCION_METHOD_BINARY)
 			{
 				elog(DEBUG2, "not binary compatible type cast (%s->%s)",
-					 format_type_be(source_type),
-					 format_type_be(dtype->type_oid));
+					 format_type_be(src_type),
+					 format_type_be(dst_type));
 				return NULL;
 			}
 		}
-		j++;
-	}
 
-	dtype = dfunc->func_rettype;
-	if (dtype->type_oid != func_rettype)
-	{
-		char	castmethod;
-
-		tuple = SearchSysCache2(CASTSOURCETARGET,
-								ObjectIdGetDatum(func_rettype),
-								ObjectIdGetDatum(dtype->type_oid));
-		if (!HeapTupleIsValid(tuple))
+		if (func_rettype != proc->prorettype)
 		{
-			elog(DEBUG2, "no type cast definition (%s->%s)",
-				 format_type_be(func_rettype),
-				 format_type_be(dtype->type_oid));
-			return NULL;	/* no cast */
-		}
-		castmethod = ((Form_pg_cast) GETSTRUCT(tuple))->castmethod;
-		ReleaseSysCache(tuple);
+			tuple = SearchSysCache2(CASTSOURCETARGET,
+									ObjectIdGetDatum(src_type),
+									ObjectIdGetDatum(dst_type));
+			if (!HeapTupleIsValid(tuple))
+			{
+				elog(DEBUG2, "no type cast definition (%s->%s)",
+					 format_type_be(src_type),
+					 format_type_be(dst_type));
+				return NULL;    /* no cast */
+			}
+			castmethod = ((Form_pg_cast) GETSTRUCT(tuple))->castmethod;
+			ReleaseSysCache(tuple);
 
-		if (castmethod != COERCION_METHOD_BINARY)
-		{
-			elog(DEBUG2, "not binary compatible type cast (%s->%s)",
-				 format_type_be(func_rettype),
-				 format_type_be(dtype->type_oid));
-			return NULL;
+			if (castmethod != COERCION_METHOD_BINARY)
+			{
+				elog(DEBUG2, "not binary compatible type cast (%s->%s)",
+					 format_type_be(src_type),
+					 format_type_be(dst_type));
+				return NULL;
+			}
 		}
+
+		/*
+		 * OK, it looks type-relabel allows to call the function
+		 */
+		dfunc = __pgstrom_devfunc_lookup_or_create(protup,
+												   proc->prorettype,
+												   proargtypes,
+												   func_collid);
 	}
 	return dfunc;
 }
@@ -1939,7 +1966,7 @@ pgstrom_devfunc_lookup(Oid func_oid,
 		func_argtypes->ndim = 1;
 		func_argtypes->dataoffset = 0;
 		func_argtypes->elemtype = OIDOID;
-		func_argtypes->dim1 = proc->pronargs;
+		func_argtypes->dim1 = list_length(func_args);
 		func_argtypes->lbound1 = 0;
 		foreach (lc, func_args)
 		{
