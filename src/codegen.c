@@ -1908,13 +1908,13 @@ __pgstrom_devfunc_lookup(HeapTuple protup,
 		if (func_rettype != proc->prorettype)
 		{
 			tuple = SearchSysCache2(CASTSOURCETARGET,
-									ObjectIdGetDatum(src_type),
-									ObjectIdGetDatum(dst_type));
+									ObjectIdGetDatum(func_rettype),
+									ObjectIdGetDatum(proc->prorettype));
 			if (!HeapTupleIsValid(tuple))
 			{
 				elog(DEBUG2, "no type cast definition (%s->%s)",
-					 format_type_be(src_type),
-					 format_type_be(dst_type));
+					 format_type_be(func_rettype),
+					 format_type_be(proc->prorettype));
 				return NULL;    /* no cast */
 			}
 			castmethod = ((Form_pg_cast) GETSTRUCT(tuple))->castmethod;
@@ -1923,8 +1923,8 @@ __pgstrom_devfunc_lookup(HeapTuple protup,
 			if (castmethod != COERCION_METHOD_BINARY)
 			{
 				elog(DEBUG2, "not binary compatible type cast (%s->%s)",
-					 format_type_be(src_type),
-					 format_type_be(dst_type));
+					 format_type_be(func_rettype),
+					 format_type_be(proc->prorettype));
 				return NULL;
 			}
 		}
