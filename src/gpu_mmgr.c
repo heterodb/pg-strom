@@ -336,8 +336,8 @@ __gpuMemAllocManagedRaw(GpuContext *gcontext,
 	CUresult	rc;
 
 	rc = cuCtxPushCurrent(gcontext->cuda_context);
-    if (rc != CUDA_SUCCESS)
-        return rc;
+	if (rc != CUDA_SUCCESS)
+		return rc;
 
 	rc = cuMemAllocManaged(&m_deviceptr, bytesize, flags);
 	if (rc != CUDA_SUCCESS)
