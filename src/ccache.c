@@ -3137,16 +3137,6 @@ pgstrom_init_ccache(void)
 	if (fstatfs(dirfd(ccache_base_dir), &statbuf) != 0)
 		elog(ERROR, "failed on fstatfs('%s'): %m", pathname);
 
-	DefineCustomStringVariable("pg_strom.ccache_databases",
-							   "databases where ccache builder works on",
-							   NULL,
-							   &ccache_startup_databases,
-							   "",
-							   PGC_SUSET,
-							   GUC_NOT_IN_SAMPLE,
-							   guc_check_ccache_databases,
-							   guc_assign_ccache_databases,
-							   guc_show_ccache_databases);
 	DefineCustomIntVariable("pg_strom.ccache_num_builders",
 							"number of ccache builder worker processes",
 							NULL,
@@ -3157,6 +3147,16 @@ pgstrom_init_ccache(void)
 							PGC_POSTMASTER,
 							GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
+	DefineCustomStringVariable("pg_strom.ccache_databases",
+							   "databases where ccache builder works on",
+							   NULL,
+							   &ccache_startup_databases,
+							   "",
+							   PGC_SUSET,
+							   GUC_NOT_IN_SAMPLE,
+							   guc_check_ccache_databases,
+							   guc_assign_ccache_databases,
+							   guc_show_ccache_databases);
 	DefineCustomBoolVariable("pg_strom.ccache_log_output",
 							 "turn on/off log output by ccache builder",
 							 NULL,
