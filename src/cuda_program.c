@@ -1309,12 +1309,6 @@ pgstrom_load_cuda_program(ProgramId program_id)
 	void	   *bin_image;
 	size_t		bin_length;
 
-	/*
-	 * To be called by GpuContext worker only, so no need to set current
-	 * CUDA context; per-thread context should be already set.
-	 */
-	Assert(GpuWorkerCurrentContext != NULL);
-
 	SpinLockAcquire(&pgcache_head->lock);
 retry_checks:
 	entry = lookup_cuda_program_entry_nolock(program_id);
@@ -1358,7 +1352,10 @@ retry_checks:
 			STROM_RE_THROW();
 		}
 		STROM_END_TRY();
-		CHECK_WORKER_TERMINATION();
+		if (!GpuWorkerCurrentContext)
+			CHECK_FOR_INTERRUPTS();
+		else
+			CHECK_WORKER_TERMINATION();
 		SpinLockAcquire(&pgcache_head->lock);
 		put_cuda_program_entry_nolock(entry);
 		goto retry_checks;
@@ -1367,7 +1364,10 @@ retry_checks:
 	{
 		/* NVRTC is still in-progress */
 		SpinLockRelease(&pgcache_head->lock);
-		CHECK_WORKER_TERMINATION();
+		if (!GpuWorkerCurrentContext)
+			CHECK_FOR_INTERRUPTS();
+		else
+			CHECK_WORKER_TERMINATION();
 		pg_usleep(50000L);
 		SpinLockAcquire(&pgcache_head->lock);
 		goto retry_checks;
