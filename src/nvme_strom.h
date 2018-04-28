@@ -214,8 +214,8 @@ read_heterodb_license_file(StromCmd__LicenseInfo *cmd,
 	filp = fopen(license_file_name, "rb");
 	if (!filp)
 	{
-		if (outerr)
-			fprintf(outerr, "failed to open '%s': %m", license_file_name);
+		if (errno != ENOENT && outerr)
+			fprintf(outerr, "failed to open '%s': %m\n", license_file_name);
 		return -1;
 	}
 	/* Extract base64 */
