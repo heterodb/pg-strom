@@ -692,10 +692,6 @@ GpuContextWorkerMain(void *arg)
 			CUmodule	cuda_module;
 			cl_int		retval;
 
-			/* try asyncronous program build if any */
-			if (pgstrom_try_build_cuda_program())
-				continue;
-
 			pthreadMutexLock(gcontext->mutex);
 			if (dlist_is_empty(&gcontext->pending_tasks))
 			{
