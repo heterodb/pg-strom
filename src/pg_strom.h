@@ -834,7 +834,6 @@ extern void pgstrom_put_cuda_program(GpuContext *gcontext,
 extern void pgstrom_build_session_info(StringInfo str,
 									   GpuTaskState *gts,
 									   cl_uint extra_flags);
-extern bool pgstrom_try_build_cuda_program(void);
 
 extern char *pgstrom_cuda_source_string(ProgramId program_id);
 extern const char *pgstrom_cuda_source_file(ProgramId program_id);

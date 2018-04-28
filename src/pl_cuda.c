@@ -2444,6 +2444,7 @@ plcuda_function_source(PG_FUNCTION_ARGS)
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
+	free(source);
 	plcuda_exec_end(plts);
 
 	ReleaseSysCache(tuple);

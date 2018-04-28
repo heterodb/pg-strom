@@ -75,13 +75,23 @@ typedef struct
 	char		base[FLEXIBLE_ARRAY_MEMBER];
 } program_cache_head;
 
+typedef struct
+{
+	pg_atomic_uint32	num_active_builders;
+	struct {
+		volatile Latch *latch;
+	} builders[FLEXIBLE_ARRAY_MEMBER];
+} program_builder_state;
+
 /* ---- GUC variables ---- */
 static int		program_cache_size_kb;
+static int		num_program_builders;
 static bool		pgstrom_debug_jit_compile_options;
 
 /* ---- static variables ---- */
 static shmem_startup_hook_type shmem_startup_next;
 static program_cache_head *pgcache_head = NULL;
+static program_builder_state *pgbuilder_state = NULL;
 #define PGSTROM_CUDA(x)	\
 	static const char *pgstrom_cuda_##x##_pathname = NULL;
 #include "cuda_filelist"
@@ -89,9 +99,12 @@ static program_cache_head *pgcache_head = NULL;
 static void	   *curand_wrapper_lib = NULL;
 static size_t	curand_wrapper_libsz;
 
+static bool		cuda_program_builder_got_signal = false;
+
 /* ---- forward declarations ---- */
 static void put_cuda_program_entry_nolock(program_cache_entry *entry);
-
+void cudaProgramBuilderMain(Datum arg);
+static void cudaProgramBuilderWakeUp(bool error_if_no_builders);
 
 /*
  * lookup_cuda_program_entry_nolock - lookup a program_cache_entry by the
@@ -683,9 +696,10 @@ pgstrom_cuda_source_string(ProgramId program_id)
 const char *
 pgstrom_cuda_source_file(ProgramId program_id)
 {
-	char	   *source = pgstrom_cuda_source_string(program_id);
-	char		tempfilepath[MAXPGPATH];
+	char	tempfilepath[MAXPGPATH];
+	char   *source;
 
+	source = pgstrom_cuda_source_string(program_id);
 	writeout_temporary_file(tempfilepath, "gpu",
 							source, strlen(source));
 	free(source);
@@ -949,75 +963,13 @@ build_cuda_program(program_cache_entry *src_entry)
 		STROM_RE_THROW();
 	}
 	STROM_END_TRY();
+	if (build_log)
+		free(build_log);
+	if (ptx_image)
+		free(ptx_image);
+	free(source);
 
 	return bin_entry;
-}
-
-/*
- * pgstrom_try_build_cuda_program
- *
- * It picks up a program entry that is not built yet, if any, then runs
- * NVRTC and linker to construct an executable binary.
- * Because linker process needs a valid CUDA context, only GpuContext
- * worker can call this function.
- */
-bool
-pgstrom_try_build_cuda_program(void)
-{
-	dlist_node	   *dnode;
-	program_cache_entry *entry;
-
-	Assert(GpuWorkerCurrentContext != NULL);
-
-	/* Is there any pending CUDA program? */
-	SpinLockAcquire(&pgcache_head->lock);
-	if (dlist_is_empty(&pgcache_head->build_list))
-	{
-		SpinLockRelease(&pgcache_head->lock);
-		return false;		/* no programs were built */
-	}
-	dnode = dlist_pop_head_node(&pgcache_head->build_list);
-	entry = dlist_container(program_cache_entry, build_chain, dnode);
-
-	/*
-	 * !ptx_image && build_chain==0 means build is in-progress,
-	 * so it can block concurrent program build any more
-	 */
-	memset(&entry->build_chain, 0, sizeof(dlist_node));
-	Assert(!entry->ptx_image);	/* must be build in-progress */
-	get_cuda_program_entry_nolock(entry);
-	SpinLockRelease(&pgcache_head->lock);
-
-	/*
-	 * This thread will focus on the program build, so some other
-	 * worker needs to process the pending tasks.
-	 */
-	pthreadCondSignal(GpuWorkerCurrentContext->cond);
-
-	STROM_TRY();
-	{
-		entry = build_cuda_program(entry);
-	}
-	STROM_CATCH();
-	{
-		/*
-		 * Unlike CUDA_PROGRAM_BUILD_FAILURE case, exceptions are usually
-		 * raised by resource starvation, thus, restart of GPU server may
-		 * be able to build the GPU program on the next trial.
-		 * So, CUDA program entry is backed to the build pending list.
-		 */
-		SpinLockAcquire(&pgcache_head->lock);
-		dlist_push_tail(&pgcache_head->build_list, &entry->build_chain);
-		put_cuda_program_entry_nolock(entry);
-		SpinLockRelease(&pgcache_head->lock);
-
-		STROM_RE_THROW();
-	}
-	STROM_END_TRY();
-
-	put_cuda_program_entry(entry);
-
-	return true;
 }
 
 /*
@@ -1047,14 +999,6 @@ __pgstrom_create_cuda_program(GpuContext *gcontext,
 	dlist_iter	iter;
 	pg_crc32	crc;
 
-	/*
-	 * sanity check - even though concurrent and unrelated worker may pick up
-	 * the CUDA program for build, here is no guarantee. For synchronous code
-	 * build, the callers' context should be capable to run NVRTC.
-	 */
-	if (wait_for_build && !gcontext->cuda_context)
-		elog(ERROR, "Bug? unable to kick synchronous code build with inactive GpuContext");
-
 	/* build with debug option? */
 	if (pgstrom_debug_jit_compile_options)
 		extra_flags |= DEVKERNEL_BUILD_DEBUG_INFO;
@@ -1074,6 +1018,8 @@ __pgstrom_create_cuda_program(GpuContext *gcontext,
 	SpinLockAcquire(&pgcache_head->lock);
 	dlist_foreach (iter, &pgcache_head->hash_slots[hindex])
 	{
+		bool		kick_builders = false;
+
 		entry = dlist_container(program_cache_entry, hash_chain, iter.cur);
 
 		if (entry->crc == crc &&
@@ -1106,16 +1052,31 @@ __pgstrom_create_cuda_program(GpuContext *gcontext,
 							(errcode(entry->error_code),
 							 errmsg("%s", entry->error_msg)));
 				}
+
+				/* Kick program builders if not built yet */
+				if (!entry->ptx_image &&
+					(entry->build_chain.prev != NULL ||
+					 entry->build_chain.next != NULL))
+					kick_builders = true;
 				SpinLockRelease(&pgcache_head->lock);
+				if (kick_builders)
+					cudaProgramBuilderWakeUp(!explain_only);
                 return program_id;
 			}
 			else
 			{
-				/*
-				 * NVRTC on this GPU kernel is still in-progress, and caller
-				 * wants to synchronize the completion of the build.
-				 */
+				kick_builders = (entry->build_chain.prev != NULL ||
+								 entry->build_chain.next != NULL);
+
 				SpinLockRelease(&pgcache_head->lock);
+
+				/*
+				 * Run-time compilation of this GPU kernel is still in-progress
+				 * or pending to build, and caller wants to synchronize the
+				 * completion of the code build
+				 */
+				if (kick_builders)
+					cudaProgramBuilderWakeUp(true);
 
 				pg_usleep(50000);	/* short sleep (50ms) */
 
@@ -1193,11 +1154,13 @@ __pgstrom_create_cuda_program(GpuContext *gcontext,
 	/*
 	 * Start asynchronous code build with NVRTC
 	 */
-	pthreadCondSignal(gcontext->cond);
+	cudaProgramBuilderWakeUp(wait_for_build);
 
 	/* wait for completion of build, if needed */
 	while (wait_for_build)
 	{
+		bool	kick_builders = false;
+
 		SpinLockAcquire(&pgcache_head->lock);
 		entry = lookup_cuda_program_entry_nolock(program_id);
 		if (!entry)
@@ -1217,8 +1180,16 @@ __pgstrom_create_cuda_program(GpuContext *gcontext,
 			SpinLockRelease(&pgcache_head->lock);
 			break;
 		}
+		else if (entry->build_chain.prev != NULL ||
+				 entry->build_chain.next != NULL)
+		{
+			kick_builders = true;
+		}
 		/* NVRTC on this GPU program is still in-progress */
 		SpinLockRelease(&pgcache_head->lock);
+
+		if (kick_builders)
+			cudaProgramBuilderWakeUp(true);
 
 		CHECK_FOR_GPUCONTEXT(gcontext);
 
@@ -1406,6 +1377,143 @@ retry_checks:
 	return cuda_module;
 }
 
+/*
+ * cudaProgramBuilderSigTerm
+ */
+static void
+cudaProgramBuilderSigTerm(SIGNAL_ARGS)
+{
+	int		saved_errno = errno;
+
+	cuda_program_builder_got_signal = true;
+
+	pg_memory_barrier();
+
+	SetLatch(MyLatch);
+
+	errno = saved_errno;
+}
+
+/*
+ * cudaProgramBuilderMain
+ */
+void
+cudaProgramBuilderMain(Datum arg)
+{
+	int			builder_id = DatumGetInt32(arg);
+	int			major;
+	int			minor;
+	nvrtcResult	rc;
+
+	pqsignal(SIGTERM, cudaProgramBuilderSigTerm);
+	BackgroundWorkerUnblockSignals();
+
+	/* Init CUDA run-time compiler library */
+	rc = nvrtcVersion(&major, &minor);
+	if (rc != NVRTC_SUCCESS)
+		elog(ERROR, "failed on nvrtcVersion: %s", nvrtcGetErrorString(rc));
+	elog(LOG, "CUDA Program Builder-%d with NVRTC version %d.%d",
+		 builder_id, major, minor);
+
+	/*
+	 * Event Loop
+	 */
+	pgbuilder_state->builders[builder_id].latch = MyLatch;
+	pg_atomic_fetch_add_u32(&pgbuilder_state->num_active_builders, 1);
+	PG_TRY();
+	{
+		while (!cuda_program_builder_got_signal)
+		{
+			program_cache_entry *entry;
+			dlist_node *dnode;
+			int			ev;
+
+			/* Is there any pending CUDA program? */
+			SpinLockAcquire(&pgcache_head->lock);
+			if (dlist_is_empty(&pgcache_head->build_list))
+			{
+				SpinLockRelease(&pgcache_head->lock);
+
+				ev = WaitLatch(MyLatch,
+							   WL_LATCH_SET |
+							   WL_TIMEOUT |
+							   WL_POSTMASTER_DEATH, 1000L
+#if PG_VERSION_NUM >= 100000
+							   ,PG_WAIT_EXTENSION
+#endif
+					);
+				ResetLatch(MyLatch);
+				if (ev & WL_POSTMASTER_DEATH)
+					elog(FATAL, "unexpected postmaster dead");
+				CHECK_FOR_INTERRUPTS();
+				continue;
+			}
+			dnode = dlist_pop_head_node(&pgcache_head->build_list);
+			entry = dlist_container(program_cache_entry, build_chain, dnode);
+
+			/*
+			 * !ptx_image && build_chain==0 means program compilation is
+			 * in-progress. So, it avoid duplication of the program build.
+			 */
+			memset(&entry->build_chain, 0, sizeof(dlist_node));
+			Assert(!entry->ptx_image);	/* must be build in-progress */
+			get_cuda_program_entry_nolock(entry);
+			SpinLockRelease(&pgcache_head->lock);
+
+			PG_TRY();
+			{
+				entry = build_cuda_program(entry);
+			}
+			PG_CATCH();
+			{
+				/*
+				 * Unlike CUDA_PROGRAM_BUILD_FAILURE case, exceptions are
+				 * often raised by resource starvation, or other reasons,
+				 * thus, CUDA program entry must be backed to the build
+				 * pending list, to be picked up by other workers.
+				 */
+				SpinLockAcquire(&pgcache_head->lock);
+				dlist_push_tail(&pgcache_head->build_list,
+								&entry->build_chain);
+				put_cuda_program_entry_nolock(entry);
+				SpinLockRelease(&pgcache_head->lock);
+				PG_RE_THROW();
+			}
+			PG_END_TRY();
+			put_cuda_program_entry(entry);
+		}
+	}
+	PG_CATCH();
+	{
+		pg_atomic_fetch_sub_u32(&pgbuilder_state->num_active_builders, 1);
+		pgbuilder_state->builders[builder_id].latch = NULL;
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	pg_atomic_fetch_sub_u32(&pgbuilder_state->num_active_builders, 1);
+	pgbuilder_state->builders[builder_id].latch = NULL;
+}
+
+static void
+cudaProgramBuilderWakeUp(bool error_if_no_builders)
+{
+	int		i, count = 0;
+
+	for (i=0; i < num_program_builders; i++)
+	{
+		volatile Latch *latch = pgbuilder_state->builders[i].latch;
+
+		if (latch)
+		{
+			SetLatch(latch);
+			count++;
+		}
+	}
+
+	if (error_if_no_builders && count == 0)
+		elog(ERROR, "PG-Strom: no active CUDA C program builder");
+}
+
 static void
 build_wrapper_libraries(const char *wrapper_filename,
 						void **p_wrapper_lib,
@@ -1549,14 +1657,21 @@ pgstrom_startup_cuda_program(void)
 						&entry->free_chain);
 		offset += (1UL << mclass);
 	}
+
+	/* initialize program builder state */
+	length = offsetof(program_builder_state,
+					  builders[num_program_builders]);
+	pgbuilder_state = ShmemInitStruct("PG-Strom Program Builders State",
+									  length, &found);
+	if (found)
+		elog(ERROR, "Bug? shared memory for program builders already exists");
+	memset(pgbuilder_state, 0, length);
 }
 
 void
 pgstrom_init_cuda_program(void)
 {
-	int			major;
-	int			minor;
-	nvrtcResult	rc;
+	int			i;
 
 	/*
 	 * allocation of shared memory segment size
@@ -1573,6 +1688,20 @@ pgstrom_init_cuda_program(void)
 							NULL, NULL, NULL);
 
 	/*
+	 * number of worker process to build CUDA program
+	 */
+	DefineCustomIntVariable("pg_strom.num_program_builders",
+							"number of workers to build CUDA C programs",
+							NULL,
+							&num_program_builders,
+							2,
+							1,
+							INT_MAX,
+							PGC_POSTMASTER,
+							GUC_NOT_IN_SAMPLE,
+							NULL, NULL, NULL);
+
+	/*
 	 * Enables debug option on GPU kernel build
 	 */
 	DefineCustomBoolVariable("pg_strom.debug_jit_compile_options",
@@ -1583,15 +1712,6 @@ pgstrom_init_cuda_program(void)
 							 PGC_SUSET,
 							 GUC_NOT_IN_SAMPLE | GUC_SUPERUSER_ONLY,
 							 NULL, NULL, NULL);
-
-	/*
-	 * Init CUDA run-time compiler library
-	 */
-	rc = nvrtcVersion(&major, &minor);
-	if (rc != NVRTC_SUCCESS)
-		elog(ERROR, "failed on nvrtcVersion: %s", nvrtcGetErrorString(rc));
-	elog(LOG, "NVRTC - CUDA Runtime Compilation vertion %d.%d",
-		 major, minor);
 
 	/* setup cuda_xxxx.h file pathname */
 #define PGSTROM_CUDA(x) \
@@ -1609,4 +1729,24 @@ pgstrom_init_cuda_program(void)
 	build_wrapper_libraries("cuda_curand.h",
 							&curand_wrapper_lib,
 							&curand_wrapper_libsz);
+
+	/* register CUDA C program builders */
+	for (i=0; i < num_program_builders; i++)
+	{
+		BackgroundWorker worker;
+
+		memset(&worker, 0, sizeof(BackgroundWorker));
+		snprintf(worker.bgw_name, sizeof(worker.bgw_name),
+				 "PG-Strom Program Builder-%d", i);
+		worker.bgw_flags = BGWORKER_SHMEM_ACCESS;
+		worker.bgw_start_time = BgWorkerStart_PostmasterStart;
+		worker.bgw_restart_time = 1;
+
+		snprintf(worker.bgw_library_name,
+				 BGW_MAXLEN, "pg_strom");
+		snprintf(worker.bgw_function_name,
+				 BGW_MAXLEN, "cudaProgramBuilderMain");
+		worker.bgw_main_arg = Int32GetDatum(i);
+		RegisterBackgroundWorker(&worker);
+	}
 }
