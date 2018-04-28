@@ -1955,16 +1955,16 @@ GPUはモデルごとにコア数やメモリ容量、最大スレッド数な�
 <td align="left">ビルド済みのGPUプログラムをキャッシュしておくための共有メモリ領域のサイズです。パラメータの更新には再起動が必要です。</td>
 </tr>
 <tr>
+<td align="left"><code>pg_strom.num_program_builders</code></td>
+<td align="center"><code>int</code></td>
+<td align="left"><code>2</code></td>
+<td align="left">GPUプログラムを非同期ビルドするためのバックグラウンドプロセスの数を指定します。パラメータの更新には再起動が必要です。</td>
+</tr>
+<tr>
 <td align="left"><code>pg_strom.debug_jit_compile_options</code></td>
 <td align="center"><code>bool</code></td>
 <td align="left"><code>off</code></td>
 <td align="left">GPUプログラムのJITコンパイル時に、デバッグオプション（行番号とシンボル情報）を含めるかどうかを指定します。GPUコアダンプ等を用いた複雑なバグの解析に有用ですが、性能のデグレードを引き起こすため、通常は使用すべきでありません。</td>
-</tr>
-<tr>
-<td align="left"><code>pg_strom.debug_kernel_source</code></td>
-<td align="center"><code>bool</code></td>
-<td align="left"><code>off</code></td>
-<td align="left">このオプションが<code>on</code>の場合、<code>EXPLAIN VERBOSE</code>コマンドで自動生成されたGPUプログラムを書き出したファイルパスを出力します。</td>
 </tr>
 </tbody>
 </table>

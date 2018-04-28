@@ -1955,6 +1955,12 @@ Right now, only gstore_fdw uses this feature.</p>
 <td align="left">Amount of the shared memory size to cache GPU programs already built. It needs restart to update the parameter.</td>
 </tr>
 <tr>
+<td align="left"><code>pg_strom.num_program_builders</code></td>
+<td align="center"><code>int</code></td>
+<td align="center"><code>2</code></td>
+<td align="left">Number of background workers to build GPU programs asynchronously. It needs restart to update the parameter.</td>
+</tr>
+<tr>
 <td align="left"><code>pg_strom.debug_jit_compile_options</code></td>
 <td align="center"><code>bool</code></td>
 <td align="center"><code>off</code></td>

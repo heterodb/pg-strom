@@ -877,15 +877,16 @@ Enables/disables a particular feature
 |パラメータ名                   |型      |初期値  |説明       |
 |:------------------------------|:------:|:-------|:----------|
 |`pg_strom.program_cache_size`  |`int`   |`256MB` |ビルド済みのGPUプログラムをキャッシュしておくための共有メモリ領域のサイズです。パラメータの更新には再起動が必要です。|
-|`pg_strom.debug_jit_compile_options`|`bool`|`off`|GPUプログラムのJITコンパイル時に、デバッグオプション（行番号とシンボル情報）を含めるかどうかを指定します。GPUコアダンプ等を用いた複雑なバグの解析に有用ですが、性能のデグレードを引き起こすため、通常は使用すべきでありません。|
-|`pg_strom.debug_kernel_source` |`bool`  |`off`    |このオプションが`on`の場合、`EXPLAIN VERBOSE`コマンドで自動生成されたGPUプログラムを書き出したファイルパスを出力します。|
+|`pg_strom.num_program_builders`|`int`|`2`|GPUプログラムを非同期ビルドするためのバックグラウンドプロセスの数を指定します。パラメータの更新には再起動が必要です。|
+|`pg_strom.debug_jit_compile_options`|`bool`|`off`|GPUプログラムのJITコンパイル時に、デバッグオプション（行番号とシンボル情報）を含めるかどうかを指定します。GPUコアダンプ等を用いた複雑なバグの解析に有用ですが、性能のデグレードを引き起こすため、通常は使用すべきでありません。||`pg_strom.debug_kernel_source` |`bool`  |`off`    |このオプションが`on`の場合、`EXPLAIN VERBOSE`コマンドで自動生成されたGPUプログラムを書き出したファイルパスを出力します。|
 }
 @en{
 **Configuration of GPU code generation and build**
 
 |Parameter                      |Type  |Default|Description|
 |:------------------------------|:----:|:----:|:----------|
-|`pg_strom.program_cache_size`  |`int`   |`256MB` |Amount of the shared memory size to cache GPU programs already built. It needs restart to update the parameter.|
+|`pg_strom.program_cache_size`  |`int` |`256MB` |Amount of the shared memory size to cache GPU programs already built. It needs restart to update the parameter.|
+|`pg_strom.num_program_builders`|`int`|`2`|Number of background workers to build GPU programs asynchronously. It needs restart to update the parameter.|
 |`pg_strom.debug_jit_compile_options`|`bool`|`off`|Controls to include debug option (line-numbers and symbol information) on JIT compile of GPU programs. It is valuable for complicated bug analysis using GPU core dump, however, should not be enabled on daily use because of performance degradation.|
 |`pg_strom.debug_kernel_source` |`bool`  |`off`   |If enables, `EXPLAIN VERBOSE` command also prints out file paths of GPU programs written out.|
 }
