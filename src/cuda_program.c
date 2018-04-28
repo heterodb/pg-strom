@@ -683,9 +683,10 @@ pgstrom_cuda_source_string(ProgramId program_id)
 const char *
 pgstrom_cuda_source_file(ProgramId program_id)
 {
-	char	   *source = pgstrom_cuda_source_string(program_id);
-	char		tempfilepath[MAXPGPATH];
+	char	tempfilepath[MAXPGPATH];
+	char   *source;
 
+	source = pgstrom_cuda_source_string(program_id);
 	writeout_temporary_file(tempfilepath, "gpu",
 							source, strlen(source));
 	free(source);
@@ -949,6 +950,11 @@ build_cuda_program(program_cache_entry *src_entry)
 		STROM_RE_THROW();
 	}
 	STROM_END_TRY();
+	if (build_log)
+		free(build_log);
+	if (ptx_image)
+		free(ptx_image);
+	free(source);
 
 	return bin_entry;
 }
