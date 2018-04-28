@@ -980,11 +980,15 @@ gpujoin_exec_nestloop(kern_context *kcxt,
 				matched_sync[x_index] = true;
 			if (__syncthreads_count(!matched_sync[x_index]) > 0)
 			{
-				if (y_index == 0)
+				if (y_index == 0 && y_index < y_unitsz)
 					result = !matched_sync[x_index];
 				else
 					result = false;
-				/* don't generate LEFT OUTER tuple twice */
+				/* adjust x_index and rd_stack as usual */
+				x_index += read_pos[depth-1];
+				assert(x_index < write_pos[depth-1]);
+				rd_stack += (x_index * depth);
+				/* don't generate LEFT OUTER tuple any more */
 				matched[depth] = true;
 				goto left_outer;
 			}
