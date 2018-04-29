@@ -1,2 +1,10 @@
+* Mon Apr 30 2018 KaiGai Kohei <kaigai@heterodb.com> - 1.9-180120
+- hotfixes for reported bugs
+- CUDA C code builder is re-designed as background worker, instead of
+  the worker thread of GpuContext.
+
+* Tue Apr 17 2018 KaiGai Kohei <kaigai@heterodb.com> - 2.0-1
+- PG-Strom v2.0 release
+
 * Sat Jan 20 2018 KaiGai Kohei <kaigai@heterodb.com> - 1.9-180120
 - initial RPM specfile
