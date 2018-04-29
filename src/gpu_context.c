@@ -1027,6 +1027,23 @@ ActivateGpuContext(GpuContext *gcontext)
 }
 
 /*
+ * DetachGpuContextIPCEntry
+ */
+static void
+DetachGpuContextIPCEntry(GpuContext *gcontext)
+{
+	GpuContextIPCEntry *ipc_entry = (GpuContextIPCEntry *)
+		((char *)gcontext->mutex - offsetof(GpuContextIPCEntry, mutex));
+
+	SpinLockAcquire(&gcontext_ipc_head->lock);
+	/* detach from the active list */
+	dlist_delete(&ipc_entry->chain);
+	dlist_push_tail(&gcontext_ipc_head->free_list,
+					&ipc_entry->chain);
+	SpinLockRelease(&gcontext_ipc_head->lock);
+}
+
+/*
  * GetGpuContext - increment reference counter
  */
 GpuContext *
@@ -1051,15 +1068,7 @@ PutGpuContext(GpuContext *gcontext)
 	newcnt = pg_atomic_sub_fetch_u32(&gcontext->refcnt, 1);
 	if (newcnt == 0)
 	{
-		GpuContextIPCEntry *ipc_entry = (GpuContextIPCEntry *)
-			((char *)gcontext->mutex - offsetof(GpuContextIPCEntry, mutex));
-
-		SpinLockAcquire(&gcontext_ipc_head->lock);
-		dlist_delete(&ipc_entry->chain);	/* detach from active list */
-		dlist_push_tail(&gcontext_ipc_head->free_list,
-						&ipc_entry->chain);
-		SpinLockRelease(&gcontext_ipc_head->lock);
-
+		DetachGpuContextIPCEntry(gcontext);
 		SpinLockAcquire(&activeGpuContextLock);
 		dlist_delete(&gcontext->chain);
 		SpinLockRelease(&activeGpuContextLock);
@@ -1211,6 +1220,7 @@ gpucontext_cleanup_callback(ResourceReleasePhase phase,
 		if (isCommit)
 			wnotice("GpuContext reference leak (refcnt=%d)",
 					pg_atomic_read_u32(&gcontext->refcnt));
+		DetachGpuContextIPCEntry(gcontext);
 		dlist_delete(&gcontext->chain);
 		SynchronizeGpuContext(gcontext);
 		ReleaseLocalResources(gcontext, isCommit);
