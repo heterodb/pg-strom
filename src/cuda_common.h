@@ -19,9 +19,12 @@
 #define CUDA_COMMON_H
 
 /* ---- Check minimum required CUDA version ---- */
-#if CUDA_VERSION < 9010
-#error PG-Strom requires CUDA 9.1 or later. Install newer version.
+#ifdef __CUDACC_RTC__
+#if __CUDACC_VER_MAJOR__ < 9 || \
+   (__CUDACC_VER_MAJOR__ == 9 && __CUDACC_VER_MINOR__ < 1)
+#error PG-Strom requires CUDA 9.1 or later. Use newer version.
 #endif
+#endif /* __CUDACC_RTC__ */
 
 /*
  * Basic type definition - because of historical reason, we use "cl_"
