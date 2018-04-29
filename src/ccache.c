@@ -1396,7 +1396,7 @@ ccache_setup_buffer(TupleDesc tupdesc,
 	memset(cc_buf, 0, sizeof(ccacheBuffer));
 	if (with_system_columns)
 		nattrs += NumOfSystemAttrs;
-	cc_buf->nattrs = tupdesc->natts;
+	cc_buf->nattrs = nattrs;
 	cc_buf->nitems = 0;
 	cc_buf->nrooms = nrooms;
 	cc_buf->vl_compress = palloc0(sizeof(int) * nattrs);
@@ -1408,6 +1408,9 @@ ccache_setup_buffer(TupleDesc tupdesc,
 	for (j=0; j < tupdesc->natts; j++)
 	{
 		Form_pg_attribute attr = tupdesc->attrs[j];
+
+		if (attr->attisdropped)
+			continue;
 
 		if (attr->attlen < 0)
 		{
@@ -1697,8 +1700,8 @@ ccache_copy_buffer_to_kds(kern_data_store *kds,
 						   SIZE_MAX,	/* to be set later */
 						   KDS_FORMAT_COLUMN,
 						   nrooms);
-	Assert(tupdesc->natts == cc_buf->nattrs ||
-		   tupdesc->natts == cc_buf->nattrs + NumOfSystemAttrs);
+	Assert(cc_buf->nattrs == tupdesc->natts ||
+		   cc_buf->nattrs == tupdesc->natts + NumOfSystemAttrs);
 
 	pos = (char *)kds + STROMALIGN(offsetof(kern_data_store,
 											colmeta[kds->ncols]));
@@ -1714,7 +1717,7 @@ ccache_copy_buffer_to_kds(kern_data_store *kds,
 		else
 			attr = SystemAttributeDefinition(j - kds->ncols, true);
 		/* skip dropped columns */
-		if (attr->attisdropped)
+		if (attr->attisdropped || !cc_buf->values[j])
 			continue;
 
 		offset = ((char *)pos - (char *)kds);
@@ -1840,7 +1843,8 @@ ccache_buffer_append_row(TupleDesc tupdesc,
 						 MemoryContext memcxt)
 {
 	MemoryContext oldcxt = MemoryContextSwitchTo(memcxt);
-	size_t		j, nitems;
+	size_t		nitems;
+	int			j;
 
 	if (cc_buf->nitems >= cc_buf->nrooms)
 		elog(ERROR, "lack of ccache buffer rooms");
@@ -1851,6 +1855,9 @@ ccache_buffer_append_row(TupleDesc tupdesc,
 		Form_pg_attribute attr = tupdesc->attrs[j];
 		bool	isnull = tup_isnull[j];
 		Datum	datum = tup_values[j];
+
+		if (attr->attisdropped)
+			continue;
 
 		if (attr->attlen < 0)
 		{
@@ -1942,7 +1949,26 @@ ccache_buffer_append_row(TupleDesc tupdesc,
 			if (!attr->attbyval)
 				memcpy(addr, DatumGetPointer(datum), attr->attlen);
 			else
-				memcpy(addr, &datum, attr->attlen);
+			{
+				switch (attr->attlen)
+				{
+					case sizeof(cl_char):
+						*((cl_char *)addr) = GET_1_BYTE(datum);
+						break;
+					case sizeof(cl_short):
+						*((cl_short *)addr) = GET_2_BYTES(datum);
+						break;
+					case sizeof(cl_int):
+						*((cl_int *)addr) = GET_4_BYTES(datum);
+						break;
+					case sizeof(cl_long):
+						*((cl_long *)addr) = GET_8_BYTES(datum);
+						break;
+					default:
+						memcpy(addr, &datum, attr->attlen);
+						break;
+				}
+			}
 		}
 	}
 	MemoryContextSwitchTo(oldcxt);

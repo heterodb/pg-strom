@@ -830,12 +830,7 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 				&tbody,
 				"  /* %s system column */\n"
 				"  tup_isnull[%d] = !t_self;\n"
-				"  if (t_self)\n"
-				"  {\n"
-				"    tup_values[%d] = PointerGetDatum(tup_extra);\n"
-				"    memcpy(tup_extra, t_self, sizeof(ItemPointerData));\n"
-				"    tup_extra += MAXALIGN(sizeof(ItemPointerData));\n"
-				"  }\n",
+				"  tup_values[%d] = PointerGetDatum(t_self);\n",
 				NameStr(attr->attname), i, i);
 		}
 		else
