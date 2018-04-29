@@ -18,6 +18,11 @@
 #ifndef CUDA_COMMON_H
 #define CUDA_COMMON_H
 
+/* ---- Check minimum required CUDA version ---- */
+#if CUDA_VERSION < 9010
+#error PG-Strom requires CUDA 9.1 or later. Install newer version.
+#endif
+
 /*
  * Basic type definition - because of historical reason, we use "cl_"
  * prefix for the definition of data types below. It might imply
