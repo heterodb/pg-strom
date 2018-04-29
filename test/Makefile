@@ -18,6 +18,9 @@ DBT3_DBGEN_FLAGS = -Wno-unused-variable -Wno-unused-but-set-variable \
 TESTAPP_LARGEOBJECT = $(STROM_BUILD_ROOT)/test/testapp_largeobject
 TESTAPP_LARGEOBJECT_SOURCE = $(addsuffix .cu,$(TESTAPP_LARGEOBJECT))
 
+EXTRA_CLEAN_TEST = $(DBT3_DBGEN) $(DBT3_DBGEN_DISTS_DSS).h \
+                   $(TESTAPP_LARGEOBJECT)
+
 #
 # Regression Test
 #
@@ -38,6 +41,12 @@ $(DBT3_DBGEN): $(DBT3_DBGEN_SOURCE) $(addsuffix .h,$(DBT3_DBGEN_DISTS_DSS))
 	cd $(STROM_BUILD_ROOT)/test/dbt3 \
         && $(CC) $(DBT3_DBGEN_FLAGS) $(notdir $(DBT3_DBGEN_SOURCE)) \
                                   -o $(notdir $(DBT3_DBGEN))
+
+$(addsuffix .h,$(DBT3_DBGEN_DISTS_DSS)): $(DBT3_DBGEN_DISTS_DSS)
+	@(echo "const char *static_dists_dss ="; \
+          sed -e 's/\\/\\\\/g' -e 's/\t/\\t/g' -e 's/"/\\"/g' \
+              -e 's/^/  "/g' -e 's/$$/\\n"/g' < $^; \
+          echo ";") > $@
 
 $(notdir $(TESTAPP_LARGEOBJECT)): $(TESTAPP_LARGEOBJECT)
 

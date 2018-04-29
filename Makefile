@@ -132,11 +132,11 @@ DATA = $(shell cpp -D 'PGSTROM_CUDA(x)=$(STROM_BUILD_ROOT)/src/cuda_\#\#x.h' \
 SCRIPTS_built = $(STROM_UTILS)
 # Extra files to be cleaned
 EXTRA_CLEAN = $(STROM_UTILS) \
-	$(shell ls $(STROM_BUILD_ROOT)/man/docs/*.md) \
-	$(shell ls */Makefile | sed 's/Makefile/pg_strom.control/g') \
-	$(shell ls pg-strom-*.tar.gz) \
+	$(shell ls $(STROM_BUILD_ROOT)/man/docs/*.md 2>/dev/null) \
+	$(shell ls */Makefile 2>/dev/null | sed 's/Makefile/pg_strom.control/g') \
+	$(shell ls pg-strom-*.tar.gz 2>/dev/null) \
 	$(STROM_BUILD_ROOT)/man/markdown_i18n \
-        $(TESTAPP_LARGEOBJECT) $(DBT3_DBGEN) $(DBT3_DBGEN_DISTS_DSS).h
+	$(EXTRA_CLEAN_TEST)
 
 #
 # Build chain of PostgreSQL
@@ -151,12 +151,6 @@ endif
 
 $(STROM_UTILS): $(addsuffix .c,$(STROM_UTILS)) $(STROM_HEADERS)
 	$(CC) $(CFLAGS) $(addsuffix .c,$@) $(PGSTROM_FLAGS) -I $(IPATH) -L $(LPATH) -lcuda -lnvrtc -o $@$(X)
-
-$(addsuffix .h,$(DBT3_DBGEN_DISTS_DSS)): $(DBT3_DBGEN_DISTS_DSS)
-	@(echo "const char *static_dists_dss ="; \
-          sed -e 's/\\/\\\\/g' -e 's/\t/\\t/g' -e 's/"/\\"/g' \
-              -e 's/^/  "/g' -e 's/$$/\\n"/g' < $^; \
-          echo ";") > $@
 
 $(HTML_FILES): $(HTML_SOURCES) $(HTML_TEMPLATE)
 	@$(MKDIR_P) $(STROM_BUILD_ROOT)/doc/html
