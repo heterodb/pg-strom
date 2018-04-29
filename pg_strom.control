@@ -1,5 +1,5 @@
 # pg_strom extension
-comment = 'pg_strom -- yet another executor powered by stream processor'
-default_version = '1.0'
+comment = 'PG-Strom -- GPU accelerated query execution engine for analytic workloads'
+default_version = '2.0'
 module_pathname = '$libdir/pg_strom'
 relocatable = false

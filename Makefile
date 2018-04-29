@@ -26,8 +26,7 @@ PG_MIN_VERSION_NUM=90600
 #
 # Installation related
 #
-PGSTROM_SQL := $(STROM_BUILD_ROOT)/pg_strom--1.0.sql
-PGSTROM_SQL_SRC = basis.sql aggfuncs.sql matrix.sql float2.sql test.sql
+PGSTROM_SQL := $(STROM_BUILD_ROOT)/sql/pg_strom--2.0.sql
 
 #
 # Source file of CPU portion
@@ -125,9 +124,9 @@ SHLIB_LINK := -L $(LPATH) -lnvrtc -lcuda
 MODULE_big = pg_strom
 OBJS =  $(STROM_OBJS)
 EXTENSION = pg_strom
-DATA_built = $(PGSTROM_SQL)
 DATA = $(shell cpp -D 'PGSTROM_CUDA(x)=$(STROM_BUILD_ROOT)/src/cuda_\#\#x.h' \
-                      $(STROM_BUILD_ROOT)/src/cuda_filelist | grep -v ^\#)
+                      $(STROM_BUILD_ROOT)/src/cuda_filelist | grep -v ^\#) \
+       $(PGSTROM_SQL)
 
 # Support utilities
 SCRIPTS_built = $(STROM_UTILS)
@@ -149,9 +148,6 @@ ifneq ($(STROM_BUILD_ROOT), .)
 pg_strom.control: $(addprefix $(STROM_BUILD_ROOT)/, pg_strom.control)
 	cp -f $< $@
 endif
-
-$(PGSTROM_SQL): $(addprefix $(STROM_BUILD_ROOT)/sql/, $(PGSTROM_SQL_SRC))
-	cat $^ > $@
 
 $(STROM_UTILS): $(addsuffix .c,$(STROM_UTILS)) $(STROM_HEADERS)
 	$(CC) $(CFLAGS) $(addsuffix .c,$@) $(PGSTROM_FLAGS) -I $(IPATH) -L $(LPATH) -lcuda -lnvrtc -o $@$(X)
