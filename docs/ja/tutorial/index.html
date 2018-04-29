@@ -324,13 +324,28 @@ SCANが終わった後のデータをいったんホスト側のバッファに�
 <h2 id="mps">MPSデーモンの利用</h2>
 <p>PostgreSQLのようにマルチプロセス環境でGPUを使用する場合、GPU側コンテキストスイッチの低減やデバイス管理に必要なリソースの低減を目的として、MPS(Multi-Process Service)を使用する事が一般的なソリューションです。</p>
 <p><a href="https://docs.nvidia.com/deploy/mps/index.html">https://docs.nvidia.com/deploy/mps/index.html</a></p>
-<p>しかし、PG-Stromの利用シーンでは、MPSサービスの既知問題により正常に動作しないCUDA APIが存在し、以下のような限定された条件下を除いては使用すべきではありません。</p>
-<ul>
-<li>GPUを使用するPostgreSQLプロセス（CPU並列クエリにおけるバックグラウンドワーカを含む）の数が常に16個以下である。Volta世代のGPUの場合は48個以下である。</li>
-<li>gstore_fdwを使用しない事。</li>
-</ul>
-<p>これは<code>CUipcMemHandle</code>を用いてプロセス間でGPUデバイスメモリを共有する際に、MPSサービス下のプロセスで獲得したGPUデバイスメモリを非MPSサービス下のプロセスでオープンできない事で、GpuJoinが使用するハッシュ表をバックグラウンドワーカー間で共有できなくなるための制限事項です。</p>
-<p>この問題は既にNVIDIAへ報告し、新しいバージョンのCUDA Toolkitにおいて修正されるとの回答を得ています。</p>
+<!--
+
+しかし、PG-Stromの利用シーンでは、MPSサービスの既知問題により正常に動作しないCUDA APIが存在し、以下のような限定された条件下を除いては使用すべきではありません。
+
+- GPUを使用するPostgreSQLプロセス（CPU並列クエリにおけるバックグラウンドワーカを含む）の数が常に16個以下である。Volta世代のGPUの場合は48個以下である。
+- gstore_fdwを使用しない事。
+
+
+
+
+これは`CUipcMemHandle`を用いてプロセス間でGPUデバイスメモリを共有する際に、MPSサービス下のプロセスで獲得したGPUデバイスメモリを非MPSサービス下のプロセスでオープンできない事で、GpuJoinが使用するハッシュ表をバックグラウンドワーカー間で共有できなくなるための制限事項です。
+
+この問題は既にNVIDIAへ報告し、新しいバージョンのCUDA Toolkitにおいて修正されるとの回答を得ています。
+
+
+-->
+
+<p>一方、現在のMPSサービスにはいくつかの<a href="https://docs.nvidia.com/deploy/mps/index.html#topic_3_3_2">制限事項</a>があり、これとPG-Stromの利用する一部機能が被っているため、MPSサービスとPG-Stromを併用する事はできません。PG-Stromを利用する際にはMPSサービスを停止してください。</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>具体的には、GpuPreAggのGPUカーネル関数が内部のハッシュ表を動的に拡大する際に使用する<code>cudaDeviceSynchronize()</code>デバイスランタイム関数が、制限事項であるDynamic Parallelism機能を使用しているため、上記の制限に抵触します。</p>
+</div>
 <h1 id="_5">トラブルシューティング</h1>
 <h2 id="_6">問題の切り分け</h2>
 <p>特定のワークロードを実行した際に何がしかの問題が発生する場合には、それが何に起因するものであるのかを特定するのはトラブルシューティングの第一歩です。</p>

@@ -357,6 +357,14 @@ pgstrom_post_planner(Query *parse,
 static void
 check_nvidia_mps(void)
 {
+	/*
+	 * NOTE: Disables to check MPS status right now, because MPS based on
+	 * CUDA 9.1 does not support dynamic parallelism feature.
+	 * Even though we don't use dynamic GPU kernel launch in GPU code,
+	 * call of cudaDeviceSynchronize() at cuda_gpupreagg.h is considered
+	 * as 'dynamic parallelism'
+	 */
+#if 0
 	const char *command = "echo get_server_list | nvidia-cuda-mps-control";
 	FILE	   *pipe_filp;
 	char		buf[2048];
@@ -426,6 +434,7 @@ check_nvidia_mps(void)
 				(errmsg("NVIDIA MPS server is running, but for the different user. PG-Strom is workable, but not optimal performance."),
 				 errhint("Restart MPS server for uid=%u. Check 'man nvidia-cuda-mps-control' for more details.", getuid())));
 	}
+#endif
 }
 
 /*

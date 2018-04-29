@@ -291,6 +291,7 @@ In case when multi-process application like PostgreSQL uses GPU device, it is a 
 
 [https://docs.nvidia.com/deploy/mps/index.html](https://docs.nvidia.com/deploy/mps/index.html)
 
+<!--
 @ja{
 しかし、PG-Stromの利用シーンでは、MPSサービスの既知問題により正常に動作しないCUDA APIが存在し、以下のような限定された条件下を除いては使用すべきではありません。
 
@@ -313,6 +314,20 @@ However, here is a known issue; some APIs don't work correctly user the use case
 This known problem is, when we share GPU device memory inter processes using `CUipcMemHandle`, a device memory region acquired by the process under MPS service cannot be opened by the process which does not use MPS. This problem prevents to share the inner hash-table of GpuJoin with background workers on CPU parallel execution.
 
 This problem is already reported to NVIDIA, then we got a consensu to fix it at the next version of CUDA Toolkit.
+}
+-->
+
+@ja{
+一方、現在のMPSサービスにはいくつかの[制限事項](https://docs.nvidia.com/deploy/mps/index.html#topic_3_3_2)があり、これとPG-Stromの利用する一部機能が被っているため、MPSサービスとPG-Stromを併用する事はできません。PG-Stromを利用する際にはMPSサービスを停止してください。
+
+!!!note
+    具体的には、GpuPreAggのGPUカーネル関数が内部のハッシュ表を動的に拡大する際に使用する`cudaDeviceSynchronize()`デバイスランタイム関数が、制限事項であるDynamic Parallelism機能を使用しているため、上記の制限に抵触します。
+}
+@en{
+On the other hands, the current version of MPS daemon has [some limitations](https://docs.nvidia.com/deploy/mps/index.html#topic_3_3_2) which overlap with a part of features of PG-Strom, therefore, you cannot use MPS daemon for PG-Strom. Disables MPS daemon when PG-Strom works.
+
+!!!note
+    For details, the `cudaDeviceSynchronize()` device runtime function internally uses dynamic parallelism that is restricted under MPS, when GpuPreAgg's GPU kernel function expands internal hash table on the demand.
 }
 
 @ja:# トラブルシューティング
