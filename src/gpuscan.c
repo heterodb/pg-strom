@@ -839,7 +839,7 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 				&tbody,
 				"  /* %s system column */\n"
 				"  tup_isnull[%d] = !htup;\n"
-				"  if (!htup)\n"
+				"  if (htup)\n"
 				"    tup_values[%d] = kern_getsysatt_%s(htup);\n",
 				NameStr(attr->attname),
 				i, i, NameStr(attr->attname));
