@@ -52,6 +52,7 @@
 #include "executor/executor.h"
 #include "executor/nodeAgg.h"
 #include "executor/nodeCustom.h"
+#include "executor/nodeSubplan.h"
 #include "fmgr.h"
 #include "foreign/fdwapi.h"
 #include "foreign/foreign.h"
@@ -178,6 +179,9 @@
 #error Base PostgreSQL version is too NEW for this PG-Strom code
 #endif
 #endif	/* PG_MAX_VERSION_NUM */
+
+#define PG_MAJOR_VERSION		(PG_VERSION_NUM / 100)
+#define PG_MINOR_VERSION		(PG_VERSION_NUM % 100)
 
 /* inline function is minimum requirement. fortunately, it also
  * become prerequisite of PostgreSQL at v9.6.
@@ -1171,6 +1175,14 @@ extern int compute_parallel_worker(RelOptInfo *rel,
 								   double heap_pages,
 								   double index_pages);
 #endif
+#if PG_VERSION_NUM < 110000
+/* PG11 changed pg_proc definition */
+extern char get_func_prokind(Oid funcid);
+#define PROKIND_FUNCTION	'f'
+#define PROKIND_AGGREGATE	'a'
+#define PROKIND_WINDOW		'w'
+#define PROKIND_PROCEDURE	'p'
+#endif
 extern const char *errorText(int errcode);
 extern const char *errorTextKernel(kern_errorbuf *kerror);
 
@@ -1207,6 +1219,72 @@ extern void show_scan_qual(List *qual, const char *qlabel,
 						   ExplainState *es);
 extern void show_instrumentation_count(const char *qlabel, int which,
 									   PlanState *planstate, ExplainState *es);
+
+/* ----------------------------------------------------------------
+ *
+ * Thin abstruction layer across multiple PostgreSQL versions
+ *
+ * ---------------------------------------------------------------- */
+
+/*
+ * MEMO: tupleDesc was re-defined at PG11. Newer version has flexible-
+ * length of FormData_pg_attribute on the tail
+ */
+#if PG_VERSION_NUM < 110000
+#define tupleDescAttr(tdesc,colidx)		((tdesc)->attrs[(colidx)])
+#else
+#define tupleDescAttr(tdesc,colidx)		(&(tdesc)->attrs[(colidx)])
+#endif
+
+/*
+ * MEMO: Naming convension of data access macro on some data types
+ * were confused before PG11
+ */
+#if PG_VERSION_NUM < 110000
+#define DatumGetRangeTypeP(x)		DatumGetRangeType(x)
+#define PG_GETARG_RANGE_P(x)		PG_GETARG_RANGE(x)
+#define PG_RETURN_RANGE_P(x)		PG_RETURN_RANGE(x)
+
+#define PG_GETARG_ANY_ARRAY_P(x)	PG_GETARG_ANY_ARRAY(x)
+#endif
+
+/*
+ * MEMO: PG11 allows to display unit of numerical values if text-format
+ */
+#if PG_VERSION_NUM < 110000
+static inline void
+ExplainPropertyInt64(const char *qlabel, const char *unit, int64 value,
+					 ExplainState *es)
+{
+	if (es->format == EXPLAIN_FORMAT_TEXT && unit != NULL)
+	{
+		appendStringInfoSpaces(es->str, es->indent * 2);
+		appendStringInfo(es->str, "%s: " INT64_FORMAT " %s\n",
+						 qlabel, value, unit);
+	}
+	else
+		ExplainPropertyLong(qlabel, value, es);
+}
+
+static inline void
+ExplainPropertyFp64(const char *qlabel, const char *unit, double value,
+					int ndigits, ExplainState *es)
+{
+	if (es->format == EXPLAIN_FORMAT_TEXT && unit != NULL)
+	{
+		appendStringInfoSpaces(es->str, es->indent * 2);
+		appendStringInfo(es->str, "%s: %.*f %s",
+						 qlabel, ndigits, value, unit);
+	}
+	else
+		ExplainPropertyFloat(qlabel,value,ndigits,es);
+}
+#else
+#define ExplainPropertyInt64(qlabel,unit,value,es)			\
+	ExplainPropertyInteger((qlabel),(unit),(value),(es))
+#define ExplainPropertyFp64(qlabel,unit,value,ndigits,es)	\
+	ExplainPropertyFloat((qlabel),(unit),(value),(ndigits),(es))
+#endif
 
 /* ----------------------------------------------------------------
  *
@@ -1643,4 +1721,32 @@ pthreadCondSignal(pthread_cond_t *cond)
 	if ((errno = pthread_cond_signal(cond)) != 0)
 		wfatal("failed on pthread_cond_signal: %m");
 }
+
+/*
+ * simple wrapper for permission checks
+ */
+static inline void
+strom_proc_aclcheck(Oid func_oid, Oid user_id, AclMode mode)
+{
+	aclcheck_error(pg_proc_aclcheck(func_oid, user_id, mode),
+#if PG_VERSION_NUM < 110000
+				   ACL_KIND_PROC,
+#else
+				   OBJECT_FUNCTION,
+#endif
+				   format_procedure(func_oid));
+}
+
+static inline void
+strom_foreign_table_aclcheck(Oid ftable_oid, Oid user_id, AclMode mode)
+{
+	aclcheck_error(pg_class_aclcheck(ftable_oid, user_id, mode),
+#if PG_VERSION_NUM < 110000
+				   ACL_KIND_CLASS,
+#else
+				   OBJECT_FOREIGN_TABLE,
+#endif
+				   get_rel_name(ftable_oid));
+}
+
 #endif	/* PG_STROM_H */

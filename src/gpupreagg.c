@@ -1314,6 +1314,8 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 		/* make a final grouping path (sort) */
 		if (can_sort)
 		{
+			PathTarget *target_orig __attribute__((unused));
+
 			sort_path = (Path *)
 				create_sort_path(root,
 								 group_rel,
@@ -1329,9 +1331,7 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 				AggStrategy	rollup_strategy = AGG_PLAIN;
 				List	   *rollup_data_list = NIL;
 #endif
-				bool		found = false;
 				ListCell   *lc;
-
 				/*
 				 * TODO: In this version, we expect group_rel->pathlist have
 				 * a GroupingSetsPath constructed by the built-in code.
@@ -1353,17 +1353,18 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 						rollup_strategy = pathnode->aggstrategy;
 						rollup_data_list = pathnode->rollups;
 #endif
-						found = true;
 						break;
 					}
 				}
-				if (!found)
+				if (!lc)
 					return;		/* give up */
 				final_path = (Path *)
 					create_groupingsets_path(root,
 											 group_rel,
 											 sort_path,
+#if PG_VERSION_NUM < 110000
 											 target_final,
+#endif
 											 (List *)parse->havingQual,
 #if PG_VERSION_NUM < 100000
 											 rollup_lists,
@@ -1374,6 +1375,17 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 #endif
 											 &agg_final_costs,
 											 num_groups);
+#if PG_VERSION_NUM >= 110000
+				/* adjust cost and overwrite PathTarget */
+				target_orig = final_path->pathtarget;
+				final_path->startup_cost += (target_final->cost.startup -
+											 target_orig->cost.startup);
+				final_path->total_cost += (target_final->cost.startup -
+										   target_orig->cost.startup) +
+					(target_final->cost.per_tuple -
+					 target_orig->cost.per_tuple) * final_path->rows;
+				final_path->pathtarget = target_final;
+#endif
 			}
 			else if (parse->hasAggs)
 				final_path = (Path *)
@@ -1388,14 +1400,29 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 									&agg_final_costs,
 									num_groups);
 			else if (parse->groupClause)
+			{
 				final_path = (Path *)
 					create_group_path(root,
 									  group_rel,
 									  sort_path,
+#if PG_VERSION_NUM < 110000
 									  target_final,
+#endif
 									  parse->groupClause,
 									  (List *) havingQual,
 									  num_groups);
+#if PG_VERSION_NUM >= 110000
+				/* adjust cost and overwrite PathTarget */
+				target_orig = final_path->pathtarget;
+				final_path->startup_cost += (target_final->cost.startup -
+											 target_orig->cost.startup);
+				final_path->total_cost += (target_final->cost.startup -
+										   target_orig->cost.startup) +
+					(target_final->cost.per_tuple -
+					 target_orig->cost.per_tuple) * final_path->rows;
+				final_path->pathtarget = target_final;
+#endif
+			}
 			else
 				elog(ERROR, "Bug? unexpected AGG/GROUP BY requirement");
 
@@ -1441,13 +1468,23 @@ static void
 gpupreagg_add_grouping_paths(PlannerInfo *root,
 							 UpperRelationKind stage,
 							 RelOptInfo *input_rel,
-							 RelOptInfo *group_rel)
+							 RelOptInfo *group_rel
+#if PG_VERSION_NUM >= 110000
+							 ,void *extra
+#endif
+	)
 {
 	Path	   *input_path;
 	ListCell   *lc;
 
 	if (create_upper_paths_next)
+	{
+#if PG_VERSION_NUM < 110000
 		(*create_upper_paths_next)(root, stage, input_rel, group_rel);
+#else
+		(*create_upper_paths_next)(root, stage, input_rel, group_rel, extra);
+#endif
+	}
 
 	if (stage != UPPERREL_GROUP_AGG)
 		return;
@@ -2809,7 +2846,7 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 				/* data type of the outer relation input stream */
 				if (outer_tlist == NIL)
 				{
-					Form_pg_attribute	attr = outer_desc->attrs[i-1];
+					Form_pg_attribute attr = tupleDescAttr(outer_desc, i-1);
 					
 					dtype = pgstrom_devtype_lookup_and_track(attr->atttypid,
 															 context);
@@ -4085,8 +4122,8 @@ ExplainGpuPreAgg(CustomScanState *node, List *ancestors, ExplainState *es)
 			= pg_atomic_read_u64(&gpa_rtstat->num_fallback_rows);
 
 		if (num_fallback_rows > 0)
-			ExplainPropertyLong("Num of CPU fallback rows",
-								num_fallback_rows, es);
+			ExplainPropertyInt64("Num of CPU fallback rows",
+								 NULL, num_fallback_rows, es);
 	}
 }
 

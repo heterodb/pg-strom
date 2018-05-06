@@ -1636,7 +1636,16 @@ PlanGpuJoinPath(PlannerInfo *root,
 
 		if (IS_OUTER_JOIN(gjpath->inners[i].join_type))
 		{
+			/*
+			 * MEMO: extract_actual_join_clauses was revised by
+			 * the commit e5d83995e9f88426b325a7ea8ce0770926dc64de.
+			 */
 			extract_actual_join_clauses(gjpath->inners[i].join_quals,
+#if ((PG_MAJOR_VERSION ==  906 && PG_MINOR_VERSION > 8) ||	\
+	 (PG_MAJOR_VERSION == 1000 && PG_MINOR_VERSION > 3) ||	\
+	 (PG_MAJOR_VERSION >= 1100))
+										best_path->path.parent->relids,
+#endif
 										&join_quals, &other_quals);
 		}
 		else
@@ -2406,25 +2415,25 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 
 			snprintf(qlabel, sizeof(qlabel),
 					 "Depth% 2d Plan Rows-in", depth);
-			ExplainPropertyFloat(qlabel, plan_nrows_in, 0, es);
+			ExplainPropertyFp64(qlabel, NULL, plan_nrows_in, 0, es);
 
 			snprintf(qlabel, sizeof(qlabel),
 					 "Depth% 2d Plan Rows-out", depth);
-			ExplainPropertyFloat(qlabel, plan_nrows_out, 0, es);
+			ExplainPropertyFp64(qlabel, NULL, plan_nrows_out, 0, es);
 
 			if (gj_rtstat)
 			{
 				snprintf(qlabel, sizeof(qlabel),
 						 "Depth% 2d Actual Rows-in", depth);
-				ExplainPropertyFloat(qlabel, exec_nrows_in, 0, es);
+				ExplainPropertyFp64(qlabel, NULL, exec_nrows_in, 0, es);
 
 				snprintf(qlabel, sizeof(qlabel),
                          "Depth% 2d Actual Rows-out by inner join", depth);
-				ExplainPropertyFloat(qlabel, exec_nrows_out1, 0, es);
+				ExplainPropertyFp64(qlabel, NULL, exec_nrows_out1, 0, es);
 
 				snprintf(qlabel, sizeof(qlabel),
 						 "Depth% 2d Actual Rows-out by outer join", depth);
-				ExplainPropertyFloat(qlabel, exec_nrows_out2, 0, es);
+				ExplainPropertyFp64(qlabel, NULL, exec_nrows_out2, 0, es);
 			}
 		}
 
@@ -4267,7 +4276,7 @@ gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
 	off = 0;
 	for (i=0; i < nattrs; i++)
 	{
-		Form_pg_attribute	attr = tupdesc->attrs[i];
+		Form_pg_attribute	attr = tupleDescAttr(tupdesc, i);
 
 		resnum = tuple_dst_resno[i - FirstLowInvalidHeapAttributeNumber];
 		if (hasnulls && att_isnull(i, htup->t_bits))

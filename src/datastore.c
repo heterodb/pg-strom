@@ -92,7 +92,7 @@ KDS_fetch_tuple_slot(TupleTableSlot *slot,
 	{
 		size_t	row_index = gts->curr_index++;
 		Datum  *tts_values = KERN_DATA_STORE_VALUES(kds, row_index);
-		bool   *tts_isnull = KERN_DATA_STORE_ISNULL(kds, row_index);
+		char   *tts_isnull = KERN_DATA_STORE_ISNULL(kds, row_index);
 		int		natts = slot->tts_tupleDescriptor->natts;
 
 		memcpy(slot->tts_values, tts_values, sizeof(Datum) * natts);
@@ -350,7 +350,7 @@ init_kernel_data_store(kern_data_store *kds,
 
 	for (i=0; i < tupdesc->natts; i++)
 	{
-		Form_pg_attribute attr = tupdesc->attrs[i];
+		Form_pg_attribute attr = tupleDescAttr(tupdesc, i);
 		int		attalign = typealign_get_width(attr->attalign);
 		bool	attbyval = attr->attbyval;
 		int		attlen = attr->attlen;

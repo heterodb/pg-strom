@@ -879,7 +879,7 @@ pgstrom_ccache_invalidator(PG_FUNCTION_ARGS)
 			!TRIGGER_FIRED_BY_UPDATE(trigdata->tg_event))
 			elog(ERROR, "%s: triggered by unknown event", __FUNCTION__);
 
-		block_nr_last = DatumGetInt32(flinfo->fn_extra);
+		block_nr_last = PointerGetDatum(flinfo->fn_extra);
 		block_nr = BlockIdGetBlockNumber(&tuple->t_self.ip_blkid);
 		block_nr &= ~(CCACHE_CHUNK_NBLOCKS - 1);
 		if ((block_nr_last & ~(CCACHE_CHUNK_NBLOCKS - 1)) != 0)
@@ -1264,7 +1264,11 @@ ccache_builder_connectdb(void)
 	 */
 	PG_ENSURE_ERROR_CLEANUP(ccache_builder_fail_on_connectdb, 0L);
 	{
-		BackgroundWorkerInitializeConnection(dbname, NULL);
+#if PG_VERSION_NUM < 110000
+		BackgroundWorkerInitializeConnection(dbname,NULL);
+#else
+		BackgroundWorkerInitializeConnection(dbname,NULL,0);
+#endif
 	}
 	PG_END_ENSURE_ERROR_CLEANUP(ccache_builder_fail_on_connectdb, 0L);
 	elog(BUILDER_LOG,
@@ -1407,7 +1411,7 @@ ccache_setup_buffer(TupleDesc tupdesc,
 	cc_buf->values = palloc0(sizeof(void *) * nattrs);
 	for (j=0; j < tupdesc->natts; j++)
 	{
-		Form_pg_attribute attr = tupdesc->attrs[j];
+		Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
 
 		if (attr->attisdropped)
 			continue;
@@ -1476,7 +1480,7 @@ ccache_expand_buffer(TupleDesc tupdesc, ccacheBuffer *cc_buf,
 		Form_pg_attribute attr;
 
 		if (j < tupdesc->natts)
-			attr = tupdesc->attrs[j];
+			attr = tupleDescAttr(tupdesc, j);
 		else
 			attr = SystemAttributeDefinition(j - cc_buf->nattrs, true);
 
@@ -1550,7 +1554,7 @@ ccacheBufferSanityCheckKDS(TupleDesc tupdesc,
 		Form_pg_attribute attr;
 
 		if (j < tupdesc->natts)
-			attr = tupdesc->attrs[j];
+			attr = tupleDescAttr(tupdesc, j);
 		else
 			attr = SystemAttributeDefinition(j - kds->ncols, true);
 
@@ -1713,7 +1717,7 @@ ccache_copy_buffer_to_kds(kern_data_store *kds,
 		size_t			nbytes;
 
 		if (j < tupdesc->natts)
-			attr = tupdesc->attrs[j];
+			attr = tupleDescAttr(tupdesc, j);
 		else
 			attr = SystemAttributeDefinition(j - kds->ncols, true);
 		/* skip dropped columns */
@@ -1852,7 +1856,7 @@ ccache_buffer_append_row(TupleDesc tupdesc,
 	nitems = cc_buf->nitems;
 	for (j=0; j < tupdesc->natts; j++)
 	{
-		Form_pg_attribute attr = tupdesc->attrs[j];
+		Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
 		bool	isnull = tup_isnull[j];
 		Datum	datum = tup_values[j];
 
@@ -1953,16 +1957,16 @@ ccache_buffer_append_row(TupleDesc tupdesc,
 				switch (attr->attlen)
 				{
 					case sizeof(cl_char):
-						*((cl_char *)addr) = GET_1_BYTE(datum);
+						*((cl_char *)addr) = (datum & 0x000000ffU);
 						break;
 					case sizeof(cl_short):
-						*((cl_short *)addr) = GET_2_BYTES(datum);
+						*((cl_short *)addr) = (datum & 0x0000ffffU);
 						break;
 					case sizeof(cl_int):
-						*((cl_int *)addr) = GET_4_BYTES(datum);
+						*((cl_int *)addr) = (datum & 0xffffffffU);
 						break;
 					case sizeof(cl_long):
-						*((cl_long *)addr) = GET_8_BYTES(datum);
+						*((cl_long *)addr) = datum;
 						break;
 					default:
 						memcpy(addr, &datum, attr->attlen);
@@ -2099,7 +2103,7 @@ __ccache_preload_chunk(ccacheChunk *cc_chunk,
 			attr = SystemAttributeDefinition(j, true);
 		}
 		else
-			attr = tupdesc->attrs[j];
+			attr = tupleDescAttr(tupdesc, j);
 
 		if (attr->attlen < 0)
 		{

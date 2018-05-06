@@ -128,7 +128,37 @@ compute_parallel_worker(RelOptInfo *rel, double heap_pages, double index_pages)
 #endif		/* < PG10 */
 
 
+#if PG_VERSION_NUM < 110000
+char
+get_func_prokind(Oid funcid)
+{
+	HeapTuple	tup;
+	Form_pg_proc procForm;
+	char		prokind;
 
+	tup = SearchSysCache1(PROCOID, ObjectIdGetDatum(funcid));
+	if (!HeapTupleIsValid(tup))
+		elog(ERROR, "cache lookup failed for function %u", funcid);
+	procForm = (Form_pg_proc) GETSTRUCT(tup);
+	if (procForm->proisagg)
+	{
+		Assert(!procForm->proiswindow);
+		prokind = PROKIND_AGGREGATE;
+	}
+	else if (procForm->proiswindow)
+	{
+		Assert(!procForm->proisagg);
+		prokind = PROKIND_WINDOW;
+	}
+	else
+	{
+		prokind = PROKIND_FUNCTION;
+	}
+	ReleaseSysCache(tup);
+
+	return prokind;
+}
+#endif		/* <PG11 */
 
 
 

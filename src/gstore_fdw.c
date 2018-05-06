@@ -475,7 +475,7 @@ gstore_fdw_make_buffer_writable(Relation frel, GpuStoreBuffer *gs_buffer)
 						gs_buffer->memcxt);
 	for (i=0; i < tupdesc->natts; i++)
 	{
-		Form_pg_attribute attr = tupdesc->attrs[i];
+		Form_pg_attribute attr = tupleDescAttr(tupdesc, i);
 		int		vl_compress;
 
 		gstore_fdw_column_options(attr->attrelid, attr->attnum,
@@ -829,7 +829,7 @@ lnext:
 		/* OK, tuple is visible */
 		for (j=0; j < tupdesc->natts; j++)
 		{
-			Form_pg_attribute attr = tupdesc->attrs[j];
+			Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
 			vl_dict_key	*vkey;
 			int			unitsz;
 			void	   *addr;
@@ -1212,7 +1212,7 @@ gstore_fdw_alloc_pgstrom_buffer(Relation frel,
 	length = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
 	for (j=0; j < tupdesc->natts; j++)
 	{
-		Form_pg_attribute attr = tupdesc->attrs[j];
+		Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
 
 		if (attr->attisdropped)
 			continue;
@@ -2001,7 +2001,6 @@ Datum
 pgstrom_gstore_export_ipchandle(PG_FUNCTION_ARGS)
 {
 	Oid				gstore_oid = PG_GETARG_OID(0);
-	AclResult		aclresult;
 	cl_int			pinning;
 	GpuStoreChunk  *gs_chunk;
 	char		   *result;
@@ -2009,10 +2008,7 @@ pgstrom_gstore_export_ipchandle(PG_FUNCTION_ARGS)
 	if (!relation_is_gstore_fdw(gstore_oid))
 		elog(ERROR, "relation %u is not gstore_fdw foreign table",
 			 gstore_oid);
-	aclresult = pg_class_aclcheck(gstore_oid, GetUserId(), ACL_SELECT);
-	if (aclresult != ACLCHECK_OK)
-		aclcheck_error(aclresult, ACL_KIND_CLASS,
-					   get_rel_name(gstore_oid));
+	strom_foreign_table_aclcheck(gstore_oid, GetUserId(), ACL_SELECT);
 
 	gstore_fdw_table_options(gstore_oid, &pinning, NULL);
 	if (pinning < 0)
@@ -2165,7 +2161,7 @@ gstore_open_device_memory(GpuContext *gcontext, Relation frel)
 	length = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
 	for (j=0; j < tupdesc->natts; j++)
 	{
-		Form_pg_attribute attr = tupdesc->attrs[j];
+		Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
 
 		if (attr->attisdropped)
 			continue;
@@ -2311,14 +2307,10 @@ pgstrom_gstore_fdw_format(PG_FUNCTION_ARGS)
 {
 	Oid				gstore_oid = PG_GETARG_OID(0);
 	GpuStoreChunk  *gs_chunk;
-	AclResult		aclresult;
 
 	if (!relation_is_gstore_fdw(gstore_oid))
 		PG_RETURN_NULL();
-	aclresult = pg_class_aclcheck(gstore_oid, GetUserId(), ACL_SELECT);
-	if (aclresult != ACLCHECK_OK)
-		aclcheck_error(aclresult, ACL_KIND_CLASS,
-					   get_rel_name(gstore_oid));
+	strom_foreign_table_aclcheck(gstore_oid, GetUserId(), ACL_SELECT);
 
 	gs_chunk = gstore_fdw_lookup_chunk(gstore_oid, GetActiveSnapshot());
 	if (!gs_chunk)
@@ -2337,15 +2329,11 @@ pgstrom_gstore_fdw_nitems(PG_FUNCTION_ARGS)
 {
 	Oid				gstore_oid = PG_GETARG_OID(0);
 	GpuStoreChunk  *gs_chunk;
-	AclResult		aclresult;
 	int64			retval = 0;
 
 	if (!relation_is_gstore_fdw(gstore_oid))
 		PG_RETURN_NULL();
-	aclresult = pg_class_aclcheck(gstore_oid, GetUserId(), ACL_SELECT);
-	if (aclresult != ACLCHECK_OK)
-		aclcheck_error(aclresult, ACL_KIND_CLASS,
-					   get_rel_name(gstore_oid));
+	strom_foreign_table_aclcheck(gstore_oid, GetUserId(), ACL_SELECT);
 
 	gs_chunk = gstore_fdw_lookup_chunk(gstore_oid, GetActiveSnapshot());
 	if (gs_chunk)
@@ -2362,16 +2350,12 @@ Datum
 pgstrom_gstore_fdw_nattrs(PG_FUNCTION_ARGS)
 {
 	Oid				gstore_oid = PG_GETARG_OID(0);
-	AclResult		aclresult;
 	Relation		frel;
 	int64			retval = 0;
 
 	if (!relation_is_gstore_fdw(gstore_oid))
 		PG_RETURN_NULL();
-	aclresult = pg_class_aclcheck(gstore_oid, GetUserId(), ACL_SELECT);
-	if (aclresult != ACLCHECK_OK)
-		aclcheck_error(aclresult, ACL_KIND_CLASS,
-					   get_rel_name(gstore_oid));
+	strom_foreign_table_aclcheck(gstore_oid, GetUserId(), ACL_SELECT);
 
 	frel = heap_open(gstore_oid, AccessShareLock);
 	retval = RelationGetNumberOfAttributes(frel);
@@ -2388,16 +2372,12 @@ Datum
 pgstrom_gstore_fdw_rawsize(PG_FUNCTION_ARGS)
 {
 	Oid				gstore_oid = PG_GETARG_OID(0);
-	AclResult		aclresult;
 	GpuStoreChunk  *gs_chunk;
 	int64			retval = 0;
 
 	if (!relation_is_gstore_fdw(gstore_oid))
 		PG_RETURN_NULL();
-	aclresult = pg_class_aclcheck(gstore_oid, GetUserId(), ACL_SELECT);
-	if (aclresult != ACLCHECK_OK)
-		aclcheck_error(aclresult, ACL_KIND_CLASS,
-					   get_rel_name(gstore_oid));
+	strom_foreign_table_aclcheck(gstore_oid, GetUserId(), ACL_SELECT);
 
 	gs_chunk = gstore_fdw_lookup_chunk(gstore_oid, GetActiveSnapshot());
 	if (gs_chunk)

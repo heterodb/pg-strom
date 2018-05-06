@@ -468,10 +468,13 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	/* If appropriate, consider parallel GpuScan */
 	if (baserel->consider_parallel && baserel->lateral_relids == NULL)
 	{
-		int		parallel_nworkers;
-
-		parallel_nworkers = compute_parallel_worker(baserel,
-													baserel->pages, -1.0);
+		int		parallel_nworkers
+			= compute_parallel_worker(baserel,
+									  baserel->pages, -1.0
+#if PG_VERSION_NUM >= 110000
+									  ,max_parallel_workers_per_gather
+#endif
+				);
 		/*
 		 * XXX - Do we need a something specific logic for GpuScan to adjust
 		 * parallel_workers.
@@ -487,7 +490,12 @@ gpuscan_add_scan_path(PlannerInfo *root,
 		add_partial_path(baserel, pathnode);
 
 		/* then, potentially generate Gather + GpuScan path */
-		generate_gather_paths(root, baserel);
+		generate_gather_paths(root,
+							  baserel
+#if PG_VERSION_NUM >= 110000
+							  ,false
+#endif
+			);
 
 		foreach (lc, baserel->pathlist)
 		{
@@ -784,7 +792,7 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 		if (anum < 0)
 			attr = SystemAttributeDefinition(anum, true);
 		else
-			attr = tupdesc->attrs[anum - 1];
+			attr = tupleDescAttr(tupdesc, anum-1);
 
 		dtype = pgstrom_devtype_lookup(attr->atttypid);
 		if (!dtype)
@@ -873,7 +881,7 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 
 	for (i=0; i < tupdesc->natts; i++)
 	{
-		Form_pg_attribute attr = tupdesc->attrs[i];
+		Form_pg_attribute attr = tupleDescAttr(tupdesc, i);
 		bool		referenced = false;
 
 		dtype = pgstrom_devtype_lookup(attr->atttypid);
@@ -1167,7 +1175,7 @@ build_gpuscan_projection_walker(Node *node, void *__context)
 			context->compatible_tlist = false;
 		else
 		{
-			Form_pg_attribute	attr = tupdesc->attrs[attnum-1];
+			Form_pg_attribute	attr = tupleDescAttr(tupdesc, attnum-1);
 
 			/* should not be a reference to dropped columns */
 			Assert(!attr->attisdropped);
@@ -1312,7 +1320,7 @@ bufsz_estimate_gpuscan_projection(RelOptInfo *baserel,
 
 		for (j=0; j < tupdesc->natts; j++)
 		{
-			Form_pg_attribute attr = tupdesc->attrs[j];
+			Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
 
 			proj_tuple_sz = att_align_nominal(proj_tuple_sz, attr->attalign);
 			proj_tuple_sz += baserel->attr_widths[j + 1 - baserel->min_attr];
@@ -2085,8 +2093,8 @@ ExplainGpuScan(CustomScanState *node, List *ancestors, ExplainState *es)
 		{
 			Instrumentation *instr = gss->gts.css.ss.ps.instrument;
 
-			ExplainPropertyLong("Rows Removed by GPU Filter",
-								nitems_filtered / instr->nloops, es);
+			ExplainPropertyInt64("Rows Removed by GPU Filter",
+								 NULL, nitems_filtered / instr->nloops, es);
 		}
 	}
 

@@ -81,66 +81,94 @@ construct_kern_parambuf(List *used_params, ExprContext *econtext,
 		{
 			ParamListInfo param_info = econtext->ecxt_param_list_info;
 			Param  *param = (Param *) node;
+			int		param_id = param->paramid;
+			Datum	param_value;
+			bool	param_isnull;
 
-			if (param_info &&
-				param->paramid > 0 && param->paramid <= param_info->numParams)
+			if (!param_info ||
+				param_id < 1 || param_id > param_info->numParams)
+				elog(ERROR, "no value found for parameter %d", param_id);
+
+			if (param->paramkind == PARAM_EXEC)
 			{
-				ParamExternData	*prm = &param_info->params[param->paramid - 1];
+				/* See ExecEvalParamExec */
+				ParamExecData  *prm
+					= &(econtext->ecxt_param_exec_vals[param_id]);
+				if (prm->execPlan != NULL)
+				{
+					/* Parameter not evaluated yet, so go do it */
+					ExecSetParamPlan(prm->execPlan, econtext);
+					/* ExecSetParamPlan should have processed this param... */
+					Assert(prm->execPlan == NULL);
+				}
+				param_isnull = prm->isnull;
+				param_value  = prm->value;
+			}
+			else if (param->paramkind == PARAM_EXTERN)
+			{
+				/* ExecEvalParamExtern */
+				ParamExternData *prm;
+				ParamExternData  prmData __attribute__((unused));
 
-				/* give hook a chance in case parameter is dynamic */
+#if PG_VERSION_NUM < 110000
+				prm = &param_info->params[param_id - 1];
 				if (!OidIsValid(prm->ptype) && param_info->paramFetch != NULL)
-					(*param_info->paramFetch) (param_info, param->paramid);
-
-				kparams = (kern_parambuf *)str.data;
-				if (!OidIsValid(prm->ptype))
-				{
-					elog(INFO, "debug: Param has no particular data type");
-					kparams->poffset[index++] = 0;	/* null */
-					continue;
-				}
-				/* safety check in case hook did something unexpected */
-				if (prm->ptype != param->paramtype)
-					ereport(ERROR,
-							(errcode(ERRCODE_DATATYPE_MISMATCH),
-							 errmsg("type of parameter %d (%s) does not match "
-									"that when preparing the plan (%s)",
-									param->paramid,
-									format_type_be(prm->ptype),
-									format_type_be(param->paramtype))));
-				if (prm->isnull)
-					kparams->poffset[index] = 0;	/* null */
+					(*param_info->paramFetch) (param_info, param_id);
+#else
+				if (param_info->paramFetch != NULL)
+					prm = param_info->paramFetch(param_info, param_id,
+												 false, &prmData);
 				else
-				{
-					int16	typlen;
-					bool	typbyval;
-
-					get_typlenbyval(prm->ptype, &typlen, &typbyval);
-					if (typbyval)
-					{
-						appendBinaryStringInfo(&str,
-											   (char *)&prm->value,
-											   typlen);
-					}
-					else if (typlen > 0)
-					{
-						appendBinaryStringInfo(&str,
-											   DatumGetPointer(prm->value),
-											   typlen);
-					}
-					else
-					{
-						appendBinaryStringInfo(&str,
-											   DatumGetPointer(prm->value),
-											   VARSIZE(prm->value));
-					}
-				}
+					prm = &param_info->params[param_id - 1];
+#endif
+				if (!OidIsValid(prm->ptype))
+					elog(ERROR, "no value found for parameter %d", param_id);
+				else if (prm->ptype != param->paramtype)
+					elog(ERROR,
+						 "type of parameter %d (%s) does not match that "
+						 "when preparing the plan (%s)",
+						 param_id,
+						 format_type_be(prm->ptype),
+						 format_type_be(param->paramtype));
+				param_isnull = prm->isnull;
+				param_value  = prm->value;
 			}
 			else
 			{
-				ereport(ERROR,
-						(errcode(ERRCODE_UNDEFINED_OBJECT),
-						 errmsg("no value found for parameter %d",
-								param->paramid)));
+				elog(ERROR, "Bug? unexpected parameter kind: %d",
+					 (int)param->paramkind);
+			}
+			kparams = (kern_parambuf *)str.data;
+			if (param_isnull)
+				kparams->poffset[index] = 0;	/* null */
+			else
+			{
+				int16	typlen;
+				bool	typbyval;
+
+				get_typlenbyval(param->paramtype, &typlen, &typbyval);
+				if (typbyval)
+				{
+					appendBinaryStringInfo(&str,
+										   (char *)&param_value,
+										   typlen);
+				}
+				else if (typlen > 0)
+				{
+					appendBinaryStringInfo(&str,
+										   DatumGetPointer(param_value),
+										   typlen);
+				}
+				else
+				{
+					struct varlena *temp = PG_DETOAST_DATUM(param_value);
+
+					appendBinaryStringInfo(&str,
+										   DatumGetPointer(temp),
+										   VARSIZE(temp));
+					if (param_value != PointerGetDatum(temp))
+						pfree(temp);
+				}
 			}
 		}
 		else if (!nested_custom_scan_tlist &&
@@ -216,7 +244,7 @@ pgstromInitGpuTaskState(GpuTaskState *gts,
 			{
 				for (i=0; i < tupdesc->natts; i++)
 				{
-					Form_pg_attribute	attr = tupdesc->attrs[i];
+					Form_pg_attribute	attr = tupleDescAttr(tupdesc, i);
 
 					if (attr->attisdropped)
 						continue;
@@ -584,9 +612,11 @@ pgstromExplainGpuTaskState(GpuTaskState *gts, ExplainState *es)
 	else
 	{
 		if (gts->ccache_refs)
-			ExplainPropertyLong("CCache Hits", gts->ccache_count, es);
+			ExplainPropertyInt64("CCache Hits",
+								 NULL, gts->ccache_count, es);
 		else if (es->format != EXPLAIN_FORMAT_TEXT)
-			ExplainPropertyLong("CCache Hits", gts->ccache_count, es);
+			ExplainPropertyInt64("CCache Hits",
+								 NULL, gts->ccache_count, es);
 	}
 
 	/* NVMe-Strom support */
@@ -600,7 +630,8 @@ pgstromExplainGpuTaskState(GpuTaskState *gts, ExplainState *es)
 
 	/* Number of CPU fallbacks, if any */
 	if (es->analyze && gts->num_cpu_fallbacks > 0)
-		ExplainPropertyLong("CPU fallbacks", gts->num_cpu_fallbacks, es);
+		ExplainPropertyInt64("CPU fallbacks",
+							 NULL, gts->num_cpu_fallbacks, es);
 
 	/* Source path of the GPU kernel */
 	if (es->verbose &&
@@ -784,11 +815,14 @@ pgstromExplainOuterScan(GpuTaskState *gts,
 							 outer_plan_width);
 		else
 		{
-			ExplainPropertyFloat("Outer Startup Cost",
-								 outer_startup_cost, 2, es);
-			ExplainPropertyFloat("Outer Total Cost", outer_total_cost, 2, es);
-			ExplainPropertyFloat("Outer Plan Rows", outer_plan_rows, 0, es);
-			ExplainPropertyInteger("Outer Plan Width", outer_plan_width, es);
+			ExplainPropertyFp64("Outer Startup Cost",
+								NULL, outer_startup_cost, 2, es);
+			ExplainPropertyFp64("Outer Total Cost",
+								NULL, outer_total_cost, 2, es);
+			ExplainPropertyFp64("Outer Plan Rows",
+								NULL, outer_plan_rows, 0, es);
+			ExplainPropertyInt64("Outer Plan Width",
+								 NULL, outer_plan_width, es);
 		}
 	}
 
@@ -823,13 +857,13 @@ pgstromExplainOuterScan(GpuTaskState *gts,
 		{
 			if (es->timing)
 			{
-				ExplainPropertyFloat("Outer Actual Startup Time",
-									 startup_sec, 3, es);
-				ExplainPropertyFloat("Outer Actual Total Time",
-									 total_sec, 3, es);
+				ExplainPropertyFp64("Outer Actual Startup Time",
+									NULL, startup_sec, 3, es);
+				ExplainPropertyFp64("Outer Actual Total Time",
+									NULL, total_sec, 3, es);
 			}
-			ExplainPropertyFloat("Outer Actual Rows", rows, 0, es);
-			ExplainPropertyFloat("Outer Actual Loops", nloops, 0, es);
+			ExplainPropertyFp64("Outer Actual Rows", NULL, rows, 0, es);
+			ExplainPropertyFp64("Outer Actual Loops", NULL, nloops, 0, es);
 		}
 	}
 	else if (es->analyze)
@@ -840,11 +874,15 @@ pgstromExplainOuterScan(GpuTaskState *gts,
 		{
 			if (es->timing)
 			{
-				ExplainPropertyFloat("Outer Actual Startup Time", 0.0, 3, es);
-				ExplainPropertyFloat("Outer Actual Total Time", 0.0, 3, es);
+				ExplainPropertyFp64("Outer Actual Startup Time",
+									NULL, 0.0, 3, es);
+				ExplainPropertyFp64("Outer Actual Total Time",
+									NULL, 0.0, 3, es);
 			}
-			ExplainPropertyFloat("Outer Actual Rows", 0.0, 0, es);
-			ExplainPropertyFloat("Outer Actual Loops", 0.0, 0, es);
+			ExplainPropertyFp64("Outer Actual Rows",
+								NULL, 0.0, 0, es);
+			ExplainPropertyFp64("Outer Actual Loops",
+								NULL, 0.0, 0, es);
 		}
 	}
 	if (es->format == EXPLAIN_FORMAT_TEXT)
@@ -858,10 +896,11 @@ pgstromExplainOuterScan(GpuTaskState *gts,
 		ExplainPropertyText("Outer Scan Filter", temp, es);
 
 		if (gts->outer_instrument.nfiltered1 > 0.0)
-			ExplainPropertyFloat("Rows Removed by Outer Scan Filter",
-								 gts->outer_instrument.nfiltered1 /
-								 gts->outer_instrument.nloops,
-								 0, es);
+			ExplainPropertyFp64("Rows Removed by Outer Scan Filter",
+								NULL,
+								gts->outer_instrument.nfiltered1 /
+								gts->outer_instrument.nloops,
+								0, es);
 	}
 }
 

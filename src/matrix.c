@@ -238,7 +238,7 @@ PG_FUNCTION_INFO_V1(varbit_to_int4_array);
 Datum
 int4_array_to_varbit(PG_FUNCTION_ARGS)
 {
-	AnyArrayType   *array = PG_GETARG_ANY_ARRAY(0);
+	AnyArrayType   *array = PG_GETARG_ANY_ARRAY_P(0);
 	VarBit		   *varbit;
 	Size			len;
 	cl_int			i, nitems;
@@ -1914,27 +1914,27 @@ PG_FUNCTION_INFO_V1(composite_type_rawsize);
 Datum
 float4_as_int4(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_DATUM(GET_4_BYTES(PG_GETARG_DATUM(0)));
+	PG_RETURN_DATUM(PG_GETARG_DATUM(0) & 0xffffffffU);
 }
 PG_FUNCTION_INFO_V1(float4_as_int4);
 
 Datum
 int4_as_float4(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_DATUM(GET_4_BYTES(PG_GETARG_DATUM(0)));
+	PG_RETURN_DATUM(PG_GETARG_DATUM(0) & 0xffffffffU);
 }
 PG_FUNCTION_INFO_V1(int4_as_float4);
 
 Datum
 float8_as_int8(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_DATUM(GET_8_BYTES(PG_GETARG_DATUM(0)));
+	PG_RETURN_DATUM(PG_GETARG_DATUM(0));
 }
 PG_FUNCTION_INFO_V1(float8_as_int8);
 
 Datum
 int8_as_float8(PG_FUNCTION_ARGS)
 {
-	PG_RETURN_DATUM(GET_8_BYTES(PG_GETARG_DATUM(0)));
+	PG_RETURN_DATUM(PG_GETARG_DATUM(0));
 }
 PG_FUNCTION_INFO_V1(int8_as_float8);

@@ -1688,37 +1688,52 @@ plcuda_function_validator(PG_FUNCTION_ARGS)
 {
 	Oid				func_oid = PG_GETARG_OID(0);
 	HeapTuple		tuple;
-	Form_pg_proc	procForm;
+	char			prokind;
 	plcudaTaskState	*plts;
 
 	if (!CheckFunctionValidatorAccess(fcinfo->flinfo->fn_oid, func_oid))
 		PG_RETURN_VOID();
-
-	tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(func_oid));
-	if (!HeapTupleIsValid(tuple))
-		elog(ERROR, "cache lookup failed for function %u", func_oid);
-	procForm = (Form_pg_proc) GETSTRUCT(tuple);
-
 	/*
 	 * Sanity check of PL/CUDA functions
 	 */
-	if (procForm->proisagg)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("Unable to use PL/CUDA for aggregate functions")));
-	if (procForm->proiswindow)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("Unable to use PL/CUDA for window functions")));
-	if (procForm->proretset)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("Righ now, PL/CUDA function does not support set returning function")));
+	prokind = get_func_prokind(func_oid);
+	switch (prokind)
+	{
+		case PROKIND_FUNCTION:
+			/* OK */
+			break;
+		case PROKIND_AGGREGATE:
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("Unable to use PL/CUDA for aggregate functions")));
+			break;
+		case PROKIND_WINDOW:
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("Unable to use PL/CUDA for window functions")));
+			break;
+		case PROKIND_PROCEDURE:
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("Unable to use PL/CUDA for procedure")));
+			break;
+		default:
+			elog(ERROR, "Bug? unknown procedure kind: %c", prokind);
+			break;
+	}
 
 	/*
 	 * Only validation of the CUDA code. Run synchronous code build, then
 	 * raise an error if code block has any error.
 	 */
+	tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(func_oid));
+	if (!HeapTupleIsValid(tuple))
+		elog(ERROR, "cache lookup failed for function %u", func_oid);
+	if (((Form_pg_proc) GETSTRUCT(tuple))->proretset)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("Righ now, PL/CUDA function does not support set returning function")));
+
 	plts = plcuda_exec_begin(tuple, NULL);
 	plcuda_exec_end(plts);
 
@@ -1736,16 +1751,12 @@ kernel_launch_helper(FunctionCallInfo __fcinfo,	/* PL/CUDA's fcinfo */
 {
     FunctionCallInfoData fcinfo;
 	FmgrInfo	flinfo;
-	AclResult	aclresult;
 	Datum		result;
 
 	if (!OidIsValid(helper_func_oid))
 		return static_config;
 
-	aclresult = pg_proc_aclcheck(helper_func_oid, GetUserId(), ACL_EXECUTE);
-	if (aclresult != ACLCHECK_OK)
-		aclcheck_error(aclresult, ACL_KIND_PROC,
-					   get_func_name(helper_func_oid));
+	strom_proc_aclcheck(helper_func_oid, GetUserId(), ACL_EXECUTE);
 
 	fmgr_info(helper_func_oid, &flinfo);
 	InitFunctionCallInfoData(fcinfo, &flinfo,

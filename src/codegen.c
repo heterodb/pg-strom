@@ -503,7 +503,7 @@ pg_range_devtype_hashfunc(devtype_info *dtype,
 {
 	if (!isnull)
 	{
-		RangeType  *r = DatumGetRangeType(datum);
+		RangeType  *r = DatumGetRangeTypeP(datum);
 		char	   *pos = (char *)(r + 1);
 		char		flags = *((char *)r + VARSIZE(r) - 1);
 
@@ -2932,9 +2932,7 @@ pgstrom_init_codegen(void)
 	/* create a memory context */
 	devinfo_memcxt = AllocSetContextCreate(CacheMemoryContext,
 										   "device type/func info cache",
-										   ALLOCSET_DEFAULT_MINSIZE,
-										   ALLOCSET_DEFAULT_INITSIZE,
-										   ALLOCSET_DEFAULT_MAXSIZE);
+										   ALLOCSET_DEFAULT_SIZES);
 	CacheRegisterSyscacheCallback(PROCOID, codegen_cache_invalidator, 0);
 	CacheRegisterSyscacheCallback(TYPEOID, codegen_cache_invalidator, 0);
 
