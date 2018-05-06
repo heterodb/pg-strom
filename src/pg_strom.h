@@ -274,6 +274,7 @@ typedef enum {
 
 typedef struct GpuTask				GpuTask;
 typedef struct GpuTaskState			GpuTaskState;
+typedef struct GpuTaskSharedState	GpuTaskSharedState;
 
 /*
  * GpuTaskState
@@ -281,6 +282,7 @@ typedef struct GpuTaskState			GpuTaskState;
  * A common structure of the state machine of GPU related tasks.
  */
 struct NVMEScanState;
+struct GpuTaskSharedState;
 
 struct GpuTaskState
 {
@@ -347,12 +349,25 @@ struct GpuTaskState
 	cl_long			num_cpu_fallbacks;	/* # of CPU fallback chunks */
 
 	/* co-operation with CPU parallel */
-	ParallelContext	*pcxt;
+	GpuTaskSharedState *gtss;		/* DSM segment of GTS if any */
+	ParallelContext	*pcxt;			/* Parallel context of PostgreSQL */
 };
 #define GTS_GET_SCAN_TUPDESC(gts)				\
 	(((GpuTaskState *)(gts))->css.ss.ss_ScanTupleSlot->tts_tupleDescriptor)
 #define GTS_GET_RESULT_TUPDESC(gts)				\
 	(((GpuTaskState *)(gts))->css.ss.ps.ps_ResultTupleSlot->tts_tupleDescriptor)
+
+/*
+ * GpuTaskSharedState
+ */
+struct GpuTaskSharedState
+{
+	uint64		nr_allocated;	/* number of blocks already allocated to
+								 * workers; almost equivalent to the
+								 * @phs_nallocated in PG11 or later.
+								 */
+	ParallelHeapScanDescData	phscan;
+};
 
 /*
  * GpuTask
@@ -801,6 +816,15 @@ extern void pgstromRescanGpuTaskState(GpuTaskState *gts);
 extern void pgstromReleaseGpuTaskState(GpuTaskState *gts);
 extern void pgstromExplainGpuTaskState(GpuTaskState *gts,
 									   ExplainState *es);
+extern Size pgstromEstimateDSMGpuTaskState(GpuTaskState *gts,
+										   ParallelContext *pcxt);
+extern void pgstromInitDSMGpuTaskState(GpuTaskState *gts,
+									   ParallelContext *pcxt,
+									   void *coordinate);
+extern void pgstromInitWorkerGpuTaskState(GpuTaskState *gts,
+										  void *coordinate);
+extern void pgstromReInitializeDSMGpuTaskState(GpuTaskState *gts);
+
 extern GpuTask *fetch_next_gputask(GpuTaskState *gts);
 extern void pgstromExplainOuterScan(GpuTaskState *gts,
 									List *deparse_context,
@@ -987,14 +1011,6 @@ extern pgstrom_data_store *gpuscanExecScanChunk(GpuTaskState *gts);
 
 extern void gpuscanRewindScanChunk(GpuTaskState *gts);
 
-extern Size ExecGpuScanEstimateDSM(CustomScanState *node,
-								   ParallelContext *pcxt);
-extern void ExecGpuScanInitDSM(CustomScanState *node,
-							   ParallelContext *pcxt,
-							   void *coordinate);
-extern void ExecGpuScanInitWorker(CustomScanState *node,
-								  shm_toc *toc,
-								  void *coordinate);
 extern void assign_gpuscan_session_info(StringInfo buf,
 										GpuTaskState *gts);
 extern void pgstrom_init_gpuscan(void);

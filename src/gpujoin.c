@@ -2228,10 +2228,8 @@ ExecReScanGpuJoin(CustomScanState *node)
 
 	/* wait for completion of any asynchronous GpuTask */
 	SynchronizeGpuContext(gjs->gts.gcontext);
-	/* rewind the outer relation */
-	if (gjs->gts.css.ss.ss_currentRelation)
-		gpuscanRewindScanChunk(&gjs->gts);
-	else
+	/* rescan the outer sub-plan */
+	if (outerPlanState(gjs))
 		ExecReScan(outerPlanState(gjs));
 	gjs->gts.scan_overflow = NULL;
 
@@ -2547,7 +2545,7 @@ ExecGpuJoinEstimateDSM(CustomScanState *node,
 							 pergpu[numDevAttrs]))
 		+ MAXALIGN(offsetof(GpuJoinRuntimeStat,
 							jstat[gjs->num_rels + 1]))
-		+ ExecGpuScanEstimateDSM(node, pcxt);
+		+ pgstromEstimateDSMGpuTaskState((GpuTaskState *)node, pcxt);
 }
 
 /*
@@ -2569,8 +2567,9 @@ ExecGpuJoinInitDSM(CustomScanState *node,
 	/* allocation of an empty multirel buffer */
 	gjs->gj_sstate = createGpuJoinSharedState(gjs, pcxt, coordinate);
 	gjs->gj_rtstat = GPUJOIN_RUNTIME_STAT(gjs->gj_sstate);
-	ExecGpuScanInitDSM(node, pcxt, ((char *)coordinate +
-									gjs->gj_sstate->ss_length));
+	coordinate = (char *)coordinate + gjs->gj_sstate->ss_length;
+
+	pgstromInitDSMGpuTaskState(&gjs->gts, pcxt, coordinate);
 }
 
 /*
@@ -2590,11 +2589,22 @@ ExecGpuJoinInitWorker(CustomScanState *node,
 	on_dsm_detach(dsm_find_mapping(gj_sstate->ss_handle),
 				  SynchronizeGpuContextOnDSMDetach,
 				  PointerGetDatum(gjs->gts.gcontext));
-	ExecGpuScanInitWorker(node, toc, ((char *)coordinate +
-									  gj_sstate->ss_length));
+	coordinate = (char *)coordinate + gj_sstate->ss_length;
+
+	pgstromInitWorkerGpuTaskState(&gjs->gts, coordinate);
 }
 
 #if PG_VERSION_NUM >= 100000
+/*
+ * ExecGpuJoinReInitializeDSM
+ */
+static void
+ExecGpuJoinReInitializeDSM(CustomScanState *node,
+						   ParallelContext *pcxt, void *coordinate)
+{
+	pgstromReInitializeDSMGpuTaskState((GpuTaskState *) node);
+}
+
 /*
  * ExecShutdownGpuJoin
  *
@@ -5913,6 +5923,7 @@ pgstrom_init_gpujoin(void)
 	gpujoin_exec_methods.InitializeDSMCustomScan = ExecGpuJoinInitDSM;
 	gpujoin_exec_methods.InitializeWorkerCustomScan = ExecGpuJoinInitWorker;
 #if PG_VERSION_NUM >= 100000
+	gpujoin_exec_methods.ReInitializeDSMCustomScan = ExecGpuJoinReInitializeDSM;
 	gpujoin_exec_methods.ShutdownCustomScan		= ExecShutdownGpuJoin;
 #endif
 	gpujoin_exec_methods.ExplainCustomScan		= ExplainGpuJoin;

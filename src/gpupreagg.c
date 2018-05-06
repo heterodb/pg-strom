@@ -3919,8 +3919,6 @@ ExecReScanGpuPreAgg(CustomScanState *node)
 	resetGpuPreAggSharedState(gpas);
 	/* common rescan handling */
 	pgstromRescanGpuTaskState(&gpas->gts);
-	/* rewind the position to read */
-	gpuscanRewindScanChunk(&gpas->gts);
 	/* reset other stuff */
 	gpas->terminator_done = false;
 }
@@ -3932,7 +3930,7 @@ static Size
 ExecGpuPreAggEstimateDSM(CustomScanState *node, ParallelContext *pcxt)
 {
 	return MAXALIGN(sizeof(GpuPreAggSharedState))
-		+ ExecGpuScanEstimateDSM(node, pcxt);
+		+ pgstromEstimateDSMGpuTaskState((GpuTaskState *)node, pcxt);
 }
 
 /*
@@ -3953,8 +3951,9 @@ ExecGpuPreAggInitDSM(CustomScanState *node,
 	/* allocation of shared state */
 	gpas->gpa_sstate = createGpuPreAggSharedState(gpas, pcxt, coordinate);
 	gpas->gpa_rtstat = &gpas->gpa_sstate->gpa_rtstat;
-	ExecGpuScanInitDSM(node, pcxt, ((char *)coordinate +
-									gpas->gpa_sstate->ss_length));
+	coordinate = (char *)coordinate + gpas->gpa_sstate->ss_length;
+
+	pgstromInitDSMGpuTaskState(&gpas->gts, pcxt, coordinate);
 }
 
 /*
@@ -3974,11 +3973,22 @@ ExecGpuPreAggInitWorker(CustomScanState *node,
 	on_dsm_detach(dsm_find_mapping(gpa_sstate->ss_handle),
 				  SynchronizeGpuContextOnDSMDetach,
 				  PointerGetDatum(gpas->gts.gcontext));
-	ExecGpuScanInitWorker(node, toc, ((char *)coordinate +
-									  gpa_sstate->ss_length));
+	coordinate = (char *)coordinate + gpa_sstate->ss_length;
+
+	pgstromInitWorkerGpuTaskState(&gpas->gts, coordinate);
 }
 
 #if PG_VERSION_NUM >= 100000
+/*
+ * ExecGpuPreAggReInitializeDSM
+ */
+static void
+ExecGpuPreAggReInitializeDSM(CustomScanState *node,
+							 ParallelContext *pcxt, void *coordinate)
+{
+	pgstromReInitializeDSMGpuTaskState((GpuTaskState *) node);
+}
+
 /*
  * ExecShutdownGpuPreAgg
  */
@@ -5207,6 +5217,7 @@ pgstrom_init_gpupreagg(void)
     gpupreagg_exec_methods.InitializeDSMCustomScan = ExecGpuPreAggInitDSM;
     gpupreagg_exec_methods.InitializeWorkerCustomScan = ExecGpuPreAggInitWorker;
 #if PG_VERSION_NUM >= 100000
+	gpupreagg_exec_methods.ReInitializeDSMCustomScan = ExecGpuPreAggReInitializeDSM;
 	gpupreagg_exec_methods.ShutdownCustomScan  = ExecShutdownGpuPreAgg;
 #endif
 	gpupreagg_exec_methods.ExplainCustomScan   = ExplainGpuPreAgg;

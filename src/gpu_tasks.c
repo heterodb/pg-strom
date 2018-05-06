@@ -496,6 +496,8 @@ pgstromExecGpuTaskState(GpuTaskState *gts)
 void
 pgstromRescanGpuTaskState(GpuTaskState *gts)
 {
+	HeapScanDesc	scan = gts->css.ss.ss_currentScanDesc;
+
 	/*
 	 * release all the unprocessed tasks
 	 */
@@ -506,6 +508,32 @@ pgstromRescanGpuTaskState(GpuTaskState *gts)
 		gts->num_ready_tasks--;
 		Assert(gts->num_ready_tasks >= 0);
 		gts->cb_release_task(gtask);
+	}
+
+	/*
+	 * rewind the scan position if GTS scans a table
+	 */
+	if (scan)
+	{
+		InstrEndLoop(&gts->outer_instrument);
+		heap_rescan(scan, NULL);
+#if PG_VERSION_NUM < 100000
+		/*
+		 * In PG9.6, re-initialization of DSM segment is a role of ReScan
+		 * method, but it was moved to ReInitializeDSM on PG10.
+		 * 
+		 */
+		if (gts->gtss)
+		{
+			GpuTaskSharedState *gtss = gts->gtss;
+
+			Assert(&gtss->phscan == scan->rs_parallel);
+			SpinLockAcquire(&gtss->phscan.phs_mutex);
+			
+			SpinLockRelease(&gtss->phscan.phs_mutex);
+		}
+#endif
+		ExecScanReScan(&gts->css.ss);
 	}
 }
 
@@ -586,6 +614,83 @@ pgstromExplainGpuTaskState(GpuTaskState *gts, ExplainState *es)
 			ExplainPropertyText("Kernel Source", cuda_source, es);
 		if (cuda_binary)
 			ExplainPropertyText("Kernel Binary", cuda_binary, es);
+	}
+}
+
+/*
+ * pgstromEstimateDSMGpuTaskState
+ */
+Size
+pgstromEstimateDSMGpuTaskState(GpuTaskState *gts, ParallelContext *pcxt)
+{
+	if (gts->css.ss.ss_currentRelation)
+	{
+		EState	   *estate = gts->css.ss.ps.state;
+
+		return MAXALIGN(offsetof(GpuTaskSharedState, phscan) +
+						heap_parallelscan_estimate(estate->es_snapshot));
+	}
+	return 0;
+}
+
+/*
+ * pgstromInitDSMGpuTaskState
+ */
+void
+pgstromInitDSMGpuTaskState(GpuTaskState *gts,
+						   ParallelContext *pcxt,
+						   void *coordinate)
+{
+	Relation	relation = gts->css.ss.ss_currentRelation;
+	EState	   *estate = gts->css.ss.ps.state;
+	Snapshot	snapshot = estate->es_snapshot;
+	GpuTaskSharedState *gtss = coordinate;
+
+	if (relation)
+	{
+		gtss->nr_allocated = 0;
+		heap_parallelscan_initialize(&gtss->phscan, relation, snapshot);
+		/* per workers initialization inclusing the coordinator */
+		pgstromInitWorkerGpuTaskState(gts, coordinate);
+	}
+	gts->gtss = gtss;
+	gts->pcxt = pcxt;
+}
+
+/*
+ * pgstromInitWorkerGpuTaskState
+ */
+void
+pgstromInitWorkerGpuTaskState(GpuTaskState *gts, void *coordinate)
+{
+	Relation	relation = gts->css.ss.ss_currentRelation;
+	GpuTaskSharedState *gtss = coordinate;
+
+	if (relation)
+	{
+		/* begin parallel scan */
+		gts->css.ss.ss_currentScanDesc =
+			heap_beginscan_parallel(relation, &gtss->phscan);
+		/* try to choose NVMe-Strom, if available */
+		PDS_init_heapscan_state(gts, gts->outer_nrows_per_block);
+	}
+	gts->gtss = gtss;
+}
+
+/*
+ * pgstromReInitializeDSMGpuTaskState
+ */
+void
+pgstromReInitializeDSMGpuTaskState(GpuTaskState *gts)
+{
+	GpuTaskSharedState *gtss = gts->gtss;
+
+	if (gtss)
+	{
+		/* see heap_parallelscan_reinitialize */
+		SpinLockAcquire(&gtss->phscan.phs_mutex);
+		gtss->nr_allocated = 0;
+		SpinLockRelease(&gtss->phscan.phs_mutex);
 	}
 }
 
