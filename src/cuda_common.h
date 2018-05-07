@@ -399,29 +399,6 @@ STATIC_INLINE(cl_uint) SmxId(void)
 	return ret;
 }
 
-#if 0
-//XXX - Does it really return correct value?
-
-/*
- * NwarpId() - reference to the %nwarpid register
- */
-STATIC_INLINE(cl_uint) NwarpId(void)
-{
-	cl_uint		ret;
-	asm volatile("mov.u32 %0, %nwarpid;" : "=r"(ret) );
-	return ret;
-}
-
-/*
- * WarpId() - reference to the %warpid register
- */
-STATIC_INLINE(cl_uint) WarpId(void)
-{
-	cl_uint		ret;
-	asm volatile("mov.u32 %0, %warpid;" : "=r"(ret) );
-	return ret;
-}
-#endif
 /*
  * LaneId() - reference to the %laneid register
  */
@@ -723,19 +700,34 @@ typedef struct {
 #define KERN_DATA_STORE_BODY(kds)					\
 	((char *)(kds) + KERN_DATA_STORE_HEAD_LENGTH(kds))
 
-/* access macro for row- and hash-format */
-#define KERN_DATA_STORE_ROWINDEX(kds)				\
-	((cl_uint *)(KERN_DATA_STORE_BODY(kds)))
+/* access function for row- and hash-format */
+STATIC_INLINE(cl_uint *)
+KERN_DATA_STORE_ROWINDEX(kern_data_store *kds)
+{
+	Assert(__ldg(&kds->format) == KDS_FORMAT_ROW ||
+		   __ldg(&kds->format) == KDS_FORMAT_HASH);
+	return (cl_uint *)KERN_DATA_STORE_BODY(kds);
+}
 
-/* access macro for hash-format */
-#define KERN_DATA_STORE_HASHSLOT(kds)				\
-	((cl_uint *)(KERN_DATA_STORE_BODY(kds) +		\
-				 STROMALIGN(sizeof(cl_uint) * (kds)->nitems)))
+/* access function for hash-format */
+STATIC_INLINE(cl_uint *)
+KERN_DATA_STORE_HASHSLOT(kern_data_store *kds)
+{
+	Assert(__ldg(&kds->format) == KDS_FORMAT_HASH);
+	return (cl_uint *)(KERN_DATA_STORE_BODY(kds) +
+					   STROMALIGN(sizeof(cl_uint) * kds->nitems));
+}
 
-/* access macro for row- and hash-format */
-#define KERN_DATA_STORE_TUPITEM(kds,kds_index)		\
-	((kern_tupitem *)((char *)(kds) +				\
-					  (KERN_DATA_STORE_ROWINDEX(kds)[(kds_index)])))
+/* access function for row- and hash-format */
+STATIC_INLINE(kern_tupitem *)
+KERN_DATA_STORE_TUPITEM(kern_data_store *kds, cl_uint kds_index)
+{
+	size_t	offset = KERN_DATA_STORE_ROWINDEX(kds)[kds_index];
+
+	if (!offset)
+		return NULL;
+	return (kern_tupitem *)((char *)kds + (offset));
+}
 
 /* access macro for row-format by tup-offset */
 STATIC_INLINE(HeapTupleHeaderData *)
@@ -760,22 +752,16 @@ KDS_ROW_REF_HTUP(kern_data_store *kds,
 	return &tupitem->htup;
 }
 
-/* access macro for hash-format */
-#define KERN_DATA_STORE_HASHITEM(kds,kds_index)		\
-	((kern_hashitem *)								\
-	 ((char *)KERN_DATA_STORE_TUPITEM(kds,kds_index) -	\
-	  offsetof(kern_hashitem, t)))
-
 STATIC_INLINE(kern_hashitem *)
 KERN_HASH_FIRST_ITEM(kern_data_store *kds, cl_uint hash)
 {
 	cl_uint	   *slot = KERN_DATA_STORE_HASHSLOT(kds);
-	cl_uint		index = hash % kds->nslots;
+	size_t		offset = slot[hash % kds->nslots];
 
-	if (slot[index] == 0)
+	if (offset == 0)
 		return NULL;
-	Assert(slot[index] < kds->length);
-	return (kern_hashitem *)((char *)kds + slot[index]);
+	Assert(offset < __ldg(&kds->length));
+	return (kern_hashitem *)((char *)kds + (offset));
 }
 
 STATIC_INLINE(kern_hashitem *)
@@ -786,9 +772,6 @@ KERN_HASH_NEXT_ITEM(kern_data_store *kds, kern_hashitem *khitem)
 	Assert(khitem->next < kds->length);
 	return (kern_hashitem *)((char *)kds + khitem->next);
 }
-
-#define KDS_HASH_REF_HTUP(kds,tup_offset,p_self,p_len)	\
-	KDS_HASH_REF_HTUP((kds),(tup_offset),(p_self),(p_len))
 
 /* access macro for tuple-slot format */
 #define KERN_DATA_STORE_SLOT_LENGTH(kds,nitems)				\

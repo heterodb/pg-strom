@@ -491,7 +491,7 @@ __PDS_create_slot(GpuContext *gcontext,
 		elog(ERROR, "Required length for KDS-Slot is too short");
 
 	nrooms = (bytesize - KDS_CALCULATE_HEAD_LENGTH(tupdesc->natts))
-		/ LONGALIGN((sizeof(Datum) + sizeof(char)) * tupdesc->natts);
+		/ MAXALIGN((sizeof(Datum) + sizeof(char)) * tupdesc->natts);
 
 	rc = __gpuMemAllocManaged(gcontext,
 							  &m_deviceptr,
@@ -1023,7 +1023,7 @@ PDS_exec_heapscan_row(pgstrom_data_store *pds,
 			continue;
 
 		/* put tuple */
-		kds->usage += LONGALIGN(offsetof(kern_tupitem, htup) + tup.t_len);
+		kds->usage += MAXALIGN(offsetof(kern_tupitem, htup) + tup.t_len);
 		tup_item = (kern_tupitem *)((char *)kds + kds->length - kds->usage);
 		tup_index[ntup] = (uintptr_t)tup_item - (uintptr_t)kds;
 		tup_item->t_len = tup.t_len;
@@ -1095,7 +1095,7 @@ KDS_insert_tuple(kern_data_store *kds, TupleTableSlot *slot)
 	tuple = ExecFetchSlotTuple(slot);
 
 	/* check whether we have room for this tuple */
-	required = LONGALIGN(offsetof(kern_tupitem, htup) + tuple->t_len);
+	required = MAXALIGN(offsetof(kern_tupitem, htup) + tuple->t_len);
 	if (KDS_CALCULATE_ROW_LENGTH(kds->ncols,
 								 kds->nitems + 1,
 								 required + kds->usage) > kds->length)
