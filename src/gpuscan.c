@@ -2141,7 +2141,8 @@ static GpuScanTask *
 gpuscan_create_task(GpuScanState *gss,
 					pgstrom_data_store *pds_src)
 {
-	TupleDesc		scan_tupdesc = GTS_GET_SCAN_TUPDESC(gss);
+	TupleTableSlot *scan_slot = gss->gts.css.ss.ss_ScanTupleSlot;
+	TupleDesc		scan_tupdesc = scan_slot->tts_tupleDescriptor;
 	GpuContext	   *gcontext = gss->gts.gcontext;
 	pgstrom_data_store *pds_dst = NULL;
 	kern_resultbuf *kresults = NULL;

@@ -24,12 +24,10 @@
 Datum pgstrom_partial_nrows(PG_FUNCTION_ARGS);
 Datum pgstrom_partial_avg_int8(PG_FUNCTION_ARGS);
 Datum pgstrom_partial_avg_float8(PG_FUNCTION_ARGS);
-//Datum pgstrom_partial_avg_numeric(PG_FUNCTION_ARGS);
 Datum pgstrom_final_avg_int8_accum(PG_FUNCTION_ARGS);
 Datum pgstrom_final_avg_int8_final(PG_FUNCTION_ARGS);
 Datum pgstrom_final_avg_float8_accum(PG_FUNCTION_ARGS);
 Datum pgstrom_final_avg_float8_final(PG_FUNCTION_ARGS);
-//Datum pgstrom_final_avg_numeric_accum(PG_FUNCTION_ARGS);
 Datum pgstrom_final_avg_numeric_final(PG_FUNCTION_ARGS);
 Datum pgstrom_partial_min_any(PG_FUNCTION_ARGS);
 Datum pgstrom_partial_max_any(PG_FUNCTION_ARGS);
@@ -98,23 +96,6 @@ pgstrom_partial_avg_float8(PG_FUNCTION_ARGS)
 	PG_RETURN_ARRAYTYPE_P(result);
 }
 PG_FUNCTION_INFO_V1(pgstrom_partial_avg_float8);
-
-#ifdef NOT_USED
-Datum
-pgstrom_partial_avg_numeric(PG_FUNCTION_ARGS)
-{
-	ArrayType  *result;
-	Datum		items[2];
-
-	items[0] = DirectFunctionCall1(int8_numeric,
-								   PG_GETARG_DATUM(0));	/* nrows(int8) */
-	items[1] = PG_GETARG_DATUM(1);	/* p_sum(numeric) */
-	result = construct_array(items, 2, NUMERICOID,
-							 -1, false, 'i');
-	PG_RETURN_ARRAYTYPE_P(result);
-}
-PG_FUNCTION_INFO_V1(pgstrom_partial_avg_numeric);
-#endif
 
 Datum
 pgstrom_final_avg_int8_accum(PG_FUNCTION_ARGS)
@@ -207,56 +188,6 @@ pgstrom_final_avg_float8_final(PG_FUNCTION_ARGS)
 	PG_RETURN_FLOAT8(x[1] / x[0]);
 }
 PG_FUNCTION_INFO_V1(pgstrom_final_avg_float8_final);
-
-#ifdef NOT_USED
-Datum
-pgstrom_final_avg_numeric_accum(PG_FUNCTION_ARGS)
-{
-	MemoryContext	aggcxt;
-	MemoryContext	oldcxt;
-	ArrayType	   *xarray;
-	ArrayType	   *yarray;
-	Datum			x0, x1;
-	Datum			y0, y1;
-	Datum			items[2];
-	bool			isnull[4];
-
-	if (!AggCheckCallContext(fcinfo, &aggcxt))
-		elog(ERROR, "aggregate function called in non-aggregate context");
-	if (PG_ARGISNULL(1))
-		elog(ERROR, "Null state was supplied");
-
-	if (PG_ARGISNULL(0))
-	{
-		oldcxt = MemoryContextSwitchTo(aggcxt);
-		xarray = PG_GETARG_ARRAYTYPE_P_COPY(1);
-		MemoryContextSwitchTo(oldcxt);
-	}
-	else
-	{
-		xarray = PG_GETARG_ARRAYTYPE_P(0);
-		yarray = PG_GETARG_ARRAYTYPE_P(1);
-
-		x0 = numeric_array_ref(xarray, 1, &isnull[0]);
-		x1 = numeric_array_ref(xarray, 2, &isnull[1]);
-		y0 = numeric_array_ref(yarray, 1, &isnull[2]);
-		y1 = numeric_array_ref(yarray, 2, &isnull[3]);
-
-		if (isnull[0] || isnull[1] || isnull[2] || isnull[3])
-			elog(ERROR, "unexpected internal state");
-
-		items[0] = DirectFunctionCall2(numeric_add, x0, y0);
-		items[1] = DirectFunctionCall2(numeric_add, x1, y1);
-
-		oldcxt = MemoryContextSwitchTo(aggcxt);
-		xarray = construct_array(items, 2, NUMERICOID,
-								 -1, false, 'i');
-		MemoryContextSwitchTo(oldcxt);
-	}
-	PG_RETURN_POINTER(xarray);
-}
-PG_FUNCTION_INFO_V1(pgstrom_final_avg_numeric_accum);
-#endif
 
 Datum
 pgstrom_final_avg_numeric_final(PG_FUNCTION_ARGS)

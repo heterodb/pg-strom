@@ -1828,7 +1828,8 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	ScanState	   *ss = &gjs->gts.css.ss;
 	CustomScan	   *cscan = (CustomScan *) node->ss.ps.plan;
 	GpuJoinInfo	   *gj_info = deform_gpujoin_info(cscan);
-	TupleDesc		result_tupdesc = GTS_GET_RESULT_TUPDESC(gjs);
+	TupleTableSlot *result_slot = gjs->gts.css.ss.ps.ps_ResultTupleSlot;
+	TupleDesc		result_tupdesc = result_slot->tts_tupleDescriptor;
 	TupleDesc		scan_tupdesc;
 	TupleDesc		junk_tupdesc;
 	List		   *tlist_fallback = NIL;
@@ -5245,64 +5246,6 @@ gpujoin_process_task(GpuTask *gtask, CUmodule cuda_module)
  *
  * ================================================================
  */
-
-#ifdef NOT_USED
-/*
- * add_extra_randomness
- *
- * BUG#211 - In case when we have to split inner relations virtually,
- * extra randomness is significant to avoid singularity. In theorem,
- * rowid of KDS (assigned sequentially on insertion) is independent
- * concept from the join key. However, people usually insert tuples
- * according to the key value (referenced by join) sequentially.
- * It eventually leads unexpected results - A particular number of
- * outer rows generates unexpected number of results rows. Even if
- * CPU reduced inner_size according to the run-time statistics, retry
- * shall be repeated until the virtual inner relation boundary goes
- * across the problematic key value.
- * This extra randomness makes distribution of the join keys flatten.
- * Because rowid of KDS items are randomized, we can expect reduction
- * of inner_size[] will reduce scale of the join result as expectation
- * of statistical result.
- *
- * NOTE: we may be able to add this extra randomness only when inner_size
- * is smaller than kds->nitems and not yet randomized. However, we also
- * pay attention the case when NVRTC support dynamic parallelism then
- * GPU kernel get capability to control inner_size[] inside GPU kernel.
- */
-static void
-add_extra_randomness(kern_data_store *kds)
-{
-	if (kds->format == KDS_FORMAT_ROW ||
-		kds->format == KDS_FORMAT_HASH)
-	{
-		cl_uint	   *row_index = KERN_DATA_STORE_ROWINDEX(kds);
-		cl_uint		x, y, temp;
-
-		for (x=0; x < kds->nitems; x++)
-		{
-			y = rand() % kds->nitems;
-			if (x == y)
-				continue;
-
-			if (kds->format == KDS_FORMAT_HASH)
-			{
-				kern_hashitem  *khitem_x = KERN_DATA_STORE_HASHITEM(kds, x);
-				kern_hashitem  *khitem_y = KERN_DATA_STORE_HASHITEM(kds, y);
-				Assert(khitem_x->rowid == x);
-				Assert(khitem_y->rowid == y);
-				khitem_x->rowid = y;	/* swap */
-				khitem_y->rowid = x;	/* swap */
-			}
-			temp = row_index[x];
-			row_index[x] = row_index[y];
-			row_index[y] = temp;
-		}
-	}
-	else
-		elog(ERROR, "Bug? add_extra_randomness for unexpected format");
-}
-#endif
 
 /*
  * calculation of the hash-value

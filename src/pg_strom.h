@@ -356,10 +356,6 @@ struct GpuTaskState
 	GpuTaskSharedState *gtss;		/* DSM segment of GTS if any */
 	ParallelContext	*pcxt;			/* Parallel context of PostgreSQL */
 };
-#define GTS_GET_SCAN_TUPDESC(gts)				\
-	(((GpuTaskState *)(gts))->css.ss.ss_ScanTupleSlot->tts_tupleDescriptor)
-#define GTS_GET_RESULT_TUPDESC(gts)				\
-	(((GpuTaskState *)(gts))->css.ss.ps.ps_ResultTupleSlot->tts_tupleDescriptor)
 
 /*
  * GpuTaskSharedState
