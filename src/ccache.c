@@ -408,7 +408,7 @@ pgstrom_ccache_load_chunk(ccacheChunk *cc_chunk,
 		{
 			kern_colmeta   *cmeta = &kds_head->colmeta[i];
 
-			length += cmeta->extra_sz * MAXIMUM_ALIGNOF;
+			length += __kds_unpack(cmeta->extra_sz);
 			if (cmeta->attlen > 0)
 				length += MAXALIGN(TYPEALIGN(cmeta->attalign,
 											 cmeta->attlen) * nitems);
@@ -447,10 +447,10 @@ pgstrom_ccache_load_chunk(ccacheChunk *cc_chunk,
 				   pds->kds.colmeta[i].atttypid  == cmeta->atttypid &&
 				   pds->kds.colmeta[i].atttypmod == cmeta->atttypmod);
 			Assert(offset == MAXALIGN(offset));
-			pds->kds.colmeta[i].va_offset = offset / MAXIMUM_ALIGNOF;
+			pds->kds.colmeta[i].va_offset = __kds_packed(offset);
 			pds->kds.colmeta[i].extra_sz = cmeta->extra_sz;
 
-			nbytes = cmeta->extra_sz * MAXIMUM_ALIGNOF;
+			nbytes = __kds_unpack(cmeta->extra_sz);
 			if (cmeta->attlen > 0)
 				nbytes += MAXALIGN(TYPEALIGN(cmeta->attalign,
 											 cmeta->attlen) * nitems);
@@ -460,7 +460,7 @@ pgstrom_ccache_load_chunk(ccacheChunk *cc_chunk,
 			if (pread(fdesc,
 					  (char *)&pds->kds + offset,
 					  nbytes,
-					  cmeta->va_offset * MAXIMUM_ALIGNOF) != nbytes)
+					  __kds_unpack(cmeta->va_offset)) != nbytes)
 				elog(ERROR, "failed on pread(2): %m");
 			offset += nbytes;
 		}
@@ -1594,8 +1594,8 @@ ccache_copy_buffer_from_kds(TupleDesc tupdesc,
 		size_t		extra_sz;
 		void	   *addr;
 
-		va_offset = (size_t)cmeta->va_offset << MAXIMUM_ALIGNOF_SHIFT;
-		extra_sz = (size_t)cmeta->extra_sz << MAXIMUM_ALIGNOF_SHIFT;
+		va_offset = __kds_unpack(cmeta->va_offset);
+		extra_sz = __kds_unpack(cmeta->extra_sz);
 		/* considered as all-null */
 		if (va_offset == 0)
 		{
@@ -1628,7 +1628,7 @@ ccache_copy_buffer_from_kds(TupleDesc tupdesc,
 				void	   *datum;
 				bool		found;
 
-				offset = ((cl_uint *)addr)[i] << MAXIMUM_ALIGNOF_SHIFT;
+				offset = __kds_unpack(((cl_uint *)addr)[i]);
 				if (offset == 0)
 				{
 					vl_array[i] = NULL;
@@ -1656,7 +1656,7 @@ ccache_copy_buffer_from_kds(TupleDesc tupdesc,
 					cc_buf->extra_sz[j] += MAXALIGN(VARSIZE(vl));
 				}
 				if (MAXALIGN(sizeof(cl_uint) * nitems) +
-					cc_buf->extra_sz[j] >= (size_t)UINT_MAX * MAXIMUM_ALIGNOF)
+					cc_buf->extra_sz[j] >= KDS_OFFSET_MAX_SIZE)
 					elog(ERROR, "too much vl_dictionary consumption");
 				vl_array[i] = entry;
 			}
@@ -1725,8 +1725,7 @@ ccache_copy_buffer_to_kds(kern_data_store *kds,
 			continue;
 
 		offset = ((char *)pos - (char *)kds);
-		Assert((offset & (MAXIMUM_ALIGNOF - 1)) == 0);
-		cmeta->va_offset = offset / MAXIMUM_ALIGNOF;
+		cmeta->va_offset = __kds_packed(offset);
 		if (cmeta->attlen < 0)
 		{
 			cl_uint	   *base = (cl_uint *)pos;
@@ -1747,12 +1746,11 @@ ccache_copy_buffer_to_kds(kern_data_store *kds,
 					if (entry->offset == 0)
 					{
 						offset = (size_t)(extra - (char *)base);
-						Assert((offset & (MAXIMUM_ALIGNOF - 1)) == 0);
-						entry->offset = offset / MAXIMUM_ALIGNOF;
+						entry->offset = __kds_packed(offset);
 						nbytes = VARSIZE_ANY(entry->vl_datum);
 						Assert(nbytes > 0);
 						memcpy(extra, entry->vl_datum, nbytes);
-						cmeta->extra_sz += MAXALIGN(nbytes) / MAXIMUM_ALIGNOF;
+						cmeta->extra_sz += __kds_packed(MAXALIGN(nbytes));
 						extra += MAXALIGN(nbytes);
 					}
 					base[k] = entry->offset;
@@ -1765,10 +1763,7 @@ ccache_copy_buffer_to_kds(kern_data_store *kds,
 		else if (!rowmap)
 		{
 			/* fixed-length attribute without row-visibility map */
-			offset = pos - (char *)kds;
-			Assert((offset & (MAXIMUM_ALIGNOF - 1)) == 0);
-
-			cmeta->va_offset = offset / MAXIMUM_ALIGNOF;
+			cmeta->va_offset = __kds_packed(pos - (char *)kds);
 			nbytes = MAXALIGN(TYPEALIGN(cmeta->attalign,
 										cmeta->attlen) * nrooms);
 			memcpy(pos, cc_buf->values[j], nbytes);
@@ -1779,7 +1774,7 @@ ccache_copy_buffer_to_kds(kern_data_store *kds,
 			else
 			{
 				nbytes = MAXALIGN(BITMAPLEN(nrooms));
-				cmeta->extra_sz = nbytes  / MAXIMUM_ALIGNOF;
+				cmeta->extra_sz = __kds_packed(nbytes);
 				memcpy(pos, cc_buf->nullmap[j], nbytes);
 				pos += nbytes;
 			}
@@ -1791,11 +1786,9 @@ ccache_copy_buffer_to_kds(kern_data_store *kds,
 			bits8	   *d_nullmap;
 			bits8	   *s_nullmap;
 			int			unitsz = TYPEALIGN(cmeta->attalign, cmeta->attlen);
-			/* fixed-length attribute with row-visibility map */
-			offset = pos - (char *)kds;
-			Assert((offset & (MAXIMUM_ALIGNOF - 1)) == 0);
 
-			cmeta->va_offset = offset / MAXIMUM_ALIGNOF;
+			/* fixed-length attribute with row-visibility map */
+			cmeta->va_offset = __kds_packed(pos - (char *)kds);
 			nbytes = MAXALIGN(TYPEALIGN(cmeta->attalign,
 										cmeta->attlen) * nrooms);
 			d_nullmap = (cc_buf->hasnull[j] ? (bits8 *)(pos + nbytes) : NULL);
@@ -1826,7 +1819,7 @@ ccache_copy_buffer_to_kds(kern_data_store *kds,
 			if (meet_null)
 			{
 				nbytes = MAXALIGN(BITMAPLEN(nrooms));
-				cmeta->extra_sz = nbytes / MAXIMUM_ALIGNOF;
+				cmeta->extra_sz = __kds_packed(nbytes);
 				pos += nbytes;
 			}
 		}
@@ -1898,7 +1891,7 @@ ccache_buffer_append_row(TupleDesc tupdesc,
 
 					usage = (MAXALIGN(sizeof(cl_uint) * nitems) +
 							 cc_buf->extra_sz[j]);
-					if (usage >= (size_t)UINT_MAX * MAXIMUM_ALIGNOF)
+					if (usage >= KDS_OFFSET_MAX_SIZE)
 						elog(ERROR, "attribute \"%s\" consumed too much",
 							 NameStr(attr->attname));
 				}

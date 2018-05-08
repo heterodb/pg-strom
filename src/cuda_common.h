@@ -669,6 +669,27 @@ typedef struct {
 #define TableOidAttributeNumber					(-7)
 #define FirstLowInvalidHeapAttributeNumber		(-8)
 
+/*
+ * MEMO: Support of 32GB KDS - KDS with row-, hash- and column-format
+ * internally uses 32bit offset value from the head or base address.
+ * We have assumption here - any objects pointed by the offset value
+ * is always aligned to MAXIMUM_ALIGNOF boundary (64bit).
+ * It means we can use 32bit offset to represent up to 32GB range (35bit).
+ */
+STATIC_INLINE(cl_uint)
+__kds_packed(size_t offset)
+{
+	Assert((offset & (~((size_t)(~0U) << MAXIMUM_ALIGNOF_SHIFT))) == 0);
+	return (cl_uint)(offset >> MAXIMUM_ALIGNOF_SHIFT);
+}
+
+STATIC_INLINE(size_t)
+__kds_unpack(cl_uint offset)
+{
+	return (size_t)offset << MAXIMUM_ALIGNOF_SHIFT;
+}
+#define KDS_OFFSET_MAX_SIZE		((size_t)UINT_MAX << MAXIMUM_ALIGNOF_SHIFT)
+
 /* length estimator */
 #define KDS_CALCULATE_HEAD_LENGTH(ncols)		\
 	STROMALIGN(offsetof(kern_data_store, colmeta[(ncols)]))
@@ -1801,7 +1822,7 @@ kern_get_datum_column(kern_data_store *kds,
 	/* special case handling if 'tableoid' system column */
 	if (cmeta->attnum == TableOidAttributeNumber)
 		return &kds->table_oid;
-	offset = __ldg(&cmeta->va_offset) << MAXIMUM_ALIGNOF_SHIFT;
+	offset = __kds_unpack(__ldg(&cmeta->va_offset));
 	if (offset == 0)
 		return NULL;
 	values = (char *)kds + offset;
@@ -1811,13 +1832,13 @@ kern_get_datum_column(kern_data_store *kds,
 		offset = ((cl_uint *)values)[rowidx];
 		if (offset == 0)
 			return NULL;
-		Assert(offset < (__ldg(&kds->nitems) * sizeof(cl_uint) +
-						 (__ldg(&cmeta->extra_sz) << MAXIMUM_ALIGNOF_SHIFT)));
-		values += (offset << MAXIMUM_ALIGNOF_SHIFT);
+		Assert(offset < ((size_t)__ldg(&kds->nitems) * sizeof(cl_uint) +
+						 (size_t)__ldg(&cmeta->extra_sz)));
+		values += __kds_unpack(offset);
 	}
 	else
 	{
-		cl_uint	extra_sz = __ldg(&cmeta->extra_sz) << MAXIMUM_ALIGNOF_SHIFT;
+		size_t	extra_sz = __kds_unpack(__ldg(&cmeta->extra_sz));
 		cl_int	unitsz = TYPEALIGN(__ldg(&cmeta->attalign),
 								   __ldg(&cmeta->attlen));
 		if (extra_sz > 0)
