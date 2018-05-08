@@ -2708,6 +2708,7 @@ gpuscan_next_tuple(GpuTaskState *gts)
 		 * NOTE: kresults->results[] keeps offset from the head of
 		 * kds_src.
 		 */
+		Assert(pds_src->kds.format == KDS_FORMAT_ROW);
 		Assert(!kresults->all_visible);
 		if (gss->gts.curr_index < kresults->nitems)
 		{
@@ -2715,20 +2716,10 @@ gpuscan_next_tuple(GpuTaskState *gts)
 			cl_uint		kds_offset;
 
 			kds_offset = kresults->results[gss->gts.curr_index++];
-			if (pds_src->kds.format == KDS_FORMAT_ROW)
-			{
-				tuple->t_data = KDS_ROW_REF_HTUP(&pds_src->kds,
-												 kds_offset,
-												 &tuple->t_self,
-												 &tuple->t_len);
-			}
-			else
-			{
-				tuple->t_data = KDS_BLOCK_REF_HTUP(&pds_src->kds,
-												   kds_offset,
-												   &tuple->t_self,
-												   &tuple->t_len);
-			}
+			tuple->t_data = KDS_ROW_REF_HTUP(&pds_src->kds,
+											 kds_offset,
+											 &tuple->t_self,
+											 &tuple->t_len);
 			slot = gss->gts.css.ss.ss_ScanTupleSlot;
 			ExecStoreTuple(tuple, slot, InvalidBuffer, false);
 		}

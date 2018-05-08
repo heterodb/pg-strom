@@ -980,7 +980,8 @@ PDS_exec_heapscan_row(pgstrom_data_store *pds,
 											kds->nitems + lines,
 											offsetof(kern_tupitem,
 													 htup) * lines +
-											BLCKSZ + kds->usage);
+											__kds_unpack(kds->usage) +
+											BLCKSZ);
 	if (max_consume > kds->length)
 	{
 		UnlockReleaseBuffer(buffer);
@@ -1002,6 +1003,7 @@ PDS_exec_heapscan_row(pgstrom_data_store *pds,
 		 lineoff++, lpp++)
 	{
 		HeapTupleData	tup;
+		size_t			curr_usage;
 		bool			valid;
 
 		if (!ItemIdIsNormal(lpp))
@@ -1023,12 +1025,14 @@ PDS_exec_heapscan_row(pgstrom_data_store *pds,
 			continue;
 
 		/* put tuple */
-		kds->usage += MAXALIGN(offsetof(kern_tupitem, htup) + tup.t_len);
-		tup_item = (kern_tupitem *)((char *)kds + kds->length - kds->usage);
-		tup_index[ntup] = (uintptr_t)tup_item - (uintptr_t)kds;
+		curr_usage = (__kds_unpack(kds->usage) +
+					  MAXALIGN(offsetof(kern_tupitem, htup) + tup.t_len));
+		tup_item = (kern_tupitem *)((char *)kds + kds->length - curr_usage);
+		tup_index[ntup] = __kds_packed((uintptr_t)tup_item - (uintptr_t)kds);
 		tup_item->t_len = tup.t_len;
 		tup_item->t_self = tup.t_self;
 		memcpy(&tup_item->htup, tup.t_data, tup.t_len);
+		kds->usage = __kds_packed(curr_usage);
 
 		ntup++;
 	}
@@ -1075,10 +1079,10 @@ PDS_exec_heapscan(GpuTaskState *gts, pgstrom_data_store *pds)
 bool
 KDS_insert_tuple(kern_data_store *kds, TupleTableSlot *slot)
 {
-	size_t				required;
-	HeapTuple			tuple;
-	cl_uint			   *tup_index;
-	kern_tupitem	   *tup_item;
+	size_t			curr_usage;
+	HeapTuple		tuple;
+	cl_uint		   *tup_index;
+	kern_tupitem   *tup_item;
 
 	/* No room to store a new kern_rowitem? */
 	if (kds->nitems >= kds->nrooms)
@@ -1095,18 +1099,20 @@ KDS_insert_tuple(kern_data_store *kds, TupleTableSlot *slot)
 	tuple = ExecFetchSlotTuple(slot);
 
 	/* check whether we have room for this tuple */
-	required = MAXALIGN(offsetof(kern_tupitem, htup) + tuple->t_len);
+	curr_usage = (__kds_unpack(kds->usage) +
+				  MAXALIGN(offsetof(kern_tupitem, htup) + tuple->t_len));
 	if (KDS_CALCULATE_ROW_LENGTH(kds->ncols,
 								 kds->nitems + 1,
-								 required + kds->usage) > kds->length)
+								 curr_usage) > kds->length)
 		return false;
 
-	kds->usage += required;
-	tup_item = (kern_tupitem *)((char *)kds + kds->length - kds->usage);
+	tup_item = (kern_tupitem *)((char *)kds + kds->length - curr_usage);
 	tup_item->t_len = tuple->t_len;
 	tup_item->t_self = tuple->t_self;
 	memcpy(&tup_item->htup, tuple->t_data, tuple->t_len);
-	tup_index[kds->nitems++] = (uintptr_t)tup_item - (uintptr_t)kds;
+	tup_index[kds->nitems++] = __kds_packed((uintptr_t)tup_item -
+											(uintptr_t)kds);
+	kds->usage = __kds_packed(curr_usage);
 
 	return true;
 }
@@ -1122,10 +1128,10 @@ KDS_insert_hashitem(kern_data_store *kds,
 					TupleTableSlot *slot,
 					cl_uint hash_value)
 {
-	cl_uint			   *row_index = KERN_DATA_STORE_ROWINDEX(kds);
-	Size				required;
-	HeapTuple			tuple;
-	kern_hashitem	   *khitem;
+	cl_uint		   *row_index = KERN_DATA_STORE_ROWINDEX(kds);
+	size_t			curr_usage;
+	HeapTuple		tuple;
+	kern_hashitem  *khitem;
 
 	/* No room to store a new kern_hashitem? */
 	if (kds->nitems >= kds->nrooms)
@@ -1138,19 +1144,16 @@ KDS_insert_hashitem(kern_data_store *kds,
 
 	/* compute required length */
 	tuple = ExecFetchSlotTuple(slot);
-	required = MAXALIGN(offsetof(kern_hashitem, t.htup) + tuple->t_len);
-
-	Assert(kds->usage == MAXALIGN(kds->usage));
+	curr_usage = (__kds_unpack(kds->usage) +
+				  MAXALIGN(offsetof(kern_hashitem, t.htup) + tuple->t_len));
 	if (KDS_CALCULATE_HASH_LENGTH(kds->ncols,
 								  kds->nitems + 1,
-								  required + kds->usage) > kds->length)
+								  curr_usage) > kds->length)
 		return false;	/* no more space to put */
 
 	/* OK, put a tuple */
 	Assert(kds->usage == MAXALIGN(kds->usage));
-	khitem = (kern_hashitem *)((char *)kds + kds->length
-							   - (kds->usage + required));
-	kds->usage += required;
+	khitem = (kern_hashitem *)((char *)kds + kds->length - curr_usage);
 	khitem->hash = hash_value;
 	khitem->next = 0x7f7f7f7f;	/* to be set later */
 	khitem->rowid = kds->nitems++;
@@ -1158,8 +1161,10 @@ KDS_insert_hashitem(kern_data_store *kds,
 	khitem->t.t_self = tuple->t_self;
 	memcpy(&khitem->t.htup, tuple->t_data, tuple->t_len);
 
-	row_index[khitem->rowid] = (cl_uint)((uintptr_t)&khitem->t.t_len -
-										 (uintptr_t)kds);
+	row_index[khitem->rowid] = __kds_packed((uintptr_t)&khitem->t.t_len -
+											(uintptr_t)kds);
+	kds->usage = __kds_packed(curr_usage);
+
 	return true;
 }
 

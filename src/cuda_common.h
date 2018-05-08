@@ -623,7 +623,7 @@ typedef struct
 typedef struct
 {
 	cl_uint				hash;	/* 32-bit hash value */
-	cl_uint				next;	/* offset of the next */
+	cl_uint				next;	/* offset of the next (PACKED) */
 	cl_uint				rowid;	/* unique identifier of this hash entry */
 	cl_uint				__padding__; /* for alignment */
 	kern_tupitem		t;		/* HeapTuple of this entry */
@@ -642,7 +642,7 @@ typedef struct {
 	 * values can be updated atomically using cmpxchg.
 	 */
 	cl_uint			nitems; 	/* number of rows in this store */
-	cl_uint			usage;		/* usage of this data-store */
+	cl_uint			usage;		/* usage of this data-store (PACKED) */
 	cl_uint			nrooms;		/* number of available rows in this store */
 	cl_uint			ncols;		/* number of columns in this store */
 	cl_char			format;		/* one of KDS_FORMAT_* above */
@@ -747,7 +747,7 @@ KERN_DATA_STORE_TUPITEM(kern_data_store *kds, cl_uint kds_index)
 
 	if (!offset)
 		return NULL;
-	return (kern_tupitem *)((char *)kds + (offset));
+	return (kern_tupitem *)((char *)kds + __kds_unpack(offset));
 }
 
 /* access macro for row-format by tup-offset */
@@ -764,7 +764,7 @@ KDS_ROW_REF_HTUP(kern_data_store *kds,
 	if (tup_offset == 0)
 		return NULL;
 	tupitem = (kern_tupitem *)((char *)(kds)
-							   + tup_offset
+							   + __kds_unpack(tup_offset)
 							   - offsetof(kern_tupitem, htup));
 	if (p_self)
 		*p_self = tupitem->t_self;
@@ -777,21 +777,24 @@ STATIC_INLINE(kern_hashitem *)
 KERN_HASH_FIRST_ITEM(kern_data_store *kds, cl_uint hash)
 {
 	cl_uint	   *slot = KERN_DATA_STORE_HASHSLOT(kds);
-	size_t		offset = slot[hash % kds->nslots];
+	size_t		offset = __kds_unpack(slot[hash % kds->nslots]);
 
 	if (offset == 0)
 		return NULL;
 	Assert(offset < __ldg(&kds->length));
-	return (kern_hashitem *)((char *)kds + (offset));
+	return (kern_hashitem *)((char *)kds + offset);
 }
 
 STATIC_INLINE(kern_hashitem *)
 KERN_HASH_NEXT_ITEM(kern_data_store *kds, kern_hashitem *khitem)
 {
+	size_t		offset;
+
 	if (!khitem || khitem->next == 0)
 		return NULL;
-	Assert(khitem->next < kds->length);
-	return (kern_hashitem *)((char *)kds + khitem->next);
+	offset = __kds_unpack(khitem->next);
+	Assert(offset < kds->length);
+	return (kern_hashitem *)((char *)kds + offset);
 }
 
 /* access macro for tuple-slot format */

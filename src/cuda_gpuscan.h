@@ -164,6 +164,10 @@ KDS_BLOCK_REF_HTUP(kern_data_store *kds,
 				   ItemPointerData *p_self,
 				   cl_uint *p_len)
 {
+	/*
+	 * NOTE: lp_offset is not packed offset!
+	 * KDS_FORMAT_BLOCK will be never larger than 4GB.
+	 */
 	ItemIdData	   *lpp = (ItemIdData *)((char *)kds + lp_offset);
 	cl_uint			head_size;
 	cl_uint			block_id;
@@ -261,17 +265,13 @@ gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
 	char		   *tup_extra = NULL;
 #endif
 #endif
-	__shared__ cl_int	src_base;
-	__shared__ cl_int	nitems_base;
-	__shared__ cl_int	usage_base	__attribute__((unused));
-	__shared__ cl_int	status __attribute__((unused));
+	__shared__ cl_uint	src_base;
+	__shared__ cl_uint	nitems_base;
+	__shared__ cl_ulong	usage_base	__attribute__((unused));
 
 	assert(kds_src->format == KDS_FORMAT_ROW);
 	assert(!kds_dst || kds_dst->format == KDS_FORMAT_ROW);
 	INIT_KERNEL_CONTEXT(&kcxt, gpuscan_exec_quals_row, kparams);
-	if (get_local_id() == 0)
-		status = StromError_Success;
-	__syncthreads();
 
 	do {
 		kern_tupitem   *tupitem;
@@ -339,7 +339,8 @@ gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
 
 		usage_offset = pgstromStairlikeSum(required, &extra_sz);
 		if (get_local_id() == 0)
-			usage_base = atomicAdd(&kds_dst->usage, extra_sz);
+			usage_base = __kds_unpack(atomicAdd(&kds_dst->usage,
+												__kds_packed(extra_sz)));
 		__syncthreads();
 
 		if (KERN_DATA_STORE_HEAD_LENGTH(kds_dst) +
@@ -364,7 +365,7 @@ gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
 					htuple_oid = 0xffffffff;
 			}
 			pos = kds_dst->length - (usage_base + usage_offset + required);
-			tup_index[nitems_base + nitems_offset] = pos;
+			tup_index[nitems_base + nitems_offset] = __kds_packed(pos);
 			form_kern_heaptuple((kern_tupitem *)((char *)kds_dst + pos),
 								kds_dst->ncols,
 								kds_dst->colmeta,
@@ -374,12 +375,8 @@ gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
 								tup_values,
 								tup_isnull);
 		}
-
 		/* bailout if any error */
-		if (kcxt.e.errcode != StromError_Success)
-			atomicCAS(&status, StromError_Success, kcxt.e.errcode);
-		__syncthreads();
-		if (status != StromError_Success)
+		if (__syncthreads_count(kcxt.e.errcode) > 0)
 			break;
 #else
 		if (get_local_id() == 0)
@@ -395,8 +392,8 @@ gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
 		/* OK, store the result index */
 		if (tupitem && rc)
 		{
-			kresults->results[nitems_base + nitems_offset] = (cl_uint)
-				((char *)(&tupitem->htup) - (char *)(kds_src));
+			kresults->results[nitems_base + nitems_offset] =
+				__kds_packed((char *)&tupitem->htup - (char *)kds_src);
 		}
 #endif
 	skip:
@@ -458,15 +455,11 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 #endif
 	__shared__ cl_uint	base;
 	__shared__ cl_uint	nitems_base;
-	__shared__ cl_uint	usage_base;
-	__shared__ cl_int	status __attribute__((unused));
+	__shared__ cl_ulong	usage_base;
 
 	assert(kds_src->format == KDS_FORMAT_BLOCK);
 	assert(kds_dst->format == KDS_FORMAT_ROW);
 	INIT_KERNEL_CONTEXT(&kcxt, gpuscan_exec_quals_block, kparams);
-	if (get_local_id() == 0)
-		status = StromError_Success;
-	__syncthreads();
 
 	part_sz = KERN_DATA_STORE_PARTSZ(kds_src);
 	n_parts = get_local_size() / part_sz;
@@ -582,11 +575,11 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 				do {
 					newval = oldval = curval;
 					newval.i.nitems += nvalids;
-					newval.i.usage  += extra_sz;
+					newval.i.usage  += __kds_packed(extra_sz);
 
 					if (KERN_DATA_STORE_HEAD_LENGTH(kds_dst) +
 						STROMALIGN(sizeof(cl_uint) * newval.i.nitems) +
-						newval.i.usage > kds_dst->length)
+						__kds_unpack(newval.i.usage) > kds_dst->length)
 					{
 						STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
 						break;
@@ -595,7 +588,7 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 												 oldval.v64,
 												 newval.v64)) != oldval.v64);
 				nitems_base = oldval.i.nitems;
-				usage_base  = oldval.i.usage;
+				usage_base  = __kds_unpack(oldval.i.usage);
 			}
 			if (__syncthreads_count(kcxt.e.errcode) > 0)
 			{
@@ -607,7 +600,7 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 			if (htup && rc)
 			{
 				cl_uint	   *tup_index = KERN_DATA_STORE_ROWINDEX(kds_dst);
-				cl_uint		pos =
+				cl_ulong	pos =
 					(kds_dst->length - (usage_base + usage_offset + required));
 #ifdef GPUSCAN_HAS_DEVICE_PROJECTION
 				cl_uint		htuple_oid = 0;
@@ -634,7 +627,7 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 				tupitem->t_self = t_self;
 				memcpy(&tupitem->htup, htup, t_len);
 #endif
-				tup_index[nitems_base + nitems_offset] = pos;
+				tup_index[nitems_base + nitems_offset] = __kds_packed(pos);
 			}
 		skip:
 			/* update statistics */
@@ -698,17 +691,13 @@ gpuscan_exec_quals_column(kern_gpuscan *kgpuscan,
 #else
 	cl_char		   *tup_extra __attribute__((unused)) = NULL;
 #endif
-	__shared__ cl_int	src_base;
-	__shared__ cl_int	nitems_base;
-	__shared__ cl_int	usage_base	__attribute__((unused));
-	__shared__ cl_int	status __attribute__((unused));
+	__shared__ cl_uint	src_base;
+	__shared__ cl_uint	nitems_base;
+	__shared__ cl_ulong	usage_base	__attribute__((unused));
 
 	assert(__ldg(&kds_src->format) == KDS_FORMAT_COLUMN);
 	assert(!kds_dst || __ldg(&kds_dst->format) == KDS_FORMAT_ROW);
 	INIT_KERNEL_CONTEXT(&kcxt, gpuscan_exec_quals_column, kparams);
-	if (get_local_id() == 0)
-		status = StromError_Success;
-	__syncthreads();
 
 	do {
 		kern_tupitem   *tupitem		__attribute__((unused));
@@ -734,10 +723,7 @@ gpuscan_exec_quals_column(kern_gpuscan *kgpuscan,
 			rc = false;
 #ifdef GPUSCAN_HAS_WHERE_QUALS
 		/* bailout if any error */
-		if (kcxt.e.errcode != StromError_Success)
-			atomicCAS(&status, StromError_Success, kcxt.e.errcode);
-		__syncthreads();
-		if (status != StromError_Success)
+		if (__syncthreads_count(kcxt.e.errcode) > 0)
 			break;
 #endif
 		/* how many rows servived WHERE-clause evaluation? */
@@ -771,7 +757,8 @@ gpuscan_exec_quals_column(kern_gpuscan *kgpuscan,
 
 		usage_offset = pgstromStairlikeSum(required, &extra_sz);
 		if (get_local_id() == 0)
-			usage_base = atomicAdd(&kds_dst->usage, extra_sz);
+			usage_base = __kds_unpack(atomicAdd(&kds_dst->usage,
+												__kds_packed(extra_sz)));
 		__syncthreads();
 
 		if (KERN_DATA_STORE_HEAD_LENGTH(kds_dst) +
@@ -789,7 +776,7 @@ gpuscan_exec_quals_column(kern_gpuscan *kgpuscan,
 			cl_uint		pos;
 
 			pos = kds_dst->length - (usage_base + usage_offset + required);
-			tup_index[nitems_base + nitems_offset] = pos;
+			tup_index[nitems_base + nitems_offset] = __kds_packed(pos);
 			form_kern_heaptuple((kern_tupitem *)((char *)kds_dst + pos),
 								kds_dst->ncols,
 								kds_dst->colmeta,
@@ -799,12 +786,8 @@ gpuscan_exec_quals_column(kern_gpuscan *kgpuscan,
 								tup_values,
 								tup_isnull);
 		}
-
 		/* bailout if any error */
-		if (kcxt.e.errcode != StromError_Success)
-			atomicCAS(&status, StromError_Success, kcxt.e.errcode);
-		__syncthreads();
-		if (status != StromError_Success)
+		if (__syncthreads_count(kcxt.e.errcode) > 0)
 			break;
 	skip:
 		/* update statistics */
