@@ -243,10 +243,13 @@ gpupreagg_final_data_move(kern_context *kcxt,
 	/* allocate extra buffer by atomic operation */
 	if (alloc_size > 0)
 	{
-		cl_uint		usage_prev = atomicAdd(&kds_dst->usage, alloc_size);
-		size_t		usage_slot = KERN_DATA_STORE_SLOT_LENGTH(kds_dst,
-															 rowidx_dst + 1);
-		if (usage_slot + usage_prev + alloc_size >= (size_t)kds_dst->length)
+		size_t		usage_prev;
+		size_t		usage_slot;
+
+		usage_slot = KERN_DATA_STORE_SLOT_LENGTH(kds_dst, rowidx_dst + 1);
+		usage_prev = __kds_unpack(atomicAdd(&kds_dst->usage,
+											__kds_packed(alloc_size)));
+		if (usage_slot + usage_prev + alloc_size >= kds_dst->length)
 		{
 			STROM_SET_ERROR(&kcxt->e, StromError_DataStoreNoSpace);
 			/*
@@ -318,13 +321,8 @@ gpupreagg_setup_row(kern_gpupreagg *kgpreagg,
 	cl_bool			try_next_window = true;
 	cl_bool			rc;
 	__shared__ cl_uint	base;
-	__shared__ cl_int	status;
 
 	INIT_KERNEL_CONTEXT(&kcxt, gpupreagg_setup_row, kparams);
-	if (get_local_id() == 0)
-		status = StromError_Success;
-	__syncthreads();
-
 	do {
 		if (get_local_id() == 0)
 			base = atomicAdd(&kgpreagg->read_src_pos, get_local_size());
@@ -355,10 +353,7 @@ gpupreagg_setup_row(kern_gpupreagg *kgpreagg,
 
 #ifdef GPUPREAGG_PULLUP_OUTER_SCAN
 		/* Bailout if any error */
-		if (kcxt.e.errcode != StromError_Success)
-			atomicCAS(&status, StromError_Success, kcxt.e.errcode);
-		__syncthreads();
-		if (status != StromError_Success)
+		if (__syncthreads_count(kcxt.e.errcode) > 0)
 			break;
 #endif
 		/* allocation of kds_slot buffer, if any */
@@ -387,11 +382,8 @@ gpupreagg_setup_row(kern_gpupreagg *kgpreagg,
 			}
 		}
 		/* bailout if any error */
-		if (kcxt.e.errcode != StromError_Success)
-            atomicCAS(&status, StromError_Success, kcxt.e.errcode);
-        __syncthreads();
-        if (status != StromError_Success)
-            break;
+		if (__syncthreads_count(kcxt.e.errcode) > 0)
+			break;
 		/* update statistics */
 		pgstromStairlikeBinaryCount(tupitem ? 1 : 0, &count);
 		if (get_local_id() == 0)
@@ -423,7 +415,7 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 
 	INIT_KERNEL_CONTEXT(&kcxt, gpupreagg_setup_block, kparams);
 
-	assert(kds_src->format == KDS_FORMAT_BLOCK ||
+	assert(kds_src->format == KDS_FORMAT_BLOCK &&
 		   kds_slot->format == KDS_FORMAT_SLOT);
 
 	part_sz = Min((kds_src->nrows_per_block +
@@ -567,13 +559,8 @@ gpupreagg_setup_column(kern_gpupreagg *kgpreagg,
 	cl_bool			try_next_window = true;
 	cl_bool			rc;
 	__shared__ cl_uint	base;
-	__shared__ cl_int	status;
 
 	INIT_KERNEL_CONTEXT(&kcxt, gpupreagg_setup_column, kparams);
-	if (get_local_id() == 0)
-		status = StromError_Success;
-	__syncthreads();
-
 	do {
 		if (get_local_id() == 0)
 			base = atomicAdd(&kgpreagg->read_src_pos, get_local_size());
@@ -599,10 +586,7 @@ gpupreagg_setup_column(kern_gpupreagg *kgpreagg,
 		}
 #ifdef GPUPREAGG_PULLUP_OUTER_SCAN
 		/* Bailout if any error */
-		if (kcxt.e.errcode != StromError_Success)
-			atomicCAS(&status, StromError_Success, kcxt.e.errcode);
-		__syncthreads();
-		if (status != StromError_Success)
+		if (__syncthreads_count(kcxt.e.errcode) > 0)
 			break;
 #endif
 		/* allocation of kds_slot buffer, if any */
@@ -631,11 +615,8 @@ gpupreagg_setup_column(kern_gpupreagg *kgpreagg,
 			}
 		}
 		/* bailout if any error */
-		if (kcxt.e.errcode != StromError_Success)
-            atomicCAS(&status, StromError_Success, kcxt.e.errcode);
-        __syncthreads();
-        if (status != StromError_Success)
-            break;
+		if (__syncthreads_count(kcxt.e.errcode) > 0)
+			break;
 		/* update statistics */
 		pgstromStairlikeBinaryCount(rc, &count);
 		if (get_local_id() == 0)
