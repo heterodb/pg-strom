@@ -199,7 +199,7 @@ static __shared__ cl_bool	scan_done;
 static __shared__ cl_int	base_depth;
 static __shared__ cl_uint	src_read_pos;
 static __shared__ cl_uint	dst_base_index;
-static __shared__ cl_uint	dst_base_usage;
+static __shared__ size_t	dst_base_usage;
 static __shared__ cl_uint	wip_count[GPUJOIN_MAX_DEPTH+1];
 static __shared__ cl_uint	read_pos[GPUJOIN_MAX_DEPTH+1];
 static __shared__ cl_uint	write_pos[GPUJOIN_MAX_DEPTH+1];
@@ -363,8 +363,8 @@ gpujoin_load_source(kern_context *kcxt,
 		if (row_index < __ldg(&kds_src->nitems))
 		{
 			tupitem = KERN_DATA_STORE_TUPITEM(kds_src, row_index);
-			t_offset = (cl_uint)((char *)&tupitem->htup - (char *)kds_src);
-
+			t_offset = __kds_packed((char *)&tupitem->htup -
+									(char *)kds_src);
 			visible = gpuscan_quals_eval(kcxt,
 										 kds_src,
 										 &tupitem->t_self,
@@ -543,7 +543,8 @@ gpujoin_load_outer(kern_context *kcxt,
 	if (row_index < kds_in->nitems && !ojmap[row_index])
 	{
 		tupitem = KERN_DATA_STORE_TUPITEM(kds_in, row_index);
-		t_offset = (cl_uint)((char *)&tupitem->htup - (char *)kds_in);
+		t_offset = __kds_packed((char *)&tupitem->htup -
+								(char *)kds_in);
 		htup = &tupitem->htup;
 	}
 	wr_index = write_pos[outer_depth];
@@ -607,7 +608,7 @@ gpujoin_projection_row(kern_context *kcxt,
 	cl_uint		nrels = kgjoin->num_rels;
 	cl_uint		read_index;
 	cl_uint		dest_index;
-	cl_uint		dest_offset;
+	size_t		dest_offset;
 	cl_uint		count;
 	cl_uint		nvalids;
 	cl_uint		required;
@@ -687,11 +688,11 @@ gpujoin_projection_row(kern_context *kcxt,
 		do {
 			newval = oldval = curval;
 			newval.i.nitems	+= nvalids;
-			newval.i.usage	+= count;
+			newval.i.usage	+= __kds_packed(count);
 
 			if (KERN_DATA_STORE_HEAD_LENGTH(kds_dst) +
 				STROMALIGN(sizeof(cl_uint) * newval.i.nitems) +
-				newval.i.usage > kds_dst->length)
+				__kds_unpack(newval.i.usage) > kds_dst->length)
 			{
 				STROM_SET_ERROR(&kcxt->e, StromError_Suspend);
 				break;
@@ -700,7 +701,7 @@ gpujoin_projection_row(kern_context *kcxt,
 										 oldval.v64,
 										 newval.v64)) != oldval.v64);
 		dst_base_index = oldval.i.nitems;
-		dst_base_usage = oldval.i.usage;
+		dst_base_usage = __kds_unpack(oldval.i.usage);
 	}
 	if (__syncthreads_count(kcxt->e.errcode) > 0)
 	{
@@ -718,7 +719,7 @@ gpujoin_projection_row(kern_context *kcxt,
 		kern_tupitem *tupitem = (kern_tupitem *)
 			((char *)kds_dst + kds_dst->length - dest_offset);
 
-		row_index[dest_index] = kds_dst->length - dest_offset;
+		row_index[dest_index] = __kds_packed(kds_dst->length - dest_offset);
 		form_kern_heaptuple(tupitem,
 							kds_dst->ncols,
 							kds_dst->colmeta,
@@ -763,7 +764,7 @@ gpujoin_projection_slot(kern_context *kcxt,
 	cl_uint		nrels = kgjoin->num_rels;
 	cl_uint		read_index;
 	cl_uint		dest_index;
-	cl_uint		dest_offset;
+	size_t		dest_offset;
 	cl_uint		count;
 	cl_uint		nvalids;
 	cl_bool		tup_is_valid = false;
@@ -838,10 +839,10 @@ gpujoin_projection_slot(kern_context *kcxt,
 		do {
 			newval = oldval = curval;
 			newval.i.nitems += nvalids;
-			newval.i.usage  += count;
+			newval.i.usage  += __kds_packed(count);
 
 			if (KERN_DATA_STORE_SLOT_LENGTH(kds_dst, newval.i.nitems) +
-				newval.i.usage > kds_dst->length)
+				__kds_unpack(newval.i.usage) > kds_dst->length)
 			{
 				STROM_SET_ERROR(&kcxt->e, StromError_Suspend);
 				break;
@@ -850,7 +851,7 @@ gpujoin_projection_slot(kern_context *kcxt,
 										 oldval.v64,
 										 newval.v64)) != oldval.v64);
 		dst_base_index = oldval.i.nitems;
-		dst_base_usage = oldval.i.usage;
+		dst_base_usage = __kds_unpack(oldval.i.usage);
 	}
 	if (__syncthreads_count(kcxt->e.errcode) > 0)
 	{
@@ -1043,8 +1044,8 @@ left_outer:
 	if (result)
 	{
 		memcpy(wr_stack, rd_stack, sizeof(cl_uint) * depth);
-		wr_stack[depth] = (!tupitem ? 0 : (cl_uint)((char *)&tupitem->htup -
-													(char *)kds_in));
+		wr_stack[depth] = (!tupitem ? 0 : __kds_packed((char *)&tupitem->htup -
+													   (char *)kds_in));
 	}
 	__syncthreads();
 	/*
@@ -1073,6 +1074,7 @@ gpujoin_exec_hashjoin(kern_context *kcxt,
 	kern_data_store	   *kds_hash = KERN_MULTIRELS_INNER_KDS(kmrels, depth);
 	cl_bool			   *oj_map = KERN_MULTIRELS_OUTER_JOIN_MAP(kmrels, depth);
 	kern_hashitem	   *khitem = NULL;
+	cl_uint				t_offset = UINT_MAX;
 	cl_uint				hash_value;
 	cl_uint				rd_index;
 	cl_uint				wr_index;
@@ -1152,7 +1154,7 @@ gpujoin_exec_hashjoin(kern_context *kcxt,
 	{
 		/* walks on the hash-slot chain */
 		khitem = (kern_hashitem *)((char *)kds_hash
-								   + l_state[depth]
+								   + __kds_unpack(l_state[depth])
 								   - offsetof(kern_hashitem, t.htup));
 		hash_value = khitem->hash;
 
@@ -1186,6 +1188,8 @@ gpujoin_exec_hashjoin(kern_context *kcxt,
 			if (oj_map && !oj_map[khitem->rowid])
 				oj_map[khitem->rowid] = true;
 		}
+		t_offset = __kds_packed((char *)&khitem->t.htup -
+								(char *)kds_hash);
 	}
 	else if (KERN_MULTIRELS_LEFT_OUTER_JOIN(kmrels, depth) &&
 			 l_state[depth] != UINT_MAX &&
@@ -1198,8 +1202,7 @@ gpujoin_exec_hashjoin(kern_context *kcxt,
 		result = false;
 
 	/* save the current hash item */
-	l_state[depth] = (!khitem ? UINT_MAX : (cl_uint)((char *)&khitem->t.htup -
-													 (char *)kds_hash));
+	l_state[depth] = t_offset;
 	wr_index = write_pos[depth];
 	wr_index += pgstromStairlikeBinaryCount(result, &count);
 	if (get_local_id() == 0)
@@ -1211,8 +1214,7 @@ gpujoin_exec_hashjoin(kern_context *kcxt,
 	if (result)
 	{
 		memcpy(wr_stack, rd_stack, sizeof(cl_uint) * depth);
-		wr_stack[depth] = (!khitem ? 0U : (cl_uint)((char *)&khitem->t.htup -
-													(char *)kds_hash));
+		wr_stack[depth] = (!khitem ? 0U : t_offset);
 	}
 	/* count number of threads still in-progress */
 	count = __syncthreads_count(khitem != NULL);

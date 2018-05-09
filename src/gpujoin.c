@@ -5327,19 +5327,22 @@ gpujoin_expand_inner_kds(dsm_segment *seg, size_t kds_offset)
 	new_kmrels = dsm_resize(seg, new_dsmlen);
 	kds = (kern_data_store *)(new_kmrels + kds_offset);
 	row_index = KERN_DATA_STORE_ROWINDEX(kds);
-	kds_length = Min(new_dsmlen - kds_offset, 0x100000000);
+	kds_length = Min(new_dsmlen - kds_offset, 0x400000000);	/* up to 16GB */
 	shift = kds_length - kds->length;
 	Assert(shift == MAXALIGN(shift));
 	if (kds->nitems > 0)
 	{
-		Assert(kds->usage > 0);
-		memmove((char *)kds + kds_length  - kds->usage,	/* new pos */
-				(char *)kds + kds->length - kds->usage,	/* old pos */
-				kds->usage);
+		size_t	curr_usage = __kds_unpack(kds->usage);
+
+		Assert(curr_usage > 0);
+		memmove((char *)kds + kds_length  - curr_usage,	/* new pos */
+				(char *)kds + kds->length - curr_usage,	/* old pos */
+				curr_usage);
 		for (i=0; i < kds->nitems; i++)
-			row_index[i] += shift;
+			row_index[i] += __kds_packed(shift);
 	}
 	kds->length = kds_length;
+	elog(INFO, "expand KDS");
 	return kds;
 }
 
@@ -5350,6 +5353,7 @@ gpujoin_expand_inner_kds(dsm_segment *seg, size_t kds_offset)
 static void
 gpujoin_compaction_inner_kds(kern_data_store *kds_in)
 {
+	size_t		curr_usage = __kds_unpack(kds_in->usage);
 	size_t		head_sz;
 	size_t		shift;
 	cl_uint	   *row_index;
@@ -5357,22 +5361,21 @@ gpujoin_compaction_inner_kds(kern_data_store *kds_in)
 
 	Assert(kds_in->format == KDS_FORMAT_HASH ||
 		   kds_in->nslots == 0);
-	Assert(kds_in->usage == MAXALIGN(kds_in->usage));
 	head_sz = KDS_CALCULATE_FRONTEND_LENGTH(kds_in->ncols,
 											kds_in->nslots,
 											kds_in->nitems);
 	Assert(head_sz == MAXALIGN(head_sz));
-	Assert(head_sz + kds_in->usage <= kds_in->length);
-	shift = kds_in->length - (head_sz + kds_in->usage);
+	Assert(head_sz + curr_usage <= kds_in->length);
+	shift = kds_in->length - (head_sz + curr_usage);
 	if (shift > 32 * 1024)	/* close the hole larger than 32KB */
 	{
 		memmove((char *)kds_in + head_sz,
-				(char *)kds_in + kds_in->length - kds_in->usage,
-				kds_in->usage);
+				(char *)kds_in + kds_in->length - curr_usage,
+				curr_usage);
 		row_index = KERN_DATA_STORE_ROWINDEX(kds_in);
 		for (i=0; i < kds_in->nitems; i++)
-			row_index[i] -= shift;
-		kds_in->length = head_sz + kds_in->usage;
+			row_index[i] -= __kds_packed(shift);
+		kds_in->length = head_sz + curr_usage;
 	}
 }
 
@@ -5425,11 +5428,14 @@ gpujoin_inner_hash_preload(innerState *istate,
 	for (i=0; i < kds_hash->nitems; i++)
 	{
 		kern_hashitem  *khitem = (kern_hashitem *)
-			((char *)kds_hash + row_index[i] - offsetof(kern_hashitem, t));
+			((char *)kds_hash
+			 + __kds_unpack(row_index[i])
+			 - offsetof(kern_hashitem, t));
 		Assert(khitem->rowid == i);
 		j = khitem->hash % kds_hash->nslots;
 		khitem->next = hash_slot[j];
-		hash_slot[j] = (uintptr_t)khitem - (uintptr_t)kds_hash;
+		hash_slot[j] = __kds_packed((char *)khitem -
+									(char *)kds_hash);
 	}
 }
 

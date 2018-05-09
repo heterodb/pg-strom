@@ -1152,7 +1152,6 @@ KDS_insert_hashitem(kern_data_store *kds,
 		return false;	/* no more space to put */
 
 	/* OK, put a tuple */
-	Assert(kds->usage == MAXALIGN(kds->usage));
 	khitem = (kern_hashitem *)((char *)kds + kds->length - curr_usage);
 	khitem->hash = hash_value;
 	khitem->next = 0x7f7f7f7f;	/* to be set later */
@@ -1161,8 +1160,8 @@ KDS_insert_hashitem(kern_data_store *kds,
 	khitem->t.t_self = tuple->t_self;
 	memcpy(&khitem->t.htup, tuple->t_data, tuple->t_len);
 
-	row_index[khitem->rowid] = __kds_packed((uintptr_t)&khitem->t.t_len -
-											(uintptr_t)kds);
+	row_index[khitem->rowid] = __kds_packed((char *)&khitem->t.t_len -
+											(char *)kds);
 	kds->usage = __kds_packed(curr_usage);
 
 	return true;
