@@ -644,22 +644,22 @@ CREATE FUNCTION pgstrom.pvariance(int8,float8,float8)
   LANGUAGE C STRICT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.float8_stddev_samp_numeric(float8[])
-  RETURNS float8[]
+  RETURNS numeric
   AS 'MODULE_PATHNAME','pgstrom_float8_stddev_samp_numeric'
   LANGUAGE C STRICT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.float8_stddev_pop_numeric(float8[])
-  RETURNS float8[]
+  RETURNS numeric
   AS 'MODULE_PATHNAME','pgstrom_float8_stddev_pop_numeric'
   LANGUAGE C STRICT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.float8_var_samp_numeric(float8[])
-  RETURNS float8[]
+  RETURNS numeric
   AS 'MODULE_PATHNAME','pgstrom_float8_var_samp_numeric'
   LANGUAGE C STRICT PARALLEL SAFE;
 
 CREATE FUNCTION pgstrom.float8_var_pop_numeric(float8[])
-  RETURNS float8[]
+  RETURNS numeric
   AS 'MODULE_PATHNAME','pgstrom_float8_var_pop_numeric'
   LANGUAGE C STRICT PARALLEL SAFE;
 

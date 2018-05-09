@@ -1539,10 +1539,9 @@ pgstrom_pullup_outer_scan(const Path *outer_path,
 			break;	/* OK */
 		if (pgstrom_path_is_gpuscan(outer_path))
 			break;	/* OK, only if GpuScan */
-		if (outer_path->pathtype == T_Result)
+		if (IsA(outer_path, ProjectionPath))
 		{
 			ProjectionPath *ppath = (ProjectionPath *) outer_path;
-
 			if (ppath->dummypp)
 			{
 				outer_path = ppath->subpath;
