@@ -977,6 +977,14 @@ try_add_gpujoin_paths(PlannerInfo *root,
 		return;
 
 	/*
+	 * GpuJoin does not support JOIN in case when either side is parameterized
+	 * by the other side.
+	 */
+	if (bms_overlap(PATH_REQ_OUTER(outer_path), inner_path->parent->relids) ||
+		bms_overlap(PATH_REQ_OUTER(inner_path), outer_path->parent->relids))
+		return;
+
+	/*
 	 * Check to see if proposed path is still parameterized, and reject
 	 * if the parameterization wouldn't be sensible.
 	 * Note that GpuNestLoop does not support parameterized nest-loop,
@@ -1079,6 +1087,12 @@ try_add_gpujoin_paths(PlannerInfo *root,
 			}
 			outer_path = linitial(gjpath->cpath.custom_paths);
 		}
+#ifdef NOT_USED
+		/*
+		 * MEMO: We are not 100% certain whether it is safe operation to
+		 * pull up built-in JOIN as a part of GpuJoin. So, this code block
+		 * is disabled right now.
+		 */
 		else if (outer_path->pathtype == T_NestLoop ||
 				 outer_path->pathtype == T_HashJoin ||
 				 outer_path->pathtype == T_MergeJoin)
@@ -1113,6 +1127,7 @@ try_add_gpujoin_paths(PlannerInfo *root,
 			ip_items_list = lcons(ip_item, ip_items_list);
 			outer_path = join_path->outerjoinpath;
 		}
+#endif
 		else
 			break;
 	}
