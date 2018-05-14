@@ -169,7 +169,8 @@ cost_gpuscan_common(PlannerInfo *root,
 	Size		htup_size;
 	QualCost	qcost;
 
-	Assert(IS_SIMPLE_REL(scan_rel) &&
+	Assert((scan_rel->reloptkind == RELOPT_BASEREL ||
+			scan_rel->reloptkind == RELOPT_OTHER_MEMBER_REL) &&
 		   scan_rel->relid > 0 &&
 		   scan_rel->relid < root->simple_rel_array_size);
 
