@@ -997,15 +997,21 @@ ActivateGpuContext(GpuContext *gcontext)
 
 		for (i=0; i < gcontext->num_workers; i++)
 		{
-			rc = cuEventCreate(&gcontext->cuda_events0[i],
-							   CU_EVENT_BLOCKING_SYNC);
-			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
+			if (!gcontext->cuda_events0[i])
+			{
+				rc = cuEventCreate(&gcontext->cuda_events0[i],
+								   CU_EVENT_BLOCKING_SYNC);
+				if (rc != CUDA_SUCCESS)
+					elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
+			}
 
-			rc = cuEventCreate(&gcontext->cuda_events1[i],
-							   CU_EVENT_BLOCKING_SYNC);
-			if (rc != CUDA_SUCCESS)
-				elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
+			if (!gcontext->cuda_events1[i])
+			{
+				rc = cuEventCreate(&gcontext->cuda_events1[i],
+								   CU_EVENT_BLOCKING_SYNC);
+				if (rc != CUDA_SUCCESS)
+					elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
+			}
 		}
 
 		/* creation of worker threads */
@@ -1169,6 +1175,7 @@ SynchronizeGpuContext(GpuContext *gcontext)
 	memset(gcontext->worker_threads, 0,
 		   sizeof(pthread_t) * gcontext->num_workers);
 	gcontext->worker_is_running = false;
+	pg_atomic_write_u32(&gcontext->terminate_workers, 0);	/* reset */
 }
 
 /*
