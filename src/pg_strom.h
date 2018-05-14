@@ -1508,6 +1508,20 @@ typealign_get_width(char type_align)
 #define lthird_node(T,x)		((T *)lthird(x))
 #endif
 
+/* lappend on the specified memory-context */
+static inline List *
+lappend_cxt(MemoryContext memcxt, List *list, void *datum)
+{
+	MemoryContext oldcxt = MemoryContextSwitchTo(memcxt);
+	List   *r;
+
+	r = lappend(list, datum);
+	MemoryContextSwitchTo(oldcxt);
+
+	return r;
+}
+
+
 static inline char *
 format_numeric(cl_long value)
 {

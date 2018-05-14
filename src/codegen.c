@@ -252,8 +252,8 @@ build_devtype_info_entry(Oid type_oid,
 	tcache = lookup_type_cache(type_oid,
 							   TYPECACHE_EQ_OPR |
 							   TYPECACHE_CMP_PROC);
-
-	entry = palloc0(sizeof(devtype_info));
+	entry = MemoryContextAllocZero(devinfo_memcxt,
+								   sizeof(devtype_info));
 	entry->type_oid = type_oid;
 	entry->type_flags = type_flags;
 	entry->type_length = type_form->typlen;
@@ -292,20 +292,19 @@ build_devtype_info_entry(Oid type_oid,
 	/* add to the hash slot */
 	hindex = (hash_uint32((uint32) entry->type_oid)
 			  % lengthof(devtype_info_slot));
-	devtype_info_slot[hindex] = lappend(devtype_info_slot[hindex], entry);
-
+	devtype_info_slot[hindex] = lappend_cxt(devinfo_memcxt,
+											devtype_info_slot[hindex],
+											entry);
 	return entry;
 }
 
 static void
 build_devtype_info(void)
 {
-	MemoryContext oldcxt;
 	int		i;
 
 	Assert(!devtype_info_is_built);
 
-	oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
 	for (i=0; i < lengthof(devtype_catalog); i++)
 	{
 		const char *nsp_name = devtype_catalog[i].type_schema;
@@ -333,8 +332,6 @@ build_devtype_info(void)
 										devtype_catalog[i].hash_func,
 										NULL);
 	}
-	MemoryContextSwitchTo(oldcxt);
-
 	devtype_info_is_built = true;
 }
 
@@ -1790,8 +1787,8 @@ __pgstrom_devfunc_lookup_or_create(HeapTuple protup,
 	/*
 	 * Not found, construct a new entry of the device function
 	 */
-	oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
-	entry = palloc0(sizeof(devfunc_info));
+	entry = MemoryContextAllocZero(devinfo_memcxt,
+								   sizeof(devfunc_info));
 	entry->func_oid = func_oid;
 	entry->func_collid = func_collid;	/* may be cleared later */
 	entry->func_is_strict = proc->proisstrict;
@@ -1805,7 +1802,7 @@ __pgstrom_devfunc_lookup_or_create(HeapTuple protup,
 			entry->func_is_negative = true;
 			goto skip;
 		}
-		func_args = lappend(func_args, dtype);
+		func_args = lappend_cxt(devinfo_memcxt, func_args, dtype);
 	}
 
 	dtype = pgstrom_devtype_lookup(func_rettype);
@@ -1819,19 +1816,25 @@ __pgstrom_devfunc_lookup_or_create(HeapTuple protup,
 	entry->func_rettype = dtype;
 	entry->func_sqlname = pstrdup(NameStr(proc->proname));
 
-	/* for system default functions (pg_catalog) */
-	if (proc->pronamespace == PG_CATALOG_NAMESPACE &&
-		pgstrom_devfunc_construct_common(entry))
-		goto skip;
-	/* other extra or polymorphic functions */
-	if (pgstrom_devfunc_construct_extra(entry, protup))
-		goto skip;
-	/* oops, function has no entry */
-	entry->func_is_negative = true;
-skip:
-	devfunc_info_slot[i] = lappend(devfunc_info_slot[i], entry);
+	oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
+	if (proc->pronamespace == PG_CATALOG_NAMESPACE
+		/* for system default functions (pg_catalog) */
+		? pgstrom_devfunc_construct_common(entry)
+		/* other extra or polymorphic functions */
+		: pgstrom_devfunc_construct_extra(entry, protup))
+	{
+		entry->func_is_negative = false;
+	}
+	else
+	{
+		/* oops, function has no entry */
+		entry->func_is_negative = true;
+	}
 	MemoryContextSwitchTo(oldcxt);
-
+skip:
+	devfunc_info_slot[i] = lappend_cxt(devinfo_memcxt,
+									   devfunc_info_slot[i],
+									   entry);
 	if (entry->func_is_negative)
 		return NULL;
 	return entry;
