@@ -1174,8 +1174,10 @@ SynchronizeGpuContext(GpuContext *gcontext)
 	}
 	memset(gcontext->worker_threads, 0,
 		   sizeof(pthread_t) * gcontext->num_workers);
+	/* reset state for next activation */
 	gcontext->worker_is_running = false;
-	pg_atomic_write_u32(&gcontext->terminate_workers, 0);	/* reset */
+	pg_atomic_write_u32(&gcontext->terminate_workers, 0);
+	pg_atomic_write_u32(&gcontext->worker_index, 0);
 }
 
 /*
