@@ -235,6 +235,7 @@ build_devtype_info_entry(Oid type_oid,
 	TypeCacheEntry *tcache;
 	devtype_info   *entry;
 	cl_int			hindex;
+	MemoryContext	oldcxt;
 
 	tuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(type_oid));
 	if (!HeapTupleIsValid(tuple))
@@ -252,8 +253,8 @@ build_devtype_info_entry(Oid type_oid,
 	tcache = lookup_type_cache(type_oid,
 							   TYPECACHE_EQ_OPR |
 							   TYPECACHE_CMP_PROC);
-	entry = MemoryContextAllocZero(devinfo_memcxt,
-								   sizeof(devtype_info));
+	oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
+	entry = palloc0(sizeof(devtype_info));
 	entry->type_oid = type_oid;
 	entry->type_flags = type_flags;
 	entry->type_length = type_form->typlen;
@@ -272,6 +273,7 @@ build_devtype_info_entry(Oid type_oid,
 	/* type equality function */
 	entry->type_eqfunc = get_opcode(tcache->eq_opr);
 	entry->type_cmpfunc = tcache->cmp_proc;
+	MemoryContextSwitchTo(oldcxt);
 
 	if (!element)
 		entry->type_array = build_devtype_info_entry(type_form->typarray,
