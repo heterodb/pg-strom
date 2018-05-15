@@ -1,4 +1,7 @@
-* Mon Apr 30 2018 KaiGai Kohei <kaigai@heterodb.com> - 1.9-180120
+* Tue May 15 2018 KaiGai Kohei <kaigai@heterodb.com> - 2.0-180515
+- hotfixes for various bugs
+
+* Mon Apr 30 2018 KaiGai Kohei <kaigai@heterodb.com> - 2.0-180430
 - hotfixes for reported bugs
 - CUDA C code builder is re-designed as background worker, instead of
   the worker thread of GpuContext.
