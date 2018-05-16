@@ -1568,7 +1568,7 @@ static devfunc_extra_catalog_t devfunc_extra_catalog[] = {
 #undef FLOAT8
 #undef NUMERIC
 
-static void
+static bool
 __construct_devfunc_info(devfunc_info *entry,
 						 const char *template)
 {
@@ -1629,15 +1629,9 @@ __construct_devfunc_info(devfunc_info *entry,
 	 */
 	if (!has_collation)
 		entry->func_collid = InvalidOid;	/* clear default if any */
-	else
-	{
-		if (OidIsValid(entry->func_collid) &&
-			!lc_collate_is_c(entry->func_collid))
-		{
-			entry->func_is_negative = true;
-			return;
-		}
-	}
+	else if (OidIsValid(entry->func_collid) &&
+			 !lc_collate_is_c(entry->func_collid))
+		return false;		/* unable to run on device */
 
 	if (strncmp(template, "f:", 2) == 0)
 		entry->func_devname = template + 2;
@@ -1645,8 +1639,9 @@ __construct_devfunc_info(devfunc_info *entry,
 	{
 		elog(NOTICE, "Bug? unknown device function template: '%s'",
 			 template);
-		entry->func_is_negative = true;
+		return false;
 	}
+	return true;
 }
 
 static bool
@@ -1672,10 +1667,7 @@ pgstrom_devfunc_construct_common(devfunc_info *entry)
 					break;
 			}
 			if (lc == NULL)
-			{
-				__construct_devfunc_info(entry, procat->func_template);
-				return true;
-			}
+				return __construct_devfunc_info(entry, procat->func_template);
 		}
 	}
 	return false;
@@ -1730,8 +1722,7 @@ pgstrom_devfunc_construct_extra(devfunc_info *entry, HeapTuple protup)
 		if (strcmp(procat->func_signature, sig.data) == 0 &&
 			strcmp(procat->func_rettype, func_rettype) == 0)
 		{
-			__construct_devfunc_info(entry, procat->func_template);
-			result = true;
+			result = __construct_devfunc_info(entry, procat->func_template);
 			goto found;
 		}
 	}
@@ -1757,7 +1748,6 @@ __pgstrom_devfunc_lookup_or_create(HeapTuple protup,
 	ListCell	   *lc;
 	ListCell	   *cell;
 	int				i, j;
-	MemoryContext	oldcxt;
 
 	i = func_oid % lengthof(devfunc_info_slot);
 	foreach (lc, devfunc_info_slot[i])
@@ -1818,7 +1808,6 @@ __pgstrom_devfunc_lookup_or_create(HeapTuple protup,
 	entry->func_rettype = dtype;
 	entry->func_sqlname = pstrdup(NameStr(proc->proname));
 
-	oldcxt = MemoryContextSwitchTo(devinfo_memcxt);
 	if (proc->pronamespace == PG_CATALOG_NAMESPACE
 		/* for system default functions (pg_catalog) */
 		? pgstrom_devfunc_construct_common(entry)
@@ -1832,7 +1821,6 @@ __pgstrom_devfunc_lookup_or_create(HeapTuple protup,
 		/* oops, function has no entry */
 		entry->func_is_negative = true;
 	}
-	MemoryContextSwitchTo(oldcxt);
 skip:
 	devfunc_info_slot[i] = lappend_cxt(devinfo_memcxt,
 									   devfunc_info_slot[i],
