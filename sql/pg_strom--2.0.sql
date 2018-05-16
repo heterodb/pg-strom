@@ -541,6 +541,16 @@ CREATE FUNCTION pgstrom.pmax(money)
   AS 'MODULE_PATHNAME', 'pgstrom_partial_max_any'
   LANGUAGE C STRICT PARALLEL SAFE;
 
+CREATE FUNCTION pgstrom.pmin(date)
+  RETURNS date
+  AS 'MODULE_PATHNAME', 'pgstrom_partial_min_any'
+  LANGUAGE C STRICT PARALLEL SAFE;
+
+CREATE FUNCTION pgstrom.pmax(date)
+  RETURNS date
+  AS 'MODULE_PATHNAME', 'pgstrom_partial_max_any'
+  LANGUAGE C STRICT PARALLEL SAFE;
+
 CREATE FUNCTION pgstrom.pmin(time)
   RETURNS time
   AS 'MODULE_PATHNAME', 'pgstrom_partial_min_any'
