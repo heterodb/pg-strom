@@ -146,6 +146,7 @@ PG_UNARY_ABS_TEMPLATE(float8, cl_double)
 /*
  * Simple comparison operators across data types
  */
+__STROMCL_SIMPLE_COMPARE_TEMPLATE(bool,  bool,   bool,   cl_char, ==, eq)
 STROMCL_SIMPLE_COMPARE_TEMPLATE(int2,    int2,   int2,   cl_short)
 STROMCL_SIMPLE_COMPARE_TEMPLATE(int24,   int2,   int4,   cl_int)
 STROMCL_SIMPLE_COMPARE_TEMPLATE(int28,   int2,   int8,   cl_long)

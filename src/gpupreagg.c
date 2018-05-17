@@ -2209,7 +2209,19 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 			get_sortgroupref_clause_noerr(sortgroupref,
 										  parse->groupClause) != NULL)
 		{
-			ListCell   *cell;
+			devtype_info   *dtype;
+			Oid				coll_oid;
+			ListCell	   *cell;
+
+			/*
+			 * Type of the grouping-key must have device equality-function
+			 */
+			dtype = pgstrom_devtype_lookup(exprType((Node *)expr));
+			if (!dtype)
+				return false;
+			coll_oid = exprCollation((Node *)expr);
+			if (!pgstrom_devfunc_lookup_type_equal(dtype, coll_oid))
+				return false;
 
 			/*
 			 * NOTE: In case when grouping-key is an expression that is not

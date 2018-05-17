@@ -687,6 +687,7 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "float8abs", 1, {FLOAT8OID}, "p/f:float8abs" },
 
 	/* '=' : equal operators */
+	{ "booleq",  2, {BOOLOID, BOOLOID}, "p/f:booleq" },
 	{ "int2eq",  2, {INT2OID, INT2OID}, "p/f:int2eq" },
 	{ "int24eq", 2, {INT2OID, INT4OID}, "p/f:int24eq" },
 	{ "int28eq", 2, {INT2OID, INT8OID}, "p/f:int28eq" },
