@@ -1203,9 +1203,7 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 
 		num_groups = Max(pathnode->rows, 1.0);
 	}
-	if (input_path->rows <= 1.0)
-		return;		/* obviously, GPU is overkill solution */
-	reduction_ratio = num_groups / input_path->rows;
+	reduction_ratio = input_path->rows / num_groups;
 	if (reduction_ratio < gpupreagg_reduction_threshold)
 	{
 		elog(DEBUG2, "GpuPreAgg: %.0f -> %.0f reduction ratio (%.2f) is bad",
