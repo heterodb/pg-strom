@@ -383,7 +383,7 @@ gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
 			nitems_base = atomicAdd(&kresults->nitems, nvalids);
 		__syncthreads();
 
-		if (nitems_base + nvalids >= kresults->nrooms)
+		if (nitems_base + nvalids > kresults->nrooms)
 		{
 			STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
 			break;
