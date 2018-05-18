@@ -23,8 +23,9 @@ static create_upper_paths_hook_type create_upper_paths_next;
 static CustomPathMethods		gpupreagg_path_methods;
 static CustomScanMethods		gpupreagg_scan_methods;
 static CustomExecMethods		gpupreagg_exec_methods;
-static bool						enable_gpupreagg;
-static bool						enable_pullup_outer_join;
+static bool						enable_gpupreagg;				/* GUC */
+static bool						enable_pullup_outer_join;		/* GUC */
+static double					gpupreagg_reduction_threshold;	/* GUC */
 
 typedef struct
 {
@@ -1177,10 +1178,40 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 	Bitmapset	   *pfunc_bitmap;
 	Node		   *havingQual;
 	double			num_groups;
+	double			reduction_ratio;
 	bool			can_sort;
 	bool			can_hash;
 	bool			can_pullup_outerscan = true;
 	AggClauseCosts	agg_final_costs;
+
+	/*
+	 * MEMO: The 'pg_strom.gpupreagg_reduction_threshold' is a tentative
+	 * solution to avoid overflow of GPU device memory for GpuPreAgg.
+	 * In case of large table scan with small reduction ratio is almost
+	 * equivalent to cache most of input records in GPU device memory.
+	 * Then, it shall be aggregated on CPU-side again, it is usually waste
+	 * of computing power and data transfer.
+	 * Of course, a threshold is not a perfect solution. We may need to
+	 * switch to bypass GPU once reduction ratio (or absolute data size) is
+	 * worse than the estimation at the planning stage.
+	 */
+	if (!parse->groupClause)
+		num_groups = 1.0;
+	else
+	{
+		Path   *pathnode = linitial(group_rel->pathlist);
+
+		num_groups = Max(pathnode->rows, 1.0);
+	}
+	if (input_path->rows <= 1.0)
+		return;		/* obviously, GPU is overkill solution */
+	reduction_ratio = num_groups / input_path->rows;
+	if (reduction_ratio < gpupreagg_reduction_threshold)
+	{
+		elog(DEBUG2, "GpuPreAgg: %.0f -> %.0f reduction ratio (%.2f) is bad",
+			 input_path->rows, num_groups, reduction_ratio);
+		return;
+	}
 
 	/* construction of the target-list for each level */
 	if (!gpupreagg_build_path_target(root,
@@ -1234,16 +1265,6 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 	/* GpuPreAgg does not support ordered aggregation */
 	if (agg_final_costs.numOrderedAggs > 0)
 		return;
-
-	/* Estimated number of groups */
-	if (!parse->groupClause)
-		num_groups = 1.0;
-	else
-	{
-		Path	   *pathnode = linitial(group_rel->pathlist);
-
-		num_groups = pathnode->rows;
-	}
 
 	/*
 	 * construction of GpuPreAgg pathnode on top of the cheapest total
@@ -5240,6 +5261,17 @@ pgstrom_init_gpupreagg(void)
 							 NULL,
 							 &enable_pullup_outer_join,
 							 true,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	/* pg_strom.gpupreagg_reduction_threshold */
+	DefineCustomRealVariable("pg_strom.gpupreagg_reduction_threshold",
+							 "Minimus reduction ratio to use GpuPreAgg",
+							 NULL,
+							 &gpupreagg_reduction_threshold,
+							 20.0,
+							 1.0,
+							 DBL_MAX,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
