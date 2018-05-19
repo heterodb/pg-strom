@@ -3786,13 +3786,13 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 							GpuTaskKind_GpuPreAgg,
 							gpa_info->ccache_refs,
 							gpa_info->used_params,
+							gpa_info->outer_nrows_per_block,
 							estate);
 	gpas->gts.cb_next_task       = gpupreagg_next_task;
 	gpas->gts.cb_terminator_task = gpupreagg_terminator_task;
 	gpas->gts.cb_next_tuple      = gpupreagg_next_tuple;
 	gpas->gts.cb_process_task    = gpupreagg_process_task;
 	gpas->gts.cb_release_task    = gpupreagg_release_task;
-	gpas->gts.outer_nrows_per_block = gpa_info->outer_nrows_per_block;
 
 	gpas->num_group_keys     = gpa_info->num_group_keys;
 

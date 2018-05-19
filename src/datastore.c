@@ -700,13 +700,13 @@ nvme_sstate_open_files(GpuContext *gcontext,
  * with KDS_FORMAT_BLOCK / NVMe-Strom.
  */
 void
-PDS_init_heapscan_state(GpuTaskState *gts,
-						cl_uint nrows_per_block)
+PDS_init_heapscan_state(GpuTaskState *gts)
 {
 	GpuContext	   *gcontext = gts->gcontext;
 	Relation		relation = gts->css.ss.ss_currentRelation;
 	TupleDesc		tupdesc = RelationGetDescr(relation);
 	EState		   *estate = gts->css.ss.ps.state;
+	cl_uint			nrows_per_block = gts->outer_nrows_per_block;
 	BlockNumber		nr_blocks;
 	BlockNumber		nr_segs;
 	NVMEScanState  *nvme_sstate;
@@ -714,9 +714,15 @@ PDS_init_heapscan_state(GpuTaskState *gts,
 	cl_uint			nchunks;
 	cl_uint			nblocks_per_chunk;
 
-	/* check storage capability and relation's size */
-	if (!RelationWillUseNvmeStrom(relation, &nr_blocks))
+	/*
+	 * Check storage capability of NVMe-Strom
+	 */
+	if (nrows_per_block == 0 ||
+		!RelationCanUseNvmeStrom(relation) ||
+		(nr_blocks = RelationGetNumberOfBlocks(relation)) <= RELSEG_SIZE)
+	{
 		return;
+	}
 
 	/*
 	 * Calculation of an optimal number of data-blocks for each PDS.

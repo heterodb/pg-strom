@@ -158,13 +158,15 @@ cost_gpuscan_common(PlannerInfo *root,
 {
 	Cost		startup_cost = 0.0;
 	Cost		run_cost = 0.0;
+	Cost		disk_scan_cost;
 	double		gpu_ratio = pgstrom_gpu_operator_cost / cpu_operator_cost;
 	double		parallel_divisor = (double) parallel_workers;
 	double		ntuples = scan_rel->tuples;
 	double		nchunks;
 	double		selectivity;
 	double		spc_seq_page_cost;
-	cl_uint		nrows_per_block;
+	bool		may_use_nvme_strom = false;
+	cl_uint		nrows_per_block = 0;
 	Size		heap_size;
 	Size		htup_size;
 	QualCost	qcost;
@@ -182,38 +184,13 @@ cost_gpuscan_common(PlannerInfo *root,
 									 NULL);
 
 	/* fetch estimated page cost for tablespace containing the table */
-	/*
-	 * TODO: we may need to discount page cost if NVMe-Strom is capable
-	 */
 	get_tablespace_page_costs(scan_rel->reltablespace,
 							  NULL, &spc_seq_page_cost);
+	disk_scan_cost = spc_seq_page_cost * (double)scan_rel->pages;
 
-	/*
-	 * Discount page scan cost if NVMe-Strom is capable
-	 *
-	 * XXX - acceleration ratio depends on number of SSDs configured
-	 * as MD0-RAID volume, number of parallel workers and so on.
-	 * Once NVMe-Strom driver supports hardware configuration info,
-	 * we follow it.
-	 */
+	/* check whether NVMe-Strom is capable */
 	if (ScanPathWillUseNvmeStrom(root, scan_rel))
-	{
-		/* FIXME: discount 50% if NVMe-Strom is ready */
-		spc_seq_page_cost /= 1.5;
-		/*
-		 * FIXME: i/o concurrency will effective throughput according
-		 * to the number of parallel workers
-		 */
-		if (parallel_workers > 0)
-			spc_seq_page_cost /= (Cost)(1 + Min(parallel_workers, 4));
-	}
-
-	/*
-	 * Disk i/o cost; we may add special treatment for NVMe-Strom.
-	 * On the other hands, planner usually choose PG-Strom's path
-	 * for large scale of data.
-	 */
-	run_cost += spc_seq_page_cost * (double)scan_rel->pages;
+		may_use_nvme_strom = true;
 
 	/*
 	 * Cost adjustment by CPU parallelism, if used.
@@ -238,12 +215,26 @@ cost_gpuscan_common(PlannerInfo *root,
 		 * cost by parallel_divisor.
 		 */
 		startup_cost += pgstrom_gpu_setup_cost / parallel_divisor;
+
+		/*
+		 * Cost discount for more efficient I/O with multiplexing.
+		 * PG background workers can issue read request to filesystem
+		 * concurrently. It enables to work I/O subsystem during blocking-
+		 * time for other workers, then, it pulls up usage ratio of the
+		 * storage system.
+		 */
+		disk_scan_cost /= Min(2.0, sqrt(parallel_divisor));
+
+		/* more disk i/o discount if NVMe-Strom is available */
+		if (may_use_nvme_strom)
+			disk_scan_cost /= 1.5;
 	}
 	else
 	{
 		parallel_divisor = 1.0;
 		startup_cost += pgstrom_gpu_setup_cost;
 	}
+	run_cost += disk_scan_cost;
 
 	/* estimation for number of chunks (assume KDS_FORMAT_ROW) */
 	heap_size = (double)(BLCKSZ - SizeOfPageHeaderData) * scan_rel->pages;
@@ -286,7 +277,7 @@ cost_gpuscan_common(PlannerInfo *root,
 	*p_parallel_divisor = parallel_divisor;
 	*p_scan_ntuples = ntuples / parallel_divisor;
 	*p_scan_nchunks = nchunks / parallel_divisor;
-	*p_nrows_per_block = nrows_per_block;
+	*p_nrows_per_block = (may_use_nvme_strom ? nrows_per_block : 0);
 	*p_startup_cost = startup_cost;
 	*p_run_cost = run_cost;
 }
@@ -1776,14 +1767,13 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 							GpuTaskKind_GpuScan,
 							gs_info->ccache_refs,
 							gs_info->used_params,
+							gs_info->nrows_per_block,
 							estate);
 	gss->gts.cb_next_task   = gpuscan_next_task;
 	gss->gts.cb_next_tuple  = gpuscan_next_tuple;
 	gss->gts.cb_switch_task = gpuscan_switch_task;
 	gss->gts.cb_process_task = gpuscan_process_task;
 	gss->gts.cb_release_task = gpuscan_release_task;
-	/* estimated number of rows per block */
-	gss->gts.outer_nrows_per_block = gs_info->nrows_per_block;
 
 	/*
 	 * initialize device qualifiers/projection stuff, for CPU fallback
@@ -2395,7 +2385,7 @@ gpuscanExecScanChunk(GpuTaskState *gts)
 		 * tablespace and expected total i/o size is enough large than cache-
 		 * only scan.
 		 */
-		PDS_init_heapscan_state(gts, gts->outer_nrows_per_block);
+		PDS_init_heapscan_state(gts);
 	}
 	scan = gts->css.ss.ss_currentScanDesc;
 	InstrStartNode(&gts->outer_instrument);

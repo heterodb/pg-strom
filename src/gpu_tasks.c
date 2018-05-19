@@ -219,6 +219,7 @@ pgstromInitGpuTaskState(GpuTaskState *gts,
 						GpuTaskKind task_kind,
 						List *ccache_refs_list,
 						List *used_params,
+						cl_uint outer_nrows_per_block,
 						EState *estate)
 {
 	Relation		relation = gts->css.ss.ss_currentRelation;
@@ -299,6 +300,7 @@ pgstromInitGpuTaskState(GpuTaskState *gts,
 	InstrInit(&gts->outer_instrument, estate->es_instrument);
 	gts->scan_overflow = NULL;
 	gts->outer_pds_suspend = NULL;
+	gts->outer_nrows_per_block = outer_nrows_per_block;
 	gts->nvme_sstate = NULL;
 
 	/*
@@ -622,10 +624,10 @@ pgstromExplainGpuTaskState(GpuTaskState *gts, ExplainState *es)
 	}
 
 	/* NVMe-Strom support */
-	if (gts->nvme_sstate ||
-		(!es->analyze &&
-		 gts->css.ss.ss_currentRelation &&
-		 RelationWillUseNvmeStrom(gts->css.ss.ss_currentRelation, NULL)))
+	if (gts->css.ss.ss_currentRelation &&
+		(!es->analyze
+		 ? gts->outer_nrows_per_block > 0
+		 : gts->nvme_sstate != NULL))
 		ExplainPropertyText("NVMe-Strom", "enabled", es);
 	else if (es->format != EXPLAIN_FORMAT_TEXT)
 		ExplainPropertyText("NVMe-Strom", "disabled", es);
@@ -705,7 +707,7 @@ pgstromInitWorkerGpuTaskState(GpuTaskState *gts, void *coordinate)
 		gts->css.ss.ss_currentScanDesc =
 			heap_beginscan_parallel(relation, &gtss->phscan);
 		/* try to choose NVMe-Strom, if available */
-		PDS_init_heapscan_state(gts, gts->outer_nrows_per_block);
+		PDS_init_heapscan_state(gts);
 	}
 	gts->gtss = gtss;
 }

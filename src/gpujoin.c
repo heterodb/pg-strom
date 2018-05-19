@@ -1883,6 +1883,7 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 							GpuTaskKind_GpuJoin,
 							gj_info->ccache_refs,
 							gj_info->used_params,
+							gj_info->outer_nrows_per_block,
 							estate);
 	gjs->gts.cb_next_tuple		= gpujoin_next_tuple;
 	gjs->gts.cb_next_task		= gpujoin_next_task;
@@ -1890,7 +1891,6 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	gjs->gts.cb_switch_task		= gpujoin_switch_task;
 	gjs->gts.cb_process_task	= gpujoin_process_task;
 	gjs->gts.cb_release_task	= gpujoin_release_task;
-	gjs->gts.outer_nrows_per_block = gj_info->outer_nrows_per_block;
 
 	/* DSM & GPU memory of inner buffer */
 	gjs->m_kmrels = 0UL;

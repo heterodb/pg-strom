@@ -810,6 +810,7 @@ extern void pgstromInitGpuTaskState(GpuTaskState *gts,
 									GpuTaskKind task_kind,
 									List *ccache_refs,
 									List *used_params,
+									cl_uint outer_nrows_per_block,
 									EState *estate);
 extern TupleTableSlot *pgstromExecGpuTaskState(GpuTaskState *gts);
 extern void pgstromRescanGpuTaskState(GpuTaskState *gts);
@@ -952,8 +953,7 @@ extern pgstrom_data_store *__PDS_create_block(GpuContext *gcontext,
 	__PDS_clone((a),__FILE__,__LINE__)
 
 //XXX - to be gpu_task.c?
-extern void PDS_init_heapscan_state(GpuTaskState *gts,
-									cl_uint nrows_per_block);
+extern void PDS_init_heapscan_state(GpuTaskState *gts);
 extern void PDS_end_heapscan_state(GpuTaskState *gts);
 extern bool PDS_exec_heapscan(GpuTaskState *gts,
 							  pgstrom_data_store *pds);
@@ -975,8 +975,6 @@ extern bool KDS_insert_hashitem(kern_data_store *kds,
 
 extern bool ScanPathWillUseNvmeStrom(PlannerInfo *root, RelOptInfo *baserel);
 extern bool RelationCanUseNvmeStrom(Relation relation);
-extern bool RelationWillUseNvmeStrom(Relation relation,
-									 BlockNumber *p_nr_blocks);
 extern void pgstrom_init_datastore(void);
 
 /*

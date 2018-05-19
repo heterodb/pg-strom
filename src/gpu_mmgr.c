@@ -1936,38 +1936,6 @@ RelationCanUseNvmeStrom(Relation relation)
 }
 
 /*
- * RelationWillUseNvmeStrom
- */
-bool
-RelationWillUseNvmeStrom(Relation relation, BlockNumber *p_nr_blocks)
-{
-	BlockNumber		nr_blocks;
-
-	/* at least, storage must support NVMe-Strom */
-	if (!RelationCanUseNvmeStrom(relation))
-		return false;
-
-	/*
-	 * NOTE: RelationGetNumberOfBlocks() has a significant but helpful
-	 * side-effect. It opens all the underlying files of MAIN_FORKNUM,
-	 * then set @rd_smgr of the relation.
-	 * It allows extension to touch file descriptors without invocation of
-	 * ReadBuffer().
-	 */
-	nr_blocks = RelationGetNumberOfBlocks(relation);
-	if (nr_blocks < ((size_t)nvme_strom_threshold_kb << 10) / BLCKSZ)
-		return false;
-
-	/*
-	 * ok, it looks to me NVMe-Strom is supported, and relation size is
-	 * reasonably large to run with SSD-to-GPU Direct mode.
-	 */
-	if (p_nr_blocks)
-		*p_nr_blocks = nr_blocks;
-	return true;
-}
-
-/*
  * ScanPathGetNBlocksByNvmeStrom
  */
 static BlockNumber
