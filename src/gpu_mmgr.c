@@ -1662,7 +1662,7 @@ pgstrom_init_gpu_mmgr(void)
 							NULL,
 							&nvme_strom_threshold_kb,
 							default_threshold,
-							0,
+							RELSEG_SIZE,
 							INT_MAX,
 							PGC_SUSET,
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
@@ -1968,19 +1968,19 @@ RelationWillUseNvmeStrom(Relation relation, BlockNumber *p_nr_blocks)
 }
 
 /*
- * ScanPathWillUseNvmeStrom - Optimizer Hint
+ * ScanPathGetNBlocksByNvmeStrom
  */
-bool
-ScanPathWillUseNvmeStrom(PlannerInfo *root, RelOptInfo *baserel)
+static BlockNumber
+ScanPathGetNBlocksByNvmeStrom(PlannerInfo *root, RelOptInfo *baserel)
 {
 	RangeTblEntry *rte;
 	HeapTuple	tuple;
 	bool		relpersistence;
 
 	if (!TablespaceCanUseNvmeStrom(baserel->reltablespace))
-		return false;
+		return 0;
 
-	/* unable to apply NVMe-Strom on temporay tables */
+	/* only permanent / unlogged table can use NVMe-Strom */
 	rte = root->simple_rte_array[baserel->relid];
 	tuple = SearchSysCache1(RELOID, ObjectIdGetDatum(rte->relid));
 	if (!HeapTupleIsValid(tuple))
@@ -1988,14 +1988,71 @@ ScanPathWillUseNvmeStrom(PlannerInfo *root, RelOptInfo *baserel)
 	relpersistence = ((Form_pg_class) GETSTRUCT(tuple))->relpersistence;
 	ReleaseSysCache(tuple);
 
-	if (relpersistence != RELPERSISTENCE_PERMANENT &&
-		relpersistence != RELPERSISTENCE_UNLOGGED)
-		return false;
+	if (relpersistence == RELPERSISTENCE_PERMANENT ||
+		relpersistence == RELPERSISTENCE_UNLOGGED)
+		return baserel->pages;
 
-	/* Is number of blocks sufficient to NVMe-Strom? */
-	if (baserel->pages < ((size_t)nvme_strom_threshold_kb << 10))
-		return false;
+	return 0;
+}
 
+/*
+ * ScanPathWillUseNvmeStrom - Optimizer Hint
+ */
+bool
+ScanPathWillUseNvmeStrom(PlannerInfo *root, RelOptInfo *baserel)
+{
+	size_t		num_scan_pages;
+
+	/*
+	 * Check expected amount of the scan i/o.
+	 * If 'baserel' is children of partition table, threshold shall be
+	 * checked towards the entire partition size, because the range of
+	 * child tables fully depend on scan qualifiers thus variable time
+	 * by time. Once user focus on a particular range, but he wants to
+	 * focus on other area. It leads potential thrashing on i/o.
+	 */
+	if (baserel->reloptkind == RELOPT_BASEREL)
+		num_scan_pages = ScanPathGetNBlocksByNvmeStrom(root, baserel);
+	else if (baserel->reloptkind == RELOPT_OTHER_MEMBER_REL)
+	{
+		ListCell   *lc;
+		Index		parent_relid = 0;
+
+		foreach (lc, root->append_rel_list)
+		{
+			AppendRelInfo  *appinfo = (AppendRelInfo *) lfirst(lc);
+
+			if (appinfo->child_relid == baserel->relid)
+			{
+				parent_relid = appinfo->parent_relid;
+				break;
+			}
+		}
+		if (!lc)
+		{
+			elog(NOTICE, "Bug? child table (%d) not found in append_rel_list",
+				 baserel->relid);
+			return false;
+		}
+
+		num_scan_pages = 0;
+		foreach (lc, root->append_rel_list)
+		{
+			AppendRelInfo  *appinfo = (AppendRelInfo *) lfirst(lc);
+			RelOptInfo	   *rel;
+
+			if (appinfo->parent_relid != parent_relid)
+				continue;
+			rel = root->simple_rel_array[appinfo->child_relid];
+			num_scan_pages += ScanPathGetNBlocksByNvmeStrom(root, rel);
+		}
+	}
+	else
+		elog(ERROR, "Bug? unexpected reloptkind of base relation: %d",
+			 (int)baserel->reloptkind);
+
+	if (num_scan_pages < ((size_t)nvme_strom_threshold_kb << 10) / BLCKSZ)
+		return false;
 	/* ok, this table scan can use nvme-strom */
 	return true;
 }
