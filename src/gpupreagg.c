@@ -2310,7 +2310,7 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 			temp = (Expr *)replace_expression_by_altfunc((Node *)expr, &con);
 			if (!con.device_executable)
 				return false;
-			if (orig_type != exprType((Node *)expr))
+			if (orig_type != exprType((Node *)temp))
 				elog(ERROR, "Bug? GpuPreAgg catalog is not consistent: %s",
 					 nodeToString(expr));
 			add_column_to_pathtarget(target_final, temp, 0);
