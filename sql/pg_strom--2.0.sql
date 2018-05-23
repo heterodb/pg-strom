@@ -465,16 +465,6 @@ CREATE AGGREGATE pgstrom.favg_numeric(float8[])
 );
 
 -- PMIN()/PMAX()
-CREATE FUNCTION pgstrom.pmin(int2)
-  RETURNS int2
-  AS 'MODULE_PATHNAME', 'pgstrom_partial_min_any'
-  LANGUAGE C STRICT PARALLEL SAFE;
-
-CREATE FUNCTION pgstrom.pmax(int2)
-  RETURNS int2
-  AS 'MODULE_PATHNAME', 'pgstrom_partial_max_any'
-  LANGUAGE C STRICT PARALLEL SAFE;
-
 CREATE FUNCTION pgstrom.pmin(int4)
   RETURNS int4
   AS 'MODULE_PATHNAME', 'pgstrom_partial_min_any'
@@ -514,6 +504,22 @@ CREATE FUNCTION pgstrom.pmax(float8)
   RETURNS float8
   AS 'MODULE_PATHNAME', 'pgstrom_partial_max_any'
   LANGUAGE C STRICT PARALLEL SAFE;
+
+CREATE AGGREGATE pgstrom.fmin_int2(int4)
+(
+  sfunc = pg_catalog.int4smaller,
+  stype = int4,
+  finalfunc = pg_catalog.int2,
+  parallel = safe
+);
+
+CREATE AGGREGATE pgstrom.fmax_int2(int4)
+(
+  sfunc = pg_catalog.int4larger,
+  stype = int4,
+  finalfunc = pg_catalog.int2,
+  parallel = safe
+);
 
 CREATE AGGREGATE pgstrom.fmin_numeric(float8)
 (

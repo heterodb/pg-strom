@@ -1406,7 +1406,7 @@ bailout:
  *
  * ----------------------------------------------------------------
  */
-
+#if 0
 STATIC_INLINE(void)
 aggcalc_atomic_min_short(cl_bool *p_accum_isnull, Datum *p_accum_datum,
 						 cl_bool newval_isnull, Datum newval_datum)
@@ -1430,6 +1430,7 @@ aggcalc_atomic_max_short(cl_bool *p_accum_isnull, Datum *p_accum_datum,
 		*p_accum_isnull = false;
 	}
 }
+#endif
 
 STATIC_INLINE(void)
 aggcalc_atomic_min_int(cl_bool *p_accum_isnull, Datum *p_accum_datum,
@@ -1599,23 +1600,8 @@ aggcalc_atomic_add_double(cl_bool *p_accum_isnull, Datum *p_accum_datum,
 {
 	if (!newval_isnull)
 	{
-#if __CUDA_ARCH__ < 600
-		cl_ulong	curval = *((cl_ulong *)p_accum_datum);
-		cl_ulong	newval;
-		cl_ulong	oldval;
-		double		temp;
-
-		do {
-			oldval = curval;
-			temp = (__longlong_as_double(oldval) +
-					__longlong_as_double((cl_ulong)newval_datum));
-			newval = __double_as_longlong(temp);
-		} while ((curval = atomicCAS((cl_ulong *)p_accum_datum,
-									 oldval, newval)) != oldval);
-#else
 		atomicAdd((cl_double *)p_accum_datum,
 				  __longlong_as_double(newval_datum));
-#endif
 		*p_accum_isnull = false;
 	}
 }
