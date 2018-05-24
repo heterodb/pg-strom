@@ -666,6 +666,7 @@ gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,		/* in/out */
 	assert(kgpreagg->num_group_keys == 0);
 	assert(kds_slot->format == KDS_FORMAT_SLOT);
 	assert(kds_final->format == KDS_FORMAT_SLOT);
+	assert(kds_slot->ncols == kds_final->ncols);
 	INIT_KERNEL_CONTEXT(&kcxt, gpupreagg_nogroup_reduction, kparams);
 
 	do {
@@ -699,6 +700,7 @@ gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,		/* in/out */
                 l_values[get_local_id()] = slot_values[index];
 			}
 			__syncthreads();
+
 			/* do reduction */
 			for (dist=2, buddy=1; dist < 2 * nvalids; buddy=dist, dist *= 2)
 			{
@@ -726,25 +728,44 @@ gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,		/* in/out */
 		if (get_local_id() == 0)
 		{
 			cl_uint		old_nitems = 0;
-			cl_uint		new_nitems = 1;
+			cl_uint		new_nitems = 0xffffffff;	/* LOCKED */
 			cl_uint		cur_nitems;
 
+		try_again:
 			cur_nitems = atomicCAS(&kds_final->nitems,
 								   old_nitems,
 								   new_nitems);
 			if (cur_nitems == 0)
+			{
+				/* just copy */
+				memcpy(KERN_DATA_STORE_ISNULL(kds_final, 0),
+					   KERN_DATA_STORE_ISNULL(kds_slot, slot_index),
+					   sizeof(cl_char) * kds_slot->ncols);
+				memcpy(KERN_DATA_STORE_VALUES(kds_final, 0),
+					   KERN_DATA_STORE_VALUES(kds_slot, slot_index),
+					   sizeof(Datum) * kds_slot->ncols);
 				atomicAdd(&kgpreagg->num_groups, 1);
-			/*
-			 * NOTE: nogroup reduction has no grouping keys, and GpuPreAgg
-			 * does not support aggregate functions that have variable length
-			 * fields as internal state. So, we don't care about copy of
-			 * grouping keys.
-			 */
-			gpupreagg_global_calc(
-				KERN_DATA_STORE_ISNULL(kds_final, 0),
-				KERN_DATA_STORE_VALUES(kds_final, 0),
-				KERN_DATA_STORE_ISNULL(kds_slot, slot_index),
-				KERN_DATA_STORE_VALUES(kds_slot, slot_index));
+				atomicExch(&kds_final->nitems, 1);	/* UNLOCKED */
+			}
+			else if (cur_nitems == 1)
+			{
+				/*
+				 * NOTE: nogroup reduction has no grouping keys, and
+				 * GpuPreAgg does not support aggregate functions that
+				 * have variable length fields as internal state.
+				 * So, we don't care about copy of grouping keys.
+				 */
+				gpupreagg_global_calc(
+					KERN_DATA_STORE_ISNULL(kds_final, 0),
+					KERN_DATA_STORE_VALUES(kds_final, 0),
+					KERN_DATA_STORE_ISNULL(kds_slot, slot_index),
+					KERN_DATA_STORE_VALUES(kds_slot, slot_index));
+			}
+			else
+			{
+				assert(cur_nitems == 0xffffffff);
+				goto try_again;
+			}
 		}
 		__syncthreads();
 	} while (!is_last_reduction);
@@ -1406,40 +1427,15 @@ bailout:
  *
  * ----------------------------------------------------------------
  */
-#if 0
-STATIC_INLINE(void)
-aggcalc_atomic_min_short(cl_bool *p_accum_isnull, Datum *p_accum_datum,
-						 cl_bool newval_isnull, Datum newval_datum)
-{
-	if (!newval_isnull)
-	{
-		atomicMin((cl_int *)p_accum_datum,
-				  (cl_int)(newval_datum & 0x0000ffff));
-		*p_accum_isnull = false;
-	}
-}
-
-STATIC_INLINE(void)
-aggcalc_atomic_max_short(cl_bool *p_accum_isnull, Datum *p_accum_datum,
-						 cl_bool newval_isnull, Datum newval_datum)
-{
-	if (!newval_isnull)
-	{
-		atomicMax((cl_int *)p_accum_datum,
-				  (cl_int)(newval_datum & 0x0000ffff));
-		*p_accum_isnull = false;
-	}
-}
-#endif
-
 STATIC_INLINE(void)
 aggcalc_atomic_min_int(cl_bool *p_accum_isnull, Datum *p_accum_datum,
 					   cl_bool newval_isnull, Datum newval_datum)
 {
 	if (!newval_isnull)
 	{
-		atomicMin((cl_int *)p_accum_datum,
-				  (cl_int)(newval_datum & 0xffffffff));
+		cl_int	newval_int = (cl_int)(newval_datum & 0xffffffffU);
+
+		atomicMin((cl_int *)p_accum_datum, newval_int);
 		*p_accum_isnull = false;
 	}
 }
@@ -1450,8 +1446,9 @@ aggcalc_atomic_max_int(cl_bool *p_accum_isnull, Datum *p_accum_datum,
 {
 	if (!newval_isnull)
 	{
-		atomicMax((cl_int *)p_accum_datum,
-				  (cl_int)(newval_datum & 0xffffffff));
+		cl_int	newval_int = (cl_int)(newval_datum & 0xffffffffU);
+
+		atomicMax((cl_int *)p_accum_datum, newval_int);
 		*p_accum_isnull = false;
 	}
 }
@@ -1462,8 +1459,9 @@ aggcalc_atomic_add_int(cl_bool *p_accum_isnull, Datum *p_accum_datum,
 {
 	if (!newval_isnull)
 	{
-		atomicAdd((cl_int *)p_accum_datum,
-				  (cl_int)(newval_datum & 0xffffffff));
+		cl_int		newval_int = (cl_int)(newval_datum & 0xffffffff);
+
+		atomicAdd((cl_int *)p_accum_datum, newval_int);
 		*p_accum_isnull = false;
 	}
 }
@@ -1607,37 +1605,15 @@ aggcalc_atomic_add_double(cl_bool *p_accum_isnull, Datum *p_accum_datum,
 }
 
 STATIC_INLINE(void)
-aggcalc_normal_min_short(cl_bool *p_accum_isnull, Datum *p_accum_datum,
-						 cl_bool newval_isnull, Datum newval_datum)
-{
-	if (!newval_isnull)
-	{
-		*((cl_int *)p_accum_datum) = Min(*((cl_int *)p_accum_datum),
-										 (cl_int)(newval_datum & 0x0000ffff));
-		*p_accum_isnull = false;
-	}
-}
-
-STATIC_INLINE(void)
-aggcalc_normal_max_short(cl_bool *p_accum_isnull, Datum *p_accum_datum,
-						 cl_bool newval_isnull, Datum newval_datum)
-{
-	if (!newval_isnull)
-	{
-		*((cl_int *)p_accum_datum) = Max(*((cl_int *)p_accum_datum),
-										 (cl_int)(newval_datum & 0x0000ffff));
-		*p_accum_isnull = false;
-	}
-}
-
-STATIC_INLINE(void)
 aggcalc_normal_min_int(cl_bool *p_accum_isnull, Datum *p_accum_datum,
 					   cl_bool newval_isnull, Datum newval_datum)
 {
 	if (!newval_isnull)
 	{
+		cl_int		newval_int = (cl_int)(newval_datum & 0xffffffffU);
+
 		*((cl_int *)p_accum_datum) = Min(*((cl_int *)p_accum_datum),
-										 (cl_int)(newval_datum & 0xffffffff));
+										 newval_int);
 		*p_accum_isnull = false;
 	}
 }
@@ -1648,8 +1624,10 @@ aggcalc_normal_max_int(cl_bool *p_accum_isnull, Datum *p_accum_datum,
 {
 	if (!newval_isnull)
 	{
+		cl_int		newval_int = (cl_int)(newval_datum & 0xffffffffU);
+
 		*((cl_int *)p_accum_datum) = Max(*((cl_int *)p_accum_datum),
-										 (cl_int)(newval_datum & 0xffffffff));
+										 newval_int);
 		*p_accum_isnull = false;
 	}
 }

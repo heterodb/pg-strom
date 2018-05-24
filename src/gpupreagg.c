@@ -3528,10 +3528,10 @@ gpupreagg_codegen_nogroup_calc(StringInfo kern,
         kern,
 		"STATIC_FUNCTION(void)\n"
 		"gpupreagg_nogroup_calc(cl_int attnum,\n"
-		"                       cl_bool *p_acm_isnull,"
-		"                       Datum   *p_acm_datum,"
-		"                       cl_bool  new_isnull,"
-		"                       Datum    new_datum)"
+		"                       cl_bool *p_acm_isnull\n,"
+		"                       Datum   *p_acm_datum,\n"
+		"                       cl_bool  new_isnull,\n"
+		"                       Datum    new_datum)\n"
 		"{\n"
 		"  switch (attnum)\n"
 		"  {\n");
