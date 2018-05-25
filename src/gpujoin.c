@@ -30,6 +30,7 @@ typedef struct
 	Index			outer_relid;	/* valid, if outer scan pull-up */
 	Expr		   *outer_quals;	/* qualifier of outer scan */
 	cl_uint			outer_nrows_per_block;
+	uint64			inner_buffer_toc_key;
 	struct {
 		JoinType	join_type;		/* one of JOIN_* */
 		double		join_nrows;		/* intermediate nrows in this depth */
@@ -57,6 +58,7 @@ typedef struct
 	Cost		outer_startup_cost;	/* copy of @startup_cost in outer path */
 	Cost		outer_total_cost;	/* copy of @total_cost in outer path */
 	cl_uint		outer_nrows_per_block;
+	cl_ulong	inner_buffer_toc_key;
 	/* for each depth */
 	List	   *plan_nrows_in;	/* list of floatVal for planned nrows_in */
 	List	   *plan_nrows_out;	/* list of floatVal for planned nrows_out */
@@ -90,6 +92,7 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 	privs = lappend(privs, pmakeFloat(gj_info->outer_startup_cost));
 	privs = lappend(privs, pmakeFloat(gj_info->outer_total_cost));
 	privs = lappend(privs, makeInteger(gj_info->outer_nrows_per_block));
+	privs = lappend(privs, makeInteger(gj_info->inner_buffer_toc_key));
 	/* for each depth */
 	privs = lappend(privs, gj_info->plan_nrows_in);
 	privs = lappend(privs, gj_info->plan_nrows_out);
@@ -129,6 +132,7 @@ deform_gpujoin_info(CustomScan *cscan)
 	gj_info->outer_startup_cost = floatVal(list_nth(privs, pindex++));
 	gj_info->outer_total_cost = floatVal(list_nth(privs, pindex++));
 	gj_info->outer_nrows_per_block = intVal(list_nth(privs, pindex++));
+	gj_info->inner_buffer_toc_key = intVal(list_nth(privs, pindex++));
 	/* for each depth */
 	gj_info->plan_nrows_in = list_nth(privs, pindex++);
 	gj_info->plan_nrows_out = list_nth(privs, pindex++);
@@ -200,6 +204,7 @@ typedef struct
 	struct GpuJoinRuntimeStat *gj_rtstat;	/* valid only PG10 or later */
 
 	/* Inner Buffers */
+	uint64			inner_buffer_toc_key;
 	CUdeviceptr		m_kmrels;
 	CUdeviceptr	   *m_kmrels_array;	/* only master process */
 	dsm_segment	   *seg_kmrels;
@@ -301,6 +306,13 @@ static CustomScanMethods	gpujoin_plan_methods;
 static CustomExecMethods	gpujoin_exec_methods;
 static bool					enable_gpunestloop;
 static bool					enable_gpuhashjoin;
+static HTAB				   *gpujoin_inner_sibling_dsm = NULL;
+typedef struct {
+	uint64			toc_key;
+	cl_int			refcnt;
+	dsm_segment	   *seg;
+	CUdeviceptr		m_kmrels_pergpu[FLEXIBLE_ARRAY_MEMBER];
+} inner_sibling_dsm;
 
 /* static functions */
 static void gpujoin_switch_task(GpuTaskState *gts, GpuTask *gtask);
@@ -1715,6 +1727,7 @@ PlanGpuJoinPath(PlannerInfo *root,
 		outerPlan(cscan) = outer_plan;
 	}
 	gj_info.outer_nrows_per_block = gjpath->outer_nrows_per_block;
+	gj_info.inner_buffer_toc_key = gjpath->inner_buffer_toc_key;
 
 	/*
 	 * Build a tentative pseudo-scan targetlist. At this point, we cannot
@@ -1893,6 +1906,7 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	gjs->gts.cb_release_task	= gpujoin_release_task;
 
 	/* DSM & GPU memory of inner buffer */
+	gjs->inner_buffer_toc_key	= gj_info->inner_buffer_toc_key;
 	gjs->m_kmrels = 0UL;
 	gjs->m_kmrels_array = NULL;
 	gjs->seg_kmrels = NULL;
@@ -5485,6 +5499,20 @@ gpujoin_inner_heap_preload(innerState *istate,
 }
 
 /*
+ * gpujoin_on_detach_inner_dsm
+ */
+static void
+gpujoin_on_detach_inner_dsm(dsm_segment *seg, Datum arg)
+{
+	uint64	inner_buffer_toc_key = DatumGetInt64(arg);
+
+	if (!hash_search(gpujoin_inner_sibling_dsm,
+					 &inner_buffer_toc_key,
+					 HASH_REMOVE, NULL))
+		elog(WARNING, "Bug? GpuJoin shared inner buffer is not tracked");
+}
+
+/*
  * gpujoin_inner_preload
  *
  * It preload inner relation to the DSM buffer once.
@@ -5505,6 +5533,33 @@ __gpujoin_inner_preload(GpuJoinState *gjs, bool with_cpu_parallel)
 	Assert(!IsParallelWorker());
 	gjs->m_kmrels_array = MemoryContextAllocZero(CurTransactionContext,
 											numDevAttrs * sizeof(CUdeviceptr));
+	/*
+	 * Partition aware GpuJoin support - In case when GpuJoin is pushed-down
+	 * across the Append node, its inner buffer can be shared with sibling
+	 * GpuJoin plans. If any of the sibling already preload the inner buffer,
+	 * no need to run the inner buffer again.
+	 */
+	if (gjs->inner_buffer_toc_key != 0)
+	{
+		inner_sibling_dsm *sibling_dsm;
+		
+		sibling_dsm = hash_search(gpujoin_inner_sibling_dsm,
+								  &gjs->inner_buffer_toc_key,
+								  HASH_FIND, NULL);
+		/* Sibling GpuJoin already run inner plans? */
+		if (sibling_dsm)
+		{
+			sibling_dsm->refcnt++;
+
+			gj_sstate->kmrels_handle = dsm_segment_handle(sibling_dsm->seg);
+			gjs->seg_kmrels = sibling_dsm->seg;
+			memcpy(gjs->m_kmrels_array,
+				   sibling_dsm->m_kmrels_pergpu,
+				   numDevAttrs * sizeof(CUdeviceptr));
+			return true;
+		}
+	}
+
 	seg = dsm_create(pgstrom_chunk_size(), 0);
 	h_kmrels = dsm_segment_address(seg);
 	kmrels_usage = STROMALIGN(offsetof(kern_multirels, chunks[num_rels]));
@@ -5638,8 +5693,32 @@ __gpujoin_inner_preload(GpuJoinState *gjs, bool with_cpu_parallel)
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuMemsetD32: %s", errorText(rc));
 	}
+
+	/*
+	 * Partition aware GpuJoin support
+	 */
+	if (gjs->inner_buffer_toc_key != 0)
+	{
+		inner_sibling_dsm *sibling_dsm;
+		bool	found;
+
+		on_dsm_detach(seg, gpujoin_on_detach_inner_dsm,
+					  Int64GetDatum(gjs->inner_buffer_toc_key));
+		sibling_dsm = hash_search(gpujoin_inner_sibling_dsm,
+								  &gjs->inner_buffer_toc_key,
+								  HASH_ENTER, &found);
+		if (found)
+			elog(ERROR, "Bug? Duplicated GpuJoin inner sibling DSM");
+
+		sibling_dsm->seg = seg;
+		sibling_dsm->refcnt = 1;
+		memcpy(sibling_dsm->m_kmrels_pergpu,
+			   gjs->m_kmrels_array,
+			   sizeof(CUdeviceptr) * numDevAttrs);
+	}
 	gj_sstate->kmrels_handle = dsm_segment_handle(seg);
 	gjs->seg_kmrels = seg;
+
 	return true;
 }
 
@@ -5761,20 +5840,14 @@ GpuJoinInnerUnload(GpuTaskState *gts, bool is_rescan)
 	if (!gj_sstate || !gjs->seg_kmrels)
 		return;
 
-	if (!IsParallelWorker())
+	if (IsParallelWorker())
 	{
-		/* Release device memory */
-		if (gjs->m_kmrels_array)
-		{
-			for (i=0; i < numDevAttrs; i++)
-			{
-				rc = gpuMemFree(gcontext, gjs->m_kmrels_array[i]);
-				if (rc != CUDA_SUCCESS)
-					elog(ERROR, "failed on gpuMemFree: %s", errorText(rc));
-			}
-			pfree(gjs->m_kmrels_array);
-			gjs->m_kmrels_array = NULL;
-		}
+		rc = gpuIpcCloseMemHandle(gcontext, gjs->m_kmrels);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on gpuIpcCloseMemHandle: %s", errorText(rc));
+	}
+	else
+	{
 		/* Reset GpuJoinSharedState, if rescan */
 		if (is_rescan)
 		{
@@ -5788,14 +5861,39 @@ GpuJoinInnerUnload(GpuTaskState *gts, bool is_rescan)
 				   offsetof(GpuJoinSharedState, pergpu[numDevAttrs]) -
 				   offsetof(GpuJoinSharedState, pergpu[0]));
 		}
-	}
-	else
-	{
-		rc = gpuIpcCloseMemHandle(gcontext, gjs->m_kmrels);
-		if (rc != CUDA_SUCCESS)
-			elog(ERROR, "failed on gpuIpcCloseMemHandle: %s", errorText(rc));
+
+		/* Is the inner buffer still shared by the sibling? */
+		if (gjs->inner_buffer_toc_key)
+		{
+			inner_sibling_dsm  *sibling_dsm
+				= hash_search(gpujoin_inner_sibling_dsm,
+							  &gjs->inner_buffer_toc_key,
+							  HASH_FIND, NULL);
+			if (!sibling_dsm)
+				elog(ERROR, "Bug? sibling inner buffer is not found");
+			if (--sibling_dsm->refcnt > 0)
+				goto skip;
+			if (!hash_search(gpujoin_inner_sibling_dsm,
+							 &gjs->inner_buffer_toc_key,
+							 HASH_REMOVE, NULL))
+				elog(FATAL, "Bug? could not remove sibling inner buffer info");
+		}
+
+		/* Release device memory */
+		if (gjs->m_kmrels_array)
+		{
+			for (i=0; i < numDevAttrs; i++)
+			{
+				rc = gpuMemFree(gcontext, gjs->m_kmrels_array[i]);
+				if (rc != CUDA_SUCCESS)
+					elog(ERROR, "failed on gpuMemFree: %s", errorText(rc));
+			}
+			pfree(gjs->m_kmrels_array);
+			gjs->m_kmrels_array = NULL;
+		}
 	}
 	dsm_detach(gjs->seg_kmrels);
+skip:
 	gjs->m_kmrels = 0UL;
 	gjs->seg_kmrels = NULL;
 }
@@ -5857,6 +5955,8 @@ gpujoinHasRightOuterJoin(GpuTaskState *gts)
 void
 pgstrom_init_gpujoin(void)
 {
+	HASHCTL		hctl;
+
 	/* turn on/off gpunestloop */
 	DefineCustomBoolVariable("pg_strom.enable_gpunestloop",
 							 "Enables the use of GpuNestLoop logic",
@@ -5904,4 +6004,17 @@ pgstrom_init_gpujoin(void)
 	/* hook registration */
 	set_join_pathlist_next = set_join_pathlist_hook;
 	set_join_pathlist_hook = gpujoin_add_join_path;
+
+	/* tracker for inner-buffers of GpuJoin */
+	memset(&hctl, 0, sizeof(HASHCTL));
+	hctl.keysize = sizeof(uint64);		/* TOC key */
+	hctl.entrysize = offsetof(inner_sibling_dsm,
+							  m_kmrels_pergpu[numDevAttrs]);
+	hctl.hcxt = TopMemoryContext;
+	gpujoin_inner_sibling_dsm = hash_create("Tracker of inner sibling buffers",
+											256,
+											&hctl,
+											HASH_ELEM |
+											HASH_BLOBS |
+											HASH_CONTEXT);
 }
