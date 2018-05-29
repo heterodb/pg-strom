@@ -1027,6 +1027,55 @@ adjust_appendrel_attr_needed(PlannerInfo *root,
 }
 
 /*
+ * make_pseudo_sjinfo_list
+ */
+static List *
+make_pseudo_sjinfo_list(PlannerInfo *root,
+						List *join_info_list,
+						Index parent_relid,
+						Index child_relid)
+{
+	List	   *result = NIL;
+	ListCell   *lc;
+
+	foreach (lc, join_info_list)
+	{
+		SpecialJoinInfo *sjinfo = copyObject(lfirst(lc));
+
+		if (bms_is_member(parent_relid, sjinfo->min_lefthand))
+		{
+			sjinfo->min_lefthand = bms_del_member(sjinfo->min_lefthand,
+												  parent_relid);
+			sjinfo->min_lefthand = bms_add_member(sjinfo->min_lefthand,
+												  child_relid);
+		}
+		if (bms_is_member(parent_relid, sjinfo->min_righthand))
+		{
+			sjinfo->min_righthand = bms_del_member(sjinfo->min_righthand,
+												   parent_relid);
+			sjinfo->min_righthand = bms_add_member(sjinfo->min_righthand,
+												   child_relid);
+		}
+		if (bms_is_member(parent_relid, sjinfo->syn_lefthand))
+		{
+			sjinfo->syn_lefthand = bms_del_member(sjinfo->syn_lefthand,
+												  parent_relid);
+			sjinfo->syn_lefthand = bms_add_member(sjinfo->syn_lefthand,
+												  child_relid);
+		}
+		if (bms_is_member(parent_relid, sjinfo->syn_righthand))
+		{
+			sjinfo->syn_righthand = bms_del_member(sjinfo->syn_righthand,
+												   parent_relid);
+			sjinfo->syn_righthand = bms_add_member(sjinfo->syn_righthand,
+												   child_relid);
+		}
+		result = lappend(result, sjinfo);
+	}
+	return result;
+}
+
+/*
  * adjust_appendrel_child_reltarget
  *
  *
@@ -1134,6 +1183,9 @@ try_add_gpujoin_append_paths(PlannerInfo *root,
 {
 	List	   *inner_paths_list = list_make1(inner_path);
 	AppendPath *old_append;
+	Index		parent_relid;
+	Index		child_relid;
+	List	   *join_info_list_saved;
 	List	  **join_rel_level_saved;
 
 	if (join_type != JOIN_INNER &&
@@ -1145,7 +1197,25 @@ try_add_gpujoin_append_paths(PlannerInfo *root,
 	{
 		if (IsA(outer_path, AppendPath))
 		{
+			ListCell   *lc;
+
 			old_append = (AppendPath *) outer_path;
+			if (old_append->partitioned_rels == NIL)
+				return;		/* not a partition table? */
+
+			/* identify the parent relid */
+			foreach (lc, root->pcinfo_list)
+			{
+				PartitionedChildRelInfo *pcinfo = lfirst(lc);
+
+				if (equal(pcinfo->child_rels, old_append->partitioned_rels))
+				{
+					parent_relid = pcinfo->parent_relid;
+					break;
+				}
+			}
+			if (!lc)
+				elog(ERROR, "Bug? no PartitionedChildRelInfo found");
 			break;
 		}
 		else if (IsA(outer_path, NestPath) ||
@@ -1183,6 +1253,7 @@ try_add_gpujoin_append_paths(PlannerInfo *root,
 	}
 
 	join_rel_level_saved = root->join_rel_level;
+	join_info_list_saved = root->join_info_list;
 	PG_TRY();
 	{
 		AppendPath *new_append = NULL;
@@ -1199,6 +1270,7 @@ try_add_gpujoin_append_paths(PlannerInfo *root,
 			RelOptInfo *curr_rel = NULL;
 			Path	   *curr_path = NULL;
 			Path	   *new_subpath = NULL;
+			ListCell   *cell;
 
 			if (subrel->reloptkind == RELOPT_OTHER_MEMBER_REL)
 			{
@@ -1207,6 +1279,28 @@ try_add_gpujoin_append_paths(PlannerInfo *root,
 				if (!adjust_appendrel_attr_needed(root, append_rel, subrel))
 					goto skip;
 			}
+
+			/* identify the current partition leaf */
+			child_relid = 0;
+			foreach (cell, root->append_rel_list)
+			{
+				AppendRelInfo *apinfo = lfirst(cell);
+
+				if (apinfo->parent_relid == parent_relid &&
+					bms_is_member(apinfo->child_relid, subrel->relids))
+				{
+					if (child_relid == 0)
+						child_relid = apinfo->child_relid;
+					else
+						elog(ERROR, "Bug? sub-relation contains multiple partition leaf");
+				}
+			}
+			if (child_relid == 0)
+				elog(ERROR, "Bug? no partition leaf found");
+			root->join_info_list =
+				make_pseudo_sjinfo_list(root, join_info_list_saved,
+										parent_relid,
+										child_relid);
 
 			foreach (lc2, inner_paths_list)
 			{
@@ -1251,11 +1345,11 @@ try_add_gpujoin_append_paths(PlannerInfo *root,
 		new_append = create_append_path(joinrel,
 										new_append_subpaths,
 										required_outer,
-										parallel_nworkers
-#if PG_VERSION_NUM >= 100000
-										,old_append->partitioned_rels
-#endif
-										);
+										parallel_nworkers,
+										old_append->partitioned_rels);
+//		new_append->path.total_cost /= 100.0;
+//		new_append->path.startup_cost /= 100.0;
+
 		if (try_parallel_path)
 			add_partial_path(joinrel, (Path *) new_append);
 		else
@@ -1263,11 +1357,13 @@ try_add_gpujoin_append_paths(PlannerInfo *root,
 	skip:
 		/* restore */
 		root->join_rel_level = join_rel_level_saved;
+		root->join_info_list = join_info_list_saved;
 	}
 	PG_CATCH();
 	{
 		/* restore */
 		root->join_rel_level = join_rel_level_saved;
+		root->join_info_list = join_info_list_saved;
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
