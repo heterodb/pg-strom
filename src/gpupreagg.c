@@ -25,6 +25,7 @@ static CustomScanMethods		gpupreagg_scan_methods;
 static CustomExecMethods		gpupreagg_exec_methods;
 static bool						enable_gpupreagg;				/* GUC */
 static bool						enable_pullup_outer_join;		/* GUC */
+static bool						enable_partitionwise_gpupreagg;	/* GUC */
 static double					gpupreagg_reduction_threshold;	/* GUC */
 
 typedef struct
@@ -4123,14 +4124,17 @@ ExplainGpuPreAgg(CustomScanState *node, List *ancestors, ExplainState *es)
 	dcontext = set_deparse_context_planstate(es->deparse_cxt,
                                             (Node *)&gpas->gts.css.ss.ps,
                                             ancestors);
-	/* Show device projection */
-	foreach (lc, cscan->custom_scan_tlist)
-		gpu_proj = lappend(gpu_proj, ((TargetEntry *) lfirst(lc))->expr);
-	if (gpu_proj != NIL)
+	/* Show device projection (verbose only) */
+	if (es->verbose)
 	{
-		exprstr = deparse_expression((Node *)gpu_proj, dcontext,
-									 es->verbose, false);
-		ExplainPropertyText("GPU Projection", exprstr, es);
+		foreach (lc, cscan->custom_scan_tlist)
+			gpu_proj = lappend(gpu_proj, ((TargetEntry *) lfirst(lc))->expr);
+		if (gpu_proj != NIL)
+		{
+			exprstr = deparse_expression((Node *)gpu_proj, dcontext,
+										 es->verbose, false);
+			ExplainPropertyText("GPU Projection", exprstr, es);
+		}
 	}
 	pgstromExplainOuterScan(&gpas->gts, dcontext, ancestors, es,
 							gpa_info->outer_quals,
@@ -5261,6 +5265,15 @@ pgstrom_init_gpupreagg(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
+	/* pg_strom.enable_partitionwise_gpupreagg */
+	DefineCustomBoolVariable("pg_strom.enable_partitionwise_gpupreagg",
+							 "(EXPERIMENTAL) Enables partition wise GpuPreAgg",
+							 NULL,
+							 &enable_partitionwise_gpupreagg,
+							 true,
+							 PGC_USERSET,
+                             GUC_NOT_IN_SAMPLE,
+                             NULL, NULL, NULL);
 	/* pg_strom.gpupreagg_reduction_threshold */
 	DefineCustomRealVariable("pg_strom.gpupreagg_reduction_threshold",
 							 "Minimus reduction ratio to use GpuPreAgg",

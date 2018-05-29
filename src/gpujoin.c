@@ -2639,31 +2639,35 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 	dcontext =  set_deparse_context_planstate(es->deparse_cxt,
 											  (Node *) node,
 											  ancestors);
-	/* Device projection */
-	resetStringInfo(&str);
-	foreach (lc1, cscan->custom_scan_tlist)
+	/* Device projection (verbose only) */
+	if (es->verbose)
 	{
-		TargetEntry	   *tle = lfirst(lc1);
-
-		if (tle->resjunk)
-			continue;
-
-		if (lc1 != list_head(cscan->custom_scan_tlist))
-			appendStringInfo(&str, ", ");
-		if (tle->resjunk)
-			appendStringInfoChar(&str, '[');
-		temp = deparse_expression((Node *)tle->expr, dcontext, true, false);
-		appendStringInfo(&str, "%s", temp);
-		if (es->verbose)
+		resetStringInfo(&str);
+		foreach (lc1, cscan->custom_scan_tlist)
 		{
-			temp = format_type_with_typemod(exprType((Node *)tle->expr),
-											exprTypmod((Node *)tle->expr));
-			appendStringInfo(&str, "::%s", temp);
+			TargetEntry	   *tle = lfirst(lc1);
+
+			if (tle->resjunk)
+				continue;
+
+			if (lc1 != list_head(cscan->custom_scan_tlist))
+				appendStringInfo(&str, ", ");
+			if (tle->resjunk)
+				appendStringInfoChar(&str, '[');
+			temp = deparse_expression((Node *)tle->expr,
+									  dcontext, true, false);
+			appendStringInfo(&str, "%s", temp);
+			if (es->verbose)
+			{
+				temp = format_type_with_typemod(exprType((Node *)tle->expr),
+												exprTypmod((Node *)tle->expr));
+				appendStringInfo(&str, "::%s", temp);
+			}
+			if (tle->resjunk)
+				appendStringInfoChar(&str, ']');
 		}
-		if (tle->resjunk)
-			appendStringInfoChar(&str, ']');
+		ExplainPropertyText("GPU Projection", str.data, es);
 	}
-	ExplainPropertyText("GPU Projection", str.data, es);
 
 	/* statistics for outer scan, if any */
 	if (gj_rtstat)

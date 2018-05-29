@@ -2064,20 +2064,23 @@ ExplainGpuScan(CustomScanState *node, List *ancestors, ExplainState *es)
 	dcontext = set_deparse_context_planstate(es->deparse_cxt,
 											 (Node *)&gss->gts.css.ss.ps,
 											 ancestors);
-	/* Show device projection */
-	foreach (lc, cscan->custom_scan_tlist)
+	/* Show device projection (verbose only) */
+	if (es->verbose)
 	{
-		TargetEntry	   *tle = lfirst(lc);
+		foreach (lc, cscan->custom_scan_tlist)
+		{
+			TargetEntry	   *tle = lfirst(lc);
 
-		if (!tle->resjunk)
-			dev_proj = lappend(dev_proj, tle->expr);
-	}
+			if (!tle->resjunk)
+				dev_proj = lappend(dev_proj, tle->expr);
+		}
 
-	if (dev_proj != NIL)
-	{
-		exprstr = deparse_expression((Node *)dev_proj, dcontext,
-									 es->verbose, false);
-		ExplainPropertyText("GPU Projection", exprstr, es);
+		if (dev_proj != NIL)
+		{
+			exprstr = deparse_expression((Node *)dev_proj, dcontext,
+										 es->verbose, false);
+			ExplainPropertyText("GPU Projection", exprstr, es);
+		}
 	}
 
 	/* Show device filters */
