@@ -1303,6 +1303,10 @@ extract_partitionwise_pathlist(PlannerInfo *root,
 			}
 			outer_path = linitial(gjpath->cpath.custom_paths);
 		}
+		else if (IsA(outer_path, ProjectionPath))
+		{
+			outer_path = ((ProjectionPath *) outer_path)->subpath;
+		}
 		else
 		{
 			return NIL;
@@ -1342,50 +1346,55 @@ extract_partitionwise_pathlist(PlannerInfo *root,
 					goto skip;
 			}
 
-			/*
-			 * MEMO: make_join_rel() determines the OUTER JOIN combination
-			 * using SpecialJoinInfo, so we have to fixup relid of the parent
-			 * relation as if child relation is referenced.
-			 */
-			root->join_info_list =
-				make_pseudo_sjinfo_list(root,
-										join_info_list_saved,
-										parent_relid, subrel);
-
-			foreach (lc2, inner_paths_list)
+			if (inner_paths_list == NIL)
+				curr_path = subpath;
+			else
 			{
-				Path   *inner_path = lfirst(lc2);
-				Relids	inner_relids = inner_path->parent->relids;
-				Relids	join_relids;
+				/*
+				 * MEMO: make_join_rel() makes OUTER JOIN decision based on
+				 * SpecialJoinInfo, so we have to fixup relid of the parent
+				 * relation as if child relation is referenced.
+				 */
+				root->join_info_list =
+					make_pseudo_sjinfo_list(root,
+											join_info_list_saved,
+											parent_relid, subrel);
 
-				join_relids = bms_union(inner_relids, subrel->relids);
-				curr_rel = find_join_rel(root, join_relids);
-				if (!curr_rel)
+				foreach (lc2, inner_paths_list)
 				{
-					curr_rel = make_join_rel(root,
-											 subrel,
-											 inner_path->parent);
+					Path   *inner_path = lfirst(lc2);
+					Relids	inner_relids = inner_path->parent->relids;
+					Relids	join_relids;
+
+					join_relids = bms_union(inner_relids, subrel->relids);
+					curr_rel = find_join_rel(root, join_relids);
 					if (!curr_rel)
-						goto skip;		/* not a valid join */
-					set_cheapest(curr_rel);
-				}
+					{
+						curr_rel = make_join_rel(root,
+												 subrel,
+												 inner_path->parent);
+						if (!curr_rel)
+							goto skip;		/* not a valid join */
+						set_cheapest(curr_rel);
+					}
 
-				if (try_parallel_path)
-				{
-					if (curr_rel->partial_pathlist == NIL)
-						goto skip;		/* no partial join path */
-					curr_path = linitial(curr_rel->partial_pathlist);
-					parallel_nworkers = Max(parallel_nworkers,
-											curr_path->parallel_workers);
+					if (try_parallel_path)
+					{
+						if (curr_rel->partial_pathlist == NIL)
+							goto skip;		/* no partial join path */
+						curr_path = linitial(curr_rel->partial_pathlist);
+					}
+					else
+					{
+						if (curr_rel->cheapest_total_path == NULL)
+							goto skip;		/* no valid join path */
+						curr_path = curr_rel->cheapest_total_path;
+					}
+					subrel = curr_rel;
 				}
-				else
-				{
-					if (curr_rel->cheapest_total_path == NULL)
-						goto skip;		/* no valid join path */
-					curr_path = curr_rel->cheapest_total_path;
-				}
-				subrel = curr_rel;
 			}
+			parallel_nworkers = Max(parallel_nworkers,
+									curr_path->parallel_workers);
 			new_subpath = setup_append_child_path(root, joinrel, curr_path);
 			if (!new_subpath)
 				goto skip;
@@ -1426,6 +1435,7 @@ try_add_gpujoin_append_paths(PlannerInfo *root,
                              Relids required_outer,
                              bool try_parallel_path)
 {
+#if PG_VERSION_NUM >= 100000
 	List	   *subpaths_list;
 	List	   *partitioned_rels;
 	int			parallel_nworkers;
@@ -1455,6 +1465,7 @@ try_add_gpujoin_append_paths(PlannerInfo *root,
 		add_partial_path(joinrel, (Path *) append_path);
 	else
 		add_path(joinrel, (Path *) append_path);
+#endif
 }
 
 /*

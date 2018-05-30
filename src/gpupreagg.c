@@ -1159,69 +1159,22 @@ make_gpupreagg_path(PlannerInfo *root,
 }
 
 /*
- * try_add_gpupreagg_paths
+ * prepend_gpupreagg_path
  */
-static void
-try_add_gpupreagg_paths(PlannerInfo *root,
-						RelOptInfo *group_rel,
-						Path *input_path)
+static Path *
+prepend_gpupreagg_path(PlannerInfo *root,
+					   RelOptInfo *group_rel,
+					   PathTarget *target_partial,
+					   PathTarget *target_device,
+					   Path *input_path,
+					   Bitmapset *pfunc_bitmap,
+					   double num_groups,
+					   AggClauseCosts *agg_final_costs,
+					   bool can_pullup_outerscan,
+					   bool try_parallel_path)
 {
-	Query		   *parse = root->parse;
-	PathTarget	   *target_upper	= root->upper_targets[UPPERREL_GROUP_AGG];
-	PathTarget	   *target_final	= create_empty_pathtarget();
-	PathTarget	   *target_partial	= create_empty_pathtarget();
-	PathTarget	   *target_device	= create_empty_pathtarget();
-	CustomPath	   *cpath;
-	Path		   *partial_path;
-	Path		   *final_path;
-	Path		   *sort_path;
-	Bitmapset	   *pfunc_bitmap;
-	Node		   *havingQual;
-	double			num_groups;
-	double			reduction_ratio;
-	bool			can_sort;
-	bool			can_hash;
-	bool			can_pullup_outerscan = true;
-	AggClauseCosts	agg_final_costs;
-
-	/*
-	 * MEMO: The 'pg_strom.gpupreagg_reduction_threshold' is a tentative
-	 * solution to avoid overflow of GPU device memory for GpuPreAgg.
-	 * In case of large table scan with small reduction ratio is almost
-	 * equivalent to cache most of input records in GPU device memory.
-	 * Then, it shall be aggregated on CPU-side again, it is usually waste
-	 * of computing power and data transfer.
-	 * Of course, a threshold is not a perfect solution. We may need to
-	 * switch to bypass GPU once reduction ratio (or absolute data size) is
-	 * worse than the estimation at the planning stage.
-	 */
-	if (!parse->groupClause)
-		num_groups = 1.0;
-	else
-	{
-		Path   *pathnode = linitial(group_rel->pathlist);
-
-		num_groups = Max(pathnode->rows, 1.0);
-	}
-	reduction_ratio = input_path->rows / num_groups;
-	if (reduction_ratio < gpupreagg_reduction_threshold)
-	{
-		elog(DEBUG2, "GpuPreAgg: %.0f -> %.0f reduction ratio (%.2f) is bad",
-			 input_path->rows, num_groups, reduction_ratio);
-		return;
-	}
-
-	/* construction of the target-list for each level */
-	if (!gpupreagg_build_path_target(root,
-									 target_upper,
-									 target_final,
-									 target_partial,
-									 target_device,
-									 input_path->pathtarget,
-									 &pfunc_bitmap,
-									 &havingQual,
-									 &can_pullup_outerscan))
-		return;
+	CustomPath *cpath;
+	Path	   *partial_path;
 
 	/*
 	 * MEMO: See grouping_planner() where it calls create_projection_path()
@@ -1251,19 +1204,6 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 		}
 	}
 
-	/* Get cost of aggregations */
-	memset(&agg_final_costs, 0, sizeof(AggClauseCosts));
-	if (parse->hasAggs)
-	{
-		get_agg_clause_costs(root, (Node *)target_final->exprs,
-							 AGGSPLIT_SIMPLE, &agg_final_costs);
-		get_agg_clause_costs(root, havingQual,
-							 AGGSPLIT_SIMPLE, &agg_final_costs);
-	}
-	/* GpuPreAgg does not support ordered aggregation */
-	if (agg_final_costs.numOrderedAggs > 0)
-		return;
-
 	/*
 	 * construction of GpuPreAgg pathnode on top of the cheapest total
 	 * cost pathnode (partial aggregation)
@@ -1276,21 +1216,22 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 								num_groups,
 								can_pullup_outerscan);
 	if (!cpath)
-		return;
+		return NULL;
 
 	/*
 	 * If GpuPreAgg pathnode is parallel-safe, inject Gather node prior to
 	 * the final aggregation step.
 	 */
-	if (cpath->path.parallel_safe &&
+	if (try_parallel_path &&
+		cpath->path.parallel_safe &&
 		cpath->path.parallel_workers > 0)
 	{
 		double		total_groups = (cpath->path.rows *
 									cpath->path.parallel_workers);
 
-		if (!agg_final_costs.hasNonPartial &&
-			!agg_final_costs.hasNonSerial)
-			return;
+		if (!agg_final_costs->hasNonPartial &&
+			!agg_final_costs->hasNonSerial)
+			return NULL;
 
 		cpath->path.parallel_aware = true;
 
@@ -1304,11 +1245,33 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 	else
 		partial_path = &cpath->path;
 
+	return partial_path;
+}
+
+/*
+ * try_add_final_aggregation_paths
+ */
+static void
+try_add_final_aggregation_paths(PlannerInfo *root,
+								RelOptInfo *group_rel,
+								PathTarget *target_final,
+								Path *partial_path,
+								List *havingQuals,
+								double num_groups,
+								AggClauseCosts *agg_final_costs)
+{
+	Query	   *parse = root->parse;
+	PathTarget *target_upper = root->upper_targets[UPPERREL_GROUP_AGG];
+	Path	   *sort_path;
+	Path	   *final_path;
+	bool		can_sort;
+	bool		can_hash;
+
 	/* strategy of the final aggregation */
 	can_sort = grouping_is_sortable(parse->groupClause);
 	can_hash = (parse->groupClause != NIL &&
 				parse->groupingSets == NIL &&
-				agg_final_costs.numOrderedAggs == 0 &&
+				agg_final_costs->numOrderedAggs == 0 &&
 				grouping_is_hashable(parse->groupClause));
 
 	/* make a final grouping path (nogroup) */
@@ -1321,8 +1284,8 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 											 AGG_PLAIN,
 											 AGGSPLIT_SIMPLE,
 											 parse->groupClause,
-											 (List *) havingQual,
-											 &agg_final_costs,
+											 havingQuals,
+											 agg_final_costs,
 											 num_groups);
 		add_path(group_rel, pgstrom_create_dummy_path(root,
 													  final_path,
@@ -1384,7 +1347,7 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 #if PG_VERSION_NUM < 110000
 											 target_final,
 #endif
-											 (List *)parse->havingQual,
+											 (List *) parse->havingQual,
 #if PG_VERSION_NUM < 100000
 											 rollup_lists,
 											 rollup_groupclauses,
@@ -1392,7 +1355,7 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 											 rollup_strategy,
 											 rollup_data_list,
 #endif
-											 &agg_final_costs,
+											 agg_final_costs,
 											 num_groups);
 #if PG_VERSION_NUM >= 110000
 				/* adjust cost and overwrite PathTarget */
@@ -1415,8 +1378,8 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 									AGG_SORTED,
 									AGGSPLIT_SIMPLE,
 									parse->groupClause,
-									(List *) havingQual,
-									&agg_final_costs,
+								    havingQuals,
+									agg_final_costs,
 									num_groups);
 			else if (parse->groupClause)
 			{
@@ -1428,7 +1391,7 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 									  target_final,
 #endif
 									  parse->groupClause,
-									  (List *) havingQual,
+									  havingQuals,
 									  num_groups);
 #if PG_VERSION_NUM >= 110000
 				/* adjust cost and overwrite PathTarget */
@@ -1455,7 +1418,7 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 		{
 			Size	hashaggtablesize
 				= estimate_hashagg_tablesize(partial_path,
-											 &agg_final_costs,
+											 agg_final_costs,
 											 num_groups);
 			if (hashaggtablesize < work_mem * 1024L)
 			{
@@ -1467,8 +1430,8 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 									AGG_HASHED,
 									AGGSPLIT_SIMPLE,
 									parse->groupClause,
-									(List *) havingQual,
-									&agg_final_costs,
+									havingQuals,
+									agg_final_costs,
 									num_groups);
 				add_path(group_rel, pgstrom_create_dummy_path(root,
 															  final_path,
@@ -1476,6 +1439,100 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 			}
 		}
 	}
+}
+
+/*
+ * try_add_gpupreagg_paths
+ */
+static void
+try_add_gpupreagg_paths(PlannerInfo *root,
+						RelOptInfo *group_rel,
+						Path *input_path,
+						bool try_parallel_path)
+{
+	Query		   *parse = root->parse;
+	PathTarget	   *target_upper	= root->upper_targets[UPPERREL_GROUP_AGG];
+	PathTarget	   *target_final	= create_empty_pathtarget();
+	PathTarget	   *target_partial	= create_empty_pathtarget();
+	PathTarget	   *target_device	= create_empty_pathtarget();
+	Path		   *partial_path;
+	Bitmapset	   *pfunc_bitmap;
+	Node		   *havingQual;
+	double			num_groups;
+	double			reduction_ratio;
+	bool			can_pullup_outerscan = true;
+	AggClauseCosts	agg_final_costs;
+
+	/*
+	 * MEMO: The 'pg_strom.gpupreagg_reduction_threshold' is a tentative
+	 * solution to avoid overflow of GPU device memory for GpuPreAgg.
+	 * In case of large table scan with small reduction ratio is almost
+	 * equivalent to cache most of input records in GPU device memory.
+	 * Then, it shall be aggregated on CPU-side again, it is usually waste
+	 * of computing power and data transfer.
+	 * Of course, a threshold is not a perfect solution. We may need to
+	 * switch to bypass GPU once reduction ratio (or absolute data size) is
+	 * worse than the estimation at the planning stage.
+	 */
+	if (!parse->groupClause)
+		num_groups = 1.0;
+	else
+	{
+		Path   *pathnode = linitial(group_rel->pathlist);
+
+		num_groups = Max(pathnode->rows, 1.0);
+	}
+	reduction_ratio = input_path->rows / num_groups;
+	if (reduction_ratio < gpupreagg_reduction_threshold)
+	{
+		elog(DEBUG2, "GpuPreAgg: %.0f -> %.0f reduction ratio (%.2f) is bad",
+			 input_path->rows, num_groups, reduction_ratio);
+		return;
+	}
+
+	/* construction of the target-list for each level */
+	if (!gpupreagg_build_path_target(root,
+									 target_upper,
+									 target_final,
+									 target_partial,
+									 target_device,
+									 input_path->pathtarget,
+									 &pfunc_bitmap,
+									 &havingQual,
+									 &can_pullup_outerscan))
+		return;
+
+	/* Get cost of aggregations */
+	memset(&agg_final_costs, 0, sizeof(AggClauseCosts));
+	if (parse->hasAggs)
+	{
+		get_agg_clause_costs(root, (Node *)target_final->exprs,
+							 AGGSPLIT_SIMPLE, &agg_final_costs);
+		get_agg_clause_costs(root, havingQual,
+							 AGGSPLIT_SIMPLE, &agg_final_costs);
+	}
+	/* GpuPreAgg does not support ordered aggregation */
+	if (agg_final_costs.numOrderedAggs > 0)
+		return;
+
+	partial_path = prepend_gpupreagg_path(root,
+										  group_rel,
+										  target_partial,
+										  target_device,
+										  input_path,
+										  pfunc_bitmap,
+										  num_groups,
+										  &agg_final_costs,
+										  can_pullup_outerscan,
+										  try_parallel_path);
+	if (partial_path)
+		try_add_final_aggregation_paths(root,
+										group_rel,
+										target_final,
+										partial_path,
+										(List *) havingQual,
+										num_groups,
+										&agg_final_costs);
 }
 
 /*
@@ -1522,7 +1579,7 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 
 	/* traditional GpuPreAgg + Agg path consideration */
 	input_path = input_rel->cheapest_total_path;
-	try_add_gpupreagg_paths(root, group_rel, input_path);
+	try_add_gpupreagg_paths(root, group_rel, input_path, false);
 
 	/*
 	 * add GpuPreAgg + Gather + Agg path for CPU+GPU hybrid parallel
@@ -1532,7 +1589,7 @@ gpupreagg_add_grouping_paths(PlannerInfo *root,
 		foreach (lc, input_rel->partial_pathlist)
 		{
 			input_path = lfirst(lc);
-			try_add_gpupreagg_paths(root, group_rel, input_path);
+			try_add_gpupreagg_paths(root, group_rel, input_path, true);
 		}
 	}
 }
@@ -5265,6 +5322,7 @@ pgstrom_init_gpupreagg(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
+#if PG_VERSION_NUM >= 100000
 	/* pg_strom.enable_partitionwise_gpupreagg */
 	DefineCustomBoolVariable("pg_strom.enable_partitionwise_gpupreagg",
 							 "(EXPERIMENTAL) Enables partition wise GpuPreAgg",
@@ -5274,6 +5332,7 @@ pgstrom_init_gpupreagg(void)
 							 PGC_USERSET,
                              GUC_NOT_IN_SAMPLE,
                              NULL, NULL, NULL);
+#endif
 	/* pg_strom.gpupreagg_reduction_threshold */
 	DefineCustomRealVariable("pg_strom.gpupreagg_reduction_threshold",
 							 "Minimus reduction ratio to use GpuPreAgg",
