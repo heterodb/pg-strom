@@ -1023,6 +1023,17 @@ extern bool pgstrom_path_is_gpujoin(const Path *pathnode);
 extern bool pgstrom_plan_is_gpujoin(const Plan *plannode);
 extern bool pgstrom_planstate_is_gpujoin(const PlanState *ps);
 extern Path *pgstrom_copy_gpujoin_path(const Path *pathnode);
+#if PG_VERSION_NUM >= 100000
+extern List *extract_partitionwise_pathlist(PlannerInfo *root,
+											RelOptInfo *joinrel,
+											Path *outer_path,
+											Path *inner_path,
+											bool try_parallel_path,
+											int *p_parallel_nworkers,
+											List **p_partitioned_rels);
+#else
+#define extract_partitionwise_pathlist(a,b,c,d,e,f,g)		NIL
+#endif
 extern int	gpujoin_process_task(GpuTask *gtask, CUmodule cuda_module);
 extern void	gpujoin_release_task(GpuTask *gtask);
 extern void assign_gpujoin_session_info(StringInfo buf,
