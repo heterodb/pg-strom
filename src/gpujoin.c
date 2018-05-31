@@ -1145,7 +1145,7 @@ typedef struct
 } fixup_appendrel_child_varnode_context;
 
 static Node *
-fixup_appendrel_child_varnode(Node *node, void *__context)
+__fixup_appendrel_child_varnode(Node *node, void *__context)
 {
 	fixup_appendrel_child_varnode_context *con = __context;
 
@@ -1181,17 +1181,27 @@ fixup_appendrel_child_varnode(Node *node, void *__context)
 		elog(ERROR, "Bug? no relevant Var-node reference in child rel: %s",
 			 nodeToString(var));
 	}
-	return expression_tree_mutator(node, fixup_appendrel_child_varnode, con);
+	return expression_tree_mutator(node, __fixup_appendrel_child_varnode, con);
+}
+
+List *
+fixup_appendrel_child_varnode(List *exprs_list,
+							  PlannerInfo *root, RelOptInfo *subrel)
+{
+	fixup_appendrel_child_varnode_context con;
+
+	Assert(IsA(exprs_list, List));
+	con.root = root;
+	con.subrel = subrel;
+	return (List *)__fixup_appendrel_child_varnode((Node *)exprs_list, &con);
 }
 
 static Path *
 setup_append_child_path(PlannerInfo *root,
-						RelOptInfo *joinrel,
+						PathTarget *old_target,
 						Path *subpath)
 {
-	fixup_appendrel_child_varnode_context con;
 	Path	   *newpath;
-	PathTarget *old_target = joinrel->reltarget;
 	PathTarget *new_target;
 
 	if (pgstrom_path_is_gpujoin(subpath))
@@ -1216,12 +1226,10 @@ setup_append_child_path(PlannerInfo *root,
 	else
 		return NULL;		/* not supported */
 
-	con.root	= root;
-	con.subrel	= subpath->parent;
-	new_target = palloc(sizeof(PathTarget));
-	memcpy(new_target, old_target, sizeof(PathTarget));
-	new_target->exprs = (List *)
-		fixup_appendrel_child_varnode((Node *)old_target->exprs, &con);
+	new_target = copy_pathtarget(old_target);
+	new_target->exprs =
+		fixup_appendrel_child_varnode((List *)old_target->exprs,
+									  root, subpath->parent);
 	newpath->pathtarget = new_target;
 
 	return newpath;
@@ -1232,10 +1240,11 @@ setup_append_child_path(PlannerInfo *root,
  */
 List *
 extract_partitionwise_pathlist(PlannerInfo *root,
-							   RelOptInfo *joinrel,
+							   PathTarget *path_target,
 							   Path *outer_path,
 							   Path *inner_path,
 							   bool try_parallel_path,
+							   Index *p_append_relid,
 							   int *p_parallel_nworkers,
 							   List **p_partitioned_rels)
 {
@@ -1395,12 +1404,15 @@ extract_partitionwise_pathlist(PlannerInfo *root,
 			}
 			parallel_nworkers = Max(parallel_nworkers,
 									curr_path->parallel_workers);
-			new_subpath = setup_append_child_path(root, joinrel, curr_path);
+			new_subpath = setup_append_child_path(root,
+												  path_target,
+												  curr_path);
 			if (!new_subpath)
 				goto skip;
 			new_append_subpaths = lappend(new_append_subpaths, new_subpath);
 		}
 		result = new_append_subpaths;
+		*p_append_relid = parent_relid;
 		*p_parallel_nworkers = parallel_nworkers;
 		*p_partitioned_rels = append_path->partitioned_rels;
 	skip:
@@ -1439,6 +1451,7 @@ try_add_gpujoin_append_paths(PlannerInfo *root,
 	List	   *subpaths_list;
 	List	   *partitioned_rels;
 	int			parallel_nworkers;
+	Index		append_relid;
 	AppendPath *append_path;
 
 	if (join_type != JOIN_INNER &&
@@ -1446,10 +1459,11 @@ try_add_gpujoin_append_paths(PlannerInfo *root,
 		return;
 
 	subpaths_list = extract_partitionwise_pathlist(root,
-												   joinrel,
+												   joinrel->reltarget,
 												   outer_path,
 												   inner_path,
 												   try_parallel_path,
+												   &append_relid,
 												   &parallel_nworkers,
 												   &partitioned_rels);
 	if (subpaths_list == NIL)

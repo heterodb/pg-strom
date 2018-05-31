@@ -1025,14 +1025,16 @@ extern bool pgstrom_planstate_is_gpujoin(const PlanState *ps);
 extern Path *pgstrom_copy_gpujoin_path(const Path *pathnode);
 #if PG_VERSION_NUM >= 100000
 extern List *extract_partitionwise_pathlist(PlannerInfo *root,
-											RelOptInfo *joinrel,
+											PathTarget *path_target,
 											Path *outer_path,
 											Path *inner_path,
 											bool try_parallel_path,
+											Index *p_append_relid,
 											int *p_parallel_nworkers,
 											List **p_partitioned_rels);
-#else
-#define extract_partitionwise_pathlist(a,b,c,d,e,f,g)		NIL
+extern List *fixup_appendrel_child_varnode(List *exprs_list,
+										   PlannerInfo *root,
+										   RelOptInfo *subrel);
 #endif
 extern int	gpujoin_process_task(GpuTask *gtask, CUmodule cuda_module);
 extern void	gpujoin_release_task(GpuTask *gtask);

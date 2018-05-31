@@ -1169,7 +1169,6 @@ prepend_gpupreagg_path(PlannerInfo *root,
 					   Path *input_path,
 					   Bitmapset *pfunc_bitmap,
 					   double num_groups,
-					   AggClauseCosts *agg_final_costs,
 					   bool can_pullup_outerscan,
 					   bool try_parallel_path)
 {
@@ -1228,13 +1227,7 @@ prepend_gpupreagg_path(PlannerInfo *root,
 	{
 		double		total_groups = (cpath->path.rows *
 									cpath->path.parallel_workers);
-
-		if (!agg_final_costs->hasNonPartial &&
-			!agg_final_costs->hasNonSerial)
-			return NULL;
-
 		cpath->path.parallel_aware = true;
-
 		partial_path = (Path *)create_gather_path(root,
 												  group_rel,
 												  &cpath->path,
@@ -1442,6 +1435,105 @@ try_add_final_aggregation_paths(PlannerInfo *root,
 }
 
 /*
+ * try_add_gpupreagg_append_paths
+ */
+static void
+try_add_gpupreagg_append_paths(PlannerInfo *root,
+							   RelOptInfo *group_rel,
+							   PathTarget *target_final,
+							   PathTarget *target_partial,
+							   PathTarget *target_device,
+							   Path *input_path,
+							   Bitmapset *pfunc_bitmap,
+							   List *havingQual,
+							   double num_groups,
+							   AggClauseCosts *agg_final_costs,
+							   bool can_pullup_outerscan,
+							   bool try_parallel_path)
+{
+	List	   *append_paths_list = NIL;
+	List	   *sub_paths_list;
+	List	   *partitioned_rels;
+	int			parallel_nworkers;
+	Index		append_relid;
+	AppendPath *append_path;
+	Path	   *partial_path;
+	ListCell   *lc;
+
+	sub_paths_list = extract_partitionwise_pathlist(root,
+													input_path->pathtarget,
+													input_path,
+													NULL,
+													try_parallel_path,
+													&append_relid,
+													&parallel_nworkers,
+													&partitioned_rels);
+	if (sub_paths_list == NIL)
+		return;
+	foreach (lc, sub_paths_list)
+	{
+		PathTarget *curr_partial = copy_pathtarget(target_partial);
+		PathTarget *curr_device = copy_pathtarget(target_device);
+		Path	   *sub_path = (Path *) lfirst(lc);
+		Path	   *partial_path;
+
+		/* fixup varno */
+		curr_partial->exprs =
+			fixup_appendrel_child_varnode(curr_partial->exprs,
+										  root, sub_path->parent);
+		curr_device->exprs =
+			fixup_appendrel_child_varnode(curr_device->exprs,
+										  root, sub_path->parent);
+
+		partial_path = prepend_gpupreagg_path(root,
+											  group_rel,
+											  curr_partial,
+											  curr_device,
+											  sub_path,
+											  pfunc_bitmap,
+											  num_groups,
+											  can_pullup_outerscan,
+											  false);
+		if (!partial_path)
+			return;
+		append_paths_list = lappend(append_paths_list, partial_path);
+	}
+	/* also see create_append_path(), some fields must be fixed up */
+	append_path = create_append_path(input_path->parent,
+									 append_paths_list,
+									 NULL,
+									 parallel_nworkers,
+									 partitioned_rels);
+	append_path->path.pathtarget = target_partial;
+
+	/* prepend Gather on demand */
+	if (try_parallel_path &&
+		append_path->path.parallel_safe &&
+		append_path->path.parallel_workers > 0)
+	{
+		double		total_groups = (append_path->path.rows *
+									append_path->path.parallel_workers);
+		append_path->path.parallel_aware = true;
+		partial_path = (Path *)create_gather_path(root,
+												  group_rel,
+												  &append_path->path,
+												  target_partial,
+												  NULL,
+												  &total_groups);
+	}
+	else
+		partial_path = &append_path->path;
+
+	try_add_final_aggregation_paths(root,
+									group_rel,
+									target_final,
+									partial_path,
+									(List *) havingQual,
+									num_groups,
+									agg_final_costs);
+}
+
+/*
  * try_add_gpupreagg_paths
  */
 static void
@@ -1515,6 +1607,20 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 	if (agg_final_costs.numOrderedAggs > 0)
 		return;
 
+	if (enable_partitionwise_gpupreagg)
+		try_add_gpupreagg_append_paths(root,
+									   group_rel,
+									   target_final,
+									   target_partial,
+									   target_device,
+									   input_path,
+									   pfunc_bitmap,
+									   (List *) havingQual,
+									   num_groups,
+									   &agg_final_costs,
+									   can_pullup_outerscan,
+									   try_parallel_path);
+
 	partial_path = prepend_gpupreagg_path(root,
 										  group_rel,
 										  target_partial,
@@ -1522,7 +1628,6 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 										  input_path,
 										  pfunc_bitmap,
 										  num_groups,
-										  &agg_final_costs,
 										  can_pullup_outerscan,
 										  try_parallel_path);
 	if (partial_path)
