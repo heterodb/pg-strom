@@ -1170,7 +1170,7 @@ prepend_gpupreagg_path(PlannerInfo *root,
 					   Bitmapset *pfunc_bitmap,
 					   double num_groups,
 					   bool can_pullup_outerscan,
-					   bool try_parallel_path)
+					   bool with_gather_node)
 {
 	CustomPath *cpath;
 	Path	   *partial_path;
@@ -1217,24 +1217,28 @@ prepend_gpupreagg_path(PlannerInfo *root,
 	if (!cpath)
 		return NULL;
 
-	/*
-	 * If GpuPreAgg pathnode is parallel-safe, inject Gather node prior to
-	 * the final aggregation step.
-	 */
-	if (try_parallel_path &&
-		cpath->path.parallel_safe &&
+	/* Is it parallel capable? */
+	if (cpath->path.parallel_safe &&
 		cpath->path.parallel_workers > 0)
 	{
-		double		total_groups = (cpath->path.rows *
-									cpath->path.parallel_workers);
 		cpath->path.parallel_aware = true;
-		partial_path = (Path *)create_gather_path(root,
-												  group_rel,
-												  &cpath->path,
-												  target_partial,
-												  NULL,
-												  &total_groups);
+
+		if (with_gather_node)
+		{
+			double	total_groups = (cpath->path.rows *
+									cpath->path.parallel_workers);
+			partial_path = (Path *)create_gather_path(root,
+													  group_rel,
+													  &cpath->path,
+													  target_partial,
+													  NULL,
+													  &total_groups);
+		}
+		else
+			partial_path = &cpath->path;
 	}
+	else if (with_gather_node)
+		partial_path = NULL;
 	else
 		partial_path = &cpath->path;
 
@@ -1630,14 +1634,17 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 										  num_groups,
 										  can_pullup_outerscan,
 										  try_parallel_path);
-	if (partial_path)
-		try_add_final_aggregation_paths(root,
-										group_rel,
-										target_final,
-										partial_path,
-										(List *) havingQual,
-										num_groups,
-										&agg_final_costs);
+	if (!partial_path ||
+		(try_parallel_path && !IsA(partial_path, Gather)))
+		return;
+
+	try_add_final_aggregation_paths(root,
+									group_rel,
+									target_final,
+									partial_path,
+									(List *) havingQual,
+									num_groups,
+									&agg_final_costs);
 }
 
 /*
