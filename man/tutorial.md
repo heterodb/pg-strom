@@ -68,12 +68,12 @@ This estimated cost is better than other query execution plans that run on CPU, 
 @ja{
 ワークロードをGPUで実行するためには、少なくとも演算式または関数、および使用されているデータ型がPG-Stromでサポートされている必要があります。
 `int`や`float`といった数値型、`date`や`timestamp`といった日付時刻型、`text`のような文字列型がサポートされており、また、四則演算や大小比較といった数多くのビルトイン演算子がサポートされています。
-詳細な一覧に関しては[リファレンス](references.md)を参照してください。
+詳細な一覧に関しては[リファレンス](ref_devfuncs.md)を参照してください。
 }
 @en{
 For GPU execution, it requires operators, functions and data types in use must be supported by PG-Strom.
 It supports numeric types like `int` or `float`, date and time types like `date` or `timestamp`, variable length string like `text` and so on. It also supports arithmetic operations, comparison operators and many built-in operators.
-See [References](references.md) for the detailed list.
+See [References](ref_devfuncs.md) for the detailed list.
 }
 
 @ja:##CPU+GPUハイブリッド並列
@@ -362,12 +362,12 @@ The configuration below disables PG-Strom, thus identically performs with the st
 @ja{
 この他にも、GpuScan、GpuJoin、GpuPreAggといった特定の実行計画のみを無効化するパラメータも定義されています。
 
-これらの詳細は[リファレンス](references.md#gpu)を参照してください。
+これらの詳細は[リファレンス/GPUパラメータ](ref_params.md)を参照してください。
 }
 @en{
 In addition, we provide parameters to disable particular execution plan like GpuScan, GpuJoin and GpuPreAgg.
 
-See [references](references.md#gpu) for more details.
+See [references/GUC Parameters](ref_params.md) for more details.
 }
 
 @ja:## クラッシュダンプの採取

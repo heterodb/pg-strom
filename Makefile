@@ -63,8 +63,10 @@ STROM_HEADERS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__STROM_HEADERS))
 #
 # Markdown (document) files
 #
-__DOC_FILES = index.md install.md tutorial.md features.md \
-	      plcuda.md references.md release_note.md
+__DOC_FILES = index.md install.md tutorial.md partition.md \
+	      ssd2gpu.md ccache.md gstore_fdw.md plcuda.md \
+	      ref_types.md ref_devfuncs.md ref_sqlfuncs.md ref_params.md \
+	      release_note.md
 
 #
 # Files to be packaged

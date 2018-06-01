@@ -14,18 +14,34 @@ pages:
 - 'Home' : 'index.md'
 - 'Install' : 'install.md'
 - 'Tutorial' : 'tutorial.md'
-- 'Advanced Features' : 'features.md'
-- 'PL/CUDA' : 'plcuda.md'
-- 'References' : 'references.md'
+- 'Partitioning' : 'partition.md'
+- 'Advanced Features' :
+    - 'SSD2GPU Direct SQL Exec' : 'ssd2gpu.md'
+    - 'Columnar Cache' : 'ccache.md'
+    - 'Gstore_fdw' : 'gstore_fdw.md'
+    - 'PL/CUDA' : 'plcuda.md'
+- 'References' :
+    - 'Data Types' : 'ref_types.md'
+    - 'Functions and Operators' : 'ref_devfuncs.md'
+    - 'SQL Objects' : 'ref_sqlfuncs.md'
+    - 'GUC Parameters' : 'ref_params.md'
 - 'Release Note' : 'release_note.md'
 }
 @ja{
 - 'はじめに' : 'index.md'
 - 'インストール' : 'install.md'
 - '利用ガイド' : 'tutorial.md'
-- '先進機能' : 'features.md'
-- 'PL/CUDA' : 'plcuda.md'
-- 'リファレンス' : 'references.md'
+- 'パーティション' : 'partition.md'
+- '先進機能' :
+    - 'SSDtoGPUダイレクトSQL実行' : 'ssd2gpu.md'
+    - '列指向キャッシュ' : 'ccache.md'
+    - 'Gstore_fdw' : 'gstore_fdw.md'
+    - 'PL/CUDA' : 'plcuda.md'
+- 'リファレンス' :
+    - 'データ型' : 'ref_types.md'
+    - '関数と演算子' : 'ref_devfuncs.md'
+    - 'SQLオブジェクト' : 'ref_sqlfuncs.md'
+    - 'GUCパラメータ' : 'ref_params.md'
 - 'リリースノート' : 'release_note.md'
 }
 extra_css:

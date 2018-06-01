@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<!--[if IE 8]><html class="no-js lt-ie9" lang="en" > <![endif]-->
+<!--[if gt IE 8]><!--> <html class="no-js" lang="en" > <!--<![endif]-->
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  
+  <meta name="author" content="PG-Strom Development Team">
+  <link rel="shortcut icon" href="../img/favicon.ico">
+  <title>SSDtoGPUダイレクトSQL実行 - PG-Strom Manual</title>
+  <link href='https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700' rel='stylesheet' type='text/css'>
+
+  <link rel="stylesheet" href="../css/theme.css" type="text/css" />
+  <link rel="stylesheet" href="../css/theme_extra.css" type="text/css" />
+  <link rel="stylesheet" href="../css/highlight.css">
+  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet">
+  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet">
+  <link href="../custom.css" rel="stylesheet">
+  
+  <script>
+    // Current page data
+    var mkdocs_page_name = "SSDtoGPU\u30c0\u30a4\u30ec\u30af\u30c8SQL\u5b9f\u884c";
+    var mkdocs_page_input_path = "ssd2gpu.md";
+    var mkdocs_page_url = "/ssd2gpu/";
+  </script>
+  
+  <script src="../js/jquery-2.1.1.min.js"></script>
+  <script src="../js/modernizr-2.8.3.min.js"></script>
+  <script type="text/javascript" src="../js/highlight.pack.js"></script> 
+  
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+
+    
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+      <div class="wy-side-nav-search">
+        <a href=".." class="icon icon-home"> PG-Strom Manual</a>
+        <div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" />
+  </form>
+
+  [<strong>Japanese</strong> | <a href="../.." style="color: #cccccc">English</a>]
+
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
+	<ul class="current">
+	  
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="..">はじめに</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../install/">インストール</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../tutorial/">利用ガイド</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../partition/">パーティション</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <span class="caption-text">先進機能</span>
+    <ul class="subnav">
+                <li class=" current">
+                    
+    <a class="current" href="./">SSDtoGPUダイレクトSQL実行</a>
+    <ul class="subnav">
+            
+    <li class="toctree-l3"><a href="#ssd-to-gpusql">SSD-to-GPUダイレクトSQL実行</a></li>
+    
+        <ul>
+        
+            <li><a class="toctree-l4" href="#_1">概要</a></li>
+        
+            <li><a class="toctree-l4" href="#_2">初期設定</a></li>
+        
+            <li><a class="toctree-l4" href="#_5">運用</a></li>
+        
+        </ul>
+    
+
+    </ul>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../ccache/">列指向キャッシュ</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../gstore_fdw/">Gstore_fdw</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../plcuda/">PL/CUDA</a>
+                </li>
+    </ul>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <span class="caption-text">リファレンス</span>
+    <ul class="subnav">
+                <li class="">
+                    
+    <a class="" href="../ref_types/">データ型</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../ref_devfuncs/">関数と演算子</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../ref_sqlfuncs/">SQLオブジェクト</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../ref_params/">GUCパラメータ</a>
+                </li>
+    </ul>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../release_note/">リリースノート</a>
+	    </li>
+          
+        </ul>
+      </div>
+      &nbsp;
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+
+      
+      <nav class="wy-nav-top" role="navigation" aria-label="top navigation">
+        <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+        <a href="..">PG-Strom Manual</a>
+      </nav>
+
+      
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href="..">Docs</a> &raquo;</li>
+    
+      
+        
+          <li>先進機能 &raquo;</li>
+        
+      
+    
+    <li>SSDtoGPUダイレクトSQL実行</li>
+    <li class="wy-breadcrumbs-aside">
+      
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main">
+            <div class="section">
+              
+                <h1 id="ssd-to-gpusql">SSD-to-GPUダイレクトSQL実行</h1>
+<h2 id="_1">概要</h2>
+<p>SQLワークロードを高速に処理するには、プロセッサが効率よく処理を行うのと同様に、ストレージやメモリからプロセッサへ高速にデータを供給する事が重要です。処理すべきデータがプロセッサに届いていなければ、プロセッサは手持ち無沙汰になってしまいます。</p>
+<p>SSD-to-GPUダイレクトSQL実行機能は、PCIeバスに直結する事で高速なI/O処理を実現するNVMe-SSDと、同じPCIeバス上に接続されたGPUをダイレクトに接続し、ハードウェア限界に近い速度でデータをプロセッサに供給する事でSQLワークロードを高速に処理するための機能です。</p>
+<p>通常、ストレージ上に格納されたPostgreSQLデータブロックは、PCIeバスを通していったんCPU/RAMへとロードされます。その後、クエリ実行計画にしたがってWHERE句によるフィルタリングやJOIN/GROUP BYといった処理を行うわけですが、集計系ワークロードの特性上、入力するデータ件数より出力するデータ件数の方がはるかに少ない件数となります。例えば数十億行を読み出した結果をGROUP BYで集約した結果が高々数百行という事も珍しくありません。</p>
+<p>言い換えれば、我々はゴミデータを運ぶためにPCIeバス上の帯域を消費しているとも言えますが、CPUがレコードの中身を調べるまでは、その要不要を判断できないため、一般的な実装ではこれは不可避と言えます。</p>
+<p><img alt="SSD2GPU Direct SQL Execution Overview" src="../img/ssd2gpu-overview.png" /></p>
+<p>SSD-to-GPUダイレクトSQL実行はデータの流れを変え、ストレージ上のデータブロックをPCIeバス上のP2P DMAを用いてGPUに直接転送し、GPUでSQLワークロードを処理する事でCPUが処理すべきレコード数を減らすための機能です。いわば、ストレージとCPU/RAMの間に位置してSQLを処理するためのプリプロセッサとしてGPUを活用し、結果としてI/O処理を高速化するためのアプローチです。</p>
+<p>本機能は内部的にNVIDIAのGPUDirect RDMAを使用しています。これはカスタムLinux kernel moduleを利用する事で、GPUデバイスメモリと他のPCIeデバイスの間でP2Pのデータ転送を可能にする基盤技術です。
+そのため、本機能を利用するには、PostgreSQLの拡張モジュールであるPG-Stromだけではなく、Linux kernelの拡張モジュールであるNVMe-Stromドライバが必要です。</p>
+<p>また、本機能が対応しているのはNVMe仕様のSSDのみです。SASやSATAといったインターフェースで接続されたSSDはサポートされていません。今までに動作実績のあるNVMe-SSDについては <a href="https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List#nvme-ssd-validation-list">002: HW Validation List</a> が参考になるでしょう。</p>
+<h2 id="_2">初期設定</h2>
+<h3 id="_3">ドライバのインストール</h3>
+<p>SSD-to-GPUダイレクトSQL実行機能を利用するには<code>nvme_strom</code>パッケージが必要です。このパッケージはNVMe-SSDとGPU間のP2P DMAを仲介するLinux kernel moduleを含んでおり、<a href="https://heterodb.github.io/swdc/">HeteroDB Software Distribution Center</a>から入手可能です。</p>
+<p>既に<code>heterodb-swdc</code>パッケージをインストールしている場合、<code>yum</code>コマンドによるインストールも可能です。</p>
+<pre><code>$ sudo yum install nvme_strom
+            :
+================================================================================
+ Package             Arch            Version            Repository         Size
+================================================================================
+Installing:
+ nvme_strom          x86_64          0.8-1.el7          heterodb          178 k
+
+Transaction Summary
+================================================================================
+Install  1 Package
+            :
+DKMS: install completed.
+  Verifying  : nvme_strom-0.8-1.el7.x86_64                                  1/1
+
+Installed:
+  nvme_strom.x86_64 0:0.8-1.el7
+
+Complete!
+</code></pre>
+
+<p><code>nvme_strom</code>パッケージのインストールが完了すると、以下のように<code>lsmod</code>コマンドで<code>nvme_strom</code>モジュールが出力されます。</p>
+<pre><code>$ lsmod | grep nvme
+nvme_strom             12625  0
+nvme                   27722  4
+nvme_core              52964  9 nvme
+</code></pre>
+
+<h3 id="_4">テーブルスペースの設計</h3>
+<p>SSD-to-GPUダイレクトSQL実行は以下の条件で発動します。</p>
+<ul>
+<li>スキャン対象のテーブルがNVMe-SSDで構成された区画に配置されている。<ul>
+<li><code>/dev/nvmeXXXX</code>ブロックデバイス、または<code>/dev/nvmeXXXX</code>ブロックデバイスのみから構成されたmd-raid0区画が対象です。</li>
+</ul>
+</li>
+<li>テーブルサイズが<code>pg_strom.nvme_strom_threshold</code>よりも大きい事。<ul>
+<li>この設定値は任意に変更可能ですが、デフォルト値は本体搭載物理メモリに<code>shared_buffers</code>の設定値の1/3を加えた大きさです。</li>
+</ul>
+</li>
+</ul>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>md-raid0を用いて複数のNVMe-SSD区画からストライピング読出しを行うには、HeteroDB社の提供するエンタープライズサブスクリプションの適用が必要です。</p>
+</div>
+<p>テーブルをNVMe-SSDで構成された区画に配置するには、データベースクラスタ全体をNVMe-SSDボリュームに格納する以外にも、PostgreSQLのテーブルスペース機能を用いて特定のテーブルや特定のデータベースのみをNVMe-SSDボリュームに配置する事ができます。</p>
+<p>例えば <code>/opt/nvme</code> にNVMe-SSDボリュームがマウントされている場合、以下のようにテーブルスペースを作成する事ができます。
+PostgreSQLのサーバプロセスの権限で当該ディレクトリ配下のファイルを読み書きできるようパーミッションが設定されている必要がある事に留意してください。</p>
+<pre><code>CREATE TABLESPACE my_nvme LOCATION '/opt/nvme';
+</code></pre>
+
+<p>このテーブルスペース上にテーブルを作成するには、<code>CREATE TABLE</code>構文で以下のように指定します。</p>
+<pre><code>CREATE TABLE my_table (...) TABLESPACE my_nvme;
+</code></pre>
+
+<p>あるいは、データベースのデフォルトテーブルスペースを変更するには、<code>ALTER DATABASE</code>構文で以下のように指定します。
+この場合、既存テーブルの配置されたテーブルスペースは変更されない事に留意してください。</p>
+<pre><code>ALTER DATABASE my_database SET TABLESPACE my_nvme;
+</code></pre>
+
+<h2 id="_5">運用</h2>
+<h3 id="guc">GUCパラメータによる制御</h3>
+<p>SSD-to-GPUダイレクトSQL実行に関連するGUCパラメータは2つあります。</p>
+<p>一つは<code>pg_strom.nvme_strom_enabled</code>で、SSD-to-GPUダイレクト機能の有効/無効を単純にon/offします。
+本パラメータが<code>off</code>になっていると、テーブルのサイズや物理配置とは無関係にSSD-to-GPUダイレクトSQL実行は使用されません。デフォルト値は<code>on</code>です。</p>
+<p>もう一つのパラメータは<code>pg_strom.nvme_strom_threshold</code>で、SSD-to-GPUダイレクトSQL実行が使われるべき最小のテーブルサイズを指定します。</p>
+<p>テーブルの物理配置がNVMe-SSD区画（または、NVMe-SSDのみで構成されたmd-raid0区画）上に存在し、かつ、テーブルのサイズが本パラメータの指定値よりも大きな場合、PG-StromはSSD-to-GPUダイレクトSQL実行を選択します。
+本パラメータのデフォルト値は、システムの物理メモリサイズと<code>shared_buffers</code>パラメータの指定値の1/3です。つまり、初期設定では間違いなくオンメモリで処理しきれないサイズのテーブルに対してだけSSD-to-GPUダイレクトSQL実行を行うよう調整されています。</p>
+<p>これは、一回の読み出しであればSSD-to-GPUダイレクトSQL実行に優位性があったとしても、オンメモリ処理ができる程度のテーブルに対しては、二回目以降のディスクキャッシュ利用を考慮すると、必ずしも優位とは言えないという仮定に立っているという事です。</p>
+<p>ワークロードの特性によっては必ずしもこの設定が正しいとは限りません。</p>
+<h3 id="ssd-to-gpusql_1">SSD-to-GPUダイレクトSQL実行の利用を確認する</h3>
+<p><code>EXPLAIN</code>コマンドを実行すると、当該クエリでSSD-to-GPUダイレクトSQL実行が利用されるのかどうかを確認する事ができます。</p>
+<p>以下のクエリの例では、<code>Custom Scan (GpuJoin)</code>による<code>lineorder</code>テーブルに対するスキャンに<code>NVMe-Strom: enabled</code>との表示が出ています。この場合、<code>lineorder</code>テーブルからの読出しにはSSD-to-GPUダイレクトSQL実行が利用されます。</p>
+<pre><code># explain (costs off)
+select sum(lo_revenue), d_year, p_brand1
+from lineorder, date1, part, supplier
+where lo_orderdate = d_datekey
+and lo_partkey = p_partkey
+and lo_suppkey = s_suppkey
+and p_category = 'MFGR#12'
+and s_region = 'AMERICA'
+  group by d_year, p_brand1
+  order by d_year, p_brand1;
+                                          QUERY PLAN
+----------------------------------------------------------------------------------------------
+ GroupAggregate
+   Group Key: date1.d_year, part.p_brand1
+   -&gt;  Sort
+         Sort Key: date1.d_year, part.p_brand1
+         -&gt;  Custom Scan (GpuPreAgg)
+               Reduction: Local
+               GPU Projection: pgstrom.psum((lo_revenue)::double precision), d_year, p_brand1
+               Combined GpuJoin: enabled
+               -&gt;  Custom Scan (GpuJoin) on lineorder
+                     GPU Projection: date1.d_year, part.p_brand1, lineorder.lo_revenue
+                     Outer Scan: lineorder
+                     Depth 1: GpuHashJoin  (nrows 2406009600...97764190)
+                              HashKeys: lineorder.lo_partkey
+                              JoinQuals: (lineorder.lo_partkey = part.p_partkey)
+                              KDS-Hash (size: 10.67MB)
+                     Depth 2: GpuHashJoin  (nrows 97764190...18544060)
+                              HashKeys: lineorder.lo_suppkey
+                              JoinQuals: (lineorder.lo_suppkey = supplier.s_suppkey)
+                              KDS-Hash (size: 131.59MB)
+                     Depth 3: GpuHashJoin  (nrows 18544060...18544060)
+                              HashKeys: lineorder.lo_orderdate
+                              JoinQuals: (lineorder.lo_orderdate = date1.d_datekey)
+                              KDS-Hash (size: 461.89KB)
+                     NVMe-Strom: enabled
+                     -&gt;  Custom Scan (GpuScan) on part
+                           GPU Projection: p_brand1, p_partkey
+                           GPU Filter: (p_category = 'MFGR#12'::bpchar)
+                     -&gt;  Custom Scan (GpuScan) on supplier
+                           GPU Projection: s_suppkey
+                           GPU Filter: (s_region = 'AMERICA'::bpchar)
+                     -&gt;  Seq Scan on date1
+(31 rows)
+</code></pre>
+
+<h3 id="visibility-map">Visibility Mapに関する注意事項</h3>
+<p>現在のところ、PG-StromのGPU側処理では行単位のMVCC可視性チェックを行う事ができません。これは、可視性チェックを行うために必要なデータ構造がホスト側だけに存在するためですが、ストレージ上のブロックを直接GPUに転送する場合、少々厄介な問題が生じます。</p>
+<p>NVMe-SSDにP2P DMAを要求する時点では、ストレージブロックの内容はまだCPU/RAMへと読み出されていないため、具体的にどの行が可視であるのか、どの行が不可視であるのかを判別する事ができません。これは、PostgreSQLがレコードをストレージへ書き出す際にMVCC関連の属性と共に書き込んでいるためで、似たような問題がIndexOnlyScanを実装する際に表面化しました。</p>
+<p>これに対処するため、PostgreSQLはVisibility Mapと呼ばれるインフラを持っています。これは、あるデータブロック中に存在するレコードが全てのトランザクションから可視である事が明らかであれば、該当するビットを立てる事で、データブロックを読むことなく当該ブロックにMVCC不可視なレコードが存在するか否かを判定する事を可能とするものです。</p>
+<p>SSD-to-GPUダイレクトSQL実行はこのインフラを利用しています。つまり、Visibility Mapがセットされており、"all-visible"であるブロックだけがSSD-to-GPU P2P DMAで読み出すようリクエストが送出されます。</p>
+<p>Visibility MapはVACUUMのタイミングで作成されるため、以下のように明示的にVACUUMを実行する事で強制的にVisibility Mapを構築する事ができます。</p>
+<pre><code>VACUUM ANALYZE linerorder;
+</code></pre>
+              
+            </div>
+          </div>
+          <footer>
+  
+    <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
+      
+        <a href="../ccache/" class="btn btn-neutral float-right" title="列指向キャッシュ">Next <span class="icon icon-circle-arrow-right"></span></a>
+      
+      
+        <a href="../partition/" class="btn btn-neutral" title="パーティション"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+      
+    </div>
+  
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+    
+  </div>
+
+  Built with <a href="http://www.mkdocs.org">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+      
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" style="cursor: pointer">
+    <span class="rst-current-version" data-toggle="rst-current-version">
+      
+      
+        <span><a href="../partition/" style="color: #fcfcfc;">&laquo; Previous</a></span>
+      
+      
+        <span style="margin-left: 15px"><a href="../ccache/" style="color: #fcfcfc">Next &raquo;</a></span>
+      
+    </span>
+</div>
+    <script>var base_url = '..';</script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/require.js"></script>
+      <script src="../search/search.js"></script>
+
+</body>
+</html>

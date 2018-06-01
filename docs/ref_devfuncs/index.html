@@ -1,0 +1,1014 @@
+<!DOCTYPE html>
+<!--[if IE 8]><html class="no-js lt-ie9" lang="en" > <![endif]-->
+<!--[if gt IE 8]><!--> <html class="no-js" lang="en" > <!--<![endif]-->
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  
+  <meta name="author" content="PG-Strom Development Team">
+  <link rel="shortcut icon" href="../img/favicon.ico">
+  <title>Functions and Operators - PG-Strom Manual</title>
+  <link href='https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700' rel='stylesheet' type='text/css'>
+
+  <link rel="stylesheet" href="../css/theme.css" type="text/css" />
+  <link rel="stylesheet" href="../css/theme_extra.css" type="text/css" />
+  <link rel="stylesheet" href="../css/highlight.css">
+  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet">
+  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet">
+  <link href="../custom.css" rel="stylesheet">
+  
+  <script>
+    // Current page data
+    var mkdocs_page_name = "Functions and Operators";
+    var mkdocs_page_input_path = "ref_devfuncs.md";
+    var mkdocs_page_url = "/ref_devfuncs/";
+  </script>
+  
+  <script src="../js/jquery-2.1.1.min.js"></script>
+  <script src="../js/modernizr-2.8.3.min.js"></script>
+  <script type="text/javascript" src="../js/highlight.pack.js"></script> 
+  
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+
+    
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+      <div class="wy-side-nav-search">
+        <a href=".." class="icon icon-home"> PG-Strom Manual</a>
+        <div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" />
+  </form>
+
+  [<a href="../ja" style="color: #cccccc">Japanese</a> | <strong>English</strong>]
+
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
+	<ul class="current">
+	  
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="..">Home</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../install/">Install</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../tutorial/">Tutorial</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../partition/">Partitioning</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <span class="caption-text">Advanced Features</span>
+    <ul class="subnav">
+                <li class="">
+                    
+    <a class="" href="../ssd2gpu/">SSD2GPU Direct SQL Exec</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../ccache/">Columnar Cache</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../gstore_fdw/">Gstore_fdw</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../plcuda/">PL/CUDA</a>
+                </li>
+    </ul>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <span class="caption-text">References</span>
+    <ul class="subnav">
+                <li class="">
+                    
+    <a class="" href="../ref_types/">Data Types</a>
+                </li>
+                <li class=" current">
+                    
+    <a class="current" href="./">Functions and Operators</a>
+    <ul class="subnav">
+            
+    <li class="toctree-l3"><a href="#device-functions-and-operators">Device functions and operators</a></li>
+    
+        <ul>
+        
+            <li><a class="toctree-l4" href="#type-cast">Type cast</a></li>
+        
+            <li><a class="toctree-l4" href="#functions-and-operators">Functions and operators</a></li>
+        
+            <li><a class="toctree-l4" href="#miscellaneous-device-functions">Miscellaneous device functions</a></li>
+        
+        </ul>
+    
+
+    </ul>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../ref_sqlfuncs/">SQL Objects</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../ref_params/">GUC Parameters</a>
+                </li>
+    </ul>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../release_note/">Release Note</a>
+	    </li>
+          
+        </ul>
+      </div>
+      &nbsp;
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+
+      
+      <nav class="wy-nav-top" role="navigation" aria-label="top navigation">
+        <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+        <a href="..">PG-Strom Manual</a>
+      </nav>
+
+      
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href="..">Docs</a> &raquo;</li>
+    
+      
+        
+          <li>References &raquo;</li>
+        
+      
+    
+    <li>Functions and Operators</li>
+    <li class="wy-breadcrumbs-aside">
+      
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main">
+            <div class="section">
+              
+                <h1 id="device-functions-and-operators">Device functions and operators</h1>
+<h2 id="type-cast">Type cast</h2>
+<table>
+<thead>
+<tr>
+<th align="left">destination type</th>
+<th align="left">source type</th>
+<th align="left">description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>bool</code></td>
+<td align="left"><code>int4</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>int2</code></td>
+<td align="left"><code>int4,int8,float2,float4,float8,numeric</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>int4</code></td>
+<td align="left"><code>int2,int8,float2,float4,float8,numeric</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>int8</code></td>
+<td align="left"><code>int2,int4,float2,float4,float8,numeric</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>float2</code></td>
+<td align="left"><code>int2,int4,int8,float4,float8,numeric</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>float4</code></td>
+<td align="left"><code>int2,int4,int8,float2,float8,numeric</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>float8</code></td>
+<td align="left"><code>int2,int4,int8,float2,float4,numeric</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>numeric</code></td>
+<td align="left"><code>int2,int4,int8,float2,float4,float8</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>money</code></td>
+<td align="left"><code>int4,int8,numeric</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>inet</code></td>
+<td align="left"><code>cidr</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>date</code></td>
+<td align="left"><code>timestamp,timestamptz</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>time</code></td>
+<td align="left"><code>timetz,timestamp,timestamptz</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>timetz</code></td>
+<td align="left"><code>time,timestamptz</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>timestamp</code></td>
+<td align="left"><code>date,timestamptz</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>timestamptz</code></td>
+<td align="left"><code>date,timestamp</code></td>
+<td align="left"></td>
+</tr>
+</tbody>
+</table>
+<h2 id="functions-and-operators">Functions and operators</h2>
+<p><strong>Numeric functions/operators</strong></p>
+<table>
+<thead>
+<tr>
+<th align="left">function/operator</th>
+<th align="left">description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>TYPE = TYPE</code></td>
+<td align="left">Comparison of two values<br><code>TYPE</code> is any of <code>int2,int4,int8</code><br><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></td>
+</tr>
+<tr>
+<td align="left"><code>TYPE = TYPE</code></td>
+<td align="left">Comparison of two values<br><code>TYPE</code> is any of <code>float2,float4,float8</code><br><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></td>
+</tr>
+<tr>
+<td align="left"><code>numeric COMP numeric</code></td>
+<td align="left">Comparison of two values<br><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></td>
+</tr>
+<tr>
+<td align="left"><code>TYPE + TYPE</code></td>
+<td align="left">Arithemetic addition<br><code>TYPE</code> is any of <code>int2,int4,int8,float2,float4,float8,numeric</code></td>
+</tr>
+<tr>
+<td align="left"><code>TYPE - TYPE</code></td>
+<td align="left">Arithemetic substract<br><code>TYPE</code> is any of <code>int2,int4,int8,float2,float4,float8,numeric</code></td>
+</tr>
+<tr>
+<td align="left"><code>TYPE * TYPE</code></td>
+<td align="left">Arithemetic multiplication<br><code>TYPE</code> is any of <code>int2,int4,int8,float2,float4,float8,numeric</code></td>
+</tr>
+<tr>
+<td align="left"><code>TYPE / TYPE</code></td>
+<td align="left">Arithemetic division<br><code>TYPE</code> is any of <code>int2,int4,int8,float2,float4,float8,numeric</code></td>
+</tr>
+<tr>
+<td align="left"><code>TYPE % TYPE</code></td>
+<td align="left">Reminer operator<br><code>TYPE</code> is any of <code>int2,int4,int8</code></td>
+</tr>
+<tr>
+<td align="left"><code>TYPE &amp; TYPE</code></td>
+<td align="left">Bitwise AND<br><code>TYPE</code> is any of <code>int2,int4,int8</code></td>
+</tr>
+<tr>
+<td align="left"><code>TYPE &#124; TYPE</code></td>
+<td align="left">Bitwise OR<br><code>TYPE</code> is any of <code>int2,int4,int8</code></td>
+</tr>
+<tr>
+<td align="left"><code>TYPE # TYPE</code></td>
+<td align="left">Bitwise XOR<br><code>TYPE</code> is any of <code>int2,int4,int8</code></td>
+</tr>
+<tr>
+<td align="left"><code>~ TYPE</code></td>
+<td align="left">Bitwise NOT<br><code>TYPE</code> is any if <code>int2,int4,int8</code></td>
+</tr>
+<tr>
+<td align="left"><code>TYPE &gt;&gt; int4</code></td>
+<td align="left">Right shift<br><code>TYPE</code> is any of <code>int2,int4,int8</code></td>
+</tr>
+<tr>
+<td align="left"><code>TYPE &lt;&lt; int4</code></td>
+<td align="left">Left shift<br><code>TYPE</code> is any of <code>int2,int4,int8</code></td>
+</tr>
+<tr>
+<td align="left"><code>+ TYPE</code></td>
+<td align="left">Unary plus<br><code>TYPE</code> is any of <code>int2,int4,int8,float2,float4,float8,numeric</code></td>
+</tr>
+<tr>
+<td align="left"><code>- TYPE</code></td>
+<td align="left">Unary minus<br><code>TYPE</code> is any of <code>int2,int4,int8,float2,float4,float8,numeric</code></td>
+</tr>
+<tr>
+<td align="left"><code>@TYPE</code></td>
+<td align="left">Absolute value<br><code>TYPE</code> is any of <code>int2,int4,int8,float2,float4,float8,numeric</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Mathematical functions</strong></p>
+<table>
+<thead>
+<tr>
+<th align="left">functions/operators</th>
+<th align="left">description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>cbrt(float8)</code></td>
+<td align="left">cube root</td>
+</tr>
+<tr>
+<td align="left"><code>dcbrt(float8)</code></td>
+<td align="left">cube root</td>
+</tr>
+<tr>
+<td align="left"><code>ceil(float8)</code></td>
+<td align="left">nearest integer greater than or equal to argument</td>
+</tr>
+<tr>
+<td align="left"><code>ceiling(float8)</code></td>
+<td align="left">nearest integer greater than or equal to argument</td>
+</tr>
+<tr>
+<td align="left"><code>exp(float8)</code></td>
+<td align="left">exponential</td>
+</tr>
+<tr>
+<td align="left"><code>dexp(float8)</code></td>
+<td align="left">exponential</td>
+</tr>
+<tr>
+<td align="left"><code>floor(float8)</code></td>
+<td align="left">nearest integer less than or equal to argument</td>
+</tr>
+<tr>
+<td align="left"><code>ln(float8)</code></td>
+<td align="left">natural logarithm</td>
+</tr>
+<tr>
+<td align="left"><code>dlog1(float8)</code></td>
+<td align="left">natural logarithm</td>
+</tr>
+<tr>
+<td align="left"><code>log(float8)</code></td>
+<td align="left">base 10 logarithm</td>
+</tr>
+<tr>
+<td align="left"><code>dlog10(float8)</code></td>
+<td align="left">base 10 logarithm</td>
+</tr>
+<tr>
+<td align="left"><code>pi()</code></td>
+<td align="left">circumference ratio</td>
+</tr>
+<tr>
+<td align="left"><code>power(float8,float8)</code></td>
+<td align="left">power</td>
+</tr>
+<tr>
+<td align="left"><code>pow(float8,float8)</code></td>
+<td align="left">power</td>
+</tr>
+<tr>
+<td align="left"><code>dpow(float8,float8)</code></td>
+<td align="left">power</td>
+</tr>
+<tr>
+<td align="left"><code>round(float8)</code></td>
+<td align="left">round to the nearest integer</td>
+</tr>
+<tr>
+<td align="left"><code>dround(float8)</code></td>
+<td align="left">round to the nearest integer</td>
+</tr>
+<tr>
+<td align="left"><code>sign(float8)</code></td>
+<td align="left">sign of the argument</td>
+</tr>
+<tr>
+<td align="left"><code>sqrt(float8)</code></td>
+<td align="left">square root</td>
+</tr>
+<tr>
+<td align="left"><code>dsqrt(float8)</code></td>
+<td align="left">square root</td>
+</tr>
+<tr>
+<td align="left"><code>trunc(float8)</code></td>
+<td align="left">truncate toward zero</td>
+</tr>
+<tr>
+<td align="left"><code>dtrunc(float8)</code></td>
+<td align="left">truncate toward zero</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Trigonometric functions</strong></p>
+<table>
+<thead>
+<tr>
+<th align="left">functions/operators</th>
+<th align="left">description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>degrees(float8)</code></td>
+<td align="left">radians to degrees</td>
+</tr>
+<tr>
+<td align="left"><code>radians(float8)</code></td>
+<td align="left">degrees to radians</td>
+</tr>
+<tr>
+<td align="left"><code>acos(float8)</code></td>
+<td align="left">inverse cosine</td>
+</tr>
+<tr>
+<td align="left"><code>asin(float8)</code></td>
+<td align="left">inverse sine</td>
+</tr>
+<tr>
+<td align="left"><code>atan(float8)</code></td>
+<td align="left">inverse tangent</td>
+</tr>
+<tr>
+<td align="left"><code>atan2(float8,float8)</code></td>
+<td align="left">inverse tangent of <code>arg1 / arg2</code></td>
+</tr>
+<tr>
+<td align="left"><code>cos(float8)</code></td>
+<td align="left">cosine</td>
+</tr>
+<tr>
+<td align="left"><code>cot(float8)</code></td>
+<td align="left">cotangent</td>
+</tr>
+<tr>
+<td align="left"><code>sin(float8)</code></td>
+<td align="left">sine</td>
+</tr>
+<tr>
+<td align="left"><code>tan(float8)</code></td>
+<td align="left">tangent</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Date and time operators</strong></p>
+<table>
+<thead>
+<tr>
+<th align="left">functions/operators</th>
+<th align="left">description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>date COMP date</code></td>
+<td align="left"><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></td>
+</tr>
+<tr>
+<td align="left"><code>date COMP timestamp</code></td>
+<td align="left"><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></td>
+</tr>
+<tr>
+<td align="left"><code>date COMP timestamptz</code></td>
+<td align="left"><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></td>
+</tr>
+<tr>
+<td align="left"><code>time COMP time</code></td>
+<td align="left"><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></td>
+</tr>
+<tr>
+<td align="left"><code>timetz COMP timetz</code></td>
+<td align="left"><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></td>
+</tr>
+<tr>
+<td align="left"><code>timestamp COMP timestamp</code></td>
+<td align="left"><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></td>
+</tr>
+<tr>
+<td align="left"><code>timestamp COMP date</code></td>
+<td align="left"><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></td>
+</tr>
+<tr>
+<td align="left"><code>timestamptz COMP timestamptz</code></td>
+<td align="left"><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></td>
+</tr>
+<tr>
+<td align="left"><code>timestamptz COMP date</code></td>
+<td align="left"><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></td>
+</tr>
+<tr>
+<td align="left"><code>timestamp COMP timestamptz</code></td>
+<td align="left"><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></td>
+</tr>
+<tr>
+<td align="left"><code>timestamptz COMP timestamp</code></td>
+<td align="left"><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></td>
+</tr>
+<tr>
+<td align="left"><code>interval COMP interval</code></td>
+<td align="left"><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></td>
+</tr>
+<tr>
+<td align="left"><code>date OP int4</code></td>
+<td align="left"><code>OP</code> is either of <code>+,-</code></td>
+</tr>
+<tr>
+<td align="left"><code>int4 + date</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>date - date</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>date + time</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>date + timetz</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>time + date</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>time - time</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>timestamp - timestamp</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>timetz OP interval</code></td>
+<td align="left"><code>OP</code> is either of <code>+,-</code></td>
+</tr>
+<tr>
+<td align="left"><code>timestamptz OP interval</code></td>
+<td align="left"><code>OP</code> is either of <code>+,-</code></td>
+</tr>
+<tr>
+<td align="left"><code>overlaps(TYPE,TYPE,TYPE,TYPE)</code></td>
+<td align="left"><code>TYPE</code> is any of <code>time,timetz,timestamp,timestamptz</code></td>
+</tr>
+<tr>
+<td align="left"><code>extract(text FROM TYPE)</code></td>
+<td align="left"><code>TYPE</code> is any of <code>time,timetz,timestamp,timestamptz,interval</code></td>
+</tr>
+<tr>
+<td align="left"><code>now()</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>- interval</code></td>
+<td align="left">unary minus operator</td>
+</tr>
+<tr>
+<td align="left"><code>interval OP interval</code></td>
+<td align="left"><code>OP</code> is either of <code>+,-</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Text functions/operators</strong></p>
+<table>
+<thead>
+<tr>
+<th align="left">functions/operators</th>
+<th align="left">description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>{text,bpchar} COMP {text,bpchar}</code></td>
+<td align="left"><code>COMP</code> is either of <code>=,&lt;&gt;</code></td>
+</tr>
+<tr>
+<td align="left"><code>{text,bpchar} COMP {text,bpchar}</code></td>
+<td align="left"><code>COMP</code> is either of <code>&lt;,&lt;=,&gt;=,&gt;</code><br>Only available on no-locale or UTF-8</td>
+</tr>
+<tr>
+<td align="left"><code>length(TYPE)</code></td>
+<td align="left">length of the string<br><code>TYPE</code> is either of <code>text,bpchar</code></td>
+</tr>
+<tr>
+<td align="left"><code>TYPE LIKE text</code></td>
+<td align="left"><code>TYPE</code> is either of <code>text,bpchar</code></td>
+</tr>
+<tr>
+<td align="left"><code>TYPE NOT LIKE text</code></td>
+<td align="left"><code>TYPE</code> is either of <code>text,bpchar</code></td>
+</tr>
+<tr>
+<td align="left"><code>TYPE ILIKE text</code></td>
+<td align="left"><code>TYPE</code> is either of <code>text,bpchar</code><br>Only available on no-locale or UTF-8</td>
+</tr>
+<tr>
+<td align="left"><code>TYPE NOT ILIKE text</code></td>
+<td align="left"><code>TYPE</code> is either of <code>text,bpchar</code><br>Only available on no-locale or UTF-8</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Network functions/operators</strong></p>
+<table>
+<thead>
+<tr>
+<th align="left">functions/operators</th>
+<th align="left">description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>macaddr COMP macaddr</code></td>
+<td align="left"><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></td>
+</tr>
+<tr>
+<td align="left"><code>macaddr &amp; macaddr</code></td>
+<td align="left">Bitwise AND operator</td>
+</tr>
+<tr>
+<td align="left"><code>macaddr &#124; macaddr</code></td>
+<td align="left">Bitwise OR operator</td>
+</tr>
+<tr>
+<td align="left"><code>~ macaddr</code></td>
+<td align="left">Bitwise NOT operator</td>
+</tr>
+<tr>
+<td align="left"><code>trunc(macaddr)</code></td>
+<td align="left">Set last 3 bytes to zero</td>
+</tr>
+<tr>
+<td align="left"><code>inet COMP inet</code></td>
+<td align="left"><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></td>
+</tr>
+<tr>
+<td align="left"><code>inet INCL inet</code></td>
+<td align="left"><code>INCL</code> is any of <code>&lt;&lt;,&lt;&lt;=,&gt;&gt;,&gt;&gt;=,&amp;&amp;</code></td>
+</tr>
+<tr>
+<td align="left"><code>~ inet</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>inet &amp; inet</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>inet &#124; inet</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>inet + int8</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>inet - int8</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>inet - inet</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>broadcast(inet)</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>family(inet)</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>hostmask(inet)</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>masklen(inet)</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>netmask(inet)</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>network(inet)</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>set_masklen(cidr,int)</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>set_masklen(inet,int)</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>inet_same_family(inet, inet)</code></td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>inet_merge(inet,inet)</code></td>
+<td align="left"></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Currency operators</strong></p>
+<table>
+<thead>
+<tr>
+<th align="left">functions/operators</th>
+<th align="left">description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>money COMP money</code></td>
+<td align="left"><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></td>
+</tr>
+<tr>
+<td align="left"><code>money OP money</code></td>
+<td align="left"><code>OP</code> is any of <code>+,-,/</code></td>
+</tr>
+<tr>
+<td align="left"><code>money * TYPE</code></td>
+<td align="left"><code>TYPE</code> is any of <code>int2,int4,float2,float4,float8</code></td>
+</tr>
+<tr>
+<td align="left"><code>TYPE * money</code></td>
+<td align="left"><code>TYPE</code> is any of <code>int2,int4,float2,float4,float8</code></td>
+</tr>
+<tr>
+<td align="left"><code>money / TYPE</code></td>
+<td align="left"><code>TYPE</code> is any of <code>int2,int4,float2,float4,float8</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>UUID operators</strong></p>
+<table>
+<thead>
+<tr>
+<th align="left">functions/operators</th>
+<th align="left">description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>uuid COMP uuid</code></td>
+<td align="left"><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Range type functions/operators</strong></p>
+<table>
+<thead>
+<tr>
+<th align="left">functions/operators</th>
+<th align="left">description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>RANGE = RANGE</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>RANGE &lt;&gt; RANGE</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>RANGE &lt; RANGE</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>RANGE &lt;= RANGE</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>RANGE &gt; RANGE</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>RANGE &gt;= RANGE</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>RANGE @ RANGE</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>RANGE @ TYPE</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code><br><code>TYPE</code> is element type of <code>RANGE</code>.</td>
+</tr>
+<tr>
+<td align="left"><code>RANGE &lt;@RANGE</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>TYPE &lt;@RANGE</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code><br><code>TYPE</code> is element type of <code>RANGE</code>.</td>
+</tr>
+<tr>
+<td align="left"><code>RANGE &amp;&amp; RANGE</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>RANGE &lt;&lt; RANGE</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>RANGE &gt;&gt; RANGE</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>RANGE &amp;&lt; RANGE</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>RANGE &amp;&gt; RANGE</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>RANGE -&#124;- RANGE</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>RANGE + RANGE</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>RANGE * RANGE</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>RANGE - RANGE</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>lower(RANGE)</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>upper(RANGE)</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>isempty(RANGE)</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>lower_inc(RANGE)</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>upper_inc(RANGE)</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>lower_inf(RANGE)</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>upper_inf(RANGE)</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+<tr>
+<td align="left"><code>range_merge(RANGE,RANGE)</code></td>
+<td align="left"><code>RANGE</code> is any of <code>int4range,int8range,tsrange,tstzrange,daterange</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="miscellaneous-device-functions">Miscellaneous device functions</h2>
+<table>
+<thead>
+<tr>
+<th align="left">functions/operators</th>
+<th align="left">result</th>
+<th align="left">description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>as_int8(float8)</code></td>
+<td align="left"><code>int8</code></td>
+<td align="left">Re-interpret double-precision floating point bit-pattern as 64bit integer value</td>
+</tr>
+<tr>
+<td align="left"><code>as_int4(float4)</code></td>
+<td align="left"><code>int4</code></td>
+<td align="left">Re-interpret single-precision floating point bit-pattern as 32bit integer value</td>
+</tr>
+<tr>
+<td align="left"><code>as_int2(float2)</code></td>
+<td align="left"><code>int2</code></td>
+<td align="left">Re-interpret half-precision floating point bit-pattern as 16bit integer value</td>
+</tr>
+<tr>
+<td align="left"><code>as_float8(int8)</code></td>
+<td align="left"><code>float8</code></td>
+<td align="left">Re-interpret 64bit integer bit-pattern as double-precision floating point value</td>
+</tr>
+<tr>
+<td align="left"><code>as_float4(int4)</code></td>
+<td align="left"><code>float4</code></td>
+<td align="left">Re-interpret 32bit integer bit-pattern as single-precision floating point value</td>
+</tr>
+<tr>
+<td align="left"><code>as_float2(int2)</code></td>
+<td align="left"><code>float2</code></td>
+<td align="left">Re-interpret 16bit integer bit-pattern as half-precision floating point value</td>
+</tr>
+</tbody>
+</table>
+              
+            </div>
+          </div>
+          <footer>
+  
+    <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
+      
+        <a href="../ref_sqlfuncs/" class="btn btn-neutral float-right" title="SQL Objects">Next <span class="icon icon-circle-arrow-right"></span></a>
+      
+      
+        <a href="../ref_types/" class="btn btn-neutral" title="Data Types"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+      
+    </div>
+  
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+    
+  </div>
+
+  Built with <a href="http://www.mkdocs.org">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+      
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" style="cursor: pointer">
+    <span class="rst-current-version" data-toggle="rst-current-version">
+      
+      
+        <span><a href="../ref_types/" style="color: #fcfcfc;">&laquo; Previous</a></span>
+      
+      
+        <span style="margin-left: 15px"><a href="../ref_sqlfuncs/" style="color: #fcfcfc">Next &raquo;</a></span>
+      
+    </span>
+</div>
+    <script>var base_url = '..';</script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/require.js"></script>
+      <script src="../search/search.js"></script>
+
+</body>
+</html>

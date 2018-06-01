@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<!--[if IE 8]><html class="no-js lt-ie9" lang="en" > <![endif]-->
+<!--[if gt IE 8]><!--> <html class="no-js" lang="en" > <!--<![endif]-->
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  
+  <meta name="author" content="PG-Strom Development Team">
+  <link rel="shortcut icon" href="../img/favicon.ico">
+  <title>Columnar Cache - PG-Strom Manual</title>
+  <link href='https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700' rel='stylesheet' type='text/css'>
+
+  <link rel="stylesheet" href="../css/theme.css" type="text/css" />
+  <link rel="stylesheet" href="../css/theme_extra.css" type="text/css" />
+  <link rel="stylesheet" href="../css/highlight.css">
+  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet">
+  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet">
+  <link href="../custom.css" rel="stylesheet">
+  
+  <script>
+    // Current page data
+    var mkdocs_page_name = "Columnar Cache";
+    var mkdocs_page_input_path = "ccache.md";
+    var mkdocs_page_url = "/ccache/";
+  </script>
+  
+  <script src="../js/jquery-2.1.1.min.js"></script>
+  <script src="../js/modernizr-2.8.3.min.js"></script>
+  <script type="text/javascript" src="../js/highlight.pack.js"></script> 
+  
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+
+    
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+      <div class="wy-side-nav-search">
+        <a href=".." class="icon icon-home"> PG-Strom Manual</a>
+        <div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" />
+  </form>
+
+  [<a href="../ja" style="color: #cccccc">Japanese</a> | <strong>English</strong>]
+
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
+	<ul class="current">
+	  
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="..">Home</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../install/">Install</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../tutorial/">Tutorial</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../partition/">Partitioning</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <span class="caption-text">Advanced Features</span>
+    <ul class="subnav">
+                <li class="">
+                    
+    <a class="" href="../ssd2gpu/">SSD2GPU Direct SQL Exec</a>
+                </li>
+                <li class=" current">
+                    
+    <a class="current" href="./">Columnar Cache</a>
+    <ul class="subnav">
+            
+    <li class="toctree-l3"><a href="#in-memory-columnar-cache">In-memory Columnar Cache</a></li>
+    
+        <ul>
+        
+            <li><a class="toctree-l4" href="#overview">Overview</a></li>
+        
+            <li><a class="toctree-l4" href="#system-setup">System Setup</a></li>
+        
+            <li><a class="toctree-l4" href="#operations">Operations</a></li>
+        
+        </ul>
+    
+
+    </ul>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../gstore_fdw/">Gstore_fdw</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../plcuda/">PL/CUDA</a>
+                </li>
+    </ul>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <span class="caption-text">References</span>
+    <ul class="subnav">
+                <li class="">
+                    
+    <a class="" href="../ref_types/">Data Types</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../ref_devfuncs/">Functions and Operators</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../ref_sqlfuncs/">SQL Objects</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../ref_params/">GUC Parameters</a>
+                </li>
+    </ul>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../release_note/">Release Note</a>
+	    </li>
+          
+        </ul>
+      </div>
+      &nbsp;
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+
+      
+      <nav class="wy-nav-top" role="navigation" aria-label="top navigation">
+        <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+        <a href="..">PG-Strom Manual</a>
+      </nav>
+
+      
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href="..">Docs</a> &raquo;</li>
+    
+      
+        
+          <li>Advanced Features &raquo;</li>
+        
+      
+    
+    <li>Columnar Cache</li>
+    <li class="wy-breadcrumbs-aside">
+      
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main">
+            <div class="section">
+              
+                <h1 id="in-memory-columnar-cache">In-memory Columnar Cache</h1>
+<h2 id="overview">Overview</h2>
+<p>PG-Strom has one another feature related to storage to supply processors data stream.</p>
+<p>In-memory columnar cache reads data blocks of the target table, convert the row-format of PostgreSQL to columnar format which is suitable for summary and analytics, and cache them on memory.</p>
+<p>This feature requires no special hardware like SSD-to-GPU Direct SQL Execution, on the other hands, RAM capacity is still smaller than SSD, so this feature is suitable to handle "not a large scale data set" up to 60%-75% of the system RAM size.</p>
+<p>This feature is not "a columnar store". It means cached and converted data blocks are flashed once PostgreSQL server process has restarted for example. When any cached rows get updated, PG-Strom invalidates the columnar cache block which contains the updated rows.
+This design on the basis that columnar format is vulnerable to updating workloads. If we try to update columnar-store with keeping consistency towards update of row-store, huge degradation of write performance is not avoidable. On the other hands, it is lightweight operation to invalidate the columnar cache block which contains the updated row.
+PG-Strom can switch GPU kernels to be invoked for row- or columnar-format according to format of the loading data blocks. So, it works flexibly, even if a columnar cache block gets invalidated thus PG-Strom has to load data blocks from the shared buffer of PostgreSQL.</p>
+<p><img alt="overview of in-memory columnar cache" src="../img/ccache-overview.png" /></p>
+<h2 id="system-setup">System Setup</h2>
+<h3 id="location-of-the-columnar-cache">Location of the columnar cache</h3>
+<p>The <code>pg_strom.ccache_base_dir</code> parameter allows to specify the path to store the columnar cache. The default is <code>/dev/shm</code> where general Linux distribution mounts <code>tmpfs</code> filesystem, so files under the directory are "volatile", with no backing store.</p>
+<p>Custom configuration of the parameter enables to construct columnar cache on larger and reasonably fast storage, like NVMe-SSD, as backing store. However, note that update of the cached rows invalidates whole of the chunk (128MB) which contains the updated rows. It may lead unexpected performance degradation, if workloads have frequent read / write involving I/O operations.</p>
+<h3 id="columnar-cache-builder-configuration">Columnar Cache Builder Configuration</h3>
+<p>PG-Strom can build in-memory columnar cache automatically and asynchronously using one or multiple background workers. These background workers are called columnar cache builder.</p>
+<p>Columnar cache builder scans the target tables to construct columnar cache in the specified database, by round-robin, then converts to columnar format and keep it on the cache. It is an asynchronous job from the backend process which handles user's SQL.</p>
+<p>Once a columnar cache is built, any other backend process can reference them. PG-Strom never construct columnar cache on demand, unlike usual disk cache mechanism, even if it is access to the area where columnar cache is not built yet. In this case, PG-Strom loads row-data through the normal storage system of PostgreSQL.</p>
+<p>The number of columnar cache builders are fixed on the startup, so you need to setup <code>pg_strom.ccache_num_builders</code> parameters then restart PostgreSQL to increase the number of workers.</p>
+<p>The <code>pg_strom.ccache_databases</code> parameter configures the databases associated with columnar cache builders.
+It requires superuser privilege to setup, and is updatable on PostgreSQL running. (Of course, it is possible to assign by <code>postgresql.conf</code> configuration on startup.)</p>
+<p>Once a comma separated list of database names are assigned, columnar cache builders are associated to the specified databases in rotation. For example, if 5 columnar cache builders are running then 3 databases (<code>postgres,my_test,benchmark</code>) are assigned on the <code>pg_strom.ccache_databases</code>, 2 columnar cache builders are assigned on the <code>postgres</code> and <code>my_test</code> database for each, and 1 columnar cache builder is assigned on the <code>benchmark</code> database.</p>
+<h3 id="source-table-configuration">Source Table Configuration</h3>
+<p>DBA needs to specify the target tables to build columnar cache.</p>
+<p>A SQL function <code>pgstrom_ccache_enabled(regclass)</code> adds the supplied table as target to build columnar cache.
+Other way round, a SQL function <code>pgstrom_ccache_disabled(regclass)</code> drops the supplied table from the target to build.</p>
+<p>Internally, it is implemented as a special trigger function which invalidate columnar cache on write to the target tables.
+It means we don't build columnar cache on the tables which have no way to invalidate columnar cache.</p>
+<pre><code>postgres=# select pgstrom_ccache_enabled('t0');
+ pgstrom_ccache_enabled
+------------------------
+ enabled
+(1 row)
+</code></pre>
+
+<h2 id="operations">Operations</h2>
+<h3 id="check-status-of-columnar-cache">Check status of columnar cache</h3>
+<p><code>pgstrom.ccache_info</code> provides the status of the current columnar cache.</p>
+<p>You can check the table, block number, cache creation time and last access time per chunk.</p>
+<pre><code>contrib_regression_pg_strom=# SELECT * FROM pgstrom.ccache_info ;
+ database_id | table_id | block_nr | nitems  |  length   |             ctime             |             atime
+-------------+----------+----------+---------+-----------+-------------------------------+-------------------------------
+       13323 | 25887    |   622592 | 1966080 | 121897472 | 2018-02-18 14:31:30.898389+09 | 2018-02-18 14:38:43.711287+09
+       13323 | 25887    |   425984 | 1966080 | 121897472 | 2018-02-18 14:28:39.356952+09 | 2018-02-18 14:38:43.514788+09
+       13323 | 25887    |    98304 | 1966080 | 121897472 | 2018-02-18 14:28:01.542261+09 | 2018-02-18 14:38:42.930281+09
+         :       :             :         :          :                :                               :
+       13323 | 25887    |    16384 | 1963079 | 121711472 | 2018-02-18 14:28:00.647021+09 | 2018-02-18 14:38:42.909112+09
+       13323 | 25887    |   737280 | 1966080 | 121897472 | 2018-02-18 14:34:32.249899+09 | 2018-02-18 14:38:43.882029+09
+       13323 | 25887    |   770048 | 1966080 | 121897472 | 2018-02-18 14:28:57.321121+09 | 2018-02-18 14:38:43.90157+09
+(50 rows)
+</code></pre>
+
+<h3 id="check-usage-of-columnar-cache">Check usage of columnar cache</h3>
+<p>You can check whether a particular query may reference columnar cache, or not, using <code>EXPLAIN</code> command.</p>
+<p>The query below joins the table <code>t0</code> and <code>t1</code>, and the <code>Custom Scan (GpuJoin)</code> which contains scan on the <code>t0</code> shows <code>CCache: enabled</code>.
+It means columnar cache may be referenced at the scan on <code>t0</code>, however, it is not certain whether it is actually referenced until query execution. Columnar cache may be invalidated by the concurrent updates.</p>
+<pre><code>postgres=# EXPLAIN SELECT id,ax FROM t0 NATURAL JOIN t1 WHERE aid &lt; 1000;
+
+                                  QUERY PLAN
+-------------------------------------------------------------------------------
+ Custom Scan (GpuJoin) on t0  (cost=12398.65..858048.45 rows=1029348 width=12)
+   GPU Projection: t0.id, t1.ax
+   Outer Scan: t0  (cost=10277.55..864623.44 rows=1029348 width=8)
+   Outer Scan Filter: (aid &lt; 1000)
+   Depth 1: GpuHashJoin  (nrows 1029348...1029348)
+            HashKeys: t0.aid
+            JoinQuals: (t0.aid = t1.aid)
+            KDS-Hash (size: 10.78MB)
+   CCache: enabled
+   -&gt;  Seq Scan on t1  (cost=0.00..1935.00 rows=100000 width=12)
+(10 rows)
+</code></pre>
+
+<p><code>EXPLAIN ANALYZE</code> command tells how many times columnar cache is referenced during the query execution.</p>
+<p>After the execution of this query, <code>Custom Scan (GpuJoin)</code> which contains scan on <code>t0</code> shows <code>CCache Hits: 50</code>.
+It means that columnar cache is referenced 50 times. Because the chunk size of columnar cache is 128MB, storage access is replaced to the columnar cache by 6.4GB.</p>
+<pre><code>postgres=# EXPLAIN ANALYZE SELECT id,ax FROM t0 NATURAL JOIN t1 WHERE aid &lt; 1000;
+
+                                    QUERY PLAN
+
+-------------------------------------------------------------------------------------------
+ Custom Scan (GpuJoin) on t0  (cost=12398.65..858048.45 rows=1029348 width=12)
+                              (actual time=91.766..723.549 rows=1000224 loops=1)
+   GPU Projection: t0.id, t1.ax
+   Outer Scan: t0  (cost=10277.55..864623.44 rows=1029348 width=8)
+                   (actual time=7.129..398.270 rows=100000000 loops=1)
+   Outer Scan Filter: (aid &lt; 1000)
+   Rows Removed by Outer Scan Filter: 98999776
+   Depth 1: GpuHashJoin  (plan nrows: 1029348...1029348, actual nrows: 1000224...1000224)
+            HashKeys: t0.aid
+            JoinQuals: (t0.aid = t1.aid)
+            KDS-Hash (size plan: 10.78MB, exec: 64.00MB)
+   CCache Hits: 50
+   -&gt;  Seq Scan on t1  (cost=0.00..1935.00 rows=100000 width=12)
+                       (actual time=0.011..13.542 rows=100000 loops=1)
+ Planning time: 23.390 ms
+ Execution time: 1409.073 ms
+(13 rows)
+</code></pre>
+
+<h3 id="attension-for-drop-database-command">Attension for <code>DROP DATABASE</code> command</h3>
+<p>When columnar cache builder constructs columnar cache asynchronously, background worker process has internally connected to the specified database.
+When <code>DROP DATABASE</code> command tries to drop a database, PostgreSQL checks whether any session connects to the database. At that time, even if no user session connects to the database, <code>DROP DATABASE</code> will fail by columnar cache builder which keeps connection to the database.</p>
+<p>Please remove the database name from the <code>pg_strom.ccache_databases</code> parameter prior to execution of <code>DROP DATABASE</code> command.
+Columnar cache builder will restart soon, then tries to connect databases according to the new configuration.</p>
+              
+            </div>
+          </div>
+          <footer>
+  
+    <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
+      
+        <a href="../gstore_fdw/" class="btn btn-neutral float-right" title="Gstore_fdw">Next <span class="icon icon-circle-arrow-right"></span></a>
+      
+      
+        <a href="../ssd2gpu/" class="btn btn-neutral" title="SSD2GPU Direct SQL Exec"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+      
+    </div>
+  
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+    
+  </div>
+
+  Built with <a href="http://www.mkdocs.org">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+      
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" style="cursor: pointer">
+    <span class="rst-current-version" data-toggle="rst-current-version">
+      
+      
+        <span><a href="../ssd2gpu/" style="color: #fcfcfc;">&laquo; Previous</a></span>
+      
+      
+        <span style="margin-left: 15px"><a href="../gstore_fdw/" style="color: #fcfcfc">Next &raquo;</a></span>
+      
+    </span>
+</div>
+    <script>var base_url = '..';</script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/require.js"></script>
+      <script src="../search/search.js"></script>
+
+</body>
+</html>

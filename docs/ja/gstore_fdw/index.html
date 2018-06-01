@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<!--[if IE 8]><html class="no-js lt-ie9" lang="en" > <![endif]-->
+<!--[if gt IE 8]><!--> <html class="no-js" lang="en" > <!--<![endif]-->
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  
+  <meta name="author" content="PG-Strom Development Team">
+  <link rel="shortcut icon" href="../img/favicon.ico">
+  <title>Gstore_fdw - PG-Strom Manual</title>
+  <link href='https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700' rel='stylesheet' type='text/css'>
+
+  <link rel="stylesheet" href="../css/theme.css" type="text/css" />
+  <link rel="stylesheet" href="../css/theme_extra.css" type="text/css" />
+  <link rel="stylesheet" href="../css/highlight.css">
+  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet">
+  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet">
+  <link href="../custom.css" rel="stylesheet">
+  
+  <script>
+    // Current page data
+    var mkdocs_page_name = "Gstore_fdw";
+    var mkdocs_page_input_path = "gstore_fdw.md";
+    var mkdocs_page_url = "/gstore_fdw/";
+  </script>
+  
+  <script src="../js/jquery-2.1.1.min.js"></script>
+  <script src="../js/modernizr-2.8.3.min.js"></script>
+  <script type="text/javascript" src="../js/highlight.pack.js"></script> 
+  
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+
+    
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+      <div class="wy-side-nav-search">
+        <a href=".." class="icon icon-home"> PG-Strom Manual</a>
+        <div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" />
+  </form>
+
+  [<strong>Japanese</strong> | <a href="../.." style="color: #cccccc">English</a>]
+
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
+	<ul class="current">
+	  
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="..">はじめに</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../install/">インストール</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../tutorial/">利用ガイド</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../partition/">パーティション</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <span class="caption-text">先進機能</span>
+    <ul class="subnav">
+                <li class="">
+                    
+    <a class="" href="../ssd2gpu/">SSDtoGPUダイレクトSQL実行</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../ccache/">列指向キャッシュ</a>
+                </li>
+                <li class=" current">
+                    
+    <a class="current" href="./">Gstore_fdw</a>
+    <ul class="subnav">
+            
+    <li class="toctree-l3"><a href="#gpugstore_fdw">GPUメモリストア(gstore_fdw)</a></li>
+    
+        <ul>
+        
+            <li><a class="toctree-l4" href="#_1">概要</a></li>
+        
+            <li><a class="toctree-l4" href="#_2">初期設定</a></li>
+        
+            <li><a class="toctree-l4" href="#_3">運用</a></li>
+        
+            <li><a class="toctree-l4" href="#_7">関連機能</a></li>
+        
+        </ul>
+    
+
+    </ul>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../plcuda/">PL/CUDA</a>
+                </li>
+    </ul>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <span class="caption-text">リファレンス</span>
+    <ul class="subnav">
+                <li class="">
+                    
+    <a class="" href="../ref_types/">データ型</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../ref_devfuncs/">関数と演算子</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../ref_sqlfuncs/">SQLオブジェクト</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../ref_params/">GUCパラメータ</a>
+                </li>
+    </ul>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../release_note/">リリースノート</a>
+	    </li>
+          
+        </ul>
+      </div>
+      &nbsp;
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+
+      
+      <nav class="wy-nav-top" role="navigation" aria-label="top navigation">
+        <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+        <a href="..">PG-Strom Manual</a>
+      </nav>
+
+      
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href="..">Docs</a> &raquo;</li>
+    
+      
+        
+          <li>先進機能 &raquo;</li>
+        
+      
+    
+    <li>Gstore_fdw</li>
+    <li class="wy-breadcrumbs-aside">
+      
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main">
+            <div class="section">
+              
+                <h1 id="gpugstore_fdw">GPUメモリストア(gstore_fdw)</h1>
+<h2 id="_1">概要</h2>
+<p>通常、PG-StromはGPUデバイスメモリを一時的にだけ利用します。クエリの実行中に必要なだけのデバイスメモリを割り当て、その領域にデータを転送してSQLワークロードを実行するためにGPUカーネルを実行します。GPUカーネルの実行が完了すると、当該領域は速やかに開放され、他のワークロードでまた利用する事が可能となります。</p>
+<p>これは複数セッションの並行実行やGPUデバイスメモリよりも巨大なテーブルのスキャンを可能にするための設計ですが、状況によっては必ずしも適切ではない場合もあります。</p>
+<p>典型的な例は、それほど巨大ではなくGPUデバイスメモリに載る程度の大きさのデータに対して、繰り返し様々な条件で計算を行うといった利用シーンです。これは機械学習やパターンマッチ、類似度サーチといったワークロードが該当します。
+S</p>
+<p>現在のGPUにとって、数GB程度のデータをオンメモリで処理する事はそれほど難しい処理ではありませんが、PL/CUDA関数の呼び出しの度にGPUへロードすべきデータをCPUで加工し、これをGPUへ転送するのはコストのかかる処理です。</p>
+<p>加えて、PostgreSQLの可変長データには1GBのサイズ上限があるため、これをPL/CUDA関数の引数として与える場合、データサイズ自体は十分にGPUデバイスメモリに載るものであってもデータ形式には一定の制約が存在する事になります。</p>
+<p>GPUメモリストア(gstore_fdw)は、あらかじめGPUデバイスメモリを確保しデータをロードしておくための機能です。
+これにより、PL/CUDA関数の呼び出しの度に引数をセットアップしたりデータを転送する必要がなくなるほか、GPUデバイスメモリの容量が許す限りデータを確保する事ができますので、可変長データの1GBサイズ制限も無くなります。</p>
+<p>gstore_fdwはその名の通り、PostgreSQLの外部データラッパ（Foreign Data Wrapper）を使用して実装されています。
+gstore_fdwの制御する外部テーブル（Foreign Table）に対して<code>INSERT</code>、<code>UPDATE</code>、<code>DELETE</code>の各コマンドを実行する事で、GPUデバイスメモリ上のデータ構造を更新する事ができます。また、同様に<code>SELECT</code>文を用いてデータを読み出す事ができます。</p>
+<p>外部テーブルを通してGPUデバイスメモリに格納されたデータは、PL/CUDA関数から参照する事ができます。
+現在のところ、SQLから透過的に生成されたGPUプログラムは当該GPUデバイスメモリ領域を参照する事はできませんが、将来のバージョンにおいて改良が予定されています。</p>
+<p><img alt="GPU memory store" src="../img/gstore_fdw-overview.png" /></p>
+<h2 id="_2">初期設定</h2>
+<p>通常、外部テーブルを作成するには以下の3ステップが必要です。</p>
+<ul>
+<li><code>CREATE FOREIGN DATA WRAPPER</code>コマンドにより外部データラッパを定義する</li>
+<li><code>CREATE SERVER</code>コマンドにより外部サーバを定義する</li>
+<li><code>CREATE FOREIGN TABLE</code>コマンドにより外部テーブルを定義する</li>
+</ul>
+<p>このうち、最初の2ステップは<code>CREATE EXTENSION pg_strom</code>コマンドの実行に含まれており、個別に実行が必要なのは最後の<code>CREATE FOREIGN TABLE</code>のみです。</p>
+<pre><code>CREATE FOREIGN TABLE ft (
+    id int,
+    signature smallint[] OPTIONS (compression 'pglz')
+)
+SERVER gstore_fdw OPTIONS(pinning '0', format 'pgstrom');
+</code></pre>
+
+<p><code>CREATE FOREIGN TABLE</code>コマンドを使用して外部テーブルを作成する際、いくつかのオプションを指定することができます。</p>
+<p><code>SERVER gstore_fdw</code>は必須です。外部テーブルがgstore_fdwによって制御されることを指定しています。</p>
+<p><code>OPTIONS</code>句では以下のオプションがサポートされています。</p>
+<table>
+<thead>
+<tr>
+<th align="center">名前</th>
+<th align="center">対象</th>
+<th align="left">説明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="center"><code>pinning</code></td>
+<td align="center">テーブル</td>
+<td align="left">デバイスメモリを確保するGPUのデバイス番号を指定します。</td>
+</tr>
+<tr>
+<td align="center"><code>format</code></td>
+<td align="center">テーブル</td>
+<td align="left">GPUデバイスメモリ上の内部データ形式を指定します。デフォルトは<code>pgstrom</code>です。</td>
+</tr>
+<tr>
+<td align="center"><code>compression</code></td>
+<td align="center">カラム</td>
+<td align="left">可変長データを圧縮して保持するかどうかを指定します。デフォストは非圧縮です。</td>
+</tr>
+</tbody>
+</table>
+<p><code>format</code>オプションで選択可能なパラメータは、現在のところ<code>pgstrom</code>のみです。これは、PG-Stromがインメモリ列キャッシュの内部フォーマットとして使用しているものと同一です。
+純粋にSQLを用いてデータの入出力を行うだけであればユーザが内部データ形式を意識する必要はありませんが、PL/CUDA関数をプログラミングしたり、IPCハンドルを用いて外部プログラムとGPUデバイスメモリを共有する場合には考慮が必要です。</p>
+<p><code>compression</code>オプションで選択可能なパラメータは、現在のところ<code>plgz</code>のみです。これは、PostgreSQLが可変長データを圧縮する際に用いているものと同一の形式で、PL/CUDA関数からはGPU内関数<code>pglz_decompress()</code>を呼び出す事で展開が可能です。圧縮アルゴリズムの特性上、例えばデータの大半が0であるような疎行列を表現する際に有用です。</p>
+<h2 id="_3">運用</h2>
+<h3 id="_4">データのロード</h3>
+<p>通常のテーブルと同様にINSERT、UPDATE、DELETEによって外部テーブルの背後に存在するGPUデバイスメモリを更新する事ができます。</p>
+<p>ただし、gstore_fdwはこれらコマンドの実行開始時に<code>SHARE UPDATE EXCLUSIVE</code>ロックを獲得する事に注意してください。これはある時点において１トランザクションのみがgstore_fdw外部テーブルを更新できることを意味します。
+この制約は、PL/CUDA関数からgstore_fdw外部テーブルを参照するときに個々のレコード単位で可視性チェックを行う必要がないという特性を得るためのトレードオフです。</p>
+<p>また、gstore_fdw外部テーブルに書き込まれた内容は、通常のテーブルと同様にトランザクションがコミットされるまでは他のセッションからは不可視です。
+この特性は、トランザクションの原子性を担保するには重要な性質ですが、古いバージョンを参照する可能性のある全てのトランザクションがコミットまたはアボートするまでの間は、古いバージョンのgstore_fdw外部テーブルの内容をGPUデバイスメモリに保持しておかねばならない事を意味します。</p>
+<p>そのため、通常のテーブルと同様にINSERT、UPDATE、DELETEが可能であるとはいえ、数行を更新してトランザクションをコミットするという事を繰り返すのは避けるべきです。基本的には大量行のINSERTによるバルクロードを行うべきです。</p>
+<p>通常のテーブルとは異なり、gstore_fdwに記録された内容は揮発性です。つまり、システムの電源断やPostgreSQLの再起動によってgstore_fdw外部テーブルの内容は容易に失われてしまいます。したがって、gstore_fdw外部テーブルにロードするデータは、他のデータソースから容易に復元可能な形にしておくべきです。</p>
+<h3 id="_5">デバイスメモリ消費量の確認</h3>
+<p>gstore_fdwによって消費されるデバイスメモリのサイズを確認するには<code>pgstrom.gstore_fdw_chunk_info</code>システムビューを参照します。</p>
+<p>ああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああ</p>
+<pre><code>postgres=# select * from pgstrom.gstore_fdw_chunk_info ;
+ database_oid | table_oid | revision | xmin | xmax | pinning | format  |  rawsize  |  nitems
+--------------+-----------+----------+------+------+---------+---------+-----------+----------
+        13806 |     26800 |        3 |    2 |    0 |       0 | pgstrom | 660000496 | 15000000
+        13806 |     26797 |        2 |    2 |    0 |       0 | pgstrom | 440000496 | 10000000
+(2 rows)
+</code></pre>
+
+<p><code>nvidia-smi</code>コマンドを</p>
+<pre><code>$ nvidia-smi
+Wed Apr  4 15:11:50 2018
++-----------------------------------------------------------------------------+
+| NVIDIA-SMI 390.30                 Driver Version: 390.30                    |
+|-------------------------------+----------------------+----------------------+
+| GPU  Name        Persistence-M| Bus-Id        Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp  Perf  Pwr:Usage/Cap|         Memory-Usage | GPU-Util  Compute M. |
+|===============================+======================+======================|
+|   0  Tesla P40           Off  | 00000000:02:00.0 Off |                    0 |
+| N/A   39C    P0    52W / 250W |   1221MiB / 22919MiB |      0%      Default |
++-------------------------------+----------------------+----------------------+
+
++-----------------------------------------------------------------------------+
+| Processes:                                                       GPU Memory |
+|  GPU       PID   Type   Process name                             Usage      |
+|=============================================================================|
+|    0      6885      C   ...bgworker: PG-Strom GPU memory keeper     1211MiB |
++-----------------------------------------------------------------------------+
+</code></pre>
+
+<h3 id="_6">内部データ形式</h3>
+<p>gstore_fdwがGPUデバイスメモリ上にデータを保持する際の内部データ形式の詳細はノートを参照してください。</p>
+<ul>
+<li><code>pgstrom</code>フォーマットの詳細<ul>
+<li>ここにノートのリンク</li>
+</ul>
+</li>
+</ul>
+<h2 id="_7">関連機能</h2>
+<p>CUDAには<code>cuIpcGetMemHandle()</code>および<code>cuIpcOpenMemHandle()</code>というAPIが用意されています。前者を用いてアプリケーションプログラムが確保したGPUデバイスメモリのユニークな識別子を取得し、後者を用いて別のアプリケーションプログラムから同一のGPUデバイスメモリを参照する事が可能となります。言い換えれば、ホストシステムにおける共有メモリのような仕組みを備えています。</p>
+<p>このユニークな識別子は<code>CUipcMemHandle</code>型のオブジェクトで、内部的には単純な64バイトのバイナリデータです。
+本節では<code>CUipcMemHandle</code>識別子を利用して、PostgreSQLと外部プログラムの間でGPUを介したデータ交換を行うための関数について説明します。</p>
+<h3 id="gstore_export_ipchandlereggstore">gstore_export_ipchandle(reggstore)</h3>
+<p>本関数は、gstore_fdw制御下の外部テーブルがGPU上に確保しているデバイスメモリの<code>CUipcMemHandle</code>識別子を取得し、bytea型のバイナリデータとして出力します。
+外部テーブルが空でGPU上にデバイスメモリを確保していなければNULLを返します。</p>
+<ul>
+<li>第1引数(<em>ftable_oid</em>): 外部テーブルのOID。<code>reggstore</code>型なので、外部テーブル名を文字列で指定する事もできる。</li>
+<li>戻り値: <code>CUipcMemHandle</code>識別子のbytea型表現。</li>
+</ul>
+<pre><code># select gstore_export_ipchandle('ft');
+                                                      gstore_export_ipchandle
+
+------------------------------------------------------------------------------------------------------------------------------------
+ \xe057880100000000de3a000000000000904e7909000000000000800900000000000000000000000000020000000000005c000000000000001200d0c10101005c
+(1 row)
+</code></pre>
+
+<h3 id="lo_import_gpuint-bytea-bigint-bigint-oid0">lo_import_gpu(int, bytea, bigint, bigint, oid=0)</h3>
+<p>本関数は、外部アプリケーションがGPU上に確保したデバイスメモリ領域をPostgreSQL側で一時的にオープンし、当該領域の内容を読み出してPostgreSQLラージオブジェクトとして書き出します。
+第5引数で指定したラージオブジェクトが既に存在する場合、ラージオブジェクトはGPUデバイスメモリから読み出した内容で置き換えられます。ただし所有者・パーミッション設定は保持されます。これ以外の場合は、新たにラージオブジェクトを作成し、GPUデバイスメモリから読み出した内容を書き込みます。</p>
+<ul>
+<li>第1引数(<em>device_nr</em>): デバイスメモリを確保したGPUデバイス番号</li>
+<li>第2引数(<em>ipc_mhandle</em>): <code>CUipcMemHandle</code>識別子のbytea型表現。</li>
+<li>第3引数(<em>offset</em>): 読出し開始位置のデバイスメモリ領域先頭からのオフセット</li>
+<li>第4引数(<em>length</em>): バイト単位での読出しサイズ</li>
+<li>第5引数(<em>loid</em>): 書き込むラージオブジェクトのOID。省略した場合 0 が指定されたものと見なす。</li>
+<li>戻り値: 書き込んだラージオブジェクトのOID</li>
+</ul>
+<h3 id="lo_export_gpuoid-int-bytea-bigint-bigint">lo_export_gpu(oid, int, bytea, bigint, bigint)</h3>
+<p>本関数は、外部アプリケーションがGPU上に確保したデバイスメモリ領域をPostgreSQL側で一時的にオープンし、当該領域へPostgreSQLラージオブジェクトの内容を書き出します。
+ラージオブジェクトのサイズが指定された書き込みサイズよりも小さい場合、残りの領域は 0 でクリアされます。</p>
+<ul>
+<li>第1引数(<em>loid</em>): 読み出すラージオブジェクトのOID</li>
+<li>第2引数(<em>device_nr</em>): デバイスメモリを確保したGPUデバイス番号</li>
+<li>第3引数(<em>ipc_mhandle</em>): <code>CUipcMemHandle</code>識別子のbytea型表現。</li>
+<li>第4引数(<em>offset</em>): 書き込み開始位置のデバイスメモリ領域先頭からのオフセット</li>
+<li>第5引数(<em>length</em>): バイト単位での書き込みサイズ</li>
+<li>戻り値: 実際に書き込んだバイト数。指定されたラージオブジェクトの大きさが<em>length</em>よりも小さな場合、<em>length</em>よりも小さな値を返す事がある。</li>
+</ul>
+              
+            </div>
+          </div>
+          <footer>
+  
+    <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
+      
+        <a href="../plcuda/" class="btn btn-neutral float-right" title="PL/CUDA">Next <span class="icon icon-circle-arrow-right"></span></a>
+      
+      
+        <a href="../ccache/" class="btn btn-neutral" title="列指向キャッシュ"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+      
+    </div>
+  
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+    
+  </div>
+
+  Built with <a href="http://www.mkdocs.org">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+      
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" style="cursor: pointer">
+    <span class="rst-current-version" data-toggle="rst-current-version">
+      
+      
+        <span><a href="../ccache/" style="color: #fcfcfc;">&laquo; Previous</a></span>
+      
+      
+        <span style="margin-left: 15px"><a href="../plcuda/" style="color: #fcfcfc">Next &raquo;</a></span>
+      
+    </span>
+</div>
+    <script>var base_url = '..';</script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/require.js"></script>
+      <script src="../search/search.js"></script>
+
+</body>
+</html>

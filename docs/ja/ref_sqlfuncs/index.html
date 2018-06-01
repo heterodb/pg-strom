@@ -1,0 +1,753 @@
+<!DOCTYPE html>
+<!--[if IE 8]><html class="no-js lt-ie9" lang="en" > <![endif]-->
+<!--[if gt IE 8]><!--> <html class="no-js" lang="en" > <!--<![endif]-->
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  
+  <meta name="author" content="PG-Strom Development Team">
+  <link rel="shortcut icon" href="../img/favicon.ico">
+  <title>SQLオブジェクト - PG-Strom Manual</title>
+  <link href='https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700' rel='stylesheet' type='text/css'>
+
+  <link rel="stylesheet" href="../css/theme.css" type="text/css" />
+  <link rel="stylesheet" href="../css/theme_extra.css" type="text/css" />
+  <link rel="stylesheet" href="../css/highlight.css">
+  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet">
+  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet">
+  <link href="../custom.css" rel="stylesheet">
+  
+  <script>
+    // Current page data
+    var mkdocs_page_name = "SQL\u30aa\u30d6\u30b8\u30a7\u30af\u30c8";
+    var mkdocs_page_input_path = "ref_sqlfuncs.md";
+    var mkdocs_page_url = "/ref_sqlfuncs/";
+  </script>
+  
+  <script src="../js/jquery-2.1.1.min.js"></script>
+  <script src="../js/modernizr-2.8.3.min.js"></script>
+  <script type="text/javascript" src="../js/highlight.pack.js"></script> 
+  
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+
+    
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+      <div class="wy-side-nav-search">
+        <a href=".." class="icon icon-home"> PG-Strom Manual</a>
+        <div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" />
+  </form>
+
+  [<strong>Japanese</strong> | <a href="../.." style="color: #cccccc">English</a>]
+
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
+	<ul class="current">
+	  
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="..">はじめに</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../install/">インストール</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../tutorial/">利用ガイド</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../partition/">パーティション</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <span class="caption-text">先進機能</span>
+    <ul class="subnav">
+                <li class="">
+                    
+    <a class="" href="../ssd2gpu/">SSDtoGPUダイレクトSQL実行</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../ccache/">列指向キャッシュ</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../gstore_fdw/">Gstore_fdw</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../plcuda/">PL/CUDA</a>
+                </li>
+    </ul>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <span class="caption-text">リファレンス</span>
+    <ul class="subnav">
+                <li class="">
+                    
+    <a class="" href="../ref_types/">データ型</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../ref_devfuncs/">関数と演算子</a>
+                </li>
+                <li class=" current">
+                    
+    <a class="current" href="./">SQLオブジェクト</a>
+    <ul class="subnav">
+            
+    <li class="toctree-l3"><a href="#pg-stromsql">PG-Strom独自のSQL関数群</a></li>
+    
+        <ul>
+        
+            <li><a class="toctree-l4" href="#_1">デバイス情報関数</a></li>
+        
+            <li><a class="toctree-l4" href="#_2">配列ベース行列サポート</a></li>
+        
+            <li><a class="toctree-l4" href="#_3">その他の関数</a></li>
+        
+        </ul>
+    
+
+    <li class="toctree-l3"><a href="#_4">システムビュー</a></li>
+    
+
+    </ul>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../ref_params/">GUCパラメータ</a>
+                </li>
+    </ul>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../release_note/">リリースノート</a>
+	    </li>
+          
+        </ul>
+      </div>
+      &nbsp;
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+
+      
+      <nav class="wy-nav-top" role="navigation" aria-label="top navigation">
+        <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+        <a href="..">PG-Strom Manual</a>
+      </nav>
+
+      
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href="..">Docs</a> &raquo;</li>
+    
+      
+        
+          <li>リファレンス &raquo;</li>
+        
+      
+    
+    <li>SQLオブジェクト</li>
+    <li class="wy-breadcrumbs-aside">
+      
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main">
+            <div class="section">
+              
+                <h1 id="pg-stromsql">PG-Strom独自のSQL関数群</h1>
+<p>本節ではPG-Stromが独自に提供するSQL関数群を説明します。</p>
+<h2 id="_1">デバイス情報関数</h2>
+<table>
+<thead>
+<tr>
+<th align="left">関数</th>
+<th align="center">戻り値</th>
+<th align="left">説明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>gpu_device_name(int = 0)</code></td>
+<td align="center"><code>text</code></td>
+<td align="left">指定したGPUデバイスの名前を返します</td>
+</tr>
+<tr>
+<td align="left"><code>gpu_global_memsize(int = 0)</code></td>
+<td align="center"><code>bigint</code></td>
+<td align="left">指定したGPUデバイスのデバイスメモリ容量を返します</td>
+</tr>
+<tr>
+<td align="left"><code>gpu_max_blocksize(int = 0)</code></td>
+<td align="center"><code>int</code></td>
+<td align="left">指定したGPUデバイスにおけるブロックサイズの最大値を返します。現在サポート対象のGPUでは1024です。</td>
+</tr>
+<tr>
+<td align="left"><code>gpu_warp_size(int = 0)</code></td>
+<td align="center"><code>int</code></td>
+<td align="left">指定したGPUデバイスにおけるワープサイズを返します。現在サポート対象のGPUでは32です。</td>
+</tr>
+<tr>
+<td align="left"><code>gpu_max_shared_memory_perblock(int = 0)</code></td>
+<td align="center"><code>int</code></td>
+<td align="left">指定したGPUデバイスにおけるブロックあたり共有メモリの最大値を返します。</td>
+</tr>
+<tr>
+<td align="left"><code>gpu_num_registers_perblock(int = 0)</code></td>
+<td align="center"><code>int</code></td>
+<td align="left">指定したGPUデバイスにおけるブロックあたりレジスタ数を返します。</td>
+</tr>
+<tr>
+<td align="left"><code>gpu_num_multiptocessors(int = 0)</code></td>
+<td align="center"><code>int</code></td>
+<td align="left">指定したGPUデバイスにおけるSM(Streaming Multiprocessor)ユニットの数を返します。</td>
+</tr>
+<tr>
+<td align="left"><code>gpu_num_cuda_cores(int = 0)</code></td>
+<td align="center"><code>int</code></td>
+<td align="left">指定したGPUデバイスにおけるCUDAコア数を返します。</td>
+</tr>
+<tr>
+<td align="left"><code>gpu_cc_major(int = 0)</code></td>
+<td align="center"><code>int</code></td>
+<td align="left">指定したGPUデバイスのCC(Compute Capability)メジャーバージョンを返します。</td>
+</tr>
+<tr>
+<td align="left"><code>gpu_cc_minor(int = 0)</code></td>
+<td align="center"><code>int</code></td>
+<td align="left">指定したGPUデバイスのCC(Compute Capability)マイナーバージョンを返します。</td>
+</tr>
+<tr>
+<td align="left"><code>gpu_pci_id(int = 0)</code></td>
+<td align="center"><code>int</code></td>
+<td align="left">指定したGPUデバイスが接続されているPCIバスIDを返します。</td>
+</tr>
+</tbody>
+</table>
+<h2 id="_2">配列ベース行列サポート</h2>
+<p>PL/CUDA関数と行列データを受け渡しするために、PostgreSQLの配列型を使用する事ができます。
+固定長の論理値/数値型データでNULLを含まない二次元配列は（配列データ型のヘッダ領域を除いて）フラットなデータ構造を持っており、行列のインデックスによって各要素のアドレスを一意に特定する事ができます。
+PG-Stromは配列ベースの行列を取り扱うためのSQL関数をいくつか提供しています。</p>
+<p><strong>型キャスト</strong></p>
+<table>
+<thead>
+<tr>
+<th align="left">変換先</th>
+<th align="left">変換元</th>
+<th align="left">説明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>int[]</code></td>
+<td align="left"><code>bit</code></td>
+<td align="left">ビット列型を32bit整数値の配列に変換します。不足するビットは0で埋められます。</td>
+</tr>
+<tr>
+<td align="left"><code>bit</code></td>
+<td align="left"><code>int[]</code></td>
+<td align="left">int配列をビット列型に変換します。</td>
+</tr>
+</tbody>
+</table>
+<p><strong>配列ベース行列関数</strong></p>
+<table>
+<thead>
+<tr>
+<th align="left">関数/演算子</th>
+<th align="left">返り値</th>
+<th align="left">説明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>array_matrix_validation(anyarray)</code></td>
+<td align="left"><code>bool</code></td>
+<td align="left">配列が配列ベース行列の条件を満足しているかどうかチェックします。</td>
+</tr>
+<tr>
+<td align="left"><code>array_matrix_height(anyarray)</code></td>
+<td align="left"><code>int</code></td>
+<td align="left">配列ベース行列の高さを返します。</td>
+</tr>
+<tr>
+<td align="left"><code>array_matrix_width(anyarray)</code></td>
+<td align="left"><code>int</code></td>
+<td align="left">配列ベース行列の幅を返します。</td>
+</tr>
+<tr>
+<td align="left"><code>array_vector_rawsize(regtype,int)</code></td>
+<td align="left"><code>bigint</code></td>
+<td align="left">指定のデータ型で長さNのベクトルを作成した場合のサイズを返します。</td>
+</tr>
+<tr>
+<td align="left"><code>array_matrix_rawsize(regtype,int,int)</code></td>
+<td align="left"><code>bigint</code></td>
+<td align="left">指定のデータ型で高さH幅Wの行列を作成した場合のサイズを返します。</td>
+</tr>
+<tr>
+<td align="left"><code>array_cube_rawsize(regtype,int,int,int)</code></td>
+<td align="left"><code>bigint</code></td>
+<td align="left">指定のデータ型で高さH幅W深さDのキューブを作成した場合のサイズを返します。</td>
+</tr>
+<tr>
+<td align="left"><code>type_len(regtype)</code></td>
+<td align="left"><code>bigint</code></td>
+<td align="left">指定のデータ型のサイズを返します。</td>
+</tr>
+<tr>
+<td align="left"><code>composite_type_rawsize(LEN,...)</code></td>
+<td align="left"><code>bigint</code></td>
+<td align="left">指定のデータ長の並びで複合型を定義した時に必要なサイズを返します。<code>type_len()</code>を組み合わせて使用する事を想定しています。<br><code>LEN</code>は<code>int,bigint</code>のいずれか</td>
+</tr>
+<tr>
+<td align="left"><code>matrix_unnest(anyarray)</code></td>
+<td align="left"><code>record</code></td>
+<td align="left">集合を返す関数で、配列ベース行列の先頭行から順に1行ずつ取り出します。PostgreSQLはレコードの型情報を持っていませんので、<code>ROW()</code>句によって型情報を与える必要があります。</td>
+</tr>
+<tr>
+<td align="left"><code>rbind(MATRIX,MATRIX)</code></td>
+<td align="left"><code>MATRIX</code></td>
+<td align="left">配列ベース行列を縦方向に結合します。<br><code>MATRIX</code>は<code>bool,int2,int4,int8,float4,float8</code>いずれかの配列型</td>
+</tr>
+<tr>
+<td align="left"><code>rbind(TYPE,MATRIX)</code></td>
+<td align="left"><code>MATRIX</code></td>
+<td align="left">配列ベース行列の先頭行にスカラ値を結合します。複数列が存在する場合、先頭行の全ての列に同じスカラ値がセットされます。<br><code>MATRIX</code>は<code>bool,int2,int4,int8,float4,float8</code>いずれかの配列型<br><code>TYPE</code>は<code>MATRIX</code>の要素型</td>
+</tr>
+<tr>
+<td align="left"><code>rbind(MATRIX,TYPE)</code></td>
+<td align="left"><code>MATRIX</code></td>
+<td align="left">配列ベース行列の末尾行にスカラ値を結合します。複数列が存在する場合、末尾行の全ての列に同じスカラ値がセットされます。<br><code>MATRIX</code>は<code>bool,int2,int4,int8,float4,float8</code>いずれかの配列型<br><code>TYPE</code>は<code>MATRIX</code>の要素型</td>
+</tr>
+<tr>
+<td align="left"><code>cbind(MATRIX,MATRIX)</code></td>
+<td align="left"><code>MATRIX</code></td>
+<td align="left">配列ベース行列を横方向に結合します。<br><code>MATRIX</code>は<code>bool,int2,int4,int8,float4,float8</code>いずれかの配列型</td>
+</tr>
+<tr>
+<td align="left"><code>cbind(TYPE,MATRIX)</code></td>
+<td align="left"><code>MATRIX</code></td>
+<td align="left">配列ベース行列の左側にスカラ値を結合します。複数行が存在する場合、左端の全ての行に同じスカラ値がセットされます。<br><code>MATRIX</code>は<code>bool,int2,int4,int8,float4,float8</code>いずれかの配列型<br><code>TYPE</code>は<code>MATRIX</code>の要素型</td>
+</tr>
+<tr>
+<td align="left"><code>cbind(MATRIX,TYPE)</code></td>
+<td align="left"><code>MATRIX</code></td>
+<td align="left">配列ベース行列の右側にスカラ値を結合します。複数行が存在する場合、右端の全ての行に同じスカラ値がセットされます。<br><code>MATRIX</code>は<code>bool,int2,int4,int8,float4,float8</code>いずれかの配列型<br><code>TYPE</code>は<code>MATRIX</code>の要素型</td>
+</tr>
+<tr>
+<td align="left"><code>transpose(MATRIX)</code></td>
+<td align="left"><code>MATRIX</code></td>
+<td align="left">配列ベース行列を転置します。<br><code>MATRIX</code>は<code>bool,int2,int4,int8,float4,float8</code>いずれかの配列型</td>
+</tr>
+</tbody>
+</table>
+<p><strong>集約関数</strong></p>
+<table>
+<thead>
+<tr>
+<th align="left">関数/演算子</th>
+<th align="left">返り値</th>
+<th align="left">説明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>array_matrix(TYPE,...)</code></td>
+<td align="left"><code>TYPE[]</code></td>
+<td align="left">可変長引数の集約関数です。M個の引数でN行が入力されると、M列xN行の配列ベース行列を返します。<br><code>TYPE</code>は<code>bool,int2,int4,int8,float4,float8</code>のいずれかです。</td>
+</tr>
+<tr>
+<td align="left"><code>array_matrix(bit)</code></td>
+<td align="left"><code>int[]</code></td>
+<td align="left">ビット列を32bit整数値の組と見なして、<code>int4[]</code>型の配列ベース行列として返す集約関数です。</td>
+</tr>
+<tr>
+<td align="left"><code>rbind(MATRIX)</code></td>
+<td align="left"><code>MATRIX</code></td>
+<td align="left">入力された配列ベース行列を縦に連結する集約関数です。<br><code>MATRIX</code>は<code>bool,int2,int4,int8,float4,float8</code>いずれかの配列型</td>
+</tr>
+<tr>
+<td align="left"><code>cbind(MATRIX)</code></td>
+<td align="left"><code>MATRIX</code></td>
+<td align="left">入力された配列ベース行列を横に連結する集約関数です。<br><code>MATRIX</code>は<code>bool,int2,int4,int8,float4,float8</code>いずれかの配列型</td>
+</tr>
+</tbody>
+</table>
+<h2 id="_3">その他の関数</h2>
+<table>
+<thead>
+<tr>
+<th align="left">関数</th>
+<th align="center">戻り値</th>
+<th align="left">説明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>pgstrom_ccache_enabled(regclass)</code></td>
+<td align="center"><code>text</code></td>
+<td align="left">指定したテーブルに対するインメモリ列キャッシュを有効にします。</td>
+</tr>
+<tr>
+<td align="left"><code>pgstrom_ccache_disabled(regclass)</code></td>
+<td align="center"><code>text</code></td>
+<td align="left">指定したテーブルに対するインメモリ列キャッシュを無効にします。</td>
+</tr>
+<tr>
+<td align="left"><code>pgstrom_ccache_prewarm(regclass)</code></td>
+<td align="center"><code>int</code></td>
+<td align="left">指定したテーブルに対するインメモリ列キャッシュを同期的に構築します。キャッシュ使用量の上限に達した時は、その時点で終了します。</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th align="left">関数</th>
+<th align="center">戻り値</th>
+<th align="left">説明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>gstore_fdw_format(reggstore)</code></td>
+<td align="center"><code>text</code></td>
+<td align="left">gstore_fdw外部テーブルの内部データ形式を返します。</td>
+</tr>
+<tr>
+<td align="left"><code>gstore_fdw_nitems(reggstore)</code></td>
+<td align="center"><code>bigint</code></td>
+<td align="left">gstore_fdw外部テーブルの行数を返します。</td>
+</tr>
+<tr>
+<td align="left"><code>gstore_fdw_nattrs(reggstore)</code></td>
+<td align="center"><code>bigint</code></td>
+<td align="left">gstore_fdw外部テーブルの列数を返します。</td>
+</tr>
+<tr>
+<td align="left"><code>gstore_fdw_rawsize(reggstore)</code></td>
+<td align="center"><code>bigint</code></td>
+<td align="left">gstore_fdw外部テーブルのバイト単位のサイズを返します。</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th align="left">関数</th>
+<th align="center">戻り値</th>
+<th align="left">説明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>gstore_export_ipchandle(reggstore)</code></td>
+<td align="center"><code>bytea</code></td>
+<td align="left">gstore_fdwのGPUデバイスメモリ領域のIPCハンドラを返します。</td>
+</tr>
+<tr>
+<td align="left"><code>lo_import_gpu(int, bytea, bigint, bigint, oid=0)</code></td>
+<td align="center"><code>oid</code></td>
+<td align="left">外部アプリケーションの確保したGPUデバイスメモリ領域をマップし、その内容をラージオブジェクトへインポートします。</td>
+</tr>
+<tr>
+<td align="left"><code>lo_export_gpu(oid, int, bytea, bigint, bigint)</code></td>
+<td align="center"><code>bigint</code></td>
+<td align="left">外部アプリケーションの確保したGPUデバイスメモリ領域をマップし、ラージオブジェクトの内容を当該領域へエクスポートします。</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th align="left">関数</th>
+<th align="center">戻り値</th>
+<th align="left">説明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>plcuda_kernel_max_blocksz</code></td>
+<td align="center"><code>int</code></td>
+<td align="left">PL/CUDA関数のヘルパーとして呼ばれた場合、当該GPUカーネルの最大ブロックサイズを返す。</td>
+</tr>
+<tr>
+<td align="left"><code>plcuda_kernel_static_shmsz()</code></td>
+<td align="center"><code>int</code></td>
+<td align="left">PL/CUDA関数のヘルパーとして呼ばれた場合、当該GPUカーネルが静的に確保したブロックあたり共有メモリサイズを返す。</td>
+</tr>
+<tr>
+<td align="left"><code>plcuda_kernel_dynamic_shmsz()</code></td>
+<td align="center"><code>int</code></td>
+<td align="left">PL/CUDA関数のヘルパーとして呼ばれた場合、当該GPUカーネルが動的に確保する事のできるブロックあたり共有メモリサイズを返す。</td>
+</tr>
+<tr>
+<td align="left"><code>plcuda_kernel_const_memsz()</code></td>
+<td align="center"><code>int</code></td>
+<td align="left">PL/CUDA関数のヘルパーとして呼ばれた場合、当該GPUカーネルが静的に確保したコンスタントメモリのサイズを返す。</td>
+</tr>
+<tr>
+<td align="left"><code>plcuda_kernel_local_memsz()</code></td>
+<td align="center"><code>int</code></td>
+<td align="left">PL/CUDA関数のヘルパーとして呼ばれた場合、当該GPUカーネルが使用するスレッドあたりローカルメモリのサイズを返す。</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th align="left">関数</th>
+<th align="center">戻り値</th>
+<th align="left">説明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>pgstrom.license_validation()</code></td>
+<td align="center"><code>text</code></td>
+<td align="left">商用サブスクリプションを手動でロードします。</td>
+</tr>
+<tr>
+<td align="left"><code>pgstrom.license_query()</code></td>
+<td align="center"><code>text</code></td>
+<td align="left">現在ロードされている商用サブスクリプションを表示します。</td>
+</tr>
+</tbody>
+</table>
+<h1 id="_4">システムビュー</h1>
+<p>PG-Stromは内部状態をユーザやアプリケーションに出力するためのシステムビューをいくつか提供しています。
+これらのシステムビューは将来のバージョンで情報が追加される可能性があります。そのため、アプリケーションから<code>SELECT * FROM ...</code>によってこれらシステムビューを参照する事は避けてください。</p>
+<p><strong>pgstrom.device_info</strong></p>
+<p><code>pgstrom.device_info</code>システムビューは、PG-Stromが認識しているGPUのデバイス属性値を出力します。
+GPUはモデルごとにコア数やメモリ容量、最大スレッド数などのスペックが異なっており、PL/CUDA関数などで直接GPUのプログラミングを行う場合には、これらの情報を元にソフトウェアを最適化する必要があります。</p>
+<table>
+<thead>
+<tr>
+<th align="left">名前</th>
+<th align="left">データ型</th>
+<th align="left">説明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left">device_nr</td>
+<td align="left"><code>int</code></td>
+<td align="left">GPUデバイス番号</td>
+</tr>
+<tr>
+<td align="left">aindex</td>
+<td align="left"><code>int</code></td>
+<td align="left">属性インデックス</td>
+</tr>
+<tr>
+<td align="left">attribute</td>
+<td align="left"><code>text</code></td>
+<td align="left">デバイス属性名</td>
+</tr>
+<tr>
+<td align="left">value</td>
+<td align="left"><code>text</code></td>
+<td align="left">デバイス属性値</td>
+</tr>
+</tbody>
+</table>
+<p><strong>pgstrom.device_preserved_meminfo</strong></p>
+<p><code>pgstrom.device_preserved_meminfo</code>システムビューは、複数のPostgreSQLバックエンドプロセスから共有するために予め確保済みのGPUデバイスメモリ領域の情報を出力します。
+現在のところ、gstore_fdwのみが本機能を使用しています。</p>
+<table>
+<thead>
+<tr>
+<th align="left">名前</th>
+<th align="left">データ型</th>
+<th align="left">説明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left">device_nr</td>
+<td align="left"><code>int</code></td>
+<td align="left">GPUデバイス番号</td>
+</tr>
+<tr>
+<td align="left">handle</td>
+<td align="left"><code>bytea</code></td>
+<td align="left">確保済みGPUデバイスメモリのIPCハンドラ</td>
+</tr>
+<tr>
+<td align="left">owner</td>
+<td align="left"><code>regrole</code></td>
+<td align="left">確保済みGPUデバイスメモリの作成者</td>
+</tr>
+<tr>
+<td align="left">length</td>
+<td align="left"><code>bigint</code></td>
+<td align="left">確保済みGPUデバイスメモリのバイト単位の長さ</td>
+</tr>
+<tr>
+<td align="left">ctime</td>
+<td align="left"><code>timestamp with time zone</code></td>
+<td align="left">確保済みGPUデバイスメモリの作成時刻</td>
+</tr>
+</tbody>
+</table>
+<p><strong>pgstrom.ccache_info</strong></p>
+<p><code>pgstrom.ccache_info</code>システムビューは、列指向キャッシュの各チャンク（128MB単位）の情報を出力します。</p>
+<table>
+<thead>
+<tr>
+<th align="left">名前</th>
+<th align="left">データ型</th>
+<th align="left">説明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left">database_id</td>
+<td align="left"><code>oid</code></td>
+<td align="left">データベースID</td>
+</tr>
+<tr>
+<td align="left">table_id</td>
+<td align="left"><code>regclass</code></td>
+<td align="left">テーブルID</td>
+</tr>
+<tr>
+<td align="left">block_nr</td>
+<td align="left"><code>int</code></td>
+<td align="left">チャンクの先頭ブロック番号</td>
+</tr>
+<tr>
+<td align="left">nitems</td>
+<td align="left"><code>bigint</code></td>
+<td align="left">チャンクに含まれる行数</td>
+</tr>
+<tr>
+<td align="left">length</td>
+<td align="left"><code>bigint</code></td>
+<td align="left">キャッシュされたチャンクのサイズ</td>
+</tr>
+<tr>
+<td align="left">ctime</td>
+<td align="left"><code>timestamp with time zone</code></td>
+<td align="left">チャンク作成時刻</td>
+</tr>
+<tr>
+<td align="left">atime</td>
+<td align="left"><code>timestamp with time zone</code></td>
+<td align="left">チャンク最終アクセス時刻</td>
+</tr>
+</tbody>
+</table>
+<p><strong>pgstrom.ccache_builder_info</strong></p>
+<p><code>pgstrom.ccache_builder_info</code>システムビューは、列指向キャッシュの非同期ビルダープロセスの情報を出力します。</p>
+<table>
+<thead>
+<tr>
+<th align="left">名前</th>
+<th align="left">データ型</th>
+<th align="left">説明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left">builder_id</td>
+<td align="left"><code>int</code></td>
+<td align="left">列指向キャッシュ非同期ビルダーのID</td>
+</tr>
+<tr>
+<td align="left">state</td>
+<td align="left"><code>text</code></td>
+<td align="left">ビルダープロセスの状態。（<code>shutdown</code>: 停止中、<code>startup</code>: 起動中、<code>loading</code>: 列指向キャッシュの構築中、<code>sleep</code>: 一時停止中）</td>
+</tr>
+<tr>
+<td align="left">database_id</td>
+<td align="left"><code>oid</code></td>
+<td align="left">ビルダープロセスが割り当てられているデータベースID</td>
+</tr>
+<tr>
+<td align="left">table_id</td>
+<td align="left"><code>regclass</code></td>
+<td align="left"><code>state</code>が<code>loading</code>の場合、読出し中のテーブルID</td>
+</tr>
+<tr>
+<td align="left">block_nr</td>
+<td align="left"><code>int</code></td>
+<td align="left"><code>state</code>が<code>loading</code>の場合、読出し中のブロック番号</td>
+</tr>
+</tbody>
+</table>
+              
+            </div>
+          </div>
+          <footer>
+  
+    <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
+      
+        <a href="../ref_params/" class="btn btn-neutral float-right" title="GUCパラメータ">Next <span class="icon icon-circle-arrow-right"></span></a>
+      
+      
+        <a href="../ref_devfuncs/" class="btn btn-neutral" title="関数と演算子"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+      
+    </div>
+  
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+    
+  </div>
+
+  Built with <a href="http://www.mkdocs.org">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+      
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" style="cursor: pointer">
+    <span class="rst-current-version" data-toggle="rst-current-version">
+      
+      
+        <span><a href="../ref_devfuncs/" style="color: #fcfcfc;">&laquo; Previous</a></span>
+      
+      
+        <span style="margin-left: 15px"><a href="../ref_params/" style="color: #fcfcfc">Next &raquo;</a></span>
+      
+    </span>
+</div>
+    <script>var base_url = '..';</script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/require.js"></script>
+      <script src="../search/search.js"></script>
+
+</body>
+</html>

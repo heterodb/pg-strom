@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<!--[if IE 8]><html class="no-js lt-ie9" lang="en" > <![endif]-->
+<!--[if gt IE 8]><!--> <html class="no-js" lang="en" > <!--<![endif]-->
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  
+  <meta name="author" content="PG-Strom Development Team">
+  <link rel="shortcut icon" href="../img/favicon.ico">
+  <title>データ型 - PG-Strom Manual</title>
+  <link href='https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700' rel='stylesheet' type='text/css'>
+
+  <link rel="stylesheet" href="../css/theme.css" type="text/css" />
+  <link rel="stylesheet" href="../css/theme_extra.css" type="text/css" />
+  <link rel="stylesheet" href="../css/highlight.css">
+  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet">
+  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet">
+  <link href="../custom.css" rel="stylesheet">
+  
+  <script>
+    // Current page data
+    var mkdocs_page_name = "\u30c7\u30fc\u30bf\u578b";
+    var mkdocs_page_input_path = "ref_types.md";
+    var mkdocs_page_url = "/ref_types/";
+  </script>
+  
+  <script src="../js/jquery-2.1.1.min.js"></script>
+  <script src="../js/modernizr-2.8.3.min.js"></script>
+  <script type="text/javascript" src="../js/highlight.pack.js"></script> 
+  
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+
+    
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+      <div class="wy-side-nav-search">
+        <a href=".." class="icon icon-home"> PG-Strom Manual</a>
+        <div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" />
+  </form>
+
+  [<strong>Japanese</strong> | <a href="../.." style="color: #cccccc">English</a>]
+
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
+	<ul class="current">
+	  
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="..">はじめに</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../install/">インストール</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../tutorial/">利用ガイド</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../partition/">パーティション</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <span class="caption-text">先進機能</span>
+    <ul class="subnav">
+                <li class="">
+                    
+    <a class="" href="../ssd2gpu/">SSDtoGPUダイレクトSQL実行</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../ccache/">列指向キャッシュ</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../gstore_fdw/">Gstore_fdw</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../plcuda/">PL/CUDA</a>
+                </li>
+    </ul>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <span class="caption-text">リファレンス</span>
+    <ul class="subnav">
+                <li class=" current">
+                    
+    <a class="current" href="./">データ型</a>
+    <ul class="subnav">
+            
+    <li class="toctree-l3"><a href="#_1">標準の数値データ型</a></li>
+    
+
+    <li class="toctree-l3"><a href="#_2">標準の日付時刻型</a></li>
+    
+
+    <li class="toctree-l3"><a href="#_3">標準の可変長データ型</a></li>
+    
+
+    <li class="toctree-l3"><a href="#_4">標準の雑多なデータ型</a></li>
+    
+
+    <li class="toctree-l3"><a href="#_5">標準の範囲型</a></li>
+    
+
+    <li class="toctree-l3"><a href="#pg-strom">PG-Stromが追加で提供するデータ型</a></li>
+    
+
+    </ul>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../ref_devfuncs/">関数と演算子</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../ref_sqlfuncs/">SQLオブジェクト</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../ref_params/">GUCパラメータ</a>
+                </li>
+    </ul>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../release_note/">リリースノート</a>
+	    </li>
+          
+        </ul>
+      </div>
+      &nbsp;
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+
+      
+      <nav class="wy-nav-top" role="navigation" aria-label="top navigation">
+        <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+        <a href="..">PG-Strom Manual</a>
+      </nav>
+
+      
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href="..">Docs</a> &raquo;</li>
+    
+      
+        
+          <li>リファレンス &raquo;</li>
+        
+      
+    
+    <li>データ型</li>
+    <li class="wy-breadcrumbs-aside">
+      
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main">
+            <div class="section">
+              
+                <p>PG-Stromは以下のデータ型をGPUで利用する事ができます。</p>
+<h1 id="_1">標準の数値データ型</h1>
+<table>
+<thead>
+<tr>
+<th align="left">SQLデータ型</th>
+<th align="left">内部データ形式</th>
+<th align="left">データ長</th>
+<th align="left">備考</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>smallint</code></td>
+<td align="left"><code>cl_short</code></td>
+<td align="left">2 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>integer</code></td>
+<td align="left"><code>cl_int</code></td>
+<td align="left">4 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>bigint</code></td>
+<td align="left"><code>cl_long</code></td>
+<td align="left">8 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>real</code></td>
+<td align="left"><code>cl_float</code></td>
+<td align="left">4 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>float</code></td>
+<td align="left"><code>cl_double</code></td>
+<td align="left">8 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>numeric</code></td>
+<td align="left"><code>cl_ulong</code></td>
+<td align="left">可変長</td>
+<td align="left">64bitの内部形式にマップ</td>
+</tr>
+</tbody>
+</table>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>GPUが<code>numeric</code>型のデータを処理する際、実装上の理由からこれを64bitの内部表現に変換して処理します。
+これら内部表現への/からの変換は透過的に行われますが、例えば、桁数の大きな<code>numeric</code>型のデータは表現する事ができないため、PG-StromはCPU側でのフォールバック処理を試みます。したがって、桁数の大きな<code>numeric</code>型のデータをGPUに与えると却って実行速度が低下してしまう事になります。
+これを避けるには、GUCパラメータ<code>pg_strom.enable_numeric_type</code>を使用して<code>numeric</code>データ型を含む演算式をGPUで実行しないように設定します。</p>
+</div>
+<h1 id="_2">標準の日付時刻型</h1>
+<table>
+<thead>
+<tr>
+<th align="left">SQLデータ型</th>
+<th align="left">内部データ形式</th>
+<th align="left">データ長</th>
+<th align="left">備考</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>date</code></td>
+<td align="left"><code>DateADT</code></td>
+<td align="left">4 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>time</code></td>
+<td align="left"><code>TimeADT</code></td>
+<td align="left">8 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>timetz</code></td>
+<td align="left"><code>TimeTzADT</code></td>
+<td align="left">12 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>timestamp</code></td>
+<td align="left"><code>Timestamp</code></td>
+<td align="left">8 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>timestamptz</code></td>
+<td align="left"><code>TimestampTz</code></td>
+<td align="left">8 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>interval</code></td>
+<td align="left"><code>Interval</code></td>
+<td align="left">16 bytes</td>
+<td align="left">time interval</td>
+</tr>
+</tbody>
+</table>
+<h1 id="_3">標準の可変長データ型</h1>
+<table>
+<thead>
+<tr>
+<th align="left">SQLデータ型</th>
+<th align="left">内部データ形式</th>
+<th align="left">データ長</th>
+<th align="left">備考</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>bpchar</code></td>
+<td align="left"><code>varlena *</code></td>
+<td align="left">可変長</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>varchar</code></td>
+<td align="left"><code>varlena *</code></td>
+<td align="left">可変長</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>bytea</code></td>
+<td align="left"><code>varlena *</code></td>
+<td align="left">可変長</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>text</code></td>
+<td align="left"><code>varlena *</code></td>
+<td align="left">可変長</td>
+<td align="left"></td>
+</tr>
+</tbody>
+</table>
+<h1 id="_4">標準の雑多なデータ型</h1>
+<table>
+<thead>
+<tr>
+<th align="left">SQLデータ型</th>
+<th align="left">内部データ形式</th>
+<th align="left">データ長</th>
+<th align="left">備考</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>boolean</code></td>
+<td align="left"><code>cl_bool</code></td>
+<td align="left">1 byte</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>money</code></td>
+<td align="left"><code>cl_long</code></td>
+<td align="left">8 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>uuid</code></td>
+<td align="left"><code>pg_uuid</code></td>
+<td align="left">16 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>macaddr</code></td>
+<td align="left"><code>macaddr</code></td>
+<td align="left">6 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>inet</code></td>
+<td align="left"><code>inet_struct</code></td>
+<td align="left">7 bytes or 19 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>cidr</code></td>
+<td align="left"><code>inet_struct</code></td>
+<td align="left">7 bytes or 19 bytes</td>
+<td align="left"></td>
+</tr>
+</tbody>
+</table>
+<h1 id="_5">標準の範囲型</h1>
+<table>
+<thead>
+<tr>
+<th align="left">SQLデータ型</th>
+<th align="left">内部データ形式</th>
+<th align="left">データ長</th>
+<th align="left">備考</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>int4range</code></td>
+<td align="left"><code>__int4range</code></td>
+<td align="left">14 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>int8range</code></td>
+<td align="left"><code>__int8range</code></td>
+<td align="left">22 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>tsrange</code></td>
+<td align="left"><code>__tsrange</code></td>
+<td align="left">22 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>tstzrange</code></td>
+<td align="left"><code>__tstzrange</code></td>
+<td align="left">22 bytes</td>
+<td align="left"></td>
+</tr>
+<tr>
+<td align="left"><code>daterange</code></td>
+<td align="left"><code>__daterange</code></td>
+<td align="left">14 bytes</td>
+<td align="left"></td>
+</tr>
+</tbody>
+</table>
+<h1 id="pg-strom">PG-Stromが追加で提供するデータ型</h1>
+<table>
+<thead>
+<tr>
+<th align="left">SQLデータ型</th>
+<th align="left">内部データ形式</th>
+<th align="left">データ長</th>
+<th align="left">備考</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>float2</code></td>
+<td align="left"><code>half_t</code></td>
+<td align="left">2 bytes</td>
+<td align="left">半精度浮動小数点数</td>
+</tr>
+<tr>
+<td align="left"><code>reggstore</code></td>
+<td align="left"><code>cl_uint</code></td>
+<td align="left">4 bytes</td>
+<td align="left">gstore_fdwのregclass型。PL/CUDA関数呼出しで特別な扱い。</td>
+</tr>
+</tbody>
+</table>
+              
+            </div>
+          </div>
+          <footer>
+  
+    <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
+      
+        <a href="../ref_devfuncs/" class="btn btn-neutral float-right" title="関数と演算子">Next <span class="icon icon-circle-arrow-right"></span></a>
+      
+      
+        <a href="../plcuda/" class="btn btn-neutral" title="PL/CUDA"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+      
+    </div>
+  
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+    
+  </div>
+
+  Built with <a href="http://www.mkdocs.org">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+      
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" style="cursor: pointer">
+    <span class="rst-current-version" data-toggle="rst-current-version">
+      
+      
+        <span><a href="../plcuda/" style="color: #fcfcfc;">&laquo; Previous</a></span>
+      
+      
+        <span style="margin-left: 15px"><a href="../ref_devfuncs/" style="color: #fcfcfc">Next &raquo;</a></span>
+      
+    </span>
+</div>
+    <script>var base_url = '..';</script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/require.js"></script>
+      <script src="../search/search.js"></script>
+
+</body>
+</html>
