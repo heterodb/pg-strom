@@ -113,17 +113,23 @@
     <a class="current" href="./">SQL Objects</a>
     <ul class="subnav">
             
-    <li class="toctree-l3"><a href="#pg-strom-specific-sql-functions">PG-Strom Specific SQL functions</a></li>
+    <li class="toctree-l3"><a href="#device-information">Device Information</a></li>
+    
+
+    <li class="toctree-l3"><a href="#array-based-matrix-support">Array-based matrix support</a></li>
     
         <ul>
         
-            <li><a class="toctree-l4" href="#device-information">Device Information</a></li>
+            <li><a class="toctree-l4" href="#type-cast">Type cast</a></li>
         
-            <li><a class="toctree-l4" href="#array-based-matrix-support">Array-based matrix support</a></li>
+            <li><a class="toctree-l4" href="#array-based-matrix-functions">Array-based matrix functions</a></li>
         
-            <li><a class="toctree-l4" href="#miscellaneous-functions">Miscellaneous functions</a></li>
+            <li><a class="toctree-l4" href="#aggregate-functions">Aggregate functions</a></li>
         
         </ul>
+    
+
+    <li class="toctree-l3"><a href="#miscellaneous-functions">Miscellaneous functions</a></li>
     
 
     <li class="toctree-l3"><a href="#system-view">System View</a></li>
@@ -179,9 +185,10 @@
           <div role="main">
             <div class="section">
               
-                <h1 id="pg-strom-specific-sql-functions">PG-Strom Specific SQL functions</h1>
-<p>This section introduces SQL functions which are additionally provided by PG-Strom.</p>
-<h2 id="device-information">Device Information</h2>
+                <h1>SQL Objects</h1>
+
+<p>This chapter introduces SQL objects additionally provided by PG-Strom.</p>
+<h1 id="device-information">Device Information</h1>
 <table>
 <thead>
 <tr>
@@ -248,11 +255,11 @@
 </tr>
 </tbody>
 </table>
-<h2 id="array-based-matrix-support">Array-based matrix support</h2>
+<h1 id="array-based-matrix-support">Array-based matrix support</h1>
 <p>You can use array data type of PostgreSQL to deliver matrix-data for PL/CUDA functions.
 A two-dimensional array of fixed-length boolean/numeric values without NULL has flat data structure (expect for the array header). It allows to identify the address of elements by indexes of the matrix uniquely.
 PG-Strom provides several SQL functions to handle array-based matrix.</p>
-<p><strong>Type cast</strong></p>
+<h2 id="type-cast">Type cast</h2>
 <table>
 <thead>
 <tr>
@@ -274,7 +281,7 @@ PG-Strom provides several SQL functions to handle array-based matrix.</p>
 </tr>
 </tbody>
 </table>
-<p><strong>Array-based matrix functions</strong></p>
+<h2 id="array-based-matrix-functions">Array-based matrix functions</h2>
 <table>
 <thead>
 <tr>
@@ -366,7 +373,7 @@ PG-Strom provides several SQL functions to handle array-based matrix.</p>
 </tr>
 </tbody>
 </table>
-<p><strong>Aggregate functions</strong></p>
+<h2 id="aggregate-functions">Aggregate functions</h2>
 <table>
 <thead>
 <tr>
@@ -398,7 +405,7 @@ PG-Strom provides several SQL functions to handle array-based matrix.</p>
 </tr>
 </tbody>
 </table>
-<h2 id="miscellaneous-functions">Miscellaneous functions</h2>
+<h1 id="miscellaneous-functions">Miscellaneous functions</h1>
 <table>
 <thead>
 <tr>

@@ -109,17 +109,37 @@
     <a class="current" href="./">関数と演算子</a>
     <ul class="subnav">
             
-    <li class="toctree-l3"><a href="#_1">デバイス関数と演算子</a></li>
+    <li class="toctree-l3"><a href="#_1">型キャスト</a></li>
     
-        <ul>
-        
-            <li><a class="toctree-l4" href="#_2">型キャスト</a></li>
-        
-            <li><a class="toctree-l4" href="#_3">関数と演算子</a></li>
-        
-            <li><a class="toctree-l4" href="#_4">その他のデバイス関数</a></li>
-        
-        </ul>
+
+    <li class="toctree-l3"><a href="#_2">数値型演算子</a></li>
+    
+
+    <li class="toctree-l3"><a href="#_3">数学関数</a></li>
+    
+
+    <li class="toctree-l3"><a href="#_4">三角関数</a></li>
+    
+
+    <li class="toctree-l3"><a href="#_5">日付/時刻型演算子</a></li>
+    
+
+    <li class="toctree-l3"><a href="#_6">文字列関数/演算子</a></li>
+    
+
+    <li class="toctree-l3"><a href="#_7">ネットワーク関数/演算子</a></li>
+    
+
+    <li class="toctree-l3"><a href="#_8">通貨型演算子</a></li>
+    
+
+    <li class="toctree-l3"><a href="#uuid">uuid型演算子</a></li>
+    
+
+    <li class="toctree-l3"><a href="#_9">範囲型演算子</a></li>
+    
+
+    <li class="toctree-l3"><a href="#_10">その他のデバイス関数</a></li>
     
 
     </ul>
@@ -176,8 +196,10 @@
           <div role="main">
             <div class="section">
               
-                <h1 id="_1">デバイス関数と演算子</h1>
-<h2 id="_2">型キャスト</h2>
+                <h1>関数と演算子</h1>
+
+<p>本章ではGPUデバイス上で実行可能な関数と演算子について説明します。</p>
+<h1 id="_1">型キャスト</h1>
 <table>
 <thead>
 <tr>
@@ -264,8 +286,7 @@
 </tr>
 </tbody>
 </table>
-<h2 id="_3">関数と演算子</h2>
-<p><strong>数値型演算子</strong></p>
+<h1 id="_2">数値型演算子</h1>
 <table>
 <thead>
 <tr>
@@ -275,11 +296,11 @@
 </thead>
 <tbody>
 <tr>
-<td align="left"><code>TYPE = TYPE</code></td>
+<td align="left"><code>TYPE COMP TYPE</code></td>
 <td align="left">Comparison of two values<br><code>TYPE</code> is any of <code>int2,int4,int8</code><br><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></td>
 </tr>
 <tr>
-<td align="left"><code>TYPE = TYPE</code></td>
+<td align="left"><code>TYPE COMP TYPE</code></td>
 <td align="left">Comparison of two values<br><code>TYPE</code> is any of <code>float2,float4,float8</code><br><code>COMP</code> is any of <code>=,&lt;&gt;,&lt;,&lt;=,&gt;=,&gt;</code></td>
 </tr>
 <tr>
@@ -344,7 +365,7 @@
 </tr>
 </tbody>
 </table>
-<p><strong>数学関数</strong></p>
+<h1 id="_3">数学関数</h1>
 <table>
 <thead>
 <tr>
@@ -443,7 +464,7 @@
 </tr>
 </tbody>
 </table>
-<p><strong>三角関数</strong></p>
+<h1 id="_4">三角関数</h1>
 <table>
 <thead>
 <tr>
@@ -494,7 +515,7 @@
 </tr>
 </tbody>
 </table>
-<p><strong>日付/時刻型演算子</strong></p>
+<h1 id="_5">日付/時刻型演算子</h1>
 <table>
 <thead>
 <tr>
@@ -613,7 +634,7 @@
 </tr>
 </tbody>
 </table>
-<p><strong>文字列関数/演算子</strong></p>
+<h1 id="_6">文字列関数/演算子</h1>
 <table>
 <thead>
 <tr>
@@ -652,7 +673,7 @@
 </tr>
 </tbody>
 </table>
-<p><strong>ネットワーク関数/演算子</strong></p>
+<h1 id="_7">ネットワーク関数/演算子</h1>
 <table>
 <thead>
 <tr>
@@ -755,7 +776,7 @@
 </tr>
 </tbody>
 </table>
-<p><strong>通貨型演算子</strong></p>
+<h1 id="_8">通貨型演算子</h1>
 <table>
 <thead>
 <tr>
@@ -786,7 +807,7 @@
 </tr>
 </tbody>
 </table>
-<p><strong>uuid型演算子</strong></p>
+<h1 id="uuid">uuid型演算子</h1>
 <table>
 <thead>
 <tr>
@@ -801,7 +822,7 @@
 </tr>
 </tbody>
 </table>
-<p><strong>範囲型演算子</strong></p>
+<h1 id="_9">範囲型演算子</h1>
 <table>
 <thead>
 <tr>
@@ -920,7 +941,7 @@
 </tr>
 </tbody>
 </table>
-<h2 id="_4">その他のデバイス関数</h2>
+<h1 id="_10">その他のデバイス関数</h1>
 <table>
 <thead>
 <tr>

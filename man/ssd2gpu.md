@@ -1,8 +1,8 @@
-@ja:#SSD-to-GPUダイレクトSQL実行
-@en:#SSD-to-GPU Direct SQL Execution
+@ja:<h1>SSD-to-GPUダイレクトSQL実行</h1>
+@en:<h1>SSD-to-GPU Direct SQL Execution</h1>
 
-@ja:##概要
-@en:##Overview
+@ja:#概要
+@en:#Overview
 
 @ja{
 SQLワークロードを高速に処理するには、プロセッサが効率よく処理を行うのと同様に、ストレージやメモリからプロセッサへ高速にデータを供給する事が重要です。処理すべきデータがプロセッサに届いていなければ、プロセッサは手持ち無沙汰になってしまいます。
@@ -50,11 +50,11 @@ Also note that this feature supports only NVMe-SSD. It does not support SAS or S
 We have tested several NVMe-SSD models. You can refer [002: HW Validation List](https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List#nvme-ssd-validation-list) for your information.
 }
 
-@ja:##初期設定
-@en:##System Setup
+@ja:#初期設定
+@en:#System Setup
 
-@ja:###ドライバのインストール
-@en:###Driver Installation
+@ja:##ドライバのインストール
+@en:##Driver Installation
 
 @ja{
 SSD-to-GPUダイレクトSQL実行機能を利用するには`nvme_strom`パッケージが必要です。このパッケージはNVMe-SSDとGPU間のP2P DMAを仲介するLinux kernel moduleを含んでおり、[HeteroDB Software Distribution Center](https://heterodb.github.io/swdc/)から入手可能です。
@@ -103,8 +103,8 @@ nvme                   27722  4
 nvme_core              52964  9 nvme
 ```
 
-@ja:###テーブルスペースの設計
-@en:###Designing Tablespace
+@ja:##テーブルスペースの設計
+@en:##Designing Tablespace
 
 @ja{
 SSD-to-GPUダイレクトSQL実行は以下の条件で発動します。
@@ -172,11 +172,11 @@ Note that tablespace of the existing tables are not changed in thie case.
 ALTER DATABASE my_database SET TABLESPACE my_nvme;
 ```
 
-@ja:##運用
-@en:##Operations
+@ja:#運用
+@en:#Operations
 
-@ja:###GUCパラメータによる制御
-@en:###Controls using GUC parameters
+@ja:##GUCパラメータによる制御
+@en:##Controls using GUC parameters
 
 @ja{
 SSD-to-GPUダイレクトSQL実行に関連するGUCパラメータは2つあります。
@@ -275,8 +275,8 @@ and s_region = 'AMERICA'
 ```
 
 
-@ja:###Visibility Mapに関する注意事項
-@en:###Attension for visibility map
+@ja:##Visibility Mapに関する注意事項
+@en:##Attension for visibility map
 
 @ja{
 現在のところ、PG-StromのGPU側処理では行単位のMVCC可視性チェックを行う事ができません。これは、可視性チェックを行うために必要なデータ構造がホスト側だけに存在するためですが、ストレージ上のブロックを直接GPUに転送する場合、少々厄介な問題が生じます。

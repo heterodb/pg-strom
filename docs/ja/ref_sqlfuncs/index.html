@@ -113,20 +113,26 @@
     <a class="current" href="./">SQLオブジェクト</a>
     <ul class="subnav">
             
-    <li class="toctree-l3"><a href="#pg-stromsql">PG-Strom独自のSQL関数群</a></li>
+    <li class="toctree-l3"><a href="#_1">デバイス情報関数</a></li>
+    
+
+    <li class="toctree-l3"><a href="#_2">配列ベース行列サポート</a></li>
     
         <ul>
         
-            <li><a class="toctree-l4" href="#_1">デバイス情報関数</a></li>
+            <li><a class="toctree-l4" href="#_3">型キャスト</a></li>
         
-            <li><a class="toctree-l4" href="#_2">配列ベース行列サポート</a></li>
+            <li><a class="toctree-l4" href="#_4">配列ベース行列関数</a></li>
         
-            <li><a class="toctree-l4" href="#_3">その他の関数</a></li>
+            <li><a class="toctree-l4" href="#_5">集約関数</a></li>
         
         </ul>
     
 
-    <li class="toctree-l3"><a href="#_4">システムビュー</a></li>
+    <li class="toctree-l3"><a href="#_6">その他の関数</a></li>
+    
+
+    <li class="toctree-l3"><a href="#_7">システムビュー</a></li>
     
 
     </ul>
@@ -179,9 +185,10 @@
           <div role="main">
             <div class="section">
               
-                <h1 id="pg-stromsql">PG-Strom独自のSQL関数群</h1>
-<p>本節ではPG-Stromが独自に提供するSQL関数群を説明します。</p>
-<h2 id="_1">デバイス情報関数</h2>
+                <h1>SQLオブジェクト</h1>
+
+<p>本章ではPG-Stromが独自に提供するSQLオブジェクトについて説明します。</p>
+<h1 id="_1">デバイス情報関数</h1>
 <table>
 <thead>
 <tr>
@@ -248,11 +255,11 @@
 </tr>
 </tbody>
 </table>
-<h2 id="_2">配列ベース行列サポート</h2>
+<h1 id="_2">配列ベース行列サポート</h1>
 <p>PL/CUDA関数と行列データを受け渡しするために、PostgreSQLの配列型を使用する事ができます。
 固定長の論理値/数値型データでNULLを含まない二次元配列は（配列データ型のヘッダ領域を除いて）フラットなデータ構造を持っており、行列のインデックスによって各要素のアドレスを一意に特定する事ができます。
 PG-Stromは配列ベースの行列を取り扱うためのSQL関数をいくつか提供しています。</p>
-<p><strong>型キャスト</strong></p>
+<h2 id="_3">型キャスト</h2>
 <table>
 <thead>
 <tr>
@@ -274,7 +281,7 @@ PG-Stromは配列ベースの行列を取り扱うためのSQL関数をいくつ
 </tr>
 </tbody>
 </table>
-<p><strong>配列ベース行列関数</strong></p>
+<h2 id="_4">配列ベース行列関数</h2>
 <table>
 <thead>
 <tr>
@@ -366,7 +373,7 @@ PG-Stromは配列ベースの行列を取り扱うためのSQL関数をいくつ
 </tr>
 </tbody>
 </table>
-<p><strong>集約関数</strong></p>
+<h2 id="_5">集約関数</h2>
 <table>
 <thead>
 <tr>
@@ -398,7 +405,7 @@ PG-Stromは配列ベースの行列を取り扱うためのSQL関数をいくつ
 </tr>
 </tbody>
 </table>
-<h2 id="_3">その他の関数</h2>
+<h1 id="_6">その他の関数</h1>
 <table>
 <thead>
 <tr>
@@ -539,7 +546,7 @@ PG-Stromは配列ベースの行列を取り扱うためのSQL関数をいくつ
 </tr>
 </tbody>
 </table>
-<h1 id="_4">システムビュー</h1>
+<h1 id="_7">システムビュー</h1>
 <p>PG-Stromは内部状態をユーザやアプリケーションに出力するためのシステムビューをいくつか提供しています。
 これらのシステムビューは将来のバージョンで情報が追加される可能性があります。そのため、アプリケーションから<code>SELECT * FROM ...</code>によってこれらシステムビューを参照する事は避けてください。</p>
 <p><strong>pgstrom.device_info</strong></p>

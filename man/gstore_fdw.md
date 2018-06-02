@@ -1,8 +1,8 @@
-@ja:#GPUメモリストア(gstore_fdw)
-@en:#GPU Memory Store(gstore_fdw)
+@ja:<h1>GPUメモリストア(gstore_fdw)</h1>
+@en:<h1>GPU Memory Store(gstore_fdw)</h1>
 
-@ja:##概要
-@en:##Overview
+@ja:#概要
+@en:#Overview
 
 @ja{
 通常、PG-StromはGPUデバイスメモリを一時的にだけ利用します。クエリの実行中に必要なだけのデバイスメモリを割り当て、その領域にデータを転送してSQLワークロードを実行するためにGPUカーネルを実行します。GPUカーネルの実行が完了すると、当該領域は速やかに開放され、他のワークロードでまた利用する事が可能となります。
@@ -54,8 +54,8 @@ Right now, GPU programs which is transparently generated from SQL statement cann
 
 ![GPU memory store](./img/gstore_fdw-overview.png)
 
-@ja:##初期設定
-@en:##Setup
+@ja:#初期設定
+@en:#Setup
 
 @ja{
 通常、外部テーブルを作成するには以下の3ステップが必要です。
@@ -132,11 +132,11 @@ Right now, only `pglz` is supported for `compression` option. This compression l
 It can be decompressed by GPU internal function `pglz_decompress()` from PL/CUDA function. Due to the characteristics of the compression algorithm, it is valuable to represent sparse matrix that is mostly zero.
 }
 
-@ja:##運用
-@en:##Operations
+@ja:#運用
+@en:#Operations
 
-@ja:###データのロード
-@en:###Loading data
+@ja:##データのロード
+@en:##Loading data
 
 @ja{
 通常のテーブルと同様にINSERT、UPDATE、DELETEによって外部テーブルの背後に存在するGPUデバイスメモリを更新する事ができます。
@@ -171,18 +171,14 @@ So, even though you can run `INSERT`, `UPDATE` or `DELETE` commands as if it is 
 Unlike regular tables, contents of the gstore_fdw foreign table is vollatile. So, it is very easy to loose contents of the gstore_fdw foreign table by power-down or PostgreSQL restart. So, what we load onto gstore_fdw foreign table should be reconstructable by other data source.
 }
 
-@ja:###デバイスメモリ消費量の確認
-@en:###Checking the memory consumption
+@ja:##デバイスメモリ消費量の確認
+@en:##Checking the memory consumption
 
 @ja{
 gstore_fdwによって消費されるデバイスメモリのサイズを確認するには`pgstrom.gstore_fdw_chunk_info`システムビューを参照します。
-
-
-ああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああ
 }
 @en{
-
-
+See `pgstrom.gstore_fdw_chunk_info` system view to see amount of the device memory consumed by gstore_fdw.
 }
 
 ```
@@ -195,11 +191,13 @@ postgres=# select * from pgstrom.gstore_fdw_chunk_info ;
 ```
 
 @ja{
-`nvidia-smi`コマンドを
+`nvidia-smi`コマンドを用いて、各GPUデバイスが実際にどの程度のデバイスメモリを消費しているかを確認する事ができます。
+Gstore_fdwが確保したメモリは、PG-Strom GPU memory keeperプロセスが保持・管理しています。ここでは、上記rawsizeの合計約1100MBに加え、CUDAが内部的に確保する領域を合わせて1211MBが占有されている事が分かります。
 }
 
 @en{
-
+By `nvidia-smi` command, you can check how much device memory is consumed for each GPU device.
+"PG-Strom GPU memory keeper" process actually keeps and manages the device memory area acquired by Gstore_fdw. In this example, 1211MB is preliminary allocated for total of the above rawsize (about 1100MB) and CUDA internal usage.
 }
 
 ```
@@ -224,25 +222,23 @@ Wed Apr  4 15:11:50 2018
 ```
 
 
-@ja:###内部データ形式
-@en:###Internal Data Format
+@ja:##内部データ形式
+@en:##Internal Data Format
 
 @ja{
 gstore_fdwがGPUデバイスメモリ上にデータを保持する際の内部データ形式の詳細はノートを参照してください。
 
-- `pgstrom`フォーマットの詳細
-    - ここにノートのリンク
+- [`pgstrom`フォーマットの詳細](https://github.com/heterodb/pg-strom/wiki/301:-Gstore_fdw-internal-format-of-%27pgstrom%27)
 }
 
 @en{
 See the notes for details of the internal data format when gstore_fdw write on GPU device memory.
 
-- Detail of the `pgstrom` format
-    - Here is a link to the note
+- [Detail of the `pgstrom` format](https://github.com/heterodb/pg-strom/wiki/301:-Gstore_fdw-internal-format-of-%27pgstrom%27)
 }
 
-@ja:##関連機能
-@en:##Related Features
+@ja:#外部プログラムとのデータ連携
+@en:#Inter-process Data Collaboration
 
 @ja{
 CUDAには`cuIpcGetMemHandle()`および`cuIpcOpenMemHandle()`というAPIが用意されています。前者を用いてアプリケーションプログラムが確保したGPUデバイスメモリのユニークな識別子を取得し、後者を用いて別のアプリケーションプログラムから同一のGPUデバイスメモリを参照する事が可能となります。言い換えれば、ホストシステムにおける共有メモリのような仕組みを備えています。
@@ -258,6 +254,8 @@ This unique identifier is `CUipcMemHandle` object; which is simple binary data i
 This session introduces SQL functions which exchange GPU device memory with other applications using `CUipcMemHandle` identifier.
 }
 
+@ja:##SQL関数の一覧
+@en:##SQL Functions to 
 
 ### gstore_export_ipchandle(reggstore)
 

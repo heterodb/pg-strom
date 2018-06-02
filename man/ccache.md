@@ -1,8 +1,8 @@
-@ja:#インメモリ列キャッシュ
-@en:#In-memory Columnar Cache
+@ja:<h1>インメモリ列キャッシュ</h1>
+@en:<h1>In-memory Columnar Cache</h1>
 
-@ja:##概要
-@en:##Overview
+@ja:#概要
+@en:#Overview
 
 @ja{
 PG-Stromはプロセッサへ高速にデータを供給するためのストレージ関連機能をもう一つ持っています。
@@ -33,11 +33,11 @@ PG-Strom can switch GPU kernels to be invoked for row- or columnar-format accord
 ![overview of in-memory columnar cache](./img/ccache-overview.png)
 
 
-@ja:##初期設定
-@en:##System Setup
+@ja:#初期設定
+@en:#System Setup
 
-@ja:###列キャッシュの格納先
-@en:###Location of the columnar cache
+@ja:##列キャッシュの格納先
+@en:##Location of the columnar cache
 
 @ja{
 `pg_strom.ccache_base_dir`パラメータによって列キャッシュの格納先を指定する事ができます。デフォルト値は`/dev/shm`で、これは一般的なLinxディストリビューションにおいて`tmpfs`が配置されているパスであり、この配下に作成されたファイルは二次記憶装置のバッキングストアを持たない揮発性のデータとなります。
@@ -49,8 +49,8 @@ The `pg_strom.ccache_base_dir` parameter allows to specify the path to store the
 
 Custom configuration of the parameter enables to construct columnar cache on larger and reasonably fast storage, like NVMe-SSD, as backing store. However, note that update of the cached rows invalidates whole of the chunk (128MB) which contains the updated rows. It may lead unexpected performance degradation, if workloads have frequent read / write involving I/O operations.
 }
-@ja:###列キャッシュビルダの設定
-@en:###Columnar Cache Builder Configuration
+@ja:##列キャッシュビルダの設定
+@en:##Columnar Cache Builder Configuration
 
 @ja{
 PG-Stromは一つまたは複数のバックグラウンドワーカーを使用して、インメモリ列キャッシュを非同期かつ自動的に構築する事ができます。この処理を行うバックグラウンドワーカーを列キャッシュビルダーと呼びます。
@@ -85,8 +85,8 @@ Once a comma separated list of database names are assigned, columnar cache build
 }
 
 
-@ja:###対象テーブルの設定
-@en:###Source Table Configuration
+@ja:##対象テーブルの設定
+@en:##Source Table Configuration
 
 @ja{
 DB管理者は列キャッシュに格納すべきテーブルを予め指定する必要があります。
@@ -115,11 +115,11 @@ postgres=# select pgstrom_ccache_enabled('t0');
 (1 row)
 ```
 
-@ja:##運用
-@en:##Operations
+@ja:#運用
+@en:#Operations
 
-@ja:###列キャッシュの状態を確認する
-@en:###Check status of columnar cache
+@ja:##列キャッシュの状態を確認する
+@en:##Check status of columnar cache
 
 @ja{
 列キャッシュの状態を確認するには`pgstrom.ccache_info`システムビューを使用します。
@@ -147,8 +147,8 @@ contrib_regression_pg_strom=# SELECT * FROM pgstrom.ccache_info ;
 ```
 
 
-@ja:###列キャッシュの利用を確認する
-@en:###Check usage of columnar cache
+@ja:##列キャッシュの利用を確認する
+@en:##Check usage of columnar cache
 
 @ja{
 あるクエリが列キャッシュを使用する可能性があるかどうか、`EXPLAIN`コマンドを使用して確認する事ができます。
@@ -217,8 +217,8 @@ postgres=# EXPLAIN ANALYZE SELECT id,ax FROM t0 NATURAL JOIN t1 WHERE aid < 1000
 (13 rows)
 ```
 
-@ja:### `DROP DATABASE`コマンドに関する注意事項
-@en:### Attension for `DROP DATABASE` command
+@ja:## `DROP DATABASE`コマンドに関する注意事項
+@en:## Attension for `DROP DATABASE` command
 
 @ja{
 列キャッシュビルダを使用して非同期に列キャッシュを構築する場合、内部的にはバックグラウンドワーカープロセスが指定されたデータベースに接続し続ける事になります。

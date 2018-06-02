@@ -82,15 +82,27 @@
     <a class="current" href="./">SSDtoGPUダイレクトSQL実行</a>
     <ul class="subnav">
             
-    <li class="toctree-l3"><a href="#ssd-to-gpusql">SSD-to-GPUダイレクトSQL実行</a></li>
+    <li class="toctree-l3"><a href="#_1">概要</a></li>
+    
+
+    <li class="toctree-l3"><a href="#_2">初期設定</a></li>
     
         <ul>
         
-            <li><a class="toctree-l4" href="#_1">概要</a></li>
+            <li><a class="toctree-l4" href="#_3">ドライバのインストール</a></li>
         
-            <li><a class="toctree-l4" href="#_2">初期設定</a></li>
+            <li><a class="toctree-l4" href="#_4">テーブルスペースの設計</a></li>
         
-            <li><a class="toctree-l4" href="#_5">運用</a></li>
+        </ul>
+    
+
+    <li class="toctree-l3"><a href="#_5">運用</a></li>
+    
+        <ul>
+        
+            <li><a class="toctree-l4" href="#guc">GUCパラメータによる制御</a></li>
+        
+            <li><a class="toctree-l4" href="#visibility-map">Visibility Mapに関する注意事項</a></li>
         
         </ul>
     
@@ -176,8 +188,9 @@
           <div role="main">
             <div class="section">
               
-                <h1 id="ssd-to-gpusql">SSD-to-GPUダイレクトSQL実行</h1>
-<h2 id="_1">概要</h2>
+                <h1>SSD-to-GPUダイレクトSQL実行</h1>
+
+<h1 id="_1">概要</h1>
 <p>SQLワークロードを高速に処理するには、プロセッサが効率よく処理を行うのと同様に、ストレージやメモリからプロセッサへ高速にデータを供給する事が重要です。処理すべきデータがプロセッサに届いていなければ、プロセッサは手持ち無沙汰になってしまいます。</p>
 <p>SSD-to-GPUダイレクトSQL実行機能は、PCIeバスに直結する事で高速なI/O処理を実現するNVMe-SSDと、同じPCIeバス上に接続されたGPUをダイレクトに接続し、ハードウェア限界に近い速度でデータをプロセッサに供給する事でSQLワークロードを高速に処理するための機能です。</p>
 <p>通常、ストレージ上に格納されたPostgreSQLデータブロックは、PCIeバスを通していったんCPU/RAMへとロードされます。その後、クエリ実行計画にしたがってWHERE句によるフィルタリングやJOIN/GROUP BYといった処理を行うわけですが、集計系ワークロードの特性上、入力するデータ件数より出力するデータ件数の方がはるかに少ない件数となります。例えば数十億行を読み出した結果をGROUP BYで集約した結果が高々数百行という事も珍しくありません。</p>
@@ -187,8 +200,8 @@
 <p>本機能は内部的にNVIDIAのGPUDirect RDMAを使用しています。これはカスタムLinux kernel moduleを利用する事で、GPUデバイスメモリと他のPCIeデバイスの間でP2Pのデータ転送を可能にする基盤技術です。
 そのため、本機能を利用するには、PostgreSQLの拡張モジュールであるPG-Stromだけではなく、Linux kernelの拡張モジュールであるNVMe-Stromドライバが必要です。</p>
 <p>また、本機能が対応しているのはNVMe仕様のSSDのみです。SASやSATAといったインターフェースで接続されたSSDはサポートされていません。今までに動作実績のあるNVMe-SSDについては <a href="https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List#nvme-ssd-validation-list">002: HW Validation List</a> が参考になるでしょう。</p>
-<h2 id="_2">初期設定</h2>
-<h3 id="_3">ドライバのインストール</h3>
+<h1 id="_2">初期設定</h1>
+<h2 id="_3">ドライバのインストール</h2>
 <p>SSD-to-GPUダイレクトSQL実行機能を利用するには<code>nvme_strom</code>パッケージが必要です。このパッケージはNVMe-SSDとGPU間のP2P DMAを仲介するLinux kernel moduleを含んでおり、<a href="https://heterodb.github.io/swdc/">HeteroDB Software Distribution Center</a>から入手可能です。</p>
 <p>既に<code>heterodb-swdc</code>パッケージをインストールしている場合、<code>yum</code>コマンドによるインストールも可能です。</p>
 <pre><code>$ sudo yum install nvme_strom
@@ -219,7 +232,7 @@ nvme                   27722  4
 nvme_core              52964  9 nvme
 </code></pre>
 
-<h3 id="_4">テーブルスペースの設計</h3>
+<h2 id="_4">テーブルスペースの設計</h2>
 <p>SSD-to-GPUダイレクトSQL実行は以下の条件で発動します。</p>
 <ul>
 <li>スキャン対象のテーブルがNVMe-SSDで構成された区画に配置されている。<ul>
@@ -250,8 +263,8 @@ PostgreSQLのサーバプロセスの権限で当該ディレクトリ配下の�
 <pre><code>ALTER DATABASE my_database SET TABLESPACE my_nvme;
 </code></pre>
 
-<h2 id="_5">運用</h2>
-<h3 id="guc">GUCパラメータによる制御</h3>
+<h1 id="_5">運用</h1>
+<h2 id="guc">GUCパラメータによる制御</h2>
 <p>SSD-to-GPUダイレクトSQL実行に関連するGUCパラメータは2つあります。</p>
 <p>一つは<code>pg_strom.nvme_strom_enabled</code>で、SSD-to-GPUダイレクト機能の有効/無効を単純にon/offします。
 本パラメータが<code>off</code>になっていると、テーブルのサイズや物理配置とは無関係にSSD-to-GPUダイレクトSQL実行は使用されません。デフォルト値は<code>on</code>です。</p>
@@ -260,7 +273,7 @@ PostgreSQLのサーバプロセスの権限で当該ディレクトリ配下の�
 本パラメータのデフォルト値は、システムの物理メモリサイズと<code>shared_buffers</code>パラメータの指定値の1/3です。つまり、初期設定では間違いなくオンメモリで処理しきれないサイズのテーブルに対してだけSSD-to-GPUダイレクトSQL実行を行うよう調整されています。</p>
 <p>これは、一回の読み出しであればSSD-to-GPUダイレクトSQL実行に優位性があったとしても、オンメモリ処理ができる程度のテーブルに対しては、二回目以降のディスクキャッシュ利用を考慮すると、必ずしも優位とは言えないという仮定に立っているという事です。</p>
 <p>ワークロードの特性によっては必ずしもこの設定が正しいとは限りません。</p>
-<h3 id="ssd-to-gpusql_1">SSD-to-GPUダイレクトSQL実行の利用を確認する</h3>
+<h3 id="ssd-to-gpusql">SSD-to-GPUダイレクトSQL実行の利用を確認する</h3>
 <p><code>EXPLAIN</code>コマンドを実行すると、当該クエリでSSD-to-GPUダイレクトSQL実行が利用されるのかどうかを確認する事ができます。</p>
 <p>以下のクエリの例では、<code>Custom Scan (GpuJoin)</code>による<code>lineorder</code>テーブルに対するスキャンに<code>NVMe-Strom: enabled</code>との表示が出ています。この場合、<code>lineorder</code>テーブルからの読出しにはSSD-to-GPUダイレクトSQL実行が利用されます。</p>
 <pre><code># explain (costs off)
@@ -309,7 +322,7 @@ and s_region = 'AMERICA'
 (31 rows)
 </code></pre>
 
-<h3 id="visibility-map">Visibility Mapに関する注意事項</h3>
+<h2 id="visibility-map">Visibility Mapに関する注意事項</h2>
 <p>現在のところ、PG-StromのGPU側処理では行単位のMVCC可視性チェックを行う事ができません。これは、可視性チェックを行うために必要なデータ構造がホスト側だけに存在するためですが、ストレージ上のブロックを直接GPUに転送する場合、少々厄介な問題が生じます。</p>
 <p>NVMe-SSDにP2P DMAを要求する時点では、ストレージブロックの内容はまだCPU/RAMへと読み出されていないため、具体的にどの行が可視であるのか、どの行が不可視であるのかを判別する事ができません。これは、PostgreSQLがレコードをストレージへ書き出す際にMVCC関連の属性と共に書き込んでいるためで、似たような問題がIndexOnlyScanを実装する際に表面化しました。</p>
 <p>これに対処するため、PostgreSQLはVisibility Mapと呼ばれるインフラを持っています。これは、あるデータブロック中に存在するレコードが全てのトランザクションから可視である事が明らかであれば、該当するビットを立てる事で、データブロックを読むことなく当該ブロックにMVCC不可視なレコードが存在するか否かを判定する事を可能とするものです。</p>

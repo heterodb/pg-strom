@@ -90,17 +90,30 @@
     <a class="current" href="./">Gstore_fdw</a>
     <ul class="subnav">
             
-    <li class="toctree-l3"><a href="#gpugstore_fdw">GPUメモリストア(gstore_fdw)</a></li>
+    <li class="toctree-l3"><a href="#_1">概要</a></li>
+    
+
+    <li class="toctree-l3"><a href="#_2">初期設定</a></li>
+    
+
+    <li class="toctree-l3"><a href="#_3">運用</a></li>
     
         <ul>
         
-            <li><a class="toctree-l4" href="#_1">概要</a></li>
+            <li><a class="toctree-l4" href="#_4">データのロード</a></li>
         
-            <li><a class="toctree-l4" href="#_2">初期設定</a></li>
+            <li><a class="toctree-l4" href="#_5">デバイスメモリ消費量の確認</a></li>
         
-            <li><a class="toctree-l4" href="#_3">運用</a></li>
+            <li><a class="toctree-l4" href="#_6">内部データ形式</a></li>
         
-            <li><a class="toctree-l4" href="#_7">関連機能</a></li>
+        </ul>
+    
+
+    <li class="toctree-l3"><a href="#_7">外部プログラムとのデータ連携</a></li>
+    
+        <ul>
+        
+            <li><a class="toctree-l4" href="#sql">SQL関数の一覧</a></li>
         
         </ul>
     
@@ -178,8 +191,9 @@
           <div role="main">
             <div class="section">
               
-                <h1 id="gpugstore_fdw">GPUメモリストア(gstore_fdw)</h1>
-<h2 id="_1">概要</h2>
+                <h1>GPUメモリストア(gstore_fdw)</h1>
+
+<h1 id="_1">概要</h1>
 <p>通常、PG-StromはGPUデバイスメモリを一時的にだけ利用します。クエリの実行中に必要なだけのデバイスメモリを割り当て、その領域にデータを転送してSQLワークロードを実行するためにGPUカーネルを実行します。GPUカーネルの実行が完了すると、当該領域は速やかに開放され、他のワークロードでまた利用する事が可能となります。</p>
 <p>これは複数セッションの並行実行やGPUデバイスメモリよりも巨大なテーブルのスキャンを可能にするための設計ですが、状況によっては必ずしも適切ではない場合もあります。</p>
 <p>典型的な例は、それほど巨大ではなくGPUデバイスメモリに載る程度の大きさのデータに対して、繰り返し様々な条件で計算を行うといった利用シーンです。これは機械学習やパターンマッチ、類似度サーチといったワークロードが該当します。
@@ -193,7 +207,7 @@ gstore_fdwの制御する外部テーブル（Foreign Table）に対して<code>
 <p>外部テーブルを通してGPUデバイスメモリに格納されたデータは、PL/CUDA関数から参照する事ができます。
 現在のところ、SQLから透過的に生成されたGPUプログラムは当該GPUデバイスメモリ領域を参照する事はできませんが、将来のバージョンにおいて改良が予定されています。</p>
 <p><img alt="GPU memory store" src="../img/gstore_fdw-overview.png" /></p>
-<h2 id="_2">初期設定</h2>
+<h1 id="_2">初期設定</h1>
 <p>通常、外部テーブルを作成するには以下の3ステップが必要です。</p>
 <ul>
 <li><code>CREATE FOREIGN DATA WRAPPER</code>コマンドにより外部データラッパを定義する</li>
@@ -240,8 +254,8 @@ SERVER gstore_fdw OPTIONS(pinning '0', format 'pgstrom');
 <p><code>format</code>オプションで選択可能なパラメータは、現在のところ<code>pgstrom</code>のみです。これは、PG-Stromがインメモリ列キャッシュの内部フォーマットとして使用しているものと同一です。
 純粋にSQLを用いてデータの入出力を行うだけであればユーザが内部データ形式を意識する必要はありませんが、PL/CUDA関数をプログラミングしたり、IPCハンドルを用いて外部プログラムとGPUデバイスメモリを共有する場合には考慮が必要です。</p>
 <p><code>compression</code>オプションで選択可能なパラメータは、現在のところ<code>plgz</code>のみです。これは、PostgreSQLが可変長データを圧縮する際に用いているものと同一の形式で、PL/CUDA関数からはGPU内関数<code>pglz_decompress()</code>を呼び出す事で展開が可能です。圧縮アルゴリズムの特性上、例えばデータの大半が0であるような疎行列を表現する際に有用です。</p>
-<h2 id="_3">運用</h2>
-<h3 id="_4">データのロード</h3>
+<h1 id="_3">運用</h1>
+<h2 id="_4">データのロード</h2>
 <p>通常のテーブルと同様にINSERT、UPDATE、DELETEによって外部テーブルの背後に存在するGPUデバイスメモリを更新する事ができます。</p>
 <p>ただし、gstore_fdwはこれらコマンドの実行開始時に<code>SHARE UPDATE EXCLUSIVE</code>ロックを獲得する事に注意してください。これはある時点において１トランザクションのみがgstore_fdw外部テーブルを更新できることを意味します。
 この制約は、PL/CUDA関数からgstore_fdw外部テーブルを参照するときに個々のレコード単位で可視性チェックを行う必要がないという特性を得るためのトレードオフです。</p>
@@ -249,9 +263,8 @@ SERVER gstore_fdw OPTIONS(pinning '0', format 'pgstrom');
 この特性は、トランザクションの原子性を担保するには重要な性質ですが、古いバージョンを参照する可能性のある全てのトランザクションがコミットまたはアボートするまでの間は、古いバージョンのgstore_fdw外部テーブルの内容をGPUデバイスメモリに保持しておかねばならない事を意味します。</p>
 <p>そのため、通常のテーブルと同様にINSERT、UPDATE、DELETEが可能であるとはいえ、数行を更新してトランザクションをコミットするという事を繰り返すのは避けるべきです。基本的には大量行のINSERTによるバルクロードを行うべきです。</p>
 <p>通常のテーブルとは異なり、gstore_fdwに記録された内容は揮発性です。つまり、システムの電源断やPostgreSQLの再起動によってgstore_fdw外部テーブルの内容は容易に失われてしまいます。したがって、gstore_fdw外部テーブルにロードするデータは、他のデータソースから容易に復元可能な形にしておくべきです。</p>
-<h3 id="_5">デバイスメモリ消費量の確認</h3>
+<h2 id="_5">デバイスメモリ消費量の確認</h2>
 <p>gstore_fdwによって消費されるデバイスメモリのサイズを確認するには<code>pgstrom.gstore_fdw_chunk_info</code>システムビューを参照します。</p>
-<p>ああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああ</p>
 <pre><code>postgres=# select * from pgstrom.gstore_fdw_chunk_info ;
  database_oid | table_oid | revision | xmin | xmax | pinning | format  |  rawsize  |  nitems
 --------------+-----------+----------+------+------+---------+---------+-----------+----------
@@ -260,7 +273,8 @@ SERVER gstore_fdw OPTIONS(pinning '0', format 'pgstrom');
 (2 rows)
 </code></pre>
 
-<p><code>nvidia-smi</code>コマンドを</p>
+<p><code>nvidia-smi</code>コマンドを用いて、各GPUデバイスが実際にどの程度のデバイスメモリを消費しているかを確認する事ができます。
+Gstore_fdwが確保したメモリは、PG-Strom GPU memory keeperプロセスが保持・管理しています。ここでは、上記rawsizeの合計約1100MBに加え、CUDAが内部的に確保する領域を合わせて1211MBが占有されている事が分かります。</p>
 <pre><code>$ nvidia-smi
 Wed Apr  4 15:11:50 2018
 +-----------------------------------------------------------------------------+
@@ -281,18 +295,16 @@ Wed Apr  4 15:11:50 2018
 +-----------------------------------------------------------------------------+
 </code></pre>
 
-<h3 id="_6">内部データ形式</h3>
+<h2 id="_6">内部データ形式</h2>
 <p>gstore_fdwがGPUデバイスメモリ上にデータを保持する際の内部データ形式の詳細はノートを参照してください。</p>
 <ul>
-<li><code>pgstrom</code>フォーマットの詳細<ul>
-<li>ここにノートのリンク</li>
+<li><a href="https://github.com/heterodb/pg-strom/wiki/301:-Gstore_fdw-internal-format-of-%27pgstrom%27"><code>pgstrom</code>フォーマットの詳細</a></li>
 </ul>
-</li>
-</ul>
-<h2 id="_7">関連機能</h2>
+<h1 id="_7">外部プログラムとのデータ連携</h1>
 <p>CUDAには<code>cuIpcGetMemHandle()</code>および<code>cuIpcOpenMemHandle()</code>というAPIが用意されています。前者を用いてアプリケーションプログラムが確保したGPUデバイスメモリのユニークな識別子を取得し、後者を用いて別のアプリケーションプログラムから同一のGPUデバイスメモリを参照する事が可能となります。言い換えれば、ホストシステムにおける共有メモリのような仕組みを備えています。</p>
 <p>このユニークな識別子は<code>CUipcMemHandle</code>型のオブジェクトで、内部的には単純な64バイトのバイナリデータです。
 本節では<code>CUipcMemHandle</code>識別子を利用して、PostgreSQLと外部プログラムの間でGPUを介したデータ交換を行うための関数について説明します。</p>
+<h2 id="sql">SQL関数の一覧</h2>
 <h3 id="gstore_export_ipchandlereggstore">gstore_export_ipchandle(reggstore)</h3>
 <p>本関数は、gstore_fdw制御下の外部テーブルがGPU上に確保しているデバイスメモリの<code>CUipcMemHandle</code>識別子を取得し、bytea型のバイナリデータとして出力します。
 外部テーブルが空でGPU上にデバイスメモリを確保していなければNULLを返します。</p>

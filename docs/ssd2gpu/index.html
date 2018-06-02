@@ -82,15 +82,27 @@
     <a class="current" href="./">SSD2GPU Direct SQL Exec</a>
     <ul class="subnav">
             
-    <li class="toctree-l3"><a href="#ssd-to-gpu-direct-sql-execution">SSD-to-GPU Direct SQL Execution</a></li>
+    <li class="toctree-l3"><a href="#overview">Overview</a></li>
+    
+
+    <li class="toctree-l3"><a href="#system-setup">System Setup</a></li>
     
         <ul>
         
-            <li><a class="toctree-l4" href="#overview">Overview</a></li>
+            <li><a class="toctree-l4" href="#driver-installation">Driver Installation</a></li>
         
-            <li><a class="toctree-l4" href="#system-setup">System Setup</a></li>
+            <li><a class="toctree-l4" href="#designing-tablespace">Designing Tablespace</a></li>
         
-            <li><a class="toctree-l4" href="#operations">Operations</a></li>
+        </ul>
+    
+
+    <li class="toctree-l3"><a href="#operations">Operations</a></li>
+    
+        <ul>
+        
+            <li><a class="toctree-l4" href="#controls-using-guc-parameters">Controls using GUC parameters</a></li>
+        
+            <li><a class="toctree-l4" href="#attension-for-visibility-map">Attension for visibility map</a></li>
         
         </ul>
     
@@ -176,8 +188,9 @@
           <div role="main">
             <div class="section">
               
-                <h1 id="ssd-to-gpu-direct-sql-execution">SSD-to-GPU Direct SQL Execution</h1>
-<h2 id="overview">Overview</h2>
+                <h1>SSD-to-GPU Direct SQL Execution</h1>
+
+<h1 id="overview">Overview</h1>
 <p>For the fast execution of SQL workloads, it needs to provide processors rapid data stream from storage or memory, in addition to processor's execution efficiency. Processor will run idle if data stream would not be delivered.</p>
 <p>SSD-to-GPU Direct SQL Execution directly connects NVMe-SSD which enables high-speed I/O processing by direct attach to the PCIe bus and GPU device that is also attached on the same PCIe bus, and runs SQL workloads very high speed by supplying data stream close to the wired speed of the hardware.</p>
 <p>Usually, PostgreSQL data blocks on the storage shall be once loaded to CPU/RAM through the PCIe bus, then, PostgreSQL runs WHERE-clause for filtering or JOIN/GROUP BY according to the query execution plan. Due to the characteristics of analytic workloads, the amount of result data set is much smaller than the source data set. For example, it is not rare case to read billions rows but output just hundreds rows after the aggregation operations with GROUP BY.</p>
@@ -188,8 +201,8 @@
 So, this feature requires NVMe-Strom driver which is a Linux kernel module in addition to PG-Strom which is a PostgreSQL extension module.</p>
 <p>Also note that this feature supports only NVMe-SSD. It does not support SAS or SATA SSD.
 We have tested several NVMe-SSD models. You can refer <a href="https://github.com/heterodb/pg-strom/wiki/002:-HW-Validation-List#nvme-ssd-validation-list">002: HW Validation List</a> for your information.</p>
-<h2 id="system-setup">System Setup</h2>
-<h3 id="driver-installation">Driver Installation</h3>
+<h1 id="system-setup">System Setup</h1>
+<h2 id="driver-installation">Driver Installation</h2>
 <p><code>nvme_strom</code> package is required to activate SSD-to-GPU Direct SQL Execution. This package contains a custom Linux kernel module which intermediates P2P DMA from NVME-SSD to GPU. You can obtain the package from the <a href="https://heterodb.github.io/swdc/">HeteroDB Software Distribution Center</a>.</p>
 <p>If <code>heterodb-swdc</code> package is already installed, you can install the package by <code>yum</code> command.</p>
 <pre><code>$ sudo yum install nvme_strom
@@ -220,7 +233,7 @@ nvme                   27722  4
 nvme_core              52964  9 nvme
 </code></pre>
 
-<h3 id="designing-tablespace">Designing Tablespace</h3>
+<h2 id="designing-tablespace">Designing Tablespace</h2>
 <p>SSD-to-GPU Direct SQL Execution shall be invoked in the following case.</p>
 <ul>
 <li>The target table to be scanned locates on the partition being consist of NVMe-SSD.<ul>
@@ -250,8 +263,8 @@ Note that tablespace of the existing tables are not changed in thie case.</p>
 <pre><code>ALTER DATABASE my_database SET TABLESPACE my_nvme;
 </code></pre>
 
-<h2 id="operations">Operations</h2>
-<h3 id="controls-using-guc-parameters">Controls using GUC parameters</h3>
+<h1 id="operations">Operations</h1>
+<h2 id="controls-using-guc-parameters">Controls using GUC parameters</h2>
 <p>There are two GPU parameters related to SSD-to-GPU Direct SQL Execution.</p>
 <p>The first is <code>pg_strom.nvme_strom_enabled</code> that simply turn on/off the function of SSD-to-GPU Direct SQL Execution.
 If <code>off</code>, SSD-to-GPU Direct SQL Execution should not be used regardless of the table size or physical location. Default is <code>on</code>.</p>
@@ -309,7 +322,7 @@ and s_region = 'AMERICA'
 (31 rows)
 </code></pre>
 
-<h3 id="attension-for-visibility-map">Attension for visibility map</h3>
+<h2 id="attension-for-visibility-map">Attension for visibility map</h2>
 <p>Right now, GPU routines of PG-Strom cannot run MVCC visibility checks per row, because only host code has a special data structure for visibility checks. It also leads a problem.</p>
 <p>We cannot know which row is visible, or invisible at the time when PG-Strom requires P2P DMA for NVMe-SSD, because contents of the storage blocks are not yet loaded to CPU/RAM, and MVCC related attributes are written with individual records. PostgreSQL had similar problem when it supports IndexOnlyScan.</p>
 <p>To address the problem, PostgreSQL has an infrastructure of visibility map which is a bunch of flags to indicate whether any records in a particular data block are visible from all the transactions. If associated bit is set, we can know the associated block has no invisible records without reading the block itself.</p>
