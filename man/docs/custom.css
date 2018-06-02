@@ -1,3 +1,8 @@
 li.toctree-l3 {
   margin-left: -12pt;
 }
+
+a.toctree-l3 {
+  margin-left: 12pt;
+}
+
