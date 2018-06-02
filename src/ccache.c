@@ -1371,11 +1371,17 @@ vl_datum_compression(void *datum, int vl_comression)
 		else
 		{
 			struct varlena *temp = PG_DETOAST_DATUM(datum);
+			struct varlena *comp;
 
-			vl = (struct varlena *)
+			comp = (struct varlena *)
 				toast_compress_datum(PointerGetDatum(temp));
-			if (vl != temp)
+			if (!comp)
+				vl = temp;
+			else
+			{
+				vl = comp;
 				pfree(temp);
+			}
 		}
 	}
 	else
