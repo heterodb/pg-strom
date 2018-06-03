@@ -78,6 +78,12 @@
 
     <li class="toctree-l2"><a href="#configuration-and-operation">Configuration and Operation</a></li>
     
+        <ul>
+        
+            <li><a class="toctree-l3" href="#consideration-for-ssdgpu-location">Consideration for SSD/GPU location</a></li>
+        
+        </ul>
+    
 
     <li class="toctree-l2"><a href="#limitations">Limitations</a></li>
     
@@ -169,8 +175,116 @@
             <div class="section">
               
                 <h1 id="brief-overview">Brief overview</h1>
+<p><img alt="Partitioning Overview" src="../img/partition-overview.png" /></p>
+<p><img alt="Partitioning Optimization" src="../img/partition-optimize.png" /></p>
+<pre><code># EXPLAIN SELECT cat,count(*),avg(ax)
+            FROM pt NATURAL JOIN t1
+           WHERE ymd &gt; '2017-01-01'::date
+           GROUP BY cat;
+                                   QUERY PLAN
+--------------------------------------------------------------------------------
+ HashAggregate  (cost=196410.07..196412.57 rows=200 width=48)
+   Group Key: pt_2017.cat
+   -&gt;  Gather  (cost=66085.69..196389.07 rows=1200 width=72)
+         Workers Planned: 2
+         -&gt;  Parallel Append  (cost=65085.69..195269.07 rows=600 width=72)
+               -&gt;  Parallel Custom Scan (GpuPreAgg)  (cost=65085.69..65089.69 rows=200 width=72)
+                     Reduction: Local
+                     Combined GpuJoin: enabled
+                     -&gt;  Parallel Custom Scan (GpuJoin) on pt_2017  (cost=32296.64..74474.20 rows=1050772 width=40)
+                           Outer Scan: pt_2017  (cost=28540.80..66891.11 rows=1050772 width=36)
+                           Outer Scan Filter: (ymd &gt; '2017-01-01'::date)
+                           Depth 1: GpuHashJoin  (nrows 1050772...2521854)
+                                    HashKeys: pt_2017.aid
+                                    JoinQuals: (pt_2017.aid = t1.aid)
+                                    KDS-Hash (size: 10.78MB)
+                           -&gt;  Seq Scan on t1  (cost=0.00..1935.00 rows=100000 width=12)
+               -&gt;  Parallel Custom Scan (GpuPreAgg)  (cost=65078.35..65082.35 rows=200 width=72)
+                     Reduction: Local
+                     Combined GpuJoin: enabled
+                     -&gt;  Parallel Custom Scan (GpuJoin) on pt_2018  (cost=32296.65..74465.75 rows=1050649 width=40)
+                           Outer Scan: pt_2018  (cost=28540.81..66883.43 rows=1050649 width=36)
+                           Outer Scan Filter: (ymd &gt; '2017-01-01'::date)
+                           Depth 1: GpuHashJoin  (nrows 1050649...2521557)
+                                    HashKeys: pt_2018.aid
+                                    JoinQuals: (pt_2018.aid = t1.aid)
+                                    KDS-Hash (size: 10.78MB)
+                           -&gt;  Seq Scan on t1  (cost=0.00..1935.00 rows=100000 width=12)
+               -&gt;  Parallel Custom Scan (GpuPreAgg)  (cost=65093.03..65097.03 rows=200 width=72)
+                     Reduction: Local
+                     Combined GpuJoin: enabled
+                     -&gt;  Parallel Custom Scan (GpuJoin) on pt_2019  (cost=32296.65..74482.64 rows=1050896 width=40)
+                           Outer Scan: pt_2019  (cost=28540.80..66898.79 rows=1050896 width=36)
+                           Outer Scan Filter: (ymd &gt; '2017-01-01'::date)
+                           Depth 1: GpuHashJoin  (nrows 1050896...2522151)
+                                    HashKeys: pt_2019.aid
+                                    JoinQuals: (pt_2019.aid = t1.aid)
+                                    KDS-Hash (size: 10.78MB)
+                           -&gt;  Seq Scan on t1  (cost=0.00..1935.00 rows=100000 width=12)
+(38 rows)
+</code></pre>
+
 <h1 id="configuration-and-operation">Configuration and Operation</h1>
+<p>By the GUC parameters below, PG-Strom enables/disables the push-down of JOIN/GROUP BY under the partition child tables.</p>
+<table>
+<thead>
+<tr>
+<th align="left">Parameter</th>
+<th align="center">Type</th>
+<th align="center">Default</th>
+<th align="left">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>pg_strom.enable_partitionwise_gpujoin</code></td>
+<td align="center"><code>bool</code></td>
+<td align="center"><code>on</code></td>
+<td align="left">Enables/disables whether GpuJoin is pushed down to the partition children. Available only PostgreSQL v10 or later.</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.enable_partitionwise_gpupreagg</code></td>
+<td align="center"><code>bool</code></td>
+<td align="center"><code>on</code></td>
+<td align="left">Enables/disables whether GpuPreAgg is pushed down to the partition children. Available only PostgreSQL v10 or later.</td>
+</tr>
+</tbody>
+</table>
+<pre><code>postgres=# set pg_strom.enable_partitionwise_gpujoin = off;
+SET
+postgres=# set pg_strom.enable_partitionwise_gpupreagg = off;
+SET
+postgres=# EXPLAIN SELECT cat,count(*),avg(ax) FROM pt NATURAL JOIN t1 WHERE ymd &gt; '2017-01-01'::date group by cat;
+                                                           QUERY PLAN
+--------------------------------------------------------------------------------------------------------------------------------
+ Finalize GroupAggregate  (cost=341392.92..341399.42 rows=200 width=48)
+   Group Key: pt.cat
+   -&gt;  Sort  (cost=341392.92..341393.92 rows=400 width=72)
+         Sort Key: pt.cat
+         -&gt;  Gather  (cost=341333.63..341375.63 rows=400 width=72)
+               Workers Planned: 2
+               -&gt;  Partial HashAggregate  (cost=340333.63..340335.63 rows=200 width=72)
+                     Group Key: pt.cat
+                     -&gt;  Parallel Custom Scan (GpuJoin)  (cost=283591.92..283591.92 rows=7565562 width=40)
+                           Depth 1: GpuHashJoin  (nrows 3152318...7565562)
+                                    HashKeys: pt.aid
+                                    JoinQuals: (pt.aid = t1.aid)
+                                    KDS-Hash (size: 10.78MB)
+                           -&gt;  Append  (cost=28540.80..200673.34 rows=3152318 width=36)
+                                 -&gt;  Parallel Custom Scan (GpuScan) on pt_2017  (cost=28540.80..66891.11 rows=1050772 width=36)
+                                       GPU Filter: (ymd &gt; '2017-01-01'::date)
+                                 -&gt;  Parallel Custom Scan (GpuScan) on pt_2018  (cost=28540.81..66883.43 rows=1050649 width=36)
+                                       GPU Filter: (ymd &gt; '2017-01-01'::date)
+                                 -&gt;  Parallel Custom Scan (GpuScan) on pt_2019  (cost=28540.80..66898.79 rows=1050896 width=36)
+                                       GPU Filter: (ymd &gt; '2017-01-01'::date)
+                           -&gt;  Seq Scan on t1  (cost=0.00..1935.00 rows=100000 width=12)
+(21 rows)
+</code></pre>
+
+<h2 id="consideration-for-ssdgpu-location">Consideration for SSD/GPU location</h2>
 <h1 id="limitations">Limitations</h1>
+<p><strong>Experimental Feature</strong></p>
+<p>It is an experimental feature to push down GpuJoin and GpuPreAgg to the partitioned child tables, so it may lead unexpected behavior or system crash. In such case, disable the feature using <code>pg_strom.enable_partitionwise_gpujoin</code> or <code>pg_strom.enable_partitionwise_gpupreagg</code>. And report your case to <a href="https://github.com/heterodb/pg-strom/issues">PG-Strom Issues</a>.</p>
               
             </div>
           </div>

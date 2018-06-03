@@ -78,6 +78,12 @@
 
     <li class="toctree-l2"><a href="#_2">設定と運用</a></li>
     
+        <ul>
+        
+            <li><a class="toctree-l3" href="#ssdgpu">SSDとGPUの配置に関する考慮</a></li>
+        
+        </ul>
+    
 
     <li class="toctree-l2"><a href="#_3">制限事項</a></li>
     
@@ -168,11 +174,144 @@
           <div role="main">
             <div class="section">
               
-                <p>本章ではPostgreSQLのパーティショニング機能とPG-Stromを併用する方法について説明します。</p>
-<p>なお、本章の内容は PostgreSQL v10 以降でPG-Stromを使用する場合にのみ有効です。</p>
+                <h1>パーティショニング</h1>
+
+<p>本章ではPostgreSQLのパーティショニング機能とPG-Stromを併用する方法について説明します。
+なお、本章の内容は PostgreSQL v10 以降でPG-Stromを使用する場合にのみ有効です。</p>
 <h1 id="_1">概要</h1>
+<p>PostgreSQL v10においてパーティショニング機能がサポートされました。
+これは、論理的には一個の大きなテーブルであるものを物理的により小さなテーブルに分割して格納する仕組みで、検索条件より明らかにスキャンの必要がないパーティション子テーブルをスキップしたり、ストレージを物理的に分散させる事でより広いI/O帯域を確保するなどの利点があります。</p>
+<p>PostgreSQL v10では範囲パーティショニング、リストパーティショニングの2種類がサポートされ、さらにPostgreSQL v11ではハッシュパーティショニングがサポートされています。</p>
+<p>以下の図は、日付型（DATE型）のキー値を用いた範囲パーティショニングを示しています。
+キー値<code>2018-05-30</code>を持つレコードは、パーティション子テーブル<code>tbl_2018</code>に振り分けられ、同様に、キー値<code>2014-03-21</code>を持つレコードは、パーティション子テーブル<code>tbl_2014</code>に振り分けられる・・・といった具合です。</p>
+<p>パーティション化されたテーブルをスキャンする時、例えば<code>WHERE ymd &gt; '2016-07-01'::date</code>という条件句が付加されていると、<code>tbl_2014</code>および<code>tbl_2015</code>に該当するレコードが存在しない事は自明ですので、PostgreSQLのオプティマイザは<code>tbl_2016</code>、<code>tbl_2017</code>、<code>tbl_2018</code>だけをスキャンし、その結果を結合する<strong>Append</strong>ノードを挟む事で、あたかも単一のテーブルからレコードを読み出したかのように振舞います。</p>
+<p><img alt="Partitioning Overview" src="../img/partition-overview.png" /></p>
+<p>PostgreSQLのパーティショニングとPG-Stromを併用する場合、まず、スキャンが必要であるとオプティマイザが判断したパーティション子テーブルのスキャンに対し、個々に実行コストを推定した上で<strong>GpuScan</strong>が選択される事があります。この場合、<strong>GpuScan</strong>の実行結果を<strong>Append</strong>ノードで束ねる事になります。</p>
+<p>ただ、パーティションテーブルのスキャンに続き、JOINやGROUP BYなどPG-Stromで高速化が可能な処理を実行する場合には、最適化の観点から検討が必要です。</p>
+<p>例えば、パーティション化されていないテーブルをスキャンして別のテーブルとJOINし、GROUP BYによる集計結果を出力する場合、条件が揃えば、各ステップ間のデータ交換はGPUデバイスメモリ上で行う事ができます。これはGPUとCPUの間のデータ移動を最小化するという観点から、最もPG-Stromが得意とするワークロードです。</p>
+<p>一方、パーティション化されたテーブルに対して同様の処理を行う場合、テーブルのスキャンとJOINやGROUP BYの間に<strong>Append</strong>処理が挟まってしまうのが課題です。そのため、GpuScanが処理したデータを一度ホストシステムへ転送し、<strong>Append</strong>処理を行った上で、その後のGpuJoinやGpuPreAgg処理を行うために再びデータをGPUへ転送する事になります。これは決して効率の良い処理ではありません。</p>
+<p>このようなCPU-GPU間のデータのピンポンを避けるため、PG-Stromは可能な限りJOINやGROUP BYを<strong>Append</strong>よりも先に実行できるようプッシュダウンを試みます。</p>
+<p>プッシュダウンが成功れば、データ交換を効率化できるだけでなく、特にGROUP BY処理によって行数を大幅に削減する事が可能となるため、<strong>Append</strong>処理を実行するホストシステムの負荷を顕著に減らす事になります。</p>
+<p><img alt="Partitioning Optimization" src="../img/partition-optimize.png" /></p>
+<p>以下の例は、日付型（date型）のフィールド<code>ymd</code>をキーとして年単位でパーティション子テーブルを設定している<code>pt</code>に対して、JOINとGROUP BYを含むクエリを投入した時の実行計画です。</p>
+<p>検索条件により2016年以前のデータを含むパーティション子テーブルのスキャンは自明に排除され、さらに<code>pt_2017</code>、<code>pt_2018</code>、<code>pt_2019</code>各テーブルのJOINとGROUP BY処理が一体となって<strong>Append</strong>の前に実行されている事が分かります。</p>
+<pre><code># EXPLAIN SELECT cat,count(*),avg(ax)
+            FROM pt NATURAL JOIN t1
+           WHERE ymd &gt; '2017-01-01'::date
+           GROUP BY cat;
+                                   QUERY PLAN
+--------------------------------------------------------------------------------
+ HashAggregate  (cost=196410.07..196412.57 rows=200 width=48)
+   Group Key: pt_2017.cat
+   -&gt;  Gather  (cost=66085.69..196389.07 rows=1200 width=72)
+         Workers Planned: 2
+         -&gt;  Parallel Append  (cost=65085.69..195269.07 rows=600 width=72)
+               -&gt;  Parallel Custom Scan (GpuPreAgg)  (cost=65085.69..65089.69 rows=200 width=72)
+                     Reduction: Local
+                     Combined GpuJoin: enabled
+                     -&gt;  Parallel Custom Scan (GpuJoin) on pt_2017  (cost=32296.64..74474.20 rows=1050772 width=40)
+                           Outer Scan: pt_2017  (cost=28540.80..66891.11 rows=1050772 width=36)
+                           Outer Scan Filter: (ymd &gt; '2017-01-01'::date)
+                           Depth 1: GpuHashJoin  (nrows 1050772...2521854)
+                                    HashKeys: pt_2017.aid
+                                    JoinQuals: (pt_2017.aid = t1.aid)
+                                    KDS-Hash (size: 10.78MB)
+                           -&gt;  Seq Scan on t1  (cost=0.00..1935.00 rows=100000 width=12)
+               -&gt;  Parallel Custom Scan (GpuPreAgg)  (cost=65078.35..65082.35 rows=200 width=72)
+                     Reduction: Local
+                     Combined GpuJoin: enabled
+                     -&gt;  Parallel Custom Scan (GpuJoin) on pt_2018  (cost=32296.65..74465.75 rows=1050649 width=40)
+                           Outer Scan: pt_2018  (cost=28540.81..66883.43 rows=1050649 width=36)
+                           Outer Scan Filter: (ymd &gt; '2017-01-01'::date)
+                           Depth 1: GpuHashJoin  (nrows 1050649...2521557)
+                                    HashKeys: pt_2018.aid
+                                    JoinQuals: (pt_2018.aid = t1.aid)
+                                    KDS-Hash (size: 10.78MB)
+                           -&gt;  Seq Scan on t1  (cost=0.00..1935.00 rows=100000 width=12)
+               -&gt;  Parallel Custom Scan (GpuPreAgg)  (cost=65093.03..65097.03 rows=200 width=72)
+                     Reduction: Local
+                     Combined GpuJoin: enabled
+                     -&gt;  Parallel Custom Scan (GpuJoin) on pt_2019  (cost=32296.65..74482.64 rows=1050896 width=40)
+                           Outer Scan: pt_2019  (cost=28540.80..66898.79 rows=1050896 width=36)
+                           Outer Scan Filter: (ymd &gt; '2017-01-01'::date)
+                           Depth 1: GpuHashJoin  (nrows 1050896...2522151)
+                                    HashKeys: pt_2019.aid
+                                    JoinQuals: (pt_2019.aid = t1.aid)
+                                    KDS-Hash (size: 10.78MB)
+                           -&gt;  Seq Scan on t1  (cost=0.00..1935.00 rows=100000 width=12)
+(38 rows)
+</code></pre>
+
 <h1 id="_2">設定と運用</h1>
+<p>以下のGUCパラメータにより、PG-StromはJOINやGROUP BYのパーティション子テーブルへのプッシュダウンを制御します。</p>
+<table>
+<thead>
+<tr>
+<th align="left">パラメータ名</th>
+<th align="center">型</th>
+<th align="center">初期値</th>
+<th align="left">説明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>pg_strom.enable_partitionwise_gpujoin</code></td>
+<td align="center"><code>bool</code></td>
+<td align="center"><code>on</code></td>
+<td align="left">GpuJoinを各パーティションの要素へプッシュダウンするかどうかを制御する。PostgreSQL v10以降でのみ対応。</td>
+</tr>
+<tr>
+<td align="left"><code>pg_strom.enable_partitionwise_gpupreagg</code></td>
+<td align="center"><code>bool</code></td>
+<td align="center"><code>on</code></td>
+<td align="left">GpuPreAggを各パーティションの要素へプッシュダウンするかどうかを制御する。PostgreSQL v10以降でのみ対応。</td>
+</tr>
+</tbody>
+</table>
+<p>これらパラメータの初期値は<code>on</code>ですが、これを<code>off</code>にした場合、プッシュダウン処理は行われません。</p>
+<p>EXPLAINコマンドで前節のクエリの実行計画を表示したところ、実行計画は以下のように変化しています。
+パーティション子テーブルのスキャンには<strong>GpuScan</strong>が使用されていますが、その処理結果は一度ホストシステムに返され、<strong>Append</strong>によって結合された後、再び<strong>GpuJoin</strong>を処理するためにGPUへと転送されます。</p>
+<pre><code>postgres=# set pg_strom.enable_partitionwise_gpujoin = off;
+SET
+postgres=# set pg_strom.enable_partitionwise_gpupreagg = off;
+SET
+postgres=# EXPLAIN SELECT cat,count(*),avg(ax) FROM pt NATURAL JOIN t1 WHERE ymd &gt; '2017-01-01'::date group by cat;
+                                                           QUERY PLAN
+--------------------------------------------------------------------------------------------------------------------------------
+ Finalize GroupAggregate  (cost=341392.92..341399.42 rows=200 width=48)
+   Group Key: pt.cat
+   -&gt;  Sort  (cost=341392.92..341393.92 rows=400 width=72)
+         Sort Key: pt.cat
+         -&gt;  Gather  (cost=341333.63..341375.63 rows=400 width=72)
+               Workers Planned: 2
+               -&gt;  Partial HashAggregate  (cost=340333.63..340335.63 rows=200 width=72)
+                     Group Key: pt.cat
+                     -&gt;  Parallel Custom Scan (GpuJoin)  (cost=283591.92..283591.92 rows=7565562 width=40)
+                           Depth 1: GpuHashJoin  (nrows 3152318...7565562)
+                                    HashKeys: pt.aid
+                                    JoinQuals: (pt.aid = t1.aid)
+                                    KDS-Hash (size: 10.78MB)
+                           -&gt;  Append  (cost=28540.80..200673.34 rows=3152318 width=36)
+                                 -&gt;  Parallel Custom Scan (GpuScan) on pt_2017  (cost=28540.80..66891.11 rows=1050772 width=36)
+                                       GPU Filter: (ymd &gt; '2017-01-01'::date)
+                                 -&gt;  Parallel Custom Scan (GpuScan) on pt_2018  (cost=28540.81..66883.43 rows=1050649 width=36)
+                                       GPU Filter: (ymd &gt; '2017-01-01'::date)
+                                 -&gt;  Parallel Custom Scan (GpuScan) on pt_2019  (cost=28540.80..66898.79 rows=1050896 width=36)
+                                       GPU Filter: (ymd &gt; '2017-01-01'::date)
+                           -&gt;  Seq Scan on t1  (cost=0.00..1935.00 rows=100000 width=12)
+(21 rows)
+</code></pre>
+
+<h2 id="ssdgpu">SSDとGPUの配置に関する考慮</h2>
+<p>PostgreSQLのパーティショニングとSSD-to-GPUダイレクトSQL実行を併用する場合、各パーティション子テーブルがデータブロックを保存するNVMe-SSDストレージの物理的な配置には特に注意が必要です。</p>
+<!--
+あとで書く。SSDの近傍GPUに自動的に近づく機能を実装してから。
+-->
+
 <h1 id="_3">制限事項</h1>
+<p><strong>実験的機能</strong></p>
+<p>GpuJoinとGpuPreAggのパーティション子テーブルへのプッシュダウンは、現時点では実験的な機能であり、予期せぬ不具合やクラッシュを引き起こす可能性があります。
+その場合は<code>pg_strom.enable_partitionwise_gpujoin</code>や<code>pg_strom.enable_partitionwise_gpupreagg</code>を用いて当該機能を無効化すると共に、<a href="https://github.com/heterodb/pg-strom/issues">PG-Strom Issues</a>へ障害レポートをお願いします。</p>
               
             </div>
           </div>
