@@ -5232,6 +5232,8 @@ gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 
 resume_kernel:
 	/* init or reset kds_slot */
+	gpreagg->kern.read_src_pos = 0;
+	gpreagg->kern.read_slot_pos = 0;
 	memcpy((void *)m_kds_slot, gpas->kds_slot_head,
 		   KERN_DATA_STORE_HEAD_LENGTH(gpas->kds_slot_head));
 	((kern_data_store *)m_kds_slot)->length = gpreagg->kds_slot_length;
