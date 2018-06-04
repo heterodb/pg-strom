@@ -1252,6 +1252,8 @@ extract_partitionwise_pathlist(PlannerInfo *root,
 	AppendPath *append_path;
 	Index		parent_relid;
 	List	   *result = NIL;
+	bool		enable_gpunestloop_saved;
+	bool		enable_gpuhashjoin_saved;
 	List	   *join_info_list_saved;
 	List	  **join_rel_level_saved;
 	double		pgstrom_gpu_setup_cost_saved;
@@ -1325,6 +1327,13 @@ extract_partitionwise_pathlist(PlannerInfo *root,
 	pgstrom_gpu_setup_cost_saved = pgstrom_gpu_setup_cost;
 	join_rel_level_saved = root->join_rel_level;
 	join_info_list_saved = root->join_info_list;
+	enable_gpunestloop_saved = enable_gpunestloop;
+	enable_gpuhashjoin_saved = enable_gpuhashjoin;
+	if (!enable_partitionwise_gpujoin)
+	{
+		enable_gpunestloop = false;
+		enable_gpuhashjoin = false;
+	}
 	PG_TRY();
 	{
 		List	   *new_append_subpaths = NIL;
@@ -1420,6 +1429,8 @@ extract_partitionwise_pathlist(PlannerInfo *root,
 		pgstrom_gpu_setup_cost = pgstrom_gpu_setup_cost_saved;
 		root->join_rel_level = join_rel_level_saved;
 		root->join_info_list = join_info_list_saved;
+		enable_gpunestloop = enable_gpunestloop_saved;
+		enable_gpuhashjoin = enable_gpuhashjoin_saved;
 	}
 	PG_CATCH();
 	{
@@ -1427,6 +1438,8 @@ extract_partitionwise_pathlist(PlannerInfo *root,
 		pgstrom_gpu_setup_cost = pgstrom_gpu_setup_cost_saved;
 		root->join_rel_level = join_rel_level_saved;
 		root->join_info_list = join_info_list_saved;
+		enable_gpunestloop = enable_gpunestloop_saved;
+		enable_gpuhashjoin = enable_gpuhashjoin_saved;
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
@@ -1704,7 +1717,7 @@ gpujoin_add_join_path(PlannerInfo *root,
 							   extra);
 
 	/* nothing to do, if PG-Strom is not enabled */
-	if (!pgstrom_enabled)
+	if (!pgstrom_enabled || (!enable_gpunestloop && !enable_gpuhashjoin))
 		return;
 
 	/*
