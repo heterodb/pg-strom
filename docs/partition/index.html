@@ -174,9 +174,26 @@
           <div role="main">
             <div class="section">
               
-                <h1 id="brief-overview">Brief overview</h1>
+                <h1>Partitioning</h1>
+
+<p>This chapter introduces the way to use PG-Strom and the partitioning feature of PostgreSQL.
+Note that this chapter is only valid when PG-Strom works on PostgreSQL v10 or later.</p>
+<p>Also see <a href="https://www.postgresql.org/docs/current/static/ddl-partitioning.html">PostgreSQL Document: Table Partitioning</a> for more details of the partitioning feature of PostgreSQL.</p>
+<h1 id="brief-overview">Brief overview</h1>
+<p>PostgreSQL v10 newly support table partitioning.
+This mechanism splits one logically large table into physically small pieces. It is valuable because it can skip partitioned child tables which is obviously unnecessary to scan from the search qualification, and it can offer broader I/O bandwidth by physically distributed storage and so on.</p>
+<p>PostgreSQL v10 supports two kinds of them: range-partitioning and list-partitioning. Then, PostgreSQL v11 newly supports hash-partitioning.</p>
+<p>The diagram below shows a range-partitioning configuration with <code>date</code>-type key values.
+A record which has <code>2018-05-30</code> as key is distributed to the partition child table <code>tbl_2018</code>, in the same way, a record which has <code>2014-03-21</code> is distributed to the partition child table <code>tbl_2014</code>, and so on.</p>
+<p>In case when scan qualifier <code>WHERE ymd &gt; '2016-07-01'::date</code> is added on scan of the partitioned table for example, it is obvious that <code>tbl_2014</code> and <code>tbl_2015</code> contains no records to match, therefore, PostgreSQL' optimizer constructs query execution plan which runs on only <code>tbl_2016</code>, <code>tbl_2017</code> and <code>tbl_2018</code> then merges their results by <strong>Append</strong> node. It shall perform as if records are read from one logical table.</p>
 <p><img alt="Partitioning Overview" src="../img/partition-overview.png" /></p>
+<p>When PG-Strom is used with table partitioning of PostgreSQL together, its optimizer may choose <strong>GpuScan</strong> to scan the individual partition child tables to be scanned, in the result of cost estimation. In this case, <strong>Append</strong> node merges the results of <strong>GpuScan</strong>.</p>
+<p>On the other hands, if query runs JOIN or GROUP BY, which can be accelerated by PG-Strom, next to the scan on partitioned table, it needs consideration from the standpoint of performance optimization.</p>
+<p>For example, in case when query scans non-partitioned table then runs JOIN with other tables and GROUP BY, under some conditions, it can handle step-step data exchange on GPU device memory. It is an optimal workload for PG-Strom due to minimized data exchange between GPU and CPU.</p>
+<p>In case when query runs corresponding workload on the partitioned table, it is problematic that <strong>Append</strong> node is injected into between the child tables scan and JOIN/GROUP BY. Under the query execution plan, the result of GpuScan must be written back to the host system, then <strong>Append</strong> merges them and send back the data to GPU to run the following GpuJoin and GpuPreAgg. It is never efficient query execution.</p>
 <p><img alt="Partitioning Optimization" src="../img/partition-optimize.png" /></p>
+<p>The example below shows a query execution plan to the query which includes JOIN and GROUP BY towards the partitioned table <code>pt</code> by the key field <code>ymd</code> of <code>date</code> type; per year distribution.</p>
+<p>Due to the scan qualification, it omits scan on the partition child tables for 2016 or prior, in addition, a combined JOIN and GROUP BY on the <code>pt_2017</code>, <code>pt_2018</code> and <code>pt_2019</code> shall be executed prior to the <strong>Append</strong>.</p>
 <pre><code># EXPLAIN SELECT cat,count(*),avg(ax)
             FROM pt NATURAL JOIN t1
            WHERE ymd &gt; '2017-01-01'::date
@@ -250,6 +267,9 @@
 </tr>
 </tbody>
 </table>
+<p>Default of the parameters are <code>on</code>. Once set to <code>off</code>, push-down is disabled.</p>
+<p>The query execution plan is changed as follows, by EXPLAIN command for the query above section.
+It uses <strong>GpuScan</strong> to scan the partition child tables, however, their results are once written back to the host system, then merged by <strong>Append</strong> and moved to GPU again to process <strong>GpuJoin</strong>.</p>
 <pre><code>postgres=# set pg_strom.enable_partitionwise_gpujoin = off;
 SET
 postgres=# set pg_strom.enable_partitionwise_gpupreagg = off;

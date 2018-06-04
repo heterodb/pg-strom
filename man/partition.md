@@ -2,6 +2,15 @@
 <h1>パーティショニング</h1>
 本章ではPostgreSQLのパーティショニング機能とPG-Stromを併用する方法について説明します。
 なお、本章の内容は PostgreSQL v10 以降でPG-Stromを使用する場合にのみ有効です。
+
+PostgreSQLのパーティション機能について、詳しくは[PostgreSQL文書：テーブルのパーティショニング](https://www.postgresql.jp/document/current/html/ddl-partitioning.html)を参照してください。
+}
+@en{
+<h1>Partitioning</h1>
+This chapter introduces the way to use PG-Strom and the partitioning feature of PostgreSQL.
+Note that this chapter is only valid when PG-Strom works on PostgreSQL v10 or later.
+
+Also see [PostgreSQL Document: Table Partitioning](https://www.postgresql.org/docs/current/static/ddl-partitioning.html) for more details of the partitioning feature of PostgreSQL.
 }
 
 @ja:#概要
@@ -13,15 +22,25 @@ PostgreSQL v10においてパーティショニング機能がサポートされ
 
 PostgreSQL v10では範囲パーティショニング、リストパーティショニングの2種類がサポートされ、さらにPostgreSQL v11ではハッシュパーティショニングがサポートされています。
 }
-@en{}
+@en{
+PostgreSQL v10 newly support table partitioning.
+This mechanism splits one logically large table into physically small pieces. It is valuable because it can skip partitioned child tables which is obviously unnecessary to scan from the search qualification, and it can offer broader I/O bandwidth by physically distributed storage and so on.
+
+PostgreSQL v10 supports two kinds of them: range-partitioning and list-partitioning. Then, PostgreSQL v11 newly supports hash-partitioning.
+}
 
 @ja{
 以下の図は、日付型（DATE型）のキー値を用いた範囲パーティショニングを示しています。
 キー値`2018-05-30`を持つレコードは、パーティション子テーブル`tbl_2018`に振り分けられ、同様に、キー値`2014-03-21`を持つレコードは、パーティション子テーブル`tbl_2014`に振り分けられる・・・といった具合です。
 
-パーティション化されたテーブルをスキャンする時、例えば`WHERE ymd > '2016-07-01'::date`という条件句が付加されていると、`tbl_2014`および`tbl_2015`に該当するレコードが存在しない事は自明ですので、PostgreSQLのオプティマイザは`tbl_2016`、`tbl_2017`、`tbl_2018`だけをスキャンし、その結果を結合する**Append**ノードを挟む事で、あたかも単一のテーブルからレコードを読み出したかのように振舞います。
+パーティション化されたテーブルをスキャンする時、例えば`WHERE ymd > '2016-07-01'::date`という条件句が付加されていると、`tbl_2014`および`tbl_2015`に該当するレコードが存在しない事は自明ですので、PostgreSQLのオプティマイザは`tbl_2016`、`tbl_2017`、`tbl_2018`だけをスキャンし、その結果を結合する**Append**ノードを挟む事で、あたかも単一のテーブルからレコードを読み出したかのように振舞う実行計画を作成します。
 }
-@en{}
+@en{
+The diagram below shows a range-partitioning configuration with `date`-type key values.
+A record which has `2018-05-30` as key is distributed to the partition child table `tbl_2018`, in the same way, a record which has `2014-03-21` is distributed to the partition child table `tbl_2014`, and so on.
+
+In case when scan qualifier `WHERE ymd > '2016-07-01'::date` is added on scan of the partitioned table for example, it is obvious that `tbl_2014` and `tbl_2015` contains no records to match, therefore, PostgreSQL' optimizer constructs query execution plan which runs on only `tbl_2016`, `tbl_2017` and `tbl_2018` then merges their results by **Append** node. It shall perform as if records are read from one logical table.
+}
 
 ![Partitioning Overview](./img/partition-overview.png)
 
@@ -29,22 +48,36 @@ PostgreSQL v10では範囲パーティショニング、リストパーティシ
 PostgreSQLのパーティショニングとPG-Stromを併用する場合、まず、スキャンが必要であるとオプティマイザが判断したパーティション子テーブルのスキャンに対し、個々に実行コストを推定した上で**GpuScan**が選択される事があります。この場合、**GpuScan**の実行結果を**Append**ノードで束ねる事になります。
 }
 
-@en{}
+@en{
+When PG-Strom is used with table partitioning of PostgreSQL together, its optimizer may choose **GpuScan** to scan the individual partition child tables to be scanned, in the result of cost estimation. In this case, **Append** node merges the results of **GpuScan**.
+}
 
 @ja{
 ただ、パーティションテーブルのスキャンに続き、JOINやGROUP BYなどPG-Stromで高速化が可能な処理を実行する場合には、最適化の観点から検討が必要です。
 
 例えば、パーティション化されていないテーブルをスキャンして別のテーブルとJOINし、GROUP BYによる集計結果を出力する場合、条件が揃えば、各ステップ間のデータ交換はGPUデバイスメモリ上で行う事ができます。これはGPUとCPUの間のデータ移動を最小化するという観点から、最もPG-Stromが得意とするワークロードです。
 
-一方、パーティション化されたテーブルに対して同様の処理を行う場合、テーブルのスキャンとJOINやGROUP BYの間に**Append**処理が挟まってしまうのが課題です。そのため、GpuScanが処理したデータを一度ホストシステムへ転送し、**Append**処理を行った上で、その後のGpuJoinやGpuPreAgg処理を行うために再びデータをGPUへ転送する事になります。これは決して効率の良い処理ではありません。
+一方、パーティション化されたテーブルに対して同様の処理を行う場合、テーブルのスキャンとJOINやGROUP BYの間に**Append**処理が挟まってしまうのが課題です。この実行計画の下では、GpuScanが処理したデータを一度ホストシステムへ転送し、**Append**処理を行った上で、その後のGpuJoinやGpuPreAgg処理を行うために再びデータをGPUへ転送する事になります。これは決して効率の良い処理ではありません。
 }
 
-@en{}
+@en{
+On the other hands, if query runs JOIN or GROUP BY, which can be accelerated by PG-Strom, next to the scan on partitioned table, it needs consideration from the standpoint of performance optimization.
+
+For example, in case when query scans non-partitioned table then runs JOIN with other tables and GROUP BY, under some conditions, it can handle step-step data exchange on GPU device memory. It is an optimal workload for PG-Strom due to minimized data exchange between GPU and CPU.
+
+In case when query runs corresponding workload on the partitioned table, it is problematic that **Append** node is injected into between the child tables scan and JOIN/GROUP BY. Under the query execution plan, the result of GpuScan must be written back to the host system, then **Append** merges them and send back the data to GPU to run the following GpuJoin and GpuPreAgg. It is never efficient query execution.
+}
 
 @ja{
 このようなCPU-GPU間のデータのピンポンを避けるため、PG-Stromは可能な限りJOINやGROUP BYを**Append**よりも先に実行できるようプッシュダウンを試みます。
 
 プッシュダウンが成功れば、データ交換を効率化できるだけでなく、特にGROUP BY処理によって行数を大幅に削減する事が可能となるため、**Append**処理を実行するホストシステムの負荷を顕著に減らす事になります。
+}
+
+@{
+To avoid the data ping-pong between CPU and GPU, PG-Strom tries to push down execution of JOIN and GROUP BY prior to **Append** as possible as they can.
+
+Once push-down gets successful, it is not only efficient data exchange, but it can also reduce load of the host system which runs **Append** because GROUP BY usually reduces the number of rows dramatically.
 }
 
 ![Partitioning Optimization](./img/partition-optimize.png)
@@ -53,6 +86,12 @@ PostgreSQLのパーティショニングとPG-Stromを併用する場合、ま�
 以下の例は、日付型（date型）のフィールド`ymd`をキーとして年単位でパーティション子テーブルを設定している`pt`に対して、JOINとGROUP BYを含むクエリを投入した時の実行計画です。
 
 検索条件により2016年以前のデータを含むパーティション子テーブルのスキャンは自明に排除され、さらに`pt_2017`、`pt_2018`、`pt_2019`各テーブルのJOINとGROUP BY処理が一体となって**Append**の前に実行されている事が分かります。
+}
+
+@en{
+The example below shows a query execution plan to the query which includes JOIN and GROUP BY towards the partitioned table `pt` by the key field `ymd` of `date` type; per year distribution.
+
+Due to the scan qualification, it omits scan on the partition child tables for 2016 or prior, in addition, a combined JOIN and GROUP BY on the `pt_2017`, `pt_2018` and `pt_2019` shall be executed prior to the **Append**.
 }
 
 ```
@@ -129,6 +168,12 @@ By the GUC parameters below, PG-Strom enables/disables the push-down of JOIN/GRO
 
 EXPLAINコマンドで前節のクエリの実行計画を表示したところ、実行計画は以下のように変化しています。
 パーティション子テーブルのスキャンには**GpuScan**が使用されていますが、その処理結果は一度ホストシステムに返され、**Append**によって結合された後、再び**GpuJoin**を処理するためにGPUへと転送されます。
+}
+@en{
+Default of the parameters are `on`. Once set to `off`, push-down is disabled.
+
+The query execution plan is changed as follows, by EXPLAIN command for the query above section.
+It uses **GpuScan** to scan the partition child tables, however, their results are once written back to the host system, then merged by **Append** and moved to GPU again to process **GpuJoin**.
 }
 ```
 postgres=# set pg_strom.enable_partitionwise_gpujoin = off;

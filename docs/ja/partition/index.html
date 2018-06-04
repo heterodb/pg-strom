@@ -178,18 +178,19 @@
 
 <p>本章ではPostgreSQLのパーティショニング機能とPG-Stromを併用する方法について説明します。
 なお、本章の内容は PostgreSQL v10 以降でPG-Stromを使用する場合にのみ有効です。</p>
+<p>PostgreSQLのパーティション機能について、詳しくは<a href="https://www.postgresql.jp/document/current/html/ddl-partitioning.html">PostgreSQL文書：テーブルのパーティショニング</a>を参照してください。</p>
 <h1 id="_1">概要</h1>
 <p>PostgreSQL v10においてパーティショニング機能がサポートされました。
 これは、論理的には一個の大きなテーブルであるものを物理的により小さなテーブルに分割して格納する仕組みで、検索条件より明らかにスキャンの必要がないパーティション子テーブルをスキップしたり、ストレージを物理的に分散させる事でより広いI/O帯域を確保するなどの利点があります。</p>
 <p>PostgreSQL v10では範囲パーティショニング、リストパーティショニングの2種類がサポートされ、さらにPostgreSQL v11ではハッシュパーティショニングがサポートされています。</p>
 <p>以下の図は、日付型（DATE型）のキー値を用いた範囲パーティショニングを示しています。
 キー値<code>2018-05-30</code>を持つレコードは、パーティション子テーブル<code>tbl_2018</code>に振り分けられ、同様に、キー値<code>2014-03-21</code>を持つレコードは、パーティション子テーブル<code>tbl_2014</code>に振り分けられる・・・といった具合です。</p>
-<p>パーティション化されたテーブルをスキャンする時、例えば<code>WHERE ymd &gt; '2016-07-01'::date</code>という条件句が付加されていると、<code>tbl_2014</code>および<code>tbl_2015</code>に該当するレコードが存在しない事は自明ですので、PostgreSQLのオプティマイザは<code>tbl_2016</code>、<code>tbl_2017</code>、<code>tbl_2018</code>だけをスキャンし、その結果を結合する<strong>Append</strong>ノードを挟む事で、あたかも単一のテーブルからレコードを読み出したかのように振舞います。</p>
+<p>パーティション化されたテーブルをスキャンする時、例えば<code>WHERE ymd &gt; '2016-07-01'::date</code>という条件句が付加されていると、<code>tbl_2014</code>および<code>tbl_2015</code>に該当するレコードが存在しない事は自明ですので、PostgreSQLのオプティマイザは<code>tbl_2016</code>、<code>tbl_2017</code>、<code>tbl_2018</code>だけをスキャンし、その結果を結合する<strong>Append</strong>ノードを挟む事で、あたかも単一のテーブルからレコードを読み出したかのように振舞う実行計画を作成します。</p>
 <p><img alt="Partitioning Overview" src="../img/partition-overview.png" /></p>
 <p>PostgreSQLのパーティショニングとPG-Stromを併用する場合、まず、スキャンが必要であるとオプティマイザが判断したパーティション子テーブルのスキャンに対し、個々に実行コストを推定した上で<strong>GpuScan</strong>が選択される事があります。この場合、<strong>GpuScan</strong>の実行結果を<strong>Append</strong>ノードで束ねる事になります。</p>
 <p>ただ、パーティションテーブルのスキャンに続き、JOINやGROUP BYなどPG-Stromで高速化が可能な処理を実行する場合には、最適化の観点から検討が必要です。</p>
 <p>例えば、パーティション化されていないテーブルをスキャンして別のテーブルとJOINし、GROUP BYによる集計結果を出力する場合、条件が揃えば、各ステップ間のデータ交換はGPUデバイスメモリ上で行う事ができます。これはGPUとCPUの間のデータ移動を最小化するという観点から、最もPG-Stromが得意とするワークロードです。</p>
-<p>一方、パーティション化されたテーブルに対して同様の処理を行う場合、テーブルのスキャンとJOINやGROUP BYの間に<strong>Append</strong>処理が挟まってしまうのが課題です。そのため、GpuScanが処理したデータを一度ホストシステムへ転送し、<strong>Append</strong>処理を行った上で、その後のGpuJoinやGpuPreAgg処理を行うために再びデータをGPUへ転送する事になります。これは決して効率の良い処理ではありません。</p>
+<p>一方、パーティション化されたテーブルに対して同様の処理を行う場合、テーブルのスキャンとJOINやGROUP BYの間に<strong>Append</strong>処理が挟まってしまうのが課題です。この実行計画の下では、GpuScanが処理したデータを一度ホストシステムへ転送し、<strong>Append</strong>処理を行った上で、その後のGpuJoinやGpuPreAgg処理を行うために再びデータをGPUへ転送する事になります。これは決して効率の良い処理ではありません。</p>
 <p>このようなCPU-GPU間のデータのピンポンを避けるため、PG-Stromは可能な限りJOINやGROUP BYを<strong>Append</strong>よりも先に実行できるようプッシュダウンを試みます。</p>
 <p>プッシュダウンが成功れば、データ交換を効率化できるだけでなく、特にGROUP BY処理によって行数を大幅に削減する事が可能となるため、<strong>Append</strong>処理を実行するホストシステムの負荷を顕著に減らす事になります。</p>
 <p><img alt="Partitioning Optimization" src="../img/partition-optimize.png" /></p>
