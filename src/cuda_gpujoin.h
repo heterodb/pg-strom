@@ -126,7 +126,7 @@ typedef struct kern_gpujoin		kern_gpujoin;
 #define KERN_GPUJOIN_SUSPEND_BLOCK(kgjoin)					\
 	((struct gpujoin_suspend_block *)						\
 	 ((char *)(kgjoin) + (kgjoin)->suspend_offset +			\
-	  get_global_index() *									\
+	  get_group_id() *										\
 	  STROMALIGN(offsetof(gpujoin_suspend_block,			\
 						  threads[get_local_size()]))))
 
@@ -1267,8 +1267,8 @@ gpujoin_main(kern_gpujoin *kgjoin,
 	/* setup private variables */
 	pstack_nrooms = kgjoin->pstack_nrooms;
 	pstack_base = (cl_uint *)((char *)kgjoin + kgjoin->pstack_offset)
-		+ get_global_index() * pstack_nrooms * ((GPUJOIN_MAX_DEPTH+1) *
-												(GPUJOIN_MAX_DEPTH+2)) / 2;
+		+ get_group_id() * pstack_nrooms * ((GPUJOIN_MAX_DEPTH+1) *
+											(GPUJOIN_MAX_DEPTH+2)) / 2;
 	/* setup crc32 table */
 	for (index = get_local_id();
 		 index < lengthof(pg_crc32_table);
@@ -1445,8 +1445,8 @@ gpujoin_right_outer(kern_gpujoin *kgjoin,
 	/* setup private variables */
 	pstack_nrooms = kgjoin->pstack_nrooms;
 	pstack_base = (cl_uint *)((char *)kgjoin + kgjoin->pstack_offset)
-		+ get_global_index() * pstack_nrooms * ((GPUJOIN_MAX_DEPTH+1) *
-												(GPUJOIN_MAX_DEPTH+2)) / 2;
+		+ get_group_id() * pstack_nrooms * ((GPUJOIN_MAX_DEPTH+1) *
+											(GPUJOIN_MAX_DEPTH+2)) / 2;
 	/* setup crc32 table */
 	for (index = get_local_id();
 		 index < lengthof(pg_crc32_table);

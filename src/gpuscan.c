@@ -2775,8 +2775,8 @@ gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 	void		   *kern_args[5];
 	size_t			offset;
 	size_t			length;
-	size_t			grid_sz;
-	size_t			block_sz;
+	cl_int			grid_sz;
+	cl_int			block_sz;
 	size_t			nitems_in;
 	size_t			nitems_out;
 	size_t			extra_size;
@@ -2893,12 +2893,11 @@ gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 	 *                         kern_data_store *kds_src,
 	 *                         kern_data_store *kds_dst)
 	 */
-	gpuOptimalBlockSize(&grid_sz,
-						&block_sz,
-						kern_gpuscan_quals,
-						0,		/* max activation */
-						0,
-						sizeof(cl_int));
+	rc = gpuOptimalBlockSize(&grid_sz,
+							 &block_sz,
+							 kern_gpuscan_quals,
+							 CU_DEVICE_PER_THREAD,
+							 0, sizeof(cl_int));
 	kern_args[0] = &m_gpuscan;
 	kern_args[1] = &m_kds_src;
 	kern_args[2] = &m_kds_dst;

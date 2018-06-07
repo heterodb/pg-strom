@@ -497,11 +497,6 @@ typedef struct NVMEScanState
 } NVMEScanState;
 
 /*
- * Misc declarations
- */
-#define GPUKERNEL_MAX_SM_MULTIPLICITY		4
-
-/*
  * --------------------------------------------------------------------
  *
  * Function Declarations
@@ -530,19 +525,24 @@ extern cl_ulong			devComputeCapability;
 extern cl_uint			devBaselineMaxThreadsPerBlock;
 
 extern void pgstrom_init_gpu_device(void);
-#if 1
-extern void largest_workgroup_size(size_t *p_grid_size,
-								   size_t *p_block_size,
-								   CUfunction function,
-								   CUdevice device,
-								   size_t nitems,
-								   size_t dynamic_shmem_per_block,
-								   size_t dynamic_shmem_per_thread);
-#endif
-extern CUresult	gpuOptimalBlockSize(size_t *p_grid_sz,
-									size_t *p_block_sz,
+
+#define GPUKERNEL_MAX_SM_MULTIPLICITY		4
+
+extern CUresult gpuOccupancyMaxPotentialBlockSize(int *p_min_grid_sz,
+												  int *p_max_block_sz,
+												  CUfunction kern_function,
+												  size_t dyn_shmem_per_block,
+												  size_t dyn_shmem_per_thread);
+extern CUresult gpuOptimalBlockSize(int *p_grid_sz,
+									int *p_block_sz,
 									CUfunction kern_function,
-									size_t max_num_threads,
+									CUdevice cuda_device,
+									size_t dyn_shmem_per_block,
+									size_t dyn_shmem_per_thread);
+extern CUresult gpuLargestBlockSize(int *p_grid_sz,
+									int *p_block_sz,
+									CUfunction kern_function,
+									CUdevice cuda_device,
 									size_t dynamic_shmem_per_block,
 									size_t dynamic_shmem_per_thread);
 /*

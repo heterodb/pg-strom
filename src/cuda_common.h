@@ -178,20 +178,14 @@ extern __shared__ cl_ulong __pgstrom_dynamic_shared_workmem[];
  * 32bit integer, thus, it makes overflow during intermediation results
  * if it is larger than INT_MAX.
  */
+#define get_group_id()			(blockIdx.x)
+#define get_num_groups()		(gridDim.x)
 #define get_local_id()			(threadIdx.x)
 #define get_local_size()		(blockDim.x)
 #define get_global_id()			(threadIdx.x + blockIdx.x * blockDim.x)
 #define get_global_size()		(blockDim.x * gridDim.x)
 #define get_global_base()		(blockIdx.x * blockDim.x)
 #define get_global_index()		(blockIdx.x)
-#define get_num_groups()		(gridDim.x)
-
-#define lget_global_id()		((size_t)threadIdx.x +	\
-								 (size_t)blockIdx.x *	\
-								 (size_t)blockDim.x)
-#define lget_global_size()		((size_t)blockDim.x * (size_t)gridDim.x)
-#define lget_global_base()		((size_t)blockIdx.x * (size_t)blockDim.x)
-#define lget_global_index()		((size_t)blockIdx.x)
 
 #else	/* __CUDACC__ */
 #include "access/htup_details.h"

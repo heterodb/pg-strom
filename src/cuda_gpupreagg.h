@@ -451,7 +451,7 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 	window_sz = n_parts * get_num_groups();
 
 	/* resume kernel from the point where suspended, if any */
-	my_suspend = KERN_GPUPREAGG_SUSPEND_CONTEXT(kgpreagg) + get_global_index();
+	my_suspend = KERN_GPUPREAGG_SUSPEND_CONTEXT(kgpreagg) + get_group_id();
 	lpp_array = KERN_GPUPREAGG_ITEMIDDATA_ARRAY(kgpreagg);
 	if (kgpreagg->suspend_count > 0)
 	{
@@ -471,7 +471,7 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 		ItemPointerData	t_self	__attribute__ ((unused));
 		BlockNumber		block_nr;
 
-		part_base = part_index * window_sz + get_global_index() * n_parts;
+		part_base = part_index * window_sz + get_group_id() * n_parts;
 		if (part_base >= kds_src->nitems)
 			break;
 		part_id = get_local_id() / part_sz + part_base;

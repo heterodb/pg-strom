@@ -450,7 +450,7 @@ VALIDATE_ARRAY_MATRIX(MatrixType *matrix)
 		cl_uint	   *localIdx = SHARED_WORKMEM(cl_uint);					\
 		cl_uint		localLimit;											\
 		cl_uint		partSize = 2 * get_local_size();					\
-		cl_uint		partBase = get_global_index() * partSize;			\
+		cl_uint		partBase = get_group_id() * partSize;				\
 		cl_uint		blockSize;											\
 		cl_uint		unitSize;											\
 		cl_uint		i;													\
@@ -573,7 +573,7 @@ VALIDATE_ARRAY_MATRIX(MatrixType *matrix)
 		cl_uint	   *localIdx = SHARED_WORKMEM(cl_uint);					\
 		cl_uint		localLimit;											\
 		cl_uint		partSize = 2 * get_local_size();					\
-		cl_uint		partBase = get_global_index() * partSize;			\
+		cl_uint		partBase = get_group_id() * partSize;				\
 		cl_uint		blockSize = partSize;								\
 		cl_uint		unitSize;											\
 		cl_uint		i;													\

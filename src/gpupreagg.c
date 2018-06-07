@@ -4785,8 +4785,8 @@ gpupreagg_init_final_hash(GpuPreAggTask *gpreagg,
 	CUfunction	kern_init_fhash;
 	CUevent		ev_init_fhash;
 	CUresult	rc;
-	size_t		grid_sz;
-	size_t		block_sz;
+	cl_int		grid_sz;
+	cl_int		block_sz;
 	void	   *kern_args[3];
 
 	pthreadMutexLock(&gpas->f_mutex);
@@ -4808,11 +4808,12 @@ gpupreagg_init_final_hash(GpuPreAggTask *gpreagg,
 			rc = gpuOptimalBlockSize(&grid_sz,
 									 &block_sz,
 									 kern_init_fhash,
-									 gpas->f_hashsize,
+									 CU_DEVICE_PER_THREAD,
 									 0, 0);
 			if (rc != CUDA_SUCCESS)
 				werror("failed on gpuOptimalBlockSize: %s", errorText(rc));
-
+			grid_sz = Min(grid_sz, (gpas->f_hashsize +
+									block_sz - 1) / block_sz);
 			kern_args[0] = &gpas->m_fhash;
 			kern_args[1] = &gpas->f_hashsize;
 			kern_args[2] = &gpas->f_hashlimit;
@@ -4891,10 +4892,9 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 	CUdeviceptr		m_kds_slot = 0UL;
 	CUdeviceptr		m_kds_final = (CUdeviceptr)&pds_final->kds;
 	CUdeviceptr		m_fhash = gpas->m_fhash;
-	int				sm_count;
 	cl_uint			last_suspend_count;
-	size_t			grid_sz;
-	size_t			block_sz;
+	cl_int			grid_sz;
+	cl_int			block_sz;
 	void		   *kern_args[6];
 	CUresult		rc;
 	int				retval = 1;
@@ -5017,14 +5017,13 @@ resume_kernel:
 	 *                      kern_data_store *kds_src,
 	 *                      kern_data_store *kds_slot)
 	 */
-	gpuOptimalBlockSize(&grid_sz,
-						&block_sz,
-						kern_setup,
-						gpreagg->kds_slot_nrooms,
-						0,	//   sizeof(cl_int) * 1024,
-						0);
-	sm_count = devAttrs[CU_DINDEX_PER_THREAD].MULTIPROCESSOR_COUNT;
-	grid_sz = Min(grid_sz, GPUKERNEL_MAX_SM_MULTIPLICITY * sm_count);
+	rc = gpuOptimalBlockSize(&grid_sz,
+							 &block_sz,
+							 kern_setup,
+							 CU_DEVICE_PER_THREAD,
+							 0, sizeof(int));
+	if (rc != CUDA_SUCCESS)
+		werror("failed on gpuOptimalBlockSize: %s", errorText(rc));
 	kern_args[0] = &m_gpreagg;
 	kern_args[1] = &m_kds_src;
 	kern_args[2] = &m_kds_slot;
@@ -5047,15 +5046,13 @@ resume_kernel:
 	 *                          kern_data_store *kds_final,
 	 *                          kern_global_hashslot *f_hash)
 	 */
-	largest_workgroup_size(&grid_sz,
-						   &block_sz,
-						   kern_reduction,
-						   CU_DEVICE_PER_THREAD,
-						   gpreagg->kds_slot_nrooms,
-						   sizeof(cl_int) * 1024,
-						   0);
-	sm_count = devAttrs[CU_DINDEX_PER_THREAD].MULTIPROCESSOR_COUNT;
-	grid_sz = Min(grid_sz, GPUKERNEL_MAX_SM_MULTIPLICITY * sm_count);
+	rc = gpuLargestBlockSize(&grid_sz,
+							 &block_sz,
+							 kern_reduction,
+							 CU_DEVICE_PER_THREAD,
+							 sizeof(cl_int) * 1024, 0);
+	if (rc != CUDA_SUCCESS)
+		werror("failed on gpuLargestBlockSize: %s", errorText(rc));
 	kern_args[0] = &m_gpreagg;
 	kern_args[1] = &m_nullptr;
 	kern_args[2] = &m_kds_slot;
@@ -5170,8 +5167,8 @@ gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 	CUdeviceptr		m_kparams = ((CUdeviceptr)&gpreagg->kern +
 								 offsetof(kern_gpupreagg, kparams));
 	CUresult		rc;
-	size_t			grid_sz;
-	size_t			block_sz;
+	cl_int			grid_sz;
+	cl_int			block_sz;
 	void		   *kern_args[10];
 	int				retval = 1;
 
@@ -5309,9 +5306,8 @@ resume_kernel:
 	rc = gpuOptimalBlockSize(&grid_sz,
 							 &block_sz,
 							 kern_gpujoin_main,
-							 0,		/* max activation */
-							 0,
-							 sizeof(int));
+							 CU_DEVICE_PER_THREAD,
+							 0, sizeof(int));
 	if (rc != CUDA_SUCCESS)
 		werror("failed on gpuOptimalBlockSize: %s", errorText(rc));
 
@@ -5346,9 +5342,8 @@ resume_kernel:
 	rc = gpuOptimalBlockSize(&grid_sz,
 							 &block_sz,
 							 kern_gpupreagg_reduction,
-							 0,		/* max activation */
-							 0,
-							 sizeof(int));
+							 CU_DEVICE_PER_THREAD,
+							 0, sizeof(int));
 	if (rc != CUDA_SUCCESS)
 		werror("failed on gpuOptimalBlockSize: %s", errorText(rc));
 

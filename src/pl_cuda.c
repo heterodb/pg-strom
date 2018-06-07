@@ -2473,9 +2473,9 @@ plcuda_process_task(GpuTask *gtask, CUmodule cuda_module)
 	plcudaTask	   *ptask = (plcudaTask *) gtask;
 	GpuContext	   *gcontext = GpuWorkerCurrentContext;
 	void		   *kern_args[3];
-	size_t			warp_size;
-	size_t			block_size;
-	size_t			grid_size;
+	cl_int			warp_size;
+	cl_int			block_size;
+	cl_int			grid_size;
 	CUfunction		kern_plcuda_prep;
 	CUfunction		kern_plcuda_main;
 	CUfunction		kern_plcuda_post;
@@ -2551,18 +2551,17 @@ plcuda_process_task(GpuTask *gtask, CUmodule cuda_module)
 		}
 		else
 		{
-			rc = gpuOptimalBlockSize(NULL,
-									 &block_size,
-									 kern_plcuda_prep,
-									 ptask->kern.prep_num_threads,
-									 ptask->kern.prep_shmem_blocksz,
-									 ptask->kern.prep_shmem_unitsz);
+			rc = gpuOccupancyMaxPotentialBlockSize(NULL,
+												   &block_size,
+												   kern_plcuda_prep,
+												ptask->kern.prep_shmem_blocksz,
+												ptask->kern.prep_shmem_unitsz);
 			if (rc != CUDA_SUCCESS)
-				werror("failed on gpuOptimalBlockSize: %s", errorText(rc));
+				werror("failed on gpuOccupancyMaxPotentialBlockSize: %s",
+					   errorText(rc));
 			grid_size = (ptask->kern.prep_num_threads +
 						 block_size - 1) / block_size;
 		}
-
 		rc = cuLaunchKernel(kern_plcuda_prep,
 							grid_size, 1, 1,
 							block_size, 1, 1,
@@ -2573,13 +2572,13 @@ plcuda_process_task(GpuTask *gtask, CUmodule cuda_module)
 							NULL);
 		if (rc != CUDA_SUCCESS)
 			werror("failed on cuLaunchKernel: %s "
-				   "(prep-kernel: grid=%u block=%u shmem=%zu)",
+				   "(prep-kernel: grid=%d block=%d shmem=%u)",
 				   errorText(rc),
-				   (cl_uint)grid_size, (cl_uint)block_size,
+				   grid_size, block_size,
 				   ptask->kern.prep_shmem_blocksz +
 				   ptask->kern.prep_shmem_unitsz * block_size);
-		wdebug("PL/CUDA prep-kernel: grid=%u block=%u shmem=%zu",
-			   (cl_uint)grid_size, (cl_uint)block_size,
+		wdebug("PL/CUDA prep-kernel: grid=%d block=%d shmem=%u",
+			   grid_size, block_size,
 			   ptask->kern.prep_shmem_blocksz +
 			   ptask->kern.prep_shmem_unitsz * block_size);
 	}
@@ -2594,15 +2593,15 @@ plcuda_process_task(GpuTask *gtask, CUmodule cuda_module)
 	}
 	else
 	{
-		rc = gpuOptimalBlockSize(NULL,
-								 &block_size,
-								 kern_plcuda_main,
-								 ptask->kern.main_num_threads,
-								 ptask->kern.main_shmem_blocksz,
-								 ptask->kern.main_shmem_unitsz);
+		rc = gpuOccupancyMaxPotentialBlockSize(NULL,
+											   &block_size,
+											   kern_plcuda_main,
+											   ptask->kern.main_shmem_blocksz,
+											   ptask->kern.main_shmem_unitsz);
 		if (rc != CUDA_SUCCESS)
-			werror("failed on gpuOptimalBlockSize: %s", errorText(rc));
-		grid_size = (ptask->kern.main_num_threads +
+			werror("failed on gpuOccupancyMaxPotentialBlockSize: %s",
+				   errorText(rc));
+		grid_size = (ptask->kern.prep_num_threads +
 					 block_size - 1) / block_size;
 	}
 
@@ -2616,13 +2615,13 @@ plcuda_process_task(GpuTask *gtask, CUmodule cuda_module)
 						NULL);
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuLaunchKernel: %s "
-			   "(main-kernel: grid=%u block=%u shmem=%zu)",
+			   "(main-kernel: grid=%d block=%d shmem=%u)",
 			   errorText(rc),
 			   (cl_uint)grid_size, (cl_uint)block_size,
 			   ptask->kern.main_shmem_blocksz +
 			   ptask->kern.main_shmem_unitsz * block_size);
-	wdebug("PL/CUDA main-kernel: grid=%u block=%u shmem=%zu",
-		   (cl_uint)grid_size, (cl_uint)block_size,
+	wdebug("PL/CUDA main-kernel: grid=%d block=%d shmem=%u",
+		   grid_size, block_size,
 		   ptask->kern.main_shmem_blocksz +
 		   ptask->kern.main_shmem_unitsz * block_size);
 
@@ -2638,14 +2637,14 @@ plcuda_process_task(GpuTask *gtask, CUmodule cuda_module)
 		}
 		else
 		{
-			rc = gpuOptimalBlockSize(NULL,
-									 &block_size,
-									 kern_plcuda_post,
-									 ptask->kern.post_num_threads,
-									 ptask->kern.post_shmem_blocksz,
-									 ptask->kern.post_shmem_unitsz);
+			rc = gpuOccupancyMaxPotentialBlockSize(NULL,
+												   &block_size,
+												   kern_plcuda_post,
+												ptask->kern.post_shmem_blocksz,
+												ptask->kern.post_shmem_unitsz);
 			if (rc != CUDA_SUCCESS)
-				werror("failed on gpuOptimalBlockSize: %s", errorText(rc));
+				werror("failed on gpuOccupancyMaxPotentialBlockSize: %s",
+					   errorText(rc));
 			grid_size = (ptask->kern.post_num_threads +
 						 block_size - 1) / block_size;
 		}
@@ -2660,13 +2659,13 @@ plcuda_process_task(GpuTask *gtask, CUmodule cuda_module)
 							NULL);
 		if (rc != CUDA_SUCCESS)
 			werror("failed on cuLaunchKernel: %s "
-				   "(post-kernel: grid=%u block=%u shmem=%zu)",
+				   "(post-kernel: grid=%d block=%d shmem=%u)",
 				   errorText(rc),
-				   (cl_uint)grid_size, (cl_uint)block_size,
+				   grid_size, block_size,
 				   ptask->kern.post_shmem_blocksz +
 				   ptask->kern.post_shmem_unitsz * block_size);
-		wdebug("PL/CUDA post-kernel: grid=%u block=%u shmem=%zu",
-			   (cl_uint)grid_size, (cl_uint)block_size,
+		wdebug("PL/CUDA post-kernel: grid=%d block=%d shmem=%u",
+			   grid_size, block_size,
 			   ptask->kern.post_shmem_blocksz +
 			   ptask->kern.post_shmem_unitsz * block_size);
 	}
