@@ -1438,6 +1438,7 @@ try_add_final_aggregation_paths(PlannerInfo *root,
 	}
 }
 
+#if PG_VERSION_NUM >= 100000
 /*
  * try_add_gpupreagg_append_paths
  */
@@ -1538,6 +1539,7 @@ try_add_gpupreagg_append_paths(PlannerInfo *root,
 									agg_final_costs);
 #endif
 }
+#endif
 
 /*
  * try_add_gpupreagg_paths
@@ -1613,6 +1615,7 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 	if (agg_final_costs.numOrderedAggs > 0)
 		return;
 
+#if PG_VERSION_NUM >= 100000
 	if (enable_partitionwise_gpupreagg)
 		try_add_gpupreagg_append_paths(root,
 									   group_rel,
@@ -1626,6 +1629,7 @@ try_add_gpupreagg_paths(PlannerInfo *root,
 									   &agg_final_costs,
 									   can_pullup_outerscan,
 									   try_parallel_path);
+#endif
 
 	partial_path = prepend_gpupreagg_path(root,
 										  group_rel,
