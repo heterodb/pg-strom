@@ -1,3 +1,7 @@
+* Thu Jun  7 2018 KaiGai Kohei <kaigai@heterodb.com> - 2.0-180607
+- hotfixes for various bugs
+- add partition-wise GpuJoin/GpuPreAgg (experimental)
+
 * Tue May 15 2018 KaiGai Kohei <kaigai@heterodb.com> - 2.0-180515
 - hotfixes for various bugs
 
