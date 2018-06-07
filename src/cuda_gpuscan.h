@@ -98,6 +98,12 @@ typedef struct ItemIdData
 #define ItemIdIsRedirected(itemId)	((itemId)->lp_flags == LP_REDIRECT)
 #define ItemIdIsDead(itemId)		((itemId)->lp_flags == LP_DEAD)
 #define ItemIdHasStorage(itemId)	((itemId)->lp_len != 0)
+#define ItemIdSetUnused(itemId)			\
+	do {								\
+		(itemId)->lp_flags = LP_UNUSED;	\
+		(itemId)->lp_off = 0;			\
+		(itemId)->lp_len = 0;			\
+	} while(0)
 
 /* definitions at storage/off.h */
 typedef cl_ushort		OffsetNumber;

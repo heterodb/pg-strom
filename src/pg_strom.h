@@ -497,6 +497,11 @@ typedef struct NVMEScanState
 } NVMEScanState;
 
 /*
+ * Misc declarations
+ */
+#define GPUKERNEL_MAX_SM_MULTIPLICITY		4
+
+/*
  * --------------------------------------------------------------------
  *
  * Function Declarations

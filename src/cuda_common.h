@@ -184,6 +184,7 @@ extern __shared__ cl_ulong __pgstrom_dynamic_shared_workmem[];
 #define get_global_size()		(blockDim.x * gridDim.x)
 #define get_global_base()		(blockIdx.x * blockDim.x)
 #define get_global_index()		(blockIdx.x)
+#define get_num_groups()		(gridDim.x)
 
 #define lget_global_id()		((size_t)threadIdx.x +	\
 								 (size_t)blockIdx.x *	\

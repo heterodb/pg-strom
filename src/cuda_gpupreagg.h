@@ -32,9 +32,12 @@ struct kern_gpupreagg
 {
 	kern_errorbuf	kerror;				/* kernel error information */
 	cl_uint			num_group_keys;		/* nogroup reduction, if 0 */
-	cl_ushort		reduction_mode;		/* one of GPUPREAGG_* above */
 	cl_uint			read_src_pos;		/* offset to read kds_src */
 	cl_uint			read_slot_pos;		/* offset to read kds_slot */
+	/* -- suspend/resume (KDS_FORMAT_BLOCK) */
+	cl_uint			suspend_count;		/* number of suspended blocks */
+	cl_uint			suspend_offset;		/* offset to suspend buffer, if any */
+	cl_uint			lpp_array_offset;	/* offset to lpp_array, if any */
 
 	/* -- runtime statistics -- */
 	cl_uint			nitems_real;		/* out: # of outer input rows */
@@ -55,8 +58,20 @@ struct kern_gpupreagg
 	cl_uint			pg_crc32_table[256];	/* master CRC32 table */
 	kern_parambuf	kparams;
 };
-
 typedef struct kern_gpupreagg	kern_gpupreagg;
+
+/*
+ * gpupreagg_suspend_context is used to suspend gpupreagg_setup_block kernel.
+ * Because KDS_FORMAT_BLOCK can have more items than estimation, so we cannot
+ * avoid overflow of @kds_slot buffer preliminary. If @nitems exceeds @nrooms,
+ * gpupreagg_setup_block will exit immediately, and save the current context
+ * on the gpupreagg_suspend_context array to resume later.
+ */
+typedef struct
+{
+	cl_uint	part_index;
+	cl_uint	line_index;
+} gpupreagg_suspend_context;
 
 /* macro definitions to reference packed values */
 #define KERN_GPUPREAGG_PARAMBUF(kgpreagg)				\
@@ -71,6 +86,18 @@ typedef struct kern_gpupreagg	kern_gpupreagg;
 	 KERN_GPUPREAGG_PARAMBUF_LENGTH(kgpreagg))
 #define KERN_GPUPREAGG_DMARECV_LENGTH(kgpreagg)			\
 	offsetof(kern_gpupreagg, pg_crc32_table[0])
+/* suspend/resume buffer for KDS_FORMAT_BLOCK */
+#define KERN_GPUPREAGG_SUSPEND_CONTEXT(kgpreagg)		\
+	((gpupreagg_suspend_context *)						\
+	 ((kgpreagg)->suspend_offset == 0					\
+	  ? NULL											\
+	  : ((char *)(kgpreagg) + (kgpreagg)->suspend_offset)))
+
+#define KERN_GPUPREAGG_ITEMIDDATA_ARRAY(kgpreagg)		\
+	((ItemIdData **)									\
+	 ((kgpreagg)->lpp_array_offset == 0					\
+	  ? NULL											\
+	  : ((char *)(kgpreagg) + (kgpreagg)->lpp_array_offset)))
 
 /*
  * NOTE: hashtable of gpupreagg is an array of pagg_hashslot.
@@ -405,12 +432,16 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 {
 	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	kern_context	kcxt;
+	cl_uint			window_sz;
 	cl_uint			part_sz;
 	cl_uint			n_parts;
 	cl_uint			count;
 	cl_uint			offset;
-	cl_bool			try_next_window = true;
+	cl_uint			part_index = 0;
+	cl_uint			line_index = 0;
 	cl_bool			thread_is_valid = false;
+	gpupreagg_suspend_context *my_suspend;
+	ItemIdData	  **lpp_array;
 	__shared__ cl_uint	base;
 
 	INIT_KERNEL_CONTEXT(&kcxt, gpupreagg_setup_block, kparams);
@@ -423,7 +454,21 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 	n_parts = get_local_size() / part_sz;
 	if (get_local_id() < part_sz * n_parts)
 		thread_is_valid = true;
-	do {
+	window_sz = n_parts * get_num_groups();
+
+	/* resume kernel from the point where suspended, if any */
+	my_suspend = KERN_GPUPREAGG_SUSPEND_CONTEXT(kgpreagg) + get_global_index();
+	lpp_array = KERN_GPUPREAGG_ITEMIDDATA_ARRAY(kgpreagg);
+	if (kgpreagg->suspend_count > 0)
+	{
+		part_index = my_suspend->part_index;
+		line_index = my_suspend->line_index;
+	}
+	__syncthreads();
+
+	for (;;)
+	{
+		cl_uint		part_base;
 		cl_uint		part_id;
 		cl_uint		line_no;
 		cl_uint		n_lines;
@@ -432,19 +477,15 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 		ItemPointerData	t_self	__attribute__ ((unused));
 		BlockNumber		block_nr;
 
-		if (get_local_id() == 0)
-			base = atomicAdd(&kgpreagg->read_src_pos, n_parts);
-		__syncthreads();
-		if (base + n_parts >= kds_src->nitems)
-			try_next_window = false;
-		if (base >= kds_src->nitems)
+		part_base = part_index * window_sz + get_global_index() * n_parts;
+		if (part_base >= kds_src->nitems)
 			break;
-
-		part_id = base + get_local_id() / part_sz;
-		line_no = get_local_id() % part_sz;
+		part_id = get_local_id() / part_sz + part_base;
+		line_no = get_local_id() % part_sz + line_index * part_sz;
 
 		do {
 			HeapTupleHeaderData *htup = NULL;
+			ItemIdData *curr_lpp = NULL;
 			cl_uint		slot_index;
 			cl_bool	   *slot_isnull;
 			Datum	   *slot_values;
@@ -461,9 +502,9 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 
 				if (line_no < n_lines)
 				{
-					ItemIdData *lpp = PageGetItemId(pg_page, line_no + 1);
-					if (ItemIdIsNormal(lpp))
-						htup = PageGetItem(pg_page, lpp);
+					curr_lpp = PageGetItemId(pg_page, line_no + 1);
+					if (ItemIdIsNormal(curr_lpp))
+						htup = PageGetItem(pg_page, curr_lpp);
 				}
 			}
 			else
@@ -486,19 +527,42 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 			offset = pgstromStairlikeBinaryCount(htup && rc, &nvalids);
 			if (nvalids > 0)
 			{
-				if (get_local_id() == 0)
-					base = atomicAdd(&kds_slot->nitems, nvalids);
+				while (get_local_id() == 0)
+				{
+					cl_uint		old_nitems = kds_slot->nitems;
+					cl_uint		new_nitems = old_nitems + nvalids;
+					cl_uint		cur_nitems;
+
+					if (new_nitems > kds_slot->nrooms)
+					{
+						base = UINT_MAX;
+						break;
+					}
+					cur_nitems = atomicCAS(&kds_slot->nitems,
+										   old_nitems, new_nitems);
+					if (cur_nitems == old_nitems)
+					{
+						base = old_nitems;
+						break;
+					}
+				}
 				__syncthreads();
 
-				if (base + nvalids >= kds_slot->nrooms)
+				/*
+				 * No more space on the kds_slot buffer, so suspend the kernel
+				 * and run reduction operations earlier.
+				 */
+				if (base == UINT_MAX)
 				{
-					STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
+					if (get_local_id() == 0)
+						atomicAdd(&kgpreagg->suspend_count, 1);
 					goto out;
 				}
 
 				slot_index = base + offset;
 				if (htup && rc)
 				{
+					assert(slot_index < kds_slot->nrooms);
 					slot_values = KERN_DATA_STORE_VALUES(kds_slot, slot_index);
 					slot_isnull = KERN_DATA_STORE_ISNULL(kds_slot, slot_index);
 
@@ -507,6 +571,8 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 											 htup,
 											 slot_values,
 											 slot_isnull);
+					/* for invalidation of ItemIdData */
+					lpp_array[slot_index] = curr_lpp;
 				}
 				/* bailout if any errors */
 				if (__syncthreads_count(kcxt.e.errcode) > 0)
@@ -528,11 +594,20 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 			 * Move to the next window of the line items, if any.
 			 * If no threads in CUDA block wants to continue, exit the loop.
 			 */
+			line_index++;
 			line_no += part_sz;
 		} while (__syncthreads_count(thread_is_valid &&
 									 line_no < n_lines) > 0);
-	} while(try_next_window);
+		/* move to the next window */
+		part_index++;
+		line_index = 0;
+	}
 out:
+	if (get_local_id() == 0)
+	{
+		my_suspend->part_index = part_index;
+		my_suspend->line_index = line_index;
+	}
 	/* write back error status if any */
 	kern_writeback_error_status(&kgpreagg->kerror, &kcxt.e);
 }
@@ -651,6 +726,7 @@ gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,		/* in/out */
 	cl_bool			is_last_reduction = false;
 	cl_bool		   *slot_isnull;
 	Datum		   *slot_values;
+	ItemIdData	  **lpp_array = KERN_GPUPREAGG_ITEMIDDATA_ARRAY(kgpreagg);
 	__shared__ cl_bool	l_isnull[MAXTHREADS_PER_BLOCK];
 	__shared__ Datum	l_values[MAXTHREADS_PER_BLOCK];
 	__shared__ cl_uint	base;
@@ -768,6 +844,12 @@ gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,		/* in/out */
 			}
 		}
 		__syncthreads();
+		/*
+		 * Invalidation of ItemId - if and when suspended GPU kernel needs
+		 * CPU fallback, rows already processed must be ignored.
+		 */
+		if (lpp_array && slot_index < slot_nitems)
+			ItemIdSetUnused(lpp_array[slot_index]);
 	} while (!is_last_reduction);
 
 	/* write-back execution status into host side */
@@ -1198,6 +1280,7 @@ gpupreagg_groupby_reduction(kern_gpupreagg *kgpreagg,		/* in/out */
 	cl_uint			owner_index;
 	cl_bool			is_owner = false;
 	cl_bool			is_last_reduction = false;
+	ItemIdData	  **lpp_array = KERN_GPUPREAGG_ITEMIDDATA_ARRAY(kgpreagg);
 	__shared__ cl_uint	crc32_table[256];
 	__shared__ cl_bool	l_isnull[MAXTHREADS_PER_BLOCK];
 	__shared__ Datum	l_values[MAXTHREADS_PER_BLOCK];
@@ -1267,6 +1350,12 @@ clean_restart:
 												 slot_isnull,
 												 slot_values);
 				FIN_LEGACY_CRC32(hash_value);
+				/*
+				 * Invalidation of ItemId - if and when suspended GPU kernel
+				 * needs CPU fallback, rows already processed must be ignored.
+				 */
+				if (lpp_array)
+					ItemIdSetUnused(lpp_array[kds_index]);
 			}
 			else
 			{
