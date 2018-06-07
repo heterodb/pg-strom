@@ -4506,8 +4506,8 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 		}
 		kds_slot_length = STROMALIGN(offsetof(kern_data_store,
 											  colmeta[gpa_tupdesc->natts])) +
-			STROMALIGN(LONGALIGN((sizeof(Datum) + sizeof(char)) *
-								 gpa_tupdesc->natts) * kds_slot_nrooms);
+			STROMALIGN(MAXALIGN((sizeof(Datum) + sizeof(char)) *
+								gpa_tupdesc->natts) * kds_slot_nrooms);
 	}
 	/* allocation of GpuPreAggTask */
 	head_sz = STROMALIGN(offsetof(GpuPreAggTask, kern.kparams) +
@@ -5283,7 +5283,6 @@ gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 
 resume_kernel:
 	/* init or reset kds_slot */
-	gpreagg->kern.read_src_pos = 0;
 	gpreagg->kern.read_slot_pos = 0;
 	memcpy((void *)m_kds_slot, gpas->kds_slot_head,
 		   KERN_DATA_STORE_HEAD_LENGTH(gpas->kds_slot_head));

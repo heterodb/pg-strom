@@ -32,7 +32,6 @@ struct kern_gpupreagg
 {
 	kern_errorbuf	kerror;				/* kernel error information */
 	cl_uint			num_group_keys;		/* nogroup reduction, if 0 */
-	cl_uint			read_src_pos;		/* offset to read kds_src */
 	cl_uint			read_slot_pos;		/* offset to read kds_slot */
 	/* -- suspend/resume (KDS_FORMAT_BLOCK) */
 	cl_uint			suspend_count;		/* number of suspended blocks */
@@ -337,7 +336,8 @@ gpupreagg_setup_row(kern_gpupreagg *kgpreagg,
 	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	kern_context	kcxt;
 	kern_tupitem   *tupitem;
-	cl_uint			src_nitems = kds_src->nitems;
+	cl_uint			src_nitems = __ldg(&kds_src->nitems);
+	cl_uint			src_base;
 	cl_uint			src_index;
 	cl_uint			slot_index;
 	cl_uint			offset;
@@ -345,22 +345,15 @@ gpupreagg_setup_row(kern_gpupreagg *kgpreagg,
 	cl_uint			nvalids;
 	Datum		   *slot_values;
 	cl_bool		   *slot_isnull;
-	cl_bool			try_next_window = true;
 	cl_bool			rc;
 	__shared__ cl_uint	base;
 
 	INIT_KERNEL_CONTEXT(&kcxt, gpupreagg_setup_row, kparams);
-	do {
-		if (get_local_id() == 0)
-			base = atomicAdd(&kgpreagg->read_src_pos, get_local_size());
-		__syncthreads();
-
-		if (base + get_local_size() >= src_nitems)
-			try_next_window = false;
-		if (base >= src_nitems)
-			break;
-
-		src_index = base + get_local_id();
+	for (src_base = get_global_base();
+		 src_base < src_nitems;
+		 src_base += get_global_size())
+	{
+		src_index = src_base + get_local_id();
 		if (src_index < src_nitems)
 		{
 			tupitem = KERN_DATA_STORE_TUPITEM(kds_src, src_index);
@@ -408,6 +401,7 @@ gpupreagg_setup_row(kern_gpupreagg *kgpreagg,
 										 slot_isnull);
 			}
 		}
+			
 		/* bailout if any error */
 		if (__syncthreads_count(kcxt.e.errcode) > 0)
 			break;
@@ -418,7 +412,7 @@ gpupreagg_setup_row(kern_gpupreagg *kgpreagg,
 			atomicAdd(&kgpreagg->nitems_real, count);
 			atomicAdd(&kgpreagg->nitems_filtered, count - nvalids);
 		}
-	} while(try_next_window);
+	}
 
 	/* write back error status if any */
 	kern_writeback_error_status(&kgpreagg->kerror, &kcxt.e);
@@ -623,7 +617,8 @@ gpupreagg_setup_column(kern_gpupreagg *kgpreagg,
 {
 	kern_parambuf  *kparams = KERN_GPUPREAGG_PARAMBUF(kgpreagg);
 	kern_context	kcxt;
-	cl_uint			src_nitems = kds_src->nitems;
+	cl_uint			src_nitems = __ldg(&kds_src->nitems);
+	cl_uint			src_base;
 	cl_uint			src_index;
 	cl_uint			slot_index;
 	cl_uint			offset;
@@ -631,22 +626,15 @@ gpupreagg_setup_column(kern_gpupreagg *kgpreagg,
 	cl_uint			nvalids;
 	Datum		   *slot_values;
 	cl_bool		   *slot_isnull;
-	cl_bool			try_next_window = true;
 	cl_bool			rc;
 	__shared__ cl_uint	base;
 
 	INIT_KERNEL_CONTEXT(&kcxt, gpupreagg_setup_column, kparams);
-	do {
-		if (get_local_id() == 0)
-			base = atomicAdd(&kgpreagg->read_src_pos, get_local_size());
-		__syncthreads();
-
-		if (base + get_local_size() >= src_nitems)
-			try_next_window = false;
-		if (base >= src_nitems)
-			break;
-
-		src_index = base + get_local_id();
+	for (src_base = get_global_base();
+		 src_base < src_nitems;
+		 src_base += get_global_size())
+	{
+		src_index = src_base + get_local_id();
 		if (src_index < src_nitems)
 		{
 #ifdef GPUPREAGG_PULLUP_OUTER_SCAN
@@ -699,8 +687,7 @@ gpupreagg_setup_column(kern_gpupreagg *kgpreagg,
 			atomicAdd(&kgpreagg->nitems_real, count);
 			atomicAdd(&kgpreagg->nitems_filtered, count - nvalids);
 		}
-	} while(try_next_window);
-
+	}
 	/* write back error status if any */
 	kern_writeback_error_status(&kgpreagg->kerror, &kcxt.e);
 }
