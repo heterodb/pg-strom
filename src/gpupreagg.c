@@ -20,13 +20,13 @@
 #include "cuda_gpupreagg.h"
 
 static create_upper_paths_hook_type create_upper_paths_next;
-static CustomPathMethods		gpupreagg_path_methods;
-static CustomScanMethods		gpupreagg_scan_methods;
-static CustomExecMethods		gpupreagg_exec_methods;
-static bool						enable_gpupreagg;				/* GUC */
-static bool						enable_pullup_outer_join;		/* GUC */
-static bool						enable_partitionwise_gpupreagg;	/* GUC */
-static double					gpupreagg_reduction_threshold;	/* GUC */
+static CustomPathMethods	gpupreagg_path_methods;
+static CustomScanMethods	gpupreagg_scan_methods;
+static CustomExecMethods	gpupreagg_exec_methods;
+static bool					enable_gpupreagg;				/* GUC */
+static bool					enable_pullup_outer_join;		/* GUC */
+static bool					enable_partitionwise_gpupreagg;	/* GUC */
+static double				gpupreagg_reduction_threshold;	/* GUC */
 
 typedef struct
 {
@@ -1455,6 +1455,7 @@ try_add_gpupreagg_append_paths(PlannerInfo *root,
 							   bool can_pullup_outerscan,
 							   bool try_parallel_path)
 {
+#if PG_VERSION_NUM >= 100000
 	List	   *append_paths_list = NIL;
 	List	   *sub_paths_list;
 	List	   *partitioned_rels;
@@ -1535,6 +1536,7 @@ try_add_gpupreagg_append_paths(PlannerInfo *root,
 									(List *) havingQual,
 									num_groups,
 									agg_final_costs);
+#endif
 }
 
 /*
@@ -5491,6 +5493,8 @@ pgstrom_init_gpupreagg(void)
 							 PGC_USERSET,
                              GUC_NOT_IN_SAMPLE,
                              NULL, NULL, NULL);
+#else
+	enable_partitionwise_gpupreagg = false;
 #endif
 	/* pg_strom.gpupreagg_reduction_threshold */
 	DefineCustomRealVariable("pg_strom.gpupreagg_reduction_threshold",

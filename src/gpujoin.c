@@ -304,9 +304,9 @@ static set_join_pathlist_hook_type set_join_pathlist_next;
 static CustomPathMethods	gpujoin_path_methods;
 static CustomScanMethods	gpujoin_plan_methods;
 static CustomExecMethods	gpujoin_exec_methods;
-static bool					enable_gpunestloop;
-static bool					enable_gpuhashjoin;
-static bool					enable_partitionwise_gpujoin = false;
+static bool					enable_gpunestloop;				/* GUC */
+static bool					enable_gpuhashjoin;				/* GUC */
+static bool					enable_partitionwise_gpujoin;	/* GUC */
 static HTAB				   *gpujoin_inner_sibling_dsm = NULL;
 typedef struct {
 	uint64			toc_key;
@@ -6533,6 +6533,8 @@ pgstrom_init_gpujoin(void)
 							 PGC_USERSET,
                              GUC_NOT_IN_SAMPLE,
                              NULL, NULL, NULL);
+#else
+	enable_partitionwise_gpujoin = false;
 #endif
 	/* setup path methods */
 	gpujoin_path_methods.CustomName				= "GpuJoin";
