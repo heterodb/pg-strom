@@ -825,7 +825,7 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 			appendStringInfo(
 				&temp,
 				"  /* %s system column */\n"
-				"  tup_isnull[%d] = !htup;\n"
+				"  tup_isnull[%d] = false;\n"
 				"  tup_values[%d] = kds_src->table_oid;\n",
 				NameStr(attr->attname), i, i);
 			appendStringInfoString(&tbody, temp.data);
@@ -838,7 +838,7 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 			appendStringInfo(
 				&tbody,
 				"  /* %s system column */\n"
-				"  tup_isnull[%d] = !t_self;\n"
+				"  tup_isnull[%d] = false;\n"
 				"  tup_values[%d] = PointerGetDatum(t_self);\n",
 				NameStr(attr->attname), i, i);
 		}
@@ -847,9 +847,8 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 			appendStringInfo(
 				&tbody,
 				"  /* %s system column */\n"
-				"  tup_isnull[%d] = !htup;\n"
-				"  if (htup)\n"
-				"    tup_values[%d] = kern_getsysatt_%s(htup);\n",
+				"  tup_isnull[%d] = false;\n"
+				"  tup_values[%d] = kern_getsysatt_%s(htup);\n",
 				NameStr(attr->attname),
 				i, i, NameStr(attr->attname));
 		}
