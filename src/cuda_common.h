@@ -206,12 +206,8 @@ typedef uintptr_t		hostptr_t;
  * STATIC_INLINE / STATIC_FUNCTION packs common attributes to be
  * assigned on host/device functions
  */
-#ifdef __CUDACC__
-#if __CUDA_ARCH__ < 200
-#define MAXTHREADS_PER_BLOCK		512
-#else
 #define MAXTHREADS_PER_BLOCK		1024
-#endif
+#ifdef __CUDACC__
 #define STATIC_INLINE(RET_TYPE)					\
 	__device__ __forceinline__ static RET_TYPE __attribute__ ((unused))
 #define STATIC_FUNCTION(RET_TYPE)				\

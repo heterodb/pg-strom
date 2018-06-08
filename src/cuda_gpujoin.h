@@ -102,6 +102,8 @@ struct kern_gpujoin
 	cl_uint			pstack_nrooms;		/* size of pseudo-stack */
 	cl_uint			suspend_offset;		/* offset to the suspend-backup */
 	cl_uint			num_rels;			/* number of inner relations */
+	cl_uint			grid_sz;			/* grid-size on invocation */
+	cl_uint			block_sz;			/* block-size on invocation */
 	cl_bool			resume_context;		/* resume context from suspend */
 	cl_uint			src_read_pos;		/* position to read from kds_src */
 	/* error status to be backed (OUT) */
@@ -113,6 +115,26 @@ struct kern_gpujoin
 };
 typedef struct kern_gpujoin		kern_gpujoin;
 
+/*
+ * suspend/resume context
+ */
+struct gpujoinSuspendBlock
+{
+	cl_int			depth;
+	cl_bool			scan_done;
+	cl_uint			src_read_pos;
+	cl_uint			stat_source_nitems;
+	struct {
+		cl_uint		wip_count;
+		cl_uint		read_pos;
+		cl_uint		write_pos;
+		cl_uint		stat_nitems;
+		cl_uint		l_state[MAXTHREADS_PER_BLOCK];	/* private variables */
+		cl_bool		matched[MAXTHREADS_PER_BLOCK];	/* private variables */
+	} pd[FLEXIBLE_ARRAY_MEMBER];	/* per-depth */
+};
+typedef struct gpujoinSuspendBlock	gpujoinSuspendBlock;
+
 #define KERN_GPUJOIN_PARAMBUF(kgjoin)					\
 	((kern_parambuf *)((char *)(kgjoin) + (kgjoin)->kparams_offset))
 #define KERN_GPUJOIN_PARAMBUF_LENGTH(kgjoin)			\
@@ -123,12 +145,11 @@ typedef struct kern_gpujoin		kern_gpujoin;
 			   (char *)(kgjoin))
 #define KERN_GPUJOIN_PSEUDO_STACK(kgjoin)					\
 	((cl_uint *)((char *)(kgjoin) + (kgjoin)->pstack_offset))
-#define KERN_GPUJOIN_SUSPEND_BLOCK(kgjoin)					\
-	((struct gpujoin_suspend_block *)						\
+#define KERN_GPUJOIN_SUSPEND_BLOCK(kgjoin,group_id)			\
+	((struct gpujoinSuspendBlock *)							\
 	 ((char *)(kgjoin) + (kgjoin)->suspend_offset +			\
-	  get_group_id() *										\
-	  STROMALIGN(offsetof(gpujoin_suspend_block,			\
-						  threads[get_local_size()]))))
+	  (group_id) * STROMALIGN(offsetof(gpujoinSuspendBlock,	\
+									   pd[(kgjoin)->num_rels + 1]))))
 
 #ifdef __CUDACC__
 
@@ -208,50 +229,38 @@ static __shared__ cl_uint	stat_nitems[GPUJOIN_MAX_DEPTH+1];
 static __shared__ cl_uint	pg_crc32_table[256];
 
 /*
- * per block suspended context
- */
-struct gpujoin_suspend_block
-{
-	cl_int			depth;
-	cl_bool			scan_done;
-	cl_uint			src_read_pos;
-	cl_uint			wip_count[GPUJOIN_MAX_DEPTH+1];
-	cl_uint			read_pos[GPUJOIN_MAX_DEPTH+1];
-	cl_uint			write_pos[GPUJOIN_MAX_DEPTH+1];
-	cl_uint			stat_source_nitems;
-	cl_uint			stat_nitems[GPUJOIN_MAX_DEPTH+1];
-	struct {
-		cl_uint		l_state[GPUJOIN_MAX_DEPTH+1];
-		cl_bool		matched[GPUJOIN_MAX_DEPTH+1];
-	} threads[FLEXIBLE_ARRAY_MEMBER];
-};
-typedef struct gpujoin_suspend_block	gpujoin_suspend_block;
-
-/*
  * gpujoin_suspend_context
  */
 STATIC_FUNCTION(void)
 gpujoin_suspend_context(kern_gpujoin *kgjoin,
 						cl_int depth, cl_uint *l_state, cl_bool *matched)
 {
-	gpujoin_suspend_block *sb = KERN_GPUJOIN_SUSPEND_BLOCK(kgjoin);
+	gpujoinSuspendBlock *sb;
+	cl_int		i;
 
+	sb = KERN_GPUJOIN_SUSPEND_BLOCK(kgjoin, get_group_id());
 	if (get_local_id() == 0)
 	{
 		sb->depth = depth;
 		sb->scan_done = scan_done;
 		sb->src_read_pos = src_read_pos;
-		memcpy(sb->wip_count, wip_count, sizeof(wip_count));
-		memcpy(sb->read_pos, read_pos, sizeof(read_pos));
-		memcpy(sb->write_pos, write_pos, sizeof(write_pos));
 		sb->stat_source_nitems = stat_source_nitems;
-		memcpy(sb->stat_nitems, stat_nitems, sizeof(stat_nitems));
+	}
+
+	for (i=get_local_id(); i <= GPUJOIN_MAX_DEPTH; i+=get_local_size())
+	{
+		sb->pd[i].wip_count = wip_count[i];
+		sb->pd[i].read_pos = read_pos[i];
+		sb->pd[i].write_pos = write_pos[i];
+		sb->pd[i].stat_nitems = stat_nitems[i];
+	}
+
+	for (i=0; i <= GPUJOIN_MAX_DEPTH; i++)
+	{
+		sb->pd[i].l_state[get_local_id()] = l_state[i];
+		sb->pd[i].matched[get_local_id()] = matched[i];
 	}
 	__syncthreads();
-	memcpy(sb->threads[get_local_id()].l_state, l_state,
-		   sizeof(cl_uint) * (GPUJOIN_MAX_DEPTH + 1));
-	memcpy(sb->threads[get_local_id()].matched, matched,
-		   sizeof(cl_bool) * (GPUJOIN_MAX_DEPTH + 1));
 }
 
 /*
@@ -261,25 +270,31 @@ STATIC_FUNCTION(cl_int)
 gpujoin_resume_context(kern_gpujoin *kgjoin,
 					   cl_uint *l_state, cl_bool *matched)
 {
-	gpujoin_suspend_block *sb = KERN_GPUJOIN_SUSPEND_BLOCK(kgjoin);
-	cl_int		depth = sb->depth;
+	gpujoinSuspendBlock *sb;
+	cl_int		i;
 
+	sb = KERN_GPUJOIN_SUSPEND_BLOCK(kgjoin, get_group_id());
 	if (get_local_id() == 0)
 	{
 		scan_done = sb->scan_done;
 		src_read_pos = sb->src_read_pos;
-		memcpy(wip_count, sb->wip_count, sizeof(wip_count));
-		memcpy(read_pos, sb->read_pos, sizeof(read_pos));
-		memcpy(write_pos, sb->write_pos, sizeof(write_pos));
 		stat_source_nitems = sb->stat_source_nitems;
-		memcpy(stat_nitems, sb->stat_nitems, sizeof(stat_nitems));
 	}
-	__syncthreads();
-	memcpy(l_state, sb->threads[get_local_id()].l_state,
-		   sizeof(cl_uint) * (GPUJOIN_MAX_DEPTH + 1));
-	memcpy(matched, sb->threads[get_local_id()].matched,
-		   sizeof(cl_bool) * (GPUJOIN_MAX_DEPTH + 1));
-	return depth;
+
+	for (i=get_local_id(); i <= GPUJOIN_MAX_DEPTH; i+=get_local_size())
+	{
+		wip_count[i] = sb->pd[i].wip_count;
+		read_pos[i] = sb->pd[i].read_pos;
+		write_pos[i] = sb->pd[i].write_pos;
+		stat_nitems[i] = sb->pd[i].stat_nitems;
+	}
+
+	for (i=0; i <= GPUJOIN_MAX_DEPTH; i++)
+	{
+		l_state[i] = sb->pd[i].l_state[get_local_id()];
+		matched[i] = sb->pd[i].matched[get_local_id()];
+	}
+	return sb->depth;
 }
 
 /*
@@ -1369,7 +1384,8 @@ gpujoin_main(kern_gpujoin *kgjoin,
 	/* update statistics only if normal exit */
 	if (depth == -1 && get_local_id() == 0)
 	{
-		gpujoin_suspend_block *sb = KERN_GPUJOIN_SUSPEND_BLOCK(kgjoin);
+		gpujoinSuspendBlock *sb
+			= KERN_GPUJOIN_SUSPEND_BLOCK(kgjoin, get_group_id());
 		sb->depth = -1;		/* no more suspend/resume! */
 
 		atomicAdd(&kgjoin->source_nitems, stat_source_nitems);
@@ -1543,7 +1559,8 @@ gpujoin_right_outer(kern_gpujoin *kgjoin,
 	/* write out statistics */
 	if (get_local_id() == 0)
 	{
-		gpujoin_suspend_block *sb = KERN_GPUJOIN_SUSPEND_BLOCK(kgjoin);
+		gpujoinSuspendBlock *sb
+			= KERN_GPUJOIN_SUSPEND_BLOCK(kgjoin, get_group_id());
 		sb->depth = -1;		/* no more suspend/resume! */
 
 		assert(stat_source_nitems == 0);

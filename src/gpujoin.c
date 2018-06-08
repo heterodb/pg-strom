@@ -4381,22 +4381,8 @@ GpuJoinSetupTask(struct kern_gpujoin *kgjoin, GpuTaskState *gts,
 	pstack_nrooms = 2048;
 	pstack_sz = MAXALIGN(sizeof(cl_uint) *
 						 pstack_nrooms * ((nrels+1) * (nrels+2)) / 2);
-	/*
-	 * MEMO: GPUJOIN_MAX_DEPTH is only available on the device code,
-	 * so we cannot determine the size of gpujoin_suspend_block on
-	 * host code.
-	 */
-	suspend_sz = (sizeof(cl_int) +					/* depth */
-				  sizeof(cl_int) +					/* scan_done */
-				  sizeof(cl_uint) +					/* src_read_pos */
-				  sizeof(cl_uint) * (nrels + 1) +	/* wip_count */
-				  sizeof(cl_uint) * (nrels + 1) +	/* read_pos */
-				  sizeof(cl_uint) * (nrels + 1) +	/* write_pos */
-				  sizeof(cl_uint) +					/* stat_source_nitems */
-				  sizeof(cl_uint) * (nrels + 1) +	/* stat_nitems */
-				  /* threads[] array */
-				  (MAXALIGN(sizeof(cl_uint) * (nrels + 1)) +
-				   MAXALIGN(sizeof(cl_bool) * (nrels + 1))) * 1024);
+	suspend_sz = STROMALIGN(offsetof(gpujoinSuspendBlock,
+									 pd[nrels + 1]));
 	if (kgjoin)
 	{
 		memset(kgjoin, 0, head_sz);
@@ -5622,6 +5608,8 @@ gpujoin_process_inner_join(GpuJoinTask *pgjoin, CUmodule cuda_module)
 							 0, sizeof(cl_int));
 	if (rc != CUDA_SUCCESS)
 		werror("failed on gpuOptimalBlockSize: %s", errorText(rc));
+	pgjoin->kern.grid_sz	= grid_sz;
+	pgjoin->kern.block_sz	= block_sz;
 
 resume_gpujoin:
 	kern_args[0] = &m_kgjoin;
