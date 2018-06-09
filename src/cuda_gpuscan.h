@@ -31,24 +31,36 @@
  */
 struct kern_gpuscan {
 	kern_errorbuf	kerror;
+	cl_uint			grid_sz;
+	cl_uint			block_sz;
 	cl_uint			read_src_pos;
 	cl_uint			nitems_in;
 	cl_uint			nitems_out;
 	cl_uint			extra_size;
-	/* performance profile */
-	struct {
-		cl_float	tv_kern_exec_quals;
-		cl_float	tv_kern_projection;
-	} pfm;
+	cl_uint			suspend_offset;		/* offset to suspend buffer, if any */
+	cl_bool			resume_context;		/* true, if resume context */
 	kern_parambuf	kparams;
+	/* <-- kern_resultbuf (if KDS_FORMAT_ROW and no projection) --> */
+	/* <-- gpuscanSuspendBlock (other cases) --> */
 };
-
 typedef struct kern_gpuscan		kern_gpuscan;
+
+typedef struct
+{
+	cl_uint		part_index;
+	cl_uint		line_index;
+} gpuscanSuspendContext;
 
 #define KERN_GPUSCAN_PARAMBUF(kgpuscan)			\
 	((kern_parambuf *)(&(kgpuscan)->kparams))
 #define KERN_GPUSCAN_PARAMBUF_LENGTH(kgpuscan)	\
 	STROMALIGN((kgpuscan)->kparams.length)
+#define KERN_GPUSCAN_SUSPEND_CONTEXT(kgpuscan, group_id) \
+	((kgpuscan)->suspend_offset == 0					 \
+	 ? NULL												 \
+	 : ((gpuscanSuspendContext *)						 \
+		((char *)(&(kgpuscan)->kparams) +				 \
+		 (kgpuscan)->suspend_offset)) + (group_id))
 #define KERN_GPUSCAN_RESULTBUF(kgpuscan)		\
 	((kern_resultbuf *)((char *)&(kgpuscan)->kparams +				\
 						STROMALIGN((kgpuscan)->kparams.length)))
@@ -62,12 +74,7 @@ typedef struct kern_gpuscan		kern_gpuscan;
 	 KERN_GPUSCAN_RESULTBUF_LENGTH(kgpuscan))
 #define KERN_GPUSCAN_DMASEND_LENGTH(kgpuscan)	\
 	(offsetof(kern_gpuscan, kparams) +			\
-	 KERN_GPUSCAN_PARAMBUF_LENGTH(kgpuscan) +	\
-	 offsetof(kern_resultbuf, results[0]))
-#define KERN_GPUSCAN_DMARECV_LENGTH(kgpuscan, nitems)	\
-	(offsetof(kern_gpuscan, kparams) +					\
-	 KERN_GPUSCAN_PARAMBUF_LENGTH(kgpuscan) +			\
-	 offsetof(kern_resultbuf, results[(nitems)]))
+	 KERN_GPUSCAN_PARAMBUF_LENGTH(kgpuscan))
 
 #ifdef __CUDACC__
 /*
@@ -433,16 +440,20 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 						 kern_data_store *kds_dst)
 {
 	kern_parambuf  *kparams = KERN_GPUSCAN_PARAMBUF(kgpuscan);
+	gpuscanSuspendContext *my_suspend;
 	kern_context	kcxt;
 	cl_uint			src_nitems = kds_src->nitems;
 	cl_uint			part_sz;
 	cl_uint			n_parts;
 	cl_uint			nitems_offset;
 	cl_uint			usage_offset;
+	cl_uint			window_sz;
+	cl_uint			part_base;
+	cl_uint			part_index = 0;
+	cl_uint			line_index = 0;
 	cl_uint			total_nitems_in = 0;	/* stat */
 	cl_uint			total_nitems_out = 0;	/* stat */
 	cl_uint			total_extra_size = 0;	/* stat */
-	cl_bool			try_next_window = true;
 	cl_bool			thread_is_valid = false;
 #ifdef GPUSCAN_HAS_DEVICE_PROJECTION
 #if GPUSCAN_DEVICE_PROJECTION_NFIELDS > 0
@@ -459,7 +470,6 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 	char		   *tup_extra = NULL;
 #endif
 #endif
-	__shared__ cl_uint	base;
 	__shared__ cl_uint	nitems_base;
 	__shared__ cl_ulong	usage_base;
 
@@ -471,24 +481,30 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 	n_parts = get_local_size() / part_sz;
 	if (get_local_id() < part_sz * n_parts)
 		thread_is_valid = true;
-	do {
+	window_sz = n_parts * get_num_groups();
+
+	/* resume kernel from the point where suspended, if any */
+	my_suspend = KERN_GPUSCAN_SUSPEND_CONTEXT(kgpuscan, get_group_id());
+	if (kgpuscan->resume_context)
+	{
+		part_index = my_suspend->part_index;
+		line_index = my_suspend->line_index;
+	}
+	__syncthreads();
+
+	for (;;)
+	{
 		cl_uint		part_id;
 		cl_uint		line_no;
 		cl_uint		n_lines;
 		cl_uint		nvalids;
 		cl_uint		nitems_real;
 
-		if (get_local_id() == 0)
-			base =  atomicAdd(&kgpuscan->read_src_pos, n_parts);
-		__syncthreads();
-
-		if (base + n_parts >= __ldg(&kds_src->nitems))
-			try_next_window = false;
-		if (base >= __ldg(&kds_src->nitems))
+		part_base = part_index * window_sz + get_group_id() * n_parts;
+		if (part_base >= kds_src->nitems)
 			break;
-
-		part_id = base + get_local_id() / part_sz;
-		line_no = get_local_id() % part_sz;
+		part_id = get_local_id() / part_sz + part_base;
+		line_no = get_local_id() % part_sz + line_index * part_sz;
 
 		do {
 			HeapTupleHeaderData *htup = NULL;
@@ -529,10 +545,7 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 				rc = false;
 			/* bailout if any error */
 			if (__syncthreads_count(kcxt.e.errcode) > 0)
-			{
-				try_next_window = false;
-				break;
-			}
+				goto out;
 #else
 			rc = true;
 #endif
@@ -587,7 +600,7 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 						STROMALIGN(sizeof(cl_uint) * newval.i.nitems) +
 						__kds_unpack(newval.i.usage) > kds_dst->length)
 					{
-						STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
+						STROM_SET_ERROR(&kcxt.e, StromError_Suspend);
 						break;
 					}
 				} while ((curval.v64 = atomicCAS((cl_ulong *)&kds_dst->nitems,
@@ -597,10 +610,7 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 				usage_base  = __kds_unpack(oldval.i.usage);
 			}
 			if (__syncthreads_count(kcxt.e.errcode) > 0)
-			{
-				try_next_window = false;
-				break;
-			}
+				goto out;
 
 			/* store the result heap tuple */
 			if (htup && rc)
@@ -649,10 +659,14 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 			 * Move to the next window of the line items, if any.
 			 * If no threads in CUDA block wants to continue, exit the loop.
 			 */
+			line_index++;
 			line_no += part_sz;
 		} while (__syncthreads_count(thread_is_valid &&
 									 line_no < n_lines) > 0);
-	} while (try_next_window);
+		/* move to the next window */
+		part_index++;
+		line_index = 0;
+	}
 
 	/* update statistics */
 	if (get_local_id() == 0)
@@ -660,6 +674,12 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 		atomicAdd(&kgpuscan->nitems_in,  total_nitems_in);
 		atomicAdd(&kgpuscan->nitems_out, total_nitems_out);
 		atomicAdd(&kgpuscan->extra_size, total_extra_size);
+	}
+out:
+	if (get_local_id() == 0)
+	{
+		my_suspend->part_index = part_index;
+		my_suspend->line_index = line_index;
 	}
 	/* write back error code to the host */
 	kern_writeback_error_status(&kgpuscan->kerror, &kcxt.e);

@@ -5116,6 +5116,7 @@ resume_kernel:
 							  pds_src->kds.length);
 			if (rc != CUDA_SUCCESS)
 				werror("failed on cuMemcpyDtoH: %s", errorText(rc));
+			pds_src->nblocks_uncached = 0;
 		}
 		gpreagg->task.kerror.errcode = StromError_Success;
 		gpreagg->task.cpu_fallback = true;
