@@ -443,13 +443,9 @@ estimate_inner_buffersize(PlannerInfo *root,
 						  RelOptInfo *joinrel,
 						  Path *outer_path,
 						  GpuJoinPath *gpath,
-						  double num_chunks,
-						  double *p_kern_nloops)
+						  double num_chunks)
 {
 	Size		inner_total_sz;
-	Size		buffer_size;
-	double		kern_nloops = 1.0;
-	double		join_ntuples;
 	cl_int		ncols;
 	cl_int		i, num_rels = gpath->num_rels;
 
@@ -466,7 +462,6 @@ estimate_inner_buffersize(PlannerInfo *root,
 		Size		inner_ntuples = (Size)inner_path->rows;
 		Size		chunk_size;
 		Size		entry_size;
-		Size		num_items;
 
 		/*
 		 * NOTE: PathTarget->width is not reliable for base relations 
@@ -508,28 +503,7 @@ estimate_inner_buffersize(PlannerInfo *root,
 												  inner_ntuples * entry_size);
 		gpath->inners[i].ichunk_size = chunk_size;
 		inner_total_sz += chunk_size;
-
-		/*
-		 * NOTE: amount of the intermediation result buffer is preferable
-		 * to fit pgstrom_chunk_size(). If too large number of rows are
-		 * expected, in-kernel GpuJoin logic internally repeat a series of
-		 * JOIN steps.
-		 */
-		join_ntuples = gpath->inners[i].join_nrows / (double)num_chunks;
-		num_items = (Size)((double)(i+2) * join_ntuples);
-		buffer_size = offsetof(kern_gpujoin, stat_nitems[num_rels + 1])
-			+ BLCKSZ	/* alternative of kern_parambuf */
-			+ STROMALIGN(offsetof(kern_resultbuf, results[num_items]))
-			+ STROMALIGN(offsetof(kern_resultbuf, results[num_items]));
-		if (buffer_size > pgstrom_chunk_size())
-		{
-			Size	nsplits = (buffer_size / pgstrom_chunk_size()) + 1;
-
-			kern_nloops *= nsplits;
-		}
 	}
-	*p_kern_nloops = kern_nloops;
-
 	return inner_total_sz;
 }
 
@@ -555,7 +529,6 @@ cost_gpujoin(PlannerInfo *root,
 	double		parallel_divisor = 1.0;
 	double		num_chunks;
 	double		outer_ntuples;
-	double		kern_nloops = 1.0;
 	int			i, num_rels = gpath->num_rels;
 	bool		retval = false;
 
@@ -593,8 +566,7 @@ cost_gpujoin(PlannerInfo *root,
 												joinrel,
 												outer_path,
 												gpath,
-												num_chunks,
-												&kern_nloops);
+												num_chunks);
 	/*
 	 * Cost for each depth
 	 */

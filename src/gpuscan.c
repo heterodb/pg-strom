@@ -118,7 +118,6 @@ typedef struct
 	/* DMA buffers */
 	pgstrom_data_store *pds_src;
 	pgstrom_data_store *pds_dst;
-	kern_resultbuf	   *kresults;
 	kern_gpuscan		kern;
 } GpuScanTask;
 
@@ -2146,10 +2145,10 @@ gpuscan_create_task(GpuScanState *gss,
 	TupleDesc		scan_tupdesc = scan_slot->tts_tupleDescriptor;
 	GpuContext	   *gcontext = gss->gts.gcontext;
 	pgstrom_data_store *pds_dst = NULL;
-	kern_resultbuf *kresults = NULL;
 	GpuScanTask	   *gscan;
 	cl_uint			nresults = 0;
 	size_t			suspend_sz = 0;
+	size_t			result_index_sz = 0;
 	size_t			length;
 	CUdeviceptr		m_deviceptr;
 	CUresult		rc;
@@ -2158,7 +2157,11 @@ gpuscan_create_task(GpuScanState *gss,
 	 * allocation of destination buffer
 	 */
 	if (pds_src->kds.format == KDS_FORMAT_ROW && !gss->dev_projection)
+	{
 		nresults = pds_src->kds.nitems;
+		result_index_sz = offsetof(gpuscanResultIndex,
+								   results[nresults]);
+	}
 	else
 	{
 		double	ntuples = pds_src->kds.nitems;
@@ -2167,14 +2170,15 @@ gpuscan_create_task(GpuScanState *gss,
 		Size	length;
 
 		if (pds_src->kds.format == KDS_FORMAT_BLOCK)
-		{HOGE
+		{
 			Assert(pds_src->kds.nrows_per_block > 0);
-			ntuples *= (double)pds_src->kds.nrows_per_block / 2;
+			ntuples *= (double)pds_src->kds.nrows_per_block;
 		}
+		//HOGE
 		length = STROMALIGN(offsetof(kern_data_store,
 									 colmeta[scan_tupdesc->natts])) +
 			STROMALIGN((Size)(sizeof(cl_uint) * ntuples)) +
-			STROMALIGN((Size)(1.2 * proj_tuple_sz * ntuples));
+			STROMALIGN((Size)(1.2 * proj_tuple_sz * ntuples / 2));
 
 		pds_dst = PDS_create_row(gcontext,
 								 scan_tupdesc,
@@ -2190,7 +2194,7 @@ gpuscan_create_task(GpuScanState *gss,
 	length = (STROMALIGN(offsetof(GpuScanTask, kern.kparams)) +
 			  STROMALIGN(gss->gts.kern_params->length) +
 			  STROMALIGN(suspend_sz) +
-			  STROMALIGN(offsetof(kern_resultbuf, results[nresults])));
+			  STROMALIGN(result_index_sz));
 	rc = gpuMemAllocManaged(gcontext,
 							&m_deviceptr,
 							length,
@@ -2198,28 +2202,17 @@ gpuscan_create_task(GpuScanState *gss,
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on gpuMemAllocManaged: %s", errorText(rc));
 	gscan = (GpuScanTask *) m_deviceptr;
-	memset(gscan, 0, (offsetof(GpuScanTask, kern) +
-					  offsetof(kern_gpuscan, kparams)));
+	memset(gscan, 0, length);
 	pgstromInitGpuTask(&gss->gts, &gscan->task);
 	gscan->with_nvme_strom = (pds_src->kds.format == KDS_FORMAT_BLOCK &&
 							  pds_src->nblocks_uncached > 0);
 	gscan->pds_src = pds_src;
 	gscan->pds_dst = pds_dst;
-	if (suspend_sz > 0)
-		gscan->kern.suspend_offset = (offsetof(kern_gpuscan, kparams) +
-									  gss->gts.kern_params->length);
+	gscan->kern.suspend_sz = suspend_sz;
 	/* kern_parambuf */
 	memcpy(KERN_GPUSCAN_PARAMBUF(&gscan->kern),
 		   gss->gts.kern_params,
 		   gss->gts.kern_params->length);
-	/* kern_resultbuf, if any */
-	kresults = KERN_GPUSCAN_RESULTBUF(&gscan->kern);
-	memset(kresults, 0, sizeof(kern_resultbuf));
-	kresults->nrels = 1;
-	kresults->nrooms = nresults;
-	if (!pds_dst)
-		gscan->kresults = kresults;
-
 	return gscan;
 }
 
@@ -2709,22 +2702,16 @@ gpuscan_next_tuple(GpuTaskState *gts)
 	else
 	{
 		pgstrom_data_store *pds_src = gscan->pds_src;
-		kern_resultbuf	   *kresults = gscan->kresults;
+		gpuscanResultIndex *gs_results
+			= KERN_GPUSCAN_RESULT_INDEX(&gscan->kern);
 
-		/*
-		 * We should not inject GpuScan for all-visible with no device
-		 * projection; GPU has no actual works in other words.
-		 * NOTE: kresults->results[] keeps offset from the head of
-		 * kds_src.
-		 */
 		Assert(pds_src->kds.format == KDS_FORMAT_ROW);
-		Assert(!kresults->all_visible);
-		if (gss->gts.curr_index < kresults->nitems)
+		if (gss->gts.curr_index < gs_results->nitems)
 		{
 			HeapTuple	tuple = &gss->scan_tuple;
 			cl_uint		kds_offset;
 
-			kds_offset = kresults->results[gss->gts.curr_index++];
+			kds_offset = gs_results->results[gss->gts.curr_index++];
 			tuple->t_data = KDS_ROW_REF_HTUP(&pds_src->kds,
 											 kds_offset,
 											 &tuple->t_self,
@@ -2956,6 +2943,10 @@ gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 	gscan->kern.grid_sz = grid_sz;
 	gscan->kern.block_sz = block_sz;
 resume_kernel:
+	gscan->kern.nitems_in = 0;
+	gscan->kern.nitems_out = 0;
+	gscan->kern.extra_size = 0;
+	gscan->kern.suspend_count = 0;
 	kern_args[0] = &m_gpuscan;
 	kern_args[1] = &m_kds_src;
 	kern_args[2] = &m_kds_dst;
@@ -2993,52 +2984,23 @@ resume_kernel:
 		GpuScanState	   *gss = (GpuScanState *)gscan->task.gts;
 		GpuScanRuntimeStat *gs_rtstat = gss->gs_rtstat;
 
+		/* update stat */
 		pg_atomic_add_fetch_u64(&gs_rtstat->nitems_filtered,
 								nitems_in - nitems_out);
-	}
-	else if (gscan->task.kerror.errcode == StromError_Suspend)
-	{
-		CHECK_WORKER_TERMINATION();
-		fprintf(stderr, "GpuScan suspend {nitems=%u usage=%u}\n", pds_dst->kds.nitems, pds_dst->kds.usage * 8);
-		/* return partial result */
-		pds_dst = PDS_clone(gscan->pds_dst);
-		gpuscan_throw_partial_result(gscan, gscan->pds_dst);
-		/* reset error status, then resume kernel with new buffer */
-		memset(&gscan->kern.kerror, 0, sizeof(kern_errorbuf));
-		gscan->kern.kerror.errcode = 0;
-        gscan->kern.resume_context = true;
-		gscan->pds_dst = pds_dst;
-		m_kds_dst = (CUdeviceptr)&pds_dst->kds;
-		goto resume_kernel;
-	}
-	else
-	{
-		if (pgstrom_cpu_fallback_enabled &&
-			gscan->task.kerror.errcode == StromError_CpuReCheck)
+		if (!pds_dst)
 		{
-			/*
-			 * In case of KDS_FORMAT_BLOCK, we have to write back the buffer
-			 * to host-side, because its ItemIdData might be updated, and
-			 * blocks might not be loaded yet if NVMe-Strom mode.
-			 */
-			if (pds_dst->kds.format == KDS_FORMAT_BLOCK)
-			{
-				rc = cuMemcpyDtoH(&pds_dst->kds,
-								  m_kds_src,
-								  pds_dst->kds.length);
-				if (rc != CUDA_SUCCESS)
-					werror("failed on cuMemcpyDtoH: %s", errorText(rc));
-				pds_dst->nblocks_uncached = 0;
-			}
-			memset(&gscan->task.kerror, 0, sizeof(kern_errorbuf));
-			gscan->task.cpu_fallback = true;
-		}
-		goto out_of_resource;
-	}
+			Assert(extra_size == 0);
 
-	if (pds_dst)
-	{
-		if (nitems_out > 0)
+			rc = cuMemPrefetchAsync((CUdeviceptr)
+									KERN_GPUSCAN_RESULT_INDEX(&gscan->kern),
+									offsetof(gpuscanResultIndex,
+											 results[nitems_out]),
+									CU_DEVICE_CPU,
+									CU_STREAM_PER_THREAD);
+			if (rc != CUDA_SUCCESS)
+				werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
+		}
+		else if (nitems_out > 0)
 		{
 			Assert(extra_size > 0);
 			offset = pds_dst->kds.length - extra_size;
@@ -3057,20 +3019,47 @@ resume_kernel:
 			if (rc != CUDA_SUCCESS)
 				werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
 		}
+
+		/* resume gpuscan kernel, if suspended */
+		if (gscan->kern.suspend_count > 0)
+		{
+			CHECK_WORKER_TERMINATION();
+
+			fprintf(stderr, "GpuScan suspend {nitems=%u usage=%u}\n", pds_dst->kds.nitems, pds_dst->kds.usage * 8);
+			/* return partial result */
+			pds_dst = PDS_clone(gscan->pds_dst);
+			gpuscan_throw_partial_result(gscan, gscan->pds_dst);
+			/* reset error status, then resume kernel with new buffer */
+			memset(&gscan->kern.kerror, 0, sizeof(kern_errorbuf));
+			gscan->kern.resume_context = true;
+			gscan->pds_dst = pds_dst;
+			m_kds_dst = (CUdeviceptr)&pds_dst->kds;
+			goto resume_kernel;
+		}
 	}
 	else
 	{
-		Assert(extra_size == 0);
-
-		rc = cuMemPrefetchAsync((CUdeviceptr)gscan->kresults,
-								offsetof(kern_resultbuf,
-										 results[nitems_out]),
-								CU_DEVICE_CPU,
-								CU_STREAM_PER_THREAD);
-		if (rc != CUDA_SUCCESS)
-			werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
+		if (pgstrom_cpu_fallback_enabled &&
+			gscan->task.kerror.errcode == StromError_CpuReCheck)
+		{
+			/*
+			 * In case of KDS_FORMAT_BLOCK, we have to write back the buffer
+			 * to host-side, because its ItemIdData might be updated, and
+			 * blocks might not be loaded yet if NVMe-Strom mode.
+			 */
+			if (pds_src->kds.format == KDS_FORMAT_BLOCK)
+			{
+				rc = cuMemcpyDtoH(&pds_src->kds,
+								  m_kds_src,
+								  pds_src->kds.length);
+				if (rc != CUDA_SUCCESS)
+					werror("failed on cuMemcpyDtoH: %s", errorText(rc));
+				pds_src->nblocks_uncached = 0;
+			}
+			memset(&gscan->task.kerror, 0, sizeof(kern_errorbuf));
+			gscan->task.cpu_fallback = true;
+		}
 	}
-
 out_of_resource:
 	if (retval > 0)
 		wnotice("GpuScan: out of resource");

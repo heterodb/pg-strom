@@ -185,7 +185,6 @@ extern __shared__ cl_ulong __pgstrom_dynamic_shared_workmem[];
 #define get_global_id()			(threadIdx.x + blockIdx.x * blockDim.x)
 #define get_global_size()		(blockDim.x * gridDim.x)
 #define get_global_base()		(blockIdx.x * blockDim.x)
-#define get_global_index()		(blockIdx.x)
 
 #else	/* __CUDACC__ */
 #include "access/htup_details.h"
@@ -850,26 +849,6 @@ pointer_on_kparams(void *ptr, kern_parambuf *kparams)
 	return kparams && ((char *)ptr >= (char *)kparams &&
 					   (char *)ptr <  (char *)kparams + kparams->length);
 }
-
-/*
- * kern_resultbuf
- *
- * Output buffer to write back calculation results on a parciular chunk.
- * kern_errorbuf informs an error status that shall be raised on host-
- * side to abort current transaction.
- */
-typedef struct {
-	cl_uint		nrels;		/* number of relations to be appeared */
-	cl_uint		nrooms;		/* max number of results rooms */
-	cl_uint		nitems;		/* number of results being written */
-	cl_char		all_visible;/* GpuScan dumps all the tuples in chunk */
-	cl_char		__padding__[3];
-	kern_errorbuf kerror;	/* error information */
-	cl_uint		results[FLEXIBLE_ARRAY_MEMBER];
-} kern_resultbuf;
-
-#define KERN_GET_RESULT(kresults, index)		\
-	((kresults)->results + (kresults)->nrels * (index))
 
 #ifdef __CUDACC__
 /* ----------------------------------------------------------------

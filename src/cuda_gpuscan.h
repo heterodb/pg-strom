@@ -19,15 +19,7 @@
 #define CUDA_GPUSCAN_H
 
 /*
- * +-----------------+
- * | kern_gpuscan    |
- * | +---------------+
- * | | kern_errbuf   |
- * | +---------------+ ---
- * | | kern_parembuf |  ^
- * | |     :         |  | parameter buffer length
- * | |     :         |  v
- * +-+---------------+ ---
+ * kern_gpuscan
  */
 struct kern_gpuscan {
 	kern_errorbuf	kerror;
@@ -37,11 +29,13 @@ struct kern_gpuscan {
 	cl_uint			nitems_in;
 	cl_uint			nitems_out;
 	cl_uint			extra_size;
-	cl_uint			suspend_offset;		/* offset to suspend buffer, if any */
-	cl_bool			resume_context;		/* true, if resume context */
+	/* suspend/resume support */
+	cl_uint			suspend_sz;			/* size of suspend context buffer */
+	cl_uint			suspend_count;		/* # of suspended workgroups */
+	cl_bool			resume_context;		/* true, if kernel should resume */
 	kern_parambuf	kparams;
-	/* <-- kern_resultbuf (if KDS_FORMAT_ROW and no projection) --> */
-	/* <-- gpuscanSuspendBlock (other cases) --> */
+	/* <-- gpuscanSuspendContext --> */
+	/* <-- gpuscanResultIndex (if KDS_FORMAT_ROW with no projection) -->*/
 };
 typedef struct kern_gpuscan		kern_gpuscan;
 
@@ -51,27 +45,27 @@ typedef struct
 	cl_uint		line_index;
 } gpuscanSuspendContext;
 
+typedef struct
+{
+	cl_uint		nitems;
+	cl_uint		results[FLEXIBLE_ARRAY_MEMBER];
+} gpuscanResultIndex;
+
 #define KERN_GPUSCAN_PARAMBUF(kgpuscan)			\
 	((kern_parambuf *)(&(kgpuscan)->kparams))
 #define KERN_GPUSCAN_PARAMBUF_LENGTH(kgpuscan)	\
 	STROMALIGN((kgpuscan)->kparams.length)
 #define KERN_GPUSCAN_SUSPEND_CONTEXT(kgpuscan, group_id) \
-	((kgpuscan)->suspend_offset == 0					 \
-	 ? NULL												 \
-	 : ((gpuscanSuspendContext *)						 \
-		((char *)(&(kgpuscan)->kparams) +				 \
-		 (kgpuscan)->suspend_offset)) + (group_id))
-#define KERN_GPUSCAN_RESULTBUF(kgpuscan)		\
-	((kern_resultbuf *)((char *)&(kgpuscan)->kparams +				\
-						STROMALIGN((kgpuscan)->kparams.length)))
-#define KERN_GPUSCAN_RESULTBUF_LENGTH(kgpuscan)	\
-	STROMALIGN(offsetof(kern_resultbuf,			\
-		results[KERN_GPUSCAN_RESULTBUF(kgpuscan)->nrels * \
-				KERN_GPUSCAN_RESULTBUF(kgpuscan)->nrooms]))
-#define KERN_GPUSCAN_LENGTH(kgpuscan)			\
-	(offsetof(kern_gpuscan, kparams) +			\
-	 KERN_GPUSCAN_PARAMBUF_LENGTH(kgpuscan) +	\
-	 KERN_GPUSCAN_RESULTBUF_LENGTH(kgpuscan))
+	((kgpuscan)->suspend_sz == 0				\
+	 ? NULL										\
+	 : ((gpuscanSuspendContext *)				\
+		((char *)KERN_GPUSCAN_PARAMBUF(kgpuscan) + \
+		 KERN_GPUSCAN_PARAMBUF_LENGTH(kgpuscan))) + (group_id))
+#define KERN_GPUSCAN_RESULT_INDEX(kgpuscan)		\
+	((gpuscanResultIndex *)						\
+	 ((char *)KERN_GPUSCAN_PARAMBUF(kgpuscan) +	\
+	  KERN_GPUSCAN_PARAMBUF_LENGTH(kgpuscan) +	\
+	  STROMALIGN((kgpuscan)->suspend_sz)))
 #define KERN_GPUSCAN_DMASEND_LENGTH(kgpuscan)	\
 	(offsetof(kern_gpuscan, kparams) +			\
 	 KERN_GPUSCAN_PARAMBUF_LENGTH(kgpuscan))
@@ -253,14 +247,17 @@ gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
 					   kern_data_store *kds_dst)
 {
 	kern_parambuf  *kparams = KERN_GPUSCAN_PARAMBUF(kgpuscan);
-	kern_resultbuf *kresults		__attribute__((unused))
-		= KERN_GPUSCAN_RESULTBUF(kgpuscan);
+	gpuscanSuspendContext *my_suspend
+		= KERN_GPUSCAN_SUSPEND_CONTEXT(kgpuscan, get_group_id());
+	gpuscanResultIndex *gs_results	__attribute__((unused))
+		= KERN_GPUSCAN_RESULT_INDEX(kgpuscan);
 	kern_context	kcxt;
+	cl_uint			part_index = 0;
 	cl_uint			src_index;
-	cl_uint			src_nitems = kds_src->nitems;
-	cl_bool			try_next_window = true;
+	cl_uint			src_base;
 	cl_uint			nitems_offset;
 	cl_uint			usage_offset	__attribute__((unused));
+	cl_uint			total_nitems_in = 0;	/* stat */
 	cl_uint			total_nitems_out = 0;	/* stat */
 	cl_uint			total_extra_size = 0;	/* stat */
 #ifdef GPUSCAN_HAS_DEVICE_PROJECTION
@@ -278,33 +275,33 @@ gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
 	char		   *tup_extra = NULL;
 #endif
 #endif
-	__shared__ cl_uint	src_base;
 	__shared__ cl_uint	nitems_base;
 	__shared__ cl_ulong	usage_base	__attribute__((unused));
 
 	assert(kds_src->format == KDS_FORMAT_ROW);
 	assert(!kds_dst || kds_dst->format == KDS_FORMAT_ROW);
 	INIT_KERNEL_CONTEXT(&kcxt, gpuscan_exec_quals_row, kparams);
+	/* resume kernel from the point where suspended, if any */
+	if (kgpuscan->resume_context)
+	{
+		assert(my_suspend != NULL);
+		part_index = my_suspend->part_index;
+	}
 
-	do {
+	for (src_base = get_global_base() + part_index * get_global_size();
+		 src_base < kds_src->nitems;
+		 src_base += get_global_size(), part_index++)
+	{
 		kern_tupitem   *tupitem;
 		cl_bool			rc;
 		cl_uint			nvalids;
 		cl_uint			required	__attribute__((unused));
 		cl_uint			extra_sz = 0;
-
-		if (get_local_id() == 0)
-			src_base = atomicAdd(&kgpuscan->read_src_pos, get_local_size());
-		__syncthreads();
-
-		if (src_base + get_local_size() >= src_nitems)
-			try_next_window = false;
-		if (src_base >= src_nitems)
-			break;
+		cl_uint			suspend_kernel	__attribute__((unused)) = 0;
 
 		/* Evalidation of the rows by WHERE-clause */
 		src_index = src_base + get_local_id();
-		if (src_index < src_nitems)
+		if (src_index < kds_src->nitems)
 		{
 			tupitem = KERN_DATA_STORE_TUPITEM(kds_src, src_index);
 			rc = gpuscan_quals_eval(&kcxt, kds_src,
@@ -327,10 +324,6 @@ gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
 			goto skip;
 
 #ifdef GPUSCAN_HAS_DEVICE_PROJECTION
-		if (get_local_id() == 0)
-			nitems_base = atomicAdd(&kds_dst->nitems, nvalids);
-		__syncthreads();
-
 		/* extract the source tuple to the private slot, if any */
 		if (tupitem && rc)
 		{
@@ -352,17 +345,38 @@ gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
 
 		usage_offset = pgstromStairlikeSum(required, &extra_sz);
 		if (get_local_id() == 0)
-			usage_base = __kds_unpack(atomicAdd(&kds_dst->usage,
-												__kds_packed(extra_sz)));
-		__syncthreads();
-
-		if (KERN_DATA_STORE_HEAD_LENGTH(kds_dst) +
-			STROMALIGN(sizeof(cl_uint) * (nitems_base + nvalids)) +
-			usage_base + extra_sz > kds_dst->length)
 		{
-			STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
-			break;
+			union {
+				struct {
+					cl_uint	nitems;
+					cl_uint	usage;
+				} i;
+				cl_ulong	v64;
+			} oldval, curval, newval;
+
+			curval.i.nitems	= kds_dst->nitems;
+			curval.i.usage	= kds_dst->usage;
+			do {
+				newval = oldval = curval;
+				newval.i.nitems += nvalids;
+				newval.i.usage  += __kds_packed(extra_sz);
+
+				if (KERN_DATA_STORE_HEAD_LENGTH(kds_dst) +
+					STROMALIGN(sizeof(cl_uint) * newval.i.nitems) +
+					__kds_unpack(newval.i.usage) > kds_dst->length)
+				{
+					atomicAdd(&kgpuscan->suspend_count, 1);
+					suspend_kernel = 1;
+					break;
+				}
+			} while ((curval.v64 = atomicCAS((cl_ulong *)&kds_dst->nitems,
+											 oldval.v64,
+											 newval.v64)) != oldval.v64);
+			nitems_base = oldval.i.nitems;
+			usage_base  = __kds_unpack(oldval.i.usage);
 		}
+		if (__syncthreads_count(suspend_kernel) > 0)
+			break;
 
 		/* store the result heap-tuple on destination buffer */
 		if (tupitem && rc)
@@ -393,36 +407,36 @@ gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
 			break;
 #else
 		if (get_local_id() == 0)
-			nitems_base = atomicAdd(&kresults->nitems, nvalids);
+			nitems_base = atomicAdd(&gs_results->nitems, nvalids);
 		__syncthreads();
-
-		if (nitems_base + nvalids > kresults->nrooms)
+		if (tupitem)
 		{
-			STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
-			break;
-		}
-
-		/* OK, store the result index */
-		if (tupitem && rc)
-		{
-			kresults->results[nitems_base + nitems_offset] =
-				__kds_packed((char *)&tupitem->htup - (char *)kds_src);
+			assert(nitems_base + nitems_offset < kds_src->nrooms);
+			gs_results->results[nitems_base + nitems_offset]
+				= __kds_packed((char *)&tupitem->htup -
+							   (char *)kds_src);
 		}
 #endif
 	skip:
 		/* update statistics */
 		if (get_local_id() == 0)
 		{
+			total_nitems_in  += Min(kds_src->nitems - src_base,
+									get_local_size());
 			total_nitems_out += nvalids;
 			total_extra_size += extra_sz;
 		}
-	} while (try_next_window);
-
-	/* write back error code and statistics to the host */
-	if (get_global_id() == 0)
-		atomicAdd(&kgpuscan->nitems_in,  kds_src->nitems);
+	}
+	/* suspend the current position (even if normal exit) */
+	if (my_suspend && get_local_id() == 0)
+	{
+		my_suspend->part_index = part_index;
+		my_suspend->line_index = 0;
+	}
+	/* write back statistics and error code */
 	if (get_local_id() == 0)
 	{
+		atomicAdd(&kgpuscan->nitems_in,  total_nitems_in);
 		atomicAdd(&kgpuscan->nitems_out, total_nitems_out);
 		atomicAdd(&kgpuscan->extra_size, total_extra_size);
 	}
@@ -514,6 +528,7 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 			cl_ushort	t_len	__attribute__((unused));
 			cl_uint		required;
 			cl_uint		extra_sz = 0;
+			cl_uint		suspend_kernel = 0;
 			cl_bool		rc;
 
 			/* identify the block */
@@ -600,7 +615,8 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 						STROMALIGN(sizeof(cl_uint) * newval.i.nitems) +
 						__kds_unpack(newval.i.usage) > kds_dst->length)
 					{
-						STROM_SET_ERROR(&kcxt.e, StromError_Suspend);
+						atomicAdd(&kgpuscan->suspend_count, 1);
+						suspend_kernel = 1;
 						break;
 					}
 				} while ((curval.v64 = atomicCAS((cl_ulong *)&kds_dst->nitems,
@@ -609,7 +625,7 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 				nitems_base = oldval.i.nitems;
 				usage_base  = __kds_unpack(oldval.i.usage);
 			}
-			if (__syncthreads_count(kcxt.e.errcode) > 0)
+			if (__syncthreads_count(suspend_kernel) > 0)
 				goto out;
 
 			/* store the result heap tuple */
@@ -696,12 +712,15 @@ gpuscan_exec_quals_column(kern_gpuscan *kgpuscan,
 						  kern_data_store *kds_dst)
 {
 	kern_parambuf  *kparams = KERN_GPUSCAN_PARAMBUF(kgpuscan);
+	gpuscanSuspendContext *my_suspend
+		= KERN_GPUSCAN_SUSPEND_CONTEXT(kgpuscan, get_group_id());
 	kern_context	kcxt;
+	cl_uint			part_index = 0;
+	cl_uint			src_base;
 	cl_uint			src_index;
-	cl_uint			src_nitems = kds_src->nitems;
-	cl_bool			try_next_window = true;
 	cl_uint			nitems_offset;
 	cl_uint			usage_offset	__attribute__((unused));
+	cl_uint			total_nitems_in = 0;	/* stat */
 	cl_uint			total_nitems_out = 0;	/* stat */
 	cl_uint			total_extra_size = 0;	/* stat */
 #if GPUSCAN_DEVICE_PROJECTION_NFIELDS > 0
@@ -717,33 +736,33 @@ gpuscan_exec_quals_column(kern_gpuscan *kgpuscan,
 #else
 	cl_char		   *tup_extra __attribute__((unused)) = NULL;
 #endif
-	__shared__ cl_uint	src_base;
 	__shared__ cl_uint	nitems_base;
 	__shared__ cl_ulong	usage_base	__attribute__((unused));
 
 	assert(__ldg(&kds_src->format) == KDS_FORMAT_COLUMN);
 	assert(!kds_dst || __ldg(&kds_dst->format) == KDS_FORMAT_ROW);
 	INIT_KERNEL_CONTEXT(&kcxt, gpuscan_exec_quals_column, kparams);
+	/* resume kernel from the point where suspended, if any */
+	if (kgpuscan->resume_context)
+	{
+		assert(my_suspend != NULL);
+		part_index = my_suspend->part_index;
+	}
 
-	do {
+	for (src_base = get_global_base() + part_index * get_global_size();
+		 src_base < kds_src->nitems;
+		 src_base += get_global_size(), part_index++)
+	{
 		kern_tupitem   *tupitem		__attribute__((unused));
 		cl_bool			rc;
 		cl_uint			nvalids;
 		cl_uint			required	__attribute__((unused));
 		cl_uint			extra_sz = 0;
-
-		if (get_local_id() == 0)
-			src_base = atomicAdd(&kgpuscan->read_src_pos, get_local_size());
-		__syncthreads();
-
-		if (src_base + get_local_size() >= src_nitems)
-			try_next_window = false;
-		if (src_base >= src_nitems)
-			break;
+		cl_uint			suspend_kernel = 0;
 
 		/* Evalidation of the rows by WHERE-clause */
 		src_index = src_base + get_local_id();
-		if (src_index < src_nitems)
+		if (src_index < kds_src->nitems)
 			rc = gpuscan_quals_eval_column(&kcxt, kds_src, src_index);
 		else
 			rc = false;
@@ -760,10 +779,6 @@ gpuscan_exec_quals_column(kern_gpuscan *kgpuscan,
 		/*
 		 * OK, extract the source columns to form a result row
 		 */
-		if (get_local_id() == 0)
-			nitems_base = atomicAdd(&kds_dst->nitems, nvalids);
-		__syncthreads();
-
 		if (rc)
 		{
 			gpuscan_projection_column(&kcxt,
@@ -783,17 +798,38 @@ gpuscan_exec_quals_column(kern_gpuscan *kgpuscan,
 
 		usage_offset = pgstromStairlikeSum(required, &extra_sz);
 		if (get_local_id() == 0)
-			usage_base = __kds_unpack(atomicAdd(&kds_dst->usage,
-												__kds_packed(extra_sz)));
-		__syncthreads();
-
-		if (KERN_DATA_STORE_HEAD_LENGTH(kds_dst) +
-			STROMALIGN(sizeof(cl_uint) * (nitems_base + nvalids)) +
-			usage_base + extra_sz > kds_dst->length)
 		{
-			STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
-			break;
+			union {
+				struct {
+					cl_uint	nitems;
+					cl_uint	usage;
+				} i;
+				cl_ulong	v64;
+			} oldval, curval, newval;
+
+			curval.i.nitems = kds_dst->nitems;
+			curval.i.usage  = kds_dst->usage;
+			do {
+				newval = oldval = curval;
+				newval.i.nitems += nvalids;
+				newval.i.usage  += __kds_packed(extra_sz);
+
+				if (KERN_DATA_STORE_HEAD_LENGTH(kds_dst) +
+					STROMALIGN(sizeof(cl_uint) * newval.i.nitems) +
+					__kds_unpack(newval.i.usage) > kds_dst->length)
+				{
+					atomicAdd(&kgpuscan->suspend_count, 1);
+					suspend_kernel = 1;
+					break;
+				}
+			} while ((curval.v64 = atomicCAS((cl_ulong *)&kds_dst->nitems,
+											 oldval.v64,
+											 newval.v64)) != oldval.v64);
+			nitems_base = oldval.i.nitems;
+			usage_base  = __kds_unpack(oldval.i.usage);
 		}
+		if (__syncthreads_count(suspend_kernel) > 0)
+			break;
 
 		/* store the result heap-tuple on destination buffer */
 		if (required > 0)
@@ -819,16 +855,22 @@ gpuscan_exec_quals_column(kern_gpuscan *kgpuscan,
 		/* update statistics */
 		if (get_local_id() == 0)
 		{
+			total_nitems_in  += Min(kds_src->nitems - src_base,
+									get_local_size());
 			total_nitems_out += nvalids;
 			total_extra_size += extra_sz;
 		}
-	} while (try_next_window);
-
-	/* write back error code and statistics to the host */
-	if (get_global_id() == 0)
-		atomicAdd(&kgpuscan->nitems_in,  kds_src->nitems);
+	}
+	/* suspend the current position (even if normal exit) */
+	if (my_suspend && get_local_id() == 0)
+	{
+		my_suspend->part_index = part_index;
+		my_suspend->line_index = 0;
+	}
+	/* write back statistics and error code */
 	if (get_local_id() == 0)
 	{
+		atomicAdd(&kgpuscan->nitems_in,  total_nitems_in);
 		atomicAdd(&kgpuscan->nitems_out, total_nitems_out);
 		atomicAdd(&kgpuscan->extra_size, total_extra_size);
 	}
