@@ -913,6 +913,13 @@ extern void pgstrom_init_codegen(void);
  * datastore.c
  */
 extern cl_uint estimate_num_chunks(Path *pathnode);
+extern bool KDS_fetch_tuple_row(TupleTableSlot *slot,
+								kern_data_store *kds,
+								HeapTuple tuple_buf,
+								size_t row_index);
+extern bool KDS_fetch_tuple_slot(TupleTableSlot *slot,
+								 kern_data_store *kds,
+								 size_t row_index);
 extern bool KDS_fetch_tuple_column(TupleTableSlot *slot,
 								   kern_data_store *kds,
 								   size_t row_index);

@@ -57,40 +57,36 @@ estimate_num_chunks(Path *pathnode)
 /*
  * PDS_fetch_tuple - fetch a tuple from the PDS
  */
-static inline bool
+bool
 KDS_fetch_tuple_row(TupleTableSlot *slot,
 					kern_data_store *kds,
-					GpuTaskState *gts)
+					HeapTuple tuple_buf,
+					size_t row_index)
 {
-	if (gts->curr_index < kds->nitems)
+	if (row_index < kds->nitems)
 	{
-		size_t			row_index = gts->curr_index++;
-		Relation		rel = gts->css.ss.ss_currentRelation;
-		kern_tupitem   *tup_item;
-		HeapTuple		tuple = &gts->curr_tuple;
+		kern_tupitem   *tup_item = KERN_DATA_STORE_TUPITEM(kds, row_index);
 
-		tup_item = KERN_DATA_STORE_TUPITEM(kds, row_index);
 		ExecClearTuple(slot);
-		tuple->t_len  = tup_item->t_len;
-		tuple->t_self = tup_item->t_self;
-		tuple->t_tableOid = (rel ? RelationGetRelid(rel) : InvalidOid);
-		tuple->t_data = &tup_item->htup;
+		tuple_buf->t_len  = tup_item->t_len;
+		tuple_buf->t_self = tup_item->t_self;
+		tuple_buf->t_tableOid = kds->table_oid;
+		tuple_buf->t_data = &tup_item->htup;
 
-		ExecStoreTuple(tuple, slot, InvalidBuffer, false);
+		ExecStoreTuple(tuple_buf, slot, InvalidBuffer, false);
 
 		return true;
 	}
 	return false;
 }
 
-static inline bool
+bool
 KDS_fetch_tuple_slot(TupleTableSlot *slot,
 					 kern_data_store *kds,
-					 GpuTaskState *gts)
+					 size_t row_index)
 {
-	if (gts->curr_index < kds->nitems)
+	if (row_index < kds->nitems)
 	{
-		size_t	row_index = gts->curr_index++;
 		Datum  *tts_values = KERN_DATA_STORE_VALUES(kds, row_index);
 		char   *tts_isnull = KERN_DATA_STORE_ISNULL(kds, row_index);
 		int		natts = slot->tts_tupleDescriptor->natts;
@@ -111,48 +107,6 @@ KDS_fetch_tuple_slot(TupleTableSlot *slot,
 		return true;
 	}
 	return false;
-}
-
-static inline bool
-KDS_fetch_tuple_block(TupleTableSlot *slot,
-					  kern_data_store *kds,
-					  GpuTaskState *gts)
-{
-	Relation	rel = gts->css.ss.ss_currentRelation;
-	HeapTuple	tuple = &gts->curr_tuple;
-	BlockNumber	block_nr;
-	PageHeader	hpage;
-	cl_uint		max_lp_index;
-	ItemId		lpp;
-
-	while (gts->curr_index < kds->nitems)
-	{
-		block_nr = KERN_DATA_STORE_BLOCK_BLCKNR(kds, gts->curr_index);
-		hpage = KERN_DATA_STORE_BLOCK_PGPAGE(kds, gts->curr_index);
-		Assert(PageIsAllVisible(hpage));
-		max_lp_index = PageGetMaxOffsetNumber(hpage);
-		while (gts->curr_lp_index < max_lp_index)
-		{
-			cl_uint		lp_index = gts->curr_lp_index++;
-
-			lpp = &hpage->pd_linp[lp_index];
-			if (!ItemIdIsNormal(lpp))
-				continue;
-
-			tuple->t_len = ItemIdGetLength(lpp);
-			BlockIdSet(&tuple->t_self.ip_blkid, block_nr);
-			tuple->t_self.ip_posid = lp_index;
-			tuple->t_tableOid = (rel ? RelationGetRelid(rel) : InvalidOid);
-			tuple->t_data = (HeapTupleHeader)((char *)hpage +
-											  ItemIdGetOffset(lpp));
-			ExecStoreTuple(tuple, slot, InvalidBuffer, false);
-			return true;
-		}
-		/* move to the next block */
-		gts->curr_index++;
-		gts->curr_lp_index = 0;
-	}
-	return false;	/* end of the PDS */
 }
 
 bool
@@ -207,6 +161,48 @@ KDS_fetch_tuple_column(TupleTableSlot *slot,
 	return true;
 }
 
+static inline bool
+KDS_fetch_tuple_block(TupleTableSlot *slot,
+					  kern_data_store *kds,
+					  GpuTaskState *gts)
+{
+	Relation	rel = gts->css.ss.ss_currentRelation;
+	HeapTuple	tuple = &gts->curr_tuple;
+	BlockNumber	block_nr;
+	PageHeader	hpage;
+	cl_uint		max_lp_index;
+	ItemId		lpp;
+
+	while (gts->curr_index < kds->nitems)
+	{
+		block_nr = KERN_DATA_STORE_BLOCK_BLCKNR(kds, gts->curr_index);
+		hpage = KERN_DATA_STORE_BLOCK_PGPAGE(kds, gts->curr_index);
+		Assert(PageIsAllVisible(hpage));
+		max_lp_index = PageGetMaxOffsetNumber(hpage);
+		while (gts->curr_lp_index < max_lp_index)
+		{
+			cl_uint		lp_index = gts->curr_lp_index++;
+
+			lpp = &hpage->pd_linp[lp_index];
+			if (!ItemIdIsNormal(lpp))
+				continue;
+
+			tuple->t_len = ItemIdGetLength(lpp);
+			BlockIdSet(&tuple->t_self.ip_blkid, block_nr);
+			tuple->t_self.ip_posid = lp_index;
+			tuple->t_tableOid = (rel ? RelationGetRelid(rel) : InvalidOid);
+			tuple->t_data = (HeapTupleHeader)((char *)hpage +
+											  ItemIdGetOffset(lpp));
+			ExecStoreTuple(tuple, slot, InvalidBuffer, false);
+			return true;
+		}
+		/* move to the next block */
+		gts->curr_index++;
+		gts->curr_lp_index = 0;
+	}
+	return false;	/* end of the PDS */
+}
+
 bool
 PDS_fetch_tuple(TupleTableSlot *slot,
 				pgstrom_data_store *pds,
@@ -216,13 +212,17 @@ PDS_fetch_tuple(TupleTableSlot *slot,
 	{
 		case KDS_FORMAT_ROW:
 		case KDS_FORMAT_HASH:
-			return KDS_fetch_tuple_row(slot, &pds->kds, gts);
+			return KDS_fetch_tuple_row(slot, &pds->kds,
+									   &gts->curr_tuple,
+									   gts->curr_index++);
 		case KDS_FORMAT_SLOT:
-			return KDS_fetch_tuple_slot(slot, &pds->kds, gts);
+			return KDS_fetch_tuple_slot(slot, &pds->kds,
+										gts->curr_index++);
 		case KDS_FORMAT_BLOCK:
 			return KDS_fetch_tuple_block(slot, &pds->kds, gts);
 		case KDS_FORMAT_COLUMN:
-			return KDS_fetch_tuple_column(slot, &pds->kds, gts->curr_index++);
+			return KDS_fetch_tuple_column(slot, &pds->kds,
+										  gts->curr_index++);
 		default:
 			elog(ERROR, "Bug? unsupported data store format: %d",
 				pds->kds.format);

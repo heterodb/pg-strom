@@ -25,7 +25,7 @@ struct kern_gpuscan {
 	kern_errorbuf	kerror;
 	cl_uint			grid_sz;
 	cl_uint			block_sz;
-	cl_uint			read_src_pos;
+	cl_uint			part_sz;			/* only KDS_FORMAT_BLOCK */
 	cl_uint			nitems_in;
 	cl_uint			nitems_out;
 	cl_uint			extra_size;
@@ -316,7 +316,7 @@ gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
 #ifdef GPUSCAN_HAS_WHERE_QUALS
 		/* bailout if any error */
 		if (__syncthreads_count(kcxt.e.errcode) > 0)
-			break;
+			goto out_nostat;
 #endif
 		/* how many rows servived WHERE-clause evaluation? */
 		nitems_offset = pgstromStairlikeBinaryCount(tupitem && rc, &nvalids);
@@ -342,6 +342,9 @@ gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
 		}
 		else
 			required = 0;
+		/* bailout if any error */
+		if (__syncthreads_count(kcxt.e.errcode) > 0)
+			goto out_nostat;
 
 		usage_offset = pgstromStairlikeSum(required, &extra_sz);
 		if (get_local_id() == 0)
@@ -402,9 +405,6 @@ gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
 								tup_values,
 								tup_isnull);
 		}
-		/* bailout if any error */
-		if (__syncthreads_count(kcxt.e.errcode) > 0)
-			break;
 #else
 		if (get_local_id() == 0)
 			nitems_base = atomicAdd(&gs_results->nitems, nvalids);
@@ -427,18 +427,19 @@ gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
 			total_extra_size += extra_sz;
 		}
 	}
-	/* suspend the current position (even if normal exit) */
-	if (my_suspend && get_local_id() == 0)
-	{
-		my_suspend->part_index = part_index;
-		my_suspend->line_index = 0;
-	}
 	/* write back statistics and error code */
 	if (get_local_id() == 0)
 	{
 		atomicAdd(&kgpuscan->nitems_in,  total_nitems_in);
 		atomicAdd(&kgpuscan->nitems_out, total_nitems_out);
 		atomicAdd(&kgpuscan->extra_size, total_extra_size);
+	}
+out_nostat:
+	/* suspend the current position (even if normal exit) */
+	if (my_suspend && get_local_id() == 0)
+	{
+		my_suspend->part_index = part_index;
+		my_suspend->line_index = 0;
 	}
 	kern_writeback_error_status(&kgpuscan->kerror, &kcxt.e);
 }
@@ -493,6 +494,8 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 
 	part_sz = KERN_DATA_STORE_PARTSZ(kds_src);
 	n_parts = get_local_size() / part_sz;
+	if (get_global_id() == 0)
+		kgpuscan->part_sz = part_sz;
 	if (get_local_id() < part_sz * n_parts)
 		thread_is_valid = true;
 	window_sz = n_parts * get_num_groups();
@@ -560,7 +563,7 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 				rc = false;
 			/* bailout if any error */
 			if (__syncthreads_count(kcxt.e.errcode) > 0)
-				goto out;
+				goto out_nostat;
 #else
 			rc = true;
 #endif
@@ -683,7 +686,7 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 		part_index++;
 		line_index = 0;
 	}
-
+out:
 	/* update statistics */
 	if (get_local_id() == 0)
 	{
@@ -691,7 +694,7 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 		atomicAdd(&kgpuscan->nitems_out, total_nitems_out);
 		atomicAdd(&kgpuscan->extra_size, total_extra_size);
 	}
-out:
+out_nostat:
 	if (get_local_id() == 0)
 	{
 		my_suspend->part_index = part_index;
@@ -769,7 +772,7 @@ gpuscan_exec_quals_column(kern_gpuscan *kgpuscan,
 #ifdef GPUSCAN_HAS_WHERE_QUALS
 		/* bailout if any error */
 		if (__syncthreads_count(kcxt.e.errcode) > 0)
-			break;
+			goto out_nostat;
 #endif
 		/* how many rows servived WHERE-clause evaluation? */
 		nitems_offset = pgstromStairlikeBinaryCount(rc, &nvalids);
@@ -861,18 +864,19 @@ gpuscan_exec_quals_column(kern_gpuscan *kgpuscan,
 			total_extra_size += extra_sz;
 		}
 	}
-	/* suspend the current position (even if normal exit) */
-	if (my_suspend && get_local_id() == 0)
-	{
-		my_suspend->part_index = part_index;
-		my_suspend->line_index = 0;
-	}
 	/* write back statistics and error code */
 	if (get_local_id() == 0)
 	{
 		atomicAdd(&kgpuscan->nitems_in,  total_nitems_in);
 		atomicAdd(&kgpuscan->nitems_out, total_nitems_out);
 		atomicAdd(&kgpuscan->extra_size, total_extra_size);
+	}
+out_nostat:
+	/* suspend the current position (even if normal exit) */
+	if (my_suspend && get_local_id() == 0)
+	{
+		my_suspend->part_index = part_index;
+		my_suspend->line_index = 0;
 	}
 	kern_writeback_error_status(&kgpuscan->kerror, &kcxt.e);
 }

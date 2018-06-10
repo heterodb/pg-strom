@@ -106,6 +106,8 @@ typedef struct {
 	cl_uint			proj_tuple_sz;
 	cl_uint			proj_extra_sz;
 	/* resource for CPU fallback */
+	cl_uint			fallback_group_id;
+	cl_uint			fallback_local_id;
 	TupleTableSlot *base_slot;
 	ProjectionInfo *base_proj;
 } GpuScanState;
@@ -1726,7 +1728,6 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	bool			explain_only = ((eflags & EXEC_FLAG_EXPLAIN_ONLY) != 0);
 	List		   *dev_tlist = NIL;
 	List		   *dev_quals_raw;
-	Expr		   *dev_quals_expr;
 	ListCell	   *lc;
 	StringInfoData	kern_define;
 	ProgramId		program_id;
@@ -1779,15 +1780,14 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	 * @dev_quals for CPU fallback references raw tuples regardless of device
 	 * projection. So, it must be initialized to reference the raw tuples.
 	 */
-	dev_quals_raw = (List *)fixup_varnode_to_origin((Node *)gs_info->dev_quals,
-													cscan->custom_scan_tlist);
-	dev_quals_expr = make_ands_explicit(dev_quals_raw);
+	dev_quals_raw = (List *)
+		fixup_varnode_to_origin((Node *)gs_info->dev_quals,
+								cscan->custom_scan_tlist);
 #if PG_VERSION_NUM < 100000
-	gss->dev_quals = list_make1(ExecInitExpr(dev_quals_expr,
-											 &gss->gts.css.ss.ps));
+	gss->dev_quals = (List *)ExecInitExpr((Expr *)dev_quals_raw,
+										  &gss->gts.css.ss.ps);
 #else
-	gss->dev_quals = ExecInitExpr(dev_quals_expr,
-								  &gss->gts.css.ss.ps);
+	gss->dev_quals = ExecInitQual(dev_quals_raw, &gss->gts.css.ss.ps);
 #endif
 
 	foreach (lc, cscan->custom_scan_tlist)
@@ -2172,9 +2172,8 @@ gpuscan_create_task(GpuScanState *gss,
 		if (pds_src->kds.format == KDS_FORMAT_BLOCK)
 		{
 			Assert(pds_src->kds.nrows_per_block > 0);
-			ntuples *= (double)pds_src->kds.nrows_per_block;
+			ntuples *= 1.5 * (double)pds_src->kds.nrows_per_block;
 		}
-		//HOGE
 		length = STROMALIGN(offsetof(kern_data_store,
 									 colmeta[scan_tupdesc->natts])) +
 			STROMALIGN((Size)(sizeof(cl_uint) * ntuples)) +
@@ -2594,8 +2593,10 @@ out:
 static void
 gpuscan_switch_task(GpuTaskState *gts, GpuTask *gtask)
 {
-	GpuScanTask		   *gscan	__attribute__((unused))
-		= (GpuScanTask *) gtask;
+	GpuScanState   *gss = (GpuScanState *) gts;
+
+	gss->fallback_group_id = 0;
+	gss->fallback_local_id = 0;
 }
 
 /*
@@ -2620,6 +2621,148 @@ gpuscan_next_task(GpuTaskState *gts)
 }
 
 /*
+ * gpuscan_next_tuple_suspended
+ */
+static bool
+gpuscan_next_tuple_suspended(GpuScanState *gss, GpuScanTask *gscan)
+{
+	pgstrom_data_store *pds_src = gscan->pds_src;
+	gpuscanSuspendContext *con;
+	cl_uint		window_sz = gscan->kern.block_sz * gscan->kern.grid_sz;
+	cl_uint		group_id;
+	cl_uint		local_id;
+	cl_uint		part_index;
+	size_t		base_index;
+	bool		status;
+
+	while (gss->fallback_group_id < gscan->kern.grid_sz)
+	{
+		group_id = gss->fallback_group_id;
+		local_id = gss->fallback_local_id;
+
+		con = KERN_GPUSCAN_SUSPEND_CONTEXT(&gscan->kern, group_id);
+		part_index = con->part_index;
+		Assert(con->line_index == 0);
+
+		base_index = (part_index * window_sz +
+					  group_id * gscan->kern.block_sz);
+		if (base_index >= pds_src->kds.nitems)
+		{
+			gss->fallback_group_id++;
+			gss->fallback_local_id = 0;
+			continue;
+		}
+
+		if (++gss->fallback_local_id >= gscan->kern.block_sz)
+		{
+			con->part_index++;
+			gss->fallback_local_id = 0;
+		}
+		if (pds_src->kds.format == KDS_FORMAT_ROW)
+			status = KDS_fetch_tuple_row(gss->base_slot,
+										 &pds_src->kds,
+										 &gss->gts.curr_tuple,
+										 base_index + local_id);
+		else
+			status = KDS_fetch_tuple_column(gss->base_slot,
+											&pds_src->kds,
+											base_index + local_id);
+		if (status)
+			return true;
+	}
+	return false;
+}
+
+/*
+ * gpuscan_next_tuple_suspended_block
+ */
+static bool
+gpuscan_next_tuple_suspended_block(GpuScanState *gss, GpuScanTask *gscan)
+{
+	pgstrom_data_store *pds_src = gscan->pds_src;
+	gpuscanSuspendContext *con;
+	cl_uint		group_id;
+	cl_uint		local_id;
+	cl_uint		part_base;
+	cl_uint		part_id;
+	cl_uint		part_sz;
+	cl_uint		n_parts;
+	cl_uint		window_sz;
+	cl_uint		part_index;
+	cl_uint		line_index;
+	cl_uint		n_lines;
+	cl_uint		line_no;
+	PageHeader	hpage;
+	BlockNumber	block_nr;
+	ItemId		lpp;
+
+	part_sz = gscan->kern.part_sz;
+	n_parts = gscan->kern.block_sz / part_sz;
+	window_sz = n_parts * gscan->kern.grid_sz;
+
+	while (gss->fallback_group_id < gscan->kern.grid_sz)
+	{
+		group_id = gss->fallback_group_id;
+		local_id = gss->fallback_local_id;
+
+		con = KERN_GPUSCAN_SUSPEND_CONTEXT(&gscan->kern, group_id);
+		part_index = con->part_index;
+		line_index = con->line_index;
+
+		part_base = part_index * window_sz + group_id * n_parts;
+		part_id = (local_id >> 16) + part_base;
+		line_no = (local_id & 0xffff) + line_index * part_sz;
+		if (part_id >= pds_src->kds.nitems)
+		{
+			/* move to the next workgroup */
+			gss->fallback_group_id++;
+			gss->fallback_local_id = 0;
+			continue;
+		}
+		block_nr = KERN_DATA_STORE_BLOCK_BLCKNR(&pds_src->kds, part_id);
+		hpage = KERN_DATA_STORE_BLOCK_PGPAGE(&pds_src->kds, part_id);
+		n_lines = PageGetMaxOffsetNumber(hpage);
+		if (line_no < n_lines)
+		{
+			gss->fallback_local_id++;
+
+			lpp = &hpage->pd_linp[line_no];
+			if (ItemIdIsNormal(lpp))
+			{
+				HeapTuple	tuple = &gss->gts.curr_tuple;
+
+				tuple->t_len = ItemIdGetLength(lpp);
+				BlockIdSet(&tuple->t_self.ip_blkid, block_nr);
+				tuple->t_self.ip_posid = line_no;
+				tuple->t_tableOid = pds_src->kds.table_oid;
+				tuple->t_data = (HeapTupleHeader)((char *)hpage +
+												  ItemIdGetOffset(lpp));
+				ExecStoreTuple(tuple, gss->base_slot, InvalidBuffer, false);
+
+				return true;
+			}
+		}
+		else
+		{
+			local_id = (local_id + 0x10000) & ~0xffffU;
+			if ((local_id >> 16) < n_parts)
+			{
+				/* move to the next page */
+				gss->fallback_local_id = local_id;
+			}
+			else
+			{
+				/* move to the next partition */
+				con->part_index++;
+				con->line_index = 0;
+				gss->fallback_local_id = 0;
+			}
+		}
+	}
+	return false;
+}
+
+/*
  * gpuscan_next_tuple_fallback - GPU fallback case
  */
 static TupleTableSlot *
@@ -2629,12 +2772,21 @@ gpuscan_next_tuple_fallback(GpuScanState *gss, GpuScanTask *gscan)
 	GpuScanRuntimeStat *gs_rtstat = gss->gs_rtstat;
 	ExprContext		   *econtext = gss->gts.css.ss.ps.ps_ExprContext;
 	TupleTableSlot	   *slot = NULL;
+	bool				status;
 
 retry_next:
 	ExecClearTuple(gss->base_slot);
-	if (!PDS_fetch_tuple(gss->base_slot, pds_src, &gss->gts))
+	if (!gscan->kern.resume_context)
+		status = PDS_fetch_tuple(gss->base_slot, pds_src, &gss->gts);
+	else if (pds_src->kds.format == KDS_FORMAT_ROW ||
+			 pds_src->kds.format == KDS_FORMAT_COLUMN)
+		status = gpuscan_next_tuple_suspended(gss, gscan);
+	else if (pds_src->kds.format == KDS_FORMAT_BLOCK)
+		status = gpuscan_next_tuple_suspended_block(gss, gscan);
+	else
+		elog(ERROR, "Bug? unexpected KDS format: %d", pds_src->kds.format);
+	if (!status)
 		return NULL;
-
 	ResetExprContext(econtext);
 	econtext->ecxt_scantuple = gss->base_slot;
 
@@ -2813,6 +2965,8 @@ gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 	CUdeviceptr		m_kds_dst = (pds_dst ? (CUdeviceptr)&pds_dst->kds : 0UL);
 	const char	   *kern_fname;
 	void		   *kern_args[5];
+	void		   *last_suspend = NULL;
+	void		   *curr_suspend;
 	size_t			offset;
 	size_t			length;
 	cl_int			grid_sz;
@@ -2878,6 +3032,11 @@ gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 				werror("failed on gpuMemAlloc: %s", errorText(rc));
 		}
 	}
+	/*
+	 * temporary buffer for suspended context
+	 */
+	if (gscan->kern.suspend_sz > 0)
+		last_suspend = alloca(gscan->kern.suspend_sz);
 
 	/*
 	 * OK, enqueue a series of requests
@@ -3025,7 +3184,6 @@ resume_kernel:
 		{
 			CHECK_WORKER_TERMINATION();
 
-			fprintf(stderr, "GpuScan suspend {nitems=%u usage=%u}\n", pds_dst->kds.nitems, pds_dst->kds.usage * 8);
 			/* return partial result */
 			pds_dst = PDS_clone(gscan->pds_dst);
 			gpuscan_throw_partial_result(gscan, gscan->pds_dst);
@@ -3034,6 +3192,14 @@ resume_kernel:
 			gscan->kern.resume_context = true;
 			gscan->pds_dst = pds_dst;
 			m_kds_dst = (CUdeviceptr)&pds_dst->kds;
+			/*
+			 * MEMO: current suspended context must be saved, because
+			 * resumed kernel invocation may return CpuReCheck error.
+			 * Once it moved to the fallback code, we have to skip rows
+			 * already returned on the prior steps.
+			 */
+			curr_suspend = KERN_GPUSCAN_SUSPEND_CONTEXT(&gscan->kern, 0);
+			memcpy(last_suspend, curr_suspend, gscan->kern.suspend_sz);
 			goto resume_kernel;
 		}
 	}
@@ -3058,6 +3224,12 @@ resume_kernel:
 			}
 			memset(&gscan->task.kerror, 0, sizeof(kern_errorbuf));
 			gscan->task.cpu_fallback = true;
+			/* restore suspend context, if any */
+			if (last_suspend)
+			{
+				curr_suspend = KERN_GPUSCAN_SUSPEND_CONTEXT(&gscan->kern, 0);
+				memcpy(curr_suspend, last_suspend, gscan->kern.suspend_sz);
+			}
 		}
 	}
 out_of_resource:
