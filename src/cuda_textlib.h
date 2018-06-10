@@ -592,14 +592,25 @@ pgfn_textlike(kern_context *kcxt, pg_text_t arg1, pg_text_t arg2)
 	result.isnull = arg1.isnull | arg2.isnull;
 	if (!result.isnull)
 	{
-		char	   *s = VARDATA_ANY(arg1.value);
-		char	   *p = VARDATA_ANY(arg2.value);
-		cl_uint		slen = VARSIZE_ANY_EXHDR(arg1.value);
-		cl_uint		plen = VARSIZE_ANY_EXHDR(arg2.value);
+		if (VARATT_IS_COMPRESSED(arg1.value) ||
+			VARATT_IS_COMPRESSED(arg2.value) ||
+			VARATT_IS_EXTERNAL(arg1.value)   ||
+			VARATT_IS_EXTERNAL(arg1.value))
+		{
+			result.isnull = true;
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		}
+		else
+		{
+			char	   *s = VARDATA_ANY(arg1.value);
+			char	   *p = VARDATA_ANY(arg2.value);
+			cl_uint		slen = VARSIZE_ANY_EXHDR(arg1.value);
+			cl_uint		plen = VARSIZE_ANY_EXHDR(arg2.value);
 
-		result.value = (GenericMatchText(kcxt,
-										 s, slen,
-										 p, plen, 0) == LIKE_TRUE);
+			result.value = (GenericMatchText(kcxt,
+											 s, slen,
+											 p, plen, 0) == LIKE_TRUE);
+		}
 	}
 	return result;
 }
@@ -612,14 +623,25 @@ pgfn_textnlike(kern_context *kcxt, pg_text_t arg1, pg_text_t arg2)
 	result.isnull = arg1.isnull | arg2.isnull;
 	if (!result.isnull)
 	{
-		char	   *s = VARDATA_ANY(arg1.value);
-		char	   *p = VARDATA_ANY(arg2.value);
-		cl_uint		slen = VARSIZE_ANY_EXHDR(arg1.value);
-		cl_uint		plen = VARSIZE_ANY_EXHDR(arg2.value);
+		if (VARATT_IS_COMPRESSED(arg1.value) ||
+			VARATT_IS_COMPRESSED(arg2.value) ||
+			VARATT_IS_EXTERNAL(arg1.value)   ||
+			VARATT_IS_EXTERNAL(arg1.value))
+		{
+			result.isnull = true;
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		}
+		else
+		{
+			char	   *s = VARDATA_ANY(arg1.value);
+			char	   *p = VARDATA_ANY(arg2.value);
+			cl_uint		slen = VARSIZE_ANY_EXHDR(arg1.value);
+			cl_uint		plen = VARSIZE_ANY_EXHDR(arg2.value);
 
-		result.value = (GenericMatchText(kcxt,
-										 s, slen,
-										 p, plen, 0) != LIKE_TRUE);
+			result.value = (GenericMatchText(kcxt,
+											 s, slen,
+											 p, plen, 0) != LIKE_TRUE);
+		}
 	}
 	return result;
 }
@@ -632,14 +654,25 @@ pgfn_texticlike(kern_context *kcxt, pg_text_t arg1, pg_text_t arg2)
 	result.isnull = arg1.isnull | arg2.isnull;
 	if (!result.isnull)
 	{
-		char	   *s = VARDATA_ANY(arg1.value);
-		char	   *p = VARDATA_ANY(arg2.value);
-		cl_uint		slen = VARSIZE_ANY_EXHDR(arg1.value);
-		cl_uint		plen = VARSIZE_ANY_EXHDR(arg2.value);
+		if (VARATT_IS_COMPRESSED(arg1.value) ||
+			VARATT_IS_COMPRESSED(arg2.value) ||
+			VARATT_IS_EXTERNAL(arg1.value)   ||
+			VARATT_IS_EXTERNAL(arg1.value))
+		{
+			result.isnull = true;
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		}
+		else
+		{
+			char	   *s = VARDATA_ANY(arg1.value);
+			char	   *p = VARDATA_ANY(arg2.value);
+			cl_uint		slen = VARSIZE_ANY_EXHDR(arg1.value);
+			cl_uint		plen = VARSIZE_ANY_EXHDR(arg2.value);
 
-		result.value = (GenericCaseMatchText(kcxt,
-											 s, slen,
-											 p, plen, 0) == LIKE_TRUE);
+			result.value = (GenericCaseMatchText(kcxt,
+												 s, slen,
+												 p, plen, 0) == LIKE_TRUE);
+		}
 	}
 	return result;
 }
@@ -652,14 +685,25 @@ pgfn_texticnlike(kern_context *kcxt, pg_text_t arg1, pg_text_t arg2)
 	result.isnull = arg1.isnull | arg2.isnull;
 	if (!result.isnull)
 	{
-		char	   *s = VARDATA_ANY(arg1.value);
-		char	   *p = VARDATA_ANY(arg2.value);
-		cl_uint		slen = VARSIZE_ANY_EXHDR(arg1.value);
-		cl_uint		plen = VARSIZE_ANY_EXHDR(arg2.value);
+		if (VARATT_IS_COMPRESSED(arg1.value) ||
+			VARATT_IS_COMPRESSED(arg2.value) ||
+			VARATT_IS_EXTERNAL(arg1.value)   ||
+			VARATT_IS_EXTERNAL(arg1.value))
+		{
+			result.isnull = true;
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		}
+		else
+		{
+			char	   *s = VARDATA_ANY(arg1.value);
+			char	   *p = VARDATA_ANY(arg2.value);
+			cl_uint		slen = VARSIZE_ANY_EXHDR(arg1.value);
+			cl_uint		plen = VARSIZE_ANY_EXHDR(arg2.value);
 
-		result.value = (GenericCaseMatchText(kcxt,
-											 s, slen,
-											 p, plen, 0) != LIKE_TRUE);
+			result.value = (GenericCaseMatchText(kcxt,
+												 s, slen,
+												 p, plen, 0) != LIKE_TRUE);
+		}
 	}
 	return result;
 }
