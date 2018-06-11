@@ -753,7 +753,7 @@ pgstromExplainOuterScan(GpuTaskState *gts,
 						List *deparse_context,
 						List *ancestors,
 						ExplainState *es,
-						Expr *outer_quals,
+						List *outer_quals,
 						Cost outer_startup_cost,
 						Cost outer_total_cost,
 						double outer_plan_rows,
@@ -894,9 +894,13 @@ pgstromExplainOuterScan(GpuTaskState *gts,
 
 	if (outer_quals)
 	{
-		char   *temp = deparse_expression((Node *)outer_quals,
-										  deparse_context,
-										  es->verbose, false);
+		Expr   *quals_expr;
+		char   *temp;
+
+		quals_expr = make_ands_explicit(outer_quals);
+		temp = deparse_expression((Node *)quals_expr,
+								  deparse_context,
+								  es->verbose, false);
 		ExplainPropertyText("Outer Scan Filter", temp, es);
 
 		if (gts->outer_instrument.nfiltered1 > 0.0)

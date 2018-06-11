@@ -40,7 +40,7 @@ typedef struct
 	int				outer_width;	/* copy of @plan_width in outer path */
 	cl_uint			outer_nrows_per_block;
 	Index			outer_scanrelid;/* RTI, if outer path pulled up */
-	Expr		   *outer_quals;	/* device executable quals of outer-scan */
+	List		   *outer_quals;	/* device executable quals of outer-scan */
 	List		   *tlist_fallback;	/* projection from outer-tlist to GPU's
 									 * initial projection; note that setrefs.c
 									 * should not update this field */
@@ -3750,6 +3750,7 @@ gpupreagg_codegen(codegen_context *context,
 	bytea		   *kparam_0;
 	cl_char		   *attr_is_preagg;
 	List		   *tlist_alt;
+	List		   *tlist_fallback = NIL;
 	ListCell	   *lc;
 	Bitmapset	   *outer_refs_any = NULL;
 	Bitmapset	   *outer_refs_expr = NULL;
@@ -3807,8 +3808,15 @@ gpupreagg_codegen(codegen_context *context,
 	gpupreagg_codegen_projection_row(&body, context, root, tlist_alt,
 									 outer_refs_any, outer_refs_expr,
 									 cscan->scan.scanrelid, outer_tlist);
+	/* remove junk entries for tlist_fallback */
+	foreach (lc, tlist_alt)
+	{
+		TargetEntry *tle = lfirst(lc);
 
-	gpa_info->tlist_fallback = tlist_alt;
+		if (!tle->resjunk)
+			tlist_fallback = lappend(tlist_fallback, tle);
+	}
+	gpa_info->tlist_fallback = tlist_fallback;
 	/* gpupreagg_hashvalue */
 	gpupreagg_codegen_hashvalue(&body, context, tlist_dev);
 	/* gpupreagg_keymatch */
@@ -3870,7 +3878,7 @@ gpupreagg_post_planner(PlannedStmt *pstmt, CustomScan *cscan)
 {
 	GpuPreAggInfo  *gpa_info = deform_gpupreagg_info(cscan);
 
-	gpa_info->outer_quals = (Expr *)
+	gpa_info->outer_quals = (List *)
 		fixup_gpupreagg_outer_quals((Node *)gpa_info->outer_quals,
 									cscan->custom_scan_tlist);
 
@@ -3987,15 +3995,13 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
     }
     else
     {
-		ExprState  *outer_quals_state;
-
 		Assert(scan_rel != NULL);
-		outer_quals_state = ExecInitExpr(gpa_info->outer_quals,
-										 &gpas->gts.css.ss.ps);
 #if PG_VERSION_NUM < 100000
-		gpas->outer_quals = list_make1(outer_quals_state);
+		gpas->outer_quals = (List *)
+			ExecInitExpr((Expr *)gpa_info->outer_quals, &gpas->gts.css.ss.ps);
 #else
-		gpas->outer_quals = outer_quals_state;
+		gpas->outer_quals = ExecInitQual(gpa_info->outer_quals,
+										 &gpas->gts.css.ss.ps);
 #endif
 		outer_tupdesc = RelationGetDescr(scan_rel);
 	}
@@ -4026,6 +4032,7 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 											   &gpas->gts.css.ss.ps,
 #endif
 											   outer_tupdesc);
+
 	/* Template of kds_slot */
 	length = STROMALIGN(offsetof(kern_data_store,
 								 colmeta[gpreagg_tupdesc->natts]));
@@ -4727,6 +4734,7 @@ gpupreagg_next_tuple_fallback(GpuPreAggState *gpas, GpuPreAggTask *gpreagg)
 								 gpreagg->pds_src,
 								 &gpas->gts))
 				return NULL;
+
 			econtext->ecxt_scantuple = gpas->outer_slot;
 		}
 		/* filter out the tuple, if any outer quals */

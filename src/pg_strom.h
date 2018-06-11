@@ -836,7 +836,7 @@ extern void pgstromExplainOuterScan(GpuTaskState *gts,
 									List *deparse_context,
 									List *ancestors,
 									ExplainState *es,
-									Expr *outer_quals,
+									List *outer_quals,
 									Cost outer_startup_cost,
 									Cost outer_total_cost,
 									double outer_plan_rows,
@@ -994,7 +994,7 @@ extern void pgstrom_init_datastore(void);
  */
 extern void cost_gpuscan_common(PlannerInfo *root,
 								RelOptInfo *scan_rel,
-								Expr *scan_quals,
+								List *scan_quals,
 								int parallel_workers,
 								double *p_parallel_divisor,
 								double *p_scan_ntuples,
@@ -1006,11 +1006,11 @@ extern Cost cost_for_dma_receive(RelOptInfo *rel, double ntuples);
 extern void codegen_gpuscan_quals(StringInfo kern,
 								  codegen_context *context,
 								  Index scanrelid,
-								  Expr *dev_quals);
+								  List *dev_quals_list);
 extern bool add_unique_expression(Expr *expr, List **p_tlist, bool resjunk);
 extern bool pgstrom_pullup_outer_scan(const Path *outer_path,
 									  Index *p_outer_relid,
-									  Expr **p_outer_quals);
+									  List **p_outer_quals);
 extern bool pgstrom_path_is_gpuscan(const Path *path);
 extern bool pgstrom_plan_is_gpuscan(const Plan *plan);
 extern bool pgstrom_planstate_is_gpuscan(const PlanState *ps);

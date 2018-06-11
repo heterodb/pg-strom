@@ -28,7 +28,7 @@ typedef struct
 	CustomPath		cpath;
 	int				num_rels;
 	Index			outer_relid;	/* valid, if outer scan pull-up */
-	Expr		   *outer_quals;	/* qualifier of outer scan */
+	List		   *outer_quals;	/* qualifier of outer scan */
 	cl_uint			outer_nrows_per_block;
 	uint64			inner_buffer_toc_key;
 	struct {
@@ -51,7 +51,7 @@ typedef struct
 	int			extra_flags;
 	List	   *ccache_refs;
 	List	   *used_params;
-	Expr	   *outer_quals;
+	List	   *outer_quals;
 	double		outer_ratio;
 	double		outer_nrows;		/* number of estimated outer nrows*/
 	int			outer_width;		/* copy of @plan_width in outer path */
@@ -2445,11 +2445,10 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	gjs->join_types = gj_info->join_types;
 	if (gj_info->outer_quals)
 	{
-		ExprState  *expr_state = ExecInitExpr(gj_info->outer_quals, &ss->ps);
 #if PG_VERSION_NUM < 100000
-		gjs->outer_quals = list_make1(expr_state);
+		gjs->outer_quals = (List *)ExecInitExpr(gj_info->outer_quals, &ss->ps);
 #else
-		gjs->outer_quals = expr_state;
+		gjs->outer_quals = ExecInitQual(gj_info->outer_quals, &ss->ps);
 #endif
 	}
 	gjs->outer_ratio = gj_info->outer_ratio;

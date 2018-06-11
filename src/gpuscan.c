@@ -148,7 +148,7 @@ static void resetGpuScanSharedState(GpuScanState *gss);
 void
 cost_gpuscan_common(PlannerInfo *root,
 					RelOptInfo *scan_rel,
-					Expr *scan_quals,
+					List *scan_quals,
 					int parallel_workers,
 					double *p_parallel_divisor,
 					double *p_scan_ntuples,
@@ -178,11 +178,11 @@ cost_gpuscan_common(PlannerInfo *root,
 		   scan_rel->relid < root->simple_rel_array_size);
 
 	/* selectivity of device executable qualifiers */
-	selectivity = clause_selectivity(root,
-									 (Node *)scan_quals,
-									 scan_rel->relid,
-									 JOIN_INNER,
-									 NULL);
+	selectivity = clauselist_selectivity(root,
+										 scan_quals,
+										 scan_rel->relid,
+										 JOIN_INNER,
+										 NULL);
 
 	/* fetch estimated page cost for tablespace containing the table */
 	get_tablespace_page_costs(scan_rel->reltablespace,
@@ -317,7 +317,6 @@ create_gpuscan_path(PlannerInfo *root,
 	CustomPath	   *cpath;
 	ParamPathInfo  *param_info;
 	List		   *ppi_quals;
-	Expr		   *dev_quals_expr = NULL;
 	Cost			startup_cost;
 	Cost			run_cost;
 	Cost			startup_delay;
@@ -328,13 +327,8 @@ create_gpuscan_path(PlannerInfo *root,
 	double			cpu_per_tuple = 0.0;
 
 	/* cost for disk i/o + GPU qualifiers */
-	if (dev_quals != NIL)
-	{
-		List   *extract_list = extract_actual_clauses(dev_quals, false);
-		dev_quals_expr = make_flat_ands_explicit(extract_list);
-	}
 	cost_gpuscan_common(root, baserel,
-						dev_quals_expr,
+						extract_actual_clauses(dev_quals, false),
 						parallel_nworkers,
 						&parallel_divisor,
 						&scan_ntuples,
@@ -511,12 +505,13 @@ gpuscan_add_scan_path(PlannerInfo *root,
  */
 void
 codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
-					  Index scanrelid, Expr *dev_quals)
+					  Index scanrelid, List *dev_quals_list)
 {
 	devtype_info   *dtype;
 	StringInfoData	tfunc;
 	StringInfoData	cfunc;
 	StringInfoData	temp;
+	Node		   *dev_quals;
 	Var			   *var;
 	char		   *expr_code = NULL;
 	ListCell	   *lc;
@@ -525,11 +520,11 @@ codegen_gpuscan_quals(StringInfo kern, codegen_context *context,
 	initStringInfo(&cfunc);
 	initStringInfo(&temp);
 
-	if (!dev_quals)
+	if (dev_quals_list == NIL)
 		goto output;
-
 	/* Let's walk on the device expression tree */
-	expr_code = pgstrom_codegen_expression((Node *)dev_quals, context);
+	dev_quals = (Node *)make_flat_ands_explicit(dev_quals_list);
+	expr_code = pgstrom_codegen_expression(dev_quals, context);
 	/* Const/Param declarations */
 	pgstrom_codegen_param_declarations(&cfunc, context);
 	pgstrom_codegen_param_declarations(&tfunc, context);
@@ -1411,7 +1406,6 @@ PlanGpuScanPath(PlannerInfo *root,
 	Relation		relation;
 	List		   *host_quals = NIL;
 	List		   *dev_quals = NIL;
-	Expr		   *dev_quals_expr = NULL;
 	List		   *tlist_dev = NIL;
 	List		   *ccache_refs = NIL;
 	ListCell	   *cell;
@@ -1449,8 +1443,6 @@ PlanGpuScanPath(PlannerInfo *root,
 	/* Reduce RestrictInfo list to bare expressions; ignore pseudoconstants */
 	host_quals = extract_actual_clauses(host_quals, false);
 	dev_quals = extract_actual_clauses(dev_quals, false);
-	if (dev_quals)
-		dev_quals_expr = make_flat_ands_explicit(dev_quals);
 
 	/*
 	 * Code construction for the CUDA kernel code
@@ -1461,7 +1453,7 @@ PlanGpuScanPath(PlannerInfo *root,
 	initStringInfo(&kern);
 	initStringInfo(&source);
 	pgstrom_init_codegen_context(&context);
-	codegen_gpuscan_quals(&kern, &context, baserel->relid, dev_quals_expr);
+	codegen_gpuscan_quals(&kern, &context, baserel->relid, dev_quals);
 	tlist_dev = build_gpuscan_projection(baserel->relid, relation,
 										 tlist,
 										 host_quals,
@@ -1524,7 +1516,7 @@ PlanGpuScanPath(PlannerInfo *root,
 bool
 pgstrom_pullup_outer_scan(const Path *outer_path,
 						  Index *p_outer_relid,
-						  Expr **p_outer_quals)
+						  List **p_outer_quals)
 {
 	RelOptInfo *baserel = outer_path->parent;
 	PathTarget *outer_target = outer_path->pathtarget;
@@ -1579,9 +1571,8 @@ pgstrom_pullup_outer_scan(const Path *outer_path,
 			return false;
 	}
 	*p_outer_relid = baserel->relid;
-	*p_outer_quals = (outer_quals != NIL
-					  ? make_flat_ands_explicit(outer_quals)
-					  : NULL);
+	*p_outer_quals = outer_quals;
+
 	return true;
 }
 
