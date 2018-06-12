@@ -19,25 +19,18 @@
 #ifndef CUDA_GPUPREAGG_H
 #define CUDA_GPUPREAGG_H
 
-/*
- * +--------------------+
- * | kern_gpupreagg     |
- * |     :              |
- * | +------------------+
- * | | kern_parambuf    |
- * | |    :             |
- * +-+------------------+
- */
 struct kern_gpupreagg
 {
 	kern_errorbuf	kerror;				/* kernel error information */
 	cl_uint			num_group_keys;		/* nogroup reduction, if 0 */
 	cl_uint			read_slot_pos;		/* offset to read kds_slot */
+	cl_uint			setup_grid_sz;		/* grid-size of setup kernel */
+	cl_uint			setup_block_sz;		/* block-size of setup kernel */
+	cl_uint			row_inval_map_size;	/* length of row-invalidation-map */
 	/* -- suspend/resume (KDS_FORMAT_BLOCK) */
+	cl_uint			suspend_size;		/* offset to suspend buffer, if any */
 	cl_uint			suspend_count;		/* number of suspended blocks */
-	cl_uint			suspend_offset;		/* offset to suspend buffer, if any */
-	cl_uint			lpp_array_offset;	/* offset to lpp_array, if any */
-
+	cl_bool			resume_context;
 	/* -- runtime statistics -- */
 	cl_uint			nitems_real;		/* out: # of outer input rows */
 	cl_uint			nitems_filtered;	/* out: # of removed rows by quals */
@@ -56,11 +49,13 @@ struct kern_gpupreagg
 	cl_uint			hash_size;				/* size of global hash-slots */
 	cl_uint			pg_crc32_table[256];	/* master CRC32 table */
 	kern_parambuf	kparams;
+	/* <-- gpupreaggSuspendContext[], if any --> */
+	/* <-- gpupreaggRowInvalidationMap. if any --> */
 };
 typedef struct kern_gpupreagg	kern_gpupreagg;
 
 /*
- * gpupreagg_suspend_context is used to suspend gpupreagg_setup_block kernel.
+ * gpupreaggSuspendContext is used to suspend gpupreagg_setup_block kernel.
  * Because KDS_FORMAT_BLOCK can have more items than estimation, so we cannot
  * avoid overflow of @kds_slot buffer preliminary. If @nitems exceeds @nrooms,
  * gpupreagg_setup_block will exit immediately, and save the current context
@@ -68,9 +63,24 @@ typedef struct kern_gpupreagg	kern_gpupreagg;
  */
 typedef struct
 {
-	cl_uint	part_index;
-	cl_uint	line_index;
-} gpupreagg_suspend_context;
+	cl_uint		part_index;
+	cl_uint		line_index;
+} gpupreaggSuspendContext;
+
+/*
+ * gpupreaggRowInvalidationMap is used to invalidate rows in the source
+ * buffer. 
+ */
+typedef struct
+{
+	cl_uint		nitems;
+	cl_uint		format;
+	cl_ulong	kds_block;		/* valid only if source is KDS_FORMAT_BLOCK */
+	struct {
+		cl_int	group_id;
+		cl_uint	row_index;
+	} t[FLEXIBLE_ARRAY_MEMBER];
+} gpupreaggRowInvalidationMap;
 
 /* macro definitions to reference packed values */
 #define KERN_GPUPREAGG_PARAMBUF(kgpreagg)				\
@@ -86,17 +96,20 @@ typedef struct
 #define KERN_GPUPREAGG_DMARECV_LENGTH(kgpreagg)			\
 	offsetof(kern_gpupreagg, pg_crc32_table[0])
 /* suspend/resume buffer for KDS_FORMAT_BLOCK */
-#define KERN_GPUPREAGG_SUSPEND_CONTEXT(kgpreagg)		\
-	((gpupreagg_suspend_context *)						\
-	 ((kgpreagg)->suspend_offset == 0					\
-	  ? NULL											\
-	  : ((char *)(kgpreagg) + (kgpreagg)->suspend_offset)))
-
-#define KERN_GPUPREAGG_ITEMIDDATA_ARRAY(kgpreagg)		\
-	((ItemIdData **)									\
-	 ((kgpreagg)->lpp_array_offset == 0					\
-	  ? NULL											\
-	  : ((char *)(kgpreagg) + (kgpreagg)->lpp_array_offset)))
+#define KERN_GPUPREAGG_SUSPEND_CONTEXT(kgpreagg,group_id)	\
+	((kgpreagg)->suspend_size > 0							\
+	 ? ((gpupreaggSuspendContext *)							\
+		((char *)KERN_GPUPREAGG_PARAMBUF(kgpreagg) +		\
+		 KERN_GPUPREAGG_PARAMBUF_LENGTH(kgpreagg))) + (group_id) \
+	 : NULL)
+/* row-invalidation map */
+#define KERN_GPUPREAGG_ROW_INVALIDATION_MAP(kgpreagg)		\
+	((kgpreagg)->row_inval_map_size > 0						\
+	 ? ((gpupreaggRowInvalidationMap *)						\
+		((char *)KERN_GPUPREAGG_PARAMBUF(kgpreagg) +		\
+		 KERN_GPUPREAGG_PARAMBUF_LENGTH(kgpreagg) +			\
+		 (kgpreagg)->suspend_size))							\
+	 : NULL)
 
 /*
  * NOTE: hashtable of gpupreagg is an array of pagg_hashslot.
@@ -346,9 +359,19 @@ gpupreagg_setup_row(kern_gpupreagg *kgpreagg,
 	Datum		   *slot_values;
 	cl_bool		   *slot_isnull;
 	cl_bool			rc;
+	gpupreaggRowInvalidationMap *ri_map;
 	__shared__ cl_uint	base;
 
+	assert(kds_src->format == KDS_FORMAT_ROW &&
+		   kds_slot->format == KDS_FORMAT_SLOT);
 	INIT_KERNEL_CONTEXT(&kcxt, gpupreagg_setup_row, kparams);
+	ri_map = KERN_GPUPREAGG_ROW_INVALIDATION_MAP(kgpreagg);
+	if (get_global_id() == 0)
+	{
+		ri_map->format = KDS_FORMAT_ROW;
+		ri_map->kds_block = 0UL;
+	}
+
 	for (src_base = get_global_base();
 		 src_base < src_nitems;
 		 src_base += get_global_size())
@@ -399,9 +422,12 @@ gpupreagg_setup_row(kern_gpupreagg *kgpreagg,
 										 &tupitem->htup,
 										 slot_values,
 										 slot_isnull);
+				ri_map->t[slot_index].group_id = -1;
+				ri_map->t[slot_index].row_index = src_index;
 			}
+			if (get_local_id() == 0)
+				atomicAdd(&ri_map->nitems, nvalids);
 		}
-			
 		/* bailout if any error */
 		if (__syncthreads_count(kcxt.e.errcode) > 0)
 			break;
@@ -434,14 +460,19 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 	cl_uint			part_index = 0;
 	cl_uint			line_index = 0;
 	cl_bool			thread_is_valid = false;
-	gpupreagg_suspend_context *my_suspend;
-	ItemIdData	  **lpp_array;
+	gpupreaggSuspendContext *my_suspend;
+	gpupreaggRowInvalidationMap *ri_map;
 	__shared__ cl_uint	base;
-
-	INIT_KERNEL_CONTEXT(&kcxt, gpupreagg_setup_block, kparams);
 
 	assert(kds_src->format == KDS_FORMAT_BLOCK &&
 		   kds_slot->format == KDS_FORMAT_SLOT);
+	INIT_KERNEL_CONTEXT(&kcxt, gpupreagg_setup_block, kparams);
+	ri_map = KERN_GPUPREAGG_ROW_INVALIDATION_MAP(kgpreagg);
+	if (get_global_id() == 0)
+	{
+		ri_map->format = KDS_FORMAT_BLOCK;
+		ri_map->kds_block = (cl_ulong) kds_src;
+	}
 
 	part_sz = Min((kds_src->nrows_per_block +
 				   warpSize-1) & ~(warpSize-1), get_local_size());
@@ -451,9 +482,8 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 	window_sz = n_parts * get_num_groups();
 
 	/* resume kernel from the point where suspended, if any */
-	my_suspend = KERN_GPUPREAGG_SUSPEND_CONTEXT(kgpreagg) + get_group_id();
-	lpp_array = KERN_GPUPREAGG_ITEMIDDATA_ARRAY(kgpreagg);
-	if (kgpreagg->suspend_count > 0)
+	my_suspend = KERN_GPUPREAGG_SUSPEND_CONTEXT(kgpreagg, get_group_id());
+	if (kgpreagg->resume_context)
 	{
 		part_index = my_suspend->part_index;
 		line_index = my_suspend->line_index;
@@ -566,8 +596,12 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 											 slot_values,
 											 slot_isnull);
 					/* for invalidation of ItemIdData */
-					lpp_array[slot_index] = curr_lpp;
+					ri_map->t[slot_index].group_id = -1;
+					ri_map->t[slot_index].row_index =
+						((char *)curr_lpp - (char *)kds_src);
 				}
+				if (get_local_id() == 0)
+					atomicAdd(&ri_map->nitems, nvalids);
 				/* bailout if any errors */
 				if (__syncthreads_count(kcxt.e.errcode) > 0)
 					goto out;
@@ -626,10 +660,20 @@ gpupreagg_setup_column(kern_gpupreagg *kgpreagg,
 	cl_uint			nvalids;
 	Datum		   *slot_values;
 	cl_bool		   *slot_isnull;
+	gpupreaggRowInvalidationMap *ri_map;
 	cl_bool			rc;
 	__shared__ cl_uint	base;
 
+	assert(kds_src->format == KDS_FORMAT_COLUMN &&
+		   kds_slot->format == KDS_FORMAT_SLOT);
 	INIT_KERNEL_CONTEXT(&kcxt, gpupreagg_setup_column, kparams);
+	ri_map = KERN_GPUPREAGG_ROW_INVALIDATION_MAP(kgpreagg);
+	if (get_global_id() == 0)
+	{
+		ri_map->format = KDS_FORMAT_COLUMN;
+		ri_map->kds_block = 0UL;
+	}
+
 	for (src_base = get_global_base();
 		 src_base < src_nitems;
 		 src_base += get_global_size())
@@ -675,7 +719,11 @@ gpupreagg_setup_column(kern_gpupreagg *kgpreagg,
 											src_index,
 											slot_values,
 											slot_isnull);
+				ri_map->t[slot_index].group_id = -1;
+				ri_map->t[slot_index].row_index = src_index;
 			}
+			if (get_local_id() == 0)
+				atomicAdd(&ri_map->nitems, nvalids);
 		}
 		/* bailout if any error */
 		if (__syncthreads_count(kcxt.e.errcode) > 0)
@@ -713,7 +761,7 @@ gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,		/* in/out */
 	cl_bool			is_last_reduction = false;
 	cl_bool		   *slot_isnull;
 	Datum		   *slot_values;
-	ItemIdData	  **lpp_array = KERN_GPUPREAGG_ITEMIDDATA_ARRAY(kgpreagg);
+	gpupreaggRowInvalidationMap *ri_map;
 	__shared__ cl_bool	l_isnull[MAXTHREADS_PER_BLOCK];
 	__shared__ Datum	l_values[MAXTHREADS_PER_BLOCK];
 	__shared__ cl_uint	base;
@@ -731,6 +779,8 @@ gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,		/* in/out */
 	assert(kds_final->format == KDS_FORMAT_SLOT);
 	assert(kds_slot->ncols == kds_final->ncols);
 	INIT_KERNEL_CONTEXT(&kcxt, gpupreagg_nogroup_reduction, kparams);
+	ri_map = KERN_GPUPREAGG_ROW_INVALIDATION_MAP(kgpreagg);
+	assert(ri_map->nitems == kds_slot->nitems);
 
 	do {
 		/* fetch next items from the kds_slot */
@@ -832,15 +882,23 @@ gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,		/* in/out */
 		}
 		__syncthreads();
 		/*
-		 * Invalidation of ItemId - if and when suspended GPU kernel needs
-		 * CPU fallback, rows already processed must be ignored.
+		 * Invalidation of the source items - once a row is merged to
+		 * the final buffer, it shall never be used even if CpuReCheck
+		 * kicks CPU fallback later.
 		 */
-		if (lpp_array && slot_index < slot_nitems)
-			ItemIdSetUnused(lpp_array[slot_index]);
+		if (slot_index < ri_map->nitems)
+		{
+			if (ri_map->format == KDS_FORMAT_BLOCK)
+			{
+				ItemIdData *lpp = (ItemIdData *)
+					(ri_map->kds_block + ri_map->t[slot_index].row_index);
+				ItemIdSetUnused(lpp);
+			}
+			ri_map->t[slot_index].group_id = INT_MAX;	/* merged! */
+		}
 	} while (!is_last_reduction);
-
 	/* write-back execution status into host side */
-    kern_writeback_error_status(&kgpreagg->kerror, &kcxt.e);
+	kern_writeback_error_status(&kgpreagg->kerror, &kcxt.e);
 }
 
 /*
@@ -1267,13 +1325,15 @@ gpupreagg_groupby_reduction(kern_gpupreagg *kgpreagg,		/* in/out */
 	cl_uint			owner_index;
 	cl_bool			is_owner = false;
 	cl_bool			is_last_reduction = false;
-	ItemIdData	  **lpp_array = KERN_GPUPREAGG_ITEMIDDATA_ARRAY(kgpreagg);
+	gpupreaggRowInvalidationMap *ri_map;
 	__shared__ cl_uint	crc32_table[256];
 	__shared__ cl_bool	l_isnull[MAXTHREADS_PER_BLOCK];
 	__shared__ Datum	l_values[MAXTHREADS_PER_BLOCK];
 	__shared__ cl_int	l_kds_index[MAXTHREADS_PER_BLOCK];
 	__shared__ pagg_hashslot l_hashslot[GPUPREAGG_LOCAL_HASHSIZE];
 	__shared__ cl_uint	base;
+	__shared__ cl_uint	last_read_pos;
+	__shared__ cl_uint	curr_read_pos;
 
 	/* skip if previous stage reported an error */
 	if (kgjoin_errorbuf &&
@@ -1287,6 +1347,11 @@ gpupreagg_groupby_reduction(kern_gpupreagg *kgpreagg,		/* in/out */
 	assert(kds_slot->format == KDS_FORMAT_SLOT);
 	assert(kds_final->format == KDS_FORMAT_SLOT);
 	INIT_KERNEL_CONTEXT(&kcxt, gpupreagg_groupby_reduction, kparams);
+	ri_map = KERN_GPUPREAGG_ROW_INVALIDATION_MAP(kgpreagg);
+	assert(ri_map->nitems == kds_slot->nitems);
+	if (get_local_id() == 0)
+		last_read_pos = 0;
+
 	/* setup crc32 table */
 	for (index = get_local_id();
 		 index < lengthof(crc32_table);
@@ -1316,7 +1381,10 @@ clean_restart:
 		index = pgstromStairlikeBinaryCount(!is_owner, &count);
 		assert(count > 0);
 		if (get_local_id() == 0)
+		{
 			base = atomicAdd(&kgpreagg->read_slot_pos, count);
+			curr_read_pos = base + count;
+		}
 		__syncthreads();
 		if (base + count >= slot_nitems)
 			is_last_reduction = true;
@@ -1337,12 +1405,8 @@ clean_restart:
 												 slot_isnull,
 												 slot_values);
 				FIN_LEGACY_CRC32(hash_value);
-				/*
-				 * Invalidation of ItemId - if and when suspended GPU kernel
-				 * needs CPU fallback, rows already processed must be ignored.
-				 */
-				if (lpp_array)
-					ItemIdSetUnused(lpp_array[kds_index]);
+				/* source row is now pending for invalidation */
+				ri_map->t[kds_index].group_id = get_group_id();
 			}
 			else
 			{
@@ -1482,6 +1546,35 @@ clean_restart:
 					goto bailout;
 				count = __syncthreads_count(is_owner);
 			} while (__syncthreads_count(lock_wait) > 0);
+
+			/*
+			 * Invalidation of the rows which are already merged to the final
+			 * buffer, to avoid duplicated accumulations.
+			 * Please assume the case when subsequent rows raised CpuReCheck
+			 * error, the host code must run the fallback routine. However,
+			 * a part of rows in the source buffer is already merged to the
+			 * final buffer, and the others are not yet. So, we have to track
+			 * the rows already merged. The CPU fallback routine must pick up
+			 * only the rows which are not merged yet.
+			 */
+			for (index = last_read_pos + get_local_id();
+				 index < curr_read_pos;
+				 index += get_local_size())
+			{
+				if (ri_map->t[index].group_id != get_group_id())
+					continue;
+				if (ri_map->format == KDS_FORMAT_BLOCK)
+				{
+					ItemIdData *lpp = (ItemIdData *)
+						(ri_map->kds_block + ri_map->t[index].row_index);
+					ItemIdSetUnused(lpp);
+				}
+				ri_map->t[index].group_id = INT_MAX;	/* merged! */
+			}
+			__syncthreads();
+			if (get_local_id() == 0)
+				last_read_pos = curr_read_pos;
+
 			/* OK, successfully moved pending items */
 			if (!is_last_reduction)
 				goto clean_restart;

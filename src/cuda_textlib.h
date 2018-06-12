@@ -60,9 +60,17 @@ STROMCL_VARLENA_VARREF_TEMPLATE(bpchar)
 /* pg_bpchar_comp_crc32 has to be defined with own way */
 STATIC_FUNCTION(cl_uint)
 pg_bpchar_comp_crc32(const cl_uint *crc32_table,
+					 kern_context *kcxt,
 					 cl_uint hash, pg_bpchar_t datum)
 {
-	if (!datum.isnull)
+	if (datum.isnull)
+		return hash;
+	if (VARATT_IS_COMPRESSED(datum.value) ||
+		VARATT_IS_EXTERNAL(datum.value))
+	{
+		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+	}
+	else
 	{
 		hash = pg_common_comp_crc32(crc32_table, hash,
 									VARDATA_ANY(datum.value),
@@ -70,6 +78,7 @@ pg_bpchar_comp_crc32(const cl_uint *crc32_table,
 	}
 	return hash;
 }
+
 STATIC_INLINE(Datum)
 pg_bpchar_as_datum(void *addr)
 {

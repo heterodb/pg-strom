@@ -175,6 +175,7 @@
 																	\
 	STATIC_FUNCTION(cl_uint)										\
 	pg_##NAME##_comp_crc32(const cl_uint *crc32_table,				\
+						   kern_context *kcxt,						\
 						   cl_uint hash, pg_##NAME##_t datum)		\
 	{																\
 		char		flags;											\

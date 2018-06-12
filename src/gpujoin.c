@@ -3602,7 +3602,7 @@ gpujoin_codegen_hash_value(StringInfo source,
 			"  temp.%s_v = %s;\n"
 			"  if (!temp.%s_v.isnull)\n"
 			"    is_null_keys = false;\n"
-			"  hash = pg_%s_comp_crc32(pg_crc32_table, hash, temp.%s_v);\n",
+			"  hash = pg_%s_comp_crc32(pg_crc32_table, kcxt, hash, temp.%s_v);\n",
 			dtype->type_name,
 			pgstrom_codegen_expression(key_expr, context),
 			dtype->type_name,

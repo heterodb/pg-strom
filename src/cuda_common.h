@@ -1034,6 +1034,7 @@ pg_common_comp_crc32(const cl_uint *crc32_table,
 #define STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(NAME,BASE)			\
 	STATIC_INLINE(cl_uint)										\
 	pg_##NAME##_comp_crc32(const cl_uint *crc32_table,			\
+						   kern_context *kcxt,					\
 						   cl_uint hash, pg_##NAME##_t datum)	\
 	{															\
 		if (!datum.isnull)										\
@@ -1574,15 +1575,23 @@ toast_decompress_datum(char *buffer, cl_uint buflen,
 #define STROMCL_VARLENA_COMP_CRC32_TEMPLATE(NAME)				\
 	STATIC_INLINE(cl_uint)										\
 	pg_##NAME##_comp_crc32(const cl_uint *crc32_table,			\
+						   kern_context *kcxt,					\
 						   cl_uint hash, pg_##NAME##_t datum)	\
 	{															\
 		if (datum.isnull)										\
 			return hash;										\
-		/* TODO: CpuReCheck if compressed or external */		\
-		hash = pg_common_comp_crc32(crc32_table,				\
-									hash,						\
-									VARDATA_ANY(datum.value),	\
-									VARSIZE_ANY_EXHDR(datum.value)); \
+		if (VARATT_IS_COMPRESSED(datum.value) ||				\
+			VARATT_IS_EXTERNAL(datum.value))					\
+		{														\
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);	\
+		}														\
+		else													\
+		{														\
+			hash = pg_common_comp_crc32(crc32_table,			\
+										hash,					\
+										VARDATA_ANY(datum.value), \
+										VARSIZE_ANY_EXHDR(datum.value)); \
+		}														\
 		return hash;											\
 	}
 

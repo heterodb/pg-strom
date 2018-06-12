@@ -16,6 +16,7 @@
  * GNU General Public License for more details.
  */
 #include "pg_strom.h"
+#include "cuda_gpuscan.h"
 #include "cuda_gpujoin.h"
 #include "cuda_gpupreagg.h"
 
@@ -3391,7 +3392,7 @@ gpupreagg_codegen_hashvalue(StringInfo kern,
 		/* compute crc32 value */
 		appendStringInfo(
 			&body,
-			"  hash_value = pg_%s_comp_crc32(crc32_table, hash_value, keyval_%u);\n",
+			"  hash_value = pg_%s_comp_crc32(crc32_table, kcxt, hash_value, keyval_%u);\n",
 			dtype->type_name, tle->resno);
 	}
 	appendStringInfoString(
@@ -4465,7 +4466,7 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 	CUresult		rc;
 	Size			head_sz;
 	Size			suspend_sz = 0;
-	Size			lpp_array_sz = 0;
+	Size			row_inval_sz = 0;
 	Size			kgjoin_len = 0;
 
 	/* allocation of the final-buffer on demand */
@@ -4473,9 +4474,7 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 		gpupreagg_alloc_final_buffer(gpas);
 
 	/* rough estimation of the result buffer */
-	if (!pds_src)
-		kds_slot_length = pgstrom_chunk_size();
-	else
+	if (pds_src)
 	{
 		kds_slot_nrooms = pds_src->kds.nitems;
 
@@ -4509,15 +4508,29 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 			 * are very variable thus 'average' is not reliable.
 			 */
 			sm_count = devAttrs[gcontext->cuda_dindex].MULTIPROCESSOR_COUNT;
-			suspend_sz = STROMALIGN(sizeof(gpupreagg_suspend_context) *
+			suspend_sz = STROMALIGN(sizeof(gpuscanSuspendContext) *
 									GPUKERNEL_MAX_SM_MULTIPLICITY * sm_count);
-			lpp_array_sz = STROMALIGN(sizeof(ItemIdData *) * kds_slot_nrooms);
 		}
 		kds_slot_length = STROMALIGN(offsetof(kern_data_store,
 											  colmeta[gpa_tupdesc->natts])) +
 			STROMALIGN(MAXALIGN((sizeof(Datum) + sizeof(char)) *
 								gpa_tupdesc->natts) * kds_slot_nrooms);
 	}
+	else
+	{
+		/* combined RIGHT OUTER JOIN or terminator task */
+		kern_data_store *kds_slot = gpas->kds_slot_head;
+
+		kds_slot_length = pgstrom_chunk_size();
+		kds_slot_nrooms = (kds_slot_length -
+						   KERN_DATA_STORE_HEAD_LENGTH(kds_slot))
+			/ (MAXALIGN(sizeof(Datum) * kds_slot->ncols) +
+			   MAXALIGN(sizeof(bool) * kds_slot->ncols));
+	}
+	/* buffer of row-invalidation-map */
+	row_inval_sz = STROMALIGN(offsetof(gpupreaggRowInvalidationMap,
+									   t[kds_slot_nrooms]));
+
 	/* allocation of GpuPreAggTask */
 	head_sz = STROMALIGN(offsetof(GpuPreAggTask, kern.kparams) +
 						 gpas->gts.kern_params->length);
@@ -4529,12 +4542,12 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 
 	rc = gpuMemAllocManaged(gcontext,
 							&m_deviceptr,
-							head_sz + suspend_sz + lpp_array_sz + kgjoin_len,
+							head_sz + suspend_sz + row_inval_sz + kgjoin_len,
 							CU_MEM_ATTACH_GLOBAL);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on gpuMemAllocManaged: %s", errorText(rc));
 	gpreagg = (GpuPreAggTask *)m_deviceptr;
-	memset(gpreagg, 0, offsetof(GpuPreAggTask, kern.kparams));
+	memset(gpreagg, 0, head_sz + suspend_sz + row_inval_sz);
 
 	pgstromInitGpuTask(&gpas->gts, &gpreagg->task);
 	gpreagg->with_nvme_strom = with_nvme_strom;
@@ -4545,7 +4558,7 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 	{
 		GpuTaskState   *outer_gts = (GpuTaskState *) outerPlanState(gpas);
 		gpreagg->kgjoin = (kern_gpujoin *)
-			((char *)gpreagg + head_sz + suspend_sz + lpp_array_sz);
+			((char *)gpreagg + head_sz + suspend_sz + row_inval_sz);
 		GpuJoinSetupTask(gpreagg->kgjoin, outer_gts, pds_src);
 		gpreagg->m_kmrels = m_kmrels;
 		gpreagg->outer_depth = outer_depth;
@@ -4557,11 +4570,8 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 	/* if any grouping keys, determine the reduction policy later */
 	gpreagg->kern.num_group_keys = gpas->num_group_keys;
 	gpreagg->kern.hash_size = kds_slot_nrooms; //deprecated?
-	if (suspend_sz > 0)
-	{
-		gpreagg->kern.suspend_offset = head_sz;
-		gpreagg->kern.lpp_array_offset = head_sz + suspend_sz;
-	}
+	gpreagg->kern.suspend_size = suspend_sz;
+	gpreagg->kern.row_inval_map_size = row_inval_sz;
 	memcpy(gpreagg->kern.pg_crc32_table,
 		   pg_crc32_table,
 		   sizeof(uint32) * 256);
@@ -4727,16 +4737,37 @@ gpupreagg_next_tuple_fallback(GpuPreAggState *gpas, GpuPreAggTask *gpreagg)
 		}
 		else
 		{
+			pgstrom_data_store *pds_src = gpreagg->pds_src;
+
+			/*
+			 * Skip rows if already merged; it is tracked by rows-invalidation-
+			 * map if not KDS_FORMAT_BLOCK. In case of KDS_FORMAT_BLOCK,
+			 * GpuPreAgg kernel invalidates ItemIdData structure directly.
+			 */
+			if (pds_src &&
+				pds_src->kds.format != KDS_FORMAT_BLOCK &&
+				gpas->gts.curr_index < pds_src->kds.nitems)
+			{
+				bool   *rows_invalidation_map = (bool *)
+					KERN_GPUPREAGG_ROW_INVALIDATION_MAP(&gpreagg->kern);
+				if (rows_invalidation_map[gpas->gts.curr_index])
+				{
+					gpas->gts.curr_index++;
+					continue;
+				}
+			}
 			/* fetch a tuple from the data-store */
 			ExecClearTuple(gpas->outer_slot);
 			if (!gpreagg->pds_src ||
 				!PDS_fetch_tuple(gpas->outer_slot,
-								 gpreagg->pds_src,
+								 pds_src,
 								 &gpas->gts))
 				return NULL;
 
 			econtext->ecxt_scantuple = gpas->outer_slot;
 		}
+		pg_atomic_add_fetch_u64(&gpa_rtstat->source_nitems, 1L);
+
 		/* filter out the tuple, if any outer quals */
 #if PG_VERSION_NUM < 100000
 		retval = ExecQual(gpas->outer_quals, econtext, false);
@@ -4745,7 +4776,7 @@ gpupreagg_next_tuple_fallback(GpuPreAggState *gpas, GpuPreAggTask *gpreagg)
 #endif
 		if (!retval)
 		{
-			//TODO: Inc number of filtered rows
+			pg_atomic_add_fetch_u64(&gpa_rtstat->nitems_filtered, 1L);
 			continue;
 		}
 		/* makes a projection from the outer-scan to the pseudo-tlist */
@@ -4892,7 +4923,7 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 	GpuContext	   *gcontext = gpas->gts.gcontext;
 	pgstrom_data_store *pds_final = gpas->pds_final;
 	pgstrom_data_store *pds_src = gpreagg->pds_src;
-	cl_char			kds_src_format = pds_src->kds.format;
+	//cl_char			kds_src_format = pds_src->kds.format;
 	const char	   *kfunc_setup;
 	CUfunction		kern_setup;
 	CUfunction		kern_reduction;
@@ -4902,9 +4933,9 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 	CUdeviceptr		m_kds_slot = 0UL;
 	CUdeviceptr		m_kds_final = (CUdeviceptr)&pds_final->kds;
 	CUdeviceptr		m_fhash = gpas->m_fhash;
-	cl_uint			last_suspend_count;
 	cl_int			grid_sz;
 	cl_int			block_sz;
+	void		   *last_suspend = NULL;
 	void		   *kern_args[6];
 	CUresult		rc;
 	int				retval = 1;
@@ -4917,15 +4948,20 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 	/*
 	 * Lookup kernel functions
 	 */
-	if (kds_src_format == KDS_FORMAT_ROW)
-		kfunc_setup = "gpupreagg_setup_row";
-	else if (kds_src_format == KDS_FORMAT_BLOCK)
-		kfunc_setup = "gpupreagg_setup_block";
-	else if (kds_src_format == KDS_FORMAT_COLUMN)
-		kfunc_setup = "gpupreagg_setup_column";
-	else
-		werror("GpuPreAgg: unknown PDS format: %d", kds_src_format);
-
+	switch (pds_src->kds.format)
+	{
+		case KDS_FORMAT_ROW:
+			kfunc_setup = "gpupreagg_setup_row";
+			break;
+		case KDS_FORMAT_BLOCK:
+			kfunc_setup = "gpupreagg_setup_block";
+			break;
+		case KDS_FORMAT_COLUMN:
+			kfunc_setup = "gpupreagg_setup_column";
+			break;
+		default:
+			werror("GpuPreAgg: unknown PDS format: %d", pds_src->kds.format);
+	}
 	rc = cuModuleGetFunction(&kern_setup,
 							 cuda_module,
 							 kfunc_setup);
@@ -4945,7 +4981,7 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 	 */
 
 	/* kds_src */
-	if (kds_src_format != KDS_FORMAT_BLOCK)
+	if (pds_src->kds.format != KDS_FORMAT_BLOCK)
 		m_kds_src = (CUdeviceptr)&pds_src->kds;
 	else
 	{
@@ -4991,11 +5027,17 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 	((kern_data_store *)m_kds_slot)->nrooms = gpreagg->kds_slot_nrooms;
 
 	/*
+	 * temporary buffer for suspended context
+	 */
+	if (gpreagg->kern.suspend_size > 0)
+		last_suspend = alloca(gpreagg->kern.suspend_size);
+
+	/*
 	 * OK, kick a series of GpuPreAgg invocations
 	 */
 
 	/* source data to be reduced */
-	if (kds_src_format != KDS_FORMAT_BLOCK)
+	if (pds_src->kds.format != KDS_FORMAT_BLOCK)
 	{
 		rc = cuMemPrefetchAsync(m_kds_src,
 								pds_src->kds.length,
@@ -5018,9 +5060,6 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 		gpuMemCopyFromSSD(m_kds_src, pds_src);
 	}
 
-resume_kernel:
-	last_suspend_count = gpreagg->kern.suspend_count;
-
 	/*
 	 * Launch:
 	 * gpupreagg_setup_XXXX(kern_gpupreagg *kgpreagg,
@@ -5034,12 +5073,15 @@ resume_kernel:
 							 0, sizeof(int));
 	if (rc != CUDA_SUCCESS)
 		werror("failed on gpuOptimalBlockSize: %s", errorText(rc));
+	gpreagg->kern.setup_grid_sz = grid_sz;
+	gpreagg->kern.setup_block_sz = block_sz;
+resume_kernel:
 	kern_args[0] = &m_gpreagg;
 	kern_args[1] = &m_kds_src;
 	kern_args[2] = &m_kds_slot;
 	rc = cuLaunchKernel(kern_setup,
-						grid_sz, 1, 1,
-						block_sz, 1, 1,
+						gpreagg->kern.setup_grid_sz, 1, 1,
+						gpreagg->kern.setup_block_sz, 1, 1,
 						sizeof(cl_int) * 1024,	/* for StairlikeSum */
 						CU_STREAM_PER_THREAD,
 						kern_args,
@@ -5104,49 +5146,81 @@ resume_kernel:
      * Elsewhere, update run-time statistics.
      */
 	gpreagg->task.kerror = gpreagg->kern.kerror;
-	if (pgstrom_cpu_fallback_enabled &&
-		gpreagg->task.kerror.errcode == StromError_CpuReCheck)
+	if (gpreagg->task.kerror.errcode == StromError_Success)
 	{
-		/*
-		 * MEMO: Block-format might suspend/resume GPU kernel before (because
-		 * accurate number of rows is not predictible before kernel launch).
-		 * In this case, part of the tuples are already merged to the final
-		 * buffer but others are not yet. GpuPreAgg kernel invalidates
-		 * ItemIdData of the in-kernel buffer, so we have to write back to
-		 * the host buffer before fallback process.
-		 * In addition, its host-side buffer may not have data blocks when
-		 * SSD-to-GPU Direct SQL Execution works as literal.
-		 */
-		if (pds_src->kds.format == KDS_FORMAT_BLOCK)
+		void	   *temp;
+
+		if (gpreagg->kern.suspend_count > 0)
 		{
-			rc = cuMemcpyDtoH(&pds_src->kds,
-							  m_kds_src,
-							  pds_src->kds.length);
-			if (rc != CUDA_SUCCESS)
-				werror("failed on cuMemcpyDtoH: %s", errorText(rc));
-			pds_src->nblocks_uncached = 0;
+			CHECK_WORKER_TERMINATION();
+			gpreagg->kern.suspend_count = 0;
+			gpreagg->kern.resume_context = true;
+
+			temp = KERN_GPUPREAGG_SUSPEND_CONTEXT(&gpreagg->kern, 0);
+			if (temp)
+				memcpy(last_suspend, temp, gpreagg->kern.suspend_size);
+			goto resume_kernel;
 		}
-		gpreagg->task.kerror.errcode = StromError_Success;
-		gpreagg->task.cpu_fallback = true;
-		retval = 0;
-	}
-	else if (gpreagg->task.kerror.errcode != StromError_Success)
-		retval = 0;		/* raise an error */
-	else if (gpreagg->kern.suspend_count != last_suspend_count)
-	{
-		Assert(pds_src->kds.format == KDS_FORMAT_BLOCK);
-		/* rewind the kds_slot buffer that is already merged */
-		((kern_data_store *)m_kds_slot)->nitems = 0;
-		gpreagg->kern.read_slot_pos = 0;
-		goto resume_kernel;
-	}
-	else
-	{
+		/* elsewhere, all the source rows successfully merged */
 		gpupreaggUpdateRunTimeStat(gpreagg->task.gts, &gpreagg->kern);
 		retval = -1;
 	}
+	else
+	{
+		if (pgstrom_cpu_fallback_enabled &&
+			gpreagg->task.kerror.errcode == StromError_CpuReCheck)
+		{
+			memset(&gpreagg->task.kerror, 0, sizeof(kern_errorbuf));
+			gpreagg->task.cpu_fallback = true;
+
+			/*
+			 * In case of KDS_FORMAT_BLOCK, we have to write back the buffer
+			 * to host-side, because its ItemIdData might be updated, and
+			 * blocks might not be loaded yet if NVMe-Strom mode.
+			 *
+			 * Elsewhere, we setup row-invalidation map to inform the rows
+			 * to be skipped by CPU fallback.
+			 */
+			if (pds_src->kds.format == KDS_FORMAT_BLOCK)
+			{
+				rc = cuMemcpyDtoH(&pds_src->kds,
+								  m_kds_src,
+								  pds_src->kds.length);
+				if (rc != CUDA_SUCCESS)
+					werror("failed on cuMemcpyDtoH: %s", errorText(rc));
+				pds_src->nblocks_uncached = 0;
+			}
+			else
+			{
+				gpupreaggRowInvalidationMap *ri_map;
+				bool	   *rowmap;
+				cl_uint		i, sz = sizeof(bool) * pds_src->kds.nitems;
+
+				ri_map = KERN_GPUPREAGG_ROW_INVALIDATION_MAP(&gpreagg->kern);
+				rowmap = alloca(sz);
+				memset(rowmap, 0, sz);
+				for (i=0; i < ri_map->nitems; i++)
+				{
+					Assert(ri_map->t[i].row_index < pds_src->kds.nitems);
+					if (ri_map->t[i].group_id == INT_MAX)
+						rowmap[ri_map->t[i].row_index] = true;
+				}
+				Assert(sz <= gpreagg->kern.row_inval_map_size);
+				memcpy(ri_map, rowmap, sz);
+			}
+
+			/* restore the suspend context, if any */
+			if (gpreagg->kern.resume_context)
+			{
+				void	   *temp
+					= KERN_GPUPREAGG_SUSPEND_CONTEXT(&gpreagg->kern, 0);
+				memcpy(temp, last_suspend, gpreagg->kern.suspend_size);
+			}
+		}
+		retval = 0;		/* back to the controller */
+	}
 out_of_resource:
-	if (kds_src_format == KDS_FORMAT_BLOCK && m_kds_src != 0UL)
+	if (pds_src->kds.format == KDS_FORMAT_BLOCK && m_kds_src != 0UL)
 		gpuMemFree(gcontext, m_kds_src);
 	if (m_kds_slot != 0UL)
 		gpuMemFree(gcontext, m_kds_slot);
