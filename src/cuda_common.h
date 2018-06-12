@@ -1578,6 +1578,7 @@ toast_decompress_datum(char *buffer, cl_uint buflen,
 	{															\
 		if (datum.isnull)										\
 			return hash;										\
+		/* TODO: CpuReCheck if compressed or external */		\
 		hash = pg_common_comp_crc32(crc32_table,				\
 									hash,						\
 									VARDATA_ANY(datum.value),	\
