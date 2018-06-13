@@ -181,9 +181,6 @@ errorText(int errcode)
 		case StromError_Success:
 			label = "Suceess";
 			break;
-		case StromError_Suspend:
-			label = "GPU Suspend";
-			break;
 		case StromError_CpuReCheck:
 			label = "CPU ReCheck";
 			break;

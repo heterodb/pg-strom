@@ -2957,7 +2957,6 @@ gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 	const char	   *kern_fname;
 	void		   *kern_args[5];
 	void		   *last_suspend = NULL;
-	void		   *curr_suspend;
 	size_t			offset;
 	size_t			length;
 	cl_int			grid_sz;
@@ -3023,11 +3022,6 @@ gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 				werror("failed on gpuMemAlloc: %s", errorText(rc));
 		}
 	}
-	/*
-	 * temporary buffer for suspended context
-	 */
-	if (gscan->kern.suspend_sz > 0)
-		last_suspend = alloca(gscan->kern.suspend_sz);
 
 	/*
 	 * OK, enqueue a series of requests
@@ -3173,8 +3167,9 @@ resume_kernel:
 		/* resume gpuscan kernel, if suspended */
 		if (gscan->kern.suspend_count > 0)
 		{
-			CHECK_WORKER_TERMINATION();
+			void	   *temp;
 
+			CHECK_WORKER_TERMINATION();
 			/* return partial result */
 			pds_dst = PDS_clone(gscan->pds_dst);
 			gpuscan_throw_partial_result(gscan, gscan->pds_dst);
@@ -3189,8 +3184,11 @@ resume_kernel:
 			 * Once it moved to the fallback code, we have to skip rows
 			 * already returned on the prior steps.
 			 */
-			curr_suspend = KERN_GPUSCAN_SUSPEND_CONTEXT(&gscan->kern, 0);
-			memcpy(last_suspend, curr_suspend, gscan->kern.suspend_sz);
+			Assert(gscan->kern.suspend_sz > 0);
+			if (!last_suspend)
+				last_suspend = alloca(gscan->kern.suspend_sz);
+			temp = KERN_GPUSCAN_SUSPEND_CONTEXT(&gscan->kern, 0);
+			memcpy(last_suspend, temp, gscan->kern.suspend_sz);
 			goto resume_kernel;
 		}
 	}
@@ -3216,10 +3214,12 @@ resume_kernel:
 			memset(&gscan->task.kerror, 0, sizeof(kern_errorbuf));
 			gscan->task.cpu_fallback = true;
 			/* restore suspend context, if any */
+			gscan->kern.resume_context = (last_suspend != NULL);
 			if (last_suspend)
 			{
-				curr_suspend = KERN_GPUSCAN_SUSPEND_CONTEXT(&gscan->kern, 0);
-				memcpy(curr_suspend, last_suspend, gscan->kern.suspend_sz);
+				void   *temp = KERN_GPUSCAN_SUSPEND_CONTEXT(&gscan->kern, 0);
+
+				memcpy(temp, last_suspend, gscan->kern.suspend_sz);
 			}
 		}
 	}

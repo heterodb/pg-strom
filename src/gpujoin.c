@@ -4352,7 +4352,7 @@ GpuJoinSetupTask(struct kern_gpujoin *kgjoin, GpuTaskState *gts,
 	pstack_nrooms = 2048;
 	pstack_sz = MAXALIGN(sizeof(cl_uint) *
 						 pstack_nrooms * ((nrels+1) * (nrels+2)) / 2);
-	suspend_sz = STROMALIGN(offsetof(gpujoinSuspendBlock,
+	suspend_sz = STROMALIGN(offsetof(gpujoinSuspendContext,
 									 pd[nrels + 1]));
 	if (kgjoin)
 	{
@@ -4361,6 +4361,7 @@ GpuJoinSetupTask(struct kern_gpujoin *kgjoin, GpuTaskState *gts,
 		kgjoin->pstack_offset = head_sz + param_sz;
 		kgjoin->pstack_nrooms = pstack_nrooms;
 		kgjoin->suspend_offset = head_sz + param_sz + mp_count * pstack_sz;
+		kgjoin->suspend_size = mp_count * suspend_sz;
 		kgjoin->num_rels = gjs->num_rels;
 		kgjoin->src_read_pos = 0;
 
@@ -5398,6 +5399,11 @@ gpujoinUpdateRunTimeStat(GpuTaskState *gts, kern_gpujoin *kgjoin)
 		pg_atomic_fetch_add_u64(&gj_rtstat->jstat[i+1].inner_nitems,
 								kgjoin->stat_nitems[i]);
 	}
+	/* reset counters (may be reused by the resumed kernel) */
+	kgjoin->source_nitems = 0;
+	kgjoin->outer_nitems  = 0;
+	for (i=0; i < gjs->num_rels; i++)
+		kgjoin->stat_nitems[i] = 0;
 }
 
 void
@@ -5488,6 +5494,7 @@ gpujoin_process_inner_join(GpuJoinTask *pgjoin, CUmodule cuda_module)
 	cl_int				block_sz;
 	cl_int				retval = 10001;
 	void			   *kern_args[10];
+	void			   *last_suspend = NULL;
 
 	/* sanity checks */
 	Assert(!pds_src || (pds_src->kds.format == KDS_FORMAT_ROW ||
@@ -5539,7 +5546,6 @@ gpujoin_process_inner_join(GpuJoinTask *pgjoin, CUmodule cuda_module)
 	/*
 	 * OK, kick a series of GpuJoin invocations
 	 */
-
 	if (pds_src->kds.format != KDS_FORMAT_BLOCK)
 	{
 		rc = cuMemPrefetchAsync(m_kds_src,
@@ -5582,7 +5588,7 @@ gpujoin_process_inner_join(GpuJoinTask *pgjoin, CUmodule cuda_module)
 	pgjoin->kern.grid_sz	= grid_sz;
 	pgjoin->kern.block_sz	= block_sz;
 
-resume_gpujoin:
+resume_kernel:
 	kern_args[0] = &m_kgjoin;
 	kern_args[1] = &gjs->m_kmrels;
 	kern_args[2] = &m_kds_src;
@@ -5608,33 +5614,29 @@ resume_gpujoin:
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuEventSynchronize: %s", errorText(rc));
 
-	if (pgstrom_cpu_fallback_enabled &&
-		pgjoin->kern.kerror.errcode == StromError_CpuReCheck)
+	pgjoin->task.kerror = pgjoin->kern.kerror;
+	if (pgjoin->task.kerror.errcode == StromError_Success)
 	{
-		/*
-		 * Run CPU fallback, and release incomplete destination buffer
-		 * immediately.
-		 */
-		gpujoin_release_dest_stores(pgjoin);
-		memset(&pgjoin->task.kerror, 0, sizeof(kern_errorbuf));
-		pgjoin->task.cpu_fallback = true;
-		retval = 0;
-	}
-	else if (pgjoin->kern.kerror.errcode == StromError_Suspend)
-	{
-		CHECK_WORKER_TERMINATION();
-		memset(&pgjoin->kern.kerror, 0, sizeof(kern_errorbuf));
-		pgjoin->kern.resume_context = true;
-		/* resume GpuJoin kernel after the buffer allocation */
-		dlist_push_tail(&pgjoin->pds_dst_inactives, &pds_dst->chain);
-		pgjoin->pds_dst = pds_dst = PDS_clone(pds_dst);
-		m_kds_dst = (CUdeviceptr)&pds_dst->kds;
-		goto resume_gpujoin;
-	}
-	else if (pgjoin->task.kerror.errcode == StromError_Success)
-	{
-		pgjoin->task.kerror = pgjoin->kern.kerror;
 		gpujoinUpdateRunTimeStat(&gjs->gts, &pgjoin->kern);
+
+		if (pgjoin->kern.suspend_count > 0)
+		{
+			CHECK_WORKER_TERMINATION();
+			pgjoin->kern.suspend_count = 0;
+			pgjoin->kern.resume_context = true;
+			if (!last_suspend)
+				last_suspend = alloca(pgjoin->kern.suspend_size);
+			memcpy(last_suspend,
+				   KERN_GPUJOIN_SUSPEND_CONTEXT(&pgjoin->kern, 0),
+				   pgjoin->kern.suspend_size);
+
+			/* TODO: partial resule shall be returned sooon */
+			dlist_push_tail(&pgjoin->pds_dst_inactives, &pds_dst->chain);
+			/* new buffer allocation, then resume GpuJoin kernel */
+			pgjoin->pds_dst = pds_dst = PDS_clone(pds_dst);
+			m_kds_dst = (CUdeviceptr)&pds_dst->kds;
+			goto resume_kernel;
+		}
 
 		if (pds_dst->kds.nitems == 0 &&
 			dlist_is_empty(&pgjoin->pds_dst_inactives))
@@ -5642,10 +5644,25 @@ resume_gpujoin:
 		else
 			retval = 0;
 	}
+	else if (pgstrom_cpu_fallback_enabled &&
+			 pgjoin->kern.kerror.errcode == StromError_CpuReCheck)
+	{
+		//TODO: no need to have multiple pds_dst later.
+		gpujoin_release_dest_stores(pgjoin);
+		memset(&pgjoin->task.kerror, 0, sizeof(kern_errorbuf));
+		pgjoin->task.cpu_fallback = true;
+		pgjoin->kern.resume_context = (last_suspend != NULL);
+		if (last_suspend)
+		{
+			memcpy(KERN_GPUJOIN_SUSPEND_CONTEXT(&pgjoin->kern, 0),
+				   last_suspend,
+				   pgjoin->kern.suspend_size);
+		}
+		retval = 0;
+	}
 	else
 	{
 		/* raise an error */
-		pgjoin->task.kerror = pgjoin->kern.kerror;
 		retval = 0;
 	}
 out_of_resource:
@@ -5668,6 +5685,7 @@ gpujoin_process_right_outer(GpuJoinTask *pgjoin, CUmodule cuda_module)
 	cl_int				grid_sz;
 	cl_int				block_sz;
 	void			   *kern_args[5];
+	void			   *last_suspend = NULL;
 	cl_int				retval;
 
 	/* sanity checks */
@@ -5693,12 +5711,14 @@ gpujoin_process_right_outer(GpuJoinTask *pgjoin, CUmodule cuda_module)
 	 *                     kern_data_store *kds_dst,
 	 *                     kern_parambuf *kparams_gpreagg)
 	 */
-resume_gpujoin:
 	rc = gpuOptimalBlockSize(&grid_sz,
 							 &block_sz,
 							 kern_gpujoin_main,
 							 CU_DEVICE_PER_THREAD,
 							 0, sizeof(cl_int));
+	if (rc != CUDA_SUCCESS)
+		werror("failed on gpuOptimalBlockSize: %s", errorText(rc));
+resume_kernel:
 	kern_args[0] = &m_kgjoin;
 	kern_args[1] = &gjs->m_kmrels;
 	kern_args[2] = &outer_depth;
@@ -5725,34 +5745,48 @@ resume_gpujoin:
 		werror("failed on cuEventSynchronize: %s", errorText(rc));
 
 	pgjoin->task.kerror = pgjoin->kern.kerror;
-	if (pgstrom_cpu_fallback_enabled &&
-		pgjoin->task.kerror.errcode == StromError_CpuReCheck)
-	{
-		/* Run CPU fallback, and release incomplete destination buffers */
-		gpujoin_release_dest_stores(pgjoin);
-		pgjoin->task.kerror.errcode = StromError_Success;
-		pgjoin->task.cpu_fallback = true;
-		retval = 0;
-	}
-	else if (pgjoin->task.kerror.errcode == StromError_Suspend)
-	{
-		pgjoin->task.kerror.errcode = StromError_Success;
-		pgjoin->kern.resume_context = true;
-
-		dlist_push_tail(&pgjoin->pds_dst_inactives, &pds_dst->chain);
-		pgjoin->pds_dst = pds_dst = PDS_clone(pds_dst);
-		m_kds_dst = (CUdeviceptr)&pds_dst->kds;
-		goto resume_gpujoin;
-	}
 	if (pgjoin->task.kerror.errcode == StromError_Success)
 	{
 		gpujoinUpdateRunTimeStat(&gjs->gts, &pgjoin->kern);
 
+		if (pgjoin->kern.suspend_count > 0)
+		{
+			CHECK_WORKER_TERMINATION();
+			pgjoin->kern.suspend_count = 0;
+			pgjoin->kern.resume_context = true;
+			if (!last_suspend)
+				last_suspend = alloca(pgjoin->kern.suspend_size);
+			memcpy(last_suspend,
+				   KERN_GPUJOIN_SUSPEND_CONTEXT(&pgjoin->kern, 0),
+				   pgjoin->kern.suspend_size);
+
+			//TODO: partial resule shall be returned sooon
+			dlist_push_tail(&pgjoin->pds_dst_inactives, &pds_dst->chain);
+			pgjoin->pds_dst = pds_dst = PDS_clone(pds_dst);
+			m_kds_dst = (CUdeviceptr)&pds_dst->kds;
+			goto resume_kernel;
+		}
 		if (pds_dst->kds.nitems == 0 &&
 			dlist_is_empty(&pgjoin->pds_dst_inactives))
 			retval = -1;
 		else
 			retval = 0;
+	}
+	else if (pgstrom_cpu_fallback_enabled &&
+			 pgjoin->task.kerror.errcode == StromError_CpuReCheck)
+	{
+		//TODO: no need to have multiple pds_dst later.
+		gpujoin_release_dest_stores(pgjoin);
+		memset(&pgjoin->task.kerror, 0, sizeof(kern_errorbuf));
+		pgjoin->task.cpu_fallback = true;
+		pgjoin->kern.resume_context = (last_suspend != NULL);
+		if (last_suspend)
+		{
+			memcpy(KERN_GPUJOIN_SUSPEND_CONTEXT(&pgjoin->kern, 0),
+				   last_suspend,
+				   pgjoin->kern.suspend_size);
+		}
+		retval = 0;
 	}
 	else
 	{

@@ -100,10 +100,13 @@ struct kern_gpujoin
 	cl_uint			kparams_offset;		/* offset to the kparams */
 	cl_uint			pstack_offset;		/* offset to the pseudo-stack */
 	cl_uint			pstack_nrooms;		/* size of pseudo-stack */
-	cl_uint			suspend_offset;		/* offset to the suspend-backup */
 	cl_uint			num_rels;			/* number of inner relations */
 	cl_uint			grid_sz;			/* grid-size on invocation */
 	cl_uint			block_sz;			/* block-size on invocation */
+	/* suspend/resume related */
+	cl_uint			suspend_offset;		/* offset to the suspend-backup */
+	cl_uint			suspend_size;		/* length of the suspend buffer */
+	cl_uint			suspend_count;		/* number of suspended blocks */
 	cl_bool			resume_context;		/* resume context from suspend */
 	cl_uint			src_read_pos;		/* position to read from kds_src */
 	/* error status to be backed (OUT) */
@@ -118,7 +121,7 @@ typedef struct kern_gpujoin		kern_gpujoin;
 /*
  * suspend/resume context
  */
-struct gpujoinSuspendBlock
+struct gpujoinSuspendContext
 {
 	cl_int			depth;
 	cl_bool			scan_done;
@@ -133,7 +136,7 @@ struct gpujoinSuspendBlock
 		cl_bool		matched[MAXTHREADS_PER_BLOCK];	/* private variables */
 	} pd[FLEXIBLE_ARRAY_MEMBER];	/* per-depth */
 };
-typedef struct gpujoinSuspendBlock	gpujoinSuspendBlock;
+typedef struct gpujoinSuspendContext	gpujoinSuspendContext;
 
 #define KERN_GPUJOIN_PARAMBUF(kgjoin)					\
 	((kern_parambuf *)((char *)(kgjoin) + (kgjoin)->kparams_offset))
@@ -145,10 +148,10 @@ typedef struct gpujoinSuspendBlock	gpujoinSuspendBlock;
 			   (char *)(kgjoin))
 #define KERN_GPUJOIN_PSEUDO_STACK(kgjoin)					\
 	((cl_uint *)((char *)(kgjoin) + (kgjoin)->pstack_offset))
-#define KERN_GPUJOIN_SUSPEND_BLOCK(kgjoin,group_id)			\
-	((struct gpujoinSuspendBlock *)							\
+#define KERN_GPUJOIN_SUSPEND_CONTEXT(kgjoin,group_id)		\
+	((struct gpujoinSuspendContext *)						\
 	 ((char *)(kgjoin) + (kgjoin)->suspend_offset +			\
-	  (group_id) * STROMALIGN(offsetof(gpujoinSuspendBlock,	\
+	  (group_id) * STROMALIGN(offsetof(gpujoinSuspendContext, \
 									   pd[(kgjoin)->num_rels + 1]))))
 
 #ifdef __CUDACC__
@@ -235,10 +238,10 @@ STATIC_FUNCTION(void)
 gpujoin_suspend_context(kern_gpujoin *kgjoin,
 						cl_int depth, cl_uint *l_state, cl_bool *matched)
 {
-	gpujoinSuspendBlock *sb;
+	gpujoinSuspendContext *sb;
 	cl_int		i;
 
-	sb = KERN_GPUJOIN_SUSPEND_BLOCK(kgjoin, get_group_id());
+	sb = KERN_GPUJOIN_SUSPEND_CONTEXT(kgjoin, get_group_id());
 	if (get_local_id() == 0)
 	{
 		sb->depth = depth;
@@ -260,6 +263,9 @@ gpujoin_suspend_context(kern_gpujoin *kgjoin,
 		sb->pd[i].l_state[get_local_id()] = l_state[i];
 		sb->pd[i].matched[get_local_id()] = matched[i];
 	}
+	/* tells host-code GPU kernel needs to be resumed */
+	if (get_local_id() == 0)
+		atomicAdd(&kgjoin->suspend_count, 1);
 	__syncthreads();
 }
 
@@ -270,10 +276,10 @@ STATIC_FUNCTION(cl_int)
 gpujoin_resume_context(kern_gpujoin *kgjoin,
 					   cl_uint *l_state, cl_bool *matched)
 {
-	gpujoinSuspendBlock *sb;
+	gpujoinSuspendContext *sb;
 	cl_int		i;
 
-	sb = KERN_GPUJOIN_SUSPEND_BLOCK(kgjoin, get_group_id());
+	sb = KERN_GPUJOIN_SUSPEND_CONTEXT(kgjoin, get_group_id());
 	if (get_local_id() == 0)
 	{
 		scan_done = sb->scan_done;
@@ -643,6 +649,7 @@ gpujoin_projection_row(kern_context *kcxt,
 	cl_char	   *extra_buf = NULL;
 #endif
 	cl_uint		extra_len = 0;
+	cl_int		needs_suspend = 0;
 
 	/* sanity checks */
 	assert(rd_stack != NULL);
@@ -698,6 +705,7 @@ gpujoin_projection_row(kern_context *kcxt,
 			cl_ulong	v64;
 		} oldval, curval, newval;
 
+		needs_suspend = 0;
 		curval.i.nitems	= kds_dst->nitems;
 		curval.i.usage	= kds_dst->usage;
 		do {
@@ -709,7 +717,7 @@ gpujoin_projection_row(kern_context *kcxt,
 				STROMALIGN(sizeof(cl_uint) * newval.i.nitems) +
 				__kds_unpack(newval.i.usage) > kds_dst->length)
 			{
-				STROM_SET_ERROR(&kcxt->e, StromError_Suspend);
+				needs_suspend = 1;
 				break;
 			}
 		} while ((curval.v64 = atomicCAS((cl_ulong *)&kds_dst->nitems,
@@ -718,7 +726,7 @@ gpujoin_projection_row(kern_context *kcxt,
 		dst_base_index = oldval.i.nitems;
 		dst_base_usage = __kds_unpack(oldval.i.usage);
 	}
-	if (__syncthreads_count(kcxt->e.errcode) > 0)
+	if (__syncthreads_count(needs_suspend) > 0)
 	{
 		/* No space left on the kds_dst, suspend the GPU kernel and bailout */
 		gpujoin_suspend_context(kgjoin, nrels+1, l_state, matched);
@@ -799,6 +807,7 @@ gpujoin_projection_slot(kern_context *kcxt,
 	cl_char	   *extra_buf = NULL;
 #endif
 	cl_uint		extra_len = 0;
+	cl_int		needs_suspend = 0;
 
 	/* sanity checks */
 	assert(rd_stack != NULL);
@@ -849,6 +858,7 @@ gpujoin_projection_slot(kern_context *kcxt,
 			cl_ulong	v64;
 		} oldval, curval, newval;
 
+		needs_suspend = 0;
 		curval.i.nitems = kds_dst->nitems;
         curval.i.usage  = kds_dst->usage;
 		do {
@@ -859,7 +869,7 @@ gpujoin_projection_slot(kern_context *kcxt,
 			if (KERN_DATA_STORE_SLOT_LENGTH(kds_dst, newval.i.nitems) +
 				__kds_unpack(newval.i.usage) > kds_dst->length)
 			{
-				STROM_SET_ERROR(&kcxt->e, StromError_Suspend);
+				needs_suspend = 1;
 				break;
 			}
 		} while ((curval.v64 = atomicCAS((cl_ulong *)&kds_dst->nitems,
@@ -868,7 +878,7 @@ gpujoin_projection_slot(kern_context *kcxt,
 		dst_base_index = oldval.i.nitems;
 		dst_base_usage = __kds_unpack(oldval.i.usage);
 	}
-	if (__syncthreads_count(kcxt->e.errcode) > 0)
+	if (__syncthreads_count(needs_suspend) > 0)
 	{
 		/* No space left on the kds_dst, suspend the GPU kernel and bailout */
 		gpujoin_suspend_context(kgjoin, nrels+1, l_state, matched);
@@ -1384,8 +1394,8 @@ gpujoin_main(kern_gpujoin *kgjoin,
 	/* update statistics only if normal exit */
 	if (depth == -1 && get_local_id() == 0)
 	{
-		gpujoinSuspendBlock *sb
-			= KERN_GPUJOIN_SUSPEND_BLOCK(kgjoin, get_group_id());
+		gpujoinSuspendContext *sb
+			= KERN_GPUJOIN_SUSPEND_CONTEXT(kgjoin, get_group_id());
 		sb->depth = -1;		/* no more suspend/resume! */
 
 		atomicAdd(&kgjoin->source_nitems, stat_source_nitems);
@@ -1559,8 +1569,8 @@ gpujoin_right_outer(kern_gpujoin *kgjoin,
 	/* write out statistics */
 	if (get_local_id() == 0)
 	{
-		gpujoinSuspendBlock *sb
-			= KERN_GPUJOIN_SUSPEND_BLOCK(kgjoin, get_group_id());
+		gpujoinSuspendContext *sb
+			= KERN_GPUJOIN_SUSPEND_CONTEXT(kgjoin, get_group_id());
 		sb->depth = -1;		/* no more suspend/resume! */
 
 		assert(stat_source_nitems == 0);

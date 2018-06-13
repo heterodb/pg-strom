@@ -235,7 +235,6 @@ typedef uintptr_t		hostptr_t;
  * Error code definition
  */
 #define StromError_Success				0		/* OK */
-#define StromError_Suspend				1001	/* GPU kernel suspend */
 #define StromError_CpuReCheck			1002	/* Re-checked by CPU */
 #define StromError_InvalidValue			1003	/* Invalid values */
 #define StromError_DataStoreNoSpace		1004	/* No space left on KDS */
@@ -1346,9 +1345,20 @@ toast_raw_datum_size(kern_context *kcxt, varlena *attr)
 
 	if (VARATT_IS_EXTERNAL(attr))
 	{
-		/* should not appear in kernel space */
-		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
-		result = 0;
+		if (VARATT_IS_EXTERNAL_ONDISK(attr))
+		{
+			varatt_external	va_ext;
+
+			memcpy(&va_ext, ((varattrib_1b_e *)attr)->va_data,
+				   sizeof(varatt_external));
+			result = va_ext.va_rawsize;
+		}
+		else
+		{
+			/* should not appear in the kernel space */
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+			result = 0;
+		}
 	}
 	else if (VARATT_IS_COMPRESSED(attr))
 	{

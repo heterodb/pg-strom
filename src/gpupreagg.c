@@ -2632,7 +2632,8 @@ PlanGpuPreAggPath(PlannerInfo *root,
 	 */
 	pgstrom_init_codegen_context(&context);
 	context.extra_flags |= (DEVKERNEL_NEEDS_DYNPARA |
-							DEVKERNEL_NEEDS_GPUPREAGG);
+							DEVKERNEL_NEEDS_GPUPREAGG |
+							DEVKERNEL_NEEDS_GPUSCAN);
 	kern_source = gpupreagg_codegen(&context,
 									root,
 									cscan,
@@ -3788,7 +3789,6 @@ gpupreagg_codegen(codegen_context *context,
 		codegen_gpuscan_quals(&body, context,
 							  cscan->scan.scanrelid,
 							  gpa_info->outer_quals);
-		context->extra_flags |= DEVKERNEL_NEEDS_GPUSCAN;
 	}
 
 	/*
@@ -4511,6 +4511,8 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 			suspend_sz = STROMALIGN(sizeof(gpuscanSuspendContext) *
 									GPUKERNEL_MAX_SM_MULTIPLICITY * sm_count);
 		}
+		kds_slot_nrooms /= 2; //XXX
+
 		kds_slot_length = STROMALIGN(offsetof(kern_data_store,
 											  colmeta[gpa_tupdesc->natts])) +
 			STROMALIGN(MAXALIGN((sizeof(Datum) + sizeof(char)) *
@@ -4908,6 +4910,9 @@ gpupreaggUpdateRunTimeStat(GpuTaskState *gts, kern_gpupreagg *kgpreagg)
 							(int64)kgpreagg->nitems_real);
 	pg_atomic_add_fetch_u64(&gpa_rtstat->nitems_filtered,
 							(int64)kgpreagg->nitems_filtered);
+	/* reset counters (may be reused by the resumed kernel) */
+	kgpreagg->nitems_real = 0;
+	kgpreagg->nitems_filtered = 0;
 }
 
 /*
@@ -5027,12 +5032,6 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 	((kern_data_store *)m_kds_slot)->nrooms = gpreagg->kds_slot_nrooms;
 
 	/*
-	 * temporary buffer for suspended context
-	 */
-	if (gpreagg->kern.suspend_size > 0)
-		last_suspend = alloca(gpreagg->kern.suspend_size);
-
-	/*
 	 * OK, kick a series of GpuPreAgg invocations
 	 */
 
@@ -5148,21 +5147,22 @@ resume_kernel:
 	gpreagg->task.kerror = gpreagg->kern.kerror;
 	if (gpreagg->task.kerror.errcode == StromError_Success)
 	{
-		void	   *temp;
-
+		gpupreaggUpdateRunTimeStat(gpreagg->task.gts, &gpreagg->kern);
 		if (gpreagg->kern.suspend_count > 0)
 		{
+			void   *temp;
+
 			CHECK_WORKER_TERMINATION();
 			gpreagg->kern.suspend_count = 0;
 			gpreagg->kern.resume_context = true;
 
+			Assert(gpreagg->kern.suspend_size > 0);
+			if (!last_suspend)
+				last_suspend = alloca(gpreagg->kern.suspend_size);
 			temp = KERN_GPUPREAGG_SUSPEND_CONTEXT(&gpreagg->kern, 0);
-			if (temp)
-				memcpy(last_suspend, temp, gpreagg->kern.suspend_size);
+			memcpy(last_suspend, temp, gpreagg->kern.suspend_size);
 			goto resume_kernel;
 		}
-		/* elsewhere, all the source rows successfully merged */
-		gpupreaggUpdateRunTimeStat(gpreagg->task.gts, &gpreagg->kern);
 		retval = -1;
 	}
 	else
@@ -5210,10 +5210,10 @@ resume_kernel:
 			}
 
 			/* restore the suspend context, if any */
-			if (gpreagg->kern.resume_context)
+			gpreagg->kern.resume_context = (last_suspend != NULL);
+			if (last_suspend)
 			{
-				void	   *temp
-					= KERN_GPUPREAGG_SUSPEND_CONTEXT(&gpreagg->kern, 0);
+				void *temp = KERN_GPUPREAGG_SUSPEND_CONTEXT(&gpreagg->kern, 0);
 				memcpy(temp, last_suspend, gpreagg->kern.suspend_size);
 			}
 		}
@@ -5241,6 +5241,7 @@ gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 	pgstrom_data_store *pds_src = gpreagg->pds_src;
 	kern_gpujoin   *kgjoin = gpreagg->kgjoin;
 	CUfunction		kern_gpujoin_main;
+	CUfunction		kern_setup_row_invalidation_map;
 	CUfunction		kern_gpupreagg_reduction;
 	CUdeviceptr		m_gpreagg = (CUdeviceptr)&gpreagg->kern;
 	CUdeviceptr		m_kgjoin = (CUdeviceptr)kgjoin;
@@ -5255,6 +5256,7 @@ gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 	cl_int			grid_sz;
 	cl_int			block_sz;
 	void		   *kern_args[10];
+	void		   *last_suspend = NULL;
 	int				retval = 1;
 
 	/*
@@ -5272,6 +5274,12 @@ gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 							 pds_src != NULL
 							 ? "gpujoin_main"
 							 : "gpujoin_right_outer");
+	if (rc != CUDA_SUCCESS)
+		werror("failed on cuModuleGetFunction: %s", errorText(rc));
+
+	rc = cuModuleGetFunction(&kern_setup_row_invalidation_map,
+							 cuda_module,
+							 "gpupreagg_setup_row_invalidation_map");
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuModuleGetFunction: %s", errorText(rc));
 
@@ -5417,6 +5425,34 @@ resume_kernel:
 
 	/*
 	 * Launch:
+	 * KERNEL_FUNCTION(void)
+	 * gpupreagg_setup_row_invalidation_map(kern_gpupreagg *kgpreagg,
+	 *                                      kern_errorbuf *kgjoin_errorbuf,
+	 *                                      kern_data_store *kds_slot)
+	 */
+	rc = gpuOptimalBlockSize(&grid_sz,
+							 &block_sz,
+							 kern_setup_row_invalidation_map,
+							 CU_DEVICE_PER_THREAD,
+							 0, 0);
+	if (rc != CUDA_SUCCESS)
+		werror("failed on gpuOptimalBlockSize: %s", errorText(rc));
+
+    kern_args[0] = &m_gpreagg;
+	kern_args[1] = &m_kgjoin;
+	kern_args[2] = &m_kds_slot;
+	rc = cuLaunchKernel(kern_setup_row_invalidation_map,
+						grid_sz, 1, 1,
+						block_sz, 1, 1,
+						0,
+						CU_STREAM_PER_THREAD,
+						kern_args,
+						NULL);
+	if (rc != CUDA_SUCCESS)
+		werror("failed on cuLaunchKernel: %s", errorText(rc));
+
+	/*
+	 * Launch:
 	 * KERNEL_FUNCTION_MAXTHREADS(void)
 	 * gpupreagg_XXXX_reduction(kern_gpupreagg *kgpreagg,
 	 *                          kern_errorbuf *kgjoin_errorbuf,
@@ -5456,51 +5492,70 @@ resume_kernel:
 	if (rc != CUDA_SUCCESS)
 		werror("failed on cuEventSynchronize: %s", errorText(rc));
 
-	if (pgstrom_cpu_fallback_enabled &&
-		kgjoin->kerror.errcode == StromError_CpuReCheck)
+	if (kgjoin->kerror.errcode != StromError_Success)
 	{
-		/* CPU fallback by GpuJoin */
-		memset(&gpreagg->task.kerror, 0, sizeof(kern_errorbuf));
-		gpreagg->task.cpu_fallback = true;
-		retval = 0;
-	}
-	else if (kgjoin->kerror.errcode != StromError_Success &&
-			 kgjoin->kerror.errcode != StromError_Suspend)
-	{
-		/* Raise an error by GpuJoin */
 		gpreagg->task.kerror = kgjoin->kerror;
-		retval = 0;
-	}
-	else if (pgstrom_cpu_fallback_enabled &&
-			 gpreagg->kern.kerror.errcode == StromError_CpuReCheck)
-	{
-		/* CPU fallback by GpuPreAgg */
-		memset(&gpreagg->task.kerror, 0, sizeof(kern_errorbuf));
-		gpreagg->task.cpu_fallback = true;
-		retval = 0;
-	}
-	else if (gpreagg->kern.kerror.errcode == StromError_Success)
-	{
-		GpuTaskState   *gjs;
-
-		if (kgjoin->kerror.errcode == StromError_Suspend)
+		if (pgstrom_cpu_fallback_enabled &&
+			gpreagg->task.kerror.errcode == StromError_CpuReCheck)
 		{
-			CHECK_WORKER_TERMINATION();
-			memset(&kgjoin->kerror, 0, sizeof(kern_errorbuf));
-			kgjoin->resume_context = true;
-			goto resume_kernel;
+			kgjoin->resume_context = (last_suspend != NULL);
+			if (last_suspend)
+			{
+				memcpy(KERN_GPUJOIN_SUSPEND_CONTEXT(kgjoin, 0),
+					   last_suspend,
+					   kgjoin->suspend_size);
+			}
+			/* CPU fallback with no partial results */
+			memset(&gpreagg->task.kerror, 0, sizeof(kern_errorbuf));
+			gpreagg->task.cpu_fallback = true;
 		}
-		gjs = (GpuTaskState *)outerPlanState(gpreagg->task.gts);
-		gpujoinUpdateRunTimeStat(gjs, gpreagg->kgjoin);
-		gpupreaggUpdateRunTimeStat(gpreagg->task.gts, &gpreagg->kern);
+		retval = 0;
+	}
+	else if (gpreagg->kern.kerror.errcode != StromError_Success)
+	{
 		gpreagg->task.kerror = gpreagg->kern.kerror;
-		retval = -1;
+		if (pgstrom_cpu_fallback_enabled &&
+			gpreagg->task.kerror.errcode == StromError_CpuReCheck)
+		{
+			kgjoin->resume_context = (last_suspend != NULL);
+			if (last_suspend)
+			{
+				memcpy(KERN_GPUJOIN_SUSPEND_CONTEXT(kgjoin, 0),
+					   last_suspend,
+					   kgjoin->suspend_size);
+			}
+			/* CPU fallback with partial results */
+			memset(&gpreagg->task.kerror, 0, sizeof(kern_errorbuf));
+			gpreagg->task.cpu_fallback = true;
+		}
+		retval = 0;
 	}
 	else
 	{
-		/* Raise an error by GpuPreAgg */
-		gpreagg->task.kerror = gpreagg->kern.kerror;
-		retval = 0;
+		GpuTaskState   *gjs = (GpuTaskState *)
+			outerPlanState(gpreagg->task.gts);
+
+		gpujoinUpdateRunTimeStat(gjs, gpreagg->kgjoin);
+        gpupreaggUpdateRunTimeStat(gpreagg->task.gts, &gpreagg->kern);
+
+		/*
+		 * GpuPreAgg-side has no code path that can cause suspend/resume.
+		 * Only GpuJoin-side can break GPU kernel execution.
+		 */
+		Assert(gpreagg->kern.suspend_count == 0);
+		if (kgjoin->suspend_count > 0)
+		{
+			CHECK_WORKER_TERMINATION();
+			kgjoin->suspend_count = 0;
+			kgjoin->resume_context = true;
+			if (!last_suspend)
+				last_suspend = alloca(kgjoin->suspend_size);
+			memcpy(last_suspend,
+				   KERN_GPUJOIN_SUSPEND_CONTEXT(kgjoin, 0),
+				   kgjoin->suspend_size);
+			goto resume_kernel;
+		}
+		retval = -1;
 	}
 out_of_resource:
 	if (pds_src &&

@@ -741,6 +741,46 @@ gpupreagg_setup_column(kern_gpupreagg *kgpreagg,
 }
 
 /*
+ * gpupreagg_setup_row_invalidation_map
+ *
+ * Because GpuJoin kernel does not care about the row-invalidation-map of
+ * GpuPreAgg, we have to set up gpupreaggRowInvalidationMap structure prior
+ * to the invocation of reduction kernels.
+ * Once CpuReCheck error happen, combined GpuPreAgg+GpuJoin logic at first
+ * processes the remained rows, then runs fallback logic of GpuJoin.
+ */
+KERNEL_FUNCTION(void)
+gpupreagg_setup_row_invalidation_map(kern_gpupreagg *kgpreagg,	/* in/out */
+									 kern_errorbuf *kgjoin_errorbuf, /* in */
+									 kern_data_store *kds_slot)	/* in */
+{
+	gpupreaggRowInvalidationMap *ri_map;
+	cl_int		index;
+
+    /* skip if previous stage reported an error */
+	assert(kgjoin_errorbuf != NULL);
+	if (kgjoin_errorbuf->errcode != StromError_Success ||
+		kgpreagg->kerror.errcode != StromError_Success)
+		return;
+
+	ri_map = KERN_GPUPREAGG_ROW_INVALIDATION_MAP(kgpreagg);
+	if (get_global_id() == 0)
+	{
+		assert(kds_slot->format == KDS_FORMAT_SLOT);
+		ri_map->nitems = kds_slot->nitems;
+		ri_map->format = KDS_FORMAT_SLOT;
+		ri_map->kds_block = 0UL;
+	}
+	for (index = get_global_id();
+		 index < Min(kds_slot->nitems, kds_slot->nrooms);
+		 index += get_global_size())
+	{
+		ri_map->t[index].group_id = -1;
+		ri_map->t[index].row_index = index;
+	}
+}
+
+/*
  * gpupreagg_nogroup_reduction
  */
 KERNEL_FUNCTION_MAXTHREADS(void)
@@ -754,7 +794,6 @@ gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,		/* in/out */
 	kern_context	kcxt;
 	varlena		   *kparam_0 = (varlena *)kparam_get_value(kparams, 0);
 	cl_char		   *attr_is_preagg = (cl_char *)VARDATA(kparam_0);
-	cl_uint			slot_nitems = kds_slot->nitems;
 	cl_uint			nvalids;
 	cl_uint			slot_index;
 	cl_int			index;
@@ -768,8 +807,7 @@ gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,		/* in/out */
 
 	/* skip if previous stage reported an error */
 	if (kgjoin_errorbuf &&
-		kgjoin_errorbuf->errcode != StromError_Success &&
-		kgjoin_errorbuf->errcode != StromError_Suspend)
+		kgjoin_errorbuf->errcode != StromError_Success)
 		return;
 	if (kgpreagg->kerror.errcode != StromError_Success)
 		return;
@@ -788,13 +826,13 @@ gpupreagg_nogroup_reduction(kern_gpupreagg *kgpreagg,		/* in/out */
 			base = atomicAdd(&kgpreagg->read_slot_pos, get_local_size());
 		__syncthreads();
 
-		if (base + get_local_size() >= slot_nitems)
+		if (base + get_local_size() >= kds_slot->nitems)
 			is_last_reduction = true;
-		if (base >= slot_nitems)
+		if (base >= kds_slot->nitems)
 			break;
-		nvalids = Min(slot_nitems - base, get_local_size());
+		nvalids = Min(kds_slot->nitems - base, get_local_size());
 		slot_index = base + get_local_id();
-		assert(slot_index < slot_nitems || get_local_id() >= nvalids);
+		assert(slot_index < kds_slot->nitems || get_local_id() >= nvalids);
 
 		/* reductions for each columns */
 		slot_isnull = KERN_DATA_STORE_ISNULL(kds_slot, slot_index);
@@ -1318,7 +1356,6 @@ gpupreagg_groupby_reduction(kern_gpupreagg *kgpreagg,		/* in/out */
 	cl_bool		   *slot_isnull;
 	Datum		   *slot_values;
 	cl_uint			index;
-	cl_uint			slot_nitems = kds_slot->nitems;
 	cl_uint			count;
 	cl_uint			kds_index;
 	cl_uint			hash_value;
@@ -1337,8 +1374,7 @@ gpupreagg_groupby_reduction(kern_gpupreagg *kgpreagg,		/* in/out */
 
 	/* skip if previous stage reported an error */
 	if (kgjoin_errorbuf &&
-		kgjoin_errorbuf->errcode != StromError_Success &&
-		kgjoin_errorbuf->errcode != StromError_Suspend)
+		kgjoin_errorbuf->errcode != StromError_Success)
 		return;
 	if (kgpreagg->kerror.errcode != StromError_Success)
 		return;
@@ -1383,18 +1419,18 @@ clean_restart:
 		if (get_local_id() == 0)
 		{
 			base = atomicAdd(&kgpreagg->read_slot_pos, count);
-			curr_read_pos = base + count;
+			curr_read_pos = Min(base + count, kds_slot->nitems);
 		}
 		__syncthreads();
-		if (base + count >= slot_nitems)
+		if (base + count >= kds_slot->nitems)
 			is_last_reduction = true;
-		if (base >= slot_nitems)
+		if (base >= kds_slot->nitems)
 			goto skip_local_reduction;
 		/* Assign a kds_index if thread is not owner */
 		if (!is_owner)
 		{
 			kds_index = base + index;
-			if (kds_index < slot_nitems)
+			if (kds_index < kds_slot->nitems)
 			{
 				slot_isnull = KERN_DATA_STORE_ISNULL(kds_slot, kds_index);
 				slot_values = KERN_DATA_STORE_VALUES(kds_slot, kds_index);
@@ -1424,7 +1460,7 @@ clean_restart:
 		/* Local hash-table lookup to get owner index */
 		if (is_owner)
 			assert(get_local_id() == owner_index);
-		else if (kds_index < slot_nitems)
+		else if (kds_index < kds_slot->nitems)
 		{
 			new_slot.s.hash		= hash_value;
 			new_slot.s.index	= get_local_id();
@@ -1447,7 +1483,7 @@ clean_restart:
 				cl_uint		buddy_index = l_kds_index[cur_slot.s.index];
 
 				assert(cur_slot.s.index < get_local_size());
-				assert(buddy_index < slot_nitems);
+				assert(buddy_index < kds_slot->nitems);
 				if (cur_slot.s.hash == hash_value &&
 					gpupreagg_keymatch(&kcxt,
 									   kds_slot, kds_index,
@@ -1475,7 +1511,7 @@ clean_restart:
 			if (!attr_is_preagg[index])
 				continue;
 			/* load the value to local storage */
-			if (kds_index < slot_nitems)
+			if (kds_index < kds_slot->nitems)
 			{
 				l_isnull[get_local_id()] = slot_isnull[index];
 				l_values[get_local_id()] = slot_values[index];
@@ -1483,7 +1519,7 @@ clean_restart:
 			__syncthreads();
 
 			/* reduction by atomic operation */
-			if (!is_owner && kds_index < slot_nitems)
+			if (!is_owner && kds_index < kds_slot->nitems)
 			{
 				assert(owner_index < get_local_size());
 				gpupreagg_local_calc(index,
