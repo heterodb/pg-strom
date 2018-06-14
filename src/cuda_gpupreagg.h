@@ -24,8 +24,8 @@ struct kern_gpupreagg
 	kern_errorbuf	kerror;				/* kernel error information */
 	cl_uint			num_group_keys;		/* nogroup reduction, if 0 */
 	cl_uint			read_slot_pos;		/* offset to read kds_slot */
-	cl_uint			setup_grid_sz;		/* grid-size of setup kernel */
-	cl_uint			setup_block_sz;		/* block-size of setup kernel */
+	cl_uint			grid_sz;			/* grid-size of setup/join kernel */
+	cl_uint			block_sz;			/* block-size of setup/join kernel */
 	cl_uint			row_inval_map_size;	/* length of row-invalidation-map */
 	/* -- suspend/resume (KDS_FORMAT_BLOCK) */
 	cl_uint			suspend_size;		/* offset to suspend buffer, if any */
@@ -1539,6 +1539,9 @@ clean_restart:
 			}
 			__syncthreads();
 		}
+		if (!is_owner && kds_index < kds_slot->nitems)
+			ri_map->t[kds_index].group_id = INT_MAX;
+
 	skip_local_reduction:
 		/*
 		 * final reduction steps if needed
@@ -1568,9 +1571,14 @@ clean_restart:
 													  hash_value,
 													  kds_final,
 													  f_hash))
+						{
 							is_owner = false;
+							ri_map->t[kds_index].group_id = INT_MAX;
+						}
 						else
+						{
 							lock_wait = true;
+						}
 					}
 					__syncthreads();
 					/* release shared lock of the final hash-slot */
@@ -1583,6 +1591,7 @@ clean_restart:
 				count = __syncthreads_count(is_owner);
 			} while (__syncthreads_count(lock_wait) > 0);
 
+#if 0
 			/*
 			 * Invalidation of the rows which are already merged to the final
 			 * buffer, to avoid duplicated accumulations.
@@ -1610,7 +1619,7 @@ clean_restart:
 			__syncthreads();
 			if (get_local_id() == 0)
 				last_read_pos = curr_read_pos;
-
+#endif
 			/* OK, successfully moved pending items */
 			if (!is_last_reduction)
 				goto clean_restart;

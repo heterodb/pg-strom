@@ -91,6 +91,7 @@ KDS_fetch_tuple_slot(TupleTableSlot *slot,
 		char   *tts_isnull = KERN_DATA_STORE_ISNULL(kds, row_index);
 		int		natts = slot->tts_tupleDescriptor->natts;
 
+		ExecClearTuple(slot);
 		memcpy(slot->tts_values, tts_values, sizeof(Datum) * natts);
 		memcpy(slot->tts_isnull, tts_isnull, sizeof(bool) * natts);
 #ifdef NOT_USED
