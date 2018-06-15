@@ -926,6 +926,9 @@ extern bool KDS_fetch_tuple_column(TupleTableSlot *slot,
 extern bool PDS_fetch_tuple(TupleTableSlot *slot,
 							pgstrom_data_store *pds,
 							GpuTaskState *gts);
+extern kern_data_store *__KDS_clone(GpuContext *gcontext,
+									kern_data_store *kds,
+									const char *filename, int lineno);
 extern pgstrom_data_store *__PDS_clone(pgstrom_data_store *pds,
 									   const char *filename, int lineno);
 extern pgstrom_data_store *PDS_retain(pgstrom_data_store *pds);
@@ -961,6 +964,8 @@ extern pgstrom_data_store *__PDS_create_block(GpuContext *gcontext,
 	__PDS_create_slot((a),(b),(c),__FILE__,__LINE__)
 #define PDS_create_block(a,b,c)					\
 	__PDS_create_block((a),(b),(c),__FILE__,__LINE__)
+#define KDS_clone(a,b)							\
+	__KDS_clone((a),(b),__FILE__,__LINE__)
 #define PDS_clone(a)							\
 	__PDS_clone((a),__FILE__,__LINE__)
 

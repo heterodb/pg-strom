@@ -118,6 +118,19 @@ struct kern_gpujoin
 };
 typedef struct kern_gpujoin		kern_gpujoin;
 
+#ifndef __CUDACC__
+/*
+ * gpujoin_reset_kernel_task - reset kern_gpujoin status prior to resume
+ */
+STATIC_INLINE(void)
+gpujoin_reset_kernel_task(kern_gpujoin *kgjoin, bool resume_context)
+{
+	memset(&kgjoin->kerror, 0, sizeof(kern_errorbuf));
+	kgjoin->suspend_count	= 0;
+	kgjoin->resume_context	= resume_context;
+}
+#endif
+
 /*
  * suspend/resume context
  */

@@ -231,6 +231,33 @@ PDS_fetch_tuple(TupleTableSlot *slot,
 }
 
 /*
+ * KDS_clone - makes an empty data store with same definition
+ */
+kern_data_store *
+__KDS_clone(GpuContext *gcontext, kern_data_store *kds_old,
+			const char *filename, int lineno)
+{
+	kern_data_store *kds_new;
+	CUdeviceptr	m_deviceptr;
+	CUresult	rc;
+
+	rc = __gpuMemAllocManaged(gcontext,
+							  &m_deviceptr,
+							  kds_old->length,
+							  CU_MEM_ATTACH_GLOBAL,
+							  filename, lineno);
+	if (rc != CUDA_SUCCESS)
+		werror("out of managed memory");
+	kds_new = (kern_data_store *) m_deviceptr;
+	/* setup */
+	memcpy(kds_new, kds_old, KERN_DATA_STORE_HEAD_LENGTH(kds_old));
+	kds_new->usage = 0;
+	kds_new->nitems = 0;
+
+	return kds_new;
+}
+
+/*
  * PDS_clone - makes an empty data store with same definition
  */
 pgstrom_data_store *
