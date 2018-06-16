@@ -1312,9 +1312,7 @@ gpujoin_main(kern_gpujoin *kgjoin,
 		 index < lengthof(pg_crc32_table);
 		 index += get_local_size())
 		pg_crc32_table[index] = kmrels->pg_crc32_table[index];
-	__syncthreads();
-
-	/* setup per-depth context */
+	/* init per-depth context */
 	memset(l_state, 0, sizeof(l_state));
 	memset(matched, 0, sizeof(matched));
 	if (get_local_id() == 0)
@@ -1328,11 +1326,12 @@ gpujoin_main(kern_gpujoin *kgjoin,
 		scan_done = false;
 		base_depth = 0;
 	}
-	__syncthreads();
+	/* resume the per-depth context, if any */
 	if (kgjoin->resume_context)
 		depth = gpujoin_resume_context(kgjoin, l_state, matched);
 	else
 		depth = 0;
+	__syncthreads();
 
 	/* main logic of GpuJoin */
 	while (depth >= 0)
@@ -1491,7 +1490,6 @@ gpujoin_right_outer(kern_gpujoin *kgjoin,
 		 index < lengthof(pg_crc32_table);
 		 index += get_local_size())
 		pg_crc32_table[index] = kmrels->pg_crc32_table[index];
-	__syncthreads();
 
 	/* setup per-depth context */
 	memset(l_state, 0, sizeof(l_state));
@@ -1506,10 +1504,14 @@ gpujoin_right_outer(kern_gpujoin *kgjoin,
 		scan_done = false;
 		base_depth = outer_depth;
 	}
+	/* resume the per-depth context, if any */
+	if (kgjoin->resume_context)
+		depth = gpujoin_resume_context(kgjoin, l_state, matched);
+	else
+		depth = outer_depth;
 	__syncthreads();
 
 	/* main logic of GpuJoin */
-	depth = outer_depth;
 	while (depth >= outer_depth)
 	{
 		if (depth == outer_depth)

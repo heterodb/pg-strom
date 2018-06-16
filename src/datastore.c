@@ -279,7 +279,6 @@ __PDS_clone(pgstrom_data_store *pds_old,
 	pds_new = (pgstrom_data_store *) m_deviceptr;
 
 	/* setup */
-	memset(&pds_new->chain, 0, sizeof(dlist_node));
 	pds_new->gcontext = pds_old->gcontext;
 	pg_atomic_init_u32(&pds_new->refcnt, 1);
 	pds_new->nblocks_uncached = 0;
@@ -456,7 +455,6 @@ __PDS_create_row(GpuContext *gcontext,
 	pds = (pgstrom_data_store *) m_deviceptr;
 
 	/* setup */
-	memset(&pds->chain, 0, sizeof(dlist_node));
 	pds->gcontext = gcontext;
 	pg_atomic_init_u32(&pds->refcnt, 1);
 	init_kernel_data_store(&pds->kds, tupdesc, bytesize,
@@ -492,7 +490,6 @@ __PDS_create_hash(GpuContext *gcontext,
 	pds = (pgstrom_data_store *) m_deviceptr;
 
 	/* setup */
-	memset(&pds->chain, 0, sizeof(dlist_node));
 	pds->gcontext = gcontext;
 	pg_atomic_init_u32(&pds->refcnt, 1);
 	init_kernel_data_store(&pds->kds, tupdesc, bytesize,
@@ -532,7 +529,6 @@ __PDS_create_slot(GpuContext *gcontext,
 	pds = (pgstrom_data_store *) m_deviceptr;
 
 	/* setup */
-	memset(&pds->chain, 0, sizeof(dlist_node));
 	pds->gcontext = gcontext;
 	pg_atomic_init_u32(&pds->refcnt, 1);
 	init_kernel_data_store(&pds->kds, tupdesc,
@@ -571,7 +567,6 @@ __PDS_create_block(GpuContext *gcontext,
 	if (rc != CUDA_SUCCESS)
 		werror("failed on gpuMemAllocHost: %s", errorText(rc));
 	/* setup */
-	memset(&pds->chain, 0, sizeof(dlist_node));
 	pds->gcontext = gcontext;
 	pg_atomic_init_u32(&pds->refcnt, 1);
 	init_kernel_data_store(&pds->kds, tupdesc, bytesize,

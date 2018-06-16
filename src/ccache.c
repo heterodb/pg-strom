@@ -424,7 +424,6 @@ pgstrom_ccache_load_chunk(ccacheChunk *cc_chunk,
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "out of managed memory");
 		pds = (pgstrom_data_store *)m_deviceptr;
-		memset(&pds->chain, 0, sizeof(dlist_node));
 		pds->gcontext = gcontext;
 		pg_atomic_init_u32(&pds->refcnt, 1);
 		pds->nblocks_uncached = 0;

@@ -391,7 +391,6 @@ struct GpuTask
 #define DEVKERNEL_NEEDS_GPUSCAN			0x00000001	/* GpuScan logic */
 #define DEVKERNEL_NEEDS_GPUJOIN			0x00000002	/* GpuJoin logic */
 #define DEVKERNEL_NEEDS_GPUPREAGG		0x00000004	/* GpuPreAgg logic */
-//#define DEVKERNEL_NEEDS_GPUSORT			0x00000008	/* GpuSort logic */
 #define DEVKERNEL_NEEDS_PLCUDA			0x00000080	/* PL/CUDA related */
 
 #define DEVKERNEL_NEEDS_DYNPARA			0x00000100	/* aks, device runtime */
@@ -460,9 +459,6 @@ typedef struct devfunc_info {
  */
 typedef struct pgstrom_data_store
 {
-	/* used to chain multiple PDSs */
-	dlist_node			chain;
-
 	/* GpuContext which owns this data store */
 	GpuContext		   *gcontext;
 

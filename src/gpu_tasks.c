@@ -492,7 +492,7 @@ pickup_gputask:
 TupleTableSlot *
 pgstromExecGpuTaskState(GpuTaskState *gts)
 {
-	TupleTableSlot *slot = gts->css.ss.ss_ScanTupleSlot;
+	TupleTableSlot *slot = NULL;
 
 	while (!gts->curr_task || !(slot = gts->cb_next_tuple(gts)))
 	{
