@@ -1979,7 +1979,6 @@ ccache_buffer_append_row(TupleDesc tupdesc,
 /*
  * long-life resources for preload/tryload
  */
-static MemoryContext	PerChunkMemoryContext;
 static char			   *PerChunkLoadBuffer;
 static Buffer			VisibilityMapBuffer = InvalidBuffer;
 
@@ -2213,12 +2212,15 @@ __ccache_preload_chunk(ccacheChunk *cc_chunk,
 static bool
 ccache_preload_chunk(ccacheChunk *cc_chunk,
 					 Relation relation,
-					 BlockNumber block_nr)
+					 BlockNumber block_nr,
+					 MemoryContext PerChunkMemCxt)
 {
-	bool	retval;
+	MemoryContext	oldcxt;
+	bool			retval;
 
 	PG_TRY();
 	{
+		oldcxt = MemoryContextSwitchTo(PerChunkMemCxt);
 		retval = __ccache_preload_chunk(cc_chunk, relation, block_nr);
 		if (retval)
 		{
@@ -2247,6 +2249,8 @@ ccache_preload_chunk(ccacheChunk *cc_chunk,
 			ccache_put_chunk_nolock(cc_chunk);
 			SpinLockRelease(&ccache_state->chunks_lock);
 		}
+		MemoryContextSwitchTo(oldcxt);
+		MemoryContextReset(PerChunkMemCxt);
 	}
 	PG_CATCH();
 	{
@@ -2272,7 +2276,7 @@ ccache_preload_chunk(ccacheChunk *cc_chunk,
  * ccache_tryload_misshit_chunk - called by tryload
  */
 static bool
-ccache_tryload_misshit_chunk(void)
+ccache_tryload_misshit_chunk(MemoryContext PerChunkMemCxt)
 {
 	dlist_node	   *dnode;
 	ccacheChunk	   *cc_chunk;
@@ -2325,7 +2329,8 @@ ccache_tryload_misshit_chunk(void)
 		Relation	relation;
 
 		relation = heap_open(cc_chunk->table_oid, AccessShareLock);
-		retval = ccache_preload_chunk(cc_chunk, relation, cc_chunk->block_nr);
+		retval = ccache_preload_chunk(cc_chunk, relation, cc_chunk->block_nr,
+									  PerChunkMemCxt);
 		heap_close(relation, NoLock);
 	}
 	PG_CATCH();
@@ -2351,7 +2356,8 @@ ccache_tryload_misshit_chunk(void)
  * ccache_tryload_one_chunk
  */
 static int
-ccache_tryload_one_chunk(Relation relation, BlockNumber block_nr)
+ccache_tryload_one_chunk(Relation relation, BlockNumber block_nr,
+						 MemoryContext PerChunkMemCxt)
 {
 	ccacheChunk	   *cc_chunk = NULL;
 	ccacheChunk	   *cc_temp;
@@ -2448,7 +2454,8 @@ ccache_tryload_one_chunk(Relation relation, BlockNumber block_nr)
 	SpinLockRelease(&ccache_state->chunks_lock);
 
 	/* try to load this chunk */
-	if (ccache_preload_chunk(cc_chunk, relation, cc_chunk->block_nr))
+	if (ccache_preload_chunk(cc_chunk, relation, cc_chunk->block_nr,
+							 PerChunkMemCxt))
 		return 1;
 
 	/*
@@ -2462,7 +2469,8 @@ ccache_tryload_one_chunk(Relation relation, BlockNumber block_nr)
  * ccache_tryload_chilly_chunks
  */
 static int
-ccache_tryload_chilly_chunks(int nchunks_atonce)
+ccache_tryload_chilly_chunks(int nchunks_atonce,
+							 MemoryContext PerChunkMemCxt)
 {
 	Relation	   *open_relations = NULL;
 	cl_long		   *open_nchunks = NULL;
@@ -2540,7 +2548,7 @@ ccache_tryload_chilly_chunks(int nchunks_atonce)
 			ccache_builder->block_nr = block_nr;
 			SpinLockRelease(&ccache_state->lock);
 
-			ccache_tryload_one_chunk(relation, block_nr);
+			ccache_tryload_one_chunk(relation, block_nr, PerChunkMemCxt);
 		}
 		PG_CATCH();
 		{
@@ -2559,127 +2567,6 @@ ccache_tryload_chilly_chunks(int nchunks_atonce)
 		ccache_builder->table_oid = InvalidOid;
 		ccache_builder->block_nr = InvalidBlockNumber;
 		SpinLockRelease(&ccache_state->lock);
-
-
-#if 0
-		/* try to lookup ccache already build */
-		cc_chunk = NULL;
-		block_nr = i * CCACHE_CHUNK_NBLOCKS;
-		hashvalue = ccache_compute_hashvalue(MyDatabaseId,
-											 RelationGetRelid(relation),
-											 block_nr);
-		SpinLockAcquire(&ccache_state->chunks_lock);
-		if (ccache_state->ccache_usage +
-			CCACHE_CHUNK_SIZE > ccache_total_size)
-		{
-			SpinLockRelease(&ccache_state->chunks_lock);
-			break;
-		}
-		k = hashvalue % ccache_num_slots;
-		dlist_foreach(iter, &ccache_state->active_slots[k])
-		{
-			cc_temp = dlist_container(ccacheChunk, hash_chain, iter.cur);
-			if (cc_temp->hash == hashvalue &&
-				cc_temp->database_oid == MyDatabaseId &&
-				cc_temp->table_oid == RelationGetRelid(relation) &&
-				cc_temp->block_nr == block_nr)
-			{
-				if (cc_temp->ctime == CCACHE_CTIME_NOT_BUILD)
-					cc_chunk = cc_temp;
-				else
-					cc_chunk = (void *)(~0L);
-				break;
-			}
-		}
-		/* this chunk is already loaded, or in-progress */
-		if (cc_chunk == (void *)(~0L))
-		{
-			SpinLockRelease(&ccache_state->chunks_lock);
-			continue;
-		}
-		else if (cc_chunk)
-		{
-			/* once detach cc_chunk from the LRU misshit list */
-			dlist_delete(&cc_chunk->lru_chain);
-			memset(&cc_chunk->lru_chain, 0, sizeof(dlist_node));
-			cc_chunk->refcnt++;
-		}
-		else if (!dlist_is_empty(&ccache_state->free_chunks_list))
-		{
-			/* try to fetch a free ccacheChunk object */
-			dnode = dlist_pop_head_node(&ccache_state->free_chunks_list);
-			cc_chunk = dlist_container(ccacheChunk, hash_chain, dnode);
-			Assert(cc_chunk->lru_chain.prev == NULL &&
-				   cc_chunk->lru_chain.next == NULL &&
-				   cc_chunk->refcnt == 0);
-			memset(cc_chunk, 0, sizeof(ccacheChunk));
-			cc_chunk->hash = hashvalue;
-			cc_chunk->database_oid = MyDatabaseId;
-			cc_chunk->table_oid = RelationGetRelid(relation);
-			cc_chunk->block_nr = block_nr;
-			cc_chunk->refcnt = 2;
-			cc_chunk->ctime = CCACHE_CTIME_IN_PROGRESS;
-			cc_chunk->atime = GetCurrentTimestamp();
-			dlist_push_head(&ccache_state->active_slots[k],
-							&cc_chunk->hash_chain);
-		}
-		else if (!dlist_is_empty(&ccache_state->lru_misshit_list))
-		{
-			/* purge oldest misshit entry, if any */
-			dnode = dlist_tail_node(&ccache_state->lru_misshit_list);
-			cc_chunk = dlist_container(ccacheChunk, lru_chain, dnode);
-			dlist_delete(&cc_chunk->hash_chain);
-			dlist_delete(&cc_chunk->lru_chain);
-			Assert(cc_chunk->length == 0 &&
-				   cc_chunk->refcnt == 1 &&
-				   cc_chunk->ctime == CCACHE_CTIME_NOT_BUILD);
-			memset(cc_chunk, 0, sizeof(ccacheChunk));
-			cc_chunk->hash = hashvalue;
-			cc_chunk->database_oid = MyDatabaseId;
-			cc_chunk->table_oid = RelationGetRelid(relation);
-			cc_chunk->block_nr = block_nr;
-			cc_chunk->refcnt = 2;
-			cc_chunk->ctime = CCACHE_CTIME_IN_PROGRESS;
-			cc_chunk->atime = GetCurrentTimestamp();
-			dlist_push_head(&ccache_state->active_slots[k],
-							&cc_chunk->hash_chain);
-		}
-		else
-		{
-			SpinLockRelease(&ccache_state->chunks_lock);
-			break;
-		}
-		SpinLockRelease(&ccache_state->chunks_lock);
-
-		/* try to load this chunk */
-		PG_TRY();
-		{
-			/* update builder's state */
-			SpinLockAcquire(&ccache_state->lock);
-			ccache_builder->table_oid = cc_chunk->table_oid;
-			ccache_builder->block_nr = cc_chunk->block_nr;
-			SpinLockRelease(&ccache_state->lock);
-
-			ccache_preload_chunk(cc_chunk, relation, cc_chunk->block_nr);
-
-			/* update builder's state */
-			SpinLockAcquire(&ccache_state->lock);
-			ccache_builder->table_oid = InvalidOid;
-			ccache_builder->block_nr = InvalidBlockNumber;
-			SpinLockRelease(&ccache_state->lock);
-		}
-		PG_CATCH();
-		{
-			/* update builder's state */
-			SpinLockAcquire(&ccache_state->lock);
-			ccache_builder->table_oid = InvalidOid;
-			ccache_builder->block_nr = InvalidBlockNumber;
-			SpinLockRelease(&ccache_state->lock);
-
-			PG_RE_THROW();
-		}
-		PG_END_TRY();
-#endif
 		/* load a chunk */
 		nchunks_atonce--;
 	}
@@ -2708,10 +2595,15 @@ pgstrom_ccache_prewarm(PG_FUNCTION_ARGS)
 	cl_uint		i, nchunks;
 	cl_uint		load_count = 0;
 	cl_int		rc;
+	MemoryContext PerChunkMemCxt;
 
 	refresh_ccache_source_relations();
 	if (!hash_search(ccache_relations_htab, &table_oid, HASH_FIND, NULL))
 		elog(ERROR, "ccache: not configured on the table %u", table_oid);
+
+	PerChunkMemCxt = AllocSetContextCreate(CurrentMemoryContext,
+										   "pgstrom_ccache_prewarm",
+										   ALLOCSET_DEFAULT_SIZES);
 
 	relation = heap_open(table_oid, AccessShareLock);
 	nchunks = RelationGetNumberOfBlocks(relation) / CCACHE_CHUNK_NBLOCKS;
@@ -2725,7 +2617,8 @@ pgstrom_ccache_prewarm(PG_FUNCTION_ARGS)
 		{
 			BlockNumber		block_nr = i * CCACHE_CHUNK_NBLOCKS;
 
-			rc = ccache_tryload_one_chunk(relation, block_nr);
+			rc = ccache_tryload_one_chunk(relation, block_nr,
+										  PerChunkMemCxt);
 			if (rc < 0)
 				break;		/* cannot continue to load any more */
 			if (rc > 0)
@@ -2745,6 +2638,7 @@ pgstrom_ccache_prewarm(PG_FUNCTION_ARGS)
 	PerChunkLoadBuffer = NULL;
 
 	heap_close(relation, NoLock);
+	MemoryContextDelete(PerChunkMemCxt);
 
 	PG_RETURN_INT32(load_count);
 }
@@ -2772,6 +2666,7 @@ void
 ccache_builder_main(Datum arg)
 {
 	cl_int		builder_id = DatumGetInt32(arg);
+	MemoryContext PerChunkMemCxt;
 	int			ev;
 
 	pqsignal(SIGTERM, ccache_builder_sigterm);
@@ -2782,9 +2677,9 @@ ccache_builder_main(Datum arg)
 	CurrentMemoryContext = AllocSetContextCreate(TopMemoryContext,
 												 "ccache builder context",
 												 ALLOCSET_DEFAULT_SIZES);
-	PerChunkMemoryContext = AllocSetContextCreate(TopMemoryContext,
-												  "per-chunk memory context",
-												  ALLOCSET_DEFAULT_SIZES);
+	PerChunkMemCxt = AllocSetContextCreate(TopMemoryContext,
+										   "per-chunk memory context",
+										   ALLOCSET_DEFAULT_SIZES);
 	PerChunkLoadBuffer = MemoryContextAlloc(TopMemoryContext,
 											CCACHE_CHUNK_SIZE);
 	ccache_builder = &ccache_state->builders[builder_id];
@@ -2800,7 +2695,6 @@ ccache_builder_main(Datum arg)
 		ccache_builder_connectdb();
 		for (;;)
 		{
-			MemoryContext	oldcxt;
 			long			timeout = 0L;
 			int				nchunks_atonce = 12;
 
@@ -2827,23 +2721,21 @@ ccache_builder_main(Datum arg)
 			/* refresh ccache relations, if needed */
 			refresh_ccache_source_relations();
 			/* try to load several chunks at once */
-			oldcxt = MemoryContextSwitchTo(PerChunkMemoryContext);
 			VisibilityMapBuffer = InvalidBuffer;
 			while (nchunks_atonce > 0)
 			{
-				if (ccache_tryload_misshit_chunk())
+				if (ccache_tryload_misshit_chunk(PerChunkMemCxt))
 					nchunks_atonce--;
 				else
 					break;
 			}
 			if (nchunks_atonce > 0)
-				nchunks_atonce = ccache_tryload_chilly_chunks(nchunks_atonce);
+				nchunks_atonce = ccache_tryload_chilly_chunks(nchunks_atonce,
+															  PerChunkMemCxt);
 			timeout = (nchunks_atonce == 0 ? 0 : 4000);
 
 			if (VisibilityMapBuffer != InvalidBuffer)
 				ReleaseBuffer(VisibilityMapBuffer);
-			MemoryContextSwitchTo(oldcxt);
-			MemoryContextReset(PerChunkMemoryContext);
 			/*
 			 * -----------------------
 			 *   END Transaction
