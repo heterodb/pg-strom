@@ -4741,8 +4741,8 @@ gpupreagg_next_tuple_fallback(GpuPreAggState *gpas, GpuPreAggTask *gpreagg)
 			GpuTaskState   *outer_gts
 				= (GpuTaskState *)outerPlanState(gpas);
 
-			//TODO: GpuJoin should restart from the suspended point
 			slot = gpujoinNextTupleFallback(outer_gts,
+											gpreagg->kgjoin,
 											gpreagg->pds_src,
 											Max(gpreagg->outer_depth, 0));
 			if (TupIsNull(slot))

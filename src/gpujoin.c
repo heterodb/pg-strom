@@ -17,7 +17,7 @@
  * GNU General Public License for more details.
  */
 #include "pg_strom.h"
-#include "cuda_numeric.h"
+#include "cuda_gpuscan.h"
 #include "cuda_gpujoin.h"
 
 /*
@@ -194,7 +194,6 @@ typedef struct
 	cl_long				fallback_inner_index;
 	pg_crc32			fallback_inner_hash;
 	cl_bool				fallback_inner_matched;
-	cl_bool				fallback_right_outer;
 } innerState;
 
 typedef struct
@@ -236,6 +235,8 @@ typedef struct
 	AttrNumber	   *outer_dst_resno;	/* destination attribute number to */
 	AttrNumber		outer_src_anum_min;	/* be mapped on the slot_fallback */
 	AttrNumber		outer_src_anum_max;
+	cl_int			fallback_resume_depth;
+	cl_long			fallback_thread_count;
 	cl_long			fallback_outer_index;
 
 	/*
@@ -333,6 +334,7 @@ static char *gpujoin_codegen(PlannerInfo *root,
 static GpuJoinSharedState *createGpuJoinSharedState(GpuJoinState *gjs,
 													ParallelContext *pcxt,
 													void *coordinate);
+static void gpujoinColocateOuterJoinMapsToHost(GpuJoinState *gjs);
 
 /*
  * misc declarations
@@ -2196,14 +2198,8 @@ PlanGpuJoinPath(PlannerInfo *root,
 												false);
 			other_quals = NIL;
 		}
-		gj_info.join_quals = lappend(gj_info.join_quals,
-									 (join_quals != NIL
-									  ? make_flat_ands_explicit(join_quals)
-									  : NULL));
-		gj_info.other_quals = lappend(gj_info.other_quals,
-									  (other_quals != NIL
-									   ? make_flat_ands_explicit(other_quals)
-									   : NULL));
+		gj_info.join_quals = lappend(gj_info.join_quals, join_quals);
+		gj_info.other_quals = lappend(gj_info.other_quals, other_quals);
 		gj_info.hash_inner_keys = lappend(gj_info.hash_inner_keys,
 										  hash_inner_keys);
 		gj_info.hash_outer_keys = lappend(gj_info.hash_outer_keys,
@@ -2576,8 +2572,8 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	{
 		Plan	   *inner_plan = list_nth(cscan->custom_plans, i);
 		innerState *istate = &gjs->inners[i];
-		Expr	   *join_quals;
-		Expr	   *other_quals;
+		List	   *join_quals;
+		List	   *other_quals;
 		List	   *hash_inner_keys;
 		List	   *hash_outer_keys;
 		TupleTableSlot *inner_slot;
@@ -2608,22 +2604,21 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 		join_quals = list_nth(gj_info->join_quals, i);
 		if (join_quals)
 		{
-			ExprState  *expr_state = ExecInitExpr(join_quals, &ss->ps);
+			Assert(IsA(join_quals, List));
 #if PG_VERSION_NUM < 100000
-			istate->join_quals = list_make1(expr_state);
+			istate->join_quals = (List *)ExecInitExpr(join_quals, &ss->ps);
 #else
-			istate->join_quals = expr_state;
+			istate->join_quals = ExecInitQual(join_quals, &ss->ps);
 #endif
 		}
 
 		other_quals = list_nth(gj_info->other_quals, i);
 		if (other_quals)
 		{
-			ExprState  *expr_state = ExecInitExpr(other_quals, &ss->ps);
 #if PG_VERSION_NUM < 100000
-			istate->other_quals = list_make1(expr_state);
+			istate->other_quals = (List *)ExecInitExpr(other_quals, &ss->ps);
 #else
-			istate->other_quals = expr_state;
+			istate->other_quals = ExecInitQual(other_quals, &ss->ps);
 #endif
 		}
 
@@ -4406,7 +4401,7 @@ gpujoin_create_task(GpuJoinState *gjs,
 	pgjoin->pds_src = pds_src;
 	pgjoin->pds_dst = PDS_create_row(gcontext,
 									 scan_tupdesc,
-									 pgstrom_chunk_size() / 2);
+									 pgstrom_chunk_size());
 	pgjoin->outer_depth = outer_depth;
 
 	/* Is NVMe-Strom available to run this GpuJoin? */
@@ -4639,6 +4634,7 @@ gpujoin_next_tuple(GpuTaskState *gts)
 		 * in the future version.
 		 */
 		slot = gpujoinNextTupleFallback(&gjs->gts,
+										&pgjoin->kern,
 										pgjoin->pds_src,
 										Max(pgjoin->outer_depth,0));
 	}
@@ -5154,42 +5150,234 @@ gpujoinFallbackLoadSource(int depth, GpuJoinState *gjs,
 	return 1;
 }
 
-static void
-gpujoinColocateOuterJoinMapsToHost(GpuJoinState *gjs)
+/*
+ * gpujoinFallbackLoadFromSuspend
+ */
+static int
+gpujoinFallbackLoadFromSuspend(GpuJoinState *gjs,
+							   kern_gpujoin *kgjoin,
+							   pgstrom_data_store *pds_src,
+							   int outer_depth)
 {
-	GpuContext	   *gcontext = gjs->gts.gcontext;
 	kern_multirels *h_kmrels = dsm_segment_address(gjs->seg_kmrels);
-	cl_bool		   *h_ojmaps;
-	CUdeviceptr		m_ojmaps;
-	CUresult		rc;
-	size_t			ojmaps_length = h_kmrels->ojmaps_length;
-	cl_uint			i, j, n;
+	cl_int		num_rels = gjs->num_rels;
+	cl_uint		block_sz = kgjoin->block_sz;
+	cl_uint		grid_sz = kgjoin->grid_sz;
+	cl_uint		global_sz = block_sz * grid_sz;
+	cl_long		thread_index;
+	cl_long		thread_loops;
+	cl_int		depth;
+	cl_uint		global_id;
+	cl_uint		group_id;
+	cl_uint		local_id;
+	cl_uint		nrooms = kgjoin->pstack_nrooms;
+	cl_uint		write_pos;
+	cl_uint		read_pos;
+	cl_uint		row_index;
+	cl_uint	   *pstack;
+	cl_int		j;
+	gpujoinSuspendContext *sb;
+	HeapTupleHeaderData *htup;
+	ItemPointerData t_self;
 
-	rc = cuCtxPushCurrent(gcontext->cuda_context);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
+lnext:
+	/* setup pseudo thread-id based on fallback_thread_count */
+	thread_index = (gjs->fallback_thread_count >> 10);
+	thread_loops = (gjs->fallback_thread_count & 0x03ff);
+	depth = thread_index / global_sz + outer_depth;
+	global_id = thread_index % global_sz;
+	group_id = global_id / block_sz;
+	local_id = global_id % block_sz;
 
-	h_ojmaps = ((char *)h_kmrels + h_kmrels->kmrels_length);
-	m_ojmaps = gjs->m_kmrels + h_kmrels->kmrels_length;
-	rc = cuMemcpyDtoH(h_ojmaps,
-					  m_ojmaps,
-					  ojmaps_length * numDevAttrs);
-	if (rc != CUDA_SUCCESS)
-		elog(ERROR, "failed on cuMemcpyHtoD: %s", errorText(rc));
-
-	rc = cuCtxPopCurrent(NULL);
-	if (rc != CUDA_SUCCESS)
-		elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
-
-	/* merge OJMaps */
-	n = ojmaps_length / sizeof(cl_ulong);
-	for (i=0; i < n; i++)
+	/* no more pending rows in the suspend context */
+	if (depth > num_rels)
 	{
-		cl_ulong	mask = 0;
-		for (j=0; j < numDevAttrs; j++)
-			mask |= ((cl_ulong *)(h_ojmaps + j * ojmaps_length))[i];
-		((cl_ulong *)(h_ojmaps + j * ojmaps_length))[i] |= mask;
+		gjs->fallback_outer_index = kgjoin->src_read_pos;
+		kgjoin->resume_context = false;
+		return 0;
 	}
+	gjs->fallback_resume_depth = depth;
+
+	/* suspend context and pseudo stack */
+	pstack = (cl_uint *)((char *)kgjoin + kgjoin->pstack_offset)
+		+ group_id * nrooms * ((num_rels + 1) * 
+							   (num_rels + 2) / 2)
+		+ nrooms * (depth * (depth + 1)) / 2;
+	sb = KERN_GPUJOIN_SUSPEND_CONTEXT(kgjoin, group_id);
+	write_pos = sb->pd[depth].write_pos;
+	read_pos = sb->pd[depth].read_pos;
+	row_index = block_sz * thread_loops + local_id;
+	if (row_index >= write_pos)
+	{
+		if (local_id < block_sz)
+		{
+			/* move to the next thread */
+			gjs->fallback_thread_count = (thread_index + 1) << 10;
+		}
+		else
+		{
+			/* move to the next threads group */
+			gjs->fallback_thread_count =
+				((thread_index / block_sz + 1) * block_sz) << 10;
+		}
+		goto lnext;
+	}
+	gjs->fallback_thread_count++;
+
+	/* extract partially joined tuples */
+	pstack += row_index * (depth + 1);
+	for (j=outer_depth; j <= depth; j++)
+	{
+		if (j == 0)
+		{
+			TupleDesc	tupdesc;
+
+			if (gjs->gts.css.ss.ss_currentRelation)
+				tupdesc = RelationGetDescr(gjs->gts.css.ss.ss_currentRelation);
+			else
+				tupdesc = outerPlanState(gjs)->ps_ResultTupleSlot->tts_tupleDescriptor;
+			/* load from the outer source buffer */
+			if (pds_src->kds.format == KDS_FORMAT_ROW)
+			{
+				htup = KDS_ROW_REF_HTUP(&pds_src->kds,
+										pstack[0],
+										&t_self, NULL);
+				gpujoin_fallback_tuple_extract(gjs->slot_fallback,
+											   tupdesc,
+											   pds_src->kds.table_oid,
+											   &t_self,
+											   htup,
+											   gjs->outer_dst_resno,
+											   gjs->outer_src_anum_min,
+											   gjs->outer_src_anum_max);
+			}
+			else if (pds_src->kds.format == KDS_FORMAT_BLOCK)
+			{
+				HeapTupleHeader	htup;
+				ItemPointerData	t_self;
+
+				htup = KDS_BLOCK_REF_HTUP(&pds_src->kds,
+										  pstack[0],
+										  &t_self, NULL);
+				gpujoin_fallback_tuple_extract(gjs->slot_fallback,
+											   tupdesc,
+											   pds_src->kds.table_oid,
+											   &t_self,
+											   htup,
+											   gjs->outer_dst_resno,
+											   gjs->outer_src_anum_min,
+											   gjs->outer_src_anum_max);
+			}
+			else if (pds_src->kds.format == KDS_FORMAT_COLUMN)
+			{
+				elog(ERROR, "not implemented yet");
+			}
+			else
+			{
+				elog(ERROR, "Bug? unexpected PDS format: %d",
+					 pds_src->kds.format);
+			}
+		}
+		else
+		{
+			innerState	   *istate = &gjs->inners[j-1];
+			TupleTableSlot *slot_in = istate->state->ps_ResultTupleSlot;
+			TupleDesc		tupdesc = slot_in->tts_tupleDescriptor;
+			kern_data_store *kds_in = KERN_MULTIRELS_INNER_KDS(h_kmrels, j);
+
+			htup = KDS_ROW_REF_HTUP(kds_in,pstack[j],&t_self,NULL);
+			gpujoin_fallback_tuple_extract(gjs->slot_fallback,
+										   tupdesc,
+										   kds_in->table_oid,
+										   &t_self,
+										   htup,
+										   istate->inner_dst_resno,
+										   istate->inner_src_anum_min,
+										   istate->inner_src_anum_max);
+		}
+	}
+
+	/* assign starting point of the next depth */
+	if (depth < num_rels)
+	{
+		innerState	   *istate = &gjs->inners[depth];
+
+		if (row_index < read_pos)
+		{
+			/*
+			 * This partially joined row is already processed by the deeper
+			 * level, so no need to move deeper level any more.
+			 */
+			goto lnext;
+		}
+		else if (row_index < read_pos + kgjoin->block_sz)
+		{
+			/*
+			 * This partially joined row is now processed by the deeper
+			 * level, so we must restart from the next position.
+			 */
+			kern_data_store *kds_in;
+			cl_uint		l_state = sb->pd[depth+1].l_state[local_id];
+			cl_bool		matched = sb->pd[depth+1].matched[local_id];
+
+			kds_in = KERN_MULTIRELS_INNER_KDS(h_kmrels, depth+1);
+			if (kds_in->format == KDS_FORMAT_HASH)
+			{
+				if (l_state == 0)
+				{
+					/* restart from the head */
+					gjs->inners[depth].fallback_inner_index = 0;
+				}
+				else if (l_state == UINT_MAX)
+				{
+					/* already reached end of the hash-chain */
+					gjs->fallback_thread_count = (thread_index + 1) << 10;
+					goto lnext;
+				}
+				else
+				{
+					kern_hashitem  *khitem = (kern_hashitem *)
+						((char *)kds_in
+						 + __kds_unpack(l_state)
+						 - offsetof(kern_hashitem, t.htup));
+					istate->fallback_inner_index =
+						((char *)khitem - (char *)kds_in);
+					istate->fallback_inner_hash = khitem->hash;
+					istate->fallback_inner_matched = matched;
+				}
+			}
+			else if (kds_in->format == KDS_FORMAT_ROW)
+			{
+				cl_uint		x_unitsz = Min(write_pos - read_pos,
+										   kgjoin->grid_sz);
+				cl_uint		y_unitsz = kgjoin->grid_sz / x_unitsz;
+
+				istate->fallback_inner_index = l_state + y_unitsz;
+			}
+			else
+				elog(ERROR, "Bug? unexpected inner buffer format: %d",
+					 kds_in->format);
+		}
+		else
+		{
+			/*
+			 * This partially joined row is not processed in the deeper
+			 * level, so we shall suspend join from the head.
+			 */
+			istate->fallback_inner_index = 0;
+		}
+	}
+	else
+	{
+		/*
+		 * This completely joined row is already written to the destination
+		 * buffer, thus should be preliminary fetched.
+		 */
+		if (row_index < read_pos)
+			goto lnext;
+	}
+	/* make the fallback_thread_count advanced */
+	return depth + 1;
 }
 
 /*
@@ -5197,6 +5385,7 @@ gpujoinColocateOuterJoinMapsToHost(GpuJoinState *gjs)
  */
 TupleTableSlot *
 gpujoinNextTupleFallback(GpuTaskState *gts,
+						 kern_gpujoin *kgjoin,
 						 pgstrom_data_store *pds_src,
 						 cl_int outer_depth)
 {
@@ -5210,16 +5399,23 @@ gpujoinNextTupleFallback(GpuTaskState *gts,
 
 	if (gjs->fallback_outer_index < 0)
 	{
+		cl_int		i, num_rels = gjs->num_rels;
+
+		/* init cpu fallback state for each GpuTask */
 		pg_atomic_write_u32(&gj_sstate->needs_colocation, 1);
 		if (pds_src)
 			Assert(outer_depth == 0);
 		else
 		{
-			Assert(outer_depth > 0 && outer_depth <= gjs->num_rels);
+			Assert(outer_depth > 0 && outer_depth <= num_rels);
 			gpujoinColocateOuterJoinMapsToHost(gjs);
-			gjs->inners[outer_depth-1].fallback_inner_index = 0;
 		}
+		gjs->fallback_resume_depth = outer_depth;
+		gjs->fallback_thread_count = 0;
 		gjs->fallback_outer_index = 0;
+		for (i=0; i < num_rels; i++)
+			gjs->inners[i].fallback_inner_index = 0;
+
 		depth = outer_depth;
 	}
 	else
@@ -5230,10 +5426,15 @@ gpujoinNextTupleFallback(GpuTaskState *gts,
 	while (depth >= 0)
 	{
 		Assert(depth >= outer_depth);
-		if (depth == outer_depth)
+		if (depth == (kgjoin->resume_context
+					  ? gjs->fallback_resume_depth
+					  : outer_depth))
 		{
 			ExecStoreAllNullTuple(gjs->slot_fallback);
-			if (pds_src)
+			if (kgjoin->resume_context)
+				depth = gpujoinFallbackLoadFromSuspend(gjs, kgjoin, pds_src,
+													   outer_depth);
+			else if (pds_src)
 				depth = gpujoinFallbackLoadSource(depth, gjs, pds_src);
 			else
 				depth = gpujoinFallbackLoadOuter(depth, gjs);
@@ -5264,7 +5465,7 @@ gpujoinNextTupleFallback(GpuTaskState *gts,
 			return slot;
 		}
 	}
-	/* rewind the pointer for the further fallback chunks */
+	/* rewind the fallback status for the further GpuJoinTask */
 	gjs->fallback_outer_index = -1;
 	return NULL;
 }
@@ -5426,6 +5627,51 @@ gpujoin_throw_partial_result(GpuJoinTask *pgjoin)
 	pthreadMutexUnlock(gcontext->mutex);
 
 	SetLatch(MyLatch);
+}
+
+/*
+ * gpujoinColocateOuterJoinMapsToHost
+ *
+ * It moves outer-join-map on the device memory to the host memory prior to
+ * CPU fallback of RIGHT/FULL OUTER JOIN. When this function is called,
+ * no GPU kernel shall not be working, so just cuMemcpyDtoH() works.
+ */
+static void
+gpujoinColocateOuterJoinMapsToHost(GpuJoinState *gjs)
+{
+	GpuContext	   *gcontext = gjs->gts.gcontext;
+	kern_multirels *h_kmrels = dsm_segment_address(gjs->seg_kmrels);
+	cl_bool		   *h_ojmaps;
+	CUdeviceptr		m_ojmaps;
+	CUresult		rc;
+	size_t			ojmaps_length = h_kmrels->ojmaps_length;
+	cl_uint			i, j, n;
+
+	rc = cuCtxPushCurrent(gcontext->cuda_context);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuCtxPushCurrent: %s", errorText(rc));
+
+	h_ojmaps = ((char *)h_kmrels + h_kmrels->kmrels_length);
+	m_ojmaps = gjs->m_kmrels + h_kmrels->kmrels_length;
+	rc = cuMemcpyDtoH(h_ojmaps,
+					  m_ojmaps,
+					  ojmaps_length * numDevAttrs);
+	if (rc != CUDA_SUCCESS)
+		elog(ERROR, "failed on cuMemcpyHtoD: %s", errorText(rc));
+
+	rc = cuCtxPopCurrent(NULL);
+	if (rc != CUDA_SUCCESS)
+		elog(WARNING, "failed on cuCtxPopCurrent: %s", errorText(rc));
+
+	/* merge OJMaps */
+	n = ojmaps_length / sizeof(cl_ulong);
+	for (i=0; i < n; i++)
+	{
+		cl_ulong	mask = 0;
+		for (j=0; j < numDevAttrs; j++)
+			mask |= ((cl_ulong *)(h_ojmaps + j * ojmaps_length))[i];
+		((cl_ulong *)(h_ojmaps + j * ojmaps_length))[i] |= mask;
+	}
 }
 
 /*
@@ -5647,6 +5893,8 @@ resume_kernel:
 		{
 			CHECK_WORKER_TERMINATION();
 
+			fprintf(stderr, "GpuJoin suspend (count=%d nitems=%u)\n", pgjoin->kern.suspend_count, pgjoin->pds_dst->kds.nitems);
+
 			gpujoin_throw_partial_result(pgjoin);
 
 			pgjoin->kern.suspend_count = 0;
@@ -5658,11 +5906,15 @@ resume_kernel:
 				   pgjoin->kern.suspend_size);
 			/* renew buffer and restart */
 			pds_dst = pgjoin->pds_dst;
-			goto resume_kernel;
+
+			//HOGEHOGE
+			pgjoin->task.cpu_fallback = true;
+			//goto resume_kernel;
 		}
 		gpujoinUpdateRunTimeStat(&gjs->gts, &pgjoin->kern);
 		/* return task if any result rows */
-		retval = (pds_dst->kds.nitems > 0 ? 0 : -1);
+		//retval = (pds_dst->kds.nitems > 0 ? 0 : -1);
+		retval = 0;
 	}
 	else if (pgstrom_cpu_fallback_enabled &&
 			 pgjoin->kern.kerror.errcode == StromError_CpuReCheck)
