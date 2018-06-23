@@ -4401,7 +4401,7 @@ gpujoin_create_task(GpuJoinState *gjs,
 	pgjoin->pds_src = pds_src;
 	pgjoin->pds_dst = PDS_create_row(gcontext,
 									 scan_tupdesc,
-									 pgstrom_chunk_size() / 2);
+									 pgstrom_chunk_size());
 	pgjoin->outer_depth = outer_depth;
 
 	/* Is NVMe-Strom available to run this GpuJoin? */
@@ -5260,6 +5260,19 @@ lnext:
 							   (num_rels + 2) / 2)
 		+ nrooms * (depth * (depth + 1)) / 2;
 	sb = KERN_GPUJOIN_SUSPEND_CONTEXT(kgjoin, group_id);
+	if (sb->depth < 0)
+	{
+		/*
+		 * This threads-group successfull finished.
+		 * So, move to the next threads-groups.
+		 */
+		gjs->fallback_thread_count =
+			((thread_index / block_sz + 1) * block_sz) << 10;
+		goto lnext;
+	}
+	else if (sb->depth != num_rels + 1)
+		elog(ERROR, "Bug? unexpected point for GpuJoin kernel suspend");
+
 	write_pos = sb->pd[depth].write_pos;
 	read_pos = sb->pd[depth].read_pos;
 	row_index = block_sz * thread_loops + local_id;
@@ -5942,9 +5955,6 @@ resume_kernel:
 		if (pgjoin->kern.suspend_count > 0)
 		{
 			CHECK_WORKER_TERMINATION();
-
-			fprintf(stderr, "GpuJoin suspend (count=%d nitems=%u)\n", pgjoin->kern.suspend_count, pgjoin->pds_dst->kds.nitems);
-
 			gpujoin_throw_partial_result(pgjoin);
 
 			pgjoin->kern.suspend_count = 0;
@@ -5956,15 +5966,11 @@ resume_kernel:
 				   pgjoin->kern.suspend_size);
 			/* renew buffer and restart */
 			pds_dst = pgjoin->pds_dst;
-
-			//HOGEHOGE
-			pgjoin->task.cpu_fallback = true;
-			//goto resume_kernel;
+			goto resume_kernel;
 		}
 		gpujoinUpdateRunTimeStat(&gjs->gts, &pgjoin->kern);
 		/* return task if any result rows */
-		//retval = (pds_dst->kds.nitems > 0 ? 0 : -1);
-		retval = 0;
+		retval = (pds_dst->kds.nitems > 0 ? 0 : -1);
 	}
 	else if (pgstrom_cpu_fallback_enabled &&
 			 pgjoin->kern.kerror.errcode == StromError_CpuReCheck)
