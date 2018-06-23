@@ -4401,7 +4401,7 @@ gpujoin_create_task(GpuJoinState *gjs,
 	pgjoin->pds_src = pds_src;
 	pgjoin->pds_dst = PDS_create_row(gcontext,
 									 scan_tupdesc,
-									 pgstrom_chunk_size());
+									 pgstrom_chunk_size() / 2);
 	pgjoin->outer_depth = outer_depth;
 
 	/* Is NVMe-Strom available to run this GpuJoin? */
@@ -4657,7 +4657,7 @@ gpujoin_next_tuple(GpuTaskState *gts)
  */
 static void
 gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
-							   TupleDesc tupdesc, Oid table_oid,
+							   kern_data_store *kds,
 							   ItemPointer t_self,
 							   HeapTupleHeader htup,
 							   AttrNumber *tuple_dst_resno,
@@ -4665,17 +4665,18 @@ gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
 							   AttrNumber src_anum_max)
 {
 	bool		hasnulls;
-	AttrNumber	fallback_nattrs __attribute__ ((unused));
+	TupleDesc	tts_tupdesc = slot_fallback->tts_tupleDescriptor;
 	Datum	   *tts_values = slot_fallback->tts_values;
 	bool	   *tts_isnull = slot_fallback->tts_isnull;
-	char	   *tp;
-	long		off;
+	cl_uint		offset;
 	int			i, nattrs;
 	AttrNumber	resnum;
 
+	Assert(kds->format == KDS_FORMAT_ROW ||
+		   kds->format == KDS_FORMAT_HASH ||
+		   kds->format == KDS_FORMAT_BLOCK);
 	Assert(src_anum_min > FirstLowInvalidHeapAttributeNumber);
-	Assert(src_anum_max <= tupdesc->natts);
-	fallback_nattrs = slot_fallback->tts_tupleDescriptor->natts;
+	Assert(src_anum_max <= kds->ncols);
 
 	/* fill up the destination with NULL, if no tuple was supplied. */
 	if (!htup)
@@ -4685,7 +4686,7 @@ gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
 			resnum = tuple_dst_resno[i-FirstLowInvalidHeapAttributeNumber-1];
 			if (resnum)
 			{
-				Assert(resnum > 0 && resnum <= fallback_nattrs);
+				Assert(resnum > 0 && resnum <= tts_tupdesc->natts);
 				tts_values[resnum - 1] = (Datum) 0;
 				tts_isnull[resnum - 1] = true;
 			}
@@ -4694,89 +4695,46 @@ gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
 	}
 	hasnulls = ((htup->t_infomask & HEAP_HASNULL) != 0);
 
-	/*
-	 * Extract system columns if any
-	 */
-	if (src_anum_min < 0)
+	/* Extract system columns if any */
+	for (i = src_anum_min; i < 0; i++)
 	{
-		/* ctid */
-		resnum = tuple_dst_resno[SelfItemPointerAttributeNumber -
-								 FirstLowInvalidHeapAttributeNumber - 1];
-		if (resnum)
-		{
-			ItemPointer		temp;
+		ItemPointer	temp;
+		Datum		datum;
 
-			Assert(resnum > 0 && resnum <= fallback_nattrs);
-			temp = palloc(sizeof(ItemPointerData));
-			ItemPointerCopy(t_self, temp);
-			tts_values[resnum - 1] = PointerGetDatum(temp);
-			tts_isnull[resnum - 1] = false;
-		}
-
-		/* cmax */
-		resnum = tuple_dst_resno[MaxCommandIdAttributeNumber -
-								 FirstLowInvalidHeapAttributeNumber - 1];
-		if (resnum)
+		resnum = tuple_dst_resno[i - FirstLowInvalidHeapAttributeNumber - 1];
+		if (!resnum)
+			continue;
+		Assert(resnum > 0 && resnum <= tts_tupdesc->natts);
+		switch (i)
 		{
-			Assert(resnum > 0 && resnum <= fallback_nattrs);
-			tts_values[resnum - 1]
-				= CommandIdGetDatum(HeapTupleHeaderGetRawCommandId(htup));
-			tts_isnull[resnum - 1] = false;
+			case SelfItemPointerAttributeNumber:
+				temp = palloc(sizeof(ItemPointerData));
+				ItemPointerCopy(t_self, temp);
+				datum = PointerGetDatum(temp);
+				break;
+			case MaxCommandIdAttributeNumber:
+				datum = CommandIdGetDatum(HeapTupleHeaderGetRawCommandId(htup));
+				break;
+			case MaxTransactionIdAttributeNumber:
+				datum = TransactionIdGetDatum(HeapTupleHeaderGetRawXmax(htup));
+				break;
+			case MinCommandIdAttributeNumber:
+				datum = CommandIdGetDatum(HeapTupleHeaderGetRawCommandId(htup));
+				break;
+			case MinTransactionIdAttributeNumber:
+				datum = TransactionIdGetDatum(HeapTupleHeaderGetRawXmin(htup));
+				break;
+			case ObjectIdAttributeNumber:
+				datum = ObjectIdGetDatum(HeapTupleHeaderGetOid(htup));
+				break;
+			case TableOidAttributeNumber:
+				datum = ObjectIdGetDatum(kds->table_oid);
+				break;
+			default:
+				elog(ERROR, "Bug? unknown system attribute: %d", i);
 		}
-
-		/* xmax */
-		resnum = tuple_dst_resno[MaxTransactionIdAttributeNumber -
-								 FirstLowInvalidHeapAttributeNumber - 1];
-		if (resnum)
-		{
-			Assert(resnum > 0 && resnum <= fallback_nattrs);
-			tts_values[resnum - 1]
-				= TransactionIdGetDatum(HeapTupleHeaderGetRawXmax(htup));
-			tts_isnull[resnum - 1] = false;
-		}
-
-		/* cmin */
-		resnum = tuple_dst_resno[MinCommandIdAttributeNumber -
-								 FirstLowInvalidHeapAttributeNumber - 1];
-		if (resnum)
-		{
-			Assert(resnum > 0 && resnum <= fallback_nattrs);
-			tts_values[resnum - 1]
-				= CommandIdGetDatum(HeapTupleHeaderGetRawCommandId(htup));
-			tts_isnull[resnum - 1] = false;
-		}
-
-		/* xmin */
-		resnum = tuple_dst_resno[MinTransactionIdAttributeNumber -
-								 FirstLowInvalidHeapAttributeNumber - 1];
-		if (resnum)
-		{
-			Assert(resnum > 0 && resnum <= fallback_nattrs);
-			tts_values[resnum - 1]
-				= TransactionIdGetDatum(HeapTupleHeaderGetRawXmin(htup));
-			tts_isnull[resnum - 1] = false;
-		}
-
-		/* oid */
-		resnum = tuple_dst_resno[ObjectIdAttributeNumber -
-								 FirstLowInvalidHeapAttributeNumber - 1];
-		if (resnum)
-		{
-			Assert(resnum > 0 && resnum <= fallback_nattrs);
-			tts_values[resnum - 1]
-				= ObjectIdGetDatum(HeapTupleHeaderGetOid(htup));
-			tts_isnull[resnum - 1] = false;
-		}
-
-		/* tableoid */
-		resnum = tuple_dst_resno[TableOidAttributeNumber -
-								 FirstLowInvalidHeapAttributeNumber - 1];
-		if (resnum)
-		{
-			Assert(resnum > 0 && resnum <= fallback_nattrs);
-			tts_values[resnum - 1] = ObjectIdGetDatum(table_oid);
-			tts_isnull[resnum - 1] = false;
-		}
+		tts_isnull[resnum - 1] = false;
+		tts_values[resnum - 1] = datum;
 	}
 
 	/*
@@ -4784,44 +4742,64 @@ gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
 	 * heap_deform_tuple(), but implemented by ourselves for performance.
 	 */
 	nattrs = HeapTupleHeaderGetNatts(htup);
-	nattrs = Min3(nattrs, tupdesc->natts, src_anum_max);
+	nattrs = Min3(nattrs, kds->ncols, src_anum_max);
 
-	tp = (char *) htup + htup->t_hoff;
-	off = 0;
+	offset = htup->t_hoff;
 	for (i=0; i < nattrs; i++)
 	{
-		Form_pg_attribute	attr = tupleDescAttr(tupdesc, i);
-
 		resnum = tuple_dst_resno[i - FirstLowInvalidHeapAttributeNumber];
 		if (hasnulls && att_isnull(i, htup->t_bits))
 		{
 			if (resnum > 0)
 			{
-				Assert(resnum <= fallback_nattrs);
+				Assert(resnum <= tts_tupdesc->natts);
 				tts_values[resnum - 1] = (Datum) 0;
 				tts_isnull[resnum - 1] = true;
 			}
-			continue;
 		}
-
-		/* elsewhere field is not null */
-		if (resnum > 0)
-		{
-			Assert(resnum <= fallback_nattrs);
-			tts_isnull[resnum - 1] = false;
-		}
-
-		if (attr->attlen == -1)
-			off = att_align_pointer(off, attr->attalign, -1, tp + off);
 		else
-			off = att_align_nominal(off, attr->attalign);
-
-		if (resnum > 0)
 		{
-			Assert(resnum <= fallback_nattrs);
-			tts_values[resnum - 1] = fetchatt(attr, tp + off);
+			kern_colmeta   *cmeta = &kds->colmeta[i];
+
+			if (cmeta->attlen > 0)
+				offset = TYPEALIGN(cmeta->attalign, offset);
+			else if (!VARATT_NOT_PAD_BYTE((char *)htup + offset))
+				offset = TYPEALIGN(cmeta->attalign, offset);
+			if (resnum > 0)
+			{
+				void	   *addr = ((char *)htup + offset);
+
+				Assert(resnum <= tts_tupdesc->natts);
+				tts_isnull[resnum - 1] = false;
+				if (cmeta->attbyval)
+				{
+					Datum	datum = 0;
+
+					if (cmeta->attlen == sizeof(cl_char))
+                        datum = *((cl_char *)addr);
+                    else if (cmeta->attlen == sizeof(cl_short))
+                        datum = *((cl_short *)addr);
+                    else if (cmeta->attlen == sizeof(cl_int))
+						datum = *((cl_int *)addr);
+					else if (cmeta->attlen == sizeof(cl_long))
+						datum = *((cl_long *)addr);
+					else
+					{
+						Assert(cmeta->attlen <= sizeof(Datum));
+						memcpy(&datum, addr, cmeta->attlen);
+					}
+					tts_values[resnum - 1] = datum;
+					offset += cmeta->attlen;
+				}
+				else
+				{
+					tts_values[resnum - 1] = PointerGetDatum(addr);
+				    offset += (cmeta->attlen < 0
+							   ? VARSIZE_ANY(addr)
+							   : cmeta->attlen);
+				}
+			}
 		}
-		off = att_addlength_pointer(off, attr->attlen, tp + off);
 	}
 
 	/*
@@ -4833,9 +4811,93 @@ gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
 		resnum = tuple_dst_resno[i - FirstLowInvalidHeapAttributeNumber];
 		if (resnum > 0)
 		{
-			Assert(resnum <= fallback_nattrs);
+			Assert(resnum <= tts_tupdesc->natts);
 			tts_values[resnum - 1] = (Datum) 0;
 			tts_isnull[resnum - 1] = true;
+		}
+	}
+}
+
+/*
+ * gpujoin_fallback_column_extract
+ */
+static void
+gpujoin_fallback_column_extract(TupleTableSlot *slot_fallback,
+								kern_data_store *kds_src,
+								cl_uint row_index,
+								AttrNumber *tuple_dst_resno,
+								AttrNumber src_anum_min,
+								AttrNumber src_anum_max)
+{
+	TupleDesc tts_tupdesc = slot_fallback->tts_tupleDescriptor;
+	Datum  *tts_values = slot_fallback->tts_values;
+	bool   *tts_isnull = slot_fallback->tts_isnull;
+	int		i, j;
+
+	for (i=src_anum_min; i < src_anum_max; i++)
+	{
+		void	   *addr = NULL;
+		AttrNumber	anum;
+		kern_colmeta *cmeta;
+
+		anum = tuple_dst_resno[i-FirstLowInvalidHeapAttributeNumber-1];
+		if (anum)
+		{
+			if (anum < 1 || anum > tts_tupdesc->natts)
+				elog(ERROR, "Bug? tuple extraction out of range (%d) at %s",
+					 anum, __FUNCTION__);
+
+			/* special case for tableoid */
+			if (i == TableOidAttributeNumber)
+			{
+				tts_isnull[anum-1] = false;
+				tts_values[anum-1] = DatumGetObjectId(kds_src->table_oid);
+				continue;
+			}
+
+			if (i < 0)
+				j = kds_src->ncols + i;		/* system column */
+			else
+				j = i - 1;					/* user column */
+
+			cmeta = &kds_src->colmeta[j];
+			addr = kern_get_datum_column(kds_src, j, row_index);
+			if (!addr)
+			{
+				tts_isnull[anum-1] = true;
+				tts_values[anum-1] = 0UL;
+			}
+			else if (!cmeta->attbyval)
+			{
+				tts_isnull[anum-1] = false;
+				tts_values[anum-1] = PointerGetDatum(addr);
+			}
+			else
+			{
+				Datum	datum = 0;
+
+				tts_isnull[anum-1] = false;
+				switch (cmeta->attlen)
+				{
+					case sizeof(cl_char):
+						datum = CharGetDatum(*((cl_char *) addr));
+						break;
+					case sizeof(cl_short):
+						datum = Int16GetDatum(*((cl_short *) addr));
+						break;
+					case sizeof(cl_int):
+						datum = Int32GetDatum(*((cl_int *) addr));
+						break;
+					case sizeof(cl_long):
+						datum = Int64GetDatum(*((cl_long *) addr));
+						break;
+					default:
+						Assert(cmeta->attlen <= sizeof(Datum));
+						memcpy(&datum, addr, cmeta->attlen);
+						break;
+				}
+				tts_values[anum-1] = datum;
+			}
 		}
 	}
 }
@@ -4848,8 +4910,6 @@ gpujoinFallbackHashJoin(int depth, GpuJoinState *gjs)
 {
 	ExprContext	   *econtext = gjs->gts.css.ss.ps.ps_ExprContext;
 	innerState	   *istate = &gjs->inners[depth-1];
-	TupleTableSlot *slot_in = istate->state->ps_ResultTupleSlot;
-	TupleDesc		tupdesc = slot_in->tts_tupleDescriptor;
 	kern_multirels *h_kmrels = dsm_segment_address(gjs->seg_kmrels);
 	kern_data_store *kds_in = KERN_MULTIRELS_INNER_KDS(h_kmrels, depth);
 	cl_bool		   *ojmaps = KERN_MULTIRELS_OUTER_JOIN_MAP(h_kmrels, depth);
@@ -4891,8 +4951,7 @@ gpujoinFallbackHashJoin(int depth, GpuJoinState *gjs)
 			(cl_uint)((char *)khitem - (char *)kds_in);
 
 		gpujoin_fallback_tuple_extract(gjs->slot_fallback,
-									   tupdesc,
-									   kds_in->table_oid,
+									   kds_in,
 									   &khitem->t.t_self,
 									   &khitem->t.htup,
 									   istate->inner_dst_resno,
@@ -4924,8 +4983,7 @@ end:
 	{
 		istate->fallback_inner_matched = true;
 		gpujoin_fallback_tuple_extract(gjs->slot_fallback,
-									   tupdesc,
-									   kds_in->table_oid,
+									   kds_in,
                                        NULL,
                                        NULL,
 									   istate->inner_dst_resno,
@@ -4951,8 +5009,6 @@ gpujoinFallbackNestLoop(int depth, GpuJoinState *gjs)
 {
 	ExprContext	   *econtext = gjs->gts.css.ss.ps.ps_ExprContext;
 	innerState	   *istate = &gjs->inners[depth-1];
-	TupleTableSlot *slot_in = istate->state->ps_ResultTupleSlot;
-	TupleDesc		tupdesc = slot_in->tts_tupleDescriptor;
 	kern_multirels *h_kmrels = dsm_segment_address(gjs->seg_kmrels);
 	kern_data_store *kds_in = KERN_MULTIRELS_INNER_KDS(h_kmrels, depth);
 	cl_bool		   *ojmaps = KERN_MULTIRELS_OUTER_JOIN_MAP(h_kmrels, depth);
@@ -4966,8 +5022,7 @@ gpujoinFallbackNestLoop(int depth, GpuJoinState *gjs)
 		bool			retval;
 
 		gpujoin_fallback_tuple_extract(gjs->slot_fallback,
-									   tupdesc,
-									   kds_in->table_oid,
+									   kds_in,
 									   &tupitem->t_self,
 									   &tupitem->htup,
 									   istate->inner_dst_resno,
@@ -5003,8 +5058,7 @@ gpujoinFallbackNestLoop(int depth, GpuJoinState *gjs)
 		istate->fallback_inner_matched = true;
 
 		gpujoin_fallback_tuple_extract(gjs->slot_fallback,
-									   tupdesc,
-									   kds_in->table_oid,
+									   kds_in,
 									   NULL,
 									   NULL,
 									   istate->inner_dst_resno,
@@ -5039,12 +5093,9 @@ gpujoinFallbackLoadOuter(int depth, GpuJoinState *gjs)
 		{
 			innerState	   *istate = &gjs->inners[depth-1];
 			kern_tupitem   *tupitem = KERN_DATA_STORE_TUPITEM(kds_in, index);
-			TupleTableSlot *slot_in = istate->state->ps_ResultTupleSlot;
-			TupleDesc		tupdesc = slot_in->tts_tupleDescriptor;
 
 			gpujoin_fallback_tuple_extract(gjs->slot_fallback,
-										   tupdesc,
-										   kds_in->table_oid,
+										   kds_in,
 										   &tupitem->t_self,
 										   &tupitem->htup,
 										   istate->inner_dst_resno,
@@ -5070,15 +5121,9 @@ gpujoinFallbackLoadSource(int depth, GpuJoinState *gjs,
 {
 	kern_data_store *kds_src = &pds_src->kds;
 	ExprContext	   *econtext = gjs->gts.css.ss.ps.ps_ExprContext;
-	TupleDesc		tupdesc;
 	bool			retval;
 
 	Assert(depth == 0);
-	if (gjs->gts.css.ss.ss_currentRelation)
-		tupdesc = RelationGetDescr(gjs->gts.css.ss.ss_currentRelation);
-	else
-		tupdesc = outerPlanState(gjs)->ps_ResultTupleSlot->tts_tupleDescriptor;
-
 	do {
 		if (kds_src->format == KDS_FORMAT_ROW)
 		{
@@ -5090,8 +5135,7 @@ gpujoinFallbackLoadSource(int depth, GpuJoinState *gjs,
 			/* fills up fallback_slot with outer columns */
 			tupitem = KERN_DATA_STORE_TUPITEM(kds_src, index);
 			gpujoin_fallback_tuple_extract(gjs->slot_fallback,
-										   tupdesc,
-										   kds_src->table_oid,
+										   kds_src,
 										   &tupitem->t_self,
 										   &tupitem->htup,
 										   gjs->outer_dst_resno,
@@ -5128,13 +5172,25 @@ gpujoinFallbackLoadSource(int depth, GpuJoinState *gjs,
 			t_self.ip_posid = line_nr + 1;
 
 			gpujoin_fallback_tuple_extract(gjs->slot_fallback,
-										   tupdesc,
-										   kds_src->table_oid,
+										   kds_src,
 										   &t_self,
 										   htup,
 										   gjs->outer_dst_resno,
 										   gjs->outer_src_anum_min,
 										   gjs->outer_src_anum_max);
+		}
+		else if (kds_src->format == KDS_FORMAT_COLUMN)
+		{
+			cl_uint		row_index = gjs->fallback_outer_index++;
+
+			if (row_index >= kds_src->nitems)
+				return -1;
+			gpujoin_fallback_column_extract(gjs->slot_fallback,
+											kds_src,
+											row_index,
+											gjs->outer_dst_resno,
+											gjs->outer_src_anum_min,
+											gjs->outer_src_anum_max);
 		}
 		else
 			elog(ERROR, "Bug? unexpected KDS format: %d", pds_src->kds.format);
@@ -5230,12 +5286,6 @@ lnext:
 	{
 		if (j == 0)
 		{
-			TupleDesc	tupdesc;
-
-			if (gjs->gts.css.ss.ss_currentRelation)
-				tupdesc = RelationGetDescr(gjs->gts.css.ss.ss_currentRelation);
-			else
-				tupdesc = outerPlanState(gjs)->ps_ResultTupleSlot->tts_tupleDescriptor;
 			/* load from the outer source buffer */
 			if (pds_src->kds.format == KDS_FORMAT_ROW)
 			{
@@ -5243,8 +5293,7 @@ lnext:
 										pstack[0],
 										&t_self, NULL);
 				gpujoin_fallback_tuple_extract(gjs->slot_fallback,
-											   tupdesc,
-											   pds_src->kds.table_oid,
+											   &pds_src->kds,
 											   &t_self,
 											   htup,
 											   gjs->outer_dst_resno,
@@ -5260,8 +5309,7 @@ lnext:
 										  pstack[0],
 										  &t_self, NULL);
 				gpujoin_fallback_tuple_extract(gjs->slot_fallback,
-											   tupdesc,
-											   pds_src->kds.table_oid,
+											   &pds_src->kds,
 											   &t_self,
 											   htup,
 											   gjs->outer_dst_resno,
@@ -5270,7 +5318,12 @@ lnext:
 			}
 			else if (pds_src->kds.format == KDS_FORMAT_COLUMN)
 			{
-				elog(ERROR, "not implemented yet");
+				gpujoin_fallback_column_extract(gjs->slot_fallback,
+												&pds_src->kds,
+												pstack[0],
+												gjs->outer_dst_resno,
+												gjs->outer_src_anum_min,
+												gjs->outer_src_anum_max);
 			}
 			else
 			{
@@ -5281,14 +5334,11 @@ lnext:
 		else
 		{
 			innerState	   *istate = &gjs->inners[j-1];
-			TupleTableSlot *slot_in = istate->state->ps_ResultTupleSlot;
-			TupleDesc		tupdesc = slot_in->tts_tupleDescriptor;
 			kern_data_store *kds_in = KERN_MULTIRELS_INNER_KDS(h_kmrels, j);
 
 			htup = KDS_ROW_REF_HTUP(kds_in,pstack[j],&t_self,NULL);
 			gpujoin_fallback_tuple_extract(gjs->slot_fallback,
-										   tupdesc,
-										   kds_in->table_oid,
+										   kds_in,
 										   &t_self,
 										   htup,
 										   istate->inner_dst_resno,
