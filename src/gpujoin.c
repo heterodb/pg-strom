@@ -539,17 +539,17 @@ cost_gpujoin(PlannerInfo *root,
 	{
 		double		dummy;
 
-		cost_gpuscan_common(root,
-							outer_path->parent,
-							gpath->outer_quals,
-							parallel_nworkers,	/* parallel scan */
-							NULL, NIL, 0,		/* BRIN-index */
-							&parallel_divisor,
-							&dummy,
-							&num_chunks,
-							&gpath->outer_nrows_per_block,
-							&startup_cost,
-							&run_cost);
+		pgstrom_common_relscan_cost(root,
+									outer_path->parent,
+									gpath->outer_quals,
+									parallel_nworkers,	/* parallel scan */
+									NULL, NIL, 0,		/* BRIN-index */
+									&parallel_divisor,
+									&dummy,
+									&num_chunks,
+									&gpath->outer_nrows_per_block,
+									&startup_cost,
+									&run_cost);
 		gpath->cpath.path.rows /= parallel_divisor;
 	}
 	else

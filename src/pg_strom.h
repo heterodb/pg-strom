@@ -1001,7 +1001,22 @@ extern IndexOptInfo *pgstrom_tryfind_brinindex(PlannerInfo *root,
 											   RelOptInfo *baserel,
 											   List **p_indexQuals,
 											   cl_long *p_indexNBlocks);
-
+#define PGSTROM_RELSCAN_NORMAL			0x0000
+#define PGSTROM_RELSCAN_SSD2GPU			0x0001
+#define PGSTROM_RELSCAN_BRIN_INDEX		0x0002
+extern int pgstrom_common_relscan_cost(PlannerInfo *root,
+									   RelOptInfo *scan_rel,
+									   List *scan_quals,
+									   int parallel_workers,
+									   IndexOptInfo *indexOpt,
+									   List *indexQuals,
+									   cl_long indexNBlocks,
+									   double *p_parallel_divisor,
+									   double *p_scan_ntuples,
+									   double *p_scan_nchunks,
+									   cl_uint *p_nrows_per_block,
+									   Cost *p_startup_cost,
+									   Cost *p_run_cost);
 /*
  * gpuscan.c
  */

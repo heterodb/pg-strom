@@ -968,17 +968,17 @@ cost_gpupreagg(PlannerInfo *root,
 		double		ntuples;
 		double		nchunks;
 
-		cost_gpuscan_common(root,
-							input_path->parent,
-							gpa_info->outer_quals,
-							parallel_nworkers,	/* parallel scan */
-							NULL, NIL, 0,		/* BRIN-index */
-							&ntuples,
-							&nchunks,
-							&parallel_divisor,
-							&gpa_info->outer_nrows_per_block,
-							&startup_cost,
-							&run_cost);
+		pgstrom_common_relscan_cost(root,
+									input_path->parent,
+									gpa_info->outer_quals,
+									parallel_nworkers,	/* parallel scan */
+									NULL, NIL, 0,		/* BRIN-index */
+									&ntuples,
+									&nchunks,
+									&parallel_divisor,
+									&gpa_info->outer_nrows_per_block,
+									&startup_cost,
+									&run_cost);
 		run_cost -= cpu_tuple_cost * ntuples;
 		gpa_info->outer_startup_cost = startup_cost;
 		gpa_info->outer_total_cost	= startup_cost + run_cost;
