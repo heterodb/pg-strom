@@ -542,7 +542,8 @@ cost_gpujoin(PlannerInfo *root,
 		cost_gpuscan_common(root,
 							outer_path->parent,
 							gpath->outer_quals,
-							parallel_nworkers,
+							parallel_nworkers,	/* parallel scan */
+							NULL, NIL, 0,		/* BRIN-index */
 							&parallel_divisor,
 							&dummy,
 							&num_chunks,

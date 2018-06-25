@@ -39,6 +39,8 @@ typedef struct {
 	List	   *ccache_refs;	/* attributed to be referenced by ccache */
 	List	   *used_params;
 	List	   *dev_quals;		/* implicitly-ANDed device quals */
+	Oid			index_oid;		/* OID of BRIN-index, if any */
+	List	   *index_quals;	/* Qualifier of BRIN-index, if any */
 } GpuScanInfo;
 
 static inline void
@@ -55,6 +57,8 @@ form_gpuscan_info(CustomScan *cscan, GpuScanInfo *gs_info)
 	privs = lappend(privs, gs_info->ccache_refs);
 	exprs = lappend(exprs, gs_info->used_params);
 	exprs = lappend(exprs, gs_info->dev_quals);
+	privs = lappend(privs, makeInteger(gs_info->index_oid));
+	exprs = lappend(exprs, gs_info->index_quals);
 
 	cscan->custom_private = privs;
 	cscan->custom_exprs = exprs;
@@ -77,6 +81,8 @@ deform_gpuscan_info(CustomScan *cscan)
 	gs_info->ccache_refs = list_nth(privs, pindex++);
 	gs_info->used_params = list_nth(exprs, eindex++);
 	gs_info->dev_quals = list_nth(exprs, eindex++);
+	gs_info->index_oid = intVal(list_nth(privs, pindex++));
+	gs_info->index_quals = list_nth(exprs, eindex++);
 
 	return gs_info;
 }
@@ -150,6 +156,9 @@ cost_gpuscan_common(PlannerInfo *root,
 					RelOptInfo *scan_rel,
 					List *scan_quals,
 					int parallel_workers,
+					IndexOptInfo *indexOpt,
+					List *indexQuals,
+					cl_long indexNBlocks,
 					double *p_parallel_divisor,
 					double *p_scan_ntuples,
 					double *p_scan_nchunks,
@@ -159,18 +168,22 @@ cost_gpuscan_common(PlannerInfo *root,
 {
 	Cost		startup_cost = 0.0;
 	Cost		run_cost = 0.0;
+	Cost		index_scan_cost = 0.0;
 	Cost		disk_scan_cost;
 	double		gpu_ratio = pgstrom_gpu_operator_cost / cpu_operator_cost;
 	double		parallel_divisor = (double) parallel_workers;
 	double		ntuples = scan_rel->tuples;
+	double		nblocks = scan_rel->pages;
 	double		nchunks;
 	double		selectivity;
 	double		spc_seq_page_cost;
+	double		spc_rand_page_cost;
 	bool		may_use_nvme_strom = false;
 	cl_uint		nrows_per_block = 0;
 	Size		heap_size;
 	Size		htup_size;
 	QualCost	qcost;
+	ListCell   *lc;
 
 	Assert((scan_rel->reloptkind == RELOPT_BASEREL ||
 			scan_rel->reloptkind == RELOPT_OTHER_MEMBER_REL) &&
@@ -183,11 +196,41 @@ cost_gpuscan_common(PlannerInfo *root,
 										 scan_rel->relid,
 										 JOIN_INNER,
 										 NULL);
-
-	/* fetch estimated page cost for tablespace containing the table */
+	/* cost of full-table scan, if no index */
 	get_tablespace_page_costs(scan_rel->reltablespace,
-							  NULL, &spc_seq_page_cost);
-	disk_scan_cost = spc_seq_page_cost * (double)scan_rel->pages;
+							  &spc_rand_page_cost,
+							  &spc_seq_page_cost);
+	disk_scan_cost = spc_seq_page_cost * nblocks;
+
+	/* consideration for BRIN-index, if any */
+	if (indexOpt)
+	{
+		BrinStatsData	statsData;
+		Relation		index_rel;
+		Cost			x;
+
+		index_rel = index_open(indexOpt->indexoid, AccessShareLock);
+		brinGetStats(index_rel, &statsData);
+		index_close(index_rel, AccessShareLock);
+
+		get_tablespace_page_costs(indexOpt->reltablespace,
+								  &spc_rand_page_cost,
+								  &spc_seq_page_cost);
+		index_scan_cost = spc_seq_page_cost * statsData.revmapNumPages;
+		foreach (lc, indexQuals)
+		{
+			cost_qual_eval_node(&qcost, (Node *)lfirst(lc), root);
+			index_scan_cost += qcost.startup + qcost.per_tuple;
+		}
+
+		x = index_scan_cost + spc_rand_page_cost * (double)indexNBlocks;
+		if (disk_scan_cost > x)
+		{
+			disk_scan_cost = x;
+			ntuples = scan_rel->tuples * ((double) indexNBlocks / nblocks);
+			nblocks = indexNBlocks;
+		}
+	}
 
 	/* check whether NVMe-Strom is capable */
 	if (ScanPathWillUseNvmeStrom(root, scan_rel))
@@ -238,7 +281,7 @@ cost_gpuscan_common(PlannerInfo *root,
 	run_cost += disk_scan_cost;
 
 	/* estimation for number of chunks (assume KDS_FORMAT_ROW) */
-	heap_size = (double)(BLCKSZ - SizeOfPageHeaderData) * scan_rel->pages;
+	heap_size = (double)(BLCKSZ - SizeOfPageHeaderData) * nblocks;
 	htup_size = (MAXALIGN(offsetof(HeapTupleHeaderData,
 								   t_bits[BITMAPLEN(scan_rel->max_attr)])) +
 				 MAXALIGN(heap_size / Max(scan_rel->tuples, 1.0) -
@@ -311,7 +354,10 @@ create_gpuscan_path(PlannerInfo *root,
 					RelOptInfo *baserel,
 					List *dev_quals,
 					List *host_quals,
-					int parallel_nworkers)
+					int parallel_nworkers,	/* for parallel-scan */
+					IndexOptInfo *indexOpt,	/* for BRIN-index */
+					List *indexQuals,		/* for BRIN-index */
+					cl_long indexNBlocks)	/* for BRIN-index */
 {
 	GpuScanInfo	   *gs_info = palloc0(sizeof(GpuScanInfo));
 	CustomPath	   *cpath;
@@ -330,12 +376,21 @@ create_gpuscan_path(PlannerInfo *root,
 	cost_gpuscan_common(root, baserel,
 						extract_actual_clauses(dev_quals, false),
 						parallel_nworkers,
+						indexOpt,
+						indexQuals,
+						indexNBlocks,
 						&parallel_divisor,
 						&scan_ntuples,
 						&scan_nchunks,
 						&gs_info->nrows_per_block,
 						&startup_cost,
 						&run_cost);
+	/* save the BRIN-index on GpuScanInfo */
+	if (indexOpt)
+	{
+		gs_info->index_oid = indexOpt->indexoid;
+		gs_info->index_quals = indexQuals;
+	}
 
 	param_info = get_baserel_parampathinfo(root, baserel,
 										   baserel->lateral_relids);
@@ -408,6 +463,9 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	Path	   *subpath;
 	List	   *dev_quals = NIL;
 	List	   *host_quals = NIL;
+	IndexOptInfo *indexOpt;
+	List	   *indexQuals;
+	cl_long		indexNBlocks;
 	ListCell   *lc;
 
 	/* call the secondary hook */
@@ -446,11 +504,19 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	if (dev_quals == NIL)
 		return;
 
+	/* Check availability of GpuScan+BRIN Index */
+	indexOpt = pgstrom_tryfind_brinindex(root, baserel,
+										 &indexQuals,
+										 &indexNBlocks);
+
 	/* add GpuScan path in single process */
 	pathnode = create_gpuscan_path(root, baserel,
 								   dev_quals,
 								   host_quals,
-								   0);
+								   0,
+								   indexOpt,
+								   indexQuals,
+								   indexNBlocks);
 	add_path(baserel, pathnode);
 
 	/* If appropriate, consider parallel GpuScan */
@@ -474,7 +540,10 @@ gpuscan_add_scan_path(PlannerInfo *root,
 		pathnode = create_gpuscan_path(root, baserel,
 									   dev_quals,
 									   host_quals,
-									   parallel_nworkers);
+									   parallel_nworkers,
+									   indexOpt,
+									   indexQuals,
+									   indexNBlocks);
 		add_partial_path(baserel, pathnode);
 
 		/*
@@ -488,7 +557,10 @@ gpuscan_add_scan_path(PlannerInfo *root,
 		subpath = create_gpuscan_path(root, baserel,
 									  dev_quals,
 									  host_quals,
-									  parallel_nworkers);
+									  parallel_nworkers,
+									  indexOpt,
+									  indexQuals,
+									  indexNBlocks);
 		pathnode = (Path *)
 			create_gather_path(root,
 							   baserel,
@@ -1406,6 +1478,7 @@ PlanGpuScanPath(PlannerInfo *root,
 	Relation		relation;
 	List		   *host_quals = NIL;
 	List		   *dev_quals = NIL;
+	List		   *index_quals = NIL;
 	List		   *tlist_dev = NIL;
 	List		   *ccache_refs = NIL;
 	ListCell	   *cell;
@@ -1443,6 +1516,7 @@ PlanGpuScanPath(PlannerInfo *root,
 	/* Reduce RestrictInfo list to bare expressions; ignore pseudoconstants */
 	host_quals = extract_actual_clauses(host_quals, false);
 	dev_quals = extract_actual_clauses(dev_quals, false);
+	index_quals = extract_actual_clauses(gs_info->index_quals, false);
 
 	/*
 	 * Code construction for the CUDA kernel code
@@ -1504,6 +1578,7 @@ PlanGpuScanPath(PlannerInfo *root,
 	gs_info->ccache_refs = ccache_refs;
 	gs_info->used_params = context.used_params;
 	gs_info->dev_quals = dev_quals;
+	gs_info->index_quals = index_quals;
 	form_gpuscan_info(cscan, gs_info);
 
 	return &cscan->scan.plan;
@@ -2087,6 +2162,17 @@ ExplainGpuScan(CustomScanState *node, List *ancestors, ExplainState *es)
 			ExplainPropertyInt64("Rows Removed by GPU Filter",
 								 NULL, nitems_filtered / instr->nloops, es);
 		}
+	}
+
+	/* show BRIN-index properties */
+	if (OidIsValid(gs_info->index_oid))
+	{
+		Node   *index_quals = (Node *)
+			make_ands_explicit(gs_info->index_quals);
+
+		exprstr = deparse_expression(index_quals, dcontext,
+									 es->verbose, false);
+		ExplainPropertyText("BRIN cond", exprstr, es);
 	}
 
 	/* common portion of EXPLAIN */

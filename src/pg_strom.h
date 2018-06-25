@@ -13,6 +13,7 @@
 #ifndef PG_STROM_H
 #define PG_STROM_H
 #include "postgres.h"
+#include "access/brin.h"
 #include "access/hash.h"
 #include "access/htup_details.h"
 #include "access/reloptions.h"
@@ -30,6 +31,7 @@
 #include "catalog/objectaccess.h"
 #include "catalog/objectaddress.h"
 #include "catalog/pg_aggregate.h"
+#include "catalog/pg_am.h"
 #include "catalog/pg_attribute.h"
 #include "catalog/pg_cast.h"
 #include "catalog/pg_class.h"
@@ -40,6 +42,7 @@
 #include "catalog/pg_language.h"
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_proc.h"
+#include "catalog/pg_statistic.h"
 #include "catalog/pg_tablespace.h"
 #include "catalog/pg_trigger.h"
 #include "catalog/pg_type.h"
@@ -126,6 +129,7 @@
 #include "utils/rel.h"
 #include "utils/resowner.h"
 #include "utils/ruleutils.h"
+#include "utils/selfuncs.h"
 #include "utils/snapmgr.h"
 #include "utils/spccache.h"
 #include "utils/syscache.h"
@@ -991,12 +995,23 @@ extern bool RelationCanUseNvmeStrom(Relation relation);
 extern void pgstrom_init_datastore(void);
 
 /*
+ * rel_scan.c
+ */
+extern IndexOptInfo *pgstrom_tryfind_brinindex(PlannerInfo *root,
+											   RelOptInfo *baserel,
+											   List **p_indexQuals,
+											   cl_long *p_indexNBlocks);
+
+/*
  * gpuscan.c
  */
 extern void cost_gpuscan_common(PlannerInfo *root,
 								RelOptInfo *scan_rel,
 								List *scan_quals,
 								int parallel_workers,
+								IndexOptInfo *indexOpt,
+								List *indexQuals,
+								cl_long indexNBlocks,
 								double *p_parallel_divisor,
 								double *p_scan_ntuples,
 								double *p_scan_nchunks,

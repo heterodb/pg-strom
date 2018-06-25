@@ -971,7 +971,8 @@ cost_gpupreagg(PlannerInfo *root,
 		cost_gpuscan_common(root,
 							input_path->parent,
 							gpa_info->outer_quals,
-							parallel_nworkers,
+							parallel_nworkers,	/* parallel scan */
+							NULL, NIL, 0,		/* BRIN-index */
 							&ntuples,
 							&nchunks,
 							&parallel_divisor,
