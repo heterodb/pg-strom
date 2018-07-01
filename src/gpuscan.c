@@ -40,7 +40,8 @@ typedef struct {
 	List	   *used_params;
 	List	   *dev_quals;		/* implicitly-ANDed device quals */
 	Oid			index_oid;		/* OID of BRIN-index, if any */
-	List	   *index_quals;	/* Qualifier of BRIN-index, if any */
+	List	   *index_conds;	/* BRIN-index key conditions */
+	List	   *index_quals;	/* original BRIN-index qualifier */
 } GpuScanInfo;
 
 static inline void
@@ -58,6 +59,7 @@ form_gpuscan_info(CustomScan *cscan, GpuScanInfo *gs_info)
 	exprs = lappend(exprs, gs_info->used_params);
 	exprs = lappend(exprs, gs_info->dev_quals);
 	privs = lappend(privs, makeInteger(gs_info->index_oid));
+	privs = lappend(privs, gs_info->index_conds);
 	exprs = lappend(exprs, gs_info->index_quals);
 
 	cscan->custom_private = privs;
@@ -82,6 +84,7 @@ deform_gpuscan_info(CustomScan *cscan)
 	gs_info->used_params = list_nth(exprs, eindex++);
 	gs_info->dev_quals = list_nth(exprs, eindex++);
 	gs_info->index_oid = intVal(list_nth(privs, pindex++));
+	gs_info->index_conds = list_nth(privs, pindex++);
 	gs_info->index_quals = list_nth(exprs, eindex++);
 
 	return gs_info;
@@ -173,6 +176,7 @@ create_gpuscan_path(PlannerInfo *root,
 					List *host_quals,
 					int parallel_nworkers,	/* for parallel-scan */
 					IndexOptInfo *indexOpt,	/* for BRIN-index */
+					List *indexConds,		/* for BRIN-index */
 					List *indexQuals,		/* for BRIN-index */
 					cl_long indexNBlocks)	/* for BRIN-index */
 {
@@ -209,6 +213,7 @@ create_gpuscan_path(PlannerInfo *root,
 	if ((scan_mode & PGSTROM_RELSCAN_BRIN_INDEX) != 0)
 	{
 		gs_info->index_oid = indexOpt->indexoid;
+		gs_info->index_conds = indexConds;
 		gs_info->index_quals = indexQuals;
 	}
 
@@ -284,6 +289,7 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	List	   *dev_quals = NIL;
 	List	   *host_quals = NIL;
 	IndexOptInfo *indexOpt;
+	List	   *indexConds;
 	List	   *indexQuals;
 	cl_long		indexNBlocks;
 	ListCell   *lc;
@@ -326,6 +332,7 @@ gpuscan_add_scan_path(PlannerInfo *root,
 
 	/* Check availability of GpuScan+BRIN Index */
 	indexOpt = pgstrom_tryfind_brinindex(root, baserel,
+										 &indexConds,
 										 &indexQuals,
 										 &indexNBlocks);
 
@@ -335,6 +342,7 @@ gpuscan_add_scan_path(PlannerInfo *root,
 								   host_quals,
 								   0,
 								   indexOpt,
+								   indexConds,
 								   indexQuals,
 								   indexNBlocks);
 	add_path(baserel, pathnode);
@@ -362,6 +370,7 @@ gpuscan_add_scan_path(PlannerInfo *root,
 									   host_quals,
 									   parallel_nworkers,
 									   indexOpt,
+									   indexConds,
 									   indexQuals,
 									   indexNBlocks);
 		add_partial_path(baserel, pathnode);
@@ -379,6 +388,7 @@ gpuscan_add_scan_path(PlannerInfo *root,
 									  host_quals,
 									  parallel_nworkers,
 									  indexOpt,
+									  indexConds,
 									  indexQuals,
 									  indexNBlocks);
 		pathnode = (Path *)
@@ -1717,6 +1727,10 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	}
 	else
 		gss->base_proj = NULL;
+	/* init BRIN-index support, if any */
+	pgstromExecInitBrinIndexMap(&gss->gts,
+								gs_info->index_oid,
+								gs_info->index_conds);
 
 	/* Get CUDA program and async build if any */
 	initStringInfo(&kern_define);
@@ -1797,6 +1811,8 @@ ExecGpuScan(CustomScanState *node)
 		gss->gs_sstate = createGpuScanSharedState(gss, NULL, NULL);
 		gss->gs_rtstat = &gss->gs_sstate->gs_rtstat;
 	}
+	if (gss->gts.outer_index_state)
+		pgstromExecGetBrinIndexMap(&gss->gts);
 	return ExecScan(&node->ss,
 					(ExecScanAccessMtd) pgstromExecGpuTaskState,
 					(ExecScanRecheckMtd) ExecReCheckGpuScan);
@@ -1812,6 +1828,8 @@ ExecEndGpuScan(CustomScanState *node)
 
 	/* wait for completion of asynchronous GpuTaks */
 	SynchronizeGpuContext(gss->gts.gcontext);
+	/* close index related stuff if any */
+	pgstromExecEndBrinIndexMap(&gss->gts);
 	/* reset fallback resources */
 	if (gss->base_slot)
 		ExecDropSingleTupleTableSlot(gss->base_slot);
@@ -1842,6 +1860,7 @@ ExecGpuScanEstimateDSM(CustomScanState *node,
 					   ParallelContext *pcxt)
 {
 	return (MAXALIGN(sizeof(GpuScanSharedState)) +
+			pgstromSizeOfBrinIndexMap((GpuTaskState *) node) +
 			pgstromEstimateDSMGpuTaskState((GpuTaskState *)node, pcxt));
 }
 
@@ -1862,7 +1881,13 @@ ExecGpuScanInitDSM(CustomScanState *node,
 				  PointerGetDatum(gss->gts.gcontext));
 	coordinate = ((char *)coordinate + 
 				  MAXALIGN(sizeof(GpuScanSharedState)));
-
+	if (gss->gts.outer_index_state)
+	{
+		gss->gts.outer_index_map = (Bitmapset *)coordinate;
+		gss->gts.outer_index_map->nwords = -1;	/* uninitialized */
+		coordinate = ((char *)coordinate +
+					  pgstromSizeOfBrinIndexMap(&gss->gts));
+	}
 	pgstromInitDSMGpuTaskState(&gss->gts, pcxt, coordinate);
 }
 
@@ -1883,7 +1908,12 @@ ExecGpuScanInitWorker(CustomScanState *node,
 				  PointerGetDatum(gss->gts.gcontext));
 	coordinate = ((char *)coordinate +
 				  MAXALIGN(sizeof(GpuScanSharedState)));
-
+	if (gss->gts.outer_index_state)
+	{
+		gss->gts.outer_index_map = (Bitmapset *)coordinate;
+		coordinate = ((char *)coordinate +
+					  pgstromSizeOfBrinIndexMap(&gss->gts));
+	}
 	pgstromInitWorkerGpuTaskState(&gss->gts, coordinate);
 }
 

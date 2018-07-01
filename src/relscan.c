@@ -251,7 +251,7 @@ estimate_brinindex_scan_nblocks(PlannerInfo *root,
 		indexRanges = 1.0;
 	minimalRanges = ceil(indexRanges * qualSelectivity);
 
-	elog(INFO, "strom: qualSelectivity=%.6f indexRanges=%.6f minimalRanges=%.6f indexCorrelation=%.6f", qualSelectivity, indexRanges, minimalRanges, indexCorrelation);
+	//elog(INFO, "strom: qualSelectivity=%.6f indexRanges=%.6f minimalRanges=%.6f indexCorrelation=%.6f", qualSelectivity, indexRanges, minimalRanges, indexCorrelation);
 
 	if (indexCorrelation < 1.0e-10)
 		estimatedRanges = indexRanges;
@@ -272,11 +272,76 @@ estimate_brinindex_scan_nblocks(PlannerInfo *root,
 }
 
 /*
+ * extract_index_conditions
+ */
+static Node *
+__fixup_indexqual_operand(Node *node, IndexOptInfo *indexOpt)
+{
+	ListCell   *lc;
+
+	if (!node)
+		return NULL;
+
+	if (IsA(node, RelabelType))
+	{
+		RelabelType *relabel = (RelabelType *) node;
+
+		return __fixup_indexqual_operand((Node *)relabel->arg, indexOpt);
+	}
+
+	foreach (lc, indexOpt->indextlist)
+	{
+		TargetEntry *tle = lfirst(lc);
+
+		if (equal(node, tle->expr))
+		{
+			return (Node *)makeVar(INDEX_VAR,
+								   tle->resno,
+								   exprType((Node *)tle->expr),
+								   exprTypmod((Node *) tle->expr),
+								   exprCollation((Node *) tle->expr),
+								   0);
+		}
+	}
+	if (IsA(node, Var))
+		elog(ERROR, "Bug? variable is not found at index tlist");
+	return expression_tree_mutator(node, __fixup_indexqual_operand, indexOpt);
+}
+
+static List *
+extract_index_conditions(List *index_quals, IndexOptInfo *indexOpt)
+{
+	List	   *result = NIL;
+	ListCell   *lc;
+
+	foreach (lc, index_quals)
+	{
+		RestrictInfo *rinfo = lfirst(lc);
+		OpExpr	   *op = (OpExpr *) rinfo->clause;
+
+		if (!IsA(rinfo->clause, OpExpr))
+			elog(ERROR, "Bug? unexpected index clause: %s",
+				 nodeToString(rinfo->clause));
+		if (list_length(((OpExpr *)rinfo->clause)->args) != 2)
+			elog(ERROR, "indexqual clause must be binary opclause");
+		op = (OpExpr *)copyObject(rinfo->clause);
+		if (!bms_equal(rinfo->left_relids, indexOpt->rel->relids))
+			CommuteOpExpr(op);
+		/* replace the indexkey expression with an index Var */
+		linitial(op->args) = __fixup_indexqual_operand(linitial(op->args),
+													   indexOpt);
+		result = lappend(result, op);
+	}
+	return result;
+}
+
+/*
  * pgstrom_tryfind_brinindex
  */
 IndexOptInfo *
 pgstrom_tryfind_brinindex(PlannerInfo *root,
 						  RelOptInfo *baserel,
+						  List **p_indexConds,
 						  List **p_indexQuals,
 						  cl_long *p_indexNBlocks)
 {
@@ -337,6 +402,8 @@ pgstrom_tryfind_brinindex(PlannerInfo *root,
 
 	if (indexOpt)
 	{
+		if (p_indexConds)
+			*p_indexConds = extract_index_conditions(indexQuals, indexOpt);
 		if (p_indexQuals)
 			*p_indexQuals = indexQuals;
 		if (p_indexNBlocks)
@@ -526,3 +593,282 @@ pgstrom_common_relscan_cost(PlannerInfo *root,
 
 	return scan_mode;
 }
+
+/*
+ * pgstromExecInitBrinIndexMap
+ */
+void
+pgstromExecInitBrinIndexMap(GpuTaskState *gts,
+							Oid index_oid,
+							List *index_conds)
+{
+	pgstromIndexState *pi_state = NULL;
+	Relation	relation = gts->css.ss.ss_currentRelation;
+	EState	   *estate = gts->css.ss.ps.state;
+	Index		scanrelid;
+	LOCKMODE	lockmode = NoLock;
+
+	if (!OidIsValid(index_oid))
+	{
+		Assert(index_conds == NIL);
+		gts->outer_index_state = NULL;
+		return;
+	}
+	Assert(relation != NULL);
+	scanrelid = ((Scan *) gts->css.ss.ps.plan)->scanrelid;
+	if (!ExecRelationIsTargetRelation(estate, scanrelid))
+		lockmode = AccessShareLock;
+
+	pi_state = palloc0(sizeof(pgstromIndexState));
+	pi_state->index_oid = index_oid;
+	pi_state->index_rel = index_open(index_oid, lockmode);
+	ExecIndexBuildScanKeys(&gts->css.ss.ps,
+						   pi_state->index_rel,
+						   index_conds,
+						   false,
+						   &pi_state->scan_keys,
+						   &pi_state->num_scan_keys,
+						   &pi_state->runtime_keys_info,
+						   &pi_state->num_runtime_keys,
+						   NULL,
+						   NULL);
+
+	/* ExprContext to evaluate runtime keys, if any */
+	if (pi_state->num_runtime_keys != 0)
+		pi_state->runtime_econtext = CreateExprContext(estate);
+	else
+		pi_state->runtime_econtext = NULL;
+
+	/* BRIN index specific initialization */
+	pi_state->nblocks = RelationGetNumberOfBlocks(relation);
+	pi_state->brin_revmap = brinRevmapInitialize(pi_state->index_rel,
+												 &pi_state->range_sz,
+												 estate->es_snapshot);
+	pi_state->brin_desc = brin_build_desc(pi_state->index_rel);
+
+	/* save the state */
+	gts->outer_index_state = pi_state;
+}
+
+/*
+ * pgstromSizeOfBrinIndexMap
+ */
+Size
+pgstromSizeOfBrinIndexMap(GpuTaskState *gts)
+{
+	pgstromIndexState *pi_state = gts->outer_index_state;
+	int		nwords;
+
+	if (!pi_state)
+		return 0;
+
+	nwords = (pi_state->nblocks +
+			  pi_state->range_sz - 1) / pi_state->range_sz;
+	return STROMALIGN(offsetof(Bitmapset, words) +
+					  sizeof(bitmapword) * nwords);
+
+}
+
+/*
+ * pgstromExecGetBrinIndexMap
+ *
+ * Also see bringetbitmap
+ */
+static void
+__pgstromExecGetBrinIndexMap(pgstromIndexState *pi_state,
+							 Bitmapset *brin_map,
+							 Snapshot snapshot)
+{
+	BrinDesc	   *bdesc = pi_state->brin_desc;
+	TupleDesc		bd_tupdesc = bdesc->bd_tupdesc;
+	BlockNumber		nblocks = pi_state->nblocks;
+	BlockNumber		range_sz = pi_state->range_sz;
+	BlockNumber		heapBlk;
+	BlockNumber		index;
+	Buffer			buf = InvalidBuffer;
+	FmgrInfo	   *consistentFn;
+	BrinMemTuple   *dtup;
+	BrinTuple	   *btup = NULL;
+	Size			btupsz = 0;
+	int				nranges;
+	int				nwords;
+	MemoryContext	oldcxt;
+	MemoryContext	perRangeCxt;
+
+	/* rooms for the consistent support procedures of indexed columns */
+	consistentFn = palloc0(sizeof(FmgrInfo) * bd_tupdesc->natts);
+	/* allocate an initial in-memory tuple */
+	dtup = brin_new_memtuple(bdesc);
+
+	/* moves to the working memory context per range */
+	perRangeCxt = AllocSetContextCreate(CurrentMemoryContext,
+										"PG-Strom BRIN-index temporary",
+										ALLOCSET_DEFAULT_SIZES);
+	oldcxt = MemoryContextSwitchTo(perRangeCxt);
+
+	nranges = (pi_state->nblocks +
+			   pi_state->range_sz - 1) / pi_state->range_sz;
+	nwords = (nranges + BITS_PER_BITMAPWORD - 1) / BITS_PER_BITMAPWORD;
+	Assert(brin_map->nwords < 0);
+	memset(brin_map->words, 0, sizeof(bitmapword) * nwords);
+	/*
+	 * Now scan the revmap.  We start by querying for heap page 0,
+	 * incrementing by the number of pages per range; this gives us a full
+	 * view of the table.
+	 */
+	for (heapBlk = 0, index = 0;
+		 heapBlk < nblocks;
+		 heapBlk += range_sz, index++)
+	{
+		bool		addrange = true;
+		BrinTuple  *tup;
+		OffsetNumber off;
+		Size		size;
+		int			keyno;
+
+		CHECK_FOR_INTERRUPTS();
+
+		MemoryContextResetAndDeleteChildren(perRangeCxt);
+
+		tup = brinGetTupleForHeapBlock(pi_state->brin_revmap, heapBlk,
+									   &buf, &off, &size,
+									   BUFFER_LOCK_SHARE,
+									   snapshot);
+		if (tup)
+		{
+			btup = brin_copy_tuple(tup, size, btup, &btupsz);
+			LockBuffer(buf, BUFFER_LOCK_UNLOCK);
+
+			dtup = brin_deform_tuple(bdesc, btup, dtup);
+			if (!dtup->bt_placeholder)
+			{
+				for (keyno = 0; keyno < pi_state->num_scan_keys; keyno++)
+				{
+					ScanKey		key = &pi_state->scan_keys[keyno];
+					AttrNumber	keyattno = key->sk_attno;
+					BrinValues *bval = &dtup->bt_columns[keyattno - 1];
+					Datum		rv;
+
+					Assert((key->sk_flags & SK_ISNULL) ||
+						   (key->sk_collation ==
+							bd_tupdesc->attrs[keyattno - 1]->attcollation));
+					/* First time this column? look up consistent function */
+					if (consistentFn[keyattno - 1].fn_oid == InvalidOid)
+					{
+						FmgrInfo   *tmp;
+
+						tmp = index_getprocinfo(pi_state->index_rel, keyattno,
+												BRIN_PROCNUM_CONSISTENT);
+						fmgr_info_copy(&consistentFn[keyattno - 1], tmp,
+									   CurrentMemoryContext);
+					}
+
+					/*
+					 * Check whether the scan key is consistent with the page
+					 * range values; if so, have the pages in the range added
+					 * to the output bitmap.
+					 */
+					rv = FunctionCall3Coll(&consistentFn[keyattno - 1],
+										   key->sk_collation,
+										   PointerGetDatum(bdesc),
+										   PointerGetDatum(bval),
+										   PointerGetDatum(key));
+					addrange = DatumGetBool(rv);
+					if (!addrange)
+						break;
+				}
+			}
+		}
+
+		if (addrange)
+		{
+			if (index / BITS_PER_BITMAPWORD < nwords)
+			{
+				brin_map->words[index / BITS_PER_BITMAPWORD]
+					|= (1U << (index % BITS_PER_BITMAPWORD));
+			}
+		}
+	}
+	MemoryContextSwitchTo(oldcxt);
+	MemoryContextDelete(perRangeCxt);
+
+	if (buf != InvalidBuffer)
+		ReleaseBuffer(buf);
+	/* mark this bitmapset is ready */
+	pg_memory_barrier();
+	brin_map->nwords = nwords;
+}
+
+void
+pgstromExecGetBrinIndexMap(GpuTaskState *gts)
+{
+	pgstromIndexState *pi_state = gts->outer_index_state;
+
+	if (!gts->outer_index_map || gts->outer_index_map->nwords < 0)
+	{
+		EState	   *estate = gts->css.ss.ps.state;
+
+		if (!gts->outer_index_map)
+		{
+			Assert(!IsParallelWorker());
+			gts->outer_index_map
+				= MemoryContextAlloc(estate->es_query_cxt,
+									 pgstromSizeOfBrinIndexMap(gts));
+			gts->outer_index_map->nwords = -1;
+		}
+
+		ResetLatch(MyLatch);
+		while (gts->outer_index_map->nwords < 0)
+		{
+			if (!IsParallelWorker())
+			{
+				__pgstromExecGetBrinIndexMap(pi_state,
+											 gts->outer_index_map,
+											 estate->es_snapshot);
+				/* wake up parallel workers if any */
+				if (gts->pcxt)
+				{
+					ParallelContext *pcxt = gts->pcxt;
+					pid_t		pid;
+					int			i;
+
+					for (i=0; i < pcxt->nworkers_launched; i++)
+					{
+						if (GetBackgroundWorkerPid(pcxt->worker[i].bgwhandle,
+												   &pid) == BGWH_STARTED)
+							ProcSendSignal(pid);
+					}
+				}
+			}
+			else
+			{
+				/* wait for completion of BRIN-index preload */
+				CHECK_FOR_INTERRUPTS();
+
+				WaitLatch(MyLatch,
+						  WL_LATCH_SET,
+						  -1
+#if PG_VERSION_NUM >= 100000
+						  ,PG_WAIT_EXTENSION
+#endif
+					);
+				ResetLatch(MyLatch);
+			}
+		}
+	}
+}
+
+void
+pgstromExecEndBrinIndexMap(GpuTaskState *gts)
+{
+	pgstromIndexState *pi_state = gts->outer_index_state;
+
+	if (!pi_state)
+		return;
+	brinRevmapTerminate(pi_state->brin_revmap);
+	index_close(pi_state->index_rel, NoLock);
+}
+
+void
+pgstromExecRewindBrinIndexMap(GpuTaskState *gts)
+{}

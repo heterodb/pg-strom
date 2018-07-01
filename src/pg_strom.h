@@ -14,6 +14,7 @@
 #define PG_STROM_H
 #include "postgres.h"
 #include "access/brin.h"
+#include "access/brin_revmap.h"
 #include "access/hash.h"
 #include "access/htup_details.h"
 #include "access/reloptions.h"
@@ -54,6 +55,7 @@
 #include "commands/trigger.h"
 #include "executor/executor.h"
 #include "executor/nodeAgg.h"
+#include "executor/nodeIndexscan.h"
 #include "executor/nodeCustom.h"
 #include "executor/nodeSubplan.h"
 #include "fmgr.h"
@@ -311,6 +313,12 @@ struct GpuTaskState
 	cl_uint			outer_nrows_per_block;
 	Instrumentation	outer_instrument; /* runtime statistics, if any */
 	TupleTableSlot *scan_overflow;	/* temporary buffer, if no space on PDS */
+	/* BRIN index support on outer relation, if any */
+	struct pgstromIndexState *outer_index_state;
+	Bitmapset	   *outer_index_map;
+
+	IndexScanDesc	outer_brin_index;	/* brin index of outer scan, if any */
+
 	/*
 	 * A pending PDS object. Load from the outer relation can be suspended
 	 * if columnar cache segment is already built and valid.
@@ -995,10 +1003,11 @@ extern bool RelationCanUseNvmeStrom(Relation relation);
 extern void pgstrom_init_datastore(void);
 
 /*
- * rel_scan.c
+ * relscan.c
  */
 extern IndexOptInfo *pgstrom_tryfind_brinindex(PlannerInfo *root,
 											   RelOptInfo *baserel,
+											   List **p_indexConds,
 											   List **p_indexQuals,
 											   cl_long *p_indexNBlocks);
 #define PGSTROM_RELSCAN_NORMAL			0x0000
@@ -1017,6 +1026,31 @@ extern int pgstrom_common_relscan_cost(PlannerInfo *root,
 									   cl_uint *p_nrows_per_block,
 									   Cost *p_startup_cost,
 									   Cost *p_run_cost);
+
+typedef struct pgstromIndexState
+{
+	Oid			index_oid;
+	Relation	index_rel;
+	BlockNumber	nblocks;
+	BlockNumber	range_sz;
+	BrinRevmap *brin_revmap;
+	BrinDesc   *brin_desc;
+	ScanKey		scan_keys;
+	int			num_scan_keys;
+	IndexRuntimeKeyInfo *runtime_keys_info;
+	int			num_runtime_keys;
+	bool		runtime_key_ready;
+	ExprContext *runtime_econtext;
+} pgstromIndexState;
+
+extern void pgstromExecInitBrinIndexMap(GpuTaskState *gts,
+										Oid index_oid,
+										List *index_quals);
+extern Size pgstromSizeOfBrinIndexMap(GpuTaskState *gts);
+extern void pgstromExecGetBrinIndexMap(GpuTaskState *gts);
+extern void pgstromExecEndBrinIndexMap(GpuTaskState *gts);
+extern void pgstromExecRewindBrinIndexMap(GpuTaskState *gts);
+
 /*
  * gpuscan.c
  */
