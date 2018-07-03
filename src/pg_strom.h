@@ -1027,22 +1027,6 @@ extern int pgstrom_common_relscan_cost(PlannerInfo *root,
 									   Cost *p_startup_cost,
 									   Cost *p_run_cost);
 
-typedef struct pgstromIndexState
-{
-	Oid			index_oid;
-	Relation	index_rel;
-	BlockNumber	nblocks;
-	BlockNumber	range_sz;
-	BrinRevmap *brin_revmap;
-	BrinDesc   *brin_desc;
-	ScanKey		scan_keys;
-	int			num_scan_keys;
-	IndexRuntimeKeyInfo *runtime_keys_info;
-	int			num_runtime_keys;
-	bool		runtime_key_ready;
-	ExprContext *runtime_econtext;
-} pgstromIndexState;
-
 extern void pgstromExecInitBrinIndexMap(GpuTaskState *gts,
 										Oid index_oid,
 										List *index_quals);
@@ -1051,22 +1035,14 @@ extern void pgstromExecGetBrinIndexMap(GpuTaskState *gts);
 extern void pgstromExecEndBrinIndexMap(GpuTaskState *gts);
 extern void pgstromExecRewindBrinIndexMap(GpuTaskState *gts);
 
+extern pgstrom_data_store *pgstromExecScanChunk(GpuTaskState *gts);
+extern void pgstromRewindScanChunk(GpuTaskState *gts);
+
+extern void pgstrom_init_relscan(void);
+
 /*
  * gpuscan.c
  */
-extern void cost_gpuscan_common(PlannerInfo *root,
-								RelOptInfo *scan_rel,
-								List *scan_quals,
-								int parallel_workers,
-								IndexOptInfo *indexOpt,
-								List *indexQuals,
-								cl_long indexNBlocks,
-								double *p_parallel_divisor,
-								double *p_scan_ntuples,
-								double *p_scan_nchunks,
-								cl_uint *p_nrows_per_block,
-								Cost *p_startup_cost,
-								Cost *p_run_cost);
 extern Cost cost_for_dma_receive(RelOptInfo *rel, double ntuples);
 extern void codegen_gpuscan_quals(StringInfo kern,
 								  codegen_context *context,
@@ -1079,12 +1055,6 @@ extern bool pgstrom_pullup_outer_scan(const Path *outer_path,
 extern bool pgstrom_path_is_gpuscan(const Path *path);
 extern bool pgstrom_plan_is_gpuscan(const Plan *plan);
 extern bool pgstrom_planstate_is_gpuscan(const PlanState *ps);
-
-extern void gpuscan_rewind_position(GpuTaskState *gts);
-
-extern pgstrom_data_store *gpuscanExecScanChunk(GpuTaskState *gts);
-
-extern void gpuscanRewindScanChunk(GpuTaskState *gts);
 
 extern void assign_gpuscan_session_info(StringInfo buf,
 										GpuTaskState *gts);

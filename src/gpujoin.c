@@ -4428,7 +4428,7 @@ GpuJoinExecOuterScanChunk(GpuTaskState *gts)
 
 	if (gjs->gts.css.ss.ss_currentRelation)
 	{
-		pds = gpuscanExecScanChunk(gts);
+		pds = pgstromExecScanChunk(gts);
 		if (pds && pds->kds.format == KDS_FORMAT_COLUMN)
 			pg_atomic_add_fetch_u64(&gj_rtstat->ccache_count, 1);
 	}

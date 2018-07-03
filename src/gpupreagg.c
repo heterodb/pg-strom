@@ -4613,7 +4613,7 @@ gpupreagg_next_task(GpuTaskState *gts)
 	}
 	else if (gpas->gts.css.ss.ss_currentRelation)
 	{
-		pds = gpuscanExecScanChunk(&gpas->gts);
+		pds = pgstromExecScanChunk(&gpas->gts);
 		if (pds && pds->kds.format == KDS_FORMAT_COLUMN)
 			pg_atomic_add_fetch_u64(&gpa_rtstat->ccache_count, 1);
 	}
