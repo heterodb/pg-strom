@@ -1811,8 +1811,6 @@ ExecGpuScan(CustomScanState *node)
 		gss->gs_sstate = createGpuScanSharedState(gss, NULL, NULL);
 		gss->gs_rtstat = &gss->gs_sstate->gs_rtstat;
 	}
-	if (gss->gts.outer_index_state)
-		pgstromExecGetBrinIndexMap(&gss->gts);
 	return ExecScan(&node->ss,
 					(ExecScanAccessMtd) pgstromExecGpuTaskState,
 					(ExecScanRecheckMtd) ExecReCheckGpuScan);
@@ -2143,271 +2141,61 @@ gpuscan_create_task(GpuScanState *gss,
 }
 
 /*
- * gpuscan_parallel_nextpage
- *
- * similar role of heap_parallelscan_nextpage in access/heap/heapam.c,
- * however, it reserves multiple pages at once, and may construct
- * a new PDS if columnar cache is valid.
+ * gpuscanExecScanChunkParallel - read the relation with parallel scan
  */
 static pgstrom_data_store *
-gpuscan_parallel_nextpage(GpuTaskState *gts, cl_uint nr_blocks)
+gpuscanExecScanChunkParallel(GpuTaskState *gts,
+							 pgstrom_data_store *pds,
+							 Bitmapset *brin_map, cl_long brin_range_sz)
 {
 	GpuTaskSharedState *gtss = gts->gtss;
-	HeapScanDesc	scan = gts->css.ss.ss_currentScanDesc;
-	GpuContext	   *gcontext = gts->gcontext;
-	Relids			ccache_refs = gts->ccache_refs;
-	Relation		relation = scan->rs_rd;
-	BlockNumber		sync_startpage = InvalidBlockNumber;
-	cl_long			page = -1;
-	cl_long			base;
-	cl_long			startblock;
-	cl_long			nr_allocated;
-	struct ccacheChunk *cc_chunk = NULL;
+	GpuContext *gcontext = gts->gcontext;
+	Relation	relation = gts->css.ss.ss_currentRelation;
+	HeapScanDesc scan = gts->css.ss.ss_currentScanDesc;
+	Relids		ccache_refs = gts->ccache_refs;
 	pgstrom_data_store *pds_column = NULL;
 
-	Assert(scan->rs_numblocks == 0);
-	Assert(scan->rs_parallel);
-retry:
-	/* Grab the spinlock. */
-	SpinLockAcquire(&gtss->phscan.phs_mutex);
-
-	/*
-	 * If the scan's startblock has not yet been initialized, we must do so
-	 * now.  If this is not a synchronized scan, we just start at block 0,
-	 * but if it is a synchronized scan, we must get the starting position
-	 * from the synchronized scan machinery.  We can't hold the spinlock
-	 * while doing that, though, so release the spinlock, get the information
-	 * we need, and retry.  If nobody else has initialized the scan in the
-	 * meantime, we'll fill in the value we fetched on the second time
-	 * through.
-	 */
-	if (gtss->phscan.phs_startblock == InvalidBlockNumber)
-	{
-		if (!gtss->phscan.phs_syncscan)
-			gtss->phscan.phs_startblock = 0;
-		else if (sync_startpage != InvalidBlockNumber)
-			gtss->phscan.phs_startblock = sync_startpage;
-		else
-		{
-			SpinLockRelease(&gtss->phscan.phs_mutex);
-			sync_startpage = ss_get_location(relation, scan->rs_nblocks);
-			goto retry;
-		}
-	}
-	startblock = gtss->phscan.phs_startblock;
-	nr_allocated = gtss->nr_allocated;
-
-	if (nr_allocated >= (cl_long)scan->rs_nblocks)
-		goto out_unlock;
-
-	if (nr_allocated + nr_blocks >= (cl_long)scan->rs_nblocks)
-		nr_blocks = (cl_long)scan->rs_nblocks - nr_allocated;
-	page = (startblock + nr_allocated) % (cl_long)scan->rs_nblocks;
-
-	/* should never read multiple blocks across the segment boundary */
-	Assert(nr_blocks > 0 && nr_blocks < RELSEG_SIZE);
-	if ((page / RELSEG_SIZE) != (page + nr_blocks - 1) / RELSEG_SIZE)
-		nr_blocks = RELSEG_SIZE - (page % RELSEG_SIZE);
-	Assert(nr_blocks > 0);
-
-	/* try to lookup columnar cache if any */
-	base = (page + CCACHE_CHUNK_NBLOCKS-1) & ~(CCACHE_CHUNK_NBLOCKS-1);
-	if (ccache_refs &&
-		(page <= base && page + nr_blocks >= base) &&
-		(base >= startblock ||
-		 base + CCACHE_CHUNK_NBLOCKS <= startblock) &&
-		(base + CCACHE_CHUNK_NBLOCKS <= scan->rs_nblocks))
-	{
-		cc_chunk = pgstrom_ccache_get_chunk(relation, base);
-		if (cc_chunk)
-		{
-			nr_blocks = base - page;
-			nr_allocated += nr_blocks + CCACHE_CHUNK_NBLOCKS;
-
-			/*
-			 * A corner case handling: if ccache chunk is empty, we can
-			 * skip the hole blocks and also can resume the table scan
-			 * from the next block of the empty ccache chunk.
-			 */
-			if (pgstrom_ccache_is_empty(cc_chunk))
-			{
-				pgstrom_ccache_put_chunk(cc_chunk);
-				cc_chunk = NULL;
-				nr_allocated += CCACHE_CHUNK_NBLOCKS;
-			}
-		}
-	}
-	if (!cc_chunk)
-		nr_allocated += nr_blocks;
-	/* update # of blocks already allocated to workers */
-	gtss->nr_allocated = nr_allocated;
-out_unlock:
-	SpinLockRelease(&gtss->phscan.phs_mutex);
-
-	/*
-	 * Report scan location.  Normally, we report the current page number.
-	 * When we reach the end of the scan, though, we report the starting page,
-	 * not the ending page, just so the starting positions for later scans
-	 * doesn't slew backwards.  We only report the position at the end of the
-	 * scan once, though: subsequent callers will have report nothing, since
-	 * they will have page == InvalidBlockNumber.
-	 */
-	if (scan->rs_syncscan)
-	{
-		ss_report_location(scan->rs_rd,
-						   page < 0
-						   ? gtss->phscan.phs_startblock
-						   : (BlockNumber)page);
-	}
-
-	/*
-	 * construction of PDS based on the columnar cache, if any
-	 */
-	if (cc_chunk)
-	{
-		PG_TRY();
-		{
-			pds_column = pgstrom_ccache_load_chunk(cc_chunk,
-												   gcontext,
-												   relation,
-												   ccache_refs);
-		}
-		PG_CATCH();
-		{
-			pgstrom_ccache_put_chunk(cc_chunk);
-			PG_RE_THROW();
-		}
-		PG_END_TRY();
-		pgstrom_ccache_put_chunk(cc_chunk);
-	}
-	Assert(page < MaxBlockNumber);
-	scan->rs_cblock = (page < 0 ? InvalidBlockNumber : (BlockNumber)page);
-	scan->rs_numblocks = nr_blocks;
-
-	return pds_column;
-}
-
-/*
- * gpuscanExecScanChunk - read the relation by one chunk
- */
-pgstrom_data_store *
-gpuscanExecScanChunk(GpuTaskState *gts)
-{
-	Relation		base_rel = gts->css.ss.ss_currentRelation;
-	HeapScanDesc	scan;
-	pgstrom_data_store *pds = NULL;
-	pgstrom_data_store *pds_column = NULL;
-
-	/*
-	 * Setup scan-descriptor, if the scan is not parallel, of if we're
-	 * executing a scan that was intended to be parallel serially.
-	 */
-	if (!gts->css.ss.ss_currentScanDesc)
-	{
-		EState	   *estate = gts->css.ss.ps.state;
-
-		gts->css.ss.ss_currentScanDesc = heap_beginscan(base_rel,
-														estate->es_snapshot,
-														0, NULL);
-		/*
-		 * Try to choose NVMe-Strom, if relation is deployed on the supported
-		 * tablespace and expected total i/o size is enough large than cache-
-		 * only scan.
-		 */
-		PDS_init_heapscan_state(gts);
-	}
-	scan = gts->css.ss.ss_currentScanDesc;
-	InstrStartNode(&gts->outer_instrument);
-
-	/* fetch suspended PDS, if any */
-	pds = gts->outer_pds_suspend;
-	gts->outer_pds_suspend = NULL;
 	for (;;)
 	{
 		if (!scan->rs_inited)
 		{
+			Assert(scan->rs_parallel);
 			if (scan->rs_nblocks == 0)
-			{
-				Assert(pds == NULL);
-				goto out;
-			}
-			if (!gts->gtss)
-			{
-				scan->rs_cblock = scan->rs_startblock;
-				Assert(scan->rs_numblocks == InvalidBlockNumber);
-			}
-			else
-			{
-				/* force to call gpuscan_parallel_nextpage() */
-				scan->rs_cblock = InvalidBlockNumber;
-				scan->rs_numblocks = 0;
-			}
+				break;
+			scan->rs_cblock = InvalidBlockNumber;
+			scan->rs_numblocks = 0;		/* force to get next blocks */
 			scan->rs_inited = true;
 		}
 		else if (scan->rs_cblock == InvalidBlockNumber)
 		{
-			/* no more blocks to read */
+			/* end of the scan */
 			break;
 		}
 
-		/* move to the next position to load */
-		if (!gts->gtss)
+		if (scan->rs_numblocks == 0)
 		{
-			BlockNumber		page = scan->rs_cblock;
-			struct ccacheChunk *cc_chunk;
-
-			/* try to fetch columnar-cache, if any */
-			if (gts->ccache_refs &&
-				(page & (CCACHE_CHUNK_NBLOCKS - 1)) == 0 &&
-				(page >= scan->rs_startblock ||
-				 page + CCACHE_CHUNK_NBLOCKS <= scan->rs_startblock) &&
-				(page + CCACHE_CHUNK_NBLOCKS <= scan->rs_nblocks))
-			{
-				cc_chunk = pgstrom_ccache_get_chunk(scan->rs_rd, page);
-				if (cc_chunk)
-				{
-					PG_TRY();
-					{
-						pds_column =
-							pgstrom_ccache_load_chunk(cc_chunk,
-													  gts->gcontext,
-													  scan->rs_rd,
-													  gts->ccache_refs);
-					}
-					PG_CATCH();
-					{
-						pgstrom_ccache_put_chunk(cc_chunk);
-						PG_RE_THROW();
-					}
-					PG_END_TRY();
-					pgstrom_ccache_put_chunk(cc_chunk);
-
-					scan->rs_cblock += CCACHE_CHUNK_NBLOCKS;
-					if (scan->rs_cblock >= scan->rs_nblocks)
-						scan->rs_cblock = 0;
-					Assert(scan->rs_numblocks == InvalidBlockNumber);
-					if (scan->rs_syncscan)
-						ss_report_location(scan->rs_rd, scan->rs_cblock);
-					if (scan->rs_cblock == scan->rs_startblock)
-						scan->rs_cblock = InvalidBlockNumber;
-					break;
-				}
-			}
-		}
-		else if (scan->rs_numblocks == 0)
-		{
-			NVMEScanState  *nvme_sstate = gts->nvme_sstate;
-			cl_uint			nblocks_atonce;
+			struct ccacheChunk *cc_chunk = NULL;
+			NVMEScanState *nvme_sstate = gts->nvme_sstate;
+			BlockNumber	sync_startpage = InvalidBlockNumber;
+			cl_long		nr_allocated;
+			cl_long		startblock;
+			cl_long		nr_blocks;
+			cl_long		page;
+			cl_long		base;
 
 			/*
-			 * Suspend the heap-scan of row-based PDS, and returns columnar
-			 * PDS instead. In case when bgworker tries to fetch multiple
-			 * blocks which contains the head block of ccache, "gap" blocks
-			 * are loaded to row-based PDS, then resumed when bgworker meets
-			 * the range with no ccache.
-			 */
-			if (pds_column)
+             * Suspend the heap-scan of row-based PDS, and returns columnar
+             * PDS instead. In case when bgworker tries to fetch multiple
+             * blocks which contains the head block of ccache, "gap" blocks
+             * are loaded to row-based PDS, then resumed when bgworker meets
+             * the range with no ccache.
+             */
+            if (pds_column)
+			{
+				gts->outer_pds_suspend = pds;
+				pds = pds_column;
 				break;
+			}
 
 			/*
 			 * MEMO: A key of i/o performance is consolidation of continuous
@@ -2423,68 +2211,422 @@ gpuscanExecScanChunk(GpuTaskState *gts)
 			 * number of DMA requests.
 			 */
 			if (!nvme_sstate)
-				nblocks_atonce = 8;
+				nr_blocks = 8;
 			else if (pds)
 			{
 				if (pds->kds.nitems >= pds->kds.nrooms)
 					break;	/* no more rooms in this PDS */
-				nblocks_atonce = pds->kds.nrooms - pds->kds.nitems;
+				nr_blocks = pds->kds.nrooms - pds->kds.nitems;
 			}
 			else
-				nblocks_atonce = nvme_sstate->nblocks_per_chunk;
-			pds_column = gpuscan_parallel_nextpage(gts, nblocks_atonce);
+				nr_blocks = nvme_sstate->nblocks_per_chunk;
 
-			/* no more blocks to read? */
-			if (scan->rs_numblocks == 0)
+		retry_lock:
+			SpinLockAcquire(&gtss->phscan.phs_mutex);
+			/*
+			 * If the scan's startblock has not yet been initialized, we must
+			 * do it now. If this is not a synchronized scan, we just start
+			 * at block 0, but if it is a synchronized scan, we must get
+			 * the starting position from the synchronized scan facility.
+			 * We can't hold the spinlock while doing that, though, so release
+			 * the spinlock once, get the information we need, and retry.
+			 * If nobody else has initialized the scan in the meantime,
+			 * we'll fill in the value we fetched on the second time through.
+			 */
+			if (gtss->phscan.phs_startblock == InvalidBlockNumber)
+			{
+				if (!gtss->phscan.phs_syncscan)
+					gtss->phscan.phs_startblock = 0;
+				else if (sync_startpage != InvalidBlockNumber)
+					gtss->phscan.phs_startblock = sync_startpage;
+				else
+				{
+					SpinLockRelease(&gtss->phscan.phs_mutex);
+					sync_startpage = ss_get_location(relation,
+													 scan->rs_nblocks);
+					goto retry_lock;
+				}
+			}
+			startblock = gtss->phscan.phs_startblock;
+			nr_allocated = gtss->nr_allocated;
+
+			if (nr_allocated >= (cl_long)scan->rs_nblocks)
+			{
+				SpinLockRelease(&gtss->phscan.phs_mutex);
+				scan->rs_cblock = InvalidBlockNumber;	/* end of the scan */
 				break;
-		}
+			}
+			if (nr_allocated + nr_blocks >= (cl_long)scan->rs_nblocks)
+				nr_blocks = (cl_long)scan->rs_nblocks - nr_allocated;
+			page = (startblock + nr_allocated) % (cl_long)scan->rs_nblocks;
 
+			/* should never read the blocks across segment boundary */
+			Assert(nr_blocks > 0 && nr_blocks <= RELSEG_SIZE);
+			if ((page / RELSEG_SIZE) != (page + nr_blocks - 1) / RELSEG_SIZE)
+				nr_blocks = RELSEG_SIZE - (page % RELSEG_SIZE);
+			Assert(nr_blocks > 0);
+
+			/* try to lookup columnar cache */
+			base = (page + CCACHE_CHUNK_NBLOCKS-1) & ~(CCACHE_CHUNK_NBLOCKS-1);
+			if (ccache_refs &&
+				(page <= base && page + nr_blocks >= base) &&
+				(base >= startblock ||
+				 base + CCACHE_CHUNK_NBLOCKS <= startblock) &&
+				(base + CCACHE_CHUNK_NBLOCKS <= scan->rs_nblocks))
+			{
+				cc_chunk = pgstrom_ccache_get_chunk(relation, base);
+				if (cc_chunk)
+				{
+					/*
+					 * A corner case handling: if ccache chunk is empty,
+					 * we can skip the hole zone, and can resume the table
+					 * scan from the next block of the empty ccache chunk.
+					 */
+					if (pgstrom_ccache_is_empty(cc_chunk))
+					{
+						pgstrom_ccache_put_chunk(cc_chunk);
+						cc_chunk = NULL;
+					}
+					/*
+					 * BRIN-index checks. If columnar cache chunk has no
+					 * valid tuples, we can skip this chunk.
+					 */
+					if (brin_map)
+					{
+						long	pos, end;
+
+						pos = base / brin_range_sz;
+						end = (base + CCACHE_CHUNK_NBLOCKS-1) / brin_range_sz;
+						while (pos <= end)
+						{
+							if (!bms_is_member(pos, brin_map))
+								break;
+							pos++;
+						}
+						if (pos > end)
+						{
+							pgstrom_ccache_put_chunk(cc_chunk);
+							cc_chunk = NULL;
+						}
+					}
+					nr_blocks = base - page;
+					nr_allocated += nr_blocks + CCACHE_CHUNK_NBLOCKS;
+					goto ccache_found;
+				}
+			}
+
+			if (brin_map)
+			{
+				long	pos = page / brin_range_sz;
+				long	end = (page + nr_blocks - 1) / brin_range_sz;
+				long	s_page = -1;
+				long	e_page = page + nr_blocks;
+
+				/* find the first valid range */
+				while (pos <= end)
+				{
+					if (!bms_is_member(pos, brin_map))
+					{
+						s_page = Max(page, pos * brin_range_sz);
+						break;
+					}
+					pos++;
+				}
+
+				if (s_page < 0)
+				{
+					/* Oops, here is no valid range, so just skip it */
+					nr_allocated += nr_blocks;
+					nr_blocks = 0;
+				}
+				else
+				{
+					/* find the continuous valid ranges */
+					Assert(pos <= end);
+					Assert(!bms_is_member(pos, brin_map));
+					while (pos <= end)
+					{
+						if (bms_is_member(pos, brin_map))
+						{
+							e_page = Min(e_page, pos * brin_range_sz);
+							break;
+						}
+						pos++;
+					}
+					nr_allocated += (e_page - page);
+					nr_blocks = e_page - s_page;
+					page = s_page;
+				}
+			}
+			else
+			{
+				/* elsewhere, just walk on the following blocks */
+				nr_allocated += nr_blocks;
+			}
+		ccache_found:
+			/* update # of blocks already allocated to workers */
+			gtss->nr_allocated = nr_allocated;
+			SpinLockRelease(&gtss->phscan.phs_mutex);
+
+			/* construction of PDS based on the columnar cache, if any */
+			if (cc_chunk)
+			{
+				PG_TRY();
+				{
+					pds_column = pgstrom_ccache_load_chunk(cc_chunk,
+														   gcontext,
+														   relation,
+														   ccache_refs);
+				}
+				PG_CATCH();
+				{
+					pgstrom_ccache_put_chunk(cc_chunk);
+					PG_RE_THROW();
+				}
+				PG_END_TRY();
+				pgstrom_ccache_put_chunk(cc_chunk);
+			}
+			scan->rs_cblock = page;
+			scan->rs_numblocks = nr_blocks;
+			continue;
+		}
 		/* allocation of row-based PDS on demand */
 		if (!pds)
 		{
 			if (gts->nvme_sstate)
 				pds = PDS_create_block(gts->gcontext,
-									   RelationGetDescr(base_rel),
+									   RelationGetDescr(relation),
 									   gts->nvme_sstate);
 			else
 				pds = PDS_create_row(gts->gcontext,
-									 RelationGetDescr(base_rel),
+									 RelationGetDescr(relation),
 									 pgstrom_chunk_size());
-			pds->kds.table_oid = RelationGetRelid(base_rel);
+			pds->kds.table_oid = RelationGetRelid(relation);
 		}
 		/* scan next block */
-		if (scan->rs_cblock == InvalidBlockNumber ||
-			!PDS_exec_heapscan(gts, pds))
+		if (!PDS_exec_heapscan(gts, pds))
+		{
+			if (pds_column)
+			{
+				gts->outer_pds_suspend = pds;
+				pds = pds_column;
+			}
 			break;
+		}
 
 		/* move to the next block */
+		scan->rs_numblocks--;
 		scan->rs_cblock++;
 		if (scan->rs_cblock >= scan->rs_nblocks)
 			scan->rs_cblock = 0;
-		if (scan->rs_numblocks != InvalidBlockNumber)
-		{
-			Assert(scan->rs_numblocks > 0);
-			scan->rs_numblocks--;
-		}
 		if (scan->rs_syncscan)
-			ss_report_location(scan->rs_rd, scan->rs_cblock);
+			ss_report_location(relation, scan->rs_cblock);
 		/* end of the scan? */
 		if (scan->rs_cblock == scan->rs_startblock)
-			scan->rs_cblock = InvalidBlockNumber;
+            scan->rs_cblock = InvalidBlockNumber;
+	}
+	return pds;
+}
+
+/*
+ * gpuscanExecScanChunk - read the relation by one chunk
+ */
+pgstrom_data_store *
+gpuscanExecScanChunk(GpuTaskState *gts)
+{
+	Relation		rel = gts->css.ss.ss_currentRelation;
+	HeapScanDesc	scan = gts->css.ss.ss_currentScanDesc;
+	Bitmapset	   *brin_map;
+	cl_long			brin_range_sz = 0;
+	pgstrom_data_store *pds = NULL;
+
+	/*
+	 * Setup scan-descriptor, if the scan is not parallel, of if we're
+	 * executing a scan that was intended to be parallel serially.
+	 */
+	if (!scan)
+	{
+		EState	   *estate = gts->css.ss.ps.state;
+
+		scan = heap_beginscan(rel, estate->es_snapshot, 0, NULL);
+		gts->css.ss.ss_currentScanDesc = scan;
+		/*
+		 * Try to choose NVMe-Strom, if relation is deployed on the supported
+		 * tablespace and expected total i/o size is enough large than cache-
+		 * only scan.
+		 */
+		PDS_init_heapscan_state(gts);
+	}
+	InstrStartNode(&gts->outer_instrument);
+	/* Load the BRIN-index bitmap, if any */
+	if (gts->outer_index_state)
+		pgstromExecGetBrinIndexMap(gts);
+	brin_map = gts->outer_index_map;
+	if (brin_map)
+		brin_range_sz = gts->outer_index_state->range_sz;
+	/* resume the suspended PDS, if any */
+	pds = gts->outer_pds_suspend;
+	gts->outer_pds_suspend = NULL;
+
+	if (gts->gtss)
+		pds = gpuscanExecScanChunkParallel(gts, pds, brin_map, brin_range_sz);
+	else
+	{
+		for (;;)
+		{
+			cl_long		page;
+
+			if (!scan->rs_inited)
+			{
+				/* no blocks to read? */
+				if (scan->rs_nblocks == 0)
+					break;
+				scan->rs_cblock = scan->rs_startblock;
+				Assert(scan->rs_numblocks == InvalidBlockNumber);
+				scan->rs_inited = true;
+			}
+			else if (scan->rs_cblock == InvalidBlockNumber)
+			{
+				/* no more blocks to read */
+				break;
+			}
+			page = scan->rs_cblock;
+
+			/* try to fetch columnar-cache, if any */
+			if (gts->ccache_refs &&
+				(page & (CCACHE_CHUNK_NBLOCKS - 1)) == 0 &&
+				(page >= scan->rs_startblock ||
+				 page + CCACHE_CHUNK_NBLOCKS <= scan->rs_startblock) &&
+				(page + CCACHE_CHUNK_NBLOCKS <= scan->rs_nblocks))
+			{
+				pgstrom_data_store *pds_column = NULL;
+				struct ccacheChunk *cc_chunk;
+
+				/*
+				 * In case when BRIN-index bitmap says here is no tuples to
+				 * be fetched in the next columnar-cache range, we can skip
+				 * this range.
+				 */
+				if (brin_map)
+				{
+					long	pos, end;
+					bool	found = false;
+
+					end = (page + CCACHE_CHUNK_NBLOCKS - 1) / brin_range_sz;
+					for (pos = page / brin_range_sz; pos <= end; pos++)
+					{
+						if (!bms_is_member(pos, brin_map))
+						{
+							found = true;
+							break;
+						}
+					}
+
+					if (!found)
+					{
+						page += CCACHE_CHUNK_NBLOCKS;
+						if (page >= scan->rs_nblocks)
+							scan->rs_cblock = 0;
+						else
+							scan->rs_cblock = page;
+						if (scan->rs_syncscan)
+							ss_report_location(rel, scan->rs_cblock);
+						if (scan->rs_cblock == scan->rs_startblock)
+							scan->rs_cblock = InvalidBlockNumber;
+						continue;
+					}
+				}
+
+				cc_chunk = pgstrom_ccache_get_chunk(rel, page);
+				if (cc_chunk)
+				{
+					PG_TRY();
+					{
+						pds_column =
+							pgstrom_ccache_load_chunk(cc_chunk,
+													  gts->gcontext,
+													  rel,
+													  gts->ccache_refs);
+					}
+					PG_CATCH();
+					{
+						pgstrom_ccache_put_chunk(cc_chunk);
+						PG_RE_THROW();
+					}
+					PG_END_TRY();
+					pgstrom_ccache_put_chunk(cc_chunk);
+
+					scan->rs_cblock += CCACHE_CHUNK_NBLOCKS;
+					if (scan->rs_cblock >= scan->rs_nblocks)
+						scan->rs_cblock = 0;
+					if (scan->rs_syncscan)
+						ss_report_location(rel, scan->rs_cblock);
+					if (scan->rs_cblock == scan->rs_startblock)
+						scan->rs_cblock = InvalidBlockNumber;
+					/* suspend row-based PDS */
+					gts->outer_pds_suspend = pds;
+					pds = pds_column;
+					break;
+				}
+			}
+
+			/*
+			 * If any, check BRIN-index bitmap, then moves to the next range
+			 * boundary if no tuple can match in this range.
+			 */
+			if (brin_map)
+			{
+				long	pos = page / brin_range_sz;
+
+				if (bms_is_member(pos, brin_map))
+				{
+					page = (pos + 1) * brin_range_sz;
+					if (page <= (cl_long)MaxBlockNumber)
+						scan->rs_cblock = (BlockNumber)page;
+					else
+						scan->rs_cblock = 0;
+					goto skip;
+				}
+			}
+
+			/* allocation of row-based PDS on demand */
+			if (!pds)
+			{
+				if (gts->nvme_sstate)
+					pds =  PDS_create_block(gts->gcontext,
+											RelationGetDescr(rel),
+											gts->nvme_sstate);
+				else
+					pds = PDS_create_row(gts->gcontext,
+										 RelationGetDescr(rel),
+										 pgstrom_chunk_size());
+				pds->kds.table_oid = RelationGetRelid(rel);
+			}
+			/* scan the next block */
+			if (!PDS_exec_heapscan(gts, pds))
+				break;		/* no more tuples we can store now! */
+			/* move to the next block */
+			scan->rs_cblock++;
+		skip:
+			if (scan->rs_cblock >= scan->rs_nblocks)
+				scan->rs_cblock = 0;
+			Assert(scan->rs_numblocks == InvalidBlockNumber);
+			if (scan->rs_syncscan)
+				ss_report_location(scan->rs_rd, scan->rs_cblock);
+			/* end of the scan? */
+			if (scan->rs_cblock == scan->rs_startblock)
+				scan->rs_cblock = InvalidBlockNumber;
+		}
 	}
 
-	if (pds_column)
-	{
-		gts->outer_pds_suspend = pds;
-		pds = pds_column;
-	}
-	else if (!pds)
+	if (!pds)
 	{
 		/* end of the scan */
 		Assert(!BlockNumberIsValid(scan->rs_cblock));
 	}
 	else if (pds->kds.nitems == 0)
 	{
+		/* empty result */
 		Assert(!BlockNumberIsValid(scan->rs_cblock));
 		PDS_release(pds);
 		pds = NULL;
@@ -2511,7 +2653,6 @@ gpuscanExecScanChunk(GpuTaskState *gts)
 				block_nums + (pds->kds.nrooms - pds->nblocks_uncached),
 				sizeof(BlockNumber) * pds->nblocks_uncached);
 	}
-out:
 	InstrStopNode(&gts->outer_instrument,
 				  !pds ? 0.0 : (double)pds->kds.nitems);
 	return pds;

@@ -720,7 +720,6 @@ __pgstromExecGetBrinIndexMap(pgstromIndexState *pi_state,
 		 heapBlk < nblocks;
 		 heapBlk += range_sz, index++)
 	{
-		bool		addrange = true;
 		BrinTuple  *tup;
 		OffsetNumber off;
 		Size		size;
@@ -765,27 +764,22 @@ __pgstromExecGetBrinIndexMap(pgstromIndexState *pi_state,
 
 					/*
 					 * Check whether the scan key is consistent with the page
-					 * range values; if so, have the pages in the range added
-					 * to the output bitmap.
+					 * range values; if so, pages in the range shall be
+					 * skipped on the scan.
 					 */
 					rv = FunctionCall3Coll(&consistentFn[keyattno - 1],
 										   key->sk_collation,
 										   PointerGetDatum(bdesc),
 										   PointerGetDatum(bval),
 										   PointerGetDatum(key));
-					addrange = DatumGetBool(rv);
-					if (!addrange)
+					if (!DatumGetBool(rv))
+					{
+						if (index / BITS_PER_BITMAPWORD < nwords)
+							brin_map->words[index / BITS_PER_BITMAPWORD]
+								|= (1U << (index % BITS_PER_BITMAPWORD));
 						break;
+					}
 				}
-			}
-		}
-
-		if (addrange)
-		{
-			if (index / BITS_PER_BITMAPWORD < nwords)
-			{
-				brin_map->words[index / BITS_PER_BITMAPWORD]
-					|= (1U << (index % BITS_PER_BITMAPWORD));
 			}
 		}
 	}
@@ -839,6 +833,22 @@ pgstromExecGetBrinIndexMap(GpuTaskState *gts)
 							ProcSendSignal(pid);
 					}
 				}
+#if 1
+				{
+					Bitmapset *map = gts->outer_index_map;
+					int		i;
+
+					elog(INFO, "range_sz = %d", pi_state->range_sz);
+					for (i=0; i < map->nwords; i += 4)
+					{
+						elog(INFO, "[%d] %08x,%08x,%08x,%08x", i,
+							 i   < map->nwords ? map->words[i]   : 0,
+							 i+1 < map->nwords ? map->words[i+1] : 0,
+							 i+2 < map->nwords ? map->words[i+2] : 0,
+							 i+3 < map->nwords ? map->words[i+3] : 0);
+					}
+				}
+#endif
 			}
 			else
 			{
