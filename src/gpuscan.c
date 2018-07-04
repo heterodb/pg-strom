@@ -91,8 +91,8 @@ deform_gpuscan_info(CustomScan *cscan)
 }
 
 typedef struct {
+	GpuTaskRuntimeStat		c;		/* common statistics */
 	pg_atomic_uint64 nitems_filtered;
-	pg_atomic_uint64 ccache_count;
 } GpuScanRuntimeStat;
 
 typedef struct {
@@ -1969,7 +1969,7 @@ ExplainGpuScan(CustomScanState *node, List *ancestors, ExplainState *es)
 	if (gs_rtstat)
 	{
 		nitems_filtered = pg_atomic_read_u64(&gs_rtstat->nitems_filtered);
-		gss->gts.ccache_count = pg_atomic_read_u64(&gs_rtstat->ccache_count);
+		mergeGpuTaskRuntimeStat(&gss->gts, &gs_rtstat->c);
 	}
 
 	/* Set up deparsing context */
@@ -2021,6 +2021,7 @@ ExplainGpuScan(CustomScanState *node, List *ancestors, ExplainState *es)
 		exprstr = deparse_expression(index_quals, dcontext,
 									 es->verbose, false);
 		ExplainPropertyText("BRIN cond", exprstr, es);
+		ExplainPropertyInteger("BRIN skipped", gss->gts.outer_brin_count, es);
 	}
 
 	/* common portion of EXPLAIN */
@@ -2160,11 +2161,9 @@ gpuscan_next_task(GpuTaskState *gts)
 	GpuScanTask		   *gscan;
 	pgstrom_data_store *pds;
 
-	pds = pgstromExecScanChunk(gts);
+	pds = pgstromExecScanChunk(gts, &gs_rtstat->c);
 	if (!pds)
 		return NULL;
-	if (pds->kds.format == KDS_FORMAT_COLUMN)
-		pg_atomic_add_fetch_u64(&gs_rtstat->ccache_count, 1);
 	gscan = gpuscan_create_task(gss, pds);
 
 	return &gscan->task;

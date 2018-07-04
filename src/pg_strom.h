@@ -318,6 +318,7 @@ struct GpuTaskState
 	Bitmapset	   *outer_index_map;
 
 	IndexScanDesc	outer_brin_index;	/* brin index of outer scan, if any */
+	long			outer_brin_count;	/* # of blocks skipped by index */
 
 	/*
 	 * A pending PDS object. Load from the outer relation can be suspended
@@ -380,6 +381,22 @@ struct GpuTaskSharedState
 								 */
 	ParallelHeapScanDescData	phscan;
 };
+
+/*
+ * GpuTaskRuntimeStat - common statistics
+ */
+typedef struct
+{
+	pg_atomic_uint64	ccache_count;
+	pg_atomic_uint64	brin_count;
+} GpuTaskRuntimeStat;
+
+static inline void mergeGpuTaskRuntimeStat(GpuTaskState *gts,
+										   GpuTaskRuntimeStat *gtrs)
+{
+	gts->ccache_count = pg_atomic_read_u64(&gtrs->ccache_count);
+	gts->outer_brin_count = pg_atomic_read_u64(&gtrs->brin_count);
+}
 
 /*
  * GpuTask
@@ -1035,7 +1052,8 @@ extern void pgstromExecGetBrinIndexMap(GpuTaskState *gts);
 extern void pgstromExecEndBrinIndexMap(GpuTaskState *gts);
 extern void pgstromExecRewindBrinIndexMap(GpuTaskState *gts);
 
-extern pgstrom_data_store *pgstromExecScanChunk(GpuTaskState *gts);
+extern pgstrom_data_store *pgstromExecScanChunk(GpuTaskState *gts,
+												GpuTaskRuntimeStat *gt_rstat);
 extern void pgstromRewindScanChunk(GpuTaskState *gts);
 
 extern void pgstrom_init_relscan(void);

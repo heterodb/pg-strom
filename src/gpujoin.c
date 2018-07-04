@@ -271,7 +271,7 @@ typedef struct GpuJoinSharedState	GpuJoinSharedState;
  */
 struct GpuJoinRuntimeStat
 {
-	pg_atomic_uint64	ccache_count;
+	GpuTaskRuntimeStat	c;		/* common statistics */
 	pg_atomic_uint64	source_nitems;
 	struct {
 		pg_atomic_uint64 inner_nitems;
@@ -2864,7 +2864,7 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 		gjs->gts.outer_instrument.nfiltered1 =
 			(pg_atomic_read_u64(&gj_rtstat->source_nitems) -
 			 pg_atomic_read_u64(&gj_rtstat->jstat[0].inner_nitems));
-		gjs->gts.ccache_count = pg_atomic_read_u64(&gj_rtstat->ccache_count);
+		mergeGpuTaskRuntimeStat(&gjs->gts, &gj_rtstat->c);
 	}
 	pgstromExplainOuterScan(&gjs->gts, dcontext, ancestors, es,
 							gj_info->outer_quals,
@@ -4428,9 +4428,7 @@ GpuJoinExecOuterScanChunk(GpuTaskState *gts)
 
 	if (gjs->gts.css.ss.ss_currentRelation)
 	{
-		pds = pgstromExecScanChunk(gts);
-		if (pds && pds->kds.format == KDS_FORMAT_COLUMN)
-			pg_atomic_add_fetch_u64(&gj_rtstat->ccache_count, 1);
+		pds = pgstromExecScanChunk(gts, &gj_rtstat->c);
 	}
 	else
 	{

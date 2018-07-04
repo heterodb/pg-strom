@@ -916,6 +916,7 @@ pgstromExecRewindBrinIndexMap(GpuTaskState *gts)
  */
 static pgstrom_data_store *
 pgstromExecScanChunkParallel(GpuTaskState *gts,
+							 GpuTaskRuntimeStat *gt_rstat,
 							 pgstrom_data_store *pds,
 							 Bitmapset *brin_map, cl_long brin_range_sz)
 {
@@ -1078,6 +1079,8 @@ pgstromExecScanChunkParallel(GpuTaskState *gts,
 						{
 							pgstrom_ccache_put_chunk(cc_chunk);
 							cc_chunk = NULL;
+							pg_atomic_add_fetch_u64(&gt_rstat->brin_count,
+													CCACHE_CHUNK_NBLOCKS);
 						}
 					}
 					nr_blocks = base - page;
@@ -1107,11 +1110,13 @@ pgstromExecScanChunkParallel(GpuTaskState *gts,
 				if (s_page < 0)
 				{
 					/* Oops, here is no valid range, so just skip it */
+					pg_atomic_add_fetch_u64(&gt_rstat->brin_count, nr_blocks);
 					nr_allocated += nr_blocks;
 					nr_blocks = 0;
 				}
 				else
 				{
+					long	prev = page;
 					/* find the continuous valid ranges */
 					Assert(pos <= end);
 					Assert(!bms_is_member(pos, brin_map));
@@ -1127,6 +1132,8 @@ pgstromExecScanChunkParallel(GpuTaskState *gts,
 					nr_allocated += (e_page - page);
 					nr_blocks = e_page - s_page;
 					page = s_page;
+					pg_atomic_add_fetch_u64(&gt_rstat->brin_count,
+											page - prev);
 				}
 			}
 			else
@@ -1203,7 +1210,7 @@ pgstromExecScanChunkParallel(GpuTaskState *gts,
  * pgstromExecScanChunk - read the relation by one chunk
  */
 pgstrom_data_store *
-pgstromExecScanChunk(GpuTaskState *gts)
+pgstromExecScanChunk(GpuTaskState *gts, GpuTaskRuntimeStat *gt_rstat)
 {
 	Relation		rel = gts->css.ss.ss_currentRelation;
 	HeapScanDesc	scan = gts->css.ss.ss_currentScanDesc;
@@ -1240,7 +1247,10 @@ pgstromExecScanChunk(GpuTaskState *gts)
 	gts->outer_pds_suspend = NULL;
 
 	if (gts->gtss)
-		pds = pgstromExecScanChunkParallel(gts, pds, brin_map, brin_range_sz);
+	{
+		pds = pgstromExecScanChunkParallel(gts, gt_rstat,
+										   pds, brin_map, brin_range_sz);
+	}
 	else
 	{
 		for (;;)
@@ -1304,6 +1314,8 @@ pgstromExecScanChunk(GpuTaskState *gts)
 							ss_report_location(rel, scan->rs_cblock);
 						if (scan->rs_cblock == scan->rs_startblock)
 							scan->rs_cblock = InvalidBlockNumber;
+						pg_atomic_add_fetch_u64(&gt_rstat->brin_count,
+												CCACHE_CHUNK_NBLOCKS);
 						continue;
 					}
 				}
@@ -1351,11 +1363,15 @@ pgstromExecScanChunk(GpuTaskState *gts)
 
 				if (bms_is_member(pos, brin_map))
 				{
+					long	prev = page;
+
 					page = (pos + 1) * brin_range_sz;
 					if (page <= (cl_long)MaxBlockNumber)
 						scan->rs_cblock = (BlockNumber)page;
 					else
 						scan->rs_cblock = 0;
+					pg_atomic_add_fetch_u64(&gt_rstat->brin_count,
+											page - prev);
 					goto skip;
 				}
 			}
@@ -1426,6 +1442,12 @@ pgstromExecScanChunk(GpuTaskState *gts)
 	}
 	InstrStopNode(&gts->outer_instrument,
 				  !pds ? 0.0 : (double)pds->kds.nitems);
+	/* update statistics */
+	if (gt_rstat)
+	{
+		if (pds && pds->kds.format == KDS_FORMAT_COLUMN)
+			pg_atomic_add_fetch_u64(&gt_rstat->ccache_count, 1);
+	}
 	return pds;
 }
 

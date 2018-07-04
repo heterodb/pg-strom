@@ -143,10 +143,10 @@ typedef struct
 
 struct GpuPreAggRuntimeStat
 {
+	GpuTaskRuntimeStat	c;		/* common statistics */
 	pg_atomic_uint64	source_nitems;
 	pg_atomic_uint64	nitems_filtered;
 	pg_atomic_uint64	num_fallback_rows;
-	pg_atomic_uint64	ccache_count;
 	pg_atomic_uint32	pg_nworkers;
 };
 typedef struct GpuPreAggRuntimeStat	GpuPreAggRuntimeStat;
@@ -4293,7 +4293,7 @@ ExplainGpuPreAgg(CustomScanState *node, List *ancestors, ExplainState *es)
 		gpas->gts.outer_instrument.nfiltered2 = 0;
 		gpas->gts.outer_instrument.nloops
 			= pg_atomic_read_u32(&gpa_rtstat->pg_nworkers);
-		gpas->gts.ccache_count = pg_atomic_read_u64(&gpa_rtstat->ccache_count);
+		mergeGpuTaskRuntimeStat(&gpas->gts, &gpa_rtstat->c);
 	}
 
 	/* shows reduction policy */
@@ -4613,9 +4613,7 @@ gpupreagg_next_task(GpuTaskState *gts)
 	}
 	else if (gpas->gts.css.ss.ss_currentRelation)
 	{
-		pds = pgstromExecScanChunk(&gpas->gts);
-		if (pds && pds->kds.format == KDS_FORMAT_COLUMN)
-			pg_atomic_add_fetch_u64(&gpa_rtstat->ccache_count, 1);
+		pds = pgstromExecScanChunk(&gpas->gts, &gpa_rtstat->c);
 	}
 	else
 	{
