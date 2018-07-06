@@ -1046,7 +1046,7 @@ extern int pgstrom_common_relscan_cost(PlannerInfo *root,
 
 extern void pgstromExecInitBrinIndexMap(GpuTaskState *gts,
 										Oid index_oid,
-										List *index_quals);
+										List *index_conds);
 extern Size pgstromSizeOfBrinIndexMap(GpuTaskState *gts);
 extern void pgstromExecGetBrinIndexMap(GpuTaskState *gts);
 extern void pgstromExecEndBrinIndexMap(GpuTaskState *gts);
@@ -1067,9 +1067,14 @@ extern void codegen_gpuscan_quals(StringInfo kern,
 								  Index scanrelid,
 								  List *dev_quals_list);
 extern bool add_unique_expression(Expr *expr, List **p_tlist, bool resjunk);
-extern bool pgstrom_pullup_outer_scan(const Path *outer_path,
+extern bool pgstrom_pullup_outer_scan(PlannerInfo *root,
+									  const Path *outer_path,
 									  Index *p_outer_relid,
-									  List **p_outer_quals);
+									  List **p_outer_quals,
+									  IndexOptInfo **p_index_opt,
+									  List **p_index_conds,
+									  List **p_index_quals,
+									  cl_long *p_index_nblocks);
 extern bool pgstrom_path_is_gpuscan(const Path *path);
 extern bool pgstrom_plan_is_gpuscan(const Plan *plan);
 extern bool pgstrom_planstate_is_gpuscan(const PlanState *ps);

@@ -42,6 +42,9 @@ typedef struct
 	cl_uint			outer_nrows_per_block;
 	Index			outer_scanrelid;/* RTI, if outer path pulled up */
 	List		   *outer_quals;	/* device executable quals of outer-scan */
+	Oid				index_oid;		/* OID of BRIN-index, if any */
+	List		   *index_conds;	/* BRIN-index key conditions */
+	List		   *index_quals;	/* Original BRIN-index qualifiers */
 	List		   *tlist_fallback;	/* projection from outer-tlist to GPU's
 									 * initial projection; note that setrefs.c
 									 * should not update this field */
@@ -68,6 +71,9 @@ form_gpupreagg_info(CustomScan *cscan, GpuPreAggInfo *gpa_info)
 	privs = lappend(privs, makeInteger(gpa_info->outer_nrows_per_block));
 	privs = lappend(privs, makeInteger(gpa_info->outer_scanrelid));
 	exprs = lappend(exprs, gpa_info->outer_quals);
+	privs = lappend(privs, makeInteger(gpa_info->index_oid));
+	privs = lappend(privs, gpa_info->index_conds);
+	exprs = lappend(exprs, gpa_info->index_quals);
 	privs = lappend(privs, gpa_info->tlist_fallback);
 	privs = lappend(privs, makeString(gpa_info->kern_source));
 	privs = lappend(privs, makeInteger(gpa_info->extra_flags));
@@ -98,6 +104,9 @@ deform_gpupreagg_info(CustomScan *cscan)
 	gpa_info->outer_nrows_per_block = intVal(list_nth(privs, pindex++));
 	gpa_info->outer_scanrelid = intVal(list_nth(privs, pindex++));
 	gpa_info->outer_quals = list_nth(exprs, eindex++);
+	gpa_info->index_oid = intVal(list_nth(privs, pindex++));
+	gpa_info->index_conds = list_nth(privs, pindex++);
+	gpa_info->index_quals = list_nth(exprs, eindex++);
 	gpa_info->tlist_fallback = list_nth(privs, pindex++);
 	gpa_info->kern_source = strVal(list_nth(privs, pindex++));
 	gpa_info->extra_flags = intVal(list_nth(privs, pindex++));
@@ -923,7 +932,10 @@ cost_gpupreagg(PlannerInfo *root,
 			   PathTarget *target_device,
 			   Path *input_path,
 			   int parallel_nworkers,
-			   double num_groups)
+			   double num_groups,
+			   IndexOptInfo *index_opt,
+			   List *index_quals,
+			   cl_long index_nblocks)
 {
 	double		gpu_cpu_ratio = pgstrom_gpu_operator_cost / cpu_operator_cost;
 	double		ntuples_out;
@@ -972,7 +984,9 @@ cost_gpupreagg(PlannerInfo *root,
 									input_path->parent,
 									gpa_info->outer_quals,
 									parallel_nworkers,	/* parallel scan */
-									NULL, NIL, 0,		/* BRIN-index */
+									index_opt,			/* BRIN-index */
+									index_quals,		/* BRIN-index */
+									index_nblocks,		/* BRIN-index */
 									&ntuples,
 									&nchunks,
 									&parallel_divisor,
@@ -1119,6 +1133,10 @@ make_gpupreagg_path(PlannerInfo *root,
 	GpuPreAggInfo  *gpa_info = palloc0(sizeof(GpuPreAggInfo));
 	List		   *custom_paths = NIL;
 	int				parallel_nworkers = 0;
+	IndexOptInfo   *index_opt = NULL;
+	List		   *index_conds = NIL;
+	List		   *index_quals = NIL;
+	cl_long			index_nblocks;
 
 	/* obviously, not suitable for GpuPreAgg */
 	if (num_groups < 1.0 || num_groups > (double)INT_MAX)
@@ -1126,9 +1144,13 @@ make_gpupreagg_path(PlannerInfo *root,
 
 	/* Try to pull up input_path if simple relation scan */
 	if (!can_pullup_outerscan ||
-		!pgstrom_pullup_outer_scan(input_path,
+		!pgstrom_pullup_outer_scan(root, input_path,
 								   &gpa_info->outer_scanrelid,
-								   &gpa_info->outer_quals))
+								   &gpa_info->outer_quals,
+								   &index_opt,
+								   &index_conds,
+								   &index_quals,
+								   &index_nblocks))
 		custom_paths = list_make1(input_path);
 
 	/* Number of workers if parallel */
@@ -1139,11 +1161,16 @@ make_gpupreagg_path(PlannerInfo *root,
 	/* cost estimation */
 	if (!cost_gpupreagg(root, cpath, gpa_info,
 						target_partial, target_device,
-						input_path, parallel_nworkers, num_groups))
+						input_path, parallel_nworkers, num_groups,
+						index_opt, index_quals, index_nblocks))
 	{
 		pfree(cpath);
 		return NULL;
 	}
+	/* BRIN-index options */
+	gpa_info->index_oid = (index_opt ? index_opt->indexoid : InvalidOid);
+	gpa_info->index_conds = index_conds;
+	gpa_info->index_quals = extract_actual_clauses(index_quals, false);
 
 	/* Setup CustomPath */
 	cpath->path.pathtype = T_CustomScan;
@@ -3997,9 +4024,11 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 		outerPlanState(gpas) = outer_ps;
 		/* GpuPreAgg don't need re-initialization of projection info */
 		outer_tupdesc = outer_ps->ps_ResultTupleSlot->tts_tupleDescriptor;
-    }
-    else
-    {
+		/* should not have any usage of BRIN-index */
+		Assert(!OidIsValid(gpa_info->index_oid));
+	}
+	else
+	{
 		Assert(scan_rel != NULL);
 #if PG_VERSION_NUM < 100000
 		gpas->outer_quals = (List *)
@@ -4009,6 +4038,9 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 										 &gpas->gts.css.ss.ps);
 #endif
 		outer_tupdesc = RelationGetDescr(scan_rel);
+		pgstromExecInitBrinIndexMap(&gpas->gts,
+									gpa_info->index_oid,
+									gpa_info->index_conds);
 	}
 
 	/*
@@ -4133,6 +4165,8 @@ ExecEndGpuPreAgg(CustomScanState *node)
 			elog(WARNING, "failed on cuEventRecord: %s", errorText(rc));
 	}
     SynchronizeGpuContext(gpas->gts.gcontext);
+	/* close index related stuff if any */
+	pgstromExecEndBrinIndexMap(&gpas->gts);
 	/* clean up subtree, if any */
 	if (outerPlanState(node))
 		ExecEndNode(outerPlanState(node));
@@ -4180,8 +4214,9 @@ ExecReScanGpuPreAgg(CustomScanState *node)
 static Size
 ExecGpuPreAggEstimateDSM(CustomScanState *node, ParallelContext *pcxt)
 {
-	return MAXALIGN(sizeof(GpuPreAggSharedState))
-		+ pgstromEstimateDSMGpuTaskState((GpuTaskState *)node, pcxt);
+	return (MAXALIGN(sizeof(GpuPreAggSharedState)) +
+			pgstromSizeOfBrinIndexMap((GpuTaskState *) node) +
+			pgstromEstimateDSMGpuTaskState((GpuTaskState *)node, pcxt));
 }
 
 /*
@@ -4203,7 +4238,13 @@ ExecGpuPreAggInitDSM(CustomScanState *node,
 	gpas->gpa_sstate = createGpuPreAggSharedState(gpas, pcxt, coordinate);
 	gpas->gpa_rtstat = &gpas->gpa_sstate->gpa_rtstat;
 	coordinate = (char *)coordinate + gpas->gpa_sstate->ss_length;
-
+	if (gpas->gts.outer_index_state)
+	{
+		gpas->gts.outer_index_map = (Bitmapset *)coordinate;
+		gpas->gts.outer_index_map->nwords = -1;	/* uninitialized */
+		coordinate = ((char *)coordinate +
+					  pgstromSizeOfBrinIndexMap(&gpas->gts));
+	}
 	pgstromInitDSMGpuTaskState(&gpas->gts, pcxt, coordinate);
 }
 
@@ -4225,7 +4266,12 @@ ExecGpuPreAggInitWorker(CustomScanState *node,
 				  SynchronizeGpuContextOnDSMDetach,
 				  PointerGetDatum(gpas->gts.gcontext));
 	coordinate = (char *)coordinate + gpa_sstate->ss_length;
-
+	if (gpas->gts.outer_index_state)
+	{
+		gpas->gts.outer_index_map = (Bitmapset *)coordinate;
+		coordinate = ((char *)coordinate +
+					  pgstromSizeOfBrinIndexMap(&gpas->gts));
+	}
 	pgstromInitWorkerGpuTaskState(&gpas->gts, coordinate);
 }
 
@@ -4330,6 +4376,19 @@ ExplainGpuPreAgg(CustomScanState *node, List *ancestors, ExplainState *es)
 		ExplainPropertyText("Combined GpuJoin", "enabled", es);
 	else if (es->format != EXPLAIN_FORMAT_TEXT)
 		ExplainPropertyText("Combined GpuJoin", "disabled", es);
+	/* show BRIN-index properties */
+	if (OidIsValid(gpa_info->index_oid))
+	{
+		Node   *index_quals = (Node *)
+			make_ands_explicit(gpa_info->index_quals);
+
+		exprstr = deparse_expression(index_quals, dcontext,
+									 es->verbose, false);
+		ExplainPropertyText("BRIN cond", exprstr, es);
+		if (es->analyze)
+			ExplainPropertyInteger("BRIN skipped",
+								   gpas->gts.outer_brin_count, es);
+	}
 	/* other common fields */
 	pgstromExplainGpuTaskState(&gpas->gts, es);
 	/* other run-time statistics, if any */

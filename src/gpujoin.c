@@ -31,6 +31,10 @@ typedef struct
 	List		   *outer_quals;	/* qualifier of outer scan */
 	cl_uint			outer_nrows_per_block;
 	uint64			inner_buffer_toc_key;
+	IndexOptInfo   *index_opt;		/* BRIN-index if any */
+	List		   *index_conds;
+	List		   *index_quals;
+	cl_long			index_nblocks;
 	struct {
 		JoinType	join_type;		/* one of JOIN_* */
 		double		join_nrows;		/* intermediate nrows in this depth */
@@ -59,6 +63,9 @@ typedef struct
 	Cost		outer_total_cost;	/* copy of @total_cost in outer path */
 	cl_uint		outer_nrows_per_block;
 	cl_ulong	inner_buffer_toc_key;
+	Oid			index_oid;			/* OID of BRIN-index, if any */
+	List	   *index_conds;		/* BRIN-index key conditions */
+	List	   *index_quals;		/* original BRIN-index qualifiers */
 	/* for each depth */
 	List	   *plan_nrows_in;	/* list of floatVal for planned nrows_in */
 	List	   *plan_nrows_out;	/* list of floatVal for planned nrows_out */
@@ -93,6 +100,9 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 	privs = lappend(privs, pmakeFloat(gj_info->outer_total_cost));
 	privs = lappend(privs, makeInteger(gj_info->outer_nrows_per_block));
 	privs = lappend(privs, makeInteger(gj_info->inner_buffer_toc_key));
+	privs = lappend(privs, makeInteger(gj_info->index_oid));
+	privs = lappend(privs, gj_info->index_conds);
+	exprs = lappend(exprs, gj_info->index_quals);
 	/* for each depth */
 	privs = lappend(privs, gj_info->plan_nrows_in);
 	privs = lappend(privs, gj_info->plan_nrows_out);
@@ -133,6 +143,9 @@ deform_gpujoin_info(CustomScan *cscan)
 	gj_info->outer_total_cost = floatVal(list_nth(privs, pindex++));
 	gj_info->outer_nrows_per_block = intVal(list_nth(privs, pindex++));
 	gj_info->inner_buffer_toc_key = intVal(list_nth(privs, pindex++));
+	gj_info->index_oid = intVal(list_nth(privs, pindex++));
+	gj_info->index_conds = list_nth(privs, pindex++);
+	gj_info->index_quals = list_nth(exprs, eindex++);
 	/* for each depth */
 	gj_info->plan_nrows_in = list_nth(privs, pindex++);
 	gj_info->plan_nrows_out = list_nth(privs, pindex++);
@@ -543,7 +556,9 @@ cost_gpujoin(PlannerInfo *root,
 									outer_path->parent,
 									gpath->outer_quals,
 									parallel_nworkers,	/* parallel scan */
-									NULL, NIL, 0,		/* BRIN-index */
+									gpath->index_opt,
+									gpath->index_quals,
+									gpath->index_nblocks,
 									&parallel_divisor,
 									&dummy,
 									&num_chunks,
@@ -814,10 +829,13 @@ create_gpujoin_path(PlannerInfo *root,
 	Assert(i == num_rels);
 
 	/* Try to pull up outer scan if enough simple */
-	pgstrom_pullup_outer_scan(outer_path,
+	pgstrom_pullup_outer_scan(root, outer_path,
 							  &gjpath->outer_relid,
-							  &gjpath->outer_quals);
-
+							  &gjpath->outer_quals,
+							  &gjpath->index_opt,
+							  &gjpath->index_conds,
+							  &gjpath->index_quals,
+							  &gjpath->index_nblocks);
 	/*
 	 * cost calculation of GpuJoin, then, add this path to the joinrel,
 	 * unless its cost is not obviously huge.
@@ -2233,10 +2251,19 @@ PlanGpuJoinPath(PlannerInfo *root,
 			j = i + FirstLowInvalidHeapAttributeNumber;
 			ccache_refs = lappend_int(ccache_refs, j);
 		}
+		/* BRIN-index stuff */
+		if (gjpath->index_opt)
+		{
+			gj_info.index_oid = gjpath->index_opt->indexoid;
+			gj_info.index_conds = gjpath->index_conds;
+			gj_info.index_quals
+				= extract_actual_clauses(gjpath->index_quals, false);
+		}
 	}
 	else
 	{
 		outerPlan(cscan) = outer_plan;
+		Assert(gjpath->index_opt == NULL);
 	}
 	gj_info.outer_nrows_per_block = gjpath->outer_nrows_per_block;
 	gj_info.inner_buffer_toc_key = gjpath->inner_buffer_toc_key;
@@ -2456,6 +2483,9 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	if (gjs->gts.css.ss.ss_currentRelation)
 	{
 		nattrs = RelationGetDescr(gjs->gts.css.ss.ss_currentRelation)->natts;
+		pgstromExecInitBrinIndexMap(&gjs->gts,
+									gj_info->index_oid,
+									gj_info->index_conds);
 	}
 	else
 	{
@@ -2464,6 +2494,7 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 		outerPlanState(gjs) = ExecInitNode(outerPlan(cscan), estate, eflags);
 		outer_slot = outerPlanState(gjs)->ps_ResultTupleSlot;
 		nattrs = outer_slot->tts_tupleDescriptor->natts;
+		Assert(!OidIsValid(gj_info->index_oid));
 	}
 
 	/*
@@ -2759,7 +2790,8 @@ ExecEndGpuJoin(CustomScanState *node)
 
 	/* wait for completion of any asynchronous GpuTask */
 	SynchronizeGpuContext(gjs->gts.gcontext);
-
+	/* close index related stuff if any */
+	pgstromExecEndBrinIndexMap(&gjs->gts);
 	/* shutdown inner/outer subtree */
 	ExecEndNode(outerPlanState(node));
 	for (i=0; i < gjs->num_rels; i++)
@@ -2872,6 +2904,19 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
                             gj_info->outer_total_cost,
                             gj_info->outer_nrows,
                             gj_info->outer_width);
+	/* BRIN-index properties */
+	if (OidIsValid(gj_info->index_oid))
+	{
+		Node   *index_quals = (Node *)
+			make_ands_explicit(gj_info->index_quals);
+
+		temp = deparse_expression(index_quals, dcontext,
+								  es->verbose, false);
+		ExplainPropertyText("BRIN cond", temp, es);
+		if (es->analyze)
+			ExplainPropertyInteger("BRIN skipped",
+								   gjs->gts.outer_brin_count, es);
+	}
 	/* join-qualifiers */
 	depth = 1;
 	forfour (lc1, gj_info->join_types,
@@ -3098,6 +3143,7 @@ ExecGpuJoinEstimateDSM(CustomScanState *node,
 							 pergpu[numDevAttrs]))
 		+ MAXALIGN(offsetof(GpuJoinRuntimeStat,
 							jstat[gjs->num_rels + 1]))
+		+ pgstromSizeOfBrinIndexMap((GpuTaskState *) node)
 		+ pgstromEstimateDSMGpuTaskState((GpuTaskState *)node, pcxt);
 }
 
@@ -3121,7 +3167,13 @@ ExecGpuJoinInitDSM(CustomScanState *node,
 	gjs->gj_sstate = createGpuJoinSharedState(gjs, pcxt, coordinate);
 	gjs->gj_rtstat = GPUJOIN_RUNTIME_STAT(gjs->gj_sstate);
 	coordinate = (char *)coordinate + gjs->gj_sstate->ss_length;
-
+	if (gjs->gts.outer_index_state)
+	{
+		gjs->gts.outer_index_map = (Bitmapset *)coordinate;
+		gjs->gts.outer_index_map->nwords = -1;		/* uninitialized */
+		coordinate = ((char *)coordinate +
+					  pgstromSizeOfBrinIndexMap(&gjs->gts));
+	}
 	pgstromInitDSMGpuTaskState(&gjs->gts, pcxt, coordinate);
 }
 
@@ -3143,7 +3195,12 @@ ExecGpuJoinInitWorker(CustomScanState *node,
 				  SynchronizeGpuContextOnDSMDetach,
 				  PointerGetDatum(gjs->gts.gcontext));
 	coordinate = (char *)coordinate + gj_sstate->ss_length;
-
+	if (gjs->gts.outer_index_state)
+	{
+		gjs->gts.outer_index_map = (Bitmapset *)coordinate;
+		coordinate = ((char *)coordinate +
+					  pgstromSizeOfBrinIndexMap(&gjs->gts));
+	}
 	pgstromInitWorkerGpuTaskState(&gjs->gts, coordinate);
 }
 

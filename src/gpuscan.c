@@ -30,7 +30,6 @@ static bool					enable_pullup_outer_scan;
  * form/deform interface of private field of CustomScan(GpuScan)
  */
 typedef struct {
-	ExtensibleNode	ex;
 	char	   *kern_source;	/* source of the CUDA kernel */
 	cl_uint		extra_flags;	/* extra libraries to be included */
 	cl_uint		proj_tuple_sz;	/* nbytes of the expected result tuple size */
@@ -1419,13 +1418,22 @@ PlanGpuScanPath(PlannerInfo *root,
  * scan with device executable qualifiers.
  */
 bool
-pgstrom_pullup_outer_scan(const Path *outer_path,
+pgstrom_pullup_outer_scan(PlannerInfo *root,
+						  const Path *outer_path,
 						  Index *p_outer_relid,
-						  List **p_outer_quals)
+						  List **p_outer_quals,
+						  IndexOptInfo **p_index_opt,
+						  List **p_index_conds,
+						  List **p_index_quals,
+						  cl_long *p_index_nblocks)
 {
 	RelOptInfo *baserel = outer_path->parent;
 	PathTarget *outer_target = outer_path->pathtarget;
 	List	   *outer_quals = NIL;
+	IndexOptInfo *indexOpt = NULL;
+	List	   *indexConds = NIL;
+	List	   *indexQuals = NIL;
+	cl_long		indexNBlocks = 0;
 	ListCell   *lc;
 
 	if (!enable_pullup_outer_scan)
@@ -1475,8 +1483,17 @@ pgstrom_pullup_outer_scan(const Path *outer_path,
 		else if (!pgstrom_device_expression(expr))
 			return false;
 	}
+
+	/* BRIN-index parameters */
+	indexOpt = pgstrom_tryfind_brinindex(root, baserel,
+										 &indexConds,
+										 &indexQuals,
+										 &indexNBlocks);
 	*p_outer_relid = baserel->relid;
 	*p_outer_quals = outer_quals;
+	*p_index_opt = indexOpt;
+	*p_index_conds = indexConds;
+	*p_index_quals = indexQuals;
 
 	return true;
 }
@@ -2021,7 +2038,9 @@ ExplainGpuScan(CustomScanState *node, List *ancestors, ExplainState *es)
 		exprstr = deparse_expression(index_quals, dcontext,
 									 es->verbose, false);
 		ExplainPropertyText("BRIN cond", exprstr, es);
-		ExplainPropertyInteger("BRIN skipped", gss->gts.outer_brin_count, es);
+		if (es->analyze)
+			ExplainPropertyInteger("BRIN skipped",
+								   gss->gts.outer_brin_count, es);
 	}
 
 	/* common portion of EXPLAIN */
