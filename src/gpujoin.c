@@ -2468,7 +2468,8 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	if (gj_info->outer_quals)
 	{
 #if PG_VERSION_NUM < 100000
-		gjs->outer_quals = (List *)ExecInitExpr(gj_info->outer_quals, &ss->ps);
+		gjs->outer_quals = (List *)
+			ExecInitExpr((Expr *)gj_info->outer_quals, &ss->ps);
 #else
 		gjs->outer_quals = ExecInitQual(gj_info->outer_quals, &ss->ps);
 #endif
@@ -2638,7 +2639,8 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 		{
 			Assert(IsA(join_quals, List));
 #if PG_VERSION_NUM < 100000
-			istate->join_quals = (List *)ExecInitExpr(join_quals, &ss->ps);
+			istate->join_quals = (List *)
+				ExecInitExpr((Expr *)join_quals, &ss->ps);
 #else
 			istate->join_quals = ExecInitQual(join_quals, &ss->ps);
 #endif
@@ -2648,7 +2650,8 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 		if (other_quals)
 		{
 #if PG_VERSION_NUM < 100000
-			istate->other_quals = (List *)ExecInitExpr(other_quals, &ss->ps);
+			istate->other_quals = (List *)
+				ExecInitExpr((Expr *)other_quals, &ss->ps);
 #else
 			istate->other_quals = ExecInitQual(other_quals, &ss->ps);
 #endif

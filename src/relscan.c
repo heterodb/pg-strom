@@ -28,6 +28,53 @@ typedef struct
 /*--- static variables ---*/
 static bool		pgstrom_enable_brin;
 
+#if PG_VERSION_NUM < 100000
+/* several BRIN-index stuff are not implemented at PG9.6 */
+#include "access/brin_page.h"
+
+/*
+ * BrinStatsData represents stats data for planner use
+ */
+typedef struct BrinStatsData
+{
+	BlockNumber	pagesPerRange;
+	BlockNumber	revmapNumPages;
+} BrinStatsData;
+
+/*
+ * Fetch index's statistical data into *stats
+ */
+static void
+brinGetStats(Relation index, BrinStatsData *stats)
+{
+	Buffer		metabuffer;
+	Page		metapage;
+	BrinMetaPageData *metadata;
+
+	metabuffer = ReadBuffer(index, BRIN_METAPAGE_BLKNO);
+	LockBuffer(metabuffer, BUFFER_LOCK_SHARE);
+	metapage = BufferGetPage(metabuffer);
+	metadata = (BrinMetaPageData *) PageGetContents(metapage);
+
+	stats->pagesPerRange = metadata->pagesPerRange;
+	stats->revmapNumPages = metadata->lastRevmapPage - 1;
+
+	UnlockReleaseBuffer(metabuffer);
+}
+#endif	/* <PG10.x */
+
+
+
+
+
+
+
+
+
+
+
+
+
 /*
  * simple_match_clause_to_indexcol
  *
@@ -108,12 +155,14 @@ simple_match_clause_to_index(IndexOptInfo *index,
     if (rinfo->pseudoconstant)
         return;
 
+#if PG_VERSION_NUM >= 100000
     /*
      * If clause can't be used as an indexqual because it must wait till after
      * some lower-security-level restriction clause, reject it.
      */
     if (!restriction_is_securely_promotable(rinfo, index->rel))
         return;
+#endif
 
 	/* OK, check each index column for a match */
 	for (indexcol = 0; indexcol < index->ncolumns; indexcol++)
@@ -143,30 +192,31 @@ estimate_brinindex_scan_nblocks(PlannerInfo *root,
 								IndexClauseSet *clauseset,
 								List **p_indexQuals)
 {
-	RangeTblEntry  *rte = root->simple_rte_array[baserel->relid];
 	Relation		indexRel;
 	BrinStatsData	statsData;
 	List		   *indexQuals = NIL;
-	ListCell	   *lc;
-	int				icol = 1;
+	ListCell	   *lc		__attribute__((unused));
+	int				icol	__attribute__((unused));
 	Selectivity		qualSelectivity;
 	Selectivity		indexSelectivity;
 	double			indexCorrelation = 0.0;
 	double			indexRanges;
 	double			minimalRanges;
 	double			estimatedRanges;
-	VariableStatData vardata;
 
 	/* Obtain some data from the index itself. */
 	indexRel = index_open(index->indexoid, AccessShareLock);
 	brinGetStats(indexRel, &statsData);
 	index_close(indexRel, AccessShareLock);
 
+#if PG_VERSION_NUM >= 100000
 	/* Get selectivity of the index qualifiers */
+	icol = 1;
 	foreach (lc, index->indextlist)
 	{
 		TargetEntry *tle = lfirst(lc);
 		ListCell   *cell;
+		VariableStatData vardata;
 
 		foreach (cell, clauseset->indexclauses[icol-1])
 		{
@@ -178,8 +228,10 @@ estimate_brinindex_scan_nblocks(PlannerInfo *root,
 		if (IsA(tle->expr, Var))
 		{
 			Var	   *var = (Var *) tle->expr;
+			RangeTblEntry *rte;
 
 			/* in case of BRIN index on simple column */
+			rte = root->simple_rte_array[var->varno];
 			if (get_relation_stats_hook &&
 				(*get_relation_stats_hook)(root, rte, var->varattno,
 										   &vardata))
@@ -241,6 +293,9 @@ estimate_brinindex_scan_nblocks(PlannerInfo *root,
 
 		icol++;
 	}
+#else
+	indexCorrelation = 1.0;
+#endif
 	qualSelectivity = clauselist_selectivity(root,
 											 indexQuals,
 											 baserel->relid,
@@ -713,8 +768,8 @@ __pgstromExecGetBrinIndexMap(pgstromIndexState *pi_state,
 	Buffer			buf = InvalidBuffer;
 	FmgrInfo	   *consistentFn;
 	BrinMemTuple   *dtup;
-	BrinTuple	   *btup = NULL;
-	Size			btupsz = 0;
+	BrinTuple	   *btup	__attribute__((unused)) = NULL;
+	Size			btupsz	__attribute__((unused)) = 0;
 	int				nranges;
 	int				nwords;
 	MemoryContext	oldcxt;
@@ -760,10 +815,17 @@ __pgstromExecGetBrinIndexMap(pgstromIndexState *pi_state,
 									   snapshot);
 		if (tup)
 		{
+#if PG_VERSION_NUM >= 100000
 			btup = brin_copy_tuple(tup, size, btup, &btupsz);
+#else
+			btup = brin_copy_tuple(tup, size);
+#endif
 			LockBuffer(buf, BUFFER_LOCK_UNLOCK);
-
+#if PG_VERSION_NUM >= 100000
 			dtup = brin_deform_tuple(bdesc, btup, dtup);
+#else
+			dtup = brin_deform_tuple(bdesc, btup);
+#endif
 			if (!dtup->bt_placeholder)
 			{
 				for (keyno = 0; keyno < pi_state->num_scan_keys; keyno++)
