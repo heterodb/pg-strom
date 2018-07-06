@@ -63,7 +63,8 @@ STROM_HEADERS = $(addprefix $(STROM_BUILD_ROOT)/src/, $(__STROM_HEADERS))
 #
 # Markdown (document) files
 #
-__DOC_FILES = index.md install.md tutorial.md partition.md \
+__DOC_FILES = index.md install.md partition.md \
+              operations.md sys_admin.md brin.md partition.md troubles.md \
 	      ssd2gpu.md ccache.md gstore_fdw.md plcuda.md \
 	      ref_types.md ref_devfuncs.md ref_sqlfuncs.md ref_params.md \
 	      release_note.md

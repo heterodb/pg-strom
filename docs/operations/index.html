@@ -8,7 +8,7 @@
   
   <meta name="author" content="PG-Strom Development Team">
   <link rel="shortcut icon" href="../img/favicon.ico">
-  <title>Tutorial - PG-Strom Manual</title>
+  <title>Basic Operations - PG-Strom Manual</title>
   <link href='https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700' rel='stylesheet' type='text/css'>
 
   <link rel="stylesheet" href="../css/theme.css" type="text/css" />
@@ -20,9 +20,9 @@
   
   <script>
     // Current page data
-    var mkdocs_page_name = "Tutorial";
-    var mkdocs_page_input_path = "tutorial.md";
-    var mkdocs_page_url = "/tutorial/";
+    var mkdocs_page_name = "Basic Operations";
+    var mkdocs_page_input_path = "operations.md";
+    var mkdocs_page_url = "/operations/";
   </script>
   
   <script src="../js/jquery-2.1.1.min.js"></script>
@@ -63,52 +63,43 @@
     <a class="" href="../install/">Install</a>
 	    </li>
           
-            <li class="toctree-l1 current">
+            <li class="toctree-l1">
 		
-    <a class="current" href="./">Tutorial</a>
+    <span class="caption-text">Tutorial</span>
+    <ul class="subnav">
+                <li class=" current">
+                    
+    <a class="current" href="./">Basic Operations</a>
     <ul class="subnav">
             
-    <li class="toctree-l2"><a href="#basic-operations">Basic operations</a></li>
-    
-        <ul>
-        
-            <li><a class="toctree-l3" href="#confirmation-of-gpu-off-loading">Confirmation of GPU off-loading</a></li>
-        
-            <li><a class="toctree-l3" href="#cpugpu-hybrid-parallel">CPU+GPU Hybrid Parallel</a></li>
-        
-            <li><a class="toctree-l3" href="#pullup-underlying-plans">Pullup underlying plans</a></li>
-        
-        </ul>
+    <li class="toctree-l3"><a href="#confirmation-of-gpu-off-loading">Confirmation of GPU off-loading</a></li>
     
 
-    <li class="toctree-l2"><a href="#notes-for-system-administration">Notes for system administration</a></li>
-    
-        <ul>
-        
-            <li><a class="toctree-l3" href="#knowledge-base">Knowledge base</a></li>
-        
-            <li><a class="toctree-l3" href="#usage-of-mps-daemon">Usage of MPS daemon</a></li>
-        
-        </ul>
+    <li class="toctree-l3"><a href="#cpugpu-hybrid-parallel">CPU+GPU Hybrid Parallel</a></li>
     
 
-    <li class="toctree-l2"><a href="#trouble-shooting">Trouble Shooting</a></li>
-    
-        <ul>
-        
-            <li><a class="toctree-l3" href="#identify-the-problem">Identify the problem</a></li>
-        
-            <li><a class="toctree-l3" href="#collecting-crash-dump">Collecting crash dump</a></li>
-        
-        </ul>
+    <li class="toctree-l3"><a href="#pullup-underlying-plans">Pullup underlying plans</a></li>
     
 
     </ul>
-	    </li>
-          
-            <li class="toctree-l1">
-		
+                </li>
+                <li class="">
+                    
+    <a class="" href="../sys_admin/">System Administration</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../brin/">Index Support</a>
+                </li>
+                <li class="">
+                    
     <a class="" href="../partition/">Partitioning</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../troubles/">Trouble Shooting</a>
+                </li>
+    </ul>
 	    </li>
           
             <li class="toctree-l1">
@@ -183,8 +174,12 @@
     <li><a href="..">Docs</a> &raquo;</li>
     
       
+        
+          <li>Tutorial &raquo;</li>
+        
+      
     
-    <li>Tutorial</li>
+    <li>Basic Operations</li>
     <li class="wy-breadcrumbs-aside">
       
     </li>
@@ -194,8 +189,9 @@
           <div role="main">
             <div class="section">
               
-                <h1 id="basic-operations">Basic operations</h1>
-<h2 id="confirmation-of-gpu-off-loading">Confirmation of GPU off-loading</h2>
+                <h1>Basic operations</h1>
+
+<h1 id="confirmation-of-gpu-off-loading">Confirmation of GPU off-loading</h1>
 <p>You can use <code>EXPLAIN</code> command to check whether query is executed on GPU device or not.
 A query is internally split into multiple elements and executed, and PG-Strom is capable to run SCAN, JOIN and GROUP BY in parallel on GPU device. If you can find out GpuScan, GpuJoin or GpuPreAgg was displayed instead of the standard operations by PostgreSQL, it means the query is partially executed on GPU device.</p>
 <p>Below is an example of <code>EXPLAIN</code> command output.</p>
@@ -235,7 +231,7 @@ This estimated cost is better than other query execution plans that run on CPU, 
 <p>For GPU execution, it requires operators, functions and data types in use must be supported by PG-Strom.
 It supports numeric types like <code>int</code> or <code>float</code>, date and time types like <code>date</code> or <code>timestamp</code>, variable length string like <code>text</code> and so on. It also supports arithmetic operations, comparison operators and many built-in operators.
 See <a href="../ref_devfuncs/">References</a> for the detailed list.</p>
-<h2 id="cpugpu-hybrid-parallel">CPU+GPU Hybrid Parallel</h2>
+<h1 id="cpugpu-hybrid-parallel">CPU+GPU Hybrid Parallel</h1>
 <p>PG-Strom also supports PostgreSQL's CPU parallel execution.</p>
 <p>In the CPU parallel execution mode, Gather node launches several background worker processes, then it gathers the result of "partial" execution by individual background workers.
 CustomScan execution plan provided by PG-Strom, like GpuJoin or GpuPreAgg, support execution at the background workers. They process their partial task using GPU individually. A CPU core usually needs much more time to set up buffer to supply data for GPU than execution of SQL workloads on GPU, so hybrid usage of CPU and GPU parallel can expect higher performance.
@@ -268,7 +264,7 @@ Execution plan tree under the Gather is executable on background worker process.
 (18 rows)
 </code></pre>
 
-<h2 id="pullup-underlying-plans">Pullup underlying plans</h2>
+<h1 id="pullup-underlying-plans">Pullup underlying plans</h1>
 <p>PG-Strom can run SCAN, JOIN and GROUP BY workloads on GPU, however, it does not work with best performance if these custom execution plan simply replace the standard operations at PostgreSQL.
 An example of problematic scenario is that SCAN once writes back its result data set to the host buffer then send the same data into GPU again to execute JOIN. Once again, JOIN results are written back and send to GPU to execute GROUP BY. It causes data ping-pong between CPU and GPU.</p>
 <p>To avoid such inefficient jobs, PG-Strom has a special mode which pulls up its sub-plan to execute a bunch of jobs in a single GPU kernel invocation. Combination of the operations blow can cause pull-up of sub-plans.</p>
@@ -351,175 +347,6 @@ It means GpuJoin pulls up the underlying GpuScan, then combined GPU kernel funct
 It means GpuJoin is never executed during the query execution, and it is right. GpuPreAgg pulls up the underlying GpuJoin, then its combined GPU kernel function runs JOIN and GROUP BY.</p>
 <p>The <code>pg_strom.pullup_outer_scan</code> parameter controls whether SCAN is pulled up, and the <code>pg_strom.pullup_outer_join</code> parameter also controls whether JOIN is pulled up.
 Both parameters are configured to <code>on</code>. Usually, no need to disable them, however, you can use the parameters to identify the problems on system troubles.</p>
-<h1 id="notes-for-system-administration">Notes for system administration</h1>
-<h2 id="knowledge-base">Knowledge base</h2>
-<p>We publish several articles, just called "notes", on the project wiki-site of PG-Strom.</p>
-<p><a href="https://github.com/heterodb/pg-strom/wiki">https://github.com/heterodb/pg-strom/wiki</a></p>
-<h2 id="usage-of-mps-daemon">Usage of MPS daemon</h2>
-<p>In case when multi-process application like PostgreSQL uses GPU device, it is a well known solution to use MPS (Multi-Process Service) to reduce context switch on GPU side and resource consumption for device management.</p>
-<p><a href="https://docs.nvidia.com/deploy/mps/index.html">https://docs.nvidia.com/deploy/mps/index.html</a></p>
-<!--
-
-However, here is a known issue; some APIs don't work correctly user the use case of PG-Strom due to the problem of MPS daemon. So, we don't recomment to use MPS daemon except for the situation below:
-
-- Number of PostgreSQL processes which use GPU device (including the background workers launched by CPU parallel execution) is always less than 16. If Volta generation, it is less than 48.
-- gstore_fdw shall not be used.
-
-
-
-
-This known problem is, when we share GPU device memory inter processes using `CUipcMemHandle`, a device memory region acquired by the process under MPS service cannot be opened by the process which does not use MPS. This problem prevents to share the inner hash-table of GpuJoin with background workers on CPU parallel execution.
-
-This problem is already reported to NVIDIA, then we got a consensu to fix it at the next version of CUDA Toolkit.
-
--->
-
-<p>On the other hands, the current version of MPS daemon has <a href="https://docs.nvidia.com/deploy/mps/index.html#topic_3_3_2">some limitations</a> which overlap with a part of features of PG-Strom, therefore, you cannot use MPS daemon for PG-Strom. Disables MPS daemon when PG-Strom works.</p>
-<div class="admonition note">
-<p class="admonition-title">Note</p>
-<p>For details, the <code>cudaDeviceSynchronize()</code> device runtime function internally uses dynamic parallelism that is restricted under MPS, when GpuPreAgg's GPU kernel function expands internal hash table on the demand.</p>
-</div>
-<h1 id="trouble-shooting">Trouble Shooting</h1>
-<h2 id="identify-the-problem">Identify the problem</h2>
-<p>In case when a particular workloads produce problems, it is the first step to identify which stuff may cause the problem.</p>
-<p>Unfortunately, much smaller number of developer supports the PG-Strom development community than PostgreSQL developer's community, thus, due to the standpoint of software quality and history, it is a reasonable estimation to suspect PG-Strom first.</p>
-<p>The <code>pg_strom.enabled</code> parameter allows to turn on/off all the functionality of PG-Strom at once.
-The configuration below disables PG-Strom, thus identically performs with the standard PostgreSQL.</p>
-<pre><code># SET pg_strom.enabled = off;
-</code></pre>
-
-<p>In addition, we provide parameters to disable particular execution plan like GpuScan, GpuJoin and GpuPreAgg.</p>
-<p>See <a href="../ref_params/">references/GUC Parameters</a> for more details.</p>
-<h2 id="collecting-crash-dump">Collecting crash dump</h2>
-<p>Crash dump is very helpful for analysis of serious problems which lead system crash for example.
-This session introduces the way to collect crash dump of the PostgreSQL and PG-Strom process (CPU side) and PG-Strom's GPU kernel, and show the back trace on the serious problems.</p>
-<h3 id="add-configuration-on-postgresql-startup">Add configuration on PostgreSQL startup</h3>
-<p>For generation of crash dump (CPU-side) on process crash, you need to change the resource limitation of the operating system for size of core file  PostgreSQL server process can generate.</p>
-<p>For generation of crash dump (GPU-size) on errors of GPU kernel, PostgreSQL server process has <code>CUDA_ENABLE_COREDUMP_ON_EXCEPTION</code>environment variable, and its value has <code>1</code>.</p>
-<p>You can put a configuration file at <code>/etc/systemd/system/postgresql-&lt;version&gt;.service.d/</code> when PostgreSQL is kicked by systemd.</p>
-<p>In case of RPM installation, a configuration file <code>pg_strom.conf</code> is also installed on the directory, and contains the following initial configuration.</p>
-<pre><code>[Service]
-LimitNOFILE=65536
-LimitCORE=infinity
-#Environment=CUDA_ENABLE_COREDUMP_ON_EXCEPTION=1
-</code></pre>
-
-<p>In CUDA 9.1, it usually takes more than several minutes to generate crash dump of GPU kernel, and it entirely stops response of the PostgreSQL session which causes an error.
-So, we recommend to set <code>CUDA_ENABLE_COREDUMP_ON_EXCEPTION</code> environment variable only if you investigate errors of GPU kernels which happen on a certain query.
-The default configuration on RPM installation comments out the line of <code>CUDA_ENABLE_COREDUMP_ON_EXCEPTION</code> environment variable.</p>
-<p>PostgreSQL server process should have unlimited <em>Max core file size</em> configuration, after the next restart.</p>
-<p>You can check it as follows.</p>
-<pre><code># cat /proc/&lt;PID of postmaster&gt;/limits
-Limit                     Soft Limit           Hard Limit           Units
-    :                         :                    :                  :
-Max core file size        unlimited            unlimited            bytes
-    :                         :                    :                  :
-</code></pre>
-
-<h3 id="installation-of-debuginfo-package">Installation of debuginfo package</h3>
-<pre><code># yum install postgresql10-debuginfo pg_strom-PG10-debuginfo
-            :
-================================================================================
- Package                  Arch    Version             Repository           Size
-================================================================================
-Installing:
- pg_strom-PG10-debuginfo  x86_64  1.9-180301.el7      heterodb-debuginfo  766 k
- postgresql10-debuginfo   x86_64  10.3-1PGDG.rhel7    pgdg10              9.7 M
-
-Transaction Summary
-================================================================================
-Install  2 Packages
-            :
-Installed:
-  pg_strom-PG10-debuginfo.x86_64 0:1.9-180301.el7
-  postgresql10-debuginfo.x86_64 0:10.3-1PGDG.rhel7
-
-Complete!
-</code></pre>
-
-<h3 id="checking-the-back-trace-on-cpu-side">Checking the back-trace on CPU side</h3>
-<p>The kernel parameter <code>kernel.core_pattern</code> and <code>kernel.core_uses_pid</code> determine the path where crash dump is written out.
-It is usually created on the current working directory of the process, check <code>/var/lib/pgdata</code> where the database cluster is deployed, if you start PostgreSQL server using systemd.</p>
-<p>Once <code>core.&lt;PID&gt;</code> file gets generated, you can check its back-trace to reach system crash using <code>gdb</code>.</p>
-<p><code>gdb</code> speficies the core file by <code>-c</code> option, and the crashed program by <code>-f</code> option.</p>
-<pre><code># gdb -c /var/lib/pgdata/core.134680 -f /usr/pgsql-10/bin/postgres
-GNU gdb (GDB) Red Hat Enterprise Linux 7.6.1-100.el7_4.1
-       :
-(gdb) bt
-#0  0x00007fb942af3903 in __epoll_wait_nocancel () from /lib64/libc.so.6
-#1  0x00000000006f71ae in WaitEventSetWaitBlock (nevents=1,
-    occurred_events=0x7ffee51e1d70, cur_timeout=-1, set=0x2833298)
-    at latch.c:1048
-#2  WaitEventSetWait (set=0x2833298, timeout=timeout@entry-1,
-    occurred_events=occurred_events@entry0x7ffee51e1d70,
-    nevents=nevents@entry1, wait_event_info=wait_event_info@entry100663296)
-    at latch.c:1000
-#3  0x00000000006210fb in secure_read (port=0x2876120,
-    ptr=0xcaa7e0 &lt;PqRecvBuffer&gt;, len=8192) at be-secure.c:166
-#4  0x000000000062b6e8 in pq_recvbuf () at pqcomm.c:963
-#5  0x000000000062c345 in pq_getbyte () at pqcomm.c:1006
-#6  0x0000000000718682 in SocketBackend (inBuf=0x7ffee51e1ef0)
-    at postgres.c:328
-#7  ReadCommand (inBuf=0x7ffee51e1ef0) at postgres.c:501
-#8  PostgresMain (argc=&lt;optimized out&gt;, argv=argv@entry0x287bb68,
-    dbname=0x28333f8 &quot;postgres&quot;, username=&lt;optimized out&gt;) at postgres.c:4030
-#9  0x000000000047adbc in BackendRun (port=0x2876120) at postmaster.c:4405
-#10 BackendStartup (port=0x2876120) at postmaster.c:4077
-#11 ServerLoop () at postmaster.c:1755
-#12 0x00000000006afb7f in PostmasterMain (argc=argc@entry3,
-    argv=argv@entry0x2831280) at postmaster.c:1363
-#13 0x000000000047bbef in main (argc=3, argv=0x2831280) at main.c:228
-</code></pre>
-
-<p><code>bt</code> command of <code>gdb</code> displays the backtrace.
-In this case, I sent <code>SIGSEGV</code> signal to the PostgreSQL backend which is waiting for queries from the client for intentional crash, the process got crashed at <code>__epoll_wait_nocancel</code> invoked by <code>WaitEventSetWait</code>.</p>
-<h3 id="checking-the-backtrace-on-gpu">Checking the backtrace on GPU</h3>
-<p>Crash dump of GPU kernel is generated on the current working directory of PostgreSQL server process, unless you don't specify the path using <code>CUDA_COREDUMP_FILE</code> environment variable explicitly.
-Check <code>/var/lib/pgdata</code> where the database cluster is deployed, if systemd started PostgreSQL. Dump file will have the following naming convension.</p>
-<p><code>core_&lt;timestamp&gt;_&lt;hostname&gt;_&lt;PID&gt;.nvcudmp</code></p>
-<p>Note that the dump-file of GPU kernel contains no debug information like symbol information in the default configuration.
-It is nearly impossible to investigate the problem, so enable inclusion of debug information for the GPU programs generated by PG-Strom, as follows.</p>
-<p>Also note than we don't recommend to turn on the configuration for daily usage, because it makes query execution performan slow down.
-Turn on only when you investigate the troubles.</p>
-<pre><code>nvme=# set pg_strom.debug_jit_compile_options = on;
-SET
-</code></pre>
-
-<p>You can check crash dump of the GPU kernel using <code>cuda-gdb</code> command.</p>
-<pre><code># /usr/local/cuda/bin/cuda-gdb
-NVIDIA (R) CUDA Debugger
-9.1 release
-Portions Copyright (C) 2007-2017 NVIDIA Corporation
-        :
-For help, type &quot;help&quot;.
-Type &quot;apropos word&quot; to search for commands related to &quot;word&quot;.
-(cuda-gdb)
-</code></pre>
-
-<p>Run <code>cuda-gdb</code> command, then load the crash dump file above using <code>target</code> command on the prompt.</p>
-<pre><code>(cuda-gdb) target cudacore /var/lib/pgdata/core_1521131828_magro.heterodb.com_216238.nvcudmp
-Opening GPU coredump: /var/lib/pgdata/core_1521131828_magro.heterodb.com_216238.nvcudmp
-[New Thread 216240]
-
-CUDA Exception: Warp Illegal Address
-The exception was triggered at PC 0x7ff4dc82f930 (cuda_gpujoin.h:1159)
-[Current focus set to CUDA kernel 0, grid 1, block (0,0,0), thread (0,0,0), device 0, sm 0, warp 0, lane 0]
-#0  0x00007ff4dc82f938 in _INTERNAL_8_pg_strom_0124cb94::gpujoin_exec_hashjoin (kcxt=0x7ff4f7fffbf8, kgjoin=0x7fe9f4800078,
-    kmrels=0x7fe9f8800000, kds_src=0x7fe9f0800030, depth=3, rd_stack=0x7fe9f4806118, wr_stack=0x7fe9f480c118, l_state=0x7ff4f7fffc48,
-    matched=0x7ff4f7fffc7c &quot;&quot;) at /usr/pgsql-10/share/extension/cuda_gpujoin.h:1159
-1159            while (khitem &amp;&amp; khitem-&gt;hash != hash_value)
-</code></pre>
-
-<p>You can check backtrace where the error happened on GPU kernel using <code>bt</code> command.</p>
-<pre><code>(cuda-gdb) bt
-#0  0x00007ff4dc82f938 in _INTERNAL_8_pg_strom_0124cb94::gpujoin_exec_hashjoin (kcxt=0x7ff4f7fffbf8, kgjoin=0x7fe9f4800078,
-    kmrels=0x7fe9f8800000, kds_src=0x7fe9f0800030, depth=3, rd_stack=0x7fe9f4806118, wr_stack=0x7fe9f480c118, l_state=0x7ff4f7fffc48,
-    matched=0x7ff4f7fffc7c &quot;&quot;) at /usr/pgsql-10/share/extension/cuda_gpujoin.h:1159
-#1  0x00007ff4dc9428f0 in gpujoin_main&lt;&lt;&lt;(30,1,1),(256,1,1)&gt;&gt;&gt; (kgjoin=0x7fe9f4800078, kmrels=0x7fe9f8800000, kds_src=0x7fe9f0800030,
-    kds_dst=0x7fe9e8800030, kparams_gpreagg=0x0) at /usr/pgsql-10/share/extension/cuda_gpujoin.h:1347
-</code></pre>
-
-<p>Please check <a href="http://docs.nvidia.com/cuda/cuda-gdb/">CUDA Toolkit Documentation - CUDA-GDB</a> for more detailed usage of <code>cuda-gdb</code> command.</p>
               
             </div>
           </div>
@@ -527,7 +354,7 @@ The exception was triggered at PC 0x7ff4dc82f930 (cuda_gpujoin.h:1159)
   
     <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
       
-        <a href="../partition/" class="btn btn-neutral float-right" title="Partitioning">Next <span class="icon icon-circle-arrow-right"></span></a>
+        <a href="../sys_admin/" class="btn btn-neutral float-right" title="System Administration">Next <span class="icon icon-circle-arrow-right"></span></a>
       
       
         <a href="../install/" class="btn btn-neutral" title="Install"><span class="icon icon-circle-arrow-left"></span> Previous</a>
@@ -559,7 +386,7 @@ The exception was triggered at PC 0x7ff4dc82f930 (cuda_gpujoin.h:1159)
         <span><a href="../install/" style="color: #fcfcfc;">&laquo; Previous</a></span>
       
       
-        <span style="margin-left: 15px"><a href="../partition/" style="color: #fcfcfc">Next &raquo;</a></span>
+        <span style="margin-left: 15px"><a href="../sys_admin/" style="color: #fcfcfc">Next &raquo;</a></span>
       
     </span>
 </div>

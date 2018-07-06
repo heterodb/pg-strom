@@ -65,29 +65,46 @@
           
             <li class="toctree-l1">
 		
-    <a class="" href="../tutorial/">利用ガイド</a>
-	    </li>
-          
-            <li class="toctree-l1 current">
-		
+    <span class="caption-text">利用ガイド</span>
+    <ul class="subnav">
+                <li class="">
+                    
+    <a class="" href="../operations/">基本的な操作</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../sys_admin/">システム管理</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../brin/">インデックス対応</a>
+                </li>
+                <li class=" current">
+                    
     <a class="current" href="./">パーティション</a>
     <ul class="subnav">
             
-    <li class="toctree-l2"><a href="#_1">概要</a></li>
+    <li class="toctree-l3"><a href="#_1">概要</a></li>
     
 
-    <li class="toctree-l2"><a href="#_2">設定と運用</a></li>
+    <li class="toctree-l3"><a href="#_2">設定と運用</a></li>
     
         <ul>
         
-            <li><a class="toctree-l3" href="#ssdgpu">SSDとGPUの配置に関する考慮</a></li>
+            <li><a class="toctree-l4" href="#ssdgpu">SSDとGPUの配置に関する考慮</a></li>
         
         </ul>
     
 
-    <li class="toctree-l2"><a href="#_3">制限事項</a></li>
+    <li class="toctree-l3"><a href="#_3">制限事項</a></li>
     
 
+    </ul>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../troubles/">トラブルシューティング</a>
+                </li>
     </ul>
 	    </li>
           
@@ -162,6 +179,10 @@
   <ul class="wy-breadcrumbs">
     <li><a href="..">Docs</a> &raquo;</li>
     
+      
+        
+          <li>利用ガイド &raquo;</li>
+        
       
     
     <li>パーティション</li>
@@ -320,10 +341,10 @@ postgres=# EXPLAIN SELECT cat,count(*),avg(ax) FROM pt NATURAL JOIN t1 WHERE ymd
   
     <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
       
-        <a href="../ssd2gpu/" class="btn btn-neutral float-right" title="SSDtoGPUダイレクトSQL実行">Next <span class="icon icon-circle-arrow-right"></span></a>
+        <a href="../troubles/" class="btn btn-neutral float-right" title="トラブルシューティング">Next <span class="icon icon-circle-arrow-right"></span></a>
       
       
-        <a href="../tutorial/" class="btn btn-neutral" title="利用ガイド"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../brin/" class="btn btn-neutral" title="インデックス対応"><span class="icon icon-circle-arrow-left"></span> Previous</a>
       
     </div>
   
@@ -349,10 +370,10 @@ postgres=# EXPLAIN SELECT cat,count(*),avg(ax) FROM pt NATURAL JOIN t1 WHERE ymd
     <span class="rst-current-version" data-toggle="rst-current-version">
       
       
-        <span><a href="../tutorial/" style="color: #fcfcfc;">&laquo; Previous</a></span>
+        <span><a href="../brin/" style="color: #fcfcfc;">&laquo; Previous</a></span>
       
       
-        <span style="margin-left: 15px"><a href="../ssd2gpu/" style="color: #fcfcfc">Next &raquo;</a></span>
+        <span style="margin-left: 15px"><a href="../troubles/" style="color: #fcfcfc">Next &raquo;</a></span>
       
     </span>
 </div>

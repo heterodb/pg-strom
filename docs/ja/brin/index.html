@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<!--[if IE 8]><html class="no-js lt-ie9" lang="en" > <![endif]-->
+<!--[if gt IE 8]><!--> <html class="no-js" lang="en" > <!--<![endif]-->
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  
+  <meta name="author" content="PG-Strom Development Team">
+  <link rel="shortcut icon" href="../img/favicon.ico">
+  <title>インデックス対応 - PG-Strom Manual</title>
+  <link href='https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700' rel='stylesheet' type='text/css'>
+
+  <link rel="stylesheet" href="../css/theme.css" type="text/css" />
+  <link rel="stylesheet" href="../css/theme_extra.css" type="text/css" />
+  <link rel="stylesheet" href="../css/highlight.css">
+  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet">
+  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet">
+  <link href="../custom.css" rel="stylesheet">
+  
+  <script>
+    // Current page data
+    var mkdocs_page_name = "\u30a4\u30f3\u30c7\u30c3\u30af\u30b9\u5bfe\u5fdc";
+    var mkdocs_page_input_path = "brin.md";
+    var mkdocs_page_url = "/brin/";
+  </script>
+  
+  <script src="../js/jquery-2.1.1.min.js"></script>
+  <script src="../js/modernizr-2.8.3.min.js"></script>
+  <script type="text/javascript" src="../js/highlight.pack.js"></script> 
+  
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+
+    
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+      <div class="wy-side-nav-search">
+        <a href=".." class="icon icon-home"> PG-Strom Manual</a>
+        <div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" />
+  </form>
+
+  [<strong>Japanese</strong> | <a href="../.." style="color: #cccccc">English</a>]
+
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
+	<ul class="current">
+	  
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="..">はじめに</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../install/">インストール</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <span class="caption-text">利用ガイド</span>
+    <ul class="subnav">
+                <li class="">
+                    
+    <a class="" href="../operations/">基本的な操作</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../sys_admin/">システム管理</a>
+                </li>
+                <li class=" current">
+                    
+    <a class="current" href="./">インデックス対応</a>
+    <ul class="subnav">
+            
+    <li class="toctree-l3"><a href="#_1">概要</a></li>
+    
+
+    <li class="toctree-l3"><a href="#_2">設定</a></li>
+    
+
+    <li class="toctree-l3"><a href="#_3">操作</a></li>
+    
+
+    </ul>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../partition/">パーティション</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../troubles/">トラブルシューティング</a>
+                </li>
+    </ul>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <span class="caption-text">先進機能</span>
+    <ul class="subnav">
+                <li class="">
+                    
+    <a class="" href="../ssd2gpu/">SSDtoGPUダイレクトSQL実行</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../ccache/">列指向キャッシュ</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../gstore_fdw/">Gstore_fdw</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../plcuda/">PL/CUDA</a>
+                </li>
+    </ul>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <span class="caption-text">リファレンス</span>
+    <ul class="subnav">
+                <li class="">
+                    
+    <a class="" href="../ref_types/">データ型</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../ref_devfuncs/">関数と演算子</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../ref_sqlfuncs/">SQLオブジェクト</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../ref_params/">GUCパラメータ</a>
+                </li>
+    </ul>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../release_note/">リリースノート</a>
+	    </li>
+          
+        </ul>
+      </div>
+      &nbsp;
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+
+      
+      <nav class="wy-nav-top" role="navigation" aria-label="top navigation">
+        <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+        <a href="..">PG-Strom Manual</a>
+      </nav>
+
+      
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href="..">Docs</a> &raquo;</li>
+    
+      
+        
+          <li>利用ガイド &raquo;</li>
+        
+      
+    
+    <li>インデックス対応</li>
+    <li class="wy-breadcrumbs-aside">
+      
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main">
+            <div class="section">
+              
+                <h1>インデックス対応</h1>
+
+<h1 id="_1">概要</h1>
+<p>PostgreSQLは何種類かのインデックス形式に対応しており、デフォルトで選択されるB-treeインデックスは特定の値を持つレコードを高速に検索する事が可能です。これ以外にも、Hash、BRIN、GiST、GINなど特性の異なるインデックス形式が提供されており、現在のところPG-StromはBRINインデックスにのみ対応しています。</p>
+<p>BRINインデックスは、時系列データにおけるタイムスタンプ値など、物理的に近傍に位置するレコード同士が近しい値を持っている事が期待できるデータセットに対して有効に作用します。本来は全件スキャンが必要な操作であっても、明らかに条件句にマッチしない領域を読み飛ばし、全件スキャンに伴うI/O量を削減する事が可能です。</p>
+<p>PG-StromにおいてもBRINインデックスの特性を活用し、GPUにロードすべきデータブロックのうち明らかに不要であるものを読み飛ばす事が可能になっています。</p>
+<p><img alt="BRIN-index Ovewview" src="../img/brin-index-overview.png" /></p>
+<h1 id="_2">設定</h1>
+<p>BRINインデックスを利用するために特別な設定は必要ありません。</p>
+<p>CREATE INDEX構文を用いて対象列にインデックスが設定されており、かつ、検索条件がBRINインデックスに適合するものであれば自動的に適用されます。</p>
+<p>BRINインデックス自体の説明は、<a href="https://www.postgresql.jp/document/current/html/brin.html">PostgreSQLのドキュメント</a>を参照してください。</p>
+<p>以下のGUCパラメータにより、PG-StromがBRINインデックスを使用するかどうかを制御する事ができます。デバッグやトラブルシューティングの場合を除き、通常は初期設定のままで構いません。</p>
+<table>
+<thead>
+<tr>
+<th align="left">パラメータ名</th>
+<th align="center">型</th>
+<th align="center">初期値</th>
+<th align="left">説明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="left"><code>pg_strom.enable_brin</code></td>
+<td align="center"><code>bool</code></td>
+<td align="center"><code>on</code></td>
+<td align="left">BRINインデックスを使用するかどうかを制御する。</td>
+</tr>
+</tbody>
+</table>
+<h1 id="_3">操作</h1>
+<p><code>EXPLAIN</code>構文によりBRINインデックスが使用されているかどうかを確認する事ができます。</p>
+<pre><code>postgres=# EXPLAIN ANALYZE
+           SELECT * FROM dt
+            WHERE ymd BETWEEN '2018-01-01' AND '2018-12-31'
+              AND cat LIKE '%aaa%';
+                                   QUERY PLAN
+--------------------------------------------------------------------------------
+ Custom Scan (GpuScan) on dt  (cost=94810.93..176275.00 rows=169992 width=44)
+                              (actual time=1777.819..1901.537 rows=175277 loops=1)
+   GPU Filter: ((ymd &gt;= '2018-01-01'::date) AND (ymd &lt;= '2018-12-31'::date) AND (cat ~~ '%aaa%'::text))
+   Rows Removed by GPU Filter: 4385491
+   BRIN cond: ((ymd &gt;= '2018-01-01'::date) AND (ymd &lt;= '2018-12-31'::date))
+   BRIN skipped: 424704
+ Planning time: 0.529 ms
+ Execution time: 2323.063 ms
+(7 rows)
+</code></pre>
+
+<p>上記の例では<code>ymd</code>列にBRINインデックスが設定されており、<code>BRIN cond</code>の表示はBRINインデックスによる絞り込み条件を、<code>BRIN skipped</code>の表示はBRINインデックスにより実際に読み飛ばされたブロックの数を示しています。</p>
+<p>この例では424704ブロックが読み飛ばされ、さらに、読み込んだブロックに含まれているレコードのうち4385491行が条件句によってフィルタされた事が分かります。</p>
+<p>データ転送のロスを減らすため、GpuJoinやGpuPreAggが直下のテーブルスキャンを引き上げ、自らテーブルのスキャン処理を行う事があります。この場合でも、BRINインデックスが利用可能であればインデックスによる絞り込みを行います。
+以下の例は、GROUP BYを含む処理でBRINインデックスが使用されているケースです。</p>
+<pre><code>postgres=# EXPLAIN ANALYZE
+           SELECT cat,count(*)
+             FROM dt WHERE ymd BETWEEN '2018-01-01' AND '2018-12-31'
+         GROUP BY cat;
+                                   QUERY PLAN
+--------------------------------------------------------------------------------
+ GroupAggregate  (cost=6149.78..6151.86 rows=26 width=12)
+                 (actual time=427.482..427.499 rows=26 loops=1)
+   Group Key: cat
+   -&gt;  Sort  (cost=6149.78..6150.24 rows=182 width=12)
+             (actual time=427.465..427.467 rows=26 loops=1)
+         Sort Key: cat
+         Sort Method: quicksort  Memory: 26kB
+         -&gt;  Custom Scan (GpuPreAgg) on dt  (cost=6140.68..6142.95 rows=182 width=12)
+                                            (actual time=427.331..427.339 rows=26 loops=1)
+               Reduction: Local
+               Outer Scan: dt  (cost=4000.00..4011.99 rows=4541187 width=4)
+                               (actual time=78.573..415.961 rows=4560768 loops=1)
+               Outer Scan Filter: ((ymd &gt;= '2018-01-01'::date) AND (ymd &lt;= '2018-12-31'::date))
+               Rows Removed by Outer Scan Filter: 15564
+               BRIN cond: ((ymd &gt;= '2018-01-01'::date) AND (ymd &lt;= '2018-12-31'::date))
+               BRIN skipped: 424704
+ Planning time: 30.992 ms
+ Execution time: 818.994 ms
+(14 rows)
+</code></pre>
+              
+            </div>
+          </div>
+          <footer>
+  
+    <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
+      
+        <a href="../partition/" class="btn btn-neutral float-right" title="パーティション">Next <span class="icon icon-circle-arrow-right"></span></a>
+      
+      
+        <a href="../sys_admin/" class="btn btn-neutral" title="システム管理"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+      
+    </div>
+  
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+    
+  </div>
+
+  Built with <a href="http://www.mkdocs.org">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+      
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" style="cursor: pointer">
+    <span class="rst-current-version" data-toggle="rst-current-version">
+      
+      
+        <span><a href="../sys_admin/" style="color: #fcfcfc;">&laquo; Previous</a></span>
+      
+      
+        <span style="margin-left: 15px"><a href="../partition/" style="color: #fcfcfc">Next &raquo;</a></span>
+      
+    </span>
+</div>
+    <script>var base_url = '..';</script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/require.js"></script>
+      <script src="../search/search.js"></script>
+
+</body>
+</html>

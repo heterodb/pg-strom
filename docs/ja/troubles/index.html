@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<!--[if IE 8]><html class="no-js lt-ie9" lang="en" > <![endif]-->
+<!--[if gt IE 8]><!--> <html class="no-js" lang="en" > <!--<![endif]-->
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  
+  <meta name="author" content="PG-Strom Development Team">
+  <link rel="shortcut icon" href="../img/favicon.ico">
+  <title>トラブルシューティング - PG-Strom Manual</title>
+  <link href='https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700' rel='stylesheet' type='text/css'>
+
+  <link rel="stylesheet" href="../css/theme.css" type="text/css" />
+  <link rel="stylesheet" href="../css/theme_extra.css" type="text/css" />
+  <link rel="stylesheet" href="../css/highlight.css">
+  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet">
+  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet">
+  <link href="../custom.css" rel="stylesheet">
+  
+  <script>
+    // Current page data
+    var mkdocs_page_name = "\u30c8\u30e9\u30d6\u30eb\u30b7\u30e5\u30fc\u30c6\u30a3\u30f3\u30b0";
+    var mkdocs_page_input_path = "troubles.md";
+    var mkdocs_page_url = "/troubles/";
+  </script>
+  
+  <script src="../js/jquery-2.1.1.min.js"></script>
+  <script src="../js/modernizr-2.8.3.min.js"></script>
+  <script type="text/javascript" src="../js/highlight.pack.js"></script> 
+  
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+
+    
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+      <div class="wy-side-nav-search">
+        <a href=".." class="icon icon-home"> PG-Strom Manual</a>
+        <div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" />
+  </form>
+
+  [<strong>Japanese</strong> | <a href="../.." style="color: #cccccc">English</a>]
+
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
+	<ul class="current">
+	  
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="..">はじめに</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../install/">インストール</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <span class="caption-text">利用ガイド</span>
+    <ul class="subnav">
+                <li class="">
+                    
+    <a class="" href="../operations/">基本的な操作</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../sys_admin/">システム管理</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../brin/">インデックス対応</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../partition/">パーティション</a>
+                </li>
+                <li class=" current">
+                    
+    <a class="current" href="./">トラブルシューティング</a>
+    <ul class="subnav">
+            
+    <li class="toctree-l3"><a href="#_1">問題の切り分け</a></li>
+    
+
+    <li class="toctree-l3"><a href="#_2">クラッシュダンプの採取</a></li>
+    
+        <ul>
+        
+            <li><a class="toctree-l4" href="#postgresql">PostgreSQL起動時設定の追加</a></li>
+        
+            <li><a class="toctree-l4" href="#debuginfo">debuginfoパッケージのインストール</a></li>
+        
+            <li><a class="toctree-l4" href="#cpu">CPU側バックトレースの確認</a></li>
+        
+            <li><a class="toctree-l4" href="#gpu">GPU側バックトレースの確認</a></li>
+        
+        </ul>
+    
+
+    </ul>
+                </li>
+    </ul>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <span class="caption-text">先進機能</span>
+    <ul class="subnav">
+                <li class="">
+                    
+    <a class="" href="../ssd2gpu/">SSDtoGPUダイレクトSQL実行</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../ccache/">列指向キャッシュ</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../gstore_fdw/">Gstore_fdw</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../plcuda/">PL/CUDA</a>
+                </li>
+    </ul>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <span class="caption-text">リファレンス</span>
+    <ul class="subnav">
+                <li class="">
+                    
+    <a class="" href="../ref_types/">データ型</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../ref_devfuncs/">関数と演算子</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../ref_sqlfuncs/">SQLオブジェクト</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../ref_params/">GUCパラメータ</a>
+                </li>
+    </ul>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../release_note/">リリースノート</a>
+	    </li>
+          
+        </ul>
+      </div>
+      &nbsp;
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+
+      
+      <nav class="wy-nav-top" role="navigation" aria-label="top navigation">
+        <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+        <a href="..">PG-Strom Manual</a>
+      </nav>
+
+      
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href="..">Docs</a> &raquo;</li>
+    
+      
+        
+          <li>利用ガイド &raquo;</li>
+        
+      
+    
+    <li>トラブルシューティング</li>
+    <li class="wy-breadcrumbs-aside">
+      
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main">
+            <div class="section">
+              
+                <h1>トラブルシューティング</h1>
+
+<h1 id="_1">問題の切り分け</h1>
+<p>特定のワークロードを実行した際に何がしかの問題が発生する場合には、それが何に起因するものであるのかを特定するのはトラブルシューティングの第一歩です。</p>
+<p>残念ながら、PostgreSQL開発者コミュニティと比べPG-Stromの開発者コミュニティは非常に少ない数の開発者によって支えられています。そのため、ソフトウェアの品質や実績といった観点から、まずPG-Stromが悪さをしていないか疑うのは妥当な判断です。</p>
+<p>PG-Stromの全機能を一度に有効化/無効化するには<code>pg_strom.enabled</code>パラメータを使用する事ができます。
+以下の設定を行う事でPG-Stromは無効化され、標準のPostgreSQLと全く同一の状態となります。
+それでもなお問題が再現するかどうかは一つの判断材料となるでしょう。</p>
+<pre><code># SET pg_strom.enabled = off;
+</code></pre>
+
+<p>この他にも、GpuScan、GpuJoin、GpuPreAggといった特定の実行計画のみを無効化するパラメータも定義されています。</p>
+<p>これらの詳細は<a href="../ref_params/">リファレンス/GPUパラメータ</a>を参照してください。</p>
+<h1 id="_2">クラッシュダンプの採取</h1>
+<p>システムのクラッシュを引き起こすような重大なトラブルの解析にはクラッシュダンプの採取が欠かせません。
+本節では、PostgreSQLとPG-Stromプロセスのクラッシュダンプ(CPU側)、およびPG-StromのGPUカーネルのクラッシュダンプ(GPU側)を取得し、障害発生時のバックトレースを採取するための手段を説明します。</p>
+<h2 id="postgresql">PostgreSQL起動時設定の追加</h2>
+<p>プロセスのクラッシュ時にクラッシュダンプ(CPU側)を生成するには、PostgreSQLサーバプロセスが生成する事のできる core ファイルのサイズを無制限に変更する必要があります。これはPostgreSQLサーバプロセスを起動するシェル上で<code>ulimit -c</code>コマンドを実行して変更する事ができます。</p>
+<p>GPUカーネルのエラー時にクラッシュダンプ(GPU側)を生成するには、PostgreSQLサーバプロセスが環境変数<code>CUDA_ENABLE_COREDUMP_ON_EXCEPTION</code>に<code>1</code>が設定されている必要があります。</p>
+<p>systemdからPostgreSQLを起動する場合、<code>/etc/systemd/system/postgresql-&lt;version&gt;.service.d/</code>以下に設定ファイルを作成し、これらの設定を追加する事ができます。</p>
+<p>RPMインストールの場合は、以下の内容の<code>pg_strom.conf</code>というファイルが作成されています。</p>
+<pre><code>[Service]
+LimitNOFILE=65536
+LimitCORE=infinity
+#Environment=CUDA_ENABLE_COREDUMP_ON_EXCEPTION=1
+</code></pre>
+
+<p>CUDA9.1においては、通常、GPUカーネルのクラッシュダンプの生成には数分以上の時間を要し、その間、エラーを発生したPostgreSQLセッションの応答は完全に停止してしまします。
+そのため、は特定クエリの実行において発生するGPUカーネルに起因するエラーの原因調査を行う場合にだけ、<code>CUDA_ENABLE_COREDUMP_ON_EXCEPTION</code>環境変数を設定する事をお勧めします。
+RPMインストールにおけるデフォルト設定は、<code>CUDA_ENABLE_COREDUMP_ON_EXCEPTION</code>環境変数の行をコメントアウトしています。</p>
+<p>PostgreSQLサーバプロセスを再起動すると、<em>Max core file size</em>がunlimitedに設定されているはずです。</p>
+<p>以下のように確認する事ができます。</p>
+<pre><code># cat /proc/&lt;PID of postmaster&gt;/limits
+Limit                     Soft Limit           Hard Limit           Units
+    :                         :                    :                  :
+Max core file size        unlimited            unlimited            bytes
+    :                         :                    :                  :
+</code></pre>
+
+<h2 id="debuginfo">debuginfoパッケージのインストール</h2>
+<p>クラッシュダンプから意味のある情報を読み取るにはシンボル情報が必要です。</p>
+<p>これらは<code>-debuginfo</code>パッケージに格納されており、システムにインストールされているPostgreSQLおよびPG-Stromのパッケージに応じてそれぞれ追加インストールが必要です。</p>
+<pre><code># yum install postgresql10-debuginfo pg_strom-PG10-debuginfo
+            :
+================================================================================
+ Package                  Arch    Version             Repository           Size
+================================================================================
+Installing:
+ pg_strom-PG10-debuginfo  x86_64  1.9-180301.el7      heterodb-debuginfo  766 k
+ postgresql10-debuginfo   x86_64  10.3-1PGDG.rhel7    pgdg10              9.7 M
+
+Transaction Summary
+================================================================================
+Install  2 Packages
+            :
+Installed:
+  pg_strom-PG10-debuginfo.x86_64 0:1.9-180301.el7
+  postgresql10-debuginfo.x86_64 0:10.3-1PGDG.rhel7
+
+Complete!
+</code></pre>
+
+<h2 id="cpu">CPU側バックトレースの確認</h2>
+<p>クラッシュダンプの作成されるパスは、カーネルパラメータ<code>kernel.core_pattern</code>および<code>kernel.core_uses_pid</code>の値によって決まります。
+通常はプロセスのカレントディレクトリに作成されますので、systemdからPostgreSQLを起動した場合はデータベースクラスタが構築される<code>/var/lib/pgdata</code>を確認してください。</p>
+<p><code>core.&lt;PID&gt;</code>ファイルが生成されているのを確認したら、<code>gdb</code>を用いてクラッシュに至るバックトレースを確認します。</p>
+<p><code>gdb</code>の<code>-c</code>オプションでコアファイルを、<code>-f</code>オプションでクラッシュしたプログラムを指定します。</p>
+<pre><code># gdb -c /var/lib/pgdata/core.134680 -f /usr/pgsql-10/bin/postgres
+GNU gdb (GDB) Red Hat Enterprise Linux 7.6.1-100.el7_4.1
+       :
+(gdb) bt
+#0  0x00007fb942af3903 in __epoll_wait_nocancel () from /lib64/libc.so.6
+#1  0x00000000006f71ae in WaitEventSetWaitBlock (nevents=1,
+    occurred_events=0x7ffee51e1d70, cur_timeout=-1, set=0x2833298)
+    at latch.c:1048
+#2  WaitEventSetWait (set=0x2833298, timeout=timeout@entry-1,
+    occurred_events=occurred_events@entry0x7ffee51e1d70,
+    nevents=nevents@entry1, wait_event_info=wait_event_info@entry100663296)
+    at latch.c:1000
+#3  0x00000000006210fb in secure_read (port=0x2876120,
+    ptr=0xcaa7e0 &lt;PqRecvBuffer&gt;, len=8192) at be-secure.c:166
+#4  0x000000000062b6e8 in pq_recvbuf () at pqcomm.c:963
+#5  0x000000000062c345 in pq_getbyte () at pqcomm.c:1006
+#6  0x0000000000718682 in SocketBackend (inBuf=0x7ffee51e1ef0)
+    at postgres.c:328
+#7  ReadCommand (inBuf=0x7ffee51e1ef0) at postgres.c:501
+#8  PostgresMain (argc=&lt;optimized out&gt;, argv=argv@entry0x287bb68,
+    dbname=0x28333f8 &quot;postgres&quot;, username=&lt;optimized out&gt;) at postgres.c:4030
+#9  0x000000000047adbc in BackendRun (port=0x2876120) at postmaster.c:4405
+#10 BackendStartup (port=0x2876120) at postmaster.c:4077
+#11 ServerLoop () at postmaster.c:1755
+#12 0x00000000006afb7f in PostmasterMain (argc=argc@entry3,
+    argv=argv@entry0x2831280) at postmaster.c:1363
+#13 0x000000000047bbef in main (argc=3, argv=0x2831280) at main.c:228
+</code></pre>
+
+<p>gdbの<code>bt</code>コマンドでバックトレースを確認します。
+このケースでは、クライアントからのクエリを待っている状態のPostgreSQLバックエンドに<code>SIGSEGV</code>シグナルを送出してクラッシュを引き起こしたため、<code>WaitEventSetWait</code>延長上の<code>__epoll_wait_nocancel</code>でプロセスがクラッシュしている事がわかります。</p>
+<h2 id="gpu">GPU側バックトレースの確認</h2>
+<p>GPUカーネルのクラッシュダンプは、（<code>CUDA_COREDUMP_FILE</code>環境変数を用いて明示的に指定しなければ）PostgreSQLサーバプロセスのカレントディレクトリに生成されます。
+systemdからPostgreSQLを起動した場合はデータベースクラスタが構築される<code>/var/lib/pgdata</code>を確認してください。以下の名前でGPUカーネルのクラッシュダンプが生成されています。</p>
+<p><code>core_&lt;timestamp&gt;_&lt;hostname&gt;_&lt;PID&gt;.nvcudmp</code></p>
+<p>なお、デフォルト設定ではGPUカーネルのクラッシュダンプにはシンボル情報などのデバッグ情報が含まれていません。この状態では障害解析を行う事はほとんど不可能ですので、以下の設定を行ってPG-Stromが生成するGPUプログラムにデバッグ情報を含めるようにしてください。</p>
+<p>ただし、この設定は実行時のパフォーマンスを低下させるため、恒常的な使用は非推奨です。
+トラブル解析時にだけ使用するようにしてください。</p>
+<pre><code>nvme=# set pg_strom.debug_jit_compile_options = on;
+SET
+</code></pre>
+
+<p>生成されたGPUカーネルのクラッシュダンプを確認するには<code>cuda-gdb</code>コマンドを使用します。</p>
+<pre><code># /usr/local/cuda/bin/cuda-gdb
+NVIDIA (R) CUDA Debugger
+9.1 release
+Portions Copyright (C) 2007-2017 NVIDIA Corporation
+        :
+For help, type &quot;help&quot;.
+Type &quot;apropos word&quot; to search for commands related to &quot;word&quot;.
+(cuda-gdb)
+</code></pre>
+
+<p>引数なしで<code>cuda-gdb</code>コマンドを実行し、プロンプト上で<code>target</code>コマンドを使用して先ほどのクラッシュダンプを読み込みます。</p>
+<pre><code>(cuda-gdb) target cudacore /var/lib/pgdata/core_1521131828_magro.heterodb.com_216238.nvcudmp
+Opening GPU coredump: /var/lib/pgdata/core_1521131828_magro.heterodb.com_216238.nvcudmp
+[New Thread 216240]
+
+CUDA Exception: Warp Illegal Address
+The exception was triggered at PC 0x7ff4dc82f930 (cuda_gpujoin.h:1159)
+[Current focus set to CUDA kernel 0, grid 1, block (0,0,0), thread (0,0,0), device 0, sm 0, warp 0, lane 0]
+#0  0x00007ff4dc82f938 in _INTERNAL_8_pg_strom_0124cb94::gpujoin_exec_hashjoin (kcxt=0x7ff4f7fffbf8, kgjoin=0x7fe9f4800078,
+    kmrels=0x7fe9f8800000, kds_src=0x7fe9f0800030, depth=3, rd_stack=0x7fe9f4806118, wr_stack=0x7fe9f480c118, l_state=0x7ff4f7fffc48,
+    matched=0x7ff4f7fffc7c &quot;&quot;) at /usr/pgsql-10/share/extension/cuda_gpujoin.h:1159
+1159            while (khitem &amp;&amp; khitem-&gt;hash != hash_value)
+</code></pre>
+
+<p>この状態で<code>bt</code>コマンドを使用し、問題発生個所へのバックトレースを採取する事ができます。</p>
+<pre><code>(cuda-gdb) bt
+#0  0x00007ff4dc82f938 in _INTERNAL_8_pg_strom_0124cb94::gpujoin_exec_hashjoin (kcxt=0x7ff4f7fffbf8, kgjoin=0x7fe9f4800078,
+    kmrels=0x7fe9f8800000, kds_src=0x7fe9f0800030, depth=3, rd_stack=0x7fe9f4806118, wr_stack=0x7fe9f480c118, l_state=0x7ff4f7fffc48,
+    matched=0x7ff4f7fffc7c &quot;&quot;) at /usr/pgsql-10/share/extension/cuda_gpujoin.h:1159
+#1  0x00007ff4dc9428f0 in gpujoin_main&lt;&lt;&lt;(30,1,1),(256,1,1)&gt;&gt;&gt; (kgjoin=0x7fe9f4800078, kmrels=0x7fe9f8800000, kds_src=0x7fe9f0800030,
+    kds_dst=0x7fe9e8800030, kparams_gpreagg=0x0) at /usr/pgsql-10/share/extension/cuda_gpujoin.h:1347
+</code></pre>
+
+<p>より詳細な<code>cuda-gdb</code>コマンドの利用法は<a href="http://docs.nvidia.com/cuda/cuda-gdb/">CUDA Toolkit Documentation - CUDA-GDB</a>を参照してください。</p>
+              
+            </div>
+          </div>
+          <footer>
+  
+    <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
+      
+        <a href="../ssd2gpu/" class="btn btn-neutral float-right" title="SSDtoGPUダイレクトSQL実行">Next <span class="icon icon-circle-arrow-right"></span></a>
+      
+      
+        <a href="../partition/" class="btn btn-neutral" title="パーティション"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+      
+    </div>
+  
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+    
+  </div>
+
+  Built with <a href="http://www.mkdocs.org">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+      
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" style="cursor: pointer">
+    <span class="rst-current-version" data-toggle="rst-current-version">
+      
+      
+        <span><a href="../partition/" style="color: #fcfcfc;">&laquo; Previous</a></span>
+      
+      
+        <span style="margin-left: 15px"><a href="../ssd2gpu/" style="color: #fcfcfc">Next &raquo;</a></span>
+      
+    </span>
+</div>
+    <script>var base_url = '..';</script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/require.js"></script>
+      <script src="../search/search.js"></script>
+
+</body>
+</html>

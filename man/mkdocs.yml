@@ -13,8 +13,12 @@ pages:
 @en{
 - 'Home' : 'index.md'
 - 'Install' : 'install.md'
-- 'Tutorial' : 'tutorial.md'
-- 'Partitioning' : 'partition.md'
+- 'Tutorial' :
+    - 'Basic Operations' : 'operations.md'
+    - 'System Administration' : 'sys_admin.md'
+    - 'Index Support' : 'brin.md'
+    - 'Partitioning' : 'partition.md'
+    - 'Trouble Shooting' : 'troubles.md'
 - 'Advanced Features' :
     - 'SSD2GPU Direct SQL Exec' : 'ssd2gpu.md'
     - 'Columnar Cache' : 'ccache.md'
@@ -30,8 +34,12 @@ pages:
 @ja{
 - 'はじめに' : 'index.md'
 - 'インストール' : 'install.md'
-- '利用ガイド' : 'tutorial.md'
-- 'パーティション' : 'partition.md'
+- '利用ガイド' :
+    - '基本的な操作' : 'operations.md'
+    - 'システム管理' : 'sys_admin.md'
+    - 'インデックス対応' : 'brin.md'
+    - 'パーティション' : 'partition.md'
+    - 'トラブルシューティング' : 'troubles.md'
 - '先進機能' :
     - 'SSDtoGPUダイレクトSQL実行' : 'ssd2gpu.md'
     - '列指向キャッシュ' : 'ccache.md'

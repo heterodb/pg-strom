@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<!--[if IE 8]><html class="no-js lt-ie9" lang="en" > <![endif]-->
+<!--[if gt IE 8]><!--> <html class="no-js" lang="en" > <!--<![endif]-->
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  
+  <meta name="author" content="PG-Strom Development Team">
+  <link rel="shortcut icon" href="../img/favicon.ico">
+  <title>システム管理 - PG-Strom Manual</title>
+  <link href='https://fonts.googleapis.com/css?family=Lato:400,700|Roboto+Slab:400,700|Inconsolata:400,700' rel='stylesheet' type='text/css'>
+
+  <link rel="stylesheet" href="../css/theme.css" type="text/css" />
+  <link rel="stylesheet" href="../css/theme_extra.css" type="text/css" />
+  <link rel="stylesheet" href="../css/highlight.css">
+  <link href="//fonts.googleapis.com/earlyaccess/notosansjp.css" rel="stylesheet">
+  <link href="//fonts.googleapis.com/css?family=Open+Sans:600,800" rel="stylesheet">
+  <link href="../custom.css" rel="stylesheet">
+  
+  <script>
+    // Current page data
+    var mkdocs_page_name = "\u30b7\u30b9\u30c6\u30e0\u7ba1\u7406";
+    var mkdocs_page_input_path = "sys_admin.md";
+    var mkdocs_page_url = "/sys_admin/";
+  </script>
+  
+  <script src="../js/jquery-2.1.1.min.js"></script>
+  <script src="../js/modernizr-2.8.3.min.js"></script>
+  <script type="text/javascript" src="../js/highlight.pack.js"></script> 
+  
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+
+    
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+      <div class="wy-side-nav-search">
+        <a href=".." class="icon icon-home"> PG-Strom Manual</a>
+        <div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" />
+  </form>
+
+  [<strong>Japanese</strong> | <a href="../.." style="color: #cccccc">English</a>]
+
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="main navigation">
+	<ul class="current">
+	  
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="..">はじめに</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../install/">インストール</a>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <span class="caption-text">利用ガイド</span>
+    <ul class="subnav">
+                <li class="">
+                    
+    <a class="" href="../operations/">基本的な操作</a>
+                </li>
+                <li class=" current">
+                    
+    <a class="current" href="./">システム管理</a>
+    <ul class="subnav">
+            
+    <li class="toctree-l3"><a href="#_1">システム管理</a></li>
+    
+
+    <li class="toctree-l3"><a href="#mps">MPSデーモンの利用</a></li>
+    
+
+    <li class="toctree-l3"><a href="#_2">ナレッジベース</a></li>
+    
+
+    </ul>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../brin/">インデックス対応</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../partition/">パーティション</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../troubles/">トラブルシューティング</a>
+                </li>
+    </ul>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <span class="caption-text">先進機能</span>
+    <ul class="subnav">
+                <li class="">
+                    
+    <a class="" href="../ssd2gpu/">SSDtoGPUダイレクトSQL実行</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../ccache/">列指向キャッシュ</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../gstore_fdw/">Gstore_fdw</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../plcuda/">PL/CUDA</a>
+                </li>
+    </ul>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <span class="caption-text">リファレンス</span>
+    <ul class="subnav">
+                <li class="">
+                    
+    <a class="" href="../ref_types/">データ型</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../ref_devfuncs/">関数と演算子</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../ref_sqlfuncs/">SQLオブジェクト</a>
+                </li>
+                <li class="">
+                    
+    <a class="" href="../ref_params/">GUCパラメータ</a>
+                </li>
+    </ul>
+	    </li>
+          
+            <li class="toctree-l1">
+		
+    <a class="" href="../release_note/">リリースノート</a>
+	    </li>
+          
+        </ul>
+      </div>
+      &nbsp;
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+
+      
+      <nav class="wy-nav-top" role="navigation" aria-label="top navigation">
+        <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+        <a href="..">PG-Strom Manual</a>
+      </nav>
+
+      
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href="..">Docs</a> &raquo;</li>
+    
+      
+        
+          <li>利用ガイド &raquo;</li>
+        
+      
+    
+    <li>システム管理</li>
+    <li class="wy-breadcrumbs-aside">
+      
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main">
+            <div class="section">
+              
+                <h1 id="_1"><h1>システム管理</h1></h1>
+<!-- リソース設定などの記述を加えるべき -->
+
+<h1 id="mps">MPSデーモンの利用</h1>
+<p>PostgreSQLのようにマルチプロセス環境でGPUを使用する場合、GPU側コンテキストスイッチの低減やデバイス管理に必要なリソースの低減を目的として、MPS(Multi-Process Service)を使用する事が一般的なソリューションです。</p>
+<p><a href="https://docs.nvidia.com/deploy/mps/index.html">https://docs.nvidia.com/deploy/mps/index.html</a></p>
+<!--
+
+しかし、PG-Stromの利用シーンでは、MPSサービスの既知問題により正常に動作しないCUDA APIが存在し、以下のような限定された条件下を除いては使用すべきではありません。
+
+- GPUを使用するPostgreSQLプロセス（CPU並列クエリにおけるバックグラウンドワーカを含む）の数が常に16個以下である。Volta世代のGPUの場合は48個以下である。
+- gstore_fdwを使用しない事。
+
+
+
+
+これは`CUipcMemHandle`を用いてプロセス間でGPUデバイスメモリを共有する際に、MPSサービス下のプロセスで獲得したGPUデバイスメモリを非MPSサービス下のプロセスでオープンできない事で、GpuJoinが使用するハッシュ表をバックグラウンドワーカー間で共有できなくなるための制限事項です。
+
+この問題は既にNVIDIAへ報告し、新しいバージョンのCUDA Toolkitにおいて修正されるとの回答を得ています。
+
+
+-->
+
+<p>一方、現在のMPSサービスにはいくつかの<a href="https://docs.nvidia.com/deploy/mps/index.html#topic_3_3_2">制限事項</a>があり、これとPG-Stromの利用する一部機能が被っているため、MPSサービスとPG-Stromを併用する事はできません。PG-Stromを利用する際にはMPSサービスを停止してください。</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>具体的には、GpuPreAggのGPUカーネル関数が内部のハッシュ表を動的に拡大する際に使用する<code>cudaDeviceSynchronize()</code>デバイスランタイム関数が、制限事項であるDynamic Parallelism機能を使用しているため、上記の制限に抵触します。</p>
+</div>
+<h1 id="_2">ナレッジベース</h1>
+<p>PG-Stromプロジェクトのwikiサイトには、ノートと呼ばれる詳細な技術情報が公開されています。</p>
+<p><a href="https://github.com/heterodb/pg-strom/wiki">https://github.com/heterodb/pg-strom/wiki</a></p>
+              
+            </div>
+          </div>
+          <footer>
+  
+    <div class="rst-footer-buttons" role="navigation" aria-label="footer navigation">
+      
+        <a href="../brin/" class="btn btn-neutral float-right" title="インデックス対応">Next <span class="icon icon-circle-arrow-right"></span></a>
+      
+      
+        <a href="../operations/" class="btn btn-neutral" title="基本的な操作"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+      
+    </div>
+  
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+    
+  </div>
+
+  Built with <a href="http://www.mkdocs.org">MkDocs</a> using a <a href="https://github.com/snide/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+      
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" style="cursor: pointer">
+    <span class="rst-current-version" data-toggle="rst-current-version">
+      
+      
+        <span><a href="../operations/" style="color: #fcfcfc;">&laquo; Previous</a></span>
+      
+      
+        <span style="margin-left: 15px"><a href="../brin/" style="color: #fcfcfc">Next &raquo;</a></span>
+      
+    </span>
+</div>
+    <script>var base_url = '..';</script>
+    <script src="../js/theme.js"></script>
+      <script src="../search/require.js"></script>
+      <script src="../search/search.js"></script>
+
+</body>
+</html>
