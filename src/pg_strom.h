@@ -872,6 +872,12 @@ extern void pgstromInitGpuTask(GpuTaskState *gts, GpuTask *gtask);
 extern void pgstrom_init_gputasks(void);
 
 /*
+ * nvme.c
+ */
+extern void	pgstrom_init_nvme(void);
+
+
+/*
  * cuda_program.c
  */
 extern ProgramId __pgstrom_create_cuda_program(GpuContext *gcontext,
