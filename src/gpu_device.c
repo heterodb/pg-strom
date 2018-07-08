@@ -249,7 +249,7 @@ pgstrom_collect_gpu_device(void)
 
 		/* sanity check using sysfs */
 		snprintf(path, sizeof(path),
-				 "/sys/bus/pci/devices/%04d:%02d:%02d.0/vendor",
+				 "/sys/bus/pci/devices/%04x:%02x:%02x.0/vendor",
 				 dattrs->PCI_DOMAIN_ID,
 				 dattrs->PCI_BUS_ID,
 				 dattrs->PCI_DEVICE_ID);
@@ -257,7 +257,7 @@ pgstrom_collect_gpu_device(void)
 		if (strcasecmp(temp, "0x10de") != 0)
 		{
 			elog(WARNING,
-				 "%s (PCIe %04d:%02d:%02d) has unknown vendor code: %s",
+				 "%s (PCIe %04x:%02x:%02x) has unknown vendor code: %s",
 				 dattrs->DEV_NAME,
 				 dattrs->PCI_DOMAIN_ID,
 				 dattrs->PCI_BUS_ID,
@@ -266,7 +266,7 @@ pgstrom_collect_gpu_device(void)
 		}
 		/* read the numa node-id from the sysfs entry */
 		snprintf(path, sizeof(path),
-				 "/sys/bus/pci/devices/%04d:%02d:%02d.0/numa_node",
+				 "/sys/bus/pci/devices/%04x:%02x:%02x.0/numa_node",
 				 dattrs->PCI_DOMAIN_ID,
 				 dattrs->PCI_BUS_ID,
 				 dattrs->PCI_DEVICE_ID);
@@ -363,7 +363,7 @@ sysfs_read_nvme_attrs(const char *nvme_path)
 		pos++;
 	else
 		pos = linebuf;
-	if (sscanf(pos, "%04d:%02d:%02d.%d",
+	if (sscanf(pos, "%04x:%02x:%02x.%d",
 			   &nvmeAttr->nvme_pcie_domain,
 			   &nvmeAttr->nvme_pcie_bus_id,
 			   &nvmeAttr->nvme_pcie_dev_id,
@@ -521,7 +521,7 @@ print_pcie_device_tree(PCIDevEntry *entry, int indent)
 			 entry->domain,
 			 entry->bus_id);
 	else if (entry->gpu_attr)
-		elog(LOG, "%*s PCIe(%04x:%02x:%02x.%x) %s",
+		elog(LOG, "%*s PCIe(%04x:%02x:%02x.%d) %s",
 			 2 * indent, "- ",
 			 entry->domain,
 			 entry->bus_id,
@@ -529,7 +529,7 @@ print_pcie_device_tree(PCIDevEntry *entry, int indent)
 			 entry->func_id,
 			 entry->gpu_attr->DEV_NAME);
 	else if (entry->nvme_attr)
-		elog(LOG, "%*s PCIe(%04x:%02x:%02x.%x) %s (%s)",
+		elog(LOG, "%*s PCIe(%04x:%02x:%02x.%d) %s (%s)",
 			 2 * indent, "- ",
 			 entry->domain,
 			 entry->bus_id,
@@ -538,7 +538,7 @@ print_pcie_device_tree(PCIDevEntry *entry, int indent)
 			 entry->nvme_attr->nvme_name,
 			 entry->nvme_attr->nvme_model);
 	else
-		elog(LOG, "%*s PCIe(%04x:%02x:%02x.%x)",
+		elog(LOG, "%*s PCIe(%04x:%02x:%02x.%d)",
 			 2 * indent, "- ",
 			 entry->domain,
 			 entry->bus_id,
@@ -631,9 +631,6 @@ calculate_nvme_distance_map(List *pcie_siblings, int depth,
 
 	return dist;
 }
-
-
-
 
 /*
  * construct_nvme_distance_map
