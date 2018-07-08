@@ -22,8 +22,7 @@ DevAttributes	   *devAttrs = NULL;
 cl_int				numDevAttrs = 0;
 cl_ulong			devComputeCapability = UINT_MAX;
 cl_uint				devBaselineMaxThreadsPerBlock = UINT_MAX;
-NVMEAttributes	  **nvmeAttrs = NULL;
-cl_int				numNvmeAttrs = 0;
+static HTAB		   *nvmeHash = NULL;
 
 /* catalog of device attributes */
 typedef enum {
@@ -50,6 +49,25 @@ static struct {
 #include "device_attrs.h"
 #undef DEV_ATTR
 };
+
+/*
+ * NvmeAttributes - properties of NVMe disks
+ */
+typedef struct NvmeAttributes
+{
+	cl_int		nvme_major;			/* major device number */
+	cl_int		nvme_minor;			/* minor device number */
+	char		nvme_name[64];		/* nvme device name */
+	char		nvme_serial[128];	/* serial number in sysfs */
+	char		nvme_model[256];	/* model name in sysfs */
+	cl_int		nvme_pcie_domain;	/* DDDD of DDDD:bb:dd.f */
+	cl_int		nvme_pcie_bus_id;	/* bb of DDDD:bb:dd.f */
+	cl_int		nvme_pcie_dev_id;	/* dd of DDDD:bb:dd.f */
+	cl_int		nvme_pcie_func_id;	/* f of DDDD:bb:dd.f */
+	cl_int		numa_node_id;		/* numa node id */
+	cl_int		nvme_optimal_gpu;	/* optimal GPU index */
+	cl_int		nvme_distances[FLEXIBLE_ARRAY_MEMBER];	/* distance map */
+} NVMEAttributes;
 
 /* declaration */
 Datum pgstrom_device_info(PG_FUNCTION_ARGS);
@@ -198,7 +216,8 @@ pgstrom_collect_gpu_device(void)
 		DevAttributes  *dattrs = &devAttrs[i];
 		int				compute_capability;
 		char			path[MAXPGPATH];
-		const char	   *temp;
+		char			linebuf[2048];
+		FILE		   *filp;
 
 		/* Recommend to use Pascal or later */
 		if (dattrs->COMPUTE_CAPABILITY_MAJOR < 6)
@@ -246,32 +265,30 @@ pgstrom_collect_gpu_device(void)
 			dattrs->CORES_PER_MPU = 64;
 		else
 			dattrs->CORES_PER_MPU = 0;	/* unknown */
-
-		/* sanity check using sysfs */
-		snprintf(path, sizeof(path),
-				 "/sys/bus/pci/devices/%04x:%02x:%02x.0/vendor",
-				 dattrs->PCI_DOMAIN_ID,
-				 dattrs->PCI_BUS_ID,
-				 dattrs->PCI_DEVICE_ID);
-		temp = sysfs_read_line(path);
-		if (strcasecmp(temp, "0x10de") != 0)
-		{
-			elog(WARNING,
-				 "%s (PCIe %04x:%02x:%02x) has unknown vendor code: %s",
-				 dattrs->DEV_NAME,
-				 dattrs->PCI_DOMAIN_ID,
-				 dattrs->PCI_BUS_ID,
-				 dattrs->PCI_DEVICE_ID,
-				 temp);
-		}
-		/* read the numa node-id from the sysfs entry */
+		/*
+		 * read the numa node-id from the sysfs entry
+		 *
+		 * Note that we assume device function-id is 0, because it is
+		 * uncertain whether MULTI_GPU_BOARD_GROUP_ID is an adequate value
+		 * to query, and these sibling devices obviously belongs to same
+		 * numa-node, even if function-id is not identical.
+		 */
 		snprintf(path, sizeof(path),
 				 "/sys/bus/pci/devices/%04x:%02x:%02x.0/numa_node",
 				 dattrs->PCI_DOMAIN_ID,
 				 dattrs->PCI_BUS_ID,
 				 dattrs->PCI_DEVICE_ID);
-		temp = sysfs_read_line(path);
-		dattrs->NUMA_NODE_ID = atoi(temp);
+		filp = fopen(path, "r");
+		if (!filp)
+			dattrs->NUMA_NODE_ID = -1;		/* unknown */
+		else
+		{
+			if (!fgets(linebuf, sizeof(linebuf), filp))
+				dattrs->NUMA_NODE_ID = -1;	/* unknown */
+			else
+				dattrs->NUMA_NODE_ID = atoi(linebuf);
+			fclose(filp);
+		}
 
 		/* Log brief CUDA device properties */
 		resetStringInfo(&str);
@@ -431,7 +448,7 @@ sysfs_read_pcie_attrs(const char *dirname, const char *my_name,
 			elog(ERROR, "unexpected sysfs entry: %s/%s", dirname, my_name);
 		entry->depth = depth;
 
-		/* Is it GPU device? */
+		/* Is it a GPU device? */
 		for (index=0; index < numDevAttrs; index++)
 		{
 			DevAttributes *dattr = &devAttrs[index];
@@ -446,19 +463,24 @@ sysfs_read_pcie_attrs(const char *dirname, const char *my_name,
 				break;
 			}
 		}
-
-		/* Is it NVMe device? */
-		for (index=0; index < numNvmeAttrs; index++)
+		/* Elsewhere, is it a NVMe device? */
+		if (!entry->gpu_attr)
 		{
-			NVMEAttributes *nvattr = nvmeAttrs[index];
+			NVMEAttributes *nvattr;
+			HASH_SEQ_STATUS hseq;
 
-			if (entry->domain == nvattr->nvme_pcie_domain &&
-				entry->bus_id == nvattr->nvme_pcie_bus_id &&
-				entry->dev_id == nvattr->nvme_pcie_dev_id &&
-				entry->func_id == nvattr->nvme_pcie_func_id)
+			hash_seq_init(&hseq, nvmeHash);
+			while ((nvattr = hash_seq_search(&hseq)) != NULL)
 			{
-				entry->nvme_attr = nvattr;
-				break;
+				if (entry->domain == nvattr->nvme_pcie_domain &&
+					entry->bus_id == nvattr->nvme_pcie_bus_id &&
+					entry->dev_id == nvattr->nvme_pcie_dev_id &&
+					entry->func_id == nvattr->nvme_pcie_func_id)
+				{
+					entry->nvme_attr = nvattr;
+					hash_seq_term(&hseq);
+					break;
+				}
 			}
 		}
 	}
@@ -633,12 +655,13 @@ calculate_nvme_distance_map(List *pcie_siblings, int depth,
 }
 
 /*
- * construct_nvme_distance_map
+ * setup_nvme_distance_map
  */
 static void
-construct_nvme_distance_map(void)
+setup_nvme_distance_map(void)
 {
 	NVMEAttributes *nvme;
+	NVMEAttributes *temp;
 	List	   *nvmeAttrList = NIL;
 	const char *dirname;
 	DIR		   *dir;
@@ -646,7 +669,8 @@ construct_nvme_distance_map(void)
 	char		path[MAXPGPATH];
 	List	   *pcie_root = NIL;
 	ListCell   *lc;
-	int			i, j, dist;
+	int			i, dist;
+	bool		found;
 
 	/*
 	 * collect individual nvme device's attributes
@@ -661,27 +685,39 @@ construct_nvme_distance_map(void)
 			continue;
 		snprintf(path, sizeof(path), "%s/%s", dirname, dent->d_name);
 
-		nvme = sysfs_read_nvme_attrs(path);
-		strncpy(nvme->nvme_name, dent->d_name, sizeof(nvme->nvme_name));
+		temp = sysfs_read_nvme_attrs(path);
+		strncpy(temp->nvme_name, dent->d_name, sizeof(nvme->nvme_name));
+
+		if (!nvmeHash)
+		{
+			HASHCTL		hctl;
+
+			memset(&hctl, 0, sizeof(HASHCTL));
+			hctl.keysize = offsetof(NVMEAttributes, nvme_name);
+			hctl.entrysize = offsetof(NVMEAttributes,
+									  nvme_distances[numDevAttrs]);
+			hctl.hcxt = TopMemoryContext;
+			nvmeHash = hash_create("NVMe SSDs", 256, &hctl,
+								   HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+		}
+		nvme = hash_search(nvmeHash, temp, HASH_ENTER, &found);
+		if (found)
+			elog(ERROR, "Bug? detects duplicate NVMe SSD (%d,%d)",
+				 nvme->nvme_major, nvme->nvme_minor);
+		Assert(nvme->nvme_major == temp->nvme_major &&
+			   nvme->nvme_minor == temp->nvme_minor);
+		memcpy(nvme, temp, offsetof(NVMEAttributes,
+									nvme_distances[numDevAttrs]));
 		nvmeAttrList = lappend(nvmeAttrList, nvme);
+
+		pfree(temp);
 	}
 	closedir(dir);
-
-	if (nvmeAttrList != NIL)
-	{
-		ListCell   *lc;
-
-		numNvmeAttrs = list_length(nvmeAttrList);
-		nvmeAttrs = malloc(sizeof(NVMEAttributes *) * numNvmeAttrs);
-		if (!nvmeAttrs)
-			elog(ERROR, "out of memory");
-		i = 0;
-		foreach (lc, nvmeAttrList)
-			nvmeAttrs[i++] = (NVMEAttributes *) lfirst(lc);
-	}
+	if (nvmeAttrList == NIL)
+		return;
 
 	/*
-	 * walk on the PCIe bus tree
+	 * Walk on the PCIe bus tree
 	 */
 	dirname = "/sys/devices";
 	dir = opendir(dirname);
@@ -704,21 +740,22 @@ construct_nvme_distance_map(void)
 	for (i=0; i < numDevAttrs; i++)
 	{
 		DevAttributes  *gpu = &devAttrs[i];
+		HASH_SEQ_STATUS	hseq;
 
-		for (j=0; j < numNvmeAttrs; j++)
+		hash_seq_init(&hseq, nvmeHash);
+		while ((nvme = hash_seq_search(&hseq)) != NULL)
 		{
 			bool	gpu_found = false;
 			bool	nvme_found = false;
 
-			nvme = nvmeAttrs[j];
 			if (gpu->NUMA_NODE_ID != nvme->numa_node_id)
 			{
 				nvme->nvme_distances[i] = -1;
 				continue;
 			}
 			dist = calculate_nvme_distance_map(pcie_root, 1,
-											   &devAttrs[i], &gpu_found,
-											   nvmeAttrs[j], &nvme_found);
+											   gpu, &gpu_found,
+											   nvme, &nvme_found);
 			if (gpu_found && nvme_found)
 				nvme->nvme_distances[i] = dist;
 			else
@@ -731,8 +768,9 @@ construct_nvme_distance_map(void)
 		print_pcie_device_tree(lfirst(lc), 2);
 
 	/* Print GPU<->SSD Distance Matrix */
-	if (numDevAttrs > 0 && numNvmeAttrs > 0)
+	if (numDevAttrs > 0 && nvmeHash != NULL)
 	{
+		HASH_SEQ_STATUS	hseq;
 		StringInfoData str;
 
 		initStringInfo(&str);
@@ -742,10 +780,9 @@ construct_nvme_distance_map(void)
 		elog(LOG, "GPU<->SSD Distance Matrix");
 		elog(LOG, "        %s", str.data);
 
-		for (j=0; j < numNvmeAttrs; j++)
+		hash_seq_init(&hseq, nvmeHash);
+		while ((nvme = hash_seq_search(&hseq)) != NULL)
 		{
-			nvme = nvmeAttrs[j];
-
 			resetStringInfo(&str);
 			appendStringInfo(&str, " %6s ", nvme->nvme_name);
 			for (i=0; i < numDevAttrs; i++)
@@ -786,7 +823,7 @@ pgstrom_init_gpu_device(void)
 	/* collect device properties by gpuinfo command */
 	pgstrom_collect_gpu_device();
 	/* setup NVME<->GPU distance map */
-	construct_nvme_distance_map();
+	setup_nvme_distance_map();
 }
 
 /*
