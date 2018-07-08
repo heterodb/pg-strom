@@ -534,18 +534,37 @@ typedef struct NVMEScanState
  */
 typedef struct DevAttributes
 {
+	cl_int		NUMA_NODE_ID;
 	cl_int		DEV_ID;
 	char		DEV_NAME[256];
 	size_t		DEV_TOTAL_MEMSZ;
 	cl_int		CORES_PER_MPU;
-#define DEV_ATTR(LABEL,a,b,c)					\
+#define DEV_ATTR(LABEL,a,b,c)		\
 	cl_int		LABEL;
 #include "device_attrs.h"
 #undef DEV_ATTR
 } DevAttributes;
 
+typedef struct NvmeAttributes
+{
+	cl_int		numa_node_id;		/* numa node id */
+	cl_int		nvme_major;			/* major device number */
+	cl_int		nvme_minor;			/* minor device number */
+	char		nvme_name[64];		/* nvme device name */
+	char		nvme_serial[128];	/* serial number in sysfs */
+	char		nvme_model[256];	/* model name in sysfs */
+	cl_int		nvme_pcie_domain;	/* DDDD of DDDD:bb:dd.f */
+	cl_int		nvme_pcie_bus_id;	/* bb of DDDD:bb:dd.f */
+	cl_int		nvme_pcie_dev_id;	/* dd of DDDD:bb:dd.f */
+	cl_int		nvme_pcie_func_id;	/* f of DDDD:bb:dd.f */
+	/* distance to GPU for each */
+	cl_int		nvme_distances[FLEXIBLE_ARRAY_MEMBER];
+} NVMEAttributes;
+
 extern DevAttributes   *devAttrs;
 extern cl_int			numDevAttrs;
+extern NVMEAttributes **nvmeAttrs;
+extern cl_int			numNvmeAttrs;
 extern cl_ulong			devComputeCapability;
 extern cl_uint			devBaselineMaxThreadsPerBlock;
 

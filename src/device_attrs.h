@@ -104,5 +104,10 @@ DEV_ATTR(CAN_USE_STREAM_WAIT_VALUE_NOR, BOOL, 1, "CU_STREAM_WAIT_VALUE_NOR is su
 DEV_ATTR(COOPERATIVE_LAUNCH, BOOL, 0, "Device supports launching cooperative kernels via cuLaunchCooperativeKernel")
 DEV_ATTR(COOPERATIVE_MULTI_DEVICE_LAUNCH, BOOL, 0, "Device can participate in cooperative kernels launched via cuLaunchCooperativeKernelMultiDevice")
 DEV_ATTR(MAX_SHARED_MEMORY_PER_BLOCK_OPTIN, INT, 0, "Maximum optin shared memory per block")
+#if CUDA_VERSION >= 9020
+DEV_ATTR(HOST_REGISTER_SUPPORTED, BOOL, 0, "Device supports host memory registration")
+DEV_ATTR(PAGEABLE_MEMORY_ACCESS_USES_HOST_PAGE_TABLES, BOOL, 0, "Device accesses pageable memory via the host's page tables")
+DEV_ATTR(DIRECT_MANAGED_MEM_ACCESS_FROM_HOST, BOOL, 0, "The host can directly access managed memory on the device without migration")
+#endif	/* CUDA 9.2 */
 #endif	/* CUDA 9.0 */
 #endif	/* CUDA 8.0 */
