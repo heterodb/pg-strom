@@ -57,15 +57,28 @@ typedef struct StromCmd__LicenseInfo
 } StromCmd__LicenseInfo;
 
 /* STROM_IOCTL__CHECK_FILE */
+#define NVME_STROM_VOLKIND__RAW_NVME		1
+#define NVME_STROM_VOLKIND__MD_RAID0		2
+
 typedef struct StromCmd__CheckFile
 {
-	int				fdesc;		/* in: file descriptor to be checked */
-	/* out: NUMA node-id where the storage device is installed. It can
-	 *      be -1, if md-raid0 stripes SSDs on multiple NUMA nodes. */
-	int				numa_node_id;
-	/* out: non-zero, if source SSD device supports 64bit DMA; which
-	 *      means NUMA aware SSD2RAM DMA is also supported. */
-	int				support_dma64;
+	/* in: file descriptor to be checked */
+	int				fdesc;
+	/* in: length of the disks[] array */
+	int				nrooms;
+	/* out: type of the volume; one of the NVME_STROM_VOLKIND_* */
+	int				volkind;
+	/* out: number of the underlying raw-disks */
+	int				ndisks;
+	/*
+	 * out: major/minor code of the raw-disk device where the file is
+	 * located on. It is exactly device number of the disk, not partition,
+	 * even if filesystem is constructed on a disk-partition.
+	 */
+	struct {
+		int			major;
+		int			minor;
+	} rawdisks[1];
 } StromCmd__CheckFile;
 
 /* STROM_IOCTL__MAP_GPU_MEMORY */
@@ -198,6 +211,7 @@ typedef struct StromCmd__StatInfo
 
 #ifndef	__KERNEL__
 #include <stdio.h>
+#include <errno.h>
 
 /* support routine to parse heterodb license file */
 static inline int

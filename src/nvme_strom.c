@@ -562,15 +562,6 @@ setup_nvme_distance_map(void)
 }
 
 /*
- * GetOptimalGpuForDisk
- */
-static int
-GetOptimalGpuForDisk(int major, int minor)
-{
-	return -1;
-}
-
-/*
  * TablespaceCanUseNvmeStrom
  */
 typedef struct
@@ -581,8 +572,6 @@ typedef struct
 } vfs_nvme_status;
 
 static HTAB	   *vfs_nvme_htable = NULL;
-static Oid		nvme_last_tablespace_oid = InvalidOid;
-static bool		nvme_last_tablespace_supported;
 
 static void
 vfs_nvme_cache_callback(Datum arg, int cacheid, uint32 hashvalue)
@@ -592,8 +581,48 @@ vfs_nvme_cache_callback(Datum arg, int cacheid, uint32 hashvalue)
 	{
 		hash_destroy(vfs_nvme_htable);
 		vfs_nvme_htable = NULL;
-		nvme_last_tablespace_oid = InvalidOid;
 	}
+}
+
+/*
+ * GetOptimalGpuForVolume
+ */
+static int
+GetOptimalGpuForVolume(int major, int minor)
+{
+	NvmeAttributes	key;
+	NvmeAttributes *nvme;
+	char		path[MAXPGPATH];
+	const char *temp;
+
+	if (!nvmeHash)
+		return -1;		/* no nvme device is detected */
+
+	snprintf(path, sizeof(path),
+			 "/sys/dev/block/%d:%d/device/dev", major, minor);
+	temp = sysfs_read_line(path, false);
+	if (!temp)
+	{
+		elog(WARNING, "failed to read '%s': %m", path);
+		return -1;
+	}
+	if (sscanf(temp, "%d:%d",
+			   &key.nvme_major,
+			   &key.nvme_minor) != 2)
+	{
+		elog(WARNING, "unexpected attribute in '%s': %s", path, temp);
+		return -1;
+	}
+
+	nvme = hash_search(nvmeHash, &key, HASH_FIND, NULL);
+	if (!nvme)
+	{
+		elog(WARNING, "nvme device (%d,%d) is not detected on startup",
+			 key.nvme_major,
+			 key.nvme_minor);
+		return -1;
+	}
+	return nvme->nvme_optimal_gpu;
 }
 
 static bool
@@ -605,15 +634,10 @@ TablespaceCanUseNvmeStrom(Oid tablespace_oid)
 	bool		found;
 
 	if (!nvme_strom_enabled)
-		return false;	/* NVMe-Strom is not configured or enabled */
+		return false;	/* nvme_strom is not configured or disabled */
 
 	if (!OidIsValid(tablespace_oid))
 		tablespace_oid = MyDatabaseTableSpace;
-
-	/* quick lookup but sufficient for more than 99.99% cases */
-	if (OidIsValid(nvme_last_tablespace_oid) &&
-		nvme_last_tablespace_oid == tablespace_oid)
-		return nvme_last_tablespace_supported;
 
 	if (!vfs_nvme_htable)
 	{
@@ -632,11 +656,7 @@ TablespaceCanUseNvmeStrom(Oid tablespace_oid)
 											HASH_ENTER,
 											&found);
 	if (found)
-	{
-		nvme_last_tablespace_oid = tablespace_oid;
-		nvme_last_tablespace_supported = entry->nvme_strom_supported;
 		return entry->nvme_strom_supported;
-	}
 
 	/* check whether the tablespace is supported */
 	entry->tablespace_oid = tablespace_oid;
@@ -649,46 +669,57 @@ TablespaceCanUseNvmeStrom(Oid tablespace_oid)
 	{
 		elog(WARNING, "failed on open('%s') of tablespace %u: %m",
 			 pathname, tablespace_oid);
+		return false;
 	}
-	else
-	{
-		StromCmd__CheckFile cmd;
-		struct stat statBuf;
 
-		memset(&cmd, 0, sizeof(StromCmd__CheckFile));
-		cmd.fdesc = fdesc;
-		if (nvme_strom_ioctl(STROM_IOCTL__CHECK_FILE, &cmd) != 0)
+	PG_TRY();
+	{
+		StromCmd__CheckFile *uarg;
+		int		nrooms = 256;
+		int		optimal_gpu = -1;
+		int		i, curr_gpu;
+
+	retry:
+		uarg = palloc0(offsetof(StromCmd__CheckFile,
+								rawdisks[nrooms]));
+		uarg->fdesc = fdesc;
+		uarg->nrooms = nrooms;
+		if (nvme_strom_ioctl(STROM_IOCTL__CHECK_FILE, uarg) != 0)
 		{
 			ereport(DEBUG1,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("nvme_strom does not support tablespace \"%s\"",
+					 errmsg("nvme_strom does not support tablespace '%s'",
 							get_tablespace_name(tablespace_oid))));
 		}
-		else if (fstat(fdesc, &statBuf) != 0)
+		else if (uarg->ndisks > nrooms)
 		{
-			elog(WARNING, "failed on fstat('%s') of tablespace \"%u\": %m",
-				 pathname, tablespace_oid);
+			nrooms = uarg->ndisks;
+			pfree(uarg);
+			goto retry;
 		}
-		else
+
+		for (i=0; i < uarg->ndisks; i++)
 		{
-			PG_TRY();
-			{
-				entry->nvme_optimal_gpu =
-					GetOptimalGpuForDisk(major(statBuf.st_dev),
-										 minor(statBuf.st_dev));
-				entry->nvme_strom_supported = true;
-			}
-			PG_CATCH();
-			{
-				close(fdesc);
-				PG_RE_THROW();
-			}
-			PG_END_TRY();
+			curr_gpu = GetOptimalGpuForVolume(uarg->rawdisks[i].major,
+											  uarg->rawdisks[i].minor);
+			if (curr_gpu < 0)
+				break;
+			if (optimal_gpu < 0)
+				optimal_gpu = curr_gpu;
+			else if (optimal_gpu != curr_gpu)
+				break;
 		}
-		close(fdesc);
+		if (i == uarg->ndisks)
+			entry->nvme_optimal_gpu = optimal_gpu;
 	}
-	nvme_last_tablespace_oid = tablespace_oid;
-	nvme_last_tablespace_supported = entry->nvme_strom_supported;
+	PG_CATCH();
+	{
+		close(fdesc);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	close(fdesc);
+
 	return entry->nvme_strom_supported;
 }
 
