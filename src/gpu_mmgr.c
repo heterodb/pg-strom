@@ -128,9 +128,6 @@ static GpuMemStatistics *gm_stat_array = NULL;
 static int			gpu_memory_segment_size_kb;	/* GUC */
 static size_t		gm_segment_sz;	/* bytesize */
 
-static bool			nvme_strom_enabled;			/* GUC */
-static int			nvme_strom_threshold_kb;	/* GUC */
-
 static int			num_preserved_gpu_memory_regions;	/* GUC */
 static bool			gpummgr_bgworker_got_signal = false;
 static GpuMemPreservedHead *gmemp_head = NULL;
@@ -139,23 +136,6 @@ Datum pgstrom_device_preserved_meminfo(PG_FUNCTION_ARGS);
 
 #define GPUMEM_DEVICE_RAW_EXTRA		((void *)(~0L))
 #define GPUMEM_HOST_RAW_EXTRA		((void *)(~1L))
-
-/*
- * nvme_strom_ioctl
- */
-static int
-nvme_strom_ioctl(int cmd, void *arg)
-{
-	static int		fdesc_nvme_strom = -1;
-
-	if (fdesc_nvme_strom < 0)
-	{
-		fdesc_nvme_strom = open(NVME_STROM_IOCTL_PATHNAME, O_RDONLY);
-		if (fdesc_nvme_strom < 0)
-			return -2;
-	}
-	return ioctl(fdesc_nvme_strom, cmd, arg);
-}
 
 /*
  * gpuMemFreeChunk
@@ -1587,14 +1567,8 @@ pgstrom_startup_gpu_mmgr(void)
 void
 pgstrom_init_gpu_mmgr(void)
 {
-	long		sysconf_pagesize;		/* _SC_PAGESIZE */
-	long		sysconf_phys_pages;		/* _SC_PHYS_PAGES */
-	long		default_threshold;
-	Size		shared_buffer_size = (Size)NBuffers * (Size)BLCKSZ;
 	Size		segment_sz;
 	Size		required;
-	bool		has_tesla_gpu = false;
-	int			i;
 	BackgroundWorker worker;
 
 	/*
@@ -1616,57 +1590,6 @@ pgstrom_init_gpu_mmgr(void)
 			 gpu_memory_segment_size_kb,
 			 (int)(pgstrom_chunk_size() >> 10));
 	gm_segment_sz = (size_t)gpu_memory_segment_size_kb << 10;
-
-	/* pg_strom.nvme_strom_enabled */
-	for (i=0; i < numDevAttrs; i++)
-	{
-		const char *dev_name = devAttrs[i].DEV_NAME;
-
-		if (strncasecmp(dev_name, "Tesla P40",   9) == 0 ||
-			strncasecmp(dev_name, "Tesla P100", 10) == 0 ||
-			strncasecmp(dev_name, "Tesla V100", 10) == 0)
-		{
-			has_tesla_gpu = true;
-			break;
-		}
-	}
-	DefineCustomBoolVariable("pg_strom.nvme_strom_enabled",
-							 "Turn on/off SSD-to-GPU P2P DMA",
-							 NULL,
-							 &nvme_strom_enabled,
-							 has_tesla_gpu,
-							 PGC_SUSET,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
-	/*
-	 * MEMO: Threshold of table's physical size to use NVMe-Strom:
-	 *   ((System RAM size) -
-	 *    (shared_buffer size)) * 0.67 + (shared_buffer size)
-	 *
-	 * If table size is enough large to issue real i/o, NVMe-Strom will
-	 * make advantage by higher i/o performance.
-	 */
-	sysconf_pagesize = sysconf(_SC_PAGESIZE);
-	if (sysconf_pagesize < 0)
-		elog(ERROR, "failed on sysconf(_SC_PAGESIZE): %m");
-	sysconf_phys_pages = sysconf(_SC_PHYS_PAGES);
-	if (sysconf_phys_pages < 0)
-		elog(ERROR, "failed on sysconf(_SC_PHYS_PAGES): %m");
-	if (sysconf_pagesize * sysconf_phys_pages < shared_buffer_size)
-		elog(ERROR, "Bug? shared_buffer is larger than system RAM");
-	default_threshold = ((sysconf_pagesize * sysconf_phys_pages -
-						  shared_buffer_size) * 2 / 3 +
-						 shared_buffer_size) / 1024;
-	DefineCustomIntVariable("pg_strom.nvme_strom_threshold",
-							"Tablesize threshold to use SSD-to-GPU P2P DMA",
-							NULL,
-							&nvme_strom_threshold_kb,
-							default_threshold,
-							RELSEG_SIZE,
-							INT_MAX,
-							PGC_SUSET,
-							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
-							NULL, NULL, NULL);
 
 	/* pg_strom.max_nchunks_for_multi_processes */
 	DefineCustomIntVariable("pg_strom.max_num_preserved_gpu_memory",
@@ -1825,202 +1748,4 @@ gpuMemCopyFromSSD(CUdeviceptr m_kds, pgstrom_data_store *pds)
 	}
 	/* (4) wait for completion of SSD2GPU P2P DMA */
 	gpuMemCopyFromSSDWaitRaw(gcontext, cmd.dma_task_id);
-}
-
-/*
- * TablespaceCanUseNvmeStrom
- */
-typedef struct
-{
-	Oid		tablespace_oid;
-	bool	nvme_strom_supported;
-} vfs_nvme_status;
-
-static HTAB	   *vfs_nvme_htable = NULL;
-static Oid		nvme_last_tablespace_oid = InvalidOid;
-static bool		nvme_last_tablespace_supported;
-
-static void
-vfs_nvme_cache_callback(Datum arg, int cacheid, uint32 hashvalue)
-{
-	/* invalidate all the cached status */
-	if (vfs_nvme_htable)
-	{
-		hash_destroy(vfs_nvme_htable);
-		vfs_nvme_htable = NULL;
-		nvme_last_tablespace_oid = InvalidOid;
-	}
-}
-
-static bool
-TablespaceCanUseNvmeStrom(Oid tablespace_oid)
-{
-	vfs_nvme_status *entry;
-	const char *pathname;
-	int			fdesc;
-	bool		found;
-
-	if (!nvme_strom_enabled)
-		return false;	/* NVMe-Strom is not configured or enabled */
-
-	if (!OidIsValid(tablespace_oid))
-		tablespace_oid = MyDatabaseTableSpace;
-
-	/* quick lookup but sufficient for more than 99.99% cases */
-	if (OidIsValid(nvme_last_tablespace_oid) &&
-		nvme_last_tablespace_oid == tablespace_oid)
-		return nvme_last_tablespace_supported;
-
-	if (!vfs_nvme_htable)
-	{
-		HASHCTL		ctl;
-
-		memset(&ctl, 0, sizeof(HASHCTL));
-		ctl.keysize = sizeof(Oid);
-		ctl.entrysize = sizeof(vfs_nvme_status);
-		vfs_nvme_htable = hash_create("VFS:NVMe-Strom status", 64,
-									  &ctl, HASH_ELEM | HASH_BLOBS);
-		CacheRegisterSyscacheCallback(TABLESPACEOID,
-									  vfs_nvme_cache_callback, (Datum) 0);
-	}
-	entry = (vfs_nvme_status *) hash_search(vfs_nvme_htable,
-											&tablespace_oid,
-											HASH_ENTER,
-											&found);
-	if (found)
-	{
-		nvme_last_tablespace_oid = tablespace_oid;
-		nvme_last_tablespace_supported = entry->nvme_strom_supported;
-		return entry->nvme_strom_supported;
-	}
-
-	/* check whether the tablespace is supported */
-	entry->tablespace_oid = tablespace_oid;
-	entry->nvme_strom_supported = false;
-
-	pathname = GetDatabasePath(MyDatabaseId, tablespace_oid);
-	fdesc = open(pathname, O_RDONLY | O_DIRECTORY);
-	if (fdesc < 0)
-	{
-		elog(WARNING, "failed to open \"%s\" of tablespace \"%s\": %m",
-			 pathname, get_tablespace_name(tablespace_oid));
-	}
-	else
-	{
-		StromCmd__CheckFile cmd;
-
-		cmd.fdesc = fdesc;
-		if (nvme_strom_ioctl(STROM_IOCTL__CHECK_FILE, &cmd) == 0)
-			entry->nvme_strom_supported = true;
-		else
-		{
-			ereport(DEBUG1,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("nvme_strom does not support tablespace \"%s\"",
-							get_tablespace_name(tablespace_oid))));
-		}
-	}
-	nvme_last_tablespace_oid = tablespace_oid;
-	nvme_last_tablespace_supported = entry->nvme_strom_supported;
-	return entry->nvme_strom_supported;
-}
-
-bool
-RelationCanUseNvmeStrom(Relation relation)
-{
-	Oid		tablespace_oid = RelationGetForm(relation)->reltablespace;
-	/* SSD2GPU on temp relation is not supported */
-	if (RelationUsesLocalBuffers(relation))
-		return false;
-	return TablespaceCanUseNvmeStrom(tablespace_oid);
-}
-
-/*
- * ScanPathGetNBlocksByNvmeStrom
- */
-static BlockNumber
-ScanPathGetNBlocksByNvmeStrom(PlannerInfo *root, RelOptInfo *baserel)
-{
-	RangeTblEntry *rte;
-	HeapTuple	tuple;
-	bool		relpersistence;
-
-	if (!TablespaceCanUseNvmeStrom(baserel->reltablespace))
-		return 0;
-
-	/* only permanent / unlogged table can use NVMe-Strom */
-	rte = root->simple_rte_array[baserel->relid];
-	tuple = SearchSysCache1(RELOID, ObjectIdGetDatum(rte->relid));
-	if (!HeapTupleIsValid(tuple))
-		elog(ERROR, "cache lookup failed for relation %u", rte->relid);
-	relpersistence = ((Form_pg_class) GETSTRUCT(tuple))->relpersistence;
-	ReleaseSysCache(tuple);
-
-	if (relpersistence == RELPERSISTENCE_PERMANENT ||
-		relpersistence == RELPERSISTENCE_UNLOGGED)
-		return baserel->pages;
-
-	return 0;
-}
-
-/*
- * ScanPathWillUseNvmeStrom - Optimizer Hint
- */
-bool
-ScanPathWillUseNvmeStrom(PlannerInfo *root, RelOptInfo *baserel)
-{
-	size_t		num_scan_pages;
-
-	/*
-	 * Check expected amount of the scan i/o.
-	 * If 'baserel' is children of partition table, threshold shall be
-	 * checked towards the entire partition size, because the range of
-	 * child tables fully depend on scan qualifiers thus variable time
-	 * by time. Once user focus on a particular range, but he wants to
-	 * focus on other area. It leads potential thrashing on i/o.
-	 */
-	if (baserel->reloptkind == RELOPT_BASEREL)
-		num_scan_pages = ScanPathGetNBlocksByNvmeStrom(root, baserel);
-	else if (baserel->reloptkind == RELOPT_OTHER_MEMBER_REL)
-	{
-		ListCell   *lc;
-		Index		parent_relid = 0;
-
-		foreach (lc, root->append_rel_list)
-		{
-			AppendRelInfo  *appinfo = (AppendRelInfo *) lfirst(lc);
-
-			if (appinfo->child_relid == baserel->relid)
-			{
-				parent_relid = appinfo->parent_relid;
-				break;
-			}
-		}
-		if (!lc)
-		{
-			elog(NOTICE, "Bug? child table (%d) not found in append_rel_list",
-				 baserel->relid);
-			return false;
-		}
-
-		num_scan_pages = 0;
-		foreach (lc, root->append_rel_list)
-		{
-			AppendRelInfo  *appinfo = (AppendRelInfo *) lfirst(lc);
-			RelOptInfo	   *rel;
-
-			if (appinfo->parent_relid != parent_relid)
-				continue;
-			rel = root->simple_rel_array[appinfo->child_relid];
-			num_scan_pages += ScanPathGetNBlocksByNvmeStrom(root, rel);
-		}
-	}
-	else
-		elog(ERROR, "Bug? unexpected reloptkind of base relation: %d",
-			 (int)baserel->reloptkind);
-
-	if (num_scan_pages < ((size_t)nvme_strom_threshold_kb << 10) / BLCKSZ)
-		return false;
-	/* ok, this table scan can use nvme-strom */
-	return true;
 }

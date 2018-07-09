@@ -872,8 +872,9 @@ extern void pgstromInitGpuTask(GpuTaskState *gts, GpuTask *gtask);
 extern void pgstrom_init_gputasks(void);
 
 /*
- * nvme.c
+ * nvme_strom.c
  */
+extern int	nvme_strom_ioctl(int cmd, void *arg);
 extern void	pgstrom_init_nvme(void);
 
 
