@@ -437,7 +437,7 @@ sysfs_read_pcie_attrs(const char *dirname, const char *my_name,
 			DevAttributes *dattr = &devAttrs[index];
 
 			if (entry->domain == dattr->PCI_DOMAIN_ID &&
-				entry->bus_id == dattr->PCI_DEVICE_ID &&
+				entry->bus_id == dattr->PCI_BUS_ID &&
 				entry->dev_id == dattr->PCI_DEVICE_ID &&
 				entry->func_id == (dattr->MULTI_GPU_BOARD ?
 								   dattr->MULTI_GPU_BOARD_GROUP_ID : 0))
