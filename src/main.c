@@ -584,7 +584,7 @@ _PG_init(void)
 	pgstrom_init_gpu_mmgr();
 	pgstrom_init_gpu_context();
 	pgstrom_init_cuda_program();
-	pgstrom_init_nvme();
+	pgstrom_init_nvme_strom();
 
 	/* registration of custom-scan providers */
 	pgstrom_init_gputasks();

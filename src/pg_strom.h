@@ -875,8 +875,10 @@ extern void pgstrom_init_gputasks(void);
  * nvme_strom.c
  */
 extern int	nvme_strom_ioctl(int cmd, void *arg);
-extern void	pgstrom_init_nvme(void);
-
+extern bool ScanPathWillUseNvmeStrom(PlannerInfo *root,
+									 RelOptInfo *baserel);
+extern bool RelationCanUseNvmeStrom(Relation relation);
+extern void	pgstrom_init_nvme_strom(void);
 
 /*
  * cuda_program.c
@@ -1022,9 +1024,6 @@ extern bool KDS_insert_tuple(kern_data_store *kds,
 extern bool KDS_insert_hashitem(kern_data_store *kds,
 								TupleTableSlot *slot,
 								cl_uint hash_value);
-
-extern bool ScanPathWillUseNvmeStrom(PlannerInfo *root, RelOptInfo *baserel);
-extern bool RelationCanUseNvmeStrom(Relation relation);
 extern void pgstrom_init_datastore(void);
 
 /*

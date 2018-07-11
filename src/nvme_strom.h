@@ -215,9 +215,7 @@ typedef struct StromCmd__StatInfo
 
 /* support routine to parse heterodb license file */
 static inline int
-read_heterodb_license_file(StromCmd__LicenseInfo *cmd,
-						   const char *license_file_name,
-						   FILE *outerr)
+read_heterodb_license_file(StromCmd__LicenseInfo *cmd, FILE *outerr)
 {
 	FILE	   *filp = NULL;
 	ssize_t		i;
@@ -225,11 +223,14 @@ read_heterodb_license_file(StromCmd__LicenseInfo *cmd,
 	long		val = 0;
 	int			bits = 0;
 
-	filp = fopen(license_file_name, "rb");
+	filp = fopen(HETERODB_LICENSE_PATHNAME, "rb");
 	if (!filp)
 	{
-		if (errno != ENOENT && outerr)
-			fprintf(outerr, "failed to open '%s': %m\n", license_file_name);
+		if (errno == ENOENT)
+			return 1;
+		else if (outerr)
+			fprintf(outerr, "failed to open '%s': %m\n",
+					HETERODB_LICENSE_PATHNAME);
 		return -1;
 	}
 	/* Extract base64 */

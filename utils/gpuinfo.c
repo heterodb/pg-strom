@@ -77,6 +77,7 @@ commercial_license_validation(int *nr_gpus)
 {
 	StromCmd__LicenseInfo cmd;
 	int			fdesc;
+	int			retry_done = 0;
 	int			i_year, i_mon, i_day;
 	int			e_year, e_mon, e_day;
 	static const char *months[] =
@@ -85,21 +86,33 @@ commercial_license_validation(int *nr_gpus)
 
 	/* Read the license file */
 	memset(&cmd, 0, sizeof(StromCmd__LicenseInfo));
-	if (read_heterodb_license_file(&cmd, HETERODB_LICENSE_PATHNAME, stderr))
+	if (read_heterodb_license_file(&cmd, stderr))
 		return 1;
 	cmd.validation = 1;
 
 	/* License validation */
+retry_open:
 	fdesc = open(NVME_STROM_IOCTL_PATHNAME, O_RDONLY);
 	if (fdesc < 0)
 	{
-		fprintf(stderr, "failed on open('%s'): %m\n",
-				NVME_STROM_IOCTL_PATHNAME);
+		int		errcode = errno;
+
+		if (errno == ENOENT &&
+			retry_done == 0 &&
+			system("/usr/bin/nvme_strom-modprobe") == 0)
+		{
+			retry_done = 1;
+			goto retry_open;
+		}
+		fprintf(stderr, "failed on open('%s'): %s\n",
+				NVME_STROM_IOCTL_PATHNAME, strerror(errcode));
 		return 1;
 	}
+
 	if (ioctl(fdesc, STROM_IOCTL__LICENSE_ADMIN, &cmd) != 0)
 	{
 		fprintf(stderr, "failed on ioctl(STROM_IOCTL__LICENSE_ADMIN): %m\n");
+		close(fdesc);
 		return 1;
 	}
 	close(fdesc);

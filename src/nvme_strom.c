@@ -64,13 +64,13 @@ static int			nvme_strom_threshold_kb;	/* GUC */
 int
 nvme_strom_ioctl(int cmd, void *arg)
 {
-	static int		fdesc_nvme_strom = -1;
+	static int	fdesc_nvme_strom = -1;
 
 	if (fdesc_nvme_strom < 0)
 	{
 		fdesc_nvme_strom = open(NVME_STROM_IOCTL_PATHNAME, O_RDONLY);
 		if (fdesc_nvme_strom < 0)
-			return -2;
+			return -1;
 	}
 	return ioctl(fdesc_nvme_strom, cmd, arg);
 }
@@ -824,10 +824,10 @@ ScanPathWillUseNvmeStrom(PlannerInfo *root, RelOptInfo *baserel)
 }
 
 /*
- * pgstrom_init_nvme
+ * pgstrom_init_nvme_strom
  */
 void
-pgstrom_init_nvme(void)
+pgstrom_init_nvme_strom(void)
 {
 	long		sysconf_pagesize;		/* _SC_PAGESIZE */
 	long		sysconf_phys_pages;		/* _SC_PHYS_PAGES */
