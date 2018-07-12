@@ -291,7 +291,6 @@ julian(long date)
 #define STATIC_DISTS 1
 #ifdef STATIC_DISTS
 #include "dists.dss.h"
-
 static char *
 static_dist_fgets(char *d, int len, size_t *pos)
 {
