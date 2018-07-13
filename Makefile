@@ -113,13 +113,16 @@ __DOC_FILES = index.md install.md partition.md \
 __PACKAGE_FILES = LICENSE README.md Makefile pg_strom.control	\
 	          src sql utils test man
 ifdef PGSTROM_VERSION
-__STROM_TGZ = pg_strom-$(shell echo $(PGSTROM_VERSION) | sed -e 's/^v//g')
-__STROM_TGZ_TAG = $(PGSTROM_VERSION)
+__STROM_TGZ = pg_strom-$(shell echo $(PGSTROM_VERSION))
 else
 __STROM_TGZ = pg_strom-master
-__STROM_TGZ_TAG = HEAD
 endif
 STROM_TGZ = $(addprefix $(STROM_BUILD_ROOT)/, $(__STROM_TGZ).tar.gz)
+ifdef PGSTROM_GITHASH
+__STROM_TGZ_GITHASH = $(PGSTROM_GITHASH)
+else
+__STROM_TGZ_GITHASH = HEAD
+endif
 
 #
 # Header and Libraries of CUDA
@@ -273,7 +276,7 @@ $(STROM_TGZ): $(shell cd $(STROM_BUILD_ROOT); git ls-files $(__PACKAGE_FILES))
 	 git archive	--format=tar.gz          \
 			--prefix=$(__STROM_TGZ)/ \
 			-o $(__STROM_TGZ).tar.gz \
-			$(__STROM_TGZ_TAG) $(__PACKAGE_FILES))
+			$(__STROM_TGZ_GITHASH) $(__PACKAGE_FILES))
 
 tarball: $(STROM_TGZ)
 
