@@ -1106,7 +1106,6 @@ extern List *extract_partitionwise_pathlist(PlannerInfo *root,
 											Path *outer_path,
 											Path *inner_path,
 											bool try_parallel_path,
-											Index *p_append_relid,
 											int *p_parallel_nworkers,
 											List **p_partitioned_rels);
 extern List *fixup_appendrel_child_varnode(List *exprs_list,
@@ -1268,6 +1267,9 @@ extern char get_func_prokind(Oid funcid);
 #define PROKIND_WINDOW		'w'
 #define PROKIND_PROCEDURE	'p'
 #endif
+extern cl_int gpulz_compress(const char *source, cl_int slen, char *dest);
+extern cl_int gpu_lz_decompress(const char *source, cl_int slen,
+								char *dest, cl_int rawsize);
 extern const char *errorText(int errcode);
 extern const char *errorTextKernel(kern_errorbuf *kerror);
 

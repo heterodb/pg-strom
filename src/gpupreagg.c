@@ -1492,7 +1492,6 @@ try_add_gpupreagg_append_paths(PlannerInfo *root,
 	List	   *sub_paths_list;
 	List	   *partitioned_rels;
 	int			parallel_nworkers;
-	Index		append_relid;
 	AppendPath *append_path;
 	Path	   *partial_path;
 	ListCell   *lc;
@@ -1502,7 +1501,6 @@ try_add_gpupreagg_append_paths(PlannerInfo *root,
 													input_path,
 													NULL,
 													try_parallel_path,
-													&append_relid,
 													&parallel_nworkers,
 													&partitioned_rels);
 	if (sub_paths_list == NIL)
@@ -1536,11 +1534,26 @@ try_add_gpupreagg_append_paths(PlannerInfo *root,
 		append_paths_list = lappend(append_paths_list, partial_path);
 	}
 	/* also see create_append_path(), some fields must be fixed up */
+#if PG_VERSION_NUM < 110000
 	append_path = create_append_path(input_path->parent,
 									 append_paths_list,
 									 NULL,
 									 parallel_nworkers,
 									 partitioned_rels);
+#else
+	if (try_parallel_path)
+		append_path = create_append_path(root, input_path->parent,
+										 NIL, append_paths_list,
+										 NULL,
+										 parallel_nworkers, true,
+										 partitioned_rels, 0.0);
+	else
+		append_path = create_append_path(root, input_path->parent,
+										 append_paths_list, NIL,
+										 NULL,
+										 parallel_nworkers, false,
+										 partitioned_rels, 0.0);
+#endif
 	append_path->path.pathtarget = target_partial;
 
 	/* prepend Gather on demand */
@@ -4386,8 +4399,8 @@ ExplainGpuPreAgg(CustomScanState *node, List *ancestors, ExplainState *es)
 									 es->verbose, false);
 		ExplainPropertyText("BRIN cond", exprstr, es);
 		if (es->analyze)
-			ExplainPropertyInteger("BRIN skipped",
-								   gpas->gts.outer_brin_count, es);
+			ExplainPropertyInt64("BRIN skipped", NULL,
+								 gpas->gts.outer_brin_count, es);
 	}
 	/* other common fields */
 	pgstromExplainGpuTaskState(&gpas->gts, es);

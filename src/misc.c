@@ -160,13 +160,6 @@ get_func_prokind(Oid funcid)
 }
 #endif		/* <PG11 */
 
-
-
-
-
-
-
-
 /*
  * errorText - string form of the error code
  */

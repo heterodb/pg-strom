@@ -1235,7 +1235,6 @@ extract_partitionwise_pathlist(PlannerInfo *root,
 							   Path *outer_path,
 							   Path *inner_path,
 							   bool try_parallel_path,
-							   Index *p_append_relid,
 							   int *p_parallel_nworkers,
 							   List **p_partitioned_rels)
 {
@@ -1256,25 +1255,13 @@ extract_partitionwise_pathlist(PlannerInfo *root,
 	{
 		if (IsA(outer_path, AppendPath))
 		{
-			ListCell   *lc;
+			RelOptInfo *append_rel = outer_path->parent;
 
 			append_path = (AppendPath *) outer_path;
-			if (append_path->partitioned_rels == NIL)
-				return NIL;		/* not a partition table? */
-
-			/* identify the parent relid */
-			foreach (lc, root->pcinfo_list)
-			{
-				PartitionedChildRelInfo *pcinfo = lfirst(lc);
-
-				if (equal(pcinfo->child_rels, append_path->partitioned_rels))
-				{
-					parent_relid = pcinfo->parent_relid;
-					break;
-				}
-			}
-			if (!lc)
-				elog(ERROR, "Bug? no relevant PartitionedChildRelInfo");
+			if (append_rel->reloptkind != RELOPT_BASEREL ||
+				append_path->partitioned_rels == 0)
+				return NIL;		/* not a simple partition table */
+			parent_relid = append_rel->relid;
 			break;
 		}
 		else if (IsA(outer_path, NestPath) ||
@@ -1285,6 +1272,9 @@ extract_partitionwise_pathlist(PlannerInfo *root,
 
 			if (jpath->jointype != JOIN_INNER &&
 				jpath->jointype != JOIN_LEFT)
+				return NIL;
+			if (try_parallel_path &&
+				!jpath->innerjoinpath->parallel_safe)
 				return NIL;
 			inner_paths_list = lcons(jpath->innerjoinpath,
 									 inner_paths_list);
@@ -1299,6 +1289,9 @@ extract_partitionwise_pathlist(PlannerInfo *root,
 			{
 				if (gjpath->inners[i].join_type != JOIN_INNER &&
 					gjpath->inners[i].join_type != JOIN_LEFT)
+					return NIL;
+				if (try_parallel_path &&
+					!gjpath->inners[i].scan_path->parallel_safe)
 					return NIL;
 				inner_paths_list = lcons(gjpath->inners[i].scan_path,
 										 inner_paths_list);
@@ -1412,7 +1405,6 @@ extract_partitionwise_pathlist(PlannerInfo *root,
 			new_append_subpaths = lappend(new_append_subpaths, new_subpath);
 		}
 		result = new_append_subpaths;
-		*p_append_relid = parent_relid;
 		*p_parallel_nworkers = parallel_nworkers;
 		*p_partitioned_rels = append_path->partitioned_rels;
 	skip:
@@ -1455,7 +1447,6 @@ try_add_gpujoin_append_paths(PlannerInfo *root,
 	List	   *subpaths_list;
 	List	   *partitioned_rels;
 	int			parallel_nworkers;
-	Index		append_relid;
 	AppendPath *append_path;
 
 	if (join_type != JOIN_INNER &&
@@ -1467,18 +1458,32 @@ try_add_gpujoin_append_paths(PlannerInfo *root,
 												   outer_path,
 												   inner_path,
 												   try_parallel_path,
-												   &append_relid,
 												   &parallel_nworkers,
 												   &partitioned_rels);
 	if (subpaths_list == NIL)
 		return;
 
 	/* make a new AppendPath */
+#if PG_VERSION_NUM < 110000
 	append_path = create_append_path(joinrel,
 									 subpaths_list,
 									 required_outer,
 									 parallel_nworkers,
 									 partitioned_rels);
+#else
+	if (try_parallel_path)
+		append_path = create_append_path(root, joinrel,
+										 NIL, subpaths_list,
+										 required_outer,
+										 parallel_nworkers, true,
+										 partitioned_rels, 0.0);
+	else
+		append_path = create_append_path(root, joinrel,
+										 subpaths_list, NIL,
+										 required_outer,
+										 parallel_nworkers, false,
+										 partitioned_rels, 0.0);
+#endif
 	if (try_parallel_path)
 		add_partial_path(joinrel, (Path *) append_path);
 	else
@@ -2917,8 +2922,8 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 								  es->verbose, false);
 		ExplainPropertyText("BRIN cond", temp, es);
 		if (es->analyze)
-			ExplainPropertyInteger("BRIN skipped",
-								   gjs->gts.outer_brin_count, es);
+			ExplainPropertyInt64("BRIN skipped", NULL,
+								 gjs->gts.outer_brin_count, es);
 	}
 	/* join-qualifiers */
 	depth = 1;

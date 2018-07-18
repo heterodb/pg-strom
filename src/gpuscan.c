@@ -2039,8 +2039,8 @@ ExplainGpuScan(CustomScanState *node, List *ancestors, ExplainState *es)
 									 es->verbose, false);
 		ExplainPropertyText("BRIN cond", exprstr, es);
 		if (es->analyze)
-			ExplainPropertyInteger("BRIN skipped",
-								   gss->gts.outer_brin_count, es);
+			ExplainPropertyInt64("BRIN skipped", NULL,
+								 gss->gts.outer_brin_count, es);
 	}
 
 	/* common portion of EXPLAIN */

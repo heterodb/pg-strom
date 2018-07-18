@@ -63,18 +63,6 @@ brinGetStats(Relation index, BrinStatsData *stats)
 }
 #endif	/* <PG10.x */
 
-
-
-
-
-
-
-
-
-
-
-
-
 /*
  * simple_match_clause_to_indexcol
  *
@@ -834,10 +822,15 @@ __pgstromExecGetBrinIndexMap(pgstromIndexState *pi_state,
 					AttrNumber	keyattno = key->sk_attno;
 					BrinValues *bval = &dtup->bt_columns[keyattno - 1];
 					Datum		rv;
+					Form_pg_attribute keyattr __attribute__((unused));
 
+#if PG_VERSION_NUM < 110000
+					keyattr = bd_tupdesc->attrs[keyattno - 1];
+#else
+					keyattr = &bd_tupdesc->attrs[keyattno - 1];
+#endif
 					Assert((key->sk_flags & SK_ISNULL) ||
-						   (key->sk_collation ==
-							bd_tupdesc->attrs[keyattno - 1]->attcollation));
+						   (key->sk_collation == keyattr->attcollation));
 					/* First time this column? look up consistent function */
 					if (consistentFn[keyattno - 1].fn_oid == InvalidOid)
 					{
