@@ -53,10 +53,12 @@ struct PCIDevEntry
 };
 typedef struct PCIDevEntry	PCIDevEntry;
 
-/* static variables */
+/* static variables/functions */
 static HTAB		   *nvmeHash = NULL;
 static bool			nvme_strom_enabled;			/* GUC */
 static int			nvme_strom_threshold_kb;	/* GUC */
+static char		   *nvme_manual_distance_map;	/* GUC */
+static void			apply_nvme_manual_distance_map(void);
 
 /*
  * nvme_strom_ioctl
@@ -337,6 +339,29 @@ print_pcie_device_tree(PCIDevEntry *entry, int indent)
 		print_pcie_device_tree(lfirst(lc), indent+2);
 }
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 /*
  * calculate_nvme_distance_map
  */
@@ -528,10 +553,13 @@ setup_nvme_distance_map(void)
 				nvme->nvme_distances[i] = -1;
 		}
 	}
-
 	/* Print PCIe tree */
 	foreach (lc, pcie_root)
 		print_pcie_device_tree(lfirst(lc), 2);
+
+	/* Overwrite the distance map by manual configuration */
+	if (nvme_manual_distance_map)
+		apply_nvme_manual_distance_map();
 
 	/* Print GPU<->SSD Distance Matrix */
 	if (numDevAttrs > 0 && nvmeHash != NULL)
@@ -542,7 +570,7 @@ setup_nvme_distance_map(void)
 		initStringInfo(&str);
 
 		for (i=0; i < numDevAttrs; i++)
-			appendStringInfo(&str, "    GPU%d", i);
+			appendStringInfo(&str, "   GPU%d  ", i);
 		elog(LOG, "GPU<->SSD Distance Matrix");
 		elog(LOG, "        %s", str.data);
 
@@ -553,11 +581,89 @@ setup_nvme_distance_map(void)
 			appendStringInfo(&str, " %6s ", nvme->nvme_name);
 			for (i=0; i < numDevAttrs; i++)
 			{
-				appendStringInfo(&str, " % 6d ", nvme->nvme_distances[i]);
+				int		dist = nvme->nvme_distances[i];
+
+				if (nvme->nvme_optimal_gpu == i)
+					appendStringInfo(&str, "  (% 4d)", dist);
+				else
+					appendStringInfo(&str, "   % 4d ", dist);
 			}
 			elog(LOG, "%s", str.data);
 		}
 		pfree(str.data);
+	}
+}
+
+/*
+ * apply_nvme_manual_distance_map
+ */
+static inline char *__trim(char *token)
+{
+	char   *tail = token + strlen(token) - 1;
+
+	while (*token == ' ' || *token == '\t')
+		token++;
+	while (tail >= token && (*tail == ' ' || *tail == '\t'))
+		*tail-- = '\0';
+	return token;
+}
+
+static void
+apply_nvme_manual_distance_map(void)
+{
+	char	   *config = pstrdup(nvme_manual_distance_map);
+	char	   *token = NULL;
+	char	   *dev1, *dev2;
+	char	   *pos1, *pos2;
+
+	token = strtok_r(config, ",", &pos1);
+	while (token)
+	{
+		NvmeAttributes *nvme = 0;
+		int		cuda_dindex;
+		char   *c;
+
+		token = __trim(token);
+
+		if ((dev1 = strtok_r(token, ":", &pos2)) == NULL ||
+			(dev2 = strtok_r(NULL, ":", &pos2)) == NULL ||
+			strtok_r(NULL, ":", &pos2) != NULL)
+			elog(ERROR, "wrong configuration at %ld character of '%s'",
+				 token - config, nvme_manual_distance_map);
+		dev1 = __trim(dev1);
+		dev2 = __trim(dev2);
+		if (strncasecmp(dev1, "nvme", 4) != 0 ||
+			strncasecmp(dev2, "gpu", 3) != 0)
+			elog(ERROR, "wrong configuration at %ld character of '%s'",
+				 token - config, nvme_manual_distance_map);
+		if (nvmeHash)
+		{
+			HASH_SEQ_STATUS	hseq;
+
+			hash_seq_init(&hseq, nvmeHash);
+			while ((nvme = hash_seq_search(&hseq)) != NULL)
+			{
+				if (strcasecmp(dev1, nvme->nvme_name) == 0)
+				{
+					hash_seq_term(&hseq);
+					break;
+				}
+			}
+		}
+		if (!nvme)
+			elog(ERROR, "NVME device '%s' was not found", dev1);
+
+		cuda_dindex = atoi(dev2 + 3);
+		c = dev2 + 3;
+		while (isdigit(*c))
+			c++;
+		if (*c != '\0' || cuda_dindex < 0 || cuda_dindex >= numDevAttrs)
+			elog(ERROR, "GPU device '%s' was not found", dev2);
+
+		/* over-write default configuration */
+		nvme->nvme_optimal_gpu = cuda_dindex;
+
+		token = strtok_r(NULL, ",", &pos1);
 	}
 }
 
@@ -887,6 +993,22 @@ pgstrom_init_nvme_strom(void)
 							GUC_NOT_IN_SAMPLE | GUC_UNIT_KB,
 							NULL, NULL, NULL);
 
+	/*
+	 * pg_strom.nvme_distance_map
+	 *
+	 * config := <token>[,<token>...]
+	 * token  := nvmeXX:gpuXX
+	 *
+	 * eg) nvme0:gpu0,nvme1:gpu1
+	 */
+	DefineCustomStringVariable("pg_strom.nvme_distance_map",
+							   "Manual configuration of GPU<->NVME distances",
+							   NULL,
+							   &nvme_manual_distance_map,
+							   NULL,
+							   PGC_POSTMASTER,
+							   GUC_NOT_IN_SAMPLE,
+							   NULL, NULL, NULL);
 	setup_nvme_distance_map();
 }
 
