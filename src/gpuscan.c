@@ -1668,7 +1668,15 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 		TupleDesc		scan_tupdesc;
 
 		scan_tupdesc = ExecCleanTypeFromTL(cscan->custom_scan_tlist, false);
+#if PG_VERSION_NUM < 110000
 		ExecAssignScanType(&gss->gts.css.ss, scan_tupdesc);
+#else
+		/*
+		 * PG11 prohibits to replace only tupdesc of TupleTableSlot,
+		 * so we allocate an entirely new slot with clean tuple-desc.
+		 */
+		ExecInitScanTupleSlot(estate, &gss->gts.css.ss, scan_tupdesc);
+#endif
 		ExecAssignScanProjectionInfoWithVarno(&gss->gts.css.ss, INDEX_VAR);
 		/* valid @custom_scan_tlist means device projection is required */
 		gss->dev_projection = true;

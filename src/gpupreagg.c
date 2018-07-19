@@ -1546,13 +1546,13 @@ try_add_gpupreagg_append_paths(PlannerInfo *root,
 										 NIL, append_paths_list,
 										 NULL,
 										 parallel_nworkers, true,
-										 partitioned_rels, 0.0);
+										 partitioned_rels, -1.0);
 	else
 		append_path = create_append_path(root, input_path->parent,
 										 append_paths_list, NIL,
 										 NULL,
 										 parallel_nworkers, false,
-										 partitioned_rels, 0.0);
+										 partitioned_rels, -1.0);
 #endif
 	append_path->path.pathtarget = target_partial;
 
@@ -1573,6 +1573,9 @@ try_add_gpupreagg_append_paths(PlannerInfo *root,
 	}
 	else
 		partial_path = &append_path->path;
+
+	elog(INFO, "preaggpath rows=%.0f cost=%.2f...%.2f", partial_path->rows, partial_path->startup_cost, partial_path->total_cost);
+
 
 	try_add_final_aggregation_paths(root,
 									group_rel,

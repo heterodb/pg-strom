@@ -1065,8 +1065,8 @@ adjust_appendrel_attr_needed(PlannerInfo *root,
 static List *
 make_pseudo_sjinfo_list(PlannerInfo *root,
 						List *join_info_list,
-						Index parent_relid,
-						RelOptInfo *subrel)
+						RelOptInfo *parent_rel,
+						RelOptInfo *child_rel)
 {
 	AppendRelInfo *apinfo = NULL;
 	List	   *result = NIL;
@@ -1077,8 +1077,8 @@ make_pseudo_sjinfo_list(PlannerInfo *root,
 	{
 		AppendRelInfo *temp = lfirst(lc);
 
-		if (temp->parent_relid == parent_relid &&
-			bms_is_member(temp->child_relid, subrel->relids))
+		if (temp->parent_relid == parent_rel->relid &&
+			bms_is_member(temp->child_relid, child_rel->relids))
 		{
 			if (!apinfo)
 				apinfo = temp;
@@ -1093,28 +1093,28 @@ make_pseudo_sjinfo_list(PlannerInfo *root,
 	{
 		SpecialJoinInfo *sjinfo = copyObject(lfirst(lc));
 
-		if (bms_is_member(parent_relid, sjinfo->min_lefthand))
+		if (bms_is_member(parent_rel->relid, sjinfo->min_lefthand))
 		{
 			sjinfo->min_lefthand = bms_del_member(sjinfo->min_lefthand,
 												  apinfo->parent_relid);
 			sjinfo->min_lefthand = bms_add_member(sjinfo->min_lefthand,
 												  apinfo->child_relid);
 		}
-		if (bms_is_member(parent_relid, sjinfo->min_righthand))
+		if (bms_is_member(parent_rel->relid, sjinfo->min_righthand))
 		{
 			sjinfo->min_righthand = bms_del_member(sjinfo->min_righthand,
 												   apinfo->parent_relid);
 			sjinfo->min_righthand = bms_add_member(sjinfo->min_righthand,
 												   apinfo->child_relid);
 		}
-		if (bms_is_member(parent_relid, sjinfo->syn_lefthand))
+		if (bms_is_member(parent_rel->relid, sjinfo->syn_lefthand))
 		{
 			sjinfo->syn_lefthand = bms_del_member(sjinfo->syn_lefthand,
 												  apinfo->parent_relid);
 			sjinfo->syn_lefthand = bms_add_member(sjinfo->syn_lefthand,
 												  apinfo->child_relid);
 		}
-		if (bms_is_member(parent_relid, sjinfo->syn_righthand))
+		if (bms_is_member(parent_rel->relid, sjinfo->syn_righthand))
 		{
 			sjinfo->syn_righthand = bms_del_member(sjinfo->syn_righthand,
 												   apinfo->parent_relid);
@@ -1240,7 +1240,6 @@ extract_partitionwise_pathlist(PlannerInfo *root,
 {
 	List	   *inner_paths_list = NIL;
 	AppendPath *append_path;
-	Index		parent_relid;
 	List	   *result = NIL;
 	bool		enable_gpunestloop_saved;
 	bool		enable_gpuhashjoin_saved;
@@ -1255,13 +1254,9 @@ extract_partitionwise_pathlist(PlannerInfo *root,
 	{
 		if (IsA(outer_path, AppendPath))
 		{
-			RelOptInfo *append_rel = outer_path->parent;
-
 			append_path = (AppendPath *) outer_path;
-			if (append_rel->reloptkind != RELOPT_BASEREL ||
-				append_path->partitioned_rels == 0)
+			if (append_path->partitioned_rels == NIL)
 				return NIL;		/* not a simple partition table */
-			parent_relid = append_rel->relid;
 			break;
 		}
 		else if (IsA(outer_path, NestPath) ||
@@ -1334,69 +1329,84 @@ extract_partitionwise_pathlist(PlannerInfo *root,
 		root->join_rel_level = NULL;
 		foreach (lc1, append_path->subpaths)
 		{
-			Path	   *subpath = lfirst(lc1);
-			RelOptInfo *subrel = subpath->parent;
-			RelOptInfo *curr_rel = NULL;
-			Path	   *curr_path = NULL;
-			Path	   *new_subpath = NULL;
+			Path	   *curr_path = lfirst(lc1);
+			RelOptInfo *curr_rel = curr_path->parent;
+			RelOptInfo *leaf_rel = curr_path->parent;
+			Path	   *new_subpath;
 
-			if (subrel->reloptkind == RELOPT_OTHER_MEMBER_REL)
+			if (leaf_rel->reloptkind == RELOPT_OTHER_MEMBER_REL)
 			{
 				RelOptInfo *append_rel = append_path->path.parent;
 
-				if (!adjust_appendrel_attr_needed(root, append_rel, subrel))
+				if (!adjust_appendrel_attr_needed(root, append_rel, leaf_rel))
 					goto skip;
 			}
 
-			if (inner_paths_list == NIL)
-				curr_path = subpath;
-			else
+			root->join_info_list = NIL;
+			foreach (lc2, inner_paths_list)
 			{
+				Path	   *inner_path = lfirst(lc2);
+				RelOptInfo *inner_rel = inner_path->parent;
+				RelOptInfo *join_rel;
+
 				/*
 				 * MEMO: make_join_rel() makes OUTER JOIN decision based on
 				 * SpecialJoinInfo, so we have to fixup relid of the parent
 				 * relation as if child relation is referenced.
 				 */
-				root->join_info_list =
-					make_pseudo_sjinfo_list(root,
-											join_info_list_saved,
-											parent_relid, subrel);
-
-				foreach (lc2, inner_paths_list)
+				if (root->join_info_list == NIL)
 				{
-					Path   *inner_path = lfirst(lc2);
-					Relids	inner_relids = inner_path->parent->relids;
-					Relids	join_relids;
-
-					join_relids = bms_union(inner_relids, subrel->relids);
-					curr_rel = find_join_rel(root, join_relids);
-					if (!curr_rel)
-					{
-						curr_rel = make_join_rel(root,
-												 subrel,
-												 inner_path->parent);
-						if (!curr_rel)
-							goto skip;		/* not a valid join */
-						set_cheapest(curr_rel);
-					}
-
-					if (try_parallel_path)
-					{
-						if (curr_rel->partial_pathlist == NIL)
-							goto skip;		/* no partial join path */
-						curr_path = linitial(curr_rel->partial_pathlist);
-					}
-					else
-					{
-						if (curr_rel->cheapest_total_path == NULL)
-							goto skip;		/* no valid join path */
-						curr_path = curr_rel->cheapest_total_path;
-					}
-					subrel = curr_rel;
+					root->join_info_list =
+						make_pseudo_sjinfo_list(root,
+												join_info_list_saved,
+												append_path->path.parent,
+												curr_rel);
 				}
+				join_rel = find_join_rel(root, bms_union(curr_rel->relids,
+														 inner_rel->relids));
+				if (!join_rel)
+				{
+					RelOptKind	reloptkind_saved = leaf_rel->reloptkind;
+
+					leaf_rel->reloptkind = RELOPT_BASEREL;
+					PG_TRY();
+					{
+						join_rel = make_join_rel(root,
+												 curr_rel,
+												 inner_rel);
+					}
+					PG_CATCH();
+					{
+						leaf_rel->reloptkind = reloptkind_saved;
+						PG_RE_THROW();
+					}
+					PG_END_TRY();
+					leaf_rel->reloptkind = reloptkind_saved;
+
+					if (!join_rel)
+						goto skip;
+					set_cheapest(join_rel);
+				}
+
+				if (try_parallel_path)
+				{
+					if (join_rel->partial_pathlist == NIL)
+						goto skip;		/* no partial join path */
+					curr_path = linitial(join_rel->partial_pathlist);
+				}
+				else
+				{
+					if (join_rel->cheapest_total_path == NULL)
+						goto skip;		/* no valid join path */
+					curr_path = join_rel->cheapest_total_path;
+				}
+				curr_rel = curr_path->parent;
 			}
-			parallel_nworkers = Max(parallel_nworkers,
-									curr_path->parallel_workers);
+			if (try_parallel_path)
+				parallel_nworkers += curr_path->parallel_workers;
+			else
+				parallel_nworkers = Max(parallel_nworkers,
+										curr_path->parallel_workers);
 			new_subpath = setup_append_child_path(root,
 												  path_target,
 												  curr_path);
@@ -1476,13 +1486,13 @@ try_add_gpujoin_append_paths(PlannerInfo *root,
 										 NIL, subpaths_list,
 										 required_outer,
 										 parallel_nworkers, true,
-										 partitioned_rels, 0.0);
+										 partitioned_rels, -1.0);
 	else
 		append_path = create_append_path(root, joinrel,
 										 subpaths_list, NIL,
 										 required_outer,
 										 parallel_nworkers, false,
-										 partitioned_rels, 0.0);
+										 partitioned_rels, -1.0);
 #endif
 	if (try_parallel_path)
 		add_partial_path(joinrel, (Path *) append_path);
@@ -2431,7 +2441,12 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	 */
 	junk_tupdesc = gjs->gts.css.ss.ss_ScanTupleSlot->tts_tupleDescriptor;
 	scan_tupdesc = ExecCleanTypeFromTL(cscan->custom_scan_tlist, false);
+#if PG_VERSION_NUM < 110000
 	ExecAssignScanType(&gjs->gts.css.ss, scan_tupdesc);
+#else
+	/* see comments in ExecInitGpuScan */
+	ExecInitScanTupleSlot(estate, &gjs->gts.css.ss, scan_tupdesc);
+#endif
 	ExecAssignScanProjectionInfoWithVarno(&gjs->gts.css.ss, INDEX_VAR);
 
 	/* Setup common GpuTaskState fields */
