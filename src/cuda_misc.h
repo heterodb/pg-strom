@@ -692,6 +692,23 @@ typedef pg_inet_t					pg_cidr_t;
 #define pg_cidr_as_datum(a)			pg_inet_as_datum(a)
 #endif	/* PG_CIDR_TYPE_DEFINED */
 
+/* memory comparison */
+STATIC_INLINE(cl_int)
+__memcmp(const void *s1, const void *s2, size_t n)
+{
+	const cl_uchar *p1 = (const cl_uchar *)s1;
+	const cl_uchar *p2 = (const cl_uchar *)s2;
+
+	while (n--)
+	{
+		if (*p1 != *p2)
+			return ((int)*p1) - ((int)*p2);
+		p1++;
+		p2++;
+	}
+	return 0;
+}
+
 /*
  * int
  * bitncmp(l, r, n)
@@ -713,7 +730,7 @@ bitncmp(const unsigned char *l, const unsigned char *r, int n)
 	int				x, b;
 
 	b = n / 8;
-	x = memcmp(l, r, b);
+	x = __memcmp(l, r, b);
 	if (x || (n % 8) == 0)
 		return x;
 

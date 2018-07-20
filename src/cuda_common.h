@@ -76,6 +76,15 @@ typedef double				cl_double;
 #define FLEXIBLE_ARRAY_MEMBER	1
 #define true			((cl_bool) 1)
 #define false			((cl_bool) 0)
+#if MAXIMUM_ALIGNOF == 16
+#define MAXIMUM_ALIGNOF_SHIFT	4
+#elif MAXIMUM_ALIGNOF == 8
+#define MAXIMUM_ALIGNOF_SHIFT	3
+#elif MAXIMUM_ALIGNOF == 4
+#define MAXIMUM_ALIGNOF_SHIFT	2
+#else
+#error Unexpected MAXIMUM_ALIGNOF definition
+#endif
 
 #define Assert(cond)	assert(cond)
 
@@ -136,26 +145,66 @@ typedef cl_ulong	Datum;
 /*
  * Limitation of types
  */
+#ifndef SHRT_MAX
 #define SHRT_MAX		32767
+#endif
+#ifndef SHRT_MIN
 #define SHRT_MIN		(-32767-1)
+#endif
+#ifndef USHRT_MAX
 #define USHRT_MAX		65535
+#endif
+#ifndef INT_MAX
 #define INT_MAX			2147483647
+#endif
+#ifndef INT_MIN
 #define INT_MIN			(-INT_MAX - 1)
+#endif
+#ifndef UINT_MAX
 #define UINT_MAX		4294967295U
+#endif
+#ifndef LONG_MAX
 #define LONG_MAX		0x7FFFFFFFFFFFFFFFLL
+#endif
+#ifndef LONG_MIN
 #define LONG_MIN        (-LONG_MAX - 1LL)
+#endif
+#ifndef ULONG_MAX
 #define ULONG_MAX		0xFFFFFFFFFFFFFFFFULL
+#endif
+#ifndef HALF_MAX
 #define HALF_MAX		__short_as_half(0x7bff)
+#endif
+#ifndef HALF_MIN
 #define HALF_MIN		__short_as_half(0x0400)
+#endif
+#ifndef HALF_INFINITY
 #define HALF_INFINITY	__short_as_half(0x0x7c00)
+#endif
+#ifndef FLT_MAX
 #define FLT_MAX			__int_as_float(0x7f7fffffU)
+#endif
+#ifndef FLT_MIN
 #define FLT_MIN			__int_as_float(0x00800000U)
+#endif
+#ifndef FLT_INFINITY
 #define FLT_INFINITY	__int_as_float(0x7f800000U)
+#endif
+#ifndef FLT_NAN
 #define FLT_NAN			__int_as_float(0x7fffffffU)
+#endif
+#ifndef DBL_MAX
 #define DBL_MAX			__longlong_as_double(0x7fefffffffffffffULL)
+#endif
+#ifndef DBL_MIN
 #define DBL_MIN			__longlong_as_double(0x0010000000000000ULL)
+#endif
+#ifndef DBL_INFINITY
 #define DBL_INFINITY	__longlong_as_double(0x7ff0000000000000ULL)
+#endif
+#ifndef DBL_NAN
 #define DBL_NAN			__longlong_as_double(0x7fffffffffffffffULL)
+#endif
 
 /*
  * MEMO: We takes dynamic local memory using cl_ulong data-type because of
@@ -2438,42 +2487,6 @@ EVAL(pg_bool_t arg)
 	if (!arg.isnull && arg.value != 0)
 		return true;
 	return false;
-}
-
-/* memory compare */
-STATIC_INLINE(cl_int)
-memcmp(const void *s1, const void *s2, size_t n)
-{
-	const cl_uchar *p1 = (const cl_uchar *)s1;
-	const cl_uchar *p2 = (const cl_uchar *)s2;
-
-	while (n--)
-	{
-		if (*p1 != *p2)
-			return ((int)*p1) - ((int)*p2);
-		p1++;
-		p2++;
-	}
-	return 0;
-}
-
-/* string comparison */
-STATIC_INLINE(cl_int)
-strcmp(const char *__s1, const char *__s2)
-{
-	const cl_uchar *s1 = (const cl_uchar *) __s1;
-	const cl_uchar *s2 = (const cl_uchar *) __s2;
-	cl_int		c1, c2;
-
-	do {
-		c1 = (cl_uchar) *s1++;
-		c2 = (cl_uchar) *s2++;
-
-		if (c1 == '\0')
-			return c1 - c2;
-	} while (c1 == c2);
-
-	return c1 - c2;
 }
 
 /*

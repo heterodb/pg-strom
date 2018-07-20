@@ -350,16 +350,10 @@ construct_flat_cuda_source(uint32 extra_flags,
 	ofs += snprintf(source + ofs, len - ofs,
 					"#include <cuda_device_runtime_api.h>\n"
 					"\n"
-					"#define HOSTPTRLEN %u\n"
-					"#define DEVICEPTRLEN %lu\n"
 					"#define BLCKSZ %u\n"
-					"#define MAXIMUM_ALIGNOF %u\n"
-					"#define MAXIMUM_ALIGNOF_SHIFT %u\n",
-					SIZEOF_VOID_P,
-					sizeof(CUdeviceptr),
+					"#define MAXIMUM_ALIGNOF %u\n",
 					BLCKSZ,
-					MAXIMUM_ALIGNOF,
-					MAXIMUM_ALIGNOF_SHIFT);
+					MAXIMUM_ALIGNOF);
 	/* Enables Debug build? */
 	if ((extra_flags & DEVKERNEL_BUILD_DEBUG_INFO) != 0)
 		ofs += snprintf(source + ofs, len - ofs,

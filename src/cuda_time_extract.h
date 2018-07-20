@@ -261,6 +261,25 @@ static const datetkn datetktbl[] = {
 	{"yesterday",	RESERV, DTK_YESTERDAY}  /* yesterday midnight */
 };
 
+/* string comparison */
+STATIC_INLINE(cl_int)
+__strcmp(const char *__s1, const char *__s2)
+{
+	const cl_uchar *s1 = (const cl_uchar *) __s1;
+	const cl_uchar *s2 = (const cl_uchar *) __s2;
+	cl_int		c1, c2;
+
+	do {
+		c1 = (cl_uchar) *s1++;
+		c2 = (cl_uchar) *s2++;
+
+		if (c1 == '\0')
+			return c1 - c2;
+	} while (c1 == c2);
+
+	return c1 - c2;
+}
+
 /*
  *
  */
@@ -278,7 +297,7 @@ datebsearch(const char *key, const datetkn *datetkntbl, int nitems)
 		comp = (int) key[0] - (int) position->token[0];
 		if (comp == 0)
 		{
-			comp = strcmp(key, position->token);
+			comp = __strcmp(key, position->token);
 			if (comp == 0)
 				return position;
 		}

@@ -432,6 +432,7 @@ struct GpuTask
 #define DEVKERNEL_NEEDS_RANGETYPE		0x00008000
 #define DEVKERNEL_NEEDS_PRIMITIVE		0x00010000
 #define DEVKERNEL_NEEDS_TIME_EXTRACT	0x00020000
+#define DEVKERNEL_NEEDS_LZCOMPRESS		0x00040000
 
 #define DEVKERNEL_NEEDS_CURAND			0x00100000
 #define DEVKERNEL_BUILD_DEBUG_INFO		0x80000000
@@ -1267,11 +1268,15 @@ extern char get_func_prokind(Oid funcid);
 #define PROKIND_WINDOW		'w'
 #define PROKIND_PROCEDURE	'p'
 #endif
-extern cl_int gpulz_compress(const char *source, cl_int slen, char *dest);
-extern cl_int gpu_lz_decompress(const char *source, cl_int slen,
-								char *dest, cl_int rawsize);
 extern const char *errorText(int errcode);
 extern const char *errorTextKernel(kern_errorbuf *kerror);
+
+/*
+ * lzcompress.c
+ */
+extern cl_int	gpulz_compress(const char *source, cl_int slen, char *dest);
+extern cl_bool	gpulz_decompress(const char *source, cl_int slen,
+								 char *dest, cl_int rawsize);
 
 /*
  * main.c
