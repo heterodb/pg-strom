@@ -311,12 +311,13 @@ print_pcie_device_tree(PCIDevEntry *entry, int indent)
 			 entry->domain,
 			 entry->bus_id);
 	else if (entry->gpu_attr)
-		elog(LOG, "%*s PCIe(%04x:%02x:%02x.%d) %s",
+		elog(LOG, "%*s PCIe(%04x:%02x:%02x.%d) GPU%d (%s)",
 			 2 * indent, "- ",
 			 entry->domain,
 			 entry->bus_id,
 			 entry->dev_id,
 			 entry->func_id,
+			 entry->gpu_attr->DEV_ID,
 			 entry->gpu_attr->DEV_NAME);
 	else if (entry->nvme_attr)
 		elog(LOG, "%*s PCIe(%04x:%02x:%02x.%d) %s (%s)",
@@ -338,29 +339,6 @@ print_pcie_device_tree(PCIDevEntry *entry, int indent)
 	foreach (lc, entry->children)
 		print_pcie_device_tree(lfirst(lc), indent+2);
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 /*
  * calculate_nvme_distance_map
@@ -462,6 +440,7 @@ setup_nvme_distance_map(void)
 	ListCell   *lc;
 	int			i, dist;
 	bool		found;
+	HASH_SEQ_STATUS hseq;
 
 	/*
 	 * collect individual nvme device's attributes
@@ -528,14 +507,15 @@ setup_nvme_distance_map(void)
 	/*
 	 * calculation of SSD<->GPU distance map
 	 */
-	for (i=0; i < numDevAttrs; i++)
+	hash_seq_init(&hseq, nvmeHash);
+	while ((nvme = hash_seq_search(&hseq)) != NULL)
 	{
-		DevAttributes  *gpu = &devAttrs[i];
-		HASH_SEQ_STATUS	hseq;
+		int		optimal_gpu = -1;
+		int		optimal_dist = INT_MAX;
 
-		hash_seq_init(&hseq, nvmeHash);
-		while ((nvme = hash_seq_search(&hseq)) != NULL)
+		for (i=0; i < numDevAttrs; i++)
 		{
+			DevAttributes  *gpu = &devAttrs[i];
 			bool	gpu_found = false;
 			bool	nvme_found = false;
 
@@ -548,10 +528,18 @@ setup_nvme_distance_map(void)
 											   gpu, &gpu_found,
 											   nvme, &nvme_found);
 			if (gpu_found && nvme_found)
+			{
 				nvme->nvme_distances[i] = dist;
+				if (dist < optimal_dist)
+				{
+					optimal_gpu = i;
+					optimal_dist = dist;
+				}
+			}
 			else
 				nvme->nvme_distances[i] = -1;
 		}
+		nvme->nvme_optimal_gpu = optimal_gpu;
 	}
 	/* Print PCIe tree */
 	foreach (lc, pcie_root)
@@ -578,7 +566,7 @@ setup_nvme_distance_map(void)
 		while ((nvme = hash_seq_search(&hseq)) != NULL)
 		{
 			resetStringInfo(&str);
-			appendStringInfo(&str, " %6s ", nvme->nvme_name);
+			appendStringInfo(&str, "   %6s", nvme->nvme_name);
 			for (i=0; i < numDevAttrs; i++)
 			{
 				int		dist = nvme->nvme_distances[i];
