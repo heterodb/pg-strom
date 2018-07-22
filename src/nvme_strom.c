@@ -816,8 +816,34 @@ GetOptimalGpuForTablespace(Oid tablespace_oid)
 	PG_END_TRY();
 	close(fdesc);
 out:
-	return (entry->nvme_optimal_gpu >= 0 &&
-			entry->nvme_optimal_gpu < numDevAttrs);
+	return entry->nvme_optimal_gpu;
+}
+
+cl_int
+GetOptimalGpuForRelation(PlannerInfo *root, RelOptInfo *rel)
+{
+	RangeTblEntry *rte;
+	HeapTuple	tup;
+	char		relpersistence;
+	cl_int		cuda_dindex;
+
+	cuda_dindex = GetOptimalGpuForTablespace(rel->reltablespace);
+	if (cuda_dindex < 0 || cuda_dindex >= numDevAttrs)
+		return -1;
+
+	/* only permanent / unlogged table can use NVMe-Strom */
+	rte = root->simple_rte_array[rel->relid];
+	tup = SearchSysCache1(RELOID, ObjectIdGetDatum(rte->relid));
+	if (!HeapTupleIsValid(tup))
+		elog(ERROR, "cache lookup failed for relation %u", rte->relid);
+	relpersistence = ((Form_pg_class) GETSTRUCT(tup))->relpersistence;
+	ReleaseSysCache(tup);
+
+	if (relpersistence == RELPERSISTENCE_PERMANENT ||
+		relpersistence == RELPERSISTENCE_UNLOGGED)
+		return cuda_dindex;
+
+	return -1;
 }
 
 bool
@@ -831,37 +857,6 @@ RelationCanUseNvmeStrom(Relation relation)
 	cuda_dindex = GetOptimalGpuForTablespace(tablespace_oid);
 	return (cuda_dindex >= 0 &&
 			cuda_dindex <  numDevAttrs);
-}
-
-/*
- * ScanPathGetNBlocksByNvmeStrom
- */
-static BlockNumber
-ScanPathGetNBlocksByNvmeStrom(PlannerInfo *root, RelOptInfo *baserel)
-{
-	RangeTblEntry *rte;
-	HeapTuple	tuple;
-	char		relpersistence;
-	cl_int		cuda_dindex;
-
-	cuda_dindex = GetOptimalGpuForTablespace(baserel->reltablespace);
-	if (cuda_dindex < 0 ||
-		cuda_dindex >= numDevAttrs)
-		return 0;
-
-	/* only permanent / unlogged table can use NVMe-Strom */
-	rte = root->simple_rte_array[baserel->relid];
-	tuple = SearchSysCache1(RELOID, ObjectIdGetDatum(rte->relid));
-	if (!HeapTupleIsValid(tuple))
-		elog(ERROR, "cache lookup failed for relation %u", rte->relid);
-	relpersistence = ((Form_pg_class) GETSTRUCT(tuple))->relpersistence;
-	ReleaseSysCache(tuple);
-
-	if (relpersistence == RELPERSISTENCE_PERMANENT ||
-		relpersistence == RELPERSISTENCE_UNLOGGED)
-		return baserel->pages;
-
-	return 0;
 }
 
 /*
@@ -882,7 +877,8 @@ ScanPathWillUseNvmeStrom(PlannerInfo *root, RelOptInfo *baserel)
 	 */
 	if (baserel->reloptkind == RELOPT_BASEREL)
 	{
-		num_scan_pages = ScanPathGetNBlocksByNvmeStrom(root, baserel);
+		if (GetOptimalGpuForRelation(root, baserel) >= 0)
+			num_scan_pages = baserel->pages;
 	}
 	else if (baserel->reloptkind == RELOPT_OTHER_MEMBER_REL)
 	{
@@ -915,7 +911,8 @@ ScanPathWillUseNvmeStrom(PlannerInfo *root, RelOptInfo *baserel)
 			if (appinfo->parent_relid != parent_relid)
 				continue;
 			rel = root->simple_rel_array[appinfo->child_relid];
-			num_scan_pages += ScanPathGetNBlocksByNvmeStrom(root, rel);
+			if (GetOptimalGpuForRelation(root, rel) >= 0)
+				num_scan_pages += rel->pages;
 		}
 	}
 	else

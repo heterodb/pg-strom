@@ -876,6 +876,8 @@ extern void pgstrom_init_gputasks(void);
  * nvme_strom.c
  */
 extern int	nvme_strom_ioctl(int cmd, void *arg);
+extern int	GetOptimalGpuForRelation(PlannerInfo *root,
+									 RelOptInfo *rel);
 extern bool ScanPathWillUseNvmeStrom(PlannerInfo *root,
 									 RelOptInfo *baserel);
 extern bool RelationCanUseNvmeStrom(Relation relation);
@@ -1079,6 +1081,7 @@ extern bool pgstrom_pullup_outer_scan(PlannerInfo *root,
 									  const Path *outer_path,
 									  Index *p_outer_relid,
 									  List **p_outer_quals,
+									  cl_int *p_cuda_dindex,
 									  IndexOptInfo **p_index_opt,
 									  List **p_index_conds,
 									  List **p_index_quals,
@@ -1086,7 +1089,7 @@ extern bool pgstrom_pullup_outer_scan(PlannerInfo *root,
 extern bool pgstrom_path_is_gpuscan(const Path *path);
 extern bool pgstrom_plan_is_gpuscan(const Plan *plan);
 extern bool pgstrom_planstate_is_gpuscan(const PlanState *ps);
-
+extern cl_int gpuscan_get_optimal_gpu(const Path *pathnode);
 extern void assign_gpuscan_session_info(StringInfo buf,
 										GpuTaskState *gts);
 extern void pgstrom_init_gpuscan(void);
@@ -1101,6 +1104,8 @@ extern bool pgstrom_path_is_gpujoin(const Path *pathnode);
 extern bool pgstrom_plan_is_gpujoin(const Plan *plannode);
 extern bool pgstrom_planstate_is_gpujoin(const PlanState *ps);
 extern Path *pgstrom_copy_gpujoin_path(const Path *pathnode);
+extern cl_int gpujoin_get_optimal_gpu(const Path *pathnode);
+
 #if PG_VERSION_NUM >= 100000
 extern List *extract_partitionwise_pathlist(PlannerInfo *root,
 											PathTarget *path_target,

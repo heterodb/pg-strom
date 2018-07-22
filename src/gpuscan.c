@@ -30,6 +30,7 @@ static bool					enable_pullup_outer_scan;
  * form/deform interface of private field of CustomScan(GpuScan)
  */
 typedef struct {
+	cl_int		cuda_dindex;	/* optimal GPU selection, or -1 */
 	char	   *kern_source;	/* source of the CUDA kernel */
 	cl_uint		extra_flags;	/* extra libraries to be included */
 	cl_uint		proj_tuple_sz;	/* nbytes of the expected result tuple size */
@@ -49,6 +50,7 @@ form_gpuscan_info(CustomScan *cscan, GpuScanInfo *gs_info)
 	List	   *privs = NIL;
 	List	   *exprs = NIL;
 
+	privs = lappend(privs, makeInteger(gs_info->cuda_dindex));
 	privs = lappend(privs, makeString(gs_info->kern_source));
 	privs = lappend(privs, makeInteger(gs_info->extra_flags));
 	privs = lappend(privs, makeInteger(gs_info->proj_tuple_sz));
@@ -74,6 +76,7 @@ deform_gpuscan_info(CustomScan *cscan)
 	int			pindex = 0;
 	int			eindex = 0;
 
+	gs_info->cuda_dindex = intVal(list_nth(privs, pindex++));
 	gs_info->kern_source = strVal(list_nth(privs, pindex++));
 	gs_info->extra_flags = intVal(list_nth(privs, pindex++));
 	gs_info->proj_tuple_sz = intVal(list_nth(privs, pindex++));
@@ -208,6 +211,8 @@ create_gpuscan_path(PlannerInfo *root,
 											&gs_info->nrows_per_block,
 											&startup_cost,
 											&run_cost);
+	/* save the optimal GPU for the scan target */
+	gs_info->cuda_dindex = GetOptimalGpuForRelation(root, baserel);
 	/* save the BRIN-index if preferable to use */
 	if ((scan_mode & PGSTROM_RELSCAN_BRIN_INDEX) != 0)
 	{
@@ -1422,6 +1427,7 @@ pgstrom_pullup_outer_scan(PlannerInfo *root,
 						  const Path *outer_path,
 						  Index *p_outer_relid,
 						  List **p_outer_quals,
+						  cl_int *p_cuda_dindex,
 						  IndexOptInfo **p_index_opt,
 						  List **p_index_conds,
 						  List **p_index_quals,
@@ -1430,6 +1436,7 @@ pgstrom_pullup_outer_scan(PlannerInfo *root,
 	RelOptInfo *baserel = outer_path->parent;
 	PathTarget *outer_target = outer_path->pathtarget;
 	List	   *outer_quals = NIL;
+	cl_int		cuda_dindex = -1;
 	IndexOptInfo *indexOpt = NULL;
 	List	   *indexConds = NIL;
 	List	   *indexQuals = NIL;
@@ -1483,6 +1490,8 @@ pgstrom_pullup_outer_scan(PlannerInfo *root,
 		else if (!pgstrom_device_expression(expr))
 			return false;
 	}
+	/* Optimal GPU selection */
+	cuda_dindex = GetOptimalGpuForRelation(root, baserel);
 
 	/* BRIN-index parameters */
 	indexOpt = pgstrom_tryfind_brinindex(root, baserel,
@@ -1491,6 +1500,7 @@ pgstrom_pullup_outer_scan(PlannerInfo *root,
 										 &indexNBlocks);
 	*p_outer_relid = baserel->relid;
 	*p_outer_quals = outer_quals;
+	*p_cuda_dindex = cuda_dindex;
 	*p_index_opt = indexOpt;
 	*p_index_conds = indexConds;
 	*p_index_quals = indexQuals;
@@ -1539,6 +1549,22 @@ pgstrom_planstate_is_gpuscan(const PlanState *ps)
 		((CustomScanState *) ps)->methods == &gpuscan_exec_methods)
 		return true;
 	return false;
+}
+
+/*
+ * gpuscan_get_optimal_gpu
+ */
+cl_int
+gpuscan_get_optimal_gpu(const Path *pathnode)
+{
+	if (pgstrom_path_is_gpuscan(pathnode))
+	{
+		CustomPath	   *cpath = (CustomPath *) pathnode;
+		GpuScanInfo	   *gs_info = linitial(cpath->custom_private);
+
+		return gs_info->cuda_dindex;
+	}
+	return -1;
 }
 
 /*
@@ -1651,7 +1677,7 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	Assert(innerPlan(node) == NULL);
 
 	/* setup GpuContext for CUDA kernel execution */
-	gcontext = AllocGpuContext(-1, false);
+	gcontext = AllocGpuContext(gs_info->cuda_dindex, false);
 	if (!explain_only)
 		ActivateGpuContext(gcontext);
 	gss->gts.gcontext = gcontext;
@@ -2050,7 +2076,22 @@ ExplainGpuScan(CustomScanState *node, List *ancestors, ExplainState *es)
 			ExplainPropertyInt64("BRIN skipped", NULL,
 								 gss->gts.outer_brin_count, es);
 	}
+	/* GPU preference, if any */
+	if (es->verbose || gs_info->cuda_dindex >= 0)
+	{
+		char	temp[320];
 
+		if (gs_info->cuda_dindex < 0)
+			snprintf(temp, sizeof(temp), "None");
+		else
+		{
+			DevAttributes  *dattr = &devAttrs[gs_info->cuda_dindex];
+
+			snprintf(temp, sizeof(temp), "GPU%d (%s)",
+					 dattr->DEV_ID, dattr->DEV_NAME);
+		}
+		ExplainPropertyText("GPU Preference", temp, es);
+	}
 	/* common portion of EXPLAIN */
 	pgstromExplainGpuTaskState(&gss->gts, es);
 }

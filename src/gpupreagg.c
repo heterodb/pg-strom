@@ -48,6 +48,7 @@ typedef struct
 	List		   *tlist_fallback;	/* projection from outer-tlist to GPU's
 									 * initial projection; note that setrefs.c
 									 * should not update this field */
+	int				cuda_dindex;
 	char		   *kern_source;
 	int				extra_flags;
 	List		   *ccache_refs;	/* referenced columns */
@@ -75,6 +76,7 @@ form_gpupreagg_info(CustomScan *cscan, GpuPreAggInfo *gpa_info)
 	privs = lappend(privs, gpa_info->index_conds);
 	exprs = lappend(exprs, gpa_info->index_quals);
 	privs = lappend(privs, gpa_info->tlist_fallback);
+	privs = lappend(privs, makeInteger(gpa_info->cuda_dindex));
 	privs = lappend(privs, makeString(gpa_info->kern_source));
 	privs = lappend(privs, makeInteger(gpa_info->extra_flags));
 	privs = lappend(privs, gpa_info->ccache_refs);
@@ -108,10 +110,13 @@ deform_gpupreagg_info(CustomScan *cscan)
 	gpa_info->index_conds = list_nth(privs, pindex++);
 	gpa_info->index_quals = list_nth(exprs, eindex++);
 	gpa_info->tlist_fallback = list_nth(privs, pindex++);
+	gpa_info->cuda_dindex = intVal(list_nth(privs, pindex++));
 	gpa_info->kern_source = strVal(list_nth(privs, pindex++));
 	gpa_info->extra_flags = intVal(list_nth(privs, pindex++));
 	gpa_info->ccache_refs = list_nth(privs, pindex++);
 	gpa_info->used_params = list_nth(exprs, eindex++);
+	Assert(pindex == list_length(privs));
+	Assert(eindex == list_length(exprs));
 
 	return gpa_info;
 }
@@ -1143,15 +1148,21 @@ make_gpupreagg_path(PlannerInfo *root,
 		return NULL;
 
 	/* Try to pull up input_path if simple relation scan */
+	gpa_info->cuda_dindex = -1;
 	if (!can_pullup_outerscan ||
 		!pgstrom_pullup_outer_scan(root, input_path,
 								   &gpa_info->outer_scanrelid,
 								   &gpa_info->outer_quals,
+								   &gpa_info->cuda_dindex,
 								   &index_opt,
 								   &index_conds,
 								   &index_quals,
 								   &index_nblocks))
+	{
+		if (pgstrom_path_is_gpujoin(input_path))
+			gpa_info->cuda_dindex = gpujoin_get_optimal_gpu(input_path);
 		custom_paths = list_make1(input_path);
+	}
 
 	/* Number of workers if parallel */
 	if (group_rel->consider_parallel &&
@@ -4003,7 +4014,7 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 
 	Assert(scan_rel ? outerPlan(node) == NULL : outerPlan(cscan) != NULL);
 	/* activate a GpuContext for CUDA kernel execution */
-	gpas->gts.gcontext = AllocGpuContext(-1, false);
+	gpas->gts.gcontext = AllocGpuContext(gpa_info->cuda_dindex, false);
 	if (!explain_only)
 		ActivateGpuContext(gpas->gts.gcontext);
 
@@ -4404,6 +4415,22 @@ ExplainGpuPreAgg(CustomScanState *node, List *ancestors, ExplainState *es)
 		if (es->analyze)
 			ExplainPropertyInt64("BRIN skipped", NULL,
 								 gpas->gts.outer_brin_count, es);
+	}
+	/* GPU preference, if any */
+	if (es->verbose || gpa_info->cuda_dindex >= 0)
+	{
+		char	temp[320];
+
+		if (gpa_info->cuda_dindex < 0)
+			snprintf(temp, sizeof(temp), "None");
+		else
+		{
+			DevAttributes  *dattr = &devAttrs[gpa_info->cuda_dindex];
+
+			snprintf(temp, sizeof(temp), "GPU%d (%s)",
+					 dattr->DEV_ID, dattr->DEV_NAME);
+		}
+		ExplainPropertyText("GPU Preference", temp, es);
 	}
 	/* other common fields */
 	pgstromExplainGpuTaskState(&gpas->gts, es);
