@@ -661,7 +661,6 @@ apply_nvme_manual_distance_map(void)
 typedef struct
 {
 	Oid		tablespace_oid;
-	bool	nvme_strom_supported;
 	int		nvme_optimal_gpu;
 } vfs_nvme_status;
 
@@ -719,8 +718,8 @@ GetOptimalGpuForVolume(int major, int minor)
 	return nvme->nvme_optimal_gpu;
 }
 
-static bool
-TablespaceCanUseNvmeStrom(Oid tablespace_oid)
+static cl_int
+GetOptimalGpuForTablespace(Oid tablespace_oid)
 {
 	vfs_nvme_status *entry;
 	const char *pathname;
@@ -750,11 +749,10 @@ TablespaceCanUseNvmeStrom(Oid tablespace_oid)
 											HASH_ENTER,
 											&found);
 	if (found)
-		return entry->nvme_strom_supported;
+		goto out;
 
 	/* check whether the tablespace is supported */
 	entry->tablespace_oid = tablespace_oid;
-	entry->nvme_strom_supported = false;
 	entry->nvme_optimal_gpu = -1;
 
 	pathname = GetDatabasePath(MyDatabaseId, tablespace_oid);
@@ -792,6 +790,10 @@ TablespaceCanUseNvmeStrom(Oid tablespace_oid)
 			goto retry;
 		}
 
+		/*
+		 * NOTE: If tablespace is built on md-raid0 volume, all the underlying
+		 * NVME devices must have same optimal GPU.
+		 */
 		for (i=0; i < uarg->ndisks; i++)
 		{
 			curr_gpu = GetOptimalGpuForVolume(uarg->rawdisks[i].major,
@@ -813,18 +815,22 @@ TablespaceCanUseNvmeStrom(Oid tablespace_oid)
 	}
 	PG_END_TRY();
 	close(fdesc);
-
-	return entry->nvme_strom_supported;
+out:
+	return (entry->nvme_optimal_gpu >= 0 &&
+			entry->nvme_optimal_gpu < numDevAttrs);
 }
 
 bool
 RelationCanUseNvmeStrom(Relation relation)
 {
 	Oid		tablespace_oid = RelationGetForm(relation)->reltablespace;
+	cl_int	cuda_dindex;
 	/* SSD2GPU on temp relation is not supported */
 	if (RelationUsesLocalBuffers(relation))
 		return false;
-	return TablespaceCanUseNvmeStrom(tablespace_oid);
+	cuda_dindex = GetOptimalGpuForTablespace(tablespace_oid);
+	return (cuda_dindex >= 0 &&
+			cuda_dindex <  numDevAttrs);
 }
 
 /*
@@ -835,9 +841,12 @@ ScanPathGetNBlocksByNvmeStrom(PlannerInfo *root, RelOptInfo *baserel)
 {
 	RangeTblEntry *rte;
 	HeapTuple	tuple;
-	bool		relpersistence;
+	char		relpersistence;
+	cl_int		cuda_dindex;
 
-	if (!TablespaceCanUseNvmeStrom(baserel->reltablespace))
+	cuda_dindex = GetOptimalGpuForTablespace(baserel->reltablespace);
+	if (cuda_dindex < 0 ||
+		cuda_dindex >= numDevAttrs)
 		return 0;
 
 	/* only permanent / unlogged table can use NVMe-Strom */
@@ -872,7 +881,9 @@ ScanPathWillUseNvmeStrom(PlannerInfo *root, RelOptInfo *baserel)
 	 * focus on other area. It leads potential thrashing on i/o.
 	 */
 	if (baserel->reloptkind == RELOPT_BASEREL)
+	{
 		num_scan_pages = ScanPathGetNBlocksByNvmeStrom(root, baserel);
+	}
 	else if (baserel->reloptkind == RELOPT_OTHER_MEMBER_REL)
 	{
 		ListCell   *lc;
