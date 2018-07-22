@@ -865,7 +865,7 @@ RelationCanUseNvmeStrom(Relation relation)
 bool
 ScanPathWillUseNvmeStrom(PlannerInfo *root, RelOptInfo *baserel)
 {
-	size_t		num_scan_pages;
+	size_t		num_scan_pages = 0;
 
 	/*
 	 * Check expected amount of the scan i/o.
@@ -902,7 +902,6 @@ ScanPathWillUseNvmeStrom(PlannerInfo *root, RelOptInfo *baserel)
 			return false;
 		}
 
-		num_scan_pages = 0;
 		foreach (lc, root->append_rel_list)
 		{
 			AppendRelInfo  *appinfo = (AppendRelInfo *) lfirst(lc);

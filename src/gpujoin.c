@@ -4772,7 +4772,8 @@ gpujoin_fallback_tuple_extract(TupleTableSlot *slot_fallback,
 							   AttrNumber src_anum_max)
 {
 	bool		hasnulls;
-	TupleDesc	tts_tupdesc = slot_fallback->tts_tupleDescriptor;
+	TupleDesc	tts_tupdesc __attribute__((unused))
+		= slot_fallback->tts_tupleDescriptor;
 	Datum	   *tts_values = slot_fallback->tts_values;
 	bool	   *tts_isnull = slot_fallback->tts_isnull;
 	cl_uint		offset;
