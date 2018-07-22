@@ -27,7 +27,7 @@ typedef struct
 {
 	CustomPath		cpath;
 	int				num_rels;
-	int				cuda_dindex;
+	int				optimal_gpu;
 	Index			outer_relid;	/* valid, if outer scan pull-up */
 	List		   *outer_quals;	/* qualifier of outer scan */
 	cl_uint			outer_nrows_per_block;
@@ -52,7 +52,7 @@ typedef struct
 typedef struct
 {
 	int			num_rels;
-	int			cuda_dindex;
+	int			optimal_gpu;
 	char	   *kern_source;
 	int			extra_flags;
 	List	   *ccache_refs;
@@ -90,7 +90,7 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 	List	   *exprs = NIL;
 
 	privs = lappend(privs, makeInteger(gj_info->num_rels));
-	privs = lappend(privs, makeInteger(gj_info->cuda_dindex));
+	privs = lappend(privs, makeInteger(gj_info->optimal_gpu));
 	privs = lappend(privs, makeString(pstrdup(gj_info->kern_source)));
 	privs = lappend(privs, makeInteger(gj_info->extra_flags));
 	privs = lappend(privs, gj_info->ccache_refs);
@@ -134,7 +134,7 @@ deform_gpujoin_info(CustomScan *cscan)
 	int			eindex = 0;
 
 	gj_info->num_rels = intVal(list_nth(privs, pindex++));
-	gj_info->cuda_dindex = intVal(list_nth(privs, pindex++));
+	gj_info->optimal_gpu = intVal(list_nth(privs, pindex++));
 	gj_info->kern_source = strVal(list_nth(privs, pindex++));
 	gj_info->extra_flags = intVal(list_nth(privs, pindex++));
 	gj_info->ccache_refs = list_nth(privs, pindex++);
@@ -406,7 +406,7 @@ cl_int
 gpujoin_get_optimal_gpu(const Path *pathnode)
 {
 	if (pgstrom_path_is_gpujoin(pathnode))
-		return ((GpuJoinPath *)pathnode)->cuda_dindex;
+		return ((GpuJoinPath *)pathnode)->optimal_gpu;
 	return -1;
 }
 
@@ -847,7 +847,7 @@ create_gpujoin_path(PlannerInfo *root,
 	pgstrom_pullup_outer_scan(root, outer_path,
 							  &gjpath->outer_relid,
 							  &gjpath->outer_quals,
-							  &gjpath->cuda_dindex,
+							  &gjpath->optimal_gpu,
 							  &gjpath->index_opt,
 							  &gjpath->index_conds,
 							  &gjpath->index_quals,
@@ -2311,7 +2311,7 @@ PlanGpuJoinPath(PlannerInfo *root,
 	 * construct kernel code
 	 */
 	pgstrom_init_codegen_context(&context);
-	gj_info.cuda_dindex = gjpath->cuda_dindex;
+	gj_info.optimal_gpu = gjpath->optimal_gpu;
 	gj_info.kern_source = gpujoin_codegen(root,
 										  cscan,
 										  &gj_info,
@@ -2442,7 +2442,7 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	ProgramId		program_id;
 
 	/* activate a GpuContext for CUDA kernel execution */
-	gjs->gts.gcontext = AllocGpuContext(gj_info->cuda_dindex, false);
+	gjs->gts.gcontext = AllocGpuContext(gj_info->optimal_gpu, false);
 	if (!explain_only)
 		ActivateGpuContext(gjs->gts.gcontext);
 	/*
@@ -2472,6 +2472,7 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 							GpuTaskKind_GpuJoin,
 							gj_info->ccache_refs,
 							gj_info->used_params,
+							gj_info->optimal_gpu,
 							gj_info->outer_nrows_per_block,
 							estate);
 	gjs->gts.cb_next_tuple		= gpujoin_next_tuple;
@@ -2954,8 +2955,18 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 								  es->verbose, false);
 		ExplainPropertyText("BRIN cond", temp, es);
 		if (es->analyze)
+		{
+			HeapScanDesc scan = gjs->gts.css.ss.ss_currentScanDesc;
+
 			ExplainPropertyInt64("BRIN skipped", NULL,
 								 gjs->gts.outer_brin_count, es);
+			if (scan)
+			{
+				double	ratio = 1.0 - ((double) gjs->gts.outer_brin_count /
+									   (double) scan->rs_numblocks);
+				ExplainPropertyFp64("BRIN ratio", "%", 100.0 * ratio, 2, es);
+			}
+		}
 	}
 	/* join-qualifiers */
 	depth = 1;
@@ -3165,22 +3176,6 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 			}
 		}
 		depth++;
-	}
-	/* GPU preference, if any */
-	if (es->verbose || gj_info->cuda_dindex >= 0)
-	{
-		char	temp[320];
-
-		if (gj_info->cuda_dindex < 0)
-			snprintf(temp, sizeof(temp), "None");
-		else
-		{
-			DevAttributes  *dattr = &devAttrs[gj_info->cuda_dindex];
-
-			snprintf(temp, sizeof(temp), "GPU%d (%s)",
-					 dattr->DEV_ID, dattr->DEV_NAME);
-		}
-		ExplainPropertyText("GPU Preference", temp, es);
 	}
 	/* other common field */
 	pgstromExplainGpuTaskState(&gjs->gts, es);

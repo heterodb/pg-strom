@@ -301,6 +301,7 @@ struct GpuTaskState
 	GpuTaskKind		task_kind;		/* one of GpuTaskKind_* */
 	ProgramId		program_id;		/* CUDA Program (to be acquired) */
 	kern_parambuf  *kern_params;	/* Const/Param buffer */
+	cl_int			optimal_gpu;	/* GPU preference on plan time */
 	Relids			ccache_refs;	/* referenced attributed, if ccache */
 	long			ccache_count;	/* # of ccache hit */
 	bool			scan_done;		/* True, if no more rows to read */
@@ -842,6 +843,7 @@ extern void pgstromInitGpuTaskState(GpuTaskState *gts,
 									GpuTaskKind task_kind,
 									List *ccache_refs,
 									List *used_params,
+									cl_int optimal_gpu,
 									cl_uint outer_nrows_per_block,
 									EState *estate);
 extern TupleTableSlot *pgstromExecGpuTaskState(GpuTaskState *gts);

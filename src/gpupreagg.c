@@ -48,7 +48,7 @@ typedef struct
 	List		   *tlist_fallback;	/* projection from outer-tlist to GPU's
 									 * initial projection; note that setrefs.c
 									 * should not update this field */
-	int				cuda_dindex;
+	int				optimal_gpu;
 	char		   *kern_source;
 	int				extra_flags;
 	List		   *ccache_refs;	/* referenced columns */
@@ -76,7 +76,7 @@ form_gpupreagg_info(CustomScan *cscan, GpuPreAggInfo *gpa_info)
 	privs = lappend(privs, gpa_info->index_conds);
 	exprs = lappend(exprs, gpa_info->index_quals);
 	privs = lappend(privs, gpa_info->tlist_fallback);
-	privs = lappend(privs, makeInteger(gpa_info->cuda_dindex));
+	privs = lappend(privs, makeInteger(gpa_info->optimal_gpu));
 	privs = lappend(privs, makeString(gpa_info->kern_source));
 	privs = lappend(privs, makeInteger(gpa_info->extra_flags));
 	privs = lappend(privs, gpa_info->ccache_refs);
@@ -110,7 +110,7 @@ deform_gpupreagg_info(CustomScan *cscan)
 	gpa_info->index_conds = list_nth(privs, pindex++);
 	gpa_info->index_quals = list_nth(exprs, eindex++);
 	gpa_info->tlist_fallback = list_nth(privs, pindex++);
-	gpa_info->cuda_dindex = intVal(list_nth(privs, pindex++));
+	gpa_info->optimal_gpu = intVal(list_nth(privs, pindex++));
 	gpa_info->kern_source = strVal(list_nth(privs, pindex++));
 	gpa_info->extra_flags = intVal(list_nth(privs, pindex++));
 	gpa_info->ccache_refs = list_nth(privs, pindex++);
@@ -1148,19 +1148,19 @@ make_gpupreagg_path(PlannerInfo *root,
 		return NULL;
 
 	/* Try to pull up input_path if simple relation scan */
-	gpa_info->cuda_dindex = -1;
+	gpa_info->optimal_gpu = -1;
 	if (!can_pullup_outerscan ||
 		!pgstrom_pullup_outer_scan(root, input_path,
 								   &gpa_info->outer_scanrelid,
 								   &gpa_info->outer_quals,
-								   &gpa_info->cuda_dindex,
+								   &gpa_info->optimal_gpu,
 								   &index_opt,
 								   &index_conds,
 								   &index_quals,
 								   &index_nblocks))
 	{
 		if (pgstrom_path_is_gpujoin(input_path))
-			gpa_info->cuda_dindex = gpujoin_get_optimal_gpu(input_path);
+			gpa_info->optimal_gpu = gpujoin_get_optimal_gpu(input_path);
 		custom_paths = list_make1(input_path);
 	}
 
@@ -4014,7 +4014,7 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 
 	Assert(scan_rel ? outerPlan(node) == NULL : outerPlan(cscan) != NULL);
 	/* activate a GpuContext for CUDA kernel execution */
-	gpas->gts.gcontext = AllocGpuContext(gpa_info->cuda_dindex, false);
+	gpas->gts.gcontext = AllocGpuContext(gpa_info->optimal_gpu, false);
 	if (!explain_only)
 		ActivateGpuContext(gpas->gts.gcontext);
 
@@ -4024,6 +4024,7 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 							GpuTaskKind_GpuPreAgg,
 							gpa_info->ccache_refs,
 							gpa_info->used_params,
+							gpa_info->optimal_gpu,
 							gpa_info->outer_nrows_per_block,
 							estate);
 	gpas->gts.cb_next_task       = gpupreagg_next_task;
@@ -4413,24 +4414,18 @@ ExplainGpuPreAgg(CustomScanState *node, List *ancestors, ExplainState *es)
 									 es->verbose, false);
 		ExplainPropertyText("BRIN cond", exprstr, es);
 		if (es->analyze)
+		{
+			HeapScanDesc scan = gpas->gts.css.ss.ss_currentScanDesc;
+
 			ExplainPropertyInt64("BRIN skipped", NULL,
 								 gpas->gts.outer_brin_count, es);
-	}
-	/* GPU preference, if any */
-	if (es->verbose || gpa_info->cuda_dindex >= 0)
-	{
-		char	temp[320];
-
-		if (gpa_info->cuda_dindex < 0)
-			snprintf(temp, sizeof(temp), "None");
-		else
-		{
-			DevAttributes  *dattr = &devAttrs[gpa_info->cuda_dindex];
-
-			snprintf(temp, sizeof(temp), "GPU%d (%s)",
-					 dattr->DEV_ID, dattr->DEV_NAME);
+			if (scan)
+			{
+				double	ratio = 1.0 - ((double) gpas->gts.outer_brin_count /
+									   (double) scan->rs_nblocks);
+				ExplainPropertyFp64("BRIN ratio", "%", 100.0 * ratio, 2, es);
+			}
 		}
-		ExplainPropertyText("GPU Preference", temp, es);
 	}
 	/* other common fields */
 	pgstromExplainGpuTaskState(&gpas->gts, es);

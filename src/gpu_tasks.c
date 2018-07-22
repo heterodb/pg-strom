@@ -219,6 +219,7 @@ pgstromInitGpuTaskState(GpuTaskState *gts,
 						GpuTaskKind task_kind,
 						List *ccache_refs_list,
 						List *used_params,
+						cl_int optimal_gpu,
 						cl_uint outer_nrows_per_block,
 						EState *estate)
 {
@@ -229,6 +230,7 @@ pgstromInitGpuTaskState(GpuTaskState *gts,
 	ListCell	   *lc;
 
 	Assert(gts->gcontext == gcontext);
+	gts->optimal_gpu = optimal_gpu;
 	gts->task_kind = task_kind;
 	gts->program_id = INVALID_PROGRAM_ID;	/* to be set later */
 	gts->kern_params = construct_kern_parambuf(used_params, econtext,
@@ -605,6 +607,23 @@ pgstromReleaseGpuTaskState(GpuTaskState *gts)
 void
 pgstromExplainGpuTaskState(GpuTaskState *gts, ExplainState *es)
 {
+	/* GPU preference, if any */
+	if (es->verbose || gts->optimal_gpu >= 0)
+	{
+		char	temp[320];
+
+		if (gts->optimal_gpu < 0)
+			snprintf(temp, sizeof(temp), "None");
+		else
+		{
+			DevAttributes  *dattr = &devAttrs[gts->optimal_gpu];
+
+			snprintf(temp, sizeof(temp), "GPU%d (%s)",
+					 dattr->DEV_ID, dattr->DEV_NAME);
+		}
+		ExplainPropertyText("GPU Preference", temp, es);
+	}
+
 	/* status of columnar-cache */
 	if (!es->analyze)
 	{

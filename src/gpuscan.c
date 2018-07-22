@@ -30,7 +30,7 @@ static bool					enable_pullup_outer_scan;
  * form/deform interface of private field of CustomScan(GpuScan)
  */
 typedef struct {
-	cl_int		cuda_dindex;	/* optimal GPU selection, or -1 */
+	cl_int		optimal_gpu;	/* optimal GPU selection, or -1 */
 	char	   *kern_source;	/* source of the CUDA kernel */
 	cl_uint		extra_flags;	/* extra libraries to be included */
 	cl_uint		proj_tuple_sz;	/* nbytes of the expected result tuple size */
@@ -50,7 +50,7 @@ form_gpuscan_info(CustomScan *cscan, GpuScanInfo *gs_info)
 	List	   *privs = NIL;
 	List	   *exprs = NIL;
 
-	privs = lappend(privs, makeInteger(gs_info->cuda_dindex));
+	privs = lappend(privs, makeInteger(gs_info->optimal_gpu));
 	privs = lappend(privs, makeString(gs_info->kern_source));
 	privs = lappend(privs, makeInteger(gs_info->extra_flags));
 	privs = lappend(privs, makeInteger(gs_info->proj_tuple_sz));
@@ -76,7 +76,7 @@ deform_gpuscan_info(CustomScan *cscan)
 	int			pindex = 0;
 	int			eindex = 0;
 
-	gs_info->cuda_dindex = intVal(list_nth(privs, pindex++));
+	gs_info->optimal_gpu = intVal(list_nth(privs, pindex++));
 	gs_info->kern_source = strVal(list_nth(privs, pindex++));
 	gs_info->extra_flags = intVal(list_nth(privs, pindex++));
 	gs_info->proj_tuple_sz = intVal(list_nth(privs, pindex++));
@@ -212,7 +212,7 @@ create_gpuscan_path(PlannerInfo *root,
 											&startup_cost,
 											&run_cost);
 	/* save the optimal GPU for the scan target */
-	gs_info->cuda_dindex = GetOptimalGpuForRelation(root, baserel);
+	gs_info->optimal_gpu = GetOptimalGpuForRelation(root, baserel);
 	/* save the BRIN-index if preferable to use */
 	if ((scan_mode & PGSTROM_RELSCAN_BRIN_INDEX) != 0)
 	{
@@ -1562,7 +1562,7 @@ gpuscan_get_optimal_gpu(const Path *pathnode)
 		CustomPath	   *cpath = (CustomPath *) pathnode;
 		GpuScanInfo	   *gs_info = linitial(cpath->custom_private);
 
-		return gs_info->cuda_dindex;
+		return gs_info->optimal_gpu;
 	}
 	return -1;
 }
@@ -1677,7 +1677,7 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	Assert(innerPlan(node) == NULL);
 
 	/* setup GpuContext for CUDA kernel execution */
-	gcontext = AllocGpuContext(gs_info->cuda_dindex, false);
+	gcontext = AllocGpuContext(gs_info->optimal_gpu, false);
 	if (!explain_only)
 		ActivateGpuContext(gcontext);
 	gss->gts.gcontext = gcontext;
@@ -1713,6 +1713,7 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 							GpuTaskKind_GpuScan,
 							gs_info->ccache_refs,
 							gs_info->used_params,
+							gs_info->optimal_gpu,
 							gs_info->nrows_per_block,
 							estate);
 	gss->gts.cb_next_task   = gpuscan_next_task;
@@ -2073,24 +2074,18 @@ ExplainGpuScan(CustomScanState *node, List *ancestors, ExplainState *es)
 									 es->verbose, false);
 		ExplainPropertyText("BRIN cond", exprstr, es);
 		if (es->analyze)
+		{
+			HeapScanDesc scan = gss->gts.css.ss.ss_currentScanDesc;
+
 			ExplainPropertyInt64("BRIN skipped", NULL,
 								 gss->gts.outer_brin_count, es);
-	}
-	/* GPU preference, if any */
-	if (es->verbose || gs_info->cuda_dindex >= 0)
-	{
-		char	temp[320];
-
-		if (gs_info->cuda_dindex < 0)
-			snprintf(temp, sizeof(temp), "None");
-		else
-		{
-			DevAttributes  *dattr = &devAttrs[gs_info->cuda_dindex];
-
-			snprintf(temp, sizeof(temp), "GPU%d (%s)",
-					 dattr->DEV_ID, dattr->DEV_NAME);
+			if (scan)
+			{
+				double  ratio = 1.0 - ((double) gss->gts.outer_brin_count /
+									   (double) scan->rs_nblocks);
+				ExplainPropertyFp64("BRIN ratio", "%", 100.0 * ratio, 2, es);
+			}
 		}
-		ExplainPropertyText("GPU Preference", temp, es);
 	}
 	/* common portion of EXPLAIN */
 	pgstromExplainGpuTaskState(&gss->gts, es);
