@@ -33,6 +33,9 @@ static pg_crc32 pg_numeric_devtype_hashfunc(devtype_info *dtype,
 static pg_crc32 pg_bpchar_devtype_hashfunc(devtype_info *dtype,
 										   pg_crc32 hash,
 										   Datum datum, bool isnull);
+static pg_crc32 pg_inet_devtype_hashfunc(devtype_info *dtype,
+										 pg_crc32 hash,
+										 Datum datum, bool isnull);
 static pg_crc32 pg_range_devtype_hashfunc(devtype_info *dtype,
 										  pg_crc32 hash,
 										  Datum datum, bool isnull);
@@ -125,11 +128,11 @@ static struct {
 	DEVTYPE_DECL("inet",   "INETOID",   "inet_struct",
 				 NULL, NULL, NULL,
 				 DEVKERNEL_NEEDS_MISC, sizeof(inet),
-				 generic_devtype_hashfunc),
+				 pg_inet_devtype_hashfunc),
 	DEVTYPE_DECL("cidr",   "CIDROID",   "inet_struct",
 				 NULL, NULL, NULL,
 				 DEVKERNEL_NEEDS_MISC, sizeof(inet),
-				 generic_devtype_hashfunc),
+				 pg_inet_devtype_hashfunc),
 	/*
 	 * Date and time datatypes
 	 */
@@ -491,6 +494,27 @@ pg_bpchar_devtype_hashfunc(devtype_info *dtype,
 		for (i = len - 1; i >= 0 && s[i] == ' '; i--)
 			;
 		COMP_LEGACY_CRC32(hash, VARDATA_ANY(datum), i+1);
+	}
+	return hash;
+}
+
+static pg_crc32
+pg_inet_devtype_hashfunc(devtype_info *dtype,
+						 pg_crc32 hash,
+						 Datum datum, bool isnull)
+{
+	Assert(dtype->type_oid == INETOID ||
+		   dtype->type_oid == CIDROID);
+	if (!isnull)
+	{
+		inet_struct *is = (inet_struct *) VARDATA_ANY(datum);
+
+		if (is->family == PGSQL_AF_INET)
+			COMP_LEGACY_CRC32(hash, is, offsetof(inet_struct, ipaddr[4]));
+		else if (is->family == PGSQL_AF_INET6)
+			COMP_LEGACY_CRC32(hash, is, offsetof(inet_struct, ipaddr[16]));
+		else
+			elog(ERROR, "unexpected address family: %d", is->family);
 	}
 	return hash;
 }

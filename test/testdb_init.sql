@@ -73,6 +73,7 @@ CREATE EXTENSION pg_strom;
 CREATE EXTENSION pgcrypto;
 
 -- create tables of DBT-3
+/*
 CREATE TABLE supplier (
     s_suppkey  INTEGER,
     s_name CHAR(25),
@@ -158,6 +159,7 @@ CREATE TABLE region (
 \copy lineitem FROM PROGRAM './dbt3/dbgen -X -T L -s 24' delimiter '|';
 \copy nation   FROM PROGRAM './dbt3/dbgen -X -T n -s 24' delimiter '|';
 \copy region   FROM PROGRAM './dbt3/dbgen -X -T r -s 24' delimiter '|';
+*/
 
 -- general putpose large table
 CREATE TABLE t0 (id int primary key,

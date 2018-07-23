@@ -631,7 +631,8 @@ pg_inet_datum_ref(kern_context *kcxt, void *datum)
 
 			if (VARSIZE_ANY_EXHDR(datum) >= ip_size)
 			{
-				memcpy(&result.value, VARDATA_ANY(datum), ip_size);
+				memcpy(&result.value, VARDATA_ANY(datum),
+					   offsetof(inet_struct, ipaddr[ip_size]));
 				result.isnull = false;
 			}
 			else
@@ -677,7 +678,29 @@ pg_inet_param(kern_context *kcxt, cl_uint param_id)
 
 	return pg_inet_datum_ref(kcxt,paddr);
 }
-STROMCL_SIMPLE_COMP_CRC32_TEMPLATE(inet,inet_struct)
+
+STATIC_INLINE(cl_uint)
+pg_inet_comp_crc32(const cl_uint *crc32_table,
+				   kern_context *kcxt,
+				   cl_uint hash, pg_inet_t datum)
+{
+	if (!datum.isnull)
+	{
+		int		len = (datum.value.family == PGSQL_AF_INET  ? 4 :
+					   datum.value.family == PGSQL_AF_INET6 ? 16 : 0);
+		if (len > 0)
+		{
+			hash = pg_common_comp_crc32(crc32_table, hash,
+										(char *)&datum.value,
+										offsetof(inet_struct, ipaddr[len]));
+		}
+		else
+		{
+			STROM_SET_ERROR(&kcxt->e, StromError_InvalidValue);
+		}
+	}
+	return hash;
+}
 #endif	/* PG_INET_TYPE_DEFINED */
 
 #ifndef PG_CIDR_TYPE_DEFINED
