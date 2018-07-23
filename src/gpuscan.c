@@ -2063,30 +2063,8 @@ ExplainGpuScan(CustomScanState *node, List *ancestors, ExplainState *es)
 								 NULL, nitems_filtered / instr->nloops, es);
 		}
 	}
-
-	/* show BRIN-index properties */
-	if (OidIsValid(gs_info->index_oid))
-	{
-		Node   *index_quals = (Node *)
-			make_ands_explicit(gs_info->index_quals);
-
-		exprstr = deparse_expression(index_quals, dcontext,
-									 es->verbose, false);
-		ExplainPropertyText("BRIN cond", exprstr, es);
-		if (es->analyze)
-		{
-			HeapScanDesc scan = gss->gts.css.ss.ss_currentScanDesc;
-
-			ExplainPropertyInt64("BRIN skipped", NULL,
-								 gss->gts.outer_brin_count, es);
-			if (scan)
-			{
-				double  ratio = 1.0 - ((double) gss->gts.outer_brin_count /
-									   (double) scan->rs_nblocks);
-				ExplainPropertyFp64("BRIN ratio", "%", 100.0 * ratio, 2, es);
-			}
-		}
-	}
+	/* BRIN-index properties */
+	pgstromExplainBrinIndexMap(&gss->gts, es, dcontext);
 	/* common portion of EXPLAIN */
 	pgstromExplainGpuTaskState(&gss->gts, es);
 }

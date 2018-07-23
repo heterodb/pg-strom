@@ -650,6 +650,7 @@ typedef struct pgstromIndexState
 {
 	Oid			index_oid;
 	Relation	index_rel;
+	Node	   *index_conds;	/* for EXPLAIN */
 	BlockNumber	nblocks;
 	BlockNumber	range_sz;
 	BrinRevmap *brin_revmap;
@@ -690,6 +691,7 @@ pgstromExecInitBrinIndexMap(GpuTaskState *gts,
 	pi_state = palloc0(sizeof(pgstromIndexState));
 	pi_state->index_oid = index_oid;
 	pi_state->index_rel = index_open(index_oid, lockmode);
+	pi_state->index_conds = (Node *)make_ands_explicit(index_conds);
 	ExecIndexBuildScanKeys(&gts->css.ss.ps,
 						   pi_state->index_rel,
 						   index_conds,
@@ -965,6 +967,43 @@ pgstromExecEndBrinIndexMap(GpuTaskState *gts)
 void
 pgstromExecRewindBrinIndexMap(GpuTaskState *gts)
 {}
+
+/*
+ * pgstromExplainBrinIndexMap
+ */
+void
+pgstromExplainBrinIndexMap(GpuTaskState *gts,
+						   ExplainState *es,
+						   List *dcontext)
+{
+	pgstromIndexState *pi_state = gts->outer_index_state;
+	char	   *conds_str;
+	char		temp[128];
+
+	conds_str = deparse_expression(pi_state->index_conds,
+								   dcontext, es->verbose, false);
+	ExplainPropertyText("BRIN cond", conds_str, es);
+	if (es->analyze)
+	{
+		if (es->format == EXPLAIN_FORMAT_TEXT)
+		{
+			snprintf(temp, sizeof(temp), "%ld of %ld (%.2f%%)",
+					 gts->outer_brin_count,
+					 (long)pi_state->nblocks,
+					 100.0 * ((double) gts->outer_brin_count /
+							  (double) pi_state->nblocks));
+			ExplainPropertyText("BRIN skipped", temp, es);
+		}
+		else
+		{
+			ExplainPropertyInt64("BRIN fetched", NULL,
+								 pi_state->nblocks -
+								 gts->outer_brin_count, es);
+			ExplainPropertyInt64("BRIN skipped", NULL,
+								 gts->outer_brin_count, es);
+		}
+	}
+}
 
 /*
  * pgstromExecScanChunkParallel - read the relation with parallel scan
@@ -1532,6 +1571,175 @@ pgstromRewindScanChunk(GpuTaskState *gts)
 	}
 #endif
 	ExecScanReScan(&gts->css.ss);
+}
+
+/*
+ * pgstromExplainOuterScan
+ */
+void
+pgstromExplainOuterScan(GpuTaskState *gts,
+						List *deparse_context,
+						List *ancestors,
+						ExplainState *es,
+						List *outer_quals,
+						Cost outer_startup_cost,
+						Cost outer_total_cost,
+						double outer_plan_rows,
+						int outer_plan_width)
+{
+	Plan		   *plannode = gts->css.ss.ps.plan;
+	Index			scanrelid = ((Scan *) plannode)->scanrelid;
+	Instrumentation *instrument = &gts->outer_instrument;
+	RangeTblEntry  *rte;
+	const char	   *refname;
+	const char	   *relname;
+	const char	   *nspname = NULL;
+	StringInfoData	str;
+
+	/* Does this GpuTaskState has outer simple scan? */
+	if (scanrelid == 0)
+		return;
+
+	/*
+	 * See the logic in ExplainTargetRel()
+	 */
+	rte = rt_fetch(scanrelid, es->rtable);
+	Assert(rte->rtekind == RTE_RELATION);
+	refname = (char *) list_nth(es->rtable_names, scanrelid - 1);
+	if (!refname)
+		refname = rte->eref->aliasname;
+	relname = get_rel_name(rte->relid);
+	if (es->verbose)
+		nspname = get_namespace_name(get_rel_namespace(rte->relid));
+
+	initStringInfo(&str);
+	if (es->format == EXPLAIN_FORMAT_TEXT)
+	{
+		if (nspname != NULL)
+			appendStringInfo(&str, "%s.%s",
+							 quote_identifier(nspname),
+							 quote_identifier(relname));
+		else if (relname)
+			appendStringInfo(&str, "%s",
+							 quote_identifier(relname));
+		if (!relname || strcmp(refname, relname) != 0)
+		{
+			if (str.len > 0)
+				appendStringInfoChar(&str, ' ');
+			appendStringInfo(&str, "%s", refname);
+		}
+	}
+	else
+	{
+		ExplainPropertyText("Outer Scan Relation", relname, es);
+		if (nspname)
+			ExplainPropertyText("Outer Scan Schema", nspname, es);
+		ExplainPropertyText("Outer Scan Alias", refname, es);
+	}
+
+	if (es->costs)
+	{
+		if (es->format == EXPLAIN_FORMAT_TEXT)
+			appendStringInfo(&str, "  (cost=%.2f..%.2f rows=%.0f width=%d)",
+							 outer_startup_cost,
+							 outer_total_cost,
+							 outer_plan_rows,
+							 outer_plan_width);
+		else
+		{
+			ExplainPropertyFp64("Outer Startup Cost",
+								NULL, outer_startup_cost, 2, es);
+			ExplainPropertyFp64("Outer Total Cost",
+								NULL, outer_total_cost, 2, es);
+			ExplainPropertyFp64("Outer Plan Rows",
+								NULL, outer_plan_rows, 0, es);
+			ExplainPropertyInt64("Outer Plan Width",
+								 NULL, outer_plan_width, es);
+		}
+	}
+
+	/*
+	 * We have to forcibly clean up the instrumentation state because we
+	 * haven't done ExecutorEnd yet.  This is pretty grotty ...
+	 * See the comment in ExplainNode()
+	 */
+	InstrEndLoop(instrument);
+
+	if (es->analyze && instrument->nloops > 0)
+	{
+		double	nloops = instrument->nloops;
+		double	startup_sec = 1000.0 * instrument->startup / nloops;
+		double	total_sec = 1000.0 * instrument->total / nloops;
+		double	rows = instrument->ntuples / nloops;
+
+		if (es->format == EXPLAIN_FORMAT_TEXT)
+		{
+			if (es->timing)
+				appendStringInfo(
+					&str,
+					" (actual time=%.3f..%.3f rows=%.0f loops=%.0f)",
+					startup_sec, total_sec, rows, nloops);
+			else
+				appendStringInfo(
+					&str,
+					" (actual rows=%.0f loops=%.0f)",
+					rows, nloops);
+		}
+		else
+		{
+			if (es->timing)
+			{
+				ExplainPropertyFp64("Outer Actual Startup Time",
+									NULL, startup_sec, 3, es);
+				ExplainPropertyFp64("Outer Actual Total Time",
+									NULL, total_sec, 3, es);
+			}
+			ExplainPropertyFp64("Outer Actual Rows", NULL, rows, 0, es);
+			ExplainPropertyFp64("Outer Actual Loops", NULL, nloops, 0, es);
+		}
+	}
+	else if (es->analyze)
+	{
+		if (es->format == EXPLAIN_FORMAT_TEXT)
+			appendStringInfoString(&str, " (never executed)");
+		else
+		{
+			if (es->timing)
+			{
+				ExplainPropertyFp64("Outer Actual Startup Time",
+									NULL, 0.0, 3, es);
+				ExplainPropertyFp64("Outer Actual Total Time",
+									NULL, 0.0, 3, es);
+			}
+			ExplainPropertyFp64("Outer Actual Rows",
+								NULL, 0.0, 0, es);
+			ExplainPropertyFp64("Outer Actual Loops",
+								NULL, 0.0, 0, es);
+		}
+	}
+	if (es->format == EXPLAIN_FORMAT_TEXT)
+		ExplainPropertyText("Outer Scan", str.data, es);
+
+	if (outer_quals)
+	{
+		Expr   *quals_expr;
+		char   *temp;
+
+		quals_expr = make_ands_explicit(outer_quals);
+		temp = deparse_expression((Node *)quals_expr,
+								  deparse_context,
+								  es->verbose, false);
+		ExplainPropertyText("Outer Scan Filter", temp, es);
+
+		if (gts->outer_instrument.nfiltered1 > 0.0)
+			ExplainPropertyFp64("Rows Removed by Outer Scan Filter",
+								NULL,
+								gts->outer_instrument.nfiltered1 /
+								gts->outer_instrument.nloops,
+								0, es);
+	}
+	/* properties of BRIN-index */
+	pgstromExplainBrinIndexMap(gts, es, deparse_context);
 }
 
 /*

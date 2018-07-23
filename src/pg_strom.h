@@ -849,8 +849,7 @@ extern void pgstromInitGpuTaskState(GpuTaskState *gts,
 extern TupleTableSlot *pgstromExecGpuTaskState(GpuTaskState *gts);
 extern void pgstromRescanGpuTaskState(GpuTaskState *gts);
 extern void pgstromReleaseGpuTaskState(GpuTaskState *gts);
-extern void pgstromExplainGpuTaskState(GpuTaskState *gts,
-									   ExplainState *es);
+extern void pgstromExplainGpuTaskState(GpuTaskState *gts, ExplainState *es);
 extern Size pgstromEstimateDSMGpuTaskState(GpuTaskState *gts,
 										   ParallelContext *pcxt);
 extern void pgstromInitDSMGpuTaskState(GpuTaskState *gts,
@@ -861,15 +860,6 @@ extern void pgstromInitWorkerGpuTaskState(GpuTaskState *gts,
 extern void pgstromReInitializeDSMGpuTaskState(GpuTaskState *gts);
 
 extern GpuTask *fetch_next_gputask(GpuTaskState *gts);
-extern void pgstromExplainOuterScan(GpuTaskState *gts,
-									List *deparse_context,
-									List *ancestors,
-									ExplainState *es,
-									List *outer_quals,
-									Cost outer_startup_cost,
-									Cost outer_total_cost,
-									double outer_plan_rows,
-									int outer_plan_width);
 
 extern void pgstromInitGpuTask(GpuTaskState *gts, GpuTask *gtask);
 extern void pgstrom_init_gputasks(void);
@@ -1063,10 +1053,23 @@ extern Size pgstromSizeOfBrinIndexMap(GpuTaskState *gts);
 extern void pgstromExecGetBrinIndexMap(GpuTaskState *gts);
 extern void pgstromExecEndBrinIndexMap(GpuTaskState *gts);
 extern void pgstromExecRewindBrinIndexMap(GpuTaskState *gts);
+extern void pgstromExplainBrinIndexMap(GpuTaskState *gts,
+									   ExplainState *es,
+									   List *dcontext);
 
 extern pgstrom_data_store *pgstromExecScanChunk(GpuTaskState *gts,
 												GpuTaskRuntimeStat *gt_rstat);
 extern void pgstromRewindScanChunk(GpuTaskState *gts);
+
+extern void pgstromExplainOuterScan(GpuTaskState *gts,
+									List *deparse_context,
+									List *ancestors,
+									ExplainState *es,
+									List *outer_quals,
+									Cost outer_startup_cost,
+									Cost outer_total_cost,
+									double outer_plan_rows,
+									int outer_plan_width);
 
 extern void pgstrom_init_relscan(void);
 
