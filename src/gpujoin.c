@@ -2945,29 +2945,6 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
                             gj_info->outer_total_cost,
                             gj_info->outer_nrows,
                             gj_info->outer_width);
-	/* BRIN-index properties */
-	if (OidIsValid(gj_info->index_oid))
-	{
-		Node   *index_quals = (Node *)
-			make_ands_explicit(gj_info->index_quals);
-
-		temp = deparse_expression(index_quals, dcontext,
-								  es->verbose, false);
-		ExplainPropertyText("BRIN cond", temp, es);
-		if (es->analyze)
-		{
-			HeapScanDesc scan = gjs->gts.css.ss.ss_currentScanDesc;
-
-			ExplainPropertyInt64("BRIN skipped", NULL,
-								 gjs->gts.outer_brin_count, es);
-			if (scan)
-			{
-				double	ratio = 1.0 - ((double) gjs->gts.outer_brin_count /
-									   (double) scan->rs_numblocks);
-				ExplainPropertyFp64("BRIN ratio", "%", 100.0 * ratio, 2, es);
-			}
-		}
-	}
 	/* join-qualifiers */
 	depth = 1;
 	forfour (lc1, gj_info->join_types,

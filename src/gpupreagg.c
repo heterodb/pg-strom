@@ -4404,29 +4404,6 @@ ExplainGpuPreAgg(CustomScanState *node, List *ancestors, ExplainState *es)
 		ExplainPropertyText("Combined GpuJoin", "enabled", es);
 	else if (es->format != EXPLAIN_FORMAT_TEXT)
 		ExplainPropertyText("Combined GpuJoin", "disabled", es);
-	/* show BRIN-index properties */
-	if (OidIsValid(gpa_info->index_oid))
-	{
-		Node   *index_quals = (Node *)
-			make_ands_explicit(gpa_info->index_quals);
-
-		exprstr = deparse_expression(index_quals, dcontext,
-									 es->verbose, false);
-		ExplainPropertyText("BRIN cond", exprstr, es);
-		if (es->analyze)
-		{
-			HeapScanDesc scan = gpas->gts.css.ss.ss_currentScanDesc;
-
-			ExplainPropertyInt64("BRIN skipped", NULL,
-								 gpas->gts.outer_brin_count, es);
-			if (scan)
-			{
-				double	ratio = 1.0 - ((double) gpas->gts.outer_brin_count /
-									   (double) scan->rs_nblocks);
-				ExplainPropertyFp64("BRIN ratio", "%", 100.0 * ratio, 2, es);
-			}
-		}
-	}
 	/* other common fields */
 	pgstromExplainGpuTaskState(&gpas->gts, es);
 	/* other run-time statistics, if any */

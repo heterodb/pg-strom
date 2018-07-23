@@ -980,6 +980,9 @@ pgstromExplainBrinIndexMap(GpuTaskState *gts,
 	char	   *conds_str;
 	char		temp[128];
 
+	if (!pi_state)
+		return;
+
 	conds_str = deparse_expression(pi_state->index_conds,
 								   dcontext, es->verbose, false);
 	ExplainPropertyText("BRIN cond", conds_str, es);
