@@ -2314,7 +2314,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 		if (b->boolop == NOT_EXPR)
 		{
 			Assert(list_length(b->args) == 1);
-			appendStringInfo(&context->str, "(!");
+			appendStringInfo(&context->str, "NOT(");
 			codegen_expression_walker(linitial(b->args), context);
 			appendStringInfoChar(&context->str, ')');
 		}
@@ -2322,7 +2322,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 		{
 			Assert(list_length(b->args) > 1);
 
-			appendStringInfoChar(&context->str, '(');
+			appendStringInfo(&context->str, "to_bool(");
 			foreach (cell, b->args)
 			{
 				Assert(exprType(lfirst(cell)) == BOOLOID);
@@ -2333,7 +2333,9 @@ codegen_expression_walker(Node *node, codegen_context *context)
 					else
 						appendStringInfo(&context->str, " || ");
 				}
+				appendStringInfo(&context->str, "EVAL(");
 				codegen_expression_walker(lfirst(cell), context);
+				appendStringInfoChar(&context->str, ')');
 			}
 			appendStringInfoChar(&context->str, ')');
 		}

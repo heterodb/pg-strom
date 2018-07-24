@@ -1348,7 +1348,9 @@ PlanGpuScanPath(PlannerInfo *root,
 			dev_quals = lappend(dev_quals, rinfo);
 	}
 	/* Reduce RestrictInfo list to bare expressions; ignore pseudoconstants */
+	host_quals = order_qual_clauses(root, host_quals);
 	host_quals = extract_actual_clauses(host_quals, false);
+	dev_quals = order_qual_clauses(root, dev_quals);
 	dev_quals = extract_actual_clauses(dev_quals, false);
 	index_quals = extract_actual_clauses(gs_info->index_quals, false);
 
@@ -1471,8 +1473,10 @@ pgstrom_pullup_outer_scan(PlannerInfo *root,
 
 		if (!pgstrom_device_expression(rinfo->clause))
 			return false;
-		outer_quals = lappend(outer_quals, rinfo->clause);
+		outer_quals = lappend(outer_quals, rinfo);
 	}
+	outer_quals = order_qual_clauses(root, outer_quals);
+	outer_quals = extract_actual_clauses(outer_quals, false);
 
 	/* target entry has to be */
 	foreach (lc, outer_target->exprs)

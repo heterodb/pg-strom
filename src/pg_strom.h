@@ -1270,6 +1270,7 @@ extern int compute_parallel_worker(RelOptInfo *rel,
 								   double heap_pages,
 								   double index_pages);
 #endif
+extern List *order_qual_clauses(PlannerInfo *root, List *clauses);
 #if PG_VERSION_NUM < 110000
 /* PG11 changed pg_proc definition */
 extern char get_func_prokind(Oid funcid);

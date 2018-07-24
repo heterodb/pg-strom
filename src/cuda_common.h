@@ -2483,6 +2483,25 @@ EVAL(pg_bool_t arg)
 	return false;
 }
 
+STATIC_INLINE(pg_bool_t)
+NOT(pg_bool_t arg)
+{
+	arg.value = !arg.value;
+	return arg;
+}
+
+STATIC_INLINE(pg_bool_t)
+to_bool(cl_bool value)
+{
+	pg_bool_t	result;
+
+	result.isnull = false;
+	result.value  = value;
+
+	return result;
+}
+
+#if 0
 /*
  * Support routine for BoolExpr
  */
@@ -2532,6 +2551,7 @@ operator || (pg_bool_t arg1, pg_bool_t arg2)
 	}
 	return result;
 }
+#endif
 
 /*
  * Support routine for CASE x WHEN y then ... else ... end
