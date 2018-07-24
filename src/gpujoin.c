@@ -3130,7 +3130,7 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 				appendStringInfo(es->str, "KDS-%s (size plan: %s, exec: %s)",
 								 hash_outer_key ? "Hash" : "Heap",
 								 format_bytesz(istate->ichunk_size),
-								 format_bytesz(kds_in->length));
+								 format_bytesz(kds_in ? kds_in->length : 0));
 			}
 			appendStringInfoChar(es->str, '\n');
 		}
@@ -3147,9 +3147,10 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 			ExplainPropertyText(qlabel, format_bytesz(len), es);
 			if (es->analyze)
 			{
+				len = (kds_in ? kds_in->length : 0);
 				snprintf(qlabel, sizeof(qlabel),
 						 "Depth % 2d KDS Exec Size", depth);
-				ExplainPropertyText(qlabel, format_bytesz(kds_in->length), es);
+				ExplainPropertyText(qlabel, format_bytesz(len), es);
 			}
 		}
 		depth++;
@@ -6475,6 +6476,7 @@ __gpujoin_inner_preload(GpuJoinState *gjs, bool with_cpu_parallel)
 	size_t			ojmaps_usage = 0;
 	size_t			kmrels_usage = 0;
 	size_t			required;
+	bool			result = true;
 
 	Assert(!IsParallelWorker());
 	gjs->m_kmrels_array = MemoryContextAllocZero(CurTransactionContext,
@@ -6592,9 +6594,8 @@ __gpujoin_inner_preload(GpuJoinState *gjs, bool with_cpu_parallel)
 			break;
 		if (kds->nitems == 0)
 		{
-			dsm_detach(seg);
-			gjs->seg_kmrels = (void *)(~0UL);
-			return false;
+			result = false;
+			goto skip_device_malloc;
 		}
 	}
 	required = h_kmrels->kmrels_length + ojmaps_usage * (numDevAttrs + 1);
@@ -6639,6 +6640,7 @@ __gpujoin_inner_preload(GpuJoinState *gjs, bool with_cpu_parallel)
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuMemsetD32: %s", errorText(rc));
 	}
+skip_device_malloc:
 
 	/*
 	 * Partition aware GpuJoin support
@@ -6665,7 +6667,7 @@ __gpujoin_inner_preload(GpuJoinState *gjs, bool with_cpu_parallel)
 	gj_sstate->kmrels_handle = dsm_segment_handle(seg);
 	gjs->seg_kmrels = seg;
 
-	return true;
+	return result;
 }
 
 bool
@@ -6695,9 +6697,8 @@ GpuJoinInnerPreload(GpuTaskState *gts, CUdeviceptr *p_m_kmrels)
 	{
 		if (p_m_kmrels)
 			*p_m_kmrels = gjs->m_kmrels;
-		return (gjs->seg_kmrels != (void *)(~0UL));
+		return (gjs->seg_kmrels != (CUdeviceptr) 0UL);
 	}
-
 	pg_atomic_add_fetch_u32(&gj_sstate->pergpu[dindex].pg_nworkers, 1);
 	pg_atomic_add_fetch_u32(&gj_sstate->pg_nworkers, 1);
 
@@ -6752,9 +6753,13 @@ GpuJoinInnerPreload(GpuTaskState *gts, CUdeviceptr *p_m_kmrels)
 		}
 	}
 	/* the inner buffer ready? */
-	if (preload_done > 1)
+	if (preload_done != 1)
+	{
+		gjs->m_kmrels = 0UL;
+		if (p_m_kmrels)
+			*p_m_kmrels = 0UL;
 		return false;
-
+	}
 	gjs->seg_kmrels = dsm_attach(gj_sstate->kmrels_handle);
 	if (!gjs->seg_kmrels)
 		elog(ERROR, "could not map dynamic shared memory segment");
@@ -6830,6 +6835,9 @@ GpuJoinInnerUnload(GpuTaskState *gts, bool is_rescan)
 		{
 			for (i=0; i < numDevAttrs; i++)
 			{
+				if (gjs->m_kmrels_array[i] == 0UL)
+					continue;
+
 				rc = gpuMemFree(gcontext, gjs->m_kmrels_array[i]);
 				if (rc != CUDA_SUCCESS)
 					elog(ERROR, "failed on gpuMemFree: %s", errorText(rc));
