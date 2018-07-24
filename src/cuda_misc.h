@@ -629,7 +629,8 @@ pg_inet_datum_ref(kern_context *kcxt, void *datum)
 			inet_struct	   *ip_data = (inet_struct *)VARDATA_ANY(datum);
 			cl_int			ip_size = ip_addrsize(ip_data);
 
-			if (VARSIZE_ANY_EXHDR(datum) >= ip_size)
+			if (VARSIZE_ANY_EXHDR(datum) >= offsetof(inet_struct,
+													 ipaddr[ip_size]))
 			{
 				memcpy(&result.value, VARDATA_ANY(datum),
 					   offsetof(inet_struct, ipaddr[ip_size]));
