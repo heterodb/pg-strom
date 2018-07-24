@@ -1568,12 +1568,6 @@ toast_decompress_datum(char *buffer, cl_uint buflen,
 																\
 		if (!datum)												\
 			result.isnull = true;								\
-		else if (!VARATT_IS_4B_U(datum) &&						\
-				 !VARATT_IS_1B(datum))							\
-		{														\
-			result.isnull = true;								\
-			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);	\
-		}														\
 		else													\
 		{														\
 			result.isnull = false;								\
