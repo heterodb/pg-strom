@@ -6061,6 +6061,20 @@ resume_kernel:
 	else if (pgstrom_cpu_fallback_enabled &&
 			 pgjoin->kern.kerror.errcode == StromError_CpuReCheck)
 	{
+		/*
+		 * In case of KDS_FORMAT_BLOCK, we have to write back the kernel
+		 * buffer to the host-side, because SSD2GPU mode bypass the host
+		 * memory, thus, CPU fallback routine will miss the data.
+		 */
+		if (pds_src->kds.format == KDS_FORMAT_BLOCK)
+		{
+			rc = cuMemcpyDtoH(&pds_src->kds,
+							  m_kds_src,
+							  pds_src->kds.length);
+			if (rc != CUDA_SUCCESS)
+				werror("failed on cuMemcpyDtoH: %s", errorText(rc));
+			pds_src->nblocks_uncached = 0;
+		}
 		memset(&pgjoin->task.kerror, 0, sizeof(kern_errorbuf));
 		pgjoin->task.cpu_fallback = true;
 		pgjoin->kern.resume_context = (last_suspend != NULL);
