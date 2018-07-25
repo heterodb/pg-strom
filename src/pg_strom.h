@@ -476,12 +476,13 @@ typedef struct devfunc_info {
 	Oid			func_collid;	/* OID of collation, if collation aware */
 	bool		func_is_negative;	/* True, if not supported by GPU */
 	bool		func_is_strict;		/* True, if NULL strict function */
-	/* fields below are valid only if func_is_negative is true */
+	/* fields below are valid only if func_is_negative is false */
 	int32		func_flags;		/* Extra flags of this function */
 	List	   *func_args;		/* argument types by devtype_info */
 	devtype_info *func_rettype;	/* result type by devtype_info */
 	const char *func_sqlname;	/* name of the function in SQL side */
 	const char *func_devname;	/* name of the function in device side */
+	Cost		func_devcost;	/* relative cost to run function on GPU */
 } devfunc_info;
 
 /*
@@ -934,8 +935,13 @@ extern void pgstrom_codegen_param_declarations(StringInfo buf,
 											   codegen_context *context);
 extern bool __pgstrom_device_expression(Expr *expr,
 										const char *filename, int lineno);
-#define pgstrom_device_expression(expr)		\
-	__pgstrom_device_expression((expr),__FILE__,__LINE__)
+
+extern bool __pgstrom_device_expression_cost(Expr *expr, int *p_devcost,
+											 const char *filename, int lineno);
+#define pgstrom_device_expression(a)			\
+	__pgstrom_device_expression((a),__FILE__,__LINE__)
+#define pgstrom_device_expression_cost(a,b)		\
+	__pgstrom_device_expression_cost((a),(b),__FILE__,__LINE__)
 extern void pgstrom_init_codegen_context(codegen_context *context);
 extern void pgstrom_init_codegen(void);
 
@@ -1270,7 +1276,6 @@ extern int compute_parallel_worker(RelOptInfo *rel,
 								   double heap_pages,
 								   double index_pages);
 #endif
-extern List *order_qual_clauses(PlannerInfo *root, List *clauses);
 #if PG_VERSION_NUM < 110000
 /* PG11 changed pg_proc definition */
 extern char get_func_prokind(Oid funcid);

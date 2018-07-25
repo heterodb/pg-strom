@@ -407,6 +407,56 @@ gpuscan_add_scan_path(PlannerInfo *root,
 }
 
 /*
+ * reorder_devqual_clauses
+ */
+static List *
+reorder_devqual_clauses(PlannerInfo *root, List *dev_quals, List *dev_costs)
+{
+	ListCell   *lc1, *lc2;
+	int			nitems;
+	int			i, j, k;
+	List	   *results = NIL;
+	struct {
+		Node   *qual;
+		int		cost;
+	}		   *items, temp;
+
+	nitems = list_length(dev_quals);
+	if (nitems <= 1)
+		return dev_quals;
+	items = palloc0(sizeof(*items) * nitems);
+
+	i = 0;
+	forboth (lc1, dev_quals,
+			 lc2, dev_costs)
+	{
+		items[i].qual = lfirst(lc1);
+		items[i].cost = lfirst_int(lc2);
+		i++;
+	}
+
+	for (i=0; i < nitems; i++)
+	{
+		k = i;
+		for (j=i+1; j < nitems; j++)
+		{
+			if (items[j].cost < items[k].cost)
+				k = j;
+		}
+		if (i != k)
+		{
+			temp = items[i];
+			items[i] = items[k];
+			items[k] = temp;
+		}
+		results = lappend(results, items[i].qual);
+	}
+	pfree(items);
+
+	return results;
+}
+
+/*
  * Code generator for GpuScan's qualifier
  */
 void
@@ -1312,6 +1362,7 @@ PlanGpuScanPath(PlannerInfo *root,
 	Relation		relation;
 	List		   *host_quals = NIL;
 	List		   *dev_quals = NIL;
+	List		   *dev_costs = NIL;
 	List		   *index_quals = NIL;
 	List		   *tlist_dev = NIL;
 	List		   *ccache_refs = NIL;
@@ -1338,19 +1389,22 @@ PlanGpuScanPath(PlannerInfo *root,
 	 */
 	foreach (cell, clauses)
 	{
-		RestrictInfo   *rinfo = lfirst(cell);
+		RestrictInfo *rinfo = lfirst(cell);
+		int		devcost;
 
 		if (exprType((Node *)rinfo->clause) != BOOLOID)
 			elog(ERROR, "Bug? clause on GpuScan does not have BOOL type");
-		if (!pgstrom_device_expression(rinfo->clause))
+		if (!pgstrom_device_expression_cost(rinfo->clause, &devcost))
 			host_quals = lappend(host_quals, rinfo);
 		else
+		{
 			dev_quals = lappend(dev_quals, rinfo);
+			dev_costs = lappend_int(dev_costs, devcost);
+		}
 	}
 	/* Reduce RestrictInfo list to bare expressions; ignore pseudoconstants */
-	host_quals = order_qual_clauses(root, host_quals);
 	host_quals = extract_actual_clauses(host_quals, false);
-	dev_quals = order_qual_clauses(root, dev_quals);
+	dev_quals = reorder_devqual_clauses(root, dev_quals, dev_costs);
 	dev_quals = extract_actual_clauses(dev_quals, false);
 	index_quals = extract_actual_clauses(gs_info->index_quals, false);
 
@@ -1438,6 +1492,7 @@ pgstrom_pullup_outer_scan(PlannerInfo *root,
 	RelOptInfo *baserel = outer_path->parent;
 	PathTarget *outer_target = outer_path->pathtarget;
 	List	   *outer_quals = NIL;
+	List	   *outer_costs = NIL;
 	cl_int		cuda_dindex = -1;
 	IndexOptInfo *indexOpt = NULL;
 	List	   *indexConds = NIL;
@@ -1469,13 +1524,15 @@ pgstrom_pullup_outer_scan(PlannerInfo *root,
 	/* qualifier has to be device executable */
 	foreach (lc, baserel->baserestrictinfo)
 	{
-		RestrictInfo   *rinfo = lfirst(lc);
+		RestrictInfo *rinfo = lfirst(lc);
+		int		devcost;
 
-		if (!pgstrom_device_expression(rinfo->clause))
+		if (!pgstrom_device_expression_cost(rinfo->clause, &devcost))
 			return false;
 		outer_quals = lappend(outer_quals, rinfo);
+		outer_costs = lappend_int(outer_costs, devcost);
 	}
-	outer_quals = order_qual_clauses(root, outer_quals);
+	outer_quals = reorder_devqual_clauses(root, outer_quals, outer_costs);
 	outer_quals = extract_actual_clauses(outer_quals, false);
 
 	/* target entry has to be */
