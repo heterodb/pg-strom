@@ -6644,6 +6644,7 @@ __gpujoin_inner_preload(GpuJoinState *gjs, bool with_cpu_parallel)
 			gjs->m_kmrels = m_deviceptr;
 		gjs->m_kmrels_array[i] = m_deviceptr;
 
+		SwitchGpuContext(gcontext, i);
 		rc = cuMemcpyHtoD(m_deviceptr, h_kmrels, required);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuMemcpyHtoD: %s", errorText(rc));
@@ -6653,6 +6654,10 @@ __gpujoin_inner_preload(GpuJoinState *gjs, bool with_cpu_parallel)
 						 1);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on cuMemsetD32: %s", errorText(rc));
+
+		rc = cuCtxPopCurrent(NULL);
+		if (rc != CUDA_SUCCESS)
+			elog(FATAL, "failed on cuCtxPopCurrent: %s", errorText(rc));
 	}
 skip_device_malloc:
 

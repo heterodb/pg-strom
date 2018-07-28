@@ -351,16 +351,13 @@ __gpuIpcOpenMemHandle(GpuContext *gcontext,
 	/* not open yet */
 	tracker = calloc(1, sizeof(ResourceTracker));
 	if (!tracker)
-		goto error_1;
+		goto error;
 
-	rc = cuCtxPushCurrent(gcontext->cuda_context);
-	if (rc != CUDA_SUCCESS)
-		goto error_2;
-
+	GPUCONTEXT_PUSH(gcontext);
 	rc = cuIpcOpenMemHandle(&m_deviceptr, m_handle, flags);
+	GPUCONTEXT_POP(gcontext);
 	if (rc != CUDA_SUCCESS)
-		goto error_3;
-	cuCtxPopCurrent(NULL);
+		goto error;
 
 	tracker->crc = resource_tracker_hashval(RESTRACK_CLASS__GPUMEMORY_IPC,
 											&m_deviceptr, sizeof(CUdeviceptr));
@@ -379,11 +376,9 @@ __gpuIpcOpenMemHandle(GpuContext *gcontext,
 
 	return CUDA_SUCCESS;
 
-error_3:
-	cuCtxPopCurrent(NULL);
-error_2:
-	free(tracker);
-error_1:
+error:
+	if (tracker)
+		free(tracker);
 	SpinLockRelease(&gcontext->restrack_lock);
 	return rc;
 }
@@ -419,7 +414,9 @@ gpuIpcCloseMemHandle(GpuContext *gcontext, CUdeviceptr m_deviceptr)
 			}
 			dlist_delete(&tracker->chain);
 
+			GPUCONTEXT_PUSH(gcontext);
 			rc = cuIpcCloseMemHandle(m_deviceptr);
+			GPUCONTEXT_POP(gcontext);
 
 			SpinLockRelease(&gcontext->restrack_lock);
 			free(tracker);
@@ -995,6 +992,7 @@ ActivateGpuContext(GpuContext *gcontext)
 		cl_int		i;
 		CUresult	rc;
 
+		GPUCONTEXT_PUSH(gcontext);
 		for (i=0; i < gcontext->num_workers; i++)
 		{
 			if (!gcontext->cuda_events0[i])
@@ -1013,6 +1011,7 @@ ActivateGpuContext(GpuContext *gcontext)
 					elog(ERROR, "failed on cuEventCreate: %s", errorText(rc));
 			}
 		}
+		GPUCONTEXT_POP(gcontext);
 
 		/* creation of worker threads */
 		for (i=0; i < gcontext->num_workers; i++)
@@ -1154,6 +1153,7 @@ SynchronizeGpuContext(GpuContext *gcontext)
 	pg_atomic_write_u32(&gcontext->terminate_workers, 1);
 	pthreadCondBroadcast(gcontext->cond);
 	/* interrupt cuEventSynchronize() */
+	GPUCONTEXT_PUSH(gcontext);
 	for (i=0; i < gcontext->num_workers; i++)
 	{
 		if ((rc = cuEventRecord(gcontext->cuda_events0[i],
@@ -1163,6 +1163,7 @@ SynchronizeGpuContext(GpuContext *gcontext)
 								CU_STREAM_PER_THREAD)) != CUDA_SUCCESS)
 			elog(WARNING, "failed on cuEventRecord: %s", errorText(rc));
 	}
+	GPUCONTEXT_POP(gcontext);
 
 	/* wait for completion of the worker threads */
 	for (i=0; i < gcontext->num_workers; i++)

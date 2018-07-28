@@ -836,6 +836,20 @@ CHECK_WORKER_TERMINATION(void)
 		werror("GpuContext worker termination");
 }
 
+#define GPUCONTEXT_PUSH(gcontext)										\
+	do {																\
+		CUresult	____rc;												\
+																		\
+		____rc = cuCtxPushCurrent((gcontext)->cuda_context);			\
+		if (____rc != CUDA_SUCCESS)										\
+			wfatal("failed on cuCtxPushCurrent: %s", errorText(____rc))
+
+#define GPUCONTEXT_POP(gcontext)										\
+		____rc = cuCtxPopCurrent(NULL);									\
+		if (____rc != CUDA_SUCCESS)										\
+			wfatal("failed on cuCtxPopCurrent: %s", errorText(____rc));	\
+	} while(0)
+
 /*
  * gpu_tasks.c
  */

@@ -4188,9 +4188,12 @@ ExecEndGpuPreAgg(CustomScanState *node)
 	/* wait for completion of any asynchronous GpuTask */
 	if (gpas->ev_init_fhash)
 	{
-		if ((rc = cuEventRecord(gpas->ev_init_fhash,
-								CU_STREAM_PER_THREAD)) != CUDA_SUCCESS)
-			elog(WARNING, "failed on cuEventRecord: %s", errorText(rc));
+		GPUCONTEXT_PUSH(gcontext);
+		rc = cuEventRecord(gpas->ev_init_fhash,
+						   CU_STREAM_PER_THREAD);
+		GPUCONTEXT_POP(gcontext);
+		if (rc != CUDA_SUCCESS)
+			elog(ERROR, "failed on cuEventRecord: %s", errorText(rc));
 	}
     SynchronizeGpuContext(gpas->gts.gcontext);
 	/* close index related stuff if any */
