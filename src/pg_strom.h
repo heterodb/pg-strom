@@ -1130,6 +1130,8 @@ extern bool pgstrom_plan_is_gpujoin(const Plan *plannode);
 extern bool pgstrom_planstate_is_gpujoin(const PlanState *ps);
 extern Path *pgstrom_copy_gpujoin_path(const Path *pathnode);
 extern cl_int gpujoin_get_optimal_gpu(const Path *pathnode);
+extern void pgstrom_gpujoin_planner_begin(void);
+extern void pgstrom_gpujoin_planner_end(bool abort);
 
 #if PG_VERSION_NUM >= 100000
 extern List *extract_partitionwise_pathlist(PlannerInfo *root,

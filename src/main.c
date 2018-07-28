@@ -337,14 +337,25 @@ pgstrom_post_planner(Query *parse,
 	PlannedStmt	   *pstmt;
 	ListCell	   *lc;
 
-	if (planner_hook_next)
-		pstmt = planner_hook_next(parse, cursorOptions, boundParams);
-	else
-		pstmt = standard_planner(parse, cursorOptions, boundParams);
+	pgstrom_gpujoin_planner_begin();
+	PG_TRY();
+	{
+		if (planner_hook_next)
+			pstmt = planner_hook_next(parse, cursorOptions, boundParams);
+		else
+			pstmt = standard_planner(parse, cursorOptions, boundParams);
 
-	pgstrom_post_planner_recurse(pstmt, &pstmt->planTree);
-	foreach (lc, pstmt->subplans)
-		pgstrom_post_planner_recurse(pstmt, (Plan **)&lfirst(lc));
+		pgstrom_post_planner_recurse(pstmt, &pstmt->planTree);
+		foreach (lc, pstmt->subplans)
+			pgstrom_post_planner_recurse(pstmt, (Plan **)&lfirst(lc));
+	}
+	PG_CATCH();
+	{
+		pgstrom_gpujoin_planner_end(true);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	pgstrom_gpujoin_planner_end(false);
 
 	return pstmt;
 }
