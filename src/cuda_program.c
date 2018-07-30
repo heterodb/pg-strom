@@ -591,6 +591,12 @@ link_cuda_libraries(char *ptx_image, size_t ptx_length,
 			werror("out of memory");
 		memcpy(bin_image, temp, bin_length);
 
+		{
+			CUmodule cuda_module;
+			rc = cuModuleLoadData(&cuda_module, temp);
+			wnotice("cuModuleLoadData = %s", errorText(rc));
+		}
+
 		*p_bin_image = bin_image;
 		*p_bin_length = bin_length;
 	}

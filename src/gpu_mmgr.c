@@ -380,7 +380,7 @@ __gpuMemAllocHostRaw(GpuContext *gcontext,
  * __gpuMemAllocDev - normal device memory allocation for exports
  */
 CUresult
-__gpuMemAllocDev(GpuContext *gcontext, int cuda_dindex,
+__gpuMemAllocDev(GpuContext *gcontext,
 				 CUdeviceptr *p_deviceptr,
 				 size_t bytesize,
 				 CUipcMemHandle *p_mhandle,
@@ -389,10 +389,12 @@ __gpuMemAllocDev(GpuContext *gcontext, int cuda_dindex,
 	CUdeviceptr	m_deviceptr;
 	CUresult	rc;
 
-	if (cuda_dindex < 0 || cuda_dindex >= numDevAttrs)
-		return CUDA_ERROR_INVALID_VALUE;
-
-	SwitchGpuContext(gcontext, cuda_dindex);
+	rc = cuCtxPushCurrent(gcontext->cuda_context);
+	if (rc != CUDA_SUCCESS)
+	{
+		wnotice("failed on cuCtxPushCurrent: %s", errorText(rc));
+		return rc;
+	}
 
 	rc = cuMemAlloc(&m_deviceptr, bytesize);
 	if (rc != CUDA_SUCCESS)

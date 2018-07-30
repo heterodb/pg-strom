@@ -333,7 +333,7 @@ fetch_next_gputask(GpuTaskState *gts)
 	cl_int			ev;
 
 	/* force activate GpuContext on demand */
-	ActivateGpuContext(gcontext);
+	Assert(gcontext->worker_is_running);
 	CHECK_FOR_GPUCONTEXT(gcontext);
 
 	pthreadMutexLock(gcontext->mutex);

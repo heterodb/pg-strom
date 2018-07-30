@@ -1738,9 +1738,9 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	Assert(innerPlan(node) == NULL);
 
 	/* setup GpuContext for CUDA kernel execution */
-	gcontext = AllocGpuContext(gs_info->optimal_gpu, false);
-	if (!explain_only)
-		ActivateGpuContext(gcontext);
+	gcontext = AllocGpuContext(gs_info->optimal_gpu, false,
+							   !explain_only,
+							   !explain_only);
 	gss->gts.gcontext = gcontext;
 
 	/*

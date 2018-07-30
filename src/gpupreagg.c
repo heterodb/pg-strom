@@ -1585,9 +1585,6 @@ try_add_gpupreagg_append_paths(PlannerInfo *root,
 	else
 		partial_path = &append_path->path;
 
-	elog(INFO, "preaggpath rows=%.0f cost=%.2f...%.2f", partial_path->rows, partial_path->startup_cost, partial_path->total_cost);
-
-
 	try_add_final_aggregation_paths(root,
 									group_rel,
 									target_final,
@@ -4014,10 +4011,9 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 
 	Assert(scan_rel ? outerPlan(node) == NULL : outerPlan(cscan) != NULL);
 	/* activate a GpuContext for CUDA kernel execution */
-	gpas->gts.gcontext = AllocGpuContext(gpa_info->optimal_gpu, false);
-	if (!explain_only)
-		ActivateGpuContext(gpas->gts.gcontext);
-
+	gpas->gts.gcontext = AllocGpuContext(gpa_info->optimal_gpu, false,
+										 !explain_only,
+										 !explain_only);
 	/* setup common GpuTaskState fields */
 	pgstromInitGpuTaskState(&gpas->gts,
 							gpas->gts.gcontext,

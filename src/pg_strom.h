@@ -234,7 +234,6 @@ typedef struct GpuContext
 	cl_int			cuda_dindex;
 	CUdevice		cuda_device;
 	CUcontext		cuda_context;
-	CUcontext	   *cuda_context_multi;	/* valid only multi-device mode */
 	CUevent		   *cuda_events0; /* per-worker general purpose event */
 	CUevent		   *cuda_events1; /* per-worker general purpose event */
 	pthread_mutex_t	cuda_modules_lock;
@@ -590,7 +589,7 @@ extern CUresult __gpuMemAllocHostRaw(GpuContext *gcontext,
 									 void **p_hostptr,
 									 size_t bytesize,
 									 const char *filename, int lineno);
-extern CUresult __gpuMemAllocDev(GpuContext *gcontext, int dindex,
+extern CUresult __gpuMemAllocDev(GpuContext *gcontext,
 								 CUdeviceptr *p_deviceptr,
 								 size_t bytesize,
 								 CUipcMemHandle *p_mhandle,
@@ -645,8 +644,8 @@ extern void gpuIpcMemCopyToHost(void *hbuffer,
 	__gpuMemAllocManagedRaw((a),(b),(c),(d),__FILE__,__LINE__)
 #define gpuMemAllocHostRaw(a,b,c)			\
 	__gpuMemAllocHostRaw((a),(b),(c),__FILE__,__LINE__)
-#define gpuMemAllocDev(a,b,c,d,e)						\
-	__gpuMemAllocDev((a),(b),(c),(d),(e),__FILE__,__LINE__)
+#define gpuMemAllocDev(a,b,c,d)				\
+	__gpuMemAllocDev((a),(b),(c),(d),__FILE__,__LINE__)
 #define gpuMemAlloc(a,b,c)					\
 	__gpuMemAlloc((a),(b),(c),__FILE__,__LINE__)
 #define gpuMemAllocManaged(a,b,c,d)			\
@@ -723,8 +722,9 @@ CHECK_FOR_GPUCONTEXT(GpuContext *gcontext)
 }
 extern CUresult gpuInit(unsigned int flags);
 extern GpuContext *AllocGpuContext(int cuda_dindex,
-								   bool never_use_mps);
-extern void ActivateGpuContext(GpuContext *gcontext);
+								   bool never_use_mps,
+								   bool activate_context,
+								   bool activate_workers);
 extern GpuContext *GetGpuContext(GpuContext *gcontext);
 extern void PutGpuContext(GpuContext *gcontext);
 extern void SwitchGpuContext(GpuContext *gcontext, int cuda_dindex);
@@ -1130,8 +1130,6 @@ extern bool pgstrom_plan_is_gpujoin(const Plan *plannode);
 extern bool pgstrom_planstate_is_gpujoin(const PlanState *ps);
 extern Path *pgstrom_copy_gpujoin_path(const Path *pathnode);
 extern cl_int gpujoin_get_optimal_gpu(const Path *pathnode);
-extern void pgstrom_gpujoin_planner_begin(void);
-extern void pgstrom_gpujoin_planner_end(bool abort);
 
 #if PG_VERSION_NUM >= 100000
 extern List *extract_partitionwise_pathlist(PlannerInfo *root,

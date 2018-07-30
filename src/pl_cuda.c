@@ -1615,8 +1615,7 @@ plcuda_exec_begin(HeapTuple protup, FunctionCallInfo fcinfo)
 	 */
 	if (fcinfo)
 		cuda_dindex = gstore_fdw_preferable_device(fcinfo);
-	gcontext = AllocGpuContext(cuda_dindex, true);
-	ActivateGpuContext(gcontext);
+	gcontext = AllocGpuContext(cuda_dindex, true, true, true);
 	/* setup a dummy GTS for PL/CUDA (see pgstromInitGpuTaskState) */
 	plts = MemoryContextAllocZero(CurTransactionContext,
 								  sizeof(plcudaTaskState));
