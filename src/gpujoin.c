@@ -6560,6 +6560,8 @@ __gpujoin_inner_preload(GpuJoinState *gjs, bool preload_multi_gpu)
 	kern_data_store *kds;
 	dsm_segment	   *seg;
 	int				i, num_rels = gjs->num_rels;
+	int				dindex_min;
+	int				dindex_max;
 	size_t			ojmaps_usage = 0;
 	size_t			kmrels_usage = 0;
 	size_t			required;
@@ -6671,9 +6673,9 @@ __gpujoin_inner_preload(GpuJoinState *gjs, bool preload_multi_gpu)
 	/*
 	 * Allocation of GPU device memory for each device if needed.
 	 */
-	for (i = (preload_multi_gpu ? gcontext->cuda_dindex : 0);
-		 i < (preload_multi_gpu ? gcontext->cuda_dindex + 1 : numDevAttrs);
-		 i++)
+	dindex_min = (!preload_multi_gpu ? gcontext->cuda_dindex : 0);
+	dindex_max = (!preload_multi_gpu ? gcontext->cuda_dindex : numDevAttrs-1);
+	for (i = dindex_min; i <= dindex_max; i++)
 	{
 		GpuContext *__gcontext;
 		CUdeviceptr	m_deviceptr;
@@ -6761,7 +6763,7 @@ GpuJoinInnerPreload(GpuTaskState *gts, CUdeviceptr *p_m_kmrels)
 	{
 		if (sibling->pergpu[dindex].m_kmrels == (CUdeviceptr) 0UL)
 		{
-			Assert(sibling->pergpu[dindex].gcontext != NULL);
+			Assert(sibling->pergpu[dindex].gcontext == NULL);
 			rc = gpuIpcOpenMemHandle(gcontext,
 									 &m_deviceptr,
 									 gj_sstate->pergpu[dindex].m_handle,
@@ -6942,7 +6944,7 @@ GpuJoinInnerUnload(GpuTaskState *gts, bool is_rescan)
 			{
 				if (sibling->pergpu[i].m_kmrels == (CUdeviceptr) 0UL)
 				{
-					Assert(sibling->pergpu[i].gcontext != NULL);
+					Assert(sibling->pergpu[i].gcontext == NULL);
 					continue;
 				}
 				rc = gpuIpcCloseMemHandle(sibling->pergpu[i].gcontext,
