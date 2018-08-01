@@ -1096,64 +1096,74 @@ adjust_appendrel_attr_needed(PlannerInfo *root,
 static List *
 make_pseudo_sjinfo_list(PlannerInfo *root,
 						List *join_info_list,
-						RelOptInfo *parent_rel,
+						List *partitioned_rels,
 						RelOptInfo *child_rel)
 {
-	AppendRelInfo *apinfo = NULL;
 	List	   *result = NIL;
+	ListCell   *cell;
 	ListCell   *lc;
+	bool		found = false;
 
-	/* identify the current partition leaf */
-	foreach (lc, root->append_rel_list)
+	foreach (cell, partitioned_rels)
 	{
-		AppendRelInfo *temp = lfirst(lc);
+		AppendRelInfo *apinfo = NULL;
+		int		parent_relid = lfirst_int(cell);
 
-		if (temp->parent_relid == parent_rel->relid &&
-			bms_is_member(temp->child_relid, child_rel->relids))
+		/* identify the current partition leaf */
+		foreach (lc, root->append_rel_list)
 		{
-			if (!apinfo)
+			AppendRelInfo *temp = lfirst(lc);
+
+			if (temp->parent_relid == parent_relid &&
+				bms_is_member(temp->child_relid, child_rel->relids))
+			{
 				apinfo = temp;
-			else
-				elog(ERROR, "Bug? sub-relation has multiple partition leafs");
+				break;
+			}
+		}
+		/* parent_relid is not parent of child_rel. try next. */
+		if (!apinfo)
+			continue;
+		found = true;
+
+		/* adjust special join info */
+		foreach (lc, join_info_list)
+		{
+			SpecialJoinInfo *sjinfo = copyObject(lfirst(lc));
+
+			if (bms_is_member(parent_relid, sjinfo->min_lefthand))
+			{
+				sjinfo->min_lefthand = bms_del_member(sjinfo->min_lefthand,
+													  parent_relid);
+				sjinfo->min_lefthand = bms_add_member(sjinfo->min_lefthand,
+													  apinfo->child_relid);
+			}
+			if (bms_is_member(parent_relid, sjinfo->min_righthand))
+			{
+				sjinfo->min_righthand = bms_del_member(sjinfo->min_righthand,
+													   parent_relid);
+				sjinfo->min_righthand = bms_add_member(sjinfo->min_righthand,
+													   apinfo->child_relid);
+			}
+			if (bms_is_member(parent_relid, sjinfo->syn_lefthand))
+			{
+				sjinfo->syn_lefthand = bms_del_member(sjinfo->syn_lefthand,
+													  parent_relid);
+				sjinfo->syn_lefthand = bms_add_member(sjinfo->syn_lefthand,
+													  apinfo->child_relid);
+			}
+			if (bms_is_member(parent_relid, sjinfo->syn_righthand))
+			{
+				sjinfo->syn_righthand = bms_del_member(sjinfo->syn_righthand,
+													   parent_relid);
+				sjinfo->syn_righthand = bms_add_member(sjinfo->syn_righthand,
+													   apinfo->child_relid);
+			}
+			result = lappend(result, sjinfo);
 		}
 	}
-	if (!apinfo)
+	if (!found)
 		elog(ERROR, "Bug? no partition leaf found");
-
-	foreach (lc, join_info_list)
-	{
-		SpecialJoinInfo *sjinfo = copyObject(lfirst(lc));
-
-		if (bms_is_member(parent_rel->relid, sjinfo->min_lefthand))
-		{
-			sjinfo->min_lefthand = bms_del_member(sjinfo->min_lefthand,
-												  apinfo->parent_relid);
-			sjinfo->min_lefthand = bms_add_member(sjinfo->min_lefthand,
-												  apinfo->child_relid);
-		}
-		if (bms_is_member(parent_rel->relid, sjinfo->min_righthand))
-		{
-			sjinfo->min_righthand = bms_del_member(sjinfo->min_righthand,
-												   apinfo->parent_relid);
-			sjinfo->min_righthand = bms_add_member(sjinfo->min_righthand,
-												   apinfo->child_relid);
-		}
-		if (bms_is_member(parent_rel->relid, sjinfo->syn_lefthand))
-		{
-			sjinfo->syn_lefthand = bms_del_member(sjinfo->syn_lefthand,
-												  apinfo->parent_relid);
-			sjinfo->syn_lefthand = bms_add_member(sjinfo->syn_lefthand,
-												  apinfo->child_relid);
-		}
-		if (bms_is_member(parent_rel->relid, sjinfo->syn_righthand))
-		{
-			sjinfo->syn_righthand = bms_del_member(sjinfo->syn_righthand,
-												   apinfo->parent_relid);
-			sjinfo->syn_righthand = bms_add_member(sjinfo->syn_righthand,
-												   apinfo->child_relid);
-		}
-		result = lappend(result, sjinfo);
-	}
 	return result;
 }
 
@@ -1288,6 +1298,13 @@ extract_partitionwise_pathlist(PlannerInfo *root,
 			append_path = (AppendPath *) outer_path;
 			if (append_path->partitioned_rels == NIL)
 				return NIL;		/* not a simple partition table */
+			/*
+			 * MEMO: need to check whether specialjoininfo is correctly
+			 * adjusted, when partitioned_rels has multiple items.
+			 */
+			if (list_length(append_path->partitioned_rels) > 1)
+				elog(NOTICE, "append_path->partitioned_rels: %s",
+					 nodeToString(append_path->partitioned_rels));
 			break;
 		}
 		else if (IsA(outer_path, NestPath) ||
@@ -1333,7 +1350,6 @@ extract_partitionwise_pathlist(PlannerInfo *root,
 			return NIL;
 		}
 	}
-
 	pgstrom_gpu_setup_cost_saved = pgstrom_gpu_setup_cost;
 	join_rel_level_saved = root->join_rel_level;
 	join_info_list_saved = root->join_info_list;
@@ -1402,7 +1418,7 @@ extract_partitionwise_pathlist(PlannerInfo *root,
 					root->join_info_list =
 						make_pseudo_sjinfo_list(root,
 												join_info_list_saved,
-												append_path->path.parent,
+												append_path->partitioned_rels,
 												curr_rel);
 				}
 				join_rel = find_join_rel(root, bms_union(curr_rel->relids,
