@@ -1173,6 +1173,7 @@ make_pseudo_sjinfo_list(PlannerInfo *root,
 typedef struct
 {
 	PlannerInfo *root;
+	List		*partitioned_rels;
 	RelOptInfo	*subrel;
 } fixup_appendrel_child_varnode_context;
 
@@ -1188,26 +1189,33 @@ __fixup_appendrel_child_varnode(Node *node, void *__context)
 		PlannerInfo	   *root = con->root;
 		RelOptInfo	   *subrel = con->subrel;
 		const Var	   *var = (Var *) node;
-		ListCell	   *lc;
+		ListCell	   *lc1, *lc2;
 
 		if (bms_is_member(var->varno, subrel->relids))
 		{
 			return (Node *)copyObject(var);
 		}
 
-		foreach (lc, root->append_rel_list)
+		foreach (lc1, con->partitioned_rels)
 		{
-			AppendRelInfo  *appinfo = (AppendRelInfo *) lfirst(lc);
+			int		parent_relid = lfirst_int(lc1);
 
-			if (appinfo->parent_relid != var->varno)
+			if (parent_relid != var->varno)
 				continue;
-			if (bms_is_member(appinfo->child_relid, subrel->relids))
+			foreach (lc2, root->append_rel_list)
 			{
-				if (list_length(appinfo->translated_vars) < var->varattno)
-					elog(ERROR, "Bug? varattno is out of range in child: %s",
-						 nodeToString(var));
-				return copyObject(list_nth(appinfo->translated_vars,
-										   var->varattno - 1));
+				AppendRelInfo *apinfo = (AppendRelInfo *)lfirst(lc2);
+
+				if (apinfo->parent_relid != parent_relid)
+					continue;
+				if (bms_is_member(apinfo->child_relid, subrel->relids))
+				{
+					if (list_length(apinfo->translated_vars) < var->varattno)
+						elog(ERROR, "Bug? varattno is out of range: %s",
+							 nodeToString(var));
+					return copyObject(list_nth(apinfo->translated_vars,
+											   var->varattno - 1));
+				}
 			}
 		}
 		elog(ERROR, "Bug? no relevant Var-node reference in child rel: %s",
@@ -1218,18 +1226,22 @@ __fixup_appendrel_child_varnode(Node *node, void *__context)
 
 List *
 fixup_appendrel_child_varnode(List *exprs_list,
-							  PlannerInfo *root, RelOptInfo *subrel)
+							  PlannerInfo *root,
+							  List *partitioned_rels,
+							  RelOptInfo *subrel)
 {
 	fixup_appendrel_child_varnode_context con;
 
 	Assert(IsA(exprs_list, List));
 	con.root = root;
+	con.partitioned_rels = partitioned_rels;
 	con.subrel = subrel;
 	return (List *)__fixup_appendrel_child_varnode((Node *)exprs_list, &con);
 }
 
 static Path *
 setup_append_child_path(PlannerInfo *root,
+						List *partitioned_rels,
 						PathTarget *old_target,
 						Path *subpath)
 {
@@ -1261,7 +1273,7 @@ setup_append_child_path(PlannerInfo *root,
 	new_target = copy_pathtarget(old_target);
 	new_target->exprs =
 		fixup_appendrel_child_varnode((List *)old_target->exprs,
-									  root, subpath->parent);
+									  root, partitioned_rels, subpath->parent);
 	newpath->pathtarget = new_target;
 
 	return newpath;
@@ -1281,6 +1293,7 @@ extract_partitionwise_pathlist(PlannerInfo *root,
 {
 	List	   *inner_paths_list = NIL;
 	AppendPath *append_path;
+	List	   *partitioned_rels;
 	List	   *result = NIL;
 	bool		enable_gpunestloop_saved;
 	bool		enable_gpuhashjoin_saved;
@@ -1302,9 +1315,10 @@ extract_partitionwise_pathlist(PlannerInfo *root,
 			 * MEMO: need to check whether specialjoininfo is correctly
 			 * adjusted, when partitioned_rels has multiple items.
 			 */
-			if (list_length(append_path->partitioned_rels) > 1)
-				elog(NOTICE, "append_path->partitioned_rels: %s",
-					 nodeToString(append_path->partitioned_rels));
+			partitioned_rels = append_path->partitioned_rels;
+			if (list_length(partitioned_rels) > 1)
+				elog(NOTICE, "multiple partitioned_rels: %s",
+					 nodeToString(partitioned_rels));
 			break;
 		}
 		else if (IsA(outer_path, NestPath) ||
@@ -1418,7 +1432,7 @@ extract_partitionwise_pathlist(PlannerInfo *root,
 					root->join_info_list =
 						make_pseudo_sjinfo_list(root,
 												join_info_list_saved,
-												append_path->partitioned_rels,
+												partitioned_rels,
 												curr_rel);
 				}
 				join_rel = find_join_rel(root, bms_union(curr_rel->relids,
@@ -1475,6 +1489,7 @@ extract_partitionwise_pathlist(PlannerInfo *root,
 				parallel_nworkers = Max(parallel_nworkers,
 										curr_path->parallel_workers);
 			new_subpath = setup_append_child_path(root,
+												  partitioned_rels,
 												  path_target,
 												  curr_path);
 			if (!new_subpath)
@@ -1483,7 +1498,7 @@ extract_partitionwise_pathlist(PlannerInfo *root,
 		}
 		result = new_append_subpaths;
 		*p_parallel_nworkers = parallel_nworkers;
-		*p_partitioned_rels = append_path->partitioned_rels;
+		*p_partitioned_rels = partitioned_rels;
 	skip:
 		/* restore */
 		pgstrom_gpu_setup_cost = pgstrom_gpu_setup_cost_saved;
@@ -2082,7 +2097,22 @@ build_device_targetlist(GpuJoinPath *gpath,
 	context.custom_plans = custom_plans;
 	context.outer_scanrelid = cscan->scan.scanrelid;
 	context.resjunk = false;
-	build_device_tlist_walker((Node *)targetlist, &context);
+	if (targetlist != NIL)
+		build_device_tlist_walker((Node *)targetlist, &context);
+	else
+	{
+		/*
+		 * MEMO: If GpuJoinPath is located under ProjectionPath,
+		 * create_plan_recurse delivers invalid tlist (=NIL).
+		 * So, we picks up referenced Var nodes from the PathTarget,
+		 * instead of the tlist.
+		 */
+		PathTarget *path_target = gpath->cpath.path.pathtarget;
+		ListCell   *lc;
+
+		foreach (lc, path_target->exprs)
+			build_device_tlist_walker((Node *)lfirst(lc), &context);
+	}
 
 	/*
 	 * Above are host referenced columns. On the other hands, the columns

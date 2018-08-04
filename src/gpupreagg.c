@@ -1526,10 +1526,14 @@ try_add_gpupreagg_append_paths(PlannerInfo *root,
 		/* fixup varno */
 		curr_partial->exprs =
 			fixup_appendrel_child_varnode(curr_partial->exprs,
-										  root, sub_path->parent);
+										  root,
+										  partitioned_rels,
+										  sub_path->parent);
 		curr_device->exprs =
 			fixup_appendrel_child_varnode(curr_device->exprs,
-										  root, sub_path->parent);
+										  root,
+										  partitioned_rels,
+										  sub_path->parent);
 
 		partial_path = prepend_gpupreagg_path(root,
 											  group_rel,
