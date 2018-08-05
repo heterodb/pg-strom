@@ -727,7 +727,6 @@ extern GpuContext *AllocGpuContext(int cuda_dindex,
 								   bool activate_workers);
 extern GpuContext *GetGpuContext(GpuContext *gcontext);
 extern void PutGpuContext(GpuContext *gcontext);
-extern void SwitchGpuContext(GpuContext *gcontext, int cuda_dindex);
 extern void SynchronizeGpuContext(GpuContext *gcontext);
 extern void SynchronizeGpuContextOnDSMDetach(dsm_segment *seg, Datum arg);
 

@@ -229,13 +229,20 @@ gpuMemFreeExtra(GpuContext *gcontext,
 				CUdeviceptr m_deviceptr,
 				void *extra)
 {
+	CUresult	rc;
+
 	if (!extra)
 		return CUDA_ERROR_INVALID_VALUE;
-	else if (extra == GPUMEM_DEVICE_RAW_EXTRA)
-		return cuMemFree(m_deviceptr);
+	GPUCONTEXT_PUSH(gcontext);
+	if (extra == GPUMEM_DEVICE_RAW_EXTRA)
+		rc = cuMemFree(m_deviceptr);
 	else if (extra == GPUMEM_HOST_RAW_EXTRA)
-		return cuMemFreeHost((void *)m_deviceptr);
-	return gpuMemFreeChunk(gcontext, m_deviceptr, (GpuMemSegment *)extra);
+		rc = cuMemFreeHost((void *)m_deviceptr);
+	else
+		rc = gpuMemFreeChunk(gcontext, m_deviceptr, (GpuMemSegment *)extra);
+	GPUCONTEXT_POP(gcontext);
+
+	return rc;
 }
 
 /*
@@ -274,32 +281,23 @@ __gpuMemAllocRaw(GpuContext *gcontext,
 	CUdeviceptr	m_deviceptr;
 	CUresult	rc;
 
-	rc = cuCtxPushCurrent(gcontext->cuda_context);
-	if (rc != CUDA_SUCCESS)
-	{
-		wnotice("failed on cuCtxPushCurrent: %s", errorText(rc));
-		return rc;
-	}
-
+	GPUCONTEXT_PUSH(gcontext);
 	rc = cuMemAlloc(&m_deviceptr, bytesize);
 	if (rc != CUDA_SUCCESS)
-	{
 		wnotice("failed on cuMemAlloc(%zu): %s", bytesize, errorText(rc));
-		cuCtxPopCurrent(NULL);
-		return rc;
-	}
-	if (!trackGpuMem(gcontext, m_deviceptr,
-					 GPUMEM_DEVICE_RAW_EXTRA,
-					 filename, lineno))
+	else if (!trackGpuMem(gcontext, m_deviceptr,
+						  GPUMEM_DEVICE_RAW_EXTRA,
+						  filename, lineno))
 	{
 		cuMemFree(m_deviceptr);
-		cuCtxPopCurrent(NULL);
-		return CUDA_ERROR_OUT_OF_MEMORY;
+		rc = CUDA_ERROR_OUT_OF_MEMORY;
 	}
-	cuCtxPopCurrent(NULL);
-	*p_devptr = m_deviceptr;
-
-	return CUDA_SUCCESS;
+	else
+	{
+		*p_devptr = m_deviceptr;
+	}
+	GPUCONTEXT_POP(gcontext);
+	return rc;
 }
 
 /*
@@ -315,28 +313,25 @@ __gpuMemAllocManagedRaw(GpuContext *gcontext,
 	CUdeviceptr	m_deviceptr;
 	CUresult	rc;
 
-	rc = cuCtxPushCurrent(gcontext->cuda_context);
-    if (rc != CUDA_SUCCESS)
-        return rc;
-
+	GPUCONTEXT_PUSH(gcontext);
 	rc = cuMemAllocManaged(&m_deviceptr, bytesize, flags);
 	if (rc != CUDA_SUCCESS)
-	{
-		cuCtxPopCurrent(NULL);
-		return rc;
-	}
-	if (!trackGpuMem(gcontext, m_deviceptr,
-					 GPUMEM_DEVICE_RAW_EXTRA,
-					 filename, lineno))
+		wnotice("failed on cuMemAllocManaged(%zu): %s",
+				bytesize, errorText(rc));
+	else if (!trackGpuMem(gcontext, m_deviceptr,
+						  GPUMEM_DEVICE_RAW_EXTRA,
+						  filename, lineno))
 	{
 		cuMemFree(m_deviceptr);
-		cuCtxPopCurrent(NULL);
-		return CUDA_ERROR_OUT_OF_MEMORY;
+		rc = CUDA_ERROR_OUT_OF_MEMORY;
 	}
-	cuCtxPopCurrent(NULL);
-	*p_deviceptr = m_deviceptr;
+	else
+	{
+		*p_deviceptr = m_deviceptr;
+	}
+	GPUCONTEXT_POP(gcontext);
 
-	return CUDA_SUCCESS;
+	return rc;
 }
 
 /*
@@ -351,29 +346,24 @@ __gpuMemAllocHostRaw(GpuContext *gcontext,
 	void	   *hostptr;
 	CUresult	rc;
 
-	rc = cuCtxPushCurrent(gcontext->cuda_context);
-	if (rc != CUDA_SUCCESS)
-		return rc;
-
+	GPUCONTEXT_PUSH(gcontext);
 	rc = cuMemAllocHost(&hostptr, bytesize);
 	if (rc != CUDA_SUCCESS)
-	{
-		cuCtxPopCurrent(NULL);
-		return rc;
-	}
-
-	if (!trackGpuMem(gcontext, (CUdeviceptr)hostptr,
-					 GPUMEM_HOST_RAW_EXTRA,
-					 filename, lineno))
+		wnotice("failed on cuMemAllocHost(%zu): %s", bytesize, errorText(rc));
+	else if (!trackGpuMem(gcontext, (CUdeviceptr)hostptr,
+						  GPUMEM_HOST_RAW_EXTRA,
+						  filename, lineno))
 	{
 		cuMemFreeHost(hostptr);
-		cuCtxPopCurrent(NULL);
-		return CUDA_ERROR_OUT_OF_MEMORY;
+		rc = CUDA_ERROR_OUT_OF_MEMORY;
 	}
-	cuCtxPopCurrent(NULL);
-	*p_hostptr = hostptr;
+	else
+	{
+		*p_hostptr = hostptr;
+	}
+	GPUCONTEXT_POP(gcontext);
 
-	return CUDA_SUCCESS;
+	return rc;
 }
 
 /*
@@ -389,46 +379,39 @@ __gpuMemAllocDev(GpuContext *gcontext,
 	CUdeviceptr	m_deviceptr;
 	CUresult	rc;
 
-	rc = cuCtxPushCurrent(gcontext->cuda_context);
-	if (rc != CUDA_SUCCESS)
-	{
-		wnotice("failed on cuCtxPushCurrent: %s", errorText(rc));
-		return rc;
-	}
-
+	GPUCONTEXT_PUSH(gcontext);
 	rc = cuMemAlloc(&m_deviceptr, bytesize);
 	if (rc != CUDA_SUCCESS)
-	{
 		wnotice("failed on cuMemAlloc(%zu): %s", bytesize, errorText(rc));
-		cuCtxPopCurrent(NULL);
-		return rc;
-	}
-
-	if (p_mhandle)
+	else
 	{
-		rc = cuIpcGetMemHandle(p_mhandle, m_deviceptr);
-		if (rc != CUDA_SUCCESS)
+		if (p_mhandle)
 		{
-			wnotice("failed on cuIpcGetMemHandle: %s", errorText(rc));
-			cuMemFree(m_deviceptr);
-			cuCtxPopCurrent(NULL);
-			return rc;
+			rc = cuIpcGetMemHandle(p_mhandle, m_deviceptr);
+			if (rc != CUDA_SUCCESS)
+			{
+				wnotice("failed on cuIpcGetMemHandle: %s", errorText(rc));
+				cuMemFree(m_deviceptr);
+			}
+		}
+		if (rc == CUDA_SUCCESS)
+		{
+			if (!trackGpuMem(gcontext, m_deviceptr,
+							 GPUMEM_DEVICE_RAW_EXTRA,
+							 filename, lineno))
+			{
+				cuMemFree(m_deviceptr);
+				rc = CUDA_ERROR_OUT_OF_MEMORY;
+			}
+			else
+			{
+				*p_deviceptr = m_deviceptr;
+			}
 		}
 	}
+	GPUCONTEXT_POP(gcontext);
 
-	if (!trackGpuMem(gcontext, m_deviceptr,
-					 GPUMEM_DEVICE_RAW_EXTRA,
-					 filename, lineno))
-	{
-		cuMemFree(m_deviceptr);
-		cuCtxPopCurrent(NULL);
-		return CUDA_ERROR_OUT_OF_MEMORY;
-	}
-	cuCtxPopCurrent(NULL);
-
-	*p_deviceptr = m_deviceptr;
-
-	return CUDA_SUCCESS;
+	return rc;
 }
 
 /*
