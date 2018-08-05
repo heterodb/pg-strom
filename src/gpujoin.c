@@ -1100,66 +1100,74 @@ make_pseudo_sjinfo_list(PlannerInfo *root,
 						RelOptInfo *child_rel)
 {
 	List	   *result = NIL;
-	ListCell   *cell;
+	ListCell   *cell1;
+	ListCell   *cell2;
 	ListCell   *lc;
 	bool		found = false;
 
-	foreach (cell, partitioned_rels)
+	foreach (cell1, partitioned_rels)
 	{
-		AppendRelInfo *apinfo = NULL;
-		int		parent_relid = lfirst_int(cell);
+		List   *__partitioned_rels = lfirst(cell1);
 
-		/* identify the current partition leaf */
-		foreach (lc, root->append_rel_list)
+		Assert(IsA(__partitioned_rels, IntList));
+		foreach (cell2, (List *)__partitioned_rels)
 		{
-			AppendRelInfo *temp = lfirst(lc);
+			AppendRelInfo *apinfo = NULL;
+			int		parent_relid = lfirst_int(cell2);
 
-			if (temp->parent_relid == parent_relid &&
-				bms_is_member(temp->child_relid, child_rel->relids))
+			/* identify the current partition leaf */
+			foreach (lc, root->append_rel_list)
 			{
-				apinfo = temp;
-				break;
+				AppendRelInfo *temp = lfirst(lc);
+
+				if (temp->parent_relid == parent_relid &&
+					bms_is_member(temp->child_relid, child_rel->relids))
+				{
+					apinfo = temp;
+					break;
+				}
 			}
-		}
-		/* parent_relid is not parent of child_rel. try next. */
-		if (!apinfo)
-			continue;
-		found = true;
+			/* parent_relid is not parent of child_rel. try next. */
+			if (!apinfo)
+				continue;
+			found = true;
 
-		/* adjust special join info */
-		foreach (lc, join_info_list)
-		{
-			SpecialJoinInfo *sjinfo = copyObject(lfirst(lc));
-
-			if (bms_is_member(parent_relid, sjinfo->min_lefthand))
+			/* adjust special join info */
+			foreach (lc, join_info_list)
 			{
-				sjinfo->min_lefthand = bms_del_member(sjinfo->min_lefthand,
+				SpecialJoinInfo *sj = copyObject(lfirst(lc));
+
+				if (bms_is_member(parent_relid, sj->min_lefthand))
+				{
+					sj->min_lefthand = bms_del_member(sj->min_lefthand,
 													  parent_relid);
-				sjinfo->min_lefthand = bms_add_member(sjinfo->min_lefthand,
+					sj->min_lefthand = bms_add_member(sj->min_lefthand,
 													  apinfo->child_relid);
-			}
-			if (bms_is_member(parent_relid, sjinfo->min_righthand))
-			{
-				sjinfo->min_righthand = bms_del_member(sjinfo->min_righthand,
+				}
+				if (bms_is_member(parent_relid, sj->min_righthand))
+				{
+					sj->min_righthand = bms_del_member(sj->min_righthand,
 													   parent_relid);
-				sjinfo->min_righthand = bms_add_member(sjinfo->min_righthand,
+					sj->min_righthand = bms_add_member(sj->min_righthand,
 													   apinfo->child_relid);
-			}
-			if (bms_is_member(parent_relid, sjinfo->syn_lefthand))
-			{
-				sjinfo->syn_lefthand = bms_del_member(sjinfo->syn_lefthand,
+				}
+				if (bms_is_member(parent_relid, sj->syn_lefthand))
+				{
+					sj->syn_lefthand = bms_del_member(sj->syn_lefthand,
 													  parent_relid);
-				sjinfo->syn_lefthand = bms_add_member(sjinfo->syn_lefthand,
+					sj->syn_lefthand = bms_add_member(sj->syn_lefthand,
 													  apinfo->child_relid);
-			}
-			if (bms_is_member(parent_relid, sjinfo->syn_righthand))
-			{
-				sjinfo->syn_righthand = bms_del_member(sjinfo->syn_righthand,
+				}
+				if (bms_is_member(parent_relid, sj->syn_righthand))
+				{
+					sj->syn_righthand = bms_del_member(sj->syn_righthand,
 													   parent_relid);
-				sjinfo->syn_righthand = bms_add_member(sjinfo->syn_righthand,
+					sj->syn_righthand = bms_add_member(sj->syn_righthand,
 													   apinfo->child_relid);
+				}
+				result = lappend(result, sj);
 			}
-			result = lappend(result, sjinfo);
+			break;
 		}
 	}
 	if (!found)
@@ -1189,7 +1197,7 @@ __fixup_appendrel_child_varnode(Node *node, void *__context)
 		PlannerInfo	   *root = con->root;
 		RelOptInfo	   *subrel = con->subrel;
 		const Var	   *var = (Var *) node;
-		ListCell	   *lc1, *lc2;
+		ListCell	   *lc1, *lc2, *lc3;
 
 		if (bms_is_member(var->varno, subrel->relids))
 		{
@@ -1198,23 +1206,23 @@ __fixup_appendrel_child_varnode(Node *node, void *__context)
 
 		foreach (lc1, con->partitioned_rels)
 		{
-			int		parent_relid = lfirst_int(lc1);
+			List   *__partitioned_rels = lfirst(lc1);
 
-			if (parent_relid != var->varno)
-				continue;
-			foreach (lc2, root->append_rel_list)
+			Assert(IsA(__partitioned_rels, IntList));
+			foreach (lc2, __partitioned_rels)
 			{
-				AppendRelInfo *apinfo = (AppendRelInfo *)lfirst(lc2);
+				int		parent_relid = lfirst_int(lc2);
 
-				if (apinfo->parent_relid != parent_relid)
+				if (parent_relid != var->varno)
 					continue;
-				if (bms_is_member(apinfo->child_relid, subrel->relids))
+				foreach (lc3, root->append_rel_list)
 				{
-					if (list_length(apinfo->translated_vars) < var->varattno)
-						elog(ERROR, "Bug? varattno is out of range: %s",
-							 nodeToString(var));
-					return copyObject(list_nth(apinfo->translated_vars,
-											   var->varattno - 1));
+					AppendRelInfo *apinfo = (AppendRelInfo *)lfirst(lc3);
+
+					if (apinfo->parent_relid == parent_relid &&
+						bms_is_member(apinfo->child_relid, subrel->relids))
+						return copyObject(list_nth(apinfo->translated_vars,
+												   var->varattno - 1));
 				}
 			}
 		}
@@ -1273,7 +1281,9 @@ setup_append_child_path(PlannerInfo *root,
 	new_target = copy_pathtarget(old_target);
 	new_target->exprs =
 		fixup_appendrel_child_varnode((List *)old_target->exprs,
-									  root, partitioned_rels, subpath->parent);
+									  root,
+									  partitioned_rels,
+									  subpath->parent);
 	newpath->pathtarget = new_target;
 
 	return newpath;
@@ -1292,8 +1302,8 @@ extract_partitionwise_pathlist(PlannerInfo *root,
 							   List **p_partitioned_rels)
 {
 	List	   *inner_paths_list = NIL;
-	AppendPath *append_path;
-	List	   *partitioned_rels;
+	AppendPath *append_path = NULL;
+	List	   *partitioned_rels = NIL;
 	List	   *result = NIL;
 	bool		enable_gpunestloop_saved;
 	bool		enable_gpuhashjoin_saved;
@@ -1311,14 +1321,11 @@ extract_partitionwise_pathlist(PlannerInfo *root,
 			append_path = (AppendPath *) outer_path;
 			if (append_path->partitioned_rels == NIL)
 				return NIL;		/* not a simple partition table */
-			/*
-			 * MEMO: need to check whether specialjoininfo is correctly
-			 * adjusted, when partitioned_rels has multiple items.
-			 */
+#if PG_VERSION_NUM < 110000
+			partitioned_rels = list_make1(append_path->partitioned_rels);
+#else
 			partitioned_rels = append_path->partitioned_rels;
-			if (list_length(partitioned_rels) > 1)
-				elog(NOTICE, "multiple partitioned_rels: %s",
-					 nodeToString(partitioned_rels));
+#endif
 			break;
 		}
 		else if (IsA(outer_path, NestPath) ||
@@ -1498,7 +1505,7 @@ extract_partitionwise_pathlist(PlannerInfo *root,
 		}
 		result = new_append_subpaths;
 		*p_parallel_nworkers = parallel_nworkers;
-		*p_partitioned_rels = partitioned_rels;
+		*p_partitioned_rels = append_path->partitioned_rels;
 	skip:
 		/* restore */
 		pgstrom_gpu_setup_cost = pgstrom_gpu_setup_cost_saved;
