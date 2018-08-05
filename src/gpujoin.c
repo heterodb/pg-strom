@@ -346,6 +346,8 @@ static bool					enable_gpunestloop;				/* GUC */
 static bool					enable_gpuhashjoin;				/* GUC */
 static bool					enable_partitionwise_gpujoin;	/* GUC */
 
+static int					num_partition_siblings = 0;
+
 /* static functions */
 static void gpujoin_switch_task(GpuTaskState *gts, GpuTask *gtask);
 static GpuTask *gpujoin_next_task(GpuTaskState *gts);
@@ -572,6 +574,7 @@ cost_gpujoin(PlannerInfo *root,
 	double		parallel_divisor = 1.0;
 	double		num_chunks;
 	double		outer_ntuples;
+	Cost		inner_cost;
 	int			i, num_rels = gpath->num_rels;
 	bool		retval = false;
 
@@ -599,7 +602,10 @@ cost_gpujoin(PlannerInfo *root,
 	}
 	else
 	{
-		startup_cost = pgstrom_gpu_setup_cost + outer_path->startup_cost;
+		startup_cost = pgstrom_gpu_setup_cost;
+		if (num_partition_siblings > 0)
+			startup_cost /= (Cost)num_partition_siblings;
+		startup_cost += outer_path->startup_cost;
 		run_cost = outer_path->total_cost - outer_path->startup_cost;
 		num_chunks = estimate_num_chunks(outer_path);
 	}
@@ -652,7 +658,10 @@ cost_gpujoin(PlannerInfo *root,
 		}
 
 		/* cost to load all the tuples from inner-path */
-		startup_cost += scan_path->total_cost;
+		inner_cost = scan_path->total_cost;
+		if (num_partition_siblings > 0)
+			inner_cost /= (Cost)num_partition_siblings;
+		startup_cost += inner_cost;
 
 		/* cost for join_qual startup */
 		cost_qual_eval(&join_quals_cost, join_quals, root);
@@ -675,8 +684,11 @@ cost_gpujoin(PlannerInfo *root,
 				(double)__KDS_NSLOTS((Size)scan_path->rows);
 
 			/* cost to compute inner hash value by CPU */
-			startup_cost += (cpu_operator_cost * num_hashkeys *
-							 scan_path->rows);
+			inner_cost = (cpu_operator_cost * num_hashkeys * scan_path->rows);
+			if (num_partition_siblings > 0)
+				inner_cost /= (Cost) num_partition_siblings;
+			startup_cost += inner_cost;
+
 			/* cost to comput hash value by GPU */
 			run_cost += (pgstrom_gpu_operator_cost *
 						 num_hashkeys *
@@ -696,7 +708,10 @@ cost_gpujoin(PlannerInfo *root,
 			double		inner_ntuples = scan_path->rows;
 
 			/* cost to preload inner heap tuples by CPU */
-			startup_cost += cpu_tuple_cost * inner_ntuples;
+			inner_cost = cpu_tuple_cost * inner_ntuples;
+			if (num_partition_siblings > 0)
+				inner_cost /= (Cost) num_partition_siblings;
+			startup_cost += inner_cost;
 
 			/* cost to evaluate join qualifiers */
 			run_cost_per_chunk += (join_quals_cost.per_tuple *
@@ -709,8 +724,11 @@ cost_gpujoin(PlannerInfo *root,
 	/* outer DMA send cost */
 	run_cost += (double)num_chunks * pgstrom_gpu_dma_cost;
 	/* inner DMA send cost */
-	run_cost += ((double)inner_buffer_sz /
-				 (double)pgstrom_chunk_size()) * pgstrom_gpu_dma_cost;
+	inner_cost = ((double)inner_buffer_sz /
+				  (double)pgstrom_chunk_size()) * pgstrom_gpu_dma_cost;
+	if (num_partition_siblings > 0)
+		inner_cost /= (Cost) num_partition_siblings;
+	run_cost += inner_cost;
 	/* cost for projection */
 	startup_cost += joinrel->reltarget->cost.startup;
 	run_cost += joinrel->reltarget->cost.per_tuple * gpath->cpath.path.rows;
@@ -1309,7 +1327,6 @@ extract_partitionwise_pathlist(PlannerInfo *root,
 	bool		enable_gpuhashjoin_saved;
 	List	   *join_info_list_saved;
 	List	  **join_rel_level_saved;
-	double		pgstrom_gpu_setup_cost_saved;
 
 	if (inner_path)
 		inner_paths_list = list_make1(inner_path);
@@ -1366,12 +1383,15 @@ extract_partitionwise_pathlist(PlannerInfo *root,
 		{
 			outer_path = ((ProjectionPath *) outer_path)->subpath;
 		}
+		else if (try_parallel_path && IsA(outer_path, GatherPath))
+		{
+			outer_path = ((GatherPath *) outer_path)->subpath;
+		}
 		else
 		{
 			return NIL;
 		}
 	}
-	pgstrom_gpu_setup_cost_saved = pgstrom_gpu_setup_cost;
 	join_rel_level_saved = root->join_rel_level;
 	join_info_list_saved = root->join_info_list;
 	enable_gpunestloop_saved = enable_gpunestloop;
@@ -1399,11 +1419,10 @@ extract_partitionwise_pathlist(PlannerInfo *root,
 		}
 
 		/*
-		 * discount pgstrom.gpu_setup_cost because same GpuContext and GPU
-		 * binary shall be reused for each partition leaf.
+		 * tells cost estimator this path is a part of partition-wise
+		 * query execution.
 		 */
-		pgstrom_gpu_setup_cost /= (double)list_length(append_path->subpaths);
-
+		num_partition_siblings = list_length(append_path->subpaths);
 		/* temporary disables "dynamic programming" algorithm */
 		root->join_rel_level = NULL;
 		foreach (lc1, append_path->subpaths)
@@ -1508,7 +1527,7 @@ extract_partitionwise_pathlist(PlannerInfo *root,
 		*p_partitioned_rels = append_path->partitioned_rels;
 	skip:
 		/* restore */
-		pgstrom_gpu_setup_cost = pgstrom_gpu_setup_cost_saved;
+		num_partition_siblings = 0;
 		root->join_rel_level = join_rel_level_saved;
 		root->join_info_list = join_info_list_saved;
 		enable_gpunestloop = enable_gpunestloop_saved;
@@ -1517,7 +1536,7 @@ extract_partitionwise_pathlist(PlannerInfo *root,
 	PG_CATCH();
 	{
 		/* restore */
-		pgstrom_gpu_setup_cost = pgstrom_gpu_setup_cost_saved;
+		num_partition_siblings = 0;
 		root->join_rel_level = join_rel_level_saved;
 		root->join_info_list = join_info_list_saved;
 		enable_gpunestloop = enable_gpunestloop_saved;
