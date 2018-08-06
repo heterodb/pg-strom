@@ -1679,7 +1679,7 @@ plcuda_exec_end(plcudaTaskState *plts)
 	if (plts->last_results_buf)
 		gpuMemFree(plts->gts.gcontext,
 				   plts->last_results_buf);
-	pgstromReleaseGpuTaskState(&plts->gts);
+	pgstromReleaseGpuTaskState(&plts->gts, NULL);
 }
 
 Datum

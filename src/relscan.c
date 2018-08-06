@@ -1013,7 +1013,6 @@ pgstromExplainBrinIndexMap(GpuTaskState *gts,
  */
 static pgstrom_data_store *
 pgstromExecScanChunkParallel(GpuTaskState *gts,
-							 GpuTaskRuntimeStat *gt_rstat,
 							 pgstrom_data_store *pds,
 							 Bitmapset *brin_map, cl_long brin_range_sz)
 {
@@ -1176,8 +1175,7 @@ pgstromExecScanChunkParallel(GpuTaskState *gts,
 						{
 							pgstrom_ccache_put_chunk(cc_chunk);
 							cc_chunk = NULL;
-							pg_atomic_add_fetch_u64(&gt_rstat->brin_count,
-													CCACHE_CHUNK_NBLOCKS);
+							gts->outer_brin_count += CCACHE_CHUNK_NBLOCKS;
 						}
 					}
 					nr_blocks = base - page;
@@ -1207,7 +1205,7 @@ pgstromExecScanChunkParallel(GpuTaskState *gts,
 				if (s_page < 0)
 				{
 					/* Oops, here is no valid range, so just skip it */
-					pg_atomic_add_fetch_u64(&gt_rstat->brin_count, nr_blocks);
+					gts->outer_brin_count += nr_blocks;
 					nr_allocated += nr_blocks;
 					nr_blocks = 0;
 				}
@@ -1229,8 +1227,7 @@ pgstromExecScanChunkParallel(GpuTaskState *gts,
 					nr_allocated += (e_page - page);
 					nr_blocks = e_page - s_page;
 					page = s_page;
-					pg_atomic_add_fetch_u64(&gt_rstat->brin_count,
-											page - prev);
+					gts->outer_brin_count += page - prev;
 				}
 			}
 			else
@@ -1307,7 +1304,7 @@ pgstromExecScanChunkParallel(GpuTaskState *gts,
  * pgstromExecScanChunk - read the relation by one chunk
  */
 pgstrom_data_store *
-pgstromExecScanChunk(GpuTaskState *gts, GpuTaskRuntimeStat *gt_rstat)
+pgstromExecScanChunk(GpuTaskState *gts)
 {
 	Relation		rel = gts->css.ss.ss_currentRelation;
 	HeapScanDesc	scan = gts->css.ss.ss_currentScanDesc;
@@ -1345,8 +1342,7 @@ pgstromExecScanChunk(GpuTaskState *gts, GpuTaskRuntimeStat *gt_rstat)
 
 	if (gts->gtss)
 	{
-		pds = pgstromExecScanChunkParallel(gts, gt_rstat,
-										   pds, brin_map, brin_range_sz);
+		pds = pgstromExecScanChunkParallel(gts, pds, brin_map, brin_range_sz);
 	}
 	else
 	{
@@ -1411,8 +1407,7 @@ pgstromExecScanChunk(GpuTaskState *gts, GpuTaskRuntimeStat *gt_rstat)
 							ss_report_location(rel, scan->rs_cblock);
 						if (scan->rs_cblock == scan->rs_startblock)
 							scan->rs_cblock = InvalidBlockNumber;
-						pg_atomic_add_fetch_u64(&gt_rstat->brin_count,
-												CCACHE_CHUNK_NBLOCKS);
+						gts->outer_brin_count += CCACHE_CHUNK_NBLOCKS;
 						continue;
 					}
 				}
@@ -1467,8 +1462,7 @@ pgstromExecScanChunk(GpuTaskState *gts, GpuTaskRuntimeStat *gt_rstat)
 						scan->rs_cblock = (BlockNumber)page;
 					else
 						scan->rs_cblock = 0;
-					pg_atomic_add_fetch_u64(&gt_rstat->brin_count,
-											page - prev);
+					gts->outer_brin_count += (page - prev);
 					goto skip;
 				}
 			}
@@ -1537,14 +1531,16 @@ pgstromExecScanChunk(GpuTaskState *gts, GpuTaskRuntimeStat *gt_rstat)
 				block_nums + (pds->kds.nrooms - pds->nblocks_uncached),
 				sizeof(BlockNumber) * pds->nblocks_uncached);
 	}
+	/* update statistics */
+	if (pds)
+	{
+		if (pds->kds.format == KDS_FORMAT_COLUMN)
+			gts->ccache_count++;
+		if (pds->kds.format == KDS_FORMAT_BLOCK)
+			gts->nvme_count += pds->nblocks_uncached;
+	}
 	InstrStopNode(&gts->outer_instrument,
 				  !pds ? 0.0 : (double)pds->kds.nitems);
-	/* update statistics */
-	if (gt_rstat)
-	{
-		if (pds && pds->kds.format == KDS_FORMAT_COLUMN)
-			pg_atomic_add_fetch_u64(&gt_rstat->ccache_count, 1);
-	}
 	return pds;
 }
 

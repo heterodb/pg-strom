@@ -575,7 +575,7 @@ pgstromRescanGpuTaskState(GpuTaskState *gts)
  * pgstromReleaseGpuTaskState
  */
 void
-pgstromReleaseGpuTaskState(GpuTaskState *gts)
+pgstromReleaseGpuTaskState(GpuTaskState *gts, GpuTaskRuntimeStat *gt_rtstat)
 {
 	/*
 	 * release any unprocessed tasks
@@ -591,6 +591,19 @@ pgstromReleaseGpuTaskState(GpuTaskState *gts)
 	/* cleanup per-query PDS-scan state, if any */
 	PDS_end_heapscan_state(gts);
 	InstrEndLoop(&gts->outer_instrument);
+	/* update runtime stat if any */
+	if (gt_rtstat && IsParallelWorker())
+	{
+		SpinLockAcquire(&gt_rtstat->lock);
+		InstrAggNode(&gt_rtstat->outer_instrument,
+					 &gts->outer_instrument);
+		SpinLockRelease(&gt_rtstat->lock);
+		pg_atomic_add_fetch_u64(&gt_rtstat->nvme_count, gts->nvme_count);
+		pg_atomic_add_fetch_u64(&gt_rtstat->ccache_count, gts->ccache_count);
+		pg_atomic_add_fetch_u64(&gt_rtstat->brin_count, gts->outer_brin_count);
+		pg_atomic_add_fetch_u64(&gt_rtstat->fallback_count,
+								gts->num_cpu_fallbacks);
+	}
 	/* release scan-desc if any */
 	if (gts->css.ss.ss_currentScanDesc)
 		heap_endscan(gts->css.ss.ss_currentScanDesc);
@@ -607,11 +620,11 @@ pgstromReleaseGpuTaskState(GpuTaskState *gts)
 void
 pgstromExplainGpuTaskState(GpuTaskState *gts, ExplainState *es)
 {
+	char	temp[320];
+
 	/* GPU preference, if any */
 	if (es->verbose || gts->optimal_gpu >= 0)
 	{
-		char	temp[320];
-
 		if (gts->optimal_gpu < 0)
 			snprintf(temp, sizeof(temp), "None");
 		else
@@ -647,7 +660,26 @@ pgstromExplainGpuTaskState(GpuTaskState *gts, ExplainState *es)
 		(!es->analyze
 		 ? gts->outer_nrows_per_block > 0
 		 : gts->nvme_sstate != NULL))
-		ExplainPropertyText("NVMe-Strom", "enabled", es);
+	{
+		if (!gts->nvme_sstate)
+			ExplainPropertyText("NVMe-Strom", "enabled", es);
+		else if (es->format == EXPLAIN_FORMAT_TEXT)
+		{
+			if (gts->nvme_count == 0)
+				ExplainPropertyText("NVMe-Strom", "enabled", es);
+			else
+			{
+				snprintf(temp, sizeof(temp), "load=%ld", gts->nvme_count);
+				ExplainPropertyText("NVMe-Strom", temp, es);
+			}
+		}
+		else
+		{
+			ExplainPropertyText("NVMe-Strom", "enabled", es);
+			ExplainPropertyInt64("NVMe-Strom Load Blocks",
+								 NULL, gts->nvme_count, es);
+		}
+	}
 	else if (es->format != EXPLAIN_FORMAT_TEXT)
 		ExplainPropertyText("NVMe-Strom", "disabled", es);
 

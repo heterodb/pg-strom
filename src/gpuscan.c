@@ -93,8 +93,7 @@ deform_gpuscan_info(CustomScan *cscan)
 }
 
 typedef struct {
-	GpuTaskRuntimeStat		c;		/* common statistics */
-	pg_atomic_uint64 nitems_filtered;
+	GpuTaskRuntimeStat	c;		/* common statistics */
 } GpuScanRuntimeStat;
 
 typedef struct {
@@ -1936,6 +1935,7 @@ static void
 ExecEndGpuScan(CustomScanState *node)
 {
 	GpuScanState	   *gss = (GpuScanState *)node;
+	GpuTaskRuntimeStat *gt_rtstat = (GpuTaskRuntimeStat *) gss->gs_rtstat;
 
 	/* wait for completion of asynchronous GpuTaks */
 	SynchronizeGpuContext(gss->gts.gcontext);
@@ -1944,7 +1944,7 @@ ExecEndGpuScan(CustomScanState *node)
 	/* reset fallback resources */
 	if (gss->base_slot)
 		ExecDropSingleTupleTableSlot(gss->base_slot);
-	pgstromReleaseGpuTaskState(&gss->gts);
+	pgstromReleaseGpuTaskState(&gss->gts, gt_rtstat);
 }
 
 /*
@@ -2041,6 +2041,7 @@ ExecShutdownGpuScan(CustomScanState *node)
 {
 	GpuScanState   *gss = (GpuScanState *) node;
 	GpuScanRuntimeStat *gs_rtstat_old = gss->gs_rtstat;
+	GpuScanRuntimeStat *gs_rtstat_new;
 
 	/*
 	 * Note that GpuScan may not be executed if GpuScan node is located
@@ -2052,14 +2053,17 @@ ExecShutdownGpuScan(CustomScanState *node)
 	 *
 	 * Elsewhere, move the statistics from DSM
 	 */
-	if (gs_rtstat_old)
-	{
-		gss->gs_rtstat = MemoryContextAlloc(CurTransactionContext,
-											sizeof(GpuScanRuntimeStat));
-		memcpy(gss->gs_rtstat,
-			   gs_rtstat_old,
-			   sizeof(GpuScanRuntimeStat));
-	}
+	if (!gs_rtstat_old)
+		return;
+	if (IsParallelWorker())
+		return;
+
+	gs_rtstat_new = MemoryContextAlloc(CurTransactionContext,
+									   sizeof(GpuScanRuntimeStat));
+	memcpy(gs_rtstat_new,
+		   gs_rtstat_old,
+		   sizeof(GpuScanRuntimeStat));
+	gss->gs_rtstat = gs_rtstat_new;
 }
 #endif
 
@@ -2077,13 +2081,15 @@ ExplainGpuScan(CustomScanState *node, List *ancestors, ExplainState *es)
 	List			   *dev_proj = NIL;
 	char			   *exprstr;
 	ListCell		   *lc;
-	uint64				nitems_filtered = 0;
 
+	/* merge run-time statistics */
+	InstrEndLoop(&gss->gts.outer_instrument);
 	if (gs_rtstat)
-	{
-		nitems_filtered = pg_atomic_read_u64(&gs_rtstat->nitems_filtered);
 		mergeGpuTaskRuntimeStat(&gss->gts, &gs_rtstat->c);
-	}
+	if (gss->gts.css.ss.ps.instrument)
+		memcpy(&gss->gts.css.ss.ps.instrument->bufusage,
+			   &gss->gts.outer_instrument.bufusage,
+			   sizeof(BufferUsage));
 
 	/* Set up deparsing context */
 	dcontext = set_deparse_context_planstate(es->deparse_cxt,
@@ -2116,13 +2122,11 @@ ExplainGpuScan(CustomScanState *node, List *ancestors, ExplainState *es)
 		exprstr = deparse_expression(dev_quals, dcontext,
 									 es->verbose, false);
 		ExplainPropertyText("GPU Filter", exprstr, es);
-		if (gss->gts.css.ss.ps.instrument && nitems_filtered > 0)
-		{
-			Instrumentation *instr = gss->gts.css.ss.ps.instrument;
 
-			ExplainPropertyInt64("Rows Removed by GPU Filter",
-								 NULL, nitems_filtered / instr->nloops, es);
-		}
+		if (gss->gts.outer_instrument.nloops > 0)
+			ExplainPropertyInt64("Rows Removed by GPU Filter", NULL,
+								 gss->gts.outer_instrument.nfiltered1 /
+								 gss->gts.outer_instrument.nloops, es);
 	}
 	/* BRIN-index properties */
 	pgstromExplainBrinIndexMap(&gss->gts, es, dcontext);
@@ -2259,11 +2263,10 @@ static GpuTask *
 gpuscan_next_task(GpuTaskState *gts)
 {
 	GpuScanState	   *gss = (GpuScanState *) gts;
-	GpuScanRuntimeStat *gs_rtstat = gss->gs_rtstat;
 	GpuScanTask		   *gscan;
 	pgstrom_data_store *pds;
 
-	pds = pgstromExecScanChunk(gts, &gs_rtstat->c);
+	pds = pgstromExecScanChunk(gts);
 	if (!pds)
 		return NULL;
 	gscan = gpuscan_create_task(gss, pds);
@@ -2444,6 +2447,7 @@ retry_next:
 	/*
 	 * (1) - Evaluation of dev_quals if any
 	 */
+	pg_atomic_add_fetch_u64(&gs_rtstat->c.source_nitems, 1);
 	if (gss->dev_quals)
 	{
 		bool		retval;
@@ -2454,7 +2458,7 @@ retry_next:
 #endif
 		if (!retval)
 		{
-			pg_atomic_add_fetch_u64(&gs_rtstat->nitems_filtered, 1);
+			pg_atomic_add_fetch_u64(&gs_rtstat->c.nitems_filtered, 1);
 			goto retry_next;
 		}
 	}
@@ -2761,7 +2765,9 @@ resume_kernel:
 		GpuScanRuntimeStat *gs_rtstat = gss->gs_rtstat;
 
 		/* update stat */
-		pg_atomic_add_fetch_u64(&gs_rtstat->nitems_filtered,
+		pg_atomic_add_fetch_u64(&gs_rtstat->c.source_nitems,
+								nitems_in);
+		pg_atomic_add_fetch_u64(&gs_rtstat->c.nitems_filtered,
 								nitems_in - nitems_out);
 		if (!pds_dst)
 		{

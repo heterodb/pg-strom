@@ -311,7 +311,6 @@ typedef struct GpuJoinSiblingState	GpuJoinSiblingState;
 struct GpuJoinRuntimeStat
 {
 	GpuTaskRuntimeStat	c;		/* common statistics */
-	pg_atomic_uint64	source_nitems;
 	struct {
 		pg_atomic_uint64 inner_nitems;
 		pg_atomic_uint64 right_nitems;
@@ -2966,8 +2965,9 @@ ExecGpuJoin(CustomScanState *node)
 static void
 ExecEndGpuJoin(CustomScanState *node)
 {
-	GpuJoinState   *gjs = (GpuJoinState *) node;
-	int				i;
+	GpuJoinState *gjs = (GpuJoinState *) node;
+	GpuTaskRuntimeStat *gt_rtstat = (GpuTaskRuntimeStat *)gjs->gj_rtstat;
+	int		i;
 
 	/* wait for completion of any asynchronous GpuTask */
 	SynchronizeGpuContext(gjs->gts.gcontext);
@@ -2979,7 +2979,7 @@ ExecEndGpuJoin(CustomScanState *node)
 		ExecEndNode(gjs->inners[i].state);
 	/* then other private resources */
 	GpuJoinInnerUnload(&gjs->gts, false);
-	pgstromReleaseGpuTaskState(&gjs->gts);
+	pgstromReleaseGpuTaskState(&gjs->gts, gt_rtstat);
 }
 
 static void
@@ -3035,6 +3035,14 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 	StringInfoData	str;
 
 	initStringInfo(&str);
+
+	if (gj_rtstat)
+		mergeGpuTaskRuntimeStat(&gjs->gts, &gj_rtstat->c);
+	if (gjs->gts.css.ss.ps.instrument)
+		memcpy(&gjs->gts.css.ss.ps.instrument->bufusage,
+			   &gjs->gts.outer_instrument.bufusage,
+			   sizeof(BufferUsage));
+
 	/* deparse context */
 	dcontext =  set_deparse_context_planstate(es->deparse_cxt,
 											  (Node *) node,
@@ -3070,15 +3078,6 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 	}
 
 	/* statistics for outer scan, if any */
-	if (gj_rtstat)
-	{
-		gjs->gts.outer_instrument.tuplecount =
-			pg_atomic_read_u64(&gj_rtstat->source_nitems);
-		gjs->gts.outer_instrument.nfiltered1 =
-			(pg_atomic_read_u64(&gj_rtstat->source_nitems) -
-			 pg_atomic_read_u64(&gj_rtstat->jstat[0].inner_nitems));
-		mergeGpuTaskRuntimeStat(&gjs->gts, &gj_rtstat->c);
-	}
 	pgstromExplainOuterScan(&gjs->gts, dcontext, ancestors, es,
 							gj_info->outer_quals,
                             gj_info->outer_startup_cost,
@@ -3414,22 +3413,26 @@ ExecShutdownGpuJoin(CustomScanState *node)
 {
 	GpuJoinState	   *gjs = (GpuJoinState *) node;
 	GpuJoinRuntimeStat *gj_rtstat_old = gjs->gj_rtstat;
+	GpuJoinRuntimeStat *gj_rtstat_new;
 	size_t				length;
 
+	/*
+	 * If this GpuJoin node is located under the inner side of another
+	 * GpuJoin, it should not be called under the background worker
+	 * context, however, ExecShutdown walks down the node.
+	 */
 	if (!gj_rtstat_old)
-	{
-		/*
-		 * If this GpuJoin node is located under the inner side of another
-		 * GpuJoin, it should not be called under the background worker
-		 * context, however, ExecShutdown walks down the node.
-		 */
-		Assert(IsParallelWorker());
 		return;
-	}
+
+	/* parallel worker put runtime-stat on ExecEnd handler */
+	if (!IsParallelWorker())
+		return;
+
 	length = offsetof(GpuJoinRuntimeStat, jstat[gjs->num_rels + 1]);
-	gjs->gj_rtstat = MemoryContextAlloc(CurTransactionContext,
-										MAXALIGN(length));
-	memcpy(gjs->gj_rtstat, gj_rtstat_old, length);
+	gj_rtstat_new = MemoryContextAlloc(CurTransactionContext,
+									   MAXALIGN(length));
+	memcpy(gj_rtstat_new, gj_rtstat_old, length);
+	gjs->gj_rtstat = gj_rtstat_new;
 }
 #endif
 
@@ -4668,12 +4671,11 @@ pgstrom_data_store *
 GpuJoinExecOuterScanChunk(GpuTaskState *gts)
 {
 	GpuJoinState   *gjs = (GpuJoinState *) gts;
-	GpuJoinRuntimeStat *gj_rtstat = gjs->gj_rtstat;
 	pgstrom_data_store *pds = NULL;
 
 	if (gjs->gts.css.ss.ss_currentRelation)
 	{
-		pds = pgstromExecScanChunk(gts, &gj_rtstat->c);
+		pds = pgstromExecScanChunk(gts);
 	}
 	else
 	{
@@ -5858,8 +5860,11 @@ gpujoinUpdateRunTimeStat(GpuTaskState *gts, kern_gpujoin *kgjoin)
 	GpuJoinRuntimeStat *gj_rtstat = gjs->gj_rtstat;
 	cl_int		i;
 
-	pg_atomic_fetch_add_u64(&gj_rtstat->source_nitems,
+	pg_atomic_fetch_add_u64(&gj_rtstat->c.source_nitems,
 							kgjoin->source_nitems);
+	pg_atomic_fetch_add_u64(&gj_rtstat->c.nitems_filtered,
+							kgjoin->source_nitems -
+							kgjoin->outer_nitems);
 	pg_atomic_fetch_add_u64(&gj_rtstat->jstat[0].inner_nitems,
 							kgjoin->outer_nitems);
 	for (i=0; i < gjs->num_rels; i++)

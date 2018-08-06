@@ -161,7 +161,6 @@ struct GpuPreAggRuntimeStat
 	pg_atomic_uint64	source_nitems;
 	pg_atomic_uint64	nitems_filtered;
 	pg_atomic_uint64	num_fallback_rows;
-	pg_atomic_uint32	pg_nworkers;
 };
 typedef struct GpuPreAggRuntimeStat	GpuPreAggRuntimeStat;
 
@@ -4182,6 +4181,7 @@ static void
 ExecEndGpuPreAgg(CustomScanState *node)
 {
 	GpuPreAggState *gpas = (GpuPreAggState *) node;
+	GpuTaskRuntimeStat *gt_rtstat = (GpuTaskRuntimeStat *) gpas->gpa_rtstat;
 	GpuContext	   *gcontext = gpas->gts.gcontext;
 	CUresult		rc;
 
@@ -4215,7 +4215,7 @@ ExecEndGpuPreAgg(CustomScanState *node)
 		ExecDropSingleTupleTableSlot(gpas->outer_slot);
 
 	releaseGpuPreAggSharedState(gpas);
-	pgstromReleaseGpuTaskState(&gpas->gts);
+	pgstromReleaseGpuTaskState(&gpas->gts, gt_rtstat);
 }
 
 /*
@@ -4292,7 +4292,6 @@ ExecGpuPreAggInitWorker(CustomScanState *node,
 
 	gpas->gpa_sstate = gpa_sstate;
 	gpas->gpa_rtstat = &gpas->gpa_sstate->gpa_rtstat;
-	pg_atomic_add_fetch_u32(&gpa_sstate->gpa_rtstat.pg_nworkers, 1);
 	on_dsm_detach(dsm_find_mapping(gpa_sstate->ss_handle),
 				  SynchronizeGpuContextOnDSMDetach,
 				  PointerGetDatum(gpas->gts.gcontext));
@@ -4325,22 +4324,25 @@ ExecShutdownGpuPreAgg(CustomScanState *node)
 {
 	GpuPreAggState	   *gpas = (GpuPreAggState *) node;
 	GpuPreAggRuntimeStat *gpa_rtstat_old = gpas->gpa_rtstat;
+	GpuPreAggRuntimeStat *gpa_rtstat_new;
 
+	/*
+	 * If this GpuPreAgg node is located under the inner side of
+	 * another GpuJoin, it should not be called under the background
+	 * worker context, however, ExecShutdown walks down the node.
+	 */
 	if (!gpa_rtstat_old)
-	{
-		/*
-		 * If this GpuPreAgg node is located under the inner side of
-		 * another GpuJoin, it should not be called under the background
-		 * worker context, however, ExecShutdown walks down the node.
-		 */
-		Assert(IsParallelWorker());
 		return;
-	}
-	gpas->gpa_rtstat = MemoryContextAlloc(CurTransactionContext,
-										  sizeof(GpuPreAggRuntimeStat));
-	memcpy(gpas->gpa_rtstat,
+	/* parallel worker put runtime-stat on ExecEnd handler */
+	if (!IsParallelWorker())
+		return;
+
+	gpa_rtstat_new = MemoryContextAlloc(CurTransactionContext,
+										sizeof(GpuPreAggRuntimeStat));
+	memcpy(gpa_rtstat_new,
 		   gpa_rtstat_old,
 		   sizeof(GpuPreAggRuntimeStat));
+	gpas->gpa_rtstat = gpa_rtstat_new;
 }
 #endif
 
@@ -4360,25 +4362,19 @@ ExplainGpuPreAgg(CustomScanState *node, List *ancestors, ExplainState *es)
 	const char			   *policy;
 	char				   *exprstr;
 
-	if (gpa_rtstat)
-	{
-		gpas->gts.outer_instrument.tuplecount = 0;
-		gpas->gts.outer_instrument.ntuples
-			= pg_atomic_read_u64(&gpa_rtstat->source_nitems);
-		gpas->gts.outer_instrument.nfiltered1
-			= pg_atomic_read_u64(&gpa_rtstat->nitems_filtered);
-		gpas->gts.outer_instrument.nfiltered2 = 0;
-		gpas->gts.outer_instrument.nloops
-			= pg_atomic_read_u32(&gpa_rtstat->pg_nworkers);
-		mergeGpuTaskRuntimeStat(&gpas->gts, &gpa_rtstat->c);
-	}
-
 	/* shows reduction policy */
 	if (gpas->num_group_keys == 0)
 		policy = "NoGroup";
 	else
 		policy = "Local";
 	ExplainPropertyText("Reduction", policy, es);
+
+	if (gpa_rtstat)
+		mergeGpuTaskRuntimeStat(&gpas->gts, &gpa_rtstat->c);
+	if (gpas->gts.css.ss.ps.instrument)
+		memcpy(&gpas->gts.css.ss.ps.instrument->bufusage,
+			   &gpas->gts.outer_instrument.bufusage,
+			   sizeof(BufferUsage));
 
 	/* Set up deparsing context */
 	dcontext = set_deparse_context_planstate(es->deparse_cxt,
@@ -4440,7 +4436,6 @@ createGpuPreAggSharedState(GpuPreAggState *gpas,
 	memset(gpa_sstate, 0, ss_length);
 	gpa_sstate->ss_handle = (pcxt ? dsm_segment_handle(pcxt->seg) : UINT_MAX);
 	gpa_sstate->ss_length = ss_length;
-	pg_atomic_init_u32(&gpa_sstate->gpa_rtstat.pg_nworkers, 0);
 
 	return gpa_sstate;
 }
@@ -4674,7 +4669,6 @@ static GpuTask *
 gpupreagg_next_task(GpuTaskState *gts)
 {
 	GpuPreAggState *gpas = (GpuPreAggState *) gts;
-	GpuPreAggRuntimeStat *gpa_rtstat = gpas->gpa_rtstat;
 	GpuContext	   *gcontext = gpas->gts.gcontext;
 	GpuTask		   *gtask = NULL;
 	pgstrom_data_store *pds = NULL;
@@ -4690,7 +4684,7 @@ gpupreagg_next_task(GpuTaskState *gts)
 	}
 	else if (gpas->gts.css.ss.ss_currentRelation)
 	{
-		pds = pgstromExecScanChunk(&gpas->gts, &gpa_rtstat->c);
+		pds = pgstromExecScanChunk(&gpas->gts);
 	}
 	else
 	{

@@ -867,6 +867,9 @@ ScanPathWillUseNvmeStrom(PlannerInfo *root, RelOptInfo *baserel)
 {
 	size_t		num_scan_pages = 0;
 
+	if (!nvme_strom_enabled)
+		return false;
+
 	/*
 	 * Check expected amount of the scan i/o.
 	 * If 'baserel' is children of partition table, threshold shall be

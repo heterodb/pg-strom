@@ -331,6 +331,7 @@ struct GpuTaskState
 	 * as source data store. Then, SSD2GPU Direct SQL Execution will be kicked.
 	 */
 	struct NVMEScanState *nvme_sstate;
+	long			nvme_count;			/* # of blocks loaded by SSD2GPU */
 
 	/*
 	 * fields to fetch rows from the current task
@@ -380,6 +381,7 @@ struct GpuTaskSharedState
 								 * @phs_nallocated in PG11 or later.
 								 */
 	ParallelHeapScanDescData	phscan;
+	/* variable length */
 };
 
 /*
@@ -387,15 +389,31 @@ struct GpuTaskSharedState
  */
 typedef struct
 {
+	slock_t				lock;
+	Instrumentation		outer_instrument;
+	pg_atomic_uint64	source_nitems;
+	pg_atomic_uint64	nitems_filtered;
+	pg_atomic_uint64	nvme_count;
 	pg_atomic_uint64	ccache_count;
 	pg_atomic_uint64	brin_count;
+	pg_atomic_uint64	fallback_count;
 } GpuTaskRuntimeStat;
 
 static inline void mergeGpuTaskRuntimeStat(GpuTaskState *gts,
-										   GpuTaskRuntimeStat *gtrs)
+										   GpuTaskRuntimeStat *gt_rtstat)
 {
-	gts->ccache_count = pg_atomic_read_u64(&gtrs->ccache_count);
-	gts->outer_brin_count = pg_atomic_read_u64(&gtrs->brin_count);
+#if PG_VERSION_NUM >= 100000
+	InstrAggNode(&gts->outer_instrument,
+				 &gt_rtstat->outer_instrument);
+	gts->outer_instrument.tuplecount = (double)
+		pg_atomic_read_u64(&gt_rtstat->source_nitems);
+	gts->outer_instrument.nfiltered1 = (double)
+		pg_atomic_read_u64(&gt_rtstat->nitems_filtered);
+	gts->nvme_count += pg_atomic_read_u64(&gt_rtstat->nvme_count);
+	gts->ccache_count += pg_atomic_read_u64(&gt_rtstat->ccache_count);
+	gts->outer_brin_count += pg_atomic_read_u64(&gt_rtstat->brin_count);
+	gts->num_cpu_fallbacks += pg_atomic_read_u64(&gt_rtstat->fallback_count);
+#endif
 }
 
 /*
@@ -862,7 +880,8 @@ extern void pgstromInitGpuTaskState(GpuTaskState *gts,
 									EState *estate);
 extern TupleTableSlot *pgstromExecGpuTaskState(GpuTaskState *gts);
 extern void pgstromRescanGpuTaskState(GpuTaskState *gts);
-extern void pgstromReleaseGpuTaskState(GpuTaskState *gts);
+extern void pgstromReleaseGpuTaskState(GpuTaskState *gts,
+									   GpuTaskRuntimeStat *gt_rtstat);
 extern void pgstromExplainGpuTaskState(GpuTaskState *gts, ExplainState *es);
 extern Size pgstromEstimateDSMGpuTaskState(GpuTaskState *gts,
 										   ParallelContext *pcxt);
@@ -1076,8 +1095,7 @@ extern void pgstromExplainBrinIndexMap(GpuTaskState *gts,
 									   ExplainState *es,
 									   List *dcontext);
 
-extern pgstrom_data_store *pgstromExecScanChunk(GpuTaskState *gts,
-												GpuTaskRuntimeStat *gt_rstat);
+extern pgstrom_data_store *pgstromExecScanChunk(GpuTaskState *gts);
 extern void pgstromRewindScanChunk(GpuTaskState *gts);
 
 extern void pgstromExplainOuterScan(GpuTaskState *gts,
