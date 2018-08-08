@@ -591,19 +591,6 @@ pgstromReleaseGpuTaskState(GpuTaskState *gts, GpuTaskRuntimeStat *gt_rtstat)
 	/* cleanup per-query PDS-scan state, if any */
 	PDS_end_heapscan_state(gts);
 	InstrEndLoop(&gts->outer_instrument);
-	/* update runtime stat if any */
-	if (gt_rtstat && IsParallelWorker())
-	{
-		SpinLockAcquire(&gt_rtstat->lock);
-		InstrAggNode(&gt_rtstat->outer_instrument,
-					 &gts->outer_instrument);
-		SpinLockRelease(&gt_rtstat->lock);
-		pg_atomic_add_fetch_u64(&gt_rtstat->nvme_count, gts->nvme_count);
-		pg_atomic_add_fetch_u64(&gt_rtstat->ccache_count, gts->ccache_count);
-		pg_atomic_add_fetch_u64(&gt_rtstat->brin_count, gts->outer_brin_count);
-		pg_atomic_add_fetch_u64(&gt_rtstat->fallback_count,
-								gts->num_cpu_fallbacks);
-	}
 	/* release scan-desc if any */
 	if (gts->css.ss.ss_currentScanDesc)
 		heap_endscan(gts->css.ss.ss_currentScanDesc);

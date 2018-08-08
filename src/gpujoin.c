@@ -364,9 +364,9 @@ static char *gpujoin_codegen(PlannerInfo *root,
 							 List *tlist,
 							 codegen_context *context);
 
-static GpuJoinSharedState *createGpuJoinSharedState(GpuJoinState *gjs,
-													ParallelContext *pcxt,
-													void *coordinate);
+static void createGpuJoinSharedState(GpuJoinState *gjs,
+									 ParallelContext *pcxt,
+									 void *coordinate);
 static void gpujoinColocateOuterJoinMapsToHost(GpuJoinState *gjs);
 
 /*
@@ -3344,13 +3344,12 @@ ExecGpuJoinInitDSM(CustomScanState *node,
 
 	/* save the ParallelContext */
 	gjs->gts.pcxt = pcxt;
-	/* ensure to stop workers prior to detach DSM */
+	/* setup shared-state and runtime-statistics */
+	createGpuJoinSharedState(gjs, pcxt, coordinate);
 	on_dsm_detach(pcxt->seg,
 				  SynchronizeGpuContextOnDSMDetach,
 				  PointerGetDatum(gjs->gts.gcontext));
 	/* allocation of an empty multirel buffer */
-	gjs->gj_sstate = createGpuJoinSharedState(gjs, pcxt, coordinate);
-	gjs->gj_rtstat = GPUJOIN_RUNTIME_STAT(gjs->gj_sstate);
 	coordinate = (char *)coordinate + gjs->gj_sstate->ss_length;
 	if (gjs->gts.outer_index_state)
 	{
@@ -3414,7 +3413,6 @@ ExecShutdownGpuJoin(CustomScanState *node)
 	GpuJoinState	   *gjs = (GpuJoinState *) node;
 	GpuJoinRuntimeStat *gj_rtstat_old = gjs->gj_rtstat;
 	GpuJoinRuntimeStat *gj_rtstat_new;
-	size_t				length;
 
 	/*
 	 * If this GpuJoin node is located under the inner side of another
@@ -3425,14 +3423,18 @@ ExecShutdownGpuJoin(CustomScanState *node)
 		return;
 
 	/* parallel worker put runtime-stat on ExecEnd handler */
-	if (!IsParallelWorker())
-		return;
-
-	length = offsetof(GpuJoinRuntimeStat, jstat[gjs->num_rels + 1]);
-	gj_rtstat_new = MemoryContextAlloc(CurTransactionContext,
-									   MAXALIGN(length));
-	memcpy(gj_rtstat_new, gj_rtstat_old, length);
-	gjs->gj_rtstat = gj_rtstat_new;
+	if (IsParallelWorker())
+		mergeGpuTaskRuntimeStatParallelWorker(&gjs->gts, &gj_rtstat_old->c);
+	else
+	{
+		EState	   *estate = gjs->gts.css.ss.ps.state;
+		size_t		length = MAXALIGN(offsetof(GpuJoinRuntimeStat,
+											   jstat[gjs->num_rels + 1]));
+		gj_rtstat_new = MemoryContextAlloc(estate->es_query_cxt,
+										   MAXALIGN(length));
+		memcpy(gj_rtstat_new, gj_rtstat_old, length);
+		gjs->gj_rtstat = gj_rtstat_new;
+	}
 }
 #endif
 
@@ -6811,9 +6813,7 @@ GpuJoinInnerPreload(GpuTaskState *gts, CUdeviceptr *p_m_kmrels)
 		preload_multi_gpu = true;
 	else
 	{
-		Assert(!IsParallelWorker());
-		gjs->gj_sstate = createGpuJoinSharedState(gjs, NULL, NULL);
-		gjs->gj_rtstat = GPUJOIN_RUNTIME_STAT(gjs->gj_sstate);
+		createGpuJoinSharedState(gjs, NULL, NULL);
 		OverWriteSharedStateIfPartitionLeaf(gjs);
 		preload_multi_gpu = (sibling != NULL);
 	}
@@ -7101,27 +7101,32 @@ GpuJoinInnerUnload(GpuTaskState *gts, bool is_rescan)
  * It construct an empty inner multi-relations buffer. It can be shared with
  * multiple backends, and referenced by CPU/GPU.
  */
-static GpuJoinSharedState *
+static void
 createGpuJoinSharedState(GpuJoinState *gjs,
 						 ParallelContext *pcxt,
 						 void *dsm_addr)
 {
+	EState	   *estate = gjs->gts.css.ss.ps.state;
 	GpuJoinSharedState *gj_sstate;
-	cl_uint		ss_length;
+	GpuJoinRuntimeStat *gj_rtstat;
+	size_t		sstate_len;
+	size_t		rtstat_len;
+	size_t		ss_length;
 
-	ss_length = (MAXALIGN(offsetof(GpuJoinSharedState,
-								   pergpu[numDevAttrs])) +
-				 MAXALIGN(offsetof(GpuJoinRuntimeStat,
-								   jstat[gjs->num_rels + 1])));
+	Assert(!IsParallelWorker());
+	sstate_len = MAXALIGN(offsetof(GpuJoinSharedState,
+								   pergpu[numDevAttrs]));
+	rtstat_len = MAXALIGN(offsetof(GpuJoinRuntimeStat,
+								   jstat[gjs->num_rels + 1]));
+	ss_length = sstate_len + rtstat_len;
 	if (dsm_addr)
 		gj_sstate = dsm_addr;
 	else
-		gj_sstate = MemoryContextAlloc(CurTransactionContext, ss_length);
+		gj_sstate = MemoryContextAlloc(estate->es_query_cxt, ss_length);
 	memset(gj_sstate, 0, ss_length);
 	gj_sstate->ss_handle = (pcxt ? dsm_segment_handle(pcxt->seg) : UINT_MAX);
 	gj_sstate->ss_length = ss_length;
-	gj_sstate->offset_runtime_stat = MAXALIGN(offsetof(GpuJoinSharedState,
-													   pergpu[numDevAttrs]));
+	gj_sstate->offset_runtime_stat = sstate_len;
 	gj_sstate->masterLatch = MyLatch;
 	gj_sstate->kmrels_handle = UINT_MAX;	/* to be set later */
 	pg_atomic_init_u32(&gj_sstate->needs_colocation,
@@ -7129,7 +7134,18 @@ createGpuJoinSharedState(GpuJoinState *gjs,
 	pg_atomic_init_u32(&gj_sstate->preload_done, 0);
 	pg_atomic_init_u32(&gj_sstate->pg_nworkers, 0);
 
-	return gj_sstate;
+	gj_rtstat = GPUJOIN_RUNTIME_STAT(gj_sstate);
+	SpinLockInit(&gj_rtstat->c.lock);
+#if PG_VERSION_NUM < 100000
+	/* Because of restrictions at PG9.6, see createGpuScanSharedState */
+	if (dsm_addr)
+	{
+		gj_rtstat = MemoryContextAllocZero(estate->es_query_cxt, rtstat_len);
+		SpinLockInit(&gj_rtstat->c.lock);
+	}
+#endif
+	gjs->gj_sstate = gj_sstate;
+	gjs->gj_rtstat = gj_rtstat;
 }
 
 /*

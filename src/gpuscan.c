@@ -142,9 +142,9 @@ static void gpuscan_switch_task(GpuTaskState *gts, GpuTask *gtask);
 static int gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module);
 static void gpuscan_release_task(GpuTask *gtask);
 
-static GpuScanSharedState *createGpuScanSharedState(GpuScanState *gss,
-													ParallelContext *pcxt,
-													void *dsm_addr);
+static void createGpuScanSharedState(GpuScanState *gss,
+									 ParallelContext *pcxt,
+									 void *dsm_addr);
 static void resetGpuScanSharedState(GpuScanState *gss);
 
 /*
@@ -1919,10 +1919,7 @@ ExecGpuScan(CustomScanState *node)
 	GpuScanState   *gss = (GpuScanState *) node;
 
 	if (!gss->gs_sstate)
-	{
-		gss->gs_sstate = createGpuScanSharedState(gss, NULL, NULL);
-		gss->gs_rtstat = &gss->gs_sstate->gs_rtstat;
-	}
+		createGpuScanSharedState(gss, NULL, NULL);
 	return ExecScan(&node->ss,
 					(ExecScanAccessMtd) pgstromExecGpuTaskState,
 					(ExecScanRecheckMtd) ExecReCheckGpuScan);
@@ -1985,13 +1982,14 @@ ExecGpuScanInitDSM(CustomScanState *node,
 {
 	GpuScanState   *gss = (GpuScanState *) node;
 
-	gss->gs_sstate = createGpuScanSharedState(gss, pcxt, coordinate);
-	gss->gs_rtstat = &gss->gs_sstate->gs_rtstat;
+	/* save the ParallelContext */
+	gss->gts.pcxt = pcxt;
+	/* setup shared-state and runtime-statistics */
+	createGpuScanSharedState(gss, pcxt, coordinate);
 	on_dsm_detach(pcxt->seg,
 				  SynchronizeGpuContextOnDSMDetach,
 				  PointerGetDatum(gss->gts.gcontext));
-	coordinate = ((char *)coordinate + 
-				  MAXALIGN(sizeof(GpuScanSharedState)));
+	coordinate = ((char *)coordinate + gss->gs_sstate->ss_length);
 	if (gss->gts.outer_index_state)
 	{
 		gss->gts.outer_index_map = (Bitmapset *)coordinate;
@@ -2055,15 +2053,20 @@ ExecShutdownGpuScan(CustomScanState *node)
 	 */
 	if (!gs_rtstat_old)
 		return;
-	if (IsParallelWorker())
-		return;
 
-	gs_rtstat_new = MemoryContextAlloc(CurTransactionContext,
-									   sizeof(GpuScanRuntimeStat));
-	memcpy(gs_rtstat_new,
-		   gs_rtstat_old,
-		   sizeof(GpuScanRuntimeStat));
-	gss->gs_rtstat = gs_rtstat_new;
+	if (IsParallelWorker())
+		mergeGpuTaskRuntimeStatParallelWorker(&gss->gts, &gs_rtstat_old->c);
+	else
+	{
+		EState	   *estate = gss->gts.css.ss.ps.state;
+
+		gs_rtstat_new = MemoryContextAlloc(estate->es_query_cxt,
+										   sizeof(GpuScanRuntimeStat));
+		memcpy(gs_rtstat_new,
+			   gs_rtstat_old,
+			   sizeof(GpuScanRuntimeStat));
+		gss->gs_rtstat = gs_rtstat_new;
+	}
 }
 #endif
 
@@ -2074,7 +2077,11 @@ static void
 ExplainGpuScan(CustomScanState *node, List *ancestors, ExplainState *es)
 {
 	GpuScanState	   *gss = (GpuScanState *) node;
+#if PG_VERSION_NUM < 100000
+	GpuScanRuntimeStat *gs_rtstat = NULL;
+#else
 	GpuScanRuntimeStat *gs_rtstat = gss->gs_rtstat;
+#endif
 	CustomScan		   *cscan = (CustomScan *) gss->gts.css.ss.ps.plan;
 	GpuScanInfo		   *gs_info = deform_gpuscan_info(cscan);
 	List			   *dcontext;
@@ -2137,24 +2144,43 @@ ExplainGpuScan(CustomScanState *node, List *ancestors, ExplainState *es)
 /*
  * createGpuScanSharedState
  */
-static GpuScanSharedState *
+static void
 createGpuScanSharedState(GpuScanState *gss,
 						 ParallelContext *pcxt,
 						 void *dsm_addr)
 {
+	EState	   *estate = gss->gts.css.ss.ps.state;
 	GpuScanSharedState *gs_sstate;
+	GpuScanRuntimeStat *gs_rtstat;
 	size_t		ss_length = MAXALIGN(sizeof(GpuScanSharedState));
 
 	Assert(!IsParallelWorker());
 	if (dsm_addr)
 		gs_sstate = dsm_addr;
 	else
-		gs_sstate = MemoryContextAlloc(CurTransactionContext, ss_length);
+		gs_sstate = MemoryContextAlloc(estate->es_query_cxt, ss_length);
 	memset(gs_sstate, 0, ss_length);
 	gs_sstate->ss_handle = (pcxt ? dsm_segment_handle(pcxt->seg) : UINT_MAX);
 	gs_sstate->ss_length = ss_length;
 
-	return gs_sstate;
+	gs_rtstat = &gs_sstate->gs_rtstat;
+	SpinLockInit(&gs_rtstat->c.lock);
+#if PG_VERSION_NUM < 100000
+	/*
+	 * MEMO: PG9.6 does not support ShutdownCustomScan() callback, so we have
+	 * no way to reference own custom run-time statistics on EXPLAIN.
+	 * It is a restriction of the older version, and is a specification;
+	 * when parallel query in PG9.6, EXPLAIN ANALYZE shows incorrect values.
+	 */
+	if (dsm_addr)
+	{
+		gs_rtstat = MemoryContextAllocZero(estate->es_query_cxt,
+										   sizeof(GpuScanRuntimeStat));
+		SpinLockInit(&gs_rtstat->c.lock);
+	}
+#endif
+	gss->gs_sstate = gs_sstate;
+	gss->gs_rtstat = gs_rtstat;
 }
 
 /*

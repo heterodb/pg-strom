@@ -221,9 +221,9 @@ static char	   *gpupreagg_codegen(codegen_context *context,
 								  List *outer_tlist,
 								  GpuPreAggInfo *gpa_info,
 								  Bitmapset *pfunc_bitmap);
-static GpuPreAggSharedState *createGpuPreAggSharedState(GpuPreAggState *gpas,
-														ParallelContext *pcxt,
-														void *dsm_addr);
+static void createGpuPreAggSharedState(GpuPreAggState *gpas,
+									   ParallelContext *pcxt,
+									   void *dsm_addr);
 static void releaseGpuPreAggSharedState(GpuPreAggState *gpas);
 static void resetGpuPreAggSharedState(GpuPreAggState *gpas);
 
@@ -4165,10 +4165,7 @@ ExecGpuPreAgg(CustomScanState *node)
 	GpuPreAggState *gpas = (GpuPreAggState *) node;
 
 	if (!gpas->gpa_sstate)
-	{
-		gpas->gpa_sstate = createGpuPreAggSharedState(gpas, NULL, NULL);
-		gpas->gpa_rtstat = &gpas->gpa_sstate->gpa_rtstat;
-	}
+		createGpuPreAggSharedState(gpas, NULL, NULL);
 	return ExecScan(&node->ss,
 					(ExecScanAccessMtd) pgstromExecGpuTaskState,
 					(ExecScanRecheckMtd) ExecReCheckGpuPreAgg);
@@ -4266,8 +4263,7 @@ ExecGpuPreAggInitDSM(CustomScanState *node,
 				  SynchronizeGpuContextOnDSMDetach,
 				  PointerGetDatum(gpas->gts.gcontext));
 	/* allocation of shared state */
-	gpas->gpa_sstate = createGpuPreAggSharedState(gpas, pcxt, coordinate);
-	gpas->gpa_rtstat = &gpas->gpa_sstate->gpa_rtstat;
+	createGpuPreAggSharedState(gpas, pcxt, coordinate);
 	coordinate = (char *)coordinate + gpas->gpa_sstate->ss_length;
 	if (gpas->gts.outer_index_state)
 	{
@@ -4334,15 +4330,19 @@ ExecShutdownGpuPreAgg(CustomScanState *node)
 	if (!gpa_rtstat_old)
 		return;
 	/* parallel worker put runtime-stat on ExecEnd handler */
-	if (!IsParallelWorker())
-		return;
+	if (IsParallelWorker())
+		mergeGpuTaskRuntimeStatParallelWorker(&gpas->gts, &gpa_rtstat_old->c);
+	else
+	{
+		EState	   *estate = gpas->gts.css.ss.ps.state;
 
-	gpa_rtstat_new = MemoryContextAlloc(CurTransactionContext,
-										sizeof(GpuPreAggRuntimeStat));
-	memcpy(gpa_rtstat_new,
-		   gpa_rtstat_old,
-		   sizeof(GpuPreAggRuntimeStat));
-	gpas->gpa_rtstat = gpa_rtstat_new;
+		gpa_rtstat_new = MemoryContextAlloc(estate->es_query_cxt,
+											sizeof(GpuPreAggRuntimeStat));
+		memcpy(gpa_rtstat_new,
+			   gpa_rtstat_old,
+			   sizeof(GpuPreAggRuntimeStat));
+		gpas->gpa_rtstat = gpa_rtstat_new;
+	}
 }
 #endif
 
@@ -4420,24 +4420,38 @@ ExplainGpuPreAgg(CustomScanState *node, List *ancestors, ExplainState *es)
 /*
  * createGpuPreAggSharedState
  */
-static GpuPreAggSharedState *
+static void
 createGpuPreAggSharedState(GpuPreAggState *gpas,
 						   ParallelContext *pcxt,
 						   void *dsm_addr)
 {
+	EState	   *estate = gpas->gts.css.ss.ps.state;
 	GpuPreAggSharedState *gpa_sstate;
+	GpuPreAggRuntimeStat *gpa_rtstat;
 	size_t		ss_length = MAXALIGN(sizeof(GpuPreAggSharedState));
 
 	Assert(!IsParallelWorker());
 	if (dsm_addr)
 		gpa_sstate = dsm_addr;
 	else
-		gpa_sstate = MemoryContextAlloc(CurTransactionContext, ss_length);
+		gpa_sstate = MemoryContextAlloc(estate->es_query_cxt, ss_length);
 	memset(gpa_sstate, 0, ss_length);
 	gpa_sstate->ss_handle = (pcxt ? dsm_segment_handle(pcxt->seg) : UINT_MAX);
 	gpa_sstate->ss_length = ss_length;
 
-	return gpa_sstate;
+	gpa_rtstat = &gpa_sstate->gpa_rtstat;
+	SpinLockInit(&gpa_rtstat->c.lock);
+#if PG_VERSION_NUM < 100000
+	/* Because of restrictions at PG9.6, see createScanSharedState */
+	if (dsm_addr)
+	{
+		gpa_rtstat = MemoryContextAllocZero(estate->es_query_cxt,
+											sizeof(GpuPreAggRuntimeStat));
+		SpinLockInit(&gpa_rtstat->c.lock);
+	}
+#endif
+	gpas->gpa_sstate = gpa_sstate;
+	gpas->gpa_rtstat = gpa_rtstat;
 }
 
 /*

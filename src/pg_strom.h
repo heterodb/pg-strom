@@ -399,10 +399,28 @@ typedef struct
 	pg_atomic_uint64	fallback_count;
 } GpuTaskRuntimeStat;
 
-static inline void mergeGpuTaskRuntimeStat(GpuTaskState *gts,
-										   GpuTaskRuntimeStat *gt_rtstat)
+static inline void
+mergeGpuTaskRuntimeStatParallelWorker(GpuTaskState *gts,
+									  GpuTaskRuntimeStat *gt_rtstat)
 {
-#if PG_VERSION_NUM >= 100000
+	Assert(IsParallelWorker());
+	if (!gt_rtstat)
+		return;
+	SpinLockAcquire(&gt_rtstat->lock);
+	InstrAggNode(&gt_rtstat->outer_instrument,
+				 &gts->outer_instrument);
+	SpinLockRelease(&gt_rtstat->lock);
+	pg_atomic_add_fetch_u64(&gt_rtstat->nvme_count, gts->nvme_count);
+	pg_atomic_add_fetch_u64(&gt_rtstat->ccache_count, gts->ccache_count);
+	pg_atomic_add_fetch_u64(&gt_rtstat->brin_count, gts->outer_brin_count);
+	pg_atomic_add_fetch_u64(&gt_rtstat->fallback_count,
+							gts->num_cpu_fallbacks);
+}
+
+static inline void
+mergeGpuTaskRuntimeStat(GpuTaskState *gts,
+						GpuTaskRuntimeStat *gt_rtstat)
+{
 	InstrAggNode(&gts->outer_instrument,
 				 &gt_rtstat->outer_instrument);
 	gts->outer_instrument.tuplecount = (double)
@@ -413,7 +431,6 @@ static inline void mergeGpuTaskRuntimeStat(GpuTaskState *gts,
 	gts->ccache_count += pg_atomic_read_u64(&gt_rtstat->ccache_count);
 	gts->outer_brin_count += pg_atomic_read_u64(&gt_rtstat->brin_count);
 	gts->num_cpu_fallbacks += pg_atomic_read_u64(&gt_rtstat->fallback_count);
-#endif
 }
 
 /*
