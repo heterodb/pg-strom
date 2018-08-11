@@ -1029,7 +1029,10 @@ pgstromExecScanChunkParallel(GpuTaskState *gts,
 		{
 			Assert(scan->rs_parallel);
 			if (scan->rs_nblocks == 0)
+			{
+				/* no blocks to read */
 				break;
+			}
 			scan->rs_cblock = InvalidBlockNumber;
 			scan->rs_numblocks = 0;		/* force to get next blocks */
 			scan->rs_inited = true;
@@ -1115,7 +1118,7 @@ pgstromExecScanChunkParallel(GpuTaskState *gts,
 					goto retry_lock;
 				}
 			}
-			startblock = gtss->phscan.phs_startblock;
+			scan->rs_startblock = startblock = gtss->phscan.phs_startblock;
 			nr_allocated = gtss->nr_allocated;
 
 			if (nr_allocated >= (cl_long)scan->rs_nblocks)
@@ -1295,7 +1298,7 @@ pgstromExecScanChunkParallel(GpuTaskState *gts,
 			ss_report_location(relation, scan->rs_cblock);
 		/* end of the scan? */
 		if (scan->rs_cblock == scan->rs_startblock)
-            scan->rs_cblock = InvalidBlockNumber;
+			scan->rs_cblock = InvalidBlockNumber;
 	}
 	return pds;
 }
@@ -1320,7 +1323,11 @@ pgstromExecScanChunk(GpuTaskState *gts)
 	{
 		EState	   *estate = gts->css.ss.ps.state;
 
-		scan = heap_beginscan(rel, estate->es_snapshot, 0, NULL);
+		if (!gts->gtss)
+			scan = heap_beginscan(rel, estate->es_snapshot, 0, NULL);
+		else
+			scan = heap_beginscan_parallel(rel, &gts->gtss->phscan);
+
 		gts->css.ss.ss_currentScanDesc = scan;
 		/*
 		 * Try to choose NVMe-Strom, if relation is deployed on the supported
