@@ -1014,6 +1014,18 @@ activation:
 }
 
 /*
+ * ActivateGpuContext
+ */
+void
+ActivateGpuContext(GpuContext *gcontext)
+{
+	if (!gcontext->cuda_context)
+		activate_cuda_context(gcontext);
+	if (!gcontext->worker_is_running)
+		activate_cuda_workers(gcontext);
+}
+
+/*
  * DetachGpuContextIPCEntry
  */
 static void

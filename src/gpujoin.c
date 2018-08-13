@@ -2568,9 +2568,8 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	ProgramId		program_id;
 
 	/* activate a GpuContext for CUDA kernel execution */
-	gjs->gts.gcontext = AllocGpuContext(gj_info->optimal_gpu, false,
-										!explain_only,
-										!explain_only);
+	gjs->gts.gcontext = AllocGpuContext(gj_info->optimal_gpu,
+										false, false, false);
 	/*
 	 * Re-initialization of scan tuple-descriptor and projection-info,
 	 * because commit 1a8a4e5cde2b7755e11bde2ea7897bd650622d3e of
@@ -2955,7 +2954,10 @@ ExecReCheckGpuJoin(CustomScanState *node, TupleTableSlot *slot)
 static TupleTableSlot *
 ExecGpuJoin(CustomScanState *node)
 {
-	if (!GpuJoinInnerPreload((GpuTaskState *)node, NULL))
+	GpuJoinState *gjs = (GpuJoinState *) node;
+
+	ActivateGpuContext(gjs->gts.gcontext);
+	if (!GpuJoinInnerPreload(&gjs->gts, NULL))
 		return NULL;
 	return ExecScan(&node->ss,
 					(ExecScanAccessMtd) pgstromExecGpuTaskState,

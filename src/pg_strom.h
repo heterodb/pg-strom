@@ -760,6 +760,7 @@ extern GpuContext *AllocGpuContext(int cuda_dindex,
 								   bool never_use_mps,
 								   bool activate_context,
 								   bool activate_workers);
+extern void ActivateGpuContext(GpuContext *gcontext);
 extern GpuContext *GetGpuContext(GpuContext *gcontext);
 extern void PutGpuContext(GpuContext *gcontext);
 extern void SynchronizeGpuContext(GpuContext *gcontext);
