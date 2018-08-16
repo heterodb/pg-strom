@@ -94,6 +94,19 @@
         </ul>
     
 
+    <li class="toctree-l2"><a href="#nvme-strom">NVME-Stromカーネルモジュール</a></li>
+    
+        <ul>
+        
+            <li><a class="toctree-l3" href="#_6">モジュールの入手とインストール</a></li>
+        
+            <li><a class="toctree-l3" href="#_7">ライセンスの有効化</a></li>
+        
+            <li><a class="toctree-l3" href="#_8">カーネルモジュールパラメータ</a></li>
+        
+        </ul>
+    
+
     </ul>
 	    </li>
           
@@ -585,6 +598,85 @@ CREATE EXTENSION
 </code></pre>
 
 <p>以上でインストール作業は完了です。</p>
+<h1 id="nvme-strom">NVME-Stromカーネルモジュール</h1>
+<p>PG-Stromとは独立した別個のソフトウェアモジュールではありますが、SSD-to-GPUダイレクトSQL実行など、PG-Stromの中核機能と密接に関係しているNVME-Stromカーネルモジュールについても本節で説明します。</p>
+<h2 id="_6">モジュールの入手とインストール</h2>
+<p>他のPG-Strom関連モジュールと同様、NVME-Stromは(https://heterodb.github.io/swdc/)[HeteroDB Software Distribution Center]からフリーソフトウェアとして配布されています。すなわち、オープンソースソフトウェアではありません。</p>
+<p><code>heterodb-swdc</code>パッケージを導入済みであれば、<code>yum install</code>コマンドを用いてRPMパッケージをダウンロード、インストールする事ができます。</p>
+<pre><code>ここにyum install
+</code></pre>
+
+<h2 id="_7">ライセンスの有効化</h2>
+<p>NVME-Stromモジュールの全ての機能を利用するには、HeteroDB社が提供するライセンスの有効化が必要です。ライセンスなしで運用する事も可能ですが、その場合、下記の機能が制限を受けます。</p>
+<ul>
+<li>SSD-to-GPUダイレクトSQL実行におけるストライピング(md-raid0)対応</li>
+<li>In-memory columnar cacheにおける圧縮機能</li>
+</ul>
+<p>ライセンスファイルは以下のような形式でHeteroDB社から入手する事ができます。</p>
+<pre><code>IAwPOAC44m8LPMoV7bMykhxM27LAVrktspcaMHki8pI1fXrxq0KzqPDK4LzAA9n26IRAr/4ymB6QJ3/JxZOfYTVsbWq66vEtTAIuZVmJ/I888zRATj1hoofh1WbIwd3/ix28Cy1v16KCgLrlqPsra6NJScMOOHnuYoWWmWe4ml+n6GVEIb7ChUJvZbEZSO/DiLXosFc0N+MD4JTEU/XsBUP9ufacpbosW/YG2nOib3mpvhkfn7RQy2T5CVQeuGjM9Taj7DN5xipqU/Q0hZaZKA8EsZwsB6b4c7usdmPILyIpuTrWnEbjJ6worOQWHA+nL87xkDL1XYGH6UVc291QPLwk=
+----
+VERSION:1
+SERIAL_NR:HDB-TRIAL
+ISSUED_AT:2018-08-16
+EXPIRED_AT:2018-09-15
+NR_GPUS:1
+LICENSEE_ORG:Capybara Kingdom
+LICENSEE_NAME:Herr.Wassershweine
+LICENSEE_MAIL:capybara@examplecom
+</code></pre>
+
+<p>これを <code>/etc/heterodb.license</code> にコピーし、PostgreSQLを再起動します。</p>
+<p>以下のようにPostgreSQLの起動ログにライセンス情報が出力され、ライセンスの有効化が行われた事が分かります。</p>
+<pre><code>$ pg_ctl restart
+   :
+LOG:  PG-Strom built for PostgreSQL 11
+LOG:  PG-Strom: GPU0 Tesla V100-PCIE-16GB (5120 CUDA cores; 1380MHz, L2 6144kB), RAM 15.78GB (4096bits, 856MHz), CC 7.0
+   :
+   :
+LOG:  HeteroDB License: { &quot;version&quot; : 1, &quot;serial_nr&quot; : &quot;HDB-TRIAL&quot;, &quot;issued_at&quot; : &quot;16-Aug-2018&quot;, &quot;expired_at&quot; : &quot;15-Sep-2018&quot;, &quot;nr_gpus&quot; : 1, &quot;licensee_org&quot; : &quot;Capybara Kingdom&quot;, &quot;licensee_name&quot; : &quot;Herr.Wassershweine&quot;, &quot;licensee_mail&quot; : &quot;capybara@examplecom&quot; }
+LOG:  listening on IPv6 address &quot;::1&quot;, port 5432
+LOG:  listening on IPv4 address &quot;127.0.0.1&quot;, port 5432
+LOG:  listening on Unix socket &quot;/tmp/.s.PGSQL.5432&quot;
+   :
+</code></pre>
+
+<h2 id="_8">カーネルモジュールパラメータ</h2>
+<p>NVME-Stromカーネルモジュールにはパラメータがあります。</p>
+<table>
+<thead>
+<tr>
+<th align="center">パラメータ名</th>
+<th align="center">型</th>
+<th align="center">初期値</th>
+<th align="center">説明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="center"><code>verbose</code></td>
+<td align="center"><code>int</code></td>
+<td align="center"><code>0</code></td>
+<td align="center">詳細なデバッグ出力を行います。</td>
+</tr>
+<tr>
+<td align="center"><code>stat_info</code></td>
+<td align="center"><code>int</code></td>
+<td align="center"><code>1</code></td>
+<td align="center">性能情報の統計サポートを有効にします。</td>
+</tr>
+<tr>
+<td align="center"><code>fast_ssd_mode</code></td>
+<td align="center"><code>int</code></td>
+<td align="center"><code>0</code></td>
+<td align="center">高速なNVME-SSDに適した動作モードです。</td>
+</tr>
+</tbody>
+</table>
+<p><code>fast_ssd_mode</code>パラメータについての補足説明を付記します。</p>
+<p>NVME-StromモジュールがSSD-to-GPU間のダイレクトデータ転送の要求を受け取ると、まず該当するデータブロックがOSのページキャッシュに載っているかどうかを調べます。
+<code>fast_ssd_mode</code>が<code>0</code>の場合、データブロックが既にページキャッシュに載っていれば、その内容を呼び出し元のユーザ空間バッファに書き戻し、アプリケーションにCUDA APIを用いたHost-&gt;Device間のデータ転送を行うよう促します。これはPCIe x4接続のNVME-SSDなど比較的低速なデバイス向きの動作です。</p>
+<p>一方、PCIe x8接続の高速SSDを使用したり、複数のSSDをストライピング構成で使用する場合は、バッファ間コピーの後で改めてHost-&gt;Device間のデータ転送を行うよりも、SSD-to-GPUのダイレクトデータ転送を行った方が効率的である事もあります。<code>fast_ssd_mode</code>が<code>0</code>以外の場合、NVME-StromドライバはOSのページキャッシュの状態に関わらず、SSD-to-GPUダイレクトのデータ転送を行います。</p>
+<p>ただし、いかなる場合においてもOSのページキャッシュが dirty である場合にはSSD-to-GPUダイレクトでのデータ転送は行われません。</p>
               
             </div>
           </div>

@@ -94,6 +94,19 @@
         </ul>
     
 
+    <li class="toctree-l2"><a href="#nvme-strom-linux-kernel-module">NVME-Strom Linux kernel module</a></li>
+    
+        <ul>
+        
+            <li><a class="toctree-l3" href="#getting-the-module-and-installation">Getting the module and installation</a></li>
+        
+            <li><a class="toctree-l3" href="#license-activation">License activation</a></li>
+        
+            <li><a class="toctree-l3" href="#kernel-module-parameters">Kernel module parameters</a></li>
+        
+        </ul>
+    
+
     </ul>
 	    </li>
           
@@ -583,6 +596,83 @@ CREATE EXTENSION
 </code></pre>
 
 <p>That's all for the installation.</p>
+<h1 id="nvme-strom-linux-kernel-module">NVME-Strom Linux kernel module</h1>
+<p>This section also introduces NVME-Strom Linux kernel module which is closely cooperating with core features of PG-Strom like SSD-to-GPU Direct SQL Execution, even if it is an independent software module.</p>
+<h2 id="getting-the-module-and-installation">Getting the module and installation</h2>
+<p>Like other PG-Strom related modules, NVME-Strom is distributed at the (https://heterodb.github.io/swdc/)[HeteroDB Software Distribution Center] as a free software. In other words, it is not an open source software.</p>
+<p>If your system already setup <code>heterodb-swdc</code> package, <code>yum install</code> command downloads the RPM file and install the <code>nvme_strom</code> package.</p>
+<pre><code>ここにyum install
+</code></pre>
+
+<h2 id="license-activation">License activation</h2>
+<p>License activation is needed to use all the features of NVME-Strom module, provided by HeteroDB,Inc. You can operate the system without license, but features below are restricted.
+- Striping support (md-raid0) at SSD-to-GPU Direct SQL Execution
+- Compression support at in-memory columnar cache</p>
+<p>You can obtain a license file, like as a plain text below, from HeteroDB,Inc.</p>
+<pre><code>IAwPOAC44m8LPMoV7bMykhxM27LAVrktspcaMHki8pI1fXrxq0KzqPDK4LzAA9n26IRAr/4ymB6QJ3/JxZOfYTVsbWq66vEtTAIuZVmJ/I888zRATj1hoofh1WbIwd3/ix28Cy1v16KCgLrlqPsra6NJScMOOHnuYoWWmWe4ml+n6GVEIb7ChUJvZbEZSO/DiLXosFc0N+MD4JTEU/XsBUP9ufacpbosW/YG2nOib3mpvhkfn7RQy2T5CVQeuGjM9Taj7DN5xipqU/Q0hZaZKA8EsZwsB6b4c7usdmPILyIpuTrWnEbjJ6worOQWHA+nL87xkDL1XYGH6UVc291QPLwk=
+----
+VERSION:1
+SERIAL_NR:HDB-TRIAL
+ISSUED_AT:2018-08-16
+EXPIRED_AT:2018-09-15
+NR_GPUS:1
+LICENSEE_ORG:Capybara Kingdom
+LICENSEE_NAME:Herr.Wassershweine
+LICENSEE_MAIL:capybara@examplecom
+</code></pre>
+
+<p>Copy the license file to <code>/etc/heterodb.license</code>, then restart PostgreSQL.</p>
+<p>The startup log messages of PostgreSQL dumps the license information, and it tells us the license activation is successfully done.</p>
+<pre><code>$ pg_ctl restart
+   :
+LOG:  PG-Strom built for PostgreSQL 11
+LOG:  PG-Strom: GPU0 Tesla V100-PCIE-16GB (5120 CUDA cores; 1380MHz, L2 6144kB), RAM 15.78GB (4096bits, 856MHz), CC 7.0
+   :
+   :
+LOG:  HeteroDB License: { &quot;version&quot; : 1, &quot;serial_nr&quot; : &quot;HDB-TRIAL&quot;, &quot;issued_at&quot; : &quot;16-Aug-2018&quot;, &quot;expired_at&quot; : &quot;15-Sep-2018&quot;, &quot;nr_gpus&quot; : 1, &quot;licensee_org&quot; : &quot;Capybara Kingdom&quot;, &quot;licensee_name&quot; : &quot;Herr.Wassershweine&quot;, &quot;licensee_mail&quot; : &quot;capybara@examplecom&quot; }
+LOG:  listening on IPv6 address &quot;::1&quot;, port 5432
+LOG:  listening on IPv4 address &quot;127.0.0.1&quot;, port 5432
+LOG:  listening on Unix socket &quot;/tmp/.s.PGSQL.5432&quot;
+   :
+</code></pre>
+
+<h2 id="kernel-module-parameters">Kernel module parameters</h2>
+<p>NVME-Strom Linux kernel module has some parameters.</p>
+<table>
+<thead>
+<tr>
+<th align="center">Parameter</th>
+<th align="center">Type</th>
+<th align="center">Default</th>
+<th align="center">Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td align="center"><code>verbose</code></td>
+<td align="center"><code>int</code></td>
+<td align="center"><code>0</code></td>
+<td align="center">Enables detailed debug output</td>
+</tr>
+<tr>
+<td align="center"><code>stat_info</code></td>
+<td align="center"><code>int</code></td>
+<td align="center"><code>1</code></td>
+<td align="center">Enables performance statistics</td>
+</tr>
+<tr>
+<td align="center"><code>fast_ssd_mode</code></td>
+<td align="center"><code>int</code></td>
+<td align="center"><code>0</code></td>
+<td align="center">Operating mode for fast NVME-SSD</td>
+</tr>
+</tbody>
+</table>
+<p>Here is an extra explanation for <code>fast_ssd_mode</code> parameter.</p>
+<p>When NVME-Strom Linux kernel module get a request for SSD-to-GPU direct data transfer, first of all, it checks whether the required data blocks are caches on page-caches of operating system.
+If <code>fast_ssd_mode</code> is <code>0</code>, NVME-Strom once writes back page caches of the required data blocks to the userspace buffer of the caller, then indicates application to invoke normal host--&gt;device data transfer by CUDA API. It is suitable for non-fast NVME-SSDs such as PCIe x4 grade.</p>
+<p>On the other hands, SSD-to-GPU direct data transfer may be faster, if you use PCIe x8 grade fast NVME-SSD or use multiple SSDs in striping mode, than normal host--&gt;device data transfer after the buffer copy. If <code>fast_ssd_mode</code> is not <code>0</code>, NVME-Strom kicks SSD-to-GPU direct data transfer regardless of the page cache state.</p>
+<p>However, it shall never kicks SSD-to-GPU direct data transfer if page cache is dirty.</p>
               
             </div>
           </div>

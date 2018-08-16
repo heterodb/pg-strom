@@ -692,3 +692,183 @@ CREATE EXTENSION
 @en{
 That's all for the installation.
 }
+
+
+@ja:# NVME-Stromモジュール
+@en:# NVME-Strom module
+
+@ja{
+PG-Stromとは独立した別個のソフトウェアモジュールではありますが、SSD-to-GPUダイレクトSQL実行など、PG-Stromの中核機能と密接に関係しているNVME-Stromカーネルモジュールについても本節で説明します。
+}
+@en{
+This section also introduces NVME-Strom Linux kernel module which is closely cooperating with core features of PG-Strom like SSD-to-GPU Direct SQL Execution, even if it is an independent software module.
+}
+
+@ja:## モジュールの入手とインストール
+@en:## Getting the module and installation
+
+@ja{
+他のPG-Strom関連モジュールと同様、NVME-Stromは(https://heterodb.github.io/swdc/)[HeteroDB Software Distribution Center]からフリーソフトウェアとして配布されています。すなわち、オープンソースソフトウェアではありません。
+
+`heterodb-swdc`パッケージを導入済みであれば、`yum install`コマンドを用いてRPMパッケージをダウンロード、インストールする事ができます。
+}
+@en{
+Like other PG-Strom related modules, NVME-Strom is distributed at the (https://heterodb.github.io/swdc/)[HeteroDB Software Distribution Center] as a free software. In other words, it is not an open source software.
+
+If your system already setup `heterodb-swdc` package, `yum install` command downloads the RPM file and install the `nvme_strom` package.
+}
+
+```
+$ sudo yum install nvme_strom
+Loaded plugins: fastestmirror
+Loading mirror speeds from cached hostfile
+ * base: mirrors.cat.net
+ * epel: ftp.iij.ad.jp
+ * extras: mirrors.cat.net
+ * ius: mirrors.kernel.org
+ * updates: mirrors.cat.net
+Resolving Dependencies
+--> Running transaction check
+---> Package nvme_strom.x86_64 0:1.3-1.el7 will be installed
+--> Finished Dependency Resolution
+
+Dependencies Resolved
+
+================================================================================
+ Package             Arch            Version            Repository         Size
+================================================================================
+Installing:
+ nvme_strom          x86_64          1.3-1.el7          heterodb          273 k
+
+Transaction Summary
+================================================================================
+Install  1 Package
+
+Total download size: 273 k
+Installed size: 1.5 M
+Is this ok [y/d/N]: y
+Downloading packages:
+No Presto metadata available for heterodb
+nvme_strom-1.3-1.el7.x86_64.rpm                            | 273 kB   00:00
+Running transaction check
+Running transaction test
+Transaction test succeeded
+Running transaction
+  Installing : nvme_strom-1.3-1.el7.x86_64                                  1/1
+  :
+<snip>
+  :
+DKMS: install completed.
+  Verifying  : nvme_strom-1.3-1.el7.x86_64                                  1/1
+
+Installed:
+  nvme_strom.x86_64 0:1.3-1.el7
+
+Complete!
+```
+
+@ja:## ライセンスの有効化
+@en:## License activation
+
+@ja{
+NVME-Stromモジュールの全ての機能を利用するには、HeteroDB社が提供するライセンスの有効化が必要です。ライセンスなしで運用する事も可能ですが、その場合、下記の機能が制限を受けます。
+
+- SSD-to-GPUダイレクトSQL実行におけるストライピング(md-raid0)対応
+- In-memory columnar cacheにおける圧縮機能
+}
+
+@en{
+License activation is needed to use all the features of NVME-Strom module, provided by HeteroDB,Inc. You can operate the system without license, but features below are restricted.
+- Striping support (md-raid0) at SSD-to-GPU Direct SQL Execution
+- Compression support at in-memory columnar cache
+}
+
+@ja{
+ライセンスファイルは以下のような形式でHeteroDB社から入手する事ができます。
+}
+@en{
+You can obtain a license file, like as a plain text below, from HeteroDB,Inc.
+}
+```
+IAwPOAC44m8LPMoV7bMykhxM27LAVrktspcaMHki8pI1fXrxq0KzqPDK4LzAA9n26IRAr/4ymB6QJ3/JxZOfYTVsbWq66vEtTAIuZVmJ/I888zRATj1hoofh1WbIwd3/ix28Cy1v16KCgLrlqPsra6NJScMOOHnuYoWWmWe4ml+n6GVEIb7ChUJvZbEZSO/DiLXosFc0N+MD4JTEU/XsBUP9ufacpbosW/YG2nOib3mpvhkfn7RQy2T5CVQeuGjM9Taj7DN5xipqU/Q0hZaZKA8EsZwsB6b4c7usdmPILyIpuTrWnEbjJ6worOQWHA+nL87xkDL1XYGH6UVc291QPLwk=
+----
+VERSION:1
+SERIAL_NR:HDB-TRIAL
+ISSUED_AT:2018-08-16
+EXPIRED_AT:2018-09-15
+NR_GPUS:1
+LICENSEE_ORG:Capybara Kingdom
+LICENSEE_NAME:Herr.Wassershweine
+LICENSEE_MAIL:capybara@example.com
+```
+
+@ja{
+これを `/etc/heterodb.license` にコピーし、PostgreSQLを再起動します。
+
+以下のようにPostgreSQLの起動ログにライセンス情報が出力され、ライセンスの有効化が行われた事が分かります。
+}
+@en{
+Copy the license file to `/etc/heterodb.license`, then restart PostgreSQL.
+
+The startup log messages of PostgreSQL dumps the license information, and it tells us the license activation is successfully done.
+}
+
+```
+$ pg_ctl restart
+   :
+LOG:  PG-Strom built for PostgreSQL 11
+LOG:  PG-Strom: GPU0 Tesla V100-PCIE-16GB (5120 CUDA cores; 1380MHz, L2 6144kB), RAM 15.78GB (4096bits, 856MHz), CC 7.0
+   :
+   :
+LOG:  HeteroDB License: { "version" : 1, "serial_nr" : "HDB-TRIAL", "issued_at" : "16-Aug-2018", "expired_at" : "15-Sep-2018", "nr_gpus" : 1, "licensee_org" : "Capybara Kingdom", "licensee_name" : "Herr.Wassershweine", "licensee_mail" : "capybara@example.com" }
+LOG:  listening on IPv6 address "::1", port 5432
+LOG:  listening on IPv4 address "127.0.0.1", port 5432
+LOG:  listening on Unix socket "/tmp/.s.PGSQL.5432"
+   :
+```
+
+@ja:## カーネルモジュールパラメータ
+@en:## Kernel module parameters
+
+@ja{
+NVME-Stromカーネルモジュールにはパラメータがあります。
+
+|パラメータ名   |型   |初期値|説明|
+|:-------------:|:---:|:-:|:-----:|
+|`verbose`      |`int`|`0`|詳細なデバッグ出力を行います。|
+|`stat_info`    |`int`|`1`|性能情報の統計サポートを有効にします。|
+|`fast_ssd_mode`|`int`|`0`|高速なNVME-SSDに適した動作モードです。|
+
+}
+@en{
+NVME-Strom Linux kernel module has some parameters.
+
+|Parameter      |Type |Default|Description|
+|:-------------:|:---:|:-:|:-----:|
+|`verbose`      |`int`|`0`|Enables detailed debug output|
+|`stat_info`    |`int`|`1`|Enables performance statistics|
+|`fast_ssd_mode`|`int`|`0`|Operating mode for fast NVME-SSD|
+}
+
+@ja{
+`fast_ssd_mode`パラメータについての補足説明を付記します。
+
+NVME-StromモジュールがSSD-to-GPU間のダイレクトデータ転送の要求を受け取ると、まず該当するデータブロックがOSのページキャッシュに載っているかどうかを調べます。
+`fast_ssd_mode`が`0`の場合、データブロックが既にページキャッシュに載っていれば、その内容を呼び出し元のユーザ空間バッファに書き戻し、アプリケーションにCUDA APIを用いたHost->Device間のデータ転送を行うよう促します。これはPCIe x4接続のNVME-SSDなど比較的低速なデバイス向きの動作です。
+
+一方、PCIe x8接続の高速SSDを使用したり、複数のSSDをストライピング構成で使用する場合は、バッファ間コピーの後で改めてHost->Device間のデータ転送を行うよりも、SSD-to-GPUのダイレクトデータ転送を行った方が効率的である事もあります。`fast_ssd_mode`が`0`以外の場合、NVME-StromドライバはOSのページキャッシュの状態に関わらず、SSD-to-GPUダイレクトのデータ転送を行います。
+
+ただし、いかなる場合においてもOSのページキャッシュが dirty である場合にはSSD-to-GPUダイレクトでのデータ転送は行われません。
+}
+
+@en{
+Here is an extra explanation for `fast_ssd_mode` parameter.
+
+When NVME-Strom Linux kernel module get a request for SSD-to-GPU direct data transfer, first of all, it checks whether the required data blocks are caches on page-caches of operating system.
+If `fast_ssd_mode` is `0`, NVME-Strom once writes back page caches of the required data blocks to the userspace buffer of the caller, then indicates application to invoke normal host-->device data transfer by CUDA API. It is suitable for non-fast NVME-SSDs such as PCIe x4 grade.
+
+On the other hands, SSD-to-GPU direct data transfer may be faster, if you use PCIe x8 grade fast NVME-SSD or use multiple SSDs in striping mode, than normal host-->device data transfer after the buffer copy. If `fast_ssd_mode` is not `0`, NVME-Strom kicks SSD-to-GPU direct data transfer regardless of the page cache state.
+
+However, it shall never kicks SSD-to-GPU direct data transfer if page cache is dirty.
+}
+
