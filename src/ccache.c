@@ -107,8 +107,8 @@ static bool			ccache_builder_got_sigterm = false;
 static HTAB		   *ccache_relations_htab = NULL;
 static oidvector   *ccache_relations_oid = NULL;
 static Oid			ccache_invalidator_func_oid = InvalidOid;
-static cl_ulong		PG_fnoid_gpulz_compression = InvalidOid;
-static cl_ulong		PG_fnoid_gpulz_decompression = InvalidOid;
+static cl_ulong		PG_fnoid_gpulz_compress = InvalidOid;
+static cl_ulong		PG_fnoid_gpulz_decompress = InvalidOid;
 
 /* functions */
 void ccache_builder_main(Datum arg);
@@ -798,8 +798,8 @@ ccache_callback_on_procoid(Datum arg, int cacheid, uint32 hashvalue)
 			ccache_callback_on_reloid(0, RELOID, 0);
 		}
 	}
-	PG_fnoid_gpulz_compression = InvalidOid;
-	PG_fnoid_gpulz_decompression = InvalidOid;
+	PG_fnoid_gpulz_compress = InvalidOid;
+	PG_fnoid_gpulz_decompress = InvalidOid;
 }
 
 /*
@@ -1398,14 +1398,14 @@ vl_datum_compression(void *datum, int vl_comression)
  */
 #define OidVectorSize(n)	offsetof(oidvector, values[(n)])
 
-static bytea *
-pgstrom_gpulz_compression(void *buffer, size_t nbytes)
+static struct varlena *
+ccache_gpulz_compression(void *buffer, size_t nbytes)
 {
 	FmgrInfo	flinfo;
 	FunctionCallInfoData fcinfo;
 	Datum		result;
 
-	if (PG_fnoid_gpulz_compression == InvalidOid)
+	if (PG_fnoid_gpulz_compress == InvalidOid)
 	{
 		Oid		namespace_oid = get_namespace_oid("pgstrom", false);
 		Oid		func_oid;
@@ -1425,22 +1425,21 @@ pgstrom_gpulz_compression(void *buffer, size_t nbytes)
 		u.func_args.values[1] = INT8OID;
 
 		func_oid = GetSysCacheOid3(PROCNAMEARGSNSP,
-								   PointerGetDatum("gpulz_compression"),
+								   PointerGetDatum("gpulz_compress"),
 								   PointerGetDatum(&u.func_args),
 								   ObjectIdGetDatum(namespace_oid));
 		if (OidIsValid(func_oid))
-			PG_fnoid_gpulz_compression = func_oid;
+			PG_fnoid_gpulz_compress = func_oid;
 		else
-			PG_fnoid_gpulz_compression = ULONG_MAX;
+			PG_fnoid_gpulz_compress = ULONG_MAX;
 	}
-	if (PG_fnoid_gpulz_compression == ULONG_MAX)
+	if (PG_fnoid_gpulz_compress == ULONG_MAX)
 		return NULL;		/* not supported */
-
 	/*
 	 * pgstrom.gpulz_compression(buffer, nbytes) can return NULL,
 	 * so unable to use OidFunctionCall2() here.
 	 */
-	fmgr_info(PG_fnoid_gpulz_compression, &flinfo);
+	fmgr_info(PG_fnoid_gpulz_compress, &flinfo);
 	InitFunctionCallInfoData(fcinfo, &flinfo, 2, InvalidOid, NULL, NULL);
 	fcinfo.arg[0] = PointerGetDatum(buffer);
 	fcinfo.arg[1] = Int64GetDatum(nbytes);
@@ -1450,15 +1449,15 @@ pgstrom_gpulz_compression(void *buffer, size_t nbytes)
 
 	if (fcinfo.isnull)
 		return NULL;
-	return DatumGetByteaP(result);
+	return (struct varlena *)PG_DETOAST_DATUM(result);
 }
 
 static bytea *
-pgstrom_gpulz_decompression(bytea *compressed)
+ccache_gpulz_decompress(bytea *compressed)
 {
 	Datum		result;
 
-	if (PG_fnoid_gpulz_decompression == InvalidOid)
+	if (PG_fnoid_gpulz_decompress == InvalidOid)
 	{
 		Oid		namespace_oid = get_namespace_oid("pgstrom", false);
 		Oid		func_oid;
@@ -1477,18 +1476,18 @@ pgstrom_gpulz_decompression(bytea *compressed)
 		u.func_args.values[0] = BYTEAOID;
 
 		func_oid = GetSysCacheOid3(PROCNAMEARGSNSP,
-								   PointerGetDatum("gpulz_decompression"),
+								   PointerGetDatum("gpulz_decompress"),
 								   PointerGetDatum(&u.func_args),
 								   ObjectIdGetDatum(namespace_oid));
 		if (OidIsValid(func_oid))
-			PG_fnoid_gpulz_decompression = func_oid;
+			PG_fnoid_gpulz_decompress = func_oid;
 		else
-			PG_fnoid_gpulz_decompression = ULONG_MAX;
+			PG_fnoid_gpulz_decompress = ULONG_MAX;
 	}
-	if (PG_fnoid_gpulz_decompression == ULONG_MAX)
+	if (PG_fnoid_gpulz_decompress == ULONG_MAX)
 		return NULL;		/* not supported */
 
-	result = OidFunctionCall1(PG_fnoid_gpulz_decompression,
+	result = OidFunctionCall1(PG_fnoid_gpulz_decompress,
 							  PointerGetDatum(compressed));
 	return DatumGetByteaP(result);
 }
@@ -1802,7 +1801,8 @@ void
 ccache_copy_buffer_to_kds(kern_data_store *kds,
 						  TupleDesc tupdesc,
 						  ccacheBuffer *cc_buf,
-						  bits8 *rowmap, size_t visible_nitems)
+						  bits8 *rowmap, size_t visible_nitems,
+						  bool try_gpulz_compression)
 {
 	size_t	nrooms = (!rowmap ? cc_buf->nitems : visible_nitems);
 	char   *pos;
@@ -1824,6 +1824,7 @@ ccache_copy_buffer_to_kds(kern_data_store *kds,
 		kern_colmeta   *cmeta = &kds->colmeta[j];
 		size_t			offset;
 		size_t			nbytes;
+		struct varlena *compress;
 
 		if (j < tupdesc->natts)
 			attr = tupleDescAttr(tupdesc, j);
@@ -1842,8 +1843,8 @@ ccache_copy_buffer_to_kds(kern_data_store *kds,
 			vl_dict_key **vl_entries = (vl_dict_key **)cc_buf->values[j];
 			vl_dict_key *entry;
 
-            for (i=0, k=0; i < cc_buf->nitems; i++)
-            {
+			for (i=0, k=0; i < cc_buf->nitems; i++)
+			{
 				/* only visible rows */
 				if (rowmap && att_isnull(i, rowmap))
 					continue;
@@ -1867,10 +1868,15 @@ ccache_copy_buffer_to_kds(kern_data_store *kds,
 				k++;
 			}
 			Assert(k == nrooms);
+			if (try_gpulz_compression)
+				compress = ccache_gpulz_compression(base, ((char *)extra -
+														   (char *)base));
 			pos += (char *)extra - (char *)base;
 		}
 		else if (!rowmap)
 		{
+			char	   *base = pos;
+
 			/* fixed-length attribute without row-visibility map */
 			cmeta->va_offset = __kds_packed(pos - (char *)kds);
 			nbytes = MAXALIGN(TYPEALIGN(cmeta->attalign,
@@ -1887,9 +1893,13 @@ ccache_copy_buffer_to_kds(kern_data_store *kds,
 				memcpy(pos, cc_buf->nullmap[j], nbytes);
 				pos += nbytes;
 			}
+
+			if (try_gpulz_compression)
+				compress = ccache_gpulz_compression(base, pos - base);
 		}
 		else
 		{
+			char	   *base = pos;
 			bool		meet_null = false;
 			char	   *src = cc_buf->values[j];
 			bits8	   *d_nullmap;
@@ -1931,6 +1941,9 @@ ccache_copy_buffer_to_kds(kern_data_store *kds,
 				cmeta->extra_sz = __kds_packed(nbytes);
 				pos += nbytes;
 			}
+
+			if (try_gpulz_compression)
+				compress = ccache_gpulz_compression(base, pos - base);
 		}
 	}
 	kds->nitems = nrooms;
@@ -2228,8 +2241,13 @@ __ccache_preload_chunk(ccacheChunk *cc_chunk,
 				   O_RDWR | O_CREAT | O_TRUNC, 0600);
 	if (fdesc < 0)
 		elog(ERROR, "failed on openat('%s'): %m", fname);
-	if (fallocate(fdesc, 0, 0, length) < 0)
+	while (fallocate(fdesc, 0, 0, length) < 0)
 	{
+		if (errno == EINTR)
+		{
+			CHECK_FOR_INTERRUPTS();
+			continue;
+		}
 		close(fdesc);
 		elog(ERROR, "failed on fallocate: %m");
 	}
@@ -2242,7 +2260,7 @@ __ccache_preload_chunk(ccacheChunk *cc_chunk,
 		close(fdesc);
 		elog(ERROR, "failed on mmap: %m");
 	}
-	ccache_copy_buffer_to_kds(kds, tupdesc, &cc_buf, NULL, 0);
+	ccache_copy_buffer_to_kds(kds, tupdesc, &cc_buf, NULL, 0, true);
 	if (munmap(kds, length) != 0)
 		elog(WARNING, "failed on munmap: %m");
 	if (close(fdesc) != 0)

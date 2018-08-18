@@ -1234,7 +1234,7 @@ gstore_fdw_alloc_pgstrom_buffer(Relation frel,
 	kds = MemoryContextAllocHuge(gs_buffer->memcxt, length);
 
 	/* 3. write out kern_data_store */
-	ccache_copy_buffer_to_kds(kds, tupdesc, cc_buf, rowmap, nrooms);
+	ccache_copy_buffer_to_kds(kds, tupdesc, cc_buf, rowmap, nrooms, false);
 	Assert(kds->length <= length);
 
 	gs_buffer->rawsize = kds->length;
@@ -2187,8 +2187,8 @@ gstore_open_device_memory(GpuContext *gcontext, Relation frel)
 		elog(ERROR, "failed on gpuMemAllocManaged: %s", errorText(rc));
 
 	ccache_copy_buffer_to_kds((kern_data_store *)m_deviceptr,
-							  tupdesc, &gs_buffer->cc_buf, rowmap, nrooms);
-
+							  tupdesc, &gs_buffer->cc_buf,
+							  rowmap, nrooms, false);
 	return m_deviceptr;
 }
 

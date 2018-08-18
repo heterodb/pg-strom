@@ -1273,7 +1273,8 @@ extern void ccache_copy_buffer_from_kds(TupleDesc tupdesc,
 extern void ccache_copy_buffer_to_kds(kern_data_store *kds,
 									  TupleDesc tupdesc,
 									  ccacheBuffer *cc_buf,
-									  bits8 *rowmap, size_t visible_nitems);
+									  bits8 *rowmap, size_t visible_nitems,
+									  bool try_gpulz_compression);
 extern void pgstrom_ccache_extract_row(TupleDesc tupdesc,
 									   size_t nitems,
 									   size_t nrooms,
