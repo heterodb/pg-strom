@@ -1359,6 +1359,7 @@ extern double	pgstrom_nrows_growth_ratio_limit;
 extern double	pgstrom_nrows_growth_margin;
 extern double	pgstrom_chunk_size_margin;
 extern Size		pgstrom_chunk_size(void);
+extern TimestampTz commercial_license_expired_at(void);
 
 extern Path *pgstrom_create_dummy_path(PlannerInfo *root,
 									   Path *subpath,

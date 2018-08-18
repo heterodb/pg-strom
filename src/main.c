@@ -438,15 +438,28 @@ check_nvidia_mps(void)
 }
 
 /*
+ * commercial_license_expired_at
+ */
+static TimestampTz	commercial_license_expired_timestamp = MIN_TIMESTAMP - 1;
+
+TimestampTz
+commercial_license_expired_at(void)
+{
+	return commercial_license_expired_timestamp;
+}
+
+/*
  * pgstrom_license_query
  */
 static bool
 commercial_license_query(StringInfo buf)
 {
 	StromCmd__LicenseInfo cmd;
-	int		fdesc;
-	int		i_year, i_mon, i_day;
-	int		e_year, e_mon, e_day;
+	int			fdesc;
+	int			i_year, i_mon, i_day;
+	int			e_year, e_mon, e_day;
+	struct tm	tm;
+	TimestampTz	tv;
 
 	memset(&cmd, 0, sizeof(StromCmd__LicenseInfo));
 	fdesc = open(NVME_STROM_IOCTL_PATHNAME, O_RDONLY);
@@ -491,6 +504,20 @@ commercial_license_query(StringInfo buf)
 		close(fdesc);
 		return false;
 	}
+
+	/* update expired timestamp */
+	memset(&tm, 0, sizeof(struct tm));
+	tm.tm_year = e_year;
+	tm.tm_mon  = e_mon;
+	tm.tm_mday = e_day;
+	tv = (TimestampTz) mktime(&tm) -
+		((POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * SECS_PER_DAY);
+	tv = (tv + SECS_PER_DAY - 1) * USECS_PER_SEC;
+	if (!IS_VALID_TIMESTAMP(commercial_license_expired_timestamp) ||
+		tv > commercial_license_expired_timestamp)
+		commercial_license_expired_timestamp = tv;
+
+	/* make a JSON string  */
 	appendStringInfo(
 		buf,
 		"{ \"version\" : %u"
