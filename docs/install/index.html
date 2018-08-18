@@ -94,7 +94,7 @@
         </ul>
     
 
-    <li class="toctree-l2"><a href="#nvme-strom-linux-kernel-module">NVME-Strom Linux kernel module</a></li>
+    <li class="toctree-l2"><a href="#nvme-strom-module">NVME-Strom module</a></li>
     
         <ul>
         
@@ -596,12 +596,57 @@ CREATE EXTENSION
 </code></pre>
 
 <p>That's all for the installation.</p>
-<h1 id="nvme-strom-linux-kernel-module">NVME-Strom Linux kernel module</h1>
+<h1 id="nvme-strom-module">NVME-Strom module</h1>
 <p>This section also introduces NVME-Strom Linux kernel module which is closely cooperating with core features of PG-Strom like SSD-to-GPU Direct SQL Execution, even if it is an independent software module.</p>
 <h2 id="getting-the-module-and-installation">Getting the module and installation</h2>
 <p>Like other PG-Strom related modules, NVME-Strom is distributed at the (https://heterodb.github.io/swdc/)[HeteroDB Software Distribution Center] as a free software. In other words, it is not an open source software.</p>
 <p>If your system already setup <code>heterodb-swdc</code> package, <code>yum install</code> command downloads the RPM file and install the <code>nvme_strom</code> package.</p>
-<pre><code>ここにyum install
+<pre><code>$ sudo yum install nvme_strom
+Loaded plugins: fastestmirror
+Loading mirror speeds from cached hostfile
+ * base: mirrors.cat.net
+ * epel: ftp.iij.ad.jp
+ * extras: mirrors.cat.net
+ * ius: mirrors.kernel.org
+ * updates: mirrors.cat.net
+Resolving Dependencies
+--&gt; Running transaction check
+---&gt; Package nvme_strom.x86_64 0:1.3-1.el7 will be installed
+--&gt; Finished Dependency Resolution
+
+Dependencies Resolved
+
+================================================================================
+ Package             Arch            Version            Repository         Size
+================================================================================
+Installing:
+ nvme_strom          x86_64          1.3-1.el7          heterodb          273 k
+
+Transaction Summary
+================================================================================
+Install  1 Package
+
+Total download size: 273 k
+Installed size: 1.5 M
+Is this ok [y/d/N]: y
+Downloading packages:
+No Presto metadata available for heterodb
+nvme_strom-1.3-1.el7.x86_64.rpm                            | 273 kB   00:00
+Running transaction check
+Running transaction test
+Transaction test succeeded
+Running transaction
+  Installing : nvme_strom-1.3-1.el7.x86_64                                  1/1
+  :
+&lt;snip&gt;
+  :
+DKMS: install completed.
+  Verifying  : nvme_strom-1.3-1.el7.x86_64                                  1/1
+
+Installed:
+  nvme_strom.x86_64 0:1.3-1.el7
+
+Complete!
 </code></pre>
 
 <h2 id="license-activation">License activation</h2>

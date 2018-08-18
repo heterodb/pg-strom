@@ -94,7 +94,7 @@
         </ul>
     
 
-    <li class="toctree-l2"><a href="#nvme-strom">NVME-Stromカーネルモジュール</a></li>
+    <li class="toctree-l2"><a href="#nvme-strom">NVME-Stromモジュール</a></li>
     
         <ul>
         
@@ -598,12 +598,57 @@ CREATE EXTENSION
 </code></pre>
 
 <p>以上でインストール作業は完了です。</p>
-<h1 id="nvme-strom">NVME-Stromカーネルモジュール</h1>
+<h1 id="nvme-strom">NVME-Stromモジュール</h1>
 <p>PG-Stromとは独立した別個のソフトウェアモジュールではありますが、SSD-to-GPUダイレクトSQL実行など、PG-Stromの中核機能と密接に関係しているNVME-Stromカーネルモジュールについても本節で説明します。</p>
 <h2 id="_6">モジュールの入手とインストール</h2>
 <p>他のPG-Strom関連モジュールと同様、NVME-Stromは(https://heterodb.github.io/swdc/)[HeteroDB Software Distribution Center]からフリーソフトウェアとして配布されています。すなわち、オープンソースソフトウェアではありません。</p>
 <p><code>heterodb-swdc</code>パッケージを導入済みであれば、<code>yum install</code>コマンドを用いてRPMパッケージをダウンロード、インストールする事ができます。</p>
-<pre><code>ここにyum install
+<pre><code>$ sudo yum install nvme_strom
+Loaded plugins: fastestmirror
+Loading mirror speeds from cached hostfile
+ * base: mirrors.cat.net
+ * epel: ftp.iij.ad.jp
+ * extras: mirrors.cat.net
+ * ius: mirrors.kernel.org
+ * updates: mirrors.cat.net
+Resolving Dependencies
+--&gt; Running transaction check
+---&gt; Package nvme_strom.x86_64 0:1.3-1.el7 will be installed
+--&gt; Finished Dependency Resolution
+
+Dependencies Resolved
+
+================================================================================
+ Package             Arch            Version            Repository         Size
+================================================================================
+Installing:
+ nvme_strom          x86_64          1.3-1.el7          heterodb          273 k
+
+Transaction Summary
+================================================================================
+Install  1 Package
+
+Total download size: 273 k
+Installed size: 1.5 M
+Is this ok [y/d/N]: y
+Downloading packages:
+No Presto metadata available for heterodb
+nvme_strom-1.3-1.el7.x86_64.rpm                            | 273 kB   00:00
+Running transaction check
+Running transaction test
+Transaction test succeeded
+Running transaction
+  Installing : nvme_strom-1.3-1.el7.x86_64                                  1/1
+  :
+&lt;snip&gt;
+  :
+DKMS: install completed.
+  Verifying  : nvme_strom-1.3-1.el7.x86_64                                  1/1
+
+Installed:
+  nvme_strom.x86_64 0:1.3-1.el7
+
+Complete!
 </code></pre>
 
 <h2 id="_7">ライセンスの有効化</h2>
