@@ -301,6 +301,7 @@ gpulz_decompress(const char *source, cl_int slen, char *dest, cl_int rawsize)
 
 /* SQL stubs */
 Datum pgstrom_gpulz_compress(PG_FUNCTION_ARGS);
+Datum pgstrom_gpulz_compress_raw(PG_FUNCTION_ARGS);
 Datum pgstrom_gpulz_decompress(PG_FUNCTION_ARGS);
 
 Datum
@@ -318,7 +319,10 @@ pgstrom_gpulz_compress(PG_FUNCTION_ARGS)
 
 	dstlen = gpulz_compress(VARDATA(src), rawsize, dst->data);
 	if (dstlen < 0)
-		elog(ERROR, "GPULz: unable to compress the data");
+	{
+		elog(NOTICE, "GPULz: unable to compress the data");
+		PG_RETURN_NULL();
+	}
 	SET_VARSIZE(dst, offsetof(GPULZ_compressed, data) + dstlen);
 
 	elog(INFO, "GPULz: %d -> %d (%.2f%%)",
@@ -327,6 +331,36 @@ pgstrom_gpulz_compress(PG_FUNCTION_ARGS)
 	PG_RETURN_POINTER(dst);
 }
 PG_FUNCTION_INFO_V1(pgstrom_gpulz_compress);
+
+Datum
+pgstrom_gpulz_compress_raw(PG_FUNCTION_ARGS)
+{
+	char   *rawdata = PG_GETARG_POINTER(0);		/* internal */
+	int64	rawsize = PG_GETARG_INT64(1);		/* int8 */
+	GPULZ_compressed *dst;
+	int		dstlen;
+
+	if (rawsize < 0)
+		elog(ERROR, "GPULz: invalid rawsize %ld", rawsize);
+	dst = palloc(offsetof(GPULZ_compressed, data) + rawsize);
+	dst->magic = GPULZ_MAGIC_NUMBER;
+	dst->blocksz = GPULZ_BLOCK_SIZE;
+	dst->rawsize = (cl_uint)rawsize;
+
+	dstlen = gpulz_compress(rawdata, rawsize, dst->data);
+	if (dstlen < 0)
+	{
+		elog(NOTICE, "GPULz: unable to compress the data");
+		PG_RETURN_NULL();
+	}
+	SET_VARSIZE(dst, offsetof(GPULZ_compressed, data) + dstlen);
+
+	elog(INFO, "GPULz: %ld -> %d (%.2f%%)",
+		 rawsize, dstlen, 100.0 * (double)dstlen / (double)rawsize);
+
+	PG_RETURN_POINTER(dst);
+}
+PG_FUNCTION_INFO_V1(pgstrom_gpulz_compress_raw);
 
 Datum
 pgstrom_gpulz_decompress(PG_FUNCTION_ARGS)

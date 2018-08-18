@@ -107,6 +107,8 @@ static bool			ccache_builder_got_sigterm = false;
 static HTAB		   *ccache_relations_htab = NULL;
 static oidvector   *ccache_relations_oid = NULL;
 static Oid			ccache_invalidator_func_oid = InvalidOid;
+static cl_ulong		PG_fnoid_gpulz_compression = InvalidOid;
+static cl_ulong		PG_fnoid_gpulz_decompression = InvalidOid;
 
 /* functions */
 void ccache_builder_main(Datum arg);
@@ -796,6 +798,8 @@ ccache_callback_on_procoid(Datum arg, int cacheid, uint32 hashvalue)
 			ccache_callback_on_reloid(0, RELOID, 0);
 		}
 	}
+	PG_fnoid_gpulz_compression = InvalidOid;
+	PG_fnoid_gpulz_decompression = InvalidOid;
 }
 
 /*
@@ -1387,6 +1391,106 @@ vl_datum_compression(void *datum, int vl_comression)
 		elog(ERROR, "unknown format %d", vl_comression);
 
 	return vl;
+}
+
+/*
+ * gpulz_compression / gpulz_decompression
+ */
+#define OidVectorSize(n)	offsetof(oidvector, values[(n)])
+
+static bytea *
+pgstrom_gpulz_compression(void *buffer, size_t nbytes)
+{
+	FmgrInfo	flinfo;
+	FunctionCallInfoData fcinfo;
+	Datum		result;
+
+	if (PG_fnoid_gpulz_compression == InvalidOid)
+	{
+		Oid		namespace_oid = get_namespace_oid("pgstrom", false);
+		Oid		func_oid;
+		union {
+			oidvector	func_args;
+			char		__buf[OidVectorSize(2)];
+		} u;
+
+		memset(&u, 0, sizeof(u));
+		SET_VARSIZE(&u, OidVectorSize(2));
+		u.func_args.ndim = 1;
+		u.func_args.dataoffset = 0;
+		u.func_args.elemtype = OIDOID;
+		u.func_args.dim1 = 2;
+		u.func_args.lbound1 = 0;
+		u.func_args.values[0] = INTERNALOID;
+		u.func_args.values[1] = INT8OID;
+
+		func_oid = GetSysCacheOid3(PROCNAMEARGSNSP,
+								   PointerGetDatum("gpulz_compression"),
+								   PointerGetDatum(&u.func_args),
+								   ObjectIdGetDatum(namespace_oid));
+		if (OidIsValid(func_oid))
+			PG_fnoid_gpulz_compression = func_oid;
+		else
+			PG_fnoid_gpulz_compression = ULONG_MAX;
+	}
+	if (PG_fnoid_gpulz_compression == ULONG_MAX)
+		return NULL;		/* not supported */
+
+	/*
+	 * pgstrom.gpulz_compression(buffer, nbytes) can return NULL,
+	 * so unable to use OidFunctionCall2() here.
+	 */
+	fmgr_info(PG_fnoid_gpulz_compression, &flinfo);
+	InitFunctionCallInfoData(fcinfo, &flinfo, 2, InvalidOid, NULL, NULL);
+	fcinfo.arg[0] = PointerGetDatum(buffer);
+	fcinfo.arg[1] = Int64GetDatum(nbytes);
+	fcinfo.argnull[0] = false;
+	fcinfo.argnull[1] = false;
+	result = FunctionCallInvoke(&fcinfo);
+
+	if (fcinfo.isnull)
+		return NULL;
+	return DatumGetByteaP(result);
+}
+
+static bytea *
+pgstrom_gpulz_decompression(bytea *compressed)
+{
+	Datum		result;
+
+	if (PG_fnoid_gpulz_decompression == InvalidOid)
+	{
+		Oid		namespace_oid = get_namespace_oid("pgstrom", false);
+		Oid		func_oid;
+		union {
+			oidvector	func_args;
+			char		__buf[OidVectorSize(1)];
+		} u;
+
+		memset(&u, 0, sizeof(u));
+		SET_VARSIZE(&u, OidVectorSize(1));
+		u.func_args.ndim = 1;
+		u.func_args.dataoffset = 0;
+		u.func_args.elemtype = OIDOID;
+		u.func_args.dim1 = 1;
+		u.func_args.lbound1 = 0;
+		u.func_args.values[0] = BYTEAOID;
+
+		func_oid = GetSysCacheOid3(PROCNAMEARGSNSP,
+								   PointerGetDatum("gpulz_decompression"),
+								   PointerGetDatum(&u.func_args),
+								   ObjectIdGetDatum(namespace_oid));
+		if (OidIsValid(func_oid))
+			PG_fnoid_gpulz_decompression = func_oid;
+		else
+			PG_fnoid_gpulz_decompression = ULONG_MAX;
+	}
+	if (PG_fnoid_gpulz_decompression == ULONG_MAX)
+		return NULL;		/* not supported */
+
+	result = OidFunctionCall1(PG_fnoid_gpulz_decompression,
+							  PointerGetDatum(compressed));
+	return DatumGetByteaP(result);
 }
 
 /*
