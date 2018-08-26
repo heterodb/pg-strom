@@ -6157,6 +6157,14 @@ gpujoin_process_inner_join(GpuJoinTask *pgjoin, CUmodule cuda_module)
 		gpuMemCopyFromSSD(m_kds_src,
 						  pds_src);
 	}
+	/* Decompression of KDS_FORMAT_COLUMN, if compressed */
+	if (pds_src->kds.format == KDS_FORMAT_COLUMN &&
+		pds_src->kds.has_compressed)
+	{
+		kernel_gpulz_decompression(cuda_module,
+								   &pgjoin->kern.kerror,
+								   &pds_src->kds);
+	}
 
 	/* Launch:
 	 * KERNEL_FUNCTION(void)

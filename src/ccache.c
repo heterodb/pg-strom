@@ -107,8 +107,6 @@ static bool			ccache_builder_got_sigterm = false;
 static HTAB		   *ccache_relations_htab = NULL;
 static oidvector   *ccache_relations_oid = NULL;
 static Oid			ccache_invalidator_func_oid = InvalidOid;
-static cl_ulong		PG_fnoid_gpulz_compress = InvalidOid;
-static cl_ulong		PG_fnoid_gpulz_decompress = InvalidOid;
 
 /* functions */
 void ccache_builder_main(Datum arg);
@@ -374,8 +372,9 @@ pgstrom_ccache_load_chunk(ccacheChunk *cc_chunk,
 	int			i, ncols;
 	int			fdesc = -1;
 	ssize_t		nitems;
-	ssize_t		length;
 	ssize_t		offset;
+	ssize_t		usage = 0;
+	ssize_t		rawsize = 0;
 	CUdeviceptr	m_deviceptr;
 	CUresult	rc;
 	char		buffer[MAXPGPATH];
@@ -397,10 +396,10 @@ pgstrom_ccache_load_chunk(ccacheChunk *cc_chunk,
 		/* load the header portion of kds-column */
 		Assert(cc_chunk->nattrs == tupdesc->natts);
 		ncols = cc_chunk->nattrs + NumOfSystemAttrs;
-		length = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
-		if (length > sizeof(buffer))
-			kds_head = palloc(length);
-		if (pread(fdesc, kds_head, length, 0) != length)
+		usage = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
+		if (usage > sizeof(buffer))
+			kds_head = palloc(usage);
+		if (pread(fdesc, kds_head, usage, 0) != usage)
 			elog(ERROR, "failed on pread(2): %m");
 		nitems = kds_head->nitems;
 		/* count length of the PDS_column */
@@ -410,18 +409,14 @@ pgstrom_ccache_load_chunk(ccacheChunk *cc_chunk,
 		{
 			kern_colmeta   *cmeta = &kds_head->colmeta[i];
 
-			length += __kds_unpack(cmeta->extra_sz);
-			if (cmeta->attlen > 0)
-				length += MAXALIGN(TYPEALIGN(cmeta->attalign,
-											 cmeta->attlen) * nitems);
-			else
-				length += MAXALIGN(sizeof(cl_uint) * nitems);
+			usage += __kds_unpack(cmeta->va_length);
+			rawsize += __kds_unpack(cmeta->va_rawsize);
 		}
 		/* allocation of pds_column buffer */
 		rc = gpuMemAllocManaged(gcontext,
 								&m_deviceptr,
 								offsetof(pgstrom_data_store,
-										 kds) + length,
+										 kds) + (usage + rawsize),
 								CU_MEM_ATTACH_GLOBAL);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "out of managed memory");
@@ -430,7 +425,7 @@ pgstrom_ccache_load_chunk(ccacheChunk *cc_chunk,
 		pg_atomic_init_u32(&pds->refcnt, 1);
 		pds->nblocks_uncached = 0;
 		pds->filedesc = -1;
-		init_kernel_data_store(&pds->kds, tupdesc, length,
+		init_kernel_data_store(&pds->kds, tupdesc, usage + rawsize,
 							   KDS_FORMAT_COLUMN, nitems);
 		/* load from the ccache file */
 		offset = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
@@ -449,15 +444,12 @@ pgstrom_ccache_load_chunk(ccacheChunk *cc_chunk,
 				   pds->kds.colmeta[i].atttypmod == cmeta->atttypmod);
 			Assert(offset == MAXALIGN(offset));
 			pds->kds.colmeta[i].va_offset = __kds_packed(offset);
-			pds->kds.colmeta[i].extra_sz = cmeta->extra_sz;
+			pds->kds.colmeta[i].va_length = cmeta->va_length;
+			pds->kds.colmeta[i].va_rawsize = cmeta->va_rawsize;
+			if (cmeta->va_rawsize > 0)
+				pds->kds.has_compressed = true;
 
-			nbytes = __kds_unpack(cmeta->extra_sz);
-			if (cmeta->attlen > 0)
-				nbytes += MAXALIGN(TYPEALIGN(cmeta->attalign,
-											 cmeta->attlen) * nitems);
-			else
-				nbytes += MAXALIGN(sizeof(cl_uint) * nitems);
-
+			nbytes = __kds_unpack(cmeta->va_length);
 			if (pread(fdesc,
 					  (char *)&pds->kds + offset,
 					  nbytes,
@@ -465,8 +457,9 @@ pgstrom_ccache_load_chunk(ccacheChunk *cc_chunk,
 				elog(ERROR, "failed on pread(2): %m");
 			offset += nbytes;
 		}
+		Assert(offset == usage);
 		pds->kds.nitems = nitems;
-		Assert(offset == length);
+		pds->kds.usage = __kds_packed(usage);
 	}
 	PG_CATCH();
 	{
@@ -477,6 +470,9 @@ pgstrom_ccache_load_chunk(ccacheChunk *cc_chunk,
 	close(fdesc);
 	if ((char *)kds_head != buffer)
 		pfree(kds_head);
+
+	if (pds)
+		elog(INFO, "KDS_column loaded (len=%zu)", pds->kds.length);
 
 	return pds;
 }
@@ -798,8 +794,6 @@ ccache_callback_on_procoid(Datum arg, int cacheid, uint32 hashvalue)
 			ccache_callback_on_reloid(0, RELOID, 0);
 		}
 	}
-	PG_fnoid_gpulz_compress = InvalidOid;
-	PG_fnoid_gpulz_decompress = InvalidOid;
 }
 
 /*
@@ -1394,105 +1388,6 @@ vl_datum_compression(void *datum, int vl_comression)
 }
 
 /*
- * gpulz_compression / gpulz_decompression
- */
-#define OidVectorSize(n)	offsetof(oidvector, values[(n)])
-
-static struct varlena *
-ccache_gpulz_compression(void *buffer, size_t nbytes)
-{
-	FmgrInfo	flinfo;
-	FunctionCallInfoData fcinfo;
-	Datum		result;
-
-	if (PG_fnoid_gpulz_compress == InvalidOid)
-	{
-		Oid		namespace_oid = get_namespace_oid("pgstrom", false);
-		Oid		func_oid;
-		union {
-			oidvector	func_args;
-			char		__buf[OidVectorSize(2)];
-		} u;
-
-		memset(&u, 0, sizeof(u));
-		SET_VARSIZE(&u, OidVectorSize(2));
-		u.func_args.ndim = 1;
-		u.func_args.dataoffset = 0;
-		u.func_args.elemtype = OIDOID;
-		u.func_args.dim1 = 2;
-		u.func_args.lbound1 = 0;
-		u.func_args.values[0] = INTERNALOID;
-		u.func_args.values[1] = INT8OID;
-
-		func_oid = GetSysCacheOid3(PROCNAMEARGSNSP,
-								   PointerGetDatum("gpulz_compress"),
-								   PointerGetDatum(&u.func_args),
-								   ObjectIdGetDatum(namespace_oid));
-		if (OidIsValid(func_oid))
-			PG_fnoid_gpulz_compress = func_oid;
-		else
-			PG_fnoid_gpulz_compress = ULONG_MAX;
-	}
-	if (PG_fnoid_gpulz_compress == ULONG_MAX)
-		return NULL;		/* not supported */
-	/*
-	 * pgstrom.gpulz_compression(buffer, nbytes) can return NULL,
-	 * so unable to use OidFunctionCall2() here.
-	 */
-	fmgr_info(PG_fnoid_gpulz_compress, &flinfo);
-	InitFunctionCallInfoData(fcinfo, &flinfo, 2, InvalidOid, NULL, NULL);
-	fcinfo.arg[0] = PointerGetDatum(buffer);
-	fcinfo.arg[1] = Int64GetDatum(nbytes);
-	fcinfo.argnull[0] = false;
-	fcinfo.argnull[1] = false;
-	result = FunctionCallInvoke(&fcinfo);
-
-	if (fcinfo.isnull)
-		return NULL;
-	return (struct varlena *)PG_DETOAST_DATUM(result);
-}
-
-static bytea *
-ccache_gpulz_decompress(bytea *compressed)
-{
-	Datum		result;
-
-	if (PG_fnoid_gpulz_decompress == InvalidOid)
-	{
-		Oid		namespace_oid = get_namespace_oid("pgstrom", false);
-		Oid		func_oid;
-		union {
-			oidvector	func_args;
-			char		__buf[OidVectorSize(1)];
-		} u;
-
-		memset(&u, 0, sizeof(u));
-		SET_VARSIZE(&u, OidVectorSize(1));
-		u.func_args.ndim = 1;
-		u.func_args.dataoffset = 0;
-		u.func_args.elemtype = OIDOID;
-		u.func_args.dim1 = 1;
-		u.func_args.lbound1 = 0;
-		u.func_args.values[0] = BYTEAOID;
-
-		func_oid = GetSysCacheOid3(PROCNAMEARGSNSP,
-								   PointerGetDatum("gpulz_decompress"),
-								   PointerGetDatum(&u.func_args),
-								   ObjectIdGetDatum(namespace_oid));
-		if (OidIsValid(func_oid))
-			PG_fnoid_gpulz_decompress = func_oid;
-		else
-			PG_fnoid_gpulz_decompress = ULONG_MAX;
-	}
-	if (PG_fnoid_gpulz_decompress == ULONG_MAX)
-		return NULL;		/* not supported */
-
-	result = OidFunctionCall1(PG_fnoid_gpulz_decompress,
-							  PointerGetDatum(compressed));
-	return DatumGetByteaP(result);
-}
-
-/*
  * ccache_setup_buffer
  */
 void
@@ -1693,17 +1588,19 @@ ccache_copy_buffer_from_kds(TupleDesc tupdesc,
 	Assert(ccacheBufferSanityCheckKDS(tupdesc, kds));
 	if (kds->nitems > cc_buf->nrooms)
 		elog(ERROR, "lack of ccache buffer rooms");
+	if (kds->has_compressed)
+		elog(ERROR, "KDS has compressed column by GPULz");
 
 	oldcxt = MemoryContextSwitchTo(memcxt);
 	for (j=0; j < cc_buf->nattrs; j++)
 	{
 		kern_colmeta *cmeta = &kds->colmeta[j];
-		size_t		va_offset;
-		size_t		extra_sz;
+		ssize_t		va_offset;
+		ssize_t		va_length;
 		void	   *addr;
 
 		va_offset = __kds_unpack(cmeta->va_offset);
-		extra_sz = __kds_unpack(cmeta->extra_sz);
+		va_length = __kds_unpack(cmeta->va_length);
 		/* considered as all-null */
 		if (va_offset == 0)
 		{
@@ -1773,6 +1670,8 @@ ccache_copy_buffer_from_kds(TupleDesc tupdesc,
 		{
 			int		unitsz = TYPEALIGN(cmeta->attalign,
 									   cmeta->attlen);
+			size_t	extra_sz = va_length - unitsz * nitems;
+
 			if (extra_sz > 0)
 			{
 				Assert(extra_sz == MAXALIGN(BITMAPLEN(nitems)));
@@ -1860,7 +1759,6 @@ ccache_copy_buffer_to_kds(kern_data_store *kds,
 						nbytes = VARSIZE_ANY(entry->vl_datum);
 						Assert(nbytes > 0);
 						memcpy(extra, entry->vl_datum, nbytes);
-						cmeta->extra_sz += __kds_packed(MAXALIGN(nbytes));
 						extra += MAXALIGN(nbytes);
 					}
 					base[k] = entry->offset;
@@ -1868,10 +1766,25 @@ ccache_copy_buffer_to_kds(kern_data_store *kds,
 				k++;
 			}
 			Assert(k == nrooms);
-			if (try_gpulz_compression)
-				compress = ccache_gpulz_compression(base, ((char *)extra -
-														   (char *)base));
-			pos += (char *)extra - (char *)base;
+			nbytes = ((char *)extra - (char *)base);
+			pos += nbytes;
+			cmeta->va_length = __kds_packed(nbytes);
+			/* Try compression by GPULz if make sense */
+			if (try_gpulz_compression && nbytes >= BLCKSZ)
+			{
+				compress = pgstrom_gpulz_compression(base, nbytes);
+				if (compress && VARSIZE(compress) < nbytes / 2)
+				{
+					size_t		chunk_sz = VARSIZE(compress);
+
+					memcpy(base, compress, chunk_sz);
+					pos = (char *)base + MAXALIGN(chunk_sz);
+					cmeta->va_length = __kds_packed(MAXALIGN(chunk_sz));
+					cmeta->va_rawsize = __kds_packed(nbytes);
+					pfree(compress);
+					kds->has_compressed = true;
+				}
+			}
 		}
 		else if (!rowmap)
 		{
@@ -1884,18 +1797,30 @@ ccache_copy_buffer_to_kds(kern_data_store *kds,
 			memcpy(pos, cc_buf->values[j], nbytes);
 			pos += nbytes;
 			/* null bitmap, if any */
-			if (!cc_buf->hasnull[j])
-				cmeta->extra_sz = 0;
-			else
+			if (cc_buf->hasnull[j])
 			{
 				nbytes = MAXALIGN(BITMAPLEN(nrooms));
-				cmeta->extra_sz = __kds_packed(nbytes);
 				memcpy(pos, cc_buf->nullmap[j], nbytes);
 				pos += nbytes;
 			}
+			nbytes = (pos - base);
+			cmeta->va_length = __kds_packed(nbytes);
+			/* Try compression by GPULz if make sense */
+			if (try_gpulz_compression && nbytes >= BLCKSZ)
+			{
+				compress = pgstrom_gpulz_compression(base, nbytes);
+				if (compress && VARSIZE(compress) < nbytes / 2)
+				{
+					size_t		chunk_sz = VARSIZE(compress);
 
-			if (try_gpulz_compression)
-				compress = ccache_gpulz_compression(base, pos - base);
+					memcpy(base, compress, chunk_sz);
+					pos = base + MAXALIGN(chunk_sz);
+					cmeta->va_length = __kds_packed(MAXALIGN(chunk_sz));
+					cmeta->va_rawsize = __kds_packed(nbytes);
+					pfree(compress);
+					kds->has_compressed = true;
+				}
+			}
 		}
 		else
 		{
@@ -1936,17 +1861,29 @@ ccache_copy_buffer_to_kds(kern_data_store *kds,
 			Assert(k == nrooms);
 			pos += MAXALIGN(unitsz * nrooms);
 			if (meet_null)
+				pos += MAXALIGN(BITMAPLEN(nrooms));
+			nbytes = pos - base;
+			cmeta->va_length = __kds_packed(nbytes);
+			/* Try compression by GPULz if make sense */
+			if (try_gpulz_compression && nbytes >= BLCKSZ)
 			{
-				nbytes = MAXALIGN(BITMAPLEN(nrooms));
-				cmeta->extra_sz = __kds_packed(nbytes);
-				pos += nbytes;
-			}
+				compress = pgstrom_gpulz_compression(base, nbytes);
+				if (compress && VARSIZE(compress) < nbytes / 2)
+				{
+					size_t		chunk_sz = VARSIZE(compress);
 
-			if (try_gpulz_compression)
-				compress = ccache_gpulz_compression(base, pos - base);
+					memcpy(base, compress, chunk_sz);
+					pos = base + MAXALIGN(chunk_sz);
+					cmeta->va_length = __kds_packed(MAXALIGN(chunk_sz));
+					cmeta->va_rawsize = __kds_packed(nbytes);
+					pfree(compress);
+					kds->has_compressed = true;
+				}
+			}
 		}
 	}
 	kds->nitems = nrooms;
+	kds->usage = __kds_packed((char *)pos - (char *)kds);
 	kds->length = (char *)pos - (char *)kds;
 }
 
@@ -2261,6 +2198,8 @@ __ccache_preload_chunk(ccacheChunk *cc_chunk,
 		elog(ERROR, "failed on mmap: %m");
 	}
 	ccache_copy_buffer_to_kds(kds, tupdesc, &cc_buf, NULL, 0, true);
+	if (ftruncate(fdesc, kds->length) != 0)
+		elog(WARNING, "failed on ftruncate: %m");
 	if (munmap(kds, length) != 0)
 		elog(WARNING, "failed on munmap: %m");
 	if (close(fdesc) != 0)

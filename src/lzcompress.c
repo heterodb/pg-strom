@@ -27,15 +27,8 @@ struct GPULZ_HistEntry
 };
 typedef struct GPULZ_HistEntry	GPULZ_HistEntry;
 
-#define GPULZ_MAGIC_NUMBER		0x4c7a		/* 'Lz' */
-#define GPULZ_BLOCK_SIZE		1024
 #define GPULZ_HISTORY_NSLOTS	65536
 #define GPULZ_HISTORY_NROOMS	262144
-#define GPULZ_MIN_MATCH			3
-#define GPULZ_MAX_MATCH			34
-#define GPULZ_MIN_LONG_OFFSET	0x0700
-#define GPULZ_MAX_SHORT_OFFSET	0x06ff
-#define GPULZ_MAX_OFFSET		0x106ff
 
 static GPULZ_HistEntry *hist_slots[GPULZ_HISTORY_NSLOTS];
 static GPULZ_HistEntry	hist_entries[GPULZ_HISTORY_NROOMS];

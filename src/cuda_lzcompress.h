@@ -9,6 +9,14 @@
 #ifndef CUDA_LZCOMPRESS_H
 #define CUDA_LZCOMPRESS_H
 
+#define GPULZ_MAGIC_NUMBER		0x4c7a		/* 'Lz' */
+#define GPULZ_BLOCK_SIZE		1024
+#define GPULZ_MIN_MATCH			3
+#define GPULZ_MAX_MATCH			34
+#define GPULZ_MIN_LONG_OFFSET	0x0700
+#define GPULZ_MAX_SHORT_OFFSET	0x06ff
+#define GPULZ_MAX_OFFSET		0x106ff
+
 typedef struct
 {
 	char		_vl_head[VARHDRSZ];
@@ -39,14 +47,19 @@ gpulz_decompress(const char *source, cl_int slen, char *dest, cl_int rawsize)
 		const cl_uchar *cntl = sp;
 		const cl_uchar *data = sp + (get_local_size() >> 3);
 		const cl_uchar *extra = data + get_local_size();
-		int				c, d, mask;
+		int				c, d;
 		cl_uint			index;
 		cl_uint			required;
 		cl_uint			usage;
 		cl_uint			ofs, len;
 
-		if (extra > send)
+		if (__syncthreads_count(extra > send) != 0)
+		{
+			if (get_local_id() == 0)
+				printf("gpulz_decompress: control+data block overrun (cntl=%p data=%p extra=%p send=%p)\n", cntl, data, extra, send);
 			return false;		/* should not happen */
+		}
+
 		/*
 		 * MEMO: First 1024bit of the current iteration block is control bit
 		 * for each threads in workgroup. If zero, its relevant data byte is
@@ -65,17 +78,22 @@ gpulz_decompress(const char *source, cl_int slen, char *dest, cl_int rawsize)
 			required = 2;		/* long offset */
 
 		index = pgstromStairlikeSum(required, &usage);
-		if (extra + usage > send)
+		if (__syncthreads_count(extra + usage > send) != 0)
+		{
+			if (get_local_id() == 0)
+				printf("gpulz_decompress: extra block overrun (extra=%p usage=%u send=%p)\n", extra, usage, send);
 			return false;		/* should not happen */
+		}
 
 		/* move 'sp' to the next location to read */
 		sp = extra + usage;
 
 		/*
 		 * MEMO: Once extra byte(s) of thread are identified, we can know
-		 * the length to write on the destination buffer for each.
-		 * Then, we have to ensure the destination buffer has enough space
-		 * to write out.
+		 * exact length to write out on the destination buffer for each.
+		 * Also note that some inline characters may point beyond the @dend
+		 * around the boundary of the compressed data tail. These characters
+		 * are out of the range, so to be skipped.
 		 */
 		extra += index;			/* thread's own extra byte(s), if any */
 		if (c == 0)
@@ -90,31 +108,138 @@ gpulz_decompress(const char *source, cl_int slen, char *dest, cl_int rawsize)
 				ofs = ((extra[1] << 8) | extra[0]) + GPULZ_MIN_LONG_OFFSET;
 		}
 		index = pgstromStairlikeSum(len, &usage);
-		if (dp + usage > dend)
-			return false;		/* should not happen */
-
-		/*
-		 * OK, write out the uncompressed character or compressed string.
-		 */
-		if (c == 0)
-			dp[index] = d;
+		if (dp + index < dend)
+		{
+			/*
+			 * OK, write out the uncompressed character or dictionary text
+			 */
+			assert(dp + index + len <= dend);
+			if (c == 0)
+				dp[index] = d;
+			else
+			{
+				Assert(dp - ofs >= dest);
+				memcpy(dp + index,  dp - ofs, len);
+			}
+		}
 		else
 		{
-			Assert(dp - ofs >= dest);
-			memcpy(dp + index,  dp - ofs, len);
+			assert(c == 0 && d == 0);
 		}
 		dp += usage;
 
 		/* sanity checks */
 		if (get_local_id() == 0)
-			ptr = sp;
+			ptr = (void *)sp;
 		__syncthreads();
-		assert(__syncthreads_count(ptr == sp) == 0);
+		assert(__syncthreads_count(ptr != sp) == 0);
 		if (get_local_id() == 0)
 			ptr = dp;
-		assert(__syncthreads_count(ptr == dp) == 0);
+		__syncthreads();
+		assert(__syncthreads_count(ptr != dp) == 0);
 	}
-	return (sp == send && dp == dend);
+	if (__syncthreads_count(sp == send && dp == dend) != 0)
+	{
+		if (get_local_id() == 0)
+			printf("gpulz_decompress: compressed data was not terminated correctly (sp=%p send=%p dp=%p dend=%p)\n", sp, send, dp, dend);
+		return false;
+	}
+	return true;
+}
+
+/*
+ * kernel_gpulz_decompression
+ *
+ * An extra kernel to decompress an compressed KDS_FORMAT_COLUMN
+ */
+KERNEL_FUNCTION_NUMTHREADS(void, GPULZ_BLOCK_SIZE)
+kernel_gpulz_decompression(kern_errorbuf *kerror,
+						   kern_data_store *kds)
+{
+	kern_errorbuf ebuf;
+	cl_int		cindex;
+	__shared__ cl_uint base;
+
+	/* sanity checks */
+	assert(kds->format == KDS_FORMAT_COLUMN);
+	if (kds->ncols == 0)
+		return;
+
+	/* urgent bailout if prior steps already raised an error */
+	if (__syncthreads_count(kerror->errcode) > 0)
+		return;
+
+	memset(&ebuf, 0, sizeof(ebuf));
+	ebuf.kernel = StromKernel_kernel_gpulz_decompression;
+
+	for (cindex = get_group_id();
+		 cindex < kds->ncols;
+		 cindex += get_num_groups())
+	{
+		kern_colmeta *cmeta = &kds->colmeta[cindex];
+		GPULZ_compressed *comp;
+		size_t		offset;
+		size_t		rawsize;
+		char	   *dest;
+
+		if (cmeta->va_rawsize == 0)
+			continue;
+		/* fetch compressed image and validation */
+		offset = __kds_unpack(cmeta->va_offset);
+		if (offset == 0)
+			continue;	/* should not happen, but legal */
+		comp = (GPULZ_compressed *)((char *)kds + offset);
+		if (MAXALIGN(VARSIZE(comp)) != __kds_unpack(cmeta->va_length))
+		{
+			printf("%s(gid=%d): inconsistent chunk size (%ld of %ld)\n",
+				   __FUNCTION__, get_global_id(),
+				   VARSIZE(comp), __kds_unpack(cmeta->va_length));
+			STROM_SET_ERROR(&ebuf, StromError_DataCorruption);
+		}
+		else if (MAXALIGN(comp->rawsize) != __kds_unpack(cmeta->va_rawsize))
+		{
+			printf("%s(gid=%d): inconsistent rawsize (%ld of %ld)\n",
+				   __FUNCTION__, get_global_id(),
+				   MAXALIGN(comp->rawsize), __kds_unpack(cmeta->va_rawsize));
+			STROM_SET_ERROR(&ebuf, StromError_DataCorruption);
+		}
+		else if (comp->magic != GPULZ_MAGIC_NUMBER)
+		{
+			printf("%s(gid=%d): wrong magic number (%04x)\n",
+				   __FUNCTION__, get_global_id(), comp->magic);
+			STROM_SET_ERROR(&ebuf, StromError_DataCorruption);
+		}
+		else if (comp->blocksz != get_local_size())
+		{
+			printf("%s(gid=%d): workgroup size mismatch (%d for %d)\n",
+				   __FUNCTION__, get_global_id(),
+				   get_local_size(), comp->blocksz);
+			STROM_SET_ERROR(&ebuf, StromError_DataCorruption);
+		}
+		if (__syncthreads_count(ebuf.errcode) > 0)
+			break;
+
+		/* allocation of the destination buffer */
+		rawsize = MAXALIGN(comp->rawsize);
+		if (get_local_id() == 0)
+			base = atomicAdd(&kds->usage, __kds_packed(rawsize));
+		__syncthreads();
+		dest = (char *)kds + __kds_unpack(base);
+		assert(dest + rawsize <= (char *)kds + kds->length);
+		if (!gpulz_decompress(comp->data, VARSIZE(comp), dest, comp->rawsize))
+		{
+			STROM_SET_ERROR(&ebuf, StromError_DataCorruption);
+			break;
+		}
+		/* update kern_colmeta */
+		if (get_local_id() == 0)
+		{
+			cmeta->va_offset = __kds_packed((char *)dest - (char *)kds);
+			cmeta->va_length = __kds_packed(MAXALIGN(rawsize));
+			cmeta->va_rawsize = 0;	/* uncompressed */
+		}
+	}
+	kern_writeback_error_status(kerror, &ebuf);
 }
 
 #endif	/* __CUDACC__ */

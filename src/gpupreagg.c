@@ -5207,6 +5207,15 @@ gpupreagg_process_reduction_task(GpuPreAggTask *gpreagg,
 		gpuMemCopyFromSSD(m_kds_src, pds_src);
 	}
 
+	/* Decompression of KDS_FORMAT_COLUMN, if any */
+	if (pds_src->kds.format == KDS_FORMAT_COLUMN &&
+		pds_src->kds.has_compressed)
+	{
+		kernel_gpulz_decompression(cuda_module,
+								   &gpreagg->kern.kerror,
+								   &pds_src->kds);
+	}
+
 	/*
 	 * Launch:
 	 * gpupreagg_setup_XXXX(kern_gpupreagg *kgpreagg,
@@ -5530,6 +5539,14 @@ gpupreagg_process_combined_task(GpuPreAggTask *gpreagg, CUmodule cuda_module)
 		else
 		{
 			gpuMemCopyFromSSD(m_kds_src, pds_src);
+		}
+		/* Decompression of KDS_FORMAT_COLUMN, if compressed */
+		if (pds_src->kds.format == KDS_FORMAT_COLUMN &&
+			pds_src->kds.has_compressed)
+		{
+			kernel_gpulz_decompression(cuda_module,
+									   &kgjoin->kerror,
+									   &pds_src->kds);
 		}
 	}
 	else

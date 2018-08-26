@@ -289,6 +289,7 @@ typedef uintptr_t		hostptr_t;
 #define StromError_DataStoreNoSpace		1004	/* No space left on KDS */
 #define StromError_WrongCodeGeneration	1005	/* Wrong GPU code generation */
 #define StromError_OutOfMemory			1006	/* Out of Memory */
+#define StromError_DataCorruption		1007	/* Data corruption */
 
 #define StromError_CudaDevRunTimeBase	1000000
 
@@ -311,6 +312,8 @@ typedef uintptr_t		hostptr_t;
 #define StromKernel_plcuda_prep_kernel				0x0501
 #define StromKernel_plcuda_main_kernel				0x0502
 #define StromKernel_plcuda_post_kernel				0x0503
+/* kernel functions by extra packages */
+#define StromKernel_kernel_gpulz_decompression		0x1001
 
 #define KERN_ERRORBUF_FILENAME_LEN		24
 typedef struct
@@ -636,13 +639,16 @@ typedef struct {
 	cl_uint			atttypid;
 	/* typmod of the SQL data type */
 	cl_int			atttypmod;
-	/* (only column) offset to the values array; that is always aligned by
-	 * MAXALIGN(). For large KDS >4GB, va_offset shall be used with 3bits-
-	 * shift to represents up to 32GB. */
+	/*
+	 * (only column format)
+	 * @va_offset is offset of the values array from the kds-head.
+	 * @va_length is length of the values array or compressed block,
+	 * if @va_rawsize is not zero.
+	 * Any of above fields are packed values for 32GB support.
+	 */
 	cl_uint			va_offset;
-	/* (only column) total size of varlena body or NULL bitmap if attbyval;
-	 * because of the same reason, extra_sz shall be used with 3bits shift. */
-	cl_uint			extra_sz;
+	cl_uint			va_length;
+	cl_uint			va_rawsize;	/* ==0, if uncompressed data */
 } kern_colmeta;
 
 /*
@@ -685,6 +691,8 @@ typedef struct {
 	cl_uint			ncols;		/* number of columns in this store */
 	cl_char			format;		/* one of KDS_FORMAT_* above */
 	cl_char			has_notbyval; /* true, if any of column is !attbyval */
+	cl_char			has_compressed; /* true, if any of column is compressed
+									 * by GPULz when KDS_FORMA_COLUMN */
 	cl_char			tdhasoid;	/* copy of TupleDesc.tdhasoid */
 	cl_uint			tdtypeid;	/* copy of TupleDesc.tdtypeid */
 	cl_int			tdtypmod;	/* copy of TupleDesc.tdtypmod */
@@ -1850,6 +1858,7 @@ kern_get_datum_column(kern_data_store *kds,
 {
 	kern_colmeta *cmeta;
 	size_t		offset;
+	size_t		length;
 	char	   *values;
 	char	   *nullmap;
 
@@ -1862,25 +1871,29 @@ kern_get_datum_column(kern_data_store *kds,
 	if (offset == 0)
 		return NULL;
 	values = (char *)kds + offset;
+	length = __kds_unpack(__ldg(&cmeta->va_length));
+	Assert(__ldg(&cmeta->va_rawsize) == 0);
 	if (__ldg(&cmeta->attlen) < 0)
 	{
 		Assert(!__ldg(&cmeta->attbyval));
 		offset = ((cl_uint *)values)[rowidx];
 		if (offset == 0)
 			return NULL;
-		Assert(offset < ((size_t)__ldg(&kds->nitems) * sizeof(cl_uint) +
-						 (size_t)__ldg(&cmeta->extra_sz)));
+		Assert(offset < length);
 		values += __kds_unpack(offset);
 	}
 	else
 	{
-		size_t	extra_sz = __kds_unpack(__ldg(&cmeta->extra_sz));
 		cl_int	unitsz = TYPEALIGN(__ldg(&cmeta->attalign),
 								   __ldg(&cmeta->attlen));
-		if (extra_sz > 0)
+		size_t	array_sz = MAXALIGN(unitsz * __ldg(&kds->nitems));
+
+		Assert(length >= array_sz);
+		if (length > array_sz)
 		{
-			Assert(MAXALIGN(BITMAPLEN(__ldg(&kds->nitems))) == extra_sz);
-			nullmap = values + MAXALIGN(unitsz * __ldg(&kds->nitems));
+			length -= array_sz;
+			Assert(MAXALIGN(BITMAPLEN(__ldg(&kds->nitems))) == length);
+			nullmap = values + array_sz;
 			if (att_isnull(rowidx, nullmap))
 				return NULL;
 		}

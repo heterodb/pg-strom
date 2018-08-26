@@ -188,6 +188,9 @@ errorText(int errcode)
 		case StromError_OutOfMemory:
 			label = "Out of Memory";
 			break;
+		case StromError_DataCorruption:
+			label = "Data corruption";
+			break;
 
 		/*
 		 * CUDA Runtime Error - we don't want to link entire CUDA runtime
@@ -341,6 +344,7 @@ errorTextKernel(kern_errorbuf *kerror)
 		KERN_ENTRY(plcuda_prep_kernel);
 		KERN_ENTRY(plcuda_main_kernel);
 		KERN_ENTRY(plcuda_post_kernel);
+		KERN_ENTRY(kernel_gpulz_decompression);
 		default:
 			kernel_name = "unknown kernel";
 			break;

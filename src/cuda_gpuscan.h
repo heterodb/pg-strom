@@ -745,6 +745,9 @@ gpuscan_exec_quals_column(kern_gpuscan *kgpuscan,
 	assert(__ldg(&kds_src->format) == KDS_FORMAT_COLUMN);
 	assert(!kds_dst || __ldg(&kds_dst->format) == KDS_FORMAT_ROW);
 	INIT_KERNEL_CONTEXT(&kcxt, gpuscan_exec_quals_column, kparams);
+	/* quick bailout if any error happen on the prior kernel */
+	if (__syncthreads_count(kgpuscan->kerror.errcode) != 0)
+		return;
 	/* resume kernel from the point where suspended, if any */
 	if (kgpuscan->resume_context)
 	{

@@ -399,7 +399,8 @@ init_kernel_data_store(kern_data_store *kds,
 		kds->colmeta[i].atttypid = (cl_uint)attr->atttypid;
 		kds->colmeta[i].atttypmod = (cl_int)attr->atttypmod;
 		kds->colmeta[i].va_offset = 0;
-		kds->colmeta[i].extra_sz = 0;
+		kds->colmeta[i].va_length = 0;
+		kds->colmeta[i].va_rawsize = 0;
 		if (attcacheoff >= 0)
 			attcacheoff += attr->attlen;
 		/*
@@ -428,7 +429,8 @@ init_kernel_data_store(kern_data_store *kds,
 			kds->colmeta[i].atttypid = (cl_uint)attr->atttypid;
 			kds->colmeta[i].atttypmod = (cl_int)attr->atttypmod;
 			kds->colmeta[i].va_offset = 0;
-			kds->colmeta[i].extra_sz = 0;
+			kds->colmeta[i].va_length = 0;
+			kds->colmeta[i].va_rawsize = 0;
 		}
 	}
 }
