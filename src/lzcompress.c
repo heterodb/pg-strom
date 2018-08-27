@@ -204,12 +204,16 @@ gpulz_compress(const char *source, cl_int slen, char *dest)
 					Assert(((length - GPULZ_MIN_MATCH) & ~0x001f) == 0);
 					dp[local_id] = ((length - GPULZ_MIN_MATCH) |
 									((offset >> 3) & 0xe0));
+					if (ep+1 >= dend)
+						return -1;
 					*ep++ = (offset & 0x00ff);
 				}
 				else
 				{
 					dp[local_id] = (length - GPULZ_MIN_MATCH) | 0xe0;
 					offset -= GPULZ_MIN_LONG_OFFSET;
+					if (ep+2 >= dend)
+						return -1;
 					*ep++ = (offset & 0x00ff);
 					*ep++ = (offset & 0xff00) >> 8;
 				}
@@ -304,13 +308,17 @@ pgstrom_gpulz_compress(PG_FUNCTION_ARGS)
 	int		rawsize = VARSIZE_ANY_EXHDR(src);
 	GPULZ_compressed *dst;
 	int		dstlen;
+	cl_uint *magic;
 
-	dst = palloc(offsetof(GPULZ_compressed, data) + rawsize);
+	dst = palloc(offsetof(GPULZ_compressed, data) + rawsize + sizeof(cl_uint));
 	dst->magic = GPULZ_MAGIC_NUMBER;
 	dst->blocksz = GPULZ_BLOCK_SIZE;
 	dst->rawsize = rawsize;
-
+	magic = (cl_uint *)((char *)dst +
+						offsetof(GPULZ_compressed, data) + rawsize);
+	*magic = 0xdeadbeaf;
 	dstlen = gpulz_compress(VARDATA(src), rawsize, dst->data);
+	Assert(*magic == 0xdeadbeaf);
 	if (dstlen < 0)
 	{
 		elog(NOTICE, "GPULz: unable to compress the data");
@@ -335,17 +343,19 @@ pgstrom_gpulz_compress_raw(PG_FUNCTION_ARGS)
 
 	if (rawsize < 0)
 		elog(ERROR, "GPULz: invalid rawsize %ld", rawsize);
-	dst = palloc(offsetof(GPULZ_compressed, data) + rawsize);
+	dst = palloc(offsetof(GPULZ_compressed, data) + rawsize + sizeof(cl_uint));
 	dst->magic = GPULZ_MAGIC_NUMBER;
 	dst->blocksz = GPULZ_BLOCK_SIZE;
 	dst->rawsize = (cl_uint)rawsize;
-
+	*((cl_uint *)((char *)dst->data + rawsize)) = 0xdeadbeaf;
 	dstlen = gpulz_compress(rawdata, rawsize, dst->data);
 	if (dstlen < 0)
 	{
+		pfree(dst);
 		elog(NOTICE, "GPULz: unable to compress the data");
 		PG_RETURN_NULL();
 	}
+	Assert(*((cl_uint *)((char *)dst->data + rawsize)) == 0xdeadbeaf);
 	SET_VARSIZE(dst, offsetof(GPULZ_compressed, data) + dstlen);
 
 	elog(INFO, "GPULz: %ld -> %d (%.2f%%)",

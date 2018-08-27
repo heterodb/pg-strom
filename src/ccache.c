@@ -1781,9 +1781,10 @@ ccache_copy_buffer_to_kds(kern_data_store *kds,
 					pos = (char *)base + MAXALIGN(chunk_sz);
 					cmeta->va_length = __kds_packed(MAXALIGN(chunk_sz));
 					cmeta->va_rawsize = __kds_packed(nbytes);
-					pfree(compress);
 					kds->has_compressed = true;
 				}
+				if (compress)
+					pfree(compress);
 			}
 		}
 		else if (!rowmap)
@@ -1817,9 +1818,10 @@ ccache_copy_buffer_to_kds(kern_data_store *kds,
 					pos = base + MAXALIGN(chunk_sz);
 					cmeta->va_length = __kds_packed(MAXALIGN(chunk_sz));
 					cmeta->va_rawsize = __kds_packed(nbytes);
-					pfree(compress);
 					kds->has_compressed = true;
 				}
+				if (compress)
+					pfree(compress);
 			}
 		}
 		else
@@ -1876,9 +1878,10 @@ ccache_copy_buffer_to_kds(kern_data_store *kds,
 					pos = base + MAXALIGN(chunk_sz);
 					cmeta->va_length = __kds_packed(MAXALIGN(chunk_sz));
 					cmeta->va_rawsize = __kds_packed(nbytes);
-					pfree(compress);
 					kds->has_compressed = true;
 				}
+				if (compress)
+					pfree(compress);
 			}
 		}
 	}
@@ -2050,7 +2053,8 @@ __ccache_preload_chunk(ccacheChunk *cc_chunk,
 	bool	   *tup_isnull;
 	ccacheBuffer cc_buf;
 	int			i, j, fdesc;
-	size_t		length;
+	size_t		map_length;
+	size_t		kds_length;
 	char		fname[MAXPGPATH];
 	kern_data_store *kds;
 	BufferAccessStrategy strategy;
@@ -2139,8 +2143,8 @@ __ccache_preload_chunk(ccacheChunk *cc_chunk,
 	}
 
 	/* write out to the ccache file */
-	length = STROMALIGN(offsetof(kern_data_store,
-								 colmeta[cc_buf.nattrs]));
+	map_length = STROMALIGN(offsetof(kern_data_store,
+									 colmeta[cc_buf.nattrs]));
 	for (j=FirstLowInvalidHeapAttributeNumber+1; j < tupdesc->natts; j++)
 	{
 		Form_pg_attribute attr;
@@ -2158,16 +2162,16 @@ __ccache_preload_chunk(ccacheChunk *cc_chunk,
 
 		if (attr->attlen < 0)
 		{
-			length += (MAXALIGN(sizeof(cl_uint) * cc_buf.nitems) +
-					   MAXALIGN(cc_buf.extra_sz[j]));
+			map_length += (MAXALIGN(sizeof(cl_uint) * cc_buf.nitems) +
+						   MAXALIGN(cc_buf.extra_sz[j]));
 		}
 		else
 		{
 			int		unitsz = att_align_nominal(attr->attlen,
 											   attr->attalign);
-			length += MAXALIGN(unitsz * cc_buf.nitems);
+			map_length += MAXALIGN(unitsz * cc_buf.nitems);
 			if (cc_buf.hasnull[j])
-				length += MAXALIGN(BITMAPLEN(cc_buf.nitems));
+				map_length += MAXALIGN(BITMAPLEN(cc_buf.nitems));
 		}
 	}
 	ccache_chunk_filename(fname,
@@ -2178,7 +2182,7 @@ __ccache_preload_chunk(ccacheChunk *cc_chunk,
 				   O_RDWR | O_CREAT | O_TRUNC, 0600);
 	if (fdesc < 0)
 		elog(ERROR, "failed on openat('%s'): %m", fname);
-	while (fallocate(fdesc, 0, 0, length) < 0)
+	while (fallocate(fdesc, 0, 0, map_length) < 0)
 	{
 		if (errno == EINTR)
 		{
@@ -2188,7 +2192,7 @@ __ccache_preload_chunk(ccacheChunk *cc_chunk,
 		close(fdesc);
 		elog(ERROR, "failed on fallocate: %m");
 	}
-	kds = mmap(NULL, length,
+	kds = mmap(NULL, map_length + sizeof(cl_uint),
 			   PROT_READ | PROT_WRITE,
 			   MAP_SHARED,
 			   fdesc, 0);
@@ -2198,9 +2202,11 @@ __ccache_preload_chunk(ccacheChunk *cc_chunk,
 		elog(ERROR, "failed on mmap: %m");
 	}
 	ccache_copy_buffer_to_kds(kds, tupdesc, &cc_buf, NULL, 0, true);
-	if (ftruncate(fdesc, kds->length) != 0)
+	kds_length = kds->length;
+	Assert(kds_length <= map_length);
+	if (ftruncate(fdesc, kds_length) != 0)
 		elog(WARNING, "failed on ftruncate: %m");
-	if (munmap(kds, length) != 0)
+	if (munmap(kds, map_length) != 0)
 		elog(WARNING, "failed on munmap: %m");
 	if (close(fdesc) != 0)
 		elog(WARNING, "failed on munmap: %m");
@@ -2219,7 +2225,7 @@ __ccache_preload_chunk(ccacheChunk *cc_chunk,
 			{
 				if (unlinkat(dirfd(ccache_base_dir), fname, 0) != 0)
 					elog(WARNING, "failed on unlinkat('%s'): %m", fname);
-				length = 0;
+				map_length = kds_length = 0;
 				elog(BUILDER_LOG,
 					 "relation %s, block_nr %u - %lu not all visible",
 					 RelationGetRelationName(relation),
@@ -2235,14 +2241,14 @@ __ccache_preload_chunk(ccacheChunk *cc_chunk,
 	}
 	PG_END_TRY();
 
-	if (length > 0)
+	if (kds_length > 0)
 	{
 		dlist_iter		iter;
 		ccacheChunk	   *cc_temp;
 
-		ccache_state->ccache_usage += TYPEALIGN(BLCKSZ, length);
+		ccache_state->ccache_usage += TYPEALIGN(BLCKSZ, kds_length);
 
-		cc_chunk->length = length;
+		cc_chunk->length = kds_length;
 		cc_chunk->nitems = cc_buf.nitems;
 		cc_chunk->nattrs = RelationGetNumberOfAttributes(relation);
 		cc_chunk->ctime = GetCurrentTimestamp();
@@ -2267,7 +2273,7 @@ __ccache_preload_chunk(ccacheChunk *cc_chunk,
 		}
 	}
 	SpinLockRelease(&ccache_state->chunks_lock);
-	return (length > 0);
+	return (kds_length > 0);
 }
 
 static bool
