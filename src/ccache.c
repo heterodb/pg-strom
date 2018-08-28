@@ -470,10 +470,6 @@ pgstrom_ccache_load_chunk(ccacheChunk *cc_chunk,
 	close(fdesc);
 	if ((char *)kds_head != buffer)
 		pfree(kds_head);
-
-	if (pds)
-		elog(INFO, "KDS_column loaded (len=%zu)", pds->kds.length);
-
 	return pds;
 }
 
@@ -2907,25 +2903,36 @@ guc_assign_ccache_databases(const char *newval, void *extra)
 
 	if (ccache_state)
 	{
-		int		i = 0;
+		bool	any_changes = false;
+		int		i;
 
 		SpinLockAcquire(&ccache_state->lock);
 		for (i=0; !my_extra[i].invalid_database; i++)
 		{
-			Assert(i < CCACHE_MAX_NUM_DATABASES);
-			strncpy(ccache_state->databases[i].dbname,
-					my_extra[i].dbname,
-					NAMEDATALEN);
-			ccache_state->databases[i].invalid_database = false;
+			if (i >= ccache_state->num_databases ||
+				strcmp(ccache_state->databases[i].dbname,
+					   my_extra[i].dbname) != 0)
+			{
+				strncpy(ccache_state->databases[i].dbname,
+						my_extra[i].dbname,
+						NAMEDATALEN);
+				any_changes = true;
+			}
 		}
-		ccache_state->num_databases = i;
-
-		/* force to restart ccache builder */
-		pg_atomic_fetch_add_u32(&ccache_state->generation, 1);
-		for (i=0; i < ccache_num_builders; i++)
+		if (ccache_state->num_databases != i)
 		{
-			if (ccache_state->builders[i].latch)
-				SetLatch(ccache_state->builders[i].latch);
+			ccache_state->num_databases = i;
+			any_changes = true;
+		}
+		/* force to restart ccache builder, if any changes */
+		if (any_changes)
+		{
+			pg_atomic_fetch_add_u32(&ccache_state->generation, 1);
+			for (i=0; i < ccache_num_builders; i++)
+			{
+				if (ccache_state->builders[i].latch)
+					SetLatch(ccache_state->builders[i].latch);
+			}
 		}
 		SpinLockRelease(&ccache_state->lock);
 	}
