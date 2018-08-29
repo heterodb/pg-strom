@@ -1209,7 +1209,7 @@ gstore_fdw_alloc_pgstrom_buffer(Relation frel,
 	Assert(tupdesc->natts == gs_buffer->cc_buf.nattrs);
 	/* 1. size estimation */
 	ncols = tupdesc->natts + NumOfSystemAttrs;
-	length = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
+	length = KDS_CALCULATE_HEAD_LENGTH(ncols, true);
 	for (j=0; j < tupdesc->natts; j++)
 	{
 		Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
@@ -2134,10 +2134,10 @@ gstore_open_device_memory(GpuContext *gcontext, Relation frel)
 	if (!gs_buffer)
 	{
 		ncols = tupdesc->natts + NumOfSystemAttrs;
-		length = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
+		length = KDS_CALCULATE_HEAD_LENGTH(ncols, true);
 		rc = gpuMemAllocManaged(gcontext,
 								&m_deviceptr,
-								length,
+								Max(length, KDS_LEAST_LENGTH),
 								CU_MEM_ATTACH_GLOBAL);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "failed on gpuMemAllocManaged: %s", errorText(rc));
@@ -2146,7 +2146,8 @@ gstore_open_device_memory(GpuContext *gcontext, Relation frel)
 							   tupdesc,
 							   length,
 							   KDS_FORMAT_COLUMN,
-							   0);
+							   0,
+							   true);
 		return m_deviceptr;
 	}
 
@@ -2158,7 +2159,7 @@ gstore_open_device_memory(GpuContext *gcontext, Relation frel)
 	 */
 	rowmap = gstore_fdw_visibility_bitmap(gs_buffer, &nrooms);
 	ncols = tupdesc->natts + NumOfSystemAttrs;
-	length = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
+	length = KDS_CALCULATE_HEAD_LENGTH(ncols, true);
 	for (j=0; j < tupdesc->natts; j++)
 	{
 		Form_pg_attribute attr = tupleDescAttr(tupdesc, j);
@@ -2181,7 +2182,7 @@ gstore_open_device_memory(GpuContext *gcontext, Relation frel)
 	}
 	rc = gpuMemAllocManaged(gcontext,
 							&m_deviceptr,
-							length,
+							Max(length, KDS_LEAST_LENGTH),
 							CU_MEM_ATTACH_GLOBAL);
 	if (rc != CUDA_SUCCESS)
 		elog(ERROR, "failed on gpuMemAllocManaged: %s", errorText(rc));

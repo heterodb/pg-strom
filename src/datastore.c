@@ -342,9 +342,11 @@ init_kernel_data_store(kern_data_store *kds,
 					   TupleDesc tupdesc,
 					   Size length,
 					   int format,
-					   uint nrooms)
+					   uint nrooms,
+					   bool has_attnames)
 {
-	int		i, j, attcacheoff;
+	int			i, attcacheoff;
+	NameData   *attNames = NULL;
 
 	memset(kds, 0, offsetof(kern_data_store, colmeta));
 	kds->length = length;
@@ -353,6 +355,7 @@ init_kernel_data_store(kern_data_store *kds,
 	kds->nrooms = nrooms;
 	kds->ncols = tupdesc->natts;
 	kds->format = format;
+	kds->has_attnames = has_attnames;
 	kds->tdhasoid = tupdesc->tdhasoid;
 	kds->tdtypeid = tupdesc->tdtypeid;
 	kds->tdtypmod = tupdesc->tdtypmod;
@@ -368,32 +371,44 @@ init_kernel_data_store(kern_data_store *kds,
 		if (tupdesc->tdhasoid)
 			attcacheoff += sizeof(Oid);
 		attcacheoff = MAXALIGN(attcacheoff);
+		Assert(!has_attnames);
 	}
 	else
 	{
+		/*
+		 * columnar format has system attribute definition next to the user
+		 * attributes. If no data array, keep va_offset/extra_sz zero.
+		 */
+		kds->ncols += NumOfSystemAttrs;
 		/* attcacheoff does not make sense for columnar format */
 		attcacheoff = -1;
+		/* it may copy attribute names */
+		attNames = KERN_DATA_STORE_ATTNAMES(kds);
 	}
 
-	for (i=0; i < tupdesc->natts; i++)
+	for (i=0; i < kds->ncols; i++)
 	{
-		Form_pg_attribute attr = tupleDescAttr(tupdesc, i);
-		int		attalign = typealign_get_width(attr->attalign);
-		bool	attbyval = attr->attbyval;
-		int		attlen = attr->attlen;
+		Form_pg_attribute attr;
+		int		attalign;
+
+		if (i < tupdesc->natts)
+			attr = tupleDescAttr(tupdesc, i);
+		else
+			attr = SystemAttributeDefinition(i - (int)kds->ncols, true);
+		attalign = typealign_get_width(attr->attalign);
 
 		if (!attr->attbyval)
 			kds->has_notbyval = true;
 		if (attcacheoff > 0)
 		{
-			if (attlen > 0)
+			if (attr->attlen > 0)
 				attcacheoff = TYPEALIGN(attalign, attcacheoff);
 			else
 				attcacheoff = -1;	/* no more shortcut any more */
 		}
-		kds->colmeta[i].attbyval = attbyval;
+		kds->colmeta[i].attbyval = attr->attbyval;
 		kds->colmeta[i].attalign = attalign;
-		kds->colmeta[i].attlen = attlen;
+		kds->colmeta[i].attlen = attr->attlen;
 		kds->colmeta[i].attnum = attr->attnum;
 		kds->colmeta[i].attcacheoff = attcacheoff;
 		kds->colmeta[i].atttypid = (cl_uint)attr->atttypid;
@@ -402,34 +417,13 @@ init_kernel_data_store(kern_data_store *kds,
 		kds->colmeta[i].va_length = 0;
 		if (attcacheoff >= 0)
 			attcacheoff += attr->attlen;
+		if (attNames)
+			memcpy(&attNames[i], &attr->attname, sizeof(NameData));
+
 		/*
 		 * !!don't forget to update pl_cuda.c if kern_colmeta layout would
 		 * be updated !!
 		 */
-	}
-
-	/*
-	 * columnar format has system attribute definition next to the regular
-	 * attributes. If no data array, keep va_offset/extra_sz zero.
-	 */
-	if (format == KDS_FORMAT_COLUMN)
-	{
-		kds->ncols += NumOfSystemAttrs;
-		for (j=FirstLowInvalidHeapAttributeNumber+1; j < 0; j++)
-		{
-			Form_pg_attribute attr = SystemAttributeDefinition(j, true);
-
-			i = kds->ncols + j;
-			kds->colmeta[i].attbyval = attr->attbyval;
-			kds->colmeta[i].attalign = typealign_get_width(attr->attalign);
-			kds->colmeta[i].attlen = attr->attlen;
-			kds->colmeta[i].attnum = j;
-			kds->colmeta[i].attcacheoff = -1;
-			kds->colmeta[i].atttypid = (cl_uint)attr->atttypid;
-			kds->colmeta[i].atttypmod = (cl_int)attr->atttypmod;
-			kds->colmeta[i].va_offset = 0;
-			kds->colmeta[i].va_length = 0;
-		}
 	}
 }
 
@@ -458,7 +452,7 @@ __PDS_create_row(GpuContext *gcontext,
 	pds->gcontext = gcontext;
 	pg_atomic_init_u32(&pds->refcnt, 1);
 	init_kernel_data_store(&pds->kds, tupdesc, bytesize,
-						   KDS_FORMAT_ROW, INT_MAX);
+						   KDS_FORMAT_ROW, INT_MAX, false);
 	pds->nblocks_uncached = 0;
 	pds->filedesc = -1;
 
@@ -476,7 +470,7 @@ __PDS_create_hash(GpuContext *gcontext,
 	CUresult	rc;
 
 	bytesize = STROMALIGN_DOWN(bytesize);
-	if (KDS_CALCULATE_HEAD_LENGTH(tupdesc->natts) > bytesize)
+	if (KDS_CALCULATE_HEAD_LENGTH(tupdesc->natts, false) > bytesize)
 		elog(ERROR, "Required length for KDS-Hash is too short");
 
 	rc = __gpuMemAllocManaged(gcontext,
@@ -493,7 +487,7 @@ __PDS_create_hash(GpuContext *gcontext,
 	pds->gcontext = gcontext;
 	pg_atomic_init_u32(&pds->refcnt, 1);
 	init_kernel_data_store(&pds->kds, tupdesc, bytesize,
-						   KDS_FORMAT_HASH, INT_MAX);
+						   KDS_FORMAT_HASH, INT_MAX, false);
 	pds->nblocks_uncached = 0;
 	pds->filedesc = -1;
 
@@ -509,14 +503,16 @@ __PDS_create_slot(GpuContext *gcontext,
 	pgstrom_data_store *pds;
 	CUdeviceptr	m_deviceptr;
 	CUresult	rc;
+	size_t		kds_head_sz;
+	size_t		unitsz;
 	size_t		nrooms;
 
 	bytesize = STROMALIGN_DOWN(bytesize);
-	if (KDS_CALCULATE_HEAD_LENGTH(tupdesc->natts) > bytesize)
+	kds_head_sz = KDS_CALCULATE_HEAD_LENGTH(tupdesc->natts, false);
+	if (kds_head_sz > bytesize)
 		elog(ERROR, "Required length for KDS-Slot is too short");
-
-	nrooms = (bytesize - KDS_CALCULATE_HEAD_LENGTH(tupdesc->natts))
-		/ MAXALIGN((sizeof(Datum) + sizeof(char)) * tupdesc->natts);
+	unitsz = MAXALIGN((sizeof(Datum) + sizeof(char)) * tupdesc->natts);
+	nrooms = (bytesize - kds_head_sz) / unitsz;
 
 	rc = __gpuMemAllocManaged(gcontext,
 							  &m_deviceptr,
@@ -533,7 +529,7 @@ __PDS_create_slot(GpuContext *gcontext,
 	pg_atomic_init_u32(&pds->refcnt, 1);
 	init_kernel_data_store(&pds->kds, tupdesc,
 						   bytesize - offsetof(pgstrom_data_store, kds),
-						   KDS_FORMAT_SLOT, nrooms);
+						   KDS_FORMAT_SLOT, nrooms, false);
 	pds->nblocks_uncached = 0;
 	pds->filedesc = -1;
 
@@ -551,7 +547,7 @@ __PDS_create_block(GpuContext *gcontext,
 	size_t		bytesize;
 	CUresult	rc;
 
-	bytesize = KDS_CALCULATE_HEAD_LENGTH(tupdesc->natts)
+	bytesize = KDS_CALCULATE_HEAD_LENGTH(tupdesc->natts, false)
 		+ STROMALIGN(sizeof(BlockNumber) * nrooms)
 		+ BLCKSZ * nrooms;
 	if (offsetof(pgstrom_data_store, kds) + bytesize > pgstrom_chunk_size())
@@ -570,7 +566,7 @@ __PDS_create_block(GpuContext *gcontext,
 	pds->gcontext = gcontext;
 	pg_atomic_init_u32(&pds->refcnt, 1);
 	init_kernel_data_store(&pds->kds, tupdesc, bytesize,
-						   KDS_FORMAT_BLOCK, nrooms);
+						   KDS_FORMAT_BLOCK, nrooms, false);
     pds->kds.nrows_per_block = nvme_sstate->nrows_per_block;
     pds->nblocks_uncached = 0;
 	pds->filedesc = -1;
@@ -733,6 +729,7 @@ PDS_init_heapscan_state(GpuTaskState *gts)
 	BlockNumber		nr_blocks;
 	BlockNumber		nr_segs;
 	NVMEScanState  *nvme_sstate;
+	size_t			kds_head_sz;
 	cl_uint			nrooms_max;
 	cl_uint			nchunks;
 	cl_uint			nblocks_per_chunk;
@@ -757,10 +754,10 @@ PDS_init_heapscan_state(GpuTaskState *gts)
 	 * So, we will adjust @nblocks_per_chunk to balance chunk size all
 	 * around the relation scan.
 	 */
-	nrooms_max = (pgstrom_chunk_size() -
-				  KDS_CALCULATE_HEAD_LENGTH(tupdesc->natts))
+	kds_head_sz = KDS_CALCULATE_HEAD_LENGTH(tupdesc->natts, false);
+	nrooms_max = (pgstrom_chunk_size() - kds_head_sz)
 		/ (sizeof(BlockNumber) + BLCKSZ);
-	while (KDS_CALCULATE_HEAD_LENGTH(tupdesc->natts) +
+	while (kds_head_sz +
 		   STROMALIGN(sizeof(BlockNumber) * nrooms_max) +
 		   BLCKSZ * nrooms_max > pgstrom_chunk_size())
 		nrooms_max--;

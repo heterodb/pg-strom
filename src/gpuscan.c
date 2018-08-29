@@ -2232,8 +2232,7 @@ gpuscan_create_task(GpuScanState *gss,
 			Assert(pds_src->kds.nrows_per_block > 0);
 			ntuples *= 1.5 * (double)pds_src->kds.nrows_per_block;
 		}
-		length = STROMALIGN(offsetof(kern_data_store,
-									 colmeta[scan_tupdesc->natts])) +
+		length = KDS_CALCULATE_HEAD_LENGTH(scan_tupdesc->natts, false) +
 			STROMALIGN((Size)(sizeof(cl_uint) * ntuples)) +
 			STROMALIGN((Size)(1.2 * proj_tuple_sz * ntuples / 2));
 

@@ -1055,9 +1055,7 @@ cost_gpupreagg(PlannerInfo *root,
 	//FIXME
 	ncols = list_length(target_device->exprs);
 	nrooms = (cl_uint)(2.5 * num_groups * (double)key_dist_salt);
-	kds_length = (STROMALIGN(offsetof(kern_data_store, colmeta[ncols])) +
-				  STROMALIGN((sizeof(Datum) +
-							  sizeof(bool)) * ncols) * nrooms +
+	kds_length = (KDS_CALCULATE_SLOT_LENGTH(ncols, nrooms) +
 				  STROMALIGN(extra_sz) * nrooms);
 	// unified memory eliminates limitation of the device memory
 	// however, some penalty is needed for large buffer
@@ -4097,15 +4095,15 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 											   outer_tupdesc);
 
 	/* Template of kds_slot */
-	length = STROMALIGN(offsetof(kern_data_store,
-								 colmeta[gpreagg_tupdesc->natts]));
+	length = KDS_CALCULATE_HEAD_LENGTH(gpreagg_tupdesc->natts, false);
 	gpas->kds_slot_head = MemoryContextAllocZero(CurTransactionContext,
 												 length);
 	init_kernel_data_store(gpas->kds_slot_head,
 						   gpreagg_tupdesc,
 						   INT_MAX,		/* to be set individually */
 						   KDS_FORMAT_SLOT,
-						   INT_MAX);	/* to be set individually */
+						   INT_MAX,		/* to be set individually */
+						   false);
 
 	/* Save the plan-time estimations */
 	gpas->plan_nrows_per_chunk =
@@ -4601,10 +4599,8 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 			suspend_sz = STROMALIGN(sizeof(gpuscanSuspendContext) *
 									GPUKERNEL_MAX_SM_MULTIPLICITY * sm_count);
 		}
-		kds_slot_length = STROMALIGN(offsetof(kern_data_store,
-											  colmeta[gpa_tupdesc->natts])) +
-			STROMALIGN(MAXALIGN((sizeof(Datum) + sizeof(char)) *
-								gpa_tupdesc->natts) * kds_slot_nrooms);
+		kds_slot_length = KDS_CALCULATE_SLOT_LENGTH(gpa_tupdesc->natts,
+													kds_slot_nrooms);
 	}
 	else
 	{

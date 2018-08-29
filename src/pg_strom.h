@@ -1024,7 +1024,8 @@ extern void init_kernel_data_store(kern_data_store *kds,
 								   TupleDesc tupdesc,
 								   Size length,
 								   int format,
-								   uint nrooms);
+								   uint nrooms,
+								   bool has_attnames);
 
 extern pgstrom_data_store *__PDS_create_row(GpuContext *gcontext,
 											TupleDesc tupdesc,

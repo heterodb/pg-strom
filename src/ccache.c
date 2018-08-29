@@ -395,7 +395,7 @@ pgstrom_ccache_load_chunk(ccacheChunk *cc_chunk,
 		/* load the header portion of kds-column */
 		Assert(cc_chunk->nattrs == tupdesc->natts);
 		ncols = cc_chunk->nattrs + NumOfSystemAttrs;
-		length = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
+		length = KDS_CALCULATE_HEAD_LENGTH(ncols, false);
 		if (length > sizeof(buffer))
 			kds_head = palloc(length);
 		if (pread(fdesc, kds_head, length, 0) != length)
@@ -424,9 +424,9 @@ pgstrom_ccache_load_chunk(ccacheChunk *cc_chunk,
 		pds->nblocks_uncached = 0;
 		pds->filedesc = -1;
 		init_kernel_data_store(&pds->kds, tupdesc, length,
-							   KDS_FORMAT_COLUMN, nitems);
+							   KDS_FORMAT_COLUMN, nitems, false);
 		/* load from the ccache file */
-		offset = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
+		offset = KERN_DATA_STORE_HEAD_LENGTH(&pds->kds);
 		for (i = bms_next_member(ccache_refs, -1);
 			 i >= 0;
 			 i = bms_next_member(ccache_refs, i))
@@ -1698,12 +1698,12 @@ ccache_copy_buffer_to_kds(kern_data_store *kds,
 						   tupdesc,
 						   SIZE_MAX,	/* to be set later */
 						   KDS_FORMAT_COLUMN,
-						   nrooms);
+						   nrooms,
+						   true);
 	Assert(cc_buf->nattrs == tupdesc->natts ||
 		   cc_buf->nattrs == tupdesc->natts + NumOfSystemAttrs);
 
-	pos = (char *)kds + STROMALIGN(offsetof(kern_data_store,
-											colmeta[kds->ncols]));
+	pos = KERN_DATA_STORE_BODY(kds);
 	for (j=0; j < cc_buf->nattrs; j++)
 	{
 		Form_pg_attribute attr;
@@ -2078,8 +2078,7 @@ __ccache_preload_chunk(ccacheChunk *cc_chunk,
 	}
 
 	/* write out to the ccache file */
-	map_length = STROMALIGN(offsetof(kern_data_store,
-									 colmeta[cc_buf.nattrs]));
+	map_length = KDS_CALCULATE_HEAD_LENGTH(cc_buf.nattrs, true);
 	for (j=FirstLowInvalidHeapAttributeNumber+1; j < tupdesc->natts; j++)
 	{
 		Form_pg_attribute attr;

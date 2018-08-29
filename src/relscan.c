@@ -495,6 +495,7 @@ pgstrom_common_relscan_cost(PlannerInfo *root,
 	cl_uint		nrows_per_block = 0;
 	Size		heap_size;
 	Size		htup_size;
+	Size		kds_head_sz;
 	QualCost	qcost;
 	ListCell   *lc;
 
@@ -600,10 +601,10 @@ pgstrom_common_relscan_cost(PlannerInfo *root,
 								   t_bits[BITMAPLEN(scan_rel->max_attr)])) +
 				 MAXALIGN(heap_size / Max(scan_rel->tuples, 1.0) -
 						  sizeof(ItemIdData) - SizeofHeapTupleHeader));
+	kds_head_sz = KDS_CALCULATE_HEAD_LENGTH(scan_rel->max_attr, false);
 	nchunks =  (((double)(offsetof(kern_tupitem, htup) + htup_size +
 						  sizeof(cl_uint)) * Max(ntuples, 1.0)) /
-				((double)(pgstrom_chunk_size() -
-						  KDS_CALCULATE_HEAD_LENGTH(scan_rel->max_attr))));
+				((double)(pgstrom_chunk_size() - kds_head_sz)));
 	nchunks = Max(nchunks, 1);
 
 	/*

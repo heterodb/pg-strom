@@ -92,6 +92,10 @@ typedef double				cl_double;
 typedef cl_ulong	hostptr_t;
 typedef size_t		devptr_t;
 typedef cl_ulong	Datum;
+typedef struct nameData
+{
+	char		data[NAMEDATALEN];
+} NameData;
 
 #define PointerGetDatum(X)	((Datum) (X))
 #define DatumGetPointer(X)	((char *) (X))
@@ -558,7 +562,7 @@ typedef struct {
 #define HEAP_ONLY_TUPLE			0x8000	/* this is heap-only tuple */
 #define HEAP2_XACT_MASK			0xE000	/* visibility-related bits */
 
-#endif
+#endif		/* __CUDACC__ */
 
 /*
  * alignment for pg-strom
@@ -689,6 +693,8 @@ typedef struct {
 	cl_uint			ncols;		/* number of columns in this store */
 	cl_char			format;		/* one of KDS_FORMAT_* above */
 	cl_char			has_notbyval; /* true, if any of column is !attbyval */
+	cl_char			has_attnames; /* true, if attname array exists next to
+								   * to the colmeta array */
 	cl_char			tdhasoid;	/* copy of TupleDesc.tdhasoid */
 	cl_uint			tdtypeid;	/* copy of TupleDesc.tdtypeid */
 	cl_int			tdtypmod;	/* copy of TupleDesc.tdtypmod */
@@ -733,35 +739,45 @@ __kds_unpack(cl_uint offset)
 #define KDS_OFFSET_MAX_SIZE		((size_t)UINT_MAX << MAXIMUM_ALIGNOF_SHIFT)
 
 /* length estimator */
-#define KDS_CALCULATE_HEAD_LENGTH(ncols)		\
-	STROMALIGN(offsetof(kern_data_store, colmeta[(ncols)]))
+#define KDS_LEAST_LENGTH		4096
 
-#define KDS_CALCULATE_FRONTEND_LENGTH(ncols,nslots,nitems)	\
-	(KDS_CALCULATE_HEAD_LENGTH(ncols) +			\
+#define KDS_CALCULATE_HEAD_LENGTH(ncols,has_attnames)			\
+	(STROMALIGN(offsetof(kern_data_store, colmeta[(ncols)])) +	\
+	 STROMALIGN((has_attnames) ? sizeof(NameData) * (ncols) : 0))
+
+#define KDS_CALCULATE_FRONTEND_LENGTH(ncols,nslots,nitems,has_attnames)	\
+	(KDS_CALCULATE_HEAD_LENGTH(ncols,has_attnames) +					\
 	 STROMALIGN(sizeof(cl_uint) * (nitems)) +	\
 	 STROMALIGN(sizeof(cl_uint) * (nslots)))
 
 /* 'nslots' estimation; 25% larger than nitems, but 128 at least */
 #define __KDS_NSLOTS(nitems)					\
 	Max(128, ((nitems) * 5) >> 2)
-#define KDS_CALCULATE_ROW_LENGTH(ncols,nitems,data_len)		\
-	(KDS_CALCULATE_FRONTEND_LENGTH((ncols),0,(nitems)) +	\
+#define KDS_CALCULATE_ROW_LENGTH(ncols,nitems,data_len)			\
+	(KDS_CALCULATE_FRONTEND_LENGTH((ncols),0,(nitems),false) +	\
 	 MAXALIGN(data_len))
 #define KDS_CALCULATE_HASH_LENGTH(ncols,nitems,data_len)	\
-	(KDS_CALCULATE_FRONTEND_LENGTH((ncols),__KDS_NSLOTS(nitems),(nitems)) +	\
+	(KDS_CALCULATE_FRONTEND_LENGTH((ncols),__KDS_NSLOTS(nitems),(nitems),false) + \
 	 MAXALIGN(data_len))
 #define KDS_CALCULATE_SLOT_LENGTH(ncols,nitems)	\
-	(KDS_CALCULATE_HEAD_LENGTH(ncols) +			\
+	(KDS_CALCULATE_HEAD_LENGTH(ncols,false) +	\
 	 LONGALIGN((sizeof(Datum) +					\
 				sizeof(char)) * (ncols)) * (nitems))
 
 /* length of the header portion of kern_data_store */
 #define KERN_DATA_STORE_HEAD_LENGTH(kds)			\
-	KDS_CALCULATE_HEAD_LENGTH((kds)->ncols)
+	KDS_CALCULATE_HEAD_LENGTH((kds)->ncols,(kds)->has_attnames)
 
 /* head address of data body */
 #define KERN_DATA_STORE_BODY(kds)					\
 	((char *)(kds) + KERN_DATA_STORE_HEAD_LENGTH(kds))
+/* attname array, if any */
+#define KERN_DATA_STORE_ATTNAMES(kds)									\
+	((NameData *)														\
+	 ((kds)->has_attnames												\
+	  ? ((char *)(kds) + STROMALIGN(offsetof(kern_data_store,			\
+											 colmeta[(kds)->ncols])))	\
+	  : NULL))
 
 /* access function for row- and hash-format */
 STATIC_INLINE(cl_uint *)

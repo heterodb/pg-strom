@@ -6521,7 +6521,8 @@ gpujoin_compaction_inner_kds(kern_data_store *kds_in)
 		   kds_in->nslots == 0);
 	head_sz = KDS_CALCULATE_FRONTEND_LENGTH(kds_in->ncols,
 											kds_in->nslots,
-											kds_in->nitems);
+											kds_in->nitems,
+											false);
 	Assert(head_sz == MAXALIGN(head_sz));
 	Assert(head_sz + curr_usage <= kds_in->length);
 	shift = kds_in->length - (head_sz + curr_usage);
@@ -6677,8 +6678,7 @@ __gpujoin_inner_preload(GpuJoinState *gjs, bool preload_multi_gpu)
 
 		/* expand DSM on demand */
 		dsm_length = dsm_segment_map_length(seg);
-		kds_head_sz = STROMALIGN(offsetof(kern_data_store,
-										  colmeta[ps_desc->natts]));
+		kds_head_sz = KDS_CALCULATE_HEAD_LENGTH(ps_desc->natts, false);
 		while (kmrels_usage + kds_head_sz > dsm_length)
 		{
 			h_kmrels = dsm_resize(seg, TYPEALIGN(BLCKSZ, (3*dsm_length)/2));
@@ -6692,7 +6692,8 @@ __gpujoin_inner_preload(GpuJoinState *gjs, bool preload_multi_gpu)
 							   (istate->hash_inner_keys != NIL
 								? KDS_FORMAT_HASH
 								: KDS_FORMAT_ROW),
-							   UINT_MAX);
+							   UINT_MAX,
+							   false);
 		h_kmrels->chunks[i].chunk_offset = kmrels_usage;
 		if (istate->hash_inner_keys != NIL)
 			gpujoin_inner_hash_preload(istate, seg, kds, kmrels_usage);
