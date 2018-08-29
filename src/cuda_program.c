@@ -412,10 +412,6 @@ construct_flat_cuda_source(uint32 extra_flags,
 		ofs += snprintf(source + ofs, len - ofs,
 						"#include \"cuda_time_extract.h\"\n");
 
-	//XXX
-	ofs += snprintf(source + ofs, len - ofs,
-					"#include \"cuda_lzcompress.h\"\n");
-
 	/* pg_anytype_t declaration */
 	pg_anytype =
 		"typedef union {\n"

@@ -642,13 +642,11 @@ typedef struct {
 	/*
 	 * (only column format)
 	 * @va_offset is offset of the values array from the kds-head.
-	 * @va_length is length of the values array or compressed block,
-	 * if @va_rawsize is not zero.
-	 * Any of above fields are packed values for 32GB support.
+	 * @va_length is length of the values array and extra area which is
+	 * used to dictionary of varlena or nullmap of fixed-length values.
 	 */
 	cl_uint			va_offset;
 	cl_uint			va_length;
-	cl_uint			va_rawsize;	/* ==0, if uncompressed data */
 } kern_colmeta;
 
 /*
@@ -691,8 +689,6 @@ typedef struct {
 	cl_uint			ncols;		/* number of columns in this store */
 	cl_char			format;		/* one of KDS_FORMAT_* above */
 	cl_char			has_notbyval; /* true, if any of column is !attbyval */
-	cl_char			has_compressed; /* true, if any of column is compressed
-									 * by GPULz when KDS_FORMA_COLUMN */
 	cl_char			tdhasoid;	/* copy of TupleDesc.tdhasoid */
 	cl_uint			tdtypeid;	/* copy of TupleDesc.tdtypeid */
 	cl_int			tdtypmod;	/* copy of TupleDesc.tdtypmod */
@@ -1872,7 +1868,6 @@ kern_get_datum_column(kern_data_store *kds,
 		return NULL;
 	values = (char *)kds + offset;
 	length = __kds_unpack(__ldg(&cmeta->va_length));
-	Assert(__ldg(&cmeta->va_rawsize) == 0);
 	if (__ldg(&cmeta->attlen) < 0)
 	{
 		Assert(!__ldg(&cmeta->attbyval));

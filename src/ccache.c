@@ -373,8 +373,7 @@ pgstrom_ccache_load_chunk(ccacheChunk *cc_chunk,
 	int			fdesc = -1;
 	ssize_t		nitems;
 	ssize_t		offset;
-	ssize_t		usage = 0;
-	ssize_t		rawsize = 0;
+	ssize_t		length = 0;
 	CUdeviceptr	m_deviceptr;
 	CUresult	rc;
 	char		buffer[MAXPGPATH];
@@ -396,10 +395,10 @@ pgstrom_ccache_load_chunk(ccacheChunk *cc_chunk,
 		/* load the header portion of kds-column */
 		Assert(cc_chunk->nattrs == tupdesc->natts);
 		ncols = cc_chunk->nattrs + NumOfSystemAttrs;
-		usage = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
-		if (usage > sizeof(buffer))
-			kds_head = palloc(usage);
-		if (pread(fdesc, kds_head, usage, 0) != usage)
+		length = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
+		if (length > sizeof(buffer))
+			kds_head = palloc(length);
+		if (pread(fdesc, kds_head, length, 0) != length)
 			elog(ERROR, "failed on pread(2): %m");
 		nitems = kds_head->nitems;
 		/* count length of the PDS_column */
@@ -409,14 +408,13 @@ pgstrom_ccache_load_chunk(ccacheChunk *cc_chunk,
 		{
 			kern_colmeta   *cmeta = &kds_head->colmeta[i];
 
-			usage += __kds_unpack(cmeta->va_length);
-			rawsize += __kds_unpack(cmeta->va_rawsize);
+			length += __kds_unpack(cmeta->va_length);
 		}
 		/* allocation of pds_column buffer */
 		rc = gpuMemAllocManaged(gcontext,
 								&m_deviceptr,
 								offsetof(pgstrom_data_store,
-										 kds) + (usage + rawsize),
+										 kds) + length,
 								CU_MEM_ATTACH_GLOBAL);
 		if (rc != CUDA_SUCCESS)
 			elog(ERROR, "out of managed memory");
@@ -425,7 +423,7 @@ pgstrom_ccache_load_chunk(ccacheChunk *cc_chunk,
 		pg_atomic_init_u32(&pds->refcnt, 1);
 		pds->nblocks_uncached = 0;
 		pds->filedesc = -1;
-		init_kernel_data_store(&pds->kds, tupdesc, usage + rawsize,
+		init_kernel_data_store(&pds->kds, tupdesc, length,
 							   KDS_FORMAT_COLUMN, nitems);
 		/* load from the ccache file */
 		offset = STROMALIGN(offsetof(kern_data_store, colmeta[ncols]));
@@ -445,9 +443,6 @@ pgstrom_ccache_load_chunk(ccacheChunk *cc_chunk,
 			Assert(offset == MAXALIGN(offset));
 			pds->kds.colmeta[i].va_offset = __kds_packed(offset);
 			pds->kds.colmeta[i].va_length = cmeta->va_length;
-			pds->kds.colmeta[i].va_rawsize = cmeta->va_rawsize;
-			if (cmeta->va_rawsize > 0)
-				pds->kds.has_compressed = true;
 
 			nbytes = __kds_unpack(cmeta->va_length);
 			if (pread(fdesc,
@@ -457,9 +452,8 @@ pgstrom_ccache_load_chunk(ccacheChunk *cc_chunk,
 				elog(ERROR, "failed on pread(2): %m");
 			offset += nbytes;
 		}
-		Assert(offset == usage);
+		Assert(offset == length);
 		pds->kds.nitems = nitems;
-		pds->kds.usage = __kds_packed(usage);
 	}
 	PG_CATCH();
 	{
@@ -1584,8 +1578,6 @@ ccache_copy_buffer_from_kds(TupleDesc tupdesc,
 	Assert(ccacheBufferSanityCheckKDS(tupdesc, kds));
 	if (kds->nitems > cc_buf->nrooms)
 		elog(ERROR, "lack of ccache buffer rooms");
-	if (kds->has_compressed)
-		elog(ERROR, "KDS has compressed column by GPULz");
 
 	oldcxt = MemoryContextSwitchTo(memcxt);
 	for (j=0; j < cc_buf->nattrs; j++)
@@ -1696,8 +1688,7 @@ void
 ccache_copy_buffer_to_kds(kern_data_store *kds,
 						  TupleDesc tupdesc,
 						  ccacheBuffer *cc_buf,
-						  bits8 *rowmap, size_t visible_nitems,
-						  bool try_gpulz_compression)
+						  bits8 *rowmap, size_t visible_nitems)
 {
 	size_t	nrooms = (!rowmap ? cc_buf->nitems : visible_nitems);
 	char   *pos;
@@ -1719,7 +1710,6 @@ ccache_copy_buffer_to_kds(kern_data_store *kds,
 		kern_colmeta   *cmeta = &kds->colmeta[j];
 		size_t			offset;
 		size_t			nbytes;
-		struct varlena *compress;
 
 		if (j < tupdesc->natts)
 			attr = tupleDescAttr(tupdesc, j);
@@ -1765,23 +1755,6 @@ ccache_copy_buffer_to_kds(kern_data_store *kds,
 			nbytes = ((char *)extra - (char *)base);
 			pos += nbytes;
 			cmeta->va_length = __kds_packed(nbytes);
-			/* Try compression by GPULz if make sense */
-			if (try_gpulz_compression && nbytes >= BLCKSZ)
-			{
-				compress = pgstrom_gpulz_compression(base, nbytes);
-				if (compress && VARSIZE(compress) < nbytes / 2)
-				{
-					size_t		chunk_sz = VARSIZE(compress);
-
-					memcpy(base, compress, chunk_sz);
-					pos = (char *)base + MAXALIGN(chunk_sz);
-					cmeta->va_length = __kds_packed(MAXALIGN(chunk_sz));
-					cmeta->va_rawsize = __kds_packed(nbytes);
-					kds->has_compressed = true;
-				}
-				if (compress)
-					pfree(compress);
-			}
 		}
 		else if (!rowmap)
 		{
@@ -1802,23 +1775,6 @@ ccache_copy_buffer_to_kds(kern_data_store *kds,
 			}
 			nbytes = (pos - base);
 			cmeta->va_length = __kds_packed(nbytes);
-			/* Try compression by GPULz if make sense */
-			if (try_gpulz_compression && nbytes >= BLCKSZ)
-			{
-				compress = pgstrom_gpulz_compression(base, nbytes);
-				if (compress && VARSIZE(compress) < nbytes / 2)
-				{
-					size_t		chunk_sz = VARSIZE(compress);
-
-					memcpy(base, compress, chunk_sz);
-					pos = base + MAXALIGN(chunk_sz);
-					cmeta->va_length = __kds_packed(MAXALIGN(chunk_sz));
-					cmeta->va_rawsize = __kds_packed(nbytes);
-					kds->has_compressed = true;
-				}
-				if (compress)
-					pfree(compress);
-			}
 		}
 		else
 		{
@@ -1862,23 +1818,6 @@ ccache_copy_buffer_to_kds(kern_data_store *kds,
 				pos += MAXALIGN(BITMAPLEN(nrooms));
 			nbytes = pos - base;
 			cmeta->va_length = __kds_packed(nbytes);
-			/* Try compression by GPULz if make sense */
-			if (try_gpulz_compression && nbytes >= BLCKSZ)
-			{
-				compress = pgstrom_gpulz_compression(base, nbytes);
-				if (compress && VARSIZE(compress) < nbytes / 2)
-				{
-					size_t		chunk_sz = VARSIZE(compress);
-
-					memcpy(base, compress, chunk_sz);
-					pos = base + MAXALIGN(chunk_sz);
-					cmeta->va_length = __kds_packed(MAXALIGN(chunk_sz));
-					cmeta->va_rawsize = __kds_packed(nbytes);
-					kds->has_compressed = true;
-				}
-				if (compress)
-					pfree(compress);
-			}
 		}
 	}
 	kds->nitems = nrooms;
@@ -2197,7 +2136,7 @@ __ccache_preload_chunk(ccacheChunk *cc_chunk,
 		close(fdesc);
 		elog(ERROR, "failed on mmap: %m");
 	}
-	ccache_copy_buffer_to_kds(kds, tupdesc, &cc_buf, NULL, 0, true);
+	ccache_copy_buffer_to_kds(kds, tupdesc, &cc_buf, NULL, 0);
 	kds_length = kds->length;
 	Assert(kds_length <= map_length);
 	if (ftruncate(fdesc, kds_length) != 0)

@@ -1368,7 +1368,6 @@ __setup_composite_kern_colmeta(HeapTuple typtup, plcudaCodeProperty *p)
 		cmeta->atttypmod = attForm->atttypmod;
 		cmeta->va_offset = 0;
 		cmeta->va_length = 0;
-		cmeta->va_rawsize = 0;
 
 		if (get_typtype(attForm->atttypid) == TYPTYPE_COMPOSITE)
 			composite_subtypes = list_append_unique_oid(composite_subtypes,
@@ -1412,7 +1411,6 @@ __setup_kern_colmeta(Oid type_oid, int attnum, plcudaCodeProperty *p)
 		result.atttypmod = -1;
 		result.va_offset = 0;
 		result.va_length = 0;
-		result.va_rawsize = 0;
 
 		return result;
 	}
@@ -1432,7 +1430,6 @@ __setup_kern_colmeta(Oid type_oid, int attnum, plcudaCodeProperty *p)
 	result.atttypmod = typeForm->typtypmod;
 	result.va_offset = 0;
 	result.va_length = 0;
-	result.va_rawsize = 0;
 
 	/*
 	 * composite type needs extra kern_colmeta array to form/deform

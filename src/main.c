@@ -625,7 +625,6 @@ _PG_init(void)
 	pgstrom_init_plcuda();
 	pgstrom_init_ccache();
 	pgstrom_init_gstore_fdw();
-	pgstrom_init_xpack();
 
 	/* check commercial license, if any */
 	check_heterodb_license();

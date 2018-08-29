@@ -2732,14 +2732,6 @@ gpuscan_process_task(GpuTask *gtask, CUmodule cuda_module)
 		if (rc != CUDA_SUCCESS)
 			werror("failed on cuMemPrefetchAsync: %s", errorText(rc));
 	}
-	/* decompression of KDS_FORMAT_COLUMN, if compressed */
-	if (pds_src->kds.format == KDS_FORMAT_COLUMN &&
-		pds_src->kds.has_compressed)
-	{
-		kernel_gpulz_decompression(cuda_module,
-								   &gscan->kern.kerror,
-								   &pds_src->kds);
-	}
 
 	/*
 	 * KERNEL_FUNCTION(void)
