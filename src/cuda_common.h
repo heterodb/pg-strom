@@ -1816,9 +1816,10 @@ kern_get_datum_tuple(kern_colmeta *colmeta,
 			addr = ((char *) htup + offset);
 			if (i == colidx)
 				return addr;
-			offset += (cmeta.attlen > 0
-					   ? cmeta.attlen
-					   : VARSIZE_ANY(addr));
+			if (cmeta.attlen > 0)
+				offset += cmeta.attlen;
+			else
+				offset += VARSIZE_ANY(addr);
 		}
 	}
 	return NULL;

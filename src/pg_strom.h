@@ -95,6 +95,7 @@
 #include "storage/buf.h"
 #include "storage/buf_internals.h"
 #include "storage/ipc.h"
+#include "storage/itemptr.h"
 #include "storage/fd.h"
 #include "storage/large_object.h"
 #include "storage/latch.h"
