@@ -42,20 +42,19 @@ typedef unsigned int		cl_uint;
 #ifdef __CUDACC__
 typedef long long			cl_long;
 typedef unsigned long long	cl_ulong;
-#else
+#else	/* __CUDACC__ */
 typedef long				cl_long;
 typedef unsigned long		cl_ulong;
-#endif
+#endif	/* !__CUDACC__ */
 #ifdef __CUDACC__
 #include <cuda_fp16.h>
 typedef __half				cl_half;
-#endif
+#endif	/* __CUDACC__ */
 typedef float				cl_float;
 typedef double				cl_double;
 
-/* CUDA NVRTC always adds -D__CUDACC__ on device code. */
-#ifdef __CUDACC__
-/* Misc definitions */
+/* PG's utility macros */
+#ifndef PG_STROM_H
 #ifdef offsetof
 #undef offsetof
 #endif
@@ -84,7 +83,7 @@ typedef double				cl_double;
 #define MAXIMUM_ALIGNOF_SHIFT	2
 #else
 #error Unexpected MAXIMUM_ALIGNOF definition
-#endif
+#endif	/* MAXIMUM_ALIGNOF */
 
 #define Assert(cond)	assert(cond)
 
@@ -131,21 +130,6 @@ typedef struct nameData
 #define get_next_log2(value)								\
 	((value) == 0 ? 0 : (sizeof(cl_ulong) * BITS_PER_BYTE - \
 						 __clzll((cl_ulong)(value) - 1)))
-
-/*
- * Alignment macros
- */
-#define TYPEALIGN(ALIGNVAL,LEN)	\
-	(((devptr_t) (LEN) + ((ALIGNVAL) - 1)) & ~((devptr_t) ((ALIGNVAL) - 1)))
-#define TYPEALIGN_DOWN(ALIGNVAL,LEN) \
-	(((devptr_t) (LEN)) & ~((devptr_t) ((ALIGNVAL) - 1)))
-#define INTALIGN(LEN)			TYPEALIGN(sizeof(cl_int), (LEN))
-#define INTALIGN_DOWN(LEN)		TYPEALIGN_DOWN(sizeof(cl_int), (LEN))
-#define LONGALIGN(LEN)          TYPEALIGN(sizeof(cl_long), (LEN))
-#define LONGALIGN_DOWN(LEN)     TYPEALIGN_DOWN(sizeof(cl_long), (LEN))
-#define MAXALIGN(LEN)			TYPEALIGN(MAXIMUM_ALIGNOF, (LEN))
-#define MAXALIGN_DOWN(LEN)		TYPEALIGN_DOWN(MAXIMUM_ALIGNOF, (LEN))
-
 /*
  * Limitation of types
  */
@@ -211,6 +195,32 @@ typedef struct nameData
 #endif
 
 /*
+ * Alignment macros
+ */
+#define TYPEALIGN(ALIGNVAL,LEN)	\
+	(((devptr_t) (LEN) + ((ALIGNVAL) - 1)) & ~((devptr_t) ((ALIGNVAL) - 1)))
+#define TYPEALIGN_DOWN(ALIGNVAL,LEN) \
+	(((devptr_t) (LEN)) & ~((devptr_t) ((ALIGNVAL) - 1)))
+#define INTALIGN(LEN)			TYPEALIGN(sizeof(cl_int), (LEN))
+#define INTALIGN_DOWN(LEN)		TYPEALIGN_DOWN(sizeof(cl_int), (LEN))
+#define LONGALIGN(LEN)          TYPEALIGN(sizeof(cl_long), (LEN))
+#define LONGALIGN_DOWN(LEN)     TYPEALIGN_DOWN(sizeof(cl_long), (LEN))
+#define MAXALIGN(LEN)			TYPEALIGN(MAXIMUM_ALIGNOF, (LEN))
+#define MAXALIGN_DOWN(LEN)		TYPEALIGN_DOWN(MAXIMUM_ALIGNOF, (LEN))
+#endif		/* PG_STROM_H */
+/*
+ * wider alignments
+ */
+#define STROMALIGN_LEN			16
+#define STROMALIGN(LEN)			TYPEALIGN(STROMALIGN_LEN,(LEN))
+#define STROMALIGN_DOWN(LEN)	TYPEALIGN_DOWN(STROMALIGN_LEN,(LEN))
+
+#define GPUMEMALIGN_LEN			1024
+#define GPUMEMALIGN(LEN)		TYPEALIGN(GPUMEMALIGN_LEN,(LEN))
+#define GPUMEMALIGN_DOWN(LEN)	TYPEALIGN_DOWN(GPUMEMALIGN_LEN,(LEN))
+
+#ifdef __CUDACC__
+/*
  * MEMO: We takes dynamic local memory using cl_ulong data-type because of
  * alignment problem. The nvidia's driver adjust alignment of local memory
  * according to the data type; 1byte for cl_char, 4bytes for cl_uint and
@@ -240,15 +250,9 @@ extern __shared__ cl_ulong __pgstrom_dynamic_shared_workmem[];
 #define get_global_base()		(blockIdx.x * blockDim.x)
 
 #else	/* __CUDACC__ */
-#include "access/htup_details.h"
-#include "storage/itemptr.h"
-#define __device__		/* address space qualifier is noise on host */
-#define __global__		/* address space qualifier is noise on host */
-#define __constant__	/* address space qualifier is noise on host */
-#define __shared__		/* address space qualifier is noise on host */
 typedef uintptr_t		hostptr_t;
 #define __ldg(x)		(*(x))	/* cache access hint is just a noise on host */
-#endif	/* __CUDACC__ */
+#endif	/* !__CUDACC__ */
 
 /*
  * Template of static function declarations
@@ -275,7 +279,7 @@ typedef uintptr_t		hostptr_t;
 #define STATIC_FUNCTION(RET_TYPE)	static inline RET_TYPE
 #define KERNEL_FUNCTION(RET_TYPE)	RET_TYPE
 #define KERNEL_FUNCTION_MAXTHREADS(RET_TYPE)	KERNEL_FUNCTION(RET_TYPE)
-#endif
+#endif	/* !__CUDACC__ */
 
 /*
  * Error code definition
@@ -413,15 +417,14 @@ kern_writeback_error_status(kern_errorbuf *result, kern_errorbuf *my_error)
 			   KERN_ERRORBUF_FILENAME_LEN);
 	}
 }
-
 #else	/* __CUDACC__ */
 /*
  * If case when STROM_SET_ERROR is called in the host code,
  * it raises an error using ereport()
  */
-#define STROM_SET_ERROR(p_kerror, errcode)		\
+#define STROM_SET_ERROR(p_kerror, errcode)							\
 	elog(ERROR, "%s:%d %s", __FUNCTION__, __LINE__, errorText(errcode))
-#endif	/* !__CUDACC__! */
+#endif	/* !__CUDACC__ */
 
 #ifdef __CUDACC__
 /*
@@ -486,7 +489,9 @@ STATIC_INLINE(cl_ulong) GlobalTimer(void)
 	asm volatile("mov.u64 %0, %globaltimer;" : "=l"(ret) );
 	return ret;
 }
+#endif		/* __CUDACC__ */
 
+#ifndef PG_STROM_H
 /* definitions at storage/block.h */
 typedef cl_uint		BlockNumber;
 #define InvalidBlockNumber		((BlockNumber) 0xFFFFFFFF)
@@ -562,18 +567,7 @@ typedef struct {
 #define HEAP_ONLY_TUPLE			0x8000	/* this is heap-only tuple */
 #define HEAP2_XACT_MASK			0xE000	/* visibility-related bits */
 
-#endif		/* __CUDACC__ */
-
-/*
- * alignment for pg-strom
- */
-#define STROMALIGN_LEN			16
-#define STROMALIGN(LEN)			TYPEALIGN(STROMALIGN_LEN,(LEN))
-#define STROMALIGN_DOWN(LEN)	TYPEALIGN_DOWN(STROMALIGN_LEN,(LEN))
-
-#define GPUMEMALIGN_LEN			1024
-#define GPUMEMALIGN(LEN)		TYPEALIGN(GPUMEMALIGN_LEN,(LEN))
-#define GPUMEMALIGN_DOWN(LEN)	TYPEALIGN_DOWN(GPUMEMALIGN_LEN,(LEN))
+#endif	/* PG_STROM_H */
 
 /*
  * kern_data_store
@@ -1173,7 +1167,7 @@ pg_bool_as_datum(void *addr)
 	cl_bool		val = *((cl_bool *)addr);
 	return SET_1_BYTE(val);
 }
-#endif
+#endif	/* PG_BOOL_TYPE_DEFINED */
 
 /* pg_int2_t */
 #ifndef PG_INT2_TYPE_DEFINED
@@ -1185,7 +1179,7 @@ pg_int2_as_datum(void *addr)
 	cl_short	val = *((cl_short *)addr);
 	return SET_2_BYTES(val);
 }
-#endif
+#endif	/* PG_INT2_TYPE_DEFINED */
 
 /* pg_int4_t */
 #ifndef PG_INT4_TYPE_DEFINED
@@ -1197,7 +1191,7 @@ pg_int4_as_datum(void *addr)
 	cl_int		val = *((cl_int *)addr);
 	return SET_4_BYTES(val);
 }
-#endif
+#endif	/* PG_INT4_TYPE_DEFINED */
 
 /* pg_int8_t */
 #ifndef PG_INT8_TYPE_DEFINED
@@ -1209,7 +1203,7 @@ pg_int8_as_datum(void *addr)
 	cl_long		val = *((cl_long *)addr);
 	return SET_8_BYTES(val);
 }
-#endif
+#endif	/* PG_INT8_TYPE_DEFINED */
 
 /* pg_float2_t */
 #ifndef PG_FLOAT2_TYPE_DEFINED
@@ -1221,7 +1215,7 @@ pg_float2_as_datum(void *addr)
 	cl_half		val = *((cl_half *)addr);
 	return SET_2_BYTES(__half_as_short(val));
 }
-#endif
+#endif	/* PG_FLOAT2_TYPE_DEFINED */
 
 /* pg_float4_t */
 #ifndef PG_FLOAT4_TYPE_DEFINED
@@ -1233,7 +1227,7 @@ pg_float4_as_datum(void *addr)
 	cl_float	val = *((cl_float *)addr);
 	return SET_4_BYTES(__float_as_int(val));
 }
-#endif
+#endif	/* PG_FLOAT4_TYPE_DEFINED */
 
 /* pg_float8_t */
 #ifndef PG_FLOAT8_TYPE_DEFINED
@@ -1245,8 +1239,10 @@ pg_float8_as_datum(void *addr)
 	cl_double	val = *((cl_double *)addr);
 	return SET_8_BYTES(__double_as_longlong(val));
 }
-#endif
+#endif	/* PG_FLOAT8_TYPE_DEFINED */
+#endif	/* __CUDACC__ */
 
+#ifndef PG_STROM_H
 /*
  * Template of variable classes: variable-length variables
  * ---------------------------------------------------------------
@@ -1402,7 +1398,9 @@ typedef struct toast_compress_header
 
 #define SET_VARSIZE(PTR, len)						\
 	(((varattrib_4b *)(PTR))->va_4byte.va_header = (((cl_uint) (len)) << 2))
+#endif	/* PG_STROM_H */
 
+#ifdef __CUDACC__
 /*
  * toast_raw_datum_size - return the raw (detoasted) size of a varlena
  * datum (including the VARHDRSZ header)
@@ -1572,7 +1570,9 @@ toast_decompress_datum(char *buffer, cl_uint buflen,
 	}
 	return true;
 }
+#endif	/* __CUDACC__ */
 
+#ifdef	__CUDACC__
 /*
  * template to reference variable length variables
  */
@@ -1682,13 +1682,13 @@ toast_decompress_datum(char *buffer, cl_uint buflen,
 #ifndef PG_VARLENA_TYPE_DEFINED
 #define PG_VARLENA_TYPE_DEFINED
 STROMCL_VARLENA_TYPE_TEMPLATE(varlena)
-#endif
+#endif	/* PG_VARLENA_TYPE_DEFINED */
 
 /* pg_bytea_t */
 #ifndef PG_BYTEA_TYPE_DEFINED
 #define PG_BYTEA_TYPE_DEFINED
 STROMCL_VARLENA_TYPE_TEMPLATE(bytea)
-#endif
+#endif	/* PG_BYTEA_TYPE_DEFINED */
 
 /*
  * Macro to extract a heap-tuple
@@ -2488,14 +2488,15 @@ form_kern_composite_type(void *buffer,			/* out */
 								 tup_values,
 								 tup_isnull);
 }
+#endif	/* __CUDACC__ */
 
+#ifdef __CUDACC__
 /* ------------------------------------------------------------
  *
  * Declarations of common built-in functions
  *
  * ------------------------------------------------------------
  */
-
 /* A utility function to evaluate pg_bool_t value as if built-in
  * bool variable.
  */
@@ -2524,58 +2525,6 @@ to_bool(cl_bool value)
 
 	return result;
 }
-
-#if 0
-/*
- * Support routine for BoolExpr
- */
-STATIC_INLINE(pg_bool_t)
-operator ! (pg_bool_t arg)
-{
-	arg.value = !arg.value;
-	return arg;
-}
-
-STATIC_INLINE(pg_bool_t)
-operator && (pg_bool_t arg1, pg_bool_t arg2)
-{
-	pg_bool_t	result;
-
-	/* If either of expression is FALSE, entire BoolExpr is also FALSE */
-	if ((!arg1.isnull && !arg1.value) ||
-		(!arg2.isnull && !arg2.value))
-	{
-		result.isnull = false;
-		result.value  = false;
-	}
-	else
-	{
-		result.isnull = arg1.isnull | arg2.isnull;
-		result.value  = (arg1.value && arg2.value ? true : false);
-	}
-	return result;
-}
-
-STATIC_INLINE(pg_bool_t)
-operator || (pg_bool_t arg1, pg_bool_t arg2)
-{
-	pg_bool_t	result;
-
-	/* If either of expression is TRUE, entire BoolExpr is also TRUE */
-	if ((!arg1.isnull && arg1.value) ||
-		(!arg2.isnull && arg2.value))
-	{
-		result.isnull = false;
-		result.value  = true;
-	}
-	else
-	{
-		result.isnull = arg1.isnull | arg2.isnull;
-		result.value  = (arg1.value || arg2.value ? true : false);
-	}
-	return result;
-}
-#endif
 
 /*
  * Support routine for CASE x WHEN y then ... else ... end
