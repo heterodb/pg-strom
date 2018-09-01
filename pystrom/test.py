@@ -9,4 +9,8 @@ curr.execute("select gstore_export_ipchandle('ft')::bytea")
 row = curr.fetchone()
 conn.close()
 
-pystrom.my_test(row[0])
+X = pystrom.my_test(row[0],['x','y','z'])
+Y = pystrom.my_test(row[0],['id'])
+
+print(X)
+print(Y)
