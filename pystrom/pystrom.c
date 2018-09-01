@@ -265,7 +265,7 @@ check_ndarray_column(kern_colmeta *cmeta, size_t nitems,
 
 
 static PyObject *
-my_test(PyObject *self, PyObject *args)
+pystrom_ipc_import(PyObject *self, PyObject *args)
 {
 	Py_buffer		__ipc_handle;
 	cudaIpcMemHandle_t ipc_handle;
@@ -437,7 +437,7 @@ bailout:
 }
 
 static PyMethodDef pystrom_methods[] = {
-	{"my_test", (PyCFunction)my_test, METH_VARARGS, "my_test of pystrom"},
+	{"ipc_import", (PyCFunction)pystrom_ipc_import, METH_VARARGS, "Import Gstore_fdw as cupy.core.ndarray"},
 	{NULL, NULL, 0, NULL},
 };
 
