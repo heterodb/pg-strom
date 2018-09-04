@@ -518,6 +518,12 @@ typedef struct devfunc_info {
 	const char *func_sqlname;	/* name of the function in SQL side */
 	const char *func_devname;	/* name of the function in device side */
 	Cost		func_devcost;	/* relative cost to run function on GPU */
+	/*
+	 * callback to inform expected consumption of the run-time varlena
+	 * buffer, if device function returns varlena datum
+	 */
+	size_t	  (*func_varlena_sz)(struct devfunc_info *dfunc,
+								 Expr **args, size_t *arglen);
 } devfunc_info;
 
 /*
