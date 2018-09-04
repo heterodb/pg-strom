@@ -1,5 +1,3 @@
-from pprint import pprint
-import sys
 import psycopg2
 import pystrom
 
