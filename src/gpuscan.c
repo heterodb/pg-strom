@@ -33,6 +33,7 @@ typedef struct {
 	cl_int		optimal_gpu;	/* optimal GPU selection, or -1 */
 	char	   *kern_source;	/* source of the CUDA kernel */
 	cl_uint		extra_flags;	/* extra libraries to be included */
+	cl_uint		varlena_bufsz;	/* buffer size of temporary varlena datum */
 	cl_uint		proj_tuple_sz;	/* nbytes of the expected result tuple size */
 	cl_uint		proj_extra_sz;	/* length of extra-buffer on kernel */
 	cl_uint		nrows_per_block;/* estimated tuple density per block */
@@ -53,6 +54,7 @@ form_gpuscan_info(CustomScan *cscan, GpuScanInfo *gs_info)
 	privs = lappend(privs, makeInteger(gs_info->optimal_gpu));
 	privs = lappend(privs, makeString(gs_info->kern_source));
 	privs = lappend(privs, makeInteger(gs_info->extra_flags));
+	privs = lappend(privs, makeInteger(gs_info->varlena_bufsz));
 	privs = lappend(privs, makeInteger(gs_info->proj_tuple_sz));
 	privs = lappend(privs, makeInteger(gs_info->proj_extra_sz));
 	privs = lappend(privs, makeInteger(gs_info->nrows_per_block));
@@ -79,6 +81,7 @@ deform_gpuscan_info(CustomScan *cscan)
 	gs_info->optimal_gpu = intVal(list_nth(privs, pindex++));
 	gs_info->kern_source = strVal(list_nth(privs, pindex++));
 	gs_info->extra_flags = intVal(list_nth(privs, pindex++));
+	gs_info->varlena_bufsz = intVal(list_nth(privs, pindex++));
 	gs_info->proj_tuple_sz = intVal(list_nth(privs, pindex++));
 	gs_info->proj_extra_sz = intVal(list_nth(privs, pindex++));
 	gs_info->nrows_per_block = intVal(list_nth(privs, pindex++));
@@ -325,7 +328,7 @@ gpuscan_add_scan_path(PlannerInfo *root,
 	{
 		RestrictInfo   *rinfo = lfirst(lc);
 
-		if (pgstrom_device_expression(rinfo->clause))
+		if (pgstrom_device_expression(root, rinfo->clause))
 			dev_quals = lappend(dev_quals, rinfo);
 		else
 			host_quals = lappend(host_quals, rinfo);
@@ -1088,6 +1091,7 @@ add_unique_expression(Expr *expr, List **p_targetlist, bool resjunk)
  */
 typedef struct
 {
+	PlannerInfo *root;
 	Index		scanrelid;
 	TupleDesc	tupdesc;
 	int			attnum;
@@ -1148,7 +1152,7 @@ build_gpuscan_projection_walker(Node *node, void *__context)
 		context->compatible_tlist = false;
 		return false;
 	}
-	else if (pgstrom_device_expression((Expr *) node))
+	else if (pgstrom_device_expression(context->root, (Expr *) node))
 	{
 		/* add device executable expression onto the tlist_dev */
 		add_unique_expression((Expr *) node, &context->tlist_dev, false);
@@ -1168,7 +1172,8 @@ build_gpuscan_projection_walker(Node *node, void *__context)
 }
 
 static List *
-build_gpuscan_projection(Index scanrelid,
+build_gpuscan_projection(PlannerInfo *root,
+						 Index scanrelid,
 						 Relation relation,
 						 List *tlist,
 						 List *host_quals,
@@ -1178,6 +1183,7 @@ build_gpuscan_projection(Index scanrelid,
 	ListCell   *lc;
 
 	memset(&context, 0, sizeof(context));
+	context.root = root;
 	context.scanrelid = scanrelid;
 	context.tupdesc = RelationGetDescr(relation);
 	context.attnum = 0;
@@ -1393,7 +1399,8 @@ PlanGpuScanPath(PlannerInfo *root,
 
 		if (exprType((Node *)rinfo->clause) != BOOLOID)
 			elog(ERROR, "Bug? clause on GpuScan does not have BOOL type");
-		if (!pgstrom_device_expression_cost(rinfo->clause, &devcost))
+		devcost = pgstrom_device_expression_cost(root, rinfo->clause);
+		if (devcost < 0)
 			host_quals = lappend(host_quals, rinfo);
 		else
 		{
@@ -1415,9 +1422,11 @@ PlanGpuScanPath(PlannerInfo *root,
 
 	initStringInfo(&kern);
 	initStringInfo(&source);
-	pgstrom_init_codegen_context(&context);
+	pgstrom_init_codegen_context(&context, root);
 	codegen_gpuscan_quals(&kern, &context, baserel->relid, dev_quals);
-	tlist_dev = build_gpuscan_projection(baserel->relid, relation,
+	tlist_dev = build_gpuscan_projection(root,
+										 baserel->relid,
+										 relation,
 										 tlist,
 										 host_quals,
 										 dev_quals);
@@ -1432,6 +1441,8 @@ PlanGpuScanPath(PlannerInfo *root,
 	heap_close(relation, NoLock);
 	appendStringInfoString(&source, kern.data);
 	pfree(kern.data);
+
+	elog(INFO, "varlena bufsz = %d", context.varlena_bufsz);
 
 	/* pickup referenced attributes */
 	pull_varattnos((Node *)dev_quals, baserel->relid, &varattnos);
@@ -1526,7 +1537,8 @@ pgstrom_pullup_outer_scan(PlannerInfo *root,
 		RestrictInfo *rinfo = lfirst(lc);
 		int		devcost;
 
-		if (!pgstrom_device_expression_cost(rinfo->clause, &devcost))
+		devcost = pgstrom_device_expression_cost(root, rinfo->clause);
+		if (devcost < 0)
 			return false;
 		outer_quals = lappend(outer_quals, rinfo);
 		outer_costs = lappend_int(outer_costs, devcost);
@@ -1547,7 +1559,7 @@ pgstrom_pullup_outer_scan(PlannerInfo *root,
 			if (var->varattno == InvalidAttrNumber)
 				return false;
 		}
-		else if (!pgstrom_device_expression(expr))
+		else if (!pgstrom_device_expression(root, expr))
 			return false;
 	}
 	/* Optimal GPU selection */
@@ -1850,6 +1862,7 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 							   gs_info->extra_flags);
 	program_id = pgstrom_create_cuda_program(gcontext,
 											 gs_info->extra_flags,
+											 gs_info->varlena_bufsz,
 											 gs_info->kern_source,
 											 kern_define.data,
 											 false,

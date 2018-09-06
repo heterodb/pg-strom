@@ -35,11 +35,12 @@ typedef struct
 	ProgramId		program_id;
 	pg_crc32		crc;			/* hash value by extra_flags */
 	int				target_cc;		/*             + target_cc   */
-	int				extra_flags;	/*             + kern_define */
+	cl_uint			extra_flags;	/*             + kern_define */
 	char		   *kern_define;	/*             + kern_source */
 	size_t			kern_deflen;
 	char		   *kern_source;
 	size_t			kern_srclen;
+	cl_uint			varlena_bufsz;
 	pg_crc32		ptx_crc;
 	char		   *ptx_image;		/* may be CUDA_PROGRAM_BUILD_FAILURE */
 	size_t			ptx_length;
@@ -334,7 +335,8 @@ put_cuda_program_entry(program_cache_entry *entry)
  * construct_flat_cuda_source
  */
 static char *
-construct_flat_cuda_source(uint32 extra_flags,
+construct_flat_cuda_source(cl_uint extra_flags,
+						   cl_uint varlena_bufsz,
 						   const char *kern_define,
 						   const char *kern_source)
 {
@@ -352,10 +354,12 @@ construct_flat_cuda_source(uint32 extra_flags,
 					"\n"
 					"#define BLCKSZ %u\n"
 					"#define MAXIMUM_ALIGNOF %u\n"
-					"#define NAMEDATALEN %u\n",
+					"#define NAMEDATALEN %u\n"
+					"#define KERN_CONTEXT_VARLENA_BUFSZ %u\n",
 					BLCKSZ,
 					MAXIMUM_ALIGNOF,
-					NAMEDATALEN);
+					NAMEDATALEN,
+					Max(varlena_bufsz, 1));
 	/* Enables Debug build? */
 	if ((extra_flags & DEVKERNEL_BUILD_DEBUG_INFO) != 0)
 		ofs += snprintf(source + ofs, len - ofs,
@@ -677,6 +681,7 @@ pgstrom_cuda_source_string(ProgramId program_id)
 	SpinLockRelease(&pgcache_head->lock);
 
 	source = construct_flat_cuda_source(entry->extra_flags,
+										entry->varlena_bufsz,
 										entry->kern_define,
 										entry->kern_source);
 	put_cuda_program_entry(entry);
@@ -761,6 +766,7 @@ build_cuda_program(program_cache_entry *src_entry)
 
 	/* Make a nvrtcProgram object */
 	source = construct_flat_cuda_source(src_entry->extra_flags,
+										src_entry->varlena_bufsz,
 										src_entry->kern_define,
 										src_entry->kern_source);
 	if (!source)
@@ -977,6 +983,7 @@ build_cuda_program(program_cache_entry *src_entry)
 ProgramId
 __pgstrom_create_cuda_program(GpuContext *gcontext,
 							  cl_uint extra_flags,
+							  cl_uint varlena_bufsz,
 							  const char *kern_source,
 							  const char *kern_define,
 							  bool wait_for_build,
@@ -1022,7 +1029,8 @@ __pgstrom_create_cuda_program(GpuContext *gcontext,
 			entry->target_cc == target_cc &&
 			entry->extra_flags == extra_flags &&
 			strcmp(entry->kern_source, kern_source) == 0 &&
-			strcmp(entry->kern_define, kern_define) == 0)
+			strcmp(entry->kern_define, kern_define) == 0 &&
+			entry->varlena_bufsz >= varlena_bufsz)
 		{
 			program_id = entry->program_id;
 			get_cuda_program_entry_nolock(entry);
@@ -1119,6 +1127,20 @@ __pgstrom_create_cuda_program(GpuContext *gcontext,
 	entry->kern_srclen = kern_srclen;
 	memcpy(entry->kern_source, kern_source, kern_srclen + 1);
 	usage += MAXALIGN(kern_srclen + 1);
+
+	/*
+	 * An extra margin on the @varlena_bufsz might be valuable to avoid
+	 * unnecessary program rebuild if program contains device functions
+	 * that can return varlena datum. Because @varlena_bufsz estimation
+	 * can be affected by small changes in query;
+	 * e.g, substring(X from 0 for 3) will make different value from
+	 * the substring(X from 1 for 4), but code itself shall not be
+	 * changed. So, extra margin will help the case.
+	 */
+	if (varlena_bufsz == 0)
+		entry->varlena_bufsz = 0;
+	else
+		entry->varlena_bufsz = MAXALIGN(varlena_bufsz + 36);
 
 	/* no cuda binary at this moment */
 	entry->ptx_image = NULL;

@@ -522,8 +522,8 @@ typedef struct devfunc_info {
 	 * callback to inform expected consumption of the run-time varlena
 	 * buffer, if device function returns varlena datum
 	 */
-	size_t	  (*func_varlena_sz)(struct devfunc_info *dfunc,
-								 Expr **args, size_t *arglen);
+	int		  (*func_varlena_sz)(struct devfunc_info *dfunc,
+								 Expr **args, int *vl_width);
 } devfunc_info;
 
 /*
@@ -938,14 +938,16 @@ extern void	pgstrom_init_nvme_strom(void);
  */
 extern ProgramId __pgstrom_create_cuda_program(GpuContext *gcontext,
 											   cl_uint extra_flags,
+											   cl_uint varlena_bufsz,
 											   const char *kern_source,
 											   const char *kern_define,
 											   bool wait_for_build,
 											   bool explain_only,
 											   const char *filename,
 											   int lineno);
-#define pgstrom_create_cuda_program(a,b,c,d,e,f)						\
-	__pgstrom_create_cuda_program((a),(b),(c),(d),(e),(f),__FILE__,__LINE__)
+#define pgstrom_create_cuda_program(a,b,c,d,e,f,g)				\
+	__pgstrom_create_cuda_program((a),(b),(c),(d),(e),(f),(g),	\
+								  __FILE__,__LINE__)
 extern CUmodule pgstrom_load_cuda_program(ProgramId program_id);
 extern void pgstrom_put_cuda_program(GpuContext *gcontext,
 									 ProgramId program_id);
@@ -963,6 +965,7 @@ extern void pgstrom_init_cuda_program(void);
  */
 typedef struct {
 	StringInfoData	str;
+	PlannerInfo *root;
 	List	   *type_defs;	/* list of devtype_info in use */
 	List	   *func_defs;	/* list of devfunc_info in use */
 	List	   *expr_defs;	/* list of devexpr_info in use */
@@ -971,9 +974,10 @@ typedef struct {
 	Bitmapset  *param_refs;	/* referenced parameters */
 	const char *var_label;	/* prefix of var reference, if exist */
 	const char *kds_label;	/* label to reference kds, if exist */
-	const char *kds_index_label; /* label to reference kds_index, if exist */
-	List	   *pseudo_tlist;/* pseudo tlist expression, if any */
-	int			extra_flags;/* external libraries to be included */
+	const char *kds_index_label;/* label to reference kds_index, if exist */
+	List	   *pseudo_tlist;	/* pseudo tlist expression, if any */
+	int			extra_flags;	/* external libraries to be included */
+	int			varlena_bufsz;	/* required size of temporary varlena buffer */
 } codegen_context;
 
 extern void pgstrom_codegen_typeoid_declarations(StringInfo buf);
@@ -990,16 +994,17 @@ extern void pgstrom_devfunc_track(codegen_context *context,
 extern char *pgstrom_codegen_expression(Node *expr, codegen_context *context);
 extern void pgstrom_codegen_param_declarations(StringInfo buf,
 											   codegen_context *context);
-extern bool __pgstrom_device_expression(Expr *expr,
+extern bool __pgstrom_device_expression(PlannerInfo *root, Expr *expr,
 										const char *filename, int lineno);
 
-extern bool __pgstrom_device_expression_cost(Expr *expr, int *p_devcost,
+extern int	__pgstrom_device_expression_cost(PlannerInfo *root, Expr *expr,
 											 const char *filename, int lineno);
-#define pgstrom_device_expression(a)			\
-	__pgstrom_device_expression((a),__FILE__,__LINE__)
-#define pgstrom_device_expression_cost(a,b)		\
+#define pgstrom_device_expression(a,b)					\
+	__pgstrom_device_expression((a),(b),__FILE__,__LINE__)
+#define pgstrom_device_expression_cost(a,b)				\
 	__pgstrom_device_expression_cost((a),(b),__FILE__,__LINE__)
-extern void pgstrom_init_codegen_context(codegen_context *context);
+extern void pgstrom_init_codegen_context(codegen_context *context,
+										 PlannerInfo *root);
 extern void pgstrom_init_codegen(void);
 
 /*
@@ -1199,6 +1204,7 @@ extern Size GpuJoinSetupTask(struct kern_gpujoin *kgjoin,
 extern ProgramId GpuJoinCreateCombinedProgram(PlanState *node,
 											  GpuTaskState *gpa_gts,
 											  cl_uint gpa_extra_flags,
+											  cl_uint gpa_varlena_bufsz,
 											  const char *gpa_kern_source,
 											  bool explain_only);
 extern bool GpuJoinInnerPreload(GpuTaskState *gts, CUdeviceptr *p_m_kmrels);

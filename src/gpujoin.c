@@ -54,7 +54,8 @@ typedef struct
 	int			num_rels;
 	int			optimal_gpu;
 	char	   *kern_source;
-	int			extra_flags;
+	cl_uint		extra_flags;
+	cl_uint		varlena_bufsz;
 	List	   *ccache_refs;
 	List	   *used_params;
 	List	   *outer_quals;
@@ -93,6 +94,7 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 	privs = lappend(privs, makeInteger(gj_info->optimal_gpu));
 	privs = lappend(privs, makeString(pstrdup(gj_info->kern_source)));
 	privs = lappend(privs, makeInteger(gj_info->extra_flags));
+	privs = lappend(privs, makeInteger(gj_info->varlena_bufsz));
 	privs = lappend(privs, gj_info->ccache_refs);
 	exprs = lappend(exprs, gj_info->used_params);
 	exprs = lappend(exprs, gj_info->outer_quals);
@@ -137,6 +139,7 @@ deform_gpujoin_info(CustomScan *cscan)
 	gj_info->optimal_gpu = intVal(list_nth(privs, pindex++));
 	gj_info->kern_source = strVal(list_nth(privs, pindex++));
 	gj_info->extra_flags = intVal(list_nth(privs, pindex++));
+	gj_info->varlena_bufsz = intVal(list_nth(privs, pindex++));
 	gj_info->ccache_refs = list_nth(privs, pindex++);
 	gj_info->used_params = list_nth(exprs, eindex++);
 	gj_info->outer_quals = list_nth(exprs, eindex++);
@@ -1698,7 +1701,7 @@ try_add_gpujoin_paths(PlannerInfo *root,
 	{
 		RestrictInfo   *rinfo = lfirst(lc);
 
-		if (!pgstrom_device_expression(rinfo->clause))
+		if (!pgstrom_device_expression(root, rinfo->clause))
 			return;
 	}
 
@@ -1780,7 +1783,7 @@ try_add_gpujoin_paths(PlannerInfo *root,
 							join_path->innerjoinpath->parent->relids))
 				return;
 
-			if (!pgstrom_device_expression((Expr *)join_quals))
+			if (!pgstrom_device_expression(root, (Expr *)join_quals))
 				return;
 
 			ip_item = palloc0(sizeof(inner_path_item));
@@ -1895,6 +1898,7 @@ gpujoin_add_join_path(PlannerInfo *root,
  */
 typedef struct
 {
+	PlannerInfo	   *root;
 	List		   *ps_tlist;
 	List		   *ps_depth;
 	List		   *ps_resno;
@@ -2075,7 +2079,7 @@ build_device_tlist_walker(Node *node, build_device_tlist_context *context)
 			 nodeToString(phvnode));
 	}
 	else if (!context->resjunk &&
-			 pgstrom_device_expression((Expr *)node))
+			 pgstrom_device_expression(context->root, (Expr *)node))
 	{
 		TargetEntry	   *ps_tle;
 
@@ -2105,7 +2109,8 @@ build_device_tlist_walker(Node *node, build_device_tlist_context *context)
 }
 
 static void
-build_device_targetlist(GpuJoinPath *gpath,
+build_device_targetlist(PlannerInfo *root,
+						GpuJoinPath *gpath,
 						CustomScan *cscan,
 						GpuJoinInfo *gj_info,
 						List *targetlist,
@@ -2118,6 +2123,7 @@ build_device_targetlist(GpuJoinPath *gpath,
 		   : cscan->scan.scanrelid != 0);
 
 	memset(&context, 0, sizeof(build_device_tlist_context));
+	context.root = root;
 	context.gpath = gpath;
 	context.custom_plans = custom_plans;
 	context.outer_scanrelid = cscan->scan.scanrelid;
@@ -2431,12 +2437,13 @@ PlanGpuJoinPath(PlannerInfo *root,
 	 * all we can construct is a pseudo-scan targetlist that is consists
 	 * of Var-nodes only.
 	 */
-	build_device_targetlist(gjpath, cscan, &gj_info, tlist, custom_plans);
+	build_device_targetlist(root, gjpath, cscan, &gj_info,
+							tlist, custom_plans);
 
 	/*
 	 * construct kernel code
 	 */
-	pgstrom_init_codegen_context(&context);
+	pgstrom_init_codegen_context(&context, root);
 	gj_info.optimal_gpu = gjpath->optimal_gpu;
 	gj_info.kern_source = gpujoin_codegen(root,
 										  cscan,
@@ -2917,6 +2924,7 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 							   gj_info->extra_flags);
 	program_id = pgstrom_create_cuda_program(gjs->gts.gcontext,
 											 gj_info->extra_flags,
+											 gj_info->varlena_bufsz,
 											 gj_info->kern_source,
 											 kern_define.data,
 											 false,
@@ -5794,6 +5802,7 @@ ProgramId
 GpuJoinCreateCombinedProgram(PlanState *node,
 							 GpuTaskState *gpa_gts,
 							 cl_uint gpa_extra_flags,
+							 cl_uint gpa_varlena_bufsz,
 							 const char *gpa_kern_source,
 							 bool explain_only)
 {
@@ -5827,6 +5836,8 @@ GpuJoinCreateCombinedProgram(PlanState *node,
 
 	program_id = pgstrom_create_cuda_program(gpa_gts->gcontext,
 											 extra_flags,
+											 Max(gj_info->varlena_bufsz,
+												 gpa_varlena_bufsz),
 											 kern_source.data,
 											 kern_define.data,
 											 false,

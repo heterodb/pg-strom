@@ -337,10 +337,18 @@ typedef struct
  */
 struct kern_parambuf;
 
+#ifndef __CUDACC__
+/* just a dummy for host code */
+#define KERN_CONTEXT_VARLENA_BUFSZ			FLEXIBLE_ARRAY_MEMBER
+#endif	/* __CUDACC__ */
+#define KERN_CONTEXT_VARLENA_BUFSZ_LIMIT	2048
+
 typedef struct
 {
 	kern_errorbuf	e;
 	struct kern_parambuf *kparams;
+	cl_uint			vlbuf_usage;
+	cl_char			vlbuf[KERN_CONTEXT_VARLENA_BUFSZ];
 } kern_context;
 
 #define INIT_KERNEL_CONTEXT(kcxt,kfunction,__kparams)		\
@@ -351,15 +359,16 @@ typedef struct
 		(kcxt)->e.filename[0] = '\0';						\
 		(kcxt)->kparams = (__kparams);						\
 		assert((cl_ulong)(__kparams) == MAXALIGN(__kparams));	\
+		(kcxt)->vlbuf_usage = 0;							\
 	} while(0)
 
+#ifdef __CUDACC__
 /*
  * It sets an error code unless no significant error code is already set.
  * Also, CpuReCheck has higher priority than RowFiltered because CpuReCheck
  * implies device cannot run the given expression completely.
  * (Usually, due to compressed or external varlena datum)
  */
-#ifdef __CUDACC__
 STATIC_INLINE(void)
 __STROM_SET_ERROR(kern_errorbuf *p_kerror, cl_int errcode,
 				  const char *filename, cl_int lineno)

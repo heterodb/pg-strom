@@ -460,7 +460,7 @@ pg_numeric_devtype_hashfunc(devtype_info *dtype,
 		kern_context	dummy;
 		pg_numeric_t	temp;
 
-		memset(&dummy, 0, sizeof(kern_context));
+		memset(&dummy, 0, sizeof(dummy));
 		/*
 		 * FIXME: If NUMERIC value is out of range, we may not be able to
 		 * execute GpuJoin in the kernel space for all the outer chunks.
@@ -592,8 +592,8 @@ typedef struct devfunc_catalog_t {
 	int			func_nargs;
 	Oid			func_argtypes[DEVFUNC_MAX_NARGS];
 	int			func_devcost;	/* relative cost to run on device */
-	size_t	  (*func_varlena_sz)(devfunc_info *dfunc,
-								 Expr **args, size_t *arglen);
+	int		  (*func_varlena_sz)(devfunc_info *dfunc,
+								 Expr **args, int *vl_width);
 	const char *func_template;	/* a template string if simple function */
 } devfunc_catalog_t;
 
@@ -977,9 +977,12 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "numeric", 1, {FLOAT4OID},  5, NULL, "n/f:float4_numeric" },
 	{ "numeric", 1, {FLOAT8OID},  5, NULL, "n/f:float8_numeric" },
 	/* Numeric operators */
-	{ "numeric_add", 2, {NUMERICOID, NUMERICOID}, 10, NULL, "n/f:numeric_add" },
-	{ "numeric_sub", 2, {NUMERICOID, NUMERICOID}, 10, NULL, "n/f:numeric_sub" },
-	{ "numeric_mul", 2, {NUMERICOID, NUMERICOID}, 10, NULL, "n/f:numeric_mul" },
+	{ "numeric_add", 2, {NUMERICOID, NUMERICOID},
+	  10, NULL, "n/f:numeric_add" },
+	{ "numeric_sub", 2, {NUMERICOID, NUMERICOID},
+	  10, NULL, "n/f:numeric_sub" },
+	{ "numeric_mul", 2, {NUMERICOID, NUMERICOID},
+	  10, NULL, "n/f:numeric_mul" },
 	{ "numeric_uplus",  1, {NUMERICOID}, 10, NULL, "n/f:numeric_uplus" },
 	{ "numeric_uminus", 1, {NUMERICOID}, 10, NULL, "n/f:numeric_uminus" },
 	{ "numeric_abs",    1, {NUMERICOID}, 10, NULL, "n/f:numeric_abs" },
@@ -1293,8 +1296,8 @@ typedef struct devfunc_extra_catalog_t {
 	const char *func_rettype;
 	const char *func_signature;
 	int			func_devcost;
-	size_t	  (*func_varlena_sz)(devfunc_info *dfunc,
-								 Expr **args, size_t *arglen);
+	int		  (*func_varlena_sz)(devfunc_info *dfunc,
+								 Expr **args, int *vl_width);
 	const char *func_template;
 } devfunc_extra_catalog_t;
 
@@ -1800,8 +1803,8 @@ __construct_devfunc_info(devfunc_info *entry,
 }
 
 /* default of dfunc->func_varlena_sz if not specified */
-static size_t
-devfunc_varlena_size_zero(devfunc_info *dfunc, Expr **args, size_t *arglen)
+static int
+devfunc_varlena_size_zero(devfunc_info *dfunc, Expr **args, int *vl_width)
 {
 	return 0;
 }
@@ -1831,10 +1834,9 @@ pgstrom_devfunc_construct_common(devfunc_info *entry)
 			if (lc == NULL)
 			{
 				entry->func_devcost = procat->func_devcost;
-				if (procat->func_varlena_sz)
-					entry->func_varlena_sz = procat->func_varlena_sz;
-				else
-					entry->func_varlena_sz = devfunc_varlena_size_zero;
+				entry->func_varlena_sz = (procat->func_varlena_sz
+										  ? procat->func_varlena_sz
+										  : devfunc_varlena_size_zero);
 				return __construct_devfunc_info(entry, procat->func_template);
 			}
 		}
@@ -2252,15 +2254,17 @@ skip:
 /*
  * codegen_expression_walker - main logic of run-time code generator
  */
-static void codegen_function_expression(devfunc_info *dfunc, List *args,
-										codegen_context *context);
+static int codegen_function_expression(codegen_context *context,
+									   devfunc_info *dfunc, List *args);
 
 static void
-codegen_expression_walker(Node *node, codegen_context *context)
+codegen_expression_walker(codegen_context *context,
+						  Node *node, int *p_varlena_sz)
 {
 	devtype_info   *dtype;
 	devfunc_info   *dfunc;
 	ListCell	   *cell;
+	int				varlena_sz = -1;
 
 	if (node == NULL)
 		return;
@@ -2280,6 +2284,10 @@ codegen_expression_walker(Node *node, codegen_context *context)
 		appendStringInfo(&context->str, "KPARAM_%u", index);
 		context->param_refs =
 			bms_add_member(context->param_refs, index);
+		if (con->constlen < 0 && !con->constisnull)
+			varlena_sz = VARSIZE_ANY_EXHDR(con->constvalue);
+		else
+			varlena_sz = 0;
 	}
 	else if (IsA(node, Param))
 	{
@@ -2310,6 +2318,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 		index = list_length(context->used_params) - 1;
 		appendStringInfo(&context->str, "KPARAM_%u", index);
 		context->param_refs = bms_add_member(context->param_refs, index);
+		varlena_sz = -1;	/* unknown */
 	}
 	else if (IsA(node, Var))
 	{
@@ -2363,6 +2372,18 @@ codegen_expression_walker(Node *node, codegen_context *context)
 							 varattno);
 		context->used_vars = list_append_unique(context->used_vars,
 												copyObject(node));
+		if (dtype->type_length < 0)
+		{
+			PlannerInfo	   *root = context->root;
+			RangeTblEntry  *rte = root->simple_rte_array[var->varno];
+
+			if (rte->rtekind == RTE_RELATION)
+				varlena_sz = get_attavgwidth(rte->relid, var->varattno);
+			else
+				varlena_sz = -1;	/* unknown */
+		}
+		else
+			varlena_sz = 0;
 	}
 	else if (IsA(node, FuncExpr))
 	{
@@ -2376,7 +2397,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 			elog(ERROR, "codegen: failed to lookup device function: %s",
 				 format_procedure(func->funcid));
 		pgstrom_devfunc_track(context, dfunc);
-		codegen_function_expression(dfunc, func->args, context);
+		varlena_sz = codegen_function_expression(context, dfunc, func->args);
 	}
 	else if (IsA(node, OpExpr) ||
 			 IsA(node, DistinctExpr))
@@ -2391,7 +2412,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 			elog(ERROR, "codegen: failed to lookup device function: %s",
 				 format_procedure(dfunc->func_oid));
 		pgstrom_devfunc_track(context, dfunc);
-		codegen_function_expression(dfunc, op->args, context);
+		varlena_sz = codegen_function_expression(context, dfunc, op->args);
 	}
 	else if (IsA(node, NullTest))
 	{
@@ -2415,8 +2436,9 @@ codegen_expression_walker(Node *node, codegen_context *context)
 				 (int)nulltest->nulltesttype);
 
 		appendStringInfo(&context->str, "(kcxt, ");
-		codegen_expression_walker((Node *) nulltest->arg, context);
+		codegen_expression_walker(context, (Node *) nulltest->arg, NULL);
 		appendStringInfoChar(&context->str, ')');
+		varlena_sz = 0;
 	}
 	else if (IsA(node, BooleanTest))
 	{
@@ -2453,8 +2475,9 @@ codegen_expression_walker(Node *node, codegen_context *context)
 				break;
 		}
 		appendStringInfo(&context->str, "pgfn_%s(kcxt, ", func_name);
-		codegen_expression_walker((Node *) booltest->arg, context);
+		codegen_expression_walker(context, (Node *) booltest->arg, NULL);
 		appendStringInfoChar(&context->str, ')');
+		varlena_sz = 0;
 	}
 	else if (IsA(node, BoolExpr))
 	{
@@ -2464,7 +2487,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 		{
 			Assert(list_length(b->args) == 1);
 			appendStringInfo(&context->str, "NOT(");
-			codegen_expression_walker(linitial(b->args), context);
+			codegen_expression_walker(context, linitial(b->args), NULL);
 			appendStringInfoChar(&context->str, ')');
 		}
 		else if (b->boolop == AND_EXPR || b->boolop == OR_EXPR)
@@ -2483,13 +2506,14 @@ codegen_expression_walker(Node *node, codegen_context *context)
 						appendStringInfo(&context->str, " || ");
 				}
 				appendStringInfo(&context->str, "EVAL(");
-				codegen_expression_walker(lfirst(cell), context);
+				codegen_expression_walker(context, lfirst(cell), NULL);
 				appendStringInfoChar(&context->str, ')');
 			}
 			appendStringInfoChar(&context->str, ')');
 		}
 		else
 			elog(ERROR, "unrecognized boolop: %d", (int) b->boolop);
+		varlena_sz = 0;
 	}
 	else if (IsA(node, CoalesceExpr))
 	{
@@ -2505,13 +2529,15 @@ codegen_expression_walker(Node *node, codegen_context *context)
 		{
 			Node   *expr = (Node *)lfirst(cell);
 			Oid		type_oid = exprType(expr);
+			int		vl_width;
 
 			if (dtype->type_oid != type_oid)
 				elog(ERROR, "device type mismatch in COALESCE: %s / %s",
 					 format_type_be(dtype->type_oid),
 					 format_type_be(type_oid));
 			appendStringInfo(&context->str, ", ");
-			codegen_expression_walker(expr, context);
+			codegen_expression_walker(context, expr, &vl_width);
+			varlena_sz = Max(varlena_sz, vl_width);
 		}
 		appendStringInfo(&context->str, ")");
 	}
@@ -2543,13 +2569,15 @@ codegen_expression_walker(Node *node, codegen_context *context)
 		{
 			Node   *expr = lfirst(cell);
 			Oid		type_oid = exprType(expr);
+			int		vl_width;
 
 			if (dtype->type_oid != type_oid)
 				elog(ERROR, "device type mismatch in LEAST/GREATEST: %s / %s",
 					 format_type_be(dtype->type_oid),
 					 format_type_be(exprType(expr)));
 			appendStringInfo(&context->str, ", ");
-			codegen_expression_walker(expr, context);
+			codegen_expression_walker(context, expr, &vl_width);
+			varlena_sz = Max(varlena_sz, vl_width);
 		}
 		appendStringInfoChar(&context->str, ')');
 	}
@@ -2562,7 +2590,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 			elog(ERROR, "codegen: failed to lookup device type: %s",
 				 format_type_be(relabel->resulttype));
 		appendStringInfo(&context->str, "to_%s(", dtype->type_name);
-		codegen_expression_walker((Node *)relabel->arg, context);
+		codegen_expression_walker(context, (Node *)relabel->arg, &varlena_sz);
 		appendStringInfo(&context->str, ")");
 	}
 	else if (IsA(node, CaseExpr))
@@ -2570,6 +2598,7 @@ codegen_expression_walker(Node *node, codegen_context *context)
 		CaseExpr   *caseexpr = (CaseExpr *) node;
 		ListCell   *cell;
 		Oid			type_oid;
+		int			vl_width;
 
 		if (caseexpr->arg)
 		{
@@ -2590,12 +2619,15 @@ codegen_expression_walker(Node *node, codegen_context *context)
 					 format_type_be(type_oid));
 			pgstrom_devfunc_track(context, dfunc);
 
-			codegen_expression_walker((Node *) caseexpr->arg, context);
+			codegen_expression_walker(context,
+									  (Node *)caseexpr->arg, &varlena_sz);
 			if (caseexpr->defresult)
 			{
 				appendStringInfo(&context->str, ", ");
-				codegen_expression_walker((Node *)caseexpr->defresult,
-										  context);
+				codegen_expression_walker(context,
+										  (Node *)caseexpr->defresult,
+										  &vl_width);
+				varlena_sz = Max(varlena_sz, vl_width);
 			}
 			foreach (cell, caseexpr->args)
 			{
@@ -2617,9 +2649,12 @@ codegen_expression_walker(Node *node, codegen_context *context)
 				else
 					elog(ERROR, "Bug? CaseTestExpr is expected for either of OpExpr args");
 				appendStringInfo(&context->str, ", ");
-				codegen_expression_walker(test_val, context);
+				codegen_expression_walker(context, test_val, NULL);
 				appendStringInfo(&context->str, ", ");
-				codegen_expression_walker((Node *)casewhen->result, context);
+				codegen_expression_walker(context,
+										  (Node *)casewhen->result,
+										  &vl_width);
+				varlena_sz = Max(varlena_sz, vl_width);
 			}
 			appendStringInfo(&context->str, ")");
 		}
@@ -2632,12 +2667,17 @@ codegen_expression_walker(Node *node, codegen_context *context)
 				Assert(exprType((Node *) casewhen->expr) == BOOLOID);
 				Assert(exprType((Node *) casewhen->result) == caseexpr->casetype);
 				appendStringInfo(&context->str, "EVAL(");
-				codegen_expression_walker((Node *) casewhen->expr, context);
+				codegen_expression_walker(context,
+										  (Node *)casewhen->expr, NULL);
 				appendStringInfo(&context->str, ") ? (");
-				codegen_expression_walker((Node *) casewhen->result, context);
+				codegen_expression_walker(context,
+										  (Node *)casewhen->result, &vl_width);
 				appendStringInfo(&context->str, ") : (");
+				varlena_sz = Max(varlena_sz, vl_width);
 			}
-			codegen_expression_walker((Node *) caseexpr->defresult, context);
+			codegen_expression_walker(context,
+									  (Node *)caseexpr->defresult, &vl_width);
+			varlena_sz = Max(varlena_sz, vl_width);
 			foreach (cell, caseexpr->args)
 				appendStringInfo(&context->str, ")");
 		}
@@ -2662,10 +2702,10 @@ codegen_expression_walker(Node *node, codegen_context *context)
 		appendStringInfo(&context->str, "PG_SCALAR_ARRAY_OP(kcxt, pgfn_%s, ",
 						 dfunc->func_devname);
 		expr = linitial(opexpr->args);
-		codegen_expression_walker(expr, context);
+		codegen_expression_walker(context, expr, NULL);
 		appendStringInfo(&context->str, ", ");
 		expr = lsecond(opexpr->args);
-		codegen_expression_walker(expr, context);
+		codegen_expression_walker(context, expr, NULL);
 		/* type of array element */
 		dtype = lsecond(dfunc->func_args);
 		appendStringInfo(&context->str, ", %s, %d, %d)",
@@ -2673,17 +2713,25 @@ codegen_expression_walker(Node *node, codegen_context *context)
 						 dtype->type_length,
 						 dtype->type_align);
 		context->extra_flags |= DEVKERNEL_NEEDS_MATRIX;
+		varlena_sz = 0;
 	}
 	else
 		elog(ERROR, "Bug? unsupported expression: %s", nodeToString(node));
+
+	if (p_varlena_sz)
+		*p_varlena_sz = varlena_sz;
 }
 
-static void
-codegen_function_expression(devfunc_info *dfunc, List *args,
-							codegen_context *context)
+static int
+codegen_function_expression(codegen_context *context,
+							devfunc_info *dfunc, List *args)
 {
 	ListCell   *lc1;
 	ListCell   *lc2;
+	Expr	   *fn_args[DEVFUNC_MAX_NARGS];
+	int			vl_width[DEVFUNC_MAX_NARGS];
+	int			index = 0;
+	int			varlena_sz;
 
 	appendStringInfo(&context->str,
 					 "pgfn_%s(kcxt",
@@ -2696,16 +2744,25 @@ codegen_function_expression(devfunc_info *dfunc, List *args,
 
 		appendStringInfo(&context->str, ", ");
 		if (dtype->type_oid == exprType(expr))
-			codegen_expression_walker(expr, context);
+			codegen_expression_walker(context, expr, &vl_width[index]);
 		else
 		{
 			appendStringInfo(&context->str,
 							 "to_%s(", dtype->type_name);
-			codegen_expression_walker(expr, context);
+			codegen_expression_walker(context, expr, &vl_width[index]);
 			appendStringInfo(&context->str, ")");
 		}
+		fn_args[index++] = (Expr *)expr;
 	}
 	appendStringInfoChar(&context->str, ')');
+
+	varlena_sz = dfunc->func_varlena_sz(dfunc, fn_args, vl_width);
+	if (varlena_sz > 0)
+		context->varlena_bufsz += MAXALIGN(VARHDRSZ + varlena_sz);
+	else if (varlena_sz < 0)
+		elog(ERROR, "cannot run %s on device due to varlena buffer usage",
+			 format_procedure(dfunc->func_oid));
+	return varlena_sz;
 }
 
 char *
@@ -2714,6 +2771,7 @@ pgstrom_codegen_expression(Node *expr, codegen_context *context)
 	codegen_context	walker_context;
 
 	initStringInfo(&walker_context.str);
+	walker_context.root = context->root;
 	walker_context.type_defs = list_copy(context->type_defs);
 	walker_context.func_defs = list_copy(context->func_defs);
 	walker_context.expr_defs = list_copy(context->expr_defs);
@@ -2723,8 +2781,9 @@ pgstrom_codegen_expression(Node *expr, codegen_context *context)
 	walker_context.var_label  = context->var_label;
 	walker_context.kds_label  = context->kds_label;
 	walker_context.kds_index_label = context->kds_index_label;
-	walker_context.extra_flags = context->extra_flags;
 	walker_context.pseudo_tlist = context->pseudo_tlist;
+	walker_context.extra_flags = context->extra_flags;
+	walker_context.varlena_bufsz = context->varlena_bufsz;
 
 	if (IsA(expr, List))
 	{
@@ -2736,7 +2795,7 @@ pgstrom_codegen_expression(Node *expr, codegen_context *context)
 
 	PG_TRY();
 	{
-		codegen_expression_walker(expr, &walker_context);
+		codegen_expression_walker(&walker_context, expr, NULL);
 	}
 	PG_CATCH();
 	{
@@ -2753,6 +2812,7 @@ pgstrom_codegen_expression(Node *expr, codegen_context *context)
 	context->param_refs = walker_context.param_refs;
 	/* no need to write back xxx_label fields because read-only */
 	context->extra_flags = walker_context.extra_flags;
+	context->varlena_bufsz = walker_context.varlena_bufsz;
 
 	return walker_context.str.data;
 }
@@ -2813,24 +2873,20 @@ pgstrom_codegen_param_declarations(StringInfo buf, codegen_context *context)
 typedef struct {
 	const char *filename;
 	int			lineno;
+	PlannerInfo *root;
 	int			devcost;
+	ssize_t		vl_usage;
 } device_expression_walker_context;
 
 static bool
-device_expression_walker(Expr *expr, device_expression_walker_context *con)
+device_expression_walker(device_expression_walker_context *con,
+						 Expr *expr, int *p_varlena_sz)
 {
-	if (expr == NULL)
-		return true;
-	if (IsA(expr, List))
-	{
-		ListCell   *cell;
+	int			varlena_sz = -1;	/* estimated length, if varlena */
 
-		foreach (cell, (List *) expr)
-		{
-			if (!device_expression_walker(lfirst(cell), con))
-				return false;
-		}
-		return true;
+	if (!expr)
+	{
+		/* do nothing */
 	}
 	else if (IsA(expr, Const))
 	{
@@ -2839,8 +2895,10 @@ device_expression_walker(Expr *expr, device_expression_walker_context *con)
 		/* supported types only */
 		if (!pgstrom_devtype_lookup(con->consttype))
 			goto unable_node;
-
-		return true;
+		if (con->constlen < 0 && !con->constisnull)
+			varlena_sz = VARSIZE_ANY_EXHDR(con->constvalue);
+		else
+			varlena_sz = 0;
 	}
 	else if (IsA(expr, Param))
 	{
@@ -2849,12 +2907,10 @@ device_expression_walker(Expr *expr, device_expression_walker_context *con)
 		/* only PARAM_EXTERN, right now */
 		if (param->paramkind != PARAM_EXTERN)
 			goto unable_node;
-
 		/* supported types only */
 		if (!pgstrom_devtype_lookup(param->paramtype))
 			goto unable_node;
-
-		return true;
+		/* we have no hint, even if argument is varlena */
 	}
 	else if (IsA(expr, Var))
 	{
@@ -2873,13 +2929,28 @@ device_expression_walker(Expr *expr, device_expression_walker_context *con)
 		 */
 		if (!dtype || dtype->type_element)
 			goto unable_node;
+		if (dtype->type_length < 0)
+		{
+			PlannerInfo	   *root = con->root;
+			RangeTblEntry  *rte = root->simple_rte_array[var->varno];
 
-		return true;
+			if (rte->rtekind == RTE_RELATION)
+				varlena_sz = get_attavgwidth(rte->relid, var->varattno);
+			else
+				varlena_sz = -1;	/* unknown */
+			elog(INFO, "att %s of rel %s: avgwidth=%d", get_attname(rte->relid, var->varattno), get_rel_name(rte->relid), varlena_sz);
+		}
+		else
+			varlena_sz = 0;
 	}
 	else if (IsA(expr, FuncExpr))
 	{
 		FuncExpr   *func = (FuncExpr *) expr;
 		devfunc_info *dfunc;
+		Expr	   *fn_args[DEVFUNC_MAX_NARGS];
+		int			vl_width[DEVFUNC_MAX_NARGS];
+		int			index = 0;
+		ListCell   *lc;
 
 		dfunc = pgstrom_devfunc_lookup(func->funcid,
 									   func->funcresulttype,
@@ -2887,13 +2958,29 @@ device_expression_walker(Expr *expr, device_expression_walker_context *con)
 									   func->inputcollid);
 		if (!dfunc)
 			goto unable_node;
+		foreach (lc, func->args)
+		{
+			fn_args[index] = (Expr *) lfirst(lc);
+			if (!device_expression_walker(con, fn_args[index],
+										  &vl_width[index]))
+				return false;
+			index++;
+		}
+		varlena_sz = dfunc->func_varlena_sz(dfunc, fn_args, vl_width);
+		if (varlena_sz > 0)
+			con->vl_usage += MAXALIGN(VARHDRSZ + varlena_sz);
+		else if (varlena_sz < 0)
+			goto unable_node;	/* don't want to run on device */
 		con->devcost += dfunc->func_devcost;
-		return device_expression_walker((Expr *) func->args, con);
 	}
 	else if (IsA(expr, OpExpr) || IsA(expr, DistinctExpr))
 	{
 		OpExpr	   *op = (OpExpr *) expr;
 		devfunc_info *dfunc;
+		Expr	   *fn_args[DEVFUNC_MAX_NARGS];
+		int			vl_width[DEVFUNC_MAX_NARGS];
+		int			index = 0;
+		ListCell   *lc;
 
 		dfunc = pgstrom_devfunc_lookup(get_opcode(op->opno),
 									   op->opresulttype,
@@ -2901,8 +2988,20 @@ device_expression_walker(Expr *expr, device_expression_walker_context *con)
 									   op->inputcollid);
 		if (!dfunc)
 			goto unable_node;
+		foreach (lc, op->args)
+		{
+			fn_args[index] = (Expr *) lfirst(lc);
+			if (!device_expression_walker(con, fn_args[index],
+										  &vl_width[index]))
+				return false;
+			index++;
+		}
+		varlena_sz = dfunc->func_varlena_sz(dfunc, fn_args, vl_width);
+		if (varlena_sz > 0)
+			con->vl_usage += MAXALIGN(VARHDRSZ + varlena_sz);
+		else if (varlena_sz < 0)
+			goto unable_node;	/* don't want to run on device */
 		con->devcost += dfunc->func_devcost;
-		return device_expression_walker((Expr *) op->args, con);
 	}
 	else if (IsA(expr, NullTest))
 	{
@@ -2910,59 +3009,76 @@ device_expression_walker(Expr *expr, device_expression_walker_context *con)
 
 		if (nulltest->argisrow)
 			goto unable_node;
+		if (!device_expression_walker(con, nulltest->arg, NULL))
+			return false;
 		/* cost for PG_ISNULL or PG_ISNOTNULL */
 		con->devcost += 1;
-		return device_expression_walker((Expr *) nulltest->arg, con);
+		varlena_sz = 0;
 	}
 	else if (IsA(expr, BooleanTest))
 	{
 		BooleanTest	   *booltest = (BooleanTest *) expr;
+
+		if (!device_expression_walker(con, booltest->arg, NULL))
+			return false;
 		/* cost for pgfn_bool_is_xxxx */
 		con->devcost += 1;
-		return device_expression_walker((Expr *) booltest->arg, con);
+		varlena_sz = 0;
 	}
 	else if (IsA(expr, BoolExpr))
 	{
 		BoolExpr	   *boolexpr = (BoolExpr *) expr;
+		ListCell	   *lc;
 
 		Assert(boolexpr->boolop == AND_EXPR ||
 			   boolexpr->boolop == OR_EXPR ||
 			   boolexpr->boolop == NOT_EXPR);
+		foreach (lc, boolexpr->args)
+		{
+			if (!device_expression_walker(con, (Expr *)lfirst(lc), NULL))
+				return false;
+		}
 		/* cost for bool-check expression */
 		con->devcost += list_length(boolexpr->args);
-		return device_expression_walker((Expr *) boolexpr->args, con);
+		varlena_sz = 0;
 	}
 	else if (IsA(expr, CoalesceExpr))
 	{
 		CoalesceExpr   *coalesce = (CoalesceExpr *) expr;
-		ListCell	   *cell;
+		ListCell	   *lc;
 
 		/* supported types only */
 		if (!pgstrom_devtype_lookup(coalesce->coalescetype))
 			goto unable_node;
 
 		/* arguments also have to be same type (=device supported) */
-		foreach (cell, coalesce->args)
+		foreach (lc, coalesce->args)
 		{
-			Node   *expr = lfirst(cell);
+			Expr   *expr = lfirst(lc);
+			int		vl_width = -1;
 
-			if (coalesce->coalescetype != exprType(expr))
+			/* arguments must be same type (= device supported) */
+			if (coalesce->coalescetype != exprType((Node *)expr))
 				goto unable_node;
+
+			if (!device_expression_walker(con, expr, &vl_width))
+				return false;
+			if (vl_width > 0)
+				varlena_sz = Max(varlena_sz, vl_width);
 		}
 		/* cost for PG_COALESCE */
 		con->devcost += list_length(coalesce->args);
-		return device_expression_walker((Expr *) coalesce->args, con);
 	}
 	else if (IsA(expr, MinMaxExpr))
 	{
 		MinMaxExpr	   *minmax = (MinMaxExpr *) expr;
 		devtype_info   *dtype = pgstrom_devtype_lookup(minmax->minmaxtype);
-		ListCell	   *cell;
+		ListCell	   *lc;
 
 		if (minmax->op != IS_GREATEST && minmax->op != IS_LEAST)
 			return false;	/* unknown MinMax operation */
 
-		/* supported types only */
+		/* only supported types */
 		if (!dtype)
 			goto unable_node;
 		/* type compare function is required */
@@ -2970,16 +3086,20 @@ device_expression_walker(Expr *expr, device_expression_walker_context *con)
 			goto unable_node;
 
 		/* arguments also have to be same type (=device supported) */
-		foreach (cell, minmax->args)
+		foreach (lc, minmax->args)
 		{
-			Node   *expr = lfirst(cell);
+			Node   *expr = lfirst(lc);
+			int		vl_width = -1;
 
 			if (minmax->minmaxtype != exprType(expr))
 				goto unable_node;
+			if (!device_expression_walker(con, lfirst(lc), &vl_width))
+				return false;
+			if (vl_width > 0)
+				varlena_sz = Max(varlena_sz, vl_width);
 		}
 		/* cost for PG_GREATEST / PG_LEAST */
 		con->devcost += list_length(minmax->args);
-		return device_expression_walker((Expr *) minmax->args, con);
 	}
 	else if (IsA(expr, RelabelType))
 	{
@@ -2989,38 +3109,54 @@ device_expression_walker(Expr *expr, device_expression_walker_context *con)
 		/* array->array relabel may be possible */
 		if (!dtype)
 			goto unable_node;
-
-		return device_expression_walker((Expr *) relabel->arg, con);
+		if (!device_expression_walker(con, relabel->arg, &varlena_sz))
+			return false;
 	}
 	else if (IsA(expr, CaseExpr))
 	{
 		CaseExpr   *caseexpr = (CaseExpr *) expr;
-		ListCell   *cell;
+		ListCell   *lc;
+		int			vl_width;
+
+		elog(INFO, "CASE: %s", nodeToString(expr));
 
 		if (!pgstrom_devtype_lookup(caseexpr->casetype))
 			goto unable_node;
-
 		if (caseexpr->arg)
 		{
-			if (!device_expression_walker(caseexpr->arg, con))
+			Oid		casetypeid = exprType((Node *)caseexpr->arg);
+			Oid		casecollid = caseexpr->casecollid;
+			devtype_info *dtype;
+
+			dtype = pgstrom_devtype_lookup(casetypeid);
+			if (!dtype)
+				goto unable_node;
+			/* type comparison function */
+			if (!pgstrom_devfunc_lookup_type_compare(dtype, casecollid))
+				goto unable_node;
+			if (!device_expression_walker(con, caseexpr->arg, NULL))
 				return false;
 		}
 
-		foreach (cell, caseexpr->args)
+		foreach (lc, caseexpr->args)
 		{
-			CaseWhen   *casewhen = lfirst(cell);
+			CaseWhen   *casewhen = lfirst(lc);
 
 			Assert(IsA(casewhen, CaseWhen));
-			if (exprType((Node *)casewhen->expr) != BOOLOID)
+			if (exprType((Node *)casewhen->expr) == BOOLOID)
 				goto unable_node;
-
-			if (!device_expression_walker(casewhen->expr, con))
+			if (!device_expression_walker(con, casewhen->expr, NULL))
 				return false;
-			if (!device_expression_walker(casewhen->result, con))
+			if (!device_expression_walker(con, casewhen->result, &vl_width))
 				return false;
+			if (vl_width > 0)
+				varlena_sz = Max(varlena_sz, vl_width);
 		}
-		if (!device_expression_walker((Expr *)caseexpr->defresult, con))
+		if (!device_expression_walker(con, (Expr *)caseexpr->defresult,
+									  &vl_width))
 			return false;
+		if (vl_width > 0)
+			varlena_sz = Max(varlena_sz, vl_width);
 		return true;
 	}
 	else if (IsA(expr, CaseTestExpr))
@@ -3036,10 +3172,10 @@ device_expression_walker(Expr *expr, device_expression_walker_context *con)
 	}
 	else if (IsA(expr, ScalarArrayOpExpr))
 	{
-		ScalarArrayOpExpr  *opexpr = (ScalarArrayOpExpr *) expr;
-		devfunc_info	   *dfunc;
-		devtype_info	   *dtype;
-		Oid					func_oid = get_opcode(opexpr->opno);
+		ScalarArrayOpExpr *opexpr = (ScalarArrayOpExpr *) expr;
+		devfunc_info   *dfunc;
+		devtype_info   *dtype;
+		Oid				func_oid = get_opcode(opexpr->opno);
 
 		dfunc = pgstrom_devfunc_lookup(func_oid,
 									   get_func_rettype(func_oid),
@@ -3062,7 +3198,7 @@ device_expression_walker(Expr *expr, device_expression_walker_context *con)
 		if (!dtype || dtype->type_array)
 			goto unable_node;
 
-		if (!device_expression_walker((Expr *) opexpr->args, con))
+		if (!device_expression_walker(con, (Expr *) opexpr->args, NULL))
 			return false;
 		/*
 		 * cost for PG_SCALAR_ARRAY_OP - It repeats invocation of the operator
@@ -3070,8 +3206,18 @@ device_expression_walker(Expr *expr, device_expression_walker_context *con)
 		 * has 32 elements in average.
 		 */
 		con->devcost += 32 * dfunc->func_devcost;
+		varlena_sz = 0;
 		return true;
 	}
+	else
+	{
+		/* elsewhere, not supported anyway */
+		goto unable_node;
+	}
+	if (p_varlena_sz)
+		*p_varlena_sz = varlena_sz;
+	return true;
+
 unable_node:
 	elog(DEBUG2, "Unable to run on device(%s:%d): %s",
 		 basename(con->filename), con->lineno, nodeToString(expr));
@@ -3084,34 +3230,55 @@ unable_node:
  * It shows a quick decision whether the provided expression tree is
  * available to run on CUDA device, or not.
  */
-bool
-__pgstrom_device_expression(Expr *expr, const char *filename, int lineno)
-{
-	device_expression_walker_context con;
-
-	memset(&con, 0, sizeof(device_expression_walker_context));
-	con.filename = filename;
-	con.lineno   = lineno;
-	con.devcost  = 0.0;
-
-	return device_expression_walker(expr, &con);
-}
-
-bool
-__pgstrom_device_expression_cost(Expr *expr, int *p_devcost,
+int
+__pgstrom_device_expression_cost(PlannerInfo *root, Expr *expr,
 								 const char *filename, int lineno)
 {
 	device_expression_walker_context con;
+	ListCell   *lc;
 
 	memset(&con, 0, sizeof(device_expression_walker_context));
+	con.root     = root;
 	con.filename = filename;
 	con.lineno   = lineno;
 	con.devcost  = 0.0;
+	con.vl_usage = 0;
 
-	if (!device_expression_walker(expr, &con))
+	if (!expr)
+		return -1;
+	if (IsA(expr, List))
+	{
+		List   *exprList = (List *) expr;
+
+		foreach (lc, exprList)
+		{
+			if (!device_expression_walker(&con, (Expr *)lfirst(lc) , NULL))
+				return -1;
+		}
+	}
+	else
+	{
+		if (!device_expression_walker(&con, expr, NULL))
+			return -1;
+	}
+	if (con.vl_usage > KERN_CONTEXT_VARLENA_BUFSZ_LIMIT)
+	{
+		elog(DEBUG2, "Expression consumes too much varlena buffer (%zu): %s",
+			 con.vl_usage, nodeToString(expr));
+		return -1;
+	}
+	Assert(con.devcost >= 0);
+	return con.devcost;
+}
+
+bool
+__pgstrom_device_expression(PlannerInfo *root, Expr *expr,
+							const char *filename, int lineno)
+{
+	if (__pgstrom_device_expression_cost(root, expr,
+										 filename, lineno) < 0)
 		return false;
 
-	*p_devcost = con.devcost;
 	return true;
 }
 
@@ -3131,10 +3298,11 @@ guc_assign_cache_invalidator(bool newval, void *extra)
 }
 
 void
-pgstrom_init_codegen_context(codegen_context *context)
+pgstrom_init_codegen_context(codegen_context *context,
+							 PlannerInfo *root)
 {
 	memset(context, 0, sizeof(codegen_context));
-
+	context->root = root;
 	context->var_label = "KVAR";
 	context->kds_label = "kds";
 	context->kds_index_label = "kds_index";

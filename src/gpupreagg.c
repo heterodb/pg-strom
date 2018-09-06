@@ -50,7 +50,8 @@ typedef struct
 									 * should not update this field */
 	int				optimal_gpu;
 	char		   *kern_source;
-	int				extra_flags;
+	cl_uint			extra_flags;
+	cl_uint			varlena_bufsz;
 	List		   *ccache_refs;	/* referenced columns */
 	List		   *used_params;	/* referenced Const/Param */
 } GpuPreAggInfo;
@@ -79,6 +80,7 @@ form_gpupreagg_info(CustomScan *cscan, GpuPreAggInfo *gpa_info)
 	privs = lappend(privs, makeInteger(gpa_info->optimal_gpu));
 	privs = lappend(privs, makeString(gpa_info->kern_source));
 	privs = lappend(privs, makeInteger(gpa_info->extra_flags));
+	privs = lappend(privs, makeInteger(gpa_info->varlena_bufsz));
 	privs = lappend(privs, gpa_info->ccache_refs);
 	exprs = lappend(exprs, gpa_info->used_params);
 
@@ -113,6 +115,7 @@ deform_gpupreagg_info(CustomScan *cscan)
 	gpa_info->optimal_gpu = intVal(list_nth(privs, pindex++));
 	gpa_info->kern_source = strVal(list_nth(privs, pindex++));
 	gpa_info->extra_flags = intVal(list_nth(privs, pindex++));
+	gpa_info->varlena_bufsz = intVal(list_nth(privs, pindex++));
 	gpa_info->ccache_refs = list_nth(privs, pindex++);
 	gpa_info->used_params = list_nth(exprs, eindex++);
 	Assert(pindex == list_length(privs));
@@ -957,6 +960,7 @@ cost_gpupreagg(PlannerInfo *root,
 	{
 		Cost	outer_startup = input_path->startup_cost;
 		Cost	outer_total   = input_path->total_cost;
+		List   *outer_tlist   = input_path->pathtarget->exprs;
 
 		/*
 		 * Discount cost for DMA-receive if GpuPreAgg can pull-up
@@ -964,7 +968,7 @@ cost_gpupreagg(PlannerInfo *root,
 		 */
 		if (enable_pullup_outer_join &&
 			pgstrom_path_is_gpujoin(input_path) &&
-			pgstrom_device_expression((Expr *)input_path->pathtarget->exprs))
+			pgstrom_device_expression(root, (Expr *)outer_tlist))
 		{
 			outer_total -= cost_for_dma_receive(input_path->parent, -1.0);
 			outer_total -= cpu_tuple_cost * input_path->rows;
@@ -1236,7 +1240,7 @@ prepend_gpupreagg_path(PlannerInfo *root,
 
 		if (pjpath->dummypp &&
 			pgstrom_path_is_gpujoin(pjpath->subpath) &&
-			pgstrom_device_expression((Expr *)pathtarget->exprs))
+			pgstrom_device_expression(root, (Expr *)pathtarget->exprs))
 		{
 			input_path = pgstrom_copy_gpujoin_path(pjpath->subpath);
 			input_path->pathtarget = pathtarget;
@@ -1593,7 +1597,7 @@ try_add_gpupreagg_append_paths(PlannerInfo *root,
 									(List *) havingQual,
 									num_groups,
 									agg_final_costs);
-#endif
+#endif	/* PG_VERSION_NUM >= 100000 */
 }
 
 /*
@@ -2137,7 +2141,8 @@ make_altfunc_pcov_xy(Aggref *aggref, const char *func_name)
  * Aggref, and append its arguments on the target_partial/target_device.
  */
 static Node *
-make_alternative_aggref(Aggref *aggref,
+make_alternative_aggref(PlannerInfo *root,
+						Aggref *aggref,
 						PathTarget *target_partial,
 						PathTarget *target_device,
 						PathTarget *target_input,
@@ -2234,7 +2239,7 @@ make_alternative_aggref(Aggref *aggref,
 		{
 			Node   *temp = replace_expression_by_outerref((Node *)pfunc->args,
 														  target_input);
-			if (!pgstrom_device_expression((Expr *) temp))
+			if (!pgstrom_device_expression(root, (Expr *) temp))
 			{
 				elog(DEBUG2, "argument of %s is not device executable: %s",
 					 format_procedure(aggref->aggfnoid),
@@ -2357,7 +2362,7 @@ make_alternative_aggref(Aggref *aggref,
 typedef struct
 {
 	bool		device_executable;
-	Query	   *parse;
+	PlannerInfo *root;
 	PathTarget *target_upper;
 	PathTarget *target_partial;
 	PathTarget *target_device;
@@ -2376,7 +2381,8 @@ replace_expression_by_altfunc(Node *node,
 		return NULL;
 	if (IsA(node, Aggref))
 	{
-		Node   *aggfn = make_alternative_aggref((Aggref *)node,
+		Node   *aggfn = make_alternative_aggref(con->root,
+												(Aggref *)node,
 												con->target_partial,
 												con->target_device,
 												con->target_input,
@@ -2430,7 +2436,7 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 
 	memset(&con, 0, sizeof(con));
 	con.device_executable = true;
-	con.parse			= parse;
+	con.root			= root;
 	con.target_upper	= target_upper;
 	con.target_partial	= target_partial;
 	con.target_device	= target_device;
@@ -2482,7 +2488,7 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 			if (!IsA(expr, Var) &&
 				!IsA(expr, Param) &&
 				!IsA(expr, Const) &&
-				(!pgstrom_device_expression(expr) ||
+				(!pgstrom_device_expression(root, expr) ||
 				 !get_typbyval(exprType((Node *) expr))))
 			{
 				*p_can_pullup_outerscan = false;
@@ -2686,7 +2692,7 @@ PlanGpuPreAggPath(PlannerInfo *root,
 	/*
 	 * construction of the GPU kernel code
 	 */
-	pgstrom_init_codegen_context(&context);
+	pgstrom_init_codegen_context(&context, root);
 	context.extra_flags |= (DEVKERNEL_NEEDS_DYNPARA |
 							DEVKERNEL_NEEDS_GPUPREAGG |
 							DEVKERNEL_NEEDS_GPUSCAN);
@@ -4120,6 +4126,7 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 		program_id = GpuJoinCreateCombinedProgram(outerPlanState(gpas),
 												  &gpas->gts,
 												  gpa_info->extra_flags,
+												  gpa_info->varlena_bufsz,
 												  gpa_info->kern_source,
 												  explain_only);
 	}
@@ -4131,6 +4138,7 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 								   gpa_info->extra_flags);
 		program_id = pgstrom_create_cuda_program(gpas->gts.gcontext,
 												 gpa_info->extra_flags,
+												 gpa_info->varlena_bufsz,
 												 gpa_info->kern_source,
 												 kern_define.data,
 												 false,

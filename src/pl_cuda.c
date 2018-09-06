@@ -1656,6 +1656,7 @@ plcuda_exec_begin(HeapTuple protup, FunctionCallInfo fcinfo)
 							   plts->p.extra_flags);
 	program_id = pgstrom_create_cuda_program(gcontext,
 											 plts->p.extra_flags,
+											 0,
 											 kern_source,
 											 kern_define.data,
 											 true,
