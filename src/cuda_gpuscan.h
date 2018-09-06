@@ -409,7 +409,7 @@ gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
 		if (get_local_id() == 0)
 			nitems_base = atomicAdd(&gs_results->nitems, nvalids);
 		__syncthreads();
-		if (tupitem)
+		if (tupitem && rc)
 		{
 			assert(nitems_base + nitems_offset < kds_src->nrooms);
 			gs_results->results[nitems_base + nitems_offset]
