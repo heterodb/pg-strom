@@ -534,6 +534,50 @@ pgfn_textlen(kern_context *kcxt, pg_text_t arg1)
 	return result;
 }
 
+STATIC_FUNCTION(pg_text_t)
+pgfn_textcat(kern_context *kcxt, pg_text_t arg1, pg_text_t arg2)
+{
+	cl_int		len1, len2;
+	cl_char	   *pos;
+	pg_text_t	result;
+
+	if (arg1.isnull)
+		return arg2;
+	if (arg2.isnull)
+		return arg1;
+	if (VARATT_IS_COMPRESSED(arg1.value) ||
+		VARATT_IS_COMPRESSED(arg2.value) ||
+		VARATT_IS_EXTERNAL(arg1.value) ||
+		VARATT_IS_EXTERNAL(arg2.value))
+	{
+		printf("gid=%u %d %d %d %d\n", get_global_id(), (int)VARATT_IS_COMPRESSED(arg1.value), (int)VARATT_IS_COMPRESSED(arg2.value), (int)VARATT_IS_EXTERNAL(arg1.value), (int)VARATT_IS_EXTERNAL(arg2.value));
+
+		result.isnull = true;
+		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		return result;
+	}
+	len1 = VARSIZE_ANY_EXHDR(arg1.value);
+	len2 = VARSIZE_ANY_EXHDR(arg2.value);
+	pos = (char *)INTALIGN(kcxt->vlpos);
+	if (!PTR_ON_VLBUF(kcxt,pos,VARHDRSZ + len1 + len2))
+	{
+		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		result.isnull = true;
+		return result;
+	}
+	result.isnull = false;
+	result.value = (struct varlena *) pos;
+	SET_VARSIZE(pos, VARHDRSZ + len1 + len2);
+	pos += VARHDRSZ;
+	memcpy(pos, VARDATA_ANY(arg1.value), len1);
+	pos += len1;
+	memcpy(pos, VARDATA_ANY(arg2.value), len2);
+	pos += len2;
+	kcxt->vlpos = pos;
+
+	return result;
+}
+
 /*
  * varchar(*) type definition
  */

@@ -546,6 +546,64 @@ pg_range_devtype_hashfunc(devtype_info *dtype,
 }
 
 /*
+ * varlena buffer estimation handler
+ */
+static int
+vlbuf_estimate_textcat(devfunc_info *dfunc, Expr **args, int *vl_width)
+{
+	int		i, maxlen = 0;
+
+	for (i=0; i < 2; i++)
+	{
+		Expr   *str = args[i];
+	retry:
+		if (IsA(str, Const))
+		{
+			Const  *con = (Const *) str;
+
+			if (!con->constisnull)
+				maxlen += VARSIZE_ANY_EXHDR(con);
+		}
+		else
+		{
+			int		typmod = exprTypmod((Node *) str);
+
+			if (typmod >= VARHDRSZ)
+				maxlen += (typmod - VARHDRSZ);
+			else if (IsA(str, FuncExpr) ||
+					 IsA(str, OpExpr) ||
+					 IsA(str, DistinctExpr))
+				maxlen += vl_width[i];
+			else if (IsA(str, RelabelType))
+			{
+				str = ((RelabelType *) str)->arg;
+				goto retry;
+			}
+			else
+			{
+				/*
+				 * Even though table statistics tell us 'average length' of
+				 * the values, we have no information about 'maximum length'
+				 * or 'standard diviation'. So, it may cause CPU recheck and
+				 * performance slowdown, if we try textcat on the device.
+				 * To avoid the risk, simply, we prohibit the operation.
+				 */
+				return -1;
+			}
+		}
+	}
+	return maxlen;
+}
+
+/*
+static int
+vlbuf_estimate_text_substr(devfunc_info *dfunc, Expr **args, int *vl_width)
+{
+	return 0;
+}
+*/
+
+/*
  * Catalog of functions supported by device code
  *
  * naming convension of functions:
@@ -1258,7 +1316,7 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 
 	/*
 	 * Text functions
-	 * ---------------------- */
+	 */
 	{ "bpchareq",  2, {BPCHAROID,BPCHAROID},  200, NULL, "s/f:bpchareq" },
 	{ "bpcharne",  2, {BPCHAROID,BPCHAROID},  200, NULL, "s/f:bpcharne" },
 	{ "bpcharlt",  2, {BPCHAROID,BPCHAROID},  200, NULL, "sc/f:bpcharlt" },
@@ -1274,7 +1332,6 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "text_gt",   2, {TEXTOID, TEXTOID},     200, NULL, "sc/f:text_gt" },
 	{ "text_ge",   2, {TEXTOID, TEXTOID},     200, NULL, "sc/f:text_ge" },
 	{ "bttextcmp", 2, {TEXTOID, TEXTOID},     200, NULL, "sc/f:type_compare" },
-	{ "length",    1, {TEXTOID},              2, NULL, "sc/f:textlen" },
 	/* LIKE operators */
 	{ "like",        2, {TEXTOID, TEXTOID},   9999, NULL, "s/f:textlike" },
 	{ "textlike",    2, {TEXTOID, TEXTOID},   9999, NULL, "s/f:textlike" },
@@ -1286,7 +1343,13 @@ static devfunc_catalog_t devfunc_common_catalog[] = {
 	{ "texticlike",    2, {TEXTOID, TEXTOID}, 9999, NULL, "sc/f:texticlike" },
 	{ "bpchariclike",  2, {TEXTOID, TEXTOID}, 9999, NULL, "sc/f:texticlike" },
 	{ "texticnlike",   2, {TEXTOID, TEXTOID}, 9999, NULL, "sc/f:texticnlike" },
-	{ "bpcharicnlike", 2, {BPCHAROID, TEXTOID}, 9999, NULL, "sc/f:texticnlike" },
+	{ "bpcharicnlike", 2, {BPCHAROID, TEXTOID},9999,NULL, "sc/f:texticnlike" },
+	/* string operations */
+	{ "length",		1, {TEXTOID},            2, NULL, "sc/f:textlen" },
+	{ "textcat",	2, {TEXTOID,TEXTOID},
+	  999, vlbuf_estimate_textcat, "s/f:textcat" },
+//	{ "substring",	3, {TEXTOID,INT4OID,INT4OID},
+//	  999, vlbuf_estimate_text_substr, "sc/f:text_substr" },
 };
 
 /*

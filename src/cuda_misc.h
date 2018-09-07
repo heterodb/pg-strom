@@ -651,18 +651,23 @@ pg_datum_ref(kern_context *kcxt, pg_inet_t &result, void *datum)
 	result = pg_inet_datum_ref(kcxt, datum);
 }
 
-STATIC_INLINE(cl_uint)
-pg_inet_datum_store(kern_context *kcxt, void *extra_buf, pg_inet_t datum)
+STATIC_INLINE(void *)
+pg_inet_datum_store(kern_context *kcxt, pg_inet_t datum)
 {
+	char	   *pos;
+
 	if (datum.isnull)
-		return 0;
-	if (extra_buf)
+		return NULL;
+	pos = (char *)MAXALIGN(kcxt->vlpos);
+	if (!PTR_ON_VLBUF(kcxt, pos, VARHDRSZ + sizeof(inet_struct)))
 	{
-		SET_VARSIZE(extra_buf, VARHDRSZ + sizeof(inet_struct));
-		memcpy((char *)extra_buf + VARHDRSZ,
-			   &datum.value, sizeof(inet_struct));
+		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		return NULL;
 	}
-	return VARHDRSZ + sizeof(inet_struct);
+	SET_VARSIZE(pos, VARHDRSZ + sizeof(inet_struct));
+	memcpy(pos + VARHDRSZ, &datum.value, sizeof(inet_struct));
+	kcxt->vlpos += VARHDRSZ + sizeof(inet_struct);
+	return pos;
 }
 
 STATIC_FUNCTION(pg_inet_t)

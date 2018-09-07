@@ -652,7 +652,6 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 	int				prev;
 	int				i, j, k;
 	bool			has_extract_tuple = false;
-	size_t			extra_size = 0;
 	devtype_info   *dtype;
 	StringInfoData	tdecl;
 	StringInfoData	cdecl;
@@ -687,10 +686,9 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 		"                         HeapTupleHeaderData *htup,\n"
 		"                         ItemPointerData *t_self,\n"
 		"                         Datum *tup_values,\n"
-		"                         cl_bool *tup_isnull,\n"
-		"                         char *tup_extra)\n"
+		"                         cl_bool *tup_isnull)\n"
 		"{\n"
-		"  void    *curr __attribute__((unused));\n"
+		"  void    *addr __attribute__((unused));\n"
 		"  cl_int   len __attribute__((unused));\n");
 
 	appendStringInfoString(
@@ -700,8 +698,7 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 		"                          kern_data_store *kds_src,\n"
 		"                          size_t src_index,\n"
 		"                          Datum *tup_values,\n"
-		"                          cl_bool *tup_isnull,\n"
-		"                          char *tup_extra)\n"
+		"                          cl_bool *tup_isnull)\n"
 		"{\n"
 		"  void    *addr __attribute__((unused));\n"
 		"  cl_uint  len  __attribute__((unused));\n");
@@ -831,7 +828,7 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 	resetStringInfo(&temp);
 	appendStringInfoString(
 		&temp,
-		"  EXTRACT_HEAP_TUPLE_BEGIN(curr, kds_src, htup);\n");
+		"  EXTRACT_HEAP_TUPLE_BEGIN(addr, kds_src, htup);\n");
 
 	for (i=0; i < tupdesc->natts; i++)
 	{
@@ -852,18 +849,18 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 			{
 				appendStringInfo(
 					&temp,
-					"  tup_isnull[%d] = !curr;\n"
-					"  if (curr)\n"
-					"    tup_values[%d] = READ_INT%d_PTR(curr);\n",
+					"  tup_isnull[%d] = !addr;\n"
+					"  if (addr)\n"
+					"    tup_values[%d] = READ_INT%d_PTR(addr);\n",
 					j, j, 8 * attr->attlen);
 			}
 			else
 			{
 				appendStringInfo(
 					&temp,
-					"  tup_isnull[%d] = !curr;\n"
-					"  if (curr)\n"
-					"    tup_values[%d] = PointerGetDatum(curr);\n",
+					"  tup_isnull[%d] = !addr;\n"
+					"  if (addr)\n"
+					"    tup_values[%d] = PointerGetDatum(addr);\n",
 					j, j);
 			}
 
@@ -901,7 +898,7 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 			/* tuple */
 			appendStringInfo(
 				&temp,
-				"  KVAR_%u = pg_%s_datum_ref(kcxt,curr);\n",
+				"  KVAR_%u = pg_%s_datum_ref(kcxt,addr);\n",
 				attr->attnum,
 				dtype->type_name);
 
@@ -927,7 +924,7 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 		}
 		appendStringInfoString(
 			&temp,
-			"  EXTRACT_HEAP_TUPLE_NEXT(curr);\n");
+			"  EXTRACT_HEAP_TUPLE_NEXT(addr);\n");
 	}
 	if (has_extract_tuple)
 		appendStringInfoString(
@@ -992,46 +989,30 @@ codegen_gpuscan_projection(StringInfo kern, codegen_context *context,
 		if (!dtype)
 			elog(ERROR, "Bug? device supported type is missing: %u", type_oid);
 
-		appendStringInfo(
-			&temp,
-			"  tup_isnull[%d] = expr_%u_v.isnull;\n",
-			tle->resno - 1, tle->resno);
-
 		if (dtype->type_byval)
 		{
 			appendStringInfo(
 				&temp,
+				"  tup_isnull[%d] = expr_%u_v.isnull;\n"
 				"  if (!expr_%u_v.isnull)\n"
 				"    tup_values[%d] = pg_%s_as_datum(&expr_%u_v.value);\n",
+				tle->resno - 1, tle->resno,
 				tle->resno,
-				tle->resno - 1,
-				dtype->type_name,
-				tle->resno);
-		}
-		else if (dtype->extra_sz > 0)
-		{
-			appendStringInfo(
-				&temp,
-				"  if (!expr_%u_v.isnull)\n"
-				"  {\n"
-				"    len = pg_%s_datum_store(kcxt,tup_extra,expr_%u_v);\n"
-				"    tup_values[%d] = PointerGetDatum(tup_extra);\n"
-				"    tup_extra += MAXALIGN(len);\n"
-				"  }\n",
-				tle->resno,
-				dtype->type_name, tle->resno,
-				tle->resno - 1);
-			extra_size += MAXALIGN(dtype->extra_sz);
+				tle->resno - 1, dtype->type_name, tle->resno);
 		}
 		else
 		{
 			appendStringInfo(
 				&temp,
-				"  if (!expr_%u_v.isnull)\n"
-				"    tup_values[%d] = PointerGetDatum(expr_%u_v.value);\n",
-				tle->resno,
+				"  addr = pg_%s_datum_store(kcxt,expr_%u_v);\n"
+				"  tup_isnull[%d] = !addr;\n"
+				"  if (addr)\n"
+				"    tup_values[%d] = PointerGetDatum(addr);\n",
+				dtype->type_name, tle->resno,
 				tle->resno - 1,
-				tle->resno);
+				tle->resno - 1);
+			if (dtype->extra_sz > 0)
+				context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
 		}
 	}
 	appendStringInfo(&tbody, "%s}\n", temp.data);
@@ -1334,14 +1315,16 @@ bufsz_estimate_gpuscan_projection(RelOptInfo *baserel,
 			proj_tuple_sz += (dtype->type_length > 0
 							  ? dtype->type_length
 							  : get_typavgwidth(type_oid, type_mod));
+			/*
+			 * Indirect fixed-length type or varlena type with special
+			 * internal format (like numeric) needs extra varlena buffer.
+			 * Expression with normal varlena type (like text) should
+			 * already allocate buffer on the device function which returns
+			 * varlena value, and codegen.c tells expected consumption of
+			 * the buffer.
+			 */
 			if (!dtype->type_byval)
-			{
-				if (dtype->extra_sz == 0)
-					elog(ERROR, "Bug? device type '%s' has indirect/varlena definition but no extra-size parameter at expression of: %s",
-						 dtype->type_name,
-						 nodeToString(tle->expr));
 				proj_extra_sz += MAXALIGN(dtype->extra_sz);
-			}
 		}
 	}
 	proj_tuple_sz = MAXALIGN(proj_tuple_sz);
@@ -1373,6 +1356,7 @@ PlanGpuScanPath(PlannerInfo *root,
 	List		   *ccache_refs = NIL;
 	ListCell	   *cell;
 	Bitmapset	   *varattnos = NULL;
+	size_t			varlena_bufsz;
 	cl_int			proj_tuple_sz = 0;
 	cl_int			proj_extra_sz = 0;
 	cl_int			i, j;
@@ -1424,6 +1408,7 @@ PlanGpuScanPath(PlannerInfo *root,
 	initStringInfo(&source);
 	pgstrom_init_codegen_context(&context, root);
 	codegen_gpuscan_quals(&kern, &context, baserel->relid, dev_quals);
+	varlena_bufsz = context.varlena_bufsz;
 	tlist_dev = build_gpuscan_projection(root,
 										 baserel->relid,
 										 relation,
@@ -1434,6 +1419,7 @@ PlanGpuScanPath(PlannerInfo *root,
 									  &proj_tuple_sz,
 									  &proj_extra_sz);
 	context.param_refs = NULL;
+	context.varlena_bufsz = proj_extra_sz;
 	codegen_gpuscan_projection(&kern, &context,
 							   baserel->relid,
 							   relation,
@@ -1441,8 +1427,9 @@ PlanGpuScanPath(PlannerInfo *root,
 	heap_close(relation, NoLock);
 	appendStringInfoString(&source, kern.data);
 	pfree(kern.data);
+	varlena_bufsz = Max(varlena_bufsz, context.varlena_bufsz);
 
-	elog(INFO, "varlena bufsz = %d", context.varlena_bufsz);
+	elog(INFO, "varlena bufsz = %zu", varlena_bufsz);
 
 	/* pickup referenced attributes */
 	pull_varattnos((Node *)dev_quals, baserel->relid, &varattnos);
@@ -1473,6 +1460,7 @@ PlanGpuScanPath(PlannerInfo *root,
 	gs_info->kern_source = source.data;
 	gs_info->extra_flags = context.extra_flags |
 		DEVKERNEL_NEEDS_DYNPARA | DEVKERNEL_NEEDS_GPUSCAN;
+	gs_info->varlena_bufsz = varlena_bufsz;
 	gs_info->proj_tuple_sz = proj_tuple_sz;
 	gs_info->proj_extra_sz = proj_extra_sz;
 	gs_info->ccache_refs = ccache_refs;
@@ -1692,10 +1680,8 @@ assign_gpuscan_session_info(StringInfo buf, GpuTaskState *gts)
 				"#define GPUSCAN_HAS_DEVICE_PROJECTION          1\n");
 		appendStringInfo(
 			buf,
-			"#define GPUSCAN_DEVICE_PROJECTION_NFIELDS      %d\n"
-			"#define GPUSCAN_DEVICE_PROJECTION_EXTRA_SIZE   %d\n",
-			tupdesc->natts,
-			gss->proj_extra_sz);
+			"#define GPUSCAN_DEVICE_PROJECTION_NFIELDS      %d\n",
+			tupdesc->natts);
 
 		if (gss->dev_quals)
 		{

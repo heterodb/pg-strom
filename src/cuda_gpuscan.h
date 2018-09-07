@@ -226,16 +226,14 @@ gpuscan_projection_tuple(kern_context *kcxt,
 						 HeapTupleHeaderData *htup,
 						 ItemPointerData *t_self,
 						 Datum *tup_values,
-						 cl_bool *tup_isnull,
-						 char *extra_buf);
+						 cl_bool *tup_isnull);
 
 STATIC_FUNCTION(void)
 gpuscan_projection_column(kern_context *kcxt,
 						  kern_data_store *kds_src,
 						  size_t src_index,
 						  Datum *tup_values,
-						  cl_bool *tup_isnull,
-						  char *extra_buf);
+						  cl_bool *tup_isnull);
 
 #ifdef GPUSCAN_KERNEL_REQUIRED
 /*
@@ -268,12 +266,6 @@ gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
 	Datum		   *tup_values = NULL;
 	cl_bool		   *tup_isnull = NULL;
 #endif
-#if GPUSCAN_DEVICE_PROJECTION_EXTRA_SIZE > 0
-	char			tup_extra[GPUSCAN_DEVICE_PROJECTION_EXTRA_SIZE]
-					__attribute__ ((aligned(MAXIMUM_ALIGNOF)));
-#else
-	char		   *tup_extra = NULL;
-#endif
 #endif
 	__shared__ cl_uint	nitems_base;
 	__shared__ cl_ulong	usage_base	__attribute__((unused));
@@ -299,6 +291,7 @@ gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
 		cl_uint			extra_sz = 0;
 		cl_uint			suspend_kernel	__attribute__((unused)) = 0;
 
+		kcxt.vlpos = kcxt.vlbuf;	/* rewind */
 		/* Evalidation of the rows by WHERE-clause */
 		src_index = src_base + get_local_id();
 		if (src_index < kds_src->nitems)
@@ -327,13 +320,13 @@ gpuscan_exec_quals_row(kern_gpuscan *kgpuscan,
 		/* extract the source tuple to the private slot, if any */
 		if (tupitem && rc)
 		{
+			kcxt.vlpos = kcxt.vlbuf;	/* rewind */
 			gpuscan_projection_tuple(&kcxt,
 									 kds_src,
 									 &tupitem->htup,
 									 &tupitem->t_self,
 									 tup_values,
-									 tup_isnull,
-									 tup_extra);
+									 tup_isnull);
 			required = MAXALIGN(offsetof(kern_tupitem, htup) +
 								compute_heaptuple_size(&kcxt,
 													   kds_dst,
@@ -478,12 +471,6 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 	Datum		   *tup_values = NULL;
 	cl_bool		   *tup_isnull = NULL;
 #endif
-#if GPUSCAN_DEVICE_PROJECTION_EXTRA_SIZE > 0
-	char			tup_extra[GPUSCAN_DEVICE_PROJECTION_EXTRA_SIZE]
-					__attribute__ ((aligned(MAXIMUM_ALIGNOF)));
-#else
-	char		   *tup_extra = NULL;
-#endif
 #endif
 	__shared__ cl_uint	nitems_base;
 	__shared__ cl_ulong	usage_base;
@@ -581,8 +568,7 @@ gpuscan_exec_quals_block(kern_gpuscan *kgpuscan,
 										 htup,
 										 &t_self,
 										 tup_values,
-										 tup_isnull,
-										 tup_extra);
+										 tup_isnull);
 				required = MAXALIGN(offsetof(kern_tupitem, htup) +
 									compute_heaptuple_size(&kcxt,
 														   kds_dst,
@@ -733,12 +719,6 @@ gpuscan_exec_quals_column(kern_gpuscan *kgpuscan,
 	Datum		   *tup_values = NULL;
 	cl_bool		   *tup_isnull = NULL;
 #endif
-#if GPUSCAN_DEVICE_PROJECTION_EXTRA_SIZE > 0
-	cl_char			tup_extra[GPUSCAN_DEVICE_PROJECTION_EXTRA_SIZE]
-					__attribute__ ((aligned(MAXIMUM_ALIGNOF)));
-#else
-	cl_char		   *tup_extra __attribute__((unused)) = NULL;
-#endif
 	__shared__ cl_uint	nitems_base;
 	__shared__ cl_ulong	usage_base	__attribute__((unused));
 
@@ -791,8 +771,7 @@ gpuscan_exec_quals_column(kern_gpuscan *kgpuscan,
 									  kds_src,
 									  src_index,
 									  tup_values,
-									  tup_isnull,
-									  tup_extra);
+									  tup_isnull);
 			required = MAXALIGN(offsetof(kern_tupitem, htup) +
 								compute_heaptuple_size(&kcxt,
 													   kds_dst,

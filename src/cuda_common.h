@@ -347,7 +347,7 @@ typedef struct
 {
 	kern_errorbuf	e;
 	struct kern_parambuf *kparams;
-	cl_uint			vlbuf_usage;
+	cl_char		   *vlpos;
 	cl_char			vlbuf[KERN_CONTEXT_VARLENA_BUFSZ];
 } kern_context;
 
@@ -358,9 +358,13 @@ typedef struct
 		(kcxt)->e.lineno = 0;								\
 		(kcxt)->e.filename[0] = '\0';						\
 		(kcxt)->kparams = (__kparams);						\
-		assert((cl_ulong)(__kparams) == MAXALIGN(__kparams));	\
-		(kcxt)->vlbuf_usage = 0;							\
+		assert((cl_ulong)(__kparams) == MAXALIGN(__kparams)); \
+		(kcxt)->vlpos = (kcxt)->vlbuf;						\
 	} while(0)
+
+#define PTR_ON_VLBUF(kcxt,ptr,len)							\
+	((char *)(ptr) >= (kcxt)->vlbuf &&						\
+	 (char *)(ptr) + (len) <= (kcxt)->vlbuf + KERN_CONTEXT_VARLENA_BUFSZ)
 
 #ifdef __CUDACC__
 /*
@@ -986,16 +990,23 @@ pointer_on_kparams(void *ptr, kern_parambuf *kparams)
 		result = pg_##NAME##_datum_ref(kcxt, datum);		\
 	}														\
 															\
-	STATIC_INLINE(cl_uint)									\
+	STATIC_INLINE(void *)									\
 	pg_##NAME##_datum_store(kern_context *kcxt,				\
-							void *extra_buf,				\
 							pg_##NAME##_t datum)			\
 	{														\
+		char	  *pos;										\
+															\
 		if (datum.isnull)									\
-			return 0;										\
-		if (extra_buf)										\
-			*((BASE *)extra_buf) = datum.value;				\
-		return sizeof(BASE);								\
+			return NULL;									\
+		pos = (char *)MAXALIGN(kcxt->vlpos);				\
+		if (!PTR_ON_VLBUF(kcxt,pos,sizeof(BASE)))			\
+		{													\
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck); \
+			return NULL;									\
+		}													\
+		*((BASE *)pos) = datum.value;						\
+		kcxt->vlpos += sizeof(BASE);						\
+		return pos;											\
 	}														\
 															\
 	STATIC_FUNCTION(pg_##NAME##_t)							\
@@ -1047,16 +1058,23 @@ pointer_on_kparams(void *ptr, kern_parambuf *kparams)
 		result = pg_##NAME##_datum_ref(kcxt, datum);		\
 	}														\
 															\
-	STATIC_INLINE(cl_uint)									\
+	STATIC_INLINE(void *)									\
 	pg_##NAME##_datum_store(kern_context *kcxt,				\
-							void *extra_buf,				\
 							pg_##NAME##_t datum)			\
 	{														\
+		char	   *pos;									\
+															\
 		if (datum.isnull)									\
-			return 0;										\
-		if (extra_buf)										\
-			memcpy(extra_buf, &datum.value, sizeof(BASE));	\
-		return sizeof(BASE);								\
+			return NULL;									\
+		pos = (char *)MAXALIGN(kcxt->vlpos);				\
+		if (!PTR_ON_VLBUF(kcxt,pos,sizeof(BASE)))			\
+		{													\
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck); \
+			return NULL;									\
+		}													\
+		memcpy(pos, &datum.value, sizeof(BASE));			\
+		kcxt->vlpos += sizeof(BASE);						\
+		return pos;											\
 	}														\
 															\
 	STATIC_FUNCTION(pg_##NAME##_t)							\
@@ -1611,19 +1629,13 @@ toast_decompress_datum(char *buffer, cl_uint buflen,
 		result = pg_##NAME##_datum_ref(kcxt, datum);			\
 	}															\
 																\
-	STATIC_INLINE(cl_uint)										\
+	STATIC_INLINE(void *)										\
 	pg_##NAME##_datum_store(kern_context *kcxt,					\
-							void *extra_buf,					\
 							pg_##NAME##_t datum)				\
 	{															\
-		cl_uint		vl_size;									\
-																\
 		if (datum.isnull)										\
-			return 0;											\
-		vl_size = VARSIZE_ANY(datum.value);						\
-		if (extra_buf)											\
-			memcpy(extra_buf, datum.value, vl_size);			\
-		return vl_size;											\
+			return NULL;										\
+		return datum.value;										\
 	}															\
 																\
 	STATIC_INLINE(pg_##NAME##_t)								\

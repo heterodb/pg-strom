@@ -128,34 +128,40 @@
 		result = pg_##NAME##_datum_ref(kcxt, datum);				\
 	}																\
 																	\
-	STATIC_FUNCTION(cl_uint)										\
+	STATIC_FUNCTION(void *)											\
 	pg_##NAME##_datum_store(kern_context *kcxt,						\
-							void *extra_buf,						\
 							pg_##NAME##_t datum)					\
 	{																\
-		char	   *pos = (char *)extra_buf + VARHDRSZ;				\
+		char	   *res;											\
+		char	   *pos;											\
 		char		flags;											\
+		cl_uint		len;											\
 																	\
 		if (datum.isnull)											\
-			return 0;												\
-		if (extra_buf)												\
+			return NULL;											\
+		res = (char *)MAXALIGN(kcxt->vlpos);						\
+		len = VARHDRSZ + sizeof(cl_uint) + 2 * sizeof(BASE) + 1;	\
+		if (!PTR_ON_VLBUF(kcxt, res, len))							\
 		{															\
-			flags = ((datum.value.l.infinite ? RANGE_LB_INF : 0)  |	\
-					 (datum.value.l.inclusive ? RANGE_LB_INC : 0) |	\
-					 (datum.value.u.infinite ? RANGE_UB_INF : 0)  |	\
-					 (datum.value.u.inclusive ? RANGE_UB_INC : 0) |	\
-					 (datum.value.empty ? RANGE_EMPTY : 0));		\
-			*((cl_uint *)pos) = PG_TYPEOID;							\
-			pos += sizeof(cl_uint);									\
-			*((BASE *)pos) = datum.value.l.val;						\
-			pos += sizeof(BASE);									\
-			*((BASE *)pos) = datum.value.u.val;						\
-			pos += sizeof(BASE);									\
-			*((char *)pos) = flags;									\
-			pos++;													\
-			SET_VARSIZE(extra_buf, pos - (char *)extra_buf);		\
+			STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);		\
+			return NULL;											\
 		}															\
-		return VARHDRSZ + sizeof(cl_uint) + 2 * sizeof(BASE) + 1;	\
+		flags = ((datum.value.l.infinite ? RANGE_LB_INF : 0)  |		\
+				 (datum.value.l.inclusive ? RANGE_LB_INC : 0) |		\
+				 (datum.value.u.infinite ? RANGE_UB_INF : 0)  |		\
+				 (datum.value.u.inclusive ? RANGE_UB_INC : 0) |		\
+				 (datum.value.empty ? RANGE_EMPTY : 0));			\
+		pos = res + VARHDRSZ;										\
+		*((cl_uint *)pos) = PG_TYPEOID;								\
+		pos += sizeof(cl_uint);										\
+		*((BASE *)pos) = datum.value.l.val;							\
+		pos += sizeof(BASE);										\
+		*((BASE *)pos) = datum.value.u.val;							\
+		pos += sizeof(BASE);										\
+		*((char *)pos) = flags;										\
+		SET_VARSIZE(res, len);										\
+																	\
+		return res;													\
 	}																\
 																	\
 	STATIC_FUNCTION(pg_##NAME##_t)									\

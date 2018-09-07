@@ -479,13 +479,26 @@ pg_datum_ref(kern_context *kcxt,
 	result = pg_numeric_datum_ref(kcxt, datum);
 }
 
-STATIC_INLINE(cl_uint)
+STATIC_INLINE(void *)
 pg_numeric_datum_store(kern_context *kcxt,
-					   char *extra_buf,
 					   pg_numeric_t datum)
 {
-	return pg_numeric_to_varlena(kcxt, extra_buf,
-								 datum.value, datum.isnull);
+	char   *pos;
+
+	if (datum.isnull)
+		return NULL;
+	pos = (char *)MAXALIGN(kcxt->vlpos);
+	if (!PTR_ON_VLBUF(kcxt, pos, ))
+	{
+		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
+		return NULL;
+	}
+	pg_numeric_to_varlena(kcxt, pos,
+						  datum.value,
+						  datum.isnull);
+	kcxt->vlpos += VARSIZE_ANY(pos);
+
+	return pos;
 }
 
 STATIC_FUNCTION(pg_numeric_t)
