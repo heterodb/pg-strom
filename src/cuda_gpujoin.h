@@ -227,7 +227,6 @@ gpujoin_projection(kern_context *kcxt,
 				   Datum *tup_values,
 				   cl_bool *tup_isnull,
 				   cl_bool *use_extra_buf,
-				   cl_char *extra_buf,
 				   cl_uint *extra_len);
 /*
  * static shared variables
@@ -655,12 +654,6 @@ gpujoin_projection_row(kern_context *kcxt,
 	cl_bool	   *tup_isnull = NULL;
 	cl_bool	   *use_extra_buf = NULL;
 #endif
-#if GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE > 0
-	cl_char		extra_buf[GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE]
-				__attribute__ ((aligned(MAXIMUM_ALIGNOF)));
-#else
-	cl_char	   *extra_buf = NULL;
-#endif
 	cl_uint		extra_len = 0;
 	cl_int		needs_suspend = 0;
 
@@ -690,9 +683,8 @@ gpujoin_projection_row(kern_context *kcxt,
 						   tup_values,
 						   tup_isnull,
 						   use_extra_buf,
-						   extra_buf,
 						   &extra_len);
-		assert(extra_len <= GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE);
+		assert(extra_len <= kcxt->vlpos - kcxt->vlbuf);
 		required = MAXALIGN(offsetof(kern_tupitem, htup) +
 							compute_heaptuple_size(kcxt,
 												   kds_dst,
@@ -813,12 +805,6 @@ gpujoin_projection_slot(kern_context *kcxt,
 	cl_bool	   *tup_isnull = NULL;
 	cl_bool	   *use_extra_buf = NULL;
 #endif
-#if GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE > 0
-	cl_char		extra_buf[GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE]
-				__attribute__ ((aligned(MAXIMUM_ALIGNOF)));
-#else
-	cl_char	   *extra_buf = NULL;
-#endif
 	cl_uint		extra_len = 0;
 	cl_int		needs_suspend = 0;
 
@@ -852,9 +838,8 @@ gpujoin_projection_slot(kern_context *kcxt,
 						   tup_values,
 						   tup_isnull,
 						   use_extra_buf,
-						   extra_buf,
 						   &extra_len);
-		assert(extra_len <= GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE);
+		assert(extra_len <= (kcxt->vlpos - kcxt->vlbuf));
 
 		tup_is_valid = true;
 	}
@@ -906,27 +891,36 @@ gpujoin_projection_slot(kern_context *kcxt,
 		Datum	   *dst_values = KERN_DATA_STORE_VALUES(kds_dst, dest_index);
 		cl_bool	   *dst_isnull = KERN_DATA_STORE_ISNULL(kds_dst, dest_index);
 		cl_char    *dst_extra;
-		cl_int		i, offset;
+		cl_char	   *src_extra;
+		cl_int		i, nbytes = 0;
 
 		/*
-		 * If varlena or indirect variables are stored in the extra buf,
-		 * we have to move the body of variables to kds_dst, and update
-		 * the pointers.
+		 * If varlena or indirect variables are stored in the varlena
+		 * buffer of kern_context, we have to copy the values to kds_dst,
+		 * and update the pointers.
 		 */
 		if (extra_len > 0)
 		{
 			dst_extra = (char *)kds_dst + kds_dst->length - dest_offset;
-			memcpy(dst_extra, extra_buf, extra_len);
-
-			for (i=0; i < GPUJOIN_DEVICE_PROJECTION_NFIELDS; i++)
+			for (i=0; i < kds_dst->ncols; i++)
 			{
-				if (tup_isnull[i] || !use_extra_buf[i])
+				kern_colmeta   *cmeta = &kds_dst->colmeta[i];
+				char		   *addr;
+
+				if (tup_isnull[i] || cmeta->attbyval)
 					continue;
-				assert(DatumGetPointer(tup_values[i]) >= extra_buf &&
-					   DatumGetPointer(tup_values[i]) < (extra_buf +
-														 extra_len));
-				offset = (cl_int)(DatumGetPointer(tup_values[i]) - extra_buf);
-				tup_values[i] = PointerGetDatum(dst_extra) + offset;
+				src_extra = DatumGetPointer(tup_values[i]);
+				if (src_extra >= kcxt->vlbuf &&
+					src_extra <  kcxt->vlpos)
+				{
+					int		len = (cmeta->attlen > 0
+								   ? cmeta->attlen
+								   : VARSIZE_ANY(src_extra));
+					memcpy(dst_extra, src_extra, len);
+					dst_extra += MAXALIGN(len);
+					nbytes += MAXALIGN(len);
+				}
+				assert(nbytes <= extra_len);
 			}
 		}
 
@@ -997,8 +991,8 @@ gpujoin_exec_nestloop(kern_context *kcxt,
 		/* elsewhere, dive into the deeper depth or projection */
 		return depth + 1;
 	}
-	x_unitsz = Min(write_pos[depth-1] - read_pos[depth-1],
-				   get_local_size());
+	__syncthreads();
+	x_unitsz = Min(write_pos[depth-1], get_local_size());
 	y_unitsz = get_local_size() / x_unitsz;
 
 	x_index = get_local_id() % x_unitsz;
@@ -1041,11 +1035,9 @@ gpujoin_exec_nestloop(kern_context *kcxt,
 		}
 		return depth;
 	}
-
 	x_index += read_pos[depth-1];
-	assert(x_index < write_pos[depth-1]);
 	rd_stack += (x_index * depth);
-	if (y_index < y_unitsz)
+	if (x_index < write_pos[depth-1] && y_index < y_unitsz)
 	{
 		y_index += y_unitsz * l_state[depth];
 		if (y_index < kds_in->nitems)
@@ -1178,6 +1170,8 @@ gpujoin_exec_hashjoin(kern_context *kcxt,
 				if (!is_null_keys)
 					khitem = KERN_HASH_FIRST_ITEM(kds_hash, hash_value);
 			}
+			/* rewind the varlena buffer */
+			kcxt->vlpos = kcxt->vlbuf;
 		}
 		else
 		{
@@ -1336,6 +1330,8 @@ gpujoin_main(kern_gpujoin *kgjoin,
 	/* main logic of GpuJoin */
 	while (depth >= 0)
 	{
+		/* rewind the varlena buffer */
+		kcxt.vlpos = kcxt.vlbuf;
 		if (depth == 0)
 		{
 			/* LOAD FROM KDS_SRC (ROW/BLOCK/COLUMN) */
@@ -1399,6 +1395,8 @@ gpujoin_main(kern_gpujoin *kgjoin,
 		}
 		if (get_local_id() == 0)
 			depth_thread0 = depth;
+//		if (__syncthreads_count(kcxt.e.errcode) > 0)
+//			goto bailout;
 		__syncthreads();
 		assert(depth_thread0 == depth);
 	}
@@ -1417,6 +1415,7 @@ gpujoin_main(kern_gpujoin *kgjoin,
 					  stat_nitems[index+1]);
 	}
 	__syncthreads();
+bailout:
 	kern_writeback_error_status(&kgjoin->kerror, &kcxt.e);
 }
 
@@ -1514,6 +1513,8 @@ gpujoin_right_outer(kern_gpujoin *kgjoin,
 	/* main logic of GpuJoin */
 	while (depth >= outer_depth)
 	{
+		/* rewind the varlena buffer */
+		kcxt.vlpos = kcxt.vlbuf;
 		if (depth == outer_depth)
 		{
 			/* makes RIGHT OUTER combinations using OUTER JOIN map */
@@ -1578,6 +1579,8 @@ gpujoin_right_outer(kern_gpujoin *kgjoin,
 		}
 		if (get_local_id() == 0)
 			depth_thread0 = depth;
+//		if (__syncthreads_count(kcxt.e.errcode) > 0)
+//			goto bailout;
 		__syncthreads();
 		assert(depth == depth_thread0);
 	}
@@ -1597,6 +1600,7 @@ gpujoin_right_outer(kern_gpujoin *kgjoin,
 		}
 	}
 	__syncthreads();
+bailout:
 	kern_writeback_error_status(&kgjoin->kerror, &kcxt.e);
 }
 

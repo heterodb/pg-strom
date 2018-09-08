@@ -81,7 +81,6 @@ typedef struct
 	/* supplemental information of ps_tlist */
 	List	   *ps_src_depth;	/* source depth of the ps_tlist entry */
 	List	   *ps_src_resno;	/* source resno of the ps_tlist entry */
-	cl_uint		extra_maxlen;	/* max length of extra area per rows */
 } GpuJoinInfo;
 
 static inline void
@@ -120,7 +119,6 @@ form_gpujoin_info(CustomScan *cscan, GpuJoinInfo *gj_info)
 
 	privs = lappend(privs, gj_info->ps_src_depth);
 	privs = lappend(privs, gj_info->ps_src_resno);
-	privs = lappend(privs, makeInteger(gj_info->extra_maxlen));
 
 	cscan->custom_private = privs;
 	cscan->custom_exprs = exprs;
@@ -165,7 +163,6 @@ deform_gpujoin_info(CustomScan *cscan)
 
 	gj_info->ps_src_depth = list_nth(privs, pindex++);
 	gj_info->ps_src_resno = list_nth(privs, pindex++);
-	gj_info->extra_maxlen = intVal(list_nth(privs, pindex++));
 	Assert(pindex == list_length(privs));
 	Assert(eindex == list_length(exprs));
 
@@ -245,8 +242,6 @@ typedef struct
 	List		   *join_quals;
 	/* result width per tuple for buffer length calculation */
 	int				result_width;
-	/* expected extra length per result tuple  */
-	cl_uint			extra_maxlen;
 
 	/*
 	 * CPU Fallback
@@ -2530,11 +2525,9 @@ assign_gpujoin_session_info(StringInfo buf, GpuTaskState *gts)
 	appendStringInfo(
 		buf,
 		"#define GPUJOIN_MAX_DEPTH %u\n"
-		"#define GPUJOIN_DEVICE_PROJECTION_NFIELDS %u\n"
-		"#define GPUJOIN_DEVICE_PROJECTION_EXTRA_SIZE %u\n",
+		"#define GPUJOIN_DEVICE_PROJECTION_NFIELDS %u\n",
 		gjs->num_rels,
-		tupdesc->natts,
-		((GpuJoinState *) gts)->extra_maxlen);
+		tupdesc->natts);
 }
 
 static Node *
@@ -2909,15 +2902,6 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 		gjs->gts.css.custom_ps = lappend(gjs->gts.css.custom_ps,
 										 istate->state);
 	}
-
-	/*
-	 * Construct CUDA program, and kick asynchronous compile process.
-	 * Note that assign_gpujoin_session_info() is called back from
-	 * the pgstrom_assign_cuda_program(), thus, gjs->extra_maxlen has
-	 * to be set prior to the program assignment.
-	 */
-	gjs->extra_maxlen = gj_info->extra_maxlen;
-
 	initStringInfo(&kern_define);
 	pgstrom_build_session_info(&kern_define,
 							   &gjs->gts,
@@ -3891,8 +3875,7 @@ static void
 gpujoin_codegen_projection(StringInfo source,
 						   CustomScan *cscan,
 						   GpuJoinInfo *gj_info,
-						   codegen_context *context,
-						   cl_uint *p_extra_maxlen)
+						   codegen_context *context)
 {
 	List		   *tlist_dev = cscan->custom_scan_tlist;
 	List		   *ps_src_depth = gj_info->ps_src_depth;
@@ -3908,7 +3891,6 @@ gpujoin_codegen_projection(StringInfo source,
 	StringInfoData	row;
 	StringInfoData	column;
 	cl_int			depth;
-	cl_uint			extra_maxlen = 0;
 	cl_bool			is_first;
 
 	varattmaps = palloc(sizeof(AttrNumber) * list_length(tlist_dev));
@@ -3963,15 +3945,15 @@ gpujoin_codegen_projection(StringInfo source,
 		"                   Datum *tup_values,\n"
 		"                   cl_bool *tup_isnull,\n"
 		"                   cl_bool *use_extra_buf,\n"
-		"                   cl_char *extra_buf,\n"
-		"                   cl_uint *extra_len)\n"
+		"                   cl_uint *p_extra_len)\n"
 		"{\n"
 		"  HeapTupleHeaderData *htup    __attribute__((unused));\n"
 		"  kern_data_store *kds_in      __attribute__((unused));\n"
 		"  ItemPointerData  t_self      __attribute__((unused));\n"
 		"  cl_uint          offset      __attribute__((unused));\n"
+		"  cl_uint          len         __attribute__((unused));\n"
 		"  void            *addr        __attribute__((unused));\n"
-		"  char            *extra_pos = extra_buf;\n"
+		"  cl_uint          extra_len = 0;\n"
 		"  pg_anytype_t     temp        __attribute__((unused));\n"
 		"\n"
 		"  if (use_extra_buf)\n"
@@ -4103,16 +4085,24 @@ gpujoin_codegen_projection(StringInfo source,
 				appendStringInfo(
 					&row,
 					"    /* %s system column */\n"
-					"    tup_isnull[%d] = false;\n"
-					"    tup_values[%d] = PointerGetDatum(extra_pos);\n"
-					"    use_extra_buf[%d] = true;\n"
-					"    memcpy(extra_pos, &t_self, sizeof(t_self));\n"
-					"    extra_pos += MAXALIGN(sizeof(t_self));\n",
+					"    addr = (void *)MAXALIGN(kcxt->vlpos);\n"
+					"    if (!PTR_ON_VLBUF(kcxt,addr,sizeof(t_self)))\n"
+					"    {\n"
+					"      tup_isnull[%d] = true;\n"
+					"      STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);\n"
+					"    }\n"
+					"    else\n"
+					"    {\n"
+					"      tup_isnull[%d] = false;\n"
+					"      tup_values[%d] = PointerGetDatum(addr);\n"
+					"      memcpy(addr, &t_self, sizeof(t_self));\n"
+					"      kcxt->vlpos += MAXALIGN(sizeof(t_self));\n"
+					"    }\n",
 					NameStr(attr->attname),
 					tle->resno - 1,
 					tle->resno - 1,
 					tle->resno - 1);
-				extra_maxlen += MAXALIGN(attr->attlen);
+				context->varlena_bufsz += MAXALIGN(sizeof(ItemPointerData));
 			}
 			else
 			{
@@ -4224,12 +4214,16 @@ gpujoin_codegen_projection(StringInfo source,
 						tle->resno - 1,
 						8 * typelen);
 				}
-				appendStringInfo(
-					&body,
-					"    tup_isnull[%d] = true;\n"
-					"    tup_values[%d] = 0;\n",
-					tle->resno - 1,
-					tle->resno - 1);
+				/* NULL-initialization for LEFT OUTER JOIN */
+				if (depth == 0)
+				{
+					appendStringInfo(
+						&body,
+						"    tup_isnull[%d] = true;\n"
+						"    tup_values[%d] = 0;\n",
+						tle->resno - 1,
+						tle->resno - 1);
+				}
 				referenced = true;
 			}
 
@@ -4363,100 +4357,40 @@ gpujoin_codegen_projection(StringInfo source,
 				dtype->type_name,
 				dtype->type_name);
 		}
-		else if (dtype->type_length > 0)
-		{
-			/* fixed length pointer data type */
-			appendStringInfo(
-				&body,
-				"  temp.%s_v = %s;\n"
-				"  tup_isnull[%d] = temp.%s_v.isnull;\n"
-				"  if (!temp.%s_v.isnull)\n"
-				"  {\n"
-				"    memcpy(extra_pos, &temp.%s_v.value,\n"
-				"           sizeof(temp.%s_v.value));\n"
-				"    tup_values[%d] = PointerGetDatum(extra_pos);\n"
-				"    extra_pos += MAXALIGN(sizeof(temp.%s_v.value));\n"
-				"    use_extra_buf[%d] = true;\n"
-				"  }\n",
-				dtype->type_name,
-				pgstrom_codegen_expression((Node *)tle->expr, context),
-				tle->resno - 1,
-				dtype->type_name,
-				dtype->type_name,
-				dtype->type_name,
-				dtype->type_name,
-				tle->resno - 1,
-				dtype->type_name,
-				tle->resno - 1);
-			extra_maxlen += MAXALIGN(dtype->type_length);
-		}
-		else if (dtype->extra_sz > 0)
-		{
-			/* variable length field with an explicit upper limit */
-			appendStringInfo(
-				&body,
-				"  temp.%s_v = %s;\n"
-				"  tup_isnull[%d] = temp.%s_v.isnull;\n"
-				"  if (!temp.%s_v.isnull)\n"
-				"  {\n"
-				"    cl_uint  __len;\n"
-				"    tup_values[%d] = PointerGetDatum(extra_pos);\n"
-				"    __len = pg_%s_datum_store(kcxt,extra_pos,temp.%s_v);"
-				"    assert(__len <= %zu);\n"
-				"    extra_pos += MAXALIGN(__len);\n"
-				"    use_extra_buf[%d] = true;\n"
-				"  }\n",
-				dtype->type_name,
-				pgstrom_codegen_expression((Node *)tle->expr, context),
-				tle->resno - 1,
-				dtype->type_name,
-				dtype->type_name,
-				tle->resno - 1,
-				dtype->type_name,
-				dtype->type_name,
-				MAXALIGN(dtype->extra_sz),
-				tle->resno - 1);
-			extra_maxlen += MAXALIGN(dtype->extra_sz);
-		}
 		else
 		{
-			/*
-			 * variable length pointer data type
-			 *
-			 * Pay attention for the case when expression may return varlena
-			 * data type, even though we have no device function that can
-			 * return a varlena function. Like:
-			 *   CASE WHEN x IS NOT NULL THEN x ELSE 'no value' END
-			 * In this case, a varlena data returned by the expression is
-			 * located on either any of KDS buffer or KPARAMS buffer.
-			 *
-			 * Unless it is not obvious by the node type, we have to walk on
-			 * the possible buffer range to find out right one. :-(
-			 */
+			/* fixed-length indirect data type or varlena */
 			appendStringInfo(
 				&body,
 				"  temp.%s_v = %s;\n"
-				"  tup_isnull[%d] = temp.%s_v.isnull;\n"
-				"  tup_values[%d] = PointerGetDatum(temp.%s_v.value);\n"
-				"  use_extra_buf[%d] = false;\n",
+				"  addr = pg_%s_datum_store(kcxt,temp.%s_v);\n"
+				"  tup_isnull[%d] = !addr;\n"
+				"  if (addr)\n"
+				"  {\n"
+				"    tup_values[%d] = PointerGetDatum(addr);\n"
+				"    if (addr >= kcxt->vlbuf && addr < kcxt->vlpos)\n"
+				"      extra_len += MAXALIGN(%s);\n"
+				"  }\n",
 				dtype->type_name,
 				pgstrom_codegen_expression((Node *)tle->expr, context),
-				tle->resno - 1, dtype->type_name,
-				tle->resno - 1, dtype->type_name,
-				tle->resno - 1);
+				dtype->type_name, dtype->type_name,
+				tle->resno - 1,
+				tle->resno - 1,
+				dtype->type_length > 0
+				? psprintf("sizeof(temp.%s_v.value)", dtype->type_name)
+				: "VARSIZE_ANY(addr)");
+			if (dtype->extra_sz > 0)
+				context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
 		}
 	}
 	/* how much extra field required? */
 	appendStringInfoString(
 		&body,
-		"\n"
-		"  *extra_len = (cl_uint)(extra_pos - extra_buf);\n");
+		"  *p_extra_len = extra_len;\n");
 	/* add parameter declarations */
 	pgstrom_codegen_param_declarations(source, context);
 	/* merge with declaration part */
 	appendStringInfo(source, "\n%s}\n", body.data);
-
-	*p_extra_maxlen = extra_maxlen;
 
 	pfree(body.data);
 	pfree(temp.data);
@@ -4471,6 +4405,7 @@ gpujoin_codegen(PlannerInfo *root,
 {
 	StringInfoData source;
 	int			depth;
+	size_t		varlena_bufsz;
 	ListCell   *cell;
 
 	initStringInfo(&source);
@@ -4482,12 +4417,18 @@ gpujoin_codegen(PlannerInfo *root,
 						  context,
 						  cscan->scan.scanrelid,
 						  gj_info->outer_quals);
+	varlena_bufsz = context->varlena_bufsz;
+
 	/*
 	 * gpujoin_join_quals
 	 */
 	context->pseudo_tlist = cscan->custom_scan_tlist;
 	for (depth=1; depth <= gj_info->num_rels; depth++)
+	{
+		context->varlena_bufsz = 0;
 		gpujoin_codegen_join_quals(&source, gj_info, depth, context);
+		varlena_bufsz = Max(varlena_bufsz, context->varlena_bufsz);
+	}
 
 	appendStringInfo(
 		&source,
@@ -4527,7 +4468,11 @@ gpujoin_codegen(PlannerInfo *root,
 	foreach (cell, gj_info->hash_outer_keys)
 	{
 		if (lfirst(cell) != NULL)
+		{
+			context->varlena_bufsz = 0;
 			gpujoin_codegen_hash_value(&source, gj_info, depth, context);
+			varlena_bufsz = Max(varlena_bufsz, context->varlena_bufsz);
+		}
 		depth++;
 	}
 
@@ -4575,8 +4520,12 @@ gpujoin_codegen(PlannerInfo *root,
 	/*
 	 * gpujoin_projection
 	 */
-	gpujoin_codegen_projection(&source, cscan, gj_info, context,
-							   &gj_info->extra_maxlen);
+	context->varlena_bufsz = 0;
+	gpujoin_codegen_projection(&source, cscan, gj_info, context);
+	varlena_bufsz = Max(varlena_bufsz, context->varlena_bufsz);
+
+	/* required varlena buffer size */
+	gj_info->varlena_bufsz = varlena_bufsz;
 
 	return source.data;
 }
