@@ -62,10 +62,18 @@ typedef struct kern_gpupreagg	kern_gpupreagg;
  * gpupreagg_setup_block will exit immediately, and save the current context
  * on the gpupreagg_suspend_context array to resume later.
  */
-typedef struct
+typedef union
 {
-	cl_uint		part_index;
-	cl_uint		line_index;
+	struct {
+		size_t		src_base;
+	} r;	/* row-format */
+	struct {
+		cl_uint		part_index;
+		cl_uint		line_index;
+	} b;	/* block-format */
+	struct {
+		size_t		src_base;
+	} c;	/* column-format */
 } gpupreaggSuspendContext;
 
 /* macro definitions to reference packed values */
@@ -218,14 +226,16 @@ gpupreagg_projection_row(kern_context *kcxt,
 						 kern_data_store *kds_src,	/* in */
 						 HeapTupleHeaderData *htup,	/* in */
 						 Datum *dst_values,			/* out */
-						 cl_char *dst_isnull);		/* out */
+						 cl_char *dst_isnull,		/* out */
+						 cl_uint *p_extra_sz);		/* out */
 
 STATIC_FUNCTION(void)
 gpupreagg_projection_column(kern_context *kcxt,
 							kern_data_store *kds_src,	/* in */
 							cl_uint src_index,			/* out */
 							Datum *dst_values,			/* out */
-							cl_char *dst_isnull);		/* out */
+							cl_char *dst_isnull,		/* out */
+							cl_uint *p_extra_sz);		/* out */
 
 /*
  * gpupreagg_final_data_move
@@ -333,6 +343,101 @@ gpupreagg_final_data_move(kern_context *kcxt,
 }
 
 /*
+ * common portion for gpupreagg_setup_*
+ */
+STATIC_FUNCTION(bool)
+gpupreagg_setup_common(kern_context    *kcxt,
+					   kern_gpupreagg  *kgpreagg,
+					   kern_data_store *kds_slot,
+					   cl_uint			nvalids,
+					   cl_uint          slot_index,
+					   Datum           *tup_values,
+					   cl_bool         *tup_isnull,
+					   cl_uint          extra_sz)
+{
+	cl_uint		offset;
+	cl_uint		required;
+	char	   *extra_pos;
+	cl_bool		suspend_kernel = false;
+	__shared__ cl_uint	nitems_base;
+	__shared__ cl_uint	extra_base;
+
+	offset = pgstromStairlikeSum(extra_sz, &required);
+	if (get_local_id() == 0)
+	{
+		union {
+			struct {
+				cl_uint	nitems;
+				cl_uint	usage;
+			} i;
+			cl_ulong	v64;
+		} oldval, curval, newval;
+
+		curval.i.nitems = kds_slot->nitems;
+		curval.i.usage  = kds_slot->usage;
+		do {
+			newval = oldval = curval;
+			newval.i.nitems += nvalids;
+			newval.i.usage  += __kds_packed(required);
+			if (KDS_CALCULATE_SLOT_LENGTH(kds_slot->ncols, newval.i.nitems) +
+				__kds_unpack(newval.i.usage) > kds_slot->length)
+			{
+				suspend_kernel = true;
+				atomicAdd(&kgpreagg->suspend_count, 1);
+				break;
+			}
+		} while((curval.v64 = atomicCAS((cl_ulong *)&kds_slot->nitems,
+										oldval.v64,
+										newval.v64)) != oldval.v64);
+		nitems_base = oldval.i.nitems;
+		extra_base = __kds_unpack(oldval.i.usage);
+	}
+	if (__syncthreads_count(suspend_kernel) > 0)
+		return false;
+
+	if (slot_index != UINT_MAX)
+	{
+		assert(slot_index < nvalids);
+		slot_index += nitems_base;
+		extra_pos = (char *)kds_slot + kds_slot->length
+			- (extra_base + required) + offset;
+		/* fixup pointers if allocated on the varlena buffer */
+		if (extra_sz > 0)
+		{
+			for (int j=0; j < kds_slot->ncols; j++)
+			{
+				kern_colmeta *cmeta = &kds_slot->colmeta[j];
+				char   *addr;
+
+				if (tup_isnull[j] || cmeta->attbyval)
+					continue;
+				addr = DatumGetPointer(tup_values[j]);
+				if (addr >= kcxt->vlbuf && addr < kcxt->vlpos)
+				{
+					tup_values[j] = PointerGetDatum(extra_pos);
+					if (cmeta->attlen > 0)
+					{
+						memcpy(extra_pos, addr, cmeta->attlen);
+						extra_pos += MAXALIGN(cmeta->attlen);
+					}
+					else
+					{
+						int		vl_len = VARSIZE_ANY(addr);
+						memcpy(extra_pos, addr, vl_len);
+						extra_pos += MAXALIGN(vl_len);
+					}
+				}
+			}
+		}
+		memcpy(KERN_DATA_STORE_VALUES(kds_slot, slot_index),
+			   tup_values, sizeof(Datum) * kds_slot->ncols);
+		memcpy(KERN_DATA_STORE_ISNULL(kds_slot, slot_index),
+			   tup_isnull, sizeof(char) * kds_slot->ncols);
+	}
+	return true;
+}
+
+/*
  * gpupreagg_setup_row
  */
 KERNEL_FUNCTION(void)
@@ -347,22 +452,33 @@ gpupreagg_setup_row(kern_gpupreagg *kgpreagg,
 	cl_uint			src_base;
 	cl_uint			src_index;
 	cl_uint			slot_index;
-	cl_uint			offset;
 	cl_uint			count;
 	cl_uint			nvalids;
-	Datum		   *slot_values;
-	cl_bool		   *slot_isnull;
+#if GPUPREAGG_DEVICE_PROJECTION_NFIELDS > 0
+	Datum			tup_values[GPUPREAGG_DEVICE_PROJECTION_NFIELDS];
+	cl_bool			tup_isnull[GPUPREAGG_DEVICE_PROJECTION_NFIELDS];
+#else
+	Datum		   *tup_values = NULL;
+	cl_bool		   *tup_isnull = NULL;
+#endif
+	gpupreaggSuspendContext *my_suspend;
 	cl_bool			rc;
-	__shared__ cl_uint	base;
 
 	assert(kds_src->format == KDS_FORMAT_ROW &&
 		   kds_slot->format == KDS_FORMAT_SLOT);
 	INIT_KERNEL_CONTEXT(&kcxt, gpupreagg_setup_row, kparams);
 
-	for (src_base = get_global_base();
-		 src_base < src_nitems;
-		 src_base += get_global_size())
+	/* resume kernel from the point where suspended, if any */
+	my_suspend = KERN_GPUPREAGG_SUSPEND_CONTEXT(kgpreagg, get_group_id());
+	if (kgpreagg->resume_context)
+		src_base = my_suspend->r.src_base;
+	else
+		src_base = get_global_base();
+	__syncthreads();
+
+	while (src_base < src_nitems)
 	{
+		kcxt.vlpos = kcxt.vlbuf;		/* rewind */
 		src_index = src_base + get_local_id();
 		if (src_index < src_nitems)
 		{
@@ -371,6 +487,7 @@ gpupreagg_setup_row(kern_gpupreagg *kgpreagg,
 			rc = gpuscan_quals_eval(&kcxt, kds_src,
 									&tupitem->t_self,
 									&tupitem->htup);
+			kcxt.vlpos = kcxt.vlbuf;	/* rewind */
 #else
 			rc = true;
 #endif
@@ -380,40 +497,41 @@ gpupreagg_setup_row(kern_gpupreagg *kgpreagg,
 			tupitem = NULL;
 			rc = false;
 		}
-
 #ifdef GPUPREAGG_PULLUP_OUTER_SCAN
-		/* Bailout if any error */
+		/* bailout if any errors */
 		if (__syncthreads_count(kcxt.e.errcode) > 0)
 			break;
 #endif
 		/* allocation of kds_slot buffer, if any */
-		offset = pgstromStairlikeBinaryCount(tupitem && rc, &nvalids);
+		slot_index = pgstromStairlikeBinaryCount(rc, &nvalids);
 		if (nvalids > 0)
 		{
-			if (get_local_id() == 0)
-				base = atomicAdd(&kds_slot->nitems, nvalids);
-			__syncthreads();
-			if (base + nvalids > kds_slot->nrooms)
-			{
-				STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
-				break;
-			}
-			slot_index = base + offset;
-			if (tupitem && rc)
-			{
-				slot_values = KERN_DATA_STORE_VALUES(kds_slot, slot_index);
-				slot_isnull = KERN_DATA_STORE_ISNULL(kds_slot, slot_index);
+			cl_uint		extra_sz = 0;
 
+			if (rc)
+			{
+				assert(tupitem != NULL);
 				gpupreagg_projection_row(&kcxt,
 										 kds_src,
 										 &tupitem->htup,
-										 slot_values,
-										 slot_isnull);
+										 tup_values,
+										 tup_isnull,
+										 &extra_sz);
 			}
+			/* bailout if any errors */
+			if (__syncthreads_count(kcxt.e.errcode) > 0)
+				break;
+
+			if (!gpupreagg_setup_common(&kcxt,
+										kgpreagg,
+										kds_slot,
+										nvalids,
+										rc ? slot_index : UINT_MAX,
+										tup_values,
+										tup_isnull,
+										extra_sz))
+				break;
 		}
-		/* bailout if any error */
-		if (__syncthreads_count(kcxt.e.errcode) > 0)
-			break;
 		/* update statistics */
 		pgstromStairlikeBinaryCount(tupitem ? 1 : 0, &count);
 		if (get_local_id() == 0)
@@ -421,8 +539,12 @@ gpupreagg_setup_row(kern_gpupreagg *kgpreagg,
 			atomicAdd(&kgpreagg->nitems_real, count);
 			atomicAdd(&kgpreagg->nitems_filtered, count - nvalids);
 		}
+		/* move to the next window */
+		src_base += get_global_size();
 	}
-
+	/* save the current execution context */
+	if (get_local_id() == 0)
+		my_suspend->r.src_base = src_base;
 	/* write back error status if any */
 	kern_writeback_error_status(&kgpreagg->kerror, &kcxt.e);
 }
@@ -439,12 +561,17 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 	cl_uint			part_sz;
 	cl_uint			n_parts;
 	cl_uint			count;
-	cl_uint			offset;
 	cl_uint			part_index = 0;
 	cl_uint			line_index = 0;
 	cl_bool			thread_is_valid = false;
+#if GPUPREAGG_DEVICE_PROJECTION_NFIELDS > 0
+	Datum			tup_values[GPUPREAGG_DEVICE_PROJECTION_NFIELDS];
+	cl_bool			tup_isnull[GPUPREAGG_DEVICE_PROJECTION_NFIELDS];
+#else
+	Datum		   *tup_values = NULL;
+	cl_bool		   *tup_isnull = NULL;
+#endif
 	gpupreaggSuspendContext *my_suspend;
-	__shared__ cl_uint	base;
 
 	assert(kds_src->format == KDS_FORMAT_BLOCK &&
 		   kds_slot->format == KDS_FORMAT_SLOT);
@@ -461,8 +588,8 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 	my_suspend = KERN_GPUPREAGG_SUSPEND_CONTEXT(kgpreagg, get_group_id());
 	if (kgpreagg->resume_context)
 	{
-		part_index = my_suspend->part_index;
-		line_index = my_suspend->line_index;
+		part_index = my_suspend->b.part_index;
+		line_index = my_suspend->b.line_index;
 	}
 	__syncthreads();
 
@@ -487,10 +614,9 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 			HeapTupleHeaderData *htup = NULL;
 			ItemIdData *curr_lpp = NULL;
 			cl_uint		slot_index;
-			cl_bool	   *slot_isnull;
-			Datum	   *slot_values;
 			cl_bool		rc = false;
 
+			kcxt.vlpos = kcxt.vlbuf;		/* rewind */
 			if (thread_is_valid && part_id < kds_src->nitems)
 			{
 				pg_page = KERN_DATA_STORE_BLOCK_PGPAGE(kds_src, part_id);
@@ -516,64 +642,43 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 			/* evaluation of the qualifier */
 #ifdef GPUPREAGG_HAS_OUTER_QUALS
 			if (htup)
+			{
 				rc = gpuscan_quals_eval(&kcxt, kds_src, &t_self, htup);
+				kcxt.vlpos = kcxt.vlbuf;		/* rewind */
+			}
 			/* bailout if any errors */
 			if (__syncthreads_count(kcxt.e.errcode) > 0)
 				goto out;
 #else
-			rc = true;
+			rc = (htup != NULL);
 #endif
 			/* allocation of the kds_slot buffer */
-			offset = pgstromStairlikeBinaryCount(htup && rc, &nvalids);
+			slot_index = pgstromStairlikeBinaryCount(rc, &nvalids);
 			if (nvalids > 0)
 			{
-				while (get_local_id() == 0)
+				cl_uint		extra_sz = 0;
+
+				if (rc)
 				{
-					cl_uint		old_nitems = kds_slot->nitems;
-					cl_uint		new_nitems = old_nitems + nvalids;
-					cl_uint		cur_nitems;
-
-					if (new_nitems > kds_slot->nrooms)
-					{
-						base = UINT_MAX;
-						break;
-					}
-					cur_nitems = atomicCAS(&kds_slot->nitems,
-										   old_nitems, new_nitems);
-					if (cur_nitems == old_nitems)
-					{
-						base = old_nitems;
-						break;
-					}
-				}
-				__syncthreads();
-
-				/*
-				 * No more space on the kds_slot buffer, so suspend the kernel
-				 * and run reduction operations earlier.
-				 */
-				if (base == UINT_MAX)
-				{
-					if (get_local_id() == 0)
-						atomicAdd(&kgpreagg->suspend_count, 1);
-					goto out;
-				}
-
-				slot_index = base + offset;
-				if (htup && rc)
-				{
-					assert(slot_index < kds_slot->nrooms);
-					slot_values = KERN_DATA_STORE_VALUES(kds_slot, slot_index);
-					slot_isnull = KERN_DATA_STORE_ISNULL(kds_slot, slot_index);
-
 					gpupreagg_projection_row(&kcxt,
 											 kds_src,
 											 htup,
-											 slot_values,
-											 slot_isnull);
+											 tup_values,
+											 tup_isnull,
+											 &extra_sz);
 				}
 				/* bailout if any errors */
 				if (__syncthreads_count(kcxt.e.errcode) > 0)
+					goto out;
+
+				if (!gpupreagg_setup_common(&kcxt,
+											kgpreagg,
+											kds_slot,
+											nvalids,
+											rc ? slot_index : UINT_MAX,
+											tup_values,
+											tup_isnull,
+											extra_sz))
 					goto out;
 			}
 			/* update statistics */
@@ -603,8 +708,8 @@ gpupreagg_setup_block(kern_gpupreagg *kgpreagg,
 out:
 	if (get_local_id() == 0)
 	{
-		my_suspend->part_index = part_index;
-		my_suspend->line_index = line_index;
+		my_suspend->b.part_index = part_index;
+		my_suspend->b.line_index = line_index;
 	}
 	/* write back error status if any */
 	kern_writeback_error_status(&kgpreagg->kerror, &kcxt.e);
@@ -625,11 +730,16 @@ gpupreagg_setup_column(kern_gpupreagg *kgpreagg,
 	cl_uint			src_base;
 	cl_uint			src_index;
 	cl_uint			slot_index;
-	cl_uint			offset;
 	cl_uint			count;
 	cl_uint			nvalids;
-	Datum		   *slot_values;
-	cl_bool		   *slot_isnull;
+#if GPUPREAGG_DEVICE_PROJECTION_NFIELDS > 0
+	Datum			tup_values[GPUPREAGG_DEVICE_PROJECTION_NFIELDS];
+	cl_bool			tup_isnull[GPUPREAGG_DEVICE_PROJECTION_NFIELDS];
+#else
+	Datum		   *tup_values = NULL;
+	cl_bool		   *tup_isnull = NULL;
+#endif
+	gpupreaggSuspendContext *my_suspend;
 	cl_bool			rc;
 	__shared__ cl_uint	base;
 
@@ -637,15 +747,23 @@ gpupreagg_setup_column(kern_gpupreagg *kgpreagg,
 		   kds_slot->format == KDS_FORMAT_SLOT);
 	INIT_KERNEL_CONTEXT(&kcxt, gpupreagg_setup_column, kparams);
 
-	for (src_base = get_global_base();
-		 src_base < src_nitems;
-		 src_base += get_global_size())
+	/* resume kernel from the point where suspended, if any */
+	my_suspend = KERN_GPUPREAGG_SUSPEND_CONTEXT(kgpreagg, get_group_id());
+	if (kgpreagg->resume_context)
+		src_base = my_suspend->c.src_base;
+	else
+		src_base = get_global_base();
+	__syncthreads();
+
+	while (src_base < src_nitems)
 	{
+		kcxt.vlpos = kcxt.vlbuf;		/* rewind */
 		src_index = src_base + get_local_id();
 		if (src_index < src_nitems)
 		{
 #ifdef GPUPREAGG_PULLUP_OUTER_SCAN
 			rc = gpuscan_quals_eval_column(&kcxt, kds_src, src_index);
+			kcxt.vlpos = kcxt.vlbuf;	/* rewind */
 #else
 			rc = true;
 #endif
@@ -660,33 +778,34 @@ gpupreagg_setup_column(kern_gpupreagg *kgpreagg,
 			break;
 #endif
 		/* allocation of kds_slot buffer, if any */
-		offset = pgstromStairlikeBinaryCount(rc ? 1 : 0, &nvalids);
+		slot_index = pgstromStairlikeBinaryCount(rc ? 1 : 0, &nvalids);
 		if (nvalids > 0)
 		{
-			if (get_local_id() == 0)
-				base = atomicAdd(&kds_slot->nitems, nvalids);
-			__syncthreads();
-			if (base + nvalids > kds_slot->nrooms)
-			{
-				STROM_SET_ERROR(&kcxt.e, StromError_DataStoreNoSpace);
-				break;
-			}
-			slot_index = base + offset;
+			cl_uint		extra_sz = 0;
+
 			if (rc)
 			{
-				slot_values = KERN_DATA_STORE_VALUES(kds_slot, slot_index);
-				slot_isnull = KERN_DATA_STORE_ISNULL(kds_slot, slot_index);
-
 				gpupreagg_projection_column(&kcxt,
-											kds_src,
-											src_index,
-											slot_values,
-											slot_isnull);
+                                            kds_src,
+                                            src_index,
+                                            tup_values,
+											tup_isnull,
+											&extra_sz);
 			}
+			/* Bailout if any error */
+			if (__syncthreads_count(kcxt.e.errcode) > 0)
+				break;
+			/* common portion */
+			if (!gpupreagg_setup_common(&kcxt,
+										kgpreagg,
+										kds_slot,
+										nvalids,
+										rc ? slot_index : UINT_MAX,
+										tup_values,
+										tup_isnull,
+										extra_sz))
+				break;
 		}
-		/* bailout if any error */
-		if (__syncthreads_count(kcxt.e.errcode) > 0)
-			break;
 		/* update statistics */
 		pgstromStairlikeBinaryCount(rc, &count);
 		if (get_local_id() == 0)
@@ -694,7 +813,12 @@ gpupreagg_setup_column(kern_gpupreagg *kgpreagg,
 			atomicAdd(&kgpreagg->nitems_real, count);
 			atomicAdd(&kgpreagg->nitems_filtered, count - nvalids);
 		}
+		/* move to the next window */
+		src_base += get_global_size();
 	}
+	/* save the current execution context */
+	if (get_local_id() == 0)
+		my_suspend->c.src_base = src_base;
 	/* write back error status if any */
 	kern_writeback_error_status(&kgpreagg->kerror, &kcxt.e);
 }

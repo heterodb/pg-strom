@@ -52,6 +52,7 @@ typedef struct
 	char		   *kern_source;
 	cl_uint			extra_flags;
 	cl_uint			varlena_bufsz;
+	cl_uint			varlena_exprsz;
 	List		   *ccache_refs;	/* referenced columns */
 	List		   *used_params;	/* referenced Const/Param */
 } GpuPreAggInfo;
@@ -81,6 +82,7 @@ form_gpupreagg_info(CustomScan *cscan, GpuPreAggInfo *gpa_info)
 	privs = lappend(privs, makeString(gpa_info->kern_source));
 	privs = lappend(privs, makeInteger(gpa_info->extra_flags));
 	privs = lappend(privs, makeInteger(gpa_info->varlena_bufsz));
+	privs = lappend(privs, makeInteger(gpa_info->varlena_exprsz));
 	privs = lappend(privs, gpa_info->ccache_refs);
 	exprs = lappend(exprs, gpa_info->used_params);
 
@@ -116,6 +118,7 @@ deform_gpupreagg_info(CustomScan *cscan)
 	gpa_info->kern_source = strVal(list_nth(privs, pindex++));
 	gpa_info->extra_flags = intVal(list_nth(privs, pindex++));
 	gpa_info->varlena_bufsz = intVal(list_nth(privs, pindex++));
+	gpa_info->varlena_exprsz = intVal(list_nth(privs, pindex++));
 	gpa_info->ccache_refs = list_nth(privs, pindex++);
 	gpa_info->used_params = list_nth(exprs, eindex++);
 	Assert(pindex == list_length(privs));
@@ -135,6 +138,7 @@ typedef struct
 	cl_bool			combined_gpujoin;
 	cl_bool			terminator_done;
 	cl_int			num_group_keys;
+	cl_uint			varlena_exprsz;
 	TupleTableSlot *gpreagg_slot;	/* Slot reflects tlist_dev (w/o junks) */
 #if PG_VERSION_NUM < 100000
 	List		   *outer_quals;	/* List of ExprState */
@@ -1788,12 +1792,22 @@ replace_expression_by_outerref(Node *node, PathTarget *target_input)
 	{
 		if (equal(node, lfirst(lc)))
 		{
-			return (Node *)makeVar(INDEX_VAR,
-								   resno,
-								   exprType(node),
-                                   exprTypmod(node),
-                                   exprCollation(node),
-                                   0);
+			Var	   *newnode;
+
+			newnode = makeVar(INDEX_VAR,
+							  resno,
+							  exprType(node),
+							  exprTypmod(node),
+							  exprCollation(node),
+							  0);
+			if (IsA(node, Var))
+			{
+				Var	   *varnode = (Var *) node;
+
+				newnode->varnoold  = varnode->varno;
+				newnode->varoattno = varnode->varattno;
+			}
+			return (Node *) newnode;
 		}
 		resno++;
 	}
@@ -2477,22 +2491,12 @@ gpupreagg_build_path_target(PlannerInfo *root,			/* in */
 				return false;
 
 			/*
-			 * NOTE: In case when grouping-key is an expression that is not
-			 * inline data type, outer-scan pullup should be prohibited,
-			 * because we have no varlena buffer to store result of the
-			 * expression.
-			 * Once outer-scan node is separated, expression with varlena
-			 * or indirect data shall be built on the underlying node, thus,
-			 * GpuPreAgg can treat these variables as a simple var-reference.
+			 * If expression cannot execute on device, unable to pull up
+			 * outer scan node. This expression must be calculated on the
+			 * host-side.
 			 */
-			if (!IsA(expr, Var) &&
-				!IsA(expr, Param) &&
-				!IsA(expr, Const) &&
-				(!pgstrom_device_expression(root, expr) ||
-				 !get_typbyval(exprType((Node *) expr))))
-			{
+			if (!pgstrom_device_expression(root, expr))
 				*p_can_pullup_outerscan = false;
-			}
 
 			/* grouping-key should be on the any of input items */
 			j = 0;
@@ -2781,6 +2785,7 @@ __make_tlist_device_projection(Node *node, void *__con)
 		if (IsA(node, Var))
 		{
 			Var	   *varnode = (Var *) node;
+			Var	   *newnode;
 
 			if (varnode->varno != con->outer_scanrelid)
 				elog(ERROR, "Bug? varnode references unknown relid: %s",
@@ -2791,12 +2796,15 @@ __make_tlist_device_projection(Node *node, void *__con)
 				con->outer_refs_expr = bms_add_member(con->outer_refs_expr, k);
 
 			Assert(varnode->varlevelsup == 0);
-			return (Node *) makeVar(INDEX_VAR,
-									varnode->varattno,
-									varnode->vartype,
-									varnode->vartypmod,
-									varnode->varcollid,
-									varnode->varlevelsup);
+			newnode = makeVar(INDEX_VAR,
+							  varnode->varattno,
+							  varnode->vartype,
+							  varnode->vartypmod,
+							  varnode->varcollid,
+							  varnode->varlevelsup);
+			newnode->varnoold  = varnode->varno;
+			newnode->varoattno = varnode->varattno;
+			return (Node *) newnode;
 		}
 	}
 	else
@@ -2806,7 +2814,7 @@ __make_tlist_device_projection(Node *node, void *__con)
 		foreach (lc, con->outer_tlist)
 		{
 			TargetEntry    *tle = lfirst(lc);
-			Var			   *varnode;
+			Var			   *newnode;
 
 			if (equal(node, tle->expr))
 			{
@@ -2815,13 +2823,20 @@ __make_tlist_device_projection(Node *node, void *__con)
 				if (con->in_expression)
 					con->outer_refs_expr = bms_add_member(con->outer_refs_expr,
 														  k);
-				varnode = makeVar(INDEX_VAR,
+				newnode = makeVar(INDEX_VAR,
 								  tle->resno,
 								  exprType((Node *)tle->expr),
 								  exprTypmod((Node *)tle->expr),
 								  exprCollation((Node *)tle->expr),
 								  0);
-				return (Node *)varnode;
+				if (IsA(node, Var))
+				{
+					Var	   *varnode = (Var *) node;
+
+					newnode->varnoold = varnode->varno;
+					newnode->varoattno = varnode->varattno;
+				}
+				return (Node *)newnode;
 			}
 		}
 
@@ -3065,7 +3080,8 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 	appendStringInfoString(
 		&decl,
 		"  void        *addr    __attribute__((unused));\n"
-		"  pg_anytype_t temp    __attribute__((unused));\n");
+		"  pg_anytype_t temp    __attribute__((unused));\n"
+		"  cl_uint      extra_sz = 0;\n");
 
 	/* open relation if GpuPreAgg looks at physical relation */
 	if (outer_scanrelid > 0)
@@ -3289,34 +3305,40 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 			&temp,
 			"\n"
 			"  /* initial attribute %d (%s) */\n"
-			"  temp.%s_v = %s;\n"
-			"  dst_isnull[%d] = temp.%s_v.isnull;\n",
+			"  temp.%s_v = %s;\n",
 			tle->resno, projection_label,
 			dtype->type_name,
-			pgstrom_codegen_expression((Node *)expr, context),
-			tle->resno - 1, dtype->type_name);
+			pgstrom_codegen_expression((Node *)expr, context));
 		if (dtype->type_byval)
 		{
 			appendStringInfo(
 				&temp,
+				"  dst_isnull[%d] = temp.%s_v.isnull;\n"
 				"  if (!temp.%s_v.isnull)\n"
 				"    dst_values[%d] = pg_%s_as_datum(&temp.%s_v.value);\n",
+				tle->resno-1, dtype->type_name,
 				dtype->type_name,
-				tle->resno-1,
-				dtype->type_name,
-				dtype->type_name);
+				tle->resno-1, dtype->type_name, dtype->type_name);
 		}
 		else
 		{
 			appendStringInfo(
 				&temp,
-				"  if (!temp.%s_v.isnull)\n"
-				"    dst_values[%d] = PointerGetDatum(temp.%s_v.value);\n",
-				dtype->type_name,
-				tle->resno-1,
-				dtype->type_name);
+				"  addr = pg_%s_datum_store(kcxt,temp.%s_v);\n"
+				"  dst_isnull[%d] = !addr;\n"
+				"  if (addr)\n"
+				"  {\n"
+				"    dst_values[%d] = PointerGetDatum(addr);\n"
+				"    if (addr >= kcxt->vlbuf && addr < kcxt->vlpos)\n"
+				"      extra_sz += MAXALIGN(%s);\n"
+				"  }\n",
+				dtype->type_name, dtype->type_name,
+				tle->resno - 1,
+				tle->resno - 1,
+				dtype->type_length > 0
+				? psprintf("sizeof(temp.%s_v.value)", dtype->type_name)
+				: "VARSIZE_ANY(addr)");
 		}
-
 		if (null_const_value)
 		{
 			appendStringInfo(
@@ -3342,9 +3364,12 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 		"                         kern_data_store *kds_src,\n"
 		"                         HeapTupleHeaderData *htup,\n"
 		"                         Datum *dst_values,\n"
-		"                         cl_char *dst_isnull)\n"
+		"                         cl_char *dst_isnull,\n"
+		"                         cl_uint *p_extra_sz)\n"
 		"{\n"
 		"%s\n%s"
+		"  if (p_extra_sz)\n"
+		"    *p_extra_sz = extra_sz;\n"
 		"}\n\n"
 		"#ifdef GPUPREAGG_COMBINED_JOIN\n"
 		"STATIC_FUNCTION(void)\n"
@@ -3355,6 +3380,7 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 		"                          cl_char *dst_isnull)\n"
 		"{\n"
 		"%s\n%s"
+		"  assert(extra_sz == 0);\n"
 		"}\n"
 		"#endif /* GPUPREAGG_COMBINED_JOIN */\n\n"
 		"STATIC_FUNCTION(void)\n"
@@ -3362,9 +3388,12 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 		"                            kern_data_store *kds_src,\n"
 		"                            cl_uint src_index,\n"
 		"                            Datum *dst_values,\n"
-		"                            cl_char *dst_isnull)\n"
+		"                            cl_char *dst_isnull,\n"
+		"                            cl_uint *p_extra_sz)\n"
 		"{\n"
 		"%s\n%s"
+		"  if (p_extra_sz)\n"
+		"    *p_extra_sz = extra_sz;\n"
 		"}\n\n",
 		decl.data,
 		tbody.data,
@@ -3871,6 +3900,9 @@ gpupreagg_codegen(codegen_context *context,
 	gpupreagg_codegen_projection_row(&body, context, root, tlist_alt,
 									 outer_refs_any, outer_refs_expr,
 									 cscan->scan.scanrelid, outer_tlist);
+	gpa_info->varlena_bufsz = context->varlena_bufsz;
+	gpa_info->varlena_exprsz = context->varlena_exprsz;
+
 	/* remove junk entries for tlist_fallback */
 	foreach (lc, tlist_alt)
 	{
@@ -3969,6 +4001,9 @@ assign_gpupreagg_session_info(StringInfo buf, GpuTaskState *gts)
 		appendStringInfo(buf, "#define GPUPREAGG_HAS_OUTER_QUALS 1\n");
 	if (gpas->combined_gpujoin)
 		appendStringInfo(buf, "#define GPUPREAGG_COMBINED_JOIN 1\n");
+
+	appendStringInfo(buf, "#define GPUPREAGG_DEVICE_PROJECTION_NFIELDS %d\n",
+					 gpas->kds_slot_head->ncols);
 }
 
 /*
@@ -4035,7 +4070,8 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 	gpas->gts.cb_process_task    = gpupreagg_process_task;
 	gpas->gts.cb_release_task    = gpupreagg_release_task;
 
-	gpas->num_group_keys     = gpa_info->num_group_keys;
+	gpas->num_group_keys	= gpa_info->num_group_keys;
+	gpas->varlena_exprsz	= gpa_info->varlena_exprsz;
 
 	/* initialization of the outer relation */
 	if (outerPlan(cscan))
@@ -4560,6 +4596,7 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 	size_t			kds_slot_length;
 	CUdeviceptr		m_deviceptr;
 	CUresult		rc;
+	cl_int			sm_count;
 	Size			head_sz;
 	Size			suspend_sz = 0;
 	Size			row_inval_sz = 0;
@@ -4577,7 +4614,6 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 		if (pds_src->kds.format == KDS_FORMAT_BLOCK)
 		{
 			struct NVMEScanState *nvme_sstate;
-			cl_int		sm_count;
 
 			nvme_sstate = gpas->combined_gpujoin
 				? ((GpuTaskState *)outerPlanState(gpas))->nvme_sstate
@@ -4596,17 +4632,12 @@ gpupreagg_create_task(GpuPreAggState *gpas,
 			 */
 			kds_slot_nrooms = 1.5 * (double)(kds_slot_nrooms *
 											 nrows_per_block);
-
-			/*
-			 * KDS_FORMAT_BLOCK also needs to have extra buffer for suspend-
-			 * resume if and when loaded PDS contained more rows then
-			 * estimation (with margin). It may happen if length of records
-			 * are very variable thus 'average' is not reliable.
-			 */
-			sm_count = devAttrs[gcontext->cuda_dindex].MULTIPROCESSOR_COUNT;
-			suspend_sz = STROMALIGN(sizeof(gpuscanSuspendContext) *
-									GPUKERNEL_MAX_SM_MULTIPLICITY * sm_count);
 		}
+		/* Extra buffer for suspend resume */
+		sm_count = devAttrs[gcontext->cuda_dindex].MULTIPROCESSOR_COUNT;
+		suspend_sz = STROMALIGN(sizeof(gpuscanSuspendContext) *
+								GPUKERNEL_MAX_SM_MULTIPLICITY * sm_count);
+
 		kds_slot_length = KDS_CALCULATE_SLOT_LENGTH(gpa_tupdesc->natts,
 													kds_slot_nrooms);
 	}
@@ -5388,6 +5419,11 @@ resume_kernel:
 			gpreagg->kds_slot = (kern_data_store *) m_kds_slot;
 			m_kds_slot = 0UL;
 		}
+		retval = 0;
+	}
+	else
+	{
+		/* raise an error */
 		retval = 0;
 	}
 out_of_resource:

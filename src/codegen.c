@@ -2351,6 +2351,7 @@ codegen_expression_walker(codegen_context *context,
 			varlena_sz = VARSIZE_ANY_EXHDR(con->constvalue);
 		else
 			varlena_sz = 0;
+		context->varlena_exprsz = 0;
 	}
 	else if (IsA(node, Param))
 	{
@@ -2382,6 +2383,7 @@ codegen_expression_walker(codegen_context *context,
 		appendStringInfo(&context->str, "KPARAM_%u", index);
 		context->param_refs = bms_add_member(context->param_refs, index);
 		varlena_sz = -1;	/* unknown */
+		context->varlena_exprsz = 0;
 	}
 	else if (IsA(node, Var))
 	{
@@ -2438,15 +2440,32 @@ codegen_expression_walker(codegen_context *context,
 		if (dtype->type_length < 0)
 		{
 			PlannerInfo	   *root = context->root;
-			RangeTblEntry  *rte = root->simple_rte_array[var->varno];
+			RelOptInfo	   *rel;
 
-			if (rte->rtekind == RTE_RELATION)
-				varlena_sz = get_attavgwidth(rte->relid, var->varattno);
-			else
-				varlena_sz = -1;	/* unknown */
+			varlena_sz = -1;
+			if (var->varno == INDEX_VAR)
+			{
+				if (var->varnoold < root->simple_rel_array_size)
+				{
+					rel = root->simple_rel_array[var->varnoold];
+					if (var->varoattno >= rel->min_attr &&
+						var->varoattno <= rel->max_attr)
+						varlena_sz = rel->attr_widths[var->varoattno -
+													  rel->min_attr];
+				}
+			}
+			else if (var->varno < root->simple_rel_array_size)
+			{
+				rel = root->simple_rel_array[var->varno];
+				if (var->varattno >= rel->min_attr &&
+					var->varattno <= rel->max_attr)
+					varlena_sz = rel->attr_widths[var->varattno -
+												  rel->min_attr];
+			}
 		}
 		else
 			varlena_sz = 0;
+		context->varlena_exprsz = 0;
 	}
 	else if (IsA(node, FuncExpr))
 	{
@@ -2461,6 +2480,7 @@ codegen_expression_walker(codegen_context *context,
 				 format_procedure(func->funcid));
 		pgstrom_devfunc_track(context, dfunc);
 		varlena_sz = codegen_function_expression(context, dfunc, func->args);
+		context->varlena_exprsz = varlena_sz;
 	}
 	else if (IsA(node, OpExpr) ||
 			 IsA(node, DistinctExpr))
@@ -2476,6 +2496,7 @@ codegen_expression_walker(codegen_context *context,
 				 format_procedure(dfunc->func_oid));
 		pgstrom_devfunc_track(context, dfunc);
 		varlena_sz = codegen_function_expression(context, dfunc, op->args);
+		context->varlena_exprsz = varlena_sz;
 	}
 	else if (IsA(node, NullTest))
 	{
@@ -2502,6 +2523,7 @@ codegen_expression_walker(codegen_context *context,
 		codegen_expression_walker(context, (Node *) nulltest->arg, NULL);
 		appendStringInfoChar(&context->str, ')');
 		varlena_sz = 0;
+		context->varlena_exprsz = 0;
 	}
 	else if (IsA(node, BooleanTest))
 	{
@@ -2541,6 +2563,7 @@ codegen_expression_walker(codegen_context *context,
 		codegen_expression_walker(context, (Node *) booltest->arg, NULL);
 		appendStringInfoChar(&context->str, ')');
 		varlena_sz = 0;
+		context->varlena_exprsz = 0;
 	}
 	else if (IsA(node, BoolExpr))
 	{
@@ -2577,10 +2600,12 @@ codegen_expression_walker(codegen_context *context,
 		else
 			elog(ERROR, "unrecognized boolop: %d", (int) b->boolop);
 		varlena_sz = 0;
+		context->varlena_exprsz = 0;
 	}
 	else if (IsA(node, CoalesceExpr))
 	{
 		CoalesceExpr   *coalesce = (CoalesceExpr *) node;
+		int				varlena_exprsz = 0;
 
 		dtype = pgstrom_devtype_lookup(coalesce->coalescetype);
 		if (!dtype)
@@ -2601,12 +2626,15 @@ codegen_expression_walker(codegen_context *context,
 			appendStringInfo(&context->str, ", ");
 			codegen_expression_walker(context, expr, &vl_width);
 			varlena_sz = Max(varlena_sz, vl_width);
+			varlena_exprsz = Max(varlena_exprsz, context->varlena_exprsz);
 		}
 		appendStringInfo(&context->str, ")");
+		context->varlena_exprsz = varlena_exprsz;
 	}
 	else if (IsA(node, MinMaxExpr))
 	{
 		MinMaxExpr	   *minmax = (MinMaxExpr *) node;
+		int				varlena_exprsz = 0;
 
 		dtype = pgstrom_devtype_lookup(minmax->minmaxtype);
 		if (!dtype)
@@ -2641,8 +2669,10 @@ codegen_expression_walker(codegen_context *context,
 			appendStringInfo(&context->str, ", ");
 			codegen_expression_walker(context, expr, &vl_width);
 			varlena_sz = Max(varlena_sz, vl_width);
+			varlena_exprsz = Max(varlena_exprsz, context->varlena_exprsz);
 		}
 		appendStringInfoChar(&context->str, ')');
+		context->varlena_exprsz = varlena_exprsz;
 	}
 	else if (IsA(node, RelabelType))
 	{
@@ -2661,7 +2691,8 @@ codegen_expression_walker(codegen_context *context,
 		CaseExpr   *caseexpr = (CaseExpr *) node;
 		ListCell   *cell;
 		Oid			type_oid;
-		int			vl_width;
+		int			__varlena_sz = 0;
+		int			varlena_exprsz = 0;
 
 		if (caseexpr->arg)
 		{
@@ -2689,8 +2720,9 @@ codegen_expression_walker(codegen_context *context,
 				appendStringInfo(&context->str, ", ");
 				codegen_expression_walker(context,
 										  (Node *)caseexpr->defresult,
-										  &vl_width);
-				varlena_sz = Max(varlena_sz, vl_width);
+										  &__varlena_sz);
+				varlena_sz = Max(varlena_sz, __varlena_sz);
+				varlena_exprsz = Max(varlena_exprsz, context->varlena_exprsz);
 			}
 			foreach (cell, caseexpr->args)
 			{
@@ -2716,10 +2748,12 @@ codegen_expression_walker(codegen_context *context,
 				appendStringInfo(&context->str, ", ");
 				codegen_expression_walker(context,
 										  (Node *)casewhen->result,
-										  &vl_width);
-				varlena_sz = Max(varlena_sz, vl_width);
+										  &__varlena_sz);
+				varlena_sz = Max(varlena_sz, __varlena_sz);
+				varlena_exprsz = Max(varlena_exprsz, context->varlena_exprsz);
 			}
 			appendStringInfo(&context->str, ")");
+			context->varlena_exprsz = varlena_exprsz;
 		}
 		else
 		{
@@ -2733,14 +2767,16 @@ codegen_expression_walker(codegen_context *context,
 				codegen_expression_walker(context,
 										  (Node *)casewhen->expr, NULL);
 				appendStringInfo(&context->str, ") ? (");
-				codegen_expression_walker(context,
-										  (Node *)casewhen->result, &vl_width);
+				codegen_expression_walker(context, (Node *)casewhen->result,
+										  &__varlena_sz);
+				varlena_sz = Max(varlena_sz, __varlena_sz);
+				varlena_exprsz = Max(varlena_exprsz, context->varlena_exprsz);
 				appendStringInfo(&context->str, ") : (");
-				varlena_sz = Max(varlena_sz, vl_width);
 			}
-			codegen_expression_walker(context,
-									  (Node *)caseexpr->defresult, &vl_width);
-			varlena_sz = Max(varlena_sz, vl_width);
+			codegen_expression_walker(context, (Node *)caseexpr->defresult,
+									  &__varlena_sz);
+			varlena_sz = Max(varlena_sz, __varlena_sz);
+			varlena_exprsz = Max(varlena_exprsz, context->varlena_exprsz);
 			foreach (cell, caseexpr->args)
 				appendStringInfo(&context->str, ")");
 		}
@@ -2777,6 +2813,7 @@ codegen_expression_walker(codegen_context *context,
 						 dtype->type_align);
 		context->extra_flags |= DEVKERNEL_NEEDS_MATRIX;
 		varlena_sz = 0;
+		context->varlena_exprsz = 0;
 	}
 	else
 		elog(ERROR, "Bug? unsupported expression: %s", nodeToString(node));
@@ -2847,6 +2884,7 @@ pgstrom_codegen_expression(Node *expr, codegen_context *context)
 	walker_context.pseudo_tlist = context->pseudo_tlist;
 	walker_context.extra_flags = context->extra_flags;
 	walker_context.varlena_bufsz = context->varlena_bufsz;
+	walker_context.varlena_exprsz = 0;
 
 	if (IsA(expr, List))
 	{
@@ -2876,6 +2914,7 @@ pgstrom_codegen_expression(Node *expr, codegen_context *context)
 	/* no need to write back xxx_label fields because read-only */
 	context->extra_flags = walker_context.extra_flags;
 	context->varlena_bufsz = walker_context.varlena_bufsz;
+	context->varlena_exprsz = walker_context.varlena_exprsz;
 
 	return walker_context.str.data;
 }
@@ -2995,13 +3034,28 @@ device_expression_walker(device_expression_walker_context *con,
 		if (dtype->type_length < 0)
 		{
 			PlannerInfo	   *root = con->root;
-			RangeTblEntry  *rte = root->simple_rte_array[var->varno];
+			RelOptInfo	   *rel;
 
-			if (rte->rtekind == RTE_RELATION)
-				varlena_sz = get_attavgwidth(rte->relid, var->varattno);
-			else
-				varlena_sz = -1;	/* unknown */
-			elog(INFO, "att %s of rel %s: avgwidth=%d", get_attname(rte->relid, var->varattno), get_rel_name(rte->relid), varlena_sz);
+			varlena_sz = -1;	/* unknown, if no table statistics */
+			if (var->varno == INDEX_VAR)
+			{
+				if (var->varnoold < root->simple_rel_array_size)
+				{
+					rel = root->simple_rel_array[var->varnoold];
+					if (var->varoattno >= rel->min_attr &&
+						var->varoattno <= rel->max_attr)
+						varlena_sz = rel->attr_widths[var->varoattno -
+													  rel->min_attr];
+				}
+			}
+			else if (var->varno < root->simple_rel_array_size)
+			{
+				rel = root->simple_rel_array[var->varno];
+				if (var->varattno >= rel->min_attr &&
+					var->varattno <= rel->max_attr)
+					varlena_sz = rel->attr_widths[var->varattno -
+												  rel->min_attr];
+			}
 		}
 		else
 			varlena_sz = 0;

@@ -978,6 +978,8 @@ typedef struct {
 	List	   *pseudo_tlist;	/* pseudo tlist expression, if any */
 	int			extra_flags;	/* external libraries to be included */
 	int			varlena_bufsz;	/* required size of temporary varlena buffer */
+	int			varlena_exprsz;	/* required size to save this expression
+								 * if it is a varlena datum */
 } codegen_context;
 
 extern void pgstrom_codegen_typeoid_declarations(StringInfo buf);

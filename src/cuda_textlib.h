@@ -561,6 +561,7 @@ pgfn_textcat(kern_context *kcxt, pg_text_t arg1, pg_text_t arg2)
 	pos = (char *)INTALIGN(kcxt->vlpos);
 	if (!PTR_ON_VLBUF(kcxt,pos,VARHDRSZ + len1 + len2))
 	{
+		printf("gid=%u len1=%d len2=%d\n", get_global_id(), len1, len2);
 		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 		result.isnull = true;
 		return result;

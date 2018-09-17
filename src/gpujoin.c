@@ -3944,8 +3944,7 @@ gpujoin_codegen_projection(StringInfo source,
 		"                   kern_data_store *kds_dst,\n"
 		"                   Datum *tup_values,\n"
 		"                   cl_bool *tup_isnull,\n"
-		"                   cl_bool *use_extra_buf,\n"
-		"                   cl_uint *p_extra_len)\n"
+		"                   cl_uint *tup_extra_sz)\n"
 		"{\n"
 		"  HeapTupleHeaderData *htup    __attribute__((unused));\n"
 		"  kern_data_store *kds_in      __attribute__((unused));\n"
@@ -3953,12 +3952,11 @@ gpujoin_codegen_projection(StringInfo source,
 		"  cl_uint          offset      __attribute__((unused));\n"
 		"  cl_uint          len         __attribute__((unused));\n"
 		"  void            *addr        __attribute__((unused));\n"
-		"  cl_uint          extra_len = 0;\n"
 		"  pg_anytype_t     temp        __attribute__((unused));\n"
 		"\n"
-		"  if (use_extra_buf)\n"
-		"    memset(use_extra_buf, 0, sizeof(cl_bool) *\n"
-		"                             GPUJOIN_DEVICE_PROJECTION_NFIELDS);\n"
+		"  if (tup_extra_sz)\n"
+		"    memset(tup_extra_sz, 0,\n"
+		"           sizeof(cl_uint) * GPUJOIN_DEVICE_PROJECTION_NFIELDS);\n"
 		"\n");
 
 	for (depth=0; depth <= gj_info->num_rels; depth++)
@@ -4096,9 +4094,12 @@ gpujoin_codegen_projection(StringInfo source,
 					"      tup_isnull[%d] = false;\n"
 					"      tup_values[%d] = PointerGetDatum(addr);\n"
 					"      memcpy(addr, &t_self, sizeof(t_self));\n"
+					"      if (tup_extra_sz)\n"
+					"        tup_extra_sz[%d] = MAXALIGN(sizeof(t_self));\n"
 					"      kcxt->vlpos += MAXALIGN(sizeof(t_self));\n"
 					"    }\n",
 					NameStr(attr->attname),
+					tle->resno - 1,
 					tle->resno - 1,
 					tle->resno - 1,
 					tle->resno - 1);
@@ -4368,12 +4369,14 @@ gpujoin_codegen_projection(StringInfo source,
 				"  if (addr)\n"
 				"  {\n"
 				"    tup_values[%d] = PointerGetDatum(addr);\n"
-				"    if (addr >= kcxt->vlbuf && addr < kcxt->vlpos)\n"
-				"      extra_len += MAXALIGN(%s);\n"
+				"    if (tup_extra_sz &&\n"
+				"        addr >= kcxt->vlbuf && addr < kcxt->vlpos)\n"
+				"      tup_extra_sz[%d] = MAXALIGN(%s);\n"
 				"  }\n",
 				dtype->type_name,
 				pgstrom_codegen_expression((Node *)tle->expr, context),
 				dtype->type_name, dtype->type_name,
+				tle->resno - 1,
 				tle->resno - 1,
 				tle->resno - 1,
 				dtype->type_length > 0
@@ -4383,10 +4386,6 @@ gpujoin_codegen_projection(StringInfo source,
 				context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
 		}
 	}
-	/* how much extra field required? */
-	appendStringInfoString(
-		&body,
-		"  *p_extra_len = extra_len;\n");
 	/* add parameter declarations */
 	pgstrom_codegen_param_declarations(source, context);
 	/* merge with declaration part */
