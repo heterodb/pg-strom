@@ -448,7 +448,10 @@ setup_nvme_distance_map(void)
 	dirname = "/sys/class/nvme";
 	dir = opendir(dirname);
 	if (!dir)
-		elog(ERROR, "failed on opendir('%s'): %m", dirname);
+	{
+		elog(LOG, "no nvme devices are installed");
+		return;
+	}
 	while ((dent = readdir(dir)) != NULL)
 	{
 		if (strncmp("nvme", dent->d_name, 4) != 0)
