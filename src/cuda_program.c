@@ -1429,7 +1429,7 @@ cudaProgramBuilderMain(Datum arg)
 	/* Init CUDA run-time compiler library */
 	rc = nvrtcVersion(&major, &minor);
 	if (rc != NVRTC_SUCCESS)
-		elog(ERROR, "failed on nvrtcVersion: %s", nvrtcGetErrorString(rc));
+		elog(ERROR, "failed on nvrtcVersion: %d", (int)rc);
 	elog(LOG, "CUDA Program Builder-%d with NVRTC version %d.%d",
 		 builder_id, major, minor);
 
