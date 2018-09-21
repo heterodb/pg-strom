@@ -52,7 +52,6 @@ typedef struct
 	char		   *kern_source;
 	cl_uint			extra_flags;
 	cl_uint			varlena_bufsz;
-	cl_uint			varlena_exprsz;
 	List		   *ccache_refs;	/* referenced columns */
 	List		   *used_params;	/* referenced Const/Param */
 } GpuPreAggInfo;
@@ -82,7 +81,6 @@ form_gpupreagg_info(CustomScan *cscan, GpuPreAggInfo *gpa_info)
 	privs = lappend(privs, makeString(gpa_info->kern_source));
 	privs = lappend(privs, makeInteger(gpa_info->extra_flags));
 	privs = lappend(privs, makeInteger(gpa_info->varlena_bufsz));
-	privs = lappend(privs, makeInteger(gpa_info->varlena_exprsz));
 	privs = lappend(privs, gpa_info->ccache_refs);
 	exprs = lappend(exprs, gpa_info->used_params);
 
@@ -118,7 +116,6 @@ deform_gpupreagg_info(CustomScan *cscan)
 	gpa_info->kern_source = strVal(list_nth(privs, pindex++));
 	gpa_info->extra_flags = intVal(list_nth(privs, pindex++));
 	gpa_info->varlena_bufsz = intVal(list_nth(privs, pindex++));
-	gpa_info->varlena_exprsz = intVal(list_nth(privs, pindex++));
 	gpa_info->ccache_refs = list_nth(privs, pindex++);
 	gpa_info->used_params = list_nth(exprs, eindex++);
 	Assert(pindex == list_length(privs));
@@ -138,7 +135,6 @@ typedef struct
 	cl_bool			combined_gpujoin;
 	cl_bool			terminator_done;
 	cl_int			num_group_keys;
-	cl_uint			varlena_exprsz;
 	TupleTableSlot *gpreagg_slot;	/* Slot reflects tlist_dev (w/o junks) */
 #if PG_VERSION_NUM < 100000
 	List		   *outer_quals;	/* List of ExprState */
@@ -222,7 +218,6 @@ static bool		gpupreagg_build_path_target(PlannerInfo *root,
 											Node **p_havingQual,
 											bool *p_can_pullup_outerscan);
 static char	   *gpupreagg_codegen(codegen_context *context,
-								  PlannerInfo *root,
 								  CustomScan *cscan,
 								  List *tlist_dev,
 								  List *outer_tlist,
@@ -2701,7 +2696,6 @@ PlanGpuPreAggPath(PlannerInfo *root,
 							DEVKERNEL_NEEDS_GPUPREAGG |
 							DEVKERNEL_NEEDS_GPUSCAN);
 	kern_source = gpupreagg_codegen(&context,
-									root,
 									cscan,
 									tlist_dev,
 									outer_tlist,
@@ -3053,13 +3047,13 @@ codegen_projection_partial_funcion(FuncExpr *f,
 static void
 gpupreagg_codegen_projection_row(StringInfo kern,
 								 codegen_context *context,
-								 PlannerInfo *root,
 								 List *tlist_alt,
 								 Bitmapset *outer_refs_any,
 								 Bitmapset *outer_refs_expr,
 								 Index outer_scanrelid,
 								 List *outer_tlist)
 {
+	PlannerInfo	   *root = context->root;
 	StringInfoData	decl;
 	StringInfoData	tbody;
 	StringInfoData	sbody;
@@ -3309,6 +3303,7 @@ gpupreagg_codegen_projection_row(StringInfo kern,
 			tle->resno, projection_label,
 			dtype->type_name,
 			pgstrom_codegen_expression((Node *)expr, context));
+
 		if (dtype->type_byval)
 		{
 			appendStringInfo(
@@ -3830,7 +3825,6 @@ gpupreagg_codegen_nogroup_calc(StringInfo kern,
  */
 static char *
 gpupreagg_codegen(codegen_context *context,
-				  PlannerInfo *root,
 				  CustomScan *cscan,
 				  List *tlist_dev,
 				  List *outer_tlist,
@@ -3897,11 +3891,14 @@ gpupreagg_codegen(codegen_context *context,
 	Assert(list_length(tlist_alt) == list_length(tlist_dev));
 	Assert(bms_is_subset(outer_refs_expr, outer_refs_any));
 
-	gpupreagg_codegen_projection_row(&body, context, root, tlist_alt,
-									 outer_refs_any, outer_refs_expr,
-									 cscan->scan.scanrelid, outer_tlist);
+	gpupreagg_codegen_projection_row(&body,
+									 context,
+									 tlist_alt,
+									 outer_refs_any,
+									 outer_refs_expr,
+									 cscan->scan.scanrelid,
+									 outer_tlist);
 	gpa_info->varlena_bufsz = context->varlena_bufsz;
-	gpa_info->varlena_exprsz = context->varlena_exprsz;
 
 	/* remove junk entries for tlist_fallback */
 	foreach (lc, tlist_alt)
@@ -4069,9 +4066,7 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 	gpas->gts.cb_next_tuple      = gpupreagg_next_tuple;
 	gpas->gts.cb_process_task    = gpupreagg_process_task;
 	gpas->gts.cb_release_task    = gpupreagg_release_task;
-
 	gpas->num_group_keys	= gpa_info->num_group_keys;
-	gpas->varlena_exprsz	= gpa_info->varlena_exprsz;
 
 	/* initialization of the outer relation */
 	if (outerPlan(cscan))

@@ -484,11 +484,13 @@ pg_numeric_datum_store(kern_context *kcxt,
 					   pg_numeric_t datum)
 {
 	char   *pos;
+	int		maxlen = VARHDRSZ + sizeof(union NumericChoice);
 
 	if (datum.isnull)
 		return NULL;
+
 	pos = (char *)MAXALIGN(kcxt->vlpos);
-	if (!PTR_ON_VLBUF(kcxt, pos, ))
+	if (!PTR_ON_VLBUF(kcxt, pos, maxlen))
 	{
 		STROM_SET_ERROR(&kcxt->e, StromError_CpuReCheck);
 		return NULL;

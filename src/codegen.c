@@ -2351,7 +2351,6 @@ codegen_expression_walker(codegen_context *context,
 			varlena_sz = VARSIZE_ANY_EXHDR(con->constvalue);
 		else
 			varlena_sz = 0;
-		context->varlena_exprsz = 0;
 	}
 	else if (IsA(node, Param))
 	{
@@ -2362,9 +2361,14 @@ codegen_expression_walker(codegen_context *context,
 			elog(ERROR, "codegen: ParamKind is not PARAM_EXTERN: %d",
 				 (int)param->paramkind);
 
-		if (!pgstrom_devtype_lookup_and_track(param->paramtype, context))
+		dtype = pgstrom_devtype_lookup_and_track(param->paramtype, context);
+		if (!dtype)
 			elog(ERROR, "codegen: faied to lookup device type: %s",
 				 format_type_be(param->paramtype));
+		if (dtype->type_length < 0)
+			varlena_sz = -1;	/* unknown */
+		else
+			varlena_sz = 0;
 
 		foreach (cell, context->used_params)
 		{
@@ -2373,7 +2377,7 @@ codegen_expression_walker(codegen_context *context,
 				appendStringInfo(&context->str, "KPARAM_%u", index);
 				context->param_refs =
 					bms_add_member(context->param_refs, index);
-				return;
+				goto out;
 			}
 			index++;
 		}
@@ -2382,14 +2386,11 @@ codegen_expression_walker(codegen_context *context,
 		index = list_length(context->used_params) - 1;
 		appendStringInfo(&context->str, "KPARAM_%u", index);
 		context->param_refs = bms_add_member(context->param_refs, index);
-		varlena_sz = -1;	/* unknown */
-		context->varlena_exprsz = 0;
 	}
 	else if (IsA(node, Var))
 	{
 		Var			   *var = (Var *) node;
 		AttrNumber		varattno = var->varattno;
-		devtype_info   *dtype;
 		ListCell	   *cell;
 
 		dtype = pgstrom_devtype_lookup_and_track(var->vartype, context);
@@ -2465,7 +2466,6 @@ codegen_expression_walker(codegen_context *context,
 		}
 		else
 			varlena_sz = 0;
-		context->varlena_exprsz = 0;
 	}
 	else if (IsA(node, FuncExpr))
 	{
@@ -2478,9 +2478,9 @@ codegen_expression_walker(codegen_context *context,
 		if (!dfunc)
 			elog(ERROR, "codegen: failed to lookup device function: %s",
 				 format_procedure(func->funcid));
+		dtype = dfunc->func_rettype;
 		pgstrom_devfunc_track(context, dfunc);
 		varlena_sz = codegen_function_expression(context, dfunc, func->args);
-		context->varlena_exprsz = varlena_sz;
 	}
 	else if (IsA(node, OpExpr) ||
 			 IsA(node, DistinctExpr))
@@ -2494,9 +2494,9 @@ codegen_expression_walker(codegen_context *context,
 		if (!dfunc)
 			elog(ERROR, "codegen: failed to lookup device function: %s",
 				 format_procedure(dfunc->func_oid));
+		dtype = dfunc->func_rettype;
 		pgstrom_devfunc_track(context, dfunc);
 		varlena_sz = codegen_function_expression(context, dfunc, op->args);
-		context->varlena_exprsz = varlena_sz;
 	}
 	else if (IsA(node, NullTest))
 	{
@@ -2523,7 +2523,6 @@ codegen_expression_walker(codegen_context *context,
 		codegen_expression_walker(context, (Node *) nulltest->arg, NULL);
 		appendStringInfoChar(&context->str, ')');
 		varlena_sz = 0;
-		context->varlena_exprsz = 0;
 	}
 	else if (IsA(node, BooleanTest))
 	{
@@ -2563,7 +2562,6 @@ codegen_expression_walker(codegen_context *context,
 		codegen_expression_walker(context, (Node *) booltest->arg, NULL);
 		appendStringInfoChar(&context->str, ')');
 		varlena_sz = 0;
-		context->varlena_exprsz = 0;
 	}
 	else if (IsA(node, BoolExpr))
 	{
@@ -2600,12 +2598,10 @@ codegen_expression_walker(codegen_context *context,
 		else
 			elog(ERROR, "unrecognized boolop: %d", (int) b->boolop);
 		varlena_sz = 0;
-		context->varlena_exprsz = 0;
 	}
 	else if (IsA(node, CoalesceExpr))
 	{
 		CoalesceExpr   *coalesce = (CoalesceExpr *) node;
-		int				varlena_exprsz = 0;
 
 		dtype = pgstrom_devtype_lookup(coalesce->coalescetype);
 		if (!dtype)
@@ -2617,24 +2613,21 @@ codegen_expression_walker(codegen_context *context,
 		{
 			Node   *expr = (Node *)lfirst(cell);
 			Oid		type_oid = exprType(expr);
-			int		vl_width;
+			int		width;
 
 			if (dtype->type_oid != type_oid)
 				elog(ERROR, "device type mismatch in COALESCE: %s / %s",
 					 format_type_be(dtype->type_oid),
 					 format_type_be(type_oid));
 			appendStringInfo(&context->str, ", ");
-			codegen_expression_walker(context, expr, &vl_width);
-			varlena_sz = Max(varlena_sz, vl_width);
-			varlena_exprsz = Max(varlena_exprsz, context->varlena_exprsz);
+			codegen_expression_walker(context, expr, &width);
+			varlena_sz = Max(varlena_sz, width);
 		}
 		appendStringInfo(&context->str, ")");
-		context->varlena_exprsz = varlena_exprsz;
 	}
 	else if (IsA(node, MinMaxExpr))
 	{
 		MinMaxExpr	   *minmax = (MinMaxExpr *) node;
-		int				varlena_exprsz = 0;
 
 		dtype = pgstrom_devtype_lookup(minmax->minmaxtype);
 		if (!dtype)
@@ -2660,19 +2653,17 @@ codegen_expression_walker(codegen_context *context,
 		{
 			Node   *expr = lfirst(cell);
 			Oid		type_oid = exprType(expr);
-			int		vl_width;
+			int		width;
 
 			if (dtype->type_oid != type_oid)
 				elog(ERROR, "device type mismatch in LEAST/GREATEST: %s / %s",
 					 format_type_be(dtype->type_oid),
 					 format_type_be(exprType(expr)));
 			appendStringInfo(&context->str, ", ");
-			codegen_expression_walker(context, expr, &vl_width);
-			varlena_sz = Max(varlena_sz, vl_width);
-			varlena_exprsz = Max(varlena_exprsz, context->varlena_exprsz);
+			codegen_expression_walker(context, expr, &width);
+			varlena_sz = Max(varlena_sz, width);
 		}
 		appendStringInfoChar(&context->str, ')');
-		context->varlena_exprsz = varlena_exprsz;
 	}
 	else if (IsA(node, RelabelType))
 	{
@@ -2691,8 +2682,7 @@ codegen_expression_walker(codegen_context *context,
 		CaseExpr   *caseexpr = (CaseExpr *) node;
 		ListCell   *cell;
 		Oid			type_oid;
-		int			__varlena_sz = 0;
-		int			varlena_exprsz = 0;
+		int			width;
 
 		if (caseexpr->arg)
 		{
@@ -2713,16 +2703,22 @@ codegen_expression_walker(codegen_context *context,
 					 format_type_be(type_oid));
 			pgstrom_devfunc_track(context, dfunc);
 
+			/* walk on the expression */
+			dtype = pgstrom_devtype_lookup(caseexpr->casetype);
+			if (!dtype)
+                elog(ERROR, "codegen: failed to lookup device type: %s",
+                     format_type_be(caseexpr->casetype));
 			codegen_expression_walker(context,
-									  (Node *)caseexpr->arg, &varlena_sz);
+									  (Node *)caseexpr->arg,
+									  NULL);
 			if (caseexpr->defresult)
 			{
 				appendStringInfo(&context->str, ", ");
 				codegen_expression_walker(context,
 										  (Node *)caseexpr->defresult,
-										  &__varlena_sz);
-				varlena_sz = Max(varlena_sz, __varlena_sz);
-				varlena_exprsz = Max(varlena_exprsz, context->varlena_exprsz);
+										  &width);
+				if (width >= 0)
+					varlena_sz = Max(varlena_sz, width);
 			}
 			foreach (cell, caseexpr->args)
 			{
@@ -2748,35 +2744,40 @@ codegen_expression_walker(codegen_context *context,
 				appendStringInfo(&context->str, ", ");
 				codegen_expression_walker(context,
 										  (Node *)casewhen->result,
-										  &__varlena_sz);
-				varlena_sz = Max(varlena_sz, __varlena_sz);
-				varlena_exprsz = Max(varlena_exprsz, context->varlena_exprsz);
+										  &width);
+				if (width >= 0)
+					varlena_sz = Max(varlena_sz, width);
 			}
 			appendStringInfo(&context->str, ")");
-			context->varlena_exprsz = varlena_exprsz;
 		}
 		else
 		{
+			dtype = pgstrom_devtype_lookup(caseexpr->casetype);
+			if (!dtype)
+				elog(ERROR, "codegen: failed to lookup device type: %s",
+					 format_type_be(caseexpr->casetype));
+
 			foreach (cell, caseexpr->args)
 			{
 				CaseWhen   *casewhen = (CaseWhen *) lfirst(cell);
 
-				Assert(exprType((Node *) casewhen->expr) == BOOLOID);
-				Assert(exprType((Node *) casewhen->result) == caseexpr->casetype);
+				Assert(exprType((Node *)casewhen->expr) == BOOLOID);
+				Assert(exprType((Node *)casewhen->result) == dtype->type_oid);
 				appendStringInfo(&context->str, "EVAL(");
 				codegen_expression_walker(context,
 										  (Node *)casewhen->expr, NULL);
 				appendStringInfo(&context->str, ") ? (");
 				codegen_expression_walker(context, (Node *)casewhen->result,
-										  &__varlena_sz);
-				varlena_sz = Max(varlena_sz, __varlena_sz);
-				varlena_exprsz = Max(varlena_exprsz, context->varlena_exprsz);
+										  &width);
+				if (width >= 0)
+					varlena_sz = Max(varlena_sz, width);
 				appendStringInfo(&context->str, ") : (");
 			}
-			codegen_expression_walker(context, (Node *)caseexpr->defresult,
-									  &__varlena_sz);
-			varlena_sz = Max(varlena_sz, __varlena_sz);
-			varlena_exprsz = Max(varlena_exprsz, context->varlena_exprsz);
+			codegen_expression_walker(context,
+									  (Node *)caseexpr->defresult,
+									  &width);
+			if (width >= 0)
+				varlena_sz = Max(varlena_sz, width);
 			foreach (cell, caseexpr->args)
 				appendStringInfo(&context->str, ")");
 		}
@@ -2813,11 +2814,10 @@ codegen_expression_walker(codegen_context *context,
 						 dtype->type_align);
 		context->extra_flags |= DEVKERNEL_NEEDS_MATRIX;
 		varlena_sz = 0;
-		context->varlena_exprsz = 0;
 	}
 	else
 		elog(ERROR, "Bug? unsupported expression: %s", nodeToString(node));
-
+out:
 	if (p_varlena_sz)
 		*p_varlena_sz = varlena_sz;
 }
@@ -2869,6 +2869,7 @@ char *
 pgstrom_codegen_expression(Node *expr, codegen_context *context)
 {
 	codegen_context	walker_context;
+	int			width;
 
 	initStringInfo(&walker_context.str);
 	walker_context.root = context->root;
@@ -2884,7 +2885,6 @@ pgstrom_codegen_expression(Node *expr, codegen_context *context)
 	walker_context.pseudo_tlist = context->pseudo_tlist;
 	walker_context.extra_flags = context->extra_flags;
 	walker_context.varlena_bufsz = context->varlena_bufsz;
-	walker_context.varlena_exprsz = 0;
 
 	if (IsA(expr, List))
 	{
@@ -2896,7 +2896,7 @@ pgstrom_codegen_expression(Node *expr, codegen_context *context)
 
 	PG_TRY();
 	{
-		codegen_expression_walker(&walker_context, expr, NULL);
+		codegen_expression_walker(&walker_context, expr, &width);
 	}
 	PG_CATCH();
 	{
@@ -2914,8 +2914,19 @@ pgstrom_codegen_expression(Node *expr, codegen_context *context)
 	/* no need to write back xxx_label fields because read-only */
 	context->extra_flags = walker_context.extra_flags;
 	context->varlena_bufsz = walker_context.varlena_bufsz;
-	context->varlena_exprsz = walker_context.varlena_exprsz;
+	/*
+	 * Even if expression itself needs no varlena extra buffer, projection
+	 * code may require the buffer to construct a temporary datum.
+	 * E.g) Numeric datum is encoded to 64bit at the GPU kernel, however,
+	 * projection needs to decode to varlena again.
+	 */
+	if (width == 0)
+	{
+		Oid				type_oid = exprType((Node *) expr);
+		devtype_info   *dtype = pgstrom_devtype_lookup(type_oid);
 
+		context->varlena_bufsz += MAXALIGN(dtype->extra_sz);
+	}
 	return walker_context.str.data;
 }
 
