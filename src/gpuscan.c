@@ -1429,8 +1429,6 @@ PlanGpuScanPath(PlannerInfo *root,
 	pfree(kern.data);
 	varlena_bufsz = Max(varlena_bufsz, context.varlena_bufsz);
 
-	elog(INFO, "varlena bufsz = %zu", varlena_bufsz);
-
 	/* pickup referenced attributes */
 	pull_varattnos((Node *)dev_quals, baserel->relid, &varattnos);
 	pull_varattnos((Node *)host_quals, baserel->relid, &varattnos);

@@ -1131,6 +1131,8 @@ pgstromExecScanChunkParallel(GpuTaskState *gts,
 			if (nr_allocated + nr_blocks >= (cl_long)scan->rs_nblocks)
 				nr_blocks = (cl_long)scan->rs_nblocks - nr_allocated;
 			page = (startblock + nr_allocated) % (cl_long)scan->rs_nblocks;
+			if (page + nr_blocks >= (cl_long)scan->rs_nblocks)
+				nr_blocks = (cl_long)scan->rs_nblocks - page;
 
 			/* should never read the blocks across segment boundary */
 			Assert(nr_blocks > 0 && nr_blocks <= RELSEG_SIZE);
