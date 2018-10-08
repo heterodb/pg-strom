@@ -1746,18 +1746,9 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 	 */
 	if (cscan->custom_scan_tlist != NIL)
 	{
-		TupleDesc		scan_tupdesc;
-
-		scan_tupdesc = ExecCleanTypeFromTL(cscan->custom_scan_tlist, false);
-#if PG_VERSION_NUM < 110000
-		ExecAssignScanType(&gss->gts.css.ss, scan_tupdesc);
-#else
-		/*
-		 * PG11 prohibits to replace only tupdesc of TupleTableSlot,
-		 * so we allocate an entirely new slot with clean tuple-desc.
-		 */
+		TupleDesc		scan_tupdesc
+			= ExecCleanTypeFromTL(cscan->custom_scan_tlist, false);
 		ExecInitScanTupleSlot(estate, &gss->gts.css.ss, scan_tupdesc);
-#endif
 		ExecAssignScanProjectionInfoWithVarno(&gss->gts.css.ss, INDEX_VAR);
 		/* valid @custom_scan_tlist means device projection is required */
 		gss->dev_projection = true;
@@ -1827,9 +1818,7 @@ ExecInitGpuScan(CustomScanState *node, EState *estate, int eflags)
 		gss->base_proj = ExecBuildProjectionInfo(dev_tlist,
 												 econtext,
 												 scan_slot,
-#if PG_VERSION_NUM >= 100000
 												 &gss->gts.css.ss.ps,
-#endif
 												 RelationGetDescr(scan_rel));
 	}
 	else
@@ -2128,9 +2117,9 @@ ExplainGpuScan(CustomScanState *node, List *ancestors, ExplainState *es)
 		ExplainPropertyText("GPU Filter", exprstr, es);
 
 		if (gss->gts.outer_instrument.nloops > 0)
-			ExplainPropertyInt64("Rows Removed by GPU Filter", NULL,
-								 gss->gts.outer_instrument.nfiltered1 /
-								 gss->gts.outer_instrument.nloops, es);
+			ExplainPropertyInteger("Rows Removed by GPU Filter", NULL,
+								   gss->gts.outer_instrument.nfiltered1 /
+								   gss->gts.outer_instrument.nloops, es);
 	}
 	/* BRIN-index properties */
 	pgstromExplainBrinIndexMap(&gss->gts, es, dcontext);

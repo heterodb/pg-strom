@@ -4126,11 +4126,8 @@ ExecInitGpuPreAgg(CustomScanState *node, EState *estate, int eflags)
 	gpas->outer_proj = ExecBuildProjectionInfo(tlist_fallback,
 											   econtext,
 											   gpas->gpreagg_slot,
-#if PG_VERSION_NUM >= 100000
 											   &gpas->gts.css.ss.ps,
-#endif
 											   outer_tupdesc);
-
 	/* Template of kds_slot */
 	length = KDS_CALCULATE_HEAD_LENGTH(gpreagg_tupdesc->natts, false);
 	gpas->kds_slot_head = MemoryContextAllocZero(CurTransactionContext,
@@ -4449,8 +4446,8 @@ ExplainGpuPreAgg(CustomScanState *node, List *ancestors, ExplainState *es)
 			= pg_atomic_read_u64(&gpa_rtstat->num_fallback_rows);
 
 		if (num_fallback_rows > 0)
-			ExplainPropertyInt64("Num of CPU fallback rows",
-								 NULL, num_fallback_rows, es);
+			ExplainPropertyInteger("Num of CPU fallback rows",
+								   NULL, num_fallback_rows, es);
 	}
 }
 

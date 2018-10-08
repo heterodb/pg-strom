@@ -943,11 +943,8 @@ pgstromExecGetBrinIndexMap(GpuTaskState *gts)
 
 				WaitLatch(MyLatch,
 						  WL_LATCH_SET,
-						  -1
-#if PG_VERSION_NUM >= 100000
-						  ,PG_WAIT_EXTENSION
-#endif
-					);
+						  -1,
+						  PG_WAIT_EXTENSION);
 				ResetLatch(MyLatch);
 			}
 		}
@@ -1000,11 +997,11 @@ pgstromExplainBrinIndexMap(GpuTaskState *gts,
 		}
 		else
 		{
-			ExplainPropertyInt64("BRIN fetched", NULL,
-								 pi_state->nblocks -
-								 gts->outer_brin_count, es);
-			ExplainPropertyInt64("BRIN skipped", NULL,
-								 gts->outer_brin_count, es);
+			ExplainPropertyInteger("BRIN fetched", NULL,
+								   pi_state->nblocks -
+								   gts->outer_brin_count, es);
+			ExplainPropertyInteger("BRIN skipped", NULL,
+								   gts->outer_brin_count, es);
 		}
 	}
 }
@@ -1656,14 +1653,14 @@ pgstromExplainOuterScan(GpuTaskState *gts,
 							 outer_plan_width);
 		else
 		{
-			ExplainPropertyFp64("Outer Startup Cost",
-								NULL, outer_startup_cost, 2, es);
-			ExplainPropertyFp64("Outer Total Cost",
-								NULL, outer_total_cost, 2, es);
-			ExplainPropertyFp64("Outer Plan Rows",
-								NULL, outer_plan_rows, 0, es);
-			ExplainPropertyInt64("Outer Plan Width",
-								 NULL, outer_plan_width, es);
+			ExplainPropertyFloat("Outer Startup Cost",
+								 NULL, outer_startup_cost, 2, es);
+			ExplainPropertyFloat("Outer Total Cost",
+								 NULL, outer_total_cost, 2, es);
+			ExplainPropertyFloat("Outer Plan Rows",
+								 NULL, outer_plan_rows, 0, es);
+			ExplainPropertyFloat("Outer Plan Width",
+								 NULL, outer_plan_width, 0, es);
 		}
 	}
 
@@ -1698,13 +1695,13 @@ pgstromExplainOuterScan(GpuTaskState *gts,
 		{
 			if (es->timing)
 			{
-				ExplainPropertyFp64("Outer Actual Startup Time",
-									NULL, startup_sec, 3, es);
-				ExplainPropertyFp64("Outer Actual Total Time",
-									NULL, total_sec, 3, es);
+				ExplainPropertyFloat("Outer Actual Startup Time",
+									 NULL, startup_sec, 3, es);
+				ExplainPropertyFloat("Outer Actual Total Time",
+									 NULL, total_sec, 3, es);
 			}
-			ExplainPropertyFp64("Outer Actual Rows", NULL, rows, 0, es);
-			ExplainPropertyFp64("Outer Actual Loops", NULL, nloops, 0, es);
+			ExplainPropertyFloat("Outer Actual Rows", NULL, rows, 0, es);
+			ExplainPropertyFloat("Outer Actual Loops", NULL, nloops, 0, es);
 		}
 	}
 	else if (es->analyze)
@@ -1715,15 +1712,15 @@ pgstromExplainOuterScan(GpuTaskState *gts,
 		{
 			if (es->timing)
 			{
-				ExplainPropertyFp64("Outer Actual Startup Time",
-									NULL, 0.0, 3, es);
-				ExplainPropertyFp64("Outer Actual Total Time",
-									NULL, 0.0, 3, es);
+				ExplainPropertyFloat("Outer Actual Startup Time",
+									 NULL, 0.0, 3, es);
+				ExplainPropertyFloat("Outer Actual Total Time",
+									 NULL, 0.0, 3, es);
 			}
-			ExplainPropertyFp64("Outer Actual Rows",
-								NULL, 0.0, 0, es);
-			ExplainPropertyFp64("Outer Actual Loops",
-								NULL, 0.0, 0, es);
+			ExplainPropertyFloat("Outer Actual Rows",
+								 NULL, 0.0, 0, es);
+			ExplainPropertyFloat("Outer Actual Loops",
+								 NULL, 0.0, 0, es);
 		}
 	}
 	if (es->format == EXPLAIN_FORMAT_TEXT)
@@ -1741,11 +1738,11 @@ pgstromExplainOuterScan(GpuTaskState *gts,
 		ExplainPropertyText("Outer Scan Filter", temp, es);
 
 		if (gts->outer_instrument.nfiltered1 > 0.0)
-			ExplainPropertyFp64("Rows Removed by Outer Scan Filter",
-								NULL,
-								gts->outer_instrument.nfiltered1 /
-								gts->outer_instrument.nloops,
-								0, es);
+			ExplainPropertyFloat("Rows Removed by Outer Scan Filter",
+								 NULL,
+								 gts->outer_instrument.nfiltered1 /
+								 gts->outer_instrument.nloops,
+								 0, es);
 	}
 	/* properties of BRIN-index */
 	pgstromExplainBrinIndexMap(gts, es, deparse_context);

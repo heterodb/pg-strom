@@ -175,29 +175,11 @@
  *
  * --------------------------------------------------------------------
  */
-#ifdef PG_MIN_VERSION_NUM
-#if PG_VERSION_NUM < PG_MIN_VERSION_NUM
+#if PG_VERSION_NUM < 90600
 #error Base PostgreSQL version is too OLD for this PG-Strom code
 #endif
-#endif	/* PG_MIN_VERSION_NUM */
-
-#ifdef PG_MAX_VERSION_NUM
-#if PG_VERSION_NUM >= PG_MAX_VERSION_NUM
-#error Base PostgreSQL version is too NEW for this PG-Strom code
-#endif
-#endif	/* PG_MAX_VERSION_NUM */
-
 #define PG_MAJOR_VERSION		(PG_VERSION_NUM / 100)
 #define PG_MINOR_VERSION		(PG_VERSION_NUM % 100)
-
-/* inline function is minimum requirement. fortunately, it also
- * become prerequisite of PostgreSQL at v9.6.
- */
-#if PG_VERSION_NUM < 90600
-#ifndef PG_USE_INLINE
-#error PG-Strom expects inline function is supported by compiler
-#endif	/* PG_USE_INLINE */
-#endif
 
 #if SIZEOF_DATUM != 8
 #error PG-Strom expects 64bit platform
@@ -1408,66 +1390,7 @@ extern void show_instrumentation_count(const char *qlabel, int which,
  * Thin abstruction layer across multiple PostgreSQL versions
  *
  * ---------------------------------------------------------------- */
-
-/*
- * MEMO: tupleDesc was re-defined at PG11. Newer version has flexible-
- * length of FormData_pg_attribute on the tail
- */
-#if PG_VERSION_NUM < 110000
-#define tupleDescAttr(tdesc,colidx)		((tdesc)->attrs[(colidx)])
-#else
-#define tupleDescAttr(tdesc,colidx)		(&(tdesc)->attrs[(colidx)])
-#endif
-
-/*
- * MEMO: Naming convension of data access macro on some data types
- * were confused before PG11
- */
-#if PG_VERSION_NUM < 110000
-#define DatumGetRangeTypeP(x)		DatumGetRangeType(x)
-#define PG_GETARG_RANGE_P(x)		PG_GETARG_RANGE(x)
-#define PG_RETURN_RANGE_P(x)		PG_RETURN_RANGE(x)
-
-#define PG_GETARG_ANY_ARRAY_P(x)	PG_GETARG_ANY_ARRAY(x)
-#endif
-
-/*
- * MEMO: PG11 allows to display unit of numerical values if text-format
- */
-#if PG_VERSION_NUM < 110000
-static inline void
-ExplainPropertyInt64(const char *qlabel, const char *unit, int64 value,
-					 ExplainState *es)
-{
-	if (es->format == EXPLAIN_FORMAT_TEXT && unit != NULL)
-	{
-		appendStringInfoSpaces(es->str, es->indent * 2);
-		appendStringInfo(es->str, "%s: " INT64_FORMAT " %s\n",
-						 qlabel, value, unit);
-	}
-	else
-		ExplainPropertyLong(qlabel, value, es);
-}
-
-static inline void
-ExplainPropertyFp64(const char *qlabel, const char *unit, double value,
-					int ndigits, ExplainState *es)
-{
-	if (es->format == EXPLAIN_FORMAT_TEXT && unit != NULL)
-	{
-		appendStringInfoSpaces(es->str, es->indent * 2);
-		appendStringInfo(es->str, "%s: %.*f %s",
-						 qlabel, ndigits, value, unit);
-	}
-	else
-		ExplainPropertyFloat(qlabel,value,ndigits,es);
-}
-#else
-#define ExplainPropertyInt64(qlabel,unit,value,es)			\
-	ExplainPropertyInteger((qlabel),(unit),(value),(es))
-#define ExplainPropertyFp64(qlabel,unit,value,ndigits,es)	\
-	ExplainPropertyFloat((qlabel),(unit),(value),(ndigits),(es))
-#endif
+#include "pg_compat.h"
 
 /* ----------------------------------------------------------------
  *

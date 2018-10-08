@@ -19,9 +19,6 @@ endif
 PG_VERSION_NUM=$(shell $(PG_CONFIG) --version | awk '{print $$NF}'	\
 	| sed -e 's/\./ /g' -e 's/[A-Za-z].*$$//g'			\
 	| awk '{printf "%d%02d%02d", $$1, $$2, (NF >=3) ? $$3 : 0}')
-# PG9.6 or later is required
-PG_MIN_VERSION_NUM=90600
-#PG_MAX_VERSION_NUM=
 
 #
 # Installation related
@@ -146,12 +143,6 @@ NVCC  := $(CUDA_PATH)/bin/nvcc
 PGSTROM_FLAGS += $(PGSTROM_FLAGS_CUSTOM)
 ifdef PGSTROM_VERSION
 PGSTROM_FLAGS += "-DPGSTROM_VERSION=\"$(PGSTROM_VERSION)\""
-endif
-ifdef PG_MIN_VERSION_NUM
-PGSTROM_FLAGS += "-DPG_MIN_VERSION_NUM=$(PG_MIN_VERSION_NUM)"
-endif
-ifdef PG_MAX_VERSION_NUM
-PGSTROM_FLAGS += "-DPG_MAX_VERSION_NUM=$(PG_MAX_VERSION_NUM)"
 endif
 PGSTROM_FLAGS += -DPGSHAREDIR=\"$(shell $(PG_CONFIG) --sharedir)\"
 PGSTROM_FLAGS += -DCUDA_INCLUDE_PATH=\"$(IPATH)\"

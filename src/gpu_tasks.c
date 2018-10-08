@@ -384,11 +384,8 @@ fetch_next_gputask(GpuTaskState *gts)
 						   WL_LATCH_SET |
 						   WL_TIMEOUT |
 						   WL_POSTMASTER_DEATH,
-						   500L
-#if PG_VERSION_NUM >= 100000
-						   ,PG_WAIT_EXTENSION
-#endif
-				);
+						   500L,
+						   PG_WAIT_EXTENSION);
 			if (ev & WL_POSTMASTER_DEATH)
 				ereport(FATAL,
 						(errcode(ERRCODE_ADMIN_SHUTDOWN),
@@ -464,11 +461,8 @@ retry:
 					   WL_LATCH_SET |
 					   WL_TIMEOUT |
 					   WL_POSTMASTER_DEATH,
-					   500L
-#if PG_VERSION_NUM >= 100000
-					   ,PG_WAIT_EXTENSION
-#endif
-			);
+					   500L,
+					   PG_WAIT_EXTENSION);
 		if (ev & WL_POSTMASTER_DEATH)
 			ereport(FATAL,
 					(errcode(ERRCODE_ADMIN_SHUTDOWN),
@@ -635,11 +629,11 @@ pgstromExplainGpuTaskState(GpuTaskState *gts, ExplainState *es)
 	else
 	{
 		if (gts->ccache_refs)
-			ExplainPropertyInt64("CCache Hits",
-								 NULL, gts->ccache_count, es);
+			ExplainPropertyInteger("CCache Hits",
+								   NULL, gts->ccache_count, es);
 		else if (es->format != EXPLAIN_FORMAT_TEXT)
-			ExplainPropertyInt64("CCache Hits",
-								 NULL, gts->ccache_count, es);
+			ExplainPropertyInteger("CCache Hits",
+								   NULL, gts->ccache_count, es);
 	}
 
 	/* NVMe-Strom support */
@@ -663,8 +657,8 @@ pgstromExplainGpuTaskState(GpuTaskState *gts, ExplainState *es)
 		else
 		{
 			ExplainPropertyText("NVMe-Strom", "enabled", es);
-			ExplainPropertyInt64("NVMe-Strom Load Blocks",
-								 NULL, gts->nvme_count, es);
+			ExplainPropertyInteger("NVMe-Strom Load Blocks",
+								   NULL, gts->nvme_count, es);
 		}
 	}
 	else if (es->format != EXPLAIN_FORMAT_TEXT)
@@ -672,8 +666,8 @@ pgstromExplainGpuTaskState(GpuTaskState *gts, ExplainState *es)
 
 	/* Number of CPU fallbacks, if any */
 	if (es->analyze && gts->num_cpu_fallbacks > 0)
-		ExplainPropertyInt64("CPU fallbacks",
-							 NULL, gts->num_cpu_fallbacks, es);
+		ExplainPropertyInteger("CPU fallbacks",
+							   NULL, gts->num_cpu_fallbacks, es);
 
 	/* Source path of the GPU kernel */
 	if (es->verbose &&

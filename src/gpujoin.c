@@ -2358,16 +2358,8 @@ PlanGpuJoinPath(PlannerInfo *root,
 
 		if (IS_OUTER_JOIN(gjpath->inners[i].join_type))
 		{
-			/*
-			 * MEMO: extract_actual_join_clauses was revised by
-			 * the commit e5d83995e9f88426b325a7ea8ce0770926dc64de.
-			 */
 			extract_actual_join_clauses(gjpath->inners[i].join_quals,
-#if ((PG_MAJOR_VERSION ==  906 && PG_MINOR_VERSION > 8) ||	\
-	 (PG_MAJOR_VERSION == 1000 && PG_MINOR_VERSION > 3) ||	\
-	 (PG_MAJOR_VERSION >= 1100))
 										best_path->path.parent->relids,
-#endif
 										&join_quals, &other_quals);
 		}
 		else
@@ -2583,12 +2575,7 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 	 */
 	junk_tupdesc = gjs->gts.css.ss.ss_ScanTupleSlot->tts_tupleDescriptor;
 	scan_tupdesc = ExecCleanTypeFromTL(cscan->custom_scan_tlist, false);
-#if PG_VERSION_NUM < 110000
-	ExecAssignScanType(&gjs->gts.css.ss, scan_tupdesc);
-#else
-	/* see comments in ExecInitGpuScan */
 	ExecInitScanTupleSlot(estate, &gjs->gts.css.ss, scan_tupdesc);
-#endif
 	ExecAssignScanProjectionInfoWithVarno(&gjs->gts.css.ss, INDEX_VAR);
 
 	/* Setup common GpuTaskState fields */
@@ -2737,9 +2724,7 @@ ExecInitGpuJoin(CustomScanState *node, EState *estate, int eflags)
 		gjs->proj_fallback = ExecBuildProjectionInfo(tlist_fallback,
 													 ss->ps.ps_ExprContext,
 													 ss->ss_ScanTupleSlot,
-#if PG_VERSION_NUM >= 100000
 													 &ss->ps,
-#endif
 													 junk_tupdesc);
 	}
 	else
@@ -3165,25 +3150,25 @@ ExplainGpuJoin(CustomScanState *node, List *ancestors, ExplainState *es)
 
 			snprintf(qlabel, sizeof(qlabel),
 					 "Depth% 2d Plan Rows-in", depth);
-			ExplainPropertyFp64(qlabel, NULL, plan_nrows_in, 0, es);
+			ExplainPropertyFloat(qlabel, NULL, plan_nrows_in, 0, es);
 
 			snprintf(qlabel, sizeof(qlabel),
 					 "Depth% 2d Plan Rows-out", depth);
-			ExplainPropertyFp64(qlabel, NULL, plan_nrows_out, 0, es);
+			ExplainPropertyFloat(qlabel, NULL, plan_nrows_out, 0, es);
 
 			if (gj_rtstat)
 			{
 				snprintf(qlabel, sizeof(qlabel),
 						 "Depth% 2d Actual Rows-in", depth);
-				ExplainPropertyFp64(qlabel, NULL, exec_nrows_in, 0, es);
+				ExplainPropertyFloat(qlabel, NULL, exec_nrows_in, 0, es);
 
 				snprintf(qlabel, sizeof(qlabel),
                          "Depth% 2d Actual Rows-out by inner join", depth);
-				ExplainPropertyFp64(qlabel, NULL, exec_nrows_out1, 0, es);
+				ExplainPropertyFloat(qlabel, NULL, exec_nrows_out1, 0, es);
 
 				snprintf(qlabel, sizeof(qlabel),
 						 "Depth% 2d Actual Rows-out by outer join", depth);
-				ExplainPropertyFp64(qlabel, NULL, exec_nrows_out2, 0, es);
+				ExplainPropertyFloat(qlabel, NULL, exec_nrows_out2, 0, es);
 			}
 		}
 
@@ -4755,11 +4740,8 @@ gpujoinSyncRightOuterJoin(GpuTaskState *gts)
 						   WL_LATCH_SET |
 						   WL_TIMEOUT |
 						   WL_POSTMASTER_DEATH,
-						   1000L
-#if PG_VERSION_NUM >= 100000
-						   ,PG_WAIT_EXTENSION
-#endif
-				);
+						   1000L,
+						   PG_WAIT_EXTENSION);
 			if (ev & WL_POSTMASTER_DEATH)
 				elog(FATAL, "Unexpected Postmaster Dead");
 			ResetLatch(MyLatch);
@@ -6881,11 +6863,8 @@ GpuJoinInnerPreload(GpuTaskState *gts, CUdeviceptr *p_m_kmrels)
 
 			WaitLatch(&MyProc->procLatch,
 					  WL_LATCH_SET,
-					  -1
-#if PG_VERSION_NUM >= 100000
-					  ,PG_WAIT_EXTENSION
-#endif
-				);
+					  -1,
+					  PG_WAIT_EXTENSION);
 			ResetLatch(&MyProc->procLatch);
 		}
 	}
