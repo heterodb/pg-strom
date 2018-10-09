@@ -310,30 +310,32 @@ gen_tbl (int tnum, DSS_HUGE start, DSS_HUGE count, long upd_num)
 		{
 		case LINE:
 		case ORDER:
-  		case ORDER_LINE: 
+		case ORDER_LINE: 
 			mk_order (i, &o, upd_num % 10000);
 
-		  if (insert_segments  && (upd_num > 0))
-			if((upd_num / 10000) < residual_rows)
+			if (insert_segments  && (upd_num > 0))
+			{
+				if((upd_num / 10000) < residual_rows)
 				{
-				if((++rows_this_segment) > rows_per_segment) 
+					if((++rows_this_segment) > rows_per_segment) 
 					{						
-					rows_this_segment=0;
-					upd_num += 10000;					
+						rows_this_segment=0;
+						upd_num += 10000;					
 					}
 				}
-			else
+				else
 				{
-				if((++rows_this_segment) >= rows_per_segment) 
+					if((++rows_this_segment) >= rows_per_segment) 
 					{
-					rows_this_segment=0;
-					upd_num += 10000;
+						rows_this_segment=0;
+						upd_num += 10000;
 					}
 				}
-
+			}
 			if (set_seeds == 0)
 				tdefs[tnum].loader(&o, upd_num);
 			break;
+
 		case SUPP:
 			mk_supp (i, &supp);
 			if (set_seeds == 0)
@@ -365,14 +367,13 @@ gen_tbl (int tnum, DSS_HUGE start, DSS_HUGE count, long upd_num)
 		row_stop(tnum);
 		if (set_seeds && (i % tdefs[tnum].base) < 2)
 		{
-			printf("\nSeeds for %s at rowcount %lld\n", tdefs[tnum].comment, i);
+			printf("\nSeeds for %s at rowcount %lld\n",
+				   tdefs[tnum].comment, i);
 			dump_seeds(tnum);
 		}
 	}
 	completed |= 1 << tnum;
 }
-
-
 
 void
 usage (void)
@@ -791,6 +792,7 @@ main (int ac, char **av)
 	* traverse the tables, invoking the appropriate data generation routine for any to be built
 	*/
 	for (i = PART; i <= REGION; i++)
+	{
 		if (table & (1 << i))
 		{
 			if (children > 1 && i < NATION)
@@ -811,6 +813,6 @@ main (int ac, char **av)
 					fprintf (stderr, "done.\n");
 			}
 		}
-			
-		return (0);
+	}
+	return (0);
 }

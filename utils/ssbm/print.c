@@ -136,15 +136,15 @@ dbg_print(int format, FILE *target, long data, int len, int sep)
 		dollars = cents / 100;
 		cents %= 100;
 		if (columnar)
-			fprintf(target, "%12ld.%02ld", dollars, cents);
+			fprintf(target, "%12d.%02d", dollars, cents);
 		else
-			fprintf(target, "%ld.%02ld", dollars, cents);
+			fprintf(target, "%d.%02d", dollars, cents);
 		break;
 	case DT_CHR:
 		if (columnar)
-			fprintf(target, "%c ", data);
+			fprintf(target, "%c ", (int)data);
 		else
-			fprintf(target, "%c", data);
+			fprintf(target, "%c", (int)data);
 		break;
 	}
 

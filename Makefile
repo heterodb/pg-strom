@@ -53,7 +53,7 @@ STROM_UTILS = $(addprefix $(STROM_BUILD_ROOT)/utils/, $(__STROM_UTILS))
 
 GPUINFO = $(STROM_BUILD_ROOT)/utils/gpuinfo
 GPUINFO_SOURCE = $(STROM_BUILD_ROOT)/utils/gpuinfo.c
-GPUINFO_CFLAGS = $(PGSTROM_FLAGS) -I $(IPATH) -L $(LPATH) -lcuda
+GPUINFO_CFLAGS = $(PGSTROM_FLAGS) -I $(IPATH) -L $(LPATH)
 
 SSBM_DBGEN = $(STROM_BUILD_ROOT)/utils/dbgen-ssbm
 __SSBM_DBGEN_SOURCE = bcd2.c  build.c load_stub.c print.c text.c \
@@ -63,7 +63,7 @@ SSBM_DBGEN_SOURCE = $(addprefix $(STROM_BUILD_ROOT)/utils/ssbm/, \
 SSBM_DBGEN_DISTS_DSS = $(STROM_BUILD_ROOT)/utils/ssbm/dists.dss.h
 SSBM_DBGEN_CFLAGS = -DDBNAME=\"dss\" -DLINUX -DDB2 -DSSBM -DTANDEM \
                     -DSTATIC_DISTS=1 \
-                    -O2 -g -I. -I$(STROM_BUILD_ROOT)/utils/ssbm -lm
+                    -O2 -g -I. -I$(STROM_BUILD_ROOT)/utils/ssbm
 __SSBM_SQL_FILES = ssbm-11.sql ssbm-12.sql ssbm-13.sql \
                    ssbm-21.sql ssbm-22.sql ssbm-23.sql \
                    ssbm-31.sql ssbm-32.sql ssbm-33.sql ssbm-34.sql \
@@ -233,10 +233,10 @@ docs:	$(STROM_BUILD_ROOT)/man/markdown_i18n
 # Build utilities
 #
 $(GPUINFO): $(GPUINFO_SOURCE) $(STROM_HEADERS)
-	$(CC) $(GPUINFO_CFLAGS) $(GPUINFO_SOURCE) -o $@
+	$(CC) $(GPUINFO_CFLAGS) $(GPUINFO_SOURCE) -o $@ -lcuda
 
 $(SSBM_DBGEN): $(SSBM_DBGEN_SOURCE) $(SSBM_DBGEN_DISTS_DSS)
-	$(CC) $(SSBM_DBGEN_CFLAGS) $(SSBM_DBGEN_SOURCE) -o $@
+	$(CC) $(SSBM_DBGEN_CFLAGS) $(SSBM_DBGEN_SOURCE) -o $@ -lm
 
 $(SSBM_DBGEN_DISTS_DSS): $(basename $(SSBM_DBGEN_DISTS_DSS))
 	@(echo "const char *static_dists_dss ="; \

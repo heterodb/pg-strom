@@ -605,7 +605,7 @@ GpuContextWorkerReportError(int elevel,
 	GpuContext *gcontext = GpuWorkerCurrentContext;
 	uint32		expected = 0;
 	va_list		va_args;
-	ssize_t		length;
+	ssize_t		length = 0;
 
 	Assert(gcontext != NULL);
 	Assert(elevel != 0);

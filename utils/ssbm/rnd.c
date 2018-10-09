@@ -56,7 +56,7 @@ row_stop(int t)	\
 			{ 
 			if (set_seeds && (Seed[i].usage > Seed[i].boundary))
 				{
-				fprintf(stderr, "\nSEED CHANGE: seed[%d].usage = %d\n", 
+				fprintf(stderr, "\nSEED CHANGE: seed[%d].usage = %ld\n", 
 					i, Seed[i].usage); 
 				Seed[i].boundary = Seed[i].usage;
 				} 

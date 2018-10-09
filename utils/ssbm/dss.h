@@ -361,7 +361,7 @@ extern tdef tdefs[];
  */
 #define  C_SIZE       165
 #define  C_NAME_TAG   "Customer#"
-#define  C_NAME_FMT   "%s%09d"
+#define  C_NAME_FMT   "%s%09ld"
 #define  C_MSEG_MAX    5
 #define  C_ABAL_MIN   -99999
 #define  C_ABAL_MAX    999999
@@ -520,7 +520,7 @@ int dbg_print(int dt, FILE *tgt, long data, int len, int eol);
 
 #ifdef SSBM
 #define  PR_DATE(tgt, yr, mn, dy)	\
-   sprintf(tgt, "19%02d%02d%02d", yr, mn, dy)
+	sprintf(tgt, "19%02d%02d%02d", (int)(yr), (int)(mn), (int)(dy))
 #else
 #ifdef MDY_DATE
 #define  PR_DATE(tgt, yr, mn, dy)	\

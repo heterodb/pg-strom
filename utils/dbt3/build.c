@@ -411,7 +411,7 @@ mk_time(DSS_HUGE index, dss_time_t * t)
 	long            m = 0;
 	long            y;
 	long            d;
-
+	
 	t->timekey = index + JDAY_BASE;
 	y = julian(index + STARTDATE - 1) / 1000;
 	d = julian(index + STARTDATE - 1) % 1000;

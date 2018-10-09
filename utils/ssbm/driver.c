@@ -603,7 +603,7 @@ partial (int tbl, int s)
 	
 	if (verbose > 0)
 	{
-		fprintf (stderr, "\tStarting to load stage %d of %d for %s...",
+		fprintf (stderr, "\tStarting to load stage %d of %ld for %s...",
 			s, children, tdefs[tbl].comment);
 	}
 	
@@ -632,7 +632,7 @@ pload (int tbl)
 	
 	if (verbose > 0)
 	{
-		fprintf (stderr, "Starting %d children to load %s",
+		fprintf (stderr, "Starting %ld children to load %s",
 			children, tdefs[tbl].comment);
 	}
 	for (c = 0; c < children; c++)
@@ -1028,11 +1028,11 @@ main (int ac, char **av)
 			if (verbose > 0)
 #ifdef SSBM
 				fprintf (stderr,
-				"Generating update pair #%d for %s [pid: %d]",
+				"Generating update pair #%ld for %s [pid: %d]",
 				upd_num + 1, tdefs[LINE].comment, DSS_PROC);
 #else
 				fprintf (stderr,
-				"Generating update pair #%d for %s [pid: %d]",
+				"Generating update pair #%ld for %s [pid: %d]",
 				upd_num + 1, tdefs[ORDER_LINE].comment, DSS_PROC);
 
 #endif
@@ -1127,14 +1127,14 @@ main (int ac, char **av)
 					}
 #endif
 					if (verbose > 0)
-						fprintf (stderr, "%s data for %s [pid: %ld]",
+						fprintf (stderr, "%s data for %s [pid: %u]",
 						(validate)?"Validating":"Generating", tdefs[i].comment, DSS_PROC);
 					gen_tbl (i, minrow, rowcnt, upd_num);
 					if (verbose > 0)
 						fprintf (stderr, "done.\n");
 				}
 				if (validate)
-					printf("Validation checksum for %s at %d GB: %0x\n", 
+					printf("Validation checksum for %s at %ld GB: %0lx\n", 
 						 tdefs[i].name, scale, tdefs[i].vtotal);
 		}
 			

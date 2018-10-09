@@ -206,8 +206,8 @@ UnifInt(DSS_HUGE nLow, DSS_HUGE nHigh, long nStream)
     int32_t	nLow32 = (int32_t)nLow,
 		nHigh32 = (int32_t)nHigh;
 	
-    if (nStream < 0 || nStream > MAX_STREAM)
-        nStream = 0;
+	if (nStream < 0 || nStream > MAX_STREAM)
+		nStream = 0;
 	
 	if ((nHigh == MAX_LONG) && (nLow == 0))
 	{
