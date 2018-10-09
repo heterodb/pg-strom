@@ -1797,7 +1797,8 @@ create_gpujoin_plan(PlannerInfo *root,
 
 		if (IS_OUTER_JOIN(gpath->inners[i].join_type))
 		{
-			extract_actual_join_clauses(gpath->inners[i].join_quals,
+			extract_actual_join_clauses(gpath->inners[i].join_quals, 
+						                                best_path->path.parent->relids,
 										&join_quals, &other_quals);
 		}
 		else
