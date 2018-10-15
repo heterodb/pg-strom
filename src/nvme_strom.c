@@ -121,7 +121,7 @@ retry:
  * sysfs_read_nvme_attrs
  */
 static NvmeAttributes *
-sysfs_read_nvme_attrs(const char *nvme_path)
+sysfs_read_nvme_attrs(const char *dirname, const char *nvme_name)
 {
 	NvmeAttributes *nvmeAttr;
 	char		path[MAXPGPATH];
@@ -129,46 +129,67 @@ sysfs_read_nvme_attrs(const char *nvme_path)
 	const char *temp;
 	char	   *pos;
 	int			i;
+	bool		pcie_nvme;
 
 	nvmeAttr = palloc0(offsetof(NvmeAttributes,
 								nvme_distances[numDevAttrs]));
-	snprintf(path, sizeof(path), "%s/device/numa_node", nvme_path);
-	temp = sysfs_read_line(path, true);
-	if (sscanf(temp, "%d", &nvmeAttr->numa_node_id) != 1)
-		elog(ERROR, "Sysfs '%s' has unexpected value", path);
+	strncpy(nvmeAttr->nvme_name, nvme_name, sizeof(nvmeAttr->nvme_name));
 
-	snprintf(path, sizeof(path), "%s/dev", nvme_path);
+	snprintf(path, sizeof(path),
+			 "%s/%s/device/numa_node", dirname, nvme_name);
+	temp = sysfs_read_line(path, false);
+	if (temp)
+	{
+		if (sscanf(temp, "%d", &nvmeAttr->numa_node_id) != 1)
+			elog(ERROR, "Sysfs '%s' has unexpected value", path);
+		pcie_nvme = true;
+	}
+	else
+	{
+		nvmeAttr->numa_node_id = -1;
+		pcie_nvme = false;
+	}
+
+	snprintf(path, sizeof(path), "%s/%s/dev", dirname, nvme_name);
 	temp = sysfs_read_line(path, true);
 	if (sscanf(temp, "%d:%d",
 			   &nvmeAttr->nvme_major,
 			   &nvmeAttr->nvme_minor) != 2)
 		elog(ERROR, "Sysfs '%s' has unexpected value", path);
 
-	snprintf(path, sizeof(path), "%s/serial", nvme_path);
+	snprintf(path, sizeof(path), "%s/%s/serial", dirname, nvme_name);
 	temp = sysfs_read_line(path, true);
 	strncpy(nvmeAttr->nvme_serial, temp, sizeof(nvmeAttr->nvme_serial));
 
-	snprintf(path, sizeof(path), "%s/model", nvme_path);
+	snprintf(path, sizeof(path), "%s/%s/model", dirname, nvme_name);
 	temp = sysfs_read_line(path, true);
 	strncpy(nvmeAttr->nvme_model, temp, sizeof(nvmeAttr->nvme_model));
 
-	snprintf(path, sizeof(path), "%s/device", nvme_path);
-	if (readlink(path, linebuf, sizeof(linebuf)) < 0)
+	if (pcie_nvme)
 	{
-		elog(ERROR, "failed on readlink('%s'): %m", path);
+		snprintf(path, sizeof(path), "%s/%s/device", dirname, nvme_name);
+		if (readlink(path, linebuf, sizeof(linebuf)) < 0)
+			elog(ERROR, "failed on readlink('%s'): %m", path);
+		pos = strrchr(linebuf, '/');
+		if (pos)
+			pos++;
+		else
+			pos = linebuf;
+		if (sscanf(pos, "%04x:%02x:%02x.%d",
+				   &nvmeAttr->nvme_pcie_domain,
+				   &nvmeAttr->nvme_pcie_bus_id,
+				   &nvmeAttr->nvme_pcie_dev_id,
+				   &nvmeAttr->nvme_pcie_func_id) != 4)
+		{
+			elog(ERROR, "'%s' has unexpected property: %s", path, linebuf);
+		}
 	}
-	pos = strrchr(linebuf, '/');
-	if (pos)
-		pos++;
 	else
-		pos = linebuf;
-	if (sscanf(pos, "%04x:%02x:%02x.%d",
-			   &nvmeAttr->nvme_pcie_domain,
-			   &nvmeAttr->nvme_pcie_bus_id,
-			   &nvmeAttr->nvme_pcie_dev_id,
-			   &nvmeAttr->nvme_pcie_func_id) != 4)
 	{
-		elog(ERROR, "'%s' has unexpected property: %s", path, linebuf);
+		nvmeAttr->nvme_pcie_domain = -1;
+		nvmeAttr->nvme_pcie_bus_id = -1;
+		nvmeAttr->nvme_pcie_dev_id = -1;
+		nvmeAttr->nvme_pcie_func_id = -1;
 	}
 
 	for (i=0; i < numDevAttrs; i++)
@@ -435,7 +456,6 @@ setup_nvme_distance_map(void)
 	const char *dirname;
 	DIR		   *dir;
 	struct dirent *dent;
-	char		path[MAXPGPATH];
 	List	   *pcie_root = NIL;
 	ListCell   *lc;
 	int			i, dist;
@@ -456,11 +476,7 @@ setup_nvme_distance_map(void)
 	{
 		if (strncmp("nvme", dent->d_name, 4) != 0)
 			continue;
-		snprintf(path, sizeof(path), "%s/%s", dirname, dent->d_name);
-
-		temp = sysfs_read_nvme_attrs(path);
-		strncpy(temp->nvme_name, dent->d_name, sizeof(nvme->nvme_name));
-
+		temp = sysfs_read_nvme_attrs(dirname, dent->d_name);
 		if (!nvmeHash)
 		{
 			HASHCTL		hctl;
@@ -556,9 +572,11 @@ setup_nvme_distance_map(void)
 	if (numDevAttrs > 0 && nvmeHash != NULL)
 	{
 		HASH_SEQ_STATUS	hseq;
-		StringInfoData str;
+		StringInfoData	str;
+		StringInfoData	dev;
 
 		initStringInfo(&str);
+		initStringInfo(&dev);
 
 		for (i=0; i < numDevAttrs; i++)
 			appendStringInfo(&str, "   GPU%d  ", i);
@@ -568,6 +586,10 @@ setup_nvme_distance_map(void)
 		hash_seq_init(&hseq, nvmeHash);
 		while ((nvme = hash_seq_search(&hseq)) != NULL)
 		{
+			if (nvme->nvme_optimal_gpu < 0)
+				appendStringInfo(&dev, "%s%s",
+								 dev.len > 0 ? ", " : "",
+								 nvme->nvme_name);
 			resetStringInfo(&str);
 			appendStringInfo(&str, "   %6s", nvme->nvme_name);
 			for (i=0; i < numDevAttrs; i++)
@@ -581,7 +603,16 @@ setup_nvme_distance_map(void)
 			}
 			elog(LOG, "%s", str.data);
 		}
+
+		if (dev.len > 0)
+		{
+			ereport(LOG,
+					(errmsg("Optimal GPUs are uncertain for NVME devices: %s",
+							dev.data),
+					 errhint("review your 'pg_strom.nvme_distance_map' configuration if these devices may be used in PostgreSQL")));
+		}
 		pfree(str.data);
+		pfree(dev.data);
 	}
 }
 
