@@ -594,6 +594,9 @@ _PG_init(void)
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 		errmsg("PG-Strom must be loaded via shared_preload_libraries")));
 
+	/* link nvrtc library according to the current CUDA version */
+	pgstrom_init_nvrtc();
+
 	/* dump version number */
 #ifdef PGSTROM_VERSION
 	elog(LOG, "PG-Strom version %s built for PostgreSQL %s",

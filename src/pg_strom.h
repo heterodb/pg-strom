@@ -1334,21 +1334,9 @@ extern const char *errorText(int errcode);
 extern const char *errorTextKernel(kern_errorbuf *kerror);
 
 /*
- * xpack.c
+ * nvrtc.c
  */
-extern struct varlena *pgstrom_gpulz_compression(void *buffer, size_t nbytes);
-extern struct varlena *pgstrom_gpulz_decompression(struct varlena *compress);
-extern void kernel_gpulz_decompression(CUmodule cuda_module,
-									   kern_errorbuf *errbuf,
-									   kern_data_store *kds_col);
-extern void	pgstrom_init_xpack(void);
-
-/*
- * lzcompress.c
- */
-extern cl_int	gpulz_compress(const char *source, cl_int slen, char *dest);
-extern cl_bool	gpulz_decompress(const char *source, cl_int slen,
-								 char *dest, cl_int rawsize);
+extern void		pgstrom_init_nvrtc(void);
 
 /*
  * main.c

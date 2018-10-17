@@ -28,7 +28,7 @@ PGSTROM_SQL := $(STROM_BUILD_ROOT)/sql/pg_strom--2.0.sql
 #
 # Source file of CPU portion
 #
-__STROM_OBJS = main.o codegen.o datastore.o cuda_program.o \
+__STROM_OBJS = main.o nvrtc.o codegen.o datastore.o cuda_program.o \
 		gpu_device.o gpu_context.o gpu_mmgr.o nvme_strom.o relscan.o \
 		gpu_tasks.o gpuscan.o gpujoin.o gpupreagg.o pl_cuda.o \
 		aggfuncs.o matrix.o float2.o ccache.o \
@@ -150,7 +150,7 @@ PGSTROM_FLAGS += -DCUDA_BINARY_PATH=\"$(BPATH)\"
 PGSTROM_FLAGS += -DCUDA_LIBRARY_PATH=\"$(LPATH)\"
 PGSTROM_FLAGS += -DCMD_GPUINFO_PATH=\"$(shell $(PG_CONFIG) --bindir)/gpuinfo\"
 PG_CPPFLAGS := $(PGSTROM_FLAGS) -I $(IPATH)
-SHLIB_LINK := -L $(LPATH) -lnvrtc -lcuda
+SHLIB_LINK := -L $(LPATH) -lcuda
 
 #
 # Definition of PG-Strom Extension
